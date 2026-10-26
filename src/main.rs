@@ -1,4 +1,5 @@
 mod canvas_tool;
+mod panels;
 mod timeline;
 mod vector_engine;
 
@@ -8,6 +9,7 @@ use canvas_tool::{
 use eframe::egui::{self, Color32, CursorIcon, Key, Pos2, Sense, Stroke, Vec2};
 use kurbo::Point;
 use lyon_tessellation::FillTessellator;
+use panels::PropertiesPanel;
 use timeline::Timeline;
 use vector_engine::FillShape;
 
@@ -26,10 +28,35 @@ fn main() -> eframe::Result<()> {
         "Clay Canvas",
         native_options,
         Box::new(|cc| {
+            configure_japanese_fonts(&cc.egui_ctx);
             configure_sharp_light_theme(&cc.egui_ctx);
             Ok(Box::new(FlashBrushApp::default()))
         }),
     )
+}
+
+/// `fonts/` フォルダ内の日本語フォント（NotoSansJP）を読み込み、日本語文字化け（豆腐）を防ぐ
+fn configure_japanese_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    fonts.font_data.insert(
+        "noto_sans_jp_regular".to_owned(),
+        egui::FontData::from_static(include_bytes!("../fonts/NotoSansJP-Regular.ttf")),
+    );
+    fonts.font_data.insert(
+        "noto_sans_jp_bold".to_owned(),
+        egui::FontData::from_static(include_bytes!("../fonts/NotoSansJP-Bold.ttf")),
+    );
+
+    if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        proportional.insert(0, "noto_sans_jp_regular".to_owned());
+        proportional.insert(1, "noto_sans_jp_bold".to_owned());
+    }
+    if let Some(monospace) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        monospace.push("noto_sans_jp_regular".to_owned());
+    }
+
+    ctx.set_fonts(fonts);
 }
 
 /// アプリ全体のUIをライトテーマ＋角丸なし（すべて直角のシャープな矩形）に設定する
@@ -46,11 +73,12 @@ fn configure_sharp_light_theme(ctx: &egui::Context) {
 }
 
 // ============================================================================
-// メインアプリケーション状態 & トップバーUI / ショートカット制御
+// メインアプリケーション状態 & ショートカット制御
 // ============================================================================
 
 pub(crate) struct FlashBrushApp {
     pub(crate) tool: Tool,
+    pub(crate) properties_panel: PropertiesPanel,
     pub(crate) brush_radius: f32,
     pub(crate) eraser_radius: f32,
     pub(crate) brush_color: Color32,
@@ -101,6 +129,7 @@ impl Default for FlashBrushApp {
     fn default() -> Self {
         Self {
             tool: Tool::Brush,
+            properties_panel: PropertiesPanel::default(),
             brush_radius: 8.0,
             eraser_radius: 22.0,
             brush_color: Color32::from_rgb(40, 45, 55),
@@ -228,10 +257,8 @@ impl FlashBrushApp {
         } else if i.key_pressed(Key::Period) || i.key_pressed(Key::ArrowRight) {
             self.step_frame(1);
         } else if i.key_pressed(Key::Home) {
-            self.timeline.is_playing = false;
             self.switch_to_layer_and_frame(self.timeline.active_layer, 0);
         } else if i.key_pressed(Key::End) {
-            self.timeline.is_playing = false;
             let last = self.timeline.total_frames.saturating_sub(1);
             self.switch_to_layer_and_frame(self.timeline.active_layer, last);
         } else if i.key_pressed(Key::F6) {
@@ -250,24 +277,14 @@ impl FlashBrushApp {
             }
         } else if i.key_pressed(Key::O) {
             self.timeline.onion_skin_enabled = !self.timeline.onion_skin_enabled;
-        } else if i.key_pressed(Key::B) {
-            self.set_tool(Tool::Brush);
-        } else if i.key_pressed(Key::E) {
-            self.set_tool(Tool::Eraser);
-        } else if i.key_pressed(Key::K) {
-            self.set_tool(Tool::Bucket);
-        } else if i.key_pressed(Key::I) {
-            self.set_tool(Tool::Eyedropper);
-        } else if i.key_pressed(Key::Q) {
-            self.set_tool(Tool::Transform);
+        } else if let Some(tool) = Tool::from_shortcut_input(i) {
+            self.set_tool(tool);
         } else if i.key_pressed(Key::Escape) {
             if !self.selected_shapes.is_empty() {
                 self.clear_selection();
             } else {
                 self.exit_current_group();
             }
-            self.set_tool(Tool::Select);
-        } else if i.key_pressed(Key::V) {
             self.set_tool(Tool::Select);
         } else if self.tool == Tool::Select {
             let plus_pressed = i.key_pressed(Key::Plus)
@@ -337,239 +354,7 @@ impl FlashBrushApp {
     }
 
     // ------------------------------------------------------------------------
-    // 3. トップツールバー UI
-    // ------------------------------------------------------------------------
-
-    fn draw_top_toolbar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("minimal_toolbar")
-            .exact_height(48.0)
-            .frame(
-                egui::Frame::none()
-                    .fill(Color32::from_rgb(240, 242, 246))
-                    .inner_margin(egui::Margin::symmetric(8.0, 0.0))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(200, 205, 215))),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-
-                    for (tool, label) in [
-                        (Tool::Brush, "🖌 Brush (B)"),
-                        (Tool::Eraser, "🧹 Eraser (E)"),
-                        (Tool::Bucket, "🪣 Bucket (K)"),
-                        (Tool::Eyedropper, "💧 Eyedropper (I)"),
-                        (Tool::Select, "↖ Select / Reshape (V)"),
-                        (Tool::Transform, "⬚ Transform (Q)"),
-                    ] {
-                        if ui.selectable_label(self.tool == tool, label).clicked() {
-                            self.set_tool(tool);
-                        }
-                    }
-
-                    ui.separator();
-                    self.draw_tool_specific_controls(ui);
-                    self.draw_group_breadcrumb(ui);
-                    self.draw_right_toolbar_actions(ui);
-                });
-            });
-    }
-
-    fn draw_tool_specific_controls(&mut self, ui: &mut egui::Ui) {
-        match self.tool {
-            Tool::Brush => {
-                ui.label("Size:");
-                ui.add(
-                    egui::Slider::new(&mut self.brush_radius, 1.0..=70.0)
-                        .step_by(1.0)
-                        .integer()
-                        .suffix(" px"),
-                );
-                ui.separator();
-                self.draw_color_picker_controls(ui);
-            }
-            Tool::Bucket | Tool::Eyedropper => {
-                self.draw_color_picker_controls(ui);
-            }
-            Tool::Eraser => {
-                ui.label("Eraser Size:");
-                ui.add(
-                    egui::Slider::new(&mut self.eraser_radius, 1.0..=80.0)
-                        .step_by(1.0)
-                        .integer()
-                        .suffix(" px"),
-                );
-            }
-            Tool::Select => {
-                if ui
-                    .selectable_label(
-                        self.select_sub_mode == SelectSubMode::Reshape,
-                        "↖ 変形・矩形選択 (V)",
-                    )
-                    .clicked()
-                {
-                    self.select_sub_mode = SelectSubMode::Reshape;
-                }
-                if ui
-                    .selectable_label(
-                        self.select_sub_mode == SelectSubMode::AddAnchor,
-                        "＋ アンカー追加 (+)",
-                    )
-                    .clicked()
-                {
-                    self.toggle_select_sub_mode(SelectSubMode::AddAnchor);
-                }
-                if ui
-                    .selectable_label(
-                        self.select_sub_mode == SelectSubMode::DeleteAnchor,
-                        "－ アンカー削除 (-)",
-                    )
-                    .clicked()
-                {
-                    self.toggle_select_sub_mode(SelectSubMode::DeleteAnchor);
-                }
-                ui.separator();
-                self.draw_group_action_buttons(ui);
-            }
-            Tool::Transform => {
-                let has_sel = !self.selected_shapes.is_empty();
-                if ui
-                    .add_enabled(has_sel, egui::Button::new("⇄ 左右反転"))
-                    .clicked()
-                {
-                    self.flip_selected_shapes(true, false);
-                }
-                if ui
-                    .add_enabled(has_sel, egui::Button::new("⇅ 上下反転"))
-                    .clicked()
-                {
-                    self.flip_selected_shapes(false, true);
-                }
-                if ui
-                    .add_enabled(has_sel, egui::Button::new("↺ -90°"))
-                    .clicked()
-                {
-                    self.rotate_selected_shapes(-std::f64::consts::FRAC_PI_2);
-                }
-                if ui
-                    .add_enabled(has_sel, egui::Button::new("↻ +90°"))
-                    .clicked()
-                {
-                    self.rotate_selected_shapes(std::f64::consts::FRAC_PI_2);
-                }
-                if ui
-                    .add_enabled(
-                        has_sel && self.transform_pivot.is_some(),
-                        egui::Button::new("◎ 中心リセット"),
-                    )
-                    .clicked()
-                {
-                    self.transform_pivot = None;
-                }
-                ui.separator();
-                self.draw_group_action_buttons(ui);
-            }
-        }
-    }
-
-    fn draw_group_breadcrumb(&mut self, ui: &mut egui::Ui) {
-        if !self.editing_group_path.is_empty() {
-            ui.separator();
-            let mut crumb = String::from("🎬 Scene");
-            for &gid in &self.editing_group_path {
-                crumb.push_str(&format!(" ▸ 📦 Group #{gid}"));
-            }
-            ui.colored_label(Color32::from_rgb(0, 120, 215), crumb);
-            if ui.button("⬅ 1階層出る").clicked() {
-                self.exit_current_group();
-            }
-        }
-    }
-
-    fn draw_right_toolbar_actions(&mut self, ui: &mut egui::Ui) {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("🗑 Clear").clicked() && !self.shapes.is_empty() {
-                self.clear_selection();
-                self.push_undo();
-                self.shapes.clear();
-                self.editing_group_path.clear();
-                self.sync_shapes_to_timeline();
-            }
-            if ui
-                .add_enabled(!self.redo_stack.is_empty(), egui::Button::new("↪ Redo"))
-                .clicked()
-            {
-                self.redo();
-            }
-            if ui
-                .add_enabled(!self.undo_stack.is_empty(), egui::Button::new("↩ Undo"))
-                .clicked()
-            {
-                self.undo();
-            }
-            ui.checkbox(&mut self.show_wireframe, "Anchors");
-            let zoom_pct = (self.view_zoom * 100.0).round() as i32;
-            if ui
-                .button(format!("🔍 {zoom_pct}%"))
-                .on_hover_text(
-                    "クリック（または Cmd+0）で 100% 表示にリセット / Space+ドラッグでパン移動",
-                )
-                .clicked()
-            {
-                self.reset_view();
-            }
-        });
-    }
-
-    fn draw_group_action_buttons(&mut self, ui: &mut egui::Ui) {
-        let can_group = !self.selected_shapes.is_empty();
-        let can_ungroup = self.selection_has_group();
-        if ui
-            .add_enabled(can_group, egui::Button::new("📦 グループ化 (Cmd+G)"))
-            .clicked()
-        {
-            self.group_selected_shapes();
-        }
-        if ui
-            .add_enabled(can_ungroup, egui::Button::new("💥 解除 (Cmd+B)"))
-            .clicked()
-        {
-            self.ungroup_selected_shapes();
-        }
-    }
-
-    fn draw_color_picker_controls(&mut self, ui: &mut egui::Ui) {
-        ui.label("Color:");
-        ui.color_edit_button_srgba(&mut self.brush_color);
-
-        let presets = [
-            Color32::from_rgb(235, 75, 75),
-            Color32::from_rgb(55, 135, 245),
-            Color32::from_rgb(65, 195, 105),
-            Color32::from_rgb(245, 190, 50),
-            Color32::from_rgb(160, 95, 235),
-            Color32::from_rgb(40, 45, 55),
-        ];
-        for c in presets {
-            let (rect, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-            ui.painter().rect_filled(rect, 0.0, c);
-            if self.brush_color == c {
-                ui.painter()
-                    .rect_stroke(rect, 0.0, Stroke::new(2.0, Color32::from_rgb(20, 25, 35)));
-            } else {
-                ui.painter().rect_stroke(
-                    rect,
-                    0.0,
-                    Stroke::new(1.0, Color32::from_rgb(175, 180, 190)),
-                );
-            }
-            if resp.clicked() {
-                self.brush_color = c;
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------------
-    // 4. 中央キャンバスのツール入力ディスパッチ・バッジ・カーソル更新
+    // 3. 中央キャンバスのツール入力ディスパッチ・バッジ・カーソル更新
     // ------------------------------------------------------------------------
 
     fn is_current_tool_allowed(&self) -> bool {
@@ -589,6 +374,17 @@ impl FlashBrushApp {
         mouse_pt: Option<Point>,
         tool_allowed: bool,
     ) {
+        if self.timeline.is_playing {
+            let canvas_interacted = (response.hovered()
+                && ui.input(|i| i.pointer.primary_pressed()))
+                || response.drag_started()
+                || response.clicked();
+            if canvas_interacted {
+                self.stop_playback();
+            } else {
+                return;
+            }
+        }
         if self.tool == Tool::Eyedropper {
             let sampling = (response.hovered() && ui.input(|i| i.pointer.primary_pressed()))
                 || response.dragged()
@@ -681,8 +477,10 @@ impl eframe::App for FlashBrushApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_playback(ctx);
         self.handle_shortcuts(ctx);
-        self.draw_top_toolbar(ctx);
+        self.draw_left_toolbar(ctx);
+        self.draw_right_properties_panel(ctx);
         self.draw_timeline_panel(ctx);
+        self.draw_stage_header_bar(ctx);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::from_rgb(244, 245, 248)))
@@ -1937,6 +1735,23 @@ mod tests {
             app2.timeline.layers[1].keyframes.len(),
             kf_count_before - 1,
             "保持フレームがない1コマ単独キーフレーム上での Shift+F5 はそのキーフレーム自体を削除して後続を左へ詰めること"
+        );
+
+        // (7) Cel の結合メッシュキャッシュと再生中ゼロコピーの検証
+        let cel = app2.timeline.layers[1].cel_at(0).unwrap();
+        let m1 = cel.cached_screen_mesh(1.0, Vec2::ZERO, false);
+        let m2 = cel.cached_screen_mesh(1.0, Vec2::ZERO, false);
+        assert!(!m1.is_empty());
+        assert_eq!(m1.vertices.len(), m2.vertices.len());
+        app2.toggle_playback();
+        assert!(app2.timeline.is_playing);
+        app2.timeline.current_frame = 0;
+        app2.toggle_playback();
+        assert!(!app2.timeline.is_playing);
+        assert_eq!(
+            app2.shapes.len(),
+            1,
+            "再生停止時に停止フレーム (frame 0) の図形がキャンバスに復元されること"
         );
     }
 

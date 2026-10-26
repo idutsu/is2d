@@ -1,6 +1,11 @@
-use crate::{vector_engine::FillShape, FlashBrushApp};
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
-use std::time::Duration;
+use crate::{
+    vector_engine::{
+        append_mesh, transform_mesh_to_screen, transform_mesh_to_screen_onion, FillShape,
+    },
+    FlashBrushApp,
+};
+use eframe::egui::{self, Align2, Color32, FontId, Mesh, Pos2, Rect, Sense, Stroke, Vec2};
+use std::{cell::RefCell, time::Duration};
 
 const LAYER_COL_W: f32 = 190.0;
 const RULER_H: f32 = 24.0;
@@ -11,19 +16,82 @@ const CELL_W: f32 = 16.0;
 // 1. タイムラインのデータモデル（Cel / Keyframe / Selection / Layer / Timeline）
 // ============================================================================
 
-/// 1枚のセル画（ベクター図形群 `Vec<FillShape>`）
+/// セル内の全図形を1つに統合したワールド座標バッチメッシュと、直近の `(zoom, pan)` スクリーン座標変換済みキャッシュ
+#[derive(Clone, Debug, Default)]
+struct CelMeshCache {
+    shape_revisions: Vec<(u64, Color32)>,
+    world_batch_mesh: Mesh,
+    screen_cache: Option<((u32, u32, u32), Mesh)>,
+}
+
+/// 1枚のセル画（ベクター図形群 `Vec<FillShape>` ＋ 高速再生・表示用の結合メッシュキャッシュ）
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Cel {
     pub(crate) shapes: Vec<FillShape>,
+    mesh_cache: RefCell<CelMeshCache>,
 }
 
 impl Cel {
     pub(crate) fn new(shapes: Vec<FillShape>) -> Self {
-        Self { shapes }
+        Self {
+            shapes,
+            mesh_cache: RefCell::new(CelMeshCache::default()),
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.shapes.is_empty()
+    }
+
+    fn ensure_world_batch_mesh(&self, cache: &mut CelMeshCache) {
+        let is_valid = cache.shape_revisions.len() == self.shapes.len()
+            && self
+                .shapes
+                .iter()
+                .zip(&cache.shape_revisions)
+                .all(|(s, &(rev, col))| s.mesh_revision == rev && s.color == col);
+        if is_valid {
+            return;
+        }
+        cache.shape_revisions = self
+            .shapes
+            .iter()
+            .map(|s| (s.mesh_revision, s.color))
+            .collect();
+        let mut batch = Mesh::default();
+        for shape in &self.shapes {
+            append_mesh(&mut batch, &shape.fill_mesh);
+        }
+        cache.world_batch_mesh = batch;
+        cache.screen_cache = None;
+    }
+
+    /// セル内の全図形を1つに結合し、指定された `(zoom, pan)` に変換したスクリーン座標 `Mesh` を返す（キャッシュヒット時は頂点計算ゼロ）
+    pub(crate) fn cached_screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> Mesh {
+        let mut cache = self.mesh_cache.borrow_mut();
+        self.ensure_world_batch_mesh(&mut cache);
+        if dim_backdrop {
+            return transform_mesh_to_screen(&cache.world_batch_mesh, zoom, pan, true);
+        }
+        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
+        if cache.screen_cache.as_ref().is_none_or(|(k, _)| *k != key) {
+            let screen_mesh = transform_mesh_to_screen(&cache.world_batch_mesh, zoom, pan, false);
+            cache.screen_cache = Some((key, screen_mesh));
+        }
+        cache.screen_cache.as_ref().unwrap().1.clone()
+    }
+
+    /// オニオンスキン表示用に、結合済みワールドメッシュをスクリーン座標＋ティント色へ一括変換して返す
+    pub(crate) fn cached_onion_mesh(
+        &self,
+        zoom: f32,
+        pan: Vec2,
+        tint_rgb: [u8; 3],
+        alpha: u8,
+    ) -> Mesh {
+        let mut cache = self.mesh_cache.borrow_mut();
+        self.ensure_world_batch_mesh(&mut cache);
+        transform_mesh_to_screen_onion(&cache.world_batch_mesh, zoom, pan, tint_rgb, alpha)
     }
 }
 
@@ -381,6 +449,7 @@ impl Timeline {
     }
 
     /// 与えられた図形リスト `shapes` を、現在フレームの各「表示中かつ非ロック」レイヤーの `Cel` に `layer_id` ごとに振り分けて書き込む
+    /// （変更がないレイヤーはクローンとキャッシュ破棄をスキップする）
     pub(crate) fn write_shapes_to_editable_cels(&mut self, shapes: &[FillShape]) {
         let frame = self.current_frame;
         for layer in &mut self.layers {
@@ -389,11 +458,21 @@ impl Timeline {
             }
             let lid = layer.id;
             if let Some(cel) = layer.cel_at_mut(frame) {
-                cel.shapes = shapes
-                    .iter()
-                    .filter(|s| s.layer_id == lid)
-                    .cloned()
-                    .collect();
+                let mut layer_iter = shapes.iter().filter(|s| s.layer_id == lid);
+                let unchanged = cel.shapes.iter().all(|c_shape| {
+                    layer_iter.next().is_some_and(|s| {
+                        s.mesh_revision == c_shape.mesh_revision
+                            && s.color == c_shape.color
+                            && s.group_path == c_shape.group_path
+                    })
+                }) && layer_iter.next().is_none();
+                if !unchanged {
+                    cel.shapes = shapes
+                        .iter()
+                        .filter(|s| s.layer_id == lid)
+                        .cloned()
+                        .collect();
+                }
             }
         }
     }
@@ -431,9 +510,14 @@ impl Timeline {
 
 impl FlashBrushApp {
     /// タイムラインの構造変更前に、未確定のキャンバス選択スライスを確定解除し `self.shapes` を現在フレームのセルへ同期する
+    /// （再生中の場合は古い `self.shapes` で現在フレームを上書きしないよう、再生停止して現在フレームの図形を読み込む）
     fn flush_canvas_before_timeline_op(&mut self) {
-        self.clear_selection();
-        self.sync_shapes_to_timeline();
+        if self.timeline.is_playing {
+            self.stop_playback();
+        } else {
+            self.clear_selection();
+            self.sync_shapes_to_timeline();
+        }
     }
 
     /// `self.shapes` 内の図形列をタイムラインのレイヤー重ね順（背面→前面）で安定ソートし、
@@ -472,6 +556,9 @@ impl FlashBrushApp {
 
     /// キャンバスの作業用 `self.shapes` を、各図形の `layer_id` ごとに現在フレームの `Cel` に振り分けて書き戻す
     pub(crate) fn sync_shapes_to_timeline(&mut self) {
+        if self.timeline.is_playing {
+            return;
+        }
         let fallback_lid = if self.timeline.is_active_layer_editable() {
             self.timeline.active_layer_id()
         } else {
@@ -551,7 +638,6 @@ impl FlashBrushApp {
         let (l0, l1) = (start_layer.min(max_l), end_layer.min(max_l));
         let (f0, f1) = (start_frame.min(max_f), end_frame.min(max_f));
 
-        self.timeline.is_playing = false;
         self.switch_to_layer_and_frame(l1, f1);
         self.timeline.cell_selection = Some(TimelineCellSelection::from_corners(l0, f0, l1, f1));
         self.select_shapes_for_timeline_selection();
@@ -559,7 +645,6 @@ impl FlashBrushApp {
 
     /// タイムラインのレイヤー個別選択を解除し、指定フレームへ再生ヘッドのみ移動する（ルーラー操作時など）
     pub(crate) fn scrub_ruler_to_frame(&mut self, frame_idx: usize) {
-        self.timeline.is_playing = false;
         let clamped_frame = frame_idx.min(self.timeline.total_frames.saturating_sub(1));
         self.flush_canvas_before_timeline_op();
         self.timeline.current_frame = clamped_frame;
@@ -590,21 +675,33 @@ impl FlashBrushApp {
 impl FlashBrushApp {
     /// 前後のフレームへコマ送り移動する（`,` / `.` キーやボタン操作）
     pub(crate) fn step_frame(&mut self, delta: isize) {
-        self.timeline.is_playing = false;
-        self.timeline.last_frame_advance_time = None;
         let total = self.timeline.total_frames.max(1) as isize;
         let next = (self.timeline.current_frame as isize + delta).rem_euclid(total) as usize;
         self.switch_to_layer_and_frame(self.timeline.active_layer, next);
     }
 
+    /// 再生中であれば停止し、停止時点のフレームの図形群を作業用 `self.shapes` に展開する
+    pub(crate) fn stop_playback(&mut self) {
+        if self.timeline.is_playing {
+            self.timeline.is_playing = false;
+            self.timeline.last_frame_advance_time = None;
+            self.load_shapes_from_timeline();
+        }
+    }
+
     /// 再生 / 一時停止を切り替える（`Enter` キーまたは Play ボタン）
     pub(crate) fn toggle_playback(&mut self) {
-        self.flush_canvas_before_timeline_op();
-        self.timeline.is_playing = !self.timeline.is_playing;
-        self.timeline.last_frame_advance_time = None;
+        if self.timeline.is_playing {
+            self.stop_playback();
+        } else {
+            self.flush_canvas_before_timeline_op();
+            self.timeline.is_playing = true;
+            self.timeline.last_frame_advance_time = None;
+        }
     }
 
     /// 再生中のフレーム自動進行を処理する
+    /// （再生中は毎コマの `FillShape` クローンを行わず、`Cel` の結合メッシュキャッシュから直接高速描画する）
     pub(crate) fn update_playback(&mut self, ctx: &egui::Context) {
         if !self.timeline.is_playing {
             self.timeline.last_frame_advance_time = None;
@@ -621,10 +718,7 @@ impl FlashBrushApp {
                 self.timeline.last_frame_advance_time =
                     Some(last_time + (steps as f64) * frame_interval);
                 let total = self.timeline.total_frames.max(1);
-                let next_frame = (self.timeline.current_frame + steps) % total;
-                self.sync_shapes_to_timeline();
-                self.timeline.current_frame = next_frame;
-                self.load_shapes_from_timeline();
+                self.timeline.current_frame = (self.timeline.current_frame + steps) % total;
             }
         } else {
             self.timeline.last_frame_advance_time = Some(now);
@@ -1161,7 +1255,6 @@ impl FlashBrushApp {
                     ui.separator();
 
                     if ui.button("⏮").on_hover_text("最初のフレームへ (Home)").clicked() {
-                        self.timeline.is_playing = false;
                         self.switch_to_layer_and_frame(self.timeline.active_layer, 0);
                     }
                     if ui.button("◀").on_hover_text("前のフレームへ (, / ←)").clicked() {
@@ -1175,7 +1268,6 @@ impl FlashBrushApp {
                         self.step_frame(1);
                     }
                     if ui.button("⏭").on_hover_text("最後のフレームへ (End)").clicked() {
-                        self.timeline.is_playing = false;
                         let last = self.timeline.total_frames.saturating_sub(1);
                         self.switch_to_layer_and_frame(self.timeline.active_layer, last);
                     }
@@ -1327,7 +1419,7 @@ impl FlashBrushApp {
                         let layer_fc = self.timeline.layers[target_layer].frame_count;
                         let max_f = layer_fc.max(self.timeline.total_frames);
                         let target_frame = col.min(max_f.saturating_sub(1));
-                        self.timeline.is_playing = false;
+                        self.stop_playback();
 
                         // 実際に存在するフレーム（col < layer_fc）の上をクリックしたときのみ MoveFrames 判定を行う
                         // （24フレームより後ろの余白領域をクリックした際に、24フレーム目を掴んで移動したと誤判定されるのを防ぐ）

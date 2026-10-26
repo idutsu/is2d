@@ -8,8 +8,8 @@ use crate::vector_engine::{
     affine_rotate_around, affine_scale_around, boolean_operation, build_smoothed_stroke_shapes_at_zoom,
     erase_from_canvas, find_enclosed_region_at, generate_brush_outline_at_zoom, make_marquee_rect_shape,
     merge_disjoint_fill_into_canvas, merge_shapes_into_canvas, normalize_vec, rects_overlap,
-    resolve_deformed_shape, tessellate_raw_polygon, to_pos2, transform_mesh_to_screen,
-    transform_mesh_to_screen_onion, BoolOp, FillShape,
+    resolve_deformed_shape, tessellate_raw_polygon, to_pos2, transform_mesh_to_screen, BoolOp,
+    FillShape,
 };
 use crate::FlashBrushApp;
 
@@ -19,12 +19,79 @@ use crate::FlashBrushApp;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Tool {
+    Select,     // V キー
+    Transform,  // Q キー（自由変形ツール）
     Brush,      // B キー
     Eraser,     // E キー
     Bucket,     // K キー
     Eyedropper, // I キー（スポイトツール）
-    Select,     // V キー
-    Transform,  // Q キー（自由変形ツール）
+}
+
+impl Tool {
+    /// 左端縦ツールバーに並べるツールの標準順序（Adobe Animate 準拠）
+    pub(crate) const ALL: [Tool; 6] = [
+        Tool::Select,
+        Tool::Transform,
+        Tool::Brush,
+        Tool::Eraser,
+        Tool::Bucket,
+        Tool::Eyedropper,
+    ];
+
+    /// 左ツールバーのボタンに表示するアイコン文字列
+    pub(crate) const fn icon(self) -> &'static str {
+        match self {
+            Tool::Select => "↖",
+            Tool::Transform => "⬚",
+            Tool::Brush => "🖌",
+            Tool::Eraser => "🧹",
+            Tool::Bucket => "🪣",
+            Tool::Eyedropper => "💧",
+        }
+    }
+
+    /// プロパティパネル等に表示するツール名（ショートカット表記付き）
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Tool::Select => "選択ツール (V)",
+            Tool::Transform => "自由変形ツール (Q)",
+            Tool::Brush => "ブラシツール (B)",
+            Tool::Eraser => "消しゴムツール (E)",
+            Tool::Bucket => "バケツ塗りツール (K)",
+            Tool::Eyedropper => "スポイトツール (I)",
+        }
+    }
+
+    /// ツールバーのホバー時に表示するツールチップ説明文
+    pub(crate) const fn tooltip(self) -> &'static str {
+        match self {
+            Tool::Select => "選択・変形ツール (V)",
+            Tool::Transform => "自由変形ツール (Q)",
+            Tool::Brush => "ブラシツール (B)",
+            Tool::Eraser => "消しゴムツール (E)",
+            Tool::Bucket => "バケツ塗りツール (K)",
+            Tool::Eyedropper => "スポイトツール (I)",
+        }
+    }
+
+    /// ツール切り替え用の単一キーショートカット
+    pub(crate) const fn shortcut_key(self) -> Key {
+        match self {
+            Tool::Select => Key::V,
+            Tool::Transform => Key::Q,
+            Tool::Brush => Key::B,
+            Tool::Eraser => Key::E,
+            Tool::Bucket => Key::K,
+            Tool::Eyedropper => Key::I,
+        }
+    }
+
+    /// 押下されたショートカットキーから対応するツールを返す
+    pub(crate) fn from_shortcut_input(i: &egui::InputState) -> Option<Tool> {
+        Self::ALL
+            .into_iter()
+            .find(|tool| i.key_pressed(tool.shortcut_key()))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2714,11 +2781,15 @@ impl FlashBrushApp {
             if !self.timeline.layers[layer_idx].visible {
                 continue;
             }
-            if self.timeline.layers[layer_idx].locked {
+            // 再生中またはロック中レイヤーは、Cel 内の結合済みスクリーンキャッシュ Mesh を1ドローコールで高速描画
+            if self.timeline.is_playing || self.timeline.layers[layer_idx].locked {
                 if let Some(cel) = self.timeline.layers[layer_idx].cel_at(curr_f) {
-                    for shape in &cel.shapes {
-                        let mesh =
-                            transform_mesh_to_screen(&shape.fill_mesh, zoom, pan, in_group_edit);
+                    if !cel.is_empty() {
+                        let mesh = cel.cached_screen_mesh(
+                            zoom,
+                            pan,
+                            in_group_edit && !self.timeline.is_playing,
+                        );
                         painter.add(egui::Shape::mesh(mesh));
                     }
                 }
@@ -2822,14 +2893,8 @@ impl FlashBrushApp {
                 continue;
             }
             if let Some(cel) = layer.cel_at(frame) {
-                for shape in &cel.shapes {
-                    let mesh = transform_mesh_to_screen_onion(
-                        &shape.fill_mesh,
-                        zoom,
-                        pan,
-                        tint_rgb,
-                        alpha,
-                    );
+                if !cel.is_empty() {
+                    let mesh = cel.cached_onion_mesh(zoom, pan, tint_rgb, alpha);
                     painter.add(egui::Shape::mesh(mesh));
                 }
             }

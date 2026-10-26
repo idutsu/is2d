@@ -12,8 +12,15 @@ use lyon_tessellation::{
     path::Path as LyonPath,
     BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex, VertexBuffers,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const REFERENCE_BRUSH_RADIUS: f64 = 8.0;
+
+static NEXT_MESH_REVISION: AtomicU64 = AtomicU64::new(1);
+
+fn next_mesh_revision() -> u64 {
+    NEXT_MESH_REVISION.fetch_add(1, Ordering::Relaxed)
+}
 
 // ============================================================================
 // コアデータ構造 (2次ベジェ輪郭 & マージ描画シェイプ)
@@ -178,6 +185,8 @@ pub(crate) struct FillShape {
     pub(crate) layer_id: u64,
     /// 外側のグループIDから内側のグループIDへの階層パス（空 `[]` ならルート階層の生シェイプ）
     pub(crate) group_path: Vec<u64>,
+    /// メッシュ内容が更新されるたびにインクリメントされるリビジョン番号（セル結合メッシュキャッシュの差分検知用）
+    pub(crate) mesh_revision: u64,
     bbox: KRect,
     bez_path: BezPath,
     pub(crate) fill_mesh: Mesh,
@@ -192,6 +201,7 @@ impl FillShape {
             holes,
             layer_id: 1,
             group_path: Vec::new(),
+            mesh_revision: 0,
             bbox: KRect::ZERO,
             bez_path: BezPath::new(),
             fill_mesh: Mesh::default(),
@@ -256,6 +266,7 @@ impl FillShape {
             self.color,
         );
         self.selection_mesh = None;
+        self.mesh_revision = next_mesh_revision();
     }
 
     pub(crate) fn bounding_box(&self) -> KRect {
@@ -285,6 +296,7 @@ impl FillShape {
                 v.pos += d;
             }
         }
+        self.mesh_revision = next_mesh_revision();
     }
 
     pub(crate) fn transform(&mut self, affine: Affine) {
@@ -2795,4 +2807,15 @@ pub(crate) fn transform_mesh_to_screen_onion(
         );
     }
     out
+}
+
+/// 複数の `Mesh` を1つのバッチ `Mesh` に結合する（セル単位の一括キャッシュ構築用）
+pub(crate) fn append_mesh(dst: &mut Mesh, src: &Mesh) {
+    if src.is_empty() {
+        return;
+    }
+    let base = dst.vertices.len() as u32;
+    dst.vertices.extend_from_slice(&src.vertices);
+    dst.indices
+        .extend(src.indices.iter().map(|&idx| base + idx));
 }
