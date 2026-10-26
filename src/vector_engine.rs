@@ -95,6 +95,26 @@ impl Contour {
         self.enforce_continuity();
     }
 
+    /// セグメント列から退化除去・最小面積判定・ワインディング向き統一・端点連続性保証を行った `Contour` を構築する
+    fn from_segments_oriented(
+        segments: Vec<QuadBez>,
+        min_seg_len: f64,
+        min_area: f64,
+        expect_positive_area: bool,
+    ) -> Option<Self> {
+        let mut contour = Self { segments };
+        contour.cleanup_degenerate(min_seg_len);
+        let area = contour.signed_area();
+        if area.abs() < min_area {
+            return None;
+        }
+        if (expect_positive_area && area < 0.0) || (!expect_positive_area && area > 0.0) {
+            contour.reverse();
+        }
+        contour.enforce_continuity();
+        Some(contour)
+    }
+
     fn reverse(&mut self) {
         self.segments.reverse();
         for seg in &mut self.segments {
@@ -148,12 +168,14 @@ impl Contour {
     }
 }
 
-/// キャンバス上の1つの塗りシェイプ（色 + 外周2次ベジェ輪郭 + 穴の2次ベジェ輪郭リスト + グループ階層 + 描画・判定キャッシュ）
+/// キャンバス上の1つの塗りシェイプ（色 + 外周2次ベジェ輪郭 + 穴の2次ベジェ輪郭リスト + 所属レイヤーID + グループ階層 + 描画・判定キャッシュ）
 #[derive(Clone, Debug)]
 pub(crate) struct FillShape {
     pub(crate) color: Color32,
     pub(crate) exterior: Contour,
     pub(crate) holes: Vec<Contour>,
+    /// このシェイプが所属するタイムラインレイヤーの固有ID（デフォルト `1`）
+    pub(crate) layer_id: u64,
     /// 外側のグループIDから内側のグループIDへの階層パス（空 `[]` ならルート階層の生シェイプ）
     pub(crate) group_path: Vec<u64>,
     bbox: KRect,
@@ -168,6 +190,7 @@ impl FillShape {
             color,
             exterior,
             holes,
+            layer_id: 1,
             group_path: Vec::new(),
             bbox: KRect::ZERO,
             bez_path: BezPath::new(),
@@ -178,9 +201,25 @@ impl FillShape {
         shape
     }
 
+    pub(crate) fn with_layer_id(mut self, layer_id: u64) -> Self {
+        self.layer_id = layer_id;
+        self
+    }
+
     pub(crate) fn with_group_path(mut self, group_path: Vec<u64>) -> Self {
         self.group_path = group_path;
         self
+    }
+
+    pub(crate) fn with_scope(mut self, layer_id: u64, group_path: &[u64]) -> Self {
+        self.layer_id = layer_id;
+        self.group_path = group_path.to_vec();
+        self
+    }
+
+    /// 外周および全内周穴の `Contour` を順に走査するイテレータを返す
+    pub(crate) fn contours(&self) -> impl Iterator<Item = &Contour> {
+        std::iter::once(&self.exterior).chain(self.holes.iter())
     }
 
     /// 指定されたグループ編集スコープ `scope` の内部（直下の生シェイプ、または子孫グループ）に属するか
@@ -204,7 +243,7 @@ impl FillShape {
 
     pub(crate) fn rebuild_cache(&mut self) {
         let mut path = BezPath::new();
-        for contour in std::iter::once(&self.exterior).chain(self.holes.iter()) {
+        for contour in self.contours() {
             contour.append_to_bez_path(&mut path);
         }
         self.bbox = path.bounding_box();
@@ -492,7 +531,7 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
     let simplified = raw_f64.simplify_shape(OverlayFillRule::NonZero, 0.05);
 
     if simplified.is_empty() {
-        let screen_outline: Vec<Point> = raw_f64.iter().map(|&[x, y]| Point::new(x, y)).collect();
+        let screen_outline = ring_f64_to_points(&raw_f64);
         let r_est = estimate_brush_radius_from_ring(&screen_outline);
         return smooth_ring_to_quad_contour(&screen_outline, r_est, true)
             .into_iter()
@@ -506,10 +545,7 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
             continue;
         }
         let r_est = estimate_brush_radius_from_shape_rings(&shape_rings);
-        let ext_pts: Vec<Point> = shape_rings[0]
-            .iter()
-            .map(|&[x, y]| Point::new(x, y))
-            .collect();
+        let ext_pts = ring_f64_to_points(&shape_rings[0]);
         let Some(exterior) = smooth_ring_to_quad_contour(&ext_pts, r_est, true) else {
             continue;
         };
@@ -517,8 +553,7 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
         let holes = shape_rings[1..]
             .iter()
             .filter_map(|hole_ring| {
-                let hole_pts: Vec<Point> =
-                    hole_ring.iter().map(|&[x, y]| Point::new(x, y)).collect();
+                let hole_pts = ring_f64_to_points(hole_ring);
                 smooth_ring_to_quad_contour(&hole_pts, r_est, false).map(&scale_to_world)
             })
             .collect();
@@ -659,19 +694,12 @@ fn smooth_ring_to_quad_contour(
         r_scale,
     );
 
-    let mut contour = Contour { segments };
-    contour.cleanup_degenerate((0.45 * r_scale).clamp(0.08, 0.5));
-
-    let area = contour.signed_area();
-    if area.abs() < (2.0 * r_scale * r_scale).max(0.25) {
-        return None;
-    }
-    if (expect_positive_area && area < 0.0) || (!expect_positive_area && area > 0.0) {
-        contour.reverse();
-    }
-    contour.enforce_continuity();
-
-    Some(contour)
+    Contour::from_segments_oriented(
+        segments,
+        (0.45 * r_scale).clamp(0.08, 0.5),
+        (2.0 * r_scale * r_scale).max(0.25),
+        expect_positive_area,
+    )
 }
 
 /// 閉じた頂点リングをスクリーン空間スケール `r_scale` に応じた等間隔ステップでリサンプリングする
@@ -793,6 +821,88 @@ fn classify_and_align_ring_features(
         t_macro[i] = signed_turn_at(dense, i, w_macro);
     }
 
+    // (A) 鋭角コーナー・自己交差分岐点（外周の凹V字ノッチや、穴の内角など）の検出
+    let mut is_sharp_corner = detect_sharp_corners(
+        &t_1,
+        &t_short,
+        &t_local,
+        &t_macro,
+        w_short,
+        w_local,
+        w_macro,
+        winding_sign,
+        is_exterior,
+    );
+
+    // 鋭角ノッチ近傍の頂点では、`t_local` / `t_macro` の計測窓が V字ノッチを跨いで相殺されるのを防ぐため窓をクランプする
+    if is_sharp_corner.iter().any(|&b| b) {
+        let clamped_turn = |idx: usize, max_w: usize| -> f64 {
+            let w_b = (1..=max_w)
+                .find(|&step| is_sharp_corner[(idx + m - step) % m])
+                .unwrap_or(max_w);
+            let w_f = (1..=max_w)
+                .find(|&step| is_sharp_corner[(idx + step) % m])
+                .unwrap_or(max_w);
+            let d_in = normalize_vec(dense[idx] - dense[(idx + m - w_b) % m]);
+            let d_out = normalize_vec(dense[(idx + w_f) % m] - dense[idx]);
+            signed_angle(d_in, d_out)
+        };
+        for i in 0..m {
+            if !is_sharp_corner[i] {
+                t_local[i] = clamped_turn(i, w_local);
+                t_macro[i] = clamped_turn(i, w_macro);
+            }
+        }
+    }
+
+    // (B) 滑らかな丸円弧（Round Cap / Round Corner）の候補検出
+    let mut is_round_arc =
+        detect_round_arcs(&t_short, &t_local, &t_macro, &is_sharp_corner, w_macro);
+
+    let mut is_high_curv: Vec<bool> = (0..m)
+        .map(|i| is_sharp_corner[i] || is_round_arc[i])
+        .collect();
+
+    if let Some(rot_idx) = find_longest_false_run_midpoint(&is_high_curv) {
+        dense.rotate_left(rot_idx);
+        t_local.rotate_left(rot_idx);
+        t_macro.rotate_left(rot_idx);
+        is_sharp_corner.rotate_left(rot_idx);
+        is_round_arc.rotate_left(rot_idx);
+        is_high_curv.rotate_left(rot_idx);
+    }
+
+    // `is_round_arc` の連続ランを検証し、180度丸キャップまたは局所的な丸コーナーのみを保護する
+    filter_protected_round_features(
+        dense,
+        &t_local,
+        &t_macro,
+        &is_sharp_corner,
+        &is_round_arc,
+        &mut is_high_curv,
+        w_local,
+        w_macro,
+        r_scale,
+        actual_ds,
+    );
+
+    (is_sharp_corner, is_high_curv)
+}
+
+/// 鋭角コーナー・自己交差分岐点（外周の凹V字ノッチや、穴の内角など）を検出する
+#[allow(clippy::too_many_arguments)]
+fn detect_sharp_corners(
+    t_1: &[f64],
+    t_short: &[f64],
+    t_local: &[f64],
+    t_macro: &[f64],
+    w_short: usize,
+    w_local: usize,
+    w_macro: usize,
+    winding_sign: f64,
+    is_exterior: bool,
+) -> Vec<bool> {
+    let m = t_short.len();
     let max_cap_scan = (w_macro + w_local).min(m / 3);
     let scan_adjacent_cap_side = |idx: usize, forward: bool| -> bool {
         let mut net = 0.0_f64;
@@ -825,9 +935,6 @@ fn classify_and_align_ring_features(
         net >= 2.20 || (hit_other_notch && net >= 1.10)
     };
 
-    // (A) 鋭角コーナー・自己交差分岐点（外周の凹V字ノッチや、穴の内角など）の検出
-    // ※ 外周（`is_exterior == true`）における凸方向（`t_short * winding_sign > 0`）のターンは
-    //    丸ブラシの半径 r が作る円弧（外角・丸キャップ）であり、1点の鋭角にはならないため除外する。
     let mut is_sharp_corner = vec![false; m];
     for i in 0..m {
         if is_exterior && t_short[i] * winding_sign > 0.0 {
@@ -890,29 +997,18 @@ fn classify_and_align_ring_features(
             }
         }
     }
+    is_sharp_corner
+}
 
-    // 鋭角ノッチ近傍の頂点では、`t_local` / `t_macro` の計測窓が V字ノッチを跨いで相殺されるのを防ぐため窓をクランプする
-    if is_sharp_corner.iter().any(|&b| b) {
-        let clamped_turn = |idx: usize, max_w: usize| -> f64 {
-            let w_b = (1..=max_w)
-                .find(|&step| is_sharp_corner[(idx + m - step) % m])
-                .unwrap_or(max_w);
-            let w_f = (1..=max_w)
-                .find(|&step| is_sharp_corner[(idx + step) % m])
-                .unwrap_or(max_w);
-            let d_in = normalize_vec(dense[idx] - dense[(idx + m - w_b) % m]);
-            let d_out = normalize_vec(dense[(idx + w_f) % m] - dense[idx]);
-            signed_angle(d_in, d_out)
-        };
-        for i in 0..m {
-            if !is_sharp_corner[i] {
-                t_local[i] = clamped_turn(i, w_local);
-                t_macro[i] = clamped_turn(i, w_macro);
-            }
-        }
-    }
-
-    // (B) 滑らかな丸円弧（Round Cap / Round Corner）の候補検出
+/// 滑らかな丸円弧（Round Cap / Round Corner）の候補頂点を検出する
+fn detect_round_arcs(
+    t_short: &[f64],
+    t_local: &[f64],
+    t_macro: &[f64],
+    is_sharp_corner: &[bool],
+    w_macro: usize,
+) -> Vec<bool> {
+    let m = t_short.len();
     let mut is_round_arc = vec![false; m];
     for i in 0..m {
         if is_sharp_corner[i] {
@@ -945,104 +1041,105 @@ fn classify_and_align_ring_features(
         }
     }
 
-    // 6割以上が丸円弧で鋭角を持たない場合は直線辺や180度キャップを持たない円・楕円ループなので、
-    // 特定箇所を180度キャップと誤認して歪めないよう `is_round_arc` を解除する
+    // 6割以上が丸円弧で鋭角を持たない場合は円・楕円ループなので特定箇所を180度キャップと誤認しないよう解除する
     if !is_sharp_corner.iter().any(|&b| b)
         && is_round_arc.iter().filter(|&&b| b).count() * 5 >= m * 3
     {
         is_round_arc.fill(false);
     }
+    is_round_arc
+}
 
-    let mut is_high_curv: Vec<bool> = (0..m)
-        .map(|i| is_sharp_corner[i] || is_round_arc[i])
+/// `is_round_arc` の連続ランを検証し、180度丸キャップまたは局所的な丸コーナーのみを `is_high_curv` として保護する
+#[allow(clippy::too_many_arguments)]
+fn filter_protected_round_features(
+    dense: &[Point],
+    t_local: &[f64],
+    t_macro: &[f64],
+    is_sharp_corner: &[bool],
+    is_round_arc: &[bool],
+    is_high_curv: &mut [bool],
+    w_local: usize,
+    w_macro: usize,
+    r_scale: f64,
+    actual_ds: f64,
+) {
+    if !is_round_arc.iter().any(|&b| b) || is_round_arc.iter().all(|&b| b) {
+        return;
+    }
+    let m = dense.len();
+    let flank_len = ((44.0 * r_scale / actual_ds).round() as usize).clamp(5, (m / 4).max(5));
+    let local_to_macro = (w_macro as f64 / w_local.max(1) as f64).max(1.0);
+    let mut is_cap_vertex = vec![false; m];
+    let run_metrics: Vec<(usize, usize, f64)> = find_true_runs(is_round_arc)
+        .into_iter()
+        .map(|(rs, re)| {
+            let (b_i, a_i) = clamp_run_bounds(rs, re, m, is_sharp_corner);
+            let (nt, _) = span_turn_metrics(&dense[b_i..=a_i]);
+            if nt >= 1.85 && (re - rs) < m / 2 {
+                is_cap_vertex[rs..=re].fill(true);
+            }
+            (rs, re, nt)
+        })
         .collect();
 
-    if let Some(rot_idx) = find_longest_false_run_midpoint(&is_high_curv) {
-        dense.rotate_left(rot_idx);
-        t_local.rotate_left(rot_idx);
-        t_macro.rotate_left(rot_idx);
-        is_sharp_corner.rotate_left(rot_idx);
-        is_round_arc.rotate_left(rot_idx);
-        is_high_curv.rotate_left(rot_idx);
-    }
+    for (r_start, r_end, net_turn) in run_metrics {
+        let is_round_cap = is_cap_vertex[r_start];
+        let sum_corner_tm: f64 = (r_start..=r_end).map(|k| t_macro[k]).sum();
+        let corner_sign = if sum_corner_tm >= 0.0 { 1.0 } else { -1.0 };
 
-    // `is_round_arc` の連続ランを検証し、180度丸キャップまたは局所的な丸コーナーを保護する
-    if is_round_arc.iter().any(|&b| b) && !is_round_arc.iter().all(|&b| b) {
-        let flank_len = ((44.0 * r_scale / actual_ds).round() as usize).clamp(5, (m / 4).max(5));
-        let local_to_macro = (w_macro as f64 / w_local.max(1) as f64).max(1.0);
-        let mut is_cap_vertex = vec![false; m];
-        let run_metrics: Vec<(usize, usize, f64)> = find_true_runs(&is_round_arc)
-            .into_iter()
-            .map(|(rs, re)| {
-                let (b_i, a_i) = clamp_run_bounds(rs, re, m, &is_sharp_corner);
-                let (nt, _) = span_turn_metrics(&dense[b_i..=a_i]);
-                if nt >= 1.85 && (re - rs) < m / 2 {
-                    is_cap_vertex[rs..=re].fill(true);
-                }
-                (rs, re, nt)
-            })
-            .collect();
-
-        for (r_start, r_end, net_turn) in run_metrics {
-            let is_round_cap = is_cap_vertex[r_start];
-            let sum_corner_tm: f64 = (r_start..=r_end).map(|k| t_macro[k]).sum();
-            let corner_sign = if sum_corner_tm >= 0.0 { 1.0 } else { -1.0 };
-
-            let mean_flank_turn = |start_idx: usize, forward: bool| -> f64 {
-                let mut sum = 0.0;
-                let mut cnt = 0usize;
-                for d in 1..(w_local + flank_len) {
-                    let i = if forward {
-                        (start_idx + d) % m
-                    } else {
-                        (start_idx + m - (d % m)) % m
-                    };
-                    if is_sharp_corner[i] || is_cap_vertex[i] {
-                        break;
-                    }
-                    if d >= w_local {
-                        sum += t_local[i] * local_to_macro * corner_sign;
-                        cnt += 1;
-                    }
-                }
-                if cnt > 0 {
-                    (sum / cnt as f64).max(0.0)
+        let mean_flank_turn = |start_idx: usize, forward: bool| -> f64 {
+            let mut sum = 0.0;
+            let mut cnt = 0usize;
+            for d in 1..(w_local + flank_len) {
+                let i = if forward {
+                    (start_idx + d) % m
                 } else {
-                    0.0
+                    (start_idx + m - (d % m)) % m
+                };
+                if is_sharp_corner[i] || is_cap_vertex[i] {
+                    break;
                 }
-            };
+                if d >= w_local {
+                    sum += t_local[i] * local_to_macro * corner_sign;
+                    cnt += 1;
+                }
+            }
+            if cnt > 0 {
+                (sum / cnt as f64).max(0.0)
+            } else {
+                0.0
+            }
+        };
 
-            let flank_before = mean_flank_turn(r_start, false);
-            let flank_after = mean_flank_turn(r_end, true);
-            let peak_abs_tm = (r_start..=r_end)
-                .map(|k| t_macro[k].abs())
-                .fold(0.0_f64, f64::max);
-            let peak_abs_tl = (r_start..=r_end)
-                .map(|k| t_local[k].abs())
-                .fold(0.0_f64, f64::max);
+        let flank_before = mean_flank_turn(r_start, false);
+        let flank_after = mean_flank_turn(r_end, true);
+        let peak_abs_tm = (r_start..=r_end)
+            .map(|k| t_macro[k].abs())
+            .fold(0.0_f64, f64::max);
+        let peak_abs_tl = (r_start..=r_end)
+            .map(|k| t_local[k].abs())
+            .fold(0.0_f64, f64::max);
 
-            let is_localized_round_corner = (r_end - r_start) <= m / 3
-                && ((net_turn >= 0.58
-                    && flank_before < 0.28
-                    && flank_after < 0.28
-                    && flank_before < 0.42 * peak_abs_tm
-                    && flank_after < 0.42 * peak_abs_tm)
-                    || (net_turn >= 0.88
-                        && peak_abs_tl >= 0.52
-                        && flank_before < 0.52 * peak_abs_tm
-                        && flank_after < 0.52 * peak_abs_tm));
+        let is_localized_round_corner = (r_end - r_start) <= m / 3
+            && ((net_turn >= 0.58
+                && flank_before < 0.28
+                && flank_after < 0.28
+                && flank_before < 0.42 * peak_abs_tm
+                && flank_after < 0.42 * peak_abs_tm)
+                || (net_turn >= 0.88
+                    && peak_abs_tl >= 0.52
+                    && flank_before < 0.52 * peak_abs_tm
+                    && flank_after < 0.52 * peak_abs_tm));
 
-            if !is_round_cap && !is_localized_round_corner {
-                for k in r_start..=r_end {
-                    if !is_sharp_corner[k] {
-                        is_high_curv[k] = false;
-                    }
+        if !is_round_cap && !is_localized_round_corner {
+            for k in r_start..=r_end {
+                if !is_sharp_corner[k] {
+                    is_high_curv[k] = false;
                 }
             }
         }
     }
-
-    (is_sharp_corner, is_high_curv)
 }
 
 /// ゼロ収縮（Zero-Shrinkage）2スケール移動平均フィルタで、描いた形や凹凸を丸めずに輪郭表面のギザギザだけを除去する
@@ -1738,15 +1835,23 @@ fn merge_shapes_into_canvas_inner(
         return;
     }
     let target_color = incoming[0].color;
+    let target_layer_id = incoming[0].layer_id;
     let target_group_path = incoming[0].group_path.clone();
     let test_bbox = union_bounding_boxes(&incoming).inflate(1.5, 1.5);
 
     let insert_limit = if target_group_path.is_empty() {
-        canvas.len()
+        canvas
+            .iter()
+            .rposition(|s| s.layer_id == target_layer_id)
+            .map(|pos| pos + 1)
+            .unwrap_or(canvas.len())
     } else {
         canvas
             .iter()
-            .rposition(|s| s.is_in_editing_scope(&target_group_path))
+            .rposition(|s| {
+                s.layer_id == target_layer_id && s.is_in_editing_scope(&target_group_path)
+            })
+            .or_else(|| canvas.iter().rposition(|s| s.layer_id == target_layer_id))
             .map(|pos| pos + 1)
             .unwrap_or(canvas.len())
     };
@@ -1757,7 +1862,7 @@ fn merge_shapes_into_canvas_inner(
     let mut overlapping_same_color = Vec::new();
 
     for existing in canvas.drain(..) {
-        if existing.group_path != target_group_path {
+        if existing.layer_id != target_layer_id || existing.group_path != target_group_path {
             updated_canvas.push(existing);
             continue;
         }
@@ -1773,7 +1878,7 @@ fn merge_shapes_into_canvas_inner(
             updated_canvas.extend(
                 boolean_operation(&[existing], &incoming, BoolOp::Difference, color)
                     .into_iter()
-                    .map(|s| s.with_group_path(target_group_path.clone())),
+                    .map(|s| s.with_scope(target_layer_id, &target_group_path)),
             );
         } else {
             updated_canvas.push(existing);
@@ -1791,7 +1896,7 @@ fn merge_shapes_into_canvas_inner(
                 target_color,
             )
             .into_iter()
-            .map(|s| s.with_group_path(target_group_path.clone())),
+            .map(|s| s.with_scope(target_layer_id, &target_group_path)),
         );
     }
 
@@ -1813,10 +1918,11 @@ pub(crate) fn erase_from_canvas(canvas: &mut Vec<FillShape>, eraser_shapes: &[Fi
             && rects_overlap(existing.bounding_box(), test_bbox)
         {
             let color = existing.color;
+            let layer_id = existing.layer_id;
             updated_canvas.extend(
                 boolean_operation(&[existing], eraser_shapes, BoolOp::Difference, color)
                     .into_iter()
-                    .map(|s| s.with_group_path(target_group_path.clone())),
+                    .map(|s| s.with_scope(layer_id, target_group_path)),
             );
         } else {
             updated_canvas.push(existing);
@@ -2073,7 +2179,7 @@ pub(crate) fn resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape> {
         .iter()
         .filter_map(|poly_shape| {
             reconstruct_fill_shape_from_rings(poly_shape, &quad_table, shape.color, false)
-                .map(|s| s.with_group_path(shape.group_path.clone()))
+                .map(|s| s.with_scope(shape.layer_id, &shape.group_path))
         })
         .collect()
 }
@@ -2236,20 +2342,7 @@ fn reconstruct_or_refit_quad_contour(
         return smooth_ring_to_quad_contour(&pts, r_est, is_outer);
     }
 
-    let mut contour = Contour { segments };
-    contour.cleanup_degenerate(0.02);
-
-    let area = contour.signed_area();
-    if area.abs() < 0.04 {
-        return None;
-    }
-
-    if (is_outer && area < 0.0) || (!is_outer && area > 0.0) {
-        contour.reverse();
-    }
-    contour.enforce_continuity();
-
-    Some(contour)
+    Contour::from_segments_oriented(segments, 0.02, 0.04, is_outer)
 }
 
 /// ポリゴン辺 `a -> b` が元のどの `QuadBez` セグメント上に乗っているかを高速判定する
@@ -2362,6 +2455,11 @@ fn extract_sub_quad(orig: QuadBez, p_start: Point, p_end: Point) -> QuadBez {
 // ============================================================================
 // 幾何ユーティリティ関数
 // ============================================================================
+
+#[inline]
+fn ring_f64_to_points(ring: &[[f64; 2]]) -> Vec<Point> {
+    ring.iter().map(|&[x, y]| Point::new(x, y)).collect()
+}
 
 #[inline]
 pub(crate) fn normalize_vec(v: KVec2) -> KVec2 {

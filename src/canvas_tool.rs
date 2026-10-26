@@ -224,6 +224,10 @@ pub(crate) enum SelectDragState {
 // ============================================================================
 
 impl FlashBrushApp {
+    // ------------------------------------------------------------------------
+    // 1. ビューポート座標変換・選択マスク・レイヤー追従ヘルパー
+    // ------------------------------------------------------------------------
+
     /// ワールド座標 `p` を現在のズーム・パンに応じたスクリーン座標 `Pos2` へ変換する
     #[inline]
     pub(crate) fn world_to_screen(&self, p: Point) -> Pos2 {
@@ -258,6 +262,42 @@ impl FlashBrushApp {
         self.view_pan = Vec2::ZERO;
     }
 
+    /// 矩形スライス前のキャンバス状態があれば取り出し、なければ現在の `self.shapes` をクローンして返す
+    #[inline]
+    fn take_or_clone_unsliced_snapshot(&mut self) -> Vec<FillShape> {
+        self.unsliced_canvas
+            .take()
+            .unwrap_or_else(|| self.shapes.clone())
+    }
+
+    /// 現在の編集スコープ（`editing_group_path`）末尾に対応する挿入インデックスを返す
+    fn scope_insert_index(&self) -> usize {
+        if self.editing_group_path.is_empty() {
+            self.shapes.len()
+        } else {
+            self.shapes
+                .iter()
+                .rposition(|s| s.is_in_editing_scope(&self.editing_group_path))
+                .map(|pos| pos + 1)
+                .unwrap_or(self.shapes.len())
+        }
+    }
+
+    /// 指定シェイプ・輪郭・セグメント番号に対応する `QuadBez` を取得する
+    #[inline]
+    fn get_contour_segment(
+        &self,
+        shape_idx: usize,
+        contour_idx: usize,
+        seg_idx: usize,
+    ) -> Option<QuadBez> {
+        self.shapes
+            .get(shape_idx)
+            .and_then(|s| s.get_contour(contour_idx))
+            .and_then(|c| c.segments.get(seg_idx))
+            .copied()
+    }
+
     /// 現在の `self.selected_shapes` に対応する選択マスク（`Vec<bool>`）と有効な選択が1つ以上あるかを返す
     pub(crate) fn selected_shape_mask(&self) -> (Vec<bool>, bool) {
         let mut is_sel = vec![false; self.shapes.len()];
@@ -271,6 +311,69 @@ impl FlashBrushApp {
         (is_sel, any_valid)
     }
 
+    /// 現在の編集スコープ（グループ内であればそのグループの所属レイヤー、そうでなければ現在のアクティブレイヤー）の `layer_id` を返す
+    pub(crate) fn active_scope_layer_id(&self) -> u64 {
+        if !self.editing_group_path.is_empty() {
+            if let Some(s) = self
+                .shapes
+                .iter()
+                .find(|s| s.is_in_editing_scope(&self.editing_group_path))
+            {
+                return s.layer_id;
+            }
+        }
+        if self.timeline.is_active_layer_editable() {
+            self.timeline.active_layer_id()
+        } else {
+            self.timeline
+                .layers
+                .iter()
+                .rev()
+                .find(|l| l.visible && !l.locked)
+                .map(|l| l.id)
+                .unwrap_or_else(|| self.timeline.active_layer_id())
+        }
+    }
+
+    /// 指定したシェイプインデックス `shape_idx` が属するレイヤーへ `self.timeline.active_layer` およびタイムライン選択状態を追従させる
+    pub(crate) fn focus_active_layer_to_shape(&mut self, shape_idx: usize) {
+        if let Some(lid) = self.shapes.get(shape_idx).map(|s| s.layer_id) {
+            if let Some(l_idx) = self.timeline.layer_index_by_id(lid) {
+                self.timeline.active_layer = l_idx;
+                let cf = self.timeline.current_frame;
+                self.timeline.cell_selection =
+                    Some(crate::timeline::TimelineCellSelection::single(l_idx, cf));
+            }
+        }
+    }
+
+    /// キャンバス上で選択されたシェイプ群（`self.selected_shapes`）が所属するレイヤーをタイムライン上で選択状態にする
+    pub(crate) fn sync_timeline_layer_from_canvas_selection(&mut self) {
+        let mut min_l: Option<usize> = None;
+        let mut max_l: Option<usize> = None;
+        let mut last_l: Option<usize> = None;
+        for &idx in &self.selected_shapes {
+            if let Some(lid) = self.shapes.get(idx).map(|s| s.layer_id) {
+                if let Some(l_idx) = self.timeline.layer_index_by_id(lid) {
+                    min_l = Some(min_l.map_or(l_idx, |m| m.min(l_idx)));
+                    max_l = Some(max_l.map_or(l_idx, |m| m.max(l_idx)));
+                    last_l = Some(l_idx);
+                }
+            }
+        }
+        if let (Some(l0), Some(l1), Some(act)) = (min_l, max_l, last_l) {
+            self.timeline.active_layer = act;
+            let cf = self.timeline.current_frame;
+            self.timeline.cell_selection = Some(
+                crate::timeline::TimelineCellSelection::from_corners(l0, cf, l1, cf),
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // 2. 選択管理・グループ階層操作・クリップボード
+    // ------------------------------------------------------------------------
+
     pub(crate) fn clear_selection(&mut self) {
         if let Some(unsliced) = self.unsliced_canvas.take() {
             self.shapes = unsliced;
@@ -279,8 +382,8 @@ impl FlashBrushApp {
             let mut base_canvas = Vec::with_capacity(self.shapes.len());
             let mut modified_raw_shapes = Vec::with_capacity(self.selected_shapes.len());
             for (idx, shape) in self.shapes.drain(..).enumerate() {
-                // 現在のスコープ直下の生シェイプのみ選択解除時に結合・切り抜き（Merge Drawing）を行い、
-                // グループ化されているオブジェクトは下の絵を削らずに独立パーツとしてそのまま残す
+                // 現在のスコープ直下の生シェイプのみ選択解除時に同一レイヤー内で結合・切り抜き（Merge Drawing）を行い、
+                // グループ化されているオブジェクトや別レイヤーの絵は削らずにそのまま残す
                 if is_sel[idx] && shape.is_raw_at_scope(&self.editing_group_path) {
                     modified_raw_shapes.push(shape);
                 } else {
@@ -288,12 +391,13 @@ impl FlashBrushApp {
                 }
             }
             while !modified_raw_shapes.is_empty() {
+                let lid = modified_raw_shapes[0].layer_id;
                 let c = modified_raw_shapes[0].color;
                 let gp = modified_raw_shapes[0].group_path.clone();
                 let mut batch = Vec::new();
                 let mut remaining = Vec::new();
                 for shape in modified_raw_shapes {
-                    if shape.color == c && shape.group_path == gp {
+                    if shape.layer_id == lid && shape.color == c && shape.group_path == gp {
                         batch.push(shape);
                     } else {
                         remaining.push(shape);
@@ -303,6 +407,7 @@ impl FlashBrushApp {
                 modified_raw_shapes = remaining;
             }
             self.shapes = base_canvas;
+            self.sort_shapes_by_layer_order();
         }
         self.selection_modified = false;
         self.selected_shapes.clear();
@@ -320,28 +425,32 @@ impl FlashBrushApp {
     /// 編集スコープおよび表示中の全レイヤーを対象に、指定座標 `pt` にヒットする最前面シェイプの色を返す（スポイト用）
     pub(crate) fn topmost_visible_color_at(&self, pt: Point) -> Option<Color32> {
         let num_layers = self.timeline.layers.len();
-        if num_layers == 0 {
-            return self
-                .shapes
-                .iter()
-                .rev()
-                .find(|s| s.contains_point(pt))
-                .map(|s| s.color);
+        if num_layers <= 1 {
+            if let Some(hit) = self.shapes.iter().rev().find(|s| s.contains_point(pt)) {
+                return Some(hit.color);
+            }
         }
         for layer_idx in (0..num_layers).rev() {
             let layer = &self.timeline.layers[layer_idx];
             if !layer.visible {
                 continue;
             }
-            let shapes_slice: &[FillShape] = if layer_idx == self.timeline.active_layer {
-                &self.shapes
-            } else if let Some(cel) = layer.cel_at(self.timeline.current_frame) {
-                &cel.shapes
+            if layer.locked {
+                if let Some(cel) = layer.cel_at(self.timeline.current_frame) {
+                    if let Some(hit) = cel.shapes.iter().rev().find(|s| s.contains_point(pt)) {
+                        return Some(hit.color);
+                    }
+                }
             } else {
-                continue;
-            };
-            if let Some(hit) = shapes_slice.iter().rev().find(|s| s.contains_point(pt)) {
-                return Some(hit.color);
+                let lid = layer.id;
+                if let Some(hit) = self
+                    .shapes
+                    .iter()
+                    .rev()
+                    .find(|s| s.layer_id == lid && s.contains_point(pt))
+                {
+                    return Some(hit.color);
+                }
             }
         }
         None
@@ -378,18 +487,23 @@ impl FlashBrushApp {
         if self.selected_shapes.is_empty() {
             return None;
         }
-        let snapshot = self
-            .unsliced_canvas
-            .take()
-            .unwrap_or_else(|| self.shapes.clone());
+        let snapshot = self.take_or_clone_unsliced_snapshot();
         let new_gid = self.next_group_id;
         self.next_group_id += 1;
+
+        let target_lid = self
+            .selected_shapes
+            .iter()
+            .filter_map(|&idx| self.shapes.get(idx).map(|s| s.layer_id))
+            .max_by_key(|&lid| self.timeline.layer_index_by_id(lid).unwrap_or(0))
+            .unwrap_or_else(|| self.active_scope_layer_id());
 
         let depth = self.editing_group_path.len();
         let mut any_grouped = false;
         for &sel_idx in &self.selected_shapes {
             if let Some(shape) = self.shapes.get_mut(sel_idx) {
                 if shape.is_in_editing_scope(&self.editing_group_path) {
+                    shape.layer_id = target_lid;
                     shape.group_path.insert(depth, new_gid);
                     any_grouped = true;
                 }
@@ -400,6 +514,9 @@ impl FlashBrushApp {
             return None;
         }
 
+        if let Some(l_idx) = self.timeline.layer_index_by_id(target_lid) {
+            self.timeline.active_layer = l_idx;
+        }
         self.commit_moved_selection(snapshot);
         self.selection_modified = false;
         self.transform_pivot = None;
@@ -412,10 +529,7 @@ impl FlashBrushApp {
         if !self.selection_has_group() {
             return false;
         }
-        let snapshot = self
-            .unsliced_canvas
-            .take()
-            .unwrap_or_else(|| self.shapes.clone());
+        let snapshot = self.take_or_clone_unsliced_snapshot();
         self.record_undo_snapshot(snapshot);
 
         let depth = self.editing_group_path.len();
@@ -497,6 +611,7 @@ impl FlashBrushApp {
             }
         }
         self.transform_pivot = None;
+        self.sync_timeline_layer_from_canvas_selection();
     }
 
     /// 既存の選択を確定解除した上で、指定座標 `pt` にある最前面シェイプ（塗り・境界線・頂点、またはグループ塊全体）を選択する
@@ -507,6 +622,8 @@ impl FlashBrushApp {
             .or_else(|| self.compute_hover_target(pt).shape_idx())
         {
             self.selected_shapes = self.expand_to_group_unit(hit_idx);
+            self.focus_active_layer_to_shape(hit_idx);
+            self.sync_timeline_layer_from_canvas_selection();
             true
         } else {
             false
@@ -525,11 +642,7 @@ impl FlashBrushApp {
         }
     }
 
-    /// Adobe Animate 風の矩形選択（Marquee Selection）：
-    /// - 現在の編集スコープ（`editing_group_path`）内のオブジェクトのみを対象とする。
-    /// - 子グループに属するシェイプはスライスせず、矩形と交差していればグループ塊全体を選択状態にする。
-    /// - 矩形に完全に収まる生シェイプはそのまま選択状態にし、一部のみ重なる生シェイプは内部（`Intersection`）と外部（`Difference`）にスライスする。
-    /// - `additive == true`（Shift キー押下）のときは既存の選択を維持したまま連続で選択領域を追加する。
+    /// Adobe Animate 風の矩形選択（Marquee Selection）
     pub(crate) fn apply_marquee_selection(&mut self, p0: Point, p1: Point, additive: bool) {
         let min_x = p0.x.min(p1.x);
         let max_x = p0.x.max(p1.x);
@@ -618,7 +731,6 @@ impl FlashBrushApp {
                 continue;
             }
 
-            // 生シェイプのバウンディングボックス全体が矩形内に完全に収まっている場合はそのまま丸ごと選択
             if bbox.x0 >= rect.x0 && bbox.x1 <= rect.x1 && bbox.y0 >= rect.y0 && bbox.y1 <= rect.y1
             {
                 new_selected.push(new_shapes.len());
@@ -627,6 +739,7 @@ impl FlashBrushApp {
             }
 
             let color = shape.color;
+            let lid = shape.layer_id;
             let gp = shape.group_path.clone();
             let inside = boolean_operation(
                 std::slice::from_ref(&shape),
@@ -650,14 +763,10 @@ impl FlashBrushApp {
                 new_shapes.push(shape);
             } else {
                 any_sliced = true;
-                new_shapes.extend(
-                    outside
-                        .into_iter()
-                        .map(|s| s.with_group_path(gp.clone())),
-                );
+                new_shapes.extend(outside.into_iter().map(|s| s.with_scope(lid, &gp)));
                 for piece in inside {
                     new_selected.push(new_shapes.len());
-                    new_shapes.push(piece.with_group_path(gp.clone()));
+                    new_shapes.push(piece.with_scope(lid, &gp));
                 }
             }
         }
@@ -668,6 +777,7 @@ impl FlashBrushApp {
         self.shapes = new_shapes;
         self.selected_shapes = new_selected;
         self.transform_pivot = None;
+        self.sync_timeline_layer_from_canvas_selection();
     }
 
     pub(crate) fn delete_selected_shapes(&mut self) -> bool {
@@ -682,10 +792,7 @@ impl FlashBrushApp {
             return false;
         }
 
-        let snapshot = self
-            .unsliced_canvas
-            .take()
-            .unwrap_or_else(|| self.shapes.clone());
+        let snapshot = self.take_or_clone_unsliced_snapshot();
         self.record_undo_snapshot(snapshot);
 
         let mut remaining = Vec::with_capacity(self.shapes.len());
@@ -733,9 +840,6 @@ impl FlashBrushApp {
     }
 
     /// 内部クリップボードのオブジェクトを現在の編集スコープへ貼り付ける。
-    /// - `in_place == false`（`Cmd+V`）：連続ペースト回数に応じて少しずつずらした位置に貼り付ける。
-    /// - `in_place == true`（`Cmd+Shift+V`）：コピー・カット時と全く同じ座標に貼り付ける。
-    /// - グループを貼り付ける際は、元のグループとは独立した新しいグループIDを再採番して構造（入れ子含む）を維持する。
     pub(crate) fn paste_clipboard(&mut self, in_place: bool) -> bool {
         if self.clipboard.is_empty() {
             return false;
@@ -752,6 +856,11 @@ impl FlashBrushApp {
             let k = self.paste_count as f64;
             KVec2::new(step * k, step * k)
         };
+
+        let active_lid = self.active_scope_layer_id();
+        let multi_layer_copy = self.clipboard.first().is_some_and(|first| {
+            self.clipboard.iter().any(|s| s.layer_id != first.layer_id)
+        });
 
         let mut gid_map: Vec<(u64, u64)> = Vec::new();
         let mut pasted_shapes = Vec::with_capacity(self.clipboard.len());
@@ -776,26 +885,27 @@ impl FlashBrushApp {
                     new_path.push(new_gid);
                 }
             }
-            let mut cloned = item.clone().with_group_path(new_path);
+            let target_lid =
+                if multi_layer_copy && self.timeline.is_layer_editable_by_id(item.layer_id) {
+                    item.layer_id
+                } else {
+                    active_lid
+                };
+            let mut cloned = item
+                .clone()
+                .with_layer_id(target_lid)
+                .with_group_path(new_path);
             if offset != KVec2::ZERO {
                 cloned.translate(offset);
             }
             pasted_shapes.push(cloned);
         }
 
-        let insert_pos = if self.editing_group_path.is_empty() {
-            self.shapes.len()
-        } else {
-            self.shapes
-                .iter()
-                .rposition(|s| s.is_in_editing_scope(&self.editing_group_path))
-                .map(|pos| pos + 1)
-                .unwrap_or(self.shapes.len())
-        };
-
+        let insert_pos = self.scope_insert_index();
         let count = pasted_shapes.len();
         self.shapes.splice(insert_pos..insert_pos, pasted_shapes);
         self.selected_shapes = (insert_pos..insert_pos + count).collect();
+        self.sort_shapes_by_layer_order();
         self.selection_modified = any_raw;
         self.transform_pivot = None;
         if !matches!(self.tool, Tool::Select | Tool::Transform) {
@@ -814,18 +924,7 @@ impl FlashBrushApp {
         self.record_undo_snapshot(snapshot);
         self.selection_modified = true;
 
-        // 選択中のシェイプ群を現在の編集スコープ（`editing_group_path`）内の最前面へ揃え、
-        // 選択解除（`clear_selection`）まで独立した選択状態を維持する
-        let insert_limit = if self.editing_group_path.is_empty() {
-            self.shapes.len()
-        } else {
-            self.shapes
-                .iter()
-                .rposition(|s| s.is_in_editing_scope(&self.editing_group_path))
-                .map(|pos| pos + 1)
-                .unwrap_or(self.shapes.len())
-        };
-
+        let insert_limit = self.scope_insert_index();
         let mut unselected = Vec::with_capacity(self.shapes.len());
         let mut moved_shapes = Vec::with_capacity(self.selected_shapes.len());
         let mut trailing_outside = Vec::new();
@@ -845,6 +944,7 @@ impl FlashBrushApp {
         unselected.extend(trailing_outside);
         self.shapes = unselected;
         self.selected_shapes = (start_sel..end_sel).collect();
+        self.sort_shapes_by_layer_order();
     }
 
     /// 選択オブジェクトの平行移動ドラッグ終了時の確定・ロールバック共通処理
@@ -871,11 +971,13 @@ impl FlashBrushApp {
     ) {
         let min_deform = 0.5 / (self.view_zoom as f64);
         if drag_dist > min_deform && shape_idx < self.shapes.len() {
+            self.focus_active_layer_to_shape(shape_idx);
             self.record_undo_snapshot(undo_snapshot);
             let mut deformed = self.shapes.remove(shape_idx);
             apply_deform(&mut deformed);
             let resolved = resolve_deformed_shape(&deformed);
             merge_shapes_into_canvas(&mut self.shapes, resolved);
+            self.sort_shapes_by_layer_order();
         } else {
             self.shapes = undo_snapshot;
         }
@@ -912,6 +1014,10 @@ impl FlashBrushApp {
         }
         Some(bbox)
     }
+
+    // ------------------------------------------------------------------------
+    // 3. 自由変形・アフィン変換・ブラシ / 消しゴム / バケツ / スポイト操作
+    // ------------------------------------------------------------------------
 
     /// 自由変形ツールの現在の基準点（ピボット座標）を返す
     pub(crate) fn active_transform_pivot(&self, bbox: KRect) -> Point {
@@ -1008,24 +1114,21 @@ impl FlashBrushApp {
     }
 
     pub(crate) fn commit_raw_outline(&mut self, raw: &[Point]) {
+        let target_lid = self.active_scope_layer_id();
         let stroke_shapes: Vec<FillShape> =
             build_smoothed_stroke_shapes_at_zoom(raw, self.brush_color, self.view_zoom as f64)
                 .into_iter()
-                .map(|s| s.with_group_path(self.editing_group_path.clone()))
+                .map(|s| s.with_scope(target_lid, &self.editing_group_path))
                 .collect();
         if self.tool == Tool::Brush {
             merge_shapes_into_canvas(&mut self.shapes, stroke_shapes);
+            self.sort_shapes_by_layer_order();
         } else {
             erase_from_canvas(&mut self.shapes, &stroke_shapes);
         }
     }
 
-    /// バケツツール（色流し込み）：
-    /// ※ グループ化されたオブジェクト（現在の編集スコープでグループに属するシェイプ）には選択中であってもバケツ塗りを無効化する。
-    /// 0. 選択領域が存在する場合は、選択されている「生シェイプ」上をクリックしたときのみ、選択中の生シェイプに色を流し込む。
-    /// 1. 非選択状態でクリック位置 `pt` が現在の編集スコープ直下の生シェイプ上であればそのシェイプの色を変更（隣接する同色シェイプとも自動結合）。
-    /// 2. 非選択状態でクリック位置 `pt` が現在の編集スコープ直下の生シェイプに囲まれた閉領域であれば、
-    ///    周囲のベジェ曲線をそのまま継承した新しい `FillShape` を生成して流し込む。
+    /// バケツツール（色流し込み）
     pub(crate) fn bucket_fill_at(&mut self, pt: Point) -> bool {
         let fill_color = self.brush_color;
 
@@ -1045,10 +1148,7 @@ impl FlashBrushApp {
                 if !any_color_diff {
                     return false;
                 }
-                let snapshot = self
-                    .unsliced_canvas
-                    .take()
-                    .unwrap_or_else(|| self.shapes.clone());
+                let snapshot = self.take_or_clone_unsliced_snapshot();
                 for &sel_idx in &self.selected_shapes {
                     if let Some(shape) = self.shapes.get_mut(sel_idx) {
                         if shape.is_raw_at_scope(&self.editing_group_path) {
@@ -1071,28 +1171,41 @@ impl FlashBrushApp {
             {
                 return false;
             }
+            self.focus_active_layer_to_shape(hit_idx);
             let snapshot = self.shapes.clone();
             let mut target = self.shapes.remove(hit_idx);
             target.color = fill_color;
             target.rebuild_cache();
             merge_disjoint_fill_into_canvas(&mut self.shapes, target);
+            self.sort_shapes_by_layer_order();
             self.record_undo_snapshot(snapshot);
             return true;
         }
 
         // 2. 現在のスコープ直下の生シェイプ群に囲まれた空白（閉領域）をクリックした場合：ベクター流し込み
-        let raw_scope_shapes: Vec<FillShape> = self
+        let target_lid = self.active_scope_layer_id();
+        let active_layer_raw: Vec<FillShape> = self
             .shapes
             .iter()
-            .filter(|s| s.is_raw_at_scope(&self.editing_group_path))
+            .filter(|s| s.layer_id == target_lid && s.is_raw_at_scope(&self.editing_group_path))
             .cloned()
             .collect();
-        if let Some(enclosed_fill) = find_enclosed_region_at(&raw_scope_shapes, pt, fill_color) {
+        let enclosed_opt = find_enclosed_region_at(&active_layer_raw, pt, fill_color).or_else(|| {
+            let all_raw_scope: Vec<FillShape> = self
+                .shapes
+                .iter()
+                .filter(|s| s.is_raw_at_scope(&self.editing_group_path))
+                .cloned()
+                .collect();
+            find_enclosed_region_at(&all_raw_scope, pt, fill_color)
+        });
+        if let Some(enclosed_fill) = enclosed_opt {
             let snapshot = self.shapes.clone();
             merge_disjoint_fill_into_canvas(
                 &mut self.shapes,
-                enclosed_fill.with_group_path(self.editing_group_path.clone()),
+                enclosed_fill.with_scope(target_lid, &self.editing_group_path),
             );
+            self.sort_shapes_by_layer_order();
             self.record_undo_snapshot(snapshot);
             return true;
         }
@@ -1106,6 +1219,10 @@ impl FlashBrushApp {
         self.brush_color = picked;
         Some(picked)
     }
+
+    // ------------------------------------------------------------------------
+    // 4. 輪郭変形（PullEdge / MoveVertex）＆ ヒットテスト（アルゴリズム 4）
+    // ------------------------------------------------------------------------
 
     /// 向こう側の輪郭エッジ付近でドロップされた際に確実に貫通して分割されるよう僅かに押し出す。
     pub(crate) fn punch_through_opposite_edge(
@@ -1260,9 +1377,6 @@ impl FlashBrushApp {
     }
 
     /// アルゴリズム 4: マウス位置に対する頂点・輪郭エッジ・塗りのヒットテスト
-    /// - Adobe Animate 仕様：すでに選択状態（`selected_shapes`）になっているシェイプは、
-    ///   輪郭や頂点の変形操作（`Edge` / `Vertex`）を無効化し、常に移動対象（`HoverTarget::Fill`）として扱う。
-    /// - 頂点・エッジの変形は未選択の生シェイプの境界を直接ドラッグした時のみ発動する。
     pub(crate) fn compute_hover_target(&self, mouse_pt: Point) -> HoverTarget {
         let inv_z = 1.0 / (self.view_zoom as f64);
         let vertex_hit_radius = 9.0 * inv_z;
@@ -1299,7 +1413,7 @@ impl FlashBrushApp {
             }
         }
 
-        // 1. 輪郭の角（アンカーポイント）への近接判定（アンカー追加モード時、および選択済みシェイプはスキップ）
+        // 1. 輪郭の角（アンカーポイント）への近接判定
         if self.select_sub_mode != SelectSubMode::AddAnchor {
             let v_radius = if self.select_sub_mode == SelectSubMode::DeleteAnchor {
                 anchor_edit_hit_radius
@@ -1352,7 +1466,7 @@ impl FlashBrushApp {
             }
         }
 
-        // 2. 輪郭の2次ベジェ曲線セグメント（エッジ）への近接判定（通常モード時の選択済みシェイプはスキップ）
+        // 2. 輪郭の2次ベジェ曲線セグメント（エッジ）への近接判定
         let mut best_edge: Option<(f64, HoverTarget)> = None;
         for (s_idx, shape) in self.shapes.iter().enumerate().rev() {
             if (self.select_sub_mode == SelectSubMode::Reshape
@@ -1411,7 +1525,7 @@ impl FlashBrushApp {
             return HoverTarget::None;
         }
 
-        // 3. シェイプ内部の塗り領域判定（現在の編集スコープ内の生シェイプおよび子グループ）
+        // 3. シェイプ内部の塗り領域判定
         if let Some(s_idx) = self.topmost_shape_at(mouse_pt) {
             return HoverTarget::Fill { shape_idx: s_idx };
         }
@@ -1480,6 +1594,10 @@ impl FlashBrushApp {
         self.select_drag = SelectDragState::None;
     }
 
+    // ------------------------------------------------------------------------
+    // 5. ツール別マウス入力ハンドリング（Transform / Brush & Eraser / Select）
+    // ------------------------------------------------------------------------
+
     /// Flash風ドット柄（Polka-Dot）選択オーバーレイを描画（キャッシュ済み Mesh を使用）
     pub(crate) fn draw_flash_selection_overlay(&mut self, painter: &egui::Painter, shape_idx: usize) {
         let zoom = self.view_zoom;
@@ -1522,242 +1640,17 @@ impl FlashBrushApp {
 
         if response.drag_started() {
             if let Some(pt) = mouse_pt {
-                if shift_held && self.compute_transform_hover(pt) == TransformHoverTarget::None {
-                    self.transform_drag = TransformDragState::MarqueeSelect {
-                        start_pos: pt,
-                        current_pos: pt,
-                        additive: true,
-                    };
-                } else {
-                    match self.compute_transform_hover(pt) {
-                        TransformHoverTarget::Pivot => {
-                            self.transform_drag = TransformDragState::MovePivot;
-                        }
-                        TransformHoverTarget::Scale(handle) => {
-                            if let Some(orig_bbox) = self.selection_bounding_box() {
-                                let orig_pivot = self.active_transform_pivot(orig_bbox);
-                                let anchor = if alt_held {
-                                    orig_pivot
-                                } else {
-                                    handle.opposite_position(orig_bbox)
-                                };
-                                let handle_start = handle.position(orig_bbox);
-                                self.transform_drag = TransformDragState::Scale {
-                                    handle,
-                                    anchor,
-                                    handle_start,
-                                    orig_pivot,
-                                    orig_shapes: self.selected_shapes_snapshot(),
-                                    undo_snapshot: self.shapes.clone(),
-                                    changed: false,
-                                };
-                            }
-                        }
-                        TransformHoverTarget::Rotate => {
-                            if let Some(orig_bbox) = self.selection_bounding_box() {
-                                let pivot = self.active_transform_pivot(orig_bbox);
-                                let start_angle = (pt.y - pivot.y).atan2(pt.x - pivot.x);
-                                self.transform_drag = TransformDragState::Rotate {
-                                    orig_bbox,
-                                    pivot,
-                                    start_angle,
-                                    current_angle: 0.0,
-                                    orig_shapes: self.selected_shapes_snapshot(),
-                                    undo_snapshot: self.shapes.clone(),
-                                };
-                            }
-                        }
-                        TransformHoverTarget::Move => {
-                            self.transform_drag = TransformDragState::Move {
-                                last_pos: pt,
-                                total_delta: KVec2::ZERO,
-                                undo_snapshot: self.shapes.clone(),
-                            };
-                        }
-                        TransformHoverTarget::None => {
-                            if let Some(hit_idx) = self.topmost_shape_at(pt) {
-                                if !self.selected_shapes.contains(&hit_idx) {
-                                    self.select_single_shape_at(pt);
-                                }
-                                self.transform_drag = TransformDragState::Move {
-                                    last_pos: pt,
-                                    total_delta: KVec2::ZERO,
-                                    undo_snapshot: self.shapes.clone(),
-                                };
-                            } else {
-                                self.transform_drag = TransformDragState::MarqueeSelect {
-                                    start_pos: pt,
-                                    current_pos: pt,
-                                    additive: false,
-                                };
-                            }
-                        }
-                    }
-                }
+                self.start_transform_drag(pt, shift_held, alt_held);
             }
         } else if response.dragged() {
             if let Some(pt) = mouse_pt {
-                let mut move_delta: Option<KVec2> = None;
-                match &mut self.transform_drag {
-                    TransformDragState::MovePivot => {
-                        self.transform_pivot = Some(pt);
-                    }
-                    TransformDragState::Move {
-                        last_pos,
-                        total_delta,
-                        ..
-                    } => {
-                        let step_delta = pt - *last_pos;
-                        *last_pos = pt;
-                        *total_delta += step_delta;
-                        move_delta = Some(step_delta);
-                    }
-                    TransformDragState::Scale {
-                        handle,
-                        anchor,
-                        handle_start,
-                        orig_pivot,
-                        orig_shapes,
-                        changed,
-                        ..
-                    } => {
-                        let eff_anchor = if alt_held { *orig_pivot } else { *anchor };
-                        let mut sx = if handle.affects_x() {
-                            let dx0 = handle_start.x - eff_anchor.x;
-                            if dx0.abs() > 1e-3 {
-                                (pt.x - eff_anchor.x) / dx0
-                            } else {
-                                1.0
-                            }
-                        } else {
-                            1.0
-                        };
-                        let mut sy = if handle.affects_y() {
-                            let dy0 = handle_start.y - eff_anchor.y;
-                            if dy0.abs() > 1e-3 {
-                                (pt.y - eff_anchor.y) / dy0
-                            } else {
-                                1.0
-                            }
-                        } else {
-                            1.0
-                        };
-
-                        if shift_held && handle.is_corner() {
-                            let mag = sx.abs().max(sy.abs());
-                            sx = mag * if sx < 0.0 { -1.0 } else { 1.0 };
-                            sy = mag * if sy < 0.0 { -1.0 } else { 1.0 };
-                        }
-
-                        if sx.abs() < 0.02 {
-                            sx = if sx < 0.0 { -0.02 } else { 0.02 };
-                        }
-                        if sy.abs() < 0.02 {
-                            sy = if sy < 0.0 { -0.02 } else { 0.02 };
-                        }
-
-                        let affine = affine_scale_around(eff_anchor, sx, sy);
-                        for (sel_idx, orig_shape) in orig_shapes.iter() {
-                            if let Some(shape) = self.shapes.get_mut(*sel_idx) {
-                                *shape = orig_shape.clone();
-                                shape.transform(affine);
-                            }
-                        }
-                        if self.transform_pivot.is_some() {
-                            self.transform_pivot = Some(affine * *orig_pivot);
-                        }
-                        *changed = (sx - 1.0).abs() > 0.005 || (sy - 1.0).abs() > 0.005;
-                    }
-                    TransformDragState::Rotate {
-                        pivot,
-                        start_angle,
-                        current_angle,
-                        orig_shapes,
-                        ..
-                    } => {
-                        if (pt - *pivot).hypot() > 2.0 {
-                            let raw = (pt.y - pivot.y).atan2(pt.x - pivot.x) - *start_angle;
-                            let mut delta_angle = raw.sin().atan2(raw.cos());
-                            if shift_held {
-                                let step = std::f64::consts::PI / 12.0; // 15° スナップ
-                                delta_angle = (delta_angle / step).round() * step;
-                            }
-                            *current_angle = delta_angle;
-                            let affine = affine_rotate_around(*pivot, delta_angle);
-                            for (sel_idx, orig_shape) in orig_shapes.iter() {
-                                if let Some(shape) = self.shapes.get_mut(*sel_idx) {
-                                    *shape = orig_shape.clone();
-                                    shape.transform(affine);
-                                }
-                            }
-                        }
-                    }
-                    TransformDragState::MarqueeSelect { current_pos, .. } => {
-                        *current_pos = pt;
-                    }
-                    TransformDragState::None => {}
-                }
-                if let Some(delta) = move_delta {
-                    self.translate_selected_shapes(delta);
-                }
+                self.update_transform_drag(pt, shift_held, alt_held);
             }
         } else if response.drag_stopped() {
-            let finished = std::mem::replace(&mut self.transform_drag, TransformDragState::None);
-            match finished {
-                TransformDragState::Move {
-                    total_delta,
-                    undo_snapshot,
-                    ..
-                } => {
-                    self.finish_move_selection_drag(total_delta, undo_snapshot);
-                }
-                TransformDragState::Scale {
-                    undo_snapshot,
-                    changed,
-                    ..
-                } => {
-                    if changed && !self.selected_shapes.is_empty() {
-                        self.commit_moved_selection(undo_snapshot);
-                    } else {
-                        self.shapes = undo_snapshot;
-                    }
-                }
-                TransformDragState::Rotate {
-                    current_angle,
-                    undo_snapshot,
-                    ..
-                } => {
-                    if current_angle.abs() > 0.002 && !self.selected_shapes.is_empty() {
-                        self.commit_moved_selection(undo_snapshot);
-                    } else {
-                        self.shapes = undo_snapshot;
-                    }
-                }
-                TransformDragState::MarqueeSelect {
-                    start_pos,
-                    current_pos,
-                    additive,
-                } => {
-                    let end_pos = mouse_pt.unwrap_or(current_pos);
-                    self.apply_marquee_selection(start_pos, end_pos, additive);
-                }
-                TransformDragState::MovePivot | TransformDragState::None => {}
-            }
+            self.finish_transform_drag(mouse_pt);
         } else if response.clicked() {
             if let Some(pt) = mouse_pt {
-                if shift_held {
-                    if let Some(hit_idx) = self.topmost_shape_at(pt) {
-                        self.toggle_shape_selection(hit_idx);
-                    }
-                } else if self.compute_transform_hover(pt) != TransformHoverTarget::Pivot {
-                    if let Some(hit_idx) = self.topmost_shape_at(pt) {
-                        if !self.selected_shapes.contains(&hit_idx) {
-                            self.select_single_shape_at(pt);
-                        }
-                    } else {
-                        self.clear_selection();
-                    }
-                }
+                self.handle_transform_click(pt, shift_held);
             }
         }
 
@@ -1765,6 +1658,245 @@ impl FlashBrushApp {
             self.transform_hover = mouse_pt
                 .map(|pt| self.compute_transform_hover(pt))
                 .unwrap_or(TransformHoverTarget::None);
+        }
+    }
+
+    fn start_transform_drag(&mut self, pt: Point, shift_held: bool, alt_held: bool) {
+        if shift_held && self.compute_transform_hover(pt) == TransformHoverTarget::None {
+            self.transform_drag = TransformDragState::MarqueeSelect {
+                start_pos: pt,
+                current_pos: pt,
+                additive: true,
+            };
+            return;
+        }
+
+        match self.compute_transform_hover(pt) {
+            TransformHoverTarget::Pivot => {
+                self.transform_drag = TransformDragState::MovePivot;
+            }
+            TransformHoverTarget::Scale(handle) => {
+                if let Some(orig_bbox) = self.selection_bounding_box() {
+                    let orig_pivot = self.active_transform_pivot(orig_bbox);
+                    let anchor = if alt_held {
+                        orig_pivot
+                    } else {
+                        handle.opposite_position(orig_bbox)
+                    };
+                    self.transform_drag = TransformDragState::Scale {
+                        handle,
+                        anchor,
+                        handle_start: handle.position(orig_bbox),
+                        orig_pivot,
+                        orig_shapes: self.selected_shapes_snapshot(),
+                        undo_snapshot: self.shapes.clone(),
+                        changed: false,
+                    };
+                }
+            }
+            TransformHoverTarget::Rotate => {
+                if let Some(orig_bbox) = self.selection_bounding_box() {
+                    let pivot = self.active_transform_pivot(orig_bbox);
+                    self.transform_drag = TransformDragState::Rotate {
+                        orig_bbox,
+                        pivot,
+                        start_angle: (pt.y - pivot.y).atan2(pt.x - pivot.x),
+                        current_angle: 0.0,
+                        orig_shapes: self.selected_shapes_snapshot(),
+                        undo_snapshot: self.shapes.clone(),
+                    };
+                }
+            }
+            TransformHoverTarget::Move => {
+                self.transform_drag = TransformDragState::Move {
+                    last_pos: pt,
+                    total_delta: KVec2::ZERO,
+                    undo_snapshot: self.shapes.clone(),
+                };
+            }
+            TransformHoverTarget::None => {
+                if let Some(hit_idx) = self.topmost_shape_at(pt) {
+                    if !self.selected_shapes.contains(&hit_idx) {
+                        self.select_single_shape_at(pt);
+                    }
+                    self.transform_drag = TransformDragState::Move {
+                        last_pos: pt,
+                        total_delta: KVec2::ZERO,
+                        undo_snapshot: self.shapes.clone(),
+                    };
+                } else {
+                    self.transform_drag = TransformDragState::MarqueeSelect {
+                        start_pos: pt,
+                        current_pos: pt,
+                        additive: false,
+                    };
+                }
+            }
+        }
+    }
+
+    fn update_transform_drag(&mut self, pt: Point, shift_held: bool, alt_held: bool) {
+        let mut move_delta: Option<KVec2> = None;
+        match &mut self.transform_drag {
+            TransformDragState::MovePivot => {
+                self.transform_pivot = Some(pt);
+            }
+            TransformDragState::Move {
+                last_pos,
+                total_delta,
+                ..
+            } => {
+                let step_delta = pt - *last_pos;
+                *last_pos = pt;
+                *total_delta += step_delta;
+                move_delta = Some(step_delta);
+            }
+            TransformDragState::Scale {
+                handle,
+                anchor,
+                handle_start,
+                orig_pivot,
+                orig_shapes,
+                changed,
+                ..
+            } => {
+                let eff_anchor = if alt_held { *orig_pivot } else { *anchor };
+                let mut sx = if handle.affects_x() {
+                    let dx0 = handle_start.x - eff_anchor.x;
+                    if dx0.abs() > 1e-3 {
+                        (pt.x - eff_anchor.x) / dx0
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                };
+                let mut sy = if handle.affects_y() {
+                    let dy0 = handle_start.y - eff_anchor.y;
+                    if dy0.abs() > 1e-3 {
+                        (pt.y - eff_anchor.y) / dy0
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                };
+
+                if shift_held && handle.is_corner() {
+                    let mag = sx.abs().max(sy.abs());
+                    sx = mag.copysign(sx);
+                    sy = mag.copysign(sy);
+                }
+                if sx.abs() < 0.02 {
+                    sx = 0.02_f64.copysign(sx);
+                }
+                if sy.abs() < 0.02 {
+                    sy = 0.02_f64.copysign(sy);
+                }
+
+                let affine = affine_scale_around(eff_anchor, sx, sy);
+                for (sel_idx, orig_shape) in orig_shapes.iter() {
+                    if let Some(shape) = self.shapes.get_mut(*sel_idx) {
+                        *shape = orig_shape.clone();
+                        shape.transform(affine);
+                    }
+                }
+                if self.transform_pivot.is_some() {
+                    self.transform_pivot = Some(affine * *orig_pivot);
+                }
+                *changed = (sx - 1.0).abs() > 0.005 || (sy - 1.0).abs() > 0.005;
+            }
+            TransformDragState::Rotate {
+                pivot,
+                start_angle,
+                current_angle,
+                orig_shapes,
+                ..
+            } => {
+                if (pt - *pivot).hypot() > 2.0 {
+                    let raw = (pt.y - pivot.y).atan2(pt.x - pivot.x) - *start_angle;
+                    let mut delta_angle = raw.sin().atan2(raw.cos());
+                    if shift_held {
+                        let step = std::f64::consts::PI / 12.0; // 15° スナップ
+                        delta_angle = (delta_angle / step).round() * step;
+                    }
+                    *current_angle = delta_angle;
+                    let affine = affine_rotate_around(*pivot, delta_angle);
+                    for (sel_idx, orig_shape) in orig_shapes.iter() {
+                        if let Some(shape) = self.shapes.get_mut(*sel_idx) {
+                            *shape = orig_shape.clone();
+                            shape.transform(affine);
+                        }
+                    }
+                }
+            }
+            TransformDragState::MarqueeSelect { current_pos, .. } => {
+                *current_pos = pt;
+            }
+            TransformDragState::None => {}
+        }
+        if let Some(delta) = move_delta {
+            self.translate_selected_shapes(delta);
+        }
+    }
+
+    fn finish_transform_drag(&mut self, mouse_pt: Option<Point>) {
+        let finished = std::mem::replace(&mut self.transform_drag, TransformDragState::None);
+        match finished {
+            TransformDragState::Move {
+                total_delta,
+                undo_snapshot,
+                ..
+            } => {
+                self.finish_move_selection_drag(total_delta, undo_snapshot);
+            }
+            TransformDragState::Scale {
+                undo_snapshot,
+                changed,
+                ..
+            } => {
+                if changed && !self.selected_shapes.is_empty() {
+                    self.commit_moved_selection(undo_snapshot);
+                } else {
+                    self.shapes = undo_snapshot;
+                }
+            }
+            TransformDragState::Rotate {
+                current_angle,
+                undo_snapshot,
+                ..
+            } => {
+                if current_angle.abs() > 0.002 && !self.selected_shapes.is_empty() {
+                    self.commit_moved_selection(undo_snapshot);
+                } else {
+                    self.shapes = undo_snapshot;
+                }
+            }
+            TransformDragState::MarqueeSelect {
+                start_pos,
+                current_pos,
+                additive,
+            } => {
+                let end_pos = mouse_pt.unwrap_or(current_pos);
+                self.apply_marquee_selection(start_pos, end_pos, additive);
+            }
+            TransformDragState::MovePivot | TransformDragState::None => {}
+        }
+    }
+
+    fn handle_transform_click(&mut self, pt: Point, shift_held: bool) {
+        if shift_held {
+            if let Some(hit_idx) = self.topmost_shape_at(pt) {
+                self.toggle_shape_selection(hit_idx);
+            }
+        } else if self.compute_transform_hover(pt) != TransformHoverTarget::Pivot {
+            if let Some(hit_idx) = self.topmost_shape_at(pt) {
+                if !self.selected_shapes.contains(&hit_idx) {
+                    self.select_single_shape_at(pt);
+                }
+            } else {
+                self.clear_selection();
+            }
         }
     }
 
@@ -1827,8 +1959,8 @@ impl FlashBrushApp {
             } else {
                 Color32::from_rgb(25, 30, 40)
             };
-            painter.rect_filled(rect, 1.0, fill_col);
-            painter.rect_stroke(rect, 1.0, Stroke::new(1.5, Color32::WHITE));
+            painter.rect_filled(rect, 0.0, fill_col);
+            painter.rect_stroke(rect, 0.0, Stroke::new(1.5, Color32::WHITE));
         }
 
         // 基準点（ピボット点：白い丸＋中心ドット）を描画
@@ -1861,7 +1993,7 @@ impl FlashBrushApp {
         show_anchors: bool,
     ) {
         let z = self.view_zoom as f64;
-        for contour in std::iter::once(&shape.exterior).chain(shape.holes.iter()) {
+        for contour in shape.contours() {
             for seg in &contour.segments {
                 let mid_dev = (seg.p1 - seg.p0.lerp(seg.p2, 0.5)).hypot() * z;
                 if mid_dev <= 0.15 {
@@ -1947,65 +2079,10 @@ impl FlashBrushApp {
     ) {
         match self.select_sub_mode {
             SelectSubMode::AddAnchor => {
-                let just_pressed = response.hovered() && ui.input(|i| i.pointer.primary_pressed());
-                if just_pressed {
-                    if let Some(pt) = mouse_pt {
-                        if let HoverTarget::Edge {
-                            shape_idx,
-                            contour_idx,
-                            seg_idx,
-                            t,
-                            ..
-                        } = self.compute_hover_target(pt)
-                        {
-                            let snapshot = self.shapes.clone();
-                            let added = self
-                                .shapes
-                                .get_mut(shape_idx)
-                                .and_then(|s| s.get_contour_mut(contour_idx))
-                                .is_some_and(|c| c.insert_anchor_at(seg_idx, t));
-                            if added {
-                                if let Some(shape) = self.shapes.get_mut(shape_idx) {
-                                    shape.rebuild_cache();
-                                }
-                                self.record_undo_snapshot(snapshot);
-                            }
-                        }
-                    }
-                }
-                self.hover_target = mouse_pt
-                    .map(|pt| self.compute_hover_target(pt))
-                    .unwrap_or(HoverTarget::None);
+                self.handle_anchor_edit_input(ui, response, mouse_pt, true);
             }
             SelectSubMode::DeleteAnchor => {
-                let just_pressed = response.hovered() && ui.input(|i| i.pointer.primary_pressed());
-                if just_pressed {
-                    if let Some(pt) = mouse_pt {
-                        if let HoverTarget::Vertex {
-                            shape_idx,
-                            contour_idx,
-                            seg_idx,
-                            ..
-                        } = self.compute_hover_target(pt)
-                        {
-                            let snapshot = self.shapes.clone();
-                            let deleted = self
-                                .shapes
-                                .get_mut(shape_idx)
-                                .and_then(|s| s.get_contour_mut(contour_idx))
-                                .is_some_and(|c| c.delete_anchor_at(seg_idx));
-                            if deleted {
-                                if let Some(shape) = self.shapes.get_mut(shape_idx) {
-                                    shape.rebuild_cache();
-                                }
-                                self.record_undo_snapshot(snapshot);
-                            }
-                        }
-                    }
-                }
-                self.hover_target = mouse_pt
-                    .map(|pt| self.compute_hover_target(pt))
-                    .unwrap_or(HoverTarget::None);
+                self.handle_anchor_edit_input(ui, response, mouse_pt, false);
             }
             SelectSubMode::Reshape => {
                 let shift_held = ui.input(|i| i.modifiers.shift);
@@ -2019,292 +2096,17 @@ impl FlashBrushApp {
                 }
                 if response.drag_started() {
                     if let Some(pt) = mouse_pt {
-                        if shift_held {
-                            // Shift 押下ドラッグ時は既存の選択を維持したまま連続で矩形選択（MarqueeSelect）を開始
-                            self.select_drag = SelectDragState::MarqueeSelect {
-                                start_pos: pt,
-                                current_pos: pt,
-                                additive: true,
-                            };
-                        } else {
-                            match self.compute_hover_target(pt) {
-                                HoverTarget::Vertex {
-                                    shape_idx,
-                                    contour_idx,
-                                    seg_idx,
-                                    pos,
-                                } => {
-                                    let snapshot = self
-                                        .unsliced_canvas
-                                        .take()
-                                        .unwrap_or_else(|| self.shapes.clone());
-                                    if let Some(contour) = self
-                                        .shapes
-                                        .get(shape_idx)
-                                        .and_then(|s| s.get_contour(contour_idx))
-                                    {
-                                        let n = contour.segments.len();
-                                        let prev_idx = (seg_idx + n - 1) % n;
-                                        let orig_prev_ctrl = contour.segments[prev_idx].p1;
-                                        let orig_curr_ctrl = contour.segments[seg_idx].p1;
-                                        self.selected_shapes.clear();
-                                        self.select_drag = SelectDragState::MoveVertex {
-                                            shape_idx,
-                                            contour_idx,
-                                            seg_idx,
-                                            orig_vertex: pos,
-                                            last_pos: pos,
-                                            orig_prev_ctrl,
-                                            orig_curr_ctrl,
-                                            snapped_to: None,
-                                            undo_snapshot: snapshot,
-                                        };
-                                    }
-                                }
-                                HoverTarget::Edge {
-                                    shape_idx,
-                                    contour_idx,
-                                    seg_idx,
-                                    t,
-                                    closest_pos,
-                                } => {
-                                    let snapshot = self
-                                        .unsliced_canvas
-                                        .take()
-                                        .unwrap_or_else(|| self.shapes.clone());
-                                    if let Some(contour) = self
-                                        .shapes
-                                        .get(shape_idx)
-                                        .and_then(|s| s.get_contour(contour_idx))
-                                    {
-                                        let orig_seg = contour.segments[seg_idx];
-                                        self.selected_shapes.clear();
-                                        self.select_drag = SelectDragState::PullEdge {
-                                            shape_idx,
-                                            contour_idx,
-                                            seg_idx,
-                                            grab_t: t.clamp(0.18, 0.82),
-                                            grab_pos: closest_pos,
-                                            last_pos: closest_pos,
-                                            orig_seg,
-                                            undo_snapshot: snapshot,
-                                        };
-                                    }
-                                }
-                                HoverTarget::Fill { shape_idx } => {
-                                    if !self.selected_shapes.contains(&shape_idx) {
-                                        self.select_single_shape_at(pt);
-                                    }
-                                    self.select_drag = SelectDragState::MoveShape {
-                                        last_pos: pt,
-                                        total_delta: KVec2::ZERO,
-                                        undo_snapshot: self.shapes.clone(),
-                                    };
-                                }
-                                HoverTarget::None => {
-                                    self.select_drag = SelectDragState::MarqueeSelect {
-                                        start_pos: pt,
-                                        current_pos: pt,
-                                        additive: false,
-                                    };
-                                }
-                            }
-                        }
+                        self.start_reshape_drag(pt, shift_held);
                     }
                 } else if response.dragged() {
                     if let Some(pt) = mouse_pt {
-                        let vertex_drag_info = if let SelectDragState::MoveVertex {
-                            shape_idx,
-                            contour_idx,
-                            seg_idx,
-                            orig_vertex,
-                            orig_prev_ctrl,
-                            orig_curr_ctrl,
-                            ..
-                        } = &self.select_drag
-                        {
-                            Some((
-                                *shape_idx,
-                                *contour_idx,
-                                *seg_idx,
-                                *orig_vertex,
-                                *orig_prev_ctrl,
-                                *orig_curr_ctrl,
-                            ))
-                        } else {
-                            None
-                        };
-
-                        if let Some((s_idx, c_idx, g_idx, orig_v, prev_c, curr_c)) =
-                            vertex_drag_info
-                        {
-                            let snap_opt = self.find_snap_vertex(pt, s_idx, c_idx, g_idx);
-                            let target_pt = snap_opt.unwrap_or(pt);
-                            if let SelectDragState::MoveVertex {
-                                snapped_to,
-                                last_pos,
-                                ..
-                            } = &mut self.select_drag
-                            {
-                                *snapped_to = snap_opt;
-                                *last_pos = target_pt;
-                            }
-                            if let Some(shape) = self.shapes.get_mut(s_idx) {
-                                Self::apply_move_vertex_to_shape(
-                                    shape,
-                                    c_idx,
-                                    g_idx,
-                                    orig_v,
-                                    (prev_c, curr_c),
-                                    target_pt,
-                                    false,
-                                );
-                            }
-                        } else {
-                            let mut move_delta: Option<KVec2> = None;
-                            match &mut self.select_drag {
-                                SelectDragState::MoveShape {
-                                    last_pos,
-                                    total_delta,
-                                    ..
-                                } => {
-                                    let step_delta = pt - *last_pos;
-                                    *last_pos = pt;
-                                    *total_delta += step_delta;
-                                    move_delta = Some(step_delta);
-                                }
-                                SelectDragState::MarqueeSelect { current_pos, .. } => {
-                                    *current_pos = pt;
-                                }
-                                SelectDragState::PullEdge {
-                                    shape_idx,
-                                    contour_idx,
-                                    seg_idx,
-                                    grab_t,
-                                    last_pos,
-                                    orig_seg,
-                                    ..
-                                } => {
-                                    *last_pos = pt;
-                                    if let Some(shape) = self.shapes.get_mut(*shape_idx) {
-                                        Self::apply_pull_edge_to_shape(
-                                            shape,
-                                            *contour_idx,
-                                            *seg_idx,
-                                            *grab_t,
-                                            *orig_seg,
-                                            pt,
-                                            false,
-                                        );
-                                    }
-                                }
-                                _ => {}
-                            }
-                            if let Some(delta) = move_delta {
-                                self.translate_selected_shapes(delta);
-                            }
-                        }
+                        self.update_reshape_drag(pt);
                     }
                 } else if response.drag_stopped() {
-                    let finished_drag =
-                        std::mem::replace(&mut self.select_drag, SelectDragState::None);
-                    match finished_drag {
-                        SelectDragState::MoveShape {
-                            total_delta,
-                            undo_snapshot,
-                            ..
-                        } => {
-                            self.finish_move_selection_drag(total_delta, undo_snapshot);
-                        }
-                        SelectDragState::MarqueeSelect {
-                            start_pos,
-                            current_pos,
-                            additive,
-                        } => {
-                            let end_pos = mouse_pt.unwrap_or(current_pos);
-                            self.apply_marquee_selection(start_pos, end_pos, additive);
-                        }
-                        SelectDragState::PullEdge {
-                            shape_idx,
-                            contour_idx,
-                            seg_idx,
-                            grab_t,
-                            grab_pos,
-                            last_pos,
-                            orig_seg,
-                            undo_snapshot,
-                        } => {
-                            self.finish_deform_shape_drag(
-                                shape_idx,
-                                (last_pos - grab_pos).hypot(),
-                                undo_snapshot,
-                                |deformed| {
-                                    Self::apply_pull_edge_to_shape(
-                                        deformed,
-                                        contour_idx,
-                                        seg_idx,
-                                        grab_t,
-                                        orig_seg,
-                                        last_pos,
-                                        true,
-                                    );
-                                },
-                            );
-                        }
-                        SelectDragState::MoveVertex {
-                            shape_idx,
-                            contour_idx,
-                            seg_idx,
-                            orig_vertex,
-                            last_pos,
-                            orig_prev_ctrl,
-                            orig_curr_ctrl,
-                            undo_snapshot,
-                            ..
-                        } => {
-                            self.finish_deform_shape_drag(
-                                shape_idx,
-                                (last_pos - orig_vertex).hypot(),
-                                undo_snapshot,
-                                |deformed| {
-                                    Self::apply_move_vertex_to_shape(
-                                        deformed,
-                                        contour_idx,
-                                        seg_idx,
-                                        orig_vertex,
-                                        (orig_prev_ctrl, orig_curr_ctrl),
-                                        last_pos,
-                                        true,
-                                    );
-                                },
-                            );
-                        }
-                        SelectDragState::None => {}
-                    }
+                    self.finish_reshape_drag(mouse_pt);
                 } else if response.clicked() {
                     if let Some(pt) = mouse_pt {
-                        // Adobe Animate 仕様：絵の上（塗り・境界線・頂点すべて）でクリックしたら必ずその絵を選択状態にする
-                        let hit_shape = self
-                            .topmost_shape_at(pt)
-                            .or_else(|| self.compute_hover_target(pt).shape_idx());
-                        if shift_held {
-                            if let Some(shape_idx) = hit_shape {
-                                self.toggle_shape_selection(shape_idx);
-                            }
-                        } else {
-                            match hit_shape {
-                                Some(shape_idx) if self.selected_shapes.contains(&shape_idx) => {
-                                    self.selected_shapes = self.expand_to_group_unit(shape_idx);
-                                    self.transform_pivot = None;
-                                }
-                                Some(_) => {
-                                    self.select_single_shape_at(pt);
-                                }
-                                None => {
-                                    self.clear_selection();
-                                }
-                            }
-                        }
+                        self.handle_reshape_click(pt, shift_held);
                     }
                 }
 
@@ -2316,6 +2118,343 @@ impl FlashBrushApp {
             }
         }
     }
+
+    fn handle_anchor_edit_input(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        mouse_pt: Option<Point>,
+        is_add: bool,
+    ) {
+        let just_pressed = response.hovered() && ui.input(|i| i.pointer.primary_pressed());
+        if just_pressed {
+            if let Some(pt) = mouse_pt {
+                let target = self.compute_hover_target(pt);
+                let snapshot = self.shapes.clone();
+                let modified_shape = match (is_add, target) {
+                    (
+                        true,
+                        HoverTarget::Edge {
+                            shape_idx,
+                            contour_idx,
+                            seg_idx,
+                            t,
+                            ..
+                        },
+                    ) => self
+                        .shapes
+                        .get_mut(shape_idx)
+                        .and_then(|s| s.get_contour_mut(contour_idx))
+                        .is_some_and(|c| c.insert_anchor_at(seg_idx, t))
+                        .then_some(shape_idx),
+                    (
+                        false,
+                        HoverTarget::Vertex {
+                            shape_idx,
+                            contour_idx,
+                            seg_idx,
+                            ..
+                        },
+                    ) => self
+                        .shapes
+                        .get_mut(shape_idx)
+                        .and_then(|s| s.get_contour_mut(contour_idx))
+                        .is_some_and(|c| c.delete_anchor_at(seg_idx))
+                        .then_some(shape_idx),
+                    _ => None,
+                };
+                if let Some(s_idx) = modified_shape {
+                    if let Some(shape) = self.shapes.get_mut(s_idx) {
+                        shape.rebuild_cache();
+                    }
+                    self.record_undo_snapshot(snapshot);
+                }
+            }
+        }
+        self.hover_target = mouse_pt
+            .map(|pt| self.compute_hover_target(pt))
+            .unwrap_or(HoverTarget::None);
+    }
+
+    fn start_reshape_drag(&mut self, pt: Point, shift_held: bool) {
+        if shift_held {
+            self.select_drag = SelectDragState::MarqueeSelect {
+                start_pos: pt,
+                current_pos: pt,
+                additive: true,
+            };
+            return;
+        }
+        match self.compute_hover_target(pt) {
+            HoverTarget::Vertex {
+                shape_idx,
+                contour_idx,
+                seg_idx,
+                pos,
+            } => {
+                let snapshot = self.take_or_clone_unsliced_snapshot();
+                if let Some(contour) = self
+                    .shapes
+                    .get(shape_idx)
+                    .and_then(|s| s.get_contour(contour_idx))
+                {
+                    let n = contour.segments.len();
+                    let prev_idx = (seg_idx + n - 1) % n;
+                    let orig_prev_ctrl = contour.segments[prev_idx].p1;
+                    let orig_curr_ctrl = contour.segments[seg_idx].p1;
+                    self.selected_shapes.clear();
+                    self.select_drag = SelectDragState::MoveVertex {
+                        shape_idx,
+                        contour_idx,
+                        seg_idx,
+                        orig_vertex: pos,
+                        last_pos: pos,
+                        orig_prev_ctrl,
+                        orig_curr_ctrl,
+                        snapped_to: None,
+                        undo_snapshot: snapshot,
+                    };
+                }
+            }
+            HoverTarget::Edge {
+                shape_idx,
+                contour_idx,
+                seg_idx,
+                t,
+                closest_pos,
+            } => {
+                let snapshot = self.take_or_clone_unsliced_snapshot();
+                if let Some(orig_seg) = self.get_contour_segment(shape_idx, contour_idx, seg_idx) {
+                    self.selected_shapes.clear();
+                    self.select_drag = SelectDragState::PullEdge {
+                        shape_idx,
+                        contour_idx,
+                        seg_idx,
+                        grab_t: t.clamp(0.18, 0.82),
+                        grab_pos: closest_pos,
+                        last_pos: closest_pos,
+                        orig_seg,
+                        undo_snapshot: snapshot,
+                    };
+                }
+            }
+            HoverTarget::Fill { shape_idx } => {
+                if !self.selected_shapes.contains(&shape_idx) {
+                    self.select_single_shape_at(pt);
+                }
+                self.select_drag = SelectDragState::MoveShape {
+                    last_pos: pt,
+                    total_delta: KVec2::ZERO,
+                    undo_snapshot: self.shapes.clone(),
+                };
+            }
+            HoverTarget::None => {
+                self.select_drag = SelectDragState::MarqueeSelect {
+                    start_pos: pt,
+                    current_pos: pt,
+                    additive: false,
+                };
+            }
+        }
+    }
+
+    fn update_reshape_drag(&mut self, pt: Point) {
+        let vertex_drag_info = if let SelectDragState::MoveVertex {
+            shape_idx,
+            contour_idx,
+            seg_idx,
+            orig_vertex,
+            orig_prev_ctrl,
+            orig_curr_ctrl,
+            ..
+        } = &self.select_drag
+        {
+            Some((
+                *shape_idx,
+                *contour_idx,
+                *seg_idx,
+                *orig_vertex,
+                *orig_prev_ctrl,
+                *orig_curr_ctrl,
+            ))
+        } else {
+            None
+        };
+
+        if let Some((s_idx, c_idx, g_idx, orig_v, prev_c, curr_c)) = vertex_drag_info {
+            let snap_opt = self.find_snap_vertex(pt, s_idx, c_idx, g_idx);
+            let target_pt = snap_opt.unwrap_or(pt);
+            if let SelectDragState::MoveVertex {
+                snapped_to,
+                last_pos,
+                ..
+            } = &mut self.select_drag
+            {
+                *snapped_to = snap_opt;
+                *last_pos = target_pt;
+            }
+            if let Some(shape) = self.shapes.get_mut(s_idx) {
+                Self::apply_move_vertex_to_shape(
+                    shape,
+                    c_idx,
+                    g_idx,
+                    orig_v,
+                    (prev_c, curr_c),
+                    target_pt,
+                    false,
+                );
+            }
+            return;
+        }
+
+        let mut move_delta: Option<KVec2> = None;
+        match &mut self.select_drag {
+            SelectDragState::MoveShape {
+                last_pos,
+                total_delta,
+                ..
+            } => {
+                let step_delta = pt - *last_pos;
+                *last_pos = pt;
+                *total_delta += step_delta;
+                move_delta = Some(step_delta);
+            }
+            SelectDragState::MarqueeSelect { current_pos, .. } => {
+                *current_pos = pt;
+            }
+            SelectDragState::PullEdge {
+                shape_idx,
+                contour_idx,
+                seg_idx,
+                grab_t,
+                last_pos,
+                orig_seg,
+                ..
+            } => {
+                *last_pos = pt;
+                if let Some(shape) = self.shapes.get_mut(*shape_idx) {
+                    Self::apply_pull_edge_to_shape(
+                        shape,
+                        *contour_idx,
+                        *seg_idx,
+                        *grab_t,
+                        *orig_seg,
+                        pt,
+                        false,
+                    );
+                }
+            }
+            _ => {}
+        }
+        if let Some(delta) = move_delta {
+            self.translate_selected_shapes(delta);
+        }
+    }
+
+    fn finish_reshape_drag(&mut self, mouse_pt: Option<Point>) {
+        let finished_drag = std::mem::replace(&mut self.select_drag, SelectDragState::None);
+        match finished_drag {
+            SelectDragState::MoveShape {
+                total_delta,
+                undo_snapshot,
+                ..
+            } => {
+                self.finish_move_selection_drag(total_delta, undo_snapshot);
+            }
+            SelectDragState::MarqueeSelect {
+                start_pos,
+                current_pos,
+                additive,
+            } => {
+                let end_pos = mouse_pt.unwrap_or(current_pos);
+                self.apply_marquee_selection(start_pos, end_pos, additive);
+            }
+            SelectDragState::PullEdge {
+                shape_idx,
+                contour_idx,
+                seg_idx,
+                grab_t,
+                grab_pos,
+                last_pos,
+                orig_seg,
+                undo_snapshot,
+            } => {
+                self.finish_deform_shape_drag(
+                    shape_idx,
+                    (last_pos - grab_pos).hypot(),
+                    undo_snapshot,
+                    |deformed| {
+                        Self::apply_pull_edge_to_shape(
+                            deformed,
+                            contour_idx,
+                            seg_idx,
+                            grab_t,
+                            orig_seg,
+                            last_pos,
+                            true,
+                        );
+                    },
+                );
+            }
+            SelectDragState::MoveVertex {
+                shape_idx,
+                contour_idx,
+                seg_idx,
+                orig_vertex,
+                last_pos,
+                orig_prev_ctrl,
+                orig_curr_ctrl,
+                undo_snapshot,
+                ..
+            } => {
+                self.finish_deform_shape_drag(
+                    shape_idx,
+                    (last_pos - orig_vertex).hypot(),
+                    undo_snapshot,
+                    |deformed| {
+                        Self::apply_move_vertex_to_shape(
+                            deformed,
+                            contour_idx,
+                            seg_idx,
+                            orig_vertex,
+                            (orig_prev_ctrl, orig_curr_ctrl),
+                            last_pos,
+                            true,
+                        );
+                    },
+                );
+            }
+            SelectDragState::None => {}
+        }
+    }
+
+    fn handle_reshape_click(&mut self, pt: Point, shift_held: bool) {
+        let hit_shape = self
+            .topmost_shape_at(pt)
+            .or_else(|| self.compute_hover_target(pt).shape_idx());
+        if shift_held {
+            if let Some(shape_idx) = hit_shape {
+                self.toggle_shape_selection(shape_idx);
+            }
+        } else {
+            match hit_shape {
+                Some(shape_idx) if self.selected_shapes.contains(&shape_idx) => {
+                    self.selected_shapes = self.expand_to_group_unit(shape_idx);
+                    self.transform_pivot = None;
+                }
+                Some(_) => {
+                    self.select_single_shape_at(pt);
+                }
+                None => {
+                    self.clear_selection();
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // 6. カーソル視覚フィードバック & キャンバス合成描画
+    // ------------------------------------------------------------------------
 
     pub(crate) fn draw_tool_cursor_and_feedback(
         &self,
@@ -2357,172 +2496,174 @@ impl FlashBrushApp {
                     hovered_color.is_some(),
                 );
             }
-            Tool::Transform => match &self.transform_drag {
-                TransformDragState::Move { .. } | TransformDragState::MovePivot => {
-                    ctx.set_cursor_icon(CursorIcon::Grabbing);
+            Tool::Transform => self.draw_transform_tool_cursor(ctx, painter, pos),
+            Tool::Select => self.draw_select_tool_cursor(ctx, painter, pos),
+        }
+    }
+
+    fn draw_transform_tool_cursor(
+        &self,
+        ctx: &egui::Context,
+        painter: &egui::Painter,
+        pos: Pos2,
+    ) {
+        match &self.transform_drag {
+            TransformDragState::Move { .. } | TransformDragState::MovePivot => {
+                ctx.set_cursor_icon(CursorIcon::Grabbing);
+            }
+            TransformDragState::Scale { handle, .. } => {
+                ctx.set_cursor_icon(scale_handle_cursor_icon(*handle));
+            }
+            TransformDragState::Rotate { .. } => {
+                ctx.set_cursor_icon(CursorIcon::Grabbing);
+                draw_transform_rotate_cursor_badge(painter, pos);
+            }
+            TransformDragState::MarqueeSelect { .. } => {
+                ctx.set_cursor_icon(CursorIcon::Crosshair);
+            }
+            TransformDragState::None => match self.transform_hover {
+                TransformHoverTarget::Pivot => {
+                    ctx.set_cursor_icon(CursorIcon::PointingHand);
                 }
-                TransformDragState::Scale { handle, .. } => {
-                    ctx.set_cursor_icon(scale_handle_cursor_icon(*handle));
+                TransformHoverTarget::Scale(h) => {
+                    ctx.set_cursor_icon(scale_handle_cursor_icon(h));
                 }
-                TransformDragState::Rotate { .. } => {
-                    ctx.set_cursor_icon(CursorIcon::Grabbing);
+                TransformHoverTarget::Rotate => {
+                    ctx.set_cursor_icon(CursorIcon::PointingHand);
                     draw_transform_rotate_cursor_badge(painter, pos);
                 }
-                TransformDragState::MarqueeSelect { .. } => {
-                    ctx.set_cursor_icon(CursorIcon::Crosshair);
+                TransformHoverTarget::Move => {
+                    ctx.set_cursor_icon(CursorIcon::Move);
                 }
-                TransformDragState::None => match self.transform_hover {
-                    TransformHoverTarget::Pivot => {
+                TransformHoverTarget::None => {
+                    ctx.set_cursor_icon(CursorIcon::Default);
+                }
+            },
+        }
+    }
+
+    fn draw_select_tool_cursor(&self, ctx: &egui::Context, painter: &egui::Painter, pos: Pos2) {
+        match &self.select_drag {
+            SelectDragState::PullEdge {
+                shape_idx,
+                contour_idx,
+                seg_idx,
+                ..
+            } => {
+                ctx.set_cursor_icon(CursorIcon::Grabbing);
+                if let Some(seg) = self.get_contour_segment(*shape_idx, *contour_idx, *seg_idx) {
+                    self.draw_highlighted_quad_segment(painter, seg);
+                }
+                draw_flash_curve_cursor_badge(painter, pos);
+            }
+            SelectDragState::MoveVertex { snapped_to, .. } => {
+                ctx.set_cursor_icon(CursorIcon::Grabbing);
+                if let Some(snap_pt) = snapped_to {
+                    let sp = self.world_to_screen(*snap_pt);
+                    painter.circle_stroke(
+                        sp,
+                        9.0,
+                        Stroke::new(2.5, Color32::from_rgb(255, 50, 140)),
+                    );
+                    painter.circle_filled(sp, 4.0, Color32::from_rgb(255, 50, 140));
+                }
+                draw_flash_corner_cursor_badge(painter, pos);
+            }
+            SelectDragState::MoveShape { .. } => {
+                ctx.set_cursor_icon(CursorIcon::Grabbing);
+            }
+            SelectDragState::MarqueeSelect { .. } => {
+                ctx.set_cursor_icon(CursorIcon::Crosshair);
+            }
+            SelectDragState::None => match self.select_sub_mode {
+                SelectSubMode::AddAnchor => {
+                    draw_anchor_plus_cursor_badge(painter, pos);
+                    if let HoverTarget::Edge {
+                        shape_idx,
+                        contour_idx,
+                        seg_idx,
+                        closest_pos,
+                        ..
+                    } = self.hover_target
+                    {
                         ctx.set_cursor_icon(CursorIcon::PointingHand);
-                    }
-                    TransformHoverTarget::Scale(h) => {
-                        ctx.set_cursor_icon(scale_handle_cursor_icon(h));
-                    }
-                    TransformHoverTarget::Rotate => {
-                        ctx.set_cursor_icon(CursorIcon::PointingHand);
-                        draw_transform_rotate_cursor_badge(painter, pos);
-                    }
-                    TransformHoverTarget::Move => {
-                        ctx.set_cursor_icon(CursorIcon::Move);
-                    }
-                    TransformHoverTarget::None => {
+                        if let Some(seg) =
+                            self.get_contour_segment(shape_idx, contour_idx, seg_idx)
+                        {
+                            self.draw_highlighted_quad_segment(painter, seg);
+                        }
+                        let cp = self.world_to_screen(closest_pos);
+                        painter.circle_filled(cp, 5.5, Color32::from_rgb(30, 200, 95));
+                        painter.circle_stroke(cp, 5.5, Stroke::new(2.0, Color32::WHITE));
+                    } else {
                         ctx.set_cursor_icon(CursorIcon::Default);
                     }
-                },
-            },
-            Tool::Select => match &self.select_drag {
-                SelectDragState::PullEdge {
-                    shape_idx,
-                    contour_idx,
-                    seg_idx,
-                    ..
-                } => {
-                    ctx.set_cursor_icon(CursorIcon::Grabbing);
-                    if let Some(seg) = self
-                        .shapes
-                        .get(*shape_idx)
-                        .and_then(|s| s.get_contour(*contour_idx))
-                        .and_then(|c| c.segments.get(*seg_idx))
-                    {
-                        self.draw_highlighted_quad_segment(painter, *seg);
+                }
+                SelectSubMode::DeleteAnchor => {
+                    draw_anchor_minus_cursor_badge(painter, pos);
+                    if let HoverTarget::Vertex { pos: v_pos, .. } = self.hover_target {
+                        ctx.set_cursor_icon(CursorIcon::PointingHand);
+                        let vp = self.world_to_screen(v_pos);
+                        painter.circle_filled(vp, 6.0, Color32::from_rgb(235, 55, 55));
+                        painter.circle_stroke(vp, 6.0, Stroke::new(2.0, Color32::WHITE));
+                    } else {
+                        ctx.set_cursor_icon(CursorIcon::Default);
                     }
-                    draw_flash_curve_cursor_badge(painter, pos);
                 }
-                SelectDragState::MoveVertex { snapped_to, .. } => {
-                    ctx.set_cursor_icon(CursorIcon::Grabbing);
-                    if let Some(snap_pt) = snapped_to {
-                        let sp = self.world_to_screen(*snap_pt);
-                        painter.circle_stroke(
-                            sp,
-                            9.0,
-                            Stroke::new(2.5, Color32::from_rgb(255, 50, 140)),
-                        );
-                        painter.circle_filled(sp, 4.0, Color32::from_rgb(255, 50, 140));
-                    }
-                    draw_flash_corner_cursor_badge(painter, pos);
-                }
-                SelectDragState::MoveShape { .. } => {
-                    ctx.set_cursor_icon(CursorIcon::Grabbing);
-                }
-                SelectDragState::MarqueeSelect { .. } => {
-                    ctx.set_cursor_icon(CursorIcon::Crosshair);
-                }
-                SelectDragState::None => match self.select_sub_mode {
-                    SelectSubMode::AddAnchor => {
-                        draw_anchor_plus_cursor_badge(painter, pos);
-                        if let HoverTarget::Edge {
-                            shape_idx,
-                            contour_idx,
-                            seg_idx,
-                            closest_pos,
-                            ..
-                        } = self.hover_target
+                SelectSubMode::Reshape => match self.hover_target {
+                    HoverTarget::Vertex {
+                        pos: v_pos,
+                        shape_idx,
+                        contour_idx,
+                        ..
+                    } => {
+                        ctx.set_cursor_icon(CursorIcon::PointingHand);
+                        if let Some(contour) = self
+                            .shapes
+                            .get(shape_idx)
+                            .and_then(|s| s.get_contour(contour_idx))
                         {
-                            ctx.set_cursor_icon(CursorIcon::PointingHand);
-                            if let Some(seg) = self
-                                .shapes
-                                .get(shape_idx)
-                                .and_then(|s| s.get_contour(contour_idx))
-                                .and_then(|c| c.segments.get(seg_idx))
-                            {
-                                self.draw_highlighted_quad_segment(painter, *seg);
+                            for seg in &contour.segments {
+                                let p = self.world_to_screen(seg.p0);
+                                painter.circle_filled(p, 3.2, Color32::WHITE);
+                                painter.circle_stroke(
+                                    p,
+                                    3.2,
+                                    Stroke::new(1.2, Color32::from_rgb(30, 130, 240)),
+                                );
                             }
-                            let cp = self.world_to_screen(closest_pos);
-                            painter.circle_filled(cp, 5.5, Color32::from_rgb(30, 200, 95));
-                            painter.circle_stroke(cp, 5.5, Stroke::new(2.0, Color32::WHITE));
-                        } else {
-                            ctx.set_cursor_icon(CursorIcon::Default);
                         }
+                        let vp = self.world_to_screen(v_pos);
+                        painter.circle_filled(vp, 5.5, Color32::from_rgb(255, 120, 40));
+                        painter.circle_stroke(vp, 5.5, Stroke::new(2.0, Color32::WHITE));
+                        draw_flash_corner_cursor_badge(painter, pos);
                     }
-                    SelectSubMode::DeleteAnchor => {
-                        draw_anchor_minus_cursor_badge(painter, pos);
-                        if let HoverTarget::Vertex { pos: v_pos, .. } = self.hover_target {
-                            ctx.set_cursor_icon(CursorIcon::PointingHand);
-                            let vp = self.world_to_screen(v_pos);
-                            painter.circle_filled(vp, 6.0, Color32::from_rgb(235, 55, 55));
-                            painter.circle_stroke(vp, 6.0, Stroke::new(2.0, Color32::WHITE));
-                        } else {
-                            ctx.set_cursor_icon(CursorIcon::Default);
+                    HoverTarget::Edge {
+                        shape_idx,
+                        contour_idx,
+                        seg_idx,
+                        closest_pos,
+                        ..
+                    } => {
+                        ctx.set_cursor_icon(CursorIcon::PointingHand);
+                        if let Some(seg) =
+                            self.get_contour_segment(shape_idx, contour_idx, seg_idx)
+                        {
+                            self.draw_highlighted_quad_segment(painter, seg);
                         }
+                        painter.circle_filled(
+                            self.world_to_screen(closest_pos),
+                            4.0,
+                            Color32::from_rgb(0, 175, 255),
+                        );
+                        draw_flash_curve_cursor_badge(painter, pos);
                     }
-                    SelectSubMode::Reshape => match self.hover_target {
-                        HoverTarget::Vertex {
-                            pos: v_pos,
-                            shape_idx,
-                            contour_idx,
-                            ..
-                        } => {
-                            ctx.set_cursor_icon(CursorIcon::PointingHand);
-                            if let Some(contour) = self
-                                .shapes
-                                .get(shape_idx)
-                                .and_then(|s| s.get_contour(contour_idx))
-                            {
-                                for seg in &contour.segments {
-                                    let p = self.world_to_screen(seg.p0);
-                                    painter.circle_filled(p, 3.2, Color32::WHITE);
-                                    painter.circle_stroke(
-                                        p,
-                                        3.2,
-                                        Stroke::new(1.2, Color32::from_rgb(30, 130, 240)),
-                                    );
-                                }
-                            }
-                            let vp = self.world_to_screen(v_pos);
-                            painter.circle_filled(vp, 5.5, Color32::from_rgb(255, 120, 40));
-                            painter.circle_stroke(vp, 5.5, Stroke::new(2.0, Color32::WHITE));
-                            draw_flash_corner_cursor_badge(painter, pos);
-                        }
-                        HoverTarget::Edge {
-                            shape_idx,
-                            contour_idx,
-                            seg_idx,
-                            closest_pos,
-                            ..
-                        } => {
-                            ctx.set_cursor_icon(CursorIcon::PointingHand);
-                            if let Some(seg) = self
-                                .shapes
-                                .get(shape_idx)
-                                .and_then(|s| s.get_contour(contour_idx))
-                                .and_then(|c| c.segments.get(seg_idx))
-                            {
-                                self.draw_highlighted_quad_segment(painter, *seg);
-                            }
-                            painter.circle_filled(
-                                self.world_to_screen(closest_pos),
-                                4.0,
-                                Color32::from_rgb(0, 175, 255),
-                            );
-                            draw_flash_curve_cursor_badge(painter, pos);
-                        }
-                        HoverTarget::Fill { .. } => {
-                            ctx.set_cursor_icon(CursorIcon::Move);
-                        }
-                        HoverTarget::None => {
-                            ctx.set_cursor_icon(CursorIcon::Default);
-                        }
-                    },
+                    HoverTarget::Fill { .. } => {
+                        ctx.set_cursor_icon(CursorIcon::Move);
+                    }
+                    HoverTarget::None => {
+                        ctx.set_cursor_icon(CursorIcon::Default);
+                    }
                 },
             },
         }
@@ -2561,53 +2702,7 @@ impl FlashBrushApp {
 
         // 0. オニオンスキン描画（前のフレーム＝青系半透明、次のフレーム＝緑系半透明）
         if self.timeline.onion_skin_enabled {
-            let curr_f = self.timeline.current_frame;
-            for step in (1..=self.timeline.onion_prev_frames).rev() {
-                if curr_f >= step {
-                    let f = curr_f - step;
-                    let alpha = (84 / step as u8).clamp(24, 84);
-                    for layer in &self.timeline.layers {
-                        if !layer.visible {
-                            continue;
-                        }
-                        if let Some(cel) = layer.cel_at(f) {
-                            for shape in &cel.shapes {
-                                let mesh = transform_mesh_to_screen_onion(
-                                    &shape.fill_mesh,
-                                    zoom,
-                                    pan,
-                                    [45, 115, 245],
-                                    alpha,
-                                );
-                                painter.add(egui::Shape::mesh(mesh));
-                            }
-                        }
-                    }
-                }
-            }
-            for step in 1..=self.timeline.onion_next_frames {
-                let f = curr_f + step;
-                if f < self.timeline.total_frames {
-                    let alpha = (84 / step as u8).clamp(24, 84);
-                    for layer in &self.timeline.layers {
-                        if !layer.visible {
-                            continue;
-                        }
-                        if let Some(cel) = layer.cel_at(f) {
-                            for shape in &cel.shapes {
-                                let mesh = transform_mesh_to_screen_onion(
-                                    &shape.fill_mesh,
-                                    zoom,
-                                    pan,
-                                    [35, 185, 105],
-                                    alpha,
-                                );
-                                painter.add(egui::Shape::mesh(mesh));
-                            }
-                        }
-                    }
-                }
-            }
+            self.draw_onion_skins(painter);
         }
 
         // 1. 下層レイヤーから上層レイヤーへ順に合成描画
@@ -2619,7 +2714,7 @@ impl FlashBrushApp {
             if !self.timeline.layers[layer_idx].visible {
                 continue;
             }
-            if layer_idx != self.timeline.active_layer {
+            if self.timeline.layers[layer_idx].locked {
                 if let Some(cel) = self.timeline.layers[layer_idx].cel_at(curr_f) {
                     for shape in &cel.shapes {
                         let mesh =
@@ -2630,8 +2725,11 @@ impl FlashBrushApp {
                 continue;
             }
 
-            // アクティブレイヤーの描画（作業中の self.shapes + ワイヤーフレーム + 選択オーバーレイ）
+            let lid = self.timeline.layers[layer_idx].id;
             for idx in 0..self.shapes.len() {
+                if num_layers > 1 && self.shapes[idx].layer_id != lid {
+                    continue;
+                }
                 let in_scope = self.shapes[idx].is_in_editing_scope(&self.editing_group_path);
                 if in_group_edit && !in_scope {
                     let mesh =
@@ -2680,7 +2778,7 @@ impl FlashBrushApp {
             let rect = egui::Rect::from_min_max(min_pos, max_pos);
             painter.rect_stroke(
                 rect,
-                1.5,
+                0.0,
                 Stroke::new(1.8, Color32::from_rgb(0, 165, 255)),
             );
         }
@@ -2689,7 +2787,56 @@ impl FlashBrushApp {
             self.draw_free_transform_box(painter);
         }
 
-        // 矩形選択（Marquee Selection）ドラッグ中の選択枠オーバーレイ描画
+        self.draw_active_marquee_box(painter);
+        self.draw_active_stroke_preview(painter);
+    }
+
+    fn draw_onion_skins(&self, painter: &egui::Painter) {
+        let curr_f = self.timeline.current_frame;
+        for step in (1..=self.timeline.onion_prev_frames).rev() {
+            if curr_f >= step {
+                let alpha = (84 / step as u8).clamp(24, 84);
+                self.draw_onion_skin_frame(painter, curr_f - step, [45, 115, 245], alpha);
+            }
+        }
+        for step in 1..=self.timeline.onion_next_frames {
+            let f = curr_f + step;
+            if f < self.timeline.total_frames {
+                let alpha = (84 / step as u8).clamp(24, 84);
+                self.draw_onion_skin_frame(painter, f, [35, 185, 105], alpha);
+            }
+        }
+    }
+
+    fn draw_onion_skin_frame(
+        &self,
+        painter: &egui::Painter,
+        frame: usize,
+        tint_rgb: [u8; 3],
+        alpha: u8,
+    ) {
+        let zoom = self.view_zoom;
+        let pan = self.view_pan;
+        for layer in &self.timeline.layers {
+            if !layer.visible {
+                continue;
+            }
+            if let Some(cel) = layer.cel_at(frame) {
+                for shape in &cel.shapes {
+                    let mesh = transform_mesh_to_screen_onion(
+                        &shape.fill_mesh,
+                        zoom,
+                        pan,
+                        tint_rgb,
+                        alpha,
+                    );
+                    painter.add(egui::Shape::mesh(mesh));
+                }
+            }
+        }
+    }
+
+    fn draw_active_marquee_box(&self, painter: &egui::Painter) {
         let active_marquee = match (&self.select_drag, &self.transform_drag) {
             (
                 SelectDragState::MarqueeSelect {
@@ -2730,36 +2877,39 @@ impl FlashBrushApp {
                 Stroke::new(1.5, Color32::from_rgb(0, 145, 255)),
             );
         }
+    }
 
-        // ドラッグ中のリアルタイム・生ポリゴンプレビュー描画
-        if !self.active_raw_outline.is_empty() {
-            let preview_color = if self.tool == Tool::Brush {
-                self.brush_color
-            } else {
-                Color32::from_rgba_unmultiplied(255, 255, 255, 220)
-            };
-            let raw_mesh = tessellate_raw_polygon(
-                &mut self.tessellator,
-                &self.active_raw_outline,
-                preview_color,
-            );
-            painter.add(egui::Shape::mesh(transform_mesh_to_screen(
-                &raw_mesh, zoom, pan, false,
-            )));
+    fn draw_active_stroke_preview(&mut self, painter: &egui::Painter) {
+        if self.active_raw_outline.is_empty() {
+            return;
+        }
+        let preview_color = if self.tool == Tool::Brush {
+            self.brush_color
+        } else {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+        };
+        let raw_mesh = tessellate_raw_polygon(
+            &mut self.tessellator,
+            &self.active_raw_outline,
+            preview_color,
+        );
+        painter.add(egui::Shape::mesh(transform_mesh_to_screen(
+            &raw_mesh,
+            self.view_zoom,
+            self.view_pan,
+            false,
+        )));
 
-            // 消しゴム（白塗り）のみ、白背景上で軌跡が判別できるよう赤い外枠線を表示し、
-            // ブラシ描画中は枠線なしの純粋な塗り色のみを表示する
-            if self.tool == Tool::Eraser {
-                let n = self.active_raw_outline.len();
-                for i in 0..n {
-                    painter.line_segment(
-                        [
-                            self.world_to_screen(self.active_raw_outline[i]),
-                            self.world_to_screen(self.active_raw_outline[(i + 1) % n]),
-                        ],
-                        Stroke::new(1.2, Color32::from_rgb(220, 60, 60)),
-                    );
-                }
+        if self.tool == Tool::Eraser {
+            let n = self.active_raw_outline.len();
+            for i in 0..n {
+                painter.line_segment(
+                    [
+                        self.world_to_screen(self.active_raw_outline[i]),
+                        self.world_to_screen(self.active_raw_outline[(i + 1) % n]),
+                    ],
+                    Stroke::new(1.2, Color32::from_rgb(220, 60, 60)),
+                );
             }
         }
     }

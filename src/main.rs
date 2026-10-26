@@ -25,8 +25,24 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Clay Canvas",
         native_options,
-        Box::new(|_cc| Ok(Box::new(FlashBrushApp::default()))),
+        Box::new(|cc| {
+            configure_sharp_light_theme(&cc.egui_ctx);
+            Ok(Box::new(FlashBrushApp::default()))
+        }),
     )
+}
+
+/// アプリ全体のUIをライトテーマ＋角丸なし（すべて直角のシャープな矩形）に設定する
+fn configure_sharp_light_theme(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::light();
+    visuals.window_rounding = egui::Rounding::ZERO;
+    visuals.menu_rounding = egui::Rounding::ZERO;
+    visuals.widgets.noninteractive.rounding = egui::Rounding::ZERO;
+    visuals.widgets.inactive.rounding = egui::Rounding::ZERO;
+    visuals.widgets.hovered.rounding = egui::Rounding::ZERO;
+    visuals.widgets.active.rounding = egui::Rounding::ZERO;
+    visuals.widgets.open.rounding = egui::Rounding::ZERO;
+    ctx.set_visuals(visuals);
 }
 
 // ============================================================================
@@ -117,13 +133,28 @@ impl Default for FlashBrushApp {
 }
 
 impl FlashBrushApp {
+    // ------------------------------------------------------------------------
+    // 1. Undo / Redo 履歴管理
+    // ------------------------------------------------------------------------
+
+    fn snapshot_timeline(&self) -> Timeline {
+        let mut tl = self.timeline.clone();
+        tl.is_playing = false;
+        tl.last_frame_advance_time = None;
+        tl
+    }
+
+    fn restore_state_snapshot(&mut self, tl: Timeline, shapes: Vec<FillShape>) {
+        self.timeline = tl;
+        self.shapes = shapes;
+        self.select_drag = SelectDragState::None;
+        self.transform_drag = TransformDragState::None;
+        self.sanitize_editing_group_path();
+    }
+
     pub(crate) fn record_undo_snapshot(&mut self, snapshot: Vec<FillShape>) {
-        let mut tl_snap = self.timeline.clone();
-        tl_snap.is_playing = false;
-        tl_snap.last_frame_advance_time = None;
-        if let Some(cel_shapes) = tl_snap.active_cel_shapes_mut() {
-            *cel_shapes = snapshot.clone();
-        }
+        let mut tl_snap = self.snapshot_timeline();
+        tl_snap.write_shapes_to_editable_cels(&snapshot);
         self.undo_stack.push((tl_snap, snapshot));
         if self.undo_stack.len() > MAX_UNDO_HISTORY {
             self.undo_stack.remove(0);
@@ -139,15 +170,9 @@ impl FlashBrushApp {
         self.clear_selection();
         self.sync_shapes_to_timeline();
         if let Some((prev_tl, prev_shapes)) = self.undo_stack.pop() {
-            let mut curr_tl = self.timeline.clone();
-            curr_tl.is_playing = false;
-            curr_tl.last_frame_advance_time = None;
-            self.redo_stack.push((curr_tl, self.shapes.clone()));
-            self.timeline = prev_tl;
-            self.shapes = prev_shapes;
-            self.select_drag = SelectDragState::None;
-            self.transform_drag = TransformDragState::None;
-            self.sanitize_editing_group_path();
+            let curr = (self.snapshot_timeline(), self.shapes.clone());
+            self.redo_stack.push(curr);
+            self.restore_state_snapshot(prev_tl, prev_shapes);
         }
     }
 
@@ -155,17 +180,15 @@ impl FlashBrushApp {
         self.clear_selection();
         self.sync_shapes_to_timeline();
         if let Some((next_tl, next_shapes)) = self.redo_stack.pop() {
-            let mut curr_tl = self.timeline.clone();
-            curr_tl.is_playing = false;
-            curr_tl.last_frame_advance_time = None;
-            self.undo_stack.push((curr_tl, self.shapes.clone()));
-            self.timeline = next_tl;
-            self.shapes = next_shapes;
-            self.select_drag = SelectDragState::None;
-            self.transform_drag = TransformDragState::None;
-            self.sanitize_editing_group_path();
+            let curr = (self.snapshot_timeline(), self.shapes.clone());
+            self.undo_stack.push(curr);
+            self.restore_state_snapshot(next_tl, next_shapes);
         }
     }
+
+    // ------------------------------------------------------------------------
+    // 2. キーボードショートカット制御
+    // ------------------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.wants_keyboard_input() {
@@ -174,7 +197,6 @@ impl FlashBrushApp {
         let mut copied_to_clipboard = false;
         ctx.input(|i| {
             let cmd = i.modifiers.command || i.modifiers.ctrl;
-            let shift = i.modifiers.shift;
             let copy_event = i.events.iter().any(|ev| matches!(ev, egui::Event::Copy));
             let cut_event = i.events.iter().any(|ev| matches!(ev, egui::Event::Cut));
             let paste_event = i
@@ -183,122 +205,150 @@ impl FlashBrushApp {
                 .any(|ev| matches!(ev, egui::Event::Paste(_)));
 
             if !cmd && !copy_event && !cut_event && !paste_event {
-                if i.key_pressed(Key::Enter) {
-                    self.toggle_playback();
-                } else if i.key_pressed(Key::Comma) || i.key_pressed(Key::ArrowLeft) {
-                    self.step_frame(-1);
-                } else if i.key_pressed(Key::Period) || i.key_pressed(Key::ArrowRight) {
-                    self.step_frame(1);
-                } else if i.key_pressed(Key::Home) {
-                    self.timeline.is_playing = false;
-                    self.switch_to_layer_and_frame(self.timeline.active_layer, 0);
-                } else if i.key_pressed(Key::End) {
-                    self.timeline.is_playing = false;
-                    let last = self.timeline.total_frames.saturating_sub(1);
-                    self.switch_to_layer_and_frame(self.timeline.active_layer, last);
-                } else if i.key_pressed(Key::F6) {
-                    if shift {
-                        self.timeline_delete_keyframe();
-                    } else {
-                        self.timeline_insert_keyframe(true);
-                    }
-                } else if i.key_pressed(Key::F7) {
-                    self.timeline_insert_keyframe(false);
-                } else if i.key_pressed(Key::F5) {
-                    if shift {
-                        self.timeline_remove_frame();
-                    } else {
-                        self.timeline_extend_frame();
-                    }
-                } else if i.key_pressed(Key::O) {
-                    self.timeline.onion_skin_enabled = !self.timeline.onion_skin_enabled;
-                } else if i.key_pressed(Key::B) {
-                    self.set_tool(Tool::Brush);
-                } else if i.key_pressed(Key::E) {
-                    self.set_tool(Tool::Eraser);
-                } else if i.key_pressed(Key::K) {
-                    self.set_tool(Tool::Bucket);
-                } else if i.key_pressed(Key::I) {
-                    self.set_tool(Tool::Eyedropper);
-                } else if i.key_pressed(Key::Q) {
-                    self.set_tool(Tool::Transform);
-                } else if i.key_pressed(Key::Escape) {
-                    if !self.selected_shapes.is_empty() {
-                        self.clear_selection();
-                    } else {
-                        self.exit_current_group();
-                    }
-                    self.set_tool(Tool::Select);
-                } else if i.key_pressed(Key::V) {
-                    self.set_tool(Tool::Select);
-                } else if self.tool == Tool::Select {
-                    let plus_pressed = i.key_pressed(Key::Plus)
-                        || i.key_pressed(Key::Equals)
-                        || i.key_pressed(Key::Semicolon)
-                        || i.events.iter().any(|ev| {
-                            matches!(ev, egui::Event::Text(t) if t == "+" || t == "=" || t == ";" || t == "＋")
-                        });
-                    let minus_pressed = i.key_pressed(Key::Minus)
-                        || i.events.iter().any(|ev| {
-                            matches!(ev, egui::Event::Text(t) if t == "-" || t == "ー" || t == "－")
-                        });
-
-                    if plus_pressed {
-                        self.toggle_select_sub_mode(SelectSubMode::AddAnchor);
-                    } else if minus_pressed {
-                        self.toggle_select_sub_mode(SelectSubMode::DeleteAnchor);
-                    }
-                }
+                self.handle_single_key_shortcuts(i, i.modifiers.shift);
             }
 
             if i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace) {
                 self.delete_selected_shapes();
             }
 
-            if copy_event || (cmd && !i.modifiers.shift && i.key_pressed(Key::C)) {
-                copied_to_clipboard = self.copy_selected_shapes();
-            } else if cut_event || (cmd && !i.modifiers.shift && i.key_pressed(Key::X)) {
-                copied_to_clipboard = self.cut_selected_shapes();
-            } else if paste_event || (cmd && i.key_pressed(Key::V)) {
-                self.paste_clipboard(i.modifiers.shift);
-            } else if cmd && i.key_pressed(Key::Num0) {
-                self.reset_view();
-            } else if cmd
-                && (i.key_pressed(Key::Plus)
-                    || i.key_pressed(Key::Equals)
-                    || i.key_pressed(Key::Semicolon))
-            {
-                let center = i.pointer.hover_pos().unwrap_or(Pos2::new(640.0, 400.0));
-                self.zoom_around_screen_pos(center, 1.25);
-            } else if cmd && i.key_pressed(Key::Minus) {
-                let center = i.pointer.hover_pos().unwrap_or(Pos2::new(640.0, 400.0));
-                self.zoom_around_screen_pos(center, 0.8);
-            } else if cmd && i.key_pressed(Key::G) {
-                if i.modifiers.shift {
-                    self.ungroup_selected_shapes();
-                } else {
-                    self.group_selected_shapes();
-                }
-            } else if cmd && i.key_pressed(Key::B) {
-                self.ungroup_selected_shapes();
-            } else if cmd && i.key_pressed(Key::Z) {
-                if i.modifiers.shift {
-                    self.redo();
-                } else {
-                    self.undo();
-                }
-            } else if cmd && i.key_pressed(Key::Y) {
-                self.redo();
-            }
+            copied_to_clipboard =
+                self.handle_command_shortcuts(i, cmd, copy_event, cut_event, paste_event);
         });
         if copied_to_clipboard {
             ctx.copy_text(String::from("clay_canvas"));
         }
     }
 
+    fn handle_single_key_shortcuts(&mut self, i: &egui::InputState, shift: bool) {
+        if i.key_pressed(Key::Enter) {
+            self.toggle_playback();
+        } else if i.key_pressed(Key::Comma) || i.key_pressed(Key::ArrowLeft) {
+            self.step_frame(-1);
+        } else if i.key_pressed(Key::Period) || i.key_pressed(Key::ArrowRight) {
+            self.step_frame(1);
+        } else if i.key_pressed(Key::Home) {
+            self.timeline.is_playing = false;
+            self.switch_to_layer_and_frame(self.timeline.active_layer, 0);
+        } else if i.key_pressed(Key::End) {
+            self.timeline.is_playing = false;
+            let last = self.timeline.total_frames.saturating_sub(1);
+            self.switch_to_layer_and_frame(self.timeline.active_layer, last);
+        } else if i.key_pressed(Key::F6) {
+            if shift {
+                self.timeline_delete_keyframe();
+            } else {
+                self.timeline_insert_keyframe(true);
+            }
+        } else if i.key_pressed(Key::F7) {
+            self.timeline_insert_keyframe(false);
+        } else if i.key_pressed(Key::F5) {
+            if shift {
+                self.timeline_remove_frame();
+            } else {
+                self.timeline_extend_frame();
+            }
+        } else if i.key_pressed(Key::O) {
+            self.timeline.onion_skin_enabled = !self.timeline.onion_skin_enabled;
+        } else if i.key_pressed(Key::B) {
+            self.set_tool(Tool::Brush);
+        } else if i.key_pressed(Key::E) {
+            self.set_tool(Tool::Eraser);
+        } else if i.key_pressed(Key::K) {
+            self.set_tool(Tool::Bucket);
+        } else if i.key_pressed(Key::I) {
+            self.set_tool(Tool::Eyedropper);
+        } else if i.key_pressed(Key::Q) {
+            self.set_tool(Tool::Transform);
+        } else if i.key_pressed(Key::Escape) {
+            if !self.selected_shapes.is_empty() {
+                self.clear_selection();
+            } else {
+                self.exit_current_group();
+            }
+            self.set_tool(Tool::Select);
+        } else if i.key_pressed(Key::V) {
+            self.set_tool(Tool::Select);
+        } else if self.tool == Tool::Select {
+            let plus_pressed = i.key_pressed(Key::Plus)
+                || i.key_pressed(Key::Equals)
+                || i.key_pressed(Key::Semicolon)
+                || i.events.iter().any(|ev| {
+                    matches!(ev, egui::Event::Text(t) if t == "+" || t == "=" || t == ";" || t == "＋")
+                });
+            let minus_pressed = i.key_pressed(Key::Minus)
+                || i.events.iter().any(|ev| {
+                    matches!(ev, egui::Event::Text(t) if t == "-" || t == "ー" || t == "－")
+                });
+
+            if plus_pressed {
+                self.toggle_select_sub_mode(SelectSubMode::AddAnchor);
+            } else if minus_pressed {
+                self.toggle_select_sub_mode(SelectSubMode::DeleteAnchor);
+            }
+        }
+    }
+
+    fn handle_command_shortcuts(
+        &mut self,
+        i: &egui::InputState,
+        cmd: bool,
+        copy_event: bool,
+        cut_event: bool,
+        paste_event: bool,
+    ) -> bool {
+        let mut copied = false;
+        if copy_event || (cmd && !i.modifiers.shift && i.key_pressed(Key::C)) {
+            copied = self.copy_selected_shapes();
+        } else if cut_event || (cmd && !i.modifiers.shift && i.key_pressed(Key::X)) {
+            copied = self.cut_selected_shapes();
+        } else if paste_event || (cmd && i.key_pressed(Key::V)) {
+            self.paste_clipboard(i.modifiers.shift);
+        } else if cmd && i.key_pressed(Key::Num0) {
+            self.reset_view();
+        } else if cmd
+            && (i.key_pressed(Key::Plus)
+                || i.key_pressed(Key::Equals)
+                || i.key_pressed(Key::Semicolon))
+        {
+            let center = i.pointer.hover_pos().unwrap_or(Pos2::new(640.0, 400.0));
+            self.zoom_around_screen_pos(center, 1.25);
+        } else if cmd && i.key_pressed(Key::Minus) {
+            let center = i.pointer.hover_pos().unwrap_or(Pos2::new(640.0, 400.0));
+            self.zoom_around_screen_pos(center, 0.8);
+        } else if cmd && i.key_pressed(Key::G) {
+            if i.modifiers.shift {
+                self.ungroup_selected_shapes();
+            } else {
+                self.group_selected_shapes();
+            }
+        } else if cmd && i.key_pressed(Key::B) {
+            self.ungroup_selected_shapes();
+        } else if cmd && i.key_pressed(Key::Z) {
+            if i.modifiers.shift {
+                self.redo();
+            } else {
+                self.undo();
+            }
+        } else if cmd && i.key_pressed(Key::Y) {
+            self.redo();
+        }
+        copied
+    }
+
+    // ------------------------------------------------------------------------
+    // 3. トップツールバー UI
+    // ------------------------------------------------------------------------
+
     fn draw_top_toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("minimal_toolbar")
             .exact_height(48.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(240, 242, 246))
+                    .inner_margin(egui::Margin::symmetric(8.0, 0.0))
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(200, 205, 215))),
+            )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
@@ -317,148 +367,157 @@ impl FlashBrushApp {
                     }
 
                     ui.separator();
-
-                    match self.tool {
-                        Tool::Brush => {
-                            ui.label("Size:");
-                            ui.add(
-                                egui::Slider::new(&mut self.brush_radius, 1.0..=70.0)
-                                    .step_by(1.0)
-                                    .integer()
-                                    .suffix(" px"),
-                            );
-                            ui.separator();
-                            self.draw_color_picker_controls(ui);
-                        }
-                        Tool::Bucket | Tool::Eyedropper => {
-                            self.draw_color_picker_controls(ui);
-                        }
-                        Tool::Eraser => {
-                            ui.label("Eraser Size:");
-                            ui.add(
-                                egui::Slider::new(&mut self.eraser_radius, 1.0..=80.0)
-                                    .step_by(1.0)
-                                    .integer()
-                                    .suffix(" px"),
-                            );
-                        }
-                        Tool::Select => {
-                            if ui
-                                .selectable_label(
-                                    self.select_sub_mode == SelectSubMode::Reshape,
-                                    "↖ 変形・矩形選択 (V)",
-                                )
-                                .clicked()
-                            {
-                                self.select_sub_mode = SelectSubMode::Reshape;
-                            }
-                            if ui
-                                .selectable_label(
-                                    self.select_sub_mode == SelectSubMode::AddAnchor,
-                                    "＋ アンカー追加 (+)",
-                                )
-                                .clicked()
-                            {
-                                self.toggle_select_sub_mode(SelectSubMode::AddAnchor);
-                            }
-                            if ui
-                                .selectable_label(
-                                    self.select_sub_mode == SelectSubMode::DeleteAnchor,
-                                    "－ アンカー削除 (-)",
-                                )
-                                .clicked()
-                            {
-                                self.toggle_select_sub_mode(SelectSubMode::DeleteAnchor);
-                            }
-                            ui.separator();
-                            self.draw_group_action_buttons(ui);
-                        }
-                        Tool::Transform => {
-                            let has_sel = !self.selected_shapes.is_empty();
-                            if ui
-                                .add_enabled(has_sel, egui::Button::new("⇄ 左右反転"))
-                                .clicked()
-                            {
-                                self.flip_selected_shapes(true, false);
-                            }
-                            if ui
-                                .add_enabled(has_sel, egui::Button::new("⇅ 上下反転"))
-                                .clicked()
-                            {
-                                self.flip_selected_shapes(false, true);
-                            }
-                            if ui
-                                .add_enabled(has_sel, egui::Button::new("↺ -90°"))
-                                .clicked()
-                            {
-                                self.rotate_selected_shapes(-std::f64::consts::FRAC_PI_2);
-                            }
-                            if ui
-                                .add_enabled(has_sel, egui::Button::new("↻ +90°"))
-                                .clicked()
-                            {
-                                self.rotate_selected_shapes(std::f64::consts::FRAC_PI_2);
-                            }
-                            if ui
-                                .add_enabled(
-                                    has_sel && self.transform_pivot.is_some(),
-                                    egui::Button::new("◎ 中心リセット"),
-                                )
-                                .clicked()
-                            {
-                                self.transform_pivot = None;
-                            }
-                            ui.separator();
-                            self.draw_group_action_buttons(ui);
-                        }
-                    }
-
-                    if !self.editing_group_path.is_empty() {
-                        ui.separator();
-                        let mut crumb = String::from("🎬 Scene");
-                        for &gid in &self.editing_group_path {
-                            crumb.push_str(&format!(" ▸ 📦 Group #{gid}"));
-                        }
-                        ui.colored_label(Color32::from_rgb(0, 120, 215), crumb);
-                        if ui.button("⬅ 1階層出る").clicked() {
-                            self.exit_current_group();
-                        }
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("🗑 Clear").clicked() && !self.shapes.is_empty() {
-                            self.clear_selection();
-                            self.push_undo();
-                            self.shapes.clear();
-                            self.editing_group_path.clear();
-                            self.sync_shapes_to_timeline();
-                        }
-                        if ui
-                            .add_enabled(!self.redo_stack.is_empty(), egui::Button::new("↪ Redo"))
-                            .clicked()
-                        {
-                            self.redo();
-                        }
-                        if ui
-                            .add_enabled(!self.undo_stack.is_empty(), egui::Button::new("↩ Undo"))
-                            .clicked()
-                        {
-                            self.undo();
-                        }
-                        ui.checkbox(&mut self.show_wireframe, "Anchors");
-                        let zoom_pct = (self.view_zoom * 100.0).round() as i32;
-                        if ui
-                            .button(format!("🔍 {zoom_pct}%"))
-                            .on_hover_text(
-                                "クリック（または Cmd+0）で 100% 表示にリセット / Space+ドラッグでパン移動",
-                            )
-                            .clicked()
-                        {
-                            self.reset_view();
-                        }
-                    });
+                    self.draw_tool_specific_controls(ui);
+                    self.draw_group_breadcrumb(ui);
+                    self.draw_right_toolbar_actions(ui);
                 });
             });
+    }
+
+    fn draw_tool_specific_controls(&mut self, ui: &mut egui::Ui) {
+        match self.tool {
+            Tool::Brush => {
+                ui.label("Size:");
+                ui.add(
+                    egui::Slider::new(&mut self.brush_radius, 1.0..=70.0)
+                        .step_by(1.0)
+                        .integer()
+                        .suffix(" px"),
+                );
+                ui.separator();
+                self.draw_color_picker_controls(ui);
+            }
+            Tool::Bucket | Tool::Eyedropper => {
+                self.draw_color_picker_controls(ui);
+            }
+            Tool::Eraser => {
+                ui.label("Eraser Size:");
+                ui.add(
+                    egui::Slider::new(&mut self.eraser_radius, 1.0..=80.0)
+                        .step_by(1.0)
+                        .integer()
+                        .suffix(" px"),
+                );
+            }
+            Tool::Select => {
+                if ui
+                    .selectable_label(
+                        self.select_sub_mode == SelectSubMode::Reshape,
+                        "↖ 変形・矩形選択 (V)",
+                    )
+                    .clicked()
+                {
+                    self.select_sub_mode = SelectSubMode::Reshape;
+                }
+                if ui
+                    .selectable_label(
+                        self.select_sub_mode == SelectSubMode::AddAnchor,
+                        "＋ アンカー追加 (+)",
+                    )
+                    .clicked()
+                {
+                    self.toggle_select_sub_mode(SelectSubMode::AddAnchor);
+                }
+                if ui
+                    .selectable_label(
+                        self.select_sub_mode == SelectSubMode::DeleteAnchor,
+                        "－ アンカー削除 (-)",
+                    )
+                    .clicked()
+                {
+                    self.toggle_select_sub_mode(SelectSubMode::DeleteAnchor);
+                }
+                ui.separator();
+                self.draw_group_action_buttons(ui);
+            }
+            Tool::Transform => {
+                let has_sel = !self.selected_shapes.is_empty();
+                if ui
+                    .add_enabled(has_sel, egui::Button::new("⇄ 左右反転"))
+                    .clicked()
+                {
+                    self.flip_selected_shapes(true, false);
+                }
+                if ui
+                    .add_enabled(has_sel, egui::Button::new("⇅ 上下反転"))
+                    .clicked()
+                {
+                    self.flip_selected_shapes(false, true);
+                }
+                if ui
+                    .add_enabled(has_sel, egui::Button::new("↺ -90°"))
+                    .clicked()
+                {
+                    self.rotate_selected_shapes(-std::f64::consts::FRAC_PI_2);
+                }
+                if ui
+                    .add_enabled(has_sel, egui::Button::new("↻ +90°"))
+                    .clicked()
+                {
+                    self.rotate_selected_shapes(std::f64::consts::FRAC_PI_2);
+                }
+                if ui
+                    .add_enabled(
+                        has_sel && self.transform_pivot.is_some(),
+                        egui::Button::new("◎ 中心リセット"),
+                    )
+                    .clicked()
+                {
+                    self.transform_pivot = None;
+                }
+                ui.separator();
+                self.draw_group_action_buttons(ui);
+            }
+        }
+    }
+
+    fn draw_group_breadcrumb(&mut self, ui: &mut egui::Ui) {
+        if !self.editing_group_path.is_empty() {
+            ui.separator();
+            let mut crumb = String::from("🎬 Scene");
+            for &gid in &self.editing_group_path {
+                crumb.push_str(&format!(" ▸ 📦 Group #{gid}"));
+            }
+            ui.colored_label(Color32::from_rgb(0, 120, 215), crumb);
+            if ui.button("⬅ 1階層出る").clicked() {
+                self.exit_current_group();
+            }
+        }
+    }
+
+    fn draw_right_toolbar_actions(&mut self, ui: &mut egui::Ui) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("🗑 Clear").clicked() && !self.shapes.is_empty() {
+                self.clear_selection();
+                self.push_undo();
+                self.shapes.clear();
+                self.editing_group_path.clear();
+                self.sync_shapes_to_timeline();
+            }
+            if ui
+                .add_enabled(!self.redo_stack.is_empty(), egui::Button::new("↪ Redo"))
+                .clicked()
+            {
+                self.redo();
+            }
+            if ui
+                .add_enabled(!self.undo_stack.is_empty(), egui::Button::new("↩ Undo"))
+                .clicked()
+            {
+                self.undo();
+            }
+            ui.checkbox(&mut self.show_wireframe, "Anchors");
+            let zoom_pct = (self.view_zoom * 100.0).round() as i32;
+            if ui
+                .button(format!("🔍 {zoom_pct}%"))
+                .on_hover_text(
+                    "クリック（または Cmd+0）で 100% 表示にリセット / Space+ドラッグでパン移動",
+                )
+                .clicked()
+            {
+                self.reset_view();
+            }
+        });
     }
 
     fn draw_group_action_buttons(&mut self, ui: &mut egui::Ui) {
@@ -492,14 +551,128 @@ impl FlashBrushApp {
         ];
         for c in presets {
             let (rect, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-            ui.painter().rect_filled(rect, 3.0, c);
+            ui.painter().rect_filled(rect, 0.0, c);
             if self.brush_color == c {
                 ui.painter()
-                    .rect_stroke(rect, 3.0, Stroke::new(2.0, Color32::WHITE));
+                    .rect_stroke(rect, 0.0, Stroke::new(2.0, Color32::from_rgb(20, 25, 35)));
+            } else {
+                ui.painter().rect_stroke(
+                    rect,
+                    0.0,
+                    Stroke::new(1.0, Color32::from_rgb(175, 180, 190)),
+                );
             }
             if resp.clicked() {
                 self.brush_color = c;
             }
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // 4. 中央キャンバスのツール入力ディスパッチ・バッジ・カーソル更新
+    // ------------------------------------------------------------------------
+
+    fn is_current_tool_allowed(&self) -> bool {
+        match self.tool {
+            Tool::Eyedropper => true,
+            Tool::Brush => self.timeline.is_active_layer_editable(),
+            Tool::Eraser | Tool::Bucket | Tool::Select | Tool::Transform => {
+                self.timeline.has_any_editable_layer()
+            }
+        }
+    }
+
+    fn handle_canvas_tool_input(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        mouse_pt: Option<Point>,
+        tool_allowed: bool,
+    ) {
+        if self.tool == Tool::Eyedropper {
+            let sampling = (response.hovered() && ui.input(|i| i.pointer.primary_pressed()))
+                || response.dragged()
+                || response.clicked();
+            if sampling {
+                if let Some(pt) = mouse_pt {
+                    self.pick_color_at(pt);
+                }
+            }
+        } else if tool_allowed {
+            match self.tool {
+                Tool::Brush | Tool::Eraser => {
+                    self.handle_brush_or_eraser_input(response, mouse_pt);
+                }
+                Tool::Bucket => {
+                    let just_pressed =
+                        response.hovered() && ui.input(|i| i.pointer.primary_pressed());
+                    if just_pressed {
+                        if let Some(pt) = mouse_pt {
+                            self.bucket_fill_at(pt);
+                        }
+                    }
+                }
+                Tool::Eyedropper => {}
+                Tool::Select => {
+                    self.handle_select_tool_input(ui, response, mouse_pt);
+                }
+                Tool::Transform => {
+                    self.handle_transform_tool_input(ui, response, mouse_pt);
+                }
+            }
+        }
+    }
+
+    fn draw_locked_layer_badge(&self, painter: &egui::Painter, canvas_rect: egui::Rect) {
+        let badge_rect = egui::Rect::from_min_size(
+            canvas_rect.left_top() + Vec2::new(12.0, 12.0),
+            Vec2::new(340.0, 26.0),
+        );
+        painter.rect_filled(
+            badge_rect,
+            0.0,
+            Color32::from_rgba_unmultiplied(255, 248, 225, 240),
+        );
+        painter.rect_stroke(
+            badge_rect,
+            0.0,
+            Stroke::new(1.0, Color32::from_rgb(215, 165, 55)),
+        );
+        painter.text(
+            badge_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "🔒 現在のレイヤーはロック中または非表示のため編集できません",
+            egui::FontId::proportional(12.0),
+            Color32::from_rgb(145, 90, 10),
+        );
+    }
+
+    fn update_canvas_cursor(
+        &self,
+        ctx: &egui::Context,
+        painter: &egui::Painter,
+        canvas_rect: egui::Rect,
+        pointer_pos: Option<Pos2>,
+        pan_state: (bool, bool),
+        tool_allowed: bool,
+    ) {
+        let Some(pos) = pointer_pos else {
+            return;
+        };
+        if !canvas_rect.contains(pos) {
+            return;
+        }
+        let (is_panning, pan_gesture_active) = pan_state;
+        if is_panning {
+            ctx.set_cursor_icon(if pan_gesture_active {
+                CursorIcon::Grabbing
+            } else {
+                CursorIcon::Grab
+            });
+        } else if !tool_allowed {
+            ctx.set_cursor_icon(CursorIcon::NotAllowed);
+        } else {
+            self.draw_tool_cursor_and_feedback(ctx, painter, pos);
         }
     }
 }
@@ -517,7 +690,6 @@ impl eframe::App for FlashBrushApp {
                 let (canvas_rect, response) =
                     ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
                 let painter = ui.painter_at(canvas_rect);
-
                 painter.rect_filled(canvas_rect, 0.0, Color32::from_rgb(250, 250, 252));
 
                 let pointer_pos = response
@@ -525,91 +697,36 @@ impl eframe::App for FlashBrushApp {
                     .or_else(|| ctx.pointer_hover_pos());
 
                 // 0. ビューポートのズーム・パン移動操作ハンドリング
-                let (is_panning, pan_gesture_active) =
+                let pan_state @ (is_panning, _) =
                     self.handle_viewport_navigation(ui, canvas_rect, pointer_pos);
 
                 let mouse_pt = pointer_pos.map(|p| self.screen_to_world(p));
-                let layer_editable = self.timeline.is_active_layer_editable();
+                let tool_allowed = self.is_current_tool_allowed();
 
-                // 1. ツール別のマウス入力ハンドリング（パン操作中、またはレイヤーがロック・非表示中は編集入力をスキップ）
+                // 1. ツール別のマウス入力ハンドリング（パン操作中はスキップ）
                 if !is_panning {
-                    if self.tool == Tool::Eyedropper {
-                        let sampling = (response.hovered()
-                            && ui.input(|i| i.pointer.primary_pressed()))
-                            || response.dragged()
-                            || response.clicked();
-                        if sampling {
-                            if let Some(pt) = mouse_pt {
-                                self.pick_color_at(pt);
-                            }
-                        }
-                    } else if layer_editable {
-                        match self.tool {
-                            Tool::Brush | Tool::Eraser => {
-                                self.handle_brush_or_eraser_input(&response, mouse_pt);
-                            }
-                            Tool::Bucket => {
-                                let just_pressed = response.hovered()
-                                    && ui.input(|i| i.pointer.primary_pressed());
-                                if just_pressed {
-                                    if let Some(pt) = mouse_pt {
-                                        self.bucket_fill_at(pt);
-                                    }
-                                }
-                            }
-                            Tool::Eyedropper => {}
-                            Tool::Select => {
-                                self.handle_select_tool_input(ui, &response, mouse_pt);
-                            }
-                            Tool::Transform => {
-                                self.handle_transform_tool_input(ui, &response, mouse_pt);
-                            }
-                        }
-                    }
+                    self.handle_canvas_tool_input(ui, &response, mouse_pt, tool_allowed);
                 }
 
-                // キャンバス編集結果を現在アクティブなセルへ即時同期
+                // キャンバス編集結果を現在フレームの各レイヤーセルへ即時同期
                 self.sync_shapes_to_timeline();
 
                 // 2. キャンバス上のシェイプ・オニオンスキン・選択枠・プレビューの描画
                 self.draw_canvas_contents(&painter);
 
-                // ロック中または非表示のレイヤーが選択されている場合はキャンバス左上に通知バッジを表示
-                if !layer_editable {
-                    let badge_rect = egui::Rect::from_min_size(
-                        canvas_rect.left_top() + Vec2::new(12.0, 12.0),
-                        Vec2::new(340.0, 26.0),
-                    );
-                    painter.rect_filled(
-                        badge_rect,
-                        5.0,
-                        Color32::from_rgba_unmultiplied(35, 38, 46, 215),
-                    );
-                    painter.text(
-                        badge_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "🔒 現在のレイヤーはロック中または非表示のため編集できません",
-                        egui::FontId::proportional(12.0),
-                        Color32::from_rgb(245, 200, 85),
-                    );
+                if !tool_allowed {
+                    self.draw_locked_layer_badge(&painter, canvas_rect);
                 }
 
                 // 3. カーソル表示とホバー・ドラッグ視覚フィードバック
-                if let Some(pos) = pointer_pos {
-                    if canvas_rect.contains(pos) {
-                        if is_panning {
-                            ctx.set_cursor_icon(if pan_gesture_active {
-                                CursorIcon::Grabbing
-                            } else {
-                                CursorIcon::Grab
-                            });
-                        } else if !layer_editable && self.tool != Tool::Eyedropper {
-                            ctx.set_cursor_icon(CursorIcon::NotAllowed);
-                        } else {
-                            self.draw_tool_cursor_and_feedback(ctx, &painter, pos);
-                        }
-                    }
-                }
+                self.update_canvas_cursor(
+                    ctx,
+                    &painter,
+                    canvas_rect,
+                    pointer_pos,
+                    pan_state,
+                    tool_allowed,
+                );
             });
     }
 }
@@ -1513,8 +1630,8 @@ mod tests {
 
         let red = Color32::from_rgb(235, 75, 75);
         let stroke = make_stroke(Point::new(100.0, 100.0), Point::new(160.0, 100.0), 12.0, red);
-        if let Some(shapes) = timeline.active_cel_shapes_mut() {
-            merge_shapes_into_canvas(shapes, stroke);
+        if let Some(cel) = timeline.layers[0].cel_at_mut(0) {
+            merge_shapes_into_canvas(&mut cel.shapes, stroke);
         }
         assert_eq!(timeline.active_cel_shapes().len(), 1);
 
@@ -1570,15 +1687,20 @@ mod tests {
         app.redo();
         assert_eq!(app.shapes.len(), 1);
 
-        // 4. 新規レイヤー追加と背面レイヤーからのスポイト色抽出
+        // 4. 新規レイヤー追加・複数レイヤー横断範囲選択（Adobe Animate 挙動）・ドラッグ＆ドロップ重ね順入れ替え・削除
         app.switch_to_layer_and_frame(0, 0);
         assert_eq!(app.shapes.len(), 1);
-        app.timeline_add_layer();
+        app.timeline_add_layer(); // Layer 2 (index 1)
         assert_eq!(app.timeline.layers.len(), 2);
         assert_eq!(app.timeline.active_layer, 1);
         assert!(
-            app.shapes.is_empty(),
+            app.timeline.active_cel_shapes().is_empty(),
             "新しく追加された前面レイヤーのセルは空であること"
+        );
+        assert_eq!(
+            app.shapes.len(),
+            1,
+            "作業キャンバス self.shapes には全可視・非ロックレイヤーの図形が展開されていること"
         );
         app.brush_color = blue;
         assert_eq!(
@@ -1586,10 +1708,233 @@ mod tests {
             Some(red),
             "空の前面レイヤー上でも、可視状態の背面レイヤーにある図形の色をスポイトで抽出できること"
         );
-        assert!(app.timeline_move_active_layer(false));
+
+        // Layer 2 (index 1) に青いストロークを追加（Layer 1 の赤いストロークと重なる位置）
+        app.brush_color = blue;
+        app.commit_raw_outline(&[
+            Point::new(120.0, 70.0),
+            Point::new(120.0, 130.0),
+            Point::new(135.0, 130.0),
+            Point::new(135.0, 70.0),
+        ]);
+        app.sync_shapes_to_timeline();
+        assert_eq!(
+            app.timeline.layers[0].cel_at(0).unwrap().shapes.len(),
+            1,
+            "別レイヤーのストロークによって背面レイヤーの図形が削られないこと（レイヤー間の Merge Drawing 分離）"
+        );
+        assert_eq!(app.timeline.layers[1].cel_at(0).unwrap().shapes.len(), 1);
+        assert_eq!(app.shapes.len(), 2);
+
+        // 現在 Layer 2 を選択していても、範囲選択（Marquee Selection）で Layer 1 と Layer 2 の両方の絵を一括選択・移動できること
+        app.apply_marquee_selection(Point::new(50.0, 50.0), Point::new(200.0, 200.0), false);
+        assert_eq!(
+            app.selected_shapes.len(),
+            2,
+            "Adobe Animate 同様に、範囲選択で複数レイヤーにまたがる全ての非ロック図形を一括選択できること"
+        );
+        let undo_snap = app.shapes.clone();
+        app.translate_selected_shapes(KVec2::new(30.0, 0.0));
+        app.commit_moved_selection(undo_snap);
+        app.clear_selection();
+        app.sync_shapes_to_timeline();
+        assert!(
+            app.timeline.layers[0].cel_at(0).unwrap().shapes[0]
+                .contains_point(Point::new(155.0, 100.0)),
+            "Layer 1 の図形が移動され、かつ Layer 1 に留まっていること"
+        );
+        assert!(
+            app.timeline.layers[1].cel_at(0).unwrap().shapes[0]
+                .contains_point(Point::new(155.0, 100.0)),
+            "Layer 2 の図形も同時に移動され、かつ Layer 1 の図形を削らずに Layer 2 に留まっていること"
+        );
+
+        // Layer 1 をロック (🔒) すると、範囲選択では Layer 2 の図形のみが選択され、Layer 1 は保護されること
+        app.set_layer_locked(0, true);
+        app.apply_marquee_selection(Point::new(50.0, 50.0), Point::new(250.0, 200.0), false);
+        assert_eq!(
+            app.selected_shapes.len(),
+            1,
+            "ロックされたレイヤーの図形は範囲選択から除外されて保護されること"
+        );
+        app.clear_selection();
+        app.set_layer_locked(0, false);
+        assert_eq!(app.shapes.len(), 2);
+
+        app.timeline_add_layer(); // Layer 3 (index 2)
+        assert_eq!(app.timeline.layers.len(), 3);
+        assert_eq!(
+            app.timeline
+                .layers
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Layer 1", "Layer 2", "Layer 3"]
+        );
+        // Layer 3 (index 2) を最背面 (index 0) へドラッグ＆ドロップ移動
+        assert!(app.timeline_reorder_layer(2, 0));
         assert_eq!(app.timeline.active_layer, 0);
+        assert_eq!(
+            app.timeline
+                .layers
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Layer 3", "Layer 1", "Layer 2"]
+        );
+        // Undo / Redo でレイヤー重ね順が完全に復元されること
+        app.undo();
+        assert_eq!(
+            app.timeline
+                .layers
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Layer 1", "Layer 2", "Layer 3"]
+        );
+        app.redo();
+        assert_eq!(
+            app.timeline
+                .layers
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Layer 3", "Layer 1", "Layer 2"]
+        );
+
+        assert!(app.timeline_move_active_layer(true));
+        assert_eq!(app.timeline.active_layer, 1);
+        assert!(app.timeline_delete_active_layer());
+        assert_eq!(app.timeline.layers.len(), 2);
         assert!(app.timeline_delete_active_layer());
         assert_eq!(app.timeline.layers.len(), 1);
+
+        // 5. 追加仕様6項目の検証：
+        // (1) レイヤー選択状態に応じた F5 / Shift+F5 挙動（選択レイヤーのみ vs 全レイヤー）
+        let mut app2 = FlashBrushApp::default();
+        app2.commit_raw_outline(&[
+            Point::new(40.0, 40.0),
+            Point::new(80.0, 40.0),
+            Point::new(80.0, 80.0),
+            Point::new(40.0, 80.0),
+        ]);
+        app2.timeline_add_layer(); // Layer 2 (index 1)
+        app2.brush_color = blue;
+        app2.commit_raw_outline(&[
+            Point::new(140.0, 40.0),
+            Point::new(180.0, 40.0),
+            Point::new(180.0, 80.0),
+            Point::new(140.0, 80.0),
+        ]);
+        app2.sync_shapes_to_timeline();
+        let base_len = app2.timeline.layers[0].frame_count;
+        assert_eq!(app2.timeline.layers[1].frame_count, base_len);
+
+        // Layer 2 (index 1) だけを選択した状態で F5 -> Layer 2 だけが +1 伸び、Layer 1 はそのまま
+        app2.select_timeline_cells(1, 0, 1, 0);
+        assert!(app2.timeline_extend_frame());
+        assert_eq!(app2.timeline.layers[0].frame_count, base_len);
+        assert_eq!(app2.timeline.layers[1].frame_count, base_len + 1);
+
+        // ルーラースクラブ等でレイヤー未選択状態 (cell_selection = None) にして F5 -> 全レイヤーが +1 伸びる
+        app2.scrub_ruler_to_frame(0);
+        assert!(app2.timeline.cell_selection.is_none());
+        assert!(app2.timeline_extend_frame());
+        assert_eq!(app2.timeline.layers[0].frame_count, base_len + 1);
+        assert_eq!(app2.timeline.layers[1].frame_count, base_len + 2);
+
+        // (2) キーフレーム（フレームセル）をクリックしたとき、そのキーフレーム内の絵が全て選択状態になること
+        app2.select_timeline_cells(0, 0, 0, 0);
+        assert_eq!(
+            app2.selected_shapes.len(),
+            1,
+            "Layer 1 のキーフレームをクリックすると Layer 1 の絵が全選択されること"
+        );
+        assert_eq!(
+            app2.shapes[app2.selected_shapes[0]].layer_id,
+            app2.timeline.layers[0].id
+        );
+
+        // (3) キャンバスの任意の絵を選択したとき、その絵が所属するレイヤーがタイムラインで選択状態になること
+        app2.clear_selection();
+        app2.scrub_ruler_to_frame(0);
+        assert!(app2.select_single_shape_at(Point::new(160.0, 60.0))); // Layer 2 の青い矩形をクリック
+        assert_eq!(app2.timeline.active_layer, 1);
+        assert_eq!(
+            app2.timeline.cell_selection.map(|s| (s.min_layer, s.max_layer)),
+            Some((1, 1)),
+            "キャンバスの絵を選択すると、その絵が属するレイヤーがタイムラインでも選択状態になること"
+        );
+
+        // (4) タイムライン上でレイヤーをまたいでドラッグ範囲選択すると、それらのレイヤーの絵がすべて選択状態になること
+        app2.select_timeline_cells(0, 0, 1, 0);
+        assert_eq!(
+            app2.selected_shapes.len(),
+            2,
+            "レイヤーをまたいでタイムラインセルを範囲選択すると、対象レイヤー群の絵がすべて選択状態になること"
+        );
+
+        // (5) 選択フレームのドラッグ移動および Alt+ドラッグ複製（コピー）
+        let sel_l1_f0 = timeline::TimelineCellSelection::single(1, 0);
+        // Alt+ドラッグ（copy_mode = true）で Layer 2 の frame 0 を frame 3 へ複製
+        assert!(app2.timeline_move_or_copy_frames(sel_l1_f0, 0, 3, true));
+        assert!(
+            !app2.timeline.layers[1].cel_at(0).unwrap().is_empty(),
+            "Alt+ドラッグ複製では元の frame 0 の絵も残ること"
+        );
+        assert_eq!(
+            app2.timeline.layers[1].keyframe_index_at(3),
+            Some(1),
+            "frame 3 に複製された新しいキーフレームが作成されていること"
+        );
+        assert!(!app2.timeline.layers[1].cel_at(3).unwrap().is_empty());
+
+        // 複製された frame 3 のキーフレームを frame 5 へ通常ドラッグ移動（copy_mode = false）
+        let sel_l1_f3 = timeline::TimelineCellSelection::single(1, 3);
+        assert!(app2.timeline_move_or_copy_frames(sel_l1_f3, 0, 2, false));
+        assert_eq!(
+            app2.timeline.layers[1].keyframes[1].start_frame,
+            5,
+            "通常ドラッグ移動では frame 3 のキーフレームが frame 5 へ移動していること"
+        );
+        assert!(
+            !app2.timeline.layers[1].cel_at(5).unwrap().is_empty(),
+            "移動先の frame 5 に絵が移動していること"
+        );
+        // 先頭 frame 0 のキーフレームを frame 2 へ通常ドラッグ移動すると、frame 0 は空キーフレームになること
+        let sel_l0_f0 = timeline::TimelineCellSelection::single(0, 0);
+        assert!(app2.timeline_move_or_copy_frames(sel_l0_f0, 0, 2, false));
+        assert!(
+            app2.timeline.layers[0].cel_at(0).unwrap().is_empty(),
+            "先頭 frame 0 のキーフレームを後続へ移動すると frame 0 は空白キーフレームになること"
+        );
+        assert!(
+            !app2.timeline.layers[0].cel_at(2).unwrap().is_empty(),
+            "移動先の frame 2 に Layer 1 の絵が移動していること"
+        );
+
+        // (6) Shift+F5（フレーム削除）がキーフレームに当たったときの Adobe Animate 準拠挙動：
+        // 保持尺が 2 コマ以上あるときはキーフレームを残して尺を縮め、1 コマ単独キーフレームのときはそのキーフレーム自体を削除して後続を左へ詰める
+        // Layer 2 の frame 3 と frame 4 にキーフレームを挿入し、frame 3 を 1 コマ単独キーフレームにする
+        app2.timeline.layers[1].insert_keyframe(3, false);
+        app2.timeline.layers[1].insert_keyframe(4, false);
+        let kf_count_before = app2.timeline.layers[1].keyframes.len();
+        // frame 0 は保持尺が 3 コマ (0, 1, 2) あるので、frame 0 で Shift+F5 を押すと kf[0] は消えず保持尺が 2 コマになり後続が 1 コマ左へ詰まる
+        app2.select_timeline_cells(1, 0, 1, 0);
+        assert!(app2.timeline_remove_frame());
+        assert_eq!(
+            app2.timeline.layers[1].keyframes.len(),
+            kf_count_before,
+            "保持フレームがあるキーフレーム上での Shift+F5 はキーフレームを消さず保持尺のみ1コマ縮めること"
+        );
+        // 次に 1 コマ幅になったキーフレーム（旧 frame 3 -> 現 frame 2）の上で Shift+F5 を押すと、その1コマKF自体が削除され後続が左へ詰まる
+        app2.select_timeline_cells(1, 2, 1, 2);
+        assert!(app2.timeline_remove_frame());
+        assert_eq!(
+            app2.timeline.layers[1].keyframes.len(),
+            kf_count_before - 1,
+            "保持フレームがない1コマ単独キーフレーム上での Shift+F5 はそのキーフレーム自体を削除して後続を左へ詰めること"
+        );
     }
 
     #[test]
