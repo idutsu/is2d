@@ -1504,4 +1504,160 @@ mod tests {
             "選択状態の細い線の外周マージン内でも移動（Fill）として掴めること"
         );
     }
+
+    #[test]
+    fn test_g1_tangent_continuity_and_spine_smoothing() {
+        let center = Point::new(220.0, 220.0);
+        let circle_r = 60.0;
+        let brush_r = 10.0;
+
+        // 手ブレの入った円ストロークを生成
+        let steps = 96usize;
+        let pts: Vec<Point> = (0..=(steps + 2))
+            .map(|i| {
+                let theta = (i as f64 / steps as f64) * std::f64::consts::TAU;
+                let wobble = (theta * 11.0).sin() * 1.8 + (theta * 17.0).cos() * 0.9;
+                let r_curr = circle_r + wobble;
+                Point::new(
+                    center.x + r_curr * theta.cos(),
+                    center.y + r_curr * theta.sin(),
+                )
+            })
+            .collect();
+
+        let raw = generate_brush_outline(&pts, brush_r);
+        let shapes = build_smoothed_stroke_shapes(&raw, Color32::BLACK);
+        assert_eq!(shapes.len(), 1);
+        let shape = &shapes[0];
+
+        // 外周・内周のすべてのアンカーにおいて、前後の2次ベジェ曲線の接線方向が一直線（G1連続）に揃っていること
+        for (c_idx, contour) in std::iter::once(&shape.exterior)
+            .chain(shape.holes.iter())
+            .enumerate()
+        {
+            let k = contour.segments.len();
+            for j in 0..k {
+                let prev = (j + k - 1) % k;
+                let t_in = normalize_vec(contour.segments[prev].p2 - contour.segments[prev].p1);
+                let t_out = normalize_vec(contour.segments[j].p1 - contour.segments[j].p0);
+                let dot = t_in.dot(t_out);
+                assert!(
+                    dot > 0.9999,
+                    "contour {c_idx} アンカー {j}/{k} で前後のベジェ曲線の接線が G1 連続に揃っていること (dot = {dot})"
+                );
+            }
+        }
+
+        // 短い辺（約35px）のコンパクトな V 字ストロークを描いたとき、角が勝手に丸められて削られないこと
+        let v_corners = [
+            Point::new(100.0, 100.0),
+            Point::new(125.0, 130.0),
+            Point::new(150.0, 100.0),
+        ];
+        let mut v_pts = Vec::new();
+        for w in v_corners.windows(2) {
+            for k in 0..16 {
+                v_pts.push(w[0].lerp(w[1], k as f64 / 16.0));
+            }
+        }
+        v_pts.push(v_corners[2]);
+        let r_v = 8.0;
+        let v_raw = generate_brush_outline(&v_pts, r_v);
+        let v_shapes = build_smoothed_stroke_shapes(&v_raw, Color32::BLACK);
+        assert_eq!(v_shapes.len(), 1);
+        let v_shape = &v_shapes[0];
+        // V字の下端外角頂点 (125, 130 + r_v * 0.85) が丸められて欠けず、しっかり塗られていること
+        assert!(
+            v_shape.contains_point(Point::new(125.0, 130.0 + r_v * 0.85)),
+            "コンパクトなV字の外角先端が勝手に丸められて削られないこと"
+        );
+        // V字の内角の谷間 (125, 114) が勝手に丸められて埋まらず、空白のままであること
+        assert!(
+            !v_shape.contains_point(Point::new(125.0, 114.0)),
+            "コンパクトなV字の内角が勝手に丸められて潰れないこと"
+        );
+
+        // L字ストローク (100,100) -> (100,200) -> (200,200) で外角・内角ともに前後の直線が巻き込まれて大きく丸まらないこと
+        let l_corners = [
+            Point::new(100.0, 100.0),
+            Point::new(100.0, 200.0),
+            Point::new(200.0, 200.0),
+        ];
+        let mut l_pts = Vec::new();
+        for w in l_corners.windows(2) {
+            for k in 0..25 {
+                l_pts.push(w[0].lerp(w[1], k as f64 / 25.0));
+            }
+        }
+        l_pts.push(l_corners[2]);
+        let r_l = 10.0;
+        let l_raw = generate_brush_outline(&l_pts, r_l);
+        let l_shapes = build_smoothed_stroke_shapes(&l_raw, Color32::BLACK);
+        assert_eq!(l_shapes.len(), 1);
+        let l_shape = &l_shapes[0];
+        assert!(
+            l_shape.contains_point(Point::new(91.5, 198.5)),
+            "L字の外角付近が削られて大きく丸まらないこと"
+        );
+        assert!(
+            !l_shape.contains_point(Point::new(88.0, 185.0)),
+            "L字の外角手前の直線辺が外側に膨らまないこと"
+        );
+        assert!(
+            !l_shape.contains_point(Point::new(112.5, 187.5)),
+            "L字の内角 (110, 190) が丸められて埋まらないこと"
+        );
+
+        // 「あ」の3画目のように、書き始めの先端が交差部から少しだけ（8px〜16px）突き出て自己交差するストロークで、
+        // 右上の交差谷間（凹V字ノッチ）が丸められてコブになったり突起が潰れたりしないこと
+        for tip_protrusion in [5.0_f64, 6.0, 9.0, 12.0, 15.0, 19.0, 24.0, 30.0] {
+            let r_a = 9.0;
+            let cross_pt = Point::new(200.0, 130.0);
+            let dir_down_left = normalize_vec(KVec2::new(-0.32, 0.95));
+            let tip_start = cross_pt - dir_down_left * tip_protrusion;
+            let a_fixed = [
+                tip_start,
+                cross_pt,
+                Point::new(190.0, 160.0),
+                Point::new(172.0, 198.0),
+                Point::new(145.0, 210.0),
+                Point::new(125.0, 190.0),
+                Point::new(128.0, 152.0),
+                Point::new(155.0, 130.0),
+                Point::new(182.0, 126.0),
+                cross_pt,
+                Point::new(218.0, 140.0),
+                Point::new(230.0, 165.0),
+                Point::new(225.0, 205.0),
+            ];
+            let mut a_pts = Vec::new();
+            for w in a_fixed.windows(2) {
+                let seg_len = (w[1] - w[0]).hypot();
+                let steps = ((seg_len / 2.5).ceil() as usize).max(4);
+                for k in 0..steps {
+                    a_pts.push(w[0].lerp(w[1], k as f64 / steps as f64));
+                }
+            }
+            a_pts.push(*a_fixed.last().unwrap());
+
+            let a_raw = generate_brush_outline(&a_pts, r_a);
+            let a_shapes = build_smoothed_stroke_shapes(&a_raw, Color32::BLACK);
+            assert_eq!(a_shapes.len(), 1);
+            let a_shape = &a_shapes[0];
+
+            // 右上の突起先端 (tip_start) の外周付近が削られずに残っていること
+            let tip_apex = tip_start - dir_down_left * (r_a * 0.80);
+            assert!(
+                a_shape.contains_point(tip_apex),
+                "protrusion={tip_protrusion}: 『あ』の右上突起の先端が丸められて潰れないこと"
+            );
+
+            // 突起の右側にある交差くびれ（凹V字ノッチ）のすぐ外側が勝手に繋がってコブ状に埋まらないこと
+            let valley_outside_probe = Point::new(cross_pt.x + r_a + 3.2, cross_pt.y - 5.5);
+            assert!(
+                !a_shape.contains_point(valley_outside_probe),
+                "protrusion={tip_protrusion}: 『あ』の右上交差部の谷間が丸められてコブ状に繋がらないこと"
+            );
+        }
+    }
 }

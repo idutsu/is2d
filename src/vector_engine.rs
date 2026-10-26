@@ -581,18 +581,25 @@ fn smooth_ring_to_quad_contour(
     let w_short = ((4.0 * r_scale / actual_ds).round() as usize).clamp(1, (m / 8).max(1));
     let w_local = ((6.0 * r_scale / actual_ds).round() as usize).clamp(2, (m / 6).max(2));
     let w_macro = ((18.0 * r_scale / actual_ds).round() as usize).clamp(4, (m / 5).max(4));
-    let (is_sharp_corner, is_high_curv) =
-        classify_and_align_ring_features(&mut dense, w_short, w_local, w_macro, r_scale, actual_ds);
+    let (is_sharp_corner, is_high_curv) = classify_and_align_ring_features(
+        &mut dense,
+        w_short,
+        w_local,
+        w_macro,
+        r_scale,
+        actual_ds,
+        expect_positive_area,
+    );
 
     // 3. ゼロ収縮（Zero-Shrinkage）2スケール移動平均フィルタによる手ブレ波打ち除去
     apply_zero_shrinkage_smoothing(&mut dense, &is_high_curv);
 
     // 4. 保護された高曲率ラン（鋭角ピーク・丸コーナー出入口・180度丸キャップ中点）のロック頂点決定
-    let locked = select_locked_feature_anchors(&dense, &is_sharp_corner, &is_high_curv, w_short, w_macro);
+    let locked = select_locked_feature_anchors(&dense, &is_sharp_corner, &is_high_curv, w_short);
 
     // 5. 単一 QuadBez フィット誤差に基づく反復アンカー削減
-    let max_edge_tol = 1.10 * r_scale;
-    let max_cap_tol = (0.42 * screen_r_scale).max(0.08) / z;
+    let max_edge_tol = 0.95 * r_scale;
+    let max_cap_tol = (0.38 * screen_r_scale).max(0.08) / z;
     let anchors = reduce_outline_anchors_by_quad_fit(
         &dense,
         &locked,
@@ -604,21 +611,34 @@ fn smooth_ring_to_quad_contour(
         return None;
     }
 
-    // 6. 各アンカー区間に形状保持2次ベジェ曲線（QuadBez）をフィッティング
-    let straight_snap_tol = (0.22 * screen_r_scale).clamp(0.04, 0.25) / z;
+    // 6. 各アンカー区間に形状保持2次ベジェ曲線（QuadBez）をフィッティングし、
+    //    滑らかな中間アンカーで前後の接線方向を一直線に揃える（G1連続フィッティング）
+    let straight_snap_tol = (0.18 * screen_r_scale).clamp(0.04, 0.20) / z;
     let k = anchors.len();
     let mut segments = Vec::with_capacity(k);
+    let mut is_straight = Vec::with_capacity(k);
     for j in 0..k {
         let span_pts = extract_cyclic_span(&dense, anchors[j], anchors[(j + 1) % k]);
         let p0 = *span_pts.first()?;
         let p2 = *span_pts.last()?;
-        let p1 = if max_deviation_from_chord(&span_pts) <= straight_snap_tol {
+        let straight = max_deviation_from_chord(&span_pts) <= straight_snap_tol;
+        let p1 = if straight {
             p0.lerp(p2, 0.5)
         } else {
             fit_quad_control_point_shape_preserving(&span_pts, p0, p2)
         };
         segments.push(QuadBez::new(p0, p1, p2));
+        is_straight.push(straight);
     }
+
+    enforce_g1_tangent_continuity_on_segments(
+        &mut segments,
+        &dense,
+        &anchors,
+        &is_sharp_corner,
+        &is_straight,
+        r_scale,
+    );
 
     let mut contour = Contour { segments };
     contour.cleanup_degenerate((0.45 * screen_r_scale).clamp(0.08, 0.5) / z);
@@ -676,6 +696,51 @@ fn resample_closed_ring_uniform(
     Some((dense, actual_ds))
 }
 
+/// `flags` 内の連続する `true` 区間 `(start, end)`（両端含む）を列挙する
+fn find_true_runs(flags: &[bool]) -> Vec<(usize, usize)> {
+    let m = flags.len();
+    let mut runs = Vec::new();
+    let mut idx = 0usize;
+    while idx < m {
+        if !flags[idx] {
+            idx += 1;
+            continue;
+        }
+        let start = idx;
+        while idx + 1 < m && flags[idx + 1] {
+            idx += 1;
+        }
+        runs.push((start, idx));
+        idx += 1;
+    }
+    runs
+}
+
+/// 連続ラン `run_start..=run_end` の前後を、`is_sharp_corner` を跨がない範囲で最大2頂点ずつ拡張した `(before_i, after_i)` を返す
+#[inline]
+fn clamp_run_bounds(
+    run_start: usize,
+    run_end: usize,
+    m: usize,
+    is_sharp_corner: &[bool],
+) -> (usize, usize) {
+    let mut b = run_start;
+    for _ in 0..2 {
+        if b == 0 || is_sharp_corner[b - 1] {
+            break;
+        }
+        b -= 1;
+    }
+    let mut a = run_end;
+    for _ in 0..2 {
+        if a + 1 >= m || is_sharp_corner[a + 1] {
+            break;
+        }
+        a += 1;
+    }
+    (b, a)
+}
+
 /// 輪郭頂点を「鋭角コーナー (`is_sharp_corner`)」「丸円弧 (`is_round_arc`)」「低曲率側面」に分類し、
 /// 最長の低曲率側面の中央が index 0 になるよう回転して返す。
 fn classify_and_align_ring_features(
@@ -685,47 +750,123 @@ fn classify_and_align_ring_features(
     w_macro: usize,
     r_scale: f64,
     actual_ds: f64,
+    is_exterior: bool,
 ) -> (Vec<bool>, Vec<bool>) {
     let m = dense.len();
+    let winding_sign = if polygon_signed_area(dense) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
     let signed_turn_at = |pts: &[Point], idx: usize, w: usize| -> f64 {
         let d_in = normalize_vec(pts[idx] - pts[(idx + m - w) % m]);
         let d_out = normalize_vec(pts[(idx + w) % m] - pts[idx]);
         signed_angle(d_in, d_out)
     };
 
+    let mut t_1 = vec![0.0; m];
     let mut t_short = vec![0.0; m];
     let mut t_local = vec![0.0; m];
     let mut t_macro = vec![0.0; m];
-    let mut cos_short = vec![1.0; m];
-    let mut cos_macro = vec![1.0; m];
 
     for i in 0..m {
+        t_1[i] = signed_turn_at(dense, i, 1);
         t_short[i] = signed_turn_at(dense, i, w_short);
         t_local[i] = signed_turn_at(dense, i, w_local);
         t_macro[i] = signed_turn_at(dense, i, w_macro);
-        cos_short[i] = t_short[i].cos();
-        cos_macro[i] = t_macro[i].cos();
     }
 
-    // (A) 鋭角コーナー・自己交差分岐点の検出
+    let max_cap_scan = (w_macro + w_local).min(m / 3);
+    let scan_adjacent_cap_side = |idx: usize, forward: bool| -> bool {
+        let mut net = 0.0_f64;
+        let mut in_arc = false;
+        let mut hit_other_notch = false;
+        for d in 1..=max_cap_scan {
+            let p = if forward {
+                (idx + d) % m
+            } else {
+                (idx + m - d) % m
+            };
+            let ts_conv = t_short[p] * winding_sign;
+            if ts_conv >= 0.08 {
+                in_arc = true;
+                net += t_1[p] * winding_sign;
+            } else if in_arc {
+                let adj = if forward {
+                    (p + 1) % m
+                } else {
+                    (p + m - 1) % m
+                };
+                if ts_conv <= -0.30 || t_short[adj] * winding_sign <= -0.30 {
+                    hit_other_notch = true;
+                }
+                break;
+            } else if d > w_short && ts_conv < -0.10 {
+                break;
+            }
+        }
+        net >= 2.20 || (hit_other_notch && net >= 1.10)
+    };
+
+    // (A) 鋭角コーナー・自己交差分岐点（外周の凹V字ノッチや、穴の内角など）の検出
+    // ※ 外周（`is_exterior == true`）における凸方向（`t_short * winding_sign > 0`）のターンは
+    //    丸ブラシの半径 r が作る円弧（外角・丸キャップ）であり、1点の鋭角にはならないため除外する。
     let mut is_sharp_corner = vec![false; m];
     for i in 0..m {
+        if is_exterior && t_short[i] * winding_sign > 0.0 {
+            continue;
+        }
         let ts_abs = t_short[i].abs();
         let tl_abs = t_local[i].abs();
         let tm_abs = t_macro[i].abs();
-        let is_right_sharp = cos_short[i] < 0.45 && tl_abs > 1.00 && cos_macro[i] < 0.48;
-        let is_concentrated_junction = ts_abs > 0.62
+
+        let t1_curr = t_1[i];
+        let t1_prev = if t_1[(i + m - 1) % m] * t1_curr > 0.0 {
+            t_1[(i + m - 1) % m]
+        } else {
+            0.0
+        };
+        let t1_next = if t_1[(i + 1) % m] * t1_curr > 0.0 {
+            t_1[(i + 1) % m]
+        } else {
+            0.0
+        };
+        let t_peak_2v =
+            (t1_curr + if t1_prev.abs() >= t1_next.abs() { t1_prev } else { t1_next }).abs();
+
+        let is_oscillating_wobble = t_short[(i + m - w_local) % m] * t_short[i] < -0.10
+            || t_short[(i + w_local) % m] * t_short[i] < -0.10;
+
+        let is_cap_adjacent_notch = is_exterior
+            && t_short[i] * winding_sign < 0.0
+            && t1_curr * winding_sign < 0.0
+            && ts_abs >= 0.44
+            && t_peak_2v >= 0.38
+            && t_peak_2v >= 0.74 * ts_abs
+            && t_1[(i + m - 1) % m] * t1_curr >= -0.35 * t1_curr.abs()
+            && t_1[(i + 1) % m] * t1_curr >= -0.35 * t1_curr.abs()
+            && (scan_adjacent_cap_side(i, false) || scan_adjacent_cap_side(i, true));
+
+        let macro_valid = !is_exterior || t_macro[i] * winding_sign < 0.0;
+        let is_right_sharp = macro_valid
+            && t_short[i].cos() < 0.45
+            && tl_abs > 1.00
+            && t_macro[i].cos() < 0.48;
+        let is_concentrated_junction = macro_valid
+            && !is_oscillating_wobble
+            && ts_abs > 0.62
             && tl_abs > 0.62
             && tm_abs > 0.55
             && ts_abs >= 0.80 * tl_abs
             && t_short[i] * t_macro[i] > 0.0;
 
-        if is_right_sharp || is_concentrated_junction {
+        if is_cap_adjacent_notch || is_right_sharp || is_concentrated_junction {
+            let s_i = if t_short[i] >= 0.0 { 1.0 } else { -1.0 };
+            let mag_i = t_short[i] * s_i;
             let is_min = (1..=w_local).all(|d| {
-                let prev = (i + m - d) % m;
-                let next = (i + d) % m;
-                cos_short[i] <= cos_short[prev] && cos_short[i] < cos_short[next]
-                    || (cos_short[i] == cos_short[next] && d > 1)
+                let mag_prev = t_short[(i + m - d) % m] * s_i;
+                let mag_next = t_short[(i + d) % m] * s_i;
+                mag_i >= mag_prev && (mag_i > mag_next || (mag_i == mag_next && d > 1))
             });
             if is_min {
                 is_sharp_corner[i] = true;
@@ -733,16 +874,44 @@ fn classify_and_align_ring_features(
         }
     }
 
+    // 鋭角ノッチ近傍の頂点では、`t_local` / `t_macro` の計測窓が V字ノッチを跨いで相殺されるのを防ぐため窓をクランプする
+    if is_sharp_corner.iter().any(|&b| b) {
+        let clamped_turn = |idx: usize, max_w: usize| -> f64 {
+            let w_b = (1..=max_w)
+                .find(|&step| is_sharp_corner[(idx + m - step) % m])
+                .unwrap_or(max_w);
+            let w_f = (1..=max_w)
+                .find(|&step| is_sharp_corner[(idx + step) % m])
+                .unwrap_or(max_w);
+            let d_in = normalize_vec(dense[idx] - dense[(idx + m - w_b) % m]);
+            let d_out = normalize_vec(dense[(idx + w_f) % m] - dense[idx]);
+            signed_angle(d_in, d_out)
+        };
+        for i in 0..m {
+            if !is_sharp_corner[i] {
+                t_local[i] = clamped_turn(i, w_local);
+                t_macro[i] = clamped_turn(i, w_macro);
+            }
+        }
+    }
+
     // (B) 滑らかな丸円弧（Round Cap / Round Corner）の候補検出
     let mut is_round_arc = vec![false; m];
     for i in 0..m {
-        let near_sharp =
-            (0..=w_macro).any(|d| is_sharp_corner[(i + d) % m] || is_sharp_corner[(i + m - d) % m]);
-        if near_sharp {
+        if is_sharp_corner[i] {
+            continue;
+        }
+        let near_same_sign_sharp = (1..=w_macro).any(|d| {
+            let next = (i + d) % m;
+            let prev = (i + m - d) % m;
+            (is_sharp_corner[next] && t_short[next] * t_short[i] > 0.0)
+                || (is_sharp_corner[prev] && t_short[prev] * t_short[i] > 0.0)
+        });
+        if near_same_sign_sharp {
             continue;
         }
         let (ts, tl, tm) = (t_short[i], t_local[i], t_macro[i]);
-        if ts.abs() > 0.11 && tl.abs() > 0.18 && tm.abs() > 0.52 && ts * tm > 0.0 && tl * tm > 0.0 {
+        if ts.abs() > 0.11 && tl.abs() > 0.18 && tm.abs() > 0.48 && ts * tm > 0.0 && tl * tm > 0.0 {
             is_round_arc[i] = true;
         }
     }
@@ -759,8 +928,10 @@ fn classify_and_align_ring_features(
         }
     }
 
-    // 過半数が丸円弧の場合は直線辺を持たない小円・楕円ループなので全周を均一平滑化する
-    if is_round_arc.iter().filter(|&&b| b).count() * 2 >= m {
+    // 8割以上が丸円弧で鋭角を持たない場合は直線辺を持たない小円・楕円ループなので全周を均一平滑化する
+    if !is_sharp_corner.iter().any(|&b| b)
+        && is_round_arc.iter().filter(|&&b| b).count() * 5 >= m * 4
+    {
         is_round_arc.fill(false);
     }
 
@@ -770,47 +941,58 @@ fn classify_and_align_ring_features(
 
     if let Some(rot_idx) = find_longest_false_run_midpoint(&is_high_curv) {
         dense.rotate_left(rot_idx);
+        t_local.rotate_left(rot_idx);
         t_macro.rotate_left(rot_idx);
         is_sharp_corner.rotate_left(rot_idx);
         is_round_arc.rotate_left(rot_idx);
         is_high_curv.rotate_left(rot_idx);
     }
 
-    // `is_round_arc` の連続ランを検証し、180度丸キャップまたは直線辺に挟まれた丸コーナーのみを保護する
+    // `is_round_arc` の連続ランを検証し、180度丸キャップまたは局所的な丸コーナーを保護する
     if is_round_arc.iter().any(|&b| b) && !is_round_arc.iter().all(|&b| b) {
-        let flank_len = ((48.0 * r_scale / actual_ds).round() as usize).clamp(6, (m / 4).max(6));
-        let mut idx = 0usize;
-        while idx < m {
-            if !is_round_arc[idx] {
-                idx += 1;
-                continue;
-            }
-            let r_start = idx;
-            while idx + 1 < m && is_round_arc[idx + 1] {
-                idx += 1;
-            }
-            let r_end = idx;
-            idx += 1;
+        let flank_len = ((44.0 * r_scale / actual_ds).round() as usize).clamp(5, (m / 4).max(5));
+        let local_to_macro = (w_macro as f64 / w_local.max(1) as f64).max(1.0);
+        let runs = find_true_runs(&is_round_arc);
 
-            let b_i = r_start.saturating_sub(2);
-            let a_i = (r_end + 2).min(m - 1);
+        let mut is_cap_vertex = vec![false; m];
+        for &(rs, re) in &runs {
+            let (b_i, a_i) = clamp_run_bounds(rs, re, m, &is_sharp_corner);
+            let (nt, _) = span_turn_metrics(&dense[b_i..=a_i]);
+            if nt >= 1.85 && (re - rs) < m / 2 {
+                is_cap_vertex[rs..=re].fill(true);
+            }
+        }
+
+        for (r_start, r_end) in runs {
+            let is_round_cap = is_cap_vertex[r_start];
+            let (b_i, a_i) = clamp_run_bounds(r_start, r_end, m, &is_sharp_corner);
             let (net_turn, _) = span_turn_metrics(&dense[b_i..=a_i]);
 
             let sum_corner_tm: f64 = (r_start..=r_end).map(|k| t_macro[k]).sum();
             let corner_sign = if sum_corner_tm >= 0.0 { 1.0 } else { -1.0 };
 
             let mean_flank_turn = |start_idx: usize, forward: bool| -> f64 {
-                let sum: f64 = (3..=(flank_len + 2))
-                    .map(|d| {
-                        let i = if forward {
-                            (start_idx + d) % m
-                        } else {
-                            (start_idx + m - (d % m)) % m
-                        };
-                        t_macro[i] * corner_sign
-                    })
-                    .sum();
-                (sum / flank_len as f64).max(0.0)
+                let mut sum = 0.0;
+                let mut cnt = 0usize;
+                for d in 1..(w_local + flank_len) {
+                    let i = if forward {
+                        (start_idx + d) % m
+                    } else {
+                        (start_idx + m - (d % m)) % m
+                    };
+                    if is_sharp_corner[i] || is_cap_vertex[i] {
+                        break;
+                    }
+                    if d >= w_local {
+                        sum += t_local[i] * local_to_macro * corner_sign;
+                        cnt += 1;
+                    }
+                }
+                if cnt > 0 {
+                    (sum / cnt as f64).max(0.0)
+                } else {
+                    0.0
+                }
             };
 
             let flank_before = mean_flank_turn(r_start, false);
@@ -818,14 +1000,20 @@ fn classify_and_align_ring_features(
             let peak_abs_tm = (r_start..=r_end)
                 .map(|k| t_macro[k].abs())
                 .fold(0.0_f64, f64::max);
+            let peak_abs_tl = (r_start..=r_end)
+                .map(|k| t_local[k].abs())
+                .fold(0.0_f64, f64::max);
 
-            let is_round_cap = net_turn >= 1.95 && (r_end - r_start) < m / 2;
-            let is_localized_round_corner = net_turn >= 1.00
-                && (r_end - r_start) <= m / 4
-                && flank_before < 0.25
-                && flank_after < 0.25
-                && flank_before < 0.38 * peak_abs_tm
-                && flank_after < 0.38 * peak_abs_tm;
+            let is_localized_round_corner = (r_end - r_start) <= m / 3
+                && ((net_turn >= 0.58
+                    && flank_before < 0.28
+                    && flank_after < 0.28
+                    && flank_before < 0.42 * peak_abs_tm
+                    && flank_after < 0.42 * peak_abs_tm)
+                    || (net_turn >= 0.88
+                        && peak_abs_tl >= 0.52
+                        && flank_before < 0.52 * peak_abs_tm
+                        && flank_after < 0.52 * peak_abs_tm));
 
             if !is_round_cap && !is_localized_round_corner {
                 for k in r_start..=r_end {
@@ -841,13 +1029,13 @@ fn classify_and_align_ring_features(
     (is_sharp_corner, is_high_curv)
 }
 
-/// ゼロ収縮（Zero-Shrinkage）2スケール移動平均フィルタで、円や曲線の半径・線幅を100%保ちつつ手ブレ波打ちを除去する
+/// ゼロ収縮（Zero-Shrinkage）2スケール移動平均フィルタで、描いた形や凹凸を丸めずに輪郭表面のギザギザだけを除去する
 fn apply_zero_shrinkage_smoothing(dense: &mut [Point], is_high_curv: &[bool]) {
     let m = dense.len();
     let mut dist_to_hc = vec![m; m];
     if is_high_curv.iter().any(|&b| b) {
-        for i in 0..m {
-            if is_high_curv[i] {
+        for (i, &hc) in is_high_curv.iter().enumerate() {
+            if hc {
                 dist_to_hc[i] = 0;
             }
         }
@@ -863,12 +1051,15 @@ fn apply_zero_shrinkage_smoothing(dense: &mut [Point], is_high_curv: &[bool]) {
         }
     }
 
-    const SMOOTH_PASSES: usize = 10;
-    let w_wide = 12usize.min(m / 5).max(3);
+    const SMOOTH_PASSES: usize = 9;
+    let w_wide = 11usize.min(m / 5).max(3);
+    let mut prev_pts = vec![Point::ORIGIN; m];
+    let mut deltas = vec![KVec2::ZERO; m];
 
     for _ in 0..SMOOTH_PASSES {
-        let prev_pts = dense.to_vec();
-        let mut deltas = vec![KVec2::ZERO; m];
+        prev_pts.copy_from_slice(dense);
+        deltas.fill(KVec2::ZERO);
+
         for i in 0..m {
             let w = dist_to_hc[i].min(5);
             if w == 0 {
@@ -878,8 +1069,7 @@ fn apply_zero_shrinkage_smoothing(dense: &mut [Point], is_high_curv: &[bool]) {
             for k in 1..=w {
                 sum += prev_pts[(i + m - k) % m].to_vec2() + prev_pts[(i + k) % m].to_vec2();
             }
-            let avg = (sum / (2 * w) as f64).to_point();
-            deltas[i] = avg - prev_pts[i];
+            deltas[i] = (sum / (2 * w) as f64).to_point() - prev_pts[i];
         }
 
         for i in 0..m {
@@ -920,7 +1110,6 @@ fn select_locked_feature_anchors(
     is_sharp_corner: &[bool],
     is_high_curv: &[bool],
     w_short: usize,
-    w_macro: usize,
 ) -> Vec<bool> {
     let m = dense.len();
     let mut cos_s = vec![1.0; m];
@@ -940,26 +1129,25 @@ fn select_locked_feature_anchors(
         return locked;
     }
 
-    let mut idx = 0usize;
-    while idx < m {
-        if !is_high_curv[idx] {
-            idx += 1;
-            continue;
+    // 1. 鋭角コーナー・自己交差V字ノッチは1点に折れ曲がりが集中しているため、頂点そのものを直接ロックする
+    for (i, &sharp) in is_sharp_corner.iter().enumerate() {
+        if sharp {
+            locked[i] = true;
         }
-        let run_start = idx;
-        while idx + 1 < m && is_high_curv[idx + 1] {
-            idx += 1;
-        }
-        let run_end = idx;
-        idx += 1;
+    }
 
+    // 2. 丸ブラシの外角や丸キャップ（`is_high_curv && !is_sharp_corner`）の連続ランを走査し、
+    //    隣接する鋭角ノッチと混ざって1点ロックに退化しないよう独立に出入口（`i_start` / `i_end`）と中点をロックする
+    let is_round_only: Vec<bool> = (0..m)
+        .map(|i| is_high_curv[i] && !is_sharp_corner[i])
+        .collect();
+
+    for (run_start, run_end) in find_true_runs(&is_round_only) {
         let peak_i = (run_start..=run_end)
             .min_by(|&a, &b| cos_s[a].partial_cmp(&cos_s[b]).unwrap_or(std::cmp::Ordering::Equal))
             .unwrap_or((run_start + run_end) / 2);
-        let min_cos = cos_s[peak_i];
 
-        let before_i = run_start.saturating_sub(2);
-        let after_i = (run_end + 2).min(m - 1);
+        let (before_i, after_i) = clamp_run_bounds(run_start, run_end, m, is_sharp_corner);
         let t_in = local_tangents[before_i];
         let t_out = local_tangents[after_i];
         let (total_turn, _) = span_turn_metrics(&dense[before_i..=after_i]);
@@ -968,53 +1156,38 @@ fn select_locked_feature_anchors(
             continue;
         }
 
-        let has_sharp = (run_start..=run_end).any(|k| is_sharp_corner[k]);
-        if has_sharp || (min_cos < 0.45 && (run_end - run_start) <= w_macro) {
+        let i_start = (before_i..=after_i)
+            .take_while(|&k| signed_angle(t_in, local_tangents[k]).abs() <= 0.18)
+            .last()
+            .unwrap_or(run_start);
+
+        let i_end = (before_i..=after_i)
+            .rev()
+            .take_while(|&k| signed_angle(local_tangents[k], t_out).abs() <= 0.18)
+            .last()
+            .unwrap_or(run_end);
+
+        let adj_sharp = (1..=3).any(|d| {
+            is_sharp_corner[(run_start + m - (d % m)) % m]
+                || is_sharp_corner[(run_end + d) % m]
+        });
+
+        if i_end <= i_start + 1 {
             locked[peak_i] = true;
         } else {
-            let mut i_start = run_start;
-            for (k, &tk) in local_tangents
-                .iter()
-                .enumerate()
-                .take(after_i + 1)
-                .skip(before_i)
-            {
-                if signed_angle(t_in, tk).abs() <= 0.18 {
-                    i_start = k;
-                } else {
-                    break;
-                }
-            }
-
-            let mut i_end = run_end;
-            for (k, &tk) in local_tangents
-                .iter()
-                .enumerate()
-                .take(after_i + 1)
-                .skip(before_i)
-                .rev()
-            {
-                if signed_angle(tk, t_out).abs() <= 0.18 {
-                    i_end = k;
-                } else {
-                    break;
-                }
-            }
-
-            if i_end <= i_start + 1 {
+            locked[i_start] = true;
+            locked[i_end] = true;
+            if adj_sharp {
                 locked[peak_i] = true;
-            } else {
-                locked[i_start] = true;
-                locked[i_end] = true;
-                if total_turn > 2.10 && i_end >= i_start + 4 {
-                    let mid_target = 0.5 * total_turn;
-                    if let Some(best_mid) = ((i_start + 1)..i_end).min_by(|&a, &b| {
-                        let da = (signed_angle(t_in, local_tangents[a]).abs() - mid_target).abs();
-                        let db = (signed_angle(t_in, local_tangents[b]).abs() - mid_target).abs();
-                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                    }) {
-                        locked[best_mid] = true;
-                    }
+            }
+            if total_turn > 1.75 && i_end >= i_start + 4 {
+                let mid_target = 0.5 * total_turn;
+                if let Some(best_mid) = ((i_start + 1)..i_end).min_by(|&a, &b| {
+                    let da = (signed_angle(t_in, local_tangents[a]).abs() - mid_target).abs();
+                    let db = (signed_angle(t_in, local_tangents[b]).abs() - mid_target).abs();
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    locked[best_mid] = true;
                 }
             }
         }
@@ -1060,12 +1233,21 @@ fn find_longest_false_run_midpoint(flags: &[bool]) -> Option<usize> {
 /// 点列 `pts` の始点 `p0` と終点 `p2` を固定したとき、輪郭の弧長中点 $M$ を正確に通過する制御点 `p1_mid` と
 /// 最小二乗制御点 `p1_ls` をブレンドし、曲線や丸キャップ・丸コーナーが内側に痩せない 2次ベジェ制御点 `p1` を求める。
 fn fit_quad_control_point_shape_preserving(pts: &[Point], p0: Point, p2: Point) -> Point {
+    let cum = compute_cumulative_arc_lengths(pts);
+    fit_quad_control_point_with_arc_lengths(pts, &cum, p0, p2)
+}
+
+fn fit_quad_control_point_with_arc_lengths(
+    pts: &[Point],
+    cum: &[f64],
+    p0: Point,
+    p2: Point,
+) -> Point {
     let n = pts.len();
     if n <= 2 {
         return p0.lerp(p2, 0.5);
     }
 
-    let cum = compute_cumulative_arc_lengths(pts);
     let total = cum[n - 1];
     if total < 1e-6 {
         return p0.lerp(p2, 0.5);
@@ -1085,23 +1267,134 @@ fn fit_quad_control_point_shape_preserving(pts: &[Point], p0: Point, p2: Point) 
         2.0 * mid_pt.x - 0.5 * (p0.x + p2.x),
         2.0 * mid_pt.y - 0.5 * (p0.y + p2.y),
     );
-    let p1_ls = fit_quad_control_point_least_squares(pts, p0, p2);
+    let p1_ls = fit_quad_control_point_least_squares(pts, cum, p0, p2);
     p1_mid.lerp(p1_ls, 0.50)
 }
 
+/// 鋭角コーナーではない滑らかなアンカー点において、前後の2次ベジェ曲線の制御点 `p1` が
+/// アンカー点を挟んで共通の接線方向（G1連続）に乗るよう調整し、アンカー箇所の微小な角度折れを解消する。
+fn enforce_g1_tangent_continuity_on_segments(
+    segments: &mut [QuadBez],
+    dense: &[Point],
+    anchors: &[usize],
+    is_sharp_corner: &[bool],
+    is_straight: &[bool],
+    r_scale: f64,
+) {
+    let k = segments.len();
+    let m = dense.len();
+    if k < 2 || m < 6 {
+        return;
+    }
+
+    let w_tan = 3usize.min(m / 8).max(1);
+    let mut anchor_tangents: Vec<Option<KVec2>> = vec![None; k];
+
+    for j in 0..k {
+        let a_idx = anchors[j];
+        let near_sharp = (0..=2).any(|d| {
+            is_sharp_corner[(a_idx + d) % m] || is_sharp_corner[(a_idx + m - d) % m]
+        });
+        if near_sharp {
+            continue;
+        }
+
+        let prev = (j + k - 1) % k;
+        if is_straight[prev] || is_straight[j] {
+            continue;
+        }
+
+        let dir_before = normalize_vec(dense[a_idx] - dense[(a_idx + m - w_tan) % m]);
+        let dir_after = normalize_vec(dense[(a_idx + w_tan) % m] - dense[a_idx]);
+        // 意図的な角（約30度以上の折れ）では接線連続化を行わず角をそのまま残す
+        if dir_before.dot(dir_after) < 0.86 {
+            continue;
+        }
+        let d_ring = normalize_vec(dir_before + dir_after);
+
+        let anchor_pt = segments[j].p0;
+        let v_in = anchor_pt - segments[prev].p1;
+        let v_out = segments[j].p1 - anchor_pt;
+        if v_in.hypot() < 1e-5 || v_out.hypot() < 1e-5 {
+            continue;
+        }
+
+        let d_in = normalize_vec(v_in);
+        let d_out = normalize_vec(v_out);
+        if d_in.dot(d_out) < 0.82 {
+            continue;
+        }
+
+        anchor_tangents[j] = Some(normalize_vec(d_in + d_out + d_ring));
+    }
+
+    let max_radial_shift = 0.85 * r_scale;
+
+    for j in 0..k {
+        if is_straight[j] {
+            continue;
+        }
+        let next = (j + 1) % k;
+        let p0 = segments[j].p0;
+        let p1_init = segments[j].p1;
+        let p2 = segments[j].p2;
+        let chord = p2 - p0;
+        let chord_len = chord.hypot();
+        if chord_len < 1e-4 {
+            continue;
+        }
+        let chord_normal = left_normal(chord / chord_len);
+
+        let t0_opt = anchor_tangents[j].or_else(|| {
+            let v0 = p1_init - p0;
+            (v0.hypot() > 1e-5).then(|| normalize_vec(v0))
+        });
+        let t2_opt = anchor_tangents[next].or_else(|| {
+            let v2 = p2 - p1_init;
+            (v2.hypot() > 1e-5).then(|| normalize_vec(v2))
+        });
+        let has_any_smooth = anchor_tangents[j].is_some() || anchor_tangents[next].is_some();
+        let candidate_p1 = if let (true, Some(t0), Some(t2)) = (has_any_smooth, t0_opt, t2_opt)
+        {
+            let cross = t0.x * t2.y - t0.y * t2.x;
+            if cross.abs() > 0.04 {
+                let s0 = (chord.x * t2.y - chord.y * t2.x) / cross;
+                let s2 = (t0.x * chord.y - t0.y * chord.x) / cross;
+                if s0 > 0.08 * chord_len
+                    && s2 > 0.08 * chord_len
+                    && s0 < 1.8 * chord_len
+                    && s2 < 1.8 * chord_len
+                {
+                    Some(p0 + t0 * s0)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(p1_tan) = candidate_p1 {
+            let radial_diff = (0.5 * (p1_tan - p1_init).dot(chord_normal)).abs();
+            let total_diff = (p1_tan - p1_init).hypot();
+            if radial_diff <= max_radial_shift && total_diff <= 0.42 * chord_len {
+                segments[j].p1 = p1_tan;
+            }
+        }
+    }
+}
+
 /// 点列 `pts` の始点 `p0` と終点 `p2` を固定したときの、最小二乗誤差を最小化する2次ベジェ制御点 `p1` を閉形式で求める
-fn fit_quad_control_point_least_squares(pts: &[Point], p0: Point, p2: Point) -> Point {
+fn fit_quad_control_point_least_squares(
+    pts: &[Point],
+    cum: &[f64],
+    p0: Point,
+    p2: Point,
+) -> Point {
     let n = pts.len();
-    if n <= 2 {
-        return p0.lerp(p2, 0.5);
-    }
-
-    let cum = compute_cumulative_arc_lengths(pts);
     let total_len = cum[n - 1];
-    if total_len < 1e-6 {
-        return p0.lerp(p2, 0.5);
-    }
-
     let mut num = KVec2::ZERO;
     let mut denom = 0.0;
     for i in 1..(n - 1) {
@@ -1178,7 +1471,7 @@ fn reduce_outline_anchors_by_quad_fit(
             }
 
             let (net_turn, macro_abs_turn) = span_turn_metrics(&span_pts);
-            if macro_abs_turn > 0.50 && (macro_abs_turn - net_turn) > 0.35 {
+            if macro_abs_turn > 0.35 && (macro_abs_turn - net_turn) > 0.24 {
                 continue;
             }
 
@@ -1199,8 +1492,9 @@ fn reduce_outline_anchors_by_quad_fit(
 
             let p0 = *span_pts.first().unwrap();
             let p2 = *span_pts.last().unwrap();
-            let p1 = fit_quad_control_point_shape_preserving(&span_pts, p0, p2);
-            let err = max_quad_fit_error(&span_pts, QuadBez::new(p0, p1, p2));
+            let cum = compute_cumulative_arc_lengths(&span_pts);
+            let p1 = fit_quad_control_point_with_arc_lengths(&span_pts, &cum, p0, p2);
+            let err = max_quad_fit_error_with_arc_lengths(&span_pts, &cum, QuadBez::new(p0, p1, p2));
 
             if err <= tol {
                 let score = err + 0.18 * net_turn * net_turn;
@@ -1279,13 +1573,12 @@ fn span_turn_metrics(span_pts: &[Point]) -> (f64, f64) {
 }
 
 /// 点列 `span_pts` と 2次ベジェ曲線 `quad` の最大距離誤差を高速計算する
-fn max_quad_fit_error(span_pts: &[Point], quad: QuadBez) -> f64 {
+fn max_quad_fit_error_with_arc_lengths(span_pts: &[Point], cum: &[f64], quad: QuadBez) -> f64 {
     let n = span_pts.len();
     if n <= 2 {
         return 0.0;
     }
 
-    let cum = compute_cumulative_arc_lengths(span_pts);
     let total_len = cum[n - 1];
     if total_len < 1e-6 {
         return 0.0;
@@ -1367,6 +1660,20 @@ pub(crate) enum BoolOp {
 /// 同一の `group_path` を持つ生シェイプ同士のみが結合（`Union`）・切り抜き（`Difference`）を行い、
 /// 異なるグループに属するシェイプは保護される。
 pub(crate) fn merge_shapes_into_canvas(canvas: &mut Vec<FillShape>, incoming: Vec<FillShape>) {
+    merge_shapes_into_canvas_inner(canvas, incoming, true);
+}
+
+/// 他の異色シェイプと重ならない塗りシェイプ（バケツ塗り・リカラー）をキャンバスへマージし、
+/// 同じ `group_path` の隣接する同色シェイプがあればシームレスに結合（Union）する。
+pub(crate) fn merge_disjoint_fill_into_canvas(canvas: &mut Vec<FillShape>, fill_shape: FillShape) {
+    merge_shapes_into_canvas_inner(canvas, vec![fill_shape], false);
+}
+
+fn merge_shapes_into_canvas_inner(
+    canvas: &mut Vec<FillShape>,
+    incoming: Vec<FillShape>,
+    subtract_diff_color: bool,
+) {
     if incoming.is_empty() {
         return;
     }
@@ -1401,7 +1708,7 @@ pub(crate) fn merge_shapes_into_canvas(canvas: &mut Vec<FillShape>, incoming: Ve
             } else {
                 updated_canvas.push(existing);
             }
-        } else if intersects_bbox {
+        } else if subtract_diff_color && intersects_bbox {
             let color = existing.color;
             updated_canvas.extend(
                 boolean_operation(&[existing], &incoming, BoolOp::Difference, color)
@@ -1549,57 +1856,6 @@ fn reconstruct_fill_shape_from_rings(
         .filter_map(|hole_ring| reconstruct_or_refit_quad_contour(hole_ring, quad_table, false))
         .collect();
     Some(FillShape::new(color, exterior, holes))
-}
-
-/// 他の異色シェイプと重ならない塗りシェイプ（バケツ塗り・リカラー）をキャンバスへマージし、
-/// 同じ `group_path` の隣接する同色シェイプがあればシームレスに結合（Union）する。
-pub(crate) fn merge_disjoint_fill_into_canvas(canvas: &mut Vec<FillShape>, fill_shape: FillShape) {
-    let target_color = fill_shape.color;
-    let target_group_path = fill_shape.group_path.clone();
-    let test_bbox = fill_shape.bounding_box().inflate(1.5, 1.5);
-
-    let insert_limit = if target_group_path.is_empty() {
-        canvas.len()
-    } else {
-        canvas
-            .iter()
-            .rposition(|s| s.is_in_editing_scope(&target_group_path))
-            .map(|pos| pos + 1)
-            .unwrap_or(canvas.len())
-    };
-    let trailing_outside = canvas.split_off(insert_limit);
-
-    let mut overlapping_same_color = Vec::new();
-    let mut updated_canvas = Vec::with_capacity(canvas.len() + 1 + trailing_outside.len());
-
-    for existing in canvas.drain(..) {
-        if existing.group_path == target_group_path
-            && existing.color == target_color
-            && rects_overlap(existing.bounding_box(), test_bbox)
-        {
-            overlapping_same_color.push(existing);
-        } else {
-            updated_canvas.push(existing);
-        }
-    }
-
-    if overlapping_same_color.is_empty() {
-        updated_canvas.push(fill_shape);
-    } else {
-        updated_canvas.extend(
-            boolean_operation(
-                &overlapping_same_color,
-                &[fill_shape],
-                BoolOp::Union,
-                target_color,
-            )
-            .into_iter()
-            .map(|s| s.with_group_path(target_group_path.clone())),
-        );
-    }
-
-    updated_canvas.extend(trailing_outside);
-    *canvas = updated_canvas;
 }
 
 /// キャンバス上のシェイプ群によって完全に囲まれた空白領域（単一シェイプの穴、または複数シェイプで囲まれた閉領域）のうち、
