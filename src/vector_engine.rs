@@ -61,19 +61,22 @@ impl Contour {
 
     /// ポリゴン近似した際の符号付き面積（Shoelace公式）
     pub(crate) fn signed_area(&self) -> f64 {
-        polygon_signed_area(&self.flatten_points(8))
-    }
-
-    /// 各2次ベジェセグメントを `subdivs` 分割した頂点列を返す
-    fn flatten_points(&self, subdivs: usize) -> Vec<Point> {
-        let n = subdivs.max(2);
-        let mut pts = Vec::with_capacity(self.segments.len() * n);
+        let Some(first_seg) = self.segments.first() else {
+            return 0.0;
+        };
+        const SUBDIVS: usize = 8;
+        let first_pt = first_seg.eval(0.0);
+        let mut prev = first_pt;
+        let mut sum = 0.0;
         for seg in &self.segments {
-            for k in 0..n {
-                pts.push(seg.eval(k as f64 / n as f64));
+            for k in 0..SUBDIVS {
+                let curr = seg.eval(k as f64 / SUBDIVS as f64);
+                sum += prev.x * curr.y - curr.x * prev.y;
+                prev = curr;
             }
         }
-        pts
+        sum += prev.x * first_pt.y - first_pt.x * prev.y;
+        0.5 * sum
     }
 
     /// 極端に短い退化セグメントを除去し、端点の連続性を保証する
@@ -478,23 +481,22 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
 
     let z = zoom.clamp(0.15, 16.0);
     let to_world = Affine::scale(1.0 / z);
-    let screen_outline: Vec<Point> = raw_outline
-        .iter()
-        .map(|&p| Point::new(p.x * z, p.y * z))
-        .collect();
-    let raw_f64: Vec<[f64; 2]> = screen_outline.iter().map(|p| [p.x, p.y]).collect();
+    let scale_to_world = |mut contour: Contour| -> Contour {
+        if (z - 1.0).abs() > 1e-9 {
+            contour.transform(to_world);
+        }
+        contour
+    };
+
+    let raw_f64: Vec<[f64; 2]> = raw_outline.iter().map(|&p| [p.x * z, p.y * z]).collect();
     let simplified = raw_f64.simplify_shape(OverlayFillRule::NonZero, 0.05);
 
     if simplified.is_empty() {
+        let screen_outline: Vec<Point> = raw_f64.iter().map(|&[x, y]| Point::new(x, y)).collect();
         let r_est = estimate_brush_radius_from_ring(&screen_outline);
         return smooth_ring_to_quad_contour(&screen_outline, r_est, true)
             .into_iter()
-            .map(|mut exterior| {
-                if (z - 1.0).abs() > 1e-9 {
-                    exterior.transform(to_world);
-                }
-                FillShape::new(color, exterior, Vec::new())
-            })
+            .map(|exterior| FillShape::new(color, scale_to_world(exterior), Vec::new()))
             .collect();
     }
 
@@ -508,27 +510,20 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
             .iter()
             .map(|&[x, y]| Point::new(x, y))
             .collect();
-        let Some(mut exterior) = smooth_ring_to_quad_contour(&ext_pts, r_est, true) else {
+        let Some(exterior) = smooth_ring_to_quad_contour(&ext_pts, r_est, true) else {
             continue;
         };
-        if (z - 1.0).abs() > 1e-9 {
-            exterior.transform(to_world);
-        }
 
         let holes = shape_rings[1..]
             .iter()
             .filter_map(|hole_ring| {
                 let hole_pts: Vec<Point> =
                     hole_ring.iter().map(|&[x, y]| Point::new(x, y)).collect();
-                let mut hole = smooth_ring_to_quad_contour(&hole_pts, r_est, false)?;
-                if (z - 1.0).abs() > 1e-9 {
-                    hole.transform(to_world);
-                }
-                Some(hole)
+                smooth_ring_to_quad_contour(&hole_pts, r_est, false).map(&scale_to_world)
             })
             .collect();
 
-        result.push(FillShape::new(color, exterior, holes));
+        result.push(FillShape::new(color, scale_to_world(exterior), holes));
     }
 
     result
@@ -582,10 +577,9 @@ fn smooth_ring_to_quad_contour(
 
     // 画面上（スクリーン空間）でのブラシ半径とリング自身の周長半径の両方を基準にスケール係数を算出し、
     // 小さな円や小さな内周穴でも形状が勝手に潰れたり丸められたりしないよう許容誤差を自動縮小する
-    let mut raw_perim = 0.0;
-    for i in 0..ring.len() {
-        raw_perim += (ring[(i + 1) % ring.len()] - ring[i]).hypot();
-    }
+    let raw_perim: f64 = (0..ring.len())
+        .map(|i| (ring[(i + 1) % ring.len()] - ring[i]).hypot())
+        .sum();
     let ring_r = raw_perim / std::f64::consts::TAU;
     let r_scale = (r_est / REFERENCE_BRUSH_RADIUS)
         .clamp(0.05, 1.5)
@@ -639,15 +633,18 @@ fn smooth_ring_to_quad_contour(
     let k = anchors.len();
     let mut segments = Vec::with_capacity(k);
     let mut is_straight = Vec::with_capacity(k);
+    let mut span_pts = Vec::new();
+    let mut cum = Vec::new();
     for j in 0..k {
-        let span_pts = extract_cyclic_span(&dense, anchors[j], anchors[(j + 1) % k]);
+        fill_cyclic_span(&dense, anchors[j], anchors[(j + 1) % k], &mut span_pts);
         let p0 = *span_pts.first()?;
         let p2 = *span_pts.last()?;
         let straight = max_deviation_from_chord(&span_pts) <= straight_snap_tol;
         let p1 = if straight {
             p0.lerp(p2, 0.5)
         } else {
-            fit_quad_control_point_shape_preserving(&span_pts, p0, p2)
+            fill_cumulative_arc_lengths(&span_pts, &mut cum);
+            fit_quad_control_point_with_arc_lengths(&span_pts, &cum, p0, p2)
         };
         segments.push(QuadBez::new(p0, p1, p2));
         is_straight.push(straight);
@@ -973,22 +970,21 @@ fn classify_and_align_ring_features(
     if is_round_arc.iter().any(|&b| b) && !is_round_arc.iter().all(|&b| b) {
         let flank_len = ((44.0 * r_scale / actual_ds).round() as usize).clamp(5, (m / 4).max(5));
         let local_to_macro = (w_macro as f64 / w_local.max(1) as f64).max(1.0);
-        let runs = find_true_runs(&is_round_arc);
-
         let mut is_cap_vertex = vec![false; m];
-        for &(rs, re) in &runs {
-            let (b_i, a_i) = clamp_run_bounds(rs, re, m, &is_sharp_corner);
-            let (nt, _) = span_turn_metrics(&dense[b_i..=a_i]);
-            if nt >= 1.85 && (re - rs) < m / 2 {
-                is_cap_vertex[rs..=re].fill(true);
-            }
-        }
+        let run_metrics: Vec<(usize, usize, f64)> = find_true_runs(&is_round_arc)
+            .into_iter()
+            .map(|(rs, re)| {
+                let (b_i, a_i) = clamp_run_bounds(rs, re, m, &is_sharp_corner);
+                let (nt, _) = span_turn_metrics(&dense[b_i..=a_i]);
+                if nt >= 1.85 && (re - rs) < m / 2 {
+                    is_cap_vertex[rs..=re].fill(true);
+                }
+                (rs, re, nt)
+            })
+            .collect();
 
-        for (r_start, r_end) in runs {
+        for (r_start, r_end, net_turn) in run_metrics {
             let is_round_cap = is_cap_vertex[r_start];
-            let (b_i, a_i) = clamp_run_bounds(r_start, r_end, m, &is_sharp_corner);
-            let (net_turn, _) = span_turn_metrics(&dense[b_i..=a_i]);
-
             let sum_corner_tm: f64 = (r_start..=r_end).map(|k| t_macro[k]).sum();
             let corner_sign = if sum_corner_tm >= 0.0 { 1.0 } else { -1.0 };
 
@@ -1038,7 +1034,6 @@ fn classify_and_align_ring_features(
 
             if !is_round_cap && !is_localized_round_corner {
                 for k in r_start..=r_end {
-                    is_round_arc[k] = false;
                     if !is_sharp_corner[k] {
                         is_high_curv[k] = false;
                     }
@@ -1140,6 +1135,14 @@ fn select_locked_feature_anchors(
     w_short: usize,
 ) -> Vec<bool> {
     let m = dense.len();
+    let mut locked = vec![false; m];
+    if is_high_curv.iter().all(|&b| b) {
+        for idx in [0, m / 4, m / 2, (3 * m) / 4] {
+            locked[idx] = true;
+        }
+        return locked;
+    }
+
     let mut cos_s = vec![1.0; m];
     let mut local_tangents = vec![KVec2::new(1.0, 0.0); m];
     for i in 0..m {
@@ -1147,14 +1150,6 @@ fn select_locked_feature_anchors(
         let d_out = normalize_vec(dense[(i + w_short) % m] - dense[i]);
         cos_s[i] = d_in.dot(d_out);
         local_tangents[i] = normalize_vec(dense[(i + 1) % m] - dense[(i + m - 1) % m]);
-    }
-
-    let mut locked = vec![false; m];
-    if is_high_curv.iter().all(|&b| b) {
-        for idx in [0, m / 4, m / 2, (3 * m) / 4] {
-            locked[idx] = true;
-        }
-        return locked;
     }
 
     // 1. 鋭角コーナー・自己交差V字ノッチは1点に折れ曲がりが集中しているため、頂点そのものを直接ロックする
@@ -1260,11 +1255,6 @@ fn find_longest_false_run_midpoint(flags: &[bool]) -> Option<usize> {
 
 /// 点列 `pts` の始点 `p0` と終点 `p2` を固定したとき、輪郭の弧長中点 $M$ を正確に通過する制御点 `p1_mid` と
 /// 最小二乗制御点 `p1_ls` をブレンドし、曲線や丸キャップ・丸コーナーが内側に痩せない 2次ベジェ制御点 `p1` を求める。
-fn fit_quad_control_point_shape_preserving(pts: &[Point], p0: Point, p2: Point) -> Point {
-    let cum = compute_cumulative_arc_lengths(pts);
-    fit_quad_control_point_with_arc_lengths(pts, &cum, p0, p2)
-}
-
 fn fit_quad_control_point_with_arc_lengths(
     pts: &[Point],
     cum: &[f64],
@@ -1480,84 +1470,104 @@ fn reduce_outline_anchors_by_quad_fit(
     }
 
     const MAX_CORNER_TURN_RAD: f64 = 1.68;
+    let mut span_pts = Vec::with_capacity(m);
+    let mut cum = Vec::with_capacity(m);
+
+    let mut eval_removal_score = |anchors: &[usize], pos: usize| -> f64 {
+        let curr_idx = anchors[pos];
+        if locked[curr_idx] {
+            return f64::INFINITY;
+        }
+
+        let prev_idx = anchors[(pos + anchors.len() - 1) % anchors.len()];
+        let next_idx = anchors[(pos + 1) % anchors.len()];
+        fill_cyclic_span(dense, prev_idx, next_idx, &mut span_pts);
+
+        if span_pts.len() > (m * 3) / 4 {
+            return f64::INFINITY;
+        }
+
+        let (net_turn, macro_abs_turn) = span_turn_metrics(&span_pts);
+        if macro_abs_turn > 0.35 && (macro_abs_turn - net_turn) > 0.24 {
+            return f64::INFINITY;
+        }
+
+        let turn_limit = if is_high_curv[curr_idx] {
+            MAX_CORNER_TURN_RAD
+        } else {
+            max_curve_turn_rad
+        };
+        if net_turn > turn_limit || macro_abs_turn > turn_limit + 0.25 {
+            return f64::INFINITY;
+        }
+
+        let tol = if is_high_curv[curr_idx] {
+            max_cap_tol
+        } else {
+            max_edge_tol
+        };
+
+        let p0 = span_pts[0];
+        let p2 = span_pts[span_pts.len() - 1];
+        let chord = p2 - p0;
+        let chord_len = chord.hypot();
+        if chord_len > 1e-4 && span_pts.len() >= 10 {
+            let n_chord = left_normal(chord / chord_len);
+            let mid = span_pts.len() / 2;
+            let mean_first: f64 = span_pts[1..mid]
+                .iter()
+                .map(|&pt| (pt - p0).dot(n_chord))
+                .sum::<f64>()
+                / (mid - 1).max(1) as f64;
+            let mean_second: f64 = span_pts[mid..(span_pts.len() - 1)]
+                .iter()
+                .map(|&pt| (pt - p0).dot(n_chord))
+                .sum::<f64>()
+                / (span_pts.len() - 1 - mid).max(1) as f64;
+            if mean_first * mean_second < 0.0
+                && mean_first.abs() > 0.72 * tol
+                && mean_second.abs() > 0.72 * tol
+            {
+                return f64::INFINITY;
+            }
+        }
+
+        fill_cumulative_arc_lengths(&span_pts, &mut cum);
+        let p1 = fit_quad_control_point_with_arc_lengths(&span_pts, &cum, p0, p2);
+        let err = max_quad_fit_error_with_arc_lengths(&span_pts, &cum, QuadBez::new(p0, p1, p2));
+
+        if err <= tol {
+            err + 0.18 * net_turn * net_turn
+        } else {
+            f64::INFINITY
+        }
+    };
+
+    let mut scores: Vec<f64> = (0..anchors.len())
+        .map(|pos| eval_removal_score(&anchors, pos))
+        .collect();
 
     while anchors.len() > 3 {
         let mut best_remove_pos: Option<usize> = None;
         let mut best_score = f64::INFINITY;
 
-        for pos in 0..anchors.len() {
-            let curr_idx = anchors[pos];
-            if locked[curr_idx] {
-                continue;
-            }
-
-            let prev_idx = anchors[(pos + anchors.len() - 1) % anchors.len()];
-            let next_idx = anchors[(pos + 1) % anchors.len()];
-            let span_pts = extract_cyclic_span(dense, prev_idx, next_idx);
-
-            if span_pts.len() > (m * 3) / 4 {
-                continue;
-            }
-
-            let (net_turn, macro_abs_turn) = span_turn_metrics(&span_pts);
-            if macro_abs_turn > 0.35 && (macro_abs_turn - net_turn) > 0.24 {
-                continue;
-            }
-
-            let turn_limit = if is_high_curv[curr_idx] {
-                MAX_CORNER_TURN_RAD
-            } else {
-                max_curve_turn_rad
-            };
-            if net_turn > turn_limit || macro_abs_turn > turn_limit + 0.25 {
-                continue;
-            }
-
-            let tol = if is_high_curv[curr_idx] {
-                max_cap_tol
-            } else {
-                max_edge_tol
-            };
-
-            let p0 = *span_pts.first().unwrap();
-            let p2 = *span_pts.last().unwrap();
-            let chord = p2 - p0;
-            let chord_len = chord.hypot();
-            if chord_len > 1e-4 && span_pts.len() >= 10 {
-                let n_chord = left_normal(chord / chord_len);
-                let mid = span_pts.len() / 2;
-                let mean_first: f64 = span_pts[1..mid]
-                    .iter()
-                    .map(|&pt| (pt - p0).dot(n_chord))
-                    .sum::<f64>()
-                    / (mid - 1).max(1) as f64;
-                let mean_second: f64 = span_pts[mid..(span_pts.len() - 1)]
-                    .iter()
-                    .map(|&pt| (pt - p0).dot(n_chord))
-                    .sum::<f64>()
-                    / (span_pts.len() - 1 - mid).max(1) as f64;
-                if mean_first * mean_second < 0.0
-                    && mean_first.abs() > 0.72 * tol
-                    && mean_second.abs() > 0.72 * tol
-                {
-                    continue;
-                }
-            }
-            let cum = compute_cumulative_arc_lengths(&span_pts);
-            let p1 = fit_quad_control_point_with_arc_lengths(&span_pts, &cum, p0, p2);
-            let err = max_quad_fit_error_with_arc_lengths(&span_pts, &cum, QuadBez::new(p0, p1, p2));
-
-            if err <= tol {
-                let score = err + 0.18 * net_turn * net_turn;
-                if score < best_score {
-                    best_score = score;
-                    best_remove_pos = Some(pos);
-                }
+        for (pos, &score) in scores.iter().enumerate() {
+            if score < best_score {
+                best_score = score;
+                best_remove_pos = Some(pos);
             }
         }
 
         if let Some(pos) = best_remove_pos {
             anchors.remove(pos);
+            scores.remove(pos);
+            let len = anchors.len();
+            if len > 3 {
+                let prev_pos = (pos + len - 1) % len;
+                let next_pos = pos % len;
+                scores[prev_pos] = eval_removal_score(&anchors, prev_pos);
+                scores[next_pos] = eval_removal_score(&anchors, next_pos);
+            }
         } else {
             break;
         }
@@ -1566,16 +1576,15 @@ fn reduce_outline_anchors_by_quad_fit(
     anchors
 }
 
-fn extract_cyclic_span(dense: &[Point], start_idx: usize, end_idx: usize) -> Vec<Point> {
+fn fill_cyclic_span(dense: &[Point], start_idx: usize, end_idx: usize, span: &mut Vec<Point>) {
     let m = dense.len();
-    let mut span = Vec::new();
+    span.clear();
     let mut curr = start_idx;
     span.push(dense[curr]);
     while curr != end_idx && span.len() <= m {
         curr = (curr + 1) % m;
         span.push(dense[curr]);
     }
-    span
 }
 
 /// 点列 `span_pts` の (ネット回転角 `|signed_turn|`, 4分割マクロ絶対回転角 `macro_abs_turn`) をラジアンで返す
@@ -1856,19 +1865,13 @@ pub(crate) fn boolean_operation(
         BoolOp::Intersection => OverlayRule::Intersect,
     };
 
-    let filter = ContourFilter {
-        min_area: 0.04,
-        simplify: false,
-    };
-
-    let overlay_result: Vec<Vec<Vec<[f64; 2]>>> =
-        FloatOverlay::with_subj_and_clip(&subj_shapes, &clip_shapes)
-            .overlay_with_filter_and_solver(
-                overlay_rule,
-                OverlayFillRule::NonZero,
-                filter,
-                Solver::AUTO,
-            );
+    let overlay_result = run_float_overlay(
+        &subj_shapes,
+        &clip_shapes,
+        overlay_rule,
+        OverlayFillRule::NonZero,
+        0.04,
+    );
 
     overlay_result
         .iter()
@@ -1881,6 +1884,25 @@ pub(crate) fn boolean_operation(
             )
         })
         .collect()
+}
+
+fn run_float_overlay(
+    subj: &[Vec<Vec<[f64; 2]>>],
+    clip: &[Vec<Vec<[f64; 2]>>],
+    overlay_rule: OverlayRule,
+    fill_rule: OverlayFillRule,
+    min_area: f64,
+) -> Vec<Vec<Vec<[f64; 2]>>> {
+    let filter = ContourFilter {
+        min_area,
+        simplify: false,
+    };
+    FloatOverlay::with_subj_and_clip(subj, clip).overlay_with_filter_and_solver(
+        overlay_rule,
+        fill_rule,
+        filter,
+        Solver::AUTO,
+    )
 }
 
 /// `i_overlay` の出力ポリゴン群（外周リング `poly_shape[0]` ＋ 穴リング群 `poly_shape[1..]`）から
@@ -1945,18 +1967,13 @@ pub(crate) fn find_enclosed_region_at(
         return None;
     }
 
-    let filter = ContourFilter {
-        min_area: 0.5,
-        simplify: false,
-    };
-    let overlay_result: Vec<Vec<Vec<[f64; 2]>>> =
-        FloatOverlay::with_subj_and_clip(&[vec![bounds_ring]], &clip_shapes)
-            .overlay_with_filter_and_solver(
-                OverlayRule::Difference,
-                OverlayFillRule::NonZero,
-                filter,
-                Solver::AUTO,
-            );
+    let overlay_result = run_float_overlay(
+        &[vec![bounds_ring]],
+        &clip_shapes,
+        OverlayRule::Difference,
+        OverlayFillRule::NonZero,
+        0.5,
+    );
 
     for poly_shape in overlay_result {
         if poly_shape.is_empty() {
@@ -2044,20 +2061,13 @@ pub(crate) fn resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape> {
         }
     }
 
-    let filter = ContourFilter {
-        min_area: 0.5,
-        simplify: false,
-    };
-
-    let empty_clip: &[Vec<Vec<[f64; 2]>>] = &[];
-    let overlay_result: Vec<Vec<Vec<[f64; 2]>>> =
-        FloatOverlay::with_subj_and_clip(&[rings], empty_clip)
-            .overlay_with_filter_and_solver(
-                OverlayRule::Subject,
-                OverlayFillRule::Positive,
-                filter,
-                Solver::AUTO,
-            );
+    let overlay_result = run_float_overlay(
+        &[rings],
+        &[],
+        OverlayRule::Subject,
+        OverlayFillRule::Positive,
+        0.5,
+    );
 
     overlay_result
         .iter()
@@ -2320,13 +2330,15 @@ fn refit_open_polyline_to_quads(pts: &[Point], epsilon: f64) -> Vec<QuadBez> {
     }
 
     let anchors: Vec<usize> = (0..n).filter(|&i| keep[i]).collect();
+    let mut cum = Vec::new();
     anchors
         .windows(2)
         .map(|w| {
             let span = &pts[w[0]..=w[1]];
             let p0 = pts[w[0]];
             let p2 = pts[w[1]];
-            let p1 = fit_quad_control_point_shape_preserving(span, p0, p2);
+            fill_cumulative_arc_lengths(span, &mut cum);
+            let p1 = fit_quad_control_point_with_arc_lengths(span, &cum, p0, p2);
             QuadBez::new(p0, p1, p2)
         })
         .collect()
@@ -2376,12 +2388,18 @@ pub(crate) fn to_pos2(p: Point) -> Pos2 {
     Pos2::new(p.x as f32, p.y as f32)
 }
 
-fn compute_cumulative_arc_lengths(pts: &[Point]) -> Vec<f64> {
-    let mut cum = vec![0.0; pts.len()];
-    for i in 1..pts.len() {
-        cum[i] = cum[i - 1] + (pts[i] - pts[i - 1]).hypot();
+fn fill_cumulative_arc_lengths(pts: &[Point], cum: &mut Vec<f64>) {
+    cum.clear();
+    cum.reserve(pts.len());
+    if pts.is_empty() {
+        return;
     }
-    cum
+    let mut acc = 0.0;
+    cum.push(0.0);
+    for i in 1..pts.len() {
+        acc += (pts[i] - pts[i - 1]).hypot();
+        cum.push(acc);
+    }
 }
 
 fn dedup_closed_ring(pts: impl IntoIterator<Item = Point>, min_dist: f64) -> Vec<Point> {
