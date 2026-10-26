@@ -1,0 +1,10 @@
+[package]
+name = "clay_canvas"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.29"
+kurbo = "0.13"
+lyon_tessellation = "1.0"
+i_overlay = "1"
