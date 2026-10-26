@@ -8,8 +8,8 @@ use crate::vector_engine::{
     affine_rotate_around, affine_scale_around, boolean_operation, build_smoothed_stroke_shapes_at_zoom,
     erase_from_canvas, find_enclosed_region_at, generate_brush_outline_at_zoom, make_marquee_rect_shape,
     merge_disjoint_fill_into_canvas, merge_shapes_into_canvas, normalize_vec, rects_overlap,
-    resolve_deformed_shape, tessellate_raw_polygon, to_pos2, transform_mesh_to_screen, BoolOp,
-    FillShape,
+    resolve_deformed_shape, tessellate_raw_polygon, to_pos2, transform_mesh_to_screen,
+    transform_mesh_to_screen_onion, BoolOp, FillShape,
 };
 use crate::FlashBrushApp;
 
@@ -317,11 +317,34 @@ impl FlashBrushApp {
         })
     }
 
-    /// 編集スコープを問わず、キャンバス全体で指定座標 `pt` にヒットする最前面シェイプのインデックスを返す（スポイト用）
-    pub(crate) fn topmost_visible_shape_at(&self, pt: Point) -> Option<usize> {
-        (0..self.shapes.len())
-            .rev()
-            .find(|&idx| self.shapes[idx].contains_point(pt))
+    /// 編集スコープおよび表示中の全レイヤーを対象に、指定座標 `pt` にヒットする最前面シェイプの色を返す（スポイト用）
+    pub(crate) fn topmost_visible_color_at(&self, pt: Point) -> Option<Color32> {
+        let num_layers = self.timeline.layers.len();
+        if num_layers == 0 {
+            return self
+                .shapes
+                .iter()
+                .rev()
+                .find(|s| s.contains_point(pt))
+                .map(|s| s.color);
+        }
+        for layer_idx in (0..num_layers).rev() {
+            let layer = &self.timeline.layers[layer_idx];
+            if !layer.visible {
+                continue;
+            }
+            let shapes_slice: &[FillShape] = if layer_idx == self.timeline.active_layer {
+                &self.shapes
+            } else if let Some(cel) = layer.cel_at(self.timeline.current_frame) {
+                &cel.shapes
+            } else {
+                continue;
+            };
+            if let Some(hit) = shapes_slice.iter().rev().find(|s| s.contains_point(pt)) {
+                return Some(hit.color);
+            }
+        }
+        None
     }
 
     /// 指定シェイプが現在の編集スコープで子グループに属していれば、同じ子グループに属する全シェイプのインデックス列を返す。
@@ -1079,8 +1102,7 @@ impl FlashBrushApp {
 
     /// スポイトツール（色抽出）：指定位置 `pt` の最前面シェイプの色を抽出し、`self.brush_color` に設定する
     pub(crate) fn pick_color_at(&mut self, pt: Point) -> Option<Color32> {
-        let hit_idx = self.topmost_visible_shape_at(pt)?;
-        let picked = self.shapes[hit_idx].color;
+        let picked = self.topmost_visible_color_at(pt)?;
         self.brush_color = picked;
         Some(picked)
     }
@@ -2322,9 +2344,7 @@ impl FlashBrushApp {
                 painter.circle_stroke(pos, 5.5, Stroke::new(1.8, Color32::WHITE));
             }
             Tool::Eyedropper => {
-                let hovered_color = self
-                    .topmost_visible_shape_at(self.screen_to_world(pos))
-                    .map(|idx| self.shapes[idx].color);
+                let hovered_color = self.topmost_visible_color_at(self.screen_to_world(pos));
                 ctx.set_cursor_icon(if hovered_color.is_some() {
                     CursorIcon::PointingHand
                 } else {
@@ -2527,7 +2547,7 @@ impl FlashBrushApp {
         }
     }
 
-    /// キャンバス上の全シェイプ、選択オーバーレイ、グループ選択枠、自由変形ボックス、矩形選択枠、およびストロークプレビューを描画
+    /// キャンバス上の全シェイプ（オニオンスキン・全可視レイヤー合成）、選択オーバーレイ、グループ選択枠、自由変形ボックス、矩形選択枠、およびストロークプレビューを描画
     pub(crate) fn draw_canvas_contents(&mut self, painter: &egui::Painter) {
         let show_wf = self.show_wireframe
             || (self.tool == Tool::Select && self.select_sub_mode != SelectSubMode::Reshape);
@@ -2538,42 +2558,115 @@ impl FlashBrushApp {
         let in_group_edit = !self.editing_group_path.is_empty();
         let zoom = self.view_zoom;
         let pan = self.view_pan;
-        let mut selected_group_boxes: Vec<(u64, KRect)> = Vec::new();
 
-        for idx in 0..self.shapes.len() {
-            let in_scope = self.shapes[idx].is_in_editing_scope(&self.editing_group_path);
-            if in_group_edit && !in_scope {
-                let mesh = transform_mesh_to_screen(&self.shapes[idx].fill_mesh, zoom, pan, true);
-                painter.add(egui::Shape::mesh(mesh));
+        // 0. オニオンスキン描画（前のフレーム＝青系半透明、次のフレーム＝緑系半透明）
+        if self.timeline.onion_skin_enabled {
+            let curr_f = self.timeline.current_frame;
+            for step in (1..=self.timeline.onion_prev_frames).rev() {
+                if curr_f >= step {
+                    let f = curr_f - step;
+                    let alpha = (84 / step as u8).clamp(24, 84);
+                    for layer in &self.timeline.layers {
+                        if !layer.visible {
+                            continue;
+                        }
+                        if let Some(cel) = layer.cel_at(f) {
+                            for shape in &cel.shapes {
+                                let mesh = transform_mesh_to_screen_onion(
+                                    &shape.fill_mesh,
+                                    zoom,
+                                    pan,
+                                    [45, 115, 245],
+                                    alpha,
+                                );
+                                painter.add(egui::Shape::mesh(mesh));
+                            }
+                        }
+                    }
+                }
+            }
+            for step in 1..=self.timeline.onion_next_frames {
+                let f = curr_f + step;
+                if f < self.timeline.total_frames {
+                    let alpha = (84 / step as u8).clamp(24, 84);
+                    for layer in &self.timeline.layers {
+                        if !layer.visible {
+                            continue;
+                        }
+                        if let Some(cel) = layer.cel_at(f) {
+                            for shape in &cel.shapes {
+                                let mesh = transform_mesh_to_screen_onion(
+                                    &shape.fill_mesh,
+                                    zoom,
+                                    pan,
+                                    [35, 185, 105],
+                                    alpha,
+                                );
+                                painter.add(egui::Shape::mesh(mesh));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1. 下層レイヤーから上層レイヤーへ順に合成描画
+        let mut selected_group_boxes: Vec<(u64, KRect)> = Vec::new();
+        let num_layers = self.timeline.layers.len();
+        let curr_f = self.timeline.current_frame;
+
+        for layer_idx in 0..num_layers {
+            if !self.timeline.layers[layer_idx].visible {
+                continue;
+            }
+            if layer_idx != self.timeline.active_layer {
+                if let Some(cel) = self.timeline.layers[layer_idx].cel_at(curr_f) {
+                    for shape in &cel.shapes {
+                        let mesh =
+                            transform_mesh_to_screen(&shape.fill_mesh, zoom, pan, in_group_edit);
+                        painter.add(egui::Shape::mesh(mesh));
+                    }
+                }
                 continue;
             }
 
-            let mesh = transform_mesh_to_screen(&self.shapes[idx].fill_mesh, zoom, pan, false);
-            painter.add(egui::Shape::mesh(mesh));
+            // アクティブレイヤーの描画（作業中の self.shapes + ワイヤーフレーム + 選択オーバーレイ）
+            for idx in 0..self.shapes.len() {
+                let in_scope = self.shapes[idx].is_in_editing_scope(&self.editing_group_path);
+                if in_group_edit && !in_scope {
+                    let mesh =
+                        transform_mesh_to_screen(&self.shapes[idx].fill_mesh, zoom, pan, true);
+                    painter.add(egui::Shape::mesh(mesh));
+                    continue;
+                }
 
-            if show_wf && self.shapes[idx].is_raw_at_scope(&self.editing_group_path) {
-                self.draw_shape_contour_lines(
-                    painter,
-                    &self.shapes[idx],
-                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(30, 80, 180, 140)),
-                    true,
-                );
-            }
+                let mesh = transform_mesh_to_screen(&self.shapes[idx].fill_mesh, zoom, pan, false);
+                painter.add(egui::Shape::mesh(mesh));
 
-            if self.selected_shapes.contains(&idx) && !active_affine_drag {
-                if let Some(gid) =
-                    self.shapes[idx].active_group_id_at_scope(&self.editing_group_path)
-                {
-                    let s_bbox = self.shapes[idx].bounding_box();
-                    if let Some((_, g_bbox)) =
-                        selected_group_boxes.iter_mut().find(|(id, _)| *id == gid)
+                if show_wf && self.shapes[idx].is_raw_at_scope(&self.editing_group_path) {
+                    self.draw_shape_contour_lines(
+                        painter,
+                        &self.shapes[idx],
+                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(30, 80, 180, 140)),
+                        true,
+                    );
+                }
+
+                if self.selected_shapes.contains(&idx) && !active_affine_drag {
+                    if let Some(gid) =
+                        self.shapes[idx].active_group_id_at_scope(&self.editing_group_path)
                     {
-                        *g_bbox = g_bbox.union(s_bbox);
+                        let s_bbox = self.shapes[idx].bounding_box();
+                        if let Some((_, g_bbox)) =
+                            selected_group_boxes.iter_mut().find(|(id, _)| *id == gid)
+                        {
+                            *g_bbox = g_bbox.union(s_bbox);
+                        } else {
+                            selected_group_boxes.push((gid, s_bbox));
+                        }
                     } else {
-                        selected_group_boxes.push((gid, s_bbox));
+                        self.draw_flash_selection_overlay(painter, idx);
                     }
-                } else {
-                    self.draw_flash_selection_overlay(painter, idx);
                 }
             }
         }

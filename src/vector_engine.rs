@@ -2676,3 +2676,25 @@ pub(crate) fn transform_mesh_to_screen(
     }
     out
 }
+
+/// オニオンスキン表示用に、ワールド座標の `Mesh` をスクリーン座標へ変換しつつ指定されたティント色・不透明度へブレンドする
+pub(crate) fn transform_mesh_to_screen_onion(
+    mesh: &Mesh,
+    zoom: f32,
+    pan: Vec2,
+    tint_rgb: [u8; 3],
+    alpha: u8,
+) -> Mesh {
+    let mut out = mesh.clone();
+    for v in &mut out.vertices {
+        v.pos = Pos2::new(v.pos.x * zoom + pan.x, v.pos.y * zoom + pan.y);
+        let [r, g, b, _] = v.color.to_srgba_unmultiplied();
+        v.color = Color32::from_rgba_unmultiplied(
+            ((r as u16 * 35 + tint_rgb[0] as u16 * 65) / 100) as u8,
+            ((g as u16 * 35 + tint_rgb[1] as u16 * 65) / 100) as u8,
+            ((b as u16 * 35 + tint_rgb[2] as u16 * 65) / 100) as u8,
+            alpha,
+        );
+    }
+    out
+}

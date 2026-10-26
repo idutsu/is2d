@@ -47,13 +47,12 @@ pub(crate) struct FlashBrushApp {
     /// スペースドラッグ / 中ボタンドラッグによるパン操作中の直前スクリーン座標
     pub(crate) pan_last_screen_pos: Option<Pos2>,
 
-    /// タイムライン・レイヤー・キーフレーム・セル構造（Phase 3 で複数レイヤー/フレーム編集へ接続）
-    #[allow(dead_code)]
+    /// タイムライン・レイヤー・キーフレーム・セル構造
     pub(crate) timeline: Timeline,
 
     pub(crate) shapes: Vec<FillShape>,
-    pub(crate) undo_stack: Vec<Vec<FillShape>>,
-    pub(crate) redo_stack: Vec<Vec<FillShape>>,
+    pub(crate) undo_stack: Vec<(Timeline, Vec<FillShape>)>,
+    pub(crate) redo_stack: Vec<(Timeline, Vec<FillShape>)>,
 
     pub(crate) active_stroke: Vec<Point>,
     pub(crate) active_raw_outline: Vec<Point>,
@@ -119,7 +118,13 @@ impl Default for FlashBrushApp {
 
 impl FlashBrushApp {
     pub(crate) fn record_undo_snapshot(&mut self, snapshot: Vec<FillShape>) {
-        self.undo_stack.push(snapshot);
+        let mut tl_snap = self.timeline.clone();
+        tl_snap.is_playing = false;
+        tl_snap.last_frame_advance_time = None;
+        if let Some(cel_shapes) = tl_snap.active_cel_shapes_mut() {
+            *cel_shapes = snapshot.clone();
+        }
+        self.undo_stack.push((tl_snap, snapshot));
         if self.undo_stack.len() > MAX_UNDO_HISTORY {
             self.undo_stack.remove(0);
         }
@@ -132,9 +137,14 @@ impl FlashBrushApp {
 
     pub(crate) fn undo(&mut self) {
         self.clear_selection();
-        if let Some(prev) = self.undo_stack.pop() {
-            self.redo_stack.push(self.shapes.clone());
-            self.shapes = prev;
+        self.sync_shapes_to_timeline();
+        if let Some((prev_tl, prev_shapes)) = self.undo_stack.pop() {
+            let mut curr_tl = self.timeline.clone();
+            curr_tl.is_playing = false;
+            curr_tl.last_frame_advance_time = None;
+            self.redo_stack.push((curr_tl, self.shapes.clone()));
+            self.timeline = prev_tl;
+            self.shapes = prev_shapes;
             self.select_drag = SelectDragState::None;
             self.transform_drag = TransformDragState::None;
             self.sanitize_editing_group_path();
@@ -143,9 +153,14 @@ impl FlashBrushApp {
 
     pub(crate) fn redo(&mut self) {
         self.clear_selection();
-        if let Some(next) = self.redo_stack.pop() {
-            self.undo_stack.push(self.shapes.clone());
-            self.shapes = next;
+        self.sync_shapes_to_timeline();
+        if let Some((next_tl, next_shapes)) = self.redo_stack.pop() {
+            let mut curr_tl = self.timeline.clone();
+            curr_tl.is_playing = false;
+            curr_tl.last_frame_advance_time = None;
+            self.undo_stack.push((curr_tl, self.shapes.clone()));
+            self.timeline = next_tl;
+            self.shapes = next_shapes;
             self.select_drag = SelectDragState::None;
             self.transform_drag = TransformDragState::None;
             self.sanitize_editing_group_path();
@@ -159,6 +174,7 @@ impl FlashBrushApp {
         let mut copied_to_clipboard = false;
         ctx.input(|i| {
             let cmd = i.modifiers.command || i.modifiers.ctrl;
+            let shift = i.modifiers.shift;
             let copy_event = i.events.iter().any(|ev| matches!(ev, egui::Event::Copy));
             let cut_event = i.events.iter().any(|ev| matches!(ev, egui::Event::Cut));
             let paste_event = i
@@ -167,7 +183,36 @@ impl FlashBrushApp {
                 .any(|ev| matches!(ev, egui::Event::Paste(_)));
 
             if !cmd && !copy_event && !cut_event && !paste_event {
-                if i.key_pressed(Key::B) {
+                if i.key_pressed(Key::Enter) {
+                    self.toggle_playback();
+                } else if i.key_pressed(Key::Comma) || i.key_pressed(Key::ArrowLeft) {
+                    self.step_frame(-1);
+                } else if i.key_pressed(Key::Period) || i.key_pressed(Key::ArrowRight) {
+                    self.step_frame(1);
+                } else if i.key_pressed(Key::Home) {
+                    self.timeline.is_playing = false;
+                    self.switch_to_layer_and_frame(self.timeline.active_layer, 0);
+                } else if i.key_pressed(Key::End) {
+                    self.timeline.is_playing = false;
+                    let last = self.timeline.total_frames.saturating_sub(1);
+                    self.switch_to_layer_and_frame(self.timeline.active_layer, last);
+                } else if i.key_pressed(Key::F6) {
+                    if shift {
+                        self.timeline_delete_keyframe();
+                    } else {
+                        self.timeline_insert_keyframe(true);
+                    }
+                } else if i.key_pressed(Key::F7) {
+                    self.timeline_insert_keyframe(false);
+                } else if i.key_pressed(Key::F5) {
+                    if shift {
+                        self.timeline_remove_frame();
+                    } else {
+                        self.timeline_extend_frame();
+                    }
+                } else if i.key_pressed(Key::O) {
+                    self.timeline.onion_skin_enabled = !self.timeline.onion_skin_enabled;
+                } else if i.key_pressed(Key::B) {
                     self.set_tool(Tool::Brush);
                 } else if i.key_pressed(Key::E) {
                     self.set_tool(Tool::Eraser);
@@ -386,6 +431,7 @@ impl FlashBrushApp {
                             self.push_undo();
                             self.shapes.clear();
                             self.editing_group_path.clear();
+                            self.sync_shapes_to_timeline();
                         }
                         if ui
                             .add_enabled(!self.redo_stack.is_empty(), egui::Button::new("↪ Redo"))
@@ -460,8 +506,10 @@ impl FlashBrushApp {
 
 impl eframe::App for FlashBrushApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.update_playback(ctx);
         self.handle_shortcuts(ctx);
         self.draw_top_toolbar(ctx);
+        self.draw_timeline_panel(ctx);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::from_rgb(244, 245, 248)))
@@ -481,44 +529,70 @@ impl eframe::App for FlashBrushApp {
                     self.handle_viewport_navigation(ui, canvas_rect, pointer_pos);
 
                 let mouse_pt = pointer_pos.map(|p| self.screen_to_world(p));
+                let layer_editable = self.timeline.is_active_layer_editable();
 
-                // 1. ツール別のマウス入力ハンドリング（パン操作中はツール入力をスキップ）
+                // 1. ツール別のマウス入力ハンドリング（パン操作中、またはレイヤーがロック・非表示中は編集入力をスキップ）
                 if !is_panning {
-                    match self.tool {
-                        Tool::Brush | Tool::Eraser => {
-                            self.handle_brush_or_eraser_input(&response, mouse_pt);
-                        }
-                        Tool::Bucket => {
-                            let just_pressed =
-                                response.hovered() && ui.input(|i| i.pointer.primary_pressed());
-                            if just_pressed {
-                                if let Some(pt) = mouse_pt {
-                                    self.bucket_fill_at(pt);
-                                }
+                    if self.tool == Tool::Eyedropper {
+                        let sampling = (response.hovered()
+                            && ui.input(|i| i.pointer.primary_pressed()))
+                            || response.dragged()
+                            || response.clicked();
+                        if sampling {
+                            if let Some(pt) = mouse_pt {
+                                self.pick_color_at(pt);
                             }
                         }
-                        Tool::Eyedropper => {
-                            let sampling = (response.hovered()
-                                && ui.input(|i| i.pointer.primary_pressed()))
-                                || response.dragged()
-                                || response.clicked();
-                            if sampling {
-                                if let Some(pt) = mouse_pt {
-                                    self.pick_color_at(pt);
+                    } else if layer_editable {
+                        match self.tool {
+                            Tool::Brush | Tool::Eraser => {
+                                self.handle_brush_or_eraser_input(&response, mouse_pt);
+                            }
+                            Tool::Bucket => {
+                                let just_pressed = response.hovered()
+                                    && ui.input(|i| i.pointer.primary_pressed());
+                                if just_pressed {
+                                    if let Some(pt) = mouse_pt {
+                                        self.bucket_fill_at(pt);
+                                    }
                                 }
                             }
-                        }
-                        Tool::Select => {
-                            self.handle_select_tool_input(ui, &response, mouse_pt);
-                        }
-                        Tool::Transform => {
-                            self.handle_transform_tool_input(ui, &response, mouse_pt);
+                            Tool::Eyedropper => {}
+                            Tool::Select => {
+                                self.handle_select_tool_input(ui, &response, mouse_pt);
+                            }
+                            Tool::Transform => {
+                                self.handle_transform_tool_input(ui, &response, mouse_pt);
+                            }
                         }
                     }
                 }
 
-                // 2. キャンバス上のシェイプ・選択枠・プレビューの描画
+                // キャンバス編集結果を現在アクティブなセルへ即時同期
+                self.sync_shapes_to_timeline();
+
+                // 2. キャンバス上のシェイプ・オニオンスキン・選択枠・プレビューの描画
                 self.draw_canvas_contents(&painter);
+
+                // ロック中または非表示のレイヤーが選択されている場合はキャンバス左上に通知バッジを表示
+                if !layer_editable {
+                    let badge_rect = egui::Rect::from_min_size(
+                        canvas_rect.left_top() + Vec2::new(12.0, 12.0),
+                        Vec2::new(340.0, 26.0),
+                    );
+                    painter.rect_filled(
+                        badge_rect,
+                        5.0,
+                        Color32::from_rgba_unmultiplied(35, 38, 46, 215),
+                    );
+                    painter.text(
+                        badge_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "🔒 現在のレイヤーはロック中または非表示のため編集できません",
+                        egui::FontId::proportional(12.0),
+                        Color32::from_rgb(245, 200, 85),
+                    );
+                }
 
                 // 3. カーソル表示とホバー・ドラッグ視覚フィードバック
                 if let Some(pos) = pointer_pos {
@@ -529,6 +603,8 @@ impl eframe::App for FlashBrushApp {
                             } else {
                                 CursorIcon::Grab
                             });
+                        } else if !layer_editable && self.tool != Tool::Eyedropper {
+                            ctx.set_cursor_icon(CursorIcon::NotAllowed);
                         } else {
                             self.draw_tool_cursor_and_feedback(ctx, &painter, pos);
                         }
@@ -1453,6 +1529,67 @@ mod tests {
         // フレーム 2 の位置からフレーム 3 に複製キーフレーム (F6: clone_prev = true) を挿入すると図形が引き継がれること
         timeline.layers[0].insert_keyframe(3, true);
         assert_eq!(timeline.layers[0].cel_at(3).unwrap().shapes.len(), 1);
+
+        // FlashBrushApp 統合テスト：F6（複製キーフレーム進行）・F7（空白キーフレーム進行）・F5（延長）・レイヤー操作・Undo/Redo
+        let mut app = FlashBrushApp::default();
+        let blue = Color32::from_rgb(55, 135, 245);
+        let s0 = make_stroke(Point::new(100.0, 100.0), Point::new(150.0, 100.0), 10.0, red);
+        merge_shapes_into_canvas(&mut app.shapes, s0);
+        app.sync_shapes_to_timeline();
+        assert_eq!(app.timeline.current_frame, 0);
+        assert_eq!(app.shapes.len(), 1);
+
+        // 1. キーフレーム先頭 (frame 0) で F6 を押すと、自動的に次のフレーム (frame 1) へ進みつつ絵が複製されること
+        assert!(app.timeline_insert_keyframe(true));
+        assert_eq!(app.timeline.current_frame, 1);
+        assert_eq!(app.shapes.len(), 1);
+
+        // 2. 絵があるキーフレーム先頭 (frame 1) で F7 を押すと、次のフレーム (frame 2) に空白キーフレームが作成されること
+        assert!(app.timeline_insert_keyframe(false));
+        assert_eq!(app.timeline.current_frame, 2);
+        assert!(app.shapes.is_empty());
+
+        // 3. F5 でフレーム延長・Shift+F5 で短縮・Shift+F6 でキーフレーム削除と Undo/Redo が正確に動作すること
+        let prev_total = app.timeline.total_frames;
+        assert!(app.timeline_extend_frame());
+        assert_eq!(app.timeline.total_frames, prev_total + 1);
+        assert!(app.timeline_remove_frame());
+        assert_eq!(app.timeline.total_frames, prev_total);
+
+        assert!(app.timeline_delete_keyframe());
+        assert_eq!(
+            app.shapes.len(),
+            1,
+            "frame 2 の空白キーフレームを削除すると直前の frame 1 の絵が保持表示されること"
+        );
+        app.undo();
+        assert!(
+            app.shapes.is_empty(),
+            "Undo で削除前の空白キーフレーム状態に戻ること"
+        );
+        app.redo();
+        assert_eq!(app.shapes.len(), 1);
+
+        // 4. 新規レイヤー追加と背面レイヤーからのスポイト色抽出
+        app.switch_to_layer_and_frame(0, 0);
+        assert_eq!(app.shapes.len(), 1);
+        app.timeline_add_layer();
+        assert_eq!(app.timeline.layers.len(), 2);
+        assert_eq!(app.timeline.active_layer, 1);
+        assert!(
+            app.shapes.is_empty(),
+            "新しく追加された前面レイヤーのセルは空であること"
+        );
+        app.brush_color = blue;
+        assert_eq!(
+            app.pick_color_at(Point::new(125.0, 100.0)),
+            Some(red),
+            "空の前面レイヤー上でも、可視状態の背面レイヤーにある図形の色をスポイトで抽出できること"
+        );
+        assert!(app.timeline_move_active_layer(false));
+        assert_eq!(app.timeline.active_layer, 0);
+        assert!(app.timeline_delete_active_layer());
+        assert_eq!(app.timeline.layers.len(), 1);
     }
 
     #[test]
