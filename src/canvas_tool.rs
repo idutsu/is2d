@@ -38,15 +38,15 @@ impl Tool {
         Tool::Eyedropper,
     ];
 
-    /// 左ツールバーのボタンに表示するアイコン文字列
+    /// 左ツールバーのボタンに表示するアイコン文字列（`MaterialIcons-Regular.ttf` のグリフ）
     pub(crate) const fn icon(self) -> &'static str {
         match self {
-            Tool::Select => "↖",
-            Tool::Transform => "⬚",
-            Tool::Brush => "🖌",
-            Tool::Eraser => "🧹",
-            Tool::Bucket => "🪣",
-            Tool::Eyedropper => "💧",
+            Tool::Select => "\u{e569}",     // near_me（選択ポインタ矢印）
+            Tool::Transform => "\u{e3c2}",  // crop_free（自由変形バウンディング枠）
+            Tool::Brush => "\u{e3ae}",      // brush（ブラシ）
+            Tool::Eraser => "\u{e664}",     // auto_fix_normal（消しゴム）
+            Tool::Bucket => "\u{e23a}",     // format_color_fill（バケツ塗り）
+            Tool::Eyedropper => "\u{e3b8}", // colorize（スポイト）
         }
     }
 

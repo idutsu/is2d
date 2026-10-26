@@ -35,7 +35,7 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// `fonts/` フォルダ内の日本語フォント（NotoSansJP）を読み込み、日本語文字化け（豆腐）を防ぐ
+/// `fonts/` フォルダ内の日本語フォント（NotoSansJP）とアイコンフォント（MaterialIcons）を読み込む
 fn configure_japanese_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
@@ -47,13 +47,19 @@ fn configure_japanese_fonts(ctx: &egui::Context) {
         "noto_sans_jp_bold".to_owned(),
         egui::FontData::from_static(include_bytes!("../fonts/NotoSansJP-Bold.ttf")),
     );
+    fonts.font_data.insert(
+        "material_icons".to_owned(),
+        egui::FontData::from_static(include_bytes!("../fonts/MaterialIcons-Regular.ttf")),
+    );
 
     if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
         proportional.insert(0, "noto_sans_jp_regular".to_owned());
         proportional.insert(1, "noto_sans_jp_bold".to_owned());
+        proportional.insert(2, "material_icons".to_owned());
     }
     if let Some(monospace) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
         monospace.push("noto_sans_jp_regular".to_owned());
+        monospace.push("material_icons".to_owned());
     }
 
     ctx.set_fonts(fonts);
@@ -437,7 +443,7 @@ impl FlashBrushApp {
         painter.text(
             badge_rect.center(),
             egui::Align2::CENTER_CENTER,
-            "🔒 現在のレイヤーはロック中または非表示のため編集できません",
+            "\u{e897} 現在のレイヤーはロック中または非表示のため編集できません",
             egui::FontId::proportional(12.0),
             Color32::from_rgb(145, 90, 10),
         );

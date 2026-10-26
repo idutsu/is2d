@@ -1242,7 +1242,7 @@ impl FlashBrushApp {
                     if ui.button("＋ レイヤー").on_hover_text("新しいレイヤーを現在のレイヤーの前面に追加").clicked() {
                         self.timeline_add_layer();
                     }
-                    if ui.add_enabled(len > 1, egui::Button::new("🗑 削除")).on_hover_text("現在選択中のレイヤーを削除").clicked() {
+                    if ui.add_enabled(len > 1, egui::Button::new(format!("{} 削除", crate::panels::icons::DELETE))).on_hover_text("現在選択中のレイヤーを削除").clicked() {
                         self.timeline_delete_active_layer();
                     }
                     if ui.add_enabled(act + 1 < len, egui::Button::new("▲")).on_hover_text("レイヤーを1つ前面（上）へ移動（ドラッグ＆ドロップでも入れ替え可能）").clicked() {
@@ -1254,20 +1254,24 @@ impl FlashBrushApp {
 
                     ui.separator();
 
-                    if ui.button("⏮").on_hover_text("最初のフレームへ (Home)").clicked() {
+                    if ui.button(crate::panels::icons::SKIP_PREV).on_hover_text("最初のフレームへ (Home)").clicked() {
                         self.switch_to_layer_and_frame(self.timeline.active_layer, 0);
                     }
-                    if ui.button("◀").on_hover_text("前のフレームへ (, / ←)").clicked() {
+                    if ui.button(crate::panels::icons::STEP_PREV).on_hover_text("前のフレームへ (, / ←)").clicked() {
                         self.step_frame(-1);
                     }
-                    let play_label = if self.timeline.is_playing { "⏸ Stop (Enter)" } else { "▶ Play (Enter)" };
+                    let play_label = if self.timeline.is_playing {
+                        format!("{} Stop (Enter)", crate::panels::icons::PAUSE)
+                    } else {
+                        format!("{} Play (Enter)", crate::panels::icons::PLAY)
+                    };
                     if ui.selectable_label(self.timeline.is_playing, play_label).on_hover_text("再生 / 一時停止 (Enter)").clicked() {
                         self.toggle_playback();
                     }
-                    if ui.button("▶").on_hover_text("次のフレームへ (. / →)").clicked() {
+                    if ui.button(crate::panels::icons::STEP_NEXT).on_hover_text("次のフレームへ (. / →)").clicked() {
                         self.step_frame(1);
                     }
-                    if ui.button("⏭").on_hover_text("最後のフレームへ (End)").clicked() {
+                    if ui.button(crate::panels::icons::SKIP_NEXT).on_hover_text("最後のフレームへ (End)").clicked() {
                         let last = self.timeline.total_frames.saturating_sub(1);
                         self.switch_to_layer_and_frame(self.timeline.active_layer, last);
                     }
@@ -1312,13 +1316,13 @@ impl FlashBrushApp {
                     if ui.add_enabled(editable && self.timeline.total_frames > 1, egui::Button::new("－ 短縮")).on_hover_text("選択レイヤー（未選択時は全レイヤー）のフレームを1コマ削除・短縮 (Shift+F5)").clicked() {
                         self.timeline_remove_frame();
                     }
-                    if ui.add_enabled(editable, egui::Button::new("✕ KF削除")).on_hover_text("現在のキーフレームを削除 / クリア (Shift+F6)").clicked() {
+                    if ui.add_enabled(editable, egui::Button::new("× KF削除")).on_hover_text("現在のキーフレームを削除 / クリア (Shift+F6)").clicked() {
                         self.timeline_delete_keyframe();
                     }
 
                     ui.separator();
 
-                    if ui.selectable_label(self.timeline.onion_skin_enabled, "🧅 Onion (O)").on_hover_text("オニオンスキン（前後のフレームの透かし表示）切替 (O)").clicked() {
+                    if ui.selectable_label(self.timeline.onion_skin_enabled, format!("{} Onion (O)", crate::panels::icons::ONION_SKIN)).on_hover_text("オニオンスキン（前後のフレームの透かし表示）切替 (O)").clicked() {
                         self.timeline.onion_skin_enabled = !self.timeline.onion_skin_enabled;
                     }
                     if self.timeline.onion_skin_enabled {
@@ -1876,10 +1880,10 @@ impl FlashBrushApp {
 
             let cy = (y0 + y1) * 0.5;
             let vis_col = if layer.visible { Color32::from_rgb(40, 45, 55) } else { Color32::from_rgb(155, 162, 174) };
-            layer_painter.text(Pos2::new(layout.panel_rect.left() + 18.0, cy), Align2::CENTER_CENTER, if layer.visible { "👁" } else { "・" }, FontId::proportional(13.0), vis_col);
+            layer_painter.text(Pos2::new(layout.panel_rect.left() + 18.0, cy), Align2::CENTER_CENTER, if layer.visible { crate::panels::icons::VISIBILITY } else { "・" }, FontId::proportional(13.0), vis_col);
 
             let lock_col = if layer.locked { Color32::from_rgb(215, 135, 20) } else { Color32::from_rgb(155, 162, 174) };
-            layer_painter.text(Pos2::new(layout.panel_rect.left() + 42.0, cy), Align2::CENTER_CENTER, if layer.locked { "🔒" } else { "·" }, FontId::proportional(12.5), lock_col);
+            layer_painter.text(Pos2::new(layout.panel_rect.left() + 42.0, cy), Align2::CENTER_CENTER, if layer.locked { crate::panels::icons::LOCK } else { "·" }, FontId::proportional(12.5), lock_col);
 
             let name_color = if !layer.visible {
                 Color32::from_rgb(145, 152, 164)
@@ -1925,8 +1929,8 @@ impl FlashBrushApp {
         let corner_rect = Rect::from_min_max(layout.panel_rect.left_top(), Pos2::new(layout.grid_left, layout.grid_top));
         painter.rect_filled(corner_rect, 0.0, Color32::from_rgb(228, 231, 237));
         let header_cy = layout.panel_rect.top() + RULER_H * 0.5;
-        painter.text(Pos2::new(layout.panel_rect.left() + 18.0, header_cy), Align2::CENTER_CENTER, "👁", FontId::proportional(11.5), Color32::from_rgb(75, 82, 95));
-        painter.text(Pos2::new(layout.panel_rect.left() + 42.0, header_cy), Align2::CENTER_CENTER, "🔒", FontId::proportional(11.5), Color32::from_rgb(75, 82, 95));
+        painter.text(Pos2::new(layout.panel_rect.left() + 18.0, header_cy), Align2::CENTER_CENTER, crate::panels::icons::VISIBILITY, FontId::proportional(11.5), Color32::from_rgb(75, 82, 95));
+        painter.text(Pos2::new(layout.panel_rect.left() + 42.0, header_cy), Align2::CENTER_CENTER, crate::panels::icons::LOCK, FontId::proportional(11.5), Color32::from_rgb(75, 82, 95));
         painter.text(Pos2::new(layout.panel_rect.left() + 60.0, header_cy), Align2::LEFT_CENTER, "Layers", FontId::proportional(11.5), Color32::from_rgb(55, 62, 74));
 
         let add_hovered = hover_pos.is_some_and(|p| layout.add_hdr_rect.contains(p));
@@ -1945,7 +1949,7 @@ impl FlashBrushApp {
         } else {
             Color32::from_rgb(155, 160, 172)
         };
-        painter.text(layout.del_hdr_rect.center(), Align2::CENTER_CENTER, "🗑", FontId::proportional(11.0), del_col);
+        painter.text(layout.del_hdr_rect.center(), Align2::CENTER_CENTER, crate::panels::icons::DELETE, FontId::proportional(11.0), del_col);
 
         painter.line_segment([Pos2::new(layout.panel_rect.left(), layout.grid_top), Pos2::new(layout.grid_left, layout.grid_top)], Stroke::new(1.0, Color32::from_rgb(180, 186, 198)));
         painter.line_segment([Pos2::new(layout.grid_left, layout.panel_rect.top()), Pos2::new(layout.grid_left, layout.panel_rect.bottom())], Stroke::new(1.0, Color32::from_rgb(180, 186, 198)));

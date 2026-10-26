@@ -4,6 +4,37 @@ use crate::canvas_tool::{SelectSubMode, Tool};
 use crate::FlashBrushApp;
 
 // ============================================================================
+// Material Icons (`fonts/MaterialIcons-Regular.ttf`) コードポイント定義
+// ============================================================================
+
+pub(crate) mod icons {
+    pub(crate) const ADD: &str = "\u{e145}";          // add (＋)
+    pub(crate) const REMOVE: &str = "\u{e15b}";       // remove (－)
+    pub(crate) const FLIP_H: &str = "\u{e8d4}";       // swap_horiz (左右反転)
+    pub(crate) const FLIP_V: &str = "\u{e8d5}";       // swap_vert (上下反転)
+    pub(crate) const ROTATE_LEFT: &str = "\u{e419}";  // rotate_left (-90°回転)
+    pub(crate) const ROTATE_RIGHT: &str = "\u{e41a}"; // rotate_right (+90°回転)
+    pub(crate) const PIVOT_RESET: &str = "\u{e3b4}";  // center_focus_strong (ピボットリセット)
+    pub(crate) const GROUP: &str = "\u{e1bd}";        // widgets (グループ化)
+    pub(crate) const UNGROUP: &str = "\u{e53c}";      // layers_clear (グループ解除)
+    pub(crate) const WIREFRAME: &str = "\u{e922}";    // timeline (アンカー・パス表示)
+    pub(crate) const UNDO: &str = "\u{e166}";         // undo (元に戻す)
+    pub(crate) const REDO: &str = "\u{e15a}";         // redo (やり直す)
+    pub(crate) const DELETE: &str = "\u{e872}";       // delete (削除 / 全消去)
+    pub(crate) const SCENE_MOVIE: &str = "\u{e02c}";  // movie (シーンアイコン)
+    pub(crate) const ARROW_BACK: &str = "\u{e5c4}";   // arrow_back (1階層出る)
+    pub(crate) const VISIBILITY: &str = "\u{e8f4}";   // visibility (レイヤー表示)
+    pub(crate) const LOCK: &str = "\u{e897}";         // lock (レイヤーロック)
+    pub(crate) const SKIP_PREV: &str = "\u{e045}";    // skip_previous (先頭フレームへ)
+    pub(crate) const STEP_PREV: &str = "\u{e408}";    // navigate_before (前のフレームへ)
+    pub(crate) const PLAY: &str = "\u{e037}";         // play_arrow (再生)
+    pub(crate) const PAUSE: &str = "\u{e034}";        // pause (一時停止)
+    pub(crate) const STEP_NEXT: &str = "\u{e409}";    // navigate_next (次のフレームへ)
+    pub(crate) const SKIP_NEXT: &str = "\u{e044}";    // skip_next (最終フレームへ)
+    pub(crate) const ONION_SKIN: &str = "\u{e3e0}";   // filter_none (オニオンスキン)
+}
+
+// ============================================================================
 // 右側プロパティパネルの状態・タブ定義（Adobe Animate 準拠）
 // ============================================================================
 
@@ -59,7 +90,7 @@ impl FlashBrushApp {
     pub(crate) fn draw_left_toolbar(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("left_vertical_toolbar")
             .resizable(false)
-            .exact_width(42.0)
+            .exact_width(44.0)
             .frame(
                 egui::Frame::none()
                     .fill(Color32::from_rgb(245, 246, 248))
@@ -69,7 +100,7 @@ impl FlashBrushApp {
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
-                    let btn_size = Vec2::new(32.0, 26.0);
+                    let btn_size = Vec2::new(34.0, 30.0);
 
                     // (1) メインツール選択ボタン群（Tool::ALL を自動ループ）
                     self.draw_left_main_tool_buttons(ui, btn_size);
@@ -95,16 +126,47 @@ impl FlashBrushApp {
             });
     }
 
+    /// 左ツールバー用の選択トグルボタン（アイコンサイズ 20px で大きく見やすく描画）
+    fn add_left_selectable_icon(
+        ui: &mut egui::Ui,
+        btn_size: Vec2,
+        selected: bool,
+        icon: &str,
+        tooltip: &str,
+    ) -> bool {
+        ui.add_sized(
+            btn_size,
+            egui::SelectableLabel::new(selected, egui::RichText::new(icon).size(20.0)),
+        )
+        .on_hover_text(tooltip)
+        .clicked()
+    }
+
+    /// 左ツールバー用のアクションボタン（アイコンサイズ 20px で大きく見やすく描画）
+    fn add_left_action_icon(
+        ui: &mut egui::Ui,
+        btn_size: Vec2,
+        enabled: bool,
+        icon: &str,
+        tooltip: &str,
+    ) -> bool {
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.add_sized(btn_size, egui::Button::new(egui::RichText::new(icon).size(20.0)))
+                .on_hover_text(tooltip)
+        })
+        .inner
+        .clicked()
+    }
+
     fn draw_left_main_tool_buttons(&mut self, ui: &mut egui::Ui, btn_size: Vec2) {
         for tool in Tool::ALL {
-            if ui
-                .add_sized(
-                    btn_size,
-                    egui::SelectableLabel::new(self.tool == tool, tool.icon()),
-                )
-                .on_hover_text(tool.tooltip())
-                .clicked()
-            {
+            if Self::add_left_selectable_icon(
+                ui,
+                btn_size,
+                self.tool == tool,
+                tool.icon(),
+                tool.tooltip(),
+            ) {
                 self.set_tool(tool);
             }
         }
@@ -113,84 +175,59 @@ impl FlashBrushApp {
     fn draw_left_tool_sub_actions(&mut self, ui: &mut egui::Ui, btn_size: Vec2) {
         match self.tool {
             Tool::Select => {
-                if ui
-                    .add_sized(
-                        btn_size,
-                        egui::SelectableLabel::new(
-                            self.select_sub_mode == SelectSubMode::AddAnchor,
-                            "＋",
-                        ),
-                    )
-                    .on_hover_text("アンカー追加モード (+)")
-                    .clicked()
-                {
+                if Self::add_left_selectable_icon(
+                    ui,
+                    btn_size,
+                    self.select_sub_mode == SelectSubMode::AddAnchor,
+                    icons::ADD,
+                    "アンカー追加モード (+)",
+                ) {
                     self.toggle_select_sub_mode(SelectSubMode::AddAnchor);
                 }
-                if ui
-                    .add_sized(
-                        btn_size,
-                        egui::SelectableLabel::new(
-                            self.select_sub_mode == SelectSubMode::DeleteAnchor,
-                            "－",
-                        ),
-                    )
-                    .on_hover_text("アンカー削除モード (-)")
-                    .clicked()
-                {
+                if Self::add_left_selectable_icon(
+                    ui,
+                    btn_size,
+                    self.select_sub_mode == SelectSubMode::DeleteAnchor,
+                    icons::REMOVE,
+                    "アンカー削除モード (-)",
+                ) {
                     self.toggle_select_sub_mode(SelectSubMode::DeleteAnchor);
                 }
                 ui.separator();
             }
             Tool::Transform => {
                 let has_sel = !self.selected_shapes.is_empty();
-                if ui
-                    .add_enabled_ui(has_sel, |ui| {
-                        ui.add_sized(btn_size, egui::Button::new("⇄"))
-                            .on_hover_text("左右反転")
-                    })
-                    .inner
-                    .clicked()
-                {
+                if Self::add_left_action_icon(ui, btn_size, has_sel, icons::FLIP_H, "左右反転") {
                     self.flip_selected_shapes(true, false);
                 }
-                if ui
-                    .add_enabled_ui(has_sel, |ui| {
-                        ui.add_sized(btn_size, egui::Button::new("⇅"))
-                            .on_hover_text("上下反転")
-                    })
-                    .inner
-                    .clicked()
-                {
+                if Self::add_left_action_icon(ui, btn_size, has_sel, icons::FLIP_V, "上下反転") {
                     self.flip_selected_shapes(false, true);
                 }
-                if ui
-                    .add_enabled_ui(has_sel, |ui| {
-                        ui.add_sized(btn_size, egui::Button::new("↺"))
-                            .on_hover_text("-90° 回転")
-                    })
-                    .inner
-                    .clicked()
-                {
+                if Self::add_left_action_icon(
+                    ui,
+                    btn_size,
+                    has_sel,
+                    icons::ROTATE_LEFT,
+                    "-90° 回転",
+                ) {
                     self.rotate_selected_shapes(-std::f64::consts::FRAC_PI_2);
                 }
-                if ui
-                    .add_enabled_ui(has_sel, |ui| {
-                        ui.add_sized(btn_size, egui::Button::new("↻"))
-                            .on_hover_text("+90° 回転")
-                    })
-                    .inner
-                    .clicked()
-                {
+                if Self::add_left_action_icon(
+                    ui,
+                    btn_size,
+                    has_sel,
+                    icons::ROTATE_RIGHT,
+                    "+90° 回転",
+                ) {
                     self.rotate_selected_shapes(std::f64::consts::FRAC_PI_2);
                 }
-                if ui
-                    .add_enabled_ui(has_sel && self.transform_pivot.is_some(), |ui| {
-                        ui.add_sized(btn_size, egui::Button::new("◎"))
-                            .on_hover_text("変形中心（ピボット）をリセット")
-                    })
-                    .inner
-                    .clicked()
-                {
+                if Self::add_left_action_icon(
+                    ui,
+                    btn_size,
+                    has_sel && self.transform_pivot.is_some(),
+                    icons::PIVOT_RESET,
+                    "変形中心（ピボット）をリセット",
+                ) {
                     self.transform_pivot = None;
                 }
                 ui.separator();
@@ -202,34 +239,31 @@ impl FlashBrushApp {
     fn draw_left_group_and_view_buttons(&mut self, ui: &mut egui::Ui, btn_size: Vec2) {
         let can_group = !self.selected_shapes.is_empty();
         let can_ungroup = self.selection_has_group();
-        if ui
-            .add_enabled_ui(can_group, |ui| {
-                ui.add_sized(btn_size, egui::Button::new("📦"))
-                    .on_hover_text("グループ化 (Cmd+G)")
-            })
-            .inner
-            .clicked()
-        {
+        if Self::add_left_action_icon(
+            ui,
+            btn_size,
+            can_group,
+            icons::GROUP,
+            "グループ化 (Cmd+G)",
+        ) {
             self.group_selected_shapes();
         }
-        if ui
-            .add_enabled_ui(can_ungroup, |ui| {
-                ui.add_sized(btn_size, egui::Button::new("💥"))
-                    .on_hover_text("グループ解除 (Cmd+B)")
-            })
-            .inner
-            .clicked()
-        {
+        if Self::add_left_action_icon(
+            ui,
+            btn_size,
+            can_ungroup,
+            icons::UNGROUP,
+            "グループ解除 (Cmd+B)",
+        ) {
             self.ungroup_selected_shapes();
         }
-        if ui
-            .add_sized(
-                btn_size,
-                egui::SelectableLabel::new(self.show_wireframe, "⚓"),
-            )
-            .on_hover_text("アンカー・パス表示切替")
-            .clicked()
-        {
+        if Self::add_left_selectable_icon(
+            ui,
+            btn_size,
+            self.show_wireframe,
+            icons::WIREFRAME,
+            "アンカー・パス表示切替",
+        ) {
             self.show_wireframe = !self.show_wireframe;
         }
     }
@@ -274,34 +308,31 @@ impl FlashBrushApp {
     }
 
     fn draw_left_history_buttons(&mut self, ui: &mut egui::Ui, btn_size: Vec2) {
-        if ui
-            .add_enabled_ui(!self.undo_stack.is_empty(), |ui| {
-                ui.add_sized(btn_size, egui::Button::new("↩"))
-                    .on_hover_text("元に戻す (Cmd+Z)")
-            })
-            .inner
-            .clicked()
-        {
+        if Self::add_left_action_icon(
+            ui,
+            btn_size,
+            !self.undo_stack.is_empty(),
+            icons::UNDO,
+            "元に戻す (Cmd+Z)",
+        ) {
             self.undo();
         }
-        if ui
-            .add_enabled_ui(!self.redo_stack.is_empty(), |ui| {
-                ui.add_sized(btn_size, egui::Button::new("↪"))
-                    .on_hover_text("やり直す (Cmd+Shift+Z)")
-            })
-            .inner
-            .clicked()
-        {
+        if Self::add_left_action_icon(
+            ui,
+            btn_size,
+            !self.redo_stack.is_empty(),
+            icons::REDO,
+            "やり直す (Cmd+Shift+Z)",
+        ) {
             self.redo();
         }
-        if ui
-            .add_enabled_ui(!self.shapes.is_empty(), |ui| {
-                ui.add_sized(btn_size, egui::Button::new("🗑"))
-                    .on_hover_text("現在フレームのキャンバスを全消去")
-            })
-            .inner
-            .clicked()
-        {
+        if Self::add_left_action_icon(
+            ui,
+            btn_size,
+            !self.shapes.is_empty(),
+            icons::DELETE,
+            "現在フレームのキャンバスを全消去",
+        ) {
             self.clear_selection();
             self.push_undo();
             self.shapes.clear();
@@ -369,15 +400,18 @@ impl FlashBrushApp {
     }
 
     fn draw_group_breadcrumb(&mut self, ui: &mut egui::Ui) {
-        let mut crumb = String::from("🎬 シーン 1");
+        let mut crumb = format!("{} シーン 1", icons::SCENE_MOVIE);
         for &gid in &self.editing_group_path {
-            crumb.push_str(&format!(" ▸ 📦 Group #{gid}"));
+            crumb.push_str(&format!(" > {} Group #{gid}", icons::GROUP));
         }
         if self.editing_group_path.is_empty() {
             ui.label(crumb);
         } else {
             ui.colored_label(Color32::from_rgb(0, 120, 215), crumb);
-            if ui.button("⬅ 1階層出る").clicked() {
+            if ui
+                .button(format!("{} 1階層出る", icons::ARROW_BACK))
+                .clicked()
+            {
                 self.exit_current_group();
             }
         }
