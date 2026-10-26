@@ -1625,7 +1625,9 @@ mod tests {
     fn test_timeline_layer_keyframe_and_cel_lookup() {
         let mut timeline = Timeline::default();
         assert_eq!(timeline.fps, 24);
+        assert_eq!(timeline.total_frames, 1);
         assert_eq!(timeline.layers.len(), 1);
+        assert_eq!(timeline.layers[0].frame_count, 1);
         assert_eq!(timeline.current_frame, 0);
 
         let red = Color32::from_rgb(235, 75, 75);
@@ -1636,12 +1638,13 @@ mod tests {
         assert_eq!(timeline.active_cel_shapes().len(), 1);
 
         // フレーム 4 に空白キーフレーム (F7: clone_prev = false) を挿入すると、
-        // フレーム 0..=3 は元のキーフレーム、フレーム 4 以降は空の新しいキーフレームを参照すること
+        // frame_count が 5 に拡張され、フレーム 0..=3 は元のキーフレーム、フレーム 4 は空の新しいキーフレームを参照すること
         timeline.layers[0].insert_keyframe(4, false);
+        assert_eq!(timeline.layers[0].frame_count, 5);
         assert_eq!(timeline.layers[0].keyframe_index_at(3), Some(0));
         assert_eq!(timeline.layers[0].keyframe_index_at(4), Some(1));
         assert_eq!(timeline.layers[0].cel_at(2).unwrap().shapes.len(), 1);
-        assert!(timeline.layers[0].cel_at(5).unwrap().is_empty());
+        assert!(timeline.layers[0].cel_at(4).unwrap().is_empty());
 
         // フレーム 2 の位置からフレーム 3 に複製キーフレーム (F6: clone_prev = true) を挿入すると図形が引き継がれること
         timeline.layers[0].insert_keyframe(3, true);

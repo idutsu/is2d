@@ -134,7 +134,7 @@ impl Layer {
     }
 
     pub(crate) fn new_with_id(id: u64, name: impl Into<String>) -> Self {
-        Self::new_with_id_and_frames(id, name, 24)
+        Self::new_with_id_and_frames(id, name, 1)
     }
 
     /// 指定フレーム番号 `frame` において有効な（保持されている）キーフレームのインデックスを返す
@@ -302,7 +302,7 @@ impl Default for Timeline {
             layers: vec![Layer::new_with_id(1, "Layer 1")],
             current_frame: 0,
             active_layer: 0,
-            total_frames: 24,
+            total_frames: 1,
             fps: 24,
             is_playing: false,
             last_frame_advance_time: None,
@@ -1324,32 +1324,37 @@ impl FlashBrushApp {
                 } else {
                     let num_layers = self.timeline.layers.len();
                     if let Some(target_layer) = layout.layer_at_y(pos.y, self.timeline.scroll_y, num_layers) {
-                        let max_f = self.timeline.layers[target_layer].frame_count.max(self.timeline.total_frames);
+                        let layer_fc = self.timeline.layers[target_layer].frame_count;
+                        let max_f = layer_fc.max(self.timeline.total_frames);
                         let target_frame = col.min(max_f.saturating_sub(1));
                         self.timeline.is_playing = false;
 
-                        let clicked_in_existing_sel = self
-                            .timeline
-                            .cell_selection
-                            .is_some_and(|s| s.contains(target_layer, target_frame));
+                        // 実際に存在するフレーム（col < layer_fc）の上をクリックしたときのみ MoveFrames 判定を行う
+                        // （24フレームより後ろの余白領域をクリックした際に、24フレーム目を掴んで移動したと誤判定されるのを防ぐ）
+                        let clicked_on_existing_frame = col < layer_fc;
+                        let clicked_in_existing_sel = clicked_on_existing_frame
+                            && self
+                                .timeline
+                                .cell_selection
+                                .is_some_and(|s| s.contains(target_layer, col));
 
-                        if clicked_in_existing_sel || alt_held {
+                        if clicked_in_existing_sel || (clicked_on_existing_frame && alt_held) {
                             let orig_sel = if let Some(sel) = self
                                 .timeline
                                 .cell_selection
-                                .filter(|s| s.contains(target_layer, target_frame))
+                                .filter(|s| s.contains(target_layer, col))
                             {
                                 sel
                             } else {
-                                self.select_timeline_cells(target_layer, target_frame, target_layer, target_frame);
-                                TimelineCellSelection::single(target_layer, target_frame)
+                                self.select_timeline_cells(target_layer, col, target_layer, col);
+                                TimelineCellSelection::single(target_layer, col)
                             };
                             self.timeline.grid_drag = TimelineGridDrag::MoveFrames {
                                 orig_sel,
                                 grab_layer: target_layer,
-                                grab_frame: target_frame,
+                                grab_frame: col,
                                 curr_layer: target_layer,
-                                curr_frame: target_frame,
+                                curr_frame: col,
                                 copy_mode: alt_held,
                                 has_moved: false,
                             };
