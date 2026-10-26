@@ -477,14 +477,24 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
     }
 
     let z = zoom.clamp(0.15, 16.0);
-    let raw_f64: Vec<[f64; 2]> = raw_outline.iter().map(|p| [p.x, p.y]).collect();
-    let simplified = raw_f64.simplify_shape(OverlayFillRule::NonZero, 0.05 / (z * z));
+    let to_world = Affine::scale(1.0 / z);
+    let screen_outline: Vec<Point> = raw_outline
+        .iter()
+        .map(|&p| Point::new(p.x * z, p.y * z))
+        .collect();
+    let raw_f64: Vec<[f64; 2]> = screen_outline.iter().map(|p| [p.x, p.y]).collect();
+    let simplified = raw_f64.simplify_shape(OverlayFillRule::NonZero, 0.05);
 
     if simplified.is_empty() {
-        let r_est = estimate_brush_radius_from_ring(raw_outline, z);
-        return smooth_ring_to_quad_contour(raw_outline, r_est, z, true)
+        let r_est = estimate_brush_radius_from_ring(&screen_outline);
+        return smooth_ring_to_quad_contour(&screen_outline, r_est, true)
             .into_iter()
-            .map(|exterior| FillShape::new(color, exterior, Vec::new()))
+            .map(|mut exterior| {
+                if (z - 1.0).abs() > 1e-9 {
+                    exterior.transform(to_world);
+                }
+                FillShape::new(color, exterior, Vec::new())
+            })
             .collect();
     }
 
@@ -493,21 +503,28 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
         if shape_rings.is_empty() {
             continue;
         }
-        let r_est = estimate_brush_radius_from_shape_rings(&shape_rings, z);
+        let r_est = estimate_brush_radius_from_shape_rings(&shape_rings);
         let ext_pts: Vec<Point> = shape_rings[0]
             .iter()
             .map(|&[x, y]| Point::new(x, y))
             .collect();
-        let Some(exterior) = smooth_ring_to_quad_contour(&ext_pts, r_est, z, true) else {
+        let Some(mut exterior) = smooth_ring_to_quad_contour(&ext_pts, r_est, true) else {
             continue;
         };
+        if (z - 1.0).abs() > 1e-9 {
+            exterior.transform(to_world);
+        }
 
         let holes = shape_rings[1..]
             .iter()
             .filter_map(|hole_ring| {
                 let hole_pts: Vec<Point> =
                     hole_ring.iter().map(|&[x, y]| Point::new(x, y)).collect();
-                smooth_ring_to_quad_contour(&hole_pts, r_est, z, false)
+                let mut hole = smooth_ring_to_quad_contour(&hole_pts, r_est, false)?;
+                if (z - 1.0).abs() > 1e-9 {
+                    hole.transform(to_world);
+                }
+                Some(hole)
             })
             .collect();
 
@@ -518,11 +535,10 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
 }
 
 /// ポリゴンリング群（外周＋内周穴）の正味面積と総周長の比（Steiner の管状近傍公式 `Area / Perimeter ≈ r`）から
-/// ストロークを描いたブラシ半径 `r` を推定する（ズーム倍率 `z` を考慮して極細線から太線までスケール不変に処理する）。
-fn estimate_brush_radius_from_shape_rings(shape_rings: &[Vec<[f64; 2]>], z: f64) -> f64 {
+/// ストロークを描いたスクリーン空間でのブラシ半径 `r` を推定する。
+fn estimate_brush_radius_from_shape_rings(shape_rings: &[Vec<[f64; 2]>]) -> f64 {
     let mut net_area = 0.0;
     let mut total_perim = 0.0;
-    let min_net_area = 0.1 / (z * z);
     for (idx, ring) in shape_rings.iter().enumerate() {
         if ring.len() < 3 {
             continue;
@@ -531,12 +547,12 @@ fn estimate_brush_radius_from_shape_rings(shape_rings: &[Vec<[f64; 2]>], z: f64)
         net_area = if idx == 0 {
             net_area + a
         } else {
-            (net_area - a).max(min_net_area)
+            (net_area - a).max(0.1)
         };
         total_perim += p;
     }
-    if total_perim < 1e-3 / z {
-        return REFERENCE_BRUSH_RADIUS / z;
+    if total_perim < 1e-3 {
+        return REFERENCE_BRUSH_RADIUS;
     }
     let circularity = (4.0 * std::f64::consts::PI * net_area) / (total_perim * total_perim);
     let r = if shape_rings.len() == 1 && circularity > 0.78 {
@@ -544,37 +560,41 @@ fn estimate_brush_radius_from_shape_rings(shape_rings: &[Vec<[f64; 2]>], z: f64)
     } else {
         1.05 * net_area / total_perim
     };
-    r.clamp(0.3 / z, 80.0 / z)
+    r.clamp(0.3, 80.0)
 }
 
-fn estimate_brush_radius_from_ring(ring: &[Point], z: f64) -> f64 {
+fn estimate_brush_radius_from_ring(ring: &[Point]) -> f64 {
     let f64_ring: Vec<[f64; 2]> = ring.iter().map(|p| [p.x, p.y]).collect();
-    estimate_brush_radius_from_shape_rings(&[f64_ring], z)
+    estimate_brush_radius_from_shape_rings(&[f64_ring])
 }
 
-/// 閉じたポリゴン頂点リング `ring` の全体の図形・線幅・角の丸みを損なわずに、
-/// 画面上のブラシ半径 `r_est * zoom` に応じたスクリーン空間基準のスケール不変パラメータで微小な手ブレ波打ちだけを整え、
+/// スクリーン空間の閉じたポリゴン頂点リング `ring` の全体の図形・線幅・角の丸みを損なわずに、
+/// ブラシ半径 `r_est` とリング自身の周長半径に応じたスケール不変パラメータでピクセルジャギーだけを整え、
 /// 単一の `QuadBez` で近似できる中間アンカーを統合して最小アンカー数の `Contour` を構築する。
 fn smooth_ring_to_quad_contour(
     ring: &[Point],
     r_est: f64,
-    zoom: f64,
     expect_positive_area: bool,
 ) -> Option<Contour> {
     if ring.len() < 3 {
         return None;
     }
 
-    let z = zoom.clamp(0.15, 16.0);
-    // 画面上（スクリーン空間）でのブラシ半径を基準にスケール係数を算出し、ワールド座標へ変換（`/ z`）
-    let screen_r_est = r_est * z;
-    let screen_r_scale = (screen_r_est / REFERENCE_BRUSH_RADIUS).clamp(0.05, 1.5);
-    let r_scale = screen_r_scale / z;
+    // 画面上（スクリーン空間）でのブラシ半径とリング自身の周長半径の両方を基準にスケール係数を算出し、
+    // 小さな円や小さな内周穴でも形状が勝手に潰れたり丸められたりしないよう許容誤差を自動縮小する
+    let mut raw_perim = 0.0;
+    for i in 0..ring.len() {
+        raw_perim += (ring[(i + 1) % ring.len()] - ring[i]).hypot();
+    }
+    let ring_r = raw_perim / std::f64::consts::TAU;
+    let r_scale = (r_est / REFERENCE_BRUSH_RADIUS)
+        .clamp(0.05, 1.5)
+        .min((ring_r / 20.0).clamp(0.05, 1.5));
+    let small_ring_factor = (ring_r / 42.0).clamp(0.25, 1.0);
 
     // 1. スクリーン空間で一定の精度を保つ等間隔リサンプリング
-    let clean_tol = (0.35 * screen_r_scale).clamp(0.05, 0.40) / z;
-    let (mut dense, actual_ds) =
-        resample_closed_ring_uniform(ring, clean_tol, r_scale, screen_r_scale, z)?;
+    let clean_tol = (0.35 * r_scale * small_ring_factor).clamp(0.05, 0.40);
+    let (mut dense, actual_ds) = resample_closed_ring_uniform(ring, clean_tol, r_scale)?;
     let m = dense.len();
 
     // 2. 鋭角コーナー（交差部・四角穴の内角）と丸円弧（Round Cap / Round Corner）の分類および基準位置回転
@@ -591,21 +611,23 @@ fn smooth_ring_to_quad_contour(
         expect_positive_area,
     );
 
-    // 3. ゼロ収縮（Zero-Shrinkage）2スケール移動平均フィルタによる手ブレ波打ち除去
-    apply_zero_shrinkage_smoothing(&mut dense, &is_high_curv);
+    // 3. ゼロ収縮（Zero-Shrinkage）2スケール移動平均フィルタによるピクセルジャギー除去
+    apply_zero_shrinkage_smoothing(&mut dense, &is_high_curv, r_scale * small_ring_factor);
 
     // 4. 保護された高曲率ラン（鋭角ピーク・丸コーナー出入口・180度丸キャップ中点）のロック頂点決定
     let locked = select_locked_feature_anchors(&dense, &is_sharp_corner, &is_high_curv, w_short);
 
     // 5. 単一 QuadBez フィット誤差に基づく反復アンカー削減
-    let max_edge_tol = 0.95 * r_scale;
-    let max_cap_tol = (0.38 * screen_r_scale).max(0.08) / z;
+    let max_edge_tol = 0.50 * r_scale * small_ring_factor;
+    let max_cap_tol = (0.36 * r_scale * small_ring_factor).max(0.06);
+    let max_curve_turn_rad = 0.82 + 0.40 * small_ring_factor;
     let anchors = reduce_outline_anchors_by_quad_fit(
         &dense,
         &locked,
         &is_high_curv,
         max_edge_tol,
         max_cap_tol,
+        max_curve_turn_rad,
     );
     if anchors.len() < 2 {
         return None;
@@ -613,7 +635,7 @@ fn smooth_ring_to_quad_contour(
 
     // 6. 各アンカー区間に形状保持2次ベジェ曲線（QuadBez）をフィッティングし、
     //    滑らかな中間アンカーで前後の接線方向を一直線に揃える（G1連続フィッティング）
-    let straight_snap_tol = (0.18 * screen_r_scale).clamp(0.04, 0.20) / z;
+    let straight_snap_tol = (0.18 * r_scale).clamp(0.04, 0.20);
     let k = anchors.len();
     let mut segments = Vec::with_capacity(k);
     let mut is_straight = Vec::with_capacity(k);
@@ -641,10 +663,10 @@ fn smooth_ring_to_quad_contour(
     );
 
     let mut contour = Contour { segments };
-    contour.cleanup_degenerate((0.45 * screen_r_scale).clamp(0.08, 0.5) / z);
+    contour.cleanup_degenerate((0.45 * r_scale).clamp(0.08, 0.5));
 
     let area = contour.signed_area();
-    if area.abs() < (2.0 * screen_r_scale * screen_r_scale).max(0.25) / (z * z) {
+    if area.abs() < (2.0 * r_scale * r_scale).max(0.25) {
         return None;
     }
     if (expect_positive_area && area < 0.0) || (!expect_positive_area && area > 0.0) {
@@ -655,13 +677,11 @@ fn smooth_ring_to_quad_contour(
     Some(contour)
 }
 
-/// 閉じた頂点リングをスクリーン空間スケール `screen_r_scale` およびズーム倍率 `z` に応じた等間隔ステップでリサンプリングする
+/// 閉じた頂点リングをスクリーン空間スケール `r_scale` に応じた等間隔ステップでリサンプリングする
 fn resample_closed_ring_uniform(
     ring: &[Point],
     clean_tol: f64,
     r_scale: f64,
-    screen_r_scale: f64,
-    z: f64,
 ) -> Option<(Vec<Point>, f64)> {
     let clean = dedup_closed_ring(ring.iter().copied(), clean_tol);
     if clean.len() < 3 {
@@ -677,7 +697,7 @@ fn resample_closed_ring_uniform(
         return None;
     }
 
-    let step_ds = ((2.0 * screen_r_scale).clamp(0.15, 2.0) / z).min(perimeter / 36.0);
+    let step_ds = (2.0 * r_scale).clamp(0.15, 2.0).min(perimeter / 36.0);
     let num_dense = ((perimeter / step_ds).round() as usize).clamp(16, 7200);
     let actual_ds = perimeter / num_dense as f64;
     let mut dense = Vec::with_capacity(num_dense);
@@ -928,9 +948,10 @@ fn classify_and_align_ring_features(
         }
     }
 
-    // 8割以上が丸円弧で鋭角を持たない場合は直線辺を持たない小円・楕円ループなので全周を均一平滑化する
+    // 6割以上が丸円弧で鋭角を持たない場合は直線辺や180度キャップを持たない円・楕円ループなので、
+    // 特定箇所を180度キャップと誤認して歪めないよう `is_round_arc` を解除する
     if !is_sharp_corner.iter().any(|&b| b)
-        && is_round_arc.iter().filter(|&&b| b).count() * 5 >= m * 4
+        && is_round_arc.iter().filter(|&&b| b).count() * 5 >= m * 3
     {
         is_round_arc.fill(false);
     }
@@ -1030,7 +1051,7 @@ fn classify_and_align_ring_features(
 }
 
 /// ゼロ収縮（Zero-Shrinkage）2スケール移動平均フィルタで、描いた形や凹凸を丸めずに輪郭表面のギザギザだけを除去する
-fn apply_zero_shrinkage_smoothing(dense: &mut [Point], is_high_curv: &[bool]) {
+fn apply_zero_shrinkage_smoothing(dense: &mut [Point], is_high_curv: &[bool], r_scale: f64) {
     let m = dense.len();
     let mut dist_to_hc = vec![m; m];
     if is_high_curv.iter().any(|&b| b) {
@@ -1051,8 +1072,11 @@ fn apply_zero_shrinkage_smoothing(dense: &mut [Point], is_high_curv: &[bool]) {
         }
     }
 
-    const SMOOTH_PASSES: usize = 9;
-    let w_wide = 11usize.min(m / 5).max(3);
+    const SMOOTH_PASSES: usize = 4;
+    let max_w = 3usize.min((m / 10).max(1));
+    let w_wide = 6usize.min(m / 6).max(3);
+    let max_shift = 0.45 * r_scale;
+    let orig_pts = dense.to_vec();
     let mut prev_pts = vec![Point::ORIGIN; m];
     let mut deltas = vec![KVec2::ZERO; m];
 
@@ -1061,7 +1085,7 @@ fn apply_zero_shrinkage_smoothing(dense: &mut [Point], is_high_curv: &[bool]) {
         deltas.fill(KVec2::ZERO);
 
         for i in 0..m {
-            let w = dist_to_hc[i].min(5);
+            let w = dist_to_hc[i].min(max_w);
             if w == 0 {
                 continue;
             }
@@ -1077,29 +1101,33 @@ fn apply_zero_shrinkage_smoothing(dense: &mut [Point], is_high_curv: &[bool]) {
             if d_hc == 0 {
                 continue;
             }
-            let fade = ((d_hc.saturating_sub(2)) as f64 / 3.0).clamp(0.0, 1.0);
-            let eff_delta = if fade > 0.0 {
-                let mut w_sum = deltas[i];
-                let mut w_cnt = 1usize;
-                for k in 1..=w_wide.min(d_hc) {
-                    let im = (i + m - k) % m;
-                    let ip = (i + k) % m;
-                    if dist_to_hc[im] >= 2 && dist_to_hc[ip] >= 2 {
-                        w_sum += deltas[im] + deltas[ip];
-                        w_cnt += 2;
-                    }
+            let mut w_sum = deltas[i];
+            let mut w_cnt = 1usize;
+            for k in 1..=w_wide.min(d_hc) {
+                let im = (i + m - k) % m;
+                let ip = (i + k) % m;
+                if dist_to_hc[im] >= 1 && dist_to_hc[ip] >= 1 {
+                    w_sum += deltas[im] + deltas[ip];
+                    w_cnt += 2;
                 }
-                let wide_avg = if w_cnt >= 3 {
-                    w_sum / w_cnt as f64
-                } else {
-                    KVec2::ZERO
-                };
-                deltas[i] - wide_avg * (1.02 * fade)
+            }
+            let wide_avg = if w_cnt >= 3 {
+                w_sum / w_cnt as f64
             } else {
-                deltas[i]
+                KVec2::ZERO
             };
+            let fade = (d_hc as f64 / 2.0).clamp(0.0, 1.0);
+            let eff_delta = (deltas[i] - wide_avg * 1.02) * fade;
 
-            dense[i] = prev_pts[i] + eff_delta * 0.58;
+            let next_pt = prev_pts[i] + eff_delta * 0.50;
+            let local_max_shift = max_shift * fade;
+            let total_disp = next_pt - orig_pts[i];
+            let disp_len = total_disp.hypot();
+            dense[i] = if disp_len > local_max_shift {
+                orig_pts[i] + total_disp * (local_max_shift / disp_len)
+            } else {
+                next_pt
+            };
         }
     }
 }
@@ -1203,7 +1231,7 @@ fn find_longest_false_run_midpoint(flags: &[bool]) -> Option<usize> {
         return None;
     }
     let Some(first_true) = flags.iter().position(|&b| b) else {
-        return Some(0);
+        return Some(m / 16);
     };
 
     let mut best_start = 0usize;
@@ -1379,7 +1407,8 @@ fn enforce_g1_tangent_continuity_on_segments(
         if let Some(p1_tan) = candidate_p1 {
             let radial_diff = (0.5 * (p1_tan - p1_init).dot(chord_normal)).abs();
             let total_diff = (p1_tan - p1_init).hypot();
-            if radial_diff <= max_radial_shift && total_diff <= 0.42 * chord_len {
+            let local_max_radial = max_radial_shift.min(0.024 * chord_len);
+            if radial_diff <= local_max_radial && total_diff <= 0.36 * chord_len {
                 segments[j].p1 = p1_tan;
             }
         }
@@ -1431,6 +1460,7 @@ fn reduce_outline_anchors_by_quad_fit(
     is_high_curv: &[bool],
     max_edge_tol: f64,
     max_cap_tol: f64,
+    max_curve_turn_rad: f64,
 ) -> Vec<usize> {
     let m = dense.len();
     let step = 4usize.max(m / 48).min(8);
@@ -1450,7 +1480,6 @@ fn reduce_outline_anchors_by_quad_fit(
     }
 
     const MAX_CORNER_TURN_RAD: f64 = 1.68;
-    const MAX_CURVE_TURN_RAD: f64 = 1.25;
 
     while anchors.len() > 3 {
         let mut best_remove_pos: Option<usize> = None;
@@ -1478,7 +1507,7 @@ fn reduce_outline_anchors_by_quad_fit(
             let turn_limit = if is_high_curv[curr_idx] {
                 MAX_CORNER_TURN_RAD
             } else {
-                MAX_CURVE_TURN_RAD
+                max_curve_turn_rad
             };
             if net_turn > turn_limit || macro_abs_turn > turn_limit + 0.25 {
                 continue;
@@ -1492,6 +1521,28 @@ fn reduce_outline_anchors_by_quad_fit(
 
             let p0 = *span_pts.first().unwrap();
             let p2 = *span_pts.last().unwrap();
+            let chord = p2 - p0;
+            let chord_len = chord.hypot();
+            if chord_len > 1e-4 && span_pts.len() >= 10 {
+                let n_chord = left_normal(chord / chord_len);
+                let mid = span_pts.len() / 2;
+                let mean_first: f64 = span_pts[1..mid]
+                    .iter()
+                    .map(|&pt| (pt - p0).dot(n_chord))
+                    .sum::<f64>()
+                    / (mid - 1).max(1) as f64;
+                let mean_second: f64 = span_pts[mid..(span_pts.len() - 1)]
+                    .iter()
+                    .map(|&pt| (pt - p0).dot(n_chord))
+                    .sum::<f64>()
+                    / (span_pts.len() - 1 - mid).max(1) as f64;
+                if mean_first * mean_second < 0.0
+                    && mean_first.abs() > 0.72 * tol
+                    && mean_second.abs() > 0.72 * tol
+                {
+                    continue;
+                }
+            }
             let cum = compute_cumulative_arc_lengths(&span_pts);
             let p1 = fit_quad_control_point_with_arc_lengths(&span_pts, &cum, p0, p2);
             let err = max_quad_fit_error_with_arc_lengths(&span_pts, &cum, QuadBez::new(p0, p1, p2));
@@ -2113,8 +2164,8 @@ fn reconstruct_or_refit_quad_contour(
         .collect();
 
     if tagged_edges.iter().all(|e| e.quad_id.is_none()) {
-        let r_est = estimate_brush_radius_from_ring(&pts, 1.0);
-        return smooth_ring_to_quad_contour(&pts, r_est, 1.0, is_outer);
+        let r_est = estimate_brush_radius_from_ring(&pts);
+        return smooth_ring_to_quad_contour(&pts, r_est, is_outer);
     }
 
     let shift = (0..n)
@@ -2171,8 +2222,8 @@ fn reconstruct_or_refit_quad_contour(
     }
 
     if segments.len() < 2 {
-        let r_est = estimate_brush_radius_from_ring(&pts, 1.0);
-        return smooth_ring_to_quad_contour(&pts, r_est, 1.0, is_outer);
+        let r_est = estimate_brush_radius_from_ring(&pts);
+        return smooth_ring_to_quad_contour(&pts, r_est, is_outer);
     }
 
     let mut contour = Contour { segments };

@@ -594,7 +594,7 @@ mod tests {
                 let jitter = if i == 0 || i == 30 {
                     0.0
                 } else {
-                    (i as f64 * 1.7).sin() * 1.5
+                    (i as f64 * 1.7).sin() * 0.38
                 };
                 Point::new(x, 200.0 + jitter)
             })
@@ -657,7 +657,7 @@ mod tests {
                 let wobble = if i == 0 || i == 36 {
                     0.0
                 } else {
-                    (i as f64 * 1.8).sin() * 1.2
+                    (i as f64 * 1.8).sin() * 0.35
                 };
                 Point::new(pt.x, pt.y + wobble)
             })
@@ -708,7 +708,7 @@ mod tests {
                 let wobble = if k == 0 || k >= steps - 2 {
                     0.0
                 } else {
-                    ((step_idx as f64) * 1.9).sin() * 1.8
+                    ((step_idx as f64) * 1.9).sin() * 0.30
                 };
                 pts.push(a.lerp(b, t) + normal * wobble);
                 step_idx += 1;
@@ -746,7 +746,7 @@ mod tests {
         let pts: Vec<Point> = (0..=(steps + 2))
             .map(|i| {
                 let theta = (i as f64 / steps as f64) * std::f64::consts::TAU;
-                let wobble = (theta * 9.0).sin() * 1.6 + (theta * 15.0).cos() * 0.7;
+                let wobble = (theta * 9.0).sin() * 0.32 + (theta * 15.0).cos() * 0.15;
                 let r_curr = circle_r + wobble;
                 Point::new(
                     center.x + r_curr * theta.cos(),
@@ -763,8 +763,8 @@ mod tests {
 
         let ext_len = circle_shape.exterior.segments.len();
         let hole_len = circle_shape.holes[0].segments.len();
-        assert!((6..=9).contains(&ext_len), "ext_len = {}", ext_len);
-        assert!((6..=9).contains(&hole_len), "hole_len = {}", hole_len);
+        assert!((6..=10).contains(&ext_len), "ext_len = {}", ext_len);
+        assert!((6..=10).contains(&hole_len), "hole_len = {}", hole_len);
 
         for k in 0..16 {
             let ang = (k as f64 / 16.0) * std::f64::consts::TAU;
@@ -1511,12 +1511,12 @@ mod tests {
         let circle_r = 60.0;
         let brush_r = 10.0;
 
-        // 手ブレの入った円ストロークを生成
+        // ピクセルジャギーの入った円ストロークを生成
         let steps = 96usize;
         let pts: Vec<Point> = (0..=(steps + 2))
             .map(|i| {
                 let theta = (i as f64 / steps as f64) * std::f64::consts::TAU;
-                let wobble = (theta * 11.0).sin() * 1.8 + (theta * 17.0).cos() * 0.9;
+                let wobble = (theta * 11.0).sin() * 0.35 + (theta * 17.0).cos() * 0.18;
                 let r_curr = circle_r + wobble;
                 Point::new(
                     center.x + r_curr * theta.cos(),
@@ -1659,5 +1659,74 @@ mod tests {
                 "protrusion={tip_protrusion}: 『あ』の右上交差部の谷間が丸められてコブ状に繋がらないこと"
             );
         }
+
+        // ゆらゆらした線（S字の波線）を描いたとき、軌道が勝手に直線化されず描いた波の山・谷が保持されること
+        let r_wave = 8.0;
+        let wave_pts: Vec<Point> = (0..=80)
+            .map(|i| {
+                let t = i as f64 / 80.0;
+                let x = 100.0 + 200.0 * t;
+                let y = 200.0 + 4.5 * (t * 4.0 * std::f64::consts::PI).sin();
+                Point::new(x, y)
+            })
+            .collect();
+        let wave_raw = generate_brush_outline(&wave_pts, r_wave);
+        let wave_shapes = build_smoothed_stroke_shapes(&wave_raw, Color32::BLACK);
+        assert_eq!(wave_shapes.len(), 1);
+        let wave_shape = &wave_shapes[0];
+        // 波の下側の山 (x=125, y=204.5) と上側の谷 (x=175, y=195.5) が平坦化されず保持されていること
+        assert!(
+            wave_shape.contains_point(Point::new(125.0, 211.0)),
+            "ゆらゆらした波線の山 (x=125) が勝手に直線化されて削られないこと"
+        );
+        assert!(
+            !wave_shape.contains_point(Point::new(125.0, 194.5)),
+            "ゆらゆらした波線の山の反対側が勝手に直線化されて埋まらないこと"
+        );
+        assert!(
+            wave_shape.contains_point(Point::new(175.0, 189.0)),
+            "ゆらゆらした波線の谷 (x=175) が勝手に直線化されて削られないこと"
+        );
+        assert!(
+            !wave_shape.contains_point(Point::new(175.0, 205.5)),
+            "ゆらゆらした波線の谷の反対側が勝手に直線化されて埋まらないこと"
+        );
+
+        // 小さめの円（半径 15px 程度で、少し横長かつ右上が膨らんだ手描きの小円）を描いたとき、
+        // 勝手に正円へ整形されず、描いた小円の非対称な輪郭と内周穴がそのまま維持されること
+        let small_center = Point::new(300.0, 300.0);
+        let r_small_brush = 6.0;
+        let small_pts: Vec<Point> = (0..=64)
+            .map(|i| {
+                let theta = (i as f64 / 62.0) * std::f64::consts::TAU;
+                // 横方向は半径 17px、縦方向は半径 12px に加え、右上 (theta ≈ -PI/4) に +2.2px の手描き膨らみを持つ小円
+                let rx = 17.0 + 2.2 * (theta * 2.0).sin();
+                let ry = 12.0 - 1.5 * (theta * 3.0).cos();
+                Point::new(
+                    small_center.x + rx * theta.cos(),
+                    small_center.y + ry * theta.sin(),
+                )
+            })
+            .collect();
+        let small_raw = generate_brush_outline(&small_pts, r_small_brush);
+        let small_shapes = build_smoothed_stroke_shapes(&small_raw, Color32::BLACK);
+        assert_eq!(small_shapes.len(), 1);
+        let small_shape = &small_shapes[0];
+        assert_eq!(small_shape.holes.len(), 1, "小さめの円の中央の穴が潰れないこと");
+        // 横方向 (theta = 0: r = 17, 外周 x = 300 + 17 + 6 = 323) はしっかり塗られ、
+        // 縦方向 (theta = PI/2: r = 12, 外周 y = 300 + 12 + 6 = 318) は正円化で膨らまないこと
+        assert!(
+            small_shape.contains_point(Point::new(322.2, 300.0)),
+            "小さめの円の横方向の張り出しが勝手に縮められないこと"
+        );
+        assert!(
+            !small_shape.contains_point(Point::new(300.0, 319.2)),
+            "小さめの円の縦方向が正円化によって勝手に外側へ膨らまないこと"
+        );
+        // 内周穴の横方向 (x = 300 + 17 - 6 = 311 の内側 309.8) が空白のままであること
+        assert!(
+            !small_shape.contains_point(Point::new(309.8, 300.0)),
+            "小さめの円の内周穴の横幅が勝手に丸められて狭まらないこと"
+        );
     }
 }
