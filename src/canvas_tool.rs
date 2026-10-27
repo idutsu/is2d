@@ -321,6 +321,22 @@ impl FlashBrushApp {
         self.view_pan = Vec2::ZERO;
     }
 
+    /// ステージ枠全体が中央キャンバス領域に余白付きでぴったり収まるようにズーム倍率とパン位置を自動調整する（「ウィンドウに合わせる」）
+    pub(crate) fn fit_stage_to_window(&mut self) {
+        let stage_w = self.stage_size.x.max(100.0);
+        let stage_h = self.stage_size.y.max(100.0);
+        let avail_w = (self.last_canvas_rect.width() - 48.0).max(64.0);
+        let avail_h = (self.last_canvas_rect.height() - 48.0).max(64.0);
+        let zoom = (avail_w / stage_w).min(avail_h / stage_h).clamp(0.15, 16.0);
+        let center = self.stage_center_world();
+        let screen_center = self.last_canvas_rect.center();
+        self.view_zoom = zoom;
+        self.view_pan = Vec2::new(
+            screen_center.x - (center.x as f32) * zoom,
+            screen_center.y - (center.y as f32) * zoom,
+        );
+    }
+
     /// ステージ（カメラ出力枠）のワールド中心座標を返す（初期 100% ビューで中央キャンバス領域の真ん中に配置）
     #[inline]
     pub(crate) fn stage_center_world(&self) -> Point {
@@ -369,7 +385,7 @@ impl FlashBrushApp {
                 Color32::from_rgba_unmultiplied(0, 0, 0, 20),
             );
         }
-        painter.rect_filled(stage_rect, 0.0, self.stage_color);
+        painter.rect_filled(stage_rect, 0.0, Color32::WHITE);
     }
 
     /// 図形描画の後に、上からステージの境界枠線（および「枠外を隠す」ON時の外周マスク）を描画する

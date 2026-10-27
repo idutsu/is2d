@@ -42,14 +42,16 @@ pub(crate) enum RightPanelTab {
     Properties, // プロパティ（現在選択中のツールの設定を表示）
     Color,      // カラー
     Library,    // ライブラリ
+    Canvas,     // キャンバス（ステージサイズ・背景色・枠外マスク・表示倍率リセット）
 }
 
 impl RightPanelTab {
     /// 右パネル上部に並べるタブの標準順序
-    pub(crate) const ALL: [RightPanelTab; 3] = [
+    pub(crate) const ALL: [RightPanelTab; 4] = [
         RightPanelTab::Properties,
         RightPanelTab::Color,
         RightPanelTab::Library,
+        RightPanelTab::Canvas,
     ];
 
     /// タブに表示するラベル名
@@ -58,6 +60,7 @@ impl RightPanelTab {
             RightPanelTab::Properties => "プロパティ",
             RightPanelTab::Color => "カラー",
             RightPanelTab::Library => "ライブラリ",
+            RightPanelTab::Canvas => "キャンバス",
         }
     }
 }
@@ -166,66 +169,11 @@ impl FlashBrushApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let zoom_pct = (self.view_zoom * 100.0).round() as i32;
-                        if ui
-                            .button(format!("{zoom_pct}%"))
-                            .on_hover_text(
-                                "クリック（または Cmd+0）で 100% 表示にリセット / Space+ドラッグでパン移動",
-                            )
-                            .clicked()
-                        {
-                            self.reset_view();
-                        }
-
-                        if self.symbol_edit_stack.is_empty() {
-                            ui.separator();
-                            if ui
-                                .add(
-                                    egui::Button::new("枠外を隠す")
-                                        .selected(self.clip_outside_stage),
-                                )
-                                .on_hover_text(
-                                    "ステージ枠の外側にはみ出た図形を隠して完成画面をプレビューします",
-                                )
-                                .clicked()
-                            {
-                                self.clip_outside_stage = !self.clip_outside_stage;
-                            }
-
-                            ui.color_edit_button_srgba(&mut self.stage_color)
-                                .on_hover_text("ステージの背景色を変更");
-
-                            let mut w = self.stage_size.x.round() as i32;
-                            let mut h = self.stage_size.y.round() as i32;
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut h)
-                                        .range(100..=2160)
-                                        .speed(2.0)
-                                        .suffix(" px"),
-                                )
-                                .on_hover_text("ステージの高さ (px)")
-                                .changed()
-                            {
-                                self.stage_size.y = h as f32;
-                            }
-                            ui.label("×");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut w)
-                                        .range(100..=3840)
-                                        .speed(2.0),
-                                )
-                                .on_hover_text("ステージの幅 (px)")
-                                .changed()
-                            {
-                                self.stage_size.x = w as f32;
-                            }
-                            ui.label(
-                                egui::RichText::new("ステージ:")
-                                    .size(11.0)
-                                    .color(Color32::from_rgb(90, 98, 110)),
-                            );
-                        }
+                        ui.label(
+                            egui::RichText::new(format!("{zoom_pct}%"))
+                                .size(11.5)
+                                .color(Color32::from_rgb(90, 98, 110)),
+                        );
                     });
                 });
             });
@@ -295,12 +243,12 @@ impl FlashBrushApp {
     }
 
     // ------------------------------------------------------------------------
-    // 3. 右端パネル（プロパティ / カラー / ライブラリ の 3 タブ切り替え）
+    // 3. 右端パネル（プロパティ / カラー / ライブラリ / キャンバス の 4 タブ切り替え）
     // ------------------------------------------------------------------------
 
     pub(crate) fn draw_right_properties_panel(&mut self, ctx: &egui::Context) {
         egui::SidePanel::right("right_properties_panel")
-            .exact_width(250.0)
+            .exact_width(280.0)
             .resizable(false)
             .frame(
                 egui::Frame::none()
@@ -309,7 +257,7 @@ impl FlashBrushApp {
                     .stroke(Stroke::new(1.0, Color32::from_rgb(214, 218, 226))),
             )
             .show(ctx, |ui| {
-                // 上部タブバー（プロパティ | カラー | ライブラリ）
+                // 上部タブバー（プロパティ | カラー | ライブラリ | キャンバス）
                 self.draw_right_panel_tab_bar(ui);
 
                 ui.add_space(4.0);
@@ -321,16 +269,18 @@ impl FlashBrushApp {
                     RightPanelTab::Properties => self.draw_properties_tab(ui),
                     RightPanelTab::Color => self.draw_color_tab(ui),
                     RightPanelTab::Library => self.draw_library_tab(ui),
+                    RightPanelTab::Canvas => self.draw_canvas_tab(ui),
                 }
             });
     }
 
-    /// 右パネル上部の3タブ切り替えバー（`プロパティ | カラー | ライブラリ`）を描画
+    /// 右パネル上部の4タブ切り替えバー（`プロパティ | カラー | ライブラリ | キャンバス`）を描画
     fn draw_right_panel_tab_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.spacing_mut().button_padding = Vec2::new(3.0, 4.0);
             let tab_count = RightPanelTab::ALL.len() as f32;
-            let btn_w = (ui.available_width() - 4.0 * (tab_count - 1.0)) / tab_count;
+            let btn_w = (ui.available_width() - 3.0 * (tab_count - 1.0)) / tab_count;
             for tab in RightPanelTab::ALL {
                 let selected = self.properties_panel.active_tab == tab;
                 let fill = if selected {
@@ -344,7 +294,7 @@ impl FlashBrushApp {
                     Color32::from_rgb(115, 122, 135)
                 };
                 let mut text = egui::RichText::new(tab.label())
-                    .size(11.5)
+                    .size(11.0)
                     .color(text_color);
                 if selected {
                     text = text.strong();
@@ -609,5 +559,99 @@ impl FlashBrushApp {
                 .strong()
                 .color(Color32::from_rgb(45, 50, 60)),
         );
+    }
+
+    /// 「キャンバス」タブの描画（ステージサイズ・枠外マスク・ウィンドウに合わせる・表示倍率リセット）
+    fn draw_canvas_tab(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new("キャンバス情報")
+                .size(11.5)
+                .strong()
+                .color(Color32::from_rgb(55, 62, 74)),
+        );
+        ui.add_space(6.0);
+
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("ステージ:")
+                    .size(11.5)
+                    .color(Color32::from_rgb(70, 78, 90)),
+            );
+            let mut w = self.stage_size.x.round() as i32;
+            let mut h = self.stage_size.y.round() as i32;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut w)
+                        .range(100..=3840)
+                        .speed(2.0),
+                )
+                .on_hover_text("ステージの幅 (px)")
+                .changed()
+            {
+                self.stage_size.x = w as f32;
+            }
+            ui.label("×");
+            if ui
+                .add(
+                    egui::DragValue::new(&mut h)
+                        .range(100..=2160)
+                        .speed(2.0)
+                        .suffix(" px"),
+                )
+                .on_hover_text("ステージの高さ (px)")
+                .changed()
+            {
+                self.stage_size.y = h as f32;
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        ui.label(
+            egui::RichText::new("キャンバス操作")
+                .size(11.5)
+                .strong()
+                .color(Color32::from_rgb(55, 62, 74)),
+        );
+        ui.add_space(6.0);
+
+        if ui
+            .add_sized(
+                Vec2::new(ui.available_width(), 28.0),
+                egui::Button::new("枠外を隠す").selected(self.clip_outside_stage),
+            )
+            .on_hover_text("ステージ枠の外側にはみ出た図形を隠して完成画面をプレビューします (Cmd+3)")
+            .clicked()
+        {
+            self.clip_outside_stage = !self.clip_outside_stage;
+        }
+
+        ui.add_space(6.0);
+
+        if ui
+            .add_sized(
+                Vec2::new(ui.available_width(), 28.0),
+                egui::Button::new("ウィンドウに合わせる"),
+            )
+            .on_hover_text("ステージ全体が中央キャンバス領域に収まるようにズームと位置を自動調整します (Cmd+2)")
+            .clicked()
+        {
+            self.fit_stage_to_window();
+        }
+
+        ui.add_space(6.0);
+
+        if ui
+            .add_sized(
+                Vec2::new(ui.available_width(), 28.0),
+                egui::Button::new("100%表示"),
+            )
+            .on_hover_text("クリック（または Cmd+1）で 100% 表示・初期位置にリセットします")
+            .clicked()
+        {
+            self.reset_view();
+        }
     }
 }

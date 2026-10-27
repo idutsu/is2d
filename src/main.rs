@@ -105,10 +105,10 @@ pub(crate) struct FlashBrushApp {
 
     /// ステージ（カメラ出力枠）のワールドサイズ（幅・高さ px、デフォルト 800×450 [16:9]）
     pub(crate) stage_size: Vec2,
-    /// ステージの背景色（デフォルト：白）
-    pub(crate) stage_color: Color32,
     /// ステージ枠外にはみ出た図形をマスクして隠すかどうか（完成画面プレビュー用）
     pub(crate) clip_outside_stage: bool,
+    /// 直近フレームの中央キャンバス描画領域（スクリーン座標、「ウィンドウに合わせる」計算用）
+    pub(crate) last_canvas_rect: egui::Rect,
 
     /// タイムライン・レイヤー・キーフレーム・セル構造
     pub(crate) timeline: Timeline,
@@ -159,8 +159,11 @@ impl Default for FlashBrushApp {
             view_pan: Vec2::ZERO,
             pan_last_screen_pos: None,
             stage_size: Vec2::new(800.0, 450.0),
-            stage_color: Color32::WHITE,
             clip_outside_stage: false,
+            last_canvas_rect: egui::Rect::from_min_max(
+                Pos2::new(52.0, 30.0),
+                Pos2::new(1000.0, 590.0),
+            ),
             timeline: Timeline::default(),
             shapes: Vec::new(),
             undo_stack: Vec::new(),
@@ -386,8 +389,12 @@ impl FlashBrushApp {
             copied = self.cut_selected_shapes();
         } else if paste_event || (cmd && i.key_pressed(Key::V)) {
             self.paste_clipboard(i.modifiers.shift);
-        } else if cmd && i.key_pressed(Key::Num0) {
+        } else if cmd && (i.key_pressed(Key::Num1) || i.key_pressed(Key::Num0)) {
             self.reset_view();
+        } else if cmd && i.key_pressed(Key::Num2) {
+            self.fit_stage_to_window();
+        } else if cmd && i.key_pressed(Key::Num3) {
+            self.clip_outside_stage = !self.clip_outside_stage;
         } else if cmd
             && (i.key_pressed(Key::Plus)
                 || i.key_pressed(Key::Equals)
@@ -552,6 +559,7 @@ impl eframe::App for FlashBrushApp {
             .show(ctx, |ui| {
                 let (canvas_rect, response) =
                     ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+                self.last_canvas_rect = canvas_rect;
                 let painter = ui.painter_at(canvas_rect);
 
                 let pointer_pos = response

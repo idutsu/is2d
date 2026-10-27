@@ -10,7 +10,7 @@
 | # | ファイル | 行数目安 | 主な責務 |
 | :-: | :--- | :---: | :--- |
 | 1 | **[`main.rs`](file:///Users/dskzts/animelite/src/main.rs)** | ~580行 | アプリ起動、フォント・テーマ初期化、アプリ全体状態（`FlashBrushApp`）、Undo/Redo履歴、キーボードショートカット、メインループ（`eframe::App::update`） |
-| 2 | **[`panels.rs`](file:///Users/dskzts/animelite/src/panels.rs)** | ~580行 | Material Icons 定数（`mod icons`）、左端縦ツールバー、ステージ上部スリムバー（パンくず・ステージ設定・ズーム）、右端3タブパネル（`プロパティ` / `カラー` / `ライブラリ`） |
+| 2 | **[`panels.rs`](file:///Users/dskzts/animelite/src/panels.rs)** | ~650行 | Material Icons 定数（`mod icons`）、左端縦ツールバー、ステージ上部スリムバー（パンくずリスト）、右端4タブパネル（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`） |
 | 3 | **[`canvas_tool.rs`](file:///Users/dskzts/animelite/src/canvas_tool.rs)** | ~1,190行 | `Tool` 列挙型、変形・選択のドラッグ＆ホバー状態型、ビューポート（ズーム・パン）＆ステージ枠描画、レイヤースコープ同期、ツール切替、カスタムカーソル＆キャンバス描画 |
 | 4 | **[`tool_paint.rs`](file:///Users/dskzts/animelite/src/tool_paint.rs)** | ~175行 | **描画・塗りツール**（ブラシ `B`・消しゴム `E`・バケツ塗り `K`・スポイト `I`）の入力処理とコミットロジック |
 | 5 | **[`tool_select.rs`](file:///Users/dskzts/animelite/src/tool_select.rs)** | ~1,520行 | **選択ツール（`V`）**、マーキー範囲選択（部分スライス）、輪郭の粘土変形（Reshape）、アンカー追加/削除（`+`/`-`）、グループ階層＆インプレイス編集、コピー＆ペースト |
@@ -44,9 +44,9 @@
   - `view_zoom: f32` — キャンバスのズーム倍率（`0.1`〜`32.0`、初期値 `1.0`）。
   - `view_pan: Vec2` — キャンバスのパン（平行移動）オフセット。
   - `pan_last_screen_pos: Option<Pos2>` — スペースキー／中ボタンドラッグ中の直前スクリーン座標。
-  - `stage_size: Vec2` — ステージ（カメラ出力枠）の幅・高さ（初期値 `1280.0 × 720.0`）。
-  - `stage_color: Color32` — ステージ用紙の背景色（初期値 `Color32::WHITE`）。
-  - `clip_outside_stage: bool` — ステージ枠外の絵を半透明ベールで隠すクリッピングマスク有効フラグ。
+  - `stage_size: Vec2` — ステージ（カメラ出力枠）の幅・高さ（初期値 `800.0 × 450.0`、背景色は常時 `Color32::WHITE`）。
+  - `clip_outside_stage: bool` — ステージ枠外の絵を隠すクリッピングマスク有効フラグ。
+  - `last_canvas_rect: egui::Rect` — 直近フレームの中央キャンバス描画領域（「ウィンドウに合わせる」計算用）。
 - **タイムライン・キャンバス・履歴フィールド**：
   - `timeline: Timeline` — 現在アクティブなタイムライン（シーン1、またはインプレイス編集中のシンボル内タイムライン）。
   - `shapes: Vec<FillShape>` — 現在フレームの可視・非ロックレイヤーから作業用に展開されたベクター図形リスト。
@@ -77,7 +77,7 @@
 - **キーボードショートカット処理**：
   - `handle_shortcuts(&mut self, ctx: &egui::Context)` — 再生中のショートカット制限と、単一キー／修飾キー付きショートカットの振り分け。
   - `handle_single_key_shortcuts(&mut self, ctx: &egui::Context)` — `Enter`（再生/停止）、`,` / `.`（コマ送り）、`F5` / `Shift+F5`（フレーム延長/削除）、`F6` / `Shift+F6`（複製KF/KF削除）、`F7`（空白KF）、`F8`（シンボル変換）、`T`（クラシックトゥイーン切替）、`O`（オニオンスキン）、`V`/`Q`/`B`/`E`/`K`/`I`（ツール切替）、`+`/`-`（アンカー追加/削除）、`Delete`/`Backspace`（削除）、`Esc`（選択解除またはグループ/シンボル階層から出る）を処理。
-  - `handle_command_shortcuts(&mut self, ctx: &egui::Context)` — `Cmd/Ctrl + 0`（表示リセット）、`Cmd/Ctrl + Z/Y`（Undo/Redo）、`Cmd/Ctrl + G/B`（グループ化/解除）、`Cmd/Ctrl + C/X/V` 及び `Cmd/Ctrl + Shift + V`（コピー/カット/ペースト/同じ位置にペースト）を処理。
+  - `handle_command_shortcuts(&mut self, ctx: &egui::Context)` — `Cmd/Ctrl + 1`（および `0`：100%表示）、`Cmd/Ctrl + 2`（ウィンドウに合わせる）、`Cmd/Ctrl + 3`（枠外を隠す）、`Cmd/Ctrl + Z/Y`（Undo/Redo）、`Cmd/Ctrl + G/B`（グループ化/解除）、`Cmd/Ctrl + C/X/V` 及び `Cmd/Ctrl + Shift + V`（コピー/カット/ペースト/同じ位置にペースト）を処理。
 - **キャンバス入力振り分け＆カーソル表示**：
   - `is_current_tool_allowed(&self) -> bool` — 再生中でなく、かつ対象レイヤーが編集可能（可視・非ロック）かどうかを判定（スポイト・選択・自由変形は他レイヤーが編集可能なら許可）。
   - `handle_canvas_tool_input(&mut self, response: &egui::Response, painter: &egui::Painter, space_down: bool, shift_down: bool, alt_down: bool)` — パン中でない場合に現在のツールに応じた入力ハンドラを呼び出す。
@@ -95,9 +95,9 @@
 - `ADD` (`\u{e145}`), `REMOVE` (`\u{e15b}`), `FLIP_H` (`\u{e3e8}`), `FLIP_V` (`\u{e8d5}`), `ROTATE_LEFT` (`\u{e419}`), `ROTATE_RIGHT` (`\u{e41a}`), `PIVOT_RESET` (`\u{e55c}`), `GROUP` (`\u{e7ef}`), `SYMBOL` (`\u{e40a}`), `WIREFRAME` (`\u{e922}`), `DELETE` (`\u{e872}`), `SCENE_MOVIE` (`\u{e02c}`), `ARROW_BACK` (`\u{e5c4}`), `VISIBILITY` (`\u{e8f4}`), `LOCK` (`\u{e897}`), `SKIP_PREV` (`\u{e045}`), `STEP_PREV` (`\u{e5cb}`), `PLAY` (`\u{e037}`), `PAUSE` (`\u{e034}`), `STEP_NEXT` (`\u{e5cc}`), `SKIP_NEXT` (`\u{e044}`), `ONION_SKIN` (`\u{e53b}`).
 
 ### 型定義
-- **`enum RightPanelTab`** — 右端パネルの3タブ列挙型：
-  - `Properties`（`プロパティ`）、`Color`（`カラー`）、`Library`（`ライブラリ`）。
-  - `RightPanelTab::ALL` — 全3タブの定数配列。
+- **`enum RightPanelTab`** — 右端パネルの4タブ列挙型：
+  - `Properties`（`プロパティ`）、`Color`（`カラー`）、`Library`（`ライブラリ`）、`Canvas`（`キャンバス`）。
+  - `RightPanelTab::ALL` — 全4タブの定数配列。
   - `label(self) -> &'static str` — タブの表示名を返す。
 - **`struct PropertiesPanel`** — 右端パネルの状態（`active_tab: RightPanelTab`、`Default` では `Properties`）。
 
@@ -108,19 +108,20 @@
   - `draw_left_main_tool_buttons(&mut self, ui: &mut egui::Ui)` — `Tool::ALL` を走査して6つのメインツールボタンを描画。
   - `draw_color_picker_controls(ui: &mut egui::Ui, brush_color: &mut Color32)` — 塗りカラーピッカーボタンと10色のプリセットカラーパレットを2列グリッドで描画。
 - **ステージ上部スリムバー**：
-  - `draw_stage_header_bar(&mut self, ctx: &egui::Context)` — 高さ `26px` の上部バーを描画。左側に階層パンくずリスト、右側にステージ幅×高さ（`Stage: W × H` `DragValue`）、ステージ背景色ピッカー、`枠外を隠す`（クリッピングマスク切替ボタン）、ズーム倍率リセットボタン（`100%`）を配置。
-  - `draw_group_breadcrumb(&mut self, ui: &mut egui::Ui)` — `シーン 1 > シンボル名 > Group #N` の階層パンくずリストと1階層戻るボタンを描画し、クリックで任意の親階層へ直接ジャンプ可能にする。
-- **右端プロパティパネル（3タブ構成）**：
-  - `draw_right_properties_panel(&mut self, ctx: &egui::Context)` — 幅 `220px` の右端パネルを描画。
-  - `draw_right_panel_tab_bar(&mut self, ui: &mut egui::Ui)` — 上部の3タブ（`プロパティ` / `カラー` / `ライブラリ`）切り替えバーを描画。
-  - `draw_properties_tab(&mut self, ui: &mut egui::Ui)` — 現在のツールに応じたプロパティセクションと、共通の表示設定（`アンカー・パスを常時表示`）・ステージ操作（`フレーム全消去`）を描画。
+  - `draw_stage_header_bar(&mut self, ctx: &egui::Context)` — 上部バーを描画し、左側に階層パンくずリスト（`draw_group_breadcrumb`）、右端に現在のズーム倍率ラベル（`100%`）を配置。
+  - `draw_group_breadcrumb(&mut self, ui: &mut egui::Ui)` — `シーン 1 › シンボル名 › Group #N` の階層パンくずリストと1階層戻るボタンを描画し、クリックで任意の親階層へ直接ジャンプ可能にする。
+- **右端プロパティパネル（4タブ構成）**：
+  - `draw_right_properties_panel(&mut self, ctx: &egui::Context)` — 幅 `280px` の右端パネルを描画。
+  - `draw_right_panel_tab_bar(&mut self, ui: &mut egui::Ui)` — 上部の4タブ（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`）切り替えバーを描画。
+  - `draw_properties_tab(&mut self, ui: &mut egui::Ui)` — 現在のツールに応じたプロパティセクションを描画。
   - `draw_select_tool_properties(&mut self, ui: &mut egui::Ui)` — 選択ツール時のプロパティ（アンカー追加 `+` / 削除 `-`、グループ化 `Cmd+G` / 解除 `Cmd+B`、シンボルに変換 `F8`、および単一シンボル選択時の再生設定 `draw_selected_symbol_properties`）を描画。
-  - `draw_transform_tool_properties(&mut self, ui: &mut egui::Ui)` — 自由変形ツール時のプロパティ（左右反転・上下反転・90°左回転・90°右回転・ピボット中央リセット・グループ化/解除・シンボル変換・単一シンボル再生設定）を描画。
-  - `draw_brush_tool_properties(&mut self, ui: &mut egui::Ui)` — ブラシ太さ（`0.5`〜`60.0 px`）スライダーを描画。
-  - `draw_eraser_tool_properties(&mut self, ui: &mut egui::Ui)` — 消しゴム太さ（`2.0`〜`80.0 px`）スライダーを描画。
-  - `draw_bucket_tool_properties(&mut self, ui: &mut egui::Ui)` — バケツツールの操作ガイドを表示。
-  - `draw_eyedropper_tool_properties(&mut self, ui: &mut egui::Ui)` — スポイトツールの操作ガイドを表示。
-  - `draw_color_tab(&mut self, ui: &mut egui::Ui)` — `カラー` タブ（RGB数値表示、カラーピッカー、プリセットパレット）を描画。
+  - `draw_transform_tool_properties(&mut self, ui: &mut egui::Ui)` — 自由変形ツール時のプロパティ（左右反転・上下反転・90°左回転・90°右回転・ピボット中央リセット・単一シンボル再生設定）を描画。
+  - `draw_brush_tool_properties(&mut self, ui: &mut egui::Ui)` — ブラシ太さスライダーを描画。
+  - `draw_eraser_tool_properties(&mut self, ui: &mut egui::Ui)` — 消しゴム太さスライダーを描画。
+  - `draw_bucket_tool_properties(&mut self, ui: &mut egui::Ui)` — バケツツールのプロパティを表示。
+  - `draw_eyedropper_tool_properties(&mut self, ui: &mut egui::Ui)` — スポイトツールのプロパティを表示。
+  - `draw_color_tab(&mut self, ui: &mut egui::Ui)` — `カラー` タブを描画。
+  - `draw_canvas_tab(&mut self, ui: &mut egui::Ui)` — `キャンバス` タブ（キャンバス情報：ステージ幅×高さ `DragValue`、キャンバス操作：`枠外を隠す` ボタン・`ウィンドウに合わせる` ボタン・`100%表示` ボタン）を描画。
 
 ---
 
@@ -151,6 +152,7 @@
   - `world_to_screen(&self, pt: Point) -> Pos2` / `screen_to_world(&self, pos: Pos2) -> Point` — ワールド座標とスクリーン座標の相互変換。
   - `zoom_around_screen_pos(&mut self, pivot_screen: Pos2, zoom_factor: f32)` — 指定スクリーン座標を不動点としてズーム倍率を変更。
   - `reset_view(&mut self)` — ズームを `1.0`（100%）、パンを `Vec2::ZERO` にリセット。
+  - `fit_stage_to_window(&mut self)` — ステージ枠全体が中央キャンバス領域に余白付きでぴったり収まるようにズーム倍率とパン位置を自動調整（「ウィンドウに合わせる」）。
   - `stage_center_world(&self) -> Point` — ステージ中心のワールド座標 `(640.0, 360.0)`（シンボルインプレイス編集中は登録点 `(0.0, 0.0)`）を返す。
   - `stage_world_rect(&self) -> Rect` / `stage_screen_rect(&self) -> egui::Rect` — ワールド座標およびスクリーン座標でのステージ矩形を返す。
   - `draw_stage_background(&self, painter: &egui::Painter, canvas_rect: egui::Rect)` — シーン編集中にペーストボード背景とステージ用紙のドロップシャドウ・背景色を描画。
