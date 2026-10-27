@@ -1681,7 +1681,7 @@
 
     #[test]
     fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
-        use crate::vector_engine::SymbolLoopMode;
+        use crate::symbol::SymbolLoopMode;
 
         let mut app = FlashBrushApp::default();
 

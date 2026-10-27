@@ -1,17 +1,52 @@
 use eframe::egui::{self, Color32, Mesh, Pos2, Stroke, Vec2};
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
-use crate::canvas_tool::Tool;
-use crate::timeline::{Cel, Layer, Timeline, TimelineCellSelection, TimelineGridDrag};
+use crate::panels::icons;
+use crate::timeline::{Cel, Layer, Timeline};
 use crate::vector_engine::{
     append_mesh, interpolate_affine, transform_mesh_to_screen, transform_mesh_to_screen_onion,
-    FillShape, SymbolInstanceBinding, SymbolLoopMode,
+    FillShape,
 };
 use crate::FlashBrushApp;
 
 // ============================================================================
-// 1. シンボル定義（SymbolDef）・トゥイーン状態（TweenState）・編集中セッション退避
+// 1. シンボル定義（SymbolDef）・インスタンス紐付け・トゥイーン状態・編集セッション
 // ============================================================================
+
+/// シンボルインスタンスのフレーム再生モード（Adobe Animate のグラフィックシンボル相当）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum SymbolLoopMode {
+    /// ループ再生：キーフレーム開始位置からシンボル内部フレームを繰り返し再生する
+    #[default]
+    Loop,
+    /// 1回再生：キーフレーム開始位置からシンボル内部の最終フレームまで再生して停止する
+    PlayOnce,
+    /// 任意のフレーム：指定された `first_frame` の1コマだけを固定表示する
+    SingleFrame,
+}
+
+/// シンボルインスタンスに属するシェイプが持つ紐付け情報（インスタンスのグループID、ライブラリ内のシンボル定義ID、ローカル基準点 `(0, 0)` からワールド座標へのアフィン変換、再生モード、開始/指定フレーム）
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SymbolInstanceBinding {
+    pub(crate) instance_gid: u64,
+    pub(crate) symbol_id: u64,
+    pub(crate) xform: Affine,
+    pub(crate) loop_mode: SymbolLoopMode,
+    pub(crate) first_frame: usize,
+}
+
+impl SymbolInstanceBinding {
+    #[inline]
+    pub(crate) fn new(instance_gid: u64, symbol_id: u64, xform: Affine) -> Self {
+        Self {
+            instance_gid,
+            symbol_id,
+            xform,
+            loop_mode: SymbolLoopMode::Loop,
+            first_frame: 0,
+        }
+    }
+}
 
 /// キーフレーム区間におけるクラシックトゥイーン（`T` キー）の有効状態
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -45,6 +80,46 @@ impl Cel {
             }) && s.group_path.first() == Some(&binding.instance_gid)
         });
         all_same_instance.then_some(binding)
+    }
+
+    /// セル内の図形群のうち、`map_binding` が `Some(updated_binding)` を返す対象シンボルインスタンスを
+    /// シンボル定義 `sym_def`（開始フレーム `kf_start_frame`）で再展開して更新する
+    pub(crate) fn rebuild_symbol_instances_with(
+        &mut self,
+        kf_start_frame: usize,
+        sym_def: &SymbolDef,
+        mut map_binding: impl FnMut(SymbolInstanceBinding) -> Option<SymbolInstanceBinding>,
+    ) -> bool {
+        let mut rebuilt = Vec::with_capacity(self.shapes.len());
+        let mut processed_gids: Vec<u64> = Vec::new();
+        let mut any_updated = false;
+
+        for shape in self.shapes.drain(..) {
+            let Some(orig_b) = shape.symbol_instance else {
+                rebuilt.push(shape);
+                continue;
+            };
+            let Some(new_b) = map_binding(orig_b) else {
+                rebuilt.push(shape);
+                continue;
+            };
+            if processed_gids.contains(&orig_b.instance_gid) {
+                continue;
+            }
+            processed_gids.push(orig_b.instance_gid);
+
+            let parent_scope = new_b.parent_scope_from_path(&shape.group_path);
+            let template_shapes = sym_def.evaluated_local_shapes_for_instance(
+                new_b,
+                kf_start_frame,
+                kf_start_frame,
+                false,
+            );
+            rebuilt.extend(new_b.instantiate_shapes(&template_shapes, shape.layer_id, parent_scope));
+            any_updated = true;
+        }
+        self.shapes = rebuilt;
+        any_updated
     }
 }
 
@@ -539,18 +614,12 @@ impl FlashBrushApp {
             local_shapes.push(local_s);
         }
 
-        let target_lid = valid_indices
-            .iter()
-            .map(|&idx| self.shapes[idx].layer_id)
-            .max_by_key(|&lid| self.timeline.layer_index_by_id(lid).unwrap_or(0))
-            .unwrap_or_else(|| self.active_scope_layer_id());
-        let binding = SymbolInstanceBinding {
-            instance_gid: inst_gid,
-            symbol_id: sym_id,
-            xform: Affine::translate(KVec2::new(center.x, center.y)),
-            loop_mode: SymbolLoopMode::Loop,
-            first_frame: 0,
-        };
+        let target_lid = self.topmost_layer_id_for_indices(&valid_indices);
+        let binding = SymbolInstanceBinding::new(
+            inst_gid,
+            sym_id,
+            Affine::translate(KVec2::new(center.x, center.y)),
+        );
         for &idx in &valid_indices {
             if let Some(shape) = self.shapes.get_mut(idx) {
                 shape.layer_id = target_lid;
@@ -597,27 +666,15 @@ impl FlashBrushApp {
 
         let inst_gid = self.next_group_id;
         self.next_group_id += 1;
-        let stage_center = self.screen_to_world(Pos2::new(500.0, 300.0));
-        let binding = SymbolInstanceBinding {
-            instance_gid: inst_gid,
+        let stage_center = self.stage_center_world();
+        let binding = SymbolInstanceBinding::new(
+            inst_gid,
             symbol_id,
-            xform: Affine::translate(KVec2::new(stage_center.x, stage_center.y)),
-            loop_mode: SymbolLoopMode::Loop,
-            first_frame: 0,
-        };
+            Affine::translate(KVec2::new(stage_center.x, stage_center.y)),
+        );
         let target_lid = self.active_scope_layer_id();
         let placed = binding.instantiate_shapes(&sym_shapes, target_lid, &self.editing_group_path);
-
-        let insert_pos = self.scope_insert_index();
-        let count = placed.len();
-        self.shapes.splice(insert_pos..insert_pos, placed);
-        self.selected_shapes = (insert_pos..insert_pos + count).collect();
-        self.sort_shapes_by_layer_order();
-        self.selection_modified = false;
-        self.transform_pivot = None;
-        if !matches!(self.tool, Tool::Select | Tool::Transform) {
-            self.set_tool(Tool::Select);
-        }
+        self.insert_and_select_shapes_in_scope(placed, false);
         true
     }
 
@@ -744,6 +801,18 @@ impl FlashBrushApp {
         Some((first_binding, sym.name.clone(), sym.total_frames.max(1)))
     }
 
+    /// 指定した `instance_gid` に属するキャンバス上の図形をすべて選択状態にする
+    pub(crate) fn select_symbol_instance_by_gid(&mut self, instance_gid: u64) {
+        self.selected_shapes = (0..self.shapes.len())
+            .filter(|&i| {
+                self.shapes[i]
+                    .symbol_instance
+                    .is_some_and(|b| b.instance_gid == instance_gid)
+            })
+            .collect();
+        self.transform_pivot = None;
+    }
+
     /// 現在選択されている単一シンボルインスタンスの再生モード（ループ再生 / 1回再生 / 任意のフレーム）および
     /// 開始/指定フレーム番号（0始まり）を更新し、現在フレームのキャンバス表示と選択状態を即時反映する
     pub(crate) fn set_selected_symbol_playback(
@@ -785,55 +854,24 @@ impl FlashBrushApp {
                 continue;
             };
             let kf = &mut layer.keyframes[kf_idx];
-            if !kf
+            if kf
                 .cel
-                .shapes
-                .iter()
-                .any(|s| s.symbol_instance.is_some_and(|b| b.instance_gid == inst_gid))
+                .rebuild_symbol_instances_with(kf.start_frame, &sym_def, |mut b| {
+                    (b.instance_gid == inst_gid).then(|| {
+                        b.loop_mode = loop_mode;
+                        b.first_frame = clamped_first;
+                        b
+                    })
+                })
             {
-                continue;
-            }
-
-            let mut rebuilt = Vec::with_capacity(kf.cel.shapes.len());
-            let mut processed = false;
-            for shape in kf.cel.shapes.drain(..) {
-                let Some(mut b) = shape
-                    .symbol_instance
-                    .filter(|b| b.instance_gid == inst_gid)
-                else {
-                    rebuilt.push(shape);
-                    continue;
-                };
-                if processed {
-                    continue;
-                }
-                processed = true;
-                b.loop_mode = loop_mode;
-                b.first_frame = clamped_first;
-                let parent_scope = b.parent_scope_from_path(&shape.group_path);
-                let template_shapes = sym_def.evaluated_local_shapes_for_instance(
-                    b,
-                    kf.start_frame,
-                    kf.start_frame,
-                    false,
-                );
-                rebuilt.extend(b.instantiate_shapes(&template_shapes, shape.layer_id, parent_scope));
                 updated = true;
             }
-            kf.cel.shapes = rebuilt;
         }
 
         if updated {
             self.sync_active_symbol_edit();
             self.load_shapes_from_timeline();
-            self.selected_shapes = (0..self.shapes.len())
-                .filter(|&i| {
-                    self.shapes[i]
-                        .symbol_instance
-                        .is_some_and(|b| b.instance_gid == inst_gid)
-                })
-                .collect();
-            self.transform_pivot = None;
+            self.select_symbol_instance_by_gid(inst_gid);
         }
         updated
     }
@@ -873,35 +911,7 @@ impl FlashBrushApp {
         // シンボル定義のローカルレイヤー群をインスタンスのステージ変換 `binding.xform` で展開して作業タイムラインを構築
         let mut sym_layers = sym_def.layers.clone();
         transform_layers_shapes(&mut sym_layers, binding.xform);
-
-        let act_l = sym_def.active_layer.min(sym_layers.len().saturating_sub(1));
-        let act_f = sym_def
-            .current_frame
-            .min(sym_def.total_frames.saturating_sub(1));
-        let sym_timeline = Timeline {
-            layers: sym_layers,
-            library: self.timeline.library.clone(),
-            next_symbol_id: self.timeline.next_symbol_id,
-            selected_library_symbol: Some(binding.symbol_id),
-            loaded_signatures: Vec::new(),
-            current_frame: act_f,
-            active_layer: act_l,
-            total_frames: sym_def.total_frames.max(1),
-            fps: self.timeline.fps,
-            is_playing: false,
-            last_frame_advance_time: None,
-            onion_skin_enabled: self.timeline.onion_skin_enabled,
-            onion_prev_frames: self.timeline.onion_prev_frames,
-            onion_next_frames: self.timeline.onion_next_frames,
-            next_layer_number: sym_def.next_layer_number.max(2),
-            next_layer_id: sym_def.next_layer_id.max(2),
-            scroll_x: 0.0,
-            scroll_y: 0.0,
-            last_ensured_frame: 0,
-            dragging_layer: None,
-            cell_selection: Some(TimelineCellSelection::single(act_l, act_f)),
-            grid_drag: TimelineGridDrag::None,
-        };
+        let sym_timeline = self.timeline.new_for_symbol_edit(&sym_def, sym_layers);
 
         let parent_timeline = std::mem::replace(&mut self.timeline, sym_timeline);
         let parent_editing_group_path = std::mem::take(&mut self.editing_group_path);
@@ -949,14 +959,7 @@ impl FlashBrushApp {
         self.load_shapes_from_timeline();
 
         // 戻った親階層で元のシンボルインスタンスを選択状態にする
-        self.selected_shapes = (0..self.shapes.len())
-            .filter(|&i| {
-                self.shapes[i]
-                    .symbol_instance
-                    .is_some_and(|b| b.instance_gid == session.instance_gid)
-            })
-            .collect();
-        self.transform_pivot = None;
+        self.select_symbol_instance_by_gid(session.instance_gid);
         true
     }
 
@@ -1008,43 +1011,328 @@ impl FlashBrushApp {
         };
         for layer in &mut self.timeline.layers {
             for kf in &mut layer.keyframes {
-                let has_sym = kf.cel.shapes.iter().any(|s| {
-                    s.symbol_instance
-                        .is_some_and(|b| b.symbol_id == symbol_id)
-                });
-                if !has_sym {
-                    continue;
-                }
-                let mut rebuilt = Vec::with_capacity(kf.cel.shapes.len());
-                let mut processed_gids: Vec<u64> = Vec::new();
-                for shape in kf.cel.shapes.drain(..) {
-                    let Some(b) = shape
-                        .symbol_instance
-                        .filter(|b| b.symbol_id == symbol_id)
-                    else {
-                        rebuilt.push(shape);
-                        continue;
-                    };
-                    if processed_gids.contains(&b.instance_gid) {
-                        continue;
-                    }
-                    processed_gids.push(b.instance_gid);
-
-                    let parent_scope = b.parent_scope_from_path(&shape.group_path);
-                    let template_shapes = sym_def.evaluated_local_shapes_for_instance(
-                        b,
-                        kf.start_frame,
-                        kf.start_frame,
-                        false,
-                    );
-                    rebuilt.extend(b.instantiate_shapes(
-                        &template_shapes,
-                        shape.layer_id,
-                        parent_scope,
-                    ));
-                }
-                kf.cel.shapes = rebuilt;
+                kf.cel
+                    .rebuild_symbol_instances_with(kf.start_frame, &sym_def, |b| {
+                        (b.symbol_id == symbol_id).then_some(b)
+                    });
             }
+        }
+    }
+
+    // ============================================================================
+    // 4. シンボルプロパティ・ライブラリパネルUI描画
+    // ============================================================================
+
+    /// 単一のシンボルインスタンスが選択されているときにプロパティパネルに表示する再生オプション（1回再生 / ループ再生 / 任意のフレーム）
+    pub(crate) fn draw_selected_symbol_properties(&mut self, ui: &mut egui::Ui) {
+        let Some((binding, sym_name, sym_total_frames)) = self.selected_single_symbol_info() else {
+            return;
+        };
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{} {sym_name}", icons::SYMBOL))
+                    .size(11.5)
+                    .strong()
+                    .color(Color32::from_rgb(0, 120, 215)),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("全 {sym_total_frames} f"))
+                        .size(10.5)
+                        .color(Color32::from_rgb(110, 118, 130)),
+                );
+            });
+        });
+
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("シンボル再生オプション")
+                .size(11.5)
+                .strong()
+                .color(Color32::from_rgb(55, 62, 74)),
+        );
+        ui.add_space(4.0);
+
+        let mut next_mode = binding.loop_mode;
+        let max_first_1based = sym_total_frames.max(1);
+        let current_first_1based = (binding.first_frame + 1).clamp(1, max_first_1based);
+        let mut next_first_1based = current_first_1based;
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let half_w = (ui.available_width() - 6.0) * 0.5;
+            if ui
+                .add_sized(
+                    Vec2::new(half_w, 26.0),
+                    egui::Button::new("ループ再生")
+                        .selected(binding.loop_mode == SymbolLoopMode::Loop),
+                )
+                .on_hover_text("キーフレーム開始位置からシンボル内部フレームをループ再生します")
+                .clicked()
+            {
+                next_mode = SymbolLoopMode::Loop;
+            }
+            if ui
+                .add_sized(
+                    Vec2::new(half_w, 26.0),
+                    egui::Button::new("1回再生")
+                        .selected(binding.loop_mode == SymbolLoopMode::PlayOnce),
+                )
+                .on_hover_text(
+                    "キーフレーム開始位置からシンボル内部の最終フレームまで1回再生して停止します",
+                )
+                .clicked()
+            {
+                next_mode = SymbolLoopMode::PlayOnce;
+            }
+        });
+
+        ui.add_space(4.0);
+
+        if ui
+            .add_sized(
+                Vec2::new(ui.available_width(), 26.0),
+                egui::Button::new("任意のフレーム")
+                    .selected(binding.loop_mode == SymbolLoopMode::SingleFrame),
+            )
+            .on_hover_text("指定したシンボル内部フレーム（1コマ）を固定表示します")
+            .clicked()
+        {
+            next_mode = SymbolLoopMode::SingleFrame;
+        }
+
+        ui.add_space(6.0);
+
+        let frame_label = match next_mode {
+            SymbolLoopMode::SingleFrame => "表示フレーム:",
+            SymbolLoopMode::Loop | SymbolLoopMode::PlayOnce => "開始フレーム:",
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(
+                egui::RichText::new(frame_label)
+                    .size(11.0)
+                    .color(Color32::from_rgb(55, 62, 74)),
+            );
+            if ui
+                .add_enabled(
+                    next_first_1based > 1,
+                    egui::Button::new(icons::STEP_PREV).min_size(Vec2::new(22.0, 22.0)),
+                )
+                .on_hover_text("前のシンボル内フレーム")
+                .clicked()
+            {
+                next_first_1based = next_first_1based.saturating_sub(1).max(1);
+            }
+            ui.add_sized(
+                Vec2::new(56.0, 22.0),
+                egui::DragValue::new(&mut next_first_1based)
+                    .range(1..=max_first_1based)
+                    .speed(0.15)
+                    .suffix(" f"),
+            );
+            if ui
+                .add_enabled(
+                    next_first_1based < max_first_1based,
+                    egui::Button::new(icons::STEP_NEXT).min_size(Vec2::new(22.0, 22.0)),
+                )
+                .on_hover_text("次のシンボル内フレーム")
+                .clicked()
+            {
+                next_first_1based = (next_first_1based + 1).min(max_first_1based);
+            }
+        });
+
+        if next_mode != binding.loop_mode || next_first_1based != current_first_1based {
+            self.set_selected_symbol_playback(next_mode, next_first_1based.saturating_sub(1));
+        }
+
+        ui.add_space(6.0);
+        if ui
+            .add_sized(
+                Vec2::new(ui.available_width(), 26.0),
+                egui::Button::new(format!("{} シンボル編集に入る", icons::SYMBOL)),
+            )
+            .on_hover_text("ダブルクリックと同様にシンボル内部のタイムライン編集モードへ入ります")
+            .clicked()
+        {
+            self.enter_symbol_timeline(binding);
+        }
+    }
+
+    /// 「ライブラリ」タブの描画（シンボルのプレビュー・一覧・名前変更・ステージ配置・削除）
+    pub(crate) fn draw_library_tab(&mut self, ui: &mut egui::Ui) {
+        let has_sel = !self.selected_shapes.is_empty();
+        if ui
+            .add_enabled(
+                has_sel,
+                egui::Button::new(format!("{} 選択図形をシンボル化 (F8)", icons::ADD))
+                    .min_size(Vec2::new(ui.available_width(), 28.0)),
+            )
+            .on_hover_text("キャンバスで選択中の図形を新しいシンボルとして登録 (F8)")
+            .clicked()
+        {
+            self.convert_selection_to_symbol();
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        if self.timeline.library.is_empty() {
+            ui.label(
+                egui::RichText::new(
+                    "シンボルがありません。\n図形を選択して F8 キーを押すとシンボルを作成できます。",
+                )
+                .size(11.5)
+                .color(Color32::from_rgb(115, 122, 135)),
+            );
+            return;
+        }
+
+        if self.timeline.selected_library_symbol.is_none()
+            || !self
+                .timeline
+                .library
+                .iter()
+                .any(|s| Some(s.id) == self.timeline.selected_library_symbol)
+        {
+            self.timeline.selected_library_symbol = self.timeline.library.first().map(|s| s.id);
+        }
+
+        // 選択中のシンボルのミニプレビュー描画領域
+        if let Some(sel_id) = self.timeline.selected_library_symbol {
+            if let Some(sym) = self.timeline.library.iter().find(|s| s.id == sel_id) {
+                let preview_shapes = sym.evaluated_local_shapes_at(sym.current_frame, false);
+                self.draw_symbol_mini_preview(ui, &preview_shapes);
+                ui.add_space(6.0);
+            }
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let place_w = ui.available_width() - 66.0;
+                if ui
+                    .add_sized(
+                        Vec2::new(place_w.max(80.0), 28.0),
+                        egui::Button::new(format!("{} ステージに配置", icons::ADD)),
+                    )
+                    .on_hover_text("選択中のシンボルを現在のフレーム・レイヤーに配置します")
+                    .clicked()
+                {
+                    self.place_symbol_instance_from_library(sel_id);
+                }
+                if ui
+                    .add_sized(
+                        Vec2::new(60.0, 28.0),
+                        egui::Button::new(format!("{} 削除", icons::DELETE)),
+                    )
+                    .on_hover_text("選択中のシンボルをライブラリから削除します")
+                    .clicked()
+                {
+                    self.delete_symbol_from_library(sel_id);
+                }
+            });
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+        }
+
+        ui.label(
+            egui::RichText::new(format!("登録シンボル一覧 ({})", self.timeline.library.len()))
+                .size(11.5)
+                .strong()
+                .color(Color32::from_rgb(55, 62, 74)),
+        );
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for sym in &mut self.timeline.library {
+                    let is_sel = self.timeline.selected_library_symbol == Some(sym.id);
+                    let row_fill = if is_sel {
+                        Color32::from_rgb(220, 234, 252)
+                    } else {
+                        Color32::from_rgb(252, 253, 255)
+                    };
+                    egui::Frame::none()
+                        .fill(row_fill)
+                        .stroke(Stroke::new(
+                            1.0,
+                            if is_sel {
+                                Color32::from_rgb(0, 125, 230)
+                            } else {
+                                Color32::from_rgb(218, 222, 230)
+                            },
+                        ))
+                        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .selectable_label(
+                                        is_sel,
+                                        egui::RichText::new(icons::SYMBOL)
+                                            .size(15.0)
+                                            .color(Color32::from_rgb(0, 130, 220)),
+                                    )
+                                    .on_hover_text("クリックして選択")
+                                    .clicked()
+                                {
+                                    self.timeline.selected_library_symbol = Some(sym.id);
+                                }
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut sym.name)
+                                        .desired_width(ui.available_width()),
+                                );
+                                if resp.clicked() || resp.gained_focus() {
+                                    self.timeline.selected_library_symbol = Some(sym.id);
+                                }
+                            });
+                        });
+                    ui.add_space(3.0);
+                }
+            });
+    }
+
+    /// ライブラリパネル上部にシンボルの縮小ベクタープレビューを描画する
+    fn draw_symbol_mini_preview(&self, ui: &mut egui::Ui, shapes: &[FillShape]) {
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 110.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(252, 252, 254));
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::from_rgb(206, 212, 222)));
+
+        if shapes.is_empty() {
+            return;
+        }
+        let mut bbox = shapes[0].bounding_box();
+        for s in &shapes[1..] {
+            bbox = bbox.union(s.bounding_box());
+        }
+        let w = (bbox.x1 - bbox.x0).max(1.0) as f32;
+        let h = (bbox.y1 - bbox.y0).max(1.0) as f32;
+        let pad = 14.0;
+        let avail_w = (rect.width() - pad * 2.0).max(10.0);
+        let avail_h = (rect.height() - pad * 2.0).max(10.0);
+        let scale = (avail_w / w).min(avail_h / h).clamp(0.05, 4.0);
+        let cx = ((bbox.x0 + bbox.x1) * 0.5) as f32;
+        let cy = ((bbox.y0 + bbox.y1) * 0.5) as f32;
+        let pan = rect.center().to_vec2() - Vec2::new(cx * scale, cy * scale);
+
+        for s in shapes {
+            let mesh = transform_mesh_to_screen(&s.fill_mesh, scale, pan, false);
+            painter.add(egui::Shape::mesh(mesh));
+        }
+
+        // 中心基準点 `+` マーク
+        let origin_scr = Pos2::new(pan.x, pan.y);
+        if rect.contains(origin_scr) {
+            draw_registration_cross(&painter, origin_scr, 4.0, false);
         }
     }
 }

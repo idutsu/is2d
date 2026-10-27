@@ -2,6 +2,7 @@ mod canvas_tool;
 mod panels;
 mod symbol;
 mod timeline;
+mod timeline_ui;
 mod tool_paint;
 mod tool_select;
 mod tool_transform;
@@ -102,6 +103,13 @@ pub(crate) struct FlashBrushApp {
     /// スペースドラッグ / 中ボタンドラッグによるパン操作中の直前スクリーン座標
     pub(crate) pan_last_screen_pos: Option<Pos2>,
 
+    /// ステージ（カメラ出力枠）のワールドサイズ（幅・高さ px、デフォルト 800×450 [16:9]）
+    pub(crate) stage_size: Vec2,
+    /// ステージの背景色（デフォルト：白）
+    pub(crate) stage_color: Color32,
+    /// ステージ枠外にはみ出た図形をマスクして隠すかどうか（完成画面プレビュー用）
+    pub(crate) clip_outside_stage: bool,
+
     /// タイムライン・レイヤー・キーフレーム・セル構造
     pub(crate) timeline: Timeline,
 
@@ -150,6 +158,9 @@ impl Default for FlashBrushApp {
             view_zoom: 1.0,
             view_pan: Vec2::ZERO,
             pan_last_screen_pos: None,
+            stage_size: Vec2::new(800.0, 450.0),
+            stage_color: Color32::WHITE,
+            clip_outside_stage: false,
             timeline: Timeline::default(),
             shapes: Vec::new(),
             undo_stack: Vec::new(),
@@ -280,6 +291,26 @@ impl FlashBrushApp {
     }
 
     fn handle_single_key_shortcuts(&mut self, i: &egui::InputState, shift: bool) {
+        if !self.selected_shapes.is_empty() {
+            let step = if shift { 10.0 } else { 1.0 };
+            let mut delta = kurbo::Vec2::ZERO;
+            if i.key_pressed(Key::ArrowLeft) {
+                delta.x -= step;
+            }
+            if i.key_pressed(Key::ArrowRight) {
+                delta.x += step;
+            }
+            if i.key_pressed(Key::ArrowUp) {
+                delta.y -= step;
+            }
+            if i.key_pressed(Key::ArrowDown) {
+                delta.y += step;
+            }
+            if delta != kurbo::Vec2::ZERO && self.nudge_selected_shapes(delta) {
+                return;
+            }
+        }
+
         if i.key_pressed(Key::Enter) {
             self.toggle_playback();
         } else if i.key_pressed(Key::Comma) || i.key_pressed(Key::ArrowLeft) {
@@ -522,7 +553,6 @@ impl eframe::App for FlashBrushApp {
                 let (canvas_rect, response) =
                     ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
                 let painter = ui.painter_at(canvas_rect);
-                painter.rect_filled(canvas_rect, 0.0, Color32::from_rgb(250, 250, 252));
 
                 let pointer_pos = response
                     .interact_pointer_pos()
@@ -543,8 +573,14 @@ impl eframe::App for FlashBrushApp {
                 // キャンバス編集結果を現在フレームの各レイヤーセルへ即時同期
                 self.sync_shapes_to_timeline();
 
-                // 2. キャンバス上のシェイプ・オニオンスキン・選択枠・プレビューの描画
+                // 2. ステージ背景（ペーストボード＋白いステージ矩形）の描画
+                self.draw_stage_background(&painter, canvas_rect);
+
+                // 3. キャンバス上のシェイプ・オニオンスキン・選択枠・プレビューの描画
                 self.draw_canvas_contents(&painter);
+
+                // 4. 図形の上からステージ境界枠線（および「枠外を隠す」ON時の外周マスク）を描画
+                self.draw_stage_foreground_overlay(&painter, canvas_rect);
 
                 if !tool_allowed {
                     self.draw_locked_layer_badge(&painter, canvas_rect);

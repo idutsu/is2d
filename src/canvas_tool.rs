@@ -321,6 +321,99 @@ impl FlashBrushApp {
         self.view_pan = Vec2::ZERO;
     }
 
+    /// ステージ（カメラ出力枠）のワールド中心座標を返す（初期 100% ビューで中央キャンバス領域の真ん中に配置）
+    #[inline]
+    pub(crate) fn stage_center_world(&self) -> Point {
+        Point::new(536.0, 310.0)
+    }
+
+    /// ステージ（カメラ出力枠）のワールド座標矩形 `KRect` を返す
+    #[inline]
+    pub(crate) fn stage_world_rect(&self) -> KRect {
+        let center = self.stage_center_world();
+        let half_w = (self.stage_size.x.max(100.0) as f64) * 0.5;
+        let half_h = (self.stage_size.y.max(100.0) as f64) * 0.5;
+        KRect::new(
+            center.x - half_w,
+            center.y - half_h,
+            center.x + half_w,
+            center.y + half_h,
+        )
+    }
+
+    /// 現在のズーム・パンに応じたステージのスクリーン座標矩形 `egui::Rect` を返す
+    #[inline]
+    pub(crate) fn stage_screen_rect(&self) -> egui::Rect {
+        let r = self.stage_world_rect();
+        egui::Rect::from_min_max(
+            self.world_to_screen(Point::new(r.x0, r.y0)),
+            self.world_to_screen(Point::new(r.x1, r.y1)),
+        )
+    }
+
+    /// 図形描画の前に、ペーストボード（枠外のグレー背景）とステージ矩形（白いキャンバス枠）を描画する
+    pub(crate) fn draw_stage_background(&self, painter: &egui::Painter, canvas_rect: egui::Rect) {
+        if !self.symbol_edit_stack.is_empty() {
+            // シンボル内部の編集モード中は部品編集用の明るい全面背景にする
+            painter.rect_filled(canvas_rect, 0.0, Color32::from_rgb(250, 250, 252));
+            return;
+        }
+        let pasteboard_col = Color32::from_rgb(218, 222, 228);
+        painter.rect_filled(canvas_rect, 0.0, pasteboard_col);
+
+        let stage_rect = self.stage_screen_rect();
+        if !self.clip_outside_stage {
+            painter.rect_filled(
+                stage_rect.translate(Vec2::new(2.0, 2.0)),
+                0.0,
+                Color32::from_rgba_unmultiplied(0, 0, 0, 20),
+            );
+        }
+        painter.rect_filled(stage_rect, 0.0, self.stage_color);
+    }
+
+    /// 図形描画の後に、上からステージの境界枠線（および「枠外を隠す」ON時の外周マスク）を描画する
+    pub(crate) fn draw_stage_foreground_overlay(
+        &self,
+        painter: &egui::Painter,
+        canvas_rect: egui::Rect,
+    ) {
+        if !self.symbol_edit_stack.is_empty() {
+            return;
+        }
+        let stage_rect = self.stage_screen_rect();
+        if self.clip_outside_stage {
+            let pasteboard_col = Color32::from_rgb(218, 222, 228);
+            let sy0 = stage_rect.min.y.clamp(canvas_rect.min.y, canvas_rect.max.y);
+            let sy1 = stage_rect.max.y.clamp(canvas_rect.min.y, canvas_rect.max.y);
+            let sx0 = stage_rect.min.x.clamp(canvas_rect.min.x, canvas_rect.max.x);
+            let sx1 = stage_rect.max.x.clamp(canvas_rect.min.x, canvas_rect.max.x);
+
+            let strips = [
+                egui::Rect::from_min_max(canvas_rect.min, Pos2::new(canvas_rect.max.x, sy0)),
+                egui::Rect::from_min_max(Pos2::new(canvas_rect.min.x, sy1), canvas_rect.max),
+                egui::Rect::from_min_max(
+                    Pos2::new(canvas_rect.min.x, sy0),
+                    Pos2::new(sx0, sy1),
+                ),
+                egui::Rect::from_min_max(
+                    Pos2::new(sx1, sy0),
+                    Pos2::new(canvas_rect.max.x, sy1),
+                ),
+            ];
+            for strip in strips {
+                if strip.width() > 0.0 && strip.height() > 0.0 {
+                    painter.rect_filled(strip, 0.0, pasteboard_col);
+                }
+            }
+        }
+        painter.rect_stroke(
+            stage_rect,
+            0.0,
+            Stroke::new(1.2, Color32::from_rgb(148, 155, 168)),
+        );
+    }
+
     /// 現在の `self.selected_shapes` に対応する選択マスク（`Vec<bool>`）と有効な選択が1つ以上あるかを返す
     pub(crate) fn selected_shape_mask(&self) -> (Vec<bool>, bool) {
         let mut is_sel = vec![false; self.shapes.len()];
@@ -356,6 +449,15 @@ impl FlashBrushApp {
                 .map(|l| l.id)
                 .unwrap_or_else(|| self.timeline.active_layer_id())
         }
+    }
+
+    /// 指定されたシェイプインデックス群が所属するレイヤーのうち最前面の `layer_id` を返す（該当なし時は `active_scope_layer_id`）
+    pub(crate) fn topmost_layer_id_for_indices(&self, indices: &[usize]) -> u64 {
+        indices
+            .iter()
+            .filter_map(|&idx| self.shapes.get(idx).map(|s| s.layer_id))
+            .max_by_key(|&lid| self.timeline.layer_index_by_id(lid).unwrap_or(0))
+            .unwrap_or_else(|| self.active_scope_layer_id())
     }
 
     /// 指定したシェイプインデックス `shape_idx` が属するレイヤーへ `self.timeline.active_layer` およびタイムライン選択状態を追従させる

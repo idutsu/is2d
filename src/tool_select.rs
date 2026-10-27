@@ -173,12 +173,7 @@ impl FlashBrushApp {
         let new_gid = self.next_group_id;
         self.next_group_id += 1;
 
-        let target_lid = self
-            .selected_shapes
-            .iter()
-            .filter_map(|&idx| self.shapes.get(idx).map(|s| s.layer_id))
-            .max_by_key(|&lid| self.timeline.layer_index_by_id(lid).unwrap_or(0))
-            .unwrap_or_else(|| self.active_scope_layer_id());
+        let target_lid = self.topmost_layer_id_for_indices(&self.selected_shapes);
 
         let depth = self.editing_group_path.len();
         let mut any_grouped = false;
@@ -334,6 +329,19 @@ impl FlashBrushApp {
         if let Some(piv) = &mut self.transform_pivot {
             *piv += delta;
         }
+    }
+
+    /// 選択中のオブジェクトを十字キー等で `delta` だけ移動し、Undo 履歴記録・最前面整列・タイムライン同期を行う
+    pub(crate) fn nudge_selected_shapes(&mut self, delta: KVec2) -> bool {
+        let (_, any_valid) = self.selected_shape_mask();
+        if !any_valid {
+            return false;
+        }
+        let undo_snapshot = self.shapes.clone();
+        self.translate_selected_shapes(delta);
+        self.commit_moved_selection(undo_snapshot);
+        self.sync_shapes_to_timeline();
+        true
     }
 
     /// Adobe Animate 風の矩形選択（Marquee Selection）
@@ -605,17 +613,26 @@ impl FlashBrushApp {
             pasted_shapes.push(cloned);
         }
 
+        self.insert_and_select_shapes_in_scope(pasted_shapes, any_raw);
+        true
+    }
+
+    /// 現在の編集スコープの最前面挿入位置へ `new_shapes` を挿入し、それらを選択状態にしてレイヤー順に整列させる
+    pub(crate) fn insert_and_select_shapes_in_scope(
+        &mut self,
+        new_shapes: Vec<FillShape>,
+        mark_modified: bool,
+    ) {
         let insert_pos = self.scope_insert_index();
-        let count = pasted_shapes.len();
-        self.shapes.splice(insert_pos..insert_pos, pasted_shapes);
+        let count = new_shapes.len();
+        self.shapes.splice(insert_pos..insert_pos, new_shapes);
         self.selected_shapes = (insert_pos..insert_pos + count).collect();
         self.sort_shapes_by_layer_order();
-        self.selection_modified = any_raw;
+        self.selection_modified = mark_modified;
         self.transform_pivot = None;
         if !matches!(self.tool, Tool::Select | Tool::Transform) {
             self.set_tool(Tool::Select);
         }
-        true
     }
 
     pub(crate) fn commit_moved_selection(&mut self, undo_snapshot: Vec<FillShape>) {
