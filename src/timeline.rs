@@ -1,7 +1,8 @@
 use crate::{
-    symbol::SymbolDef,
+    symbol::{SymbolDef, TweenState},
     vector_engine::{
         append_mesh, transform_mesh_to_screen, transform_mesh_to_screen_onion, FillShape,
+        SymbolInstanceBinding,
     },
     FlashBrushApp,
 };
@@ -96,11 +97,12 @@ impl Cel {
     }
 }
 
-/// タイムライン上のキーフレーム（開始フレーム番号 0-indexed とセル画 `Cel`）
+/// タイムライン上のキーフレーム（開始フレーム番号 0-indexed、セル画 `Cel`、クラシックトゥイーン有効フラグ `tween`）
 #[derive(Clone, Debug)]
 pub(crate) struct Keyframe {
     pub(crate) start_frame: usize,
     pub(crate) cel: Cel,
+    pub(crate) tween: bool,
 }
 
 impl Keyframe {
@@ -108,6 +110,7 @@ impl Keyframe {
         Self {
             start_frame,
             cel: Cel::default(),
+            tween: false,
         }
     }
 }
@@ -232,6 +235,7 @@ impl Layer {
     }
 
     /// 指定フレーム番号 `frame` で編集対象となる `Cel` への可変参照を返す
+    #[cfg(test)]
     pub(crate) fn cel_at_mut(&mut self, frame: usize) -> Option<&mut Cel> {
         let idx = self.keyframe_index_at(frame)?;
         Some(&mut self.keyframes[idx].cel)
@@ -245,14 +249,37 @@ impl Layer {
         if let Some(existing_idx) = self.keyframes.iter().position(|kf| kf.start_frame == frame) {
             if !clone_prev {
                 self.keyframes[existing_idx].cel.shapes.clear();
+                self.keyframes[existing_idx].tween = false;
             }
             return existing_idx;
         }
 
         let lid = self.id;
+        let split_tween_binding = if clone_prev {
+            self.interpolated_tween_binding_at(frame)
+        } else {
+            None
+        };
+
         let cloned_shapes = if clone_prev {
             self.cel_at(frame)
-                .map(|c| c.shapes.iter().cloned().map(|s| s.with_layer_id(lid)).collect())
+                .map(|c| {
+                    c.shapes
+                        .iter()
+                        .cloned()
+                        .map(|mut s| {
+                            s.layer_id = lid;
+                            if let Some((start_b, interp_b)) = split_tween_binding {
+                                if start_b.xform.determinant().abs() > 1e-9 {
+                                    let delta = interp_b.xform * start_b.xform.inverse();
+                                    s.transform(delta);
+                                    s.symbol_instance = Some(interp_b);
+                                }
+                            }
+                            s
+                        })
+                        .collect()
+                })
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -264,6 +291,7 @@ impl Layer {
             Keyframe {
                 start_frame: frame,
                 cel: Cel::new(cloned_shapes),
+                tween: split_tween_binding.is_some(),
             },
         );
         insert_idx
@@ -275,10 +303,11 @@ impl Layer {
             return false;
         };
         if idx == 0 {
-            if self.keyframes[0].cel.is_empty() {
+            if self.keyframes[0].cel.is_empty() && !self.keyframes[0].tween {
                 return false;
             }
             self.keyframes[0].cel.shapes.clear();
+            self.keyframes[0].tween = false;
             true
         } else {
             self.keyframes.remove(idx);
@@ -322,10 +351,11 @@ impl Layer {
             self.frame_count = (self.frame_count - 1).max(1);
             true
         } else if self.frame_count <= 1 {
-            if self.keyframes[0].cel.is_empty() {
+            if self.keyframes[0].cel.is_empty() && !self.keyframes[0].tween {
                 false
             } else {
                 self.keyframes[0].cel.shapes.clear();
+                self.keyframes[0].tween = false;
                 true
             }
         } else {
@@ -342,6 +372,16 @@ impl Layer {
     }
 }
 
+/// `load_shapes_from_timeline` 読み込み時点のシェイプ署名（トゥイーン中間フレーム等の未編集判定用）
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LoadedShapeSig {
+    layer_id: u64,
+    mesh_revision: u64,
+    color: Color32,
+    group_path: Vec<u64>,
+    symbol_instance: Option<SymbolInstanceBinding>,
+}
+
 /// レイヤー配列・現在のフレーム・FPS・再生制御・オニオンスキン設定・セル範囲選択・シンボルライブラリを管理するタイムライン構造体
 #[derive(Clone, Debug)]
 pub(crate) struct Timeline {
@@ -349,6 +389,7 @@ pub(crate) struct Timeline {
     pub(crate) library: Vec<SymbolDef>,
     pub(crate) next_symbol_id: u64,
     pub(crate) selected_library_symbol: Option<u64>,
+    pub(crate) loaded_signatures: Vec<LoadedShapeSig>,
     pub(crate) current_frame: usize,
     pub(crate) active_layer: usize,
     pub(crate) total_frames: usize,
@@ -375,6 +416,7 @@ impl Default for Timeline {
             library: Vec::new(),
             next_symbol_id: 1,
             selected_library_symbol: None,
+            loaded_signatures: Vec::new(),
             current_frame: 0,
             active_layer: 0,
             total_frames: 1,
@@ -455,18 +497,74 @@ impl Timeline {
             .unwrap_or(&[])
     }
 
+    /// `load_shapes_from_timeline` 読み込み時点のシェイプ署名一覧を記録する
+    pub(crate) fn record_loaded_signatures(&mut self, shapes: &[FillShape]) {
+        self.loaded_signatures = shapes
+            .iter()
+            .map(|s| LoadedShapeSig {
+                layer_id: s.layer_id,
+                mesh_revision: s.mesh_revision,
+                color: s.color,
+                group_path: s.group_path.clone(),
+                symbol_instance: s.symbol_instance,
+            })
+            .collect();
+    }
+
+    /// 指定レイヤー `lid` のシェイプ群が直近の `record_loaded_signatures` 時点から未変更であるかを判定する
+    fn is_layer_unchanged_since_load(&self, lid: u64, shapes: &[FillShape]) -> bool {
+        let mut loaded_iter = self.loaded_signatures.iter().filter(|sig| sig.layer_id == lid);
+        shapes
+            .iter()
+            .filter(|s| s.layer_id == lid)
+            .all(|s| {
+                loaded_iter.next().is_some_and(|sig| {
+                    s.mesh_revision == sig.mesh_revision
+                        && s.color == sig.color
+                        && s.group_path == sig.group_path
+                        && s.symbol_instance == sig.symbol_instance
+                })
+            })
+            && loaded_iter.next().is_none()
+    }
+
     /// 与えられた図形リスト `shapes` を、現在フレームの各「表示中かつ非ロック」レイヤーの `Cel` に `layer_id` ごとに振り分けて書き込む
     /// （変更がないレイヤーはクローンとキャッシュ破棄をスキップする）
     pub(crate) fn write_shapes_to_editable_cels(&mut self, shapes: &[FillShape]) {
         let frame = self.current_frame;
-        for layer in &mut self.layers {
-            if !layer.visible || layer.locked {
+        for l_idx in 0..self.layers.len() {
+            if !self.layers[l_idx].visible || self.layers[l_idx].locked {
                 continue;
             }
-            let lid = layer.id;
-            if let Some(cel) = layer.cel_at_mut(frame) {
+            let lid = self.layers[l_idx].id;
+            let is_tween_mid = self.layers[l_idx].interpolated_tween_binding_at(frame).is_some();
+            let has_multiframe = self.layers[l_idx]
+                .cel_at(frame)
+                .is_some_and(|c| self.has_multiframe_symbol(&c.shapes));
+
+            if (is_tween_mid || has_multiframe) && self.is_layer_unchanged_since_load(lid, shapes) {
+                continue;
+            }
+
+            if is_tween_mid {
+                let new_shapes: Vec<FillShape> = shapes
+                    .iter()
+                    .filter(|s| s.layer_id == lid)
+                    .cloned()
+                    .collect();
+                let kf_idx = self.layers[l_idx].insert_keyframe(frame, false);
+                self.layers[l_idx].keyframes[kf_idx].cel.shapes = new_shapes;
+                self.layers[l_idx].keyframes[kf_idx].tween = self.layers[l_idx].keyframes[kf_idx]
+                    .cel
+                    .single_symbol_instance()
+                    .is_some();
+                continue;
+            }
+
+            if let Some(kf_idx) = self.layers[l_idx].keyframe_index_at(frame) {
+                let kf = &mut self.layers[l_idx].keyframes[kf_idx];
                 let mut layer_iter = shapes.iter().filter(|s| s.layer_id == lid);
-                let unchanged = cel.shapes.iter().all(|c_shape| {
+                let unchanged = kf.cel.shapes.iter().all(|c_shape| {
                     layer_iter.next().is_some_and(|s| {
                         s.mesh_revision == c_shape.mesh_revision
                             && s.color == c_shape.color
@@ -475,14 +573,18 @@ impl Timeline {
                     })
                 }) && layer_iter.next().is_none();
                 if !unchanged {
-                    cel.shapes = shapes
+                    kf.cel.shapes = shapes
                         .iter()
                         .filter(|s| s.layer_id == lid)
                         .cloned()
                         .collect();
+                    if kf.tween && kf.cel.single_symbol_instance().is_none() {
+                        kf.tween = false;
+                    }
                 }
             }
         }
+        self.record_loaded_signatures(shapes);
     }
 
     /// 現在アクティブなレイヤーが編集可能（表示中かつ非ロック）であるかを返す
@@ -588,22 +690,18 @@ impl FlashBrushApp {
     }
 
     /// 現在フレームにおける全ての「表示中かつ非ロック（`visible && !locked`）」レイヤーの `Cel` から
-    /// 背面レイヤー→前面レイヤーの順で（シンボルの内部タイムラインフレームも評価しつつ）`self.shapes` を一括読み込みする
+    /// 背面レイヤー→前面レイヤーの順で（トゥイーン補間およびシンボルの内部タイムラインフレームも評価しつつ）`self.shapes` を一括読み込みする
     pub(crate) fn load_shapes_from_timeline(&mut self) {
         let frame = self.timeline.current_frame;
         let mut loaded = Vec::new();
-        for layer in &self.timeline.layers {
+        for layer_idx in 0..self.timeline.layers.len() {
+            let layer = &self.timeline.layers[layer_idx];
             if !layer.visible || layer.locked {
                 continue;
             }
-            let lid = layer.id;
-            if let Some(cel) = layer.cel_at(frame) {
-                let resolved = self
-                    .timeline
-                    .resolve_shapes_with_symbols(&cel.shapes, frame, false);
-                loaded.extend(resolved.into_iter().map(|s| s.with_layer_id(lid)));
-            }
+            loaded.extend(self.timeline.evaluate_layer_shapes_at(layer_idx, frame, false));
         }
+        self.timeline.record_loaded_signatures(&loaded);
         self.shapes = loaded;
         self.selected_shapes.clear();
         self.unsliced_canvas = None;
@@ -902,20 +1000,34 @@ impl FlashBrushApp {
         self.push_undo();
 
         // 1. 各移動元レイヤーから選択フレーム区間内のキーフレーム（または先頭セル画）を抽出
-        let mut extracted_per_layer: Vec<(usize, Vec<(usize, Cel)>)> = Vec::new();
+        let mut extracted_per_layer: Vec<(usize, Vec<Keyframe>)> = Vec::new();
         for src_l in sel.min_layer..=sel.max_layer {
             let dst_l = (src_l as isize + actual_dl) as usize;
             let layer = &self.timeline.layers[src_l];
-            let mut kfs_in_range: Vec<(usize, Cel)> = layer
+            let mut kfs_in_range: Vec<Keyframe> = layer
                 .keyframes
                 .iter()
                 .filter(|kf| kf.start_frame >= sel.min_frame && kf.start_frame <= sel.max_frame)
-                .map(|kf| (kf.start_frame - sel.min_frame, kf.cel.clone()))
+                .map(|kf| Keyframe {
+                    start_frame: kf.start_frame - sel.min_frame,
+                    cel: kf.cel.clone(),
+                    tween: kf.tween,
+                })
                 .collect();
 
-            if !kfs_in_range.iter().any(|(off, _)| *off == 0) {
+            if !kfs_in_range.iter().any(|kf| kf.start_frame == 0) {
                 let fallback_cel = layer.cel_at(sel.min_frame).cloned().unwrap_or_default();
-                kfs_in_range.insert(0, (0, fallback_cel));
+                let fallback_tween = layer
+                    .keyframe_index_at(sel.min_frame)
+                    .is_some_and(|idx| layer.keyframes[idx].tween);
+                kfs_in_range.insert(
+                    0,
+                    Keyframe {
+                        start_frame: 0,
+                        cel: fallback_cel,
+                        tween: fallback_tween,
+                    },
+                );
             }
             extracted_per_layer.push((dst_l, kfs_in_range));
         }
@@ -940,26 +1052,29 @@ impl FlashBrushApp {
             if dst_max_frame >= dst_layer.frame_count {
                 dst_layer.frame_count = dst_max_frame + 1;
             }
-            for (rel_off, mut cel) in kfs_in_range {
-                for shape in &mut cel.shapes {
+            for mut kf in kfs_in_range {
+                for shape in &mut kf.cel.shapes {
                     shape.layer_id = dst_lid;
                 }
-                let target_f = dst_min_frame + rel_off;
+                let valid_tween = kf.tween && kf.cel.single_symbol_instance().is_some();
+                let target_f = dst_min_frame + kf.start_frame;
                 if let Some(existing) = dst_layer
                     .keyframes
                     .iter_mut()
-                    .find(|kf| kf.start_frame == target_f)
+                    .find(|existing_kf| existing_kf.start_frame == target_f)
                 {
-                    existing.cel = cel;
+                    existing.cel = kf.cel;
+                    existing.tween = valid_tween;
                 } else {
                     let pos = dst_layer
                         .keyframes
-                        .partition_point(|kf| kf.start_frame < target_f);
+                        .partition_point(|existing_kf| existing_kf.start_frame < target_f);
                     dst_layer.keyframes.insert(
                         pos,
                         Keyframe {
                             start_frame: target_f,
-                            cel,
+                            cel: kf.cel,
+                            tween: valid_tween,
                         },
                     );
                 }
@@ -1332,6 +1447,40 @@ impl FlashBrushApp {
                         self.timeline_delete_keyframe();
                     }
 
+                    let (can_tween, is_tweened) = self.can_toggle_tween_at_current_frame();
+                    let tween_btn = egui::Button::new(
+                        egui::RichText::new("⇄ トゥイーン (T)").color(if is_tweened {
+                            Color32::from_rgb(75, 30, 150)
+                        } else if can_tween {
+                            Color32::from_rgb(35, 40, 48)
+                        } else {
+                            Color32::from_rgb(150, 156, 168)
+                        }),
+                    )
+                    .fill(if is_tweened {
+                        Color32::from_rgb(218, 198, 250)
+                    } else {
+                        Color32::from_rgb(248, 249, 252)
+                    })
+                    .stroke(Stroke::new(
+                        1.0,
+                        if is_tweened {
+                            Color32::from_rgb(135, 95, 205)
+                        } else {
+                            Color32::from_rgb(198, 204, 214)
+                        },
+                    ));
+                    if ui
+                        .add_enabled(can_tween, tween_btn)
+                        .on_hover_text("クラシックトゥイーンの ON / OFF を切り替え (T)")
+                        .on_disabled_hover_text(
+                            "トゥイーンを設定するには、開始キーフレームにシンボルが1つだけ存在する必要があります (F8 でシンボル化)",
+                        )
+                        .clicked()
+                    {
+                        self.timeline_toggle_tween();
+                    }
+
                     ui.separator();
 
                     if ui.selectable_label(self.timeline.onion_skin_enabled, format!("{} Onion (O)", crate::panels::icons::ONION_SKIN)).on_hover_text("オニオンスキン（前後のフレームの透かし表示）切替 (O)").clicked() {
@@ -1626,6 +1775,7 @@ impl FlashBrushApp {
                     }
                     let span_end = layer.span_end_for_keyframe(kf_idx);
                     if span_end >= layout.first_vis_frame && span_start <= layout.last_vis_frame {
+                        let tween_state = layer.tween_state_at_keyframe(kf_idx);
                         Self::draw_keyframe_span(
                             grid_painter,
                             layout,
@@ -1636,6 +1786,7 @@ impl FlashBrushApp {
                             span_end,
                             !kf.cel.is_empty(),
                             is_layer_selected,
+                            tween_state,
                         );
                     }
                 }
@@ -1713,7 +1864,7 @@ impl FlashBrushApp {
         }
     }
 
-    /// 1つのキーフレーム保持区間（帯・1コマ区切り線・先頭丸記号 `●`/`○`・終端マーク `▯`）を描画する
+    /// 1つのキーフレーム保持区間（帯・1コマ区切り線・先頭丸記号 `●`/`○`・終端マーク `▯` またはトゥイーン点線/矢印）を描画する
     #[allow(clippy::too_many_arguments)]
     fn draw_keyframe_span(
         grid_painter: &egui::Painter,
@@ -1725,20 +1876,32 @@ impl FlashBrushApp {
         span_end: usize,
         has_art: bool,
         is_layer_selected: bool,
+        tween_state: TweenState,
     ) {
         let sx0 = layout.frame_x(span_start, scroll_x);
         let sx1 = layout.frame_x(span_end + 1, scroll_x);
         let span_rect = Rect::from_min_max(Pos2::new(sx0, y0), Pos2::new(sx1, y1));
+        let is_tween = !matches!(tween_state, TweenState::None);
 
-        let span_fill = match (has_art, is_layer_selected) {
-            (true, true) => Color32::from_rgb(196, 212, 232),
-            (true, false) => Color32::from_rgb(212, 218, 228),
-            (false, true) => Color32::from_rgb(244, 248, 255),
-            (false, false) => Color32::from_rgb(255, 255, 255),
+        let span_fill = if is_tween {
+            if is_layer_selected {
+                Color32::from_rgb(206, 184, 245)
+            } else {
+                Color32::from_rgb(222, 205, 250)
+            }
+        } else {
+            match (has_art, is_layer_selected) {
+                (true, true) => Color32::from_rgb(196, 212, 232),
+                (true, false) => Color32::from_rgb(212, 218, 228),
+                (false, true) => Color32::from_rgb(244, 248, 255),
+                (false, false) => Color32::from_rgb(255, 255, 255),
+            }
         };
         grid_painter.rect_filled(span_rect, 0.0, span_fill);
 
-        let sep_col = if has_art {
+        let sep_col = if is_tween {
+            Color32::from_rgba_unmultiplied(150, 122, 196, 95)
+        } else if has_art {
             Color32::from_rgba_unmultiplied(145, 155, 172, 110)
         } else {
             Color32::from_rgba_unmultiplied(195, 202, 214, 130)
@@ -1747,20 +1910,74 @@ impl FlashBrushApp {
             let fx = layout.frame_x(f, scroll_x);
             grid_painter.line_segment([Pos2::new(fx, y0 + 1.0), Pos2::new(fx, y1 - 1.0)], Stroke::new(1.0, sep_col));
         }
-        grid_painter.rect_stroke(span_rect, 0.0, Stroke::new(1.0, Color32::from_rgb(155, 162, 175)));
+        let border_col = if is_tween {
+            Color32::from_rgb(146, 116, 194)
+        } else {
+            Color32::from_rgb(155, 162, 175)
+        };
+        grid_painter.rect_stroke(span_rect, 0.0, Stroke::new(1.0, border_col));
 
         let kf_center = Pos2::new(sx0 + CELL_W * 0.5, (y0 + y1) * 0.5 + 1.0);
         if has_art {
-            grid_painter.circle_filled(kf_center, 3.8, Color32::from_rgb(25, 28, 35));
+            let dot_col = if is_tween {
+                Color32::from_rgb(45, 20, 95)
+            } else {
+                Color32::from_rgb(25, 28, 35)
+            };
+            grid_painter.circle_filled(kf_center, 3.8, dot_col);
         } else {
             grid_painter.circle_stroke(kf_center, 3.6, Stroke::new(1.5, Color32::from_rgb(75, 82, 95)));
         }
 
-        if span_end > span_start {
-            let end_mark_x = sx1 - CELL_W * 0.45;
-            let end_box = Rect::from_center_size(Pos2::new(end_mark_x, kf_center.y), Vec2::new(4.2, 8.5));
-            grid_painter.rect_filled(end_box, 0.0, Color32::WHITE);
-            grid_painter.rect_stroke(end_box, 0.0, Stroke::new(1.2, Color32::from_rgb(90, 98, 112)));
+        match tween_state {
+            TweenState::None => {
+                if span_end > span_start {
+                    let end_mark_x = sx1 - CELL_W * 0.45;
+                    let end_box = Rect::from_center_size(Pos2::new(end_mark_x, kf_center.y), Vec2::new(4.2, 8.5));
+                    grid_painter.rect_filled(end_box, 0.0, Color32::WHITE);
+                    grid_painter.rect_stroke(end_box, 0.0, Stroke::new(1.2, Color32::from_rgb(90, 98, 112)));
+                }
+            }
+            TweenState::Incomplete => {
+                // 終了キーフレームが存在しない（または条件不一致）→ 横点線（`----`）を描画
+                let line_x0 = sx0 + CELL_W * 0.5 + 5.0;
+                let line_x1 = sx1 - 2.0;
+                if line_x1 > line_x0 {
+                    let dash_col = Color32::from_rgb(90, 50, 160);
+                    let mut x = line_x0;
+                    while x < line_x1 {
+                        let x_end = (x + 4.0).min(line_x1);
+                        grid_painter.line_segment(
+                            [Pos2::new(x, kf_center.y), Pos2::new(x_end, kf_center.y)],
+                            Stroke::new(1.5, dash_col),
+                        );
+                        x += 7.0;
+                    }
+                }
+            }
+            TweenState::Complete { .. } => {
+                // 終了キーフレームが存在する完全トゥイーン → 実線矢印（`───▶`）を描画
+                let line_x0 = sx0 + CELL_W * 0.5 + 5.0;
+                let line_x1 = sx1 - 2.0;
+                let arrow_col = Color32::from_rgb(72, 32, 145);
+                if line_x1 > line_x0 {
+                    let shaft_end = (line_x1 - 4.0).max(line_x0);
+                    grid_painter.line_segment(
+                        [Pos2::new(line_x0, kf_center.y), Pos2::new(shaft_end, kf_center.y)],
+                        Stroke::new(1.6, arrow_col),
+                    );
+                }
+                let tip = Pos2::new(line_x1, kf_center.y);
+                grid_painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        tip,
+                        Pos2::new(tip.x - 5.5, tip.y - 3.4),
+                        Pos2::new(tip.x - 5.5, tip.y + 3.4),
+                    ],
+                    arrow_col,
+                    Stroke::NONE,
+                ));
+            }
         }
     }
 

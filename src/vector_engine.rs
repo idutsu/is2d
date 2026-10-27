@@ -370,6 +370,51 @@ pub(crate) fn affine_rotate_around(pivot: Point, angle_rad: f64) -> Affine {
         * Affine::translate(-pivot.to_vec2())
 }
 
+/// 2つの2Dアフィン変換行列 `start` と `end` を TRS（平行移動・最短回転・スケール・シアー）に分解し、
+/// パラメータ `t`（`0.0..=1.0`）で補間した新しい `Affine` を返す（クラシックトゥイーン用）
+pub(crate) fn interpolate_affine(start: Affine, end: Affine, t: f64) -> Affine {
+    let t = t.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return start;
+    }
+    if t >= 1.0 {
+        return end;
+    }
+    let (tx0, ty0, rot0, sx0, sy0, sh0) = decompose_affine_trs(start);
+    let (tx1, ty1, rot1, sx1, sy1, sh1) = decompose_affine_trs(end);
+
+    let tx = tx0 + (tx1 - tx0) * t;
+    let ty = ty0 + (ty1 - ty0) * t;
+    let mut delta_rot = (rot1 - rot0).rem_euclid(std::f64::consts::TAU);
+    if delta_rot > std::f64::consts::PI {
+        delta_rot -= std::f64::consts::TAU;
+    }
+    let rot = rot0 + delta_rot * t;
+    let sx = sx0 + (sx1 - sx0) * t;
+    let sy = sy0 + (sy1 - sy0) * t;
+    let sh = sh0 + (sh1 - sh0) * t;
+
+    let (sin_r, cos_r) = rot.sin_cos();
+    let a = sx * cos_r;
+    let b = sx * sin_r;
+    let c = sh * cos_r - sy * sin_r;
+    let d = sh * sin_r + sy * cos_r;
+    Affine::new([a, b, c, d, tx, ty])
+}
+
+fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64, f64, f64) {
+    let [a, b, c, d, tx, ty] = affine.as_coeffs();
+    let sx = a.hypot(b);
+    let (cos_r, sin_r, rot) = if sx > 1e-9 {
+        (a / sx, b / sx, b.atan2(a))
+    } else {
+        (1.0, 0.0, 0.0)
+    };
+    let shear = c * cos_r + d * sin_r;
+    let sy = -c * sin_r + d * cos_r;
+    (tx, ty, rot, sx, sy, shear)
+}
+
 /// 矩形選択用の `KRect` から4辺の直線 `QuadBez` を持つ `FillShape` を生成する
 pub(crate) fn make_marquee_rect_shape(rect: KRect) -> FillShape {
     let p00 = Point::new(rect.x0, rect.y0);

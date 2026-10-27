@@ -189,10 +189,11 @@ impl FlashBrushApp {
 
     fn restore_state_snapshot(
         &mut self,
-        tl: Timeline,
+        mut tl: Timeline,
         shapes: Vec<FillShape>,
         sym_stack: Vec<SymbolEditSession>,
     ) {
+        tl.record_loaded_signatures(&shapes);
         self.timeline = tl;
         self.shapes = shapes;
         self.symbol_edit_stack = sym_stack;
@@ -308,6 +309,8 @@ impl FlashBrushApp {
             }
         } else if i.key_pressed(Key::O) {
             self.timeline.onion_skin_enabled = !self.timeline.onion_skin_enabled;
+        } else if i.key_pressed(Key::T) {
+            self.timeline_toggle_tween();
         } else if let Some(tool) = Tool::from_shortcut_input(i) {
             self.set_tool(tool);
         } else if i.key_pressed(Key::Escape) {

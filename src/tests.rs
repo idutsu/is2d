@@ -1570,3 +1570,111 @@
         app.switch_to_layer_and_frame(0, 2);
         assert_eq!(app.shapes.len(), 2);
     }
+
+    #[test]
+    fn test_classic_tween_single_symbol_condition_and_interpolation() {
+        use crate::symbol::TweenState;
+
+        let mut app = FlashBrushApp::default();
+
+        // 1. 空のキーフレームではトゥイーン (T) を設定できないこと
+        assert!(!app.timeline_toggle_tween());
+
+        // 2. 生の絵（Raw Shape）だけのキーフレームではトゥイーンを設定できないこと
+        app.shapes = make_stroke(
+            Point::new(100.0, 150.0),
+            Point::new(200.0, 150.0),
+            16.0,
+            Color32::from_rgb(230, 80, 80),
+        );
+        assert!(!app.timeline_toggle_tween());
+
+        // 3. 通常のグループ（Cmd+G）だけのキーフレームでもトゥイーンを設定できないこと
+        app.selected_shapes = vec![0];
+        assert!(app.group_selected_shapes().is_some());
+        assert!(!app.timeline_toggle_tween());
+        assert!(app.ungroup_selected_shapes());
+
+        // 4. F8 で単一シンボルに変換すると、トゥイーンを設定できること
+        app.selected_shapes = vec![0];
+        let sym_id = app.convert_selection_to_symbol().unwrap();
+        assert!(app.timeline_toggle_tween());
+        assert!(app.timeline.layers[0].keyframes[0].tween);
+        assert_eq!(
+            app.timeline.layers[0].tween_state_at_keyframe(0),
+            TweenState::Incomplete,
+            "終了キーフレームがない状態では未完トゥイーン（横点線）になること"
+        );
+
+        // 5. もう1回 T を押すとトゥイーンを解除でき、さらに別のシンボルや生の絵を混在させると T が拒否されること
+        assert!(app.timeline_toggle_tween());
+        assert!(!app.timeline.layers[0].keyframes[0].tween);
+
+        // 2つ目のシンボルインスタンスを配置（複数シンボル混在）→ トゥイーン設定不可
+        assert!(app.place_symbol_instance_from_library(sym_id));
+        assert!(!app.timeline_toggle_tween());
+        // 2つ目のインスタンスを削除して単一シンボルに戻す
+        assert!(app.delete_selected_shapes());
+
+        // 生の絵を1つ追加（シンボル＋生の絵混在）→ トゥイーン設定不可
+        let raw_extra = make_stroke(
+            Point::new(300.0, 300.0),
+            Point::new(340.0, 300.0),
+            8.0,
+            Color32::BLACK,
+        )
+        .remove(0);
+        app.shapes.push(raw_extra);
+        assert!(!app.timeline_toggle_tween());
+        app.shapes.pop();
+
+        // 6. 単一シンボルだけの状態で T を押し、F5 で 4 コマ延長（frame 0..=4）、frame 4 で F6 を押して終了キーフレームを作成
+        assert!(app.timeline_toggle_tween());
+        for _ in 0..4 {
+            assert!(app.timeline_extend_frame());
+        }
+        assert_eq!(app.timeline.total_frames, 5);
+        assert_eq!(
+            app.timeline.layers[0].tween_state_at_keyframe(0),
+            TweenState::Incomplete
+        );
+
+        // frame 4 に移動して F6（複製キーフレーム作成）
+        app.switch_to_layer_and_frame(0, 4);
+        assert!(app.timeline_insert_keyframe(true));
+        assert_eq!(app.timeline.current_frame, 4);
+        assert!(
+            matches!(
+                app.timeline.layers[0].tween_state_at_keyframe(0),
+                TweenState::Complete {
+                    start_frame: 0,
+                    end_frame: 4,
+                    ..
+                }
+            ),
+            "終了キーフレームに同一シンボルの単一インスタンスが存在すると完全トゥイーン（実線矢印）になること"
+        );
+
+        // 7. 終了キーフレーム（frame 4）でシンボルを X 方向に +200px、Y 方向に +80px 平行移動
+        app.selected_shapes = vec![0];
+        let snap = app.shapes.clone();
+        app.translate_selected_shapes(KVec2::new(200.0, 80.0));
+        app.commit_moved_selection(snap);
+        app.sync_shapes_to_timeline();
+
+        // 中間フレーム（frame 2, t = 0.5）へ切り替えると、中心座標が (150 + 100, 150 + 40) = (250, 190) に補間されていること
+        app.switch_to_layer_and_frame(0, 2);
+        let mid_bbox = app.shapes[0].bounding_box();
+        let mid_cx = (mid_bbox.x0 + mid_bbox.x1) * 0.5;
+        let mid_cy = (mid_bbox.y0 + mid_bbox.y1) * 0.5;
+        assert!((mid_cx - 250.0).abs() < 1.0, "mid_cx = {mid_cx}");
+        assert!((mid_cy - 190.0).abs() < 1.0, "mid_cy = {mid_cy}");
+
+        // 中間フレームを表示したあとに先頭フレーム（frame 0）へ戻っても、先頭キーフレームの座標 (150, 150) が上書き破壊されていないこと
+        app.switch_to_layer_and_frame(0, 0);
+        let start_bbox = app.shapes[0].bounding_box();
+        let start_cx = (start_bbox.x0 + start_bbox.x1) * 0.5;
+        let start_cy = (start_bbox.y0 + start_bbox.y1) * 0.5;
+        assert!((start_cx - 150.0).abs() < 1.0, "start_cx = {start_cx}");
+        assert!((start_cy - 150.0).abs() < 1.0, "start_cy = {start_cy}");
+    }

@@ -4,14 +4,112 @@ use kurbo::{Affine, Point, Vec2 as KVec2};
 use crate::canvas_tool::Tool;
 use crate::timeline::{Cel, Layer, Timeline, TimelineCellSelection, TimelineGridDrag};
 use crate::vector_engine::{
-    append_mesh, transform_mesh_to_screen, transform_mesh_to_screen_onion, FillShape,
-    SymbolInstanceBinding,
+    append_mesh, interpolate_affine, transform_mesh_to_screen, transform_mesh_to_screen_onion,
+    FillShape, SymbolInstanceBinding,
 };
 use crate::FlashBrushApp;
 
 // ============================================================================
-// 1. シンボル定義（SymbolDef）・編集中セッション退避（SymbolEditSession）・共通ヘルパー
+// 1. シンボル定義（SymbolDef）・トゥイーン状態（TweenState）・編集中セッション退避
 // ============================================================================
+
+/// キーフレーム区間におけるクラシックトゥイーン（`T` キー）の有効状態
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TweenState {
+    /// トゥイーン未設定（または開始キーフレームが単一シンボル条件を満たしていない）
+    None,
+    /// 開始キーフレームは単一シンボルでトゥイーンONだが、終了キーフレームが存在しない（または条件不一致）→ 横点線（`----`）表示
+    Incomplete,
+    /// 開始・終了キーフレームとも同一シンボルの単一インスタンスが存在する完全トゥイーン → 実線矢印（`───▶`）表示＆TRS補間
+    Complete {
+        start_frame: usize,
+        end_frame: usize,
+        start_binding: SymbolInstanceBinding,
+        end_binding: SymbolInstanceBinding,
+    },
+}
+
+impl Cel {
+    /// このセル（キーフレーム）に「ルート直下の単一シンボルインスタンスのみ（1個だけ）」が存在する場合、
+    /// その `SymbolInstanceBinding` を返す。
+    /// （空セル、生シェイプのみ、通常グループのみ、複数シンボル、シンボル＋生シェイプ、シンボル＋グループ等の場合はすべて `None`）
+    pub(crate) fn single_symbol_instance(&self) -> Option<SymbolInstanceBinding> {
+        let first = self.shapes.first()?;
+        let binding = first.symbol_instance?;
+        if first.group_path.first() != Some(&binding.instance_gid) {
+            return None;
+        }
+        let all_same_instance = self.shapes.iter().all(|s| {
+            s.symbol_instance.is_some_and(|b| {
+                b.instance_gid == binding.instance_gid && b.symbol_id == binding.symbol_id
+            }) && s.group_path.first() == Some(&binding.instance_gid)
+        });
+        all_same_instance.then_some(binding)
+    }
+}
+
+impl Layer {
+    /// `kf_idx` 番目のキーフレームにおけるトゥイーン状態（未設定 / 点線の未完トゥイーン / 実線矢印の完全トゥイーン）を判定する
+    pub(crate) fn tween_state_at_keyframe(&self, kf_idx: usize) -> TweenState {
+        let Some(kf) = self.keyframes.get(kf_idx) else {
+            return TweenState::None;
+        };
+        if !kf.tween {
+            return TweenState::None;
+        }
+        let Some(start_binding) = kf.cel.single_symbol_instance() else {
+            return TweenState::None;
+        };
+        if let Some(next_kf) = self
+            .keyframes
+            .get(kf_idx + 1)
+            .filter(|next| next.start_frame < self.frame_count && next.start_frame > kf.start_frame)
+        {
+            if let Some(end_binding) = next_kf
+                .cel
+                .single_symbol_instance()
+                .filter(|b| b.symbol_id == start_binding.symbol_id)
+            {
+                return TweenState::Complete {
+                    start_frame: kf.start_frame,
+                    end_frame: next_kf.start_frame,
+                    start_binding,
+                    end_binding,
+                };
+            }
+        }
+        TweenState::Incomplete
+    }
+
+    /// 指定フレーム `frame` が完全トゥイーン（`TweenState::Complete`）の中間フレーム（`start_frame < frame < end_frame`）である場合、
+    /// TRS補間後の `(開始バインディング, 補間後バインディング)` を返す
+    pub(crate) fn interpolated_tween_binding_at(
+        &self,
+        frame: usize,
+    ) -> Option<(SymbolInstanceBinding, SymbolInstanceBinding)> {
+        let kf_idx = self.keyframe_index_at(frame)?;
+        match self.tween_state_at_keyframe(kf_idx) {
+            TweenState::Complete {
+                start_frame,
+                end_frame,
+                start_binding,
+                end_binding,
+            } if frame > start_frame && frame < end_frame => {
+                let t = (frame - start_frame) as f64 / (end_frame - start_frame) as f64;
+                let interp_xform = interpolate_affine(start_binding.xform, end_binding.xform, t);
+                Some((
+                    start_binding,
+                    SymbolInstanceBinding {
+                        instance_gid: start_binding.instance_gid,
+                        symbol_id: start_binding.symbol_id,
+                        xform: interp_xform,
+                    },
+                ))
+            }
+            _ => None,
+        }
+    }
+}
 
 impl SymbolInstanceBinding {
     /// ローカル座標系のシェイプ列 `local_shapes` を、このインスタンスの変換行列 `self.xform`・`layer_id`・
@@ -70,13 +168,12 @@ pub(crate) fn draw_registration_cross(
     );
 }
 
-/// レイヤー配列内の全キーフレーム・全シェイプに対してアフィン変換 `affine` を適用し、シンボル紐付けをクリアする
+/// レイヤー配列内の全キーフレーム・全シェイプに対してアフィン変換 `affine` を適用する
 fn transform_layers_shapes(layers: &mut [Layer], affine: Affine) {
     for layer in layers {
         for kf in &mut layer.keyframes {
             for s in &mut kf.cel.shapes {
                 s.transform(affine);
-                s.symbol_instance = None;
             }
         }
     }
@@ -122,8 +219,17 @@ impl SymbolDef {
                 continue;
             }
             if let Some(cel) = layer.cel_at(frame) {
+                let delta_xform = layer
+                    .interpolated_tween_binding_at(frame)
+                    .and_then(|(start_b, interp_b)| {
+                        (start_b.xform.determinant().abs() > 1e-9)
+                            .then(|| interp_b.xform * start_b.xform.inverse())
+                    });
                 for s in &cel.shapes {
                     let mut cloned = s.clone();
+                    if let Some(dx) = delta_xform {
+                        cloned.transform(dx);
+                    }
                     cloned.layer_id = 1;
                     out.push(cloned);
                 }
@@ -230,9 +336,56 @@ impl Timeline {
         out
     }
 
-    /// 指定レイヤー・フレームの結合済みワールド座標メッシュを（複数フレームシンボル評価込みで）構築する
-    fn build_resolved_world_batch_mesh(&self, shapes: &[FillShape], frame: usize) -> Option<Mesh> {
-        let resolved = self.resolve_shapes_with_symbols(shapes, frame, true);
+    /// 指定レイヤー `layer_idx` の指定フレーム `frame` における図形列を、クラシックトゥイーン補間およびシンボル内タイムライン評価込みで返す
+    pub(crate) fn evaluate_layer_shapes_at(
+        &self,
+        layer_idx: usize,
+        frame: usize,
+        allow_empty: bool,
+    ) -> Vec<FillShape> {
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return Vec::new();
+        };
+        let Some(cel) = layer.cel_at(frame) else {
+            return Vec::new();
+        };
+        let lid = layer.id;
+
+        if let Some((start_b, interp_b)) = layer.interpolated_tween_binding_at(frame) {
+            if let Some(sym) = self.library.iter().find(|s| s.id == interp_b.symbol_id) {
+                let local_shapes = sym.evaluated_local_shapes_at(frame, allow_empty);
+                return interp_b.instantiate_shapes(&local_shapes, lid, &[]);
+            }
+            let delta = if start_b.xform.determinant().abs() > 1e-9 {
+                interp_b.xform * start_b.xform.inverse()
+            } else {
+                Affine::IDENTITY
+            };
+            return cel
+                .shapes
+                .iter()
+                .map(|s| {
+                    let mut c = s.clone().with_layer_id(lid);
+                    c.transform(delta);
+                    c.symbol_instance = Some(interp_b);
+                    c
+                })
+                .collect();
+        }
+
+        self.resolve_shapes_with_symbols(&cel.shapes, frame, allow_empty)
+            .into_iter()
+            .map(|s| s.with_layer_id(lid))
+            .collect()
+    }
+
+    /// 指定レイヤー・フレームの結合済みワールド座標メッシュを（トゥイーン補間・複数フレームシンボル評価込みで）構築する
+    fn build_layer_resolved_world_batch_mesh(
+        &self,
+        layer_idx: usize,
+        frame: usize,
+    ) -> Option<Mesh> {
+        let resolved = self.evaluate_layer_shapes_at(layer_idx, frame, true);
         if resolved.is_empty() {
             return None;
         }
@@ -243,7 +396,7 @@ impl Timeline {
         Some(batch)
     }
 
-    /// 指定レイヤー・フレームの描画用スクリーン `Mesh` を返す（複数フレームシンボルを含む場合はフレーム評価を行い、それ以外は高速キャッシュを返す）
+    /// 指定レイヤー・フレームの描画用スクリーン `Mesh` を返す（トゥイーン中間フレームまたは複数フレームシンボルを含む場合はフレーム評価を行い、それ以外は高速キャッシュを返す）
     pub(crate) fn resolved_cel_screen_mesh(
         &self,
         layer_idx: usize,
@@ -252,18 +405,21 @@ impl Timeline {
         pan: Vec2,
         dim_backdrop: bool,
     ) -> Option<Mesh> {
-        let cel = self.layers.get(layer_idx)?.cel_at(frame)?;
+        let layer = self.layers.get(layer_idx)?;
+        let cel = layer.cel_at(frame)?;
         if cel.is_empty() {
             return None;
         }
-        if !self.has_multiframe_symbol(&cel.shapes) {
+        if layer.interpolated_tween_binding_at(frame).is_none()
+            && !self.has_multiframe_symbol(&cel.shapes)
+        {
             return Some(cel.cached_screen_mesh(zoom, pan, dim_backdrop));
         }
-        let batch = self.build_resolved_world_batch_mesh(&cel.shapes, frame)?;
+        let batch = self.build_layer_resolved_world_batch_mesh(layer_idx, frame)?;
         Some(transform_mesh_to_screen(&batch, zoom, pan, dim_backdrop))
     }
 
-    /// 指定レイヤー・フレームのオニオンスキン描画用スクリーン `Mesh` を返す（複数フレームシンボル対応）
+    /// 指定レイヤー・フレームのオニオンスキン描画用スクリーン `Mesh` を返す（トゥイーン補間・複数フレームシンボル対応）
     pub(crate) fn resolved_cel_onion_mesh(
         &self,
         layer_idx: usize,
@@ -273,14 +429,17 @@ impl Timeline {
         tint_rgb: [u8; 3],
         alpha: u8,
     ) -> Option<Mesh> {
-        let cel = self.layers.get(layer_idx)?.cel_at(frame)?;
+        let layer = self.layers.get(layer_idx)?;
+        let cel = layer.cel_at(frame)?;
         if cel.is_empty() {
             return None;
         }
-        if !self.has_multiframe_symbol(&cel.shapes) {
+        if layer.interpolated_tween_binding_at(frame).is_none()
+            && !self.has_multiframe_symbol(&cel.shapes)
+        {
             return Some(cel.cached_onion_mesh(zoom, pan, tint_rgb, alpha));
         }
-        let batch = self.build_resolved_world_batch_mesh(&cel.shapes, frame)?;
+        let batch = self.build_layer_resolved_world_batch_mesh(layer_idx, frame)?;
         Some(transform_mesh_to_screen_onion(
             &batch, zoom, pan, tint_rgb, alpha,
         ))
@@ -433,10 +592,83 @@ impl FlashBrushApp {
                 kf.cel
                     .shapes
                     .retain(|s| s.symbol_instance.is_none_or(|b| b.symbol_id != symbol_id));
+                if kf.tween && kf.cel.single_symbol_instance().is_none() {
+                    kf.tween = false;
+                }
             }
         }
         self.sanitize_editing_group_path();
         true
+    }
+
+    /// 現在のフレーム・選択レイヤーにおいてクラシックトゥイーンの切替が可能か `(切替可能か, 現在トゥイーンONか)` を返す
+    pub(crate) fn can_toggle_tween_at_current_frame(&self) -> (bool, bool) {
+        let targets = self.timeline.target_layers_for_frame_op();
+        if targets.is_empty() {
+            return (false, false);
+        }
+        let curr_f = self.timeline.current_frame;
+        let mut any_tweened = false;
+        let mut any_can_enable = false;
+        for &l_idx in &targets {
+            let layer = &self.timeline.layers[l_idx];
+            if let Some(kf_idx) = layer.keyframe_index_at(curr_f) {
+                let kf = &layer.keyframes[kf_idx];
+                if kf.tween && kf.cel.single_symbol_instance().is_some() {
+                    any_tweened = true;
+                } else if kf.cel.single_symbol_instance().is_some() {
+                    any_can_enable = true;
+                }
+            }
+        }
+        (any_tweened || any_can_enable, any_tweened)
+    }
+
+    /// 現在のキーフレーム（または保持フレームが属する開始キーフレーム）に対してクラシックトゥイーンを ON / OFF トグルする（`T` キー）。
+    /// トゥイーンを ON にするための厳格条件：開始キーフレームに「シンボルインスタンスが1つだけ」存在すること。
+    pub(crate) fn timeline_toggle_tween(&mut self) -> bool {
+        let targets = self.timeline.target_layers_for_frame_op();
+        if targets.is_empty() {
+            return false;
+        }
+        let prev_selected = self.selected_shapes.clone();
+        self.flush_canvas_before_timeline_op();
+
+        let (can_toggle, is_currently_tweened) = self.can_toggle_tween_at_current_frame();
+        if !can_toggle {
+            self.selected_shapes = prev_selected
+                .into_iter()
+                .filter(|&idx| idx < self.shapes.len())
+                .collect();
+            return false;
+        }
+
+        self.push_undo();
+        let curr_f = self.timeline.current_frame;
+        let next_tween = !is_currently_tweened;
+        let mut changed = false;
+
+        for &l_idx in &targets {
+            let layer = &mut self.timeline.layers[l_idx];
+            if let Some(kf_idx) = layer.keyframe_index_at(curr_f) {
+                let kf = &mut layer.keyframes[kf_idx];
+                if next_tween {
+                    if kf.cel.single_symbol_instance().is_some() && !kf.tween {
+                        kf.tween = true;
+                        changed = true;
+                    }
+                } else if kf.tween {
+                    kf.tween = false;
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            self.load_shapes_from_timeline();
+            self.select_shapes_for_timeline_selection();
+        }
+        changed
     }
 
     /// 現在選択されている図形が単一のシンボルインスタンスである場合、その `(SymbolInstanceBinding, シンボル名)` を返す
@@ -484,19 +716,15 @@ impl FlashBrushApp {
             .map(|s| s.backdrop_shapes.clone())
             .unwrap_or_default();
         let curr_f = self.timeline.current_frame;
-        for layer in &self.timeline.layers {
-            if !layer.visible {
+        for layer_idx in 0..self.timeline.layers.len() {
+            if !self.timeline.layers[layer_idx].visible {
                 continue;
             }
-            if let Some(cel) = layer.cel_at(curr_f) {
-                let resolved = self
-                    .timeline
-                    .resolve_shapes_with_symbols(&cel.shapes, curr_f, false);
-                backdrop_shapes.extend(resolved.into_iter().filter(|s| {
-                    s.symbol_instance
-                        .is_none_or(|b| b.instance_gid != binding.instance_gid)
-                }));
-            }
+            let resolved = self.timeline.evaluate_layer_shapes_at(layer_idx, curr_f, false);
+            backdrop_shapes.extend(resolved.into_iter().filter(|s| {
+                s.symbol_instance
+                    .is_none_or(|b| b.instance_gid != binding.instance_gid)
+            }));
         }
 
         // シンボル定義のローカルレイヤー群をインスタンスのステージ変換 `binding.xform` で展開して作業タイムラインを構築
@@ -512,6 +740,7 @@ impl FlashBrushApp {
             library: self.timeline.library.clone(),
             next_symbol_id: self.timeline.next_symbol_id,
             selected_library_symbol: Some(binding.symbol_id),
+            loaded_signatures: Vec::new(),
             current_frame: act_f,
             active_layer: act_l,
             total_frames: sym_def.total_frames.max(1),
