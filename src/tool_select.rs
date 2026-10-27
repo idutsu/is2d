@@ -24,7 +24,7 @@ impl FlashBrushApp {
     }
 
     /// 現在の編集スコープ（`editing_group_path`）末尾に対応する挿入インデックスを返す
-    fn scope_insert_index(&self) -> usize {
+    pub(crate) fn scope_insert_index(&self) -> usize {
         if self.editing_group_path.is_empty() {
             self.shapes.len()
         } else {
@@ -205,7 +205,7 @@ impl FlashBrushApp {
         Some(new_gid)
     }
 
-    /// 選択中のグループを1段階だけ解除（分離）する（`Cmd+B`）。
+    /// 選択中のグループまたはシンボルインスタンスを1段階だけ解除（分離）する（`Cmd+B`）。
     /// 多段入れ子の場合は内側の子グループ構造を維持したまま最外殻のグループのみを外す。
     pub(crate) fn ungroup_selected_shapes(&mut self) -> bool {
         if !self.selection_has_group() {
@@ -221,7 +221,13 @@ impl FlashBrushApp {
                 if shape.is_in_editing_scope(&self.editing_group_path)
                     && shape.group_path.len() > depth
                 {
-                    shape.group_path.remove(depth);
+                    let removed_gid = shape.group_path.remove(depth);
+                    if shape
+                        .symbol_instance
+                        .is_some_and(|b| b.instance_gid == removed_gid)
+                    {
+                        shape.symbol_instance = None;
+                    }
                     if shape.group_path.len() == depth {
                         any_became_raw = true;
                     }
@@ -235,7 +241,7 @@ impl FlashBrushApp {
         true
     }
 
-    /// ダブルクリック位置 `pt` にグループがあれば、そのグループの中に入ってインプレイス編集モードへ移行する
+    /// ダブルクリック位置 `pt` にシンボルがあればそのシンボルの独自タイムラインへ入り、グループがあればインプレイス編集モードへ移行する
     pub(crate) fn enter_group_at(&mut self, pt: Point) -> bool {
         let Some(hit_idx) = self.topmost_shape_at(pt) else {
             return false;
@@ -244,26 +250,32 @@ impl FlashBrushApp {
         else {
             return false;
         };
+        if let Some(binding) = self.shapes[hit_idx]
+            .symbol_instance
+            .filter(|b| b.instance_gid == gid)
+        {
+            return self.enter_symbol_timeline(binding);
+        }
         self.clear_selection();
         self.editing_group_path.push(gid);
         true
     }
 
-    /// 現在入っているグループ編集階層から1段階上の親階層へ戻る
+    /// 現在入っているグループまたはシンボルタイムライン編集階層から1段階上の親階層へ戻る
     pub(crate) fn exit_current_group(&mut self) -> bool {
-        if self.editing_group_path.is_empty() {
-            return false;
+        if !self.editing_group_path.is_empty() {
+            self.clear_selection();
+            let exited_gid = self.editing_group_path.pop().unwrap();
+            self.selected_shapes = (0..self.shapes.len())
+                .filter(|&i| {
+                    self.shapes[i].active_group_id_at_scope(&self.editing_group_path)
+                        == Some(exited_gid)
+                })
+                .collect();
+            self.transform_pivot = None;
+            return true;
         }
-        self.clear_selection();
-        let exited_gid = self.editing_group_path.pop().unwrap();
-        self.selected_shapes = (0..self.shapes.len())
-            .filter(|&i| {
-                self.shapes[i].active_group_id_at_scope(&self.editing_group_path)
-                    == Some(exited_gid)
-            })
-            .collect();
-        self.transform_pivot = None;
-        true
+        self.exit_symbol_timeline()
     }
 
     /// Undo / Redo 後に現在潜っている `editing_group_path` のグループが存在しなくなった場合は親階層へ戻す
@@ -577,6 +589,16 @@ impl FlashBrushApp {
                 .clone()
                 .with_layer_id(target_lid)
                 .with_group_path(new_path);
+            if let Some(mut binding) = cloned.symbol_instance {
+                if let Some(&(_, mapped_inst_gid)) =
+                    gid_map.iter().find(|&&(orig, _)| orig == binding.instance_gid)
+                {
+                    binding.instance_gid = mapped_inst_gid;
+                    cloned.symbol_instance = Some(binding);
+                } else {
+                    cloned.symbol_instance = None;
+                }
+            }
             if offset != KVec2::ZERO {
                 cloned.translate(offset);
             }

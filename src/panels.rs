@@ -16,6 +16,7 @@ pub(crate) mod icons {
     pub(crate) const ROTATE_RIGHT: &str = "\u{e41a}"; // rotate_right (+90°回転)
     pub(crate) const PIVOT_RESET: &str = "\u{e3b4}";  // center_focus_strong (ピボットリセット)
     pub(crate) const GROUP: &str = "\u{e1bd}";        // widgets (グループ表示)
+    pub(crate) const SYMBOL: &str = "\u{e87b}";       // extension (シンボル表示)
     pub(crate) const WIREFRAME: &str = "\u{e922}";    // timeline (アンカー・パス表示)
     pub(crate) const DELETE: &str = "\u{e872}";       // delete (削除)
     pub(crate) const SCENE_MOVIE: &str = "\u{e02c}";  // movie (シーンアイコン)
@@ -181,10 +182,20 @@ impl FlashBrushApp {
 
     fn draw_group_breadcrumb(&mut self, ui: &mut egui::Ui) {
         let mut crumb = format!("{} シーン 1", icons::SCENE_MOVIE);
+        for sess in &self.symbol_edit_stack {
+            let sym_name = self
+                .timeline
+                .library
+                .iter()
+                .find(|s| s.id == sess.symbol_id)
+                .map(|s| s.name.as_str())
+                .unwrap_or(&sess.symbol_name);
+            crumb.push_str(&format!(" > {} {sym_name}", icons::SYMBOL));
+        }
         for &gid in &self.editing_group_path {
             crumb.push_str(&format!(" > {} Group #{gid}", icons::GROUP));
         }
-        if self.editing_group_path.is_empty() {
+        if self.symbol_edit_stack.is_empty() && self.editing_group_path.is_empty() {
             ui.label(crumb);
         } else {
             ui.colored_label(Color32::from_rgb(0, 120, 215), crumb);
@@ -348,6 +359,40 @@ impl FlashBrushApp {
         {
             self.show_wireframe = !self.show_wireframe;
         }
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        ui.label(
+            egui::RichText::new("シンボル・グループ")
+                .size(11.5)
+                .strong()
+                .color(Color32::from_rgb(55, 62, 74)),
+        );
+        ui.add_space(4.0);
+
+        let has_sel = !self.selected_shapes.is_empty();
+        if ui
+            .add_enabled(
+                has_sel,
+                egui::Button::new(format!("{} シンボルに変換 (F8)", icons::SYMBOL))
+                    .min_size(Vec2::new(ui.available_width(), 28.0)),
+            )
+            .on_hover_text("選択中の図形をシンボルに変換してライブラリに登録します (F8)")
+            .clicked()
+        {
+            self.convert_selection_to_symbol();
+        }
+
+        if let Some((_, sym_name)) = self.selected_single_symbol_info() {
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(format!("{} 選択中: {sym_name}", icons::SYMBOL))
+                    .size(11.5)
+                    .color(Color32::from_rgb(0, 120, 215)),
+            );
+        }
     }
 
     /// 自由変形ツール (`Tool::Transform`) のプロパティ設定項目
@@ -485,13 +530,175 @@ impl FlashBrushApp {
         );
     }
 
-    /// 「ライブラリ」タブの描画（仮）
+    /// 「ライブラリ」タブの描画（シンボルのプレビュー・一覧・名前変更・ステージ配置・削除）
     fn draw_library_tab(&mut self, ui: &mut egui::Ui) {
+        let has_sel = !self.selected_shapes.is_empty();
+        if ui
+            .add_enabled(
+                has_sel,
+                egui::Button::new(format!("{} 選択図形をシンボル化 (F8)", icons::ADD))
+                    .min_size(Vec2::new(ui.available_width(), 28.0)),
+            )
+            .on_hover_text("キャンバスで選択中の図形を新しいシンボルとして登録 (F8)")
+            .clicked()
+        {
+            self.convert_selection_to_symbol();
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        if self.timeline.library.is_empty() {
+            ui.label(
+                egui::RichText::new(
+                    "シンボルがありません。\n図形を選択して F8 キーを押すとシンボルを作成できます。",
+                )
+                .size(11.5)
+                .color(Color32::from_rgb(115, 122, 135)),
+            );
+            return;
+        }
+
+        if self.timeline.selected_library_symbol.is_none()
+            || !self
+                .timeline
+                .library
+                .iter()
+                .any(|s| Some(s.id) == self.timeline.selected_library_symbol)
+        {
+            self.timeline.selected_library_symbol = self.timeline.library.first().map(|s| s.id);
+        }
+
+        // 選択中のシンボルのミニプレビュー描画領域
+        if let Some(sel_id) = self.timeline.selected_library_symbol {
+            if let Some(sym) = self.timeline.library.iter().find(|s| s.id == sel_id) {
+                let preview_shapes = sym.evaluated_local_shapes_at(sym.current_frame, false);
+                self.draw_symbol_mini_preview(ui, &preview_shapes);
+                ui.add_space(6.0);
+            }
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let place_w = ui.available_width() - 66.0;
+                if ui
+                    .add_sized(
+                        Vec2::new(place_w.max(80.0), 28.0),
+                        egui::Button::new(format!("{} ステージに配置", icons::ADD)),
+                    )
+                    .on_hover_text("選択中のシンボルを現在のフレーム・レイヤーに配置します")
+                    .clicked()
+                {
+                    self.place_symbol_instance_from_library(sel_id);
+                }
+                if ui
+                    .add_sized(
+                        Vec2::new(60.0, 28.0),
+                        egui::Button::new(format!("{} 削除", icons::DELETE)),
+                    )
+                    .on_hover_text("選択中のシンボルをライブラリから削除します")
+                    .clicked()
+                {
+                    self.delete_symbol_from_library(sel_id);
+                }
+            });
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+        }
+
         ui.label(
-            egui::RichText::new("▼ ライブラリ (仮)")
-                .size(12.0)
+            egui::RichText::new(format!("登録シンボル一覧 ({})", self.timeline.library.len()))
+                .size(11.5)
                 .strong()
-                .color(Color32::from_rgb(45, 50, 60)),
+                .color(Color32::from_rgb(55, 62, 74)),
         );
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for sym in &mut self.timeline.library {
+                    let is_sel = self.timeline.selected_library_symbol == Some(sym.id);
+                    let row_fill = if is_sel {
+                        Color32::from_rgb(220, 234, 252)
+                    } else {
+                        Color32::from_rgb(252, 253, 255)
+                    };
+                    egui::Frame::none()
+                        .fill(row_fill)
+                        .stroke(Stroke::new(
+                            1.0,
+                            if is_sel {
+                                Color32::from_rgb(0, 125, 230)
+                            } else {
+                                Color32::from_rgb(218, 222, 230)
+                            },
+                        ))
+                        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .selectable_label(
+                                        is_sel,
+                                        egui::RichText::new(icons::SYMBOL)
+                                            .size(15.0)
+                                            .color(Color32::from_rgb(0, 130, 220)),
+                                    )
+                                    .on_hover_text("クリックして選択")
+                                    .clicked()
+                                {
+                                    self.timeline.selected_library_symbol = Some(sym.id);
+                                }
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut sym.name)
+                                        .desired_width(ui.available_width()),
+                                );
+                                if resp.clicked() || resp.gained_focus() {
+                                    self.timeline.selected_library_symbol = Some(sym.id);
+                                }
+                            });
+                        });
+                    ui.add_space(3.0);
+                }
+            });
+    }
+
+    /// ライブラリパネル上部にシンボルの縮小ベクタープレビューを描画する
+    fn draw_symbol_mini_preview(&self, ui: &mut egui::Ui, shapes: &[crate::vector_engine::FillShape]) {
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 110.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(252, 252, 254));
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::from_rgb(206, 212, 222)));
+
+        if shapes.is_empty() {
+            return;
+        }
+        let mut bbox = shapes[0].bounding_box();
+        for s in &shapes[1..] {
+            bbox = bbox.union(s.bounding_box());
+        }
+        let w = (bbox.x1 - bbox.x0).max(1.0) as f32;
+        let h = (bbox.y1 - bbox.y0).max(1.0) as f32;
+        let pad = 14.0;
+        let avail_w = (rect.width() - pad * 2.0).max(10.0);
+        let avail_h = (rect.height() - pad * 2.0).max(10.0);
+        let scale = (avail_w / w).min(avail_h / h).clamp(0.05, 4.0);
+        let cx = ((bbox.x0 + bbox.x1) * 0.5) as f32;
+        let cy = ((bbox.y0 + bbox.y1) * 0.5) as f32;
+        let pan = rect.center().to_vec2() - Vec2::new(cx * scale, cy * scale);
+
+        for s in shapes {
+            let mesh =
+                crate::vector_engine::transform_mesh_to_screen(&s.fill_mesh, scale, pan, false);
+            painter.add(egui::Shape::mesh(mesh));
+        }
+
+        // 中心基準点 `+` マーク
+        let origin_scr = egui::Pos2::new(pan.x, pan.y);
+        if rect.contains(origin_scr) {
+            crate::symbol::draw_registration_cross(&painter, origin_scr, 4.0, false);
+        }
     }
 }

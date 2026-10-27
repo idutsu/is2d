@@ -1,4 +1,5 @@
 use crate::{
+    symbol::SymbolDef,
     vector_engine::{
         append_mesh, transform_mesh_to_screen, transform_mesh_to_screen_onion, FillShape,
     },
@@ -341,10 +342,13 @@ impl Layer {
     }
 }
 
-/// レイヤー配列・現在のフレーム・FPS・再生制御・オニオンスキン設定・セル範囲選択を管理するタイムライン構造体
+/// レイヤー配列・現在のフレーム・FPS・再生制御・オニオンスキン設定・セル範囲選択・シンボルライブラリを管理するタイムライン構造体
 #[derive(Clone, Debug)]
 pub(crate) struct Timeline {
     pub(crate) layers: Vec<Layer>,
+    pub(crate) library: Vec<SymbolDef>,
+    pub(crate) next_symbol_id: u64,
+    pub(crate) selected_library_symbol: Option<u64>,
     pub(crate) current_frame: usize,
     pub(crate) active_layer: usize,
     pub(crate) total_frames: usize,
@@ -368,6 +372,9 @@ impl Default for Timeline {
     fn default() -> Self {
         Self {
             layers: vec![Layer::new_with_id(1, "Layer 1")],
+            library: Vec::new(),
+            next_symbol_id: 1,
+            selected_library_symbol: None,
             current_frame: 0,
             active_layer: 0,
             total_frames: 1,
@@ -464,6 +471,7 @@ impl Timeline {
                         s.mesh_revision == c_shape.mesh_revision
                             && s.color == c_shape.color
                             && s.group_path == c_shape.group_path
+                            && s.symbol_instance == c_shape.symbol_instance
                     })
                 }) && layer_iter.next().is_none();
                 if !unchanged {
@@ -511,7 +519,7 @@ impl Timeline {
 impl FlashBrushApp {
     /// タイムラインの構造変更前に、未確定のキャンバス選択スライスを確定解除し `self.shapes` を現在フレームのセルへ同期する
     /// （再生中の場合は古い `self.shapes` で現在フレームを上書きしないよう、再生停止して現在フレームの図形を読み込む）
-    fn flush_canvas_before_timeline_op(&mut self) {
+    pub(crate) fn flush_canvas_before_timeline_op(&mut self) {
         if self.timeline.is_playing {
             self.stop_playback();
         } else {
@@ -576,10 +584,11 @@ impl FlashBrushApp {
         }
         self.sort_shapes_by_layer_order();
         self.timeline.write_shapes_to_editable_cels(&self.shapes);
+        self.sync_active_symbol_edit();
     }
 
     /// 現在フレームにおける全ての「表示中かつ非ロック（`visible && !locked`）」レイヤーの `Cel` から
-    /// 背面レイヤー→前面レイヤーの順で `self.shapes` を一括読み込みする
+    /// 背面レイヤー→前面レイヤーの順で（シンボルの内部タイムラインフレームも評価しつつ）`self.shapes` を一括読み込みする
     pub(crate) fn load_shapes_from_timeline(&mut self) {
         let frame = self.timeline.current_frame;
         let mut loaded = Vec::new();
@@ -589,7 +598,10 @@ impl FlashBrushApp {
             }
             let lid = layer.id;
             if let Some(cel) = layer.cel_at(frame) {
-                loaded.extend(cel.shapes.iter().cloned().map(|s| s.with_layer_id(lid)));
+                let resolved = self
+                    .timeline
+                    .resolve_shapes_with_symbols(&cel.shapes, frame, false);
+                loaded.extend(resolved.into_iter().map(|s| s.with_layer_id(lid)));
             }
         }
         self.shapes = loaded;
@@ -1745,12 +1757,7 @@ impl FlashBrushApp {
         }
 
         if span_end > span_start {
-            let line_col = Color32::from_rgb(105, 114, 128);
             let end_mark_x = sx1 - CELL_W * 0.45;
-            grid_painter.line_segment(
-                [Pos2::new(kf_center.x + 5.5, kf_center.y), Pos2::new(end_mark_x - 3.0, kf_center.y)],
-                Stroke::new(1.2, line_col),
-            );
             let end_box = Rect::from_center_size(Pos2::new(end_mark_x, kf_center.y), Vec2::new(4.2, 8.5));
             grid_painter.rect_filled(end_box, 0.0, Color32::WHITE);
             grid_painter.rect_stroke(end_box, 0.0, Stroke::new(1.2, Color32::from_rgb(90, 98, 112)));

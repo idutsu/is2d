@@ -175,7 +175,15 @@ impl Contour {
     }
 }
 
-/// キャンバス上の1つの塗りシェイプ（色 + 外周2次ベジェ輪郭 + 穴の2次ベジェ輪郭リスト + 所属レイヤーID + グループ階層 + 描画・判定キャッシュ）
+/// シンボルインスタンスに属するシェイプが持つ紐付け情報（インスタンスのグループID、ライブラリ内のシンボル定義ID、ローカル基準点 `(0, 0)` からワールド座標へのアフィン変換）
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SymbolInstanceBinding {
+    pub(crate) instance_gid: u64,
+    pub(crate) symbol_id: u64,
+    pub(crate) xform: Affine,
+}
+
+/// キャンバス上の1つの塗りシェイプ（色 + 外周2次ベジェ輪郭 + 穴の2次ベジェ輪郭リスト + 所属レイヤーID + グループ階層 + シンボル紐付け + 描画・判定キャッシュ）
 #[derive(Clone, Debug)]
 pub(crate) struct FillShape {
     pub(crate) color: Color32,
@@ -185,6 +193,8 @@ pub(crate) struct FillShape {
     pub(crate) layer_id: u64,
     /// 外側のグループIDから内側のグループIDへの階層パス（空 `[]` ならルート階層の生シェイプ）
     pub(crate) group_path: Vec<u64>,
+    /// このシェイプがシンボルインスタンスに属する場合の紐付け情報
+    pub(crate) symbol_instance: Option<SymbolInstanceBinding>,
     /// メッシュ内容が更新されるたびにインクリメントされるリビジョン番号（セル結合メッシュキャッシュの差分検知用）
     pub(crate) mesh_revision: u64,
     bbox: KRect,
@@ -201,6 +211,7 @@ impl FillShape {
             holes,
             layer_id: 1,
             group_path: Vec::new(),
+            symbol_instance: None,
             mesh_revision: 0,
             bbox: KRect::ZERO,
             bez_path: BezPath::new(),
@@ -285,6 +296,9 @@ impl FillShape {
         for hole in &mut self.holes {
             hole.translate(delta);
         }
+        if let Some(binding) = &mut self.symbol_instance {
+            binding.xform = Affine::translate(delta) * binding.xform;
+        }
         self.bbox = self.bbox + delta;
         self.bez_path.apply_affine(kurbo::Affine::translate(delta));
         let d = egui::vec2(delta.x as f32, delta.y as f32);
@@ -303,6 +317,9 @@ impl FillShape {
         self.exterior.transform(affine);
         for hole in &mut self.holes {
             hole.transform(affine);
+        }
+        if let Some(binding) = &mut self.symbol_instance {
+            binding.xform = affine * binding.xform;
         }
         self.rebuild_cache();
     }

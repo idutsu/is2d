@@ -1,5 +1,6 @@
 mod canvas_tool;
 mod panels;
+mod symbol;
 mod timeline;
 mod tool_paint;
 mod tool_select;
@@ -13,6 +14,7 @@ use eframe::egui::{self, Color32, CursorIcon, Key, Pos2, Sense, Stroke, Vec2};
 use kurbo::Point;
 use lyon_tessellation::FillTessellator;
 use panels::PropertiesPanel;
+use symbol::SymbolEditSession;
 use timeline::Timeline;
 use vector_engine::FillShape;
 
@@ -104,8 +106,8 @@ pub(crate) struct FlashBrushApp {
     pub(crate) timeline: Timeline,
 
     pub(crate) shapes: Vec<FillShape>,
-    pub(crate) undo_stack: Vec<(Timeline, Vec<FillShape>)>,
-    pub(crate) redo_stack: Vec<(Timeline, Vec<FillShape>)>,
+    pub(crate) undo_stack: Vec<(Timeline, Vec<FillShape>, Vec<SymbolEditSession>)>,
+    pub(crate) redo_stack: Vec<(Timeline, Vec<FillShape>, Vec<SymbolEditSession>)>,
 
     pub(crate) active_stroke: Vec<Point>,
     pub(crate) active_raw_outline: Vec<Point>,
@@ -119,6 +121,8 @@ pub(crate) struct FlashBrushApp {
 
     /// 現在インプレイス編集で潜っているグループ階層のパス（空 `[]` ならルートシーン）
     pub(crate) editing_group_path: Vec<u64>,
+    /// シンボルをダブルクリックしてシンボル独自のタイムライン編集に入っている際の親シーン退避スタック
+    pub(crate) symbol_edit_stack: Vec<SymbolEditSession>,
     /// 新規グループ化時に採番する一意のグループIDカウンタ
     pub(crate) next_group_id: u64,
 
@@ -159,6 +163,7 @@ impl Default for FlashBrushApp {
             hover_target: HoverTarget::None,
             select_drag: SelectDragState::None,
             editing_group_path: Vec::new(),
+            symbol_edit_stack: Vec::new(),
             next_group_id: 1,
             clipboard: Vec::new(),
             paste_count: 0,
@@ -182,9 +187,15 @@ impl FlashBrushApp {
         tl
     }
 
-    fn restore_state_snapshot(&mut self, tl: Timeline, shapes: Vec<FillShape>) {
+    fn restore_state_snapshot(
+        &mut self,
+        tl: Timeline,
+        shapes: Vec<FillShape>,
+        sym_stack: Vec<SymbolEditSession>,
+    ) {
         self.timeline = tl;
         self.shapes = shapes;
+        self.symbol_edit_stack = sym_stack;
         self.select_drag = SelectDragState::None;
         self.transform_drag = TransformDragState::None;
         self.sanitize_editing_group_path();
@@ -193,7 +204,8 @@ impl FlashBrushApp {
     pub(crate) fn record_undo_snapshot(&mut self, snapshot: Vec<FillShape>) {
         let mut tl_snap = self.snapshot_timeline();
         tl_snap.write_shapes_to_editable_cels(&snapshot);
-        self.undo_stack.push((tl_snap, snapshot));
+        self.undo_stack
+            .push((tl_snap, snapshot, self.symbol_edit_stack.clone()));
         if self.undo_stack.len() > MAX_UNDO_HISTORY {
             self.undo_stack.remove(0);
         }
@@ -207,20 +219,28 @@ impl FlashBrushApp {
     pub(crate) fn undo(&mut self) {
         self.clear_selection();
         self.sync_shapes_to_timeline();
-        if let Some((prev_tl, prev_shapes)) = self.undo_stack.pop() {
-            let curr = (self.snapshot_timeline(), self.shapes.clone());
+        if let Some((prev_tl, prev_shapes, prev_stack)) = self.undo_stack.pop() {
+            let curr = (
+                self.snapshot_timeline(),
+                self.shapes.clone(),
+                self.symbol_edit_stack.clone(),
+            );
             self.redo_stack.push(curr);
-            self.restore_state_snapshot(prev_tl, prev_shapes);
+            self.restore_state_snapshot(prev_tl, prev_shapes, prev_stack);
         }
     }
 
     pub(crate) fn redo(&mut self) {
         self.clear_selection();
         self.sync_shapes_to_timeline();
-        if let Some((next_tl, next_shapes)) = self.redo_stack.pop() {
-            let curr = (self.snapshot_timeline(), self.shapes.clone());
+        if let Some((next_tl, next_shapes, next_stack)) = self.redo_stack.pop() {
+            let curr = (
+                self.snapshot_timeline(),
+                self.shapes.clone(),
+                self.symbol_edit_stack.clone(),
+            );
             self.undo_stack.push(curr);
-            self.restore_state_snapshot(next_tl, next_shapes);
+            self.restore_state_snapshot(next_tl, next_shapes, next_stack);
         }
     }
 
@@ -278,6 +298,8 @@ impl FlashBrushApp {
             }
         } else if i.key_pressed(Key::F7) {
             self.timeline_insert_keyframe(false);
+        } else if i.key_pressed(Key::F8) {
+            self.convert_selection_to_symbol();
         } else if i.key_pressed(Key::F5) {
             if shift {
                 self.timeline_remove_frame();

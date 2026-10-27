@@ -1496,3 +1496,77 @@
             "小さめの円の内周穴の横幅が勝手に丸められて狭まらないこと"
         );
     }
+
+    #[test]
+    fn test_symbol_conversion_library_placement_and_inplace_sync() {
+        let mut app = FlashBrushApp {
+            shapes: make_stroke(
+                Point::new(100.0, 150.0),
+                Point::new(200.0, 150.0),
+                16.0,
+                Color32::from_rgb(230, 80, 80),
+            ),
+            selected_shapes: vec![0],
+            ..Default::default()
+        };
+
+        // 1. F8 シンボル化で "Symbol 1" がライブラリに登録され、インスタンスになること
+        let sym_id = app
+            .convert_selection_to_symbol()
+            .expect("シンボル変換が成功すること");
+        assert_eq!(app.timeline.library.len(), 1);
+        assert_eq!(app.timeline.library[0].id, sym_id);
+        assert_eq!(app.timeline.library[0].name, "Symbol 1");
+        assert!(app.selected_single_symbol_info().is_some());
+
+        // 2. ライブラリからステージへ2つ目のインスタンスを配置できること
+        assert!(app.place_symbol_instance_from_library(sym_id));
+        assert_eq!(app.shapes.len(), 2);
+        assert_ne!(
+            app.shapes[0].symbol_instance.unwrap().instance_gid,
+            app.shapes[1].symbol_instance.unwrap().instance_gid
+        );
+
+        // 3. 1つ目のインスタンスをダブルクリックすると、シンボル専用のタイムラインへ切り替わること
+        assert!(app.enter_group_at(Point::new(150.0, 150.0)));
+        assert_eq!(app.symbol_edit_stack.len(), 1);
+        assert_eq!(app.timeline.total_frames, 1);
+
+        // シンボル内タイムラインで F6（複製キーフレーム）を押して2フレーム目を作成し、2フレーム目に帽子を描き足す
+        assert!(app.timeline_insert_keyframe(true));
+        assert_eq!(app.timeline.total_frames, 2);
+        assert_eq!(app.timeline.current_frame, 1);
+
+        let hat = make_stroke(
+            Point::new(120.0, 80.0),
+            Point::new(180.0, 80.0),
+            10.0,
+            Color32::from_rgb(50, 120, 240),
+        )
+        .remove(0);
+        app.shapes.push(hat);
+        app.sync_shapes_to_timeline();
+
+        // 4. シンボルから親シーン（シーン1）へ戻ると、シンボル内タイムライン（2フレーム）が保持され、
+        //    親シーンのフレーム進行に合わせてループ評価されること
+        assert!(app.exit_current_group());
+        assert!(app.symbol_edit_stack.is_empty());
+        assert_eq!(app.timeline.library[0].total_frames, 2);
+
+        // シーン1の尺を3フレームに延長（F5 x 2）
+        assert!(app.timeline_extend_frame());
+        assert!(app.timeline_extend_frame());
+        assert_eq!(app.timeline.total_frames, 3);
+
+        // フレーム0（シンボル内 0F = 1シェイプ × 2インスタンス = 2シェイプ）
+        app.switch_to_layer_and_frame(0, 0);
+        assert_eq!(app.shapes.len(), 2);
+
+        // フレーム1（シンボル内 1F = 2シェイプ × 2インスタンス = 4シェイプ）
+        app.switch_to_layer_and_frame(0, 1);
+        assert_eq!(app.shapes.len(), 4);
+
+        // フレーム2（ループしてシンボル内 0F = 1シェイプ × 2インスタンス = 2シェイプ）
+        app.switch_to_layer_and_frame(0, 2);
+        assert_eq!(app.shapes.len(), 2);
+    }

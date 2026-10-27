@@ -673,13 +673,21 @@ impl FlashBrushApp {
         let zoom = self.view_zoom;
         let pan = self.view_pan;
 
-        // 0. オニオンスキン描画（前のフレーム＝青系半透明、次のフレーム＝緑系半透明）
+        // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を薄暗く（インプレース背景）描画
+        if let Some(session) = self.symbol_edit_stack.last() {
+            for s in &session.backdrop_shapes {
+                let mesh = transform_mesh_to_screen(&s.fill_mesh, zoom, pan, true);
+                painter.add(egui::Shape::mesh(mesh));
+            }
+        }
+
+        // 0.5 オニオンスキン描画（前のフレーム＝青系半透明、次のフレーム＝緑系半透明）
         if self.timeline.onion_skin_enabled {
             self.draw_onion_skins(painter);
         }
 
         // 1. 下層レイヤーから上層レイヤーへ順に合成描画
-        let mut selected_group_boxes: Vec<(u64, KRect)> = Vec::new();
+        let mut selected_group_boxes: Vec<(u64, KRect, Option<Point>)> = Vec::new();
         let num_layers = self.timeline.layers.len();
         let curr_f = self.timeline.current_frame;
 
@@ -687,17 +695,16 @@ impl FlashBrushApp {
             if !self.timeline.layers[layer_idx].visible {
                 continue;
             }
-            // 再生中またはロック中レイヤーは、Cel 内の結合済みスクリーンキャッシュ Mesh を1ドローコールで高速描画
+            // 再生中またはロック中レイヤーは、Cel 内の結合済みスクリーンキャッシュ Mesh（複数フレームシンボルはフレーム評価込み）を描画
             if self.timeline.is_playing || self.timeline.layers[layer_idx].locked {
-                if let Some(cel) = self.timeline.layers[layer_idx].cel_at(curr_f) {
-                    if !cel.is_empty() {
-                        let mesh = cel.cached_screen_mesh(
-                            zoom,
-                            pan,
-                            in_group_edit && !self.timeline.is_playing,
-                        );
-                        painter.add(egui::Shape::mesh(mesh));
-                    }
+                if let Some(mesh) = self.timeline.resolved_cel_screen_mesh(
+                    layer_idx,
+                    curr_f,
+                    zoom,
+                    pan,
+                    in_group_edit && !self.timeline.is_playing,
+                ) {
+                    painter.add(egui::Shape::mesh(mesh));
                 }
                 continue;
             }
@@ -732,12 +739,16 @@ impl FlashBrushApp {
                         self.shapes[idx].active_group_id_at_scope(&self.editing_group_path)
                     {
                         let s_bbox = self.shapes[idx].bounding_box();
-                        if let Some((_, g_bbox)) =
-                            selected_group_boxes.iter_mut().find(|(id, _)| *id == gid)
+                        let sym_reg = self.shapes[idx]
+                            .symbol_instance
+                            .filter(|b| b.instance_gid == gid)
+                            .map(|b| b.xform * Point::ZERO);
+                        if let Some((_, g_bbox, _)) =
+                            selected_group_boxes.iter_mut().find(|(id, _, _)| *id == gid)
                         {
                             *g_bbox = g_bbox.union(s_bbox);
                         } else {
-                            selected_group_boxes.push((gid, s_bbox));
+                            selected_group_boxes.push((gid, s_bbox, sym_reg));
                         }
                     } else {
                         self.draw_flash_selection_overlay(painter, idx);
@@ -746,17 +757,39 @@ impl FlashBrushApp {
             }
         }
 
-        // 選択中のグループ塊のバウンディングボックス枠（Adobe Animate 風の水色グループ枠）を描画
-        for (_, g_bbox) in selected_group_boxes {
+        // 選択中のグループ塊（緑枠）およびシンボルインスタンス（水色枠＋基準点 `＋` マーク）を描画
+        for (_, g_bbox, sym_reg) in selected_group_boxes {
             let min_pos =
                 self.world_to_screen(Point::new(g_bbox.x0, g_bbox.y0)) - Vec2::splat(2.0);
             let max_pos =
                 self.world_to_screen(Point::new(g_bbox.x1, g_bbox.y1)) + Vec2::splat(2.0);
             let rect = egui::Rect::from_min_max(min_pos, max_pos);
-            painter.rect_stroke(
-                rect,
-                0.0,
-                Stroke::new(1.8, Color32::from_rgb(0, 165, 255)),
+            if let Some(origin) = sym_reg {
+                let cyan = Color32::from_rgb(0, 165, 255);
+                painter.rect_stroke(rect, 0.0, Stroke::new(1.8, cyan));
+                crate::symbol::draw_registration_cross(
+                    painter,
+                    self.world_to_screen(origin),
+                    3.2,
+                    true,
+                );
+            } else {
+                painter.rect_stroke(
+                    rect,
+                    0.0,
+                    Stroke::new(1.8, Color32::from_rgb(30, 185, 95)),
+                );
+            }
+        }
+
+        // シンボル内部タイムライン編集中は、シンボルの基準点 `(0, 0)` に常時 `+` クロスヘアを表示
+        if let Some(session) = self.symbol_edit_stack.last() {
+            let origin = session.instance_xform * Point::ZERO;
+            crate::symbol::draw_registration_cross(
+                painter,
+                self.world_to_screen(origin),
+                5.5,
+                true,
             );
         }
 
@@ -794,15 +827,15 @@ impl FlashBrushApp {
     ) {
         let zoom = self.view_zoom;
         let pan = self.view_pan;
-        for layer in &self.timeline.layers {
+        for (layer_idx, layer) in self.timeline.layers.iter().enumerate() {
             if !layer.visible {
                 continue;
             }
-            if let Some(cel) = layer.cel_at(frame) {
-                if !cel.is_empty() {
-                    let mesh = cel.cached_onion_mesh(zoom, pan, tint_rgb, alpha);
-                    painter.add(egui::Shape::mesh(mesh));
-                }
+            if let Some(mesh) =
+                self.timeline
+                    .resolved_cel_onion_mesh(layer_idx, frame, zoom, pan, tint_rgb, alpha)
+            {
+                painter.add(egui::Shape::mesh(mesh));
             }
         }
     }

@@ -1,6 +1,6 @@
 # `src/` ディレクトリ構成・各ファイルの役割
 
-`animelite` のソースコードは、UIパネル・ツール操作・ベクター幾何演算・タイムライン・テストの役割ごとに以下の **9ファイル** に分割されています。
+`animelite` のソースコードは、UIパネル・ツール操作・ベクター幾何演算・タイムライン・シンボル管理・テストの役割ごとに以下の **10ファイル** に分割されています。
 
 ---
 
@@ -15,8 +15,9 @@
 | **[`tool_select.rs`](file:///Users/dskzts/animelite/src/tool_select.rs)** | **選択ツール（`V`）**、マーキー範囲選択（部分スライス）、輪郭の粘土変形（Reshape）、アンカー追加/削除、グループ編集、コピー＆ペースト |
 | **[`tool_transform.rs`](file:///Users/dskzts/animelite/src/tool_transform.rs)** | **自由変形ツール（`Q`）**、8方向バウンディングボックス拡大縮小、回転、ピボット移動、反転 |
 | **[`timeline.rs`](file:///Users/dskzts/animelite/src/timeline.rs)** | **タイムライン（X-Sheet）**、レイヤー・キーフレーム管理、3段階メッシュキャッシュ＆ゼロコピー再生、タイムラインUI描画 |
+| **[`symbol.rs`](file:///Users/dskzts/animelite/src/symbol.rs)** | **シンボル＆ライブラリ＆シンボル内タイムライン**（`F8` シンボル化、ライブラリ配置・削除、インプレイスタイムライン編集、ループ評価） |
 | **[`vector_engine.rs`](file:///Users/dskzts/animelite/src/vector_engine.rs)** | **2Dベクター幾何エンジン**（`FillShape` / `Contour`）、ストローク生成・ベジェ曲線フィット、ブーリアン演算（結合・切り抜き・閉領域検出）、三角形分割 |
-| **[`tests.rs`](file:///Users/dskzts/animelite/src/tests.rs)** | 全機能の自動ユニットテスト（19件） |
+| **[`tests.rs`](file:///Users/dskzts/animelite/src/tests.rs)** | 全機能の自動ユニットテスト（20件） |
 
 ---
 
@@ -111,9 +112,21 @@ Adobe Animate 準拠の周辺パネルUIを担当します。
 
 ---
 
-### 8. [`vector_engine.rs`](file:///Users/dskzts/animelite/src/vector_engine.rs) — 2Dベクター幾何・曲線フィット・ブーリアン演算エンジン
+### 8. [`symbol.rs`](file:///Users/dskzts/animelite/src/symbol.rs) — シンボル・ライブラリ・シンボル内タイムライン
+- **データ構造**：
+  - `SymbolDef`：ライブラリに登録されるシンボル定義（中心 `(0, 0)` 基準のローカル座標で独自タイムライン `layers` / `total_frames` を保持）
+  - `SymbolEditSession`：シンボルをダブルクリックしてインプレイス編集する際の親シーン退避セッション
+- **シンボル変換・ライブラリ操作**：
+  - `convert_selection_to_symbol` (`F8`) / `place_symbol_instance_from_library` / `delete_symbol_from_library` / `selected_single_symbol_info`
+- **シンボル内タイムライン編集＆ループ評価**：
+  - `enter_symbol_timeline` / `exit_symbol_timeline` / `sync_active_symbol_edit` / `refresh_symbol_instances_in_timeline`
+  - `resolve_shapes_with_symbols` / `resolved_cel_screen_mesh` / `resolved_cel_onion_mesh`：親タイムラインのフレームに応じたシンボル内部フレームのループ評価（`frame % sym.total_frames`）
+
+---
+
+### 9. [`vector_engine.rs`](file:///Users/dskzts/animelite/src/vector_engine.rs) — 2Dベクター幾何・曲線フィット・ブーリアン演算エンジン
 - **図形データ構造**：
-  - `FillShape`, `Contour`, `PathSegment`（2次ベジェ曲線セグメント、外周と穴の輪郭、所属レイヤーID、グループパス、ローカル三角形メッシュキャッシュ、`mesh_revision`）
+  - `FillShape`, `Contour`, `PathSegment`, `SymbolInstanceBinding`（2次ベジェ曲線セグメント、外周と穴の輪郭、所属レイヤーID、グループパス、シンボルインスタンス紐付け、ローカル三角形メッシュキャッシュ、`mesh_revision`）
 - **ストローク生成＆ベジェ曲線スムージング**：
   - `generate_brush_outline_at_zoom` / `build_smoothed_stroke_shapes_at_zoom`：手描き点列から一定幅の輪郭を生成し、丸端キャップの保持とG1連続ベジェ曲線フィッティングを実行
 - **ブーリアン演算（`i_overlay`）＆三角形分割（`lyon_tessellation`）**：
@@ -122,5 +135,5 @@ Adobe Animate 準拠の周辺パネルUIを担当します。
 
 ---
 
-### 9. [`tests.rs`](file:///Users/dskzts/animelite/src/tests.rs) — ユニットテストスイート
-- `cargo test` で実行される全19件のユニットテスト（ストローク一定幅、丸端キャップ、同色結合・異色切り抜き、エッジ貫通分割、アンカー追加/削除、バケツ閉領域塗り、マーキー部分スライス、自由変形、スポイト、ネストグループ、ズーム、コピペ、タイムライン操作など）を収録しています。
+### 10. [`tests.rs`](file:///Users/dskzts/animelite/src/tests.rs) — ユニットテストスイート
+- `cargo test` で実行される全20件のユニットテスト（ストローク一定幅、丸端キャップ、同色結合・異色切り抜き、エッジ貫通分割、アンカー追加/削除、バケツ閉領域塗り、マーキー部分スライス、自由変形、スポイト、ネストグループ、ズーム、コピペ、タイムライン操作、シンボル変換・独自タイムライン同期など）を収録しています。
