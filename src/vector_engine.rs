@@ -175,12 +175,26 @@ impl Contour {
     }
 }
 
-/// シンボルインスタンスに属するシェイプが持つ紐付け情報（インスタンスのグループID、ライブラリ内のシンボル定義ID、ローカル基準点 `(0, 0)` からワールド座標へのアフィン変換）
+/// シンボルインスタンスのフレーム再生モード（Adobe Animate のグラフィックシンボル相当）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum SymbolLoopMode {
+    /// ループ再生：キーフレーム開始位置からシンボル内部フレームを繰り返し再生する
+    #[default]
+    Loop,
+    /// 1回再生：キーフレーム開始位置からシンボル内部の最終フレームまで再生して停止する
+    PlayOnce,
+    /// 任意のフレーム：指定された `first_frame` の1コマだけを固定表示する
+    SingleFrame,
+}
+
+/// シンボルインスタンスに属するシェイプが持つ紐付け情報（インスタンスのグループID、ライブラリ内のシンボル定義ID、ローカル基準点 `(0, 0)` からワールド座標へのアフィン変換、再生モード、開始/指定フレーム）
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SymbolInstanceBinding {
     pub(crate) instance_gid: u64,
     pub(crate) symbol_id: u64,
     pub(crate) xform: Affine,
+    pub(crate) loop_mode: SymbolLoopMode,
+    pub(crate) first_frame: usize,
 }
 
 /// キャンバス上の1つの塗りシェイプ（色 + 外周2次ベジェ輪郭 + 穴の2次ベジェ輪郭リスト + 所属レイヤーID + グループ階層 + シンボル紐付け + 描画・判定キャッシュ）

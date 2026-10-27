@@ -5,7 +5,7 @@ use crate::canvas_tool::Tool;
 use crate::timeline::{Cel, Layer, Timeline, TimelineCellSelection, TimelineGridDrag};
 use crate::vector_engine::{
     append_mesh, interpolate_affine, transform_mesh_to_screen, transform_mesh_to_screen_onion,
-    FillShape, SymbolInstanceBinding,
+    FillShape, SymbolInstanceBinding, SymbolLoopMode,
 };
 use crate::FlashBrushApp;
 
@@ -103,6 +103,8 @@ impl Layer {
                         instance_gid: start_binding.instance_gid,
                         symbol_id: start_binding.symbol_id,
                         xform: interp_xform,
+                        loop_mode: start_binding.loop_mode,
+                        first_frame: start_binding.first_frame,
                     },
                 ))
             }
@@ -238,6 +240,37 @@ impl SymbolDef {
         out
     }
 
+    /// インスタンスの再生設定（`binding.loop_mode`, `binding.first_frame`）とキーフレーム開始フレーム `kf_start_frame`、
+    /// 現在の親フレーム `current_frame` から、評価すべきシンボル内部フレーム番号（`0..total_frames`）を算出する
+    pub(crate) fn resolve_internal_frame(
+        &self,
+        binding: SymbolInstanceBinding,
+        kf_start_frame: usize,
+        current_frame: usize,
+    ) -> usize {
+        let fc = self.total_frames.max(1);
+        let base = binding.first_frame.min(fc - 1);
+        let elapsed = current_frame.saturating_sub(kf_start_frame);
+        match binding.loop_mode {
+            SymbolLoopMode::Loop => (base + elapsed) % fc,
+            SymbolLoopMode::PlayOnce => (base + elapsed).min(fc - 1),
+            SymbolLoopMode::SingleFrame => base,
+        }
+    }
+
+    /// インスタンスの再生設定（ループ再生 / 1回再生 / 任意のフレーム）に基づいて、
+    /// 指定フレーム `current_frame`（開始キーフレーム `kf_start_frame`）でのローカル図形列を返す
+    pub(crate) fn evaluated_local_shapes_for_instance(
+        &self,
+        binding: SymbolInstanceBinding,
+        kf_start_frame: usize,
+        current_frame: usize,
+        allow_empty: bool,
+    ) -> Vec<FillShape> {
+        let internal_frame = self.resolve_internal_frame(binding, kf_start_frame, current_frame);
+        self.evaluated_local_shapes_at(internal_frame, allow_empty)
+    }
+
     /// 指定されたフレーム番号 `offset_frame` に対応するシンボル内部フレーム（`offset_frame % total_frames` でループ評価）の
     /// 全可視レイヤーのローカル図形列（背面→前面順）を返す
     pub(crate) fn evaluated_local_shapes_at(
@@ -300,10 +333,12 @@ impl Timeline {
         })
     }
 
-    /// 指定フレーム `frame` において、各シンボルインスタンスの内部タイムライン（`frame % sym.total_frames`）を評価して展開した図形列を返す
+    /// 指定フレーム `frame`（開始キーフレーム `kf_start_frame`）において、各シンボルインスタンスの内部タイムラインを
+    /// インスタンスごとの再生モード（ループ再生 / 1回再生 / 任意のフレーム）で評価して展開した図形列を返す
     pub(crate) fn resolve_shapes_with_symbols(
         &self,
         raw_shapes: &[FillShape],
+        kf_start_frame: usize,
         frame: usize,
         allow_empty: bool,
     ) -> Vec<FillShape> {
@@ -330,7 +365,8 @@ impl Timeline {
             };
 
             let parent_scope = b.parent_scope_from_path(&shape.group_path);
-            let local_shapes = sym.evaluated_local_shapes_at(frame, allow_empty);
+            let local_shapes =
+                sym.evaluated_local_shapes_for_instance(b, kf_start_frame, frame, allow_empty);
             out.extend(b.instantiate_shapes(&local_shapes, shape.layer_id, parent_scope));
         }
         out
@@ -346,14 +382,22 @@ impl Timeline {
         let Some(layer) = self.layers.get(layer_idx) else {
             return Vec::new();
         };
-        let Some(cel) = layer.cel_at(frame) else {
+        let Some(kf_idx) = layer.keyframe_index_at(frame) else {
             return Vec::new();
         };
+        let kf = &layer.keyframes[kf_idx];
+        let cel = &kf.cel;
+        let kf_start_frame = kf.start_frame;
         let lid = layer.id;
 
         if let Some((start_b, interp_b)) = layer.interpolated_tween_binding_at(frame) {
             if let Some(sym) = self.library.iter().find(|s| s.id == interp_b.symbol_id) {
-                let local_shapes = sym.evaluated_local_shapes_at(frame, allow_empty);
+                let local_shapes = sym.evaluated_local_shapes_for_instance(
+                    interp_b,
+                    kf_start_frame,
+                    frame,
+                    allow_empty,
+                );
                 return interp_b.instantiate_shapes(&local_shapes, lid, &[]);
             }
             let delta = if start_b.xform.determinant().abs() > 1e-9 {
@@ -373,7 +417,7 @@ impl Timeline {
                 .collect();
         }
 
-        self.resolve_shapes_with_symbols(&cel.shapes, frame, allow_empty)
+        self.resolve_shapes_with_symbols(&cel.shapes, kf_start_frame, frame, allow_empty)
             .into_iter()
             .map(|s| s.with_layer_id(lid))
             .collect()
@@ -504,6 +548,8 @@ impl FlashBrushApp {
             instance_gid: inst_gid,
             symbol_id: sym_id,
             xform: Affine::translate(KVec2::new(center.x, center.y)),
+            loop_mode: SymbolLoopMode::Loop,
+            first_frame: 0,
         };
         for &idx in &valid_indices {
             if let Some(shape) = self.shapes.get_mut(idx) {
@@ -538,7 +584,7 @@ impl FlashBrushApp {
             .library
             .iter()
             .find(|s| s.id == symbol_id)
-            .map(|s| s.evaluated_local_shapes_at(self.timeline.current_frame, false))
+            .map(|s| s.evaluated_local_shapes_at(0, false))
         else {
             return false;
         };
@@ -556,6 +602,8 @@ impl FlashBrushApp {
             instance_gid: inst_gid,
             symbol_id,
             xform: Affine::translate(KVec2::new(stage_center.x, stage_center.y)),
+            loop_mode: SymbolLoopMode::Loop,
+            first_frame: 0,
         };
         let target_lid = self.active_scope_layer_id();
         let placed = binding.instantiate_shapes(&sym_shapes, target_lid, &self.editing_group_path);
@@ -671,8 +719,10 @@ impl FlashBrushApp {
         changed
     }
 
-    /// 現在選択されている図形が単一のシンボルインスタンスである場合、その `(SymbolInstanceBinding, シンボル名)` を返す
-    pub(crate) fn selected_single_symbol_info(&self) -> Option<(SymbolInstanceBinding, String)> {
+    /// 現在選択されている図形が単一のシンボルインスタンスである場合、その `(SymbolInstanceBinding, シンボル名, シンボル総フレーム数)` を返す
+    pub(crate) fn selected_single_symbol_info(
+        &self,
+    ) -> Option<(SymbolInstanceBinding, String, usize)> {
         if self.selected_shapes.is_empty() {
             return None;
         }
@@ -686,13 +736,106 @@ impl FlashBrushApp {
         if !all_same {
             return None;
         }
-        let name = self
+        let sym = self
             .timeline
             .library
             .iter()
-            .find(|sym| sym.id == first_binding.symbol_id)
-            .map(|sym| sym.name.clone())?;
-        Some((first_binding, name))
+            .find(|sym| sym.id == first_binding.symbol_id)?;
+        Some((first_binding, sym.name.clone(), sym.total_frames.max(1)))
+    }
+
+    /// 現在選択されている単一シンボルインスタンスの再生モード（ループ再生 / 1回再生 / 任意のフレーム）および
+    /// 開始/指定フレーム番号（0始まり）を更新し、現在フレームのキャンバス表示と選択状態を即時反映する
+    pub(crate) fn set_selected_symbol_playback(
+        &mut self,
+        loop_mode: SymbolLoopMode,
+        first_frame: usize,
+    ) -> bool {
+        let Some((binding, _, total_frames)) = self.selected_single_symbol_info() else {
+            return false;
+        };
+        let clamped_first = first_frame.min(total_frames.saturating_sub(1));
+        if binding.loop_mode == loop_mode && binding.first_frame == clamped_first {
+            return false;
+        }
+
+        let inst_gid = binding.instance_gid;
+        let sym_id = binding.symbol_id;
+        self.clear_selection();
+        self.sync_shapes_to_timeline();
+        self.push_undo();
+
+        let Some(sym_def) = self
+            .timeline
+            .library
+            .iter()
+            .find(|s| s.id == sym_id)
+            .cloned()
+        else {
+            return false;
+        };
+
+        let curr_f = self.timeline.current_frame;
+        let mut updated = false;
+        for layer in &mut self.timeline.layers {
+            if !layer.visible || layer.locked {
+                continue;
+            }
+            let Some(kf_idx) = layer.keyframe_index_at(curr_f) else {
+                continue;
+            };
+            let kf = &mut layer.keyframes[kf_idx];
+            if !kf
+                .cel
+                .shapes
+                .iter()
+                .any(|s| s.symbol_instance.is_some_and(|b| b.instance_gid == inst_gid))
+            {
+                continue;
+            }
+
+            let mut rebuilt = Vec::with_capacity(kf.cel.shapes.len());
+            let mut processed = false;
+            for shape in kf.cel.shapes.drain(..) {
+                let Some(mut b) = shape
+                    .symbol_instance
+                    .filter(|b| b.instance_gid == inst_gid)
+                else {
+                    rebuilt.push(shape);
+                    continue;
+                };
+                if processed {
+                    continue;
+                }
+                processed = true;
+                b.loop_mode = loop_mode;
+                b.first_frame = clamped_first;
+                let parent_scope = b.parent_scope_from_path(&shape.group_path);
+                let template_shapes = sym_def.evaluated_local_shapes_for_instance(
+                    b,
+                    kf.start_frame,
+                    kf.start_frame,
+                    false,
+                );
+                rebuilt.extend(b.instantiate_shapes(&template_shapes, shape.layer_id, parent_scope));
+                updated = true;
+            }
+            kf.cel.shapes = rebuilt;
+        }
+
+        if updated {
+            self.sync_active_symbol_edit();
+            self.load_shapes_from_timeline();
+            self.selected_shapes = (0..self.shapes.len())
+                .filter(|&i| {
+                    self.shapes[i]
+                        .symbol_instance
+                        .is_some_and(|b| b.instance_gid == inst_gid)
+                })
+                .collect();
+            self.transform_pivot = None;
+        }
+        updated
     }
 
     /// シンボルインスタンスをダブルクリックして、そのシンボル専用の内部タイムライン編集モードへ入る
@@ -845,6 +988,7 @@ impl FlashBrushApp {
             let parent_f = session_mut.parent_timeline.current_frame;
             session_mut.backdrop_shapes = session_mut.parent_timeline.resolve_shapes_with_symbols(
                 &session_mut.backdrop_shapes,
+                0,
                 parent_f,
                 false,
             );
@@ -871,7 +1015,6 @@ impl FlashBrushApp {
                 if !has_sym {
                     continue;
                 }
-                let template_shapes = sym_def.evaluated_local_shapes_at(kf.start_frame, false);
                 let mut rebuilt = Vec::with_capacity(kf.cel.shapes.len());
                 let mut processed_gids: Vec<u64> = Vec::new();
                 for shape in kf.cel.shapes.drain(..) {
@@ -888,6 +1031,12 @@ impl FlashBrushApp {
                     processed_gids.push(b.instance_gid);
 
                     let parent_scope = b.parent_scope_from_path(&shape.group_path);
+                    let template_shapes = sym_def.evaluated_local_shapes_for_instance(
+                        b,
+                        kf.start_frame,
+                        kf.start_frame,
+                        false,
+                    );
                     rebuilt.extend(b.instantiate_shapes(
                         &template_shapes,
                         shape.layer_id,

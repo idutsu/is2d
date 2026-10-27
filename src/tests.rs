@@ -1678,3 +1678,81 @@
         assert!((start_cx - 150.0).abs() < 1.0, "start_cx = {start_cx}");
         assert!((start_cy - 150.0).abs() < 1.0, "start_cy = {start_cy}");
     }
+
+    #[test]
+    fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
+        use crate::vector_engine::SymbolLoopMode;
+
+        let mut app = FlashBrushApp::default();
+
+        // 1. シンボルを作成し、内部を3フレーム構成にする（0F=赤、1F=緑、2F=青）
+        let red = Color32::from_rgb(220, 60, 60);
+        let green = Color32::from_rgb(60, 190, 90);
+        let blue = Color32::from_rgb(60, 110, 230);
+        app.shapes = make_stroke(Point::new(100.0, 100.0), Point::new(160.0, 100.0), 12.0, red);
+        app.selected_shapes = vec![0];
+        assert!(app.convert_selection_to_symbol().is_some());
+
+        let (binding, _, _) = app.selected_single_symbol_info().unwrap();
+        assert!(app.enter_symbol_timeline(binding));
+
+        // シンボル内部 1F（空白キーフレーム → 緑シェイプ）
+        assert!(app.timeline_extend_frame());
+        app.switch_to_layer_and_frame(0, 1);
+        assert!(app.timeline_insert_keyframe(false));
+        app.shapes = make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(160.0, 100.0),
+            12.0,
+            green,
+        );
+        app.sync_shapes_to_timeline();
+
+        // シンボル内部 2F（空白キーフレーム → 青シェイプ）
+        assert!(app.timeline_extend_frame());
+        app.switch_to_layer_and_frame(0, 2);
+        assert!(app.timeline_insert_keyframe(false));
+        app.shapes = make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(160.0, 100.0),
+            12.0,
+            blue,
+        );
+        app.sync_shapes_to_timeline();
+        assert_eq!(app.timeline.total_frames, 3);
+
+        // 親シーンへ戻る（5フレーム分の尺に延長: frame 0..=4）
+        assert!(app.exit_symbol_timeline());
+        for _ in 0..4 {
+            assert!(app.timeline_extend_frame());
+        }
+        assert_eq!(app.timeline.total_frames, 5);
+
+        // 2. デフォルト（Loop, first_frame = 0）: 0F=赤, 1F=緑, 2F=青, 3F=赤, 4F=緑
+        let expected_loop = [red, green, blue, red, green];
+        for (f, &col) in expected_loop.iter().enumerate() {
+            app.switch_to_layer_and_frame(0, f);
+            assert_eq!(app.shapes[0].color, col, "Loop mode at frame {f}");
+        }
+
+        // 3. 1回再生（PlayOnce, first_frame = 0）に変更: 0F=赤, 1F=緑, 2F=青, 3F=青, 4F=青
+        app.switch_to_layer_and_frame(0, 0);
+        app.selected_shapes = vec![0];
+        assert!(app.set_selected_symbol_playback(SymbolLoopMode::PlayOnce, 0));
+        let expected_once = [red, green, blue, blue, blue];
+        for (f, &col) in expected_once.iter().enumerate() {
+            app.switch_to_layer_and_frame(0, f);
+            assert_eq!(app.shapes[0].color, col, "PlayOnce mode at frame {f}");
+        }
+
+        // 4. 任意のフレーム（SingleFrame, first_frame = 1 [UI上は2フレーム目=緑]）に変更: 全フレームで緑
+        app.switch_to_layer_and_frame(0, 0);
+        app.selected_shapes = vec![0];
+        assert!(app.set_selected_symbol_playback(SymbolLoopMode::SingleFrame, 1));
+        assert_eq!(app.shapes[0].color, green);
+        assert_eq!(app.selected_shapes, vec![0]);
+        for f in 0..5 {
+            app.switch_to_layer_and_frame(0, f);
+            assert_eq!(app.shapes[0].color, green, "SingleFrame(1) at frame {f}");
+        }
+    }

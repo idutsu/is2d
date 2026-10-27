@@ -1,6 +1,7 @@
 use eframe::egui::{self, Color32, Stroke, Vec2};
 
 use crate::canvas_tool::{SelectSubMode, Tool};
+use crate::vector_engine::SymbolLoopMode;
 use crate::FlashBrushApp;
 
 // ============================================================================
@@ -385,13 +386,146 @@ impl FlashBrushApp {
             self.convert_selection_to_symbol();
         }
 
-        if let Some((_, sym_name)) = self.selected_single_symbol_info() {
-            ui.add_space(6.0);
+        self.draw_selected_symbol_properties(ui);
+    }
+
+    /// 単一のシンボルインスタンスが選択されているときにプロパティパネルに表示する再生オプション（1回再生 / ループ再生 / 任意のフレーム）
+    fn draw_selected_symbol_properties(&mut self, ui: &mut egui::Ui) {
+        let Some((binding, sym_name, sym_total_frames)) = self.selected_single_symbol_info() else {
+            return;
+        };
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new(format!("{} 選択中: {sym_name}", icons::SYMBOL))
+                egui::RichText::new(format!("{} {sym_name}", icons::SYMBOL))
                     .size(11.5)
+                    .strong()
                     .color(Color32::from_rgb(0, 120, 215)),
             );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("全 {sym_total_frames} f"))
+                        .size(10.5)
+                        .color(Color32::from_rgb(110, 118, 130)),
+                );
+            });
+        });
+
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("シンボル再生オプション")
+                .size(11.5)
+                .strong()
+                .color(Color32::from_rgb(55, 62, 74)),
+        );
+        ui.add_space(4.0);
+
+        let mut next_mode = binding.loop_mode;
+        let max_first_1based = sym_total_frames.max(1);
+        let current_first_1based = (binding.first_frame + 1).clamp(1, max_first_1based);
+        let mut next_first_1based = current_first_1based;
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let half_w = (ui.available_width() - 6.0) * 0.5;
+            if ui
+                .add_sized(
+                    Vec2::new(half_w, 26.0),
+                    egui::Button::new("ループ再生")
+                        .selected(binding.loop_mode == SymbolLoopMode::Loop),
+                )
+                .on_hover_text("キーフレーム開始位置からシンボル内部フレームをループ再生します")
+                .clicked()
+            {
+                next_mode = SymbolLoopMode::Loop;
+            }
+            if ui
+                .add_sized(
+                    Vec2::new(half_w, 26.0),
+                    egui::Button::new("1回再生")
+                        .selected(binding.loop_mode == SymbolLoopMode::PlayOnce),
+                )
+                .on_hover_text("キーフレーム開始位置からシンボル内部の最終フレームまで1回再生して停止します")
+                .clicked()
+            {
+                next_mode = SymbolLoopMode::PlayOnce;
+            }
+        });
+
+        ui.add_space(4.0);
+
+        if ui
+            .add_sized(
+                Vec2::new(ui.available_width(), 26.0),
+                egui::Button::new("任意のフレーム")
+                    .selected(binding.loop_mode == SymbolLoopMode::SingleFrame),
+            )
+            .on_hover_text("指定したシンボル内部フレーム（1コマ）を固定表示します")
+            .clicked()
+        {
+            next_mode = SymbolLoopMode::SingleFrame;
+        }
+
+        ui.add_space(6.0);
+
+        let frame_label = match next_mode {
+            SymbolLoopMode::SingleFrame => "表示フレーム:",
+            SymbolLoopMode::Loop | SymbolLoopMode::PlayOnce => "開始フレーム:",
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(
+                egui::RichText::new(frame_label)
+                    .size(11.0)
+                    .color(Color32::from_rgb(55, 62, 74)),
+            );
+            if ui
+                .add_enabled(
+                    next_first_1based > 1,
+                    egui::Button::new(icons::STEP_PREV).min_size(Vec2::new(22.0, 22.0)),
+                )
+                .on_hover_text("前のシンボル内フレーム")
+                .clicked()
+            {
+                next_first_1based = next_first_1based.saturating_sub(1).max(1);
+            }
+            ui.add_sized(
+                Vec2::new(56.0, 22.0),
+                egui::DragValue::new(&mut next_first_1based)
+                    .range(1..=max_first_1based)
+                    .speed(0.15)
+                    .suffix(" f"),
+            );
+            if ui
+                .add_enabled(
+                    next_first_1based < max_first_1based,
+                    egui::Button::new(icons::STEP_NEXT).min_size(Vec2::new(22.0, 22.0)),
+                )
+                .on_hover_text("次のシンボル内フレーム")
+                .clicked()
+            {
+                next_first_1based = (next_first_1based + 1).min(max_first_1based);
+            }
+        });
+
+        if next_mode != binding.loop_mode || next_first_1based != current_first_1based {
+            self.set_selected_symbol_playback(next_mode, next_first_1based.saturating_sub(1));
+        }
+
+        ui.add_space(6.0);
+        if ui
+            .add_sized(
+                Vec2::new(ui.available_width(), 26.0),
+                egui::Button::new(format!("{} シンボル編集に入る", icons::SYMBOL)),
+            )
+            .on_hover_text("ダブルクリックと同様にシンボル内部のタイムライン編集モードへ入ります")
+            .clicked()
+        {
+            self.enter_symbol_timeline(binding);
         }
     }
 
@@ -474,6 +608,8 @@ impl FlashBrushApp {
         {
             self.transform_pivot = None;
         }
+
+        self.draw_selected_symbol_properties(ui);
     }
 
     /// ブラシツール (`Tool::Brush`) のプロパティ設定項目
