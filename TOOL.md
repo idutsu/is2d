@@ -59,6 +59,15 @@ pub(crate) enum Tool {
 }
 ```
 
+### ツール関連ファイルの役割分担
+
+| ファイル | 役割 |
+| :--- | :--- |
+| **[`src/canvas_tool.rs`](file:///Users/dskzts/clay_canvas/src/canvas_tool.rs)** | `Tool` 列挙型、モード切替（`set_tool`）、ズーム/パン座標変換、ステージ＆オニオンスキン描画、カーソル表示 |
+| **[`src/tool_paint.rs`](file:///Users/dskzts/clay_canvas/src/tool_paint.rs)** | ブラシ（`B`）・消しゴム（`E`）・バケツ塗り（`K`）・スポイト（`I`）の操作ロジック |
+| **[`src/tool_select.rs`](file:///Users/dskzts/clay_canvas/src/tool_select.rs)** | 選択ツール（`V`）、マーキー部分スライス、輪郭変形（Reshape）、アンカー追加/削除、グループ・コピー＆ペースト |
+| **[`src/tool_transform.rs`](file:///Users/dskzts/clay_canvas/src/tool_transform.rs)** | 自由変形ツール（`Q`）、8方向拡大縮小、回転、ピボット移動、反転、バウンディングボックス描画 |
+
 ### `Tool` が持つメソッド一覧（[`src/canvas_tool.rs`](file:///Users/dskzts/clay_canvas/src/canvas_tool.rs)）
 - **`Tool::ALL`**：左ツールバーに並べる標準順序の配列。[`draw_left_main_tool_buttons`](file:///Users/dskzts/clay_canvas/src/panels.rs) がこの配列をループしてボタンを自動生成します。
 - **`tool.icon()`**：左ツールバーのボタンに表示するアイコン文字列を返します。
