@@ -232,8 +232,11 @@ impl FlashBrushApp {
     }
 
     fn draw_group_breadcrumb(&mut self, ui: &mut egui::Ui) {
-        let mut crumb = format!("{} シーン 1", icons::SCENE_MOVIE);
+        let mut items: Vec<String> = vec![format!("{} シーン 1", icons::SCENE_MOVIE)];
         for sess in &self.symbol_edit_stack {
+            for &gid in &sess.parent_editing_group_path {
+                items.push(format!("{} Group #{gid}", icons::GROUP));
+            }
             let sym_name = self
                 .timeline
                 .library
@@ -241,20 +244,52 @@ impl FlashBrushApp {
                 .find(|s| s.id == sess.symbol_id)
                 .map(|s| s.name.as_str())
                 .unwrap_or(&sess.symbol_name);
-            crumb.push_str(&format!(" > {} {sym_name}", icons::SYMBOL));
+            items.push(format!("{} {sym_name}", icons::SYMBOL));
         }
         for &gid in &self.editing_group_path {
-            crumb.push_str(&format!(" > {} Group #{gid}", icons::GROUP));
+            items.push(format!("{} Group #{gid}", icons::GROUP));
         }
-        if self.symbol_edit_stack.is_empty() && self.editing_group_path.is_empty() {
-            ui.label(crumb);
-        } else {
-            ui.colored_label(Color32::from_rgb(0, 120, 215), crumb);
-            if ui
-                .button(format!("{} 1階層出る", icons::ARROW_BACK))
-                .clicked()
-            {
-                self.exit_current_group();
+
+        if items.len() == 1 {
+            ui.label(&items[0]);
+            return;
+        }
+
+        if ui
+            .button(format!("{}", icons::ARROW_BACK))
+            .on_hover_text("1つ上の階層へ戻る (Esc)")
+            .clicked()
+        {
+            self.exit_current_group();
+            return;
+        }
+
+        let last_idx = items.len() - 1;
+        let mut exit_steps = 0usize;
+        for (idx, label) in items.iter().enumerate() {
+            if idx > 0 {
+                ui.label(
+                    egui::RichText::new("›")
+                        .size(12.0)
+                        .color(Color32::from_rgb(130, 138, 150)),
+                );
+            }
+            if idx < last_idx {
+                if ui
+                    .add(egui::Button::new(label).frame(false))
+                    .on_hover_text("クリックしてこの階層へ直接戻る")
+                    .clicked()
+                {
+                    exit_steps = last_idx - idx;
+                }
+            } else {
+                ui.colored_label(Color32::from_rgb(0, 120, 215), label);
+            }
+        }
+
+        for _ in 0..exit_steps {
+            if !self.exit_current_group() {
+                break;
             }
         }
     }
