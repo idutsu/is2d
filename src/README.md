@@ -1,6 +1,6 @@
 # `src/` ディレクトリ構成・各ファイルの役割
 
-`Clay Canvas` のソースコードは、UIパネル・ツール操作・ベクター幾何演算・タイムライン・テストの役割ごとに以下の **9ファイル** に分割されています。
+`animelite` のソースコードは、UIパネル・ツール操作・ベクター幾何演算・タイムライン・テストの役割ごとに以下の **9ファイル** に分割されています。
 
 ---
 
@@ -8,21 +8,21 @@
 
 | ファイル | 主な役割 |
 | :--- | :--- |
-| **[`main.rs`](file:///Users/dskzts/clay_canvas/src/main.rs)** | アプリ起動、フォント・テーマ設定、アプリ全体状態（`FlashBrushApp`）、Undo/Redo、ショートカット、メインループ |
-| **[`panels.rs`](file:///Users/dskzts/clay_canvas/src/panels.rs)** | 左端縦ツールバー、ステージ上部スリムバー、右端プロパティパネル（3タブ切り替え）、Material Icons 定数 |
-| **[`canvas_tool.rs`](file:///Users/dskzts/clay_canvas/src/canvas_tool.rs)** | `Tool` 列挙型、**ツールモード切り替え（`set_tool`）**、ズーム/パン座標変換、ステージ＆オニオンスキン描画、カーソル表示 |
-| **[`tool_paint.rs`](file:///Users/dskzts/clay_canvas/src/tool_paint.rs)** | **描画・塗りツール**（ブラシ `B`・消しゴム `E`・バケツ塗り `K`・スポイト `I`）の操作ロジック |
-| **[`tool_select.rs`](file:///Users/dskzts/clay_canvas/src/tool_select.rs)** | **選択ツール（`V`）**、マーキー範囲選択（部分スライス）、輪郭の粘土変形（Reshape）、アンカー追加/削除、グループ編集、コピー＆ペースト |
-| **[`tool_transform.rs`](file:///Users/dskzts/clay_canvas/src/tool_transform.rs)** | **自由変形ツール（`Q`）**、8方向バウンディングボックス拡大縮小、回転、ピボット移動、反転 |
-| **[`timeline.rs`](file:///Users/dskzts/clay_canvas/src/timeline.rs)** | **タイムライン（X-Sheet）**、レイヤー・キーフレーム管理、3段階メッシュキャッシュ＆ゼロコピー再生、タイムラインUI描画 |
-| **[`vector_engine.rs`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs)** | **2Dベクター幾何エンジン**（`FillShape` / `Contour`）、ストローク生成・ベジェ曲線フィット、ブーリアン演算（結合・切り抜き・閉領域検出）、三角形分割 |
-| **[`tests.rs`](file:///Users/dskzts/clay_canvas/src/tests.rs)** | 全機能の自動ユニットテスト（19件） |
+| **[`main.rs`](file:///Users/dskzts/animelite/src/main.rs)** | アプリ起動、フォント・テーマ設定、アプリ全体状態（`FlashBrushApp`）、Undo/Redo、ショートカット、メインループ |
+| **[`panels.rs`](file:///Users/dskzts/animelite/src/panels.rs)** | 左端縦ツールバー、ステージ上部スリムバー、右端プロパティパネル（3タブ切り替え）、Material Icons 定数 |
+| **[`canvas_tool.rs`](file:///Users/dskzts/animelite/src/canvas_tool.rs)** | `Tool` 列挙型、**ツールモード切り替え（`set_tool`）**、ズーム/パン座標変換、ステージ＆オニオンスキン描画、カーソル表示 |
+| **[`tool_paint.rs`](file:///Users/dskzts/animelite/src/tool_paint.rs)** | **描画・塗りツール**（ブラシ `B`・消しゴム `E`・バケツ塗り `K`・スポイト `I`）の操作ロジック |
+| **[`tool_select.rs`](file:///Users/dskzts/animelite/src/tool_select.rs)** | **選択ツール（`V`）**、マーキー範囲選択（部分スライス）、輪郭の粘土変形（Reshape）、アンカー追加/削除、グループ編集、コピー＆ペースト |
+| **[`tool_transform.rs`](file:///Users/dskzts/animelite/src/tool_transform.rs)** | **自由変形ツール（`Q`）**、8方向バウンディングボックス拡大縮小、回転、ピボット移動、反転 |
+| **[`timeline.rs`](file:///Users/dskzts/animelite/src/timeline.rs)** | **タイムライン（X-Sheet）**、レイヤー・キーフレーム管理、3段階メッシュキャッシュ＆ゼロコピー再生、タイムラインUI描画 |
+| **[`vector_engine.rs`](file:///Users/dskzts/animelite/src/vector_engine.rs)** | **2Dベクター幾何エンジン**（`FillShape` / `Contour`）、ストローク生成・ベジェ曲線フィット、ブーリアン演算（結合・切り抜き・閉領域検出）、三角形分割 |
+| **[`tests.rs`](file:///Users/dskzts/animelite/src/tests.rs)** | 全機能の自動ユニットテスト（19件） |
 
 ---
 
 ## 各ファイルの詳細な役割
 
-### 1. [`main.rs`](file:///Users/dskzts/clay_canvas/src/main.rs) — エントリポイント・アプリ状態・ショートカット・メインループ
+### 1. [`main.rs`](file:///Users/dskzts/animelite/src/main.rs) — エントリポイント・アプリ状態・ショートカット・メインループ
 - **ウィンドウ起動・初期化**：
   - `main`：ウィンドウサイズとネイティブオプションの設定
   - `configure_japanese_fonts`：`fonts/` 内の日本語フォント（`NotoSansJP`）とアイコンフォント（`MaterialIcons`）の登録
@@ -36,7 +36,7 @@
 
 ---
 
-### 2. [`panels.rs`](file:///Users/dskzts/clay_canvas/src/panels.rs) — 左ツールバー・ステージ上部バー・右プロパティパネル
+### 2. [`panels.rs`](file:///Users/dskzts/animelite/src/panels.rs) — 左ツールバー・ステージ上部バー・右プロパティパネル
 Adobe Animate 準拠の周辺パネルUIを担当します。
 - **`mod icons`**：`MaterialIcons-Regular.ttf` のアイコンコードポイント定数一覧
 - **左端縦ツールバー（`draw_left_toolbar`）**：
@@ -53,7 +53,7 @@ Adobe Animate 準拠の周辺パネルUIを担当します。
 
 ---
 
-### 3. [`canvas_tool.rs`](file:///Users/dskzts/clay_canvas/src/canvas_tool.rs) — ツール共通定義・モード切替・ビューポート・ステージ描画
+### 3. [`canvas_tool.rs`](file:///Users/dskzts/animelite/src/canvas_tool.rs) — ツール共通定義・モード切替・ビューポート・ステージ描画
 - **`enum Tool`**：6種類のツールのアイコン、ラベル名、ツールチップ、ショートカットキー定義（`Tool::ALL`, `from_shortcut_input`）
 - **ドラッグ・ホバー状態型**：`ScaleHandle`, `TransformHoverTarget`, `TransformDragState`, `SelectSubMode`, `HoverTarget`, `SelectDragState`
 - **モード切り替え**：
@@ -66,7 +66,7 @@ Adobe Animate 準拠の周辺パネルUIを担当します。
 
 ---
 
-### 4. [`tool_paint.rs`](file:///Users/dskzts/clay_canvas/src/tool_paint.rs) — ブラシ・消しゴム・バケツ・スポイト
+### 4. [`tool_paint.rs`](file:///Users/dskzts/animelite/src/tool_paint.rs) — ブラシ・消しゴム・バケツ・スポイト
 - **`handle_brush_or_eraser_input`**：マウスドラッグ中のストローク座標収集とリアルタイムアウトライン生成
 - **`commit_raw_outline`**：描き終わったストロークをベジェ曲線にスムージングし、ブラシなら同一レイヤー内で結合/切り抜き（`merge_shapes_into_canvas`）、消しゴムなら減算（`erase_from_canvas`）を実行
 - **`bucket_fill_at`**：選択中の生シェイプの色変更、既存シェイプの塗り替え、または複数レイヤーの図形で囲まれた閉領域（穴）の検出とベクター流し込み
@@ -74,7 +74,7 @@ Adobe Animate 準拠の周辺パネルUIを担当します。
 
 ---
 
-### 5. [`tool_select.rs`](file:///Users/dskzts/clay_canvas/src/tool_select.rs) — 選択ツール・輪郭変形・グループ・クリップボード
+### 5. [`tool_select.rs`](file:///Users/dskzts/animelite/src/tool_select.rs) — 選択ツール・輪郭変形・グループ・クリップボード
 - **選択操作**：
   - `handle_select_tool_input`：選択ツール（`V`）のマウス入力エントリポイント
   - `apply_marquee_selection`：矩形ドラッグによる範囲選択（生シェイプの部分スライスとグループ全体の選択）
@@ -91,7 +91,7 @@ Adobe Animate 準拠の周辺パネルUIを担当します。
 
 ---
 
-### 6. [`tool_transform.rs`](file:///Users/dskzts/clay_canvas/src/tool_transform.rs) — 自由変形ツール（`Q`）
+### 6. [`tool_transform.rs`](file:///Users/dskzts/animelite/src/tool_transform.rs) — 自由変形ツール（`Q`）
 - **ヒット判定とアフィン変換**：
   - `compute_transform_hover`：ピボット点、8方向スケールハンドル、四隅外側の回転ゾーン、内部移動ゾーンの判定
   - `apply_affine_to_selected` / `flip_selected_shapes` / `rotate_selected_shapes` / `scale_selected_shapes`
@@ -101,7 +101,7 @@ Adobe Animate 準拠の周辺パネルUIを担当します。
 
 ---
 
-### 7. [`timeline.rs`](file:///Users/dskzts/clay_canvas/src/timeline.rs) — タイムライン・レイヤー・再生キャッシュ・X-Sheet UI
+### 7. [`timeline.rs`](file:///Users/dskzts/animelite/src/timeline.rs) — タイムライン・レイヤー・再生キャッシュ・X-Sheet UI
 - **データ構造**：`Timeline`, `Layer`, `Keyframe`, `Cel`, `TimelineCellSelection`
 - **3段階メッシュキャッシュ＆ゼロコピー再生**：
   - `CelMeshCache`：セル単位でスクリーン座標変換済みの描画メッシュ（`cached_screen_mesh`）とオニオンスキン用メッシュ（`cached_onion_mesh`）をキャッシュ
@@ -111,7 +111,7 @@ Adobe Animate 準拠の周辺パネルUIを担当します。
 
 ---
 
-### 8. [`vector_engine.rs`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs) — 2Dベクター幾何・曲線フィット・ブーリアン演算エンジン
+### 8. [`vector_engine.rs`](file:///Users/dskzts/animelite/src/vector_engine.rs) — 2Dベクター幾何・曲線フィット・ブーリアン演算エンジン
 - **図形データ構造**：
   - `FillShape`, `Contour`, `PathSegment`（2次ベジェ曲線セグメント、外周と穴の輪郭、所属レイヤーID、グループパス、ローカル三角形メッシュキャッシュ、`mesh_revision`）
 - **ストローク生成＆ベジェ曲線スムージング**：
@@ -122,5 +122,5 @@ Adobe Animate 準拠の周辺パネルUIを担当します。
 
 ---
 
-### 9. [`tests.rs`](file:///Users/dskzts/clay_canvas/src/tests.rs) — ユニットテストスイート
+### 9. [`tests.rs`](file:///Users/dskzts/animelite/src/tests.rs) — ユニットテストスイート
 - `cargo test` で実行される全19件のユニットテスト（ストローク一定幅、丸端キャップ、同色結合・異色切り抜き、エッジ貫通分割、アンカー追加/削除、バケツ閉領域塗り、マーキー部分スライス、自由変形、スポイト、ネストグループ、ズーム、コピペ、タイムライン操作など）を収録しています。

@@ -21,14 +21,14 @@ const MAX_UNDO_HISTORY: usize = 50;
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Clay Canvas — Flash Brush & Merge Vector Engine")
+            .with_title("animelite")
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([800.0, 520.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Clay Canvas",
+        "animelite",
         native_options,
         Box::new(|cc| {
             configure_japanese_fonts(&cc.egui_ctx);
@@ -254,7 +254,7 @@ impl FlashBrushApp {
                 self.handle_command_shortcuts(i, cmd, copy_event, cut_event, paste_event);
         });
         if copied_to_clipboard {
-            ctx.copy_text(String::from("clay_canvas"));
+            ctx.copy_text(String::from("animelite"));
         }
     }
 
@@ -538,6 +538,5 @@ impl eframe::App for FlashBrushApp {
     }
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests;

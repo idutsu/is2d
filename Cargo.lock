@@ -162,6 +162,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "animelite"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "i_overlay",
+ "kurbo",
+ "lyon_tessellation",
+]
+
+[[package]]
 name = "arboard"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -599,16 +609,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ced0551234e87afee12411d535648dd89d2e7f34c78b753395567aff3d447ff"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "clay_canvas"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "i_overlay",
- "kurbo",
- "lyon_tessellation",
 ]
 
 [[package]]

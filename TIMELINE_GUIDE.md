@@ -1,6 +1,6 @@
-# Clay Canvas タイムライン操作ガイド
+# animelite タイムライン操作ガイド
 
-`Clay Canvas` の下部タイムラインパネルは **Adobe Animate (旧 Flash)** のタイムライン・エクスポージャーシート（X-Sheet）の操作体系に準拠して設計されています。
+`animelite` の下部タイムラインパネルは **Adobe Animate (旧 Flash)** のタイムライン・エクスポージャーシート（X-Sheet）の操作体系に準拠して設計されています。
 
 ---
 
@@ -127,7 +127,7 @@
 
 ### (1) `F5`（保持フレーム追加 / 短縮）のレイヤー個別尺・選択状態に応じた挙動（Adobe Animate 仕様）
 - **レイヤーごとの独立したフレーム長（終端フレーム）管理**：
-  - 全レイヤーが一律に同じ `total_frames` まで伸びるのではなく、各 [`Layer`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L106-L114) がそれぞれ独立したフレーム長（`frame_count` / 終端フレーム）を持つ構造にする（あるレイヤーの終端フレームより後ろのコマでは、そのレイヤーの絵は表示されない）。
+  - 全レイヤーが一律に同じ `total_frames` まで伸びるのではなく、各 [`Layer`](file:///Users/dskzts/animelite/src/timeline.rs#L106-L114) がそれぞれ独立したフレーム長（`frame_count` / 終端フレーム）を持つ構造にする（あるレイヤーの終端フレームより後ろのコマでは、そのレイヤーの絵は表示されない）。
 - **レイヤー選択状態（選択あり / 選択なし）に応じた `F5` / `Shift+F5` の挙動分岐**：
   1. **特定のレイヤー（またはセル）が選択されている場合**：
      - **`F5`** を押すと、**現在選択されているそのレイヤーだけ**保持フレームが `+1` 延長される（他のレイヤーのフレーム長やキーフレーム位置は変化しない）。
@@ -171,21 +171,21 @@
 ## 8. UIテーマ・再生エンジン＆キャッシュアーキテクチャ
 
 ### (1) シャープなライトテーマ UI（角丸ゼロ）
-- アプリ全体の `egui::Visuals`（[`configure_sharp_light_theme`](file:///Users/dskzts/clay_canvas/src/main.rs#L36-L46)）およびタイムラインのカスタム描画において、すべてのボタン・スライダー・セル・キーフレーム帯・再生ヘッド・選択枠の角丸半径（`rounding`）を **`0.0`（直角）** に統一。
+- アプリ全体の `egui::Visuals`（[`configure_sharp_light_theme`](file:///Users/dskzts/animelite/src/main.rs#L36-L46)）およびタイムラインのカスタム描画において、すべてのボタン・スライダー・セル・キーフレーム帯・再生ヘッド・選択枠の角丸半径（`rounding`）を **`0.0`（直角）** に統一。
 - タイムラインパネル全体を **ライトテーマ** で配色し、空白キーフレームは白（`#FFFFFF`）＋中抜き丸 `○`、描画ありキーフレームはライトシルバー（`#D4DAE4`）＋黒丸 `●` で視認性を高めている。
 
-### (2) 再生ループの仕組み（[`update_playback`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L684-L708)）
+### (2) 再生ループの仕組み（[`update_playback`](file:///Users/dskzts/animelite/src/timeline.rs#L684-L708)）
 - 普段の編集待機中は `egui` の省電力リアクティブモード（入力があったときのみ再描画）で動作し、再生中（`is_playing == true`）の間だけ `ctx.request_repaint_after(...)` で自動的にゲームループを継続稼働させる。
 - 経過時間（`ctx.input(|i| i.time)`）から `1.0 / fps` 秒ごとに `current_frame` を進め、万が一描画負荷でフレームが遅れた場合は `steps = (elapsed / frame_interval).floor()` により自動でコマ飛び（フレームスキップ）して実時間の再生テンポを維持する。
 
 ### (3) 重たい絵でも再生が落ちない3段階キャッシュ機構
-1. **第1段階：シェイプ単位のベジェ曲線テッセレーションキャッシュ（[`FillShape::fill_mesh`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L180-L195)）**
+1. **第1段階：シェイプ単位のベジェ曲線テッセレーションキャッシュ（[`FillShape::fill_mesh`](file:///Users/dskzts/animelite/src/vector_engine.rs#L180-L195)）**
    - 2次ベジェ曲線の輪郭から三角形ポリゴンへの分割（`lyon_tessellation`）はストローク確定・変形時に1回だけ実行され、`FillShape` 内にキャッシュされる。再生中にベジェ曲線のポリゴン分割を再計算することはない。
-2. **第2段階：セル単位の結合メッシュ＆スクリーン座標キャッシュ（[`Cel::cached_screen_mesh`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L74-L86), [`Cel::cached_onion_mesh`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L89-L99)）**
-   - 1つの [`Cel`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L30-L100) に何百・何千個のシェイプが含まれていても、それらを **1つの結合済み `egui::Mesh`（`world_batch_mesh`）** に統合して保持する。
+2. **第2段階：セル単位の結合メッシュ＆スクリーン座標キャッシュ（[`Cel::cached_screen_mesh`](file:///Users/dskzts/animelite/src/timeline.rs#L74-L86), [`Cel::cached_onion_mesh`](file:///Users/dskzts/animelite/src/timeline.rs#L89-L99)）**
+   - 1つの [`Cel`](file:///Users/dskzts/animelite/src/timeline.rs#L30-L100) に何百・何千個のシェイプが含まれていても、それらを **1つの結合済み `egui::Mesh`（`world_batch_mesh`）** に統合して保持する。
    - さらに現在のビューポート `(zoom, pan)` でスクリーン座標へ変換したメッシュも `Cel` 内にキャッシュするため、ズーム・パンが変わらない限り **毎フレームの頂点座標変換（`pos * zoom + pan`）のCPU計算もゼロ** になり、1レイヤーにつき1ドローコールで描画が完了する。
-3. **第3段階：再生中のゼロコピー化と通常時の差分同期（[`update_playback`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L684-L708), [`write_shapes_to_editable_cels`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L453-L479)）**
-   - 再生開始時（[`toggle_playback`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L672-L680)）に1回だけキャンバスの編集内容を `Cel` に保存したあとは、**再生中にコマが進んでも作業用 `self.shapes` へのディープコピー（`load` / `sync`）を一切行わず**、各レイヤーの `Cel` キャッシュから直接描画する（再生停止時 [`stop_playback`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L663-L669) にのみ停止フレームの図形を `self.shapes` に展開する）。
-   - 通常編集時にも各シェイプの [`mesh_revision`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L189) を比較し、変更がないレイヤーでは `Cel` へのクローンとキャッシュ破棄をスキップする。
+3. **第3段階：再生中のゼロコピー化と通常時の差分同期（[`update_playback`](file:///Users/dskzts/animelite/src/timeline.rs#L684-L708), [`write_shapes_to_editable_cels`](file:///Users/dskzts/animelite/src/timeline.rs#L453-L479)）**
+   - 再生開始時（[`toggle_playback`](file:///Users/dskzts/animelite/src/timeline.rs#L672-L680)）に1回だけキャンバスの編集内容を `Cel` に保存したあとは、**再生中にコマが進んでも作業用 `self.shapes` へのディープコピー（`load` / `sync`）を一切行わず**、各レイヤーの `Cel` キャッシュから直接描画する（再生停止時 [`stop_playback`](file:///Users/dskzts/animelite/src/timeline.rs#L663-L669) にのみ停止フレームの図形を `self.shapes` に展開する）。
+   - 通常編集時にも各シェイプの [`mesh_revision`](file:///Users/dskzts/animelite/src/vector_engine.rs#L189) を比較し、変更がないレイヤーでは `Cel` へのクローンとキャッシュ破棄をスキップする。
 
 

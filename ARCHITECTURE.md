@@ -1,6 +1,6 @@
-# Clay Canvas — アーキテクチャ設計書・描画計算の数学的根拠
+# animelite — アーキテクチャ設計書・描画計算の数学的根拠
 
-本ドキュメントは、Clay Canvas の全体モジュール構成、および Adobe Animate（旧 Macromedia Flash）のマージ描画・ベクターブラシの書き味を実現している幾何アルゴリズムと数学的根拠をまとめた技術仕様書です。
+本ドキュメントは、animelite の全体モジュール構成、および Adobe Animate（旧 Macromedia Flash）のマージ描画・ベクターブラシの書き味を実現している幾何アルゴリズムと数学的根拠をまとめた技術仕様書です。
 
 ---
 
@@ -27,17 +27,17 @@ flowchart TD
 
 | 層 | モジュール | 主な責務 |
 | :--- | :--- | :--- |
-| **① 幾何演算層** | [`src/vector_engine.rs`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs) | 2次ベジェ閉輪郭 [`Contour`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L25-L27)、塗り図形 [`FillShape`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L153-L163)、ブラシ包絡線生成、画面空間2次ベジェフィッティング、平面ブーリアン演算・曲線再構築、Lyon GPUメッシュ生成 |
-| **② ツール操作層** | [`src/canvas_tool.rs`](file:///Users/dskzts/clay_canvas/src/canvas_tool.rs) | ブラシ・消しゴム・バケツ・スポイト・選択（エッジつまみ変形・頂点移動・矩形選択スライス・アンカー追加/削除）・自由変形・無限階層グループ編集・ビューポート変換（ズーム・パン） |
-| **③ 時間軸管理層** | [`src/timeline.rs`](file:///Users/dskzts/clay_canvas/src/timeline.rs) | [`Timeline`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L94-L108) / [`Layer`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L67-L74) / [`Keyframe`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L48-L53) / [`Cel`](file:///Users/dskzts/clay_canvas/src/timeline.rs#L11-L14) の管理、キーフレーム操作（`F5`/`F6`/`F7`）、再生・スクラブ・オニオンスキン・タイムラインUI描画 |
-| **④ アプリ統合層** | [`src/main.rs`](file:///Users/dskzts/clay_canvas/src/main.rs) | アプリケーション状態 [`FlashBrushApp`](file:///Users/dskzts/clay_canvas/src/main.rs#L91-L152)、上部ツールバー・中央キャンバス・下部タイムラインの統合、Undo/Redo スナップショット履歴、単体テストスイート |
+| **① 幾何演算層** | [`src/vector_engine.rs`](file:///Users/dskzts/animelite/src/vector_engine.rs) | 2次ベジェ閉輪郭 [`Contour`](file:///Users/dskzts/animelite/src/vector_engine.rs#L25-L27)、塗り図形 [`FillShape`](file:///Users/dskzts/animelite/src/vector_engine.rs#L153-L163)、ブラシ包絡線生成、画面空間2次ベジェフィッティング、平面ブーリアン演算・曲線再構築、Lyon GPUメッシュ生成 |
+| **② ツール操作層** | [`src/canvas_tool.rs`](file:///Users/dskzts/animelite/src/canvas_tool.rs) | ブラシ・消しゴム・バケツ・スポイト・選択（エッジつまみ変形・頂点移動・矩形選択スライス・アンカー追加/削除）・自由変形・無限階層グループ編集・ビューポート変換（ズーム・パン） |
+| **③ 時間軸管理層** | [`src/timeline.rs`](file:///Users/dskzts/animelite/src/timeline.rs) | [`Timeline`](file:///Users/dskzts/animelite/src/timeline.rs#L94-L108) / [`Layer`](file:///Users/dskzts/animelite/src/timeline.rs#L67-L74) / [`Keyframe`](file:///Users/dskzts/animelite/src/timeline.rs#L48-L53) / [`Cel`](file:///Users/dskzts/animelite/src/timeline.rs#L11-L14) の管理、キーフレーム操作（`F5`/`F6`/`F7`）、再生・スクラブ・オニオンスキン・タイムラインUI描画 |
+| **④ アプリ統合層** | [`src/main.rs`](file:///Users/dskzts/animelite/src/main.rs) | アプリケーション状態 [`FlashBrushApp`](file:///Users/dskzts/animelite/src/main.rs#L91-L152)、上部ツールバー・中央キャンバス・下部タイムラインの統合、Undo/Redo スナップショット履歴、単体テストスイート |
 
 ---
 
 ## 2. ベクター図形の表現と基本幾何演算（`Contour` / `FillShape`）
 
 ### 2.1 2次ベジェ曲線（`QuadBez`）による閉輪郭表現
-Adobe Animate と同じく、すべての図形輪郭（[`Contour`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L25-L27)）を3次ベジェではなく **2次ベジェ曲線（Quadratic Bézier Curve）** の閉じたチェインとして表現します。2次ベジェ曲線は制御点 $P_1$ が1つだけであり、「曲線の途中をつまんで引っ張る」操作に対して制御点が一意に決まるという幾何学的な利点があります。
+Adobe Animate と同じく、すべての図形輪郭（[`Contour`](file:///Users/dskzts/animelite/src/vector_engine.rs#L25-L27)）を3次ベジェではなく **2次ベジェ曲線（Quadratic Bézier Curve）** の閉じたチェインとして表現します。2次ベジェ曲線は制御点 $P_1$ が1つだけであり、「曲線の途中をつまんで引っ張る」操作に対して制御点が一意に決まるという幾何学的な利点があります。
 
 各セグメント $i \in \{0, \dots, N-1\}$ は始点 $P_{0,i}$、制御点 $P_{1,i}$、終点 $P_{2,i}$ を持ち、パラメータ $t \in [0, 1]$ に対して次式で定義されます。
 
@@ -47,18 +47,18 @@ $$B_i(t) = (1-t)^2 P_{0,i} + 2(1-t)t P_{1,i} + t^2 P_{2,i}$$
 
 $$B_i'(t) = 2(1-t)(P_{1,i} - P_{0,i}) + 2t(P_{2,i} - P_{1,i})$$
 
-閉ループの $C^0$ 連続条件として、隣接セグメント間で常に $P_{2,i} = P_{0,(i+1)\bmod N}$ を保証します（[`Contour::enforce_continuity`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L105-L116)）。
+閉ループの $C^0$ 連続条件として、隣接セグメント間で常に $P_{2,i} = P_{0,(i+1)\bmod N}$ を保証します（[`Contour::enforce_continuity`](file:///Users/dskzts/animelite/src/vector_engine.rs#L105-L116)）。
 
 ### 2.2 De Casteljau 分割による形状不変アンカー追加と削除
-- **アンカー追加（[`Contour::insert_anchor_at`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L118-L131)）**：
+- **アンカー追加（[`Contour::insert_anchor_at`](file:///Users/dskzts/animelite/src/vector_engine.rs#L118-L131)）**：
   セグメント上の指定パラメータ $t \in [0.08, 0.92]$ において De Casteljau のアルゴリズムを適用し、元の曲線形状を一切変えずに2つの2次ベジェ曲線 $[0, t]$ と $[t, 1]$ に厳密分割します。
   $$Q_0 = (1-t)P_0 + t P_1, \quad Q_1 = (1-t)P_1 + t P_2, \quad R = (1-t)Q_0 + t Q_1 = B(t)$$
   分割後の左セグメントは $(P_0, Q_0, R)$、右セグメントは $(R, Q_1, P_2)$ となり、合成曲線は元の $B(t)$ と数学的に完全一致します。
-- **アンカー削除（[`Contour::delete_anchor_at`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L133-L148)）**：
+- **アンカー削除（[`Contour::delete_anchor_at`](file:///Users/dskzts/animelite/src/vector_engine.rs#L133-L148)）**：
   指定アンカー $P_{0,i}$ を削除し、前セグメントの始点 $P_{0,i-1}$ と当該セグメントの終点 $P_{2,i}$ を中点制御点 $P_1 = \frac{1}{2}(P_{0,i-1} + P_{2,i})$ を持つ直線2次ベジェで結びます。
 
 ### 2.3 符号付き面積とワインディング規約
-[`Contour::signed_area`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L63-L79) では各セグメントを8等分評価した頂点列 $(V_0, V_1, \dots, V_{M-1})$ に対し、**Shoelace（測量士）の公式** を直接適用して符号付き面積 $A$ を算出します。
+[`Contour::signed_area`](file:///Users/dskzts/animelite/src/vector_engine.rs#L63-L79) では各セグメントを8等分評価した頂点列 $(V_0, V_1, \dots, V_{M-1})$ に対し、**Shoelace（測量士）の公式** を直接適用して符号付き面積 $A$ を算出します。
 
 $$A = \frac{1}{2} \sum_{k=0}^{M-1} (V_{k,x} V_{k+1,y} - V_{k+1,x} V_{k,y}) \quad (V_M = V_0)$$
 
@@ -69,7 +69,7 @@ $$A = \frac{1}{2} \sum_{k=0}^{M-1} (V_{k,x} V_{k+1,y} - V_{k+1,x} V_{k,y}) \quad
 
 ## 3. アルゴリズム 1：丸ブラシ軌跡からの厳密なオフセット包絡線生成
 
-[`generate_brush_outline_at_zoom`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L332-L454) は、マウスドラッグで得られた中心点列（スパイン） $(C_0, C_1, \dots, C_{n-1})$ とブラシ半径 $r$ から、**描いた軌跡の中心線を一切改変せずに** 半径 $r$ の円盤が掃引する閉包絡線（Envelope）を生成します。
+[`generate_brush_outline_at_zoom`](file:///Users/dskzts/animelite/src/vector_engine.rs#L332-L454) は、マウスドラッグで得られた中心点列（スパイン） $(C_0, C_1, \dots, C_{n-1})$ とブラシ半径 $r$ から、**描いた軌跡の中心線を一切改変せずに** 半径 $r$ の円盤が掃引する閉包絡線（Envelope）を生成します。
 
 1. **スクリーン空間基準の最小ステップ間引き**：
    現在のズーム倍率を $z \in [0.15, 16.0]$ としたとき、スクリーン上のブラシ半径 $r_{\text{screen}} = r \cdot z$ に比例する最小サンプリング間隔
@@ -90,7 +90,7 @@ $$A = \frac{1}{2} \sum_{k=0}^{M-1} (V_{k,x} V_{k+1,y} - V_{k+1,x} V_{k,y}) \quad
 
 ## 4. アルゴリズム 2：軌道・形を変えない Adobe Animate 方式 2次ベジェ輪郭構築
 
-[`build_smoothed_stroke_shapes_at_zoom`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L470-L527) および [`smooth_ring_to_quad_contour`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L566-L672) は、生のブラシ輪郭ポリゴンから「手描きの軌道・線幅・小さな円の形・丸キャップ」をそのまま保ちつつ、ピクセルジャギーの除去と不要な中間アンカーの削減のみを行う6段階のパイプラインです。
+[`build_smoothed_stroke_shapes_at_zoom`](file:///Users/dskzts/animelite/src/vector_engine.rs#L470-L527) および [`smooth_ring_to_quad_contour`](file:///Users/dskzts/animelite/src/vector_engine.rs#L566-L672) は、生のブラシ輪郭ポリゴンから「手描きの軌道・線幅・小さな円の形・丸キャップ」をそのまま保ちつつ、ピクセルジャギーの除去と不要な中間アンカーの削減のみを行う6段階のパイプラインです。
 
 ```mermaid
 flowchart LR
@@ -106,24 +106,24 @@ flowchart LR
 
 $$P_{\text{screen}} = z \cdot P_{\text{world}}$$
 
-以降の自己交差解消（`simplify_shape`）・ブラシ半径推定・リサンプリング・平滑化・ベジェ近似のすべてを **スクリーン空間（px 基準）** で実行し、完成した [`Contour`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L25-L27) に最後だけ逆スケール変換 $z^{-1}$ を適用します。これにより、どのズーム倍率で描いても画面上の見た目に完全一致したズーム不変（Bit-for-Bit Zoom Invariant）な結果が得られます。
+以降の自己交差解消（`simplify_shape`）・ブラシ半径推定・リサンプリング・平滑化・ベジェ近似のすべてを **スクリーン空間（px 基準）** で実行し、完成した [`Contour`](file:///Users/dskzts/animelite/src/vector_engine.rs#L25-L27) に最後だけ逆スケール変換 $z^{-1}$ を適用します。これにより、どのズーム倍率で描いても画面上の見た目に完全一致したズーム不変（Bit-for-Bit Zoom Invariant）な結果が得られます。
 
 ### 4.2 Steiner の管状近傍公式によるブラシ半径推定と小円保護スケーリング
-自己交差解消後のポリゴンリング群（外周＋内周穴）の正味面積 $A_{\text{net}}$ と総周長 $L$ から、[`estimate_brush_radius_from_shape_rings`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L531-L556) にてスクリーン空間での実効ブラシ半径 $r_{\text{est}}$ を推定します。
+自己交差解消後のポリゴンリング群（外周＋内周穴）の正味面積 $A_{\text{net}}$ と総周長 $L$ から、[`estimate_brush_radius_from_shape_rings`](file:///Users/dskzts/animelite/src/vector_engine.rs#L531-L556) にてスクリーン空間での実効ブラシ半径 $r_{\text{est}}$ を推定します。
 
 - 長さ $\ell$、半径 $r$ のストロークの面積は $A \approx 2r\ell + \pi r^2$、周長は $L \approx 2\ell + 2\pi r$ であるため、**Steiner の管状近傍公式** より比 $A / L$ はブラシ半径 $r$ に比例します（$r \approx 1.05 \, A_{\text{net}} / L$）。
 - 一方、スタンプや小さな円塊のように**等周商（Circularity）**
   $$C = \frac{4\pi A_{\text{net}}}{L^2} > 0.78$$
   が高い単一リングでは、円の面積・周長比 $A / L = r / 2$ に従い $r_{\text{est}} = 2 A_{\text{net}} / L$ として正確に半径を復元します。
 
-さらに、各リング自身の周長半径 $R_{\text{ring}} = L_{\text{ring}} / 2\pi$ からスケール係数 `r_scale` と小ループ保護係数 `small_ring_factor` を算出します（[`smooth_ring_to_quad_contour`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L577-L587)）。
+さらに、各リング自身の周長半径 $R_{\text{ring}} = L_{\text{ring}} / 2\pi$ からスケール係数 `r_scale` と小ループ保護係数 `small_ring_factor` を算出します（[`smooth_ring_to_quad_contour`](file:///Users/dskzts/animelite/src/vector_engine.rs#L577-L587)）。
 
 $$r_{\text{scale}} = \min\!\left(\operatorname{clamp}\!\left(\frac{r_{\text{est}}}{8.0},\; 0.05,\; 1.5\right),\; \operatorname{clamp}\!\left(\frac{R_{\text{ring}}}{20.0},\; 0.05,\; 1.5\right)\right), \quad f_{\text{small}} = \operatorname{clamp}\!\left(\frac{R_{\text{ring}}}{42.0},\; 0.25,\; 1.0\right)$$
 
 これにより、細ペンや小さな円・小さな内周穴では平滑化窓や近似許容誤差が自動的に最大 $1/4$ まで縮小され、小さな円が勝手に変形されたり潰れたりすることを防ぎます。
 
 ### 4.3 マルチスケール回転角による特徴点（鋭角ノッチ・丸キャップ・丸コーナー）の分類
-等間隔弧長ステップ $\Delta s$ でリサンプリングされた頂点列 $D_0, \dots, D_{m-1}$ に対し、[`classify_and_align_ring_features`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L760-L1041) では4つの空間スケール窓（$1$, $w_{\text{short}} \approx 4 r_{\text{scale}} / \Delta s$, $w_{\text{local}} \approx 6 r_{\text{scale}} / \Delta s$, $w_{\text{macro}} \approx 18 r_{\text{scale}} / \Delta s$）で符号付き回転角を計測します。
+等間隔弧長ステップ $\Delta s$ でリサンプリングされた頂点列 $D_0, \dots, D_{m-1}$ に対し、[`classify_and_align_ring_features`](file:///Users/dskzts/animelite/src/vector_engine.rs#L760-L1041) では4つの空間スケール窓（$1$, $w_{\text{short}} \approx 4 r_{\text{scale}} / \Delta s$, $w_{\text{local}} \approx 6 r_{\text{scale}} / \Delta s$, $w_{\text{macro}} \approx 18 r_{\text{scale}} / \Delta s$）で符号付き回転角を計測します。
 
 $$\theta_w(i) = \operatorname{atan2}\!\left(\hat{d}_{\text{in}}(i, w) \times \hat{d}_{\text{out}}(i, w),\; \hat{d}_{\text{in}}(i, w) \cdot \hat{d}_{\text{out}}(i, w)\right)$$
 
@@ -134,7 +134,7 @@ $$\theta_w(i) = \operatorname{atan2}\!\left(\hat{d}_{\text{in}}(i, w) \times \ha
    ただし、鋭角を持たず全周の $60\%$ 以上が `is_round_arc` となる図形は「手描きの円・楕円ループ」であるため、一部だけをキャップと誤認して歪めないよう `is_round_arc` を全解除して全周を均一に扱います。
 
 ### 4.4 ゼロ収縮（Zero-Shrinkage / Taubin 型）2スケール移動平均フィルタ
-通常の移動平均（ラプラシアン平滑化）を閉曲線に反復適用すると、曲率ベクトル方向に頂点が内側へ移動し、円や角が痩せて形が変わってしまいます。これを防ぐため、[`apply_zero_shrinkage_smoothing`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L1044-L1124) では **狭窓変位から広窓変位（大局的な曲率ドリフト）を差し引く2スケール・バンドパスフィルタ** を採用しています。
+通常の移動平均（ラプラシアン平滑化）を閉曲線に反復適用すると、曲率ベクトル方向に頂点が内側へ移動し、円や角が痩せて形が変わってしまいます。これを防ぐため、[`apply_zero_shrinkage_smoothing`](file:///Users/dskzts/animelite/src/vector_engine.rs#L1044-L1124) では **狭窓変位から広窓変位（大局的な曲率ドリフト）を差し引く2スケール・バンドパスフィルタ** を採用しています。
 
 1. **狭窓平均変位（高周波ジャギー＋大局曲率）**：
    高曲率特徴点からの距離 $d_{\text{hc}}(i)$ に応じて窓幅 $w = \min(d_{\text{hc}}(i), 3)$ を定め、近傍平均への変位ベクトル $\Delta_{\text{narrow}}(i)$ を求めます。
@@ -148,12 +148,12 @@ $$\theta_w(i) = \operatorname{atan2}\!\left(\hat{d}_{\text{in}}(i, w) \times \ha
    に厳密クランプします。これにより、描いたストロークの軌道や小さな円の形は一切修正されず、マウス座標の整数丸めによるサブピクセルのギザギザだけが滑らかに整えられます。
 
 ### 4.5 弧長中点補間＋最小二乗法のハイブリッド制御点決定
-アンカー区間 $Q_0, Q_1, \dots, Q_{n-1}$（始点 $P_0 = Q_0$、終点 $P_2 = Q_{n-1}$、総弧長 $L$）に1本の2次ベジェ曲線を当てはめる際、[`fit_quad_control_point_with_arc_lengths`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L1255-L1286) では以下の2つの制御点を $1:1$ でブレンドします。
+アンカー区間 $Q_0, Q_1, \dots, Q_{n-1}$（始点 $P_0 = Q_0$、終点 $P_2 = Q_{n-1}$、総弧長 $L$）に1本の2次ベジェ曲線を当てはめる際、[`fit_quad_control_point_with_arc_lengths`](file:///Users/dskzts/animelite/src/vector_engine.rs#L1255-L1286) では以下の2つの制御点を $1:1$ でブレンドします。
 
 1. **弧長中点 $M$ を厳密に通過する制御点 $P_{1,\text{mid}}$**：
    累積弧長 $s_i$ から $s = L/2$ に対応する輪郭上の弧長中点 $M$ を線形補間で求め、$B(0.5) = \frac{1}{4}P_0 + \frac{1}{2}P_1 + \frac{1}{4}P_2 = M$ を満たす制御点を逆算します。
    $$P_{1,\text{mid}} = 2M - \frac{1}{2}(P_0 + P_2)$$
-2. **弦長パラメータ最小二乗法による制御点 $P_{1,\text{ls}}$（[`fit_quad_control_point_least_squares`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L1408-L1441)）**：
+2. **弦長パラメータ最小二乗法による制御点 $P_{1,\text{ls}}$（[`fit_quad_control_point_least_squares`](file:///Users/dskzts/animelite/src/vector_engine.rs#L1408-L1441)）**：
    各内点 $Q_i$ の正規化弧長パラメータ $t_i = \operatorname{clamp}(s_i / L,\; 0.05,\; 0.95)$ に対し、バーンスタイン基底 $B_0(t) = (1-t)^2$, $B_1(t) = 2(1-t)t$, $B_2(t) = t^2$ を用いて二乗誤差 $\sum_{i=1}^{n-2} \|B(t_i) - Q_i\|^2$ を最小化する閉形式解を算出します。
    $$\frac{\partial}{\partial P_1} \sum_{i=1}^{n-2} \|B(t_i) - Q_i\|^2 = 0 \implies P_{1,\text{ls}} = \frac{\sum_{i=1}^{n-2} B_1(t_i)\left(Q_i - B_0(t_i)P_0 - B_2(t_i)P_2\right)}{\sum_{i=1}^{n-2} B_1(t_i)^2}$$
 3. **ハイブリッド制御点**：
@@ -161,18 +161,18 @@ $$\theta_w(i) = \operatorname{atan2}\!\left(\hat{d}_{\text{in}}(i, w) \times \ha
    最小二乗法単独では丸キャップや深いカーブで頂点がわずかに内側へ痩せる性質がありますが、$P_{1,\text{mid}}$ と合成することで中点通過精度と全体の二乗誤差最小化を両立します。
 
 ### 4.6 ニュートン1ステップ射影誤差と $O(K \cdot M)$ 反復アンカー削減
-[`reduce_outline_anchors_by_quad_fit`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L1445-L1570) では、ロックされていない中間アンカー候補 $a_j$ を削除して前後区間 $a_{j-1} \to a_{j+1}$ を1本の `QuadBez` に統合できるかを判定します。
+[`reduce_outline_anchors_by_quad_fit`](file:///Users/dskzts/animelite/src/vector_engine.rs#L1445-L1570) では、ロックされていない中間アンカー候補 $a_j$ を削除して前後区間 $a_{j-1} \to a_{j+1}$ を1本の `QuadBez` に統合できるかを判定します。
 
 - **変曲点（S字カーブ）棄却ガード**：
   2次ベジェ曲線は単一セグメント内に変曲点を持てないため、弦 $P_0 P_2$ の法線方向符号付き距離の前半平均 $\bar{d}_1$ と後半平均 $\bar{d}_2$ が異符号（$\bar{d}_1 \cdot \bar{d}_2 < 0$）かつ共に $0.72 \cdot \text{tol}$ を超えるS字区間は統合を棄却します。
-- **ニュートン1ステップ射影による高速最大距離誤差（[`max_quad_fit_error_with_arc_lengths`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L1629-L1657)）**：
+- **ニュートン1ステップ射影による高速最大距離誤差（[`max_quad_fit_error_with_arc_lengths`](file:///Users/dskzts/animelite/src/vector_engine.rs#L1629-L1657)）**：
   各点 $Q_i$ の初期パラメータ $t_0 = s_i / L$ に対し、曲線の接線ベクトル $B'(t_0)$ への正射影でパラメータを1ステップ精密化します。
   $$t_1 = \operatorname{clamp}\!\left(t_0 + \frac{(Q_i - B(t_0)) \cdot B'(t_0)}{\|B'(t_0)\|^2},\; 0,\; 1\right), \quad \varepsilon_{\max} = \max_{1 \le i \le n-2} \min\!\left(\|Q_i - B(t_1)\|,\; \|Q_i - B(t_0)\|\right)$$
 - **差分更新による $O(K \cdot M)$ 優先度削減**：
   許容誤差 $\varepsilon_{\max} \le \text{tol}$（側面で $0.50 \cdot r_{\text{scale}} \cdot f_{\text{small}}$ px、丸キャップで $0.36 \cdot r_{\text{scale}} \cdot f_{\text{small}}$ px）を満たす候補のうち、スコア $\varepsilon_{\max} + 0.18 \, \Theta_{\text{net}}^2$ が最小のアンカーから順に削除します。アンカー $j$ を削除した際、区間が変化するのは前後の隣接2アンカー（$j-1$ と $j+1$）のみであるため、この2箇所のスコアのみを再計算することで $O(K \cdot M)$ の高速性を実現しています。
 
 ### 4.7 接線交点射影による $G^1$ 連続化
-[`enforce_g1_tangent_continuity_on_segments`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L1290-L1406) では、鋭角でも直線接続でもない滑らかな中間アンカー $A_j$ において、前セグメントの終端接線方向 $\hat{d}_{\text{in}}$、次セグメントの始端接線方向 $\hat{d}_{\text{out}}$、および密な輪郭上の弦方向 $\hat{d}_{\text{ring}}$ の平均単位接線ベクトル $\hat{T}_j$ を求めます。
+[`enforce_g1_tangent_continuity_on_segments`](file:///Users/dskzts/animelite/src/vector_engine.rs#L1290-L1406) では、鋭角でも直線接続でもない滑らかな中間アンカー $A_j$ において、前セグメントの終端接線方向 $\hat{d}_{\text{in}}$、次セグメントの始端接線方向 $\hat{d}_{\text{out}}$、および密な輪郭上の弦方向 $\hat{d}_{\text{ring}}$ の平均単位接線ベクトル $\hat{T}_j$ を求めます。
 
 セグメント $j$ の両端アンカー $P_0, P_2$ に共通接線ベクトル $\hat{T}_0, \hat{T}_2$ が定義されているとき、2直線の交点条件
 
@@ -184,18 +184,18 @@ $$P_0 + s_0 \hat{T}_0 = P_2 - s_2 \hat{T}_2 \implies s_0 = \frac{(P_2 - P_0) \ti
 
 ## 5. アルゴリズム 3：平面ブーリアン演算と De Casteljau ハイブリッド曲線再構築
 
-Adobe Animate の「マージ描画（Merge Drawing）」では、同色ストロークの結合（`Union`）、異色ストロークや消しゴムによる切り抜き（`Difference`）、矩形選択による部分スライス（`Intersection`）、バケツによる閉領域抽出（背景矩形からの `Difference`）、エッジ横断変形時の図形分割（`OverlayFillRule::Positive`）のすべてが平面ブーリアン演算に帰着します（[`boolean_operation`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L1839-L1885)）。
+Adobe Animate の「マージ描画（Merge Drawing）」では、同色ストロークの結合（`Union`）、異色ストロークや消しゴムによる切り抜き（`Difference`）、矩形選択による部分スライス（`Intersection`）、バケツによる閉領域抽出（背景矩形からの `Difference`）、エッジ横断変形時の図形分割（`OverlayFillRule::Positive`）のすべてが平面ブーリアン演算に帰着します（[`boolean_operation`](file:///Users/dskzts/animelite/src/vector_engine.rs#L1839-L1885)）。
 
-ポリゴンベースのブーリアン演算ライブラリ（`i_overlay`）をそのまま使うと出力がすべて折れ線（ポリゴン）に劣化してしまうため、本エンジンでは **「元の `QuadBez` セグメントへの逆引きマッチング ＋ De Casteljau 部分切り出し」** によるハイブリッド再構築（[`reconstruct_or_refit_quad_contour`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L2147-L2250)）を行っています。
+ポリゴンベースのブーリアン演算ライブラリ（`i_overlay`）をそのまま使うと出力がすべて折れ線（ポリゴン）に劣化してしまうため、本エンジンでは **「元の `QuadBez` セグメントへの逆引きマッチング ＋ De Casteljau 部分切り出し」** によるハイブリッド再構築（[`reconstruct_or_refit_quad_contour`](file:///Users/dskzts/animelite/src/vector_engine.rs#L2147-L2250)）を行っています。
 
-1. **適応分割と `QuadRecord` テーブル登録（[`sample_contour_ring_for_overlay`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L2077-L2102)）**：
+1. **適応分割と `QuadRecord` テーブル登録（[`sample_contour_ring_for_overlay`](file:///Users/dskzts/animelite/src/vector_engine.rs#L2077-L2102)）**：
    入力シェイプの各 `QuadBez` セグメントを `quad_table` にバウンディングボックス付きで登録しつつ、直線に近いセグメントは2分割、曲線セグメントは弧長に応じた分割数（$\lceil L / 1.2 \rceil \in [4, 256]$）でポリゴン化して `i_overlay` に渡します。
-2. **出力ポリゴン辺から元の `QuadBez` への逆引きマッチング（[`match_edge_to_quad`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L2253-L2298)）**：
+2. **出力ポリゴン辺から元の `QuadBez` への逆引きマッチング（[`match_edge_to_quad`](file:///Users/dskzts/animelite/src/vector_engine.rs#L2253-L2298)）**：
    `i_overlay` が出力したポリゴンの各辺 $a \to b$（中点 $m = \frac{1}{2}(a+b)$、単位方向 $\hat{d}_{\text{chord}}$）について、`quad_table` 内の元の曲線 $B_q(t)$ との最近接距離と接線方向の一致度を判定します。
    - 距離条件：$\operatorname{dist}(m, B_q) \le 0.45$, $\operatorname{dist}(a, B_q) \le 0.45$, $\operatorname{dist}(b, B_q) \le 0.45$
    - 接線整合条件：$\left|\hat{d}_{\text{chord}} \cdot \frac{B_q'(t_m)}{\|B_q'(t_m)\|}\right| \ge 0.90$
    これらを満たす最小スコアの曲線ID `quad_id = Some(q)` を各辺にタグ付けします。
-3. **De Casteljau 部分切り出しによる無劣化復元（[`extract_sub_quad`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L2346-L2358)）**：
+3. **De Casteljau 部分切り出しによる無劣化復元（[`extract_sub_quad`](file:///Users/dskzts/animelite/src/vector_engine.rs#L2346-L2358)）**：
    同じ `quad_id = Some(q)` が連続する辺のラン（始点 $P_{\text{start}}$、終点 $P_{\text{end}}$）は、元の2次ベジェ曲線 $B_q$ 上のパラメータ区間 $[t_0, t_1]$（$t_0 = \operatorname{nearest}(P_{\text{start}})$, $t_1 = \operatorname{nearest}(P_{\text{end}})$）を De Casteljau 法（`orig.subsegment(t0..t1)`）で1本の `QuadBez` として切り出します。
    これにより、**ブーリアン演算や消しゴム・矩形スライスを何度繰り返しても、既存の曲線部分は一切ポリゴン化・劣化せず、交差部で正確に切断された元の2次ベジェ曲線が維持されます。**
 
@@ -204,21 +204,21 @@ Adobe Animate の「マージ描画（Merge Drawing）」では、同色スト�
 ## 6. アルゴリズム 4：インタラクティブ輪郭変形と GPU メッシュ描画
 
 ### 6.1 エッジつまみ変形（`PullEdge`）の逆算制御点更新
-選択ツールで未選択シェイプの曲線エッジ上の点 $G = B(t_g)$（$t_g \in [0.18, 0.82]$）をつかみ、変位ベクトル $\Delta = P_{\text{drag}} - G$ だけドラッグした際、両端アンカー $P_0, P_2$ を固定したまま曲線が新しい通過点 $P_{\text{drag}}$ を通るための新しい制御点 $P_1'$ は次式で一意に求まります（[`FlashBrushApp::apply_pull_edge_to_shape`](file:///Users/dskzts/clay_canvas/src/canvas_tool.rs#L1138-L1171)）。
+選択ツールで未選択シェイプの曲線エッジ上の点 $G = B(t_g)$（$t_g \in [0.18, 0.82]$）をつかみ、変位ベクトル $\Delta = P_{\text{drag}} - G$ だけドラッグした際、両端アンカー $P_0, P_2$ を固定したまま曲線が新しい通過点 $P_{\text{drag}}$ を通るための新しい制御点 $P_1'$ は次式で一意に求まります（[`FlashBrushApp::apply_pull_edge_to_shape`](file:///Users/dskzts/animelite/src/canvas_tool.rs#L1138-L1171)）。
 
 $$B_{\text{new}}(t_g) = (1-t_g)^2 P_0 + 2(1-t_g)t_g P_1' + t_g^2 P_2 = B(t_g) + \Delta \implies P_1' = P_1 + \frac{\Delta}{2 t_g (1 - t_g)}$$
 
 ### 6.2 頂点ドラッグ変形（`MoveVertex`）と反対側エッジ貫通分割
-アンカー頂点 $V = P_{2,i-1} = P_{0,i}$ を変位 $\Delta = P_{\text{drag}} - V$ だけ移動する際は、前後のセグメントの曲率バランスが自然に保たれるよう、隣接する2つの制御点を $\frac{1}{2}\Delta$ ずつ追従移動させます（[`FlashBrushApp::apply_move_vertex_to_shape`](file:///Users/dskzts/clay_canvas/src/canvas_tool.rs#L1174-L1218)）。
+アンカー頂点 $V = P_{2,i-1} = P_{0,i}$ を変位 $\Delta = P_{\text{drag}} - V$ だけ移動する際は、前後のセグメントの曲率バランスが自然に保たれるよう、隣接する2つの制御点を $\frac{1}{2}\Delta$ ずつ追従移動させます（[`FlashBrushApp::apply_move_vertex_to_shape`](file:///Users/dskzts/animelite/src/canvas_tool.rs#L1174-L1218)）。
 
 $$P_{1,i-1}' = P_{1,i-1} + \frac{1}{2}\Delta, \quad P_{1,i}' = P_{1,i} + \frac{1}{2}\Delta$$
 
-また、エッジや頂点を反対側の輪郭線を越えてドラッグ＆ドロップした際には、[`punch_through_opposite_edge`](file:///Users/dskzts/clay_canvas/src/canvas_tool.rs#L1089-L1135) と [`resolve_deformed_shape`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L2044-L2073) により、`OverlayFillRule::Positive`（正のワインディング領域のみの抽出）を適用して裏返り（負のワインディング領域）を自動消去し、くびれた図形を2つの独立した `FillShape` へ自然に分割します。
+また、エッジや頂点を反対側の輪郭線を越えてドラッグ＆ドロップした際には、[`punch_through_opposite_edge`](file:///Users/dskzts/animelite/src/canvas_tool.rs#L1089-L1135) と [`resolve_deformed_shape`](file:///Users/dskzts/animelite/src/vector_engine.rs#L2044-L2073) により、`OverlayFillRule::Positive`（正のワインディング領域のみの抽出）を適用して裏返り（負のワインディング領域）を自動消去し、くびれた図形を2つの独立した `FillShape` へ自然に分割します。
 
 ### 6.3 Lyon テッセレーションと高速 Polka-Dot 選択網点メッシュ
-- **曲線テッセレーション（[`tessellate_lyon_path`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L2597-L2631)）**：
-  各 [`FillShape`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L153-L163) の外周・内周穴の2次ベジェパスを `lyon_tessellation::FillTessellator`（許容誤差 `0.04`、`FillRule::EvenOdd`）で三角形メッシュ `fill_mesh` に変換してキャッシュし、描画フレームごとに [`transform_mesh_to_screen`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L2635-L2659) でビューポート変換（$P_{\text{screen}} = z \cdot P_{\text{world}} + \text{pan}$）のみを行って GPU へ送出します。
-- **三角形外積判定による選択網点オーバーレイ（[`build_polka_dot_selection_mesh`](file:///Users/dskzts/clay_canvas/src/vector_engine.rs#L2484-L2577)）**：
+- **曲線テッセレーション（[`tessellate_lyon_path`](file:///Users/dskzts/animelite/src/vector_engine.rs#L2597-L2631)）**：
+  各 [`FillShape`](file:///Users/dskzts/animelite/src/vector_engine.rs#L153-L163) の外周・内周穴の2次ベジェパスを `lyon_tessellation::FillTessellator`（許容誤差 `0.04`、`FillRule::EvenOdd`）で三角形メッシュ `fill_mesh` に変換してキャッシュし、描画フレームごとに [`transform_mesh_to_screen`](file:///Users/dskzts/animelite/src/vector_engine.rs#L2635-L2659) でビューポート変換（$P_{\text{screen}} = z \cdot P_{\text{world}} + \text{pan}$）のみを行って GPU へ送出します。
+- **三角形外積判定による選択網点オーバーレイ（[`build_polka_dot_selection_mesh`](file:///Users/dskzts/animelite/src/vector_engine.rs#L2484-L2577)）**：
   Adobe Animate 特有の網点（Polka-Dot）選択表示を高速に生成するため、毎フレーム曲線に対して `winding()` を呼ぶのではなく、すでにテッセレーションされた `fill_mesh` の各三角形 $\triangle ABC$ のバウンディングボックス内の千鳥格子点 $P=(x, y)$ に対し、3辺の2次元外積
   $$c_0 = (B - A) \times (P - A),\quad c_1 = (C - B) \times (P - B),\quad c_2 = (A - C) \times (P - C)$$
   が同符号（$(c_0 \ge 0 \land c_1 \ge 0 \land c_2 \ge 0) \lor (c_0 \le 0 \land c_1 \le 0 \land c_2 \le 0)$）であるかのみで内部判定を行い、ズーム倍率 $z$ に逆比例させた一定画面サイズの白黒ペアのドット四角形メッシュをキャッシュ生成します。

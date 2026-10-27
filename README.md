@@ -1,4 +1,4 @@
-# Clay Canvas — Flash Brush & Merge Vector Engine
+# animelite — Flash Brush & Merge Vector Engine
 
 Macromedia Flash（現 Adobe Animate）の **「ブラシツール（マージ描画モード）」** の描き心地と輪郭変形体験に特化した、Rust 製の2Dベクタードローイングアプリケーションです。
 

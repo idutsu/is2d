@@ -1,12 +1,12 @@
-# Clay Canvas パネル＆UIレイアウト設計ガイド (`PANEL.md`)
+# animelite パネル＆UIレイアウト設計ガイド (`PANEL.md`)
 
-`Clay Canvas` の画面レイアウトとUIパネル群は、**Adobe Animate** のワークスペース構成に準拠し、すべて**角丸なし（`Rounding::ZERO`）のシャープなライトテーマ**で統一されています。
+`animelite` の画面レイアウトとUIパネル群は、**Adobe Animate** のワークスペース構成に準拠し、すべて**角丸なし（`Rounding::ZERO`）のシャープなライトテーマ**で統一されています。
 
 ---
 
 ## 1. 全体レイアウト構成（5ペイン構成）
 
-[`eframe::App::update`](file:///Users/dskzts/clay_canvas/src/main.rs) では、`egui` のパネル評価順序を利用して、左右のパネルが画面の上端から下端まで貫通し、中央のステージと下部タイムラインを挟み込むレイアウトを実現しています。
+[`eframe::App::update`](file:///Users/dskzts/animelite/src/main.rs) では、`egui` のパネル評価順序を利用して、左右のパネルが画面の上端から下端まで貫通し、中央のステージと下部タイムラインを挟み込むレイアウトを実現しています。
 
 ```text
 +------+----------------------------------------------------+----------------+
@@ -25,20 +25,20 @@
 
 | 描画順 | パネル名 | `egui` コンポーネント | 実装ファイル・メソッド |
 | :---: | :--- | :--- | :--- |
-| **1** | **左端縦ツールバー** | `SidePanel::left("left_vertical_toolbar")` (幅 `42px`) | [`src/panels.rs`](file:///Users/dskzts/clay_canvas/src/panels.rs) — `draw_left_toolbar` |
-| **2** | **右端プロパティパネル** | `SidePanel::right("right_properties_panel")` (幅 `250px`) | [`src/panels.rs`](file:///Users/dskzts/clay_canvas/src/panels.rs) — `draw_right_properties_panel` |
-| **3** | **下部タイムラインパネル** | `TopBottomPanel::bottom("timeline_panel")` (リサイズ可) | [`src/timeline.rs`](file:///Users/dskzts/clay_canvas/src/timeline.rs) — `draw_timeline_panel` |
-| **4** | **ステージ上部スリムバー** | `TopBottomPanel::top("stage_header_bar")` (高さ `30px`) | [`src/panels.rs`](file:///Users/dskzts/clay_canvas/src/panels.rs) — `draw_stage_header_bar` |
-| **5** | **中央キャンバス (Stage)** | `CentralPanel::default()` | [`src/main.rs`](file:///Users/dskzts/clay_canvas/src/main.rs) — `eframe::App::update` |
+| **1** | **左端縦ツールバー** | `SidePanel::left("left_vertical_toolbar")` (幅 `42px`) | [`src/panels.rs`](file:///Users/dskzts/animelite/src/panels.rs) — `draw_left_toolbar` |
+| **2** | **右端プロパティパネル** | `SidePanel::right("right_properties_panel")` (幅 `250px`) | [`src/panels.rs`](file:///Users/dskzts/animelite/src/panels.rs) — `draw_right_properties_panel` |
+| **3** | **下部タイムラインパネル** | `TopBottomPanel::bottom("timeline_panel")` (リサイズ可) | [`src/timeline.rs`](file:///Users/dskzts/animelite/src/timeline.rs) — `draw_timeline_panel` |
+| **4** | **ステージ上部スリムバー** | `TopBottomPanel::top("stage_header_bar")` (高さ `30px`) | [`src/panels.rs`](file:///Users/dskzts/animelite/src/panels.rs) — `draw_stage_header_bar` |
+| **5** | **中央キャンバス (Stage)** | `CentralPanel::default()` | [`src/main.rs`](file:///Users/dskzts/animelite/src/main.rs) — `eframe::App::update` |
 
 > [!IMPORTANT]
 > `egui` では先に呼んだ `SidePanel` がウィンドウの上下端まで領域を確保するため、`draw_left_toolbar` と `draw_right_properties_panel` を `draw_timeline_panel` より前に呼ぶ順序を維持してください。
 
 ---
 
-## 2. モジュール・クラス（構造体）構成（[`src/panels.rs`](file:///Users/dskzts/clay_canvas/src/panels.rs)）
+## 2. モジュール・クラス（構造体）構成（[`src/panels.rs`](file:///Users/dskzts/animelite/src/panels.rs)）
 
-左右のパネルとステージ上部バーのUIコードは、[`src/main.rs`](file:///Users/dskzts/clay_canvas/src/main.rs) が肥大化しないよう [`src/panels.rs`](file:///Users/dskzts/clay_canvas/src/panels.rs) に分離されています。
+左右のパネルとステージ上部バーのUIコードは、[`src/main.rs`](file:///Users/dskzts/animelite/src/main.rs) が肥大化しないよう [`src/panels.rs`](file:///Users/dskzts/animelite/src/panels.rs) に分離されています。
 
 ### ① 右側パネルの状態管理
 - **`enum RightPanelTab`（上部の3タブ）**：
@@ -73,9 +73,9 @@
 ## 3. 今後ツールのプロパティ項目や新しいタブを増やすときの手順
 
 ### 各ツールの「プロパティ」に設定項目を追加する場合
-- [`src/panels.rs`](file:///Users/dskzts/clay_canvas/src/panels.rs) にあるツール別の専用関数（`draw_brush_tool_properties`、`draw_select_tool_properties` など）の中にそのままUI（スライダー、チェックボックス、ボタン等）を追加するだけで、そのツールを選んだときに自動で表示されます。
+- [`src/panels.rs`](file:///Users/dskzts/animelite/src/panels.rs) にあるツール別の専用関数（`draw_brush_tool_properties`、`draw_select_tool_properties` など）の中にそのままUI（スライダー、チェックボックス、ボタン等）を追加するだけで、そのツールを選んだときに自動で表示されます。
 
 ### 右パネル上部に新しいタブを増やす場合
-1. [`src/panels.rs`](file:///Users/dskzts/clay_canvas/src/panels.rs) の `enum RightPanelTab` に新しい列挙子を追加します。
+1. [`src/panels.rs`](file:///Users/dskzts/animelite/src/panels.rs) の `enum RightPanelTab` に新しい列挙子を追加します。
 2. `RightPanelTab::ALL` と `RightPanelTab::label()` にラベル名を追加します（タブバーのボタン幅は自動で等分調整されます）。
 3. `draw_right_properties_panel` の `match self.properties_panel.active_tab` に描画メソッドを追加します。
