@@ -1,6 +1,6 @@
 # `src/` ディレクトリ完全リファレンス（全11ファイル・全型・全関数一覧）
 
-`animelite` のソースコードは、UIパネル・キャンバスツール・ベクター幾何演算・タイムラインデータ・タイムラインUI・シンボル＆トゥイーン・テストの責務ごとに **全11ファイル** に分割されています。
+`is2d` のソースコードは、UIパネル・キャンバスツール・ベクター幾何演算・タイムラインデータ・タイムラインUI・シンボル＆トゥイーン・テストの責務ごとに **全11ファイル** に分割されています。
 本ドキュメントでは、`src/` 内のすべてのファイル・構造体・列挙型・定数・メソッド・ヘルパー関数・ユニットテストを漏れなく記載します。
 
 ---
@@ -9,25 +9,25 @@
 
 | # | ファイル | 行数目安 | 主な責務 |
 | :-: | :--- | :---: | :--- |
-| 1 | **[`main.rs`](file:///Users/dskzts/animelite/src/main.rs)** | ~580行 | アプリ起動、フォント・テーマ初期化、アプリ全体状態（`FlashBrushApp`）、Undo/Redo履歴、キーボードショートカット、メインループ（`eframe::App::update`） |
-| 2 | **[`panels.rs`](file:///Users/dskzts/animelite/src/panels.rs)** | ~650行 | Material Icons 定数（`mod icons`）、左端縦ツールバー、ステージ上部スリムバー（パンくずリスト）、右端4タブパネル（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`） |
-| 3 | **[`canvas_tool.rs`](file:///Users/dskzts/animelite/src/canvas_tool.rs)** | ~1,190行 | `Tool` 列挙型、変形・選択のドラッグ＆ホバー状態型、ビューポート（ズーム・パン）＆ステージ枠描画、レイヤースコープ同期、ツール切替、カスタムカーソル＆キャンバス描画 |
-| 4 | **[`tool_paint.rs`](file:///Users/dskzts/animelite/src/tool_paint.rs)** | ~175行 | **描画・塗りツール**（ブラシ `B`・消しゴム `E`・バケツ塗り `K`・スポイト `I`）の入力処理とコミットロジック |
-| 5 | **[`tool_select.rs`](file:///Users/dskzts/animelite/src/tool_select.rs)** | ~1,520行 | **選択ツール（`V`）**、マーキー範囲選択（部分スライス）、輪郭の粘土変形（Reshape）、アンカー追加/削除（`+`/`-`）、グループ階層＆インプレイス編集、コピー＆ペースト |
-| 6 | **[`tool_transform.rs`](file:///Users/dskzts/animelite/src/tool_transform.rs)** | ~480行 | **自由変形ツール（`Q`）**、ピボット管理、8方向スケールハンドル・回転・平行移動・反転、変形バウンディングボックス描画 |
-| 7 | **[`timeline.rs`](file:///Users/dskzts/animelite/src/timeline.rs)** | ~1,220行 | **タイムラインのデータモデル＆ロジック**（`Timeline` / `Layer` / `Keyframe` / `Cel`、3段階メッシュキャッシュ＆ゼロコピー再生、キーフレーム操作、フレーム移動/複製、レイヤー操作） |
-| 8 | **[`timeline_ui.rs`](file:///Users/dskzts/animelite/src/timeline_ui.rs)** | ~1,450行 | **タイムライン（X-Sheet）UI描画＆マウス操作**（`TimelineLayout`、コントロールバー、ルーラー、フレームグリッド、キーフレーム区間描画、レイヤー一覧、D&D操作） |
-| 9 | **[`symbol.rs`](file:///Users/dskzts/animelite/src/symbol.rs)** | ~1,340行 | **シンボル＆ライブラリ＆クラシックトゥイーン**（`F8` シンボル化、ライブラリ管理、シンボル内タイムライン編集、再生モード `Loop`/`PlayOnce`/`SingleFrame`、`T` トゥイーン補間、関連UI描画） |
-| 10 | **[`vector_engine.rs`](file:///Users/dskzts/animelite/src/vector_engine.rs)** | ~2,880行 | **2Dベクター幾何エンジン**（`Contour` / `FillShape`、ストローク輪郭生成、G1連続2次ベジェ曲線フィット、`i_overlay` ブーリアン演算＆De Casteljau 再構築、`lyon` 三角形メッシュ化） |
-| 11 | **[`tests.rs`](file:///Users/dskzts/animelite/src/tests.rs)** | ~1,760行 | 全機能を検証する自動ユニットテストスイート（全22テスト） |
+| 1 | **[`main.rs`](./main.rs)** | ~610行 | アプリ起動、フォント・テーマ初期化、アプリ全体状態（`FlashBrushApp`）、Undo/Redo履歴、キーボードショートカット、メインループ（`eframe::App::update`） |
+| 2 | **[`panels.rs`](./panels.rs)** | ~650行 | Material Icons 定数（`mod icons`）、左端縦ツールバー、ステージ上部スリムバー（パンくずリスト）、右端4タブパネル（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`） |
+| 3 | **[`canvas_tool.rs`](./canvas_tool.rs)** | ~1,200行 | `Tool` 列挙型、変形・選択のドラッグ＆ホバー状態型、ビューポート（ズーム・パン）＆ステージ枠描画、レイヤースコープ同期、ツール切替、カスタムカーソル＆キャンバス描画 |
+| 4 | **[`tool_paint.rs`](./tool_paint.rs)** | ~175行 | **描画・塗りツール**（ブラシ `B`・消しゴム `E`・バケツ塗り `K`・スポイト `I`）の入力処理とコミットロジック |
+| 5 | **[`tool_select.rs`](./tool_select.rs)** | ~1,535行 | **選択ツール（`V`）**、マーキー範囲選択（部分スライス）、輪郭の粘土変形（Reshape）、アンカー追加/削除（`+`/`-`）、グループ階層＆インプレイス編集、コピー＆ペースト |
+| 6 | **[`tool_transform.rs`](./tool_transform.rs)** | ~480行 | **自由変形ツール（`Q`）**、ピボット管理、8方向スケールハンドル・回転・平行移動・反転、変形バウンディングボックス描画 |
+| 7 | **[`timeline.rs`](./timeline.rs)** | ~1,220行 | **タイムラインのデータモデル＆ロジック**（`Timeline` / `Layer` / `Keyframe` / `Cel`、3段階メッシュキャッシュ＆ゼロコピー再生、キーフレーム操作、フレーム移動/複製、レイヤー操作） |
+| 8 | **[`timeline_ui.rs`](./timeline_ui.rs)** | ~1,450行 | **タイムライン（X-Sheet）UI描画＆マウス操作**（`TimelineLayout`、コントロールバー、ルーラー、フレームグリッド、キーフレーム区間描画、レイヤー一覧、D&D操作） |
+| 9 | **[`symbol.rs`](./symbol.rs)** | ~1,340行 | **シンボル＆ライブラリ＆クラシックトゥイーン**（`F8` シンボル化、ライブラリ管理、シンボル内タイムライン編集、再生モード `Loop`/`PlayOnce`/`SingleFrame`、`T` トゥイーン補間、関連UI描画） |
+| 10 | **[`vector_engine.rs`](./vector_engine.rs)** | ~2,880行 | **2Dベクター幾何エンジン**（`Contour` / `FillShape`、ストローク輪郭生成、G1連続2次ベジェ曲線フィット、`i_overlay` ブーリアン演算＆De Casteljau 再構築、`lyon` 三角形メッシュ化） |
+| 11 | **[`tests.rs`](./tests.rs)** | ~1,760行 | 全機能を検証する自動ユニットテストスイート（全22テスト） |
 
 ---
 
-## 1. [`main.rs`](file:///Users/dskzts/animelite/src/main.rs) — エントリポイント・アプリ状態・Undo/Redo・ショートカット・メインループ
+## 1. [`main.rs`](./main.rs) — エントリポイント・アプリ状態・Undo/Redo・ショートカット・メインループ
 
 ### 定数・初期化関数
-- **`MAX_UNDO_HISTORY: usize`** (`100`) — Undo スタックが保持する最大スナップショット数。
-- **`main() -> eframe::Result<()>`** — ウィンドウサイズ（`1280 × 820`）とタイトル（`"Animelite"`）を設定し、フォント・テーマを初期化して `eframe::run_native` を起動。
+- **`MAX_UNDO_HISTORY: usize`** (`50`) — Undo スタックが保持する最大スナップショット数。
+- **`main() -> eframe::Result<()>`** — ウィンドウサイズ（`1280 × 820`）とタイトル（`"is2d"`）を設定し、フォント・テーマを初期化して `eframe::run_native` を起動。
 - **`configure_japanese_fonts(ctx: &egui::Context)`** — `fonts/NotoSansJP-Medium.ttf`（日本語表示）および `fonts/MaterialIcons-Regular.ttf`（UIアイコン）を読み込み、`Proportional` / `Monospace` フォントファミリーへ登録。
 - **`configure_sharp_light_theme(ctx: &egui::Context)`** — すべてのウィジェット・パネル・メニューの角丸を `Rounding::ZERO` に統一したシャープなライトテーマを設定。
 
@@ -88,7 +88,7 @@
 
 ---
 
-## 2. [`panels.rs`](file:///Users/dskzts/animelite/src/panels.rs) — アイコン定数・左ツールバー・上部ステージバー・右プロパティパネル
+## 2. [`panels.rs`](./panels.rs) — アイコン定数・左ツールバー・上部ステージバー・右プロパティパネル
 
 ### モジュール `icons`
 `MaterialIcons-Regular.ttf` の Unicode コードポイント定数（全22種）：
@@ -125,7 +125,7 @@
 
 ---
 
-## 3. [`canvas_tool.rs`](file:///Users/dskzts/animelite/src/canvas_tool.rs) — ツール定義・ビューポート・ステージ枠・カーソル・キャンバス描画
+## 3. [`canvas_tool.rs`](./canvas_tool.rs) — ツール定義・ビューポート・ステージ枠・カーソル・キャンバス描画
 
 ### 列挙型・状態型
 - **`enum Tool`** — メインツール6種（`Select`, `Transform`, `Brush`, `Eraser`, `Bucket`, `Eyedropper`）。
@@ -188,7 +188,7 @@
 
 ---
 
-## 4. [`tool_paint.rs`](file:///Users/dskzts/animelite/src/tool_paint.rs) — ブラシ・消しゴム・バケツ・スポイト操作ロジック
+## 4. [`tool_paint.rs`](./tool_paint.rs) — ブラシ・消しゴム・バケツ・スポイト操作ロジック
 
 ### `FlashBrushApp` のメソッド（`tool_paint.rs` 内）
 - **`handle_brush_or_eraser_input(&mut self, response: &egui::Response, painter: &egui::Painter)`** — ブラシ（`B`）および消しゴム（`E`）のドラッグ開始・ドラッグ中（点列追加と `generate_brush_outline_at_zoom` によるリアルタイムアウトライン生成）・ドラッグ終了（`commit_raw_outline` 呼び出し）を処理。
@@ -200,7 +200,7 @@
 
 ---
 
-## 5. [`tool_select.rs`](file:///Users/dskzts/animelite/src/tool_select.rs) — 選択ツール・輪郭粘土変形・グループ階層・クリップボード
+## 5. [`tool_select.rs`](./tool_select.rs) — 選択ツール・輪郭粘土変形・グループ階層・クリップボード
 
 ### `FlashBrushApp` のメソッド（`tool_select.rs` 内）
 - **スナップショット＆スコープ挿入ヘルパー**：
@@ -250,7 +250,7 @@
 
 ---
 
-## 6. [`tool_transform.rs`](file:///Users/dskzts/animelite/src/tool_transform.rs) — 自由変形ツール（`Q`）
+## 6. [`tool_transform.rs`](./tool_transform.rs) — 自由変形ツール（`Q`）
 
 ### `FlashBrushApp` のメソッド（`tool_transform.rs` 内）
 - **`active_transform_pivot(&self, bbox: Rect) -> Point`** — カスタムピボットが設定されていればその座標、未設定なら選択バウンディングボックスの中心座標を返す。
@@ -268,7 +268,7 @@
 
 ---
 
-## 7. [`timeline.rs`](file:///Users/dskzts/animelite/src/timeline.rs) — タイムラインのデータモデル・3段階メッシュキャッシュ・キーフレーム＆レイヤー操作
+## 7. [`timeline.rs`](./timeline.rs) — タイムラインのデータモデル・3段階メッシュキャッシュ・キーフレーム＆レイヤー操作
 
 ### 構造体・列挙型（`timeline.rs` 内）
 - **`struct CelMeshCache`** — セル単位のキャッシュ構造体（`world_revision`, `world_batch_mesh`, `last_zoom`, `last_pan`, `last_screen_mesh`, `last_onion_tint`, `last_onion_mesh`）。
@@ -335,7 +335,7 @@
 
 ---
 
-## 8. [`timeline_ui.rs`](file:///Users/dskzts/animelite/src/timeline_ui.rs) — タイムライン（X-Sheet）UI描画・マウス操作
+## 8. [`timeline_ui.rs`](./timeline_ui.rs) — タイムライン（X-Sheet）UI描画・マウス操作
 
 ### 定数・レイアウト構造体
 - **レイアウト定数**：
@@ -376,7 +376,7 @@
 
 ---
 
-## 9. [`symbol.rs`](file:///Users/dskzts/animelite/src/symbol.rs) — シンボル・ライブラリ・再生オプション・クラシックトゥイーン・関連UI
+## 9. [`symbol.rs`](./symbol.rs) — シンボル・ライブラリ・再生オプション・クラシックトゥイーン・関連UI
 
 ### 構造体・列挙型（`symbol.rs` 内）
 - **`enum SymbolLoopMode`** — グラフィックシンボルの再生モード列挙型：
@@ -438,7 +438,7 @@
 
 ---
 
-## 10. [`vector_engine.rs`](file:///Users/dskzts/animelite/src/vector_engine.rs) — 2Dベクター幾何・曲線フィット・ブーリアン演算・メッシュ化エンジン
+## 10. [`vector_engine.rs`](./vector_engine.rs) — 2Dベクター幾何・曲線フィット・ブーリアン演算・メッシュ化エンジン
 
 ### 定数・アトミックカウンタ
 - **`REFERENCE_BRUSH_RADIUS: f64`** (`8.0`) — ブラシ太さに依存せず一定のスムージング品質を保つための基準ブラシ半径。
@@ -528,7 +528,7 @@
 
 ---
 
-## 11. [`tests.rs`](file:///Users/dskzts/animelite/src/tests.rs) — 自動ユニットテストスイート（全22件）
+## 11. [`tests.rs`](./tests.rs) — 自動ユニットテストスイート（全22件）
 
 `cargo test` で実行される全22件のユニットテストとテスト用ヘルパー関数：
 

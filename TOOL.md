@@ -1,6 +1,6 @@
-# animelite ツール仕様・拡張ガイド (`TOOL.md`)
+# is2d ツール仕様・拡張ガイド (`TOOL.md`)
 
-`animelite` のツール群は **Adobe Animate (旧 Flash)** のベクター描画・Merge Drawing（結合描画）・オブジェクトグループ編集体系に準拠して設計されています。
+`is2d` のツール群は **Adobe Animate (旧 Flash)** のベクター描画・Merge Drawing（結合描画）・オブジェクトグループ編集体系に準拠して設計されています。
 
 ---
 
@@ -46,7 +46,7 @@
 
 ## 3. クラス（構造体・列挙型）設計と管理構造
 
-ツールの定義とメタデータは [`src/canvas_tool.rs`](file:///Users/dskzts/animelite/src/canvas_tool.rs) の `Tool` 列挙型（`enum Tool`）と `impl Tool` に一元化されています。
+ツールの定義とメタデータは [`src/canvas_tool.rs`](./src/canvas_tool.rs) の `Tool` 列挙型（`enum Tool`）と `impl Tool` に一元化されています。
 
 ```rust
 pub(crate) enum Tool {
@@ -63,13 +63,13 @@ pub(crate) enum Tool {
 
 | ファイル | 役割 |
 | :--- | :--- |
-| **[`src/canvas_tool.rs`](file:///Users/dskzts/animelite/src/canvas_tool.rs)** | `Tool` 列挙型、モード切替（`set_tool`）、ズーム/パン座標変換、ステージ＆オニオンスキン描画、カーソル表示 |
-| **[`src/tool_paint.rs`](file:///Users/dskzts/animelite/src/tool_paint.rs)** | ブラシ（`B`）・消しゴム（`E`）・バケツ塗り（`K`）・スポイト（`I`）の操作ロジック |
-| **[`src/tool_select.rs`](file:///Users/dskzts/animelite/src/tool_select.rs)** | 選択ツール（`V`）、マーキー部分スライス、輪郭変形（Reshape）、アンカー追加/削除、グループ・コピー＆ペースト |
-| **[`src/tool_transform.rs`](file:///Users/dskzts/animelite/src/tool_transform.rs)** | 自由変形ツール（`Q`）、8方向拡大縮小、回転、ピボット移動、反転、バウンディングボックス描画 |
+| **[`src/canvas_tool.rs`](./src/canvas_tool.rs)** | `Tool` 列挙型、モード切替（`set_tool`）、ズーム/パン座標変換、ステージ＆オニオンスキン描画、カーソル表示 |
+| **[`src/tool_paint.rs`](./src/tool_paint.rs)** | ブラシ（`B`）・消しゴム（`E`）・バケツ塗り（`K`）・スポイト（`I`）の操作ロジック |
+| **[`src/tool_select.rs`](./src/tool_select.rs)** | 選択ツール（`V`）、マーキー部分スライス、輪郭変形（Reshape）、アンカー追加/削除、グループ・コピー＆ペースト |
+| **[`src/tool_transform.rs`](./src/tool_transform.rs)** | 自由変形ツール（`Q`）、8方向拡大縮小、回転、ピボット移動、反転、バウンディングボックス描画 |
 
-### `Tool` が持つメソッド一覧（[`src/canvas_tool.rs`](file:///Users/dskzts/animelite/src/canvas_tool.rs)）
-- **`Tool::ALL`**：左ツールバーに並べる標準順序の配列。[`draw_left_main_tool_buttons`](file:///Users/dskzts/animelite/src/panels.rs) がこの配列をループしてボタンを自動生成します。
+### `Tool` が持つメソッド一覧（[`src/canvas_tool.rs`](./src/canvas_tool.rs)）
+- **`Tool::ALL`**：左ツールバーに並べる標準順序の配列。[`draw_left_main_tool_buttons`](./src/panels.rs) がこの配列をループしてボタンを自動生成します。
 - **`tool.icon()`**：左ツールバーのボタンに表示するアイコン文字列を返します。
 - **`tool.label()`**：右側の「ツール」プロパティタブに表示するツール名（ショートカット表記付き）を返します。
 - **`tool.tooltip()`**：左ツールバーでホバーした際のツールチップ文字列を返します。
@@ -82,11 +82,11 @@ pub(crate) enum Tool {
 
 将来「直線ツール」「矩形・楕円ツール」「ペンツール」「投げ縄ツール」などを追加する場合は、以下の手順だけで安全に追加できます（未対応の箇所があれば Rust コンパイラが `match` の網羅性チェックで場所を教えてくれます）：
 
-1. **[`src/canvas_tool.rs`](file:///Users/dskzts/animelite/src/canvas_tool.rs) の `enum Tool` に列挙子を追加する**
+1. **[`src/canvas_tool.rs`](./src/canvas_tool.rs) の `enum Tool` に列挙子を追加する**
    - `Tool::ALL` に追加し、`icon()` / `label()` / `tooltip()` / `shortcut_key()` の `match` 分岐に1行ずつ追加します。
    - これだけで**左ツールバーへのボタン追加**、**ショートカットキー対応**、**右パネルの「ツール」タブ名表示**が自動的に完了します。
-2. **ツール固有のサブボタンやプロパティ項目がある場合（[`src/panels.rs`](file:///Users/dskzts/animelite/src/panels.rs)）**
+2. **ツール固有のサブボタンやプロパティ項目がある場合（[`src/panels.rs`](./src/panels.rs)）**
    - 左ツールバーに補助ボタンを出したい場合は `draw_left_tool_sub_actions` に分岐を追加します。
    - 右プロパティパネルの「ツール」タブに設定スライダー等を出したい場合は `draw_tool_property_tab` に追加します。
-3. **キャンバス上のマウス入力・カーソル描画（[`src/main.rs`](file:///Users/dskzts/animelite/src/main.rs) / [`src/canvas_tool.rs`](file:///Users/dskzts/animelite/src/canvas_tool.rs)）**
+3. **キャンバス上のマウス入力・カーソル描画（[`src/main.rs`](./src/main.rs) / [`src/canvas_tool.rs`](./src/canvas_tool.rs)）**
    - `is_current_tool_allowed`、`handle_canvas_tool_input`、`draw_tool_cursor_and_feedback` の `match self.tool` に処理を追加します。

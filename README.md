@@ -1,4 +1,4 @@
-# animelite — Flash Brush & 2D Vector Animation Studio
+# is2d — Flash Brush & 2D Vector Animation Studio
 
 Macromedia Flash（現 Adobe Animate）の **「ブラシツール（マージ描画モード）」** の描き心地・粘土のような輪郭変形体験・X-Sheet タイムライン・シンボル＆クラシックトゥイーンを Rust で実装した 2D ベクタードローイング＆アニメーション制作アプリケーションです。
 
@@ -78,8 +78,9 @@ Macromedia Flash（現 Adobe Animate）の **「ブラシツール（マージ�
 
 ## ソースコード構成・詳細ドキュメント
 
-- **[`src/README.md`](file:///Users/dskzts/animelite/src/README.md)**: `src/` ディレクトリ内の全11ファイル（[`main.rs`](file:///Users/dskzts/animelite/src/main.rs), [`panels.rs`](file:///Users/dskzts/animelite/src/panels.rs), [`canvas_tool.rs`](file:///Users/dskzts/animelite/src/canvas_tool.rs), [`tool_paint.rs`](file:///Users/dskzts/animelite/src/tool_paint.rs), [`tool_select.rs`](file:///Users/dskzts/animelite/src/tool_select.rs), [`tool_transform.rs`](file:///Users/dskzts/animelite/src/tool_transform.rs), [`timeline.rs`](file:///Users/dskzts/animelite/src/timeline.rs), [`timeline_ui.rs`](file:///Users/dskzts/animelite/src/timeline_ui.rs), [`symbol.rs`](file:///Users/dskzts/animelite/src/symbol.rs), [`vector_engine.rs`](file:///Users/dskzts/animelite/src/vector_engine.rs), [`tests.rs`](file:///Users/dskzts/animelite/src/tests.rs)）の全構造体・全列挙型・全定数・全関数・全22テストを網羅した完全リファレンスです。
-- **[`DOCUMENT.md`](file:///Users/dskzts/animelite/DOCUMENT.md)**: アーキテクチャ設計・データ構造・アルゴリズムの詳細解説ドキュメントです。
+- **[`src/README.md`](./src/README.md)**: `src/` ディレクトリ内の全11ファイル（[`main.rs`](./src/main.rs), [`panels.rs`](./src/panels.rs), [`canvas_tool.rs`](./src/canvas_tool.rs), [`tool_paint.rs`](./src/tool_paint.rs), [`tool_select.rs`](./src/tool_select.rs), [`tool_transform.rs`](./src/tool_transform.rs), [`timeline.rs`](./src/timeline.rs), [`timeline_ui.rs`](./src/timeline_ui.rs), [`symbol.rs`](./src/symbol.rs), [`vector_engine.rs`](./src/vector_engine.rs), [`tests.rs`](./src/tests.rs)）の全構造体・全列挙型・全定数・全関数・全22テストを網羅した完全リファレンスです。
+- **[`DOCUMENT.md`](./DOCUMENT.md)**: ユーザー向けの全機能・操作ガイドです。
+- **[`ARCHITECTURE.md`](./ARCHITECTURE.md)**: アーキテクチャ設計・データ構造・アルゴリズムの詳細解説ドキュメントです。
 
 ---
 
