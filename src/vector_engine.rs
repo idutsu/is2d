@@ -364,21 +364,37 @@ pub(crate) fn affine_rotate_around(pivot: Point, angle_rad: f64) -> Affine {
         * Affine::translate(-pivot.to_vec2())
 }
 
-/// 2つの2Dアフィン変換行列 `start` と `end` を TRS（平行移動・最短回転・スケール・シアー）に分解し、
-/// パラメータ `t`（`0.0..=1.0`）で補間した新しい `Affine` を返す（クラシックトゥイーン用）
-pub(crate) fn interpolate_affine(start: Affine, end: Affine, t: f64) -> Affine {
+/// 2つの2Dアフィン変換行列 `start` と `end` を、それぞれのローカル基準点（ピボット）`start_pivot`, `end_pivot` を軸として
+/// TRS（ピボットのワールド平行移動・最短回転・スケール・シアー）に分解し、
+/// パラメータ `t`（`0.0..=1.0`）で補間した `(補間後の Affine, 補間後のローカルピボット Point)` を返す（クラシックトゥイーン用）
+pub(crate) fn interpolate_affine_with_pivot(
+    start: Affine,
+    start_pivot: Point,
+    end: Affine,
+    end_pivot: Point,
+    t: f64,
+) -> (Affine, Point) {
+    // 片方のキーフレームのみピボットが移動されている（もう片方が初期位置 (0, 0) のまま）場合は、
+    // 移動された側のローカルピボットを区間共通の回転・変形軸として採用する
+    let start_custom = (start_pivot - Point::ZERO).hypot() > 1e-6;
+    let end_custom = (end_pivot - Point::ZERO).hypot() > 1e-6;
+    let (p0, p1) = match (start_custom, end_custom) {
+        (true, false) => (start_pivot, start_pivot),
+        (false, true) => (end_pivot, end_pivot),
+        _ => (start_pivot, end_pivot),
+    };
+
     let t = t.clamp(0.0, 1.0);
     if t <= 0.0 {
-        return start;
+        return (start, p0);
     }
     if t >= 1.0 {
-        return end;
+        return (end, p1);
     }
-    let (tx0, ty0, rot0, sx0, sy0, sh0) = decompose_affine_trs(start);
-    let (tx1, ty1, rot1, sx1, sy1, sh1) = decompose_affine_trs(end);
 
-    let tx = tx0 + (tx1 - tx0) * t;
-    let ty = ty0 + (ty1 - ty0) * t;
+    let (_, _, rot0, sx0, sy0, sh0) = decompose_affine_trs(start);
+    let (_, _, rot1, sx1, sy1, sh1) = decompose_affine_trs(end);
+
     let mut delta_rot = (rot1 - rot0).rem_euclid(std::f64::consts::TAU);
     if delta_rot > std::f64::consts::PI {
         delta_rot -= std::f64::consts::TAU;
@@ -393,7 +409,14 @@ pub(crate) fn interpolate_affine(start: Affine, end: Affine, t: f64) -> Affine {
     let b = sx * sin_r;
     let c = sh * cos_r - sy * sin_r;
     let d = sh * sin_r + sy * cos_r;
-    Affine::new([a, b, c, d, tx, ty])
+    let linear = Affine::new([a, b, c, d, 0.0, 0.0]);
+
+    let local_pivot = p0.lerp(p1, t);
+    let world_pivot = (start * p0).lerp(end * p1, t);
+    let interp_xform = Affine::translate(world_pivot.to_vec2())
+        * linear
+        * Affine::translate(-local_pivot.to_vec2());
+    (interp_xform, local_pivot)
 }
 
 fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64, f64, f64) {

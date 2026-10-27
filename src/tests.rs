@@ -1677,6 +1677,47 @@
         let start_cy = (start_bbox.y0 + start_bbox.y1) * 0.5;
         assert!((start_cx - 150.0).abs() < 1.0, "start_cx = {start_cx}");
         assert!((start_cy - 150.0).abs() < 1.0, "start_cy = {start_cy}");
+
+        // 8. シンボルインスタンスの変形中心（ピボット）を左端の関節位置 (100, 150) に設定し、
+        //    選択解除・フレーム移動後も保持され、そのピボットを中心にクラシックトゥイーン回転補間されること
+        app.switch_to_layer_and_frame(0, 4);
+        app.selected_shapes = vec![0];
+        // 一旦 frame 4 の位置も frame 0 と同じ (150, 150) に戻す
+        let snap_reset = app.shapes.clone();
+        app.translate_selected_shapes(KVec2::new(-200.0, -80.0));
+        app.commit_moved_selection(snap_reset);
+        app.sync_shapes_to_timeline();
+
+        // frame 4 でピボットを左端 (100, 150) [ローカル座標 (-50, 0)] に移動して +90° 回転
+        let joint_world = Point::new(100.0, 150.0);
+        assert!(app.set_selected_symbol_world_pivot(Some(joint_world), true));
+        app.clear_selection();
+        app.selected_shapes = vec![0];
+        let bbox_f4 = app.selection_bounding_box().unwrap();
+        assert!(
+            (app.active_transform_pivot(bbox_f4) - joint_world).hypot() < 1e-4,
+            "選択解除後もシンボルインスタンスのカスタムピボット座標が保持されること"
+        );
+        assert!(app.rotate_selected_shapes(std::f64::consts::FRAC_PI_2));
+        app.sync_shapes_to_timeline();
+
+        // 中間フレーム（frame 2, t = 0.5 = +45° 回転）において、関節ピボット (100, 150) がぶれずに固定され、
+        // 元の中心 (150, 150) [関節から距離 50px] が 45° 回転位置 (100 + 50*cos45°, 150 + 50*sin45°) を通過すること
+        app.switch_to_layer_and_frame(0, 2);
+        let mid_binding = app.shapes[0].symbol_instance.unwrap();
+        assert!(
+            (mid_binding.world_pivot() - joint_world).hypot() < 1e-4,
+            "トゥイーン中間フレームでもピボット（関節位置）のワールド座標が固定されていること: {:?}",
+            mid_binding.world_pivot()
+        );
+        let expected_mid_center = Point::new(
+            100.0 + 50.0 * std::f64::consts::FRAC_1_SQRT_2,
+            150.0 + 50.0 * std::f64::consts::FRAC_1_SQRT_2,
+        );
+        assert!(
+            app.shapes[0].contains_point(expected_mid_center),
+            "中間フレーム (t=0.5) でピボット (100, 150) を軸とした +45° 回転位置にシェイプが存在すること"
+        );
     }
 
     #[test]

@@ -173,7 +173,11 @@ pub(crate) enum TransformHoverTarget {
 #[derive(Clone, Debug)]
 pub(crate) enum TransformDragState {
     None,
-    MovePivot,
+    MovePivot {
+        orig_pivot: Point,
+        undo_snapshot: Vec<FillShape>,
+        changed: bool,
+    },
     Move {
         last_pos: Point,
         total_delta: KVec2,
@@ -592,7 +596,7 @@ impl FlashBrushApp {
         pos: Pos2,
     ) {
         match &self.transform_drag {
-            TransformDragState::Move { .. } | TransformDragState::MovePivot => {
+            TransformDragState::Move { .. } | TransformDragState::MovePivot { .. } => {
                 ctx.set_cursor_icon(CursorIcon::Grabbing);
             }
             TransformDragState::Scale { handle, .. } => {

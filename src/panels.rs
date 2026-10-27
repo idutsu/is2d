@@ -204,7 +204,7 @@ impl FlashBrushApp {
         }
 
         if ui
-            .button(format!("{}", icons::ARROW_BACK))
+            .button(icons::ARROW_BACK)
             .on_hover_text("1つ上の階層へ戻る (Esc)")
             .clicked()
         {
@@ -494,14 +494,14 @@ impl FlashBrushApp {
 
         if ui
             .add_enabled(
-                has_sel && self.transform_pivot.is_some(),
+                has_sel && self.has_custom_transform_pivot(),
                 egui::Button::new(format!("{} 変形中心（ピボット）をリセット", icons::PIVOT_RESET))
                     .min_size(Vec2::new(ui.available_width(), 28.0)),
             )
-            .on_hover_text("移動した変形中心（ピボット）を選択範囲の中央へ戻す")
+            .on_hover_text("移動した変形中心（ピボット）を初期位置（選択中央 / シンボル基準点）へ戻す")
             .clicked()
         {
-            self.transform_pivot = None;
+            self.reset_selected_transform_pivot();
         }
 
         self.draw_selected_symbol_properties(ui);

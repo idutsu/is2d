@@ -15,8 +15,75 @@ impl FlashBrushApp {
     // ------------------------------------------------------------------------
 
     /// 自由変形ツールの現在の基準点（ピボット座標）を返す
+    /// （単一シンボルインスタンス選択時はインスタンスに保存されたピボット座標 `binding.world_pivot()` を返す）
     pub(crate) fn active_transform_pivot(&self, bbox: KRect) -> Point {
-        self.transform_pivot.unwrap_or_else(|| bbox.center())
+        if let Some(piv) = self.transform_pivot {
+            return piv;
+        }
+        if let Some((binding, _, _)) = self.selected_single_symbol_info() {
+            return binding.world_pivot();
+        }
+        bbox.center()
+    }
+
+    /// 現在の選択対象に初期位置から移動されたカスタム変形中心（ピボット）が設定されているかを返す
+    pub(crate) fn has_custom_transform_pivot(&self) -> bool {
+        if self.transform_pivot.is_some() {
+            return true;
+        }
+        self.selected_single_symbol_info()
+            .is_some_and(|(b, _, _)| (b.pivot - Point::ZERO).hypot() > 1e-6)
+    }
+
+    /// 単一のシンボルインスタンスが選択されている場合、ワールド座標 `world_pivot`（`None` なら初期基準点 `(0, 0)`）を
+    /// シンボルローカル座標に変換してインスタンスの `binding.pivot` に保存する
+    pub(crate) fn set_selected_symbol_world_pivot(
+        &mut self,
+        world_pivot: Option<Point>,
+        commit_to_timeline: bool,
+    ) -> bool {
+        let Some((binding, _, _)) = self.selected_single_symbol_info() else {
+            return false;
+        };
+        let new_local_pivot = match world_pivot {
+            Some(pt) => {
+                if binding.xform.determinant().abs() <= 1e-9 {
+                    return false;
+                }
+                binding.xform.inverse() * pt
+            }
+            None => Point::ZERO,
+        };
+        if (new_local_pivot - binding.pivot).hypot() <= 1e-7 {
+            return true;
+        }
+        if commit_to_timeline {
+            let undo_snapshot = self.shapes.clone();
+            self.record_undo_snapshot(undo_snapshot);
+        }
+        let inst_gid = binding.instance_gid;
+        for shape in &mut self.shapes {
+            if let Some(b) = shape
+                .symbol_instance
+                .as_mut()
+                .filter(|b| b.instance_gid == inst_gid)
+            {
+                b.pivot = new_local_pivot;
+            }
+        }
+        if commit_to_timeline {
+            self.sync_shapes_to_timeline();
+        }
+        true
+    }
+
+    /// 選択オブジェクトの変形中心（ピボット）を初期位置（選択中央、またはシンボルの基準点 `(0, 0)`）へリセットする
+    pub(crate) fn reset_selected_transform_pivot(&mut self) -> bool {
+        let mut changed = self.transform_pivot.take().is_some();
+        if self.set_selected_symbol_world_pivot(None, true) {
+            changed = true;
+        }
+        changed
     }
 
     /// 自由変形ツール（`Q`）でのマウス位置のヒット判定
@@ -65,6 +132,11 @@ impl FlashBrushApp {
             return false;
         }
         let undo_snapshot = self.shapes.clone();
+        if let Some(piv) = self.transform_pivot {
+            if self.set_selected_symbol_world_pivot(Some(piv), false) {
+                self.transform_pivot = None;
+            }
+        }
         let mut any_transformed = false;
         for &sel_idx in &self.selected_shapes {
             if let Some(shape) = self.shapes.get_mut(sel_idx) {
@@ -122,7 +194,7 @@ impl FlashBrushApp {
         if response.double_clicked() {
             if let Some(pt) = mouse_pt {
                 if self.compute_transform_hover(pt) == TransformHoverTarget::Pivot {
-                    self.transform_pivot = None;
+                    self.reset_selected_transform_pivot();
                 } else if !self.enter_group_at(pt) {
                     self.exit_current_group();
                 }
@@ -165,11 +237,24 @@ impl FlashBrushApp {
 
         match self.compute_transform_hover(pt) {
             TransformHoverTarget::Pivot => {
-                self.transform_drag = TransformDragState::MovePivot;
+                if let Some(bbox) = self.selection_bounding_box() {
+                    let orig_pivot = self.active_transform_pivot(bbox);
+                    self.transform_drag = TransformDragState::MovePivot {
+                        orig_pivot,
+                        undo_snapshot: self.shapes.clone(),
+                        changed: false,
+                    };
+                }
             }
             TransformHoverTarget::Scale(handle) => {
                 if let Some(orig_bbox) = self.selection_bounding_box() {
+                    let undo_snapshot = self.shapes.clone();
                     let orig_pivot = self.active_transform_pivot(orig_bbox);
+                    if let Some(piv) = self.transform_pivot {
+                        if self.set_selected_symbol_world_pivot(Some(piv), false) {
+                            self.transform_pivot = None;
+                        }
+                    }
                     let anchor = if alt_held {
                         orig_pivot
                     } else {
@@ -181,21 +266,27 @@ impl FlashBrushApp {
                         handle_start: handle.position(orig_bbox),
                         orig_pivot,
                         orig_shapes: self.selected_shapes_snapshot(),
-                        undo_snapshot: self.shapes.clone(),
+                        undo_snapshot,
                         changed: false,
                     };
                 }
             }
             TransformHoverTarget::Rotate => {
                 if let Some(orig_bbox) = self.selection_bounding_box() {
+                    let undo_snapshot = self.shapes.clone();
                     let pivot = self.active_transform_pivot(orig_bbox);
+                    if let Some(piv) = self.transform_pivot {
+                        if self.set_selected_symbol_world_pivot(Some(piv), false) {
+                            self.transform_pivot = None;
+                        }
+                    }
                     self.transform_drag = TransformDragState::Rotate {
                         orig_bbox,
                         pivot,
                         start_angle: (pt.y - pivot.y).atan2(pt.x - pivot.x),
                         current_angle: 0.0,
                         orig_shapes: self.selected_shapes_snapshot(),
-                        undo_snapshot: self.shapes.clone(),
+                        undo_snapshot,
                     };
                 }
             }
@@ -229,9 +320,17 @@ impl FlashBrushApp {
 
     fn update_transform_drag(&mut self, pt: Point, shift_held: bool, alt_held: bool) {
         let mut move_delta: Option<KVec2> = None;
+        let mut new_pivot_pt: Option<Point> = None;
         match &mut self.transform_drag {
-            TransformDragState::MovePivot => {
-                self.transform_pivot = Some(pt);
+            TransformDragState::MovePivot {
+                orig_pivot,
+                changed,
+                ..
+            } => {
+                if (pt - *orig_pivot).hypot() > 0.5 / (self.view_zoom as f64) {
+                    *changed = true;
+                }
+                new_pivot_pt = Some(pt);
             }
             TransformDragState::Move {
                 last_pos,
@@ -327,6 +426,13 @@ impl FlashBrushApp {
             }
             TransformDragState::None => {}
         }
+        if let Some(piv_pt) = new_pivot_pt {
+            if self.set_selected_symbol_world_pivot(Some(piv_pt), false) {
+                self.transform_pivot = None;
+            } else {
+                self.transform_pivot = Some(piv_pt);
+            }
+        }
         if let Some(delta) = move_delta {
             self.translate_selected_shapes(delta);
         }
@@ -372,7 +478,21 @@ impl FlashBrushApp {
                 let end_pos = mouse_pt.unwrap_or(current_pos);
                 self.apply_marquee_selection(start_pos, end_pos, additive);
             }
-            TransformDragState::MovePivot | TransformDragState::None => {}
+            TransformDragState::MovePivot {
+                undo_snapshot,
+                changed,
+                ..
+            } => {
+                if changed {
+                    if self.selected_single_symbol_info().is_some() {
+                        self.record_undo_snapshot(undo_snapshot);
+                        self.sync_shapes_to_timeline();
+                    }
+                } else {
+                    self.shapes = undo_snapshot;
+                }
+            }
+            TransformDragState::None => {}
         }
     }
 
@@ -457,7 +577,7 @@ impl FlashBrushApp {
 
         // 基準点（ピボット点：白い丸＋中心ドット）を描画
         let piv_pos = self.world_to_screen(pivot);
-        let piv_active = matches!(self.transform_drag, TransformDragState::MovePivot)
+        let piv_active = matches!(self.transform_drag, TransformDragState::MovePivot { .. })
             || (matches!(self.transform_drag, TransformDragState::None)
                 && self.transform_hover == TransformHoverTarget::Pivot);
         let piv_radius = if piv_active { 5.8 } else { 4.8 };

@@ -253,7 +253,10 @@
 ## 6. [`tool_transform.rs`](./tool_transform.rs) — 自由変形ツール（`Q`）
 
 ### `FlashBrushApp` のメソッド（`tool_transform.rs` 内）
-- **`active_transform_pivot(&self, bbox: Rect) -> Point`** — カスタムピボットが設定されていればその座標、未設定なら選択バウンディングボックスの中心座標を返す。
+- **`active_transform_pivot(&self, bbox: Rect) -> Point`** — カスタムピボットが設定されていればその座標、単一シンボルインスタンス選択時はインスタンスに保存されたピボット（`binding.world_pivot()`）、それ以外は選択バウンディングボックスの中心座標を返す。
+- **`has_custom_transform_pivot(&self) -> bool`** — 現在の選択対象に初期位置から移動されたカスタム変形中心（ピボット）が設定されているかを返す。
+- **`set_selected_symbol_world_pivot(&mut self, world_pivot: Option<Point>, commit_to_timeline: bool) -> bool`** — 単一シンボルインスタンス選択時にワールド座標ピボットをローカル座標に変換して `SymbolInstanceBinding::pivot` に保存・同期する。
+- **`reset_selected_transform_pivot(&mut self) -> bool`** — 選択オブジェクトの変形中心（ピボット）を初期位置（選択中央またはシンボル基準点 `(0, 0)`）へリセットする。
 - **`compute_transform_hover(&self, world_pt: Point) -> TransformHoverTarget`** — マウス位置からピボット点、8方向スケールハンドル、四隅外側の回転ゾーン、バウンディングボックス内部の移動ゾーンの優先順位でヒット判定。
 - **`apply_affine_to_selected(&mut self, affine: Affine) -> bool`** — 選択中の全図形にアフィン変換行列を適用してタイムラインへ同期する共通ヘルパー。
 - **`flip_selected_shapes(&mut self, horizontal: bool, vertical: bool) -> bool`** — ピボット点を基準に選択図形を左右反転または上下反転（反転後のベジェ輪郭ワインディングも自動補正）。
@@ -383,8 +386,9 @@
   - `Loop`（`ループ`：親タイムラインの進行に合わせて内部タイムラインをループ再生）
   - `PlayOnce`（`1回再生`：内部タイムラインの最終フレームに達したら停止）
   - `SingleFrame`（`任意のフレーム`：親フレームに関係なく指定した `first_frame` を固定表示）
-- **`struct SymbolInstanceBinding`** — シンボルインスタンスの紐付け情報（`instance_gid: u64`, `symbol_id: u64`, `xform: Affine`, `loop_mode: SymbolLoopMode`, `first_frame: usize`）。
-  - `new(instance_gid: u64, symbol_id: u64, xform: Affine) -> Self` — デフォルト再生設定（`Loop`, `first_frame: 0`）でバインディングを生成。
+- **`struct SymbolInstanceBinding`** — シンボルインスタンスの紐付け情報（`instance_gid: u64`, `symbol_id: u64`, `xform: Affine`, `pivot: Point`, `loop_mode: SymbolLoopMode`, `first_frame: usize`）。
+  - `new(instance_gid: u64, symbol_id: u64, xform: Affine) -> Self` — デフォルト設定（`pivot: Point::ZERO`, `Loop`, `first_frame: 0`）でバインディングを生成。
+  - `world_pivot(self) -> Point` — インスタンスの現在のワールド座標における変形中心点（`self.xform * self.pivot`）を返す。
   - `instantiate_shapes(&self, local_shapes: &[FillShape], layer_id: u64, parent_scope: &[u64]) -> Vec<FillShape>` — シンボルのローカル図形群にインスタンスのアフィン変換・レイヤーID・グループパス・バインディングを適用してステージ上の図形群を生成。
   - `parent_scope_from_path(&self, group_path: &[u64]) -> Vec<u64>` — 図形の `group_path` から自身の `instance_gid` を除いた親スコープパスを抽出。
 - **`enum TweenState`** — キーフレーム区間のクラシックトゥイーン状態：
@@ -473,7 +477,7 @@
 - **アフィン変換・マーキー矩形生成**：
   - `affine_scale_around(pivot: Point, sx: f64, sy: f64) -> Affine` — 指定ピボット中心のスケール行列を生成。
   - `affine_rotate_around(pivot: Point, angle_rad: f64) -> Affine` — 指定ピボット中心の回転行列を生成。
-  - `interpolate_affine(a: Affine, b: Affine, t: f64) -> Affine` — 2つのアフィン変換行列を TRS（平行移動・回転角度・スケール・シアー）に分解して滑らかに補間（クラシックトゥイーン用）。
+  - `interpolate_affine_with_pivot(start: Affine, start_pivot: Point, end: Affine, end_pivot: Point, t: f64) -> (Affine, Point)` — 2つのアフィン変換行列をローカルピボット `start_pivot`, `end_pivot` を軸として TRS（ピボットのワールド平行移動・最短回転角度・スケール・シアー）に分解し、滑らかに補間（クラシックトゥイーン用）。
   - `decompose_affine_trs(c: [f64; 6]) -> (f64, f64, f64, f64, f64, f64)` — 2Dアフィン行列係数を `(tx, ty, angle, sx, sy, shear)` へ極分解。
   - `make_marquee_rect_shape(p0: Point, p1: Point, color: Color32) -> Option<FillShape>` — 2つの対角座標から矩形の `FillShape` を生成。
 - **アルゴリズム1：ブラシ軌跡からの閉輪郭（アウトライン）生成**：

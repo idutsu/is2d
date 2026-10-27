@@ -4,8 +4,8 @@ use kurbo::{Affine, Point, Vec2 as KVec2};
 use crate::panels::icons;
 use crate::timeline::{Cel, Layer, Timeline};
 use crate::vector_engine::{
-    append_mesh, interpolate_affine, transform_mesh_to_screen, transform_mesh_to_screen_onion,
-    FillShape,
+    append_mesh, interpolate_affine_with_pivot, transform_mesh_to_screen,
+    transform_mesh_to_screen_onion, FillShape,
 };
 use crate::FlashBrushApp;
 
@@ -25,12 +25,14 @@ pub(crate) enum SymbolLoopMode {
     SingleFrame,
 }
 
-/// シンボルインスタンスに属するシェイプが持つ紐付け情報（インスタンスのグループID、ライブラリ内のシンボル定義ID、ローカル基準点 `(0, 0)` からワールド座標へのアフィン変換、再生モード、開始/指定フレーム）
+/// シンボルインスタンスに属するシェイプが持つ紐付け情報（インスタンスのグループID、ライブラリ内のシンボル定義ID、ローカル基準点 `(0, 0)` からワールド座標へのアフィン変換、ローカル変形中心ピボット、再生モード、開始/指定フレーム）
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SymbolInstanceBinding {
     pub(crate) instance_gid: u64,
     pub(crate) symbol_id: u64,
     pub(crate) xform: Affine,
+    /// シンボルローカル座標系での変形中心点（ピボット）。初期値は `Point::ZERO` `(0.0, 0.0)`
+    pub(crate) pivot: Point,
     pub(crate) loop_mode: SymbolLoopMode,
     pub(crate) first_frame: usize,
 }
@@ -42,13 +44,21 @@ impl SymbolInstanceBinding {
             instance_gid,
             symbol_id,
             xform,
+            pivot: Point::ZERO,
             loop_mode: SymbolLoopMode::Loop,
             first_frame: 0,
         }
     }
+
+    /// このインスタンスの現在のワールド座標における変形中心点（ピボット）を返す
+    #[inline]
+    pub(crate) fn world_pivot(self) -> Point {
+        self.xform * self.pivot
+    }
 }
 
 /// キーフレーム区間におけるクラシックトゥイーン（`T` キー）の有効状態
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum TweenState {
     /// トゥイーン未設定（または開始キーフレームが単一シンボル条件を満たしていない）
@@ -171,13 +181,20 @@ impl Layer {
                 end_binding,
             } if frame > start_frame && frame < end_frame => {
                 let t = (frame - start_frame) as f64 / (end_frame - start_frame) as f64;
-                let interp_xform = interpolate_affine(start_binding.xform, end_binding.xform, t);
+                let (interp_xform, interp_pivot) = interpolate_affine_with_pivot(
+                    start_binding.xform,
+                    start_binding.pivot,
+                    end_binding.xform,
+                    end_binding.pivot,
+                    t,
+                );
                 Some((
                     start_binding,
                     SymbolInstanceBinding {
                         instance_gid: start_binding.instance_gid,
                         symbol_id: start_binding.symbol_id,
                         xform: interp_xform,
+                        pivot: interp_pivot,
                         loop_mode: start_binding.loop_mode,
                         first_frame: start_binding.first_frame,
                     },
