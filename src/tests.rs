@@ -884,6 +884,35 @@
             app.shapes[pasted_idx].contains_point(Point::new(120.0 + 16.0, 100.0 + 16.0)),
             "Cmd+V では (+16, +16) ずれた位置に貼り付けられること"
         );
+
+        // 4. Alt + ドラッグ複製 (duplicate_selected_shapes_for_alt_drag) でシンボルやグループが独立したIDで複製移動でき、
+        //    1回の Undo で複製前の状態に戻ること
+        let sym_id = app.convert_selection_to_symbol().unwrap();
+        let orig_inst_gid = app.selected_single_symbol_info().unwrap().0.instance_gid;
+        let count_before = app.shapes.len();
+
+        let undo_snapshot = app.duplicate_selected_shapes_for_alt_drag();
+        assert_eq!(app.shapes.len(), count_before + 1);
+        app.translate_selected_shapes(KVec2::new(60.0, 40.0));
+        app.finish_move_selection_drag(KVec2::new(60.0, 40.0), undo_snapshot);
+
+        let (dup_binding, _, _) = app.selected_single_symbol_info().unwrap();
+        assert_eq!(dup_binding.symbol_id, sym_id);
+        assert_ne!(
+            dup_binding.instance_gid, orig_inst_gid,
+            "Alt+ドラッグで複製されたシンボルインスタンスには新しい一意な instance_gid が採番されること"
+        );
+        assert!(
+            app.shapes[app.selected_shapes[0]]
+                .contains_point(Point::new(120.0 + 16.0 + 60.0, 100.0 + 16.0 + 40.0)),
+            "複製されたシンボルがドラッグ先座標に移動していること"
+        );
+        app.undo();
+        assert_eq!(
+            app.shapes.len(),
+            count_before,
+            "1回の Undo で Alt+ドラッグ複製前の状態へ戻ること"
+        );
     }
 
     #[test]

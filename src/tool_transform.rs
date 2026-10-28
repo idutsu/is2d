@@ -292,21 +292,34 @@ impl FlashBrushApp {
                 }
             }
             TransformHoverTarget::Move => {
+                let undo_snapshot = if alt_held {
+                    self.duplicate_selected_shapes_for_alt_drag()
+                } else {
+                    self.shapes.clone()
+                };
                 self.transform_drag = TransformDragState::Move {
                     last_pos: pt,
                     total_delta: KVec2::ZERO,
-                    undo_snapshot: self.shapes.clone(),
+                    undo_snapshot,
                 };
             }
             TransformHoverTarget::None => {
-                if let Some(hit_idx) = self.topmost_shape_at(pt) {
+                if let Some(hit_idx) = self
+                    .topmost_shape_at(pt)
+                    .or_else(|| self.compute_hover_target(pt).shape_idx())
+                {
                     if !self.selected_shapes.contains(&hit_idx) {
                         self.select_single_shape_at(pt);
                     }
+                    let undo_snapshot = if alt_held {
+                        self.duplicate_selected_shapes_for_alt_drag()
+                    } else {
+                        self.shapes.clone()
+                    };
                     self.transform_drag = TransformDragState::Move {
                         last_pos: pt,
                         total_delta: KVec2::ZERO,
-                        undo_snapshot: self.shapes.clone(),
+                        undo_snapshot,
                     };
                 } else {
                     self.transform_drag = TransformDragState::MarqueeSelect {

@@ -511,14 +511,14 @@ impl FlashBrushApp {
         true
     }
 
-    /// 選択中のオブジェクト（生シェイプ・部分スライス領域・グループ問わず）を内部クリップボードにコピーする（`Cmd+C`）
-    pub(crate) fn copy_selected_shapes(&mut self) -> bool {
+    /// 現在選択中のシェイプ群を現在の編集スコープ（`editing_group_path`）からの相対グループパス付きで抽出する
+    fn extract_selected_shapes_relative_to_scope(&self) -> Vec<FillShape> {
         let (is_sel, any_valid) = self.selected_shape_mask();
         if !any_valid {
-            return false;
+            return Vec::new();
         }
         let depth = self.editing_group_path.len();
-        self.clipboard.clear();
+        let mut extracted = Vec::with_capacity(self.selected_shapes.len());
         for (idx, shape) in self.shapes.iter().enumerate() {
             if is_sel[idx] {
                 let rel_group_path = if shape.group_path.starts_with(&self.editing_group_path) {
@@ -526,12 +526,82 @@ impl FlashBrushApp {
                 } else {
                     Vec::new()
                 };
-                self.clipboard
-                    .push(shape.clone().with_group_path(rel_group_path));
+                extracted.push(shape.clone().with_group_path(rel_group_path));
             }
         }
+        extracted
+    }
+
+    /// 相対グループパスを持つシェイプ群に対し、新しいグループID・シンボルインスタンスIDを採番して現在の編集スコープ用に変換する
+    fn instantiate_relative_shapes_in_scope(
+        &mut self,
+        rel_shapes: &[FillShape],
+        offset: KVec2,
+        preserve_original_layer: bool,
+    ) -> (Vec<FillShape>, bool) {
+        let active_lid = self.active_scope_layer_id();
+        let mut gid_map: Vec<(u64, u64)> = Vec::new();
+        let mut instantiated = Vec::with_capacity(rel_shapes.len());
+        let mut any_raw = false;
+
+        for item in rel_shapes {
+            let mut new_path = self.editing_group_path.clone();
+            if item.group_path.is_empty() {
+                any_raw = true;
+            } else {
+                for &old_gid in &item.group_path {
+                    let new_gid = if let Some(&(_, mapped)) =
+                        gid_map.iter().find(|&&(orig, _)| orig == old_gid)
+                    {
+                        mapped
+                    } else {
+                        let alloc = self.next_group_id;
+                        self.next_group_id += 1;
+                        gid_map.push((old_gid, alloc));
+                        alloc
+                    };
+                    new_path.push(new_gid);
+                }
+            }
+            let target_lid = if preserve_original_layer
+                && self.timeline.is_layer_editable_by_id(item.layer_id)
+            {
+                item.layer_id
+            } else {
+                active_lid
+            };
+            let mut cloned = item
+                .clone()
+                .with_layer_id(target_lid)
+                .with_group_path(new_path);
+            if let Some(mut binding) = cloned.symbol_instance {
+                if let Some(&(_, mapped_inst_gid)) =
+                    gid_map.iter().find(|&&(orig, _)| orig == binding.instance_gid)
+                {
+                    binding.instance_gid = mapped_inst_gid;
+                    cloned.symbol_instance = Some(binding);
+                } else {
+                    cloned.symbol_instance = None;
+                }
+            }
+            if offset != KVec2::ZERO {
+                cloned.translate(offset);
+            }
+            instantiated.push(cloned);
+        }
+
+        (instantiated, any_raw)
+    }
+
+    /// 選択中のオブジェクト（生シェイプ・部分スライス領域・グループ問わず）を内部クリップボードにコピーする（`Cmd+C`）
+    pub(crate) fn copy_selected_shapes(&mut self) -> bool {
+        let extracted = self.extract_selected_shapes_relative_to_scope();
+        if extracted.is_empty() {
+            return false;
+        }
+        self.clipboard = extracted;
         self.paste_count = 0;
-        !self.clipboard.is_empty()
+        true
     }
 
     /// 選択中のオブジェクトを内部クリップボードにコピーした上でキャンバスから削除する（`Cmd+X`）
@@ -560,62 +630,33 @@ impl FlashBrushApp {
             KVec2::new(step * k, step * k)
         };
 
-        let active_lid = self.active_scope_layer_id();
         let multi_layer_copy = self.clipboard.first().is_some_and(|first| {
             self.clipboard.iter().any(|s| s.layer_id != first.layer_id)
         });
-
-        let mut gid_map: Vec<(u64, u64)> = Vec::new();
-        let mut pasted_shapes = Vec::with_capacity(self.clipboard.len());
-        let mut any_raw = false;
-
-        for item in &self.clipboard {
-            let mut new_path = self.editing_group_path.clone();
-            if item.group_path.is_empty() {
-                any_raw = true;
-            } else {
-                for &old_gid in &item.group_path {
-                    let new_gid = if let Some(&(_, mapped)) =
-                        gid_map.iter().find(|&&(orig, _)| orig == old_gid)
-                    {
-                        mapped
-                    } else {
-                        let alloc = self.next_group_id;
-                        self.next_group_id += 1;
-                        gid_map.push((old_gid, alloc));
-                        alloc
-                    };
-                    new_path.push(new_gid);
-                }
-            }
-            let target_lid =
-                if multi_layer_copy && self.timeline.is_layer_editable_by_id(item.layer_id) {
-                    item.layer_id
-                } else {
-                    active_lid
-                };
-            let mut cloned = item
-                .clone()
-                .with_layer_id(target_lid)
-                .with_group_path(new_path);
-            if let Some(mut binding) = cloned.symbol_instance {
-                if let Some(&(_, mapped_inst_gid)) =
-                    gid_map.iter().find(|&&(orig, _)| orig == binding.instance_gid)
-                {
-                    binding.instance_gid = mapped_inst_gid;
-                    cloned.symbol_instance = Some(binding);
-                } else {
-                    cloned.symbol_instance = None;
-                }
-            }
-            if offset != KVec2::ZERO {
-                cloned.translate(offset);
-            }
-            pasted_shapes.push(cloned);
-        }
+        let clipboard_snapshot = self.clipboard.clone();
+        let (pasted_shapes, any_raw) =
+            self.instantiate_relative_shapes_in_scope(&clipboard_snapshot, offset, multi_layer_copy);
 
         self.insert_and_select_shapes_in_scope(pasted_shapes, any_raw);
         true
+    }
+
+    /// 現在選択中のオブジェクト（生シェイプ・グループ・シンボル）をその場に複製し、
+    /// 複製側を選択状態に切り替えた上でドラッグ移動用の `undo_snapshot` を返す（`Alt + ドラッグ` 複製用）
+    pub(crate) fn duplicate_selected_shapes_for_alt_drag(&mut self) -> Vec<FillShape> {
+        let rel_shapes = self.extract_selected_shapes_relative_to_scope();
+        if rel_shapes.is_empty() {
+            return self.shapes.clone();
+        }
+        let saved_pivot = self.transform_pivot;
+        self.clear_selection();
+        let undo_snapshot = self.shapes.clone();
+        let (duplicated, _) =
+            self.instantiate_relative_shapes_in_scope(&rel_shapes, KVec2::ZERO, true);
+        self.insert_and_select_shapes_in_scope(duplicated, false);
+        self.transform_pivot = saved_pivot;
+        self.sync_timeline_layer_from_canvas_selection();
+        undo_snapshot
     }
 
     /// 現在の編集スコープの最前面挿入位置へ `new_shapes` を挿入し、それらを選択状態にしてレイヤー順に整列させる
@@ -678,8 +719,9 @@ impl FlashBrushApp {
         let min_move = 1.0 / (self.view_zoom as f64);
         if total_delta.hypot() > min_move && !self.selected_shapes.is_empty() {
             self.commit_moved_selection(undo_snapshot);
-        } else if total_delta.hypot() > 0.0 {
+        } else if total_delta.hypot() > 0.0 || self.shapes.len() != undo_snapshot.len() {
             self.shapes = undo_snapshot;
+            self.selected_shapes.retain(|&idx| idx < self.shapes.len());
         }
     }
 
@@ -1167,6 +1209,7 @@ impl FlashBrushApp {
             }
             SelectSubMode::Reshape => {
                 let shift_held = ui.input(|i| i.modifiers.shift);
+                let alt_held = ui.input(|i| i.modifiers.alt);
                 if response.double_clicked() {
                     if let Some(pt) = mouse_pt {
                         if !self.enter_group_at(pt) {
@@ -1177,7 +1220,7 @@ impl FlashBrushApp {
                 }
                 if response.drag_started() {
                     if let Some(pt) = mouse_pt {
-                        self.start_reshape_drag(pt, shift_held);
+                        self.start_reshape_drag(pt, shift_held, alt_held);
                     }
                 } else if response.dragged() {
                     if let Some(pt) = mouse_pt {
@@ -1257,7 +1300,7 @@ impl FlashBrushApp {
             .unwrap_or(HoverTarget::None);
     }
 
-    fn start_reshape_drag(&mut self, pt: Point, shift_held: bool) {
+    fn start_reshape_drag(&mut self, pt: Point, shift_held: bool, alt_held: bool) {
         self.inspect_timeline_frame = false;
         if shift_held {
             self.select_drag = SelectDragState::MarqueeSelect {
@@ -1267,7 +1310,22 @@ impl FlashBrushApp {
             };
             return;
         }
-        match self.compute_hover_target(pt) {
+        let target = self.compute_hover_target(pt);
+        if alt_held {
+            if let Some(shape_idx) = target.shape_idx() {
+                if !self.selected_shapes.contains(&shape_idx) {
+                    self.select_single_shape_at(pt);
+                }
+                let undo_snapshot = self.duplicate_selected_shapes_for_alt_drag();
+                self.select_drag = SelectDragState::MoveShape {
+                    last_pos: pt,
+                    total_delta: KVec2::ZERO,
+                    undo_snapshot,
+                };
+                return;
+            }
+        }
+        match target {
             HoverTarget::Vertex {
                 shape_idx,
                 contour_idx,

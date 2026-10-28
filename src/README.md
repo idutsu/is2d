@@ -237,11 +237,14 @@
   - `enter_group_at(&mut self, world_pt: Point) -> bool` — ダブルクリック位置にあるシンボルインスタンス（`enter_symbol_timeline` へ委譲）またはグループ（`editing_group_path` にプッシュ）の内部へインプレイス編集で潜る。
   - `exit_current_group(&mut self) -> bool` — 現在のグループ階層から1つ上の親階層へ出る（ルート階層でシンボル編集中なら `exit_symbol_timeline` で親シーンへ戻る）。
   - `sanitize_editing_group_path(&mut self)` — タイムライン切替や削除後に `editing_group_path` の図形が存在しなくなった場合、存在する親階層まで自動的にポップする。
-- **コピー・カット・ペースト（クリップボード操作）**：
+- **コピー・カット・ペースト・Alt＋ドラッグ複製（クリップボード＆複製操作）**：
+  - `extract_selected_shapes_relative_to_scope(&self) -> Vec<FillShape>` — 選択中のシェイプ群を現在の編集スコープからの相対グループパス付きで抽出。
+  - `instantiate_relative_shapes_in_scope(&mut self, rel_shapes: &[FillShape], offset: Vec2, preserve_original_layer: bool) -> (Vec<FillShape>, bool)` — 相対パスを持つシェイプ群に対し、新しいグループID・シンボルインスタンスIDを採番して現在の編集スコープ用に変換する共通ヘルパー。
   - `copy_selected_shapes(&mut self) -> bool` — 選択中の図形群を内部クリップボードに保存（`Cmd/Ctrl + C`）。
   - `cut_selected_shapes(&mut self) -> bool` — 選択中の図形群をコピーして削除（`Cmd/Ctrl + X`）。
   - `paste_clipboard(&mut self, in_place: bool) -> bool` — クリップボードの図形群を貼り付け（`in_place = false` なら `(+16, +16)` ずつオフセット、`in_place = true` なら元と同じ座標に配置）。グループやシンボルインスタンスには新しい一意なIDを再採番。
-  - `insert_and_select_shapes_in_scope(&mut self, new_shapes: Vec<FillShape>)` — 新規生成またはペーストされた図形群を現在の編集スコープへ挿入し、それらを選択状態にしてタイムラインへ同期する共通ヘルパー。
+  - `duplicate_selected_shapes_for_alt_drag(&mut self) -> Vec<FillShape>` — 選択中のオブジェクト（生シェイプ・グループ・シンボル）をその場に複製し、複製側を選択状態に切り替えた上でドラッグ移動用の `undo_snapshot` を返す（`Alt + ドラッグ` 複製用）。
+  - `insert_and_select_shapes_in_scope(&mut self, new_shapes: Vec<FillShape>, mark_modified: bool)` — 新規生成・ペースト・複製された図形群を現在の編集スコープへ挿入し、それらを選択状態にしてレイヤー順へ整列する共通ヘルパー。
 - **輪郭の粘土変形（Reshape）＆アンカーポイント編集**：
   - `punch_through_opposite_edge(contour: &mut Contour, dragged_seg_idx: usize, grab_pt: Point, target_pt: Point, eps: f64)` — エッジを対向側の輪郭線ギリギリまたは向こう側へドラッグした際、確実に2図形へ分割されるよう微小に切り込みを貫通させる補正処理。
   - `apply_pull_edge_to_shape(shape: &mut FillShape, contour_idx: usize, seg_idx: usize, grab_t: f64, orig_seg: QuadBez, target_pt: Point, punch_opposite: bool)` — 2次ベジェ曲線の式 `B(t) = (1-t)^2 P0 + 2t(1-t) P1 + t^2 P2` から制御点 `P1` を逆算し、掴んだ点 `grab_t` が `target_pt` を通るように曲線をリアルタイム変形。
