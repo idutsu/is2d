@@ -762,6 +762,9 @@ impl FlashBrushApp {
                 .into_iter()
                 .filter(|&idx| idx < self.shapes.len())
                 .collect();
+            self.notify_warning(
+                "トゥイーンを設定するには、キーフレームに単一のシンボルインスタンス（F8）のみを配置してください",
+            );
             return false;
         }
 

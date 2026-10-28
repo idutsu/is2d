@@ -578,13 +578,13 @@ impl Timeline {
             .max(1);
     }
 
-    /// 指定した `(layer_idx, frame_idx)` を範囲内にクランプしてアクティブレイヤー・現在フレーム・単一セル選択状態に設定する
+    /// 指定した `(layer_idx, frame_idx)` をアクティブレイヤー・現在フレーム・単一セル選択状態に設定する
+    /// （`frame_idx` は現在の `total_frames` より後ろの未作成フレーム番号も選択可能）
     pub(crate) fn select_single_cell(&mut self, layer_idx: usize, frame_idx: usize) {
         let clamped_layer = layer_idx.min(self.layers.len().saturating_sub(1));
-        let clamped_frame = frame_idx.min(self.total_frames.saturating_sub(1));
         self.active_layer = clamped_layer;
-        self.current_frame = clamped_frame;
-        self.cell_selection = Some(TimelineCellSelection::single(clamped_layer, clamped_frame));
+        self.current_frame = frame_idx;
+        self.cell_selection = Some(TimelineCellSelection::single(clamped_layer, frame_idx));
     }
 
     /// 現在アクティブなレイヤーの固有 `layer_id` を返す
@@ -597,16 +597,18 @@ impl Timeline {
         self.layers.iter().position(|l| l.id == layer_id)
     }
 
-    /// 指定した `layer_id` のレイヤーが表示中かつ非ロック（編集可能）であるかを返す
+    /// 指定した `layer_id` のレイヤーが現在フレームにおいて表示中かつ非ロック（編集可能）であるかを返す
     pub(crate) fn is_layer_editable_by_id(&self, layer_id: u64) -> bool {
-        self.layers
-            .iter()
-            .any(|l| l.id == layer_id && l.visible && !l.locked)
+        self.layers.iter().any(|l| {
+            l.id == layer_id && l.visible && !l.locked && self.current_frame < l.frame_count
+        })
     }
 
-    /// 表示中かつ非ロック（編集可能）なレイヤーが1つ以上存在するかを返す
+    /// 現在フレームにおいて表示中かつ非ロック（編集可能）なレイヤーが1つ以上存在するかを返す
     pub(crate) fn has_any_editable_layer(&self) -> bool {
-        self.layers.iter().any(|l| l.visible && !l.locked)
+        self.layers
+            .iter()
+            .any(|l| l.visible && !l.locked && self.current_frame < l.frame_count)
     }
 
     /// `F5` / `Shift+F5` 等のフレーム操作対象となるレイヤーインデックス一覧を返す：
@@ -705,11 +707,11 @@ impl Timeline {
         self.record_loaded_signatures(shapes);
     }
 
-    /// 現在アクティブなレイヤーが編集可能（表示中かつ非ロック）であるかを返す
+    /// 現在アクティブなレイヤーが現在フレームにおいて編集可能（表示中・非ロック・フレーム作成済み）であるかを返す
     pub(crate) fn is_active_layer_editable(&self) -> bool {
         self.layers
             .get(self.active_layer)
-            .is_some_and(|l| l.visible && !l.locked)
+            .is_some_and(|l| l.visible && !l.locked && self.current_frame < l.frame_count)
     }
 }
 
@@ -832,6 +834,7 @@ impl FlashBrushApp {
     }
 
     /// タイムラインのセル範囲を選択し、そのレイヤー群の現在フレームにある全図形をキャンバス上で選択状態にする
+    /// （2フレーム目以降のまだ尺が伸びていない空マスも直接選択でき、そのまま `F5` / `F6` / `F7` でその位置まで尺を伸ばせる）
     pub(crate) fn select_timeline_cells(
         &mut self,
         start_layer: usize,
@@ -843,9 +846,8 @@ impl FlashBrushApp {
             return;
         }
         let max_l = self.timeline.layers.len() - 1;
-        let max_f = self.timeline.total_frames.saturating_sub(1);
         let (l0, l1) = (start_layer.min(max_l), end_layer.min(max_l));
-        let (f0, f1) = (start_frame.min(max_f), end_frame.min(max_f));
+        let (f0, f1) = (start_frame, end_frame);
 
         self.switch_to_layer_and_frame(l1, f1);
         self.timeline.cell_selection = Some(TimelineCellSelection::from_corners(l0, f0, l1, f1));
@@ -899,6 +901,9 @@ impl FlashBrushApp {
             self.stop_playback();
         } else {
             self.flush_canvas_before_timeline_op();
+            if self.timeline.current_frame >= self.timeline.total_frames {
+                self.timeline.current_frame = 0;
+            }
             self.timeline.is_playing = true;
             self.timeline.last_frame_advance_time = None;
         }
@@ -1000,8 +1005,9 @@ impl FlashBrushApp {
         true
     }
 
-    /// 現在フレームの保持尺を1フレーム延長する（`F5` / Adobe Animate 仕様）：
-    /// - 特定のレイヤーが選択されていれば選択レイヤーのみ、未選択時（`cell_selection == None`）は全非ロックレイヤーを +1 フレーム延長する。
+    /// 現在フレーム（または選択セル範囲の終端フレーム）の保持尺を延長する（`F5` / Adobe Animate 仕様）：
+    /// - 2フレーム目以降の未作成の空マスを選択している場合は、そのフレーム位置まで一気に尺を伸ばす。
+    /// - 既存のフレーム内を選択している場合は、選択レイヤー（未選択時は全非ロックレイヤー）を +1 フレーム延長する。
     pub(crate) fn timeline_extend_frame(&mut self) -> bool {
         let targets = self.timeline.target_layers_for_frame_op();
         if targets.is_empty() {
@@ -1009,9 +1015,13 @@ impl FlashBrushApp {
         }
         self.flush_canvas_before_timeline_op();
         self.push_undo();
-        let curr_f = self.timeline.current_frame;
+        let target_f = self
+            .timeline
+            .cell_selection
+            .map(|s| s.max_frame.max(self.timeline.current_frame))
+            .unwrap_or(self.timeline.current_frame);
         for &l_idx in &targets {
-            self.timeline.layers[l_idx].insert_frame_at(curr_f);
+            self.timeline.layers[l_idx].insert_frame_at(target_f);
         }
         self.timeline.sync_total_frames();
         self.load_shapes_from_timeline();

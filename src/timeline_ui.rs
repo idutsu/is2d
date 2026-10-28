@@ -30,12 +30,12 @@ struct TimelineLayout {
 }
 
 impl TimelineLayout {
-    fn new(panel_rect: Rect, total_frames: usize, scroll_x: f32) -> Self {
+    fn new(panel_rect: Rect, max_reach_frames: usize, scroll_x: f32) -> Self {
         let grid_left = panel_rect.left() + LAYER_COL_W;
         let grid_top = panel_rect.top() + RULER_H;
         let grid_w = (panel_rect.right() - grid_left).max(1.0);
         let grid_h = (panel_rect.bottom() - grid_top).max(1.0);
-        let max_frames_shown = (total_frames + 12).max(36);
+        let max_frames_shown = (max_reach_frames + 24).max(60);
         let first_vis_frame = (scroll_x / CELL_W).floor() as usize;
         let last_vis_frame =
             (((scroll_x + grid_w) / CELL_W).ceil() as usize).min(max_frames_shown);
@@ -165,15 +165,25 @@ impl FlashBrushApp {
                 self.timeline
                     .ensure_current_frame_visible((panel_rect.width() - LAYER_COL_W).max(1.0));
 
+                let sel_max = self
+                    .timeline
+                    .cell_selection
+                    .map(|s| s.max_frame + 1)
+                    .unwrap_or(0);
+                let max_reach_frames = self
+                    .timeline
+                    .total_frames
+                    .max(self.timeline.current_frame + 1)
+                    .max(sel_max);
                 let mut layout = TimelineLayout::new(
                     panel_rect,
-                    self.timeline.total_frames,
+                    max_reach_frames,
                     self.timeline.scroll_x,
                 );
                 self.handle_timeline_scroll(ui, &response, &layout);
                 layout = TimelineLayout::new(
                     panel_rect,
-                    self.timeline.total_frames,
+                    max_reach_frames,
                     self.timeline.scroll_x,
                 );
 
@@ -554,12 +564,11 @@ impl FlashBrushApp {
                     layout.layer_at_y(pos.y, self.timeline.scroll_y, num_layers)
                 {
                     let layer_fc = self.timeline.layers[target_layer].frame_count;
-                    let max_f = layer_fc.max(self.timeline.total_frames);
-                    let target_frame = col.min(max_f.saturating_sub(1));
+                    let target_frame = col;
                     self.stop_playback();
 
                     // 実際に存在するフレーム（col < layer_fc）の上をクリックしたときのみ MoveFrames 判定を行う
-                    // （24フレームより後ろの余白領域をクリックした際に、24フレーム目を掴んで移動したと誤判定されるのを防ぐ）
+                    // （未作成の後ろの空マスをクリックした際はその空マスを選択状態にし、F5 / F6 / F7 でそこまで尺を伸ばせるようにする）
                     let clicked_on_existing_frame = col < layer_fc;
                     let clicked_in_existing_sel = clicked_on_existing_frame
                         && self
@@ -635,8 +644,7 @@ impl FlashBrushApp {
             } => {
                 if primary_down {
                     if let Some(pos) = pointer_pos {
-                        let col = layout.frame_at_x(pos.x, self.timeline.scroll_x);
-                        let target_frame = col.min(self.timeline.total_frames.saturating_sub(1));
+                        let target_frame = layout.frame_at_x(pos.x, self.timeline.scroll_x);
                         let target_layer = layout.clamped_layer_at_y(
                             pos.y,
                             self.timeline.scroll_y,

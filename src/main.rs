@@ -16,10 +16,56 @@ use kurbo::Point;
 use lyon_tessellation::FillTessellator;
 use panels::PropertiesPanel;
 use symbol::SymbolEditSession;
+use std::time::{Duration, Instant};
 use timeline::Timeline;
 use vector_engine::FillShape;
 
 const MAX_UNDO_HISTORY: usize = 50;
+const DEFAULT_TOAST_DURATION: Duration = Duration::from_millis(2800);
+
+/// キャンバス左上に表示する通知・警告メッセージの種別
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoticeKind {
+    /// 操作不可や条件不足の警告（黄色系バッジ）
+    Warning,
+    /// エラー通知（赤系バッジ）
+    #[allow(dead_code)]
+    Error,
+    /// 通常の案内・情報（青系バッジ）
+    #[allow(dead_code)]
+    Info,
+}
+
+impl NoticeKind {
+    /// 種別に応じた `(背景色, 枠線色, 文字色)` を返す
+    pub(crate) fn colors(self) -> (Color32, Color32, Color32) {
+        match self {
+            NoticeKind::Warning => (
+                Color32::from_rgba_unmultiplied(255, 248, 225, 244),
+                Color32::from_rgb(215, 165, 55),
+                Color32::from_rgb(145, 90, 10),
+            ),
+            NoticeKind::Error => (
+                Color32::from_rgba_unmultiplied(255, 236, 236, 244),
+                Color32::from_rgb(220, 75, 75),
+                Color32::from_rgb(155, 25, 25),
+            ),
+            NoticeKind::Info => (
+                Color32::from_rgba_unmultiplied(235, 245, 255, 244),
+                Color32::from_rgb(55, 140, 225),
+                Color32::from_rgb(20, 75, 145),
+            ),
+        }
+    }
+}
+
+/// 操作時に一定時間表示して自動で消えるトースト通知メッセージ
+#[derive(Clone, Debug)]
+pub(crate) struct StatusToast {
+    pub(crate) kind: NoticeKind,
+    pub(crate) message: String,
+    pub(crate) expires_at: Instant,
+}
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
@@ -143,6 +189,9 @@ pub(crate) struct FlashBrushApp {
     pub(crate) transform_hover: TransformHoverTarget,
     pub(crate) transform_drag: TransformDragState,
 
+    /// 操作トリガーで一定時間表示するトースト通知メッセージ
+    pub(crate) status_toast: Option<StatusToast>,
+
     pub(crate) tessellator: FillTessellator,
 }
 
@@ -184,6 +233,7 @@ impl Default for FlashBrushApp {
             transform_pivot: None,
             transform_hover: TransformHoverTarget::None,
             transform_drag: TransformDragState::None,
+            status_toast: None,
             tessellator: FillTessellator::new(),
         }
     }
@@ -491,28 +541,100 @@ impl FlashBrushApp {
         }
     }
 
-    fn draw_locked_layer_badge(&self, painter: &egui::Painter, canvas_rect: egui::Rect) {
-        let badge_rect = egui::Rect::from_min_size(
-            canvas_rect.left_top() + Vec2::new(12.0, 12.0),
-            Vec2::new(340.0, 26.0),
-        );
-        painter.rect_filled(
-            badge_rect,
-            0.0,
-            Color32::from_rgba_unmultiplied(255, 248, 225, 240),
-        );
-        painter.rect_stroke(
-            badge_rect,
-            0.0,
-            Stroke::new(1.0, Color32::from_rgb(215, 165, 55)),
-        );
-        painter.text(
-            badge_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "\u{e897} 現在のレイヤーはロック中または非表示のため編集できません",
-            egui::FontId::proportional(12.0),
-            Color32::from_rgb(145, 90, 10),
-        );
+    /// キャンバス左上に一定時間自動で消える通知メッセージを表示する共通メソッド
+    pub(crate) fn show_notice(&mut self, kind: NoticeKind, message: impl Into<String>) {
+        self.status_toast = Some(StatusToast {
+            kind,
+            message: message.into(),
+            expires_at: Instant::now() + DEFAULT_TOAST_DURATION,
+        });
+    }
+
+    /// 警告・条件不足のトースト通知をキャンバス左上に表示する
+    pub(crate) fn notify_warning(&mut self, message: impl Into<String>) {
+        self.show_notice(NoticeKind::Warning, message);
+    }
+
+    /// エラーのトースト通知をキャンバス左上に表示する
+    #[allow(dead_code)]
+    pub(crate) fn notify_error(&mut self, message: impl Into<String>) {
+        self.show_notice(NoticeKind::Error, message);
+    }
+
+    /// 案内・情報のトースト通知をキャンバス左上に表示する
+    #[allow(dead_code)]
+    pub(crate) fn notify_info(&mut self, message: impl Into<String>) {
+        self.show_notice(NoticeKind::Info, message);
+    }
+
+    /// 現在のレイヤー・フレーム状態から常時表示すべき状態連動メッセージを判定する
+    fn current_state_notice(&self, tool_allowed: bool) -> Option<(NoticeKind, &'static str)> {
+        if tool_allowed {
+            return None;
+        }
+        let is_uncreated_frame = self
+            .timeline
+            .layers
+            .get(self.timeline.active_layer)
+            .is_some_and(|l| l.visible && !l.locked && self.timeline.current_frame >= l.frame_count);
+        if is_uncreated_frame {
+            Some((
+                NoticeKind::Warning,
+                "現在のフレームは未作成です（F5 / F6 / F7 でフレームを作成してください）",
+            ))
+        } else {
+            Some((
+                NoticeKind::Warning,
+                "\u{e897} 現在のレイヤーはロック中または非表示のため編集できません",
+            ))
+        }
+    }
+
+    /// 状態連動の警告バッジおよび一時トースト通知をキャンバス左上へ統一フォーマットで縦積み描画する
+    fn draw_canvas_notices(
+        &mut self,
+        ctx: &egui::Context,
+        painter: &egui::Painter,
+        canvas_rect: egui::Rect,
+        tool_allowed: bool,
+    ) {
+        let mut notices: Vec<(NoticeKind, String)> = Vec::new();
+        if let Some((kind, msg)) = self.current_state_notice(tool_allowed) {
+            notices.push((kind, msg.to_owned()));
+        }
+
+        if let Some(toast) = &self.status_toast {
+            let now = Instant::now();
+            if now < toast.expires_at {
+                ctx.request_repaint_after(toast.expires_at.saturating_duration_since(now));
+                if !notices.iter().any(|(_, m)| m == &toast.message) {
+                    notices.push((toast.kind, toast.message.clone()));
+                }
+            } else {
+                self.status_toast = None;
+            }
+        }
+
+        let mut y_offset = 12.0_f32;
+        for (kind, text) in notices {
+            let (bg_col, border_col, text_col) = kind.colors();
+            let galley =
+                painter.layout_no_wrap(text, egui::FontId::proportional(12.0), text_col);
+            let badge_w = (galley.size().x + 24.0).max(200.0);
+            let badge_h = 26.0;
+            let badge_rect = egui::Rect::from_min_size(
+                canvas_rect.left_top() + Vec2::new(12.0, y_offset),
+                Vec2::new(badge_w, badge_h),
+            );
+            painter.rect_filled(badge_rect, 0.0, bg_col);
+            painter.rect_stroke(badge_rect, 0.0, Stroke::new(1.0, border_col));
+            let text_pos = Pos2::new(
+                badge_rect.left() + 12.0,
+                badge_rect.center().y - galley.size().y * 0.5,
+            );
+            painter.galley(text_pos, galley, text_col);
+            y_offset += badge_h + 6.0;
+        }
     }
 
     fn update_canvas_cursor(
@@ -590,9 +712,8 @@ impl eframe::App for FlashBrushApp {
                 // 4. 図形の上からステージ境界枠線（および「枠外を隠す」ON時の外周マスク）を描画
                 self.draw_stage_foreground_overlay(&painter, canvas_rect);
 
-                if !tool_allowed {
-                    self.draw_locked_layer_badge(&painter, canvas_rect);
-                }
+                // 5. 状態連動の警告バッジおよび一時トースト通知を描画
+                self.draw_canvas_notices(ctx, &painter, canvas_rect, tool_allowed);
 
                 // 3. カーソル表示とホバー・ドラッグ視覚フィードバック
                 self.update_canvas_cursor(

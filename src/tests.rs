@@ -941,6 +941,17 @@
         assert!(app.timeline_remove_frame());
         assert_eq!(app.timeline.total_frames, prev_total);
 
+        // 3b. Adobe Animate 仕様：現在の尺（prev_total）より先の空マス（例: frame 9 = 10フレーム目）を選択して F5 を押すと、
+        //     そのフレーム位置まで一気に保持尺が伸びること
+        app.select_timeline_cells(0, 9, 0, 9);
+        assert_eq!(app.timeline.current_frame, 9);
+        assert!(app.timeline_extend_frame());
+        assert_eq!(app.timeline.layers[0].frame_count, 10);
+        assert_eq!(app.timeline.total_frames, 10);
+        app.undo();
+        assert_eq!(app.timeline.total_frames, prev_total);
+        app.switch_to_layer_and_frame(0, 2);
+
         assert!(app.timeline_delete_keyframe());
         assert_eq!(
             app.shapes.len(),
