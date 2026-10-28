@@ -142,6 +142,12 @@ impl FlashBrushApp {
             .cloned()
             .collect();
         let enclosed_opt = find_enclosed_region_at(&active_layer_raw, pt, fill_color).or_else(|| {
+            let has_other_layer_raw = self.shapes.iter().any(|s| {
+                s.layer_id != target_lid && s.is_raw_at_scope(&self.editing_group_path)
+            });
+            if !has_other_layer_raw {
+                return None;
+            }
             let all_raw_scope: Vec<FillShape> = self
                 .shapes
                 .iter()

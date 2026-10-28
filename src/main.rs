@@ -134,6 +134,8 @@ fn configure_sharp_light_theme(ctx: &egui::Context) {
 // メインアプリケーション状態 & ショートカット制御
 // ============================================================================
 
+pub(crate) type UndoEntry = (Timeline, Vec<FillShape>, Vec<SymbolEditSession>);
+
 pub(crate) struct FlashBrushApp {
     pub(crate) tool: Tool,
     pub(crate) properties_panel: PropertiesPanel,
@@ -160,8 +162,8 @@ pub(crate) struct FlashBrushApp {
     pub(crate) timeline: Timeline,
 
     pub(crate) shapes: Vec<FillShape>,
-    pub(crate) undo_stack: Vec<(Timeline, Vec<FillShape>, Vec<SymbolEditSession>)>,
-    pub(crate) redo_stack: Vec<(Timeline, Vec<FillShape>, Vec<SymbolEditSession>)>,
+    pub(crate) undo_stack: Vec<UndoEntry>,
+    pub(crate) redo_stack: Vec<UndoEntry>,
 
     pub(crate) active_stroke: Vec<Point>,
     pub(crate) active_raw_outline: Vec<Point>,
@@ -256,14 +258,16 @@ impl FlashBrushApp {
         mut tl: Timeline,
         shapes: Vec<FillShape>,
         sym_stack: Vec<SymbolEditSession>,
-    ) {
+    ) -> UndoEntry {
         tl.record_loaded_signatures(&shapes);
+        let prev_tl = self.snapshot_timeline();
         self.timeline = tl;
-        self.shapes = shapes;
-        self.symbol_edit_stack = sym_stack;
+        let prev_shapes = std::mem::replace(&mut self.shapes, shapes);
+        let prev_stack = std::mem::replace(&mut self.symbol_edit_stack, sym_stack);
         self.select_drag = SelectDragState::None;
         self.transform_drag = TransformDragState::None;
         self.sanitize_editing_group_path();
+        (prev_tl, prev_shapes, prev_stack)
     }
 
     pub(crate) fn record_undo_snapshot(&mut self, snapshot: Vec<FillShape>) {
@@ -285,13 +289,8 @@ impl FlashBrushApp {
         self.clear_selection();
         self.sync_shapes_to_timeline();
         if let Some((prev_tl, prev_shapes, prev_stack)) = self.undo_stack.pop() {
-            let curr = (
-                self.snapshot_timeline(),
-                self.shapes.clone(),
-                self.symbol_edit_stack.clone(),
-            );
+            let curr = self.restore_state_snapshot(prev_tl, prev_shapes, prev_stack);
             self.redo_stack.push(curr);
-            self.restore_state_snapshot(prev_tl, prev_shapes, prev_stack);
         }
     }
 
@@ -299,13 +298,8 @@ impl FlashBrushApp {
         self.clear_selection();
         self.sync_shapes_to_timeline();
         if let Some((next_tl, next_shapes, next_stack)) = self.redo_stack.pop() {
-            let curr = (
-                self.snapshot_timeline(),
-                self.shapes.clone(),
-                self.symbol_edit_stack.clone(),
-            );
+            let curr = self.restore_state_snapshot(next_tl, next_shapes, next_stack);
             self.undo_stack.push(curr);
-            self.restore_state_snapshot(next_tl, next_shapes, next_stack);
         }
     }
 

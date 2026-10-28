@@ -902,9 +902,11 @@ impl FlashBrushApp {
         let anchor_edit_hit_radius = 12.0 * inv_z;
         let selected_grab_radius = 6.0 * inv_z;
 
+        let (is_sel, has_sel) = self.selected_shape_mask();
+
         // 0. 通常の選択モード（Reshape）では、選択済みシェイプ（極細線の外周マージン含む）へのホバーを
         //    すべて移動対象（HoverTarget::Fill）として最優先し、選択済みシェイプの変形暴発を防ぐ
-        if self.select_sub_mode == SelectSubMode::Reshape && !self.selected_shapes.is_empty() {
+        if self.select_sub_mode == SelectSubMode::Reshape && has_sel {
             for &s_idx in self.selected_shapes.iter().rev() {
                 let Some(shape) = self.shapes.get(s_idx) else {
                     continue;
@@ -939,8 +941,7 @@ impl FlashBrushApp {
             };
             let mut best_vertex: Option<(f64, HoverTarget)> = None;
             for (s_idx, shape) in self.shapes.iter().enumerate().rev() {
-                if (self.select_sub_mode == SelectSubMode::Reshape
-                    && self.selected_shapes.contains(&s_idx))
+                if (self.select_sub_mode == SelectSubMode::Reshape && is_sel[s_idx])
                     || !shape.is_raw_at_scope(&self.editing_group_path)
                     || !shape
                         .bounding_box()
@@ -986,8 +987,7 @@ impl FlashBrushApp {
         // 2. 輪郭の2次ベジェ曲線セグメント（エッジ）への近接判定
         let mut best_edge: Option<(f64, HoverTarget)> = None;
         for (s_idx, shape) in self.shapes.iter().enumerate().rev() {
-            if (self.select_sub_mode == SelectSubMode::Reshape
-                && self.selected_shapes.contains(&s_idx))
+            if (self.select_sub_mode == SelectSubMode::Reshape && is_sel[s_idx])
                 || !shape.is_raw_at_scope(&self.editing_group_path)
                 || !shape
                     .bounding_box()

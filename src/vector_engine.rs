@@ -2022,7 +2022,7 @@ pub(crate) fn erase_from_canvas(canvas: &mut Vec<FillShape>, eraser_shapes: &[Fi
     *canvas = updated_canvas;
 }
 
-fn union_bounding_boxes(shapes: &[FillShape]) -> KRect {
+pub(crate) fn union_bounding_boxes(shapes: &[FillShape]) -> KRect {
     let mut bbox = shapes[0].bounding_box();
     for s in &shapes[1..] {
         bbox = bbox.union(s.bounding_box());

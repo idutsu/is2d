@@ -1384,59 +1384,23 @@ impl FlashBrushApp {
         let add_hovered = hover_pos.is_some_and(|p| layout.add_hdr_rect.contains(p));
         let del_enabled = num_layers > 1;
         let del_hovered = del_enabled && hover_pos.is_some_and(|p| layout.del_hdr_rect.contains(p));
-        painter.rect_filled(
+        draw_header_mini_button(
+            painter,
             layout.add_hdr_rect,
-            0.0,
-            if add_hovered {
-                Color32::from_rgb(55, 130, 225)
-            } else {
-                Color32::from_rgb(212, 217, 226)
-            },
-        );
-        painter.rect_stroke(
-            layout.add_hdr_rect,
-            0.0,
-            Stroke::new(1.0, Color32::from_rgb(175, 182, 194)),
-        );
-        painter.text(
-            layout.add_hdr_rect.center(),
-            Align2::CENTER_CENTER,
             "＋",
-            FontId::proportional(12.0),
-            if add_hovered {
-                Color32::WHITE
-            } else {
-                Color32::from_rgb(35, 40, 50)
-            },
+            12.0,
+            true,
+            add_hovered,
+            Color32::from_rgb(55, 130, 225),
         );
-
-        painter.rect_filled(
+        draw_header_mini_button(
+            painter,
             layout.del_hdr_rect,
-            0.0,
-            if del_hovered {
-                Color32::from_rgb(215, 70, 70)
-            } else {
-                Color32::from_rgb(212, 217, 226)
-            },
-        );
-        painter.rect_stroke(
-            layout.del_hdr_rect,
-            0.0,
-            Stroke::new(1.0, Color32::from_rgb(175, 182, 194)),
-        );
-        let del_col = if del_hovered {
-            Color32::WHITE
-        } else if del_enabled {
-            Color32::from_rgb(35, 40, 50)
-        } else {
-            Color32::from_rgb(155, 160, 172)
-        };
-        painter.text(
-            layout.del_hdr_rect.center(),
-            Align2::CENTER_CENTER,
             icons::DELETE,
-            FontId::proportional(11.0),
-            del_col,
+            11.0,
+            del_enabled,
+            del_hovered,
+            Color32::from_rgb(215, 70, 70),
         );
 
         painter.line_segment(
@@ -1454,4 +1418,40 @@ impl FlashBrushApp {
             Stroke::new(1.0, Color32::from_rgb(180, 186, 198)),
         );
     }
+}
+
+/// レイヤー一覧左上ヘッダーのミニボタン（`[＋]` / `[🗑]`）を描画するヘルパー
+fn draw_header_mini_button(
+    painter: &egui::Painter,
+    rect: Rect,
+    label: &str,
+    font_size: f32,
+    enabled: bool,
+    hovered: bool,
+    hover_fill: Color32,
+) {
+    painter.rect_filled(
+        rect,
+        0.0,
+        if hovered {
+            hover_fill
+        } else {
+            Color32::from_rgb(212, 217, 226)
+        },
+    );
+    painter.rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::from_rgb(175, 182, 194)));
+    let text_col = if hovered {
+        Color32::WHITE
+    } else if enabled {
+        Color32::from_rgb(35, 40, 50)
+    } else {
+        Color32::from_rgb(155, 160, 172)
+    };
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(font_size),
+        text_col,
+    );
 }

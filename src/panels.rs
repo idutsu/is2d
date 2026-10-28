@@ -347,13 +347,7 @@ impl FlashBrushApp {
 
     /// 選択ツール (`Tool::Select`) のプロパティ設定項目
     fn draw_select_tool_properties(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new("アンカー編集モード")
-                .size(11.5)
-                .strong()
-                .color(Color32::from_rgb(55, 62, 74)),
-        );
-        ui.add_space(4.0);
+        draw_panel_section_label(ui, "アンカー編集モード", 4.0);
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -400,13 +394,7 @@ impl FlashBrushApp {
         ui.separator();
         ui.add_space(6.0);
 
-        ui.label(
-            egui::RichText::new("シンボル・グループ")
-                .size(11.5)
-                .strong()
-                .color(Color32::from_rgb(55, 62, 74)),
-        );
-        ui.add_space(4.0);
+        draw_panel_section_label(ui, "シンボル・グループ", 4.0);
 
         let has_sel = !self.selected_shapes.is_empty();
         if ui
@@ -428,13 +416,7 @@ impl FlashBrushApp {
     fn draw_transform_tool_properties(&mut self, ui: &mut egui::Ui) {
         let has_sel = !self.selected_shapes.is_empty();
 
-        ui.label(
-            egui::RichText::new("変形アクション")
-                .size(11.5)
-                .strong()
-                .color(Color32::from_rgb(55, 62, 74)),
-        );
-        ui.add_space(4.0);
+        draw_panel_section_label(ui, "変形アクション", 4.0);
 
         ui.add_enabled_ui(has_sel, |ui| {
             ui.horizontal(|ui| {
@@ -509,13 +491,7 @@ impl FlashBrushApp {
 
     /// ブラシツール (`Tool::Brush`) のプロパティ設定項目
     fn draw_brush_tool_properties(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new("ブラシサイズ")
-                .size(11.5)
-                .strong()
-                .color(Color32::from_rgb(55, 62, 74)),
-        );
-        ui.add_space(4.0);
+        draw_panel_section_label(ui, "ブラシサイズ", 4.0);
         ui.add(
             egui::Slider::new(&mut self.brush_radius, 1.0..=70.0)
                 .step_by(1.0)
@@ -526,13 +502,7 @@ impl FlashBrushApp {
 
     /// 消しゴムツール (`Tool::Eraser`) のプロパティ設定項目
     fn draw_eraser_tool_properties(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new("消しゴムサイズ")
-                .size(11.5)
-                .strong()
-                .color(Color32::from_rgb(55, 62, 74)),
-        );
-        ui.add_space(4.0);
+        draw_panel_section_label(ui, "消しゴムサイズ", 4.0);
         ui.add(
             egui::Slider::new(&mut self.eraser_radius, 1.0..=80.0)
                 .step_by(1.0)
@@ -563,13 +533,7 @@ impl FlashBrushApp {
 
     /// 「キャンバス」タブの描画（ステージサイズ・枠外マスク・ウィンドウに合わせる・表示倍率リセット）
     fn draw_canvas_tab(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new("キャンバス情報")
-                .size(11.5)
-                .strong()
-                .color(Color32::from_rgb(55, 62, 74)),
-        );
-        ui.add_space(6.0);
+        draw_panel_section_label(ui, "キャンバス情報", 6.0);
 
         ui.horizontal(|ui| {
             ui.label(
@@ -609,13 +573,7 @@ impl FlashBrushApp {
         ui.separator();
         ui.add_space(6.0);
 
-        ui.label(
-            egui::RichText::new("キャンバス操作")
-                .size(11.5)
-                .strong()
-                .color(Color32::from_rgb(55, 62, 74)),
-        );
-        ui.add_space(6.0);
+        draw_panel_section_label(ui, "キャンバス操作", 6.0);
 
         if ui
             .add_sized(
@@ -654,4 +612,15 @@ impl FlashBrushApp {
             self.reset_view();
         }
     }
+}
+
+/// 右パネル内の各セクション見出しラベルと下部余白を描画する共通ヘルパー
+pub(crate) fn draw_panel_section_label(ui: &mut egui::Ui, title: &str, bottom_space: f32) {
+    ui.label(
+        egui::RichText::new(title)
+            .size(11.5)
+            .strong()
+            .color(Color32::from_rgb(55, 62, 74)),
+    );
+    ui.add_space(bottom_space);
 }

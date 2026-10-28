@@ -1,11 +1,11 @@
 use eframe::egui::{self, Color32, Mesh, Pos2, Stroke, Vec2};
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
-use crate::panels::icons;
+use crate::panels::{draw_panel_section_label, icons};
 use crate::timeline::{Cel, Layer, Timeline};
 use crate::vector_engine::{
     append_mesh, interpolate_affine_with_pivot, transform_mesh_to_screen,
-    transform_mesh_to_screen_onion, FillShape,
+    transform_mesh_to_screen_onion, union_bounding_boxes, FillShape,
 };
 use crate::FlashBrushApp;
 
@@ -1070,13 +1070,7 @@ impl FlashBrushApp {
         });
 
         ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new("シンボル再生オプション")
-                .size(11.5)
-                .strong()
-                .color(Color32::from_rgb(55, 62, 74)),
-        );
-        ui.add_space(4.0);
+        draw_panel_section_label(ui, "シンボル再生オプション", 4.0);
 
         let mut next_mode = binding.loop_mode;
         let max_first_1based = sym_total_frames.max(1);
@@ -1262,13 +1256,11 @@ impl FlashBrushApp {
             ui.add_space(4.0);
         }
 
-        ui.label(
-            egui::RichText::new(format!("登録シンボル一覧 ({})", self.timeline.library.len()))
-                .size(11.5)
-                .strong()
-                .color(Color32::from_rgb(55, 62, 74)),
+        draw_panel_section_label(
+            ui,
+            &format!("登録シンボル一覧 ({})", self.timeline.library.len()),
+            4.0,
         );
-        ui.add_space(4.0);
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -1330,10 +1322,7 @@ impl FlashBrushApp {
         if shapes.is_empty() {
             return;
         }
-        let mut bbox = shapes[0].bounding_box();
-        for s in &shapes[1..] {
-            bbox = bbox.union(s.bounding_box());
-        }
+        let bbox = union_bounding_boxes(shapes);
         let w = (bbox.x1 - bbox.x0).max(1.0) as f32;
         let h = (bbox.y1 - bbox.y0).max(1.0) as f32;
         let pad = 14.0;

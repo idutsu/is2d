@@ -9,24 +9,26 @@
 
 | # | ファイル | 行数目安 | 主な責務 |
 | :-: | :--- | :---: | :--- |
-| 1 | **[`main.rs`](./main.rs)** | ~610行 | アプリ起動、フォント・テーマ初期化、アプリ全体状態（`FlashBrushApp`）、Undo/Redo履歴、キーボードショートカット、メインループ（`eframe::App::update`） |
-| 2 | **[`panels.rs`](./panels.rs)** | ~650行 | Material Icons 定数（`mod icons`）、左端縦ツールバー、ステージ上部スリムバー（パンくずリスト）、右端4タブパネル（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`） |
-| 3 | **[`canvas_tool.rs`](./canvas_tool.rs)** | ~1,200行 | `Tool` 列挙型、変形・選択のドラッグ＆ホバー状態型、ビューポート（ズーム・パン）＆ステージ枠描画、レイヤースコープ同期、ツール切替、カスタムカーソル＆キャンバス描画 |
-| 4 | **[`tool_paint.rs`](./tool_paint.rs)** | ~175行 | **描画・塗りツール**（ブラシ `B`・消しゴム `E`・バケツ塗り `K`・スポイト `I`）の入力処理とコミットロジック |
+| 1 | **[`main.rs`](./main.rs)** | ~725行 | アプリ起動、フォント・テーマ初期化、アプリ全体状態（`FlashBrushApp`）、共通ステータス通知バナー（`NoticeKind` / `StatusToast`）、Undo/Redo履歴、キーボードショートカット、メインループ（`eframe::App::update`） |
+| 2 | **[`panels.rs`](./panels.rs)** | ~625行 | Material Icons 定数（`mod icons`）、左端縦ツールバー、ステージ上部スリムバー（パンくずリスト）、右端4タブパネル（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`） |
+| 3 | **[`canvas_tool.rs`](./canvas_tool.rs)** | ~1,205行 | `Tool` 列挙型、変形・選択のドラッグ＆ホバー状態型、ビューポート（ズーム・パン）＆ステージ枠描画、レイヤースコープ同期、ツール切替、カスタムカーソル＆キャンバス描画 |
+| 4 | **[`tool_paint.rs`](./tool_paint.rs)** | ~180行 | **描画・塗りツール**（ブラシ `B`・消しゴム `E`・バケツ塗り `K`・スポイト `I`）の入力処理とコミットロジック |
 | 5 | **[`tool_select.rs`](./tool_select.rs)** | ~1,535行 | **選択ツール（`V`）**、マーキー範囲選択（部分スライス）、輪郭の粘土変形（Reshape）、アンカー追加/削除（`+`/`-`）、グループ階層＆インプレイス編集、コピー＆ペースト |
-| 6 | **[`tool_transform.rs`](./tool_transform.rs)** | ~480行 | **自由変形ツール（`Q`）**、ピボット管理、8方向スケールハンドル・回転・平行移動・反転、変形バウンディングボックス描画 |
-| 7 | **[`timeline.rs`](./timeline.rs)** | ~1,220行 | **タイムラインのデータモデル＆ロジック**（`Timeline` / `Layer` / `Keyframe` / `Cel`、3段階メッシュキャッシュ＆ゼロコピー再生、キーフレーム操作、フレーム移動/複製、レイヤー操作） |
-| 8 | **[`timeline_ui.rs`](./timeline_ui.rs)** | ~1,450行 | **タイムライン（X-Sheet）UI描画＆マウス操作**（`TimelineLayout`、コントロールバー、ルーラー、フレームグリッド、キーフレーム区間描画、レイヤー一覧、D&D操作） |
-| 9 | **[`symbol.rs`](./symbol.rs)** | ~1,340行 | **シンボル＆ライブラリ＆クラシックトゥイーン**（`F8` シンボル化、ライブラリ管理、シンボル内タイムライン編集、再生モード `Loop`/`PlayOnce`/`SingleFrame`、`T` トゥイーン補間、関連UI描画） |
-| 10 | **[`vector_engine.rs`](./vector_engine.rs)** | ~2,880行 | **2Dベクター幾何エンジン**（`Contour` / `FillShape`、ストローク輪郭生成、G1連続2次ベジェ曲線フィット、`i_overlay` ブーリアン演算＆De Casteljau 再構築、`lyon` 三角形メッシュ化） |
-| 11 | **[`tests.rs`](./tests.rs)** | ~1,760行 | 全機能を検証する自動ユニットテストスイート（全22テスト） |
+| 6 | **[`tool_transform.rs`](./tool_transform.rs)** | ~595行 | **自由変形ツール（`Q`）**、ピボット管理、8方向スケールハンドル・回転・平行移動・反転、変形バウンディングボックス描画 |
+| 7 | **[`timeline.rs`](./timeline.rs)** | ~1,230行 | **タイムラインのデータモデル＆ロジック**（`Timeline` / `Layer` / `Keyframe` / `Cel`、3段階メッシュキャッシュ＆ゼロコピー再生、キーフレーム操作、フレーム移動/複製、レイヤー操作） |
+| 8 | **[`timeline_ui.rs`](./timeline_ui.rs)** | ~1,455行 | **タイムライン（X-Sheet）UI描画＆マウス操作**（`TimelineLayout`、コントロールバー、ルーラー、フレームグリッド、キーフレーム区間描画、レイヤー一覧、D&D操作） |
+| 9 | **[`symbol.rs`](./symbol.rs)** | ~1,345行 | **シンボル＆ライブラリ＆クラシックトゥイーン**（`F8` シンボル化、ライブラリ管理、シンボル内タイムライン編集、再生モード `Loop`/`PlayOnce`/`SingleFrame`、`T` トゥイーン補間、関連UI描画） |
+| 10 | **[`vector_engine.rs`](./vector_engine.rs)** | ~2,900行 | **2Dベクター幾何エンジン**（`Contour` / `FillShape`、ストローク輪郭生成、G1連続2次ベジェ曲線フィット、`i_overlay` ブーリアン演算＆De Casteljau 再構築、`lyon` 三角形メッシュ化） |
+| 11 | **[`tests.rs`](./tests.rs)** | ~1,810行 | 全機能を検証する自動ユニットテストスイート（全22テスト） |
 
 ---
 
 ## 1. [`main.rs`](./main.rs) — エントリポイント・アプリ状態・Undo/Redo・ショートカット・メインループ
 
-### 定数・初期化関数
+### 定数・通知型・初期化関数
 - **`MAX_UNDO_HISTORY: usize`** (`50`) — Undo スタックが保持する最大スナップショット数。
+- **`enum NoticeKind`** — キャンバス左上に表示するステータスメッセージの種類（`Warning` / `Error` / `Info`）と配色・アイコン定義（`colors(self)`）。
+- **`struct StatusToast`** — 一定時間（デフォルト3秒）で自動消滅するワンショット通知メッセージ（`kind: NoticeKind`, `message: String`, `expires_at: Instant`）。
 - **`main() -> eframe::Result<()>`** — ウィンドウサイズ（`1280 × 820`）とタイトル（`"is2d"`）を設定し、フォント・テーマを初期化して `eframe::run_native` を起動。
 - **`configure_japanese_fonts(ctx: &egui::Context)`** — `fonts/NotoSansJP-Medium.ttf`（日本語表示）および `fonts/MaterialIcons-Regular.ttf`（UIアイコン）を読み込み、`Proportional` / `Monospace` フォントファミリーへ登録。
 - **`configure_sharp_light_theme(ctx: &egui::Context)`** — すべてのウィジェット・パネル・メニューの角丸を `Rounding::ZERO` に統一したシャープなライトテーマを設定。
@@ -65,23 +67,26 @@
   - `next_group_id: u64` — グループID／シンボルインスタンスIDの連番採番カウンタ。
   - `clipboard: Vec<FillShape>` / `paste_count: usize` — コピー＆ペースト用内部クリップボードと連続ペーストのオフセット回数。
   - `transform_pivot: Option<Point>` / `transform_hover: TransformHoverTarget` / `transform_drag: TransformDragState` — 自由変形ツール（`Q`）の基準点・ホバー・ドラッグ状態。
+  - `status_toast: Option<StatusToast>` — 操作エラー・警告などを一定時間表示するワンショット通知。
   - `tessellator: FillTessellator` — `lyon` の三角形分割器インスタンス。
 
 ### `FlashBrushApp` のメソッド（`main.rs` 内）
 - **Undo / Redo 履歴管理**：
-  - `snapshot_timeline(&mut self) -> Timeline` — 現在の作業キャンバス（スライス前スナップショットがあればそれを優先）をタイムラインへ同期した状態の `Timeline` クローンを作成。
-  - `restore_state_snapshot(&mut self, state: Timeline)` — 指定した `Timeline` スナップショットを復元し、作業図形・選択状態・グループ編集パス・シンボル編集同期を更新。
-  - `record_undo_snapshot(&mut self, snapshot: Timeline)` — 渡された操作前スナップショットを `undo_stack` に積み（上限 `MAX_UNDO_HISTORY`）、`redo_stack` をクリア。
+  - `snapshot_timeline(&self) -> Timeline` — 再生タイマー等をクリアした現在の `Timeline` クローンを作成。
+  - `restore_state_snapshot(&mut self, tl: Timeline, shapes: Vec<FillShape>, sym_stack: Vec<SymbolEditSession>) -> UndoEntry` — 指定したタイムライン・図形・シンボル編集スタックを `std::mem::replace` で無コピー復元し、置換前の状態を返す。
+  - `record_undo_snapshot(&mut self, snapshot: Vec<FillShape>)` — 渡された操作前スナップショットを `undo_stack` に積み（上限 `MAX_UNDO_HISTORY`）、`redo_stack` をクリア。
   - `push_undo(&mut self)` — 現在の状態をスナップショット化して `record_undo_snapshot` に記録。
   - `undo(&mut self)` / `redo(&mut self)` — `Cmd/Ctrl + Z` および `Cmd/Ctrl + Y`（`Cmd+Shift+Z`）による履歴の巻き戻し・やり直し。
 - **キーボードショートカット処理**：
   - `handle_shortcuts(&mut self, ctx: &egui::Context)` — 再生中のショートカット制限と、単一キー／修飾キー付きショートカットの振り分け。
   - `handle_single_key_shortcuts(&mut self, ctx: &egui::Context)` — `Enter`（再生/停止）、`,` / `.`（コマ送り）、`F5` / `Shift+F5`（フレーム延長/削除）、`F6` / `Shift+F6`（複製KF/KF削除）、`F7`（空白KF）、`F8`（シンボル変換）、`T`（クラシックトゥイーン切替）、`O`（オニオンスキン）、`V`/`Q`/`B`/`E`/`K`/`I`（ツール切替）、`+`/`-`（アンカー追加/削除）、`Delete`/`Backspace`（削除）、`Esc`（選択解除またはグループ/シンボル階層から出る）を処理。
   - `handle_command_shortcuts(&mut self, ctx: &egui::Context)` — `Cmd/Ctrl + 1`（および `0`：100%表示）、`Cmd/Ctrl + 2`（ウィンドウに合わせる）、`Cmd/Ctrl + 3`（枠外を隠す）、`Cmd/Ctrl + Z/Y`（Undo/Redo）、`Cmd/Ctrl + G/B`（グループ化/解除）、`Cmd/Ctrl + C/X/V` 及び `Cmd/Ctrl + Shift + V`（コピー/カット/ペースト/同じ位置にペースト）を処理。
-- **キャンバス入力振り分け＆カーソル表示**：
+- **キャンバス入力振り分け・共通ステータス通知・カーソル表示**：
   - `is_current_tool_allowed(&self) -> bool` — 再生中でなく、かつ対象レイヤーが編集可能（可視・非ロック）かどうかを判定（スポイト・選択・自由変形は他レイヤーが編集可能なら許可）。
   - `handle_canvas_tool_input(&mut self, response: &egui::Response, painter: &egui::Painter, space_down: bool, shift_down: bool, alt_down: bool)` — パン中でない場合に現在のツールに応じた入力ハンドラを呼び出す。
-  - `draw_locked_layer_badge(&self, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter)` — 非表示またはロックされたレイヤー上で描画しようとした際にカーソル横に警告バッジを表示。
+  - `show_notice(&mut self, kind: NoticeKind, message: impl Into<String>)` / `notify_warning(&mut self, message: impl Into<String>)` / `notify_error(&mut self, message: impl Into<String>)` / `notify_info(&mut self, message: impl Into<String>)` — キャンバス左上への一時通知トースト登録ヘルパー。
+  - `current_state_notice(&self) -> Option<(NoticeKind, &'static str)>` — 現在のレイヤー・フレーム状態（非表示・ロック・未作成フレーム）に応じた常駐警告メッセージを返す。
+  - `draw_canvas_notices(&mut self, ctx: &egui::Context, painter: &egui::Painter, canvas_rect: egui::Rect, current_tool_allowed: bool, hover_pos: Option<Pos2>)` — 常駐ステータス警告・一時トースト通知をキャンバス左上に縦積み描画し、描画不可時のカーソル横バッジも表示。
   - `update_canvas_cursor(&self, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, is_panning: bool, space_down: bool)` — パン中・ロック中・通常操作中のOSカーソルとカスタムツールカーソルを更新。
 - **メインループ**：
   - `eframe::App::update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame)` — 毎フレームの再生タイマー進行、ショートカット処理、左ツールバー・右プロパティパネル・下部タイムライン・上部ステージバー・中央キャンバスの描画とイベント処理を実行。
@@ -122,6 +127,8 @@
   - `draw_eyedropper_tool_properties(&mut self, ui: &mut egui::Ui)` — スポイトツールのプロパティを表示。
   - `draw_color_tab(&mut self, ui: &mut egui::Ui)` — `カラー` タブを描画。
   - `draw_canvas_tab(&mut self, ui: &mut egui::Ui)` — `キャンバス` タブ（キャンバス情報：ステージ幅×高さ `DragValue`、キャンバス操作：`枠外を隠す` ボタン・`ウィンドウに合わせる` ボタン・`100%表示` ボタン）を描画。
+- **共通UIヘルパー関数（`panels.rs` 内）**：
+  - `draw_panel_section_label(ui: &mut egui::Ui, title: &str, bottom_space: f32)` — 右パネル内の各セクション見出しラベルと下部余白を描画する共通ヘルパー。
 
 ---
 
@@ -180,8 +187,7 @@
 ### カーソルバッジ描画フリー関数（`canvas_tool.rs` 内）
 - `draw_flash_curve_cursor_badge(painter: &egui::Painter, pos: Pos2)` — エッジホバー時の曲線アークバッジを描画。
 - `draw_flash_corner_cursor_badge(painter: &egui::Painter, pos: Pos2)` — 頂点ホバー時のシャープ角バッジ＋スナップリングを描画。
-- `draw_anchor_plus_cursor_badge(painter: &egui::Painter, pos: Pos2)` — アンカー追加モードの緑 `+` バッジを描画。
-- `draw_anchor_minus_cursor_badge(painter: &egui::Painter, pos: Pos2)` — アンカー削除モードの赤 `-` バッジを描画。
+- `draw_anchor_edit_cursor_badge(painter: &egui::Painter, pos: Pos2, is_plus: bool)` — アンカー追加モード（緑 `+`）およびアンカー削除モード（赤 `-`）のバッジを描画。
 - `scale_handle_cursor_icon(handle: ScaleHandle) -> egui::CursorIcon` — `ScaleHandle` に対応するOSリサイズカーソルアイコンを返す。
 - `draw_transform_rotate_cursor_badge(painter: &egui::Painter, pos: Pos2)` — 自由変形ツールの回転アーク矢印バッジを描画。
 - `draw_eyedropper_cursor_badge(painter: &egui::Painter, pos: Pos2, sample_color: Option<Color32>, current_color: Color32)` — スポイトツールの十字照準と抽出色プレビュースウォッチを描画。
@@ -328,7 +334,7 @@
   - `stop_playback(&mut self)` / `toggle_playback(&mut self)` / `update_playback(&mut self, ctx: &egui::Context)` — 再生開始・停止と、`1.0 / fps` 秒ごとのフレーム進行・再描画要求。
   - `timeline_insert_keyframe(&mut self, clone_prev: bool) -> bool` — `F6`（複製KF）・`F7`（空白KF）の挿入（既存KF先頭で押した場合は自動的に次フレームへ進んで作成する Adobe Animate 準拠挙動）。
   - `timeline_delete_keyframe(&mut self) -> bool` — `Shift+F6` によるキーフレーム削除。
-  - `timeline_extend_frame(&mut self) -> bool` / `timeline_remove_frame(&mut self) -> bool` — `F5`（フレーム延長）および `Shift+F5`（フレーム短縮・削除）。
+  - `timeline_extend_frame(&mut self) -> bool` / `timeline_remove_frame(&mut self) -> bool` — `F5`（フレーム延長：未作成フレーム選択時はそのフレームまで一括延長）および `Shift+F5`（フレーム短縮・削除）。
   - `timeline_move_or_copy_frames(&mut self, sel: TimelineCellSelection, layer_delta: isize, frame_delta: isize, copy_mode: bool) -> bool` — 選択フレーム範囲のドラッグ移動および `Alt`+ドラッグ複製。
 - **レイヤー操作**：
   - `set_layer_visible(&mut self, layer_idx: usize, visible: bool)` / `set_layer_locked(&mut self, layer_idx: usize, locked: bool)` — レイヤーの表示/非表示（👁）とロック（🔒）の切り替え。
@@ -355,7 +361,8 @@
 
 ### `Timeline` のメソッド＆フリー関数（`timeline_ui.rs` 内）
 - **`Timeline::ensure_current_frame_visible(&mut self, grid_width: f32)`** — 再生ヘッド（`current_frame`）が表示領域外に出た際、`scroll_x` を自動スクロールして追従させる。
-- **`draw_floating_drag_badge(ctx: &egui::Context, id_str: &'static str, pos: Pos2, text: String, bg_color: Color32, stroke_color: Color32)`** — フレーム移動／複製ドラッグ中やレイヤー並べ替えドラッグ中にカーソル横へ追従するフローティングバッジを描画。
+- **`draw_floating_drag_badge(painter: &egui::Painter, badge_rect: Rect, accent_color: Color32, text: &str, font_size: f32)`** — フレーム移動／複製ドラッグ中やレイヤー並べ替えドラッグ中にカーソル横へ追従するフローティングバッジを描画。
+- **`draw_header_mini_button(painter: &egui::Painter, rect: Rect, label: &str, font_size: f32, enabled: bool, hovered: bool, hover_fill: Color32)`** — レイヤー一覧左上ヘッダーの `[＋]` / `[🗑]` ミニボタンを描画。
 
 ### `FlashBrushApp` のメソッド（`timeline_ui.rs` 内）
 - **パネル全体＆コントロールバー描画**：

@@ -668,7 +668,7 @@ impl FlashBrushApp {
             }
             SelectDragState::None => match self.select_sub_mode {
                 SelectSubMode::AddAnchor => {
-                    draw_anchor_plus_cursor_badge(painter, pos);
+                    draw_anchor_edit_cursor_badge(painter, pos, true);
                     if let HoverTarget::Edge {
                         shape_idx,
                         contour_idx,
@@ -691,7 +691,7 @@ impl FlashBrushApp {
                     }
                 }
                 SelectSubMode::DeleteAnchor => {
-                    draw_anchor_minus_cursor_badge(painter, pos);
+                    draw_anchor_edit_cursor_badge(painter, pos, false);
                     if let HoverTarget::Vertex { pos: v_pos, .. } = self.hover_target {
                         ctx.set_cursor_icon(CursorIcon::PointingHand);
                         let vp = self.world_to_screen(v_pos);
@@ -810,6 +810,7 @@ impl FlashBrushApp {
 
         // 1. 下層レイヤーから上層レイヤーへ順に合成描画
         let mut selected_group_boxes: Vec<(u64, KRect, Option<Point>)> = Vec::new();
+        let (is_sel, has_sel) = self.selected_shape_mask();
         let num_layers = self.timeline.layers.len();
         let curr_f = self.timeline.current_frame;
 
@@ -832,7 +833,7 @@ impl FlashBrushApp {
             }
 
             let lid = self.timeline.layers[layer_idx].id;
-            for idx in 0..self.shapes.len() {
+            for (idx, &shape_selected) in is_sel.iter().enumerate() {
                 if num_layers > 1 && self.shapes[idx].layer_id != lid {
                     continue;
                 }
@@ -856,7 +857,7 @@ impl FlashBrushApp {
                     );
                 }
 
-                if self.selected_shapes.contains(&idx) && !active_affine_drag {
+                if has_sel && !active_affine_drag && shape_selected {
                     if let Some(gid) =
                         self.shapes[idx].active_group_id_at_scope(&self.editing_group_path)
                     {
@@ -1119,32 +1120,27 @@ fn draw_flash_corner_cursor_badge(painter: &egui::Painter, cursor: Pos2) {
     painter.line_segment([p1, p2], stroke);
 }
 
-/// アンカー追加モード時の「＋」カーソルバッジを描画
-fn draw_anchor_plus_cursor_badge(painter: &egui::Painter, cursor: Pos2) {
+/// アンカー追加（`is_plus = true`: 緑「＋」）およびアンカー削除（`is_plus = false`: 赤「－」）のカーソルバッジを描画
+fn draw_anchor_edit_cursor_badge(painter: &egui::Painter, cursor: Pos2, is_plus: bool) {
     let base = cursor + Vec2::new(15.0, 15.0);
-    painter.circle_filled(base, 8.0, Color32::from_rgb(30, 190, 90));
+    let fill = if is_plus {
+        Color32::from_rgb(30, 190, 90)
+    } else {
+        Color32::from_rgb(230, 55, 55)
+    };
+    painter.circle_filled(base, 8.0, fill);
     painter.circle_stroke(base, 8.0, Stroke::new(1.5, Color32::WHITE));
     let stroke = Stroke::new(2.2, Color32::WHITE);
     painter.line_segment(
         [Pos2::new(base.x - 4.5, base.y), Pos2::new(base.x + 4.5, base.y)],
         stroke,
     );
-    painter.line_segment(
-        [Pos2::new(base.x, base.y - 4.5), Pos2::new(base.x, base.y + 4.5)],
-        stroke,
-    );
-}
-
-/// アンカー削除モード時の「－」カーソルバッジを描画
-fn draw_anchor_minus_cursor_badge(painter: &egui::Painter, cursor: Pos2) {
-    let base = cursor + Vec2::new(15.0, 15.0);
-    painter.circle_filled(base, 8.0, Color32::from_rgb(230, 55, 55));
-    painter.circle_stroke(base, 8.0, Stroke::new(1.5, Color32::WHITE));
-    let stroke = Stroke::new(2.2, Color32::WHITE);
-    painter.line_segment(
-        [Pos2::new(base.x - 4.5, base.y), Pos2::new(base.x + 4.5, base.y)],
-        stroke,
-    );
+    if is_plus {
+        painter.line_segment(
+            [Pos2::new(base.x, base.y - 4.5), Pos2::new(base.x, base.y + 4.5)],
+            stroke,
+        );
+    }
 }
 
 /// 自由変形ツールの各スケールハンドルに対応するリサイズカーソルアイコンを返す
