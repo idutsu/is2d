@@ -111,6 +111,7 @@ impl Cel {
         &mut self,
         kf_start_frame: usize,
         sym_def: &SymbolDef,
+        library: &[SymbolDef],
         mut map_binding: impl FnMut(SymbolInstanceBinding) -> Option<SymbolInstanceBinding>,
     ) -> bool {
         let mut rebuilt = Vec::with_capacity(self.shapes.len());
@@ -137,6 +138,8 @@ impl Cel {
                 kf_start_frame,
                 kf_start_frame,
                 false,
+                library,
+                0,
             );
             rebuilt.extend(new_b.instantiate_shapes(&template_shapes, shape.layer_id, parent_scope));
             any_updated = true;
@@ -303,6 +306,60 @@ pub(crate) struct SymbolDef {
     pub(crate) next_layer_id: u64,
 }
 
+const MAX_SYMBOL_NEST_DEPTH: usize = 8;
+
+/// 入れ子シンボル対応で図形スライス内のシンボルインスタンスを再帰展開する共通ヘルパー
+/// （`force_reinstantiate == false` の通常フレーム評価時は、1フレーム静止シンボルの再変換・再テッセレーションをスキップする）
+fn resolve_shapes_with_library(
+    raw_shapes: &[FillShape],
+    kf_start_frame: usize,
+    frame: usize,
+    allow_empty: bool,
+    force_reinstantiate: bool,
+    library: &[SymbolDef],
+    depth: usize,
+) -> Vec<FillShape> {
+    if depth >= MAX_SYMBOL_NEST_DEPTH || !raw_shapes.iter().any(|s| s.symbol_instance.is_some()) {
+        return raw_shapes.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(raw_shapes.len());
+    let mut processed_gids: Vec<u64> = Vec::new();
+
+    for shape in raw_shapes {
+        let Some(b) = shape.symbol_instance else {
+            out.push(shape.clone());
+            continue;
+        };
+        if processed_gids.contains(&b.instance_gid) {
+            continue;
+        }
+
+        let Some(sym) = library.iter().find(|sym| sym.id == b.symbol_id) else {
+            out.push(shape.clone());
+            continue;
+        };
+
+        if !force_reinstantiate && !sym.has_dynamic_animation(library, depth) {
+            out.push(shape.clone());
+            continue;
+        }
+        processed_gids.push(b.instance_gid);
+
+        let parent_scope = b.parent_scope_from_path(&shape.group_path);
+        let local_shapes = sym.evaluated_local_shapes_for_instance(
+            b,
+            kf_start_frame,
+            frame,
+            allow_empty,
+            library,
+            depth + 1,
+        );
+        out.extend(b.instantiate_shapes(&local_shapes, shape.layer_id, parent_scope));
+    }
+    out
+}
+
 impl SymbolDef {
     pub(crate) fn new(id: u64, name: String, mut local_shapes: Vec<FillShape>) -> Self {
         for s in &mut local_shapes {
@@ -322,27 +379,46 @@ impl SymbolDef {
         }
     }
 
-    fn collect_visible_local_shapes_at(&self, frame: usize) -> Vec<FillShape> {
+    /// このシンボル自身、または内部の入れ子シンボルが複数フレームを持つかを再帰判定する
+    pub(crate) fn has_dynamic_animation(&self, library: &[SymbolDef], depth: usize) -> bool {
+        if self.total_frames > 1 {
+            return true;
+        }
+        if depth >= MAX_SYMBOL_NEST_DEPTH {
+            return false;
+        }
+        self.layers.iter().any(|layer| {
+            layer.keyframes.iter().any(|kf| {
+                kf.cel.shapes.iter().any(|s| {
+                    s.symbol_instance.is_some_and(|b| {
+                        library.iter().any(|child| {
+                            child.id == b.symbol_id
+                                && child.has_dynamic_animation(library, depth + 1)
+                        })
+                    })
+                })
+            })
+        })
+    }
+
+    fn collect_visible_local_shapes_at(
+        &self,
+        frame: usize,
+        child_eval_frame: usize,
+        library: &[SymbolDef],
+        depth: usize,
+    ) -> Vec<FillShape> {
         let mut out = Vec::new();
         for layer in &self.layers {
-            if !layer.visible {
-                continue;
-            }
-            if let Some(cel) = layer.cel_at(frame) {
-                let delta_xform = layer
-                    .interpolated_tween_binding_at(frame)
-                    .and_then(|(start_b, interp_b)| {
-                        (start_b.xform.determinant().abs() > 1e-9)
-                            .then(|| interp_b.xform * start_b.xform.inverse())
-                    });
-                for s in &cel.shapes {
-                    let mut cloned = s.clone();
-                    if let Some(dx) = delta_xform {
-                        cloned.transform(dx);
-                    }
-                    cloned.layer_id = 1;
-                    out.push(cloned);
-                }
+            if layer.visible {
+                out.extend(layer.evaluate_shapes_at(
+                    frame,
+                    child_eval_frame,
+                    1,
+                    false,
+                    library,
+                    depth,
+                ));
             }
         }
         out
@@ -374,9 +450,31 @@ impl SymbolDef {
         kf_start_frame: usize,
         current_frame: usize,
         allow_empty: bool,
+        library: &[SymbolDef],
+        depth: usize,
     ) -> Vec<FillShape> {
         let internal_frame = self.resolve_internal_frame(binding, kf_start_frame, current_frame);
-        self.evaluated_local_shapes_at(internal_frame, allow_empty)
+        let child_eval_frame = if self.total_frames <= 1 && binding.loop_mode != SymbolLoopMode::SingleFrame {
+            binding.first_frame + current_frame.saturating_sub(kf_start_frame)
+        } else {
+            internal_frame
+        };
+        let fc = self.total_frames.max(1);
+        let out = self.collect_visible_local_shapes_at(
+            internal_frame % fc,
+            child_eval_frame,
+            library,
+            depth,
+        );
+        if !out.is_empty() || allow_empty {
+            return out;
+        }
+        (0..fc)
+            .find_map(|f| {
+                let fallback = self.collect_visible_local_shapes_at(f, f, library, depth);
+                (!fallback.is_empty()).then_some(fallback)
+            })
+            .unwrap_or_default()
     }
 
     /// 指定されたフレーム番号 `offset_frame` に対応するシンボル内部フレーム（`offset_frame % total_frames` でループ評価）の
@@ -385,18 +483,11 @@ impl SymbolDef {
         &self,
         offset_frame: usize,
         allow_empty: bool,
+        library: &[SymbolDef],
+        depth: usize,
     ) -> Vec<FillShape> {
-        let fc = self.total_frames.max(1);
-        let out = self.collect_visible_local_shapes_at(offset_frame % fc);
-        if !out.is_empty() || allow_empty {
-            return out;
-        }
-        (0..fc)
-            .find_map(|f| {
-                let fallback = self.collect_visible_local_shapes_at(f);
-                (!fallback.is_empty()).then_some(fallback)
-            })
-            .unwrap_or_default()
+        let binding = SymbolInstanceBinding::new(0, self.id, Affine::IDENTITY);
+        self.evaluated_local_shapes_for_instance(binding, 0, offset_frame, allow_empty, library, depth)
     }
 
     /// 作業用タイムライン `working_tl` と逆変換行列 `inv_xform` からシンボル定義のレイヤー・フレーム状態を更新する
@@ -416,68 +507,89 @@ impl SymbolDef {
 #[derive(Clone, Debug)]
 pub(crate) struct SymbolEditSession {
     pub(crate) symbol_id: u64,
-    pub(crate) symbol_name: String,
     pub(crate) instance_gid: u64,
     pub(crate) instance_xform: Affine,
     pub(crate) parent_timeline: Timeline,
     pub(crate) parent_editing_group_path: Vec<u64>,
-    /// 親シーンの現在フレームにおける周辺図形（対象シンボルインスタンス自身を除いた背景表示用シェイプ群）
-    pub(crate) backdrop_shapes: Vec<FillShape>,
+    /// 親シーンの現在フレームにおける周辺図形（対象シンボルインスタンス自身を除いた背景表示用バッチキャッシュ付きセル）
+    pub(crate) backdrop_cel: Cel,
 }
 
 // ============================================================================
-// 2. タイムライン上のシンボルフレーム評価・メッシュ生成（impl Timeline）
+// 2. タイムライン上のシンボルフレーム評価・メッシュ生成（impl Layer / impl Timeline）
 // ============================================================================
 
+impl Layer {
+    /// このレイヤーの指定フレーム `frame` における図形列を、クラシックトゥイーン補間およびシンボル内タイムライン評価込みで返す
+    pub(crate) fn evaluate_shapes_at(
+        &self,
+        frame: usize,
+        child_eval_frame: usize,
+        out_layer_id: u64,
+        allow_empty: bool,
+        library: &[SymbolDef],
+        depth: usize,
+    ) -> Vec<FillShape> {
+        let Some(kf_idx) = self.keyframe_index_at(frame) else {
+            return Vec::new();
+        };
+        let kf = &self.keyframes[kf_idx];
+        if let Some((start_b, interp_b)) = self.interpolated_tween_binding_at(frame) {
+            if depth < MAX_SYMBOL_NEST_DEPTH {
+                if let Some(sym) = library.iter().find(|s| s.id == interp_b.symbol_id) {
+                    let local_shapes = sym.evaluated_local_shapes_for_instance(
+                        interp_b,
+                        kf.start_frame,
+                        child_eval_frame,
+                        allow_empty,
+                        library,
+                        depth + 1,
+                    );
+                    return interp_b.instantiate_shapes(&local_shapes, out_layer_id, &[]);
+                }
+            }
+            let delta = (start_b.xform.determinant().abs() > 1e-9)
+                .then(|| interp_b.xform * start_b.xform.inverse());
+            return kf
+                .cel
+                .shapes
+                .iter()
+                .map(|s| {
+                    let mut c = s.clone().with_layer_id(out_layer_id);
+                    if let Some(dx) = delta {
+                        c.transform(dx);
+                    }
+                    c.symbol_instance = Some(interp_b);
+                    c
+                })
+                .collect();
+        }
+
+        resolve_shapes_with_library(
+            &kf.cel.shapes,
+            kf.start_frame,
+            child_eval_frame,
+            allow_empty,
+            false,
+            library,
+            depth,
+        )
+        .into_iter()
+        .map(|s| s.with_layer_id(out_layer_id))
+        .collect()
+    }
+}
+
 impl Timeline {
-    /// 与えられた図形スライス内に、複数フレームを持つシンボルインスタンスが含まれているかを返す
-    pub(crate) fn has_multiframe_symbol(&self, shapes: &[FillShape]) -> bool {
+    /// 与えられた図形スライス内に、複数フレームを持つシンボルインスタンス（入れ子含む）が含まれているかを返す
+    pub(crate) fn has_multiframe_symbol(shapes: &[FillShape], library: &[SymbolDef]) -> bool {
         shapes.iter().any(|s| {
             s.symbol_instance.is_some_and(|b| {
-                self.library
+                library
                     .iter()
-                    .any(|sym| sym.id == b.symbol_id && sym.total_frames > 1)
+                    .any(|sym| sym.id == b.symbol_id && sym.has_dynamic_animation(library, 0))
             })
         })
-    }
-
-    /// 指定フレーム `frame`（開始キーフレーム `kf_start_frame`）において、各シンボルインスタンスの内部タイムラインを
-    /// インスタンスごとの再生モード（ループ再生 / 1回再生 / 任意のフレーム）で評価して展開した図形列を返す
-    pub(crate) fn resolve_shapes_with_symbols(
-        &self,
-        raw_shapes: &[FillShape],
-        kf_start_frame: usize,
-        frame: usize,
-        allow_empty: bool,
-    ) -> Vec<FillShape> {
-        if !raw_shapes.iter().any(|s| s.symbol_instance.is_some()) {
-            return raw_shapes.to_vec();
-        }
-
-        let mut out = Vec::with_capacity(raw_shapes.len());
-        let mut processed_gids: Vec<u64> = Vec::new();
-
-        for shape in raw_shapes {
-            let Some(b) = shape.symbol_instance else {
-                out.push(shape.clone());
-                continue;
-            };
-            if processed_gids.contains(&b.instance_gid) {
-                continue;
-            }
-            processed_gids.push(b.instance_gid);
-
-            let Some(sym) = self.library.iter().find(|sym| sym.id == b.symbol_id) else {
-                out.push(shape.clone());
-                continue;
-            };
-
-            let parent_scope = b.parent_scope_from_path(&shape.group_path);
-            let local_shapes =
-                sym.evaluated_local_shapes_for_instance(b, kf_start_frame, frame, allow_empty);
-            out.extend(b.instantiate_shapes(&local_shapes, shape.layer_id, parent_scope));
-        }
-        out
     }
 
     /// 指定レイヤー `layer_idx` の指定フレーム `frame` における図形列を、クラシックトゥイーン補間およびシンボル内タイムライン評価込みで返す
@@ -486,49 +598,12 @@ impl Timeline {
         layer_idx: usize,
         frame: usize,
         allow_empty: bool,
+        library: &[SymbolDef],
     ) -> Vec<FillShape> {
         let Some(layer) = self.layers.get(layer_idx) else {
             return Vec::new();
         };
-        let Some(kf_idx) = layer.keyframe_index_at(frame) else {
-            return Vec::new();
-        };
-        let kf = &layer.keyframes[kf_idx];
-        let cel = &kf.cel;
-        let kf_start_frame = kf.start_frame;
-        let lid = layer.id;
-
-        if let Some((start_b, interp_b)) = layer.interpolated_tween_binding_at(frame) {
-            if let Some(sym) = self.library.iter().find(|s| s.id == interp_b.symbol_id) {
-                let local_shapes = sym.evaluated_local_shapes_for_instance(
-                    interp_b,
-                    kf_start_frame,
-                    frame,
-                    allow_empty,
-                );
-                return interp_b.instantiate_shapes(&local_shapes, lid, &[]);
-            }
-            let delta = if start_b.xform.determinant().abs() > 1e-9 {
-                interp_b.xform * start_b.xform.inverse()
-            } else {
-                Affine::IDENTITY
-            };
-            return cel
-                .shapes
-                .iter()
-                .map(|s| {
-                    let mut c = s.clone().with_layer_id(lid);
-                    c.transform(delta);
-                    c.symbol_instance = Some(interp_b);
-                    c
-                })
-                .collect();
-        }
-
-        self.resolve_shapes_with_symbols(&cel.shapes, kf_start_frame, frame, allow_empty)
-            .into_iter()
-            .map(|s| s.with_layer_id(lid))
-            .collect()
+        layer.evaluate_shapes_at(frame, frame, layer.id, allow_empty, library, 0)
     }
 
     /// 指定レイヤー・フレームの結合済みワールド座標メッシュを（トゥイーン補間・複数フレームシンボル評価込みで）構築する
@@ -536,8 +611,9 @@ impl Timeline {
         &self,
         layer_idx: usize,
         frame: usize,
+        library: &[SymbolDef],
     ) -> Option<Mesh> {
-        let resolved = self.evaluate_layer_shapes_at(layer_idx, frame, true);
+        let resolved = self.evaluate_layer_shapes_at(layer_idx, frame, true, library);
         if resolved.is_empty() {
             return None;
         }
@@ -548,7 +624,20 @@ impl Timeline {
         Some(batch)
     }
 
-    /// 指定レイヤー・フレームの描画用スクリーン `Mesh` を返す（トゥイーン中間フレームまたは複数フレームシンボルを含む場合はフレーム評価を行い、それ以外は高速キャッシュを返す）
+    fn static_cel_at(
+        &self,
+        layer_idx: usize,
+        frame: usize,
+        library: &[SymbolDef],
+    ) -> Option<(&Cel, bool)> {
+        let layer = self.layers.get(layer_idx)?;
+        let cel = layer.cel_at(frame).filter(|c| !c.is_empty())?;
+        let is_static = layer.interpolated_tween_binding_at(frame).is_none()
+            && !Self::has_multiframe_symbol(&cel.shapes, library);
+        Some((cel, is_static))
+    }
+
+    /// 指定レイヤー・フレームの描画用スクリーン `Mesh` を返す（静止セルは `Cel` キャッシュを使用し、トゥイーン中間フレーム・複数フレームシンボルは評価後に変換する）
     pub(crate) fn resolved_cel_screen_mesh(
         &self,
         layer_idx: usize,
@@ -556,18 +645,13 @@ impl Timeline {
         zoom: f32,
         pan: Vec2,
         dim_backdrop: bool,
+        library: &[SymbolDef],
     ) -> Option<Mesh> {
-        let layer = self.layers.get(layer_idx)?;
-        let cel = layer.cel_at(frame)?;
-        if cel.is_empty() {
-            return None;
-        }
-        if layer.interpolated_tween_binding_at(frame).is_none()
-            && !self.has_multiframe_symbol(&cel.shapes)
-        {
+        let (cel, is_static) = self.static_cel_at(layer_idx, frame, library)?;
+        if is_static {
             return Some(cel.cached_screen_mesh(zoom, pan, dim_backdrop));
         }
-        let batch = self.build_layer_resolved_world_batch_mesh(layer_idx, frame)?;
+        let batch = self.build_layer_resolved_world_batch_mesh(layer_idx, frame, library)?;
         Some(transform_mesh_to_screen(&batch, zoom, pan, dim_backdrop))
     }
 
@@ -578,20 +662,14 @@ impl Timeline {
         frame: usize,
         zoom: f32,
         pan: Vec2,
-        tint_rgb: [u8; 3],
-        alpha: u8,
+        (tint_rgb, alpha): ([u8; 3], u8),
+        library: &[SymbolDef],
     ) -> Option<Mesh> {
-        let layer = self.layers.get(layer_idx)?;
-        let cel = layer.cel_at(frame)?;
-        if cel.is_empty() {
-            return None;
-        }
-        if layer.interpolated_tween_binding_at(frame).is_none()
-            && !self.has_multiframe_symbol(&cel.shapes)
-        {
+        let (cel, is_static) = self.static_cel_at(layer_idx, frame, library)?;
+        if is_static {
             return Some(cel.cached_onion_mesh(zoom, pan, tint_rgb, alpha));
         }
-        let batch = self.build_layer_resolved_world_batch_mesh(layer_idx, frame)?;
+        let batch = self.build_layer_resolved_world_batch_mesh(layer_idx, frame, library)?;
         Some(transform_mesh_to_screen_onion(
             &batch, zoom, pan, tint_rgb, alpha,
         ))
@@ -630,7 +708,7 @@ impl FlashBrushApp {
         }
         let center = Point::new((bbox.x0 + bbox.x1) * 0.5, (bbox.y0 + bbox.y1) * 0.5);
 
-        let sym_id = self.timeline.next_symbol_id;
+        let sym_id = self.next_symbol_id;
         let sym_name = format!("Symbol {sym_id}");
         let inst_gid = self.next_group_id;
         self.next_group_id += 1;
@@ -641,8 +719,13 @@ impl FlashBrushApp {
         for &idx in &valid_indices {
             let mut local_s = self.shapes[idx].clone();
             local_s.layer_id = 1;
-            local_s.group_path = local_s.group_path[depth..].to_vec();
-            local_s.symbol_instance = None;
+            local_s.group_path = local_s.group_path.get(depth..).unwrap_or_default().to_vec();
+            if local_s
+                .symbol_instance
+                .is_some_and(|b| !local_s.group_path.contains(&b.instance_gid))
+            {
+                local_s.symbol_instance = None;
+            }
             local_s.translate(to_local);
             local_shapes.push(local_s);
         }
@@ -666,14 +749,10 @@ impl FlashBrushApp {
         }
         // Undo スナップショットに変換前のライブラリ状態が残るよう、先に commit してからライブラリへ追加する
         self.commit_moved_selection(snapshot);
-        self.timeline.next_symbol_id += 1;
+        self.next_symbol_id += 1;
         let sym_def = SymbolDef::new(sym_id, sym_name, local_shapes);
-        self.timeline.library.push(sym_def.clone());
-        self.timeline.selected_library_symbol = Some(sym_id);
-        for sess in &mut self.symbol_edit_stack {
-            sess.parent_timeline.next_symbol_id = self.timeline.next_symbol_id;
-            sess.parent_timeline.library.push(sym_def.clone());
-        }
+        self.library.push(sym_def);
+        self.selected_library_symbol = Some(sym_id);
         self.selection_modified = false;
         self.transform_pivot = None;
         self.inspect_timeline_frame = false;
@@ -683,11 +762,10 @@ impl FlashBrushApp {
     /// ライブラリ内の指定シンボル `symbol_id` の新しいインスタンスを現在のステージ中央へ配置する
     pub(crate) fn place_symbol_instance_from_library(&mut self, symbol_id: u64) -> bool {
         let Some(sym_shapes) = self
-            .timeline
             .library
             .iter()
             .find(|s| s.id == symbol_id)
-            .map(|s| s.evaluated_local_shapes_at(0, false))
+            .map(|s| s.evaluated_local_shapes_at(0, false, &self.library, 1))
         else {
             return false;
         };
@@ -712,30 +790,56 @@ impl FlashBrushApp {
         true
     }
 
-    /// ライブラリから指定シンボル `symbol_id` を削除し、全フレーム・キャンバス上のインスタンスも除去する
+    /// ライブラリから指定シンボル `symbol_id` を削除し、ステージ上および全フレームに配置されていた該当インスタンスは
+    /// 消去せず通常のグループ図形へ自動分解（デタッチ）して残す
     pub(crate) fn delete_symbol_from_library(&mut self, symbol_id: u64) -> bool {
-        if !self.timeline.library.iter().any(|s| s.id == symbol_id) {
+        if !self.library.iter().any(|s| s.id == symbol_id) {
             return false;
+        }
+        while self
+            .symbol_edit_stack
+            .iter()
+            .any(|sess| sess.symbol_id == symbol_id)
+        {
+            self.exit_symbol_timeline();
         }
         self.clear_selection();
         self.push_undo();
 
-        self.timeline.library.retain(|s| s.id != symbol_id);
-        if self.timeline.selected_library_symbol == Some(symbol_id) {
-            self.timeline.selected_library_symbol = self.timeline.library.first().map(|s| s.id);
+        self.library.retain(|s| s.id != symbol_id);
+        if self.selected_library_symbol == Some(symbol_id) {
+            self.selected_library_symbol = self.library.first().map(|s| s.id);
         }
-        self.shapes
-            .retain(|s| s.symbol_instance.is_none_or(|b| b.symbol_id != symbol_id));
-        for layer in &mut self.timeline.layers {
-            for kf in &mut layer.keyframes {
-                kf.cel
-                    .shapes
-                    .retain(|s| s.symbol_instance.is_none_or(|b| b.symbol_id != symbol_id));
-                if kf.tween && kf.cel.single_symbol_instance().is_none() {
-                    kf.tween = false;
+
+        let detach_in_shapes = |shapes: &mut [FillShape]| {
+            for s in shapes {
+                if s.symbol_instance.is_some_and(|b| b.symbol_id == symbol_id) {
+                    s.symbol_instance = None;
                 }
             }
+        };
+        let detach_in_layers = |layers: &mut [Layer]| {
+            for layer in layers {
+                for kf in &mut layer.keyframes {
+                    detach_in_shapes(&mut kf.cel.shapes);
+                    if kf.tween && kf.cel.single_symbol_instance().is_none() {
+                        kf.tween = false;
+                    }
+                }
+            }
+        };
+
+        detach_in_shapes(&mut self.shapes);
+        detach_in_layers(&mut self.timeline.layers);
+        for sym in &mut self.library {
+            detach_in_layers(&mut sym.layers);
         }
+        for sess in &mut self.symbol_edit_stack {
+            detach_in_layers(&mut sess.parent_timeline.layers);
+            detach_in_shapes(&mut sess.backdrop_cel.shapes);
+        }
+
+        self.record_loaded_signatures();
         self.sanitize_editing_group_path();
         true
     }
@@ -847,14 +951,13 @@ impl FlashBrushApp {
             return false;
         }
 
-        self.flush_canvas_before_timeline_op();
-        self.push_undo();
-        if let Some(layer_mut) = self.timeline.layers.get_mut(self.timeline.active_layer) {
-            if let Some(kf) = layer_mut.keyframes.get_mut(kf_idx) {
-                kf.tween_rotate = rotate_mode;
+        self.mutate_timeline_with_undo(|tl| {
+            if let Some(layer_mut) = tl.layers.get_mut(tl.active_layer) {
+                if let Some(kf) = layer_mut.keyframes.get_mut(kf_idx) {
+                    kf.tween_rotate = rotate_mode;
+                }
             }
-        }
-        self.load_shapes_from_timeline();
+        });
         self.select_shapes_for_timeline_selection();
         self.inspect_timeline_frame = true;
         true
@@ -878,7 +981,6 @@ impl FlashBrushApp {
             return None;
         }
         let sym = self
-            .timeline
             .library
             .iter()
             .find(|sym| sym.id == first_binding.symbol_id)?;
@@ -918,13 +1020,7 @@ impl FlashBrushApp {
         self.sync_shapes_to_timeline();
         self.push_undo();
 
-        let Some(sym_def) = self
-            .timeline
-            .library
-            .iter()
-            .find(|s| s.id == sym_id)
-            .cloned()
-        else {
+        let Some(sym_def) = self.library.iter().find(|s| s.id == sym_id) else {
             return false;
         };
 
@@ -938,16 +1034,18 @@ impl FlashBrushApp {
                 continue;
             };
             let kf = &mut layer.keyframes[kf_idx];
-            if kf
-                .cel
-                .rebuild_symbol_instances_with(kf.start_frame, &sym_def, |mut b| {
+            if kf.cel.rebuild_symbol_instances_with(
+                kf.start_frame,
+                sym_def,
+                &self.library,
+                |mut b| {
                     (b.instance_gid == inst_gid).then(|| {
                         b.loop_mode = loop_mode;
                         b.first_frame = clamped_first;
                         b
                     })
-                })
-            {
+                },
+            ) {
                 updated = true;
             }
         }
@@ -963,7 +1061,6 @@ impl FlashBrushApp {
     /// シンボルインスタンスをダブルクリックして、そのシンボル専用の内部タイムライン編集モードへ入る
     pub(crate) fn enter_symbol_timeline(&mut self, binding: SymbolInstanceBinding) -> bool {
         let Some(sym_def) = self
-            .timeline
             .library
             .iter()
             .find(|s| s.id == binding.symbol_id)
@@ -978,14 +1075,16 @@ impl FlashBrushApp {
         let mut backdrop_shapes: Vec<FillShape> = self
             .symbol_edit_stack
             .last()
-            .map(|s| s.backdrop_shapes.clone())
+            .map(|s| s.backdrop_cel.shapes.clone())
             .unwrap_or_default();
         let curr_f = self.timeline.current_frame;
         for layer_idx in 0..self.timeline.layers.len() {
             if !self.timeline.layers[layer_idx].visible {
                 continue;
             }
-            let resolved = self.timeline.evaluate_layer_shapes_at(layer_idx, curr_f, false);
+            let resolved =
+                self.timeline
+                    .evaluate_layer_shapes_at(layer_idx, curr_f, false, &self.library);
             backdrop_shapes.extend(resolved.into_iter().filter(|s| {
                 s.symbol_instance
                     .is_none_or(|b| b.instance_gid != binding.instance_gid)
@@ -996,21 +1095,45 @@ impl FlashBrushApp {
         let mut sym_layers = sym_def.layers.clone();
         transform_layers_shapes(&mut sym_layers, binding.xform);
         let sym_timeline = self.timeline.new_for_symbol_edit(&sym_def, sym_layers);
+        self.selected_library_symbol = Some(sym_def.id);
 
         let parent_timeline = std::mem::replace(&mut self.timeline, sym_timeline);
         let parent_editing_group_path = std::mem::take(&mut self.editing_group_path);
         self.symbol_edit_stack.push(SymbolEditSession {
             symbol_id: binding.symbol_id,
-            symbol_name: sym_def.name,
             instance_gid: binding.instance_gid,
             instance_xform: binding.xform,
             parent_timeline,
             parent_editing_group_path,
-            backdrop_shapes,
+            backdrop_cel: Cel::new(backdrop_shapes),
         });
 
         self.load_shapes_from_timeline();
         true
+    }
+
+    /// ライブラリ内の指定シンボル `symbol_id` の内部タイムライン編集モードへ入る
+    pub(crate) fn enter_symbol_from_library(&mut self, symbol_id: u64) -> bool {
+        if self
+            .symbol_edit_stack
+            .iter()
+            .any(|sess| sess.symbol_id == symbol_id)
+        {
+            return false;
+        }
+        let binding = self
+            .shapes
+            .iter()
+            .find_map(|s| s.symbol_instance.filter(|b| b.symbol_id == symbol_id))
+            .unwrap_or_else(|| {
+                let stage_center = self.stage_center_world();
+                SymbolInstanceBinding::new(
+                    0,
+                    symbol_id,
+                    Affine::translate(KVec2::new(stage_center.x, stage_center.y)),
+                )
+            });
+        self.enter_symbol_timeline(binding)
     }
 
     /// 現在入っているシンボル内部タイムライン編集モードから1段階上の親シーン（または親シンボル）タイムラインへ戻る
@@ -1020,16 +1143,15 @@ impl FlashBrushApp {
         }
         self.flush_canvas_before_timeline_op();
 
-        let session = self.symbol_edit_stack.pop().unwrap();
+        let Some(session) = self.symbol_edit_stack.pop() else {
+            return false;
+        };
         let sym_timeline = std::mem::replace(&mut self.timeline, session.parent_timeline);
         self.editing_group_path = session.parent_editing_group_path;
-        self.timeline.library = sym_timeline.library.clone();
-        self.timeline.next_symbol_id = sym_timeline.next_symbol_id;
 
         if session.instance_xform.determinant().abs() > 1e-9 {
             let inv_xform = session.instance_xform.inverse();
             if let Some(sym_def) = self
-                .timeline
                 .library
                 .iter_mut()
                 .find(|s| s.id == session.symbol_id)
@@ -1038,8 +1160,8 @@ impl FlashBrushApp {
             }
         }
 
-        // 親タイムライン内の該当シンボルインスタンスの格納図形を最新化
-        self.refresh_symbol_instances_in_timeline(session.symbol_id);
+        // ライブラリ内の親シンボル定義および親タイムライン内の全シンボルインスタンス格納図形を最新化
+        self.refresh_symbol_instances_in_timeline();
         self.load_shapes_from_timeline();
 
         // 戻った親階層で元のシンボルインスタンスを選択状態にする
@@ -1048,7 +1170,7 @@ impl FlashBrushApp {
     }
 
     /// シンボル内部タイムライン編集中に、現在の `self.timeline`（シンボルタイムライン）の状態を
-    /// ライブラリ定義（`SymbolDef`）および背景プレビュー（`backdrop_shapes`）へ同期する
+    /// ライブラリ定義（`SymbolDef`）および背景プレビュー（`backdrop_cel`）へ同期する
     pub(crate) fn sync_active_symbol_edit(&mut self) {
         let Some(session) = self.symbol_edit_stack.last() else {
             return;
@@ -1058,49 +1180,65 @@ impl FlashBrushApp {
         }
         let inv_xform = session.instance_xform.inverse();
         let sym_id = session.symbol_id;
-        let working_snapshot = self.timeline.clone();
 
-        if let Some(sym_def) = self.timeline.library.iter_mut().find(|s| s.id == sym_id) {
-            sym_def.update_from_working_timeline(&working_snapshot, inv_xform);
+        if let Some(sym_def) = self.library.iter_mut().find(|s| s.id == sym_id) {
+            sym_def.update_from_working_timeline(&self.timeline, inv_xform);
         }
         if let Some(session_mut) = self.symbol_edit_stack.last_mut() {
-            if let Some(parent_sym) = session_mut
-                .parent_timeline
-                .library
-                .iter_mut()
-                .find(|s| s.id == sym_id)
+            if session_mut
+                .backdrop_cel
+                .shapes
+                .iter()
+                .any(|s| s.symbol_instance.is_some_and(|b| b.symbol_id == sym_id))
             {
-                parent_sym.update_from_working_timeline(&working_snapshot, inv_xform);
+                let parent_f = session_mut.parent_timeline.current_frame;
+                session_mut.backdrop_cel = Cel::new(resolve_shapes_with_library(
+                    &session_mut.backdrop_cel.shapes,
+                    0,
+                    parent_f,
+                    false,
+                    true,
+                    &self.library,
+                    0,
+                ));
             }
-            let parent_f = session_mut.parent_timeline.current_frame;
-            session_mut.backdrop_shapes = session_mut.parent_timeline.resolve_shapes_with_symbols(
-                &session_mut.backdrop_shapes,
-                0,
-                parent_f,
-                false,
-            );
         }
     }
 
-    /// `self.timeline.layers` 内の全キーフレームにある指定シンボル `symbol_id` のインスタンス図形を最新定義で更新する
-    pub(crate) fn refresh_symbol_instances_in_timeline(&mut self, symbol_id: u64) {
-        let Some(sym_def) = self
-            .timeline
-            .library
-            .iter()
-            .find(|s| s.id == symbol_id)
-            .cloned()
-        else {
-            return;
+    /// ライブラリ内の入れ子シンボルおよび `self.timeline.layers` 内の全キーフレームにあるシンボルインスタンス図形を最新定義で更新する
+    pub(crate) fn refresh_symbol_instances_in_timeline(&mut self) {
+        let refresh_layers = |layers: &mut [Layer], library: &[SymbolDef]| {
+            for layer in layers {
+                for kf in &mut layer.keyframes {
+                    if kf.cel.shapes.iter().any(|s| s.symbol_instance.is_some()) {
+                        kf.cel.shapes = resolve_shapes_with_library(
+                            &kf.cel.shapes,
+                            kf.start_frame,
+                            kf.start_frame,
+                            false,
+                            true,
+                            library,
+                            0,
+                        );
+                    }
+                }
+            }
         };
-        for layer in &mut self.timeline.layers {
-            for kf in &mut layer.keyframes {
-                kf.cel
-                    .rebuild_symbol_instances_with(kf.start_frame, &sym_def, |b| {
-                        (b.symbol_id == symbol_id).then_some(b)
-                    });
+        let has_nested_symbols = self.library.iter().any(|sym| {
+            sym.layers.iter().any(|l| {
+                l.keyframes
+                    .iter()
+                    .any(|kf| kf.cel.shapes.iter().any(|s| s.symbol_instance.is_some()))
+            })
+        });
+        if has_nested_symbols {
+            for i in 0..self.library.len() {
+                let mut layers = std::mem::take(&mut self.library[i].layers);
+                refresh_layers(&mut layers, &self.library);
+                self.library[i].layers = layers;
             }
         }
+        refresh_layers(&mut self.timeline.layers, &self.library);
     }
 
     // ============================================================================
@@ -1308,6 +1446,33 @@ impl FlashBrushApp {
             }
         });
 
+        if next_mode == SymbolLoopMode::SingleFrame && (2..=12).contains(&max_first_1based) {
+            ui.add_space(4.0);
+            for chunk_start in (1..=max_first_1based).step_by(6) {
+                let chunk_end = (chunk_start + 5).min(max_first_1based);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    let cols = (chunk_end - chunk_start + 1) as f32;
+                    let btn_w = ((ui.available_width() - 3.0 * (cols - 1.0)) / cols).max(24.0);
+                    for f in chunk_start..=chunk_end {
+                        if ui
+                            .add_sized(
+                                Vec2::new(btn_w, 22.0),
+                                egui::Button::new(format!("{f}F"))
+                                    .selected(next_first_1based == f),
+                            )
+                            .clicked()
+                        {
+                            next_first_1based = f;
+                        }
+                    }
+                });
+                if chunk_end < max_first_1based {
+                    ui.add_space(3.0);
+                }
+            }
+        }
+
         if next_mode != binding.loop_mode || next_first_1based != current_first_1based {
             self.set_selected_symbol_playback(next_mode, next_first_1based.saturating_sub(1));
         }
@@ -1325,7 +1490,7 @@ impl FlashBrushApp {
         }
     }
 
-    /// 「ライブラリ」タブの描画（シンボルのプレビュー・一覧・名前変更・ステージ配置・削除）
+    /// 「ライブラリ」タブの描画（シンボルのプレビュー・一覧・名前変更・ステージ配置・編集・削除）
     pub(crate) fn draw_library_tab(&mut self, ui: &mut egui::Ui) {
         let has_sel = !self.selected_shapes.is_empty();
         if ui
@@ -1344,7 +1509,7 @@ impl FlashBrushApp {
         ui.separator();
         ui.add_space(6.0);
 
-        if self.timeline.library.is_empty() {
+        if self.library.is_empty() {
             ui.label(
                 egui::RichText::new(
                     "シンボルがありません。\n図形を選択して F8 キーを押すとシンボルを作成できます。",
@@ -1355,31 +1520,34 @@ impl FlashBrushApp {
             return;
         }
 
-        if self.timeline.selected_library_symbol.is_none()
+        if self.selected_library_symbol.is_none()
             || !self
-                .timeline
                 .library
                 .iter()
-                .any(|s| Some(s.id) == self.timeline.selected_library_symbol)
+                .any(|s| Some(s.id) == self.selected_library_symbol)
         {
-            self.timeline.selected_library_symbol = self.timeline.library.first().map(|s| s.id);
+            self.selected_library_symbol = self.library.first().map(|s| s.id);
         }
 
         // 選択中のシンボルのミニプレビュー描画領域
-        if let Some(sel_id) = self.timeline.selected_library_symbol {
-            if let Some(sym) = self.timeline.library.iter().find(|s| s.id == sel_id) {
-                let preview_shapes = sym.evaluated_local_shapes_at(sym.current_frame, false);
-                self.draw_symbol_mini_preview(ui, &preview_shapes);
+        if let Some(sel_id) = self.selected_library_symbol {
+            if let Some(sym) = self.library.iter().find(|s| s.id == sel_id) {
+                self.draw_symbol_mini_preview(ui, sym);
                 ui.add_space(6.0);
             }
 
+            let is_editing_self = self
+                .symbol_edit_stack
+                .iter()
+                .any(|sess| sess.symbol_id == sel_id);
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let place_w = ui.available_width() - 66.0;
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let place_w = (ui.available_width() - 116.0).max(70.0);
                 if ui
-                    .add_sized(
-                        Vec2::new(place_w.max(80.0), 28.0),
-                        egui::Button::new(format!("{} ステージに配置", icons::ADD)),
+                    .add_enabled(
+                        !is_editing_self,
+                        egui::Button::new(format!("{} ステージに配置", icons::ADD))
+                            .min_size(Vec2::new(place_w, 28.0)),
                     )
                     .on_hover_text("選択中のシンボルを現在のフレーム・レイヤーに配置します")
                     .clicked()
@@ -1387,8 +1555,19 @@ impl FlashBrushApp {
                     self.place_symbol_instance_from_library(sel_id);
                 }
                 if ui
+                    .add_enabled(
+                        !is_editing_self,
+                        egui::Button::new(format!("{} 編集", icons::SYMBOL))
+                            .min_size(Vec2::new(54.0, 28.0)),
+                    )
+                    .on_hover_text("選択中のシンボルの内部タイムライン編集へ入ります")
+                    .clicked()
+                {
+                    self.enter_symbol_from_library(sel_id);
+                }
+                if ui
                     .add_sized(
-                        Vec2::new(60.0, 28.0),
+                        Vec2::new(54.0, 28.0),
                         egui::Button::new(format!("{} 削除", icons::DELETE)),
                     )
                     .on_hover_text("選択中のシンボルをライブラリから削除します")
@@ -1404,15 +1583,15 @@ impl FlashBrushApp {
 
         draw_panel_section_label(
             ui,
-            &format!("登録シンボル一覧 ({})", self.timeline.library.len()),
+            &format!("登録シンボル一覧 ({})", self.library.len()),
             4.0,
         );
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for sym in &mut self.timeline.library {
-                    let is_sel = self.timeline.selected_library_symbol == Some(sym.id);
+                for sym in &mut self.library {
+                    let is_sel = self.selected_library_symbol == Some(sym.id);
                     let row_fill = if is_sel {
                         Color32::from_rgb(220, 234, 252)
                     } else {
@@ -1441,14 +1620,14 @@ impl FlashBrushApp {
                                     .on_hover_text("クリックして選択")
                                     .clicked()
                                 {
-                                    self.timeline.selected_library_symbol = Some(sym.id);
+                                    self.selected_library_symbol = Some(sym.id);
                                 }
                                 let resp = ui.add(
                                     egui::TextEdit::singleline(&mut sym.name)
                                         .desired_width(ui.available_width()),
                                 );
                                 if resp.clicked() || resp.gained_focus() {
-                                    self.timeline.selected_library_symbol = Some(sym.id);
+                                    self.selected_library_symbol = Some(sym.id);
                                 }
                             });
                         });
@@ -1458,17 +1637,18 @@ impl FlashBrushApp {
     }
 
     /// ライブラリパネル上部にシンボルの縮小ベクタープレビューを描画する
-    fn draw_symbol_mini_preview(&self, ui: &mut egui::Ui, shapes: &[FillShape]) {
+    fn draw_symbol_mini_preview(&self, ui: &mut egui::Ui, sym: &SymbolDef) {
         let (rect, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 110.0), egui::Sense::hover());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, Color32::from_rgb(252, 252, 254));
         painter.rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::from_rgb(206, 212, 222)));
 
+        let shapes = sym.evaluated_local_shapes_at(sym.current_frame, false, &self.library, 1);
         if shapes.is_empty() {
             return;
         }
-        let bbox = union_bounding_boxes(shapes);
+        let bbox = union_bounding_boxes(&shapes);
         let w = (bbox.x1 - bbox.x0).max(1.0) as f32;
         let h = (bbox.y1 - bbox.y0).max(1.0) as f32;
         let pad = 14.0;
@@ -1479,12 +1659,14 @@ impl FlashBrushApp {
         let cy = ((bbox.y0 + bbox.y1) * 0.5) as f32;
         let pan = rect.center().to_vec2() - Vec2::new(cx * scale, cy * scale);
 
-        for s in shapes {
-            let mesh = transform_mesh_to_screen(&s.fill_mesh, scale, pan, false);
-            painter.add(egui::Shape::mesh(mesh));
+        for s in &shapes {
+            painter.add(egui::Shape::Mesh(transform_mesh_to_screen(
+                &s.fill_mesh,
+                scale,
+                pan,
+                false,
+            )));
         }
-
-        // 中心基準点 `+` マーク
         let origin_scr = Pos2::new(pan.x, pan.y);
         if rect.contains(origin_scr) {
             draw_registration_cross(&painter, origin_scr, 4.0, false);

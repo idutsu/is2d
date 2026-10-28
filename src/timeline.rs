@@ -2,23 +2,35 @@ use crate::{
     symbol::{SymbolDef, TweenRotate},
     vector_engine::{
         append_mesh, transform_mesh_to_screen, transform_mesh_to_screen_onion, FillShape,
-        SymbolInstanceBinding,
+        OnionMeshCacheEntry, ScreenMeshCacheEntry, SymbolInstanceBinding,
     },
     FlashBrushApp,
 };
 use eframe::egui::{self, Color32, Mesh, Vec2};
-use std::{cell::RefCell, time::Duration};
+use std::{cell::RefCell, sync::Arc, time::Duration};
 
 // ============================================================================
 // 1. タイムラインのデータモデル（Cel / Keyframe / Selection / Layer / Timeline）
 // ============================================================================
 
-/// セル内の全図形を1つに統合したワールド座標バッチメッシュと、直近の `(zoom, pan)` スクリーン座標変換済みキャッシュ
-#[derive(Clone, Debug, Default)]
+/// セル内の全図形を1つに統合したワールド座標バッチメッシュと、直近の `(zoom, pan)` スクリーン座標・オニオンスキン変換済みキャッシュ
+#[derive(Debug, Default)]
 struct CelMeshCache {
     shape_revisions: Vec<(u64, Color32)>,
-    world_batch_mesh: Mesh,
-    screen_cache: Option<((u32, u32, u32), Mesh)>,
+    world_batch_mesh: Arc<Mesh>,
+    screen_cache: Option<ScreenMeshCacheEntry>,
+    onion_cache: Option<OnionMeshCacheEntry>,
+}
+
+impl Clone for CelMeshCache {
+    fn clone(&self) -> Self {
+        Self {
+            shape_revisions: self.shape_revisions.clone(),
+            world_batch_mesh: Arc::clone(&self.world_batch_mesh),
+            screen_cache: None,
+            onion_cache: None,
+        }
+    }
 }
 
 /// 1枚のセル画（ベクター図形群 `Vec<FillShape>` ＋ 高速再生・表示用の結合メッシュキャッシュ）
@@ -59,26 +71,38 @@ impl Cel {
         for shape in &self.shapes {
             append_mesh(&mut batch, &shape.fill_mesh);
         }
-        cache.world_batch_mesh = batch;
+        cache.world_batch_mesh = Arc::new(batch);
         cache.screen_cache = None;
+        cache.onion_cache = None;
     }
 
-    /// セル内の全図形を1つに結合し、指定された `(zoom, pan)` に変換したスクリーン座標 `Mesh` を返す（キャッシュヒット時は頂点計算ゼロ）
-    pub(crate) fn cached_screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> Mesh {
+    /// セル内の全図形を1つに結合し、指定された `(zoom, pan, dim_backdrop)` に変換したスクリーン座標 `Mesh` を返す
+    pub(crate) fn cached_screen_mesh(
+        &self,
+        zoom: f32,
+        pan: Vec2,
+        dim_backdrop: bool,
+    ) -> Mesh {
         let mut cache = self.mesh_cache.borrow_mut();
         self.ensure_world_batch_mesh(&mut cache);
-        if dim_backdrop {
-            return transform_mesh_to_screen(&cache.world_batch_mesh, zoom, pan, true);
+        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits(), dim_backdrop);
+        if let Some((k, mesh)) = &cache.screen_cache {
+            if *k == key {
+                return (**mesh).clone();
+            }
         }
-        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
-        if cache.screen_cache.as_ref().is_none_or(|(k, _)| *k != key) {
-            let screen_mesh = transform_mesh_to_screen(&cache.world_batch_mesh, zoom, pan, false);
-            cache.screen_cache = Some((key, screen_mesh));
-        }
-        cache.screen_cache.as_ref().unwrap().1.clone()
+        let screen_mesh = Arc::new(transform_mesh_to_screen(
+            &cache.world_batch_mesh,
+            zoom,
+            pan,
+            dim_backdrop,
+        ));
+        let out = (*screen_mesh).clone();
+        cache.screen_cache = Some((key, screen_mesh));
+        out
     }
 
-    /// オニオンスキン表示用に、結合済みワールドメッシュをスクリーン座標＋ティント色へ一括変換して返す
+    /// オニオンスキン表示用に、結合済みワールドメッシュをスクリーン座標＋ティント色へ一括変換してキャッシュ経由で返す
     pub(crate) fn cached_onion_mesh(
         &self,
         zoom: f32,
@@ -88,7 +112,22 @@ impl Cel {
     ) -> Mesh {
         let mut cache = self.mesh_cache.borrow_mut();
         self.ensure_world_batch_mesh(&mut cache);
-        transform_mesh_to_screen_onion(&cache.world_batch_mesh, zoom, pan, tint_rgb, alpha)
+        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits(), tint_rgb, alpha);
+        if let Some((k, mesh)) = &cache.onion_cache {
+            if *k == key {
+                return (**mesh).clone();
+            }
+        }
+        let onion_mesh = Arc::new(transform_mesh_to_screen_onion(
+            &cache.world_batch_mesh,
+            zoom,
+            pan,
+            tint_rgb,
+            alpha,
+        ));
+        let out = (*onion_mesh).clone();
+        cache.onion_cache = Some((key, onion_mesh));
+        out
     }
 }
 
@@ -481,7 +520,7 @@ pub(crate) struct LoadedShapeSig {
 }
 
 impl LoadedShapeSig {
-    fn from_shape(s: &FillShape) -> Self {
+    pub(crate) fn from_shape(s: &FillShape) -> Self {
         Self {
             layer_id: s.layer_id,
             mesh_revision: s.mesh_revision,
@@ -491,27 +530,35 @@ impl LoadedShapeSig {
         }
     }
 
-    fn matches(&self, s: &FillShape) -> bool {
+    pub(crate) fn matches(&self, s: &FillShape) -> bool {
         self.mesh_revision == s.mesh_revision
             && self.color == s.color
             && self.group_path == s.group_path
             && self.symbol_instance == s.symbol_instance
     }
+
+    pub(crate) fn matches_with_layer(&self, s: &FillShape) -> bool {
+        self.layer_id == s.layer_id && self.matches(s)
+    }
+
+    fn shapes_match(a: &FillShape, b: &FillShape) -> bool {
+        a.mesh_revision == b.mesh_revision
+            && a.color == b.color
+            && a.group_path == b.group_path
+            && a.symbol_instance == b.symbol_instance
+    }
 }
 
-/// レイヤー配列・現在のフレーム・FPS・再生制御・オニオンスキン設定・セル範囲選択・シンボルライブラリを管理するタイムライン構造体
+/// レイヤー配列・現在のフレーム・FPS・再生制御・オニオンスキン設定・セル範囲選択を管理するタイムライン構造体
 #[derive(Clone, Debug)]
 pub(crate) struct Timeline {
     pub(crate) layers: Vec<Layer>,
-    pub(crate) library: Vec<SymbolDef>,
-    pub(crate) next_symbol_id: u64,
-    pub(crate) selected_library_symbol: Option<u64>,
-    pub(crate) loaded_signatures: Vec<LoadedShapeSig>,
     pub(crate) current_frame: usize,
     pub(crate) active_layer: usize,
     pub(crate) total_frames: usize,
     pub(crate) fps: u32,
     pub(crate) is_playing: bool,
+    pub(crate) loop_playback: bool,
     pub(crate) last_frame_advance_time: Option<f64>,
     pub(crate) onion_skin_enabled: bool,
     pub(crate) onion_prev_frames: usize,
@@ -530,15 +577,12 @@ impl Default for Timeline {
     fn default() -> Self {
         Self {
             layers: vec![Layer::new_with_id(1, "Layer 1")],
-            library: Vec::new(),
-            next_symbol_id: 1,
-            selected_library_symbol: None,
-            loaded_signatures: Vec::new(),
             current_frame: 0,
             active_layer: 0,
             total_frames: 1,
             fps: 24,
             is_playing: false,
+            loop_playback: true,
             last_frame_advance_time: None,
             onion_skin_enabled: false,
             onion_prev_frames: 2,
@@ -556,7 +600,7 @@ impl Default for Timeline {
 }
 
 impl Timeline {
-    /// シンボル内部タイムライン編集モード用に、親タイムラインのライブラリ・設定を引き継いだ作業用 `Timeline` を生成する
+    /// シンボル内部タイムライン編集モード用に、親タイムラインの再生・オニオンスキン設定を引き継いだ作業用 `Timeline` を生成する
     pub(crate) fn new_for_symbol_edit(&self, sym_def: &SymbolDef, sym_layers: Vec<Layer>) -> Self {
         let act_l = sym_def.active_layer.min(sym_layers.len().saturating_sub(1));
         let act_f = sym_def
@@ -564,15 +608,12 @@ impl Timeline {
             .min(sym_def.total_frames.saturating_sub(1));
         Self {
             layers: sym_layers,
-            library: self.library.clone(),
-            next_symbol_id: self.next_symbol_id,
-            selected_library_symbol: Some(sym_def.id),
-            loaded_signatures: Vec::new(),
             current_frame: act_f,
             active_layer: act_l,
             total_frames: sym_def.total_frames.max(1),
             fps: self.fps,
             is_playing: false,
+            loop_playback: self.loop_playback,
             last_frame_advance_time: None,
             onion_skin_enabled: self.onion_skin_enabled,
             onion_prev_frames: self.onion_prev_frames,
@@ -588,7 +629,7 @@ impl Timeline {
         }
     }
 
-    /// 全レイヤーの `frame_count` の最大値からタイムライン全体の `total_frames` を再計算する
+    /// 全レイヤーの `frame_count` の最大値からタイムライン全体の `total_frames` を再計算し、レイヤー選択インデックスを範囲内へ補正する
     pub(crate) fn sync_total_frames(&mut self) {
         self.total_frames = self
             .layers
@@ -597,6 +638,12 @@ impl Timeline {
             .max()
             .unwrap_or(1)
             .max(1);
+        let max_l = self.layers.len().saturating_sub(1);
+        self.active_layer = self.active_layer.min(max_l);
+        if let Some(sel) = &mut self.cell_selection {
+            sel.min_layer = sel.min_layer.min(max_l);
+            sel.max_layer = sel.max_layer.min(max_l);
+        }
     }
 
     /// 指定した `(layer_idx, frame_idx)` をアクティブレイヤー・現在フレーム・単一セル選択状態に設定する
@@ -657,14 +704,13 @@ impl Timeline {
             .unwrap_or(&[])
     }
 
-    /// `load_shapes_from_timeline` 読み込み時点のシェイプ署名一覧を記録する
-    pub(crate) fn record_loaded_signatures(&mut self, shapes: &[FillShape]) {
-        self.loaded_signatures = shapes.iter().map(LoadedShapeSig::from_shape).collect();
-    }
-
-    /// 指定レイヤー `lid` のシェイプ群が直近の `record_loaded_signatures` 時点から未変更であるかを判定する
-    fn is_layer_unchanged_since_load(&self, lid: u64, shapes: &[FillShape]) -> bool {
-        let mut loaded_iter = self.loaded_signatures.iter().filter(|sig| sig.layer_id == lid);
+    /// 指定レイヤー `lid` のシェイプ群が直近の `loaded_signatures` 時点から未変更であるかを判定する
+    fn is_layer_unchanged_since_load(
+        loaded_signatures: &[LoadedShapeSig],
+        lid: u64,
+        shapes: &[FillShape],
+    ) -> bool {
+        let mut loaded_iter = loaded_signatures.iter().filter(|sig| sig.layer_id == lid);
         shapes
             .iter()
             .filter(|s| s.layer_id == lid)
@@ -672,10 +718,34 @@ impl Timeline {
             && loaded_iter.next().is_none()
     }
 
+    /// 非編集可能レイヤーに紐付いているシェイプの `layer_id` を現在の編集可能レイヤーIDへ補正する
+    pub(crate) fn normalize_shape_layer_ids(&self, shapes: &mut [FillShape]) {
+        let fallback_lid = if self.is_active_layer_editable() {
+            self.active_layer_id()
+        } else {
+            self.layers
+                .iter()
+                .find(|l| l.visible && !l.locked)
+                .map(|l| l.id)
+                .unwrap_or_else(|| self.active_layer_id())
+        };
+        for shape in shapes {
+            if !self.is_layer_editable_by_id(shape.layer_id) {
+                shape.layer_id = fallback_lid;
+            }
+        }
+    }
+
     /// 与えられた図形リスト `shapes` を、現在フレームの各「表示中かつ非ロック」レイヤーの `Cel` に `layer_id` ごとに振り分けて書き込む
-    /// （変更がないレイヤーはクローンとキャッシュ破棄をスキップする）
-    pub(crate) fn write_shapes_to_editable_cels(&mut self, shapes: &[FillShape]) {
+    /// （変更がないレイヤーはクローンとキャッシュ破棄をスキップし、いずれかの `Cel` が更新された場合のみ `true` を返す）
+    pub(crate) fn write_shapes_to_editable_cels(
+        &mut self,
+        shapes: &[FillShape],
+        library: &[SymbolDef],
+        loaded_signatures: &[LoadedShapeSig],
+    ) -> bool {
         let frame = self.current_frame;
+        let mut any_cel_modified = false;
         for l_idx in 0..self.layers.len() {
             if !self.layers[l_idx].visible || self.layers[l_idx].locked {
                 continue;
@@ -684,9 +754,11 @@ impl Timeline {
             let is_tween_mid = self.layers[l_idx].interpolated_tween_binding_at(frame).is_some();
             let has_multiframe = self.layers[l_idx]
                 .cel_at(frame)
-                .is_some_and(|c| self.has_multiframe_symbol(&c.shapes));
+                .is_some_and(|c| Self::has_multiframe_symbol(&c.shapes, library));
 
-            if (is_tween_mid || has_multiframe) && self.is_layer_unchanged_since_load(lid, shapes) {
+            if (is_tween_mid || has_multiframe)
+                && Self::is_layer_unchanged_since_load(loaded_signatures, lid, shapes)
+            {
                 continue;
             }
 
@@ -702,6 +774,7 @@ impl Timeline {
                     .cel
                     .single_symbol_instance()
                     .is_some();
+                any_cel_modified = true;
                 continue;
             }
 
@@ -711,7 +784,7 @@ impl Timeline {
                 let unchanged = kf.cel.shapes.iter().all(|c_shape| {
                     layer_iter
                         .next()
-                        .is_some_and(|s| LoadedShapeSig::from_shape(c_shape).matches(s))
+                        .is_some_and(|s| LoadedShapeSig::shapes_match(c_shape, s))
                 }) && layer_iter.next().is_none();
                 if !unchanged {
                     kf.cel.shapes = shapes
@@ -722,10 +795,11 @@ impl Timeline {
                     if kf.tween && kf.cel.single_symbol_instance().is_none() {
                         kf.tween = false;
                     }
+                    any_cel_modified = true;
                 }
             }
         }
-        self.record_loaded_signatures(shapes);
+        any_cel_modified
     }
 
     /// 現在アクティブなレイヤーが現在フレームにおいて編集可能（表示中・非ロック・フレーム作成済み）であるかを返す
@@ -750,6 +824,15 @@ impl FlashBrushApp {
             self.clear_selection();
             self.sync_shapes_to_timeline();
         }
+    }
+
+    /// 作業キャンバスを確定同期し、Undo履歴を記録した上でタイムライン変更処理 `mutate` を実行し、完了後に `self.shapes` を再読み込みする
+    pub(crate) fn mutate_timeline_with_undo(&mut self, mutate: impl FnOnce(&mut Timeline)) {
+        self.flush_canvas_before_timeline_op();
+        self.push_undo();
+        mutate(&mut self.timeline);
+        self.sync_active_symbol_edit();
+        self.load_shapes_from_timeline();
     }
 
     /// `self.shapes` 内の図形列をタイムラインのレイヤー重ね順（背面→前面）で安定ソートし、
@@ -786,29 +869,38 @@ impl FlashBrushApp {
         }
     }
 
+    /// `self.shapes` の現在のシェイプ署名一覧を `self.loaded_signatures` に記録する
+    pub(crate) fn record_loaded_signatures(&mut self) {
+        self.loaded_signatures = self.shapes.iter().map(LoadedShapeSig::from_shape).collect();
+    }
+
+    /// `self.shapes` 全体が直近の読み込み・同期時点（`self.loaded_signatures`）から一切変更されていないかを判定する（ヒープ確保なし）
+    pub(crate) fn is_all_shapes_unchanged(&self) -> bool {
+        self.loaded_signatures.len() == self.shapes.len()
+            && self
+                .loaded_signatures
+                .iter()
+                .zip(self.shapes.iter())
+                .all(|(sig, s)| sig.matches_with_layer(s))
+    }
+
     /// キャンバスの作業用 `self.shapes` を、各図形の `layer_id` ごとに現在フレームの `Cel` に振り分けて書き戻す
     pub(crate) fn sync_shapes_to_timeline(&mut self) {
-        if self.timeline.is_playing {
+        self.sanitize_editing_group_path();
+        if self.timeline.is_playing || self.is_all_shapes_unchanged() {
             return;
         }
-        let fallback_lid = if self.timeline.is_active_layer_editable() {
-            self.timeline.active_layer_id()
-        } else {
-            self.timeline
-                .layers
-                .iter()
-                .find(|l| l.visible && !l.locked)
-                .map(|l| l.id)
-                .unwrap_or_else(|| self.timeline.active_layer_id())
-        };
-        for shape in &mut self.shapes {
-            if !self.timeline.is_layer_editable_by_id(shape.layer_id) {
-                shape.layer_id = fallback_lid;
-            }
-        }
+        self.timeline.normalize_shape_layer_ids(&mut self.shapes);
         self.sort_shapes_by_layer_order();
-        self.timeline.write_shapes_to_editable_cels(&self.shapes);
-        self.sync_active_symbol_edit();
+        let any_modified = self.timeline.write_shapes_to_editable_cels(
+            &self.shapes,
+            &self.library,
+            &self.loaded_signatures,
+        );
+        self.record_loaded_signatures();
+        if any_modified {
+            self.sync_active_symbol_edit();
+        }
     }
 
     /// 現在フレームにおける全ての「表示中かつ非ロック（`visible && !locked`）」レイヤーの `Cel` から
@@ -821,10 +913,15 @@ impl FlashBrushApp {
             if !layer.visible || layer.locked {
                 continue;
             }
-            loaded.extend(self.timeline.evaluate_layer_shapes_at(layer_idx, frame, false));
+            loaded.extend(self.timeline.evaluate_layer_shapes_at(
+                layer_idx,
+                frame,
+                false,
+                &self.library,
+            ));
         }
-        self.timeline.record_loaded_signatures(&loaded);
         self.shapes = loaded;
+        self.record_loaded_signatures();
         self.selected_shapes.clear();
         self.unsliced_canvas = None;
         self.selection_modified = false;
@@ -832,6 +929,12 @@ impl FlashBrushApp {
         self.transform_drag = crate::canvas_tool::TransformDragState::None;
         self.transform_pivot = None;
         self.sanitize_editing_group_path();
+        if let Some(session) = self.symbol_edit_stack.last() {
+            if let Some(sym_def) = self.library.iter_mut().find(|s| s.id == session.symbol_id) {
+                sym_def.current_frame = self.timeline.current_frame;
+                sym_def.active_layer = self.timeline.active_layer;
+            }
+        }
     }
 
     /// タイムライン上で選択されたセル範囲（単一キーフレームまたは複数レイヤー範囲）に属するすべての図形をキャンバス上で選択状態にする
@@ -924,7 +1027,10 @@ impl FlashBrushApp {
             self.stop_playback();
         } else {
             self.flush_canvas_before_timeline_op();
-            if self.timeline.current_frame >= self.timeline.total_frames {
+            let last_f = self.timeline.total_frames.saturating_sub(1);
+            if self.timeline.current_frame >= self.timeline.total_frames
+                || (!self.timeline.loop_playback && self.timeline.current_frame >= last_f)
+            {
                 self.timeline.current_frame = 0;
             }
             self.timeline.is_playing = true;
@@ -950,7 +1056,17 @@ impl FlashBrushApp {
                 self.timeline.last_frame_advance_time =
                     Some(last_time + (steps as f64) * frame_interval);
                 let total = self.timeline.total_frames.max(1);
-                self.timeline.current_frame = (self.timeline.current_frame + steps) % total;
+                if self.timeline.loop_playback {
+                    self.timeline.current_frame = (self.timeline.current_frame + steps) % total;
+                } else {
+                    let next = self.timeline.current_frame + steps;
+                    if next >= total - 1 {
+                        self.timeline.current_frame = total - 1;
+                        self.stop_playback();
+                        return;
+                    }
+                    self.timeline.current_frame = next;
+                }
             }
         } else {
             self.timeline.last_frame_advance_time = Some(now);
@@ -965,38 +1081,36 @@ impl FlashBrushApp {
         if targets.is_empty() {
             return false;
         }
-        self.flush_canvas_before_timeline_op();
-        self.push_undo();
+        self.mutate_timeline_with_undo(|tl| {
+            let curr_f = tl.current_frame;
+            let is_exact_kf = targets.iter().all(|&l_idx| {
+                tl.layers[l_idx]
+                    .keyframes
+                    .iter()
+                    .any(|kf| kf.start_frame == curr_f)
+            });
+            let curr_non_empty = targets.iter().any(|&l_idx| {
+                tl.layers[l_idx]
+                    .cel_at(curr_f)
+                    .is_some_and(|c| !c.is_empty())
+            });
 
-        let curr_f = self.timeline.current_frame;
-        let is_exact_kf = targets.iter().all(|&l_idx| {
-            self.timeline.layers[l_idx]
-                .keyframes
-                .iter()
-                .any(|kf| kf.start_frame == curr_f)
+            let target_frame = if is_exact_kf && (clone_prev || curr_non_empty) {
+                curr_f + 1
+            } else {
+                curr_f
+            };
+
+            for &l_idx in &targets {
+                tl.layers[l_idx].insert_keyframe(target_frame, clone_prev);
+            }
+            tl.sync_total_frames();
+            tl.current_frame = target_frame;
+            if let Some(sel) = &mut tl.cell_selection {
+                sel.min_frame = target_frame;
+                sel.max_frame = target_frame;
+            }
         });
-        let curr_non_empty = targets.iter().any(|&l_idx| {
-            self.timeline.layers[l_idx]
-                .cel_at(curr_f)
-                .is_some_and(|c| !c.is_empty())
-        });
-
-        let target_frame = if is_exact_kf && (clone_prev || curr_non_empty) {
-            curr_f + 1
-        } else {
-            curr_f
-        };
-
-        for &l_idx in &targets {
-            self.timeline.layers[l_idx].insert_keyframe(target_frame, clone_prev);
-        }
-        self.timeline.sync_total_frames();
-        self.timeline.current_frame = target_frame;
-        if let Some(sel) = &mut self.timeline.cell_selection {
-            sel.min_frame = target_frame;
-            sel.max_frame = target_frame;
-        }
-        self.load_shapes_from_timeline();
         if clone_prev {
             self.select_shapes_for_timeline_selection();
         }
@@ -1011,20 +1125,19 @@ impl FlashBrushApp {
         }
         self.flush_canvas_before_timeline_op();
         let curr_f = self.timeline.current_frame;
-        let can_delete = targets.iter().any(|&l_idx| {
+        if !targets.iter().any(|&l_idx| {
             let layer = &self.timeline.layers[l_idx];
             layer
                 .keyframe_index_at(curr_f)
                 .is_some_and(|idx| idx > 0 || !layer.keyframes[0].cel.is_empty())
-        });
-        if !can_delete {
+        }) {
             return false;
         }
-        self.push_undo();
-        for &l_idx in &targets {
-            self.timeline.layers[l_idx].delete_keyframe_at(curr_f);
-        }
-        self.load_shapes_from_timeline();
+        self.mutate_timeline_with_undo(|tl| {
+            for &l_idx in &targets {
+                tl.layers[l_idx].delete_keyframe_at(curr_f);
+            }
+        });
         true
     }
 
@@ -1036,18 +1149,16 @@ impl FlashBrushApp {
         if targets.is_empty() {
             return false;
         }
-        self.flush_canvas_before_timeline_op();
-        self.push_undo();
-        let target_f = self
-            .timeline
-            .cell_selection
-            .map(|s| s.max_frame.max(self.timeline.current_frame))
-            .unwrap_or(self.timeline.current_frame);
-        for &l_idx in &targets {
-            self.timeline.layers[l_idx].insert_frame_at(target_f);
-        }
-        self.timeline.sync_total_frames();
-        self.load_shapes_from_timeline();
+        self.mutate_timeline_with_undo(|tl| {
+            let target_f = tl
+                .cell_selection
+                .map(|s| s.max_frame.max(tl.current_frame))
+                .unwrap_or(tl.current_frame);
+            for &l_idx in &targets {
+                tl.layers[l_idx].insert_frame_at(target_f);
+            }
+            tl.sync_total_frames();
+        });
         true
     }
 
@@ -1060,29 +1171,26 @@ impl FlashBrushApp {
         }
         self.flush_canvas_before_timeline_op();
         let curr_f = self.timeline.current_frame;
-        let can_remove = targets.iter().any(|&l_idx| {
+        if !targets.iter().any(|&l_idx| {
             let l = &self.timeline.layers[l_idx];
             l.frame_count > 1 || l.keyframes.first().is_some_and(|kf| !kf.cel.is_empty())
-        });
-        if !can_remove {
+        }) {
             return false;
         }
-        self.push_undo();
         let mut any_changed = false;
-        for &l_idx in &targets {
-            if self.timeline.layers[l_idx].remove_frame_at(curr_f) {
-                any_changed = true;
+        self.mutate_timeline_with_undo(|tl| {
+            for &l_idx in &targets {
+                if tl.layers[l_idx].remove_frame_at(curr_f) {
+                    any_changed = true;
+                }
             }
-        }
-        self.timeline.sync_total_frames();
-        if self.timeline.current_frame >= self.timeline.total_frames {
-            self.timeline.current_frame = self.timeline.total_frames - 1;
-        }
-        if let Some(sel) = &mut self.timeline.cell_selection {
-            sel.min_frame = sel.min_frame.min(self.timeline.current_frame);
-            sel.max_frame = sel.max_frame.min(self.timeline.current_frame);
-        }
-        self.load_shapes_from_timeline();
+            tl.sync_total_frames();
+            tl.current_frame = tl.current_frame.min(tl.total_frames - 1);
+            if let Some(sel) = &mut tl.cell_selection {
+                sel.min_frame = sel.min_frame.min(tl.current_frame);
+                sel.max_frame = sel.max_frame.min(tl.current_frame);
+            }
+        });
         any_changed
     }
 
@@ -1118,43 +1226,47 @@ impl FlashBrushApp {
 
         for src_l in sel.min_layer..=sel.max_layer {
             let dst_l = (src_l as isize + actual_dl) as usize;
-            if self.timeline.layers[src_l].locked || self.timeline.layers[dst_l].locked {
+            let Some(src_layer) = self.timeline.layers.get(src_l) else {
+                return false;
+            };
+            let Some(dst_layer) = self.timeline.layers.get(dst_l) else {
+                return false;
+            };
+            if src_layer.locked || dst_layer.locked {
                 return false;
             }
         }
 
-        self.flush_canvas_before_timeline_op();
-        self.push_undo();
+        self.mutate_timeline_with_undo(|tl| {
+            let extracted: Vec<(usize, Vec<Keyframe>)> = (sel.min_layer..=sel.max_layer)
+                .map(|src_l| {
+                    let dst_l = (src_l as isize + actual_dl) as usize;
+                    let kfs =
+                        tl.layers[src_l].extract_keyframes_in_range(sel.min_frame, sel.max_frame);
+                    (dst_l, kfs)
+                })
+                .collect();
 
-        let extracted: Vec<(usize, Vec<Keyframe>)> = (sel.min_layer..=sel.max_layer)
-            .map(|src_l| {
-                let dst_l = (src_l as isize + actual_dl) as usize;
-                let kfs = self.timeline.layers[src_l]
-                    .extract_keyframes_in_range(sel.min_frame, sel.max_frame);
-                (dst_l, kfs)
-            })
-            .collect();
-
-        if !copy_mode {
-            for src_l in sel.min_layer..=sel.max_layer {
-                self.timeline.layers[src_l].remove_keyframes_in_range(sel.min_frame, sel.max_frame);
+            if !copy_mode {
+                for src_l in sel.min_layer..=sel.max_layer {
+                    tl.layers[src_l].remove_keyframes_in_range(sel.min_frame, sel.max_frame);
+                }
             }
-        }
 
-        for (dst_l, kfs) in extracted {
-            self.timeline.layers[dst_l].place_keyframes_at(dst_min_frame, dst_max_frame, kfs);
-        }
+            for (dst_l, kfs) in extracted {
+                tl.layers[dst_l].place_keyframes_at(dst_min_frame, dst_max_frame, kfs);
+            }
 
-        self.timeline.sync_total_frames();
-        self.timeline.active_layer = dst_max_layer;
-        self.timeline.current_frame = dst_min_frame;
-        self.timeline.cell_selection = Some(TimelineCellSelection {
-            min_layer: dst_min_layer,
-            max_layer: dst_max_layer,
-            min_frame: dst_min_frame,
-            max_frame: dst_max_frame,
+            tl.sync_total_frames();
+            tl.active_layer = dst_max_layer;
+            tl.current_frame = dst_min_frame;
+            tl.cell_selection = Some(TimelineCellSelection {
+                min_layer: dst_min_layer,
+                max_layer: dst_max_layer,
+                min_frame: dst_min_frame,
+                max_frame: dst_max_frame,
+            });
         });
-        self.load_shapes_from_timeline();
         self.select_shapes_for_timeline_selection();
         true
     }
@@ -1165,42 +1277,39 @@ impl FlashBrushApp {
 // ============================================================================
 
 impl FlashBrushApp {
-    /// 指定レイヤーの表示/非表示（👁）を設定し、作業キャンバス `self.shapes` を再同期する
-    pub(crate) fn set_layer_visible(&mut self, layer_idx: usize, visible: bool) {
+    fn mutate_layer(&mut self, layer_idx: usize, f: impl FnOnce(&mut Layer)) {
         if layer_idx >= self.timeline.layers.len() {
             return;
         }
         self.flush_canvas_before_timeline_op();
-        self.timeline.layers[layer_idx].visible = visible;
+        f(&mut self.timeline.layers[layer_idx]);
+        self.sync_active_symbol_edit();
         self.load_shapes_from_timeline();
+    }
+
+    /// 指定レイヤーの表示/非表示（👁）を設定し、作業キャンバス `self.shapes` を再同期する
+    pub(crate) fn set_layer_visible(&mut self, layer_idx: usize, visible: bool) {
+        self.mutate_layer(layer_idx, |l| l.visible = visible);
     }
 
     /// 指定レイヤーのロック状態（🔒）を設定し、作業キャンバス `self.shapes` を再同期する
     pub(crate) fn set_layer_locked(&mut self, layer_idx: usize, locked: bool) {
-        if layer_idx >= self.timeline.layers.len() {
-            return;
-        }
-        self.flush_canvas_before_timeline_op();
-        self.timeline.layers[layer_idx].locked = locked;
-        self.load_shapes_from_timeline();
+        self.mutate_layer(layer_idx, |l| l.locked = locked);
     }
 
     /// 新しいレイヤーを現在のアクティブレイヤーの1つ上（前面）に追加する
     pub(crate) fn timeline_add_layer(&mut self) {
-        self.flush_canvas_before_timeline_op();
-        self.push_undo();
-        let name = format!("Layer {}", self.timeline.next_layer_number);
-        self.timeline.next_layer_number += 1;
-        let lid = self.timeline.next_layer_id;
-        self.timeline.next_layer_id += 1;
-        let insert_idx = (self.timeline.active_layer + 1).min(self.timeline.layers.len());
-        let fc = self.timeline.total_frames.max(1);
-        self.timeline
-            .layers
-            .insert(insert_idx, Layer::new_with_id_and_frames(lid, name, fc));
-        self.timeline
-            .select_single_cell(insert_idx, self.timeline.current_frame);
-        self.load_shapes_from_timeline();
+        self.mutate_timeline_with_undo(|tl| {
+            let name = format!("Layer {}", tl.next_layer_number);
+            tl.next_layer_number += 1;
+            let lid = tl.next_layer_id;
+            tl.next_layer_id += 1;
+            let insert_idx = (tl.active_layer + 1).min(tl.layers.len());
+            let fc = tl.total_frames.max(1);
+            tl.layers
+                .insert(insert_idx, Layer::new_with_id_and_frames(lid, name, fc));
+            tl.select_single_cell(insert_idx, tl.current_frame);
+        });
     }
 
     /// 現在アクティブなレイヤーを削除する（最低1レイヤーは残す）
@@ -1208,13 +1317,11 @@ impl FlashBrushApp {
         if self.timeline.layers.len() <= 1 {
             return false;
         }
-        self.flush_canvas_before_timeline_op();
-        self.push_undo();
-        self.timeline.layers.remove(self.timeline.active_layer);
-        self.timeline.sync_total_frames();
-        self.timeline
-            .select_single_cell(self.timeline.active_layer, self.timeline.current_frame);
-        self.load_shapes_from_timeline();
+        self.mutate_timeline_with_undo(|tl| {
+            tl.layers.remove(tl.active_layer);
+            tl.sync_total_frames();
+            tl.select_single_cell(tl.active_layer, tl.current_frame);
+        });
         true
     }
 
@@ -1224,13 +1331,11 @@ impl FlashBrushApp {
         if from_idx >= len || to_idx >= len || from_idx == to_idx {
             return false;
         }
-        self.flush_canvas_before_timeline_op();
-        self.push_undo();
-        let layer = self.timeline.layers.remove(from_idx);
-        self.timeline.layers.insert(to_idx, layer);
-        self.timeline
-            .select_single_cell(to_idx, self.timeline.current_frame);
-        self.load_shapes_from_timeline();
+        self.mutate_timeline_with_undo(|tl| {
+            let layer = tl.layers.remove(from_idx);
+            tl.layers.insert(to_idx, layer);
+            tl.select_single_cell(to_idx, tl.current_frame);
+        });
         true
     }
 

@@ -143,8 +143,6 @@ fn draw_floating_drag_badge(
 impl FlashBrushApp {
     /// 画面下部の Adobe Animate 風タイムラインパネルを描画・操作する（ライトテーマ・角丸なし）
     pub(crate) fn draw_timeline_panel(&mut self, ctx: &egui::Context) {
-        self.sync_shapes_to_timeline();
-
         egui::TopBottomPanel::bottom("timeline_panel")
             .resizable(true)
             .default_height(186.0)
@@ -180,12 +178,7 @@ impl FlashBrushApp {
                     max_reach_frames,
                     self.timeline.scroll_x,
                 );
-                self.handle_timeline_scroll(ui, &response, &layout);
-                layout = TimelineLayout::new(
-                    panel_rect,
-                    max_reach_frames,
-                    self.timeline.scroll_x,
-                );
+                self.handle_timeline_scroll(ui, &response, &mut layout);
 
                 let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
                 let primary_down = ui.input(|i| i.pointer.primary_down());
@@ -321,6 +314,13 @@ impl FlashBrushApp {
             let last = self.timeline.total_frames.saturating_sub(1);
             self.switch_to_layer_and_frame(self.timeline.active_layer, last);
         }
+        if ui
+            .selectable_label(self.timeline.loop_playback, "↻")
+            .on_hover_text("ループ再生 ON / OFF（OFF時は最終フレームで自動停止）")
+            .clicked()
+        {
+            self.timeline.loop_playback = !self.timeline.loop_playback;
+        }
 
         ui.separator();
 
@@ -337,15 +337,20 @@ impl FlashBrushApp {
             .changed()
         {
             let next_total = (total_f as usize).max(1);
-            for layer in &mut self.timeline.layers {
-                layer.frame_count = next_total;
-            }
-            self.timeline.sync_total_frames();
-            if self.timeline.current_frame >= self.timeline.total_frames {
-                self.switch_to_layer_and_frame(
-                    self.timeline.active_layer,
-                    self.timeline.total_frames - 1,
-                );
+            if next_total != self.timeline.total_frames {
+                self.mutate_timeline_with_undo(|tl| {
+                    for layer in &mut tl.layers {
+                        layer.frame_count = next_total;
+                    }
+                    tl.sync_total_frames();
+                    if tl.current_frame >= tl.total_frames {
+                        tl.current_frame = tl.total_frames - 1;
+                    }
+                    if let Some(sel) = &mut tl.cell_selection {
+                        sel.min_frame = sel.min_frame.min(tl.current_frame);
+                        sel.max_frame = sel.max_frame.min(tl.current_frame);
+                    }
+                });
             }
         }
 
@@ -469,7 +474,7 @@ impl FlashBrushApp {
         &mut self,
         ui: &egui::Ui,
         response: &egui::Response,
-        layout: &TimelineLayout,
+        layout: &mut TimelineLayout,
     ) {
         let max_scroll_x = ((layout.max_frames_shown as f32) * CELL_W - layout.grid_w).max(0.0);
         let max_scroll_y = ((self.timeline.layers.len() as f32) * ROW_H - layout.grid_h).max(0.0);
@@ -500,6 +505,10 @@ impl FlashBrushApp {
 
         self.timeline.scroll_x = self.timeline.scroll_x.clamp(0.0, max_scroll_x);
         self.timeline.scroll_y = self.timeline.scroll_y.clamp(0.0, max_scroll_y);
+        layout.first_vis_frame = (self.timeline.scroll_x / CELL_W).floor() as usize;
+        layout.last_vis_frame = (((self.timeline.scroll_x + layout.grid_w) / CELL_W).ceil()
+            as usize)
+            .min(layout.max_frames_shown);
     }
 
     /// 3. タイムラインパネル内のクリック・ドラッグ入力処理（ルーラースクラブ・セル範囲選択・フレーム移動/複製・レイヤーD&D）

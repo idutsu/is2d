@@ -36,9 +36,10 @@ pub(crate) mod icons {
 // 右側パネルの状態・タブ定義（プロパティ / カラー / ライブラリ）
 // ============================================================================
 
-/// 右側パネル上部の切り替えタブ（プロパティ / カラー / ライブラリ）
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// 右側パネル上部の切り替えタブ（プロパティ / カラー / ライブラリ / キャンバス）
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum RightPanelTab {
+    #[default]
     Properties, // プロパティ（現在選択中のツールの設定を表示）
     Color,      // カラー
     Library,    // ライブラリ
@@ -61,20 +62,6 @@ impl RightPanelTab {
             RightPanelTab::Color => "カラー",
             RightPanelTab::Library => "ライブラリ",
             RightPanelTab::Canvas => "キャンバス",
-        }
-    }
-}
-
-/// 右側パネルの状態管理構造体
-#[derive(Clone, Debug)]
-pub(crate) struct PropertiesPanel {
-    pub(crate) active_tab: RightPanelTab,
-}
-
-impl Default for PropertiesPanel {
-    fn default() -> Self {
-        Self {
-            active_tab: RightPanelTab::Properties,
         }
     }
 }
@@ -186,12 +173,11 @@ impl FlashBrushApp {
                 items.push(format!("{} Group #{gid}", icons::GROUP));
             }
             let sym_name = self
-                .timeline
                 .library
                 .iter()
                 .find(|s| s.id == sess.symbol_id)
                 .map(|s| s.name.as_str())
-                .unwrap_or(&sess.symbol_name);
+                .unwrap_or("Symbol");
             items.push(format!("{} {sym_name}", icons::SYMBOL));
         }
         for &gid in &self.editing_group_path {
@@ -265,9 +251,9 @@ impl FlashBrushApp {
                 ui.add_space(6.0);
 
                 // アクティブなタブに応じた中身を描画
-                match self.properties_panel.active_tab {
+                match self.right_panel_tab {
                     RightPanelTab::Properties => self.draw_properties_tab(ui),
-                    RightPanelTab::Color => self.draw_color_tab(ui),
+                    RightPanelTab::Color => self.draw_color_palette_section(ui),
                     RightPanelTab::Library => self.draw_library_tab(ui),
                     RightPanelTab::Canvas => self.draw_canvas_tab(ui),
                 }
@@ -282,7 +268,7 @@ impl FlashBrushApp {
             let tab_count = RightPanelTab::ALL.len() as f32;
             let btn_w = (ui.available_width() - 3.0 * (tab_count - 1.0)) / tab_count;
             for tab in RightPanelTab::ALL {
-                let selected = self.properties_panel.active_tab == tab;
+                let selected = self.right_panel_tab == tab;
                 let fill = if selected {
                     Color32::from_rgb(255, 255, 255)
                 } else {
@@ -312,7 +298,7 @@ impl FlashBrushApp {
                     .min_size(Vec2::new(btn_w, 24.0));
 
                 if ui.add(btn).clicked() {
-                    self.properties_panel.active_tab = tab;
+                    self.right_panel_tab = tab;
                 }
             }
         });
@@ -338,10 +324,16 @@ impl FlashBrushApp {
         match self.tool {
             Tool::Select => self.draw_select_tool_properties(ui),
             Tool::Transform => self.draw_transform_tool_properties(ui),
-            Tool::Brush => self.draw_brush_tool_properties(ui),
-            Tool::Eraser => self.draw_eraser_tool_properties(ui),
-            Tool::Bucket => self.draw_bucket_tool_properties(ui),
-            Tool::Eyedropper => self.draw_eyedropper_tool_properties(ui),
+            Tool::Brush => {
+                Self::draw_radius_slider_section(ui, "ブラシサイズ", &mut self.brush_radius, 70.0)
+            }
+            Tool::Eraser => Self::draw_radius_slider_section(
+                ui,
+                "消しゴムサイズ",
+                &mut self.eraser_radius,
+                80.0,
+            ),
+            Tool::Bucket | Tool::Eyedropper => self.draw_color_palette_section(ui),
         }
 
         // 下部ぶら下がりセクション：
@@ -406,6 +398,7 @@ impl FlashBrushApp {
         draw_panel_section_label(ui, "シンボル・グループ", 4.0);
 
         let has_sel = !self.selected_shapes.is_empty();
+        let has_group = self.selection_has_group();
         if ui
             .add_enabled(
                 has_sel,
@@ -417,6 +410,70 @@ impl FlashBrushApp {
         {
             self.convert_selection_to_symbol();
         }
+
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let half_w = (ui.available_width() - 6.0) * 0.5;
+            if ui
+                .add_enabled(
+                    has_sel,
+                    egui::Button::new(format!("{} グループ化", icons::GROUP))
+                        .min_size(Vec2::new(half_w, 28.0)),
+                )
+                .on_hover_text("選択中のオブジェクトを1つのグループにまとめる (Cmd+G)")
+                .clicked()
+            {
+                self.group_selected_shapes();
+            }
+            if ui
+                .add_enabled(
+                    has_group,
+                    egui::Button::new("解除 (Cmd+B)").min_size(Vec2::new(half_w, 28.0)),
+                )
+                .on_hover_text("選択中のグループまたはシンボルインスタンスを1段階解除する (Cmd+B)")
+                .clicked()
+            {
+                self.ungroup_selected_shapes();
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        draw_panel_section_label(ui, "消去アクション", 4.0);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let half_w = (ui.available_width() - 6.0) * 0.5;
+            if ui
+                .add_enabled(
+                    has_sel,
+                    egui::Button::new(format!("{} 選択削除", icons::DELETE))
+                        .min_size(Vec2::new(half_w, 28.0)),
+                )
+                .on_hover_text("選択中の図形を削除 (Backspace / Delete)")
+                .clicked()
+            {
+                self.delete_selected_shapes();
+            }
+            let has_any = self
+                .shapes
+                .iter()
+                .any(|s| s.is_in_editing_scope(&self.editing_group_path));
+            if ui
+                .add_enabled(
+                    has_any,
+                    egui::Button::new("フレーム全消去").min_size(Vec2::new(half_w, 28.0)),
+                )
+                .on_hover_text("現在の編集スコープ・フレーム内の図形をすべて消去")
+                .clicked()
+            {
+                self.clear_active_frame_shapes();
+            }
+        });
     }
 
     /// 自由変形ツール (`Tool::Transform`) のプロパティ設定項目
@@ -494,46 +551,76 @@ impl FlashBrushApp {
         }
     }
 
-    /// ブラシツール (`Tool::Brush`) のプロパティ設定項目
-    fn draw_brush_tool_properties(&mut self, ui: &mut egui::Ui) {
-        draw_panel_section_label(ui, "ブラシサイズ", 4.0);
+    /// ブラシ・消しゴムのサイズスライダー共通UIセクション
+    fn draw_radius_slider_section(ui: &mut egui::Ui, label: &str, radius: &mut f32, max_r: f32) {
+        draw_panel_section_label(ui, label, 4.0);
         ui.add(
-            egui::Slider::new(&mut self.brush_radius, 1.0..=70.0)
+            egui::Slider::new(radius, 1.0..=max_r)
                 .step_by(1.0)
                 .integer()
                 .suffix(" px"),
         );
     }
 
-    /// 消しゴムツール (`Tool::Eraser`) のプロパティ設定項目
-    fn draw_eraser_tool_properties(&mut self, ui: &mut egui::Ui) {
-        draw_panel_section_label(ui, "消しゴムサイズ", 4.0);
-        ui.add(
-            egui::Slider::new(&mut self.eraser_radius, 1.0..=80.0)
-                .step_by(1.0)
-                .integer()
-                .suffix(" px"),
-        );
-    }
+    /// カラーピッカーと10色プリセットパレットの共通UIセクション
+    fn draw_color_palette_section(&mut self, ui: &mut egui::Ui) {
+        const PRESET_COLORS: [Color32; 10] = [
+            Color32::from_rgb(40, 45, 55),
+            Color32::from_rgb(255, 255, 255),
+            Color32::from_rgb(235, 75, 75),
+            Color32::from_rgb(245, 145, 55),
+            Color32::from_rgb(245, 210, 60),
+            Color32::from_rgb(65, 195, 105),
+            Color32::from_rgb(50, 190, 210),
+            Color32::from_rgb(55, 135, 245),
+            Color32::from_rgb(145, 95, 235),
+            Color32::from_rgb(235, 105, 175),
+        ];
 
-    /// バケツ塗りツール (`Tool::Bucket`) のプロパティ設定項目（ここへ順次追加）
-    fn draw_bucket_tool_properties(&mut self, ui: &mut egui::Ui) {
-        ui.label("バケツ塗りツールのプロパティ (仮)");
-    }
+        draw_panel_section_label(ui, "現在の塗りカラー", 4.0);
+        ui.horizontal(|ui| {
+            ui.color_edit_button_srgba(&mut self.brush_color);
+            let [r, g, b, _] = self.brush_color.to_srgba_unmultiplied();
+            ui.label(
+                egui::RichText::new(format!("#{r:02X}{g:02X}{b:02X}"))
+                    .monospace()
+                    .size(11.5)
+                    .color(Color32::from_rgb(70, 78, 90)),
+            );
+        });
 
-    /// スポイトツール (`Tool::Eyedropper`) のプロパティ設定項目（ここへ順次追加）
-    fn draw_eyedropper_tool_properties(&mut self, ui: &mut egui::Ui) {
-        ui.label("スポイトツールのプロパティ (仮)");
-    }
+        ui.add_space(8.0);
+        draw_panel_section_label(ui, "プリセットパレット (10色)", 4.0);
 
-    /// 「カラー」タブの描画（仮）
-    fn draw_color_tab(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new("▼ カラーパネル (仮)")
-                .size(12.0)
-                .strong()
-                .color(Color32::from_rgb(45, 50, 60)),
-        );
+        for row in PRESET_COLORS.chunks(5) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let swatch_w = ((ui.available_width() - 6.0 * 4.0) / 5.0).max(24.0);
+                for &col in row {
+                    let is_active = self.brush_color == col;
+                    let (rect, resp) =
+                        ui.allocate_exact_size(Vec2::new(swatch_w, 24.0), egui::Sense::click());
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 0.0, col);
+                    painter.rect_stroke(
+                        rect,
+                        0.0,
+                        Stroke::new(
+                            if is_active { 2.0 } else { 1.0 },
+                            if is_active {
+                                Color32::from_rgb(0, 125, 230)
+                            } else {
+                                Color32::from_rgb(185, 192, 204)
+                            },
+                        ),
+                    );
+                    if resp.clicked() {
+                        self.brush_color = col;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+        }
     }
 
     /// 「キャンバス」タブの描画（ステージサイズ・枠外マスク・ウィンドウに合わせる・表示倍率リセット）

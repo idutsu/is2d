@@ -6,21 +6,25 @@ mod timeline_ui;
 mod tool_paint;
 mod tool_select;
 mod tool_transform;
+mod vector_boolean;
 mod vector_engine;
+mod vector_stroke;
 
 use canvas_tool::{
     HoverTarget, SelectDragState, SelectSubMode, Tool, TransformDragState, TransformHoverTarget,
 };
 use eframe::egui::{self, Color32, CursorIcon, Key, Pos2, Sense, Stroke, Vec2};
 use kurbo::Point;
-use lyon_tessellation::FillTessellator;
-use panels::PropertiesPanel;
-use symbol::SymbolEditSession;
-use std::time::{Duration, Instant};
-use timeline::Timeline;
+use panels::RightPanelTab;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
+use symbol::{SymbolDef, SymbolEditSession};
+use timeline::{LoadedShapeSig, Timeline, TimelineGridDrag};
 use vector_engine::FillShape;
 
-const MAX_UNDO_HISTORY: usize = 50;
+const MAX_UNDO_HISTORY: usize = 100;
 const DEFAULT_TOAST_DURATION: Duration = Duration::from_millis(2800);
 
 /// キャンバス左上に表示する通知・警告メッセージの種別
@@ -134,11 +138,17 @@ fn configure_sharp_light_theme(ctx: &egui::Context) {
 // メインアプリケーション状態 & ショートカット制御
 // ============================================================================
 
-pub(crate) type UndoEntry = (Timeline, Vec<FillShape>, Vec<SymbolEditSession>);
+#[derive(Clone, Debug)]
+pub(crate) struct UndoEntry {
+    pub(crate) timeline: Timeline,
+    pub(crate) library: Vec<SymbolDef>,
+    pub(crate) next_symbol_id: u64,
+    pub(crate) symbol_edit_stack: Vec<SymbolEditSession>,
+}
 
 pub(crate) struct FlashBrushApp {
     pub(crate) tool: Tool,
-    pub(crate) properties_panel: PropertiesPanel,
+    pub(crate) right_panel_tab: RightPanelTab,
     pub(crate) brush_radius: f32,
     pub(crate) eraser_radius: f32,
     pub(crate) brush_color: Color32,
@@ -160,9 +170,15 @@ pub(crate) struct FlashBrushApp {
 
     /// タイムライン・レイヤー・キーフレーム・セル構造
     pub(crate) timeline: Timeline,
+    /// プロジェクト全体で共有されるシンボルライブラリ
+    pub(crate) library: Vec<SymbolDef>,
+    pub(crate) next_symbol_id: u64,
+    pub(crate) selected_library_symbol: Option<u64>,
 
     pub(crate) shapes: Vec<FillShape>,
-    pub(crate) undo_stack: Vec<UndoEntry>,
+    /// 直近の `load_shapes_from_timeline` 読み込み時点のシェイプ署名一覧（`Timeline` スナップショットに含めない作業用キャッシュ）
+    pub(crate) loaded_signatures: Vec<LoadedShapeSig>,
+    pub(crate) undo_stack: VecDeque<UndoEntry>,
     pub(crate) redo_stack: Vec<UndoEntry>,
 
     pub(crate) active_stroke: Vec<Point>,
@@ -196,15 +212,13 @@ pub(crate) struct FlashBrushApp {
 
     /// 操作トリガーで一定時間表示するトースト通知メッセージ
     pub(crate) status_toast: Option<StatusToast>,
-
-    pub(crate) tessellator: FillTessellator,
 }
 
 impl Default for FlashBrushApp {
     fn default() -> Self {
         Self {
             tool: Tool::Brush,
-            properties_panel: PropertiesPanel::default(),
+            right_panel_tab: RightPanelTab::default(),
             brush_radius: 8.0,
             eraser_radius: 22.0,
             brush_color: Color32::from_rgb(40, 45, 55),
@@ -219,8 +233,12 @@ impl Default for FlashBrushApp {
                 Pos2::new(1000.0, 590.0),
             ),
             timeline: Timeline::default(),
+            library: Vec::new(),
+            next_symbol_id: 1,
+            selected_library_symbol: None,
             shapes: Vec::new(),
-            undo_stack: Vec::new(),
+            loaded_signatures: Vec::new(),
+            undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
             active_stroke: Vec::new(),
             active_raw_outline: Vec::new(),
@@ -240,7 +258,6 @@ impl Default for FlashBrushApp {
             transform_drag: TransformDragState::None,
             inspect_timeline_frame: false,
             status_toast: None,
-            tessellator: FillTessellator::new(),
         }
     }
 }
@@ -254,46 +271,72 @@ impl FlashBrushApp {
         let mut tl = self.timeline.clone();
         tl.is_playing = false;
         tl.last_frame_advance_time = None;
+        tl.dragging_layer = None;
+        tl.grid_drag = TimelineGridDrag::None;
         tl
     }
 
-    fn restore_state_snapshot(
-        &mut self,
-        mut tl: Timeline,
-        shapes: Vec<FillShape>,
-        sym_stack: Vec<SymbolEditSession>,
-    ) -> UndoEntry {
-        tl.record_loaded_signatures(&shapes);
-        let prev_tl = self.snapshot_timeline();
-        self.timeline = tl;
-        let prev_shapes = std::mem::replace(&mut self.shapes, shapes);
-        let prev_stack = std::mem::replace(&mut self.symbol_edit_stack, sym_stack);
-        self.select_drag = SelectDragState::None;
-        self.transform_drag = TransformDragState::None;
-        self.sanitize_editing_group_path();
-        (prev_tl, prev_shapes, prev_stack)
-    }
-
-    pub(crate) fn record_undo_snapshot(&mut self, snapshot: Vec<FillShape>) {
-        let mut tl_snap = self.snapshot_timeline();
-        tl_snap.write_shapes_to_editable_cels(&snapshot);
-        self.undo_stack
-            .push((tl_snap, snapshot, self.symbol_edit_stack.clone()));
-        if self.undo_stack.len() > MAX_UNDO_HISTORY {
-            self.undo_stack.remove(0);
+    fn push_undo_entry(&mut self, entry: UndoEntry) {
+        if self.undo_stack.len() >= MAX_UNDO_HISTORY {
+            self.undo_stack.pop_front();
         }
+        self.undo_stack.push_back(entry);
         self.redo_stack.clear();
     }
 
+    fn restore_state_snapshot(&mut self, mut entry: UndoEntry) -> UndoEntry {
+        let prev_scroll = (self.timeline.scroll_x, self.timeline.scroll_y);
+        let prev_entry = UndoEntry {
+            timeline: self.snapshot_timeline(),
+            library: std::mem::replace(&mut self.library, entry.library),
+            next_symbol_id: std::mem::replace(&mut self.next_symbol_id, entry.next_symbol_id),
+            symbol_edit_stack: std::mem::replace(
+                &mut self.symbol_edit_stack,
+                entry.symbol_edit_stack,
+            ),
+        };
+        entry.timeline.scroll_x = prev_scroll.0;
+        entry.timeline.scroll_y = prev_scroll.1;
+        self.timeline = entry.timeline;
+        self.selected_library_symbol = self
+            .selected_library_symbol
+            .filter(|&id| self.library.iter().any(|s| s.id == id))
+            .or_else(|| self.library.first().map(|s| s.id));
+        self.load_shapes_from_timeline();
+        prev_entry
+    }
+
+    pub(crate) fn record_undo_snapshot(&mut self, mut snapshot: Vec<FillShape>) {
+        let mut tl_snap = self.snapshot_timeline();
+        tl_snap.normalize_shape_layer_ids(&mut snapshot);
+        tl_snap.write_shapes_to_editable_cels(&snapshot, &self.library, &self.loaded_signatures);
+        let entry = UndoEntry {
+            timeline: tl_snap,
+            library: self.library.clone(),
+            next_symbol_id: self.next_symbol_id,
+            symbol_edit_stack: self.symbol_edit_stack.clone(),
+        };
+        self.push_undo_entry(entry);
+    }
+
     pub(crate) fn push_undo(&mut self) {
-        self.record_undo_snapshot(self.shapes.clone());
+        if !self.timeline.is_playing {
+            self.sync_shapes_to_timeline();
+        }
+        let entry = UndoEntry {
+            timeline: self.snapshot_timeline(),
+            library: self.library.clone(),
+            next_symbol_id: self.next_symbol_id,
+            symbol_edit_stack: self.symbol_edit_stack.clone(),
+        };
+        self.push_undo_entry(entry);
     }
 
     pub(crate) fn undo(&mut self) {
         self.clear_selection();
         self.sync_shapes_to_timeline();
-        if let Some((prev_tl, prev_shapes, prev_stack)) = self.undo_stack.pop() {
-            let curr = self.restore_state_snapshot(prev_tl, prev_shapes, prev_stack);
+        if let Some(prev_entry) = self.undo_stack.pop_back() {
+            let curr = self.restore_state_snapshot(prev_entry);
             self.redo_stack.push(curr);
         }
     }
@@ -301,9 +344,12 @@ impl FlashBrushApp {
     pub(crate) fn redo(&mut self) {
         self.clear_selection();
         self.sync_shapes_to_timeline();
-        if let Some((next_tl, next_shapes, next_stack)) = self.redo_stack.pop() {
-            let curr = self.restore_state_snapshot(next_tl, next_shapes, next_stack);
-            self.undo_stack.push(curr);
+        if let Some(next_entry) = self.redo_stack.pop() {
+            let curr = self.restore_state_snapshot(next_entry);
+            if self.undo_stack.len() >= MAX_UNDO_HISTORY {
+                self.undo_stack.pop_front();
+            }
+            self.undo_stack.push_back(curr);
         }
     }
 
@@ -697,9 +743,6 @@ impl eframe::App for FlashBrushApp {
                 if !is_panning {
                     self.handle_canvas_tool_input(ui, &response, mouse_pt, tool_allowed);
                 }
-
-                // キャンバス編集結果を現在フレームの各レイヤーセルへ即時同期
-                self.sync_shapes_to_timeline();
 
                 // 2. ステージ背景（ペーストボード＋白いステージ矩形）の描画
                 self.draw_stage_background(&painter, canvas_rect);

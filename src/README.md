@@ -1,6 +1,6 @@
-# `src/` ディレクトリ完全リファレンス（全11ファイル・全型・全関数一覧）
+# `src/` ディレクトリ完全リファレンス（全13ファイル・全型・全関数一覧）
 
-`is2d` のソースコードは、UIパネル・キャンバスツール・ベクター幾何演算・タイムラインデータ・タイムラインUI・シンボル＆トゥイーン・テストの責務ごとに **全11ファイル** に分割されています。
+`is2d` のソースコードは、UIパネル・キャンバスツール・ベクター幾何エンジン（コア／ストローク平滑化／ブーリアン演算）・タイムラインデータ・タイムラインUI・シンボル＆トゥイーン・テストの責務ごとに **全13ファイル** に分割されています。
 本ドキュメントでは、`src/` 内のすべてのファイル・構造体・列挙型・定数・メソッド・ヘルパー関数・ユニットテストを漏れなく記載します。
 
 ---
@@ -9,24 +9,27 @@
 
 | # | ファイル | 行数目安 | 主な責務 |
 | :-: | :--- | :---: | :--- |
-| 1 | **[`main.rs`](./main.rs)** | ~725行 | アプリ起動、フォント・テーマ初期化、アプリ全体状態（`FlashBrushApp`）、共通ステータス通知バナー（`NoticeKind` / `StatusToast`）、Undo/Redo履歴、キーボードショートカット、メインループ（`eframe::App::update`） |
-| 2 | **[`panels.rs`](./panels.rs)** | ~625行 | Material Icons 定数（`mod icons`）、左端縦ツールバー、ステージ上部スリムバー（パンくずリスト）、右端4タブパネル（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`） |
-| 3 | **[`canvas_tool.rs`](./canvas_tool.rs)** | ~1,205行 | `Tool` 列挙型、変形・選択のドラッグ＆ホバー状態型、ビューポート（ズーム・パン）＆ステージ枠描画、レイヤースコープ同期、ツール切替、カスタムカーソル＆キャンバス描画 |
-| 4 | **[`tool_paint.rs`](./tool_paint.rs)** | ~180行 | **描画・塗りツール**（ブラシ `B`・消しゴム `E`・バケツ塗り `K`・スポイト `I`）の入力処理とコミットロジック |
-| 5 | **[`tool_select.rs`](./tool_select.rs)** | ~1,535行 | **選択ツール（`V`）**、マーキー範囲選択（部分スライス）、輪郭の粘土変形（Reshape）、アンカー追加/削除（`+`/`-`）、グループ階層＆インプレイス編集、コピー＆ペースト |
-| 6 | **[`tool_transform.rs`](./tool_transform.rs)** | ~595行 | **自由変形ツール（`Q`）**、ピボット管理、8方向スケールハンドル・回転・平行移動・反転、変形バウンディングボックス描画 |
-| 7 | **[`timeline.rs`](./timeline.rs)** | ~1,230行 | **タイムラインのデータモデル＆ロジック**（`Timeline` / `Layer` / `Keyframe` / `Cel`、3段階メッシュキャッシュ＆ゼロコピー再生、キーフレーム操作、フレーム移動/複製、レイヤー操作） |
-| 8 | **[`timeline_ui.rs`](./timeline_ui.rs)** | ~1,455行 | **タイムライン（X-Sheet）UI描画＆マウス操作**（`TimelineLayout`、コントロールバー、ルーラー、フレームグリッド、キーフレーム区間描画、レイヤー一覧、D&D操作） |
-| 9 | **[`symbol.rs`](./symbol.rs)** | ~1,345行 | **シンボル＆ライブラリ＆クラシックトゥイーン**（`F8` シンボル化、ライブラリ管理、シンボル内タイムライン編集、再生モード `Loop`/`PlayOnce`/`SingleFrame`、`T` トゥイーン補間、関連UI描画） |
-| 10 | **[`vector_engine.rs`](./vector_engine.rs)** | ~2,900行 | **2Dベクター幾何エンジン**（`Contour` / `FillShape`、ストローク輪郭生成、G1連続2次ベジェ曲線フィット、`i_overlay` ブーリアン演算＆De Casteljau 再構築、`lyon` 三角形メッシュ化） |
-| 11 | **[`tests.rs`](./tests.rs)** | ~1,810行 | 全機能を検証する自動ユニットテストスイート（全22テスト） |
+| 1 | **[`main.rs`](./main.rs)** | ~775行 | アプリ起動、フォント・テーマ初期化、アプリ全体状態（`FlashBrushApp`）、共通ステータス通知バナー（`NoticeKind` / `StatusToast`）、Undo/Redo履歴、キーボードショートカット、メインループ（`eframe::App::update`） |
+| 2 | **[`panels.rs`](./panels.rs)** | ~740行 | Material Icons 定数（`mod icons`）、左端縦ツールバー、ステージ上部スリムバー（パンくずリスト）、右端4タブパネル（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`） |
+| 3 | **[`canvas_tool.rs`](./canvas_tool.rs)** | ~1,225行 | `Tool` 列挙型、変形・選択のドラッグ＆ホバー状態型（共通 `MoveSelectionDrag` / `MarqueeDrag`）、ビューポート（ズーム・パン）＆ステージ枠描画、レイヤースコープ同期、ツール切替、カスタムカーソル＆キャンバス合成描画 |
+| 4 | **[`tool_paint.rs`](./tool_paint.rs)** | ~182行 | **描画・塗りツール**（ブラシ `B`・消しゴム `E`・バケツ塗り `K`・スポイト `I`）の入力処理とコミットロジック |
+| 5 | **[`tool_select.rs`](./tool_select.rs)** | ~1,620行 | **選択ツール（`V`）**、マーキー範囲選択（部分スライス）、輪郭の粘土変形（Reshape）、アンカー追加/削除（`+`/`-`）、3制御点AABB早期棄却（`quad_control_bbox_contains`）、グループ階層＆インプレイス編集、コピー＆ペースト |
+| 6 | **[`tool_transform.rs`](./tool_transform.rs)** | ~555行 | **自由変形ツール（`Q`）**、ピボット管理、8方向スケールハンドル・回転・平行移動・反転、変形バウンディングボックス描画 |
+| 7 | **[`timeline.rs`](./timeline.rs)** | ~1,355行 | **タイムラインのデータモデル＆ロジック**（`Timeline` / `Layer` / `Keyframe` / `Cel`、`CelMeshCache` 共有キャッシュ、キーフレーム操作、フレーム移動/複製、レイヤー操作） |
+| 8 | **[`timeline_ui.rs`](./timeline_ui.rs)** | ~1,465行 | **タイムライン（X-Sheet）UI描画＆マウス操作**（`TimelineLayout`、コントロールバー、ルーラー、フレームグリッド、キーフレーム区間描画、レイヤー一覧、D&D操作） |
+| 9 | **[`symbol.rs`](./symbol.rs)** | ~1,705行 | **シンボル＆ライブラリ＆クラシックトゥイーン**（`F8` シンボル変換、入れ子シンボル再帰評価、ライブラリ管理＆非破壊デタッチ、シンボル内タイムライン編集、再生モード `Loop`/`PlayOnce`/`SingleFrame`、`T` トゥイーン補間、関連UI描画） |
+| 10 | **[`vector_engine.rs`](./vector_engine.rs)** | ~900行 | **2Dベクター幾何コア＆メッシュ描画エンジン**（`Contour` / `FillShape`、CoW `Arc` キャッシュ＆異常値ガード付きアフィン変換、幾何ユーティリティ、`lyon` 三角形メッシュ化） |
+| 11 | **[`vector_stroke.rs`](./vector_stroke.rs)** | ~1,440行 | **アルゴリズム 1 & 2：ストローク輪郭生成＆100%スムージング曲線フィット**（スケール不変ブラシ輪郭生成、特徴点ロック、ゼロ収縮平滑化、G1連続2次ベジェ曲線フィット） |
+| 12 | **[`vector_boolean.rs`](./vector_boolean.rs)** | ~730行 | **アルゴリズム 3：マージ描画＆ブーリアン演算エンジン**（`BoolOp`、`i_overlay` ブーリアン演算、元の `QuadBez` タグ照合＆De Casteljau 部分曲線再構築、閉領域バケツ検出、自己交差解消） |
+| 13 | **[`tests.rs`](./tests.rs)** | ~1,960行 | 全機能および異常値・クラッシュ耐性を検証する自動ユニットテストスイート（全24テスト） |
 
 ---
 
 ## 1. [`main.rs`](./main.rs) — エントリポイント・アプリ状態・Undo/Redo・ショートカット・メインループ
 
-### 定数・通知型・初期化関数
-- **`MAX_UNDO_HISTORY: usize`** (`50`) — Undo スタックが保持する最大スナップショット数。
+### 定数・通知型・履歴型・初期化関数
+- **`MAX_UNDO_HISTORY: usize`** (`100`) — Undo スタックが保持する最大スナップショット数。
+- **`struct UndoEntry`** — Undo / Redo スタックが保持する1ステップ分の状態スナップショット（`timeline: Timeline`, `library: Vec<SymbolDef>`, `next_symbol_id: u64`, `symbol_edit_stack: Vec<SymbolEditSession>`）。作業キャンバス `shapes` は復元時にタイムラインから再展開することで重複保持を排除。
 - **`enum NoticeKind`** — キャンバス左上に表示するステータスメッセージの種類（`Warning` / `Error` / `Info`）と配色・アイコン定義（`colors(self)`）。
 - **`struct StatusToast`** — 一定時間（デフォルト3秒）で自動消滅するワンショット通知メッセージ（`kind: NoticeKind`, `message: String`, `expires_at: Instant`）。
 - **`main() -> eframe::Result<()>`** — ウィンドウサイズ（`1280 × 820`）とタイトル（`"is2d"`）を設定し、フォント・テーマを初期化して `eframe::run_native` を起動。
@@ -37,9 +40,9 @@
 アプリケーション全体の状態を保持するルート構造体（`Default` 実装あり）。
 - **ツール・UI・ブラシ設定フィールド**：
   - `tool: Tool` — 現在選択中のメインツール（初期値 `Tool::Brush`）。
-  - `properties_panel: PropertiesPanel` — 右端パネルのアクティブタブ状態。
-  - `brush_radius: f32` — ブラシ半径（ワールド座標px、初期値 `10.0`）。
-  - `eraser_radius: f32` — 消しゴム半径（ワールド座標px、初期値 `18.0`）。
+  - `right_panel_tab: RightPanelTab` — 右端パネルのアクティブタブ状態（初期値 `RightPanelTab::Properties`）。
+  - `brush_radius: f32` — ブラシ半径（ワールド座標px、初期値 `8.0`）。
+  - `eraser_radius: f32` — 消しゴム半径（ワールド座標px、初期値 `22.0`）。
   - `brush_color: Color32` — 現在の描画・塗りつぶしカラー。
   - `show_wireframe: bool` — アンカーポイントとベジェ曲線パスの常時オーバーレイ表示フラグ。
 - **ビューポート・ステージ枠設定フィールド**：
@@ -49,10 +52,14 @@
   - `stage_size: Vec2` — ステージ（カメラ出力枠）の幅・高さ（初期値 `800.0 × 450.0`、背景色は常時 `Color32::WHITE`）。
   - `clip_outside_stage: bool` — ステージ枠外の絵を隠すクリッピングマスク有効フラグ。
   - `last_canvas_rect: egui::Rect` — 直近フレームの中央キャンバス描画領域（「ウィンドウに合わせる」計算用）。
-- **タイムライン・キャンバス・履歴フィールド**：
+- **タイムライン・ライブラリ・キャンバス・履歴フィールド**：
   - `timeline: Timeline` — 現在アクティブなタイムライン（シーン1、またはインプレイス編集中のシンボル内タイムライン）。
+  - `library: Vec<SymbolDef>` — プロジェクト共通のシンボルライブラリ一覧（シーンとシンボル内タイムライン階層の間で共有）。
+  - `next_symbol_id: u64` — 次に新規作成するシンボル定義の連番ID（初期値 `1`）。
+  - `selected_library_symbol: Option<u64>` — ライブラリパネルで現在選択されているシンボルのID。
   - `shapes: Vec<FillShape>` — 現在フレームの可視・非ロックレイヤーから作業用に展開されたベクター図形リスト。
-  - `undo_stack: Vec<Timeline>` / `redo_stack: Vec<Timeline>` — タイムライン全体（レイヤー・キーフレーム・ライブラリ含む）のスナップショット履歴。
+  - `loaded_signatures: Vec<LoadedShapeSig>` — `load_shapes_from_timeline` または `sync_shapes_to_timeline` 時点の `shapes` 署名一覧（Undo スナップショットに含めず、編集発生時のレイヤー別差分検知に使用）。
+  - `undo_stack: VecDeque<UndoEntry>` / `redo_stack: Vec<UndoEntry>` — タイムライン・ライブラリ・シンボル編集スタックのスナップショット履歴（上限超過時は `pop_front` で $O(1)$ 破棄）。
 - **ストローク入力・選択・変形・グループ・シンボル編集フィールド**：
   - `active_stroke: Vec<Point>` — ブラシ／消しゴムでドラッグ中の中心軌跡点列。
   - `active_raw_outline: Vec<Point>` — ドラッグ中にリアルタイム生成された閉輪郭ポリゴン点列。
@@ -69,14 +76,13 @@
   - `transform_pivot: Option<Point>` / `transform_hover: TransformHoverTarget` / `transform_drag: TransformDragState` — 自由変形ツール（`Q`）の基準点・ホバー・ドラッグ状態。
   - `inspect_timeline_frame: bool` — プロパティパネル下部の表示対象フラグ（`true`: タイムラインのフレーム／トゥイーン属性、`false`: キャンバス上のシンボル属性）。
   - `status_toast: Option<StatusToast>` — 操作エラー・警告などを一定時間表示するワンショット通知。
-  - `tessellator: FillTessellator` — `lyon` の三角形分割器インスタンス。
 
 ### `FlashBrushApp` のメソッド（`main.rs` 内）
 - **Undo / Redo 履歴管理**：
-  - `snapshot_timeline(&self) -> Timeline` — 再生タイマー等をクリアした現在の `Timeline` クローンを作成。
-  - `restore_state_snapshot(&mut self, tl: Timeline, shapes: Vec<FillShape>, sym_stack: Vec<SymbolEditSession>) -> UndoEntry` — 指定したタイムライン・図形・シンボル編集スタックを `std::mem::replace` で無コピー復元し、置換前の状態を返す。
-  - `record_undo_snapshot(&mut self, snapshot: Vec<FillShape>)` — 渡された操作前スナップショットを `undo_stack` に積み（上限 `MAX_UNDO_HISTORY`）、`redo_stack` をクリア。
-  - `push_undo(&mut self)` — 現在の状態をスナップショット化して `record_undo_snapshot` に記録。
+  - `snapshot_timeline(&self) -> Timeline` — 再生タイマーやドラッグ一時状態をリセットした現在の `Timeline` クローンを作成。
+  - `restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry` — 現在のタイムラインスクロール位置（`scroll_x`, `scroll_y`）を維持したまま指定した `UndoEntry`（タイムライン・ライブラリ・シンボル編集スタック）を `std::mem::replace` で無コピー復元し、`load_shapes_from_timeline` で作業図形を再展開して置換前の `UndoEntry` を返す。
+  - `record_undo_snapshot(&mut self, snapshot: Vec<FillShape>)` — 渡された操作前スナップショットからタイムラインを組み立てて `undo_stack` に積み（上限 `MAX_UNDO_HISTORY`）、`redo_stack` をクリア。
+  - `push_undo(&mut self)` — 現在の状態をスナップショット化して `undo_stack` に記録。
   - `undo(&mut self)` / `redo(&mut self)` — `Cmd/Ctrl + Z` および `Cmd/Ctrl + Y`（`Cmd+Shift+Z`）による履歴の巻き戻し・やり直し。
 - **キーボードショートカット処理**：
   - `handle_shortcuts(&mut self, ctx: &egui::Context)` — 再生中のショートカット制限と、単一キー／修飾キー付きショートカットの振り分け。
@@ -101,11 +107,10 @@
 - `ADD` (`\u{e145}`), `REMOVE` (`\u{e15b}`), `FLIP_H` (`\u{e3e8}`), `FLIP_V` (`\u{e8d5}`), `ROTATE_LEFT` (`\u{e419}`), `ROTATE_RIGHT` (`\u{e41a}`), `PIVOT_RESET` (`\u{e55c}`), `GROUP` (`\u{e7ef}`), `SYMBOL` (`\u{e40a}`), `WIREFRAME` (`\u{e922}`), `DELETE` (`\u{e872}`), `SCENE_MOVIE` (`\u{e02c}`), `ARROW_BACK` (`\u{e5c4}`), `VISIBILITY` (`\u{e8f4}`), `LOCK` (`\u{e897}`), `SKIP_PREV` (`\u{e045}`), `STEP_PREV` (`\u{e5cb}`), `PLAY` (`\u{e037}`), `PAUSE` (`\u{e034}`), `STEP_NEXT` (`\u{e5cc}`), `SKIP_NEXT` (`\u{e044}`), `ONION_SKIN` (`\u{e53b}`).
 
 ### 型定義
-- **`enum RightPanelTab`** — 右端パネルの4タブ列挙型：
+- **`enum RightPanelTab`** — 右端パネルの4タブ列挙型（`Default` は `Properties`）：
   - `Properties`（`プロパティ`）、`Color`（`カラー`）、`Library`（`ライブラリ`）、`Canvas`（`キャンバス`）。
   - `RightPanelTab::ALL` — 全4タブの定数配列。
   - `label(self) -> &'static str` — タブの表示名を返す。
-- **`struct PropertiesPanel`** — 右端パネルの状態（`active_tab: RightPanelTab`、`Default` では `Properties`）。
 
 ### `FlashBrushApp` のメソッド（`panels.rs` 内）
 - **左端縦ツールバー**：
@@ -120,13 +125,10 @@
   - `draw_right_properties_panel(&mut self, ctx: &egui::Context)` — 幅 `280px` の右端パネルを描画。
   - `draw_right_panel_tab_bar(&mut self, ui: &mut egui::Ui)` — 上部の4タブ（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`）切り替えバーを描画。
   - `draw_properties_tab(&mut self, ui: &mut egui::Ui)` — 現在のツールに応じたプロパティセクションを描画。
-  - `draw_select_tool_properties(&mut self, ui: &mut egui::Ui)` — 選択ツール時のプロパティ（アンカー追加 `+` / 削除 `-`、グループ化 `Cmd+G` / 解除 `Cmd+B`、シンボルに変換 `F8`、および単一シンボル選択時の再生設定 `draw_selected_symbol_properties`）を描画。
+  - `draw_select_tool_properties(&mut self, ui: &mut egui::Ui)` — 選択ツール時のプロパティ（アンカー追加 `+` / 削除 `-`、グループ化 `Cmd+G` / 解除 `Cmd+B`、シンボルに変換 `F8`、選択削除、フレーム全消去、および単一シンボル選択時の再生設定 `draw_selected_symbol_properties`）を描画。
   - `draw_transform_tool_properties(&mut self, ui: &mut egui::Ui)` — 自由変形ツール時のプロパティ（左右反転・上下反転・90°左回転・90°右回転・ピボット中央リセット・単一シンボル再生設定）を描画。
-  - `draw_brush_tool_properties(&mut self, ui: &mut egui::Ui)` — ブラシ太さスライダーを描画。
-  - `draw_eraser_tool_properties(&mut self, ui: &mut egui::Ui)` — 消しゴム太さスライダーを描画。
-  - `draw_bucket_tool_properties(&mut self, ui: &mut egui::Ui)` — バケツツールのプロパティを表示。
-  - `draw_eyedropper_tool_properties(&mut self, ui: &mut egui::Ui)` — スポイトツールのプロパティを表示。
-  - `draw_color_tab(&mut self, ui: &mut egui::Ui)` — `カラー` タブを描画。
+  - `draw_radius_slider_section(ui: &mut egui::Ui, label: &str, radius: &mut f32, max_r: f32)` — ブラシ・消しゴムで共有する太さスライダーを描画。
+  - `draw_color_palette_section(&mut self, ui: &mut egui::Ui)` — カラータブ・バケツ・スポイトで共有する塗り色ピッカー（16進数RGB表示付き）と10色プリセットパレットスウォッチを描画。
   - `draw_canvas_tab(&mut self, ui: &mut egui::Ui)` — `キャンバス` タブ（キャンバス情報：ステージ幅×高さ `DragValue`、キャンバス操作：`枠外を隠す` ボタン・`ウィンドウに合わせる` ボタン・`100%表示` ボタン）を描画。
 - **共通UIヘルパー関数（`panels.rs` 内）**：
   - `draw_panel_section_label(ui: &mut egui::Ui, title: &str, bottom_space: f32)` — 右パネル内の各セクション見出しラベルと下部余白を描画する共通ヘルパー。
@@ -149,20 +151,22 @@
   - `opposite(self) -> Self` / `opposite_position(self, bbox: Rect) -> Point` — 対角・対辺の反対側ハンドルとその座標を返す。
   - `affects_x(self) -> bool` / `affects_y(self) -> bool` / `is_corner(self) -> bool` — X軸・Y軸への影響と四隅判定。
 - **`enum TransformHoverTarget`** — 自由変形ツールのホバー対象（`None`, `Pivot`, `Scale(ScaleHandle)`, `Rotate`, `Move`）。
-- **`enum TransformDragState`** — 自由変形ツールのドラッグ状態（`None`, `MovePivot`, `Move`, `Scale`, `Rotate`, `MarqueeSelect`）。
+- **`struct MoveSelectionDrag`** — 選択ツール（`V`）と自由変形ツール（`Q`）で共通化された選択移動ドラッグ状態（`start_pos`, `last_pos`, `alt_duplicated`, `undo_snapshot`）。
+- **`struct MarqueeDrag`** — 選択ツール（`V`）と自由変形ツール（`Q`）で共通化された矩形マーキー選択ドラッグ状態（`start_pos`, `current_pos`）。
+- **`enum TransformDragState`** — 自由変形ツールのドラッグ状態（`None`, `MovePivot`, `Move(MoveSelectionDrag)`, `Scale`, `Rotate`, `MarqueeSelect(MarqueeDrag)`）。
 - **`enum SelectSubMode`** — 選択ツールのサブモード（`Reshape`, `AddAnchor`, `DeleteAnchor`）。
-- **`enum HoverTarget`** — 選択ツールのホバー対象（`None`, `Vertex { shape_idx, contour_idx, seg_idx }`, `Edge { shape_idx, contour_idx, seg_idx, t, nearest_pt }`, `Fill { shape_idx }`）。
+- **`enum HoverTarget`** — 選択ツールのホバー対象（`None`, `Vertex { shape_idx, contour_idx, seg_idx }`, `Edge { shape_idx, contour_idx, seg_idx, t, closest_pos }`, `Fill { shape_idx }`）。
   - `shape_idx(&self) -> Option<usize>` — ホバー中の図形インデックスを返す。
-- **`enum SelectDragState`** — 選択ツールのドラッグ状態（`None`, `MoveShape`, `MarqueeSelect`, `PullEdge`, `MoveVertex`）。
+- **`enum SelectDragState`** — 選択ツールのドラッグ状態（`None`, `MoveShape(MoveSelectionDrag)`, `MarqueeSelect(MarqueeDrag)`, `PullEdge`, `MoveVertex`）。
 
 ### `FlashBrushApp` のメソッド（`canvas_tool.rs` 内）
 - **ビューポート（ズーム・パン）＆ステージ枠**：
-  - `world_to_screen(&self, pt: Point) -> Pos2` / `screen_to_world(&self, pos: Pos2) -> Point` — ワールド座標とスクリーン座標の相互変換。
+  - `world_to_screen(&self, pt: Point) -> Pos2` / `screen_to_world(&self, pos: Pos2) -> Point` / `world_rect_to_screen(&self, r: Rect) -> egui::Rect` — ワールド座標・矩形とスクリーン座標・矩形の相互変換。
   - `zoom_around_screen_pos(&mut self, pivot_screen: Pos2, zoom_factor: f32)` — 指定スクリーン座標を不動点としてズーム倍率を変更。
   - `reset_view(&mut self)` — ズームを `1.0`（100%）、パンを `Vec2::ZERO` にリセット。
   - `fit_stage_to_window(&mut self)` — ステージ枠全体が中央キャンバス領域に余白付きでぴったり収まるようにズーム倍率とパン位置を自動調整（「ウィンドウに合わせる」）。
   - `stage_center_world(&self) -> Point` — ステージ中心のワールド座標 `(640.0, 360.0)`（シンボルインプレイス編集中は登録点 `(0.0, 0.0)`）を返す。
-  - `stage_world_rect(&self) -> Rect` / `stage_screen_rect(&self) -> egui::Rect` — ワールド座標およびスクリーン座標でのステージ矩形を返す。
+  - `stage_world_rect(&self) -> Rect` / `stage_screen_rect(&self) -> egui::Rect` / `visible_world_rect(&self, painter: &egui::Painter) -> Rect` — ワールド座標・スクリーン座標でのステージ矩形および現在画面に表示されるワールド範囲（カリング用）を返す。
   - `draw_stage_background(&self, painter: &egui::Painter, canvas_rect: egui::Rect)` — シーン編集中にペーストボード背景とステージ用紙のドロップシャドウ・背景色を描画。
   - `draw_stage_foreground_overlay(&self, painter: &egui::Painter, canvas_rect: egui::Rect)` — 絵の上にステージ境界枠線を描画し、`clip_outside_stage` 有効時はステージ外周4方向を覆う半透明ベールを描画。シンボル編集中は中心 `(0, 0)` に基準十字マークを描画。
   - `handle_viewport_navigation(&mut self, ctx: &egui::Context, response: &egui::Response, space_down: bool) -> bool` — ホイール／ピンチによるカーソル中心ズームと、スペースキー／中ボタンドラッグによるパン操作を処理。
@@ -180,10 +184,10 @@
   - `draw_transform_tool_cursor(&self, ctx: &egui::Context, painter: &egui::Painter, pos: Pos2)` — 自由変形ツールの8方向リサイズ矢印、4方向移動矢印、回転アークバッジ、ピボット移動カーソルを表示。
   - `draw_select_tool_cursor(&self, ctx: &egui::Context, painter: &egui::Painter, pos: Pos2)` — 選択ツールの頂点角バッジ、曲線エッジバッジ、アンカー `+`/`-` バッジ、移動カーソルを表示。
   - `draw_highlighted_quad_segment(&self, painter: &egui::Painter, shape_idx: usize, contour_idx: usize, seg_idx: usize, color: Color32)` — ホバー中の2次ベジェ曲線セグメント1本を強調ハイライト描画。
-  - `draw_canvas_contents(&mut self, painter: &egui::Painter)` — 再生中は `resolved_cel_screen_mesh` によるゼロコピー高速描画、停止中は編集対象レイヤーとトゥイーン・多フレームシンボルを含む全レイヤーを正確な重ね順で描画し、選択網点・ワイヤーフレーム・自由変形枠を重ねて描画。
+  - `draw_canvas_contents(&mut self, painter: &egui::Painter)` — シンボル編集背景は `backdrop_cel.cached_screen_mesh`、再生中・ロック中レイヤーは `resolved_cel_screen_mesh`、編集可能レイヤーは単一ループで各図形・選択網点・ワイヤーフレーム・自由変形枠を重ねて描画。
   - `draw_onion_skins(&mut self, painter: &egui::Painter)` / `draw_onion_skin_frame(&mut self, painter: &egui::Painter, frame: usize, tint: Color32)` — 前後フレームのオニオンスキン（過去フレーム＝青系、未来フレーム＝緑系、距離に応じた段階的アルファ減衰）を描画。
   - `draw_active_marquee_box(&self, painter: &egui::Painter)` — 選択ツール／自由変形ツールでドラッグ中の矩形選択ボックスを描画。
-  - `draw_active_stroke_preview(&mut self, painter: &egui::Painter)` — ブラシ／消しゴムでドラッグ中のリアルタイムストロークプレビューを描画。
+  - `draw_active_stroke_preview(&self, painter: &egui::Painter)` — ブラシ／消しゴムでドラッグ中のリアルタイムストロークプレビューを描画。
 
 ### カーソルバッジ描画フリー関数（`canvas_tool.rs` 内）
 - `draw_flash_curve_cursor_badge(painter: &egui::Painter, pos: Pos2)` — エッジホバー時の曲線アークバッジを描画。
@@ -226,9 +230,10 @@
   - `nudge_selected_shapes(&mut self, delta: Vec2) -> bool` — 選択中の全図形を十字キー等で `delta` だけ移動し、Undo 履歴記録・最前面整列・タイムライン同期を実行。
   - `apply_marquee_selection(&mut self, start_pt: Point, end_pt: Point, additive: bool)` — 矩形ドラッグによる範囲選択を実行。グループやシンボルは矩形と交差すれば塊全体を選択し、生シェイプは矩形境界で `Intersection` / `Difference` による部分スライス（ナイフ切断選択）を行う（`Shift` 押下時は既存の選択スライスを維持したまま追加スライス）。
   - `delete_selected_shapes(&mut self) -> bool` — 選択中の図形・スライス領域を一括削除し、Undo 記録とタイムライン同期を実行。
+  - `clear_active_frame_shapes(&mut self) -> bool` — 現在の編集スコープ（グループ編集中ならそのグループ内、通常時はアクティブレイヤー）の現在フレーム図形をすべて消去。
   - `commit_moved_selection(&mut self, undo_snapshot: Vec<FillShape>)` — 選択図形の移動・変形完了時に選択図形を各レイヤー・スコープ内の最前面へ並べ替え、シンボルインスタンスのアフィン変換行列も更新。
-  - `finish_move_selection_drag(&mut self, start_pt: Point, last_pt: Point, undo_snapshot: Timeline)` — 選択移動ドラッグの終了処理と Undo 記録。
-  - `finish_deform_shape_drag(&mut self, shape_idx: usize, start_pt: Point, last_pt: Point, undo_snapshot: Timeline)` — エッジ引き伸ばし／頂点移動ドラッグの終了時に `resolve_deformed_shape` で自己交差解消・横断分割を実行し、同一レイヤー・同一スコープ内へマージ。
+  - `finish_move_selection_drag(&mut self, total_delta: Vec2, undo_snapshot: Vec<FillShape>)` — 選択移動ドラッグの終了処理と Undo 記録。
+  - `finish_deform_shape_drag(&mut self, shape_idx: usize, undo_snapshot: Vec<FillShape>)` — エッジ引き伸ばし／頂点移動ドラッグの終了時に `resolve_deformed_shape` で自己交差解消・横断分割を実行し、同一レイヤー・同一スコープ内へマージ。
   - `selected_shapes_snapshot(&self) -> Vec<FillShape>` — 現在選択中の図形群のクローン配列を返す。
   - `selection_bounding_box(&self) -> Option<Rect>` — 現在選択中の全図形の統合バウンディングボックスを返す。
 - **グループ化・グループ解除・インプレイス階層編集**：
@@ -246,9 +251,10 @@
   - `duplicate_selected_shapes_for_alt_drag(&mut self) -> Vec<FillShape>` — 選択中のオブジェクト（生シェイプ・グループ・シンボル）をその場に複製し、複製側を選択状態に切り替えた上でドラッグ移動用の `undo_snapshot` を返す（`Alt + ドラッグ` 複製用）。
   - `insert_and_select_shapes_in_scope(&mut self, new_shapes: Vec<FillShape>, mark_modified: bool)` — 新規生成・ペースト・複製された図形群を現在の編集スコープへ挿入し、それらを選択状態にしてレイヤー順へ整列する共通ヘルパー。
 - **輪郭の粘土変形（Reshape）＆アンカーポイント編集**：
+  - `quad_control_bbox_contains(seg: &QuadBez, pt: Point, margin: f64) -> bool` — 2次ベジェ曲線の凸包性質（曲線全体が必ず3制御点 `p0, p1, p2` のAABB内に収まる性質）を利用し、高コストな3次方程式求根 `seg.nearest` を呼ぶ前に `margin` 外のセグメントを $O(1)$ で早期棄却するフリー関数。
   - `punch_through_opposite_edge(contour: &mut Contour, dragged_seg_idx: usize, grab_pt: Point, target_pt: Point, eps: f64)` — エッジを対向側の輪郭線ギリギリまたは向こう側へドラッグした際、確実に2図形へ分割されるよう微小に切り込みを貫通させる補正処理。
   - `apply_pull_edge_to_shape(shape: &mut FillShape, contour_idx: usize, seg_idx: usize, grab_t: f64, orig_seg: QuadBez, target_pt: Point, punch_opposite: bool)` — 2次ベジェ曲線の式 `B(t) = (1-t)^2 P0 + 2t(1-t) P1 + t^2 P2` から制御点 `P1` を逆算し、掴んだ点 `grab_t` が `target_pt` を通るように曲線をリアルタイム変形。
-  - `apply_move_vertex_to_shape(shape: &mut FillShape, contour_idx: usize, seg_idx: usize, orig_contour: &Contour, target_pt: Point)` — 掴んだ頂点（アンカーポイント）を `target_pt` へ移動し、前後のセグメントの制御点を自然な比率で追従させる。
+  - `apply_move_vertex_to_shape(shape: &mut FillShape, contour_idx: usize, seg_idx: usize, orig_contour: &Contour, target_pt: Point, punch_opposite: bool)` — 掴んだ頂点（アンカーポイント）を `target_pt` へ移動し、前後のセグメントの制御点を自然な比率で追従させる。
   - `point_within_shape_contours(shape: &FillShape, pt: Point, margin: f64) -> bool` — 指定座標が図形の内部または輪郭から `margin` 以内にあるかを判定。
   - `compute_hover_target(&self, world_pt: Point) -> HoverTarget` — 選択ツールでのマウス位置から `Vertex` / `Edge` / `Fill` / `None` を判定（選択済み図形やグループは変形ではなく常に `Fill` 移動として扱う Adobe Animate 準拠挙動）。
   - `find_snap_vertex(&self, world_pt: Point, exclude_shape: usize, exclude_contour: usize, exclude_seg: usize) -> Option<Point>` — 頂点ドラッグ中に近くの他頂点（または同一輪郭の別頂点）へ吸着するスナップ座標を検索。
@@ -265,7 +271,7 @@
 ### `FlashBrushApp` のメソッド（`tool_transform.rs` 内）
 - **`active_transform_pivot(&self, bbox: Rect) -> Point`** — カスタムピボットが設定されていればその座標、単一シンボルインスタンス選択時はインスタンスに保存されたピボット（`binding.world_pivot()`）、それ以外は選択バウンディングボックスの中心座標を返す。
 - **`has_custom_transform_pivot(&self) -> bool`** — 現在の選択対象に初期位置から移動されたカスタム変形中心（ピボット）が設定されているかを返す。
-- **`set_selected_symbol_world_pivot(&mut self, world_pivot: Option<Point>, commit_to_timeline: bool) -> bool`** — 単一シンボルインスタンス選択時にワールド座標ピボットをローカル座標に変換して `SymbolInstanceBinding::pivot` に保存・同期する。
+- **`set_selected_symbol_world_pivot(&mut self, world_pivot: Option<Point>, commit_to_timeline: bool) -> bool`** / **`flush_transform_pivot_to_symbol(&mut self)`** — 単一シンボルインスタンス選択時にワールド座標ピボットをローカル座標に変換して `SymbolInstanceBinding::pivot` に保存・同期する。
 - **`reset_selected_transform_pivot(&mut self) -> bool`** — 選択オブジェクトの変形中心（ピボット）を初期位置（選択中央またはシンボル基準点 `(0, 0)`）へリセットする。
 - **`compute_transform_hover(&self, world_pt: Point) -> TransformHoverTarget`** — マウス位置からピボット点、8方向スケールハンドル、四隅外側の回転ゾーン、バウンディングボックス内部の移動ゾーンの優先順位でヒット判定。
 - **`apply_affine_to_selected(&mut self, affine: Affine) -> bool`** — 選択中の全図形にアフィン変換行列を適用してタイムラインへ同期する共通ヘルパー。
@@ -284,12 +290,12 @@
 ## 7. [`timeline.rs`](./timeline.rs) — タイムラインのデータモデル・3段階メッシュキャッシュ・キーフレーム＆レイヤー操作
 
 ### 構造体・列挙型（`timeline.rs` 内）
-- **`struct CelMeshCache`** — セル単位のキャッシュ構造体（`world_revision`, `world_batch_mesh`, `last_zoom`, `last_pan`, `last_screen_mesh`, `last_onion_tint`, `last_onion_mesh`）。
+- **`struct CelMeshCache`** — セル単位のキャッシュ構造体（`world_revision`, `world_batch_mesh: Arc<egui::Mesh>`, `screen_cache`, `onion_cache`、Clone 時は `Arc::clone` による `O(1)` 共有）。
 - **`struct Cel`** — 1つのキーフレームが保持する描画セル（`shapes: Vec<FillShape>` と `cache: RefCell<CelMeshCache>`）。
   - `new(shapes: Vec<FillShape>) -> Self` / `is_empty(&self) -> bool`
   - `ensure_world_batch_mesh(&self)` — セル内の全図形の `mesh_revision` ハッシュを検証し、変化があればワールド座標での結合メッシュを再構築（変化がなければ O(1) でスキップ）。
-  - `cached_screen_mesh(&self, zoom: f32, pan: Vec2, clip_to_stage: bool) -> Arc<egui::Mesh>` — 現在のズーム・パンに応じたスクリーン座標メッシュをキャッシュから O(1)（`Arc::clone` のみ）で返す。
-  - `cached_onion_mesh(&self, zoom: f32, pan: Vec2, tint: Color32) -> Arc<egui::Mesh>` — オニオンスキン用の単色半透明スクリーンメッシュをキャッシュから返す。
+  - `cached_screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> egui::Mesh` — 現在のズーム・パンに応じたスクリーン座標メッシュをキャッシュから返す。
+  - `cached_onion_mesh(&self, zoom: f32, pan: Vec2, tint: Color32) -> egui::Mesh` — オニオンスキン用の単色半透明スクリーンメッシュをキャッシュから返す。
 - **`struct Keyframe`** — キーフレーム構造体（`start_frame: usize`, `cel: Cel`, `tween: bool`）。
   - `new_blank(start_frame: usize) -> Self` — 指定フレーム開始の空キーフレームを生成。
   - `clear_cel(&mut self)` — キーフレームを空のセル＆`tween = false` に初期化。
@@ -310,23 +316,26 @@
   - `remove_keyframes_in_range(&mut self, min_f: usize, max_f: usize)` — 通常ドラッグ移動時に元の範囲のキーフレームをクリア・削除。
   - `place_keyframes_at(&mut self, base_frame: usize, extracted: Vec<(usize, Cel, bool)>, min_required_end: usize)` — 抽出したキーフレーム群を移動／複製先フレームへ配置。
 - **`struct LoadedShapeSig`** — キャンバス展開時の図形署名（`mesh_revision`, `color`, `group_path`, `symbol_instance`）。未編集のトゥイーン補間図形やシンボル展開図形で元のキーフレームを上書き破壊しないための変更検知に使用。
-  - `from_shape(s: &FillShape) -> Self` / `matches(&self, s: &FillShape) -> bool`
-- **`struct Timeline`** — タイムライン全体の状態（`layers`, `next_layer_id`, `library: Vec<SymbolDef>`, `next_symbol_id`, `active_layer`, `current_frame`, `total_frames`, `fps`, `is_playing`, `loop_playback`, `onion_skin_enabled`, `onion_prev_frames`, `onion_next_frames`, `last_Advance_instant`, `scroll_x`, `scroll_y`, `cell_selection`, `grid_drag`, `dragging_layer`, `loaded_layer_sigs`）。
-  - `Default` 実装（24fps、1フレーム、`Layer 1` 1枚）
-  - `new_for_symbol_edit(symbol: &SymbolDef, library: Vec<SymbolDef>, next_symbol_id: u64, fps: u32, onion_skin_enabled: bool, onion_prev_frames: usize, onion_next_frames: usize) -> Self` — シンボル内部のインプレイス編集用タイムラインを構築。
+  - `from_shape(s: &FillShape) -> Self` / `matches_with_layer(&self, s: &FillShape, expected_layer_id: u64) -> bool`
+- **`struct Timeline`** — タイムライン全体の状態（`layers`, `next_layer_id`, `active_layer`, `current_frame`, `total_frames`, `fps`, `is_playing`, `loop_playback`, `onion_skin_enabled`, `onion_prev_frames`, `onion_next_frames`, `last_advance_instant`, `scroll_x`, `scroll_y`, `cell_selection`, `grid_drag`, `dragging_layer`）。
+  - `Default` 実装（24fps、1フレーム、`Layer 1` 1枚、`loop_playback = true`）
+  - `new_for_symbol_edit(&self, sym_def: &SymbolDef, sym_layers: Vec<Layer>) -> Self` — シンボル内部のインプレイス編集用タイムラインを構築。
   - `sync_total_frames(&mut self)` — 全レイヤーの `frame_count` の最大値に `total_frames` を同期。
   - `select_single_cell(&mut self, layer: usize, frame: usize)` — アクティブレイヤー・現在フレーム・単一セル選択を一括設定。
   - `active_layer_id(&self) -> u64` / `layer_index_by_id(&self, id: u64) -> Option<usize>`
   - `is_layer_editable_by_id(&self, id: u64) -> bool` / `has_any_editable_layer(&self) -> bool` / `is_active_layer_editable(&self) -> bool`
   - `target_layers_for_frame_op(&self) -> Vec<usize>` — フレーム延長・短縮操作の対象レイヤー一覧（セル選択があればそのレイヤー範囲、なければ全レイヤー）を返す。
   - `active_cel_shapes(&self) -> &[FillShape]` — 現在のアクティブレイヤー・現在フレームのセル内図形スライスを返す。
-  - `record_loaded_signatures(&mut self, shapes: &[FillShape])` / `is_layer_unchanged_since_load(&self, layer_id: u64, current_layer_shapes: &[FillShape]) -> bool` — ロード時の図形署名の記録と未変更判定。
-  - `write_shapes_to_editable_cels(&mut self, shapes: &[FillShape])` — 作業キャンバス `shapes` を各レイヤーの `layer_id` ごとに振り分け、実際に編集されたレイヤーのみセルへ書き戻す。
+  - `is_layer_unchanged_since_load(loaded_signatures: &[LoadedShapeSig], layer_id: u64, current_layer_shapes: &[FillShape]) -> bool` — ロード時の図形署名スライスと現在レイヤーの図形群を照合し、ヒープ確保ゼロでレイヤー別未変更判定を実行。
+  - `normalize_shape_layer_ids(&self, shapes: &mut [FillShape])` — 存在しないレイヤーIDを持つ図形をアクティブレイヤーのIDへ正規化。
+  - `write_shapes_to_editable_cels(&mut self, shapes: &[FillShape], library: &[SymbolDef], loaded_signatures: &[LoadedShapeSig]) -> bool` — 作業キャンバス `shapes` を各レイヤーの `layer_id` ごとに振り分け、実際に編集されたレイヤーのみセルへ書き戻す。
 
 ### `FlashBrushApp` のメソッド（`timeline.rs` 内）
 - **キャンバス同期・セル選択・移動**：
   - `flush_canvas_before_timeline_op(&mut self)` — タイムライン操作前に選択を解除して作業キャンバスをタイムラインへ同期。
+  - `mutate_timeline_with_undo(&mut self, mutate: impl FnOnce(&mut Timeline))` — 作業キャンバスの確定同期・Undo履歴記録・タイムライン変更・再読み込みを一括実行する共通トランザクションヘルパー。
   - `sort_shapes_by_layer_order(&mut self)` — `self.shapes` をタイムラインのレイヤー背面→前面の順序へ安定ソート。
+  - `record_loaded_signatures(&mut self)` / `is_all_shapes_unchanged(&self) -> bool` — `self.shapes` の署名一覧を `self.loaded_signatures` に記録し、未変更かどうかをヒープ確保なしで $O(N)$ 判定。
   - `sync_shapes_to_timeline(&mut self)` — 現在の作業キャンバスをタイムラインへ書き戻し、シンボル編集中なら `sync_active_symbol_edit` で親シーンのライブラリ定義へも即座に反映。
   - `load_shapes_from_timeline(&mut self)` — 現在フレームの全可視・非ロックレイヤーの図形（トゥイーン補間・シンボル評価済み）を `self.shapes` に展開。
   - `select_shapes_for_timeline_selection(&mut self)` — タイムライン上で選択されたセル範囲（レイヤー群）に属するキャンバス上の図形をすべて選択状態にする。
@@ -407,28 +416,30 @@
   - `None`（トゥイーン無効）
   - `Incomplete`（トゥイーンONだが条件未達 → タイムライン上に横点線を表示）
   - `Complete { start_frame, end_frame, start_binding, end_binding, rotate_mode }`（開始・終了ともに同一シンボルの単一インスタンスのみ → タイムライン上に実線矢印を表示しTRS線形補間を実行）
-- **`struct SymbolDef`** — ライブラリに登録されるシンボル定義（`id: u64`, `name: String`, `layers: Vec<Layer>`, `next_layer_id: u64`, `total_frames: usize`）。
+- **`struct SymbolDef`** — ライブラリに登録されるシンボル定義（`id: u64`, `name: String`, `layers: Vec<Layer>`, `total_frames: usize`, `active_layer: usize`, `current_frame: usize`, `next_layer_number: usize`, `next_layer_id: u64`）。
   - `new(id: u64, name: String, local_shapes: Vec<FillShape>) -> Self` — ローカル図形群から1レイヤー・1フレームの初期シンボル定義を作成。
+  - `has_dynamic_animation(&self, library: &[SymbolDef], depth: usize) -> bool` — シンボル自身または入れ子の子シンボルが複数フレームやトゥイーンを持つかを再帰判定。
   - `collect_visible_local_shapes_at(&self, internal_frame: usize, library: &[SymbolDef], depth: usize) -> Vec<FillShape>` — 指定した内部フレームにおける全可視レイヤーのローカル図形を収集（入れ子シンボル・内部トゥイーンも再帰評価）。
   - `resolve_internal_frame(&self, binding: &SymbolInstanceBinding, keyframe_offset: usize) -> usize` — インスタンスの再生モード（`Loop` / `PlayOnce` / `SingleFrame`）と `first_frame`、および親キーフレーム先頭からの経過フレーム数 `keyframe_offset` から表示すべき内部フレーム番号（0始まり）を算出。
   - `evaluated_local_shapes_for_instance(&self, binding: &SymbolInstanceBinding, keyframe_offset: usize, library: &[SymbolDef], depth: usize) -> Vec<FillShape>` — インスタンス設定に基づいて評価されたローカル図形群を返す。
   - `evaluated_local_shapes_at(&self, parent_frame: usize, library: &[SymbolDef], depth: usize) -> Vec<FillShape>` — デフォルトのループ評価でローカル図形群を返す（ライブラリのミニプレビュー等で使用）。
   - `update_from_working_timeline(&mut self, timeline: &Timeline)` — インプレイス編集中の作業タイムラインからレイヤー構造と `total_frames` をシンボル定義へ反映。
-- **`struct SymbolEditSession`** — シンボルをダブルクリックしてインプレイス編集する際の親タイムライン退避セッション（`symbol_id`, `instance_gid`, `instance_xform`, `parent_timeline`, `parent_editing_group_path`）。
+- **`struct SymbolEditSession`** — シンボルをダブルクリックしてインプレイス編集する際の親タイムライン退避セッション（`symbol_id`, `instance_gid`, `instance_xform`, `parent_timeline`, `parent_editing_group_path`, `backdrop_cel: Cel`）。
 
 ### `Cel` / `Layer` / `Timeline` の拡張メソッド＆フリー関数（`symbol.rs` 内）
 - **`Cel::single_symbol_instance(&self) -> Option<SymbolInstanceBinding>`** — セル内の図形が生の絵や別グループを含まず、**ただ1つのシンボルインスタンスのみ**で構成されている場合にその `SymbolInstanceBinding` を返す（クラシックトゥイーンの成立条件判定）。
 - **`Cel::rebuild_symbol_instances_with(&mut self, library: &[SymbolDef], mut map_binding: impl FnMut(SymbolInstanceBinding) -> SymbolInstanceBinding) -> bool`** — セル内のすべてのシンボルインスタンスを最新のライブラリ定義および変換関数 `map_binding` で一括再構築する共通ヘルパー。
 - **`Layer::tween_state_at_keyframe(&self, kf_idx: usize) -> TweenState`** — 指定キーフレームのクラシックトゥイーン状態（`None` / `Incomplete` / `Complete`）を判定。
 - **`Layer::interpolated_tween_binding_at(&self, frame: usize) -> Option<(SymbolInstanceBinding, usize)>`** — トゥイーン補間区間内の指定フレームにおける補間済み `SymbolInstanceBinding`（位置・回転・スケールのTRS分解補間）とキーフレーム先頭からの経過フレーム数 `keyframe_offset` を返す。
-- **`Timeline::has_multiframe_symbol(&self) -> bool`** — ライブラリ内に2フレーム以上のタイムラインを持つシンボルが存在するか判定。
-- **`Timeline::resolve_shapes_with_symbols(&self, raw_shapes: &[FillShape], kf_start_frame: usize, frame: usize) -> Vec<FillShape>`** — セル内の図形配列に対し、シンボルインスタンスを現在フレーム・再生モードに応じた内部フレームの図形へ展開。
-- **`Timeline::evaluate_layer_shapes_at(&self, layer_idx: usize, frame: usize) -> Option<Vec<FillShape>>`** — 指定レイヤー・指定フレームで描画すべき図形一覧を、クラシックトゥイーン補間またはシンボル再生モード展開を行って返す。
-- **`Timeline::build_layer_resolved_world_batch_mesh(&self, layer_idx: usize, frame: usize) -> Option<egui::Mesh>`** — トゥイーン補間・シンボル展開後の図形群からワールド座標の結合メッシュを生成。
-- **`Timeline::resolved_cel_screen_mesh(&self, layer_idx: usize, frame: usize, zoom: f32, pan: Vec2, clip_to_stage: bool) -> Option<Arc<egui::Mesh>>`** — トゥイーン・多フレームシンボルがあれば動的評価メッシュ、なければ `Cel::cached_screen_mesh` のゼロコピーキャッシュを返す。
-- **`Timeline::resolved_cel_onion_mesh(&self, layer_idx: usize, frame: usize, zoom: f32, pan: Vec2, tint: Color32) -> Option<Arc<egui::Mesh>>`** — オニオンスキン描画用の解決済みメッシュを返す。
-- **`draw_registration_cross(painter: &egui::Painter, center: Pos2, arm_len: f32, color: Color32)`** — シンボル基準点（`+` 十字マーク）を描画するフリー関数。
-- **`transform_layers_shapes(layers: &[Layer], xform: Affine) -> Vec<Layer>`** — レイヤー配列内の全キーフレームの図形およびシンボルインスタンス行列にアフィン変換を一括適用するフリー関数。
+- **`Timeline::has_multiframe_symbol(shapes: &[FillShape], library: &[SymbolDef]) -> bool`** — 図形スライス内に複数フレームや動的アニメーションを持つシンボルが含まれるか判定。
+- **`resolve_shapes_with_library(raw_shapes: &[FillShape], kf_start_frame: usize, frame: usize, allow_empty: bool, force_reinstantiate: bool, library: &[SymbolDef], depth: usize) -> Vec<FillShape>`** — セル内の図形配列に対し、シンボルインスタンス（入れ子シンボル含む）を現在フレーム・再生モードに応じた内部フレームの図形へ再帰展開（通常フレーム評価時は1フレーム静止シンボルの再変換をスキップして `Arc` メッシュをそのまま再利用）。
+- **`Layer::evaluate_shapes_at(&self, frame: usize, child_eval_frame: usize, out_layer_id: u64, allow_empty: bool, library: &[SymbolDef], depth: usize) -> Vec<FillShape>`** — 単一レイヤーの指定フレームにおける図形一覧を、クラシックトゥイーン補間またはシンボル再生モード展開を行って返す（ルートシーンとシンボル内部タイムラインで共通化）。
+- **`Timeline::evaluate_layer_shapes_at(&self, layer_idx: usize, frame: usize, allow_empty: bool, library: &[SymbolDef]) -> Vec<FillShape>`** — 指定レイヤー・指定フレームで描画すべき図形一覧を `Layer::evaluate_shapes_at` 経由で返す。
+- **`Timeline::build_layer_resolved_world_batch_mesh(&self, layer_idx: usize, frame: usize, library: &[SymbolDef]) -> Option<egui::Mesh>`** — トゥイーン補間・シンボル展開後の図形群からワールド座標の結合メッシュを生成。
+- **`Timeline::resolved_cel_screen_mesh(&self, layer_idx: usize, frame: usize, zoom: f32, pan: Vec2, dim_backdrop: bool, library: &[SymbolDef]) -> Option<egui::Mesh>`** — 静止セルは `Cel::cached_screen_mesh` のキャッシュを返し、トゥイーンや複数フレームシンボルを含む場合は評価後に変換して返す。
+- **`Timeline::resolved_cel_onion_mesh(&self, layer_idx: usize, frame: usize, zoom: f32, pan: Vec2, (tint_rgb, alpha): ([u8; 3], u8), library: &[SymbolDef]) -> Option<egui::Mesh>`** — オニオンスキン描画用の解決済みメッシュを `Cel::cached_onion_mesh` または動的評価から返す。
+- **`draw_registration_cross(painter: &egui::Painter, center: Pos2, arm_len: f32, with_circle: bool)`** — シンボル基準点（`+` 十字マーク）を描画するフリー関数。
+- **`transform_layers_shapes(layers: &mut [Layer], affine: Affine)`** — レイヤー配列内の全キーフレームの図形およびシンボルインスタンス行列にアフィン変換を一括適用するフリー関数。
 
 ### `FlashBrushApp` のメソッド（`symbol.rs` 内）
 - **シンボル変換・ライブラリ管理**：
@@ -446,55 +457,77 @@
   - `set_selected_symbol_playback(&mut self, new_mode: SymbolLoopMode, new_first_frame: usize) -> bool` — 選択中の単一シンボルインスタンスの再生モードと開始/指定フレームを変更し、現在フレームの表示を即座に再評価。
 - **シンボル内タイムライン編集（インプレイス編集）**：
   - `enter_symbol_timeline(&mut self, binding: SymbolInstanceBinding) -> bool` — シンボルインスタンスをダブルクリックした際、親タイムラインを `symbol_edit_stack` に退避し、シンボルのローカルタイムラインとステージへ切り替える。
+  - `enter_symbol_from_library(&mut self, symbol_id: u64) -> bool` — ライブラリパネルの「編集」ボタンから直接シンボルのタイムライン編集へ入る。
   - `exit_symbol_timeline(&mut self) -> bool` — シンボル内タイムラインでの編集結果をライブラリ定義へ保存し、親タイムラインへ復帰して全インスタンスの表示を更新。
   - `sync_active_symbol_edit(&mut self)` — シンボル編集中にタイムラインが更新された際、直ちに親セッション側のライブラリ定義へ変更を同期。
-  - `refresh_symbol_instances_in_timeline(timeline: &mut Timeline)` — タイムライン内の全レイヤー・全キーフレームに配置されているシンボルインスタンスを最新のライブラリ定義で再構築。
+  - `refresh_symbol_instances_in_timeline(&mut self)` — タイムライン内の全レイヤー・全キーフレームに配置されているシンボルインスタンスを最新のライブラリ定義で再構築。
 - **フレーム（トゥイーン）＆シンボル関連UI描画（プロパティパネル＆ライブラリタブ）**：
   - `draw_selected_frame_properties(&mut self, ui: &mut egui::Ui)` — タイムライン上でトゥイーンキーフレームを選択した際に右プロパティパネル下部へ表示される「クラシックトゥイーン」（回転の向き：`自動` / `時計回り (CW)` / `反時計回り (CCW)`）を描画。
   - `draw_selected_symbol_properties(&mut self, ui: &mut egui::Ui)` — キャンバス上で単一シンボル選択時に右プロパティパネル下部へ表示される「シンボル再生オプション」（`ループ再生` / `1回再生` / `任意のフレーム` 切り替え、フレーム番号 `DragValue`、シンボル編集ボタン）を描画。
   - `draw_library_tab(&mut self, ui: &mut egui::Ui)` — 右パネルの `ライブラリ` タブ（選択図形のシンボル登録ボタン、登録済みシンボル一覧カード、名前インライン編集、ミニプレビュー、配置・編集・削除ボタン）を描画。
-  - `draw_symbol_mini_preview(ui: &mut egui::Ui, sym: &SymbolDef, library: &[SymbolDef])` — ライブラリカード左側のシンボル縮小プレビューを描画。
+  - `draw_symbol_mini_preview(&self, ui: &mut egui::Ui, sym: &SymbolDef)` — ライブラリパネル上部にシンボルの縮小ベクタープレビューを描画。
 
 ---
 
-## 10. [`vector_engine.rs`](./vector_engine.rs) — 2Dベクター幾何・曲線フィット・ブーリアン演算・メッシュ化エンジン
+## 10. [`vector_engine.rs`](./vector_engine.rs) — 2Dベクター幾何コア・アフィン変換・メッシュ化エンジン
 
-### 定数・アトミックカウンタ
+### 定数・アトミックカウンタ・スレッドローカル変数
 - **`REFERENCE_BRUSH_RADIUS: f64`** (`8.0`) — ブラシ太さに依存せず一定のスムージング品質を保つための基準ブラシ半径。
-- **`NEXT_MESH_REVISION: AtomicU64`** / **`next_mesh_revision() -> u64`** — 図形メッシュが再構築されるたびに一意なリビジョン番号を発行するアトミックカウンタ。
+- **`NEXT_MESH_REVISION: AtomicU64`** / **`next_mesh_revision() -> u64`** — 図形メッシュが更新されるたびに一意なリビジョン番号を発行するアトミックカウンタ。
+- **`TESSELLATOR: RefCell<FillTessellator>`** — `lyon` の内部作業バッファをスレッドローカルで再利用し、毎回の `FillTessellator::new()` ヒープ再確保をゼロにするキャッシュ。
 
-### 構造体・列挙型（`vector_engine.rs` 内）
-- **`struct Contour`** — 閉じた2次ベジェ曲線（`segments: Vec<QuadBez>`）の輪郭ループ（外周または穴）。
-  - `translate(&mut self, delta: Vec2)` / `transform(&mut self, affine: Affine)` — 輪郭の平行移動およびアフィン変換。
-  - `append_to_bez_path(&self, path: &mut BezPath)` — `kurbo::BezPath` へ輪郭パスを追記。
+### 構造体（`vector_engine.rs` 内）
+- **`struct Contour`** — 閉じた2次ベジェ曲線（`segments: Arc<Vec<QuadBez>>`、Copy-on-Write）の輪郭ループ（外周または穴）。
+  - `new(segments: Vec<QuadBez>) -> Self` / `segments_mut(&mut self) -> &mut Vec<QuadBez>`
+  - `translate(&mut self, delta: Vec2)` / `transform(&mut self, affine: Affine)` — 非有限座標・特異行列（面積ゼロ潰れ）をガードした輪郭の平行移動およびアフィン変換。
+  - `bounding_box(&self) -> kurbo::Rect` — `BezPath` ヒープアロケーションなしで各 `QuadBez` から直接バウンディングボックスを算出。
+  - `append_to_bez_path(&self, path: &mut BezPath)` — `kurbo::BezPath` へ閉輪郭パスを追記。
   - `signed_area(&self) -> f64` — 輪郭の符号付き面積を計算（スクリーン座標系で外周時計回り `> 0`、穴反時計回り `< 0`）。
-  - `cleanup_degenerate(&mut self)` — 長さほぼゼロの退化セグメントを除去し、端点の連続性を保証。
-  - `from_segments_oriented(segments: Vec<QuadBez>, is_exterior: bool) -> Self` / `reverse(&mut self)` / `enforce_continuity(&mut self)` — ワインディング向きを揃えた `Contour` の構築・反転・接続点補正。
+  - `cleanup_degenerate(&mut self, min_len: f64)` — 長さほぼゼロの退化セグメントや非有限座標を除去し、端点の連続性を保証。
+  - `from_segments_oriented(segments: Vec<QuadBez>, min_seg_len: f64, min_area: f64, expect_positive_area: bool) -> Option<Self>` / `reverse(&mut self)` / `enforce_continuity(&mut self)` — ワインディング向きを揃えた `Contour` の構築・反転・接続点補正。
   - `insert_anchor_at(&mut self, seg_idx: usize, t: f64) -> bool` — De Casteljau 分割（`subsegment`）により曲線形状を保ったまま指定パラメータ `t` にアンカーポイントを挿入。
   - `delete_anchor_at(&mut self, seg_idx: usize) -> bool` — 指定アンカーポイントを削除し、前後のアンカー間を直線セグメント（中点制御点）で繋ぐ。
-- **`struct FillShape`** — 単一カラーの塗りベクター図形（`color: Color32`, `exterior: Contour`, `holes: Vec<Contour>`, `layer_id: u64`, `group_path: Vec<u64>`, `symbol_instance: Option<SymbolInstanceBinding>`, `cached_bbox: Rect`, `cached_bez_path: BezPath`, `cached_local_mesh: Arc<egui::Mesh>`, `cached_polka_dot_mesh: OnceLock<Arc<egui::Mesh>>`, `mesh_revision: u64`）。
+- **`type ScreenMeshCacheEntry`** / **`type OnionMeshCacheEntry`** — スクリーン座標変換済みメッシュキャッシュおよびオニオンスキン変換済みメッシュキャッシュのキーと `Arc<egui::Mesh>` のペア。
+- **`struct FillShape`** — 単一カラーの塗りベクター図形（`color: Color32`, `exterior: Contour`, `holes: Vec<Contour>`, `layer_id: u64`, `group_path: Vec<u64>`, `symbol_instance: Option<SymbolInstanceBinding>`, `mesh_revision: u64`, `bbox: Rect`, `fill_mesh: Arc<egui::Mesh>`, `selection_mesh: Option<(u32, Arc<egui::Mesh>)>`）。
   - `new(color: Color32, exterior: Contour, holes: Vec<Contour>) -> Self`
-  - `with_layer_id(self, layer_id: u64) -> Self` / `with_group_path(self, group_path: Vec<u64>) -> Self` / `with_scope(self, layer_id: u64, group_path: Vec<u64>) -> Self`
+  - `with_layer_id(self, layer_id: u64) -> Self` / `with_group_path(self, group_path: Vec<u64>) -> Self` / `with_scope(self, layer_id: u64, group_path: &[u64]) -> Self`
   - `contours(&self) -> impl Iterator<Item = &Contour>` — 外周とすべての穴を順に走査するイテレータ。
-  - `is_in_editing_scope(&self, editing_scope: &[u64]) -> bool` — 図形が現在のグループ編集スコープ内に属するか判定。
-  - `is_raw_at_scope(&self, editing_scope: &[u64]) -> bool` — 現在の編集スコープにおいてグループ・シンボルに属さない「生のシェイプ（Merge Drawing 対象）」であるか判定。
-  - `active_group_id_at_scope(&self, editing_scope: &[u64]) -> Option<u64>` — 現在の編集スコープ直下の子グループID（またはシンボルインスタンスID）を返す。
-  - `rebuild_cache(&mut self)` — バウンディングボックス、`BezPath`、ローカル三角形メッシュ、メッシュリビジョンを再計算。
-  - `bounding_box(&self) -> Rect` / `contains_point(&self, pt: Point) -> bool`（NonZero ワインディング判定）
-  - `translate(&mut self, delta: Vec2)` — 制御点とキャッシュ済み頂点座標を直接平行移動（再テッセレーション不要の高速移動）。
-  - `transform(&mut self, affine: Affine)` — アフィン変換を適用し、負の行列式（反転）の場合は外周・穴のワインディング向きを自動補正してキャッシュを再構築。
-  - `selection_overlay_mesh(&self) -> Arc<egui::Mesh>` — 選択時の白い網点（Polka-Dot）メッシュを遅延生成・キャッシュ取得。
-  - `contour_count(&self) -> usize` / `get_contour(&self, idx: usize) -> Option<&Contour>` / `get_contour_mut(&mut self, idx: usize) -> Option<&mut Contour>` — インデックス（`0`＝外周、`1..`＝穴）による輪郭アクセス。
-- **`enum BoolOp`** — ブーリアン演算種別（`Union`, `Difference`, `Intersection`）。
-- **`struct QuadRecord`** / **`struct TaggedEdge`** — ブーリアン演算後のポリゴン辺から元の2次ベジェ曲線セグメントを逆引き・De Casteljau 部分抽出するための内部レコード。
+  - `is_in_editing_scope(&self, scope: &[u64]) -> bool` — 図形が現在のグループ編集スコープ内に属するか判定。
+  - `is_raw_at_scope(&self, scope: &[u64]) -> bool` — 現在の編集スコープにおいてグループ・シンボルに属さない「生のシェイプ（Merge Drawing 対象）」であるか判定。
+  - `active_group_id_at_scope(&self, scope: &[u64]) -> Option<u64>` — 現在の編集スコープ直下の子グループID（またはシンボルインスタンスID）を返す。
+  - `rebuild_cache(&mut self)` — バウンディングボックス、`Arc<Mesh>`、メッシュリビジョンを再計算し、選択メッシュキャッシュを無効化。
+  - `set_color(&mut self, color: Color32)` — 再テッセレーションを行わずに塗り色とキャッシュ済み頂点カラーのみを高速更新。
+  - `bounding_box(&self) -> Rect` / `contains_point(&self, pt: Point) -> bool`（AABB 早期棄却＋`kurbo::BezPath::winding` による EvenOdd 内外判定）
+  - `translate(&mut self, delta: Vec2)` — 制御点とキャッシュ済み `fill_mesh`・`selection_mesh` の頂点座標を直接平行移動（再テッセレーション不要）。
+  - `transform(&mut self, affine: Affine)` — 非有限値・ゼロ面積潰れをガードした上で輪郭とキャッシュ済み `fill_mesh` の頂点にアフィン変換を直接適用（トゥイーン補間や自由変形ドラッグ中に `FillTessellator` を再実行しない高速パス）。
+  - `selection_overlay_mesh(&mut self, zoom: f32) -> Arc<egui::Mesh>` — 選択時の白い網点（Polka-Dot）メッシュを遅延生成・キャッシュ取得。
+  - `get_contour(&self, idx: usize) -> Option<&Contour>` / `get_contour_mut(&mut self, idx: usize) -> Option<&mut Contour>` — インデックス（`0`＝外周、`1..`＝穴）による輪郭アクセス。
 
 ### フリー関数（`vector_engine.rs` 内）
 - **アフィン変換・マーキー矩形生成**：
   - `affine_scale_around(pivot: Point, sx: f64, sy: f64) -> Affine` — 指定ピボット中心のスケール行列を生成。
   - `affine_rotate_around(pivot: Point, angle_rad: f64) -> Affine` — 指定ピボット中心の回転行列を生成。
-  - `interpolate_affine_with_pivot(start: Affine, start_pivot: Point, end: Affine, end_pivot: Point, t: f64) -> (Affine, Point)` — 2つのアフィン変換行列をローカルピボット `start_pivot`, `end_pivot` を軸として TRS（ピボットのワールド平行移動・最短回転角度・スケール・シアー）に分解し、滑らかに補間（クラシックトゥイーン用）。
+  - `interpolate_affine_with_pivot(start: Affine, end: Affine, t: f64, rotate_mode: TweenRotate, pivot_local: Point) -> Affine` — 2つのアフィン変換行列をローカルピボット `pivot_local` を軸として TRS（ピボットのワールド平行移動・回転角度・スケール・シアー）に分解し、滑らかに補間（クラシックトゥイーン用）。
   - `decompose_affine_trs(c: [f64; 6]) -> (f64, f64, f64, f64, f64, f64)` — 2Dアフィン行列係数を `(tx, ty, angle, sx, sy, shear)` へ極分解。
   - `make_marquee_rect_shape(p0: Point, p1: Point, color: Color32) -> Option<FillShape>` — 2つの対角座標から矩形の `FillShape` を生成。
+  - `union_bounding_boxes(shapes: &[FillShape]) -> Option<Rect>` — 図形配列の統合バウンディングボックスを計算。
+- **幾何ユーティリティ関数**：
+  - `ring_f64_to_points(ring: &[[f64; 2]]) -> Vec<Point>` / `normalize_vec(v: Vec2) -> Vec2` / `left_normal(v: Vec2) -> Vec2` / `signed_angle(a: Vec2, b: Vec2) -> f64` / `to_pos2(p: Point) -> Pos2`
+  - `fill_cumulative_arc_lengths(pts: &[Point], cum: &mut Vec<f64>)` / `dedup_closed_ring(pts: impl IntoIterator<Item = Point>, min_dist: f64) -> Vec<Point>`
+  - `signed_area_f64(pts: &[[f64; 2]]) -> f64` / `ring_area_and_perimeter_f64(ring: &[[f64; 2]]) -> (f64, f64)` / `polygon_signed_area(pts: &[Point]) -> f64`
+  - `point_to_segment_dist(pt: Point, a: Point, b: Point) -> f64` / `rects_overlap(a: Rect, b: Rect) -> bool`
+- **`lyon` テッセレーション＆スクリーンメッシュ変換**：
+  - `tessellate_contours_to_mesh(exterior: &Contour, holes: &[Contour], color: Color32) -> egui::Mesh` — 外周と穴の2次ベジェ輪郭をスレッドローカルの `TESSELLATOR`（`FillRule::EvenOdd`）で三角形メッシュ化。
+  - `build_polka_dot_selection_mesh(fill_mesh: &egui::Mesh, zoom: f32) -> egui::Mesh` — 図形の三角形メッシュとグリッド状の小さな正方形群の交差から、Flash 風の白い網点（Polka-Dot）選択オーバーレイメッシュを生成。
+  - `tessellate_raw_polygon(pts: &[Point], color: Color32) -> egui::Mesh` — ドラッグ中の生アウトラインポリゴンをスレッドローカルの `TESSELLATOR` で三角形メッシュへ分割。
+  - `tessellate_lyon_path(tessellator: &mut FillTessellator, path: &LyonPath, color: Color32, fill_rule: FillRule) -> egui::Mesh` — `lyon::path::Path` から中間バッファなしで `egui::epaint::Vertex` 配列を直接出力する `egui::Mesh` 変換コア。
+  - `transform_mesh_to_screen(mesh: &egui::Mesh, zoom: f32, pan: Vec2, dim_backdrop: bool) -> egui::Mesh` / `transform_mesh_to_screen_onion(mesh: &egui::Mesh, zoom: f32, pan: Vec2, tint_rgb: [u8; 3], alpha: u8) -> egui::Mesh` — ワールド座標メッシュの頂点配列を現在のズーム・パンでスクリーン座標へ一括変換（通常用およびオニオンスキン単色用）。
+  - `append_mesh(dst: &mut egui::Mesh, src: &egui::Mesh)` — 複数の `egui::Mesh` の頂点・インデックス配列を1つのバッチメッシュへ結合。
+
+---
+
+## 11. [`vector_stroke.rs`](./vector_stroke.rs) — アルゴリズム 1 & 2：ストローク輪郭生成＆100%スムージング曲線フィット
+
 - **アルゴリズム1：ブラシ軌跡からの閉輪郭（アウトライン）生成**：
   - `generate_brush_outline(points: &[Point], radius: f64) -> Vec<Point>` / `generate_brush_outline_at_zoom(points: &[Point], radius: f64, view_zoom: f64) -> Vec<Point>` — ブラシ中心軌跡点列から進行方向左右の法線オフセット点列と始点・終点の半円キャップを計算し、単一の閉じた輪郭ポリゴンを生成（微小手ブレ除去フィルタ＋中心スパイン重み付け平均を含む）。
 - **アルゴリズム2：100%スムージング＆G1連続2次ベジェ曲線フィッティング**：
@@ -517,43 +550,41 @@
   - `span_turn_metrics(pts: &[Point]) -> (f64, f64)` — スパン内の累積回転角とネット回転角を算出。
   - `max_quad_fit_error_with_arc_lengths(pts: &[Point], arc_lens: &[f64], q: QuadBez) -> f64` — 点列と2次ベジェ曲線の最大乖離誤差を計算。
   - `max_deviation_from_chord(pts: &[Point]) -> (usize, f64)` / `rdp_recursive(pts: &[Point], eps: f64, keep: &mut [bool])` — Ramer-Douglas-Peucker 頂点間引きアルゴリズム。
-- **アルゴリズム3：マージ描画（`i_overlay` ブーリアン演算＆De Casteljau 2次ベジェ再構築）**：
-  - `merge_shapes_into_canvas(canvas: &mut Vec<FillShape>, new_shapes: Vec<FillShape>)` — 新規図形群を同じレイヤー・同じグループスコープ内の生シェイプに対して同色 `Union`・異色 `Difference` でマージ統合。
-  - `merge_disjoint_fill_into_canvas(canvas: &mut Vec<FillShape>, fill_shape: FillShape)` — バケツ塗りで検出された閉領域を周囲の同色生シェイプとのみ `Union` 統合（異色シェイプのDifference切り抜きを省略する高速パス）。
-  - `merge_shapes_into_canvas_inner(canvas: &mut Vec<FillShape>, new_shapes: Vec<FillShape>, cut_different_color: bool)` — マージ描画の内部共通実装。
-  - `erase_from_canvas(canvas: &mut Vec<FillShape>, eraser_shapes: &[FillShape], target_layer_id: u64, editing_scope: &[u64])` — 消しゴム図形で対象スコープ内の生シェイプを `Difference` 減算。
-  - `union_bounding_boxes(shapes: &[FillShape]) -> Option<Rect>` — 図形配列の統合バウンディングボックスを計算。
-  - `boolean_operation(subject: &[FillShape], clip: &[FillShape], op: BoolOp, result_color: Color32) -> Vec<FillShape>` — `subject` と `clip` の2次ベジェ図形群に対して `Union` / `Difference` / `Intersection` を実行し、結果を再び滑らかな2次ベジェ `FillShape` 群として再構築。
-  - `run_float_overlay(subj_shapes: &[Vec<Vec<[f64; 2]>>], clip_shapes: &[Vec<Vec<[f64; 2]>>], rule: OverlayRule) -> Vec<Vec<Vec<[f64; 2]>>>` — `i_overlay::FloatOverlay` の実行ラッパー。
-  - `reconstruct_fill_shape_from_rings(shape_rings: &[Vec<[f64; 2]>], source_quads: &[QuadRecord], tagged_edges: &[TaggedEdge], result_color: Color32) -> Option<FillShape>` — ブーリアン演算結果のポリゴンリング群から `FillShape` を復元。
-  - `find_enclosed_region_at(canvas: &[FillShape], target_pt: Point, fill_color: Color32, workspace_bounds: Rect) -> Option<FillShape>` — バケツツール用：キャンバス全体の輪郭で作業領域を分割し、クリック座標を含む閉領域（穴）を抽出してベクター図形化。
-  - `flatten_shape_for_overlay(shape: &FillShape, source_quads: &mut Vec<QuadRecord>, tagged_edges: &mut Vec<TaggedEdge>) -> Vec<Vec<[f64; 2]>>` — `FillShape` の各 `QuadBez` をタグ付き折れ線に細分化して `i_overlay` 入力形式へ変換。
-  - `resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape>` — エッジ引き伸ばし・頂点移動後の輪郭に対して `SimplifyShape` を実行し、自己交差の解消や2図形への横断分割を解決。
-  - `quad_subdivision_steps(q: &QuadBez) -> usize` — `QuadBez` の長さと曲率に応じた適切な分割ステップ数を算出。
-  - `sample_contour_ring_for_overlay(contour: &Contour, is_exterior: bool) -> Vec<[f64; 2]>` / `flatten_contour_preserving_direction(contour: &Contour, steps_per_seg: usize) -> Vec<[f64; 2]>` / `flatten_contour_for_overlay(contour: &Contour, is_exterior: bool, source_quads: &mut Vec<QuadRecord>, tagged_edges: &mut Vec<TaggedEdge>) -> Vec<[f64; 2]>` — 輪郭のポリゴンサンプリングと元セグメント追跡タグ付け。
-  - `reconstruct_or_refit_quad_contour(ring: &[[f64; 2]], is_exterior: bool, source_quads: &[QuadRecord], tagged_edges: &[TaggedEdge]) -> Option<Contour>` / `match_edge_to_quad(a: Point, b: Point, source_quads: &[QuadRecord], tagged_edges: &[TaggedEdge]) -> Option<(usize, f64, f64)>` / `refit_open_polyline_to_quads(pts: &[Point]) -> Vec<QuadBez>` / `extract_sub_quad(q: QuadBez, t0: f64, t1: f64) -> QuadBez` — ブーリアン演算後の各ポリゴン辺を元の `QuadBez` セグメントへ照合し、De Casteljau 法（`extract_sub_quad`）で無劣化に部分曲線を切り出して閉じた2次ベジェ輪郭へ再構築。
-- **幾何ユーティリティ関数**：
-  - `ring_f64_to_points(ring: &[[f64; 2]]) -> Vec<Point>` / `normalize_vec(v: Vec2) -> Vec2` / `left_normal(v: Vec2) -> Vec2` / `signed_angle(a: Vec2, b: Vec2) -> f64` / `to_pos2(p: Point) -> Pos2`
-  - `fill_cumulative_arc_lengths(pts: &[Point], out: &mut Vec<f64>) -> f64` / `dedup_closed_ring(pts: &mut Vec<Point>, eps: f64)`
-  - `signed_area_f64(ring: &[[f64; 2]]) -> f64` / `ring_area_and_perimeter_f64(ring: &[[f64; 2]]) -> (f64, f64)` / `polygon_signed_area(pts: &[Point]) -> f64`
-  - `point_to_segment_dist(p: Point, a: Point, b: Point) -> f64` / `rects_overlap(a: Rect, b: Rect) -> bool`
-- **`lyon` テッセレーション＆スクリーンメッシュ変換**：
-  - `tessellate_contours_to_mesh(exterior: &Contour, holes: &[Contour], color: Color32) -> egui::Mesh` — 外周と穴の2次ベジェ輪郭を `lyon`（`FillRule::NonZero`）で三角形メッシュ化。
-  - `build_polka_dot_selection_mesh(local_mesh: &egui::Mesh) -> egui::Mesh` — 図形の三角形メッシュとグリッド状の小さな正方形群の交差から、Flash 風の白い網点（Polka-Dot）選択オーバーレイメッシュを生成。
-  - `tessellate_raw_polygon(tessellator: &mut FillTessellator, points: &[Point], color: Color32, zoom: f32, pan: Vec2) -> egui::Mesh` — ドラッグ中の生アウトラインポリゴンを直接スクリーン座標メッシュへ分割。
-  - `tessellate_lyon_path(tessellator: &mut FillTessellator, path: &LyonPath, color: Color32) -> egui::Mesh` — `lyon::path::Path` から `egui::Mesh` への変換コア。
-  - `transform_mesh_to_screen(local_mesh: &egui::Mesh, zoom: f32, pan: Vec2) -> egui::Mesh` / `transform_mesh_to_screen_onion(local_mesh: &egui::Mesh, zoom: f32, pan: Vec2, onion_color: Color32) -> egui::Mesh` — ワールド座標メッシュの頂点配列を現在のズーム・パンでスクリーン座標へ一括変換（通常用およびオニオンスキン単色用）。
-  - `append_mesh(dst: &mut egui::Mesh, src: &egui::Mesh)` — 複数の `egui::Mesh` の頂点・インデックス配列を1つのバッチメッシュへ結合。
 
 ---
 
-## 11. [`tests.rs`](./tests.rs) — 自動ユニットテストスイート（全22件）
+## 12. [`vector_boolean.rs`](./vector_boolean.rs) — アルゴリズム 3：マージ描画＆ブーリアン演算エンジン
 
-`cargo test` で実行される全22件のユニットテストとテスト用ヘルパー関数：
+### 構造体・列挙型（`vector_boolean.rs` 内）
+- **`enum BoolOp`** — ブーリアン演算種別（`Union`, `Difference`, `Intersection`）。
+- **`type OverlayShape`** (`Vec<Vec<[f64; 2]>>`) — `i_overlay` へ渡す外周・穴リング集合の型エイリアス。
+- **`struct QuadRecord`** / **`struct TaggedEdge`** — ブーリアン演算後のポリゴン辺から元の2次ベジェ曲線セグメントを逆引き・De Casteljau 部分抽出するための内部レコード（`quad_match: Option<(usize, f64)>` により終点パラメータもキャッシュ）。
+
+### フリー関数（`vector_boolean.rs` 内）
+- `merge_shapes_into_canvas(canvas: &mut Vec<FillShape>, new_shapes: Vec<FillShape>)` — 新規図形群を同じレイヤー・同じグループスコープ内の生シェイプに対して同色 `Union`・異色 `Difference` でマージ統合。
+- `merge_disjoint_fill_into_canvas(canvas: &mut Vec<FillShape>, fill_shape: FillShape)` — バケツ塗りで検出された閉領域を周囲の同色生シェイプとのみ `Union` 統合（異色シェイプのDifference切り抜きを省略する高速パス）。
+- `merge_shapes_into_canvas_inner(canvas: &mut Vec<FillShape>, new_shapes: Vec<FillShape>, cut_different_color: bool)` — マージ描画の内部共通実装。
+- `erase_from_canvas(canvas: &mut Vec<FillShape>, eraser_shapes: &[FillShape], target_layer_id: u64, editing_scope: &[u64])` — 消しゴム図形で対象スコープ内の生シェイプを `Difference` 減算。
+- `slice_shape_with_marquee_rect(shape: &FillShape, clip_rect_shape: &FillShape) -> (Vec<FillShape>, Vec<FillShape>)` — 矩形マーキー部分選択によるスライス分割時に、対象図形と矩形のポリゴン分割および `QuadRecord` テーブル構築を1回だけ行い、1パスで `(inside, outside)` 両方の `FillShape` 群を返す高速スライサー。
+- `boolean_operation(subject: &[FillShape], clip: &[FillShape], op: BoolOp, result_color: Color32) -> Vec<FillShape>` — `subject` と `clip` の2次ベジェ図形群に対して `Union` / `Difference` / `Intersection` を実行し、結果を再び滑らかな2次ベジェ `FillShape` 群として再構築。
+- `run_float_overlay(subj_shapes: &[OverlayShape], clip_shapes: &[OverlayShape], rule: OverlayRule) -> Vec<OverlayShape>` — `i_overlay::FloatOverlay` の実行ラッパー。
+- `reconstruct_fill_shape_from_rings(shape_rings: &[Vec<[f64; 2]>], source_quads: &[QuadRecord], tagged_edges: &[TaggedEdge], result_color: Color32) -> Option<FillShape>` / `reconstruct_shapes_from_overlay(overlay_result: &[OverlayShape], quad_table: &[QuadRecord], color: Color32, filter_sliver_holes: bool) -> Vec<FillShape>` — ブーリアン演算結果のポリゴンリング群から `FillShape` を復元。
+- `poly_shape_contains_point(poly_shape: &[Vec<[f64; 2]>], pt: Point) -> bool` — ポリゴンリング群に対する高速な 2D Even-Odd レイキャスト内外判定（バケツ塗りでクリック座標を含まない全候補領域のベジェ再構築・テッセレーションをスキップするために使用）。
+- `find_enclosed_region_at(canvas: &[FillShape], target_pt: Point, fill_color: Color32, workspace_bounds: Rect) -> Option<FillShape>` — バケツツール用：キャンバス全体の輪郭で作業領域を分割し、`poly_shape_contains_point` を通過した唯一の閉領域のみをベクター図形化。
+- `flatten_shape_for_overlay(shape: &FillShape, quad_table: &mut Vec<QuadRecord>) -> OverlayShape` / `flatten_shape_rings(shape: &FillShape, orient_by_area: bool, quad_table: &mut Vec<QuadRecord>) -> OverlayShape` / `flatten_contour_ring(contour: &Contour, orient_as_outer: Option<bool>, quad_table: &mut Vec<QuadRecord>) -> Option<Vec<[f64; 2]>>` — `FillShape` の各 `QuadBez` をタグ付き折れ線に細分化して `i_overlay` 入力形式へ変換。
+- `resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape>` — エッジ引き伸ばし・頂点移動後の輪郭に対して `OverlayFillRule::Positive` を実行し、自己交差の解消や2図形への横断分割を解決。
+- `quad_subdivision_steps(q: QuadBez) -> usize` / `sample_contour_ring_for_overlay(contour: &Contour, quad_table: &mut Vec<QuadRecord>) -> Option<Vec<[f64; 2]>>` — `QuadBez` の長さと曲率に応じた適切な分割ステップ数算出と輪郭ポリゴンサンプリング。
+- `reconstruct_or_refit_quad_contour(ring: &[[f64; 2]], is_exterior: bool, source_quads: &[QuadRecord], tagged_edges: &[TaggedEdge]) -> Option<Contour>` / `match_edge_to_quad(a: Point, b: Point, source_quads: &[QuadRecord], tagged_edges: &[TaggedEdge]) -> Option<(usize, f64, f64)>` / `refit_open_polyline_to_quads(pts: &[Point]) -> Vec<QuadBez>` / `extract_sub_quad(q: QuadBez, t0: f64, t1: f64) -> QuadBez` — ブーリアン演算後の各ポリゴン辺を元の `QuadBez` セグメントへ照合し、De Casteljau 法（`extract_sub_quad`）で無劣化に部分曲線を切り出して閉じた2次ベジェ輪郭へ再構築。
+
+---
+
+## 13. [`tests.rs`](./tests.rs) — 自動ユニットテストスイート（全24件）
+
+`cargo test` で実行される全24件のユニットテストとテスト用ヘルパー関数：
 
 - **ヘルパー関数**：
   - `make_stroke(p0: Point, p1: Point, radius: f32, color: Color32) -> Vec<FillShape>` — 2点間を結ぶ直線ブラシストロークを生成・スムージングして返す。
-- **ユニットテスト一覧（全22件）**：
+- **ユニットテスト一覧（全24件）**：
   1. `test_same_color_union_and_diff_split_with_i_overlay` — 同色ストロークの `Union` 融合と、異色ストローク横断による `Difference` 分断を検証。
   2. `test_smoothing_100_preserves_width_round_caps_and_minimal_anchors` — 100%スムージング時に太さが痩せず、両端の丸キャップが保たれ、最小限のアンカー数に収まることを検証。
   3. `test_curved_stroke_has_strictly_uniform_width` — 手ブレを含む曲線ストロークでも全長にわたり厳密に一定の線幅が保たれることを検証。
@@ -576,3 +607,5 @@
   20. `test_symbol_conversion_library_placement_and_inplace_sync` — `F8` シンボル変換、ライブラリからの複数インスタンス配置、ダブルクリックによるシンボル内タイムライン編集（複数フレーム化）、親シーンでのループ評価を検証。
   21. `test_classic_tween_single_symbol_condition_and_interpolation` — 単一シンボルのみでのクラシックトゥイーン（`T`）許可条件、未完トゥイーン（横点線）と完全トゥイーン（実線矢印）の遷移、中間フレームのTRS線形補間、元キーフレームの非破壊保護を検証。
   22. `test_symbol_playback_modes_loop_play_once_and_single_frame` — シンボルインスタンスごとの再生モード（`ループ` / `1回再生` / `任意のフレーム`）と開始フレーム指定の動作を検証。
+  23. `test_nested_symbol_evaluation_and_library_delete_detach` — 入れ子シンボル（親シンボル内の子シンボルアニメーション）の再帰評価と、ライブラリからシンボル削除時にステージ上の絵が消えず通常グループとしてデタッチされることを検証。
+  24. `test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions` — `NaN`・無限大・空配列・ゼロ面積アフィン変換・スライス選択とシンボル出入り・Undo/Redo・範囲外レイヤー指定などの異常値や連続操作に対してパニックせず安全に動作することを検証。

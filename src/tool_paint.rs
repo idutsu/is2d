@@ -77,6 +77,7 @@ impl FlashBrushApp {
         } else {
             erase_from_canvas(&mut self.shapes, &stroke_shapes);
         }
+        self.sync_shapes_to_timeline();
     }
 
     /// バケツツール（色流し込み）
@@ -103,13 +104,13 @@ impl FlashBrushApp {
                 for &sel_idx in &self.selected_shapes {
                     if let Some(shape) = self.shapes.get_mut(sel_idx) {
                         if shape.is_raw_at_scope(&self.editing_group_path) {
-                            shape.color = fill_color;
-                            shape.rebuild_cache();
+                            shape.set_color(fill_color);
                         }
                     }
                 }
                 self.selection_modified = true;
                 self.record_undo_snapshot(snapshot);
+                self.sync_shapes_to_timeline();
                 return true;
             }
             return false;
@@ -125,11 +126,11 @@ impl FlashBrushApp {
             self.focus_active_layer_to_shape(hit_idx);
             let snapshot = self.shapes.clone();
             let mut target = self.shapes.remove(hit_idx);
-            target.color = fill_color;
-            target.rebuild_cache();
+            target.set_color(fill_color);
             merge_disjoint_fill_into_canvas(&mut self.shapes, target);
             self.sort_shapes_by_layer_order();
             self.record_undo_snapshot(snapshot);
+            self.sync_shapes_to_timeline();
             return true;
         }
 
@@ -164,6 +165,7 @@ impl FlashBrushApp {
             );
             self.sort_shapes_by_layer_order();
             self.record_undo_snapshot(snapshot);
+            self.sync_shapes_to_timeline();
             return true;
         }
 

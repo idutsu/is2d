@@ -1554,9 +1554,9 @@
         let sym_id = app
             .convert_selection_to_symbol()
             .expect("シンボル変換が成功すること");
-        assert_eq!(app.timeline.library.len(), 1);
-        assert_eq!(app.timeline.library[0].id, sym_id);
-        assert_eq!(app.timeline.library[0].name, "Symbol 1");
+        assert_eq!(app.library.len(), 1);
+        assert_eq!(app.library[0].id, sym_id);
+        assert_eq!(app.library[0].name, "Symbol 1");
         assert!(app.selected_single_symbol_info().is_some());
 
         // 2. ライブラリからステージへ2つ目のインスタンスを配置できること
@@ -1591,7 +1591,7 @@
         //    親シーンのフレーム進行に合わせてループ評価されること
         assert!(app.exit_current_group());
         assert!(app.symbol_edit_stack.is_empty());
-        assert_eq!(app.timeline.library[0].total_frames, 2);
+        assert_eq!(app.library[0].total_frames, 2);
 
         // シーン1の尺を3フレームに延長（F5 x 2）
         assert!(app.timeline_extend_frame());
@@ -1863,4 +1863,101 @@
             app.switch_to_layer_and_frame(0, f);
             assert_eq!(app.shapes[0].color, green, "SingleFrame(1) at frame {f}");
         }
+    }
+
+    #[test]
+    fn test_nested_symbol_evaluation_and_library_delete_detach() {
+        let mut app = FlashBrushApp::default();
+        let red = Color32::from_rgb(220, 60, 60);
+        let blue = Color32::from_rgb(60, 110, 230);
+
+        // 1. 子シンボル（Symbol 1: 0F=赤, 1F=青 の2フレーム）を作成
+        app.shapes = make_stroke(Point::new(100.0, 100.0), Point::new(160.0, 100.0), 12.0, red);
+        app.selected_shapes = vec![0];
+        let child_sym_id = app.convert_selection_to_symbol().unwrap();
+        let (child_binding, _, _) = app.selected_single_symbol_info().unwrap();
+        assert!(app.enter_symbol_timeline(child_binding));
+        assert!(app.timeline_extend_frame());
+        app.switch_to_layer_and_frame(0, 1);
+        assert!(app.timeline_insert_keyframe(false));
+        app.shapes = make_stroke(Point::new(100.0, 100.0), Point::new(160.0, 100.0), 12.0, blue);
+        app.sync_shapes_to_timeline();
+        assert!(app.exit_symbol_timeline());
+
+        // 2. 子シンボルインスタンスを選択したまま、さらに親シンボル（Symbol 2: 1フレーム）に変換（入れ子構造）
+        app.selected_shapes = vec![0];
+        let parent_sym_id = app.convert_selection_to_symbol().unwrap();
+        assert_ne!(child_sym_id, parent_sym_id);
+
+        // 親シーンを2フレームに延長すると、1フレームの親シンボル越しに子シンボルの2フレームアニメが再帰評価されること
+        assert!(app.timeline_extend_frame());
+        app.switch_to_layer_and_frame(0, 0);
+        assert_eq!(app.shapes[0].color, red);
+        app.switch_to_layer_and_frame(0, 1);
+        assert_eq!(app.shapes[0].color, blue);
+
+        // 3. ライブラリから親シンボルを削除すると、ステージ上の図形は消滅せず通常グループへデタッチされて残ること
+        app.switch_to_layer_and_frame(0, 0);
+        assert!(app.delete_symbol_from_library(parent_sym_id));
+        assert_eq!(app.shapes.len(), 1, "シンボル削除時もステージ上の絵が消えないこと");
+        assert!(
+            app.shapes[0].symbol_instance.is_none(),
+            "シンボル紐付けが解除されていること"
+        );
+        assert!(
+            !app.shapes[0].group_path.is_empty(),
+            "通常のグループ図形として group_path が維持されていること"
+        );
+    }
+
+    #[test]
+    fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions() {
+        use crate::vector_engine::union_bounding_boxes;
+        use kurbo::{Affine, Rect as KRect};
+
+        let mut app = FlashBrushApp::default();
+        let red = Color32::from_rgb(220, 60, 60);
+
+        // 1. NaN / 無限大 / 空配列 / 長さ0ストロークを入力してもパニックせず安全に無視されること
+        assert!(generate_brush_outline(&[], 8.0).is_empty());
+        assert!(generate_brush_outline(&[Point::new(f64::NAN, 10.0)], 8.0).is_empty());
+        assert!(generate_brush_outline(&[Point::new(10.0, 10.0)], f64::NAN).is_empty());
+        assert!(build_smoothed_stroke_shapes(&[Point::new(f64::INFINITY, 0.0); 4], red).is_empty());
+        assert_eq!(union_bounding_boxes(&[]), KRect::ZERO);
+
+        // 長さ0の単一点スタンプは有効な円形シェイプになること
+        let dot_outline = generate_brush_outline(&[Point::new(100.0, 100.0)], 6.0);
+        let dot_shapes = build_smoothed_stroke_shapes(&dot_outline, red);
+        assert_eq!(dot_shapes.len(), 1);
+
+        // 2. 面積0（特異行列）アフィン変換や NaN 平行移動を与えても図形データが破壊されないこと
+        let mut shape = dot_shapes[0].clone();
+        let orig_bbox = shape.bounding_box();
+        shape.translate(KVec2::new(f64::NAN, f64::INFINITY));
+        shape.transform(Affine::scale(0.0));
+        shape.transform(Affine::new([f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]));
+        assert_eq!(shape.bounding_box(), orig_bbox);
+        assert!(!shape.contains_point(Point::new(f64::NAN, f64::NAN)));
+
+        // 3. スライス選択 → シンボル化 → シンボル出入り → Undo/Redo → 範囲外レイヤー操作の連続負荷でもパニックしないこと
+        app.shapes = make_stroke(Point::new(50.0, 100.0), Point::new(200.0, 100.0), 14.0, red);
+        app.sync_shapes_to_timeline();
+        app.apply_marquee_selection(Point::new(80.0, 70.0), Point::new(130.0, 130.0), false);
+        assert!(app.convert_selection_to_symbol().is_some());
+        if let Some((b, _, _)) = app.selected_single_symbol_info() {
+            assert!(app.enter_symbol_timeline(b));
+            assert!(app.exit_symbol_timeline());
+        }
+        assert!(!app.exit_symbol_timeline());
+        assert!(!app.exit_current_group());
+        app.undo();
+        app.redo();
+        app.set_layer_visible(999, false);
+        app.set_layer_locked(999, true);
+        assert!(!app.timeline_move_or_copy_frames(
+            crate::timeline::TimelineCellSelection::single(999, 999),
+            1,
+            1,
+            false
+        ));
     }

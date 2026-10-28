@@ -5,6 +5,7 @@ use crate::vector_engine::{
     tessellate_raw_polygon, to_pos2, transform_mesh_to_screen, FillShape,
 };
 use crate::FlashBrushApp;
+
 // ============================================================================
 // ツールとインタラクション状態
 // ============================================================================
@@ -58,11 +59,7 @@ impl Tool {
     pub(crate) const fn tooltip(self) -> &'static str {
         match self {
             Tool::Select => "選択・変形ツール (V)",
-            Tool::Transform => "自由変形ツール (Q)",
-            Tool::Brush => "ブラシツール (B)",
-            Tool::Eraser => "消しゴムツール (E)",
-            Tool::Bucket => "バケツ塗りツール (K)",
-            Tool::Eyedropper => "スポイトツール (I)",
+            _ => self.label(),
         }
     }
 
@@ -170,6 +167,49 @@ pub(crate) enum TransformHoverTarget {
     Move,
 }
 
+/// 選択ツール (`Tool::Select`) と自由変形ツール (`Tool::Transform`) で共通利用する選択オブジェクト平行移動ドラッグ状態
+#[derive(Clone, Debug)]
+pub(crate) struct MoveSelectionDrag {
+    pub(crate) last_pos: Point,
+    pub(crate) total_delta: KVec2,
+    pub(crate) undo_snapshot: Vec<FillShape>,
+}
+
+impl MoveSelectionDrag {
+    pub(crate) fn new(start_pos: Point, undo_snapshot: Vec<FillShape>) -> Self {
+        Self {
+            last_pos: start_pos,
+            total_delta: KVec2::ZERO,
+            undo_snapshot,
+        }
+    }
+
+    pub(crate) fn step(&mut self, pt: Point) -> KVec2 {
+        let step_delta = pt - self.last_pos;
+        self.last_pos = pt;
+        self.total_delta += step_delta;
+        step_delta
+    }
+}
+
+/// 選択ツール (`Tool::Select`) と自由変形ツール (`Tool::Transform`) で共通利用する矩形マーキー選択ドラッグ状態
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MarqueeDrag {
+    pub(crate) start_pos: Point,
+    pub(crate) current_pos: Point,
+    pub(crate) additive: bool,
+}
+
+impl MarqueeDrag {
+    pub(crate) fn new(start_pos: Point, additive: bool) -> Self {
+        Self {
+            start_pos,
+            current_pos: start_pos,
+            additive,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum TransformDragState {
     None,
@@ -178,11 +218,7 @@ pub(crate) enum TransformDragState {
         undo_snapshot: Vec<FillShape>,
         changed: bool,
     },
-    Move {
-        last_pos: Point,
-        total_delta: KVec2,
-        undo_snapshot: Vec<FillShape>,
-    },
+    Move(MoveSelectionDrag),
     Scale {
         handle: ScaleHandle,
         anchor: Point,
@@ -200,11 +236,7 @@ pub(crate) enum TransformDragState {
         orig_shapes: Vec<(usize, FillShape)>,
         undo_snapshot: Vec<FillShape>,
     },
-    MarqueeSelect {
-        start_pos: Point,
-        current_pos: Point,
-        additive: bool,
-    },
+    MarqueeSelect(MarqueeDrag),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -249,16 +281,8 @@ impl HoverTarget {
 #[derive(Clone, Debug)]
 pub(crate) enum SelectDragState {
     None,
-    MoveShape {
-        last_pos: Point,
-        total_delta: KVec2,
-        undo_snapshot: Vec<FillShape>,
-    },
-    MarqueeSelect {
-        start_pos: Point,
-        current_pos: Point,
-        additive: bool,
-    },
+    MoveShape(MoveSelectionDrag),
+    MarqueeSelect(MarqueeDrag),
     PullEdge {
         shape_idx: usize,
         contour_idx: usize,
@@ -361,14 +385,34 @@ impl FlashBrushApp {
         )
     }
 
-    /// 現在のズーム・パンに応じたステージのスクリーン座標矩形 `egui::Rect` を返す
+    /// ワールド座標矩形 `r` をスクリーン座標矩形 `egui::Rect` へ変換する
     #[inline]
-    pub(crate) fn stage_screen_rect(&self) -> egui::Rect {
-        let r = self.stage_world_rect();
+    pub(crate) fn world_rect_to_screen(&self, r: KRect) -> egui::Rect {
         egui::Rect::from_min_max(
             self.world_to_screen(Point::new(r.x0, r.y0)),
             self.world_to_screen(Point::new(r.x1, r.y1)),
         )
+    }
+
+    /// 現在のズーム・パンに応じたステージのスクリーン座標矩形 `egui::Rect` を返す
+    #[inline]
+    pub(crate) fn stage_screen_rect(&self) -> egui::Rect {
+        self.world_rect_to_screen(self.stage_world_rect())
+    }
+
+    /// 現在スクリーン上に表示されるワールド座標範囲 `KRect` を返す（画面外・ステージ枠外カリング用）
+    #[inline]
+    pub(crate) fn visible_world_rect(&self, painter: &egui::Painter) -> KRect {
+        let clip_scr = painter.clip_rect();
+        let view_rect = KRect::from_points(
+            self.screen_to_world(clip_scr.min),
+            self.screen_to_world(clip_scr.max),
+        );
+        if self.clip_outside_stage && self.symbol_edit_stack.is_empty() {
+            view_rect.intersect(self.stage_world_rect())
+        } else {
+            view_rect
+        }
     }
 
     /// 図形描画の前に、ペーストボード（枠外のグレー背景）とステージ矩形（白いキャンバス枠）を描画する
@@ -717,7 +761,7 @@ impl FlashBrushApp {
                                 .get(shape_idx)
                                 .and_then(|s| s.get_contour(contour_idx))
                             {
-                                for seg in &contour.segments {
+                                for seg in contour.segments.iter() {
                                     let p = self.world_to_screen(seg.p0);
                                     painter.circle_filled(p, 3.2, Color32::WHITE);
                                     painter.circle_stroke(
@@ -797,11 +841,12 @@ impl FlashBrushApp {
         let zoom = self.view_zoom;
         let pan = self.view_pan;
 
-        // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を薄暗く（インプレース背景）描画
+        // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画
         if let Some(session) = self.symbol_edit_stack.last() {
-            for s in &session.backdrop_shapes {
-                let mesh = transform_mesh_to_screen(&s.fill_mesh, zoom, pan, true);
-                painter.add(egui::Shape::mesh(mesh));
+            if !session.backdrop_cel.is_empty() {
+                painter.add(egui::Shape::Mesh(
+                    session.backdrop_cel.cached_screen_mesh(zoom, pan, true),
+                ));
             }
         }
 
@@ -810,61 +855,68 @@ impl FlashBrushApp {
             self.draw_onion_skins(painter);
         }
 
-        // 1. 下層レイヤーから上層レイヤーへ順に合成描画
+        // 1. 下層レイヤーから上層レイヤーへ順に合成描画（`self.shapes` はレイヤー順に整列されているため単一カーソルで O(N) 走査）
+        let num_layers = self.timeline.layers.len();
         let mut selected_group_boxes: Vec<(u64, KRect, Option<Point>)> = Vec::new();
         let (is_sel, has_sel) = self.selected_shape_mask();
-        let num_layers = self.timeline.layers.len();
         let curr_f = self.timeline.current_frame;
+        let view_world_rect = self.visible_world_rect(painter);
+        let mut shape_cursor = 0usize;
 
         for layer_idx in 0..num_layers {
-            if !self.timeline.layers[layer_idx].visible {
+            let Some(layer) = self.timeline.layers.get(layer_idx) else {
+                continue;
+            };
+            if !layer.visible {
                 continue;
             }
             // 再生中またはロック中レイヤーは、Cel 内の結合済みスクリーンキャッシュ Mesh（複数フレームシンボルはフレーム評価込み）を描画
-            if self.timeline.is_playing || self.timeline.layers[layer_idx].locked {
+            if self.timeline.is_playing || layer.locked {
                 if let Some(mesh) = self.timeline.resolved_cel_screen_mesh(
                     layer_idx,
                     curr_f,
                     zoom,
                     pan,
                     in_group_edit && !self.timeline.is_playing,
+                    &self.library,
                 ) {
-                    painter.add(egui::Shape::mesh(mesh));
+                    painter.add(egui::Shape::Mesh(mesh));
                 }
                 continue;
             }
 
-            let lid = self.timeline.layers[layer_idx].id;
-            for (idx, &shape_selected) in is_sel.iter().enumerate() {
-                if num_layers > 1 && self.shapes[idx].layer_id != lid {
+            let lid = layer.id;
+            if num_layers > 1 {
+                while shape_cursor < self.shapes.len()
+                    && self.shapes[shape_cursor].layer_id != lid
+                    && self
+                        .timeline
+                        .layer_index_by_id(self.shapes[shape_cursor].layer_id)
+                        .is_none_or(|ord| ord < layer_idx)
+                {
+                    shape_cursor += 1;
+                }
+            }
+
+            let start_idx = shape_cursor;
+            while shape_cursor < self.shapes.len()
+                && (num_layers <= 1 || self.shapes[shape_cursor].layer_id == lid)
+            {
+                shape_cursor += 1;
+            }
+
+            for idx in start_idx..shape_cursor {
+                let Some(shape) = self.shapes.get(idx) else {
                     continue;
-                }
-                let in_scope = self.shapes[idx].is_in_editing_scope(&self.editing_group_path);
-                if in_group_edit && !in_scope {
-                    let mesh =
-                        transform_mesh_to_screen(&self.shapes[idx].fill_mesh, zoom, pan, true);
-                    painter.add(egui::Shape::mesh(mesh));
-                    continue;
-                }
-
-                let mesh = transform_mesh_to_screen(&self.shapes[idx].fill_mesh, zoom, pan, false);
-                painter.add(egui::Shape::mesh(mesh));
-
-                if show_wf && self.shapes[idx].is_raw_at_scope(&self.editing_group_path) {
-                    self.draw_shape_contour_lines(
-                        painter,
-                        &self.shapes[idx],
-                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(30, 80, 180, 140)),
-                        true,
-                    );
-                }
-
-                if has_sel && !active_affine_drag && shape_selected {
-                    if let Some(gid) =
-                        self.shapes[idx].active_group_id_at_scope(&self.editing_group_path)
-                    {
-                        let s_bbox = self.shapes[idx].bounding_box();
-                        let sym_reg = self.shapes[idx]
+                };
+                let in_scope = shape.is_in_editing_scope(&self.editing_group_path);
+                let shape_sel =
+                    in_scope && has_sel && !active_affine_drag && is_sel.get(idx).copied().unwrap_or(false);
+                let sel_gid = if shape_sel {
+                    let gid = shape.active_group_id_at_scope(&self.editing_group_path);
+                    if let Some(gid) = gid {
+                        let s_bbox = shape.bounding_box();
+                        let sym_reg = shape
                             .symbol_instance
                             .filter(|b| b.instance_gid == gid)
                             .map(|b| b.xform * Point::ZERO);
@@ -875,23 +927,46 @@ impl FlashBrushApp {
                         } else {
                             selected_group_boxes.push((gid, s_bbox, sym_reg));
                         }
-                    } else {
-                        self.draw_flash_selection_overlay(painter, idx);
                     }
+                    gid
+                } else {
+                    None
+                };
+
+                // 画面表示範囲（および「枠外を隠す」ON時のステージ範囲）と交差しない図形は描画をスキップ
+                if !crate::vector_engine::rects_overlap(shape.bounding_box(), view_world_rect) {
+                    continue;
+                }
+
+                let dim = in_group_edit && !in_scope;
+                painter.add(egui::Shape::Mesh(transform_mesh_to_screen(
+                    &shape.fill_mesh,
+                    zoom,
+                    pan,
+                    dim,
+                )));
+                if !in_scope {
+                    continue;
+                }
+                if show_wf && shape.is_raw_at_scope(&self.editing_group_path) {
+                    self.draw_shape_contour_lines(
+                        painter,
+                        shape,
+                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(30, 80, 180, 140)),
+                        true,
+                    );
+                }
+                if shape_sel && sel_gid.is_none() {
+                    self.draw_flash_selection_overlay(painter, idx);
                 }
             }
         }
 
         // 選択中のグループ塊（緑枠）およびシンボルインスタンス（水色枠＋基準点 `＋` マーク）を描画
         for (_, g_bbox, sym_reg) in selected_group_boxes {
-            let min_pos =
-                self.world_to_screen(Point::new(g_bbox.x0, g_bbox.y0)) - Vec2::splat(2.0);
-            let max_pos =
-                self.world_to_screen(Point::new(g_bbox.x1, g_bbox.y1)) + Vec2::splat(2.0);
-            let rect = egui::Rect::from_min_max(min_pos, max_pos);
+            let rect = self.world_rect_to_screen(g_bbox).expand(2.0);
             if let Some(origin) = sym_reg {
-                let cyan = Color32::from_rgb(0, 165, 255);
-                painter.rect_stroke(rect, 0.0, Stroke::new(1.8, cyan));
+                painter.rect_stroke(rect, 0.0, Stroke::new(1.8, Color32::from_rgb(0, 165, 255)));
                 crate::symbol::draw_registration_cross(
                     painter,
                     self.world_to_screen(origin),
@@ -899,11 +974,7 @@ impl FlashBrushApp {
                     true,
                 );
             } else {
-                painter.rect_stroke(
-                    rect,
-                    0.0,
-                    Stroke::new(1.8, Color32::from_rgb(30, 185, 95)),
-                );
+                painter.rect_stroke(rect, 0.0, Stroke::new(1.8, Color32::from_rgb(30, 185, 95)));
             }
         }
 
@@ -956,45 +1027,29 @@ impl FlashBrushApp {
             if !layer.visible {
                 continue;
             }
-            if let Some(mesh) =
-                self.timeline
-                    .resolved_cel_onion_mesh(layer_idx, frame, zoom, pan, tint_rgb, alpha)
-            {
-                painter.add(egui::Shape::mesh(mesh));
+            if let Some(mesh) = self.timeline.resolved_cel_onion_mesh(
+                layer_idx,
+                frame,
+                zoom,
+                pan,
+                (tint_rgb, alpha),
+                &self.library,
+            ) {
+                painter.add(egui::Shape::Mesh(mesh));
             }
         }
     }
 
     fn draw_active_marquee_box(&self, painter: &egui::Painter) {
         let active_marquee = match (&self.select_drag, &self.transform_drag) {
-            (
-                SelectDragState::MarqueeSelect {
-                    start_pos,
-                    current_pos,
-                    ..
-                },
-                _,
-            )
-            | (
-                _,
-                TransformDragState::MarqueeSelect {
-                    start_pos,
-                    current_pos,
-                    ..
-                },
-            ) => Some((*start_pos, *current_pos)),
+            (SelectDragState::MarqueeSelect(m), _) | (_, TransformDragState::MarqueeSelect(m)) => {
+                Some(*m)
+            }
             _ => None,
         };
-        if let Some((start_pos, current_pos)) = active_marquee {
-            let min_pos = self.world_to_screen(Point::new(
-                start_pos.x.min(current_pos.x),
-                start_pos.y.min(current_pos.y),
-            ));
-            let max_pos = self.world_to_screen(Point::new(
-                start_pos.x.max(current_pos.x),
-                start_pos.y.max(current_pos.y),
-            ));
-            let marquee_rect = egui::Rect::from_min_max(min_pos, max_pos);
+        if let Some(m) = active_marquee {
+            let marquee_rect =
+                self.world_rect_to_screen(KRect::from_points(m.start_pos, m.current_pos));
             painter.rect_filled(
                 marquee_rect,
                 0.0,
@@ -1008,7 +1063,7 @@ impl FlashBrushApp {
         }
     }
 
-    fn draw_active_stroke_preview(&mut self, painter: &egui::Painter) {
+    fn draw_active_stroke_preview(&self, painter: &egui::Painter) {
         if self.active_raw_outline.is_empty() {
             return;
         }
@@ -1017,12 +1072,8 @@ impl FlashBrushApp {
         } else {
             Color32::from_rgba_unmultiplied(255, 255, 255, 220)
         };
-        let raw_mesh = tessellate_raw_polygon(
-            &mut self.tessellator,
-            &self.active_raw_outline,
-            preview_color,
-        );
-        painter.add(egui::Shape::mesh(transform_mesh_to_screen(
+        let raw_mesh = tessellate_raw_polygon(&self.active_raw_outline, preview_color);
+        painter.add(egui::Shape::Mesh(transform_mesh_to_screen(
             &raw_mesh,
             self.view_zoom,
             self.view_pan,

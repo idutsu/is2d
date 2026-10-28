@@ -1,18 +1,29 @@
 use eframe::egui::{self, Color32, Stroke};
-use kurbo::{
-    ParamCurve, ParamCurveArclen, ParamCurveNearest, Point, QuadBez, Rect as KRect, Vec2 as KVec2,
-};
+use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 
-use crate::canvas_tool::{HoverTarget, SelectDragState, SelectSubMode, Tool};
+use crate::canvas_tool::{
+    HoverTarget, MarqueeDrag, MoveSelectionDrag, SelectDragState, SelectSubMode, Tool,
+};
 use crate::vector_engine::{
     boolean_operation, make_marquee_rect_shape, merge_shapes_into_canvas, normalize_vec,
-    rects_overlap, resolve_deformed_shape, transform_mesh_to_screen, BoolOp, FillShape,
+    rects_overlap, resolve_deformed_shape, slice_shape_with_marquee_rect, transform_mesh_to_screen,
+    BoolOp, FillShape,
 };
 use crate::FlashBrushApp;
 
 // ============================================================================
 // 選択ツール（Tool::Select / V キー）・輪郭変形・アンカー編集・グループ・クリップボード
 // ============================================================================
+
+/// 2次ベジェ曲線の3制御点 `(p0, p1, p2)` の凸包AABB（余白 `margin` 付き）に点 `pt` が含まれるかを高速判定する
+#[inline]
+fn quad_control_bbox_contains(seg: &QuadBez, pt: Point, margin: f64) -> bool {
+    let min_x = seg.p0.x.min(seg.p1.x).min(seg.p2.x) - margin;
+    let max_x = seg.p0.x.max(seg.p1.x).max(seg.p2.x) + margin;
+    let min_y = seg.p0.y.min(seg.p1.y).min(seg.p2.y) - margin;
+    let max_y = seg.p0.y.max(seg.p1.y).max(seg.p2.y) + margin;
+    pt.x >= min_x && pt.x <= max_x && pt.y >= min_y && pt.y <= max_y
+}
 
 impl FlashBrushApp {
     /// 矩形スライス前のキャンバス状態があれば取り出し、なければ現在の `self.shapes` をクローンして返す
@@ -90,6 +101,7 @@ impl FlashBrushApp {
             }
             self.shapes = base_canvas;
             self.sort_shapes_by_layer_order();
+            self.sync_shapes_to_timeline();
         }
         self.selection_modified = false;
         self.selected_shapes.clear();
@@ -234,6 +246,7 @@ impl FlashBrushApp {
             self.selection_modified = true;
         }
         self.transform_pivot = None;
+        self.sync_shapes_to_timeline();
         true
     }
 
@@ -261,7 +274,9 @@ impl FlashBrushApp {
     pub(crate) fn exit_current_group(&mut self) -> bool {
         if !self.editing_group_path.is_empty() {
             self.clear_selection();
-            let exited_gid = self.editing_group_path.pop().unwrap();
+            let Some(exited_gid) = self.editing_group_path.pop() else {
+                return false;
+            };
             self.selected_shapes = (0..self.shapes.len())
                 .filter(|&i| {
                     self.shapes[i].active_group_id_at_scope(&self.editing_group_path)
@@ -274,14 +289,22 @@ impl FlashBrushApp {
         self.exit_symbol_timeline()
     }
 
-    /// Undo / Redo 後に現在潜っている `editing_group_path` のグループが存在しなくなった場合は親階層へ戻す
+    /// キャンバス図形更新後に、存在しなくなった `editing_group_path`・範囲外の `selected_shapes`・`hover_target` を自動補正する
     pub(crate) fn sanitize_editing_group_path(&mut self) {
+        self.selected_shapes.retain(|&idx| idx < self.shapes.len());
+        if self
+            .hover_target
+            .shape_idx()
+            .is_some_and(|idx| idx >= self.shapes.len())
+        {
+            self.hover_target = HoverTarget::None;
+        }
         while !self.editing_group_path.is_empty() {
-            let exists = self
+            if self
                 .shapes
                 .iter()
-                .any(|s| s.is_in_editing_scope(&self.editing_group_path));
-            if exists {
+                .any(|s| s.is_in_editing_scope(&self.editing_group_path))
+            {
                 break;
             }
             self.editing_group_path.pop();
@@ -341,7 +364,6 @@ impl FlashBrushApp {
         let undo_snapshot = self.shapes.clone();
         self.translate_selected_shapes(delta);
         self.commit_moved_selection(undo_snapshot);
-        self.sync_shapes_to_timeline();
         true
     }
 
@@ -441,26 +463,13 @@ impl FlashBrushApp {
                 continue;
             }
 
-            let color = shape.color;
             let lid = shape.layer_id;
             let gp = shape.group_path.clone();
-            let inside = boolean_operation(
-                std::slice::from_ref(&shape),
-                std::slice::from_ref(&clip_rect_shape),
-                BoolOp::Intersection,
-                color,
-            );
+            let (inside, outside) = slice_shape_with_marquee_rect(&shape, &clip_rect_shape);
             if inside.is_empty() {
                 new_shapes.push(shape);
                 continue;
             }
-
-            let outside = boolean_operation(
-                std::slice::from_ref(&shape),
-                std::slice::from_ref(&clip_rect_shape),
-                BoolOp::Difference,
-                color,
-            );
             if outside.is_empty() {
                 new_selected.push(new_shapes.len());
                 new_shapes.push(shape);
@@ -508,6 +517,24 @@ impl FlashBrushApp {
         self.selection_modified = false;
         self.selected_shapes.clear();
         self.transform_pivot = None;
+        self.sync_shapes_to_timeline();
+        true
+    }
+
+    /// 現在の編集スコープ（グループ編集時はそのグループ内、通常時は現在フレームの全編集可能レイヤー）の図形をすべて消去する
+    pub(crate) fn clear_active_frame_shapes(&mut self) -> bool {
+        let has_any_in_scope = self
+            .shapes
+            .iter()
+            .any(|s| s.is_in_editing_scope(&self.editing_group_path));
+        if !has_any_in_scope {
+            return false;
+        }
+        self.clear_selection();
+        self.push_undo();
+        self.shapes
+            .retain(|s| !s.is_in_editing_scope(&self.editing_group_path));
+        self.sync_shapes_to_timeline();
         true
     }
 
@@ -675,6 +702,7 @@ impl FlashBrushApp {
         if !matches!(self.tool, Tool::Select | Tool::Transform) {
             self.set_tool(Tool::Select);
         }
+        self.sync_shapes_to_timeline();
     }
 
     pub(crate) fn commit_moved_selection(&mut self, undo_snapshot: Vec<FillShape>) {
@@ -708,6 +736,7 @@ impl FlashBrushApp {
         self.shapes = unselected;
         self.selected_shapes = (start_sel..end_sel).collect();
         self.sort_shapes_by_layer_order();
+        self.sync_shapes_to_timeline();
     }
 
     /// 選択オブジェクトの平行移動ドラッグ終了時の確定・ロールバック共通処理
@@ -742,6 +771,7 @@ impl FlashBrushApp {
             let resolved = resolve_deformed_shape(&deformed);
             merge_shapes_into_canvas(&mut self.shapes, resolved);
             self.sort_shapes_by_layer_order();
+            self.sync_shapes_to_timeline();
         } else {
             self.shapes = undo_snapshot;
         }
@@ -804,22 +834,22 @@ impl FlashBrushApp {
 
         let drag_dir = normalize_vec(drag_vec);
         let mut best_near: Option<(f64, Point)> = None;
-        for c_idx in 0..shape.contour_count() {
-            if let Some(c) = shape.get_contour(c_idx) {
-                for (s_idx, seg) in c.segments.iter().enumerate() {
-                    if c_idx == contour_idx && ignore_segs.contains(&s_idx) {
-                        continue;
-                    }
-                    let near = seg.nearest(drag_pt, 0.05);
-                    let d = near.distance_sq.sqrt();
-                    if d <= 6.0 {
-                        let near_pt = seg.eval(near.t);
-                        if (near_pt - anchor_a).hypot() > 8.0
-                            && (near_pt - anchor_b).hypot() > 8.0
-                            && best_near.is_none_or(|(bd, _)| d < bd)
-                        {
-                            best_near = Some((d, near_pt));
-                        }
+        for (c_idx, c) in shape.contours().enumerate() {
+            for (s_idx, seg) in c.segments.iter().enumerate() {
+                if (c_idx == contour_idx && ignore_segs.contains(&s_idx))
+                    || !quad_control_bbox_contains(seg, drag_pt, 6.0)
+                {
+                    continue;
+                }
+                let near = seg.nearest(drag_pt, 0.05);
+                let d = near.distance_sq.sqrt();
+                if d <= 6.0 {
+                    let near_pt = seg.eval(near.t);
+                    if (near_pt - anchor_a).hypot() > 8.0
+                        && (near_pt - anchor_b).hypot() > 8.0
+                        && best_near.is_none_or(|(bd, _)| d < bd)
+                    {
+                        best_near = Some((d, near_pt));
                     }
                 }
             }
@@ -863,10 +893,12 @@ impl FlashBrushApp {
         let new_p1 = orig_seg.p1 + delta / denom;
         if let Some(contour) = shape.get_contour_mut(contour_idx) {
             if seg_idx < contour.segments.len() {
-                contour.segments[seg_idx].p1 = new_p1;
+                contour.segments_mut()[seg_idx].p1 = new_p1;
             }
         }
-        shape.rebuild_cache();
+        if !punch_opposite {
+            shape.rebuild_cache();
+        }
     }
 
     /// 頂点ドラッグ変形（MoveVertex）を適用する。
@@ -907,13 +939,16 @@ impl FlashBrushApp {
         let delta = effective_pt - orig_vertex;
         if let Some(contour) = shape.get_contour_mut(contour_idx) {
             if seg_idx < contour.segments.len() {
-                contour.segments[prev_idx].p2 = effective_pt;
-                contour.segments[seg_idx].p0 = effective_pt;
-                contour.segments[prev_idx].p1 = orig_ctrls.0 + delta * 0.5;
-                contour.segments[seg_idx].p1 = orig_ctrls.1 + delta * 0.5;
+                let segs = contour.segments_mut();
+                segs[prev_idx].p2 = effective_pt;
+                segs[seg_idx].p0 = effective_pt;
+                segs[prev_idx].p1 = orig_ctrls.0 + delta * 0.5;
+                segs[seg_idx].p1 = orig_ctrls.1 + delta * 0.5;
             }
         }
-        shape.rebuild_cache();
+        if !punch_opposite {
+            shape.rebuild_cache();
+        }
     }
 
     /// 指定座標 `pt` がシェイプの輪郭（外周・穴）から距離 `radius` 以内にあるかを判定する
@@ -924,12 +959,13 @@ impl FlashBrushApp {
         inv_z: f64,
     ) -> bool {
         let r_sq = radius * radius;
-        for c_idx in 0..shape.contour_count() {
-            if let Some(contour) = shape.get_contour(c_idx) {
-                for seg in &contour.segments {
-                    if seg.nearest(pt, 0.05 * inv_z).distance_sq <= r_sq {
-                        return true;
-                    }
+        for contour in shape.contours() {
+            for seg in contour.segments.iter() {
+                if !quad_control_bbox_contains(seg, pt, radius) {
+                    continue;
+                }
+                if seg.nearest(pt, 0.05 * inv_z).distance_sq <= r_sq {
+                    return true;
                 }
             }
         }
@@ -993,28 +1029,26 @@ impl FlashBrushApp {
                 {
                     continue;
                 }
-                for c_idx in 0..shape.contour_count() {
-                    if let Some(contour) = shape.get_contour(c_idx) {
-                        if self.select_sub_mode == SelectSubMode::DeleteAnchor
-                            && contour.segments.len() <= 2
+                for (c_idx, contour) in shape.contours().enumerate() {
+                    if self.select_sub_mode == SelectSubMode::DeleteAnchor
+                        && contour.segments.len() <= 2
+                    {
+                        continue;
+                    }
+                    for (seg_idx, seg) in contour.segments.iter().enumerate() {
+                        let dist = (mouse_pt - seg.p0).hypot();
+                        if dist <= v_radius
+                            && best_vertex.as_ref().is_none_or(|(d, _)| dist < *d)
                         {
-                            continue;
-                        }
-                        for (seg_idx, seg) in contour.segments.iter().enumerate() {
-                            let dist = (mouse_pt - seg.p0).hypot();
-                            if dist <= v_radius
-                                && best_vertex.as_ref().is_none_or(|(d, _)| dist < *d)
-                            {
-                                best_vertex = Some((
-                                    dist,
-                                    HoverTarget::Vertex {
-                                        shape_idx: s_idx,
-                                        contour_idx: c_idx,
-                                        seg_idx,
-                                        pos: seg.p0,
-                                    },
-                                ));
-                            }
+                            best_vertex = Some((
+                                dist,
+                                HoverTarget::Vertex {
+                                    shape_idx: s_idx,
+                                    contour_idx: c_idx,
+                                    seg_idx,
+                                    pos: seg.p0,
+                                },
+                            ));
                         }
                     }
                 }
@@ -1047,33 +1081,34 @@ impl FlashBrushApp {
                 edge_hit_outer_radius
             };
 
-            for c_idx in 0..shape.contour_count() {
-                if let Some(contour) = shape.get_contour(c_idx) {
-                    for (seg_idx, seg) in contour.segments.iter().enumerate() {
-                        let nearest = seg.nearest(mouse_pt, 0.05 * inv_z);
-                        let t_clamped = nearest.t.clamp(0.08, 0.92);
-                        let eval_pt = if self.select_sub_mode == SelectSubMode::AddAnchor {
-                            seg.eval(t_clamped)
-                        } else {
-                            seg.eval(nearest.t)
-                        };
-                        let dist = nearest.distance_sq.sqrt();
-                        if dist <= max_dist && best_edge.as_ref().is_none_or(|(d, _)| dist < *d) {
-                            best_edge = Some((
-                                dist,
-                                HoverTarget::Edge {
-                                    shape_idx: s_idx,
-                                    contour_idx: c_idx,
-                                    seg_idx,
-                                    t: if self.select_sub_mode == SelectSubMode::AddAnchor {
-                                        t_clamped
-                                    } else {
-                                        nearest.t
-                                    },
-                                    closest_pos: eval_pt,
+            for (c_idx, contour) in shape.contours().enumerate() {
+                for (seg_idx, seg) in contour.segments.iter().enumerate() {
+                    if !quad_control_bbox_contains(seg, mouse_pt, max_dist) {
+                        continue;
+                    }
+                    let nearest = seg.nearest(mouse_pt, 0.05 * inv_z);
+                    let t_clamped = nearest.t.clamp(0.08, 0.92);
+                    let eval_pt = if self.select_sub_mode == SelectSubMode::AddAnchor {
+                        seg.eval(t_clamped)
+                    } else {
+                        seg.eval(nearest.t)
+                    };
+                    let dist = nearest.distance_sq.sqrt();
+                    if dist <= max_dist && best_edge.as_ref().is_none_or(|(d, _)| dist < *d) {
+                        best_edge = Some((
+                            dist,
+                            HoverTarget::Edge {
+                                shape_idx: s_idx,
+                                contour_idx: c_idx,
+                                seg_idx,
+                                t: if self.select_sub_mode == SelectSubMode::AddAnchor {
+                                    t_clamped
+                                } else {
+                                    nearest.t
                                 },
-                            ));
-                        }
+                                closest_pos: eval_pt,
+                            },
+                        ));
                     }
                 }
             }
@@ -1113,21 +1148,19 @@ impl FlashBrushApp {
             {
                 continue;
             }
-            for c_idx in 0..shape.contour_count() {
-                if let Some(contour) = shape.get_contour(c_idx) {
-                    for (seg_idx, seg) in contour.segments.iter().enumerate() {
-                        if s_idx == ignore_shape
-                            && c_idx == ignore_contour
-                            && seg_idx == ignore_seg
-                        {
-                            continue;
-                        }
-                        let dist = (drag_pt - seg.p0).hypot();
-                        if dist <= snap_radius
-                            && best_snap.as_ref().is_none_or(|(d, _)| dist < *d)
-                        {
-                            best_snap = Some((dist, seg.p0));
-                        }
+            for (c_idx, contour) in shape.contours().enumerate() {
+                for (seg_idx, seg) in contour.segments.iter().enumerate() {
+                    if s_idx == ignore_shape
+                        && c_idx == ignore_contour
+                        && seg_idx == ignore_seg
+                    {
+                        continue;
+                    }
+                    let dist = (drag_pt - seg.p0).hypot();
+                    if dist <= snap_radius
+                        && best_snap.as_ref().is_none_or(|(d, _)| dist < *d)
+                    {
+                        best_snap = Some((dist, seg.p0));
                     }
                 }
             }
@@ -1136,23 +1169,25 @@ impl FlashBrushApp {
     }
 
 
-    /// Flash風ドット柄（Polka-Dot）選択オーバーレイを描画（キャッシュ済み Mesh を使用）
+    /// Flash風ドット柄（Polka-Dot）選択オーバーレイを描画
     pub(crate) fn draw_flash_selection_overlay(&mut self, painter: &egui::Painter, shape_idx: usize) {
         let zoom = self.view_zoom;
         let pan = self.view_pan;
-        let sel_mesh = transform_mesh_to_screen(
-            self.shapes[shape_idx].selection_overlay_mesh(zoom),
-            zoom,
-            pan,
-            false,
-        );
-        painter.add(egui::Shape::mesh(sel_mesh));
-        self.draw_shape_contour_lines(
-            painter,
-            &self.shapes[shape_idx],
-            Stroke::new(1.5, Color32::from_rgb(0, 175, 255)),
-            false,
-        );
+        let Some(shape) = self.shapes.get_mut(shape_idx) else {
+            return;
+        };
+        let sel_mesh = shape.selection_overlay_mesh(zoom);
+        painter.add(egui::Shape::Mesh(transform_mesh_to_screen(
+            &sel_mesh, zoom, pan, false,
+        )));
+        if let Some(shape_ref) = self.shapes.get(shape_idx) {
+            self.draw_shape_contour_lines(
+                painter,
+                shape_ref,
+                Stroke::new(1.5, Color32::from_rgb(0, 175, 255)),
+                false,
+            );
+        }
     }
 
 
@@ -1164,8 +1199,17 @@ impl FlashBrushApp {
         show_anchors: bool,
     ) {
         let z = self.view_zoom as f64;
+        let pad = 4.0 / z;
+        let view_rect = self.visible_world_rect(painter).inflate(pad, pad);
         for contour in shape.contours() {
-            for seg in &contour.segments {
+            for seg in contour.segments.iter() {
+                if seg.p0.x.max(seg.p1.x).max(seg.p2.x) < view_rect.x0
+                    || seg.p0.x.min(seg.p1.x).min(seg.p2.x) > view_rect.x1
+                    || seg.p0.y.max(seg.p1.y).max(seg.p2.y) < view_rect.y0
+                    || seg.p0.y.min(seg.p1.y).min(seg.p2.y) > view_rect.y1
+                {
+                    continue;
+                }
                 let mid_dev = (seg.p1 - seg.p0.lerp(seg.p2, 0.5)).hypot() * z;
                 if mid_dev <= 0.15 {
                     painter.line_segment(
@@ -1174,7 +1218,8 @@ impl FlashBrushApp {
                     );
                 } else {
                     let mut prev = seg.p0;
-                    let steps = (((seg.arclen(1.0) * z) / 8.0).ceil() as usize).clamp(3, 18);
+                    let approx_len = ((seg.p1 - seg.p0).hypot() + (seg.p2 - seg.p1).hypot()) * z;
+                    let steps = ((approx_len / 8.0).ceil() as usize).clamp(3, 18);
                     for k in 1..=steps {
                         let curr = seg.eval(k as f64 / steps as f64);
                         painter.line_segment(
@@ -1292,6 +1337,7 @@ impl FlashBrushApp {
                         shape.rebuild_cache();
                     }
                     self.record_undo_snapshot(snapshot);
+                    self.sync_shapes_to_timeline();
                 }
             }
         }
@@ -1300,14 +1346,24 @@ impl FlashBrushApp {
             .unwrap_or(HoverTarget::None);
     }
 
+    /// 選択オブジェクトの移動ドラッグ（`Alt` 複製移動を含む）の初期状態を構築する共通ヘルパー
+    pub(crate) fn begin_move_selection_drag(
+        &mut self,
+        pt: Point,
+        alt_held: bool,
+    ) -> MoveSelectionDrag {
+        let undo_snapshot = if alt_held {
+            self.duplicate_selected_shapes_for_alt_drag()
+        } else {
+            self.shapes.clone()
+        };
+        MoveSelectionDrag::new(pt, undo_snapshot)
+    }
+
     fn start_reshape_drag(&mut self, pt: Point, shift_held: bool, alt_held: bool) {
         self.inspect_timeline_frame = false;
         if shift_held {
-            self.select_drag = SelectDragState::MarqueeSelect {
-                start_pos: pt,
-                current_pos: pt,
-                additive: true,
-            };
+            self.select_drag = SelectDragState::MarqueeSelect(MarqueeDrag::new(pt, true));
             return;
         }
         let target = self.compute_hover_target(pt);
@@ -1316,12 +1372,8 @@ impl FlashBrushApp {
                 if !self.selected_shapes.contains(&shape_idx) {
                     self.select_single_shape_at(pt);
                 }
-                let undo_snapshot = self.duplicate_selected_shapes_for_alt_drag();
-                self.select_drag = SelectDragState::MoveShape {
-                    last_pos: pt,
-                    total_delta: KVec2::ZERO,
-                    undo_snapshot,
-                };
+                self.select_drag =
+                    SelectDragState::MoveShape(self.begin_move_selection_drag(pt, true));
                 return;
             }
         }
@@ -1333,15 +1385,19 @@ impl FlashBrushApp {
                 pos,
             } => {
                 let snapshot = self.take_or_clone_unsliced_snapshot();
-                if let Some(contour) = self
+                if let Some((orig_prev_ctrl, orig_curr_ctrl)) = self
                     .shapes
                     .get(shape_idx)
                     .and_then(|s| s.get_contour(contour_idx))
+                    .and_then(|contour| {
+                        let n = contour.segments.len();
+                        if n == 0 || seg_idx >= n {
+                            return None;
+                        }
+                        let prev_idx = (seg_idx + n - 1) % n;
+                        Some((contour.segments[prev_idx].p1, contour.segments[seg_idx].p1))
+                    })
                 {
-                    let n = contour.segments.len();
-                    let prev_idx = (seg_idx + n - 1) % n;
-                    let orig_prev_ctrl = contour.segments[prev_idx].p1;
-                    let orig_curr_ctrl = contour.segments[seg_idx].p1;
                     self.selected_shapes.clear();
                     self.select_drag = SelectDragState::MoveVertex {
                         shape_idx,
@@ -1382,18 +1438,11 @@ impl FlashBrushApp {
                 if !self.selected_shapes.contains(&shape_idx) {
                     self.select_single_shape_at(pt);
                 }
-                self.select_drag = SelectDragState::MoveShape {
-                    last_pos: pt,
-                    total_delta: KVec2::ZERO,
-                    undo_snapshot: self.shapes.clone(),
-                };
+                self.select_drag =
+                    SelectDragState::MoveShape(self.begin_move_selection_drag(pt, false));
             }
             HoverTarget::None => {
-                self.select_drag = SelectDragState::MarqueeSelect {
-                    start_pos: pt,
-                    current_pos: pt,
-                    additive: false,
-                };
+                self.select_drag = SelectDragState::MarqueeSelect(MarqueeDrag::new(pt, false));
             }
         }
     }
@@ -1449,18 +1498,11 @@ impl FlashBrushApp {
 
         let mut move_delta: Option<KVec2> = None;
         match &mut self.select_drag {
-            SelectDragState::MoveShape {
-                last_pos,
-                total_delta,
-                ..
-            } => {
-                let step_delta = pt - *last_pos;
-                *last_pos = pt;
-                *total_delta += step_delta;
-                move_delta = Some(step_delta);
+            SelectDragState::MoveShape(drag) => {
+                move_delta = Some(drag.step(pt));
             }
-            SelectDragState::MarqueeSelect { current_pos, .. } => {
-                *current_pos = pt;
+            SelectDragState::MarqueeSelect(m) => {
+                m.current_pos = pt;
             }
             SelectDragState::PullEdge {
                 shape_idx,
@@ -1494,20 +1536,12 @@ impl FlashBrushApp {
     fn finish_reshape_drag(&mut self, mouse_pt: Option<Point>) {
         let finished_drag = std::mem::replace(&mut self.select_drag, SelectDragState::None);
         match finished_drag {
-            SelectDragState::MoveShape {
-                total_delta,
-                undo_snapshot,
-                ..
-            } => {
-                self.finish_move_selection_drag(total_delta, undo_snapshot);
+            SelectDragState::MoveShape(drag) => {
+                self.finish_move_selection_drag(drag.total_delta, drag.undo_snapshot);
             }
-            SelectDragState::MarqueeSelect {
-                start_pos,
-                current_pos,
-                additive,
-            } => {
-                let end_pos = mouse_pt.unwrap_or(current_pos);
-                self.apply_marquee_selection(start_pos, end_pos, additive);
+            SelectDragState::MarqueeSelect(m) => {
+                let end_pos = mouse_pt.unwrap_or(m.current_pos);
+                self.apply_marquee_selection(m.start_pos, end_pos, m.additive);
             }
             SelectDragState::PullEdge {
                 shape_idx,

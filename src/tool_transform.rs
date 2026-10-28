@@ -1,7 +1,7 @@
 use eframe::egui::{self, Color32, Stroke, Vec2};
 use kurbo::{Affine, Point, Rect as KRect, Vec2 as KVec2};
 
-use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
+use crate::canvas_tool::{MarqueeDrag, ScaleHandle, TransformDragState, TransformHoverTarget};
 use crate::vector_engine::{affine_rotate_around, affine_scale_around};
 use crate::FlashBrushApp;
 
@@ -126,17 +126,21 @@ impl FlashBrushApp {
         TransformHoverTarget::None
     }
 
+    fn flush_transform_pivot_to_symbol(&mut self) {
+        if let Some(piv) = self.transform_pivot {
+            if self.set_selected_symbol_world_pivot(Some(piv), false) {
+                self.transform_pivot = None;
+            }
+        }
+    }
+
     /// 選択中のオブジェクトを現在の基準点（ピボット）中心にアフィン変換する
     pub(crate) fn apply_affine_to_selected(&mut self, affine: Affine) -> bool {
         if self.selected_shapes.is_empty() {
             return false;
         }
         let undo_snapshot = self.shapes.clone();
-        if let Some(piv) = self.transform_pivot {
-            if self.set_selected_symbol_world_pivot(Some(piv), false) {
-                self.transform_pivot = None;
-            }
-        }
+        self.flush_transform_pivot_to_symbol();
         let mut any_transformed = false;
         for &sel_idx in &self.selected_shapes {
             if let Some(shape) = self.shapes.get_mut(sel_idx) {
@@ -150,15 +154,21 @@ impl FlashBrushApp {
         any_transformed
     }
 
-    /// 選択中のオブジェクトを左右反転（`flip_x`）または上下反転（`flip_y`）する
-    pub(crate) fn flip_selected_shapes(&mut self, flip_x: bool, flip_y: bool) -> bool {
+    /// 選択中のオブジェクトを現在の基準点（ピボット）中心に `(sx, sy)` 倍に拡大・縮小（または反転）する
+    pub(crate) fn scale_selected_shapes(&mut self, sx: f64, sy: f64) -> bool {
         let Some(bbox) = self.selection_bounding_box() else {
             return false;
         };
         let pivot = self.active_transform_pivot(bbox);
-        let sx = if flip_x { -1.0 } else { 1.0 };
-        let sy = if flip_y { -1.0 } else { 1.0 };
         self.apply_affine_to_selected(affine_scale_around(pivot, sx, sy))
+    }
+
+    /// 選択中のオブジェクトを左右反転（`flip_x`）または上下反転（`flip_y`）する
+    pub(crate) fn flip_selected_shapes(&mut self, flip_x: bool, flip_y: bool) -> bool {
+        self.scale_selected_shapes(
+            if flip_x { -1.0 } else { 1.0 },
+            if flip_y { -1.0 } else { 1.0 },
+        )
     }
 
     /// 選択中のオブジェクトを現在の基準点（ピボット）中心に `angle_rad` 回転する
@@ -168,16 +178,6 @@ impl FlashBrushApp {
         };
         let pivot = self.active_transform_pivot(bbox);
         self.apply_affine_to_selected(affine_rotate_around(pivot, angle_rad))
-    }
-
-    /// 選択中のオブジェクトを現在の基準点（ピボット）中心に `(sx, sy)` 倍に拡大・縮小する
-    #[cfg(test)]
-    pub(crate) fn scale_selected_shapes(&mut self, sx: f64, sy: f64) -> bool {
-        let Some(bbox) = self.selection_bounding_box() else {
-            return false;
-        };
-        let pivot = self.active_transform_pivot(bbox);
-        self.apply_affine_to_selected(affine_scale_around(pivot, sx, sy))
     }
 
 
@@ -228,11 +228,7 @@ impl FlashBrushApp {
     fn start_transform_drag(&mut self, pt: Point, shift_held: bool, alt_held: bool) {
         self.inspect_timeline_frame = false;
         if shift_held && self.compute_transform_hover(pt) == TransformHoverTarget::None {
-            self.transform_drag = TransformDragState::MarqueeSelect {
-                start_pos: pt,
-                current_pos: pt,
-                additive: true,
-            };
+            self.transform_drag = TransformDragState::MarqueeSelect(MarqueeDrag::new(pt, true));
             return;
         }
 
@@ -251,11 +247,7 @@ impl FlashBrushApp {
                 if let Some(orig_bbox) = self.selection_bounding_box() {
                     let undo_snapshot = self.shapes.clone();
                     let orig_pivot = self.active_transform_pivot(orig_bbox);
-                    if let Some(piv) = self.transform_pivot {
-                        if self.set_selected_symbol_world_pivot(Some(piv), false) {
-                            self.transform_pivot = None;
-                        }
-                    }
+                    self.flush_transform_pivot_to_symbol();
                     let anchor = if alt_held {
                         orig_pivot
                     } else {
@@ -276,11 +268,7 @@ impl FlashBrushApp {
                 if let Some(orig_bbox) = self.selection_bounding_box() {
                     let undo_snapshot = self.shapes.clone();
                     let pivot = self.active_transform_pivot(orig_bbox);
-                    if let Some(piv) = self.transform_pivot {
-                        if self.set_selected_symbol_world_pivot(Some(piv), false) {
-                            self.transform_pivot = None;
-                        }
-                    }
+                    self.flush_transform_pivot_to_symbol();
                     self.transform_drag = TransformDragState::Rotate {
                         orig_bbox,
                         pivot,
@@ -292,16 +280,8 @@ impl FlashBrushApp {
                 }
             }
             TransformHoverTarget::Move => {
-                let undo_snapshot = if alt_held {
-                    self.duplicate_selected_shapes_for_alt_drag()
-                } else {
-                    self.shapes.clone()
-                };
-                self.transform_drag = TransformDragState::Move {
-                    last_pos: pt,
-                    total_delta: KVec2::ZERO,
-                    undo_snapshot,
-                };
+                self.transform_drag =
+                    TransformDragState::Move(self.begin_move_selection_drag(pt, alt_held));
             }
             TransformHoverTarget::None => {
                 if let Some(hit_idx) = self
@@ -311,22 +291,11 @@ impl FlashBrushApp {
                     if !self.selected_shapes.contains(&hit_idx) {
                         self.select_single_shape_at(pt);
                     }
-                    let undo_snapshot = if alt_held {
-                        self.duplicate_selected_shapes_for_alt_drag()
-                    } else {
-                        self.shapes.clone()
-                    };
-                    self.transform_drag = TransformDragState::Move {
-                        last_pos: pt,
-                        total_delta: KVec2::ZERO,
-                        undo_snapshot,
-                    };
+                    self.transform_drag =
+                        TransformDragState::Move(self.begin_move_selection_drag(pt, alt_held));
                 } else {
-                    self.transform_drag = TransformDragState::MarqueeSelect {
-                        start_pos: pt,
-                        current_pos: pt,
-                        additive: false,
-                    };
+                    self.transform_drag =
+                        TransformDragState::MarqueeSelect(MarqueeDrag::new(pt, false));
                 }
             }
         }
@@ -346,15 +315,8 @@ impl FlashBrushApp {
                 }
                 new_pivot_pt = Some(pt);
             }
-            TransformDragState::Move {
-                last_pos,
-                total_delta,
-                ..
-            } => {
-                let step_delta = pt - *last_pos;
-                *last_pos = pt;
-                *total_delta += step_delta;
-                move_delta = Some(step_delta);
+            TransformDragState::Move(drag) => {
+                move_delta = Some(drag.step(pt));
             }
             TransformDragState::Scale {
                 handle,
@@ -366,43 +328,28 @@ impl FlashBrushApp {
                 ..
             } => {
                 let eff_anchor = if alt_held { *orig_pivot } else { *anchor };
-                let mut sx = if handle.affects_x() {
-                    let dx0 = handle_start.x - eff_anchor.x;
-                    if dx0.abs() > 1e-3 {
-                        (pt.x - eff_anchor.x) / dx0
+                let axis_scale = |affects: bool, hs: f64, p: f64, a: f64| {
+                    if affects && (hs - a).abs() > 1e-3 {
+                        (p - a) / (hs - a)
                     } else {
                         1.0
                     }
-                } else {
-                    1.0
                 };
-                let mut sy = if handle.affects_y() {
-                    let dy0 = handle_start.y - eff_anchor.y;
-                    if dy0.abs() > 1e-3 {
-                        (pt.y - eff_anchor.y) / dy0
-                    } else {
-                        1.0
-                    }
-                } else {
-                    1.0
-                };
+                let mut sx = axis_scale(handle.affects_x(), handle_start.x, pt.x, eff_anchor.x);
+                let mut sy = axis_scale(handle.affects_y(), handle_start.y, pt.y, eff_anchor.y);
 
                 if shift_held && handle.is_corner() {
                     let mag = sx.abs().max(sy.abs());
                     sx = mag.copysign(sx);
                     sy = mag.copysign(sy);
                 }
-                if sx.abs() < 0.02 {
-                    sx = 0.02_f64.copysign(sx);
-                }
-                if sy.abs() < 0.02 {
-                    sy = 0.02_f64.copysign(sy);
-                }
+                sx = sx.abs().max(0.02).copysign(sx);
+                sy = sy.abs().max(0.02).copysign(sy);
 
                 let affine = affine_scale_around(eff_anchor, sx, sy);
                 for (sel_idx, orig_shape) in orig_shapes.iter() {
                     if let Some(shape) = self.shapes.get_mut(*sel_idx) {
-                        *shape = orig_shape.clone();
+                        shape.clone_from(orig_shape);
                         shape.transform(affine);
                     }
                 }
@@ -429,14 +376,14 @@ impl FlashBrushApp {
                     let affine = affine_rotate_around(*pivot, delta_angle);
                     for (sel_idx, orig_shape) in orig_shapes.iter() {
                         if let Some(shape) = self.shapes.get_mut(*sel_idx) {
-                            *shape = orig_shape.clone();
+                            shape.clone_from(orig_shape);
                             shape.transform(affine);
                         }
                     }
                 }
             }
-            TransformDragState::MarqueeSelect { current_pos, .. } => {
-                *current_pos = pt;
+            TransformDragState::MarqueeSelect(m) => {
+                m.current_pos = pt;
             }
             TransformDragState::None => {}
         }
@@ -455,12 +402,8 @@ impl FlashBrushApp {
     fn finish_transform_drag(&mut self, mouse_pt: Option<Point>) {
         let finished = std::mem::replace(&mut self.transform_drag, TransformDragState::None);
         match finished {
-            TransformDragState::Move {
-                total_delta,
-                undo_snapshot,
-                ..
-            } => {
-                self.finish_move_selection_drag(total_delta, undo_snapshot);
+            TransformDragState::Move(drag) => {
+                self.finish_move_selection_drag(drag.total_delta, drag.undo_snapshot);
             }
             TransformDragState::Scale {
                 undo_snapshot,
@@ -484,13 +427,9 @@ impl FlashBrushApp {
                     self.shapes = undo_snapshot;
                 }
             }
-            TransformDragState::MarqueeSelect {
-                start_pos,
-                current_pos,
-                additive,
-            } => {
-                let end_pos = mouse_pt.unwrap_or(current_pos);
-                self.apply_marquee_selection(start_pos, end_pos, additive);
+            TransformDragState::MarqueeSelect(m) => {
+                let end_pos = mouse_pt.unwrap_or(m.current_pos);
+                self.apply_marquee_selection(m.start_pos, end_pos, m.additive);
             }
             TransformDragState::MovePivot {
                 undo_snapshot,
