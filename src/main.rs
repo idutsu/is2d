@@ -191,6 +191,9 @@ pub(crate) struct FlashBrushApp {
     pub(crate) transform_hover: TransformHoverTarget,
     pub(crate) transform_drag: TransformDragState,
 
+    /// プロパティパネルの下部表示対象（`true`: タイムラインのフレーム/トゥイーン属性、`false`: キャンバス上のシンボル属性）
+    pub(crate) inspect_timeline_frame: bool,
+
     /// 操作トリガーで一定時間表示するトースト通知メッセージ
     pub(crate) status_toast: Option<StatusToast>,
 
@@ -235,6 +238,7 @@ impl Default for FlashBrushApp {
             transform_pivot: None,
             transform_hover: TransformHoverTarget::None,
             transform_drag: TransformDragState::None,
+            inspect_timeline_frame: false,
             status_toast: None,
             tessellator: FillTessellator::new(),
         }

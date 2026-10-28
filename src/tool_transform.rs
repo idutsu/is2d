@@ -226,6 +226,7 @@ impl FlashBrushApp {
     }
 
     fn start_transform_drag(&mut self, pt: Point, shift_held: bool, alt_held: bool) {
+        self.inspect_timeline_frame = false;
         if shift_held && self.compute_transform_hover(pt) == TransformHoverTarget::None {
             self.transform_drag = TransformDragState::MarqueeSelect {
                 start_pos: pt,
@@ -497,6 +498,7 @@ impl FlashBrushApp {
     }
 
     fn handle_transform_click(&mut self, pt: Point, shift_held: bool) {
+        self.inspect_timeline_frame = false;
         if shift_held {
             if let Some(hit_idx) = self.topmost_shape_at(pt) {
                 self.toggle_shape_selection(hit_idx);

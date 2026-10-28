@@ -67,6 +67,7 @@
   - `next_group_id: u64` — グループID／シンボルインスタンスIDの連番採番カウンタ。
   - `clipboard: Vec<FillShape>` / `paste_count: usize` — コピー＆ペースト用内部クリップボードと連続ペーストのオフセット回数。
   - `transform_pivot: Option<Point>` / `transform_hover: TransformHoverTarget` / `transform_drag: TransformDragState` — 自由変形ツール（`Q`）の基準点・ホバー・ドラッグ状態。
+  - `inspect_timeline_frame: bool` — プロパティパネル下部の表示対象フラグ（`true`: タイムラインのフレーム／トゥイーン属性、`false`: キャンバス上のシンボル属性）。
   - `status_toast: Option<StatusToast>` — 操作エラー・警告などを一定時間表示するワンショット通知。
   - `tessellator: FillTessellator` — `lyon` の三角形分割器インスタンス。
 
@@ -398,10 +399,11 @@
   - `world_pivot(self) -> Point` — インスタンスの現在のワールド座標における変形中心点（`self.xform * self.pivot`）を返す。
   - `instantiate_shapes(&self, local_shapes: &[FillShape], layer_id: u64, parent_scope: &[u64]) -> Vec<FillShape>` — シンボルのローカル図形群にインスタンスのアフィン変換・レイヤーID・グループパス・バインディングを適用してステージ上の図形群を生成。
   - `parent_scope_from_path(&self, group_path: &[u64]) -> Vec<u64>` — 図形の `group_path` から自身の `instance_gid` を除いた親スコープパスを抽出。
+- **`enum TweenRotate`** — クラシックトゥイーンの回転方向列挙型（`Auto`：最短角度、`Clockwise`：時計回り CW、`CounterClockwise`：反時計回り CCW）。
 - **`enum TweenState`** — キーフレーム区間のクラシックトゥイーン状態：
   - `None`（トゥイーン無効）
   - `Incomplete`（トゥイーンONだが条件未達 → タイムライン上に横点線を表示）
-  - `Complete { start_frame, end_frame, start_binding, end_binding }`（開始・終了ともに同一シンボルの単一インスタンスのみ → タイムライン上に実線矢印を表示しTRS線形補間を実行）
+  - `Complete { start_frame, end_frame, start_binding, end_binding, rotate_mode }`（開始・終了ともに同一シンボルの単一インスタンスのみ → タイムライン上に実線矢印を表示しTRS線形補間を実行）
 - **`struct SymbolDef`** — ライブラリに登録されるシンボル定義（`id: u64`, `name: String`, `layers: Vec<Layer>`, `next_layer_id: u64`, `total_frames: usize`）。
   - `new(id: u64, name: String, local_shapes: Vec<FillShape>) -> Self` — ローカル図形群から1レイヤー・1フレームの初期シンボル定義を作成。
   - `collect_visible_local_shapes_at(&self, internal_frame: usize, library: &[SymbolDef], depth: usize) -> Vec<FillShape>` — 指定した内部フレームにおける全可視レイヤーのローカル図形を収集（入れ子シンボル・内部トゥイーンも再帰評価）。
@@ -431,8 +433,10 @@
   - `place_symbol_instance_from_library(&mut self, symbol_id: u64) -> bool` — ライブラリ内の指定シンボルをステージ中央へ新しいインスタンスとして配置。
   - `delete_symbol_from_library(&mut self, symbol_id: u64) -> bool` — 指定シンボルをライブラリから削除し、タイムライン上の全インスタンスを通常のグループ（ベクター図形）へ自動分解。
 - **クラシックトゥイーン操作**：
-  - `can_toggle_tween_at_current_frame(&self) -> bool` — 現在のアクティブレイヤー・現在フレームのキーフレームでクラシックトゥイーンを切り替え可能か判定。
+  - `can_toggle_tween_at_current_frame(&self) -> (bool, bool)` — 現在のアクティブレイヤー・現在フレームのキーフレームでクラシックトゥイーンを切り替え可能か判定。
   - `timeline_toggle_tween(&mut self) -> bool` — 現在フレームが属するキーフレームのクラシックトゥイーン（`T` キー）を ON/OFF 切り替え。
+  - `active_tween_keyframe_info(&self) -> Option<(usize, TweenRotate, bool)>` — 現在選択中のキーフレームがトゥイーン有効な場合に開始フレーム・回転方向・完全トゥイーン判定を返す。
+  - `set_active_keyframe_tween_rotate(&mut self, rotate_mode: TweenRotate) -> bool` — 現在選択中のトゥイーンキーフレームの回転方向（`Auto` / `Clockwise` / `CounterClockwise`）を設定。
 - **シンボル再生オプション（ループ / 1回再生 / 任意のフレーム）**：
   - `selected_single_symbol_info(&self) -> Option<(SymbolInstanceBinding, String, usize)>` — キャンバス上で単一のシンボルインスタンスのみが選択されている場合、その `(binding, シンボル名, シンボル総フレーム数)` を返す。
   - `select_symbol_instance_by_gid(&mut self, instance_gid: u64)` — 指定 `instance_gid` を持つ全構成図形を再選択するヘルパー。
@@ -442,8 +446,9 @@
   - `exit_symbol_timeline(&mut self) -> bool` — シンボル内タイムラインでの編集結果をライブラリ定義へ保存し、親タイムラインへ復帰して全インスタンスの表示を更新。
   - `sync_active_symbol_edit(&mut self)` — シンボル編集中にタイムラインが更新された際、直ちに親セッション側のライブラリ定義へ変更を同期。
   - `refresh_symbol_instances_in_timeline(timeline: &mut Timeline)` — タイムライン内の全レイヤー・全キーフレームに配置されているシンボルインスタンスを最新のライブラリ定義で再構築。
-- **シンボル関連UI描画（プロパティパネル＆ライブラリタブ）**：
-  - `draw_selected_symbol_properties(&mut self, ui: &mut egui::Ui)` — 単一シンボル選択時に右プロパティパネルへ表示される「シンボル再生設定」（`ループ` / `1回再生` / `任意のフレーム` 切り替え、フレーム番号 `DragValue`、クイックフレーム選択ボタン、タイムライン編集ボタン）を描画。
+- **フレーム（トゥイーン）＆シンボル関連UI描画（プロパティパネル＆ライブラリタブ）**：
+  - `draw_selected_frame_properties(&mut self, ui: &mut egui::Ui)` — タイムライン上でトゥイーンキーフレームを選択した際に右プロパティパネル下部へ表示される「クラシックトゥイーン」（回転の向き：`自動` / `時計回り (CW)` / `反時計回り (CCW)`）を描画。
+  - `draw_selected_symbol_properties(&mut self, ui: &mut egui::Ui)` — キャンバス上で単一シンボル選択時に右プロパティパネル下部へ表示される「シンボル再生オプション」（`ループ再生` / `1回再生` / `任意のフレーム` 切り替え、フレーム番号 `DragValue`、シンボル編集ボタン）を描画。
   - `draw_library_tab(&mut self, ui: &mut egui::Ui)` — 右パネルの `ライブラリ` タブ（選択図形のシンボル登録ボタン、登録済みシンボル一覧カード、名前インライン編集、ミニプレビュー、配置・編集・削除ボタン）を描画。
   - `draw_symbol_mini_preview(ui: &mut egui::Ui, sym: &SymbolDef, library: &[SymbolDef])` — ライブラリカード左側のシンボル縮小プレビューを描画。
 

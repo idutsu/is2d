@@ -482,6 +482,7 @@ impl FlashBrushApp {
 
     /// 指定したシェイプインデックス `shape_idx` が属するレイヤーへ `self.timeline.active_layer` およびタイムライン選択状態を追従させる
     pub(crate) fn focus_active_layer_to_shape(&mut self, shape_idx: usize) {
+        self.inspect_timeline_frame = false;
         if let Some(lid) = self.shapes.get(shape_idx).map(|s| s.layer_id) {
             if let Some(l_idx) = self.timeline.layer_index_by_id(lid) {
                 self.timeline.active_layer = l_idx;
@@ -494,6 +495,7 @@ impl FlashBrushApp {
 
     /// キャンバス上で選択されたシェイプ群（`self.selected_shapes`）が所属するレイヤーをタイムライン上で選択状態にする
     pub(crate) fn sync_timeline_layer_from_canvas_selection(&mut self) {
+        self.inspect_timeline_frame = false;
         let mut min_l: Option<usize> = None;
         let mut max_l: Option<usize> = None;
         let mut last_l: Option<usize> = None;

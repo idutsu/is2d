@@ -94,6 +94,7 @@ impl FlashBrushApp {
         self.selection_modified = false;
         self.selected_shapes.clear();
         self.transform_pivot = None;
+        self.inspect_timeline_frame = false;
     }
 
     /// 現在の編集スコープ（`editing_group_path`）内で、指定座標 `pt` にヒットする最前面シェイプのインデックスを返す
@@ -1257,6 +1258,7 @@ impl FlashBrushApp {
     }
 
     fn start_reshape_drag(&mut self, pt: Point, shift_held: bool) {
+        self.inspect_timeline_frame = false;
         if shift_held {
             self.select_drag = SelectDragState::MarqueeSelect {
                 start_pos: pt,
@@ -1509,6 +1511,7 @@ impl FlashBrushApp {
     }
 
     fn handle_reshape_click(&mut self, pt: Point, shift_held: bool) {
+        self.inspect_timeline_frame = false;
         let hit_shape = self
             .topmost_shape_at(pt)
             .or_else(|| self.compute_hover_target(pt).shape_idx());

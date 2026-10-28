@@ -175,7 +175,7 @@ impl Contour {
     }
 }
 
-pub(crate) use crate::symbol::SymbolInstanceBinding;
+pub(crate) use crate::symbol::{SymbolInstanceBinding, TweenRotate};
 
 /// キャンバス上の1つの塗りシェイプ（色 + 外周2次ベジェ輪郭 + 穴の2次ベジェ輪郭リスト + 所属レイヤーID + グループ階層 + シンボル紐付け + 描画・判定キャッシュ）
 #[derive(Clone, Debug)]
@@ -365,13 +365,14 @@ pub(crate) fn affine_rotate_around(pivot: Point, angle_rad: f64) -> Affine {
 }
 
 /// 2つの2Dアフィン変換行列 `start` と `end` を、それぞれのローカル基準点（ピボット）`start_pivot`, `end_pivot` を軸として
-/// TRS（ピボットのワールド平行移動・最短回転・スケール・シアー）に分解し、
+/// TRS（ピボットのワールド平行移動・指定回転方向・スケール・シアー）に分解し、
 /// パラメータ `t`（`0.0..=1.0`）で補間した `(補間後の Affine, 補間後のローカルピボット Point)` を返す（クラシックトゥイーン用）
 pub(crate) fn interpolate_affine_with_pivot(
     start: Affine,
     start_pivot: Point,
     end: Affine,
     end_pivot: Point,
+    rotate_mode: TweenRotate,
     t: f64,
 ) -> (Affine, Point) {
     // 片方のキーフレームのみピボットが移動されている（もう片方が初期位置 (0, 0) のまま）場合は、
@@ -395,10 +396,30 @@ pub(crate) fn interpolate_affine_with_pivot(
     let (_, _, rot0, sx0, sy0, sh0) = decompose_affine_trs(start);
     let (_, _, rot1, sx1, sy1, sh1) = decompose_affine_trs(end);
 
-    let mut delta_rot = (rot1 - rot0).rem_euclid(std::f64::consts::TAU);
-    if delta_rot > std::f64::consts::PI {
-        delta_rot -= std::f64::consts::TAU;
-    }
+    let cw_delta = (rot1 - rot0).rem_euclid(std::f64::consts::TAU);
+    let delta_rot = match rotate_mode {
+        TweenRotate::Auto => {
+            if cw_delta > std::f64::consts::PI {
+                cw_delta - std::f64::consts::TAU
+            } else {
+                cw_delta
+            }
+        }
+        TweenRotate::Clockwise => {
+            if cw_delta < 1e-5 || (std::f64::consts::TAU - cw_delta) < 1e-5 {
+                std::f64::consts::TAU
+            } else {
+                cw_delta
+            }
+        }
+        TweenRotate::CounterClockwise => {
+            if cw_delta < 1e-5 || (std::f64::consts::TAU - cw_delta) < 1e-5 {
+                -std::f64::consts::TAU
+            } else {
+                cw_delta - std::f64::consts::TAU
+            }
+        }
+    };
     let rot = rot0 + delta_rot * t;
     let sx = sx0 + (sx1 - sx0) * t;
     let sy = sy0 + (sy1 - sy0) * t;

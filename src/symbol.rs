@@ -57,6 +57,18 @@ impl SymbolInstanceBinding {
     }
 }
 
+/// クラシックトゥイーンの回転方向（Adobe Animate のトゥイーン回転設定相当）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum TweenRotate {
+    /// 自動：開始角度から終了角度へ最短の角度差（`-180°..=+180°`）で回転する
+    #[default]
+    Auto,
+    /// 時計回り (CW)：時計回り（右回り）方向に回転する
+    Clockwise,
+    /// 反時計回り (CCW)：反時計回り（左回り）方向に回転する
+    CounterClockwise,
+}
+
 /// キーフレーム区間におけるクラシックトゥイーン（`T` キー）の有効状態
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -71,6 +83,7 @@ pub(crate) enum TweenState {
         end_frame: usize,
         start_binding: SymbolInstanceBinding,
         end_binding: SymbolInstanceBinding,
+        rotate_mode: TweenRotate,
     },
 }
 
@@ -160,6 +173,7 @@ impl Layer {
                     end_frame: next_kf.start_frame,
                     start_binding,
                     end_binding,
+                    rotate_mode: kf.tween_rotate,
                 };
             }
         }
@@ -179,6 +193,7 @@ impl Layer {
                 end_frame,
                 start_binding,
                 end_binding,
+                rotate_mode,
             } if frame > start_frame && frame < end_frame => {
                 let t = (frame - start_frame) as f64 / (end_frame - start_frame) as f64;
                 let (interp_xform, interp_pivot) = interpolate_affine_with_pivot(
@@ -186,6 +201,7 @@ impl Layer {
                     start_binding.pivot,
                     end_binding.xform,
                     end_binding.pivot,
+                    rotate_mode,
                     t,
                 );
                 Some((
@@ -660,6 +676,7 @@ impl FlashBrushApp {
         }
         self.selection_modified = false;
         self.transform_pivot = None;
+        self.inspect_timeline_frame = false;
         Some(sym_id)
     }
 
@@ -792,8 +809,55 @@ impl FlashBrushApp {
         if changed {
             self.load_shapes_from_timeline();
             self.select_shapes_for_timeline_selection();
+            self.inspect_timeline_frame = true;
         }
         changed
+    }
+
+    /// 現在選択されているアクティブレイヤー・現在フレームが属するキーフレームがクラシックトゥイーン有効である場合、
+    /// `(キーフレーム開始フレーム 0-indexed, 現在の回転モード TweenRotate, 完全トゥイーンか)` を返す
+    pub(crate) fn active_tween_keyframe_info(&self) -> Option<(usize, TweenRotate, bool)> {
+        let layer = self.timeline.layers.get(self.timeline.active_layer)?;
+        let kf_idx = layer.keyframe_index_at(self.timeline.current_frame)?;
+        let kf = layer.keyframes.get(kf_idx)?;
+        if !kf.tween || kf.cel.single_symbol_instance().is_none() {
+            return None;
+        }
+        let is_complete = matches!(
+            layer.tween_state_at_keyframe(kf_idx),
+            TweenState::Complete { .. }
+        );
+        Some((kf.start_frame, kf.tween_rotate, is_complete))
+    }
+
+    /// 現在のアクティブレイヤー・現在フレームが属するトゥイーンキーフレームの回転方向 `tween_rotate` を設定する
+    pub(crate) fn set_active_keyframe_tween_rotate(&mut self, rotate_mode: TweenRotate) -> bool {
+        let Some(layer) = self.timeline.layers.get(self.timeline.active_layer) else {
+            return false;
+        };
+        if layer.locked || !layer.visible {
+            return false;
+        }
+        let Some(kf_idx) = layer.keyframe_index_at(self.timeline.current_frame) else {
+            return false;
+        };
+        if !layer.keyframes[kf_idx].tween
+            || layer.keyframes[kf_idx].tween_rotate == rotate_mode
+        {
+            return false;
+        }
+
+        self.flush_canvas_before_timeline_op();
+        self.push_undo();
+        if let Some(layer_mut) = self.timeline.layers.get_mut(self.timeline.active_layer) {
+            if let Some(kf) = layer_mut.keyframes.get_mut(kf_idx) {
+                kf.tween_rotate = rotate_mode;
+            }
+        }
+        self.load_shapes_from_timeline();
+        self.select_shapes_for_timeline_selection();
+        self.inspect_timeline_frame = true;
+        true
     }
 
     /// 現在選択されている図形が単一のシンボルインスタンスである場合、その `(SymbolInstanceBinding, シンボル名, シンボル総フレーム数)` を返す
@@ -1040,10 +1104,92 @@ impl FlashBrushApp {
     }
 
     // ============================================================================
-    // 4. シンボルプロパティ・ライブラリパネルUI描画
+    // 4. フレーム（トゥイーン）プロパティ・シンボルプロパティ・ライブラリパネルUI描画
     // ============================================================================
 
-    /// 単一のシンボルインスタンスが選択されているときにプロパティパネルに表示する再生オプション（1回再生 / ループ再生 / 任意のフレーム）
+    /// タイムラインでキーフレーム（またはトゥイーン区間）を明示的に選択しているときにプロパティパネル下部に表示するトゥイーン設定（回転の向き）
+    pub(crate) fn draw_selected_frame_properties(&mut self, ui: &mut egui::Ui) {
+        let Some((kf_start_frame, current_rotate, is_complete)) = self.active_tween_keyframe_info()
+        else {
+            return;
+        };
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("⇄ クラシックトゥイーン")
+                    .size(11.5)
+                    .strong()
+                    .color(Color32::from_rgb(105, 55, 185)),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let status_label = if is_complete {
+                    format!("KF {}f", kf_start_frame + 1)
+                } else {
+                    format!("KF {}f (未完)", kf_start_frame + 1)
+                };
+                ui.label(
+                    egui::RichText::new(status_label)
+                        .size(10.5)
+                        .color(Color32::from_rgb(110, 118, 130)),
+                );
+            });
+        });
+
+        ui.add_space(6.0);
+        draw_panel_section_label(ui, "回転の向き", 4.0);
+
+        let mut next_rotate = current_rotate;
+        if ui
+            .add_sized(
+                Vec2::new(ui.available_width(), 26.0),
+                egui::Button::new("自動（最短角度）")
+                    .selected(current_rotate == TweenRotate::Auto),
+            )
+            .on_hover_text("開始角度から終了角度へ最短の角度差で回転します")
+            .clicked()
+        {
+            next_rotate = TweenRotate::Auto;
+        }
+
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let half_w = (ui.available_width() - 6.0) * 0.5;
+            if ui
+                .add_sized(
+                    Vec2::new(half_w, 26.0),
+                    egui::Button::new(format!("{} 時計回り (CW)", icons::ROTATE_RIGHT))
+                        .selected(current_rotate == TweenRotate::Clockwise),
+                )
+                .on_hover_text("時計回り（右回り）方向に回転して補間します")
+                .clicked()
+            {
+                next_rotate = TweenRotate::Clockwise;
+            }
+            if ui
+                .add_sized(
+                    Vec2::new(half_w, 26.0),
+                    egui::Button::new(format!("{} 反時計回り (CCW)", icons::ROTATE_LEFT))
+                        .selected(current_rotate == TweenRotate::CounterClockwise),
+                )
+                .on_hover_text("反時計回り（左回り）方向に回転して補間します")
+                .clicked()
+            {
+                next_rotate = TweenRotate::CounterClockwise;
+            }
+        });
+
+        if next_rotate != current_rotate {
+            self.set_active_keyframe_tween_rotate(next_rotate);
+        }
+    }
+
+    /// キャンバス上で単一のシンボルインスタンスを選択しているときにプロパティパネル下部に表示する再生オプション（1回再生 / ループ再生 / 任意のフレーム）
     pub(crate) fn draw_selected_symbol_properties(&mut self, ui: &mut egui::Ui) {
         let Some((binding, sym_name, sym_total_frames)) = self.selected_single_symbol_info() else {
             return;

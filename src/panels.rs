@@ -343,6 +343,15 @@ impl FlashBrushApp {
             Tool::Bucket => self.draw_bucket_tool_properties(ui),
             Tool::Eyedropper => self.draw_eyedropper_tool_properties(ui),
         }
+
+        // 下部ぶら下がりセクション：
+        // - タイムラインのフレームを明示的に選択したときは「キーフレーム / トゥイーン設定（回転の向き等）」
+        // - キャンバス上のシンボルを選択したとき（選択 / 自由変形ツール時）は「シンボル再生オプション」
+        if self.inspect_timeline_frame {
+            self.draw_selected_frame_properties(ui);
+        } else if matches!(self.tool, Tool::Select | Tool::Transform) {
+            self.draw_selected_symbol_properties(ui);
+        }
     }
 
     /// 選択ツール (`Tool::Select`) のプロパティ設定項目
@@ -408,8 +417,6 @@ impl FlashBrushApp {
         {
             self.convert_selection_to_symbol();
         }
-
-        self.draw_selected_symbol_properties(ui);
     }
 
     /// 自由変形ツール (`Tool::Transform`) のプロパティ設定項目
@@ -485,8 +492,6 @@ impl FlashBrushApp {
         {
             self.reset_selected_transform_pivot();
         }
-
-        self.draw_selected_symbol_properties(ui);
     }
 
     /// ブラシツール (`Tool::Brush`) のプロパティ設定項目

@@ -1729,6 +1729,33 @@
             app.shapes[0].contains_point(expected_mid_center),
             "中間フレーム (t=0.5) でピボット (100, 150) を軸とした +45° 回転位置にシェイプが存在すること"
         );
+
+        // 9. タイムラインのキーフレーム選択時とキャンバス上のシンボル選択時で `inspect_timeline_frame` が切り替わり、
+        //    トゥイーンの回転方向（時計回り CW / 反時計回り CCW）が中間フレームに反映されること
+        app.select_timeline_cells(0, 0, 0, 0);
+        assert!(
+            app.inspect_timeline_frame,
+            "タイムラインのセルを選択したときはフレーム属性表示モード (inspect_timeline_frame = true) になること"
+        );
+        app.select_single_shape_at(Point::new(150.0, 150.0));
+        assert!(
+            !app.inspect_timeline_frame,
+            "キャンバス上のシンボルをクリックしたときはシンボル属性表示モード (inspect_timeline_frame = false) になること"
+        );
+
+        // 先頭キーフレームを選択して回転の向きを「反時計回り (CCW)」に変更すると、
+        // 0° -> +90° (CW) の終了角度へ反時計回りに -270° 回転し、中間フレーム (t=0.5) では -135° 位置を通過すること
+        app.select_timeline_cells(0, 0, 0, 0);
+        assert!(app.set_active_keyframe_tween_rotate(crate::symbol::TweenRotate::CounterClockwise));
+        app.switch_to_layer_and_frame(0, 2);
+        let expected_ccw_mid_center = Point::new(
+            100.0 - 50.0 * std::f64::consts::FRAC_1_SQRT_2,
+            150.0 - 50.0 * std::f64::consts::FRAC_1_SQRT_2,
+        );
+        assert!(
+            app.shapes[0].contains_point(expected_ccw_mid_center),
+            "反時計回り (CCW) 指定時は中間フレーム (t=0.5) で -135° 回転位置を通過すること"
+        );
     }
 
     #[test]

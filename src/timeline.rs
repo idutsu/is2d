@@ -1,5 +1,5 @@
 use crate::{
-    symbol::SymbolDef,
+    symbol::{SymbolDef, TweenRotate},
     vector_engine::{
         append_mesh, transform_mesh_to_screen, transform_mesh_to_screen_onion, FillShape,
         SymbolInstanceBinding,
@@ -92,12 +92,13 @@ impl Cel {
     }
 }
 
-/// タイムライン上のキーフレーム（開始フレーム番号 0-indexed、セル画 `Cel`、クラシックトゥイーン有効フラグ `tween`）
+/// タイムライン上のキーフレーム（開始フレーム番号 0-indexed、セル画 `Cel`、クラシックトゥイーン有効フラグ `tween`、トゥイーン回転方向 `tween_rotate`）
 #[derive(Clone, Debug)]
 pub(crate) struct Keyframe {
     pub(crate) start_frame: usize,
     pub(crate) cel: Cel,
     pub(crate) tween: bool,
+    pub(crate) tween_rotate: TweenRotate,
 }
 
 impl Keyframe {
@@ -106,6 +107,7 @@ impl Keyframe {
             start_frame,
             cel: Cel::default(),
             tween: false,
+            tween_rotate: TweenRotate::Auto,
         }
     }
 
@@ -116,6 +118,7 @@ impl Keyframe {
         } else {
             self.cel.shapes.clear();
             self.tween = false;
+            self.tween_rotate = TweenRotate::Auto;
             true
         }
     }
@@ -290,6 +293,13 @@ impl Layer {
             Vec::new()
         };
 
+        let inherited_rotate = if split_tween_binding.is_some() {
+            self.keyframe_index_at(frame)
+                .map(|idx| self.keyframes[idx].tween_rotate)
+                .unwrap_or(TweenRotate::Auto)
+        } else {
+            TweenRotate::Auto
+        };
         let insert_idx = self.keyframes.partition_point(|kf| kf.start_frame < frame);
         self.keyframes.insert(
             insert_idx,
@@ -297,6 +307,7 @@ impl Layer {
                 start_frame: frame,
                 cel: Cel::new(cloned_shapes),
                 tween: split_tween_binding.is_some(),
+                tween_rotate: inherited_rotate,
             },
         );
         insert_idx
@@ -379,20 +390,23 @@ impl Layer {
                 start_frame: kf.start_frame - min_frame,
                 cel: kf.cel.clone(),
                 tween: kf.tween,
+                tween_rotate: kf.tween_rotate,
             })
             .collect();
 
         if !kfs.iter().any(|kf| kf.start_frame == 0) {
             let fallback_cel = self.cel_at(min_frame).cloned().unwrap_or_default();
-            let fallback_tween = self
+            let (fallback_tween, fallback_rotate) = self
                 .keyframe_index_at(min_frame)
-                .is_some_and(|idx| self.keyframes[idx].tween);
+                .map(|idx| (self.keyframes[idx].tween, self.keyframes[idx].tween_rotate))
+                .unwrap_or((false, TweenRotate::Auto));
             kfs.insert(
                 0,
                 Keyframe {
                     start_frame: 0,
                     cel: fallback_cel,
                     tween: fallback_tween,
+                    tween_rotate: fallback_rotate,
                 },
             );
         }
@@ -424,6 +438,11 @@ impl Layer {
                 shape.layer_id = dst_lid;
             }
             let valid_tween = kf.tween && kf.cel.single_symbol_instance().is_some();
+            let rotate_mode = if valid_tween {
+                kf.tween_rotate
+            } else {
+                TweenRotate::Auto
+            };
             let target_f = dst_min_frame + kf.start_frame;
             if let Some(existing) = self
                 .keyframes
@@ -432,6 +451,7 @@ impl Layer {
             {
                 existing.cel = kf.cel;
                 existing.tween = valid_tween;
+                existing.tween_rotate = rotate_mode;
             } else {
                 let pos = self
                     .keyframes
@@ -442,6 +462,7 @@ impl Layer {
                         start_frame: target_f,
                         cel: kf.cel,
                         tween: valid_tween,
+                        tween_rotate: rotate_mode,
                     },
                 );
             }
@@ -831,6 +852,7 @@ impl FlashBrushApp {
             })
             .collect();
         self.transform_pivot = None;
+        self.inspect_timeline_frame = true;
     }
 
     /// タイムラインのセル範囲を選択し、そのレイヤー群の現在フレームにある全図形をキャンバス上で選択状態にする
@@ -871,6 +893,7 @@ impl FlashBrushApp {
         self.flush_canvas_before_timeline_op();
         self.timeline.select_single_cell(layer_idx, frame_idx);
         self.load_shapes_from_timeline();
+        self.inspect_timeline_frame = true;
     }
 }
 
