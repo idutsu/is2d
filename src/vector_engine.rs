@@ -11,22 +11,142 @@ use std::{
     cell::RefCell,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex, MutexGuard, OnceLock,
     },
 };
 
-pub(crate) use crate::{
-    symbol::{SymbolInstanceBinding, TweenRotate},
-    vector_boolean::*,
-    vector_stroke::*,
-};
-
 pub(crate) const REFERENCE_BRUSH_RADIUS: f64 = 8.0;
+pub(crate) const MIN_VIEW_ZOOM: f32 = 0.15;
+pub(crate) const MAX_VIEW_ZOOM: f32 = 16.0;
+
+/// シンボルインスタンスのフレーム再生モード（Adobe Animate のグラフィックシンボル相当）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub(crate) enum SymbolLoopMode {
+    /// ループ再生：キーフレーム開始位置からシンボル内部フレームを繰り返し再生する
+    #[default]
+    Loop,
+    /// 1回再生：キーフレーム開始位置からシンボル内部の最終フレームまで再生して停止する
+    PlayOnce,
+    /// 任意のフレーム：指定された `first_frame` の1コマだけを固定表示する
+    SingleFrame,
+}
+
+/// クラシックトゥイーンの回転方向（Adobe Animate のトゥイーン回転設定相当）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub(crate) enum TweenRotate {
+    /// 自動：開始角度から終了角度へ最短の角度差（`-180°..=+180°`）で回転する
+    #[default]
+    Auto,
+    /// 時計回り (CW)：時計回り（右回り）方向に回転する
+    Clockwise,
+    /// 反時計回り (CCW)：反時計回り（左回り）方向に回転する
+    CounterClockwise,
+}
+
+/// シンボルインスタンスに属するシェイプが持つ幾何変換・再生紐付け情報
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SymbolInstanceBinding {
+    pub(crate) instance_gid: u64,
+    pub(crate) symbol_id: u64,
+    pub(crate) xform: Affine,
+    /// シンボルローカル座標系での変形中心点（ピボット）。初期値は `Point::ZERO` `(0.0, 0.0)`
+    pub(crate) pivot: Point,
+    pub(crate) loop_mode: SymbolLoopMode,
+    pub(crate) first_frame: usize,
+}
+
+impl SymbolInstanceBinding {
+    #[inline]
+    pub(crate) fn new(instance_gid: u64, symbol_id: u64, xform: Affine) -> Self {
+        Self {
+            instance_gid,
+            symbol_id,
+            xform,
+            pivot: Point::ZERO,
+            loop_mode: SymbolLoopMode::Loop,
+            first_frame: 0,
+        }
+    }
+
+    /// このインスタンスの現在のワールド座標における変形中心点（ピボット）を返す
+    #[inline]
+    pub(crate) fn world_pivot(self) -> Point {
+        self.xform * self.pivot
+    }
+
+    /// ローカル座標系のシェイプ列 `local_shapes` を、このインスタンスの変換行列 `self.xform`・`layer_id`・
+    /// スコープパス `scope_prefix`（末尾に `self.instance_gid` を自動付与）でステージ座標へ展開する
+    pub(crate) fn instantiate_shapes(
+        self,
+        local_shapes: &[FillShape],
+        layer_id: u64,
+        scope_prefix: &[u64],
+    ) -> Vec<FillShape> {
+        let mut out = Vec::with_capacity(local_shapes.len());
+        for s in local_shapes {
+            let _ = s.fill_mesh();
+            let mut inst_s = s.clone();
+            inst_s.shape_id = next_shape_id();
+            let mut full_path =
+                Vec::with_capacity(scope_prefix.len() + 1 + inst_s.group_path.len());
+            full_path.extend_from_slice(scope_prefix);
+            full_path.push(self.instance_gid);
+            full_path.extend(inst_s.group_path.iter().copied());
+            inst_s.transform_with_cached_mesh(self.xform);
+            inst_s.layer_id = layer_id;
+            inst_s.group_path = full_path;
+            inst_s.symbol_instance = Some(self);
+            out.push(inst_s);
+        }
+        out
+    }
+
+    /// 既存シェイプの `group_path` から、このインスタンス `self.instance_gid` より外側の親スコープパススライスを返す
+    pub(crate) fn parent_scope_from_path(self, group_path: &[u64]) -> &[u64] {
+        let pos = group_path
+            .iter()
+            .position(|&gid| gid == self.instance_gid)
+            .unwrap_or(group_path.len());
+        &group_path[..pos]
+    }
+}
 
 static NEXT_MESH_REVISION: AtomicU64 = AtomicU64::new(1);
+static NEXT_SHAPE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_CONTOUR_ID: AtomicU64 = AtomicU64::new(1);
 
-fn next_mesh_revision() -> u64 {
+pub(crate) fn next_mesh_revision() -> u64 {
     NEXT_MESH_REVISION.fetch_add(1, Ordering::Relaxed)
+}
+
+pub(crate) fn next_shape_id() -> u64 {
+    NEXT_SHAPE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+pub(crate) fn next_contour_id() -> u64 {
+    NEXT_CONTOUR_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// `Arc` と共存可能なスレッドセーフ（`Send + Sync`）かつ `Clone` 対応の内部可変キャッシュラッパー
+#[derive(Debug, Default)]
+pub(crate) struct SyncCache<T>(Mutex<T>);
+
+impl<T> SyncCache<T> {
+    #[inline]
+    pub(crate) fn new(val: T) -> Self {
+        Self(Mutex::new(val))
+    }
+
+    #[inline]
+    pub(crate) fn lock(&self) -> MutexGuard<'_, T> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl<T: Clone> Clone for SyncCache<T> {
+    fn clone(&self) -> Self {
+        Self::new(self.lock().clone())
+    }
 }
 
 thread_local! {
@@ -41,17 +161,26 @@ thread_local! {
 /// 隣接セグメント間で `segments[i].p2 == segments[(i + 1) % len].p0` を常に満たす。
 #[derive(Clone, Debug)]
 pub(crate) struct Contour {
+    /// 輪郭セグメント内容の単調増加リビジョンID（メモリアドレスに依存しない O(1) 同一性比較・逆引きキー用）
+    pub(crate) contour_id: u64,
     pub(crate) segments: Arc<Vec<QuadBez>>,
 }
 
 impl Contour {
     pub(crate) fn new(segments: Vec<QuadBez>) -> Self {
         Self {
+            contour_id: next_contour_id(),
             segments: Arc::new(segments),
         }
     }
 
+    #[inline]
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        self.contour_id == other.contour_id && Arc::ptr_eq(&self.segments, &other.segments)
+    }
+
     pub(crate) fn segments_mut(&mut self) -> &mut Vec<QuadBez> {
+        self.contour_id = next_contour_id();
         Arc::make_mut(&mut self.segments)
     }
 
@@ -237,9 +366,14 @@ pub(crate) type ScreenMeshCacheEntry = ((u32, u32, u32, bool), Arc<Mesh>);
 /// オニオンスキン変換済みメッシュキャッシュのキー（`(zoom_bits, pan_x_bits, pan_y_bits, tint_rgb, alpha)`）とメッシュのペア
 pub(crate) type OnionMeshCacheEntry = ((u32, u32, u32, [u8; 3], u8), Arc<Mesh>);
 
+/// 選択時ドット柄オーバーレイのスクリーン座標変換済みメッシュキャッシュのキー（`(zoom_bits, pan_x_bits, pan_y_bits)`）とメッシュのペア
+pub(crate) type SelectionScreenMeshCacheEntry = ((u32, u32, u32), Arc<Mesh>);
+
 /// キャンバス上の1つの塗りシェイプ（色 + 外周2次ベジェ輪郭 + 穴の2次ベジェ輪郭リスト + 所属レイヤーID + グループ階層 + シンボル紐付け + 描画・判定キャッシュ）
 #[derive(Clone, Debug)]
 pub(crate) struct FillShape {
+    /// 各シェイプインスタンスを順序変更・ソート後も安定して識別する固有ID
+    pub(crate) shape_id: u64,
     pub(crate) color: Color32,
     pub(crate) exterior: Contour,
     pub(crate) holes: Vec<Contour>,
@@ -252,13 +386,16 @@ pub(crate) struct FillShape {
     /// メッシュ内容が更新されるたびにインクリメントされるリビジョン番号（セル結合メッシュキャッシュの差分検知用）
     pub(crate) mesh_revision: u64,
     bbox: KRect,
-    pub(crate) fill_mesh: Arc<Mesh>,
+    fill_mesh: OnceLock<Arc<Mesh>>,
+    screen_mesh_cache: SyncCache<Option<ScreenMeshCacheEntry>>,
     pub(crate) selection_mesh: Option<(u32, Arc<Mesh>)>,
+    pub(crate) selection_screen_mesh: Option<SelectionScreenMeshCacheEntry>,
 }
 
 impl FillShape {
     pub(crate) fn new(color: Color32, exterior: Contour, holes: Vec<Contour>) -> Self {
         let mut shape = Self {
+            shape_id: next_shape_id(),
             color,
             exterior,
             holes,
@@ -267,11 +404,104 @@ impl FillShape {
             symbol_instance: None,
             mesh_revision: 0,
             bbox: KRect::ZERO,
-            fill_mesh: Arc::new(Mesh::default()),
+            fill_mesh: OnceLock::new(),
+            screen_mesh_cache: SyncCache::new(None),
             selection_mesh: None,
+            selection_screen_mesh: None,
         };
         shape.rebuild_cache();
         shape
+    }
+
+    /// 現在フレームで内部図形が空白（0シェイプ）のシンボルインスタンスを、
+    /// `CanvasState::shapes` 内で他の図形と同一の一元配列上で管理するための非表示マーカー要素を生成する
+    pub(crate) fn new_empty_symbol_marker(
+        binding: SymbolInstanceBinding,
+        layer_id: u64,
+        parent_scope: &[u64],
+    ) -> Self {
+        let mut group_path = Vec::with_capacity(parent_scope.len() + 1);
+        group_path.extend_from_slice(parent_scope);
+        group_path.push(binding.instance_gid);
+        let mut shape = Self {
+            shape_id: next_shape_id(),
+            color: Color32::TRANSPARENT,
+            exterior: Contour::new(Vec::new()),
+            holes: Vec::new(),
+            layer_id,
+            group_path,
+            symbol_instance: Some(binding),
+            mesh_revision: 0,
+            bbox: KRect::ZERO,
+            fill_mesh: OnceLock::new(),
+            screen_mesh_cache: SyncCache::new(None),
+            selection_mesh: None,
+            selection_screen_mesh: None,
+        };
+        shape.rebuild_cache();
+        shape
+    }
+
+    /// この要素が空白フレームのシンボルインスタンスを表す非表示マーカーであるか
+    #[inline]
+    pub(crate) fn is_empty_symbol_marker(&self) -> bool {
+        self.exterior.segments.is_empty() && self.symbol_instance.is_some()
+    }
+
+    /// 描画用の塗り `egui::Mesh` を遅延テッセレーションして返す（キャッシュ済みの場合は O(1) で参照を返す）
+    pub(crate) fn fill_mesh(&self) -> &Arc<Mesh> {
+        self.fill_mesh.get_or_init(|| {
+            Arc::new(tessellate_contours_to_mesh(
+                &self.exterior,
+                &self.holes,
+                self.color,
+            ))
+        })
+    }
+
+    /// 指定された `(zoom, pan, dim_backdrop)` に対応するスクリーン座標変換済み `Arc<Mesh>` をキャッシュ経由で返す
+    pub(crate) fn cached_screen_mesh(
+        &self,
+        zoom: f32,
+        pan: Vec2,
+        dim_backdrop: bool,
+    ) -> Arc<Mesh> {
+        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits(), dim_backdrop);
+        if let Some((k, mesh)) = &*self.screen_mesh_cache.lock() {
+            if *k == key {
+                return Arc::clone(mesh);
+            }
+        }
+        let screen_mesh = Arc::new(transform_mesh_to_screen(
+            self.fill_mesh(),
+            zoom,
+            pan,
+            dim_backdrop,
+        ));
+        *self.screen_mesh_cache.lock() = Some((key, Arc::clone(&screen_mesh)));
+        screen_mesh
+    }
+
+    /// いずれかの一時メッシュキャッシュ（`fill_mesh`, `screen_mesh_cache`, `selection_mesh`, `selection_screen_mesh`）を保持しているか
+    #[inline]
+    pub(crate) fn has_any_transient_cache(&self) -> bool {
+        self.fill_mesh.get().is_some()
+            || self.screen_mesh_cache.lock().is_some()
+            || self.selection_mesh.is_some()
+            || self.selection_screen_mesh.is_some()
+    }
+
+    /// Undo 履歴保存時やバックアップ時に、幾何データから随時再生成可能な描画メッシュキャッシュを破棄してメモリを解放する
+    pub(crate) fn strip_transient_caches(&mut self) {
+        self.fill_mesh = OnceLock::new();
+        *self.screen_mesh_cache.lock() = None;
+        self.selection_mesh = None;
+        self.selection_screen_mesh = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_cached_fill_mesh(&self) -> bool {
+        self.fill_mesh.get().is_some()
     }
 
     pub(crate) fn with_layer_id(mut self, layer_id: u64) -> Self {
@@ -290,9 +520,13 @@ impl FillShape {
         self
     }
 
-    /// 外周および全内周穴の `Contour` を順に走査するイテレータを返す
+    /// 実体のある外周および全内周穴の `Contour` を順に走査するイテレータを返す
+    /// （空白フレームのシンボルマーカーの場合は 0 件の空イテレータを返すため、呼び出し側での個別ガードが不要）
     pub(crate) fn contours(&self) -> impl Iterator<Item = &Contour> {
-        std::iter::once(&self.exterior).chain(self.holes.iter())
+        (!self.exterior.segments.is_empty())
+            .then_some(&self.exterior)
+            .into_iter()
+            .chain(self.holes.iter())
     }
 
     /// 指定されたグループ編集スコープ `scope` の内部（直下の生シェイプ、または子孫グループ）に属するか
@@ -315,6 +549,12 @@ impl FillShape {
     }
 
     fn compute_bbox(&self) -> KRect {
+        if self.exterior.segments.is_empty() {
+            if let Some(b) = &self.symbol_instance {
+                let p = b.xform * Point::ZERO;
+                return KRect::from_points(p, p);
+            }
+        }
         let mut bbox = self.exterior.bounding_box();
         for hole in &self.holes {
             bbox = bbox.union(hole.bounding_box());
@@ -324,12 +564,10 @@ impl FillShape {
 
     pub(crate) fn rebuild_cache(&mut self) {
         self.bbox = self.compute_bbox();
-        self.fill_mesh = Arc::new(tessellate_contours_to_mesh(
-            &self.exterior,
-            &self.holes,
-            self.color,
-        ));
+        self.fill_mesh = OnceLock::new();
+        *self.screen_mesh_cache.lock() = None;
         self.selection_mesh = None;
+        self.selection_screen_mesh = None;
         self.mesh_revision = next_mesh_revision();
     }
 
@@ -339,14 +577,52 @@ impl FillShape {
             return;
         }
         self.color = color;
-        for v in &mut Arc::make_mut(&mut self.fill_mesh).vertices {
-            v.color = color;
+        if let Some(arc_mesh) = self.fill_mesh.get_mut() {
+            for v in &mut Arc::make_mut(arc_mesh).vertices {
+                v.color = color;
+            }
         }
+        *self.screen_mesh_cache.lock() = None;
         self.mesh_revision = next_mesh_revision();
+    }
+
+    /// 外周・穴のすべてが指定した `Contour` の `Arc` とポインタ一致するかを返す
+    pub(crate) fn has_same_contour_arcs(&self, exterior: &Contour, holes: &[Contour]) -> bool {
+        self.exterior.ptr_eq(exterior)
+            && self.holes.len() == holes.len()
+            && self
+                .holes
+                .iter()
+                .zip(holes.iter())
+                .all(|(a, b)| a.ptr_eq(b))
+    }
+
+    /// ステージ座標で未変形だった図形の属性（`color`, `layer_id`, `group_path`, `symbol_instance`）を維持したまま、
+    /// 変換誤差のないローカルテンプレート `local_template` の輪郭・メッシュを O(1) で復元する
+    pub(crate) fn restore_from_local_template(
+        &self,
+        local_template: &FillShape,
+        inv_xform: Affine,
+    ) -> FillShape {
+        let mut restored = local_template.clone();
+        restored.layer_id = self.layer_id;
+        restored.group_path = self.group_path.clone();
+        restored.symbol_instance = self.symbol_instance.map(|mut b| {
+            b.xform = inv_xform * b.xform;
+            b
+        });
+        restored.set_color(self.color);
+        restored
     }
 
     pub(crate) fn bounding_box(&self) -> KRect {
         self.bbox
+    }
+
+    /// 実体のあるベクター輪郭を持つ場合のみバウンディングボックスを返す（空白フレームのシンボルマーカーの場合は `None`）
+    #[inline]
+    pub(crate) fn geometry_bounding_box(&self) -> Option<KRect> {
+        (!self.is_empty_symbol_marker()).then_some(self.bbox)
     }
 
     pub(crate) fn contains_point(&self, pt: Point) -> bool {
@@ -373,14 +649,18 @@ impl FillShape {
         }
         self.bbox = self.bbox + delta;
         let d = egui::vec2(delta.x as f32, delta.y as f32);
-        for v in &mut Arc::make_mut(&mut self.fill_mesh).vertices {
-            v.pos += d;
+        if let Some(arc_mesh) = self.fill_mesh.get_mut() {
+            for v in &mut Arc::make_mut(arc_mesh).vertices {
+                v.pos += d;
+            }
         }
+        *self.screen_mesh_cache.lock() = None;
         if let Some((_, sel)) = &mut self.selection_mesh {
             for v in &mut Arc::make_mut(sel).vertices {
                 v.pos += d;
             }
         }
+        self.selection_screen_mesh = None;
         self.mesh_revision = next_mesh_revision();
     }
 
@@ -397,16 +677,57 @@ impl FillShape {
         if let Some(binding) = &mut self.symbol_instance {
             binding.xform = affine * binding.xform;
         }
-        self.bbox = self.compute_bbox();
-        for v in &mut Arc::make_mut(&mut self.fill_mesh).vertices {
-            let x = v.pos.x as f64;
-            let y = v.pos.y as f64;
-            v.pos = Pos2::new(
-                (a * x + c * y + tx) as f32,
-                (b * x + d * y + ty) as f32,
-            );
+        let max_scale_sq = (a * a + b * b).max(c * c + d * d);
+        if max_scale_sq > 1.25 * 1.25 {
+            self.rebuild_cache();
+        } else {
+            self.bbox = self.compute_bbox();
+            if let Some(arc_mesh) = self.fill_mesh.get_mut() {
+                for v in &mut Arc::make_mut(arc_mesh).vertices {
+                    let x = v.pos.x as f64;
+                    let y = v.pos.y as f64;
+                    v.pos = Pos2::new(
+                        (a * x + c * y + tx) as f32,
+                        (b * x + d * y + ty) as f32,
+                    );
+                }
+            }
+            *self.screen_mesh_cache.lock() = None;
+            self.selection_mesh = None;
+            self.selection_screen_mesh = None;
+            self.mesh_revision = next_mesh_revision();
         }
+    }
+
+    /// シンボルインスタンス展開やトゥイーン補間など、既にテッセレーション済みの `fill_mesh` を保持したまま
+    /// アフィン変換を適用し、再生中やオニオンスキン描画での毎フレームの再テッセレーションを回避する
+    pub(crate) fn transform_with_cached_mesh(&mut self, affine: Affine) {
+        let [a, b, c, d, tx, ty] = affine.as_coeffs();
+        let det = a * d - b * c;
+        if !affine.as_coeffs().iter().all(|v| v.is_finite()) || det.abs() < 1e-12 {
+            return;
+        }
+        self.exterior.transform(affine);
+        for hole in &mut self.holes {
+            hole.transform(affine);
+        }
+        if let Some(binding) = &mut self.symbol_instance {
+            binding.xform = affine * binding.xform;
+        }
+        self.bbox = self.compute_bbox();
+        if let Some(arc_mesh) = self.fill_mesh.get_mut() {
+            for v in &mut Arc::make_mut(arc_mesh).vertices {
+                let x = v.pos.x as f64;
+                let y = v.pos.y as f64;
+                v.pos = Pos2::new(
+                    (a * x + c * y + tx) as f32,
+                    (b * x + d * y + ty) as f32,
+                );
+            }
+        }
+        *self.screen_mesh_cache.lock() = None;
         self.selection_mesh = None;
+        self.selection_screen_mesh = None;
         self.mesh_revision = next_mesh_revision();
     }
 
@@ -417,12 +738,29 @@ impl FillShape {
                 return Arc::clone(mesh);
             }
         }
-        let mesh = Arc::new(build_polka_dot_selection_mesh(&self.fill_mesh, zoom));
+        let mesh = Arc::new(build_polka_dot_selection_mesh(self.fill_mesh(), zoom));
         self.selection_mesh = Some((key, Arc::clone(&mesh)));
         mesh
     }
 
+    /// 指定された `(zoom, pan)` に対応するスクリーン座標変換済みのドット柄選択オーバーレイ `Arc<Mesh>` をキャッシュ経由で返す
+    pub(crate) fn cached_selection_screen_mesh(&mut self, zoom: f32, pan: Vec2) -> Arc<Mesh> {
+        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
+        if let Some((k, mesh)) = &self.selection_screen_mesh {
+            if *k == key {
+                return Arc::clone(mesh);
+            }
+        }
+        let world_sel = self.selection_overlay_mesh(zoom);
+        let screen_sel = Arc::new(transform_mesh_to_screen(&world_sel, zoom, pan, false));
+        self.selection_screen_mesh = Some((key, Arc::clone(&screen_sel)));
+        screen_sel
+    }
+
     pub(crate) fn get_contour(&self, idx: usize) -> Option<&Contour> {
+        if self.exterior.segments.is_empty() {
+            return None;
+        }
         if idx == 0 {
             Some(&self.exterior)
         } else {
@@ -431,6 +769,9 @@ impl FillShape {
     }
 
     pub(crate) fn get_contour_mut(&mut self, idx: usize) -> Option<&mut Contour> {
+        if self.exterior.segments.is_empty() {
+            return None;
+        }
         if idx == 0 {
             Some(&mut self.exterior)
         } else {
@@ -668,6 +1009,15 @@ pub(crate) fn rects_overlap(a: KRect, b: KRect) -> bool {
     a.x0 <= b.x1 && a.x1 >= b.x0 && a.y0 <= b.y1 && a.y1 >= b.y0
 }
 
+pub(crate) fn union_bounding_boxes(shapes: &[FillShape]) -> KRect {
+    let Some(first) = shapes.first() else {
+        return KRect::ZERO;
+    };
+    shapes[1..]
+        .iter()
+        .fold(first.bounding_box(), |acc, s| acc.union(s.bounding_box()))
+}
+
 // ============================================================================
 // Lyon テッセレーション描画エンジン (2次ベジェパス -> GPU Mesh)
 // ============================================================================
@@ -694,12 +1044,36 @@ fn tessellate_contours_to_mesh(exterior: &Contour, holes: &[Contour], color: Col
 }
 
 fn build_polka_dot_selection_mesh(fill_mesh: &Mesh, zoom: f32) -> Mesh {
+    const MAX_POLKA_DOT_GRID_CELLS: f32 = 25_000.0;
+    const MAX_POLKA_DOT_VERTICES: usize = 65_536;
+
     let mut sel_mesh = Mesh::default();
-    let inv_z = 1.0 / zoom.clamp(0.15, 16.0);
-    let step: f32 = 6.0 * inv_z;
-    let r_white = 1.15 * inv_z;
-    let r_dark = 0.85 * inv_z;
-    let offset_dark = 0.7 * inv_z;
+    if fill_mesh.vertices.is_empty() || fill_mesh.indices.len() < 3 {
+        return sel_mesh;
+    }
+
+    let mut mesh_min_x = f32::INFINITY;
+    let mut mesh_max_x = f32::NEG_INFINITY;
+    let mut mesh_min_y = f32::INFINITY;
+    let mut mesh_max_y = f32::NEG_INFINITY;
+    for v in &fill_mesh.vertices {
+        mesh_min_x = mesh_min_x.min(v.pos.x);
+        mesh_max_x = mesh_max_x.max(v.pos.x);
+        mesh_min_y = mesh_min_y.min(v.pos.y);
+        mesh_max_y = mesh_max_y.max(v.pos.y);
+    }
+    let bbox_area = (mesh_max_x - mesh_min_x).max(0.0) * (mesh_max_y - mesh_min_y).max(0.0);
+    if !bbox_area.is_finite() {
+        return sel_mesh;
+    }
+
+    let base_inv_z = 1.0 / zoom.clamp(MIN_VIEW_ZOOM, MAX_VIEW_ZOOM);
+    let min_step_for_budget = (bbox_area / MAX_POLKA_DOT_GRID_CELLS).sqrt();
+    let step: f32 = (6.0 * base_inv_z).max(min_step_for_budget).max(1e-3);
+    let scale = step / 6.0;
+    let r_white = 1.15 * scale;
+    let r_dark = 0.85 * scale;
+    let offset_dark = 0.7 * scale;
     let white = Color32::from_rgba_unmultiplied(255, 255, 255, 220);
     let dark = Color32::from_rgba_unmultiplied(20, 20, 20, 180);
 
@@ -731,7 +1105,7 @@ fn build_polka_dot_selection_mesh(fill_mesh: &Mesh, zoom: f32) -> Mesh {
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     };
 
-    for tri in fill_mesh.indices.chunks_exact(3) {
+    'tri_loop: for tri in fill_mesh.indices.chunks_exact(3) {
         let a = fill_mesh.vertices[tri[0] as usize].pos;
         let b = fill_mesh.vertices[tri[1] as usize].pos;
         let c = fill_mesh.vertices[tri[2] as usize].pos;
@@ -772,6 +1146,9 @@ fn build_polka_dot_selection_mesh(fill_mesh: &Mesh, zoom: f32) -> Mesh {
                 if (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0)
                     || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0)
                 {
+                    if sel_mesh.vertices.len() + 8 > MAX_POLKA_DOT_VERTICES {
+                        break 'tri_loop;
+                    }
                     let pt = Pos2::new(x, y);
                     push_dot_quad(&mut sel_mesh, pt, r_white, white);
                     push_dot_quad(
@@ -894,4 +1271,10 @@ pub(crate) fn append_mesh(dst: &mut Mesh, src: &Mesh) {
     dst.vertices.extend_from_slice(&src.vertices);
     dst.indices
         .extend(src.indices.iter().map(|&idx| base + idx));
+}
+
+/// `Arc<egui::Mesh>` を単一所有時はムーブ、共有時はクローンで `egui::Shape::Mesh` に変換する
+#[inline]
+pub(crate) fn arc_mesh_to_shape(mesh: Arc<Mesh>) -> egui::Shape {
+    egui::Shape::Mesh(Arc::unwrap_or_clone(mesh))
 }

@@ -31,7 +31,10 @@ pub(crate) fn generate_brush_outline_at_zoom(
         return Vec::new();
     }
 
-    let z = zoom.clamp(0.15, 16.0);
+    let z = zoom.clamp(
+        crate::vector_engine::MIN_VIEW_ZOOM as f64,
+        crate::vector_engine::MAX_VIEW_ZOOM as f64,
+    );
     let r = radius.clamp(0.05, 2000.0);
     let screen_r = r * z;
     let min_step = (0.15 * screen_r).clamp(0.2, 0.8) / z;
@@ -182,7 +185,10 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
         return Vec::new();
     }
 
-    let z = zoom.clamp(0.15, 16.0);
+    let z = zoom.clamp(
+        crate::vector_engine::MIN_VIEW_ZOOM as f64,
+        crate::vector_engine::MAX_VIEW_ZOOM as f64,
+    );
     let to_world = Affine::scale(1.0 / z);
     let scale_to_world = |mut contour: Contour| -> Contour {
         if (z - 1.0).abs() > 1e-9 {
@@ -448,6 +454,16 @@ fn clamp_run_bounds(
     (b, a)
 }
 
+struct RingTurnMetrics {
+    t_1: Vec<f64>,
+    t_short: Vec<f64>,
+    t_local: Vec<f64>,
+    t_macro: Vec<f64>,
+    w_short: usize,
+    w_local: usize,
+    w_macro: usize,
+}
+
 /// 輪郭頂点を「鋭角コーナー (`is_sharp_corner`)」「丸円弧 (`is_round_arc`)」「低曲率側面」に分類し、
 /// 最長の低曲率側面の中央が index 0 になるよう回転して返す。
 fn classify_and_align_ring_features(
@@ -471,30 +487,25 @@ fn classify_and_align_ring_features(
         signed_angle(d_in, d_out)
     };
 
-    let mut t_1 = vec![0.0; m];
-    let mut t_short = vec![0.0; m];
-    let mut t_local = vec![0.0; m];
-    let mut t_macro = vec![0.0; m];
-
-    for i in 0..m {
-        t_1[i] = signed_turn_at(dense, i, 1);
-        t_short[i] = signed_turn_at(dense, i, w_short);
-        t_local[i] = signed_turn_at(dense, i, w_local);
-        t_macro[i] = signed_turn_at(dense, i, w_macro);
-    }
-
-    // (A) 鋭角コーナー・自己交差分岐点（外周の凹V字ノッチや、穴の内角など）の検出
-    let mut is_sharp_corner = detect_sharp_corners(
-        &t_1,
-        &t_short,
-        &t_local,
-        &t_macro,
+    let mut turns = RingTurnMetrics {
+        t_1: vec![0.0; m],
+        t_short: vec![0.0; m],
+        t_local: vec![0.0; m],
+        t_macro: vec![0.0; m],
         w_short,
         w_local,
         w_macro,
-        winding_sign,
-        is_exterior,
-    );
+    };
+
+    for i in 0..m {
+        turns.t_1[i] = signed_turn_at(dense, i, 1);
+        turns.t_short[i] = signed_turn_at(dense, i, w_short);
+        turns.t_local[i] = signed_turn_at(dense, i, w_local);
+        turns.t_macro[i] = signed_turn_at(dense, i, w_macro);
+    }
+
+    // (A) 鋭角コーナー・自己交差分岐点（外周の凹V字ノッチや、穴の内角など）の検出
+    let mut is_sharp_corner = detect_sharp_corners(&turns, winding_sign, is_exterior);
 
     if is_sharp_corner.iter().any(|&b| b) {
         let clamped_turn = |idx: usize, max_w: usize| -> f64 {
@@ -508,17 +519,16 @@ fn classify_and_align_ring_features(
             let d_out = normalize_vec(dense[(idx + w_f) % m] - dense[idx]);
             signed_angle(d_in, d_out)
         };
-        for i in 0..m {
-            if !is_sharp_corner[i] {
-                t_local[i] = clamped_turn(i, w_local);
-                t_macro[i] = clamped_turn(i, w_macro);
+        for (i, &sharp) in is_sharp_corner.iter().enumerate() {
+            if !sharp {
+                turns.t_local[i] = clamped_turn(i, w_local);
+                turns.t_macro[i] = clamped_turn(i, w_macro);
             }
         }
     }
 
     // (B) 滑らかな丸円弧（Round Cap / Round Corner）の候補検出
-    let mut is_round_arc =
-        detect_round_arcs(&t_short, &t_local, &t_macro, &is_sharp_corner, w_macro);
+    let mut is_round_arc = detect_round_arcs(&turns, &is_sharp_corner);
 
     let mut is_high_curv: Vec<bool> = (0..m)
         .map(|i| is_sharp_corner[i] || is_round_arc[i])
@@ -526,8 +536,8 @@ fn classify_and_align_ring_features(
 
     if let Some(rot_idx) = find_longest_false_run_midpoint(&is_high_curv) {
         dense.rotate_left(rot_idx);
-        t_local.rotate_left(rot_idx);
-        t_macro.rotate_left(rot_idx);
+        turns.t_local.rotate_left(rot_idx);
+        turns.t_macro.rotate_left(rot_idx);
         is_sharp_corner.rotate_left(rot_idx);
         is_round_arc.rotate_left(rot_idx);
         is_high_curv.rotate_left(rot_idx);
@@ -535,32 +545,99 @@ fn classify_and_align_ring_features(
 
     filter_protected_round_features(
         dense,
-        &t_local,
-        &t_macro,
+        &turns,
         &is_sharp_corner,
         &is_round_arc,
         &mut is_high_curv,
-        w_local,
-        w_macro,
-        r_scale,
-        actual_ds,
+        (r_scale, actual_ds),
     );
 
     (is_sharp_corner, is_high_curv)
 }
 
-#[allow(clippy::too_many_arguments)]
+// ============================================================================
+// 特徴点（シャープ角・丸端キャップ・高曲率コーナー）検出の幾何しきい値定数
+// ============================================================================
+
+/// 丸端キャップ隣接スキャンで「凸円弧区間」とみなす最小短距離回転角（rad）
+const CAP_SCAN_MIN_CONVEX_TURN: f64 = 0.08;
+/// 丸端キャップ終端で反対側の凹ノッチに到達したと判定する短距離回転角しきい値（rad）
+const CAP_SCAN_OPPOSITE_NOTCH_TURN: f64 = -0.30;
+/// 丸端キャップ探索を打ち切る凹方向逆転のしきい値（rad）
+const CAP_SCAN_ABORT_CONCAVE_TURN: f64 = -0.10;
+/// 単独の半円丸端キャップとみなす最小累積回転角（rad, 約126°）
+const CAP_SCAN_MIN_NET_TURN: f64 = 2.20;
+/// 両側を凹ノッチに挟まれた丸端キャップとみなす最小累積回転角（rad, 約63°）
+const CAP_SCAN_NOTCH_BOUNDED_MIN_TURN: f64 = 1.10;
+
+/// 手ブレによる周期的な蛇行（wobble）と判定する前後局所回転角の逆符号積しきい値
+const WOBBLE_OPPOSITE_TURN_PRODUCT: f64 = -0.10;
+/// 丸端キャップ付け根の鋭い凹ノッチ（『あ』の交差部など）と判定する短距離回転角の最小絶対値（rad）
+const CAP_NOTCH_MIN_SHORT_TURN: f64 = 0.44;
+/// 丸端キャップ付け根の凹ノッチにおける隣接2頂点ピーク回転角の最小値（rad）
+const CAP_NOTCH_MIN_PEAK_2V_TURN: f64 = 0.38;
+/// 丸端キャップ付け根の凹ノッチにおける短距離回転角に対する2頂点集中度比率
+const CAP_NOTCH_MIN_PEAK_CONCENTRATION: f64 = 0.74;
+/// 丸端キャップ付け根の凹ノッチで前後の1ステップ回転が逆向きに暴れていないことを確認する許容比
+const CAP_NOTCH_ADJACENT_SIGN_TOLERANCE: f64 = -0.35;
+
+/// 直角〜鋭角コーナーと判定する短距離回転角の最大余弦（cos ≈ 63° 以上）
+const RIGHT_CORNER_MAX_SHORT_COS: f64 = 0.45;
+/// 直角〜鋭角コーナーと判定する局所回転角の最小絶対値（rad）
+const RIGHT_CORNER_MIN_LOCAL_TURN: f64 = 1.00;
+/// 直角〜鋭角コーナーと判定するマクロ回転角の最大余弦
+const RIGHT_CORNER_MAX_MACRO_COS: f64 = 0.48;
+
+/// 集中した折れ角（ジャンクション）と判定する短距離・局所回転角の最小絶対値（rad）
+const JUNCTION_MIN_SHORT_AND_LOCAL_TURN: f64 = 0.62;
+/// 集中した折れ角と判定するマクロ回転角の最小絶対値（rad）
+const JUNCTION_MIN_MACRO_TURN: f64 = 0.55;
+/// 集中した折れ角における局所回転角に対する短距離回転角の最小集中比率
+const JUNCTION_MIN_SHORT_TO_LOCAL_RATIO: f64 = 0.80;
+
+/// 丸弧（Round Arc）候補と判定する短距離・局所・マクロ回転角の最小絶対値（rad）
+const ROUND_ARC_MIN_SHORT_TURN: f64 = 0.11;
+const ROUND_ARC_MIN_LOCAL_TURN: f64 = 0.18;
+const ROUND_ARC_MIN_MACRO_TURN: f64 = 0.48;
+
+/// 保護すべき丸端キャップ区間と判定する最小ネット回転角（rad, 約106°）
+const PROTECTED_CAP_MIN_NET_TURN: f64 = 1.85;
+/// 局所的な丸角（緩やかなL字等）と判定する最小ネット回転角と両脇フランジの最大許容曲がり量
+const LOCAL_ROUND_CORNER_MIN_TURN: f64 = 0.58;
+const LOCAL_ROUND_CORNER_MAX_FLANK_TURN: f64 = 0.28;
+const LOCAL_ROUND_CORNER_MAX_FLANK_RATIO: f64 = 0.42;
+/// やや大きく曲がる局所丸角と判定する最小ネット回転角・局所ピーク・フランジ比率
+const STRONG_ROUND_CORNER_MIN_TURN: f64 = 0.88;
+const STRONG_ROUND_CORNER_MIN_PEAK_LOCAL: f64 = 0.52;
+const STRONG_ROUND_CORNER_MAX_FLANK_RATIO: f64 = 0.52;
+
+/// G1接線連続化を適用するアンカー前後の弦方向内積および制御点接線内積の最小値（cos）
+const G1_MIN_RING_DIR_DOT: f64 = 0.86;
+const G1_MIN_TANGENT_DOT: f64 = 0.82;
+/// G1接線交点から制御点 `P1` を求める際の最小外積および弦長に対するパラメータ許容範囲
+const G1_MIN_TANGENT_CROSS: f64 = 0.04;
+const G1_MIN_INTERSECT_CHORD_RATIO: f64 = 0.08;
+const G1_MAX_INTERSECT_CHORD_RATIO: f64 = 1.80;
+/// G1接線補正による制御点移動の最大半径方向シフト比・弦長比
+const G1_MAX_RADIAL_SHIFT_BRUSH_RATIO: f64 = 0.85;
+const G1_MAX_RADIAL_SHIFT_CHORD_RATIO: f64 = 0.024;
+const G1_MAX_TOTAL_SHIFT_CHORD_RATIO: f64 = 0.36;
+
 fn detect_sharp_corners(
-    t_1: &[f64],
-    t_short: &[f64],
-    t_local: &[f64],
-    t_macro: &[f64],
-    w_short: usize,
-    w_local: usize,
-    w_macro: usize,
+    turns: &RingTurnMetrics,
     winding_sign: f64,
     is_exterior: bool,
 ) -> Vec<bool> {
+    let RingTurnMetrics {
+        t_1,
+        t_short,
+        t_local,
+        t_macro,
+        w_short,
+        w_local,
+        w_macro,
+    } = turns;
+    let (&w_short, &w_local, &w_macro) = (w_short, w_local, w_macro);
     let m = t_short.len();
     let max_cap_scan = (w_macro + w_local).min(m / 3);
     let scan_adjacent_cap_side = |idx: usize, forward: bool| -> bool {
@@ -574,7 +651,7 @@ fn detect_sharp_corners(
                 (idx + m - d) % m
             };
             let ts_conv = t_short[p] * winding_sign;
-            if ts_conv >= 0.08 {
+            if ts_conv >= CAP_SCAN_MIN_CONVEX_TURN {
                 in_arc = true;
                 net += t_1[p] * winding_sign;
             } else if in_arc {
@@ -583,15 +660,18 @@ fn detect_sharp_corners(
                 } else {
                     (p + m - 1) % m
                 };
-                if ts_conv <= -0.30 || t_short[adj] * winding_sign <= -0.30 {
+                if ts_conv <= CAP_SCAN_OPPOSITE_NOTCH_TURN
+                    || t_short[adj] * winding_sign <= CAP_SCAN_OPPOSITE_NOTCH_TURN
+                {
                     hit_other_notch = true;
                 }
                 break;
-            } else if d > w_short && ts_conv < -0.10 {
+            } else if d > w_short && ts_conv < CAP_SCAN_ABORT_CONCAVE_TURN {
                 break;
             }
         }
-        net >= 2.20 || (hit_other_notch && net >= 1.10)
+        net >= CAP_SCAN_MIN_NET_TURN
+            || (hit_other_notch && net >= CAP_SCAN_NOTCH_BOUNDED_MIN_TURN)
     };
 
     let mut is_sharp_corner = vec![false; m];
@@ -622,30 +702,31 @@ fn detect_sharp_corners(
             })
         .abs();
 
-        let is_oscillating_wobble = t_short[(i + m - w_local) % m] * t_short[i] < -0.10
-            || t_short[(i + w_local) % m] * t_short[i] < -0.10;
+        let is_oscillating_wobble =
+            t_short[(i + m - w_local) % m] * t_short[i] < WOBBLE_OPPOSITE_TURN_PRODUCT
+                || t_short[(i + w_local) % m] * t_short[i] < WOBBLE_OPPOSITE_TURN_PRODUCT;
 
         let is_cap_adjacent_notch = is_exterior
             && t_short[i] * winding_sign < 0.0
             && t1_curr * winding_sign < 0.0
-            && ts_abs >= 0.44
-            && t_peak_2v >= 0.38
-            && t_peak_2v >= 0.74 * ts_abs
-            && t_1[(i + m - 1) % m] * t1_curr >= -0.35 * t1_curr.abs()
-            && t_1[(i + 1) % m] * t1_curr >= -0.35 * t1_curr.abs()
+            && ts_abs >= CAP_NOTCH_MIN_SHORT_TURN
+            && t_peak_2v >= CAP_NOTCH_MIN_PEAK_2V_TURN
+            && t_peak_2v >= CAP_NOTCH_MIN_PEAK_CONCENTRATION * ts_abs
+            && t_1[(i + m - 1) % m] * t1_curr >= CAP_NOTCH_ADJACENT_SIGN_TOLERANCE * t1_curr.abs()
+            && t_1[(i + 1) % m] * t1_curr >= CAP_NOTCH_ADJACENT_SIGN_TOLERANCE * t1_curr.abs()
             && (scan_adjacent_cap_side(i, false) || scan_adjacent_cap_side(i, true));
 
         let macro_valid = !is_exterior || t_macro[i] * winding_sign < 0.0;
         let is_right_sharp = macro_valid
-            && t_short[i].cos() < 0.45
-            && tl_abs > 1.00
-            && t_macro[i].cos() < 0.48;
+            && t_short[i].cos() < RIGHT_CORNER_MAX_SHORT_COS
+            && tl_abs > RIGHT_CORNER_MIN_LOCAL_TURN
+            && t_macro[i].cos() < RIGHT_CORNER_MAX_MACRO_COS;
         let is_concentrated_junction = macro_valid
             && !is_oscillating_wobble
-            && ts_abs > 0.62
-            && tl_abs > 0.62
-            && tm_abs > 0.55
-            && ts_abs >= 0.80 * tl_abs
+            && ts_abs > JUNCTION_MIN_SHORT_AND_LOCAL_TURN
+            && tl_abs > JUNCTION_MIN_SHORT_AND_LOCAL_TURN
+            && tm_abs > JUNCTION_MIN_MACRO_TURN
+            && ts_abs >= JUNCTION_MIN_SHORT_TO_LOCAL_RATIO * tl_abs
             && t_short[i] * t_macro[i] > 0.0;
 
         if is_cap_adjacent_notch || is_right_sharp || is_concentrated_junction {
@@ -664,13 +745,15 @@ fn detect_sharp_corners(
     is_sharp_corner
 }
 
-fn detect_round_arcs(
-    t_short: &[f64],
-    t_local: &[f64],
-    t_macro: &[f64],
-    is_sharp_corner: &[bool],
-    w_macro: usize,
-) -> Vec<bool> {
+fn detect_round_arcs(turns: &RingTurnMetrics, is_sharp_corner: &[bool]) -> Vec<bool> {
+    let RingTurnMetrics {
+        t_short,
+        t_local,
+        t_macro,
+        w_macro,
+        ..
+    } = turns;
+    let w_macro = *w_macro;
     let m = t_short.len();
     let mut is_round_arc = vec![false; m];
     for i in 0..m {
@@ -687,7 +770,12 @@ fn detect_round_arcs(
             continue;
         }
         let (ts, tl, tm) = (t_short[i], t_local[i], t_macro[i]);
-        if ts.abs() > 0.11 && tl.abs() > 0.18 && tm.abs() > 0.48 && ts * tm > 0.0 && tl * tm > 0.0 {
+        if ts.abs() > ROUND_ARC_MIN_SHORT_TURN
+            && tl.abs() > ROUND_ARC_MIN_LOCAL_TURN
+            && tm.abs() > ROUND_ARC_MIN_MACRO_TURN
+            && ts * tm > 0.0
+            && tl * tm > 0.0
+        {
             is_round_arc[i] = true;
         }
     }
@@ -711,22 +799,25 @@ fn detect_round_arcs(
     is_round_arc
 }
 
-#[allow(clippy::too_many_arguments)]
 fn filter_protected_round_features(
     dense: &[Point],
-    t_local: &[f64],
-    t_macro: &[f64],
+    turns: &RingTurnMetrics,
     is_sharp_corner: &[bool],
     is_round_arc: &[bool],
     is_high_curv: &mut [bool],
-    w_local: usize,
-    w_macro: usize,
-    r_scale: f64,
-    actual_ds: f64,
+    (r_scale, actual_ds): (f64, f64),
 ) {
     if !is_round_arc.iter().any(|&b| b) || is_round_arc.iter().all(|&b| b) {
         return;
     }
+    let RingTurnMetrics {
+        t_local,
+        t_macro,
+        w_local,
+        w_macro,
+        ..
+    } = turns;
+    let (&w_local, &w_macro) = (w_local, w_macro);
     let m = dense.len();
     let flank_len = ((44.0 * r_scale / actual_ds).round() as usize).clamp(5, (m / 4).max(5));
     let local_to_macro = (w_macro as f64 / w_local.max(1) as f64).max(1.0);
@@ -736,7 +827,7 @@ fn filter_protected_round_features(
         .map(|(rs, re)| {
             let (b_i, a_i) = clamp_run_bounds(rs, re, m, is_sharp_corner);
             let (nt, _) = span_turn_metrics(&dense[b_i..=a_i]);
-            if nt >= 1.85 && (re - rs) < m / 2 {
+            if nt >= PROTECTED_CAP_MIN_NET_TURN && (re - rs) < m / 2 {
                 is_cap_vertex[rs..=re].fill(true);
             }
             (rs, re, nt)
@@ -782,15 +873,15 @@ fn filter_protected_round_features(
             .fold(0.0_f64, f64::max);
 
         let is_localized_round_corner = (r_end - r_start) <= m / 3
-            && ((net_turn >= 0.58
-                && flank_before < 0.28
-                && flank_after < 0.28
-                && flank_before < 0.42 * peak_abs_tm
-                && flank_after < 0.42 * peak_abs_tm)
-                || (net_turn >= 0.88
-                    && peak_abs_tl >= 0.52
-                    && flank_before < 0.52 * peak_abs_tm
-                    && flank_after < 0.52 * peak_abs_tm));
+            && ((net_turn >= LOCAL_ROUND_CORNER_MIN_TURN
+                && flank_before < LOCAL_ROUND_CORNER_MAX_FLANK_TURN
+                && flank_after < LOCAL_ROUND_CORNER_MAX_FLANK_TURN
+                && flank_before < LOCAL_ROUND_CORNER_MAX_FLANK_RATIO * peak_abs_tm
+                && flank_after < LOCAL_ROUND_CORNER_MAX_FLANK_RATIO * peak_abs_tm)
+                || (net_turn >= STRONG_ROUND_CORNER_MIN_TURN
+                    && peak_abs_tl >= STRONG_ROUND_CORNER_MIN_PEAK_LOCAL
+                    && flank_before < STRONG_ROUND_CORNER_MAX_FLANK_RATIO * peak_abs_tm
+                    && flank_after < STRONG_ROUND_CORNER_MAX_FLANK_RATIO * peak_abs_tm));
 
         if !is_round_cap && !is_localized_round_corner {
             for k in r_start..=r_end {
@@ -1070,7 +1161,7 @@ fn enforce_g1_tangent_continuity_on_segments(
 
         let dir_before = normalize_vec(dense[a_idx] - dense[(a_idx + m - w_tan) % m]);
         let dir_after = normalize_vec(dense[(a_idx + w_tan) % m] - dense[a_idx]);
-        if dir_before.dot(dir_after) < 0.86 {
+        if dir_before.dot(dir_after) < G1_MIN_RING_DIR_DOT {
             continue;
         }
         let d_ring = normalize_vec(dir_before + dir_after);
@@ -1084,14 +1175,14 @@ fn enforce_g1_tangent_continuity_on_segments(
 
         let d_in = normalize_vec(v_in);
         let d_out = normalize_vec(v_out);
-        if d_in.dot(d_out) < 0.82 {
+        if d_in.dot(d_out) < G1_MIN_TANGENT_DOT {
             continue;
         }
 
         anchor_tangents[j] = Some(normalize_vec(d_in + d_out + d_ring));
     }
 
-    let max_radial_shift = 0.85 * r_scale;
+    let max_radial_shift = G1_MAX_RADIAL_SHIFT_BRUSH_RATIO * r_scale;
 
     for j in 0..k {
         if is_straight[j] {
@@ -1119,13 +1210,13 @@ fn enforce_g1_tangent_continuity_on_segments(
         let has_any_smooth = anchor_tangents[j].is_some() || anchor_tangents[next].is_some();
         let candidate_p1 = if let (true, Some(t0), Some(t2)) = (has_any_smooth, t0_opt, t2_opt) {
             let cross = t0.x * t2.y - t0.y * t2.x;
-            if cross.abs() > 0.04 {
+            if cross.abs() > G1_MIN_TANGENT_CROSS {
                 let s0 = (chord.x * t2.y - chord.y * t2.x) / cross;
                 let s2 = (t0.x * chord.y - t0.y * chord.x) / cross;
-                if s0 > 0.08 * chord_len
-                    && s2 > 0.08 * chord_len
-                    && s0 < 1.8 * chord_len
-                    && s2 < 1.8 * chord_len
+                if s0 > G1_MIN_INTERSECT_CHORD_RATIO * chord_len
+                    && s2 > G1_MIN_INTERSECT_CHORD_RATIO * chord_len
+                    && s0 < G1_MAX_INTERSECT_CHORD_RATIO * chord_len
+                    && s2 < G1_MAX_INTERSECT_CHORD_RATIO * chord_len
                 {
                     Some(p0 + t0 * s0)
                 } else {
@@ -1141,8 +1232,8 @@ fn enforce_g1_tangent_continuity_on_segments(
         if let Some(p1_tan) = candidate_p1 {
             let radial_diff = (0.5 * (p1_tan - p1_init).dot(chord_normal)).abs();
             let total_diff = (p1_tan - p1_init).hypot();
-            let local_max_radial = max_radial_shift.min(0.024 * chord_len);
-            if radial_diff <= local_max_radial && total_diff <= 0.36 * chord_len {
+            let local_max_radial = max_radial_shift.min(G1_MAX_RADIAL_SHIFT_CHORD_RATIO * chord_len);
+            if radial_diff <= local_max_radial && total_diff <= G1_MAX_TOTAL_SHIFT_CHORD_RATIO * chord_len {
                 segments[j].p1 = p1_tan;
             }
         }
@@ -1210,14 +1301,11 @@ fn reduce_outline_anchors_by_quad_fit(
     let mut span_pts = Vec::with_capacity(m);
     let mut cum = Vec::with_capacity(m);
 
-    let mut eval_removal_score = |anchors: &[usize], pos: usize| -> f64 {
-        let curr_idx = anchors[pos];
+    let mut eval_removal_score = |prev_idx: usize, curr_idx: usize, next_idx: usize| -> f64 {
         if locked[curr_idx] {
             return f64::INFINITY;
         }
 
-        let prev_idx = anchors[(pos + anchors.len() - 1) % anchors.len()];
-        let next_idx = anchors[(pos + 1) % anchors.len()];
         fill_cyclic_span(dense, prev_idx, next_idx, &mut span_pts);
 
         if span_pts.len() > (m * 3) / 4 {
@@ -1280,37 +1368,52 @@ fn reduce_outline_anchors_by_quad_fit(
         }
     };
 
-    let mut scores: Vec<f64> = (0..anchors.len())
-        .map(|pos| eval_removal_score(&anchors, pos))
-        .collect();
+    let n = anchors.len();
+    if n <= 3 {
+        return anchors;
+    }
 
-    while anchors.len() > 3 {
-        let mut best_remove_pos: Option<usize> = None;
-        let mut best_score = f64::INFINITY;
+    let mut prev: Vec<usize> = (0..n).map(|i| (i + n - 1) % n).collect();
+    let mut next: Vec<usize> = (0..n).map(|i| (i + 1) % n).collect();
+    let mut alive = vec![true; n];
+    let mut generation = vec![0u32; n];
+    let mut alive_count = n;
+    let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u64, usize, u32)>> =
+        std::collections::BinaryHeap::with_capacity(n * 2);
 
-        for (pos, &score) in scores.iter().enumerate() {
-            if score < best_score {
-                best_score = score;
-                best_remove_pos = Some(pos);
-            }
-        }
-
-        if let Some(pos) = best_remove_pos {
-            anchors.remove(pos);
-            scores.remove(pos);
-            let len = anchors.len();
-            if len > 3 {
-                let prev_pos = (pos + len - 1) % len;
-                let next_pos = pos % len;
-                scores[prev_pos] = eval_removal_score(&anchors, prev_pos);
-                scores[next_pos] = eval_removal_score(&anchors, next_pos);
-            }
-        } else {
-            break;
+    for i in 0..n {
+        let s = eval_removal_score(anchors[prev[i]], anchors[i], anchors[next[i]]);
+        if s.is_finite() {
+            heap.push(std::cmp::Reverse((s.to_bits(), i, 0)));
         }
     }
 
-    anchors
+    while alive_count > 3 {
+        let Some(std::cmp::Reverse((_, u, gen))) = heap.pop() else {
+            break;
+        };
+        if !alive[u] || generation[u] != gen {
+            continue;
+        }
+        alive[u] = false;
+        alive_count -= 1;
+        let p = prev[u];
+        let nx = next[u];
+        next[p] = nx;
+        prev[nx] = p;
+
+        if alive_count > 3 {
+            for v in [p, nx] {
+                generation[v] = generation[v].wrapping_add(1);
+                let sv = eval_removal_score(anchors[prev[v]], anchors[v], anchors[next[v]]);
+                if sv.is_finite() {
+                    heap.push(std::cmp::Reverse((sv.to_bits(), v, generation[v])));
+                }
+            }
+        }
+    }
+
+    (0..n).filter(|&i| alive[i]).map(|i| anchors[i]).collect()
 }
 
 fn fill_cyclic_span(dense: &[Point], start_idx: usize, end_idx: usize, span: &mut Vec<Point>) {

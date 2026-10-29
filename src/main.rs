@@ -10,9 +10,7 @@ mod vector_boolean;
 mod vector_engine;
 mod vector_stroke;
 
-use canvas_tool::{
-    HoverTarget, SelectDragState, SelectSubMode, Tool, TransformDragState, TransformHoverTarget,
-};
+use canvas_tool::{CanvasState, SelectSubMode, Tool, ViewportState};
 use eframe::egui::{self, Color32, CursorIcon, Key, Pos2, Sense, Stroke, Vec2};
 use kurbo::Point;
 use panels::RightPanelTab;
@@ -20,8 +18,9 @@ use std::{
     collections::VecDeque,
     time::{Duration, Instant},
 };
-use symbol::{SymbolDef, SymbolEditSession};
-use timeline::{LoadedShapeSig, Timeline, TimelineGridDrag};
+use symbol::{SymbolDef, SymbolEditSession, SymbolManager};
+use timeline::Timeline;
+use timeline_ui::TimelineUiState;
 use vector_engine::FillShape;
 
 const MAX_UNDO_HISTORY: usize = 100;
@@ -86,7 +85,7 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             configure_japanese_fonts(&cc.egui_ctx);
             configure_sharp_light_theme(&cc.egui_ctx);
-            Ok(Box::new(FlashBrushApp::default()))
+            Ok(Box::new(Is2dApp::default()))
         }),
     )
 }
@@ -141,215 +140,300 @@ fn configure_sharp_light_theme(ctx: &egui::Context) {
 #[derive(Clone, Debug)]
 pub(crate) struct UndoEntry {
     pub(crate) timeline: Timeline,
-    pub(crate) library: Vec<SymbolDef>,
-    pub(crate) next_symbol_id: u64,
-    pub(crate) symbol_edit_stack: Vec<SymbolEditSession>,
+    pub(crate) library: std::sync::Arc<Vec<SymbolDef>>,
+    pub(crate) editing_group_path: Vec<u64>,
+    pub(crate) symbol_edit_stack: std::sync::Arc<Vec<SymbolEditSession>>,
+    pub(crate) stage_size: Vec2,
+    pub(crate) symbols_revision: u64,
 }
 
-pub(crate) struct FlashBrushApp {
+impl UndoEntry {
+    /// スナップショットから随時再生成可能な一時メッシュキャッシュ（`fill_mesh`, `selection_mesh`, `CelMeshCache`）を除去し、
+    /// 直前の履歴スナップショット `prev_timeline` と未変更のセルは `Arc` を $O(1)$ 共有した軽量状態にする
+    pub(crate) fn strip_transient_caches(mut self, prev_timeline: Option<&Timeline>) -> Self {
+        self.timeline.strip_transient_caches_with_prev(prev_timeline);
+        if let Some(lib) = std::sync::Arc::get_mut(&mut self.library) {
+            for sym in lib {
+                sym.strip_transient_caches();
+            }
+        }
+        if let Some(stack) = std::sync::Arc::get_mut(&mut self.symbol_edit_stack) {
+            for sess in stack {
+                sess.strip_transient_caches();
+            }
+        }
+        self
+    }
+}
+
+/// Undo / Redo スナップショット履歴を管理する構造体
+#[derive(Default)]
+pub(crate) struct UndoHistory {
+    pub(crate) undo_stack: VecDeque<UndoEntry>,
+    pub(crate) redo_stack: Vec<UndoEntry>,
+}
+
+impl UndoHistory {
+    /// シンボルライブラリおよび編集スタックが直近の履歴エントリから未変更（同一 `revision`）であれば
+    /// `Arc` ポインタを $O(1)$ で共有し、変更されている場合のみクローン＆キャッシュ除去して新しい `Arc` を返す
+    pub(crate) fn snapshot_symbols(
+        &self,
+        symbols: &SymbolManager,
+    ) -> (
+        std::sync::Arc<Vec<SymbolDef>>,
+        std::sync::Arc<Vec<SymbolEditSession>>,
+        u64,
+    ) {
+        if let Some(reused) = self
+            .undo_stack
+            .back()
+            .or_else(|| self.redo_stack.last())
+            .filter(|e| e.symbols_revision == symbols.revision)
+        {
+            return (
+                std::sync::Arc::clone(&reused.library),
+                std::sync::Arc::clone(&reused.symbol_edit_stack),
+                symbols.revision,
+            );
+        }
+        let mut lib = symbols.library.clone();
+        for sym in &mut lib {
+            sym.strip_transient_caches();
+        }
+        let mut stack = symbols.edit_stack.clone();
+        for sess in &mut stack {
+            sess.strip_transient_caches();
+        }
+        (
+            std::sync::Arc::new(lib),
+            std::sync::Arc::new(stack),
+            symbols.revision,
+        )
+    }
+
+    /// 新しい Undo エントリをスタックへ追加し、Redo スタックをクリアする
+    pub(crate) fn push(&mut self, entry: UndoEntry) {
+        let stripped = {
+            let prev_tl = self
+                .undo_stack
+                .back()
+                .or_else(|| self.redo_stack.last())
+                .map(|e| &e.timeline);
+            entry.strip_transient_caches(prev_tl)
+        };
+        if self.undo_stack.len() >= MAX_UNDO_HISTORY {
+            self.undo_stack.pop_front();
+        }
+        self.undo_stack.push_back(stripped);
+        self.redo_stack.clear();
+    }
+
+    /// Undo スタック末尾から直前のスナップショットを取り出す
+    pub(crate) fn pop_undo(&mut self) -> Option<UndoEntry> {
+        self.undo_stack.pop_back()
+    }
+
+    /// Redo スタック末尾から次のスナップショットを取り出す
+    pub(crate) fn pop_redo(&mut self) -> Option<UndoEntry> {
+        self.redo_stack.pop()
+    }
+
+    /// Undo 実行前の現在状態を Redo スタックへ退避する
+    pub(crate) fn push_redo(&mut self, entry: UndoEntry) {
+        let stripped = {
+            let prev_tl = self
+                .redo_stack
+                .last()
+                .or_else(|| self.undo_stack.back())
+                .map(|e| &e.timeline);
+            entry.strip_transient_caches(prev_tl)
+        };
+        self.redo_stack.push(stripped);
+    }
+
+    /// Redo 実行前の現在状態を Undo スタックへ戻す（Redo スタックは消去しない）
+    pub(crate) fn push_undo_from_redo(&mut self, entry: UndoEntry) {
+        let stripped = {
+            let prev_tl = self
+                .undo_stack
+                .back()
+                .or_else(|| self.redo_stack.last())
+                .map(|e| &e.timeline);
+            entry.strip_transient_caches(prev_tl)
+        };
+        if self.undo_stack.len() >= MAX_UNDO_HISTORY {
+            self.undo_stack.pop_front();
+        }
+        self.undo_stack.push_back(stripped);
+    }
+}
+
+/// ツール選択・ブラシ/消しゴム設定・右パネルタブ・トースト通知などアプリ全体のUI設定状態
+pub(crate) struct AppUiState {
     pub(crate) tool: Tool,
+    pub(crate) select_sub_mode: SelectSubMode,
     pub(crate) right_panel_tab: RightPanelTab,
     pub(crate) brush_radius: f32,
     pub(crate) eraser_radius: f32,
     pub(crate) brush_color: Color32,
     pub(crate) show_wireframe: bool,
-
-    /// キャンバスのズーム倍率（1.0 = 100%, 範囲 0.15..=16.0）
-    pub(crate) view_zoom: f32,
-    /// キャンバスのパンオフセット（スクリーンピクセル単位）
-    pub(crate) view_pan: Vec2,
-    /// スペースドラッグ / 中ボタンドラッグによるパン操作中の直前スクリーン座標
-    pub(crate) pan_last_screen_pos: Option<Pos2>,
-
-    /// ステージ（カメラ出力枠）のワールドサイズ（幅・高さ px、デフォルト 800×450 [16:9]）
-    pub(crate) stage_size: Vec2,
-    /// ステージ枠外にはみ出た図形をマスクして隠すかどうか（完成画面プレビュー用）
-    pub(crate) clip_outside_stage: bool,
-    /// 直近フレームの中央キャンバス描画領域（スクリーン座標、「ウィンドウに合わせる」計算用）
-    pub(crate) last_canvas_rect: egui::Rect,
-
-    /// タイムライン・レイヤー・キーフレーム・セル構造
-    pub(crate) timeline: Timeline,
-    /// プロジェクト全体で共有されるシンボルライブラリ
-    pub(crate) library: Vec<SymbolDef>,
-    pub(crate) next_symbol_id: u64,
-    pub(crate) selected_library_symbol: Option<u64>,
-
-    pub(crate) shapes: Vec<FillShape>,
-    /// 直近の `load_shapes_from_timeline` 読み込み時点のシェイプ署名一覧（`Timeline` スナップショットに含めない作業用キャッシュ）
-    pub(crate) loaded_signatures: Vec<LoadedShapeSig>,
-    pub(crate) undo_stack: VecDeque<UndoEntry>,
-    pub(crate) redo_stack: Vec<UndoEntry>,
-
-    pub(crate) active_stroke: Vec<Point>,
-    pub(crate) active_raw_outline: Vec<Point>,
-
-    pub(crate) selected_shapes: Vec<usize>,
-    pub(crate) unsliced_canvas: Option<Vec<FillShape>>,
-    pub(crate) selection_modified: bool,
-    pub(crate) select_sub_mode: SelectSubMode,
-    pub(crate) hover_target: HoverTarget,
-    pub(crate) select_drag: SelectDragState,
-
-    /// 現在インプレイス編集で潜っているグループ階層のパス（空 `[]` ならルートシーン）
-    pub(crate) editing_group_path: Vec<u64>,
-    /// シンボルをダブルクリックしてシンボル独自のタイムライン編集に入っている際の親シーン退避スタック
-    pub(crate) symbol_edit_stack: Vec<SymbolEditSession>,
-    /// 新規グループ化時に採番する一意のグループIDカウンタ
-    pub(crate) next_group_id: u64,
-
-    /// コピー / カットされたシェイプ群（`group_path` はコピー時の編集スコープからの相対パス）
-    pub(crate) clipboard: Vec<FillShape>,
-    /// `Cmd+V` による通常ペーストの連続回数（少しずつずらして配置するためのカウンタ）
-    pub(crate) paste_count: usize,
-
-    pub(crate) transform_pivot: Option<Point>,
-    pub(crate) transform_hover: TransformHoverTarget,
-    pub(crate) transform_drag: TransformDragState,
-
     /// プロパティパネルの下部表示対象（`true`: タイムラインのフレーム/トゥイーン属性、`false`: キャンバス上のシンボル属性）
     pub(crate) inspect_timeline_frame: bool,
-
     /// 操作トリガーで一定時間表示するトースト通知メッセージ
     pub(crate) status_toast: Option<StatusToast>,
 }
 
-impl Default for FlashBrushApp {
+impl Default for AppUiState {
     fn default() -> Self {
         Self {
             tool: Tool::Brush,
+            select_sub_mode: SelectSubMode::Reshape,
             right_panel_tab: RightPanelTab::default(),
             brush_radius: 8.0,
             eraser_radius: 22.0,
             brush_color: Color32::from_rgb(40, 45, 55),
             show_wireframe: false,
-            view_zoom: 1.0,
-            view_pan: Vec2::ZERO,
-            pan_last_screen_pos: None,
-            stage_size: Vec2::new(800.0, 450.0),
-            clip_outside_stage: false,
-            last_canvas_rect: egui::Rect::from_min_max(
-                Pos2::new(52.0, 30.0),
-                Pos2::new(1000.0, 590.0),
-            ),
-            timeline: Timeline::default(),
-            library: Vec::new(),
-            next_symbol_id: 1,
-            selected_library_symbol: None,
-            shapes: Vec::new(),
-            loaded_signatures: Vec::new(),
-            undo_stack: VecDeque::new(),
-            redo_stack: Vec::new(),
-            active_stroke: Vec::new(),
-            active_raw_outline: Vec::new(),
-            selected_shapes: Vec::new(),
-            unsliced_canvas: None,
-            selection_modified: false,
-            select_sub_mode: SelectSubMode::Reshape,
-            hover_target: HoverTarget::None,
-            select_drag: SelectDragState::None,
-            editing_group_path: Vec::new(),
-            symbol_edit_stack: Vec::new(),
-            next_group_id: 1,
-            clipboard: Vec::new(),
-            paste_count: 0,
-            transform_pivot: None,
-            transform_hover: TransformHoverTarget::None,
-            transform_drag: TransformDragState::None,
             inspect_timeline_frame: false,
             status_toast: None,
         }
     }
 }
 
-impl FlashBrushApp {
-    // ------------------------------------------------------------------------
-    // 1. Undo / Redo 履歴管理
-    // ------------------------------------------------------------------------
-
-    fn snapshot_timeline(&self) -> Timeline {
-        let mut tl = self.timeline.clone();
-        tl.is_playing = false;
-        tl.last_frame_advance_time = None;
-        tl.dragging_layer = None;
-        tl.grid_drag = TimelineGridDrag::None;
-        tl
+impl AppUiState {
+    /// キャンバス左上に一定時間自動で消えるトースト通知メッセージを登録する
+    pub(crate) fn show_notice(&mut self, kind: NoticeKind, message: impl Into<String>) {
+        self.status_toast = Some(StatusToast {
+            kind,
+            message: message.into(),
+            expires_at: Instant::now() + DEFAULT_TOAST_DURATION,
+        });
     }
+}
 
-    fn push_undo_entry(&mut self, entry: UndoEntry) {
-        if self.undo_stack.len() >= MAX_UNDO_HISTORY {
-            self.undo_stack.pop_front();
-        }
-        self.undo_stack.push_back(entry);
-        self.redo_stack.clear();
-    }
+/// アプリケーション全体のルート構造体（責務ごとに独立した7つのドメイン構造体で構成）
+#[derive(Default)]
+pub(crate) struct Is2dApp {
+    /// ツール設定・右パネルタブ・ステータストースト通知などのUI状態
+    pub(crate) ui: AppUiState,
+    /// キャンバスのズーム・パン・ステージ枠設定
+    pub(crate) viewport: ViewportState,
+    /// 現在フレームの作業図形・選択・変形・排他ドラッグ・クリップボード状態
+    pub(crate) canvas: CanvasState,
+    /// タイムライン・レイヤー・キーフレーム・セル構造
+    pub(crate) timeline: Timeline,
+    /// タイムラインパネルの再生・スクロール・D&D等の一時UI状態
+    pub(crate) timeline_ui: TimelineUiState,
+    /// プロジェクト共通のシンボルライブラリ・シンボルインプレイス編集スタック・ID採番
+    pub(crate) symbols: SymbolManager,
+    /// Undo / Redo 履歴スタック
+    pub(crate) history: UndoHistory,
+}
 
-    fn restore_state_snapshot(&mut self, mut entry: UndoEntry) -> UndoEntry {
-        let prev_scroll = (self.timeline.scroll_x, self.timeline.scroll_y);
+impl Is2dApp {
+    // ------------------------------------------------------------------------
+    // 1. Undo / Redo 履歴管理 & トランザクション変更API
+    // ------------------------------------------------------------------------
+
+    fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
+        self.timeline_ui.cancel_drag();
+        self.viewport.editing_stage_size = false;
+        let (prev_lib, prev_stack, prev_rev) = self.history.snapshot_symbols(&self.symbols);
         let prev_entry = UndoEntry {
-            timeline: self.snapshot_timeline(),
-            library: std::mem::replace(&mut self.library, entry.library),
-            next_symbol_id: std::mem::replace(&mut self.next_symbol_id, entry.next_symbol_id),
-            symbol_edit_stack: std::mem::replace(
-                &mut self.symbol_edit_stack,
-                entry.symbol_edit_stack,
+            timeline: std::mem::replace(&mut self.timeline, entry.timeline),
+            library: prev_lib,
+            editing_group_path: std::mem::replace(
+                &mut self.canvas.editing_group_path,
+                entry.editing_group_path,
             ),
+            symbol_edit_stack: prev_stack,
+            stage_size: std::mem::replace(&mut self.viewport.stage_size, entry.stage_size),
+            symbols_revision: prev_rev,
         };
-        entry.timeline.scroll_x = prev_scroll.0;
-        entry.timeline.scroll_y = prev_scroll.1;
-        self.timeline = entry.timeline;
-        self.selected_library_symbol = self
-            .selected_library_symbol
-            .filter(|&id| self.library.iter().any(|s| s.id == id))
-            .or_else(|| self.library.first().map(|s| s.id));
-        self.load_shapes_from_timeline();
+        self.symbols.library = std::sync::Arc::unwrap_or_clone(entry.library);
+        self.symbols.edit_stack = std::sync::Arc::unwrap_or_clone(entry.symbol_edit_stack);
+        self.symbols.revision = entry.symbols_revision;
+        self.symbols.sync_after_restore();
+        canvas_tool::load_shapes_from_timeline(self);
         prev_entry
     }
 
     pub(crate) fn record_undo_snapshot(&mut self, mut snapshot: Vec<FillShape>) {
-        let mut tl_snap = self.snapshot_timeline();
+        let mut tl_snap = self.timeline.clone();
         tl_snap.normalize_shape_layer_ids(&mut snapshot);
-        tl_snap.write_shapes_to_editable_cels(&snapshot, &self.library, &self.loaded_signatures);
+        tl_snap.write_shapes_to_editable_cels(
+            &snapshot,
+            &self.symbols.library,
+            self.canvas.loaded_signatures(),
+        );
+        let (library, symbol_edit_stack, symbols_revision) =
+            self.history.snapshot_symbols(&self.symbols);
         let entry = UndoEntry {
             timeline: tl_snap,
-            library: self.library.clone(),
-            next_symbol_id: self.next_symbol_id,
-            symbol_edit_stack: self.symbol_edit_stack.clone(),
+            library,
+            editing_group_path: self.canvas.editing_group_path.clone(),
+            symbol_edit_stack,
+            stage_size: self.viewport.stage_size,
+            symbols_revision,
         };
-        self.push_undo_entry(entry);
+        self.history.push(entry);
     }
 
     pub(crate) fn push_undo(&mut self) {
-        if !self.timeline.is_playing {
-            self.sync_shapes_to_timeline();
+        if !self.timeline_ui.is_playing {
+            canvas_tool::sync_shapes_to_timeline(self);
         }
+        let (library, symbol_edit_stack, symbols_revision) =
+            self.history.snapshot_symbols(&self.symbols);
         let entry = UndoEntry {
-            timeline: self.snapshot_timeline(),
-            library: self.library.clone(),
-            next_symbol_id: self.next_symbol_id,
-            symbol_edit_stack: self.symbol_edit_stack.clone(),
+            timeline: self.timeline.clone(),
+            library,
+            editing_group_path: self.canvas.editing_group_path.clone(),
+            symbol_edit_stack,
+            stage_size: self.viewport.stage_size,
+            symbols_revision,
         };
-        self.push_undo_entry(entry);
+        self.history.push(entry);
+    }
+
+    /// キャンバス図形に対する変更トランザクションを一括実行する：
+    /// 1. 必要に応じて未確定選択を確定解除 (`clear_selection`)
+    /// 2. 変更前の Undo スナップショットを記録
+    /// 3. `mutate` クロージャでキャンバス図形を更新
+    /// 4. 変更後の図形を現在フレームのタイムライン `Cel` へ自動同期 (`sync_shapes_to_timeline`)
+    pub(crate) fn mutate_canvas_with_undo(
+        &mut self,
+        clear_selection_first: bool,
+        mutate: impl FnOnce(&mut Self),
+    ) {
+        if clear_selection_first {
+            tool_select::clear_selection(self);
+        }
+        let snapshot = self.canvas.take_or_clone_unsliced_snapshot();
+        self.record_undo_snapshot(snapshot);
+        mutate(self);
+        canvas_tool::sync_shapes_to_timeline(self);
+    }
+
+    /// 事前取得済みの変更前スナップショット `pre_mutation_snapshot` を Undo 履歴に記録し、
+    /// 現在の `self.canvas.shapes` をタイムライン `Cel` へ自動同期する単一コミットAPI
+    pub(crate) fn commit_canvas_mutation(&mut self, pre_mutation_snapshot: Vec<FillShape>) {
+        self.record_undo_snapshot(pre_mutation_snapshot);
+        canvas_tool::sync_shapes_to_timeline(self);
     }
 
     pub(crate) fn undo(&mut self) {
-        self.clear_selection();
-        self.sync_shapes_to_timeline();
-        if let Some(prev_entry) = self.undo_stack.pop_back() {
+        canvas_tool::flush_canvas_before_timeline_op(self);
+        if let Some(prev_entry) = self.history.pop_undo() {
             let curr = self.restore_state_snapshot(prev_entry);
-            self.redo_stack.push(curr);
+            self.history.push_redo(curr);
         }
     }
 
     pub(crate) fn redo(&mut self) {
-        self.clear_selection();
-        self.sync_shapes_to_timeline();
-        if let Some(next_entry) = self.redo_stack.pop() {
+        canvas_tool::flush_canvas_before_timeline_op(self);
+        if let Some(next_entry) = self.history.pop_redo() {
             let curr = self.restore_state_snapshot(next_entry);
-            if self.undo_stack.len() >= MAX_UNDO_HISTORY {
-                self.undo_stack.pop_front();
-            }
-            self.undo_stack.push_back(curr);
+            self.history.push_undo_from_redo(curr);
         }
     }
 
@@ -361,7 +445,6 @@ impl FlashBrushApp {
         if ctx.wants_keyboard_input() {
             return;
         }
-        let mut copied_to_clipboard = false;
         ctx.input(|i| {
             let cmd = i.modifiers.command || i.modifiers.ctrl;
             let copy_event = i.events.iter().any(|ev| matches!(ev, egui::Event::Copy));
@@ -376,19 +459,15 @@ impl FlashBrushApp {
             }
 
             if i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace) {
-                self.delete_selected_shapes();
+                tool_select::delete_selected_shapes(self);
             }
 
-            copied_to_clipboard =
-                self.handle_command_shortcuts(i, cmd, copy_event, cut_event, paste_event);
+            self.handle_command_shortcuts(i, cmd, copy_event, cut_event, paste_event);
         });
-        if copied_to_clipboard {
-            ctx.copy_text(String::from("is2d"));
-        }
     }
 
     fn handle_single_key_shortcuts(&mut self, i: &egui::InputState, shift: bool) {
-        if !self.selected_shapes.is_empty() {
+        if !self.canvas.selected_shapes.is_empty() {
             let step = if shift { 10.0 } else { 1.0 };
             let mut delta = kurbo::Vec2::ZERO;
             if i.key_pressed(Key::ArrowLeft) {
@@ -403,52 +482,53 @@ impl FlashBrushApp {
             if i.key_pressed(Key::ArrowDown) {
                 delta.y += step;
             }
-            if delta != kurbo::Vec2::ZERO && self.nudge_selected_shapes(delta) {
+            if delta != kurbo::Vec2::ZERO {
+                let _ = tool_select::nudge_selected_shapes(self, delta);
                 return;
             }
         }
 
         if i.key_pressed(Key::Enter) {
-            self.toggle_playback();
+            timeline_ui::toggle_playback(self);
         } else if i.key_pressed(Key::Comma) || i.key_pressed(Key::ArrowLeft) {
-            self.step_frame(-1);
+            timeline_ui::step_frame(self, -1);
         } else if i.key_pressed(Key::Period) || i.key_pressed(Key::ArrowRight) {
-            self.step_frame(1);
+            timeline_ui::step_frame(self, 1);
         } else if i.key_pressed(Key::Home) {
-            self.switch_to_layer_and_frame(self.timeline.active_layer, 0);
+            timeline_ui::switch_to_layer_and_frame(self, self.timeline.active_layer, 0);
         } else if i.key_pressed(Key::End) {
             let last = self.timeline.total_frames.saturating_sub(1);
-            self.switch_to_layer_and_frame(self.timeline.active_layer, last);
+            timeline_ui::switch_to_layer_and_frame(self, self.timeline.active_layer, last);
         } else if i.key_pressed(Key::F6) {
             if shift {
-                self.timeline_delete_keyframe();
+                timeline_ui::timeline_delete_keyframe(self);
             } else {
-                self.timeline_insert_keyframe(true);
+                timeline_ui::timeline_insert_keyframe(self, true);
             }
         } else if i.key_pressed(Key::F7) {
-            self.timeline_insert_keyframe(false);
+            timeline_ui::timeline_insert_keyframe(self, false);
         } else if i.key_pressed(Key::F8) {
-            self.convert_selection_to_symbol();
+            tool_transform::convert_selection_to_symbol(self);
         } else if i.key_pressed(Key::F5) {
             if shift {
-                self.timeline_remove_frame();
+                timeline_ui::timeline_remove_frame(self);
             } else {
-                self.timeline_extend_frame();
+                timeline_ui::timeline_extend_frame(self);
             }
         } else if i.key_pressed(Key::O) {
-            self.timeline.onion_skin_enabled = !self.timeline.onion_skin_enabled;
+            self.timeline_ui.onion_skin_enabled = !self.timeline_ui.onion_skin_enabled;
         } else if i.key_pressed(Key::T) {
-            self.timeline_toggle_tween();
+            tool_transform::timeline_toggle_tween(self);
         } else if let Some(tool) = Tool::from_shortcut_input(i) {
-            self.set_tool(tool);
+            canvas_tool::set_tool(self, tool);
         } else if i.key_pressed(Key::Escape) {
-            if !self.selected_shapes.is_empty() {
-                self.clear_selection();
+            if !self.canvas.selected_shapes.is_empty() {
+                tool_select::clear_selection(self);
             } else {
-                self.exit_current_group();
+                tool_select::exit_current_group(self);
             }
-            self.set_tool(Tool::Select);
-        } else if self.tool == Tool::Select {
+            canvas_tool::set_tool(self, Tool::Select);
+        } else if self.ui.tool == Tool::Select {
             let plus_pressed = i.key_pressed(Key::Plus)
                 || i.key_pressed(Key::Equals)
                 || i.key_pressed(Key::Semicolon)
@@ -461,9 +541,9 @@ impl FlashBrushApp {
                 });
 
             if plus_pressed {
-                self.toggle_select_sub_mode(SelectSubMode::AddAnchor);
+                canvas_tool::toggle_select_sub_mode(self, SelectSubMode::AddAnchor);
             } else if minus_pressed {
-                self.toggle_select_sub_mode(SelectSubMode::DeleteAnchor);
+                canvas_tool::toggle_select_sub_mode(self, SelectSubMode::DeleteAnchor);
             }
         }
     }
@@ -475,38 +555,43 @@ impl FlashBrushApp {
         copy_event: bool,
         cut_event: bool,
         paste_event: bool,
-    ) -> bool {
-        let mut copied = false;
+    ) {
         if copy_event || (cmd && !i.modifiers.shift && i.key_pressed(Key::C)) {
-            copied = self.copy_selected_shapes();
+            tool_select::copy_selected_shapes(self);
         } else if cut_event || (cmd && !i.modifiers.shift && i.key_pressed(Key::X)) {
-            copied = self.cut_selected_shapes();
+            tool_select::cut_selected_shapes(self);
         } else if paste_event || (cmd && i.key_pressed(Key::V)) {
-            self.paste_clipboard(i.modifiers.shift);
+            tool_select::paste_clipboard(self, i.modifiers.shift);
         } else if cmd && (i.key_pressed(Key::Num1) || i.key_pressed(Key::Num0)) {
-            self.reset_view();
+            self.viewport.reset_view();
         } else if cmd && i.key_pressed(Key::Num2) {
-            self.fit_stage_to_window();
+            self.viewport.fit_stage_to_window();
         } else if cmd && i.key_pressed(Key::Num3) {
-            self.clip_outside_stage = !self.clip_outside_stage;
+            self.viewport.clip_outside_stage = !self.viewport.clip_outside_stage;
         } else if cmd
             && (i.key_pressed(Key::Plus)
                 || i.key_pressed(Key::Equals)
                 || i.key_pressed(Key::Semicolon))
         {
-            let center = i.pointer.hover_pos().unwrap_or(Pos2::new(640.0, 400.0));
-            self.zoom_around_screen_pos(center, 1.25);
+            let center = i
+                .pointer
+                .hover_pos()
+                .unwrap_or_else(|| self.viewport.last_canvas_rect.center());
+            self.viewport.zoom_around_screen_pos(center, 1.25);
         } else if cmd && i.key_pressed(Key::Minus) {
-            let center = i.pointer.hover_pos().unwrap_or(Pos2::new(640.0, 400.0));
-            self.zoom_around_screen_pos(center, 0.8);
+            let center = i
+                .pointer
+                .hover_pos()
+                .unwrap_or_else(|| self.viewport.last_canvas_rect.center());
+            self.viewport.zoom_around_screen_pos(center, 0.8);
         } else if cmd && i.key_pressed(Key::G) {
             if i.modifiers.shift {
-                self.ungroup_selected_shapes();
+                tool_select::ungroup_selected_shapes(self);
             } else {
-                self.group_selected_shapes();
+                tool_select::group_selected_shapes(self);
             }
         } else if cmd && i.key_pressed(Key::B) {
-            self.ungroup_selected_shapes();
+            tool_select::ungroup_selected_shapes(self);
         } else if cmd && i.key_pressed(Key::Z) {
             if i.modifiers.shift {
                 self.redo();
@@ -516,7 +601,6 @@ impl FlashBrushApp {
         } else if cmd && i.key_pressed(Key::Y) {
             self.redo();
         }
-        copied
     }
 
     // ------------------------------------------------------------------------
@@ -524,7 +608,7 @@ impl FlashBrushApp {
     // ------------------------------------------------------------------------
 
     fn is_current_tool_allowed(&self) -> bool {
-        match self.tool {
+        match self.ui.tool {
             Tool::Eyedropper => true,
             Tool::Brush => self.timeline.is_active_layer_editable(),
             Tool::Eraser | Tool::Bucket | Tool::Select | Tool::Transform => {
@@ -540,46 +624,46 @@ impl FlashBrushApp {
         mouse_pt: Option<Point>,
         tool_allowed: bool,
     ) {
-        if self.timeline.is_playing {
+        if self.timeline_ui.is_playing {
             let canvas_interacted = (response.hovered()
                 && ui.input(|i| i.pointer.primary_pressed()))
                 || response.drag_started()
                 || response.clicked();
             if canvas_interacted {
-                self.stop_playback();
+                canvas_tool::stop_playback(self);
             } else {
                 return;
             }
         }
-        if self.tool == Tool::Eyedropper {
+        if self.ui.tool == Tool::Eyedropper {
             let sampling = (response.hovered() && ui.input(|i| i.pointer.primary_pressed()))
                 || response.dragged()
                 || response.clicked();
             if sampling {
                 if let Some(pt) = mouse_pt {
-                    self.pick_color_at(pt);
+                    tool_paint::pick_color_at(self, pt);
                 }
             }
         } else if tool_allowed {
-            match self.tool {
+            match self.ui.tool {
                 Tool::Brush | Tool::Eraser => {
-                    self.handle_brush_or_eraser_input(response, mouse_pt);
+                    tool_paint::handle_brush_or_eraser_input(self, response, mouse_pt);
                 }
                 Tool::Bucket => {
                     let just_pressed =
                         response.hovered() && ui.input(|i| i.pointer.primary_pressed());
                     if just_pressed {
                         if let Some(pt) = mouse_pt {
-                            self.bucket_fill_at(pt);
+                            tool_paint::bucket_fill_at(self, pt);
                         }
                     }
                 }
                 Tool::Eyedropper => {}
                 Tool::Select => {
-                    self.handle_select_tool_input(ui, response, mouse_pt);
+                    tool_select::handle_select_tool_input(self, ui, response, mouse_pt);
                 }
                 Tool::Transform => {
-                    self.handle_transform_tool_input(ui, response, mouse_pt);
+                    tool_transform::handle_transform_tool_input(self, ui, response, mouse_pt);
                 }
             }
         }
@@ -587,11 +671,7 @@ impl FlashBrushApp {
 
     /// キャンバス左上に一定時間自動で消える通知メッセージを表示する共通メソッド
     pub(crate) fn show_notice(&mut self, kind: NoticeKind, message: impl Into<String>) {
-        self.status_toast = Some(StatusToast {
-            kind,
-            message: message.into(),
-            expires_at: Instant::now() + DEFAULT_TOAST_DURATION,
-        });
+        self.ui.show_notice(kind, message);
     }
 
     /// 警告・条件不足のトースト通知をキャンバス左上に表示する
@@ -647,7 +727,7 @@ impl FlashBrushApp {
             notices.push((kind, msg.to_owned()));
         }
 
-        if let Some(toast) = &self.status_toast {
+        if let Some(toast) = &self.ui.status_toast {
             let now = Instant::now();
             if now < toast.expires_at {
                 ctx.request_repaint_after(toast.expires_at.saturating_duration_since(now));
@@ -655,7 +735,7 @@ impl FlashBrushApp {
                     notices.push((toast.kind, toast.message.clone()));
                 }
             } else {
-                self.status_toast = None;
+                self.ui.status_toast = None;
             }
         }
 
@@ -706,26 +786,27 @@ impl FlashBrushApp {
         } else if !tool_allowed {
             ctx.set_cursor_icon(CursorIcon::NotAllowed);
         } else {
-            self.draw_tool_cursor_and_feedback(ctx, painter, pos);
+            canvas_tool::draw_tool_cursor_and_feedback(self, ctx, painter, pos);
         }
     }
+
 }
 
-impl eframe::App for FlashBrushApp {
+impl eframe::App for Is2dApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.update_playback(ctx);
+        timeline_ui::update_playback(self, ctx);
         self.handle_shortcuts(ctx);
-        self.draw_left_toolbar(ctx);
-        self.draw_right_properties_panel(ctx);
-        self.draw_timeline_panel(ctx);
-        self.draw_stage_header_bar(ctx);
+        panels::draw_left_toolbar(self, ctx);
+        panels::draw_right_properties_panel(self, ctx);
+        timeline_ui::draw_timeline_panel(self, ctx);
+        panels::draw_stage_header_bar(self, ctx);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::from_rgb(244, 245, 248)))
             .show(ctx, |ui| {
                 let (canvas_rect, response) =
                     ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
-                self.last_canvas_rect = canvas_rect;
+                self.viewport.last_canvas_rect = canvas_rect;
                 let painter = ui.painter_at(canvas_rect);
 
                 let pointer_pos = response
@@ -734,26 +815,28 @@ impl eframe::App for FlashBrushApp {
 
                 // 0. ビューポートのズーム・パン移動操作ハンドリング
                 let pan_state @ (is_panning, _) =
-                    self.handle_viewport_navigation(ui, canvas_rect, pointer_pos);
+                    self.viewport.handle_navigation(ui, canvas_rect, pointer_pos);
 
-                let mouse_pt = pointer_pos.map(|p| self.screen_to_world(p));
+                let mouse_pt = pointer_pos.map(|p| self.viewport.screen_to_world(p));
                 let tool_allowed = self.is_current_tool_allowed();
 
-                // 1. ツール別のマウス入力ハンドリング（パン操作中はスキップ）
-                if !is_panning {
+                // 1. ツール別のマウス入力ハンドリング（パン操作開始時は進行中のドラッグをキャンセルしてスキップ）
+                if is_panning {
+                    canvas_tool::cancel_active_drag(self);
+                } else {
                     self.handle_canvas_tool_input(ui, &response, mouse_pt, tool_allowed);
                 }
 
+                let in_symbol_edit = !self.symbols.edit_stack.is_empty();
+
                 // 2. ステージ背景（ペーストボード＋白いステージ矩形）の描画
-                self.draw_stage_background(&painter, canvas_rect);
+                self.viewport
+                    .draw_stage_background(&painter, canvas_rect, in_symbol_edit);
 
-                // 3. キャンバス上のシェイプ・オニオンスキン・選択枠・プレビューの描画
-                self.draw_canvas_contents(&painter);
+                // 3. キャンバス上のシェイプ・オニオンスキン・ステージ枠線・選択枠・プレビューの描画
+                canvas_tool::draw_canvas_contents(self, &painter);
 
-                // 4. 図形の上からステージ境界枠線（および「枠外を隠す」ON時の外周マスク）を描画
-                self.draw_stage_foreground_overlay(&painter, canvas_rect);
-
-                // 5. 状態連動の警告バッジおよび一時トースト通知を描画
+                // 4. 状態連動の警告バッジおよび一時トースト通知を描画
                 self.draw_canvas_notices(ctx, &painter, canvas_rect, tool_allowed);
 
                 // 3. カーソル表示とホバー・ドラッグ視覚フィードバック
