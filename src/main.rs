@@ -1,5 +1,6 @@
 mod canvas_tool;
 mod panels;
+mod project_io;
 mod symbol;
 mod timeline;
 mod timeline_ui;
@@ -32,10 +33,8 @@ pub(crate) enum NoticeKind {
     /// 操作不可や条件不足の警告（黄色系バッジ）
     Warning,
     /// エラー通知（赤系バッジ）
-    #[allow(dead_code)]
     Error,
     /// 通常の案内・情報（青系バッジ）
-    #[allow(dead_code)]
     Info,
 }
 
@@ -73,7 +72,7 @@ pub(crate) struct StatusToast {
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("is2d")
+            .with_title("is2d - 無題-1")
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([800.0, 520.0]),
         ..Default::default()
@@ -145,13 +144,16 @@ pub(crate) struct UndoEntry {
     pub(crate) symbol_edit_stack: std::sync::Arc<Vec<SymbolEditSession>>,
     pub(crate) stage_size: Vec2,
     pub(crate) symbols_revision: u64,
+    /// この履歴スナップショットが表すドキュメント状態世代ID（未保存変更 `is_dirty` 判定用）
+    pub(crate) commit_id: u64,
 }
 
 impl UndoEntry {
     /// スナップショットから随時再生成可能な一時メッシュキャッシュ（`fill_mesh`, `selection_mesh`, `CelMeshCache`）を除去し、
     /// 直前の履歴スナップショット `prev_timeline` と未変更のセルは `Arc` を $O(1)$ 共有した軽量状態にする
     pub(crate) fn strip_transient_caches(mut self, prev_timeline: Option<&Timeline>) -> Self {
-        self.timeline.strip_transient_caches_with_prev(prev_timeline);
+        self.timeline
+            .strip_transient_caches_with_prev(prev_timeline);
         if let Some(lib) = std::sync::Arc::get_mut(&mut self.library) {
             for sym in lib {
                 sym.strip_transient_caches();
@@ -166,14 +168,49 @@ impl UndoEntry {
     }
 }
 
-/// Undo / Redo スナップショット履歴を管理する構造体
-#[derive(Default)]
+/// Undo / Redo スナップショット履歴および保存時点のドキュメント世代IDを管理する構造体
 pub(crate) struct UndoHistory {
     pub(crate) undo_stack: VecDeque<UndoEntry>,
     pub(crate) redo_stack: Vec<UndoEntry>,
+    /// 現在のドキュメント状態の世代ID（初期状態・読み込み直後は `0`）
+    pub(crate) current_commit_id: u64,
+    /// 直近の保存時点（または未編集の初期状態）の世代ID（`Some(current_commit_id)` と一致していれば未変更）
+    pub(crate) saved_commit_id: Option<u64>,
+    /// 次に発行する新しい状態世代ID（単調増加）
+    pub(crate) next_commit_id: u64,
+}
+
+impl Default for UndoHistory {
+    fn default() -> Self {
+        Self {
+            undo_stack: VecDeque::new(),
+            redo_stack: Vec::new(),
+            current_commit_id: 0,
+            saved_commit_id: Some(0),
+            next_commit_id: 1,
+        }
+    }
 }
 
 impl UndoHistory {
+    /// 現在のドキュメントに未保存の変更があるか（保存時点の世代IDと現在世代IDが異なるか）を返す
+    #[inline]
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.saved_commit_id != Some(self.current_commit_id)
+    }
+
+    /// 現在のドキュメント世代IDを「保存済み」として記録する
+    #[inline]
+    pub(crate) fn mark_saved(&mut self) {
+        self.saved_commit_id = Some(self.current_commit_id);
+    }
+
+    /// 保存済み世代IDをクリアして常時「未保存」状態にする（別タブによる同名ファイル上書き時のデタッチ用）
+    #[inline]
+    pub(crate) fn mark_unsaved(&mut self) {
+        self.saved_commit_id = None;
+    }
+
     /// シンボルライブラリおよび編集スタックが直近の履歴エントリから未変更（同一 `revision`）であれば
     /// `Arc` ポインタを $O(1)$ で共有し、変更されている場合のみクローン＆キャッシュ除去して新しい `Arc` を返す
     pub(crate) fn snapshot_symbols(
@@ -211,8 +248,11 @@ impl UndoHistory {
         )
     }
 
-    /// 新しい Undo エントリをスタックへ追加し、Redo スタックをクリアする
-    pub(crate) fn push(&mut self, entry: UndoEntry) {
+    /// 新しい Undo エントリをスタックへ追加し、Redo スタックをクリアして現在の状態世代IDを進める
+    pub(crate) fn push(&mut self, mut entry: UndoEntry) {
+        entry.commit_id = self.current_commit_id;
+        self.current_commit_id = self.next_commit_id;
+        self.next_commit_id = self.next_commit_id.saturating_add(1);
         let stripped = {
             let prev_tl = self
                 .undo_stack
@@ -279,6 +319,10 @@ pub(crate) struct AppUiState {
     pub(crate) show_wireframe: bool,
     /// プロパティパネルの下部表示対象（`true`: タイムラインのフレーム/トゥイーン属性、`false`: キャンバス上のシンボル属性）
     pub(crate) inspect_timeline_frame: bool,
+    /// シンボル再生オプションの開始/表示フレーム数値フィールドを連続編集（ドラッグ/入力）中かどうか
+    pub(crate) editing_symbol_playback: bool,
+    /// 現在開いている・保存先の `.is2d` プロジェクトファイルパス（未保存の新規ドキュメント時は `None`）
+    pub(crate) current_file_path: Option<std::path::PathBuf>,
     /// 操作トリガーで一定時間表示するトースト通知メッセージ
     pub(crate) status_toast: Option<StatusToast>,
 }
@@ -294,6 +338,8 @@ impl Default for AppUiState {
             brush_color: Color32::from_rgb(40, 45, 55),
             show_wireframe: false,
             inspect_timeline_frame: false,
+            editing_symbol_playback: false,
+            current_file_path: None,
             status_toast: None,
         }
     }
@@ -310,7 +356,7 @@ impl AppUiState {
     }
 }
 
-/// アプリケーション全体のルート構造体（責務ごとに独立した7つのドメイン構造体で構成）
+/// アプリケーション全体のルート構造体（責務ごとに独立したドメイン構造体で構成）
 #[derive(Default)]
 pub(crate) struct Is2dApp {
     /// ツール設定・右パネルタブ・ステータストースト通知などのUI状態
@@ -327,6 +373,8 @@ pub(crate) struct Is2dApp {
     pub(crate) symbols: SymbolManager,
     /// Undo / Redo 履歴スタック
     pub(crate) history: UndoHistory,
+    /// 複数ドキュメント同時オープン用のタブ管理状態（アクティブ状態スワップ方式）
+    pub(crate) tabs: project_io::DocumentTabManager,
 }
 
 impl Is2dApp {
@@ -337,6 +385,10 @@ impl Is2dApp {
     fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
         self.timeline_ui.cancel_drag();
         self.viewport.editing_stage_size = false;
+        self.timeline_ui.editing_total_frames = false;
+        self.timeline_ui.editing_fps = false;
+        self.symbols.actively_renaming_symbol = None;
+        self.ui.editing_symbol_playback = false;
         let (prev_lib, prev_stack, prev_rev) = self.history.snapshot_symbols(&self.symbols);
         let prev_entry = UndoEntry {
             timeline: std::mem::replace(&mut self.timeline, entry.timeline),
@@ -348,6 +400,7 @@ impl Is2dApp {
             symbol_edit_stack: prev_stack,
             stage_size: std::mem::replace(&mut self.viewport.stage_size, entry.stage_size),
             symbols_revision: prev_rev,
+            commit_id: std::mem::replace(&mut self.history.current_commit_id, entry.commit_id),
         };
         self.symbols.library = std::sync::Arc::unwrap_or_clone(entry.library);
         self.symbols.edit_stack = std::sync::Arc::unwrap_or_clone(entry.symbol_edit_stack);
@@ -374,12 +427,21 @@ impl Is2dApp {
             symbol_edit_stack,
             stage_size: self.viewport.stage_size,
             symbols_revision,
+            commit_id: self.history.current_commit_id,
         };
         self.history.push(entry);
     }
 
     pub(crate) fn push_undo(&mut self) {
-        if !self.timeline_ui.is_playing {
+        if self.timeline_ui.is_playing {
+            canvas_tool::stop_playback(self);
+        } else if let Some(mut unsliced) = self.canvas.take_unsliced_snapshot() {
+            let selected_ids = self.canvas.selected_shape_ids();
+            self.timeline.normalize_shape_layer_ids(&mut unsliced);
+            self.canvas.shapes = unsliced;
+            self.canvas.restore_selection_by_shape_ids(&selected_ids);
+            canvas_tool::sync_shapes_to_timeline(self);
+        } else {
             canvas_tool::sync_shapes_to_timeline(self);
         }
         let (library, symbol_edit_stack, symbols_revision) =
@@ -391,20 +453,23 @@ impl Is2dApp {
             symbol_edit_stack,
             stage_size: self.viewport.stage_size,
             symbols_revision,
+            commit_id: self.history.current_commit_id,
         };
         self.history.push(entry);
     }
 
     /// キャンバス図形に対する変更トランザクションを一括実行する：
-    /// 1. 必要に応じて未確定選択を確定解除 (`clear_selection`)
-    /// 2. 変更前の Undo スナップショットを記録
-    /// 3. `mutate` クロージャでキャンバス図形を更新
-    /// 4. 変更後の図形を現在フレームのタイムライン `Cel` へ自動同期 (`sync_shapes_to_timeline`)
+    /// 1. 再生中であれば停止して現在フレームの図形を展開 (`stop_playback`)
+    /// 2. 必要に応じて未確定選択を確定解除 (`clear_selection`)
+    /// 3. 変更前の Undo スナップショットを記録
+    /// 4. `mutate` クロージャでキャンバス図形を更新
+    /// 5. 変更後の図形を現在フレームのタイムライン `Cel` へ自動同期 (`sync_shapes_to_timeline`)
     pub(crate) fn mutate_canvas_with_undo(
         &mut self,
         clear_selection_first: bool,
         mutate: impl FnOnce(&mut Self),
     ) {
+        canvas_tool::stop_playback(self);
         if clear_selection_first {
             tool_select::clear_selection(self);
         }
@@ -417,6 +482,7 @@ impl Is2dApp {
     /// 事前取得済みの変更前スナップショット `pre_mutation_snapshot` を Undo 履歴に記録し、
     /// 現在の `self.canvas.shapes` をタイムライン `Cel` へ自動同期する単一コミットAPI
     pub(crate) fn commit_canvas_mutation(&mut self, pre_mutation_snapshot: Vec<FillShape>) {
+        canvas_tool::stop_playback(self);
         self.record_undo_snapshot(pre_mutation_snapshot);
         canvas_tool::sync_shapes_to_timeline(self);
     }
@@ -442,6 +508,30 @@ impl Is2dApp {
     // ------------------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let mut file_cmd = None;
+        ctx.input(|i| {
+            let cmd = i.modifiers.command || i.modifiers.ctrl;
+            if cmd && i.key_pressed(Key::N) {
+                file_cmd = Some(0u8);
+            } else if cmd && i.key_pressed(Key::O) {
+                file_cmd = Some(1u8);
+            } else if cmd && i.key_pressed(Key::S) {
+                file_cmd = Some(if i.modifiers.shift { 3u8 } else { 2u8 });
+            } else if cmd && i.key_pressed(Key::W) {
+                file_cmd = Some(4u8);
+            }
+        });
+        if let Some(cmd_id) = file_cmd {
+            match cmd_id {
+                0 => project_io::new_project(self, ctx),
+                1 => project_io::open_project_dialog(self, ctx),
+                2 => project_io::save_project(self, ctx),
+                3 => project_io::save_project_as_dialog(self, ctx),
+                4 => project_io::close_active_tab(self, Some(ctx)),
+                _ => {}
+            }
+            return;
+        }
         if ctx.wants_keyboard_input() {
             return;
         }
@@ -536,9 +626,9 @@ impl Is2dApp {
                     matches!(ev, egui::Event::Text(t) if t == "+" || t == "=" || t == ";" || t == "＋")
                 });
             let minus_pressed = i.key_pressed(Key::Minus)
-                || i.events.iter().any(|ev| {
-                    matches!(ev, egui::Event::Text(t) if t == "-" || t == "ー" || t == "－")
-                });
+                || i.events.iter().any(
+                    |ev| matches!(ev, egui::Event::Text(t) if t == "-" || t == "ー" || t == "－"),
+                );
 
             if plus_pressed {
                 canvas_tool::toggle_select_sub_mode(self, SelectSubMode::AddAnchor);
@@ -680,13 +770,11 @@ impl Is2dApp {
     }
 
     /// エラーのトースト通知をキャンバス左上に表示する
-    #[allow(dead_code)]
     pub(crate) fn notify_error(&mut self, message: impl Into<String>) {
         self.show_notice(NoticeKind::Error, message);
     }
 
     /// 案内・情報のトースト通知をキャンバス左上に表示する
-    #[allow(dead_code)]
     pub(crate) fn notify_info(&mut self, message: impl Into<String>) {
         self.show_notice(NoticeKind::Info, message);
     }
@@ -700,7 +788,9 @@ impl Is2dApp {
             .timeline
             .layers
             .get(self.timeline.active_layer)
-            .is_some_and(|l| l.visible && !l.locked && self.timeline.current_frame >= l.frame_count);
+            .is_some_and(|l| {
+                l.visible && !l.locked && self.timeline.current_frame >= l.frame_count
+            });
         if is_uncreated_frame {
             Some((
                 NoticeKind::Warning,
@@ -742,8 +832,7 @@ impl Is2dApp {
         let mut y_offset = 12.0_f32;
         for (kind, text) in notices {
             let (bg_col, border_col, text_col) = kind.colors();
-            let galley =
-                painter.layout_no_wrap(text, egui::FontId::proportional(12.0), text_col);
+            let galley = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), text_col);
             let badge_w = (galley.size().x + 24.0).max(200.0);
             let badge_h = 26.0;
             let badge_rect = egui::Rect::from_min_size(
@@ -789,16 +878,18 @@ impl Is2dApp {
             canvas_tool::draw_tool_cursor_and_feedback(self, ctx, painter, pos);
         }
     }
-
 }
 
 impl eframe::App for Is2dApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        project_io::handle_viewport_close_request(self, ctx);
         timeline_ui::update_playback(self, ctx);
         self.handle_shortcuts(ctx);
+        panels::draw_top_menu_bar(self, ctx);
         panels::draw_left_toolbar(self, ctx);
         panels::draw_right_properties_panel(self, ctx);
         timeline_ui::draw_timeline_panel(self, ctx);
+        panels::draw_document_tab_bar(self, ctx);
         panels::draw_stage_header_bar(self, ctx);
 
         egui::CentralPanel::default()
@@ -815,7 +906,8 @@ impl eframe::App for Is2dApp {
 
                 // 0. ビューポートのズーム・パン移動操作ハンドリング
                 let pan_state @ (is_panning, _) =
-                    self.viewport.handle_navigation(ui, canvas_rect, pointer_pos);
+                    self.viewport
+                        .handle_navigation(ui, canvas_rect, pointer_pos);
 
                 let mouse_pt = pointer_pos.map(|p| self.viewport.screen_to_world(p));
                 let tool_allowed = self.is_current_tool_allowed();

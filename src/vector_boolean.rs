@@ -4,8 +4,7 @@ use i_overlay::{
     float::{filter::ContourFilter, overlay::FloatOverlay},
 };
 use kurbo::{
-    ParamCurve, ParamCurveArclen, ParamCurveDeriv, ParamCurveNearest, Point, QuadBez,
-    Rect as KRect,
+    ParamCurve, ParamCurveArclen, ParamCurveDeriv, ParamCurveNearest, Point, QuadBez, Rect as KRect,
 };
 
 use crate::{
@@ -141,11 +140,19 @@ fn merge_homogeneous_batch_into_canvas(
     if overlapping_same_color.is_empty() && !incoming_self_overlaps {
         updated_canvas.extend(incoming);
     } else if overlapping_same_color.is_empty() {
-        updated_canvas.extend(
-            boolean_operation(&incoming[..1], &incoming[1..], BoolOp::Union, target_color)
-                .into_iter()
-                .map(|s| s.with_scope(target_layer_id, &target_group_path)),
-        );
+        let unioned =
+            boolean_operation(&incoming[..1], &incoming[1..], BoolOp::Union, target_color);
+        let mut used_ids = Vec::with_capacity(unioned.len());
+        updated_canvas.extend(unioned.into_iter().map(|mut s| {
+            let s_bbox = s.bounding_box().inflate(1.5, 1.5);
+            if let Some(inc) = incoming.iter().find(|inc| {
+                !used_ids.contains(&inc.shape_id) && rects_overlap(s_bbox, inc.bounding_box())
+            }) {
+                used_ids.push(inc.shape_id);
+                s.shape_id = inc.shape_id;
+            }
+            s.with_scope(target_layer_id, &target_group_path)
+        }));
     } else {
         updated_canvas.extend(
             boolean_operation(
@@ -163,26 +170,30 @@ fn merge_homogeneous_batch_into_canvas(
     *canvas = updated_canvas;
 }
 
-/// 消しゴムの輪郭で、同じ編集スコープ（`group_path`）直下の生シェイプに対してのみ Boolean Difference を適用する
-pub(crate) fn erase_from_canvas(canvas: &mut Vec<FillShape>, eraser_shapes: &[FillShape]) {
+/// 消しゴムの輪郭で、指定されたアクティブレイヤー（`target_layer_id`）かつ同じ編集スコープ（`editing_scope`）直下の生シェイプに対してのみ Boolean Difference を適用する
+pub(crate) fn erase_from_canvas(
+    canvas: &mut Vec<FillShape>,
+    eraser_shapes: &[FillShape],
+    target_layer_id: u64,
+    editing_scope: &[u64],
+) {
     if eraser_shapes.is_empty() {
         return;
     }
-    let target_group_path = &eraser_shapes[0].group_path;
     let test_bbox = union_bounding_boxes(eraser_shapes).inflate(1.5, 1.5);
     let mut prepared_clip: Option<PreparedClip> = None;
 
     let mut updated_canvas = Vec::with_capacity(canvas.len());
     for existing in canvas.drain(..) {
-        if existing.group_path == *target_group_path
+        if existing.layer_id == target_layer_id
+            && existing.group_path == editing_scope
             && rects_overlap(existing.bounding_box(), test_bbox)
         {
-            let layer_id = existing.layer_id;
             let clip = prepared_clip.get_or_insert_with(|| PreparedClip::new(eraser_shapes));
             updated_canvas.extend(
                 clip.subtract_from(&existing)
                     .into_iter()
-                    .map(|s| s.with_scope(layer_id, target_group_path)),
+                    .map(|s| s.with_scope(target_layer_id, editing_scope)),
             );
         } else {
             updated_canvas.push(existing);
@@ -427,45 +438,67 @@ fn reconstruct_fill_shape_from_rings(
     Some(FillShape::new(color, exterior, holes))
 }
 
-/// 指定座標 `pt` を囲み得る連結AABBクラスタを計算し、無関係な遠方のシェイプを事前にAABBカリングする
+/// 指定座標 `pt` を囲み得る連結AABBクラスタをスイープライン＋Union-Find（素集合データ構造）で計算し、
+/// 無関係な遠方のシェイプを事前にAABBカリングする
 fn cull_enclosed_region_candidates(
     canvas: &[FillShape],
     pt: Point,
 ) -> Option<(KRect, Vec<FillShape>)> {
-    let mut clusters: Vec<KRect> = canvas
+    let mut comp_rects: Vec<KRect> = canvas
         .iter()
         .filter(|s| !s.exterior.segments.is_empty())
         .map(|s| s.bounding_box().inflate(1.0, 1.0))
         .collect();
-    if clusters.is_empty() {
+    let n = comp_rects.len();
+    if n == 0 {
         return None;
     }
 
-    let mut merged = true;
-    while merged {
-        merged = false;
-        let mut i = 0;
-        while i < clusters.len() {
-            let mut j = i + 1;
-            while j < clusters.len() {
-                if rects_overlap(clusters[i], clusters[j]) {
-                    let b = clusters.swap_remove(j);
-                    clusters[i] = clusters[i].union(b);
-                    merged = true;
-                } else {
-                    j += 1;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_unstable_by(|&a, &b| comp_rects[a].x0.total_cmp(&comp_rects[b].x0));
+
+    let mut parent: Vec<usize> = (0..n).collect();
+    let find_root = |parent: &mut [usize], mut x: usize| -> usize {
+        while parent[x] != x {
+            let p = parent[x];
+            parent[x] = parent[p];
+            x = p;
+        }
+        x
+    };
+
+    for a_pos in 0..n {
+        let i = order[a_pos];
+        let rect_i = comp_rects[i];
+        for &j in &order[(a_pos + 1)..] {
+            let rect_j = comp_rects[j];
+            if rect_j.x0 > rect_i.x1 {
+                break;
+            }
+            if rect_i.y0 <= rect_j.y1 && rect_i.y1 >= rect_j.y0 {
+                let ri = find_root(&mut parent, i);
+                let rj = find_root(&mut parent, j);
+                if ri != rj {
+                    parent[rj] = ri;
                 }
             }
-            i += 1;
+        }
+    }
+
+    for i in 0..n {
+        let root = find_root(&mut parent, i);
+        if root != i {
+            let r = comp_rects[i];
+            comp_rects[root] = comp_rects[root].union(r);
         }
     }
 
     let mut active_bounds: Option<KRect> = None;
-    for c in clusters {
-        if c.contains(pt) {
+    for i in 0..n {
+        if parent[i] == i && comp_rects[i].contains(pt) {
             active_bounds = Some(match active_bounds {
-                Some(acc) => acc.union(c),
-                None => c,
+                Some(acc) => acc.union(comp_rects[i]),
+                None => comp_rects[i],
             });
         }
     }
@@ -521,6 +554,7 @@ pub(crate) fn find_enclosed_region_at(
         min_area,
     );
 
+    let mut cached_grid: Option<QuadSpatialGrid> = None;
     for poly_shape in overlay_result {
         if poly_shape.is_empty() {
             continue;
@@ -551,9 +585,9 @@ pub(crate) fn find_enclosed_region_at(
             continue;
         }
 
-        let grid = QuadSpatialGrid::new(&quad_table);
+        let grid = cached_grid.get_or_insert_with(|| QuadSpatialGrid::new(&quad_table));
         let Some(candidate) =
-            reconstruct_fill_shape_from_rings(&poly_shape, &quad_table, &grid, fill_color, false)
+            reconstruct_fill_shape_from_rings(&poly_shape, &quad_table, grid, fill_color, false)
         else {
             continue;
         };
@@ -577,9 +611,7 @@ fn poly_shape_contains_point(poly_shape: &[Vec<[f64; 2]>], pt: Point) -> bool {
         for i in 0..n {
             let [xi, yi] = ring[i];
             let [xj, yj] = ring[j];
-            if ((yi > pt.y) != (yj > pt.y))
-                && (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi)
-            {
+            if ((yi > pt.y) != (yj > pt.y)) && (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi) {
                 inside = !inside;
             }
             j = i;
@@ -708,10 +740,7 @@ fn flatten_contour_preserving_direction(
     Some(ring)
 }
 
-fn flatten_shape_for_overlay(
-    shape: &FillShape,
-    quad_table: &mut Vec<QuadRecord>,
-) -> OverlayShape {
+fn flatten_shape_for_overlay(shape: &FillShape, quad_table: &mut Vec<QuadRecord>) -> OverlayShape {
     let Some(ext_ring) = flatten_contour_for_overlay(&shape.exterior, true, quad_table) else {
         return Vec::new();
     };

@@ -236,7 +236,9 @@ pub(crate) fn handle_transform_tool_input(
         if let Some(pt) = mouse_pt {
             if compute_transform_hover(&app.canvas, pt, zoom) == TransformHoverTarget::Pivot {
                 reset_selected_transform_pivot(app);
-            } else if !crate::tool_select::enter_group_at(app, pt) {
+            } else if !crate::tool_select::enter_group_at(app, pt)
+                && app.canvas.topmost_shape_at(pt).is_none()
+            {
                 crate::tool_select::exit_current_group(app);
             }
         }
@@ -281,12 +283,11 @@ fn start_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held
         TransformHoverTarget::Pivot => {
             if let Some(bbox) = app.canvas.selection_bounding_box(zoom) {
                 let orig_pivot = app.canvas.active_transform_pivot(bbox);
-                app.canvas.drag =
-                    ActiveCanvasDrag::Transform(TransformDragState::MovePivot {
-                        orig_pivot,
-                        undo_snapshot: app.canvas.snapshot_for_drag(),
-                        changed: false,
-                    });
+                app.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::MovePivot {
+                    orig_pivot,
+                    undo_snapshot: app.canvas.snapshot_for_drag(),
+                    changed: false,
+                });
             }
         }
         TransformHoverTarget::Scale(handle) => {
@@ -343,12 +344,11 @@ fn start_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held
                     crate::tool_select::select_single_shape_at(app, pt);
                 }
                 let move_drag = crate::tool_select::begin_move_selection_drag(app, pt, alt_held);
-                app.canvas.drag =
-                    ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
+                app.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
             } else {
-                app.canvas.drag = ActiveCanvasDrag::Transform(
-                    TransformDragState::MarqueeSelect(MarqueeDrag::new(pt, false)),
-                );
+                app.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::MarqueeSelect(
+                    MarqueeDrag::new(pt, false),
+                ));
             }
         }
     }
@@ -404,8 +404,7 @@ fn update_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_hel
 
                 let affine = affine_scale_around(eff_anchor, sx, sy);
                 *changed = (sx - 1.0).abs() > 0.005 || (sy - 1.0).abs() > 0.005;
-                scale_update =
-                    Some((affine, *orig_pivot, app.canvas.transform_pivot.is_some()));
+                scale_update = Some((affine, *orig_pivot, app.canvas.transform_pivot.is_some()));
             }
             TransformDragState::Rotate {
                 pivot,
@@ -434,7 +433,11 @@ fn update_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_hel
         if let ActiveCanvasDrag::Transform(TransformDragState::Scale { orig_shapes, .. }) =
             &app.canvas.drag
         {
-            CanvasState::transform_selected_from_origins(&mut app.canvas.shapes, orig_shapes, affine);
+            CanvasState::transform_selected_from_origins(
+                &mut app.canvas.shapes,
+                orig_shapes,
+                affine,
+            );
         }
         if has_piv {
             app.canvas.transform_pivot = Some(affine * orig_pivot);
@@ -444,7 +447,11 @@ fn update_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_hel
         if let ActiveCanvasDrag::Transform(TransformDragState::Rotate { orig_shapes, .. }) =
             &app.canvas.drag
         {
-            CanvasState::transform_selected_from_origins(&mut app.canvas.shapes, orig_shapes, affine);
+            CanvasState::transform_selected_from_origins(
+                &mut app.canvas.shapes,
+                orig_shapes,
+                affine,
+            );
         }
     }
     if let Some(piv_pt) = new_pivot_pt {
@@ -467,7 +474,11 @@ fn finish_transform_drag(app: &mut Is2dApp, mouse_pt: Option<Point>) {
     };
     match finished {
         TransformDragState::Move(drag) => {
-            crate::tool_select::finish_move_selection_drag(app, drag.total_delta, drag.undo_snapshot);
+            crate::tool_select::finish_move_selection_drag(
+                app,
+                drag.total_delta,
+                drag.undo_snapshot,
+            );
         }
         TransformDragState::Scale {
             undo_snapshot,
@@ -566,10 +577,12 @@ pub(crate) fn compute_transform_hover(
     }
 
     if bbox.contains(mouse_pt)
-        || canvas
-            .selected_shapes
-            .iter()
-            .any(|&idx| canvas.shapes.get(idx).is_some_and(|s| s.contains_point(mouse_pt)))
+        || canvas.selected_shapes.iter().any(|&idx| {
+            canvas
+                .shapes
+                .get(idx)
+                .is_some_and(|s| s.contains_point(mouse_pt))
+        })
     {
         return TransformHoverTarget::Move;
     }
@@ -725,7 +738,11 @@ fn scale_handle_cursor_icon(handle: ScaleHandle) -> CursorIcon {
 /// 自由変形ツールの外周で回転モードに入った際の「回転アーク」カーソルバッジを描画
 fn draw_transform_rotate_cursor_badge(painter: &egui::Painter, cursor: Pos2) {
     let base = cursor + Vec2::new(15.0, 15.0);
-    painter.circle_filled(base, 8.5, Color32::from_rgba_unmultiplied(255, 255, 255, 235));
+    painter.circle_filled(
+        base,
+        8.5,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 235),
+    );
     painter.circle_stroke(base, 8.5, Stroke::new(1.5, Color32::from_rgb(0, 125, 240)));
     let r = 5.0_f32;
     let steps = 10;
@@ -751,6 +768,7 @@ fn draw_transform_rotate_cursor_badge(painter: &egui::Painter, cursor: Pos2) {
 
 /// 選択中のオブジェクト（生シェイプ・グループ問わず）を新しい「シンボル」に変換してライブラリに登録する（`F8`）
 pub(crate) fn convert_selection_to_symbol(app: &mut Is2dApp) -> Option<u64> {
+    crate::canvas_tool::stop_playback(app);
     crate::canvas_tool::cancel_active_drag(app);
     if app.canvas.selected_shapes.is_empty() {
         return None;
@@ -833,8 +851,10 @@ pub(crate) fn convert_selection_to_symbol(app: &mut Is2dApp) -> Option<u64> {
 /// ライブラリ内の指定シンボル `symbol_id` の新しいインスタンスを現在のステージ中央へ配置する
 /// （直接・間接の循環参照を起こす場合は拒否し、Frame 0 が空白のマルチフレームシンボルや全フレーム白紙の空シンボルでも配置可能）
 pub(crate) fn place_symbol_instance_from_library(app: &mut Is2dApp, symbol_id: u64) -> bool {
+    crate::canvas_tool::stop_playback(app);
+    let target_lid = crate::canvas_tool::active_scope_layer_id(app);
     if !app.symbols.can_place_symbol_in_current_context(symbol_id)
-        || !app.timeline.has_any_editable_layer()
+        || !app.timeline.is_layer_editable_by_id(target_lid)
     {
         return false;
     }
@@ -885,11 +905,7 @@ pub(crate) fn place_symbol_instance_from_library(app: &mut Is2dApp, symbol_id: u
             .unwrap_or_default();
 
         let placed = if !sym_shapes.is_empty() {
-            binding.instantiate_shapes(
-                &sym_shapes,
-                target_lid,
-                &app.canvas.editing_group_path,
-            )
+            binding.instantiate_shapes(&sym_shapes, target_lid, &app.canvas.editing_group_path)
         } else {
             vec![FillShape::new_empty_symbol_marker(
                 binding,
@@ -909,6 +925,7 @@ pub(crate) fn rename_symbol_in_library(
     symbol_id: u64,
     new_name: impl Into<String>,
 ) -> bool {
+    crate::canvas_tool::stop_playback(app);
     let new_name = new_name.into();
     if app
         .symbols
@@ -926,6 +943,7 @@ pub(crate) fn rename_symbol_in_library(
 /// ライブラリから指定シンボル `symbol_id` を削除し、ステージ上および全フレームに配置されていた該当インスタンスは
 /// 消去せず通常のグループ図形へ自動分解（デタッチ）して残す
 pub(crate) fn delete_symbol_from_library(app: &mut Is2dApp, symbol_id: u64) -> bool {
+    crate::canvas_tool::stop_playback(app);
     if app.symbols.find_symbol(symbol_id).is_none() {
         return false;
     }
@@ -940,11 +958,8 @@ pub(crate) fn delete_symbol_from_library(app: &mut Is2dApp, symbol_id: u64) -> b
     crate::tool_select::clear_selection(app);
     app.push_undo();
 
-    app.symbols.remove_symbol_and_detach(
-        symbol_id,
-        &mut app.timeline,
-        &mut app.canvas.shapes,
-    );
+    app.symbols
+        .remove_symbol_and_detach(symbol_id, &mut app.timeline, &mut app.canvas.shapes);
 
     app.canvas.record_loaded_signatures();
     app.canvas.sanitize_editing_scope();
@@ -958,15 +973,13 @@ pub(crate) fn timeline_toggle_tween(app: &mut Is2dApp) -> bool {
     if targets.is_empty() {
         return false;
     }
-    let prev_selected = app.canvas.selected_shapes.clone();
+    let prev_selected_ids = app.canvas.selected_shape_ids();
     crate::canvas_tool::flush_canvas_before_timeline_op(app);
 
     let (can_toggle, is_currently_tweened) = app.timeline.can_toggle_tween_at_current_frame();
     if !can_toggle {
-        app.canvas.selected_shapes = prev_selected
-            .into_iter()
-            .filter(|&idx| idx < app.canvas.shapes.len())
-            .collect();
+        app.canvas
+            .restore_selection_by_shape_ids(&prev_selected_ids);
         app.notify_warning(
             "トゥイーンを設定するには、キーフレームに単一のシンボルインスタンス（F8）のみを配置してください",
         );
@@ -1003,7 +1016,10 @@ pub(crate) fn timeline_toggle_tween(app: &mut Is2dApp) -> bool {
 }
 
 /// 現在のアクティブレイヤー・現在フレームが属するトゥイーンキーフレームの回転方向 `tween_rotate` を設定する
-pub(crate) fn set_active_keyframe_tween_rotate(app: &mut Is2dApp, rotate_mode: TweenRotate) -> bool {
+pub(crate) fn set_active_keyframe_tween_rotate(
+    app: &mut Is2dApp,
+    rotate_mode: TweenRotate,
+) -> bool {
     let Some(layer) = app.timeline.layers.get(app.timeline.active_layer) else {
         return false;
     };
@@ -1013,9 +1029,7 @@ pub(crate) fn set_active_keyframe_tween_rotate(app: &mut Is2dApp, rotate_mode: T
     let Some(kf_idx) = layer.keyframe_index_at(app.timeline.current_frame) else {
         return false;
     };
-    if !layer.keyframes[kf_idx].tween
-        || layer.keyframes[kf_idx].tween_rotate == rotate_mode
-    {
+    if !layer.keyframes[kf_idx].tween || layer.keyframes[kf_idx].tween_rotate == rotate_mode {
         return false;
     }
 
@@ -1055,6 +1069,7 @@ pub(crate) fn set_selected_symbol_playback(
     loop_mode: SymbolLoopMode,
     first_frame: usize,
 ) -> bool {
+    crate::canvas_tool::stop_playback(app);
     let Some((binding, _, total_frames)) = selected_single_symbol_info(app) else {
         return false;
     };
@@ -1067,7 +1082,9 @@ pub(crate) fn set_selected_symbol_playback(
     let sym_id = binding.symbol_id;
     crate::tool_select::clear_selection(app);
     crate::canvas_tool::sync_shapes_to_timeline(app);
-    app.push_undo();
+    if !app.ui.editing_symbol_playback {
+        app.push_undo();
+    }
 
     if app.symbols.find_symbol(sym_id).is_none() {
         return false;
@@ -1165,6 +1182,7 @@ pub(crate) fn enter_symbol_timeline(app: &mut Is2dApp, binding: SymbolInstanceBi
 
 /// ライブラリ内の指定シンボル `symbol_id` の内部タイムライン編集モードへ入る
 pub(crate) fn enter_symbol_from_library(app: &mut Is2dApp, symbol_id: u64) -> bool {
+    crate::canvas_tool::stop_playback(app);
     if app
         .symbols
         .edit_stack
@@ -1173,27 +1191,45 @@ pub(crate) fn enter_symbol_from_library(app: &mut Is2dApp, symbol_id: u64) -> bo
     {
         return false;
     }
-    let curr_f = app.timeline.current_frame;
-    let binding = app
+    let has_instance_in_current_timeline = app
         .canvas
         .shapes
         .iter()
-        .find_map(|s| s.symbol_instance.filter(|b| b.symbol_id == symbol_id))
-        .or_else(|| {
-            app.timeline.layers.iter().find_map(|l| {
-                l.cel_at(curr_f)?.instances.iter().find_map(|inst| {
-                    (inst.binding.symbol_id == symbol_id).then_some(inst.binding)
+        .any(|s| s.symbol_instance.is_some_and(|b| b.symbol_id == symbol_id))
+        || app.timeline.layers.iter().any(|l| {
+            l.keyframes.iter().any(|kf| {
+                kf.cel
+                    .instances
+                    .iter()
+                    .any(|inst| inst.binding.symbol_id == symbol_id)
+            })
+        });
+    if !app.symbols.edit_stack.is_empty() && !has_instance_in_current_timeline {
+        while !app.symbols.edit_stack.is_empty() {
+            exit_symbol_timeline(app);
+        }
+    }
+    let curr_f = app.timeline.current_frame;
+    let binding =
+        app.canvas
+            .shapes
+            .iter()
+            .find_map(|s| s.symbol_instance.filter(|b| b.symbol_id == symbol_id))
+            .or_else(|| {
+                app.timeline.layers.iter().find_map(|l| {
+                    l.cel_at(curr_f)?.instances.iter().find_map(|inst| {
+                        (inst.binding.symbol_id == symbol_id).then_some(inst.binding)
+                    })
                 })
             })
-        })
-        .unwrap_or_else(|| {
-            let stage_center = app.viewport.stage_center_world();
-            SymbolInstanceBinding::new(
-                0,
-                symbol_id,
-                Affine::translate(KVec2::new(stage_center.x, stage_center.y)),
-            )
-        });
+            .unwrap_or_else(|| {
+                let stage_center = app.viewport.stage_center_world();
+                SymbolInstanceBinding::new(
+                    0,
+                    symbol_id,
+                    Affine::translate(KVec2::new(stage_center.x, stage_center.y)),
+                )
+            });
     enter_symbol_timeline(app, binding)
 }
 
@@ -1207,6 +1243,7 @@ pub(crate) fn exit_symbol_timeline(app: &mut Is2dApp) -> bool {
     let Some(mut session) = app.symbols.edit_stack.pop() else {
         return false;
     };
+    session.parent_timeline.fps = app.timeline.fps;
     let sym_timeline = std::mem::replace(&mut app.timeline, session.parent_timeline);
     app.canvas.editing_group_path = session.parent_editing_group_path;
     app.timeline_ui
@@ -1229,6 +1266,7 @@ pub(crate) fn exit_symbol_timeline(app: &mut Is2dApp) -> bool {
     crate::canvas_tool::load_shapes_from_timeline(app);
 
     // 戻った親階層で元のシンボルインスタンスを選択状態にする
-    app.canvas.select_symbol_instance_by_gid(session.instance_gid);
+    app.canvas
+        .select_symbol_instance_by_gid(session.instance_gid);
     true
 }

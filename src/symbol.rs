@@ -5,10 +5,10 @@ use eframe::egui;
 use kurbo::Affine;
 
 use crate::timeline::{Cel, Layer, Timeline};
-pub(crate) use crate::vector_engine::{SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 use crate::vector_engine::{
     append_mesh, transform_mesh_to_screen, union_bounding_boxes, Contour, FillShape, SyncCache,
 };
+pub(crate) use crate::vector_engine::{SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 
 // ============================================================================
 // 1. シンボル定義（SymbolDef）・インスタンス紐付け・トゥイーン状態・編集セッション
@@ -165,6 +165,7 @@ pub(crate) struct SymbolDef {
     /// シンボル定義の変更世代番号（解決済みセルメッシュキャッシュの署名計算用）
     pub(crate) revision: u64,
     mini_preview_cache: SyncCache<Option<SymbolMiniPreviewCacheEntry>>,
+    dynamic_anim_cache: SyncCache<Option<(u64, u64, bool)>>,
 }
 
 pub(crate) const MAX_SYMBOL_NEST_DEPTH: usize = 8;
@@ -219,12 +220,8 @@ pub(crate) fn resolve_cel_with_library(
         let Some(sym) = ctx.library.iter().find(|sym| sym.id == b.symbol_id) else {
             continue;
         };
-        let local_shapes = sym.evaluated_local_shapes_for_instance(
-            b,
-            kf_start_frame,
-            frame,
-            ctx.nested(),
-        );
+        let local_shapes =
+            sym.evaluated_local_shapes_for_instance(b, kf_start_frame, frame, ctx.nested());
         if local_shapes.is_empty() && ctx.depth == 0 {
             out.push(FillShape::new_empty_symbol_marker(
                 b,
@@ -257,6 +254,7 @@ impl SymbolDef {
             timeline,
             revision: 0,
             mini_preview_cache: SyncCache::new(None),
+            dynamic_anim_cache: SyncCache::new(None),
         }
     }
 
@@ -264,6 +262,7 @@ impl SymbolDef {
     pub(crate) fn strip_transient_caches(&mut self) {
         self.timeline.strip_transient_caches();
         *self.mini_preview_cache.lock() = None;
+        *self.dynamic_anim_cache.lock() = None;
     }
 
     /// ライブラリパネルのミニプレビュー矩形 `rect` に対応するスクリーン変換済み結合 `Arc<Mesh>` と基準点スクリーン座標 `Pos2` をキャッシュ経由で返す
@@ -319,27 +318,57 @@ impl SymbolDef {
 
     /// このシンボル自身、または内部の入れ子シンボルが複数フレーム（または先頭フレーム空白）を持つかを再帰判定する
     pub(crate) fn has_dynamic_animation(&self, library: &[SymbolDef], depth: usize) -> bool {
+        if depth >= MAX_SYMBOL_NEST_DEPTH {
+            return false;
+        }
+        let self_sig = self.timeline.layers.iter().fold(
+            self.revision
+                .wrapping_mul(31)
+                .wrapping_add(self.timeline.total_frames as u64),
+            |acc, l| {
+                let c0 = l
+                    .cel_at(0)
+                    .map_or(0, |c| c.revision.wrapping_add(u64::from(!c.is_empty())));
+                acc.wrapping_mul(31)
+                    .wrapping_add(u64::from(l.visible))
+                    .wrapping_mul(31)
+                    .wrapping_add(c0)
+            },
+        );
+        let lib_sig = library.iter().fold(library.len() as u64, |acc, s| {
+            acc.wrapping_mul(31)
+                .wrapping_add(s.id)
+                .wrapping_mul(31)
+                .wrapping_add(s.revision)
+                .wrapping_mul(31)
+                .wrapping_add(s.timeline.total_frames as u64)
+        });
+        if let Some((rev, sig, cached)) = *self.dynamic_anim_cache.lock() {
+            if rev == self_sig && sig == lib_sig {
+                return cached;
+            }
+        }
         let frame_zero_empty = self
             .timeline
             .layers
             .iter()
-            .all(|l| !l.visible || l.cel_at(0).is_none_or(|c| c.shapes.is_empty()));
-        if self.timeline.total_frames > 1 || frame_zero_empty {
-            return true;
-        }
-        if depth >= MAX_SYMBOL_NEST_DEPTH {
-            return false;
-        }
-        self.timeline.layers.iter().any(|layer| {
-            layer.keyframes.iter().any(|kf| {
-                kf.cel.instances.iter().any(|inst| {
-                    library.iter().any(|child| {
-                        child.id == inst.binding.symbol_id
-                            && child.has_dynamic_animation(library, depth + 1)
+            .all(|l| !l.visible || l.cel_at(0).is_none_or(|c| c.is_empty()));
+        let dynamic = if self.timeline.total_frames > 1 || frame_zero_empty {
+            true
+        } else {
+            self.timeline.layers.iter().any(|layer| {
+                layer.keyframes.iter().any(|kf| {
+                    kf.cel.instances.iter().any(|inst| {
+                        library.iter().any(|child| {
+                            child.id == inst.binding.symbol_id
+                                && child.has_dynamic_animation(library, depth + 1)
+                        })
                     })
                 })
             })
-        })
+        };
+        *self.dynamic_anim_cache.lock() = Some((self_sig, lib_sig, dynamic));
+        dynamic
     }
 
     /// シンボルの全フレーム（`0..total_frames`）を先頭から走査し、最初に図形が存在するフレームのローカル図形列を返す
@@ -380,8 +409,8 @@ impl SymbolDef {
         let base = binding.first_frame.min(fc - 1);
         let elapsed = current_frame.saturating_sub(kf_start_frame);
         match binding.loop_mode {
-            SymbolLoopMode::Loop => (base + elapsed) % fc,
-            SymbolLoopMode::PlayOnce => (base + elapsed).min(fc - 1),
+            SymbolLoopMode::Loop => base.saturating_add(elapsed) % fc,
+            SymbolLoopMode::PlayOnce => base.saturating_add(elapsed).min(fc - 1),
             SymbolLoopMode::SingleFrame => base,
         }
     }
@@ -396,12 +425,15 @@ impl SymbolDef {
         ctx: SymbolEvalCtx<'_>,
     ) -> Vec<FillShape> {
         let internal_frame = self.resolve_internal_frame(binding, kf_start_frame, current_frame);
-        let child_eval_frame =
-            if self.timeline.total_frames <= 1 && binding.loop_mode != SymbolLoopMode::SingleFrame {
-                binding.first_frame + current_frame.saturating_sub(kf_start_frame)
-            } else {
-                internal_frame
-            };
+        let child_eval_frame = if self.timeline.total_frames <= 1
+            && binding.loop_mode != SymbolLoopMode::SingleFrame
+        {
+            binding
+                .first_frame
+                .saturating_add(current_frame.saturating_sub(kf_start_frame))
+        } else {
+            internal_frame
+        };
         let fc = self.timeline.total_frames.max(1);
         self.collect_visible_local_shapes_at(internal_frame % fc, child_eval_frame, ctx)
     }
@@ -569,15 +601,23 @@ impl SymbolManager {
     /// 新しいグループ / シンボルインスタンス用の一意な `group_id` を採番して返す
     pub(crate) fn alloc_group_id(&mut self) -> u64 {
         let id = self.next_group_id;
-        self.next_group_id += 1;
+        self.next_group_id = self.next_group_id.saturating_add(1);
         id
     }
 
     /// 新しいシンボル定義をライブラリへ登録し、採番された `symbol_id` を返す
     pub(crate) fn register_new_symbol(&mut self, local_shapes: Vec<FillShape>) -> u64 {
         let sym_id = self.next_symbol_id;
-        self.next_symbol_id += 1;
-        let sym_def = SymbolDef::new(sym_id, format!("Symbol {sym_id}"), local_shapes);
+        self.next_symbol_id = self.next_symbol_id.saturating_add(1);
+        let mut name_num = sym_id;
+        while self
+            .library
+            .iter()
+            .any(|s| s.name == format!("Symbol {name_num}"))
+        {
+            name_num = name_num.saturating_add(1);
+        }
+        let sym_def = SymbolDef::new(sym_id, format!("Symbol {name_num}"), local_shapes);
         self.library.push(sym_def);
         self.selected_library_symbol = Some(sym_id);
         self.bump_revision();
@@ -634,10 +674,10 @@ impl SymbolManager {
     /// `candidate_child_id` のシンボルインスタンスを安全に配置可能か（循環参照を起こさないか）を返す
     pub(crate) fn can_place_symbol_in_current_context(&self, candidate_child_id: u64) -> bool {
         self.find_symbol(candidate_child_id).is_some()
-            && !self
+            && self
                 .edit_stack
                 .iter()
-                .any(|sess| self.would_create_symbol_cycle(sess.symbol_id, candidate_child_id))
+                .all(|sess| !self.would_create_symbol_cycle(sess.symbol_id, candidate_child_id))
     }
 
     /// 指定した `symbol_id` のシンボル名を変更する（変更があった場合のみ `true` を返す）
@@ -654,23 +694,32 @@ impl SymbolManager {
         true
     }
 
-    /// Undo / Redo スナップショット復元後に、ライブラリ選択状態の整合性を整える
-    pub(crate) fn sync_after_restore(&mut self) {
-        self.actively_renaming_symbol = None;
+    /// ライブラリで選択中のシンボルIDが有効か検証し、未選択または削除済みの場合は先頭シンボルを選択する
+    pub(crate) fn ensure_valid_selection(&mut self) {
         if self
             .selected_library_symbol
-            .is_some_and(|id| !self.library.iter().any(|s| s.id == id))
+            .is_none_or(|id| !self.library.iter().any(|s| s.id == id))
         {
             self.selected_library_symbol = self.library.first().map(|s| s.id);
         }
     }
 
+    /// Undo / Redo スナップショット復元後に、ライブラリ選択状態の整合性を整える
+    pub(crate) fn sync_after_restore(&mut self) {
+        self.actively_renaming_symbol = None;
+        self.ensure_valid_selection();
+    }
+
     /// シンボル内部タイムライン編集中に、現在の `working_tl`（シンボルタイムライン）の状態を
     /// ライブラリ定義（`SymbolDef`）へ同期する（`backdrop_cel` は正規化保持のため再構築不要）
     pub(crate) fn sync_active_edit(&mut self, working_tl: &Timeline) {
-        let Some((sym_id, inv_xform)) = self.edit_stack.last().and_then(|session| {
-            (session.instance_xform.determinant().abs() > 1e-9)
-                .then(|| (session.symbol_id, session.instance_xform.inverse()))
+        let Some((sym_id, inv_xform)) = self.edit_stack.last().map(|session| {
+            let inv = if session.instance_xform.determinant().abs() > 1e-9 {
+                session.instance_xform.inverse()
+            } else {
+                Affine::IDENTITY
+            };
+            (session.symbol_id, inv)
         }) else {
             return;
         };
@@ -774,10 +823,11 @@ impl ResolvedCelSig {
     ) -> bool {
         let kf = &layer.keyframes[kf_idx];
         let next_kf = if kf.tween {
-            layer
-                .keyframes
-                .get(kf_idx + 1)
-                .and_then(|nkf| nkf.cel.single_symbol_instance().map(|nb| (nkf.start_frame, nb)))
+            layer.keyframes.get(kf_idx + 1).and_then(|nkf| {
+                nkf.cel
+                    .single_symbol_instance()
+                    .map(|nb| (nkf.start_frame, nb))
+            })
         } else {
             None
         };

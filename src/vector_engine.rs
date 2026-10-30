@@ -3,9 +3,8 @@ use kurbo::{
     Affine, BezPath, ParamCurve, Point, QuadBez, Rect as KRect, Shape as KurboShape, Vec2 as KVec2,
 };
 use lyon_tessellation::{
-    math::point as lyon_point,
-    path::Path as LyonPath,
-    BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex, VertexBuffers,
+    math::point as lyon_point, path::Path as LyonPath, BuffersBuilder, FillOptions, FillRule,
+    FillTessellator, FillVertex, VertexBuffers,
 };
 use std::{
     cell::RefCell,
@@ -303,7 +302,7 @@ impl Contour {
         Some(contour)
     }
 
-    fn reverse(&mut self) {
+    pub(crate) fn reverse(&mut self) {
         let segs = self.segments_mut();
         segs.reverse();
         for seg in segs {
@@ -311,7 +310,7 @@ impl Contour {
         }
     }
 
-    fn enforce_continuity(&mut self) {
+    pub(crate) fn enforce_continuity(&mut self) {
         let n = self.segments.len();
         if n == 0 {
             return;
@@ -387,6 +386,7 @@ pub(crate) struct FillShape {
     pub(crate) mesh_revision: u64,
     bbox: KRect,
     fill_mesh: OnceLock<Arc<Mesh>>,
+    hit_bez_path: OnceLock<Arc<BezPath>>,
     screen_mesh_cache: SyncCache<Option<ScreenMeshCacheEntry>>,
     pub(crate) selection_mesh: Option<(u32, Arc<Mesh>)>,
     pub(crate) selection_screen_mesh: Option<SelectionScreenMeshCacheEntry>,
@@ -405,6 +405,7 @@ impl FillShape {
             mesh_revision: 0,
             bbox: KRect::ZERO,
             fill_mesh: OnceLock::new(),
+            hit_bez_path: OnceLock::new(),
             screen_mesh_cache: SyncCache::new(None),
             selection_mesh: None,
             selection_screen_mesh: None,
@@ -434,6 +435,7 @@ impl FillShape {
             mesh_revision: 0,
             bbox: KRect::ZERO,
             fill_mesh: OnceLock::new(),
+            hit_bez_path: OnceLock::new(),
             screen_mesh_cache: SyncCache::new(None),
             selection_mesh: None,
             selection_screen_mesh: None,
@@ -460,13 +462,13 @@ impl FillShape {
     }
 
     /// 指定された `(zoom, pan, dim_backdrop)` に対応するスクリーン座標変換済み `Arc<Mesh>` をキャッシュ経由で返す
-    pub(crate) fn cached_screen_mesh(
-        &self,
-        zoom: f32,
-        pan: Vec2,
-        dim_backdrop: bool,
-    ) -> Arc<Mesh> {
-        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits(), dim_backdrop);
+    pub(crate) fn cached_screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> Arc<Mesh> {
+        let key = (
+            zoom.to_bits(),
+            pan.x.to_bits(),
+            pan.y.to_bits(),
+            dim_backdrop,
+        );
         if let Some((k, mesh)) = &*self.screen_mesh_cache.lock() {
             if *k == key {
                 return Arc::clone(mesh);
@@ -482,10 +484,11 @@ impl FillShape {
         screen_mesh
     }
 
-    /// いずれかの一時メッシュキャッシュ（`fill_mesh`, `screen_mesh_cache`, `selection_mesh`, `selection_screen_mesh`）を保持しているか
+    /// いずれかの一時メッシュキャッシュ（`fill_mesh`, `hit_bez_path`, `screen_mesh_cache`, `selection_mesh`, `selection_screen_mesh`）を保持しているか
     #[inline]
     pub(crate) fn has_any_transient_cache(&self) -> bool {
         self.fill_mesh.get().is_some()
+            || self.hit_bez_path.get().is_some()
             || self.screen_mesh_cache.lock().is_some()
             || self.selection_mesh.is_some()
             || self.selection_screen_mesh.is_some()
@@ -494,6 +497,7 @@ impl FillShape {
     /// Undo 履歴保存時やバックアップ時に、幾何データから随時再生成可能な描画メッシュキャッシュを破棄してメモリを解放する
     pub(crate) fn strip_transient_caches(&mut self) {
         self.fill_mesh = OnceLock::new();
+        self.hit_bez_path = OnceLock::new();
         *self.screen_mesh_cache.lock() = None;
         self.selection_mesh = None;
         self.selection_screen_mesh = None;
@@ -565,6 +569,7 @@ impl FillShape {
     pub(crate) fn rebuild_cache(&mut self) {
         self.bbox = self.compute_bbox();
         self.fill_mesh = OnceLock::new();
+        self.hit_bez_path = OnceLock::new();
         *self.screen_mesh_cache.lock() = None;
         self.selection_mesh = None;
         self.selection_screen_mesh = None;
@@ -629,10 +634,13 @@ impl FillShape {
         if !pt.x.is_finite() || !pt.y.is_finite() || !self.bbox.inflate(2.0, 2.0).contains(pt) {
             return false;
         }
-        let mut path = BezPath::new();
-        for c in self.contours() {
-            c.append_to_bez_path(&mut path);
-        }
+        let path = self.hit_bez_path.get_or_init(|| {
+            let mut p = BezPath::new();
+            for c in self.contours() {
+                c.append_to_bez_path(&mut p);
+            }
+            Arc::new(p)
+        });
         (path.winding(pt) & 1) != 0
     }
 
@@ -648,6 +656,7 @@ impl FillShape {
             binding.xform = Affine::translate(delta) * binding.xform;
         }
         self.bbox = self.bbox + delta;
+        self.hit_bez_path = OnceLock::new();
         let d = egui::vec2(delta.x as f32, delta.y as f32);
         if let Some(arc_mesh) = self.fill_mesh.get_mut() {
             for v in &mut Arc::make_mut(arc_mesh).vertices {
@@ -682,14 +691,12 @@ impl FillShape {
             self.rebuild_cache();
         } else {
             self.bbox = self.compute_bbox();
+            self.hit_bez_path = OnceLock::new();
             if let Some(arc_mesh) = self.fill_mesh.get_mut() {
                 for v in &mut Arc::make_mut(arc_mesh).vertices {
                     let x = v.pos.x as f64;
                     let y = v.pos.y as f64;
-                    v.pos = Pos2::new(
-                        (a * x + c * y + tx) as f32,
-                        (b * x + d * y + ty) as f32,
-                    );
+                    v.pos = Pos2::new((a * x + c * y + tx) as f32, (b * x + d * y + ty) as f32);
                 }
             }
             *self.screen_mesh_cache.lock() = None;
@@ -715,15 +722,74 @@ impl FillShape {
             binding.xform = affine * binding.xform;
         }
         self.bbox = self.compute_bbox();
+        self.hit_bez_path = OnceLock::new();
         if let Some(arc_mesh) = self.fill_mesh.get_mut() {
             for v in &mut Arc::make_mut(arc_mesh).vertices {
                 let x = v.pos.x as f64;
                 let y = v.pos.y as f64;
-                v.pos = Pos2::new(
-                    (a * x + c * y + tx) as f32,
-                    (b * x + d * y + ty) as f32,
-                );
+                v.pos = Pos2::new((a * x + c * y + tx) as f32, (b * x + d * y + ty) as f32);
             }
+        }
+        *self.screen_mesh_cache.lock() = None;
+        self.selection_mesh = None;
+        self.selection_screen_mesh = None;
+        self.mesh_revision = next_mesh_revision();
+    }
+
+    /// 自由変形ドラッグ中、ドラッグ開始時の `orig` から既存の単一所有 `fill_mesh` 頂点バッファを再利用して `affine` を適用する
+    /// （`clone_from` による `Arc` 参照カウント増加と毎フレームの頂点バッファ再確保を回避する）
+    pub(crate) fn transform_from_origin(&mut self, orig: &FillShape, affine: Affine) {
+        let [a, b, c, d, tx, ty] = affine.as_coeffs();
+        let det = a * d - b * c;
+        if !affine.as_coeffs().iter().all(|v| v.is_finite()) || det.abs() < 1e-12 {
+            self.clone_from(orig);
+            return;
+        }
+        self.exterior = orig.exterior.clone();
+        self.exterior.transform(affine);
+        self.holes.clone_from(&orig.holes);
+        for hole in &mut self.holes {
+            hole.transform(affine);
+        }
+        self.symbol_instance = orig.symbol_instance.map(|mut binding| {
+            binding.xform = affine * binding.xform;
+            binding
+        });
+        self.bbox = self.compute_bbox();
+        self.hit_bez_path = OnceLock::new();
+        if let Some(src_mesh) = orig.fill_mesh.get() {
+            let reused = if let Some(dst_arc) = self.fill_mesh.get_mut() {
+                if dst_arc.vertices.len() == src_mesh.vertices.len()
+                    && dst_arc.indices.len() == src_mesh.indices.len()
+                {
+                    let dst_mesh = Arc::make_mut(dst_arc);
+                    for (dst_v, src_v) in dst_mesh.vertices.iter_mut().zip(src_mesh.vertices.iter())
+                    {
+                        let x = src_v.pos.x as f64;
+                        let y = src_v.pos.y as f64;
+                        dst_v.pos =
+                            Pos2::new((a * x + c * y + tx) as f32, (b * x + d * y + ty) as f32);
+                        dst_v.color = src_v.color;
+                        dst_v.uv = src_v.uv;
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !reused {
+                let mut cloned = (**src_mesh).clone();
+                for v in &mut cloned.vertices {
+                    let x = v.pos.x as f64;
+                    let y = v.pos.y as f64;
+                    v.pos = Pos2::new((a * x + c * y + tx) as f32, (b * x + d * y + ty) as f32);
+                }
+                self.fill_mesh = OnceLock::from(Arc::new(cloned));
+            }
+        } else {
+            self.fill_mesh = OnceLock::new();
         }
         *self.screen_mesh_cache.lock() = None;
         self.selection_mesh = None;
@@ -1143,9 +1209,7 @@ fn build_polka_dot_selection_mesh(fill_mesh: &Mesh, zoom: f32) -> Mesh {
                 let c0 = ab.x * (y - a.y) - ab.y * (x - a.x);
                 let c1 = bc.x * (y - b.y) - bc.y * (x - b.x);
                 let c2 = ca.x * (y - c.y) - ca.y * (x - c.x);
-                if (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0)
-                    || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0)
-                {
+                if (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0) || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0) {
                     if sel_mesh.vertices.len() + 8 > MAX_POLKA_DOT_VERTICES {
                         break 'tri_loop;
                     }

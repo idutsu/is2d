@@ -228,12 +228,10 @@ impl ViewportState {
         let stage_h = self.stage_size.y.max(100.0);
         let avail_w = (self.last_canvas_rect.width() - 48.0).max(64.0);
         let avail_h = (self.last_canvas_rect.height() - 48.0).max(64.0);
-        let zoom = (avail_w / stage_w)
-            .min(avail_h / stage_h)
-            .clamp(
-                crate::vector_engine::MIN_VIEW_ZOOM,
-                crate::vector_engine::MAX_VIEW_ZOOM,
-            );
+        let zoom = (avail_w / stage_w).min(avail_h / stage_h).clamp(
+            crate::vector_engine::MIN_VIEW_ZOOM,
+            crate::vector_engine::MAX_VIEW_ZOOM,
+        );
         let center = self.stage_center_world();
         let screen_center = self.last_canvas_rect.center();
         self.zoom = zoom;
@@ -564,9 +562,10 @@ impl CanvasState {
     /// 現在の選択対象にグループ化されたオブジェクトが含まれているか
     pub(crate) fn selection_has_group(&self) -> bool {
         self.selected_shapes.iter().any(|&idx| {
-            self.shapes
-                .get(idx)
-                .is_some_and(|s| s.active_group_id_at_scope(&self.editing_group_path).is_some())
+            self.shapes.get(idx).is_some_and(|s| {
+                s.active_group_id_at_scope(&self.editing_group_path)
+                    .is_some()
+            })
         })
     }
 
@@ -643,8 +642,8 @@ impl CanvasState {
         any_transformed
     }
 
-    /// 自由変形ドラッグ中、ドラッグ開始時点の `orig_shapes` に対してキャッシュ済みメッシュ頂点変換で `affine` を適用する
-    /// （ドラッグ中の毎フレームの再テッセレーションを回避し、マウスリリース確定時にのみ再構築する）
+    /// 自由変形ドラッグ中、ドラッグ開始時点の `orig_shapes` に対してキャッシュ済みメッシュ頂点バッファを再利用して `affine` を適用する
+    /// （ドラッグ中の毎フレームの再テッセレーションおよび頂点バッファ再確保を回避し、マウスリリース確定時にのみ再構築する）
     pub(crate) fn transform_selected_from_origins(
         shapes: &mut [FillShape],
         orig_shapes: &[(usize, FillShape)],
@@ -652,8 +651,7 @@ impl CanvasState {
     ) {
         for (sel_idx, orig_shape) in orig_shapes.iter() {
             if let Some(shape) = shapes.get_mut(*sel_idx) {
-                shape.clone_from(orig_shape);
-                shape.transform_with_cached_mesh(affine);
+                shape.transform_from_origin(orig_shape, affine);
             }
         }
     }
@@ -901,11 +899,8 @@ impl CanvasState {
         }
 
         let selected_ids = self.selected_shape_ids();
-        self.shapes.sort_by_key(|s| {
-            timeline
-                .layer_index_by_id(s.layer_id)
-                .unwrap_or(usize::MAX)
-        });
+        self.shapes
+            .sort_by_key(|s| timeline.layer_index_by_id(s.layer_id).unwrap_or(usize::MAX));
         self.restore_selection_by_shape_ids(&selected_ids);
     }
 
@@ -958,7 +953,7 @@ pub(crate) fn active_scope_layer_id(app: &Is2dApp) -> u64 {
             .layers
             .iter()
             .rev()
-            .find(|l| l.visible && !l.locked)
+            .find(|l| l.visible && !l.locked && app.timeline.current_frame < l.frame_count)
             .map(|l| l.id)
             .unwrap_or_else(|| app.timeline.active_layer_id())
     }
@@ -1004,9 +999,9 @@ pub(crate) fn sync_timeline_layer_from_canvas_selection(app: &mut Is2dApp) {
     if let (Some(l0), Some(l1), Some(act)) = (min_l, max_l, last_l) {
         app.timeline.active_layer = act;
         let cf = app.timeline.current_frame;
-        app.timeline.cell_selection = Some(
-            crate::timeline::TimelineCellSelection::from_corners(l0, cf, l1, cf),
-        );
+        app.timeline.cell_selection = Some(crate::timeline::TimelineCellSelection::from_corners(
+            l0, cf, l1, cf,
+        ));
     }
 }
 
@@ -1190,7 +1185,9 @@ pub(crate) fn draw_tool_cursor_and_feedback(
                 hovered_color.is_some(),
             );
         }
-        Tool::Transform => crate::tool_transform::draw_transform_tool_cursor(app, ctx, painter, pos),
+        Tool::Transform => {
+            crate::tool_transform::draw_transform_tool_cursor(app, ctx, painter, pos)
+        }
         Tool::Select => crate::tool_select::draw_select_tool_cursor(app, ctx, painter, pos),
     }
 }
@@ -1322,10 +1319,8 @@ fn draw_editable_layer_shapes(
             continue;
         };
         let in_scope = shape.is_in_editing_scope(&app.canvas.editing_group_path);
-        let shape_sel = in_scope
-            && has_sel
-            && !active_affine_drag
-            && is_sel.get(idx).copied().unwrap_or(false);
+        let shape_sel =
+            in_scope && has_sel && !active_affine_drag && is_sel.get(idx).copied().unwrap_or(false);
         let sel_gid = if shape_sel {
             let gid = shape.active_group_id_at_scope(&app.canvas.editing_group_path);
             if let Some(gid) = gid {
@@ -1335,8 +1330,9 @@ fn draw_editable_layer_shapes(
                     .symbol_instance
                     .filter(|b| b.instance_gid == gid)
                     .map(|b| b.xform * Point::ZERO);
-                if let Some((_, g_geom, g_fallback, _)) =
-                    selected_group_boxes.iter_mut().find(|(id, _, _, _)| *id == gid)
+                if let Some((_, g_geom, g_fallback, _)) = selected_group_boxes
+                    .iter_mut()
+                    .find(|(id, _, _, _)| *id == gid)
                 {
                     if let Some(gb) = geom_bbox {
                         *g_geom = Some(g_geom.map_or(gb, |acc| acc.union(gb)));
@@ -1430,12 +1426,7 @@ fn draw_selected_group_and_symbol_boxes(
         let rect = app.viewport.world_rect_to_screen(g_bbox).expand(2.0);
         if let Some(origin) = sym_reg {
             painter.rect_stroke(rect, 0.0, Stroke::new(1.8, Color32::from_rgb(0, 165, 255)));
-            draw_registration_cross(
-                painter,
-                app.viewport.world_to_screen(origin),
-                3.2,
-                true,
-            );
+            draw_registration_cross(painter, app.viewport.world_to_screen(origin), 3.2, true);
         } else {
             painter.rect_stroke(rect, 0.0, Stroke::new(1.8, Color32::from_rgb(30, 185, 95)));
         }
@@ -1443,12 +1434,7 @@ fn draw_selected_group_and_symbol_boxes(
 
     if let Some(session) = app.symbols.edit_stack.last() {
         let origin = session.instance_xform * Point::ZERO;
-        draw_registration_cross(
-            painter,
-            app.viewport.world_to_screen(origin),
-            5.5,
-            true,
-        );
+        draw_registration_cross(painter, app.viewport.world_to_screen(origin), 5.5, true);
     }
 }
 

@@ -170,11 +170,7 @@ impl Cel {
 
     /// Undo 履歴保存時などに、セル内の全図形および結合メッシュキャッシュの一時データを破棄する
     pub(crate) fn strip_transient_caches(&mut self) {
-        if self
-            .shapes
-            .iter()
-            .any(FillShape::has_any_transient_cache)
-        {
+        if self.shapes.iter().any(FillShape::has_any_transient_cache) {
             for s in Arc::make_mut(&mut self.shapes) {
                 s.strip_transient_caches();
             }
@@ -211,15 +207,15 @@ impl Cel {
     }
 
     /// セル内の全図形を1つに結合し、指定された `(zoom, pan, dim_backdrop)` に変換したスクリーン座標 `Arc<Mesh>` を返す
-    pub(crate) fn cached_screen_mesh(
-        &self,
-        zoom: f32,
-        pan: Vec2,
-        dim_backdrop: bool,
-    ) -> Arc<Mesh> {
+    pub(crate) fn cached_screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> Arc<Mesh> {
         let mut cache = self.mesh_cache.lock();
         self.ensure_world_batch_mesh(&mut cache);
-        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits(), dim_backdrop);
+        let key = (
+            zoom.to_bits(),
+            pan.x.to_bits(),
+            pan.y.to_bits(),
+            dim_backdrop,
+        );
         if let Some((k, mesh)) = &cache.screen_cache {
             if *k == key {
                 return Arc::clone(mesh);
@@ -245,7 +241,13 @@ impl Cel {
     ) -> Arc<Mesh> {
         let mut cache = self.mesh_cache.lock();
         self.ensure_world_batch_mesh(&mut cache);
-        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits(), tint_rgb, alpha);
+        let key = (
+            zoom.to_bits(),
+            pan.x.to_bits(),
+            pan.y.to_bits(),
+            tint_rgb,
+            alpha,
+        );
         if let Some((k, mesh)) = &cache.onion_cache {
             if *k == key {
                 return Arc::clone(mesh);
@@ -289,18 +291,6 @@ impl Cel {
             built.clone(),
         );
         built
-    }
-
-    /// シンボルインスタンスやトゥイーンを含むセルの解決済みワールド座標バッチメッシュをキャッシュ経由で取得する
-    #[cfg(test)]
-    pub(crate) fn cached_resolved_world_batch_mesh(
-        &self,
-        sig_query: ResolvedSigQuery<'_>,
-        eval_frame_key: usize,
-        build_fn: impl FnOnce() -> Option<Mesh>,
-    ) -> Option<Arc<Mesh>> {
-        let mut cache = self.mesh_cache.lock();
-        self.ensure_resolved_world_batch(&mut cache, sig_query, eval_frame_key, build_fn)
     }
 
     /// シンボルインスタンスやトゥイーンを含むセルの解決済みスクリーン座標 `Arc<Mesh>` をキャッシュ経由で返す
@@ -833,7 +823,7 @@ impl Layer {
         }
     }
 
-    /// 抽出された相対キーフレーム群 `kfs` を `[dst_min_frame..=dst_max_frame]` に配置する（尺を超える場合は自動延長）
+    /// 抽出された相対キーフレーム群 `kfs` を `[dst_min_frame..=dst_max_frame]` に配置する（移動先範囲の既存キーフレームは上書き置換し、尺を超える場合は自動延長）
     pub(crate) fn place_keyframes_at(
         &mut self,
         dst_min_frame: usize,
@@ -844,6 +834,8 @@ impl Layer {
         if dst_max_frame >= self.frame_count {
             self.frame_count = dst_max_frame + 1;
         }
+        self.keyframes
+            .retain(|kf| kf.start_frame < dst_min_frame || kf.start_frame > dst_max_frame);
         for mut kf in kfs {
             if kf.cel.shapes.iter().any(|s| s.layer_id != dst_lid) {
                 for shape in kf.cel.shapes_mut() {
@@ -885,6 +877,9 @@ impl Layer {
                 );
             }
         }
+        if self.keyframes.is_empty() || self.keyframes[0].start_frame > 0 {
+            self.keyframes.insert(0, Keyframe::new_blank(0));
+        }
     }
 
     /// `kf_idx` 番目のキーフレームにおけるトゥイーン状態（未設定 / 点線の未完トゥイーン / 実線矢印の完全トゥイーン）を判定する
@@ -896,7 +891,7 @@ impl Layer {
             return TweenState::None;
         }
         let Some(start_binding) = kf.cel.single_symbol_instance() else {
-            return TweenState::None;
+            return TweenState::Incomplete;
         };
         if let Some(next_kf) = self
             .keyframes
@@ -1177,7 +1172,10 @@ impl Timeline {
 
     /// 現在アクティブなレイヤーの固有 `layer_id` を返す
     pub(crate) fn active_layer_id(&self) -> u64 {
-        self.layers.get(self.active_layer).map(|l| l.id).unwrap_or(1)
+        self.layers
+            .get(self.active_layer)
+            .map(|l| l.id)
+            .unwrap_or(1)
     }
 
     /// 指定した `layer_id` を持つレイヤーのインデックス（`0..layers.len()`）を返す
@@ -1188,7 +1186,11 @@ impl Timeline {
     /// 指定した `layer_id` のレイヤーが現在フレームにおいて表示中かつ非ロック（編集可能）であるかを返す
     pub(crate) fn is_layer_editable_by_id(&self, layer_id: u64) -> bool {
         self.layers.iter().any(|l| {
-            l.id == layer_id && l.visible && !l.locked && self.current_frame < l.frame_count
+            l.id == layer_id
+                && l.visible
+                && !l.locked
+                && self.current_frame < l.frame_count
+                && !l.keyframes.is_empty()
         })
     }
 
@@ -1245,7 +1247,7 @@ impl Timeline {
         } else {
             self.layers
                 .iter()
-                .find(|l| l.visible && !l.locked)
+                .find(|l| l.visible && !l.locked && self.current_frame < l.frame_count)
                 .map(|l| l.id)
                 .unwrap_or_else(|| self.active_layer_id())
         };
@@ -1298,7 +1300,9 @@ impl Timeline {
                 continue;
             }
             let lid = self.layers[l_idx].id;
-            let is_tween_mid = self.layers[l_idx].interpolated_tween_binding_at(frame).is_some();
+            let is_tween_mid = self.layers[l_idx]
+                .interpolated_tween_binding_at(frame)
+                .is_some();
             let has_multiframe = self.layers[l_idx]
                 .cel_at(frame)
                 .is_some_and(|c| c.has_dynamic_symbol(library));
@@ -1367,26 +1371,28 @@ impl Timeline {
     /// 対象レイヤー群 `targets` に対して現在フレーム（または直後フレーム）へキーフレームを挿入する（`F6` / `F7`）
     pub(crate) fn insert_keyframe_on_targets(&mut self, targets: &[usize], clone_prev: bool) {
         let curr_f = self.current_frame;
-        let is_exact_kf = targets.iter().all(|&l_idx| {
-            self.layers[l_idx]
-                .keyframes
-                .iter()
-                .any(|kf| kf.start_frame == curr_f)
-        });
-        let curr_non_empty = targets.iter().any(|&l_idx| {
-            self.layers[l_idx]
-                .cel_at(curr_f)
-                .is_some_and(|c| !c.is_empty())
-        });
-
-        let target_frame = if is_exact_kf && (clone_prev || curr_non_empty) {
-            curr_f + 1
+        let should_advance = if clone_prev {
+            targets.iter().all(|&l_idx| {
+                self.layers
+                    .get(l_idx)
+                    .is_some_and(|l| l.keyframes.iter().any(|kf| kf.start_frame == curr_f))
+            })
         } else {
-            curr_f
+            targets.iter().any(|&l_idx| {
+                self.layers.get(l_idx).is_some_and(|l| {
+                    l.keyframes
+                        .iter()
+                        .any(|kf| kf.start_frame == curr_f && !kf.cel.is_empty())
+                })
+            })
         };
 
+        let target_frame = if should_advance { curr_f + 1 } else { curr_f };
+
         for &l_idx in targets {
-            self.layers[l_idx].insert_keyframe(target_frame, clone_prev);
+            if let Some(layer) = self.layers.get_mut(l_idx) {
+                layer.insert_keyframe(target_frame, clone_prev);
+            }
         }
         self.sync_total_frames();
         self.current_frame = target_frame;
@@ -1400,10 +1406,11 @@ impl Timeline {
     pub(crate) fn can_delete_keyframe_on_targets(&self, targets: &[usize]) -> bool {
         let curr_f = self.current_frame;
         targets.iter().any(|&l_idx| {
-            let layer = &self.layers[l_idx];
-            layer
-                .keyframe_index_at(curr_f)
-                .is_some_and(|idx| idx > 0 || !layer.keyframes[0].cel.is_empty())
+            self.layers.get(l_idx).is_some_and(|layer| {
+                layer.keyframe_index_at(curr_f).is_some_and(|idx| {
+                    idx > 0 || layer.keyframes.first().is_some_and(|kf| !kf.cel.is_empty())
+                })
+            })
         })
     }
 
@@ -1411,7 +1418,9 @@ impl Timeline {
     pub(crate) fn delete_keyframe_on_targets(&mut self, targets: &[usize]) {
         let curr_f = self.current_frame;
         for &l_idx in targets {
-            self.layers[l_idx].delete_keyframe_at(curr_f);
+            if let Some(layer) = self.layers.get_mut(l_idx) {
+                layer.delete_keyframe_at(curr_f);
+            }
         }
     }
 
@@ -1422,7 +1431,9 @@ impl Timeline {
             .map(|s| s.max_frame.max(self.current_frame))
             .unwrap_or(self.current_frame);
         for &l_idx in targets {
-            self.layers[l_idx].insert_frame_at(target_f);
+            if let Some(layer) = self.layers.get_mut(l_idx) {
+                layer.insert_frame_at(target_f);
+            }
         }
         self.sync_total_frames();
     }
@@ -1430,8 +1441,9 @@ impl Timeline {
     /// 対象レイヤー群 `targets` の現在フレームに短縮可能なフレームが存在するかを返す
     pub(crate) fn can_remove_frame_on_targets(&self, targets: &[usize]) -> bool {
         targets.iter().any(|&l_idx| {
-            let l = &self.layers[l_idx];
-            l.frame_count > 1 || l.keyframes.first().is_some_and(|kf| !kf.cel.is_empty())
+            self.layers.get(l_idx).is_some_and(|l| {
+                l.frame_count > 1 || l.keyframes.first().is_some_and(|kf| !kf.cel.is_empty())
+            })
         })
     }
 
@@ -1440,12 +1452,14 @@ impl Timeline {
         let curr_f = self.current_frame;
         let mut any_changed = false;
         for &l_idx in targets {
-            if self.layers[l_idx].remove_frame_at(curr_f) {
-                any_changed = true;
+            if let Some(layer) = self.layers.get_mut(l_idx) {
+                if layer.remove_frame_at(curr_f) {
+                    any_changed = true;
+                }
             }
         }
         self.sync_total_frames();
-        self.current_frame = self.current_frame.min(self.total_frames - 1);
+        self.current_frame = self.current_frame.min(self.total_frames.saturating_sub(1));
         if let Some(sel) = &mut self.cell_selection {
             sel.min_frame = sel.min_frame.min(self.current_frame);
             sel.max_frame = sel.max_frame.min(self.current_frame);
@@ -1508,22 +1522,28 @@ impl Timeline {
         copy_mode: bool,
     ) {
         let extracted: Vec<(usize, Vec<Keyframe>)> = (sel.min_layer..=sel.max_layer)
-            .map(|src_l| {
+            .filter_map(|src_l| {
                 let dst_l = (src_l as isize + actual_dl) as usize;
-                let kfs =
-                    self.layers[src_l].extract_keyframes_in_range(sel.min_frame, sel.max_frame);
-                (dst_l, kfs)
+                let kfs = self
+                    .layers
+                    .get(src_l)?
+                    .extract_keyframes_in_range(sel.min_frame, sel.max_frame);
+                Some((dst_l, kfs))
             })
             .collect();
 
         if !copy_mode {
             for src_l in sel.min_layer..=sel.max_layer {
-                self.layers[src_l].remove_keyframes_in_range(sel.min_frame, sel.max_frame);
+                if let Some(layer) = self.layers.get_mut(src_l) {
+                    layer.remove_keyframes_in_range(sel.min_frame, sel.max_frame);
+                }
             }
         }
 
         for (dst_l, kfs) in extracted {
-            self.layers[dst_l].place_keyframes_at(dst_sel.min_frame, dst_sel.max_frame, kfs);
+            if let Some(layer) = self.layers.get_mut(dst_l) {
+                layer.place_keyframes_at(dst_sel.min_frame, dst_sel.max_frame, kfs);
+            }
         }
 
         self.sync_total_frames();
@@ -1535,9 +1555,9 @@ impl Timeline {
     /// 新しいレイヤーを現在のアクティブレイヤーの1つ上（前面）に追加して選択する
     pub(crate) fn add_layer_above_active(&mut self) {
         let name = format!("Layer {}", self.next_layer_number);
-        self.next_layer_number += 1;
+        self.next_layer_number = self.next_layer_number.saturating_add(1);
         let lid = self.next_layer_id;
-        self.next_layer_id += 1;
+        self.next_layer_id = self.next_layer_id.saturating_add(1);
         let insert_idx = (self.active_layer + 1).min(self.layers.len());
         let fc = self.total_frames.max(1);
         self.layers
@@ -1545,8 +1565,11 @@ impl Timeline {
         self.select_single_cell(insert_idx, self.current_frame);
     }
 
-    /// 現在アクティブなレイヤーを削除し、総フレーム数と選択セルを再同期する
+    /// 現在アクティブなレイヤーを削除し、総フレーム数と選択セルを再同期する（最低1レイヤーは維持する）
     pub(crate) fn delete_active_layer(&mut self) {
+        if self.layers.len() <= 1 || self.active_layer >= self.layers.len() {
+            return;
+        }
         self.layers.remove(self.active_layer);
         self.sync_total_frames();
         self.select_single_cell(self.active_layer, self.current_frame);
@@ -1554,6 +1577,9 @@ impl Timeline {
 
     /// 指定レイヤー `from_idx` を `to_idx` の重ね順位置へ移動して選択する
     pub(crate) fn reorder_layer(&mut self, from_idx: usize, to_idx: usize) {
+        if from_idx >= self.layers.len() || to_idx >= self.layers.len() {
+            return;
+        }
         let layer = self.layers.remove(from_idx);
         self.layers.insert(to_idx, layer);
         self.select_single_cell(to_idx, self.current_frame);
@@ -1570,25 +1596,6 @@ impl Timeline {
             return Vec::new();
         };
         layer.evaluate_shapes_at((frame, frame), layer.id, SymbolEvalCtx::new(library))
-    }
-
-    /// 指定レイヤー・フレームの結合済みワールド座標メッシュを（トゥイーン補間・複数フレームシンボル評価・キャッシュ込みで）構築する
-    #[cfg(test)]
-    pub(crate) fn build_layer_resolved_world_batch_mesh(
-        &self,
-        layer_idx: usize,
-        frame: usize,
-        library: &[SymbolDef],
-    ) -> Option<Mesh> {
-        let (cel, resolved_ctx) = self.cel_cache_context_at(layer_idx, frame, library)?;
-        if let Some((sig, eval_frame_key)) = resolved_ctx {
-            let arc_mesh = cel.cached_resolved_world_batch_mesh(sig, eval_frame_key, || {
-                self.build_uncached_world_batch_mesh(layer_idx, frame, library)
-            })?;
-            Some((*arc_mesh).clone())
-        } else {
-            self.build_uncached_world_batch_mesh(layer_idx, frame, library)
-        }
     }
 
     fn build_uncached_world_batch_mesh(

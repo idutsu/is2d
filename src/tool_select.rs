@@ -167,7 +167,13 @@ pub(crate) fn apply_pull_edge_to_shape(
         (orig_seg.p0, orig_seg.p2),
         (grab_pos, drag_pt),
     );
-    set_pulled_edge(shape, (contour_idx, seg_idx), grab_t, orig_seg, effective_pt);
+    set_pulled_edge(
+        shape,
+        (contour_idx, seg_idx),
+        grab_t,
+        orig_seg,
+        effective_pt,
+    );
 }
 
 /// 頂点ドラッグ変形（MoveVertex）の頂点と前後制御点を計算して反映する（リアルタイムプレビュー用）。
@@ -231,27 +237,41 @@ pub(crate) fn apply_move_vertex_to_shape(
 // 2. 選択管理・グループ階層操作・クリップボード
 // ------------------------------------------------------------------------
 
+/// `selection_modified == true` の選択中生シェイプを同一レイヤー・同一スコープのキャンバス図形へ結合・切り抜き（Merge Drawing）確定し、
+/// タイムラインへ同期する（選択状態そのもののクリアは呼び出し側で行う）
+pub(crate) fn flush_modified_raw_selection_merge(app: &mut Is2dApp) {
+    if !app.canvas.selection_modified || app.canvas.selected_shapes.is_empty() {
+        app.canvas.selection_modified = false;
+        return;
+    }
+    let (is_sel, _) = app.canvas.selected_shape_mask();
+    let mut base_canvas = Vec::with_capacity(app.canvas.shapes.len());
+    let mut modified_raw_shapes = Vec::with_capacity(app.canvas.selected_shapes.len());
+    for (idx, shape) in app.canvas.shapes.drain(..).enumerate() {
+        // 現在のスコープ直下の生シェイプのみ同一レイヤー内で結合・切り抜き（Merge Drawing）を行い、
+        // グループ化されているオブジェクトや別レイヤーの絵は削らずにそのまま残す
+        if is_sel[idx] && shape.is_raw_at_scope(&app.canvas.editing_group_path) {
+            modified_raw_shapes.push(shape);
+        } else {
+            base_canvas.push(shape);
+        }
+    }
+    merge_shapes_into_canvas(&mut base_canvas, modified_raw_shapes);
+    app.canvas.shapes = base_canvas;
+    app.canvas.sort_shapes_by_layer_order(&app.timeline);
+    crate::canvas_tool::sync_shapes_to_timeline(app);
+    app.canvas.selection_modified = false;
+}
+
 pub(crate) fn clear_selection(app: &mut Is2dApp) {
     crate::canvas_tool::rollback_shape_drag(app);
     if let Some(unsliced) = app.canvas.take_unsliced_snapshot() {
+        let selected_ids = app.canvas.selected_shape_ids();
         app.canvas.shapes = unsliced;
-    } else if app.canvas.selection_modified && !app.canvas.selected_shapes.is_empty() {
-        let (is_sel, _) = app.canvas.selected_shape_mask();
-        let mut base_canvas = Vec::with_capacity(app.canvas.shapes.len());
-        let mut modified_raw_shapes = Vec::with_capacity(app.canvas.selected_shapes.len());
-        for (idx, shape) in app.canvas.shapes.drain(..).enumerate() {
-            // 現在のスコープ直下の生シェイプのみ選択解除時に同一レイヤー内で結合・切り抜き（Merge Drawing）を行い、
-            // グループ化されているオブジェクトや別レイヤーの絵は削らずにそのまま残す
-            if is_sel[idx] && shape.is_raw_at_scope(&app.canvas.editing_group_path) {
-                modified_raw_shapes.push(shape);
-            } else {
-                base_canvas.push(shape);
-            }
-        }
-        merge_shapes_into_canvas(&mut base_canvas, modified_raw_shapes);
-        app.canvas.shapes = base_canvas;
-        app.canvas.sort_shapes_by_layer_order(&app.timeline);
-        crate::canvas_tool::sync_shapes_to_timeline(app);
+        app.canvas.restore_selection_by_shape_ids(&selected_ids);
+    }
+    if app.canvas.selection_modified && !app.canvas.selected_shapes.is_empty() {
+        flush_modified_raw_selection_merge(app);
     }
     app.canvas.selection_modified = false;
     app.canvas.selected_shapes.clear();
@@ -261,6 +281,7 @@ pub(crate) fn clear_selection(app: &mut Is2dApp) {
 
 /// 選択中のオブジェクト（生シェイプ・既存グループ問わず）を新しい1つのグループにまとめる（`Cmd+G` / 無限入れ子対応）
 pub(crate) fn group_selected_shapes(app: &mut Is2dApp) -> Option<u64> {
+    crate::canvas_tool::stop_playback(app);
     crate::canvas_tool::cancel_active_drag(app);
     if app.canvas.selected_shapes.is_empty() {
         return None;
@@ -268,7 +289,8 @@ pub(crate) fn group_selected_shapes(app: &mut Is2dApp) -> Option<u64> {
     let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
     let new_gid = app.symbols.alloc_group_id();
 
-    let target_lid = crate::canvas_tool::topmost_layer_id_for_indices(app, &app.canvas.selected_shapes);
+    let target_lid =
+        crate::canvas_tool::topmost_layer_id_for_indices(app, &app.canvas.selected_shapes);
 
     let depth = app.canvas.editing_group_path.len();
     let mut any_grouped = false;
@@ -298,6 +320,7 @@ pub(crate) fn group_selected_shapes(app: &mut Is2dApp) -> Option<u64> {
 /// 選択中のグループまたはシンボルインスタンスを1段階だけ解除（分離）する（`Cmd+B`）。
 /// 多段入れ子の場合は内側の子グループ構造を維持したまま最外殻のグループのみを外す。
 pub(crate) fn ungroup_selected_shapes(app: &mut Is2dApp) -> bool {
+    crate::canvas_tool::stop_playback(app);
     crate::canvas_tool::cancel_active_drag(app);
     if !app.canvas.selection_has_group() {
         return false;
@@ -372,6 +395,7 @@ pub(crate) fn enter_group_at(app: &mut Is2dApp, pt: Point) -> bool {
 
 /// 現在入っているグループまたはシンボルタイムライン編集階層から1段階上の親階層へ戻る
 pub(crate) fn exit_current_group(app: &mut Is2dApp) -> bool {
+    crate::canvas_tool::stop_playback(app);
     if !app.canvas.editing_group_path.is_empty() {
         clear_selection(app);
         let Some(exited_gid) = app.canvas.editing_group_path.pop() else {
@@ -397,6 +421,11 @@ pub(crate) fn toggle_shape_selection(app: &mut Is2dApp, shape_idx: usize) {
         app.canvas
             .selected_shapes
             .retain(|i| unit.binary_search(i).is_err());
+        if app.canvas.selected_shapes.is_empty() && !app.canvas.selection_modified {
+            if let Some(unsliced) = app.canvas.take_unsliced_snapshot() {
+                app.canvas.shapes = unsliced;
+            }
+        }
     } else {
         for idx in unit {
             if !sel_mask.get(idx).copied().unwrap_or(false) {
@@ -413,9 +442,11 @@ pub(crate) fn select_single_shape_at(app: &mut Is2dApp, pt: Point) -> bool {
     clear_selection(app);
     let zoom = app.viewport.zoom;
     let sub_mode = app.ui.select_sub_mode;
-    if let Some(hit_idx) = app.canvas.topmost_shape_at(pt).or_else(|| {
-        compute_hover_target(&app.canvas, pt, zoom, sub_mode).shape_idx()
-    }) {
+    if let Some(hit_idx) = app
+        .canvas
+        .topmost_shape_at(pt)
+        .or_else(|| compute_hover_target(&app.canvas, pt, zoom, sub_mode).shape_idx())
+    {
         app.canvas.selected_shapes = app.canvas.expand_to_group_unit(hit_idx);
         crate::canvas_tool::focus_active_layer_to_shape(app, hit_idx);
         crate::canvas_tool::sync_timeline_layer_from_canvas_selection(app);
@@ -427,6 +458,7 @@ pub(crate) fn select_single_shape_at(app: &mut Is2dApp, pt: Point) -> bool {
 
 /// 選択中のオブジェクトを十字キー等で `delta` だけ移動し、Undo 履歴記録・最前面整列・タイムライン同期を行う
 pub(crate) fn nudge_selected_shapes(app: &mut Is2dApp, delta: KVec2) -> bool {
+    crate::canvas_tool::stop_playback(app);
     crate::canvas_tool::cancel_active_drag(app);
     let (_, any_valid) = app.canvas.selected_shape_mask();
     if !any_valid {
@@ -455,6 +487,10 @@ pub(crate) fn apply_marquee_selection(app: &mut Is2dApp, p0: Point, p1: Point, a
 
     if !additive {
         clear_selection(app);
+    } else if app.canvas.selection_modified && !app.canvas.selected_shapes.is_empty() {
+        let selected_ids = app.canvas.selected_shape_ids();
+        flush_modified_raw_selection_merge(app);
+        app.canvas.restore_selection_by_shape_ids(&selected_ids);
     }
 
     let rect = KRect::new(min_x, min_y, max_x, max_y);
@@ -465,8 +501,8 @@ pub(crate) fn apply_marquee_selection(app: &mut Is2dApp, p0: Point, p1: Point, a
         (vec![false; app.canvas.shapes.len()], false)
     };
     let hit_group_ids = collect_marquee_hit_groups(&app.canvas, rect, &clip_rect_shape);
-    let pre_slice_snapshot = (!app.canvas.has_unsliced_snapshot())
-        .then(|| app.canvas.shapes.clone());
+    let pre_slice_snapshot =
+        (!app.canvas.has_unsliced_snapshot()).then(|| app.canvas.shapes.clone());
 
     let mut any_sliced = false;
     let mut new_shapes = Vec::with_capacity(app.canvas.shapes.len() + 4);
@@ -494,8 +530,7 @@ pub(crate) fn apply_marquee_selection(app: &mut Is2dApp, p0: Point, p1: Point, a
             new_shapes.push(shape);
             continue;
         }
-        if bbox.x0 >= rect.x0 && bbox.x1 <= rect.x1 && bbox.y0 >= rect.y0 && bbox.y1 <= rect.y1
-        {
+        if bbox.x0 >= rect.x0 && bbox.x1 <= rect.x1 && bbox.y0 >= rect.y0 && bbox.y1 <= rect.y1 {
             new_selected.push(new_shapes.len());
             new_shapes.push(shape);
             continue;
@@ -526,11 +561,17 @@ pub(crate) fn apply_marquee_selection(app: &mut Is2dApp, p0: Point, p1: Point, a
     }
     app.canvas.shapes = new_shapes;
     app.canvas.selected_shapes = new_selected;
+    if app.canvas.selected_shapes.is_empty() && !app.canvas.selection_modified {
+        if let Some(unsliced) = app.canvas.take_unsliced_snapshot() {
+            app.canvas.shapes = unsliced;
+        }
+    }
     app.canvas.transform_pivot = None;
     crate::canvas_tool::sync_timeline_layer_from_canvas_selection(app);
 }
 
 pub(crate) fn delete_selected_shapes(app: &mut Is2dApp) -> bool {
+    crate::canvas_tool::stop_playback(app);
     crate::canvas_tool::cancel_active_drag(app);
     if app.canvas.selected_shapes.is_empty() {
         return false;
@@ -561,6 +602,7 @@ pub(crate) fn delete_selected_shapes(app: &mut Is2dApp) -> bool {
 
 /// 現在の編集スコープ（グループ編集時はそのグループ内、通常時は現在フレームの全編集可能レイヤー）の図形をすべて消去する
 pub(crate) fn clear_active_frame_shapes(app: &mut Is2dApp) -> bool {
+    crate::canvas_tool::stop_playback(app);
     let has_any_in_scope = app
         .canvas
         .shapes
@@ -586,10 +628,90 @@ fn instantiate_relative_shapes_in_scope(
 ) -> (Vec<FillShape>, bool) {
     let active_lid = crate::canvas_tool::active_scope_layer_id(app);
     let mut gid_map: Vec<(u64, u64)> = Vec::new();
+    let mut seen_instance_gids: HashSet<u64> = HashSet::new();
     let mut instantiated = Vec::with_capacity(rel_shapes.len());
     let mut any_raw = false;
 
     for item in rel_shapes {
+        let target_lid =
+            if preserve_original_layer && app.timeline.is_layer_editable_by_id(item.layer_id) {
+                item.layer_id
+            } else {
+                active_lid
+            };
+
+        if let Some(orig_binding) = item
+            .symbol_instance
+            .filter(|b| item.group_path.contains(&b.instance_gid))
+        {
+            if !seen_instance_gids.insert(orig_binding.instance_gid) {
+                continue;
+            }
+            let mut new_parent_scope = app.canvas.editing_group_path.clone();
+            for &old_gid in orig_binding.parent_scope_from_path(&item.group_path) {
+                let new_gid = if let Some(&(_, mapped)) =
+                    gid_map.iter().find(|&&(orig, _)| orig == old_gid)
+                {
+                    mapped
+                } else {
+                    let alloc = app.symbols.alloc_group_id();
+                    gid_map.push((old_gid, alloc));
+                    alloc
+                };
+                new_parent_scope.push(new_gid);
+            }
+            let mapped_inst_gid = if let Some(&(_, mapped)) = gid_map
+                .iter()
+                .find(|&&(orig, _)| orig == orig_binding.instance_gid)
+            {
+                mapped
+            } else {
+                let alloc = app.symbols.alloc_group_id();
+                gid_map.push((orig_binding.instance_gid, alloc));
+                alloc
+            };
+
+            let mut new_binding = orig_binding;
+            new_binding.instance_gid = mapped_inst_gid;
+            if offset != KVec2::ZERO {
+                new_binding.xform = kurbo::Affine::translate(offset) * new_binding.xform;
+            }
+
+            if let Some(sym) = app.symbols.find_symbol(new_binding.symbol_id) {
+                let current_frame = app.timeline.current_frame;
+                let kf_start_frame = app
+                    .timeline
+                    .layer_index_by_id(target_lid)
+                    .and_then(|l_idx| {
+                        let layer = &app.timeline.layers[l_idx];
+                        layer
+                            .keyframe_index_at(current_frame)
+                            .map(|kf_idx| layer.keyframes[kf_idx].start_frame)
+                    })
+                    .unwrap_or(current_frame);
+                let local_shapes = sym.evaluated_local_shapes_for_instance(
+                    new_binding,
+                    kf_start_frame,
+                    current_frame,
+                    crate::symbol::SymbolEvalCtx::new(&app.symbols.library),
+                );
+                if local_shapes.is_empty() {
+                    instantiated.push(FillShape::new_empty_symbol_marker(
+                        new_binding,
+                        target_lid,
+                        &new_parent_scope,
+                    ));
+                } else {
+                    instantiated.extend(new_binding.instantiate_shapes(
+                        &local_shapes,
+                        target_lid,
+                        &new_parent_scope,
+                    ));
+                }
+                continue;
+            }
+        }
+
         let mut new_path = app.canvas.editing_group_path.clone();
         if item.group_path.is_empty() {
             any_raw = true;
@@ -607,21 +729,15 @@ fn instantiate_relative_shapes_in_scope(
                 new_path.push(new_gid);
             }
         }
-        let target_lid = if preserve_original_layer
-            && app.timeline.is_layer_editable_by_id(item.layer_id)
-        {
-            item.layer_id
-        } else {
-            active_lid
-        };
         let mut cloned = item
             .clone()
             .with_layer_id(target_lid)
             .with_group_path(new_path);
         cloned.shape_id = next_shape_id();
         if let Some(mut binding) = cloned.symbol_instance {
-            if let Some(&(_, mapped_inst_gid)) =
-                gid_map.iter().find(|&&(orig, _)| orig == binding.instance_gid)
+            if let Some(&(_, mapped_inst_gid)) = gid_map
+                .iter()
+                .find(|&&(orig, _)| orig == binding.instance_gid)
             {
                 binding.instance_gid = mapped_inst_gid;
                 cloned.symbol_instance = Some(binding);
@@ -640,13 +756,18 @@ fn instantiate_relative_shapes_in_scope(
 
 /// 選択中のオブジェクト（生シェイプ・部分スライス領域・グループ問わず）を内部クリップボードにコピーする（`Cmd+C`）
 pub(crate) fn copy_selected_shapes(app: &mut Is2dApp) -> bool {
+    crate::canvas_tool::stop_playback(app);
     crate::canvas_tool::cancel_active_drag(app);
-    let extracted = app.canvas.extract_selected_relative_to_scope();
+    let mut extracted = app.canvas.extract_selected_relative_to_scope();
     if extracted.is_empty() {
         return false;
     }
+    for s in &mut extracted {
+        s.strip_transient_caches();
+    }
     app.canvas.clipboard = extracted;
     app.canvas.paste_count = 0;
+    crate::project_io::capture_clipboard_symbols(app);
     true
 }
 
@@ -660,11 +781,31 @@ pub(crate) fn cut_selected_shapes(app: &mut Is2dApp) -> bool {
 
 /// 内部クリップボードのオブジェクトを現在の編集スコープへ貼り付ける。
 pub(crate) fn paste_clipboard(app: &mut Is2dApp, in_place: bool) -> bool {
+    crate::canvas_tool::stop_playback(app);
     if app.canvas.clipboard.is_empty() {
+        return false;
+    }
+    let target_lid = crate::canvas_tool::active_scope_layer_id(app);
+    if !app.timeline.is_layer_editable_by_id(target_lid) {
+        app.notify_warning("現在のレイヤーまたはフレームは編集できないためペーストできません");
+        return false;
+    }
+    if crate::project_io::would_clipboard_paste_all_cycle(app) {
+        app.notify_warning("編集中のシンボル自身や親シンボルは循環参照になるため配置できません");
         return false;
     }
 
     app.mutate_canvas_with_undo(true, |app| {
+        let (resolved, had_cycle) = crate::project_io::resolve_clipboard_for_paste(app);
+        if had_cycle {
+            app.notify_warning(
+                "編集中のシンボル自身や親シンボルは循環参照になるため配置できません",
+            );
+        }
+        if resolved.is_empty() {
+            return;
+        }
+
         let offset = if in_place {
             KVec2::ZERO
         } else {
@@ -674,19 +815,16 @@ pub(crate) fn paste_clipboard(app: &mut Is2dApp, in_place: bool) -> bool {
             KVec2::new(step * k, step * k)
         };
 
-        let multi_layer_copy = app.canvas.clipboard.first().is_some_and(|first| {
-            app.canvas
-                .clipboard
-                .iter()
-                .any(|s| s.layer_id != first.layer_id)
-        });
-        let clipboard_snapshot = app.canvas.clipboard.clone();
-        let (pasted_shapes, any_raw) = instantiate_relative_shapes_in_scope(
-            app,
-            &clipboard_snapshot,
-            offset,
-            multi_layer_copy,
-        );
+        let same_timeline_context = app.tabs.clipboard_source_doc_id == app.tabs.active_doc_id()
+            && app.tabs.clipboard_source_symbol_id
+                == app.symbols.edit_stack.last().map(|s| s.symbol_id)
+            && app.canvas.editing_group_path.is_empty();
+        let multi_layer_copy = same_timeline_context
+            && resolved
+                .first()
+                .is_some_and(|first| resolved.iter().any(|s| s.layer_id != first.layer_id));
+        let (pasted_shapes, any_raw) =
+            instantiate_relative_shapes_in_scope(app, &resolved, offset, multi_layer_copy);
 
         insert_and_select_shapes_in_scope(app, pasted_shapes, any_raw);
     });
@@ -703,8 +841,7 @@ pub(crate) fn duplicate_selected_shapes_for_alt_drag(app: &mut Is2dApp) -> Vec<F
     let saved_pivot = app.canvas.transform_pivot;
     clear_selection(app);
     let undo_snapshot = app.canvas.snapshot_for_drag();
-    let (duplicated, _) =
-        instantiate_relative_shapes_in_scope(app, &rel_shapes, KVec2::ZERO, true);
+    let (duplicated, _) = instantiate_relative_shapes_in_scope(app, &rel_shapes, KVec2::ZERO, true);
     insert_and_select_shapes_in_scope(app, duplicated, false);
     app.canvas.transform_pivot = saved_pivot;
     crate::canvas_tool::sync_timeline_layer_from_canvas_selection(app);
@@ -910,7 +1047,7 @@ pub(crate) fn handle_select_tool_input(
             let alt_held = ui.input(|i| i.modifiers.alt);
             if response.double_clicked() {
                 if let Some(pt) = mouse_pt {
-                    if !enter_group_at(app, pt) {
+                    if !enter_group_at(app, pt) && app.canvas.topmost_shape_at(pt).is_none() {
                         exit_current_group(app);
                     }
                 }
@@ -956,7 +1093,8 @@ fn handle_anchor_edit_input(
     if just_pressed {
         if let Some(pt) = mouse_pt {
             let target = compute_hover_target(&app.canvas, pt, zoom, sub_mode);
-            let snapshot = app.canvas.shapes.clone();
+            let had_unsliced = app.canvas.has_unsliced_snapshot();
+            let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
             let modified_shape = match (is_add, target) {
                 (
                     true,
@@ -996,6 +1134,8 @@ fn handle_anchor_edit_input(
                     shape.rebuild_cache();
                 }
                 app.commit_canvas_mutation(snapshot);
+            } else if had_unsliced {
+                app.canvas.restore_unsliced_snapshot(snapshot);
             }
         }
     }
@@ -1025,7 +1165,8 @@ fn start_reshape_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held: 
             ActiveCanvasDrag::Select(SelectDragState::MarqueeSelect(MarqueeDrag::new(pt, true)));
         return;
     }
-    let target = compute_hover_target(&app.canvas, pt, app.viewport.zoom, app.ui.select_sub_mode);
+    let mut target =
+        compute_hover_target(&app.canvas, pt, app.viewport.zoom, app.ui.select_sub_mode);
     if alt_held {
         if let Some(shape_idx) = target.shape_idx() {
             if !app.canvas.selected_shapes.contains(&shape_idx) {
@@ -1035,6 +1176,14 @@ fn start_reshape_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held: 
             app.canvas.drag = ActiveCanvasDrag::Select(SelectDragState::MoveShape(move_drag));
             return;
         }
+    }
+    if matches!(
+        target,
+        HoverTarget::Vertex { .. } | HoverTarget::Edge { .. }
+    ) && (!app.canvas.selected_shapes.is_empty() || app.canvas.has_unsliced_snapshot())
+    {
+        clear_selection(app);
+        target = compute_hover_target(&app.canvas, pt, app.viewport.zoom, app.ui.select_sub_mode);
     }
     match target {
         HoverTarget::Vertex {
@@ -1080,9 +1229,9 @@ fn start_reshape_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held: 
             closest_pos,
         } => {
             let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
-            if let Some(orig_seg) =
-                app.canvas
-                    .get_contour_segment(shape_idx, contour_idx, seg_idx)
+            if let Some(orig_seg) = app
+                .canvas
+                .get_contour_segment(shape_idx, contour_idx, seg_idx)
             {
                 app.canvas.selected_shapes.clear();
                 app.canvas.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
@@ -1148,13 +1297,7 @@ fn update_reshape_drag(app: &mut Is2dApp, pt: Point) {
             *last_pos = target_pt;
         }
         if let Some(shape) = app.canvas.shapes.get_mut(s_idx) {
-            set_moved_vertex(
-                shape,
-                (c_idx, g_idx),
-                orig_v,
-                (prev_c, curr_c),
-                target_pt,
-            );
+            set_moved_vertex(shape, (c_idx, g_idx), orig_v, (prev_c, curr_c), target_pt);
             shape.rebuild_cache();
         }
         return;
@@ -1180,13 +1323,7 @@ fn update_reshape_drag(app: &mut Is2dApp, pt: Point) {
             } => {
                 *last_pos = pt;
                 if let Some(shape) = app.canvas.shapes.get_mut(*shape_idx) {
-                    set_pulled_edge(
-                        shape,
-                        (*contour_idx, *seg_idx),
-                        *grab_t,
-                        *orig_seg,
-                        pt,
-                    );
+                    set_pulled_edge(shape, (*contour_idx, *seg_idx), *grab_t, *orig_seg, pt);
                     shape.rebuild_cache();
                 }
             }
@@ -1272,9 +1409,10 @@ fn handle_reshape_click(app: &mut Is2dApp, pt: Point, shift_held: bool) {
     app.ui.inspect_timeline_frame = false;
     let zoom = app.viewport.zoom;
     let sub_mode = app.ui.select_sub_mode;
-    let hit_shape = app.canvas.topmost_shape_at(pt).or_else(|| {
-        compute_hover_target(&app.canvas, pt, zoom, sub_mode).shape_idx()
-    });
+    let hit_shape = app
+        .canvas
+        .topmost_shape_at(pt)
+        .or_else(|| compute_hover_target(&app.canvas, pt, zoom, sub_mode).shape_idx());
     if shift_held {
         if let Some(shape_idx) = hit_shape {
             toggle_shape_selection(app, shape_idx);
@@ -1425,9 +1563,7 @@ pub(crate) fn compute_hover_target(
                 }
                 for (seg_idx, seg) in contour.segments.iter().enumerate() {
                     let dist = (mouse_pt - seg.p0).hypot();
-                    if dist <= v_radius
-                        && best_vertex.as_ref().is_none_or(|(d, _)| dist < *d)
-                    {
+                    if dist <= v_radius && best_vertex.as_ref().is_none_or(|(d, _)| dist < *d) {
                         best_vertex = Some((
                             dist,
                             HoverTarget::Vertex {
@@ -1582,11 +1718,7 @@ pub(crate) fn draw_select_tool_cursor(
             ctx.set_cursor_icon(CursorIcon::Grabbing);
             if let Some(snap_pt) = snapped_to {
                 let sp = app.viewport.world_to_screen(*snap_pt);
-                painter.circle_stroke(
-                    sp,
-                    9.0,
-                    Stroke::new(2.5, Color32::from_rgb(255, 50, 140)),
-                );
+                painter.circle_stroke(sp, 9.0, Stroke::new(2.5, Color32::from_rgb(255, 50, 140)));
                 painter.circle_filled(sp, 4.0, Color32::from_rgb(255, 50, 140));
             }
             draw_flash_corner_cursor_badge(painter, pos);
@@ -1619,9 +1751,9 @@ fn draw_select_sub_mode_cursor(
             } = app.canvas.hover_target
             {
                 ctx.set_cursor_icon(CursorIcon::PointingHand);
-                if let Some(seg) =
-                    app.canvas
-                        .get_contour_segment(shape_idx, contour_idx, seg_idx)
+                if let Some(seg) = app
+                    .canvas
+                    .get_contour_segment(shape_idx, contour_idx, seg_idx)
                 {
                     draw_highlighted_quad_segment(app, painter, seg);
                 }
@@ -1693,9 +1825,9 @@ fn draw_reshape_hover_cursor(
         } => {
             ctx.set_cursor_icon(CursorIcon::PointingHand);
             if app.ui.show_wireframe {
-                if let Some(seg) =
-                    app.canvas
-                        .get_contour_segment(shape_idx, contour_idx, seg_idx)
+                if let Some(seg) = app
+                    .canvas
+                    .get_contour_segment(shape_idx, contour_idx, seg_idx)
                 {
                     draw_highlighted_quad_segment(app, painter, seg);
                 }
@@ -1780,12 +1912,18 @@ fn draw_anchor_edit_cursor_badge(painter: &egui::Painter, cursor: Pos2, is_plus:
     painter.circle_stroke(base, 8.0, Stroke::new(1.5, Color32::WHITE));
     let stroke = Stroke::new(2.2, Color32::WHITE);
     painter.line_segment(
-        [Pos2::new(base.x - 4.5, base.y), Pos2::new(base.x + 4.5, base.y)],
+        [
+            Pos2::new(base.x - 4.5, base.y),
+            Pos2::new(base.x + 4.5, base.y),
+        ],
         stroke,
     );
     if is_plus {
         painter.line_segment(
-            [Pos2::new(base.x, base.y - 4.5), Pos2::new(base.x, base.y + 4.5)],
+            [
+                Pos2::new(base.x, base.y - 4.5),
+                Pos2::new(base.x, base.y + 4.5),
+            ],
             stroke,
         );
     }

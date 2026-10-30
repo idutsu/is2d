@@ -10,9 +10,7 @@ use crate::vector_engine::{
     append_mesh, rects_overlap, tessellate_raw_polygon, transform_mesh_to_screen, FillShape,
     MAX_VIEW_ZOOM, MIN_VIEW_ZOOM,
 };
-use crate::vector_stroke::{
-    build_smoothed_stroke_shapes_at_zoom, generate_brush_outline_at_zoom,
-};
+use crate::vector_stroke::{build_smoothed_stroke_shapes_at_zoom, generate_brush_outline_at_zoom};
 use crate::Is2dApp;
 
 /// ブラシ・消しゴムドラッグ中のリアルタイムプレビューにおいて、
@@ -72,7 +70,13 @@ pub(crate) fn handle_brush_or_eraser_input(
                 .is_none_or(|&last| (pt - last).hypot() >= min_sample_dist)
             {
                 if stroke.len().saturating_sub(*tail_start_idx) >= STROKE_TAIL_CHUNK_LEN {
-                    append_mesh(committed_mesh, tail_mesh);
+                    let screen_chunk = transform_mesh_to_screen(
+                        tail_mesh,
+                        app.viewport.zoom,
+                        app.viewport.pan,
+                        false,
+                    );
+                    append_mesh(committed_mesh, &screen_chunk);
                     *tail_start_idx = stroke.len().saturating_sub(2);
                 }
                 stroke.push(pt);
@@ -82,9 +86,7 @@ pub(crate) fn handle_brush_or_eraser_input(
             }
         }
     } else if response.drag_stopped() {
-        if let ActiveCanvasDrag::PaintStroke { stroke, .. } =
-            std::mem::take(&mut app.canvas.drag)
-        {
+        if let ActiveCanvasDrag::PaintStroke { stroke, .. } = std::mem::take(&mut app.canvas.drag) {
             let raw_outline = generate_brush_outline_at_zoom(&stroke, base_r, z);
             if !raw_outline.is_empty() {
                 commit_raw_outline(app, &raw_outline);
@@ -101,19 +103,21 @@ pub(crate) fn handle_brush_or_eraser_input(
 pub(crate) fn commit_raw_outline(app: &mut Is2dApp, raw: &[Point]) {
     app.mutate_canvas_with_undo(true, |app| {
         let target_lid = crate::canvas_tool::active_scope_layer_id(app);
-        let stroke_shapes: Vec<FillShape> = build_smoothed_stroke_shapes_at_zoom(
-            raw,
-            app.ui.brush_color,
-            app.viewport.zoom as f64,
-        )
-        .into_iter()
-        .map(|s| s.with_scope(target_lid, &app.canvas.editing_group_path))
-        .collect();
+        let stroke_shapes: Vec<FillShape> =
+            build_smoothed_stroke_shapes_at_zoom(raw, app.ui.brush_color, app.viewport.zoom as f64)
+                .into_iter()
+                .map(|s| s.with_scope(target_lid, &app.canvas.editing_group_path))
+                .collect();
         if app.ui.tool == Tool::Brush {
             merge_shapes_into_canvas(&mut app.canvas.shapes, stroke_shapes);
             app.canvas.sort_shapes_by_layer_order(&app.timeline);
         } else {
-            erase_from_canvas(&mut app.canvas.shapes, &stroke_shapes);
+            erase_from_canvas(
+                &mut app.canvas.shapes,
+                &stroke_shapes,
+                target_lid,
+                &app.canvas.editing_group_path,
+            );
         }
     });
 }
@@ -162,14 +166,15 @@ pub(crate) fn bucket_fill_at(app: &mut Is2dApp, pt: Point) -> bool {
         let hit_shape = &app.canvas.shapes[hit_idx];
         let hit_layer_id = hit_shape.layer_id;
         let hit_layer_ord = app.timeline.layer_index_by_id(hit_layer_id).unwrap_or(0);
-        let occluded_by_locked_above = (hit_layer_ord + 1..app.timeline.layers.len()).any(|l_idx| {
-            let layer = &app.timeline.layers[l_idx];
-            layer.visible
-                && layer.locked
-                && all_visible_shapes
-                    .iter()
-                    .any(|s| s.layer_id == layer.id && s.contains_point(pt))
-        });
+        let occluded_by_locked_above =
+            (hit_layer_ord + 1..app.timeline.layers.len()).any(|l_idx| {
+                let layer = &app.timeline.layers[l_idx];
+                layer.visible
+                    && layer.locked
+                    && all_visible_shapes
+                        .iter()
+                        .any(|s| s.layer_id == layer.id && s.contains_point(pt))
+            });
 
         if !occluded_by_locked_above && hit_shape.is_raw_at_scope(&app.canvas.editing_group_path) {
             if hit_shape.color == fill_color {
@@ -196,10 +201,11 @@ pub(crate) fn bucket_fill_at(app: &mut Is2dApp, pt: Point) -> bool {
                 );
                 if pieces.len() > 1 {
                     if let Some(split_piece) = pieces.into_iter().find(|p| p.contains_point(pt)) {
-                        let snapshot = app.canvas.shapes.clone();
+                        let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
                         merge_shapes_into_canvas(
                             &mut app.canvas.shapes,
-                            vec![split_piece.with_scope(hit_layer_id, &app.canvas.editing_group_path)],
+                            vec![split_piece
+                                .with_scope(hit_layer_id, &app.canvas.editing_group_path)],
                         );
                         app.canvas.sort_shapes_by_layer_order(&app.timeline);
                         app.commit_canvas_mutation(snapshot);
@@ -209,7 +215,7 @@ pub(crate) fn bucket_fill_at(app: &mut Is2dApp, pt: Point) -> bool {
             }
 
             crate::canvas_tool::focus_active_layer_to_shape(app, hit_idx);
-            let snapshot = app.canvas.shapes.clone();
+            let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
             let mut target = app.canvas.shapes.remove(hit_idx);
             target.set_color(fill_color);
             merge_disjoint_fill_into_canvas(&mut app.canvas.shapes, target);
@@ -246,7 +252,7 @@ pub(crate) fn bucket_fill_at(app: &mut Is2dApp, pt: Point) -> bool {
             .flatten()
     });
     if let Some(enclosed_fill) = enclosed_opt {
-        let snapshot = app.canvas.shapes.clone();
+        let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
         merge_disjoint_fill_into_canvas(
             &mut app.canvas.shapes,
             enclosed_fill.with_scope(target_lid, &app.canvas.editing_group_path),
@@ -310,11 +316,22 @@ pub(crate) fn topmost_visible_color_at(app: &Is2dApp, pt: Point) -> Option<Color
             continue;
         }
         if layer.locked {
-            let evaluated = app.timeline.evaluate_layer_shapes_at(
-                layer_idx,
-                app.timeline.current_frame,
-                &app.symbols.library,
-            );
+            let cf = app.timeline.current_frame;
+            if layer.interpolated_tween_binding_at(cf).is_none() {
+                if let Some(cel) = layer.cel_at(cf) {
+                    if cel.instances.is_empty() {
+                        if let Some(hit) = cel.shapes.iter().rev().find(|s| s.contains_point(pt)) {
+                            return Some(hit.color);
+                        }
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+            let evaluated =
+                app.timeline
+                    .evaluate_layer_shapes_at(layer_idx, cf, &app.symbols.library);
             if let Some(hit) = evaluated.iter().rev().find(|s| s.contains_point(pt)) {
                 return Some(hit.color);
             }
@@ -360,12 +377,7 @@ pub(crate) fn draw_active_stroke_preview(
         return;
     }
     if !committed_mesh.is_empty() {
-        artwork_painter.add(egui::Shape::Mesh(transform_mesh_to_screen(
-            committed_mesh,
-            app.viewport.zoom,
-            app.viewport.pan,
-            false,
-        )));
+        artwork_painter.add(egui::Shape::Mesh(committed_mesh.clone()));
     }
     if !tail_mesh.is_empty() {
         artwork_painter.add(egui::Shape::Mesh(transform_mesh_to_screen(

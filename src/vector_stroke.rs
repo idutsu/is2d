@@ -1,8 +1,6 @@
 use eframe::egui::Color32;
 use i_overlay::{core::fill_rule::FillRule as OverlayFillRule, float::simplify::SimplifyShape};
-use kurbo::{
-    Affine, ParamCurve, ParamCurveDeriv, Point, QuadBez, Vec2 as KVec2,
-};
+use kurbo::{Affine, ParamCurve, ParamCurveDeriv, Point, QuadBez, Vec2 as KVec2};
 
 use crate::vector_engine::{
     dedup_closed_ring, fill_cumulative_arc_lengths, left_normal, normalize_vec,
@@ -45,7 +43,10 @@ pub(crate) fn generate_brush_outline_at_zoom(
         if !pt.x.is_finite() || !pt.y.is_finite() {
             continue;
         }
-        if clean.last().is_none_or(|&last| (pt - last).hypot() >= min_step) {
+        if clean
+            .last()
+            .is_none_or(|&last| (pt - last).hypot() >= min_step)
+        {
             clean.push(pt);
         }
     }
@@ -180,7 +181,9 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
 ) -> Vec<FillShape> {
     if raw_outline.len() < 3
         || !zoom.is_finite()
-        || raw_outline.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
+        || raw_outline
+            .iter()
+            .any(|p| !p.x.is_finite() || !p.y.is_finite())
     {
         return Vec::new();
     }
@@ -670,8 +673,7 @@ fn detect_sharp_corners(
                 break;
             }
         }
-        net >= CAP_SCAN_MIN_NET_TURN
-            || (hit_other_notch && net >= CAP_SCAN_NOTCH_BOUNDED_MIN_TURN)
+        net >= CAP_SCAN_MIN_NET_TURN || (hit_other_notch && net >= CAP_SCAN_NOTCH_BOUNDED_MIN_TURN)
     };
 
     let mut is_sharp_corner = vec![false; m];
@@ -702,9 +704,9 @@ fn detect_sharp_corners(
             })
         .abs();
 
-        let is_oscillating_wobble =
-            t_short[(i + m - w_local) % m] * t_short[i] < WOBBLE_OPPOSITE_TURN_PRODUCT
-                || t_short[(i + w_local) % m] * t_short[i] < WOBBLE_OPPOSITE_TURN_PRODUCT;
+        let is_oscillating_wobble = t_short[(i + m - w_local) % m] * t_short[i]
+            < WOBBLE_OPPOSITE_TURN_PRODUCT
+            || t_short[(i + w_local) % m] * t_short[i] < WOBBLE_OPPOSITE_TURN_PRODUCT;
 
         let is_cap_adjacent_notch = is_exterior
             && t_short[i] * winding_sign < 0.0
@@ -1010,7 +1012,11 @@ fn select_locked_feature_anchors(
 
     for (run_start, run_end) in find_true_runs(&is_round_only) {
         let peak_i = (run_start..=run_end)
-            .min_by(|&a, &b| cos_s[a].partial_cmp(&cos_s[b]).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|&a, &b| {
+                cos_s[a]
+                    .partial_cmp(&cos_s[b])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .unwrap_or((run_start + run_end) / 2);
 
         let (before_i, after_i) = clamp_run_bounds(run_start, run_end, m, is_sharp_corner);
@@ -1034,8 +1040,7 @@ fn select_locked_feature_anchors(
             .unwrap_or(run_end);
 
         let adj_sharp = (1..=3).any(|d| {
-            is_sharp_corner[(run_start + m - (d % m)) % m]
-                || is_sharp_corner[(run_end + d) % m]
+            is_sharp_corner[(run_start + m - (d % m)) % m] || is_sharp_corner[(run_end + d) % m]
         });
 
         if i_end <= i_start + 1 {
@@ -1147,9 +1152,8 @@ fn enforce_g1_tangent_continuity_on_segments(
 
     for j in 0..k {
         let a_idx = anchors[j];
-        let near_sharp = (0..=2).any(|d| {
-            is_sharp_corner[(a_idx + d) % m] || is_sharp_corner[(a_idx + m - d) % m]
-        });
+        let near_sharp = (0..=2)
+            .any(|d| is_sharp_corner[(a_idx + d) % m] || is_sharp_corner[(a_idx + m - d) % m]);
         if near_sharp {
             continue;
         }
@@ -1232,20 +1236,18 @@ fn enforce_g1_tangent_continuity_on_segments(
         if let Some(p1_tan) = candidate_p1 {
             let radial_diff = (0.5 * (p1_tan - p1_init).dot(chord_normal)).abs();
             let total_diff = (p1_tan - p1_init).hypot();
-            let local_max_radial = max_radial_shift.min(G1_MAX_RADIAL_SHIFT_CHORD_RATIO * chord_len);
-            if radial_diff <= local_max_radial && total_diff <= G1_MAX_TOTAL_SHIFT_CHORD_RATIO * chord_len {
+            let local_max_radial =
+                max_radial_shift.min(G1_MAX_RADIAL_SHIFT_CHORD_RATIO * chord_len);
+            if radial_diff <= local_max_radial
+                && total_diff <= G1_MAX_TOTAL_SHIFT_CHORD_RATIO * chord_len
+            {
                 segments[j].p1 = p1_tan;
             }
         }
     }
 }
 
-fn fit_quad_control_point_least_squares(
-    pts: &[Point],
-    cum: &[f64],
-    p0: Point,
-    p2: Point,
-) -> Point {
+fn fit_quad_control_point_least_squares(pts: &[Point], cum: &[f64], p0: Point, p2: Point) -> Point {
     let n = pts.len();
     let total_len = cum[n - 1];
     let mut num = KVec2::ZERO;
@@ -1512,6 +1514,8 @@ fn max_deviation_from_chord(pts: &[Point]) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
+const MAX_RDP_RECURSION_DEPTH: usize = 64;
+
 pub(crate) fn rdp_recursive(
     all_pts: &[Point],
     start: usize,
@@ -1519,7 +1523,18 @@ pub(crate) fn rdp_recursive(
     epsilon: f64,
     keep: &mut [bool],
 ) {
-    if end <= start + 1 {
+    rdp_recursive_bounded(all_pts, start, end, epsilon, keep, 0);
+}
+
+fn rdp_recursive_bounded(
+    all_pts: &[Point],
+    start: usize,
+    end: usize,
+    epsilon: f64,
+    keep: &mut [bool],
+    depth: usize,
+) {
+    if end <= start + 1 || depth >= MAX_RDP_RECURSION_DEPTH {
         return;
     }
     let a = all_pts[start];
@@ -1537,7 +1552,7 @@ pub(crate) fn rdp_recursive(
 
     if max_dist > epsilon {
         keep[split_idx] = true;
-        rdp_recursive(all_pts, start, split_idx, epsilon, keep);
-        rdp_recursive(all_pts, split_idx, end, epsilon, keep);
+        rdp_recursive_bounded(all_pts, start, split_idx, epsilon, keep, depth + 1);
+        rdp_recursive_bounded(all_pts, split_idx, end, epsilon, keep, depth + 1);
     }
 }

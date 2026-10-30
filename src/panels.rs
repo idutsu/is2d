@@ -22,28 +22,28 @@ pub(crate) const MOD_KEY: &str = if cfg!(target_os = "macos") {
 // ============================================================================
 
 pub(crate) mod icons {
-    pub(crate) const ADD: &str = "\u{e145}";          // add (＋)
-    pub(crate) const REMOVE: &str = "\u{e15b}";       // remove (－)
-    pub(crate) const FLIP_H: &str = "\u{e8d4}";       // swap_horiz (左右反転)
-    pub(crate) const FLIP_V: &str = "\u{e8d5}";       // swap_vert (上下反転)
-    pub(crate) const ROTATE_LEFT: &str = "\u{e419}";  // rotate_left (-90°回転)
+    pub(crate) const ADD: &str = "\u{e145}"; // add (＋)
+    pub(crate) const REMOVE: &str = "\u{e15b}"; // remove (－)
+    pub(crate) const FLIP_H: &str = "\u{e8d4}"; // swap_horiz (左右反転)
+    pub(crate) const FLIP_V: &str = "\u{e8d5}"; // swap_vert (上下反転)
+    pub(crate) const ROTATE_LEFT: &str = "\u{e419}"; // rotate_left (-90°回転)
     pub(crate) const ROTATE_RIGHT: &str = "\u{e41a}"; // rotate_right (+90°回転)
-    pub(crate) const PIVOT_RESET: &str = "\u{e3b4}";  // center_focus_strong (ピボットリセット)
-    pub(crate) const GROUP: &str = "\u{e1bd}";        // widgets (グループ表示)
-    pub(crate) const SYMBOL: &str = "\u{e87b}";       // extension (シンボル表示)
-    pub(crate) const WIREFRAME: &str = "\u{e922}";    // timeline (アンカー・パス表示)
-    pub(crate) const DELETE: &str = "\u{e872}";       // delete (削除)
-    pub(crate) const SCENE_MOVIE: &str = "\u{e02c}";  // movie (シーンアイコン)
-    pub(crate) const ARROW_BACK: &str = "\u{e5c4}";   // arrow_back (1階層出る)
-    pub(crate) const VISIBILITY: &str = "\u{e8f4}";   // visibility (レイヤー表示)
-    pub(crate) const LOCK: &str = "\u{e897}";         // lock (レイヤーロック)
-    pub(crate) const SKIP_PREV: &str = "\u{e045}";    // skip_previous (先頭フレームへ)
-    pub(crate) const STEP_PREV: &str = "\u{e408}";    // navigate_before (前のフレームへ)
-    pub(crate) const PLAY: &str = "\u{e037}";         // play_arrow (再生)
-    pub(crate) const PAUSE: &str = "\u{e034}";        // pause (一時停止)
-    pub(crate) const STEP_NEXT: &str = "\u{e409}";    // navigate_next (次のフレームへ)
-    pub(crate) const SKIP_NEXT: &str = "\u{e044}";    // skip_next (最終フレームへ)
-    pub(crate) const ONION_SKIN: &str = "\u{e3e0}";   // filter_none (オニオンスキン)
+    pub(crate) const PIVOT_RESET: &str = "\u{e3b4}"; // center_focus_strong (ピボットリセット)
+    pub(crate) const GROUP: &str = "\u{e1bd}"; // widgets (グループ表示)
+    pub(crate) const SYMBOL: &str = "\u{e87b}"; // extension (シンボル表示)
+    pub(crate) const WIREFRAME: &str = "\u{e922}"; // timeline (アンカー・パス表示)
+    pub(crate) const DELETE: &str = "\u{e872}"; // delete (削除)
+    pub(crate) const SCENE_MOVIE: &str = "\u{e02c}"; // movie (シーンアイコン)
+    pub(crate) const ARROW_BACK: &str = "\u{e5c4}"; // arrow_back (1階層出る)
+    pub(crate) const VISIBILITY: &str = "\u{e8f4}"; // visibility (レイヤー表示)
+    pub(crate) const LOCK: &str = "\u{e897}"; // lock (レイヤーロック)
+    pub(crate) const SKIP_PREV: &str = "\u{e045}"; // skip_previous (先頭フレームへ)
+    pub(crate) const STEP_PREV: &str = "\u{e408}"; // navigate_before (前のフレームへ)
+    pub(crate) const PLAY: &str = "\u{e037}"; // play_arrow (再生)
+    pub(crate) const PAUSE: &str = "\u{e034}"; // pause (一時停止)
+    pub(crate) const STEP_NEXT: &str = "\u{e409}"; // navigate_next (次のフレームへ)
+    pub(crate) const SKIP_NEXT: &str = "\u{e044}"; // skip_next (最終フレームへ)
+    pub(crate) const ONION_SKIN: &str = "\u{e3e0}"; // filter_none (オニオンスキン)
 }
 
 // ============================================================================
@@ -55,9 +55,9 @@ pub(crate) mod icons {
 pub(crate) enum RightPanelTab {
     #[default]
     Properties, // プロパティ（現在選択中のツールの設定を表示）
-    Color,      // カラー
-    Library,    // ライブラリ
-    Canvas,     // キャンバス（ステージサイズ・背景色・枠外マスク・表示倍率リセット）
+    Color,   // カラー
+    Library, // ライブラリ
+    Canvas,  // キャンバス（ステージサイズ・背景色・枠外マスク・表示倍率リセット）
 }
 
 impl RightPanelTab {
@@ -81,8 +81,158 @@ impl RightPanelTab {
 }
 
 // ============================================================================
-// 左端縦ツールバー・ステージ上部バー・右端プロパティパネルの描画実装
+// 最上部メニューバー・左端縦ツールバー・ステージ上部バー・右端パネルの描画実装
 // ============================================================================
+
+// ------------------------------------------------------------------------
+// 0. 最上部メニューバー（ファイル・編集・表示）
+// ------------------------------------------------------------------------
+
+pub(crate) fn draw_top_menu_bar(app: &mut Is2dApp, ctx: &egui::Context) {
+    egui::TopBottomPanel::top("top_menu_bar").show(ctx, |ui| {
+        egui::menu::bar(ui, |ui| {
+            draw_file_menu(app, ui);
+            draw_edit_menu(app, ui);
+            draw_view_menu(app, ui);
+        });
+    });
+}
+
+fn menu_action_button(ui: &mut egui::Ui, enabled: bool, label: &str, shortcut: &str) -> bool {
+    let btn = if shortcut.is_empty() {
+        egui::Button::new(label)
+    } else {
+        egui::Button::new(label).shortcut_text(shortcut)
+    };
+    let clicked = ui.add_enabled(enabled, btn).clicked();
+    if clicked {
+        ui.close_menu();
+    }
+    clicked
+}
+
+fn draw_file_menu(app: &mut Is2dApp, ui: &mut egui::Ui) {
+    ui.menu_button("ファイル", |ui| {
+        ui.set_min_width(210.0);
+        let ctx = ui.ctx().clone();
+        if menu_action_button(ui, true, "新規作成", &format!("{MOD_KEY}+N")) {
+            crate::project_io::new_project(app, &ctx);
+        }
+
+        ui.separator();
+
+        if menu_action_button(ui, true, "開く...", &format!("{MOD_KEY}+O")) {
+            crate::project_io::open_project_dialog(app, &ctx);
+        }
+        if menu_action_button(ui, true, "保存", &format!("{MOD_KEY}+S")) {
+            crate::project_io::save_project(app, &ctx);
+        }
+        if menu_action_button(
+            ui,
+            true,
+            "名前を付けて保存...",
+            &format!("{MOD_KEY}+Shift+S"),
+        ) {
+            crate::project_io::save_project_as_dialog(app, &ctx);
+        }
+
+        ui.separator();
+
+        if menu_action_button(ui, true, "タブを閉じる", &format!("{MOD_KEY}+W")) {
+            crate::project_io::close_active_tab(app, Some(&ctx));
+        }
+    });
+}
+
+fn draw_edit_menu(app: &mut Is2dApp, ui: &mut egui::Ui) {
+    ui.menu_button("編集", |ui| {
+        ui.set_min_width(230.0);
+        let can_undo = !app.history.undo_stack.is_empty();
+        let can_redo = !app.history.redo_stack.is_empty();
+        let has_selection = !app.canvas.selected_shapes.is_empty();
+        let can_paste = !app.canvas.clipboard.is_empty()
+            && app
+                .timeline
+                .is_layer_editable_by_id(crate::canvas_tool::active_scope_layer_id(app));
+
+        if menu_action_button(ui, can_undo, "元に戻す", &format!("{MOD_KEY}+Z")) {
+            app.undo();
+        }
+        if menu_action_button(ui, can_redo, "やり直し", &format!("{MOD_KEY}+Y")) {
+            app.redo();
+        }
+
+        ui.separator();
+
+        if menu_action_button(ui, has_selection, "カット", &format!("{MOD_KEY}+X")) {
+            crate::canvas_tool::stop_playback(app);
+            crate::tool_select::cut_selected_shapes(app);
+        }
+        if menu_action_button(ui, has_selection, "コピー", &format!("{MOD_KEY}+C")) {
+            crate::canvas_tool::stop_playback(app);
+            crate::tool_select::copy_selected_shapes(app);
+        }
+        if menu_action_button(ui, can_paste, "ペースト", &format!("{MOD_KEY}+V")) {
+            crate::canvas_tool::stop_playback(app);
+            crate::tool_select::paste_clipboard(app, false);
+        }
+        if menu_action_button(
+            ui,
+            can_paste,
+            "同じ位置にペースト",
+            &format!("{MOD_KEY}+Shift+V"),
+        ) {
+            crate::canvas_tool::stop_playback(app);
+            crate::tool_select::paste_clipboard(app, true);
+        }
+
+        ui.separator();
+
+        if menu_action_button(ui, has_selection, "選択削除", "Backspace") {
+            crate::canvas_tool::stop_playback(app);
+            crate::tool_select::delete_selected_shapes(app);
+        }
+    });
+}
+
+fn draw_view_menu(app: &mut Is2dApp, ui: &mut egui::Ui) {
+    ui.menu_button("表示", |ui| {
+        ui.set_min_width(220.0);
+        if menu_action_button(ui, true, "100%表示", &format!("{MOD_KEY}+1")) {
+            app.viewport.reset_view();
+        }
+        if menu_action_button(ui, true, "ウィンドウに合わせる", &format!("{MOD_KEY}+2")) {
+            app.viewport.fit_stage_to_window();
+        }
+
+        ui.separator();
+
+        if ui
+            .checkbox(
+                &mut app.viewport.clip_outside_stage,
+                format!("枠外を隠す ({MOD_KEY}+3)"),
+            )
+            .clicked()
+        {
+            ui.close_menu();
+        }
+        if ui
+            .checkbox(&mut app.ui.show_wireframe, "アンカーを表示")
+            .clicked()
+        {
+            ui.close_menu();
+        }
+        if ui
+            .checkbox(
+                &mut app.timeline_ui.onion_skin_enabled,
+                "オニオンスキン (O)",
+            )
+            .clicked()
+        {
+            ui.close_menu();
+        }
+    });
+}
 
 // ------------------------------------------------------------------------
 // 1. 左端縦ツールバー（Adobe Animate 準拠の縦長ツールボックス）
@@ -147,6 +297,115 @@ fn draw_left_main_tool_buttons(app: &mut Is2dApp, ui: &mut egui::Ui, btn_size: V
 fn draw_color_picker_controls(app: &mut Is2dApp, ui: &mut egui::Ui) {
     ui.color_edit_button_srgba(&mut app.ui.brush_color)
         .on_hover_text("塗りカラー変更");
+}
+
+// ------------------------------------------------------------------------
+// 1.5 ドキュメントタブバー（複数ファイルの同時オープン・切り替え・閉じる・新規追加）
+// ------------------------------------------------------------------------
+
+pub(crate) fn draw_document_tab_bar(app: &mut Is2dApp, ctx: &egui::Context) {
+    crate::project_io::update_window_title(app, ctx);
+    egui::TopBottomPanel::top("document_tab_bar").show(ctx, |ui| {
+        egui::ScrollArea::horizontal()
+            .id_salt("document_tab_scroll")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let active_idx = app.tabs.active_index;
+                    let active_dirty = app.history.is_dirty();
+                    let tab_count = app.tabs.tabs.len();
+
+                    let mut switch_target = None;
+                    let mut close_target = None;
+
+                    for idx in 0..tab_count {
+                        let is_active = idx == active_idx;
+                        let title = app.tabs.tabs[idx].display_title(
+                            app.ui.current_file_path.as_deref(),
+                            active_dirty,
+                            is_active,
+                        );
+                        let bg_fill = if is_active {
+                            Color32::from_rgb(255, 255, 255)
+                        } else {
+                            Color32::from_rgb(232, 235, 240)
+                        };
+                        let border_color = if is_active {
+                            Color32::from_rgb(0, 120, 215)
+                        } else {
+                            Color32::from_rgb(205, 210, 218)
+                        };
+
+                        egui::Frame::none()
+                            .fill(bg_fill)
+                            .stroke(Stroke::new(1.0, border_color))
+                            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    let text = egui::RichText::new(title).color(if is_active {
+                                        Color32::from_rgb(15, 25, 40)
+                                    } else {
+                                        Color32::from_rgb(90, 98, 110)
+                                    });
+                                    let btn_resp = ui.add(egui::Button::new(text).frame(false));
+                                    if btn_resp.clicked() {
+                                        switch_target = Some(idx);
+                                    }
+                                    btn_resp.on_hover_ui(|ui| {
+                                        let path_ref = if is_active {
+                                            app.ui.current_file_path.as_deref()
+                                        } else {
+                                            app.tabs.tabs[idx].file_path.as_deref()
+                                        };
+                                        match path_ref {
+                                            Some(p) => {
+                                                ui.label(format!(
+                                                    "{}\nクリックしてこのドキュメントへ切り替え",
+                                                    p.display()
+                                                ));
+                                            }
+                                            None => {
+                                                ui.label(
+                                                    "未保存ドキュメント\nクリックしてこのドキュメントへ切り替え",
+                                                );
+                                            }
+                                        }
+                                    });
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new("×")
+                                                    .size(12.0)
+                                                    .color(Color32::from_rgb(120, 128, 140)),
+                                            )
+                                            .frame(false),
+                                        )
+                                        .on_hover_text(format!("タブを閉じる ({MOD_KEY}+W)"))
+                                        .clicked()
+                                    {
+                                        close_target = Some(idx);
+                                    }
+                                });
+                            });
+                    }
+
+                    if ui
+                        .button(icons::ADD)
+                        .on_hover_text(format!("新規ドキュメントタブを追加 ({MOD_KEY}+N)"))
+                        .clicked()
+                    {
+                        crate::project_io::new_project(app, ctx);
+                    }
+
+                    if let Some(close_idx) = close_target {
+                        crate::project_io::close_tab(app, close_idx, Some(ctx));
+                    } else if let Some(target_idx) = switch_target {
+                        crate::project_io::switch_to_tab(app, target_idx, Some(ctx));
+                    }
+                });
+            });
+    });
 }
 
 // ------------------------------------------------------------------------
@@ -338,14 +597,9 @@ fn draw_properties_tab(app: &mut Is2dApp, ui: &mut egui::Ui) {
     match app.ui.tool {
         Tool::Select => draw_select_tool_properties(app, ui),
         Tool::Transform => draw_transform_tool_properties(app, ui),
-        Tool::Brush => draw_radius_slider_section(
-            ui,
-            "ブラシサイズ",
-            &mut app.ui.brush_radius,
-            0.5,
-            70.0,
-            0.5,
-        ),
+        Tool::Brush => {
+            draw_radius_slider_section(ui, "ブラシサイズ", &mut app.ui.brush_radius, 0.5, 70.0, 0.5)
+        }
         Tool::Eraser => draw_radius_slider_section(
             ui,
             "消しゴムサイズ",
@@ -573,8 +827,11 @@ fn draw_transform_tool_properties(app: &mut Is2dApp, ui: &mut egui::Ui) {
     if ui
         .add_enabled(
             has_sel && app.canvas.has_custom_transform_pivot(),
-            egui::Button::new(format!("{} 変形中心（ピボット）をリセット", icons::PIVOT_RESET))
-                .min_size(Vec2::new(ui.available_width(), 28.0)),
+            egui::Button::new(format!(
+                "{} 変形中心（ピボット）をリセット",
+                icons::PIVOT_RESET
+            ))
+            .min_size(Vec2::new(ui.available_width(), 28.0)),
         )
         .on_hover_text("移動した変形中心（ピボット）を初期位置（選択中央 / シンボル基準点）へ戻す")
         .clicked()
@@ -682,11 +939,7 @@ fn draw_canvas_tab(app: &mut Is2dApp, ui: &mut egui::Ui) {
         let mut w = app.viewport.stage_size.x.round() as i32;
         let mut h = app.viewport.stage_size.y.round() as i32;
         let w_resp = ui
-            .add(
-                egui::DragValue::new(&mut w)
-                    .range(100..=3840)
-                    .speed(2.0),
-            )
+            .add(egui::DragValue::new(&mut w).range(100..=3840).speed(2.0))
             .on_hover_text("ステージの幅 (px)");
         if w_resp.changed() && (w as f32 - app.viewport.stage_size.x).abs() > f32::EPSILON {
             if !app.viewport.editing_stage_size {
@@ -715,6 +968,10 @@ fn draw_canvas_tab(app: &mut Is2dApp, ui: &mut egui::Ui) {
             || w_resp.lost_focus()
             || h_resp.drag_stopped()
             || h_resp.lost_focus()
+            || (!w_resp.dragged()
+                && !w_resp.has_focus()
+                && !h_resp.dragged()
+                && !h_resp.has_focus())
         {
             app.viewport.editing_stage_size = false;
         }
@@ -825,8 +1082,7 @@ pub(crate) fn draw_selected_frame_properties(app: &mut Is2dApp, ui: &mut egui::U
     if ui
         .add_sized(
             Vec2::new(ui.available_width(), 26.0),
-            egui::Button::new("自動（最短角度）")
-                .selected(current_rotate == TweenRotate::Auto),
+            egui::Button::new("自動（最短角度）").selected(current_rotate == TweenRotate::Auto),
         )
         .on_hover_text("開始角度から終了角度へ最短の角度差で回転します")
         .clicked()
@@ -871,6 +1127,7 @@ pub(crate) fn draw_selected_frame_properties(app: &mut Is2dApp, ui: &mut egui::U
 /// キャンバス上で単一のシンボルインスタンスを選択しているときにプロパティパネル下部に表示する再生オプション（1回再生 / ループ再生 / 任意のフレーム）
 pub(crate) fn draw_selected_symbol_properties(app: &mut Is2dApp, ui: &mut egui::Ui) {
     let Some((binding, sym_name, sym_total_frames)) = selected_single_symbol_info(app) else {
+        app.ui.editing_symbol_playback = false;
         return;
     };
 
@@ -908,8 +1165,7 @@ pub(crate) fn draw_selected_symbol_properties(app: &mut Is2dApp, ui: &mut egui::
         if ui
             .add_sized(
                 Vec2::new(half_w, 26.0),
-                egui::Button::new("ループ再生")
-                    .selected(binding.loop_mode == SymbolLoopMode::Loop),
+                egui::Button::new("ループ再生").selected(binding.loop_mode == SymbolLoopMode::Loop),
             )
             .on_hover_text("キーフレーム開始位置からシンボル内部フレームをループ再生します")
             .clicked()
@@ -951,6 +1207,7 @@ pub(crate) fn draw_selected_symbol_properties(app: &mut Is2dApp, ui: &mut egui::
         SymbolLoopMode::SingleFrame => "表示フレーム:",
         SymbolLoopMode::Loop | SymbolLoopMode::PlayOnce => "開始フレーム:",
     };
+    let mut drag_active = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(
@@ -958,6 +1215,7 @@ pub(crate) fn draw_selected_symbol_properties(app: &mut Is2dApp, ui: &mut egui::
                 .size(11.0)
                 .color(Color32::from_rgb(55, 62, 74)),
         );
+        let mut step_clicked = false;
         if ui
             .add_enabled(
                 next_first_1based > 1,
@@ -967,8 +1225,9 @@ pub(crate) fn draw_selected_symbol_properties(app: &mut Is2dApp, ui: &mut egui::
             .clicked()
         {
             next_first_1based = next_first_1based.saturating_sub(1).max(1);
+            step_clicked = true;
         }
-        ui.add_sized(
+        let drag_resp = ui.add_sized(
             Vec2::new(56.0, 22.0),
             egui::DragValue::new(&mut next_first_1based)
                 .range(1..=max_first_1based)
@@ -984,7 +1243,12 @@ pub(crate) fn draw_selected_symbol_properties(app: &mut Is2dApp, ui: &mut egui::
             .clicked()
         {
             next_first_1based = (next_first_1based + 1).min(max_first_1based);
+            step_clicked = true;
         }
+        drag_active = !step_clicked
+            && (drag_resp.dragged() || drag_resp.has_focus())
+            && !drag_resp.drag_stopped()
+            && !drag_resp.lost_focus();
     });
 
     if next_mode == SymbolLoopMode::SingleFrame && (2..=12).contains(&max_first_1based) {
@@ -999,12 +1263,12 @@ pub(crate) fn draw_selected_symbol_properties(app: &mut Is2dApp, ui: &mut egui::
                     if ui
                         .add_sized(
                             Vec2::new(btn_w, 22.0),
-                            egui::Button::new(format!("{f}F"))
-                                .selected(next_first_1based == f),
+                            egui::Button::new(format!("{f}F")).selected(next_first_1based == f),
                         )
                         .clicked()
                     {
                         next_first_1based = f;
+                        drag_active = false;
                     }
                 }
             });
@@ -1014,8 +1278,12 @@ pub(crate) fn draw_selected_symbol_properties(app: &mut Is2dApp, ui: &mut egui::
         }
     }
 
+    if next_mode != binding.loop_mode || !drag_active {
+        app.ui.editing_symbol_playback = false;
+    }
     if next_mode != binding.loop_mode || next_first_1based != current_first_1based {
         set_selected_symbol_playback(app, next_mode, next_first_1based.saturating_sub(1));
+        app.ui.editing_symbol_playback = drag_active && next_mode == binding.loop_mode;
     }
 
     ui.add_space(6.0);
@@ -1061,10 +1329,7 @@ pub(crate) fn draw_library_tab(app: &mut Is2dApp, ui: &mut egui::Ui) {
         return;
     }
 
-    app.symbols.sync_after_restore();
-    if app.symbols.selected_library_symbol.is_none() {
-        app.symbols.selected_library_symbol = app.symbols.library.first().map(|s| s.id);
-    }
+    app.symbols.ensure_valid_selection();
 
     if let Some(sel_id) = app.symbols.selected_library_symbol {
         draw_selected_library_symbol_controls(app, ui, sel_id);
@@ -1090,7 +1355,10 @@ fn draw_selected_library_symbol_controls(app: &mut Is2dApp, ui: &mut egui::Ui, s
         .edit_stack
         .iter()
         .any(|sess| sess.symbol_id == sel_id);
-    let can_place = app.symbols.can_place_symbol_in_current_context(sel_id);
+    let can_place = app.symbols.can_place_symbol_in_current_context(sel_id)
+        && app
+            .timeline
+            .is_layer_editable_by_id(crate::canvas_tool::active_scope_layer_id(app));
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let place_w = (ui.available_width() - 116.0).max(70.0);
@@ -1143,64 +1411,67 @@ fn draw_library_symbol_list(app: &mut Is2dApp, ui: &mut egui::Ui) {
     let mut rename_req: Option<(u64, String)> = None;
     let mut clear_renaming_id: Option<u64> = None;
 
+    let active_doc_id = app.tabs.active_doc_id();
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (sym_id, mut name, total_frames) in entries {
-                let is_sel = app.symbols.selected_library_symbol == Some(sym_id);
-                let row_fill = if is_sel {
-                    Color32::from_rgb(220, 234, 252)
-                } else {
-                    Color32::from_rgb(252, 253, 255)
-                };
-                let stroke_col = if is_sel {
-                    Color32::from_rgb(0, 125, 230)
-                } else {
-                    Color32::from_rgb(218, 222, 230)
-                };
-                egui::Frame::none()
-                    .fill(row_fill)
-                    .stroke(Stroke::new(1.0, stroke_col))
-                    .inner_margin(egui::Margin::symmetric(6.0, 4.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .selectable_label(
-                                    is_sel,
-                                    egui::RichText::new(icons::SYMBOL)
-                                        .size(15.0)
-                                        .color(Color32::from_rgb(0, 130, 220)),
-                                )
-                                .on_hover_text("クリックして選択")
-                                .clicked()
-                            {
-                                app.symbols.selected_library_symbol = Some(sym_id);
-                            }
-                            let text_w = (ui.available_width() - 36.0).max(60.0);
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut name).desired_width(text_w),
-                            );
-                            if resp.clicked() || resp.gained_focus() {
-                                app.symbols.selected_library_symbol = Some(sym_id);
-                            }
-                            if resp.changed() {
-                                rename_req = Some((sym_id, name));
-                            }
-                            if resp.lost_focus() {
-                                clear_renaming_id = Some(sym_id);
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!("{total_frames} f"))
-                                            .size(10.5)
-                                            .color(Color32::from_rgb(115, 122, 135)),
-                                    );
-                                },
-                            );
+                ui.push_id((active_doc_id, sym_id), |ui| {
+                    let is_sel = app.symbols.selected_library_symbol == Some(sym_id);
+                    let row_fill = if is_sel {
+                        Color32::from_rgb(220, 234, 252)
+                    } else {
+                        Color32::from_rgb(252, 253, 255)
+                    };
+                    let stroke_col = if is_sel {
+                        Color32::from_rgb(0, 125, 230)
+                    } else {
+                        Color32::from_rgb(218, 222, 230)
+                    };
+                    egui::Frame::none()
+                        .fill(row_fill)
+                        .stroke(Stroke::new(1.0, stroke_col))
+                        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .selectable_label(
+                                        is_sel,
+                                        egui::RichText::new(icons::SYMBOL)
+                                            .size(15.0)
+                                            .color(Color32::from_rgb(0, 130, 220)),
+                                    )
+                                    .on_hover_text("クリックして選択")
+                                    .clicked()
+                                {
+                                    app.symbols.selected_library_symbol = Some(sym_id);
+                                }
+                                let text_w = (ui.available_width() - 36.0).max(60.0);
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut name).desired_width(text_w),
+                                );
+                                if resp.clicked() || resp.gained_focus() {
+                                    app.symbols.selected_library_symbol = Some(sym_id);
+                                }
+                                if resp.changed() {
+                                    rename_req = Some((sym_id, name));
+                                }
+                                if resp.lost_focus() {
+                                    clear_renaming_id = Some(sym_id);
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("{total_frames} f"))
+                                                .size(10.5)
+                                                .color(Color32::from_rgb(115, 122, 135)),
+                                        );
+                                    },
+                                );
+                            });
                         });
-                    });
+                });
                 ui.add_space(3.0);
             }
         });
@@ -1223,7 +1494,11 @@ fn draw_symbol_mini_preview(app: &Is2dApp, ui: &mut egui::Ui, sym: &SymbolDef) {
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 110.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_rgb(252, 252, 254));
-    painter.rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::from_rgb(206, 212, 222)));
+    painter.rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(1.0, Color32::from_rgb(206, 212, 222)),
+    );
 
     if let Some((mesh, origin_scr)) =
         sym.cached_mini_preview(rect, app.symbols.revision, &app.symbols.library)

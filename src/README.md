@@ -1,6 +1,6 @@
-# `src/` ディレクトリ完全リファレンス（全13ファイル・全型・全関数一覧）
+# `src/` ディレクトリ完全リファレンス（全14ファイル・全型・全関数一覧）
 
-`is2d` のソースコードは、UIパネル・キャンバスツール・ベクター幾何エンジン（コア／ストローク平滑化／ブーリアン演算）・タイムラインデータ・タイムラインUI・シンボル＆トゥイーン・テストの責務ごとに **全13ファイル** に分割されています。
+`is2d` のソースコードは、UIパネル・プロジェクト保存/読込・キャンバスツール・ベクター幾何エンジン（コア／ストローク平滑化／ブーリアン演算）・タイムラインデータ・タイムラインUI・シンボル＆トゥイーン・テストの責務ごとに **全14ファイル** に分割されています。
 本ドキュメントでは、`src/` 内のすべてのファイル・構造体・列挙型・定数・メソッド・ヘルパー関数・ユニットテストを漏れなく記載します。
 
 ---
@@ -9,19 +9,20 @@
 
 | # | ファイル | 行数目安 | 主な責務 |
 | :-: | :--- | :---: | :--- |
-| 1 | **[`main.rs`](./main.rs)** | ~850行 | **Layer 5 (App Shell)**：アプリ起動、フォント・テーマ初期化、アプリ全体状態（`Is2dApp` / `AppUiState` / `UndoHistory`）、唯一の `impl Is2dApp`（トランザクション型キャンバス更新API・共通ステータス通知バナー・ショートカット）、メインループ |
-| 2 | **[`panels.rs`](./panels.rs)** | ~1,260行 | **Layer 4 (UI Presentation)**：Material Icons 定数（`mod icons`）、OS別修飾キー表記定数（`MOD_KEY`）、左端縦ツールバー、ステージ上部スリムバー（パンくずリスト）、右端4タブパネル（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`、およびトゥイーン設定・シンボル再生オプション・ライブラリ一覧＆ミニプレビューUI描画）のモジュール関数群 |
-| 3 | **[`canvas_tool.rs`](./canvas_tool.rs)** | ~1,570行 | **Layer 3 (Tool Logic)**：`Tool` 列挙型、共通ドラッグ状態型（`ActiveCanvasDrag` / `MoveSelectionDrag` / `MarqueeDrag`）、唯一の `impl ViewportState`（ズーム・パン・ステージ枠）＆唯一の `impl CanvasState`（空白フレームシンボルマーカー統合表現・`shape_id` 二分探索ベース選択追従・非公開 `loaded_signatures` / `unsliced_canvas` 不変条件カプセル化）、キャンバスとタイムラインの同期・トランザクション（`sync_shapes_to_timeline` / `load_shapes_from_timeline` / `mutate_timeline_with_undo`）、シンボル基準点十字（`draw_registration_cross`）・キャンバス合成描画関数群 |
-| 4 | **[`tool_paint.rs`](./tool_paint.rs)** | ~420行 | **Layer 3 (Tool Logic) — 描画・塗りツール**（ブラシ `B`・消しゴム `E`・バケツ塗り `K`・スポイト `I`）の入力処理、チャンク増分プレビュー（`STROKE_TAIL_CHUNK_LEN` / `draw_active_stroke_preview`）、最前面カラー抽出（`topmost_visible_color_at`）、スポイトカーソルバッジ（`draw_eyedropper_cursor_badge`）・コミット関数群 |
-| 5 | **[`tool_select.rs`](./tool_select.rs)** | ~1,810行 | **Layer 3 (Tool Logic) — 選択ツール（`V`）**、選択サブモード・ホバー・ドラッグ状態型（`SelectSubMode` / `HoverTarget` / `SelectDragState`）、ヒット判定＆頂点スナップ（`compute_hover_target` / `find_snap_vertex` / `collect_marquee_hit_groups`）、マーキー範囲選択（部分スライス）、輪郭の粘土変形（Reshape）、アンカー追加/削除（`+`/`-`）、グループ階層＆インプレイス編集、コピー＆ペースト、選択ツールカーソル・バッジ描画のモジュール関数群 |
-| 6 | **[`tool_transform.rs`](./tool_transform.rs)** | ~1,230行 | **Layer 3 (Tool Logic) — 自由変形ツール（`Q`）＆シンボル/トゥイーン操作コントローラ**、変形ハンドル・ホバー・ドラッグ状態型（`ScaleHandle` / `TransformHoverTarget` / `TransformDragState`）、自由変形バウンディングボックス＆カーソル描画（`draw_free_transform_box` / `draw_transform_tool_cursor`）、ピボット設定・リセット、8方向スケール・回転・平行移動・反転、および `F8` シンボル変換・ライブラリ配置/改名/削除・`T` トゥイーン切替・シンボル内タイムライン出入りコントローラ関数群 |
-| 7 | **[`timeline.rs`](./timeline.rs)** | ~1,700行 | **Layer 2 (Domain / Model) — タイムラインの純粋データモデル**（UI・アプリ状態への逆依存ゼロ：唯一の `impl Timeline` / `impl Layer` / `impl Keyframe` / `impl Cel`（`Arc<Vec<FillShape>>` ＋ `Arc<Vec<SymbolInstance>>` CoW共有）、衝突ゼロ署名 `ResolvedCelSig` による `SyncCache<CelMeshCache>` 3階層共有キャッシュ、`LoadedShapeSig`、シンボル・トゥイーン評価、キーフレーム・フレーム・レイヤー操作メソッド群） |
-| 8 | **[`timeline_ui.rs`](./timeline_ui.rs)** | ~1,895行 | **Layer 4 (UI Presentation) — タイムライン（X-Sheet）UI状態・描画＆コントローラ**（唯一の `impl TimelineUiState`、`TimelineGridDrag`、`TimelineLayout`、再生制御・キーフレーム/フレーム/レイヤー操作の `&mut Is2dApp` コントローラ関数群、コントロールバー、ルーラー、フレームグリッド、キーフレーム区間描画、レイヤー一覧、D&D操作関数群） |
-| 9 | **[`symbol.rs`](./symbol.rs)** | ~920行 | **Layer 2 (Domain / Model) — シンボル＆ライブラリ＆クラシックトゥイーンの純粋データモデル**（UI・アプリ状態への逆依存ゼロ：唯一の `impl SymbolManager` / `impl SymbolDef`（内部に `timeline: Timeline` とミニプレビューメッシュキャッシュ `mini_preview_cache` を保持）、`SymbolInstance`（`shape_order_index` 付き）、穴輪郭ハッシュを含む複合キー `StageShapeCacheKey` による2階層 $O(1)$ ローカル復元キャッシュ `StageToLocalCache`、入れ子シンボル再帰評価、衝突ゼロ署名 `ResolvedCelSig` ＆ ヒープ確保ゼロの遅延署名照合クエリ `ResolvedSigQuery`） |
-| 10 | **[`vector_engine.rs`](./vector_engine.rs)** | ~1,285行 | **Layer 1 (Geometry) — 2Dベクター幾何コア＆メッシュ描画エンジン**（他モジュールへの依存ゼロ：スレッドセーフな `SyncCache<T>`、`SymbolLoopMode` / `TweenRotate` / `SymbolInstanceBinding`、`Contour` / `FillShape`（不変エンティティID `shape_id`＋`OnceLock` 遅延メッシュキャッシュ＋スクリーンメッシュキャッシュ＋選択ドット柄スクリーンメッシュキャッシュ＋`geometry_bounding_box()`）、CoW `Arc` キャッシュ＆異常値ガード付きアフィン変換、`union_bounding_boxes`、`arc_mesh_to_shape` ゼロコピー `Arc::unwrap_or_clone`、`lyon` 三角形メッシュ化） |
-| 11 | **[`vector_stroke.rs`](./vector_stroke.rs)** | ~1,545行 | **Layer 1 (Geometry) — アルゴリズム 1 & 2：ストローク輪郭生成＆100%スムージング曲線フィット**（`vector_engine` のみに依存：スケール不変ブラシ輪郭生成、特徴点ロック、ゼロ収縮平滑化、G1連続2次ベジェ曲線フィット） |
-| 12 | **[`vector_boolean.rs`](./vector_boolean.rs)** | ~985行 | **Layer 1 (Geometry) — アルゴリズム 3：マージ描画＆ブーリアン演算エンジン**（`vector_engine` と `vector_stroke` のみに依存：`BoolOp`、事前フラットニングキャッシュ `PreparedClip`、`i_overlay` ブーリアン演算、`QuadSpatialGrid` 2D空間インデックスによる元の `QuadBez` タグ照合＆De Casteljau 部分曲線再構築、AABBクラスタ事前カリング付き閉領域バケツ検出、自己交差解消） |
-| 13 | **[`tests.rs`](./tests.rs)** | ~2,905行 | 全機能および異常値・クラッシュ耐性を検証する自動ユニットテストスイート（全24テスト） |
+| 1 | **[`main.rs`](./main.rs)** | ~940行 | **Layer 5 (App Shell)**：アプリ起動、フォント・テーマ初期化、アプリ全体状態（`Is2dApp` / `AppUiState` / `UndoHistory` / `DocumentTabManager`）、唯一の `impl Is2dApp`（トランザクション型キャンバス更新API・共通ステータス通知バナー・ショートカット）、メインループ |
+| 2 | **[`panels.rs`](./panels.rs)** | ~1,515行 | **Layer 4 (UI Presentation)**：Material Icons 定数（`mod icons`）、OS別修飾キー表記定数（`MOD_KEY`）、最上部メニューバー（`ファイル`・`編集`・`表示`）、複数ドキュメントタブバー（`draw_document_tab_bar`）、左端縦ツールバー、ステージ上部スリムバー（パンくずリスト）、右端4タブパネル（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`）のモジュール関数群 |
+| 3 | **[`project_io.rs`](./project_io.rs)** | ~1,840行 | **Layer 3 (Project Persistence & Multi-Document Tabs)**：複数ドキュメント同時オープンのスロットスワップ管理（`DocumentSlot` / `DocumentTabManager` / `OpenProjectOutcome`）、別タブ間シンボル定義の `Arc<SymbolDef>` 共有スナップショット移植（`capture_clipboard_symbols` / `resolve_clipboard_for_paste`）、`.is2d`（JSON形式）保存・読み込み専用DTO群（`ProjectDocument` / `SavedTimeline` / `SavedSymbolDef` 等）、編集中シンボルの非破壊多段フラッシュ、PID付き一時ファイル＋`sync_all` 経由のアトミック保存（`save_project_to_path` / `open_project_in_tab`）、`rfd` OS標準ファイルダイアログ連携 |
+| 4 | **[`canvas_tool.rs`](./canvas_tool.rs)** | ~1,520行 | **Layer 3 (Tool Logic)**：`Tool` 列挙型、共通ドラッグ状態型（`ActiveCanvasDrag` / `MoveSelectionDrag` / `MarqueeDrag`）、唯一の `impl ViewportState`（ズーム・パン・ステージ枠）＆唯一の `impl CanvasState`（空白フレームシンボルマーカー統合表現・`shape_id` 二分探索ベース選択追従・非公開 `loaded_signatures` / `unsliced_canvas` 不変条件カプセル化）、キャンバスとタイムラインの同期・トランザクション（`sync_shapes_to_timeline` / `load_shapes_from_timeline` / `mutate_timeline_with_undo`）、シンボル基準点十字（`draw_registration_cross`）・キャンバス合成描画関数群 |
+| 5 | **[`tool_paint.rs`](./tool_paint.rs)** | ~420行 | **Layer 3 (Tool Logic) — 描画・塗りツール**（ブラシ `B`・消しゴム `E`・バケツ塗り `K`・スポイト `I`）の入力処理、チャンク増分プレビュー（`STROKE_TAIL_CHUNK_LEN` / `draw_active_stroke_preview`）、最前面カラー抽出（`topmost_visible_color_at`）、スポイトカーソルバッジ（`draw_eyedropper_cursor_badge`）・コミット関数群 |
+| 6 | **[`tool_select.rs`](./tool_select.rs)** | ~1,920行 | **Layer 3 (Tool Logic) — 選択ツール（`V`）**、選択サブモード・ホバー・ドラッグ状態型（`SelectSubMode` / `HoverTarget` / `SelectDragState`）、ヒット判定＆頂点スナップ（`compute_hover_target` / `find_snap_vertex` / `collect_marquee_hit_groups`）、マーキー範囲選択（部分スライス）、輪郭の粘土変形（Reshape）、アンカー追加/削除（`+`/`-`）、グループ階層＆インプレイス編集、コピー＆ペースト、選択ツールカーソル・バッジ描画のモジュール関数群 |
+| 7 | **[`tool_transform.rs`](./tool_transform.rs)** | ~1,260行 | **Layer 3 (Tool Logic) — 自由変形ツール（`Q`）＆シンボル/トゥイーン操作コントローラ**、変形ハンドル・ホバー・ドラッグ状態型（`ScaleHandle` / `TransformHoverTarget` / `TransformDragState`）、自由変形バウンディングボックス＆カーソル描画（`draw_free_transform_box` / `draw_transform_tool_cursor`）、ピボット設定・リセット、8方向スケール・回転・平行移動・反転、および `F8` シンボル変換・ライブラリ配置/改名/削除・`T` トゥイーン切替・シンボル内タイムライン出入りコントローラ関数群 |
+| 8 | **[`timeline.rs`](./timeline.rs)** | ~1,715行 | **Layer 2 (Domain / Model) — タイムラインのデータモデル**（`Is2dApp` やUIパネルへの逆依存ゼロ：唯一の `impl Timeline` / `impl Layer` / `impl Keyframe` / `impl Cel`（`Arc<Vec<FillShape>>` ＋ `Arc<Vec<SymbolInstance>>` CoW共有）、衝突ゼロ署名 `ResolvedCelSig` による `SyncCache<CelMeshCache>` 3階層共有キャッシュ、`LoadedShapeSig`、シンボル・トゥイーン評価、キーフレーム・フレーム・レイヤー操作メソッド群） |
+| 9 | **[`timeline_ui.rs`](./timeline_ui.rs)** | ~1,900行 | **Layer 4 (UI Presentation) — タイムライン（X-Sheet）UI状態・描画＆コントローラ**（唯一の `impl TimelineUiState`、`TimelineGridDrag`、`TimelineLayout`、再生制御・キーフレーム/フレーム/レイヤー操作の `&mut Is2dApp` コントローラ関数群、コントロールバー、ルーラー、フレームグリッド、キーフレーム区間描画、レイヤー一覧、D&D操作関数群） |
+| 10 | **[`symbol.rs`](./symbol.rs)** | ~975行 | **Layer 2 (Domain / Model) — シンボル＆ライブラリ＆クラシックトゥイーンのデータモデル**（`Is2dApp` やUIパネルへの逆依存ゼロ：唯一の `impl SymbolManager` / `impl SymbolDef`（内部に `timeline: Timeline` と `mini_preview_cache` / `dynamic_anim_cache` を保持）、`SymbolInstance`（`shape_order_index` 付き）、穴輪郭ハッシュを含む複合キー `StageShapeCacheKey` による2階層 $O(1)$ ローカル復元キャッシュ `StageToLocalCache`、入れ子シンボル再帰評価、衝突ゼロ署名 `ResolvedCelSig` ＆ ヒープ確保ゼロの遅延署名照合クエリ `ResolvedSigQuery`） |
+| 11 | **[`vector_engine.rs`](./vector_engine.rs)** | ~1,350行 | **Layer 1 (Geometry) — 2Dベクター幾何コア＆メッシュ描画エンジン**（クレート内他モジュールへの依存ゼロ：スレッドセーフな `SyncCache<T>`、`SymbolLoopMode` / `TweenRotate` / `SymbolInstanceBinding`、`Contour` / `FillShape`（不変エンティティID `shape_id`＋`OnceLock` 遅延メッシュ/ヒットパスキャッシュ＋スクリーンメッシュキャッシュ＋選択ドット柄スクリーンメッシュキャッシュ＋`geometry_bounding_box()`）、CoW `Arc` キャッシュ＆異常値ガード付きアフィン変換、`union_bounding_boxes`、`arc_mesh_to_shape`（`Arc::unwrap_or_clone`）、`lyon` 三角形メッシュ化） |
+| 12 | **[`vector_stroke.rs`](./vector_stroke.rs)** | ~1,555行 | **Layer 1 (Geometry) — アルゴリズム 1 & 2：ストローク輪郭生成＆100%スムージング曲線フィット**（`vector_engine` のみに依存：スケール不変ブラシ輪郭生成、特徴点ロック、ゼロ収縮平滑化、G1連続2次ベジェ曲線フィット、再帰深さガード付きRDP間引き） |
+| 13 | **[`vector_boolean.rs`](./vector_boolean.rs)** | ~1,055行 | **Layer 1 (Geometry) — アルゴリズム 3：マージ描画＆ブーリアン演算エンジン**（`vector_engine` と `vector_stroke` のみに依存：`BoolOp`、事前フラットニングキャッシュ `PreparedClip`、`i_overlay` ブーリアン演算、遅延構築 `QuadSpatialGrid` 2D空間インデックスによる元の `QuadBez` タグ照合＆De Casteljau 部分曲線再構築、スイープライン＋Union-Find AABBクラスタ事前カリング付き閉領域バケツ検出、自己交差解消） |
+| 14 | **[`tests.rs`](./tests.rs)** | ~3,880行 | 全機能・保存/読込ラウンドトリップ・異常値・クラッシュ耐性を検証する自動ユニットテストスイート（全36テスト） |
 
 ---
 
@@ -29,15 +30,15 @@
 
 ### 定数・通知型・履歴型・初期化関数
 - **`MAX_UNDO_HISTORY: usize`** (`100`) — Undo スタックが保持する最大スナップショット数。
-- **`struct UndoEntry`** — Undo / Redo スタックが保持する1ステップ分の状態スナップショット（`timeline: Timeline`, `library: Arc<Vec<SymbolDef>>`, `symbol_edit_stack: Arc<Vec<SymbolEditSession>>`, `editing_group_path: Vec<u64>`, `stage_size: Vec2`, `symbols_revision: u64`）。作業キャンバス `shapes` は復元時にタイムラインから再展開することで重複保持を排除し、IDカウンタ（`next_symbol_id` / `next_group_id`）は単調増加を維持するため履歴対象外とする。さらに `UndoHistory::snapshot_symbols` によりシンボル未変更の連続操作間では `library` と `symbol_edit_stack` の `Arc` を $O(1)$ で構造共有（CoW）し、`Timeline::strip_transient_caches_with_prev` により未変更キーフレームの `Cel::shapes`（`Arc<Vec<FillShape>>`）および `Cel::instances`（`Arc<Vec<SymbolInstance>>`）も直前のスナップショットと $O(1)$ で構造共有して、実際に変更されたセルのみ一時キャッシュを破棄して軽量保持する。
+- **`struct UndoEntry`** — Undo / Redo スタックが保持する1ステップ分の状態スナップショット（`timeline: Timeline`, `library: Arc<Vec<SymbolDef>>`, `symbol_edit_stack: Arc<Vec<SymbolEditSession>>`, `editing_group_path: Vec<u64>`, `stage_size: Vec2`, `symbols_revision: u64`, `commit_id: u64`）。作業キャンバス `shapes` は復元時にタイムラインから再展開することで重複保持を排除し、IDカウンタ（`next_symbol_id` / `next_group_id`）は単調増加を維持するため履歴対象外とする。さらに `UndoHistory::snapshot_symbols` によりシンボル未変更の連続操作間では `library` と `symbol_edit_stack` の `Arc` を $O(1)$ で構造共有（CoW）し、`Timeline::strip_transient_caches_with_prev` により未変更キーフレームの `Cel::shapes`（`Arc<Vec<FillShape>>`）および `Cel::instances`（`Arc<Vec<SymbolInstance>>`）も直前のスナップショットと $O(1)$ で構造共有して、実際に変更されたセルのみ一時キャッシュを破棄して軽量保持する。
 - **`enum NoticeKind`** — キャンバス左上に表示するステータスメッセージの種類（`Warning` / `Error` / `Info`）と配色・アイコン定義（`colors(self)`）。
-- **`struct StatusToast`** — 一定時間（デフォルト3秒）で自動消滅するワンショット通知メッセージ（`kind: NoticeKind`, `message: String`, `expires_at: Instant`）。
-- **`main() -> eframe::Result<()>`** — ウィンドウサイズ（`1280 × 820`）とタイトル（`"is2d"`）を設定し、フォント・テーマを初期化して `eframe::run_native` を起動。
-- **`configure_japanese_fonts(ctx: &egui::Context)`** — `fonts/NotoSansJP-Medium.ttf`（日本語表示）および `fonts/MaterialIcons-Regular.ttf`（UIアイコン）を読み込み、`Proportional` / `Monospace` フォントファミリーへ登録。
+- **`struct StatusToast`** — 一定時間（2.8秒＝`2800ms`）で自動消滅するワンショット通知メッセージ（`kind: NoticeKind`, `message: String`, `expires_at: Instant`）。
+- **`main() -> eframe::Result<()>`** — ウィンドウサイズ（`1280 × 820`）とタイトル（`"is2d - 無題-1"`）を設定し、フォント・テーマを初期化して `eframe::run_native` を起動。
+- **`configure_japanese_fonts(ctx: &egui::Context)`** — `fonts/NotoSansJP-Regular.ttf`・`fonts/NotoSansJP-Bold.ttf`（日本語表示）および `fonts/MaterialIcons-Regular.ttf`（UIアイコン）を読み込み、`Proportional` / `Monospace` フォントファミリーへ登録。
 - **`configure_sharp_light_theme(ctx: &egui::Context)`** — すべてのウィジェット・パネル・メニューの角丸を `Rounding::ZERO` に統一したシャープなライトテーマを設定。
 
-### 構造体 `Is2dApp` および責務別7サブ構造体
-アプリケーション全体の状態を保持するルート構造体 `Is2dApp`（`#[derive(Default)]`）は、直下に約30個のフラットなフィールドを持つ God Object を廃し、責務ごとの独立した **7つのドメイン構造体** に分割されている（Rust のフィールド単位の借用分割により `&mut self.timeline` と `&self.canvas` / `&self.symbols` などの同時借用もゼロコストで両立）：
+### 構造体 `Is2dApp` および責務別8サブ構造体
+アプリケーション全体の状態を保持するルート構造体 `Is2dApp`（`#[derive(Default)]`）は、直下に約30個のフラットなフィールドを持つ God Object を廃し、責務ごとの独立した **8つのドメイン構造体** に分割されている（Rust のフィールド単位の借用分割により `&mut self.timeline` と `&self.canvas` / `&self.symbols` などの同時借用もゼロコストで両立）：
 
 1. **`ui: AppUiState`**（[`main.rs`](./main.rs)）— ツール選択・ブラシ設定・表示オプション・ステータストースト通知のUI状態：
    - `tool: Tool` — 現在選択中のメインツール（初期値 `Tool::Brush`）。
@@ -46,8 +47,10 @@
    - `brush_radius: f32` — ブラシ半径（ワールド座標px、初期値 `8.0`）。
    - `eraser_radius: f32` — 消しゴム半径（ワールド座標px、初期値 `22.0`）。
    - `brush_color: Color32` — 現在の描画・塗りつぶしカラー。
-   - `show_wireframe: bool` — アンカーポイントとベジェ曲線パスの常時オーバーレイ表示フラグ。
-   - `inspect_timeline_frame: bool` — プロパティパネル下部の表示対象フラグ（`true`: タイムラインのフレーム／トゥイーン属性、`false`: キャンバス上のシンボル属性）。
+   - `show_wireframe: bool` — アンカーポイントとベジェ曲線パスの常時オーバーレイ表示フラグ（ドキュメントタブ単位で保持）。
+   - `inspect_timeline_frame: bool` — プロパティパネル下部の表示対象フラグ（`true`: タイムラインのフレーム／トゥイーン属性、`false`: キャンバス上のシンボル属性、ドキュメントタブ単位で保持）。
+   - `editing_symbol_playback: bool` — シンボル再生オプションの開始/表示フレーム数値フィールド（`DragValue`）連続編集フラグ（Undo重複記録防止用）。
+   - `current_file_path: Option<PathBuf>` — 現在開いている・保存先の `.is2d` プロジェクトファイルパス（未保存の新規ドキュメント時は `None`）。
    - `status_toast: Option<StatusToast>` — 操作エラー・警告などを一定時間表示するワンショット通知。
 2. **`viewport: ViewportState`**（[`canvas_tool.rs`](./canvas_tool.rs)）— キャンバスカメラ（ズーム・パン）およびステージ枠設定：
    - `zoom: f32` — キャンバスのズーム倍率（`MIN_VIEW_ZOOM: 0.15`〜`MAX_VIEW_ZOOM: 16.0`、初期値 `1.0`）。
@@ -77,39 +80,42 @@
    - `actively_renaming_symbol: Option<u64>` — ライブラリ一覧で現在テキスト入力中のシンボルID（連続入力中のUndo重複記録防止用）。
    - `edit_stack: Vec<SymbolEditSession>` — シンボルをダブルクリックして内部タイムラインへ潜っている際の親シーン退避スタック。
    - `next_group_id: u64` — グループID／シンボルインスタンスIDの単調増加連番採番カウンタ（初期値 `1`）。
-7. **`history: UndoHistory`**（[`main.rs`](./main.rs)）— Undo / Redo スナップショット履歴管理構造体：
+7. **`history: UndoHistory`**（[`main.rs`](./main.rs)）— Undo / Redo スナップショット履歴および未保存変更（Dirty）状態管理構造体：
    - `undo_stack: VecDeque<UndoEntry>` / `redo_stack: Vec<UndoEntry>` — タイムライン・ライブラリ・シンボル編集スタック・グループ編集パスのスナップショット履歴（上限超過時は `pop_front` で $O(1)$ 破棄）。
+   - `current_commit_id: u64` / `saved_commit_id: Option<u64>` / `next_commit_id: u64` — ドキュメント状態世代IDと保存時点の世代IDを追跡し、編集・Undo・Redo・保存のすべてに連動して `is_dirty()`（タブ末尾の `*` 表示）を $O(1)$ で判定。
+8. **`tabs: DocumentTabManager`**（[`project_io.rs`](./project_io.rs)）— 複数ドキュメント同時オープン用のタブ管理状態（アクティブ状態スワップ方式）。
 
 ### `AppUiState` / `UndoHistory` / `Is2dApp` のメソッド（`main.rs` 内）
-- **`AppUiState::show_notice(&mut self, kind: NoticeKind, message: impl Into<String>)`** — ステータス通知トーストを3秒間の有効期限付きで登録。
+- **`AppUiState::show_notice(&mut self, kind: NoticeKind, message: impl Into<String>)`** — ステータス通知トーストを2.8秒間（`2800ms`）の有効期限付きで登録。
 - **`UndoHistory` のメソッド**：
+  - `is_dirty(&self) -> bool` / `mark_saved(&mut self)` / `mark_unsaved(&mut self)` — 保存時点の世代ID `saved_commit_id` と現在世代ID `current_commit_id` の一致判定および保存状態更新。
   - `snapshot_symbols(&self, symbols: &SymbolManager) -> (Arc<Vec<SymbolDef>>, Arc<Vec<SymbolEditSession>>, u64)` — シンボル世代番号 `symbols.revision` が直近エントリと同一なら既存の `Arc` を $O(1)$ 共有し、変更時のみクローン・一時キャッシュ除去を行う。
-  - `push(&mut self, entry: UndoEntry)` — 操作前スナップショットを `undo_stack` に積み（上限 `MAX_UNDO_HISTORY`）、`redo_stack` をクリア。
+  - `push(&mut self, entry: UndoEntry)` — 操作前スナップショットに現在世代IDを記録して `undo_stack` に積み（上限 `MAX_UNDO_HISTORY`）、`redo_stack` をクリアして新しい世代IDへ進める。
   - `pop_undo(&mut self) -> Option<UndoEntry>` / `pop_redo(&mut self) -> Option<UndoEntry>` / `push_redo(&mut self, entry: UndoEntry)` / `push_undo_from_redo(&mut self, entry: UndoEntry)` — Undo/Redo スタックのカプセル化された出し入れ操作。
 - **Undo / Redo 履歴管理＆トランザクション型キャンバス更新（`Is2dApp`）**：
-  - `restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry` — 指定した `UndoEntry`（タイムライン・ライブラリ・シンボル編集スタック・グループ編集パス）を `std::mem::replace` で無コピー復元し、`load_shapes_from_timeline` で作業図形を再展開（＋`symbols.sync_after_restore()` と `sanitize_editing_group_path()` で整合性を保証）して置換前の `UndoEntry` を返す。
+  - `restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry` — 指定した `UndoEntry`（タイムライン・ライブラリ・シンボル編集スタック・グループ編集パス・ステージサイズ）を `std::mem::replace` で無コピー復元し、`load_shapes_from_timeline` で作業図形を再展開（内部で `sanitize_editing_scope` を実行、さらに `symbols.sync_after_restore()` で選択シンボル整合性を保証）して置換前の `UndoEntry` を返す。
   - `record_undo_snapshot(&mut self, snapshot: Vec<FillShape>)` — 渡された操作前スナップショットからタイムラインを組み立てて `self.history.push(...)` に記録。
-  - `push_undo(&mut self)` — 現在の状態をスナップショット化して `self.history` に記録。
-  - `mutate_canvas_with_undo(&mut self, clear_sel_first: bool, mutate: impl FnOnce(&mut Self) -> bool) -> bool` — キャンバス図形を変更する全ツール操作の共通トランザクションAPI。事前選択解除（オプション）→操作前スナップショット退避→クロージャ実行→変更成立時の `record_undo_snapshot`＋`sync_shapes_to_timeline` を一括保証し、手動の `push_undo` / `sync_shapes_to_timeline` 呼び出し漏れを根絶。
+  - `push_undo(&mut self)` — 現在の状態（未確定の `unsliced_canvas` がある場合はスライス前図形を優先復元）をスナップショット化して `self.history` に記録。
+  - `mutate_canvas_with_undo(&mut self, clear_sel_first: bool, mutate: impl FnOnce(&mut Self))` — キャンバス図形を変更する全ツール操作の共通トランザクションAPI。事前選択解除（オプション）→操作前スナップショット退避→クロージャ実行→`record_undo_snapshot`＋`sync_shapes_to_timeline` を一括保証し、手動の `push_undo` / `sync_shapes_to_timeline` 呼び出し漏れを根絶。
   - `commit_canvas_mutation(&mut self, undo_snapshot: Vec<FillShape>)` — ドラッグ開始時やスライス前に退避しておいた `undo_snapshot` を用いて、キャンバス変更の Undo 記録とタイムライン同期を不可分に確定する共通ヘルパー。
   - `undo(&mut self)` / `redo(&mut self)` — `Cmd/Ctrl + Z` および `Cmd/Ctrl + Y`（`Cmd+Shift+Z`）による履歴の巻き戻し・やり直し（実行前に `flush_canvas_before_timeline_op` で進行中ドラッグのロールバックと未確定選択のコミットを実行）。
 - **キーボードショートカット処理**：
-  - `handle_shortcuts(&mut self, ctx: &egui::Context)` — 再生中のショートカット制限と、単一キー／修飾キー付きショートカットの振り分け。
-  - `handle_single_key_shortcuts(&mut self, ctx: &egui::Context)` — `Enter`（再生/停止）、`,` / `.`（コマ送り）、`F5` / `Shift+F5`（フレーム延長/削除）、`F6` / `Shift+F6`（複製KF/KF削除）、`F7`（空白KF）、`F8`（シンボル変換）、`T`（クラシックトゥイーン切替）、`O`（オニオンスキン）、`V`/`Q`/`B`/`E`/`K`/`I`（ツール切替）、`+`/`-`（アンカー追加/削除）、`Delete`/`Backspace`（削除）、`Esc`（選択解除またはグループ/シンボル階層から出る）を処理。
-  - `handle_command_shortcuts(&mut self, ctx: &egui::Context)` — `Cmd/Ctrl + 1`（および `0`：100%表示）、`Cmd/Ctrl + 2`（ウィンドウに合わせる）、`Cmd/Ctrl + 3`（枠外を隠す）、`Cmd/Ctrl + Z/Y`（Undo/Redo）、`Cmd/Ctrl + G/B`（グループ化/解除）、`Cmd/Ctrl + C/X/V` 及び `Cmd/Ctrl + Shift + V`（コピー/カット/ペースト/同じ位置にペースト）を処理。
+  - `handle_shortcuts(&mut self, ctx: &egui::Context)` — 再生中のショートカット制限、ファイル操作ショートカット（`Cmd/Ctrl + N` 新規、`Cmd/Ctrl + O` 開く、`Cmd/Ctrl + S` 保存、`Cmd/Ctrl + Shift + S` 名前を付けて保存）、および単一キー／修飾キー付きショートカットの振り分け。
+  - `handle_single_key_shortcuts(&mut self, i: &egui::InputState)` — `Enter`（再生/停止）、`,` / `.`（コマ送り）、`F5` / `Shift+F5`（フレーム延長/削除）、`F6` / `Shift+F6`（複製KF/KF削除）、`F7`（空白KF）、`F8`（シンボル変換）、`T`（クラシックトゥイーン切替）、`O`（オニオンスキン）、`V`/`Q`/`B`/`E`/`K`/`I`（ツール切替）、`+`/`-`（アンカー追加/削除）、`Delete`/`Backspace`（削除）、`Esc`（選択解除またはグループ/シンボル階層から出る）を処理。
+  - `handle_command_shortcuts(&mut self, ctx: &egui::Context, i: &egui::InputState)` — `Cmd/Ctrl + 1`（および `0`：100%表示）、`Cmd/Ctrl + 2`（ウィンドウに合わせる）、`Cmd/Ctrl + 3`（枠外を隠す）、`Cmd/Ctrl + Z/Y`（Undo/Redo）、`Cmd/Ctrl + G/B`（グループ化/解除）、`Cmd/Ctrl + C/X/V` 及び `Cmd/Ctrl + Shift + V`（コピー/カット/ペースト/同じ位置にペースト）を処理。
 - **キャンバス入力振り分け・共通ステータス通知・カーソル表示**：
   - `is_current_tool_allowed(&self) -> bool` — 再生中でなく、かつ対象レイヤーが編集可能（可視・非ロック）かどうかを判定（スポイト・選択・自由変形は他レイヤーが編集可能なら許可）。
-  - `handle_canvas_tool_input(&mut self, response: &egui::Response, painter: &egui::Painter, space_down: bool, shift_down: bool, alt_down: bool)` — パン中でない場合に現在のツールに応じた入力ハンドラを呼び出す。
+  - `handle_canvas_tool_input(&mut self, ui: &egui::Ui, response: &egui::Response, mouse_pt: Option<Point>, tool_allowed: bool)` — パン中でない場合に現在のツールに応じた入力ハンドラを呼び出す。
   - `show_notice(&mut self, kind: NoticeKind, message: impl Into<String>)` / `notify_warning(&mut self, message: impl Into<String>)` / `notify_error(&mut self, message: impl Into<String>)` / `notify_info(&mut self, message: impl Into<String>)` — キャンバス左上への一時通知トースト登録ヘルパー。
-  - `current_state_notice(&self) -> Option<(NoticeKind, &'static str)>` — 現在のレイヤー・フレーム状態（非表示・ロック・未作成フレーム）に応じた常駐警告メッセージを返す。
-  - `draw_canvas_notices(&mut self, ctx: &egui::Context, painter: &egui::Painter, canvas_rect: egui::Rect, current_tool_allowed: bool, hover_pos: Option<Pos2>)` — 常駐ステータス警告・一時トースト通知をキャンバス左上に縦積みバナー描画。
-  - `update_canvas_cursor(&self, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, is_panning: bool, space_down: bool)` — パン中・ロック中（`CursorIcon::NotAllowed`）・通常操作中のOSカーソルとカスタムツールカーソルを更新。
+  - `current_state_notice(&self, tool_allowed: bool) -> Option<(NoticeKind, &'static str)>` — 現在のレイヤー・フレーム状態（非表示・ロック・未作成フレーム）に応じた常駐警告メッセージを返す。
+  - `draw_canvas_notices(&mut self, ctx: &egui::Context, painter: &egui::Painter, canvas_rect: egui::Rect, tool_allowed: bool)` — 常駐ステータス警告・一時トースト通知をキャンバス左上に縦積みバナー描画。
+  - `update_canvas_cursor(&self, ctx: &egui::Context, painter: &egui::Painter, canvas_rect: egui::Rect, pointer_pos: Option<Pos2>, (is_panning, space_down): (bool, bool), tool_allowed: bool)` — パン中・ロック中（`CursorIcon::NotAllowed`）・通常操作中のOSカーソルとカスタムツールカーソルを更新。
 - **メインループ**：
-  - `eframe::App::update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame)` — 毎フレームの再生タイマー進行、ショートカット処理、左ツールバー・右プロパティパネル・下部タイムライン・上部ステージバー・中央キャンバスの描画とイベント処理を実行。
+  - `eframe::App::update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame)` — 毎フレームの再生タイマー進行、ショートカット処理、最上部メニューバー・左ツールバー・右プロパティパネル・下部タイムライン・上部ステージバー・中央キャンバスの描画とイベント処理を実行。
 
 ---
 
-## 2. [`panels.rs`](./panels.rs) — アイコン定数・左ツールバー・上部ステージバー・右プロパティパネル
+## 2. [`panels.rs`](./panels.rs) — アイコン定数・最上部メニューバー・左ツールバー・上部ステージバー・右プロパティパネル
 
 ### モジュール `icons`・定数
 - **`MOD_KEY: &str`** — プラットフォーム標準の修飾キー表記定数（macOS では `"Cmd"`、Windows / Linux では `"Ctrl"`）。
@@ -123,6 +129,9 @@
   - `label(self) -> &'static str` — タブの表示名を返す。
 
 ### モジュール関数（`panels.rs` 内）
+- **最上部メニューバー＆ドキュメントタブバー**：
+  - `draw_top_menu_bar(app: &mut Is2dApp, ctx: &egui::Context)` — ウィンドウ最上部に横幅いっぱいのメニューバー（`egui::TopBottomPanel::top("top_menu_bar")` + `egui::menu::bar`）を描画し、`draw_file_menu`（`ファイル`）・`draw_edit_menu`（`編集`）・`draw_view_menu`（`表示`）およびショートカット表示付きメニューボタンヘルパー `menu_action_button` を配置。
+  - `draw_document_tab_bar(app: &mut Is2dApp, ctx: &egui::Context)` — ステージ上部に複数ドキュメントの切り替えタブ・閉じるボタン（`×`）・新規タブ追加ボタン（`＋`）を横スクロール対応で描画。
 - **左端縦ツールバー**：
   - `draw_left_toolbar(app: &mut Is2dApp, ctx: &egui::Context)` — 幅 `44px` の左端縦ツールバーパネルを描画。
   - `add_left_selectable_icon(ui: &mut egui::Ui, btn_size: Vec2, selected: bool, icon: &str, tooltip: &str) -> bool` — ツールバー用の正方形アイコンボタンを描画するヘルパー。
@@ -150,6 +159,42 @@
 
 ---
 
+## 2.5 [`project_io.rs`](./project_io.rs) — 複数ドキュメントタブ管理・プロジェクト保存/読み込み（`.is2d` JSON）＆ OS標準ファイルダイアログ連携
+
+### 複数ドキュメントタブ構造体・関数
+- **`enum OpenProjectOutcome`** — `open_project_in_tab` の実行結果区分（`Loaded` / `SwitchedToExistingTab` / `AlreadyActiveTab`）。
+- **`struct DocumentSlot`** — 開いている1つのドキュメントタブの独立状態スロット（`doc_id`, `untitled_number`, `file_path`, `inspect_timeline_frame`, `show_wireframe`, `viewport`, `canvas`, `timeline`, `timeline_ui`, `symbols`, `history`）。`display_title` で未保存変更があるタブには末尾に `" *"` を付与したタイトルを返す。
+- **`struct DocumentTabManager`** — 複数ドキュメントタブ管理構造体（`tabs: Vec<DocumentSlot>`, `active_index: usize`, `next_untitled_number`, `next_doc_id`, `clipboard_source_doc_id`, `clipboard_source_symbol_id`, `clipboard_source_symbols_revision`, `clipboard_symbols: Vec<Arc<SymbolDef>>`, `clipboard_imported_map: HashMap<(u64, u64), u64>`, `last_window_title: String`）。現在アクティブなタブの状態は `Is2dApp` 直下のフィールドへ `std::mem::take` で展開されるため、アクティブスロット内に旧タブのメモリが残留せず、同一リビジョンでの再コピー時も `Arc<SymbolDef>` が $O(1)$ で共有される。
+- `set_active_file_path(app: &mut Is2dApp, path: Option<PathBuf>)` — `app.ui.current_file_path` と `app.tabs.tabs[active_index].file_path` を単一の真の情報源として一括同期。
+- `pack_active_into_slot(app: &mut Is2dApp)` / `unpack_slot_into_active(app: &mut Is2dApp, index: usize)` / `is_active_tab_pristine_empty(app: &Is2dApp) -> bool` / `paths_refer_to_same_file(a: &Path, b: &Path) -> bool` — アクティブドキュメント状態とタブスロット間のゼロコピー移し替え（`std::mem::take`）、初期白紙状態の判定、および正規化パス・ファイルIDによる同一ファイル判定ヘルパー。
+- `surrender_focused_widget(ctx: &egui::Context)` — タブ切り替え・新規作成・ファイル読込・タブ閉じの前に `egui` のフォーカス中ウィジェットからフォーカスを解放。
+- `is_tab_dirty(app: &Is2dApp, index: usize) -> bool` / `confirm_unsaved_tab_before_close(app: &mut Is2dApp, tab_index: usize, ctx: &egui::Context) -> bool` / `handle_viewport_close_request(app: &mut Is2dApp, ctx: &egui::Context)` — タブ閉じやウィンドウクローズ時に未保存変更（`*`）がある場合の保存・破棄・キャンセル確認を行う（非アクティブタブの保存・キャンセル時は常に元のアクティブタブへ復帰し、後半タブの保存により先行タブがデタッチされて新たに Dirty 化したケースも漏れなく再チェック）。
+- `switch_to_tab(app: &mut Is2dApp, target_index: usize, ctx: Option<&egui::Context>) -> bool` / `close_tab(app: &mut Is2dApp, close_index: usize, ctx: Option<&egui::Context>)` / `close_active_tab(app: &mut Is2dApp, ctx: Option<&egui::Context>)` — タブ切り替えおよびタブ閉じ処理（最後の1タブを閉じた場合は連番をリセットして `無題-1` に初期化）。
+- `capture_clipboard_symbols(app: &mut Is2dApp)` / `remap_timeline_group_ids(tl: &mut Timeline, symbols: &mut SymbolManager)` / `can_paste_clipboard_symbol(app: &Is2dApp, src_sym_id: u64) -> bool` / `would_clipboard_paste_all_cycle(app: &Is2dApp) -> bool` / `resolve_clipboard_for_paste(app: &mut Is2dApp) -> (Vec<FillShape>, bool)` — 別タブ間でシンボルインスタンスをコピー＆ペーストした際、`Cmd+C` 時点の不変スナップショットを破壊せず、循環参照チェック・到達可能シンボルの自動移植（同名シンボルの重複回避リネーム・内部タイムラインの `group_path` / `instance_gid` 新規再採番リマップ・Undo 後の再移植・元タブ復帰時および元タブ削除後の `clipboard_imported_map` 再利用による重複防止を含む）を行ってペースト用の図形列を返す。
+
+### 定数・シリアライズ専用データ構造（DTO）
+- **`PROJECT_FORMAT_VERSION: u32`** (`1`) / **`PROJECT_FILE_EXTENSION: &str`** (`"is2d"`) / **`MAX_TIMELINE_FRAMES: usize`** (`100_000`) / **`MAX_PROJECT_FILE_BYTES: u64`** (`100 * 1024 * 1024`) / **`MAX_LAYERS_PER_TIMELINE: usize`** (`1_000`) / **`MAX_CONTOUR_SEGMENTS: usize`** (`100_000`) — プロジェクトファイルのフォーマットバージョン番号・標準拡張子・タイムライン最大許容フレーム数・最大ファイルサイズ（100MB）・最大レイヤー数・輪郭あたり最大ベジェセグメント数。
+- **`enum SavedTweenRotate`** / **`enum SavedSymbolLoopMode`** — `TweenRotate` および `SymbolLoopMode` と1対1で相互変換する `Serialize` / `Deserialize` 対応列挙型。
+- **`struct SavedSymbolInstanceBinding`** / **`struct SavedSymbolInstance`** — シンボルインスタンスのアフィン変換行列（`[f64; 6]`）・ローカルピボット（`[f64; 2]`）・再生モード・親グループスコープ・挿入順序を保持する保存用構造体。
+- **`struct SavedContour`** / **`struct SavedFillShape`** — 2次ベジェ輪郭（`Vec<[[f64; 2]; 3]>`）と図形属性（色 `[u8; 4]`、外周・穴輪郭、所属レイヤーID、グループパス）を一時メッシュキャッシュ抜きで保持する保存用構造体（復元時に最大セグメント数上限と外周・穴のワインディング方向・微小退化輪郭を正規化）。
+- **`struct SavedKeyframe`** / **`struct SavedLayer`** / **`struct SavedTimeline`** / **`struct SavedSymbolDef`** — タイムライン・レイヤー・キーフレームおよびシンボルライブラリ定義の保存用構造体（読み込み時に重複レイヤーID再採番・セル内の重複 `instance_gid` 排除・単一シンボル条件に基づく `tween` フラグ正規化・フレーム数・FPS `1..=60` クランプ・先頭0フレーム目のキーフレーム存在不変条件を検証・補正）。
+- **`struct ProjectDocument`** — `.is2d` ファイルのルート構造体（`version`, `stage_size`, `timeline`, `library`, `next_symbol_id`, `next_group_id`）。
+  - `from_app(app: &Is2dApp) -> Self` — ルートシーンのタイムラインとシンボルライブラリから保存用ドキュメントを構築。
+  - `apply_to_app(self, app: &mut Is2dApp)` — 読み込んだドキュメントを `Is2dApp` へ適用し、`id == 0` または重複するシンボルIDの一意再採番＋参照先 `symbol_id` リマップ・孤児インスタンス除去・シンボル循環参照除去・`tween` 単一シンボル条件の再検証・ステージサイズ（`100..=3840` × `100..=2160`）クランプ・ID採番カウンタ（`next_symbol_id` / `next_group_id` / `next_layer_id`）の整合性保証・履歴初期化・作業キャンバス展開を実行。
+
+### ファイル入出力＆ダイアログ関数（`project_io.rs` 内）
+- `update_window_title(app: &mut Is2dApp, ctx: &egui::Context)` — アクティブタブのファイル名・無題番号・Dirty状態（`*`）に応じてウィンドウタイトルバーを `"is2d - <タブ名>"` に更新。
+- `prepare_active_tab_for_switch_or_save(app: &mut Is2dApp, flush_raw_merge: bool)` — キャンバス上の選択状態やカスタムピボットを解除せずに、再生停止・進行中ドラッグおよびタイムラインドラッグ・パン状態の中断・連続編集フラグのリセット・（`flush_raw_merge == true` の保存時のみ）未マージ生シェイプの結合/切り抜き確定・作業キャンバスのセル同期・多段シンボルインプレイス編集スタックのライブラリ同期を実行。
+- `save_project_to_path(app: &mut Is2dApp, path: &Path) -> Result<(), String>` — 編集状態を非破壊同期した上で JSON 文字列へシリアライズし、同一ディレクトリのPID付き一時ファイルへの書き出し＋`File::sync_all()`＋`std::fs::rename` によるアトミック保存を実行（別タブが同一ファイルを開いていた場合は重複防止のためデタッチし、保存済み世代IDを更新）。
+- `read_project_document(path: &Path) -> Result<ProjectDocument, String>` — ファイルサイズ上限（`MAX_PROJECT_FILE_BYTES`）とフォーマットバージョンを検証した上で `.is2d` JSON ファイルをデシリアライズ。
+- `open_project_in_tab(app: &mut Is2dApp, path: &Path, ctx: Option<&egui::Context>) -> Result<OpenProjectOutcome, String>` — 指定パスの `.is2d` ファイルを検証・パースし、既存タブへの切り替え・空の無題タブへの直接適用（および無題タブ連番リセット）・またはアクティブタブの右隣への新規タブ追加を行って復元。
+- `new_project(app: &mut Is2dApp, ctx: &egui::Context)` — アクティブタブの右隣に新しい白紙ドキュメントタブを追加して切り替え。
+- `open_project_dialog(app: &mut Is2dApp, ctx: &egui::Context)` — `rfd::FileDialog` で `.is2d` ファイル選択ダイアログを表示し、`OpenProjectOutcome` に応じたトースト通知を表示。
+- `save_project(app: &mut Is2dApp, ctx: &egui::Context)` — `current_file_path` があれば即座に上書き保存し、未保存（`None`）なら `save_project_as_dialog` を呼び出す。
+- `save_project_as_dialog(app: &mut Is2dApp, ctx: &egui::Context)` — `rfd::FileDialog` で保存ダイアログを表示し、拡張子 `.is2d` を補完して保存・タイトル更新を行う。
+
+---
+
 ## 3. [`canvas_tool.rs`](./canvas_tool.rs) — ツール定義・ビューポート・作業キャンバス状態・タイムライン同期・キャンバス合成描画
 
 ### 列挙型・状態型
@@ -160,10 +205,10 @@
   - `tooltip(self) -> &'static str` — ショートカット付きのツールチップ文字列を返す。
   - `shortcut_key(self) -> egui::Key` — 対応するショートカットキー（`V`, `Q`, `B`, `E`, `K`, `I`）。
   - `from_shortcut_input(i: &egui::InputState) -> Option<Self>` — 押されたキーから対応する `Tool` を返す。
-- **`struct MoveSelectionDrag`** — 選択ツール（`V`）と自由変形ツール（`Q`）で共通化された選択移動ドラッグ状態（`start_pos`, `last_pos`, `alt_duplicated`, `undo_snapshot`）。
-- **`struct MarqueeDrag`** — 選択ツール（`V`）と自由変形ツール（`Q`）で共通化された矩形マーキー選択ドラッグ状態（`start_pos`, `current_pos`）。
+- **`struct MoveSelectionDrag`** — 選択ツール（`V`）と自由変形ツール（`Q`）で共通化された選択移動ドラッグ状態（`last_pos`, `total_delta`, `undo_snapshot`）。
+- **`struct MarqueeDrag`** — 選択ツール（`V`）と自由変形ツール（`Q`）で共通化された矩形マーキー選択ドラッグ状態（`start_pos`, `current_pos`, `additive`）。
 - **`enum ActiveCanvasDrag`** — キャンバス上の全ドラッグ操作を統合した排他的状態マシン（`None`, `PaintStroke { stroke, committed_mesh, tail_outline, tail_mesh, tail_start_idx }`, `Select(SelectDragState)`, `Transform(TransformDragState)`）。
-- **`struct ViewportState`** — キャンバスのカメラ（`zoom`, `pan`, `pan_last_screen_pos`）およびステージ枠設定（`stage_size`, `clip_outside_stage`, `last_canvas_rect`）を保持する構造体。座標変換・ズーム・パン・ステージ枠描画・ハードウェアシザークリップの固有メソッド（`world_to_screen`, `screen_to_world`, `zoom_around_screen_pos`, `reset_view`, `fit_stage_to_window`, `stage_center_world`, `stage_world_rect`, `world_rect_to_screen`, `stage_screen_rect`, `visible_world_rect`, `draw_stage_background`, `artwork_painter`, `draw_stage_foreground_overlay`, `handle_navigation`）を自己完結で実装（`clip_outside_stage` 有効時は `Painter::with_clip_rect` によりステージ矩形へ直接クリッピングし、選択枠や変形ハンドルは非クリップの `painter` 上に維持）。
+- **`struct ViewportState`** — キャンバスのカメラ（`zoom`, `pan`, `pan_last_screen_pos`）およびステージ枠設定（`stage_size`, `clip_outside_stage`, `last_canvas_rect`, `editing_stage_size`）を保持する構造体。座標変換・ズーム・パン・ステージ枠描画・ハードウェアシザークリップの固有メソッド（`world_to_screen`, `screen_to_world`, `zoom_around_screen_pos`, `reset_view`, `fit_stage_to_window`, `stage_center_world`, `stage_world_rect`, `world_rect_to_screen`, `stage_screen_rect`, `visible_world_rect`, `draw_stage_background`, `artwork_painter`, `draw_stage_foreground_overlay`, `handle_navigation`）を自己完結で実装（`clip_outside_stage` 有効時は `Painter::with_clip_rect` によりステージ矩形へ直接クリッピングし、選択枠や変形ハンドルは非クリップの `painter` 上に維持）。
 - **`struct CanvasState`** — 作業キャンバスの展開図形（`shapes`：空白フレームシンボルインスタンスのゼロ面積マーカーを含む統合表現）・非公開カプセル化された不変条件フィールド（`loaded_signatures`, `unsliced_canvas`）・排他ドラッグ状態（`drag`）・選択状態（`selected_shapes`, `selection_modified`, `hover_target`）・グループ編集パス（`editing_group_path`）・クリップボード（`clipboard`, `paste_count`）・自由変形状態（`transform_pivot`, `transform_hover`）を保持する構造体。全モジュールに分散していた `impl CanvasState` を本ファイル1箇所に集約し、1行委譲ラッパーを排してキャンバス固有の選択・`shape_id` ベース選択追従・ピボット取得・分割借用対応アフィン変換・署名検証・シンボルインスタンス走査・ドラッグロールバック・状態遷移不変条件メソッド（`loaded_signatures`, `has_unsliced_snapshot`, `take_unsliced_snapshot`, `restore_unsliced_snapshot`, `clear_unsliced_snapshot`, `selected_shape_mask`, `selected_shape_ids`, `restore_selection_by_shape_ids`, `take_or_clone_unsliced_snapshot`, `snapshot_for_drag`, `restore_drag_snapshot`, `scope_insert_index`, `get_contour_segment`, `topmost_shape_at`, `expand_to_group_unit`, `selection_has_group`, `selected_shapes_snapshot`, `selection_bounding_box`, `translate_selected`, `transform_selected`, `transform_selected_from_origins`, `sanitize_editing_scope`, `record_loaded_signatures`, `reset_selection_state`, `replace_loaded_shapes`, `select_shapes_in_layers`, `is_all_shapes_unchanged`, `extract_selected_relative_to_scope`, `select_symbol_instance_by_gid`, `selected_single_symbol_binding`, `update_symbol_instance_binding`, `rollback_shape_drag`, `sort_shapes_by_layer_order`, `active_transform_pivot`, `has_custom_transform_pivot`）を自己完結で実装。
 
 ### モジュール関数（`canvas_tool.rs` 内）
@@ -184,8 +229,8 @@
   - `toggle_select_sub_mode(app: &mut Is2dApp, target_mode: SelectSubMode)` — 選択ツールへ切り替えつつ、アンカー追加（`+`）・削除（`-`）サブモードをトグル切り替え。
 - **カスタムカーソル振り分け＆キャンバス合成描画**：
   - `draw_tool_cursor_and_feedback(app: &Is2dApp, ctx: &egui::Context, painter: &egui::Painter, pos: Pos2)` — 現在のツールに応じたカーソルオーバーレイを各ツールモジュール（`tool_paint`, `tool_select`, `tool_transform`）へ振り分け。
-  - `draw_canvas_contents(app: &mut Is2dApp, painter: &egui::Painter)` / `draw_editable_layer_shapes(app: &mut Is2dApp, painter: &egui::Painter, range: Range<usize>, view_world_rect: Rect, (is_sel, has_sel): (&[bool], bool), selected_group_boxes: &mut Vec<(u64, Rect, Option<Point>)>)` / `draw_selected_group_and_symbol_boxes(app: &Is2dApp, painter: &egui::Painter, selected_group_boxes: &[(u64, Rect, Option<Point>)])` — シンボル編集背景は `backdrop_cel.cached_screen_mesh`（またはシンボル展開）、再生中・ロック中レイヤーは `resolved_cel_screen_mesh`、編集可能レイヤーは図形メッシュ・選択網点・ワイヤーフレーム・グループ緑枠／シンボル水色枠＋基準十字マーク・自由変形枠を責務別に重ねて描画。
-  - `draw_onion_skins(app: &Is2dApp, painter: &egui::Painter)` / `draw_onion_skin_frame(app: &Is2dApp, painter: &egui::Painter, frame: usize, tint_rgb: [u8; 3], alpha: u8)` — 前後フレームのオニオンスキン（過去フレーム＝青系、未来フレーム＝緑系、距離に応じた段階的アルファ減衰）を描画。
+  - `draw_canvas_contents(app: &mut Is2dApp, painter: &egui::Painter)` / `draw_editable_layer_shapes(app: &mut Is2dApp, painter: &egui::Painter, shape_range: Range<usize>, (is_sel, has_sel): (&[bool], bool), selected_group_boxes: &mut Vec<(u64, Rect, Option<Point>)>)` / `draw_selected_group_and_symbol_boxes(app: &Is2dApp, painter: &egui::Painter, selected_group_boxes: &[(u64, Rect, Option<Point>)])` — シンボル編集背景は `backdrop_cel.cached_screen_mesh`（またはシンボル展開）、再生中・ロック中レイヤーは `resolved_cel_screen_mesh`、編集可能レイヤーは図形メッシュ・選択網点・ワイヤーフレーム・グループ緑枠／シンボル水色枠＋基準十字マーク・自由変形枠を責務別に重ねて描画。
+  - `draw_onion_skins(app: &Is2dApp, painter: &egui::Painter)` / `draw_onion_skin_frame(app: &Is2dApp, painter: &egui::Painter, frame: usize, (tint_rgb, alpha): ([u8; 3], u8))` — 前後フレームのオニオンスキン（過去フレーム＝青系、未来フレーム＝緑系、距離に応じた段階的アルファ減衰）を描画。
   - `draw_active_marquee_box(app: &Is2dApp, painter: &egui::Painter)` — 選択ツール／自由変形ツールでドラッグ中の矩形選択ボックスを描画。
   - `draw_registration_cross(painter: &egui::Painter, center: Pos2, arm: f32, with_white_halo: bool)` — シンボル基準点（`+` 十字マーク）を描画する共通フリー関数。
 
@@ -213,20 +258,20 @@
 - **`enum SelectSubMode`** — 選択ツールのサブモード（`Reshape`, `AddAnchor`, `DeleteAnchor`）。
 - **`enum HoverTarget`** — 選択ツールのホバー対象（`None`, `Vertex { shape_idx, contour_idx, seg_idx }`, `Edge { shape_idx, contour_idx, seg_idx, t, closest_pos }`, `Fill { shape_idx }`）。
   - `shape_idx(&self) -> Option<usize>` — ホバー中の図形インデックスを返す。
-- **`enum SelectDragState`** — 選択ツールのアクティブドラッグ状態（`MoveShape(MoveSelectionDrag)`, `MarqueeSelect(MarqueeDrag)`, `PullEdge`, `MoveVertex`）。
+- **`enum SelectDragState`** — 選択ツールのアクティブドラッグ状態（`MoveShape(MoveSelectionDrag)`, `MarqueeSelect(MarqueeDrag)`, `PullEdge { shape_idx, contour_idx, seg_idx, grab_t, start_pos, orig_seg, undo_snapshot }`, `MoveVertex { shape_idx, contour_idx, seg_idx, orig_vertex, orig_prev_ctrl, orig_curr_ctrl, undo_snapshot }`）。
 
 ### ヒット判定・頂点スナップ・輪郭変形フリー関数（`tool_select.rs` 内）
 - `quad_control_bbox_contains(seg: QuadBez, pt: Point, tol: f64) -> bool` / `point_within_shape_contours(shape: &FillShape, pt: Point, hit_tol: f64) -> bool` — 2次ベジェ制御点AABBおよび輪郭線周辺での高速ヒット判定補助関数。
 - `collect_marquee_hit_groups(canvas: &CanvasState, marquee_rect: Rect, marquee_shape: &FillShape) -> Vec<u64>` — マーキー矩形と交差するグループ／シンボルインスタンスのID一覧を収集。
-- `compute_hover_target(canvas: &CanvasState, pt: Point, zoom: f32) -> HoverTarget` — 選択ツールでマウス直下にヒットしている要素（頂点・エッジ・塗り）を優先順位に従って判定。
-- `find_snap_vertex(canvas: &CanvasState, pt: Point, zoom: f32, exclude: Option<(usize, usize, usize)>) -> Option<Point>` — 頂点ドラッグ時に近傍の他頂点へ吸着するスナップ先座標を探索。
+- `compute_hover_target(canvas: &CanvasState, pt: Point, zoom: f32, sub_mode: SelectSubMode) -> HoverTarget` — 選択ツールでマウス直下にヒットしている要素（頂点・エッジ・塗り）をサブモード・優先順位に従って判定。
+- `find_snap_vertex(canvas: &CanvasState, pt: Point, zoom: f32, exclude_shape: usize, exclude_contour: usize, exclude_seg: usize) -> Option<Point>` — 頂点ドラッグ時に近傍の他頂点へ吸着するスナップ先座標を探索。
 - `punch_through_opposite_edge(shape: &FillShape, contour_idx: usize, ignore_segs: &[usize], (anchor_a, anchor_b): (Point, Point), (start_pt, drag_pt): (Point, Point)) -> Point` — エッジを対向側の輪郭線ギリギリまたは向こう側へドラッグした際、確実に2図形へ分割されるよう微小に切り込みを貫通させる補正処理。
 - `set_pulled_edge(shape: &mut FillShape, (contour_idx, seg_idx): (usize, usize), grab_t: f64, orig_seg: QuadBez, target_pt: Point)` / `apply_pull_edge_to_shape(shape: &mut FillShape, (contour_idx, seg_idx): (usize, usize), grab_t: f64, orig_seg: QuadBez, drag_pt: Point)` — 2次ベジェ曲線の式 `B(t) = (1-t)^2 P0 + 2t(1-t) P1 + t^2 P2` から制御点 `P1` を逆算し、掴んだ点 `grab_t` が目標座標を通るように変形（リアルタイムプレビュー用および貫通補正込み確定用）。
 - `set_moved_vertex(shape: &mut FillShape, (contour_idx, seg_idx): (usize, usize), orig_vertex: Point, orig_ctrls: (Point, Point), target_pt: Point)` / `apply_move_vertex_to_shape(shape: &mut FillShape, (contour_idx, seg_idx): (usize, usize), orig_vertex: Point, orig_ctrls: (Point, Point), drag_pt: Point)` — 掴んだ頂点（アンカーポイント）を移動し、前後のセグメントの制御点を自然な比率で追従させる（リアルタイムプレビュー用および貫通補正込み確定用）。
 
 ### モジュール関数（`tool_select.rs` 内）
 - **選択・移動・マーキースライス・削除**：
-  - `clear_selection(app: &mut Is2dApp)` — 選択状態を解除。マーキースライス後に未編集なら元の図形を無劣化復元し、移動・色変更された生シェイプがあれば同じレイヤー・同じスコープの生シェイプに対して Merge Drawing（結合・切り抜き）を確定。
+  - `flush_modified_raw_selection_merge(app: &mut Is2dApp)` / `clear_selection(app: &mut Is2dApp)` — 選択状態を解除。マーキースライス後に未編集なら元の図形を無劣化復元し、移動・色変更された生シェイプがあれば同じレイヤー・同じスコープの生シェイプに対して Merge Drawing（結合・切り抜き）を確定。
   - `toggle_shape_selection(app: &mut Is2dApp, shape_idx: usize)` — `Shift` クリックで図形（またはグループ塊）の選択状態をトグル切り替え。
   - `select_single_shape_at(app: &mut Is2dApp, pt: Point) -> bool` — 単一クリックで指定座標の図形（またはグループ塊）を選択し、タイムラインのレイヤー選択も同期。
   - `nudge_selected_shapes(app: &mut Is2dApp, delta: Vec2) -> bool` — 選択中の全図形を十字キー等で `delta` だけ移動し、Undo 履歴記録・最前面整列・タイムライン同期を実行。
@@ -266,7 +311,7 @@
   - `ScaleHandle::ALL: [ScaleHandle; 8]`
   - `position(self, bbox: Rect) -> Point` / `opposite(self) -> Self` / `opposite_position(self, bbox: Rect) -> Point` / `affects_x(self) -> bool` / `affects_y(self) -> bool` / `is_corner(self) -> bool`
 - **`enum TransformHoverTarget`** — 自由変形ツールのホバー対象（`None`, `Pivot`, `Scale(ScaleHandle)`, `Rotate`, `Move`）。
-- **`enum TransformDragState`** — 自由変形ツールのアクティブドラッグ状態（`MovePivot`, `Move(MoveSelectionDrag)`, `Scale`, `Rotate`, `MarqueeSelect(MarqueeDrag)`）。
+- **`enum TransformDragState`** — 自由変形ツールのアクティブドラッグ状態（`MovePivot { undo_snapshot }`, `Move(MoveSelectionDrag)`, `Scale { handle, anchor, start_bbox, orig_shapes, orig_pivot, undo_snapshot }`, `Rotate { pivot, start_angle, orig_shapes, undo_snapshot }`, `MarqueeSelect(MarqueeDrag)`）。
 
 ### モジュール関数（`tool_transform.rs` 内）
 - **自由変形ギズモ・ホバー・カーソル・アフィン変形**：
@@ -312,11 +357,11 @@
 - **`struct Layer`** — タイムラインの1レイヤー（`id: u64`, `name: String`, `visible: bool`, `locked: bool`, `keyframes: Vec<Keyframe>`, `frame_count: usize`）。全モジュールに分散していた `impl Layer` を本ファイル1箇所に集約：
   - `new_with_id_and_frames(id: u64, name: impl Into<String>, frame_count: usize) -> Self` / `new_with_id(id: u64, name: impl Into<String>) -> Self`
   - `keyframe_index_at(&self, frame: usize) -> Option<usize>` — 指定フレームが属するキーフレームのインデックスを返す。
-  - `span_end_for_keyframe(&self, kf_idx: usize) -> usize` — 指定キーフレームの保持スパン終了フレーム（排他的上限）を返す。
+  - `span_end_for_keyframe(&self, kf_idx: usize) -> usize` — 指定キーフレームの保持スパン終了フレーム（inclusive 閉区間上限）を返す。
   - `cel_at(&self, frame: usize) -> Option<&Cel>` / `cel_at_mut(&mut self, frame: usize) -> Option<&mut Cel>` — 指定フレームで有効な `Cel` への参照を返す。
   - `insert_keyframe(&mut self, frame: usize, clone_prev: bool) -> usize` / `delete_keyframe_at(&mut self, frame: usize) -> bool` / `insert_frame_at(&mut self, frame: usize)` / `remove_frame_at(&mut self, frame: usize) -> bool`
-  - `extract_keyframes_in_range(&self, min_f: usize, max_f: usize) -> Vec<(usize, Cel, bool, TweenRotate)>` / `remove_keyframes_in_range(&mut self, min_f: usize, max_f: usize)` / `place_keyframes_at(&mut self, base_frame: usize, extracted: Vec<(usize, Cel, bool, TweenRotate)>, min_required_end: usize)`
-  - `detach_symbol_id(&mut self, symbol_id: u64, library: &[SymbolDef])` / `tween_state_at_keyframe(&self, kf_idx: usize) -> TweenState` / `interpolated_tween_binding_at(&self, frame: usize) -> Option<(SymbolInstanceBinding, usize)>` / `evaluate_shapes_at(&self, (frame, child_eval_frame): (usize, usize), out_layer_id: u64, ctx: SymbolEvalCtx<'_>) -> Vec<FillShape>`
+  - `extract_keyframes_in_range(&self, min_frame: usize, max_frame: usize) -> Vec<Keyframe>` / `remove_keyframes_in_range(&mut self, min_frame: usize, max_frame: usize)` / `place_keyframes_at(&mut self, dst_min_frame: usize, dst_max_frame: usize, kfs: Vec<Keyframe>)`
+  - `detach_symbol_id(&mut self, symbol_id: u64, library: &[SymbolDef])` / `tween_state_at_keyframe(&self, kf_idx: usize) -> TweenState` / `interpolated_tween_binding_at(&self, frame: usize) -> Option<(SymbolInstanceBinding, SymbolInstanceBinding)>` / `evaluate_shapes_at(&self, (frame, child_eval_frame): (usize, usize), out_layer_id: u64, ctx: SymbolEvalCtx<'_>) -> Vec<FillShape>`
 - **`struct LoadedShapeSig`** — キャンバス展開時の図形署名（`#[derive(Clone, Debug, PartialEq)]`：`shape_id`, `layer_id`, `mesh_revision`, `color`, `group_path: Vec<u64>`, `symbol_instance`）。ハッシュ衝突リスクのない完全比較を行い、未編集のトゥイーン補間図形やシンボル展開図形で元のキーフレームを上書き破壊しないためのレイヤー別変更検知に使用。
   - `from_shape(s: &FillShape) -> Self` / `matches(&self, s: &FillShape) -> bool` / `matches_with_layer(&self, s: &FillShape) -> bool`
 - **`struct Timeline`** — タイムライン全体のドキュメント状態（`layers`, `next_layer_number`, `next_layer_id`, `active_layer`, `current_frame`, `total_frames`, `fps`, `cell_selection`）。全モジュールに分散していた `impl Timeline` を本ファイル1箇所に集約：
@@ -330,7 +375,7 @@
   - `strip_transient_caches(&mut self)` / `strip_transient_caches_with_prev(&mut self, prev: Option<&Timeline>)` — 全レイヤー・全キーフレームの一時メッシュキャッシュを破棄（`prev` 指定時は `cel.revision == p_kf.cel.revision` の未変更キーフレームについて既にキャッシュ除去済みの `Arc<Vec<FillShape>>` / `Arc<Vec<SymbolInstance>>` を $O(1)$ で引き継ぐ）。
   - `write_shapes_to_editable_cels(&mut self, shapes: &[FillShape], library: &[SymbolDef], loaded_signatures: &[LoadedShapeSig]) -> bool` — 作業キャンバス `shapes` を各レイヤーの `layer_id` ごとに振り分け、実際に編集されたレイヤーのみセルへ書き戻す。
   - `insert_keyframe_on_targets` / `can_delete_keyframe_on_targets` / `delete_keyframe_on_targets` / `extend_frame_on_targets` / `can_remove_frame_on_targets` / `remove_frame_on_targets` / `resolve_frame_move_bounds` / `move_or_copy_frames` / `add_layer_above_active` / `delete_active_layer` / `reorder_layer`
-  - `can_toggle_tween_at_current_frame(&self) -> (bool, bool)` / `active_tween_keyframe_info(&self) -> Option<(usize, TweenRotate, bool)>` / `evaluate_layer_shapes_at(&self, layer_idx: usize, frame: usize, library: &[SymbolDef]) -> Vec<FillShape>` / `build_layer_resolved_world_batch_mesh(&self, layer_idx: usize, frame: usize, library: &[SymbolDef]) -> Option<egui::Mesh>` / `resolved_cel_screen_mesh(&self, ...)` / `resolved_cel_onion_mesh(&self, ...)`
+  - `can_toggle_tween_at_current_frame(&self) -> (bool, bool)` / `active_tween_keyframe_info(&self) -> Option<(usize, TweenRotate, bool)>` / `evaluate_layer_shapes_at(&self, layer_idx: usize, frame: usize, library: &[SymbolDef]) -> Vec<FillShape>` / `resolved_cel_screen_mesh(&self, ...)` / `resolved_cel_onion_mesh(&self, ...)`
 
 ---
 
@@ -373,21 +418,22 @@
   - `draw_timeline_panel(app: &mut Is2dApp, ctx: &egui::Context)` — 下部タイムラインパネル全体（コントロールバー＋X-Sheet本体）を描画。
   - `draw_timeline_control_bar(app: &mut Is2dApp, ui: &mut egui::Ui)` — 上部コントロールバーを描画（以下4つのセクション関数を呼び出し）。
   - `draw_control_bar_layer_buttons(app: &mut Is2dApp, ui: &mut egui::Ui)` — レイヤー追加（`+`）・削除（`🗑`）・上へ移動（`▲`）・下へ移動（`▼`）ボタンを描画。
-  - `draw_control_bar_transport_buttons(app: &mut Is2dApp, ui: &mut egui::Ui)` — 先頭フレーム・前コマ・再生/一時停止・次コマ・最終フレーム・ループ切替・現在フレーム番号・FPS `DragValue` を描画。
-  - `draw_control_bar_keyframe_buttons(app: &mut Is2dApp, ui: &mut egui::Ui)` — `F6 KF`（複製キーフレーム）、`F7 空KF`（空白キーフレーム）、`+F5`（延長）、`-F5`（短縮）、`KF削除`、`T Tween`（クラシックトゥイーン切替）ボタンを描画。
-  - `draw_control_bar_onion_controls(app: &mut Is2dApp, ui: &mut egui::Ui)` — オニオンスキン有効トグルと前後参照フレーム数（`前` / `後` `DragValue`）を描画。
+  - `draw_control_bar_transport_buttons(app: &mut Is2dApp, ui: &mut egui::Ui)` — 先頭フレーム・前コマ・再生/一時停止・次コマ・最終フレーム・ループ切替・現在フレーム番号・総フレーム数 `DragValue`・FPS `DragValue` を描画。
+  - `draw_control_bar_keyframe_buttons(app: &mut Is2dApp, ui: &mut egui::Ui)` — `＋F6 複製KF`（複製キーフレーム）、`＋F7 空白KF`（空白キーフレーム）、`＋延長 (F5)`、`－短縮`、`× KF削除`、`⇄ トゥイーン (T)`（クラシックトゥイーン切替）ボタンを描画。
+  - `draw_control_bar_onion_controls(app: &mut Is2dApp, ui: &mut egui::Ui)` — オニオンスキン有効トグル（`オニオンスキン (O)`）と前後参照フレーム数（`前` / `後` `DragValue`）を描画。
 - **スクロール＆ポインタ（マウス・ドラッグ）操作**：
-  - `handle_timeline_scroll(app: &mut Is2dApp, ctx: &egui::Context, body_rect: egui::Rect, grid_w: f32, grid_h: f32, max_cols: usize, total_layers: usize)` — ホイール・トラックパッドによる水平/垂直スクロール制御。
-  - `handle_timeline_pointer_input(app: &mut Is2dApp, ctx: &egui::Context, response: &egui::Response, layout: &TimelineLayout)` — タイムライン上のポインタ入力を統合処理（以下の開始・ドラッグ更新・カーソル更新関数へ振り分け）。
-  - `update_timeline_cursor_icon(app: &Is2dApp, ctx: &egui::Context)` — タイムラインのドラッグ状態（フレーム移動・レイヤー並べ替え）に応じたOSカーソル更新（状態遷移ロジックからUIカーソル副作用を分離）。
-  - `handle_timeline_click_start(app: &mut Is2dApp, pos: Pos2, shift_held: bool, layout: &TimelineLayout)` — ルーラークリック、フレームセルクリック（`Shift` 範囲選択・選択済みセルの再ドラッグによる移動開始）、レイヤー行クリック（👁表示切替・🔒ロック切替・レイヤーD&D開始）を処理。
-  - `update_timeline_grid_drag(app: &mut Is2dApp, pointer_pos: Option<Pos2>, primary_down: bool, primary_released: bool, alt_held: bool, layout: &TimelineLayout)` — ルーラースクラブ、セル矩形範囲選択、フレーム移動／`Alt` 複製ドラッグの状態更新と確定。
-  - `update_timeline_layer_drag(app: &mut Is2dApp, pointer_pos: Option<Pos2>, primary_released: bool, layout: &TimelineLayout)` — レイヤー重ね順ドラッグ＆ドロップのドロップ確定。
-- **X-Sheet グリッド・ルーラー・レイヤー一覧描画**：
-  - `draw_timeline_frame_grid(app: &Is2dApp, painter: &egui::Painter, layout: &TimelineLayout, max_cols: usize, alt_held: bool, pointer_pos: Option<Pos2>)` / `draw_timeline_layer_row(app: &Is2dApp, painter: &egui::Painter, layout: &TimelineLayout, max_cols: usize, ui_row: usize, layer_idx: usize)` / `draw_move_frames_ghost(app: &Is2dApp, painter: &egui::Painter, layout: &TimelineLayout, alt_held: bool, pointer_pos: Option<Pos2>)` — フレームグリッド背景、5フレームごとの目盛り列、各レイヤーのキーフレーム行、選択セルの青ハイライト、フレーム移動／複製のゴースト枠・バッジ、赤い再生ヘッド縦線を描画。
+  - `handle_timeline_scroll(app: &mut Is2dApp, ctx: &egui::Context, response: &egui::Response, layout: &TimelineLayout, max_cols: usize, total_layers: usize)` — ホイール・トラックパッドによる水平/垂直スクロール制御。
+  - `handle_timeline_pointer_input(app: &mut Is2dApp, ctx: &egui::Context, response: &egui::Response, layout: &TimelineLayout, (alt_held, shift_held): (bool, bool), (primary_down, primary_released): (bool, bool))` — タイムライン上のポインタ入力を統合処理（以下の開始・ドラッグ更新・カーソル更新関数へ振り分け）。
+  - `update_timeline_cursor_icon(app: &Is2dApp, ctx: &egui::Context, pointer_pos: Option<Pos2>, alt_held: bool, layout: &TimelineLayout)` — タイムラインのドラッグ状態（フレーム移動・レイヤー並べ替え）および選択済みセル上のホバーに応じたOSカーソル更新（状態遷移ロジックからUIカーソル副作用を分離）。
+  - `handle_timeline_click_start(app: &mut Is2dApp, pos: Pos2, shift_held: bool, num_layers: usize, layout: &TimelineLayout)` — ルーラークリック、フレームセルクリック（`Shift` 範囲選択・選択済みセルの再ドラッグによる移動開始）、レイヤー行クリック（👁表示切替・🔒ロック切替・`Shift` レイヤー範囲選択・レイヤーD&D開始）を処理。
+  - `update_timeline_grid_drag(app: &mut Is2dApp, pointer_pos: Option<Pos2>, (primary_down, primary_released, alt_held): (bool, bool, bool), num_layers: usize, layout: &TimelineLayout)` — ルーラースクラブ、セル矩形範囲選択、フレーム移動／`Alt` 複製ドラッグの状態更新と確定。
+  - `update_timeline_layer_drag(app: &mut Is2dApp, pointer_pos: Option<Pos2>, primary_released: bool, num_layers: usize, layout: &TimelineLayout)` — レイヤー重ね順ドラッグ＆ドロップのドロップ確定。
+- **X-Sheet グリッド・ルーラー・レイヤー一覧・スクロールバー描画**：
+  - `draw_timeline_frame_grid(app: &Is2dApp, painter: &egui::Painter, layout: &TimelineLayout, max_cols: usize, alt_held: bool, pointer_pos: Option<Pos2>)` / `draw_timeline_layer_row(app: &Is2dApp, painter: &egui::Painter, layout: &TimelineLayout, max_cols: usize, ui_row: usize, layer_idx: usize)` / `draw_move_frames_ghost(app: &Is2dApp, painter: &egui::Painter, layout: &TimelineLayout, alt_held: bool, pointer_pos: Option<Pos2>)` — フレームグリッド背景、5フレームごとの目盛り列、各レイヤーのキーフレーム行、選択セルの青ハイライト、フレーム移動／複製のゴースト枠・バッジ（`↔ コマを移動` / `＋ コマを複製 (Alt)`）、赤い再生ヘッド縦線を描画。
   - `draw_keyframe_span(app: &Is2dApp, painter: &egui::Painter, layout: &TimelineLayout, layer: &Layer, kf_idx: usize, kf_end: usize, row_y: f32)` / `draw_keyframe_tween_or_end_marker(painter: &egui::Painter, tween_state: TweenState, span_rect: egui::Rect, kf_len: usize, row_y: f32, text_col: Color32)` — 1つのキーフレームスパンの背景色（通常＝白/グレー、トゥイーン有効＝薄紫）、クラシックトゥイーンの実線矢印／未完横点線、先頭丸印（塗りあり＝黒丸 `●`、空＝白抜き丸 `○`）、保持スパン末尾の白抜き長方形マーカー `▯` を描画。
   - `draw_timeline_ruler(app: &Is2dApp, painter: &egui::Painter, layout: &TimelineLayout, max_cols: usize)` — 上部ルーラーのフレーム番号目盛り、オニオンスキン範囲帯、赤の再生ヘッドマーカーを描画。
   - `draw_timeline_layer_list(app: &mut Is2dApp, painter: &egui::Painter, layout: &TimelineLayout, pointer_pos: Option<Pos2>, primary_clicked: bool)` — 左側カラムの各レイヤー行（アクティブ強調、レイヤー名、👁表示アイコン、🔒ロックアイコン）を描画。
+  - `draw_timeline_scrollbars(app: &Is2dApp, painter: &egui::Painter, layout: &TimelineLayout, max_cols: usize, total_layers: usize)` — コンテンツが表示領域を超える場合に水平・垂直スクロールバーインジケータを描画。
 
 ---
 
@@ -399,21 +445,21 @@
   - `None`（トゥイーン無効）
   - `Incomplete`（トゥイーンONだが条件未達 → タイムライン上に横点線を表示）
   - `Complete { start_frame, end_frame, start_binding, end_binding, rotate_mode }`（開始・終了ともに同一シンボルの単一インスタンスのみ → タイムライン上に実線矢印を表示しTRS線形補間を実行）
-- **`type SymbolMiniPreviewCacheEntry`** / **`struct SymbolDef`** — ライブラリに登録されるシンボル定義（`id: u64`, `name: String`, `timeline: Timeline`, `revision: u64`, `mini_preview_cache: SyncCache<Option<SymbolMiniPreviewCacheEntry>>`）。内部タイムライン状態として `Timeline` 構造体を直接保持することで、`Timeline` と `SymbolDef` のフィールド重複と手動コピーを完全に排除。
+- **`type SymbolMiniPreviewCacheEntry`** / **`struct SymbolDef`** — ライブラリに登録されるシンボル定義（`id: u64`, `name: String`, `timeline: Timeline`, `revision: u64`, `mini_preview_cache: SyncCache<Option<SymbolMiniPreviewCacheEntry>>`, `dynamic_anim_cache: SyncCache<Option<(u64, u64, bool)>>`）。内部タイムライン状態として `Timeline` 構造体を直接保持することで、`Timeline` と `SymbolDef` のフィールド重複と手動コピーを完全に排除。
   - `new(id: u64, name: String, local_shapes: Vec<FillShape>) -> Self` — ローカル図形群から1レイヤー・1フレームの初期 `Timeline` を持つシンボル定義を作成。
   - `cached_mini_preview(&self, rect: egui::Rect, library_revision: u64, library: &[SymbolDef]) -> Option<(Arc<egui::Mesh>, egui::Pos2)>` — ライブラリパネルのミニプレビュー矩形 `rect` に対応するスクリーン変換済み結合 `Arc<egui::Mesh>` と基準点スクリーン座標 `Pos2` を `SyncCache` 経由で $O(1)$ で返す。
-  - `has_dynamic_animation(&self, library: &[SymbolDef], depth: usize) -> bool` — シンボル自身または入れ子の子シンボルが複数フレームや先頭空白フレームを持つかを再帰判定。
+  - `has_dynamic_animation(&self, library: &[SymbolDef], depth: usize) -> bool` — シンボル自身または入れ子の子シンボルが複数フレームや先頭空白フレームを持つかを再帰判定（`depth == 0` では `(self.revision, library.len())` をキーに `dynamic_anim_cache` で $O(1)$ メモ化）。
   - `first_non_empty_local_shapes(&self, library: &[SymbolDef]) -> Vec<FillShape>` — シンボルの全フレームを先頭から走査し、最初に図形が存在するフレームのローカル図形列を返す（1コマ目が空白のマルチフレームシンボルの配置・プレビュー用）。
   - `collect_visible_local_shapes_at(&self, frame: usize, child_eval_frame: usize, ctx: SymbolEvalCtx<'_>) -> Vec<FillShape>` — 指定した内部フレームにおける全可視レイヤーのローカル図形を収集（入れ子シンボル・内部トゥイーンも再帰評価）。
   - `resolve_internal_frame(&self, binding: SymbolInstanceBinding, kf_start_frame: usize, current_frame: usize) -> usize` — インスタンスの再生モード（`Loop` / `PlayOnce` / `SingleFrame`）と `first_frame`、および親キーフレーム先頭からの経過フレーム数から表示すべき内部フレーム番号（0始まり）を算出。
   - `evaluated_local_shapes_for_instance(&self, binding: SymbolInstanceBinding, kf_start_frame: usize, current_frame: usize, ctx: SymbolEvalCtx<'_>) -> Vec<FillShape>` — インスタンス設定に基づいて評価されたローカル図形群を返す。
   - `evaluated_local_shapes_at(&self, offset_frame: usize, library: &[SymbolDef]) -> Vec<FillShape>` — デフォルトのループ評価でローカル図形群を返す（ライブラリのミニプレビュー等で使用）。
   - `update_from_working_timeline(&mut self, working_tl: &Timeline, inv_xform: Affine, stage_to_local_cache: &mut StageToLocalCache)` — インプレイス編集中の作業タイムラインをクローンし、未変更キーフレームは `StageToLocalCache::cels` の論理リビジョン `Cel::revision` 一致により $O(1)$ でローカル `Cel` を共有復元、編集されたキーフレーム内でも未編集図形は複合キー `StageShapeCacheKey`（`(contour_id, color, holes.len(), holes_hash)`）による `StageToLocalCache::shapes` から $O(1)$ でローカル原本を無劣化復元し、新規・変形図形のみ逆アフィン変換 `inv_xform` を適用して `self.timeline` へ反映。
-  - `strip_transient_caches(&mut self)` — `self.timeline.strip_transient_caches()` および `mini_preview_cache` のクリアにより一時メッシュキャッシュを破棄。
+  - `strip_transient_caches(&mut self)` — `self.timeline.strip_transient_caches()` および `mini_preview_cache`・`dynamic_anim_cache` のクリアにより一時キャッシュを破棄。
 - **`struct SymbolEvalCtx<'a>`** — シンボル再帰評価時の設定コンテキスト（`library`, `depth`）。
 - **`type StageShapeCacheKey = (u64, [u8; 4], usize, u64)`** / **`struct StageToLocalEntry`** / **`struct StageCelToLocalEntry`** / **`struct StageToLocalCache`** — シンボルインプレイス編集時に未変更キーフレームのローカル `Cel`（`cels: HashMap<u64, StageCelToLocalEntry>`、`Cel::revision` キー）および未変形図形のローカル `FillShape`（`shapes: HashMap<StageShapeCacheKey, StageToLocalEntry>`、`(contour_id, color, holes.len(), holes_hash)` 複合キー）を生メモリアドレスに依存しない論理IDの2階層すべて $O(1)$ で無劣化逆引きするキャッシュ構造体。
 - **`struct SymbolEditSession`** — シンボルをダブルクリックしてインプレイス編集する際の親タイムライン退避セッション（`symbol_id`, `instance_gid`, `instance_xform`, `stage_to_local_cache: StageToLocalCache`, `parent_timeline`, `parent_editing_group_path`, `backdrop_cel: Cel`）。`strip_transient_caches(&mut self)` により Undo 履歴保存時に一時キャッシュを破棄。
-- **`struct SymbolManager`** — シンボルライブラリ（`library`）・選択中シンボル（`selected_library_symbol`）・連続リネーム中シンボル（`actively_renaming_symbol`）・シンボル内部編集スタック（`edit_stack`）・単調増加IDカウンタ（`next_symbol_id`, `next_group_id`）・CoW履歴共有世代番号（`revision`）を保持する構造体。ID採番・世代番号更新・シンボル登録/検索/改名・循環参照防止（DAGサイクル検査）・削除＆非破壊デタッチ・インプレイス編集同期の固有メソッド（`alloc_group_id`, `bump_revision`, `register_new_symbol`, `find_symbol`, `find_symbol_mut`, `would_create_symbol_cycle`, `can_place_symbol_in_current_context`, `rename_symbol`, `sync_after_restore`, `remove_symbol_and_detach`, `sync_active_edit`）を自己完結で実装。
+- **`struct SymbolManager`** — シンボルライブラリ（`library`）・選択中シンボル（`selected_library_symbol`）・連続リネーム中シンボル（`actively_renaming_symbol`）・シンボル内部編集スタック（`edit_stack`）・単調増加IDカウンタ（`next_symbol_id`, `next_group_id`）・CoW履歴共有世代番号（`revision`）を保持する構造体。ID採番・世代番号更新・シンボル登録/検索/改名・循環参照防止（DAGサイクル検査）・削除＆非破壊デタッチ・インプレイス編集同期の固有メソッド（`alloc_group_id`, `bump_revision`, `register_new_symbol`, `find_symbol`, `find_symbol_mut`, `would_create_symbol_cycle`, `can_place_symbol_in_current_context`, `rename_symbol`, `ensure_valid_selection`, `sync_after_restore`, `remove_symbol_and_detach`, `sync_active_edit`）を自己完結で実装。
 - **`struct ResolvedCelSig`** / **`enum ResolvedSigQuery<'a>`** — 解決済みセルおよび背景セルキャッシュの衝突ゼロ構造化署名（`cel_revision`, `start_frame`, `tween`, `tween_rotate`, `next_kf`, `referenced_symbols: Vec<(u64, u64)>`）と、既存のキャッシュ済み署名に対してヒープアロケーション・再帰走査を一切行わずに整合性を判定するクエリ型（`matches` / `compute` / `matches_layer_keyframe` / `matches_cel`）。64bitハッシュ値ではなく構造体の完全一致比較を行うことでハッシュ衝突リスクを排除し、かつ再生中・オニオンスキン描画中の毎フレーム一時 `Vec` 確保もゼロ化。
 
 ### フリー関数（`symbol.rs` 内）
@@ -434,7 +480,7 @@
 - **`TESSELLATOR: RefCell<FillTessellator>`** — `lyon` の内部作業バッファをスレッドローカルで再利用し、毎回の `FillTessellator::new()` ヒープ再確保をゼロにするキャッシュ。
 
 ### 構造体・列挙型（`vector_engine.rs` 内）
-- **`struct SyncCache<T>`** — `Arc` で共有されるデータ構造内の一時メッシュキャッシュを `Send + Sync` かつ `Clone` / `Debug` / `Default` 対応で保持するためのスレッドセーフな内部可変キャッシュラッパー（`with_mut` / `clear`）。
+- **`struct SyncCache<T>`** — `Arc` で共有されるデータ構造内の一時メッシュキャッシュを `Send + Sync` かつ `Clone` / `Debug` / `Default` 対応で保持するためのスレッドセーフな内部可変キャッシュラッパー（`new` / `lock`）。
 - **`enum SymbolLoopMode`** — グラフィックシンボルの再生モード列挙型（`Loop`, `PlayOnce`, `SingleFrame`）。
 - **`enum TweenRotate`** — クラシックトゥイーンの回転方向列挙型（`Auto`, `Clockwise`, `CounterClockwise`）。
 - **`struct SymbolInstanceBinding`** — シンボルインスタンスの幾何・再生紐付け情報（`instance_gid: u64`, `symbol_id: u64`, `xform: Affine`, `pivot: Point`, `loop_mode: SymbolLoopMode`, `first_frame: usize`）。
@@ -450,24 +496,24 @@
   - `insert_anchor_at(&mut self, seg_idx: usize, t: f64) -> bool` — De Casteljau 分割（`subsegment`）により曲線形状を保ったまま指定パラメータ `t` にアンカーポイントを挿入。
   - `delete_anchor_at(&mut self, seg_idx: usize) -> bool` — 指定アンカーポイントを削除し、前後のアンカー間を直線セグメント（中点制御点）で繋ぐ。
 - **`type ScreenMeshCacheEntry`** / **`type OnionMeshCacheEntry`** / **`type SelectionScreenMeshCacheEntry`** — スクリーン座標変換済みメッシュキャッシュ、オニオンスキン変換済みメッシュキャッシュ、および選択時ドット柄オーバーレイのスクリーン座標変換済みメッシュキャッシュのキーと `Arc<egui::Mesh>` のペア。
-- **`struct FillShape`** — 単一カラーの塗りベクター図形（`shape_id: u64`, `color: Color32`, `exterior: Contour`, `holes: Vec<Contour>`, `layer_id: u64`, `group_path: Vec<u64>`, `symbol_instance: Option<SymbolInstanceBinding>`, `mesh_revision: u64`, `bbox: Rect`, `fill_mesh: OnceLock<Arc<egui::Mesh>>`, `screen_mesh_cache: SyncCache<Option<ScreenMeshCacheEntry>>`, `selection_mesh: Option<(u32, Arc<Mesh>)>`, `selection_screen_mesh: Option<SelectionScreenMeshCacheEntry>`）。`fill_mesh` を `OnceLock` による遅延生成キャッシュ、`screen_mesh_cache` を `SyncCache` とすることで、幾何計算中の中間図形での不要なテッセレーションと Undo 履歴での頂点バッファ保持を排除しつつ `Send + Sync` を満たす。
+- **`struct FillShape`** — 単一カラーの塗りベクター図形（`shape_id: u64`, `color: Color32`, `exterior: Contour`, `holes: Vec<Contour>`, `layer_id: u64`, `group_path: Vec<u64>`, `symbol_instance: Option<SymbolInstanceBinding>`, `mesh_revision: u64`, `bbox: Rect`, `fill_mesh: OnceLock<Arc<egui::Mesh>>`, `hit_bez_path: OnceLock<Arc<BezPath>>`, `screen_mesh_cache: SyncCache<Option<ScreenMeshCacheEntry>>`, `selection_mesh: Option<(u32, Arc<Mesh>)>`, `selection_screen_mesh: Option<SelectionScreenMeshCacheEntry>`）。`fill_mesh` および `hit_bez_path` を `OnceLock` による遅延生成キャッシュ、`screen_mesh_cache` を `SyncCache` とすることで、幾何計算中の中間図形での不要なテッセレーション、ヒットテスト時の毎回の `BezPath` ヒープ再確保、および Undo 履歴での頂点バッファ保持を排除しつつ `Send + Sync` を満たす。
   - `new(color: Color32, exterior: Contour, holes: Vec<Contour>) -> Self`
   - `new_empty_symbol_marker(binding: SymbolInstanceBinding, layer_id: u64, parent_scope: &[u64]) -> Self` / `is_empty_symbol_marker(&self) -> bool` — 現在フレームで内部図形が0個（空白キーフレーム等）のシンボルインスタンスを `canvas.shapes` 上の正確なZ順序位置で表現するゼロ面積（`exterior.segments.is_empty()`）マーカーの生成・判定。
   - `fill_mesh(&self) -> &Arc<egui::Mesh>` — 三角形メッシュを `OnceLock::get_or_init` で遅延テッセレーション・キャッシュ取得（空白シンボルマーカーの場合は空メッシュを即座に返す）。
-  - `cached_screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> Arc<egui::Mesh>` — 編集可能レイヤー図形のスクリーン座標変換済みメッシュを `Arc<egui::Mesh>` キャッシュ経由で取得し、静止時の毎フレーム頂点座標変換と `Vec<Vertex>` / `Vec<u32>` クローンを回避。
-  - `strip_transient_caches(&mut self)` — `fill_mesh`・`screen_mesh_cache`・`selection_mesh`・`selection_screen_mesh` を破棄し、Undo スナップショット保存時のメモリ消費を最小化するとともにアクティブ図形側の `Arc::make_mut` 頂点バッファ複製を防止。
+  - `cached_screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> Arc<egui::Mesh>` — 編集可能レイヤー図形のスクリーン座標変換済みメッシュを `Arc<egui::Mesh>` キャッシュ経由で取得し、静止時の毎フレーム頂点座標変換を回避。
+  - `strip_transient_caches(&mut self)` — `fill_mesh`・`hit_bez_path`・`screen_mesh_cache`・`selection_mesh`・`selection_screen_mesh` を破棄し、Undo スナップショット保存時のメモリ消費を最小化するとともにアクティブ図形側の `Arc::make_mut` 頂点バッファ複製を防止。
   - `with_layer_id(self, layer_id: u64) -> Self` / `with_group_path(self, group_path: Vec<u64>) -> Self` / `with_scope(self, layer_id: u64, group_path: &[u64]) -> Self`
   - `has_same_contour_arcs(&self, exterior: &Contour, holes: &[Contour]) -> bool` / `restore_from_local_template(&self, local_template: &FillShape, inv_xform: Affine) -> FillShape` — `Arc::ptr_eq` で輪郭データの無変更を $O(1)$ 判定し、属性（色・レイヤー・グループパス・シンボル紐付け）を引き継ぎつつローカル頂点とキャッシュ済みメッシュを完全無劣化で復元するヘルパー。
   - `contours(&self) -> impl Iterator<Item = &Contour>` — 実体のある外周とすべての穴を順に走査するイテレータ（空白フレームのシンボルマーカーの場合は 0 件の空イテレータを返し、呼び出し側の個別ガードを不要化）。
   - `is_in_editing_scope(&self, scope: &[u64]) -> bool` — 図形が現在のグループ編集スコープ内に属するか判定。
   - `is_raw_at_scope(&self, scope: &[u64]) -> bool` — 現在の編集スコープにおいてグループ・シンボルに属さない「生のシェイプ（Merge Drawing 対象）」であるか判定。
   - `active_group_id_at_scope(&self, scope: &[u64]) -> Option<u64>` — 現在の編集スコープ直下の子グループID（またはシンボルインスタンスID）を返す。
-  - `rebuild_cache(&mut self)` — バウンディングボックス、`Arc<Mesh>`、メッシュリビジョンを再計算し、選択メッシュキャッシュを無効化。
+  - `rebuild_cache(&mut self)` — バウンディングボックス、`Arc<Mesh>`、メッシュリビジョンを再計算し、`hit_bez_path`・選択メッシュキャッシュを無効化。
   - `set_color(&mut self, color: Color32)` — 再テッセレーションを行わずに塗り色とキャッシュ済み頂点カラーのみを高速更新。
-  - `bounding_box(&self) -> Rect` / `geometry_bounding_box(&self) -> Option<Rect>`（実体のあるベクター輪郭を持つ場合のみ `Some(bbox)`、空白フレームのシンボルマーカーでは `None`） / `contains_point(&self, pt: Point) -> bool`（AABB 早期棄却＋`kurbo::BezPath::winding` による EvenOdd 内外判定）
+  - `bounding_box(&self) -> Rect` / `geometry_bounding_box(&self) -> Option<Rect>`（実体のあるベクター輪郭を持つ場合のみ `Some(bbox)`、空白フレームのシンボルマーカーでは `None`） / `contains_point(&self, pt: Point) -> bool`（AABB 早期棄却＋`hit_bez_path: OnceLock<Arc<BezPath>>` キャッシュ上の `kurbo::BezPath::winding` によるヒープ確保ゼロの EvenOdd 内外判定）
   - `translate(&mut self, delta: Vec2)` — 制御点とキャッシュ済み `fill_mesh`・`selection_mesh` の頂点座標を直接平行移動（再テッセレーション不要）。
   - `transform(&mut self, affine: Affine)` — 非有限値・ゼロ面積潰れをガードした上で輪郭にアフィン変換を適用。等倍回転・縮小時はキャッシュ済み `fill_mesh` の頂点にアフィン変換を直接適用して高速化し、拡大変形時（`max_scale_sq > 1.25 * 1.25`）は曲線のカクつきを防ぐため `rebuild_cache()` で再テッセレーションを実行。
-  - `transform_with_cached_mesh(&mut self, affine: Affine)` — シンボルインスタンス展開やトゥイーン補間時に、既にテッセレーション済みのローカル `fill_mesh` を破棄せず頂点アフィン変換で維持し、再生・オニオンスキン描画での毎フレームの再テッセレーションを回避。
+  - `transform_with_cached_mesh(&mut self, affine: Affine)` / `transform_from_origin(&mut self, orig: &FillShape, affine: Affine)` — シンボルインスタンス展開・トゥイーン補間・自由変形ドラッグ時に、既にテッセレーション済みの `fill_mesh` 頂点バッファを再利用してアフィン変換を適用し、毎フレームの再テッセレーションおよび頂点バッファ再確保を回避。
   - `selection_overlay_mesh(&mut self, zoom: f32) -> Arc<egui::Mesh>` / `cached_selection_screen_mesh(&mut self, zoom: f32, pan: Vec2) -> Arc<egui::Mesh>` — 選択時の白い網点（Polka-Dot）ワールドメッシュおよびスクリーン変換済みメッシュを遅延生成・キャッシュ取得。
   - `get_contour(&self, idx: usize) -> Option<&Contour>` / `get_contour_mut(&mut self, idx: usize) -> Option<&mut Contour>` — インデックス（`0`＝外周、`1..`＝穴）による輪郭アクセス。
 
@@ -502,24 +548,24 @@
 - **アルゴリズム2：100%スムージング＆G1連続2次ベジェ曲線フィッティング**：
   - 特徴点検出・G1連続化の幾何しきい値定数群（`CAP_SCAN_*`, `CAP_NOTCH_*`, `RIGHT_CORNER_*`, `JUNCTION_*`, `ROUND_ARC_*`, `PROTECTED_CAP_*`, `LOCAL_ROUND_CORNER_*`, `STRONG_ROUND_CORNER_*`, `G1_*`）を名前付き定数として定義。
   - `build_smoothed_stroke_shapes(raw_outline: &[Point], color: Color32) -> Vec<FillShape>` / `build_smoothed_stroke_shapes_at_zoom(raw_outline: &[Point], color: Color32, view_zoom: f64) -> Vec<FillShape>` — 生アウトラインを `i_overlay::SimplifyShape` で自己交差解消したのち、各外周・穴リングを滑らかな2次ベジェ曲線へ変換。
-  - `estimate_brush_radius_from_shape_rings(rings: &[Vec<[f64; 2]>]) -> f64` / `estimate_brush_radius_from_ring(ring: &[[f64; 2]]) -> f64` — 輪郭の面積と周囲長から実効ブラシ半径 `r_est` を推定。
-  - `smooth_ring_to_quad_contour(ring: &[[f64; 2]], is_exterior: bool, r_est: f64) -> Option<Contour>` — 単一の閉リングから特徴点分類・Taubin ゼロ収縮平滑化・2次ベジェ曲線フィット・G1連続化を行って `Contour` を構築。
-  - `resample_closed_ring_uniform(pts: &[Point], step: f64) -> Vec<Point>` — 閉リングを等間隔弧長でリサンプリング。
-  - `find_true_runs(flags: &[bool]) -> Vec<(usize, usize)>` / `clamp_run_bounds(s: usize, e: usize, n: usize, max_half_steps: usize) -> (usize, usize)` — 周期配列上の連続する `true` 区間の検出とクランプ。
-  - `classify_and_align_ring_features(resampled: &mut [Point], cum_arc: &[f64], total_len: f64, step: f64, scale: f64, r_est: f64) -> (Vec<bool>, Vec<bool>)` — 閉リング上の各頂点を「シャープな角（折れ角）」と「丸端キャップ／円弧」に分類し、真の角頂点へ位置を整列。
-  - `detect_sharp_corners(resampled: &[Point], step: f64, scale: f64, r_est: f64) -> Vec<bool>` — マルチスケール弦方向角度から鋭角・直角コーナーを検出。
-  - `detect_round_arcs(resampled: &[Point], is_sharp_corner: &[bool], step: f64, r_est: f64) -> Vec<bool>` — 曲率が一貫して高い半円キャップや小円ループ領域を検出。
-  - `filter_protected_round_features(resampled: &mut [Point], cum_arc: &[f64], total_len: f64, step: f64, r_est: f64, is_sharp_corner: &[bool], is_round_arc: &[bool]) -> Vec<bool>` — 保護すべき丸端キャップと真のコーナーを選別し、外角・内角の頂点座標を交線方向へスナップ補正。
-  - `apply_zero_shrinkage_smoothing(pts: &[Point], is_sharp_corner: &[bool], is_protected_round: &[bool], step: f64, scale: f64) -> Vec<Point>` — コーナーと丸端キャップを保護しつつ直線・緩曲線のジャギーを除去する Taubin 膨張・収縮フィルタ。
-  - `select_locked_feature_anchors(smoothed: &[Point], cum_arc: &[f64], total_len: f64, is_sharp_corner: &[bool], is_protected_round: &[bool], r_est: f64) -> (Vec<usize>, Vec<bool>)` — ベジェ分割の初期ロックアンカーとコーナーフラグを選出。
+  - `estimate_brush_radius_from_shape_rings(shape_rings: &[Vec<[f64; 2]>]) -> f64` / `estimate_brush_radius_from_ring(ring: &[Point]) -> f64` — 輪郭の面積と周囲長から実効ブラシ半径 `r_est` を推定。
+  - `smooth_ring_to_quad_contour(ring: &[Point], r_est: f64, expect_positive_area: bool) -> Option<Contour>` — 単一の閉リングから特徴点分類・ゼロ収縮平滑化・2次ベジェ曲線フィット・G1連続化を行って `Contour` を構築。
+  - `resample_closed_ring_uniform(ring: &[Point], clean_tol: f64, r_scale: f64) -> Option<(Vec<Point>, f64)>` — 閉リングを等間隔弧長でリサンプリング。
+  - `find_true_runs(flags: &[bool]) -> Vec<(usize, usize)>` / `clamp_run_bounds(run_start: usize, run_end: usize, m: usize, is_sharp_corner: &[bool]) -> (usize, usize)` — 周期配列上の連続する `true` 区間の検出とクランプ。
+  - `classify_and_align_ring_features(dense: &mut [Point], w_short: usize, w_local: usize, w_macro: usize, r_scale: f64, actual_ds: f64, is_exterior: bool) -> (Vec<bool>, Vec<bool>)` — 閉リング上の各頂点を「シャープな角（折れ角）」と「丸端キャップ／円弧」に分類し、最長の低曲率側面中央を基準位置へ回転。
+  - `detect_sharp_corners(turns: &RingTurnMetrics, winding_sign: f64, is_exterior: bool) -> Vec<bool>` — マルチスケール弦方向角度から鋭角・直角コーナーを検出。
+  - `detect_round_arcs(turns: &RingTurnMetrics, is_sharp_corner: &[bool]) -> Vec<bool>` — 曲率が一貫して高い半円キャップや小円ループ領域を検出。
+  - `filter_protected_round_features(dense: &[Point], turns: &RingTurnMetrics, is_sharp_corner: &[bool], is_round_arc: &[bool], is_high_curv: &mut [bool], (r_scale, actual_ds): (f64, f64))` — 保護すべき丸端キャップと真の丸コーナーを選別。
+  - `apply_zero_shrinkage_smoothing(dense: &mut [Point], is_high_curv: &[bool], r_scale: f64)` — コーナーと丸端キャップを保護しつつ直線・緩曲線のジャギーを除去するゼロ収縮2スケール移動平均フィルタ。
+  - `select_locked_feature_anchors(dense: &[Point], is_sharp_corner: &[bool], is_high_curv: &[bool], w_short: usize) -> Vec<bool>` — ベジェ分割の初期ロックアンカーフラグを選出。
   - `find_longest_false_run_midpoint(flags: &[bool]) -> Option<usize>` — 非特徴区間の最長ランの中点を返す。
-  - `fit_quad_control_point_with_arc_lengths(pts: &[Point], arc_lens: &[f64]) -> Point` / `fit_quad_control_point_least_squares(pts: &[Point]) -> Point` — 弧長パラメータに基づく最小二乗法で最適な2次ベジェ制御点 `P1` を算出。
-  - `enforce_g1_tangent_continuity_on_segments(segments: &mut [QuadBez], anchor_is_corner: &[bool])` — 非コーナーアンカーにおいて前後の2次ベジェ曲線の接線方向を一直線（G1連続）に揃える。
-  - `reduce_outline_anchors_by_quad_fit(pts: &[Point], cum_arc: &[f64], total_len: f64, locked_indices: &[usize], locked_is_corner: &[bool], fit_tol: f64, rdp_eps: f64) -> (Vec<usize>, Vec<bool>)` — 2次ベジェ曲線1本で許容誤差内に収まるスパンはアンカーを増やさず、収まらないスパンのみ再帰的に分割して最小限のアンカー列を構築。
-  - `fill_cyclic_span(pts: &[Point], cum_arc: &[f64], total_len: f64, start: usize, end: usize, span_pts: &mut Vec<Point>, span_arcs: &mut Vec<f64>)` — 閉リング上の `start..=end` 区間の点列と累積弧長を取り出す。
-  - `span_turn_metrics(pts: &[Point]) -> (f64, f64)` — スパン内の累積回転角とネット回転角を算出。
-  - `max_quad_fit_error_with_arc_lengths(pts: &[Point], arc_lens: &[f64], q: QuadBez) -> f64` — 点列と2次ベジェ曲線の最大乖離誤差を計算。
-  - `max_deviation_from_chord(pts: &[Point]) -> (usize, f64)` / `rdp_recursive(pts: &[Point], eps: f64, keep: &mut [bool])` — Ramer-Douglas-Peucker 頂点間引きアルゴリズム。
+  - `fit_quad_control_point_with_arc_lengths(pts: &[Point], cum: &[f64], p0: Point, p2: Point) -> Point` / `fit_quad_control_point_least_squares(pts: &[Point], cum: &[f64], p0: Point, p2: Point) -> Point` — 弧長パラメータに基づく最小二乗法で最適な2次ベジェ制御点 `P1` を算出。
+  - `enforce_g1_tangent_continuity_on_segments(segments: &mut [QuadBez], dense: &[Point], anchors: &[usize], is_sharp_corner: &[bool], is_straight: &[bool], r_scale: f64)` — 非コーナーアンカーにおいて前後の2次ベジェ曲線の接線方向を一直線（G1連続）に揃える。
+  - `reduce_outline_anchors_by_quad_fit(dense: &[Point], locked: &[bool], is_high_curv: &[bool], max_edge_tol: f64, max_cap_tol: f64, max_curve_turn_rad: f64) -> Vec<usize>` — 2次ベジェ曲線1本で許容誤差内に収まるスパンはアンカーを増やさず統合し、最小限のアンカー列を構築。
+  - `fill_cyclic_span(dense: &[Point], start_idx: usize, end_idx: usize, span: &mut Vec<Point>)` — 閉リング上の `start_idx..=end_idx` 区間の点列を取り出す。
+  - `span_turn_metrics(span_pts: &[Point]) -> (f64, f64)` — スパン内のネット回転角と累積回転角を算出。
+  - `max_quad_fit_error_with_arc_lengths(span_pts: &[Point], cum: &[f64], quad: QuadBez) -> f64` — 点列と2次ベジェ曲線の最大乖離誤差を計算。
+  - `max_deviation_from_chord(pts: &[Point]) -> f64` / `rdp_recursive(all_pts: &[Point], start: usize, end: usize, epsilon: f64, keep: &mut [bool])` — 弦からの最大距離算出および Ramer-Douglas-Peucker 頂点間引きアルゴリズム。
 
 ---
 
@@ -535,14 +581,14 @@
 - `merge_shapes_into_canvas(canvas: &mut Vec<FillShape>, new_shapes: Vec<FillShape>)` — 新規図形群を同じレイヤー・同じグループスコープ内の生シェイプに対して同色 `Union`・異色 `Difference` でマージ統合。
 - `merge_disjoint_fill_into_canvas(canvas: &mut Vec<FillShape>, fill_shape: FillShape)` — バケツ塗りで検出された閉領域を周囲の同色生シェイプとのみ `Union` 統合（異色シェイプのDifference切り抜きを省略する高速パス）。
 - `merge_shapes_into_canvas_inner(canvas: &mut Vec<FillShape>, incoming: Vec<FillShape>, subtract_diff_color: bool)` / `merge_homogeneous_batch_into_canvas(canvas: &mut Vec<FillShape>, incoming: Vec<FillShape>, subtract_diff_color: bool)` — 連続する同一レイヤー・同一スコープ・同色の図形群を1バッチにまとめ、1回の `FloatOverlay` パスで結合・切り抜きを実行するマージ描画の内部共通実装。
-- `erase_from_canvas(canvas: &mut Vec<FillShape>, eraser_shapes: &[FillShape], target_layer_id: u64, editing_scope: &[u64])` — 消しゴム図形で対象スコープ内の生シェイプを `Difference` 減算。
+- `erase_from_canvas(canvas: &mut Vec<FillShape>, eraser_shapes: &[FillShape], target_layer_id: u64, editing_scope: &[u64])` — 消しゴム図形でアクティブレイヤー（`target_layer_id`）かつ対象編集スコープ（`editing_scope`）内の生シェイプのみを `Difference` 減算。
 - `slice_shape_with_marquee_rect(shape: &FillShape, clip_rect_shape: &FillShape) -> (Vec<FillShape>, Vec<FillShape>)` — 矩形マーキー部分選択によるスライス分割時に、対象図形と矩形のポリゴン分割および `QuadRecord` テーブル構築を1回だけ行い、1パスで `(inside, outside)` 両方の `FillShape` 群を返す高速スライサー。
 - `adaptive_overlay_min_area(shapes_a: &[FillShape], shapes_b: &[FillShape]) -> f64` — 入力図形の最小バウンディングボックス短辺から `i_overlay` の最小面積閾値 `min_area` をスケール適応的に算出（1600%拡大表示での最小半径 `0.5px` 細密加筆・消しゴムでも微小図形が消失しないよう動的調整）。
 - `boolean_operation(subject: &[FillShape], clip: &[FillShape], op: BoolOp, result_color: Color32) -> Vec<FillShape>` — `subject` と `clip` の2次ベジェ図形群に対して `Union` / `Difference` / `Intersection` を実行し、結果を再び滑らかな2次ベジェ `FillShape` 群として再構築。
 - `run_float_overlay(subj_shapes: &[OverlayShape], clip_shapes: &[OverlayShape], rule: OverlayRule, fill_rule: OverlayFillRule, min_area: f64) -> Vec<OverlayShape>` — `i_overlay::FloatOverlay` の実行ラッパー。
 - `reconstruct_fill_shape_from_rings(shape_rings: &[Vec<[f64; 2]>], source_quads: &[QuadRecord], grid: &QuadSpatialGrid, result_color: Color32, filter_sliver_holes: bool) -> Option<FillShape>` / `reconstruct_shapes_from_overlay(overlay_result: &[OverlayShape], quad_table: &[QuadRecord], color: Color32, filter_sliver_holes: bool) -> Vec<FillShape>` — ブーリアン演算結果のポリゴンリング群からスケール適応許容差を用いて `FillShape` を復元。
 - `poly_shape_contains_point(poly_shape: &[Vec<[f64; 2]>], pt: Point) -> bool` — ポリゴンリング群に対する高速な 2D Even-Odd レイキャスト内外判定（バケツ塗りでクリック座標を含まない全候補領域のベジェ再構築・テッセレーションをスキップするために使用）。
-- `cull_enclosed_region_candidates(canvas: &[FillShape], target_pt: Point) -> Option<(Vec<&FillShape>, Rect)>` — バケツツール用：キャンバス内の図形群を微膨張AABB（`inflate(1.0, 1.0)`）の交差による連結成分（クラスタ）へ分類し、クリック座標 `target_pt` がどのクラスタのAABBにも含まれない開いた余白であれば `FloatOverlay` を呼ばずに $O(N)$ で即座に `None` を返し、含まれる場合も該当クラスタと交差する候補図形のみに絞り込む事前カリング関数。
+- `cull_enclosed_region_candidates(canvas: &[FillShape], pt: Point) -> Option<(KRect, Vec<FillShape>)>` — バケツツール用：キャンバス内の図形群を微膨張AABB（`inflate(1.0, 1.0)`）の交差による連結成分（クラスタ）へスイープライン＋Union-Find（素集合データ構造）で高速分類し、クリック座標 `pt` がどのクラスタのAABBにも含まれない開いた余白であれば `FloatOverlay` を呼ばずに即座に `None` を返し、含まれる場合も該当クラスタと交差する候補図形のみに絞り込む事前カリング関数。
 - `find_enclosed_region_at(canvas: &[FillShape], target_pt: Point, fill_color: Color32) -> Option<FillShape>` — バケツツール用：`cull_enclosed_region_candidates` で抽出した候補図形群と局所バウンディングボックスのみに対して `FloatOverlay` を実行し、`poly_shape_contains_point` を通過した唯一の閉領域のみをベクター図形化。
 - `flatten_shape_for_overlay(shape: &FillShape, quad_table: &mut Vec<QuadRecord>) -> OverlayShape` / `flatten_contour_for_overlay(contour: &Contour, is_outer: bool, quad_table: &mut Vec<QuadRecord>) -> Option<Vec<[f64; 2]>>` / `flatten_contour_preserving_direction(contour: &Contour, quad_table: &mut Vec<QuadRecord>) -> Option<Vec<[f64; 2]>>` — `FillShape` の各 `QuadBez` をタグ付き折れ線に細分化して `i_overlay` 入力形式へ変換。
 - `resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape>` — エッジ引き伸ばし・頂点移動後の輪郭に対して `OverlayFillRule::Positive` を実行し、自己交差の解消や2図形への横断分割を解決。
@@ -551,13 +597,13 @@
 
 ---
 
-## 13. [`tests.rs`](./tests.rs) — 自動ユニットテストスイート（全24件）
+## 13. [`tests.rs`](./tests.rs) — 自動ユニットテストスイート（全36件）
 
-`cargo test` で実行される全24件のユニットテストとテスト用ヘルパー関数：
+`cargo test` で実行される全36件のユニットテストとテスト用ヘルパー関数：
 
 - **ヘルパー関数**：
   - `make_stroke(p0: Point, p1: Point, radius: f32, color: Color32) -> Vec<FillShape>` — 2点間を結ぶ直線ブラシストロークを生成・スムージングして返す。
-- **ユニットテスト一覧（全24件）**：
+- **ユニットテスト一覧（全36件）**：
   1. `test_same_color_union_and_diff_split_with_i_overlay` — 同色ストロークの `Union` 融合と、異色ストローク横断による `Difference` 分断を検証。
   2. `test_smoothing_100_preserves_width_round_caps_and_minimal_anchors` — 100%スムージング時に太さが痩せず、両端の丸キャップが保たれ、最小限のアンカー数に収まることを検証。
   3. `test_curved_stroke_has_strictly_uniform_width` — 手ブレを含む曲線ストロークでも全長にわたり厳密に一定の線幅が保たれることを検証。
@@ -581,4 +627,16 @@
   21. `test_classic_tween_single_symbol_condition_and_interpolation` — 単一シンボルのみでのクラシックトゥイーン（`T`）許可条件、未完トゥイーン（横点線）と完全トゥイーン（実線矢印）の遷移、中間フレームのTRS線形補間、元キーフレームの非破壊保護を検証。
   22. `test_symbol_playback_modes_loop_play_once_and_single_frame` — シンボルインスタンスごとの再生モード（`ループ` / `1回再生` / `任意のフレーム`）と開始フレーム指定の動作を検証。
   23. `test_nested_symbol_evaluation_and_library_delete_detach` — 入れ子シンボル（親シンボル内の子シンボルアニメーション）の再帰評価と、ライブラリからシンボル削除時にステージ上の絵が消えず通常グループとしてデタッチされることを検証。
-  24. `test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions` — `NaN`・無限大・空配列・ゼロ面積アフィン変換・スライス選択とシンボル出入り・Undo/Redo・範囲外レイヤー指定などの異常値や連続操作に対してパニックせず安全に動作することを検証。
+  24. `test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions` — `NaN`・無限大・空配列・ゼロ面積アフィン変換・スライス選択とシンボル出入り・Undo/Redo・範囲外レイヤー指定・逆順3階層ネスト・ロック中トゥイーンへのスポイトなどの異常値や連続操作に対してパニックせず安全に動作することを検証。
+  25. `test_stage_to_local_cache_and_resolved_cel_cow_preservation` — 空白フレーム状態のシンボルを含む親グループの移動/回転/削除追従、`UndoEntry` および `StageToLocalCache` の論理IDベース `Arc` CoW 構造共有、解決済みセルメッシュキャッシュの部分無効化防止を検証。
+  26. `test_bucket_fill_locked_walls_and_cluster_culling` — ロックされた別レイヤーの分割線によるバケツ塗り領域分割、1600%拡大時の極小シェイプ同士のブール演算保持、スイープライン＋Union-Find による遠方シェイプの事前AABBカリングを検証。
+  27. `test_tween_lru_cache_no_thrashing` — 12フレームのクラシックトゥイーン再生を複数周ループした際、64エントリLRUキャッシュによりスラッシングせず同一 `Arc<Mesh>` が $O(1)$ で返却されることを検証。
+  28. `test_project_save_and_load_roundtrip` — 複数レイヤー・グループ・シンボル定義・インプレイス編集・クラシックトゥイーン・ステージサイズ・FPSを含む `.is2d` 保存と再読み込み、および複数ドキュメントタブの同時オープン・切り替え・タブ閉じを検証。
+  29. `test_cross_tab_symbol_paste_and_group_id_remapping` — 同一リビジョン再コピー時の `Arc<SymbolDef>` 共有、コピー後のシンボル編集・子シンボル削除に対する最新定義ペースト、別タブへのシンボル移植時の内部 `group_path` 再採番リマップを検証。
+  30. `test_save_merge_flush_rollback_and_undo_redo` — 生シェイプ選択移動中の保存（Merge Drawing 確定）、同色 Union 保存時の選択維持/解除、保存I/O失敗時のライブキャンバス完全ロールバック、および `selection_modified` からの Undo/Redo マージ確定維持を検証。
+  31. `test_malformed_json_sanitization_and_cycle_breaking` — 外部改変された異常系 `.is2d` JSON（シンボル循環参照 `A ⇄ B`、重複レイヤーID、孤児インスタンス、逆向きワインディング、範囲外設定値）の自動サニタイズと DAG 保証を検証。
+  32. `test_eraser_only_erases_active_layer_and_preserves_other_unlocked_layers` — 消しゴム（`erase_from_canvas`）がアクティブな `target_layer_id` の生シェイプのみを削り、他の非ロック可視レイヤーの図形を削らないことを検証。
+  33. `test_multilayer_f7_advances_frame_and_move_frames_overwrites_destination` — 複数レイヤー選択時の `F7`（空白KF挿入）でいずれかの対象レイヤーに描画内容があれば次フレームへ進むこと、およびフレーム移動（`move_or_copy_frames`）時に移動先スパン内の既存キーフレームがクリアされ保持スパンが分断されないことを検証。
+  34. `test_double_click_raw_shape_does_not_exit_group_or_symbol_and_tween_state_incomplete` — シンボルまたはグループ内編集中に生シェイプ上をダブルクリックしても誤って親階層へ脱出しないこと、および図形が空または複数になったトゥイーンKFが `TweenState::Incomplete`（横点線）を返すことを検証。
+  35. `test_marquee_shift_deselect_restores_unsliced_for_bucket_fill_and_symbol_rename_undo_grouping` — マーキースライス後の `Shift` 選択解除時に `unsliced_canvas` が即座に復元されて直後のバケツ塗りで古いスナップショットが復活しないこと、およびライブラリでのシンボル名連続入力中に1文字ごとの重複 Undo 記録が防がれることを検証。
+  36. `test_step_frame_loop_mode_and_viewport_fit_and_total_frames_over_600` — `step_frame` の `loop_playback` ON/OFF 境界動作、`ViewportState::fit_stage_to_window` のフィッティング計算、および 600 フレーム超のプロジェクトでの総フレーム数維持を検証。
