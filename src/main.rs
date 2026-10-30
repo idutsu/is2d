@@ -1,7 +1,10 @@
 mod canvas_tool;
+mod clipboard_ops;
 mod panels;
 mod project_io;
+mod select_ops;
 mod symbol;
+mod symbol_ops;
 mod timeline;
 mod timeline_ui;
 mod tool_paint;
@@ -11,63 +14,21 @@ mod vector_boolean;
 mod vector_engine;
 mod vector_stroke;
 
-use canvas_tool::{CanvasState, SelectSubMode, Tool, ViewportState};
+use std::time::Instant;
+
 use eframe::egui::{self, Color32, CursorIcon, Key, Pos2, Sense, Stroke, Vec2};
 use kurbo::Point;
-use panels::RightPanelTab;
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
-use symbol::{SymbolDef, SymbolEditSession, SymbolManager};
-use timeline::Timeline;
-use timeline_ui::TimelineUiState;
-use vector_engine::FillShape;
 
-const MAX_UNDO_HISTORY: usize = 100;
-const DEFAULT_TOAST_DURATION: Duration = Duration::from_millis(2800);
-
-/// キャンバス左上に表示する通知・警告メッセージの種別
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NoticeKind {
-    /// 操作不可や条件不足の警告（黄色系バッジ）
-    Warning,
-    /// エラー通知（赤系バッジ）
-    Error,
-    /// 通常の案内・情報（青系バッジ）
-    Info,
-}
-
-impl NoticeKind {
-    /// 種別に応じた `(背景色, 枠線色, 文字色)` を返す
-    pub(crate) fn colors(self) -> (Color32, Color32, Color32) {
-        match self {
-            NoticeKind::Warning => (
-                Color32::from_rgba_unmultiplied(255, 248, 225, 244),
-                Color32::from_rgb(215, 165, 55),
-                Color32::from_rgb(145, 90, 10),
-            ),
-            NoticeKind::Error => (
-                Color32::from_rgba_unmultiplied(255, 236, 236, 244),
-                Color32::from_rgb(220, 75, 75),
-                Color32::from_rgb(155, 25, 25),
-            ),
-            NoticeKind::Info => (
-                Color32::from_rgba_unmultiplied(235, 245, 255, 244),
-                Color32::from_rgb(55, 140, 225),
-                Color32::from_rgb(20, 75, 145),
-            ),
-        }
-    }
-}
-
-/// 操作時に一定時間表示して自動で消えるトースト通知メッセージ
-#[derive(Clone, Debug)]
-pub(crate) struct StatusToast {
-    pub(crate) kind: NoticeKind,
-    pub(crate) message: String,
-    pub(crate) expires_at: Instant,
-}
+use canvas_tool::{EditorDoc, NoticeKind, SelectSubMode, Tool};
+#[cfg(test)]
+pub(crate) use canvas_tool::MAX_UNDO_HISTORY;
+use panels::UiAction;
+use project_io::{DocumentTabManager, ProjectWorkspace};
+#[cfg(test)]
+pub(crate) use timeline::Timeline;
+use timeline_ui::{TimelineHost, TimelineUiState};
+#[cfg(test)]
+pub(crate) use vector_engine::FillShape;
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
@@ -149,384 +110,197 @@ fn key_pressed_no_repeat(i: &egui::InputState, target: Key) -> bool {
 }
 
 // ============================================================================
-// メインアプリケーション状態 & ショートカット制御
+// メインアプリケーション状態 & ショートカット・アクションディスパッチ制御
 // ============================================================================
 
-#[derive(Clone, Debug)]
-pub(crate) struct UndoEntry {
-    pub(crate) timeline: Timeline,
-    pub(crate) library: std::sync::Arc<Vec<SymbolDef>>,
-    pub(crate) editing_group_path: Vec<u64>,
-    pub(crate) symbol_edit_stack: std::sync::Arc<Vec<SymbolEditSession>>,
-    pub(crate) stage_size: Vec2,
-    pub(crate) symbols_revision: u64,
-    /// この履歴スナップショットが表すドキュメント状態世代ID（未保存変更 `is_dirty` 判定用）
-    pub(crate) commit_id: u64,
-}
-
-impl UndoEntry {
-    /// スナップショットから随時再生成可能な一時メッシュキャッシュ（`fill_mesh`, `selection_mesh`, `CelMeshCache`）を除去し、
-    /// 直前の履歴スナップショット `prev_timeline` と未変更のセルは `Arc` を $O(1)$ 共有した軽量状態にする
-    /// （`library` と `symbol_edit_stack` は `UndoHistory::snapshot_symbols` 生成時点でキャッシュ除去＆シンボル単位のCoW共有済み）
-    pub(crate) fn strip_transient_caches(mut self, prev_timeline: Option<&Timeline>) -> Self {
-        self.timeline
-            .strip_transient_caches_with_prev(prev_timeline);
-        self
-    }
-}
-
-/// Undo / Redo スナップショット履歴および保存時点のドキュメント世代IDを管理する構造体
-pub(crate) struct UndoHistory {
-    pub(crate) undo_stack: VecDeque<UndoEntry>,
-    pub(crate) redo_stack: Vec<UndoEntry>,
-    /// 現在のドキュメント状態の世代ID（初期状態・読み込み直後は `0`）
-    pub(crate) current_commit_id: u64,
-    /// 直近の保存時点（または未編集の初期状態）の世代ID（`Some(current_commit_id)` と一致していれば未変更）
-    pub(crate) saved_commit_id: Option<u64>,
-    /// 次に発行する新しい状態世代ID（単調増加）
-    pub(crate) next_commit_id: u64,
-}
-
-impl Default for UndoHistory {
-    fn default() -> Self {
-        Self {
-            undo_stack: VecDeque::new(),
-            redo_stack: Vec::new(),
-            current_commit_id: 0,
-            saved_commit_id: Some(0),
-            next_commit_id: 1,
-        }
-    }
-}
-
-impl UndoHistory {
-    /// 現在のドキュメントに未保存の変更があるか（保存時点の世代IDと現在世代IDが異なるか）を返す
-    #[inline]
-    pub(crate) fn is_dirty(&self) -> bool {
-        self.saved_commit_id != Some(self.current_commit_id)
-    }
-
-    /// 現在のドキュメント世代IDを「保存済み」として記録する
-    #[inline]
-    pub(crate) fn mark_saved(&mut self) {
-        self.saved_commit_id = Some(self.current_commit_id);
-    }
-
-    /// 保存済み世代IDをクリアして常時「未保存」状態にする（別タブによる同名ファイル上書き時のデタッチ用）
-    #[inline]
-    pub(crate) fn mark_unsaved(&mut self) {
-        self.saved_commit_id = None;
-    }
-
-    /// シンボルライブラリおよび編集スタックが直近の履歴エントリから未変更（同一 `revision`）であれば
-    /// `Arc` ポインタを $O(1)$ で共有し、一部シンボルのみ変更されている場合は未変更シンボル（同一 `id` かつ `revision`）および
-    /// 退避中の親タイムライン未変更セルの `Arc` を引き継ぎながら差分シンボルのみキャッシュ除去して新しい `Arc` を返す
-    pub(crate) fn snapshot_symbols(
-        &self,
-        symbols: &SymbolManager,
-    ) -> (
-        std::sync::Arc<Vec<SymbolDef>>,
-        std::sync::Arc<Vec<SymbolEditSession>>,
-        u64,
-    ) {
-        let prev_entry = self.undo_stack.back().or_else(|| self.redo_stack.last());
-        if let Some(reused) = prev_entry.filter(|e| e.symbols_revision == symbols.revision) {
-            return (
-                std::sync::Arc::clone(&reused.library),
-                std::sync::Arc::clone(&reused.symbol_edit_stack),
-                symbols.revision,
-            );
-        }
-        let mut lib = Vec::with_capacity(symbols.library.len());
-        for sym in &symbols.library {
-            if let Some(prev_sym) = prev_entry.and_then(|pe| {
-                pe.library
-                    .iter()
-                    .find(|s| s.id == sym.id && s.revision == sym.revision)
-            }) {
-                lib.push(prev_sym.clone());
-            } else {
-                let prev_sym_tl = prev_entry.and_then(|pe| {
-                    pe.library
-                        .iter()
-                        .find(|s| s.id == sym.id)
-                        .map(|s| &s.timeline)
-                });
-                let mut cloned = sym.clone();
-                cloned.timeline.strip_transient_caches_with_prev(prev_sym_tl);
-                cloned.clear_preview_and_anim_caches();
-                lib.push(cloned);
-            }
-        }
-        let mut stack = Vec::with_capacity(symbols.edit_stack.len());
-        for (idx, sess) in symbols.edit_stack.iter().enumerate() {
-            let prev_sess = prev_entry
-                .and_then(|pe| pe.symbol_edit_stack.get(idx))
-                .filter(|ps| ps.symbol_id == sess.symbol_id && ps.instance_gid == sess.instance_gid);
-            let mut cloned_sess = sess.clone();
-            cloned_sess.strip_transient_caches_with_prev(prev_sess);
-            stack.push(cloned_sess);
-        }
-        (
-            std::sync::Arc::new(lib),
-            std::sync::Arc::new(stack),
-            symbols.revision,
-        )
-    }
-
-    /// 新しい Undo エントリをスタックへ追加し、Redo スタックをクリアして現在の状態世代IDを進める
-    pub(crate) fn push(&mut self, mut entry: UndoEntry) {
-        entry.commit_id = self.current_commit_id;
-        self.current_commit_id = self.next_commit_id;
-        self.next_commit_id = self.next_commit_id.saturating_add(1);
-        let stripped = {
-            let prev_tl = self
-                .undo_stack
-                .back()
-                .or_else(|| self.redo_stack.last())
-                .map(|e| &e.timeline);
-            entry.strip_transient_caches(prev_tl)
-        };
-        if self.undo_stack.len() >= MAX_UNDO_HISTORY {
-            self.undo_stack.pop_front();
-        }
-        self.undo_stack.push_back(stripped);
-        self.redo_stack.clear();
-    }
-
-    /// Undo スタック末尾から直前のスナップショットを取り出す
-    pub(crate) fn pop_undo(&mut self) -> Option<UndoEntry> {
-        self.undo_stack.pop_back()
-    }
-
-    /// Redo スタック末尾から次のスナップショットを取り出す
-    pub(crate) fn pop_redo(&mut self) -> Option<UndoEntry> {
-        self.redo_stack.pop()
-    }
-
-    /// Undo 実行前の現在状態を Redo スタックへ退避する
-    pub(crate) fn push_redo(&mut self, entry: UndoEntry) {
-        let stripped = {
-            let prev_tl = self
-                .redo_stack
-                .last()
-                .or_else(|| self.undo_stack.back())
-                .map(|e| &e.timeline);
-            entry.strip_transient_caches(prev_tl)
-        };
-        self.redo_stack.push(stripped);
-    }
-
-    /// Redo 実行前の現在状態を Undo スタックへ戻す（Redo スタックは消去しない）
-    pub(crate) fn push_undo_from_redo(&mut self, entry: UndoEntry) {
-        let stripped = {
-            let prev_tl = self
-                .undo_stack
-                .back()
-                .or_else(|| self.redo_stack.last())
-                .map(|e| &e.timeline);
-            entry.strip_transient_caches(prev_tl)
-        };
-        if self.undo_stack.len() >= MAX_UNDO_HISTORY {
-            self.undo_stack.pop_front();
-        }
-        self.undo_stack.push_back(stripped);
-    }
-}
-
-/// ツール選択・ブラシ/消しゴム設定・右パネルタブ・トースト通知などアプリ全体のUI設定状態
-pub(crate) struct AppUiState {
-    pub(crate) tool: Tool,
-    pub(crate) select_sub_mode: SelectSubMode,
-    pub(crate) right_panel_tab: RightPanelTab,
-    pub(crate) brush_radius: f32,
-    pub(crate) eraser_radius: f32,
-    pub(crate) brush_color: Color32,
-    pub(crate) show_wireframe: bool,
-    /// プロパティパネルの下部表示対象（`true`: タイムラインのフレーム/トゥイーン属性、`false`: キャンバス上のシンボル属性）
-    pub(crate) inspect_timeline_frame: bool,
-    /// シンボル再生オプションの開始/表示フレーム数値フィールドを連続編集（ドラッグ/入力）中かどうか
-    pub(crate) editing_symbol_playback: bool,
-    /// 現在開いている・保存先の `.is2d` プロジェクトファイルパス（未保存の新規ドキュメント時は `None`）
-    pub(crate) current_file_path: Option<std::path::PathBuf>,
-    /// 操作トリガーで一定時間表示するトースト通知メッセージ
-    pub(crate) status_toast: Option<StatusToast>,
-}
-
-impl Default for AppUiState {
-    fn default() -> Self {
-        Self {
-            tool: Tool::Brush,
-            select_sub_mode: SelectSubMode::Reshape,
-            right_panel_tab: RightPanelTab::default(),
-            brush_radius: 8.0,
-            eraser_radius: 22.0,
-            brush_color: Color32::from_rgb(40, 45, 55),
-            show_wireframe: false,
-            inspect_timeline_frame: false,
-            editing_symbol_playback: false,
-            current_file_path: None,
-            status_toast: None,
-        }
-    }
-}
-
-impl AppUiState {
-    /// キャンバス左上に一定時間自動で消えるトースト通知メッセージを登録する
-    pub(crate) fn show_notice(&mut self, kind: NoticeKind, message: impl Into<String>) {
-        self.status_toast = Some(StatusToast {
-            kind,
-            message: message.into(),
-            expires_at: Instant::now() + DEFAULT_TOAST_DURATION,
-        });
-    }
-}
-
-/// アプリケーション全体のルート構造体（責務ごとに独立したドメイン構造体で構成）
+/// アプリケーション全体のルート構造体（単一ドキュメント状態 `EditorDoc`・タイムラインUI状態・複数タブ管理で構成）
 #[derive(Default)]
 pub(crate) struct Is2dApp {
-    /// ツール設定・右パネルタブ・ステータストースト通知などのUI状態
-    pub(crate) ui: AppUiState,
-    /// キャンバスのズーム・パン・ステージ枠設定
-    pub(crate) viewport: ViewportState,
-    /// 現在フレームの作業図形・選択・変形・排他ドラッグ・クリップボード状態
-    pub(crate) canvas: CanvasState,
-    /// タイムライン・レイヤー・キーフレーム・セル構造
-    pub(crate) timeline: Timeline,
+    /// 現在アクティブなドキュメント状態（UI・ビューポート・作業キャンバス・タイムライン・シンボル・Undo履歴）
+    pub(crate) doc: EditorDoc,
     /// タイムラインパネルの再生・スクロール・D&D等の一時UI状態
     pub(crate) timeline_ui: TimelineUiState,
-    /// プロジェクト共通のシンボルライブラリ・シンボルインプレイス編集スタック・ID採番
-    pub(crate) symbols: SymbolManager,
-    /// Undo / Redo 履歴スタック
-    pub(crate) history: UndoHistory,
-    /// 複数ドキュメント同時オープン用のタブ管理状態（アクティブ状態スワップ方式）
-    pub(crate) tabs: project_io::DocumentTabManager,
+    /// 複数ドキュメント同時オープン用のタブ管理状態（`EditorDoc` 一括スワップ方式）
+    pub(crate) tabs: DocumentTabManager,
+}
+
+impl std::ops::Deref for Is2dApp {
+    type Target = EditorDoc;
+    fn deref(&self) -> &Self::Target {
+        &self.doc
+    }
+}
+
+impl std::ops::DerefMut for Is2dApp {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.doc
+    }
+}
+
+impl ProjectWorkspace for Is2dApp {
+    fn doc(&self) -> &EditorDoc {
+        &self.doc
+    }
+
+    fn doc_mut(&mut self) -> &mut EditorDoc {
+        &mut self.doc
+    }
+
+    fn tabs(&self) -> &DocumentTabManager {
+        &self.tabs
+    }
+
+    fn tabs_mut(&mut self) -> &mut DocumentTabManager {
+        &mut self.tabs
+    }
+
+    fn doc_and_tabs_mut(&mut self) -> (&mut EditorDoc, &mut DocumentTabManager) {
+        (&mut self.doc, &mut self.tabs)
+    }
+}
+
+impl TimelineHost for Is2dApp {
+    fn doc(&self) -> &EditorDoc {
+        &self.doc
+    }
+
+    fn doc_mut(&mut self) -> &mut EditorDoc {
+        &mut self.doc
+    }
+
+    fn timeline_ui(&self) -> &TimelineUiState {
+        &self.timeline_ui
+    }
+
+    fn timeline_ui_mut(&mut self) -> &mut TimelineUiState {
+        &mut self.timeline_ui
+    }
+
+    fn doc_and_timeline_ui_mut(&mut self) -> (&mut EditorDoc, &mut TimelineUiState) {
+        (&mut self.doc, &mut self.timeline_ui)
+    }
 }
 
 impl Is2dApp {
-    // ------------------------------------------------------------------------
-    // 1. Undo / Redo 履歴管理 & トランザクション変更API
-    // ------------------------------------------------------------------------
-
-    fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
-        self.timeline_ui.cancel_drag();
-        self.viewport.editing_stage_size = false;
-        self.timeline_ui.editing_total_frames = false;
-        self.timeline_ui.editing_fps = false;
-        self.symbols.actively_renaming_symbol = None;
-        self.ui.editing_symbol_playback = false;
-        let (prev_lib, prev_stack, prev_rev) = self.history.snapshot_symbols(&self.symbols);
-        let prev_entry = UndoEntry {
-            timeline: std::mem::replace(&mut self.timeline, entry.timeline),
-            library: prev_lib,
-            editing_group_path: std::mem::replace(
-                &mut self.canvas.editing_group_path,
-                entry.editing_group_path,
-            ),
-            symbol_edit_stack: prev_stack,
-            stage_size: std::mem::replace(&mut self.viewport.stage_size, entry.stage_size),
-            symbols_revision: prev_rev,
-            commit_id: std::mem::replace(&mut self.history.current_commit_id, entry.commit_id),
-        };
-        self.symbols.library = std::sync::Arc::unwrap_or_clone(entry.library);
-        self.symbols.edit_stack = std::sync::Arc::unwrap_or_clone(entry.symbol_edit_stack);
-        self.symbols.revision = entry.symbols_revision;
-        self.symbols.sync_after_restore();
-        canvas_tool::load_shapes_from_timeline(self);
-        prev_entry
-    }
-
-    pub(crate) fn record_undo_snapshot(&mut self, mut snapshot: Vec<FillShape>) {
-        let mut tl_snap = self.timeline.clone();
-        tl_snap.normalize_shape_layer_ids(&mut snapshot);
-        tl_snap.write_shapes_to_editable_cels(
-            &snapshot,
-            &self.symbols.library,
-            self.canvas.loaded_signatures(),
-        );
-        let (library, symbol_edit_stack, symbols_revision) =
-            self.history.snapshot_symbols(&self.symbols);
-        let entry = UndoEntry {
-            timeline: tl_snap,
-            library,
-            editing_group_path: self.canvas.editing_group_path.clone(),
-            symbol_edit_stack,
-            stage_size: self.viewport.stage_size,
-            symbols_revision,
-            commit_id: self.history.current_commit_id,
-        };
-        self.history.push(entry);
-    }
-
-    pub(crate) fn push_undo(&mut self) {
-        if self.timeline_ui.is_playing {
-            canvas_tool::stop_playback(self);
-        } else if let Some(mut unsliced) = self.canvas.take_unsliced_snapshot() {
-            let selected_ids = self.canvas.selected_shape_ids();
-            self.timeline.normalize_shape_layer_ids(&mut unsliced);
-            self.canvas.shapes = unsliced;
-            self.canvas.restore_selection_by_shape_ids(&selected_ids);
-            canvas_tool::sync_shapes_to_timeline(self);
-        } else {
-            canvas_tool::sync_shapes_to_timeline(self);
-        }
-        let (library, symbol_edit_stack, symbols_revision) =
-            self.history.snapshot_symbols(&self.symbols);
-        let entry = UndoEntry {
-            timeline: self.timeline.clone(),
-            library,
-            editing_group_path: self.canvas.editing_group_path.clone(),
-            symbol_edit_stack,
-            stage_size: self.viewport.stage_size,
-            symbols_revision,
-            commit_id: self.history.current_commit_id,
-        };
-        self.history.push(entry);
-    }
-
-    /// キャンバス図形に対する変更トランザクションを一括実行する：
-    /// 1. 再生中であれば停止して現在フレームの図形を展開 (`stop_playback`)
-    /// 2. 必要に応じて未確定選択を確定解除 (`clear_selection`)
-    /// 3. 変更前の Undo スナップショットを記録
-    /// 4. `mutate` クロージャでキャンバス図形を更新
-    /// 5. 変更後の図形を現在フレームのタイムライン `Cel` へ自動同期 (`sync_shapes_to_timeline`)
-    pub(crate) fn mutate_canvas_with_undo(
-        &mut self,
-        clear_selection_first: bool,
-        mutate: impl FnOnce(&mut Self),
-    ) {
-        canvas_tool::stop_playback(self);
-        if clear_selection_first {
-            tool_select::clear_selection(self);
-        }
-        let snapshot = self.canvas.take_or_clone_unsliced_snapshot();
-        self.record_undo_snapshot(snapshot);
-        mutate(self);
-        canvas_tool::sync_shapes_to_timeline(self);
-    }
-
-    /// 事前取得済みの変更前スナップショット `pre_mutation_snapshot` を Undo 履歴に記録し、
-    /// 現在の `self.canvas.shapes` をタイムライン `Cel` へ自動同期する単一コミットAPI
-    pub(crate) fn commit_canvas_mutation(&mut self, pre_mutation_snapshot: Vec<FillShape>) {
-        canvas_tool::stop_playback(self);
-        self.record_undo_snapshot(pre_mutation_snapshot);
-        canvas_tool::sync_shapes_to_timeline(self);
-    }
-
     pub(crate) fn undo(&mut self) {
-        canvas_tool::flush_canvas_before_timeline_op(self);
-        if let Some(prev_entry) = self.history.pop_undo() {
-            let curr = self.restore_state_snapshot(prev_entry);
-            self.history.push_redo(curr);
-        }
+        self.timeline_ui.sync_with_doc(&mut self.doc);
+        self.doc.undo();
+        self.timeline_ui.sync_with_doc(&mut self.doc);
     }
 
     pub(crate) fn redo(&mut self) {
-        canvas_tool::flush_canvas_before_timeline_op(self);
-        if let Some(next_entry) = self.history.pop_redo() {
-            let curr = self.restore_state_snapshot(next_entry);
-            self.history.push_undo_from_redo(curr);
+        self.timeline_ui.sync_with_doc(&mut self.doc);
+        self.doc.redo();
+        self.timeline_ui.sync_with_doc(&mut self.doc);
+    }
+
+    /// UIパネルから収集した `UiAction` を一括ディスパッチする
+    pub(crate) fn apply_action(&mut self, action: UiAction, ctx: &egui::Context) {
+        match action {
+            UiAction::NewProject => project_io::new_project(self, ctx),
+            UiAction::OpenProjectDialog => project_io::open_project_dialog(self, ctx),
+            UiAction::SaveProject => project_io::save_project(self, ctx),
+            UiAction::SaveProjectAsDialog => project_io::save_project_as_dialog(self, ctx),
+            UiAction::CloseActiveTab => project_io::close_active_tab(self, Some(ctx)),
+            UiAction::CloseTab(idx) => project_io::close_tab(self, idx, Some(ctx)),
+            UiAction::SwitchToTab(idx) => {
+                project_io::switch_to_tab(self, idx, Some(ctx));
+            }
+            UiAction::ConfirmPendingCloseSave => project_io::confirm_pending_close_save(self, ctx),
+            UiAction::ConfirmPendingCloseDiscard => {
+                project_io::confirm_pending_close_discard(self, ctx)
+            }
+            UiAction::ConfirmPendingCloseCancel => {
+                project_io::confirm_pending_close_cancel(self, ctx)
+            }
+            UiAction::Undo => self.undo(),
+            UiAction::Redo => self.redo(),
+            UiAction::CutSelected => {
+                canvas_tool::stop_playback(&mut self.doc);
+                clipboard_ops::cut_selected_shapes(&mut self.doc);
+            }
+            UiAction::CopySelected => {
+                canvas_tool::stop_playback(&mut self.doc);
+                clipboard_ops::copy_selected_shapes(&mut self.doc);
+            }
+            UiAction::PasteClipboard { in_place } => {
+                canvas_tool::stop_playback(&mut self.doc);
+                clipboard_ops::paste_clipboard(&mut self.doc, in_place);
+            }
+            UiAction::DeleteSelected => {
+                canvas_tool::stop_playback(&mut self.doc);
+                select_ops::delete_selected_shapes(&mut self.doc);
+            }
+            UiAction::ClearActiveFrame => {
+                select_ops::clear_active_frame_shapes(&mut self.doc);
+            }
+            UiAction::SetTool(tool) => {
+                canvas_tool::set_tool(&mut self.doc, tool);
+            }
+            UiAction::ToggleSelectSubMode(mode) => {
+                canvas_tool::toggle_select_sub_mode(&mut self.doc, mode);
+            }
+            UiAction::ResetView => {
+                self.doc.viewport.reset_view();
+            }
+            UiAction::FitStageToWindow => {
+                self.doc.viewport.fit_stage_to_window();
+            }
+            UiAction::ExitGroupSteps(steps) => {
+                for _ in 0..steps {
+                    if !select_ops::exit_current_group(&mut self.doc) {
+                        break;
+                    }
+                }
+            }
+            UiAction::GroupSelected => {
+                select_ops::group_selected_shapes(&mut self.doc);
+            }
+            UiAction::UngroupSelected => {
+                select_ops::ungroup_selected_shapes(&mut self.doc);
+            }
+            UiAction::FlipSelected { flip_x, flip_y } => {
+                tool_transform::flip_selected_shapes(&mut self.doc, flip_x, flip_y);
+            }
+            UiAction::RotateSelected(angle) => {
+                tool_transform::rotate_selected_shapes(&mut self.doc, angle);
+            }
+            UiAction::ResetTransformPivot => {
+                tool_transform::reset_selected_transform_pivot(&mut self.doc);
+            }
+            UiAction::ConvertSelectionToSymbol => {
+                symbol_ops::convert_selection_to_symbol(&mut self.doc);
+            }
+            UiAction::SetTweenRotate(rotate) => {
+                symbol_ops::set_active_keyframe_tween_rotate(&mut self.doc, rotate);
+            }
+            UiAction::SetSymbolPlayback {
+                loop_mode,
+                first_frame,
+                drag_active,
+            } => {
+                symbol_ops::set_selected_symbol_playback(&mut self.doc, loop_mode, first_frame);
+                self.doc.ui.editing_symbol_playback = drag_active;
+            }
+            UiAction::EnterSymbolTimeline(binding) => {
+                symbol_ops::enter_symbol_timeline(&mut self.doc, binding);
+            }
+            UiAction::PlaceSymbolFromLibrary(sym_id) => {
+                symbol_ops::place_symbol_instance_from_library(&mut self.doc, sym_id);
+            }
+            UiAction::EnterSymbolFromLibrary(sym_id) => {
+                symbol_ops::enter_symbol_from_library(&mut self.doc, sym_id);
+            }
+            UiAction::DeleteSymbolFromLibrary(sym_id) => {
+                symbol_ops::delete_symbol_from_library(&mut self.doc, sym_id);
+            }
+            UiAction::RenameSymbolInLibrary { sym_id, new_name } => {
+                if symbol_ops::rename_symbol_in_library(&mut self.doc, sym_id, new_name) {
+                    self.doc.symbols.actively_renaming_symbol = Some(sym_id);
+                }
+            }
         }
+        self.timeline_ui.sync_with_doc(&mut self.doc);
     }
 
     // ------------------------------------------------------------------------
@@ -581,14 +355,14 @@ impl Is2dApp {
         if key_pressed_no_repeat(&input, Key::Delete)
             || key_pressed_no_repeat(&input, Key::Backspace)
         {
-            tool_select::delete_selected_shapes(self);
+            select_ops::delete_selected_shapes(&mut self.doc);
         }
 
         self.handle_command_shortcuts(&input, cmd, copy_event, cut_event, paste_event);
     }
 
     fn handle_single_key_shortcuts(&mut self, i: &egui::InputState, shift: bool) {
-        if !self.canvas.selected_shapes.is_empty() {
+        if !self.doc.canvas.selected_shapes.is_empty() {
             let step = if shift { 10.0 } else { 1.0 };
             let mut delta = kurbo::Vec2::ZERO;
             let mut any_non_repeat = false;
@@ -623,13 +397,13 @@ impl Is2dApp {
             }
             if delta != kurbo::Vec2::ZERO {
                 if any_non_repeat {
-                    let _ = tool_select::nudge_selected_shapes(self, delta);
+                    let _ = select_ops::nudge_selected_shapes(&mut self.doc, delta);
                 } else {
-                    canvas_tool::stop_playback(self);
-                    canvas_tool::cancel_active_drag(self);
-                    self.canvas.translate_selected(delta);
-                    self.canvas.selection_modified = true;
-                    canvas_tool::sync_shapes_to_timeline(self);
+                    canvas_tool::stop_playback(&mut self.doc);
+                    canvas_tool::cancel_active_drag(&mut self.doc);
+                    self.doc.canvas.translate_selected(delta);
+                    self.doc.canvas.selection_modified = true;
+                    canvas_tool::sync_shapes_to_timeline(&mut self.doc);
                 }
                 return;
             }
@@ -642,41 +416,43 @@ impl Is2dApp {
         } else if i.key_pressed(Key::Period) || i.key_pressed(Key::ArrowRight) {
             timeline_ui::step_frame(self, 1);
         } else if key_pressed_no_repeat(i, Key::Home) {
-            timeline_ui::switch_to_layer_and_frame(self, self.timeline.active_layer, 0);
+            let act = self.doc.timeline.active_layer;
+            timeline_ui::switch_to_layer_and_frame(&mut self.doc, act, 0);
         } else if key_pressed_no_repeat(i, Key::End) {
-            let last = self.timeline.total_frames.saturating_sub(1);
-            timeline_ui::switch_to_layer_and_frame(self, self.timeline.active_layer, last);
+            let last = self.doc.timeline.total_frames.saturating_sub(1);
+            let act = self.doc.timeline.active_layer;
+            timeline_ui::switch_to_layer_and_frame(&mut self.doc, act, last);
         } else if i.key_pressed(Key::F6) {
             if shift {
-                timeline_ui::timeline_delete_keyframe(self);
+                timeline_ui::timeline_delete_keyframe(&mut self.doc);
             } else {
-                timeline_ui::timeline_insert_keyframe(self, true);
+                timeline_ui::timeline_insert_keyframe(&mut self.doc, true);
             }
         } else if i.key_pressed(Key::F7) {
-            timeline_ui::timeline_insert_keyframe(self, false);
+            timeline_ui::timeline_insert_keyframe(&mut self.doc, false);
         } else if key_pressed_no_repeat(i, Key::F8) {
-            canvas_tool::convert_selection_to_symbol(self);
+            symbol_ops::convert_selection_to_symbol(&mut self.doc);
         } else if i.key_pressed(Key::F5) {
             if shift {
-                timeline_ui::timeline_remove_frame(self);
+                timeline_ui::timeline_remove_frame(&mut self.doc);
             } else {
-                timeline_ui::timeline_extend_frame(self);
+                timeline_ui::timeline_extend_frame(&mut self.doc);
             }
         } else if key_pressed_no_repeat(i, Key::O) {
             self.timeline_ui.onion_skin_enabled = !self.timeline_ui.onion_skin_enabled;
         } else if key_pressed_no_repeat(i, Key::T) {
-            canvas_tool::timeline_toggle_tween(self);
+            symbol_ops::timeline_toggle_tween(&mut self.doc);
         } else if let Some(tool) = Tool::from_shortcut_input(i) {
-            canvas_tool::set_tool(self, tool);
+            canvas_tool::set_tool(&mut self.doc, tool);
         } else if key_pressed_no_repeat(i, Key::Escape) {
-            canvas_tool::cancel_active_drag(self);
-            if !self.canvas.selected_shapes.is_empty() {
-                canvas_tool::clear_selection(self);
+            canvas_tool::cancel_active_drag(&mut self.doc);
+            if !self.doc.canvas.selected_shapes.is_empty() {
+                canvas_tool::clear_selection(&mut self.doc);
             } else {
-                canvas_tool::exit_current_group(self);
+                select_ops::exit_current_group(&mut self.doc);
             }
-            self.ui.select_sub_mode = SelectSubMode::Reshape;
-        } else if self.ui.tool == Tool::Select {
+            self.doc.ui.select_sub_mode = SelectSubMode::Reshape;
+        } else if self.doc.ui.tool == Tool::Select {
             let has_repeat_key = i.events.iter().any(|ev| {
                 matches!(
                     ev,
@@ -701,9 +477,9 @@ impl Is2dApp {
                     ));
 
             if plus_pressed {
-                canvas_tool::toggle_select_sub_mode(self, SelectSubMode::AddAnchor);
+                canvas_tool::toggle_select_sub_mode(&mut self.doc, SelectSubMode::AddAnchor);
             } else if minus_pressed {
-                canvas_tool::toggle_select_sub_mode(self, SelectSubMode::DeleteAnchor);
+                canvas_tool::toggle_select_sub_mode(&mut self.doc, SelectSubMode::DeleteAnchor);
             }
         }
     }
@@ -728,28 +504,28 @@ impl Is2dApp {
             )
         });
         let v_released_fallback =
-            cmd && v_release_event && !self.canvas.paste_triggered_on_press;
+            cmd && v_release_event && !self.doc.canvas.paste_triggered_on_press;
         if v_release_event {
-            self.canvas.paste_triggered_on_press = false;
+            self.doc.canvas.paste_triggered_on_press = false;
         }
 
         if copy_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::C)) {
-            tool_select::copy_selected_shapes(self);
+            clipboard_ops::copy_selected_shapes(&mut self.doc);
         } else if cut_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::X)) {
-            tool_select::cut_selected_shapes(self);
+            clipboard_ops::cut_selected_shapes(&mut self.doc);
         } else if paste_event || v_pressed_no_repeat {
-            self.canvas.paste_triggered_on_press = true;
-            tool_select::paste_clipboard(self, i.modifiers.shift);
+            self.doc.canvas.paste_triggered_on_press = true;
+            clipboard_ops::paste_clipboard(&mut self.doc, i.modifiers.shift);
         } else if v_released_fallback {
-            tool_select::paste_clipboard(self, i.modifiers.shift);
+            clipboard_ops::paste_clipboard(&mut self.doc, i.modifiers.shift);
         } else if cmd
             && (key_pressed_no_repeat(i, Key::Num1) || key_pressed_no_repeat(i, Key::Num0))
         {
-            self.viewport.reset_view();
+            self.doc.viewport.reset_view();
         } else if cmd && key_pressed_no_repeat(i, Key::Num2) {
-            self.viewport.fit_stage_to_window();
+            self.doc.viewport.fit_stage_to_window();
         } else if cmd && key_pressed_no_repeat(i, Key::Num3) {
-            self.viewport.clip_outside_stage = !self.viewport.clip_outside_stage;
+            self.doc.viewport.clip_outside_stage = !self.doc.viewport.clip_outside_stage;
         } else if cmd
             && (i.key_pressed(Key::Plus)
                 || i.key_pressed(Key::Equals)
@@ -758,22 +534,22 @@ impl Is2dApp {
             let center = i
                 .pointer
                 .hover_pos()
-                .unwrap_or_else(|| self.viewport.last_canvas_rect.center());
-            self.viewport.zoom_around_screen_pos(center, 1.25);
+                .unwrap_or_else(|| self.doc.viewport.last_canvas_rect.center());
+            self.doc.viewport.zoom_around_screen_pos(center, 1.25);
         } else if cmd && i.key_pressed(Key::Minus) {
             let center = i
                 .pointer
                 .hover_pos()
-                .unwrap_or_else(|| self.viewport.last_canvas_rect.center());
-            self.viewport.zoom_around_screen_pos(center, 0.8);
+                .unwrap_or_else(|| self.doc.viewport.last_canvas_rect.center());
+            self.doc.viewport.zoom_around_screen_pos(center, 0.8);
         } else if cmd && key_pressed_no_repeat(i, Key::G) {
             if i.modifiers.shift {
-                tool_select::ungroup_selected_shapes(self);
+                select_ops::ungroup_selected_shapes(&mut self.doc);
             } else {
-                tool_select::group_selected_shapes(self);
+                select_ops::group_selected_shapes(&mut self.doc);
             }
         } else if cmd && key_pressed_no_repeat(i, Key::B) {
-            tool_select::ungroup_selected_shapes(self);
+            select_ops::ungroup_selected_shapes(&mut self.doc);
         } else if cmd && i.key_pressed(Key::Z) {
             if i.modifiers.shift {
                 self.redo();
@@ -790,10 +566,12 @@ impl Is2dApp {
     // ------------------------------------------------------------------------
 
     fn is_current_tool_allowed(&self) -> bool {
-        match self.ui.tool {
+        match self.doc.ui.tool {
             Tool::Eyedropper => true,
-            Tool::Brush | Tool::Eraser | Tool::Bucket => self.timeline.is_active_layer_editable(),
-            Tool::Select | Tool::Transform => self.timeline.has_any_editable_layer(),
+            Tool::Brush | Tool::Eraser | Tool::Bucket => {
+                self.doc.timeline.is_active_layer_editable()
+            }
+            Tool::Select | Tool::Transform => self.doc.timeline.has_any_editable_layer(),
         }
     }
 
@@ -810,63 +588,50 @@ impl Is2dApp {
                 || response.drag_started_by(egui::PointerButton::Primary)
                 || response.clicked_by(egui::PointerButton::Primary);
             if canvas_interacted {
-                canvas_tool::stop_playback(self);
+                canvas_tool::stop_playback(&mut self.doc);
+                self.timeline_ui.sync_with_doc(&mut self.doc);
             } else {
                 return;
             }
         }
-        if self.ui.tool == Tool::Eyedropper {
+        if self.doc.ui.tool == Tool::Eyedropper {
             let sampling = (response.hovered() && ui.input(|i| i.pointer.primary_pressed()))
                 || response.dragged_by(egui::PointerButton::Primary)
                 || response.clicked_by(egui::PointerButton::Primary);
             if sampling {
                 if let Some(pt) = mouse_pt {
-                    tool_paint::pick_color_at(self, pt);
+                    tool_paint::pick_color_at(&mut self.doc, pt);
                 }
             }
         } else if tool_allowed {
-            match self.ui.tool {
+            match self.doc.ui.tool {
                 Tool::Brush | Tool::Eraser => {
-                    tool_paint::handle_brush_or_eraser_input(self, response, mouse_pt);
+                    tool_paint::handle_brush_or_eraser_input(&mut self.doc, response, mouse_pt);
                 }
                 Tool::Bucket => {
                     let just_pressed =
                         response.hovered() && ui.input(|i| i.pointer.primary_pressed());
                     if just_pressed {
                         if let Some(pt) = mouse_pt {
-                            tool_paint::bucket_fill_at(self, pt);
+                            tool_paint::bucket_fill_at(&mut self.doc, pt);
                         }
                     }
                 }
                 Tool::Eyedropper => {}
                 Tool::Select => {
-                    tool_select::handle_select_tool_input(self, ui, response, mouse_pt);
+                    tool_select::handle_select_tool_input(&mut self.doc, ui, response, mouse_pt);
                 }
                 Tool::Transform => {
-                    tool_transform::handle_transform_tool_input(self, ui, response, mouse_pt);
+                    tool_transform::handle_transform_tool_input(
+                        &mut self.doc,
+                        ui,
+                        response,
+                        mouse_pt,
+                    );
                 }
             }
         }
-    }
-
-    /// キャンバス左上に一定時間自動で消える通知メッセージを表示する共通メソッド
-    pub(crate) fn show_notice(&mut self, kind: NoticeKind, message: impl Into<String>) {
-        self.ui.show_notice(kind, message);
-    }
-
-    /// 警告・条件不足のトースト通知をキャンバス左上に表示する
-    pub(crate) fn notify_warning(&mut self, message: impl Into<String>) {
-        self.show_notice(NoticeKind::Warning, message);
-    }
-
-    /// エラーのトースト通知をキャンバス左上に表示する
-    pub(crate) fn notify_error(&mut self, message: impl Into<String>) {
-        self.show_notice(NoticeKind::Error, message);
-    }
-
-    /// 案内・情報のトースト通知をキャンバス左上に表示する
-    pub(crate) fn notify_info(&mut self, message: impl Into<String>) {
-        self.show_notice(NoticeKind::Info, message);
+        self.timeline_ui.sync_with_doc(&mut self.doc);
     }
 
     /// 現在のレイヤー・フレーム状態から常時表示すべき状態連動メッセージを判定する
@@ -875,11 +640,12 @@ impl Is2dApp {
             return None;
         }
         let is_uncreated_frame = self
+            .doc
             .timeline
             .layers
-            .get(self.timeline.active_layer)
+            .get(self.doc.timeline.active_layer)
             .is_some_and(|l| {
-                l.visible && !l.locked && self.timeline.current_frame >= l.frame_count
+                l.visible && !l.locked && self.doc.timeline.current_frame >= l.frame_count
             });
         if is_uncreated_frame {
             Some((
@@ -907,7 +673,7 @@ impl Is2dApp {
             notices.push((kind, msg.to_owned()));
         }
 
-        if let Some(toast) = &self.ui.status_toast {
+        if let Some(toast) = &self.doc.ui.status_toast {
             let now = Instant::now();
             if now < toast.expires_at {
                 ctx.request_repaint_after(toast.expires_at.saturating_duration_since(now));
@@ -915,7 +681,7 @@ impl Is2dApp {
                     notices.push((toast.kind, toast.message.clone()));
                 }
             } else {
-                self.ui.status_toast = None;
+                self.doc.ui.status_toast = None;
             }
         }
 
@@ -965,27 +731,52 @@ impl Is2dApp {
         } else if !tool_allowed {
             ctx.set_cursor_icon(CursorIcon::NotAllowed);
         } else {
-            panels::draw_tool_cursor_and_feedback(self, ctx, painter, pos);
+            panels::draw_tool_cursor_and_feedback(&self.doc, ctx, painter, pos);
         }
     }
+
     pub(crate) fn update_ui(&mut self, ctx: &egui::Context) {
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         project_io::handle_viewport_close_request(self, ctx);
         timeline_ui::update_playback(self, ctx);
         self.handle_shortcuts(ctx);
-        panels::draw_top_menu_bar(self, ctx);
-        panels::draw_left_toolbar(self, ctx);
-        panels::draw_right_properties_panel(self, ctx);
+        self.timeline_ui.sync_with_doc(&mut self.doc);
+
+        let mut actions = Vec::new();
+        panels::draw_top_menu_bar(&mut self.doc, &mut self.timeline_ui, &mut actions, ctx);
+        for action in actions.drain(..) {
+            self.apply_action(action, ctx);
+        }
+
+        panels::draw_left_toolbar(&mut self.doc, &mut actions, ctx);
+        for action in actions.drain(..) {
+            self.apply_action(action, ctx);
+        }
+
+        panels::draw_right_properties_panel(&mut self.doc, &mut actions, ctx);
+        for action in actions.drain(..) {
+            self.apply_action(action, ctx);
+        }
+
         timeline_ui::draw_timeline_panel(self, ctx);
-        panels::draw_document_tab_bar(self, ctx);
-        panels::draw_stage_header_bar(self, ctx);
+
+        project_io::update_window_title(self, ctx);
+        panels::draw_document_tab_bar(&self.doc, &self.tabs, &mut actions, ctx);
+        for action in actions.drain(..) {
+            self.apply_action(action, ctx);
+        }
+
+        panels::draw_stage_header_bar(&self.doc, &mut actions, ctx);
+        for action in actions.drain(..) {
+            self.apply_action(action, ctx);
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::from_rgb(244, 245, 248)))
             .show(ctx, |ui| {
                 let (canvas_rect, response) =
                     ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
-                self.viewport.last_canvas_rect = canvas_rect;
+                self.doc.viewport.last_canvas_rect = canvas_rect;
                 let painter = ui.painter_at(canvas_rect);
 
                 let pointer_pos = response
@@ -994,32 +785,34 @@ impl Is2dApp {
 
                 // 0. ビューポートのズーム・パン移動操作ハンドリング
                 let pan_state @ (is_panning, _) =
-                    self.viewport
+                    self.doc
+                        .viewport
                         .handle_navigation(ui, canvas_rect, pointer_pos);
 
-                let mouse_pt = pointer_pos.map(|p| self.viewport.screen_to_world(p));
+                let mouse_pt = pointer_pos.map(|p| self.doc.viewport.screen_to_world(p));
                 let tool_allowed = self.is_current_tool_allowed();
 
                 // 1. ツール別のマウス入力ハンドリング（パン操作開始時は進行中のドラッグをキャンセルしてスキップ）
                 if is_panning {
-                    canvas_tool::cancel_active_drag(self);
+                    canvas_tool::cancel_active_drag(&mut self.doc);
                 } else {
                     self.handle_canvas_tool_input(ui, &response, mouse_pt, tool_allowed);
                 }
 
-                let in_symbol_edit = !self.symbols.edit_stack.is_empty();
+                let in_symbol_edit = !self.doc.symbols.edit_stack.is_empty();
 
                 // 2. ステージ背景（ペーストボード＋白いステージ矩形）の描画
-                self.viewport
+                self.doc
+                    .viewport
                     .draw_stage_background(&painter, canvas_rect, in_symbol_edit);
 
                 // 3. キャンバス上のシェイプ・オニオンスキン・ステージ枠線・選択枠・プレビューの描画
-                panels::draw_canvas_contents(self, &painter);
+                panels::draw_canvas_contents(&mut self.doc, &self.timeline_ui, &painter);
 
                 // 4. 状態連動の警告バッジおよび一時トースト通知を描画
                 self.draw_canvas_notices(ctx, &painter, canvas_rect, tool_allowed);
 
-                // 3. カーソル表示とホバー・ドラッグ視覚フィードバック
+                // 5. カーソル表示とホバー・ドラッグ視覚フィードバック
                 self.update_canvas_cursor(
                     ctx,
                     &painter,
@@ -1030,7 +823,10 @@ impl Is2dApp {
                 );
             });
 
-        panels::draw_unsaved_close_confirm_modal(self, ctx);
+        panels::draw_unsaved_close_confirm_modal(&self.doc, &self.tabs, &mut actions, ctx);
+        for action in actions.drain(..) {
+            self.apply_action(action, ctx);
+        }
     }
 }
 

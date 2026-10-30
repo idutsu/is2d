@@ -1,19 +1,25 @@
 use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
-use crate::canvas_tool::{ActiveCanvasDrag, CanvasState, MarqueeDrag, ViewportState};
-pub(crate) use crate::canvas_tool::{
-    selected_single_symbol_info, ScaleHandle, TransformDragState, TransformHoverTarget,
+use crate::canvas_tool::{
+    cancel_active_drag, clear_selection, commit_moved_selection, finish_move_selection_drag,
+    ActiveCanvasDrag, CanvasState, EditorDoc, MarqueeDrag, ViewportState,
 };
+pub(crate) use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
+use crate::clipboard_ops::begin_move_selection_drag;
+use crate::select_ops::{
+    apply_marquee_selection, compute_hover_target, handle_canvas_double_click,
+    retain_selection_and_flush_deselected, select_single_shape_at, toggle_shape_selection,
+};
+pub(crate) use crate::symbol_ops::selected_single_symbol_info;
 #[cfg(test)]
-pub(crate) use crate::canvas_tool::{
+pub(crate) use crate::symbol_ops::{
     convert_selection_to_symbol, delete_symbol_from_library, enter_symbol_from_library,
     enter_symbol_timeline, exit_symbol_timeline, place_symbol_instance_from_library,
     rename_symbol_in_library, set_active_keyframe_tween_rotate, set_selected_symbol_playback,
     timeline_toggle_tween,
 };
 use crate::vector_engine::{affine_rotate_around, affine_scale_around};
-use crate::Is2dApp;
 
 // ============================================================================
 // 自由変形ツール（Tool::Transform / Q キー）の型定義・操作・アフィン変換・変形枠描画
@@ -22,11 +28,11 @@ use crate::Is2dApp;
 /// 単一のシンボルインスタンスが選択されている場合、ワールド座標 `world_pivot`（`None` なら初期基準点 `(0, 0)`）を
 /// シンボルローカル座標に変換してインスタンスの `binding.pivot` に保存する
 pub(crate) fn set_selected_symbol_world_pivot(
-    app: &mut Is2dApp,
+    doc: &mut EditorDoc,
     world_pivot: Option<Point>,
     commit_to_timeline: bool,
 ) -> bool {
-    let Some(binding) = app.canvas.selected_single_symbol_binding() else {
+    let Some(binding) = doc.canvas.selected_single_symbol_binding() else {
         return false;
     };
     let new_local_pivot = match world_pivot {
@@ -41,99 +47,99 @@ pub(crate) fn set_selected_symbol_world_pivot(
     if (new_local_pivot - binding.pivot).hypot() <= 1e-7 {
         return true;
     }
-    if !app.canvas.selection_modified {
-        if let Some(mut unsliced) = app.canvas.take_unsliced_snapshot() {
-            app.canvas.salvage_caches_into(&mut unsliced);
-            app.canvas.shapes = unsliced;
-            app.canvas.select_symbol_instance_by_gid(binding.instance_gid);
+    if !doc.canvas.selection_modified {
+        if let Some(mut unsliced) = doc.canvas.take_unsliced_snapshot() {
+            doc.canvas.salvage_caches_into(&mut unsliced);
+            doc.canvas.shapes = unsliced;
+            doc.canvas.select_symbol_instance_by_gid(binding.instance_gid);
         }
     }
     let undo_snapshot =
-        commit_to_timeline.then(|| app.canvas.take_or_clone_unsliced_snapshot());
-    app.canvas
+        commit_to_timeline.then(|| doc.canvas.take_or_clone_unsliced_snapshot());
+    doc.canvas
         .update_symbol_instance_binding(binding.instance_gid, |b| b.pivot = new_local_pivot);
     if let Some(snapshot) = undo_snapshot {
-        app.commit_canvas_mutation(snapshot);
+        doc.commit_canvas_mutation(snapshot);
     }
     true
 }
 
 /// 選択オブジェクトの変形中心（ピボット）を初期位置（選択中央、またはシンボルの基準点 `(0, 0)`）へリセットする
-pub(crate) fn reset_selected_transform_pivot(app: &mut Is2dApp) -> bool {
-    let mut changed = app.canvas.transform_pivot.take().is_some();
-    if set_selected_symbol_world_pivot(app, None, true) {
+pub(crate) fn reset_selected_transform_pivot(doc: &mut EditorDoc) -> bool {
+    let mut changed = doc.canvas.transform_pivot.take().is_some();
+    if set_selected_symbol_world_pivot(doc, None, true) {
         changed = true;
     }
     changed
 }
 
-fn flush_transform_pivot_to_symbol(app: &mut Is2dApp) {
-    if let Some(piv) = app.canvas.transform_pivot {
-        if set_selected_symbol_world_pivot(app, Some(piv), false) {
-            app.canvas.transform_pivot = None;
+fn flush_transform_pivot_to_symbol(doc: &mut EditorDoc) {
+    if let Some(piv) = doc.canvas.transform_pivot {
+        if set_selected_symbol_world_pivot(doc, Some(piv), false) {
+            doc.canvas.transform_pivot = None;
         }
     }
 }
 
 /// 選択中のオブジェクトを現在の基準点（ピボット）中心にアフィン変換する
-pub(crate) fn apply_affine_to_selected(app: &mut Is2dApp, affine: Affine) -> bool {
-    crate::canvas_tool::cancel_active_drag(app);
-    if app.canvas.selected_shapes.is_empty() {
+pub(crate) fn apply_affine_to_selected(doc: &mut EditorDoc, affine: Affine) -> bool {
+    cancel_active_drag(doc);
+    if doc.canvas.selected_shapes.is_empty() {
         return false;
     }
-    let undo_snapshot = app.canvas.take_or_clone_unsliced_snapshot();
-    flush_transform_pivot_to_symbol(app);
-    let any_transformed = app.canvas.transform_selected(affine);
+    let undo_snapshot = doc.canvas.take_or_clone_unsliced_snapshot();
+    flush_transform_pivot_to_symbol(doc);
+    let any_transformed = doc.canvas.transform_selected(affine);
     if any_transformed {
-        crate::canvas_tool::commit_moved_selection(app, undo_snapshot);
+        commit_moved_selection(doc, undo_snapshot);
     }
     any_transformed
 }
 
 /// 選択中のオブジェクトを現在の基準点（ピボット）中心に `(sx, sy)` 倍に拡大・縮小（または反転）する
-pub(crate) fn scale_selected_shapes(app: &mut Is2dApp, sx: f64, sy: f64) -> bool {
-    let Some(bbox) = app.canvas.selection_bounding_box(app.viewport.zoom) else {
+pub(crate) fn scale_selected_shapes(doc: &mut EditorDoc, sx: f64, sy: f64) -> bool {
+    let Some(bbox) = doc.canvas.selection_bounding_box(doc.viewport.zoom) else {
         return false;
     };
-    let pivot = app.canvas.active_transform_pivot(bbox);
-    apply_affine_to_selected(app, affine_scale_around(pivot, sx, sy))
+    let pivot = doc.canvas.active_transform_pivot(bbox);
+    apply_affine_to_selected(doc, affine_scale_around(pivot, sx, sy))
 }
 
 /// 選択中のオブジェクトを左右反転（`flip_x`）または上下反転（`flip_y`）する
-pub(crate) fn flip_selected_shapes(app: &mut Is2dApp, flip_x: bool, flip_y: bool) -> bool {
+pub(crate) fn flip_selected_shapes(doc: &mut EditorDoc, flip_x: bool, flip_y: bool) -> bool {
     scale_selected_shapes(
-        app,
+        doc,
         if flip_x { -1.0 } else { 1.0 },
         if flip_y { -1.0 } else { 1.0 },
     )
 }
 
 /// 選択中のオブジェクトを現在の基準点（ピボット）中心に `angle_rad` 回転する
-pub(crate) fn rotate_selected_shapes(app: &mut Is2dApp, angle_rad: f64) -> bool {
-    let Some(bbox) = app.canvas.selection_bounding_box(app.viewport.zoom) else {
+pub(crate) fn rotate_selected_shapes(doc: &mut EditorDoc, angle_rad: f64) -> bool {
+    let Some(bbox) = doc.canvas.selection_bounding_box(doc.viewport.zoom) else {
         return false;
     };
-    let pivot = app.canvas.active_transform_pivot(bbox);
-    apply_affine_to_selected(app, affine_rotate_around(pivot, angle_rad))
+    let pivot = doc.canvas.active_transform_pivot(bbox);
+    apply_affine_to_selected(doc, affine_rotate_around(pivot, angle_rad))
 }
 
 /// 自由変形ツール（`Tool::Transform` / `Q`）のマウス入力処理
 pub(crate) fn handle_transform_tool_input(
-    app: &mut Is2dApp,
+    doc: &mut EditorDoc,
     ui: &egui::Ui,
     response: &egui::Response,
     mouse_pt: Option<Point>,
 ) {
     let shift_held = ui.input(|i| i.modifiers.shift);
     let alt_held = ui.input(|i| i.modifiers.alt);
-    let zoom = app.viewport.zoom;
+    let zoom = doc.viewport.zoom;
 
     if response.double_clicked_by(PointerButton::Primary) {
         if let Some(pt) = mouse_pt {
-            if compute_transform_hover(&app.canvas, pt, zoom) == TransformHoverTarget::Pivot {
-                reset_selected_transform_pivot(app);
+            if compute_transform_hover(&doc.canvas, pt, zoom) == TransformHoverTarget::Pivot {
+                reset_selected_transform_pivot(doc);
             } else {
-                crate::canvas_tool::handle_canvas_double_click(app, pt);
+                handle_canvas_double_click(doc, pt);
             }
         }
         return;
@@ -142,41 +148,46 @@ pub(crate) fn handle_transform_tool_input(
     if response.drag_started_by(PointerButton::Primary) {
         let press_pt = ui
             .input(|i| i.pointer.press_origin())
-            .map(|p| app.viewport.screen_to_world(p));
+            .map(|p| doc.viewport.screen_to_world(p));
         if let Some(start_pt) = press_pt.or(mouse_pt) {
-            start_transform_drag(app, start_pt, shift_held, alt_held);
+            start_transform_drag(doc, start_pt, shift_held, alt_held);
             if let Some(curr_pt) = mouse_pt {
                 if (curr_pt - start_pt).hypot() > 1e-6 {
-                    update_transform_drag(app, curr_pt, shift_held, alt_held);
+                    update_transform_drag(doc, curr_pt, shift_held, alt_held);
                 }
             }
         }
     } else if response.dragged_by(PointerButton::Primary) {
         if let Some(pt) = mouse_pt {
-            update_transform_drag(app, pt, shift_held, alt_held);
+            update_transform_drag(doc, pt, shift_held, alt_held);
         }
     }
     if response.drag_stopped_by(PointerButton::Primary) {
-        finish_transform_drag(app, mouse_pt);
+        finish_transform_drag(doc, mouse_pt);
     } else if response.clicked_by(PointerButton::Primary) {
         if let Some(pt) = mouse_pt {
-            handle_transform_click(app, pt, shift_held);
+            handle_transform_click(doc, pt, shift_held);
         }
     }
 
-    if !matches!(app.canvas.drag, ActiveCanvasDrag::Transform(_)) {
-        app.canvas.transform_hover = mouse_pt
-            .map(|pt| compute_transform_hover(&app.canvas, pt, app.viewport.zoom))
+    if !matches!(doc.canvas.drag, ActiveCanvasDrag::Transform(_)) {
+        doc.canvas.transform_hover = mouse_pt
+            .map(|pt| compute_transform_hover(&doc.canvas, pt, doc.viewport.zoom))
             .unwrap_or(TransformHoverTarget::None);
     }
 }
 
-pub(crate) fn start_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held: bool) {
-    app.ui.inspect_timeline_frame = false;
-    let zoom = app.viewport.zoom;
-    let hover = compute_transform_hover(&app.canvas, pt, zoom);
+pub(crate) fn start_transform_drag(
+    doc: &mut EditorDoc,
+    pt: Point,
+    shift_held: bool,
+    alt_held: bool,
+) {
+    doc.ui.inspect_timeline_frame = false;
+    let zoom = doc.viewport.zoom;
+    let hover = compute_transform_hover(&doc.canvas, pt, zoom);
     if shift_held && hover == TransformHoverTarget::None {
-        app.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::MarqueeSelect(
+        doc.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::MarqueeSelect(
             MarqueeDrag::new(pt, true),
         ));
         return;
@@ -184,81 +195,75 @@ pub(crate) fn start_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: boo
 
     match hover {
         TransformHoverTarget::Pivot => {
-            if let Some(binding) = app.canvas.selected_single_symbol_binding() {
-                if !app.canvas.selection_modified {
-                    if let Some(mut unsliced) = app.canvas.take_unsliced_snapshot() {
-                        app.canvas.salvage_caches_into(&mut unsliced);
-                        app.canvas.shapes = unsliced;
-                        app.canvas.select_symbol_instance_by_gid(binding.instance_gid);
+            if let Some(binding) = doc.canvas.selected_single_symbol_binding() {
+                if !doc.canvas.selection_modified {
+                    if let Some(mut unsliced) = doc.canvas.take_unsliced_snapshot() {
+                        doc.canvas.salvage_caches_into(&mut unsliced);
+                        doc.canvas.shapes = unsliced;
+                        doc.canvas.select_symbol_instance_by_gid(binding.instance_gid);
                     }
                 }
             }
-            if let Some(bbox) = app.canvas.selection_bounding_box(zoom) {
-                let orig_pivot = app.canvas.active_transform_pivot(bbox);
-                app.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::MovePivot {
+            if let Some(bbox) = doc.canvas.selection_bounding_box(zoom) {
+                let orig_pivot = doc.canvas.active_transform_pivot(bbox);
+                doc.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::MovePivot {
                     orig_pivot,
-                    undo_snapshot: app.canvas.snapshot_for_drag(),
+                    undo_snapshot: doc.canvas.snapshot_for_drag(),
                     changed: false,
                 });
             }
         }
         TransformHoverTarget::Scale(handle) => {
-            if let Some(orig_bbox) = app.canvas.selection_bounding_box(zoom) {
-                let undo_snapshot = app.canvas.snapshot_for_drag();
-                let orig_pivot = app.canvas.active_transform_pivot(orig_bbox);
-                flush_transform_pivot_to_symbol(app);
+            if let Some(orig_bbox) = doc.canvas.selection_bounding_box(zoom) {
+                let undo_snapshot = doc.canvas.snapshot_for_drag();
+                let orig_pivot = doc.canvas.active_transform_pivot(orig_bbox);
+                flush_transform_pivot_to_symbol(doc);
                 let anchor = if alt_held {
                     orig_pivot
                 } else {
                     handle.opposite_position(orig_bbox)
                 };
-                app.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::Scale {
+                doc.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::Scale {
                     handle,
                     anchor,
                     handle_start: handle.position(orig_bbox),
                     orig_pivot,
-                    orig_shapes: app.canvas.selected_shapes_snapshot(),
+                    orig_shapes: doc.canvas.selected_shapes_snapshot(),
                     undo_snapshot,
                     changed: false,
                 });
             }
         }
         TransformHoverTarget::Rotate => {
-            if let Some(orig_bbox) = app.canvas.selection_bounding_box(zoom) {
-                let undo_snapshot = app.canvas.snapshot_for_drag();
-                let pivot = app.canvas.active_transform_pivot(orig_bbox);
-                flush_transform_pivot_to_symbol(app);
-                app.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::Rotate {
+            if let Some(orig_bbox) = doc.canvas.selection_bounding_box(zoom) {
+                let undo_snapshot = doc.canvas.snapshot_for_drag();
+                let pivot = doc.canvas.active_transform_pivot(orig_bbox);
+                flush_transform_pivot_to_symbol(doc);
+                doc.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::Rotate {
                     orig_bbox,
                     pivot,
                     start_angle: (pt.y - pivot.y).atan2(pt.x - pivot.x),
                     current_angle: 0.0,
-                    orig_shapes: app.canvas.selected_shapes_snapshot(),
+                    orig_shapes: doc.canvas.selected_shapes_snapshot(),
                     undo_snapshot,
                 });
             }
         }
         TransformHoverTarget::Move => {
-            let move_drag = crate::canvas_tool::begin_move_selection_drag(app, pt, alt_held);
-            app.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
+            let move_drag = begin_move_selection_drag(doc, pt, alt_held);
+            doc.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
         }
         TransformHoverTarget::None => {
-            if let Some(hit_idx) = app.canvas.topmost_shape_at(pt).or_else(|| {
-                crate::canvas_tool::compute_hover_target(
-                    &app.canvas,
-                    pt,
-                    zoom,
-                    app.ui.select_sub_mode,
-                )
-                .shape_idx()
+            if let Some(hit_idx) = doc.canvas.topmost_shape_at(pt).or_else(|| {
+                compute_hover_target(&doc.canvas, pt, zoom, doc.ui.select_sub_mode).shape_idx()
             }) {
-                if !app.canvas.selected_shapes.contains(&hit_idx) {
-                    crate::canvas_tool::select_single_shape_at(app, pt);
+                if !doc.canvas.selected_shapes.contains(&hit_idx) {
+                    select_single_shape_at(doc, pt);
                 }
-                let move_drag = crate::canvas_tool::begin_move_selection_drag(app, pt, alt_held);
-                app.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
+                let move_drag = begin_move_selection_drag(doc, pt, alt_held);
+                doc.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
             } else {
-                app.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::MarqueeSelect(
+                doc.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::MarqueeSelect(
                     MarqueeDrag::new(pt, false),
                 ));
             }
@@ -267,7 +272,7 @@ pub(crate) fn start_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: boo
 }
 
 pub(crate) fn update_transform_drag(
-    app: &mut Is2dApp,
+    doc: &mut EditorDoc,
     pt: Point,
     shift_held: bool,
     alt_held: bool,
@@ -277,14 +282,14 @@ pub(crate) fn update_transform_drag(
     let mut scale_update: Option<(Affine, Point, bool)> = None;
     let mut rotate_update: Option<Affine> = None;
 
-    if let ActiveCanvasDrag::Transform(transform_drag) = &mut app.canvas.drag {
+    if let ActiveCanvasDrag::Transform(transform_drag) = &mut doc.canvas.drag {
         match transform_drag {
             TransformDragState::MovePivot {
                 orig_pivot,
                 changed,
                 ..
             } => {
-                if (pt - *orig_pivot).hypot() > 0.5 / (app.viewport.zoom as f64) {
+                if (pt - *orig_pivot).hypot() > 0.5 / (doc.viewport.zoom as f64) {
                     *changed = true;
                 }
                 new_pivot_pt = Some(pt);
@@ -321,7 +326,7 @@ pub(crate) fn update_transform_drag(
 
                 let affine = affine_scale_around(eff_anchor, sx, sy);
                 *changed = (sx - 1.0).abs() > 0.005 || (sy - 1.0).abs() > 0.005;
-                scale_update = Some((affine, *orig_pivot, app.canvas.transform_pivot.is_some()));
+                scale_update = Some((affine, *orig_pivot, doc.canvas.transform_pivot.is_some()));
             }
             TransformDragState::Rotate {
                 pivot,
@@ -348,60 +353,56 @@ pub(crate) fn update_transform_drag(
 
     if let Some((affine, orig_pivot, has_piv)) = scale_update {
         if let ActiveCanvasDrag::Transform(TransformDragState::Scale { orig_shapes, .. }) =
-            &app.canvas.drag
+            &doc.canvas.drag
         {
             CanvasState::transform_selected_from_origins(
-                &mut app.canvas.shapes,
+                &mut doc.canvas.shapes,
                 orig_shapes,
                 affine,
             );
         }
         if has_piv {
-            app.canvas.transform_pivot = Some(affine * orig_pivot);
+            doc.canvas.transform_pivot = Some(affine * orig_pivot);
         }
     }
     if let Some(affine) = rotate_update {
         if let ActiveCanvasDrag::Transform(TransformDragState::Rotate { orig_shapes, .. }) =
-            &app.canvas.drag
+            &doc.canvas.drag
         {
             CanvasState::transform_selected_from_origins(
-                &mut app.canvas.shapes,
+                &mut doc.canvas.shapes,
                 orig_shapes,
                 affine,
             );
         }
     }
     if let Some(piv_pt) = new_pivot_pt {
-        if set_selected_symbol_world_pivot(app, Some(piv_pt), false) {
-            app.canvas.transform_pivot = None;
+        if set_selected_symbol_world_pivot(doc, Some(piv_pt), false) {
+            doc.canvas.transform_pivot = None;
         } else {
-            app.canvas.transform_pivot = Some(piv_pt);
+            doc.canvas.transform_pivot = Some(piv_pt);
         }
     }
     if let Some(delta) = move_delta {
-        app.canvas.translate_selected(delta);
+        doc.canvas.translate_selected(delta);
     }
 }
 
-pub(crate) fn finish_transform_drag(app: &mut Is2dApp, mouse_pt: Option<Point>) {
+pub(crate) fn finish_transform_drag(doc: &mut EditorDoc, mouse_pt: Option<Point>) {
     let ActiveCanvasDrag::Transform(finished) =
-        std::mem::replace(&mut app.canvas.drag, ActiveCanvasDrag::None)
+        std::mem::replace(&mut doc.canvas.drag, ActiveCanvasDrag::None)
     else {
         return;
     };
     match finished {
         TransformDragState::Move(drag) => {
-            let min_move = 1.0 / (app.viewport.zoom as f64);
+            let min_move = 1.0 / (doc.viewport.zoom as f64);
             let rolled_back =
-                drag.total_delta.hypot() <= min_move || app.canvas.selected_shapes.is_empty();
+                drag.total_delta.hypot() <= min_move || doc.canvas.selected_shapes.is_empty();
             let orig_ids = drag.orig_selected_ids;
-            crate::canvas_tool::finish_move_selection_drag(
-                app,
-                drag.total_delta,
-                drag.undo_snapshot,
-            );
+            finish_move_selection_drag(doc, drag.total_delta, drag.undo_snapshot);
             if rolled_back && !orig_ids.is_empty() {
-                app.canvas.restore_selection_by_shape_ids(&orig_ids);
+                doc.canvas.restore_selection_by_shape_ids(&orig_ids);
             }
         }
         TransformDragState::Scale {
@@ -409,10 +410,10 @@ pub(crate) fn finish_transform_drag(app: &mut Is2dApp, mouse_pt: Option<Point>) 
             changed,
             ..
         } => {
-            if changed && !app.canvas.selected_shapes.is_empty() {
-                crate::canvas_tool::commit_moved_selection(app, undo_snapshot);
+            if changed && !doc.canvas.selected_shapes.is_empty() {
+                commit_moved_selection(doc, undo_snapshot);
             } else {
-                app.canvas.restore_drag_snapshot(undo_snapshot);
+                doc.canvas.restore_drag_snapshot(undo_snapshot);
             }
         }
         TransformDragState::Rotate {
@@ -420,15 +421,15 @@ pub(crate) fn finish_transform_drag(app: &mut Is2dApp, mouse_pt: Option<Point>) 
             undo_snapshot,
             ..
         } => {
-            if current_angle.abs() > 0.002 && !app.canvas.selected_shapes.is_empty() {
-                crate::canvas_tool::commit_moved_selection(app, undo_snapshot);
+            if current_angle.abs() > 0.002 && !doc.canvas.selected_shapes.is_empty() {
+                commit_moved_selection(doc, undo_snapshot);
             } else {
-                app.canvas.restore_drag_snapshot(undo_snapshot);
+                doc.canvas.restore_drag_snapshot(undo_snapshot);
             }
         }
         TransformDragState::MarqueeSelect(m) => {
             let end_pos = mouse_pt.unwrap_or(m.current_pos);
-            crate::canvas_tool::apply_marquee_selection(app, m.start_pos, end_pos, m.additive);
+            apply_marquee_selection(doc, m.start_pos, end_pos, m.additive);
         }
         TransformDragState::MovePivot {
             undo_snapshot,
@@ -436,41 +437,40 @@ pub(crate) fn finish_transform_drag(app: &mut Is2dApp, mouse_pt: Option<Point>) 
             ..
         } => {
             if changed {
-                if selected_single_symbol_info(app).is_some() {
-                    let snapshot = app
+                if selected_single_symbol_info(doc).is_some() {
+                    let snapshot = doc
                         .canvas
                         .take_unsliced_snapshot()
                         .unwrap_or(undo_snapshot);
-                    app.commit_canvas_mutation(snapshot);
+                    doc.commit_canvas_mutation(snapshot);
                 }
             } else {
-                app.canvas.restore_drag_snapshot(undo_snapshot);
+                doc.canvas.restore_drag_snapshot(undo_snapshot);
             }
         }
     }
 }
 
-fn handle_transform_click(app: &mut Is2dApp, pt: Point, shift_held: bool) {
-    app.ui.inspect_timeline_frame = false;
-    let zoom = app.viewport.zoom;
-    let hit_opt = app.canvas.topmost_shape_at(pt).or_else(|| {
-        crate::canvas_tool::compute_hover_target(&app.canvas, pt, zoom, app.ui.select_sub_mode)
-            .shape_idx()
+fn handle_transform_click(doc: &mut EditorDoc, pt: Point, shift_held: bool) {
+    doc.ui.inspect_timeline_frame = false;
+    let zoom = doc.viewport.zoom;
+    let hit_opt = doc.canvas.topmost_shape_at(pt).or_else(|| {
+        compute_hover_target(&doc.canvas, pt, zoom, doc.ui.select_sub_mode).shape_idx()
     });
     if shift_held {
         if let Some(hit_idx) = hit_opt {
-            crate::canvas_tool::toggle_shape_selection(app, hit_idx);
+            toggle_shape_selection(doc, hit_idx);
         }
-    } else if compute_transform_hover(&app.canvas, pt, zoom) != TransformHoverTarget::Pivot {
+    } else if compute_transform_hover(&doc.canvas, pt, zoom) != TransformHoverTarget::Pivot {
         if let Some(hit_idx) = hit_opt {
-            if !app.canvas.selected_shapes.contains(&hit_idx) {
-                crate::canvas_tool::select_single_shape_at(app, pt);
+            if !doc.canvas.selected_shapes.contains(&hit_idx) {
+                select_single_shape_at(doc, pt);
             } else {
-                let unit = app.canvas.expand_to_group_unit(hit_idx);
-                crate::canvas_tool::retain_selection_and_flush_deselected(app, &unit);
+                let unit = doc.canvas.expand_to_group_unit(hit_idx);
+                retain_selection_and_flush_deselected(doc, &unit);
             }
         } else {
-            crate::canvas_tool::clear_selection(app);
+            clear_selection(doc);
         }
     }
 }
@@ -626,12 +626,12 @@ pub(crate) fn draw_free_transform_box(
 }
 
 pub(crate) fn draw_transform_tool_cursor(
-    app: &Is2dApp,
+    doc: &EditorDoc,
     ctx: &egui::Context,
     painter: &egui::Painter,
     pos: Pos2,
 ) {
-    match &app.canvas.drag {
+    match &doc.canvas.drag {
         ActiveCanvasDrag::Transform(
             TransformDragState::Move { .. } | TransformDragState::MovePivot { .. },
         ) => {
@@ -647,7 +647,7 @@ pub(crate) fn draw_transform_tool_cursor(
         ActiveCanvasDrag::Transform(TransformDragState::MarqueeSelect { .. }) => {
             ctx.set_cursor_icon(CursorIcon::Crosshair);
         }
-        _ => match app.canvas.transform_hover {
+        _ => match doc.canvas.transform_hover {
             TransformHoverTarget::Pivot => {
                 ctx.set_cursor_icon(CursorIcon::PointingHand);
             }

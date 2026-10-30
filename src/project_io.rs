@@ -1,21 +1,22 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use eframe::egui::{self, Color32, Vec2};
 use kurbo::{Affine, Point, QuadBez};
 use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{
-    max_group_id_in_timeline, CanvasState, SelectSubMode, TimelineUiState, ViewportState,
+    cancel_active_drag, flush_modified_raw_selection_merge, load_shapes_from_timeline,
+    stop_playback, sync_shapes_to_timeline, CanvasState, EditorDoc, SelectSubMode, UndoHistory,
+    ViewportState,
 };
+use crate::clipboard_ops::max_group_id_in_timeline;
 use crate::symbol::{
     SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode, SymbolManager, TweenRotate,
 };
 pub(crate) use crate::timeline::MAX_TIMELINE_FRAMES;
 use crate::timeline::{Cel, Keyframe, Layer, Timeline, TimelineCellSelection};
 use crate::vector_engine::{Contour, FillShape};
-use crate::{Is2dApp, UndoHistory};
 
 /// `.is2d` プロジェクトファイルの現在のフォーマットバージョン
 pub(crate) const PROJECT_FORMAT_VERSION: u32 = 1;
@@ -67,6 +68,15 @@ pub(crate) enum OpenProjectOutcome {
 // 0. 複数ドキュメント同時オープン（ドキュメントタブ管理 & アクティブ状態スワップ）
 // ============================================================================
 
+/// ドキュメント状態（`EditorDoc`）と複数タブ管理（`DocumentTabManager`）の組を抽象化するトレイト
+pub(crate) trait ProjectWorkspace {
+    fn doc(&self) -> &EditorDoc;
+    fn doc_mut(&mut self) -> &mut EditorDoc;
+    fn tabs(&self) -> &DocumentTabManager;
+    fn tabs_mut(&mut self) -> &mut DocumentTabManager;
+    fn doc_and_tabs_mut(&mut self) -> (&mut EditorDoc, &mut DocumentTabManager);
+}
+
 /// 開いている1つのドキュメントタブが保持する独立状態スロット
 pub(crate) struct DocumentSlot {
     /// ドキュメント固有の一意ID（別タブ間コピペのソース・ターゲット識別用）
@@ -75,16 +85,21 @@ pub(crate) struct DocumentSlot {
     pub(crate) untitled_number: usize,
     /// 保存先・読み込み元の `.is2d` ファイルパス（未保存なら `None`）
     pub(crate) file_path: Option<PathBuf>,
-    /// プロパティパネル下部の表示対象（`true`: タイムラインフレーム属性、`false`: シンボル属性）
-    pub(crate) inspect_timeline_frame: bool,
-    /// 「表示 > アンカーを表示」のタブ別ON/OFF状態
-    pub(crate) show_wireframe: bool,
-    pub(crate) viewport: ViewportState,
-    pub(crate) canvas: CanvasState,
-    pub(crate) timeline: Timeline,
-    pub(crate) timeline_ui: TimelineUiState,
-    pub(crate) symbols: SymbolManager,
-    pub(crate) history: UndoHistory,
+    /// タブごとの単一ドキュメント状態（アクティブ時はワークスペースの `EditorDoc` とスワップされる）
+    pub(crate) doc: EditorDoc,
+}
+
+impl std::ops::Deref for DocumentSlot {
+    type Target = EditorDoc;
+    fn deref(&self) -> &Self::Target {
+        &self.doc
+    }
+}
+
+impl std::ops::DerefMut for DocumentSlot {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.doc
+    }
 }
 
 impl DocumentSlot {
@@ -93,14 +108,7 @@ impl DocumentSlot {
             doc_id,
             untitled_number,
             file_path: None,
-            inspect_timeline_frame: false,
-            show_wireframe: false,
-            viewport: ViewportState::default(),
-            canvas: CanvasState::default(),
-            timeline: Timeline::default(),
-            timeline_ui: TimelineUiState::default(),
-            symbols: SymbolManager::default(),
-            history: UndoHistory::default(),
+            doc: EditorDoc::new_with_id(doc_id),
         }
     }
 
@@ -123,7 +131,7 @@ impl DocumentSlot {
         let is_dirty = if is_active {
             active_is_dirty
         } else {
-            self.history.is_dirty()
+            self.doc.history.is_dirty()
         };
         if is_dirty {
             format!("{base} *")
@@ -133,22 +141,12 @@ impl DocumentSlot {
     }
 }
 
-/// 複数のドキュメントタブを管理する構造体（アクティブなタブは `Is2dApp` 直下のフィールドへ展開される）
+/// 複数のドキュメントタブを管理する構造体
 pub(crate) struct DocumentTabManager {
     pub(crate) tabs: Vec<DocumentSlot>,
     pub(crate) active_index: usize,
     pub(crate) next_untitled_number: usize,
     pub(crate) next_doc_id: u64,
-    /// コピー（`Cmd+C`）を実行した元ドキュメントの `doc_id`（不変スナップショット）
-    pub(crate) clipboard_source_doc_id: u64,
-    /// コピー（`Cmd+C`）を実行した時点のシンボル編集コンテキスト（ルートシーンなら `None`、シンボル内なら `Some(symbol_id)`）
-    pub(crate) clipboard_source_symbol_id: Option<u64>,
-    /// コピー（`Cmd+C`）を実行した時点のシンボルライブラリの世代番号（同一世代での再コピー時に `Arc<SymbolDef>` を $O(1)$ で共有する）
-    pub(crate) clipboard_source_symbols_revision: u64,
-    /// 別タブへシンボルをペーストした際に自動移植するためのシンボル定義スナップショット（子→親のトポロジカル順、`Arc` 共有の不変保持）
-    pub(crate) clipboard_symbols: Vec<Arc<SymbolDef>>,
-    /// 現在のクリップボードから各タブへ移植済みのシンボルID対応表 `(target_doc_id, src_sym_id) -> target_sym_id`
-    pub(crate) clipboard_imported_map: HashMap<(u64, u64), u64>,
     /// 直近にOSウィンドウへ送信したタイトル文字列（毎フレームの重複送信防止用キャッシュ）
     pub(crate) last_window_title: String,
     /// 未保存変更確認モーダル（egui ウィンドウ）の表示待機状態
@@ -164,11 +162,6 @@ impl Default for DocumentTabManager {
             active_index: 0,
             next_untitled_number: 2,
             next_doc_id: 2,
-            clipboard_source_doc_id: 1,
-            clipboard_source_symbol_id: None,
-            clipboard_source_symbols_revision: 0,
-            clipboard_symbols: Vec::new(),
-            clipboard_imported_map: HashMap::new(),
             last_window_title: String::new(),
             pending_close_confirm: None,
             allow_viewport_close: false,
@@ -177,16 +170,7 @@ impl Default for DocumentTabManager {
 }
 
 impl DocumentTabManager {
-    /// 現在アクティブなタブの `doc_id` を返す
-    #[inline]
-    pub(crate) fn active_doc_id(&self) -> u64 {
-        self.tabs
-            .get(self.active_index)
-            .map(|t| t.doc_id)
-            .unwrap_or(1)
-    }
-
-    /// 現在アクティブなタブのメタデータ（`file_path`）を `app.ui.current_file_path` と同期する
+    /// 現在アクティブなタブのメタデータ（`file_path`）を `doc.ui.current_file_path` と同期する
     #[inline]
     pub(crate) fn sync_active_file_path(&mut self, path: Option<PathBuf>) {
         if let Some(slot) = self.tabs.get_mut(self.active_index) {
@@ -207,10 +191,11 @@ impl DocumentTabManager {
     }
 }
 
-/// アクティブタブの `file_path` を `app.ui.current_file_path` と `app.tabs.tabs[active_index].file_path` の双方に一括設定する
-pub(crate) fn set_active_file_path(app: &mut Is2dApp, path: Option<PathBuf>) {
-    app.ui.current_file_path = path.clone();
-    app.tabs.sync_active_file_path(path);
+/// アクティブタブの `file_path` を `doc.ui.current_file_path` と `tabs.tabs[active_index].file_path` の双方に一括設定する
+pub(crate) fn set_active_file_path(ws: &mut impl ProjectWorkspace, path: Option<PathBuf>) {
+    let (doc, tabs) = ws.doc_and_tabs_mut();
+    doc.ui.current_file_path = path.clone();
+    tabs.sync_active_file_path(path);
 }
 
 /// タブ切り替え・新規作成・ファイル読込・タブ閉じの前に、egui のフォーカス中テキスト入力ウィジェットからフォーカスを解放する
@@ -224,21 +209,20 @@ fn surrender_focused_widget(ctx: &egui::Context) {
 
 /// タブ切り替えやプロジェクト保存の前に、選択状態やカスタムピボットを破壊せずに
 /// 進行中ドラッグの中断・連続編集フラグのリセット・（保存時のみ）未マージ生シェイプの結合/切り抜き確定・作業キャンバスのセル同期・多段シンボル編集スタックのライブラリ同期を行う
-fn prepare_active_tab_for_switch_or_save(app: &mut Is2dApp, flush_raw_merge: bool) {
-    crate::canvas_tool::stop_playback(app);
-    crate::canvas_tool::cancel_active_drag(app);
-    app.timeline_ui.cancel_drag();
-    app.viewport.pan_last_screen_pos = None;
-    app.viewport.editing_stage_size = false;
-    app.symbols.actively_renaming_symbol = None;
-    app.ui.editing_symbol_playback = false;
+fn prepare_active_tab_for_switch_or_save(doc: &mut EditorDoc, flush_raw_merge: bool) {
+    stop_playback(doc);
+    cancel_active_drag(doc);
+    doc.viewport.pan_last_screen_pos = None;
+    doc.viewport.editing_stage_size = false;
+    doc.symbols.actively_renaming_symbol = None;
+    doc.ui.editing_symbol_playback = false;
 
-    if flush_raw_merge && app.canvas.selection_modified && !app.canvas.selected_shapes.is_empty() {
-        let selected_ids = app.canvas.selected_shape_ids();
-        let saved_pivot = app.canvas.transform_pivot;
-        crate::canvas_tool::flush_modified_raw_selection_merge(app);
-        app.canvas.restore_selection_by_shape_ids(&selected_ids);
-        app.canvas.transform_pivot = if app.canvas.selected_shapes.is_empty() {
+    if flush_raw_merge && doc.canvas.selection_modified && !doc.canvas.selected_shapes.is_empty() {
+        let selected_ids = doc.canvas.selected_shape_ids();
+        let saved_pivot = doc.canvas.transform_pivot;
+        flush_modified_raw_selection_merge(doc);
+        doc.canvas.restore_selection_by_shape_ids(&selected_ids);
+        doc.canvas.transform_pivot = if doc.canvas.selected_shapes.is_empty() {
             None
         } else {
             saved_pivot
@@ -247,161 +231,169 @@ fn prepare_active_tab_for_switch_or_save(app: &mut Is2dApp, flush_raw_merge: boo
 
     // 矩形マーキースライス直後で未編集の一時分割状態（`has_unsliced_snapshot() == true`）の間は、
     // タイムライン側に既にスライス前の正しい図形が保持されているため上書き同期をスキップし、選択も維持する
-    if !app.canvas.has_unsliced_snapshot() {
-        crate::canvas_tool::sync_shapes_to_timeline(app);
+    if !doc.canvas.has_unsliced_snapshot() {
+        sync_shapes_to_timeline(doc);
     }
-    app.symbols.sync_active_edit(&app.timeline);
+    doc.symbols.sync_active_edit(&doc.timeline);
 
-    if app.symbols.edit_stack.len() >= 2 {
-        for idx in (1..app.symbols.edit_stack.len()).rev() {
-            let sym_id = app.symbols.edit_stack[idx - 1].symbol_id;
-            let xform = app.symbols.edit_stack[idx - 1].instance_xform;
+    if doc.symbols.edit_stack.len() >= 2 {
+        for idx in (1..doc.symbols.edit_stack.len()).rev() {
+            let sym_id = doc.symbols.edit_stack[idx - 1].symbol_id;
+            let xform = doc.symbols.edit_stack[idx - 1].instance_xform;
             if xform.determinant().abs() <= 1e-9 {
                 continue;
             }
             let inv_xform = xform.inverse();
-            let working_tl = app.symbols.edit_stack[idx].parent_timeline.clone();
+            let working_tl = doc.symbols.edit_stack[idx].parent_timeline.clone();
             let mut cache =
-                std::mem::take(&mut app.symbols.edit_stack[idx - 1].stage_to_local_cache);
-            if let Some(sym_def) = app.symbols.find_symbol_mut(sym_id) {
+                std::mem::take(&mut doc.symbols.edit_stack[idx - 1].stage_to_local_cache);
+            if let Some(sym_def) = doc.symbols.find_symbol_mut(sym_id) {
                 sym_def.update_from_working_timeline(&working_tl, inv_xform, &mut cache);
             }
-            app.symbols.edit_stack[idx - 1].stage_to_local_cache = cache;
+            doc.symbols.edit_stack[idx - 1].stage_to_local_cache = cache;
         }
     }
 }
 
-/// 現在の `Is2dApp` 上のアクティブドキュメント状態を `app.tabs.tabs[active_index]` スロットへ退避する
-/// （タブ間共有の `clipboard` およびウィンドウ共通の `last_canvas_rect` は `app` 側に引き継ぐ）
-fn pack_active_into_slot(app: &mut Is2dApp) {
-    prepare_active_tab_for_switch_or_save(app, false);
-    let shared_clipboard = std::mem::take(&mut app.canvas.clipboard);
-    let last_canvas_rect = app.viewport.last_canvas_rect;
-    let idx = app.tabs.active_index;
-    if let Some(slot) = app.tabs.tabs.get_mut(idx) {
-        slot.file_path = app.ui.current_file_path.clone();
-        slot.inspect_timeline_frame = app.ui.inspect_timeline_frame;
-        slot.show_wireframe = app.ui.show_wireframe;
-        slot.viewport = std::mem::take(&mut app.viewport);
-        slot.canvas = std::mem::take(&mut app.canvas);
-        slot.timeline = std::mem::take(&mut app.timeline);
-        slot.timeline_ui = std::mem::take(&mut app.timeline_ui);
-        slot.symbols = std::mem::take(&mut app.symbols);
-        slot.history = std::mem::take(&mut app.history);
-    }
-    app.canvas.clipboard = shared_clipboard;
-    app.viewport.last_canvas_rect = last_canvas_rect;
+/// ウィンドウ共通の状態（タブ間共有クリップボード・ツール/ブラシ設定・トースト・キャンバス矩形）を保持したまま
+/// アクティブ `EditorDoc` とタブスロットの `EditorDoc` を一括 `std::mem::swap` する
+fn swap_doc_preserving_shared_state(active: &mut EditorDoc, slot_doc: &mut EditorDoc) {
+    let shared_clipboard = active.canvas.take_shared_clipboard();
+    let last_canvas_rect = active.viewport.last_canvas_rect;
+    let tool = active.ui.tool;
+    let select_sub_mode = active.ui.select_sub_mode;
+    let right_panel_tab = active.ui.right_panel_tab;
+    let brush_radius = active.ui.brush_radius;
+    let eraser_radius = active.ui.eraser_radius;
+    let brush_color = active.ui.brush_color;
+    let status_toast = active.ui.status_toast.take();
+
+    std::mem::swap(active, slot_doc);
+
+    active.canvas.restore_shared_clipboard(shared_clipboard);
+    active.viewport.last_canvas_rect = last_canvas_rect;
+    active.ui.tool = tool;
+    active.ui.select_sub_mode = select_sub_mode;
+    active.ui.right_panel_tab = right_panel_tab;
+    active.ui.brush_radius = brush_radius;
+    active.ui.eraser_radius = eraser_radius;
+    active.ui.brush_color = brush_color;
+    active.ui.status_toast = status_toast;
 }
 
-/// `app.tabs.tabs[target_index]` スロットの状態を `Is2dApp` のアクティブフィールドへ展開する
-/// （`std::mem::take` によりアクティブスロット側のフィールドは常に空 `Default` になり、閉じたタブのメモリ残留を防ぐ）
-fn unpack_slot_into_active(app: &mut Is2dApp, target_index: usize) {
-    let shared_clipboard = std::mem::take(&mut app.canvas.clipboard);
-    let last_canvas_rect = app.viewport.last_canvas_rect;
-    app.tabs.active_index = target_index;
-    if let Some(slot) = app.tabs.tabs.get_mut(target_index) {
-        app.ui.current_file_path = slot.file_path.clone();
-        app.ui.inspect_timeline_frame = slot.inspect_timeline_frame;
-        app.ui.show_wireframe = slot.show_wireframe;
-        app.viewport = std::mem::take(&mut slot.viewport);
-        app.canvas = std::mem::take(&mut slot.canvas);
-        app.timeline = std::mem::take(&mut slot.timeline);
-        app.timeline_ui = std::mem::take(&mut slot.timeline_ui);
-        app.symbols = std::mem::take(&mut slot.symbols);
-        app.history = std::mem::take(&mut slot.history);
+/// 現在のアクティブドキュメント状態を `tabs.tabs[active_index]` スロットへ退避する
+fn pack_active_into_slot(ws: &mut impl ProjectWorkspace) {
+    let (doc, tabs) = ws.doc_and_tabs_mut();
+    prepare_active_tab_for_switch_or_save(doc, false);
+    let idx = tabs.active_index;
+    if let Some(slot) = tabs.tabs.get_mut(idx) {
+        slot.file_path = doc.ui.current_file_path.clone();
+        swap_doc_preserving_shared_state(doc, &mut slot.doc);
     }
-    app.viewport.last_canvas_rect = last_canvas_rect;
-    app.canvas.clipboard = shared_clipboard;
-    app.canvas.paste_count = 0;
-    app.canvas.paste_offset = kurbo::Vec2::ZERO;
-    if !app.canvas.selected_shapes.is_empty() && app.ui.select_sub_mode != SelectSubMode::Reshape {
-        app.ui.select_sub_mode = SelectSubMode::Reshape;
+}
+
+/// `tabs.tabs[target_index]` スロットの状態をアクティブ `EditorDoc` へ展開する
+fn unpack_slot_into_active(ws: &mut impl ProjectWorkspace, target_index: usize) {
+    let (doc, tabs) = ws.doc_and_tabs_mut();
+    tabs.active_index = target_index;
+    if let Some(slot) = tabs.tabs.get_mut(target_index) {
+        swap_doc_preserving_shared_state(doc, &mut slot.doc);
+        doc.doc_id = slot.doc_id;
+        doc.ui.current_file_path = slot.file_path.clone();
+    }
+    doc.canvas.paste_count = 0;
+    doc.canvas.paste_offset = kurbo::Vec2::ZERO;
+    doc.timeline_switched = true;
+    if !doc.canvas.selected_shapes.is_empty() && doc.ui.select_sub_mode != SelectSubMode::Reshape {
+        doc.ui.select_sub_mode = SelectSubMode::Reshape;
     }
 }
 
 /// アクティブドキュメントのタイムライン・シンボル・履歴・キャンバス・ビューポート・UIフラグを一括初期化し、
-/// タブ間共有の `clipboard` と `last_canvas_rect` を引き継いだ上で現在フレームの図形を展開する共通ヘルパー
+/// タブ間共有のクリップボードと `last_canvas_rect` を引き継いだ上で現在フレームの図形を展開する共通ヘルパー
 fn reset_active_document_state(
-    app: &mut Is2dApp,
+    doc: &mut EditorDoc,
     timeline: Timeline,
     symbols: SymbolManager,
     stage_size: Vec2,
 ) {
-    let shared_clipboard = std::mem::take(&mut app.canvas.clipboard);
-    let last_canvas_rect = app.viewport.last_canvas_rect;
-    app.timeline = timeline;
-    app.timeline_ui = TimelineUiState::default();
-    app.symbols = symbols;
-    app.history = UndoHistory::default();
-    app.canvas = CanvasState::default();
-    app.canvas.clipboard = shared_clipboard;
-    app.viewport = ViewportState {
+    let shared_clipboard = doc.canvas.take_shared_clipboard();
+    let last_canvas_rect = doc.viewport.last_canvas_rect;
+
+    doc.timeline = timeline;
+    doc.symbols = symbols;
+    doc.history = UndoHistory::default();
+    doc.canvas = CanvasState::default();
+    doc.canvas.restore_shared_clipboard(shared_clipboard);
+    doc.viewport = ViewportState {
         stage_size,
         last_canvas_rect,
         ..Default::default()
     };
-    app.viewport.reset_view();
-    app.ui.inspect_timeline_frame = false;
-    app.ui.show_wireframe = false;
-    app.ui.editing_symbol_playback = false;
-    app.ui.select_sub_mode = SelectSubMode::Reshape;
-    crate::canvas_tool::load_shapes_from_timeline(app);
+    doc.viewport.reset_view();
+    doc.ui.inspect_timeline_frame = false;
+    doc.ui.show_wireframe = false;
+    doc.ui.editing_symbol_playback = false;
+    doc.ui.select_sub_mode = SelectSubMode::Reshape;
+    doc.is_playing = false;
+    doc.timeline_switched = true;
+    load_shapes_from_timeline(doc);
 }
 
 /// 現在アクティブなタブが「起動直後・新規作成直後で一度も編集されていない白紙の無題タブ」であるかを判定する
-pub(crate) fn is_active_tab_pristine_empty(app: &Is2dApp) -> bool {
-    app.ui.current_file_path.is_none()
-        && !app.history.is_dirty()
-        && app.history.undo_stack.is_empty()
-        && app.history.redo_stack.is_empty()
-        && app.symbols.library.is_empty()
-        && app.symbols.edit_stack.is_empty()
-        && app.viewport.stage_size == Vec2::new(800.0, 450.0)
-        && !app.viewport.clip_outside_stage
-        && !app.timeline_ui.onion_skin_enabled
-        && app.timeline.fps == 24
-        && app.timeline.total_frames == 1
-        && app.timeline.layers.len() == 1
-        && app.timeline.layers[0].name == "Layer 1"
-        && app.timeline.layers[0].visible
-        && !app.timeline.layers[0].locked
-        && app.timeline.layers[0].frame_count == 1
-        && app.timeline.layers[0].keyframes.len() == 1
-        && app.timeline.layers[0].keyframes[0].cel.is_empty()
-        && app.canvas.shapes.is_empty()
+pub(crate) fn is_active_tab_pristine_empty(doc: &EditorDoc) -> bool {
+    doc.ui.current_file_path.is_none()
+        && !doc.history.is_dirty()
+        && doc.history.undo_stack.is_empty()
+        && doc.history.redo_stack.is_empty()
+        && doc.symbols.library.is_empty()
+        && doc.symbols.edit_stack.is_empty()
+        && doc.viewport.stage_size == Vec2::new(800.0, 450.0)
+        && !doc.viewport.clip_outside_stage
+        && doc.timeline.fps == 24
+        && doc.timeline.total_frames == 1
+        && doc.timeline.layers.len() == 1
+        && doc.timeline.layers[0].name == "Layer 1"
+        && doc.timeline.layers[0].visible
+        && !doc.timeline.layers[0].locked
+        && doc.timeline.layers[0].frame_count == 1
+        && doc.timeline.layers[0].keyframes.len() == 1
+        && doc.timeline.layers[0].keyframes[0].cel.is_empty()
+        && doc.canvas.shapes.is_empty()
 }
 
 /// 指定したインデックス `index` のタブに未保存変更（`is_dirty() == true`）があるかを返す
-pub(crate) fn is_tab_dirty(app: &Is2dApp, index: usize) -> bool {
-    if index == app.tabs.active_index {
-        app.history.is_dirty()
+pub(crate) fn is_tab_dirty(ws: &impl ProjectWorkspace, index: usize) -> bool {
+    if index == ws.tabs().active_index {
+        ws.doc().history.is_dirty()
     } else {
-        app.tabs
+        ws.tabs()
             .tabs
             .get(index)
-            .is_some_and(|slot| slot.history.is_dirty())
+            .is_some_and(|slot| slot.doc.history.is_dirty())
     }
 }
 
 /// OSウィンドウの閉じる操作（`×` ボタンや `Cmd+Q` / `Alt+F4`）が要求された際、
 /// 未保存変更があるタブが存在する場合は `CancelClose` を発行してアプリ内の非ブロッキング確認モーダルを表示する
-pub(crate) fn handle_viewport_close_request(app: &mut Is2dApp, ctx: &egui::Context) {
+pub(crate) fn handle_viewport_close_request(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
     if !ctx.input(|i| i.viewport().close_requested()) {
         return;
     }
-    if app.tabs.allow_viewport_close {
+    if ws.tabs().allow_viewport_close {
         return;
     }
-    if app.tabs.pending_close_confirm.is_some() {
+    if ws.tabs().pending_close_confirm.is_some() {
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         return;
     }
-    if let Some(idx) = (0..app.tabs.tabs.len()).find(|&i| is_tab_dirty(app, i)) {
-        let orig_active = app.tabs.active_index;
+    let tab_count = ws.tabs().tabs.len();
+    if let Some(idx) = (0..tab_count).find(|&i| is_tab_dirty(ws, i)) {
+        let orig_active = ws.tabs().active_index;
         if idx != orig_active {
-            switch_to_tab(app, idx, Some(ctx));
+            switch_to_tab(ws, idx, Some(ctx));
         }
-        app.tabs.pending_close_confirm = Some(PendingCloseConfirm::ViewportClose {
+        ws.tabs_mut().pending_close_confirm = Some(PendingCloseConfirm::ViewportClose {
             current_tab_index: idx,
             orig_active,
             discarded_doc_ids: HashSet::new(),
@@ -411,31 +403,33 @@ pub(crate) fn handle_viewport_close_request(app: &mut Is2dApp, ctx: &egui::Conte
 }
 
 fn advance_viewport_close_confirm(
-    app: &mut Is2dApp,
+    ws: &mut impl ProjectWorkspace,
     orig_active: usize,
     discarded_doc_ids: HashSet<u64>,
     ctx: &egui::Context,
 ) {
-    if let Some(next_idx) = (0..app.tabs.tabs.len())
-        .find(|&i| is_tab_dirty(app, i) && !discarded_doc_ids.contains(&app.tabs.tabs[i].doc_id))
-    {
-        if next_idx != app.tabs.active_index {
-            switch_to_tab(app, next_idx, Some(ctx));
+    let tab_count = ws.tabs().tabs.len();
+    let next_idx = (0..tab_count).find(|&i| {
+        is_tab_dirty(ws, i) && !discarded_doc_ids.contains(&ws.tabs().tabs[i].doc_id)
+    });
+    if let Some(next_idx) = next_idx {
+        if next_idx != ws.tabs().active_index {
+            switch_to_tab(ws, next_idx, Some(ctx));
         }
-        app.tabs.pending_close_confirm = Some(PendingCloseConfirm::ViewportClose {
+        ws.tabs_mut().pending_close_confirm = Some(PendingCloseConfirm::ViewportClose {
             current_tab_index: next_idx,
             orig_active,
             discarded_doc_ids,
         });
     } else {
-        app.tabs.allow_viewport_close = true;
+        ws.tabs_mut().allow_viewport_close = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
 
 /// 未保存変更確認モーダルで「保存して閉じる」が選択された際の処理を実行する
-pub(crate) fn confirm_pending_close_save(app: &mut Is2dApp, ctx: &egui::Context) {
-    let Some(pending) = app.tabs.pending_close_confirm.take() else {
+pub(crate) fn confirm_pending_close_save(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
+    let Some(pending) = ws.tabs_mut().pending_close_confirm.take() else {
         return;
     };
     match pending {
@@ -443,11 +437,11 @@ pub(crate) fn confirm_pending_close_save(app: &mut Is2dApp, ctx: &egui::Context)
             tab_index,
             orig_active,
         } => {
-            save_project(app, ctx);
-            if !is_tab_dirty(app, tab_index) {
-                close_tab_immediately(app, tab_index, orig_active, Some(ctx));
-            } else if tab_index != orig_active && orig_active < app.tabs.tabs.len() {
-                switch_to_tab(app, orig_active, Some(ctx));
+            save_project(ws, ctx);
+            if !is_tab_dirty(ws, tab_index) {
+                close_tab_immediately(ws, tab_index, orig_active, Some(ctx));
+            } else if tab_index != orig_active && orig_active < ws.tabs().tabs.len() {
+                switch_to_tab(ws, orig_active, Some(ctx));
             }
         }
         PendingCloseConfirm::ViewportClose {
@@ -455,19 +449,19 @@ pub(crate) fn confirm_pending_close_save(app: &mut Is2dApp, ctx: &egui::Context)
             orig_active,
             discarded_doc_ids,
         } => {
-            save_project(app, ctx);
-            if !is_tab_dirty(app, current_tab_index) {
-                advance_viewport_close_confirm(app, orig_active, discarded_doc_ids, ctx);
-            } else if app.tabs.active_index != orig_active && orig_active < app.tabs.tabs.len() {
-                switch_to_tab(app, orig_active, Some(ctx));
+            save_project(ws, ctx);
+            if !is_tab_dirty(ws, current_tab_index) {
+                advance_viewport_close_confirm(ws, orig_active, discarded_doc_ids, ctx);
+            } else if ws.tabs().active_index != orig_active && orig_active < ws.tabs().tabs.len() {
+                switch_to_tab(ws, orig_active, Some(ctx));
             }
         }
     }
 }
 
 /// 未保存変更確認モーダルで「保存せずに破棄」が選択された際の処理を実行する
-pub(crate) fn confirm_pending_close_discard(app: &mut Is2dApp, ctx: &egui::Context) {
-    let Some(pending) = app.tabs.pending_close_confirm.take() else {
+pub(crate) fn confirm_pending_close_discard(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
+    let Some(pending) = ws.tabs_mut().pending_close_confirm.take() else {
         return;
     };
     match pending {
@@ -475,147 +469,152 @@ pub(crate) fn confirm_pending_close_discard(app: &mut Is2dApp, ctx: &egui::Conte
             tab_index,
             orig_active,
         } => {
-            close_tab_immediately(app, tab_index, orig_active, Some(ctx));
+            close_tab_immediately(ws, tab_index, orig_active, Some(ctx));
         }
         PendingCloseConfirm::ViewportClose {
             current_tab_index,
             orig_active,
             mut discarded_doc_ids,
         } => {
-            if let Some(slot) = app.tabs.tabs.get(current_tab_index) {
+            if let Some(slot) = ws.tabs().tabs.get(current_tab_index) {
                 discarded_doc_ids.insert(slot.doc_id);
             }
-            advance_viewport_close_confirm(app, orig_active, discarded_doc_ids, ctx);
+            advance_viewport_close_confirm(ws, orig_active, discarded_doc_ids, ctx);
         }
     }
 }
 
 /// 未保存変更確認モーダルで「キャンセル」が選択された際の処理を実行する
-pub(crate) fn confirm_pending_close_cancel(app: &mut Is2dApp, ctx: &egui::Context) {
-    let Some(pending) = app.tabs.pending_close_confirm.take() else {
+pub(crate) fn confirm_pending_close_cancel(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
+    let Some(pending) = ws.tabs_mut().pending_close_confirm.take() else {
         return;
     };
     let orig_active = match pending {
         PendingCloseConfirm::SingleTab { orig_active, .. }
         | PendingCloseConfirm::ViewportClose { orig_active, .. } => orig_active,
     };
-    if app.tabs.active_index != orig_active && orig_active < app.tabs.tabs.len() {
-        switch_to_tab(app, orig_active, Some(ctx));
+    if ws.tabs().active_index != orig_active && orig_active < ws.tabs().tabs.len() {
+        switch_to_tab(ws, orig_active, Some(ctx));
     }
 }
 
 /// 指定したインデックス `target_index` のドキュメントタブへ切り替える
 pub(crate) fn switch_to_tab(
-    app: &mut Is2dApp,
+    ws: &mut impl ProjectWorkspace,
     target_index: usize,
     ctx: Option<&egui::Context>,
 ) -> bool {
-    if target_index >= app.tabs.tabs.len() || target_index == app.tabs.active_index {
+    if target_index >= ws.tabs().tabs.len() || target_index == ws.tabs().active_index {
         return false;
     }
-    app.tabs.pending_close_confirm = None;
-    pack_active_into_slot(app);
-    unpack_slot_into_active(app, target_index);
+    ws.tabs_mut().pending_close_confirm = None;
+    pack_active_into_slot(ws);
+    unpack_slot_into_active(ws, target_index);
 
     if let Some(c) = ctx {
         surrender_focused_widget(c);
-        update_window_title(app, c);
+        update_window_title(ws, c);
     }
     true
 }
 
 /// 指定したインデックス `close_index` のドキュメントタブを閉じる（未保存変更があり `ctx` が与えられた場合は非ブロッキング確認モーダルを開く）
-pub(crate) fn close_tab(app: &mut Is2dApp, close_index: usize, ctx: Option<&egui::Context>) {
-    if close_index >= app.tabs.tabs.len() {
+pub(crate) fn close_tab(
+    ws: &mut impl ProjectWorkspace,
+    close_index: usize,
+    ctx: Option<&egui::Context>,
+) {
+    if close_index >= ws.tabs().tabs.len() {
         return;
     }
-    let orig_active = app.tabs.active_index;
+    let orig_active = ws.tabs().active_index;
     if let Some(c) = ctx {
-        if is_tab_dirty(app, close_index) {
+        if is_tab_dirty(ws, close_index) {
             if close_index != orig_active {
-                switch_to_tab(app, close_index, Some(c));
+                switch_to_tab(ws, close_index, Some(c));
             }
-            app.tabs.pending_close_confirm = Some(PendingCloseConfirm::SingleTab {
+            ws.tabs_mut().pending_close_confirm = Some(PendingCloseConfirm::SingleTab {
                 tab_index: close_index,
                 orig_active,
             });
             return;
         }
     }
-    close_tab_immediately(app, close_index, orig_active, ctx);
+    close_tab_immediately(ws, close_index, orig_active, ctx);
 }
 
 fn close_tab_immediately(
-    app: &mut Is2dApp,
+    ws: &mut impl ProjectWorkspace,
     close_index: usize,
     orig_active: usize,
     ctx: Option<&egui::Context>,
 ) {
-    if close_index >= app.tabs.tabs.len() {
+    if close_index >= ws.tabs().tabs.len() {
         return;
     }
-    app.tabs.pending_close_confirm = None;
+    ws.tabs_mut().pending_close_confirm = None;
 
-    if app.tabs.tabs.len() <= 1 {
+    if ws.tabs().tabs.len() <= 1 {
         // 最後の1タブを閉じた場合は連番をリセットし、白紙の「無題-1」へ初期化する
-        crate::canvas_tool::stop_playback(app);
-        crate::canvas_tool::cancel_active_drag(app);
-        app.tabs.next_untitled_number = 1;
-        let doc_id = app.tabs.alloc_doc_id();
-        let untitled_num = app.tabs.alloc_untitled_number();
+        stop_playback(ws.doc_mut());
+        cancel_active_drag(ws.doc_mut());
+        ws.tabs_mut().next_untitled_number = 1;
+        let doc_id = ws.tabs_mut().alloc_doc_id();
+        let untitled_num = ws.tabs_mut().alloc_untitled_number();
 
-        app.tabs.tabs[0] = DocumentSlot::new_empty(doc_id, untitled_num);
-        app.tabs.active_index = 0;
-        set_active_file_path(app, None);
+        ws.tabs_mut().tabs[0] = DocumentSlot::new_empty(doc_id, untitled_num);
+        ws.tabs_mut().active_index = 0;
+        ws.doc_mut().doc_id = doc_id;
+        set_active_file_path(ws, None);
         reset_active_document_state(
-            app,
+            ws.doc_mut(),
             Timeline::default(),
             SymbolManager::default(),
             ViewportState::default().stage_size,
         );
         if let Some(c) = ctx {
             surrender_focused_widget(c);
-            update_window_title(app, c);
+            update_window_title(ws, c);
         }
         return;
     }
 
-    if close_index == app.tabs.active_index {
-        crate::canvas_tool::stop_playback(app);
-        crate::canvas_tool::cancel_active_drag(app);
-        app.timeline_ui.cancel_drag();
-        app.viewport.pan_last_screen_pos = None;
+    if close_index == ws.tabs().active_index {
+        stop_playback(ws.doc_mut());
+        cancel_active_drag(ws.doc_mut());
+        ws.doc_mut().viewport.pan_last_screen_pos = None;
 
-        app.tabs.tabs.remove(close_index);
+        ws.tabs_mut().tabs.remove(close_index);
+        let remaining_len = ws.tabs().tabs.len();
         let next_active = if orig_active != close_index {
             if close_index < orig_active {
                 orig_active - 1
             } else {
-                orig_active.min(app.tabs.tabs.len() - 1)
+                orig_active.min(remaining_len - 1)
             }
         } else {
-            close_index.min(app.tabs.tabs.len() - 1)
+            close_index.min(remaining_len - 1)
         };
-        unpack_slot_into_active(app, next_active);
+        unpack_slot_into_active(ws, next_active);
         if let Some(c) = ctx {
             surrender_focused_widget(c);
-            update_window_title(app, c);
+            update_window_title(ws, c);
         }
     } else {
-        app.tabs.tabs.remove(close_index);
-        if close_index < app.tabs.active_index {
-            app.tabs.active_index -= 1;
+        ws.tabs_mut().tabs.remove(close_index);
+        if close_index < ws.tabs().active_index {
+            ws.tabs_mut().active_index -= 1;
         }
         if let Some(c) = ctx {
-            update_window_title(app, c);
+            update_window_title(ws, c);
         }
     }
 }
 
 /// 現在アクティブなドキュメントタブを閉じる（`Cmd/Ctrl + W`）
-pub(crate) fn close_active_tab(app: &mut Is2dApp, ctx: Option<&egui::Context>) {
-    let active = app.tabs.active_index;
-    close_tab(app, active, ctx);
+pub(crate) fn close_active_tab(ws: &mut impl ProjectWorkspace, ctx: Option<&egui::Context>) {
+    let active = ws.tabs().active_index;
+    close_tab(ws, active, ctx);
 }
 
 // ============================================================================
@@ -643,9 +642,9 @@ impl From<TweenRotate> for SavedTweenRotate {
 impl From<SavedTweenRotate> for TweenRotate {
     fn from(value: SavedTweenRotate) -> Self {
         match value {
-            SavedTweenRotate::Auto => Self::Auto,
-            SavedTweenRotate::Clockwise => Self::Clockwise,
-            SavedTweenRotate::CounterClockwise => Self::CounterClockwise,
+            SavedTweenRotate::Auto => TweenRotate::Auto,
+            SavedTweenRotate::Clockwise => TweenRotate::Clockwise,
+            SavedTweenRotate::CounterClockwise => TweenRotate::CounterClockwise,
         }
     }
 }
@@ -671,9 +670,9 @@ impl From<SymbolLoopMode> for SavedSymbolLoopMode {
 impl From<SavedSymbolLoopMode> for SymbolLoopMode {
     fn from(value: SavedSymbolLoopMode) -> Self {
         match value {
-            SavedSymbolLoopMode::Loop => Self::Loop,
-            SavedSymbolLoopMode::PlayOnce => Self::PlayOnce,
-            SavedSymbolLoopMode::SingleFrame => Self::SingleFrame,
+            SavedSymbolLoopMode::Loop => SymbolLoopMode::Loop,
+            SavedSymbolLoopMode::PlayOnce => SymbolLoopMode::PlayOnce,
+            SavedSymbolLoopMode::SingleFrame => SymbolLoopMode::SingleFrame,
         }
     }
 }
@@ -1109,29 +1108,29 @@ pub(crate) struct ProjectDocument {
 }
 
 impl ProjectDocument {
-    /// 現在の `Is2dApp` から保存用の `ProjectDocument` を生成する
-    pub(crate) fn from_app(app: &Is2dApp) -> Self {
-        let root_timeline = app
+    /// 現在の `EditorDoc` から保存用の `ProjectDocument` を生成する
+    pub(crate) fn from_app(doc: &EditorDoc) -> Self {
+        let root_timeline = doc
             .symbols
             .edit_stack
             .first()
             .map(|sess| &sess.parent_timeline)
-            .unwrap_or(&app.timeline);
+            .unwrap_or(&doc.timeline);
         let mut saved_timeline: SavedTimeline = root_timeline.into();
-        saved_timeline.fps = app.timeline.fps.clamp(1, 60);
+        saved_timeline.fps = doc.timeline.fps.clamp(1, 60);
 
         Self {
             version: PROJECT_FORMAT_VERSION,
-            stage_size: [app.viewport.stage_size.x, app.viewport.stage_size.y],
+            stage_size: [doc.viewport.stage_size.x, doc.viewport.stage_size.y],
             timeline: saved_timeline,
-            library: app
+            library: doc
                 .symbols
                 .library
                 .iter()
                 .map(SavedSymbolDef::from)
                 .collect(),
-            next_symbol_id: app.symbols.next_symbol_id,
-            next_group_id: app.symbols.next_group_id,
+            next_symbol_id: doc.symbols.next_symbol_id,
+            next_group_id: doc.symbols.next_group_id,
         }
     }
 
@@ -1173,7 +1172,7 @@ impl ProjectDocument {
     }
 
     /// 読み込んだ `ProjectDocument` を現在のアクティブドキュメントへ適用し、作業キャンバスや履歴を初期化する
-    pub(crate) fn apply_to_app(self, app: &mut Is2dApp) {
+    pub(crate) fn apply_to_app(self, doc: &mut EditorDoc) {
         let mut timeline: Timeline = self.timeline.into();
 
         // 重複または不正（id == 0 / id > MAX_SAFE_ENTITY_ID）な SymbolDef::id を一意な安全IDへ再採番してライブラリを構築
@@ -1397,7 +1396,7 @@ impl ProjectDocument {
         } else {
             450.0
         };
-        reset_active_document_state(app, timeline, symbols, Vec2::new(w, h));
+        reset_active_document_state(doc, timeline, symbols, Vec2::new(w, h));
     }
 }
 
@@ -1462,22 +1461,19 @@ fn paths_refer_to_same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// 現在のアクティブタブ（ファイル名・無題番号・未保存 `*` 状態）に応じてウィンドウタイトルバーの表示を更新する
-pub(crate) fn update_window_title(app: &mut Is2dApp, ctx: &egui::Context) {
-    let tab_title = app
+pub(crate) fn update_window_title(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
+    let active_idx = ws.tabs().active_index;
+    let current_file_path = ws.doc().ui.current_file_path.clone();
+    let is_dirty = ws.doc().history.is_dirty();
+    let tab_title = ws
+        .tabs()
         .tabs
-        .tabs
-        .get(app.tabs.active_index)
-        .map(|slot| {
-            slot.display_title(
-                app.ui.current_file_path.as_deref(),
-                app.history.is_dirty(),
-                true,
-            )
-        })
+        .get(active_idx)
+        .map(|slot| slot.display_title(current_file_path.as_deref(), is_dirty, true))
         .unwrap_or_else(|| "無題-1".to_owned());
     let full_title = format!("is2d - {tab_title}");
-    if app.tabs.last_window_title != full_title {
-        app.tabs.last_window_title = full_title.clone();
+    if ws.tabs().last_window_title != full_title {
+        ws.tabs_mut().last_window_title = full_title.clone();
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(full_title));
     }
 }
@@ -1490,46 +1486,51 @@ type PreSaveRollbackState = (
     SymbolManager,
 );
 
-fn restore_pre_save_state(app: &mut Is2dApp, pre_save_state: Option<PreSaveRollbackState>) {
+fn restore_pre_save_state(doc: &mut EditorDoc, pre_save_state: Option<PreSaveRollbackState>) {
     if let Some((shapes, sel, pivot, tl, syms)) = pre_save_state {
-        app.canvas.shapes = shapes;
-        app.canvas.selected_shapes = sel;
-        app.canvas.selection_modified = true;
-        app.canvas.transform_pivot = pivot;
-        app.timeline = tl;
-        app.symbols = syms;
-        app.canvas.record_loaded_signatures();
+        doc.canvas.shapes = shapes;
+        doc.canvas.selected_shapes = sel;
+        doc.canvas.selection_modified = true;
+        doc.canvas.transform_pivot = pivot;
+        doc.timeline = tl;
+        doc.symbols = syms;
+        doc.canvas.record_loaded_signatures();
     }
 }
 
 /// 指定されたファイルパス `path` へプロジェクトを一時ファイル経由でアトミック保存する
-pub(crate) fn save_project_to_path(app: &mut Is2dApp, path: &Path) -> Result<(), String> {
-    let pre_save_state = (app.canvas.selection_modified && !app.canvas.selected_shapes.is_empty())
-        .then(|| {
+pub(crate) fn save_project_to_path(
+    ws: &mut impl ProjectWorkspace,
+    path: &Path,
+) -> Result<(), String> {
+    let pre_save_state = {
+        let doc = ws.doc();
+        (doc.canvas.selection_modified && !doc.canvas.selected_shapes.is_empty()).then(|| {
             (
-                app.canvas.shapes.clone(),
-                app.canvas.selected_shapes.clone(),
-                app.canvas.transform_pivot,
-                app.timeline.clone(),
-                app.symbols.clone(),
+                doc.canvas.shapes.clone(),
+                doc.canvas.selected_shapes.clone(),
+                doc.canvas.transform_pivot,
+                doc.timeline.clone(),
+                doc.symbols.clone(),
             )
-        });
-    prepare_active_tab_for_switch_or_save(app, true);
+        })
+    };
+    prepare_active_tab_for_switch_or_save(ws.doc_mut(), true);
 
-    let doc = ProjectDocument::from_app(app);
-    if let Err(err) = doc.validate_finite() {
-        restore_pre_save_state(app, pre_save_state);
+    let proj_doc = ProjectDocument::from_app(ws.doc());
+    if let Err(err) = proj_doc.validate_finite() {
+        restore_pre_save_state(ws.doc_mut(), pre_save_state);
         return Err(err);
     }
-    let json = match serde_json::to_string(&doc) {
+    let json = match serde_json::to_string(&proj_doc) {
         Ok(s) => s,
         Err(e) => {
-            restore_pre_save_state(app, pre_save_state);
+            restore_pre_save_state(ws.doc_mut(), pre_save_state);
             return Err(format!("プロジェクトデータの変換に失敗しました: {e}"));
         }
     };
     if json.len() as u64 > MAX_PROJECT_FILE_BYTES {
-        restore_pre_save_state(app, pre_save_state);
+        restore_pre_save_state(ws.doc_mut(), pre_save_state);
         return Err(format!(
             "保存データが最大サイズ上限を超えています ({} MB > 上限 {} MB)",
             json.len() as u64 / (1024 * 1024),
@@ -1553,13 +1554,13 @@ pub(crate) fn save_project_to_path(app: &mut Is2dApp, path: &Path) -> Result<(),
     })();
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&tmp_path);
-        restore_pre_save_state(app, pre_save_state);
+        restore_pre_save_state(ws.doc_mut(), pre_save_state);
         return Err(format!("一時ファイルの書き込みに失敗しました: {e}"));
     }
 
     if let Err(e) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
-        restore_pre_save_state(app, pre_save_state);
+        restore_pre_save_state(ws.doc_mut(), pre_save_state);
         return Err(format!("ファイルの保存に失敗しました: {e}"));
     }
     if let Some(parent) = path.parent() {
@@ -1569,9 +1570,9 @@ pub(crate) fn save_project_to_path(app: &mut Is2dApp, path: &Path) -> Result<(),
     }
 
     // 別タブが同じファイルパスを開いていた場合、重複タブ化を防ぐため別タブ側のファイル紐付けを解除して未保存状態にする
-    let active_idx = app.tabs.active_index;
+    let active_idx = ws.tabs().active_index;
     let mut detached_indices = Vec::new();
-    for (idx, slot) in app.tabs.tabs.iter().enumerate() {
+    for (idx, slot) in ws.tabs().tabs.iter().enumerate() {
         if idx != active_idx
             && slot
                 .file_path
@@ -1582,22 +1583,23 @@ pub(crate) fn save_project_to_path(app: &mut Is2dApp, path: &Path) -> Result<(),
         }
     }
     for idx in detached_indices {
-        let alloc_num = if app.tabs.tabs[idx].untitled_number == 0 {
-            Some(app.tabs.alloc_untitled_number())
+        let alloc_num = if ws.tabs().tabs[idx].untitled_number == 0 {
+            Some(ws.tabs_mut().alloc_untitled_number())
         } else {
             None
         };
-        if let Some(slot) = app.tabs.tabs.get_mut(idx) {
+        if let Some(slot) = ws.tabs_mut().tabs.get_mut(idx) {
             if let Some(num) = alloc_num {
                 slot.untitled_number = num;
             }
             slot.file_path = None;
-            slot.history.mark_unsaved();
+            slot.doc.ui.current_file_path = None;
+            slot.doc.history.mark_unsaved();
         }
     }
 
-    set_active_file_path(app, Some(path.to_path_buf()));
-    app.history.mark_saved();
+    set_active_file_path(ws, Some(path.to_path_buf()));
+    ws.doc_mut().history.mark_saved();
     Ok(())
 }
 
@@ -1640,14 +1642,16 @@ fn read_project_document(path: &Path) -> Result<ProjectDocument, String> {
 
 /// 指定パスのプロジェクトを「新しいタブ」（または既存の同一ファイルタブ／空の無題タブ）として開く
 pub(crate) fn open_project_in_tab(
-    app: &mut Is2dApp,
+    ws: &mut impl ProjectWorkspace,
     path: &Path,
     ctx: Option<&egui::Context>,
 ) -> Result<OpenProjectOutcome, String> {
     // 1. すでに同じファイルパスが別タブ（または現在タブ）で開かれていれば、そのタブへ切り替える
-    let existing_tab = app.tabs.tabs.iter().enumerate().find_map(|(idx, slot)| {
-        let slot_path = if idx == app.tabs.active_index {
-            app.ui.current_file_path.as_deref()
+    let active_idx = ws.tabs().active_index;
+    let current_file_path = ws.doc().ui.current_file_path.clone();
+    let existing_tab = ws.tabs().tabs.iter().enumerate().find_map(|(idx, slot)| {
+        let slot_path = if idx == active_idx {
+            current_file_path.as_deref()
         } else {
             slot.file_path.as_deref()
         }?;
@@ -1655,81 +1659,84 @@ pub(crate) fn open_project_in_tab(
     });
 
     if let Some(existing_idx) = existing_tab {
-        if existing_idx == app.tabs.active_index {
+        if existing_idx == ws.tabs().active_index {
             return Ok(OpenProjectOutcome::AlreadyActiveTab);
         }
-        switch_to_tab(app, existing_idx, ctx);
+        switch_to_tab(ws, existing_idx, ctx);
         return Ok(OpenProjectOutcome::SwitchedToExistingTab);
     }
 
     // 2. ファイル内容を先に検証・パース（エラー時にタブを増やさない）
-    let doc = read_project_document(path)?;
+    let proj_doc = read_project_document(path)?;
 
     // 3. 現在のタブが未編集の空の無題タブでなければ、アクティブタブの右隣に新しいタブスロットを追加して切り替える
     // （ファイル読込タブでは `untitled_number` を `0` として遅延採番し、`無題-N` 連番の欠番スキップを防ぐ）
-    if !is_active_tab_pristine_empty(app) {
-        pack_active_into_slot(app);
-        let doc_id = app.tabs.alloc_doc_id();
-        let insert_idx = (app.tabs.active_index + 1).min(app.tabs.tabs.len());
-        app.tabs
+    if !is_active_tab_pristine_empty(ws.doc()) {
+        pack_active_into_slot(ws);
+        let doc_id = ws.tabs_mut().alloc_doc_id();
+        let insert_idx = (ws.tabs().active_index + 1).min(ws.tabs().tabs.len());
+        ws.tabs_mut()
             .tabs
             .insert(insert_idx, DocumentSlot::new_empty(doc_id, 0));
-        unpack_slot_into_active(app, insert_idx);
+        unpack_slot_into_active(ws, insert_idx);
     } else {
-        crate::canvas_tool::stop_playback(app);
-        crate::canvas_tool::cancel_active_drag(app);
-        app.timeline_ui.cancel_drag();
-        app.viewport.pan_last_screen_pos = None;
-        let new_doc_id = app.tabs.alloc_doc_id();
-        if let Some(slot) = app.tabs.tabs.get_mut(app.tabs.active_index) {
+        stop_playback(ws.doc_mut());
+        cancel_active_drag(ws.doc_mut());
+        ws.doc_mut().viewport.pan_last_screen_pos = None;
+        let new_doc_id = ws.tabs_mut().alloc_doc_id();
+        let active_idx = ws.tabs().active_index;
+        if let Some(slot) = ws.tabs_mut().tabs.get_mut(active_idx) {
             slot.doc_id = new_doc_id;
+            slot.doc.doc_id = new_doc_id;
             slot.untitled_number = 0;
         }
-        app.tabs.next_untitled_number = app
-            .tabs
+        ws.doc_mut().doc_id = new_doc_id;
+        let max_untitled = ws
+            .tabs()
             .tabs
             .iter()
             .map(|t| t.untitled_number)
             .max()
-            .unwrap_or(0)
-            + 1;
+            .unwrap_or(0);
+        ws.tabs_mut().next_untitled_number = max_untitled + 1;
     }
 
     // 4. 読み込んだドキュメントを適用
-    doc.apply_to_app(app);
-    set_active_file_path(app, Some(path.to_path_buf()));
-    app.history.mark_saved();
+    proj_doc.apply_to_app(ws.doc_mut());
+    set_active_file_path(ws, Some(path.to_path_buf()));
+    ws.doc_mut().history.mark_saved();
     if let Some(c) = ctx {
         surrender_focused_widget(c);
-        update_window_title(app, c);
+        update_window_title(ws, c);
     }
     Ok(OpenProjectOutcome::Loaded)
 }
 
 /// アクティブタブの右隣に新しい白紙ドキュメントタブを追加して切り替える（`Cmd/Ctrl + N` / タブバーの `＋` ボタン）
-pub(crate) fn new_project(app: &mut Is2dApp, ctx: &egui::Context) {
-    pack_active_into_slot(app);
+pub(crate) fn new_project(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
+    pack_active_into_slot(ws);
 
-    let doc_id = app.tabs.alloc_doc_id();
-    let untitled_num = app.tabs.alloc_untitled_number();
-    let insert_idx = (app.tabs.active_index + 1).min(app.tabs.tabs.len());
-    app.tabs
+    let doc_id = ws.tabs_mut().alloc_doc_id();
+    let untitled_num = ws.tabs_mut().alloc_untitled_number();
+    let insert_idx = (ws.tabs().active_index + 1).min(ws.tabs().tabs.len());
+    ws.tabs_mut()
         .tabs
         .insert(insert_idx, DocumentSlot::new_empty(doc_id, untitled_num));
-    unpack_slot_into_active(app, insert_idx);
-    app.viewport.reset_view();
-    crate::canvas_tool::load_shapes_from_timeline(app);
+    unpack_slot_into_active(ws, insert_idx);
+    ws.doc_mut().viewport.reset_view();
+    load_shapes_from_timeline(ws.doc_mut());
 
     surrender_focused_widget(ctx);
-    update_window_title(app, ctx);
-    app.notify_info(format!("新規タブ「無題-{untitled_num}」を作成しました"));
+    update_window_title(ws, ctx);
+    ws.doc_mut()
+        .notify_info(format!("新規タブ「無題-{untitled_num}」を作成しました"));
 }
 
 /// OS標準の「開く」ダイアログを表示し、選択された `.is2d` ファイルを新しいタブ（または空の無題タブ）に読み込む
-pub(crate) fn open_project_dialog(app: &mut Is2dApp, ctx: &egui::Context) {
+pub(crate) fn open_project_dialog(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
     let mut dialog =
         rfd::FileDialog::new().add_filter("is2d プロジェクト (*.is2d)", &[PROJECT_FILE_EXTENSION]);
-    if let Some(parent) = app.ui.current_file_path.as_deref().and_then(Path::parent) {
+    if let Some(parent) = ws.doc().ui.current_file_path.as_deref().and_then(Path::parent) {
         dialog = dialog.set_directory(parent);
     }
 
@@ -1741,47 +1748,51 @@ pub(crate) fn open_project_dialog(app: &mut Is2dApp, ctx: &egui::Context) {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("ファイル");
-    match open_project_in_tab(app, &path, Some(ctx)) {
+    match open_project_in_tab(ws, &path, Some(ctx)) {
         Ok(OpenProjectOutcome::Loaded) => {
-            app.notify_info(format!("「{name}」を開きました"));
+            ws.doc_mut().notify_info(format!("「{name}」を開きました"));
         }
         Ok(OpenProjectOutcome::SwitchedToExistingTab) => {
-            app.notify_info(format!("既に開いている「{name}」のタブへ切り替えました"));
+            ws.doc_mut()
+                .notify_info(format!("既に開いている「{name}」のタブへ切り替えました"));
         }
         Ok(OpenProjectOutcome::AlreadyActiveTab) => {
-            app.notify_info(format!("「{name}」は既に現在のタブで開かれています"));
+            ws.doc_mut()
+                .notify_info(format!("「{name}」は既に現在のタブで開かれています"));
         }
         Err(err) => {
-            app.notify_error(err);
+            ws.doc_mut().notify_error(err);
         }
     }
 }
 
 /// 上書き保存（`current_file_path` が未設定なら「名前を付けて保存」ダイアログを開く）
-pub(crate) fn save_project(app: &mut Is2dApp, ctx: &egui::Context) {
-    let Some(path) = app.ui.current_file_path.clone() else {
-        save_project_as_dialog(app, ctx);
+pub(crate) fn save_project(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
+    let Some(path) = ws.doc().ui.current_file_path.clone() else {
+        save_project_as_dialog(ws, ctx);
         return;
     };
 
-    match save_project_to_path(app, &path) {
+    match save_project_to_path(ws, &path) {
         Ok(()) => {
-            update_window_title(app, ctx);
+            update_window_title(ws, ctx);
             let name = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("ファイル");
-            app.notify_info(format!("「{name}」に上書き保存しました"));
+            ws.doc_mut()
+                .notify_info(format!("「{name}」に上書き保存しました"));
         }
         Err(err) => {
-            app.notify_error(err);
+            ws.doc_mut().notify_error(err);
         }
     }
 }
 
 /// OS標準の「名前を付けて保存」ダイアログを表示し、選択されたパスへ `.is2d` ファイルを保存する
-pub(crate) fn save_project_as_dialog(app: &mut Is2dApp, ctx: &egui::Context) {
-    let default_name = app
+pub(crate) fn save_project_as_dialog(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
+    let default_name = ws
+        .doc()
         .ui
         .current_file_path
         .as_deref()
@@ -1789,10 +1800,10 @@ pub(crate) fn save_project_as_dialog(app: &mut Is2dApp, ctx: &egui::Context) {
         .and_then(|n| n.to_str())
         .map(str::to_owned)
         .unwrap_or_else(|| {
-            let num = app
+            let num = ws
+                .tabs()
                 .tabs
-                .tabs
-                .get(app.tabs.active_index)
+                .get(ws.tabs().active_index)
                 .map(|s| s.untitled_number.max(1))
                 .unwrap_or(1);
             format!("untitled-{num}.is2d")
@@ -1801,7 +1812,7 @@ pub(crate) fn save_project_as_dialog(app: &mut Is2dApp, ctx: &egui::Context) {
     let mut dialog = rfd::FileDialog::new()
         .add_filter("is2d プロジェクト (*.is2d)", &[PROJECT_FILE_EXTENSION])
         .set_file_name(&default_name);
-    if let Some(parent) = app.ui.current_file_path.as_deref().and_then(Path::parent) {
+    if let Some(parent) = ws.doc().ui.current_file_path.as_deref().and_then(Path::parent) {
         dialog = dialog.set_directory(parent);
     }
 
@@ -1812,17 +1823,18 @@ pub(crate) fn save_project_as_dialog(app: &mut Is2dApp, ctx: &egui::Context) {
         path.set_extension(PROJECT_FILE_EXTENSION);
     }
 
-    match save_project_to_path(app, &path) {
+    match save_project_to_path(ws, &path) {
         Ok(()) => {
-            update_window_title(app, ctx);
+            update_window_title(ws, ctx);
             let name = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("ファイル");
-            app.notify_info(format!("「{name}」を保存しました"));
+            ws.doc_mut()
+                .notify_info(format!("「{name}」を保存しました"));
         }
         Err(err) => {
-            app.notify_error(err);
+            ws.doc_mut().notify_error(err);
         }
     }
 }

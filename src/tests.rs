@@ -2827,8 +2827,9 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
     sort_app.canvas.shapes = vec![shape_top, shape_bottom];
     sort_app.canvas.selected_shapes = vec![0];
     sort_app
+        .doc
         .canvas
-        .sort_shapes_by_layer_order(&sort_app.timeline);
+        .sort_shapes_by_layer_order(&sort_app.doc.timeline);
     assert_eq!(sort_app.canvas.shapes[0].layer_id, lid_bottom);
     assert_eq!(sort_app.canvas.shapes[1].layer_id, lid_top);
     assert_eq!(
@@ -3350,10 +3351,10 @@ fn test_clipboard_symbol_evaluates_latest_symbol_def_and_shares_arc() {
     let parent_sym = tool_transform::convert_selection_to_symbol(&mut sym_paste_app).unwrap();
     sym_paste_app.canvas.selected_shapes = vec![0];
     assert!(tool_select::copy_selected_shapes(&mut sym_paste_app));
-    let first_clip_sym_arc = std::sync::Arc::clone(&sym_paste_app.tabs.clipboard_symbols[0]);
+    let first_clip_sym_arc = std::sync::Arc::clone(&sym_paste_app.canvas.clipboard_symbols[0]);
     assert!(tool_select::copy_selected_shapes(&mut sym_paste_app));
     assert!(
-        std::sync::Arc::ptr_eq(&first_clip_sym_arc, &sym_paste_app.tabs.clipboard_symbols[0]),
+        std::sync::Arc::ptr_eq(&first_clip_sym_arc, &sym_paste_app.canvas.clipboard_symbols[0]),
         "同一シンボルリビジョンでの再コピー時は clipboard_symbols の Arc<SymbolDef> が O(1) ポインタ共有されること"
     );
 
@@ -5348,7 +5349,7 @@ fn test_pivot_commit_restores_unsliced_marquee_snapshot_and_persists() {
     app.canvas.shapes.extend(sym_shapes);
     canvas_tool::sync_shapes_to_timeline(&mut app);
     app.canvas.selected_shapes = vec![1];
-    canvas_tool::convert_selection_to_symbol(&mut app).unwrap();
+    symbol_ops::convert_selection_to_symbol(&mut app).unwrap();
 
     // 生シェイプの一部とシンボルインスタンス全体をまたぐマーキー選択を行う
     tool_select::apply_marquee_selection(
@@ -5426,8 +5427,8 @@ fn test_move_or_copy_frames_preserves_following_frames_tween_pose_and_remaps_ids
         make_stroke(Point::new(100.0, 100.0), Point::new(140.0, 100.0), 10.0, red);
     canvas_tool::sync_shapes_to_timeline(&mut tween_app);
     tween_app.canvas.selected_shapes = vec![0];
-    canvas_tool::convert_selection_to_symbol(&mut tween_app).unwrap();
-    assert!(canvas_tool::timeline_toggle_tween(&mut tween_app));
+    symbol_ops::convert_selection_to_symbol(&mut tween_app).unwrap();
+    assert!(symbol_ops::timeline_toggle_tween(&mut tween_app));
     timeline_ui::switch_to_layer_and_frame(&mut tween_app, 0, 4);
     timeline_ui::timeline_insert_keyframe(&mut tween_app, true);
     assert!(tool_select::nudge_selected_shapes(
@@ -5540,7 +5541,7 @@ fn test_cancel_drag_and_noop_drag_preserve_tessellated_mesh_caches() {
     assert!(app.canvas.shapes[0].has_cached_fill_mesh());
 
     // 1. 選択移動ドラッグを開始して微小移動未満で終了（noop リストア）してもキャッシュが失われないこと
-    let move_drag = canvas_tool::begin_move_selection_drag(&mut app, Point::new(150.0, 100.0), false);
+    let move_drag = clipboard_ops::begin_move_selection_drag(&mut app, Point::new(150.0, 100.0), false);
     tool_select::finish_move_selection_drag(&mut app, move_drag.total_delta, move_drag.undo_snapshot);
     assert!(
         app.canvas.shapes[0].has_cached_fill_mesh()

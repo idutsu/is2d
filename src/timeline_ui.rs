@@ -1,17 +1,17 @@
 use std::time::Duration;
 
-pub(crate) use crate::canvas_tool::{TimelineGridDrag, TimelineUiState, CELL_W};
-use crate::{
-    canvas_tool::{
-        flush_canvas_before_timeline_op, icons, load_shapes_from_timeline,
-        mutate_timeline_with_undo, select_shapes_for_timeline_selection, stop_playback,
-        timeline_toggle_tween,
-    },
-    symbol::TweenState,
-    timeline::{Timeline, TimelineCellSelection, MAX_TIMELINE_FRAMES},
-    Is2dApp,
-};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
+
+use crate::canvas_tool::{
+    flush_canvas_before_timeline_op, load_shapes_from_timeline, mutate_timeline_with_undo,
+    select_shapes_for_timeline_selection, stop_playback, EditorDoc,
+};
+use crate::symbol::TweenState;
+use crate::symbol_ops::timeline_toggle_tween;
+use crate::timeline::{Timeline, TimelineCellSelection, MAX_TIMELINE_FRAMES};
+
+/// タイムライングリッドの1フレームあたりのセル幅（px）
+pub(crate) const CELL_W: f32 = 16.0;
 
 const LAYER_COL_W: f32 = 190.0;
 const RULER_H: f32 = 24.0;
@@ -21,6 +21,166 @@ const LAYER_LOCK_HIT_RANGE: std::ops::Range<f32> = 30.0..54.0;
 const LAYER_VIS_ICON_X: f32 = 18.0;
 const LAYER_LOCK_ICON_X: f32 = 42.0;
 const LAYER_NAME_X: f32 = 60.0;
+
+// ============================================================================
+// Material Icons (`fonts/MaterialIcons-Regular.ttf`) コードポイント定義
+// ============================================================================
+
+pub(crate) mod icons {
+    pub(crate) const ADD: &str = "\u{e145}"; // add (＋)
+    pub(crate) const REMOVE: &str = "\u{e15b}"; // remove (－)
+    pub(crate) const FLIP_H: &str = "\u{e8d4}"; // swap_horiz (左右反転)
+    pub(crate) const FLIP_V: &str = "\u{e8d5}"; // swap_vert (上下反転)
+    pub(crate) const ROTATE_LEFT: &str = "\u{e419}"; // rotate_left (-90°回転)
+    pub(crate) const ROTATE_RIGHT: &str = "\u{e41a}"; // rotate_right (+90°回転)
+    pub(crate) const PIVOT_RESET: &str = "\u{e3b4}"; // center_focus_strong (ピボットリセット)
+    pub(crate) const GROUP: &str = "\u{e1bd}"; // widgets (グループ表示)
+    pub(crate) const SYMBOL: &str = "\u{e87b}"; // extension (シンボル表示)
+    pub(crate) const WIREFRAME: &str = "\u{e922}"; // timeline (アンカー・パス表示)
+    pub(crate) const DELETE: &str = "\u{e872}"; // delete (削除)
+    pub(crate) const SCENE_MOVIE: &str = "\u{e02c}"; // movie (シーンアイコン)
+    pub(crate) const ARROW_BACK: &str = "\u{e5c4}"; // arrow_back (1階層出る)
+    pub(crate) const VISIBILITY: &str = "\u{e8f4}"; // visibility (レイヤー表示)
+    pub(crate) const LOCK: &str = "\u{e897}"; // lock (レイヤーロック)
+    pub(crate) const SKIP_PREV: &str = "\u{e045}"; // skip_previous (先頭フレームへ)
+    pub(crate) const STEP_PREV: &str = "\u{e408}"; // navigate_before (前のフレームへ)
+    pub(crate) const PLAY: &str = "\u{e037}"; // play_arrow (再生)
+    pub(crate) const PAUSE: &str = "\u{e034}"; // pause (一時停止)
+    pub(crate) const STEP_NEXT: &str = "\u{e409}"; // navigate_next (次のフレームへ)
+    pub(crate) const SKIP_NEXT: &str = "\u{e044}"; // skip_next (最終フレームへ)
+    pub(crate) const ONION_SKIN: &str = "\u{e3e0}"; // filter_none (オニオンスキン)
+}
+
+// ============================================================================
+// 0. タイムラインUI状態とホスト抽象化
+// ============================================================================
+
+/// ドキュメント状態（`EditorDoc`）とタイムラインUI状態（`TimelineUiState`）の組を抽象化するトレイト
+pub(crate) trait TimelineHost {
+    fn doc(&self) -> &EditorDoc;
+    fn doc_mut(&mut self) -> &mut EditorDoc;
+    fn timeline_ui(&self) -> &TimelineUiState;
+    fn timeline_ui_mut(&mut self) -> &mut TimelineUiState;
+    fn doc_and_timeline_ui_mut(&mut self) -> (&mut EditorDoc, &mut TimelineUiState);
+}
+
+/// タイムライン右側領域（ルーラー・フレームグリッド・スクロールバー）でのマウスドラッグ状態
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum TimelineGridDrag {
+    #[default]
+    None,
+    /// 上部フレーム番号ルーラーのドラッグによる再生ヘッドスクラブ（レイヤー個別選択を解除）
+    ScrubRuler,
+    /// 下部横スクロールバーのドラッグ操作
+    ScrubScrollbarX { grab_offset_x: f32 },
+    /// 右端縦スクロールバーのドラッグ操作
+    ScrubScrollbarY { grab_offset_y: f32 },
+    /// フレームグリッド上でのセル範囲選択ドラッグ（複数レイヤー・複数フレーム横断）
+    SelectCells {
+        start_layer: usize,
+        start_frame: usize,
+    },
+    /// 選択済みフレーム範囲のドラッグ移動、または `Alt`（`Option`）押下による複製
+    MoveFrames {
+        orig_sel: TimelineCellSelection,
+        grab_layer: usize,
+        grab_frame: usize,
+        curr_layer: usize,
+        curr_frame: usize,
+        copy_mode: bool,
+        has_moved: bool,
+    },
+}
+
+/// タイムラインパネルの再生状態・ループ/オニオンスキン表示設定・スクロール位置・ドラッグ操作等のUI状態
+#[derive(Clone, Debug)]
+pub(crate) struct TimelineUiState {
+    pub(crate) is_playing: bool,
+    pub(crate) loop_playback: bool,
+    pub(crate) onion_skin_enabled: bool,
+    pub(crate) onion_prev_frames: usize,
+    pub(crate) onion_next_frames: usize,
+    pub(crate) last_frame_advance_time: Option<f64>,
+    pub(crate) scroll_x: f32,
+    pub(crate) scroll_y: f32,
+    pub(crate) last_ensured_frame: usize,
+    pub(crate) dragging_layer: Option<usize>,
+    pub(crate) grid_drag: TimelineGridDrag,
+    /// 総フレーム数 `DragValue` の連続ドラッグ・入力中にUndo履歴が1フレームごとに積まれるのを防ぐフラグ
+    pub(crate) editing_total_frames: bool,
+    /// FPS `DragValue` の連続ドラッグ・入力中にUndo履歴が1フレームごとに積まれるのを防ぐフラグ
+    pub(crate) editing_fps: bool,
+}
+
+impl Default for TimelineUiState {
+    fn default() -> Self {
+        Self {
+            is_playing: false,
+            loop_playback: true,
+            onion_skin_enabled: false,
+            onion_prev_frames: 2,
+            onion_next_frames: 2,
+            last_frame_advance_time: None,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            last_ensured_frame: 0,
+            dragging_layer: None,
+            grid_drag: TimelineGridDrag::None,
+            editing_total_frames: false,
+            editing_fps: false,
+        }
+    }
+}
+
+impl TimelineUiState {
+    pub(crate) fn cancel_drag(&mut self) {
+        self.dragging_layer = None;
+        self.grid_drag = TimelineGridDrag::None;
+        self.editing_total_frames = false;
+        self.editing_fps = false;
+    }
+
+    pub(crate) fn reset_for_timeline_switch(&mut self, current_frame: usize) {
+        self.is_playing = false;
+        self.last_frame_advance_time = None;
+        self.scroll_x = 0.0;
+        self.scroll_y = 0.0;
+        self.last_ensured_frame = current_frame;
+        self.cancel_drag();
+    }
+
+    /// ドキュメント層（L3 `EditorDoc`）での再生停止要求やタイムライン切り替え通知を `TimelineUiState` に同期する
+    pub(crate) fn sync_with_doc(&mut self, doc: &mut EditorDoc) {
+        if std::mem::take(&mut doc.timeline_switched) {
+            self.reset_for_timeline_switch(doc.timeline.current_frame);
+            doc.is_playing = false;
+        } else if !doc.is_playing && self.is_playing {
+            self.is_playing = false;
+            self.last_frame_advance_time = None;
+        } else if self.is_playing && !doc.is_playing {
+            doc.is_playing = true;
+        }
+    }
+
+    /// 再生ヘッド（`current_frame`）が移動して表示領域外に出た場合のみ、横スクロール位置 `scroll_x` を自動追従させる
+    /// （手動のマウスホイールスクロールで再生ヘッドが画面外に出た場合は引き戻さない）
+    pub(crate) fn ensure_current_frame_visible(&mut self, current_frame: usize, grid_width: f32) {
+        if current_frame == self.last_ensured_frame {
+            return;
+        }
+        self.last_ensured_frame = current_frame;
+        if grid_width <= CELL_W * 2.0 {
+            return;
+        }
+        let head_left = current_frame as f32 * CELL_W;
+        let head_right = head_left + CELL_W;
+        if head_left < self.scroll_x {
+            self.scroll_x = head_left;
+        } else if head_right > self.scroll_x + grid_width - CELL_W {
+            self.scroll_x = (head_right - grid_width + CELL_W).max(0.0);
+        }
+    }
+}
 
 // ============================================================================
 // 1. タイムラインUIのレイアウト計算・スクロール追従
@@ -186,7 +346,11 @@ fn draw_floating_drag_badge(
 // ============================================================================
 
 /// 画面下部の Adobe Animate 風タイムラインパネルを描画・操作する（ライトテーマ・角丸なし）
-pub(crate) fn draw_timeline_panel(app: &mut Is2dApp, ctx: &egui::Context) {
+pub(crate) fn draw_timeline_panel(host: &mut impl TimelineHost, ctx: &egui::Context) {
+    {
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.sync_with_doc(doc);
+    }
     egui::TopBottomPanel::bottom("timeline_panel")
         .resizable(true)
         .default_height(186.0)
@@ -198,30 +362,33 @@ pub(crate) fn draw_timeline_panel(app: &mut Is2dApp, ctx: &egui::Context) {
         )
         .show(ctx, |ui| {
             ui.visuals_mut().override_text_color = Some(Color32::from_rgb(35, 40, 48));
-            draw_timeline_control_bar(app, ui);
+            draw_timeline_control_bar(host, ui);
 
             let (panel_rect, response) =
                 ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
             let painter = ui.painter_at(panel_rect);
 
-            app.timeline_ui.ensure_current_frame_visible(
-                app.timeline.current_frame,
+            let current_frame = host.doc().timeline.current_frame;
+            host.timeline_ui_mut().ensure_current_frame_visible(
+                current_frame,
                 (panel_rect.width() - LAYER_COL_W).max(1.0),
             );
 
-            let sel_max = app
+            let sel_max = host
+                .doc()
                 .timeline
                 .cell_selection
                 .map(|s| s.max_frame + 1)
                 .unwrap_or(0);
-            let max_reach_frames = app
+            let max_reach_frames = host
+                .doc()
                 .timeline
                 .total_frames
-                .max(app.timeline.current_frame + 1)
+                .max(current_frame + 1)
                 .max(sel_max);
             let mut layout =
-                TimelineLayout::new(panel_rect, max_reach_frames, app.timeline_ui.scroll_x);
-            handle_timeline_scroll(app, ui, &response, &mut layout);
+                TimelineLayout::new(panel_rect, max_reach_frames, host.timeline_ui().scroll_x);
+            handle_timeline_scroll(host, ui, &response, &mut layout);
 
             let primary_down = ui.input(|i| i.pointer.primary_down());
             let alt_held = ui.input(|i| i.modifiers.alt);
@@ -231,7 +398,7 @@ pub(crate) fn draw_timeline_panel(app: &mut Is2dApp, ctx: &egui::Context) {
             let hover_pos = ui.input(|i| i.pointer.hover_pos());
 
             let drag_layer_feedback =
-                handle_timeline_pointer_input(app, ui, &response, &mut layout);
+                handle_timeline_pointer_input(host, ui, &response, &mut layout);
 
             let grid_rect = Rect::from_min_max(
                 Pos2::new(layout.grid_left, layout.grid_top),
@@ -239,22 +406,22 @@ pub(crate) fn draw_timeline_panel(app: &mut Is2dApp, ctx: &egui::Context) {
             );
             let grid_painter = painter.with_clip_rect(grid_rect);
 
-            draw_timeline_frame_grid(app, &grid_painter, &layout, alt_held, pointer_pos);
-            draw_timeline_ruler(app, &painter, &grid_painter, &layout);
+            draw_timeline_frame_grid(host, &grid_painter, &layout, alt_held, pointer_pos);
+            draw_timeline_ruler(host, &painter, &grid_painter, &layout);
             draw_timeline_layer_list(
-                app,
+                host,
                 &painter,
                 &layout,
                 primary_down,
                 hover_pos,
                 drag_layer_feedback,
             );
-            draw_timeline_scrollbars(app, &painter, &layout);
+            draw_timeline_scrollbars(host, &painter, &layout);
         });
 }
 
 /// 1. 上部タイムライン操作バーの描画とボタンイベント処理
-fn draw_timeline_control_bar(app: &mut Is2dApp, ui: &mut egui::Ui) {
+fn draw_timeline_control_bar(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
     egui::Frame::none()
         .fill(Color32::from_rgb(242, 244, 248))
         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(202, 208, 218)))
@@ -262,27 +429,29 @@ fn draw_timeline_control_bar(app: &mut Is2dApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                draw_control_bar_layer_buttons(app, ui);
+                draw_control_bar_layer_buttons(host.doc_mut(), ui);
                 ui.separator();
-                draw_control_bar_transport_buttons(app, ui);
+                draw_control_bar_transport_buttons(host, ui);
                 ui.separator();
-                draw_control_bar_keyframe_buttons(app, ui);
+                draw_control_bar_keyframe_buttons(host.doc_mut(), ui);
                 ui.separator();
-                draw_control_bar_onion_controls(app, ui);
+                draw_control_bar_onion_controls(host.timeline_ui_mut(), ui);
             });
+            let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+            timeline_ui.sync_with_doc(doc);
         });
 }
 
 /// コントロールバー：レイヤー追加・削除・上下移動ボタン
-fn draw_control_bar_layer_buttons(app: &mut Is2dApp, ui: &mut egui::Ui) {
-    let len = app.timeline.layers.len();
-    let act = app.timeline.active_layer;
+fn draw_control_bar_layer_buttons(doc: &mut EditorDoc, ui: &mut egui::Ui) {
+    let len = doc.timeline.layers.len();
+    let act = doc.timeline.active_layer;
     if ui
         .button("＋ レイヤー")
         .on_hover_text("新しいレイヤーを現在のレイヤーの前面に追加")
         .clicked()
     {
-        timeline_add_layer(app);
+        timeline_add_layer(doc);
     }
     if ui
         .add_enabled(
@@ -292,79 +461,86 @@ fn draw_control_bar_layer_buttons(app: &mut Is2dApp, ui: &mut egui::Ui) {
         .on_hover_text("現在選択中のレイヤーを削除")
         .clicked()
     {
-        timeline_delete_active_layer(app);
+        timeline_delete_active_layer(doc);
     }
     if ui
         .add_enabled(act + 1 < len, egui::Button::new("▲"))
         .on_hover_text("レイヤーを1つ前面（上）へ移動（ドラッグ＆ドロップでも入れ替え可能）")
         .clicked()
     {
-        timeline_move_active_layer(app, true);
+        timeline_move_active_layer(doc, true);
     }
     if ui
         .add_enabled(act > 0, egui::Button::new("▼"))
         .on_hover_text("レイヤーを1つ背面（下）へ移動（ドラッグ＆ドロップでも入れ替え可能）")
         .clicked()
     {
-        timeline_move_active_layer(app, false);
+        timeline_move_active_layer(doc, false);
     }
 }
 
 /// コントロールバー：再生・コマ送り・総フレーム数・FPS設定
-fn draw_control_bar_transport_buttons(app: &mut Is2dApp, ui: &mut egui::Ui) {
+fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
     if ui
         .button(icons::SKIP_PREV)
         .on_hover_text("最初のフレームへ (Home)")
         .clicked()
     {
-        switch_to_layer_and_frame(app, app.timeline.active_layer, 0);
+        let act = host.doc().timeline.active_layer;
+        switch_to_layer_and_frame(host.doc_mut(), act, 0);
     }
     if ui
         .button(icons::STEP_PREV)
         .on_hover_text("前のフレームへ (, / ←)")
         .clicked()
     {
-        step_frame(app, -1);
+        step_frame(host, -1);
     }
-    let play_label = if app.timeline_ui.is_playing {
+    let is_playing = host.timeline_ui().is_playing;
+    let play_label = if is_playing {
         format!("{} 停止 (Enter)", icons::PAUSE)
     } else {
         format!("{} 再生 (Enter)", icons::PLAY)
     };
     if ui
-        .selectable_label(app.timeline_ui.is_playing, play_label)
+        .selectable_label(is_playing, play_label)
         .on_hover_text("再生 / 一時停止 (Enter)")
         .clicked()
     {
-        toggle_playback(app);
+        toggle_playback(host);
     }
     if ui
         .button(icons::STEP_NEXT)
         .on_hover_text("次のフレームへ (. / →)")
         .clicked()
     {
-        step_frame(app, 1);
+        step_frame(host, 1);
     }
     if ui
         .button(icons::SKIP_NEXT)
         .on_hover_text("最後のフレームへ (End)")
         .clicked()
     {
-        let last = app.timeline.total_frames.saturating_sub(1);
-        switch_to_layer_and_frame(app, app.timeline.active_layer, last);
+        let last = host.doc().timeline.total_frames.saturating_sub(1);
+        let act = host.doc().timeline.active_layer;
+        switch_to_layer_and_frame(host.doc_mut(), act, last);
     }
+    let loop_pb = host.timeline_ui().loop_playback;
     if ui
-        .selectable_label(app.timeline_ui.loop_playback, "↻")
+        .selectable_label(loop_pb, "↻")
         .on_hover_text("ループ再生 ON / OFF（OFF時は最終フレームで自動停止）")
         .clicked()
     {
-        app.timeline_ui.loop_playback = !app.timeline_ui.loop_playback;
+        host.timeline_ui_mut().loop_playback = !loop_pb;
     }
 
     ui.separator();
 
-    ui.label(format!("フレーム: {:>2} /", app.timeline.current_frame + 1));
-    let mut total_f = app.timeline.total_frames as u32;
+    ui.label(format!(
+        "フレーム: {:>2} /",
+        host.doc().timeline.current_frame + 1
+    ));
+    let mut total_f = host.doc().timeline.total_frames as u32;
     let total_resp = ui
         .add(
             egui::DragValue::new(&mut total_f)
@@ -377,26 +553,27 @@ fn draw_control_bar_transport_buttons(app: &mut Is2dApp, ui: &mut egui::Ui) {
         .on_hover_text(format!("総フレーム数 (1〜{})", MAX_TIMELINE_FRAMES));
     if total_resp.changed() {
         let next_total = (total_f as usize).max(1);
-        if next_total != app.timeline.total_frames {
-            if !app.timeline_ui.editing_total_frames {
-                flush_canvas_before_timeline_op(app);
-                app.push_undo();
-                app.timeline_ui.editing_total_frames = true;
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        if next_total != doc.timeline.total_frames {
+            if !timeline_ui.editing_total_frames {
+                flush_canvas_before_timeline_op(doc);
+                doc.push_undo();
+                timeline_ui.editing_total_frames = true;
             }
-            app.timeline.resize_total_frames(next_total);
-            app.symbols.sync_active_edit(&app.timeline);
-            load_shapes_from_timeline(app);
+            doc.timeline.resize_total_frames(next_total);
+            doc.symbols.sync_active_edit(&doc.timeline);
+            load_shapes_from_timeline(doc);
         }
     }
     if total_resp.drag_stopped()
         || total_resp.lost_focus()
         || (!total_resp.dragged() && !total_resp.has_focus())
     {
-        app.timeline_ui.editing_total_frames = false;
+        host.timeline_ui_mut().editing_total_frames = false;
     }
 
     ui.label("FPS:");
-    let mut fps_val = app.timeline.fps;
+    let mut fps_val = host.doc().timeline.fps;
     let fps_resp = ui.add(
         egui::DragValue::new(&mut fps_val)
             .range(1..=60)
@@ -405,21 +582,22 @@ fn draw_control_bar_transport_buttons(app: &mut Is2dApp, ui: &mut egui::Ui) {
     );
     if fps_resp.changed() {
         let next_fps = fps_val.clamp(1, 60);
-        if next_fps != app.timeline.fps {
-            if !app.timeline_ui.editing_fps {
-                if !app.timeline_ui.is_playing {
-                    flush_canvas_before_timeline_op(app);
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        if next_fps != doc.timeline.fps {
+            if !timeline_ui.editing_fps {
+                if !timeline_ui.is_playing {
+                    flush_canvas_before_timeline_op(doc);
                 }
-                app.push_undo();
-                app.timeline_ui.editing_fps = true;
+                doc.push_undo();
+                timeline_ui.editing_fps = true;
             }
-            app.timeline.fps = next_fps;
-            for sess in &mut app.symbols.edit_stack {
+            doc.timeline.fps = next_fps;
+            for sess in &mut doc.symbols.edit_stack {
                 sess.parent_timeline.fps = next_fps;
             }
-            app.symbols.sync_active_edit(&app.timeline);
-            if app.timeline_ui.is_playing {
-                app.timeline_ui.last_frame_advance_time = None;
+            doc.symbols.sync_active_edit(&doc.timeline);
+            if timeline_ui.is_playing {
+                timeline_ui.last_frame_advance_time = None;
             }
         }
     }
@@ -427,53 +605,53 @@ fn draw_control_bar_transport_buttons(app: &mut Is2dApp, ui: &mut egui::Ui) {
         || fps_resp.lost_focus()
         || (!fps_resp.dragged() && !fps_resp.has_focus())
     {
-        app.timeline_ui.editing_fps = false;
+        host.timeline_ui_mut().editing_fps = false;
     }
 }
 
 /// コントロールバー：キーフレーム挿入・削除・フレーム延長/短縮・クラシックトゥイーンボタン
-fn draw_control_bar_keyframe_buttons(app: &mut Is2dApp, ui: &mut egui::Ui) {
-    let targets = app.timeline.target_layers_for_frame_op();
+fn draw_control_bar_keyframe_buttons(doc: &mut EditorDoc, ui: &mut egui::Ui) {
+    let targets = doc.timeline.target_layers_for_frame_op();
     let editable = !targets.is_empty();
-    let can_remove_frame = app.timeline.can_remove_frame_on_targets(&targets);
-    let can_delete_kf = app.timeline.can_delete_keyframe_on_targets(&targets);
+    let can_remove_frame = doc.timeline.can_remove_frame_on_targets(&targets);
+    let can_delete_kf = doc.timeline.can_delete_keyframe_on_targets(&targets);
     if ui
         .add_enabled(editable, egui::Button::new("● キーフレーム (F6)"))
         .on_hover_text("現在の絵を複製して新しいキーフレームを挿入 (F6)")
         .clicked()
     {
-        timeline_insert_keyframe(app, true);
+        timeline_insert_keyframe(doc, true);
     }
     if ui
         .add_enabled(editable, egui::Button::new("○ 空白KF (F7)"))
         .on_hover_text("空の新しいキーフレームを挿入 (F7)")
         .clicked()
     {
-        timeline_insert_keyframe(app, false);
+        timeline_insert_keyframe(doc, false);
     }
     if ui
         .add_enabled(editable, egui::Button::new("＋ 延長 (F5)"))
         .on_hover_text("選択レイヤー（未選択時は全レイヤー）のフレーム尺を1コマ延長 (F5)")
         .clicked()
     {
-        timeline_extend_frame(app);
+        timeline_extend_frame(doc);
     }
     if ui
         .add_enabled(can_remove_frame, egui::Button::new("－ 短縮"))
         .on_hover_text("選択レイヤー（未選択時は全レイヤー）のフレームを1コマ削除・短縮 (Shift+F5)")
         .clicked()
     {
-        timeline_remove_frame(app);
+        timeline_remove_frame(doc);
     }
     if ui
         .add_enabled(can_delete_kf, egui::Button::new("× KF削除"))
         .on_hover_text("現在のキーフレームを削除 / クリア (Shift+F6)")
         .clicked()
     {
-        timeline_delete_keyframe(app);
+        timeline_delete_keyframe(doc);
     }
 
-    let (can_tween, is_tweened) = app.timeline.can_toggle_tween_at_current_frame();
+    let (can_tween, is_tweened) = doc.timeline.can_toggle_tween_at_current_frame();
     let tween_btn = egui::Button::new(egui::RichText::new("⇄ トゥイーン (T)").color(
         if is_tweened {
             Color32::from_rgb(75, 30, 150)
@@ -504,25 +682,25 @@ fn draw_control_bar_keyframe_buttons(app: &mut Is2dApp, ui: &mut egui::Ui) {
         )
         .clicked()
     {
-        timeline_toggle_tween(app);
+        timeline_toggle_tween(doc);
     }
 }
 
 /// コントロールバー：オニオンスキン ON/OFF・前後フレーム数設定
-fn draw_control_bar_onion_controls(app: &mut Is2dApp, ui: &mut egui::Ui) {
+fn draw_control_bar_onion_controls(timeline_ui: &mut TimelineUiState, ui: &mut egui::Ui) {
     if ui
         .selectable_label(
-            app.timeline_ui.onion_skin_enabled,
+            timeline_ui.onion_skin_enabled,
             format!("{} オニオンスキン (O)", icons::ONION_SKIN),
         )
         .on_hover_text("オニオンスキン（前後のフレームの透かし表示）切替 (O)")
         .clicked()
     {
-        app.timeline_ui.onion_skin_enabled = !app.timeline_ui.onion_skin_enabled;
+        timeline_ui.onion_skin_enabled = !timeline_ui.onion_skin_enabled;
     }
-    if app.timeline_ui.onion_skin_enabled {
-        let mut prev_n = app.timeline_ui.onion_prev_frames as u32;
-        let mut next_n = app.timeline_ui.onion_next_frames as u32;
+    if timeline_ui.onion_skin_enabled {
+        let mut prev_n = timeline_ui.onion_prev_frames as u32;
+        let mut next_n = timeline_ui.onion_next_frames as u32;
         ui.label("前:");
         if ui
             .add(
@@ -533,7 +711,7 @@ fn draw_control_bar_onion_controls(app: &mut Is2dApp, ui: &mut egui::Ui) {
             )
             .changed()
         {
-            app.timeline_ui.onion_prev_frames = prev_n as usize;
+            timeline_ui.onion_prev_frames = prev_n as usize;
         }
         ui.label("後:");
         if ui
@@ -545,20 +723,20 @@ fn draw_control_bar_onion_controls(app: &mut Is2dApp, ui: &mut egui::Ui) {
             )
             .changed()
         {
-            app.timeline_ui.onion_next_frames = next_n as usize;
+            timeline_ui.onion_next_frames = next_n as usize;
         }
     }
 }
 
 /// 2. マウスホイールによるタイムライン横・縦スクロール更新と範囲クランプ
 fn handle_timeline_scroll(
-    app: &mut Is2dApp,
+    host: &mut impl TimelineHost,
     ui: &egui::Ui,
     response: &egui::Response,
     layout: &mut TimelineLayout,
 ) {
     let max_scroll_x = ((layout.max_frames_shown as f32) * CELL_W - layout.grid_w).max(0.0);
-    let max_scroll_y = ((app.timeline.layers.len() as f32) * ROW_H - layout.grid_h).max(0.0);
+    let max_scroll_y = ((host.doc().timeline.layers.len() as f32) * ROW_H - layout.grid_h).max(0.0);
 
     let pointer_in_timeline = response.hovered() || ui.rect_contains_pointer(ui.max_rect());
     if pointer_in_timeline {
@@ -567,35 +745,37 @@ fn handle_timeline_scroll(
             let pointer_in_layers = ui
                 .input(|i| i.pointer.hover_pos())
                 .is_some_and(|p| p.x < layout.grid_left && p.y > layout.grid_top);
+            let timeline_ui = host.timeline_ui_mut();
             if scroll_delta.x.abs() > 0.1 && scroll_delta.y.abs() > 0.1 {
-                app.timeline_ui.scroll_x -= scroll_delta.x;
-                app.timeline_ui.scroll_y -= scroll_delta.y;
+                timeline_ui.scroll_x -= scroll_delta.x;
+                timeline_ui.scroll_y -= scroll_delta.y;
             } else if (pointer_in_layers || shift_held || max_scroll_x <= 0.0)
                 && max_scroll_y > 0.0
                 && scroll_delta.y.abs() >= scroll_delta.x.abs()
             {
-                app.timeline_ui.scroll_y -= scroll_delta.y;
+                timeline_ui.scroll_y -= scroll_delta.y;
             } else {
                 let dx = if scroll_delta.x.abs() > scroll_delta.y.abs() {
                     scroll_delta.x
                 } else {
                     scroll_delta.y
                 };
-                app.timeline_ui.scroll_x -= dx;
+                timeline_ui.scroll_x -= dx;
             }
         }
     }
 
-    app.timeline_ui.scroll_x = app.timeline_ui.scroll_x.clamp(0.0, max_scroll_x);
-    app.timeline_ui.scroll_y = app.timeline_ui.scroll_y.clamp(0.0, max_scroll_y);
-    layout.first_vis_frame = (app.timeline_ui.scroll_x / CELL_W).floor() as usize;
-    layout.last_vis_frame = (((app.timeline_ui.scroll_x + layout.grid_w) / CELL_W).ceil() as usize)
+    let timeline_ui = host.timeline_ui_mut();
+    timeline_ui.scroll_x = timeline_ui.scroll_x.clamp(0.0, max_scroll_x);
+    timeline_ui.scroll_y = timeline_ui.scroll_y.clamp(0.0, max_scroll_y);
+    layout.first_vis_frame = (timeline_ui.scroll_x / CELL_W).floor() as usize;
+    layout.last_vis_frame = (((timeline_ui.scroll_x + layout.grid_w) / CELL_W).ceil() as usize)
         .min(layout.max_frames_shown);
 }
 
 /// 3. タイムラインパネル内のクリック・ドラッグ入力処理（ルーラースクラブ・セル範囲選択・フレーム移動/複製・レイヤーD&D・スクロールバー操作）
 fn handle_timeline_pointer_input(
-    app: &mut Is2dApp,
+    host: &mut impl TimelineHost,
     ui: &egui::Ui,
     response: &egui::Response,
     layout: &mut TimelineLayout,
@@ -610,63 +790,70 @@ fn handle_timeline_pointer_input(
     let hover_pos = ui.input(|i| i.pointer.hover_pos());
     if response.hovered() && primary_pressed {
         if let Some(pos) = pointer_pos {
-            handle_timeline_click_start(app, layout, pos, alt_held, shift_held);
+            handle_timeline_click_start(host, layout, pos, alt_held, shift_held);
         }
     }
-    update_timeline_grid_drag(app, layout, primary_down, alt_held, pointer_pos);
-    let drag_layer_feedback = update_timeline_layer_drag(app, layout, primary_down, pointer_pos);
+    update_timeline_grid_drag(host, layout, primary_down, alt_held, pointer_pos);
+    let drag_layer_feedback = update_timeline_layer_drag(host, layout, primary_down, pointer_pos);
     update_timeline_cursor_icon(
-        app,
+        host,
         ui.ctx(),
         layout,
         alt_held,
         hover_pos,
         drag_layer_feedback.is_some(),
     );
+    let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+    timeline_ui.sync_with_doc(doc);
     drag_layer_feedback
 }
 
 /// タイムライン上のマウス押下開始時のクリック判定（レイヤー列 / ルーラー / スクロールバー / フレームグリッド）
 fn handle_timeline_click_start(
-    app: &mut Is2dApp,
+    host: &mut impl TimelineHost,
     layout: &mut TimelineLayout,
     pos: Pos2,
     alt_held: bool,
     shift_held: bool,
 ) {
     if layout.add_hdr_rect.contains(pos) {
-        timeline_add_layer(app);
-    } else if layout.del_hdr_rect.contains(pos) && app.timeline.layers.len() > 1 {
-        timeline_delete_active_layer(app);
+        timeline_add_layer(host.doc_mut());
+    } else if layout.del_hdr_rect.contains(pos) && host.doc().timeline.layers.len() > 1 {
+        timeline_delete_active_layer(host.doc_mut());
     } else if pos.x < layout.grid_left && pos.y >= layout.grid_top {
-        let num_layers = app.timeline.layers.len();
-        if let Some(layer_idx) = layout.layer_at_y(pos.y, app.timeline_ui.scroll_y, num_layers) {
+        let num_layers = host.doc().timeline.layers.len();
+        let scroll_y = host.timeline_ui().scroll_y;
+        if let Some(layer_idx) = layout.layer_at_y(pos.y, scroll_y, num_layers) {
             let rel_x = pos.x - layout.panel_rect.left();
             if LAYER_VIS_HIT_RANGE.contains(&rel_x) {
-                let next_vis = !app.timeline.layers[layer_idx].visible;
-                set_layer_visible(app, layer_idx, next_vis);
+                let next_vis = !host.doc().timeline.layers[layer_idx].visible;
+                set_layer_visible(host.doc_mut(), layer_idx, next_vis);
             } else if LAYER_LOCK_HIT_RANGE.contains(&rel_x) {
-                let next_lock = !app.timeline.layers[layer_idx].locked;
-                set_layer_locked(app, layer_idx, next_lock);
+                let next_lock = !host.doc().timeline.layers[layer_idx].locked;
+                set_layer_locked(host.doc_mut(), layer_idx, next_lock);
             } else {
-                let cf = app.timeline.current_frame;
+                let cf = host.doc().timeline.current_frame;
                 let anchor_layer = if shift_held {
-                    app.timeline.active_layer.min(num_layers.saturating_sub(1))
+                    host.doc()
+                        .timeline
+                        .active_layer
+                        .min(num_layers.saturating_sub(1))
                 } else {
                     layer_idx
                 };
-                select_timeline_cells(app, anchor_layer, cf, layer_idx, cf);
+                select_timeline_cells(host.doc_mut(), anchor_layer, cf, layer_idx, cf);
                 if !shift_held {
-                    app.timeline_ui.dragging_layer = Some(layer_idx);
+                    host.timeline_ui_mut().dragging_layer = Some(layer_idx);
                 }
             }
         } else {
-            app.timeline.cell_selection = None;
+            host.doc_mut().timeline.cell_selection = None;
         }
-    } else if app.timeline_ui.dragging_layer.is_none() && pos.x >= layout.grid_left {
-        let num_layers = app.timeline.layers.len();
+    } else if host.timeline_ui().dragging_layer.is_none() && pos.x >= layout.grid_left {
+        let num_layers = host.doc().timeline.layers.len();
+        let scroll_y = host.timeline_ui().scroll_y;
         if let Some((hit_rect, thumb_rect, thumb_h, max_scroll_y)) =
-            layout.vertical_scrollbar_metrics(num_layers, app.timeline_ui.scroll_y)
+            layout.vertical_scrollbar_metrics(num_layers, scroll_y)
         {
             if hit_rect.contains(pos) {
                 let grab_offset_y = if pos.y >= thumb_rect.top() && pos.y <= thumb_rect.bottom() {
@@ -675,14 +862,17 @@ fn handle_timeline_click_start(
                     thumb_h * 0.5
                 };
                 let track_span = (layout.grid_h - thumb_h).max(1.0);
-                let ratio_y = ((pos.y - grab_offset_y - layout.grid_top) / track_span).clamp(0.0, 1.0);
-                app.timeline_ui.scroll_y = ratio_y * max_scroll_y;
-                app.timeline_ui.grid_drag = TimelineGridDrag::ScrubScrollbarY { grab_offset_y };
+                let ratio_y =
+                    ((pos.y - grab_offset_y - layout.grid_top) / track_span).clamp(0.0, 1.0);
+                let timeline_ui = host.timeline_ui_mut();
+                timeline_ui.scroll_y = ratio_y * max_scroll_y;
+                timeline_ui.grid_drag = TimelineGridDrag::ScrubScrollbarY { grab_offset_y };
                 return;
             }
         }
+        let scroll_x = host.timeline_ui().scroll_x;
         if let Some((hit_rect, thumb_rect, thumb_w, max_scroll_x)) =
-            layout.horizontal_scrollbar_metrics(app.timeline_ui.scroll_x)
+            layout.horizontal_scrollbar_metrics(scroll_x)
         {
             if hit_rect.contains(pos) {
                 let grab_offset_x = if pos.x >= thumb_rect.left() && pos.x <= thumb_rect.right() {
@@ -691,145 +881,159 @@ fn handle_timeline_click_start(
                     thumb_w * 0.5
                 };
                 let track_span = (layout.grid_w - thumb_w).max(1.0);
-                let ratio_x = ((pos.x - grab_offset_x - layout.grid_left) / track_span).clamp(0.0, 1.0);
-                app.timeline_ui.scroll_x = ratio_x * max_scroll_x;
-                layout.sync_visible_frames(app.timeline_ui.scroll_x);
-                app.timeline_ui.grid_drag = TimelineGridDrag::ScrubScrollbarX { grab_offset_x };
+                let ratio_x =
+                    ((pos.x - grab_offset_x - layout.grid_left) / track_span).clamp(0.0, 1.0);
+                let new_scroll_x = ratio_x * max_scroll_x;
+                let timeline_ui = host.timeline_ui_mut();
+                timeline_ui.scroll_x = new_scroll_x;
+                layout.sync_visible_frames(new_scroll_x);
+                timeline_ui.grid_drag = TimelineGridDrag::ScrubScrollbarX { grab_offset_x };
                 return;
             }
         }
 
-        let col = layout.frame_at_x(pos.x, app.timeline_ui.scroll_x);
+        let col = layout.frame_at_x(pos.x, host.timeline_ui().scroll_x);
         if pos.y < layout.grid_top {
-            let target_frame = col.min(app.timeline.total_frames.saturating_sub(1));
-            app.timeline_ui.grid_drag = TimelineGridDrag::ScrubRuler;
-            scrub_ruler_to_frame(app, target_frame);
-        } else {
-            if let Some(target_layer) =
-                layout.layer_at_y(pos.y, app.timeline_ui.scroll_y, num_layers)
-            {
-                let layer_fc = app.timeline.layers[target_layer].frame_count;
-                let target_frame = col;
-                stop_playback(app);
+            let target_frame = col.min(host.doc().timeline.total_frames.saturating_sub(1));
+            host.timeline_ui_mut().grid_drag = TimelineGridDrag::ScrubRuler;
+            scrub_ruler_to_frame(host.doc_mut(), target_frame);
+        } else if let Some(target_layer) =
+            layout.layer_at_y(pos.y, host.timeline_ui().scroll_y, num_layers)
+        {
+            let layer_fc = host.doc().timeline.layers[target_layer].frame_count;
+            let target_frame = col;
+            stop_playback(host.doc_mut());
 
-                if shift_held {
-                    let anchor_layer = app.timeline.active_layer.min(num_layers.saturating_sub(1));
-                    let anchor_frame = app.timeline.current_frame;
-                    select_timeline_cells(
-                        app,
-                        anchor_layer,
-                        anchor_frame,
-                        target_layer,
-                        target_frame,
-                    );
-                    app.timeline_ui.grid_drag = TimelineGridDrag::SelectCells {
-                        start_layer: anchor_layer,
-                        start_frame: anchor_frame,
-                    };
-                    return;
-                }
+            if shift_held {
+                let anchor_layer = host
+                    .doc()
+                    .timeline
+                    .active_layer
+                    .min(num_layers.saturating_sub(1));
+                let anchor_frame = host.doc().timeline.current_frame;
+                select_timeline_cells(
+                    host.doc_mut(),
+                    anchor_layer,
+                    anchor_frame,
+                    target_layer,
+                    target_frame,
+                );
+                host.timeline_ui_mut().grid_drag = TimelineGridDrag::SelectCells {
+                    start_layer: anchor_layer,
+                    start_frame: anchor_frame,
+                };
+                return;
+            }
 
-                // 実際に存在するフレーム（col < layer_fc）の上をクリックしたときのみ MoveFrames 判定を行う
-                // （未作成の後ろの空マスをクリックした際はその空マスを選択状態にし、F5 / F6 / F7 でそこまで尺を伸ばせるようにする）
-                let clicked_on_existing_frame = col < layer_fc;
-                let clicked_in_existing_sel = clicked_on_existing_frame
-                    && app
-                        .timeline
-                        .cell_selection
-                        .is_some_and(|s| s.contains(target_layer, col));
+            // 実際に存在するフレーム（col < layer_fc）の上をクリックしたときのみ MoveFrames 判定を行う
+            // （未作成の後ろの空マスをクリックした際はその空マスを選択状態にし、F5 / F6 / F7 でそこまで尺を伸ばせるようにする）
+            let clicked_on_existing_frame = col < layer_fc;
+            let clicked_in_existing_sel = clicked_on_existing_frame
+                && host
+                    .doc()
+                    .timeline
+                    .cell_selection
+                    .is_some_and(|s| s.contains(target_layer, col));
 
-                if clicked_in_existing_sel || (clicked_on_existing_frame && alt_held) {
-                    let orig_sel = if let Some(sel) = app
-                        .timeline
-                        .cell_selection
-                        .filter(|s| s.contains(target_layer, col))
-                    {
-                        sel
-                    } else {
-                        select_timeline_cells(app, target_layer, col, target_layer, col);
-                        TimelineCellSelection::single(target_layer, col)
-                    };
-                    app.timeline_ui.grid_drag = TimelineGridDrag::MoveFrames {
-                        orig_sel,
-                        grab_layer: target_layer,
-                        grab_frame: col,
-                        curr_layer: target_layer,
-                        curr_frame: col,
-                        copy_mode: alt_held,
-                        has_moved: false,
-                    };
+            if clicked_in_existing_sel || (clicked_on_existing_frame && alt_held) {
+                let orig_sel = if let Some(sel) = host
+                    .doc()
+                    .timeline
+                    .cell_selection
+                    .filter(|s| s.contains(target_layer, col))
+                {
+                    sel
                 } else {
                     select_timeline_cells(
-                        app,
+                        host.doc_mut(),
                         target_layer,
-                        target_frame,
+                        col,
                         target_layer,
-                        target_frame,
+                        col,
                     );
-                    app.timeline_ui.grid_drag = TimelineGridDrag::SelectCells {
-                        start_layer: target_layer,
-                        start_frame: target_frame,
-                    };
-                }
+                    TimelineCellSelection::single(target_layer, col)
+                };
+                host.timeline_ui_mut().grid_drag = TimelineGridDrag::MoveFrames {
+                    orig_sel,
+                    grab_layer: target_layer,
+                    grab_frame: col,
+                    curr_layer: target_layer,
+                    curr_frame: col,
+                    copy_mode: alt_held,
+                    has_moved: false,
+                };
             } else {
-                app.timeline.cell_selection = None;
+                select_timeline_cells(
+                    host.doc_mut(),
+                    target_layer,
+                    target_frame,
+                    target_layer,
+                    target_frame,
+                );
+                host.timeline_ui_mut().grid_drag = TimelineGridDrag::SelectCells {
+                    start_layer: target_layer,
+                    start_frame: target_frame,
+                };
             }
+        } else {
+            host.doc_mut().timeline.cell_selection = None;
         }
     }
 }
 
 /// ルーラースクラブ・スクロールバー操作・セル範囲選択・フレーム移動/複製ドラッグの継続および確定処理
 fn update_timeline_grid_drag(
-    app: &mut Is2dApp,
+    host: &mut impl TimelineHost,
     layout: &mut TimelineLayout,
     primary_down: bool,
     alt_held: bool,
     pointer_pos: Option<Pos2>,
 ) {
-    match app.timeline_ui.grid_drag {
+    match host.timeline_ui().grid_drag {
         TimelineGridDrag::None => {}
         TimelineGridDrag::ScrubRuler => {
             if primary_down {
                 if let Some(pos) = pointer_pos {
-                    let col = layout.frame_at_x(pos.x, app.timeline_ui.scroll_x);
-                    scrub_ruler_to_frame(app, col.min(app.timeline.total_frames.saturating_sub(1)));
+                    let col = layout.frame_at_x(pos.x, host.timeline_ui().scroll_x);
+                    let target = col.min(host.doc().timeline.total_frames.saturating_sub(1));
+                    scrub_ruler_to_frame(host.doc_mut(), target);
                 }
             } else {
-                app.timeline_ui.grid_drag = TimelineGridDrag::None;
+                host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
             }
         }
         TimelineGridDrag::ScrubScrollbarX { grab_offset_x } => {
             if primary_down {
-                if let (Some(pos), Some((_, _, thumb_w, max_scroll_x))) = (
-                    pointer_pos,
-                    layout.horizontal_scrollbar_metrics(app.timeline_ui.scroll_x),
-                ) {
+                let scroll_x = host.timeline_ui().scroll_x;
+                if let (Some(pos), Some((_, _, thumb_w, max_scroll_x))) =
+                    (pointer_pos, layout.horizontal_scrollbar_metrics(scroll_x))
+                {
                     let track_span = (layout.grid_w - thumb_w).max(1.0);
                     let ratio_x =
                         ((pos.x - grab_offset_x - layout.grid_left) / track_span).clamp(0.0, 1.0);
-                    app.timeline_ui.scroll_x = ratio_x * max_scroll_x;
-                    layout.sync_visible_frames(app.timeline_ui.scroll_x);
+                    let new_scroll_x = ratio_x * max_scroll_x;
+                    host.timeline_ui_mut().scroll_x = new_scroll_x;
+                    layout.sync_visible_frames(new_scroll_x);
                 }
             } else {
-                app.timeline_ui.grid_drag = TimelineGridDrag::None;
+                host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
             }
         }
         TimelineGridDrag::ScrubScrollbarY { grab_offset_y } => {
             if primary_down {
+                let num_layers = host.doc().timeline.layers.len();
+                let scroll_y = host.timeline_ui().scroll_y;
                 if let (Some(pos), Some((_, _, thumb_h, max_scroll_y))) = (
                     pointer_pos,
-                    layout.vertical_scrollbar_metrics(
-                        app.timeline.layers.len(),
-                        app.timeline_ui.scroll_y,
-                    ),
+                    layout.vertical_scrollbar_metrics(num_layers, scroll_y),
                 ) {
                     let track_span = (layout.grid_h - thumb_h).max(1.0);
                     let ratio_y =
                         ((pos.y - grab_offset_y - layout.grid_top) / track_span).clamp(0.0, 1.0);
-                    app.timeline_ui.scroll_y = ratio_y * max_scroll_y;
+                    host.timeline_ui_mut().scroll_y = ratio_y * max_scroll_y;
                 }
             } else {
-                app.timeline_ui.grid_drag = TimelineGridDrag::None;
+                host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
             }
         }
         TimelineGridDrag::SelectCells {
@@ -838,23 +1042,23 @@ fn update_timeline_grid_drag(
         } => {
             if primary_down {
                 if let Some(pos) = pointer_pos {
-                    let target_frame = layout.frame_at_x(pos.x, app.timeline_ui.scroll_x);
-                    let target_layer = layout.clamped_layer_at_y(
-                        pos.y,
-                        app.timeline_ui.scroll_y,
-                        app.timeline.layers.len(),
-                    );
-                    let max_l = app.timeline.layers.len().saturating_sub(1);
+                    let scroll_x = host.timeline_ui().scroll_x;
+                    let scroll_y = host.timeline_ui().scroll_y;
+                    let num_layers = host.doc().timeline.layers.len();
+                    let target_frame = layout.frame_at_x(pos.x, scroll_x);
+                    let target_layer = layout.clamped_layer_at_y(pos.y, scroll_y, num_layers);
+                    let max_l = num_layers.saturating_sub(1);
                     let l0 = start_layer.min(max_l);
                     let l1 = target_layer.min(max_l);
                     let desired_sel =
                         TimelineCellSelection::from_corners(l0, start_frame, l1, target_frame);
-                    if app.timeline.cell_selection != Some(desired_sel)
-                        || app.timeline.active_layer != l1
-                        || app.timeline.current_frame != target_frame
+                    let doc = host.doc();
+                    if doc.timeline.cell_selection != Some(desired_sel)
+                        || doc.timeline.active_layer != l1
+                        || doc.timeline.current_frame != target_frame
                     {
                         select_timeline_cells(
-                            app,
+                            host.doc_mut(),
                             start_layer,
                             start_frame,
                             target_layer,
@@ -863,7 +1067,7 @@ fn update_timeline_grid_drag(
                     }
                 }
             } else {
-                app.timeline_ui.grid_drag = TimelineGridDrag::None;
+                host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
             }
         }
         TimelineGridDrag::MoveFrames {
@@ -877,15 +1081,14 @@ fn update_timeline_grid_drag(
         } => {
             if primary_down {
                 if let Some(pos) = pointer_pos {
-                    let col = layout.frame_at_x(pos.x, app.timeline_ui.scroll_x);
+                    let scroll_x = host.timeline_ui().scroll_x;
+                    let scroll_y = host.timeline_ui().scroll_y;
+                    let num_layers = host.doc().timeline.layers.len();
+                    let col = layout.frame_at_x(pos.x, scroll_x);
                     let next_frame = col.min(layout.max_frames_shown.saturating_sub(1));
-                    let next_layer = layout.clamped_layer_at_y(
-                        pos.y,
-                        app.timeline_ui.scroll_y,
-                        app.timeline.layers.len(),
-                    );
+                    let next_layer = layout.clamped_layer_at_y(pos.y, scroll_y, num_layers);
                     let moved = has_moved || next_layer != grab_layer || next_frame != grab_frame;
-                    app.timeline_ui.grid_drag = TimelineGridDrag::MoveFrames {
+                    host.timeline_ui_mut().grid_drag = TimelineGridDrag::MoveFrames {
                         orig_sel,
                         grab_layer,
                         grab_frame,
@@ -896,19 +1099,25 @@ fn update_timeline_grid_drag(
                     };
                 }
             } else {
-                app.timeline_ui.grid_drag = TimelineGridDrag::None;
+                host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
                 if has_moved {
                     let layer_delta = curr_layer as isize - grab_layer as isize;
                     let frame_delta = curr_frame as isize - grab_frame as isize;
                     timeline_move_or_copy_frames(
-                        app,
+                        host.doc_mut(),
                         orig_sel,
                         layer_delta,
                         frame_delta,
                         copy_mode || alt_held,
                     );
                 } else {
-                    select_timeline_cells(app, grab_layer, grab_frame, grab_layer, grab_frame);
+                    select_timeline_cells(
+                        host.doc_mut(),
+                        grab_layer,
+                        grab_frame,
+                        grab_layer,
+                        grab_frame,
+                    );
                 }
             }
         }
@@ -917,33 +1126,33 @@ fn update_timeline_grid_drag(
 
 /// レイヤーD&D並び替えの継続およびドロップ確定処理
 fn update_timeline_layer_drag(
-    app: &mut Is2dApp,
+    host: &mut impl TimelineHost,
     layout: &TimelineLayout,
     primary_down: bool,
     pointer_pos: Option<Pos2>,
 ) -> Option<(usize, usize, Pos2)> {
-    let src_idx = app.timeline_ui.dragging_layer?;
-    let num_layers = app.timeline.layers.len();
+    let src_idx = host.timeline_ui().dragging_layer?;
+    let num_layers = host.doc().timeline.layers.len();
     if src_idx >= num_layers {
-        app.timeline_ui.dragging_layer = None;
+        host.timeline_ui_mut().dragging_layer = None;
         return None;
     }
     if let Some(pos) = pointer_pos {
-        let dst_idx = layout.clamped_layer_at_y(pos.y, app.timeline_ui.scroll_y, num_layers);
+        let dst_idx = layout.clamped_layer_at_y(pos.y, host.timeline_ui().scroll_y, num_layers);
         if primary_down {
             return Some((src_idx, dst_idx, pos));
         }
-        app.timeline_ui.dragging_layer = None;
-        timeline_reorder_layer(app, src_idx, dst_idx);
+        host.timeline_ui_mut().dragging_layer = None;
+        timeline_reorder_layer(host.doc_mut(), src_idx, dst_idx);
     } else if !primary_down {
-        app.timeline_ui.dragging_layer = None;
+        host.timeline_ui_mut().dragging_layer = None;
     }
     None
 }
 
 /// タイムライン上のドラッグ状態およびホバー位置に応じてOSカーソルアイコンを更新する
 fn update_timeline_cursor_icon(
-    app: &Is2dApp,
+    host: &impl TimelineHost,
     ctx: &egui::Context,
     layout: &TimelineLayout,
     alt_held: bool,
@@ -952,7 +1161,7 @@ fn update_timeline_cursor_icon(
 ) {
     if let TimelineGridDrag::MoveFrames {
         has_moved: true, ..
-    } = app.timeline_ui.grid_drag
+    } = host.timeline_ui().grid_drag
     {
         ctx.set_cursor_icon(if alt_held {
             egui::CursorIcon::Copy
@@ -967,7 +1176,11 @@ fn update_timeline_cursor_icon(
             && hpos.y >= layout.grid_top
             && (hpos.x - layout.panel_rect.left()) >= LAYER_LOCK_HIT_RANGE.end
             && layout
-                .layer_at_y(hpos.y, app.timeline_ui.scroll_y, app.timeline.layers.len())
+                .layer_at_y(
+                    hpos.y,
+                    host.timeline_ui().scroll_y,
+                    host.doc().timeline.layers.len(),
+                )
                 .is_some()
         {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
@@ -977,7 +1190,7 @@ fn update_timeline_cursor_icon(
 
 /// 4. 右側フレームグリッド（キーフレーム帯・セル選択ハイライト・フレーム移動ゴースト枠）の描画
 fn draw_timeline_frame_grid(
-    app: &Is2dApp,
+    host: &impl TimelineHost,
     grid_painter: &egui::Painter,
     layout: &TimelineLayout,
     alt_held: bool,
@@ -989,8 +1202,8 @@ fn draw_timeline_frame_grid(
     );
     grid_painter.rect_filled(grid_rect, 0.0, Color32::from_rgb(232, 235, 240));
 
-    let num_layers = app.timeline.layers.len();
-    let (scroll_x, scroll_y) = (app.timeline_ui.scroll_x, app.timeline_ui.scroll_y);
+    let num_layers = host.doc().timeline.layers.len();
+    let (scroll_x, scroll_y) = (host.timeline_ui().scroll_x, host.timeline_ui().scroll_y);
 
     for row in 0..num_layers {
         let layer_idx = num_layers.saturating_sub(1 + row);
@@ -999,10 +1212,10 @@ fn draw_timeline_frame_grid(
         if y1 < layout.grid_top || y0 > layout.panel_rect.bottom() {
             continue;
         }
-        draw_timeline_layer_row(app, grid_painter, layout, layer_idx, (y0, y1));
+        draw_timeline_layer_row(host, grid_painter, layout, layer_idx, (y0, y1));
     }
 
-    draw_move_frames_ghost(app, grid_painter, layout, alt_held, pointer_pos);
+    draw_move_frames_ghost(host, grid_painter, layout, alt_held, pointer_pos);
 
     for f in layout.first_vis_frame..=layout.last_vis_frame {
         if (f + 1) % 5 == 0 {
@@ -1020,15 +1233,16 @@ fn draw_timeline_frame_grid(
 
 /// 単一レイヤー行 `layer_idx` の背景セル・キーフレームスパン帯・セル選択枠を描画する
 fn draw_timeline_layer_row(
-    app: &Is2dApp,
+    host: &impl TimelineHost,
     grid_painter: &egui::Painter,
     layout: &TimelineLayout,
     layer_idx: usize,
     (y0, y1): (f32, f32),
 ) {
-    let scroll_x = app.timeline_ui.scroll_x;
-    let layer = &app.timeline.layers[layer_idx];
-    let is_layer_selected = app
+    let doc = host.doc();
+    let scroll_x = host.timeline_ui().scroll_x;
+    let layer = &doc.timeline.layers[layer_idx];
+    let is_layer_selected = doc
         .timeline
         .cell_selection
         .is_some_and(|s| s.contains_layer(layer_idx));
@@ -1058,12 +1272,12 @@ fn draw_timeline_layer_row(
                 && layer.span_end_for_keyframe(kf_idx) >= layout.first_vis_frame
                 && kf.start_frame <= layout.last_vis_frame
             {
-                draw_keyframe_span(app, grid_painter, layout, layer_idx, kf_idx, (y0, y1));
+                draw_keyframe_span(host, grid_painter, layout, layer_idx, kf_idx, (y0, y1));
             }
         }
     }
 
-    if let Some(sel) = app
+    if let Some(sel) = doc
         .timeline
         .cell_selection
         .filter(|s| s.contains_layer(layer_idx))
@@ -1097,7 +1311,7 @@ fn draw_timeline_layer_row(
 
 /// フレーム移動／Alt複製ドラッグ中のゴーストプレビュー矩形とフローティングバッジを描画する
 fn draw_move_frames_ghost(
-    app: &Is2dApp,
+    host: &impl TimelineHost,
     grid_painter: &egui::Painter,
     layout: &TimelineLayout,
     alt_held: bool,
@@ -1111,15 +1325,16 @@ fn draw_move_frames_ghost(
         curr_frame,
         copy_mode,
         has_moved: true,
-    } = app.timeline_ui.grid_drag
+    } = host.timeline_ui().grid_drag
     else {
         return;
     };
-    let num_layers = app.timeline.layers.len();
-    let (scroll_x, scroll_y) = (app.timeline_ui.scroll_x, app.timeline_ui.scroll_y);
+    let doc = host.doc();
+    let num_layers = doc.timeline.layers.len();
+    let (scroll_x, scroll_y) = (host.timeline_ui().scroll_x, host.timeline_ui().scroll_y);
     let layer_delta = curr_layer as isize - grab_layer as isize;
     let frame_delta = curr_frame as isize - grab_frame as isize;
-    let Some((dst_sel, _)) = app
+    let Some((dst_sel, _)) = doc
         .timeline
         .resolve_frame_move_bounds(orig_sel, layer_delta, frame_delta)
     else {
@@ -1174,24 +1389,25 @@ fn draw_move_frames_ghost(
 
 /// 1つのキーフレーム保持区間（帯・1コマ区切り線・先頭丸記号 `●`/`○`・終端マーク `▯` またはトゥイーン点線/矢印）を描画する
 fn draw_keyframe_span(
-    app: &Is2dApp,
+    host: &impl TimelineHost,
     grid_painter: &egui::Painter,
     layout: &TimelineLayout,
     layer_idx: usize,
     kf_idx: usize,
     (y0, y1): (f32, f32),
 ) {
-    let layer = &app.timeline.layers[layer_idx];
+    let doc = host.doc();
+    let layer = &doc.timeline.layers[layer_idx];
     let kf = &layer.keyframes[kf_idx];
     let span_start = kf.start_frame;
     let span_end = layer.span_end_for_keyframe(kf_idx);
     let has_art = !kf.cel.is_empty();
-    let is_layer_selected = app
+    let is_layer_selected = doc
         .timeline
         .cell_selection
         .is_some_and(|s| s.contains_layer(layer_idx));
     let tween_state = layer.tween_state_at_keyframe(kf_idx);
-    let scroll_x = app.timeline_ui.scroll_x;
+    let scroll_x = host.timeline_ui().scroll_x;
     let sx0 = layout.frame_x(span_start, scroll_x);
     let sx1 = layout.frame_x(span_end + 1, scroll_x);
     let span_rect = Rect::from_min_max(Pos2::new(sx0, y0), Pos2::new(sx1, y1));
@@ -1324,11 +1540,13 @@ fn draw_keyframe_tween_or_end_marker(
 
 /// 5. 上部フレーム番号ルーラー・オニオンスキン帯・再生ヘッドの描画
 fn draw_timeline_ruler(
-    app: &Is2dApp,
+    host: &impl TimelineHost,
     painter: &egui::Painter,
     grid_painter: &egui::Painter,
     layout: &TimelineLayout,
 ) {
+    let doc = host.doc();
+    let timeline_ui = host.timeline_ui();
     let ruler_rect = Rect::from_min_max(
         Pos2::new(layout.grid_left, layout.panel_rect.top()),
         Pos2::new(layout.panel_rect.right(), layout.grid_top),
@@ -1336,10 +1554,10 @@ fn draw_timeline_ruler(
     let ruler_painter = painter.with_clip_rect(ruler_rect);
     ruler_painter.rect_filled(ruler_rect, 0.0, Color32::from_rgb(228, 231, 237));
 
-    let scroll_x = app.timeline_ui.scroll_x;
-    if app.timeline_ui.onion_skin_enabled {
-        let cf = app.timeline.current_frame;
-        let prev_start = cf.saturating_sub(app.timeline_ui.onion_prev_frames);
+    let scroll_x = timeline_ui.scroll_x;
+    if timeline_ui.onion_skin_enabled {
+        let cf = doc.timeline.current_frame;
+        let prev_start = cf.saturating_sub(timeline_ui.onion_prev_frames);
         if prev_start < cf {
             ruler_painter.rect_filled(
                 Rect::from_min_max(
@@ -1350,8 +1568,8 @@ fn draw_timeline_ruler(
                 Color32::from_rgba_unmultiplied(45, 125, 240, 65),
             );
         }
-        let next_end = (cf + app.timeline_ui.onion_next_frames)
-            .min(app.timeline.total_frames.saturating_sub(1));
+        let next_end = (cf + timeline_ui.onion_next_frames)
+            .min(doc.timeline.total_frames.saturating_sub(1));
         if next_end > cf {
             ruler_painter.rect_filled(
                 Rect::from_min_max(
@@ -1380,7 +1598,7 @@ fn draw_timeline_ruler(
             Stroke::new(1.0_f32, Color32::from_rgb(145, 152, 165)),
         );
         if is_major {
-            let col = if f < app.timeline.total_frames {
+            let col = if f < doc.timeline.total_frames {
                 Color32::from_rgb(40, 45, 55)
             } else {
                 Color32::from_rgb(140, 146, 158)
@@ -1395,7 +1613,7 @@ fn draw_timeline_ruler(
         }
     }
 
-    let head_x = layout.frame_x(app.timeline.current_frame, scroll_x) + CELL_W * 0.5;
+    let head_x = layout.frame_x(doc.timeline.current_frame, scroll_x) + CELL_W * 0.5;
     if head_x >= layout.grid_left - CELL_W && head_x <= layout.panel_rect.right() + CELL_W {
         let head_box = Rect::from_min_max(
             Pos2::new(head_x - CELL_W * 0.5, layout.panel_rect.top() + 1.0),
@@ -1410,7 +1628,7 @@ fn draw_timeline_ruler(
         ruler_painter.text(
             head_box.center(),
             Align2::CENTER_CENTER,
-            format!("{}", app.timeline.current_frame + 1),
+            format!("{}", doc.timeline.current_frame + 1),
             FontId::proportional(11.0),
             Color32::WHITE,
         );
@@ -1434,13 +1652,15 @@ fn draw_timeline_ruler(
 
 /// 6. 左側レイヤー一覧列・D&Dインジケータ・左上ヘッダーセルの描画
 fn draw_timeline_layer_list(
-    app: &Is2dApp,
+    host: &impl TimelineHost,
     painter: &egui::Painter,
     layout: &TimelineLayout,
     primary_down: bool,
     hover_pos: Option<Pos2>,
     drag_layer_feedback: Option<(usize, usize, Pos2)>,
 ) {
+    let doc = host.doc();
+    let timeline_ui = host.timeline_ui();
     let layer_list_rect = Rect::from_min_max(
         Pos2::new(layout.panel_rect.left(), layout.grid_top),
         Pos2::new(layout.grid_left, layout.panel_rect.bottom()),
@@ -1448,8 +1668,8 @@ fn draw_timeline_layer_list(
     let layer_painter = painter.with_clip_rect(layer_list_rect);
     layer_painter.rect_filled(layer_list_rect, 0.0, Color32::from_rgb(238, 240, 245));
 
-    let num_layers = app.timeline.layers.len();
-    let scroll_y = app.timeline_ui.scroll_y;
+    let num_layers = doc.timeline.layers.len();
+    let scroll_y = timeline_ui.scroll_y;
 
     for row in 0..num_layers {
         let layer_idx = num_layers.saturating_sub(1 + row);
@@ -1462,13 +1682,13 @@ fn draw_timeline_layer_list(
             Pos2::new(layout.panel_rect.left(), y0),
             Pos2::new(layout.grid_left, y1),
         );
-        let layer = &app.timeline.layers[layer_idx];
-        let is_selected_layer = app
+        let layer = &doc.timeline.layers[layer_idx];
+        let is_selected_layer = doc
             .timeline
             .cell_selection
             .is_some_and(|s| s.contains_layer(layer_idx));
-        let is_active = layer_idx == app.timeline.active_layer;
-        let is_being_dragged = app.timeline_ui.dragging_layer == Some(layer_idx) && primary_down;
+        let is_active = layer_idx == doc.timeline.active_layer;
+        let is_being_dragged = timeline_ui.dragging_layer == Some(layer_idx) && primary_down;
 
         let row_bg = if is_being_dragged {
             Color32::from_rgb(185, 215, 250)
@@ -1577,7 +1797,7 @@ fn draw_timeline_layer_list(
                 indicator_col,
             );
         }
-        if let Some(src_layer) = app.timeline.layers.get(src_idx) {
+        if let Some(src_layer) = doc.timeline.layers.get(src_idx) {
             let min_bx = layout.panel_rect.left() + 8.0;
             let max_bx = (layout.grid_left - 90.0).max(min_bx);
             let min_by = layout.grid_top + 2.0;
@@ -1707,9 +1927,13 @@ fn draw_header_mini_button(
 }
 
 /// タイムラインの横・縦スクロール領域が画面幅・高さを超える場合にスクロールバーを描画する
-fn draw_timeline_scrollbars(app: &Is2dApp, painter: &egui::Painter, layout: &TimelineLayout) {
+fn draw_timeline_scrollbars(
+    host: &impl TimelineHost,
+    painter: &egui::Painter,
+    layout: &TimelineLayout,
+) {
     if let Some((_, thumb_rect, _, _)) =
-        layout.horizontal_scrollbar_metrics(app.timeline_ui.scroll_x)
+        layout.horizontal_scrollbar_metrics(host.timeline_ui().scroll_x)
     {
         painter.rect_filled(
             thumb_rect,
@@ -1718,9 +1942,10 @@ fn draw_timeline_scrollbars(app: &Is2dApp, painter: &egui::Painter, layout: &Tim
         );
     }
 
-    if let Some((_, thumb_rect, _, _)) =
-        layout.vertical_scrollbar_metrics(app.timeline.layers.len(), app.timeline_ui.scroll_y)
-    {
+    if let Some((_, thumb_rect, _, _)) = layout.vertical_scrollbar_metrics(
+        host.doc().timeline.layers.len(),
+        host.timeline_ui().scroll_y,
+    ) {
         painter.rect_filled(
             thumb_rect,
             2.0,
@@ -1736,142 +1961,155 @@ fn draw_timeline_scrollbars(app: &Is2dApp, painter: &egui::Painter, layout: &Tim
 /// タイムラインのセル範囲を選択し、そのレイヤー群の現在フレームにある全図形をキャンバス上で選択状態にする
 /// （2フレーム目以降のまだ尺が伸びていない空マスも直接選択でき、そのまま `F5` / `F6` / `F7` でその位置まで尺を伸ばせる）
 pub(crate) fn select_timeline_cells(
-    app: &mut Is2dApp,
+    doc: &mut EditorDoc,
     start_layer: usize,
     start_frame: usize,
     end_layer: usize,
     end_frame: usize,
 ) {
-    if app.timeline.layers.is_empty() {
+    if doc.timeline.layers.is_empty() {
         return;
     }
-    let max_l = app.timeline.layers.len() - 1;
+    let max_l = doc.timeline.layers.len() - 1;
     let (l0, l1) = (start_layer.min(max_l), end_layer.min(max_l));
     let (f0, f1) = (start_frame, end_frame);
 
-    switch_to_layer_and_frame(app, l1, f1);
-    app.timeline.cell_selection = Some(TimelineCellSelection::from_corners(l0, f0, l1, f1));
-    select_shapes_for_timeline_selection(app);
+    switch_to_layer_and_frame(doc, l1, f1);
+    doc.timeline.cell_selection = Some(TimelineCellSelection::from_corners(l0, f0, l1, f1));
+    select_shapes_for_timeline_selection(doc);
 }
 
 /// タイムラインのレイヤー個別選択を解除し、指定フレームへ再生ヘッドのみ移動する（ルーラー操作時など）
-pub(crate) fn scrub_ruler_to_frame(app: &mut Is2dApp, frame_idx: usize) {
-    let clamped_frame = frame_idx.min(app.timeline.total_frames.saturating_sub(1));
-    if !app.timeline_ui.is_playing
-        && app.timeline.current_frame == clamped_frame
-        && app.timeline.cell_selection.is_none()
+pub(crate) fn scrub_ruler_to_frame(doc: &mut EditorDoc, frame_idx: usize) {
+    let clamped_frame = frame_idx.min(doc.timeline.total_frames.saturating_sub(1));
+    if !doc.is_playing
+        && doc.timeline.current_frame == clamped_frame
+        && doc.timeline.cell_selection.is_none()
     {
         return;
     }
-    flush_canvas_before_timeline_op(app);
-    app.timeline.current_frame = clamped_frame;
-    app.timeline.cell_selection = None;
-    load_shapes_from_timeline(app);
+    flush_canvas_before_timeline_op(doc);
+    doc.timeline.current_frame = clamped_frame;
+    doc.timeline.cell_selection = None;
+    load_shapes_from_timeline(doc);
 }
 
 /// 指定したレイヤー・フレームへ切り替える
-pub(crate) fn switch_to_layer_and_frame(app: &mut Is2dApp, layer_idx: usize, frame_idx: usize) {
-    if app.timeline.layers.is_empty() {
+pub(crate) fn switch_to_layer_and_frame(doc: &mut EditorDoc, layer_idx: usize, frame_idx: usize) {
+    if doc.timeline.layers.is_empty() {
         return;
     }
-    flush_canvas_before_timeline_op(app);
-    app.timeline.select_single_cell(layer_idx, frame_idx);
-    load_shapes_from_timeline(app);
-    app.ui.inspect_timeline_frame = true;
+    flush_canvas_before_timeline_op(doc);
+    doc.timeline.select_single_cell(layer_idx, frame_idx);
+    load_shapes_from_timeline(doc);
+    doc.ui.inspect_timeline_frame = true;
 }
 
 /// 前後のフレームへコマ送り移動する（`,` / `.` キーやボタン操作）
-pub(crate) fn step_frame(app: &mut Is2dApp, delta: isize) {
-    let total = app.timeline.total_frames.max(1) as isize;
-    let next = if app.timeline_ui.loop_playback {
-        (app.timeline.current_frame as isize + delta).rem_euclid(total) as usize
+pub(crate) fn step_frame(host: &mut impl TimelineHost, delta: isize) {
+    let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+    timeline_ui.sync_with_doc(doc);
+    let total = doc.timeline.total_frames.max(1) as isize;
+    let next = if timeline_ui.loop_playback {
+        (doc.timeline.current_frame as isize + delta).rem_euclid(total) as usize
     } else {
-        (app.timeline.current_frame as isize + delta).clamp(0, total - 1) as usize
+        (doc.timeline.current_frame as isize + delta).clamp(0, total - 1) as usize
     };
-    switch_to_layer_and_frame(app, app.timeline.active_layer, next);
+    let active_layer = doc.timeline.active_layer;
+    switch_to_layer_and_frame(doc, active_layer, next);
+    timeline_ui.sync_with_doc(doc);
 }
 
 /// 再生 / 一時停止を切り替える（`Enter` キーまたは Play ボタン）
-pub(crate) fn toggle_playback(app: &mut Is2dApp) {
-    if app.timeline_ui.is_playing {
-        stop_playback(app);
+pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
+    let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+    timeline_ui.sync_with_doc(doc);
+    if timeline_ui.is_playing {
+        stop_playback(doc);
+        timeline_ui.is_playing = false;
+        timeline_ui.last_frame_advance_time = None;
     } else {
-        flush_canvas_before_timeline_op(app);
-        app.timeline_ui.cancel_drag();
-        let last_f = app.timeline.total_frames.saturating_sub(1);
-        if app.timeline.current_frame >= app.timeline.total_frames
-            || (!app.timeline_ui.loop_playback && app.timeline.current_frame >= last_f)
+        flush_canvas_before_timeline_op(doc);
+        timeline_ui.cancel_drag();
+        let last_f = doc.timeline.total_frames.saturating_sub(1);
+        if doc.timeline.current_frame >= doc.timeline.total_frames
+            || (!timeline_ui.loop_playback && doc.timeline.current_frame >= last_f)
         {
-            app.timeline.current_frame = 0;
+            doc.timeline.current_frame = 0;
         }
-        app.timeline_ui.is_playing = true;
-        app.timeline_ui.last_frame_advance_time = None;
+        doc.is_playing = true;
+        timeline_ui.is_playing = true;
+        timeline_ui.last_frame_advance_time = None;
     }
 }
 
 /// 再生中のフレーム自動進行を処理する
 /// （再生中は毎コマの `FillShape` クローンを行わず、`Cel` の結合メッシュキャッシュから直接高速描画する）
-pub(crate) fn update_playback(app: &mut Is2dApp, ctx: &egui::Context) {
-    if !app.timeline_ui.is_playing {
-        app.timeline_ui.last_frame_advance_time = None;
+pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context) {
+    let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+    timeline_ui.sync_with_doc(doc);
+    if !timeline_ui.is_playing {
+        timeline_ui.last_frame_advance_time = None;
         return;
     }
-    let fps = app.timeline.fps.clamp(1, 60);
+    let fps = doc.timeline.fps.clamp(1, 60);
     let frame_interval = 1.0 / (fps as f64);
     let now = ctx.input(|i| i.time);
 
-    if let Some(last_time) = app.timeline_ui.last_frame_advance_time {
+    if let Some(last_time) = timeline_ui.last_frame_advance_time {
         let elapsed = now - last_time;
         if elapsed >= frame_interval {
             let steps = ((elapsed / frame_interval).floor() as usize).max(1);
-            app.timeline_ui.last_frame_advance_time =
+            timeline_ui.last_frame_advance_time =
                 Some(last_time + (steps as f64) * frame_interval);
-            let total = app.timeline.total_frames.max(1);
-            if app.timeline_ui.loop_playback {
-                app.timeline.current_frame = (app.timeline.current_frame + steps) % total;
+            let total = doc.timeline.total_frames.max(1);
+            if timeline_ui.loop_playback {
+                doc.timeline.current_frame = (doc.timeline.current_frame + steps) % total;
             } else {
-                let next = app.timeline.current_frame + steps;
+                let next = doc.timeline.current_frame + steps;
                 if next >= total - 1 {
-                    app.timeline.current_frame = total - 1;
-                    stop_playback(app);
+                    doc.timeline.current_frame = total - 1;
+                    stop_playback(doc);
+                    timeline_ui.is_playing = false;
+                    timeline_ui.last_frame_advance_time = None;
                     return;
                 }
-                app.timeline.current_frame = next;
+                doc.timeline.current_frame = next;
             }
         }
     } else {
-        app.timeline_ui.last_frame_advance_time = Some(now);
+        timeline_ui.last_frame_advance_time = Some(now);
     }
 
     ctx.request_repaint_after(Duration::from_secs_f64(frame_interval * 0.5));
 }
 
 /// キーフレーム挿入（`F6`: `clone_prev = true` で前の絵を複製 / `F7`: `clone_prev = false` で空白セル作成）
-pub(crate) fn timeline_insert_keyframe(app: &mut Is2dApp, clone_prev: bool) -> bool {
-    let targets = app.timeline.target_layers_for_frame_op();
+pub(crate) fn timeline_insert_keyframe(doc: &mut EditorDoc, clone_prev: bool) -> bool {
+    let targets = doc.timeline.target_layers_for_frame_op();
     if targets.is_empty() {
         return false;
     }
-    mutate_timeline_with_undo(app, |tl| {
+    mutate_timeline_with_undo(doc, |tl| {
         tl.insert_keyframe_on_targets(&targets, clone_prev);
     });
     if clone_prev {
-        select_shapes_for_timeline_selection(app);
+        select_shapes_for_timeline_selection(doc);
     }
     true
 }
 
 /// 現在フレームのキーフレームを削除（フレーム0の場合は空白化）する（`Shift+F6`）
-pub(crate) fn timeline_delete_keyframe(app: &mut Is2dApp) -> bool {
-    let targets = app.timeline.target_layers_for_frame_op();
+pub(crate) fn timeline_delete_keyframe(doc: &mut EditorDoc) -> bool {
+    let targets = doc.timeline.target_layers_for_frame_op();
     if targets.is_empty() {
         return false;
     }
-    flush_canvas_before_timeline_op(app);
-    if !app.timeline.can_delete_keyframe_on_targets(&targets) {
+    flush_canvas_before_timeline_op(doc);
+    if !doc.timeline.can_delete_keyframe_on_targets(&targets) {
         return false;
     }
-    mutate_timeline_with_undo(app, |tl| {
+    mutate_timeline_with_undo(doc, |tl| {
         tl.delete_keyframe_on_targets(&targets);
     });
     true
@@ -1880,12 +2118,12 @@ pub(crate) fn timeline_delete_keyframe(app: &mut Is2dApp) -> bool {
 /// 現在フレーム（または選択セル範囲の終端フレーム）の保持尺を延長する（`F5` / Adobe Animate 仕様）：
 /// - 2フレーム目以降の未作成の空マスを選択している場合は、そのフレーム位置まで一気に尺を伸ばす。
 /// - 既存のフレーム内を選択している場合は、選択レイヤー（未選択時は全非ロックレイヤー）を +1 フレーム延長する。
-pub(crate) fn timeline_extend_frame(app: &mut Is2dApp) -> bool {
-    let targets = app.timeline.target_layers_for_frame_op();
+pub(crate) fn timeline_extend_frame(doc: &mut EditorDoc) -> bool {
+    let targets = doc.timeline.target_layers_for_frame_op();
     if targets.is_empty() {
         return false;
     }
-    mutate_timeline_with_undo(app, |tl| {
+    mutate_timeline_with_undo(doc, |tl| {
         tl.extend_frame_on_targets(&targets);
     });
     true
@@ -1893,17 +2131,17 @@ pub(crate) fn timeline_extend_frame(app: &mut Is2dApp) -> bool {
 
 /// 現在フレームの保持尺を1フレーム短縮する（`Shift+F5` / Adobe Animate 仕様）：
 /// - 保持フレームがあれば保持尺を -1 フレーム短縮し、1フレーム幅のキーフレームに当たった場合はそのキーフレーム自体を削除して後続を左へ詰める。
-pub(crate) fn timeline_remove_frame(app: &mut Is2dApp) -> bool {
-    let targets = app.timeline.target_layers_for_frame_op();
+pub(crate) fn timeline_remove_frame(doc: &mut EditorDoc) -> bool {
+    let targets = doc.timeline.target_layers_for_frame_op();
     if targets.is_empty() {
         return false;
     }
-    flush_canvas_before_timeline_op(app);
-    if !app.timeline.can_remove_frame_on_targets(&targets) {
+    flush_canvas_before_timeline_op(doc);
+    if !doc.timeline.can_remove_frame_on_targets(&targets) {
         return false;
     }
     let mut any_changed = false;
-    mutate_timeline_with_undo(app, |tl| {
+    mutate_timeline_with_undo(doc, |tl| {
         any_changed = tl.remove_frame_on_targets(&targets);
     });
     any_changed
@@ -1912,32 +2150,32 @@ pub(crate) fn timeline_remove_frame(app: &mut Is2dApp) -> bool {
 /// 選択されたフレーム範囲 `sel`（単一・複数フレーム・複数レイヤー横断）を `(delta_layer, delta_frame)` だけ移動、
 /// または `copy_mode == true`（`Alt` / `Option` 押下）の場合は移動元を残したまま移動先へ複製する
 pub(crate) fn timeline_move_or_copy_frames(
-    app: &mut Is2dApp,
+    doc: &mut EditorDoc,
     sel: TimelineCellSelection,
     delta_layer: isize,
     delta_frame: isize,
     copy_mode: bool,
 ) -> bool {
-    let Some((dst_sel, actual_dl)) =
-        app.timeline
-            .resolve_frame_move_bounds(sel, delta_layer, delta_frame)
+    let Some((dst_sel, actual_dl)) = doc
+        .timeline
+        .resolve_frame_move_bounds(sel, delta_layer, delta_frame)
     else {
         return false;
     };
-    mutate_timeline_with_undo(app, |tl| {
+    mutate_timeline_with_undo(doc, |tl| {
         tl.move_or_copy_frames(sel, dst_sel, actual_dl, copy_mode);
     });
-    app.symbols.next_group_id = app
+    doc.symbols.next_group_id = doc
         .symbols
         .next_group_id
-        .max(app.timeline.max_group_id().saturating_add(1));
-    select_shapes_for_timeline_selection(app);
+        .max(doc.timeline.max_group_id().saturating_add(1));
+    select_shapes_for_timeline_selection(doc);
     true
 }
 
-/// 指定レイヤーの表示/非表示（👁）を設定し、Undo記録と作業キャンバス `app.canvas.shapes` の再同期を行う
-pub(crate) fn set_layer_visible(app: &mut Is2dApp, layer_idx: usize, visible: bool) {
-    if app
+/// 指定レイヤーの表示/非表示（👁）を設定し、Undo記録と作業キャンバス `doc.canvas.shapes` の再同期を行う
+pub(crate) fn set_layer_visible(doc: &mut EditorDoc, layer_idx: usize, visible: bool) {
+    if doc
         .timeline
         .layers
         .get(layer_idx)
@@ -1945,16 +2183,16 @@ pub(crate) fn set_layer_visible(app: &mut Is2dApp, layer_idx: usize, visible: bo
     {
         return;
     }
-    mutate_timeline_with_undo(app, |tl| {
+    mutate_timeline_with_undo(doc, |tl| {
         if let Some(layer) = tl.layers.get_mut(layer_idx) {
             layer.visible = visible;
         }
     });
 }
 
-/// 指定レイヤーのロック状態（🔒）を設定し、Undo記録と作業キャンバス `app.canvas.shapes` の再同期を行う
-pub(crate) fn set_layer_locked(app: &mut Is2dApp, layer_idx: usize, locked: bool) {
-    if app
+/// 指定レイヤーのロック状態（🔒）を設定し、Undo記録と作業キャンバス `doc.canvas.shapes` の再同期を行う
+pub(crate) fn set_layer_locked(doc: &mut EditorDoc, layer_idx: usize, locked: bool) {
+    if doc
         .timeline
         .layers
         .get(layer_idx)
@@ -1962,7 +2200,7 @@ pub(crate) fn set_layer_locked(app: &mut Is2dApp, layer_idx: usize, locked: bool
     {
         return;
     }
-    mutate_timeline_with_undo(app, |tl| {
+    mutate_timeline_with_undo(doc, |tl| {
         if let Some(layer) = tl.layers.get_mut(layer_idx) {
             layer.locked = locked;
         }
@@ -1970,35 +2208,35 @@ pub(crate) fn set_layer_locked(app: &mut Is2dApp, layer_idx: usize, locked: bool
 }
 
 /// 新しいレイヤーを現在のアクティブレイヤーの1つ上（前面）に追加する
-pub(crate) fn timeline_add_layer(app: &mut Is2dApp) {
-    mutate_timeline_with_undo(app, Timeline::add_layer_above_active);
+pub(crate) fn timeline_add_layer(doc: &mut EditorDoc) {
+    mutate_timeline_with_undo(doc, Timeline::add_layer_above_active);
 }
 
 /// 現在アクティブなレイヤーを削除する（最低1レイヤーは残す）
-pub(crate) fn timeline_delete_active_layer(app: &mut Is2dApp) -> bool {
-    if app.timeline.layers.len() <= 1 {
+pub(crate) fn timeline_delete_active_layer(doc: &mut EditorDoc) -> bool {
+    if doc.timeline.layers.len() <= 1 {
         return false;
     }
-    mutate_timeline_with_undo(app, Timeline::delete_active_layer);
+    mutate_timeline_with_undo(doc, Timeline::delete_active_layer);
     true
 }
 
 /// 指定したレイヤー `from_idx` を `to_idx` の重ね順位置へ移動する（ドラッグ＆ドロップ入れ替え対応）
-pub(crate) fn timeline_reorder_layer(app: &mut Is2dApp, from_idx: usize, to_idx: usize) -> bool {
-    let len = app.timeline.layers.len();
+pub(crate) fn timeline_reorder_layer(doc: &mut EditorDoc, from_idx: usize, to_idx: usize) -> bool {
+    let len = doc.timeline.layers.len();
     if from_idx >= len || to_idx >= len || from_idx == to_idx {
         return false;
     }
-    mutate_timeline_with_undo(app, |tl| {
+    mutate_timeline_with_undo(doc, |tl| {
         tl.reorder_layer(from_idx, to_idx);
     });
     true
 }
 
 /// 現在アクティブなレイヤーを1つ上（前面: `up = true`）または1つ下（背面: `up = false`）へ移動する
-pub(crate) fn timeline_move_active_layer(app: &mut Is2dApp, up: bool) -> bool {
-    let len = app.timeline.layers.len();
-    let curr = app.timeline.active_layer;
+pub(crate) fn timeline_move_active_layer(doc: &mut EditorDoc, up: bool) -> bool {
+    let len = doc.timeline.layers.len();
+    let curr = doc.timeline.active_layer;
     let target = if up {
         if curr + 1 >= len {
             return false;
@@ -2010,5 +2248,5 @@ pub(crate) fn timeline_move_active_layer(app: &mut Is2dApp, up: bool) -> bool {
         }
         curr - 1
     };
-    timeline_reorder_layer(app, curr, target)
+    timeline_reorder_layer(doc, curr, target)
 }

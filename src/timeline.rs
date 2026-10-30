@@ -1,36 +1,210 @@
-use crate::{
-    symbol::{
-        interpolate_affine_with_pivot, resolve_cel_with_library, ResolvedCelSig, ResolvedSigQuery,
-        SymbolDef, SymbolEvalCtx, SymbolInstance, TweenRotate, TweenState, MAX_SYMBOL_NEST_DEPTH,
-    },
-    vector_engine::{
-        append_mesh, next_shape_id, transform_mesh_to_screen, transform_mesh_to_screen_onion,
-        FillShape, OnionMeshCacheEntry, ScreenMeshCacheEntry, SymbolInstanceBinding,
-        SymbolLoopMode, SyncCache,
-    },
+use crate::vector_engine::{
+    append_mesh, next_shape_id, transform_mesh_to_screen, transform_mesh_to_screen_onion,
+    FillShape, OnionMeshCacheEntry, ScreenMeshCacheEntry, SymbolInstanceBinding, SymbolLoopMode,
+    SyncCache,
 };
 use eframe::egui::{Color32, Mesh, Vec2};
+use kurbo::{Affine, Point};
 use std::{collections::HashMap, sync::Arc};
 
 /// タイムラインおよびシンボル内タイムラインの最大許容フレーム数（破損JSONによる巨大ループ防止）
 pub(crate) const MAX_TIMELINE_FRAMES: usize = 100_000;
+
+/// クラシックトゥイーンの回転方向（Adobe Animate のトゥイーン回転設定相当）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub(crate) enum TweenRotate {
+    /// 自動：開始角度から終了角度へ最短の角度差（`-180°..=+180°`）で回転する
+    #[default]
+    Auto,
+    /// 時計回り (CW)：時計回り（右回り）方向に回転する
+    Clockwise,
+    /// 反時計回り (CCW)：反時計回り（左回り）方向に回転する
+    CounterClockwise,
+}
+
+/// セル（`Cel`）内に正規化して保持されるシンボルインスタンスエンティティ
+/// （構成図形が0個の空白フレームや空シンボルであってもインスタンスの存在・配置情報を独立して保持し、`Cel::shapes` には展開図形を重複保持しない）
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SymbolInstance {
+    pub(crate) binding: SymbolInstanceBinding,
+    pub(crate) layer_id: u64,
+    /// このインスタンスが属する外側の親グループ階層パス（ルート配置なら空 `[]`）
+    pub(crate) parent_scope: Vec<u64>,
+    /// `Cel::shapes`（非シンボル図形列）内での背面→前面の挿入インデックス
+    pub(crate) shape_order_index: usize,
+}
+
+/// キーフレーム区間におけるクラシックトゥイーン（`T` キー）の有効状態
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TweenState {
+    /// トゥイーン未設定（または開始キーフレームが単一シンボル条件を満たしていない）
+    None,
+    /// 開始キーフレームは単一シンボルでトゥイーンONだが、終了キーフレームが存在しない（または条件不一致）→ 横点線（`----`）表示
+    Incomplete,
+    /// 開始・終了キーフレームとも同一シンボルの単一インスタンスが存在する完全トゥイーン → 実線矢印（`───▶`）表示＆TRS補間
+    Complete {
+        start_frame: usize,
+        end_frame: usize,
+        start_binding: SymbolInstanceBinding,
+        end_binding: SymbolInstanceBinding,
+        rotate_mode: TweenRotate,
+    },
+}
+
+/// シンボル展開やクラシックトゥイーン補間を含む解決済みセルメッシュキャッシュの衝突ゼロ署名
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ResolvedCelSig {
+    pub(crate) cel_revision: u64,
+    pub(crate) start_frame: usize,
+    pub(crate) tween: bool,
+    pub(crate) tween_rotate: TweenRotate,
+    pub(crate) next_kf: Option<(usize, SymbolInstanceBinding)>,
+    pub(crate) referenced_symbols: Vec<(u64, u64)>,
+}
+
+impl SymbolInstanceBinding {
+    /// 既存シェイプの `group_path` から、このインスタンス `self.instance_gid` より外側の親スコープパススライスを返す
+    pub(crate) fn parent_scope_from_path(self, group_path: &[u64]) -> &[u64] {
+        let pos = group_path
+            .iter()
+            .position(|&gid| gid == self.instance_gid)
+            .unwrap_or(group_path.len());
+        &group_path[..pos]
+    }
+}
+
+/// 2つの2Dアフィン変換行列 `start` と `end` を、それぞれのローカル基準点（ピボット）`start_pivot`, `end_pivot` を軸として
+/// TRS（ピボットのワールド平行移動・指定回転方向・スケール・シアー）に分解し、
+/// パラメータ `t`（`0.0..=1.0`）で補間した `(補間後の Affine, 補間後のローカルピボット Point)` を返す（クラシックトゥイーン用）
+pub(crate) fn interpolate_affine_with_pivot(
+    start: Affine,
+    start_pivot: Point,
+    end: Affine,
+    end_pivot: Point,
+    rotate_mode: TweenRotate,
+    t: f64,
+) -> (Affine, Point) {
+    let start_custom = (start_pivot - Point::ZERO).hypot() > 1e-6;
+    let end_custom = (end_pivot - Point::ZERO).hypot() > 1e-6;
+    let (p0, p1) = match (start_custom, end_custom) {
+        (true, false) => (start_pivot, start_pivot),
+        (false, true) => (end_pivot, end_pivot),
+        _ => (start_pivot, end_pivot),
+    };
+
+    let t = t.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return (start, p0);
+    }
+    if t >= 1.0 {
+        return (end, p1);
+    }
+
+    let (_, _, rot0, sx0, sy0, sh0) = decompose_affine_trs(start);
+    let (_, _, mut rot1, mut sx1, mut sy1, mut sh1) = decompose_affine_trs(end);
+    // 開始と終了で行列式の符号（反転状態）が異なり、かつ双対表現 (-sx, -sy, -sh, rot + π) の方が
+    // 回転角の差分が小さい場合（水平反転など）、不要な 180° 回転を防ぐため水平スケール反転表現を採用する
+    if sy0 * sy1 < 0.0 {
+        let diff_keep = (rot1 - rot0 + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI;
+        let diff_flip = (rot1 - rot0).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+        if diff_flip.abs() < diff_keep.abs() {
+            sx1 = -sx1;
+            sy1 = -sy1;
+            sh1 = -sh1;
+            rot1 += std::f64::consts::PI;
+        }
+    }
+
+    let cw_delta = (rot1 - rot0).rem_euclid(std::f64::consts::TAU);
+    let delta_rot = match rotate_mode {
+        TweenRotate::Auto => {
+            if cw_delta > std::f64::consts::PI {
+                cw_delta - std::f64::consts::TAU
+            } else {
+                cw_delta
+            }
+        }
+        TweenRotate::Clockwise => {
+            if cw_delta < 1e-5 || (std::f64::consts::TAU - cw_delta) < 1e-5 {
+                std::f64::consts::TAU
+            } else {
+                cw_delta
+            }
+        }
+        TweenRotate::CounterClockwise => {
+            if cw_delta < 1e-5 || (std::f64::consts::TAU - cw_delta) < 1e-5 {
+                -std::f64::consts::TAU
+            } else {
+                cw_delta - std::f64::consts::TAU
+            }
+        }
+    };
+    let rot = rot0 + delta_rot * t;
+    const MIN_TWEEN_SCALE: f64 = 1e-3;
+    let mut sx = sx0 + (sx1 - sx0) * t;
+    let mut sy = sy0 + (sy1 - sy0) * t;
+    if sx.abs() < MIN_TWEEN_SCALE {
+        sx = if sx0 >= 0.0 {
+            MIN_TWEEN_SCALE
+        } else {
+            -MIN_TWEEN_SCALE
+        };
+    }
+    if sy.abs() < MIN_TWEEN_SCALE {
+        sy = if sy0 >= 0.0 {
+            MIN_TWEEN_SCALE
+        } else {
+            -MIN_TWEEN_SCALE
+        };
+    }
+    let sh = sh0 + (sh1 - sh0) * t;
+
+    let (sin_r, cos_r) = rot.sin_cos();
+    let a = sx * cos_r;
+    let b = sx * sin_r;
+    let c = sh * cos_r - sy * sin_r;
+    let d = sh * sin_r + sy * cos_r;
+    let linear = Affine::new([a, b, c, d, 0.0, 0.0]);
+
+    let local_pivot = p0.lerp(p1, t);
+    let world_pivot = (start * p0).lerp(end * p1, t);
+    let interp_xform = Affine::translate(world_pivot.to_vec2())
+        * linear
+        * Affine::translate(-local_pivot.to_vec2());
+    (interp_xform, local_pivot)
+}
+
+fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64, f64, f64) {
+    let [a, b, c, d, tx, ty] = affine.as_coeffs();
+    let sx = a.hypot(b);
+    let (cos_r, sin_r, rot) = if sx > 1e-9 {
+        (a / sx, b / sx, b.atan2(a))
+    } else {
+        (1.0, 0.0, 0.0)
+    };
+    let shear = c * cos_r + d * sin_r;
+    let sy = -c * sin_r + d * cos_r;
+    (tx, ty, rot, sx, sy, shear)
+}
 
 // ============================================================================
 // 1. タイムラインのデータモデル（Cel / Keyframe / Selection / Layer / Timeline）
 // ============================================================================
 
 const MAX_RESOLVED_CEL_CACHE_ENTRIES: usize = 256;
-type ResolvedScreenCacheKey = (usize, u32, u32, u32, bool);
-type ResolvedOnionCacheKey = (usize, u32, u32, u32, [u8; 3], u8);
-type LruEntry<K, V> = (K, V, u64);
+pub(crate) type ResolvedScreenCacheKey = (usize, u32, u32, u32, bool);
+pub(crate) type ResolvedOnionCacheKey = (usize, u32, u32, u32, [u8; 3], u8);
+pub(crate) type LruEntry<K, V> = (K, V, u64);
 
-fn lru_get<K: PartialEq, V: Clone>(entries: &mut [LruEntry<K, V>], key: &K) -> Option<V> {
+pub(crate) fn lru_get<K: PartialEq, V: Clone>(entries: &mut [LruEntry<K, V>], key: &K) -> Option<V> {
     let (_, val, last_used_tick) = entries.iter_mut().find(|(k, _, _)| k == key)?;
     *last_used_tick = crate::vector_engine::next_mesh_revision();
     Some(val.clone())
 }
 
-fn lru_insert<K, V>(entries: &mut Vec<LruEntry<K, V>>, key: K, val: V) {
+pub(crate) fn lru_insert<K, V>(entries: &mut Vec<LruEntry<K, V>>, key: K, val: V) {
     let tick = crate::vector_engine::next_mesh_revision();
     if entries.len() < MAX_RESOLVED_CEL_CACHE_ENTRIES {
         entries.push((key, val, tick));
@@ -41,18 +215,18 @@ fn lru_insert<K, V>(entries: &mut Vec<LruEntry<K, V>>, key: K, val: V) {
 
 /// セル内の全図形を1つに統合したワールド座標バッチメッシュと、直近の `(zoom, pan)` スクリーン座標・オニオンスキン変換済みキャッシュ
 #[derive(Debug, Default)]
-struct CelMeshCache {
+pub(crate) struct CelMeshCache {
     shape_revisions: Vec<(u64, Color32)>,
     world_batch_mesh: Arc<Mesh>,
     screen_cache: Option<ScreenMeshCacheEntry>,
     onion_cache: Option<OnionMeshCacheEntry>,
     /// シンボルインスタンスやトゥイーンを含むセルの解決済みメッシュキャッシュ署名
-    resolved_sig: Option<ResolvedCelSig>,
+    pub(crate) resolved_sig: Option<ResolvedCelSig>,
     /// 解決済みスクリーン・オニオンメッシュキャッシュが対象としている直近のビューポート `(zoom_bits, pan_x_bits, pan_y_bits)`
-    resolved_view_key: Option<(u32, u32, u32)>,
-    resolved_world_batches: Vec<LruEntry<usize, Option<Arc<Mesh>>>>,
-    resolved_screen_caches: Vec<LruEntry<ResolvedScreenCacheKey, Arc<Mesh>>>,
-    resolved_onion_caches: Vec<LruEntry<ResolvedOnionCacheKey, Arc<Mesh>>>,
+    pub(crate) resolved_view_key: Option<(u32, u32, u32)>,
+    pub(crate) resolved_world_batches: Vec<LruEntry<usize, Option<Arc<Mesh>>>>,
+    pub(crate) resolved_screen_caches: Vec<LruEntry<ResolvedScreenCacheKey, Arc<Mesh>>>,
+    pub(crate) resolved_onion_caches: Vec<LruEntry<ResolvedOnionCacheKey, Arc<Mesh>>>,
 }
 
 impl Clone for CelMeshCache {
@@ -80,7 +254,7 @@ pub(crate) struct Cel {
     pub(crate) instances: Arc<Vec<SymbolInstance>>,
     /// セル内容（`shapes` / `instances`）が更新されるたびにインクリメントされるリビジョン番号（Undo履歴の $O(1)$ CoW 共有用）
     pub(crate) revision: u64,
-    mesh_cache: SyncCache<CelMeshCache>,
+    pub(crate) mesh_cache: SyncCache<CelMeshCache>,
 }
 
 impl Default for Cel {
@@ -270,163 +444,6 @@ impl Cel {
         onion_mesh
     }
 
-    fn ensure_resolved_world_batch(
-        &self,
-        cache: &mut CelMeshCache,
-        sig_query: ResolvedSigQuery<'_>,
-        eval_frame_key: usize,
-        build_fn: impl FnOnce() -> Option<Mesh>,
-    ) -> Option<Arc<Mesh>> {
-        if !cache
-            .resolved_sig
-            .as_ref()
-            .is_some_and(|sig| sig_query.matches(sig))
-        {
-            cache.resolved_sig = Some(sig_query.compute());
-            cache.resolved_world_batches.clear();
-            cache.resolved_screen_caches.clear();
-            cache.resolved_onion_caches.clear();
-        }
-        if let Some(opt_mesh) = lru_get(&mut cache.resolved_world_batches, &eval_frame_key) {
-            return opt_mesh;
-        }
-        let built = build_fn().map(Arc::new);
-        lru_insert(
-            &mut cache.resolved_world_batches,
-            eval_frame_key,
-            built.clone(),
-        );
-        built
-    }
-
-    /// シンボルインスタンスやトゥイーンを含むセルの解決済みスクリーン座標 `Arc<Mesh>` をキャッシュ経由で返す
-    pub(crate) fn cached_resolved_screen_mesh(
-        &self,
-        (sig_query, eval_frame_key): (ResolvedSigQuery<'_>, usize),
-        zoom: f32,
-        pan: Vec2,
-        dim_backdrop: bool,
-        build_fn: impl FnOnce() -> Option<Mesh>,
-    ) -> Option<Arc<Mesh>> {
-        let mut cache = self.mesh_cache.lock();
-        let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
-        if cache.resolved_view_key != Some(view_key) {
-            cache.resolved_view_key = Some(view_key);
-            cache.resolved_screen_caches.clear();
-            cache.resolved_onion_caches.clear();
-        }
-        let key = (
-            eval_frame_key,
-            view_key.0,
-            view_key.1,
-            view_key.2,
-            dim_backdrop,
-        );
-        if cache
-            .resolved_sig
-            .as_ref()
-            .is_some_and(|sig| sig_query.matches(sig))
-        {
-            if let Some(mesh) = lru_get(&mut cache.resolved_screen_caches, &key) {
-                return Some(mesh);
-            }
-        }
-        let world_batch =
-            self.ensure_resolved_world_batch(&mut cache, sig_query, eval_frame_key, build_fn)?;
-        let screen_mesh = Arc::new(transform_mesh_to_screen(
-            &world_batch,
-            zoom,
-            pan,
-            dim_backdrop,
-        ));
-        lru_insert(
-            &mut cache.resolved_screen_caches,
-            key,
-            Arc::clone(&screen_mesh),
-        );
-        Some(screen_mesh)
-    }
-
-    /// シンボルインプレイス編集時の親シーン背景セル（`backdrop_cel`）の半透明スクリーン座標メッシュをキャッシュ経由で返す
-    pub(crate) fn cached_backdrop_screen_mesh(
-        &self,
-        parent_frame: usize,
-        zoom: f32,
-        pan: Vec2,
-        library: &[SymbolDef],
-    ) -> Option<Arc<Mesh>> {
-        if self.is_empty() {
-            return None;
-        }
-        if self.instances.is_empty() {
-            return Some(self.cached_screen_mesh(zoom, pan, true));
-        }
-        let sig_query = ResolvedSigQuery::SingleCel { cel: self, library };
-        self.cached_resolved_screen_mesh((sig_query, parent_frame), zoom, pan, true, || {
-            let shapes = crate::symbol::resolve_cel_with_library(
-                self,
-                parent_frame,
-                parent_frame,
-                SymbolEvalCtx::new(library),
-            );
-            let mut batch = Mesh::default();
-            for s in &shapes {
-                append_mesh(&mut batch, s.fill_mesh());
-            }
-            (!batch.is_empty()).then_some(batch)
-        })
-    }
-
-    /// シンボルインスタンスやトゥイーンを含むセルの解決済みオニオンスキン `Arc<Mesh>` をキャッシュ経由で返す
-    pub(crate) fn cached_resolved_onion_mesh(
-        &self,
-        (sig_query, eval_frame_key): (ResolvedSigQuery<'_>, usize),
-        zoom: f32,
-        pan: Vec2,
-        (tint_rgb, alpha): ([u8; 3], u8),
-        build_fn: impl FnOnce() -> Option<Mesh>,
-    ) -> Option<Arc<Mesh>> {
-        let mut cache = self.mesh_cache.lock();
-        let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
-        if cache.resolved_view_key != Some(view_key) {
-            cache.resolved_view_key = Some(view_key);
-            cache.resolved_screen_caches.clear();
-            cache.resolved_onion_caches.clear();
-        }
-        let key = (
-            eval_frame_key,
-            view_key.0,
-            view_key.1,
-            view_key.2,
-            tint_rgb,
-            alpha,
-        );
-        if cache
-            .resolved_sig
-            .as_ref()
-            .is_some_and(|sig| sig_query.matches(sig))
-        {
-            if let Some(mesh) = lru_get(&mut cache.resolved_onion_caches, &key) {
-                return Some(mesh);
-            }
-        }
-        let world_batch =
-            self.ensure_resolved_world_batch(&mut cache, sig_query, eval_frame_key, build_fn)?;
-        let onion_mesh = Arc::new(transform_mesh_to_screen_onion(
-            &world_batch,
-            zoom,
-            pan,
-            tint_rgb,
-            alpha,
-        ));
-        lru_insert(
-            &mut cache.resolved_onion_caches,
-            key,
-            Arc::clone(&onion_mesh),
-        );
-        Some(onion_mesh)
-    }
-
     /// このセル（キーフレーム）に「ルート直下の単一シンボルインスタンスのみ（1個だけ）」が存在する場合、
     /// その `SymbolInstanceBinding` を返す。
     /// （空セル、生シェイプのみ、通常グループのみ、複数シンボル、シンボル＋生シェイプ、シンボル＋グループ等の場合はすべて `None`）
@@ -435,15 +452,6 @@ impl Cel {
             && self.instances.len() == 1
             && self.instances[0].parent_scope.is_empty())
         .then(|| self.instances[0].binding)
-    }
-
-    /// このセル内に、複数フレームまたは先頭フレーム空白の動的シンボルインスタンス（入れ子含む）が含まれているかを返す
-    pub(crate) fn has_dynamic_symbol(&self, library: &[SymbolDef]) -> bool {
-        self.instances.iter().any(|inst| {
-            library.iter().any(|sym| {
-                sym.id == inst.binding.symbol_id && sym.has_dynamic_animation(library, 0)
-            })
-        })
     }
 
     /// セル内の正規化シンボルインスタンス一覧 `self.instances` のうち、
@@ -460,79 +468,6 @@ impl Cel {
             }
         }
         any_updated
-    }
-
-    /// 指定された `symbol_id` を参照するシンボルインスタンスバインディングを解除（通常のグループ図形へ展開して `shapes` に格納）する
-    pub(crate) fn detach_symbol_id(
-        &mut self,
-        symbol_id: u64,
-        kf_start_frame: usize,
-        library: &[SymbolDef],
-        next_group_id: &mut u64,
-    ) {
-        if !self
-            .instances
-            .iter()
-            .any(|inst| inst.binding.symbol_id == symbol_id)
-        {
-            return;
-        }
-        let ctx = SymbolEvalCtx::new(library);
-        let mut out_shapes = Vec::with_capacity(self.shapes.len() + self.instances.len());
-        let mut out_instances = Vec::with_capacity(self.instances.len());
-        let mut next_shape_idx = 0;
-
-        for inst in self.instances.iter().cloned() {
-            let target_idx = inst.shape_order_index.min(self.shapes.len());
-            while next_shape_idx < target_idx {
-                out_shapes.push(self.shapes[next_shape_idx].clone());
-                next_shape_idx += 1;
-            }
-            if inst.binding.symbol_id == symbol_id {
-                if let Some(sym) = library.iter().find(|s| s.id == symbol_id) {
-                    let local_shapes = sym.evaluated_local_shapes_for_instance(
-                        inst.binding,
-                        kf_start_frame,
-                        kf_start_frame,
-                        ctx.nested(),
-                    );
-                    let mut inner_gid_map: Vec<(u64, u64)> = Vec::new();
-                    let inner_start = inst.parent_scope.len() + 1;
-                    for mut s in inst.binding.instantiate_shapes(
-                        &local_shapes,
-                        inst.layer_id,
-                        &inst.parent_scope,
-                    ) {
-                        s.symbol_instance = None;
-                        if s.group_path.len() > inner_start {
-                            for gid in &mut s.group_path[inner_start..] {
-                                let mapped = if let Some(&(_, m)) =
-                                    inner_gid_map.iter().find(|&&(old, _)| old == *gid)
-                                {
-                                    m
-                                } else {
-                                    let id = *next_group_id;
-                                    *next_group_id = next_group_id.saturating_add(1);
-                                    inner_gid_map.push((*gid, id));
-                                    id
-                                };
-                                *gid = mapped;
-                            }
-                        }
-                        out_shapes.push(s);
-                    }
-                }
-            } else {
-                let mut kept = inst;
-                kept.shape_order_index = out_shapes.len();
-                out_instances.push(kept);
-            }
-        }
-        while next_shape_idx < self.shapes.len() {
-            out_shapes.push(self.shapes[next_shape_idx].clone());
-            next_shape_idx += 1;
-        }
-        self.set_parts(out_shapes, out_instances);
     }
 }
 
@@ -1166,63 +1101,6 @@ impl Layer {
             _ => None,
         }
     }
-
-    /// レイヤー内の全キーフレームから指定 `symbol_id` のシンボル参照をデタッチし、単一シンボル条件を失ったトゥイーンを解除する
-    pub(crate) fn detach_symbol_id(
-        &mut self,
-        symbol_id: u64,
-        library: &[SymbolDef],
-        next_group_id: &mut u64,
-    ) {
-        for kf in &mut self.keyframes {
-            kf.cel
-                .detach_symbol_id(symbol_id, kf.start_frame, library, next_group_id);
-            if kf.tween && kf.cel.single_symbol_instance().is_none() {
-                kf.tween = false;
-            }
-        }
-    }
-
-    /// このレイヤーの指定フレーム `frame` における図形列を、クラシックトゥイーン補間およびシンボル内タイムライン評価込みで返す
-    pub(crate) fn evaluate_shapes_at(
-        &self,
-        (frame, child_eval_frame): (usize, usize),
-        out_layer_id: u64,
-        ctx: SymbolEvalCtx<'_>,
-    ) -> Vec<FillShape> {
-        let Some(kf_idx) = self.keyframe_index_at(frame) else {
-            return Vec::new();
-        };
-        let kf = &self.keyframes[kf_idx];
-        if let Some((_, interp_b)) = self.interpolated_tween_binding_at(frame) {
-            if ctx.depth < MAX_SYMBOL_NEST_DEPTH {
-                if let Some(sym) = ctx.library.iter().find(|s| s.id == interp_b.symbol_id) {
-                    let local_shapes = sym.evaluated_local_shapes_for_instance(
-                        interp_b,
-                        kf.start_frame,
-                        child_eval_frame,
-                        ctx.nested(),
-                    );
-                    if !local_shapes.is_empty() {
-                        return interp_b.instantiate_shapes(&local_shapes, out_layer_id, &[]);
-                    }
-                }
-            }
-            if ctx.depth == 0 {
-                return vec![FillShape::new_empty_symbol_marker(
-                    interp_b,
-                    out_layer_id,
-                    &[],
-                )];
-            }
-            return Vec::new();
-        }
-
-        resolve_cel_with_library(&kf.cel, kf.start_frame, child_eval_frame, ctx)
-            .into_iter()
-            .map(|s| s.with_layer_id(out_layer_id))
-            .collect()
-    }
 }
 
 /// `load_shapes_from_timeline` 読み込み時点のシェイプ署名（ハッシュ衝突のない完全比較構造体）
@@ -1263,7 +1141,7 @@ impl LoadedShapeSig {
         self.layer_id == s.layer_id && self.matches(s)
     }
 
-    fn shapes_match(a: &FillShape, b: &FillShape) -> bool {
+    pub(crate) fn shapes_match(a: &FillShape, b: &FillShape) -> bool {
         a.mesh_revision == b.mesh_revision
             && a.color == b.color
             && a.group_path == b.group_path
@@ -1300,22 +1178,6 @@ impl Default for Timeline {
 }
 
 impl Timeline {
-    /// シンボル内部タイムライン編集モード用に、シンボル定義の `timeline` をベースに親タイムラインのFPSを引き継いだ作業用 `Timeline` を生成する
-    pub(crate) fn new_for_symbol_edit(&self, sym_def: &SymbolDef, sym_layers: Vec<Layer>) -> Self {
-        let mut tl = sym_def.timeline.clone();
-        let act_l = tl.active_layer.min(sym_layers.len().saturating_sub(1));
-        let act_f = tl.current_frame.min(tl.total_frames.saturating_sub(1));
-        tl.layers = sym_layers;
-        tl.active_layer = act_l;
-        tl.current_frame = act_f;
-        tl.total_frames = tl.total_frames.max(1);
-        tl.fps = self.fps;
-        tl.next_layer_number = tl.next_layer_number.max(2);
-        tl.next_layer_id = tl.next_layer_id.max(2);
-        tl.cell_selection = Some(TimelineCellSelection::single(act_l, act_f));
-        tl
-    }
-
     /// 全レイヤーの `frame_count` の最大値からタイムライン全体の `total_frames` を再計算し、レイヤー選択インデックスを範囲内へ補正する
     pub(crate) fn sync_total_frames(&mut self) {
         self.total_frames = self
@@ -1445,7 +1307,7 @@ impl Timeline {
     }
 
     /// 指定レイヤー `lid` のシェイプ群が直近の読み込み時点から未変更であるかを判定する
-    fn is_layer_unchanged_since_load(
+    pub(crate) fn is_layer_unchanged_since_load(
         loaded_signatures: &[LoadedShapeSig],
         lid: u64,
         shapes: &[FillShape],
@@ -1500,100 +1362,6 @@ impl Timeline {
                 }
             }
         }
-    }
-
-    /// 与えられた図形リスト `shapes` を、現在フレームの各「表示中かつ非ロック」レイヤーの `Cel` に `layer_id` ごとに振り分けて書き込む
-    /// （変更がないレイヤーはクローンとキャッシュ破棄をスキップし、いずれかの `Cel` が更新された場合のみ `true` を返す）
-    pub(crate) fn write_shapes_to_editable_cels(
-        &mut self,
-        shapes: &[FillShape],
-        library: &[SymbolDef],
-        loaded_signatures: &[LoadedShapeSig],
-    ) -> bool {
-        let frame = self.current_frame;
-        let mut any_cel_modified = false;
-        for l_idx in 0..self.layers.len() {
-            if !self.layers[l_idx].visible || self.layers[l_idx].locked {
-                continue;
-            }
-            let lid = self.layers[l_idx].id;
-            let is_tween_mid = self.layers[l_idx]
-                .interpolated_tween_binding_at(frame)
-                .is_some();
-            let has_multiframe = self.layers[l_idx]
-                .cel_at(frame)
-                .is_some_and(|c| c.has_dynamic_symbol(library));
-
-            if (is_tween_mid || has_multiframe)
-                && Self::is_layer_unchanged_since_load(loaded_signatures, lid, shapes)
-            {
-                continue;
-            }
-
-            if is_tween_mid {
-                let (prev_kf_start, prev_tween_rotate) = self.layers[l_idx]
-                    .keyframe_index_at(frame)
-                    .map(|i| {
-                        let kf = &self.layers[l_idx].keyframes[i];
-                        (kf.start_frame, kf.tween_rotate)
-                    })
-                    .unwrap_or((frame, TweenRotate::Auto));
-                let elapsed = frame.saturating_sub(prev_kf_start);
-                let new_shapes: Vec<FillShape> = shapes
-                    .iter()
-                    .filter(|s| s.layer_id == lid)
-                    .cloned()
-                    .collect();
-                let kf_idx = self.layers[l_idx].insert_keyframe(frame, false);
-                let (non_symbol_shapes, mut next_instances) =
-                    Cel::split_shapes_and_instances(new_shapes);
-                for inst in &mut next_instances {
-                    if inst.binding.loop_mode != SymbolLoopMode::SingleFrame {
-                        inst.binding.first_frame =
-                            inst.binding.first_frame.saturating_add(elapsed);
-                    }
-                }
-                self.layers[l_idx].keyframes[kf_idx].cel =
-                    Cel::new_with_instances(non_symbol_shapes, next_instances);
-                let has_single_sym = self.layers[l_idx].keyframes[kf_idx]
-                    .cel
-                    .single_symbol_instance()
-                    .is_some();
-                self.layers[l_idx].keyframes[kf_idx].tween = has_single_sym;
-                if has_single_sym {
-                    self.layers[l_idx].keyframes[kf_idx].tween_rotate = prev_tween_rotate;
-                }
-                any_cel_modified = true;
-                continue;
-            }
-
-            if let Some(kf_idx) = self.layers[l_idx].keyframe_index_at(frame) {
-                let kf = &mut self.layers[l_idx].keyframes[kf_idx];
-                let updated_cel_shapes: Vec<FillShape> = shapes
-                    .iter()
-                    .filter(|s| s.layer_id == lid)
-                    .cloned()
-                    .collect();
-                let (non_symbol_shapes, next_instances) =
-                    Cel::split_shapes_and_instances(updated_cel_shapes);
-                let unchanged = *kf.cel.instances == next_instances
-                    && kf.cel.shapes.len() == non_symbol_shapes.len()
-                    && kf
-                        .cel
-                        .shapes
-                        .iter()
-                        .zip(&non_symbol_shapes)
-                        .all(|(a, b)| LoadedShapeSig::shapes_match(a, b));
-                if !unchanged {
-                    kf.cel.set_parts(non_symbol_shapes, next_instances);
-                    if kf.tween && kf.cel.single_symbol_instance().is_none() {
-                        kf.tween = false;
-                    }
-                    any_cel_modified = true;
-                }
-            }
-        }
-        any_cel_modified
     }
 
     /// 現在アクティブなレイヤーが現在フレームにおいて編集可能（表示中・非ロック・フレーム作成済み）であるかを返す
@@ -1869,106 +1637,6 @@ impl Timeline {
         let layer = self.layers.remove(from_idx);
         self.layers.insert(to_idx, layer);
         self.select_single_cell(to_idx, self.current_frame);
-    }
-
-    /// 指定レイヤー `layer_idx` の指定フレーム `frame` における図形列を、クラシックトゥイーン補間およびシンボル内タイムライン評価込みで返す
-    pub(crate) fn evaluate_layer_shapes_at(
-        &self,
-        layer_idx: usize,
-        frame: usize,
-        library: &[SymbolDef],
-    ) -> Vec<FillShape> {
-        let Some(layer) = self.layers.get(layer_idx) else {
-            return Vec::new();
-        };
-        layer.evaluate_shapes_at((frame, frame), layer.id, SymbolEvalCtx::new(library))
-    }
-
-    fn build_uncached_world_batch_mesh(
-        &self,
-        layer_idx: usize,
-        frame: usize,
-        library: &[SymbolDef],
-    ) -> Option<Mesh> {
-        let resolved = self.evaluate_layer_shapes_at(layer_idx, frame, library);
-        let mut batch = Mesh::default();
-        for s in &resolved {
-            append_mesh(&mut batch, s.fill_mesh());
-        }
-        (!batch.is_empty()).then_some(batch)
-    }
-
-    fn cel_cache_context_at<'a>(
-        &'a self,
-        layer_idx: usize,
-        frame: usize,
-        library: &'a [SymbolDef],
-    ) -> Option<(&'a Cel, Option<(ResolvedSigQuery<'a>, usize)>)> {
-        let layer = self.layers.get(layer_idx)?;
-        let kf_idx = layer.keyframe_index_at(frame)?;
-        let kf = &layer.keyframes[kf_idx];
-        if kf.cel.is_empty() {
-            return None;
-        }
-        let has_tween = layer.interpolated_tween_binding_at(frame).is_some();
-        let is_pure_shape_cel = !has_tween && kf.cel.instances.is_empty();
-        if is_pure_shape_cel {
-            return Some((&kf.cel, None));
-        }
-        let all_single_frame = !has_tween
-            && kf
-                .cel
-                .instances
-                .iter()
-                .all(|inst| inst.binding.loop_mode == SymbolLoopMode::SingleFrame);
-        let is_dynamic = !all_single_frame && (has_tween || kf.cel.has_dynamic_symbol(library));
-        let eval_frame_key = if is_dynamic { frame } else { kf.start_frame };
-        let sig_query = ResolvedSigQuery::LayerKeyframe {
-            layer,
-            kf_idx,
-            library,
-        };
-        Some((&kf.cel, Some((sig_query, eval_frame_key))))
-    }
-
-    /// 指定レイヤー・フレームの描画用スクリーン `Arc<Mesh>` を返す（純粋シェイプセルもシンボル・トゥイーンを含むセルも `Cel` キャッシュを再利用する）
-    pub(crate) fn resolved_cel_screen_mesh(
-        &self,
-        layer_idx: usize,
-        frame: usize,
-        zoom: f32,
-        pan: Vec2,
-        dim_backdrop: bool,
-        library: &[SymbolDef],
-    ) -> Option<Arc<Mesh>> {
-        let (cel, resolved_ctx) = self.cel_cache_context_at(layer_idx, frame, library)?;
-        let Some((sig, eval_frame_key)) = resolved_ctx else {
-            return (!cel.shapes.is_empty())
-                .then(|| cel.cached_screen_mesh(zoom, pan, dim_backdrop));
-        };
-        cel.cached_resolved_screen_mesh((sig, eval_frame_key), zoom, pan, dim_backdrop, || {
-            self.build_uncached_world_batch_mesh(layer_idx, frame, library)
-        })
-    }
-
-    /// 指定レイヤー・フレームのオニオンスキン描画用スクリーン `Arc<Mesh>` を返す（トゥイーン補間・複数フレームシンボルもキャッシュ経由で高速返却）
-    pub(crate) fn resolved_cel_onion_mesh(
-        &self,
-        layer_idx: usize,
-        frame: usize,
-        zoom: f32,
-        pan: Vec2,
-        (tint_rgb, alpha): ([u8; 3], u8),
-        library: &[SymbolDef],
-    ) -> Option<Arc<Mesh>> {
-        let (cel, resolved_ctx) = self.cel_cache_context_at(layer_idx, frame, library)?;
-        let Some((sig, eval_frame_key)) = resolved_ctx else {
-            return (!cel.shapes.is_empty())
-                .then(|| cel.cached_onion_mesh(zoom, pan, tint_rgb, alpha));
-        };
-        cel.cached_resolved_onion_mesh((sig, eval_frame_key), zoom, pan, (tint_rgb, alpha), || {
-            self.build_uncached_world_batch_mesh(layer_idx, frame, library)
-        })
     }
 
     /// 現在のフレーム・選択レイヤーにおいてクラシックトゥイーンの切替が可能か `(切替可能か, 現在トゥイーンONか)` を返す

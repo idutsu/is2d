@@ -1,7 +1,7 @@
 use eframe::egui::{self, Color32, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::Point;
 
-use crate::canvas_tool::{ActiveCanvasDrag, Tool};
+use crate::canvas_tool::{ActiveCanvasDrag, EditorDoc, Tool};
 use crate::vector_boolean::{
     boolean_operation, erase_from_canvas, find_enclosed_region_at, merge_disjoint_fill_into_canvas,
     merge_shapes_into_canvas, BoolOp,
@@ -11,7 +11,6 @@ use crate::vector_engine::{
     MAX_VIEW_ZOOM, MIN_VIEW_ZOOM,
 };
 use crate::vector_stroke::{build_smoothed_stroke_shapes_at_zoom, generate_brush_outline_at_zoom};
-use crate::Is2dApp;
 
 /// ブラシ・消しゴムドラッグ中のリアルタイムプレビューにおいて、
 /// 1フレームあたりに再テッセレーションする末尾ストローク点数の上限（これを超えた前半区間は `committed_mesh` に確定させて O(1) 更新を保証する）
@@ -22,7 +21,7 @@ const STROKE_TAIL_CHUNK_LEN: usize = 24;
 // ============================================================================
 
 pub(crate) fn handle_brush_or_eraser_input(
-    app: &mut Is2dApp,
+    app: &mut EditorDoc,
     response: &egui::Response,
     mouse_pt: Option<Point>,
 ) {
@@ -110,7 +109,7 @@ pub(crate) fn handle_brush_or_eraser_input(
     }
 }
 
-pub(crate) fn commit_raw_outline(app: &mut Is2dApp, raw: &[Point]) {
+pub(crate) fn commit_raw_outline(app: &mut EditorDoc, raw: &[Point]) {
     let target_lid = crate::canvas_tool::active_scope_layer_id(app);
     if !app.timeline.is_layer_editable_by_id(target_lid) {
         return;
@@ -168,7 +167,7 @@ pub(crate) fn commit_raw_outline(app: &mut Is2dApp, raw: &[Point]) {
 }
 
 /// バケツツール（色流し込み）
-pub(crate) fn bucket_fill_at(app: &mut Is2dApp, pt: Point) -> bool {
+pub(crate) fn bucket_fill_at(app: &mut EditorDoc, pt: Point) -> bool {
     let fill_color = app.ui.brush_color;
     let target_lid = crate::canvas_tool::active_scope_layer_id(app);
     if !app.timeline.is_layer_editable_by_id(target_lid) {
@@ -321,7 +320,7 @@ pub(crate) fn bucket_fill_at(app: &mut Is2dApp, pt: Point) -> bool {
 }
 
 /// 現在表示されているすべてのレイヤー（ロック中レイヤーを含む）の現在フレーム解決済み図形を背面→前面順で収集する
-fn collect_all_visible_shapes(app: &Is2dApp) -> Vec<FillShape> {
+fn collect_all_visible_shapes(app: &EditorDoc) -> Vec<FillShape> {
     let mut out = Vec::with_capacity(app.canvas.shapes.len());
     for (layer_idx, layer) in app.timeline.layers.iter().enumerate() {
         if !layer.visible {
@@ -420,7 +419,7 @@ fn symbol_binding_color_at(
 }
 
 /// 編集スコープおよび表示中の全レイヤーを対象に、指定座標 `pt` にヒットする最前面シェイプの色を返す（スポイト用）
-pub(crate) fn topmost_visible_color_at(app: &Is2dApp, pt: Point) -> Option<Color32> {
+pub(crate) fn topmost_visible_color_at(app: &EditorDoc, pt: Point) -> Option<Color32> {
     let num_layers = app.timeline.layers.len();
     if num_layers == 1
         && app
@@ -464,7 +463,7 @@ pub(crate) fn topmost_visible_color_at(app: &Is2dApp, pt: Point) -> Option<Color
 }
 
 /// スポイトツール（色抽出）：指定位置 `pt` の最前面シェイプの色を抽出し、`app.ui.brush_color` に設定する
-pub(crate) fn pick_color_at(app: &mut Is2dApp, pt: Point) -> Option<Color32> {
+pub(crate) fn pick_color_at(app: &mut EditorDoc, pt: Point) -> Option<Color32> {
     let picked = topmost_visible_color_at(app, pt)?;
     app.ui.brush_color = picked;
     Some(picked)
@@ -472,7 +471,7 @@ pub(crate) fn pick_color_at(app: &mut Is2dApp, pt: Point) -> Option<Color32> {
 
 /// 進行中のブラシ・消しゴムストロークの増分プレビューメッシュを描画する
 pub(crate) fn draw_active_stroke_preview(
-    app: &Is2dApp,
+    app: &EditorDoc,
     artwork_painter: &egui::Painter,
     gizmo_painter: &egui::Painter,
 ) {
