@@ -821,22 +821,25 @@ impl SymbolManager {
 
     /// 新しいグループ / シンボルインスタンス用の一意な `group_id` を採番して返す
     pub(crate) fn alloc_group_id(&mut self) -> u64 {
-        let id = self.next_group_id;
-        self.next_group_id = self.next_group_id.saturating_add(1);
+        let id = self.next_group_id.max(1);
+        self.next_group_id = if id < u64::MAX { id + 1 } else { 1 };
         id
     }
 
     /// 新しいシンボル定義をライブラリへ登録し、採番された `symbol_id` を返す
     pub(crate) fn register_new_symbol(&mut self, local_shapes: Vec<FillShape>) -> u64 {
-        let sym_id = self.next_symbol_id;
-        self.next_symbol_id = self.next_symbol_id.saturating_add(1);
+        let mut sym_id = self.next_symbol_id.max(1);
+        while self.library.iter().any(|s| s.id == sym_id) {
+            sym_id = if sym_id < u64::MAX { sym_id + 1 } else { 1 };
+        }
+        self.next_symbol_id = sym_id.saturating_add(1);
         let mut name_num = sym_id;
         while self
             .library
             .iter()
             .any(|s| s.name == format!("Symbol {name_num}"))
         {
-            name_num = name_num.saturating_add(1);
+            name_num = if name_num < u64::MAX { name_num + 1 } else { 1 };
         }
         let sym_def = SymbolDef::new(sym_id, format!("Symbol {name_num}"), local_shapes);
         self.library.push(sym_def);
@@ -867,10 +870,8 @@ impl SymbolManager {
         }
         let mut stack = vec![candidate_child_id];
         let mut visited = std::collections::HashSet::new();
+        visited.insert(candidate_child_id);
         while let Some(cur_id) = stack.pop() {
-            if !visited.insert(cur_id) {
-                continue;
-            }
             let Some(sym) = self.find_symbol(cur_id) else {
                 continue;
             };
@@ -881,7 +882,7 @@ impl SymbolManager {
                         if child_id == parent_symbol_id {
                             return true;
                         }
-                        if !visited.contains(&child_id) {
+                        if visited.insert(child_id) {
                             stack.push(child_id);
                         }
                     }

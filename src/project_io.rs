@@ -32,6 +32,26 @@ pub(crate) const MAX_LAYERS_PER_TIMELINE: usize = 1_000;
 /// 1輪郭（Contour）あたりの最大許容ベジェセグメント数
 pub(crate) const MAX_CONTOUR_SEGMENTS: usize = 100_000;
 
+/// 読み込み時に許容するエンティティID（`layer_id` / `symbol_id` / `group_id` / `instance_gid`）の最大安全値
+/// （`u64::MAX` 付近の細工IDによる `saturating_add` 衝突を防止するため、上限を超えるIDは読み込み時に安全な連番へ再採番する）
+pub(crate) const MAX_SAFE_ENTITY_ID: u64 = u64::MAX / 2;
+
+/// 未保存変更があるタブを閉じる際の非ブロッキング確認モーダル状態
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PendingCloseConfirm {
+    /// 単一タブのクローズ確認（`close_tab` / `Cmd+W` / タブの `×` ボタン）
+    SingleTab {
+        tab_index: usize,
+        orig_active: usize,
+    },
+    /// アプリ終了（ウィンドウクローズ）時の未保存タブ順次確認
+    ViewportClose {
+        current_tab_index: usize,
+        orig_active: usize,
+        discarded_doc_ids: HashSet<u64>,
+    },
+}
+
 /// `open_project_in_tab` の実行結果区分
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OpenProjectOutcome {
@@ -131,6 +151,10 @@ pub(crate) struct DocumentTabManager {
     pub(crate) clipboard_imported_map: HashMap<(u64, u64), u64>,
     /// 直近にOSウィンドウへ送信したタイトル文字列（毎フレームの重複送信防止用キャッシュ）
     pub(crate) last_window_title: String,
+    /// 未保存変更確認モーダル（egui ウィンドウ）の表示待機状態
+    pub(crate) pending_close_confirm: Option<PendingCloseConfirm>,
+    /// 全タブの未保存確認が完了し、OSウィンドウのクローズを許可するフラグ
+    pub(crate) allow_viewport_close: bool,
 }
 
 impl Default for DocumentTabManager {
@@ -146,6 +170,8 @@ impl Default for DocumentTabManager {
             clipboard_symbols: Vec::new(),
             clipboard_imported_map: HashMap::new(),
             last_window_title: String::new(),
+            pending_close_confirm: None,
+            allow_viewport_close: false,
         }
     }
 }
@@ -287,6 +313,7 @@ fn unpack_slot_into_active(app: &mut Is2dApp, target_index: usize) {
     app.viewport.last_canvas_rect = last_canvas_rect;
     app.canvas.clipboard = shared_clipboard;
     app.canvas.paste_count = 0;
+    app.canvas.paste_offset = kurbo::Vec2::ZERO;
     if !app.canvas.selected_shapes.is_empty() && app.ui.select_sub_mode != SelectSubMode::Reshape {
         app.ui.select_sub_mode = SelectSubMode::Reshape;
     }
@@ -356,74 +383,124 @@ pub(crate) fn is_tab_dirty(app: &Is2dApp, index: usize) -> bool {
     }
 }
 
-/// 対象タブに未保存変更がある場合、対象タブを画面に表示した上でOSネイティブ確認ダイアログ
-/// （「はい：保存して閉じる」「いいえ：破棄して閉じる」「キャンセル」）を表示する
-fn confirm_unsaved_tab_before_close(
-    app: &mut Is2dApp,
-    tab_index: usize,
-    ctx: &egui::Context,
-) -> bool {
-    if !is_tab_dirty(app, tab_index) {
-        return true;
-    }
-    let orig_active = app.tabs.active_index;
-    if tab_index != orig_active {
-        switch_to_tab(app, tab_index, Some(ctx));
-    }
-    let tab_name = app
-        .tabs
-        .tabs
-        .get(tab_index)
-        .map(|slot| slot.display_title(app.ui.current_file_path.as_deref(), false, true))
-        .unwrap_or_else(|| "無題".to_owned());
-
-    let result = rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Warning)
-        .set_title("未保存の変更の確認")
-        .set_description(format!(
-            "「{tab_name}」には未保存の変更があります。\n閉じる前に変更を保存しますか？\n（「はい」= 保存して閉じる / 「いいえ」= 保存せずに破棄 / 「キャンセル」= 閉じない）"
-        ))
-        .set_buttons(rfd::MessageButtons::YesNoCancel)
-        .show();
-
-    match result {
-        rfd::MessageDialogResult::Yes => {
-            save_project(app, ctx);
-            let saved_ok = !app.history.is_dirty();
-            if !saved_ok && tab_index != orig_active && orig_active < app.tabs.tabs.len() {
-                switch_to_tab(app, orig_active, Some(ctx));
-            }
-            saved_ok
-        }
-        rfd::MessageDialogResult::No => true,
-        _ => {
-            if tab_index != orig_active && orig_active < app.tabs.tabs.len() {
-                switch_to_tab(app, orig_active, Some(ctx));
-            }
-            false
-        }
-    }
-}
-
 /// OSウィンドウの閉じる操作（`×` ボタンや `Cmd+Q` / `Alt+F4`）が要求された際、
-/// 未保存変更があるタブについて保存・破棄・キャンセルの確認を行い、キャンセルされた場合は `CancelClose` を発行する
-/// （後半タブの保存によって先行タブのファイルパスが上書きされ `mark_unsaved()` で新たに Dirty 化したケースも漏れなく再チェックする）
+/// 未保存変更があるタブが存在する場合は `CancelClose` を発行してアプリ内の非ブロッキング確認モーダルを表示する
 pub(crate) fn handle_viewport_close_request(app: &mut Is2dApp, ctx: &egui::Context) {
     if !ctx.input(|i| i.viewport().close_requested()) {
         return;
     }
-    let mut discarded_doc_ids = HashSet::new();
-    while let Some(idx) = (0..app.tabs.tabs.len())
+    if app.tabs.allow_viewport_close {
+        return;
+    }
+    if app.tabs.pending_close_confirm.is_some() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        return;
+    }
+    if let Some(idx) = (0..app.tabs.tabs.len()).find(|&i| is_tab_dirty(app, i)) {
+        let orig_active = app.tabs.active_index;
+        if idx != orig_active {
+            switch_to_tab(app, idx, Some(ctx));
+        }
+        app.tabs.pending_close_confirm = Some(PendingCloseConfirm::ViewportClose {
+            current_tab_index: idx,
+            orig_active,
+            discarded_doc_ids: HashSet::new(),
+        });
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+    }
+}
+
+fn advance_viewport_close_confirm(
+    app: &mut Is2dApp,
+    orig_active: usize,
+    discarded_doc_ids: HashSet<u64>,
+    ctx: &egui::Context,
+) {
+    if let Some(next_idx) = (0..app.tabs.tabs.len())
         .find(|&i| is_tab_dirty(app, i) && !discarded_doc_ids.contains(&app.tabs.tabs[i].doc_id))
     {
-        let doc_id = app.tabs.tabs[idx].doc_id;
-        if !confirm_unsaved_tab_before_close(app, idx, ctx) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            return;
+        if next_idx != app.tabs.active_index {
+            switch_to_tab(app, next_idx, Some(ctx));
         }
-        if is_tab_dirty(app, idx) {
-            discarded_doc_ids.insert(doc_id);
+        app.tabs.pending_close_confirm = Some(PendingCloseConfirm::ViewportClose {
+            current_tab_index: next_idx,
+            orig_active,
+            discarded_doc_ids,
+        });
+    } else {
+        app.tabs.allow_viewport_close = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+}
+
+/// 未保存変更確認モーダルで「保存して閉じる」が選択された際の処理を実行する
+pub(crate) fn confirm_pending_close_save(app: &mut Is2dApp, ctx: &egui::Context) {
+    let Some(pending) = app.tabs.pending_close_confirm.take() else {
+        return;
+    };
+    match pending {
+        PendingCloseConfirm::SingleTab {
+            tab_index,
+            orig_active,
+        } => {
+            save_project(app, ctx);
+            if !is_tab_dirty(app, tab_index) {
+                close_tab_immediately(app, tab_index, orig_active, Some(ctx));
+            } else if tab_index != orig_active && orig_active < app.tabs.tabs.len() {
+                switch_to_tab(app, orig_active, Some(ctx));
+            }
         }
+        PendingCloseConfirm::ViewportClose {
+            current_tab_index,
+            orig_active,
+            discarded_doc_ids,
+        } => {
+            save_project(app, ctx);
+            if !is_tab_dirty(app, current_tab_index) {
+                advance_viewport_close_confirm(app, orig_active, discarded_doc_ids, ctx);
+            } else if app.tabs.active_index != orig_active && orig_active < app.tabs.tabs.len() {
+                switch_to_tab(app, orig_active, Some(ctx));
+            }
+        }
+    }
+}
+
+/// 未保存変更確認モーダルで「保存せずに破棄」が選択された際の処理を実行する
+pub(crate) fn confirm_pending_close_discard(app: &mut Is2dApp, ctx: &egui::Context) {
+    let Some(pending) = app.tabs.pending_close_confirm.take() else {
+        return;
+    };
+    match pending {
+        PendingCloseConfirm::SingleTab {
+            tab_index,
+            orig_active,
+        } => {
+            close_tab_immediately(app, tab_index, orig_active, Some(ctx));
+        }
+        PendingCloseConfirm::ViewportClose {
+            current_tab_index,
+            orig_active,
+            mut discarded_doc_ids,
+        } => {
+            if let Some(slot) = app.tabs.tabs.get(current_tab_index) {
+                discarded_doc_ids.insert(slot.doc_id);
+            }
+            advance_viewport_close_confirm(app, orig_active, discarded_doc_ids, ctx);
+        }
+    }
+}
+
+/// 未保存変更確認モーダルで「キャンセル」が選択された際の処理を実行する
+pub(crate) fn confirm_pending_close_cancel(app: &mut Is2dApp, ctx: &egui::Context) {
+    let Some(pending) = app.tabs.pending_close_confirm.take() else {
+        return;
+    };
+    let orig_active = match pending {
+        PendingCloseConfirm::SingleTab { orig_active, .. }
+        | PendingCloseConfirm::ViewportClose { orig_active, .. } => orig_active,
+    };
+    if app.tabs.active_index != orig_active && orig_active < app.tabs.tabs.len() {
+        switch_to_tab(app, orig_active, Some(ctx));
     }
 }
 
@@ -436,6 +513,7 @@ pub(crate) fn switch_to_tab(
     if target_index >= app.tabs.tabs.len() || target_index == app.tabs.active_index {
         return false;
     }
+    app.tabs.pending_close_confirm = None;
     pack_active_into_slot(app);
     unpack_slot_into_active(app, target_index);
 
@@ -446,17 +524,37 @@ pub(crate) fn switch_to_tab(
     true
 }
 
-/// 指定したインデックス `close_index` のドキュメントタブを閉じる（最後の1タブを閉じた場合は新規の無題タブ `無題-1` にリセット）
+/// 指定したインデックス `close_index` のドキュメントタブを閉じる（未保存変更があり `ctx` が与えられた場合は非ブロッキング確認モーダルを開く）
 pub(crate) fn close_tab(app: &mut Is2dApp, close_index: usize, ctx: Option<&egui::Context>) {
     if close_index >= app.tabs.tabs.len() {
         return;
     }
     let orig_active = app.tabs.active_index;
     if let Some(c) = ctx {
-        if !confirm_unsaved_tab_before_close(app, close_index, c) {
+        if is_tab_dirty(app, close_index) {
+            if close_index != orig_active {
+                switch_to_tab(app, close_index, Some(c));
+            }
+            app.tabs.pending_close_confirm = Some(PendingCloseConfirm::SingleTab {
+                tab_index: close_index,
+                orig_active,
+            });
             return;
         }
     }
+    close_tab_immediately(app, close_index, orig_active, ctx);
+}
+
+fn close_tab_immediately(
+    app: &mut Is2dApp,
+    close_index: usize,
+    orig_active: usize,
+    ctx: Option<&egui::Context>,
+) {
+    if close_index >= app.tabs.tabs.len() {
+        return;
+    }
+    app.tabs.pending_close_confirm = None;
 
     if app.tabs.tabs.len() <= 1 {
         // 最後の1タブを閉じた場合は連番をリセットし、白紙の「無題-1」へ初期化する
@@ -912,14 +1010,25 @@ impl From<SavedTimeline> for Timeline {
             layers.push(Layer::new_with_id(1, "Layer 1"));
         }
 
-        // 重複する Layer::id があれば一意なIDへ再採番し、各キーフレーム内の図形・インスタンスの layer_id も正規化する
+        // 重複または安全上限（MAX_SAFE_ENTITY_ID）超過の Layer::id があれば一意な安全IDへ再採番し、各キーフレーム内の図形・インスタンスの layer_id も正規化する
         let mut seen_layer_ids = HashSet::with_capacity(layers.len());
-        let mut max_layer_id = layers.iter().map(|l| l.id).max().unwrap_or(1).max(1);
+        let mut max_layer_id = layers
+            .iter()
+            .map(|l| l.id)
+            .filter(|&id| id > 0 && id <= MAX_SAFE_ENTITY_ID)
+            .max()
+            .unwrap_or(0);
         for layer in &mut layers {
-            if !seen_layer_ids.insert(layer.id) {
-                max_layer_id = max_layer_id.saturating_add(1);
-                layer.id = max_layer_id;
-                seen_layer_ids.insert(layer.id);
+            if layer.id == 0 || layer.id > MAX_SAFE_ENTITY_ID || !seen_layer_ids.insert(layer.id) {
+                loop {
+                    max_layer_id = max_layer_id.saturating_add(1).max(1);
+                    if seen_layer_ids.insert(max_layer_id) {
+                        layer.id = max_layer_id;
+                        break;
+                    }
+                }
+            } else {
+                max_layer_id = max_layer_id.max(layer.id);
             }
             let lid = layer.id;
             for kf in &mut layer.keyframes {
@@ -940,6 +1049,11 @@ impl From<SavedTimeline> for Timeline {
             .max(s.total_frames.clamp(1, MAX_TIMELINE_FRAMES));
         let active_layer = s.active_layer.min(layers.len().saturating_sub(1));
         let current_frame = s.current_frame.min(total_frames.saturating_sub(1));
+        let raw_next_layer_id = if s.next_layer_id <= MAX_SAFE_ENTITY_ID {
+            s.next_layer_id
+        } else {
+            2
+        };
         let mut tl = Self {
             layers,
             current_frame,
@@ -947,7 +1061,7 @@ impl From<SavedTimeline> for Timeline {
             total_frames,
             fps: s.fps.clamp(1, 60),
             next_layer_number: s.next_layer_number.max(2),
-            next_layer_id: s.next_layer_id.max(max_layer_id.saturating_add(1)).max(2),
+            next_layer_id: raw_next_layer_id.max(max_layer_id.saturating_add(1)).max(2),
             cell_selection: Some(TimelineCellSelection::single(active_layer, current_frame)),
         };
         tl.sync_total_frames();
@@ -1062,42 +1176,139 @@ impl ProjectDocument {
     pub(crate) fn apply_to_app(self, app: &mut Is2dApp) {
         let mut timeline: Timeline = self.timeline.into();
 
-        // 重複または不正（id == 0）な SymbolDef::id を一意な新しいIDへ再採番してライブラリを構築
+        // 重複または不正（id == 0 / id > MAX_SAFE_ENTITY_ID）な SymbolDef::id を一意な安全IDへ再採番してライブラリを構築
         let mut seen_sym_ids = HashSet::with_capacity(self.library.len());
         let mut next_fallback_sym_id = self
             .library
             .iter()
             .map(|s| s.id)
+            .filter(|&id| id > 0 && id <= MAX_SAFE_ENTITY_ID)
             .max()
             .unwrap_or(0)
             .saturating_add(1)
             .max(1);
+        let mut sym_id_remap: HashMap<u64, u64> = HashMap::new();
         let mut library: Vec<SymbolDef> = Vec::with_capacity(self.library.len());
         for saved_sym in self.library {
             let mut sym = SymbolDef::from(saved_sym);
-            if sym.id == 0 || !seen_sym_ids.insert(sym.id) {
+            let orig_id = sym.id;
+            if sym.id == 0 || sym.id > MAX_SAFE_ENTITY_ID || !seen_sym_ids.insert(sym.id) {
+                while seen_sym_ids.contains(&next_fallback_sym_id) {
+                    next_fallback_sym_id = next_fallback_sym_id.saturating_add(1);
+                }
                 sym.id = next_fallback_sym_id;
                 next_fallback_sym_id = next_fallback_sym_id.saturating_add(1);
                 seen_sym_ids.insert(sym.id);
+                if orig_id > 0 && !seen_sym_ids.contains(&orig_id) {
+                    sym_id_remap.entry(orig_id).or_insert(sym.id);
+                }
             }
             library.push(sym);
         }
 
+        // 安全上限を超える group_id / instance_gid の上限を把握し、必要時に再採番するためのカウンタを準備
+        let mut max_valid_gid = 0_u64;
+        for tl in std::iter::once(&timeline).chain(library.iter().map(|s| &s.timeline)) {
+            for layer in &tl.layers {
+                for kf in &layer.keyframes {
+                    for s in kf.cel.shapes.iter() {
+                        for &gid in &s.group_path {
+                            if gid > 0 && gid <= MAX_SAFE_ENTITY_ID {
+                                max_valid_gid = max_valid_gid.max(gid);
+                            }
+                        }
+                    }
+                    for inst in kf.cel.instances.iter() {
+                        for &gid in &inst.parent_scope {
+                            if gid > 0 && gid <= MAX_SAFE_ENTITY_ID {
+                                max_valid_gid = max_valid_gid.max(gid);
+                            }
+                        }
+                        if inst.binding.instance_gid > 0
+                            && inst.binding.instance_gid <= MAX_SAFE_ENTITY_ID
+                        {
+                            max_valid_gid = max_valid_gid.max(inst.binding.instance_gid);
+                        }
+                    }
+                }
+            }
+        }
+        let mut next_safe_gid = max_valid_gid.saturating_add(1).max(1);
+        let mut unsafe_gid_remap: HashMap<u64, u64> = HashMap::new();
+
         // 存在しない symbol_id（孤児インスタンス）をルートタイムラインおよび各シンボルタイムラインから除去し、
-        // 単一シンボル条件を満たさなくなったキーフレームの tween フラグも正規化する
+        // 再採番された symbol_id / group_id / instance_gid の反映と tween フラグの正規化を行う
         for tl in std::iter::once(&mut timeline).chain(library.iter_mut().map(|s| &mut s.timeline))
         {
             for layer in &mut tl.layers {
                 for kf in &mut layer.keyframes {
-                    if kf
-                        .cel
-                        .instances
-                        .iter()
-                        .any(|inst| !seen_sym_ids.contains(&inst.binding.symbol_id))
-                    {
-                        kf.cel
-                            .instances_mut()
-                            .retain(|inst| seen_sym_ids.contains(&inst.binding.symbol_id));
+                    let has_unsafe_shape_gid = kf.cel.shapes.iter().any(|s| {
+                        s.group_path
+                            .iter()
+                            .any(|&gid| gid == 0 || gid > MAX_SAFE_ENTITY_ID)
+                    });
+                    if has_unsafe_shape_gid {
+                        for s in kf.cel.shapes_mut() {
+                            for gid in &mut s.group_path {
+                                if *gid == 0 || *gid > MAX_SAFE_ENTITY_ID {
+                                    *gid = *unsafe_gid_remap.entry(*gid).or_insert_with(|| {
+                                        let id = next_safe_gid;
+                                        next_safe_gid = next_safe_gid.saturating_add(1);
+                                        id
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    let needs_inst_update = kf.cel.instances.iter().any(|inst| {
+                        sym_id_remap.contains_key(&inst.binding.symbol_id)
+                            || !seen_sym_ids.contains(&inst.binding.symbol_id)
+                            || inst.binding.instance_gid == 0
+                            || inst.binding.instance_gid > MAX_SAFE_ENTITY_ID
+                            || inst
+                                .parent_scope
+                                .iter()
+                                .any(|&gid| gid == 0 || gid > MAX_SAFE_ENTITY_ID)
+                    });
+                    if needs_inst_update {
+                        let mut seen_kf_gids = HashSet::new();
+                        let mut updated_instances = Vec::with_capacity(kf.cel.instances.len());
+                        for mut inst in (*kf.cel.instances).clone() {
+                            if let Some(&mapped_sym_id) = sym_id_remap.get(&inst.binding.symbol_id)
+                            {
+                                inst.binding.symbol_id = mapped_sym_id;
+                            }
+                            if !seen_sym_ids.contains(&inst.binding.symbol_id) {
+                                continue;
+                            }
+                            for gid in &mut inst.parent_scope {
+                                if *gid == 0 || *gid > MAX_SAFE_ENTITY_ID {
+                                    *gid = *unsafe_gid_remap.entry(*gid).or_insert_with(|| {
+                                        let id = next_safe_gid;
+                                        next_safe_gid = next_safe_gid.saturating_add(1);
+                                        id
+                                    });
+                                }
+                            }
+                            if inst.binding.instance_gid == 0
+                                || inst.binding.instance_gid > MAX_SAFE_ENTITY_ID
+                            {
+                                inst.binding.instance_gid = *unsafe_gid_remap
+                                    .entry(inst.binding.instance_gid)
+                                    .or_insert_with(|| {
+                                        let id = next_safe_gid;
+                                        next_safe_gid = next_safe_gid.saturating_add(1);
+                                        id
+                                    });
+                            }
+                            if !seen_kf_gids.insert(inst.binding.instance_gid) {
+                                inst.binding.instance_gid = next_safe_gid;
+                                next_safe_gid = next_safe_gid.saturating_add(1);
+                                seen_kf_gids.insert(inst.binding.instance_gid);
+                            }
+                            updated_instances.push(inst);
+                        }
+                        *kf.cel.instances_mut() = updated_instances;
                     }
                     kf.tween &= kf.cel.single_symbol_instance().is_some();
                 }
@@ -1110,63 +1321,67 @@ impl ProjectDocument {
             max_gid = max_gid.max(max_group_id_in_timeline(&sym.timeline));
         }
 
+        let raw_next_sym_id = if self.next_symbol_id <= MAX_SAFE_ENTITY_ID {
+            self.next_symbol_id
+        } else {
+            1
+        };
+        let raw_next_gid = if self.next_group_id <= MAX_SAFE_ENTITY_ID {
+            self.next_group_id
+        } else {
+            1
+        };
         let selected_library_symbol = library.first().map(|s| s.id);
         let mut symbols = SymbolManager {
             library,
-            next_symbol_id: self.next_symbol_id.max(max_sym_id.saturating_add(1)).max(1),
+            next_symbol_id: raw_next_sym_id.max(max_sym_id.saturating_add(1)).max(1),
             selected_library_symbol,
             actively_renaming_symbol: None,
             edit_stack: Vec::new(),
-            next_group_id: self.next_group_id.max(max_gid.saturating_add(1)).max(1),
+            next_group_id: raw_next_gid.max(max_gid.saturating_add(1)).max(1),
             revision: crate::vector_engine::next_mesh_revision(),
         };
 
-        // 外部改変された JSON にシンボルの自己・相互循環参照が含まれていた場合はサイクル辺を除去して DAG を保証する
-        let mut cycle_edge_cache: HashMap<(u64, u64), bool> = HashMap::new();
-        for sym_idx in 0..symbols.library.len() {
-            let parent_sym_id = symbols.library[sym_idx].id;
-            let num_layers = symbols.library[sym_idx].timeline.layers.len();
-            for l_idx in 0..num_layers {
-                let num_kfs = symbols.library[sym_idx].timeline.layers[l_idx]
-                    .keyframes
-                    .len();
-                for kf_idx in 0..num_kfs {
-                    let has_cycle = symbols.library[sym_idx].timeline.layers[l_idx].keyframes
-                        [kf_idx]
-                        .cel
-                        .instances
-                        .iter()
-                        .any(|inst| {
-                            let child_id = inst.binding.symbol_id;
-                            *cycle_edge_cache
-                                .entry((parent_sym_id, child_id))
-                                .or_insert_with(|| {
-                                    symbols.would_create_symbol_cycle(parent_sym_id, child_id)
-                                })
-                        });
-                    if has_cycle {
-                        let instances: Vec<SymbolInstance> = symbols.library[sym_idx]
-                            .timeline
-                            .layers[l_idx]
-                            .keyframes[kf_idx]
-                            .cel
-                            .instances
-                            .iter()
-                            .filter(|inst| {
-                                let child_id = inst.binding.symbol_id;
-                                !*cycle_edge_cache
-                                    .entry((parent_sym_id, child_id))
-                                    .or_insert_with(|| {
-                                        symbols.would_create_symbol_cycle(parent_sym_id, child_id)
-                                    })
-                            })
-                            .cloned()
-                            .collect();
-                        let kf =
-                            &mut symbols.library[sym_idx].timeline.layers[l_idx].keyframes[kf_idx];
-                        *kf.cel.instances_mut() = instances;
-                        kf.tween &= kf.cel.single_symbol_instance().is_some();
-                        cycle_edge_cache.clear();
+        // 外部改変された JSON にシンボルの自己・相互循環参照が含まれていた場合は、
+        // 3色DFS（0 = 未訪問, 1 = 現在の探索経路上, 2 = 探索完了・DAG保証済み）により O(V + E) の単一パスで後退辺（サイクル辺）を除去する
+        let n_syms = symbols.library.len();
+        if n_syms > 0 {
+            let id_to_idx: HashMap<u64, usize> = symbols
+                .library
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.id, i))
+                .collect();
+            let mut color = vec![0_u8; n_syms];
+            let mut dfs_stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
+            for start_idx in 0..n_syms {
+                if color[start_idx] != 0 {
+                    continue;
+                }
+                color[start_idx] = 1;
+                let children = collect_and_strip_cycle_back_edges(
+                    &mut symbols.library[start_idx],
+                    &id_to_idx,
+                    &color,
+                );
+                dfs_stack.push((start_idx, children, 0));
+                while let Some((u_idx, children, next_i)) = dfs_stack.last_mut() {
+                    if *next_i < children.len() {
+                        let v_idx = children[*next_i];
+                        *next_i += 1;
+                        if color[v_idx] == 0 {
+                            color[v_idx] = 1;
+                            let v_children = collect_and_strip_cycle_back_edges(
+                                &mut symbols.library[v_idx],
+                                &id_to_idx,
+                                &color,
+                            );
+                            dfs_stack.push((v_idx, v_children, 0));
+                        }
+                    } else {
+                        let u = *u_idx;
+                        color[u] = 2;
+                        dfs_stack.pop();
                     }
                 }
             }
@@ -1186,14 +1401,59 @@ impl ProjectDocument {
     }
 }
 
+/// シンボル定義 `sym` 内の全キーフレームを走査し、現在DFSスタック上の祖先（`color[v_idx] == 1`）へ向かう後退辺（サイクル辺）を除去しつつ、
+/// 未訪問（`color[v_idx] == 0`）の子シンボルインデックス一覧を重複なしで返す
+fn collect_and_strip_cycle_back_edges(
+    sym: &mut SymbolDef,
+    id_to_idx: &HashMap<u64, usize>,
+    color: &[u8],
+) -> Vec<usize> {
+    let mut unvisited_children = Vec::new();
+    let mut seen_children = HashSet::new();
+    for layer in &mut sym.timeline.layers {
+        for kf in &mut layer.keyframes {
+            let has_back_edge = kf.cel.instances.iter().any(|inst| {
+                id_to_idx
+                    .get(&inst.binding.symbol_id)
+                    .is_none_or(|&v_idx| color[v_idx] == 1)
+            });
+            if has_back_edge {
+                kf.cel.instances_mut().retain(|inst| {
+                    id_to_idx
+                        .get(&inst.binding.symbol_id)
+                        .is_some_and(|&v_idx| color[v_idx] != 1)
+                });
+                kf.tween &= kf.cel.single_symbol_instance().is_some();
+            }
+            for inst in kf.cel.instances.iter() {
+                if let Some(&v_idx) = id_to_idx.get(&inst.binding.symbol_id) {
+                    if color[v_idx] == 0 && seen_children.insert(v_idx) {
+                        unvisited_children.push(v_idx);
+                    }
+                }
+            }
+        }
+    }
+    unvisited_children
+}
+
 // ============================================================================
 // 2. ファイル読み書きコア関数 & OSファイルダイアログ連携
 // ============================================================================
 
-/// 2つのパスが同一のファイルを指しているか（`canonicalize` または文字列表現の一致）を判定する
+/// 2つのパスが同一のファイルを指しているか（文字列表現の一致・`canonicalize`・Unix ファイルID `dev/ino`）を判定する
 fn paths_refer_to_same_file(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            if ma.dev() == mb.dev() && ma.ino() == mb.ino() {
+                return true;
+            }
+        }
     }
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(ca), Ok(cb)) => ca == cb,

@@ -118,11 +118,22 @@ impl Tool {
         }
     }
 
-    /// 押下されたショートカットキーから対応するツールを返す
+    /// 押下されたショートカットキー（キーリピート除外）から対応するツールを返す
     pub(crate) fn from_shortcut_input(i: &egui::InputState) -> Option<Tool> {
-        Self::ALL
-            .into_iter()
-            .find(|tool| i.key_pressed(tool.shortcut_key()))
+        Self::ALL.into_iter().find(|tool| {
+            let target = tool.shortcut_key();
+            i.events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    } if *key == target
+                )
+            })
+        })
     }
 }
 
@@ -136,10 +147,7 @@ pub(crate) struct MoveSelectionDrag {
 }
 
 impl MoveSelectionDrag {
-    pub(crate) fn new(start_pos: Point, mut undo_snapshot: Vec<FillShape>) -> Self {
-        for s in &mut undo_snapshot {
-            s.strip_transient_caches();
-        }
+    pub(crate) fn new(start_pos: Point, undo_snapshot: Vec<FillShape>) -> Self {
         Self {
             last_pos: start_pos,
             total_delta: KVec2::ZERO,
@@ -229,6 +237,7 @@ pub(crate) enum SelectDragState {
         seg_idx: usize,
         grab_t: f64,
         grab_pos: Point,
+        grab_offset: KVec2,
         last_pos: Point,
         orig_seg: QuadBez,
         undo_snapshot: Vec<FillShape>,
@@ -753,10 +762,12 @@ pub(crate) struct CanvasState {
     pub(crate) editing_group_path: Vec<u64>,
     /// コピー / カットされたシェイプ群（`group_path` はコピー時の編集スコープからの相対パス）
     pub(crate) clipboard: Vec<FillShape>,
-    /// `Cmd+C` / `Cmd+X` 実行後に OS クリップボードへダミー文字列を同期するフラグ（`ViewportCommand::Paste` 発火用）
-    pub(crate) pending_os_clipboard_sync: bool,
+    /// `Cmd+V` 押下時に `Event::Paste` または `Key::V` (pressed) で既にペーストを実行済みかのフラグ（OSクリップボード空時のキーリリースフォールバック二重発火防止用）
+    pub(crate) paste_triggered_on_press: bool,
     /// `Cmd+V` による通常ペーストの連続回数（少しずつずらして配置するためのカウンタ）
     pub(crate) paste_count: usize,
+    /// `Cmd+V` による通常ペーストの累積ワールド座標オフセット（途中でズーム変更しても階段状にずらす用）
+    pub(crate) paste_offset: KVec2,
     pub(crate) transform_pivot: Option<Point>,
     pub(crate) transform_hover: TransformHoverTarget,
 }
@@ -805,32 +816,46 @@ impl CanvasState {
         (is_sel, any_valid)
     }
 
-    /// 矩形スライス前のキャンバス状態があれば取り出し、なければ現在の `self.shapes` をクローンして返す
+    /// 現在の `self.shapes` から、幾何輪郭と色が一致する `target_shapes` へ描画・当たり判定キャッシュを O(1) で引き継ぐ
+    pub(crate) fn salvage_caches_into(&self, target_shapes: &mut [FillShape]) {
+        if self.shapes.is_empty() || target_shapes.is_empty() {
+            return;
+        }
+        for (idx, target) in target_shapes.iter_mut().enumerate() {
+            if let Some(same_pos) = self.shapes.get(idx) {
+                if target.reuse_caches_from(same_pos) {
+                    continue;
+                }
+            }
+            for donor in &self.shapes {
+                if target.reuse_caches_from(donor) {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// 矩形スライス前のキャンバス状態があれば取り出し（既存キャッシュを引き継ぎ）、なければ現在の `self.shapes` をクローンして返す
     #[inline]
     pub(crate) fn take_or_clone_unsliced_snapshot(&mut self) -> Vec<FillShape> {
-        let mut snap = self
-            .unsliced_canvas
-            .take()
-            .unwrap_or_else(|| self.shapes.clone());
-        for s in &mut snap {
-            s.strip_transient_caches();
+        if let Some(mut snap) = self.unsliced_canvas.take() {
+            self.salvage_caches_into(&mut snap);
+            snap
+        } else {
+            self.shapes.clone()
         }
-        snap
     }
 
     /// ドラッグ開始用に現在の `self.shapes` のスナップショットを取得する
-    /// （スナップショット側の一時メッシュキャッシュを除去しておくことで、ドラッグ中の `Arc::make_mut` による頂点配列クローンを回避する）
+    /// （微小ドラッグやキャンセル時に再テッセレーションが起きないよう `Arc<Mesh>` キャッシュを共有保持し、Undoスタック格納時にのみ除去する）
     #[inline]
     pub(crate) fn snapshot_for_drag(&self) -> Vec<FillShape> {
-        let mut snap = self.shapes.clone();
-        for s in &mut snap {
-            s.strip_transient_caches();
-        }
-        snap
+        self.shapes.clone()
     }
 
     /// ドラッグが閾値未満でキャンセルされた際に `snapshot` から `self.shapes` を復元し、署名キャッシュを同期する
-    pub(crate) fn restore_drag_snapshot(&mut self, snapshot: Vec<FillShape>) -> bool {
+    pub(crate) fn restore_drag_snapshot(&mut self, mut snapshot: Vec<FillShape>) -> bool {
+        self.salvage_caches_into(&mut snapshot);
         let len_changed = self.shapes.len() != snapshot.len();
         self.shapes = snapshot;
         self.selected_shapes.retain(|&idx| idx < self.shapes.len());
@@ -1027,8 +1052,9 @@ impl CanvasState {
         self.transform_pivot = None;
     }
 
-    /// タイムラインから読み込んだ図形列で `self.shapes` を置き換える
-    pub(crate) fn replace_loaded_shapes(&mut self, loaded: Vec<FillShape>) {
+    /// タイムラインから読み込んだ図形列で `self.shapes` を置き換える（既存シェイプと輪郭・色が一致するものは描画キャッシュを引き継ぐ）
+    pub(crate) fn replace_loaded_shapes(&mut self, mut loaded: Vec<FillShape>) {
+        self.salvage_caches_into(&mut loaded);
         self.shapes = loaded;
         self.record_loaded_signatures();
         self.reset_selection_state();
@@ -1541,7 +1567,8 @@ pub(crate) fn flush_modified_raw_selection_merge(app: &mut Is2dApp) {
 
 pub(crate) fn clear_selection(app: &mut Is2dApp) {
     rollback_shape_drag(app);
-    if let Some(unsliced) = app.canvas.take_unsliced_snapshot() {
+    if let Some(mut unsliced) = app.canvas.take_unsliced_snapshot() {
+        app.canvas.salvage_caches_into(&mut unsliced);
         let selected_ids = app.canvas.selected_shape_ids();
         app.canvas.shapes = unsliced;
         app.canvas.restore_selection_by_shape_ids(&selected_ids);
@@ -1553,6 +1580,85 @@ pub(crate) fn clear_selection(app: &mut Is2dApp) {
     app.canvas.selected_shapes.clear();
     app.canvas.transform_pivot = None;
     app.ui.inspect_timeline_frame = false;
+}
+
+/// 現在の選択図形のうち `keep_indices` のみを選択に残し、選択から外れた変更済み生シェイプのみをキャンバスへ結合・切り抜き確定する
+/// （選択に残った図形は結合せず `selection_modified = true` のまま維持する）
+pub(crate) fn retain_selection_and_flush_deselected(app: &mut Is2dApp, keep_indices: &[usize]) {
+    let (is_sel, any_valid) = app.canvas.selected_shape_mask();
+    if !any_valid {
+        clear_selection(app);
+        return;
+    }
+    let mut is_keep = vec![false; app.canvas.shapes.len()];
+    let mut any_keep = false;
+    for &idx in keep_indices {
+        if idx < is_keep.len() && is_sel[idx] {
+            is_keep[idx] = true;
+            any_keep = true;
+        }
+    }
+    if !any_keep {
+        clear_selection(app);
+        return;
+    }
+
+    if app.canvas.selection_modified {
+        let keep_ids: Vec<u64> = app
+            .canvas
+            .shapes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, s)| is_keep[idx].then_some(s.shape_id))
+            .collect();
+        let insert_limit = app.canvas.scope_insert_index();
+        let mut base_canvas = Vec::with_capacity(app.canvas.shapes.len());
+        let mut deselected_raw_shapes = Vec::new();
+        let mut kept_shapes = Vec::with_capacity(keep_ids.len());
+        let mut trailing_outside = Vec::new();
+        for (idx, shape) in app.canvas.shapes.drain(..).enumerate() {
+            if is_keep[idx] {
+                kept_shapes.push(shape);
+            } else if is_sel[idx] && shape.is_raw_at_scope(&app.canvas.editing_group_path) {
+                deselected_raw_shapes.push(shape);
+            } else if idx < insert_limit {
+                base_canvas.push(shape);
+            } else {
+                trailing_outside.push(shape);
+            }
+        }
+        let merged_any = !deselected_raw_shapes.is_empty();
+        if merged_any {
+            merge_shapes_into_canvas(&mut base_canvas, deselected_raw_shapes);
+        }
+        base_canvas.extend(kept_shapes);
+        base_canvas.extend(trailing_outside);
+        app.canvas.shapes = base_canvas;
+        app.canvas.sort_shapes_by_layer_order(&app.timeline);
+        app.canvas.restore_selection_by_shape_ids(&keep_ids);
+        if merged_any {
+            sync_shapes_to_timeline(app);
+        }
+        app.canvas.selection_modified = !app.canvas.selected_shapes.is_empty();
+    } else {
+        app.canvas.selected_shapes = (0..is_keep.len()).filter(|&i| is_keep[i]).collect();
+        let any_raw_kept = app.canvas.selected_shapes.iter().any(|&i| {
+            app.canvas
+                .shapes
+                .get(i)
+                .is_some_and(|s| s.is_raw_at_scope(&app.canvas.editing_group_path))
+        });
+        if !any_raw_kept {
+            if let Some(mut unsliced) = app.canvas.take_unsliced_snapshot() {
+                app.canvas.salvage_caches_into(&mut unsliced);
+                let keep_ids = app.canvas.selected_shape_ids();
+                app.canvas.shapes = unsliced;
+                app.canvas.restore_selection_by_shape_ids(&keep_ids);
+            }
+        }
+    }
+    app.canvas.transform_pivot = None;
+    sync_timeline_layer_from_canvas_selection(app);
 }
 
 /// ダブルクリック位置 `pt` にシンボルがあればそのシンボルの独自タイムラインへ入り、グループがあればインプレイス編集モードへ移行する
@@ -1608,41 +1714,23 @@ pub(crate) fn toggle_shape_selection(app: &mut Is2dApp, shape_idx: usize) {
     let unit = app.canvas.expand_to_group_unit(shape_idx);
     let (sel_mask, _) = app.canvas.selected_shape_mask();
     if sel_mask.get(shape_idx).copied().unwrap_or(false) {
-        if app.canvas.selection_modified {
-            let remaining_ids: Vec<u64> = app
-                .canvas
-                .selected_shapes
-                .iter()
-                .copied()
-                .filter(|i| unit.binary_search(i).is_err())
-                .filter_map(|i| app.canvas.shapes.get(i).map(|s| s.shape_id))
-                .collect();
-            if let Some(unsliced) = app.canvas.take_unsliced_snapshot() {
-                let all_sel_ids = app.canvas.selected_shape_ids();
-                app.canvas.shapes = unsliced;
-                app.canvas.restore_selection_by_shape_ids(&all_sel_ids);
-            }
-            flush_modified_raw_selection_merge(app);
-            app.canvas.restore_selection_by_shape_ids(&remaining_ids);
-        } else {
-            app.canvas
-                .selected_shapes
-                .retain(|i| unit.binary_search(i).is_err());
-            if app.canvas.selected_shapes.is_empty() {
-                if let Some(unsliced) = app.canvas.take_unsliced_snapshot() {
-                    app.canvas.shapes = unsliced;
-                }
-            }
-        }
+        let remaining: Vec<usize> = app
+            .canvas
+            .selected_shapes
+            .iter()
+            .copied()
+            .filter(|i| unit.binary_search(i).is_err())
+            .collect();
+        retain_selection_and_flush_deselected(app, &remaining);
     } else {
         for idx in unit {
             if !sel_mask.get(idx).copied().unwrap_or(false) {
                 app.canvas.selected_shapes.push(idx);
             }
         }
+        app.canvas.transform_pivot = None;
+        sync_timeline_layer_from_canvas_selection(app);
     }
-    app.canvas.transform_pivot = None;
-    sync_timeline_layer_from_canvas_selection(app);
 }
 
 /// 既存の選択を確定解除した上で、指定座標 `pt` にある最前面シェイプ（塗り・境界線・頂点、またはグループ塊全体）を選択する
@@ -1935,7 +2023,7 @@ pub(crate) fn insert_and_select_shapes_in_scope(
 }
 
 /// 選択中の生シェイプ群を現在の編集スコープ内の最前面へ並べ替え、レイヤー順に整列させる
-/// （グループ・シンボルのみが選択されている場合は既存の重ね順を維持したままキャッシュを再構築する）
+/// （グループ・シンボルのみが選択されている場合は既存の重ね順とキャッシュを維持する）
 pub(crate) fn reorder_selected_to_scope_front(app: &mut Is2dApp) -> bool {
     let (is_sel, any_valid) = app.canvas.selected_shape_mask();
     if !any_valid {
@@ -1949,11 +2037,6 @@ pub(crate) fn reorder_selected_to_scope_front(app: &mut Is2dApp) -> bool {
         .enumerate()
         .any(|(idx, s)| is_sel[idx] && s.is_raw_at_scope(&scope));
     if !any_raw_selected {
-        for (idx, shape) in app.canvas.shapes.iter_mut().enumerate() {
-            if is_sel[idx] && shape.symbol_instance.is_none() {
-                shape.rebuild_cache();
-            }
-        }
         return true;
     }
 
@@ -1961,11 +2044,8 @@ pub(crate) fn reorder_selected_to_scope_front(app: &mut Is2dApp) -> bool {
     let mut unselected = Vec::with_capacity(app.canvas.shapes.len());
     let mut moved_shapes = Vec::with_capacity(app.canvas.selected_shapes.len());
     let mut trailing_outside = Vec::new();
-    for (idx, mut shape) in app.canvas.shapes.drain(..).enumerate() {
+    for (idx, shape) in app.canvas.shapes.drain(..).enumerate() {
         if is_sel[idx] {
-            if shape.symbol_instance.is_none() {
-                shape.rebuild_cache();
-            }
             moved_shapes.push(shape);
         } else if idx < insert_limit {
             unselected.push(shape);

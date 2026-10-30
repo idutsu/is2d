@@ -534,19 +534,22 @@ impl Is2dApp {
     // ------------------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        let mut file_cmd = None;
-        ctx.input(|i| {
-            let cmd = i.modifiers.command || i.modifiers.ctrl;
-            if cmd && key_pressed_no_repeat(i, Key::N) {
-                file_cmd = Some(0u8);
-            } else if cmd && key_pressed_no_repeat(i, Key::O) {
-                file_cmd = Some(1u8);
-            } else if cmd && key_pressed_no_repeat(i, Key::S) {
-                file_cmd = Some(if i.modifiers.shift { 3u8 } else { 2u8 });
-            } else if cmd && key_pressed_no_repeat(i, Key::W) {
-                file_cmd = Some(4u8);
-            }
-        });
+        if self.tabs.pending_close_confirm.is_some() {
+            return;
+        }
+        let input = ctx.input(|i| i.clone());
+        let cmd = input.modifiers.command || input.modifiers.ctrl;
+        let file_cmd = if cmd && key_pressed_no_repeat(&input, Key::N) {
+            Some(0u8)
+        } else if cmd && key_pressed_no_repeat(&input, Key::O) {
+            Some(1u8)
+        } else if cmd && key_pressed_no_repeat(&input, Key::S) {
+            Some(if input.modifiers.shift { 3u8 } else { 2u8 })
+        } else if cmd && key_pressed_no_repeat(&input, Key::W) {
+            Some(4u8)
+        } else {
+            None
+        };
         if let Some(cmd_id) = file_cmd {
             match cmd_id {
                 0 => project_io::new_project(self, ctx),
@@ -561,25 +564,27 @@ impl Is2dApp {
         if ctx.wants_keyboard_input() {
             return;
         }
-        ctx.input(|i| {
-            let cmd = i.modifiers.command || i.modifiers.ctrl;
-            let copy_event = i.events.iter().any(|ev| matches!(ev, egui::Event::Copy));
-            let cut_event = i.events.iter().any(|ev| matches!(ev, egui::Event::Cut));
-            let paste_event = i
-                .events
-                .iter()
-                .any(|ev| matches!(ev, egui::Event::Paste(_)));
+        let copy_event = input
+            .events
+            .iter()
+            .any(|ev| matches!(ev, egui::Event::Copy));
+        let cut_event = input.events.iter().any(|ev| matches!(ev, egui::Event::Cut));
+        let paste_event = input
+            .events
+            .iter()
+            .any(|ev| matches!(ev, egui::Event::Paste(_)));
 
-            if !cmd && !copy_event && !cut_event && !paste_event {
-                self.handle_single_key_shortcuts(i, i.modifiers.shift);
-            }
+        if !cmd && !copy_event && !cut_event && !paste_event {
+            self.handle_single_key_shortcuts(&input, input.modifiers.shift);
+        }
 
-            if i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace) {
-                tool_select::delete_selected_shapes(self);
-            }
+        if key_pressed_no_repeat(&input, Key::Delete)
+            || key_pressed_no_repeat(&input, Key::Backspace)
+        {
+            tool_select::delete_selected_shapes(self);
+        }
 
-            self.handle_command_shortcuts(i, cmd, copy_event, cut_event, paste_event);
-        });
+        self.handle_command_shortcuts(&input, cmd, copy_event, cut_event, paste_event);
     }
 
     fn handle_single_key_shortcuts(&mut self, i: &egui::InputState, shift: bool) {
@@ -623,24 +628,22 @@ impl Is2dApp {
                     canvas_tool::stop_playback(self);
                     canvas_tool::cancel_active_drag(self);
                     self.canvas.translate_selected(delta);
-                    if canvas_tool::reorder_selected_to_scope_front(self) {
-                        self.canvas.selection_modified = true;
-                        canvas_tool::sync_shapes_to_timeline(self);
-                    }
+                    self.canvas.selection_modified = true;
+                    canvas_tool::sync_shapes_to_timeline(self);
                 }
                 return;
             }
         }
 
-        if i.key_pressed(Key::Enter) {
+        if key_pressed_no_repeat(i, Key::Enter) {
             timeline_ui::toggle_playback(self);
         } else if i.key_pressed(Key::Comma) || i.key_pressed(Key::ArrowLeft) {
             timeline_ui::step_frame(self, -1);
         } else if i.key_pressed(Key::Period) || i.key_pressed(Key::ArrowRight) {
             timeline_ui::step_frame(self, 1);
-        } else if i.key_pressed(Key::Home) {
+        } else if key_pressed_no_repeat(i, Key::Home) {
             timeline_ui::switch_to_layer_and_frame(self, self.timeline.active_layer, 0);
-        } else if i.key_pressed(Key::End) {
+        } else if key_pressed_no_repeat(i, Key::End) {
             let last = self.timeline.total_frames.saturating_sub(1);
             timeline_ui::switch_to_layer_and_frame(self, self.timeline.active_layer, last);
         } else if i.key_pressed(Key::F6) {
@@ -659,13 +662,13 @@ impl Is2dApp {
             } else {
                 timeline_ui::timeline_extend_frame(self);
             }
-        } else if i.key_pressed(Key::O) {
+        } else if key_pressed_no_repeat(i, Key::O) {
             self.timeline_ui.onion_skin_enabled = !self.timeline_ui.onion_skin_enabled;
-        } else if i.key_pressed(Key::T) {
+        } else if key_pressed_no_repeat(i, Key::T) {
             canvas_tool::timeline_toggle_tween(self);
         } else if let Some(tool) = Tool::from_shortcut_input(i) {
             canvas_tool::set_tool(self, tool);
-        } else if i.key_pressed(Key::Escape) {
+        } else if key_pressed_no_repeat(i, Key::Escape) {
             canvas_tool::cancel_active_drag(self);
             if !self.canvas.selected_shapes.is_empty() {
                 canvas_tool::clear_selection(self);
@@ -674,16 +677,28 @@ impl Is2dApp {
             }
             self.ui.select_sub_mode = SelectSubMode::Reshape;
         } else if self.ui.tool == Tool::Select {
-            let plus_pressed = i.key_pressed(Key::Plus)
-                || i.key_pressed(Key::Equals)
-                || i.key_pressed(Key::Semicolon)
-                || i.events.iter().any(|ev| {
-                    matches!(ev, egui::Event::Text(t) if t == "+" || t == "=" || t == ";" || t == "＋")
-                });
-            let minus_pressed = i.key_pressed(Key::Minus)
-                || i.events.iter().any(
-                    |ev| matches!(ev, egui::Event::Text(t) if t == "-" || t == "ー" || t == "－"),
-                );
+            let has_repeat_key = i.events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    egui::Event::Key {
+                        pressed: true,
+                        repeat: true,
+                        ..
+                    }
+                )
+            });
+            let plus_pressed = key_pressed_no_repeat(i, Key::Plus)
+                || key_pressed_no_repeat(i, Key::Equals)
+                || key_pressed_no_repeat(i, Key::Semicolon)
+                || (!has_repeat_key
+                    && i.events.iter().any(|ev| {
+                        matches!(ev, egui::Event::Text(t) if t == "+" || t == "=" || t == ";" || t == "＋")
+                    }));
+            let minus_pressed = key_pressed_no_repeat(i, Key::Minus)
+                || (!has_repeat_key
+                    && i.events.iter().any(
+                        |ev| matches!(ev, egui::Event::Text(t) if t == "-" || t == "ー" || t == "－"),
+                    ));
 
             if plus_pressed {
                 canvas_tool::toggle_select_sub_mode(self, SelectSubMode::AddAnchor);
@@ -701,17 +716,39 @@ impl Is2dApp {
         cut_event: bool,
         paste_event: bool,
     ) {
-        if copy_event || (cmd && !i.modifiers.shift && i.key_pressed(Key::C)) {
+        let v_pressed_no_repeat = cmd && key_pressed_no_repeat(i, Key::V);
+        let v_release_event = i.events.iter().any(|ev| {
+            matches!(
+                ev,
+                egui::Event::Key {
+                    key: Key::V,
+                    pressed: false,
+                    ..
+                }
+            )
+        });
+        let v_released_fallback =
+            cmd && v_release_event && !self.canvas.paste_triggered_on_press;
+        if v_release_event {
+            self.canvas.paste_triggered_on_press = false;
+        }
+
+        if copy_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::C)) {
             tool_select::copy_selected_shapes(self);
-        } else if cut_event || (cmd && !i.modifiers.shift && i.key_pressed(Key::X)) {
+        } else if cut_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::X)) {
             tool_select::cut_selected_shapes(self);
-        } else if paste_event || (cmd && i.key_pressed(Key::V)) {
+        } else if paste_event || v_pressed_no_repeat {
+            self.canvas.paste_triggered_on_press = true;
             tool_select::paste_clipboard(self, i.modifiers.shift);
-        } else if cmd && (i.key_pressed(Key::Num1) || i.key_pressed(Key::Num0)) {
+        } else if v_released_fallback {
+            tool_select::paste_clipboard(self, i.modifiers.shift);
+        } else if cmd
+            && (key_pressed_no_repeat(i, Key::Num1) || key_pressed_no_repeat(i, Key::Num0))
+        {
             self.viewport.reset_view();
-        } else if cmd && i.key_pressed(Key::Num2) {
+        } else if cmd && key_pressed_no_repeat(i, Key::Num2) {
             self.viewport.fit_stage_to_window();
-        } else if cmd && i.key_pressed(Key::Num3) {
+        } else if cmd && key_pressed_no_repeat(i, Key::Num3) {
             self.viewport.clip_outside_stage = !self.viewport.clip_outside_stage;
         } else if cmd
             && (i.key_pressed(Key::Plus)
@@ -993,9 +1030,7 @@ impl Is2dApp {
                 );
             });
 
-        if std::mem::take(&mut self.canvas.pending_os_clipboard_sync) {
-            ctx.copy_text("is2d-shape-clipboard".to_owned());
-        }
+        panels::draw_unsaved_close_confirm_modal(self, ctx);
     }
 }
 

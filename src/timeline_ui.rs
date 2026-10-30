@@ -1927,6 +1927,10 @@ pub(crate) fn timeline_move_or_copy_frames(
     mutate_timeline_with_undo(app, |tl| {
         tl.move_or_copy_frames(sel, dst_sel, actual_dl, copy_mode);
     });
+    app.symbols.next_group_id = app
+        .symbols
+        .next_group_id
+        .max(app.timeline.max_group_id().saturating_add(1));
     select_shapes_for_timeline_selection(app);
     true
 }

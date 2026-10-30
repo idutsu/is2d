@@ -8,8 +8,8 @@ use crate::canvas_tool::{
 };
 pub(crate) use crate::canvas_tool::{
     apply_marquee_selection, clear_selection, commit_moved_selection, compute_hover_target,
-    exit_current_group, finish_move_selection_drag, flush_modified_raw_selection_merge,
-    handle_canvas_double_click, select_single_shape_at, toggle_shape_selection,
+    exit_current_group, finish_move_selection_drag, handle_canvas_double_click,
+    select_single_shape_at, toggle_shape_selection,
 };
 #[cfg(test)]
 pub(crate) use crate::canvas_tool::{
@@ -367,8 +367,8 @@ pub(crate) fn copy_selected_shapes(app: &mut Is2dApp) -> bool {
         s.strip_transient_caches();
     }
     app.canvas.clipboard = extracted;
-    app.canvas.pending_os_clipboard_sync = true;
     app.canvas.paste_count = 0;
+    app.canvas.paste_offset = KVec2::ZERO;
     crate::canvas_tool::capture_clipboard_symbols(app);
     true
 }
@@ -411,10 +411,13 @@ pub(crate) fn paste_clipboard(app: &mut Is2dApp, in_place: bool) -> bool {
         let offset = if in_place {
             KVec2::ZERO
         } else {
+            if app.canvas.paste_count == 0 {
+                app.canvas.paste_offset = KVec2::ZERO;
+            }
             app.canvas.paste_count += 1;
-            const PASTE_WORLD_STEP: f64 = 16.0;
-            let k = app.canvas.paste_count as f64;
-            KVec2::new(PASTE_WORLD_STEP * k, PASTE_WORLD_STEP * k)
+            let step = 16.0 / (app.viewport.zoom as f64);
+            app.canvas.paste_offset += KVec2::new(step, step);
+            app.canvas.paste_offset
         };
 
         let same_timeline_context = app.tabs.clipboard_source_doc_id == app.tabs.active_doc_id()
@@ -657,7 +660,7 @@ fn handle_anchor_edit_input(
         .unwrap_or(HoverTarget::None);
 }
 
-fn start_reshape_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held: bool) {
+pub(crate) fn start_reshape_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held: bool) {
     app.ui.inspect_timeline_frame = false;
     if shift_held {
         app.canvas.drag =
@@ -732,14 +735,19 @@ fn start_reshape_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held: 
                 .canvas
                 .get_contour_segment(shape_idx, contour_idx, seg_idx)
             {
+                let grab_t = t.clamp(0.18, 0.82);
+                let grab_pos = orig_seg.eval(grab_t);
+                // 実カーソル位置 pt と曲線上の最近接点 closest_pos の差、および丸め前 t と grab_t の位置差を合わせた初期オフセット
+                let grab_offset = (closest_pos - pt) + (grab_pos - closest_pos);
                 app.canvas.selected_shapes.clear();
                 app.canvas.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
                     shape_idx,
                     contour_idx,
                     seg_idx,
-                    grab_t: t.clamp(0.18, 0.82),
-                    grab_pos: closest_pos,
-                    last_pos: closest_pos,
+                    grab_t,
+                    grab_pos,
+                    grab_offset,
+                    last_pos: grab_pos,
                     orig_seg,
                     undo_snapshot: snapshot,
                 });
@@ -760,7 +768,7 @@ fn start_reshape_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held: 
     }
 }
 
-fn update_reshape_drag(app: &mut Is2dApp, pt: Point) {
+pub(crate) fn update_reshape_drag(app: &mut Is2dApp, pt: Point) {
     let vertex_drag_info = if let ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
         shape_idx,
         contour_idx,
@@ -816,13 +824,21 @@ fn update_reshape_drag(app: &mut Is2dApp, pt: Point) {
                 contour_idx,
                 seg_idx,
                 grab_t,
+                grab_offset,
                 last_pos,
                 orig_seg,
                 ..
             } => {
-                *last_pos = pt;
+                let target_pt = pt + *grab_offset;
+                *last_pos = target_pt;
                 if let Some(shape) = app.canvas.shapes.get_mut(*shape_idx) {
-                    set_pulled_edge(shape, (*contour_idx, *seg_idx), *grab_t, *orig_seg, pt);
+                    set_pulled_edge(
+                        shape,
+                        (*contour_idx, *seg_idx),
+                        *grab_t,
+                        *orig_seg,
+                        target_pt,
+                    );
                     shape.rebuild_cache();
                 }
             }
@@ -864,6 +880,7 @@ fn finish_reshape_drag(app: &mut Is2dApp, mouse_pt: Option<Point>) {
             last_pos,
             orig_seg,
             undo_snapshot,
+            ..
         } => {
             finish_deform_shape_drag(
                 app,
@@ -927,23 +944,7 @@ fn handle_reshape_click(app: &mut Is2dApp, pt: Point, shift_held: bool) {
         match hit_shape {
             Some(shape_idx) if app.canvas.selected_shapes.contains(&shape_idx) => {
                 let unit = app.canvas.expand_to_group_unit(shape_idx);
-                if app.canvas.selection_modified && app.canvas.selected_shapes != unit {
-                    let unit_ids: Vec<u64> = unit
-                        .iter()
-                        .filter_map(|&i| app.canvas.shapes.get(i).map(|s| s.shape_id))
-                        .collect();
-                    if let Some(unsliced) = app.canvas.take_unsliced_snapshot() {
-                        let all_sel_ids = app.canvas.selected_shape_ids();
-                        app.canvas.shapes = unsliced;
-                        app.canvas.restore_selection_by_shape_ids(&all_sel_ids);
-                    }
-                    flush_modified_raw_selection_merge(app);
-                    app.canvas.restore_selection_by_shape_ids(&unit_ids);
-                } else {
-                    app.canvas.selected_shapes = unit;
-                }
-                app.canvas.transform_pivot = None;
-                crate::canvas_tool::sync_timeline_layer_from_canvas_selection(app);
+                crate::canvas_tool::retain_selection_and_flush_deselected(app, &unit);
             }
             Some(_) => {
                 select_single_shape_at(app, pt);

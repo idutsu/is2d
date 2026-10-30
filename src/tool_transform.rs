@@ -41,7 +41,15 @@ pub(crate) fn set_selected_symbol_world_pivot(
     if (new_local_pivot - binding.pivot).hypot() <= 1e-7 {
         return true;
     }
-    let undo_snapshot = commit_to_timeline.then(|| app.canvas.shapes.clone());
+    if !app.canvas.selection_modified {
+        if let Some(mut unsliced) = app.canvas.take_unsliced_snapshot() {
+            app.canvas.salvage_caches_into(&mut unsliced);
+            app.canvas.shapes = unsliced;
+            app.canvas.select_symbol_instance_by_gid(binding.instance_gid);
+        }
+    }
+    let undo_snapshot =
+        commit_to_timeline.then(|| app.canvas.take_or_clone_unsliced_snapshot());
     app.canvas
         .update_symbol_instance_binding(binding.instance_gid, |b| b.pivot = new_local_pivot);
     if let Some(snapshot) = undo_snapshot {
@@ -73,7 +81,7 @@ pub(crate) fn apply_affine_to_selected(app: &mut Is2dApp, affine: Affine) -> boo
     if app.canvas.selected_shapes.is_empty() {
         return false;
     }
-    let undo_snapshot = app.canvas.shapes.clone();
+    let undo_snapshot = app.canvas.take_or_clone_unsliced_snapshot();
     flush_transform_pivot_to_symbol(app);
     let any_transformed = app.canvas.transform_selected(affine);
     if any_transformed {
@@ -163,7 +171,7 @@ pub(crate) fn handle_transform_tool_input(
     }
 }
 
-fn start_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held: bool) {
+pub(crate) fn start_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held: bool) {
     app.ui.inspect_timeline_frame = false;
     let zoom = app.viewport.zoom;
     let hover = compute_transform_hover(&app.canvas, pt, zoom);
@@ -176,6 +184,15 @@ fn start_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held
 
     match hover {
         TransformHoverTarget::Pivot => {
+            if let Some(binding) = app.canvas.selected_single_symbol_binding() {
+                if !app.canvas.selection_modified {
+                    if let Some(mut unsliced) = app.canvas.take_unsliced_snapshot() {
+                        app.canvas.salvage_caches_into(&mut unsliced);
+                        app.canvas.shapes = unsliced;
+                        app.canvas.select_symbol_instance_by_gid(binding.instance_gid);
+                    }
+                }
+            }
             if let Some(bbox) = app.canvas.selection_bounding_box(zoom) {
                 let orig_pivot = app.canvas.active_transform_pivot(bbox);
                 app.canvas.drag = ActiveCanvasDrag::Transform(TransformDragState::MovePivot {
@@ -249,7 +266,12 @@ fn start_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held
     }
 }
 
-fn update_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held: bool) {
+pub(crate) fn update_transform_drag(
+    app: &mut Is2dApp,
+    pt: Point,
+    shift_held: bool,
+    alt_held: bool,
+) {
     let mut move_delta: Option<KVec2> = None;
     let mut new_pivot_pt: Option<Point> = None;
     let mut scale_update: Option<(Affine, Point, bool)> = None;
@@ -361,7 +383,7 @@ fn update_transform_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_hel
     }
 }
 
-fn finish_transform_drag(app: &mut Is2dApp, mouse_pt: Option<Point>) {
+pub(crate) fn finish_transform_drag(app: &mut Is2dApp, mouse_pt: Option<Point>) {
     let ActiveCanvasDrag::Transform(finished) =
         std::mem::replace(&mut app.canvas.drag, ActiveCanvasDrag::None)
     else {
@@ -415,7 +437,11 @@ fn finish_transform_drag(app: &mut Is2dApp, mouse_pt: Option<Point>) {
         } => {
             if changed {
                 if selected_single_symbol_info(app).is_some() {
-                    app.commit_canvas_mutation(undo_snapshot);
+                    let snapshot = app
+                        .canvas
+                        .take_unsliced_snapshot()
+                        .unwrap_or(undo_snapshot);
+                    app.commit_canvas_mutation(snapshot);
                 }
             } else {
                 app.canvas.restore_drag_snapshot(undo_snapshot);
@@ -441,23 +467,7 @@ fn handle_transform_click(app: &mut Is2dApp, pt: Point, shift_held: bool) {
                 crate::canvas_tool::select_single_shape_at(app, pt);
             } else {
                 let unit = app.canvas.expand_to_group_unit(hit_idx);
-                if app.canvas.selection_modified && app.canvas.selected_shapes != unit {
-                    let unit_ids: Vec<u64> = unit
-                        .iter()
-                        .filter_map(|&i| app.canvas.shapes.get(i).map(|s| s.shape_id))
-                        .collect();
-                    if let Some(unsliced) = app.canvas.take_unsliced_snapshot() {
-                        let all_sel_ids = app.canvas.selected_shape_ids();
-                        app.canvas.shapes = unsliced;
-                        app.canvas.restore_selection_by_shape_ids(&all_sel_ids);
-                    }
-                    crate::canvas_tool::flush_modified_raw_selection_merge(app);
-                    app.canvas.restore_selection_by_shape_ids(&unit_ids);
-                } else {
-                    app.canvas.selected_shapes = unit;
-                }
-                app.canvas.transform_pivot = None;
-                crate::canvas_tool::sync_timeline_layer_from_canvas_selection(app);
+                crate::canvas_tool::retain_selection_and_flush_deselected(app, &unit);
             }
         } else {
             crate::canvas_tool::clear_selection(app);
@@ -491,9 +501,21 @@ pub(crate) fn compute_transform_hover(
         return TransformHoverTarget::Scale(h);
     }
 
-    let outer_rotate_rect = bbox.inflate(24.0 * inv_z, 24.0 * inv_z);
+    let corner_rotate_radius = 24.0 * inv_z;
+    let outer_rotate_rect = bbox.inflate(corner_rotate_radius, corner_rotate_radius);
     let inner_move_rect = bbox.inflate(-2.0 * inv_z, -2.0 * inv_z);
-    if outer_rotate_rect.contains(mouse_pt) && !inner_move_rect.contains(mouse_pt) {
+    let corners = [
+        ScaleHandle::TopLeft.position(bbox),
+        ScaleHandle::TopRight.position(bbox),
+        ScaleHandle::BottomRight.position(bbox),
+        ScaleHandle::BottomLeft.position(bbox),
+    ];
+    if outer_rotate_rect.contains(mouse_pt)
+        && !inner_move_rect.contains(mouse_pt)
+        && corners
+            .iter()
+            .any(|&c| (mouse_pt - c).hypot() <= corner_rotate_radius)
+    {
         return TransformHoverTarget::Rotate;
     }
 

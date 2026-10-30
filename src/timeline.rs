@@ -4,13 +4,13 @@ use crate::{
         SymbolDef, SymbolEvalCtx, SymbolInstance, TweenRotate, TweenState, MAX_SYMBOL_NEST_DEPTH,
     },
     vector_engine::{
-        append_mesh, transform_mesh_to_screen, transform_mesh_to_screen_onion, FillShape,
-        OnionMeshCacheEntry, ScreenMeshCacheEntry, SymbolInstanceBinding, SymbolLoopMode,
-        SyncCache,
+        append_mesh, next_shape_id, transform_mesh_to_screen, transform_mesh_to_screen_onion,
+        FillShape, OnionMeshCacheEntry, ScreenMeshCacheEntry, SymbolInstanceBinding,
+        SymbolLoopMode, SyncCache,
     },
 };
 use eframe::egui::{Color32, Mesh, Vec2};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 /// タイムラインおよびシンボル内タイムラインの最大許容フレーム数（破損JSONによる巨大ループ防止）
 pub(crate) const MAX_TIMELINE_FRAMES: usize = 100_000;
@@ -568,6 +568,60 @@ impl Keyframe {
     }
 }
 
+fn max_group_id_in_keyframes(kfs: &[Keyframe]) -> u64 {
+    let mut max_gid = 0_u64;
+    for kf in kfs {
+        for s in kf.cel.shapes.iter() {
+            for &gid in &s.group_path {
+                max_gid = max_gid.max(gid);
+            }
+            if let Some(b) = s.symbol_instance {
+                max_gid = max_gid.max(b.instance_gid);
+            }
+        }
+        for inst in kf.cel.instances.iter() {
+            for &gid in &inst.parent_scope {
+                max_gid = max_gid.max(gid);
+            }
+            max_gid = max_gid.max(inst.binding.instance_gid);
+        }
+    }
+    max_gid
+}
+
+fn remap_keyframes_group_and_instance_ids(kfs: &mut [Keyframe], next_gid: &mut u64) {
+    let mut gid_map: HashMap<u64, u64> = HashMap::new();
+    let mut alloc_gid = |old_id: u64, map: &mut HashMap<u64, u64>| -> u64 {
+        *map.entry(old_id).or_insert_with(|| {
+            let id = (*next_gid).max(1);
+            *next_gid = id.saturating_add(1);
+            id
+        })
+    };
+    for kf in kfs {
+        if !kf.cel.shapes.is_empty() {
+            for shape in kf.cel.shapes_mut() {
+                shape.shape_id = next_shape_id();
+                for gid in &mut shape.group_path {
+                    *gid = alloc_gid(*gid, &mut gid_map);
+                }
+                if let Some(mut b) = shape.symbol_instance {
+                    b.instance_gid = alloc_gid(b.instance_gid, &mut gid_map);
+                    shape.symbol_instance = Some(b);
+                }
+            }
+        }
+        if !kf.cel.instances.is_empty() {
+            for inst in kf.cel.instances_mut() {
+                for gid in &mut inst.parent_scope {
+                    *gid = alloc_gid(*gid, &mut gid_map);
+                }
+                inst.binding.instance_gid = alloc_gid(inst.binding.instance_gid, &mut gid_map);
+            }
+        }
+    }
+}
+
 /// タイムライン上で選択されているセル矩形範囲（複数レイヤー × 複数フレーム対応）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TimelineCellSelection {
@@ -834,7 +888,93 @@ impl Layer {
         }
     }
 
+    /// 指定フレーム `frame` における評価済みセル姿勢（クラシックトゥイーン中割り姿勢および経過フレーム分の内部 `first_frame` 進行を含む）を、
+    /// 指定された `start_frame` を持つ新しい `Keyframe` として構築して返す
+    pub(crate) fn snapshot_keyframe_at(&self, frame: usize, start_frame: usize) -> Keyframe {
+        if frame >= self.frame_count {
+            return Keyframe::new_blank(start_frame);
+        }
+        let Some(kf_idx) = self.keyframe_index_at(frame) else {
+            return Keyframe::new_blank(start_frame);
+        };
+        let kf = &self.keyframes[kf_idx];
+        if kf.start_frame == frame {
+            return Keyframe {
+                start_frame,
+                cel: kf.cel.clone(),
+                tween: kf.tween,
+                tween_rotate: kf.tween_rotate,
+            };
+        }
+
+        let lid = self.id;
+        let elapsed = frame.saturating_sub(kf.start_frame);
+        let split_tween_binding = self.interpolated_tween_binding_at(frame);
+        let cloned_shapes: Vec<FillShape> = kf
+            .cel
+            .shapes
+            .iter()
+            .cloned()
+            .map(|mut s| {
+                s.layer_id = lid;
+                if let Some((start_b, mut interp_b)) = split_tween_binding {
+                    if interp_b.loop_mode != SymbolLoopMode::SingleFrame {
+                        interp_b.first_frame = interp_b.first_frame.saturating_add(elapsed);
+                    }
+                    if start_b.xform.determinant().abs() > 1e-9 {
+                        let delta = interp_b.xform * start_b.xform.inverse();
+                        s.transform(delta);
+                        s.symbol_instance = Some(interp_b);
+                    }
+                } else if let Some(mut b) = s.symbol_instance {
+                    if b.loop_mode != SymbolLoopMode::SingleFrame {
+                        b.first_frame = b.first_frame.saturating_add(elapsed);
+                        s.symbol_instance = Some(b);
+                    }
+                }
+                s
+            })
+            .collect();
+        let cloned_instances: Vec<SymbolInstance> = kf
+            .cel
+            .instances
+            .iter()
+            .cloned()
+            .map(|mut inst| {
+                inst.layer_id = lid;
+                if let Some((start_b, interp_b)) = split_tween_binding {
+                    if inst.binding.instance_gid == start_b.instance_gid {
+                        inst.binding = interp_b;
+                    }
+                }
+                if inst.binding.loop_mode != SymbolLoopMode::SingleFrame {
+                    inst.binding.first_frame = inst.binding.first_frame.saturating_add(elapsed);
+                }
+                inst
+            })
+            .collect();
+        let cel = Cel::new_with_instances(cloned_shapes, cloned_instances);
+        let valid_tween = kf.tween && cel.single_symbol_instance().is_some();
+        let tween_rotate = if valid_tween {
+            kf.tween_rotate
+        } else {
+            TweenRotate::Auto
+        };
+        Keyframe {
+            start_frame,
+            cel,
+            tween: valid_tween,
+            tween_rotate,
+        }
+    }
+
+    /// このレイヤー内の全キーフレームに含まれる最大のグループID / `instance_gid` を返す
+    pub(crate) fn max_group_id(&self) -> u64 {
+        max_group_id_in_keyframes(&self.keyframes)
+    }
+
     /// 指定フレーム区間 `[min_frame..=max_frame]` 内のキーフレーム群を相対フレーム位置（`0..=max_frame - min_frame`）で抽出する
+    /// （`min_frame` がキーフレーム途中やトゥイーン中割りフレームにある場合は、そのフレームの評価済み中割り姿勢を引き継ぐ）
     pub(crate) fn extract_keyframes_in_range(
         &self,
         min_frame: usize,
@@ -853,20 +993,7 @@ impl Layer {
             .collect();
 
         if !kfs.iter().any(|kf| kf.start_frame == 0) {
-            let fallback_cel = self.cel_at(min_frame).cloned().unwrap_or_default();
-            let (fallback_tween, fallback_rotate) = self
-                .keyframe_index_at(min_frame)
-                .map(|idx| (self.keyframes[idx].tween, self.keyframes[idx].tween_rotate))
-                .unwrap_or((false, TweenRotate::Auto));
-            kfs.insert(
-                0,
-                Keyframe {
-                    start_frame: 0,
-                    cel: fallback_cel,
-                    tween: fallback_tween,
-                    tween_rotate: fallback_rotate,
-                },
-            );
+            kfs.insert(0, self.snapshot_keyframe_at(min_frame, 0));
         }
         kfs
     }
@@ -880,19 +1007,47 @@ impl Layer {
         }
     }
 
-    /// 抽出された相対キーフレーム群 `kfs` を `[dst_min_frame..=dst_max_frame]` に配置する（移動先範囲の既存キーフレームは上書き置換し、尺を超える場合は自動延長）
+    /// 抽出された相対キーフレーム群 `kfs` を `[dst_min_frame..=dst_max_frame]` に配置する
+    /// （移動先範囲直後のフレーム姿勢を保持する境界キーフレームを自動挿入し、別レイヤーからの配置時はグループID・`instance_gid` を再採番する）
     pub(crate) fn place_keyframes_at(
         &mut self,
         dst_min_frame: usize,
         dst_max_frame: usize,
-        kfs: Vec<Keyframe>,
+        mut kfs: Vec<Keyframe>,
     ) {
         let dst_lid = self.id;
+        let is_cross_layer = kfs.iter().any(|kf| {
+            kf.cel.shapes.iter().any(|s| s.layer_id != dst_lid)
+                || kf.cel.instances.iter().any(|i| i.layer_id != dst_lid)
+        });
+        if is_cross_layer {
+            let mut next_gid = self
+                .max_group_id()
+                .max(max_group_id_in_keyframes(&kfs))
+                .saturating_add(1)
+                .max(1);
+            remap_keyframes_group_and_instance_ids(&mut kfs, &mut next_gid);
+        }
+
+        let after_frame = dst_max_frame + 1;
+        let post_range_kf = (after_frame < self.frame_count
+            && !self
+                .keyframes
+                .iter()
+                .any(|kf| kf.start_frame == after_frame))
+        .then(|| self.snapshot_keyframe_at(after_frame, after_frame));
+
         if dst_max_frame >= self.frame_count {
             self.frame_count = dst_max_frame + 1;
         }
         self.keyframes
             .retain(|kf| kf.start_frame < dst_min_frame || kf.start_frame > dst_max_frame);
+        if let Some(after_kf) = post_range_kf {
+            let pos = self
+                .keyframes
+                .partition_point(|existing_kf| existing_kf.start_frame < after_frame);
+            self.keyframes.insert(pos, after_kf);
+        }
         for mut kf in kfs {
             if kf.cel.shapes.iter().any(|s| s.layer_id != dst_lid) {
                 for shape in kf.cel.shapes_mut() {
@@ -1615,6 +1770,15 @@ impl Timeline {
         ))
     }
 
+    /// タイムライン内の全レイヤー・全キーフレームに含まれる最大のグループID / `instance_gid` を返す
+    pub(crate) fn max_group_id(&self) -> u64 {
+        self.layers
+            .iter()
+            .map(Layer::max_group_id)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// 検証済みの移動先 `dst_sel` へ選択範囲 `sel` のキーフレーム群を移動または複製する
     pub(crate) fn move_or_copy_frames(
         &mut self,
@@ -1623,13 +1787,30 @@ impl Timeline {
         actual_dl: isize,
         copy_mode: bool,
     ) {
+        let mut next_gid = self.max_group_id().saturating_add(1).max(1);
         let extracted: Vec<(usize, Vec<Keyframe>)> = (sel.min_layer..=sel.max_layer)
             .filter_map(|src_l| {
                 let dst_l = (src_l as isize + actual_dl) as usize;
-                let kfs = self
+                let dst_lid = self.layers.get(dst_l)?.id;
+                let mut kfs = self
                     .layers
                     .get(src_l)?
                     .extract_keyframes_in_range(sel.min_frame, sel.max_frame);
+                if copy_mode || actual_dl != 0 {
+                    remap_keyframes_group_and_instance_ids(&mut kfs, &mut next_gid);
+                    for kf in &mut kfs {
+                        if kf.cel.shapes.iter().any(|s| s.layer_id != dst_lid) {
+                            for shape in kf.cel.shapes_mut() {
+                                shape.layer_id = dst_lid;
+                            }
+                        }
+                        if kf.cel.instances.iter().any(|i| i.layer_id != dst_lid) {
+                            for inst in kf.cel.instances_mut() {
+                                inst.layer_id = dst_lid;
+                            }
+                        }
+                    }
+                }
                 Some((dst_l, kfs))
             })
             .collect();
@@ -1658,8 +1839,11 @@ impl Timeline {
     pub(crate) fn add_layer_above_active(&mut self) {
         let name = format!("Layer {}", self.next_layer_number);
         self.next_layer_number = self.next_layer_number.saturating_add(1);
-        let lid = self.next_layer_id;
-        self.next_layer_id = self.next_layer_id.saturating_add(1);
+        let mut lid = self.next_layer_id.max(1);
+        while self.layers.iter().any(|l| l.id == lid) {
+            lid = if lid < u64::MAX { lid + 1 } else { 1 };
+        }
+        self.next_layer_id = lid.saturating_add(1);
         let insert_idx = (self.active_layer + 1).min(self.layers.len());
         let fc = self.total_frames.max(1);
         self.layers

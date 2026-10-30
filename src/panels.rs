@@ -1826,3 +1826,75 @@ fn draw_active_marquee_box(app: &Is2dApp, painter: &egui::Painter) {
         );
     }
 }
+
+/// 未保存変更があるタブを閉じる際の非ブロッキング確認モーダルダイアログ（egui Window）を描画する
+pub(crate) fn draw_unsaved_close_confirm_modal(app: &mut Is2dApp, ctx: &egui::Context) {
+    let Some(pending) = app.tabs.pending_close_confirm.clone() else {
+        return;
+    };
+    let tab_index = match &pending {
+        crate::project_io::PendingCloseConfirm::SingleTab { tab_index, .. } => *tab_index,
+        crate::project_io::PendingCloseConfirm::ViewportClose {
+            current_tab_index, ..
+        } => *current_tab_index,
+    };
+    let tab_name = app
+        .tabs
+        .tabs
+        .get(tab_index)
+        .map(|slot| {
+            slot.display_title(
+                app.ui.current_file_path.as_deref(),
+                false,
+                tab_index == app.tabs.active_index,
+            )
+        })
+        .unwrap_or_else(|| "無題".to_owned());
+
+    egui::Area::new(egui::Id::new("unsaved_close_confirm_backdrop"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(Pos2::ZERO)
+        .show(ctx, |ui| {
+            let screen_rect = ctx.screen_rect();
+            ui.allocate_rect(screen_rect, egui::Sense::click_and_drag());
+            ui.painter().rect_filled(
+                screen_rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(15, 20, 28, 96),
+            );
+        });
+
+    let mut action: Option<u8> = None;
+    egui::Window::new("未保存の変更の確認")
+        .id(egui::Id::new("unsaved_close_confirm_modal"))
+        .order(egui::Order::Tooltip)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.set_min_width(320.0);
+            ui.add_space(4.0);
+            ui.label(format!(
+                "「{tab_name}」には未保存の変更があります。\n閉じる前に変更を保存しますか？"
+            ));
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui.button("保存して閉じる").clicked() {
+                    action = Some(1);
+                }
+                if ui.button("保存せずに破棄").clicked() {
+                    action = Some(2);
+                }
+                if ui.button("キャンセル").clicked() {
+                    action = Some(3);
+                }
+            });
+        });
+
+    match action {
+        Some(1) => crate::project_io::confirm_pending_close_save(app, ctx),
+        Some(2) => crate::project_io::confirm_pending_close_discard(app, ctx),
+        Some(3) => crate::project_io::confirm_pending_close_cancel(app, ctx),
+        _ => {}
+    }
+}

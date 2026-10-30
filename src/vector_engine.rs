@@ -425,6 +425,38 @@ impl FillShape {
         self.selection_screen_mesh = None;
     }
 
+    /// 輪郭データと色が同一である既存シェイプ `donor` から描画・当たり判定キャッシュを O(1) で引き継ぐ
+    pub(crate) fn reuse_caches_from(&mut self, donor: &FillShape) -> bool {
+        if self.color != donor.color
+            || (self.mesh_revision != donor.mesh_revision
+                && !self.has_same_contour_arcs(&donor.exterior, &donor.holes))
+        {
+            return false;
+        }
+        if self.fill_mesh.get().is_none() {
+            if let Some(m) = donor.fill_mesh.get() {
+                let _ = self.fill_mesh.set(Arc::clone(m));
+            }
+        }
+        if self.hit_bez_path.get().is_none() {
+            if let Some(p) = donor.hit_bez_path.get() {
+                let _ = self.hit_bez_path.set(Arc::clone(p));
+            }
+        }
+        if self.screen_mesh_cache.lock().is_none() {
+            if let Some(sc) = &*donor.screen_mesh_cache.lock() {
+                *self.screen_mesh_cache.lock() = Some(sc.clone());
+            }
+        }
+        if self.selection_mesh.is_none() {
+            self.selection_mesh = donor.selection_mesh.clone();
+        }
+        if self.selection_screen_mesh.is_none() {
+            self.selection_screen_mesh = donor.selection_screen_mesh.clone();
+        }
+        true
+    }
+
     #[cfg(test)]
     pub(crate) fn has_cached_fill_mesh(&self) -> bool {
         self.fill_mesh.get().is_some()
