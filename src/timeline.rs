@@ -6,7 +6,7 @@ use crate::{
     vector_engine::{
         append_mesh, interpolate_affine_with_pivot, transform_mesh_to_screen,
         transform_mesh_to_screen_onion, FillShape, OnionMeshCacheEntry, ScreenMeshCacheEntry,
-        SymbolInstanceBinding, SyncCache,
+        SymbolInstanceBinding, SymbolLoopMode, SyncCache,
     },
 };
 use eframe::egui::{Color32, Mesh, Vec2};
@@ -16,7 +16,7 @@ use std::sync::Arc;
 // 1. タイムラインのデータモデル（Cel / Keyframe / Selection / Layer / Timeline）
 // ============================================================================
 
-const MAX_RESOLVED_CEL_CACHE_ENTRIES: usize = 64;
+const MAX_RESOLVED_CEL_CACHE_ENTRIES: usize = 256;
 type ResolvedScreenCacheKey = (usize, u32, u32, u32, bool);
 type ResolvedOnionCacheKey = (usize, u32, u32, u32, [u8; 3], u8);
 type LruEntry<K, V> = (K, V, u64);
@@ -353,7 +353,7 @@ impl Cel {
         self.cached_resolved_screen_mesh((sig_query, parent_frame), zoom, pan, true, || {
             let shapes = crate::symbol::resolve_cel_with_library(
                 self,
-                0,
+                parent_frame,
                 parent_frame,
                 SymbolEvalCtx::new(library),
             );
@@ -450,6 +450,7 @@ impl Cel {
         symbol_id: u64,
         kf_start_frame: usize,
         library: &[SymbolDef],
+        next_group_id: &mut u64,
     ) {
         if !self
             .instances
@@ -477,12 +478,29 @@ impl Cel {
                         kf_start_frame,
                         ctx.nested(),
                     );
+                    let mut inner_gid_map: Vec<(u64, u64)> = Vec::new();
+                    let inner_start = inst.parent_scope.len() + 1;
                     for mut s in inst.binding.instantiate_shapes(
                         &local_shapes,
                         inst.layer_id,
                         &inst.parent_scope,
                     ) {
                         s.symbol_instance = None;
+                        if s.group_path.len() > inner_start {
+                            for gid in &mut s.group_path[inner_start..] {
+                                let mapped = if let Some(&(_, m)) =
+                                    inner_gid_map.iter().find(|&&(old, _)| old == *gid)
+                                {
+                                    m
+                                } else {
+                                    let id = *next_group_id;
+                                    *next_group_id = next_group_id.saturating_add(1);
+                                    inner_gid_map.push((*gid, id));
+                                    id
+                                };
+                                *gid = mapped;
+                            }
+                        }
                         out_shapes.push(s);
                     }
                 }
@@ -648,6 +666,11 @@ impl Layer {
         }
 
         let lid = self.id;
+        let prev_kf_start = self
+            .keyframe_index_at(frame)
+            .map(|i| self.keyframes[i].start_frame)
+            .unwrap_or(frame);
+        let elapsed = frame.saturating_sub(prev_kf_start);
         let split_tween_binding = if clone_prev {
             self.interpolated_tween_binding_at(frame)
         } else {
@@ -663,11 +686,20 @@ impl Layer {
                         .cloned()
                         .map(|mut s| {
                             s.layer_id = lid;
-                            if let Some((start_b, interp_b)) = split_tween_binding {
+                            if let Some((start_b, mut interp_b)) = split_tween_binding {
+                                if interp_b.loop_mode != SymbolLoopMode::SingleFrame {
+                                    interp_b.first_frame =
+                                        interp_b.first_frame.saturating_add(elapsed);
+                                }
                                 if start_b.xform.determinant().abs() > 1e-9 {
                                     let delta = interp_b.xform * start_b.xform.inverse();
                                     s.transform(delta);
                                     s.symbol_instance = Some(interp_b);
+                                }
+                            } else if let Some(mut b) = s.symbol_instance {
+                                if b.loop_mode != SymbolLoopMode::SingleFrame {
+                                    b.first_frame = b.first_frame.saturating_add(elapsed);
+                                    s.symbol_instance = Some(b);
                                 }
                             }
                             s
@@ -683,6 +715,10 @@ impl Layer {
                                 if inst.binding.instance_gid == start_b.instance_gid {
                                     inst.binding = interp_b;
                                 }
+                            }
+                            if inst.binding.loop_mode != SymbolLoopMode::SingleFrame {
+                                inst.binding.first_frame =
+                                    inst.binding.first_frame.saturating_add(elapsed);
                             }
                             inst
                         })
@@ -714,13 +750,17 @@ impl Layer {
         insert_idx
     }
 
-    /// 指定フレーム `frame` を含むキーフレームを削除（フレーム0の場合は空白化）する（`Shift+F6`）
+    /// 指定フレーム `frame` を含むキーフレームを削除（フレーム0の先頭の場合は空白化）する（`Shift+F6`）
     pub(crate) fn delete_keyframe_at(&mut self, frame: usize) -> bool {
         let Some(idx) = self.keyframe_index_at(frame) else {
             return false;
         };
         if idx == 0 {
-            self.keyframes[0].clear_cel()
+            if frame == 0 {
+                self.keyframes[0].clear_cel()
+            } else {
+                false
+            }
         } else {
             self.keyframes.remove(idx);
             true
@@ -745,11 +785,10 @@ impl Layer {
     /// - 対象キーフレーム区間に保持フレーム（2コマ以上の長さ）がある場合は、キーフレームを残したまま保持尺を1フレーム縮め、後続キーフレームを左へ1フレーム詰める。
     /// - 対象キーフレーム区間が1フレーム幅（保持フレームなし）の場合は、そのキーフレーム自体を削除し、後続キーフレームを左へ1フレーム詰めて繰り上げる。
     pub(crate) fn remove_frame_at(&mut self, frame: usize) -> bool {
-        if self.frame_count == 0 {
+        if self.frame_count == 0 || frame >= self.frame_count {
             return false;
         }
-        let target_f = frame.min(self.frame_count - 1);
-        let Some(kf_idx) = self.keyframe_index_at(target_f) else {
+        let Some(kf_idx) = self.keyframe_index_at(frame) else {
             return false;
         };
         let span_start = self.keyframes[kf_idx].start_frame;
@@ -956,9 +995,15 @@ impl Layer {
     }
 
     /// レイヤー内の全キーフレームから指定 `symbol_id` のシンボル参照をデタッチし、単一シンボル条件を失ったトゥイーンを解除する
-    pub(crate) fn detach_symbol_id(&mut self, symbol_id: u64, library: &[SymbolDef]) {
+    pub(crate) fn detach_symbol_id(
+        &mut self,
+        symbol_id: u64,
+        library: &[SymbolDef],
+        next_group_id: &mut u64,
+    ) {
         for kf in &mut self.keyframes {
-            kf.cel.detach_symbol_id(symbol_id, kf.start_frame, library);
+            kf.cel
+                .detach_symbol_id(symbol_id, kf.start_frame, library, next_group_id);
             if kf.tween && kf.cel.single_symbol_instance().is_none() {
                 kf.tween = false;
             }
@@ -1266,15 +1311,14 @@ impl Timeline {
     /// 直前の履歴スナップショット `prev` と同一リビジョンの `Cel` は既にキャッシュ除去済みの `Arc` を $O(1)$ で共有し、
     /// 変更されたキーフレームのみキャッシュ除去を実行する
     pub(crate) fn strip_transient_caches_with_prev(&mut self, prev: Option<&Timeline>) {
-        for (l_idx, layer) in self.layers.iter_mut().enumerate() {
-            let prev_layer = prev
-                .and_then(|p| p.layers.get(l_idx))
-                .filter(|pl| pl.id == layer.id);
-            for (kf_idx, kf) in layer.keyframes.iter_mut().enumerate() {
-                if let Some(prev_kf) = prev_layer
-                    .and_then(|pl| pl.keyframes.get(kf_idx))
-                    .filter(|pkf| pkf.cel.revision == kf.cel.revision)
-                {
+        for layer in &mut self.layers {
+            let prev_layer = prev.and_then(|p| p.layers.iter().find(|pl| pl.id == layer.id));
+            for kf in &mut layer.keyframes {
+                if let Some(prev_kf) = prev_layer.and_then(|pl| {
+                    pl.keyframes
+                        .iter()
+                        .find(|pkf| pkf.cel.revision == kf.cel.revision)
+                }) {
                     kf.cel.shapes = Arc::clone(&prev_kf.cel.shapes);
                     kf.cel.instances = Arc::clone(&prev_kf.cel.instances);
                     *kf.cel.mesh_cache.lock() = CelMeshCache::default();
@@ -1314,14 +1358,25 @@ impl Timeline {
             }
 
             if is_tween_mid {
+                let prev_kf_start = self.layers[l_idx]
+                    .keyframe_index_at(frame)
+                    .map(|i| self.layers[l_idx].keyframes[i].start_frame)
+                    .unwrap_or(frame);
+                let elapsed = frame.saturating_sub(prev_kf_start);
                 let new_shapes: Vec<FillShape> = shapes
                     .iter()
                     .filter(|s| s.layer_id == lid)
                     .cloned()
                     .collect();
                 let kf_idx = self.layers[l_idx].insert_keyframe(frame, false);
-                let (non_symbol_shapes, next_instances) =
+                let (non_symbol_shapes, mut next_instances) =
                     Cel::split_shapes_and_instances(new_shapes);
+                for inst in &mut next_instances {
+                    if inst.binding.loop_mode != SymbolLoopMode::SingleFrame {
+                        inst.binding.first_frame =
+                            inst.binding.first_frame.saturating_add(elapsed);
+                    }
+                }
                 self.layers[l_idx].keyframes[kf_idx].cel =
                     Cel::new_with_instances(non_symbol_shapes, next_instances);
                 self.layers[l_idx].keyframes[kf_idx].tween = self.layers[l_idx].keyframes[kf_idx]
@@ -1388,9 +1443,21 @@ impl Timeline {
         };
 
         let target_frame = if should_advance { curr_f + 1 } else { curr_f };
+        let shift_for_blank = !clone_prev
+            && should_advance
+            && targets.iter().any(|&l_idx| {
+                self.layers.get(l_idx).is_some_and(|l| {
+                    l.keyframes
+                        .iter()
+                        .any(|kf| kf.start_frame == target_frame && !kf.cel.is_empty())
+                })
+            });
 
         for &l_idx in targets {
             if let Some(layer) = self.layers.get_mut(l_idx) {
+                if shift_for_blank {
+                    layer.insert_frame_at(curr_f);
+                }
                 layer.insert_keyframe(target_frame, clone_prev);
             }
         }
@@ -1408,7 +1475,12 @@ impl Timeline {
         targets.iter().any(|&l_idx| {
             self.layers.get(l_idx).is_some_and(|layer| {
                 layer.keyframe_index_at(curr_f).is_some_and(|idx| {
-                    idx > 0 || layer.keyframes.first().is_some_and(|kf| !kf.cel.is_empty())
+                    idx > 0
+                        || (curr_f == 0
+                            && layer
+                                .keyframes
+                                .first()
+                                .is_some_and(|kf| !kf.cel.is_empty() || kf.tween))
                 })
             })
         })
@@ -1440,9 +1512,14 @@ impl Timeline {
 
     /// 対象レイヤー群 `targets` の現在フレームに短縮可能なフレームが存在するかを返す
     pub(crate) fn can_remove_frame_on_targets(&self, targets: &[usize]) -> bool {
+        let curr_f = self.current_frame;
         targets.iter().any(|&l_idx| {
             self.layers.get(l_idx).is_some_and(|l| {
-                l.frame_count > 1 || l.keyframes.first().is_some_and(|kf| !kf.cel.is_empty())
+                curr_f < l.frame_count
+                    && (l.frame_count > 1
+                        || l.keyframes
+                            .first()
+                            .is_some_and(|kf| !kf.cel.is_empty() || kf.tween))
             })
         })
     }
@@ -1629,7 +1706,13 @@ impl Timeline {
         if is_pure_shape_cel {
             return Some((&kf.cel, None));
         }
-        let is_dynamic = has_tween || kf.cel.has_dynamic_symbol(library);
+        let all_single_frame = !has_tween
+            && kf
+                .cel
+                .instances
+                .iter()
+                .all(|inst| inst.binding.loop_mode == SymbolLoopMode::SingleFrame);
+        let is_dynamic = !all_single_frame && (has_tween || kf.cel.has_dynamic_symbol(library));
         let eval_frame_key = if is_dynamic { frame } else { kf.start_frame };
         let sig_query = ResolvedSigQuery::LayerKeyframe {
             layer,

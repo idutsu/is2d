@@ -341,6 +341,7 @@ impl Contour {
     }
 
     /// 指定アンカー `seg_idx`（`segments[seg_idx].p0`）を削除し、前後のアンカー（点Aと点C）を直線セグメントで結ぶ
+    /// （削除後に輪郭面積が潰れてゼロになる場合は削除を行わず `false` を返す）
     pub(crate) fn delete_anchor_at(&mut self, seg_idx: usize) -> bool {
         let n = self.segments.len();
         if n <= 2 || seg_idx >= n {
@@ -351,10 +352,15 @@ impl Contour {
         let p2 = self.segments[seg_idx].p2;
         let p1 = p0.lerp(p2, 0.5);
 
-        let segs = self.segments_mut();
+        let mut candidate = self.clone();
+        let segs = candidate.segments_mut();
         segs[prev_idx] = QuadBez::new(p0, p1, p2);
         segs.remove(seg_idx);
-        self.enforce_continuity();
+        candidate.enforce_continuity();
+        if candidate.signed_area().abs() <= 1e-4 {
+            return false;
+        }
+        *self = candidate;
         true
     }
 }
@@ -721,6 +727,11 @@ impl FillShape {
         if let Some(binding) = &mut self.symbol_instance {
             binding.xform = affine * binding.xform;
         }
+        let max_scale_sq = (a * a + b * b).max(c * c + d * d);
+        if max_scale_sq > 16.0 && !self.exterior.segments.is_empty() {
+            self.rebuild_cache();
+            return;
+        }
         self.bbox = self.compute_bbox();
         self.hit_bez_path = OnceLock::new();
         if let Some(arc_mesh) = self.fill_mesh.get_mut() {
@@ -919,8 +930,23 @@ pub(crate) fn interpolate_affine_with_pivot(
         }
     };
     let rot = rot0 + delta_rot * t;
-    let sx = sx0 + (sx1 - sx0) * t;
-    let sy = sy0 + (sy1 - sy0) * t;
+    const MIN_TWEEN_SCALE: f64 = 1e-3;
+    let mut sx = sx0 + (sx1 - sx0) * t;
+    let mut sy = sy0 + (sy1 - sy0) * t;
+    if sx.abs() < MIN_TWEEN_SCALE {
+        sx = if sx0 >= 0.0 {
+            MIN_TWEEN_SCALE
+        } else {
+            -MIN_TWEEN_SCALE
+        };
+    }
+    if sy.abs() < MIN_TWEEN_SCALE {
+        sy = if sy0 >= 0.0 {
+            MIN_TWEEN_SCALE
+        } else {
+            -MIN_TWEEN_SCALE
+        };
+    }
     let sh = sh0 + (sh1 - sh0) * t;
 
     let (sin_r, cos_r) = rot.sin_cos();

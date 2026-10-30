@@ -41,8 +41,17 @@ pub(crate) fn handle_brush_or_eraser_input(
     let min_sample_dist = (0.25 * screen_r).clamp(0.4, 1.5) / z;
 
     if response.drag_started() {
-        if let Some(pt) = mouse_pt {
-            let stroke = vec![pt];
+        let press_pt = response
+            .ctx
+            .input(|i| i.pointer.press_origin())
+            .map(|p| app.viewport.screen_to_world(p));
+        if let Some(start_pt) = press_pt.or(mouse_pt) {
+            let mut stroke = vec![start_pt];
+            if let Some(curr_pt) = mouse_pt {
+                if (curr_pt - start_pt).hypot() >= min_sample_dist {
+                    stroke.push(curr_pt);
+                }
+            }
             let tail_outline = generate_brush_outline_at_zoom(&stroke, base_r, z);
             let tail_mesh = tessellate_raw_polygon(&tail_outline, preview_color);
             app.canvas.drag = ActiveCanvasDrag::PaintStroke {
@@ -85,7 +94,8 @@ pub(crate) fn handle_brush_or_eraser_input(
                 *tail_mesh = tessellate_raw_polygon(tail_outline, preview_color);
             }
         }
-    } else if response.drag_stopped() {
+    }
+    if response.drag_stopped() {
         if let ActiveCanvasDrag::PaintStroke { stroke, .. } = std::mem::take(&mut app.canvas.drag) {
             let raw_outline = generate_brush_outline_at_zoom(&stroke, base_r, z);
             if !raw_outline.is_empty() {
@@ -101,42 +111,85 @@ pub(crate) fn handle_brush_or_eraser_input(
 }
 
 pub(crate) fn commit_raw_outline(app: &mut Is2dApp, raw: &[Point]) {
-    app.mutate_canvas_with_undo(true, |app| {
-        let target_lid = crate::canvas_tool::active_scope_layer_id(app);
-        let stroke_shapes: Vec<FillShape> =
-            build_smoothed_stroke_shapes_at_zoom(raw, app.ui.brush_color, app.viewport.zoom as f64)
-                .into_iter()
-                .map(|s| s.with_scope(target_lid, &app.canvas.editing_group_path))
-                .collect();
-        if app.ui.tool == Tool::Brush {
+    let target_lid = crate::canvas_tool::active_scope_layer_id(app);
+    if !app.timeline.is_layer_editable_by_id(target_lid) {
+        return;
+    }
+    let stroke_shapes: Vec<FillShape> =
+        build_smoothed_stroke_shapes_at_zoom(raw, app.ui.brush_color, app.viewport.zoom as f64)
+            .into_iter()
+            .map(|s| s.with_scope(target_lid, &app.canvas.editing_group_path))
+            .collect();
+    if stroke_shapes.is_empty() {
+        return;
+    }
+    if app.ui.tool == Tool::Brush {
+        app.mutate_canvas_with_undo(true, |app| {
             merge_shapes_into_canvas(&mut app.canvas.shapes, stroke_shapes);
             app.canvas.sort_shapes_by_layer_order(&app.timeline);
-        } else {
-            erase_from_canvas(
-                &mut app.canvas.shapes,
-                &stroke_shapes,
-                target_lid,
-                &app.canvas.editing_group_path,
-            );
+        });
+    } else {
+        let has_bbox_overlap = app.canvas.shapes.iter().any(|s| {
+            s.layer_id == target_lid
+                && s.is_raw_at_scope(&app.canvas.editing_group_path)
+                && stroke_shapes
+                    .iter()
+                    .any(|er| rects_overlap(s.bounding_box(), er.bounding_box()))
+        });
+        if !has_bbox_overlap {
+            return;
         }
-    });
+        crate::canvas_tool::stop_playback(app);
+        crate::tool_select::clear_selection(app);
+        let prev_revs: Vec<(u64, u64)> = app
+            .canvas
+            .shapes
+            .iter()
+            .map(|s| (s.shape_id, s.mesh_revision))
+            .collect();
+        let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
+        erase_from_canvas(
+            &mut app.canvas.shapes,
+            &stroke_shapes,
+            target_lid,
+            &app.canvas.editing_group_path,
+        );
+        let unchanged = app.canvas.shapes.len() == prev_revs.len()
+            && app
+                .canvas
+                .shapes
+                .iter()
+                .zip(prev_revs.iter())
+                .all(|(s, &(id, rev))| s.shape_id == id && s.mesh_revision == rev);
+        if !unchanged {
+            app.commit_canvas_mutation(snapshot);
+        }
+    }
 }
 
 /// バケツツール（色流し込み）
 pub(crate) fn bucket_fill_at(app: &mut Is2dApp, pt: Point) -> bool {
     let fill_color = app.ui.brush_color;
+    let target_lid = crate::canvas_tool::active_scope_layer_id(app);
+    if !app.timeline.is_layer_editable_by_id(target_lid) {
+        return false;
+    }
 
     // 0. 選択領域が存在する場合：選択中の「生シェイプ」のみにバケツで色を流し込む（グループは無効）
     if !app.canvas.selected_shapes.is_empty() {
         let clicked_selected_raw = app.canvas.selected_shapes.iter().copied().any(|idx| {
             app.canvas.shapes.get(idx).is_some_and(|s| {
-                s.is_raw_at_scope(&app.canvas.editing_group_path) && s.contains_point(pt)
+                app.timeline.is_layer_editable_by_id(s.layer_id)
+                    && s.is_raw_at_scope(&app.canvas.editing_group_path)
+                    && s.contains_point(pt)
             })
         });
         if clicked_selected_raw {
             let any_color_diff = app.canvas.selected_shapes.iter().copied().any(|idx| {
                 app.canvas.shapes.get(idx).is_some_and(|s| {
-                    s.is_raw_at_scope(&app.canvas.editing_group_path) && s.color != fill_color
+                    app.timeline.is_layer_editable_by_id(s.layer_id)
+                        && s.is_raw_at_scope(&app.canvas.editing_group_path)
+                        && s.color != fill_color
                 })
             });
             if !any_color_diff {
@@ -145,7 +198,9 @@ pub(crate) fn bucket_fill_at(app: &mut Is2dApp, pt: Point) -> bool {
             let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
             for &sel_idx in &app.canvas.selected_shapes {
                 if let Some(shape) = app.canvas.shapes.get_mut(sel_idx) {
-                    if shape.is_raw_at_scope(&app.canvas.editing_group_path) {
+                    if app.timeline.is_layer_editable_by_id(shape.layer_id)
+                        && shape.is_raw_at_scope(&app.canvas.editing_group_path)
+                    {
                         shape.set_color(fill_color);
                     }
                 }
@@ -158,25 +213,27 @@ pub(crate) fn bucket_fill_at(app: &mut Is2dApp, pt: Point) -> bool {
     }
 
     // 全表示レイヤー（ロック中レイヤーやグループ・シンボルを含む）の解決済み図形を収集する
-    let target_lid = crate::canvas_tool::active_scope_layer_id(app);
     let all_visible_shapes = collect_all_visible_shapes(app);
+    let target_layer_ord = app.timeline.layer_index_by_id(target_lid).unwrap_or(0);
 
-    // 1. 既存の生シェイプ上をクリックした場合：色の塗り替え（ただし別レイヤー・ロックレイヤー・グループの境界線で分割されている場合は分割領域の塗りを優先）
-    if let Some(hit_idx) = app.canvas.topmost_shape_at(pt) {
+    // 1. アクティブレイヤー（target_lid）の既存の生シェイプ上をクリックした場合：色の塗り替え
+    // （ただし別レイヤー・ロックレイヤー・グループの境界線で分割されている場合は分割領域の塗りを優先）
+    if let Some(hit_idx) = (0..app.canvas.shapes.len()).rev().find(|&idx| {
+        let s = &app.canvas.shapes[idx];
+        s.layer_id == target_lid
+            && s.is_in_editing_scope(&app.canvas.editing_group_path)
+            && s.contains_point(pt)
+    }) {
+        let occluded_above = (target_layer_ord + 1..app.timeline.layers.len()).any(|l_idx| {
+            let layer = &app.timeline.layers[l_idx];
+            layer.visible
+                && all_visible_shapes
+                    .iter()
+                    .any(|s| s.layer_id == layer.id && s.contains_point(pt))
+        });
+
         let hit_shape = &app.canvas.shapes[hit_idx];
-        let hit_layer_id = hit_shape.layer_id;
-        let hit_layer_ord = app.timeline.layer_index_by_id(hit_layer_id).unwrap_or(0);
-        let occluded_by_locked_above =
-            (hit_layer_ord + 1..app.timeline.layers.len()).any(|l_idx| {
-                let layer = &app.timeline.layers[l_idx];
-                layer.visible
-                    && layer.locked
-                    && all_visible_shapes
-                        .iter()
-                        .any(|s| s.layer_id == layer.id && s.contains_point(pt))
-            });
-
-        if !occluded_by_locked_above && hit_shape.is_raw_at_scope(&app.canvas.editing_group_path) {
+        if !occluded_above && hit_shape.is_raw_at_scope(&app.canvas.editing_group_path) {
             if hit_shape.color == fill_color {
                 return false;
             }
@@ -185,7 +242,7 @@ pub(crate) fn bucket_fill_at(app: &mut Is2dApp, pt: Point) -> bool {
             let overlapping_walls: Vec<FillShape> = all_visible_shapes
                 .iter()
                 .filter(|s| {
-                    (s.layer_id != hit_layer_id
+                    (s.layer_id != target_lid
                         || !s.is_raw_at_scope(&app.canvas.editing_group_path))
                         && !s.contains_point(pt)
                         && rects_overlap(s.bounding_box(), hit_bbox)
@@ -205,7 +262,7 @@ pub(crate) fn bucket_fill_at(app: &mut Is2dApp, pt: Point) -> bool {
                         merge_shapes_into_canvas(
                             &mut app.canvas.shapes,
                             vec![split_piece
-                                .with_scope(hit_layer_id, &app.canvas.editing_group_path)],
+                                .with_scope(target_lid, &app.canvas.editing_group_path)],
                         );
                         app.canvas.sort_shapes_by_layer_order(&app.timeline);
                         app.commit_canvas_mutation(snapshot);
@@ -223,9 +280,7 @@ pub(crate) fn bucket_fill_at(app: &mut Is2dApp, pt: Point) -> bool {
             app.commit_canvas_mutation(snapshot);
             return true;
         }
-        if occluded_by_locked_above || hit_layer_id == target_lid {
-            return false;
-        }
+        return false;
     }
 
     // 2. 全表示レイヤー（ロック中レイヤー・グループ・シンボルを含む）の境界線に囲まれた閉領域をクリックした場合：ベクター流し込み
@@ -292,6 +347,78 @@ fn collect_all_visible_shapes(app: &Is2dApp) -> Vec<FillShape> {
     out
 }
 
+/// ロックされたレイヤー（またはシンボル内部タイムライン）上の指定フレーム・指定座標 `pt` にヒットする最前面図形の色を、
+/// 図形クローンやメッシュ再構築を行わずに逆アフィン変換で高速に判定する
+fn locked_layer_color_at(
+    layer: &crate::timeline::Layer,
+    frame: usize,
+    pt: Point,
+    library: &[crate::symbol::SymbolDef],
+    depth: usize,
+) -> Option<Color32> {
+    if depth >= crate::symbol::MAX_SYMBOL_NEST_DEPTH || !layer.visible || frame >= layer.frame_count {
+        return None;
+    }
+    let kf_idx = layer.keyframe_index_at(frame)?;
+    let kf = &layer.keyframes[kf_idx];
+    if let Some((_, binding)) = layer.interpolated_tween_binding_at(frame) {
+        return symbol_binding_color_at(binding, kf.start_frame, frame, pt, library, depth);
+    }
+    let cel = &kf.cel;
+    if cel.instances.is_empty() {
+        return cel.shapes.iter().rev().find(|s| s.contains_point(pt)).map(|s| s.color);
+    }
+    // `shape_order_index` の逆順（最前面→最背面）にインスタンスと生シェイプを検査
+    let mut shape_idx = cel.shapes.len();
+    for inst in cel.instances.iter().rev() {
+        let target_ord = inst.shape_order_index.min(cel.shapes.len());
+        while shape_idx > target_ord {
+            shape_idx -= 1;
+            if cel.shapes[shape_idx].contains_point(pt) {
+                return Some(cel.shapes[shape_idx].color);
+            }
+        }
+        if let Some(col) =
+            symbol_binding_color_at(inst.binding, kf.start_frame, frame, pt, library, depth)
+        {
+            return Some(col);
+        }
+    }
+    while shape_idx > 0 {
+        shape_idx -= 1;
+        if cel.shapes[shape_idx].contains_point(pt) {
+            return Some(cel.shapes[shape_idx].color);
+        }
+    }
+    None
+}
+
+fn symbol_binding_color_at(
+    binding: crate::symbol::SymbolInstanceBinding,
+    kf_start_frame: usize,
+    parent_frame: usize,
+    world_pt: Point,
+    library: &[crate::symbol::SymbolDef],
+    depth: usize,
+) -> Option<Color32> {
+    if depth >= crate::symbol::MAX_SYMBOL_NEST_DEPTH
+        || binding.xform.determinant().abs() <= 1e-9
+    {
+        return None;
+    }
+    let sym = library.iter().find(|s| s.id == binding.symbol_id)?;
+    let internal_frame = sym.resolve_internal_frame(binding, kf_start_frame, parent_frame);
+    let local_pt = binding.xform.inverse() * world_pt;
+    for l_idx in (0..sym.timeline.layers.len()).rev() {
+        let layer = &sym.timeline.layers[l_idx];
+        if let Some(col) = locked_layer_color_at(layer, internal_frame, local_pt, library, depth + 1)
+        {
+            return Some(col);
+        }
+    }
+    None
+}
+
 /// 編集スコープおよび表示中の全レイヤーを対象に、指定座標 `pt` にヒットする最前面シェイプの色を返す（スポイト用）
 pub(crate) fn topmost_visible_color_at(app: &Is2dApp, pt: Point) -> Option<Color32> {
     let num_layers = app.timeline.layers.len();
@@ -317,23 +444,8 @@ pub(crate) fn topmost_visible_color_at(app: &Is2dApp, pt: Point) -> Option<Color
         }
         if layer.locked {
             let cf = app.timeline.current_frame;
-            if layer.interpolated_tween_binding_at(cf).is_none() {
-                if let Some(cel) = layer.cel_at(cf) {
-                    if cel.instances.is_empty() {
-                        if let Some(hit) = cel.shapes.iter().rev().find(|s| s.contains_point(pt)) {
-                            return Some(hit.color);
-                        }
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
-            let evaluated =
-                app.timeline
-                    .evaluate_layer_shapes_at(layer_idx, cf, &app.symbols.library);
-            if let Some(hit) = evaluated.iter().rev().find(|s| s.contains_point(pt)) {
-                return Some(hit.color);
+            if let Some(col) = locked_layer_color_at(layer, cf, pt, &app.symbols.library, 0) {
+                return Some(col);
             }
         } else {
             let lid = layer.id;
@@ -396,7 +508,7 @@ pub(crate) fn draw_active_stroke_preview(
                     app.viewport.world_to_screen(tail_outline[i]),
                     app.viewport.world_to_screen(tail_outline[(i + 1) % n]),
                 ],
-                Stroke::new(1.2, Color32::from_rgb(220, 60, 60)),
+                Stroke::new(1.2_f32, Color32::from_rgb(220, 60, 60)),
             );
         }
     }
@@ -411,18 +523,18 @@ pub(crate) fn draw_eyedropper_cursor_badge(
 ) {
     // カーソル先端のターゲットドット
     painter.circle_filled(cursor, 2.5, sample_color);
-    painter.circle_stroke(cursor, 2.5, Stroke::new(1.2, Color32::WHITE));
+    painter.circle_stroke(cursor, 2.5, Stroke::new(1.2_f32, Color32::WHITE));
 
     // 右下に抽出色プレビューバッジを表示
     let badge = cursor + Vec2::new(16.0, 16.0);
     let r = if is_over_shape { 9.5 } else { 7.5 };
     painter.circle_filled(badge, r, sample_color);
-    painter.circle_stroke(badge, r, Stroke::new(2.2, Color32::WHITE));
+    painter.circle_stroke(badge, r, Stroke::new(2.2_f32, Color32::WHITE));
     painter.circle_stroke(
         badge,
         r + 1.2,
         Stroke::new(
-            1.2,
+            1.2_f32,
             if is_over_shape {
                 Color32::from_rgb(0, 145, 255)
             } else {

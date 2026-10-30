@@ -607,6 +607,9 @@ fn remap_timeline_group_ids(tl: &mut Timeline, symbols: &mut SymbolManager) {
 /// `copy_selected_shapes`（`Cmd+C`）実行時に、クリップボード内の図形が参照しているシンボル定義（入れ子含む）を `Arc` 共有スナップショットとして退避する
 pub(crate) fn capture_clipboard_symbols(app: &mut Is2dApp) {
     let active_doc_id = app.tabs.active_doc_id();
+    if active_doc_id != app.tabs.clipboard_source_doc_id {
+        app.tabs.clipboard_imported_map.clear();
+    }
     let reusable = if active_doc_id == app.tabs.clipboard_source_doc_id
         && app.symbols.revision == app.tabs.clipboard_source_symbols_revision
     {
@@ -619,7 +622,6 @@ pub(crate) fn capture_clipboard_symbols(app: &mut Is2dApp) {
     app.tabs.clipboard_source_doc_id = active_doc_id;
     app.tabs.clipboard_source_symbol_id = app.symbols.edit_stack.last().map(|s| s.symbol_id);
     app.tabs.clipboard_source_symbols_revision = app.symbols.revision;
-    app.tabs.clipboard_imported_map.clear();
 
     let mut visited = Vec::new();
     let mut collected = Vec::new();
@@ -1385,12 +1387,49 @@ impl ProjectDocument {
         }
     }
 
+    /// 保存前にドキュメント内の全浮動小数点値（ステージサイズ・座標・変換行列・ピボット）が有限値（非 `NaN` / 非 `Infinity`）であるかを検証する
+    pub(crate) fn validate_finite(&self) -> Result<(), String> {
+        if !self.stage_size[0].is_finite() || !self.stage_size[1].is_finite() {
+            return Err("ステージサイズに無効な数値（NaN / Infinity）が含まれています".to_owned());
+        }
+        let check_timeline = |tl: &SavedTimeline| -> bool {
+            tl.layers.iter().all(|layer| {
+                layer.keyframes.iter().all(|kf| {
+                    let shapes_ok = kf.shapes.iter().all(|sh| {
+                        sh.exterior
+                            .segments
+                            .iter()
+                            .all(|pts| pts.iter().flatten().all(|v| v.is_finite()))
+                            && sh.holes.iter().all(|h| {
+                                h.segments
+                                    .iter()
+                                    .all(|pts| pts.iter().flatten().all(|v| v.is_finite()))
+                            })
+                    });
+                    let instances_ok = kf.instances.iter().all(|inst| {
+                        inst.binding.xform.iter().all(|v| v.is_finite())
+                            && inst.binding.pivot.iter().all(|v| v.is_finite())
+                    });
+                    shapes_ok && instances_ok
+                })
+            })
+        };
+        if !check_timeline(&self.timeline)
+            || !self.library.iter().all(|sym| check_timeline(&sym.timeline))
+        {
+            return Err(
+                "プロジェクトデータに無効な数値（NaN / Infinity）が含まれています".to_owned(),
+            );
+        }
+        Ok(())
+    }
+
     /// 読み込んだ `ProjectDocument` を現在のアクティブドキュメントへ適用し、作業キャンバスや履歴を初期化する
     pub(crate) fn apply_to_app(self, app: &mut Is2dApp) {
         let shared_clipboard = std::mem::take(&mut app.canvas.clipboard);
         let mut timeline: Timeline = self.timeline.into();
 
-        // 重複または不正（id == 0）な SymbolDef::id を排除・再採番して一意なライブラリを構築
+        // 重複または不正（id == 0）な SymbolDef::id を一意な新しいIDへ再採番してライブラリを構築
         let mut seen_sym_ids = HashSet::with_capacity(self.library.len());
         let mut next_fallback_sym_id = self
             .library
@@ -1403,13 +1442,12 @@ impl ProjectDocument {
         let mut library: Vec<SymbolDef> = Vec::with_capacity(self.library.len());
         for saved_sym in self.library {
             let mut sym = SymbolDef::from(saved_sym);
-            if sym.id == 0 {
+            if sym.id == 0 || !seen_sym_ids.insert(sym.id) {
                 sym.id = next_fallback_sym_id;
                 next_fallback_sym_id = next_fallback_sym_id.saturating_add(1);
+                seen_sym_ids.insert(sym.id);
             }
-            if seen_sym_ids.insert(sym.id) {
-                library.push(sym);
-            }
+            library.push(sym);
         }
 
         // 存在しない symbol_id（孤児インスタンス）をルートタイムラインおよび各シンボルタイムラインから除去し、
@@ -1449,10 +1487,11 @@ impl ProjectDocument {
             actively_renaming_symbol: None,
             edit_stack: Vec::new(),
             next_group_id: self.next_group_id.max(max_gid.saturating_add(1)).max(1),
-            revision: 1,
+            revision: crate::vector_engine::next_mesh_revision(),
         };
 
         // 外部改変された JSON にシンボルの自己・相互循環参照が含まれていた場合はサイクル辺を除去して DAG を保証する
+        let mut cycle_edge_cache: HashMap<(u64, u64), bool> = HashMap::new();
         for sym_idx in 0..app.symbols.library.len() {
             let parent_sym_id = app.symbols.library[sym_idx].id;
             let num_layers = app.symbols.library[sym_idx].timeline.layers.len();
@@ -1467,8 +1506,12 @@ impl ProjectDocument {
                         .instances
                         .iter()
                         .any(|inst| {
-                            app.symbols
-                                .would_create_symbol_cycle(parent_sym_id, inst.binding.symbol_id)
+                            let child_id = inst.binding.symbol_id;
+                            *cycle_edge_cache
+                                .entry((parent_sym_id, child_id))
+                                .or_insert_with(|| {
+                                    app.symbols.would_create_symbol_cycle(parent_sym_id, child_id)
+                                })
                         });
                     if has_cycle {
                         let instances: Vec<SymbolInstance> =
@@ -1477,10 +1520,13 @@ impl ProjectDocument {
                                 .instances
                                 .iter()
                                 .filter(|inst| {
-                                    !app.symbols.would_create_symbol_cycle(
-                                        parent_sym_id,
-                                        inst.binding.symbol_id,
-                                    )
+                                    let child_id = inst.binding.symbol_id;
+                                    !*cycle_edge_cache
+                                        .entry((parent_sym_id, child_id))
+                                        .or_insert_with(|| {
+                                            app.symbols
+                                                .would_create_symbol_cycle(parent_sym_id, child_id)
+                                        })
                                 })
                                 .cloned()
                                 .collect();
@@ -1488,6 +1534,7 @@ impl ProjectDocument {
                             [kf_idx];
                         *kf.cel.instances_mut() = instances;
                         kf.tween &= kf.cel.single_symbol_instance().is_some();
+                        cycle_edge_cache.clear();
                     }
                 }
             }
@@ -1558,6 +1605,26 @@ pub(crate) fn update_window_title(app: &mut Is2dApp, ctx: &egui::Context) {
     }
 }
 
+type PreSaveRollbackState = (
+    Vec<FillShape>,
+    Vec<usize>,
+    Option<Point>,
+    Timeline,
+    SymbolManager,
+);
+
+fn restore_pre_save_state(app: &mut Is2dApp, pre_save_state: Option<PreSaveRollbackState>) {
+    if let Some((shapes, sel, pivot, tl, syms)) = pre_save_state {
+        app.canvas.shapes = shapes;
+        app.canvas.selected_shapes = sel;
+        app.canvas.selection_modified = true;
+        app.canvas.transform_pivot = pivot;
+        app.timeline = tl;
+        app.symbols = syms;
+        app.canvas.record_loaded_signatures();
+    }
+}
+
 /// 指定されたファイルパス `path` へプロジェクトを一時ファイル経由でアトミック保存する
 pub(crate) fn save_project_to_path(app: &mut Is2dApp, path: &Path) -> Result<(), String> {
     let pre_save_state = (app.canvas.selection_modified && !app.canvas.selected_shapes.is_empty())
@@ -1573,21 +1640,25 @@ pub(crate) fn save_project_to_path(app: &mut Is2dApp, path: &Path) -> Result<(),
     prepare_active_tab_for_switch_or_save(app, true);
 
     let doc = ProjectDocument::from_app(app);
-    let json = match serde_json::to_string_pretty(&doc) {
+    if let Err(err) = doc.validate_finite() {
+        restore_pre_save_state(app, pre_save_state);
+        return Err(err);
+    }
+    let json = match serde_json::to_string(&doc) {
         Ok(s) => s,
         Err(e) => {
-            if let Some((shapes, sel, pivot, tl, syms)) = pre_save_state {
-                app.canvas.shapes = shapes;
-                app.canvas.selected_shapes = sel;
-                app.canvas.selection_modified = true;
-                app.canvas.transform_pivot = pivot;
-                app.timeline = tl;
-                app.symbols = syms;
-                app.canvas.record_loaded_signatures();
-            }
+            restore_pre_save_state(app, pre_save_state);
             return Err(format!("プロジェクトデータの変換に失敗しました: {e}"));
         }
     };
+    if json.len() as u64 > MAX_PROJECT_FILE_BYTES {
+        restore_pre_save_state(app, pre_save_state);
+        return Err(format!(
+            "保存データが最大サイズ上限を超えています ({} MB > 上限 {} MB)",
+            json.len() as u64 / (1024 * 1024),
+            MAX_PROJECT_FILE_BYTES / (1024 * 1024)
+        ));
+    }
 
     let tmp_name = format!(
         ".{}.{}.tmp",
@@ -1605,29 +1676,13 @@ pub(crate) fn save_project_to_path(app: &mut Is2dApp, path: &Path) -> Result<(),
     })();
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&tmp_path);
-        if let Some((shapes, sel, pivot, tl, syms)) = pre_save_state {
-            app.canvas.shapes = shapes;
-            app.canvas.selected_shapes = sel;
-            app.canvas.selection_modified = true;
-            app.canvas.transform_pivot = pivot;
-            app.timeline = tl;
-            app.symbols = syms;
-            app.canvas.record_loaded_signatures();
-        }
+        restore_pre_save_state(app, pre_save_state);
         return Err(format!("一時ファイルの書き込みに失敗しました: {e}"));
     }
 
     if let Err(e) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
-        if let Some((shapes, sel, pivot, tl, syms)) = pre_save_state {
-            app.canvas.shapes = shapes;
-            app.canvas.selected_shapes = sel;
-            app.canvas.selection_modified = true;
-            app.canvas.transform_pivot = pivot;
-            app.timeline = tl;
-            app.symbols = syms;
-            app.canvas.record_loaded_signatures();
-        }
+        restore_pre_save_state(app, pre_save_state);
         return Err(format!("ファイルの保存に失敗しました: {e}"));
     }
     if let Some(parent) = path.parent() {
@@ -1671,17 +1726,29 @@ pub(crate) fn save_project_to_path(app: &mut Is2dApp, path: &Path) -> Result<(),
 
 /// 指定されたファイルパス `path` から `ProjectDocument` を読み込み・バージョン検証して返す
 fn read_project_document(path: &Path) -> Result<ProjectDocument, String> {
-    let meta =
-        std::fs::metadata(path).map_err(|e| format!("ファイルの読み込みに失敗しました: {e}"))?;
-    if meta.len() > MAX_PROJECT_FILE_BYTES {
+    use std::io::Read;
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("ファイルの読み込みに失敗しました: {e}"))?;
+    if let Ok(meta) = file.metadata() {
+        if meta.len() > MAX_PROJECT_FILE_BYTES {
+            return Err(format!(
+                "プロジェクトファイルが大きすぎます ({} MB > 上限 {} MB)",
+                meta.len() / (1024 * 1024),
+                MAX_PROJECT_FILE_BYTES / (1024 * 1024)
+            ));
+        }
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PROJECT_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("ファイルの読み込みに失敗しました: {e}"))?;
+    if bytes.len() as u64 > MAX_PROJECT_FILE_BYTES {
         return Err(format!(
             "プロジェクトファイルが大きすぎます ({} MB > 上限 {} MB)",
-            meta.len() / (1024 * 1024),
+            bytes.len() as u64 / (1024 * 1024),
             MAX_PROJECT_FILE_BYTES / (1024 * 1024)
         ));
     }
-    let bytes =
-        std::fs::read(path).map_err(|e| format!("ファイルの読み込みに失敗しました: {e}"))?;
     let doc: ProjectDocument = serde_json::from_slice(&bytes)
         .map_err(|e| format!("プロジェクトファイルの形式が正しくありません: {e}"))?;
 

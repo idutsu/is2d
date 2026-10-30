@@ -236,24 +236,31 @@ pub(crate) fn handle_transform_tool_input(
         if let Some(pt) = mouse_pt {
             if compute_transform_hover(&app.canvas, pt, zoom) == TransformHoverTarget::Pivot {
                 reset_selected_transform_pivot(app);
-            } else if !crate::tool_select::enter_group_at(app, pt)
-                && app.canvas.topmost_shape_at(pt).is_none()
-            {
-                crate::tool_select::exit_current_group(app);
+            } else {
+                crate::tool_select::handle_canvas_double_click(app, pt);
             }
         }
         return;
     }
 
     if response.drag_started() {
-        if let Some(pt) = mouse_pt {
-            start_transform_drag(app, pt, shift_held, alt_held);
+        let press_pt = ui
+            .input(|i| i.pointer.press_origin())
+            .map(|p| app.viewport.screen_to_world(p));
+        if let Some(start_pt) = press_pt.or(mouse_pt) {
+            start_transform_drag(app, start_pt, shift_held, alt_held);
+            if let Some(curr_pt) = mouse_pt {
+                if (curr_pt - start_pt).hypot() > 1e-6 {
+                    update_transform_drag(app, curr_pt, shift_held, alt_held);
+                }
+            }
         }
     } else if response.dragged() {
         if let Some(pt) = mouse_pt {
             update_transform_drag(app, pt, shift_held, alt_held);
         }
-    } else if response.drag_stopped() {
+    }
+    if response.drag_stopped() {
         finish_transform_drag(app, mouse_pt);
     } else if response.clicked() {
         if let Some(pt) = mouse_pt {
@@ -474,11 +481,18 @@ fn finish_transform_drag(app: &mut Is2dApp, mouse_pt: Option<Point>) {
     };
     match finished {
         TransformDragState::Move(drag) => {
+            let min_move = 1.0 / (app.viewport.zoom as f64);
+            let rolled_back =
+                drag.total_delta.hypot() <= min_move || app.canvas.selected_shapes.is_empty();
+            let orig_ids = drag.orig_selected_ids;
             crate::tool_select::finish_move_selection_drag(
                 app,
                 drag.total_delta,
                 drag.undo_snapshot,
             );
+            if rolled_back && !orig_ids.is_empty() {
+                app.canvas.restore_selection_by_shape_ids(&orig_ids);
+            }
         }
         TransformDragState::Scale {
             undo_snapshot,
@@ -537,6 +551,25 @@ fn handle_transform_click(app: &mut Is2dApp, pt: Point, shift_held: bool) {
         if let Some(hit_idx) = hit_opt {
             if !app.canvas.selected_shapes.contains(&hit_idx) {
                 crate::tool_select::select_single_shape_at(app, pt);
+            } else {
+                let unit = app.canvas.expand_to_group_unit(hit_idx);
+                if app.canvas.selection_modified && app.canvas.selected_shapes != unit {
+                    let unit_ids: Vec<u64> = unit
+                        .iter()
+                        .filter_map(|&i| app.canvas.shapes.get(i).map(|s| s.shape_id))
+                        .collect();
+                    if let Some(unsliced) = app.canvas.take_unsliced_snapshot() {
+                        let all_sel_ids = app.canvas.selected_shape_ids();
+                        app.canvas.shapes = unsliced;
+                        app.canvas.restore_selection_by_shape_ids(&all_sel_ids);
+                    }
+                    crate::tool_select::flush_modified_raw_selection_merge(app);
+                    app.canvas.restore_selection_by_shape_ids(&unit_ids);
+                } else {
+                    app.canvas.selected_shapes = unit;
+                }
+                app.canvas.transform_pivot = None;
+                crate::canvas_tool::sync_timeline_layer_from_canvas_selection(app);
             }
         } else {
             crate::tool_select::clear_selection(app);
@@ -627,7 +660,7 @@ pub(crate) fn draw_free_transform_box(
         rot_affine * Point::new(base_bbox.x0, base_bbox.y1),
     ];
 
-    let box_stroke = Stroke::new(1.5, Color32::from_rgb(20, 115, 225));
+    let box_stroke = Stroke::new(1.5_f32, Color32::from_rgb(20, 115, 225));
     for i in 0..4 {
         painter.line_segment(
             [
@@ -656,7 +689,7 @@ pub(crate) fn draw_free_transform_box(
             Color32::from_rgb(25, 30, 40)
         };
         painter.rect_filled(rect, 0.0, fill_col);
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.5, Color32::WHITE));
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.5_f32, Color32::WHITE));
     }
 
     // 基準点（ピボット点：白い丸＋中心ドット）を描画
@@ -671,7 +704,7 @@ pub(crate) fn draw_free_transform_box(
         piv_pos,
         piv_radius,
         Stroke::new(
-            1.8,
+            1.8_f32,
             if piv_active {
                 Color32::from_rgb(255, 110, 30)
             } else {
@@ -743,12 +776,12 @@ fn draw_transform_rotate_cursor_badge(painter: &egui::Painter, cursor: Pos2) {
         8.5,
         Color32::from_rgba_unmultiplied(255, 255, 255, 235),
     );
-    painter.circle_stroke(base, 8.5, Stroke::new(1.5, Color32::from_rgb(0, 125, 240)));
+    painter.circle_stroke(base, 8.5, Stroke::new(1.5_f32, Color32::from_rgb(0, 125, 240)));
     let r = 5.0_f32;
     let steps = 10;
     let start_ang = -std::f32::consts::FRAC_PI_4 * 3.0;
     let end_ang = std::f32::consts::FRAC_PI_2;
-    let stroke = Stroke::new(1.8, Color32::from_rgb(20, 25, 35));
+    let stroke = Stroke::new(1.8_f32, Color32::from_rgb(20, 25, 35));
     let mut prev = Pos2::new(base.x + r * start_ang.cos(), base.y + r * start_ang.sin());
     for i in 1..=steps {
         let a = start_ang + (end_ang - start_ang) * (i as f32 / steps as f32);
@@ -937,7 +970,11 @@ pub(crate) fn rename_symbol_in_library(
     if app.symbols.actively_renaming_symbol != Some(symbol_id) {
         app.push_undo();
     }
-    app.symbols.rename_symbol(symbol_id, new_name)
+    let renamed = app.symbols.rename_symbol(symbol_id, new_name);
+    if renamed {
+        app.symbols.actively_renaming_symbol = Some(symbol_id);
+    }
+    renamed
 }
 
 /// ライブラリから指定シンボル `symbol_id` を削除し、ステージ上および全フレームに配置されていた該当インスタンスは
@@ -961,8 +998,8 @@ pub(crate) fn delete_symbol_from_library(app: &mut Is2dApp, symbol_id: u64) -> b
     app.symbols
         .remove_symbol_and_detach(symbol_id, &mut app.timeline, &mut app.canvas.shapes);
 
-    app.canvas.record_loaded_signatures();
-    app.canvas.sanitize_editing_scope();
+    app.symbols.sync_active_edit(&app.timeline);
+    crate::canvas_tool::load_shapes_from_timeline(app);
     true
 }
 
@@ -1135,7 +1172,7 @@ pub(crate) fn enter_symbol_timeline(app: &mut Is2dApp, binding: SymbolInstanceBi
         .map(|s| {
             resolve_cel_with_library(
                 &s.backdrop_cel,
-                0,
+                s.parent_timeline.current_frame,
                 s.parent_timeline.current_frame,
                 SymbolEvalCtx::new(&app.symbols.library),
             )
@@ -1143,16 +1180,32 @@ pub(crate) fn enter_symbol_timeline(app: &mut Is2dApp, binding: SymbolInstanceBi
         .unwrap_or_default();
     let curr_f = app.timeline.current_frame;
     for layer_idx in 0..app.timeline.layers.len() {
-        if !app.timeline.layers[layer_idx].visible {
+        let layer = &app.timeline.layers[layer_idx];
+        if !layer.visible {
             continue;
         }
+        let kf_start = layer
+            .keyframe_index_at(curr_f)
+            .map(|ki| layer.keyframes[ki].start_frame)
+            .unwrap_or(curr_f);
         let resolved =
             app.timeline
                 .evaluate_layer_shapes_at(layer_idx, curr_f, &app.symbols.library);
-        backdrop_shapes.extend(resolved.into_iter().filter(|s| {
-            s.symbol_instance
-                .is_none_or(|b| b.instance_gid != binding.instance_gid)
-        }));
+        for mut s in resolved {
+            if s.symbol_instance
+                .is_some_and(|b| b.instance_gid == binding.instance_gid)
+            {
+                continue;
+            }
+            if let Some(mut b) = s.symbol_instance {
+                if let Some(sym) = app.symbols.find_symbol(b.symbol_id) {
+                    b.first_frame = sym.resolve_internal_frame(b, kf_start, curr_f);
+                    b.loop_mode = SymbolLoopMode::SingleFrame;
+                    s.symbol_instance = Some(b);
+                }
+            }
+            backdrop_shapes.push(s);
+        }
     }
 
     // シンボル定義のローカルレイヤー群をインスタンスのステージ変換 `binding.xform` で展開して作業タイムラインを構築

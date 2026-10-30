@@ -246,7 +246,7 @@ pub(crate) fn draw_left_toolbar(app: &mut Is2dApp, ctx: &egui::Context) {
             egui::Frame::none()
                 .fill(Color32::from_rgb(245, 246, 248))
                 .inner_margin(egui::Margin::symmetric(4.0, 6.0))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(210, 214, 222))),
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(210, 214, 222))),
         )
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -338,7 +338,7 @@ pub(crate) fn draw_document_tab_bar(app: &mut Is2dApp, ctx: &egui::Context) {
 
                         egui::Frame::none()
                             .fill(bg_fill)
-                            .stroke(Stroke::new(1.0, border_color))
+                            .stroke(Stroke::new(1.0_f32, border_color))
                             .inner_margin(egui::Margin::symmetric(6.0, 2.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
@@ -419,7 +419,7 @@ pub(crate) fn draw_stage_header_bar(app: &mut Is2dApp, ctx: &egui::Context) {
             egui::Frame::none()
                 .fill(Color32::from_rgb(245, 246, 248))
                 .inner_margin(egui::Margin::symmetric(10.0, 0.0))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(214, 218, 226))),
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(214, 218, 226))),
         )
         .show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
@@ -513,7 +513,7 @@ pub(crate) fn draw_right_properties_panel(app: &mut Is2dApp, ctx: &egui::Context
             egui::Frame::none()
                 .fill(Color32::from_rgb(245, 246, 248))
                 .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(214, 218, 226))),
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(214, 218, 226))),
         )
         .show(ctx, |ui| {
             // 上部タブバー（プロパティ | カラー | ライブラリ | キャンバス）
@@ -561,7 +561,7 @@ fn draw_right_panel_tab_bar(app: &mut Is2dApp, ui: &mut egui::Ui) {
             let btn = egui::Button::new(text)
                 .fill(fill)
                 .stroke(Stroke::new(
-                    1.0,
+                    1.0_f32,
                     if selected {
                         Color32::from_rgb(190, 196, 208)
                     } else {
@@ -616,7 +616,8 @@ fn draw_properties_tab(app: &mut Is2dApp, ui: &mut egui::Ui) {
     // - キャンバス上のシンボルを選択したとき（選択 / 自由変形ツール時）は「シンボル再生オプション」
     if app.ui.inspect_timeline_frame {
         draw_selected_frame_properties(app, ui);
-    } else if matches!(app.ui.tool, Tool::Select | Tool::Transform) {
+    }
+    if matches!(app.ui.tool, Tool::Select | Tool::Transform) {
         draw_selected_symbol_properties(app, ui);
     }
 }
@@ -909,7 +910,7 @@ fn draw_color_palette_section(app: &mut Is2dApp, ui: &mut egui::Ui) {
                     rect,
                     0.0,
                     Stroke::new(
-                        if is_active { 2.0 } else { 1.0 },
+                        if is_active { 2.0_f32 } else { 1.0_f32 },
                         if is_active {
                             Color32::from_rgb(0, 125, 230)
                         } else {
@@ -939,7 +940,12 @@ fn draw_canvas_tab(app: &mut Is2dApp, ui: &mut egui::Ui) {
         let mut w = app.viewport.stage_size.x.round() as i32;
         let mut h = app.viewport.stage_size.y.round() as i32;
         let w_resp = ui
-            .add(egui::DragValue::new(&mut w).range(100..=3840).speed(2.0))
+            .add(
+                egui::DragValue::new(&mut w)
+                    .range(100..=3840)
+                    .speed(2.0)
+                    .update_while_editing(false),
+            )
             .on_hover_text("ステージの幅 (px)");
         if w_resp.changed() && (w as f32 - app.viewport.stage_size.x).abs() > f32::EPSILON {
             if !app.viewport.editing_stage_size {
@@ -954,7 +960,8 @@ fn draw_canvas_tab(app: &mut Is2dApp, ui: &mut egui::Ui) {
                 egui::DragValue::new(&mut h)
                     .range(100..=2160)
                     .speed(2.0)
-                    .suffix(" px"),
+                    .suffix(" px")
+                    .update_while_editing(false),
             )
             .on_hover_text("ステージの高さ (px)");
         if h_resp.changed() && (h as f32 - app.viewport.stage_size.y).abs() > f32::EPSILON {
@@ -1156,7 +1163,11 @@ pub(crate) fn draw_selected_symbol_properties(app: &mut Is2dApp, ui: &mut egui::
 
     let mut next_mode = binding.loop_mode;
     let max_first_1based = sym_total_frames.max(1);
-    let current_first_1based = (binding.first_frame + 1).clamp(1, max_first_1based);
+    let current_first_1based = if binding.loop_mode == SymbolLoopMode::Loop {
+        (binding.first_frame % max_first_1based) + 1
+    } else {
+        (binding.first_frame + 1).clamp(1, max_first_1based)
+    };
     let mut next_first_1based = current_first_1based;
 
     ui.horizontal(|ui| {
@@ -1232,7 +1243,8 @@ pub(crate) fn draw_selected_symbol_properties(app: &mut Is2dApp, ui: &mut egui::
             egui::DragValue::new(&mut next_first_1based)
                 .range(1..=max_first_1based)
                 .speed(0.15)
-                .suffix(" f"),
+                .suffix(" f")
+                .update_while_editing(false),
         );
         if ui
             .add_enabled(
@@ -1430,7 +1442,7 @@ fn draw_library_symbol_list(app: &mut Is2dApp, ui: &mut egui::Ui) {
                     };
                     egui::Frame::none()
                         .fill(row_fill)
-                        .stroke(Stroke::new(1.0, stroke_col))
+                        .stroke(Stroke::new(1.0_f32, stroke_col))
                         .inner_margin(egui::Margin::symmetric(6.0, 4.0))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -1497,7 +1509,7 @@ fn draw_symbol_mini_preview(app: &Is2dApp, ui: &mut egui::Ui, sym: &SymbolDef) {
     painter.rect_stroke(
         rect,
         0.0,
-        Stroke::new(1.0, Color32::from_rgb(206, 212, 222)),
+        Stroke::new(1.0_f32, Color32::from_rgb(206, 212, 222)),
     );
 
     if let Some((mesh, origin_scr)) =

@@ -92,6 +92,7 @@ pub(crate) struct MoveSelectionDrag {
     pub(crate) last_pos: Point,
     pub(crate) total_delta: KVec2,
     pub(crate) undo_snapshot: Vec<FillShape>,
+    pub(crate) orig_selected_ids: Vec<u64>,
 }
 
 impl MoveSelectionDrag {
@@ -103,7 +104,13 @@ impl MoveSelectionDrag {
             last_pos: start_pos,
             total_delta: KVec2::ZERO,
             undo_snapshot,
+            orig_selected_ids: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_orig_selected_ids(mut self, orig_selected_ids: Vec<u64>) -> Self {
+        self.orig_selected_ids = orig_selected_ids;
+        self
     }
 
     pub(crate) fn step(&mut self, pt: Point) -> KVec2 {
@@ -352,7 +359,7 @@ impl ViewportState {
         painter.rect_stroke(
             stage_rect,
             0.0,
-            Stroke::new(1.2, Color32::from_rgb(148, 155, 168)),
+            Stroke::new(1.2_f32, Color32::from_rgb(148, 155, 168)),
         );
     }
 
@@ -421,6 +428,8 @@ pub(crate) struct CanvasState {
     pub(crate) editing_group_path: Vec<u64>,
     /// コピー / カットされたシェイプ群（`group_path` はコピー時の編集スコープからの相対パス）
     pub(crate) clipboard: Vec<FillShape>,
+    /// `Cmd+C` / `Cmd+X` 実行後に OS クリップボードへダミー文字列を同期するフラグ（`ViewportCommand::Paste` 発火用）
+    pub(crate) pending_os_clipboard_sync: bool,
     /// `Cmd+V` による通常ペーストの連続回数（少しずつずらして配置するためのカウンタ）
     pub(crate) paste_count: usize,
     pub(crate) transform_pivot: Option<Point>,
@@ -802,10 +811,12 @@ impl CanvasState {
             return false;
         }
         let mut rollback_snapshot: Option<Vec<FillShape>> = None;
+        let mut rollback_selected_ids: Vec<u64> = Vec::new();
         match std::mem::replace(&mut self.drag, ActiveCanvasDrag::None) {
             ActiveCanvasDrag::Select(SelectDragState::MoveShape(drag))
             | ActiveCanvasDrag::Transform(TransformDragState::Move(drag)) => {
                 rollback_snapshot = Some(drag.undo_snapshot);
+                rollback_selected_ids = drag.orig_selected_ids;
             }
             ActiveCanvasDrag::Select(
                 SelectDragState::PullEdge { undo_snapshot, .. }
@@ -838,7 +849,11 @@ impl CanvasState {
         }
 
         if let Some(snapshot) = rollback_snapshot {
-            self.restore_drag_snapshot(snapshot)
+            let len_changed = self.restore_drag_snapshot(snapshot);
+            if !rollback_selected_ids.is_empty() {
+                self.restore_selection_by_shape_ids(&rollback_selected_ids);
+            }
+            len_changed
         } else {
             false
         }
@@ -946,17 +961,7 @@ pub(crate) fn active_scope_layer_id(app: &Is2dApp) -> u64 {
             return s.layer_id;
         }
     }
-    if app.timeline.is_active_layer_editable() {
-        app.timeline.active_layer_id()
-    } else {
-        app.timeline
-            .layers
-            .iter()
-            .rev()
-            .find(|l| l.visible && !l.locked && app.timeline.current_frame < l.frame_count)
-            .map(|l| l.id)
-            .unwrap_or_else(|| app.timeline.active_layer_id())
-    }
+    app.timeline.active_layer_id()
 }
 
 /// 指定されたシェイプインデックス群が所属するレイヤーのうち最前面の `layer_id` を返す（該当なし時は `active_scope_layer_id`）
@@ -1060,6 +1065,7 @@ pub(crate) fn flush_canvas_before_timeline_op(app: &mut Is2dApp) {
     if app.timeline_ui.is_playing {
         stop_playback(app);
     } else {
+        cancel_active_drag(app);
         crate::tool_select::clear_selection(app);
         sync_shapes_to_timeline(app);
     }
@@ -1119,7 +1125,6 @@ pub(crate) fn load_shapes_from_timeline(app: &mut Is2dApp) {
             if sym_def.timeline.current_frame != cf || sym_def.timeline.active_layer != al {
                 sym_def.timeline.current_frame = cf;
                 sym_def.timeline.active_layer = al;
-                app.symbols.bump_revision();
             }
         }
     }
@@ -1163,12 +1168,12 @@ pub(crate) fn draw_tool_cursor_and_feedback(
             } else {
                 Color32::from_rgb(220, 60, 60)
             };
-            painter.circle_stroke(pos, r * app.viewport.zoom, Stroke::new(1.5, ring_col));
+            painter.circle_stroke(pos, r * app.viewport.zoom, Stroke::new(1.5_f32, ring_col));
         }
         Tool::Bucket => {
             ctx.set_cursor_icon(CursorIcon::PointingHand);
             painter.circle_filled(pos, 5.5, app.ui.brush_color);
-            painter.circle_stroke(pos, 5.5, Stroke::new(1.8, Color32::WHITE));
+            painter.circle_stroke(pos, 5.5, Stroke::new(1.8_f32, Color32::WHITE));
         }
         Tool::Eyedropper => {
             let hovered_color =
@@ -1364,7 +1369,7 @@ fn draw_editable_layer_shapes(
                 app,
                 gizmo_painter,
                 shape,
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(30, 80, 180, 140)),
+                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(30, 80, 180, 140)),
                 true,
             );
         }
@@ -1382,7 +1387,7 @@ pub(crate) fn draw_registration_cross(
     with_white_halo: bool,
 ) {
     if with_white_halo {
-        let halo = Stroke::new(3.0, Color32::WHITE);
+        let halo = Stroke::new(3.0_f32, Color32::WHITE);
         painter.line_segment(
             [
                 Pos2::new(center.x - arm, center.y),
@@ -1398,7 +1403,7 @@ pub(crate) fn draw_registration_cross(
             halo,
         );
     }
-    let fg = Stroke::new(1.4, Color32::from_rgb(0, 125, 220));
+    let fg = Stroke::new(1.4_f32, Color32::from_rgb(0, 125, 220));
     painter.line_segment(
         [
             Pos2::new(center.x - arm, center.y),
@@ -1425,10 +1430,18 @@ fn draw_selected_group_and_symbol_boxes(
         let g_bbox = geom_bbox.unwrap_or(fallback_bbox);
         let rect = app.viewport.world_rect_to_screen(g_bbox).expand(2.0);
         if let Some(origin) = sym_reg {
-            painter.rect_stroke(rect, 0.0, Stroke::new(1.8, Color32::from_rgb(0, 165, 255)));
+            painter.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.8_f32, Color32::from_rgb(0, 165, 255)),
+            );
             draw_registration_cross(painter, app.viewport.world_to_screen(origin), 3.2, true);
         } else {
-            painter.rect_stroke(rect, 0.0, Stroke::new(1.8, Color32::from_rgb(30, 185, 95)));
+            painter.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.8_f32, Color32::from_rgb(30, 185, 95)),
+            );
         }
     }
 
@@ -1499,7 +1512,7 @@ fn draw_active_marquee_box(app: &Is2dApp, painter: &egui::Painter) {
         painter.rect_stroke(
             marquee_rect,
             0.0,
-            Stroke::new(1.5, Color32::from_rgb(0, 145, 255)),
+            Stroke::new(1.5_f32, Color32::from_rgb(0, 145, 255)),
         );
     }
 }

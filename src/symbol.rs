@@ -169,6 +169,7 @@ pub(crate) struct SymbolDef {
 }
 
 pub(crate) const MAX_SYMBOL_NEST_DEPTH: usize = 8;
+pub(crate) const MAX_EXPANDED_SYMBOL_SHAPES: usize = 10_000;
 
 /// シンボル再帰評価時の設定コンテキスト
 #[derive(Clone, Copy)]
@@ -212,9 +213,12 @@ pub(crate) fn resolve_cel_with_library(
 
     for inst in cel.instances.iter() {
         let target_idx = inst.shape_order_index.min(cel.shapes.len());
-        while next_shape_idx < target_idx {
+        while next_shape_idx < target_idx && out.len() < MAX_EXPANDED_SYMBOL_SHAPES {
             out.push(cel.shapes[next_shape_idx].clone());
             next_shape_idx += 1;
+        }
+        if out.len() >= MAX_EXPANDED_SYMBOL_SHAPES {
+            break;
         }
         let b = inst.binding;
         let Some(sym) = ctx.library.iter().find(|sym| sym.id == b.symbol_id) else {
@@ -229,11 +233,18 @@ pub(crate) fn resolve_cel_with_library(
                 &inst.parent_scope,
             ));
         } else {
-            out.extend(b.instantiate_shapes(&local_shapes, inst.layer_id, &inst.parent_scope));
+            let remaining = MAX_EXPANDED_SYMBOL_SHAPES.saturating_sub(out.len());
+            out.extend(
+                b.instantiate_shapes(
+                    &local_shapes[..local_shapes.len().min(remaining)],
+                    inst.layer_id,
+                    &inst.parent_scope,
+                ),
+            );
         }
     }
 
-    while next_shape_idx < cel.shapes.len() {
+    while next_shape_idx < cel.shapes.len() && out.len() < MAX_EXPANDED_SYMBOL_SHAPES {
         out.push(cel.shapes[next_shape_idx].clone());
         next_shape_idx += 1;
     }
@@ -252,7 +263,7 @@ impl SymbolDef {
             id,
             name,
             timeline,
-            revision: 0,
+            revision: crate::vector_engine::next_mesh_revision(),
             mini_preview_cache: SyncCache::new(None),
             dynamic_anim_cache: SyncCache::new(None),
         }
@@ -261,6 +272,11 @@ impl SymbolDef {
     /// Undo 履歴保存時などに、シンボル定義内のタイムラインおよびミニプレビューの一時メッシュキャッシュを破棄する
     pub(crate) fn strip_transient_caches(&mut self) {
         self.timeline.strip_transient_caches();
+        self.clear_preview_and_anim_caches();
+    }
+
+    /// シンボル定義のミニプレビューおよび動的アニメーション判定の一時キャッシュを破棄する
+    pub(crate) fn clear_preview_and_anim_caches(&mut self) {
         *self.mini_preview_cache.lock() = None;
         *self.dynamic_anim_cache.lock() = None;
     }
@@ -390,8 +406,13 @@ impl SymbolDef {
     ) -> Vec<FillShape> {
         let mut out = Vec::new();
         for layer in &self.timeline.layers {
+            if out.len() >= MAX_EXPANDED_SYMBOL_SHAPES {
+                break;
+            }
             if layer.visible {
-                out.extend(layer.evaluate_shapes_at((frame, child_eval_frame), 1, ctx));
+                let eval = layer.evaluate_shapes_at((frame, child_eval_frame), 1, ctx);
+                let remaining = MAX_EXPANDED_SYMBOL_SHAPES.saturating_sub(out.len());
+                out.extend(eval.into_iter().take(remaining));
             }
         }
         out
@@ -406,12 +427,15 @@ impl SymbolDef {
         current_frame: usize,
     ) -> usize {
         let fc = self.timeline.total_frames.max(1);
-        let base = binding.first_frame.min(fc - 1);
         let elapsed = current_frame.saturating_sub(kf_start_frame);
         match binding.loop_mode {
-            SymbolLoopMode::Loop => base.saturating_add(elapsed) % fc,
-            SymbolLoopMode::PlayOnce => base.saturating_add(elapsed).min(fc - 1),
-            SymbolLoopMode::SingleFrame => base,
+            SymbolLoopMode::Loop => (binding.first_frame % fc + elapsed % fc) % fc,
+            SymbolLoopMode::PlayOnce => binding
+                .first_frame
+                .min(fc - 1)
+                .saturating_add(elapsed)
+                .min(fc - 1),
+            SymbolLoopMode::SingleFrame => binding.first_frame.min(fc - 1),
         }
     }
 
@@ -537,7 +561,7 @@ impl SymbolDef {
         }
         *stage_to_local_cache = next_cache;
         self.timeline = next_tl;
-        self.revision = self.revision.wrapping_add(1);
+        self.revision = crate::vector_engine::next_mesh_revision();
     }
 }
 
@@ -556,10 +580,17 @@ pub(crate) struct SymbolEditSession {
 }
 
 impl SymbolEditSession {
-    /// Undo 履歴保存時などに、退避中の親タイムライン・背景セル・ローカル形状キャッシュの一時メッシュを破棄する
-    pub(crate) fn strip_transient_caches(&mut self) {
-        self.parent_timeline.strip_transient_caches();
-        self.backdrop_cel.strip_transient_caches();
+    /// Undo 履歴保存時などに、退避中の親タイムライン（未変更セルは `prev` と `Arc` 共有）・背景セル・ローカル形状キャッシュの一時メッシュを破棄する
+    pub(crate) fn strip_transient_caches_with_prev(&mut self, prev: Option<&Self>) {
+        self.parent_timeline
+            .strip_transient_caches_with_prev(prev.map(|ps| &ps.parent_timeline));
+        if let Some(ps) =
+            prev.filter(|ps| ps.backdrop_cel.revision == self.backdrop_cel.revision)
+        {
+            self.backdrop_cel = ps.backdrop_cel.clone();
+        } else {
+            self.backdrop_cel.strip_transient_caches();
+        }
         self.stage_to_local_cache.strip_transient_caches();
     }
 }
@@ -593,9 +624,9 @@ impl Default for SymbolManager {
 }
 
 impl SymbolManager {
-    /// シンボルライブラリまたは編集スタックの世代番号 `revision` をインクリメントする
+    /// シンボルライブラリまたは編集スタックの世代番号 `revision` を一意な値へ更新する
     pub(crate) fn bump_revision(&mut self) {
-        self.revision = self.revision.wrapping_add(1);
+        self.revision = crate::vector_engine::next_mesh_revision();
     }
 
     /// 新しいグループ / シンボルインスタンス用の一意な `group_id` を採番して返す
@@ -689,7 +720,7 @@ impl SymbolManager {
             return false;
         }
         sym.name = new_name;
-        sym.revision = sym.revision.wrapping_add(1);
+        sym.revision = crate::vector_engine::next_mesh_revision();
         self.bump_revision();
         true
     }
@@ -748,14 +779,31 @@ impl SymbolManager {
         if !self.library.iter().any(|s| s.id == symbol_id) {
             return false;
         }
+        let mut detached_inner_gid_map: Vec<((u64, u64), u64)> = Vec::new();
         for s in canvas_shapes.iter_mut() {
-            if s.symbol_instance.is_some_and(|b| b.symbol_id == symbol_id) {
+            if let Some(b) = s.symbol_instance.filter(|b| b.symbol_id == symbol_id) {
                 s.symbol_instance = None;
+                if let Some(pos) = s.group_path.iter().position(|&g| g == b.instance_gid) {
+                    for inner_gid in &mut s.group_path[(pos + 1)..] {
+                        let key = (b.instance_gid, *inner_gid);
+                        let mapped = if let Some(&(_, m)) =
+                            detached_inner_gid_map.iter().find(|&&(k, _)| k == key)
+                        {
+                            m
+                        } else {
+                            let id = self.next_group_id;
+                            self.next_group_id = self.next_group_id.saturating_add(1);
+                            detached_inner_gid_map.push((key, id));
+                            id
+                        };
+                        *inner_gid = mapped;
+                    }
+                }
             }
         }
         canvas_shapes.retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
         for layer in &mut timeline.layers {
-            layer.detach_symbol_id(symbol_id, &self.library);
+            layer.detach_symbol_id(symbol_id, &self.library, &mut self.next_group_id);
         }
         for i in 0..self.library.len() {
             if self.library[i].id == symbol_id {
@@ -763,19 +811,20 @@ impl SymbolManager {
             }
             let mut layers = std::mem::take(&mut self.library[i].timeline.layers);
             for layer in &mut layers {
-                layer.detach_symbol_id(symbol_id, &self.library);
+                layer.detach_symbol_id(symbol_id, &self.library, &mut self.next_group_id);
             }
             self.library[i].timeline.layers = layers;
-            self.library[i].revision = self.library[i].revision.wrapping_add(1);
+            self.library[i].revision = crate::vector_engine::next_mesh_revision();
         }
         for sess in &mut self.edit_stack {
             for layer in &mut sess.parent_timeline.layers {
-                layer.detach_symbol_id(symbol_id, &self.library);
+                layer.detach_symbol_id(symbol_id, &self.library, &mut self.next_group_id);
             }
             sess.backdrop_cel.detach_symbol_id(
                 symbol_id,
                 sess.parent_timeline.current_frame,
                 &self.library,
+                &mut self.next_group_id,
             );
         }
         self.library.retain(|s| s.id != symbol_id);

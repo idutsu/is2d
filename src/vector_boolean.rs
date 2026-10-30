@@ -82,22 +82,36 @@ fn merge_homogeneous_batch_into_canvas(
     let target_group_path = incoming[0].group_path.clone();
     let test_bbox = union_bounding_boxes(&incoming).inflate(1.5, 1.5);
 
-    let insert_limit = if target_group_path.is_empty() {
-        canvas
-            .iter()
-            .rposition(|s| s.layer_id == target_layer_id)
-            .map(|pos| pos + 1)
-            .unwrap_or(canvas.len())
-    } else {
-        canvas
-            .iter()
-            .rposition(|s| {
-                s.layer_id == target_layer_id && s.is_in_editing_scope(&target_group_path)
+    let insert_limit = canvas
+        .iter()
+        .rposition(|s| {
+            s.layer_id == target_layer_id
+                && s.group_path == target_group_path
+                && s.symbol_instance.is_none()
+        })
+        .map(|pos| pos + 1)
+        .or_else(|| {
+            canvas.iter().position(|s| {
+                s.layer_id == target_layer_id
+                    && s.is_in_editing_scope(&target_group_path)
+                    && !s.is_raw_at_scope(&target_group_path)
             })
-            .or_else(|| canvas.iter().rposition(|s| s.layer_id == target_layer_id))
-            .map(|pos| pos + 1)
-            .unwrap_or(canvas.len())
-    };
+        })
+        .or_else(|| {
+            canvas
+                .iter()
+                .rposition(|s| {
+                    s.layer_id == target_layer_id && s.is_in_editing_scope(&target_group_path)
+                })
+                .map(|pos| pos + 1)
+        })
+        .or_else(|| {
+            canvas
+                .iter()
+                .rposition(|s| s.layer_id == target_layer_id)
+                .map(|pos| pos + 1)
+        })
+        .unwrap_or(canvas.len());
     let trailing_outside = canvas.split_off(insert_limit);
 
     let mut updated_canvas =
@@ -106,7 +120,10 @@ fn merge_homogeneous_batch_into_canvas(
     let mut prepared_clip: Option<PreparedClip> = None;
 
     for existing in canvas.drain(..) {
-        if existing.layer_id != target_layer_id || existing.group_path != target_group_path {
+        if existing.layer_id != target_layer_id
+            || existing.group_path != target_group_path
+            || existing.symbol_instance.is_some()
+        {
             updated_canvas.push(existing);
             continue;
         }
@@ -416,7 +433,7 @@ fn reconstruct_fill_shape_from_rings(
     let exterior = reconstruct_or_refit_quad_contour(&poly_shape[0], quad_table, grid, true)?;
     let (_, ext_perim) = ring_area_and_perimeter_f64(&poly_shape[0]);
     let hole_scale = if ext_perim < 16.0 {
-        (ext_perim / 16.0).clamp(0.05, 1.0)
+        (ext_perim / 16.0).clamp(0.005, 1.0)
     } else {
         1.0
     };
@@ -429,7 +446,12 @@ fn reconstruct_fill_shape_from_rings(
                 return true;
             }
             let (a, p) = ring_area_and_perimeter_f64(hole_ring);
-            a >= min_hole_area && (a / p.max(1e-5)) >= min_hole_thickness
+            let circularity = (4.0 * std::f64::consts::PI * a) / (p * p).max(1e-9);
+            if circularity >= 0.18 {
+                a >= 1e-4
+            } else {
+                a >= min_hole_area && (a / p.max(1e-5)) >= min_hole_thickness
+            }
         })
         .filter_map(|hole_ring| {
             reconstruct_or_refit_quad_contour(hole_ring, quad_table, grid, false)
@@ -878,7 +900,7 @@ fn reconstruct_or_refit_quad_contour(
 
     let (_, ring_perim) = ring_area_and_perimeter_f64(ring_f64);
     let scale = if ring_perim < 4.0 {
-        (ring_perim / 4.0).clamp(0.02, 1.0)
+        (ring_perim / 4.0).clamp(0.005, 1.0)
     } else {
         1.0
     };

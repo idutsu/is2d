@@ -93,10 +93,20 @@ pub(crate) fn punch_through_opposite_edge(
     (anchor_a, anchor_b): (Point, Point),
     (start_pt, drag_pt): (Point, Point),
 ) -> Point {
+    let bbox = shape.bounding_box();
+    let min_dim = bbox.width().min(bbox.height());
+    let chord_len = (anchor_b - anchor_a).hypot();
+    let scale = (min_dim / 16.0).min(chord_len / 24.0).clamp(0.04, 1.0);
+    let min_drag = 6.0 * scale;
+    let min_anchor_dist = 10.0 * scale;
+    let near_thresh = 6.0 * scale;
+    let min_near_anchor = 8.0 * scale;
+    let punch_push = 4.5 * scale;
+
     let drag_vec = drag_pt - start_pt;
-    if drag_vec.hypot() <= 6.0
-        || (drag_pt - anchor_a).hypot() <= 10.0
-        || (drag_pt - anchor_b).hypot() <= 10.0
+    if drag_vec.hypot() <= min_drag
+        || (drag_pt - anchor_a).hypot() <= min_anchor_dist
+        || (drag_pt - anchor_b).hypot() <= min_anchor_dist
     {
         return drag_pt;
     }
@@ -106,16 +116,16 @@ pub(crate) fn punch_through_opposite_edge(
     for (c_idx, c) in shape.contours().enumerate() {
         for (s_idx, seg) in c.segments.iter().enumerate() {
             if (c_idx == contour_idx && ignore_segs.contains(&s_idx))
-                || !quad_control_bbox_contains(seg, drag_pt, 6.0)
+                || !quad_control_bbox_contains(seg, drag_pt, near_thresh)
             {
                 continue;
             }
-            let near = seg.nearest(drag_pt, 0.05);
+            let near = seg.nearest(drag_pt, 0.05 * scale);
             let d = near.distance_sq.sqrt();
-            if d <= 6.0 {
+            if d <= near_thresh {
                 let near_pt = seg.eval(near.t);
-                if (near_pt - anchor_a).hypot() > 8.0
-                    && (near_pt - anchor_b).hypot() > 8.0
+                if (near_pt - anchor_a).hypot() > min_near_anchor
+                    && (near_pt - anchor_b).hypot() > min_near_anchor
                     && best_near.is_none_or(|(bd, _)| d < bd)
                 {
                     best_near = Some((d, near_pt));
@@ -124,7 +134,7 @@ pub(crate) fn punch_through_opposite_edge(
         }
     }
     if let Some((_, near_pt)) = best_near {
-        let punched = near_pt + drag_dir * 4.5;
+        let punched = near_pt + drag_dir * punch_push;
         if (punched - start_pt).dot(drag_dir) > (drag_pt - start_pt).dot(drag_dir) {
             return punched;
         }
@@ -329,6 +339,7 @@ pub(crate) fn ungroup_selected_shapes(app: &mut Is2dApp) -> bool {
 
     let depth = app.canvas.editing_group_path.len();
     let mut any_became_raw = false;
+    let mut detached_inner_gid_map: Vec<((u64, u64), u64)> = Vec::new();
     for &sel_idx in &app.canvas.selected_shapes {
         if let Some(shape) = app.canvas.shapes.get_mut(sel_idx) {
             if shape.is_in_editing_scope(&app.canvas.editing_group_path)
@@ -340,6 +351,19 @@ pub(crate) fn ungroup_selected_shapes(app: &mut Is2dApp) -> bool {
                     .is_some_and(|b| b.instance_gid == removed_gid)
                 {
                     shape.symbol_instance = None;
+                    for inner_gid in &mut shape.group_path[depth..] {
+                        let key = (removed_gid, *inner_gid);
+                        let mapped = if let Some(&(_, m)) =
+                            detached_inner_gid_map.iter().find(|&&(k, _)| k == key)
+                        {
+                            m
+                        } else {
+                            let alloc = app.symbols.alloc_group_id();
+                            detached_inner_gid_map.push((key, alloc));
+                            alloc
+                        };
+                        *inner_gid = mapped;
+                    }
                 }
                 if shape.group_path.len() == depth && !shape.exterior.segments.is_empty() {
                     any_became_raw = true;
@@ -418,12 +442,30 @@ pub(crate) fn toggle_shape_selection(app: &mut Is2dApp, shape_idx: usize) {
     let unit = app.canvas.expand_to_group_unit(shape_idx);
     let (sel_mask, _) = app.canvas.selected_shape_mask();
     if sel_mask.get(shape_idx).copied().unwrap_or(false) {
-        app.canvas
-            .selected_shapes
-            .retain(|i| unit.binary_search(i).is_err());
-        if app.canvas.selected_shapes.is_empty() && !app.canvas.selection_modified {
+        if app.canvas.selection_modified {
+            let remaining_ids: Vec<u64> = app
+                .canvas
+                .selected_shapes
+                .iter()
+                .copied()
+                .filter(|i| unit.binary_search(i).is_err())
+                .filter_map(|i| app.canvas.shapes.get(i).map(|s| s.shape_id))
+                .collect();
             if let Some(unsliced) = app.canvas.take_unsliced_snapshot() {
+                let all_sel_ids = app.canvas.selected_shape_ids();
                 app.canvas.shapes = unsliced;
+                app.canvas.restore_selection_by_shape_ids(&all_sel_ids);
+            }
+            flush_modified_raw_selection_merge(app);
+            app.canvas.restore_selection_by_shape_ids(&remaining_ids);
+        } else {
+            app.canvas
+                .selected_shapes
+                .retain(|i| unit.binary_search(i).is_err());
+            if app.canvas.selected_shapes.is_empty() {
+                if let Some(unsliced) = app.canvas.take_unsliced_snapshot() {
+                    app.canvas.shapes = unsliced;
+                }
             }
         }
     } else {
@@ -766,6 +808,7 @@ pub(crate) fn copy_selected_shapes(app: &mut Is2dApp) -> bool {
         s.strip_transient_caches();
     }
     app.canvas.clipboard = extracted;
+    app.canvas.pending_os_clipboard_sync = true;
     app.canvas.paste_count = 0;
     crate::project_io::capture_clipboard_symbols(app);
     true
@@ -866,11 +909,27 @@ pub(crate) fn insert_and_select_shapes_in_scope(
     }
 }
 
-/// 選択中の図形群を現在の編集スコープ内の最前面へ並べ替え、レイヤー順に整列させる
+/// 選択中の生シェイプ群を現在の編集スコープ内の最前面へ並べ替え、レイヤー順に整列させる
+/// （グループ・シンボルのみが選択されている場合は既存の重ね順を維持したままキャッシュを再構築する）
 pub(crate) fn reorder_selected_to_scope_front(app: &mut Is2dApp) -> bool {
     let (is_sel, any_valid) = app.canvas.selected_shape_mask();
     if !any_valid {
         return false;
+    }
+    let scope = app.canvas.editing_group_path.clone();
+    let any_raw_selected = app
+        .canvas
+        .shapes
+        .iter()
+        .enumerate()
+        .any(|(idx, s)| is_sel[idx] && s.is_raw_at_scope(&scope));
+    if !any_raw_selected {
+        for (idx, shape) in app.canvas.shapes.iter_mut().enumerate() {
+            if is_sel[idx] && shape.symbol_instance.is_none() {
+                shape.rebuild_cache();
+            }
+        }
+        return true;
     }
 
     let insert_limit = app.canvas.scope_insert_index();
@@ -967,7 +1026,7 @@ pub(crate) fn draw_flash_selection_overlay(
             app,
             painter,
             shape_ref,
-            Stroke::new(1.5, Color32::from_rgb(0, 175, 255)),
+            Stroke::new(1.5_f32, Color32::from_rgb(0, 175, 255)),
             false,
         );
     }
@@ -1023,7 +1082,7 @@ pub(crate) fn draw_shape_contour_lines(
             if show_anchors {
                 let a = app.viewport.world_to_screen(seg.p0);
                 painter.circle_filled(a, 3.0, Color32::WHITE);
-                painter.circle_stroke(a, 3.0, Stroke::new(1.2, Color32::from_rgb(30, 120, 230)));
+                painter.circle_stroke(a, 3.0, Stroke::new(1.2_f32, Color32::from_rgb(30, 120, 230)));
             }
         }
     }
@@ -1047,21 +1106,28 @@ pub(crate) fn handle_select_tool_input(
             let alt_held = ui.input(|i| i.modifiers.alt);
             if response.double_clicked() {
                 if let Some(pt) = mouse_pt {
-                    if !enter_group_at(app, pt) && app.canvas.topmost_shape_at(pt).is_none() {
-                        exit_current_group(app);
-                    }
+                    handle_canvas_double_click(app, pt);
                 }
                 return;
             }
             if response.drag_started() {
-                if let Some(pt) = mouse_pt {
-                    start_reshape_drag(app, pt, shift_held, alt_held);
+                let press_pt = ui
+                    .input(|i| i.pointer.press_origin())
+                    .map(|p| app.viewport.screen_to_world(p));
+                if let Some(start_pt) = press_pt.or(mouse_pt) {
+                    start_reshape_drag(app, start_pt, shift_held, alt_held);
+                    if let Some(curr_pt) = mouse_pt {
+                        if (curr_pt - start_pt).hypot() > 1e-6 {
+                            update_reshape_drag(app, curr_pt);
+                        }
+                    }
                 }
             } else if response.dragged() {
                 if let Some(pt) = mouse_pt {
                     update_reshape_drag(app, pt);
                 }
-            } else if response.drag_stopped() {
+            }
+            if response.drag_stopped() {
                 finish_reshape_drag(app, mouse_pt);
             } else if response.clicked() {
                 if let Some(pt) = mouse_pt {
@@ -1150,12 +1216,14 @@ pub(crate) fn begin_move_selection_drag(
     pt: Point,
     alt_held: bool,
 ) -> MoveSelectionDrag {
-    let undo_snapshot = if alt_held {
-        duplicate_selected_shapes_for_alt_drag(app)
+    if alt_held {
+        let orig_selected_ids = app.canvas.selected_shape_ids();
+        let undo_snapshot = duplicate_selected_shapes_for_alt_drag(app);
+        MoveSelectionDrag::new(pt, undo_snapshot).with_orig_selected_ids(orig_selected_ids)
     } else {
-        app.canvas.snapshot_for_drag()
-    };
-    MoveSelectionDrag::new(pt, undo_snapshot)
+        let undo_snapshot = app.canvas.snapshot_for_drag();
+        MoveSelectionDrag::new(pt, undo_snapshot)
+    }
 }
 
 fn start_reshape_drag(app: &mut Is2dApp, pt: Point, shift_held: bool, alt_held: bool) {
@@ -1343,7 +1411,14 @@ fn finish_reshape_drag(app: &mut Is2dApp, mouse_pt: Option<Point>) {
     };
     match finished_drag {
         SelectDragState::MoveShape(drag) => {
+            let min_move = 1.0 / (app.viewport.zoom as f64);
+            let rolled_back =
+                drag.total_delta.hypot() <= min_move || app.canvas.selected_shapes.is_empty();
+            let orig_ids = drag.orig_selected_ids;
             finish_move_selection_drag(app, drag.total_delta, drag.undo_snapshot);
+            if rolled_back && !orig_ids.is_empty() {
+                app.canvas.restore_selection_by_shape_ids(&orig_ids);
+            }
         }
         SelectDragState::MarqueeSelect(m) => {
             let end_pos = mouse_pt.unwrap_or(m.current_pos);
@@ -1405,6 +1480,13 @@ fn finish_reshape_drag(app: &mut Is2dApp, mouse_pt: Option<Point>) {
     }
 }
 
+/// キャンバス上のダブルクリックによるグループ/シンボルへのインプレイス進入、または空白背景ダブルクリックによる親階層への復帰を処理する
+pub(crate) fn handle_canvas_double_click(app: &mut Is2dApp, pt: Point) {
+    if !enter_group_at(app, pt) && app.canvas.topmost_shape_at(pt).is_none() {
+        exit_current_group(app);
+    }
+}
+
 fn handle_reshape_click(app: &mut Is2dApp, pt: Point, shift_held: bool) {
     app.ui.inspect_timeline_frame = false;
     let zoom = app.viewport.zoom;
@@ -1420,8 +1502,24 @@ fn handle_reshape_click(app: &mut Is2dApp, pt: Point, shift_held: bool) {
     } else {
         match hit_shape {
             Some(shape_idx) if app.canvas.selected_shapes.contains(&shape_idx) => {
-                app.canvas.selected_shapes = app.canvas.expand_to_group_unit(shape_idx);
+                let unit = app.canvas.expand_to_group_unit(shape_idx);
+                if app.canvas.selection_modified && app.canvas.selected_shapes != unit {
+                    let unit_ids: Vec<u64> = unit
+                        .iter()
+                        .filter_map(|&i| app.canvas.shapes.get(i).map(|s| s.shape_id))
+                        .collect();
+                    if let Some(unsliced) = app.canvas.take_unsliced_snapshot() {
+                        let all_sel_ids = app.canvas.selected_shape_ids();
+                        app.canvas.shapes = unsliced;
+                        app.canvas.restore_selection_by_shape_ids(&all_sel_ids);
+                    }
+                    flush_modified_raw_selection_merge(app);
+                    app.canvas.restore_selection_by_shape_ids(&unit_ids);
+                } else {
+                    app.canvas.selected_shapes = unit;
+                }
                 app.canvas.transform_pivot = None;
+                crate::canvas_tool::sync_timeline_layer_from_canvas_selection(app);
             }
             Some(_) => {
                 select_single_shape_at(app, pt);
@@ -1539,6 +1637,8 @@ pub(crate) fn compute_hover_target(
         }
     }
 
+    let topmost_fill_idx = canvas.topmost_shape_at(mouse_pt);
+
     // 1. 輪郭の角（アンカーポイント）への近接判定
     if sub_mode != SelectSubMode::AddAnchor {
         let v_radius = if sub_mode == SelectSubMode::DeleteAnchor {
@@ -1548,6 +1648,9 @@ pub(crate) fn compute_hover_target(
         };
         let mut best_vertex: Option<(f64, HoverTarget)> = None;
         for (s_idx, shape) in canvas.shapes.iter().enumerate().rev() {
+            if topmost_fill_idx.is_some_and(|top| s_idx < top) {
+                continue;
+            }
             let Some(bbox) = shape.geometry_bounding_box() else {
                 continue;
             };
@@ -1564,6 +1667,13 @@ pub(crate) fn compute_hover_target(
                 for (seg_idx, seg) in contour.segments.iter().enumerate() {
                     let dist = (mouse_pt - seg.p0).hypot();
                     if dist <= v_radius && best_vertex.as_ref().is_none_or(|(d, _)| dist < *d) {
+                        let occluded_by_front = (s_idx + 1..canvas.shapes.len()).any(|front_idx| {
+                            canvas.shapes[front_idx].is_in_editing_scope(&canvas.editing_group_path)
+                                && canvas.shapes[front_idx].contains_point(seg.p0)
+                        });
+                        if occluded_by_front {
+                            continue;
+                        }
                         best_vertex = Some((
                             dist,
                             HoverTarget::Vertex {
@@ -1588,6 +1698,9 @@ pub(crate) fn compute_hover_target(
     // 2. 輪郭の2次ベジェ曲線セグメント（エッジ）への近接判定
     let mut best_edge: Option<(f64, HoverTarget)> = None;
     for (s_idx, shape) in canvas.shapes.iter().enumerate().rev() {
+        if topmost_fill_idx.is_some_and(|top| s_idx < top) {
+            continue;
+        }
         let Some(bbox) = shape.geometry_bounding_box() else {
             continue;
         };
@@ -1621,6 +1734,13 @@ pub(crate) fn compute_hover_target(
                 };
                 let dist = nearest.distance_sq.sqrt();
                 if dist <= max_dist && best_edge.as_ref().is_none_or(|(d, _)| dist < *d) {
+                    let occluded_by_front = (s_idx + 1..canvas.shapes.len()).any(|front_idx| {
+                        canvas.shapes[front_idx].is_in_editing_scope(&canvas.editing_group_path)
+                            && canvas.shapes[front_idx].contains_point(eval_pt)
+                    });
+                    if occluded_by_front {
+                        continue;
+                    }
                     best_edge = Some((
                         dist,
                         HoverTarget::Edge {
@@ -1647,7 +1767,7 @@ pub(crate) fn compute_hover_target(
     }
 
     // 3. シェイプ内部の塗り領域判定
-    if let Some(s_idx) = canvas.topmost_shape_at(mouse_pt) {
+    if let Some(s_idx) = topmost_fill_idx {
         return HoverTarget::Fill { shape_idx: s_idx };
     }
 
@@ -1718,7 +1838,7 @@ pub(crate) fn draw_select_tool_cursor(
             ctx.set_cursor_icon(CursorIcon::Grabbing);
             if let Some(snap_pt) = snapped_to {
                 let sp = app.viewport.world_to_screen(*snap_pt);
-                painter.circle_stroke(sp, 9.0, Stroke::new(2.5, Color32::from_rgb(255, 50, 140)));
+                painter.circle_stroke(sp, 9.0, Stroke::new(2.5_f32, Color32::from_rgb(255, 50, 140)));
                 painter.circle_filled(sp, 4.0, Color32::from_rgb(255, 50, 140));
             }
             draw_flash_corner_cursor_badge(painter, pos);
@@ -1759,7 +1879,7 @@ fn draw_select_sub_mode_cursor(
                 }
                 let cp = app.viewport.world_to_screen(closest_pos);
                 painter.circle_filled(cp, 5.5, Color32::from_rgb(30, 200, 95));
-                painter.circle_stroke(cp, 5.5, Stroke::new(2.0, Color32::WHITE));
+                painter.circle_stroke(cp, 5.5, Stroke::new(2.0_f32, Color32::WHITE));
             } else {
                 ctx.set_cursor_icon(CursorIcon::Default);
             }
@@ -1770,7 +1890,7 @@ fn draw_select_sub_mode_cursor(
                 ctx.set_cursor_icon(CursorIcon::PointingHand);
                 let vp = app.viewport.world_to_screen(v_pos);
                 painter.circle_filled(vp, 6.0, Color32::from_rgb(235, 55, 55));
-                painter.circle_stroke(vp, 6.0, Stroke::new(2.0, Color32::WHITE));
+                painter.circle_stroke(vp, 6.0, Stroke::new(2.0_f32, Color32::WHITE));
             } else {
                 ctx.set_cursor_icon(CursorIcon::Default);
             }
@@ -1806,13 +1926,13 @@ fn draw_reshape_hover_cursor(
                         painter.circle_stroke(
                             p,
                             3.2,
-                            Stroke::new(1.2, Color32::from_rgb(30, 130, 240)),
+                            Stroke::new(1.2_f32, Color32::from_rgb(30, 130, 240)),
                         );
                     }
                 }
                 let vp = app.viewport.world_to_screen(v_pos);
                 painter.circle_filled(vp, 5.5, Color32::from_rgb(255, 120, 40));
-                painter.circle_stroke(vp, 5.5, Stroke::new(2.0, Color32::WHITE));
+                painter.circle_stroke(vp, 5.5, Stroke::new(2.0_f32, Color32::WHITE));
             }
             draw_flash_corner_cursor_badge(painter, pos);
         }
@@ -1859,14 +1979,14 @@ pub(crate) fn draw_highlighted_quad_segment(app: &Is2dApp, painter: &egui::Paint
                 app.viewport.world_to_screen(prev),
                 app.viewport.world_to_screen(curr),
             ],
-            Stroke::new(3.0, Color32::from_rgb(0, 175, 255)),
+            Stroke::new(3.0_f32, Color32::from_rgb(0, 175, 255)),
         );
         prev = curr;
     }
     for end_pt in [seg.p0, seg.p2] {
         let p = app.viewport.world_to_screen(end_pt);
         painter.circle_filled(p, 4.0, Color32::WHITE);
-        painter.circle_stroke(p, 4.0, Stroke::new(1.8, Color32::from_rgb(0, 140, 230)));
+        painter.circle_stroke(p, 4.0, Stroke::new(1.8_f32, Color32::from_rgb(0, 140, 230)));
     }
 }
 
@@ -1883,7 +2003,7 @@ fn draw_flash_curve_cursor_badge(painter: &egui::Painter, cursor: Pos2) {
         let curr = arc.eval(k as f64 / 10.0);
         painter.line_segment(
             [to_pos2(prev), to_pos2(curr)],
-            Stroke::new(2.2, Color32::from_rgb(20, 20, 25)),
+            Stroke::new(2.2_f32, Color32::from_rgb(20, 20, 25)),
         );
         prev = curr;
     }
@@ -1895,7 +2015,7 @@ fn draw_flash_corner_cursor_badge(painter: &egui::Painter, cursor: Pos2) {
     let p0 = Pos2::new(base.x - 6.0, base.y + 5.0);
     let p1 = Pos2::new(base.x + 1.0, base.y - 5.0);
     let p2 = Pos2::new(base.x + 8.0, base.y + 5.0);
-    let stroke = Stroke::new(2.2, Color32::from_rgb(20, 20, 25));
+    let stroke = Stroke::new(2.2_f32, Color32::from_rgb(20, 20, 25));
     painter.line_segment([p0, p1], stroke);
     painter.line_segment([p1, p2], stroke);
 }
@@ -1909,8 +2029,8 @@ fn draw_anchor_edit_cursor_badge(painter: &egui::Painter, cursor: Pos2, is_plus:
         Color32::from_rgb(230, 55, 55)
     };
     painter.circle_filled(base, 8.0, fill);
-    painter.circle_stroke(base, 8.0, Stroke::new(1.5, Color32::WHITE));
-    let stroke = Stroke::new(2.2, Color32::WHITE);
+    painter.circle_stroke(base, 8.0, Stroke::new(1.5_f32, Color32::WHITE));
+    let stroke = Stroke::new(2.2_f32, Color32::WHITE);
     painter.line_segment(
         [
             Pos2::new(base.x - 4.5, base.y),

@@ -151,19 +151,10 @@ pub(crate) struct UndoEntry {
 impl UndoEntry {
     /// スナップショットから随時再生成可能な一時メッシュキャッシュ（`fill_mesh`, `selection_mesh`, `CelMeshCache`）を除去し、
     /// 直前の履歴スナップショット `prev_timeline` と未変更のセルは `Arc` を $O(1)$ 共有した軽量状態にする
+    /// （`library` と `symbol_edit_stack` は `UndoHistory::snapshot_symbols` 生成時点でキャッシュ除去＆シンボル単位のCoW共有済み）
     pub(crate) fn strip_transient_caches(mut self, prev_timeline: Option<&Timeline>) -> Self {
         self.timeline
             .strip_transient_caches_with_prev(prev_timeline);
-        if let Some(lib) = std::sync::Arc::get_mut(&mut self.library) {
-            for sym in lib {
-                sym.strip_transient_caches();
-            }
-        }
-        if let Some(stack) = std::sync::Arc::get_mut(&mut self.symbol_edit_stack) {
-            for sess in stack {
-                sess.strip_transient_caches();
-            }
-        }
         self
     }
 }
@@ -212,7 +203,8 @@ impl UndoHistory {
     }
 
     /// シンボルライブラリおよび編集スタックが直近の履歴エントリから未変更（同一 `revision`）であれば
-    /// `Arc` ポインタを $O(1)$ で共有し、変更されている場合のみクローン＆キャッシュ除去して新しい `Arc` を返す
+    /// `Arc` ポインタを $O(1)$ で共有し、一部シンボルのみ変更されている場合は未変更シンボル（同一 `id` かつ `revision`）および
+    /// 退避中の親タイムライン未変更セルの `Arc` を引き継ぎながら差分シンボルのみキャッシュ除去して新しい `Arc` を返す
     pub(crate) fn snapshot_symbols(
         &self,
         symbols: &SymbolManager,
@@ -221,25 +213,43 @@ impl UndoHistory {
         std::sync::Arc<Vec<SymbolEditSession>>,
         u64,
     ) {
-        if let Some(reused) = self
-            .undo_stack
-            .back()
-            .or_else(|| self.redo_stack.last())
-            .filter(|e| e.symbols_revision == symbols.revision)
-        {
+        let prev_entry = self.undo_stack.back().or_else(|| self.redo_stack.last());
+        if let Some(reused) = prev_entry.filter(|e| e.symbols_revision == symbols.revision) {
             return (
                 std::sync::Arc::clone(&reused.library),
                 std::sync::Arc::clone(&reused.symbol_edit_stack),
                 symbols.revision,
             );
         }
-        let mut lib = symbols.library.clone();
-        for sym in &mut lib {
-            sym.strip_transient_caches();
+        let mut lib = Vec::with_capacity(symbols.library.len());
+        for sym in &symbols.library {
+            if let Some(prev_sym) = prev_entry.and_then(|pe| {
+                pe.library
+                    .iter()
+                    .find(|s| s.id == sym.id && s.revision == sym.revision)
+            }) {
+                lib.push(prev_sym.clone());
+            } else {
+                let prev_sym_tl = prev_entry.and_then(|pe| {
+                    pe.library
+                        .iter()
+                        .find(|s| s.id == sym.id)
+                        .map(|s| &s.timeline)
+                });
+                let mut cloned = sym.clone();
+                cloned.timeline.strip_transient_caches_with_prev(prev_sym_tl);
+                cloned.clear_preview_and_anim_caches();
+                lib.push(cloned);
+            }
         }
-        let mut stack = symbols.edit_stack.clone();
-        for sess in &mut stack {
-            sess.strip_transient_caches();
+        let mut stack = Vec::with_capacity(symbols.edit_stack.len());
+        for (idx, sess) in symbols.edit_stack.iter().enumerate() {
+            let prev_sess = prev_entry
+                .and_then(|pe| pe.symbol_edit_stack.get(idx))
+                .filter(|ps| ps.symbol_id == sess.symbol_id && ps.instance_gid == sess.instance_gid);
+            let mut cloned_sess = sess.clone();
+            cloned_sess.strip_transient_caches_with_prev(prev_sess);
+            stack.push(cloned_sess);
         }
         (
             std::sync::Arc::new(lib),
@@ -560,20 +570,48 @@ impl Is2dApp {
         if !self.canvas.selected_shapes.is_empty() {
             let step = if shift { 10.0 } else { 1.0 };
             let mut delta = kurbo::Vec2::ZERO;
-            if i.key_pressed(Key::ArrowLeft) {
-                delta.x -= step;
-            }
-            if i.key_pressed(Key::ArrowRight) {
-                delta.x += step;
-            }
-            if i.key_pressed(Key::ArrowUp) {
-                delta.y -= step;
-            }
-            if i.key_pressed(Key::ArrowDown) {
-                delta.y += step;
+            let mut any_non_repeat = false;
+            for ev in &i.events {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat,
+                    ..
+                } = ev
+                {
+                    match key {
+                        Key::ArrowLeft => {
+                            delta.x -= step;
+                            any_non_repeat |= !*repeat;
+                        }
+                        Key::ArrowRight => {
+                            delta.x += step;
+                            any_non_repeat |= !*repeat;
+                        }
+                        Key::ArrowUp => {
+                            delta.y -= step;
+                            any_non_repeat |= !*repeat;
+                        }
+                        Key::ArrowDown => {
+                            delta.y += step;
+                            any_non_repeat |= !*repeat;
+                        }
+                        _ => {}
+                    }
+                }
             }
             if delta != kurbo::Vec2::ZERO {
-                let _ = tool_select::nudge_selected_shapes(self, delta);
+                if any_non_repeat {
+                    let _ = tool_select::nudge_selected_shapes(self, delta);
+                } else {
+                    canvas_tool::stop_playback(self);
+                    canvas_tool::cancel_active_drag(self);
+                    self.canvas.translate_selected(delta);
+                    if tool_select::reorder_selected_to_scope_front(self) {
+                        self.canvas.selection_modified = true;
+                        canvas_tool::sync_shapes_to_timeline(self);
+                    }
+                }
                 return;
             }
         }
@@ -597,7 +635,17 @@ impl Is2dApp {
             }
         } else if i.key_pressed(Key::F7) {
             timeline_ui::timeline_insert_keyframe(self, false);
-        } else if i.key_pressed(Key::F8) {
+        } else if i.events.iter().any(|ev| {
+            matches!(
+                ev,
+                egui::Event::Key {
+                    key: Key::F8,
+                    pressed: true,
+                    repeat: false,
+                    ..
+                }
+            )
+        }) {
             tool_transform::convert_selection_to_symbol(self);
         } else if i.key_pressed(Key::F5) {
             if shift {
@@ -612,12 +660,13 @@ impl Is2dApp {
         } else if let Some(tool) = Tool::from_shortcut_input(i) {
             canvas_tool::set_tool(self, tool);
         } else if i.key_pressed(Key::Escape) {
+            canvas_tool::cancel_active_drag(self);
             if !self.canvas.selected_shapes.is_empty() {
                 tool_select::clear_selection(self);
             } else {
                 tool_select::exit_current_group(self);
             }
-            canvas_tool::set_tool(self, Tool::Select);
+            self.ui.select_sub_mode = SelectSubMode::Reshape;
         } else if self.ui.tool == Tool::Select {
             let plus_pressed = i.key_pressed(Key::Plus)
                 || i.key_pressed(Key::Equals)
@@ -700,10 +749,8 @@ impl Is2dApp {
     fn is_current_tool_allowed(&self) -> bool {
         match self.ui.tool {
             Tool::Eyedropper => true,
-            Tool::Brush => self.timeline.is_active_layer_editable(),
-            Tool::Eraser | Tool::Bucket | Tool::Select | Tool::Transform => {
-                self.timeline.has_any_editable_layer()
-            }
+            Tool::Brush | Tool::Eraser | Tool::Bucket => self.timeline.is_active_layer_editable(),
+            Tool::Select | Tool::Transform => self.timeline.has_any_editable_layer(),
         }
     }
 
@@ -840,7 +887,7 @@ impl Is2dApp {
                 Vec2::new(badge_w, badge_h),
             );
             painter.rect_filled(badge_rect, 0.0, bg_col);
-            painter.rect_stroke(badge_rect, 0.0, Stroke::new(1.0, border_col));
+            painter.rect_stroke(badge_rect, 0.0, Stroke::new(1.0_f32, border_col));
             let text_pos = Pos2::new(
                 badge_rect.left() + 12.0,
                 badge_rect.center().y - galley.size().y * 0.5,
@@ -878,10 +925,7 @@ impl Is2dApp {
             canvas_tool::draw_tool_cursor_and_feedback(self, ctx, painter, pos);
         }
     }
-}
-
-impl eframe::App for Is2dApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    pub(crate) fn update_ui(&mut self, ctx: &egui::Context) {
         project_io::handle_viewport_close_request(self, ctx);
         timeline_ui::update_playback(self, ctx);
         self.handle_shortcuts(ctx);
@@ -941,6 +985,16 @@ impl eframe::App for Is2dApp {
                     tool_allowed,
                 );
             });
+
+        if std::mem::take(&mut self.canvas.pending_os_clipboard_sync) {
+            ctx.copy_text("is2d-shape-clipboard".to_owned());
+        }
+    }
+}
+
+impl eframe::App for Is2dApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.update_ui(ctx);
     }
 }
 
