@@ -200,15 +200,17 @@ $$P_{1,i-1}' = P_{1,i-1} + \frac{1}{2}\Delta, \quad P_{1,i}' = P_{1,i} + \frac{1
 
 ## 6. アルゴリズム 5：クラシックトゥイーンの TRS 極分解とカスタムピボット軸アフィン補間
 
-[`interpolate_affine_with_pivot`](./src/vector_engine.rs) および [`decompose_affine_trs`](./src/vector_engine.rs) では、2つのキーフレームにおけるシンボルインスタンスの2Dアフィン変換行列 $M_0, M_1$ とローカル基準点（ピボット） $p_0, p_1$ から、補間中もピボット位置やスケールが歪まない Adobe Animate 準拠のアフィン補間を行います。
+[`interpolate_affine_with_pivot`](./src/symbol.rs) および [`decompose_affine_trs`](./src/symbol.rs) では、2つのキーフレームにおけるシンボルインスタンスの2Dアフィン変換行列 $M_0, M_1$ とローカル基準点（ピボット） $p_0, p_1$ から、補間中もピボット位置やスケールが歪まない Adobe Animate 準拠のアフィン補間を行います。
 
-### 6.1 2Dアフィン行列の QR（回転・スケール・シアー）分解
+### 6.1 2Dアフィン行列の QR（回転・スケール・シアー）分解と水平反転の等価表現選択
 2Dアフィン行列 $M = \begin{bmatrix} a & c & t_x \\ b & d & t_y \\ 0 & 0 & 1 \end{bmatrix}$ の $2 \times 2$ 線形部 $L = \begin{bmatrix} a & c \\ b & d \end{bmatrix}$ を、回転角 $\theta = \operatorname{atan2}(b, a)$、X軸スケール $s_x = \sqrt{a^2 + b^2}$、シアー成分 $h$、Y軸符号付きスケール $s_y$ に分解します。
 
 $$R(\theta) = \begin{bmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{bmatrix}, \quad R(\theta)^\top L = \begin{bmatrix} s_x & h \\ 0 & s_y \end{bmatrix} \implies \begin{cases} h = c \cos\theta + d \sin\theta \\ s_y = -c \sin\theta + d \cos\theta \end{cases}$$
 
+ここで $R(\theta + \pi) \begin{bmatrix} -s_x & -h \\ 0 & -s_y \end{bmatrix} = R(\theta) \begin{bmatrix} s_x & h \\ 0 & s_y \end{bmatrix}$ という等価表現が存在するため、終了フレームに水平反転（$s_x < 0, s_y > 0$）が含まれる場合、標準分解（$s_x > 0$ 固定）のままでは $\theta_1 = \theta_0 + \pi, s_y < 0$ と解釈され不要な 180° 回転が発生してしまいます。そのため、開始角度 $\theta_0$ との角度差がより小さい方の等価表現 $(\theta_1 + \pi, -s_x, -s_y, -h)$ を自動選択することで、水平反転時は回転ゼロで $s_x$ のみが $+1 \to -1$ へ純粋補間されます。
+
 ### 6.2 回転の向き（`Auto` / `Clockwise` / `CounterClockwise`）に応じた角度差分 $\Delta\theta$
-開始角 $\theta_0$ と終了角 $\theta_1$ の正方向差分 $\Delta_{\text{cw}} = (\theta_1 - \theta_0) \bmod 2\pi \in [0, 2\pi)$ から、設定された [`TweenRotate`](./src/vector_engine.rs) モードに応じて補間角差分 $\Delta\theta$ を決定します。
+開始角 $\theta_0$ と終了角 $\theta_1$ の正方向差分 $\Delta_{\text{cw}} = (\theta_1 - \theta_0) \bmod 2\pi \in [0, 2\pi)$ から、設定された [`TweenRotate`](./src/symbol.rs) モードに応じて補間角差分 $\Delta\theta$ を決定します。
 
 - **自動・最短角度（`TweenRotate::Auto`）**：
   $$\Delta\theta = \begin{cases} \Delta_{\text{cw}} - 2\pi & (\Delta_{\text{cw}} > \pi) \\ \Delta_{\text{cw}} & (\Delta_{\text{cw}} \le \pi) \end{cases} \in (-\pi, \pi]$$

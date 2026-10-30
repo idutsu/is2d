@@ -1,12 +1,15 @@
-use eframe::egui::{self, Color32, Stroke, Vec2};
+use eframe::egui::{self, Color32, CursorIcon, Pos2, Stroke, Vec2};
+use kurbo::{Point, Rect as KRect};
 
-use crate::canvas_tool::{draw_registration_cross, SelectSubMode, Tool};
-use crate::symbol::{SymbolDef, SymbolLoopMode, TweenRotate};
-use crate::tool_transform::{
-    convert_selection_to_symbol, delete_symbol_from_library, enter_symbol_from_library,
-    enter_symbol_timeline, place_symbol_instance_from_library, rename_symbol_in_library,
-    selected_single_symbol_info, set_active_keyframe_tween_rotate, set_selected_symbol_playback,
+pub(crate) use crate::canvas_tool::icons;
+use crate::canvas_tool::{
+    convert_selection_to_symbol, delete_symbol_from_library, draw_registration_cross,
+    enter_symbol_from_library, enter_symbol_timeline, place_symbol_instance_from_library,
+    rename_symbol_in_library, selected_single_symbol_info, set_active_keyframe_tween_rotate,
+    set_selected_symbol_playback, ActiveCanvasDrag, SelectDragState, SelectSubMode, Tool,
+    TransformDragState,
 };
+use crate::symbol::{SymbolDef, SymbolLoopMode, TweenRotate};
 use crate::vector_engine::arc_mesh_to_shape;
 use crate::Is2dApp;
 
@@ -16,35 +19,6 @@ pub(crate) const MOD_KEY: &str = if cfg!(target_os = "macos") {
 } else {
     "Ctrl"
 };
-
-// ============================================================================
-// Material Icons (`fonts/MaterialIcons-Regular.ttf`) コードポイント定義
-// ============================================================================
-
-pub(crate) mod icons {
-    pub(crate) const ADD: &str = "\u{e145}"; // add (＋)
-    pub(crate) const REMOVE: &str = "\u{e15b}"; // remove (－)
-    pub(crate) const FLIP_H: &str = "\u{e8d4}"; // swap_horiz (左右反転)
-    pub(crate) const FLIP_V: &str = "\u{e8d5}"; // swap_vert (上下反転)
-    pub(crate) const ROTATE_LEFT: &str = "\u{e419}"; // rotate_left (-90°回転)
-    pub(crate) const ROTATE_RIGHT: &str = "\u{e41a}"; // rotate_right (+90°回転)
-    pub(crate) const PIVOT_RESET: &str = "\u{e3b4}"; // center_focus_strong (ピボットリセット)
-    pub(crate) const GROUP: &str = "\u{e1bd}"; // widgets (グループ表示)
-    pub(crate) const SYMBOL: &str = "\u{e87b}"; // extension (シンボル表示)
-    pub(crate) const WIREFRAME: &str = "\u{e922}"; // timeline (アンカー・パス表示)
-    pub(crate) const DELETE: &str = "\u{e872}"; // delete (削除)
-    pub(crate) const SCENE_MOVIE: &str = "\u{e02c}"; // movie (シーンアイコン)
-    pub(crate) const ARROW_BACK: &str = "\u{e5c4}"; // arrow_back (1階層出る)
-    pub(crate) const VISIBILITY: &str = "\u{e8f4}"; // visibility (レイヤー表示)
-    pub(crate) const LOCK: &str = "\u{e897}"; // lock (レイヤーロック)
-    pub(crate) const SKIP_PREV: &str = "\u{e045}"; // skip_previous (先頭フレームへ)
-    pub(crate) const STEP_PREV: &str = "\u{e408}"; // navigate_before (前のフレームへ)
-    pub(crate) const PLAY: &str = "\u{e037}"; // play_arrow (再生)
-    pub(crate) const PAUSE: &str = "\u{e034}"; // pause (一時停止)
-    pub(crate) const STEP_NEXT: &str = "\u{e409}"; // navigate_next (次のフレームへ)
-    pub(crate) const SKIP_NEXT: &str = "\u{e044}"; // skip_next (最終フレームへ)
-    pub(crate) const ONION_SKIN: &str = "\u{e3e0}"; // filter_none (オニオンスキン)
-}
 
 // ============================================================================
 // 右側パネルの状態・タブ定義（プロパティ / カラー / ライブラリ）
@@ -1519,5 +1493,336 @@ fn draw_symbol_mini_preview(app: &Is2dApp, ui: &mut egui::Ui, sym: &SymbolDef) {
         if rect.contains(origin_scr) {
             draw_registration_cross(&painter, origin_scr, 4.0, false);
         }
+    }
+}
+
+// ============================================================================
+// 中央ステージ・アートワーク・オニオンスキン・ツールカーソル描画
+// ============================================================================
+
+pub(crate) fn draw_tool_cursor_and_feedback(
+    app: &Is2dApp,
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    pos: Pos2,
+) {
+    match app.ui.tool {
+        Tool::Brush | Tool::Eraser => {
+            ctx.set_cursor_icon(CursorIcon::Crosshair);
+            let r = if app.ui.tool == Tool::Brush {
+                app.ui.brush_radius
+            } else {
+                app.ui.eraser_radius
+            };
+            let ring_col = if app.ui.tool == Tool::Brush {
+                app.ui.brush_color
+            } else {
+                Color32::from_rgb(220, 60, 60)
+            };
+            painter.circle_stroke(pos, r * app.viewport.zoom, Stroke::new(1.5_f32, ring_col));
+        }
+        Tool::Bucket => {
+            ctx.set_cursor_icon(CursorIcon::PointingHand);
+            painter.circle_filled(pos, 5.5, app.ui.brush_color);
+            painter.circle_stroke(pos, 5.5, Stroke::new(1.8_f32, Color32::WHITE));
+        }
+        Tool::Eyedropper => {
+            let hovered_color =
+                crate::tool_paint::topmost_visible_color_at(app, app.viewport.screen_to_world(pos));
+            ctx.set_cursor_icon(if hovered_color.is_some() {
+                CursorIcon::PointingHand
+            } else {
+                CursorIcon::Crosshair
+            });
+            crate::tool_paint::draw_eyedropper_cursor_badge(
+                painter,
+                pos,
+                hovered_color.unwrap_or(app.ui.brush_color),
+                hovered_color.is_some(),
+            );
+        }
+        Tool::Transform => {
+            crate::tool_transform::draw_transform_tool_cursor(app, ctx, painter, pos)
+        }
+        Tool::Select => crate::tool_select::draw_select_tool_cursor(app, ctx, painter, pos),
+    }
+}
+
+/// キャンバス上の全シェイプ（オニオンスキン・全可視レイヤー合成）、選択オーバーレイ、グループ選択枠、自由変形ボックス、矩形選択枠、およびストロークプレビューを描画
+pub(crate) fn draw_canvas_contents(app: &mut Is2dApp, painter: &egui::Painter) {
+    let in_group_edit = !app.canvas.editing_group_path.is_empty();
+    let in_symbol_edit = !app.symbols.edit_stack.is_empty();
+    let zoom = app.viewport.zoom;
+    let pan = app.viewport.pan;
+    let artwork_painter =
+        app.viewport
+            .artwork_painter(painter, painter.clip_rect(), in_symbol_edit);
+
+    // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画
+    if let Some(session) = app.symbols.edit_stack.last() {
+        if let Some(mesh) = session.backdrop_cel.cached_backdrop_screen_mesh(
+            session.parent_timeline.current_frame,
+            zoom,
+            pan,
+            &app.symbols.library,
+        ) {
+            artwork_painter.add(arc_mesh_to_shape(mesh));
+        }
+    }
+
+    // 0.5 オニオンスキン描画（前のフレーム＝青系半透明、次のフレーム＝緑系半透明）
+    if app.timeline_ui.onion_skin_enabled {
+        draw_onion_skins(app, &artwork_painter);
+    }
+
+    // 1. 下層レイヤーから上層レイヤーへ順に合成描画（`app.canvas.shapes` はレイヤー順に整列されているため単一カーソルで O(N) 走査）
+    let num_layers = app.timeline.layers.len();
+    let mut selected_group_boxes: Vec<(u64, Option<KRect>, KRect, Option<Point>)> = Vec::new();
+    let (is_sel, has_sel) = app.canvas.selected_shape_mask();
+    let curr_f = app.timeline.current_frame;
+    let view_world_rect = app
+        .viewport
+        .visible_world_rect(&artwork_painter, in_symbol_edit);
+    let mut shape_cursor = 0usize;
+
+    for layer_idx in 0..num_layers {
+        let Some((lid, is_visible, is_locked)) = app
+            .timeline
+            .layers
+            .get(layer_idx)
+            .map(|l| (l.id, l.visible, l.locked))
+        else {
+            continue;
+        };
+        if !is_visible {
+            continue;
+        }
+        if app.timeline_ui.is_playing || is_locked {
+            if let Some(mesh) = app.timeline.resolved_cel_screen_mesh(
+                layer_idx,
+                curr_f,
+                zoom,
+                pan,
+                in_group_edit && !app.timeline_ui.is_playing,
+                &app.symbols.library,
+            ) {
+                artwork_painter.add(arc_mesh_to_shape(mesh));
+            }
+            continue;
+        }
+
+        if num_layers > 1 {
+            while shape_cursor < app.canvas.shapes.len()
+                && app.canvas.shapes[shape_cursor].layer_id != lid
+                && app
+                    .timeline
+                    .layer_index_by_id(app.canvas.shapes[shape_cursor].layer_id)
+                    .is_none_or(|ord| ord < layer_idx)
+            {
+                shape_cursor += 1;
+            }
+        }
+        let start_idx = shape_cursor;
+        while shape_cursor < app.canvas.shapes.len()
+            && (num_layers <= 1 || app.canvas.shapes[shape_cursor].layer_id == lid)
+        {
+            shape_cursor += 1;
+        }
+        draw_editable_layer_shapes(
+            app,
+            (&artwork_painter, painter),
+            start_idx..shape_cursor,
+            view_world_rect,
+            (&is_sel, has_sel),
+            &mut selected_group_boxes,
+        );
+    }
+
+    app.viewport
+        .draw_stage_foreground_overlay(painter, painter.clip_rect(), in_symbol_edit);
+    draw_selected_group_and_symbol_boxes(app, painter, &selected_group_boxes);
+
+    if app.ui.tool == Tool::Transform {
+        crate::tool_transform::draw_free_transform_box(&app.canvas, painter, &app.viewport);
+    }
+    draw_active_marquee_box(app, painter);
+    crate::tool_paint::draw_active_stroke_preview(app, &artwork_painter, painter);
+}
+
+/// 編集可能レイヤー1枚分の図形スライス範囲 `range` を描画し、選択中のグループ／シンボル外枠情報を集計する
+fn draw_editable_layer_shapes(
+    app: &mut Is2dApp,
+    (artwork_painter, gizmo_painter): (&egui::Painter, &egui::Painter),
+    range: std::ops::Range<usize>,
+    view_world_rect: KRect,
+    (is_sel, has_sel): (&[bool], bool),
+    selected_group_boxes: &mut Vec<(u64, Option<KRect>, KRect, Option<Point>)>,
+) {
+    let show_wf = app.ui.tool == Tool::Select
+        && (app.ui.show_wireframe || app.ui.select_sub_mode != SelectSubMode::Reshape);
+    let active_affine_drag = matches!(
+        app.canvas.drag,
+        ActiveCanvasDrag::Transform(
+            TransformDragState::Scale { .. } | TransformDragState::Rotate { .. }
+        )
+    );
+    let in_group_edit = !app.canvas.editing_group_path.is_empty();
+    let zoom = app.viewport.zoom;
+    let pan = app.viewport.pan;
+
+    for idx in range {
+        let Some(shape) = app.canvas.shapes.get(idx) else {
+            continue;
+        };
+        let in_scope = shape.is_in_editing_scope(&app.canvas.editing_group_path);
+        let shape_sel =
+            in_scope && has_sel && !active_affine_drag && is_sel.get(idx).copied().unwrap_or(false);
+        let sel_gid = if shape_sel {
+            let gid = shape.active_group_id_at_scope(&app.canvas.editing_group_path);
+            if let Some(gid) = gid {
+                let geom_bbox = shape.geometry_bounding_box();
+                let fallback_bbox = shape.bounding_box();
+                let sym_reg = shape
+                    .symbol_instance
+                    .filter(|b| b.instance_gid == gid)
+                    .map(|b| b.xform * Point::ZERO);
+                if let Some((_, g_geom, g_fallback, _)) = selected_group_boxes
+                    .iter_mut()
+                    .find(|(id, _, _, _)| *id == gid)
+                {
+                    if let Some(gb) = geom_bbox {
+                        *g_geom = Some(g_geom.map_or(gb, |acc| acc.union(gb)));
+                    }
+                    *g_fallback = g_fallback.union(fallback_bbox);
+                } else {
+                    selected_group_boxes.push((gid, geom_bbox, fallback_bbox, sym_reg));
+                }
+            }
+            gid
+        } else {
+            None
+        };
+
+        let Some(geom_bbox) = shape.geometry_bounding_box() else {
+            continue;
+        };
+        if !crate::vector_engine::rects_overlap(geom_bbox, view_world_rect) {
+            continue;
+        }
+
+        let dim = in_group_edit && !in_scope;
+        artwork_painter.add(arc_mesh_to_shape(shape.cached_screen_mesh(zoom, pan, dim)));
+        if !in_scope {
+            continue;
+        }
+        if show_wf && shape.is_raw_at_scope(&app.canvas.editing_group_path) {
+            crate::tool_select::draw_shape_contour_lines(
+                app,
+                gizmo_painter,
+                shape,
+                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(30, 80, 180, 140)),
+                true,
+            );
+        }
+        if shape_sel && sel_gid.is_none() {
+            crate::tool_select::draw_flash_selection_overlay(app, gizmo_painter, idx);
+        }
+    }
+}
+
+/// 選択中のグループ塊（緑枠）およびシンボルインスタンス（水色枠＋基準点 `＋` マーク）、シンボル編集中の基準点を描画
+fn draw_selected_group_and_symbol_boxes(
+    app: &Is2dApp,
+    painter: &egui::Painter,
+    selected_group_boxes: &[(u64, Option<KRect>, KRect, Option<Point>)],
+) {
+    for &(_, geom_bbox, fallback_bbox, sym_reg) in selected_group_boxes {
+        let g_bbox = geom_bbox.unwrap_or(fallback_bbox);
+        let rect = app.viewport.world_rect_to_screen(g_bbox).expand(2.0);
+        if let Some(origin) = sym_reg {
+            painter.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.8_f32, Color32::from_rgb(0, 165, 255)),
+            );
+            draw_registration_cross(painter, app.viewport.world_to_screen(origin), 3.2, true);
+        } else {
+            painter.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.8_f32, Color32::from_rgb(30, 185, 95)),
+            );
+        }
+    }
+
+    if let Some(session) = app.symbols.edit_stack.last() {
+        let origin = session.instance_xform * Point::ZERO;
+        draw_registration_cross(painter, app.viewport.world_to_screen(origin), 5.5, true);
+    }
+}
+
+fn draw_onion_skins(app: &Is2dApp, painter: &egui::Painter) {
+    let curr_f = app.timeline.current_frame;
+    for step in (1..=app.timeline_ui.onion_prev_frames).rev() {
+        if curr_f >= step {
+            let alpha = (84 / step as u8).clamp(24, 84);
+            draw_onion_skin_frame(app, painter, curr_f - step, [45, 115, 245], alpha);
+        }
+    }
+    for step in 1..=app.timeline_ui.onion_next_frames {
+        let f = curr_f + step;
+        if f < app.timeline.total_frames {
+            let alpha = (84 / step as u8).clamp(24, 84);
+            draw_onion_skin_frame(app, painter, f, [35, 185, 105], alpha);
+        }
+    }
+}
+
+fn draw_onion_skin_frame(
+    app: &Is2dApp,
+    painter: &egui::Painter,
+    frame: usize,
+    tint_rgb: [u8; 3],
+    alpha: u8,
+) {
+    let zoom = app.viewport.zoom;
+    let pan = app.viewport.pan;
+    for (layer_idx, layer) in app.timeline.layers.iter().enumerate() {
+        if !layer.visible {
+            continue;
+        }
+        if let Some(mesh) = app.timeline.resolved_cel_onion_mesh(
+            layer_idx,
+            frame,
+            zoom,
+            pan,
+            (tint_rgb, alpha),
+            &app.symbols.library,
+        ) {
+            painter.add(arc_mesh_to_shape(mesh));
+        }
+    }
+}
+
+fn draw_active_marquee_box(app: &Is2dApp, painter: &egui::Painter) {
+    let active_marquee = match &app.canvas.drag {
+        ActiveCanvasDrag::Select(SelectDragState::MarqueeSelect(m))
+        | ActiveCanvasDrag::Transform(TransformDragState::MarqueeSelect(m)) => Some(*m),
+        _ => None,
+    };
+    if let Some(m) = active_marquee {
+        let marquee_rect = app
+            .viewport
+            .world_rect_to_screen(KRect::from_points(m.start_pos, m.current_pos));
+        painter.rect_filled(
+            marquee_rect,
+            0.0,
+            Color32::from_rgba_unmultiplied(0, 145, 255, 32),
+        );
+        painter.rect_stroke(
+            marquee_rect,
+            0.0,
+            Stroke::new(1.5_f32, Color32::from_rgb(0, 145, 255)),
+        );
     }
 }

@@ -30,18 +30,6 @@ pub(crate) enum SymbolLoopMode {
     SingleFrame,
 }
 
-/// クラシックトゥイーンの回転方向（Adobe Animate のトゥイーン回転設定相当）
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub(crate) enum TweenRotate {
-    /// 自動：開始角度から終了角度へ最短の角度差（`-180°..=+180°`）で回転する
-    #[default]
-    Auto,
-    /// 時計回り (CW)：時計回り（右回り）方向に回転する
-    Clockwise,
-    /// 反時計回り (CCW)：反時計回り（左回り）方向に回転する
-    CounterClockwise,
-}
-
 /// シンボルインスタンスに属するシェイプが持つ幾何変換・再生紐付け情報
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SymbolInstanceBinding {
@@ -65,48 +53,6 @@ impl SymbolInstanceBinding {
             loop_mode: SymbolLoopMode::Loop,
             first_frame: 0,
         }
-    }
-
-    /// このインスタンスの現在のワールド座標における変形中心点（ピボット）を返す
-    #[inline]
-    pub(crate) fn world_pivot(self) -> Point {
-        self.xform * self.pivot
-    }
-
-    /// ローカル座標系のシェイプ列 `local_shapes` を、このインスタンスの変換行列 `self.xform`・`layer_id`・
-    /// スコープパス `scope_prefix`（末尾に `self.instance_gid` を自動付与）でステージ座標へ展開する
-    pub(crate) fn instantiate_shapes(
-        self,
-        local_shapes: &[FillShape],
-        layer_id: u64,
-        scope_prefix: &[u64],
-    ) -> Vec<FillShape> {
-        let mut out = Vec::with_capacity(local_shapes.len());
-        for s in local_shapes {
-            let _ = s.fill_mesh();
-            let mut inst_s = s.clone();
-            inst_s.shape_id = next_shape_id();
-            let mut full_path =
-                Vec::with_capacity(scope_prefix.len() + 1 + inst_s.group_path.len());
-            full_path.extend_from_slice(scope_prefix);
-            full_path.push(self.instance_gid);
-            full_path.extend(inst_s.group_path.iter().copied());
-            inst_s.transform_with_cached_mesh(self.xform);
-            inst_s.layer_id = layer_id;
-            inst_s.group_path = full_path;
-            inst_s.symbol_instance = Some(self);
-            out.push(inst_s);
-        }
-        out
-    }
-
-    /// 既存シェイプの `group_path` から、このインスタンス `self.instance_gid` より外側の親スコープパススライスを返す
-    pub(crate) fn parent_scope_from_path(self, group_path: &[u64]) -> &[u64] {
-        let pos = group_path
-            .iter()
-            .position(|&gid| gid == self.instance_gid)
-            .unwrap_or(group_path.len());
-        &group_path[..pos]
     }
 }
 
@@ -408,36 +354,6 @@ impl FillShape {
             layer_id: 1,
             group_path: Vec::new(),
             symbol_instance: None,
-            mesh_revision: 0,
-            bbox: KRect::ZERO,
-            fill_mesh: OnceLock::new(),
-            hit_bez_path: OnceLock::new(),
-            screen_mesh_cache: SyncCache::new(None),
-            selection_mesh: None,
-            selection_screen_mesh: None,
-        };
-        shape.rebuild_cache();
-        shape
-    }
-
-    /// 現在フレームで内部図形が空白（0シェイプ）のシンボルインスタンスを、
-    /// `CanvasState::shapes` 内で他の図形と同一の一元配列上で管理するための非表示マーカー要素を生成する
-    pub(crate) fn new_empty_symbol_marker(
-        binding: SymbolInstanceBinding,
-        layer_id: u64,
-        parent_scope: &[u64],
-    ) -> Self {
-        let mut group_path = Vec::with_capacity(parent_scope.len() + 1);
-        group_path.extend_from_slice(parent_scope);
-        group_path.push(binding.instance_gid);
-        let mut shape = Self {
-            shape_id: next_shape_id(),
-            color: Color32::TRANSPARENT,
-            exterior: Contour::new(Vec::new()),
-            holes: Vec::new(),
-            layer_id,
-            group_path,
-            symbol_instance: Some(binding),
             mesh_revision: 0,
             bbox: KRect::ZERO,
             fill_mesh: OnceLock::new(),
@@ -858,7 +774,7 @@ impl FillShape {
 }
 
 // ============================================================================
-// アフィン変換・クラシックトゥイーン補間・幾何ユーティリティ関数
+// アフィン変換・幾何ユーティリティ関数
 // ============================================================================
 
 /// 指定基準点 `anchor` を中心とした非一様スケーリング（および反転）のアフィン変換行列を生成する
@@ -873,108 +789,6 @@ pub(crate) fn affine_rotate_around(pivot: Point, angle_rad: f64) -> Affine {
     Affine::translate(pivot.to_vec2())
         * Affine::rotate(angle_rad)
         * Affine::translate(-pivot.to_vec2())
-}
-
-/// 2つの2Dアフィン変換行列 `start` と `end` を、それぞれのローカル基準点（ピボット）`start_pivot`, `end_pivot` を軸として
-/// TRS（ピボットのワールド平行移動・指定回転方向・スケール・シアー）に分解し、
-/// パラメータ `t`（`0.0..=1.0`）で補間した `(補間後の Affine, 補間後のローカルピボット Point)` を返す（クラシックトゥイーン用）
-pub(crate) fn interpolate_affine_with_pivot(
-    start: Affine,
-    start_pivot: Point,
-    end: Affine,
-    end_pivot: Point,
-    rotate_mode: TweenRotate,
-    t: f64,
-) -> (Affine, Point) {
-    let start_custom = (start_pivot - Point::ZERO).hypot() > 1e-6;
-    let end_custom = (end_pivot - Point::ZERO).hypot() > 1e-6;
-    let (p0, p1) = match (start_custom, end_custom) {
-        (true, false) => (start_pivot, start_pivot),
-        (false, true) => (end_pivot, end_pivot),
-        _ => (start_pivot, end_pivot),
-    };
-
-    let t = t.clamp(0.0, 1.0);
-    if t <= 0.0 {
-        return (start, p0);
-    }
-    if t >= 1.0 {
-        return (end, p1);
-    }
-
-    let (_, _, rot0, sx0, sy0, sh0) = decompose_affine_trs(start);
-    let (_, _, rot1, sx1, sy1, sh1) = decompose_affine_trs(end);
-
-    let cw_delta = (rot1 - rot0).rem_euclid(std::f64::consts::TAU);
-    let delta_rot = match rotate_mode {
-        TweenRotate::Auto => {
-            if cw_delta > std::f64::consts::PI {
-                cw_delta - std::f64::consts::TAU
-            } else {
-                cw_delta
-            }
-        }
-        TweenRotate::Clockwise => {
-            if cw_delta < 1e-5 || (std::f64::consts::TAU - cw_delta) < 1e-5 {
-                std::f64::consts::TAU
-            } else {
-                cw_delta
-            }
-        }
-        TweenRotate::CounterClockwise => {
-            if cw_delta < 1e-5 || (std::f64::consts::TAU - cw_delta) < 1e-5 {
-                -std::f64::consts::TAU
-            } else {
-                cw_delta - std::f64::consts::TAU
-            }
-        }
-    };
-    let rot = rot0 + delta_rot * t;
-    const MIN_TWEEN_SCALE: f64 = 1e-3;
-    let mut sx = sx0 + (sx1 - sx0) * t;
-    let mut sy = sy0 + (sy1 - sy0) * t;
-    if sx.abs() < MIN_TWEEN_SCALE {
-        sx = if sx0 >= 0.0 {
-            MIN_TWEEN_SCALE
-        } else {
-            -MIN_TWEEN_SCALE
-        };
-    }
-    if sy.abs() < MIN_TWEEN_SCALE {
-        sy = if sy0 >= 0.0 {
-            MIN_TWEEN_SCALE
-        } else {
-            -MIN_TWEEN_SCALE
-        };
-    }
-    let sh = sh0 + (sh1 - sh0) * t;
-
-    let (sin_r, cos_r) = rot.sin_cos();
-    let a = sx * cos_r;
-    let b = sx * sin_r;
-    let c = sh * cos_r - sy * sin_r;
-    let d = sh * sin_r + sy * cos_r;
-    let linear = Affine::new([a, b, c, d, 0.0, 0.0]);
-
-    let local_pivot = p0.lerp(p1, t);
-    let world_pivot = (start * p0).lerp(end * p1, t);
-    let interp_xform = Affine::translate(world_pivot.to_vec2())
-        * linear
-        * Affine::translate(-local_pivot.to_vec2());
-    (interp_xform, local_pivot)
-}
-
-fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64, f64, f64) {
-    let [a, b, c, d, tx, ty] = affine.as_coeffs();
-    let sx = a.hypot(b);
-    let (cos_r, sin_r, rot) = if sx > 1e-9 {
-        (a / sx, b / sx, b.atan2(a))
-    } else {
-        (1.0, 0.0, 0.0)
-    };
-    let shear = c * cos_r + d * sin_r;
-    let sy = -c * sin_r + d * cos_r;
-    (tx, ty, rot, sx, sy, shear)
 }
 
 /// 矩形選択用の `KRect` から4辺の直線 `QuadBez` を持つ `FillShape` を生成する
@@ -1137,7 +951,7 @@ fn tessellate_contours_to_mesh(exterior: &Contour, holes: &[Contour], color: Col
 
 fn build_polka_dot_selection_mesh(fill_mesh: &Mesh, zoom: f32) -> Mesh {
     const MAX_POLKA_DOT_GRID_CELLS: f32 = 25_000.0;
-    const MAX_POLKA_DOT_VERTICES: usize = 65_536;
+    const MAX_POLKA_DOT_VERTICES: usize = (MAX_POLKA_DOT_GRID_CELLS as usize) * 8;
 
     let mut sel_mesh = Mesh::default();
     if fill_mesh.vertices.is_empty() || fill_mesh.indices.len() < 3 {

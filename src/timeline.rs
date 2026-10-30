@@ -1,16 +1,19 @@
 use crate::{
     symbol::{
-        resolve_cel_with_library, ResolvedCelSig, ResolvedSigQuery, SymbolDef, SymbolEvalCtx,
-        SymbolInstance, TweenRotate, TweenState, MAX_SYMBOL_NEST_DEPTH,
+        interpolate_affine_with_pivot, resolve_cel_with_library, ResolvedCelSig, ResolvedSigQuery,
+        SymbolDef, SymbolEvalCtx, SymbolInstance, TweenRotate, TweenState, MAX_SYMBOL_NEST_DEPTH,
     },
     vector_engine::{
-        append_mesh, interpolate_affine_with_pivot, transform_mesh_to_screen,
-        transform_mesh_to_screen_onion, FillShape, OnionMeshCacheEntry, ScreenMeshCacheEntry,
-        SymbolInstanceBinding, SymbolLoopMode, SyncCache,
+        append_mesh, transform_mesh_to_screen, transform_mesh_to_screen_onion, FillShape,
+        OnionMeshCacheEntry, ScreenMeshCacheEntry, SymbolInstanceBinding, SymbolLoopMode,
+        SyncCache,
     },
 };
 use eframe::egui::{Color32, Mesh, Vec2};
 use std::sync::Arc;
+
+/// タイムラインおよびシンボル内タイムラインの最大許容フレーム数（破損JSONによる巨大ループ防止）
+pub(crate) const MAX_TIMELINE_FRAMES: usize = 100_000;
 
 // ============================================================================
 // 1. タイムラインのデータモデル（Cel / Keyframe / Selection / Layer / Timeline）
@@ -45,6 +48,8 @@ struct CelMeshCache {
     onion_cache: Option<OnionMeshCacheEntry>,
     /// シンボルインスタンスやトゥイーンを含むセルの解決済みメッシュキャッシュ署名
     resolved_sig: Option<ResolvedCelSig>,
+    /// 解決済みスクリーン・オニオンメッシュキャッシュが対象としている直近のビューポート `(zoom_bits, pan_x_bits, pan_y_bits)`
+    resolved_view_key: Option<(u32, u32, u32)>,
     resolved_world_batches: Vec<LruEntry<usize, Option<Arc<Mesh>>>>,
     resolved_screen_caches: Vec<LruEntry<ResolvedScreenCacheKey, Arc<Mesh>>>,
     resolved_onion_caches: Vec<LruEntry<ResolvedOnionCacheKey, Arc<Mesh>>>,
@@ -58,6 +63,7 @@ impl Clone for CelMeshCache {
             screen_cache: None,
             onion_cache: None,
             resolved_sig: None,
+            resolved_view_key: None,
             resolved_world_batches: Vec::new(),
             resolved_screen_caches: Vec::new(),
             resolved_onion_caches: Vec::new(),
@@ -303,11 +309,17 @@ impl Cel {
         build_fn: impl FnOnce() -> Option<Mesh>,
     ) -> Option<Arc<Mesh>> {
         let mut cache = self.mesh_cache.lock();
+        let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
+        if cache.resolved_view_key != Some(view_key) {
+            cache.resolved_view_key = Some(view_key);
+            cache.resolved_screen_caches.clear();
+            cache.resolved_onion_caches.clear();
+        }
         let key = (
             eval_frame_key,
-            zoom.to_bits(),
-            pan.x.to_bits(),
-            pan.y.to_bits(),
+            view_key.0,
+            view_key.1,
+            view_key.2,
             dim_backdrop,
         );
         if cache
@@ -375,11 +387,17 @@ impl Cel {
         build_fn: impl FnOnce() -> Option<Mesh>,
     ) -> Option<Arc<Mesh>> {
         let mut cache = self.mesh_cache.lock();
+        let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
+        if cache.resolved_view_key != Some(view_key) {
+            cache.resolved_view_key = Some(view_key);
+            cache.resolved_screen_caches.clear();
+            cache.resolved_onion_caches.clear();
+        }
         let key = (
             eval_frame_key,
-            zoom.to_bits(),
-            pan.x.to_bits(),
-            pan.y.to_bits(),
+            view_key.0,
+            view_key.1,
+            view_key.2,
             tint_rgb,
             alpha,
         );
@@ -1358,10 +1376,13 @@ impl Timeline {
             }
 
             if is_tween_mid {
-                let prev_kf_start = self.layers[l_idx]
+                let (prev_kf_start, prev_tween_rotate) = self.layers[l_idx]
                     .keyframe_index_at(frame)
-                    .map(|i| self.layers[l_idx].keyframes[i].start_frame)
-                    .unwrap_or(frame);
+                    .map(|i| {
+                        let kf = &self.layers[l_idx].keyframes[i];
+                        (kf.start_frame, kf.tween_rotate)
+                    })
+                    .unwrap_or((frame, TweenRotate::Auto));
                 let elapsed = frame.saturating_sub(prev_kf_start);
                 let new_shapes: Vec<FillShape> = shapes
                     .iter()
@@ -1379,10 +1400,14 @@ impl Timeline {
                 }
                 self.layers[l_idx].keyframes[kf_idx].cel =
                     Cel::new_with_instances(non_symbol_shapes, next_instances);
-                self.layers[l_idx].keyframes[kf_idx].tween = self.layers[l_idx].keyframes[kf_idx]
+                let has_single_sym = self.layers[l_idx].keyframes[kf_idx]
                     .cel
                     .single_symbol_instance()
                     .is_some();
+                self.layers[l_idx].keyframes[kf_idx].tween = has_single_sym;
+                if has_single_sym {
+                    self.layers[l_idx].keyframes[kf_idx].tween_rotate = prev_tween_rotate;
+                }
                 any_cel_modified = true;
                 continue;
             }

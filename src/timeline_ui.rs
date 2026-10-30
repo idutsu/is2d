@@ -1,13 +1,14 @@
 use std::time::Duration;
 
+pub(crate) use crate::canvas_tool::{TimelineGridDrag, TimelineUiState, CELL_W};
 use crate::{
     canvas_tool::{
-        flush_canvas_before_timeline_op, load_shapes_from_timeline, mutate_timeline_with_undo,
-        select_shapes_for_timeline_selection, stop_playback,
+        flush_canvas_before_timeline_op, icons, load_shapes_from_timeline,
+        mutate_timeline_with_undo, select_shapes_for_timeline_selection, stop_playback,
+        timeline_toggle_tween,
     },
-    panels::icons,
     symbol::TweenState,
-    timeline::{Timeline, TimelineCellSelection},
+    timeline::{Timeline, TimelineCellSelection, MAX_TIMELINE_FRAMES},
     Is2dApp,
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
@@ -15,121 +16,11 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec
 const LAYER_COL_W: f32 = 190.0;
 const RULER_H: f32 = 24.0;
 const ROW_H: f32 = 26.0;
-pub(crate) const CELL_W: f32 = 16.0;
 const LAYER_VIS_HIT_RANGE: std::ops::Range<f32> = 6.0..30.0;
 const LAYER_LOCK_HIT_RANGE: std::ops::Range<f32> = 30.0..54.0;
 const LAYER_VIS_ICON_X: f32 = 18.0;
 const LAYER_LOCK_ICON_X: f32 = 42.0;
 const LAYER_NAME_X: f32 = 60.0;
-
-// ============================================================================
-// 0. タイムラインUI・再生・オニオンスキン状態（TimelineGridDrag / TimelineUiState）
-// ============================================================================
-
-/// タイムライン右側領域（ルーラー・フレームグリッド・スクロールバー）でのマウスドラッグ状態
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) enum TimelineGridDrag {
-    #[default]
-    None,
-    /// 上部フレーム番号ルーラーのドラッグによる再生ヘッドスクラブ（レイヤー個別選択を解除）
-    ScrubRuler,
-    /// 下部横スクロールバーのドラッグ操作
-    ScrubScrollbarX { grab_offset_x: f32 },
-    /// 右端縦スクロールバーのドラッグ操作
-    ScrubScrollbarY { grab_offset_y: f32 },
-    /// フレームグリッド上でのセル範囲選択ドラッグ（複数レイヤー・複数フレーム横断）
-    SelectCells {
-        start_layer: usize,
-        start_frame: usize,
-    },
-    /// 選択済みフレーム範囲のドラッグ移動、または `Alt`（`Option`）押下による複製
-    MoveFrames {
-        orig_sel: TimelineCellSelection,
-        grab_layer: usize,
-        grab_frame: usize,
-        curr_layer: usize,
-        curr_frame: usize,
-        copy_mode: bool,
-        has_moved: bool,
-    },
-}
-
-/// タイムラインパネルの再生状態・ループ/オニオンスキン表示設定・スクロール位置・ドラッグ操作等のUI状態
-#[derive(Clone, Debug)]
-pub(crate) struct TimelineUiState {
-    pub(crate) is_playing: bool,
-    pub(crate) loop_playback: bool,
-    pub(crate) onion_skin_enabled: bool,
-    pub(crate) onion_prev_frames: usize,
-    pub(crate) onion_next_frames: usize,
-    pub(crate) last_frame_advance_time: Option<f64>,
-    pub(crate) scroll_x: f32,
-    pub(crate) scroll_y: f32,
-    pub(crate) last_ensured_frame: usize,
-    pub(crate) dragging_layer: Option<usize>,
-    pub(crate) grid_drag: TimelineGridDrag,
-    /// 総フレーム数 `DragValue` の連続ドラッグ・入力中にUndo履歴が1フレームごとに積まれるのを防ぐフラグ
-    pub(crate) editing_total_frames: bool,
-    /// FPS `DragValue` の連続ドラッグ・入力中にUndo履歴が1フレームごとに積まれるのを防ぐフラグ
-    pub(crate) editing_fps: bool,
-}
-
-impl Default for TimelineUiState {
-    fn default() -> Self {
-        Self {
-            is_playing: false,
-            loop_playback: true,
-            onion_skin_enabled: false,
-            onion_prev_frames: 2,
-            onion_next_frames: 2,
-            last_frame_advance_time: None,
-            scroll_x: 0.0,
-            scroll_y: 0.0,
-            last_ensured_frame: 0,
-            dragging_layer: None,
-            grid_drag: TimelineGridDrag::None,
-            editing_total_frames: false,
-            editing_fps: false,
-        }
-    }
-}
-
-impl TimelineUiState {
-    pub(crate) fn cancel_drag(&mut self) {
-        self.dragging_layer = None;
-        self.grid_drag = TimelineGridDrag::None;
-        self.editing_total_frames = false;
-        self.editing_fps = false;
-    }
-
-    pub(crate) fn reset_for_timeline_switch(&mut self, current_frame: usize) {
-        self.is_playing = false;
-        self.last_frame_advance_time = None;
-        self.scroll_x = 0.0;
-        self.scroll_y = 0.0;
-        self.last_ensured_frame = current_frame;
-        self.cancel_drag();
-    }
-
-    /// 再生ヘッド（`current_frame`）が移動して表示領域外に出た場合のみ、横スクロール位置 `scroll_x` を自動追従させる
-    /// （手動のマウスホイールスクロールで再生ヘッドが画面外に出た場合は引き戻さない）
-    pub(crate) fn ensure_current_frame_visible(&mut self, current_frame: usize, grid_width: f32) {
-        if current_frame == self.last_ensured_frame {
-            return;
-        }
-        self.last_ensured_frame = current_frame;
-        if grid_width <= CELL_W * 2.0 {
-            return;
-        }
-        let head_left = current_frame as f32 * CELL_W;
-        let head_right = head_left + CELL_W;
-        if head_left < self.scroll_x {
-            self.scroll_x = head_left;
-        } else if head_right > self.scroll_x + grid_width - CELL_W {
-            self.scroll_x = (head_right - grid_width + CELL_W).max(0.0);
-        }
-    }
-}
 
 // ============================================================================
 // 1. タイムラインUIのレイアウト計算・スクロール追従
@@ -477,16 +368,13 @@ fn draw_control_bar_transport_buttons(app: &mut Is2dApp, ui: &mut egui::Ui) {
     let total_resp = ui
         .add(
             egui::DragValue::new(&mut total_f)
-                .range(1..=(crate::project_io::MAX_TIMELINE_FRAMES as u32))
+                .range(1..=(MAX_TIMELINE_FRAMES as u32))
                 .clamp_existing_to_range(false)
                 .update_while_editing(false)
                 .speed(0.25)
                 .suffix(" f"),
         )
-        .on_hover_text(format!(
-            "総フレーム数 (1〜{})",
-            crate::project_io::MAX_TIMELINE_FRAMES
-        ));
+        .on_hover_text(format!("総フレーム数 (1〜{})", MAX_TIMELINE_FRAMES));
     if total_resp.changed() {
         let next_total = (total_f as usize).max(1);
         if next_total != app.timeline.total_frames {
@@ -616,7 +504,7 @@ fn draw_control_bar_keyframe_buttons(app: &mut Is2dApp, ui: &mut egui::Ui) {
         )
         .clicked()
     {
-        crate::tool_transform::timeline_toggle_tween(app);
+        timeline_toggle_tween(app);
     }
 }
 

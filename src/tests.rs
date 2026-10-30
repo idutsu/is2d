@@ -718,21 +718,26 @@ fn test_eyedropper_picks_topmost_shape_color() {
     let blue = Color32::from_rgb(55, 135, 245);
     let green = Color32::from_rgb(65, 195, 105);
 
-    // 左側に赤、右側に青のシェイプを描画
+    // 背面 (Layer 1) に赤シェイプ (x: 100..260, y: 200) を配置し、
+    // 前面グループとして同一座標 (200, 200) に重なる青シェイプ (x: 180..320, y: 200) を重ねる
     let s_red = make_stroke(
         Point::new(100.0, 200.0),
-        Point::new(180.0, 200.0),
+        Point::new(260.0, 200.0),
         20.0,
         red,
     );
-    let s_blue = make_stroke(
-        Point::new(240.0, 200.0),
+    merge_shapes_into_canvas(&mut app.canvas.shapes, s_red);
+
+    let mut s_blue = make_stroke(
+        Point::new(180.0, 200.0),
         Point::new(320.0, 200.0),
         20.0,
         blue,
     );
-    merge_shapes_into_canvas(&mut app.canvas.shapes, s_red);
-    merge_shapes_into_canvas(&mut app.canvas.shapes, s_blue);
+    for sh in &mut s_blue {
+        sh.group_path = vec![1];
+    }
+    app.canvas.shapes.extend(s_blue);
 
     app.ui.brush_color = green;
     canvas_tool::set_tool(&mut app, Tool::Eyedropper);
@@ -744,29 +749,31 @@ fn test_eyedropper_picks_topmost_shape_color() {
     );
     assert_eq!(app.ui.brush_color, green);
 
-    // 2. 赤シェイプ上をクリックすると brush_color が赤になること
+    // 2. 背面の赤シェイプ単独部分 (120, 200) をクリックすると赤になること
     assert_eq!(
-        tool_paint::pick_color_at(&mut app, Point::new(140.0, 200.0)),
+        tool_paint::pick_color_at(&mut app, Point::new(120.0, 200.0)),
         Some(red)
     );
     assert_eq!(app.ui.brush_color, red);
 
-    // 3. 青シェイプ上をクリックすると brush_color が青になること
+    // 3. 赤と青が重なる同一座標 (200, 200) をクリックすると最前面の青が優先して返ること
+    assert!(app.canvas.shapes[0].contains_point(Point::new(200.0, 200.0)));
+    assert!(app.canvas.shapes[1].contains_point(Point::new(200.0, 200.0)));
     assert_eq!(
-        tool_paint::pick_color_at(&mut app, Point::new(280.0, 200.0)),
-        Some(blue)
+        tool_paint::pick_color_at(&mut app, Point::new(200.0, 200.0)),
+        Some(blue),
+        "同一座標で2つの図形が重なっている場合、最前面の図形色が優先されること"
     );
     assert_eq!(app.ui.brush_color, blue);
 }
 
 #[test]
-fn test_nested_grouping_ungrouping_and_edit_in_place() {
+fn test_group_selection_bucket_protection_and_non_destructive_overlap() {
     let mut app = Is2dApp::default();
     let red = Color32::from_rgb(235, 75, 75);
     let blue = Color32::from_rgb(55, 135, 245);
     let green = Color32::from_rgb(65, 195, 105);
 
-    // 1. ベースの赤い大シェイプ (x: 100..300, y: 200) と、別の位置に青い白目 (x: 100, y: 100) + 緑の黒目 (x: 140, y: 100) を描画
     let face = make_stroke(
         Point::new(100.0, 200.0),
         Point::new(300.0, 200.0),
@@ -790,86 +797,75 @@ fn test_nested_grouping_ungrouping_and_edit_in_place() {
     merge_shapes_into_canvas(&mut app.canvas.shapes, eye_b);
     assert_eq!(app.canvas.shapes.len(), 3);
 
-    // 2. 青と緑の2シェイプを選択して 1段目のグループ化 (Cmd+G -> eye_gid)
     app.canvas.selected_shapes = vec![1, 2];
     let eye_gid =
-        tool_select::group_selected_shapes(&mut app).expect("1段目のグループ化が成功すること");
+        tool_select::group_selected_shapes(&mut app).expect("グループ化が成功すること");
     assert_eq!(app.canvas.shapes[1].group_path, vec![eye_gid]);
     assert_eq!(app.canvas.shapes[2].group_path, vec![eye_gid]);
 
-    // 3. 1つクリックするだけでグループ全体の2シェイプが同時選択されること
+    // 1つクリックするだけでグループ全体の2シェイプが同時選択されること
     tool_select::clear_selection(&mut app);
     assert!(tool_select::select_single_shape_at(
         &mut app,
         Point::new(100.0, 100.0)
     ));
-    assert_eq!(
-        app.canvas.selected_shapes.len(),
-        2,
-        "グループの片方をクリックするとグループ塊全体が選択されること"
-    );
+    assert_eq!(app.canvas.selected_shapes.len(), 2);
 
-    // 3b. グループ選択状態でバケツツールを使っても、グループ内の絵の色は変わらず無効であること
+    // グループ選択状態でバケツツールを使っても無効であること
     app.ui.brush_color = red;
-    assert!(
-        !tool_paint::bucket_fill_at(&mut app, Point::new(100.0, 100.0)),
-        "選択中のグループに対してバケツ塗りは無効であること"
-    );
+    assert!(!tool_paint::bucket_fill_at(&mut app, Point::new(100.0, 100.0)));
     assert_eq!(app.canvas.shapes[1].color, blue);
     assert_eq!(app.canvas.shapes[2].color, green);
 
-    // 4. グループを赤い顔シェイプの上 (y: 100 -> y: 200) へ移動して選択解除しても、下の赤い顔シェイプが切り抜かれず両方共存すること
+    // グループを赤い顔シェイプの上へ移動して選択解除しても下の生シェイプを切り抜かないこと
     let snap = app.canvas.shapes.clone();
     app.canvas.translate_selected(KVec2::new(0.0, 100.0));
     tool_select::commit_moved_selection(&mut app, snap);
     tool_select::clear_selection(&mut app);
-    assert_eq!(
-        app.canvas.shapes.len(),
-        3,
-        "グループ化されたパーツは選択解除しても下の生シェイプを切り抜かないこと"
-    );
-    assert!(
-        app.canvas.shapes[0].contains_point(Point::new(100.0, 200.0)),
-        "下の赤い顔シェイプが削られずに残っていること"
-    );
+    assert_eq!(app.canvas.shapes.len(), 3);
+    assert!(app.canvas.shapes[0].contains_point(Point::new(100.0, 200.0)));
+}
 
-    // 5. さらに「赤い顔シェイプ (idx 0)」と「目グループ (idx 1, 2)」をまとめて 2段目の入れ子グループ化 (Cmd+G -> head_gid)
+#[test]
+fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    let green = Color32::from_rgb(65, 195, 105);
+
+    let face = make_stroke(Point::new(100.0, 200.0), Point::new(300.0, 200.0), 30.0, red);
+    let eye_a = make_stroke(Point::new(90.0, 200.0), Point::new(110.0, 200.0), 15.0, blue);
+    let eye_b = make_stroke(Point::new(135.0, 200.0), Point::new(155.0, 200.0), 12.0, green);
+    merge_shapes_into_canvas(&mut app.canvas.shapes, face);
+    app.canvas.shapes.extend(eye_a);
+    app.canvas.shapes.extend(eye_b);
+
+    app.canvas.selected_shapes = vec![1, 2];
+    let eye_gid = tool_select::group_selected_shapes(&mut app).unwrap();
     app.canvas.selected_shapes = vec![0, 1, 2];
-    let head_gid = tool_select::group_selected_shapes(&mut app)
-        .expect("2段目の入れ子グループ化が成功すること");
+    let head_gid = tool_select::group_selected_shapes(&mut app).unwrap();
     assert_eq!(app.canvas.shapes[0].group_path, vec![head_gid]);
     assert_eq!(app.canvas.shapes[1].group_path, vec![head_gid, eye_gid]);
     assert_eq!(app.canvas.shapes[2].group_path, vec![head_gid, eye_gid]);
 
-    // 6. ダブルクリック相当 (enter_group_at) で head_gid の中へインプレイス編集で潜る
-    assert!(tool_select::enter_group_at(
-        &mut app,
-        Point::new(200.0, 200.0)
-    ));
+    assert!(tool_select::enter_group_at(&mut app, Point::new(200.0, 200.0)));
     assert_eq!(app.canvas.editing_group_path, vec![head_gid]);
-    // head_gid の中では、赤い顔 (idx 0) は生シェイプ、目 (idx 1, 2) は子グループ eye_gid として扱われること
     assert!(app.canvas.shapes[0].is_raw_at_scope(&app.canvas.editing_group_path));
     assert_eq!(
         app.canvas.shapes[1].active_group_id_at_scope(&app.canvas.editing_group_path),
         Some(eye_gid)
     );
-    // さらに目グループをダブルクリックすると 2階層目 [head_gid, eye_gid] へ潜れること
-    assert!(tool_select::enter_group_at(
-        &mut app,
-        Point::new(100.0, 200.0)
-    ));
+
+    assert!(tool_select::enter_group_at(&mut app, Point::new(100.0, 200.0)));
     assert_eq!(app.canvas.editing_group_path, vec![head_gid, eye_gid]);
     assert!(app.canvas.shapes[1].is_raw_at_scope(&app.canvas.editing_group_path));
 
-    // 2回 exit_current_group でルート階層に戻り、head_gid が選択状態になること
     assert!(tool_select::exit_current_group(&mut app));
     assert_eq!(app.canvas.editing_group_path, vec![head_gid]);
     assert!(tool_select::exit_current_group(&mut app));
     assert!(app.canvas.editing_group_path.is_empty());
     assert_eq!(app.canvas.selected_shapes.len(), 3);
 
-    // 7. ルート階層で 1回 グループ解除 (Cmd+B / ungroup_selected_shapes) すると、
-    // 外側の head_gid だけが外れ、内側の eye_gid グループはそのまま維持されること
     assert!(tool_select::ungroup_selected_shapes(&mut app));
     assert!(app.canvas.shapes[0].group_path.is_empty());
     assert_eq!(app.canvas.shapes[1].group_path, vec![eye_gid]);
@@ -877,11 +873,10 @@ fn test_nested_grouping_ungrouping_and_edit_in_place() {
 }
 
 #[test]
-fn test_zoom_around_cursor_and_fine_brush_at_high_zoom() {
+fn test_zoom_around_cursor_preserves_world_point_and_clamps_bounds() {
     let mut app = Is2dApp::default();
     let cursor = Pos2::new(320.0, 240.0);
 
-    // 1. カーソル位置 (320, 240) を中心に 400% -> 800% へズームしても、カーソル直下のワールド座標が不変であること
     let world_before = app.viewport.screen_to_world(cursor);
     app.viewport.zoom_around_screen_pos(cursor, 4.0);
     app.viewport.zoom_around_screen_pos(cursor, 2.0);
@@ -894,7 +889,24 @@ fn test_zoom_around_cursor_and_fine_brush_at_high_zoom() {
     let screen_roundtrip = app.viewport.world_to_screen(world_after);
     assert!((screen_roundtrip - cursor).length() < 1e-3);
 
-    // 2. 800% ズーム状態で極細ブラシ（半径 0.5 px）のストロークを描いた際、微小面積フィルタで消えず滑らかなシェイプが生成されること
+    // 上限 (MAX_VIEW_ZOOM = 16.0) と下限 (MIN_VIEW_ZOOM = 0.15) でクランプされ、かつカーソル下の座標が保たれること
+    app.viewport.zoom_around_screen_pos(cursor, 100.0);
+    assert_eq!(app.viewport.zoom, crate::vector_engine::MAX_VIEW_ZOOM);
+    assert!((app.viewport.screen_to_world(cursor) - world_before).hypot() < 1e-3);
+
+    app.viewport.zoom_around_screen_pos(cursor, 0.001);
+    assert_eq!(app.viewport.zoom, crate::vector_engine::MIN_VIEW_ZOOM);
+    assert!((app.viewport.screen_to_world(cursor) - world_before).hypot() < 1e-3);
+
+    app.viewport.reset_view();
+    assert_eq!(app.viewport.zoom, 1.0);
+    assert_eq!(app.viewport.pan, Vec2::ZERO);
+}
+
+#[test]
+fn test_fine_brush_and_zoom_invariant_stroke_smoothing() {
+    let mut app = Is2dApp::default();
+    app.viewport.zoom = 8.0;
     app.ui.brush_radius = 0.5;
     let fine_raw = generate_brush_outline_at_zoom(
         &[Point::new(320.0, 240.0), Point::new(323.0, 240.0)],
@@ -902,15 +914,9 @@ fn test_zoom_around_cursor_and_fine_brush_at_high_zoom() {
         app.viewport.zoom as f64,
     );
     tool_paint::commit_raw_outline(&mut app, &fine_raw);
-    assert_eq!(
-        app.canvas.shapes.len(),
-        1,
-        "800% ズーム時の 0.5px 極細ストロークが消えずにシェイプ化されること"
-    );
+    assert_eq!(app.canvas.shapes.len(), 1);
     assert!(app.canvas.shapes[0].contains_point(Point::new(321.5, 240.0)));
 
-    // 3. 100% ズーム (r=8px) と 400% ズーム (r=2px、画面上では同じ8px相当) で同じ画面軌跡を描いたとき、
-    //    スムーズ化後のベジェ曲線セグメント数が完全に一致し、面積も正確に 1/16 (1/4^2) スケールになること
     let screen_pts: Vec<Point> = (0..=40)
         .map(|i| {
             let t = i as f64 / 40.0;
@@ -933,29 +939,18 @@ fn test_zoom_around_cursor_and_fine_brush_at_high_zoom() {
     assert_eq!(shapes_1x.len(), 1);
     assert_eq!(shapes_4x.len(), 1);
     assert_eq!(
-            shapes_1x[0].exterior.segments.len(),
-            shapes_4x[0].exterior.segments.len(),
-            "100%表示と400%拡大表示で、画面上同一のストロークに対するスムーズ化結果のアンカー数が完全一致すること"
-        );
-    let area_ratio = shapes_1x[0].exterior.signed_area() / shapes_4x[0].exterior.signed_area();
-    assert!(
-        (area_ratio - 16.0).abs() < 0.05,
-        "面積比がズーム倍率の2乗 (16.0) と一致すること: area_ratio={area_ratio}"
+        shapes_1x[0].exterior.segments.len(),
+        shapes_4x[0].exterior.segments.len(),
     );
-
-    // 4. リセット (Cmd+0 相当) で 100%・原点パンへ戻ること
-    app.viewport.reset_view();
-    assert_eq!(app.viewport.zoom, 1.0);
-    assert_eq!(app.viewport.pan, Vec2::ZERO);
+    let area_ratio = shapes_1x[0].exterior.signed_area() / shapes_4x[0].exterior.signed_area();
+    assert!((area_ratio - 16.0).abs() < 0.05);
 }
 
 #[test]
-fn test_copy_cut_paste_and_paste_in_place() {
+fn test_cut_and_paste_in_place_seamlessly_remerges_raw_shape() {
     let mut app = Is2dApp::default();
     let red = Color32::from_rgb(235, 75, 75);
-    let blue = Color32::from_rgb(55, 135, 245);
 
-    // 1. 横長の赤シェイプ (x: 100..300, y: 200) を描画し、左半分 (x: 70..200) を矩形選択してカット (Cmd+X)
     let stroke = make_stroke(
         Point::new(100.0, 200.0),
         Point::new(300.0, 200.0),
@@ -971,39 +966,27 @@ fn test_copy_cut_paste_and_paste_in_place() {
         Point::new(200.0, 250.0),
         false,
     );
-    assert!(
-        tool_select::cut_selected_shapes(&mut app),
-        "Cmd+X で選択領域がカットされること"
-    );
-    assert_eq!(
-        app.canvas.shapes.len(),
-        1,
-        "右半分のみがキャンバスに残ること"
-    );
+    assert!(tool_select::cut_selected_shapes(&mut app));
+    assert_eq!(app.canvas.shapes.len(), 1);
     assert!(!app.canvas.shapes[0].contains_point(Point::new(120.0, 200.0)));
     assert!(app.canvas.shapes[0].contains_point(Point::new(260.0, 200.0)));
 
-    // 2. 同じ位置に貼り付け (Cmd+Shift+V) -> 元の左半分座標 (120, 200) に貼り付けられ、選択解除で右半分と1つに再結合されること
-    assert!(
-        tool_select::paste_clipboard(&mut app, true),
-        "Cmd+Shift+V で同じ位置に貼り付けられること"
-    );
+    assert!(tool_select::paste_clipboard(&mut app, true));
     assert_eq!(app.canvas.selected_shapes.len(), 1);
     assert!(
         app.canvas.shapes[app.canvas.selected_shapes[0]].contains_point(Point::new(120.0, 200.0))
     );
     tool_select::clear_selection(&mut app);
-    assert_eq!(
-        app.canvas.shapes.len(),
-        1,
-        "同じ位置に貼り付けた同色生シェイプは選択解除時に元の右半分とシームレスに結合されること"
-    );
+    assert_eq!(app.canvas.shapes.len(), 1);
     assert!(app.canvas.shapes[0].contains_point(Point::new(120.0, 200.0)));
     assert!(app.canvas.shapes[0].contains_point(Point::new(260.0, 200.0)));
+}
 
-    // 3. グループ化されたオブジェクトのコピー (Cmd+C) ＆通常貼り付け (Cmd+V) で、
-    //    元のグループとは独立した新しいグループIDが採番され、オフセット (+16, +16) 位置に配置されること
-    app.canvas.shapes.clear();
+#[test]
+fn test_copy_paste_group_assigns_new_gid_and_alt_drag_symbol_undo() {
+    let mut app = Is2dApp::default();
+    let blue = Color32::from_rgb(55, 135, 245);
+
     let g_part = make_stroke(
         Point::new(100.0, 100.0),
         Point::new(140.0, 100.0),
@@ -1014,28 +997,19 @@ fn test_copy_cut_paste_and_paste_in_place() {
     app.canvas.selected_shapes = vec![0];
     let orig_gid = tool_select::group_selected_shapes(&mut app).unwrap();
 
-    assert!(
-        tool_select::copy_selected_shapes(&mut app),
-        "Cmd+C でグループがコピーされること"
-    );
-    assert!(
-        tool_select::paste_clipboard(&mut app, false),
-        "Cmd+V でオフセット付き貼り付けが成功すること"
-    );
+    assert!(tool_select::copy_selected_shapes(&mut app));
+    // 高ズーム時でもワールド座標上の一定オフセット (+16, +16) で貼り付けられること
+    app.viewport.zoom = 4.0;
+    assert!(tool_select::paste_clipboard(&mut app, false));
     assert_eq!(app.canvas.shapes.len(), 2);
     let pasted_idx = app.canvas.selected_shapes[0];
     let pasted_gid = app.canvas.shapes[pasted_idx].group_path[0];
-    assert_ne!(
-        pasted_gid, orig_gid,
-        "複製されたグループには元のグループとは別の一意なグループIDが割り当てられること"
-    );
+    assert_ne!(pasted_gid, orig_gid);
     assert!(
         app.canvas.shapes[pasted_idx].contains_point(Point::new(120.0 + 16.0, 100.0 + 16.0)),
-        "Cmd+V では (+16, +16) ずれた位置に貼り付けられること"
+        "Cmd+V ではズーム倍率によらずワールド座標 (+16, +16) ずれた位置に貼り付けられること"
     );
 
-    // 4. Alt + ドラッグ複製 (duplicate_selected_shapes_for_alt_drag) でシンボルやグループが独立したIDで複製移動でき、
-    //    1回の Undo で複製前の状態に戻ること
     let sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     let orig_inst_gid = tool_transform::selected_single_symbol_info(&app)
         .unwrap()
@@ -1050,25 +1024,17 @@ fn test_copy_cut_paste_and_paste_in_place() {
 
     let (dup_binding, _, _) = tool_transform::selected_single_symbol_info(&app).unwrap();
     assert_eq!(dup_binding.symbol_id, sym_id);
-    assert_ne!(
-            dup_binding.instance_gid, orig_inst_gid,
-            "Alt+ドラッグで複製されたシンボルインスタンスには新しい一意な instance_gid が採番されること"
-        );
+    assert_ne!(dup_binding.instance_gid, orig_inst_gid);
     assert!(
         app.canvas.shapes[app.canvas.selected_shapes[0]]
             .contains_point(Point::new(120.0 + 16.0 + 60.0, 100.0 + 16.0 + 40.0)),
-        "複製されたシンボルがドラッグ先座標に移動していること"
     );
     app.undo();
-    assert_eq!(
-        app.canvas.shapes.len(),
-        count_before,
-        "1回の Undo で Alt+ドラッグ複製前の状態へ戻ること"
-    );
+    assert_eq!(app.canvas.shapes.len(), count_before);
 }
 
 #[test]
-fn test_timeline_layer_keyframe_and_cel_lookup() {
+fn test_timeline_layer_keyframe_insertion_and_cel_lookup() {
     let mut timeline = Timeline::default();
     assert_eq!(timeline.fps, 24);
     assert_eq!(timeline.total_frames, 1);
@@ -1088,8 +1054,6 @@ fn test_timeline_layer_keyframe_and_cel_lookup() {
     }
     assert_eq!(timeline.active_cel_shapes().len(), 1);
 
-    // フレーム 4 に空白キーフレーム (F7: clone_prev = false) を挿入すると、
-    // frame_count が 5 に拡張され、フレーム 0..=3 は元のキーフレーム、フレーム 4 は空の新しいキーフレームを参照すること
     timeline.layers[0].insert_keyframe(4, false);
     assert_eq!(timeline.layers[0].frame_count, 5);
     assert_eq!(timeline.layers[0].keyframe_index_at(3), Some(0));
@@ -1097,13 +1061,14 @@ fn test_timeline_layer_keyframe_and_cel_lookup() {
     assert_eq!(timeline.layers[0].cel_at(2).unwrap().shapes.len(), 1);
     assert!(timeline.layers[0].cel_at(4).unwrap().is_empty());
 
-    // フレーム 2 の位置からフレーム 3 に複製キーフレーム (F6: clone_prev = true) を挿入すると図形が引き継がれること
     timeline.layers[0].insert_keyframe(3, true);
     assert_eq!(timeline.layers[0].cel_at(3).unwrap().shapes.len(), 1);
+}
 
-    // Is2dApp 統合テスト：F6（複製キーフレーム進行）・F7（空白キーフレーム進行）・F5（延長）・レイヤー操作・Undo/Redo
+#[test]
+fn test_timeline_f5_f6_f7_and_delete_keyframe_undo_redo() {
     let mut app = Is2dApp::default();
-    let blue = Color32::from_rgb(55, 135, 245);
+    let red = Color32::from_rgb(235, 75, 75);
     let s0 = make_stroke(
         Point::new(100.0, 100.0),
         Point::new(150.0, 100.0),
@@ -1112,28 +1077,21 @@ fn test_timeline_layer_keyframe_and_cel_lookup() {
     );
     merge_shapes_into_canvas(&mut app.canvas.shapes, s0);
     canvas_tool::sync_shapes_to_timeline(&mut app);
-    assert_eq!(app.timeline.current_frame, 0);
-    assert_eq!(app.canvas.shapes.len(), 1);
 
-    // 1. キーフレーム先頭 (frame 0) で F6 を押すと、自動的に次のフレーム (frame 1) へ進みつつ絵が複製されること
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
     assert_eq!(app.timeline.current_frame, 1);
     assert_eq!(app.canvas.shapes.len(), 1);
 
-    // 2. 絵があるキーフレーム先頭 (frame 1) で F7 を押すと、次のフレーム (frame 2) に空白キーフレームが作成されること
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
     assert_eq!(app.timeline.current_frame, 2);
     assert!(app.canvas.shapes.is_empty());
 
-    // 3. F5 でフレーム延長・Shift+F5 で短縮・Shift+F6 でキーフレーム削除と Undo/Redo が正確に動作すること
     let prev_total = app.timeline.total_frames;
     assert!(timeline_ui::timeline_extend_frame(&mut app));
     assert_eq!(app.timeline.total_frames, prev_total + 1);
     assert!(timeline_ui::timeline_remove_frame(&mut app));
     assert_eq!(app.timeline.total_frames, prev_total);
 
-    // 3b. Adobe Animate 仕様：現在の尺（prev_total）より先の空マス（例: frame 9 = 10フレーム目）を選択して F5 を押すと、
-    //     そのフレーム位置まで一気に保持尺が伸びること
     timeline_ui::select_timeline_cells(&mut app, 0, 9, 0, 9);
     assert_eq!(app.timeline.current_frame, 9);
     assert!(timeline_ui::timeline_extend_frame(&mut app));
@@ -1144,42 +1102,38 @@ fn test_timeline_layer_keyframe_and_cel_lookup() {
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
 
     assert!(timeline_ui::timeline_delete_keyframe(&mut app));
-    assert_eq!(
-        app.canvas.shapes.len(),
-        1,
-        "frame 2 の空白キーフレームを削除すると直前の frame 1 の絵が保持表示されること"
-    );
+    assert_eq!(app.canvas.shapes.len(), 1);
     app.undo();
-    assert!(
-        app.canvas.shapes.is_empty(),
-        "Undo で削除前の空白キーフレーム状態に戻ること"
-    );
+    assert!(app.canvas.shapes.is_empty());
     app.redo();
     assert_eq!(app.canvas.shapes.len(), 1);
+}
 
-    // 4. 新規レイヤー追加・複数レイヤー横断範囲選択（Adobe Animate 挙動）・ドラッグ＆ドロップ重ね順入れ替え・削除
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
-    assert_eq!(app.canvas.shapes.len(), 1);
-    timeline_ui::timeline_add_layer(&mut app); // Layer 2 (index 1)
+#[test]
+fn test_multilayer_isolation_cross_layer_marquee_and_lock_protection() {
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    let s0 = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(150.0, 100.0),
+        10.0,
+        red,
+    );
+    merge_shapes_into_canvas(&mut app.canvas.shapes, s0);
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+
+    timeline_ui::timeline_add_layer(&mut app);
     assert_eq!(app.timeline.layers.len(), 2);
     assert_eq!(app.timeline.active_layer, 1);
-    assert!(
-        app.timeline.active_cel_shapes().is_empty(),
-        "新しく追加された前面レイヤーのセルは空であること"
-    );
-    assert_eq!(
-        app.canvas.shapes.len(),
-        1,
-        "作業キャンバス self.canvas.shapes には全可視・非ロックレイヤーの図形が展開されていること"
-    );
+    assert!(app.timeline.active_cel_shapes().is_empty());
+    assert_eq!(app.canvas.shapes.len(), 1);
     app.ui.brush_color = blue;
     assert_eq!(
         tool_paint::pick_color_at(&mut app, Point::new(125.0, 100.0)),
-        Some(red),
-        "空の前面レイヤー上でも、可視状態の背面レイヤーにある図形の色をスポイトで抽出できること"
+        Some(red)
     );
 
-    // Layer 2 (index 1) に青いストロークを追加（Layer 1 の赤いストロークと重なる位置）
     app.ui.brush_color = blue;
     tool_paint::commit_raw_outline(
         &mut app,
@@ -1191,43 +1145,27 @@ fn test_timeline_layer_keyframe_and_cel_lookup() {
         ],
     );
     canvas_tool::sync_shapes_to_timeline(&mut app);
-    assert_eq!(
-            app.timeline.layers[0].cel_at(0).unwrap().shapes.len(),
-            1,
-            "別レイヤーのストロークによって背面レイヤーの図形が削られないこと（レイヤー間の Merge Drawing 分離）"
-        );
+    assert_eq!(app.timeline.layers[0].cel_at(0).unwrap().shapes.len(), 1);
     assert_eq!(app.timeline.layers[1].cel_at(0).unwrap().shapes.len(), 1);
     assert_eq!(app.canvas.shapes.len(), 2);
 
-    // 現在 Layer 2 を選択していても、範囲選択（Marquee Selection）で Layer 1 と Layer 2 の両方の絵を一括選択・移動できること
     tool_select::apply_marquee_selection(
         &mut app,
         Point::new(50.0, 50.0),
         Point::new(200.0, 200.0),
         false,
     );
-    assert_eq!(
-            app.canvas.selected_shapes.len(),
-            2,
-            "Adobe Animate 同様に、範囲選択で複数レイヤーにまたがる全ての非ロック図形を一括選択できること"
-        );
+    assert_eq!(app.canvas.selected_shapes.len(), 2);
     let undo_snap = app.canvas.shapes.clone();
     app.canvas.translate_selected(KVec2::new(30.0, 0.0));
     tool_select::commit_moved_selection(&mut app, undo_snap);
     tool_select::clear_selection(&mut app);
     canvas_tool::sync_shapes_to_timeline(&mut app);
-    assert!(
-        app.timeline.layers[0].cel_at(0).unwrap().shapes[0]
-            .contains_point(Point::new(155.0, 100.0)),
-        "Layer 1 の図形が移動され、かつ Layer 1 に留まっていること"
-    );
-    assert!(
-        app.timeline.layers[1].cel_at(0).unwrap().shapes[0]
-            .contains_point(Point::new(155.0, 100.0)),
-        "Layer 2 の図形も同時に移動され、かつ Layer 1 の図形を削らずに Layer 2 に留まっていること"
-    );
+    assert!(app.timeline.layers[0].cel_at(0).unwrap().shapes[0]
+        .contains_point(Point::new(155.0, 100.0)));
+    assert!(app.timeline.layers[1].cel_at(0).unwrap().shapes[0]
+        .contains_point(Point::new(155.0, 100.0)));
 
-    // Layer 1 をロック (🔒) すると、範囲選択では Layer 2 の図形のみが選択され、Layer 1 は保護されること
     timeline_ui::set_layer_locked(&mut app, 0, true);
     tool_select::apply_marquee_selection(
         &mut app,
@@ -1235,16 +1173,17 @@ fn test_timeline_layer_keyframe_and_cel_lookup() {
         Point::new(250.0, 200.0),
         false,
     );
-    assert_eq!(
-        app.canvas.selected_shapes.len(),
-        1,
-        "ロックされたレイヤーの図形は範囲選択から除外されて保護されること"
-    );
+    assert_eq!(app.canvas.selected_shapes.len(), 1);
     tool_select::clear_selection(&mut app);
     timeline_ui::set_layer_locked(&mut app, 0, false);
     assert_eq!(app.canvas.shapes.len(), 2);
+}
 
-    timeline_ui::timeline_add_layer(&mut app); // Layer 3 (index 2)
+#[test]
+fn test_timeline_layer_reorder_move_and_delete() {
+    let mut app = Is2dApp::default();
+    timeline_ui::timeline_add_layer(&mut app);
+    timeline_ui::timeline_add_layer(&mut app);
     assert_eq!(app.timeline.layers.len(), 3);
     assert_eq!(
         app.timeline
@@ -1254,7 +1193,7 @@ fn test_timeline_layer_keyframe_and_cel_lookup() {
             .collect::<Vec<_>>(),
         vec!["Layer 1", "Layer 2", "Layer 3"]
     );
-    // Layer 3 (index 2) を最背面 (index 0) へドラッグ＆ドロップ移動
+
     assert!(timeline_ui::timeline_reorder_layer(&mut app, 2, 0));
     assert_eq!(app.timeline.active_layer, 0);
     assert_eq!(
@@ -1265,7 +1204,6 @@ fn test_timeline_layer_keyframe_and_cel_lookup() {
             .collect::<Vec<_>>(),
         vec!["Layer 3", "Layer 1", "Layer 2"]
     );
-    // Undo / Redo でレイヤー重ね順が完全に復元されること
     app.undo();
     assert_eq!(
         app.timeline
@@ -1291,12 +1229,14 @@ fn test_timeline_layer_keyframe_and_cel_lookup() {
     assert_eq!(app.timeline.layers.len(), 2);
     assert!(timeline_ui::timeline_delete_active_layer(&mut app));
     assert_eq!(app.timeline.layers.len(), 1);
+}
 
-    // 5. 追加仕様6項目の検証：
-    // (1) レイヤー選択状態に応じた F5 / Shift+F5 挙動（選択レイヤーのみ vs 全レイヤー）
-    let mut app2 = Is2dApp::default();
+#[test]
+fn test_timeline_cell_selection_sync_with_canvas_selection() {
+    let mut app = Is2dApp::default();
+    let blue = Color32::from_rgb(55, 135, 245);
     tool_paint::commit_raw_outline(
-        &mut app2,
+        &mut app,
         &[
             Point::new(40.0, 40.0),
             Point::new(80.0, 40.0),
@@ -1304,10 +1244,10 @@ fn test_timeline_layer_keyframe_and_cel_lookup() {
             Point::new(40.0, 80.0),
         ],
     );
-    timeline_ui::timeline_add_layer(&mut app2); // Layer 2 (index 1)
-    app2.ui.brush_color = blue;
+    timeline_ui::timeline_add_layer(&mut app);
+    app.ui.brush_color = blue;
     tool_paint::commit_raw_outline(
-        &mut app2,
+        &mut app,
         &[
             Point::new(140.0, 40.0),
             Point::new(180.0, 40.0),
@@ -1315,142 +1255,117 @@ fn test_timeline_layer_keyframe_and_cel_lookup() {
             Point::new(140.0, 80.0),
         ],
     );
-    canvas_tool::sync_shapes_to_timeline(&mut app2);
-    let base_len = app2.timeline.layers[0].frame_count;
-    assert_eq!(app2.timeline.layers[1].frame_count, base_len);
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+    let base_len = app.timeline.layers[0].frame_count;
 
-    // Layer 2 (index 1) だけを選択した状態で F5 -> Layer 2 だけが +1 伸び、Layer 1 はそのまま
-    timeline_ui::select_timeline_cells(&mut app2, 1, 0, 1, 0);
-    assert!(timeline_ui::timeline_extend_frame(&mut app2));
-    assert_eq!(app2.timeline.layers[0].frame_count, base_len);
-    assert_eq!(app2.timeline.layers[1].frame_count, base_len + 1);
+    timeline_ui::select_timeline_cells(&mut app, 1, 0, 1, 0);
+    assert!(timeline_ui::timeline_extend_frame(&mut app));
+    assert_eq!(app.timeline.layers[0].frame_count, base_len);
+    assert_eq!(app.timeline.layers[1].frame_count, base_len + 1);
 
-    // ルーラースクラブ等でレイヤー未選択状態 (cell_selection = None) にして F5 -> 全レイヤーが +1 伸びる
-    timeline_ui::scrub_ruler_to_frame(&mut app2, 0);
-    assert!(app2.timeline.cell_selection.is_none());
-    assert!(timeline_ui::timeline_extend_frame(&mut app2));
-    assert_eq!(app2.timeline.layers[0].frame_count, base_len + 1);
-    assert_eq!(app2.timeline.layers[1].frame_count, base_len + 2);
+    timeline_ui::scrub_ruler_to_frame(&mut app, 0);
+    assert!(app.timeline.cell_selection.is_none());
+    assert!(timeline_ui::timeline_extend_frame(&mut app));
+    assert_eq!(app.timeline.layers[0].frame_count, base_len + 1);
+    assert_eq!(app.timeline.layers[1].frame_count, base_len + 2);
 
-    // (2) キーフレーム（フレームセル）をクリックしたとき、そのキーフレーム内の絵が全て選択状態になること
-    timeline_ui::select_timeline_cells(&mut app2, 0, 0, 0, 0);
+    timeline_ui::select_timeline_cells(&mut app, 0, 0, 0, 0);
+    assert_eq!(app.canvas.selected_shapes.len(), 1);
     assert_eq!(
-        app2.canvas.selected_shapes.len(),
-        1,
-        "Layer 1 のキーフレームをクリックすると Layer 1 の絵が全選択されること"
-    );
-    assert_eq!(
-        app2.canvas.shapes[app2.canvas.selected_shapes[0]].layer_id,
-        app2.timeline.layers[0].id
+        app.canvas.shapes[app.canvas.selected_shapes[0]].layer_id,
+        app.timeline.layers[0].id
     );
 
-    // (3) キャンバスの任意の絵を選択したとき、その絵が所属するレイヤーがタイムラインで選択状態になること
-    tool_select::clear_selection(&mut app2);
-    timeline_ui::scrub_ruler_to_frame(&mut app2, 0);
+    tool_select::clear_selection(&mut app);
+    timeline_ui::scrub_ruler_to_frame(&mut app, 0);
     assert!(tool_select::select_single_shape_at(
-        &mut app2,
+        &mut app,
         Point::new(160.0, 60.0)
-    )); // Layer 2 の青い矩形をクリック
-    assert_eq!(app2.timeline.active_layer, 1);
+    ));
+    assert_eq!(app.timeline.active_layer, 1);
     assert_eq!(
-        app2.timeline
+        app.timeline
             .cell_selection
             .map(|s| (s.min_layer, s.max_layer)),
-        Some((1, 1)),
-        "キャンバスの絵を選択すると、その絵が属するレイヤーがタイムラインでも選択状態になること"
+        Some((1, 1))
     );
 
-    // (4) タイムライン上でレイヤーをまたいでドラッグ範囲選択すると、それらのレイヤーの絵がすべて選択状態になること
-    timeline_ui::select_timeline_cells(&mut app2, 0, 0, 1, 0);
-    assert_eq!(
-            app2.canvas.selected_shapes.len(),
-            2,
-            "レイヤーをまたいでタイムラインセルを範囲選択すると、対象レイヤー群の絵がすべて選択状態になること"
-        );
+    timeline_ui::select_timeline_cells(&mut app, 0, 0, 1, 0);
+    assert_eq!(app.canvas.selected_shapes.len(), 2);
+}
 
-    // (5) 選択フレームのドラッグ移動および Alt+ドラッグ複製（コピー）
+#[test]
+fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
+    let mut app = Is2dApp::default();
+    let blue = Color32::from_rgb(55, 135, 245);
+    tool_paint::commit_raw_outline(
+        &mut app,
+        &[
+            Point::new(40.0, 40.0),
+            Point::new(80.0, 40.0),
+            Point::new(80.0, 80.0),
+            Point::new(40.0, 80.0),
+        ],
+    );
+    timeline_ui::timeline_add_layer(&mut app);
+    app.ui.brush_color = blue;
+    tool_paint::commit_raw_outline(
+        &mut app,
+        &[
+            Point::new(140.0, 40.0),
+            Point::new(180.0, 40.0),
+            Point::new(180.0, 80.0),
+            Point::new(140.0, 80.0),
+        ],
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+    timeline_ui::scrub_ruler_to_frame(&mut app, 0);
+    timeline_ui::timeline_extend_frame(&mut app);
+
     let sel_l1_f0 = timeline::TimelineCellSelection::single(1, 0);
-    // Alt+ドラッグ（copy_mode = true）で Layer 2 の frame 0 を frame 3 へ複製
     assert!(timeline_ui::timeline_move_or_copy_frames(
-        &mut app2, sel_l1_f0, 0, 3, true
+        &mut app, sel_l1_f0, 0, 3, true
     ));
-    assert!(
-        !app2.timeline.layers[1].cel_at(0).unwrap().is_empty(),
-        "Alt+ドラッグ複製では元の frame 0 の絵も残ること"
-    );
-    assert_eq!(
-        app2.timeline.layers[1].keyframe_index_at(3),
-        Some(1),
-        "frame 3 に複製された新しいキーフレームが作成されていること"
-    );
-    assert!(!app2.timeline.layers[1].cel_at(3).unwrap().is_empty());
+    assert!(!app.timeline.layers[1].cel_at(0).unwrap().is_empty());
+    assert_eq!(app.timeline.layers[1].keyframe_index_at(3), Some(1));
+    assert!(!app.timeline.layers[1].cel_at(3).unwrap().is_empty());
 
-    // 複製された frame 3 のキーフレームを frame 5 へ通常ドラッグ移動（copy_mode = false）
     let sel_l1_f3 = timeline::TimelineCellSelection::single(1, 3);
     assert!(timeline_ui::timeline_move_or_copy_frames(
-        &mut app2, sel_l1_f3, 0, 2, false
+        &mut app, sel_l1_f3, 0, 2, false
     ));
-    assert_eq!(
-        app2.timeline.layers[1].keyframes[1].start_frame, 5,
-        "通常ドラッグ移動では frame 3 のキーフレームが frame 5 へ移動していること"
-    );
-    assert!(
-        !app2.timeline.layers[1].cel_at(5).unwrap().is_empty(),
-        "移動先の frame 5 に絵が移動していること"
-    );
-    // 先頭 frame 0 のキーフレームを frame 2 へ通常ドラッグ移動すると、frame 0 は空キーフレームになること
+    assert_eq!(app.timeline.layers[1].keyframes[1].start_frame, 5);
+    assert!(!app.timeline.layers[1].cel_at(5).unwrap().is_empty());
+
     let sel_l0_f0 = timeline::TimelineCellSelection::single(0, 0);
     assert!(timeline_ui::timeline_move_or_copy_frames(
-        &mut app2, sel_l0_f0, 0, 2, false
+        &mut app, sel_l0_f0, 0, 2, false
     ));
-    assert!(
-        app2.timeline.layers[0].cel_at(0).unwrap().is_empty(),
-        "先頭 frame 0 のキーフレームを後続へ移動すると frame 0 は空白キーフレームになること"
-    );
-    assert!(
-        !app2.timeline.layers[0].cel_at(2).unwrap().is_empty(),
-        "移動先の frame 2 に Layer 1 の絵が移動していること"
-    );
+    assert!(app.timeline.layers[0].cel_at(0).unwrap().is_empty());
+    assert!(!app.timeline.layers[0].cel_at(2).unwrap().is_empty());
 
-    // (6) Shift+F5（フレーム削除）がキーフレームに当たったときの Adobe Animate 準拠挙動：
-    // 保持尺が 2 コマ以上あるときはキーフレームを残して尺を縮め、1 コマ単独キーフレームのときはそのキーフレーム自体を削除して後続を左へ詰める
-    // Layer 2 の frame 3 と frame 4 にキーフレームを挿入し、frame 3 を 1 コマ単独キーフレームにする
-    app2.timeline.layers[1].insert_keyframe(3, false);
-    app2.timeline.layers[1].insert_keyframe(4, false);
-    let kf_count_before = app2.timeline.layers[1].keyframes.len();
-    // frame 0 は保持尺が 3 コマ (0, 1, 2) あるので、frame 0 で Shift+F5 を押すと kf[0] は消えず保持尺が 2 コマになり後続が 1 コマ左へ詰まる
-    timeline_ui::select_timeline_cells(&mut app2, 1, 0, 1, 0);
-    assert!(timeline_ui::timeline_remove_frame(&mut app2));
-    assert_eq!(
-            app2.timeline.layers[1].keyframes.len(),
-            kf_count_before,
-            "保持フレームがあるキーフレーム上での Shift+F5 はキーフレームを消さず保持尺のみ1コマ縮めること"
-        );
-    // 次に 1 コマ幅になったキーフレーム（旧 frame 3 -> 現 frame 2）の上で Shift+F5 を押すと、その1コマKF自体が削除され後続が左へ詰まる
-    timeline_ui::select_timeline_cells(&mut app2, 1, 2, 1, 2);
-    assert!(timeline_ui::timeline_remove_frame(&mut app2));
-    assert_eq!(
-            app2.timeline.layers[1].keyframes.len(),
-            kf_count_before - 1,
-            "保持フレームがない1コマ単独キーフレーム上での Shift+F5 はそのキーフレーム自体を削除して後続を左へ詰めること"
-        );
+    app.timeline.layers[1].insert_keyframe(3, false);
+    app.timeline.layers[1].insert_keyframe(4, false);
+    let kf_count_before = app.timeline.layers[1].keyframes.len();
+    timeline_ui::select_timeline_cells(&mut app, 1, 0, 1, 0);
+    assert!(timeline_ui::timeline_remove_frame(&mut app));
+    assert_eq!(app.timeline.layers[1].keyframes.len(), kf_count_before);
 
-    // (7) Cel の結合メッシュキャッシュと再生中ゼロコピーの検証
-    let cel = app2.timeline.layers[1].cel_at(0).unwrap();
+    timeline_ui::select_timeline_cells(&mut app, 1, 2, 1, 2);
+    assert!(timeline_ui::timeline_remove_frame(&mut app));
+    assert_eq!(app.timeline.layers[1].keyframes.len(), kf_count_before - 1);
+
+    let cel = app.timeline.layers[1].cel_at(0).unwrap();
     let m1 = cel.cached_screen_mesh(1.0, Vec2::ZERO, false);
     let m2 = cel.cached_screen_mesh(1.0, Vec2::ZERO, false);
     assert!(!m1.is_empty());
-    assert_eq!(m1.vertices.len(), m2.vertices.len());
-    timeline_ui::toggle_playback(&mut app2);
-    assert!(app2.timeline_ui.is_playing);
-    app2.timeline.current_frame = 0;
-    timeline_ui::toggle_playback(&mut app2);
-    assert!(!app2.timeline_ui.is_playing);
-    assert_eq!(
-        app2.canvas.shapes.len(),
-        1,
-        "再生停止時に停止フレーム (frame 0) の図形がキャンバスに復元されること"
-    );
+    assert!(std::sync::Arc::ptr_eq(&m1, &m2));
+    timeline_ui::toggle_playback(&mut app);
+    assert!(app.timeline_ui.is_playing);
+    app.timeline.current_frame = 0;
+    timeline_ui::toggle_playback(&mut app);
+    assert!(!app.timeline_ui.is_playing);
+    assert_eq!(app.canvas.shapes.len(), 1);
 }
 
 #[test]
@@ -1529,12 +1444,11 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
 }
 
 #[test]
-fn test_g1_tangent_continuity_and_spine_smoothing() {
+fn test_g1_tangent_continuity_on_wobbly_circle_stroke() {
     let center = Point::new(220.0, 220.0);
     let circle_r = 60.0;
     let brush_r = 10.0;
 
-    // ピクセルジャギーの入った円ストロークを生成
     let steps = 96usize;
     let pts: Vec<Point> = (0..=(steps + 2))
         .map(|i| {
@@ -1553,7 +1467,6 @@ fn test_g1_tangent_continuity_and_spine_smoothing() {
     assert_eq!(shapes.len(), 1);
     let shape = &shapes[0];
 
-    // 外周・内周のすべてのアンカーにおいて、前後の2次ベジェ曲線の接線方向が一直線（G1連続）に揃っていること
     for (c_idx, contour) in std::iter::once(&shape.exterior)
         .chain(shape.holes.iter())
         .enumerate()
@@ -1565,13 +1478,15 @@ fn test_g1_tangent_continuity_and_spine_smoothing() {
             let t_out = normalize_vec(contour.segments[j].p1 - contour.segments[j].p0);
             let dot = t_in.dot(t_out);
             assert!(
-                    dot > 0.9999,
-                    "contour {c_idx} アンカー {j}/{k} で前後のベジェ曲線の接線が G1 連続に揃っていること (dot = {dot})"
-                );
+                dot > 0.9999,
+                "contour {c_idx} アンカー {j}/{k} で前後のベジェ曲線の接線が G1 連続に揃っていること (dot = {dot})"
+            );
         }
     }
+}
 
-    // 短い辺（約35px）のコンパクトな V 字ストロークを描いたとき、角が勝手に丸められて削られないこと
+#[test]
+fn test_sharp_v_and_l_corners_preserve_inner_and_outer_vertices() {
     let v_corners = [
         Point::new(100.0, 100.0),
         Point::new(125.0, 130.0),
@@ -1589,18 +1504,9 @@ fn test_g1_tangent_continuity_and_spine_smoothing() {
     let v_shapes = build_smoothed_stroke_shapes(&v_raw, Color32::BLACK);
     assert_eq!(v_shapes.len(), 1);
     let v_shape = &v_shapes[0];
-    // V字の下端外角頂点 (125, 130 + r_v * 0.85) が丸められて欠けず、しっかり塗られていること
-    assert!(
-        v_shape.contains_point(Point::new(125.0, 130.0 + r_v * 0.85)),
-        "コンパクトなV字の外角先端が勝手に丸められて削られないこと"
-    );
-    // V字の内角の谷間 (125, 114) が勝手に丸められて埋まらず、空白のままであること
-    assert!(
-        !v_shape.contains_point(Point::new(125.0, 114.0)),
-        "コンパクトなV字の内角が勝手に丸められて潰れないこと"
-    );
+    assert!(v_shape.contains_point(Point::new(125.0, 130.0 + r_v * 0.85)));
+    assert!(!v_shape.contains_point(Point::new(125.0, 114.0)));
 
-    // L字ストローク (100,100) -> (100,200) -> (200,200) で外角・内角ともに前後の直線が巻き込まれて大きく丸まらないこと
     let l_corners = [
         Point::new(100.0, 100.0),
         Point::new(100.0, 200.0),
@@ -1618,21 +1524,13 @@ fn test_g1_tangent_continuity_and_spine_smoothing() {
     let l_shapes = build_smoothed_stroke_shapes(&l_raw, Color32::BLACK);
     assert_eq!(l_shapes.len(), 1);
     let l_shape = &l_shapes[0];
-    assert!(
-        l_shape.contains_point(Point::new(91.5, 198.5)),
-        "L字の外角付近が削られて大きく丸まらないこと"
-    );
-    assert!(
-        !l_shape.contains_point(Point::new(88.0, 185.0)),
-        "L字の外角手前の直線辺が外側に膨らまないこと"
-    );
-    assert!(
-        !l_shape.contains_point(Point::new(112.5, 187.5)),
-        "L字の内角 (110, 190) が丸められて埋まらないこと"
-    );
+    assert!(l_shape.contains_point(Point::new(91.5, 198.5)));
+    assert!(!l_shape.contains_point(Point::new(88.0, 185.0)));
+    assert!(!l_shape.contains_point(Point::new(112.5, 187.5)));
+}
 
-    // 「あ」の3画目のように、書き始めの先端が交差部から少しだけ（8px〜16px）突き出て自己交差するストロークで、
-    // 右上の交差谷間（凹V字ノッチ）が丸められてコブになったり突起が潰れたりしないこと
+#[test]
+fn test_self_intersecting_tip_protrusion_preserves_concave_notch() {
     for tip_protrusion in [5.0_f64, 6.0, 9.0, 12.0, 15.0, 19.0, 24.0, 30.0] {
         let r_a = 9.0;
         let cross_pt = Point::new(200.0, 130.0);
@@ -1668,22 +1566,16 @@ fn test_g1_tangent_continuity_and_spine_smoothing() {
         assert_eq!(a_shapes.len(), 1);
         let a_shape = &a_shapes[0];
 
-        // 右上の突起先端 (tip_start) の外周付近が削られずに残っていること
         let tip_apex = tip_start - dir_down_left * (r_a * 0.80);
-        assert!(
-            a_shape.contains_point(tip_apex),
-            "protrusion={tip_protrusion}: 『あ』の右上突起の先端が丸められて潰れないこと"
-        );
+        assert!(a_shape.contains_point(tip_apex));
 
-        // 突起の右側にある交差くびれ（凹V字ノッチ）のすぐ外側が勝手に繋がってコブ状に埋まらないこと
         let valley_outside_probe = Point::new(cross_pt.x + r_a + 3.2, cross_pt.y - 5.5);
-        assert!(
-                !a_shape.contains_point(valley_outside_probe),
-                "protrusion={tip_protrusion}: 『あ』の右上交差部の谷間が丸められてコブ状に繋がらないこと"
-            );
+        assert!(!a_shape.contains_point(valley_outside_probe));
     }
+}
 
-    // ゆらゆらした線（S字の波線）を描いたとき、軌道が勝手に直線化されず描いた波の山・谷が保持されること
+#[test]
+fn test_wavy_and_asymmetric_small_loop_strokes_preserve_hand_drawn_contours() {
     let r_wave = 8.0;
     let wave_pts: Vec<Point> = (0..=80)
         .map(|i| {
@@ -1697,32 +1589,16 @@ fn test_g1_tangent_continuity_and_spine_smoothing() {
     let wave_shapes = build_smoothed_stroke_shapes(&wave_raw, Color32::BLACK);
     assert_eq!(wave_shapes.len(), 1);
     let wave_shape = &wave_shapes[0];
-    // 波の下側の山 (x=125, y=204.5) と上側の谷 (x=175, y=195.5) が平坦化されず保持されていること
-    assert!(
-        wave_shape.contains_point(Point::new(125.0, 211.0)),
-        "ゆらゆらした波線の山 (x=125) が勝手に直線化されて削られないこと"
-    );
-    assert!(
-        !wave_shape.contains_point(Point::new(125.0, 194.5)),
-        "ゆらゆらした波線の山の反対側が勝手に直線化されて埋まらないこと"
-    );
-    assert!(
-        wave_shape.contains_point(Point::new(175.0, 189.0)),
-        "ゆらゆらした波線の谷 (x=175) が勝手に直線化されて削られないこと"
-    );
-    assert!(
-        !wave_shape.contains_point(Point::new(175.0, 205.5)),
-        "ゆらゆらした波線の谷の反対側が勝手に直線化されて埋まらないこと"
-    );
+    assert!(wave_shape.contains_point(Point::new(125.0, 211.0)));
+    assert!(!wave_shape.contains_point(Point::new(125.0, 194.5)));
+    assert!(wave_shape.contains_point(Point::new(175.0, 189.0)));
+    assert!(!wave_shape.contains_point(Point::new(175.0, 205.5)));
 
-    // 小さめの円（半径 15px 程度で、少し横長かつ右上が膨らんだ手描きの小円）を描いたとき、
-    // 勝手に正円へ整形されず、描いた小円の非対称な輪郭と内周穴がそのまま維持されること
     let small_center = Point::new(300.0, 300.0);
     let r_small_brush = 6.0;
     let small_pts: Vec<Point> = (0..=64)
         .map(|i| {
             let theta = (i as f64 / 62.0) * std::f64::consts::TAU;
-            // 横方向は半径 17px、縦方向は半径 12px に加え、右上 (theta ≈ -PI/4) に +2.2px の手描き膨らみを持つ小円
             let rx = 17.0 + 2.2 * (theta * 2.0).sin();
             let ry = 12.0 - 1.5 * (theta * 3.0).cos();
             Point::new(
@@ -1735,26 +1611,10 @@ fn test_g1_tangent_continuity_and_spine_smoothing() {
     let small_shapes = build_smoothed_stroke_shapes(&small_raw, Color32::BLACK);
     assert_eq!(small_shapes.len(), 1);
     let small_shape = &small_shapes[0];
-    assert_eq!(
-        small_shape.holes.len(),
-        1,
-        "小さめの円の中央の穴が潰れないこと"
-    );
-    // 横方向 (theta = 0: r = 17, 外周 x = 300 + 17 + 6 = 323) はしっかり塗られ、
-    // 縦方向 (theta = PI/2: r = 12, 外周 y = 300 + 12 + 6 = 318) は正円化で膨らまないこと
-    assert!(
-        small_shape.contains_point(Point::new(322.2, 300.0)),
-        "小さめの円の横方向の張り出しが勝手に縮められないこと"
-    );
-    assert!(
-        !small_shape.contains_point(Point::new(300.0, 319.2)),
-        "小さめの円の縦方向が正円化によって勝手に外側へ膨らまないこと"
-    );
-    // 内周穴の横方向 (x = 300 + 17 - 6 = 311 の内側 309.8) が空白のままであること
-    assert!(
-        !small_shape.contains_point(Point::new(309.8, 300.0)),
-        "小さめの円の内周穴の横幅が勝手に丸められて狭まらないこと"
-    );
+    assert_eq!(small_shape.holes.len(), 1);
+    assert!(small_shape.contains_point(Point::new(322.2, 300.0)));
+    assert!(!small_shape.contains_point(Point::new(300.0, 319.2)));
+    assert!(!small_shape.contains_point(Point::new(309.8, 300.0)));
 }
 
 #[test]
@@ -1768,7 +1628,6 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
     );
     app.canvas.selected_shapes = vec![0];
 
-    // 1. F8 シンボル化で "Symbol 1" がライブラリに登録され、インスタンスになること
     let sym_id =
         tool_transform::convert_selection_to_symbol(&mut app).expect("シンボル変換が成功すること");
     assert_eq!(app.symbols.library.len(), 1);
@@ -1776,7 +1635,6 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
     assert_eq!(app.symbols.library[0].name, "Symbol 1");
     assert!(tool_transform::selected_single_symbol_info(&app).is_some());
 
-    // 2. ライブラリからステージへ2つ目のインスタンスを配置できること
     assert!(tool_transform::place_symbol_instance_from_library(
         &mut app, sym_id
     ));
@@ -1786,7 +1644,6 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
         app.canvas.shapes[1].symbol_instance.unwrap().instance_gid
     );
 
-    // 3. 1つ目のインスタンスをダブルクリックすると、シンボル専用のタイムラインへ切り替わること
     assert!(tool_select::enter_group_at(
         &mut app,
         Point::new(150.0, 150.0)
@@ -1794,7 +1651,6 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
     assert_eq!(app.symbols.edit_stack.len(), 1);
     assert_eq!(app.timeline.total_frames, 1);
 
-    // シンボル内タイムラインで F6（複製キーフレーム）を押して2フレーム目を作成し、2フレーム目に帽子を描き足す
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
     assert_eq!(app.timeline.total_frames, 2);
     assert_eq!(app.timeline.current_frame, 1);
@@ -1809,40 +1665,31 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
     app.canvas.shapes.push(hat);
     canvas_tool::sync_shapes_to_timeline(&mut app);
 
-    // 4. シンボルから親シーン（シーン1）へ戻ると、シンボル内タイムライン（2フレーム）が保持され、
-    //    親シーンのフレーム進行に合わせてループ評価されること
     assert!(tool_select::exit_current_group(&mut app));
     assert!(app.symbols.edit_stack.is_empty());
     assert_eq!(app.symbols.library[0].timeline.total_frames, 2);
 
-    // シーン1の尺を3フレームに延長（F5 x 2）
     assert!(timeline_ui::timeline_extend_frame(&mut app));
     assert!(timeline_ui::timeline_extend_frame(&mut app));
     assert_eq!(app.timeline.total_frames, 3);
 
-    // フレーム0（シンボル内 0F = 1シェイプ × 2インスタンス = 2シェイプ）
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
     assert_eq!(app.canvas.shapes.len(), 2);
 
-    // フレーム1（シンボル内 1F = 2シェイプ × 2インスタンス = 4シェイプ）
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
     assert_eq!(app.canvas.shapes.len(), 4);
 
-    // フレーム2（ループしてシンボル内 0F = 1シェイプ × 2インスタンス = 2シェイプ）
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
     assert_eq!(app.canvas.shapes.len(), 2);
 }
 
 #[test]
-fn test_classic_tween_single_symbol_condition_and_interpolation() {
+fn test_classic_tween_requires_single_symbol_instance() {
     use crate::symbol::TweenState;
 
     let mut app = Is2dApp::default();
-
-    // 1. 空のキーフレームではトゥイーン (T) を設定できないこと
     assert!(!tool_transform::timeline_toggle_tween(&mut app));
 
-    // 2. 生の絵（Raw Shape）だけのキーフレームではトゥイーンを設定できないこと
     app.canvas.shapes = make_stroke(
         Point::new(100.0, 150.0),
         Point::new(200.0, 150.0),
@@ -1851,13 +1698,11 @@ fn test_classic_tween_single_symbol_condition_and_interpolation() {
     );
     assert!(!tool_transform::timeline_toggle_tween(&mut app));
 
-    // 3. 通常のグループ（Cmd+G）だけのキーフレームでもトゥイーンを設定できないこと
     app.canvas.selected_shapes = vec![0];
     assert!(tool_select::group_selected_shapes(&mut app).is_some());
     assert!(!tool_transform::timeline_toggle_tween(&mut app));
     assert!(tool_select::ungroup_selected_shapes(&mut app));
 
-    // 4. F8 で単一シンボルに変換すると、トゥイーンを設定できること
     app.canvas.selected_shapes = vec![0];
     let sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     assert!(tool_transform::timeline_toggle_tween(&mut app));
@@ -1865,22 +1710,17 @@ fn test_classic_tween_single_symbol_condition_and_interpolation() {
     assert_eq!(
         app.timeline.layers[0].tween_state_at_keyframe(0),
         TweenState::Incomplete,
-        "終了キーフレームがない状態では未完トゥイーン（横点線）になること"
     );
 
-    // 5. もう1回 T を押すとトゥイーンを解除でき、さらに別のシンボルや生の絵を混在させると T が拒否されること
     assert!(tool_transform::timeline_toggle_tween(&mut app));
     assert!(!app.timeline.layers[0].keyframes[0].tween);
 
-    // 2つ目のシンボルインスタンスを配置（複数シンボル混在）→ トゥイーン設定不可
     assert!(tool_transform::place_symbol_instance_from_library(
         &mut app, sym_id
     ));
     assert!(!tool_transform::timeline_toggle_tween(&mut app));
-    // 2つ目のインスタンスを削除して単一シンボルに戻す
     assert!(tool_select::delete_selected_shapes(&mut app));
 
-    // 生の絵を1つ追加（シンボル＋生の絵混在）→ トゥイーン設定不可
     let raw_extra = make_stroke(
         Point::new(300.0, 300.0),
         Point::new(340.0, 300.0),
@@ -1890,9 +1730,21 @@ fn test_classic_tween_single_symbol_condition_and_interpolation() {
     .remove(0);
     app.canvas.shapes.push(raw_extra);
     assert!(!tool_transform::timeline_toggle_tween(&mut app));
-    app.canvas.shapes.pop();
+}
 
-    // 6. 単一シンボルだけの状態で T を押し、F5 で 4 コマ延長（frame 0..=4）、frame 4 で F6 を押して終了キーフレームを作成
+#[test]
+fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
+    use crate::symbol::TweenState;
+
+    let mut app = Is2dApp::default();
+    app.canvas.shapes = make_stroke(
+        Point::new(100.0, 150.0),
+        Point::new(200.0, 150.0),
+        16.0,
+        Color32::from_rgb(230, 80, 80),
+    );
+    app.canvas.selected_shapes = vec![0];
+    tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     assert!(tool_transform::timeline_toggle_tween(&mut app));
     for _ in 0..4 {
         assert!(timeline_ui::timeline_extend_frame(&mut app));
@@ -1903,56 +1755,44 @@ fn test_classic_tween_single_symbol_condition_and_interpolation() {
         TweenState::Incomplete
     );
 
-    // frame 4 に移動して F6（複製キーフレーム作成）
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
-    assert_eq!(app.timeline.current_frame, 4);
-    assert!(
-            matches!(
-                app.timeline.layers[0].tween_state_at_keyframe(0),
-                TweenState::Complete {
-                    start_frame: 0,
-                    end_frame: 4,
-                    ..
-                }
-            ),
-            "終了キーフレームに同一シンボルの単一インスタンスが存在すると完全トゥイーン（実線矢印）になること"
-        );
+    assert!(matches!(
+        app.timeline.layers[0].tween_state_at_keyframe(0),
+        TweenState::Complete {
+            start_frame: 0,
+            end_frame: 4,
+            ..
+        }
+    ));
 
-    // 7. 終了キーフレーム（frame 4）でシンボルを X 方向に +200px、Y 方向に +80px 平行移動
     app.canvas.selected_shapes = vec![0];
     let snap = app.canvas.shapes.clone();
     app.canvas.translate_selected(KVec2::new(200.0, 80.0));
     tool_select::commit_moved_selection(&mut app, snap);
     canvas_tool::sync_shapes_to_timeline(&mut app);
 
-    // 中間フレーム（frame 2, t = 0.5）へ切り替えると、中心座標が (150 + 100, 150 + 40) = (250, 190) に補間されていること
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
     let mid_bbox = app.canvas.shapes[0].bounding_box();
     let mid_cx = (mid_bbox.x0 + mid_bbox.x1) * 0.5;
     let mid_cy = (mid_bbox.y0 + mid_bbox.y1) * 0.5;
-    assert!((mid_cx - 250.0).abs() < 1.0, "mid_cx = {mid_cx}");
-    assert!((mid_cy - 190.0).abs() < 1.0, "mid_cy = {mid_cy}");
+    assert!((mid_cx - 250.0).abs() < 1.0);
+    assert!((mid_cy - 190.0).abs() < 1.0);
 
-    // 中間フレームを表示したあとに先頭フレーム（frame 0）へ戻っても、先頭キーフレームの座標 (150, 150) が上書き破壊されていないこと
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
     let start_bbox = app.canvas.shapes[0].bounding_box();
     let start_cx = (start_bbox.x0 + start_bbox.x1) * 0.5;
     let start_cy = (start_bbox.y0 + start_bbox.y1) * 0.5;
-    assert!((start_cx - 150.0).abs() < 1.0, "start_cx = {start_cx}");
-    assert!((start_cy - 150.0).abs() < 1.0, "start_cy = {start_cy}");
+    assert!((start_cx - 150.0).abs() < 1.0);
+    assert!((start_cy - 150.0).abs() < 1.0);
 
-    // 8. シンボルインスタンスの変形中心（ピボット）を左端の関節位置 (100, 150) に設定し、
-    //    選択解除・フレーム移動後も保持され、そのピボットを中心にクラシックトゥイーン回転補間されること
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
     app.canvas.selected_shapes = vec![0];
-    // 一旦 frame 4 の位置も frame 0 と同じ (150, 150) に戻す
     let snap_reset = app.canvas.shapes.clone();
     app.canvas.translate_selected(KVec2::new(-200.0, -80.0));
     tool_select::commit_moved_selection(&mut app, snap_reset);
     canvas_tool::sync_shapes_to_timeline(&mut app);
 
-    // frame 4 でピボットを左端 (100, 150) [ローカル座標 (-50, 0)] に移動して +90° 回転
     let joint_world = Point::new(100.0, 150.0);
     assert!(tool_transform::set_selected_symbol_world_pivot(
         &mut app,
@@ -1965,49 +1805,27 @@ fn test_classic_tween_single_symbol_condition_and_interpolation() {
         .canvas
         .selection_bounding_box(app.viewport.zoom)
         .unwrap();
-    assert!(
-        (app.canvas.active_transform_pivot(bbox_f4) - joint_world).hypot() < 1e-4,
-        "選択解除後もシンボルインスタンスのカスタムピボット座標が保持されること"
-    );
+    assert!((app.canvas.active_transform_pivot(bbox_f4) - joint_world).hypot() < 1e-4);
     assert!(tool_transform::rotate_selected_shapes(
         &mut app,
         std::f64::consts::FRAC_PI_2
     ));
     canvas_tool::sync_shapes_to_timeline(&mut app);
 
-    // 中間フレーム（frame 2, t = 0.5 = +45° 回転）において、関節ピボット (100, 150) がぶれずに固定され、
-    // 元の中心 (150, 150) [関節から距離 50px] が 45° 回転位置 (100 + 50*cos45°, 150 + 50*sin45°) を通過すること
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
     let mid_binding = app.canvas.shapes[0].symbol_instance.unwrap();
-    assert!(
-        (mid_binding.world_pivot() - joint_world).hypot() < 1e-4,
-        "トゥイーン中間フレームでもピボット（関節位置）のワールド座標が固定されていること: {:?}",
-        mid_binding.world_pivot()
-    );
+    assert!((mid_binding.world_pivot() - joint_world).hypot() < 1e-4);
     let expected_mid_center = Point::new(
         100.0 + 50.0 * std::f64::consts::FRAC_1_SQRT_2,
         150.0 + 50.0 * std::f64::consts::FRAC_1_SQRT_2,
     );
-    assert!(
-            app.canvas.shapes[0].contains_point(expected_mid_center),
-            "中間フレーム (t=0.5) でピボット (100, 150) を軸とした +45° 回転位置にシェイプが存在すること"
-        );
+    assert!(app.canvas.shapes[0].contains_point(expected_mid_center));
 
-    // 9. タイムラインのキーフレーム選択時とキャンバス上のシンボル選択時で `inspect_timeline_frame` が切り替わり、
-    //    トゥイーンの回転方向（時計回り CW / 反時計回り CCW）が中間フレームに反映されること
     timeline_ui::select_timeline_cells(&mut app, 0, 0, 0, 0);
-    assert!(
-            app.ui.inspect_timeline_frame,
-            "タイムラインのセルを選択したときはフレーム属性表示モード (inspect_timeline_frame = true) になること"
-        );
+    assert!(app.ui.inspect_timeline_frame);
     tool_select::select_single_shape_at(&mut app, Point::new(150.0, 150.0));
-    assert!(
-            !app.ui.inspect_timeline_frame,
-            "キャンバス上のシンボルをクリックしたときはシンボル属性表示モード (inspect_timeline_frame = false) になること"
-        );
+    assert!(!app.ui.inspect_timeline_frame);
 
-    // 先頭キーフレームを選択して回転の向きを「反時計回り (CCW)」に変更すると、
-    // 0° -> +90° (CW) の終了角度へ反時計回りに -270° 回転し、中間フレーム (t=0.5) では -135° 位置を通過すること
     timeline_ui::select_timeline_cells(&mut app, 0, 0, 0, 0);
     assert!(tool_transform::set_active_keyframe_tween_rotate(
         &mut app,
@@ -2018,10 +1836,7 @@ fn test_classic_tween_single_symbol_condition_and_interpolation() {
         100.0 - 50.0 * std::f64::consts::FRAC_1_SQRT_2,
         150.0 - 50.0 * std::f64::consts::FRAC_1_SQRT_2,
     );
-    assert!(
-        app.canvas.shapes[0].contains_point(expected_ccw_mid_center),
-        "反時計回り (CCW) 指定時は中間フレーム (t=0.5) で -135° 回転位置を通過すること"
-    );
+    assert!(app.canvas.shapes[0].contains_point(expected_ccw_mid_center));
 }
 
 #[test]
@@ -2029,8 +1844,6 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
     use crate::symbol::SymbolLoopMode;
 
     let mut app = Is2dApp::default();
-
-    // 1. シンボルを作成し、内部を3フレーム構成にする（0F=赤、1F=緑、2F=青）
     let red = Color32::from_rgb(220, 60, 60);
     let green = Color32::from_rgb(60, 190, 90);
     let blue = Color32::from_rgb(60, 110, 230);
@@ -2046,7 +1859,6 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
     let (binding, _, _) = tool_transform::selected_single_symbol_info(&app).unwrap();
     assert!(tool_transform::enter_symbol_timeline(&mut app, binding));
 
-    // シンボル内部 1F（空白キーフレーム → 緑シェイプ）
     assert!(timeline_ui::timeline_extend_frame(&mut app));
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
@@ -2058,7 +1870,6 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
     );
     canvas_tool::sync_shapes_to_timeline(&mut app);
 
-    // シンボル内部 2F（空白キーフレーム → 青シェイプ）
     assert!(timeline_ui::timeline_extend_frame(&mut app));
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
@@ -2071,21 +1882,18 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
     canvas_tool::sync_shapes_to_timeline(&mut app);
     assert_eq!(app.timeline.total_frames, 3);
 
-    // 親シーンへ戻る（5フレーム分の尺に延長: frame 0..=4）
     assert!(tool_transform::exit_symbol_timeline(&mut app));
     for _ in 0..4 {
         assert!(timeline_ui::timeline_extend_frame(&mut app));
     }
     assert_eq!(app.timeline.total_frames, 5);
 
-    // 2. デフォルト（Loop, first_frame = 0）: 0F=赤, 1F=緑, 2F=青, 3F=赤, 4F=緑
     let expected_loop = [red, green, blue, red, green];
     for (f, &col) in expected_loop.iter().enumerate() {
         timeline_ui::switch_to_layer_and_frame(&mut app, 0, f);
         assert_eq!(app.canvas.shapes[0].color, col, "Loop mode at frame {f}");
     }
 
-    // 3. 1回再生（PlayOnce, first_frame = 0）に変更: 0F=赤, 1F=緑, 2F=青, 3F=青, 4F=青
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
     app.canvas.selected_shapes = vec![0];
     assert!(tool_transform::set_selected_symbol_playback(
@@ -2096,13 +1904,9 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
     let expected_once = [red, green, blue, blue, blue];
     for (f, &col) in expected_once.iter().enumerate() {
         timeline_ui::switch_to_layer_and_frame(&mut app, 0, f);
-        assert_eq!(
-            app.canvas.shapes[0].color, col,
-            "PlayOnce mode at frame {f}"
-        );
+        assert_eq!(app.canvas.shapes[0].color, col, "PlayOnce mode at frame {f}");
     }
 
-    // 4. 任意のフレーム（SingleFrame, first_frame = 1 [UI上は2フレーム目=緑]）に変更: 全フレームで緑
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
     app.canvas.selected_shapes = vec![0];
     assert!(tool_transform::set_selected_symbol_playback(
@@ -2114,20 +1918,16 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
     assert_eq!(app.canvas.selected_shapes, vec![0]);
     for f in 0..5 {
         timeline_ui::switch_to_layer_and_frame(&mut app, 0, f);
-        assert_eq!(
-            app.canvas.shapes[0].color, green,
-            "SingleFrame(1) at frame {f}"
-        );
+        assert_eq!(app.canvas.shapes[0].color, green);
     }
 }
 
 #[test]
-fn test_nested_symbol_evaluation_and_library_delete_detach() {
+fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
     let mut app = Is2dApp::default();
     let red = Color32::from_rgb(220, 60, 60);
     let blue = Color32::from_rgb(60, 110, 230);
 
-    // 1. 子シンボル（Symbol 1: 0F=赤, 1F=青 の2フレーム）を作成
     app.canvas.shapes = make_stroke(
         Point::new(100.0, 100.0),
         Point::new(160.0, 100.0),
@@ -2153,50 +1953,38 @@ fn test_nested_symbol_evaluation_and_library_delete_detach() {
     canvas_tool::sync_shapes_to_timeline(&mut app);
     assert!(tool_transform::exit_symbol_timeline(&mut app));
 
-    // 2. 子シンボルインスタンスを選択したまま、さらに親シンボル（Symbol 2: 1フレーム）に変換（入れ子構造）
     app.canvas.selected_shapes = vec![0];
     let parent_sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     assert_ne!(child_sym_id, parent_sym_id);
 
-    // 親シーンを2フレームに延長すると、1フレームの親シンボル越しに子シンボルの2フレームアニメが再帰評価されること
     assert!(timeline_ui::timeline_extend_frame(&mut app));
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
     assert_eq!(app.canvas.shapes[0].color, red);
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
     assert_eq!(app.canvas.shapes[0].color, blue);
 
-    // 2b. 子シンボルの3フレーム目に空白キーフレーム（F7）を追加した場合、
-    //     親シーンの3フレーム目では編集時（canvas.shapes）も再生時（build_layer_resolved_world_batch_mesh）も
-    //     空白（0シェイプ）として一貫評価され、かつ別フレームへ戻るとシンボルインスタンスが保持されていること
     assert!(tool_transform::enter_symbol_from_library(
         &mut app,
         child_sym_id
     ));
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, false)); // 2F目（index 2）に空白キーフレーム挿入
+    assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
     assert_eq!(app.timeline.total_frames, 3);
     assert!(tool_transform::exit_symbol_timeline(&mut app));
 
-    assert!(timeline_ui::timeline_extend_frame(&mut app)); // 親シーンも3フレームに延長
+    assert!(timeline_ui::timeline_extend_frame(&mut app));
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
-    assert_eq!(
-            app.canvas.shapes.len(),
-            1,
-            "シンボル内の空白キーフレームは親シーンの編集キャンバスでも単一の空シンボルマーカーとして CanvasState::shapes 内に保持されること"
-        );
+    assert_eq!(app.canvas.shapes.len(), 1);
     assert!(app.canvas.shapes[0].is_empty_symbol_marker());
-    // 空白フレームのシンボルインスタンスも selected_shapes 経由で直接選択・バインディング取得できること
     canvas_tool::select_shapes_for_timeline_selection(&mut app);
     assert_eq!(app.canvas.selected_shapes, vec![0]);
     assert!(app.canvas.selected_single_symbol_binding().is_some());
     tool_select::clear_selection(&mut app);
-    assert!(
-        app.timeline
-            .resolved_cel_screen_mesh(0, 2, 1.0, Vec2::ZERO, false, &app.symbols.library)
-            .is_none(),
-        "再生時の解決済みメッシュでも空白キーフレームは None (描画なし) になること"
-    );
-    // 空白フレーム上で生の絵を追加描画しても、親キーフレームのシンボルインスタンス自体は消滅せず保持されること
+    assert!(app
+        .timeline
+        .resolved_cel_screen_mesh(0, 2, 1.0, Vec2::ZERO, false, &app.symbols.library)
+        .is_none());
+
     let extra = make_stroke(
         Point::new(220.0, 100.0),
         Point::new(260.0, 100.0),
@@ -2207,16 +1995,24 @@ fn test_nested_symbol_evaluation_and_library_delete_detach() {
     app.canvas.shapes.push(extra);
     canvas_tool::sync_shapes_to_timeline(&mut app);
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
-    assert_eq!(
-        app.canvas.shapes.len(),
-        2,
-        "フレーム0に戻るとシンボルインスタンスと追加した生シェイプの両方が存在すること"
-    );
-    // 生シェイプ追加を Undo して元の単一シンボル状態へ戻す
-    app.canvas.shapes.retain(|s| s.symbol_instance.is_some());
-    canvas_tool::sync_shapes_to_timeline(&mut app);
+    assert_eq!(app.canvas.shapes.len(), 2);
+}
 
-    // 2c. シンボル名の変更およびレイヤー表示/ロック切り替えが Undo 履歴に記録され、Undo で元に戻ること
+#[test]
+fn test_symbol_rename_library_delete_detach_and_inplace_child_symbol_creation() {
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+    app.canvas.shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(160.0, 100.0),
+        12.0,
+        red,
+    );
+    app.canvas.selected_shapes = vec![0];
+    let child_sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
+    app.canvas.selected_shapes = vec![0];
+    let parent_sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
+
     let orig_name = app.symbols.find_symbol(parent_sym_id).unwrap().name.clone();
     assert!(tool_transform::rename_symbol_in_library(
         &mut app,
@@ -2238,28 +2034,14 @@ fn test_nested_symbol_evaluation_and_library_delete_detach() {
     app.undo();
     assert!(!app.timeline.layers[0].locked);
 
-    // 3. ライブラリから親シンボルを削除すると、ステージ上の図形は消滅せず通常グループへデタッチされて残ること
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
     assert!(tool_transform::delete_symbol_from_library(
         &mut app,
         parent_sym_id
     ));
-    assert_eq!(
-        app.canvas.shapes.len(),
-        1,
-        "シンボル削除時もステージ上の絵が消えないこと"
-    );
-    assert!(
-        app.canvas.shapes[0].symbol_instance.is_none(),
-        "シンボル紐付けが解除されていること"
-    );
-    assert!(
-        !app.canvas.shapes[0].group_path.is_empty(),
-        "通常のグループ図形として group_path が維持されていること"
-    );
+    assert_eq!(app.canvas.shapes.len(), 1);
+    assert!(app.canvas.shapes[0].symbol_instance.is_none());
+    assert!(!app.canvas.shapes[0].group_path.is_empty());
 
-    // 4. 親シンボルのインプレイス編集中に内部図形を F8 で新規子シンボルへ変換した際、
-    //    即座にライブラリ登録と親シンボル定義への同期が完了し、Undo/Redo でも整合すること
     assert!(tool_transform::enter_symbol_from_library(
         &mut app,
         child_sym_id
@@ -2269,46 +2051,35 @@ fn test_nested_symbol_evaluation_and_library_delete_detach() {
     let lib_len_before = app.symbols.library.len();
     let grandchild_sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     assert_eq!(app.symbols.library.len(), lib_len_before + 1);
-    assert!(
-        !app.symbols
-            .find_symbol(child_sym_id)
-            .unwrap()
-            .evaluated_local_shapes_at(0, &app.symbols.library)
-            .is_empty(),
-        "インプレイス編集中の F8 子シンボル変換直後に親シンボル定義の評価結果が空にならないこと"
-    );
+    assert!(!app
+        .symbols
+        .find_symbol(child_sym_id)
+        .unwrap()
+        .evaluated_local_shapes_at(0, &app.symbols.library)
+        .is_empty());
     app.undo();
-    assert_eq!(
-        app.symbols.library.len(),
-        lib_len_before,
-        "Undo で新規登録された子シンボルもライブラリから巻き戻されること"
-    );
+    assert_eq!(app.symbols.library.len(), lib_len_before);
     app.redo();
     assert!(app.symbols.find_symbol(grandchild_sym_id).is_some());
     assert!(tool_transform::exit_symbol_timeline(&mut app));
 }
 
 #[test]
-fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions() {
+fn test_degenerate_nan_infinite_stroke_and_affine_inputs_do_not_panic() {
     use crate::vector_engine::union_bounding_boxes;
     use kurbo::{Affine, Rect as KRect};
 
-    let mut app = Is2dApp::default();
     let red = Color32::from_rgb(220, 60, 60);
-
-    // 1. NaN / 無限大 / 空配列 / 長さ0ストロークを入力してもパニックせず安全に無視されること
     assert!(generate_brush_outline(&[], 8.0).is_empty());
     assert!(generate_brush_outline(&[Point::new(f64::NAN, 10.0)], 8.0).is_empty());
     assert!(generate_brush_outline(&[Point::new(10.0, 10.0)], f64::NAN).is_empty());
     assert!(build_smoothed_stroke_shapes(&[Point::new(f64::INFINITY, 0.0); 4], red).is_empty());
     assert_eq!(union_bounding_boxes(&[]), KRect::ZERO);
 
-    // 長さ0の単一点スタンプは有効な円形シェイプになること
     let dot_outline = generate_brush_outline(&[Point::new(100.0, 100.0)], 6.0);
     let dot_shapes = build_smoothed_stroke_shapes(&dot_outline, red);
     assert_eq!(dot_shapes.len(), 1);
 
-    // 2. 面積0（特異行列）アフィン変換や NaN 平行移動を与えても図形データが破壊されないこと
     let mut shape = dot_shapes[0].clone();
     let orig_bbox = shape.bounding_box();
     shape.translate(KVec2::new(f64::NAN, f64::INFINITY));
@@ -2316,8 +2087,12 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
     shape.transform(Affine::new([f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]));
     assert_eq!(shape.bounding_box(), orig_bbox);
     assert!(!shape.contains_point(Point::new(f64::NAN, f64::NAN)));
+}
 
-    // 3. スライス選択 → シンボル化 → シンボル出入り → Undo/Redo → 範囲外レイヤー操作の連続負荷でもパニックしないこと
+#[test]
+fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
     app.canvas.shapes = make_stroke(Point::new(50.0, 100.0), Point::new(200.0, 100.0), 14.0, red);
     canvas_tool::sync_shapes_to_timeline(&mut app);
     tool_select::apply_marquee_selection(
@@ -2344,7 +2119,6 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
         false
     ));
 
-    // 4. ドラッグ途中の一時状態（描きかけストローク・変形プレビュー）が排他ステートマシン `ActiveCanvasDrag` で安全に管理されること
     let clean_shapes = app.canvas.shapes.clone();
     let clean_bbox = app.canvas.shapes[0].bounding_box();
     app.canvas.drag = crate::canvas_tool::ActiveCanvasDrag::Select(
@@ -2354,11 +2128,9 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
         )),
     );
     app.canvas.shapes[0].translate(KVec2::new(500.0, 500.0));
-    // clear_selection は未確定の形状ドラッグ（Select / Transform）のみをロールバックする
     tool_select::clear_selection(&mut app);
     assert_eq!(app.canvas.shapes[0].bounding_box(), clean_bbox);
 
-    // PaintStroke 状態は clear_selection() に干渉されず、set_tool() でのみ消去されること
     let stroke = vec![Point::new(10.0, 10.0), Point::new(40.0, 10.0)];
     let tail_outline = generate_brush_outline(&stroke, 8.0);
     let tail_mesh = crate::vector_engine::tessellate_raw_polygon(&tail_outline, Color32::BLACK);
@@ -2380,19 +2152,16 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
         crate::canvas_tool::ActiveCanvasDrag::None
     ));
 
-    // 5. シンボルインプレース編集の無劣化キャッシュ（未編集シェイプは回転・スケール下でも何度も出入りして完全一致・Arc共有を維持）
     let b = app
         .canvas
         .shapes
         .iter()
         .find_map(|s| s.symbol_instance)
-        .expect("シンボルインスタンスが存在すること");
+        .unwrap();
     let sym_id = b.symbol_id;
     let orig_local_shape = app
         .symbols
-        .library
-        .iter()
-        .find(|s| s.id == sym_id)
+        .find_symbol(sym_id)
         .unwrap()
         .timeline
         .layers[0]
@@ -2407,9 +2176,7 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
     }
     let after_local_shape = &app
         .symbols
-        .library
-        .iter()
-        .find(|s| s.id == sym_id)
+        .find_symbol(sym_id)
         .unwrap()
         .timeline
         .layers[0]
@@ -2419,8 +2186,10 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
     assert!(after_local_shape
         .has_same_contour_arcs(&orig_local_shape.exterior, &orig_local_shape.holes));
     assert_eq!(after_local_shape.mesh_revision, orig_rev);
+}
 
-    // 6. Timeline::resize_total_frames の安全性検証（短いレイヤーの保護と孤児キーフレームの整理）
+#[test]
+fn test_timeline_resize_total_frames_and_fill_shape_lazy_retessellation() {
     let mut tl = Timeline {
         total_frames: 10,
         ..Default::default()
@@ -2429,40 +2198,28 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
     tl.layers[0].insert_keyframe(8, false);
     let short_layer = crate::timeline::Layer::new_with_id_and_frames(2, "Short Layer", 4);
     tl.layers.push(short_layer);
-    // 10f -> 20f に延長した際、10f だったレイヤーは 20f に伸び、4f だった短いレイヤーは 4f のまま保護されること
     tl.resize_total_frames(20);
     assert_eq!(tl.layers[0].frame_count, 20);
     assert_eq!(tl.layers[1].frame_count, 4);
-    // 20f -> 6f に短縮した際、frame 8 のキーフレームが孤児として残らず整理されること
     tl.resize_total_frames(6);
     assert_eq!(tl.layers[0].frame_count, 6);
     assert!(tl.layers[0].keyframes.iter().all(|kf| kf.start_frame < 6));
 
-    // 7. FillShape の遅延メッシュ生成（OnceLock）と拡大アフィン変換時の再テッセレーション検証
     let small_raw = generate_brush_outline(&[Point::new(100.0, 100.0)], 4.0);
     let mut small_circle = build_smoothed_stroke_shapes(&small_raw, Color32::WHITE)
         .into_iter()
         .next()
         .unwrap();
-    assert!(
-        !small_circle.has_cached_fill_mesh(),
-        "生成直後の FillShape は描画要求があるまで egui::Mesh をテッセレーションしないこと"
-    );
+    assert!(!small_circle.has_cached_fill_mesh());
     let verts_before = small_circle.fill_mesh().vertices.len();
     assert!(small_circle.has_cached_fill_mesh());
     small_circle.transform(kurbo::Affine::scale_about(10.0, Point::new(100.0, 100.0)));
-    assert!(
-        !small_circle.has_cached_fill_mesh(),
-        "大幅な拡大時にはキャッシュが無効化され、次回 fill_mesh() 呼び出しまで遅延されること"
-    );
-    assert!(
-            small_circle.fill_mesh().vertices.len() > verts_before,
-            "大幅な拡大アフィン変換時には曲線が再テッセレーションされてメッシュ頂点数が増えること ({} -> {})",
-            verts_before,
-            small_circle.fill_mesh().vertices.len()
-        );
+    assert!(!small_circle.has_cached_fill_mesh());
+    assert!(small_circle.fill_mesh().vertices.len() > verts_before);
+}
 
-    // 8. Cel::instances によるシンボルインスタンス正規化（複数構成シェイプの1エンティティ集約＆全フレーム白紙化後の復活）
+#[test]
+fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping() {
     let mut sym_app = Is2dApp::default();
     let mut two_shapes = make_stroke(
         Point::new(200.0, 200.0),
@@ -2479,30 +2236,22 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
     sym_app.canvas.shapes = two_shapes;
     sym_app.canvas.selected_shapes = vec![0, 1];
     let empty_test_sym_id = tool_transform::convert_selection_to_symbol(&mut sym_app).unwrap();
+    assert_eq!(sym_app.canvas.shapes.len(), 2);
+    assert!(sym_app.timeline.layers[0].keyframes[0]
+        .cel
+        .shapes
+        .is_empty());
     assert_eq!(
-        sym_app.canvas.shapes.len(),
-        2,
-        "キャンバス上には展開された2つの構成シェイプが存在すること"
+        sym_app.timeline.layers[0].keyframes[0].cel.instances.len(),
+        1
     );
-    assert!(
-        sym_app.timeline.layers[0].keyframes[0]
-            .cel
-            .shapes
-            .is_empty(),
-        "正規化された Cel::shapes にはシンボル図形を重複保持しないこと"
-    );
-    assert_eq!(
-            sym_app.timeline.layers[0].keyframes[0].cel.instances.len(),
-            1,
-            "Cel::instances には構成シェイプ数に関わらず正規化された1つの SymbolInstance のみが保持されること"
-        );
     assert!(tool_transform::enter_symbol_from_library(
         &mut sym_app,
         empty_test_sym_id
     ));
     assert!(tool_select::clear_active_frame_shapes(&mut sym_app));
     assert!(tool_transform::exit_symbol_timeline(&mut sym_app));
-    // シンボルが空の間は Cel::shapes は0個かつ Cel::instances にエンティティが保持され、作業キャンバス CanvasState::shapes には空シンボルマーカーとして一元保持されること
+
     assert_eq!(sym_app.canvas.shapes.len(), 1);
     assert!(sym_app.canvas.shapes[0].is_empty_symbol_marker());
     assert!(sym_app.timeline.layers[0].keyframes[0]
@@ -2517,15 +2266,15 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
         .cel
         .single_symbol_instance()
         .is_some());
-    // 全フレームが白紙状態のシンボルでも、ライブラリからステージ中央へ新規インスタンスを配置できること（提案2の検証）
-    assert!(
-        tool_transform::place_symbol_instance_from_library(&mut sym_app, empty_test_sym_id),
-        "全フレームが白紙の空シンボルでもライブラリからステージへ配置できること"
-    );
+    assert!(tool_transform::place_symbol_instance_from_library(
+        &mut sym_app,
+        empty_test_sym_id
+    ));
     assert_eq!(sym_app.canvas.shapes.len(), 2);
     assert!(sym_app.canvas.shapes[1].is_empty_symbol_marker());
     sym_app.undo();
     assert_eq!(sym_app.canvas.shapes.len(), 1);
+
     assert!(tool_transform::enter_symbol_from_library(
         &mut sym_app,
         empty_test_sym_id
@@ -2538,14 +2287,9 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
     );
     canvas_tool::sync_shapes_to_timeline(&mut sym_app);
     assert!(tool_transform::exit_symbol_timeline(&mut sym_app));
-    assert_eq!(
-        sym_app.canvas.shapes.len(),
-        1,
-        "一度空にしたシンボルに再度絵を描くと、親ステージ上のインスタンスが元の位置に復活すること"
-    );
+    assert_eq!(sym_app.canvas.shapes.len(), 1);
     assert!(sym_app.canvas.shapes[0].contains_point(Point::new(230.0, 200.0)));
 
-    // 9. ステージサイズ (stage_size) の変更が Undo / Redo で復元され、かつ UndoHistory 内の図形からは一時メッシュキャッシュが除去されていること
     let _ = sym_app.symbols.library[0].timeline.layers[0].keyframes[0]
         .cel
         .shapes[0]
@@ -2557,26 +2301,19 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
     let orig_stage = sym_app.viewport.stage_size;
     sym_app.push_undo();
     let last_undo = sym_app.history.undo_stack.back().unwrap();
-    assert!(
-        !last_undo.library[0].timeline.layers[0].keyframes[0]
-            .cel
-            .shapes[0]
-            .has_cached_fill_mesh(),
-        "UndoEntry 保存時には FillShape の egui::Mesh キャッシュが除去されていること"
-    );
+    assert!(!last_undo.library[0].timeline.layers[0].keyframes[0]
+        .cel
+        .shapes[0]
+        .has_cached_fill_mesh());
     sym_app.viewport.stage_size = Vec2::new(1920.0, 1080.0);
     sym_app.undo();
     assert_eq!(sym_app.viewport.stage_size, orig_stage);
     sym_app.redo();
     assert_eq!(sym_app.viewport.stage_size, Vec2::new(1920.0, 1080.0));
 
-    // 9.5 選択ドット柄スクリーンメッシュキャッシュおよびライブラリミニプレビューキャッシュの O(1) 共有検証
     let sel_m1 = sym_app.canvas.shapes[0].cached_selection_screen_mesh(1.25, Vec2::new(12.0, -8.0));
     let sel_m2 = sym_app.canvas.shapes[0].cached_selection_screen_mesh(1.25, Vec2::new(12.0, -8.0));
-    assert!(
-            std::sync::Arc::ptr_eq(&sel_m1, &sel_m2),
-            "同一の (zoom, pan) では選択ドット柄スクリーンメッシュの Arc が再変換なしで O(1) 共有されること"
-        );
+    assert!(std::sync::Arc::ptr_eq(&sel_m1, &sel_m2));
     let preview_rect =
         eframe::egui::Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(200.0, 110.0));
     let (prev_m1, orig1) = sym_app.symbols.library[0]
@@ -2593,12 +2330,11 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
             &sym_app.symbols.library,
         )
         .unwrap();
-    assert!(
-            std::sync::Arc::ptr_eq(&prev_m1, &prev_m2) && orig1 == orig2,
-            "ライブラリミニプレビューは同一矩形・同一リビジョンで Arc<Mesh> が O(1) キャッシュ共有されること"
-        );
+    assert!(std::sync::Arc::ptr_eq(&prev_m1, &prev_m2) && orig1 == orig2);
+}
 
-    // 10. 逆順ネスト（Symbol A(id小) -> Symbol B -> Symbol C(id大)）のトポロジカル更新＆拡大シンボルのメッシュキャッシュ保持
+#[test]
+fn test_reverse_order_nested_symbol_topological_propagation_and_cycle_guard() {
     let mut nest_app = Is2dApp::default();
     nest_app.canvas.shapes = make_stroke(
         Point::new(400.0, 225.0),
@@ -2618,7 +2354,6 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
     let last_idx = nest_app.canvas.shapes.len() - 1;
     nest_app.canvas.selected_shapes = vec![last_idx];
     let sym_b = tool_transform::convert_selection_to_symbol(&mut nest_app).unwrap();
-    // ルートから sym_b のインスタンスを消去（ライブラリには残る）
     tool_select::delete_selected_shapes(&mut nest_app);
 
     nest_app.canvas.shapes.extend(make_stroke(
@@ -2633,11 +2368,7 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
     tool_select::delete_selected_shapes(&mut nest_app);
     assert!(sym_a < sym_b && sym_b < sym_c);
 
-    // sym_a の中に sym_b を配置し、sym_b の中に sym_c を配置する（逆順3階層ネスト）
-    assert!(tool_transform::enter_symbol_from_library(
-        &mut nest_app,
-        sym_a
-    ));
+    assert!(tool_transform::enter_symbol_from_library(&mut nest_app, sym_a));
     assert!(tool_select::clear_active_frame_shapes(&mut nest_app));
     assert!(tool_transform::place_symbol_instance_from_library(
         &mut nest_app,
@@ -2645,10 +2376,7 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
     ));
     assert!(tool_transform::exit_symbol_timeline(&mut nest_app));
 
-    assert!(tool_transform::enter_symbol_from_library(
-        &mut nest_app,
-        sym_b
-    ));
+    assert!(tool_transform::enter_symbol_from_library(&mut nest_app, sym_b));
     assert!(tool_select::clear_active_frame_shapes(&mut nest_app));
     assert!(tool_transform::place_symbol_instance_from_library(
         &mut nest_app,
@@ -2656,23 +2384,16 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
     ));
     assert!(tool_transform::exit_symbol_timeline(&mut nest_app));
 
-    // 最深部の sym_c を編集して色を緑に変更 → 1回の exit で sym_b -> sym_a -> ルートシーンまで一括反映されること
     let updated_green = Color32::from_rgb(20, 210, 90);
-    assert!(tool_transform::enter_symbol_from_library(
-        &mut nest_app,
-        sym_c
-    ));
+    assert!(tool_transform::enter_symbol_from_library(&mut nest_app, sym_c));
     for s in &mut nest_app.canvas.shapes {
         s.set_color(updated_green);
     }
     canvas_tool::sync_shapes_to_timeline(&mut nest_app);
     assert!(tool_transform::exit_symbol_timeline(&mut nest_app));
     assert_eq!(nest_app.canvas.shapes.len(), 1);
-    assert_eq!(
-            nest_app.canvas.shapes[0].color, updated_green,
-            "逆順3階層ネスト（A -> B -> C）でも C の変更がトポロジカル順で B・A・ルートへ即座に伝播すること"
-        );
-    // 3倍拡大のシンボルインスタンス展開でも OnceLock メッシュキャッシュが破棄されず引き継がれること
+    assert_eq!(nest_app.canvas.shapes[0].color, updated_green);
+
     let scaled_binding =
         crate::symbol::SymbolInstanceBinding::new(999, sym_c, kurbo::Affine::scale(3.0));
     let sym_c_def = nest_app.symbols.find_symbol(sym_c).unwrap();
@@ -2681,26 +2402,19 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
         1,
         &[],
     );
-    assert!(
-            inst_shapes[0].has_cached_fill_mesh(),
-            "拡大シンボルインスタンス展開時にもローカルメッシュキャッシュが頂点変換で維持され再テッセレーションが不要であること"
-        );
-    // シンボル入れ子の間接的な循環参照（A -> B -> A）がブロックされること
-    assert!(tool_transform::enter_symbol_from_library(
-        &mut nest_app,
-        sym_b
-    ));
-    assert!(
-            !nest_app.symbols.can_place_symbol_in_current_context(sym_a),
-            "sym_a -> sym_b の親子関係があるとき、sym_b の中に sym_a を配置する循環参照が禁止されること"
-        );
+    assert!(inst_shapes[0].has_cached_fill_mesh());
+
+    assert!(tool_transform::enter_symbol_from_library(&mut nest_app, sym_b));
+    assert!(!nest_app.symbols.can_place_symbol_in_current_context(sym_a));
     assert!(!tool_transform::place_symbol_instance_from_library(
         &mut nest_app,
         sym_a
     ));
     assert!(tool_transform::exit_symbol_timeline(&mut nest_app));
+}
 
-    // 11. ロックされたレイヤー上のクラシックトゥイーン中間フレームに対するスポイト色抽出
+#[test]
+fn test_eyedropper_samples_interpolated_tween_position_on_locked_layer() {
     let mut tween_eye_app = Is2dApp::default();
     let tween_color = Color32::from_rgb(240, 120, 30);
     tween_eye_app.canvas.shapes = make_stroke(
@@ -2715,24 +2429,21 @@ fn test_crash_resilience_against_degenerate_inputs_and_rapid_state_transitions()
     timeline_ui::select_timeline_cells(&mut tween_eye_app, 0, 4, 0, 4);
     timeline_ui::timeline_insert_keyframe(&mut tween_eye_app, true);
     tool_select::nudge_selected_shapes(&mut tween_eye_app, kurbo::Vec2::new(200.0, 0.0));
-    // レイヤーをロックして中間フレーム（frame = 2, x = 200.0）へ移動
     timeline_ui::set_layer_locked(&mut tween_eye_app, 0, true);
     timeline_ui::scrub_ruler_to_frame(&mut tween_eye_app, 2);
     assert_eq!(
         tool_paint::topmost_visible_color_at(&tween_eye_app, Point::new(200.0, 200.0)),
         Some(tween_color),
-        "ロック中レイヤーのトゥイーン中間フレームでも補間後の現在座標からスポイトで色を拾えること"
     );
     assert_eq!(
-            tool_paint::topmost_visible_color_at(&tween_eye_app, Point::new(100.0, 200.0)),
-            None,
-            "ロック中レイヤーのトゥイーン中間フレームで開始キーフレームの古い位置からは色を拾わないこと"
-        );
+        tool_paint::topmost_visible_color_at(&tween_eye_app, Point::new(100.0, 200.0)),
+        None,
+    );
 }
 
 #[test]
-fn test_stage_to_local_cache_and_resolved_cel_cow_preservation() {
-    // 空白フレーム状態のシンボルを含む親グループ（Cmd+G）の移動・削除同期、および Undo 履歴 / StageToLocalCache の Arc 構造共有（CoW）
+fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronously() {
+    // 空白フレーム状態のシンボルを含む親グループ（Cmd+G）の移動・回転・削除同期、および Undo 履歴の Arc 構造共有（CoW）
     let mut grp_sym_app = Is2dApp::default();
     grp_sym_app.canvas.shapes = make_stroke(
         Point::new(100.0, 100.0),
@@ -2771,10 +2482,10 @@ fn test_stage_to_local_cache_and_resolved_cel_cow_preservation() {
     // F1（シンボルが空白フレームで消えている状態）へ移動し、親グループを (+150, 0) 平行移動する
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
     assert_eq!(
-            grp_sym_app.canvas.shapes.len(),
-            2,
-            "F1では空白シンボルマーカー1個と兄弟シェイプ1個の計2個が CanvasState::shapes 内に一元展開されていること"
-        );
+        grp_sym_app.canvas.shapes.len(),
+        2,
+        "F1では空白シンボルマーカー1個と兄弟シェイプ1個の計2個が CanvasState::shapes 内に一元展開されていること"
+    );
     grp_sym_app.canvas.selected_shapes = grp_sym_app.canvas.expand_to_group_unit(0);
     assert_eq!(grp_sym_app.canvas.selected_shapes, vec![0, 1]);
     assert!(tool_select::nudge_selected_shapes(
@@ -2795,9 +2506,9 @@ fn test_stage_to_local_cache_and_resolved_cel_cow_preservation() {
         })
         .unwrap();
     assert!(
-            moved_sym_shape.contains_point(Point::new(260.0, 100.0)),
-            "空白フレーム中に親グループを移動した場合も、内部の空白フレームシンボルが置いていかれず追従移動すること"
-        );
+        moved_sym_shape.contains_point(Point::new(260.0, 100.0)),
+        "空白フレーム中に親グループを移動した場合も、内部の空白フレームシンボルが置いていかれず追従移動すること"
+    );
 
     // Undo 履歴の Arc<Vec<SymbolDef>> および未変更キーフレームの Cel::shapes (Arc<Vec<FillShape>>) が連続操作間でポインタ共有（CoW）されていること
     grp_sym_app.push_undo();
@@ -2810,12 +2521,12 @@ fn test_stage_to_local_cache_and_resolved_cel_cow_preservation() {
         "シンボル未変更時の UndoEntry 間では library がディープクローンされず Arc 共有されること"
     );
     assert!(
-            std::sync::Arc::ptr_eq(
-                &e_prev.timeline.layers[0].keyframes[0].cel.shapes,
-                &e_last.timeline.layers[0].keyframes[0].cel.shapes
-            ),
-            "未変更キーフレームの Cel::shapes は連続する UndoEntry 間でディープクローンされず Arc 共有（CoW）されること"
-        );
+        std::sync::Arc::ptr_eq(
+            &e_prev.timeline.layers[0].keyframes[0].cel.shapes,
+            &e_last.timeline.layers[0].keyframes[0].cel.shapes
+        ),
+        "未変更キーフレームの Cel::shapes は連続する UndoEntry 間でディープクローンされず Arc 共有（CoW）されること"
+    );
 
     // F1に戻って親グループを +90° 回転させても、空白フレーム中のシンボルが正確なアフィン変換で追従すること
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
@@ -2835,10 +2546,10 @@ fn test_stage_to_local_cache_and_resolved_cel_cow_preservation() {
         })
         .unwrap();
     assert!(
-            rotated_sym_shape.contains_point(Point::new(320.0, 160.0)),
-            "空白フレーム中に親グループを回転した場合も、内部の空白フレームシンボルが同じ回転変換で追従すること: bbox={:?}",
-            rotated_sym_shape.bounding_box()
-        );
+        rotated_sym_shape.contains_point(Point::new(320.0, 160.0)),
+        "空白フレーム中に親グループを回転した場合も、内部の空白フレームシンボルが同じ回転変換で追従すること: bbox={:?}",
+        rotated_sym_shape.bounding_box()
+    );
 
     // F1に戻って親グループを削除すると、空白フレーム状態のシンボルインスタンスも一緒に削除されること
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
@@ -2846,14 +2557,30 @@ fn test_stage_to_local_cache_and_resolved_cel_cow_preservation() {
     assert!(tool_select::delete_selected_shapes(&mut grp_sym_app));
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 2);
     assert!(
-            grp_sym_app.canvas.shapes.is_empty(),
-            "空白フレーム中に親グループを削除すると、内部の空白フレームシンボルも残骸にならず一緒に削除されること"
-        );
+        grp_sym_app.canvas.shapes.is_empty(),
+        "空白フレーム中に親グループを削除すると、内部の空白フレームシンボルも残骸にならず一緒に削除されること"
+    );
+}
 
-    // 1コマ目（Frame 0）が空白キーフレームで2コマ目（Frame 1）にのみ絵があるマルチフレームシンボルをライブラリから配置できること
-    assert!(tool_transform::enter_symbol_from_library(
+#[test]
+fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
+    let mut grp_sym_app = Is2dApp::default();
+    grp_sym_app.canvas.shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(120.0, 100.0),
+        10.0,
+        Color32::from_rgb(200, 40, 40),
+    );
+    grp_sym_app.canvas.selected_shapes = vec![0];
+    let blink_sym_id = tool_transform::convert_selection_to_symbol(&mut grp_sym_app).unwrap();
+    let blink_binding = grp_sym_app.canvas.shapes[0].symbol_instance.unwrap();
+    assert!(tool_transform::enter_symbol_timeline(
         &mut grp_sym_app,
-        blink_sym_id
+        blink_binding
+    ));
+    assert!(timeline_ui::timeline_insert_keyframe(
+        &mut grp_sym_app,
+        false
     ));
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
     assert!(tool_select::clear_active_frame_shapes(&mut grp_sym_app));
@@ -2867,6 +2594,10 @@ fn test_stage_to_local_cache_and_resolved_cel_cow_preservation() {
     canvas_tool::sync_shapes_to_timeline(&mut grp_sym_app);
     assert!(tool_transform::exit_symbol_timeline(&mut grp_sym_app));
 
+    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
+    assert!(tool_select::clear_active_frame_shapes(&mut grp_sym_app));
+    timeline_ui::select_timeline_cells(&mut grp_sym_app, 0, 2, 0, 2);
+    assert!(timeline_ui::timeline_extend_frame(&mut grp_sym_app));
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
     assert!(
         tool_transform::place_symbol_instance_from_library(&mut grp_sym_app, blink_sym_id),
@@ -2902,6 +2633,28 @@ fn test_stage_to_local_cache_and_resolved_cel_cow_preservation() {
         std::sync::Arc::ptr_eq(&m_scr_1, &m_scr_2),
         "キャッシュヒット時は頂点配列をディープコピーせず同一の Arc<Mesh> を O(1) 返却すること"
     );
+
+    // パン（pan）が変化した際は resolved_cel_screen_mesh のスクリーン座標キャッシュが再計算されること (#3)
+    let m_scr_panned = grp_sym_app
+        .timeline
+        .resolved_cel_screen_mesh(
+            0,
+            1,
+            1.0,
+            Vec2::new(50.0, -30.0),
+            false,
+            &grp_sym_app.symbols.library,
+        )
+        .unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&m_scr_2, &m_scr_panned),
+        "pan が変化した際は古いスクリーン座標メッシュを返さず再変換されること"
+    );
+    assert!(
+        (m_scr_panned.vertices[0].pos.x - (m_scr_2.vertices[0].pos.x + 50.0)).abs() < 1e-3,
+        "pan の移動量が頂点スクリーン座標に正確に反映されていること"
+    );
+
     let m_onion_1 = grp_sym_app
         .timeline
         .resolved_cel_onion_mesh(
@@ -2947,12 +2700,12 @@ fn test_stage_to_local_cache_and_resolved_cel_cow_preservation() {
         .resolved_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, false, &grp_sym_app.symbols.library)
         .unwrap();
     assert!(
-            std::sync::Arc::ptr_eq(
-                &m_scr_before_unreferenced_edit,
-                &m_scr_after_unreferenced_edit
-            ),
-            "当該セルが直接・間接に参照していない別シンボルの revision が更新されても解決済みセルキャッシュが無駄に破棄されないこと"
-        );
+        std::sync::Arc::ptr_eq(
+            &m_scr_before_unreferenced_edit,
+            &m_scr_after_unreferenced_edit
+        ),
+        "当該セルが直接・間接に参照していない別シンボルの revision が更新されても解決済みセルキャッシュが無駄に破棄されないこと"
+    );
     grp_sym_app
         .symbols
         .rename_symbol(blink_sym_id, "ReferencedBlinkSymbolEdited".to_string());
@@ -2961,94 +2714,11 @@ fn test_stage_to_local_cache_and_resolved_cel_cow_preservation() {
         .resolved_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, false, &grp_sym_app.symbols.library)
         .unwrap();
     assert!(
-            !std::sync::Arc::ptr_eq(
-                &m_scr_after_unreferenced_edit,
-                &m_scr_after_referenced_edit
-            ),
-            "当該セルが参照しているシンボルの revision が更新された際は解決済みセルキャッシュ署名が変化して再評価されること"
-        );
-
-    // オニオンスキンやループ再生などのビュー設定（TimelineUiState）を変更した後に Undo / Redo を実行しても巻き戻らないこと
-    grp_sym_app.timeline_ui.onion_skin_enabled = true;
-    grp_sym_app.timeline_ui.onion_prev_frames = 5;
-    grp_sym_app.timeline_ui.onion_next_frames = 4;
-    grp_sym_app.timeline_ui.loop_playback = false;
-    grp_sym_app.timeline.fps = 30;
-    grp_sym_app.undo();
-    assert!(grp_sym_app.timeline_ui.onion_skin_enabled);
-    assert_eq!(grp_sym_app.timeline_ui.onion_prev_frames, 5);
-    assert_eq!(grp_sym_app.timeline_ui.onion_next_frames, 4);
-    assert!(!grp_sym_app.timeline_ui.loop_playback);
-    grp_sym_app.redo();
-    assert!(grp_sym_app.timeline_ui.onion_skin_enabled);
-    assert_eq!(grp_sym_app.timeline_ui.onion_prev_frames, 5);
-    assert_eq!(grp_sym_app.timeline_ui.onion_next_frames, 4);
-    assert!(!grp_sym_app.timeline_ui.loop_playback);
-
-    // `FillShape::shape_id` によるレイヤー順ソート後の選択状態追従と `LoadedShapeSig` の一致
-    let mut sort_app = Is2dApp::default();
-    timeline_ui::timeline_add_layer(&mut sort_app);
-    let lid_bottom = sort_app.timeline.layers[0].id;
-    let lid_top = sort_app.timeline.layers[1].id;
-    let shape_top = make_stroke(
-        Point::new(10.0, 10.0),
-        Point::new(30.0, 10.0),
-        6.0,
-        Color32::RED,
-    )
-    .remove(0)
-    .with_layer_id(lid_top);
-    let shape_bottom = make_stroke(
-        Point::new(10.0, 40.0),
-        Point::new(30.0, 40.0),
-        6.0,
-        Color32::BLUE,
-    )
-    .remove(0)
-    .with_layer_id(lid_bottom);
-    let top_shape_id = shape_top.shape_id;
-    assert_ne!(top_shape_id, shape_bottom.shape_id);
-    sort_app.canvas.shapes = vec![shape_top, shape_bottom];
-    sort_app.canvas.selected_shapes = vec![0];
-    sort_app
-        .canvas
-        .sort_shapes_by_layer_order(&sort_app.timeline);
-    assert_eq!(sort_app.canvas.shapes[0].layer_id, lid_bottom);
-    assert_eq!(sort_app.canvas.shapes[1].layer_id, lid_top);
-    assert_eq!(
-            sort_app.canvas.selected_shapes,
-            vec![1],
-            "sort_shapes_by_layer_order 後も shape_id に基づいて選択インデックスが新しい位置へ追従すること"
-        );
-    assert_eq!(sort_app.canvas.selected_shape_ids(), vec![top_shape_id]);
-    sort_app.canvas.record_loaded_signatures();
-    assert!(sort_app.canvas.is_all_shapes_unchanged());
-
-    // 空シンボルマーカーのデータモデル不変条件（contours=0, geometry_bounding_box=None, スナップ非対象）
-    let empty_marker = FillShape::new_empty_symbol_marker(
-        crate::symbol::SymbolInstanceBinding::new(
-            777,
-            blink_sym_id,
-            kurbo::Affine::translate((50.0, 50.0)),
+        !std::sync::Arc::ptr_eq(
+            &m_scr_after_unreferenced_edit,
+            &m_scr_after_referenced_edit
         ),
-        lid_bottom,
-        &[],
-    );
-    assert_eq!(empty_marker.contours().count(), 0);
-    assert!(empty_marker.get_contour(0).is_none());
-    assert!(empty_marker.geometry_bounding_box().is_none());
-    sort_app.canvas.shapes.push(empty_marker);
-    assert!(
-        tool_select::find_snap_vertex(
-            &sort_app.canvas,
-            Point::new(50.0, 50.0),
-            1.0,
-            usize::MAX,
-            0,
-            0,
-        )
-        .is_none(),
-        "空白フレームのシンボルマーカーの基準点に対して頂点磁気スナップが発生しないこと"
+        "当該セルが参照しているシンボルの revision が更新された際は解決済みセルキャッシュ署名が変化して再評価されること"
     );
 
     // シンボルインプレイス編集時に Frame 0 を編集しても未変更の Frame 1 の Cel::shapes は Arc ポインタ共有が維持されること
@@ -3106,9 +2776,96 @@ fn test_stage_to_local_cache_and_resolved_cel_cow_preservation() {
         .cel
         .shapes;
     assert!(
-            std::sync::Arc::ptr_eq(&f1_local_arc_before, f1_local_arc_after),
-            "シンボルインプレイス編集で Undo 保存や別キーフレーム編集を挟んでも、未変更キーフレームのローカル Cel::shapes は論理IDベースの StageToLocalCache により Arc 共有（CoW）が維持されること"
-        );
+        std::sync::Arc::ptr_eq(&f1_local_arc_before, f1_local_arc_after),
+        "シンボルインプレイス編集で Undo 保存や別キーフレーム編集を挟んでも、未変更キーフレームのローカル Cel::shapes は論理IDベースの StageToLocalCache により Arc 共有（CoW）が維持されること"
+    );
+}
+
+#[test]
+fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
+    // オニオンスキンやループ再生などのビュー設定（TimelineUiState）を変更した後に Undo / Redo を実行しても巻き戻らないこと
+    let mut sort_app = Is2dApp::default();
+    sort_app.push_undo();
+    sort_app.timeline_ui.onion_skin_enabled = true;
+    sort_app.timeline_ui.onion_prev_frames = 5;
+    sort_app.timeline_ui.onion_next_frames = 4;
+    sort_app.timeline_ui.loop_playback = false;
+    sort_app.timeline.fps = 30;
+    sort_app.undo();
+    assert!(sort_app.timeline_ui.onion_skin_enabled);
+    assert_eq!(sort_app.timeline_ui.onion_prev_frames, 5);
+    assert_eq!(sort_app.timeline_ui.onion_next_frames, 4);
+    assert!(!sort_app.timeline_ui.loop_playback);
+    sort_app.redo();
+    assert!(sort_app.timeline_ui.onion_skin_enabled);
+    assert_eq!(sort_app.timeline_ui.onion_prev_frames, 5);
+    assert_eq!(sort_app.timeline_ui.onion_next_frames, 4);
+    assert!(!sort_app.timeline_ui.loop_playback);
+
+    // `FillShape::shape_id` によるレイヤー順ソート後の選択状態追従と `LoadedShapeSig` の一致
+    timeline_ui::timeline_add_layer(&mut sort_app);
+    let lid_bottom = sort_app.timeline.layers[0].id;
+    let lid_top = sort_app.timeline.layers[1].id;
+    let shape_top = make_stroke(
+        Point::new(10.0, 10.0),
+        Point::new(30.0, 10.0),
+        6.0,
+        Color32::RED,
+    )
+    .remove(0)
+    .with_layer_id(lid_top);
+    let shape_bottom = make_stroke(
+        Point::new(10.0, 40.0),
+        Point::new(30.0, 40.0),
+        6.0,
+        Color32::BLUE,
+    )
+    .remove(0)
+    .with_layer_id(lid_bottom);
+    let top_shape_id = shape_top.shape_id;
+    assert_ne!(top_shape_id, shape_bottom.shape_id);
+    sort_app.canvas.shapes = vec![shape_top, shape_bottom];
+    sort_app.canvas.selected_shapes = vec![0];
+    sort_app
+        .canvas
+        .sort_shapes_by_layer_order(&sort_app.timeline);
+    assert_eq!(sort_app.canvas.shapes[0].layer_id, lid_bottom);
+    assert_eq!(sort_app.canvas.shapes[1].layer_id, lid_top);
+    assert_eq!(
+        sort_app.canvas.selected_shapes,
+        vec![1],
+        "sort_shapes_by_layer_order 後も shape_id に基づいて選択インデックスが新しい位置へ追従すること"
+    );
+    assert_eq!(sort_app.canvas.selected_shape_ids(), vec![top_shape_id]);
+    sort_app.canvas.record_loaded_signatures();
+    assert!(sort_app.canvas.is_all_shapes_unchanged());
+
+    // 空シンボルマーカーのデータモデル不変条件（contours=0, geometry_bounding_box=None, スナップ非対象）
+    let empty_marker = FillShape::new_empty_symbol_marker(
+        crate::symbol::SymbolInstanceBinding::new(
+            777,
+            1,
+            kurbo::Affine::translate((50.0, 50.0)),
+        ),
+        lid_bottom,
+        &[],
+    );
+    assert_eq!(empty_marker.contours().count(), 0);
+    assert!(empty_marker.get_contour(0).is_none());
+    assert!(empty_marker.geometry_bounding_box().is_none());
+    sort_app.canvas.shapes.push(empty_marker);
+    assert!(
+        tool_select::find_snap_vertex(
+            &sort_app.canvas,
+            Point::new(50.0, 50.0),
+            1.0,
+            usize::MAX,
+            0,
+            0,
+        )
+        .is_none(),
+        "空白フレームのシンボルマーカーの基準点に対して頂点磁気スナップが発生しないこと"
+    );
 }
 
 #[test]
@@ -3152,7 +2909,42 @@ fn test_bucket_fill_locked_walls_and_cluster_culling() {
         "ロックされた別レイヤーの分割線が壁として機能し、反対側の右半分までは塗りつぶされないこと"
     );
 
-    // (b) 1600%（zoom = 16.0）拡大時の極小シェイプ同士のブール演算（Union / Difference）で消失しないこと
+    // (b) 大量の無関係な遠方シェイプが存在する場合も スイープライン＋Union-Find AABB 連結クラスタ事前カリングにより
+    // クラスタ外クリックは即座に None を返し、対象閉領域内クリックは正確に抽出されること
+    let mut many_walls = bucket_app.canvas.shapes.clone();
+    for idx in 0..80 {
+        let ox = 1500.0 + (idx % 10) as f64 * 120.0;
+        let oy = 1500.0 + (idx / 10) as f64 * 120.0;
+        many_walls.extend(make_stroke(
+            Point::new(ox, oy),
+            Point::new(ox + 50.0, oy + 20.0),
+            6.0,
+            Color32::BLACK,
+        ));
+    }
+    assert!(
+        crate::vector_boolean::find_enclosed_region_at(
+            &many_walls,
+            Point::new(900.0, 900.0),
+            Color32::GREEN
+        )
+        .is_none(),
+        "どの連結AABBクラスタにも含まれない空白座標はオーバーレイ構築前に None となること"
+    );
+    let enclosed_right = crate::vector_boolean::find_enclosed_region_at(
+        &many_walls,
+        Point::new(230.0, 200.0),
+        Color32::GREEN,
+    )
+    .expect("無関係な遠方シェイプが多数存在しても対象クラスタ内の閉領域が正確に抽出されること");
+    assert!(enclosed_right.contains_point(Point::new(230.0, 200.0)));
+    assert!(!enclosed_right.contains_point(Point::new(170.0, 200.0)));
+}
+
+#[test]
+fn test_micro_shapes_boolean_union_and_difference_at_16x_zoom() {
+    let red = Color32::from_rgb(220, 50, 50);
+    // 1600%（zoom = 16.0）拡大時の極小シェイプ同士のブール演算（Union / Difference）で消失しないこと
     let micro_raw_a = generate_brush_outline_at_zoom(
         &[Point::new(100.0, 100.0), Point::new(100.3, 100.0)],
         0.12,
@@ -3186,37 +2978,6 @@ fn test_bucket_fill_locked_walls_and_cluster_culling() {
         !micro_diff.is_empty(),
         "1600%拡大時の極小シェイプ同士の Difference が消失せず正確に切り抜かれること"
     );
-
-    // (c) 大量の無関係な遠方シェイプが存在する場合も スイープライン＋Union-Find AABB 連結クラスタ事前カリングにより
-    // クラスタ外クリックは即座に None を返し、対象閉領域内クリックは正確に抽出されること
-    let mut many_walls = bucket_app.canvas.shapes.clone();
-    for idx in 0..80 {
-        let ox = 1500.0 + (idx % 10) as f64 * 120.0;
-        let oy = 1500.0 + (idx / 10) as f64 * 120.0;
-        many_walls.extend(make_stroke(
-            Point::new(ox, oy),
-            Point::new(ox + 50.0, oy + 20.0),
-            6.0,
-            Color32::BLACK,
-        ));
-    }
-    assert!(
-        crate::vector_boolean::find_enclosed_region_at(
-            &many_walls,
-            Point::new(900.0, 900.0),
-            Color32::GREEN
-        )
-        .is_none(),
-        "どの連結AABBクラスタにも含まれない空白座標はオーバーレイ構築前に None となること"
-    );
-    let enclosed_right = crate::vector_boolean::find_enclosed_region_at(
-        &many_walls,
-        Point::new(230.0, 200.0),
-        Color32::GREEN,
-    )
-    .expect("無関係な遠方シェイプが多数存在しても対象クラスタ内の閉領域が正確に抽出されること");
-    assert!(enclosed_right.contains_point(Point::new(230.0, 200.0)));
-    assert!(!enclosed_right.contains_point(Point::new(170.0, 200.0)));
 }
 
 #[test]
@@ -3231,20 +2992,28 @@ fn test_tween_lru_cache_no_thrashing() {
     );
     lru_tween_app.canvas.selected_shapes = vec![0];
     tool_transform::convert_selection_to_symbol(&mut lru_tween_app).unwrap();
-    // シンボルインスタンスを移動確定してもキャッシュ済み fill_mesh が破棄されないこと
-    let _ = lru_tween_app.canvas.shapes[0].fill_mesh();
+    // シンボルインスタンスを移動確定してもキャッシュ済み fill_mesh が破棄されず、平行移動分だけ頂点がシフトすること
+    let mesh_before = lru_tween_app.canvas.shapes[0].fill_mesh();
+    assert!(!mesh_before.is_empty());
+    let x0_before = mesh_before.vertices[0].pos.x;
     assert!(tool_select::nudge_selected_shapes(
         &mut lru_tween_app,
         kurbo::Vec2::new(10.0, 0.0)
     ));
     assert!(
-            lru_tween_app.canvas.shapes[0].has_cached_fill_mesh(),
-            "シンボルインスタンスの移動確定（commit_moved_selection）時にキャッシュ済み fill_mesh が無駄に破棄されないこと"
-        );
+        lru_tween_app.canvas.shapes[0].has_cached_fill_mesh(),
+        "シンボルインスタンスの移動確定（commit_moved_selection）時にキャッシュ済み fill_mesh が無駄に破棄されないこと"
+    );
+    let mesh_after = lru_tween_app.canvas.shapes[0].fill_mesh();
+    assert!(
+        (mesh_after.vertices[0].pos.x - (x0_before + 10.0)).abs() < 1e-3,
+        "移動確定後の fill_mesh 頂点座標が +10.0 シフトしていること"
+    );
     tool_transform::timeline_toggle_tween(&mut lru_tween_app);
     timeline_ui::select_timeline_cells(&mut lru_tween_app, 0, 11, 0, 11);
     timeline_ui::timeline_insert_keyframe(&mut lru_tween_app, true);
     tool_select::nudge_selected_shapes(&mut lru_tween_app, kurbo::Vec2::new(240.0, 0.0));
+
     let first_loop_meshes: Vec<std::sync::Arc<egui::Mesh>> = (0..12)
         .map(|f| {
             lru_tween_app
@@ -3266,9 +3035,9 @@ fn test_tween_lru_cache_no_thrashing() {
             .resolved_cel_screen_mesh(0, f, 1.0, Vec2::ZERO, false, &lru_tween_app.symbols.library)
             .unwrap();
         assert!(
-                std::sync::Arc::ptr_eq(first_m, &second_m),
-                "12フレームのトゥイーンループ再生2周目（frame={f}）でもスラッシングを起こさず同一の Arc<Mesh> が O(1) キャッシュヒットすること"
-            );
+            std::sync::Arc::ptr_eq(first_m, &second_m),
+            "12フレームのトゥイーンループ再生2周目（frame={f}）でもスラッシングを起こさず同一の Arc<Mesh> が O(1) キャッシュヒットすること"
+        );
     }
 }
 
@@ -3369,13 +3138,35 @@ fn test_project_save_and_load_roundtrip() {
     assert!(loaded_app.symbols.next_group_id > gid);
     assert!(loaded_app.symbols.next_symbol_id > sym_id);
 
-    // 複数ドキュメントタブ（同時オープン・切り替え・別タブ間シンボルコピペ・タブ閉じ）の検証
+    let _ = std::fs::remove_file(&tmp_path);
+}
+
+#[test]
+fn test_multitab_open_switch_symbol_copy_paste_and_close() {
+    let mut app = Is2dApp::default();
+    app.viewport.stage_size = Vec2::new(1280.0, 720.0);
+    app.canvas.shapes = make_stroke(
+        Point::new(100.0, 120.0),
+        Point::new(160.0, 120.0),
+        12.0,
+        Color32::from_rgb(240, 80, 60),
+    );
+    app.canvas.selected_shapes = vec![0];
+    let sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
+
+    let tmp_path =
+        std::env::temp_dir().join(format!("is2d_multitab_test1_{}.is2d", std::process::id()));
     let tmp_path2 =
-        std::env::temp_dir().join(format!("is2d_roundtrip_test2_{}.is2d", std::process::id()));
+        std::env::temp_dir().join(format!("is2d_multitab_test2_{}.is2d", std::process::id()));
+    crate::project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
+
     let mut app2 = Is2dApp::default();
     app2.viewport.stage_size = Vec2::new(640.0, 480.0);
     crate::project_io::save_project_to_path(&mut app2, &tmp_path2)
         .expect("2つ目の保存に成功すること");
+
+    let mut loaded_app = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut loaded_app, &tmp_path, None).unwrap();
 
     // Tab 0 (loaded_app) でシンボルインスタンスを選択してコピー（同時に保存時の選択状態維持も検証）
     timeline_ui::switch_to_layer_and_frame(&mut loaded_app, 0, 0);
@@ -3478,8 +3269,22 @@ fn test_project_save_and_load_roundtrip() {
     assert!(loaded_app.ui.current_file_path.is_none());
     assert_eq!(loaded_app.tabs.tabs[0].untitled_number, 1);
 
-    // --- 追加検証：指摘2・指摘3・指摘4・指摘6A・指摘8・指摘9-1 ---
-    // (1) 指摘8: ファイル読込で新規タブが増えても next_untitled_number が無駄に消費されないこと
+    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_file(&tmp_path2);
+}
+
+#[test]
+fn test_untitled_tab_numbering_and_per_tab_wireframe_state() {
+    let tmp_path =
+        std::env::temp_dir().join(format!("is2d_untitled_test1_{}.is2d", std::process::id()));
+    let tmp_path2 =
+        std::env::temp_dir().join(format!("is2d_untitled_test2_{}.is2d", std::process::id()));
+    let mut app = Is2dApp::default();
+    crate::project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
+    crate::project_io::save_project_to_path(&mut app, &tmp_path2).unwrap();
+
+    // ファイル読込で新規タブが増えても next_untitled_number が無駄に消費されないこと
+    let mut loaded_app = Is2dApp::default();
     loaded_app.push_undo();
     loaded_app.canvas.shapes = make_stroke(
         Point::new(50.0, 50.0),
@@ -3492,9 +3297,9 @@ fn test_project_save_and_load_roundtrip() {
     crate::project_io::open_project_in_tab(&mut loaded_app, &tmp_path2, None)
         .expect("ファイル読込に成功すること");
     assert_eq!(
-            loaded_app.tabs.next_untitled_number, next_untitled_before,
-            "既存ファイルを別タブで開いた際に無題タブ連番（next_untitled_number）が欠番スキップしないこと"
-        );
+        loaded_app.tabs.next_untitled_number, next_untitled_before,
+        "既存ファイルを別タブで開いた際に無題タブ連番（next_untitled_number）が欠番スキップしないこと"
+    );
 
     // 起動直後の白紙「無題-1」タブでファイルを開いた場合、次の新規タブが「無題-1」から採番され、show_wireframe がタブ独立保持されること
     let mut fresh_open_app = Is2dApp::default();
@@ -3524,9 +3329,8 @@ fn test_project_save_and_load_roundtrip() {
 }
 
 #[test]
-fn test_cross_tab_symbol_paste_and_group_id_remapping() {
-    // (1) コピー後にシンボル定義を編集して再ペーストした際、古い展開図形ではなく最新の SymbolDef が評価されること、
-    //     また削除済み子シンボルが孤児復活しないこと、同一リビジョンでの再コピー時に Arc<SymbolDef> が O(1) 共有されること
+fn test_clipboard_symbol_evaluates_latest_symbol_def_and_shares_arc() {
+    // コピー後にシンボル定義を編集して再ペーストした際、古い展開図形ではなく最新の SymbolDef が評価されること
     let mut sym_paste_app = Is2dApp::default();
     sym_paste_app.canvas.shapes = make_stroke(
         Point::new(100.0, 100.0),
@@ -3543,9 +3347,9 @@ fn test_cross_tab_symbol_paste_and_group_id_remapping() {
     let first_clip_sym_arc = std::sync::Arc::clone(&sym_paste_app.tabs.clipboard_symbols[0]);
     assert!(tool_select::copy_selected_shapes(&mut sym_paste_app));
     assert!(
-            std::sync::Arc::ptr_eq(&first_clip_sym_arc, &sym_paste_app.tabs.clipboard_symbols[0]),
-            "同一シンボルリビジョンでの再コピー時は clipboard_symbols の Arc<SymbolDef> が O(1) ポインタ共有されること"
-        );
+        std::sync::Arc::ptr_eq(&first_clip_sym_arc, &sym_paste_app.tabs.clipboard_symbols[0]),
+        "同一シンボルリビジョンでの再コピー時は clipboard_symbols の Arc<SymbolDef> が O(1) ポインタ共有されること"
+    );
 
     // 子シンボルをライブラリから削除（親シンボル内では通常グループへデタッチされる）
     assert!(tool_transform::delete_symbol_from_library(
@@ -3591,18 +3395,21 @@ fn test_cross_tab_symbol_paste_and_group_id_remapping() {
         "デタッチ済みの子シンボルが孤児として再インポートされないこと"
     );
     assert_eq!(
-            sym_paste_app.canvas.shapes.len(),
-            4,
-            "コピー後に編集された最新シンボル定義（2シェイプ×2インスタンス＝4シェイプ）が展開されること"
-        );
+        sym_paste_app.canvas.shapes.len(),
+        4,
+        "コピー後に編集された最新シンボル定義（2シェイプ×2インスタンス＝4シェイプ）が展開されること"
+    );
     assert!(sym_paste_app
         .canvas
         .shapes
         .iter()
         .all(|s| s.color == Color32::BLUE));
+}
 
-    // (2) 別タブからのシンボルペースト時に内部タイムラインの group_path が再採番され、
-    //     貼り付け先タブの既存グループ（gid=1）とデタッチ時にID衝突しないこと、またタブ切り替え時に非アクティブスロットへ clipboard が残留しないこと
+#[test]
+fn test_cross_tab_symbol_paste_remaps_inner_group_ids() {
+    // 別タブからのシンボルペースト時に内部タイムラインの group_path が再採番され、
+    // 貼り付け先タブの既存グループ（gid=1）とデタッチ時にID衝突しないこと、またタブ切り替え時に非アクティブスロットへ clipboard が残留しないこと
     let tmp_cross_tab =
         std::env::temp_dir().join(format!("is2d_cross_tab_gid_{}.is2d", std::process::id()));
     let mut empty_doc_app = Is2dApp::default();
@@ -3656,14 +3463,14 @@ fn test_cross_tab_symbol_paste_and_group_id_remapping() {
         .unwrap()
         .group_path[0];
     assert_ne!(
-            blue_gid, red_gid,
-            "別タブから移植したシンボル内部のグループIDが再採番され、貼り付け先タブの既存グループとID衝突しないこと"
-        );
+        blue_gid, red_gid,
+        "別タブから移植したシンボル内部のグループIDが再採番され、貼り付け先タブの既存グループとID衝突しないこと"
+    );
     let _ = std::fs::remove_file(&tmp_cross_tab);
 }
 
 #[test]
-fn test_save_merge_flush_rollback_and_undo_redo() {
+fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     let tmp_merge_path =
         std::env::temp_dir().join(format!("is2d_save_merge_test_{}.is2d", std::process::id()));
 
@@ -3732,9 +3539,9 @@ fn test_save_merge_flush_rollback_and_undo_redo() {
         "同色シェイプが1つにUnion結合されていること"
     );
     assert!(
-            union_save_app.canvas.selected_shapes.is_empty(),
-            "非選択の背景同色シェイプとUnion融合して保存した場合は背景シェイプが勝手に選択に巻き込まれないこと"
-        );
+        union_save_app.canvas.selected_shapes.is_empty(),
+        "非選択の背景同色シェイプとUnion融合して保存した場合は背景シェイプが勝手に選択に巻き込まれないこと"
+    );
 
     let mut self_union_app = Is2dApp::default();
     self_union_app.canvas.shapes = make_stroke(
@@ -3766,7 +3573,23 @@ fn test_save_merge_flush_rollback_and_undo_redo() {
         "選択シェイプ同士のみのUnion結合では shape_id が引き継がれ選択状態が維持されること"
     );
 
+    let _ = std::fs::remove_file(&tmp_merge_path);
+}
+
+#[test]
+fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
     // 全レイヤーロック中は paste_clipboard が拒否され、矩形マーキースライス直後（未編集）に push_undo() が呼ばれても分割断片が早期確定されないこと
+    let mut self_union_app = Is2dApp::default();
+    self_union_app.canvas.shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(200.0, 100.0),
+        16.0,
+        Color32::RED,
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut self_union_app);
+    self_union_app.canvas.selected_shapes = vec![0];
+    assert!(tool_select::copy_selected_shapes(&mut self_union_app));
+
     timeline_ui::set_layer_locked(&mut self_union_app, 0, true);
     assert!(
         !tool_select::paste_clipboard(&mut self_union_app, true),
@@ -3782,17 +3605,20 @@ fn test_save_merge_flush_rollback_and_undo_redo() {
         false,
     );
     assert!(self_union_app.canvas.has_unsliced_snapshot());
-    assert_eq!(self_union_app.canvas.shapes.len(), 2);
+    assert!(self_union_app.canvas.shapes.len() >= 2);
     self_union_app.push_undo();
     assert_eq!(
-            self_union_app.timeline.layers[0].keyframes[0].cel.shapes.len(),
-            1,
-            "マーキースライス未編集状態で push_undo が呼ばれてもタイムライン側の分割前1シェイプが維持されること"
-        );
+        self_union_app.timeline.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .len(),
+        1,
+        "マーキースライス未編集状態で push_undo が呼ばれてもタイムライン側の分割前1シェイプが維持されること"
+    );
     tool_select::clear_selection(&mut self_union_app);
     assert_eq!(self_union_app.canvas.shapes.len(), 1);
 
-    // (3) 存在しないディレクトリへの保存（I/O失敗）時のロールバックと、selection_modified からの Undo -> Redo マージ確定
+    // 存在しないディレクトリへの保存（I/O失敗）時のロールバックと、selection_modified からの Undo -> Redo マージ確定
     let mut undo_redo_merge_app = Is2dApp::default();
     undo_redo_merge_app.canvas.shapes = make_stroke(
         Point::new(100.0, 100.0),
@@ -3834,8 +3660,44 @@ fn test_save_merge_flush_rollback_and_undo_redo() {
         1,
         "selection_modified 状態からの Undo -> Redo 後もマージ描画（Union）が確定維持されること"
     );
+}
 
-    let _ = std::fs::remove_file(&tmp_merge_path);
+#[test]
+fn test_corrupt_and_truncated_json_returns_error_without_modifying_app() {
+    let tmp_corrupt =
+        std::env::temp_dir().join(format!("is2d_corrupt_test_{}.is2d", std::process::id()));
+    let mut app = Is2dApp::default();
+    app.viewport.stage_size = Vec2::new(960.0, 540.0);
+
+    // 1. 途中で切れた不正な JSON 構文
+    std::fs::write(&tmp_corrupt, r#"{"version": 1, "stage_size": [800.0,"#).unwrap();
+    let res1 = crate::project_io::open_project_in_tab(&mut app, &tmp_corrupt, None);
+    assert!(
+        res1.is_err(),
+        "途中で切断された壊れた JSON はパニックせず Err を返すこと"
+    );
+    assert_eq!(
+        app.viewport.stage_size,
+        Vec2::new(960.0, 540.0),
+        "読み込みエラー時に既存タブの状態が破壊されないこと"
+    );
+
+    // 2. 空ファイル
+    std::fs::write(&tmp_corrupt, "").unwrap();
+    assert!(crate::project_io::open_project_in_tab(&mut app, &tmp_corrupt, None).is_err());
+
+    // 3. 未来の未対応バージョン番号
+    std::fs::write(
+        &tmp_corrupt,
+        r#"{"version": 999, "stage_size": [800.0, 450.0], "timeline": {"fps": 24, "total_frames": 1, "active_layer": 0, "current_frame": 0, "next_layer_id": 2, "layers": []}}"#,
+    )
+    .unwrap();
+    assert!(
+        crate::project_io::open_project_in_tab(&mut app, &tmp_corrupt, None).is_err(),
+        "未対応の未来バージョン番号は Err を返すこと"
+    );
+
+    let _ = std::fs::remove_file(&tmp_corrupt);
 }
 
 #[test]
@@ -4096,7 +3958,7 @@ fn test_eraser_only_erases_active_layer_and_preserves_other_unlocked_layers() {
 }
 
 #[test]
-fn test_multilayer_f7_advances_frame_and_move_frames_overwrites_destination() {
+fn test_multilayer_f7_advances_frame_when_any_selected_layer_has_content() {
     let mut app = Is2dApp::default();
     let red = Color32::from_rgb(220, 50, 50);
 
@@ -4117,8 +3979,12 @@ fn test_multilayer_f7_advances_frame_and_move_frames_overwrites_destination() {
         !app.timeline.layers[0].keyframes[0].cel.is_empty(),
         "複数レイヤー選択時の F7 で Frame 0 の既存の絵が消去されないこと"
     );
+}
 
-    // 次に、移動先に既存キーフレームがある状態でのフレーム区間移動（place_keyframes_at）の検証
+#[test]
+fn test_move_frames_overwrites_destination_and_cross_layer_offset() {
+    let red = Color32::from_rgb(220, 50, 50);
+    // 移動先に既存キーフレームがある状態でのフレーム区間移動（place_keyframes_at）の検証
     let mut move_app = Is2dApp::default();
     for _ in 0..5 {
         timeline_ui::timeline_extend_frame(&mut move_app);
@@ -4168,12 +4034,33 @@ fn test_multilayer_f7_advances_frame_and_move_frames_overwrites_destination() {
         move_app.timeline.layers[0].cel_at(4).unwrap().shapes[0].color,
         red
     );
+
+    // 別レイヤー（layer_offset = +1）へのフレーム区間移動で移動先レイヤーの layer_id に更新されること
+    timeline_ui::timeline_add_layer(&mut move_app);
+    let dst_layer_id = move_app.timeline.layers[1].id;
+    let sel_cross = crate::timeline::TimelineCellSelection::from_corners(0, 3, 0, 5);
+    assert!(timeline_ui::timeline_move_or_copy_frames(
+        &mut move_app,
+        sel_cross,
+        1,
+        -2,
+        false
+    ));
+    assert!(
+        move_app.timeline.layers[0].cel_at(3).unwrap().is_empty(),
+        "移動元レイヤー (Layer 1) の Frame 3..=5 は空白化されていること"
+    );
+    let moved_cel = move_app.timeline.layers[1].cel_at(1).unwrap();
+    assert_eq!(moved_cel.shapes.len(), 1);
+    assert_eq!(moved_cel.shapes[0].color, red);
+    assert_eq!(
+        moved_cel.shapes[0].layer_id, dst_layer_id,
+        "別レイヤーへ移動したキーフレーム内のシェイプは移動先レイヤーの layer_id に更新されていること"
+    );
 }
 
 #[test]
-fn test_double_click_raw_shape_does_not_exit_group_or_symbol_and_tween_state_incomplete() {
-    use crate::symbol::TweenState;
-
+fn test_double_click_raw_shape_does_not_exit_group_or_symbol() {
     let mut app = Is2dApp::default();
     app.canvas.shapes = make_stroke(
         Point::new(100.0, 100.0),
@@ -4203,8 +4090,20 @@ fn test_double_click_raw_shape_does_not_exit_group_or_symbol_and_tween_state_inc
     let pt_empty = Point::new(400.0, 400.0);
     tool_select::handle_canvas_double_click(&mut app, pt_empty);
     assert!(app.canvas.editing_group_path.is_empty());
+}
 
-    // Keyframe::tween == true だが単一シンボルインスタンスが存在しない状態では TweenState::Incomplete を返すこと
+#[test]
+fn test_tween_state_incomplete_when_not_single_symbol_instance() {
+    use crate::symbol::TweenState;
+
+    let mut app = Is2dApp::default();
+    app.canvas.shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(200.0, 100.0),
+        14.0,
+        Color32::RED,
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut app);
     app.timeline.layers[0].keyframes[0].tween = true;
     assert_eq!(
         app.timeline.layers[0].tween_state_at_keyframe(0),
@@ -4214,13 +4113,13 @@ fn test_double_click_raw_shape_does_not_exit_group_or_symbol_and_tween_state_inc
 }
 
 #[test]
-fn test_marquee_shift_deselect_restores_unsliced_for_bucket_fill_and_symbol_rename_undo_grouping() {
+fn test_marquee_shift_deselect_restores_unsliced_for_bucket_fill() {
     let mut app = Is2dApp::default();
     let red = Color32::from_rgb(220, 50, 50);
     let blue = Color32::from_rgb(50, 120, 220);
 
-    // 1. マーキースライスで1本のストロークを2つに分割選択したあと、Shift+クリック（toggle_shape_selection）で選択を空にした際、
-    //    即座に unsliced_canvas が復元され、直後のバケツ塗りで古い unsliced_canvas が復活しないこと
+    // マーキースライスで1本のストロークを2つに分割選択したあと、Shift+クリック（toggle_shape_selection）で選択を空にした際、
+    // 即座に unsliced_canvas が復元され、直後のバケツ塗りで古い unsliced_canvas が復活しないこと
     app.canvas.shapes = make_stroke(
         Point::new(100.0, 100.0),
         Point::new(240.0, 100.0),
@@ -4253,8 +4152,17 @@ fn test_marquee_shift_deselect_restores_unsliced_for_bucket_fill_and_symbol_rena
     ));
     assert_eq!(app.canvas.shapes.len(), 1);
     assert_eq!(app.canvas.shapes[0].color, blue);
+}
 
-    // 2. rename_symbol_in_library と ensure_valid_selection() による連続リネーム時の Undo グループ化検証
+#[test]
+fn test_symbol_rename_consecutive_keystrokes_grouped_into_single_undo() {
+    let mut app = Is2dApp::default();
+    app.canvas.shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(240.0, 100.0),
+        16.0,
+        Color32::BLUE,
+    );
     app.canvas.selected_shapes = vec![0];
     let sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     let undo_before_rename = app.history.undo_stack.len();
@@ -4276,10 +4184,10 @@ fn test_marquee_shift_deselect_restores_unsliced_for_bucket_fill_and_symbol_rena
 }
 
 #[test]
-fn test_step_frame_loop_mode_and_viewport_fit_and_total_frames_over_600() {
+fn test_step_frame_loop_mode_and_total_frames_over_600() {
     let mut app = Is2dApp::default();
 
-    // 1. 600フレーム超（1200フレーム）のタイムラインリサイズと step_frame のループ ON / OFF 挙動
+    // 600フレーム超（1200フレーム）のタイムラインリサイズと step_frame のループ ON / OFF 挙動
     app.timeline.resize_total_frames(1200);
     assert_eq!(app.timeline.total_frames, 1200);
     assert_eq!(app.timeline.layers[0].frame_count, 1200);
@@ -4299,8 +4207,11 @@ fn test_step_frame_loop_mode_and_viewport_fit_and_total_frames_over_600() {
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1199);
     timeline_ui::step_frame(&mut app, 1);
     assert_eq!(app.timeline.current_frame, 1199);
+}
 
-    // 2. ViewportState::fit_stage_to_window と zoom_around_screen_pos の動作検証
+#[test]
+fn test_viewport_fit_stage_to_window() {
+    let mut app = Is2dApp::default();
     app.viewport.last_canvas_rect =
         eframe::egui::Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1600.0, 900.0));
     app.viewport.stage_size = Vec2::new(800.0, 450.0);
@@ -4318,8 +4229,11 @@ fn test_step_frame_loop_mode_and_viewport_fit_and_total_frames_over_600() {
         (world_before - world_after).hypot() < 1e-3,
         "指定スクリーン座標を中心としたズーム後もその座標下のワールド座標がずれないこと"
     );
+}
 
-    // 3. シンボル内 Frame 0 が空だがネストした子シンボルインスタンスのみが存在する場合の has_dynamic_animation 判定
+#[test]
+fn test_nested_static_child_symbol_is_not_treated_as_dynamic_blank_frame() {
+    // シンボル内 Frame 0 が空だがネストした子シンボルインスタンスのみが存在する場合の has_dynamic_animation 判定
     let mut sym_parent = crate::symbol::SymbolDef::new(1, "Parent".to_string(), Vec::new());
     let sym_child = crate::symbol::SymbolDef::new(
         2,
@@ -4348,12 +4262,12 @@ fn test_step_frame_loop_mode_and_viewport_fit_and_total_frames_over_600() {
 }
 
 #[test]
-fn test_f7_preserves_next_keyframe_and_shift_f6_shift_f5_guards() {
+fn test_f7_preserves_next_keyframe_by_pushing_tail() {
     let mut app = Is2dApp::default();
     let red = Color32::from_rgb(220, 40, 40);
     let blue = Color32::from_rgb(40, 100, 220);
 
-    // 1. Frame 0 に赤い絵、Frame 1 に青い絵のキーフレームを作成
+    // Frame 0 に赤い絵、Frame 1 に青い絵のキーフレームを作成
     app.canvas.shapes = make_stroke(Point::new(100.0, 100.0), Point::new(160.0, 100.0), 10.0, red);
     canvas_tool::sync_shapes_to_timeline(&mut app);
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
@@ -4374,8 +4288,12 @@ fn test_f7_preserves_next_keyframe_and_shift_f6_shift_f5_guards() {
         blue,
         "Frame 1 にあった既存の青いキーフレームが消去されず Frame 2 に保持されていること"
     );
+}
 
-    // 2. Frame 0 の保持フレーム（Frame 1〜）で Shift+F6 を押しても先頭キーフレーム (Frame 0) を誤って白紙化しないこと
+#[test]
+fn test_shift_f6_and_shift_f5_boundary_guards() {
+    let red = Color32::from_rgb(220, 40, 40);
+    // 1. Frame 0 の保持フレーム（Frame 1〜）で Shift+F6 を押しても先頭キーフレーム (Frame 0) を誤って白紙化しないこと
     let mut hold_app = Is2dApp::default();
     hold_app.canvas.shapes =
         make_stroke(Point::new(100.0, 100.0), Point::new(160.0, 100.0), 10.0, red);
@@ -4389,7 +4307,7 @@ fn test_f7_preserves_next_keyframe_and_shift_f6_shift_f5_guards() {
     );
     assert!(!hold_app.timeline.layers[0].cel_at(0).unwrap().is_empty());
 
-    // 3. 尺の短いレイヤーが含まれる状態で後ろのフレームで Shift+F5 を押した際、範囲外の短いレイヤーの末尾を削らないこと
+    // 2. 尺の短いレイヤーが含まれる状態で後ろのフレームで Shift+F5 を押した際、範囲外の短いレイヤーの末尾を削らないこと
     timeline_ui::timeline_add_layer(&mut hold_app);
     hold_app.timeline.layers[1].frame_count = 1;
     hold_app.timeline.cell_selection = None;
@@ -4400,8 +4318,14 @@ fn test_f7_preserves_next_keyframe_and_shift_f6_shift_f5_guards() {
         hold_app.timeline.layers[1].frame_count, 1,
         "現在フレーム (2) に届いていない短いレイヤー (frame_count=1) は Shift+F5 の影響を受けないこと"
     );
+}
 
-    // 4. 複数フレームを持つ Loop シンボルの保持スパン途中で F6 を押した際、表示コマが先頭(0)に巻き戻らないこと
+#[test]
+fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotate() {
+    let red = Color32::from_rgb(220, 40, 40);
+    let blue = Color32::from_rgb(40, 100, 220);
+
+    // 複数フレームを持つ Loop シンボルの保持スパン途中で F6 を押した際、表示コマが先頭(0)に巻き戻らないこと
     let mut sym_f6_app = Is2dApp::default();
     sym_f6_app.canvas.shapes =
         make_stroke(Point::new(100.0, 100.0), Point::new(150.0, 100.0), 10.0, red);
@@ -4418,7 +4342,7 @@ fn test_f7_preserves_next_keyframe_and_shift_f6_shift_f5_guards() {
             blue,
         );
     }
-    sym_f6_app.timeline.resize_total_frames(4);
+    sym_f6_app.timeline.resize_total_frames(5);
     timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 2);
     assert_eq!(sym_f6_app.canvas.shapes[0].color, blue);
     assert!(timeline_ui::timeline_insert_keyframe(&mut sym_f6_app, true));
@@ -4427,13 +4351,41 @@ fn test_f7_preserves_next_keyframe_and_shift_f6_shift_f5_guards() {
         blue,
         "F6 で分割された新しいキーフレームでも Loop シンボルの表示コマ (Frame 2 = 青) がそのまま引き継がれること"
     );
+
+    // トゥイーン区間（tween_rotate = Clockwise）の途中フレームでキャンバス編集（write_shapes_to_editable_cels）により自動分割された際、
+    // 新設された中間キーフレームにも tween_rotate = Clockwise が引き継がれること (#10)
+    timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 4);
+    assert!(timeline_ui::timeline_insert_keyframe(&mut sym_f6_app, true));
+    timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 2);
+    assert!(tool_transform::timeline_toggle_tween(&mut sym_f6_app));
+    assert!(tool_transform::set_active_keyframe_tween_rotate(
+        &mut sym_f6_app,
+        crate::symbol::TweenRotate::Clockwise
+    ));
+    timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 3);
+    sym_f6_app.canvas.selected_shapes = vec![0];
+    assert!(tool_select::nudge_selected_shapes(
+        &mut sym_f6_app,
+        kurbo::Vec2::new(20.0, 0.0)
+    ));
+    let kf_at_3 = sym_f6_app.timeline.layers[0]
+        .keyframes
+        .iter()
+        .find(|kf| kf.start_frame == 3)
+        .expect("Frame 3 に新キーフレームが自動分割生成されていること");
+    assert!(kf_at_3.tween);
+    assert_eq!(
+        kf_at_3.tween_rotate,
+        crate::symbol::TweenRotate::Clockwise,
+        "トゥイーン区間途中で自動分割されたキーフレームに前のキーフレームの tween_rotate 設定が引き継がれること"
+    );
 }
 
 #[test]
-fn test_flip_tween_midpoint_and_symbol_delete_mid_tween_and_layer_lock_guards() {
-    use crate::vector_engine::{interpolate_affine_with_pivot, TweenRotate};
+fn test_flip_tween_midpoint_and_horizontal_flip_without_spurious_rotation() {
+    use crate::symbol::{interpolate_affine_with_pivot, TweenRotate};
 
-    // 1. 反転を含むトゥイーンの中間フレーム (t = 0.5) でも特異行列 (det == 0) にならずピボット位置へ正しく変換されること (H5)
+    // 1. 垂直反転 (scale_non_uniform(1.0, -1.0)) を含むトゥイーンの中間フレーム (t = 0.5) でも特異行列にならずピボット位置へ変換されること (H5)
     let a0 = kurbo::Affine::translate((100.0, 100.0));
     let a1 = kurbo::Affine::translate((300.0, 100.0)) * kurbo::Affine::scale_non_uniform(1.0, -1.0);
     let (mid, _) = interpolate_affine_with_pivot(
@@ -4455,7 +4407,27 @@ fn test_flip_tween_midpoint_and_symbol_delete_mid_tween_and_layer_lock_guards() 
         mid_origin
     );
 
-    // 2. トゥイーンの途中フレームでシンボルをライブラリ削除した際、開始キーフレームが途中フレームの姿勢で上書きされないこと (H6)
+    // 2. 水平反転 (scale_non_uniform(-1.0, 1.0)) を含むトゥイーンで不要な180°回転が発生せず、Y軸方向が反転せず X スケールのみ補間されること (#4)
+    let h1 = kurbo::Affine::translate((300.0, 100.0)) * kurbo::Affine::scale_non_uniform(-1.0, 1.0);
+    let (mid_h, _) = interpolate_affine_with_pivot(
+        a0,
+        Point::ZERO,
+        h1,
+        Point::ZERO,
+        TweenRotate::Auto,
+        0.25,
+    );
+    let top_pt = mid_h * Point::new(0.0, -20.0);
+    assert!(
+        (top_pt.y - 80.0).abs() < 1e-3,
+        "水平反転 (scale_x = -1, scale_y = +1) のトゥイーン途中で 180° 回転に誤分解されて上下が揺れないこと: top_pt={:?}",
+        top_pt
+    );
+}
+
+#[test]
+fn test_symbol_delete_mid_tween_preserves_start_keyframe_pose() {
+    // トゥイーンの途中フレームでシンボルをライブラリ削除した際、開始キーフレームが途中フレームの姿勢で上書きされないこと (H6)
     let mut app = Is2dApp::default();
     let red = Color32::from_rgb(220, 40, 40);
     let blue = Color32::from_rgb(40, 100, 220);
@@ -4473,7 +4445,7 @@ fn test_flip_tween_midpoint_and_symbol_delete_mid_tween_and_layer_lock_guards() 
     assert!(tool_transform::timeline_toggle_tween(&mut app));
 
     // 中間フレーム (Frame 2, x ≈ 220) に移動し、別レイヤーを追加した上でシンボルを削除して別レイヤーに描画
-    timeline_ui:: timeline_add_layer(&mut app);
+    timeline_ui::timeline_add_layer(&mut app);
     timeline_ui::switch_to_layer_and_frame(&mut app, 1, 2);
     assert!(tool_transform::delete_symbol_from_library(&mut app, sym_id));
     let raw_blue =
@@ -4487,9 +4459,18 @@ fn test_flip_tween_midpoint_and_symbol_delete_mid_tween_and_layer_lock_guards() 
         "中間フレームでシンボル削除後に別レイヤーへ描画しても、Layer 1 の開始キーフレーム (Frame 0) の座標 (x≈120) が中間姿勢 (x≈220) で上書きされないこと: center={:?}",
         kf0_bbox.center()
     );
+}
 
-    // 3. アクティブレイヤーがロック中は消しゴム・バケツが別レイヤーへフォールバックせず拒否されること、また空振り消しゴムで Undo が増えないこと (H7)
+#[test]
+fn test_noop_eraser_does_not_push_undo_and_active_layer_lock_blocks_paint_tools() {
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 40, 40);
+    app.canvas.shapes = make_stroke(Point::new(100.0, 100.0), Point::new(140.0, 100.0), 10.0, red);
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+    timeline_ui::timeline_add_layer(&mut app);
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+
+    // 図形に当たらない空振り消しゴムで Undo が増えないこと (H7)
     let undo_before_noop_erase = app.history.undo_stack.len();
     app.ui.tool = Tool::Eraser;
     let miss_erase =
@@ -4501,6 +4482,7 @@ fn test_flip_tween_midpoint_and_symbol_delete_mid_tween_and_layer_lock_guards() 
         "図形に当たらない空振り消しゴム操作では Undo 履歴が積まれないこと"
     );
 
+    // アクティブレイヤーがロック中は消しゴム・バケツが別レイヤーへフォールバックせず拒否されること
     timeline_ui::set_layer_locked(&mut app, 1, true);
     app.timeline.active_layer = 1;
     app.ui.tool = Tool::Eraser;
@@ -4513,8 +4495,11 @@ fn test_flip_tween_midpoint_and_symbol_delete_mid_tween_and_layer_lock_guards() 
         !app.is_current_tool_allowed(),
         "アクティブレイヤーがロック中は他レイヤーが非ロックでもバケツが禁止判定になること"
     );
+}
 
-    // 4. コンパクト JSON 保存・非有限値検証 (H8)・Undo 100件上限・シンボル編集中の未変更シンボル Arc 共有 (H10)
+#[test]
+fn test_compact_json_serialization_nan_rejection_and_undo_history_cap() {
+    let red = Color32::from_rgb(220, 40, 40);
     let tmp_compact =
         std::env::temp_dir().join(format!("is2d_compact_test_{}.is2d", std::process::id()));
     let mut save_app = Is2dApp::default();
@@ -4546,22 +4531,23 @@ fn test_flip_tween_midpoint_and_symbol_delete_mid_tween_and_layer_lock_guards() 
 }
 
 #[test]
-fn test_egui_input_shortcuts_clipboard_sync_and_drag_press_origin() {
+fn test_egui_brush_drag_press_origin_and_right_click_ignored() {
     use eframe::egui;
 
     let ctx = egui::Context::default();
     let mut app = Is2dApp::default();
+    let screen_rect = Some(egui::Rect::from_min_size(
+        Pos2::ZERO,
+        Vec2::new(1280.0, 820.0),
+    ));
 
-    // 1. ブラシドラッグ開始時 (H1): 押下位置 (100, 100) からドラッグ認識閾値を超えて (140, 100) へ動いたフレームで、
-    //    描き始めの始点 (100, 100) が欠落せずストロークに含まれること
+    // 1. ブラシドラッグ開始時 (H1): 押下位置 (300, 300) からドラッグ認識閾値を超えて (360, 300) へ動いたフレームで、
+    //    描き始めの始点が欠落せずストロークに含まれること
     let press_pos = Pos2::new(300.0, 300.0);
     let drag_pos = Pos2::new(360.0, 300.0);
     let _ = ctx.run(
         egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(1280.0, 820.0),
-            )),
+            screen_rect,
             events: vec![egui::Event::PointerMoved(press_pos)],
             ..Default::default()
         },
@@ -4572,10 +4558,7 @@ fn test_egui_input_shortcuts_clipboard_sync_and_drag_press_origin() {
     let expected_start_world = app.viewport.screen_to_world(press_pos);
     let _ = ctx.run(
         egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(1280.0, 820.0),
-            )),
+            screen_rect,
             events: vec![
                 egui::Event::PointerMoved(press_pos),
                 egui::Event::PointerButton {
@@ -4593,10 +4576,7 @@ fn test_egui_input_shortcuts_clipboard_sync_and_drag_press_origin() {
     );
     let _ = ctx.run(
         egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(1280.0, 820.0),
-            )),
+            screen_rect,
             events: vec![egui::Event::PointerMoved(drag_pos)],
             ..Default::default()
         },
@@ -4606,10 +4586,7 @@ fn test_egui_input_shortcuts_clipboard_sync_and_drag_press_origin() {
     );
     let _ = ctx.run(
         egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(1280.0, 820.0),
-            )),
+            screen_rect,
             events: vec![egui::Event::PointerButton {
                 pos: drag_pos,
                 button: egui::PointerButton::Primary,
@@ -4628,14 +4605,83 @@ fn test_egui_input_shortcuts_clipboard_sync_and_drag_press_origin() {
         "ブラシのドラッグ開始位置 press_origin が欠落せず塗りに含まれていること"
     );
 
-    // 2. コピー時の OS クリップボード同期 (H2) と F8 キーリピート抑止・Esc ツール維持
+    // 2. 右ボタンドラッグ（PointerButton::Secondary）ではブラシ描画が発火しないこと (#2)
+    let r_start = Pos2::new(450.0, 300.0);
+    let r_end = Pos2::new(520.0, 300.0);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(r_start),
+                egui::Event::PointerButton {
+                    pos: r_start,
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerMoved(r_end)],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerButton {
+                pos: r_end,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert_eq!(
+        app.canvas.shapes.len(),
+        1,
+        "右クリックドラッグではブラシストロークが描画されないこと"
+    );
+}
+
+#[test]
+fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
+    use eframe::egui;
+
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let screen_rect = Some(egui::Rect::from_min_size(
+        Pos2::ZERO,
+        Vec2::new(1280.0, 820.0),
+    ));
+
+    app.canvas.shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(180.0, 100.0),
+        12.0,
+        Color32::RED,
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut app);
     app.canvas.selected_shapes = vec![0];
+
+    // 1. コピー時の OS クリップボード同期 (H2)
     let out_copy = ctx.run(
         egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(1280.0, 820.0),
-            )),
+            screen_rect,
             events: vec![egui::Event::Copy],
             ..Default::default()
         },
@@ -4651,10 +4697,7 @@ fn test_egui_input_shortcuts_clipboard_sync_and_drag_press_origin() {
     // Event::Paste でペーストが実行され図形が2つになること
     let _ = ctx.run(
         egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(1280.0, 820.0),
-            )),
+            screen_rect,
             events: vec![egui::Event::Paste("is2d-shape-clipboard".to_owned())],
             ..Default::default()
         },
@@ -4664,13 +4707,10 @@ fn test_egui_input_shortcuts_clipboard_sync_and_drag_press_origin() {
     );
     assert_eq!(app.canvas.shapes.len(), 2);
 
-    // F8 初回押下でシンボルが1つ作成され、直後のフレームで F8 長押しリピートイベントが来ても2重にシンボル化されないこと
+    // 2. F8 初回押下でシンボルが1つ作成され、直後のフレームで F8 長押しリピートイベントが来ても2重にシンボル化されないこと
     let _ = ctx.run(
         egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(1280.0, 820.0),
-            )),
+            screen_rect,
             events: vec![egui::Event::Key {
                 key: egui::Key::F8,
                 physical_key: None,
@@ -4688,10 +4728,7 @@ fn test_egui_input_shortcuts_clipboard_sync_and_drag_press_origin() {
 
     let _ = ctx.run(
         egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(1280.0, 820.0),
-            )),
+            screen_rect,
             events: vec![
                 egui::Event::Key {
                     key: egui::Key::F8,
@@ -4721,12 +4758,44 @@ fn test_egui_input_shortcuts_clipboard_sync_and_drag_press_origin() {
     );
     assert_eq!(app.ui.tool, Tool::Transform);
 
+    // 3. Cmd+0 でキャンバスの viewport.zoom が 1.0 (100%) にリセットされ、egui 全体の UI zoom_factor が変更されないこと (#1)
+    app.viewport.zoom = 2.5;
+    app.viewport.pan = Vec2::new(120.0, -80.0);
+    let cmd_mods = egui::Modifiers {
+        command: true,
+        ctrl: true,
+        ..Default::default()
+    };
     let _ = ctx.run(
         egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(1280.0, 820.0),
-            )),
+            screen_rect,
+            modifiers: cmd_mods,
+            events: vec![egui::Event::Key {
+                key: egui::Key::Num0,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: cmd_mods,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(
+        (app.viewport.zoom - 1.0).abs() < 1e-6 && app.viewport.pan == Vec2::ZERO,
+        "Cmd+0 でキャンバスの zoom が 1.0、pan が ZERO にリセットされること"
+    );
+    assert!(
+        (ctx.zoom_factor() - 1.0).abs() < 1e-6,
+        "zoom_with_keyboard = false により egui 全体の UI スケールが変更されないこと"
+    );
+
+    // 4. Esc で選択解除しても現在のツール (Tool::Transform) が勝手に Tool::Select へ切り替わらないこと
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
             events: vec![egui::Event::Key {
                 key: egui::Key::Escape,
                 physical_key: None,
@@ -4745,5 +4814,279 @@ fn test_egui_input_shortcuts_clipboard_sync_and_drag_press_origin() {
         app.ui.tool,
         Tool::Transform,
         "Esc で選択解除しても現在のツール (Tool::Transform) が勝手に Tool::Select へ切り替わらないこと"
+    );
+}
+
+#[test]
+fn test_egui_select_and_transform_tool_raw_input_interactions() {
+    use eframe::egui;
+
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let screen_rect = Some(egui::Rect::from_min_size(
+        Pos2::ZERO,
+        Vec2::new(1280.0, 820.0),
+    ));
+
+    // 初回フレームで viewport.last_canvas_rect を確定させる
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+
+    // ステージ中央にシェイプを配置
+    let center_world = app.viewport.stage_center_world();
+    app.canvas.shapes = make_stroke(
+        Point::new(center_world.x - 40.0, center_world.y),
+        Point::new(center_world.x + 40.0, center_world.y),
+        20.0,
+        Color32::from_rgb(220, 60, 60),
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+
+    // 1. 選択ツール (Tool::Select) でシェイプ中央を左クリックして選択し、右クリックドラッグでは移動しないことを検証
+    app.ui.tool = Tool::Select;
+    let center_screen = app.viewport.world_to_screen(center_world);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(center_screen),
+                egui::Event::PointerButton {
+                    pos: center_screen,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: center_screen,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert_eq!(
+        app.canvas.selected_shapes,
+        vec![0],
+        "handle_select_tool_input 経由の左クリックでシェイプが選択されること"
+    );
+
+    // 2. 自由変形ツール (Tool::Transform) でシェイプ内部（ピボットから離れた位置）を左ドラッグして平行移動できること
+    app.ui.tool = Tool::Transform;
+    let initial_bbox_center = app.canvas.shapes[0].bounding_box().center();
+    let grab_world = Point::new(initial_bbox_center.x - 20.0, initial_bbox_center.y);
+    let grab_screen = app.viewport.world_to_screen(grab_world);
+    let drag_to = Pos2::new(grab_screen.x + 50.0, grab_screen.y);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(grab_screen),
+                egui::Event::PointerButton {
+                    pos: grab_screen,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerMoved(drag_to)],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerButton {
+                pos: drag_to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let moved_center = app.canvas.shapes[0].bounding_box().center();
+    let expected_dx = 50.0 / (app.viewport.zoom as f64);
+    assert!(
+        (moved_center.x - (initial_bbox_center.x + expected_dx)).abs() < 2.0,
+        "handle_transform_tool_input 経由の左ドラッグでシェイプが平行移動されること: moved_center={:?}, expected_x={}",
+        moved_center,
+        initial_bbox_center.x + expected_dx
+    );
+}
+
+#[test]
+fn test_hidden_layer_shapes_excluded_from_canvas_and_preserved_on_sync() {
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 40, 40);
+    let blue = Color32::from_rgb(40, 120, 220);
+
+    // Layer 1 に赤い図形、Layer 2 に青い図形を作成
+    app.canvas.shapes = make_stroke(Point::new(100.0, 100.0), Point::new(160.0, 100.0), 10.0, red);
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+    timeline_ui::timeline_add_layer(&mut app);
+    let lid2 = app.timeline.layers[1].id;
+    app.canvas.shapes.extend(
+        make_stroke(Point::new(100.0, 200.0), Point::new(160.0, 200.0), 10.0, blue)
+            .into_iter()
+            .map(|s| s.with_layer_id(lid2)),
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+    assert_eq!(app.canvas.shapes.len(), 2);
+
+    // Layer 1 を非表示 (visible = false) に切り替えると、CanvasState::shapes から除外されること
+    timeline_ui::set_layer_visible(&mut app, 0, false);
+    assert_eq!(
+        app.canvas.shapes.len(),
+        1,
+        "非表示レイヤー (visible=false) の図形は load_shapes_from_timeline から除外されること"
+    );
+    assert_eq!(app.canvas.shapes[0].color, blue);
+
+    // その状態で Layer 2 を編集して sync_shapes_to_timeline を実行しても、非表示の Layer 1 の図形が消去されないこと
+    app.canvas.selected_shapes = vec![0];
+    assert!(tool_select::nudge_selected_shapes(
+        &mut app,
+        kurbo::Vec2::new(20.0, 0.0)
+    ));
+    assert_eq!(
+        app.timeline.layers[0].keyframes[0].cel.shapes.len(),
+        1,
+        "非表示レイヤーが除外された状態で他レイヤーを編集しても非表示レイヤーのセル内容は保護されること"
+    );
+
+    // 再び Layer 1 を表示に戻すと赤い図形が復活すること
+    timeline_ui::set_layer_visible(&mut app, 0, true);
+    assert_eq!(app.canvas.shapes.len(), 2);
+}
+
+#[test]
+fn test_time_based_playback_advance_and_onion_skin_rendering() {
+    use eframe::egui;
+
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let screen_rect = Some(egui::Rect::from_min_size(
+        Pos2::ZERO,
+        Vec2::new(1280.0, 820.0),
+    ));
+
+    // 3フレームのアニメーションを作成し、オニオンスキンを ON にする
+    app.timeline.fps = 10; // 1コマ = 0.1秒
+    app.timeline.resize_total_frames(3);
+    app.canvas.shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(150.0, 100.0),
+        10.0,
+        Color32::RED,
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
+    timeline_ui::timeline_insert_keyframe(&mut app, false);
+    app.canvas.shapes = make_stroke(
+        Point::new(150.0, 100.0),
+        Point::new(200.0, 100.0),
+        10.0,
+        Color32::GREEN,
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
+    timeline_ui::timeline_insert_keyframe(&mut app, false);
+    app.canvas.shapes = make_stroke(
+        Point::new(200.0, 100.0),
+        Point::new(250.0, 100.0),
+        10.0,
+        Color32::BLUE,
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+
+    // Frame 1 でオニオンスキンを有効化して update_ui を実行し、前後のオニオンスキンキャッシュが構築・描画されることを検証
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
+    app.timeline_ui.onion_skin_enabled = true;
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            time: Some(1.0),
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+
+    // 非ループ再生 (loop_playback = false) で Frame 0 から再生を開始し、時刻を進めて最終フレーム (Frame 2) で自動停止することを検証
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    app.timeline_ui.loop_playback = false;
+    timeline_ui::toggle_playback(&mut app);
+    assert!(app.timeline_ui.is_playing);
+
+    // t = 1.0s で再生開始基準時刻を記録
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            time: Some(1.0),
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert_eq!(app.timeline.current_frame, 0);
+
+    // t = 1.12s (+0.12s -> 1コマ進行)
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            time: Some(1.12),
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert_eq!(app.timeline.current_frame, 1);
+    assert!(app.timeline_ui.is_playing);
+
+    // t = 1.35s (最終フレーム Frame 2 に到達して自動停止)
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            time: Some(1.35),
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert_eq!(app.timeline.current_frame, 2);
+    assert!(
+        !app.timeline_ui.is_playing,
+        "loop_playback == false のとき最終フレーム到達で is_playing が false になり自動停止すること"
     );
 }

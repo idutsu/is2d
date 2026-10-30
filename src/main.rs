@@ -121,6 +121,7 @@ fn configure_japanese_fonts(ctx: &egui::Context) {
 
 /// アプリ全体のUIをライトテーマ＋角丸なし（すべて直角のシャープな矩形）に設定する
 fn configure_sharp_light_theme(ctx: &egui::Context) {
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
     let mut visuals = egui::Visuals::light();
     visuals.window_rounding = egui::Rounding::ZERO;
     visuals.menu_rounding = egui::Rounding::ZERO;
@@ -130,6 +131,21 @@ fn configure_sharp_light_theme(ctx: &egui::Context) {
     visuals.widgets.active.rounding = egui::Rounding::ZERO;
     visuals.widgets.open.rounding = egui::Rounding::ZERO;
     ctx.set_visuals(visuals);
+}
+
+/// キーリピートを除外して「押された最初のフレームのみ `true`」を返すヘルパー
+fn key_pressed_no_repeat(i: &egui::InputState, target: Key) -> bool {
+    i.events.iter().any(|ev| {
+        matches!(
+            ev,
+            egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                ..
+            } if *key == target
+        )
+    })
 }
 
 // ============================================================================
@@ -521,13 +537,13 @@ impl Is2dApp {
         let mut file_cmd = None;
         ctx.input(|i| {
             let cmd = i.modifiers.command || i.modifiers.ctrl;
-            if cmd && i.key_pressed(Key::N) {
+            if cmd && key_pressed_no_repeat(i, Key::N) {
                 file_cmd = Some(0u8);
-            } else if cmd && i.key_pressed(Key::O) {
+            } else if cmd && key_pressed_no_repeat(i, Key::O) {
                 file_cmd = Some(1u8);
-            } else if cmd && i.key_pressed(Key::S) {
+            } else if cmd && key_pressed_no_repeat(i, Key::S) {
                 file_cmd = Some(if i.modifiers.shift { 3u8 } else { 2u8 });
-            } else if cmd && i.key_pressed(Key::W) {
+            } else if cmd && key_pressed_no_repeat(i, Key::W) {
                 file_cmd = Some(4u8);
             }
         });
@@ -607,7 +623,7 @@ impl Is2dApp {
                     canvas_tool::stop_playback(self);
                     canvas_tool::cancel_active_drag(self);
                     self.canvas.translate_selected(delta);
-                    if tool_select::reorder_selected_to_scope_front(self) {
+                    if canvas_tool::reorder_selected_to_scope_front(self) {
                         self.canvas.selection_modified = true;
                         canvas_tool::sync_shapes_to_timeline(self);
                     }
@@ -635,18 +651,8 @@ impl Is2dApp {
             }
         } else if i.key_pressed(Key::F7) {
             timeline_ui::timeline_insert_keyframe(self, false);
-        } else if i.events.iter().any(|ev| {
-            matches!(
-                ev,
-                egui::Event::Key {
-                    key: Key::F8,
-                    pressed: true,
-                    repeat: false,
-                    ..
-                }
-            )
-        }) {
-            tool_transform::convert_selection_to_symbol(self);
+        } else if key_pressed_no_repeat(i, Key::F8) {
+            canvas_tool::convert_selection_to_symbol(self);
         } else if i.key_pressed(Key::F5) {
             if shift {
                 timeline_ui::timeline_remove_frame(self);
@@ -656,15 +662,15 @@ impl Is2dApp {
         } else if i.key_pressed(Key::O) {
             self.timeline_ui.onion_skin_enabled = !self.timeline_ui.onion_skin_enabled;
         } else if i.key_pressed(Key::T) {
-            tool_transform::timeline_toggle_tween(self);
+            canvas_tool::timeline_toggle_tween(self);
         } else if let Some(tool) = Tool::from_shortcut_input(i) {
             canvas_tool::set_tool(self, tool);
         } else if i.key_pressed(Key::Escape) {
             canvas_tool::cancel_active_drag(self);
             if !self.canvas.selected_shapes.is_empty() {
-                tool_select::clear_selection(self);
+                canvas_tool::clear_selection(self);
             } else {
-                tool_select::exit_current_group(self);
+                canvas_tool::exit_current_group(self);
             }
             self.ui.select_sub_mode = SelectSubMode::Reshape;
         } else if self.ui.tool == Tool::Select {
@@ -723,13 +729,13 @@ impl Is2dApp {
                 .hover_pos()
                 .unwrap_or_else(|| self.viewport.last_canvas_rect.center());
             self.viewport.zoom_around_screen_pos(center, 0.8);
-        } else if cmd && i.key_pressed(Key::G) {
+        } else if cmd && key_pressed_no_repeat(i, Key::G) {
             if i.modifiers.shift {
                 tool_select::ungroup_selected_shapes(self);
             } else {
                 tool_select::group_selected_shapes(self);
             }
-        } else if cmd && i.key_pressed(Key::B) {
+        } else if cmd && key_pressed_no_repeat(i, Key::B) {
             tool_select::ungroup_selected_shapes(self);
         } else if cmd && i.key_pressed(Key::Z) {
             if i.modifiers.shift {
@@ -764,8 +770,8 @@ impl Is2dApp {
         if self.timeline_ui.is_playing {
             let canvas_interacted = (response.hovered()
                 && ui.input(|i| i.pointer.primary_pressed()))
-                || response.drag_started()
-                || response.clicked();
+                || response.drag_started_by(egui::PointerButton::Primary)
+                || response.clicked_by(egui::PointerButton::Primary);
             if canvas_interacted {
                 canvas_tool::stop_playback(self);
             } else {
@@ -774,8 +780,8 @@ impl Is2dApp {
         }
         if self.ui.tool == Tool::Eyedropper {
             let sampling = (response.hovered() && ui.input(|i| i.pointer.primary_pressed()))
-                || response.dragged()
-                || response.clicked();
+                || response.dragged_by(egui::PointerButton::Primary)
+                || response.clicked_by(egui::PointerButton::Primary);
             if sampling {
                 if let Some(pt) = mouse_pt {
                     tool_paint::pick_color_at(self, pt);
@@ -922,10 +928,11 @@ impl Is2dApp {
         } else if !tool_allowed {
             ctx.set_cursor_icon(CursorIcon::NotAllowed);
         } else {
-            canvas_tool::draw_tool_cursor_and_feedback(self, ctx, painter, pos);
+            panels::draw_tool_cursor_and_feedback(self, ctx, painter, pos);
         }
     }
     pub(crate) fn update_ui(&mut self, ctx: &egui::Context) {
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
         project_io::handle_viewport_close_request(self, ctx);
         timeline_ui::update_playback(self, ctx);
         self.handle_shortcuts(ctx);
@@ -970,7 +977,7 @@ impl Is2dApp {
                     .draw_stage_background(&painter, canvas_rect, in_symbol_edit);
 
                 // 3. キャンバス上のシェイプ・オニオンスキン・ステージ枠線・選択枠・プレビューの描画
-                canvas_tool::draw_canvas_contents(self, &painter);
+                panels::draw_canvas_contents(self, &painter);
 
                 // 4. 状態連動の警告バッジおよび一時トースト通知を描画
                 self.draw_canvas_notices(ctx, &painter, canvas_rect, tool_allowed);

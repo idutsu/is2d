@@ -6,12 +6,14 @@ use eframe::egui::{self, Color32, Vec2};
 use kurbo::{Affine, Point, QuadBez};
 use serde::{Deserialize, Serialize};
 
-use crate::canvas_tool::{CanvasState, SelectSubMode, ViewportState};
+use crate::canvas_tool::{
+    max_group_id_in_timeline, CanvasState, SelectSubMode, TimelineUiState, ViewportState,
+};
 use crate::symbol::{
     SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode, SymbolManager, TweenRotate,
 };
+pub(crate) use crate::timeline::MAX_TIMELINE_FRAMES;
 use crate::timeline::{Cel, Keyframe, Layer, Timeline, TimelineCellSelection};
-use crate::timeline_ui::TimelineUiState;
 use crate::vector_engine::{Contour, FillShape};
 use crate::{Is2dApp, UndoHistory};
 
@@ -20,9 +22,6 @@ pub(crate) const PROJECT_FORMAT_VERSION: u32 = 1;
 
 /// プロジェクトファイルの標準拡張子
 pub(crate) const PROJECT_FILE_EXTENSION: &str = "is2d";
-
-/// タイムラインおよびシンボル内タイムラインの最大許容フレーム数（破損JSONによる巨大ループ防止）
-pub(crate) const MAX_TIMELINE_FRAMES: usize = 100_000;
 
 /// 読み込み可能なプロジェクトファイルの最大バイト数（100MB：異常な巨大ファイルによるOOM防止）
 pub(crate) const MAX_PROJECT_FILE_BYTES: u64 = 100 * 1024 * 1024;
@@ -211,7 +210,7 @@ fn prepare_active_tab_for_switch_or_save(app: &mut Is2dApp, flush_raw_merge: boo
     if flush_raw_merge && app.canvas.selection_modified && !app.canvas.selected_shapes.is_empty() {
         let selected_ids = app.canvas.selected_shape_ids();
         let saved_pivot = app.canvas.transform_pivot;
-        crate::tool_select::flush_modified_raw_selection_merge(app);
+        crate::canvas_tool::flush_modified_raw_selection_merge(app);
         app.canvas.restore_selection_by_shape_ids(&selected_ids);
         app.canvas.transform_pivot = if app.canvas.selected_shapes.is_empty() {
             None
@@ -291,6 +290,35 @@ fn unpack_slot_into_active(app: &mut Is2dApp, target_index: usize) {
     if !app.canvas.selected_shapes.is_empty() && app.ui.select_sub_mode != SelectSubMode::Reshape {
         app.ui.select_sub_mode = SelectSubMode::Reshape;
     }
+}
+
+/// アクティブドキュメントのタイムライン・シンボル・履歴・キャンバス・ビューポート・UIフラグを一括初期化し、
+/// タブ間共有の `clipboard` と `last_canvas_rect` を引き継いだ上で現在フレームの図形を展開する共通ヘルパー
+fn reset_active_document_state(
+    app: &mut Is2dApp,
+    timeline: Timeline,
+    symbols: SymbolManager,
+    stage_size: Vec2,
+) {
+    let shared_clipboard = std::mem::take(&mut app.canvas.clipboard);
+    let last_canvas_rect = app.viewport.last_canvas_rect;
+    app.timeline = timeline;
+    app.timeline_ui = TimelineUiState::default();
+    app.symbols = symbols;
+    app.history = UndoHistory::default();
+    app.canvas = CanvasState::default();
+    app.canvas.clipboard = shared_clipboard;
+    app.viewport = ViewportState {
+        stage_size,
+        last_canvas_rect,
+        ..Default::default()
+    };
+    app.viewport.reset_view();
+    app.ui.inspect_timeline_frame = false;
+    app.ui.show_wireframe = false;
+    app.ui.editing_symbol_playback = false;
+    app.ui.select_sub_mode = SelectSubMode::Reshape;
+    crate::canvas_tool::load_shapes_from_timeline(app);
 }
 
 /// 現在アクティブなタブが「起動直後・新規作成直後で一度も編集されていない白紙の無題タブ」であるかを判定する
@@ -434,31 +462,19 @@ pub(crate) fn close_tab(app: &mut Is2dApp, close_index: usize, ctx: Option<&egui
         // 最後の1タブを閉じた場合は連番をリセットし、白紙の「無題-1」へ初期化する
         crate::canvas_tool::stop_playback(app);
         crate::canvas_tool::cancel_active_drag(app);
-        let shared_clipboard = std::mem::take(&mut app.canvas.clipboard);
-        let last_canvas_rect = app.viewport.last_canvas_rect;
         app.tabs.next_untitled_number = 1;
         let doc_id = app.tabs.alloc_doc_id();
         let untitled_num = app.tabs.alloc_untitled_number();
 
         app.tabs.tabs[0] = DocumentSlot::new_empty(doc_id, untitled_num);
         app.tabs.active_index = 0;
-        app.timeline = Timeline::default();
-        app.timeline_ui = TimelineUiState::default();
-        app.symbols = SymbolManager::default();
-        app.history = UndoHistory::default();
-        app.canvas = CanvasState::default();
-        app.canvas.clipboard = shared_clipboard;
-        app.viewport = ViewportState {
-            last_canvas_rect,
-            ..Default::default()
-        };
-        app.viewport.reset_view();
         set_active_file_path(app, None);
-        app.ui.inspect_timeline_frame = false;
-        app.ui.show_wireframe = false;
-        app.ui.editing_symbol_playback = false;
-        app.ui.select_sub_mode = SelectSubMode::Reshape;
-        crate::canvas_tool::load_shapes_from_timeline(app);
+        reset_active_document_state(
+            app,
+            Timeline::default(),
+            SymbolManager::default(),
+            ViewportState::default().stage_size,
+        );
         if let Some(c) = ctx {
             surrender_focused_widget(c);
             update_window_title(app, c);
@@ -502,388 +518,6 @@ pub(crate) fn close_tab(app: &mut Is2dApp, close_index: usize, ctx: Option<&egui
 pub(crate) fn close_active_tab(app: &mut Is2dApp, ctx: Option<&egui::Context>) {
     let active = app.tabs.active_index;
     close_tab(app, active, ctx);
-}
-
-// ============================================================================
-// 0.5 別タブ間のクリップボード・シンボル定義自動移植ロジック
-// ============================================================================
-
-fn collect_symbol_and_descendants(
-    sym_id: u64,
-    library: &[SymbolDef],
-    reusable: &[Arc<SymbolDef>],
-    visited: &mut Vec<u64>,
-    out: &mut Vec<Arc<SymbolDef>>,
-) {
-    if visited.contains(&sym_id) {
-        return;
-    }
-    visited.push(sym_id);
-    let Some(sym) = library.iter().find(|s| s.id == sym_id) else {
-        return;
-    };
-    for layer in &sym.timeline.layers {
-        for kf in &layer.keyframes {
-            for inst in kf.cel.instances.iter() {
-                collect_symbol_and_descendants(
-                    inst.binding.symbol_id,
-                    library,
-                    reusable,
-                    visited,
-                    out,
-                );
-            }
-        }
-    }
-    if let Some(existing) = reusable.iter().find(|s| s.id == sym_id) {
-        out.push(Arc::clone(existing));
-    } else {
-        let mut cloned = sym.clone();
-        cloned.strip_transient_caches();
-        out.push(Arc::new(cloned));
-    }
-}
-
-/// シンボルの内部タイムライン内で使用されている最大のグループID（`group_path` / `instance_gid` / `parent_scope`）を返す
-fn max_group_id_in_timeline(tl: &Timeline) -> u64 {
-    let mut max_gid = 0u64;
-    for layer in &tl.layers {
-        for kf in &layer.keyframes {
-            for sh in kf.cel.shapes.iter() {
-                if let Some(&gid) = sh.group_path.iter().max() {
-                    max_gid = max_gid.max(gid);
-                }
-            }
-            for inst in kf.cel.instances.iter() {
-                max_gid = max_gid.max(inst.binding.instance_gid);
-                if let Some(&gid) = inst.parent_scope.iter().max() {
-                    max_gid = max_gid.max(gid);
-                }
-            }
-        }
-    }
-    max_gid
-}
-
-/// 別タブから移植されるシンボルの内部タイムライン内の全グループID（`group_path` / `instance_gid` / `parent_scope`）を
-/// 貼り付け先タブの `SymbolManager` で新規採番したIDへ一括リマップし、貼り付け先タブの既存グループとのID衝突を防ぐ
-fn remap_timeline_group_ids(tl: &mut Timeline, symbols: &mut SymbolManager) {
-    let mut gid_map: HashMap<u64, u64> = HashMap::new();
-    let mut map_gid = |old_gid: u64, symbols: &mut SymbolManager| -> u64 {
-        *gid_map
-            .entry(old_gid)
-            .or_insert_with(|| symbols.alloc_group_id())
-    };
-    for layer in &mut tl.layers {
-        for kf in &mut layer.keyframes {
-            if kf
-                .cel
-                .shapes
-                .iter()
-                .any(|s| !s.group_path.is_empty() || s.symbol_instance.is_some())
-            {
-                for sh in kf.cel.shapes_mut() {
-                    for gid in &mut sh.group_path {
-                        *gid = map_gid(*gid, symbols);
-                    }
-                    if let Some(mut b) = sh.symbol_instance {
-                        b.instance_gid = map_gid(b.instance_gid, symbols);
-                        sh.symbol_instance = Some(b);
-                    }
-                }
-            }
-            if !kf.cel.instances.is_empty() {
-                for inst in kf.cel.instances_mut() {
-                    inst.binding.instance_gid = map_gid(inst.binding.instance_gid, symbols);
-                    for gid in &mut inst.parent_scope {
-                        *gid = map_gid(*gid, symbols);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// `copy_selected_shapes`（`Cmd+C`）実行時に、クリップボード内の図形が参照しているシンボル定義（入れ子含む）を `Arc` 共有スナップショットとして退避する
-pub(crate) fn capture_clipboard_symbols(app: &mut Is2dApp) {
-    let active_doc_id = app.tabs.active_doc_id();
-    if active_doc_id != app.tabs.clipboard_source_doc_id {
-        app.tabs.clipboard_imported_map.clear();
-    }
-    let reusable = if active_doc_id == app.tabs.clipboard_source_doc_id
-        && app.symbols.revision == app.tabs.clipboard_source_symbols_revision
-    {
-        std::mem::take(&mut app.tabs.clipboard_symbols)
-    } else {
-        app.tabs.clipboard_symbols.clear();
-        Vec::new()
-    };
-
-    app.tabs.clipboard_source_doc_id = active_doc_id;
-    app.tabs.clipboard_source_symbol_id = app.symbols.edit_stack.last().map(|s| s.symbol_id);
-    app.tabs.clipboard_source_symbols_revision = app.symbols.revision;
-
-    let mut visited = Vec::new();
-    let mut collected = Vec::new();
-    for shape in &app.canvas.clipboard {
-        if let Some(b) = shape.symbol_instance {
-            collect_symbol_and_descendants(
-                b.symbol_id,
-                &app.symbols.library,
-                &reusable,
-                &mut visited,
-                &mut collected,
-            );
-        }
-    }
-    app.tabs.clipboard_symbols = collected;
-}
-
-/// 現在のタブのライブラリに `src_sym_id` に対応する有効な既存シンボルが存在し、
-/// かつそのシンボルが現在参照しているすべての子シンボルもライブラリ内に実在していればそのIDを返す
-fn existing_reusable_target_symbol_id(app: &Is2dApp, src_sym_id: u64) -> Option<u64> {
-    let target_doc_id = app.tabs.active_doc_id();
-    let source_doc_id = app.tabs.clipboard_source_doc_id;
-    let candidate = (target_doc_id == source_doc_id)
-        .then_some(src_sym_id)
-        .filter(|&id| app.symbols.find_symbol(id).is_some())
-        .or_else(|| {
-            app.tabs
-                .clipboard_imported_map
-                .get(&(target_doc_id, src_sym_id))
-                .copied()
-                .filter(|&id| app.symbols.find_symbol(id).is_some())
-        })?;
-
-    let sym_def = app.symbols.find_symbol(candidate)?;
-    let all_children_exist = sym_def.timeline.layers.iter().all(|l| {
-        l.keyframes.iter().all(|kf| {
-            kf.cel
-                .instances
-                .iter()
-                .all(|inst| app.symbols.find_symbol(inst.binding.symbol_id).is_some())
-        })
-    });
-    all_children_exist.then_some(candidate)
-}
-
-fn can_paste_clipboard_symbol_inner(
-    app: &Is2dApp,
-    src_sym_id: u64,
-    visited: &mut Vec<u64>,
-) -> bool {
-    if app.symbols.edit_stack.is_empty() {
-        return true;
-    }
-    if visited.contains(&src_sym_id) {
-        return true;
-    }
-    visited.push(src_sym_id);
-
-    if let Some(live_id) = existing_reusable_target_symbol_id(app, src_sym_id) {
-        return app.symbols.can_place_symbol_in_current_context(live_id);
-    }
-
-    if app.tabs.active_doc_id() == app.tabs.clipboard_source_doc_id
-        && app
-            .symbols
-            .edit_stack
-            .iter()
-            .any(|sess| sess.symbol_id == src_sym_id)
-    {
-        return false;
-    }
-
-    let Some(src_sym) = app
-        .tabs
-        .clipboard_symbols
-        .iter()
-        .find(|s| s.id == src_sym_id)
-    else {
-        return true;
-    };
-
-    for layer in &src_sym.timeline.layers {
-        for kf in &layer.keyframes {
-            for inst in kf.cel.instances.iter() {
-                if !can_paste_clipboard_symbol_inner(app, inst.binding.symbol_id, visited) {
-                    return false;
-                }
-            }
-        }
-    }
-    true
-}
-
-/// クリップボード内のシンボル `src_sym_id` が現在の編集コンテキスト（`edit_stack`）に対して循環参照を起こさずに配置可能かを判定する
-pub(crate) fn can_paste_clipboard_symbol(app: &Is2dApp, src_sym_id: u64) -> bool {
-    let mut visited = Vec::new();
-    can_paste_clipboard_symbol_inner(app, src_sym_id, &mut visited)
-}
-
-/// `paste_clipboard`（`Cmd+V`）実行前に、現在のタブでクリップボード内の図形がすべて自己・親シンボルの循環参照により配置不可能かを判定する
-pub(crate) fn would_clipboard_paste_all_cycle(app: &Is2dApp) -> bool {
-    if app.canvas.clipboard.is_empty() || app.symbols.edit_stack.is_empty() {
-        return false;
-    }
-    app.canvas.clipboard.iter().all(|shape| {
-        shape
-            .symbol_instance
-            .is_some_and(|b| !can_paste_clipboard_symbol(app, b.symbol_id))
-    })
-}
-
-fn collect_needed_clipboard_imports(
-    app: &Is2dApp,
-    src_sym_id: u64,
-    local_sym_map: &mut HashMap<u64, u64>,
-    needed_imports: &mut HashSet<u64>,
-    visited: &mut HashSet<u64>,
-) {
-    if !visited.insert(src_sym_id) {
-        return;
-    }
-    if let Some(valid_id) = existing_reusable_target_symbol_id(app, src_sym_id) {
-        local_sym_map.insert(src_sym_id, valid_id);
-        return;
-    }
-    needed_imports.insert(src_sym_id);
-    if let Some(src_sym) = app
-        .tabs
-        .clipboard_symbols
-        .iter()
-        .find(|s| s.id == src_sym_id)
-    {
-        for layer in &src_sym.timeline.layers {
-            for kf in &layer.keyframes {
-                for inst in kf.cel.instances.iter() {
-                    collect_needed_clipboard_imports(
-                        app,
-                        inst.binding.symbol_id,
-                        local_sym_map,
-                        needed_imports,
-                        visited,
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// `paste_clipboard`（`Cmd+V`）実行時に、クリップボードの不変スナップショットを破壊せず、
-/// 循環参照となる図形を事前に除外した上で、現在のタブのライブラリに不足しているシンボル定義のみを自動移植し、
-/// 現在のタブの有効な `symbol_id` に解決されたペースト用 `(Vec<FillShape>, had_cycle)` を返す
-pub(crate) fn resolve_clipboard_for_paste(app: &mut Is2dApp) -> (Vec<FillShape>, bool) {
-    let mut had_cycle = false;
-    let mut resolved_shapes = Vec::with_capacity(app.canvas.clipboard.len());
-    for shape in &app.canvas.clipboard {
-        if let Some(b) = shape.symbol_instance {
-            if !can_paste_clipboard_symbol(app, b.symbol_id) {
-                had_cycle = true;
-                continue;
-            }
-        }
-        resolved_shapes.push(shape.clone());
-    }
-
-    if resolved_shapes.is_empty() || app.tabs.clipboard_symbols.is_empty() {
-        return (resolved_shapes, had_cycle);
-    }
-
-    let target_doc_id = app.tabs.active_doc_id();
-    let source_doc_id = app.tabs.clipboard_source_doc_id;
-    let mut local_sym_map: HashMap<u64, u64> = HashMap::new();
-    let mut needed_imports: HashSet<u64> = HashSet::new();
-    let mut visited: HashSet<u64> = HashSet::new();
-
-    for shape in &resolved_shapes {
-        if let Some(b) = shape.symbol_instance {
-            collect_needed_clipboard_imports(
-                app,
-                b.symbol_id,
-                &mut local_sym_map,
-                &mut needed_imports,
-                &mut visited,
-            );
-        }
-    }
-
-    let mut any_imported = false;
-
-    for idx in 0..app.tabs.clipboard_symbols.len() {
-        let src_sym_id = app.tabs.clipboard_symbols[idx].id;
-        if !needed_imports.contains(&src_sym_id) {
-            continue;
-        }
-        let mut imported = (*app.tabs.clipboard_symbols[idx]).clone();
-
-        let new_id =
-            if target_doc_id == source_doc_id && app.symbols.find_symbol(imported.id).is_none() {
-                app.symbols.next_symbol_id = app
-                    .symbols
-                    .next_symbol_id
-                    .max(imported.id.saturating_add(1));
-                imported.id
-            } else {
-                let id = app.symbols.next_symbol_id;
-                app.symbols.next_symbol_id = app.symbols.next_symbol_id.saturating_add(1);
-                id
-            };
-
-        local_sym_map.insert(imported.id, new_id);
-        app.tabs
-            .clipboard_imported_map
-            .insert((target_doc_id, imported.id), new_id);
-
-        imported.id = new_id;
-        if app.symbols.library.iter().any(|s| s.name == imported.name) {
-            let base_name = imported.name.clone();
-            let mut suffix = 2usize;
-            loop {
-                let candidate = format!("{base_name} ({suffix})");
-                if !app.symbols.library.iter().any(|s| s.name == candidate) {
-                    imported.name = candidate;
-                    break;
-                }
-                suffix = suffix.saturating_add(1);
-            }
-        }
-        for layer in &mut imported.timeline.layers {
-            for kf in &mut layer.keyframes {
-                for inst in kf.cel.instances_mut() {
-                    if let Some(&mapped_child_id) = local_sym_map.get(&inst.binding.symbol_id) {
-                        inst.binding.symbol_id = mapped_child_id;
-                    }
-                }
-            }
-        }
-        remap_timeline_group_ids(&mut imported.timeline, &mut app.symbols);
-        let max_internal_gid = max_group_id_in_timeline(&imported.timeline);
-        app.symbols.next_group_id = app
-            .symbols
-            .next_group_id
-            .max(max_internal_gid.saturating_add(1));
-
-        app.symbols.library.push(imported);
-        if app.symbols.selected_library_symbol.is_none() {
-            app.symbols.selected_library_symbol = Some(new_id);
-        }
-        any_imported = true;
-    }
-
-    if any_imported {
-        app.symbols.bump_revision();
-    }
-
-    for shape in &mut resolved_shapes {
-        if let Some(mut b) = shape.symbol_instance {
-            if let Some(&mapped_id) = local_sym_map.get(&b.symbol_id) {
-                b.symbol_id = mapped_id;
-                shape.symbol_instance = Some(b);
-            }
-        }
-    }
-    (resolved_shapes, had_cycle)
 }
 
 // ============================================================================
@@ -1426,7 +1060,6 @@ impl ProjectDocument {
 
     /// 読み込んだ `ProjectDocument` を現在のアクティブドキュメントへ適用し、作業キャンバスや履歴を初期化する
     pub(crate) fn apply_to_app(self, app: &mut Is2dApp) {
-        let shared_clipboard = std::mem::take(&mut app.canvas.clipboard);
         let mut timeline: Timeline = self.timeline.into();
 
         // 重複または不正（id == 0）な SymbolDef::id を一意な新しいIDへ再採番してライブラリを構築
@@ -1478,9 +1111,7 @@ impl ProjectDocument {
         }
 
         let selected_library_symbol = library.first().map(|s| s.id);
-        app.timeline = timeline;
-        app.timeline_ui = TimelineUiState::default();
-        app.symbols = SymbolManager {
+        let mut symbols = SymbolManager {
             library,
             next_symbol_id: self.next_symbol_id.max(max_sym_id.saturating_add(1)).max(1),
             selected_library_symbol,
@@ -1492,15 +1123,15 @@ impl ProjectDocument {
 
         // 外部改変された JSON にシンボルの自己・相互循環参照が含まれていた場合はサイクル辺を除去して DAG を保証する
         let mut cycle_edge_cache: HashMap<(u64, u64), bool> = HashMap::new();
-        for sym_idx in 0..app.symbols.library.len() {
-            let parent_sym_id = app.symbols.library[sym_idx].id;
-            let num_layers = app.symbols.library[sym_idx].timeline.layers.len();
+        for sym_idx in 0..symbols.library.len() {
+            let parent_sym_id = symbols.library[sym_idx].id;
+            let num_layers = symbols.library[sym_idx].timeline.layers.len();
             for l_idx in 0..num_layers {
-                let num_kfs = app.symbols.library[sym_idx].timeline.layers[l_idx]
+                let num_kfs = symbols.library[sym_idx].timeline.layers[l_idx]
                     .keyframes
                     .len();
                 for kf_idx in 0..num_kfs {
-                    let has_cycle = app.symbols.library[sym_idx].timeline.layers[l_idx].keyframes
+                    let has_cycle = symbols.library[sym_idx].timeline.layers[l_idx].keyframes
                         [kf_idx]
                         .cel
                         .instances
@@ -1510,28 +1141,29 @@ impl ProjectDocument {
                             *cycle_edge_cache
                                 .entry((parent_sym_id, child_id))
                                 .or_insert_with(|| {
-                                    app.symbols.would_create_symbol_cycle(parent_sym_id, child_id)
+                                    symbols.would_create_symbol_cycle(parent_sym_id, child_id)
                                 })
                         });
                     if has_cycle {
-                        let instances: Vec<SymbolInstance> =
-                            app.symbols.library[sym_idx].timeline.layers[l_idx].keyframes[kf_idx]
-                                .cel
-                                .instances
-                                .iter()
-                                .filter(|inst| {
-                                    let child_id = inst.binding.symbol_id;
-                                    !*cycle_edge_cache
-                                        .entry((parent_sym_id, child_id))
-                                        .or_insert_with(|| {
-                                            app.symbols
-                                                .would_create_symbol_cycle(parent_sym_id, child_id)
-                                        })
-                                })
-                                .cloned()
-                                .collect();
-                        let kf = &mut app.symbols.library[sym_idx].timeline.layers[l_idx].keyframes
-                            [kf_idx];
+                        let instances: Vec<SymbolInstance> = symbols.library[sym_idx]
+                            .timeline
+                            .layers[l_idx]
+                            .keyframes[kf_idx]
+                            .cel
+                            .instances
+                            .iter()
+                            .filter(|inst| {
+                                let child_id = inst.binding.symbol_id;
+                                !*cycle_edge_cache
+                                    .entry((parent_sym_id, child_id))
+                                    .or_insert_with(|| {
+                                        symbols.would_create_symbol_cycle(parent_sym_id, child_id)
+                                    })
+                            })
+                            .cloned()
+                            .collect();
+                        let kf =
+                            &mut symbols.library[sym_idx].timeline.layers[l_idx].keyframes[kf_idx];
                         *kf.cel.instances_mut() = instances;
                         kf.tween &= kf.cel.single_symbol_instance().is_some();
                         cycle_edge_cache.clear();
@@ -1539,14 +1171,6 @@ impl ProjectDocument {
                 }
             }
         }
-
-        app.history = UndoHistory::default();
-        app.canvas = CanvasState::default();
-        app.canvas.clipboard = shared_clipboard;
-        app.ui.inspect_timeline_frame = false;
-        app.ui.show_wireframe = false;
-        app.ui.editing_symbol_playback = false;
-        app.ui.select_sub_mode = SelectSubMode::Reshape;
 
         let w = if self.stage_size[0].is_finite() {
             self.stage_size[0].clamp(100.0, 3840.0)
@@ -1558,14 +1182,7 @@ impl ProjectDocument {
         } else {
             450.0
         };
-        let last_canvas_rect = app.viewport.last_canvas_rect;
-        app.viewport = ViewportState {
-            stage_size: Vec2::new(w, h),
-            last_canvas_rect,
-            ..Default::default()
-        };
-        app.viewport.reset_view();
-        crate::canvas_tool::load_shapes_from_timeline(app);
+        reset_active_document_state(app, timeline, symbols, Vec2::new(w, h));
     }
 }
 

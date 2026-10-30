@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, Pos2, Stroke, Vec2};
+use eframe::egui::{self, Color32, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::Point;
 
 use crate::canvas_tool::{ActiveCanvasDrag, Tool};
@@ -40,7 +40,7 @@ pub(crate) fn handle_brush_or_eraser_input(
     let screen_r = base_r * z;
     let min_sample_dist = (0.25 * screen_r).clamp(0.4, 1.5) / z;
 
-    if response.drag_started() {
+    if response.drag_started_by(PointerButton::Primary) {
         let press_pt = response
             .ctx
             .input(|i| i.pointer.press_origin())
@@ -62,7 +62,7 @@ pub(crate) fn handle_brush_or_eraser_input(
                 tail_start_idx: 0,
             };
         }
-    } else if response.dragged() {
+    } else if response.dragged_by(PointerButton::Primary) {
         if let (
             Some(pt),
             ActiveCanvasDrag::PaintStroke {
@@ -95,14 +95,14 @@ pub(crate) fn handle_brush_or_eraser_input(
             }
         }
     }
-    if response.drag_stopped() {
+    if response.drag_stopped_by(PointerButton::Primary) {
         if let ActiveCanvasDrag::PaintStroke { stroke, .. } = std::mem::take(&mut app.canvas.drag) {
             let raw_outline = generate_brush_outline_at_zoom(&stroke, base_r, z);
             if !raw_outline.is_empty() {
                 commit_raw_outline(app, &raw_outline);
             }
         }
-    } else if response.clicked() {
+    } else if response.clicked_by(PointerButton::Primary) {
         if let Some(pt) = mouse_pt {
             let raw = generate_brush_outline_at_zoom(&[pt], base_r, z);
             commit_raw_outline(app, &raw);
@@ -140,7 +140,7 @@ pub(crate) fn commit_raw_outline(app: &mut Is2dApp, raw: &[Point]) {
             return;
         }
         crate::canvas_tool::stop_playback(app);
-        crate::tool_select::clear_selection(app);
+        crate::canvas_tool::clear_selection(app);
         let prev_revs: Vec<(u64, u64)> = app
             .canvas
             .shapes
