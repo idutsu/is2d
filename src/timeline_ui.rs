@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
-use crate::canvas_tool::{CoalesceKey, Tab, commit_floating, load_shapes_from_timeline};
+use crate::canvas_tool::{CoalesceKey, Tab, commit_floating};
 use crate::doc_actions::{Action, ActionHost, apply};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{
@@ -141,12 +141,13 @@ impl TimelineUiState {
         self.cancel_drag();
     }
 
-    /// 再生中であれば停止し、停止時点のフレームの図形群を作業用 `tab.session.shapes` に展開する
+    /// 再生中であれば停止し、停止時点のフレームの状態に合わせて編集スコープを整合させる
     pub(crate) fn stop_playback(&mut self, tab: &mut Tab) {
         if self.is_playing {
             self.is_playing = false;
             self.last_frame_advance_time = None;
-            load_shapes_from_timeline(tab);
+            tab.refresh_scene_base();
+            tab.session.sanitize_editing_scope();
         }
     }
 
@@ -2074,7 +2075,7 @@ pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context)
             if stopped {
                 timeline_ui.is_playing = false;
                 timeline_ui.last_frame_advance_time = None;
-                load_shapes_from_timeline(tab);
+                tab.session.sanitize_editing_scope();
                 return;
             }
         }

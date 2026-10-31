@@ -6,11 +6,10 @@ use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 use crate::canvas_tool::{
     Clipboard, CoalesceKey, Floating, FloatingOrigin, NoticeKind, SelectSubMode, ShapeId,
     StatusToast, Tab, Tool, ToolSettings, UndoEntry, active_scope_layer_id, cancel_active_drag,
-    clear_selection, commit_floating, focus_active_layer_to_shape,
+    clear_selection, commit_floating, edit_layers, editable_layer_ids, focus_active_layer_to_shape,
     focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
-    load_shapes_from_timeline, merge_floating_into_base_shapes, prepare_moved_selection,
-    select_shapes_for_timeline_selection, set_tool, show_notice, sync_shapes_to_timeline,
-    toggle_select_sub_mode,
+    merge_floating_into_base_shapes, prepare_moved_selection,
+    select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode,
 };
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes,
@@ -376,14 +375,13 @@ fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
     tab.history.last_coalesce_key = coalesce;
 }
 
-/// キャンバス図形（`tab.session.shapes` または `tab.session.floating`）を変更する直前に呼び出し、変更前の状態を Undo スタックへ記録する
+/// キャンバス図形（文書セルまたは `tab.session.floating`）を変更する直前に呼び出し、変更前の状態を Undo スタックへ記録する
 fn push_canvas_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
     if let Some(key) = coalesce {
         if tab.history.last_coalesce_key == Some(key) {
             return;
         }
     }
-    sync_shapes_to_timeline(tab);
     push_undo_entry_from_doc(tab, coalesce);
 }
 
@@ -393,15 +391,22 @@ fn push_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
             return;
         }
     }
-    sync_shapes_to_timeline(tab);
     push_undo_entry_from_doc(tab, coalesce);
+}
+
+fn reset_session_after_timeline_change(tab: &mut Tab) {
+    cancel_active_drag(tab);
+    tab.session.floating = None;
+    tab.session.transform_pivot = None;
+    tab.session.clear_overlay();
+    tab.session.sanitize_editing_scope();
 }
 
 fn mutate_timeline_with_undo(tab: &mut Tab, mutate: impl FnOnce(&mut Timeline)) {
     commit_floating(tab);
     push_undo(tab, None);
     tab.with_active_timeline_mut(|tl, _| mutate(tl));
-    load_shapes_from_timeline(tab);
+    reset_session_after_timeline_change(tab);
 }
 
 // ============================================================================
@@ -496,39 +501,20 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         Action::CommitMovedSelection => {
             ApplyResult::Applied(apply_commit_moved_selection(tab, None))
         }
-        Action::DeleteSelection => {
-            if prepare_delete_selected_shapes(tab, |tab| push_canvas_undo(tab, None)) {
-                sync_shapes_to_timeline(tab);
-                ApplyResult::Applied(true)
-            } else {
-                ApplyResult::Applied(false)
-            }
-        }
+        Action::DeleteSelection => ApplyResult::Applied(prepare_delete_selected_shapes(tab, |tab| {
+            push_canvas_undo(tab, None)
+        })),
         Action::ClearActiveFrame => {
-            if prepare_clear_active_frame_shapes(tab, |tab| push_canvas_undo(tab, None)) {
-                sync_shapes_to_timeline(tab);
-                ApplyResult::Applied(true)
-            } else {
-                ApplyResult::Applied(false)
-            }
+            ApplyResult::Applied(prepare_clear_active_frame_shapes(tab, |tab| {
+                push_canvas_undo(tab, None)
+            }))
         }
-        Action::Group => {
-            if let Some(gid) = prepare_group_selected_shapes(tab, |tab| push_canvas_undo(tab, None))
-            {
-                sync_shapes_to_timeline(tab);
-                ApplyResult::CreatedId(Some(gid))
-            } else {
-                ApplyResult::CreatedId(None)
-            }
-        }
-        Action::Ungroup => {
-            if prepare_ungroup_selected_shapes(tab, |tab| push_canvas_undo(tab, None)) {
-                sync_shapes_to_timeline(tab);
-                ApplyResult::Applied(true)
-            } else {
-                ApplyResult::Applied(false)
-            }
-        }
+        Action::Group => ApplyResult::CreatedId(prepare_group_selected_shapes(tab, |tab| {
+            push_canvas_undo(tab, None)
+        })),
+        Action::Ungroup => ApplyResult::Applied(prepare_ungroup_selected_shapes(tab, |tab| {
+            push_canvas_undo(tab, None)
+        })),
         Action::EnterGroupAt { pt } => ApplyResult::Applied(enter_group_at(tab, pt)),
         Action::ExitGroup => ApplyResult::Applied(exit_current_group(tab)),
         Action::ExitGroupSteps { steps } => {
@@ -701,12 +687,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             if !prepare_copy_selected_shapes(tab, clipboard) {
                 return ApplyResult::Applied(false);
             }
-            if prepare_delete_selected_shapes(tab, |tab| push_canvas_undo(tab, None)) {
-                sync_shapes_to_timeline(tab);
-                ApplyResult::Applied(true)
-            } else {
-                ApplyResult::Applied(false)
-            }
+            ApplyResult::Applied(prepare_delete_selected_shapes(tab, |tab| {
+                push_canvas_undo(tab, None)
+            }))
         }
         Action::Paste { in_place } => {
             ApplyResult::Applied(apply_paste_clipboard(tab, tool, clipboard, toast, in_place))
@@ -716,7 +699,6 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             if let Some((sym_id, target_lid, local_shapes)) =
                 prepare_convert_selection_to_symbol(tab, |tab| push_canvas_undo(tab, None))
             {
-                sync_shapes_to_timeline(tab);
                 let registered_id = tab.doc.register_new_symbol(local_shapes);
                 tab.view.selected_library_symbol = Some(registered_id);
                 tab.with_active_timeline_mut(|tl, _| {
@@ -737,7 +719,6 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 if !matches!(tool.tool, Tool::Select | Tool::Transform) {
                     set_tool(tab, tool, Tool::Select);
                 }
-                sync_shapes_to_timeline(tab);
                 ApplyResult::Applied(true)
             } else {
                 ApplyResult::Applied(false)
@@ -883,12 +864,9 @@ fn apply_raw_outline(tab: &mut Tab, active_tool: Tool, brush_color: Color32, raw
     if active_tool == Tool::Brush {
         clear_selection(tab);
         push_canvas_undo(tab, None);
-        let mut shapes = std::mem::take(&mut tab.session.shapes);
-        merge_shapes_into_canvas(&mut shapes, stroke_shapes);
-        crate::canvas_tool::Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
-        tab.session.shapes = shapes;
-        tab.session.invalidate_scene_order();
-        sync_shapes_to_timeline(tab);
+        edit_layers(tab, &[target_lid], |edit| {
+            merge_shapes_into_canvas(&mut edit.shapes, stroke_shapes);
+        });
         true
     } else {
         let has_bbox_overlap = tab.scene().iter().any(|s| {
@@ -902,13 +880,18 @@ fn apply_raw_outline(tab: &mut Tab, active_tool: Tool, brush_color: Color32, raw
             return false;
         }
         clear_selection(tab);
-        let prev_revs: Vec<(u64, u64)> = tab
+        let mut next_shapes: Vec<FillShape> = tab
             .session
-            .shapes
+            .base_cache
+            .shapes()
+            .iter()
+            .filter(|s| s.layer_id == target_lid)
+            .cloned()
+            .collect();
+        let prev_revs: Vec<(u64, u64)> = next_shapes
             .iter()
             .map(|s| (s.shape_id, s.mesh_revision))
             .collect();
-        let mut next_shapes = tab.session.shapes.clone();
         erase_from_canvas(
             &mut next_shapes,
             &stroke_shapes,
@@ -922,9 +905,9 @@ fn apply_raw_outline(tab: &mut Tab, active_tool: Tool, brush_color: Color32, raw
                 .all(|(s, &(id, rev))| s.shape_id == id && s.mesh_revision == rev);
         if !unchanged {
             push_canvas_undo(tab, None);
-            tab.session.shapes = next_shapes;
-            tab.session.invalidate_scene_order();
-            sync_shapes_to_timeline(tab);
+            edit_layers(tab, &[target_lid], |edit| {
+                edit.shapes = next_shapes;
+            });
             true
         } else {
             false
@@ -1070,45 +1053,38 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 if pieces.len() > 1 {
                     if let Some(split_piece) = pieces.into_iter().find(|p| p.contains_point(pt)) {
                         push_canvas_undo(tab, None);
-                        let mut shapes = std::mem::take(&mut tab.session.shapes);
-                        merge_shapes_into_canvas(
-                            &mut shapes,
-                            vec![split_piece
-                                .with_scope(target_lid, &tab.session.editing_group_path)],
-                        );
-                        crate::canvas_tool::Session::sort_vec_by_layer_order(
-                            &mut shapes,
-                            tab.active_timeline(),
-                        );
-                        tab.session.shapes = shapes;
-                        tab.session.invalidate_scene_order();
-                        sync_shapes_to_timeline(tab);
+                        let editing_group_path = tab.session.editing_group_path.clone();
+                        edit_layers(tab, &[target_lid], |edit| {
+                            merge_shapes_into_canvas(
+                                &mut edit.shapes,
+                                vec![split_piece.with_scope(target_lid, &editing_group_path)],
+                            );
+                        });
                         return true;
                     }
                 }
             }
 
             focus_active_layer_to_shape(tab, hit_idx);
-            let Some(pos) = tab
+            if !tab
                 .session
-                .shapes
+                .base_cache
+                .shapes()
                 .iter()
-                .position(|s| s.shape_id == hit_shape.shape_id)
-            else {
+                .any(|s| s.shape_id == hit_shape.shape_id)
+            {
                 return false;
-            };
+            }
             push_canvas_undo(tab, None);
-            let mut shapes = std::mem::take(&mut tab.session.shapes);
-            let mut target = shapes.remove(pos);
-            target.set_color(fill_color);
-            merge_disjoint_fill_into_canvas(&mut shapes, target);
-            crate::canvas_tool::Session::sort_vec_by_layer_order(
-                &mut shapes,
-                tab.active_timeline(),
-            );
-            tab.session.shapes = shapes;
-            tab.session.invalidate_scene_order();
-            sync_shapes_to_timeline(tab);
+            let hit_id = hit_shape.shape_id;
+            let hit_lid = hit_shape.layer_id;
+            edit_layers(tab, &[hit_lid], |edit| {
+                if let Some(pos) = edit.shapes.iter().position(|s| s.shape_id == hit_id) {
+                    let mut target = edit.shapes.remove(pos);
+                    target.set_color(fill_color);
+                    merge_disjoint_fill_into_canvas(&mut edit.shapes, target);
+                }
+            });
             return true;
         }
         return false;
@@ -1136,19 +1112,138 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
     });
     if let Some(enclosed_fill) = enclosed_opt {
         push_canvas_undo(tab, None);
-        let mut shapes = std::mem::take(&mut tab.session.shapes);
-        merge_disjoint_fill_into_canvas(
-            &mut shapes,
-            enclosed_fill.with_scope(target_lid, &tab.session.editing_group_path),
-        );
-        crate::canvas_tool::Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
-        tab.session.shapes = shapes;
-        tab.session.invalidate_scene_order();
-        sync_shapes_to_timeline(tab);
+        let editing_group_path = tab.session.editing_group_path.clone();
+        edit_layers(tab, &[target_lid], |edit| {
+            merge_disjoint_fill_into_canvas(
+                &mut edit.shapes,
+                enclosed_fill.with_scope(target_lid, &editing_group_path),
+            );
+        });
         return true;
     }
 
     false
+}
+
+fn translate_selected_shapes(tab: &mut Tab, delta: KVec2) -> bool {
+    if delta == KVec2::ZERO || tab.session.selection.is_empty() {
+        return false;
+    }
+    let _ = prepare_moved_selection(tab);
+    let mut any_moved = false;
+    if let Some(fl) = &mut tab.session.floating {
+        for piece in &mut fl.pieces {
+            if tab.session.selection.contains_shape(piece) {
+                piece.translate(delta);
+                any_moved = true;
+            }
+        }
+        if any_moved {
+            fl.modified = true;
+        }
+    }
+    let mut target_lids: Vec<u64> = Vec::new();
+    for s in tab.session.base_cache.shapes() {
+        let hidden = tab
+            .session
+            .floating
+            .as_ref()
+            .is_some_and(|fl| fl.hidden.contains(&s.shape_id));
+        if !hidden
+            && tab.session.selection.contains_shape(s)
+            && !target_lids.contains(&s.layer_id)
+        {
+            target_lids.push(s.layer_id);
+        }
+    }
+    if !target_lids.is_empty() {
+        let selection = tab.session.selection.clone();
+        let hidden = tab
+            .session
+            .floating
+            .as_ref()
+            .map(|fl| fl.hidden.clone())
+            .unwrap_or_default();
+        edit_layers(tab, &target_lids, |edit| {
+            for s in &mut edit.shapes {
+                if !hidden.contains(&s.shape_id) && selection.contains_shape(s) {
+                    s.translate(delta);
+                    any_moved = true;
+                }
+            }
+        });
+    }
+    if let Some(piv) = &mut tab.session.transform_pivot {
+        *piv += delta;
+    }
+    tab.session.rebuild_overlay_from_floating();
+    any_moved
+}
+
+fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
+    if tab.session.selection.is_empty() {
+        return false;
+    }
+    let _ = prepare_moved_selection(tab);
+    let mut any_transformed = false;
+    if let Some(fl) = &mut tab.session.floating {
+        for piece in &mut fl.pieces {
+            if tab.session.selection.contains_shape(piece) {
+                if piece.is_empty_symbol_marker() {
+                    if let Some(b) = &mut piece.symbol_instance {
+                        b.xform = affine * b.xform;
+                    }
+                    piece.rebuild_cache();
+                } else {
+                    piece.transform(affine);
+                }
+                any_transformed = true;
+            }
+        }
+        if any_transformed {
+            fl.modified = true;
+        }
+    }
+    let mut target_lids: Vec<u64> = Vec::new();
+    for s in tab.session.base_cache.shapes() {
+        let hidden = tab
+            .session
+            .floating
+            .as_ref()
+            .is_some_and(|fl| fl.hidden.contains(&s.shape_id));
+        if !hidden
+            && tab.session.selection.contains_shape(s)
+            && !target_lids.contains(&s.layer_id)
+        {
+            target_lids.push(s.layer_id);
+        }
+    }
+    if !target_lids.is_empty() {
+        let selection = tab.session.selection.clone();
+        let hidden = tab
+            .session
+            .floating
+            .as_ref()
+            .map(|fl| fl.hidden.clone())
+            .unwrap_or_default();
+        edit_layers(tab, &target_lids, |edit| {
+            for s in &mut edit.shapes {
+                if !hidden.contains(&s.shape_id) && selection.contains_shape(s) {
+                    if s.is_empty_symbol_marker() {
+                        if let Some(b) = &mut s.symbol_instance {
+                            b.xform = affine * b.xform;
+                        }
+                        s.rebuild_cache();
+                    } else {
+                        s.transform(affine);
+                    }
+                    any_transformed = true;
+                }
+            }
+        });
+    }
+    tab.session.rebuild_overlay_from_floating();
+    any_transformed
 }
 
 fn apply_commit_moved_selection(tab: &mut Tab, coalesce: Option<CoalesceKey>) -> bool {
@@ -1162,11 +1257,7 @@ fn apply_commit_moved_selection(tab: &mut Tab, coalesce: Option<CoalesceKey>) ->
     if let Some(fl) = taken_unmodified_fl {
         tab.session.floating = Some(fl);
     }
-    if !prepare_moved_selection(tab) {
-        return false;
-    }
-    sync_shapes_to_timeline(tab);
-    true
+    prepare_moved_selection(tab)
 }
 
 fn duplicate_selected_in_working_copy(tab: &mut Tab) {
@@ -1203,10 +1294,7 @@ fn apply_finish_move_selection_drag(
     if alt_duplicate {
         duplicate_selected_in_working_copy(tab);
     }
-    tab.session.translate_selected(total_delta);
-    let _ = prepare_moved_selection(tab);
-    sync_shapes_to_timeline(tab);
-    true
+    translate_selected_shapes(tab, total_delta)
 }
 
 fn apply_move_selected(
@@ -1224,10 +1312,7 @@ fn apply_move_selected(
         return false;
     }
     push_canvas_undo(tab, coalesce);
-    tab.session.translate_selected(delta);
-    let _ = prepare_moved_selection(tab);
-    sync_shapes_to_timeline(tab);
-    true
+    translate_selected_shapes(tab, delta)
 }
 
 fn apply_deform_shape(
@@ -1246,13 +1331,19 @@ fn apply_deform_shape(
         .floating
         .as_ref()
         .is_some_and(|fl| fl.remainder.iter().any(|r| r.shape_id == shape_id));
-    if !in_remainder && !tab.session.shapes.iter().any(|s| s.shape_id == shape_id) {
+    let in_base = tab
+        .session
+        .base_cache
+        .shapes()
+        .iter()
+        .any(|s| s.shape_id == shape_id);
+    if !in_remainder && !in_base {
         return false;
     }
     focus_active_layer_to_shape_by_id(tab, shape_id);
     push_canvas_undo(tab, None);
-    if in_remainder {
-        let rem_to_commit = tab.session.floating.as_mut().map(|fl| {
+    let rem_to_commit = if in_remainder {
+        tab.session.floating.as_mut().map(|fl| {
             fl.modified = true;
             Floating {
                 origin: fl.origin,
@@ -1261,27 +1352,26 @@ fn apply_deform_shape(
                 hidden: std::mem::take(&mut fl.hidden),
                 modified: true,
             }
-        });
-        if let Some(rem_to_commit) = rem_to_commit {
-            let mut shapes = std::mem::take(&mut tab.session.shapes);
-            merge_floating_into_base_shapes(&mut shapes, rem_to_commit, tab.active_timeline());
-            tab.session.shapes = shapes;
-        }
-    }
-    let Some(pos) = tab.session.shapes.iter().position(|s| s.shape_id == shape_id) else {
-        tab.session.rebuild_overlay_from_floating();
-        return false;
+        })
+    } else {
+        None
     };
-    let mut shapes = std::mem::take(&mut tab.session.shapes);
-    let mut deformed = shapes.remove(pos);
-    apply_deform(&mut deformed);
-    let resolved = resolve_deformed_shape(&deformed);
-    merge_shapes_into_canvas(&mut shapes, resolved);
-    crate::canvas_tool::Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
-    tab.session.shapes = shapes;
+    let layer_ids = editable_layer_ids(tab);
+    let mut deformed_ok = false;
+    edit_layers(tab, &layer_ids, |edit| {
+        if let Some(rem_fl) = rem_to_commit {
+            merge_floating_into_base_shapes(&mut edit.shapes, rem_fl, &edit.layer_order_ids);
+        }
+        if let Some(pos) = edit.shapes.iter().position(|s| s.shape_id == shape_id) {
+            let mut deformed = edit.shapes.remove(pos);
+            apply_deform(&mut deformed);
+            let resolved = resolve_deformed_shape(&deformed);
+            merge_shapes_into_canvas(&mut edit.shapes, resolved);
+            deformed_ok = true;
+        }
+    });
     tab.session.rebuild_overlay_from_floating();
-    sync_shapes_to_timeline(tab);
-    true
+    deformed_ok
 }
 
 fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
@@ -1437,15 +1527,26 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         }
     }
 
-    let Some(pos) = tab.session.shapes.iter().position(|s| s.shape_id == shape_id) else {
+    let Some(base_shape) = tab
+        .session
+        .base_cache
+        .shapes()
+        .iter()
+        .find(|s| s.shape_id == shape_id)
+        .cloned()
+    else {
         return false;
     };
-    let mut test_shape = tab.session.shapes[pos].clone();
+    let target_lid = base_shape.layer_id;
+    let mut test_shape = base_shape;
     if apply_to_shape(&mut test_shape) {
         push_canvas_undo(tab, None);
-        tab.session.shapes[pos] = test_shape;
+        edit_layers(tab, &[target_lid], |edit| {
+            if let Some(pos) = edit.shapes.iter().position(|s| s.shape_id == shape_id) {
+                edit.shapes[pos] = test_shape;
+            }
+        });
         tab.session.rebuild_overlay_from_floating();
-        sync_shapes_to_timeline(tab);
         true
     } else {
         false
@@ -1485,11 +1586,17 @@ fn apply_set_selected_symbol_world_pivot(
     if commit_to_timeline {
         push_canvas_undo(tab, None);
     }
-    tab.session
-        .update_symbol_instance_binding(binding.instance_gid, |b| b.pivot = new_local_pivot);
-    if commit_to_timeline {
-        sync_shapes_to_timeline(tab);
-    }
+    let inst_gid = binding.instance_gid;
+    let layer_ids = editable_layer_ids(tab);
+    edit_layers(tab, &layer_ids, |edit| {
+        for s in &mut edit.shapes {
+            if let Some(b) = &mut s.symbol_instance {
+                if b.instance_gid == inst_gid {
+                    b.pivot = new_local_pivot;
+                }
+            }
+        }
+    });
     true
 }
 
@@ -1512,12 +1619,7 @@ fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     }
     push_canvas_undo(tab, None);
     flush_transform_pivot_to_symbol(tab);
-    let any_transformed = tab.session.transform_selected(affine);
-    if any_transformed {
-        let _ = prepare_moved_selection(tab);
-        sync_shapes_to_timeline(tab);
-    }
-    any_transformed
+    transform_selected_shapes(tab, affine)
 }
 
 fn apply_paste_clipboard(
@@ -1590,7 +1692,6 @@ fn apply_paste_clipboard(
         if !matches!(tool.tool, Tool::Select | Tool::Transform) {
             set_tool(tab, tool, Tool::Select);
         }
-        sync_shapes_to_timeline(tab);
     }
     true
 }
@@ -1628,13 +1729,13 @@ fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     clear_selection(tab);
     push_undo(tab, None);
 
-    tab.doc
-        .remove_symbol_and_detach(sym_id, &mut tab.session.shapes);
+    tab.doc.remove_symbol_and_detach(sym_id);
     if tab.view.selected_library_symbol == Some(sym_id) {
         tab.view.selected_library_symbol = tab.doc.library.first().map(|s| s.id);
     }
 
-    load_shapes_from_timeline(tab);
+    tab.refresh_scene_base();
+    reset_session_after_timeline_change(tab);
     true
 }
 
@@ -1680,7 +1781,7 @@ fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -
     });
 
     if changed {
-        load_shapes_from_timeline(tab);
+        reset_session_after_timeline_change(tab);
         select_shapes_for_timeline_selection(tab);
         tab.view.inspect_timeline_frame = true;
     }
@@ -1711,7 +1812,7 @@ fn apply_set_tween_rotate(tab: &mut Tab, rotate_mode: TweenRotate) -> bool {
             }
         }
     });
-    load_shapes_from_timeline(tab);
+    reset_session_after_timeline_change(tab);
     select_shapes_for_timeline_selection(tab);
     tab.view.inspect_timeline_frame = true;
     true
@@ -1745,32 +1846,21 @@ fn apply_set_symbol_playback(
         return false;
     }
 
-    let updated = tab.with_active_timeline_mut(|tl, _| {
-        let curr_f = tl.current_frame;
-        let mut updated = false;
-        for layer in &mut tl.layers {
-            if !layer.visible || layer.locked {
-                continue;
-            }
-            let Some(kf_idx) = layer.keyframe_index_at(curr_f) else {
-                continue;
-            };
-            let kf = &mut layer.keyframes[kf_idx];
-            if kf.cel.update_symbol_instances_with(|mut b| {
-                (b.instance_gid == inst_gid).then(|| {
+    let layer_ids = editable_layer_ids(tab);
+    let mut updated = false;
+    edit_layers(tab, &layer_ids, |edit| {
+        for s in &mut edit.shapes {
+            if let Some(b) = &mut s.symbol_instance {
+                if b.instance_gid == inst_gid {
                     b.loop_mode = next_mode;
                     b.first_frame = clamped_first;
-                    b
-                })
-            }) {
-                updated = true;
+                    updated = true;
+                }
             }
         }
-        updated
     });
-
     if updated {
-        load_shapes_from_timeline(tab);
+        reset_session_after_timeline_change(tab);
     }
     updated
 }
@@ -1807,7 +1897,7 @@ fn apply_switch_to_layer_and_frame(tab: &mut Tab, layer_idx: usize, frame_idx: u
         tl.current_frame
     });
     retain_selection_on_same_keyframe(tab, prev_frame, next_frame);
-    load_shapes_from_timeline(tab);
+    reset_session_after_timeline_change(tab);
     tab.view.inspect_timeline_frame = true;
 }
 
@@ -1824,7 +1914,7 @@ fn apply_scrub_ruler_to_frame(tab: &mut Tab, frame_idx: usize) {
         tl.cell_selection = None;
     });
     retain_selection_on_same_keyframe(tab, prev_frame, clamped_frame);
-    load_shapes_from_timeline(tab);
+    reset_session_after_timeline_change(tab);
 }
 
 fn apply_select_timeline_cells(
@@ -2030,7 +2120,7 @@ fn apply_set_total_frames(
         }
         push_undo(tab, coalesce);
         tab.with_active_timeline_mut(|tl, _| tl.resize_total_frames(next_total));
-        load_shapes_from_timeline(tab);
+        reset_session_after_timeline_change(tab);
         return true;
     }
     false
@@ -2070,11 +2160,6 @@ pub(crate) fn commit_raw_outline(host: &mut impl ActionHost, raw: &[Point]) {
 pub(crate) fn bucket_fill_at(host: &mut impl ActionHost, pt: Point) -> bool {
     let color = host.tool().brush_color;
     apply(host, Action::BucketFill { pt, color }).as_bool()
-}
-
-#[cfg(test)]
-pub(crate) fn commit_moved_selection(host: &mut impl ActionHost) {
-    apply(host, Action::CommitMovedSelection);
 }
 
 #[cfg(test)]

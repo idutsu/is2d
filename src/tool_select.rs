@@ -11,9 +11,9 @@ use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{Action, ActionHost, apply};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{
-    clear_active_frame_shapes, commit_moved_selection, copy_selected_shapes, cut_selected_shapes,
-    delete_selected_shapes, finish_move_selection_drag, group_selected_shapes,
-    nudge_selected_shapes, paste_clipboard, ungroup_selected_shapes,
+    clear_active_frame_shapes, copy_selected_shapes, cut_selected_shapes, delete_selected_shapes,
+    finish_move_selection_drag, group_selected_shapes, nudge_selected_shapes, paste_clipboard,
+    ungroup_selected_shapes,
 };
 #[cfg(not(test))]
 use crate::select_ops::compute_hover_target;

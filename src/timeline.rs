@@ -459,22 +459,6 @@ impl Cel {
             && self.instances[0].parent_scope.is_empty())
         .then(|| self.instances[0].binding)
     }
-
-    /// セル内の正規化シンボルインスタンス一覧 `self.instances` のうち、
-    /// `map_binding` が `Some(updated_binding)` を返す対象インスタンスを更新する
-    pub(crate) fn update_symbol_instances_with(
-        &mut self,
-        mut map_binding: impl FnMut(SymbolInstanceBinding) -> Option<SymbolInstanceBinding>,
-    ) -> bool {
-        let mut any_updated = false;
-        for inst in self.instances_mut() {
-            if let Some(new_b) = map_binding(inst.binding) {
-                inst.binding = new_b;
-                any_updated = true;
-            }
-        }
-        any_updated
-    }
 }
 
 /// タイムライン上のキーフレーム（開始フレーム番号 0-indexed、セル画 `Cel`、クラシックトゥイーン有効フラグ `tween`、トゥイーン回転方向 `tween_rotate`）
@@ -657,13 +641,6 @@ impl Layer {
     pub(crate) fn cel_at(&self, frame: usize) -> Option<&Cel> {
         let idx = self.keyframe_index_at(frame)?;
         Some(&self.keyframes[idx].cel)
-    }
-
-    /// 指定フレーム番号 `frame` で編集対象となる `Cel` への可変参照を返す
-    #[cfg(test)]
-    pub(crate) fn cel_at_mut(&mut self, frame: usize) -> Option<&mut Cel> {
-        let idx = self.keyframe_index_at(frame)?;
-        Some(&mut self.keyframes[idx].cel)
     }
 
     /// 指定フレーム `frame` にキーフレームを挿入する（`clone_prev == true`: `F6` 複製 / `false`: `F7` 空白）
@@ -1140,60 +1117,6 @@ impl Layer {
     }
 }
 
-/// `load_shapes_from_timeline` 読み込み時点のシェイプ署名（ハッシュ衝突のない完全比較構造体）
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct LoadedShapeSig {
-    shape_id: u64,
-    layer_id: u64,
-    mesh_revision: u64,
-    color: Color32,
-    group_path: Vec<u64>,
-    symbol_instance: Option<SymbolInstanceBinding>,
-}
-
-impl LoadedShapeSig {
-    #[inline]
-    pub(crate) fn from_shape(s: &FillShape) -> Self {
-        Self {
-            shape_id: s.shape_id,
-            layer_id: s.layer_id,
-            mesh_revision: s.mesh_revision,
-            color: s.color,
-            group_path: s.group_path.clone(),
-            symbol_instance: s.symbol_instance,
-        }
-    }
-
-    #[inline]
-    pub(crate) fn matches(&self, s: &FillShape) -> bool {
-        self.shape_id == s.shape_id
-            && self.mesh_revision == s.mesh_revision
-            && self.color == s.color
-            && self.group_path == s.group_path
-            && self.symbol_instance == s.symbol_instance
-    }
-
-    #[inline]
-    pub(crate) fn matches_with_layer(&self, s: &FillShape) -> bool {
-        self.layer_id == s.layer_id && self.matches(s)
-    }
-
-    #[inline]
-    pub(crate) fn matches_instance(&self, inst: &SymbolInstance) -> bool {
-        self.layer_id == inst.layer_id
-            && self.symbol_instance == Some(inst.binding)
-            && inst.binding.parent_scope_from_path(&self.group_path)
-                == inst.parent_scope.as_slice()
-    }
-
-    pub(crate) fn shapes_match(a: &FillShape, b: &FillShape) -> bool {
-        a.mesh_revision == b.mesh_revision
-            && a.color == b.color
-            && a.group_path == b.group_path
-            && a.symbol_instance == b.symbol_instance
-    }
-}
-
 /// レイヤー配列・現在のフレーム・FPS・セル範囲選択を管理するタイムライン構造体（永続ドキュメント状態）
 #[derive(Clone, Debug)]
 pub(crate) struct Timeline {
@@ -1349,20 +1272,6 @@ impl Timeline {
             .and_then(|layer| layer.cel_at(self.current_frame))
             .map(|cel| cel.shapes.as_slice())
             .unwrap_or(&[])
-    }
-
-    /// 指定レイヤー `lid` のシェイプ群が直近の読み込み時点から未変更であるかを判定する
-    pub(crate) fn is_layer_unchanged_since_load(
-        loaded_signatures: &[LoadedShapeSig],
-        lid: u64,
-        shapes: &[FillShape],
-    ) -> bool {
-        let mut loaded_iter = loaded_signatures.iter().filter(|sig| sig.layer_id == lid);
-        shapes
-            .iter()
-            .filter(|s| s.layer_id == lid)
-            .all(|s| loaded_iter.next().is_some_and(|sig| sig.matches(s)))
-            && loaded_iter.next().is_none()
     }
 
     /// 非編集可能レイヤーに紐付いているシェイプの `layer_id` を現在の編集可能レイヤーIDへ補正する

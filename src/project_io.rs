@@ -6,8 +6,7 @@ use kurbo::{Affine, Point, QuadBez};
 use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{
-    cancel_active_drag, load_shapes_from_timeline, merge_floating_into_base_shapes,
-    sync_shapes_to_timeline, SelectSubMode, Session, Tab, UndoHistory, View,
+    SelectSubMode, Session, Tab, UndoHistory, View, cancel_active_drag, commit_floating,
 };
 use crate::clipboard_ops::max_group_id_in_timeline;
 use crate::symbol::{
@@ -94,7 +93,6 @@ fn prepare_active_tab_for_switch_or_save(tab: &mut Tab) {
     cancel_active_drag(tab);
     tab.view.pan_last_screen_pos = None;
     tab.history.end_coalesce();
-    sync_shapes_to_timeline(tab);
 }
 
 /// アクティブタブのインデックスを `target_index` へ切り替え、キャンバス矩形を引き継ぎつつペーストオフセット等をリセットする
@@ -112,7 +110,7 @@ fn activate_tab_index(ws: &mut impl ProjectWorkspace, target_index: usize) {
 }
 
 /// アクティブタブのドキュメント・履歴・作業セッション・ビュー表示を一括初期化し、
-/// `last_canvas_rect` を引き継いだ上で現在フレームの図形を展開する共通ヘルパー
+/// `last_canvas_rect` を引き継いだ上で現在フレームの土台キャッシュを構築する共通ヘルパー
 fn reset_active_document_state(tab: &mut Tab, doc: Document) {
     let last_canvas_rect = tab.view.last_canvas_rect;
     let selected_library_symbol = doc.library.first().map(|s| s.id);
@@ -126,7 +124,7 @@ fn reset_active_document_state(tab: &mut Tab, doc: Document) {
         ..Default::default()
     };
     tab.view.reset_view();
-    load_shapes_from_timeline(tab);
+    tab.refresh_scene_base();
 }
 
 /// 現在アクティブなタブが「起動直後・新規作成直後で一度も編集されていない白紙の無題タブ」であるかを判定する
@@ -148,7 +146,6 @@ pub(crate) fn is_active_tab_pristine_empty(tab: &Tab) -> bool {
         && tab.doc.root.layers[0].frame_count == 1
         && tab.doc.root.layers[0].keyframes.len() == 1
         && tab.doc.root.layers[0].keyframes[0].cel.is_empty()
-        && tab.session.shapes.is_empty()
         && tab.session.floating.is_none()
 }
 
@@ -907,42 +904,28 @@ impl ProjectDocument {
             .as_ref()
             .filter(|fl| fl.needs_merge_commit())
         {
-            let mut doc_copy = tab.doc.clone();
-            let mut base_shapes = tab.session.shapes.clone();
-            merge_floating_into_base_shapes(&mut base_shapes, fl.clone(), tab.active_timeline());
-            let world_xform = tab.session.edit_path.world_xform();
-            if let Some(last) = tab.session.edit_path.last() {
-                if let Some(idx) = doc_copy.library.iter().position(|s| s.id == last.symbol_id) {
-                    let mut taken_tl = std::mem::take(&mut doc_copy.library[idx].timeline);
-                    taken_tl.normalize_shape_layer_ids(&mut base_shapes);
-                    Session::sort_vec_by_layer_order(&mut base_shapes, &taken_tl);
-                    taken_tl.write_shapes_to_editable_cels(
-                        &base_shapes,
-                        &doc_copy.library,
-                        &[],
-                        world_xform,
-                    );
-                    doc_copy.library[idx].timeline = taken_tl;
-                }
-            } else {
-                doc_copy.root.normalize_shape_layer_ids(&mut base_shapes);
-                Session::sort_vec_by_layer_order(&mut base_shapes, &doc_copy.root);
-                doc_copy.root.write_shapes_to_editable_cels(
-                    &base_shapes,
-                    &doc_copy.library,
-                    &[],
-                    world_xform,
-                );
-            }
-            let mut saved_timeline: SavedTimeline = (&doc_copy.root).into();
-            saved_timeline.fps = doc_copy.root.fps.clamp(1, 60);
+            let mut temp_tab = Tab::new_empty(tab.id, tab.untitled_number);
+            temp_tab.doc = tab.doc.clone();
+            temp_tab.session.edit_path = tab.session.edit_path.clone();
+            temp_tab.session.editing_group_path = tab.session.editing_group_path.clone();
+            temp_tab.session.floating = Some(fl.clone());
+            temp_tab.refresh_scene_base();
+            commit_floating(&mut temp_tab);
+
+            let mut saved_timeline: SavedTimeline = (&temp_tab.doc.root).into();
+            saved_timeline.fps = temp_tab.doc.root.fps.clamp(1, 60);
             return Self {
                 version: PROJECT_FORMAT_VERSION,
-                stage_size: [doc_copy.stage_size.x, doc_copy.stage_size.y],
+                stage_size: [temp_tab.doc.stage_size.x, temp_tab.doc.stage_size.y],
                 timeline: saved_timeline,
-                library: doc_copy.library.iter().map(SavedSymbolDef::from).collect(),
-                next_symbol_id: doc_copy.next_symbol_id,
-                next_group_id: doc_copy.next_group_id,
+                library: temp_tab
+                    .doc
+                    .library
+                    .iter()
+                    .map(SavedSymbolDef::from)
+                    .collect(),
+                next_symbol_id: temp_tab.doc.next_symbol_id,
+                next_group_id: temp_tab.doc.next_group_id,
             };
         }
 
@@ -1490,7 +1473,6 @@ pub(crate) fn new_project(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
         .insert(insert_idx, Tab::new_empty(doc_id, untitled_num));
     activate_tab_index(ws, insert_idx);
     ws.tab_mut().view.reset_view();
-    load_shapes_from_timeline(ws.tab_mut());
 
     surrender_focused_widget(ctx);
     update_window_title(ws, ctx);

@@ -1,8 +1,8 @@
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    Session, Tab, active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating,
-    insert_and_select_shapes_in_scope, load_shapes_from_timeline, topmost_layer_id_for_indices,
+    Tab, active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
+    editable_layer_ids, insert_and_select_shapes_in_scope, topmost_layer_id_for_indices,
 };
 use crate::symbol::{EditLevel, SymbolEvalCtx, SymbolInstanceBinding};
 use crate::timeline::TimelineCellSelection;
@@ -32,77 +32,84 @@ pub(crate) fn prepare_convert_selection_to_symbol(
 
     before_mutate(tab);
 
-    let layer_ids: Vec<u64> = tab.active_timeline().layers.iter().map(|l| l.id).collect();
-    tab.session.layer_order_ids = layer_ids;
-    tab.session.materialize_floating_without_merge();
+    let sym_id = tab.doc.next_symbol_id;
+    let inst_gid = tab.doc.alloc_group_id();
+    let fl_opt = tab.session.floating.take();
+    let selection = tab.session.selection.clone();
+    let depth = tab.session.editing_group_path.len();
+    let layer_ids = editable_layer_ids(tab);
+    let mut local_shapes = Vec::new();
 
-    let valid_indices: Vec<usize> = tab
-        .session
-        .shapes
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, s)| {
-            (tab.session.selection.contains_shape(s)
-                && s.is_in_editing_scope(&tab.session.editing_group_path))
-            .then_some(idx)
-        })
-        .collect();
-    if valid_indices.is_empty() {
+    edit_layers(tab, &layer_ids, |edit| {
+        if let Some(fl) = fl_opt {
+            edit.materialize_floating_without_merge(fl);
+        }
+
+        let valid_indices: Vec<usize> = edit
+            .shapes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, s)| {
+                (selection.contains_shape(s) && s.is_in_editing_scope(&edit.editing_group_path))
+                    .then_some(idx)
+            })
+            .collect();
+        if valid_indices.is_empty() {
+            return;
+        }
+
+        let mut bbox = edit.shapes[valid_indices[0]].bounding_box();
+        for &idx in &valid_indices[1..] {
+            bbox = bbox.union(edit.shapes[idx].bounding_box());
+        }
+        let center = Point::new((bbox.x0 + bbox.x1) * 0.5, (bbox.y0 + bbox.y1) * 0.5);
+
+        let to_local = KVec2::new(-center.x, -center.y);
+        local_shapes.reserve(valid_indices.len());
+        for &idx in &valid_indices {
+            let mut local_s = edit.shapes[idx].clone();
+            local_s.layer_id = 1;
+            local_s.group_path = local_s.group_path.get(depth..).unwrap_or_default().to_vec();
+            if local_s
+                .symbol_instance
+                .is_some_and(|b| !local_s.group_path.contains(&b.instance_gid))
+            {
+                local_s.symbol_instance = None;
+            }
+            local_s.translate(to_local);
+            local_shapes.push(local_s);
+        }
+
+        let binding = SymbolInstanceBinding::new(
+            inst_gid,
+            sym_id,
+            Affine::translate(KVec2::new(center.x, center.y)),
+        );
+        let insert_limit = edit.scope_insert_index();
+        let mut unselected = Vec::with_capacity(edit.shapes.len());
+        let mut converted_shapes = Vec::new();
+        let mut trailing_outside = Vec::new();
+        for (idx, mut shape) in edit.shapes.drain(..).enumerate() {
+            if valid_indices.binary_search(&idx).is_ok() {
+                shape.layer_id = target_lid;
+                shape.group_path.insert(depth, inst_gid);
+                shape.symbol_instance = Some(binding);
+                converted_shapes.push(shape);
+            } else if idx < insert_limit {
+                unselected.push(shape);
+            } else {
+                trailing_outside.push(shape);
+            }
+        }
+        unselected.extend(converted_shapes);
+        unselected.extend(trailing_outside);
+        edit.shapes = unselected;
+    });
+
+    if local_shapes.is_empty() {
         return None;
     }
 
-    let mut bbox = tab.session.shapes[valid_indices[0]].bounding_box();
-    for &idx in &valid_indices[1..] {
-        bbox = bbox.union(tab.session.shapes[idx].bounding_box());
-    }
-    let center = Point::new((bbox.x0 + bbox.x1) * 0.5, (bbox.y0 + bbox.y1) * 0.5);
-
-    let sym_id = tab.doc.next_symbol_id;
-    let inst_gid = tab.doc.alloc_group_id();
-
-    let depth = tab.session.editing_group_path.len();
-    let to_local = KVec2::new(-center.x, -center.y);
-    let mut local_shapes = Vec::with_capacity(valid_indices.len());
-    for &idx in &valid_indices {
-        let mut local_s = tab.session.shapes[idx].clone();
-        local_s.layer_id = 1;
-        local_s.group_path = local_s.group_path.get(depth..).unwrap_or_default().to_vec();
-        if local_s
-            .symbol_instance
-            .is_some_and(|b| !local_s.group_path.contains(&b.instance_gid))
-        {
-            local_s.symbol_instance = None;
-        }
-        local_s.translate(to_local);
-        local_shapes.push(local_s);
-    }
-
-    let binding = SymbolInstanceBinding::new(
-        inst_gid,
-        sym_id,
-        Affine::translate(KVec2::new(center.x, center.y)),
-    );
-    let insert_limit = tab.session.scope_insert_index();
-    let mut unselected = Vec::with_capacity(tab.session.shapes.len());
-    let mut converted_shapes = Vec::new();
-    let mut trailing_outside = Vec::new();
-    for (idx, mut shape) in tab.session.shapes.drain(..).enumerate() {
-        if valid_indices.binary_search(&idx).is_ok() {
-            shape.layer_id = target_lid;
-            shape.group_path.insert(depth, inst_gid);
-            shape.symbol_instance = Some(binding);
-            converted_shapes.push(shape);
-        } else if idx < insert_limit {
-            unselected.push(shape);
-        } else {
-            trailing_outside.push(shape);
-        }
-    }
-    unselected.extend(converted_shapes);
-    unselected.extend(trailing_outside);
-    Session::sort_vec_by_layer_order(&mut unselected, tab.active_timeline());
-    tab.session.shapes = unselected;
-    tab.session.floating = None;
     tab.session.rebuild_overlay_from_floating();
     tab.session.selection.clear();
     tab.session.selection.instances.insert(inst_gid);
@@ -272,8 +279,7 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
     });
 
     let fps = tab.doc.root.fps;
-    if let Some(sym_def) = tab.doc.find_symbol_mut(binding.symbol_id) {
-        let tl = &mut sym_def.timeline;
+    tab.with_active_timeline_mut(|tl, _| {
         tl.total_frames = tl.total_frames.max(1);
         let act_l = tl.active_layer.min(tl.layers.len().saturating_sub(1));
         let act_f = tl.current_frame.min(tl.total_frames.saturating_sub(1));
@@ -283,9 +289,13 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
         tl.next_layer_number = tl.next_layer_number.max(2);
         tl.next_layer_id = tl.next_layer_id.max(2);
         tl.cell_selection = Some(TimelineCellSelection::single(act_l, act_f));
-    }
+    });
 
-    load_shapes_from_timeline(tab);
+    cancel_active_drag(tab);
+    tab.session.floating = None;
+    tab.session.transform_pivot = None;
+    tab.session.clear_overlay();
+    tab.session.sanitize_editing_scope();
     true
 }
 
@@ -301,8 +311,7 @@ pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
         return false;
     }
     let has_instance_in_current_timeline = tab
-        .session
-        .shapes
+        .scene()
         .iter()
         .any(|s| s.symbol_instance.is_some_and(|b| b.symbol_id == symbol_id))
         || tab.active_timeline().layers.iter().any(|l| {
@@ -322,8 +331,7 @@ pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
     let curr_f = tl.current_frame;
     let world_xform = tab.session.edit_path.world_xform();
     let binding = tab
-        .session
-        .shapes
+        .scene()
         .iter()
         .find_map(|s| s.symbol_instance.filter(|b| b.symbol_id == symbol_id))
         .or_else(|| {
@@ -370,7 +378,11 @@ pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
     });
     tab.session.editing_group_path = lvl.parent_group_path;
 
-    load_shapes_from_timeline(tab);
+    cancel_active_drag(tab);
+    tab.session.floating = None;
+    tab.session.transform_pivot = None;
+    tab.session.clear_overlay();
+    tab.session.sanitize_editing_scope();
 
     tab.session
         .select_symbol_instance_by_gid(lvl.instance_gid);

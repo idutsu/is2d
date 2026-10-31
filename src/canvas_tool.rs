@@ -7,8 +7,8 @@ use eframe::egui::{self, Color32, Key, Pos2, Stroke, Vec2};
 use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 
 pub(crate) use crate::symbol::Document;
-use crate::symbol::{EditPath, SymbolDef, SymbolLoopMode};
-use crate::timeline::{Cel, LoadedShapeSig, Timeline, TimelineCellSelection};
+use crate::symbol::{EditPath, SymbolDef, SymbolLoopMode, TweenRotate};
+use crate::timeline::{Cel, Timeline, TimelineCellSelection};
 use crate::vector_boolean::merge_shapes_into_canvas;
 use crate::vector_engine::{FillShape, SyncCache};
 
@@ -700,30 +700,268 @@ impl Selection {
     }
 }
 
-/// 既存の `donor_shapes` から、幾何輪郭と色が一致する `target_shapes` へ描画・当たり判定キャッシュを O(1) で引き継ぐ
-pub(crate) fn salvage_caches_from_slice(
-    donor_shapes: &[FillShape],
-    target_shapes: &mut [FillShape],
-) {
-    if donor_shapes.is_empty() || target_shapes.is_empty() {
-        return;
+pub(crate) type LayerId = u64;
+pub(crate) type Scope = Vec<u64>;
+
+mod scene_base_cache {
+    use std::collections::HashMap;
+    use std::ops::Range;
+
+    use kurbo::Affine;
+
+    use super::{LayerId, ShapeId};
+    use crate::symbol::{
+        compute_resolved_cel_signature, ResolvedCelSig, SymbolDef, SymbolLoopMode,
+    };
+    use crate::timeline::{Layer, Timeline};
+    use crate::vector_engine::FillShape;
+
+    struct CachedLayer {
+        layer_id: LayerId,
+        visible: bool,
+        locked: bool,
+        cel_sig: Option<ResolvedCelSig>,
+        eval_frame: usize,
+        world_xform_bits: [u64; 6],
+        range: Range<usize>,
     }
-    for (idx, target) in target_shapes.iter_mut().enumerate() {
-        if let Some(same_pos) = donor_shapes.get(idx) {
-            if target.reuse_caches_from(same_pos) {
-                continue;
-            }
+
+    /// `Document`（編集中タイムライン＋シンボルライブラリ＋`world_xform`）から構築されるレイヤー別の読み取り専用土台キャッシュ
+    /// （このキャッシュを書き換えてよいのは `rebuild` 処理のみ）
+    #[derive(Default)]
+    pub(crate) struct SceneBaseCache {
+        layers: Vec<CachedLayer>,
+        flat_shapes: Vec<FillShape>,
+        layer_order_ids: Vec<LayerId>,
+    }
+
+    fn layer_eval_frame(layer: &Layer, kf_idx: usize, frame: usize, library: &[SymbolDef]) -> usize {
+        let kf = &layer.keyframes[kf_idx];
+        let has_tween = layer.interpolated_tween_binding_at(frame).is_some();
+        let all_single_frame = !has_tween
+            && kf
+                .cel
+                .instances
+                .iter()
+                .all(|inst| inst.binding.loop_mode == SymbolLoopMode::SingleFrame);
+        let is_dynamic = !all_single_frame && (has_tween || kf.cel.has_dynamic_symbol(library));
+        if is_dynamic {
+            frame
+        } else {
+            kf.start_frame
         }
-        for donor in donor_shapes {
-            if target.reuse_caches_from(donor) {
-                break;
+    }
+
+    fn transform_layer_shapes_to_stage(shapes: &mut [FillShape], world_xform: Affine) {
+        if world_xform == Affine::IDENTITY {
+            return;
+        }
+        for s in shapes {
+            let orig_rev = s.mesh_revision;
+            if s.is_empty_symbol_marker() {
+                if let Some(b) = &mut s.symbol_instance {
+                    b.xform = world_xform * b.xform;
+                }
+                s.rebuild_cache();
+            } else {
+                if s.symbol_instance.is_some() {
+                    let _ = s.fill_mesh();
+                    s.transform_with_cached_mesh(world_xform);
+                } else {
+                    s.transform(world_xform);
+                }
+                if world_xform.determinant().abs() < 1e-12 {
+                    if let Some(b) = &mut s.symbol_instance {
+                        b.xform = world_xform * b.xform;
+                    }
+                }
             }
+            s.mesh_revision = orig_rev;
+        }
+    }
+
+    impl SceneBaseCache {
+        #[inline]
+        pub(crate) fn shapes(&self) -> &[FillShape] {
+            &self.flat_shapes
+        }
+
+        #[inline]
+        pub(crate) fn layer_order_ids(&self) -> &[LayerId] {
+            &self.layer_order_ids
+        }
+
+        /// キー `(layer_id, cel_revision, eval_frame, world_xform, 参照シンボルの revision)` が変わったレイヤーだけ作り直し、
+        /// `shape_id` と `mesh_revision` が同じ図形は描画キャッシュを `HashMap` で引き継ぐ
+        pub(crate) fn rebuild(
+            &mut self,
+            tl: &Timeline,
+            library: &[SymbolDef],
+            world_xform: Affine,
+        ) -> bool {
+            let frame = tl.current_frame;
+            let xform_bits = world_xform.as_coeffs().map(f64::to_bits);
+
+            let same_layer_list = self.layers.len() == tl.layers.len()
+                && self.layers.iter().zip(&tl.layers).all(|(c, l)| {
+                    if c.layer_id != l.id
+                        || c.visible != l.visible
+                        || c.locked != l.locked
+                        || c.world_xform_bits != xform_bits
+                    {
+                        return false;
+                    }
+                    if !l.visible || l.locked {
+                        return c.cel_sig.is_none();
+                    }
+                    match l.keyframe_index_at(frame) {
+                        Some(kf_idx) => {
+                            let ef = layer_eval_frame(l, kf_idx, frame, library);
+                            c.eval_frame == ef
+                                && c.cel_sig
+                                    .as_ref()
+                                    .is_some_and(|sig| sig.matches_layer_keyframe(l, kf_idx, library))
+                        }
+                        None => c.cel_sig.is_none(),
+                    }
+                });
+            if same_layer_list {
+                return false;
+            }
+
+            let old_layers = std::mem::take(&mut self.layers);
+            let old_flat = std::mem::take(&mut self.flat_shapes);
+            let mut old_by_id: HashMap<LayerId, (CachedLayer, Vec<FillShape>)> =
+                HashMap::with_capacity(old_layers.len());
+            let mut old_flat_iter = old_flat.into_iter();
+            let mut cursor = 0usize;
+            for cl in old_layers {
+                let skip = cl.range.start.saturating_sub(cursor);
+                for _ in 0..skip {
+                    let _ = old_flat_iter.next();
+                }
+                let count = cl.range.len();
+                let mut vec = Vec::with_capacity(count);
+                for _ in 0..count {
+                    if let Some(s) = old_flat_iter.next() {
+                        vec.push(s);
+                    }
+                }
+                cursor = cl.range.end;
+                old_by_id.insert(cl.layer_id, (cl, vec));
+            }
+
+            let mut new_layers = Vec::with_capacity(tl.layers.len());
+            let mut new_flat = Vec::new();
+            let mut new_order_ids = Vec::with_capacity(tl.layers.len());
+
+            for (layer_idx, layer) in tl.layers.iter().enumerate() {
+                new_order_ids.push(layer.id);
+                if !layer.visible || layer.locked {
+                    let start = new_flat.len();
+                    new_layers.push(CachedLayer {
+                        layer_id: layer.id,
+                        visible: layer.visible,
+                        locked: layer.locked,
+                        cel_sig: None,
+                        eval_frame: 0,
+                        world_xform_bits: xform_bits,
+                        range: start..start,
+                    });
+                    continue;
+                }
+                let Some(kf_idx) = layer.keyframe_index_at(frame) else {
+                    let start = new_flat.len();
+                    new_layers.push(CachedLayer {
+                        layer_id: layer.id,
+                        visible: layer.visible,
+                        locked: layer.locked,
+                        cel_sig: None,
+                        eval_frame: 0,
+                        world_xform_bits: xform_bits,
+                        range: start..start,
+                    });
+                    continue;
+                };
+                let ef = layer_eval_frame(layer, kf_idx, frame, library);
+                if let Some((old_cl, old_shapes)) = old_by_id.remove(&layer.id) {
+                    let key_unchanged = old_cl.visible == layer.visible
+                        && old_cl.locked == layer.locked
+                        && old_cl.world_xform_bits == xform_bits
+                        && old_cl.eval_frame == ef
+                        && old_cl
+                            .cel_sig
+                            .as_ref()
+                            .is_some_and(|sig| sig.matches_layer_keyframe(layer, kf_idx, library));
+                    if key_unchanged {
+                        let start = new_flat.len();
+                        new_flat.extend(old_shapes);
+                        let end = new_flat.len();
+                        new_layers.push(CachedLayer {
+                            layer_id: layer.id,
+                            visible: layer.visible,
+                            locked: layer.locked,
+                            cel_sig: old_cl.cel_sig,
+                            eval_frame: ef,
+                            world_xform_bits: xform_bits,
+                            range: start..end,
+                        });
+                        continue;
+                    }
+                    let mut evaluated = tl.evaluate_layer_shapes_at(layer_idx, frame, library);
+                    transform_layer_shapes_to_stage(&mut evaluated, world_xform);
+                    if old_cl.world_xform_bits == xform_bits && !old_shapes.is_empty() {
+                        let donor_map: HashMap<(ShapeId, u64), &FillShape> = old_shapes
+                            .iter()
+                            .map(|d| ((d.shape_id, d.mesh_revision), d))
+                            .collect();
+                        for s in &mut evaluated {
+                            if let Some(donor) = donor_map.get(&(s.shape_id, s.mesh_revision)) {
+                                s.reuse_caches_from(donor);
+                            }
+                        }
+                    }
+                    let sig = compute_resolved_cel_signature(layer, kf_idx, library);
+                    let start = new_flat.len();
+                    new_flat.extend(evaluated);
+                    let end = new_flat.len();
+                    new_layers.push(CachedLayer {
+                        layer_id: layer.id,
+                        visible: layer.visible,
+                        locked: layer.locked,
+                        cel_sig: Some(sig),
+                        eval_frame: ef,
+                        world_xform_bits: xform_bits,
+                        range: start..end,
+                    });
+                } else {
+                    let mut evaluated = tl.evaluate_layer_shapes_at(layer_idx, frame, library);
+                    transform_layer_shapes_to_stage(&mut evaluated, world_xform);
+                    let sig = compute_resolved_cel_signature(layer, kf_idx, library);
+                    let start = new_flat.len();
+                    new_flat.extend(evaluated);
+                    let end = new_flat.len();
+                    new_layers.push(CachedLayer {
+                        layer_id: layer.id,
+                        visible: layer.visible,
+                        locked: layer.locked,
+                        cel_sig: Some(sig),
+                        eval_frame: ef,
+                        world_xform_bits: xform_bits,
+                        range: start..end,
+                    });
+                }
+            }
+
+            self.layers = new_layers;
+            self.flat_shapes = new_flat;
+            self.layer_order_ids = new_order_ids;
+            true
         }
     }
 }
 
-pub(crate) type LayerId = u64;
-pub(crate) type Scope = Vec<u64>;
+use scene_base_cache::SceneBaseCache;
 
 /// `Overlay` で追加する図形の重なり順指定
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -850,19 +1088,6 @@ pub(crate) fn build_scene_order_by_layer_ids(
     out
 }
 
-/// 土台の図形列 `base` と上乗せ `overlay` から画面の重なり順リストを構築する
-pub(crate) fn build_scene_order(
-    base: &[FillShape],
-    overlay: &Overlay,
-    timeline: &Timeline,
-) -> Vec<SceneEntry> {
-    if overlay.is_empty() {
-        return (0..base.len()).map(SceneEntry::Base).collect();
-    }
-    let layer_ids: Vec<LayerId> = timeline.layers.iter().map(|l| l.id).collect();
-    build_scene_order_by_layer_ids(base, overlay, &layer_ids)
-}
-
 /// `Scene` の図形を重なり順に走査するイテレータ
 #[derive(Clone)]
 pub(crate) struct SceneIter<'a> {
@@ -917,46 +1142,6 @@ pub(crate) struct Scene<'a> {
     direct_base_fallback: bool,
     overlay_only_selected: bool,
     overlay_movable_start: usize,
-}
-
-impl Scene<'static> {
-    /// 現在のフレーム（`tl.current_frame`）における全ての「表示中かつ非ロック（`visible && !locked`）」レイヤーの `Cel` から
-    /// 背面レイヤー→前面レイヤーの順で（トゥイーン補間およびシンボルの内部タイムラインフレームも評価しつつ）図形列を構築する
-    pub(crate) fn resolve(
-        tl: &Timeline,
-        library: &[SymbolDef],
-        world_xform: Affine,
-        prev_shapes: &[FillShape],
-    ) -> Vec<FillShape> {
-        let frame = tl.current_frame;
-        let mut loaded = Vec::new();
-        for layer_idx in 0..tl.layers.len() {
-            let layer = &tl.layers[layer_idx];
-            if !layer.visible || layer.locked {
-                continue;
-            }
-            loaded.extend(tl.evaluate_layer_shapes_at(layer_idx, frame, library));
-        }
-        if world_xform != Affine::IDENTITY {
-            for s in &mut loaded {
-                if s.is_empty_symbol_marker() {
-                    if let Some(b) = &mut s.symbol_instance {
-                        b.xform = world_xform * b.xform;
-                    }
-                    s.rebuild_cache();
-                } else {
-                    s.transform(world_xform);
-                    if world_xform.determinant().abs() < 1e-12 {
-                        if let Some(b) = &mut s.symbol_instance {
-                            b.xform = world_xform * b.xform;
-                        }
-                    }
-                }
-            }
-        }
-        salvage_caches_from_slice(prev_shapes, &mut loaded);
-        loaded
-    }
 }
 
 impl<'a> Scene<'a> {
@@ -1226,6 +1411,16 @@ pub(crate) struct Floating {
     pub(crate) modified: bool,
 }
 
+#[inline]
+fn shapes_equal_for_snapshot(a: &FillShape, b: &FillShape) -> bool {
+    a.shape_id == b.shape_id
+        && a.layer_id == b.layer_id
+        && a.mesh_revision == b.mesh_revision
+        && a.color == b.color
+        && a.group_path == b.group_path
+        && a.symbol_instance == b.symbol_instance
+}
+
 impl Floating {
     /// マーキー矩形スライス直後でまだ一度も移動・変形されていない状態かを返す
     #[inline]
@@ -1260,27 +1455,24 @@ impl Floating {
                 .pieces
                 .iter()
                 .zip(&other.pieces)
-                .all(|(a, b)| LoadedShapeSig::from_shape(a).matches_with_layer(b))
+                .all(|(a, b)| shapes_equal_for_snapshot(a, b))
             && self
                 .remainder
                 .iter()
                 .zip(&other.remainder)
-                .all(|(a, b)| LoadedShapeSig::from_shape(a).matches_with_layer(b))
+                .all(|(a, b)| shapes_equal_for_snapshot(a, b))
     }
 }
 
-/// タブごとの編集セッション状態（作業図形・選択・変形・排他ドラッグ・編集階層、保存しない）
+/// タブごとの編集セッション状態（土台キャッシュ・上乗せ・選択・変形・排他ドラッグ・編集階層、保存しない）
 #[derive(Default)]
 pub(crate) struct Session {
     /// シンボルインプレイス編集の経路（空ならルート）
     pub(crate) edit_path: EditPath,
     /// シンボル編集中の親シーン背景薄表示セル派生キャッシュ `(doc.revision, edit_path, backdrop_cel, parent_frame)`
     pub(crate) backdrop_cache: SyncCache<Option<(u64, EditPath, Cel, usize)>>,
-    pub(crate) shapes: Vec<FillShape>,
-    /// 直近の `load_shapes_from_timeline` 読み込み時点のシェイプ署名一覧（`Timeline` スナップショットに含めない作業用キャッシュ）
-    loaded_signatures: Vec<LoadedShapeSig>,
-    /// 現在のタイムラインのレイヤーID順序キャッシュ（`Session::scene()` 構築用）
-    pub(crate) layer_order_ids: Vec<LayerId>,
+    /// `Document` から構築されるレイヤー別の読み取り専用土台キャッシュ
+    pub(crate) base_cache: SceneBaseCache,
     /// 土台図形列に対する上乗せ図形状態（Floating およびドラッグ中の仮表示）
     pub(crate) overlay: Overlay,
     /// `Alt` 複製ドラッグ中など、`Overlay` 内の可動図形のみを選択表示・境界枠対象とするフラグ
@@ -1304,13 +1496,13 @@ impl Session {
     /// `Session` 単体から読み取り専用の `Scene` ビューを返す
     #[inline]
     pub(crate) fn scene(&self) -> Scene<'_> {
+        let base = self.base_cache.shapes();
         let order = self.scene_order.get_or_init(|| {
-            build_scene_order_by_layer_ids(&self.shapes, &self.overlay, &self.layer_order_ids)
+            build_scene_order_by_layer_ids(base, &self.overlay, self.base_cache.layer_order_ids())
         });
-        let direct_base_fallback =
-            self.overlay.is_empty() && order.len() != self.shapes.len();
+        let direct_base_fallback = self.overlay.is_empty() && order.len() != base.len();
         Scene {
-            base: &self.shapes,
+            base,
             overlay: &self.overlay,
             order,
             direct_base_fallback,
@@ -1319,7 +1511,7 @@ impl Session {
         }
     }
 
-    /// `Scene` の合成順序キャッシュを無効化する（土台 `shapes` または `overlay` の構成が変わったときに呼ぶ）
+    /// `Scene` の合成順序キャッシュを無効化する（土台または `overlay` の構成が変わったときに呼ぶ）
     #[inline]
     pub(crate) fn invalidate_scene_order(&mut self) {
         let _ = self.scene_order.take();
@@ -1369,7 +1561,12 @@ impl Session {
         self.overlay.clear();
         self.overlay_only_selected = false;
         self.overlay_movable_start = 0;
-        let Some(orig) = self.shapes.iter().find(|s| s.shape_id == shape_id) else {
+        let Some(orig) = self
+            .base_cache
+            .shapes()
+            .iter()
+            .find(|s| s.shape_id == shape_id)
+        else {
             self.invalidate_scene_order();
             return false;
         };
@@ -1420,7 +1617,7 @@ impl Session {
         }
         self.overlay_movable_start = self.overlay.add.len();
 
-        for shape in &self.shapes {
+        for shape in self.base_cache.shapes() {
             if self
                 .floating
                 .as_ref()
@@ -1489,7 +1686,7 @@ impl Session {
         self.overlay_movable_start = self.overlay.add.len();
 
         let mut orig_shapes = Vec::new();
-        for shape in &self.shapes {
+        for shape in self.base_cache.shapes() {
             if self
                 .floating
                 .as_ref()
@@ -1558,19 +1755,6 @@ impl Session {
         }
     }
 
-    /// 直近の読み込み・同期時点のシェイプ署名ベクタを一時的に取り出す
-    #[inline]
-    pub(crate) fn take_loaded_signatures(&mut self) -> Vec<LoadedShapeSig> {
-        std::mem::take(&mut self.loaded_signatures)
-    }
-
-    /// 取り出していたシェイプ署名ベクタのバッファを戻した上で現在の `self.shapes` の署名を記録する
-    #[inline]
-    pub(crate) fn restore_loaded_signatures_and_record(&mut self, buf: Vec<LoadedShapeSig>) {
-        self.loaded_signatures = buf;
-        self.record_loaded_signatures();
-    }
-
     /// 確定時に結合が必要な変更済み `Floating` が保持されているかを返す
     #[inline]
     pub(crate) fn has_modified_floating(&self) -> bool {
@@ -1591,7 +1775,7 @@ impl Session {
     pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self, origin: FloatingOrigin) -> bool {
         let scope = self.editing_group_path.clone();
         let mut newly_lifted = Vec::new();
-        for shape in &self.shapes {
+        for shape in self.base_cache.shapes() {
             let already_hidden = self
                 .floating
                 .as_ref()
@@ -1618,8 +1802,8 @@ impl Session {
             fl.hidden.insert(s.shape_id);
             fl.pieces.push(s);
         }
-        if self.layer_order_ids.len() > 1 && fl.pieces.len() > 1 {
-            let order_ids = &self.layer_order_ids;
+        let order_ids = self.base_cache.layer_order_ids();
+        if order_ids.len() > 1 && fl.pieces.len() > 1 {
             fl.pieces
                 .sort_by_key(|s| layer_order_index(order_ids, s.layer_id));
         }
@@ -1746,11 +1930,6 @@ impl Session {
         self.scene().selected_shape_mask(&self.selection)
     }
 
-    /// 現在の `self.shapes` から、幾何輪郭と色が一致する `target_shapes` へ描画・当たり判定キャッシュを O(1) で引き継ぐ
-    pub(crate) fn salvage_caches_into(&self, target_shapes: &mut [FillShape]) {
-        salvage_caches_from_slice(&self.shapes, target_shapes);
-    }
-
     /// `Scene` 上に現在存在する図形・シンボルインスタンスのみを選択に残す
     pub(crate) fn retain_existing_selection(&mut self) {
         if self.selection.is_empty() {
@@ -1772,135 +1951,6 @@ impl Session {
             .retain(|gid| valid_instances.contains(gid));
     }
 
-    /// `Floating` をブーリアン結合せずにそのまま `self.shapes` に実体化する（グループ化・シンボル変換の前処理用）
-    pub(crate) fn materialize_floating_without_merge(&mut self) {
-        let Some(fl) = self.floating.take() else {
-            return;
-        };
-        let insert_limit = self.scope_insert_index();
-        let mut rem_by_hid: HashMap<ShapeId, Vec<FillShape>> = HashMap::new();
-        let mut tail_rem: Vec<FillShape> = Vec::new();
-        let mut current_hid: Option<ShapeId> = None;
-        for rem in fl.remainder {
-            if fl.hidden.contains(&rem.shape_id) {
-                current_hid = Some(rem.shape_id);
-            }
-            if let Some(hid) = current_hid {
-                rem_by_hid.entry(hid).or_default().push(rem);
-            } else {
-                tail_rem.push(rem);
-            }
-        }
-        let mut prefix = Vec::with_capacity(self.shapes.len() + fl.pieces.len());
-        let mut trailing = Vec::new();
-        for (idx, shape) in self.shapes.drain(..).enumerate() {
-            let dst = if idx < insert_limit {
-                &mut prefix
-            } else {
-                &mut trailing
-            };
-            if fl.hidden.contains(&shape.shape_id) {
-                if let Some(rems) = rem_by_hid.remove(&shape.shape_id) {
-                    dst.extend(rems);
-                }
-            } else {
-                dst.push(shape);
-            }
-        }
-        for (_, rems) in rem_by_hid {
-            prefix.extend(rems);
-        }
-        prefix.extend(tail_rem);
-        prefix.extend(fl.pieces);
-        prefix.extend(trailing);
-        if self.layer_order_ids.len() > 1 && prefix.len() > 1 {
-            let order_ids = &self.layer_order_ids;
-            prefix.sort_by_key(|s| layer_order_index(order_ids, s.layer_id));
-        }
-        self.shapes = prefix;
-        self.rebuild_overlay_from_floating();
-    }
-
-    /// 現在の編集スコープ（`editing_group_path`）末尾に対応する挿入インデックスを返す
-    pub(crate) fn scope_insert_index(&self) -> usize {
-        if self.editing_group_path.is_empty() {
-            self.shapes.len()
-        } else {
-            self.shapes
-                .iter()
-                .rposition(|s| s.is_in_editing_scope(&self.editing_group_path))
-                .map(|pos| pos + 1)
-                .unwrap_or(self.shapes.len())
-        }
-    }
-
-    /// 選択中の全シェイプとカスタムピボット点を `delta` だけ平行移動する（生シェイプは `Floating` に持ち上げて移動）
-    pub(crate) fn translate_selected(&mut self, delta: KVec2) {
-        if self.selection.is_empty() {
-            return;
-        }
-        self.lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
-        if let Some(fl) = &mut self.floating {
-            fl.modified = true;
-            for piece in &mut fl.pieces {
-                if self.selection.contains_shape(piece) {
-                    piece.translate(delta);
-                }
-            }
-        }
-        for shape in &mut self.shapes {
-            if self
-                .floating
-                .as_ref()
-                .is_some_and(|fl| fl.hidden.contains(&shape.shape_id))
-            {
-                continue;
-            }
-            if self.selection.contains_shape(shape) {
-                shape.translate(delta);
-            }
-        }
-        if let Some(piv) = &mut self.transform_pivot {
-            *piv += delta;
-        }
-        self.rebuild_overlay_from_floating();
-    }
-
-    /// 選択中の全シェイプに `affine` 変換を適用する（生シェイプは `Floating` に持ち上げて変換）
-    pub(crate) fn transform_selected(&mut self, affine: kurbo::Affine) -> bool {
-        if self.selection.is_empty() {
-            return false;
-        }
-        self.lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
-        let mut any_transformed = false;
-        if let Some(fl) = &mut self.floating {
-            for piece in &mut fl.pieces {
-                if self.selection.contains_shape(piece) {
-                    piece.transform(affine);
-                    any_transformed = true;
-                }
-            }
-            if any_transformed {
-                fl.modified = true;
-            }
-        }
-        for shape in &mut self.shapes {
-            if self
-                .floating
-                .as_ref()
-                .is_some_and(|fl| fl.hidden.contains(&shape.shape_id))
-            {
-                continue;
-            }
-            if self.selection.contains_shape(shape) {
-                shape.transform(affine);
-                any_transformed = true;
-            }
-        }
-        self.rebuild_overlay_from_floating();
-        any_transformed
-    }
-
     /// キャンバス図形更新後に、存在しなくなった `editing_group_path`・消滅した `selection`・無効化した `hover_target` を自動補正する
     pub(crate) fn sanitize_editing_scope(&mut self) {
         self.retain_existing_selection();
@@ -1919,25 +1969,6 @@ impl Session {
             }
             self.editing_group_path.pop();
         }
-    }
-
-    /// `self.shapes` の現在のシェイプ署名一覧を `loaded_signatures` に記録する（既存バッファを再利用してアロケーションを回避）
-    pub(crate) fn record_loaded_signatures(&mut self) {
-        self.loaded_signatures.clear();
-        self.loaded_signatures
-            .extend(self.shapes.iter().map(LoadedShapeSig::from_shape));
-    }
-
-    /// タイムラインから読み込んだ図形列で `self.shapes` を置き換える（既存シェイプと輪郭・色が一致するものは描画キャッシュを引き継ぐ）
-    pub(crate) fn replace_loaded_shapes(&mut self, mut loaded: Vec<FillShape>) {
-        self.salvage_caches_into(&mut loaded);
-        self.shapes = loaded;
-        self.record_loaded_signatures();
-        self.floating = None;
-        self.transform_pivot = None;
-        self.clear_overlay();
-        self.invalidate_scene_order();
-        self.sanitize_editing_scope();
     }
 
     /// 現在の編集スコープ内で指定レイヤーID集合 `layer_ids` に属する全図形を選択状態にする
@@ -1990,16 +2021,6 @@ impl Session {
         }
     }
 
-    /// `self.shapes` 全体が直近の読み込み・同期時点から一切変更されていないかを判定する（ヒープ確保なし）
-    pub(crate) fn is_all_shapes_unchanged(&self) -> bool {
-        self.loaded_signatures.len() == self.shapes.len()
-            && self
-                .loaded_signatures
-                .iter()
-                .zip(self.shapes.iter())
-                .all(|(sig, s)| sig.matches_with_layer(s))
-    }
-
     /// 現在選択中のシェイプ群を現在の編集スコープ（`editing_group_path`）からの相対グループパス付きで抽出する
     pub(crate) fn extract_selected_relative_to_scope(&self) -> Vec<FillShape> {
         if self.selection.is_empty() {
@@ -2024,33 +2045,14 @@ impl Session {
     pub(crate) fn select_symbol_instance_by_gid(&mut self, instance_gid: u64) {
         self.selection.clear();
         if self
-            .shapes
+            .base_cache
+            .shapes()
             .iter()
             .any(|s| s.symbol_instance.is_some_and(|b| b.instance_gid == instance_gid))
         {
             self.selection.instances.insert(instance_gid);
         }
         self.transform_pivot = None;
-    }
-
-    /// 指定された `instance_gid` を持つキャンバス上の全シンボルインスタンス図形に対して `update` を一括適用する
-    pub(crate) fn update_symbol_instance_binding(
-        &mut self,
-        instance_gid: u64,
-        mut update: impl FnMut(&mut crate::symbol::SymbolInstanceBinding),
-    ) -> bool {
-        let mut any_updated = false;
-        for shape in &mut self.shapes {
-            if let Some(b) = shape
-                .symbol_instance
-                .as_mut()
-                .filter(|b| b.instance_gid == instance_gid)
-            {
-                update(b);
-                any_updated = true;
-            }
-        }
-        any_updated
     }
 
     /// 選択ツールまたは自由変形ツールで進行中だった図形変形・移動ドラッグのみを中断して仮表示 `Overlay` を破棄する（ブラシのストローク状態には干渉しない）
@@ -2116,11 +2118,6 @@ impl Session {
         }
 
         shapes.sort_by_key(|s| timeline.layer_index_by_id(s.layer_id).unwrap_or(usize::MAX));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn sort_shapes_by_layer_order(&mut self, timeline: &Timeline) {
-        Self::sort_vec_by_layer_order(&mut self.shapes, timeline);
     }
 }
 
@@ -2404,7 +2401,7 @@ impl Default for Tab {
 impl Tab {
     /// 指定された `id` と `untitled_number` で空の初期タブを生成する
     pub(crate) fn new_empty(id: u64, untitled_number: usize) -> Self {
-        Self {
+        let mut tab = Self {
             id,
             untitled_number,
             file: None,
@@ -2412,28 +2409,37 @@ impl Tab {
             session: Session::default(),
             view: View::default(),
             history: UndoHistory::default(),
-        }
+        };
+        tab.refresh_scene_base();
+        tab
     }
 
     /// 現在のフレームと編集位置で解決された読み取り専用の図形ビューを返す
     #[inline]
     pub(crate) fn scene(&self) -> Scene<'_> {
-        let order = self.session.scene_order.get_or_init(|| {
-            build_scene_order(
-                &self.session.shapes,
-                &self.session.overlay,
-                self.active_timeline(),
-            )
-        });
-        let direct_base_fallback =
-            self.session.overlay.is_empty() && order.len() != self.session.shapes.len();
-        Scene {
-            base: &self.session.shapes,
-            overlay: &self.session.overlay,
-            order,
-            direct_base_fallback,
-            overlay_only_selected: self.session.overlay_only_selected,
-            overlay_movable_start: self.session.overlay_movable_start,
+        self.session.scene()
+    }
+
+    /// `Document` の現在フレームおよび `edit_path` から `Scene` のレイヤー別土台キャッシュを再構築する
+    pub(crate) fn refresh_scene_base(&mut self) {
+        let world_xform = self.session.edit_path.world_xform();
+        let changed = if let Some(last) = self.session.edit_path.last() {
+            if let Some(sym) = self.doc.library.iter().find(|s| s.id == last.symbol_id) {
+                self.session
+                    .base_cache
+                    .rebuild(&sym.timeline, &self.doc.library, world_xform)
+            } else {
+                self.session
+                    .base_cache
+                    .rebuild(&self.doc.root, &self.doc.library, world_xform)
+            }
+        } else {
+            self.session
+                .base_cache
+                .rebuild(&self.doc.root, &self.doc.library, world_xform)
+        };
+        if changed {
+            self.session.invalidate_scene_order();
         }
     }
 
@@ -2469,10 +2475,13 @@ impl Tab {
                     self.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
                     self.doc.bump_revision();
                 }
+                self.refresh_scene_base();
                 return res;
             }
         }
-        f(&mut self.doc.root, &self.doc.library)
+        let res = f(&mut self.doc.root, &self.doc.library);
+        self.refresh_scene_base();
+        res
     }
 
     /// シンボルインプレイス編集中の親シーン背景薄表示メッシュを派生データキャッシュ経由で返す
@@ -2628,7 +2637,9 @@ impl Tab {
             &mut self.session.editing_group_path,
         );
         self.ensure_valid_library_selection();
-        load_shapes_from_timeline(self);
+        cancel_active_drag(self);
+        self.session.transform_pivot = None;
+        self.refresh_scene_base();
         self.session.floating = entry.floating.map(Arc::unwrap_or_clone);
         self.session.rebuild_overlay_from_floating();
         self.session.selection = prev_selection;
@@ -2637,6 +2648,7 @@ impl Tab {
             let keep = self.session.selected_indices();
             commit_floating_except(self, &keep);
         }
+        self.session.sanitize_editing_scope();
         prev_entry
     }
 
@@ -2658,14 +2670,368 @@ impl Tab {
 }
 
 // ============================================================================
-// 6. レイヤー解決・ドラッグロールバック・キャンバス⇔タイムライン状態同期
+// 6. レイヤー解決・ドラッグロールバック・文書の図形書き換え（edit_layers）
 // ============================================================================
+
+/// `edit_layers` のコールバックに渡される対象レイヤー図形編集コンテキスト（ステージ座標）
+pub(crate) struct LayerEdit {
+    pub(crate) shapes: Vec<FillShape>,
+    pub(crate) editing_group_path: Vec<u64>,
+    pub(crate) layer_order_ids: Vec<LayerId>,
+    pub(crate) next_group_id: u64,
+}
+
+impl LayerEdit {
+    /// 現在の編集スコープ（`editing_group_path`）末尾に対応する挿入インデックスを返す
+    pub(crate) fn scope_insert_index(&self) -> usize {
+        if self.editing_group_path.is_empty() {
+            self.shapes.len()
+        } else {
+            self.shapes
+                .iter()
+                .rposition(|s| s.is_in_editing_scope(&self.editing_group_path))
+                .map(|pos| pos + 1)
+                .unwrap_or(self.shapes.len())
+        }
+    }
+
+    /// `Floating` をブーリアン結合せずにそのまま `self.shapes` に実体化する（グループ化・シンボル変換の前処理用）
+    pub(crate) fn materialize_floating_without_merge(&mut self, fl: Floating) {
+        let insert_limit = self.scope_insert_index();
+        let mut rem_by_hid: HashMap<ShapeId, Vec<FillShape>> = HashMap::new();
+        let mut tail_rem: Vec<FillShape> = Vec::new();
+        let mut current_hid: Option<ShapeId> = None;
+        for rem in fl.remainder {
+            if fl.hidden.contains(&rem.shape_id) {
+                current_hid = Some(rem.shape_id);
+            }
+            if let Some(hid) = current_hid {
+                rem_by_hid.entry(hid).or_default().push(rem);
+            } else {
+                tail_rem.push(rem);
+            }
+        }
+        let mut prefix = Vec::with_capacity(self.shapes.len() + fl.pieces.len());
+        let mut trailing = Vec::new();
+        for (idx, shape) in self.shapes.drain(..).enumerate() {
+            let dst = if idx < insert_limit {
+                &mut prefix
+            } else {
+                &mut trailing
+            };
+            if fl.hidden.contains(&shape.shape_id) {
+                if let Some(rems) = rem_by_hid.remove(&shape.shape_id) {
+                    dst.extend(rems);
+                }
+            } else {
+                dst.push(shape);
+            }
+        }
+        for (_, rems) in rem_by_hid {
+            prefix.extend(rems);
+        }
+        prefix.extend(tail_rem);
+        prefix.extend(fl.pieces);
+        prefix.extend(trailing);
+        if self.layer_order_ids.len() > 1 && prefix.len() > 1 {
+            let order_ids = &self.layer_order_ids;
+            prefix.sort_by_key(|s| layer_order_index(order_ids, s.layer_id));
+        }
+        self.shapes = prefix;
+    }
+}
+
+struct InitialLayerShapeState {
+    shape_id: ShapeId,
+    mesh_revision: u64,
+    color: Color32,
+    group_path: Vec<u64>,
+    symbol_instance: Option<crate::symbol::SymbolInstanceBinding>,
+}
+
+impl InitialLayerShapeState {
+    #[inline]
+    fn from_shape(s: &FillShape) -> Self {
+        Self {
+            shape_id: s.shape_id,
+            mesh_revision: s.mesh_revision,
+            color: s.color,
+            group_path: s.group_path.clone(),
+            symbol_instance: s.symbol_instance,
+        }
+    }
+
+    #[inline]
+    fn matches(&self, s: &FillShape) -> bool {
+        self.shape_id == s.shape_id
+            && self.mesh_revision == s.mesh_revision
+            && self.color == s.color
+            && self.group_path == s.group_path
+            && self.symbol_instance == s.symbol_instance
+    }
+}
+
+/// 現在フレームで編集可能（表示中・非ロック・フレーム範囲内）な全レイヤーID一覧を背面→前面順で返す
+pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
+    let tl = tab.active_timeline();
+    let frame = tl.current_frame;
+    tl.layers
+        .iter()
+        .filter(|l| l.visible && !l.locked && frame < l.frame_count && !l.keyframes.is_empty())
+        .map(|l| l.id)
+        .collect()
+}
+
+/// 文書の図形を書き換える唯一の入口：
+/// - 対象レイヤー群 `layer_ids` の現在フレームの図形を `world_xform` でステージ座標にして `f` に渡す（ルート時は座標変換しない）。
+/// - `f` のあと、変わった図形だけ逆変換して書き戻す。変わっていない図形（`shape_id` と `mesh_revision` が同じ）は
+///   `shape_id` の `HashMap` で $O(N)$ 対応づけして元のローカル図形をそのまま残す。
+/// - トゥイーン途中フレームへのキーフレーム挿入、動的シンボル、レイヤーID正規化、レイヤー順ソートを一括処理する。
+pub(crate) fn edit_layers(
+    tab: &mut Tab,
+    layer_ids: &[LayerId],
+    f: impl FnOnce(&mut LayerEdit),
+) -> bool {
+    let world_xform = tab.session.edit_path.world_xform();
+    let has_world_xform = world_xform != Affine::IDENTITY;
+    let inv_xform = if !has_world_xform || world_xform.determinant().abs() <= 1e-9 {
+        Affine::IDENTITY
+    } else {
+        world_xform.inverse()
+    };
+    let need_inv = inv_xform != Affine::IDENTITY;
+    let editing_group_path = tab.session.editing_group_path.clone();
+    let mut next_group_id = tab.doc.next_group_id.max(1);
+
+    let any_cel_modified = tab.with_active_timeline_mut(|tl, library| {
+        let frame = tl.current_frame;
+        let fallback_lid = if tl.is_active_layer_editable() {
+            Some(tl.active_layer_id())
+        } else {
+            tl.layers
+                .iter()
+                .find(|l| {
+                    l.visible && !l.locked && frame < l.frame_count && !l.keyframes.is_empty()
+                })
+                .map(|l| l.id)
+        };
+        let include_fallback =
+            layer_ids.is_empty() || layer_ids.iter().any(|&id| !tl.is_layer_editable_by_id(id));
+
+        let mut target_layer_indices = Vec::new();
+        for (l_idx, layer) in tl.layers.iter().enumerate() {
+            if !layer.visible
+                || layer.locked
+                || frame >= layer.frame_count
+                || layer.keyframes.is_empty()
+            {
+                continue;
+            }
+            if layer_ids.contains(&layer.id)
+                || (include_fallback && fallback_lid == Some(layer.id))
+            {
+                target_layer_indices.push(l_idx);
+            }
+        }
+        if target_layer_indices.is_empty() {
+            return false;
+        }
+
+        let mut loaded_shapes = Vec::new();
+        let mut initial_layer_states: HashMap<LayerId, Vec<InitialLayerShapeState>> =
+            HashMap::with_capacity(target_layer_indices.len());
+        let mut initial_stage_inst_xform: HashMap<(InstanceGid, u64), Affine> = HashMap::new();
+        let mut orig_local_shapes_map: HashMap<ShapeId, FillShape> = HashMap::new();
+        let mut orig_local_inst_map: HashMap<(InstanceGid, u64), Affine> = HashMap::new();
+
+        for &l_idx in &target_layer_indices {
+            let lid = tl.layers[l_idx].id;
+            if let Some(cel) = tl.layers[l_idx].cel_at(frame) {
+                for orig in cel.shapes.iter() {
+                    orig_local_shapes_map.insert(orig.shape_id, orig.clone());
+                }
+                if has_world_xform {
+                    for orig_inst in cel.instances.iter() {
+                        orig_local_inst_map.insert(
+                            (orig_inst.binding.instance_gid, orig_inst.binding.symbol_id),
+                            orig_inst.binding.xform,
+                        );
+                    }
+                }
+            }
+            let mut layer_shapes = tl.evaluate_layer_shapes_at(l_idx, frame, library);
+            if has_world_xform {
+                for s in &mut layer_shapes {
+                    let orig_rev = s.mesh_revision;
+                    if s.is_empty_symbol_marker() {
+                        if let Some(b) = &mut s.symbol_instance {
+                            b.xform = world_xform * b.xform;
+                        }
+                        s.rebuild_cache();
+                    } else {
+                        s.transform(world_xform);
+                        if world_xform.determinant().abs() < 1e-12 {
+                            if let Some(b) = &mut s.symbol_instance {
+                                b.xform = world_xform * b.xform;
+                            }
+                        }
+                    }
+                    s.mesh_revision = orig_rev;
+                }
+            }
+            for s in &layer_shapes {
+                if let Some(b) = s.symbol_instance {
+                    initial_stage_inst_xform.insert((b.instance_gid, b.symbol_id), b.xform);
+                }
+            }
+            let init_states = layer_shapes
+                .iter()
+                .map(InitialLayerShapeState::from_shape)
+                .collect();
+            initial_layer_states.insert(lid, init_states);
+            loaded_shapes.extend(layer_shapes);
+        }
+
+        let layer_order_ids: Vec<LayerId> = tl.layers.iter().map(|l| l.id).collect();
+        let mut edit = LayerEdit {
+            shapes: loaded_shapes,
+            editing_group_path,
+            layer_order_ids,
+            next_group_id,
+        };
+        f(&mut edit);
+        next_group_id = edit.next_group_id;
+
+        tl.normalize_shape_layer_ids(&mut edit.shapes);
+        Session::sort_vec_by_layer_order(&mut edit.shapes, tl);
+
+        let mut any_modified = false;
+        for &l_idx in &target_layer_indices {
+            let lid = tl.layers[l_idx].id;
+            let is_unchanged = initial_layer_states.get(&lid).is_some_and(|init_list| {
+                let mut iter = edit.shapes.iter().filter(|s| s.layer_id == lid);
+                init_list
+                    .iter()
+                    .all(|st| iter.next().is_some_and(|s| st.matches(s)))
+                    && iter.next().is_none()
+            });
+            if is_unchanged {
+                continue;
+            }
+
+            let is_tween_mid = tl.layers[l_idx]
+                .interpolated_tween_binding_at(frame)
+                .is_some();
+            if is_tween_mid {
+                let (prev_kf_start, prev_tween_rotate) = tl.layers[l_idx]
+                    .keyframe_index_at(frame)
+                    .map(|i| {
+                        let kf = &tl.layers[l_idx].keyframes[i];
+                        (kf.start_frame, kf.tween_rotate)
+                    })
+                    .unwrap_or((frame, TweenRotate::Auto));
+                let elapsed = frame.saturating_sub(prev_kf_start);
+                let new_shapes: Vec<FillShape> = edit
+                    .shapes
+                    .iter()
+                    .filter(|s| s.layer_id == lid)
+                    .cloned()
+                    .collect();
+                let kf_idx = tl.layers[l_idx].insert_keyframe(frame, false);
+                let (mut non_symbol_shapes, mut next_instances) =
+                    Cel::split_shapes_and_instances(new_shapes);
+                if has_world_xform && need_inv {
+                    for s in &mut non_symbol_shapes {
+                        s.transform(inv_xform);
+                    }
+                }
+                for inst in &mut next_instances {
+                    if has_world_xform && need_inv {
+                        inst.binding.xform = inv_xform * inst.binding.xform;
+                    }
+                    if inst.binding.loop_mode != SymbolLoopMode::SingleFrame {
+                        inst.binding.first_frame =
+                            inst.binding.first_frame.saturating_add(elapsed);
+                    }
+                }
+                tl.layers[l_idx].keyframes[kf_idx].cel =
+                    Cel::new_with_instances(non_symbol_shapes, next_instances);
+                let has_single_sym = tl.layers[l_idx].keyframes[kf_idx]
+                    .cel
+                    .single_symbol_instance()
+                    .is_some();
+                tl.layers[l_idx].keyframes[kf_idx].tween = has_single_sym;
+                if has_single_sym {
+                    tl.layers[l_idx].keyframes[kf_idx].tween_rotate = prev_tween_rotate;
+                }
+                any_modified = true;
+                continue;
+            }
+
+            if let Some(kf_idx) = tl.layers[l_idx].keyframe_index_at(frame) {
+                let kf = &mut tl.layers[l_idx].keyframes[kf_idx];
+                let updated_cel_shapes: Vec<FillShape> = edit
+                    .shapes
+                    .iter()
+                    .filter(|s| s.layer_id == lid)
+                    .cloned()
+                    .collect();
+                let (mut non_symbol_shapes, mut next_instances) =
+                    Cel::split_shapes_and_instances(updated_cel_shapes);
+                for s in &mut non_symbol_shapes {
+                    if let Some(orig) = orig_local_shapes_map
+                        .get(&s.shape_id)
+                        .filter(|orig| orig.mesh_revision == s.mesh_revision)
+                    {
+                        let mut kept = orig.clone();
+                        kept.color = s.color;
+                        kept.layer_id = s.layer_id;
+                        kept.group_path = s.group_path.clone();
+                        kept.symbol_instance = s.symbol_instance;
+                        *s = kept;
+                        continue;
+                    }
+                    if has_world_xform && need_inv {
+                        s.transform(inv_xform);
+                    }
+                }
+                if has_world_xform {
+                    for inst in &mut next_instances {
+                        let key = (inst.binding.instance_gid, inst.binding.symbol_id);
+                        let stage_xform_unchanged = initial_stage_inst_xform
+                            .get(&key)
+                            .is_some_and(|&init_xf| init_xf == inst.binding.xform);
+                        if stage_xform_unchanged {
+                            if let Some(&orig_xf) = orig_local_inst_map.get(&key) {
+                                inst.binding.xform = orig_xf;
+                                continue;
+                            }
+                        }
+                        if need_inv {
+                            inst.binding.xform = inv_xform * inst.binding.xform;
+                        }
+                    }
+                }
+                kf.cel.set_parts(non_symbol_shapes, next_instances);
+                if kf.tween && kf.cel.single_symbol_instance().is_none() {
+                    kf.tween = false;
+                }
+                any_modified = true;
+            }
+        }
+        any_modified
+    });
+
+    tab.doc.next_group_id = next_group_id;
+    tab.session.sanitize_editing_scope();
+    any_cel_modified
+}
 
 /// 現在の編集スコープ（グループ内であればそのグループの所属レイヤー、そうでなければ現在のアクティブレイヤー）の `layer_id` を返す
 pub(crate) fn active_scope_layer_id(session: &Session, timeline: &Timeline) -> u64 {
     if !session.editing_group_path.is_empty() {
         if let Some(s) = session
-            .shapes
+            .scene()
             .iter()
             .find(|s| s.is_in_editing_scope(&session.editing_group_path))
         {
@@ -2743,11 +3109,9 @@ pub(crate) fn sync_timeline_layer_from_canvas_selection(tab: &mut Tab) {
 }
 
 /// 選択ツールまたは自由変形ツールで進行中だった図形変形・移動ドラッグのみを中断し、
-/// プレビュー変形中だった図形をドラッグ開始前の状態へ安全に巻き戻す（ブラシのストローク状態には干渉しない）
+/// 仮表示 `Overlay` を破棄してドラッグ開始前の状態へ安全に巻き戻す（ブラシのストローク状態には干渉しない）
 pub(crate) fn rollback_shape_drag(tab: &mut Tab) {
-    if tab.session.rollback_shape_drag() {
-        sync_shapes_to_timeline(tab);
-    }
+    let _ = tab.session.rollback_shape_drag();
 }
 
 /// 進行中のすべてのキャンバスドラッグ操作（ブラシ/消しゴム・輪郭変形・移動・自由変形）を中断し、
@@ -2776,42 +3140,6 @@ pub(crate) fn toggle_select_sub_mode(
         target_mode
     };
     clear_selection(tab);
-}
-
-/// キャンバスの作業用 `tab.session.shapes` を、各図形の `layer_id` ごとに現在フレームの `Cel` に振り分けて書き戻す
-pub(crate) fn sync_shapes_to_timeline(tab: &mut Tab) {
-    tab.session.sanitize_editing_scope();
-    let layer_ids: Vec<LayerId> = tab.active_timeline().layers.iter().map(|l| l.id).collect();
-    tab.session.layer_order_ids = layer_ids;
-    tab.session.invalidate_scene_order();
-    if tab.session.is_all_shapes_unchanged() {
-        return;
-    }
-    let mut shapes = std::mem::take(&mut tab.session.shapes);
-    let sigs = tab.session.take_loaded_signatures();
-    let world_xform = tab.session.edit_path.world_xform();
-    tab.with_active_timeline_mut(|tl, library| {
-        tl.normalize_shape_layer_ids(&mut shapes);
-        Session::sort_vec_by_layer_order(&mut shapes, tl);
-        tl.write_shapes_to_editable_cels(&shapes, library, &sigs, world_xform)
-    });
-    tab.session.shapes = shapes;
-    tab.session.restore_loaded_signatures_and_record(sigs);
-}
-
-/// 現在フレームにおける全ての「表示中かつ非ロック（`visible && !locked`）」レイヤーの `Cel` から
-/// 背面レイヤー→前面レイヤーの順で（トゥイーン補間およびシンボルの内部タイムラインフレームも評価しつつ）図形列を一括解決・読み込みする
-pub(crate) fn load_shapes_from_timeline(tab: &mut Tab) {
-    cancel_active_drag(tab);
-    let layer_ids: Vec<LayerId> = tab.active_timeline().layers.iter().map(|l| l.id).collect();
-    tab.session.layer_order_ids = layer_ids;
-    let resolved = Scene::resolve(
-        tab.active_timeline(),
-        &tab.doc.library,
-        tab.session.edit_path.world_xform(),
-        &tab.session.shapes,
-    );
-    tab.session.replace_loaded_shapes(resolved);
 }
 
 /// タイムライン上で選択されたセル範囲（単一キーフレームまたは複数レイヤー範囲）に属するすべての図形をキャンバス上で選択状態にする
@@ -2875,7 +3203,7 @@ pub(crate) fn draw_registration_cross(
 pub(crate) fn merge_floating_into_base_shapes(
     base_shapes: &mut Vec<FillShape>,
     fl: Floating,
-    timeline: &Timeline,
+    layer_order_ids: &[LayerId],
 ) {
     if !fl.hidden.is_empty() || !fl.remainder.is_empty() {
         let mut rem_chunks: HashMap<ShapeId, Vec<FillShape>> = HashMap::new();
@@ -2910,7 +3238,37 @@ pub(crate) fn merge_floating_into_base_shapes(
     if !fl.pieces.is_empty() {
         merge_shapes_into_canvas(base_shapes, fl.pieces);
     }
-    Session::sort_vec_by_layer_order(base_shapes, timeline);
+    if layer_order_ids.len() > 1 && base_shapes.len() > 1 {
+        base_shapes.sort_by_key(|s| layer_order_index(layer_order_ids, s.layer_id));
+    }
+}
+
+/// `Floating` が影響するレイヤーID一覧を収集する
+pub(crate) fn floating_target_layer_ids(tab: &Tab, fl: &Floating) -> Vec<LayerId> {
+    let mut lids: Vec<LayerId> = Vec::new();
+    let mut push_unique = |lid: LayerId| {
+        if !lids.contains(&lid) {
+            lids.push(lid);
+        }
+    };
+    for p in &fl.pieces {
+        push_unique(p.layer_id);
+    }
+    for r in &fl.remainder {
+        push_unique(r.layer_id);
+    }
+    if !fl.hidden.is_empty() {
+        for s in tab.session.base_cache.shapes() {
+            if fl.hidden.contains(&s.shape_id) {
+                push_unique(s.layer_id);
+            }
+        }
+    }
+    if lids.is_empty() {
+        let lid = active_scope_layer_id(&tab.session, tab.active_timeline());
+        lids.push(lid);
+    }
+    lids
 }
 
 /// `tab.session.floating` のうち `keep_indices`（`Scene` インデックス）に含まれない選択図形を確定
@@ -2938,12 +3296,12 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             return true;
         }
         if fl.needs_merge_commit() {
-            let mut shapes = std::mem::take(&mut tab.session.shapes);
-            merge_floating_into_base_shapes(&mut shapes, fl, tab.active_timeline());
-            tab.session.shapes = shapes;
+            let lids = floating_target_layer_ids(tab, &fl);
+            edit_layers(tab, &lids, |edit| {
+                merge_floating_into_base_shapes(&mut edit.shapes, fl, &edit.layer_order_ids);
+            });
             tab.session.rebuild_overlay_from_floating();
             tab.session.retain_existing_selection();
-            sync_shapes_to_timeline(tab);
             return true;
         }
         tab.session.rebuild_overlay_from_floating();
@@ -3012,9 +3370,10 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             hidden: std::mem::take(&mut fl.hidden),
             modified: true,
         };
-        let mut shapes = std::mem::take(&mut tab.session.shapes);
-        merge_floating_into_base_shapes(&mut shapes, to_commit, tab.active_timeline());
-        tab.session.shapes = shapes;
+        let lids = floating_target_layer_ids(tab, &to_commit);
+        edit_layers(tab, &lids, |edit| {
+            merge_floating_into_base_shapes(&mut edit.shapes, to_commit, &edit.layer_order_ids);
+        });
     }
     if !kept_pieces.is_empty() {
         fl.pieces = kept_pieces;
@@ -3022,9 +3381,6 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
     }
     tab.session.rebuild_overlay_from_floating();
     tab.session.retain_existing_selection();
-    if merged_any {
-        sync_shapes_to_timeline(tab);
-    }
     merged_any
 }
 
@@ -3067,13 +3423,20 @@ pub(crate) fn insert_and_select_shapes_in_scope(
             }
         }
         if !non_raw_shapes.is_empty() {
-            let insert_pos = tab.session.scope_insert_index();
-            let mut shapes = std::mem::take(&mut tab.session.shapes);
-            shapes.splice(insert_pos..insert_pos, non_raw_shapes);
-            Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
-            tab.session.shapes = shapes;
+            let mut lids: Vec<LayerId> = non_raw_shapes.iter().map(|s| s.layer_id).collect();
+            lids.push(active_scope_layer_id(&tab.session, tab.active_timeline()));
+            edit_layers(tab, &lids, |edit| {
+                let insert_pos = edit.scope_insert_index();
+                edit.shapes.splice(insert_pos..insert_pos, non_raw_shapes);
+            });
+            for s in tab.scene().iter() {
+                if tab.session.selection.contains_shape(s) {
+                    // keep selection
+                }
+            }
         }
         if !raw_pieces.is_empty() {
+            tab.active_timeline().normalize_shape_layer_ids(&mut raw_pieces);
             tab.session.floating = Some(Floating {
                 origin,
                 pieces: raw_pieces,
@@ -3086,11 +3449,14 @@ pub(crate) fn insert_and_select_shapes_in_scope(
         }
         tab.session.rebuild_overlay_from_floating();
     } else {
-        let insert_pos = tab.session.scope_insert_index();
-        let mut shapes = std::mem::take(&mut tab.session.shapes);
-        shapes.splice(insert_pos..insert_pos, new_shapes);
-        Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
-        tab.session.shapes = shapes;
+        if !new_shapes.is_empty() {
+            let mut lids: Vec<LayerId> = new_shapes.iter().map(|s| s.layer_id).collect();
+            lids.push(active_scope_layer_id(&tab.session, tab.active_timeline()));
+            edit_layers(tab, &lids, |edit| {
+                let insert_pos = edit.scope_insert_index();
+                edit.shapes.splice(insert_pos..insert_pos, new_shapes);
+            });
+        }
         tab.session.floating = None;
         tab.session.rebuild_overlay_from_floating();
     }

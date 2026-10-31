@@ -7,7 +7,7 @@ use kurbo::{Affine, Point};
 #[cfg(test)]
 pub(crate) use crate::timeline::interpolate_affine_with_pivot;
 pub(crate) use crate::timeline::{ResolvedCelSig, SymbolInstance, TweenRotate, TweenState};
-use crate::timeline::{lru_get, lru_insert, Cel, CelMeshCache, Layer, LoadedShapeSig, Timeline};
+use crate::timeline::{lru_get, lru_insert, Cel, CelMeshCache, Layer, Timeline};
 use crate::vector_engine::{
     append_mesh, next_shape_id, transform_mesh_to_screen, transform_mesh_to_screen_onion,
     union_bounding_boxes, Contour, FillShape, SyncCache,
@@ -661,38 +661,11 @@ impl Document {
         true
     }
 
-    /// 指定した `symbol_id` をライブラリから削除し、ルートタイムライン・キャンバス図形・入れ子シンボルから参照をデタッチする
-    pub(crate) fn remove_symbol_and_detach(
-        &mut self,
-        symbol_id: u64,
-        canvas_shapes: &mut Vec<FillShape>,
-    ) -> bool {
+    /// 指定した `symbol_id` をライブラリから削除し、ルートタイムライン・入れ子シンボルから参照をデタッチする
+    pub(crate) fn remove_symbol_and_detach(&mut self, symbol_id: u64) -> bool {
         if !self.library.iter().any(|s| s.id == symbol_id) {
             return false;
         }
-        let mut detached_inner_gid_map: Vec<((u64, u64), u64)> = Vec::new();
-        for s in canvas_shapes.iter_mut() {
-            if let Some(b) = s.symbol_instance.filter(|b| b.symbol_id == symbol_id) {
-                s.symbol_instance = None;
-                if let Some(pos) = s.group_path.iter().position(|&g| g == b.instance_gid) {
-                    for inner_gid in &mut s.group_path[(pos + 1)..] {
-                        let key = (b.instance_gid, *inner_gid);
-                        let mapped = if let Some(&(_, m)) =
-                            detached_inner_gid_map.iter().find(|&&(k, _)| k == key)
-                        {
-                            m
-                        } else {
-                            let id = self.next_group_id;
-                            self.next_group_id = self.next_group_id.saturating_add(1);
-                            detached_inner_gid_map.push((key, id));
-                            id
-                        };
-                        *inner_gid = mapped;
-                    }
-                }
-            }
-        }
-        canvas_shapes.retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
         for layer in &mut self.root.layers {
             layer.detach_symbol_id(symbol_id, &self.library, &mut self.next_group_id);
         }
@@ -1294,151 +1267,6 @@ impl Layer {
 }
 
 impl Timeline {
-    /// 与えられた図形リスト `shapes` を、現在フレームの各「表示中かつ非ロック」レイヤーの `Cel` に `layer_id` ごとに振り分けて書き込む
-    /// （変更がないレイヤーはクローンとキャッシュ破棄をスキップし、変更された図形・インスタンスのみ `world_xform` の逆変換を適用する）
-    pub(crate) fn write_shapes_to_editable_cels(
-        &mut self,
-        shapes: &[FillShape],
-        library: &[SymbolDef],
-        loaded_signatures: &[LoadedShapeSig],
-        world_xform: Affine,
-    ) -> bool {
-        let has_world_xform = world_xform != Affine::IDENTITY;
-        let inv_xform = if !has_world_xform || world_xform.determinant().abs() <= 1e-9 {
-            Affine::IDENTITY
-        } else {
-            world_xform.inverse()
-        };
-        let need_inv = inv_xform != Affine::IDENTITY;
-        let frame = self.current_frame;
-        let mut any_cel_modified = false;
-        for l_idx in 0..self.layers.len() {
-            if !self.layers[l_idx].visible || self.layers[l_idx].locked {
-                continue;
-            }
-            let lid = self.layers[l_idx].id;
-            let is_tween_mid = self.layers[l_idx]
-                .interpolated_tween_binding_at(frame)
-                .is_some();
-            let has_multiframe = self.layers[l_idx]
-                .cel_at(frame)
-                .is_some_and(|c| c.has_dynamic_symbol(library));
-
-            if (is_tween_mid || has_multiframe || has_world_xform)
-                && Self::is_layer_unchanged_since_load(loaded_signatures, lid, shapes)
-            {
-                continue;
-            }
-
-            if is_tween_mid {
-                let (prev_kf_start, prev_tween_rotate) = self.layers[l_idx]
-                    .keyframe_index_at(frame)
-                    .map(|i| {
-                        let kf = &self.layers[l_idx].keyframes[i];
-                        (kf.start_frame, kf.tween_rotate)
-                    })
-                    .unwrap_or((frame, TweenRotate::Auto));
-                let elapsed = frame.saturating_sub(prev_kf_start);
-                let new_shapes: Vec<FillShape> = shapes
-                    .iter()
-                    .filter(|s| s.layer_id == lid)
-                    .cloned()
-                    .collect();
-                let kf_idx = self.layers[l_idx].insert_keyframe(frame, false);
-                let (mut non_symbol_shapes, mut next_instances) =
-                    Cel::split_shapes_and_instances(new_shapes);
-                if need_inv {
-                    for s in &mut non_symbol_shapes {
-                        s.transform(inv_xform);
-                    }
-                }
-                for inst in &mut next_instances {
-                    if need_inv {
-                        inst.binding.xform = inv_xform * inst.binding.xform;
-                    }
-                    if inst.binding.loop_mode != SymbolLoopMode::SingleFrame {
-                        inst.binding.first_frame =
-                            inst.binding.first_frame.saturating_add(elapsed);
-                    }
-                }
-                self.layers[l_idx].keyframes[kf_idx].cel =
-                    Cel::new_with_instances(non_symbol_shapes, next_instances);
-                let has_single_sym = self.layers[l_idx].keyframes[kf_idx]
-                    .cel
-                    .single_symbol_instance()
-                    .is_some();
-                self.layers[l_idx].keyframes[kf_idx].tween = has_single_sym;
-                if has_single_sym {
-                    self.layers[l_idx].keyframes[kf_idx].tween_rotate = prev_tween_rotate;
-                }
-                any_cel_modified = true;
-                continue;
-            }
-
-            if let Some(kf_idx) = self.layers[l_idx].keyframe_index_at(frame) {
-                let kf = &mut self.layers[l_idx].keyframes[kf_idx];
-                let updated_cel_shapes: Vec<FillShape> = shapes
-                    .iter()
-                    .filter(|s| s.layer_id == lid)
-                    .cloned()
-                    .collect();
-                let (mut non_symbol_shapes, mut next_instances) =
-                    Cel::split_shapes_and_instances(updated_cel_shapes);
-                if has_world_xform {
-                    for s in &mut non_symbol_shapes {
-                        let is_unmodified = loaded_signatures
-                            .iter()
-                            .any(|sig| sig.matches_with_layer(s));
-                        if is_unmodified {
-                            if let Some(orig) =
-                                kf.cel.shapes.iter().find(|orig| orig.shape_id == s.shape_id)
-                            {
-                                *s = orig.clone();
-                                continue;
-                            }
-                        }
-                        if need_inv {
-                            s.transform(inv_xform);
-                        }
-                    }
-                    for inst in &mut next_instances {
-                        let is_unmodified = loaded_signatures
-                            .iter()
-                            .any(|sig| sig.matches_instance(inst));
-                        if is_unmodified {
-                            if let Some(orig_inst) = kf.cel.instances.iter().find(|orig| {
-                                orig.binding.instance_gid == inst.binding.instance_gid
-                                    && orig.binding.symbol_id == inst.binding.symbol_id
-                            }) {
-                                inst.binding = orig_inst.binding;
-                                continue;
-                            }
-                        }
-                        if need_inv {
-                            inst.binding.xform = inv_xform * inst.binding.xform;
-                        }
-                    }
-                }
-                let unchanged = *kf.cel.instances == next_instances
-                    && kf.cel.shapes.len() == non_symbol_shapes.len()
-                    && kf
-                        .cel
-                        .shapes
-                        .iter()
-                        .zip(&non_symbol_shapes)
-                        .all(|(a, b)| LoadedShapeSig::shapes_match(a, b));
-                if !unchanged {
-                    kf.cel.set_parts(non_symbol_shapes, next_instances);
-                    if kf.tween && kf.cel.single_symbol_instance().is_none() {
-                        kf.tween = false;
-                    }
-                    any_cel_modified = true;
-                }
-            }
-        }
-        any_cel_modified
-    }
-
     /// 指定レイヤー `layer_idx` の指定フレーム `frame` における図形列を、クラシックトゥイーン補間およびシンボル内タイムライン評価込みで返す
     pub(crate) fn evaluate_layer_shapes_at(
         &self,
