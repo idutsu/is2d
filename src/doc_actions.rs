@@ -430,9 +430,10 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         host.stop_playback();
     }
     let (tab, tool, clipboard, toast) = host.parts_mut();
+    tab.sync_scene_from_session();
     let coalesce = action.coalesce_key(tab);
 
-    match action {
+    let res = match action {
         Action::PaintStroke {
             points,
             radius,
@@ -615,20 +616,34 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             ApplyResult::Applied(apply_affine_to_selected_inner(tab, affine))
         }
         Action::ScaleSelection { sx, sy } => {
-            let Some(bbox) = tab.session.selection_bounding_box(tab.view.zoom) else {
+            let Some(bbox) = tab
+                .scene
+                .selection_bounding_box(&tab.session.selection, tab.view.zoom)
+            else {
                 return ApplyResult::Applied(false);
             };
-            let pivot = tab.session.active_transform_pivot(bbox);
+            let pivot = tab.scene.active_transform_pivot(
+                &tab.session.selection,
+                tab.session.transform_pivot,
+                bbox,
+            );
             ApplyResult::Applied(apply_affine_to_selected_inner(
                 tab,
                 affine_scale_around(pivot, sx, sy),
             ))
         }
         Action::FlipSelection { flip_x, flip_y } => {
-            let Some(bbox) = tab.session.selection_bounding_box(tab.view.zoom) else {
+            let Some(bbox) = tab
+                .scene
+                .selection_bounding_box(&tab.session.selection, tab.view.zoom)
+            else {
                 return ApplyResult::Applied(false);
             };
-            let pivot = tab.session.active_transform_pivot(bbox);
+            let pivot = tab.scene.active_transform_pivot(
+                &tab.session.selection,
+                tab.session.transform_pivot,
+                bbox,
+            );
             let sx = if flip_x { -1.0 } else { 1.0 };
             let sy = if flip_y { -1.0 } else { 1.0 };
             ApplyResult::Applied(apply_affine_to_selected_inner(
@@ -637,10 +652,17 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             ))
         }
         Action::RotateSelection { angle_rad } => {
-            let Some(bbox) = tab.session.selection_bounding_box(tab.view.zoom) else {
+            let Some(bbox) = tab
+                .scene
+                .selection_bounding_box(&tab.session.selection, tab.view.zoom)
+            else {
                 return ApplyResult::Applied(false);
             };
-            let pivot = tab.session.active_transform_pivot(bbox);
+            let pivot = tab.scene.active_transform_pivot(
+                &tab.session.selection,
+                tab.session.transform_pivot,
+                bbox,
+            );
             ApplyResult::Applied(apply_affine_to_selected_inner(
                 tab,
                 affine_rotate_around(pivot, angle_rad),
@@ -843,7 +865,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             tab.history.end_coalesce();
             ApplyResult::Applied(true)
         }
-    }
+    };
+    tab.sync_scene_from_session();
+    res
 }
 
 // ============================================================================
@@ -912,7 +936,7 @@ fn apply_raw_outline(tab: &mut Tab, active_tool: Tool, brush_color: Color32, raw
 }
 
 fn collect_all_visible_shapes(tab: &Tab) -> Vec<FillShape> {
-    let mut out = Vec::with_capacity(tab.session.shapes.len());
+    let mut out = Vec::with_capacity(tab.scene.len());
     for (layer_idx, layer) in tab.doc.root.layers.iter().enumerate() {
         if !layer.visible {
             continue;
@@ -926,8 +950,8 @@ fn collect_all_visible_shapes(tab: &Tab) -> Vec<FillShape> {
         } else {
             let lid = layer.id;
             out.extend(
-                tab.session
-                    .shapes
+                tab.scene
+                    .shapes()
                     .iter()
                     .filter(|s| s.layer_id == lid)
                     .cloned(),
@@ -945,14 +969,14 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
 
     // 0. 選択領域が存在する場合：選択中の「生シェイプ」のみにバケツで色を流し込む（グループは無効）
     if !tab.session.selection.is_empty() {
-        let clicked_selected_raw = tab.session.shapes.iter().any(|s| {
+        let clicked_selected_raw = tab.scene.shapes().iter().any(|s| {
             tab.session.selection.contains_shape(s)
                 && tab.doc.root.is_layer_editable_by_id(s.layer_id)
                 && s.is_raw_at_scope(&tab.session.editing_group_path)
                 && s.contains_point(pt)
         });
         if clicked_selected_raw {
-            let any_color_diff = tab.session.shapes.iter().any(|s| {
+            let any_color_diff = tab.scene.shapes().iter().any(|s| {
                 tab.session.selection.contains_shape(s)
                     && tab.doc.root.is_layer_editable_by_id(s.layer_id)
                     && s.is_raw_at_scope(&tab.session.editing_group_path)
@@ -980,8 +1004,10 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
     let all_visible_shapes = collect_all_visible_shapes(tab);
     let target_layer_ord = tab.doc.root.layer_index_by_id(target_lid).unwrap_or(0);
 
-    if let Some(hit_idx) = (0..tab.session.shapes.len()).rev().find(|&idx| {
-        let s = &tab.session.shapes[idx];
+    if let Some(hit_idx) = (0..tab.scene.len()).rev().find(|&idx| {
+        let Some(s) = tab.scene.get(idx) else {
+            return false;
+        };
         s.layer_id == target_lid
             && s.is_in_editing_scope(&tab.session.editing_group_path)
             && s.contains_point(pt)
@@ -994,7 +1020,9 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                     .any(|s| s.layer_id == layer.id && s.contains_point(pt))
         });
 
-        let hit_shape = &tab.session.shapes[hit_idx];
+        let Some(hit_shape) = tab.scene.get(hit_idx).cloned() else {
+            return false;
+        };
         if !occluded_above && hit_shape.is_raw_at_scope(&tab.session.editing_group_path) {
             if hit_shape.color == fill_color {
                 return false;
@@ -1012,7 +1040,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 .collect();
             if !overlapping_walls.is_empty() {
                 let pieces = boolean_operation(
-                    std::slice::from_ref(hit_shape),
+                    std::slice::from_ref(&hit_shape),
                     &overlapping_walls,
                     BoolOp::Difference,
                     fill_color,
@@ -1051,8 +1079,8 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
         .collect();
     let enclosed_opt = find_enclosed_region_at(&wall_shapes, pt, fill_color).or_else(|| {
         let active_layer_raw: Vec<FillShape> = tab
-            .session
-            .shapes
+            .scene
+            .shapes()
             .iter()
             .filter(|s| {
                 s.layer_id == target_lid
@@ -1145,6 +1173,7 @@ fn apply_deform_shape(
 fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     clear_selection(tab);
     let target = compute_hover_target(
+        &tab.scene,
         &tab.session,
         from,
         tab.view.zoom,
@@ -1162,7 +1191,7 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     };
     let snapshot = tab.session.take_or_clone_unsliced_snapshot();
     let Some(orig_seg) = tab
-        .session
+        .scene
         .get_contour_segment(shape_idx, contour_idx, seg_idx)
     else {
         return false;
@@ -1178,6 +1207,7 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
 fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     clear_selection(tab);
     let target = compute_hover_target(
+        &tab.scene,
         &tab.session,
         from,
         tab.view.zoom,
@@ -1194,8 +1224,7 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     };
     let snapshot = tab.session.take_or_clone_unsliced_snapshot();
     let Some((orig_prev_ctrl, orig_curr_ctrl)) = tab
-        .session
-        .shapes
+        .scene
         .get(shape_idx)
         .and_then(|s| s.get_contour(contour_idx))
         .and_then(|contour| {
@@ -1228,7 +1257,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
     } else {
         SelectSubMode::DeleteAnchor
     };
-    let target = compute_hover_target(&tab.session, pt, zoom, sub_mode);
+    let target = compute_hover_target(&tab.scene, &tab.session, pt, zoom, sub_mode);
     let had_unsliced = tab.session.has_unsliced_snapshot();
     let snapshot = tab.session.take_or_clone_unsliced_snapshot();
     let modified_shape = match (is_add, target) {
@@ -1291,7 +1320,10 @@ fn apply_set_selected_symbol_world_pivot(
     world_pivot: Option<Point>,
     commit_to_timeline: bool,
 ) -> bool {
-    let Some(binding) = tab.session.selected_single_symbol_binding() else {
+    let Some(binding) = tab
+        .scene
+        .selected_single_symbol_binding(&tab.session.selection)
+    else {
         return false;
     };
     let new_local_pivot = match world_pivot {
@@ -1306,13 +1338,14 @@ fn apply_set_selected_symbol_world_pivot(
     if (new_local_pivot - binding.pivot).hypot() <= 1e-7 {
         return true;
     }
-    if !tab.session.selection_modified {
-        tab.session.restore_unsliced_preserving_selection();
+    if !tab.session.selection_modified && tab.session.restore_unsliced_preserving_selection() {
+        tab.sync_scene_from_session();
     }
     let undo_snapshot =
         commit_to_timeline.then(|| tab.session.take_or_clone_unsliced_snapshot());
     tab.session
         .update_symbol_instance_binding(binding.instance_gid, |b| b.pivot = new_local_pivot);
+    tab.sync_scene_from_session();
     if let Some(snapshot) = undo_snapshot {
         commit_canvas_mutation(tab, snapshot);
     }

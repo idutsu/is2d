@@ -729,6 +729,247 @@ impl Selection {
     }
 }
 
+/// 既存の `donor_shapes` から、幾何輪郭と色が一致する `target_shapes` へ描画・当たり判定キャッシュを O(1) で引き継ぐ
+pub(crate) fn salvage_caches_from_slice(
+    donor_shapes: &[FillShape],
+    target_shapes: &mut [FillShape],
+) {
+    if donor_shapes.is_empty() || target_shapes.is_empty() {
+        return;
+    }
+    for (idx, target) in target_shapes.iter_mut().enumerate() {
+        if let Some(same_pos) = donor_shapes.get(idx) {
+            if target.reuse_caches_from(same_pos) {
+                continue;
+            }
+        }
+        for donor in donor_shapes {
+            if target.reuse_caches_from(donor) {
+                break;
+            }
+        }
+    }
+}
+
+/// 現在のフレームと編集位置で解決した、描画・当たり判定用の読み取り専用図形列
+#[derive(Clone, Default)]
+pub(crate) struct Scene {
+    shapes: Vec<FillShape>,
+}
+
+impl Scene {
+    /// 現在のフレーム（`doc.root.current_frame`）における全ての「表示中かつ非ロック（`visible && !locked`）」レイヤーの `Cel` から
+    /// 背面レイヤー→前面レイヤーの順で（トゥイーン補間およびシンボルの内部タイムラインフレームも評価しつつ）読み取り専用図形列を構築する
+    pub(crate) fn resolve(doc: &Document, prev_scene: Option<&Scene>) -> Self {
+        let frame = doc.root.current_frame;
+        let mut loaded = Vec::new();
+        for layer_idx in 0..doc.root.layers.len() {
+            let layer = &doc.root.layers[layer_idx];
+            if !layer.visible || layer.locked {
+                continue;
+            }
+            loaded.extend(
+                doc.root
+                    .evaluate_layer_shapes_at(layer_idx, frame, &doc.library),
+            );
+        }
+        if let Some(prev) = prev_scene {
+            salvage_caches_from_slice(&prev.shapes, &mut loaded);
+        }
+        Self { shapes: loaded }
+    }
+
+    /// 図形スライスから `Scene` を同期更新する
+    pub(crate) fn sync_from_shapes(&mut self, shapes: &[FillShape]) {
+        self.shapes.clear();
+        self.shapes.extend_from_slice(shapes);
+    }
+
+    /// 読み取り専用の図形スライスを返す
+    #[inline]
+    pub(crate) fn shapes(&self) -> &[FillShape] {
+        &self.shapes
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.shapes.len()
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, idx: usize) -> Option<&FillShape> {
+        self.shapes.get(idx)
+    }
+
+    /// 指定シェイプ・輪郭・セグメント番号に対応する `QuadBez` を取得する
+    #[inline]
+    pub(crate) fn get_contour_segment(
+        &self,
+        shape_idx: usize,
+        contour_idx: usize,
+        seg_idx: usize,
+    ) -> Option<QuadBez> {
+        self.shapes
+            .get(shape_idx)
+            .and_then(|s| s.get_contour(contour_idx))
+            .and_then(|c| c.segments.get(seg_idx))
+            .copied()
+    }
+
+    /// 編集スコープ `editing_group_path` 内で、指定座標 `pt` にヒットする最前面シェイプのインデックスを返す
+    pub(crate) fn topmost_shape_at(&self, pt: Point, editing_group_path: &[u64]) -> Option<usize> {
+        (0..self.shapes.len()).rev().find(|&idx| {
+            self.shapes[idx].is_in_editing_scope(editing_group_path)
+                && self.shapes[idx].contains_point(pt)
+        })
+    }
+
+    /// 指定シェイプが編集スコープ `editing_group_path` で子グループに属していれば、同じ子グループに属する全シェイプのインデックス列を返す。
+    /// 生シェイプであれば `vec![shape_idx]` のみを返す。
+    pub(crate) fn expand_to_group_unit(
+        &self,
+        shape_idx: usize,
+        editing_group_path: &[u64],
+    ) -> Vec<usize> {
+        let Some(shape) = self.shapes.get(shape_idx) else {
+            return Vec::new();
+        };
+        if let Some(gid) = shape.active_group_id_at_scope(editing_group_path) {
+            (0..self.shapes.len())
+                .filter(|&i| {
+                    self.shapes[i].active_group_id_at_scope(editing_group_path) == Some(gid)
+                })
+                .collect()
+        } else {
+            vec![shape_idx]
+        }
+    }
+
+    /// 指定インデックスの図形が現在選択されているかを返す
+    #[inline]
+    pub(crate) fn is_shape_selected(&self, shape_idx: usize, selection: &Selection) -> bool {
+        self.shapes
+            .get(shape_idx)
+            .is_some_and(|s| selection.contains_shape(s))
+    }
+
+    /// `selection` に対応する選択マスク（`Vec<bool>`）と有効な選択が1つ以上あるかを返す
+    pub(crate) fn selected_shape_mask(&self, selection: &Selection) -> (Vec<bool>, bool) {
+        if selection.is_empty() {
+            return (vec![false; self.shapes.len()], false);
+        }
+        let mut is_sel = vec![false; self.shapes.len()];
+        let mut any_valid = false;
+        for (idx, shape) in self.shapes.iter().enumerate() {
+            if selection.contains_shape(shape) {
+                is_sel[idx] = true;
+                any_valid = true;
+            }
+        }
+        (is_sel, any_valid)
+    }
+
+    /// 現在の選択対象にグループ化されたオブジェクトが含まれているか
+    pub(crate) fn selection_has_group(
+        &self,
+        selection: &Selection,
+        editing_group_path: &[u64],
+    ) -> bool {
+        if selection.is_empty() {
+            return false;
+        }
+        self.shapes.iter().any(|s| {
+            selection.contains_shape(s) && s.active_group_id_at_scope(editing_group_path).is_some()
+        })
+    }
+
+    /// 選択中シェイプ群の全体のバウンディングボックスを返す
+    /// （可視シェイプが含まれる場合は `geometry_bounding_box()` の外接矩形を返し、空白フレームシンボルマーカーのみの場合はその基準点から算出する）
+    pub(crate) fn selection_bounding_box(
+        &self,
+        selection: &Selection,
+        zoom: f32,
+    ) -> Option<KRect> {
+        if selection.is_empty() {
+            return None;
+        }
+        let mut geom_iter = self
+            .shapes
+            .iter()
+            .filter(|s| selection.contains_shape(s))
+            .filter_map(|s| s.geometry_bounding_box());
+        let mut bbox = match geom_iter.next() {
+            Some(first) => geom_iter.fold(first, |acc, r| acc.union(r)),
+            None => {
+                let mut fallback = self
+                    .shapes
+                    .iter()
+                    .filter(|s| selection.contains_shape(s))
+                    .map(|s| s.bounding_box());
+                let first_fb = fallback.next()?;
+                fallback.fold(first_fb, |acc, r| acc.union(r))
+            }
+        };
+        let min_extent = 6.0 / (zoom as f64);
+        let half_extent = 0.5 * min_extent;
+        if bbox.width() < min_extent {
+            let cx = 0.5 * (bbox.x0 + bbox.x1);
+            bbox.x0 = cx - half_extent;
+            bbox.x1 = cx + half_extent;
+        }
+        if bbox.height() < min_extent {
+            let cy = 0.5 * (bbox.y0 + bbox.y1);
+            bbox.y0 = cy - half_extent;
+            bbox.y1 = cy + half_extent;
+        }
+        Some(bbox)
+    }
+
+    /// 現在選択されている図形が単一のシンボルインスタンスである場合、その `SymbolInstanceBinding` を返す
+    pub(crate) fn selected_single_symbol_binding(
+        &self,
+        selection: &Selection,
+    ) -> Option<crate::symbol::SymbolInstanceBinding> {
+        if !selection.shapes.is_empty() || selection.instances.len() != 1 {
+            return None;
+        }
+        let &gid = selection.instances.iter().next()?;
+        self.shapes
+            .iter()
+            .find_map(|s| s.symbol_instance.filter(|b| b.instance_gid == gid))
+    }
+
+    /// 自由変形ツールの現在の基準点（ピボット座標）を返す
+    /// （単一シンボルインスタンス選択時はインスタンスに保存されたピボット座標 `binding.world_pivot()` を返す）
+    pub(crate) fn active_transform_pivot(
+        &self,
+        selection: &Selection,
+        transform_pivot: Option<Point>,
+        bbox: KRect,
+    ) -> Point {
+        if let Some(piv) = transform_pivot {
+            return piv;
+        }
+        if let Some(binding) = self.selected_single_symbol_binding(selection) {
+            return binding.world_pivot();
+        }
+        bbox.center()
+    }
+
+    /// 現在の選択対象に初期位置から移動されたカスタム変形中心（ピボット）が設定されているかを返す
+    pub(crate) fn has_custom_transform_pivot(
+        &self,
+        selection: &Selection,
+        transform_pivot: Option<Point>,
+    ) -> bool {
+        if transform_pivot.is_some() {
+            return true;
+        }
+        self.selected_single_symbol_binding(selection)
+            .is_some_and(|b| (b.pivot - Point::ZERO).hypot() > 1e-6)
+    }
+}
+
 /// タブごとの編集セッション状態（作業図形・選択・変形・排他ドラッグ・編集階層、保存しない）
 #[derive(Default)]
 pub(crate) struct Session {
@@ -781,14 +1022,6 @@ impl Session {
         self.unsliced_canvas = None;
     }
 
-    /// 指定インデックスの図形が現在選択されているかを返す
-    #[inline]
-    pub(crate) fn is_shape_selected(&self, shape_idx: usize) -> bool {
-        self.shapes
-            .get(shape_idx)
-            .is_some_and(|s| self.selection.contains_shape(s))
-    }
-
     /// 現在選択されている図形のキャンバスインデックス列（昇順）を返す
     pub(crate) fn selected_indices(&self) -> Vec<usize> {
         if self.selection.is_empty() {
@@ -838,21 +1071,7 @@ impl Session {
 
     /// 現在の `self.shapes` から、幾何輪郭と色が一致する `target_shapes` へ描画・当たり判定キャッシュを O(1) で引き継ぐ
     pub(crate) fn salvage_caches_into(&self, target_shapes: &mut [FillShape]) {
-        if self.shapes.is_empty() || target_shapes.is_empty() {
-            return;
-        }
-        for (idx, target) in target_shapes.iter_mut().enumerate() {
-            if let Some(same_pos) = self.shapes.get(idx) {
-                if target.reuse_caches_from(same_pos) {
-                    continue;
-                }
-            }
-            for donor in &self.shapes {
-                if target.reuse_caches_from(donor) {
-                    break;
-                }
-            }
-        }
+        salvage_caches_from_slice(&self.shapes, target_shapes);
     }
 
     /// 矩形スライス前のキャンバス状態があれば、描画キャッシュと選択シェイプIDを維持したまま `self.shapes` へ復元し `true` を返す
@@ -909,58 +1128,6 @@ impl Session {
         }
     }
 
-    /// 指定シェイプ・輪郭・セグメント番号に対応する `QuadBez` を取得する
-    #[inline]
-    pub(crate) fn get_contour_segment(
-        &self,
-        shape_idx: usize,
-        contour_idx: usize,
-        seg_idx: usize,
-    ) -> Option<QuadBez> {
-        self.shapes
-            .get(shape_idx)
-            .and_then(|s| s.get_contour(contour_idx))
-            .and_then(|c| c.segments.get(seg_idx))
-            .copied()
-    }
-
-    /// 現在の編集スコープ（`editing_group_path`）内で、指定座標 `pt` にヒットする最前面シェイプのインデックスを返す
-    pub(crate) fn topmost_shape_at(&self, pt: Point) -> Option<usize> {
-        (0..self.shapes.len()).rev().find(|&idx| {
-            self.shapes[idx].is_in_editing_scope(&self.editing_group_path)
-                && self.shapes[idx].contains_point(pt)
-        })
-    }
-
-    /// 指定シェイプが現在の編集スコープで子グループに属していれば、同じ子グループに属する全シェイプのインデックス列を返す。
-    /// 生シェイプであれば `vec![shape_idx]` のみを返す。
-    pub(crate) fn expand_to_group_unit(&self, shape_idx: usize) -> Vec<usize> {
-        let Some(shape) = self.shapes.get(shape_idx) else {
-            return Vec::new();
-        };
-        if let Some(gid) = shape.active_group_id_at_scope(&self.editing_group_path) {
-            (0..self.shapes.len())
-                .filter(|&i| {
-                    self.shapes[i].active_group_id_at_scope(&self.editing_group_path) == Some(gid)
-                })
-                .collect()
-        } else {
-            vec![shape_idx]
-        }
-    }
-
-    /// 現在の選択対象にグループ化されたオブジェクトが含まれているか
-    pub(crate) fn selection_has_group(&self) -> bool {
-        if self.selection.is_empty() {
-            return false;
-        }
-        self.shapes.iter().any(|s| {
-            self.selection.contains_shape(s)
-                && s.active_group_id_at_scope(&self.editing_group_path)
-                    .is_some()
-        })
-    }
-
     /// 選択中のシェイプ群の `(インデックス, FillShape クローン)` 一覧を返す
     /// （ドラッグ変形中にキャッシュ頂点を直接変換できるよう、クローン前に `fill_mesh` を初期化しておく）
     pub(crate) fn selected_shapes_snapshot(&self) -> Vec<(usize, FillShape)> {
@@ -976,44 +1143,6 @@ impl Session {
                 (idx, s.clone())
             })
             .collect()
-    }
-
-    /// 選択中シェイプ群の全体のバウンディングボックスを返す
-    /// （可視シェイプが含まれる場合は `geometry_bounding_box()` の外接矩形を返し、空白フレームシンボルマーカーのみの場合はその基準点から算出する）
-    pub(crate) fn selection_bounding_box(&self, zoom: f32) -> Option<KRect> {
-        if self.selection.is_empty() {
-            return None;
-        }
-        let mut geom_iter = self
-            .shapes
-            .iter()
-            .filter(|s| self.selection.contains_shape(s))
-            .filter_map(|s| s.geometry_bounding_box());
-        let mut bbox = match geom_iter.next() {
-            Some(first) => geom_iter.fold(first, |acc, r| acc.union(r)),
-            None => {
-                let mut fallback = self
-                    .shapes
-                    .iter()
-                    .filter(|s| self.selection.contains_shape(s))
-                    .map(|s| s.bounding_box());
-                let first_fb = fallback.next()?;
-                fallback.fold(first_fb, |acc, r| acc.union(r))
-            }
-        };
-        let min_extent = 6.0 / (zoom as f64);
-        let half_extent = 0.5 * min_extent;
-        if bbox.width() < min_extent {
-            let cx = 0.5 * (bbox.x0 + bbox.x1);
-            bbox.x0 = cx - half_extent;
-            bbox.x1 = cx + half_extent;
-        }
-        if bbox.height() < min_extent {
-            let cy = 0.5 * (bbox.y0 + bbox.y1);
-            bbox.y0 = cy - half_extent;
-            bbox.y1 = cy + half_extent;
-        }
-        Some(bbox)
     }
 
     /// 選択中の全シェイプとカスタムピボット点を `delta` だけ平行移動する
@@ -1186,19 +1315,6 @@ impl Session {
         self.transform_pivot = None;
     }
 
-    /// 現在選択されている図形が単一のシンボルインスタンスである場合、その `SymbolInstanceBinding` を返す
-    pub(crate) fn selected_single_symbol_binding(
-        &self,
-    ) -> Option<crate::symbol::SymbolInstanceBinding> {
-        if !self.selection.shapes.is_empty() || self.selection.instances.len() != 1 {
-            return None;
-        }
-        let &gid = self.selection.instances.iter().next()?;
-        self.shapes
-            .iter()
-            .find_map(|s| s.symbol_instance.filter(|b| b.instance_gid == gid))
-    }
-
     /// 指定された `instance_gid` を持つキャンバス上の全シンボルインスタンス図形に対して `update` を一括適用する
     pub(crate) fn update_symbol_instance_binding(
         &mut self,
@@ -1322,27 +1438,6 @@ impl Session {
 
         self.shapes
             .sort_by_key(|s| timeline.layer_index_by_id(s.layer_id).unwrap_or(usize::MAX));
-    }
-
-    /// 自由変形ツールの現在の基準点（ピボット座標）を返す
-    /// （単一シンボルインスタンス選択時はインスタンスに保存されたピボット座標 `binding.world_pivot()` を返す）
-    pub(crate) fn active_transform_pivot(&self, bbox: KRect) -> Point {
-        if let Some(piv) = self.transform_pivot {
-            return piv;
-        }
-        if let Some(binding) = self.selected_single_symbol_binding() {
-            return binding.world_pivot();
-        }
-        bbox.center()
-    }
-
-    /// 現在の選択対象に初期位置から移動されたカスタム変形中心（ピボット）が設定されているかを返す
-    pub(crate) fn has_custom_transform_pivot(&self) -> bool {
-        if self.transform_pivot.is_some() {
-            return true;
-        }
-        self.selected_single_symbol_binding()
-            .is_some_and(|b| (b.pivot - Point::ZERO).hypot() > 1e-6)
     }
 }
 
@@ -1585,7 +1680,7 @@ pub(crate) fn show_notice(
 // 5. タブ（1つの開いているファイル/ドキュメント編集セッション：Tab）
 // ============================================================================
 
-/// 1つの開いているタブ（保存対象の `Document`・操作中の `Session`・タブごとの表示設定 `View`・Undo履歴 `UndoHistory`）
+/// 1つの開いているタブ（保存対象の `Document`・描画および当たり判定用の読み取り専用 `Scene`・操作中の `Session`・タブごとの表示設定 `View`・Undo履歴 `UndoHistory`）
 pub(crate) struct Tab {
     /// タブの一意な識別ID（タブ間クリップボード・シンボル移植の同一タブ判定用）
     pub(crate) id: u64,
@@ -1595,6 +1690,8 @@ pub(crate) struct Tab {
     pub(crate) file: Option<PathBuf>,
     /// 保存対象のデータ（ルートタイムライン・シンボルライブラリ・ステージサイズ・採番カウンタ）
     pub(crate) doc: Document,
+    /// 現在のフレームと編集位置で解決された読み取り専用の表示・当たり判定用シーン
+    pub(crate) scene: Scene,
     /// 今フレームの作業図形・選択・変形・排他ドラッグ・編集スタック
     pub(crate) session: Session,
     /// タブごとのキャンバス表示設定（ズーム・パン・枠外クリップ・ワイヤーフレーム・オニオンスキン・選択シンボル）
@@ -1617,10 +1714,17 @@ impl Tab {
             untitled_number,
             file: None,
             doc: Document::default(),
+            scene: Scene::default(),
             session: Session::default(),
             view: View::default(),
             history: UndoHistory::default(),
         }
+    }
+
+    /// 作業中の `self.session.shapes` の最新状態（ドラッグ中のプレビュー変形や矩形スライスを含む）を `self.scene` へ同期する
+    #[inline]
+    pub(crate) fn sync_scene_from_session(&mut self) {
+        self.scene.sync_from_shapes(&self.session.shapes);
     }
 
     /// ダーティマーク（` *`）を除いたタブのベース表示名を返す
@@ -1753,7 +1857,7 @@ pub(crate) fn topmost_layer_id_for_indices(
 /// 指定したシェイプインデックス `shape_idx` が属するレイヤーへ `tab.doc.root.active_layer` およびタイムライン選択状態を追従させる
 pub(crate) fn focus_active_layer_to_shape(tab: &mut Tab, shape_idx: usize) {
     tab.view.inspect_timeline_frame = false;
-    if let Some(lid) = tab.session.shapes.get(shape_idx).map(|s| s.layer_id) {
+    if let Some(lid) = tab.scene.get(shape_idx).map(|s| s.layer_id) {
         if let Some(l_idx) = tab.doc.root.layer_index_by_id(lid) {
             tab.doc.root.active_layer = l_idx;
             let cf = tab.doc.root.current_frame;
@@ -1768,7 +1872,7 @@ pub(crate) fn sync_timeline_layer_from_canvas_selection(tab: &mut Tab) {
     let mut min_l: Option<usize> = None;
     let mut max_l: Option<usize> = None;
     let mut last_l: Option<usize> = None;
-    for shape in &tab.session.shapes {
+    for shape in tab.scene.shapes() {
         if tab.session.selection.contains_shape(shape) {
             if let Some(l_idx) = tab.doc.root.layer_index_by_id(shape.layer_id) {
                 min_l = Some(min_l.map_or(l_idx, |m| m.min(l_idx)));
@@ -1790,6 +1894,7 @@ pub(crate) fn rollback_shape_drag(tab: &mut Tab) {
     if tab.session.rollback_shape_drag() {
         sync_shapes_to_timeline(tab);
     }
+    tab.sync_scene_from_session();
 }
 
 /// 進行中のすべてのキャンバスドラッグ操作（ブラシ/消しゴム・輪郭変形・移動・自由変形）を中断し、
@@ -1834,6 +1939,7 @@ pub(crate) fn flush_canvas_before_timeline_op(tab: &mut Tab) {
 /// キャンバスの作業用 `tab.session.shapes` を、各図形の `layer_id` ごとに現在フレームの `Cel` に振り分けて書き戻す
 pub(crate) fn sync_shapes_to_timeline(tab: &mut Tab) {
     tab.session.sanitize_editing_scope();
+    tab.sync_scene_from_session();
     if tab.session.is_all_shapes_unchanged() {
         return;
     }
@@ -1841,6 +1947,7 @@ pub(crate) fn sync_shapes_to_timeline(tab: &mut Tab) {
         .root
         .normalize_shape_layer_ids(&mut tab.session.shapes);
     tab.session.sort_shapes_by_layer_order(&tab.doc.root);
+    tab.sync_scene_from_session();
     let any_modified = tab.doc.root.write_shapes_to_editable_cels(
         &tab.session.shapes,
         &tab.doc.library,
@@ -1853,23 +1960,13 @@ pub(crate) fn sync_shapes_to_timeline(tab: &mut Tab) {
 }
 
 /// 現在フレームにおける全ての「表示中かつ非ロック（`visible && !locked`）」レイヤーの `Cel` から
-/// 背面レイヤー→前面レイヤーの順で（トゥイーン補間およびシンボルの内部タイムラインフレームも評価しつつ）`tab.session.shapes` を一括読み込みする
+/// 背面レイヤー→前面レイヤーの順で（トゥイーン補間およびシンボルの内部タイムラインフレームも評価しつつ）`tab.scene` と `tab.session.shapes` を一括解決・読み込みする
 pub(crate) fn load_shapes_from_timeline(tab: &mut Tab) {
     cancel_active_drag(tab);
-    let frame = tab.doc.root.current_frame;
-    let mut loaded = Vec::new();
-    for layer_idx in 0..tab.doc.root.layers.len() {
-        let layer = &tab.doc.root.layers[layer_idx];
-        if !layer.visible || layer.locked {
-            continue;
-        }
-        loaded.extend(
-            tab.doc
-                .root
-                .evaluate_layer_shapes_at(layer_idx, frame, &tab.doc.library),
-        );
-    }
-    tab.session.replace_loaded_shapes(loaded);
+    let resolved_scene = Scene::resolve(&tab.doc, Some(&tab.scene));
+    tab.session
+        .replace_loaded_shapes(resolved_scene.shapes().to_vec());
+    tab.scene = resolved_scene;
     if let Some(sym_id) = tab.session.edit_stack.last().map(|s| s.symbol_id) {
         let cf = tab.doc.root.current_frame;
         let al = tab.doc.root.active_layer;
@@ -1965,7 +2062,9 @@ pub(crate) fn flush_modified_raw_selection_merge(tab: &mut Tab) {
 pub(crate) fn clear_selection(tab: &mut Tab) {
     tab.history.end_coalesce();
     rollback_shape_drag(tab);
-    tab.session.restore_unsliced_preserving_selection();
+    if tab.session.restore_unsliced_preserving_selection() {
+        tab.sync_scene_from_session();
+    }
     if tab.session.selection_modified && !tab.session.selection.is_empty() {
         flush_modified_raw_selection_merge(tab);
     }
@@ -1973,6 +2072,7 @@ pub(crate) fn clear_selection(tab: &mut Tab) {
     tab.session.selection.clear();
     tab.session.transform_pivot = None;
     tab.view.inspect_timeline_frame = false;
+    tab.sync_scene_from_session();
 }
 
 /// 現在の編集スコープの最前面挿入位置へ `new_shapes` を挿入し、それらを選択状態にしてレイヤー順に整列させる
@@ -1992,6 +2092,7 @@ pub(crate) fn insert_and_select_shapes_in_scope(
     tab.session.sort_shapes_by_layer_order(&tab.doc.root);
     tab.session.selection_modified = mark_modified;
     tab.session.transform_pivot = None;
+    tab.sync_scene_from_session();
 }
 
 /// 選択中の生シェイプ群を現在の編集スコープ内の最前面へ並べ替え、レイヤー順に整列させる
@@ -2030,6 +2131,7 @@ pub(crate) fn reorder_selected_to_scope_front(tab: &mut Tab) -> bool {
     unselected.extend(trailing_outside);
     tab.session.shapes = unselected;
     tab.session.sort_shapes_by_layer_order(&tab.doc.root);
+    tab.sync_scene_from_session();
     true
 }
 
@@ -2069,5 +2171,6 @@ pub(crate) fn prepare_moved_selection(tab: &mut Tab, undo_snapshot: &[FillShape]
         return false;
     }
     tab.session.selection_modified = true;
+    tab.sync_scene_from_session();
     true
 }

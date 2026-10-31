@@ -159,15 +159,18 @@ pub(crate) fn prepare_place_symbol_instance(
 pub(crate) fn selected_single_symbol_info(
     tab: &Tab,
 ) -> Option<(SymbolInstanceBinding, String, usize)> {
-    let binding = tab.session.selected_single_symbol_binding().or_else(|| {
-        let layer = tab.doc.root.layers.get(tab.doc.root.active_layer)?;
-        if !layer.visible || layer.locked {
-            return None;
-        }
-        layer
-            .cel_at(tab.doc.root.current_frame)?
-            .single_symbol_instance()
-    })?;
+    let binding = tab
+        .scene
+        .selected_single_symbol_binding(&tab.session.selection)
+        .or_else(|| {
+            let layer = tab.doc.root.layers.get(tab.doc.root.active_layer)?;
+            if !layer.visible || layer.locked {
+                return None;
+            }
+            layer
+                .cel_at(tab.doc.root.current_frame)?
+                .single_symbol_instance()
+        })?;
     let sym = tab.doc.find_symbol(binding.symbol_id)?;
     Some((binding, sym.name.clone(), sym.timeline.total_frames.max(1)))
 }

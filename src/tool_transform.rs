@@ -1,7 +1,9 @@
 use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
-use crate::canvas_tool::{ActiveCanvasDrag, MarqueeDrag, Session, Tab, View, clear_selection};
+use crate::canvas_tool::{
+    ActiveCanvasDrag, MarqueeDrag, Scene, Session, Tab, View, clear_selection,
+};
 pub(crate) use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{
@@ -43,7 +45,7 @@ pub(crate) fn handle_transform_tool_input(
 
     if response.double_clicked_by(PointerButton::Primary) {
         if let Some(pt) = mouse_pt {
-            if compute_transform_hover(&host.tab().session, pt, zoom)
+            if compute_transform_hover(&host.tab().scene, &host.tab().session, pt, zoom)
                 == TransformHoverTarget::Pivot
             {
                 apply(host, Action::ResetTransformPivot);
@@ -82,7 +84,7 @@ pub(crate) fn handle_transform_tool_input(
     let tab = host.tab_mut();
     if !matches!(tab.session.drag, ActiveCanvasDrag::Transform(_)) {
         tab.session.transform_hover = mouse_pt
-            .map(|pt| compute_transform_hover(&tab.session, pt, tab.view.zoom))
+            .map(|pt| compute_transform_hover(&tab.scene, &tab.session, pt, tab.view.zoom))
             .unwrap_or(TransformHoverTarget::None);
     }
 }
@@ -96,8 +98,9 @@ pub(crate) fn start_transform_drag(
     let sub_mode = host.tool().select_sub_mode;
     let tab = host.tab_mut();
     tab.view.inspect_timeline_frame = false;
+    tab.sync_scene_from_session();
     let zoom = tab.view.zoom;
-    let hover = compute_transform_hover(&tab.session, pt, zoom);
+    let hover = compute_transform_hover(&tab.scene, &tab.session, pt, zoom);
     if shift_held && hover == TransformHoverTarget::None {
         tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::MarqueeSelect(
             MarqueeDrag::new(pt, true),
@@ -107,13 +110,24 @@ pub(crate) fn start_transform_drag(
 
     match hover {
         TransformHoverTarget::Pivot => {
-            if tab.session.selected_single_symbol_binding().is_some()
+            if tab
+                .scene
+                .selected_single_symbol_binding(&tab.session.selection)
+                .is_some()
                 && !tab.session.selection_modified
+                && tab.session.restore_unsliced_preserving_selection()
             {
-                tab.session.restore_unsliced_preserving_selection();
+                tab.sync_scene_from_session();
             }
-            if let Some(bbox) = tab.session.selection_bounding_box(zoom) {
-                let orig_pivot = tab.session.active_transform_pivot(bbox);
+            if let Some(bbox) = tab
+                .scene
+                .selection_bounding_box(&tab.session.selection, zoom)
+            {
+                let orig_pivot = tab.scene.active_transform_pivot(
+                    &tab.session.selection,
+                    tab.session.transform_pivot,
+                    bbox,
+                );
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::MovePivot {
                     orig_pivot,
                     undo_snapshot: tab.session.snapshot_for_drag(),
@@ -122,9 +136,16 @@ pub(crate) fn start_transform_drag(
             }
         }
         TransformHoverTarget::Scale(handle) => {
-            if let Some(orig_bbox) = tab.session.selection_bounding_box(zoom) {
+            if let Some(orig_bbox) = tab
+                .scene
+                .selection_bounding_box(&tab.session.selection, zoom)
+            {
                 let undo_snapshot = tab.session.snapshot_for_drag();
-                let orig_pivot = tab.session.active_transform_pivot(orig_bbox);
+                let orig_pivot = tab.scene.active_transform_pivot(
+                    &tab.session.selection,
+                    tab.session.transform_pivot,
+                    orig_bbox,
+                );
                 flush_transform_pivot_to_symbol(tab);
                 let anchor = if alt_held {
                     orig_pivot
@@ -143,9 +164,16 @@ pub(crate) fn start_transform_drag(
             }
         }
         TransformHoverTarget::Rotate => {
-            if let Some(orig_bbox) = tab.session.selection_bounding_box(zoom) {
+            if let Some(orig_bbox) = tab
+                .scene
+                .selection_bounding_box(&tab.session.selection, zoom)
+            {
                 let undo_snapshot = tab.session.snapshot_for_drag();
-                let pivot = tab.session.active_transform_pivot(orig_bbox);
+                let pivot = tab.scene.active_transform_pivot(
+                    &tab.session.selection,
+                    tab.session.transform_pivot,
+                    orig_bbox,
+                );
                 flush_transform_pivot_to_symbol(tab);
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Rotate {
                     orig_bbox,
@@ -162,10 +190,14 @@ pub(crate) fn start_transform_drag(
             tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
         }
         TransformHoverTarget::None => {
-            if let Some(hit_idx) = tab.session.topmost_shape_at(pt).or_else(|| {
-                compute_hover_target(&tab.session, pt, zoom, sub_mode).shape_idx()
-            }) {
-                if !tab.session.is_shape_selected(hit_idx) {
+            if let Some(hit_idx) = tab
+                .scene
+                .topmost_shape_at(pt, &tab.session.editing_group_path)
+                .or_else(|| {
+                    compute_hover_target(&tab.scene, &tab.session, pt, zoom, sub_mode).shape_idx()
+                })
+            {
+                if !tab.scene.is_shape_selected(hit_idx, &tab.session.selection) {
                     select_single_shape_at(tab, sub_mode, pt);
                 }
                 let move_drag = begin_move_selection_drag(tab, pt, alt_held);
@@ -260,6 +292,7 @@ pub(crate) fn update_transform_drag(
         }
     }
 
+    let mut shapes_mutated = false;
     if let Some((affine, orig_pivot, has_piv)) = scale_update {
         if let ActiveCanvasDrag::Transform(TransformDragState::Scale { orig_shapes, .. }) =
             &tab.session.drag
@@ -269,6 +302,7 @@ pub(crate) fn update_transform_drag(
                 orig_shapes,
                 affine,
             );
+            shapes_mutated = true;
         }
         if has_piv {
             tab.session.transform_pivot = Some(affine * orig_pivot);
@@ -283,17 +317,23 @@ pub(crate) fn update_transform_drag(
                 orig_shapes,
                 affine,
             );
+            shapes_mutated = true;
         }
     }
     if let Some(piv_pt) = new_pivot_pt {
         if update_selected_symbol_world_pivot_live(tab, Some(piv_pt)) {
             tab.session.transform_pivot = None;
+            shapes_mutated = true;
         } else {
             tab.session.transform_pivot = Some(piv_pt);
         }
     }
     if let Some(delta) = move_delta {
         tab.session.translate_selected(delta);
+        shapes_mutated = true;
+    }
+    if shapes_mutated {
+        tab.sync_scene_from_session();
     }
 }
 
@@ -372,19 +412,24 @@ fn handle_transform_click(host: &mut impl ActionHost, pt: Point, shift_held: boo
     let tab = host.tab_mut();
     tab.view.inspect_timeline_frame = false;
     let zoom = tab.view.zoom;
-    let hit_opt = tab.session.topmost_shape_at(pt).or_else(|| {
-        compute_hover_target(&tab.session, pt, zoom, sub_mode).shape_idx()
-    });
+    let hit_opt = tab
+        .scene
+        .topmost_shape_at(pt, &tab.session.editing_group_path)
+        .or_else(|| compute_hover_target(&tab.scene, &tab.session, pt, zoom, sub_mode).shape_idx());
     if shift_held {
         if let Some(hit_idx) = hit_opt {
             toggle_shape_selection(tab, hit_idx);
         }
-    } else if compute_transform_hover(&tab.session, pt, zoom) != TransformHoverTarget::Pivot {
+    } else if compute_transform_hover(&tab.scene, &tab.session, pt, zoom)
+        != TransformHoverTarget::Pivot
+    {
         if let Some(hit_idx) = hit_opt {
-            if !tab.session.is_shape_selected(hit_idx) {
+            if !tab.scene.is_shape_selected(hit_idx, &tab.session.selection) {
                 select_single_shape_at(tab, sub_mode, pt);
             } else {
-                let unit = tab.session.expand_to_group_unit(hit_idx);
+                let unit = tab
+                    .scene
+                    .expand_to_group_unit(hit_idx, &tab.session.editing_group_path);
                 retain_selection_and_flush_deselected(tab, &unit);
             }
         } else {
@@ -393,13 +438,14 @@ fn handle_transform_click(host: &mut impl ActionHost, pt: Point, shift_held: boo
     }
 }
 
-/// 自由変形ツール（`Q`）でのマウス位置のヒット判定
+/// 自由変形ツール（`Q`）でのマウス位置のヒット判定（`Scene` を読み取る）
 pub(crate) fn compute_transform_hover(
+    scene: &Scene,
     session: &Session,
     mouse_pt: Point,
     zoom: f32,
 ) -> TransformHoverTarget {
-    let Some(bbox) = session.selection_bounding_box(zoom) else {
+    let Some(bbox) = scene.selection_bounding_box(&session.selection, zoom) else {
         return TransformHoverTarget::None;
     };
     let inv_z = 1.0 / (zoom as f64);
@@ -410,7 +456,7 @@ pub(crate) fn compute_transform_hover(
             best_handle = Some((d, handle));
         }
     }
-    let pivot = session.active_transform_pivot(bbox);
+    let pivot = scene.active_transform_pivot(&session.selection, session.transform_pivot, bbox);
     let pivot_dist = (mouse_pt - pivot).hypot();
     if pivot_dist <= 8.5 * inv_z && best_handle.is_none_or(|(hd, _)| pivot_dist < hd) {
         return TransformHoverTarget::Pivot;
@@ -438,8 +484,8 @@ pub(crate) fn compute_transform_hover(
     }
 
     if bbox.contains(mouse_pt)
-        || session
-            .shapes
+        || scene
+            .shapes()
             .iter()
             .any(|s| session.selection.contains_shape(s) && s.contains_point(mouse_pt))
     {
@@ -449,8 +495,9 @@ pub(crate) fn compute_transform_hover(
     TransformHoverTarget::None
 }
 
-/// 自由変形ツール（`Tool::Transform`）のバウンディングボックス・8ハンドル・基準点（ピボット）を描画
+/// 自由変形ツール（`Tool::Transform`）のバウンディングボックス・8ハンドル・基準点（ピボット）を描画（`Scene` を読み取る）
 pub(crate) fn draw_free_transform_box(
+    scene: &Scene,
     session: &Session,
     painter: &egui::Painter,
     view: &View,
@@ -472,8 +519,9 @@ pub(crate) fn draw_free_transform_box(
                 affine_rotate_around(*pivot, *current_angle),
                 *pivot,
             )
-        } else if let Some(bbox) = session.selection_bounding_box(view.zoom) {
-            let piv = session.active_transform_pivot(bbox);
+        } else if let Some(bbox) = scene.selection_bounding_box(&session.selection, view.zoom) {
+            let piv =
+                scene.active_transform_pivot(&session.selection, session.transform_pivot, bbox);
             (bbox, Affine::IDENTITY, piv)
         } else {
             return;

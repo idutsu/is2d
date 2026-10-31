@@ -233,6 +233,7 @@ fn symbol_binding_color_at(
 
 /// 編集スコープおよび表示中の全レイヤーを対象に、指定座標 `pt` にヒットする最前面シェイプの色を返す（スポイト用）
 pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> {
+    let scene_shapes = tab.scene.shapes();
     let num_layers = tab.doc.root.layers.len();
     if num_layers == 1
         && tab
@@ -242,9 +243,7 @@ pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> 
             .first()
             .is_some_and(|l| l.visible && !l.locked)
     {
-        return tab
-            .session
-            .shapes
+        return scene_shapes
             .iter()
             .rev()
             .find(|s| s.contains_point(pt))
@@ -262,9 +261,7 @@ pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> 
             }
         } else {
             let lid = layer.id;
-            if let Some(hit) = tab
-                .session
-                .shapes
+            if let Some(hit) = scene_shapes
                 .iter()
                 .rev()
                 .find(|s| s.layer_id == lid && s.contains_point(pt))
@@ -278,6 +275,7 @@ pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> 
 
 /// スポイトツール（色抽出）：指定位置 `pt` の最前面シェイプの色を抽出し、`host.tool_mut().brush_color` に設定する
 pub(crate) fn pick_color_at(host: &mut impl ActionHost, pt: Point) -> Option<Color32> {
+    host.tab_mut().sync_scene_from_session();
     let picked = topmost_visible_color_at(host.tab(), pt)?;
     host.tool_mut().brush_color = picked;
     Some(picked)
