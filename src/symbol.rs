@@ -7,9 +7,7 @@ use kurbo::{Affine, Point};
 #[cfg(test)]
 pub(crate) use crate::timeline::interpolate_affine_with_pivot;
 pub(crate) use crate::timeline::{ResolvedCelSig, SymbolInstance, TweenRotate, TweenState};
-use crate::timeline::{
-    lru_get, lru_insert, Cel, CelMeshCache, Layer, LoadedShapeSig, Timeline, TimelineCellSelection,
-};
+use crate::timeline::{lru_get, lru_insert, Cel, CelMeshCache, Layer, LoadedShapeSig, Timeline};
 use crate::vector_engine::{
     append_mesh, next_shape_id, transform_mesh_to_screen, transform_mesh_to_screen_onion,
     union_bounding_boxes, Contour, FillShape, SyncCache,
@@ -71,111 +69,6 @@ impl FillShape {
         shape.symbol_instance = Some(binding);
         shape
     }
-}
-
-/// シンボルインプレイス編集時に未変形図形を逆引きする複合キャッシュキー（外周 `contour_id`, 色 RGBA, 穴輪郭数, 穴 `contour_id` 合成ハッシュ）
-pub(crate) type StageShapeCacheKey = (u64, [u8; 4], usize, u64);
-
-#[inline]
-fn stage_shape_cache_key(s: &FillShape) -> StageShapeCacheKey {
-    let holes_hash = s
-        .holes
-        .iter()
-        .fold(0u64, |acc, h| acc.rotate_left(13) ^ h.contour_id);
-    (
-        s.exterior.contour_id,
-        s.color.to_array(),
-        s.holes.len(),
-        holes_hash,
-    )
-}
-
-/// シンボルインプレイス編集時に、ステージ変換後の輪郭 `Arc` から元の無劣化ローカル図形を O(1) 逆引きするキャッシュエントリ
-#[derive(Clone, Debug)]
-pub(crate) struct StageToLocalEntry {
-    pub(crate) stage_exterior: Contour,
-    pub(crate) stage_holes: Vec<Contour>,
-    pub(crate) local_shape: FillShape,
-}
-
-/// シンボルインプレイス編集時に、ステージ変換後のセル `revision` から元のローカル `Cel` を O(1) 逆引きするキャッシュエントリ
-#[derive(Clone, Debug)]
-pub(crate) struct StageCelToLocalEntry {
-    pub(crate) stage_revision: u64,
-    pub(crate) stage_shapes: Arc<Vec<FillShape>>,
-    pub(crate) local_cel: Cel,
-}
-
-/// シンボルインプレイス編集時に、未変更キーフレーム（`Cel::revision` 一致）および
-/// 未変形図形（`StageShapeCacheKey` 一致）の2階層で無劣化ローカルデータを O(1) 復元するキャッシュ
-#[derive(Clone, Debug, Default)]
-pub(crate) struct StageToLocalCache {
-    pub(crate) cels: HashMap<u64, StageCelToLocalEntry>,
-    pub(crate) shapes: HashMap<StageShapeCacheKey, StageToLocalEntry>,
-}
-
-impl StageToLocalCache {
-    /// Undo 履歴保存時などに、キャッシュ内のローカルセルおよびローカル図形の一時メッシュを破棄する
-    pub(crate) fn strip_transient_caches(&mut self) {
-        for entry in self.cels.values_mut() {
-            entry.local_cel.strip_transient_caches();
-        }
-        for entry in self.shapes.values_mut() {
-            entry.local_shape.strip_transient_caches();
-        }
-    }
-}
-
-/// ステージ上の図形 `s` が未変形（外周・内周穴の輪郭 `Contour` が完全一致）であれば、
-/// 対応するローカル図形キャッシュエントリを `HashMap` から O(1) で検索して返す
-fn lookup_untouched_local_shape<'a>(
-    s: &FillShape,
-    primary_cache: &'a HashMap<StageShapeCacheKey, StageToLocalEntry>,
-    fallback_cache: &'a HashMap<StageShapeCacheKey, StageToLocalEntry>,
-) -> Option<&'a StageToLocalEntry> {
-    let key = stage_shape_cache_key(s);
-    primary_cache
-        .get(&key)
-        .or_else(|| fallback_cache.get(&key))
-        .filter(|e| s.has_same_contour_arcs(&e.stage_exterior, &e.stage_holes))
-}
-
-/// シンボル定義のローカルレイヤー配列を `xform` でステージ座標へ変換し、同時に2階層 O(1) 無劣化逆引きキャッシュ（`StageToLocalCache`）を構築する
-pub(crate) fn transform_layers_with_local_cache(
-    local_layers: &[Layer],
-    xform: Affine,
-) -> (Vec<Layer>, StageToLocalCache) {
-    let mut stage_layers = local_layers.to_vec();
-    let mut cache = StageToLocalCache::default();
-    for layer in &mut stage_layers {
-        for kf in &mut layer.keyframes {
-            let local_cel = kf.cel.clone();
-            for s in kf.cel.shapes_mut() {
-                let local_shape = s.clone();
-                s.transform(xform);
-                cache.shapes.insert(
-                    stage_shape_cache_key(s),
-                    StageToLocalEntry {
-                        stage_exterior: s.exterior.clone(),
-                        stage_holes: s.holes.clone(),
-                        local_shape,
-                    },
-                );
-            }
-            for inst in kf.cel.instances_mut() {
-                inst.binding.xform = xform * inst.binding.xform;
-            }
-            cache.cels.insert(
-                kf.cel.revision,
-                StageCelToLocalEntry {
-                    stage_revision: kf.cel.revision,
-                    stage_shapes: Arc::clone(&kf.cel.shapes),
-                    local_cel,
-                },
-            );
-        }
-    }
-    (stage_layers, cache)
 }
 
 /// シンボル定義のプレビュー用ローカルキャッシュ（評価済み外接矩形・ワールド座標結合メッシュ・スクリーン変換済みメッシュ）
@@ -592,121 +485,48 @@ impl SymbolDef {
             SymbolEvalCtx::new(library).nested(),
         ))
     }
-
-    /// 作業用タイムライン `working_tl` と逆変換行列 `inv_xform` からシンボル定義の `timeline` を更新する
-    /// （未変更キーフレームは `Cel` の `Arc` ポインタ一致により O(1) でローカル `Cel` を共有復元し、
-    ///   編集されたキーフレーム内でも `stage_to_local_cache.shapes` に O(1) 一致する未変形図形は逆変換・再テッセレーションをスキップする）
-    pub(crate) fn update_from_working_timeline(
-        &mut self,
-        working_tl: &Timeline,
-        inv_xform: Affine,
-        stage_to_local_cache: &mut StageToLocalCache,
-    ) {
-        let mut next_tl = working_tl.clone();
-        next_tl.total_frames = next_tl.total_frames.max(1);
-        let mut next_cache = StageToLocalCache {
-            cels: HashMap::with_capacity(stage_to_local_cache.cels.len()),
-            shapes: HashMap::with_capacity(stage_to_local_cache.shapes.len()),
-        };
-        for layer in &mut next_tl.layers {
-            for kf in &mut layer.keyframes {
-                let cel_key = kf.cel.revision;
-                if let Some(cel_hit) = next_cache
-                    .cels
-                    .get(&cel_key)
-                    .or_else(|| stage_to_local_cache.cels.get(&cel_key))
-                    .filter(|e| e.stage_revision == cel_key)
-                    .cloned()
-                {
-                    for stage_s in cel_hit.stage_shapes.iter() {
-                        let s_key = stage_shape_cache_key(stage_s);
-                        if let std::collections::hash_map::Entry::Vacant(e) =
-                            next_cache.shapes.entry(s_key)
-                        {
-                            if let Some(s_entry) = stage_to_local_cache.shapes.get(&s_key) {
-                                e.insert(s_entry.clone());
-                            }
-                        }
-                    }
-                    kf.cel = cel_hit.local_cel.clone();
-                    next_cache.cels.entry(cel_key).or_insert(cel_hit);
-                    continue;
-                }
-
-                let stage_shapes = Arc::clone(&kf.cel.shapes);
-                for s in kf.cel.shapes_mut() {
-                    if let Some(hit) = lookup_untouched_local_shape(
-                        s,
-                        &next_cache.shapes,
-                        &stage_to_local_cache.shapes,
-                    )
-                    .cloned()
-                    {
-                        let key = stage_shape_cache_key(s);
-                        let restored = s.restore_from_local_template(&hit.local_shape, inv_xform);
-                        next_cache.shapes.entry(key).or_insert(hit);
-                        *s = restored;
-                    } else {
-                        let stage_exterior = s.exterior.clone();
-                        let stage_holes = s.holes.clone();
-                        let key = stage_shape_cache_key(s);
-                        s.transform(inv_xform);
-                        next_cache.shapes.insert(
-                            key,
-                            StageToLocalEntry {
-                                stage_exterior,
-                                stage_holes,
-                                local_shape: s.clone(),
-                            },
-                        );
-                    }
-                }
-                for inst in kf.cel.instances_mut() {
-                    inst.binding.xform = inv_xform * inst.binding.xform;
-                }
-                next_cache.cels.insert(
-                    cel_key,
-                    StageCelToLocalEntry {
-                        stage_revision: cel_key,
-                        stage_shapes,
-                        local_cel: kf.cel.clone(),
-                    },
-                );
-            }
-        }
-        *stage_to_local_cache = next_cache;
-        self.timeline = next_tl;
-        self.revision = crate::vector_engine::next_mesh_revision();
-    }
 }
 
-/// シンボルをダブルクリックしてシンボル独自のタイムライン編集に入った際に退避する親シーンの状態
-#[derive(Clone, Debug)]
-pub(crate) struct SymbolEditSession {
-    pub(crate) symbol_id: u64,
+/// シンボルインプレイス編集の1段分の階層情報
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EditLevel {
     pub(crate) instance_gid: u64,
-    pub(crate) instance_xform: Affine,
-    pub(crate) parent_timeline: Timeline,
-    pub(crate) parent_editing_group_path: Vec<u64>,
-    /// 親シーンの現在フレームにおける周辺図形（対象シンボルインスタンス自身を除いた背景表示用バッチキャッシュ付きセル）
-    pub(crate) backdrop_cel: Cel,
-    /// 未変更キーフレームの `Cel` 共有および未変形図形の逆行列往復劣化防止を O(1) で行う2階層キャッシュ
-    pub(crate) stage_to_local_cache: StageToLocalCache,
+    pub(crate) symbol_id: u64,
+    /// 入った時点の、親の中での変換（トゥイーン中なら補間後の値）
+    pub(crate) xform_in_parent: Affine,
+    pub(crate) parent_frame: usize,
+    pub(crate) parent_active_layer: usize,
+    pub(crate) parent_group_path: Vec<u64>,
 }
 
-impl SymbolEditSession {
-    /// Undo 履歴保存時などに、退避中の親タイムライン（未変更セルは `prev` と `Arc` 共有）・背景セル・ローカル形状キャッシュの一時メッシュを破棄する
-    pub(crate) fn strip_transient_caches_with_prev(&mut self, prev: Option<&Self>) {
-        self.parent_timeline
-            .strip_transient_caches_with_prev(prev.map(|ps| &ps.parent_timeline));
-        if let Some(ps) =
-            prev.filter(|ps| ps.backdrop_cel.revision == self.backdrop_cel.revision)
-        {
-            self.backdrop_cel = ps.backdrop_cel.clone();
-        } else {
-            self.backdrop_cel.strip_transient_caches();
-        }
-        self.stage_to_local_cache.strip_transient_caches();
+/// シンボルインプレイス編集の経路（空ならルート）
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct EditPath {
+    pub(crate) levels: Vec<EditLevel>,
+}
+
+impl EditPath {
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.levels.is_empty()
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.levels.len()
+    }
+
+    #[inline]
+    pub(crate) fn last(&self) -> Option<&EditLevel> {
+        self.levels.last()
+    }
+
+    /// `levels` の変換を順に掛けたワールド（ステージ）変換行列を返す
+    #[inline]
+    pub(crate) fn world_xform(&self) -> Affine {
+        self.levels
+            .iter()
+            .fold(Affine::IDENTITY, |acc, lvl| acc * lvl.xform_in_parent)
     }
 }
 
@@ -718,7 +538,7 @@ pub(crate) struct Document {
     pub(crate) stage_size: Vec2,
     pub(crate) next_symbol_id: u64,
     pub(crate) next_group_id: u64,
-    /// `library` または編集スタックの内容変更世代番号（Undo履歴の `Arc` CoW 構造共有用）
+    /// `library` の内容変更世代番号（Undo履歴の `Arc` CoW 構造共有用）
     pub(crate) revision: u64,
 }
 
@@ -736,7 +556,7 @@ impl Default for Document {
 }
 
 impl Document {
-    /// シンボルライブラリまたは編集スタックの世代番号 `revision` を一意な値へ更新する
+    /// シンボルライブラリの世代番号 `revision` を一意な値へ更新する
     pub(crate) fn bump_revision(&mut self) {
         self.revision = crate::vector_engine::next_mesh_revision();
     }
@@ -813,17 +633,18 @@ impl Document {
         false
     }
 
-    /// 現在の編集コンテキスト（ルートシーンまたはシンボルインプレース編集スタック）に
+    /// 現在の編集コンテキスト（ルートシーンまたはシンボルインプレース編集経路 `edit_path`）に
     /// `candidate_child_id` のシンボルインスタンスを安全に配置可能か（循環参照を起こさないか）を返す
     pub(crate) fn can_place_symbol_in_current_context(
         &self,
-        edit_stack: &[SymbolEditSession],
+        edit_path: &EditPath,
         candidate_child_id: u64,
     ) -> bool {
         self.find_symbol(candidate_child_id).is_some()
-            && edit_stack
+            && edit_path
+                .levels
                 .iter()
-                .all(|sess| !self.would_create_symbol_cycle(sess.symbol_id, candidate_child_id))
+                .all(|lvl| !self.would_create_symbol_cycle(lvl.symbol_id, candidate_child_id))
     }
 
     /// 指定した `symbol_id` のシンボル名を変更する（変更があった場合のみ `true` を返す）
@@ -840,38 +661,10 @@ impl Document {
         true
     }
 
-    /// シンボル内部タイムライン編集中に、現在の `self.root`（作業用シンボルタイムライン）の状態を
-    /// ライブラリ定義（`SymbolDef`）へ同期する（`backdrop_cel` は正規化保持のため再構築不要）
-    pub(crate) fn sync_active_edit(&mut self, edit_stack: &mut [SymbolEditSession]) {
-        let Some((sym_id, inv_xform)) = edit_stack.last().map(|session| {
-            let inv = if session.instance_xform.determinant().abs() > 1e-9 {
-                session.instance_xform.inverse()
-            } else {
-                Affine::IDENTITY
-            };
-            (session.symbol_id, inv)
-        }) else {
-            return;
-        };
-
-        let mut cache = edit_stack
-            .last_mut()
-            .map(|s| std::mem::take(&mut s.stage_to_local_cache))
-            .unwrap_or_default();
-        if let Some(sym_def) = self.library.iter_mut().find(|s| s.id == sym_id) {
-            sym_def.update_from_working_timeline(&self.root, inv_xform, &mut cache);
-        }
-        if let Some(session) = edit_stack.last_mut() {
-            session.stage_to_local_cache = cache;
-        }
-        self.bump_revision();
-    }
-
-    /// 指定した `symbol_id` をライブラリから削除し、渡されたタイムライン・キャンバス図形・入れ子シンボル・編集スタックから参照をデタッチする
+    /// 指定した `symbol_id` をライブラリから削除し、ルートタイムライン・キャンバス図形・入れ子シンボルから参照をデタッチする
     pub(crate) fn remove_symbol_and_detach(
         &mut self,
         symbol_id: u64,
-        edit_stack: &mut [SymbolEditSession],
         canvas_shapes: &mut Vec<FillShape>,
     ) -> bool {
         if !self.library.iter().any(|s| s.id == symbol_id) {
@@ -903,31 +696,79 @@ impl Document {
         for layer in &mut self.root.layers {
             layer.detach_symbol_id(symbol_id, &self.library, &mut self.next_group_id);
         }
-        for i in 0..self.library.len() {
-            if self.library[i].id == symbol_id {
+        let library_snapshot = self.library.clone();
+        for sym_def in &mut self.library {
+            if sym_def.id == symbol_id {
                 continue;
             }
-            let mut layers = std::mem::take(&mut self.library[i].timeline.layers);
-            for layer in &mut layers {
-                layer.detach_symbol_id(symbol_id, &self.library, &mut self.next_group_id);
+            for layer in &mut sym_def.timeline.layers {
+                layer.detach_symbol_id(symbol_id, &library_snapshot, &mut self.next_group_id);
             }
-            self.library[i].timeline.layers = layers;
-            self.library[i].revision = crate::vector_engine::next_mesh_revision();
-        }
-        for sess in edit_stack.iter_mut() {
-            for layer in &mut sess.parent_timeline.layers {
-                layer.detach_symbol_id(symbol_id, &self.library, &mut self.next_group_id);
-            }
-            sess.backdrop_cel.detach_symbol_id(
-                symbol_id,
-                sess.parent_timeline.current_frame,
-                &self.library,
-                &mut self.next_group_id,
-            );
+            sym_def.revision = crate::vector_engine::next_mesh_revision();
         }
         self.library.retain(|s| s.id != symbol_id);
         self.bump_revision();
         true
+    }
+
+    /// Undo / Redo 後に `edit_path` を検証し、途中のシンボルまたはインスタンスが消えていたら到達できる段まで戻る
+    pub(crate) fn validate_edit_path(
+        &mut self,
+        edit_path: &mut EditPath,
+        editing_group_path: &mut Vec<u64>,
+    ) {
+        let mut reachable_len = 0usize;
+        for i in 0..edit_path.levels.len() {
+            let lvl = &edit_path.levels[i];
+            if self.find_symbol(lvl.symbol_id).is_none() {
+                break;
+            }
+            if lvl.instance_gid != 0 {
+                let parent_tl = if i == 0 {
+                    &self.root
+                } else {
+                    let prev_sym_id = edit_path.levels[i - 1].symbol_id;
+                    let Some(sym) = self.find_symbol(prev_sym_id) else {
+                        break;
+                    };
+                    &sym.timeline
+                };
+                let has_inst = parent_tl.layers.iter().any(|l| {
+                    l.keyframes.iter().any(|kf| {
+                        kf.cel.instances.iter().any(|inst| {
+                            inst.binding.instance_gid == lvl.instance_gid
+                                && inst.binding.symbol_id == lvl.symbol_id
+                        })
+                    })
+                });
+                if !has_inst {
+                    break;
+                }
+            }
+            reachable_len = i + 1;
+        }
+        if reachable_len < edit_path.levels.len() {
+            let popped = edit_path.levels[reachable_len].clone();
+            edit_path.levels.truncate(reachable_len);
+            *editing_group_path = popped.parent_group_path;
+            if let Some(last) = edit_path.last() {
+                if let Some(s) = self.find_symbol_mut(last.symbol_id) {
+                    s.timeline.active_layer = popped
+                        .parent_active_layer
+                        .min(s.timeline.layers.len().saturating_sub(1));
+                    s.timeline.current_frame = popped
+                        .parent_frame
+                        .min(s.timeline.total_frames.saturating_sub(1));
+                }
+            } else {
+                self.root.active_layer = popped
+                    .parent_active_layer
+                    .min(self.root.layers.len().saturating_sub(1));
+                self.root.current_frame = popped
+                    .parent_frame
+                    .min(self.root.total_frames.saturating_sub(1));
+            }
+        }
     }
 }
 
@@ -1131,13 +972,16 @@ impl Cel {
         cache: &mut CelMeshCache,
         sig_query: ResolvedSigQuery<'_>,
         eval_frame_key: usize,
+        xform_key: [u64; 6],
         build_fn: impl FnOnce() -> Option<Mesh>,
     ) -> Option<Arc<Mesh>> {
-        if !cache
-            .resolved_sig
-            .as_ref()
-            .is_some_and(|sig| sig_query.matches(sig))
+        if cache.resolved_xform_key != Some(xform_key)
+            || !cache
+                .resolved_sig
+                .as_ref()
+                .is_some_and(|sig| sig_query.matches(sig))
         {
+            cache.resolved_xform_key = Some(xform_key);
             cache.resolved_sig = Some(sig_query.compute());
             cache.resolved_world_batches.clear();
             cache.resolved_screen_caches.clear();
@@ -1158,13 +1002,14 @@ impl Cel {
     /// シンボルインスタンスやトゥイーンを含むセルの解決済みスクリーン座標 `Arc<Mesh>` をキャッシュ経由で返す
     pub(crate) fn cached_resolved_screen_mesh(
         &self,
-        (sig_query, eval_frame_key): (ResolvedSigQuery<'_>, usize),
+        (sig_query, eval_frame_key, world_xform): (ResolvedSigQuery<'_>, usize, Affine),
         zoom: f32,
         pan: Vec2,
         dim_backdrop: bool,
         build_fn: impl FnOnce() -> Option<Mesh>,
     ) -> Option<Arc<Mesh>> {
         let mut cache = self.mesh_cache.lock();
+        let xform_key = world_xform.as_coeffs().map(f64::to_bits);
         let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
         if cache.resolved_view_key != Some(view_key) {
             cache.resolved_view_key = Some(view_key);
@@ -1178,17 +1023,23 @@ impl Cel {
             view_key.2,
             dim_backdrop,
         );
-        if cache
-            .resolved_sig
-            .as_ref()
-            .is_some_and(|sig| sig_query.matches(sig))
+        if cache.resolved_xform_key == Some(xform_key)
+            && cache
+                .resolved_sig
+                .as_ref()
+                .is_some_and(|sig| sig_query.matches(sig))
         {
             if let Some(mesh) = lru_get(&mut cache.resolved_screen_caches, &key) {
                 return Some(mesh);
             }
         }
-        let world_batch =
-            self.ensure_resolved_world_batch(&mut cache, sig_query, eval_frame_key, build_fn)?;
+        let world_batch = self.ensure_resolved_world_batch(
+            &mut cache,
+            sig_query,
+            eval_frame_key,
+            xform_key,
+            build_fn,
+        )?;
         let screen_mesh = Arc::new(transform_mesh_to_screen(
             &world_batch,
             zoom,
@@ -1218,31 +1069,38 @@ impl Cel {
             return Some(self.cached_screen_mesh(zoom, pan, true));
         }
         let sig_query = ResolvedSigQuery::SingleCel { cel: self, library };
-        self.cached_resolved_screen_mesh((sig_query, parent_frame), zoom, pan, true, || {
-            let shapes = resolve_cel_with_library(
-                self,
-                parent_frame,
-                parent_frame,
-                SymbolEvalCtx::new(library),
-            );
-            let mut batch = Mesh::default();
-            for s in &shapes {
-                append_mesh(&mut batch, s.fill_mesh());
-            }
-            (!batch.is_empty()).then_some(batch)
-        })
+        self.cached_resolved_screen_mesh(
+            (sig_query, parent_frame, Affine::IDENTITY),
+            zoom,
+            pan,
+            true,
+            || {
+                let shapes = resolve_cel_with_library(
+                    self,
+                    parent_frame,
+                    parent_frame,
+                    SymbolEvalCtx::new(library),
+                );
+                let mut batch = Mesh::default();
+                for s in &shapes {
+                    append_mesh(&mut batch, s.fill_mesh());
+                }
+                (!batch.is_empty()).then_some(batch)
+            },
+        )
     }
 
     /// シンボルインスタンスやトゥイーンを含むセルの解決済みオニオンスキン `Arc<Mesh>` をキャッシュ経由で返す
     pub(crate) fn cached_resolved_onion_mesh(
         &self,
-        (sig_query, eval_frame_key): (ResolvedSigQuery<'_>, usize),
+        (sig_query, eval_frame_key, world_xform): (ResolvedSigQuery<'_>, usize, Affine),
         zoom: f32,
         pan: Vec2,
         (tint_rgb, alpha): ([u8; 3], u8),
         build_fn: impl FnOnce() -> Option<Mesh>,
     ) -> Option<Arc<Mesh>> {
         let mut cache = self.mesh_cache.lock();
+        let xform_key = world_xform.as_coeffs().map(f64::to_bits);
         let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
         if cache.resolved_view_key != Some(view_key) {
             cache.resolved_view_key = Some(view_key);
@@ -1257,17 +1115,23 @@ impl Cel {
             tint_rgb,
             alpha,
         );
-        if cache
-            .resolved_sig
-            .as_ref()
-            .is_some_and(|sig| sig_query.matches(sig))
+        if cache.resolved_xform_key == Some(xform_key)
+            && cache
+                .resolved_sig
+                .as_ref()
+                .is_some_and(|sig| sig_query.matches(sig))
         {
             if let Some(mesh) = lru_get(&mut cache.resolved_onion_caches, &key) {
                 return Some(mesh);
             }
         }
-        let world_batch =
-            self.ensure_resolved_world_batch(&mut cache, sig_query, eval_frame_key, build_fn)?;
+        let world_batch = self.ensure_resolved_world_batch(
+            &mut cache,
+            sig_query,
+            eval_frame_key,
+            xform_key,
+            build_fn,
+        )?;
         let onion_mesh = Arc::new(transform_mesh_to_screen_onion(
             &world_batch,
             zoom,
@@ -1430,30 +1294,22 @@ impl Layer {
 }
 
 impl Timeline {
-    /// シンボル内部タイムライン編集モード用に、シンボル定義の `timeline` をベースに親タイムラインのFPSを引き継いだ作業用 `Timeline` を生成する
-    pub(crate) fn new_for_symbol_edit(&self, sym_def: &SymbolDef, sym_layers: Vec<Layer>) -> Self {
-        let mut tl = sym_def.timeline.clone();
-        let act_l = tl.active_layer.min(sym_layers.len().saturating_sub(1));
-        let act_f = tl.current_frame.min(tl.total_frames.saturating_sub(1));
-        tl.layers = sym_layers;
-        tl.active_layer = act_l;
-        tl.current_frame = act_f;
-        tl.total_frames = tl.total_frames.max(1);
-        tl.fps = self.fps;
-        tl.next_layer_number = tl.next_layer_number.max(2);
-        tl.next_layer_id = tl.next_layer_id.max(2);
-        tl.cell_selection = Some(TimelineCellSelection::single(act_l, act_f));
-        tl
-    }
-
     /// 与えられた図形リスト `shapes` を、現在フレームの各「表示中かつ非ロック」レイヤーの `Cel` に `layer_id` ごとに振り分けて書き込む
-    /// （変更がないレイヤーはクローンとキャッシュ破棄をスキップし、いずれかの `Cel` が更新された場合のみ `true` を返す）
+    /// （変更がないレイヤーはクローンとキャッシュ破棄をスキップし、変更された図形・インスタンスのみ `world_xform` の逆変換を適用する）
     pub(crate) fn write_shapes_to_editable_cels(
         &mut self,
         shapes: &[FillShape],
         library: &[SymbolDef],
         loaded_signatures: &[LoadedShapeSig],
+        world_xform: Affine,
     ) -> bool {
+        let has_world_xform = world_xform != Affine::IDENTITY;
+        let inv_xform = if !has_world_xform || world_xform.determinant().abs() <= 1e-9 {
+            Affine::IDENTITY
+        } else {
+            world_xform.inverse()
+        };
+        let need_inv = inv_xform != Affine::IDENTITY;
         let frame = self.current_frame;
         let mut any_cel_modified = false;
         for l_idx in 0..self.layers.len() {
@@ -1468,7 +1324,7 @@ impl Timeline {
                 .cel_at(frame)
                 .is_some_and(|c| c.has_dynamic_symbol(library));
 
-            if (is_tween_mid || has_multiframe)
+            if (is_tween_mid || has_multiframe || has_world_xform)
                 && Self::is_layer_unchanged_since_load(loaded_signatures, lid, shapes)
             {
                 continue;
@@ -1489,9 +1345,17 @@ impl Timeline {
                     .cloned()
                     .collect();
                 let kf_idx = self.layers[l_idx].insert_keyframe(frame, false);
-                let (non_symbol_shapes, mut next_instances) =
+                let (mut non_symbol_shapes, mut next_instances) =
                     Cel::split_shapes_and_instances(new_shapes);
+                if need_inv {
+                    for s in &mut non_symbol_shapes {
+                        s.transform(inv_xform);
+                    }
+                }
                 for inst in &mut next_instances {
+                    if need_inv {
+                        inst.binding.xform = inv_xform * inst.binding.xform;
+                    }
                     if inst.binding.loop_mode != SymbolLoopMode::SingleFrame {
                         inst.binding.first_frame =
                             inst.binding.first_frame.saturating_add(elapsed);
@@ -1518,8 +1382,43 @@ impl Timeline {
                     .filter(|s| s.layer_id == lid)
                     .cloned()
                     .collect();
-                let (non_symbol_shapes, next_instances) =
+                let (mut non_symbol_shapes, mut next_instances) =
                     Cel::split_shapes_and_instances(updated_cel_shapes);
+                if has_world_xform {
+                    for s in &mut non_symbol_shapes {
+                        let is_unmodified = loaded_signatures
+                            .iter()
+                            .any(|sig| sig.matches_with_layer(s));
+                        if is_unmodified {
+                            if let Some(orig) =
+                                kf.cel.shapes.iter().find(|orig| orig.shape_id == s.shape_id)
+                            {
+                                *s = orig.clone();
+                                continue;
+                            }
+                        }
+                        if need_inv {
+                            s.transform(inv_xform);
+                        }
+                    }
+                    for inst in &mut next_instances {
+                        let is_unmodified = loaded_signatures
+                            .iter()
+                            .any(|sig| sig.matches_instance(inst));
+                        if is_unmodified {
+                            if let Some(orig_inst) = kf.cel.instances.iter().find(|orig| {
+                                orig.binding.instance_gid == inst.binding.instance_gid
+                                    && orig.binding.symbol_id == inst.binding.symbol_id
+                            }) {
+                                inst.binding = orig_inst.binding;
+                                continue;
+                            }
+                        }
+                        if need_inv {
+                            inst.binding.xform = inv_xform * inst.binding.xform;
+                        }
+                    }
+                }
                 let unchanged = *kf.cel.instances == next_instances
                     && kf.cel.shapes.len() == non_symbol_shapes.len()
                     && kf
@@ -1557,9 +1456,16 @@ impl Timeline {
         &self,
         layer_idx: usize,
         frame: usize,
+        world_xform: Affine,
         library: &[SymbolDef],
     ) -> Option<Mesh> {
-        let resolved = self.evaluate_layer_shapes_at(layer_idx, frame, library);
+        let mut resolved = self.evaluate_layer_shapes_at(layer_idx, frame, library);
+        if world_xform != Affine::IDENTITY {
+            for s in &mut resolved {
+                let _ = s.fill_mesh();
+                s.transform_with_cached_mesh(world_xform);
+            }
+        }
         let mut batch = Mesh::default();
         for s in &resolved {
             append_mesh(&mut batch, s.fill_mesh());
@@ -1571,6 +1477,7 @@ impl Timeline {
         &'a self,
         layer_idx: usize,
         frame: usize,
+        world_xform: Affine,
         library: &'a [SymbolDef],
     ) -> Option<(&'a Cel, Option<(ResolvedSigQuery<'a>, usize)>)> {
         let layer = self.layers.get(layer_idx)?;
@@ -1580,7 +1487,8 @@ impl Timeline {
             return None;
         }
         let has_tween = layer.interpolated_tween_binding_at(frame).is_some();
-        let is_pure_shape_cel = !has_tween && kf.cel.instances.is_empty();
+        let is_pure_shape_cel =
+            !has_tween && kf.cel.instances.is_empty() && world_xform == Affine::IDENTITY;
         if is_pure_shape_cel {
             return Some((&kf.cel, None));
         }
@@ -1601,6 +1509,7 @@ impl Timeline {
     }
 
     /// 指定レイヤー・フレームの描画用スクリーン `Arc<Mesh>` を返す（純粋シェイプセルもシンボル・トゥイーンを含むセルも `Cel` キャッシュを再利用する）
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolved_cel_screen_mesh(
         &self,
         layer_idx: usize,
@@ -1608,19 +1517,25 @@ impl Timeline {
         zoom: f32,
         pan: Vec2,
         dim_backdrop: bool,
+        world_xform: Affine,
         library: &[SymbolDef],
     ) -> Option<Arc<Mesh>> {
-        let (cel, resolved_ctx) = self.cel_cache_context_at(layer_idx, frame, library)?;
+        let (cel, resolved_ctx) = self.cel_cache_context_at(layer_idx, frame, world_xform, library)?;
         let Some((sig, eval_frame_key)) = resolved_ctx else {
             return (!cel.shapes.is_empty())
                 .then(|| cel.cached_screen_mesh(zoom, pan, dim_backdrop));
         };
-        cel.cached_resolved_screen_mesh((sig, eval_frame_key), zoom, pan, dim_backdrop, || {
-            self.build_uncached_world_batch_mesh(layer_idx, frame, library)
-        })
+        cel.cached_resolved_screen_mesh(
+            (sig, eval_frame_key, world_xform),
+            zoom,
+            pan,
+            dim_backdrop,
+            || self.build_uncached_world_batch_mesh(layer_idx, frame, world_xform, library),
+        )
     }
 
     /// 指定レイヤー・フレームのオニオンスキン描画用スクリーン `Arc<Mesh>` を返す（トゥイーン補間・複数フレームシンボルもキャッシュ経由で高速返却）
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolved_cel_onion_mesh(
         &self,
         layer_idx: usize,
@@ -1628,15 +1543,20 @@ impl Timeline {
         zoom: f32,
         pan: Vec2,
         (tint_rgb, alpha): ([u8; 3], u8),
+        world_xform: Affine,
         library: &[SymbolDef],
     ) -> Option<Arc<Mesh>> {
-        let (cel, resolved_ctx) = self.cel_cache_context_at(layer_idx, frame, library)?;
+        let (cel, resolved_ctx) = self.cel_cache_context_at(layer_idx, frame, world_xform, library)?;
         let Some((sig, eval_frame_key)) = resolved_ctx else {
             return (!cel.shapes.is_empty())
                 .then(|| cel.cached_onion_mesh(zoom, pan, tint_rgb, alpha));
         };
-        cel.cached_resolved_onion_mesh((sig, eval_frame_key), zoom, pan, (tint_rgb, alpha), || {
-            self.build_uncached_world_batch_mesh(layer_idx, frame, library)
-        })
+        cel.cached_resolved_onion_mesh(
+            (sig, eval_frame_key, world_xform),
+            zoom,
+            pan,
+            (tint_rgb, alpha),
+            || self.build_uncached_world_batch_mesh(layer_idx, frame, world_xform, library),
+        )
     }
 }

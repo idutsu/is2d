@@ -253,11 +253,9 @@ fn draw_edit_menu(
         let can_undo = !tab.history.undo_stack.is_empty();
         let can_redo = !tab.history.redo_stack.is_empty();
         let has_selection = !tab.session.selection.is_empty();
+        let tl = tab.active_timeline();
         let can_paste = !clipboard.shapes.is_empty()
-            && tab
-                .doc
-                .root
-                .is_layer_editable_by_id(active_scope_layer_id(&tab.session, &tab.doc.root));
+            && tl.is_layer_editable_by_id(active_scope_layer_id(&tab.session, tl));
 
         if menu_action_button(ui, can_undo, "元に戻す", &format!("{MOD_KEY}+Z")) {
             actions.push(UiAction::Undo);
@@ -539,15 +537,15 @@ pub(crate) fn draw_stage_header_bar(
 
 fn draw_group_breadcrumb(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     let mut items: Vec<String> = vec![format!("{} シーン 1", icons::SCENE_MOVIE)];
-    for sess in &tab.session.edit_stack {
-        for &gid in &sess.parent_editing_group_path {
+    for lvl in &tab.session.edit_path.levels {
+        for &gid in &lvl.parent_group_path {
             items.push(format!("{} Group #{gid}", icons::GROUP));
         }
         let sym_name = tab
             .doc
             .library
             .iter()
-            .find(|s| s.id == sess.symbol_id)
+            .find(|s| s.id == lvl.symbol_id)
             .map(|s| s.name.as_str())
             .unwrap_or("Symbol");
         items.push(format!("{} {sym_name}", icons::SYMBOL));
@@ -1186,7 +1184,7 @@ pub(crate) fn draw_selected_frame_properties(
     ui: &mut egui::Ui,
 ) {
     let Some((kf_start_frame, current_rotate, is_complete)) =
-        tab.doc.root.active_tween_keyframe_info()
+        tab.active_timeline().active_tween_keyframe_info()
     else {
         return;
     };
@@ -1524,14 +1522,13 @@ fn draw_selected_library_symbol_controls(
 
     let is_editing_self = tab
         .session
-        .edit_stack
+        .edit_path
+        .levels
         .iter()
-        .any(|sess| sess.symbol_id == sel_id);
+        .any(|lvl| lvl.symbol_id == sel_id);
+    let tl = tab.active_timeline();
     let can_place = tab.can_place_symbol_in_current_context(sel_id)
-        && tab
-            .doc
-            .root
-            .is_layer_editable_by_id(active_scope_layer_id(&tab.session, &tab.doc.root));
+        && tl.is_layer_editable_by_id(active_scope_layer_id(&tab.session, tl));
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let place_w = (ui.available_width() - 116.0).max(70.0);
@@ -1764,7 +1761,8 @@ pub(crate) fn draw_canvas_contents(
     painter: &egui::Painter,
 ) {
     let in_group_edit = !tab.session.editing_group_path.is_empty();
-    let in_symbol_edit = !tab.session.edit_stack.is_empty();
+    let in_symbol_edit = !tab.session.edit_path.is_empty();
+    let world_xform = tab.session.edit_path.world_xform();
     let zoom = tab.view.zoom;
     let pan = tab.view.pan;
     let stage_size = tab.doc.stage_size;
@@ -1773,13 +1771,8 @@ pub(crate) fn draw_canvas_contents(
         .artwork_painter(painter, painter.clip_rect(), stage_size, in_symbol_edit);
 
     // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画
-    if let Some(session) = tab.session.edit_stack.last() {
-        if let Some(mesh) = session.backdrop_cel.cached_backdrop_screen_mesh(
-            session.parent_timeline.current_frame,
-            zoom,
-            pan,
-            &tab.doc.library,
-        ) {
+    if in_symbol_edit {
+        if let Some(mesh) = tab.cached_backdrop_screen_mesh(zoom, pan) {
             artwork_painter.add(arc_mesh_to_shape(mesh));
         }
     }
@@ -1790,10 +1783,11 @@ pub(crate) fn draw_canvas_contents(
     }
 
     // 1. 下層レイヤーから上層レイヤーへ順に合成描画（`tab.scene().shapes()` はレイヤー順に整列されているため単一カーソルで O(N) 走査）
-    let num_layers = tab.doc.root.layers.len();
+    let tl = tab.active_timeline();
+    let num_layers = tl.layers.len();
     let mut selected_group_boxes: Vec<(u64, Option<KRect>, KRect, Option<Point>)> = Vec::new();
     let (is_sel, has_sel) = tab.scene().selected_shape_mask(&tab.session.selection);
-    let curr_f = tab.doc.root.current_frame;
+    let curr_f = tl.current_frame;
     let view_world_rect =
         tab.view
             .visible_world_rect(&artwork_painter, stage_size, in_symbol_edit);
@@ -1801,9 +1795,7 @@ pub(crate) fn draw_canvas_contents(
     let mut shape_cursor = 0usize;
 
     for layer_idx in 0..num_layers {
-        let Some((lid, is_visible, is_locked)) = tab
-            .doc
-            .root
+        let Some((lid, is_visible, is_locked)) = tl
             .layers
             .get(layer_idx)
             .map(|l| (l.id, l.visible, l.locked))
@@ -1814,12 +1806,13 @@ pub(crate) fn draw_canvas_contents(
             continue;
         }
         if timeline_ui.is_playing || is_locked {
-            if let Some(mesh) = tab.doc.root.resolved_cel_screen_mesh(
+            if let Some(mesh) = tl.resolved_cel_screen_mesh(
                 layer_idx,
                 curr_f,
                 zoom,
                 pan,
                 in_group_edit && !timeline_ui.is_playing,
+                world_xform,
                 &tab.doc.library,
             ) {
                 artwork_painter.add(arc_mesh_to_shape(mesh));
@@ -1830,9 +1823,7 @@ pub(crate) fn draw_canvas_contents(
         if num_layers > 1 {
             while shape_cursor < scene_shapes.len()
                 && scene_shapes[shape_cursor].layer_id != lid
-                && tab
-                    .doc
-                    .root
+                && tl
                     .layer_index_by_id(scene_shapes[shape_cursor].layer_id)
                     .is_none_or(|ord| ord < layer_idx)
             {
@@ -1979,14 +1970,15 @@ fn draw_selected_group_and_symbol_boxes(
         }
     }
 
-    if let Some(session) = tab.session.edit_stack.last() {
-        let origin = session.instance_xform * Point::ZERO;
+    if !tab.session.edit_path.is_empty() {
+        let origin = tab.session.edit_path.world_xform() * Point::ZERO;
         draw_registration_cross(painter, tab.view.world_to_screen(origin), 5.5, true);
     }
 }
 
 fn draw_onion_skins(tab: &Tab, painter: &egui::Painter) {
-    let curr_f = tab.doc.root.current_frame;
+    let tl = tab.active_timeline();
+    let curr_f = tl.current_frame;
     for step in (1..=tab.view.onion_prev_frames).rev() {
         if curr_f >= step {
             let alpha = (84 / step as u8).clamp(24, 84);
@@ -1995,7 +1987,7 @@ fn draw_onion_skins(tab: &Tab, painter: &egui::Painter) {
     }
     for step in 1..=tab.view.onion_next_frames {
         let f = curr_f + step;
-        if f < tab.doc.root.total_frames {
+        if f < tl.total_frames {
             let alpha = (84 / step as u8).clamp(24, 84);
             draw_onion_skin_frame(tab, painter, f, [35, 185, 105], alpha);
         }
@@ -2011,16 +2003,19 @@ fn draw_onion_skin_frame(
 ) {
     let zoom = tab.view.zoom;
     let pan = tab.view.pan;
-    for (layer_idx, layer) in tab.doc.root.layers.iter().enumerate() {
+    let world_xform = tab.session.edit_path.world_xform();
+    let tl = tab.active_timeline();
+    for (layer_idx, layer) in tl.layers.iter().enumerate() {
         if !layer.visible {
             continue;
         }
-        if let Some(mesh) = tab.doc.root.resolved_cel_onion_mesh(
+        if let Some(mesh) = tl.resolved_cel_onion_mesh(
             layer_idx,
             frame,
             zoom,
             pan,
             (tint_rgb, alpha),
+            world_xform,
             &tab.doc.library,
         ) {
             painter.add(arc_mesh_to_shape(mesh));

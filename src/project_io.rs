@@ -110,25 +110,6 @@ fn prepare_active_tab_for_switch_or_save(tab: &mut Tab, flush_raw_merge: bool) {
     if !tab.session.has_unsliced_snapshot() {
         sync_shapes_to_timeline(tab);
     }
-    tab.sync_active_symbol_edit();
-
-    if tab.session.edit_stack.len() >= 2 {
-        for idx in (1..tab.session.edit_stack.len()).rev() {
-            let sym_id = tab.session.edit_stack[idx - 1].symbol_id;
-            let xform = tab.session.edit_stack[idx - 1].instance_xform;
-            if xform.determinant().abs() <= 1e-9 {
-                continue;
-            }
-            let inv_xform = xform.inverse();
-            let working_tl = tab.session.edit_stack[idx].parent_timeline.clone();
-            let mut cache =
-                std::mem::take(&mut tab.session.edit_stack[idx - 1].stage_to_local_cache);
-            if let Some(sym_def) = tab.doc.find_symbol_mut(sym_id) {
-                sym_def.update_from_working_timeline(&working_tl, inv_xform, &mut cache);
-            }
-            tab.session.edit_stack[idx - 1].stage_to_local_cache = cache;
-        }
-    }
 }
 
 /// アクティブタブのインデックスを `target_index` へ切り替え、キャンバス矩形を引き継ぎつつペーストオフセット等をリセットする
@@ -170,7 +151,7 @@ pub(crate) fn is_active_tab_pristine_empty(tab: &Tab) -> bool {
         && tab.history.undo_stack.is_empty()
         && tab.history.redo_stack.is_empty()
         && tab.doc.library.is_empty()
-        && tab.session.edit_stack.is_empty()
+        && tab.session.edit_path.is_empty()
         && tab.doc.stage_size == Vec2::new(800.0, 450.0)
         && !tab.view.clip_outside_stage
         && tab.doc.root.fps == 24
@@ -933,13 +914,7 @@ pub(crate) struct ProjectDocument {
 impl ProjectDocument {
     /// 現在の `Tab` から保存用の `ProjectDocument` を生成する
     pub(crate) fn from_app(tab: &Tab) -> Self {
-        let root_timeline = tab
-            .session
-            .edit_stack
-            .first()
-            .map(|sess| &sess.parent_timeline)
-            .unwrap_or(&tab.doc.root);
-        let mut saved_timeline: SavedTimeline = root_timeline.into();
+        let mut saved_timeline: SavedTimeline = (&tab.doc.root).into();
         saved_timeline.fps = tab.doc.root.fps.clamp(1, 60);
 
         Self {
@@ -1292,17 +1267,18 @@ type PreSaveRollbackState = (
     Option<Floating>,
     Option<Point>,
     Document,
-    Vec<crate::symbol::SymbolEditSession>,
+    crate::symbol::EditPath,
 );
 
 fn restore_pre_save_state(tab: &mut Tab, pre_save_state: Option<PreSaveRollbackState>) {
-    if let Some((shapes, sel, floating, pivot, doc, edit_stack)) = pre_save_state {
+    if let Some((shapes, sel, floating, pivot, doc, edit_path)) = pre_save_state {
         tab.session.shapes = shapes;
         tab.session.selection = sel;
         tab.session.floating = floating;
         tab.session.transform_pivot = pivot;
         tab.doc = doc;
-        tab.session.edit_stack = edit_stack;
+        tab.session.edit_path = edit_path;
+        tab.session.backdrop_cache = Default::default();
         tab.session.record_loaded_signatures();
     }
 }
@@ -1321,7 +1297,7 @@ pub(crate) fn save_project_to_path(
                 tab.session.floating.clone(),
                 tab.session.transform_pivot,
                 tab.doc.clone(),
-                tab.session.edit_stack.clone(),
+                tab.session.edit_path.clone(),
             )
         })
     };

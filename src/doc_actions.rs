@@ -365,29 +365,29 @@ fn record_undo(
             return;
         }
     }
-    let tl_snap = if let Some(fallback) = pre_canvas {
+    if let Some(fallback) = pre_canvas {
         let mut snapshot = tab.session.take_unsliced_snapshot().unwrap_or(fallback);
-        let mut tl = tab.doc.root.clone();
-        tl.normalize_shape_layer_ids(&mut snapshot);
-        tl.write_shapes_to_editable_cels(
-            &snapshot,
-            &tab.doc.library,
-            tab.session.loaded_signatures(),
-        );
-        tl
+        let sigs = tab.session.take_loaded_signatures();
+        let world_xform = tab.session.edit_path.world_xform();
+        tab.with_active_timeline_mut(|tl, library| {
+            tl.normalize_shape_layer_ids(&mut snapshot);
+            crate::canvas_tool::Session::sort_vec_by_layer_order(&mut snapshot, tl);
+            tl.write_shapes_to_editable_cels(&snapshot, library, &sigs, world_xform)
+        });
+        let current_shapes = std::mem::replace(&mut tab.session.shapes, snapshot);
+        tab.session.restore_loaded_signatures_and_record(sigs);
+        tab.session.shapes = current_shapes;
     } else {
         tab.session.restore_unsliced_preserving_selection();
         sync_shapes_to_timeline(tab);
-        tab.doc.root.clone()
-    };
-    let (library, symbol_edit_stack, symbols_revision) = tab
-        .history
-        .snapshot_symbols(&tab.doc, &tab.session.edit_stack);
+    }
+    let tl_snap = tab.doc.root.clone();
+    let (library, symbols_revision) = tab.history.snapshot_symbols(&tab.doc);
     let entry = UndoEntry {
         timeline: tl_snap,
         library,
+        edit_path: tab.session.edit_path.clone(),
         editing_group_path: tab.session.editing_group_path.clone(),
-        symbol_edit_stack,
         stage_size: tab.doc.stage_size,
         symbols_revision,
         commit_id: tab.history.current_commit_id,
@@ -416,8 +416,7 @@ fn commit_canvas_mutation(tab: &mut Tab, pre_mutation_canvas_snapshot: Vec<FillS
 fn mutate_timeline_with_undo(tab: &mut Tab, mutate: impl FnOnce(&mut Timeline)) {
     flush_canvas_before_timeline_op(tab);
     push_undo(tab, None);
-    mutate(&mut tab.doc.root);
-    tab.doc.sync_active_edit(&mut tab.session.edit_stack);
+    tab.with_active_timeline_mut(|tl, _| mutate(tl));
     load_shapes_from_timeline(tab);
 }
 
@@ -478,8 +477,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         Action::SelectAll => {
             clear_selection(tab);
             let editable_lids: std::collections::HashSet<u64> = tab
-                .doc
-                .root
+                .active_timeline()
                 .layers
                 .iter()
                 .filter(|l| l.visible && !l.locked)
@@ -729,9 +727,11 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 commit_canvas_mutation(tab, snapshot);
                 let registered_id = tab.doc.register_new_symbol(local_shapes);
                 tab.view.selected_library_symbol = Some(registered_id);
-                if let Some(l_idx) = tab.doc.root.layer_index_by_id(target_lid) {
-                    tab.doc.root.active_layer = l_idx;
-                }
+                tab.with_active_timeline_mut(|tl, _| {
+                    if let Some(l_idx) = tl.layer_index_by_id(target_lid) {
+                        tl.active_layer = l_idx;
+                    }
+                });
                 tab.session.floating = None;
                 tab.session.transform_pivot = None;
                 tab.view.inspect_timeline_frame = false;
@@ -760,7 +760,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         Action::ExitSymbolTimeline => ApplyResult::Applied(exit_symbol_timeline(tab)),
         Action::ExitSymbolToDepth { depth } => {
             let mut exited = false;
-            while tab.session.edit_stack.len() > depth {
+            while tab.session.edit_path.len() > depth {
                 if !exit_symbol_timeline(tab) {
                     break;
                 }
@@ -876,8 +876,8 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
 // ============================================================================
 
 fn apply_raw_outline(tab: &mut Tab, active_tool: Tool, brush_color: Color32, raw: &[Point]) -> bool {
-    let target_lid = active_scope_layer_id(&tab.session, &tab.doc.root);
-    if !tab.doc.root.is_layer_editable_by_id(target_lid) {
+    let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
+    if !tab.active_timeline().is_layer_editable_by_id(target_lid) {
         return false;
     }
     let stroke_shapes: Vec<FillShape> =
@@ -891,8 +891,10 @@ fn apply_raw_outline(tab: &mut Tab, active_tool: Tool, brush_color: Color32, raw
     if active_tool == Tool::Brush {
         clear_selection(tab);
         let snapshot = tab.session.take_or_clone_unsliced_snapshot();
-        merge_shapes_into_canvas(&mut tab.session.shapes, stroke_shapes);
-        tab.session.sort_shapes_by_layer_order(&tab.doc.root);
+        let mut shapes = std::mem::take(&mut tab.session.shapes);
+        merge_shapes_into_canvas(&mut shapes, stroke_shapes);
+        crate::canvas_tool::Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
+        tab.session.shapes = shapes;
         commit_canvas_mutation(tab, snapshot);
         true
     } else {
@@ -938,16 +940,24 @@ fn apply_raw_outline(tab: &mut Tab, active_tool: Tool, brush_color: Color32, raw
 
 fn collect_all_visible_shapes(tab: &Tab) -> Vec<FillShape> {
     let mut out = Vec::with_capacity(tab.scene().len());
-    for (layer_idx, layer) in tab.doc.root.layers.iter().enumerate() {
+    let tl = tab.active_timeline();
+    let world_xform = tab.session.edit_path.world_xform();
+    for (layer_idx, layer) in tl.layers.iter().enumerate() {
         if !layer.visible {
             continue;
         }
         if layer.locked {
-            out.extend(tab.doc.root.evaluate_layer_shapes_at(
+            let mut eval = tl.evaluate_layer_shapes_at(
                 layer_idx,
-                tab.doc.root.current_frame,
+                tl.current_frame,
                 &tab.doc.library,
-            ));
+            );
+            if world_xform != Affine::IDENTITY {
+                for s in &mut eval {
+                    s.transform(world_xform);
+                }
+            }
+            out.extend(eval);
         } else {
             let lid = layer.id;
             out.extend(
@@ -963,23 +973,24 @@ fn collect_all_visible_shapes(tab: &Tab) -> Vec<FillShape> {
 }
 
 fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
-    let target_lid = active_scope_layer_id(&tab.session, &tab.doc.root);
-    if !tab.doc.root.is_layer_editable_by_id(target_lid) {
+    let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
+    if !tab.active_timeline().is_layer_editable_by_id(target_lid) {
         return false;
     }
 
     // 0. 選択領域が存在する場合：選択中の「生シェイプ」のみにバケツで色を流し込む（グループは無効）
     if !tab.session.selection.is_empty() {
+        let tl = tab.active_timeline();
         let clicked_selected_raw = tab.scene().shapes().iter().any(|s| {
             tab.session.selection.contains_shape(s)
-                && tab.doc.root.is_layer_editable_by_id(s.layer_id)
+                && tl.is_layer_editable_by_id(s.layer_id)
                 && s.is_raw_at_scope(&tab.session.editing_group_path)
                 && s.contains_point(pt)
         });
         if clicked_selected_raw {
             let any_color_diff = tab.scene().shapes().iter().any(|s| {
                 tab.session.selection.contains_shape(s)
-                    && tab.doc.root.is_layer_editable_by_id(s.layer_id)
+                    && tl.is_layer_editable_by_id(s.layer_id)
                     && s.is_raw_at_scope(&tab.session.editing_group_path)
                     && s.color != fill_color
             });
@@ -987,14 +998,17 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 return false;
             }
             let snapshot = tab.session.take_or_clone_unsliced_snapshot();
-            for shape in &mut tab.session.shapes {
+            let mut shapes = std::mem::take(&mut tab.session.shapes);
+            let tl = tab.active_timeline();
+            for shape in &mut shapes {
                 if tab.session.selection.contains_shape(shape)
-                    && tab.doc.root.is_layer_editable_by_id(shape.layer_id)
+                    && tl.is_layer_editable_by_id(shape.layer_id)
                     && shape.is_raw_at_scope(&tab.session.editing_group_path)
                 {
                     shape.set_color(fill_color);
                 }
             }
+            tab.session.shapes = shapes;
             tab.session.mark_floating_modified(FloatingOrigin::Move);
             commit_canvas_mutation(tab, snapshot);
             return true;
@@ -1003,7 +1017,10 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
     }
 
     let all_visible_shapes = collect_all_visible_shapes(tab);
-    let target_layer_ord = tab.doc.root.layer_index_by_id(target_lid).unwrap_or(0);
+    let target_layer_ord = tab
+        .active_timeline()
+        .layer_index_by_id(target_lid)
+        .unwrap_or(0);
 
     let scene = tab.scene();
     if let Some(hit_idx) = (0..scene.len()).rev().find(|&idx| {
@@ -1014,8 +1031,9 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
             && s.is_in_editing_scope(&tab.session.editing_group_path)
             && s.contains_point(pt)
     }) {
-        let occluded_above = (target_layer_ord + 1..tab.doc.root.layers.len()).any(|l_idx| {
-            let layer = &tab.doc.root.layers[l_idx];
+        let tl = tab.active_timeline();
+        let occluded_above = (target_layer_ord + 1..tl.layers.len()).any(|l_idx| {
+            let layer = &tl.layers[l_idx];
             layer.visible
                 && all_visible_shapes
                     .iter()
@@ -1050,12 +1068,17 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 if pieces.len() > 1 {
                     if let Some(split_piece) = pieces.into_iter().find(|p| p.contains_point(pt)) {
                         let snapshot = tab.session.take_or_clone_unsliced_snapshot();
+                        let mut shapes = std::mem::take(&mut tab.session.shapes);
                         merge_shapes_into_canvas(
-                            &mut tab.session.shapes,
+                            &mut shapes,
                             vec![split_piece
                                 .with_scope(target_lid, &tab.session.editing_group_path)],
                         );
-                        tab.session.sort_shapes_by_layer_order(&tab.doc.root);
+                        crate::canvas_tool::Session::sort_vec_by_layer_order(
+                            &mut shapes,
+                            tab.active_timeline(),
+                        );
+                        tab.session.shapes = shapes;
                         commit_canvas_mutation(tab, snapshot);
                         return true;
                     }
@@ -1064,10 +1087,15 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
 
             focus_active_layer_to_shape(tab, hit_idx);
             let snapshot = tab.session.take_or_clone_unsliced_snapshot();
-            let mut target = tab.session.shapes.remove(hit_idx);
+            let mut shapes = std::mem::take(&mut tab.session.shapes);
+            let mut target = shapes.remove(hit_idx);
             target.set_color(fill_color);
-            merge_disjoint_fill_into_canvas(&mut tab.session.shapes, target);
-            tab.session.sort_shapes_by_layer_order(&tab.doc.root);
+            merge_disjoint_fill_into_canvas(&mut shapes, target);
+            crate::canvas_tool::Session::sort_vec_by_layer_order(
+                &mut shapes,
+                tab.active_timeline(),
+            );
+            tab.session.shapes = shapes;
             commit_canvas_mutation(tab, snapshot);
             return true;
         }
@@ -1097,11 +1125,13 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
     });
     if let Some(enclosed_fill) = enclosed_opt {
         let snapshot = tab.session.take_or_clone_unsliced_snapshot();
+        let mut shapes = std::mem::take(&mut tab.session.shapes);
         merge_disjoint_fill_into_canvas(
-            &mut tab.session.shapes,
+            &mut shapes,
             enclosed_fill.with_scope(target_lid, &tab.session.editing_group_path),
         );
-        tab.session.sort_shapes_by_layer_order(&tab.doc.root);
+        crate::canvas_tool::Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
+        tab.session.shapes = shapes;
         commit_canvas_mutation(tab, snapshot);
         return true;
     }
@@ -1159,11 +1189,13 @@ fn apply_deform_shape(
     let min_deform = 0.5 / (tab.view.zoom as f64);
     if drag_dist > min_deform && shape_idx < tab.session.shapes.len() {
         focus_active_layer_to_shape(tab, shape_idx);
-        let mut deformed = tab.session.shapes.remove(shape_idx);
+        let mut shapes = std::mem::take(&mut tab.session.shapes);
+        let mut deformed = shapes.remove(shape_idx);
         apply_deform(&mut deformed);
         let resolved = resolve_deformed_shape(&deformed);
-        merge_shapes_into_canvas(&mut tab.session.shapes, resolved);
-        tab.session.sort_shapes_by_layer_order(&tab.doc.root);
+        merge_shapes_into_canvas(&mut shapes, resolved);
+        crate::canvas_tool::Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
+        tab.session.shapes = shapes;
         commit_canvas_mutation(tab, undo_snapshot);
         true
     } else {
@@ -1385,8 +1417,8 @@ fn apply_paste_clipboard(
     if clipboard.shapes.is_empty() {
         return false;
     }
-    let target_lid = active_scope_layer_id(&tab.session, &tab.doc.root);
-    if !tab.doc.root.is_layer_editable_by_id(target_lid) {
+    let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
+    if !tab.active_timeline().is_layer_editable_by_id(target_lid) {
         show_notice(
             toast,
             NoticeKind::Warning,
@@ -1428,7 +1460,7 @@ fn apply_paste_clipboard(
 
         let same_timeline_context = clipboard.source_doc_id == tab.id
             && clipboard.source_symbol_id
-                == tab.session.edit_stack.last().map(|s| s.symbol_id)
+                == tab.session.edit_path.last().map(|s| s.symbol_id)
             && tab.session.editing_group_path.is_empty();
         let multi_layer_copy = same_timeline_context
             && resolved
@@ -1473,9 +1505,10 @@ fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     }
     while tab
         .session
-        .edit_stack
+        .edit_path
+        .levels
         .iter()
-        .any(|sess| sess.symbol_id == sym_id)
+        .any(|lvl| lvl.symbol_id == sym_id)
     {
         exit_symbol_timeline(tab);
     }
@@ -1483,24 +1516,24 @@ fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     push_undo(tab, None);
 
     tab.doc
-        .remove_symbol_and_detach(sym_id, &mut tab.session.edit_stack, &mut tab.session.shapes);
+        .remove_symbol_and_detach(sym_id, &mut tab.session.shapes);
     if tab.view.selected_library_symbol == Some(sym_id) {
         tab.view.selected_library_symbol = tab.doc.library.first().map(|s| s.id);
     }
 
-    tab.doc.sync_active_edit(&mut tab.session.edit_stack);
     load_shapes_from_timeline(tab);
     true
 }
 
 fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -> bool {
-    let targets = tab.doc.root.target_layers_for_frame_op();
+    let targets = tab.active_timeline().target_layers_for_frame_op();
     if targets.is_empty() {
         return false;
     }
     flush_canvas_before_timeline_op(tab);
 
-    let (can_toggle, is_currently_tweened) = tab.doc.root.can_toggle_tween_at_current_frame();
+    let (can_toggle, is_currently_tweened) =
+        tab.active_timeline().can_toggle_tween_at_current_frame();
     if !can_toggle {
         show_notice(
             toast,
@@ -1511,25 +1544,27 @@ fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -
     }
 
     push_undo(tab, None);
-    let curr_f = tab.doc.root.current_frame;
     let next_tween = !is_currently_tweened;
-    let mut changed = false;
-
-    for &l_idx in &targets {
-        let layer = &mut tab.doc.root.layers[l_idx];
-        if let Some(kf_idx) = layer.keyframe_index_at(curr_f) {
-            let kf = &mut layer.keyframes[kf_idx];
-            if next_tween {
-                if kf.cel.single_symbol_instance().is_some() && !kf.tween {
-                    kf.tween = true;
+    let changed = tab.with_active_timeline_mut(|tl, _| {
+        let curr_f = tl.current_frame;
+        let mut changed = false;
+        for &l_idx in &targets {
+            let layer = &mut tl.layers[l_idx];
+            if let Some(kf_idx) = layer.keyframe_index_at(curr_f) {
+                let kf = &mut layer.keyframes[kf_idx];
+                if next_tween {
+                    if kf.cel.single_symbol_instance().is_some() && !kf.tween {
+                        kf.tween = true;
+                        changed = true;
+                    }
+                } else if kf.tween {
+                    kf.tween = false;
                     changed = true;
                 }
-            } else if kf.tween {
-                kf.tween = false;
-                changed = true;
             }
         }
-    }
+        changed
+    });
 
     if changed {
         load_shapes_from_timeline(tab);
@@ -1540,13 +1575,14 @@ fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -
 }
 
 fn apply_set_tween_rotate(tab: &mut Tab, rotate_mode: TweenRotate) -> bool {
-    let Some(layer) = tab.doc.root.layers.get(tab.doc.root.active_layer) else {
+    let tl = tab.active_timeline();
+    let Some(layer) = tl.layers.get(tl.active_layer) else {
         return false;
     };
     if layer.locked || !layer.visible {
         return false;
     }
-    let Some(kf_idx) = layer.keyframe_index_at(tab.doc.root.current_frame) else {
+    let Some(kf_idx) = layer.keyframe_index_at(tl.current_frame) else {
         return false;
     };
     if !layer.keyframes[kf_idx].tween || layer.keyframes[kf_idx].tween_rotate == rotate_mode {
@@ -1555,12 +1591,13 @@ fn apply_set_tween_rotate(tab: &mut Tab, rotate_mode: TweenRotate) -> bool {
 
     flush_canvas_before_timeline_op(tab);
     push_undo(tab, None);
-    if let Some(layer_mut) = tab.doc.root.layers.get_mut(tab.doc.root.active_layer) {
-        if let Some(kf) = layer_mut.keyframes.get_mut(kf_idx) {
-            kf.tween_rotate = rotate_mode;
+    tab.with_active_timeline_mut(|tl, _| {
+        if let Some(layer_mut) = tl.layers.get_mut(tl.active_layer) {
+            if let Some(kf) = layer_mut.keyframes.get_mut(kf_idx) {
+                kf.tween_rotate = rotate_mode;
+            }
         }
-    }
-    tab.doc.sync_active_edit(&mut tab.session.edit_stack);
+    });
     load_shapes_from_timeline(tab);
     select_shapes_for_timeline_selection(tab);
     tab.view.inspect_timeline_frame = true;
@@ -1595,29 +1632,31 @@ fn apply_set_symbol_playback(
         return false;
     }
 
-    let curr_f = tab.doc.root.current_frame;
-    let mut updated = false;
-    for layer in &mut tab.doc.root.layers {
-        if !layer.visible || layer.locked {
-            continue;
+    let updated = tab.with_active_timeline_mut(|tl, _| {
+        let curr_f = tl.current_frame;
+        let mut updated = false;
+        for layer in &mut tl.layers {
+            if !layer.visible || layer.locked {
+                continue;
+            }
+            let Some(kf_idx) = layer.keyframe_index_at(curr_f) else {
+                continue;
+            };
+            let kf = &mut layer.keyframes[kf_idx];
+            if kf.cel.update_symbol_instances_with(|mut b| {
+                (b.instance_gid == inst_gid).then(|| {
+                    b.loop_mode = next_mode;
+                    b.first_frame = clamped_first;
+                    b
+                })
+            }) {
+                updated = true;
+            }
         }
-        let Some(kf_idx) = layer.keyframe_index_at(curr_f) else {
-            continue;
-        };
-        let kf = &mut layer.keyframes[kf_idx];
-        if kf.cel.update_symbol_instances_with(|mut b| {
-            (b.instance_gid == inst_gid).then(|| {
-                b.loop_mode = next_mode;
-                b.first_frame = clamped_first;
-                b
-            })
-        }) {
-            updated = true;
-        }
-    }
+        updated
+    });
 
     if updated {
-        tab.doc.sync_active_edit(&mut tab.session.edit_stack);
         load_shapes_from_timeline(tab);
     }
     updated
@@ -1630,8 +1669,7 @@ fn retain_selection_on_same_keyframe(tab: &mut Tab, prev_frame: usize, next_fram
         return;
     }
     let same_kf_layer_ids: HashSet<u64> = tab
-        .doc
-        .root
+        .active_timeline()
         .layers
         .iter()
         .filter(|l| {
@@ -1646,27 +1684,32 @@ fn retain_selection_on_same_keyframe(tab: &mut Tab, prev_frame: usize, next_fram
 }
 
 fn apply_switch_to_layer_and_frame(tab: &mut Tab, layer_idx: usize, frame_idx: usize) {
-    if tab.doc.root.layers.is_empty() {
+    if tab.active_timeline().layers.is_empty() {
         return;
     }
-    let prev_frame = tab.doc.root.current_frame;
+    let prev_frame = tab.active_timeline().current_frame;
     flush_canvas_before_timeline_op(tab);
-    tab.doc.root.select_single_cell(layer_idx, frame_idx);
-    let next_frame = tab.doc.root.current_frame;
+    let next_frame = tab.with_active_timeline_mut(|tl, _| {
+        tl.select_single_cell(layer_idx, frame_idx);
+        tl.current_frame
+    });
     retain_selection_on_same_keyframe(tab, prev_frame, next_frame);
     load_shapes_from_timeline(tab);
     tab.view.inspect_timeline_frame = true;
 }
 
 fn apply_scrub_ruler_to_frame(tab: &mut Tab, frame_idx: usize) {
-    let clamped_frame = frame_idx.min(tab.doc.root.total_frames.saturating_sub(1));
-    if tab.doc.root.current_frame == clamped_frame && tab.doc.root.cell_selection.is_none() {
+    let tl = tab.active_timeline();
+    let clamped_frame = frame_idx.min(tl.total_frames.saturating_sub(1));
+    if tl.current_frame == clamped_frame && tl.cell_selection.is_none() {
         return;
     }
-    let prev_frame = tab.doc.root.current_frame;
+    let prev_frame = tl.current_frame;
     flush_canvas_before_timeline_op(tab);
-    tab.doc.root.current_frame = clamped_frame;
-    tab.doc.root.cell_selection = None;
+    tab.with_active_timeline_mut(|tl, _| {
+        tl.current_frame = clamped_frame;
+        tl.cell_selection = None;
+    });
     retain_selection_on_same_keyframe(tab, prev_frame, clamped_frame);
     load_shapes_from_timeline(tab);
 }
@@ -1678,20 +1721,23 @@ fn apply_select_timeline_cells(
     end_layer: usize,
     end_frame: usize,
 ) {
-    if tab.doc.root.layers.is_empty() {
+    let num_layers = tab.active_timeline().layers.len();
+    if num_layers == 0 {
         return;
     }
-    let max_l = tab.doc.root.layers.len() - 1;
+    let max_l = num_layers - 1;
     let (l0, l1) = (start_layer.min(max_l), end_layer.min(max_l));
     let (f0, f1) = (start_frame, end_frame);
 
     apply_switch_to_layer_and_frame(tab, l1, f1);
-    tab.doc.root.cell_selection = Some(TimelineCellSelection::from_corners(l0, f0, l1, f1));
+    tab.with_active_timeline_mut(|tl, _| {
+        tl.cell_selection = Some(TimelineCellSelection::from_corners(l0, f0, l1, f1));
+    });
     select_shapes_for_timeline_selection(tab);
 }
 
 fn apply_timeline_insert_keyframe(tab: &mut Tab, clone_prev: bool) -> bool {
-    let targets = tab.doc.root.target_layers_for_frame_op();
+    let targets = tab.active_timeline().target_layers_for_frame_op();
     if targets.is_empty() {
         return false;
     }
@@ -1705,12 +1751,12 @@ fn apply_timeline_insert_keyframe(tab: &mut Tab, clone_prev: bool) -> bool {
 }
 
 fn apply_timeline_delete_keyframe(tab: &mut Tab) -> bool {
-    let targets = tab.doc.root.target_layers_for_frame_op();
+    let targets = tab.active_timeline().target_layers_for_frame_op();
     if targets.is_empty() {
         return false;
     }
     flush_canvas_before_timeline_op(tab);
-    if !tab.doc.root.can_delete_keyframe_on_targets(&targets) {
+    if !tab.active_timeline().can_delete_keyframe_on_targets(&targets) {
         return false;
     }
     mutate_timeline_with_undo(tab, |tl| {
@@ -1720,7 +1766,7 @@ fn apply_timeline_delete_keyframe(tab: &mut Tab) -> bool {
 }
 
 fn apply_timeline_extend_frame(tab: &mut Tab) -> bool {
-    let targets = tab.doc.root.target_layers_for_frame_op();
+    let targets = tab.active_timeline().target_layers_for_frame_op();
     if targets.is_empty() {
         return false;
     }
@@ -1731,12 +1777,12 @@ fn apply_timeline_extend_frame(tab: &mut Tab) -> bool {
 }
 
 fn apply_timeline_remove_frame(tab: &mut Tab) -> bool {
-    let targets = tab.doc.root.target_layers_for_frame_op();
+    let targets = tab.active_timeline().target_layers_for_frame_op();
     if targets.is_empty() {
         return false;
     }
     flush_canvas_before_timeline_op(tab);
-    if !tab.doc.root.can_remove_frame_on_targets(&targets) {
+    if !tab.active_timeline().can_remove_frame_on_targets(&targets) {
         return false;
     }
     let mut any_changed = false;
@@ -1754,8 +1800,7 @@ fn apply_timeline_move_or_copy_frames(
     copy_mode: bool,
 ) -> bool {
     let Some((dst_sel, actual_dl)) = tab
-        .doc
-        .root
+        .active_timeline()
         .resolve_frame_move_bounds(sel, delta_layer, delta_frame)
     else {
         return false;
@@ -1763,23 +1808,21 @@ fn apply_timeline_move_or_copy_frames(
     mutate_timeline_with_undo(tab, |tl| {
         tl.move_or_copy_frames(sel, dst_sel, actual_dl, copy_mode);
     });
-    tab.doc.next_group_id = tab
-        .doc
-        .next_group_id
-        .max(tab.doc.root.max_group_id().saturating_add(1));
+    let max_gid = tab.active_timeline().max_group_id().saturating_add(1);
+    tab.doc.next_group_id = tab.doc.next_group_id.max(max_gid);
     select_shapes_for_timeline_selection(tab);
     true
 }
 
 fn apply_timeline_add_layer(tab: &mut Tab) {
-    if tab.doc.root.layers.len() >= MAX_LAYERS_PER_TIMELINE {
+    if tab.active_timeline().layers.len() >= MAX_LAYERS_PER_TIMELINE {
         return;
     }
     mutate_timeline_with_undo(tab, Timeline::add_layer_above_active);
 }
 
 fn apply_timeline_delete_active_layer(tab: &mut Tab) -> bool {
-    if tab.doc.root.layers.len() <= 1 {
+    if tab.active_timeline().layers.len() <= 1 {
         return false;
     }
     mutate_timeline_with_undo(tab, Timeline::delete_active_layer);
@@ -1787,7 +1830,7 @@ fn apply_timeline_delete_active_layer(tab: &mut Tab) -> bool {
 }
 
 fn apply_timeline_reorder_layer(tab: &mut Tab, from_idx: usize, to_idx: usize) -> bool {
-    let len = tab.doc.root.layers.len();
+    let len = tab.active_timeline().layers.len();
     if from_idx >= len || to_idx >= len || from_idx == to_idx {
         return false;
     }
@@ -1798,8 +1841,9 @@ fn apply_timeline_reorder_layer(tab: &mut Tab, from_idx: usize, to_idx: usize) -
 }
 
 fn apply_timeline_move_active_layer(tab: &mut Tab, up: bool) -> bool {
-    let len = tab.doc.root.layers.len();
-    let curr = tab.doc.root.active_layer;
+    let tl = tab.active_timeline();
+    let len = tl.layers.len();
+    let curr = tl.active_layer;
     let target = if up {
         if curr + 1 >= len {
             return false;
@@ -1816,8 +1860,7 @@ fn apply_timeline_move_active_layer(tab: &mut Tab, up: bool) -> bool {
 
 fn apply_set_layer_visible(tab: &mut Tab, layer_idx: usize, visible: bool) {
     if tab
-        .doc
-        .root
+        .active_timeline()
         .layers
         .get(layer_idx)
         .is_none_or(|l| l.visible == visible)
@@ -1833,8 +1876,7 @@ fn apply_set_layer_visible(tab: &mut Tab, layer_idx: usize, visible: bool) {
 
 fn apply_set_layer_locked(tab: &mut Tab, layer_idx: usize, locked: bool) {
     if tab
-        .doc
-        .root
+        .active_timeline()
         .layers
         .get(layer_idx)
         .is_none_or(|l| l.locked == locked)
@@ -1869,13 +1911,12 @@ fn apply_set_total_frames(
     coalesce: Option<CoalesceKey>,
 ) -> bool {
     let next_total = next_total.max(1);
-    if next_total != tab.doc.root.total_frames {
+    if next_total != tab.active_timeline().total_frames {
         if tab.history.last_coalesce_key != coalesce || coalesce.is_none() {
             flush_canvas_before_timeline_op(tab);
         }
         push_undo(tab, coalesce);
-        tab.doc.root.resize_total_frames(next_total);
-        tab.doc.sync_active_edit(&mut tab.session.edit_stack);
+        tab.with_active_timeline_mut(|tl, _| tl.resize_total_frames(next_total));
         load_shapes_from_timeline(tab);
         return true;
     }
@@ -1884,7 +1925,7 @@ fn apply_set_total_frames(
 
 fn apply_set_fps(tab: &mut Tab, next_fps: u32, coalesce: Option<CoalesceKey>) -> bool {
     let next_fps = next_fps.clamp(1, 60);
-    if next_fps != tab.doc.root.fps {
+    if next_fps != tab.active_timeline().fps {
         if (tab.history.last_coalesce_key != coalesce || coalesce.is_none())
             && tab.session.selection.is_empty()
             && !tab.session.has_unsliced_snapshot()
@@ -1893,10 +1934,11 @@ fn apply_set_fps(tab: &mut Tab, next_fps: u32, coalesce: Option<CoalesceKey>) ->
         }
         push_undo(tab, coalesce);
         tab.doc.root.fps = next_fps;
-        for sess in &mut tab.session.edit_stack {
-            sess.parent_timeline.fps = next_fps;
+        for lvl in &tab.session.edit_path.levels {
+            if let Some(sym) = tab.doc.find_symbol_mut(lvl.symbol_id) {
+                sym.timeline.fps = next_fps;
+            }
         }
-        tab.doc.sync_active_edit(&mut tab.session.edit_stack);
         return true;
     }
     false

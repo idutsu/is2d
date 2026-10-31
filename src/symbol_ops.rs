@@ -5,11 +5,8 @@ use crate::canvas_tool::{
     flush_canvas_before_timeline_op, insert_and_select_shapes_in_scope, load_shapes_from_timeline,
     reorder_selected_to_scope_front, topmost_layer_id_for_indices,
 };
-use crate::symbol::{
-    SymbolEditSession, SymbolEvalCtx, SymbolInstanceBinding, SymbolLoopMode,
-    resolve_cel_with_library, transform_layers_with_local_cache,
-};
-use crate::timeline::Cel;
+use crate::symbol::{EditLevel, SymbolEvalCtx, SymbolInstanceBinding};
+use crate::timeline::TimelineCellSelection;
 use crate::vector_engine::{FillShape, union_bounding_boxes};
 
 /// 選択中のオブジェクトを新しい「シンボル」に変換するためのローカル図形抽出とインスタンスバインディング付与を行い、
@@ -64,7 +61,8 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         local_shapes.push(local_s);
     }
 
-    let target_lid = topmost_layer_id_for_indices(&tab.session, &tab.doc.root, &valid_indices);
+    let target_lid =
+        topmost_layer_id_for_indices(&tab.session, tab.active_timeline(), &valid_indices);
     let binding = SymbolInstanceBinding::new(
         inst_gid,
         sym_id,
@@ -89,11 +87,11 @@ pub(crate) fn prepare_place_symbol_instance(
     tab: &mut Tab,
     symbol_id: u64,
 ) -> Option<Vec<FillShape>> {
-    let target_lid = active_scope_layer_id(&tab.session, &tab.doc.root);
+    let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
     if !tab
         .doc
-        .can_place_symbol_in_current_context(&tab.session.edit_stack, symbol_id)
-        || !tab.doc.root.is_layer_editable_by_id(target_lid)
+        .can_place_symbol_in_current_context(&tab.session.edit_path, symbol_id)
+        || !tab.active_timeline().is_layer_editable_by_id(target_lid)
     {
         return None;
     }
@@ -117,16 +115,15 @@ pub(crate) fn prepare_place_symbol_instance(
         symbol_id,
         Affine::translate(KVec2::new(offset.x, offset.y)),
     );
-    let target_lid = active_scope_layer_id(&tab.session, &tab.doc.root);
-    let curr_frame = tab.doc.root.current_frame;
-    let kf_start = tab
-        .doc
-        .root
+    let tl = tab.active_timeline();
+    let target_lid = active_scope_layer_id(&tab.session, tl);
+    let curr_frame = tl.current_frame;
+    let kf_start = tl
         .layer_index_by_id(target_lid)
         .and_then(|l_idx| {
-            tab.doc.root.layers[l_idx]
+            tl.layers[l_idx]
                 .keyframe_index_at(curr_frame)
-                .map(|ki| tab.doc.root.layers[l_idx].keyframes[ki].start_frame)
+                .map(|ki| tl.layers[l_idx].keyframes[ki].start_frame)
         })
         .unwrap_or(curr_frame);
     let sym_shapes = tab
@@ -159,17 +156,20 @@ pub(crate) fn prepare_place_symbol_instance(
 pub(crate) fn selected_single_symbol_info(
     tab: &Tab,
 ) -> Option<(SymbolInstanceBinding, String, usize)> {
+    let tl = tab.active_timeline();
     let binding = tab
         .scene()
         .selected_single_symbol_binding(&tab.session.selection)
         .or_else(|| {
-            let layer = tab.doc.root.layers.get(tab.doc.root.active_layer)?;
+            let layer = tl.layers.get(tl.active_layer)?;
             if !layer.visible || layer.locked {
                 return None;
             }
-            layer
-                .cel_at(tab.doc.root.current_frame)?
-                .single_symbol_instance()
+            let mut b = layer
+                .cel_at(tl.current_frame)?
+                .single_symbol_instance()?;
+            b.xform = tab.session.edit_path.world_xform() * b.xform;
+            Some(b)
         })?;
     let sym = tab.doc.find_symbol(binding.symbol_id)?;
     Some((binding, sym.name.clone(), sym.timeline.total_frames.max(1)))
@@ -177,74 +177,81 @@ pub(crate) fn selected_single_symbol_info(
 
 /// シンボルインスタンスをダブルクリックして、そのシンボル専用の内部タイムライン編集モードへ入る
 pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBinding) -> bool {
-    let Some(sym_def) = tab.doc.find_symbol(binding.symbol_id).cloned() else {
+    if tab.doc.find_symbol(binding.symbol_id).is_none() {
         return false;
-    };
+    }
 
     flush_canvas_before_timeline_op(tab);
     tab.session.selection.clear();
 
-    let mut backdrop_shapes: Vec<FillShape> = tab
-        .session
-        .edit_stack
-        .last()
-        .map(|s| {
-            resolve_cel_with_library(
-                &s.backdrop_cel,
-                s.parent_timeline.current_frame,
-                s.parent_timeline.current_frame,
-                SymbolEvalCtx::new(&tab.doc.library),
-            )
-        })
-        .unwrap_or_default();
-    let curr_f = tab.doc.root.current_frame;
-    for layer_idx in 0..tab.doc.root.layers.len() {
-        let layer = &tab.doc.root.layers[layer_idx];
-        if !layer.visible {
-            continue;
-        }
-        let kf_start = layer
-            .keyframe_index_at(curr_f)
-            .map(|ki| layer.keyframes[ki].start_frame)
-            .unwrap_or(curr_f);
-        let resolved =
-            tab.doc
-                .root
-                .evaluate_layer_shapes_at(layer_idx, curr_f, &tab.doc.library);
-        for mut s in resolved {
-            if s.symbol_instance
-                .is_some_and(|b| b.instance_gid == binding.instance_gid)
-            {
-                continue;
+    let (parent_frame, parent_active_layer, xform_in_parent) = {
+        let tl = tab.active_timeline();
+        let curr_f = tl.current_frame;
+        let act_l = tl.active_layer;
+        let prev_world = tab.session.edit_path.world_xform();
+        let xform = if tab.session.edit_path.is_empty() {
+            binding.xform
+        } else {
+            let local_inst_xform = (binding.instance_gid != 0).then(|| {
+                tl.layers.iter().find_map(|layer| {
+                    if !layer.visible {
+                        return None;
+                    }
+                    if let Some((_, interp_b)) = layer.interpolated_tween_binding_at(curr_f) {
+                        if interp_b.instance_gid == binding.instance_gid
+                            && interp_b.symbol_id == binding.symbol_id
+                        {
+                            return Some(interp_b.xform);
+                        }
+                    }
+                    layer.cel_at(curr_f)?.instances.iter().find_map(|inst| {
+                        (inst.binding.instance_gid == binding.instance_gid
+                            && inst.binding.symbol_id == binding.symbol_id)
+                            .then_some(inst.binding.xform)
+                    })
+                })
+            }).flatten();
+            if let Some(local_xf) = local_inst_xform.filter(|&local_xf| {
+                (prev_world * local_xf)
+                    .as_coeffs()
+                    .iter()
+                    .zip(binding.xform.as_coeffs())
+                    .all(|(a, b)| (a - b).abs() <= 1e-6)
+            }) {
+                local_xf
+            } else if prev_world.determinant().abs() > 1e-9 {
+                prev_world.inverse() * binding.xform
+            } else {
+                binding.xform
             }
-            if let Some(mut b) = s.symbol_instance {
-                if let Some(sym) = tab.doc.find_symbol(b.symbol_id) {
-                    b.first_frame = sym.resolve_internal_frame(b, kf_start, curr_f);
-                    b.loop_mode = SymbolLoopMode::SingleFrame;
-                    s.symbol_instance = Some(b);
-                }
-            }
-            backdrop_shapes.push(s);
-        }
-    }
+        };
+        (curr_f, act_l, xform)
+    };
 
-    let (sym_layers, stage_to_local_cache) =
-        transform_layers_with_local_cache(&sym_def.timeline.layers, binding.xform);
-    let sym_timeline = tab.doc.root.new_for_symbol_edit(&sym_def, sym_layers);
-    tab.view.selected_library_symbol = Some(sym_def.id);
-
-    let parent_timeline = std::mem::replace(&mut tab.doc.root, sym_timeline);
-    let parent_editing_group_path = std::mem::take(&mut tab.session.editing_group_path);
-    tab.session.edit_stack.push(SymbolEditSession {
-        symbol_id: binding.symbol_id,
+    tab.view.selected_library_symbol = Some(binding.symbol_id);
+    let parent_group_path = std::mem::take(&mut tab.session.editing_group_path);
+    tab.session.edit_path.levels.push(EditLevel {
         instance_gid: binding.instance_gid,
-        instance_xform: binding.xform,
-        parent_timeline,
-        parent_editing_group_path,
-        backdrop_cel: Cel::new(backdrop_shapes),
-        stage_to_local_cache,
+        symbol_id: binding.symbol_id,
+        xform_in_parent,
+        parent_frame,
+        parent_active_layer,
+        parent_group_path,
     });
-    tab.doc.bump_revision();
+
+    let fps = tab.doc.root.fps;
+    if let Some(sym_def) = tab.doc.find_symbol_mut(binding.symbol_id) {
+        let tl = &mut sym_def.timeline;
+        tl.total_frames = tl.total_frames.max(1);
+        let act_l = tl.active_layer.min(tl.layers.len().saturating_sub(1));
+        let act_f = tl.current_frame.min(tl.total_frames.saturating_sub(1));
+        tl.active_layer = act_l;
+        tl.current_frame = act_f;
+        tl.fps = fps;
+        tl.next_layer_number = tl.next_layer_number.max(2);
+        tl.next_layer_id = tl.next_layer_id.max(2);
+        tl.cell_selection = Some(TimelineCellSelection::single(act_l, act_f));
+    }
 
     load_shapes_from_timeline(tab);
     true
@@ -254,9 +261,10 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
 pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
     if tab
         .session
-        .edit_stack
+        .edit_path
+        .levels
         .iter()
-        .any(|sess| sess.symbol_id == symbol_id)
+        .any(|lvl| lvl.symbol_id == symbol_id)
     {
         return false;
     }
@@ -265,7 +273,7 @@ pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
         .shapes
         .iter()
         .any(|s| s.symbol_instance.is_some_and(|b| b.symbol_id == symbol_id))
-        || tab.doc.root.layers.iter().any(|l| {
+        || tab.active_timeline().layers.iter().any(|l| {
             l.keyframes.iter().any(|kf| {
                 kf.cel
                     .instances
@@ -273,21 +281,27 @@ pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
                     .any(|inst| inst.binding.symbol_id == symbol_id)
             })
         });
-    if !tab.session.edit_stack.is_empty() && !has_instance_in_current_timeline {
-        while !tab.session.edit_stack.is_empty() {
+    if !tab.session.edit_path.is_empty() && !has_instance_in_current_timeline {
+        while !tab.session.edit_path.is_empty() {
             exit_symbol_timeline(tab);
         }
     }
-    let curr_f = tab.doc.root.current_frame;
+    let tl = tab.active_timeline();
+    let curr_f = tl.current_frame;
+    let world_xform = tab.session.edit_path.world_xform();
     let binding = tab
         .session
         .shapes
         .iter()
         .find_map(|s| s.symbol_instance.filter(|b| b.symbol_id == symbol_id))
         .or_else(|| {
-            tab.doc.root.layers.iter().find_map(|l| {
+            tl.layers.iter().find_map(|l| {
                 l.cel_at(curr_f)?.instances.iter().find_map(|inst| {
-                    (inst.binding.symbol_id == symbol_id).then_some(inst.binding)
+                    (inst.binding.symbol_id == symbol_id).then(|| {
+                        let mut b = inst.binding;
+                        b.xform = world_xform * b.xform;
+                        b
+                    })
                 })
             })
         })
@@ -304,35 +318,29 @@ pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
 
 /// 現在入っているシンボル内部タイムライン編集モードから1段階上の親シーン（または親シンボル）タイムラインへ戻る
 pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
-    if tab.session.edit_stack.is_empty() {
+    if tab.session.edit_path.is_empty() {
         return false;
     }
     flush_canvas_before_timeline_op(tab);
     tab.session.selection.clear();
 
-    let Some(mut session) = tab.session.edit_stack.pop() else {
+    let Some(lvl) = tab.session.edit_path.levels.pop() else {
         return false;
     };
-    session.parent_timeline.fps = tab.doc.root.fps;
-    let sym_timeline = std::mem::replace(&mut tab.doc.root, session.parent_timeline);
-    tab.session.editing_group_path = session.parent_editing_group_path;
+    let fps = tab.doc.root.fps;
+    tab.with_active_timeline_mut(|tl, _| {
+        tl.fps = fps;
+        let act_l = lvl.parent_active_layer.min(tl.layers.len().saturating_sub(1));
+        let act_f = lvl.parent_frame.min(tl.total_frames.saturating_sub(1));
+        tl.active_layer = act_l;
+        tl.current_frame = act_f;
+        tl.cell_selection = Some(TimelineCellSelection::single(act_l, act_f));
+    });
+    tab.session.editing_group_path = lvl.parent_group_path;
 
-    if session.instance_xform.determinant().abs() > 1e-9 {
-        let inv_xform = session.instance_xform.inverse();
-        if let Some(sym_def) = tab.doc.find_symbol_mut(session.symbol_id) {
-            sym_def.update_from_working_timeline(
-                &sym_timeline,
-                inv_xform,
-                &mut session.stage_to_local_cache,
-            );
-        }
-    }
-    tab.doc.bump_revision();
-
-    tab.doc.sync_active_edit(&mut tab.session.edit_stack);
     load_shapes_from_timeline(tab);
 
     tab.session
-        .select_symbol_instance_by_gid(session.instance_gid);
+        .select_symbol_instance_by_gid(lvl.instance_gid);
     true
 }

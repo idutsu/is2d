@@ -1655,12 +1655,12 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
         &mut app,
         Point::new(150.0, 150.0)
     ));
-    assert_eq!(app.session.edit_stack.len(), 1);
-    assert_eq!(app.doc.root.total_frames, 1);
+    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.active_timeline().total_frames, 1);
 
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
-    assert_eq!(app.doc.root.total_frames, 2);
-    assert_eq!(app.doc.root.current_frame, 1);
+    assert_eq!(app.active_timeline().total_frames, 2);
+    assert_eq!(app.active_timeline().current_frame, 1);
 
     let hat = make_stroke(
         Point::new(120.0, 80.0),
@@ -1673,7 +1673,7 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
     canvas_tool::sync_shapes_to_timeline(&mut app);
 
     assert!(tool_select::exit_current_group(&mut app));
-    assert!(app.session.edit_stack.is_empty());
+    assert!(app.session.edit_path.is_empty());
     assert_eq!(app.doc.library[0].timeline.total_frames, 2);
 
     assert!(timeline_ui::timeline_extend_frame(&mut app));
@@ -1893,7 +1893,7 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
         blue,
     );
     canvas_tool::sync_shapes_to_timeline(&mut app);
-    assert_eq!(app.doc.root.total_frames, 3);
+    assert_eq!(app.active_timeline().total_frames, 3);
 
     assert!(tool_transform::exit_symbol_timeline(&mut app));
     for _ in 0..4 {
@@ -1982,7 +1982,7 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
     ));
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
-    assert_eq!(app.doc.root.total_frames, 3);
+    assert_eq!(app.active_timeline().total_frames, 3);
     assert!(tool_transform::exit_symbol_timeline(&mut app));
 
     assert!(timeline_ui::timeline_extend_frame(&mut app));
@@ -1998,7 +1998,15 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
     tool_select::clear_selection(&mut app);
     assert!(app
         .doc.root
-        .resolved_cel_screen_mesh(0, 2, 1.0, Vec2::ZERO, false, &app.doc.library)
+        .resolved_cel_screen_mesh(
+            0,
+            2,
+            1.0,
+            Vec2::ZERO,
+            false,
+            kurbo::Affine::IDENTITY,
+            &app.doc.library,
+        )
         .is_none());
 
     let extra = make_stroke(
@@ -2666,11 +2674,27 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
     // シンボルを含むセルのスクリーンメッシュおよびオニオンスキンメッシュのキャッシュ再利用（Arcポインタ共有）検証
     let m_scr_1 = grp_sym_app
         .doc.root
-        .resolved_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, false, &grp_sym_app.doc.library)
+        .resolved_cel_screen_mesh(
+            0,
+            1,
+            1.0,
+            Vec2::ZERO,
+            false,
+            kurbo::Affine::IDENTITY,
+            &grp_sym_app.doc.library,
+        )
         .unwrap();
     let m_scr_2 = grp_sym_app
         .doc.root
-        .resolved_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, false, &grp_sym_app.doc.library)
+        .resolved_cel_screen_mesh(
+            0,
+            1,
+            1.0,
+            Vec2::ZERO,
+            false,
+            kurbo::Affine::IDENTITY,
+            &grp_sym_app.doc.library,
+        )
         .unwrap();
     assert!(
         std::sync::Arc::ptr_eq(&m_scr_1, &m_scr_2),
@@ -2686,6 +2710,7 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
             1.0,
             Vec2::new(50.0, -30.0),
             false,
+            kurbo::Affine::IDENTITY,
             &grp_sym_app.doc.library,
         )
         .unwrap();
@@ -2706,6 +2731,7 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
             1.0,
             Vec2::ZERO,
             ([35, 175, 105], 90),
+            kurbo::Affine::IDENTITY,
             &grp_sym_app.doc.library,
         )
         .unwrap();
@@ -2717,6 +2743,7 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
             1.0,
             Vec2::ZERO,
             ([35, 175, 105], 90),
+            kurbo::Affine::IDENTITY,
             &grp_sym_app.doc.library,
         )
         .unwrap();
@@ -2733,14 +2760,30 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
     let second_sym_id = grp_sym_app.doc.register_new_symbol(second_sym_shapes);
     let m_scr_before_unreferenced_edit = grp_sym_app
         .doc.root
-        .resolved_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, false, &grp_sym_app.doc.library)
+        .resolved_cel_screen_mesh(
+            0,
+            1,
+            1.0,
+            Vec2::ZERO,
+            false,
+            kurbo::Affine::IDENTITY,
+            &grp_sym_app.doc.library,
+        )
         .unwrap();
     grp_sym_app
         .doc
         .rename_symbol(second_sym_id, "UnreferencedSymbolEdited".to_string());
     let m_scr_after_unreferenced_edit = grp_sym_app
         .doc.root
-        .resolved_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, false, &grp_sym_app.doc.library)
+        .resolved_cel_screen_mesh(
+            0,
+            1,
+            1.0,
+            Vec2::ZERO,
+            false,
+            kurbo::Affine::IDENTITY,
+            &grp_sym_app.doc.library,
+        )
         .unwrap();
     assert!(
         std::sync::Arc::ptr_eq(
@@ -2754,7 +2797,15 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
         .rename_symbol(blink_sym_id, "ReferencedBlinkSymbolEdited".to_string());
     let m_scr_after_referenced_edit = grp_sym_app
         .doc.root
-        .resolved_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, false, &grp_sym_app.doc.library)
+        .resolved_cel_screen_mesh(
+            0,
+            1,
+            1.0,
+            Vec2::ZERO,
+            false,
+            kurbo::Affine::IDENTITY,
+            &grp_sym_app.doc.library,
+        )
         .unwrap();
     assert!(
         !std::sync::Arc::ptr_eq(
@@ -2789,14 +2840,11 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
         &mut grp_sym_app,
         inst_b
     ));
-    let session = grp_sym_app.session.edit_stack.last().unwrap();
-    let bd_m1 = session
-        .backdrop_cel
-        .cached_backdrop_screen_mesh(0, 1.0, Vec2::ZERO, &grp_sym_app.doc.library)
+    let bd_m1 = grp_sym_app
+        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
         .expect("背景シェイプが存在するため backdrop メッシュが生成されること");
-    let bd_m2 = session
-        .backdrop_cel
-        .cached_backdrop_screen_mesh(0, 1.0, Vec2::ZERO, &grp_sym_app.doc.library)
+    let bd_m2 = grp_sym_app
+        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
         .expect("キャッシュ済みの backdrop メッシュが返ること");
     assert!(std::sync::Arc::ptr_eq(&bd_m1, &bd_m2));
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
@@ -3096,6 +3144,7 @@ fn test_tween_lru_cache_no_thrashing() {
                     1.0,
                     Vec2::ZERO,
                     false,
+                    kurbo::Affine::IDENTITY,
                     &lru_tween_app.doc.library,
                 )
                 .unwrap()
@@ -3105,7 +3154,15 @@ fn test_tween_lru_cache_no_thrashing() {
         let second_m = lru_tween_app
             .doc
             .root
-            .resolved_cel_screen_mesh(0, f, 1.0, Vec2::ZERO, false, &lru_tween_app.doc.library)
+            .resolved_cel_screen_mesh(
+                0,
+                f,
+                1.0,
+                Vec2::ZERO,
+                false,
+                kurbo::Affine::IDENTITY,
+                &lru_tween_app.doc.library,
+            )
             .unwrap();
         assert!(
             std::sync::Arc::ptr_eq(first_m, &second_m),
@@ -3437,10 +3494,10 @@ fn test_clipboard_symbol_evaluates_latest_symbol_def_and_shares_arc() {
         &mut sym_paste_app,
         parent_sym
     ));
-    sym_paste_app.doc.root.fps = 12;
-    for sess in &mut sym_paste_app.session.edit_stack {
-        sess.parent_timeline.fps = 12;
-    }
+    doc_actions::apply(
+        &mut sym_paste_app,
+        doc_actions::Action::SetFps { fps: 12 },
+    );
     sym_paste_app.session.shapes = make_stroke(
         Point::new(100.0, 100.0),
         Point::new(140.0, 100.0),
@@ -8158,9 +8215,14 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
         "compute_hover_target が Scene<'_> を読み取って当たり判定を返すこと"
     );
 
-    // 2. Scene::resolve(&app.doc, &app.session.shapes) が既存メッシュキャッシュを引き継ぎつつ解決結果を返すこと
+    // 2. Scene::resolve(app.active_timeline(), &app.doc.library, Affine::IDENTITY, &app.session.shapes) が既存メッシュキャッシュを引き継ぎつつ解決結果を返すこと
     let mesh_arc_before = std::sync::Arc::clone(app.scene().shapes()[0].fill_mesh());
-    let resolved = canvas_tool::Scene::resolve(&app.doc, &app.session.shapes);
+    let resolved = canvas_tool::Scene::resolve(
+        app.tab().active_timeline(),
+        &app.doc.library,
+        kurbo::Affine::IDENTITY,
+        &app.session.shapes,
+    );
     assert_eq!(resolved.len(), 1);
     assert!(
         std::sync::Arc::ptr_eq(resolved[0].fill_mesh(), &mesh_arc_before),
@@ -8552,6 +8614,387 @@ fn test_stage5_anchor_edit_preserved_after_nudge_deselect_and_frame_scrub() {
         "Undo -> Redo 後もアンカー追加・削除後の線分数が維持されること"
     );
 }
+
+#[test]
+fn test_stage6b_non_uniform_scale_rotated_symbol_edit_preserves_untouched_shape_bits() {
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 120, 220);
+
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(220.0, 115.0)],
+                radius: 14.0,
+                color: red,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(160.0, 107.0),
+            },
+            Action::ConvertToSymbol,
+        ],
+    );
+    let sym_id = app.doc.library[0].id;
+    let orig_local_shape = app
+        .doc
+        .find_symbol(sym_id)
+        .unwrap()
+        .timeline
+        .layers[0]
+        .keyframes[0]
+        .cel
+        .shapes[0]
+        .clone();
+    let orig_bits: Vec<[u64; 6]> = orig_local_shape
+        .exterior
+        .segments
+        .iter()
+        .map(|seg| {
+            [
+                seg.p0.x.to_bits(),
+                seg.p0.y.to_bits(),
+                seg.p1.x.to_bits(),
+                seg.p1.y.to_bits(),
+                seg.p2.x.to_bits(),
+                seg.p2.y.to_bits(),
+            ]
+        })
+        .collect();
+
+    // 非一様スケール（sx != sy）＋回転をインスタンスに適用
+    run(
+        &mut app,
+        &[
+            Action::ScaleSelection { sx: 1.73, sy: 0.61 },
+            Action::RotateSelection { angle_rad: 0.47 },
+        ],
+    );
+    let (binding, _, _) = tool_transform::selected_single_symbol_info(&app).unwrap();
+
+    // インスタンスに入り、別の場所に50回ストロークを描いて出る
+    run(&mut app, &[Action::EnterSymbolTimeline { binding }]);
+    assert_eq!(app.session.edit_path.len(), 1);
+    for i in 0..50 {
+        let y = 260.0 + (i as f64) * 2.5;
+        run(
+            &mut app,
+            &[Action::PaintStroke {
+                points: vec![Point::new(80.0, y), Point::new(140.0, y)],
+                radius: 4.0,
+                color: blue,
+            }],
+        );
+    }
+    run(&mut app, &[Action::ExitSymbolTimeline]);
+    assert!(app.session.edit_path.is_empty());
+
+    let sym_shapes = &app
+        .doc
+        .find_symbol(sym_id)
+        .unwrap()
+        .timeline
+        .layers[0]
+        .keyframes[0]
+        .cel
+        .shapes;
+    let preserved = sym_shapes
+        .iter()
+        .find(|s| s.shape_id == orig_local_shape.shape_id)
+        .expect("未変更の既存図形が同一 shape_id で保持されていること");
+    let after_bits: Vec<[u64; 6]> = preserved
+        .exterior
+        .segments
+        .iter()
+        .map(|seg| {
+            [
+                seg.p0.x.to_bits(),
+                seg.p0.y.to_bits(),
+                seg.p1.x.to_bits(),
+                seg.p1.y.to_bits(),
+                seg.p2.x.to_bits(),
+                seg.p2.y.to_bits(),
+            ]
+        })
+        .collect();
+    assert_eq!(
+        orig_bits, after_bits,
+        "非一様スケール＋回転インスタンス内で50回別箇所に描画して出ても、既存の未変更図形の頂点座標が to_bits() 単位で完全一致すること"
+    );
+}
+
+#[test]
+fn test_stage6b_save_inside_two_level_nested_symbol_matches_save_after_exit_to_root() {
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+    let green = Color32::from_rgb(40, 180, 90);
+    let blue = Color32::from_rgb(60, 120, 220);
+
+    // 内側シンボル（Symbol 1）を作成し、さらにそれを包む外側シンボル（Symbol 2）を作成して2段ネストにする
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(180.0, 100.0)],
+                radius: 12.0,
+                color: red,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(140.0, 100.0),
+            },
+            Action::ConvertToSymbol,
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 160.0), Point::new(180.0, 160.0)],
+                radius: 12.0,
+                color: green,
+            },
+            Action::SelectAll,
+            Action::ConvertToSymbol,
+        ],
+    );
+    assert_eq!(app.doc.library.len(), 2);
+
+    // 1段目（外側シンボル）に入り、さらに2段目（内側シンボル）へ入る
+    let (outer_binding, _, _) = tool_transform::selected_single_symbol_info(&app).unwrap();
+    run(
+        &mut app,
+        &[Action::EnterSymbolTimeline {
+            binding: outer_binding,
+        }],
+    );
+    assert_eq!(app.session.edit_path.len(), 1);
+    run(
+        &mut app,
+        &[Action::EnterGroupAt {
+            pt: Point::new(140.0, 100.0),
+        }],
+    );
+    assert_eq!(app.session.edit_path.len(), 2);
+
+    // 2段目の中でストロークを追加
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: vec![Point::new(100.0, 220.0), Point::new(180.0, 220.0)],
+            radius: 10.0,
+            color: blue,
+        }],
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let path_nested = tmp_dir.join("is2d_stage6b_nested_save.is2d");
+    let path_root = tmp_dir.join("is2d_stage6b_root_save.is2d");
+
+    // 2段ネストに入ったまま保存
+    project_io::save_project_to_path(&mut app, &path_nested).unwrap();
+    assert_eq!(app.session.edit_path.len(), 2);
+
+    // ルートに出てから保存
+    run(&mut app, &[Action::ExitSymbolToDepth { depth: 0 }]);
+    assert!(app.session.edit_path.is_empty());
+    project_io::save_project_to_path(&mut app, &path_root).unwrap();
+
+    let json_nested = std::fs::read_to_string(&path_nested).unwrap();
+    let json_root = std::fs::read_to_string(&path_root).unwrap();
+    let _ = std::fs::remove_file(&path_nested);
+    let _ = std::fs::remove_file(&path_root);
+
+    assert_eq!(
+        json_nested, json_root,
+        "2段ネストのシンボルに入った状態で保存したファイルと、ルートに出てから保存したファイルが完全一致すること"
+    );
+}
+
+#[test]
+fn test_stage6b_timeline_ops_f6_f7_add_layer_inside_symbol_modify_library_symbol_def() {
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(120.0, 120.0), Point::new(200.0, 120.0)],
+                radius: 12.0,
+                color: red,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(160.0, 120.0),
+            },
+            Action::ConvertToSymbol,
+        ],
+    );
+    let sym_id = app.doc.library[0].id;
+    let (binding, _, _) = tool_transform::selected_single_symbol_info(&app).unwrap();
+
+    run(&mut app, &[Action::EnterSymbolTimeline { binding }]);
+    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.doc.root.total_frames, 1);
+    assert_eq!(app.doc.root.layers.len(), 1);
+
+    // シンボル内で F6（キーフレーム複製挿入）、F7（空白キーフレーム挿入）、レイヤー追加を実行
+    run(
+        &mut app,
+        &[
+            Action::InsertKeyframe { copy_prev: true },
+            Action::InsertKeyframe { copy_prev: false },
+            Action::AddLayer,
+        ],
+    );
+
+    // ルートタイムラインは変わらず、doc.library 内の SymbolDef のタイムラインが直接更新されていること
+    assert_eq!(app.doc.root.total_frames, 1);
+    assert_eq!(app.doc.root.layers.len(), 1);
+
+    let sym_tl = &app.doc.find_symbol(sym_id).unwrap().timeline;
+    assert_eq!(sym_tl.total_frames, 3);
+    assert_eq!(sym_tl.layers.len(), 2);
+    assert_eq!(sym_tl.layers[0].keyframes.len(), 3);
+    assert!(!sym_tl.layers[0].keyframes[1].cel.is_empty());
+    assert!(sym_tl.layers[0].keyframes[2].cel.is_empty());
+}
+
+#[test]
+fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and_edit_path() {
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+    let green = Color32::from_rgb(40, 180, 90);
+    let blue = Color32::from_rgb(60, 120, 220);
+
+    // 1. シンボルに入る前の操作（ストローク描画 → シンボル化 → ルート上で移動）
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(180.0, 100.0)],
+                radius: 12.0,
+                color: red,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(140.0, 100.0),
+            },
+            Action::ConvertToSymbol,
+            Action::MoveSelected {
+                delta: KVec2::new(20.0, 0.0),
+            },
+        ],
+    );
+    let sym_id = app.doc.library[0].id;
+    let (binding, _, _) = tool_transform::selected_single_symbol_info(&app).unwrap();
+
+    // 2. シンボルに入って内部でストローク描画＋F6 キーフレーム挿入
+    run(
+        &mut app,
+        &[
+            Action::EnterSymbolTimeline { binding },
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 160.0), Point::new(180.0, 160.0)],
+                radius: 12.0,
+                color: green,
+            },
+            Action::InsertKeyframe { copy_prev: true },
+        ],
+    );
+    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.doc.find_symbol(sym_id).unwrap().timeline.total_frames, 2);
+
+    // 3. シンボルから出た後の操作（ルートに青ストローク描画）
+    run(
+        &mut app,
+        &[
+            Action::ExitSymbolTimeline,
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 260.0), Point::new(180.0, 260.0)],
+                radius: 12.0,
+                color: blue,
+            },
+        ],
+    );
+    assert!(app.session.edit_path.is_empty());
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 1);
+
+    // Undo 1: ルートの青ストロークを取り消す（まだルート階層）
+    run(&mut app, &[Action::Undo]);
+    assert!(app.session.edit_path.is_empty());
+    assert!(app.doc.root.layers[0].keyframes[0].cel.shapes.is_empty());
+
+    // Undo 2: シンボル内の F6 キーフレーム挿入を取り消す（EditPath がシンボル内深さ1へ戻る）
+    run(&mut app, &[Action::Undo]);
+    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.session.edit_path.last().unwrap().symbol_id, sym_id);
+    assert_eq!(app.doc.find_symbol(sym_id).unwrap().timeline.total_frames, 1);
+    assert_eq!(
+        app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .len(),
+        2
+    );
+
+    // Undo 3: シンボル内の緑ストローク描画を取り消す（EditPath はシンボル内深さ1のまま、内部図形が1個へ戻る）
+    run(&mut app, &[Action::Undo]);
+    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(
+        app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .len(),
+        1
+    );
+
+    // Undo 4: シンボルに入る前の MoveSelected を取り消す（EditPath がルートへ戻る）
+    run(&mut app, &[Action::Undo]);
+    assert!(app.session.edit_path.is_empty());
+    assert_eq!(app.doc.library.len(), 1);
+
+    // Undo 5: シンボル化（ConvertToSymbol）自体を取り消す（ルート、ライブラリ空）
+    run(&mut app, &[Action::Undo]);
+    assert!(app.session.edit_path.is_empty());
+    assert!(app.doc.library.is_empty());
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 1);
+
+    // Redo 1..5 で順番にすべて復元されること
+    run(&mut app, &[Action::Redo]);
+    assert!(app.session.edit_path.is_empty());
+    assert_eq!(app.doc.library.len(), 1);
+
+    run(&mut app, &[Action::Redo]);
+    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(
+        app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .len(),
+        1
+    );
+
+    run(&mut app, &[Action::Redo]);
+    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(
+        app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .len(),
+        2
+    );
+
+    run(&mut app, &[Action::Redo]);
+    assert!(app.session.edit_path.is_empty());
+    assert_eq!(app.doc.find_symbol(sym_id).unwrap().timeline.total_frames, 2);
+
+    run(&mut app, &[Action::Redo]);
+    assert!(app.session.edit_path.is_empty());
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 1);
+}
+
 
 
 

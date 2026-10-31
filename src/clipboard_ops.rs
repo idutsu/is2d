@@ -18,19 +18,20 @@ pub(crate) fn instantiate_relative_shapes_in_scope(
     offset: KVec2,
     preserve_original_layer: bool,
 ) -> (Vec<FillShape>, bool) {
-    let active_lid = active_scope_layer_id(&tab.session, &tab.doc.root);
+    let active_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
     let mut gid_map: Vec<(u64, u64)> = Vec::new();
     let mut seen_instance_gids: HashSet<u64> = HashSet::new();
     let mut instantiated = Vec::with_capacity(rel_shapes.len());
     let mut any_raw = false;
 
     for item in rel_shapes {
-        let target_lid =
-            if preserve_original_layer && tab.doc.root.is_layer_editable_by_id(item.layer_id) {
-                item.layer_id
-            } else {
-                active_lid
-            };
+        let target_lid = if preserve_original_layer
+            && tab.active_timeline().is_layer_editable_by_id(item.layer_id)
+        {
+            item.layer_id
+        } else {
+            active_lid
+        };
 
         if let Some(orig_binding) = item
             .symbol_instance
@@ -69,19 +70,18 @@ pub(crate) fn instantiate_relative_shapes_in_scope(
                 new_binding.xform = Affine::translate(offset) * new_binding.xform;
             }
 
+            let tl = tab.active_timeline();
+            let current_frame = tl.current_frame;
+            let kf_start_frame = tl
+                .layer_index_by_id(target_lid)
+                .and_then(|l_idx| {
+                    let layer = &tl.layers[l_idx];
+                    layer
+                        .keyframe_index_at(current_frame)
+                        .map(|kf_idx| layer.keyframes[kf_idx].start_frame)
+                })
+                .unwrap_or(current_frame);
             if let Some(sym) = tab.doc.find_symbol(new_binding.symbol_id) {
-                let current_frame = tab.doc.root.current_frame;
-                let kf_start_frame = tab
-                    .doc
-                    .root
-                    .layer_index_by_id(target_lid)
-                    .and_then(|l_idx| {
-                        let layer = &tab.doc.root.layers[l_idx];
-                        layer
-                            .keyframe_index_at(current_frame)
-                            .map(|kf_idx| layer.keyframes[kf_idx].start_frame)
-                    })
-                    .unwrap_or(current_frame);
                 let local_shapes = sym.evaluated_local_shapes_for_instance(
                     new_binding,
                     kf_start_frame,
@@ -296,7 +296,7 @@ pub(crate) fn capture_clipboard_symbols(tab: &Tab, clipboard: &mut Clipboard) {
     };
 
     clipboard.source_doc_id = active_doc_id;
-    clipboard.source_symbol_id = tab.session.edit_stack.last().map(|s| s.symbol_id);
+    clipboard.source_symbol_id = tab.session.edit_path.last().map(|s| s.symbol_id);
     clipboard.source_symbols_revision = tab.doc.revision;
 
     let mut visited = Vec::new();
@@ -351,7 +351,7 @@ fn can_paste_clipboard_symbol_inner(
     src_sym_id: u64,
     visited: &mut Vec<u64>,
 ) -> bool {
-    if tab.session.edit_stack.is_empty() {
+    if tab.session.edit_path.is_empty() {
         return true;
     }
     if visited.contains(&src_sym_id) {
@@ -362,15 +362,16 @@ fn can_paste_clipboard_symbol_inner(
     if let Some(live_id) = existing_reusable_target_symbol_id(tab, clipboard, src_sym_id) {
         return tab
             .doc
-            .can_place_symbol_in_current_context(&tab.session.edit_stack, live_id);
+            .can_place_symbol_in_current_context(&tab.session.edit_path, live_id);
     }
 
     if tab.id == clipboard.source_doc_id
         && tab
             .session
-            .edit_stack
+            .edit_path
+            .levels
             .iter()
-            .any(|sess| sess.symbol_id == src_sym_id)
+            .any(|lvl| lvl.symbol_id == src_sym_id)
     {
         return false;
     }
@@ -408,7 +409,7 @@ pub(crate) fn can_paste_clipboard_symbol(
 
 /// `paste_clipboard`（`Cmd+V`）実行前に、現在のタブでクリップボード内の図形がすべて自己・親シンボルの循環参照により配置不可能かを判定する
 pub(crate) fn would_clipboard_paste_all_cycle(tab: &Tab, clipboard: &Clipboard) -> bool {
-    if clipboard.shapes.is_empty() || tab.session.edit_stack.is_empty() {
+    if clipboard.shapes.is_empty() || tab.session.edit_path.is_empty() {
         return false;
     }
     clipboard.shapes.iter().all(|shape| {

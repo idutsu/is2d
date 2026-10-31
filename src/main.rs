@@ -555,11 +555,12 @@ impl Is2dApp {
         } else if i.key_pressed(Key::Period) || i.key_pressed(Key::ArrowRight) {
             timeline_ui::step_frame(self, 1);
         } else if key_pressed_no_repeat(i, Key::Home) {
-            let layer_idx = self.tab().doc.root.active_layer;
+            let layer_idx = self.tab().active_timeline().active_layer;
             apply(self, Action::SwitchLayerAndFrame { layer_idx, frame: 0 });
         } else if key_pressed_no_repeat(i, Key::End) {
-            let frame = self.tab().doc.root.total_frames.saturating_sub(1);
-            let layer_idx = self.tab().doc.root.active_layer;
+            let tl = self.tab().active_timeline();
+            let frame = tl.total_frames.saturating_sub(1);
+            let layer_idx = tl.active_layer;
             apply(self, Action::SwitchLayerAndFrame { layer_idx, frame });
         } else if i.key_pressed(Key::F6) {
             if shift {
@@ -733,9 +734,11 @@ impl Is2dApp {
         match self.tool.tool {
             Tool::Eyedropper => true,
             Tool::Brush | Tool::Eraser | Tool::Bucket => {
-                self.tab().doc.root.is_active_layer_editable()
+                self.tab().active_timeline().is_active_layer_editable()
             }
-            Tool::Select | Tool::Transform => self.tab().doc.root.has_any_editable_layer(),
+            Tool::Select | Tool::Transform => {
+                self.tab().active_timeline().has_any_editable_layer()
+            }
         }
     }
 
@@ -799,7 +802,7 @@ impl Is2dApp {
         if tool_allowed {
             return None;
         }
-        let tl = &self.tab().doc.root;
+        let tl = self.tab().active_timeline();
         let is_uncreated_frame = tl
             .layers
             .get(tl.active_layer)
@@ -973,7 +976,7 @@ impl Is2dApp {
                     self.handle_canvas_tool_input(ui, &response, mouse_pt, tool_allowed);
                 }
 
-                let in_symbol_edit = !self.tab().session.edit_stack.is_empty();
+                let in_symbol_edit = !self.tab().session.edit_path.is_empty();
                 let stage_size = self.tab().doc.stage_size;
 
                 // 2. ステージ背景（ペーストボード＋白いステージ矩形）の描画

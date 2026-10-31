@@ -4,13 +4,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Key, Pos2, Stroke, Vec2};
-use kurbo::{Point, QuadBez, Rect as KRect, Vec2 as KVec2};
+use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 
 pub(crate) use crate::symbol::Document;
-use crate::symbol::{SymbolDef, SymbolEditSession};
-use crate::timeline::{LoadedShapeSig, Timeline, TimelineCellSelection};
+use crate::symbol::{EditPath, SymbolDef, SymbolLoopMode};
+use crate::timeline::{Cel, LoadedShapeSig, Timeline, TimelineCellSelection};
 use crate::vector_boolean::merge_shapes_into_canvas;
-use crate::vector_engine::FillShape;
+use crate::vector_engine::{FillShape, SyncCache};
 
 #[cfg(test)]
 pub(crate) const MAX_UNDO_HISTORY: usize = 100;
@@ -758,20 +758,39 @@ pub(crate) struct Scene<'a> {
 }
 
 impl Scene<'static> {
-    /// 現在のフレーム（`doc.root.current_frame`）における全ての「表示中かつ非ロック（`visible && !locked`）」レイヤーの `Cel` から
+    /// 現在のフレーム（`tl.current_frame`）における全ての「表示中かつ非ロック（`visible && !locked`）」レイヤーの `Cel` から
     /// 背面レイヤー→前面レイヤーの順で（トゥイーン補間およびシンボルの内部タイムラインフレームも評価しつつ）図形列を構築する
-    pub(crate) fn resolve(doc: &Document, prev_shapes: &[FillShape]) -> Vec<FillShape> {
-        let frame = doc.root.current_frame;
+    pub(crate) fn resolve(
+        tl: &Timeline,
+        library: &[SymbolDef],
+        world_xform: Affine,
+        prev_shapes: &[FillShape],
+    ) -> Vec<FillShape> {
+        let frame = tl.current_frame;
         let mut loaded = Vec::new();
-        for layer_idx in 0..doc.root.layers.len() {
-            let layer = &doc.root.layers[layer_idx];
+        for layer_idx in 0..tl.layers.len() {
+            let layer = &tl.layers[layer_idx];
             if !layer.visible || layer.locked {
                 continue;
             }
-            loaded.extend(
-                doc.root
-                    .evaluate_layer_shapes_at(layer_idx, frame, &doc.library),
-            );
+            loaded.extend(tl.evaluate_layer_shapes_at(layer_idx, frame, library));
+        }
+        if world_xform != Affine::IDENTITY {
+            for s in &mut loaded {
+                if s.is_empty_symbol_marker() {
+                    if let Some(b) = &mut s.symbol_instance {
+                        b.xform = world_xform * b.xform;
+                    }
+                    s.rebuild_cache();
+                } else {
+                    s.transform(world_xform);
+                    if world_xform.determinant().abs() < 1e-12 {
+                        if let Some(b) = &mut s.symbol_instance {
+                            b.xform = world_xform * b.xform;
+                        }
+                    }
+                }
+            }
         }
         salvage_caches_from_slice(prev_shapes, &mut loaded);
         loaded
@@ -1007,8 +1026,10 @@ impl Floating {
 /// タブごとの編集セッション状態（作業図形・選択・変形・排他ドラッグ・編集階層、保存しない）
 #[derive(Default)]
 pub(crate) struct Session {
-    /// シンボルインプレイス編集時の親タイムライン退避スタック（段階6で `EditPath` に置き換える）
-    pub(crate) edit_stack: Vec<SymbolEditSession>,
+    /// シンボルインプレイス編集の経路（空ならルート）
+    pub(crate) edit_path: EditPath,
+    /// シンボル編集中の親シーン背景薄表示セル派生キャッシュ `(doc.revision, edit_path, backdrop_cel, parent_frame)`
+    pub(crate) backdrop_cache: SyncCache<Option<(u64, EditPath, Cel, usize)>>,
     pub(crate) shapes: Vec<FillShape>,
     /// 直近の `load_shapes_from_timeline` 読み込み時点のシェイプ署名一覧（`Timeline` スナップショットに含めない作業用キャッシュ）
     loaded_signatures: Vec<LoadedShapeSig>,
@@ -1024,11 +1045,17 @@ pub(crate) struct Session {
 }
 
 impl Session {
-
-    /// 直近の読み込み・同期時点のシェイプ署名スライスを返す
+    /// 直近の読み込み・同期時点のシェイプ署名ベクタを一時的に取り出す
     #[inline]
-    pub(crate) fn loaded_signatures(&self) -> &[LoadedShapeSig] {
-        &self.loaded_signatures
+    pub(crate) fn take_loaded_signatures(&mut self) -> Vec<LoadedShapeSig> {
+        std::mem::take(&mut self.loaded_signatures)
+    }
+
+    /// 取り出していたシェイプ署名ベクタのバッファを戻した上で現在の `self.shapes` の署名を記録する
+    #[inline]
+    pub(crate) fn restore_loaded_signatures_and_record(&mut self, buf: Vec<LoadedShapeSig>) {
+        self.loaded_signatures = buf;
+        self.record_loaded_signatures();
     }
 
     /// 確定時に結合が必要な変更済み `Floating` が保持されているかを返す
@@ -1496,12 +1523,12 @@ impl Session {
         }
     }
 
-    /// キャンバス上のシェイプ群が `timeline.layers` の下層→上層順（同一レイヤー内では元の前後順）になるよう安定ソートする
-    pub(crate) fn sort_shapes_by_layer_order(&mut self, timeline: &Timeline) {
-        if self.shapes.len() <= 1 || timeline.layers.len() <= 1 {
+    /// シェイプ配列が `timeline.layers` の下層→上層順（同一レイヤー内では元の前後順）になるよう安定ソートする
+    pub(crate) fn sort_vec_by_layer_order(shapes: &mut [FillShape], timeline: &Timeline) {
+        if shapes.len() <= 1 || timeline.layers.len() <= 1 {
             return;
         }
-        let is_already_sorted = self.shapes.windows(2).all(|w| {
+        let is_already_sorted = shapes.windows(2).all(|w| {
             let o0 = timeline
                 .layer_index_by_id(w[0].layer_id)
                 .unwrap_or(usize::MAX);
@@ -1514,8 +1541,12 @@ impl Session {
             return;
         }
 
-        self.shapes
-            .sort_by_key(|s| timeline.layer_index_by_id(s.layer_id).unwrap_or(usize::MAX));
+        shapes.sort_by_key(|s| timeline.layer_index_by_id(s.layer_id).unwrap_or(usize::MAX));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sort_shapes_by_layer_order(&mut self, timeline: &Timeline) {
+        Self::sort_vec_by_layer_order(&mut self.shapes, timeline);
     }
 }
 
@@ -1527,8 +1558,8 @@ impl Session {
 pub(crate) struct UndoEntry {
     pub(crate) timeline: Timeline,
     pub(crate) library: Arc<Vec<SymbolDef>>,
+    pub(crate) edit_path: EditPath,
     pub(crate) editing_group_path: Vec<u64>,
-    pub(crate) symbol_edit_stack: Arc<Vec<SymbolEditSession>>,
     pub(crate) stage_size: Vec2,
     pub(crate) symbols_revision: u64,
     /// この履歴スナップショットが表すドキュメント状態世代ID（未保存変更 `is_dirty` 判定用）
@@ -1608,28 +1639,34 @@ impl UndoHistory {
         self.saved_commit_id = None;
     }
 
-    /// シンボルライブラリおよび編集スタックが直近の履歴エントリから未変更（同一 `revision`）であれば
-    /// `Arc` ポインタを $O(1)$ で共有し、一部シンボルのみ変更されている場合は未変更シンボルおよび
-    /// 退避中の親タイムライン未変更セルの `Arc` を引き継ぎながら差分シンボルのみキャッシュ除去して新しい `Arc` を返す
-    pub(crate) fn snapshot_symbols(
-        &self,
-        doc: &Document,
-        edit_stack: &[SymbolEditSession],
-    ) -> (Arc<Vec<SymbolDef>>, Arc<Vec<SymbolEditSession>>, u64) {
+    /// シンボルライブラリが直近の履歴エントリから未変更（同一 `revision` かつカーソル状態一致）であれば
+    /// `Arc` ポインタを $O(1)$ で共有し、一部シンボルのみ変更されている場合は未変更シンボルの `Arc` を引き継ぎながら
+    /// 差分シンボルのみキャッシュ除去して新しい `Arc` を返す
+    pub(crate) fn snapshot_symbols(&self, doc: &Document) -> (Arc<Vec<SymbolDef>>, u64) {
         let prev_entry = self.undo_stack.back().or_else(|| self.redo_stack.last());
-        if let Some(reused) = prev_entry.filter(|e| e.symbols_revision == doc.revision) {
-            return (
-                Arc::clone(&reused.library),
-                Arc::clone(&reused.symbol_edit_stack),
-                doc.revision,
-            );
+        if let Some(reused) = prev_entry.filter(|e| {
+            e.symbols_revision == doc.revision
+                && e.library.len() == doc.library.len()
+                && e.library.iter().zip(&doc.library).all(|(a, b)| {
+                    a.id == b.id
+                        && a.revision == b.revision
+                        && a.timeline.current_frame == b.timeline.current_frame
+                        && a.timeline.active_layer == b.timeline.active_layer
+                        && a.timeline.cell_selection == b.timeline.cell_selection
+                })
+        }) {
+            return (Arc::clone(&reused.library), doc.revision);
         }
         let mut lib = Vec::with_capacity(doc.library.len());
         for sym in &doc.library {
             if let Some(prev_sym) = prev_entry.and_then(|pe| {
-                pe.library
-                    .iter()
-                    .find(|s| s.id == sym.id && s.revision == sym.revision)
+                pe.library.iter().find(|s| {
+                    s.id == sym.id
+                        && s.revision == sym.revision
+                        && s.timeline.current_frame == sym.timeline.current_frame
+                        && s.timeline.active_layer == sym.timeline.active_layer
+                        && s.timeline.cell_selection == sym.timeline.cell_selection
+                })
             }) {
                 lib.push(prev_sym.clone());
             } else {
@@ -1645,16 +1682,7 @@ impl UndoHistory {
                 lib.push(cloned);
             }
         }
-        let mut stack = Vec::with_capacity(edit_stack.len());
-        for (idx, sess) in edit_stack.iter().enumerate() {
-            let prev_sess = prev_entry
-                .and_then(|pe| pe.symbol_edit_stack.get(idx))
-                .filter(|ps| ps.symbol_id == sess.symbol_id && ps.instance_gid == sess.instance_gid);
-            let mut cloned_sess = sess.clone();
-            cloned_sess.strip_transient_caches_with_prev(prev_sess);
-            stack.push(cloned_sess);
-        }
-        (Arc::new(lib), Arc::new(stack), doc.revision)
+        (Arc::new(lib), doc.revision)
     }
 
     /// 新しい Undo エントリをスタックへ追加し、Redo スタックをクリアして現在の状態世代IDを進める
@@ -1804,6 +1832,124 @@ impl Tab {
         }
     }
 
+    /// 現在編集中のタイムラインへの不変参照を返す
+    #[inline]
+    pub(crate) fn active_timeline(&self) -> &Timeline {
+        if let Some(last) = self.session.edit_path.last() {
+            if let Some(sym) = self.doc.find_symbol(last.symbol_id) {
+                return &sym.timeline;
+            }
+        }
+        &self.doc.root
+    }
+
+    /// 現在編集中のタイムラインへの可変参照とシンボルライブラリへの読み取り専用参照を渡して処理を実行する
+    pub(crate) fn with_active_timeline_mut<R>(
+        &mut self,
+        f: impl FnOnce(&mut Timeline, &[SymbolDef]) -> R,
+    ) -> R {
+        if let Some(last) = self.session.edit_path.last() {
+            if let Some(idx) = self.doc.library.iter().position(|s| s.id == last.symbol_id) {
+                let prev_fps = self.doc.root.fps;
+                let mut taken_tl = std::mem::take(&mut self.doc.library[idx].timeline);
+                taken_tl.fps = prev_fps;
+                let prev_sig = taken_tl.artwork_revision_signature();
+                let res = f(&mut taken_tl, &self.doc.library);
+                if taken_tl.fps != prev_fps {
+                    self.doc.root.fps = taken_tl.fps;
+                }
+                let changed = taken_tl.artwork_revision_signature() != prev_sig;
+                self.doc.library[idx].timeline = taken_tl;
+                if changed {
+                    self.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
+                    self.doc.bump_revision();
+                }
+                return res;
+            }
+        }
+        f(&mut self.doc.root, &self.doc.library)
+    }
+
+    /// シンボルインプレイス編集中の親シーン背景薄表示メッシュを派生データキャッシュ経由で返す
+    pub(crate) fn cached_backdrop_screen_mesh(
+        &self,
+        zoom: f32,
+        pan: Vec2,
+    ) -> Option<Arc<egui::Mesh>> {
+        if self.session.edit_path.is_empty() {
+            return None;
+        }
+        let mut guard = self.session.backdrop_cache.lock();
+        let needs_rebuild = guard.as_ref().is_none_or(|(rev, path, _, _)| {
+            *rev != self.doc.revision || path != &self.session.edit_path
+        });
+        if needs_rebuild {
+            let mut backdrop_shapes = Vec::new();
+            for lvl_idx in 0..self.session.edit_path.levels.len() {
+                let lvl = &self.session.edit_path.levels[lvl_idx];
+                let parent_tl = if lvl_idx == 0 {
+                    &self.doc.root
+                } else {
+                    let prev_sym_id = self.session.edit_path.levels[lvl_idx - 1].symbol_id;
+                    let Some(sym) = self.doc.find_symbol(prev_sym_id) else {
+                        continue;
+                    };
+                    &sym.timeline
+                };
+                let parent_world_xform = self.session.edit_path.levels[..lvl_idx]
+                    .iter()
+                    .fold(Affine::IDENTITY, |acc, l| acc * l.xform_in_parent);
+                let curr_f = lvl
+                    .parent_frame
+                    .min(parent_tl.total_frames.saturating_sub(1));
+                for layer_idx in 0..parent_tl.layers.len() {
+                    let layer = &parent_tl.layers[layer_idx];
+                    if !layer.visible {
+                        continue;
+                    }
+                    let kf_start = layer
+                        .keyframe_index_at(curr_f)
+                        .map(|ki| layer.keyframes[ki].start_frame)
+                        .unwrap_or(curr_f);
+                    let resolved =
+                        parent_tl.evaluate_layer_shapes_at(layer_idx, curr_f, &self.doc.library);
+                    for mut s in resolved {
+                        if s.symbol_instance
+                            .is_some_and(|b| b.instance_gid == lvl.instance_gid)
+                        {
+                            continue;
+                        }
+                        if parent_world_xform != Affine::IDENTITY {
+                            let _ = s.fill_mesh();
+                            s.transform_with_cached_mesh(parent_world_xform);
+                        }
+                        if let Some(mut b) = s.symbol_instance {
+                            if let Some(sym) = self.doc.find_symbol(b.symbol_id) {
+                                b.first_frame = sym.resolve_internal_frame(b, kf_start, curr_f);
+                                b.loop_mode = SymbolLoopMode::SingleFrame;
+                                s.symbol_instance = Some(b);
+                            }
+                        }
+                        backdrop_shapes.push(s);
+                    }
+                }
+            }
+            let parent_frame = self
+                .session
+                .edit_path
+                .last()
+                .map_or(0, |l| l.parent_frame);
+            *guard = Some((
+                self.doc.revision,
+                self.session.edit_path.clone(),
+                Cel::new(backdrop_shapes),
+                parent_frame,
+            ));
+        }
+        let (_, _, cel, parent_frame) = guard.as_ref()?;
+        cel.cached_backdrop_screen_mesh(*parent_frame, zoom, pan, &self.doc.library)
+    }
+
     /// ダーティマーク（` *`）を除いたタブのベース表示名を返す
     pub(crate) fn base_title(&self) -> String {
         match self
@@ -1839,17 +1985,11 @@ impl Tab {
         self.view.fit_stage_to_window(self.doc.stage_size);
     }
 
-    /// 現在編集中コンテキスト（インプレース編集スタック考慮）に指定シンボルを配置可能か（循環参照しないか）判定する
+    /// 現在編集中コンテキスト（インプレース編集経路考慮）に指定シンボルを配置可能か（循環参照しないか）判定する
     #[inline]
     pub(crate) fn can_place_symbol_in_current_context(&self, symbol_id: u64) -> bool {
         self.doc
-            .can_place_symbol_in_current_context(&self.session.edit_stack, symbol_id)
-    }
-
-    /// インプレース編集中のシンボルがある場合、現在の作業タイムラインをライブラリ定義へ同期する
-    #[inline]
-    pub(crate) fn sync_active_symbol_edit(&mut self) {
-        self.doc.sync_active_edit(&mut self.session.edit_stack);
+            .can_place_symbol_in_current_context(&self.session.edit_path, symbol_id)
     }
 
     /// ライブラリ選択中のシンボルIDが存在しない場合に先頭シンボルへ補正する
@@ -1860,24 +2000,25 @@ impl Tab {
 
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
         self.history.last_coalesce_key = None;
-        let (prev_lib, prev_stack, prev_rev) = self
-            .history
-            .snapshot_symbols(&self.doc, &self.session.edit_stack);
+        let (prev_lib, prev_rev) = self.history.snapshot_symbols(&self.doc);
         let prev_entry = UndoEntry {
             timeline: std::mem::replace(&mut self.doc.root, entry.timeline),
             library: prev_lib,
+            edit_path: std::mem::replace(&mut self.session.edit_path, entry.edit_path),
             editing_group_path: std::mem::replace(
                 &mut self.session.editing_group_path,
                 entry.editing_group_path,
             ),
-            symbol_edit_stack: prev_stack,
             stage_size: std::mem::replace(&mut self.doc.stage_size, entry.stage_size),
             symbols_revision: prev_rev,
             commit_id: std::mem::replace(&mut self.history.current_commit_id, entry.commit_id),
         };
         self.doc.library = Arc::unwrap_or_clone(entry.library);
-        self.session.edit_stack = Arc::unwrap_or_clone(entry.symbol_edit_stack);
         self.doc.revision = entry.symbols_revision;
+        self.doc.validate_edit_path(
+            &mut self.session.edit_path,
+            &mut self.session.editing_group_path,
+        );
         self.ensure_valid_library_selection();
         load_shapes_from_timeline(self);
         prev_entry
@@ -1931,15 +2072,17 @@ pub(crate) fn topmost_layer_id_for_indices(
         .unwrap_or_else(|| active_scope_layer_id(session, timeline))
 }
 
-/// 指定したシェイプインデックス `shape_idx` が属するレイヤーへ `tab.doc.root.active_layer` およびタイムライン選択状態を追従させる
+/// 指定したシェイプインデックス `shape_idx` が属するレイヤーへ編集中タイムラインの `active_layer` およびタイムライン選択状態を追従させる
 pub(crate) fn focus_active_layer_to_shape(tab: &mut Tab, shape_idx: usize) {
     tab.view.inspect_timeline_frame = false;
     if let Some(lid) = tab.scene().get(shape_idx).map(|s| s.layer_id) {
-        if let Some(l_idx) = tab.doc.root.layer_index_by_id(lid) {
-            tab.doc.root.active_layer = l_idx;
-            let cf = tab.doc.root.current_frame;
-            tab.doc.root.cell_selection = Some(TimelineCellSelection::single(l_idx, cf));
-        }
+        tab.with_active_timeline_mut(|tl, _| {
+            if let Some(l_idx) = tl.layer_index_by_id(lid) {
+                tl.active_layer = l_idx;
+                let cf = tl.current_frame;
+                tl.cell_selection = Some(TimelineCellSelection::single(l_idx, cf));
+            }
+        });
     }
 }
 
@@ -1949,9 +2092,10 @@ pub(crate) fn sync_timeline_layer_from_canvas_selection(tab: &mut Tab) {
     let mut min_l: Option<usize> = None;
     let mut max_l: Option<usize> = None;
     let mut last_l: Option<usize> = None;
+    let tl = tab.active_timeline();
     for shape in tab.scene().shapes() {
         if tab.session.selection.contains_shape(shape) {
-            if let Some(l_idx) = tab.doc.root.layer_index_by_id(shape.layer_id) {
+            if let Some(l_idx) = tl.layer_index_by_id(shape.layer_id) {
                 min_l = Some(min_l.map_or(l_idx, |m| m.min(l_idx)));
                 max_l = Some(max_l.map_or(l_idx, |m| m.max(l_idx)));
                 last_l = Some(l_idx);
@@ -1959,9 +2103,11 @@ pub(crate) fn sync_timeline_layer_from_canvas_selection(tab: &mut Tab) {
         }
     }
     if let (Some(l0), Some(l1), Some(act)) = (min_l, max_l, last_l) {
-        tab.doc.root.active_layer = act;
-        let cf = tab.doc.root.current_frame;
-        tab.doc.root.cell_selection = Some(TimelineCellSelection::from_corners(l0, cf, l1, cf));
+        tab.with_active_timeline_mut(|tl, _| {
+            tl.active_layer = act;
+            let cf = tl.current_frame;
+            tl.cell_selection = Some(TimelineCellSelection::from_corners(l0, cf, l1, cf));
+        });
     }
 }
 
@@ -2018,47 +2164,40 @@ pub(crate) fn sync_shapes_to_timeline(tab: &mut Tab) {
     if tab.session.is_all_shapes_unchanged() {
         return;
     }
-    tab.doc
-        .root
-        .normalize_shape_layer_ids(&mut tab.session.shapes);
-    tab.session.sort_shapes_by_layer_order(&tab.doc.root);
-    let any_modified = tab.doc.root.write_shapes_to_editable_cels(
-        &tab.session.shapes,
-        &tab.doc.library,
-        tab.session.loaded_signatures(),
-    );
-    tab.session.record_loaded_signatures();
-    if any_modified {
-        tab.doc.sync_active_edit(&mut tab.session.edit_stack);
-    }
+    let mut shapes = std::mem::take(&mut tab.session.shapes);
+    let sigs = tab.session.take_loaded_signatures();
+    let world_xform = tab.session.edit_path.world_xform();
+    tab.with_active_timeline_mut(|tl, library| {
+        tl.normalize_shape_layer_ids(&mut shapes);
+        Session::sort_vec_by_layer_order(&mut shapes, tl);
+        tl.write_shapes_to_editable_cels(&shapes, library, &sigs, world_xform)
+    });
+    tab.session.shapes = shapes;
+    tab.session.restore_loaded_signatures_and_record(sigs);
 }
 
 /// 現在フレームにおける全ての「表示中かつ非ロック（`visible && !locked`）」レイヤーの `Cel` から
 /// 背面レイヤー→前面レイヤーの順で（トゥイーン補間およびシンボルの内部タイムラインフレームも評価しつつ）図形列を一括解決・読み込みする
 pub(crate) fn load_shapes_from_timeline(tab: &mut Tab) {
     cancel_active_drag(tab);
-    let resolved = Scene::resolve(&tab.doc, &tab.session.shapes);
+    let resolved = Scene::resolve(
+        tab.active_timeline(),
+        &tab.doc.library,
+        tab.session.edit_path.world_xform(),
+        &tab.session.shapes,
+    );
     tab.session.replace_loaded_shapes(resolved);
-    if let Some(sym_id) = tab.session.edit_stack.last().map(|s| s.symbol_id) {
-        let cf = tab.doc.root.current_frame;
-        let al = tab.doc.root.active_layer;
-        if let Some(sym_def) = tab.doc.find_symbol_mut(sym_id) {
-            if sym_def.timeline.current_frame != cf || sym_def.timeline.active_layer != al {
-                sym_def.timeline.current_frame = cf;
-                sym_def.timeline.active_layer = al;
-            }
-        }
-    }
 }
 
 /// タイムライン上で選択されたセル範囲（単一キーフレームまたは複数レイヤー範囲）に属するすべての図形をキャンバス上で選択状態にする
 pub(crate) fn select_shapes_for_timeline_selection(tab: &mut Tab) {
     clear_selection(tab);
-    let Some(sel) = tab.doc.root.cell_selection else {
+    let tl = tab.active_timeline();
+    let Some(sel) = tl.cell_selection else {
         return;
     };
     let selected_lids: HashSet<u64> = (sel.min_layer..=sel.max_layer)
-        .filter_map(|l_idx| tab.doc.root.layers.get(l_idx))
+        .filter_map(|l_idx| tl.layers.get(l_idx))
         .filter(|l| l.visible && !l.locked)
         .map(|l| l.id)
         .collect();
@@ -2136,8 +2275,8 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
                 }
             }
             merge_shapes_into_canvas(&mut base_canvas, modified_raw_shapes);
+            Session::sort_vec_by_layer_order(&mut base_canvas, tab.active_timeline());
             tab.session.shapes = base_canvas;
-            tab.session.sort_shapes_by_layer_order(&tab.doc.root);
             tab.session.selection.retain_existing(&tab.session.shapes);
             tab.session.floating = None;
             sync_shapes_to_timeline(tab);
@@ -2172,8 +2311,8 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
         }
         base_canvas.extend(kept_shapes);
         base_canvas.extend(trailing_outside);
+        Session::sort_vec_by_layer_order(&mut base_canvas, tab.active_timeline());
         tab.session.shapes = base_canvas;
-        tab.session.sort_shapes_by_layer_order(&tab.doc.root);
         tab.session.selection.retain_existing(&tab.session.shapes);
         if merged_any {
             tab.session.clear_unsliced_snapshot();
@@ -2222,10 +2361,10 @@ pub(crate) fn insert_and_select_shapes_in_scope(
         tab.session.selection.insert_shape(s);
     }
     let insert_pos = tab.session.scope_insert_index();
-    tab.session
-        .shapes
-        .splice(insert_pos..insert_pos, new_shapes);
-    tab.session.sort_shapes_by_layer_order(&tab.doc.root);
+    let mut shapes = std::mem::take(&mut tab.session.shapes);
+    shapes.splice(insert_pos..insert_pos, new_shapes);
+    Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
+    tab.session.shapes = shapes;
     if let Some(origin) = floating_origin {
         tab.session.floating = Some(Floating {
             origin,
@@ -2272,8 +2411,8 @@ pub(crate) fn reorder_selected_to_scope_front(tab: &mut Tab) -> bool {
 
     unselected.extend(moved_shapes);
     unselected.extend(trailing_outside);
+    Session::sort_vec_by_layer_order(&mut unselected, tab.active_timeline());
     tab.session.shapes = unselected;
-    tab.session.sort_shapes_by_layer_order(&tab.doc.root);
     true
 }
 

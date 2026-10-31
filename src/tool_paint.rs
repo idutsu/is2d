@@ -234,11 +234,10 @@ fn symbol_binding_color_at(
 /// 編集スコープおよび表示中の全レイヤーを対象に、指定座標 `pt` にヒットする最前面シェイプの色を返す（スポイト用）
 pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> {
     let scene_shapes = tab.scene().shapes();
-    let num_layers = tab.doc.root.layers.len();
+    let tl = tab.active_timeline();
+    let num_layers = tl.layers.len();
     if num_layers == 1
-        && tab
-            .doc
-            .root
+        && tl
             .layers
             .first()
             .is_some_and(|l| l.visible && !l.locked)
@@ -250,13 +249,21 @@ pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> 
             .map(|s| s.color);
     }
     for layer_idx in (0..num_layers).rev() {
-        let layer = &tab.doc.root.layers[layer_idx];
+        let layer = &tl.layers[layer_idx];
         if !layer.visible {
             continue;
         }
         if layer.locked {
-            let cf = tab.doc.root.current_frame;
-            if let Some(col) = locked_layer_color_at(layer, cf, pt, &tab.doc.library, 0) {
+            let cf = tl.current_frame;
+            let world_xform = tab.session.edit_path.world_xform();
+            let local_pt = if world_xform == kurbo::Affine::IDENTITY {
+                pt
+            } else if world_xform.determinant().abs() > 1e-9 {
+                world_xform.inverse() * pt
+            } else {
+                continue;
+            };
+            if let Some(col) = locked_layer_color_at(layer, cf, local_pt, &tab.doc.library, 0) {
                 return Some(col);
             }
         } else {

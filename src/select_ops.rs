@@ -641,7 +641,8 @@ pub(crate) fn prepare_group_selected_shapes(tab: &mut Tab) -> Option<(u64, Vec<F
     let snapshot = tab.session.take_or_clone_unsliced_snapshot();
     let new_gid = tab.doc.alloc_group_id();
 
-    let target_lid = topmost_layer_id_for_indices(&tab.session, &tab.doc.root, &sel_indices);
+    let target_lid =
+        topmost_layer_id_for_indices(&tab.session, tab.active_timeline(), &sel_indices);
 
     let depth = tab.session.editing_group_path.len();
     let mut any_grouped = false;
@@ -659,9 +660,11 @@ pub(crate) fn prepare_group_selected_shapes(tab: &mut Tab) -> Option<(u64, Vec<F
         return None;
     }
 
-    if let Some(l_idx) = tab.doc.root.layer_index_by_id(target_lid) {
-        tab.doc.root.active_layer = l_idx;
-    }
+    tab.with_active_timeline_mut(|tl, _| {
+        if let Some(l_idx) = tl.layer_index_by_id(target_lid) {
+            tl.active_layer = l_idx;
+        }
+    });
     let _ = prepare_moved_selection(tab, &snapshot);
     tab.session.floating = None;
     tab.session.transform_pivot = None;

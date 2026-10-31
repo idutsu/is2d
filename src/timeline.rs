@@ -225,6 +225,8 @@ pub(crate) struct CelMeshCache {
     onion_cache: Option<OnionMeshCacheEntry>,
     /// シンボルインスタンスやトゥイーンを含むセルの解決済みメッシュキャッシュ署名
     pub(crate) resolved_sig: Option<ResolvedCelSig>,
+    /// 解決済みワールドバッチ・スクリーン・オニオンメッシュキャッシュが対象としている直近の `world_xform` ビット列
+    pub(crate) resolved_xform_key: Option<[u64; 6]>,
     /// 解決済みスクリーン・オニオンメッシュキャッシュが対象としている直近のビューポート `(zoom_bits, pan_x_bits, pan_y_bits)`
     pub(crate) resolved_view_key: Option<(u32, u32, u32)>,
     pub(crate) resolved_world_batches: Vec<LruEntry<usize, Option<Arc<Mesh>>>>,
@@ -240,6 +242,7 @@ impl Clone for CelMeshCache {
             screen_cache: None,
             onion_cache: None,
             resolved_sig: None,
+            resolved_xform_key: None,
             resolved_view_key: None,
             resolved_world_batches: Vec::new(),
             resolved_screen_caches: Vec::new(),
@@ -1175,6 +1178,14 @@ impl LoadedShapeSig {
         self.layer_id == s.layer_id && self.matches(s)
     }
 
+    #[inline]
+    pub(crate) fn matches_instance(&self, inst: &SymbolInstance) -> bool {
+        self.layer_id == inst.layer_id
+            && self.symbol_instance == Some(inst.binding)
+            && inst.binding.parent_scope_from_path(&self.group_path)
+                == inst.parent_scope.as_slice()
+    }
+
     pub(crate) fn shapes_match(a: &FillShape, b: &FillShape) -> bool {
         a.mesh_revision == b.mesh_revision
             && a.color == b.color
@@ -1713,5 +1724,42 @@ impl Timeline {
             TweenState::Complete { .. }
         );
         Some((kf.start_frame, kf.tween_rotate, is_complete))
+    }
+
+    /// タイムラインの描画内容・構造（レイヤー構成・表示/ロック・フレーム長・各キーフレームのセル世代とトゥイーン設定）の軽量署名ハッシュを返す
+    pub(crate) fn artwork_revision_signature(&self) -> u64 {
+        let mut h = (self.total_frames as u64)
+            .wrapping_mul(31)
+            .wrapping_add(self.layers.len() as u64);
+        for layer in &self.layers {
+            h = h
+                .wrapping_mul(31)
+                .wrapping_add(layer.id)
+                .wrapping_mul(31)
+                .wrapping_add(u64::from(layer.visible))
+                .wrapping_mul(31)
+                .wrapping_add(u64::from(layer.locked))
+                .wrapping_mul(31)
+                .wrapping_add(layer.frame_count as u64)
+                .wrapping_mul(31)
+                .wrapping_add(layer.keyframes.len() as u64);
+            for kf in &layer.keyframes {
+                let rot_code = match kf.tween_rotate {
+                    TweenRotate::Auto => 0u64,
+                    TweenRotate::Clockwise => 1u64,
+                    TweenRotate::CounterClockwise => 2u64,
+                };
+                h = h
+                    .wrapping_mul(31)
+                    .wrapping_add(kf.start_frame as u64)
+                    .wrapping_mul(31)
+                    .wrapping_add(u64::from(kf.tween))
+                    .wrapping_mul(31)
+                    .wrapping_add(rot_code)
+                    .wrapping_mul(31)
+                    .wrapping_add(kf.cel.revision);
+            }
+        }
+        h
     }
 }

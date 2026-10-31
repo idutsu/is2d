@@ -563,24 +563,6 @@ impl FillShape {
                 .all(|(a, b)| a.ptr_eq(b))
     }
 
-    /// ステージ座標で未変形だった図形の属性（`color`, `layer_id`, `group_path`, `symbol_instance`）を維持したまま、
-    /// 変換誤差のないローカルテンプレート `local_template` の輪郭・メッシュを O(1) で復元する
-    pub(crate) fn restore_from_local_template(
-        &self,
-        local_template: &FillShape,
-        inv_xform: Affine,
-    ) -> FillShape {
-        let mut restored = local_template.clone();
-        restored.layer_id = self.layer_id;
-        restored.group_path = self.group_path.clone();
-        restored.symbol_instance = self.symbol_instance.map(|mut b| {
-            b.xform = inv_xform * b.xform;
-            b
-        });
-        restored.set_color(self.color);
-        restored
-    }
-
     pub(crate) fn bounding_box(&self) -> KRect {
         self.bbox
     }

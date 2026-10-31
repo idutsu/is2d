@@ -70,7 +70,7 @@ pub(crate) fn draw_shape_contour_lines(
         .visible_world_rect(
             painter,
             tab.doc.stage_size,
-            !tab.session.edit_stack.is_empty(),
+            !tab.session.edit_path.is_empty(),
         )
         .inflate(pad, pad);
     for contour in shape.contours() {
