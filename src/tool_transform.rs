@@ -165,7 +165,7 @@ pub(crate) fn start_transform_drag(
             if let Some(hit_idx) = tab.session.topmost_shape_at(pt).or_else(|| {
                 compute_hover_target(&tab.session, pt, zoom, sub_mode).shape_idx()
             }) {
-                if !tab.session.selected_shapes.contains(&hit_idx) {
+                if !tab.session.is_shape_selected(hit_idx) {
                     select_single_shape_at(tab, sub_mode, pt);
                 }
                 let move_drag = begin_move_selection_drag(tab, pt, alt_held);
@@ -381,7 +381,7 @@ fn handle_transform_click(host: &mut impl ActionHost, pt: Point, shift_held: boo
         }
     } else if compute_transform_hover(&tab.session, pt, zoom) != TransformHoverTarget::Pivot {
         if let Some(hit_idx) = hit_opt {
-            if !tab.session.selected_shapes.contains(&hit_idx) {
+            if !tab.session.is_shape_selected(hit_idx) {
                 select_single_shape_at(tab, sub_mode, pt);
             } else {
                 let unit = tab.session.expand_to_group_unit(hit_idx);
@@ -438,12 +438,10 @@ pub(crate) fn compute_transform_hover(
     }
 
     if bbox.contains(mouse_pt)
-        || session.selected_shapes.iter().any(|&idx| {
-            session
-                .shapes
-                .get(idx)
-                .is_some_and(|s| s.contains_point(mouse_pt))
-        })
+        || session
+            .shapes
+            .iter()
+            .any(|s| session.selection.contains_shape(s) && s.contains_point(mouse_pt))
     {
         return TransformHoverTarget::Move;
     }
@@ -457,7 +455,7 @@ pub(crate) fn draw_free_transform_box(
     painter: &egui::Painter,
     view: &View,
 ) {
-    if session.selected_shapes.is_empty() {
+    if session.selection.is_empty() {
         return;
     }
 

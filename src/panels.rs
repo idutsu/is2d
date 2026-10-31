@@ -252,7 +252,7 @@ fn draw_edit_menu(
         ui.set_min_width(230.0);
         let can_undo = !tab.history.undo_stack.is_empty();
         let can_redo = !tab.history.redo_stack.is_empty();
-        let has_selection = !tab.session.selected_shapes.is_empty();
+        let has_selection = !tab.session.selection.is_empty();
         let can_paste = !clipboard.shapes.is_empty()
             && tab
                 .doc
@@ -792,7 +792,7 @@ fn draw_select_tool_properties(
 
     draw_panel_section_label(ui, "消去アクション", 4.0);
 
-    let has_sel = !tab.session.selected_shapes.is_empty();
+    let has_sel = !tab.session.selection.is_empty();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let half_w = (ui.available_width() - 6.0) * 0.5;
@@ -829,7 +829,7 @@ fn draw_select_tool_properties(
 fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     draw_panel_section_label(ui, "シンボル・グループ", 4.0);
 
-    let has_sel = !tab.session.selected_shapes.is_empty();
+    let has_sel = !tab.session.selection.is_empty();
     let has_group = tab.session.selection_has_group();
     if ui
         .add_enabled(
@@ -882,7 +882,7 @@ fn draw_transform_tool_properties(
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
 ) {
-    let has_sel = !tab.session.selected_shapes.is_empty();
+    let has_sel = !tab.session.selection.is_empty();
 
     draw_panel_section_label(ui, "変形アクション", 4.0);
 
@@ -1463,7 +1463,7 @@ pub(crate) fn draw_library_tab(
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
 ) {
-    let has_sel = !tab.session.selected_shapes.is_empty();
+    let has_sel = !tab.session.selection.is_empty();
     if ui
         .add_enabled(
             has_sel,

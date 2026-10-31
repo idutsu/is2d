@@ -506,7 +506,7 @@ impl Is2dApp {
     }
 
     fn handle_single_key_shortcuts(&mut self, i: &egui::InputState, shift: bool) {
-        if !self.tab().session.selected_shapes.is_empty() {
+        if !self.tab().session.selection.is_empty() {
             let step = if shift { 10.0 } else { 1.0 };
             let mut delta = kurbo::Vec2::ZERO;
             let mut any_non_repeat = false;
@@ -586,7 +586,7 @@ impl Is2dApp {
             apply(self, Action::SetTool { tool });
         } else if key_pressed_no_repeat(i, Key::Escape) {
             canvas_tool::cancel_active_drag(self.tab_mut());
-            if !self.tab().session.selected_shapes.is_empty() {
+            if !self.tab().session.selection.is_empty() {
                 apply(self, Action::Deselect);
             } else {
                 apply(self, Action::ExitGroup);

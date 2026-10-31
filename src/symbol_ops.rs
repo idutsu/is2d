@@ -18,15 +18,14 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     tab: &mut Tab,
 ) -> Option<(u64, u64, Vec<FillShape>, Vec<FillShape>)> {
     cancel_active_drag(tab);
-    if tab.session.selected_shapes.is_empty() {
+    if tab.session.selection.is_empty() {
         return None;
     }
     let snapshot = tab.session.take_or_clone_unsliced_snapshot();
     let valid_indices: Vec<usize> = tab
         .session
-        .selected_shapes
-        .iter()
-        .copied()
+        .selected_indices()
+        .into_iter()
         .filter(|&idx| {
             tab.session
                 .shapes
@@ -78,6 +77,8 @@ pub(crate) fn prepare_convert_selection_to_symbol(
             shape.symbol_instance = Some(binding);
         }
     }
+    tab.session.selection.clear();
+    tab.session.selection.instances.insert(inst_gid);
 
     reorder_selected_to_scope_front(tab);
     Some((sym_id, target_lid, local_shapes, snapshot))

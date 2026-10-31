@@ -95,13 +95,10 @@ fn prepare_active_tab_for_switch_or_save(tab: &mut Tab, flush_raw_merge: bool) {
     tab.view.pan_last_screen_pos = None;
     tab.history.end_coalesce();
 
-    if flush_raw_merge && tab.session.selection_modified && !tab.session.selected_shapes.is_empty()
-    {
-        let selected_ids = tab.session.selected_shape_ids();
+    if flush_raw_merge && tab.session.selection_modified && !tab.session.selection.is_empty() {
         let saved_pivot = tab.session.transform_pivot;
         flush_modified_raw_selection_merge(tab);
-        tab.session.restore_selection_by_shape_ids(&selected_ids);
-        tab.session.transform_pivot = if tab.session.selected_shapes.is_empty() {
+        tab.session.transform_pivot = if tab.session.selection.is_empty() {
             None
         } else {
             saved_pivot
@@ -141,7 +138,7 @@ fn activate_tab_index(ws: &mut impl ProjectWorkspace, target_index: usize) {
     ws.tab_mut().view.last_canvas_rect = last_canvas_rect;
     ws.clipboard_mut().paste_count = 0;
     ws.clipboard_mut().paste_offset = kurbo::Vec2::ZERO;
-    if !ws.tab().session.selected_shapes.is_empty()
+    if !ws.tab().session.selection.is_empty()
         && ws.tool().select_sub_mode != SelectSubMode::Reshape
     {
         ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
@@ -417,7 +414,7 @@ fn close_tab_immediately(
         ws.tab_mut().view.last_canvas_rect = last_canvas_rect;
         ws.clipboard_mut().paste_count = 0;
         ws.clipboard_mut().paste_offset = kurbo::Vec2::ZERO;
-        if !ws.tab().session.selected_shapes.is_empty()
+        if !ws.tab().session.selection.is_empty()
             && ws.tool().select_sub_mode != SelectSubMode::Reshape
         {
             ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
@@ -1291,7 +1288,7 @@ pub(crate) fn update_window_title(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
 
 type PreSaveRollbackState = (
     Vec<FillShape>,
-    Vec<usize>,
+    crate::canvas_tool::Selection,
     Option<Point>,
     Document,
     Vec<crate::symbol::SymbolEditSession>,
@@ -1300,7 +1297,7 @@ type PreSaveRollbackState = (
 fn restore_pre_save_state(tab: &mut Tab, pre_save_state: Option<PreSaveRollbackState>) {
     if let Some((shapes, sel, pivot, doc, edit_stack)) = pre_save_state {
         tab.session.shapes = shapes;
-        tab.session.selected_shapes = sel;
+        tab.session.selection = sel;
         tab.session.selection_modified = true;
         tab.session.transform_pivot = pivot;
         tab.doc = doc;
@@ -1316,10 +1313,10 @@ pub(crate) fn save_project_to_path(
 ) -> Result<(), String> {
     let pre_save_state = {
         let tab = ws.tab();
-        (tab.session.selection_modified && !tab.session.selected_shapes.is_empty()).then(|| {
+        (tab.session.selection_modified && !tab.session.selection.is_empty()).then(|| {
             (
                 tab.session.shapes.clone(),
-                tab.session.selected_shapes.clone(),
+                tab.session.selection.clone(),
                 tab.session.transform_pivot,
                 tab.doc.clone(),
                 tab.session.edit_stack.clone(),

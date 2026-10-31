@@ -521,12 +521,12 @@ fn test_marquee_select_partial_slice_and_shift_multi_select() {
         "部分矩形選択で内外2つにスライスされること"
     );
     assert_eq!(
-        app.session.selected_shapes.len(),
+        app.session.selected_indices().len(),
         1,
         "スライスされた内側のみが選択されていること"
     );
     assert!(
-        app.session.shapes[app.session.selected_shapes[0]].contains_point(Point::new(110.0, 200.0)),
+        app.session.shapes[app.session.selected_indices()[0]].contains_point(Point::new(110.0, 200.0)),
         "選択された断片が左端領域を含んでいること"
     );
 
@@ -537,7 +537,7 @@ fn test_marquee_select_partial_slice_and_shift_multi_select() {
         1,
         "未編集で選択解除すると元の1つのシェイプに復元されること"
     );
-    assert!(app.session.selected_shapes.is_empty());
+    assert!(app.session.selection.is_empty());
 
     // 3. 左端 (x: 70..140) を矩形選択し、続いて Shift キー押下（additive = true）で右端 (x: 260..330) も連続矩形選択
     tool_select::apply_marquee_selection(
@@ -558,7 +558,7 @@ fn test_marquee_select_partial_slice_and_shift_multi_select() {
         "左右両端のスライスと中央の非選択領域の計3つに分割されること"
     );
     assert_eq!(
-        app.session.selected_shapes.len(),
+        app.session.selected_indices().len(),
         2,
         "Shift 連続矩形選択で左右2つの領域が同時に選択されていること"
     );
@@ -607,12 +607,12 @@ fn test_keep_selection_on_tool_switch_and_bucket_fill_selected_region_only() {
         Point::new(200.0, 250.0),
         false,
     );
-    assert_eq!(app.session.selected_shapes.len(), 1);
+    assert_eq!(app.session.selected_indices().len(), 1);
 
     // 2. バケツツールに切り替えても選択状態が解除されないこと
     doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Bucket });
     assert_eq!(
-        app.session.selected_shapes.len(),
+        app.session.selected_indices().len(),
         1,
         "バケツツールに切り替えても選択が維持されること"
     );
@@ -660,7 +660,7 @@ fn test_free_transform_rotate_scale_and_flip() {
     );
     merge_shapes_into_canvas(&mut app.session.shapes, stroke);
     assert_eq!(app.session.shapes.len(), 1);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
 
     // 1. +90° 回転 -> 横長だったシェイプが中心 (200, 200) を軸に縦長 (x: 200, y: 100..300) になること
@@ -693,7 +693,7 @@ fn test_free_transform_rotate_scale_and_flip() {
         red,
     );
     merge_shapes_into_canvas(&mut app.session.shapes, left_piece);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     app.session.transform_pivot = Some(Point::new(200.0, 200.0));
 
     assert!(tool_transform::flip_selected_shapes(&mut app, true, false));
@@ -797,7 +797,7 @@ fn test_group_selection_bucket_protection_and_non_destructive_overlap() {
     merge_shapes_into_canvas(&mut app.session.shapes, eye_b);
     assert_eq!(app.session.shapes.len(), 3);
 
-    app.session.selected_shapes = vec![1, 2];
+    app.session.set_selected_indices(vec![1, 2]);
     let eye_gid =
         tool_select::group_selected_shapes(&mut app).expect("グループ化が成功すること");
     assert_eq!(app.session.shapes[1].group_path, vec![eye_gid]);
@@ -809,7 +809,7 @@ fn test_group_selection_bucket_protection_and_non_destructive_overlap() {
         &mut app,
         Point::new(100.0, 100.0)
     ));
-    assert_eq!(app.session.selected_shapes.len(), 2);
+    assert_eq!(app.session.selected_indices().len(), 2);
 
     // グループ選択状態でバケツツールを使っても無効であること
     app.tool.brush_color = red;
@@ -840,9 +840,9 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
     app.session.shapes.extend(eye_a);
     app.session.shapes.extend(eye_b);
 
-    app.session.selected_shapes = vec![1, 2];
+    app.session.set_selected_indices(vec![1, 2]);
     let eye_gid = tool_select::group_selected_shapes(&mut app).unwrap();
-    app.session.selected_shapes = vec![0, 1, 2];
+    app.session.set_selected_indices(vec![0, 1, 2]);
     let head_gid = tool_select::group_selected_shapes(&mut app).unwrap();
     assert_eq!(app.session.shapes[0].group_path, vec![head_gid]);
     assert_eq!(app.session.shapes[1].group_path, vec![head_gid, eye_gid]);
@@ -864,7 +864,7 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
     assert_eq!(app.session.editing_group_path, vec![head_gid]);
     assert!(tool_select::exit_current_group(&mut app));
     assert!(app.session.editing_group_path.is_empty());
-    assert_eq!(app.session.selected_shapes.len(), 3);
+    assert_eq!(app.session.selected_indices().len(), 3);
 
     assert!(tool_select::ungroup_selected_shapes(&mut app));
     assert!(app.session.shapes[0].group_path.is_empty());
@@ -972,9 +972,9 @@ fn test_cut_and_paste_in_place_seamlessly_remerges_raw_shape() {
     assert!(app.session.shapes[0].contains_point(Point::new(260.0, 200.0)));
 
     assert!(tool_select::paste_clipboard(&mut app, true));
-    assert_eq!(app.session.selected_shapes.len(), 1);
+    assert_eq!(app.session.selected_indices().len(), 1);
     assert!(
-        app.session.shapes[app.session.selected_shapes[0]].contains_point(Point::new(120.0, 200.0))
+        app.session.shapes[app.session.selected_indices()[0]].contains_point(Point::new(120.0, 200.0))
     );
     tool_select::clear_selection(&mut app);
     assert_eq!(app.session.shapes.len(), 1);
@@ -994,7 +994,7 @@ fn test_copy_paste_group_assigns_new_gid_and_alt_drag_symbol_undo() {
         blue,
     );
     merge_shapes_into_canvas(&mut app.session.shapes, g_part);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let orig_gid = tool_select::group_selected_shapes(&mut app).unwrap();
 
     assert!(tool_select::copy_selected_shapes(&mut app));
@@ -1002,7 +1002,7 @@ fn test_copy_paste_group_assigns_new_gid_and_alt_drag_symbol_undo() {
     app.view.zoom = 4.0;
     assert!(tool_select::paste_clipboard(&mut app, false));
     assert_eq!(app.session.shapes.len(), 2);
-    let pasted_idx = app.session.selected_shapes[0];
+    let pasted_idx = app.session.selected_indices()[0];
     let pasted_gid = app.session.shapes[pasted_idx].group_path[0];
     assert_ne!(pasted_gid, orig_gid);
     assert!(
@@ -1026,7 +1026,7 @@ fn test_copy_paste_group_assigns_new_gid_and_alt_drag_symbol_undo() {
     assert_eq!(dup_binding.symbol_id, sym_id);
     assert_ne!(dup_binding.instance_gid, orig_inst_gid);
     assert!(
-        app.session.shapes[app.session.selected_shapes[0]]
+        app.session.shapes[app.session.selected_indices()[0]]
             .contains_point(Point::new(120.0 + 16.0 + 60.0, 100.0 + 16.0 + 40.0)),
     );
     app.undo();
@@ -1155,7 +1155,7 @@ fn test_multilayer_isolation_cross_layer_marquee_and_lock_protection() {
         Point::new(200.0, 200.0),
         false,
     );
-    assert_eq!(app.session.selected_shapes.len(), 2);
+    assert_eq!(app.session.selected_indices().len(), 2);
     let undo_snap = app.session.shapes.clone();
     app.session.translate_selected(KVec2::new(30.0, 0.0));
     tool_select::commit_moved_selection(&mut app, undo_snap);
@@ -1173,7 +1173,7 @@ fn test_multilayer_isolation_cross_layer_marquee_and_lock_protection() {
         Point::new(250.0, 200.0),
         false,
     );
-    assert_eq!(app.session.selected_shapes.len(), 1);
+    assert_eq!(app.session.selected_indices().len(), 1);
     tool_select::clear_selection(&mut app);
     timeline_ui::set_layer_locked(&mut app, 0, false);
     assert_eq!(app.session.shapes.len(), 2);
@@ -1270,9 +1270,9 @@ fn test_timeline_cell_selection_sync_with_canvas_selection() {
     assert_eq!(app.doc.root.layers[1].frame_count, base_len + 2);
 
     timeline_ui::select_timeline_cells(&mut app, 0, 0, 0, 0);
-    assert_eq!(app.session.selected_shapes.len(), 1);
+    assert_eq!(app.session.selected_indices().len(), 1);
     assert_eq!(
-        app.session.shapes[app.session.selected_shapes[0]].layer_id,
+        app.session.shapes[app.session.selected_indices()[0]].layer_id,
         app.doc.root.layers[0].id
     );
 
@@ -1291,7 +1291,7 @@ fn test_timeline_cell_selection_sync_with_canvas_selection() {
     );
 
     timeline_ui::select_timeline_cells(&mut app, 0, 0, 1, 0);
-    assert_eq!(app.session.selected_shapes.len(), 2);
+    assert_eq!(app.session.selected_indices().len(), 2);
 }
 
 #[test]
@@ -1409,7 +1409,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
         tool_select::select_single_shape_at(&mut app, vertex_pt),
         "頂点や境界線上をクリックしてもシェイプが選択状態になること"
     );
-    assert_eq!(app.session.selected_shapes, vec![0]);
+    assert_eq!(app.session.selected_indices(), vec![0]);
 
     // 3. 選択状態（網点表示）になった後は、頂点上・境界線上・少し外側のマージンのどこを掴んでも
     //    変形（Vertex / Edge）は無効化され、常に移動（HoverTarget::Fill）になること
@@ -1628,7 +1628,7 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
         16.0,
         Color32::from_rgb(230, 80, 80),
     );
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
 
     let sym_id =
         tool_transform::convert_selection_to_symbol(&mut app).expect("シンボル変換が成功すること");
@@ -1700,12 +1700,12 @@ fn test_classic_tween_requires_single_symbol_instance() {
     );
     assert!(!tool_transform::timeline_toggle_tween(&mut app));
 
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     assert!(tool_select::group_selected_shapes(&mut app).is_some());
     assert!(!tool_transform::timeline_toggle_tween(&mut app));
     assert!(tool_select::ungroup_selected_shapes(&mut app));
 
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     assert!(tool_transform::timeline_toggle_tween(&mut app));
     assert!(app.doc.root.layers[0].keyframes[0].tween);
@@ -1745,7 +1745,7 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
         16.0,
         Color32::from_rgb(230, 80, 80),
     );
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     assert!(tool_transform::timeline_toggle_tween(&mut app));
     for _ in 0..4 {
@@ -1768,7 +1768,7 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
         }
     ));
 
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let snap = app.session.shapes.clone();
     app.session.translate_selected(KVec2::new(200.0, 80.0));
     tool_select::commit_moved_selection(&mut app, snap);
@@ -1789,7 +1789,7 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
     assert!((start_cy - 150.0).abs() < 1.0);
 
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let snap_reset = app.session.shapes.clone();
     app.session.translate_selected(KVec2::new(-200.0, -80.0));
     tool_select::commit_moved_selection(&mut app, snap_reset);
@@ -1802,7 +1802,7 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
         true
     ));
     tool_select::clear_selection(&mut app);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let bbox_f4 = app
         .session
         .selection_bounding_box(app.view.zoom)
@@ -1855,7 +1855,7 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
         12.0,
         red,
     );
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     assert!(tool_transform::convert_selection_to_symbol(&mut app).is_some());
 
     let (binding, _, _) = tool_transform::selected_single_symbol_info(&app).unwrap();
@@ -1897,7 +1897,7 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
     }
 
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     assert!(tool_transform::set_selected_symbol_playback(
         &mut app,
         SymbolLoopMode::PlayOnce,
@@ -1910,14 +1910,14 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
     }
 
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     assert!(tool_transform::set_selected_symbol_playback(
         &mut app,
         SymbolLoopMode::SingleFrame,
         1
     ));
     assert_eq!(app.session.shapes[0].color, green);
-    assert_eq!(app.session.selected_shapes, vec![0]);
+    assert_eq!(app.session.selected_indices(), vec![0]);
     for f in 0..5 {
         timeline_ui::switch_to_layer_and_frame(&mut app, 0, f);
         assert_eq!(app.session.shapes[0].color, green);
@@ -1936,7 +1936,7 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
         12.0,
         red,
     );
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let child_sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     let (child_binding, _, _) = tool_transform::selected_single_symbol_info(&app).unwrap();
     assert!(tool_transform::enter_symbol_timeline(
@@ -1955,7 +1955,7 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
     canvas_tool::sync_shapes_to_timeline(&mut app);
     assert!(tool_transform::exit_symbol_timeline(&mut app));
 
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let parent_sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     assert_ne!(child_sym_id, parent_sym_id);
 
@@ -1979,7 +1979,7 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
     assert_eq!(app.session.shapes.len(), 1);
     assert!(app.session.shapes[0].is_empty_symbol_marker());
     canvas_tool::select_shapes_for_timeline_selection(&mut app);
-    assert_eq!(app.session.selected_shapes, vec![0]);
+    assert_eq!(app.session.selected_indices(), vec![0]);
     assert!(app.session.selected_single_symbol_binding().is_some());
     tool_select::clear_selection(&mut app);
     assert!(app
@@ -2010,9 +2010,9 @@ fn test_symbol_rename_library_delete_detach_and_inplace_child_symbol_creation() 
         12.0,
         red,
     );
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let child_sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let parent_sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
 
     let orig_name = app.doc.find_symbol(parent_sym_id).unwrap().name.clone();
@@ -2049,7 +2049,7 @@ fn test_symbol_rename_library_delete_detach_and_inplace_child_symbol_creation() 
         child_sym_id
     ));
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let lib_len_before = app.doc.library.len();
     let grandchild_sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     assert_eq!(app.doc.library.len(), lib_len_before + 1);
@@ -2238,8 +2238,12 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
         Color32::from_rgb(60, 120, 220),
     ));
     sym_app.session.shapes = two_shapes;
-    sym_app.session.selected_shapes = vec![0, 1];
+    sym_app.session.set_selected_indices(vec![0, 1]);
+    assert_eq!(sym_app.session.selection.shapes.len(), 2);
+    assert!(sym_app.session.selection.instances.is_empty());
     let empty_test_sym_id = tool_transform::convert_selection_to_symbol(&mut sym_app).unwrap();
+    assert!(sym_app.session.selection.shapes.is_empty());
+    assert_eq!(sym_app.session.selection.instances.len(), 1);
     assert_eq!(sym_app.session.shapes.len(), 2);
     assert!(sym_app.doc.root.layers[0].keyframes[0]
         .cel
@@ -2356,7 +2360,7 @@ fn test_reverse_order_nested_symbol_topological_propagation_and_cycle_guard() {
         8.0,
         Color32::from_rgb(100, 100, 100),
     );
-    nest_app.session.selected_shapes = vec![0];
+    nest_app.session.set_selected_indices(vec![0]);
     let sym_a = tool_transform::convert_selection_to_symbol(&mut nest_app).unwrap();
 
     nest_app.session.shapes.extend(make_stroke(
@@ -2366,7 +2370,7 @@ fn test_reverse_order_nested_symbol_topological_propagation_and_cycle_guard() {
         Color32::from_rgb(150, 150, 150),
     ));
     let last_idx = nest_app.session.shapes.len() - 1;
-    nest_app.session.selected_shapes = vec![last_idx];
+    nest_app.session.set_selected_indices(vec![last_idx]);
     let sym_b = tool_transform::convert_selection_to_symbol(&mut nest_app).unwrap();
     tool_select::delete_selected_shapes(&mut nest_app);
 
@@ -2377,7 +2381,7 @@ fn test_reverse_order_nested_symbol_topological_propagation_and_cycle_guard() {
         Color32::from_rgb(200, 50, 50),
     ));
     let last_idx = nest_app.session.shapes.len() - 1;
-    nest_app.session.selected_shapes = vec![last_idx];
+    nest_app.session.set_selected_indices(vec![last_idx]);
     let sym_c = tool_transform::convert_selection_to_symbol(&mut nest_app).unwrap();
     tool_select::delete_selected_shapes(&mut nest_app);
     assert!(sym_a < sym_b && sym_b < sym_c);
@@ -2437,7 +2441,7 @@ fn test_eyedropper_samples_interpolated_tween_position_on_locked_layer() {
         12.0,
         tween_color,
     );
-    tween_eye_app.session.selected_shapes = vec![0];
+    tween_eye_app.session.set_selected_indices(vec![0]);
     tool_transform::convert_selection_to_symbol(&mut tween_eye_app).unwrap();
     tool_transform::timeline_toggle_tween(&mut tween_eye_app);
     timeline_ui::select_timeline_cells(&mut tween_eye_app, 0, 4, 0, 4);
@@ -2465,7 +2469,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
         10.0,
         Color32::from_rgb(200, 40, 40),
     );
-    grp_sym_app.session.selected_shapes = vec![0];
+    grp_sym_app.session.set_selected_indices(vec![0]);
     let blink_sym_id = tool_transform::convert_selection_to_symbol(&mut grp_sym_app).unwrap();
     // シンボル内部に入り、2フレーム目を空白キーフレーム（F7）にする（F0: 表示, F1: 空白）
     let blink_binding = grp_sym_app.session.shapes[0].symbol_instance.unwrap();
@@ -2487,7 +2491,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
         Color32::from_rgb(40, 120, 220),
     );
     grp_sym_app.session.shapes.extend(sib_shapes);
-    grp_sym_app.session.selected_shapes = vec![0, 1];
+    grp_sym_app.session.set_selected_indices(vec![0, 1]);
     assert!(tool_select::group_selected_shapes(&mut grp_sym_app).is_some());
     // ルートシーンを3フレームに延長（F0: シンボル表示, F1: シンボル空白, F2: シンボルループ再表示）
     timeline_ui::select_timeline_cells(&mut grp_sym_app, 0, 2, 0, 2);
@@ -2500,8 +2504,8 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
         2,
         "F1では空白シンボルマーカー1個と兄弟シェイプ1個の計2個が CanvasState::shapes 内に一元展開されていること"
     );
-    grp_sym_app.session.selected_shapes = grp_sym_app.session.expand_to_group_unit(0);
-    assert_eq!(grp_sym_app.session.selected_shapes, vec![0, 1]);
+    { let sel = grp_sym_app.session.expand_to_group_unit(0); grp_sym_app.session.set_selected_indices(sel); }
+    assert_eq!(grp_sym_app.session.selected_indices(), vec![0, 1]);
     assert!(tool_select::nudge_selected_shapes(
         &mut grp_sym_app,
         kurbo::Vec2::new(150.0, 0.0)
@@ -2555,7 +2559,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
 
     // F1に戻って親グループを +90° 回転させても、空白フレーム中のシンボルが正確なアフィン変換で追従すること
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
-    grp_sym_app.session.selected_shapes = grp_sym_app.session.expand_to_group_unit(0);
+    { let sel = grp_sym_app.session.expand_to_group_unit(0); grp_sym_app.session.set_selected_indices(sel); }
     assert!(tool_transform::rotate_selected_shapes(
         &mut grp_sym_app,
         std::f64::consts::FRAC_PI_2
@@ -2578,7 +2582,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
 
     // F1に戻って親グループを削除すると、空白フレーム状態のシンボルインスタンスも一緒に削除されること
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
-    grp_sym_app.session.selected_shapes = grp_sym_app.session.expand_to_group_unit(0);
+    { let sel = grp_sym_app.session.expand_to_group_unit(0); grp_sym_app.session.set_selected_indices(sel); }
     assert!(tool_select::delete_selected_shapes(&mut grp_sym_app));
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 2);
     assert!(
@@ -2596,7 +2600,7 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
         10.0,
         Color32::from_rgb(200, 40, 40),
     );
-    grp_sym_app.session.selected_shapes = vec![0];
+    grp_sym_app.session.set_selected_indices(vec![0]);
     let blink_sym_id = tool_transform::convert_selection_to_symbol(&mut grp_sym_app).unwrap();
     let blink_binding = grp_sym_app.session.shapes[0].symbol_instance.unwrap();
     assert!(tool_transform::enter_symbol_timeline(
@@ -2849,15 +2853,17 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
     let top_shape_id = shape_top.shape_id;
     assert_ne!(top_shape_id, shape_bottom.shape_id);
     sort_app.session.shapes = vec![shape_top, shape_bottom];
-    sort_app.session.selected_shapes = vec![0];
+    sort_app.session.set_selected_indices(vec![0]);
+    assert!(sort_app.session.selection.shapes.contains(&top_shape_id));
     {
         let tab = sort_app.tab_mut();
         tab.session.sort_shapes_by_layer_order(&tab.doc.root);
     }
     assert_eq!(sort_app.session.shapes[0].layer_id, lid_bottom);
     assert_eq!(sort_app.session.shapes[1].layer_id, lid_top);
+    assert!(sort_app.session.selection.shapes.contains(&top_shape_id));
     assert_eq!(
-        sort_app.session.selected_shapes,
+        sort_app.session.selected_indices(),
         vec![1],
         "sort_shapes_by_layer_order 後も shape_id に基づいて選択インデックスが新しい位置へ追従すること"
     );
@@ -3034,7 +3040,7 @@ fn test_tween_lru_cache_no_thrashing() {
         10.0,
         Color32::from_rgb(220, 80, 40),
     );
-    lru_tween_app.session.selected_shapes = vec![0];
+    lru_tween_app.session.set_selected_indices(vec![0]);
     tool_transform::convert_selection_to_symbol(&mut lru_tween_app).unwrap();
     // シンボルインスタンスを移動確定してもキャッシュ済み fill_mesh が破棄されず、平行移動分だけ頂点がシフトすること
     let mesh_before = lru_tween_app.session.shapes[0].fill_mesh();
@@ -3106,7 +3112,7 @@ fn test_project_save_and_load_roundtrip() {
         12.0,
         Color32::from_rgb(240, 80, 60),
     );
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     assert!(tool_transform::timeline_toggle_tween(&mut app));
     assert!(tool_transform::set_active_keyframe_tween_rotate(
@@ -3131,7 +3137,7 @@ fn test_project_save_and_load_roundtrip() {
     }
     app.session.shapes.extend(raw_and_group);
     let last_idx = app.session.shapes.len() - 1;
-    app.session.selected_shapes = vec![last_idx];
+    app.session.set_selected_indices(vec![last_idx]);
     let gid = tool_select::group_selected_shapes(&mut app).unwrap();
 
     // シンボルインプレイス編集に入った状態で保存してもルートタイムラインとライブラリが正しく保存されること
@@ -3203,7 +3209,7 @@ fn test_multitab_open_switch_symbol_copy_paste_and_close() {
         12.0,
         Color32::from_rgb(240, 80, 60),
     );
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
 
     let tmp_path =
@@ -3222,17 +3228,18 @@ fn test_multitab_open_switch_symbol_copy_paste_and_close() {
 
     // Tab 0 (loaded_app) でシンボルインスタンスを選択してコピー（同時に保存時の選択状態維持も検証）
     timeline_ui::switch_to_layer_and_frame(&mut loaded_app, 0, 0);
-    loaded_app.session.selected_shapes = (0..loaded_app.session.shapes.len())
+    let sym_indices: Vec<usize> = (0..loaded_app.session.shapes.len())
         .filter(|&i| loaded_app.session.shapes[i].symbol_instance.is_some())
         .collect();
+    loaded_app.session.set_selected_indices(sym_indices);
     loaded_app.session.transform_pivot = Some(Point::new(111.0, 222.0));
-    assert!(!loaded_app.session.selected_shapes.is_empty());
+    assert!(!loaded_app.session.selection.is_empty());
     assert!(tool_select::copy_selected_shapes(&mut loaded_app));
 
     // Cmd+S（save_project_to_path）を実行しても現在の選択状態とカスタムピボットが強制解除されないこと
     crate::project_io::save_project_to_path(&mut loaded_app, &tmp_path)
         .expect("選択維持のまま上書き保存に成功すること");
-    assert!(!loaded_app.session.selected_shapes.is_empty());
+    assert!(!loaded_app.session.selection.is_empty());
     assert_eq!(
         loaded_app.session.transform_pivot,
         Some(Point::new(111.0, 222.0))
@@ -3390,11 +3397,11 @@ fn test_clipboard_symbol_evaluates_latest_symbol_def_and_shares_arc() {
         10.0,
         Color32::RED,
     );
-    sym_paste_app.session.selected_shapes = vec![0];
+    sym_paste_app.session.set_selected_indices(vec![0]);
     let child_sym = tool_transform::convert_selection_to_symbol(&mut sym_paste_app).unwrap();
-    sym_paste_app.session.selected_shapes = vec![0];
+    sym_paste_app.session.set_selected_indices(vec![0]);
     let parent_sym = tool_transform::convert_selection_to_symbol(&mut sym_paste_app).unwrap();
-    sym_paste_app.session.selected_shapes = vec![0];
+    sym_paste_app.session.set_selected_indices(vec![0]);
     assert!(tool_select::copy_selected_shapes(&mut sym_paste_app));
     let first_clip_sym_arc = std::sync::Arc::clone(&sym_paste_app.clipboard.symbols[0]);
     assert!(tool_select::copy_selected_shapes(&mut sym_paste_app));
@@ -3474,12 +3481,12 @@ fn test_cross_tab_symbol_paste_remaps_inner_group_ids() {
         10.0,
         Color32::RED,
     );
-    cross_gid_app.session.selected_shapes = vec![0];
+    cross_gid_app.session.set_selected_indices(vec![0]);
     let tab0_inner_gid = tool_select::group_selected_shapes(&mut cross_gid_app).unwrap();
     assert_eq!(tab0_inner_gid, 1);
-    cross_gid_app.session.selected_shapes = vec![0];
+    cross_gid_app.session.set_selected_indices(vec![0]);
     let _tab0_sym_id = tool_transform::convert_selection_to_symbol(&mut cross_gid_app).unwrap();
-    cross_gid_app.session.selected_shapes = vec![0];
+    cross_gid_app.session.set_selected_indices(vec![0]);
     assert!(tool_select::copy_selected_shapes(&mut cross_gid_app));
 
     // 2つ目のタブを開き、Tab 1 側でもグループ（gid=1）を作成してから Tab 0 のシンボルをペースト＆グループ解除（デタッチ）
@@ -3494,7 +3501,7 @@ fn test_cross_tab_symbol_paste_remaps_inner_group_ids() {
         10.0,
         Color32::BLUE,
     );
-    cross_gid_app.session.selected_shapes = vec![0];
+    cross_gid_app.session.set_selected_indices(vec![0]);
     let tab1_existing_gid = tool_select::group_selected_shapes(&mut cross_gid_app).unwrap();
     assert_eq!(tab1_existing_gid, 1);
 
@@ -3543,7 +3550,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     merge_app.session.shapes = blue_stroke;
     merge_app.session.shapes.extend(red_stroke);
     canvas_tool::sync_shapes_to_timeline(&mut merge_app);
-    merge_app.session.selected_shapes = vec![1];
+    merge_app.session.set_selected_indices(vec![1]);
     let snap = merge_app.session.snapshot_for_drag();
     merge_app.session.translate_selected(KVec2::new(0.0, -80.0));
     tool_select::commit_moved_selection(&mut merge_app, snap);
@@ -3577,7 +3584,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
         Color32::RED,
     ));
     canvas_tool::sync_shapes_to_timeline(&mut union_save_app);
-    union_save_app.session.selected_shapes = vec![1];
+    union_save_app.session.set_selected_indices(vec![1]);
     let snap_u = union_save_app.session.snapshot_for_drag();
     union_save_app
         .session
@@ -3591,7 +3598,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
         "同色シェイプが1つにUnion結合されていること"
     );
     assert!(
-        union_save_app.session.selected_shapes.is_empty(),
+        union_save_app.session.selection.is_empty(),
         "非選択の背景同色シェイプとUnion融合して保存した場合は背景シェイプが勝手に選択に巻き込まれないこと"
     );
 
@@ -3609,7 +3616,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
         Color32::RED,
     ));
     canvas_tool::sync_shapes_to_timeline(&mut self_union_app);
-    self_union_app.session.selected_shapes = vec![0, 1];
+    self_union_app.session.set_selected_indices(vec![0, 1]);
     assert!(tool_select::copy_selected_shapes(&mut self_union_app));
     let snap_su = self_union_app.session.snapshot_for_drag();
     self_union_app
@@ -3620,7 +3627,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
         .expect("選択同士のUnion保存に成功すること");
     assert_eq!(self_union_app.session.shapes.len(), 1);
     assert_eq!(
-        self_union_app.session.selected_shapes,
+        self_union_app.session.selected_indices(),
         vec![0],
         "選択シェイプ同士のみのUnion結合では shape_id が引き継がれ選択状態が維持されること"
     );
@@ -3639,7 +3646,7 @@ fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
         Color32::RED,
     );
     canvas_tool::sync_shapes_to_timeline(&mut self_union_app);
-    self_union_app.session.selected_shapes = vec![0];
+    self_union_app.session.set_selected_indices(vec![0]);
     assert!(tool_select::copy_selected_shapes(&mut self_union_app));
 
     timeline_ui::set_layer_locked(&mut self_union_app, 0, true);
@@ -3690,7 +3697,7 @@ fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
         Color32::RED,
     ));
     canvas_tool::sync_shapes_to_timeline(&mut undo_redo_merge_app);
-    undo_redo_merge_app.session.selected_shapes = vec![1];
+    undo_redo_merge_app.session.set_selected_indices(vec![1]);
     let snap_ur = undo_redo_merge_app.session.snapshot_for_drag();
     undo_redo_merge_app
         .session
@@ -4147,7 +4154,7 @@ fn test_double_click_raw_shape_does_not_exit_group_or_symbol() {
         14.0,
         Color32::RED,
     );
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let gid = tool_select::group_selected_shapes(&mut app).unwrap();
 
     // グループをダブルクリックしてインプレイス編集に入る
@@ -4213,10 +4220,10 @@ fn test_marquee_shift_deselect_restores_unsliced_for_bucket_fill() {
         false,
     );
     assert!(app.session.has_unsliced_snapshot());
-    assert_eq!(app.session.selected_shapes.len(), 1);
-    let sel_idx = app.session.selected_shapes[0];
+    assert_eq!(app.session.selected_indices().len(), 1);
+    let sel_idx = app.session.selected_indices()[0];
     tool_select::toggle_shape_selection(&mut app, sel_idx);
-    assert!(app.session.selected_shapes.is_empty());
+    assert!(app.session.selection.is_empty());
     assert!(
         !app.session.has_unsliced_snapshot(),
         "Shift+クリックで選択が空になった時点で未編集のマーキースライスは即座に復元されること"
@@ -4242,7 +4249,7 @@ fn test_symbol_rename_consecutive_keystrokes_grouped_into_single_undo() {
         16.0,
         Color32::BLUE,
     );
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     let undo_before_rename = app.history.undo_stack.len();
 
@@ -4408,7 +4415,7 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
     let mut sym_f6_app = Is2dApp::default();
     sym_f6_app.session.shapes =
         make_stroke(Point::new(100.0, 100.0), Point::new(150.0, 100.0), 10.0, red);
-    sym_f6_app.session.selected_shapes = vec![0];
+    sym_f6_app.session.set_selected_indices(vec![0]);
     let sym_id = tool_transform::convert_selection_to_symbol(&mut sym_f6_app).unwrap();
     {
         let sym_def = sym_f6_app.doc.find_symbol_mut(sym_id).unwrap();
@@ -4442,7 +4449,7 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
         crate::symbol::TweenRotate::Clockwise
     ));
     timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 3);
-    sym_f6_app.session.selected_shapes = vec![0];
+    sym_f6_app.session.set_selected_indices(vec![0]);
     assert!(tool_select::nudge_selected_shapes(
         &mut sym_f6_app,
         kurbo::Vec2::new(20.0, 0.0)
@@ -4511,12 +4518,12 @@ fn test_symbol_delete_mid_tween_preserves_start_keyframe_pose() {
     let red = Color32::from_rgb(220, 40, 40);
     let blue = Color32::from_rgb(40, 100, 220);
     app.session.shapes = make_stroke(Point::new(100.0, 100.0), Point::new(140.0, 100.0), 10.0, red);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
     app.doc.root.resize_total_frames(5);
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
     timeline_ui::timeline_insert_keyframe(&mut app, true);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let snap = app.session.snapshot_for_drag();
     app.session.translate_selected(KVec2::new(200.0, 0.0));
     tool_select::commit_moved_selection(&mut app, snap);
@@ -4761,7 +4768,7 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
         Color32::RED,
     );
     canvas_tool::sync_shapes_to_timeline(&mut app);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
 
     // 1. コピー時に OS クリップボードを汚染せず、OS クリップボード非依存で Cmd+V が機能すること (#15)
     let out_copy = ctx.run(
@@ -4985,7 +4992,7 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
             app.update_ui(ctx);
         },
     );
-    assert!(app.session.selected_shapes.is_empty());
+    assert!(app.session.selection.is_empty());
     assert_eq!(
         app.tool.tool,
         Tool::Transform,
@@ -5053,7 +5060,7 @@ fn test_egui_select_and_transform_tool_raw_input_interactions() {
         },
     );
     assert_eq!(
-        app.session.selected_shapes,
+        app.session.selected_indices(),
         vec![0],
         "handle_select_tool_input 経由の左クリックでシェイプが選択されること"
     );
@@ -5146,7 +5153,7 @@ fn test_hidden_layer_shapes_excluded_from_canvas_and_preserved_on_sync() {
     assert_eq!(app.session.shapes[0].color, blue);
 
     // その状態で Layer 2 を編集して sync_shapes_to_timeline を実行しても、非表示の Layer 1 の図形が消去されないこと
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     assert!(tool_select::nudge_selected_shapes(
         &mut app,
         kurbo::Vec2::new(20.0, 0.0)
@@ -5364,7 +5371,7 @@ fn test_shift_partial_deselect_only_merges_deselected_raw_shape() {
     let area_blue_bottom_before = app.session.shapes[1].exterior.signed_area();
 
     // 赤い図形2つ (index 2, 3) を選択して左へ -100px 移動し、2つの青い図形の上にそれぞれ重ねる
-    app.session.selected_shapes = vec![2, 3];
+    app.session.set_selected_indices(vec![2, 3]);
     assert!(tool_select::nudge_selected_shapes(
         &mut app,
         kurbo::Vec2::new(-100.0, 0.0)
@@ -5373,14 +5380,14 @@ fn test_shift_partial_deselect_only_merges_deselected_raw_shape() {
 
     // Shift+クリック相当の toggle_shape_selection で、上側の赤い図形 (index 2) だけを選択解除し、下側の赤い図形 (index 3) は選択に残す (#7)
     tool_select::toggle_shape_selection(&mut app, 2);
-    assert_eq!(app.session.selected_shapes.len(), 1);
+    assert_eq!(app.session.selected_indices().len(), 1);
     assert!(
         app.session.selection_modified,
         "一部の図形だけを選択解除した際、残りの選択図形は selection_modified=true のまま維持されること (#7)"
     );
 
     // 選択に残した下側の赤い図形をさらに右へ +100px 戻してから全選択解除する
-    let remaining_idx = app.session.selected_shapes[0];
+    let remaining_idx = app.session.selected_indices()[0];
     assert_eq!(app.session.shapes[remaining_idx].color, red);
     assert!(tool_select::nudge_selected_shapes(
         &mut app,
@@ -5464,7 +5471,7 @@ fn test_pivot_commit_restores_unsliced_marquee_snapshot_and_persists() {
     );
     app.session.shapes.extend(sym_shapes);
     canvas_tool::sync_shapes_to_timeline(&mut app);
-    app.session.selected_shapes = vec![1];
+    app.session.set_selected_indices(vec![1]);
     doc_actions::convert_selection_to_symbol(&mut app).unwrap();
 
     // 生シェイプの一部とシンボルインスタンス全体をまたぐマーキー選択を行う
@@ -5485,7 +5492,7 @@ fn test_pivot_commit_restores_unsliced_marquee_snapshot_and_persists() {
         .filter(|(_, s)| s.symbol_instance.is_some())
         .map(|(i, _)| i)
         .collect();
-    app.session.selected_shapes = sym_indices;
+    app.session.set_selected_indices(sym_indices);
     let new_world_pivot = Point::new(155.0, 235.0);
     assert!(tool_transform::set_selected_symbol_world_pivot(
         &mut app,
@@ -5542,7 +5549,7 @@ fn test_move_or_copy_frames_preserves_following_frames_tween_pose_and_remaps_ids
     tween_app.session.shapes =
         make_stroke(Point::new(100.0, 100.0), Point::new(140.0, 100.0), 10.0, red);
     canvas_tool::sync_shapes_to_timeline(&mut tween_app);
-    tween_app.session.selected_shapes = vec![0];
+    tween_app.session.set_selected_indices(vec![0]);
     doc_actions::convert_selection_to_symbol(&mut tween_app).unwrap();
     assert!(doc_actions::timeline_toggle_tween(&mut tween_app));
     timeline_ui::switch_to_layer_and_frame(&mut tween_app, 0, 4);
@@ -5651,7 +5658,7 @@ fn test_cancel_drag_and_noop_drag_preserve_tessellated_mesh_caches() {
         Color32::from_rgb(70, 140, 230),
     );
     canvas_tool::sync_shapes_to_timeline(&mut app);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
 
     // 事前に fill_mesh キャッシュを構築して Arc ポインタを取得 (#12)
     let mesh_arc_before = std::sync::Arc::clone(app.session.shapes[0].fill_mesh());
@@ -5667,7 +5674,7 @@ fn test_cancel_drag_and_noop_drag_preserve_tessellated_mesh_caches() {
     );
 
     // 2. 自由変形ドラッグを開始して Esc 相当の cancel_active_drag で中断してもキャッシュが失われないこと
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let bbox = app.session.selection_bounding_box(app.view.zoom).unwrap();
     tool_transform::start_transform_drag(
         &mut app,
@@ -6014,7 +6021,7 @@ fn test_key_repeat_suppressed_for_enter_onion_tween_and_cmd3() {
         10.0,
         Color32::RED,
     );
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
     assert!(!app.doc.root.layers[0].keyframes[0].tween);
     let _ = ctx.run(
@@ -6107,7 +6114,7 @@ fn test_transform_rotate_zone_only_near_four_corners_and_paste_staircase_across_
         Color32::from_rgb(80, 140, 220),
     );
     canvas_tool::sync_shapes_to_timeline(&mut app);
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let bbox = app.session.selection_bounding_box(app.view.zoom).unwrap();
 
     // 1. 四隅の少し外側 (+10px, -10px) は Rotate になるが、上辺中央の少し外側 (四隅から100px以上離れた位置) は Rotate にならないこと (#17)
@@ -6380,7 +6387,7 @@ fn test_onion_skin_per_tab_isolation_and_shift_marquee_no_premature_merge() {
     canvas_tool::sync_shapes_to_timeline(&mut sel_app);
 
     // 中央の赤図形 (idx=1) を選択して左へ -80px 移動し、Shape 0 と重ならせる（まだ選択中なので未結合で3図形のまま）
-    sel_app.session.selected_shapes = vec![1];
+    sel_app.session.set_selected_indices(vec![1]);
     assert!(doc_actions::nudge_selected_shapes(
         &mut sel_app,
         KVec2::new(-80.0, 0.0)
@@ -6400,7 +6407,7 @@ fn test_onion_skin_per_tab_isolation_and_shift_marquee_no_premature_merge() {
         3,
         "Shift＋マーキーで追加選択しても、まだ選択中の移動済み生図形は先に結合されないこと (#4)"
     );
-    assert_eq!(sel_app.session.selected_shapes.len(), 2);
+    assert_eq!(sel_app.session.selected_indices().len(), 2);
 
     // その後選択解除 (clear_selection) した瞬間に同色結合が確定し、赤1個＋青1個の計2図形になること
     canvas_tool::clear_selection(&mut sel_app);
@@ -6421,7 +6428,7 @@ fn test_scale_commit_and_repeated_transform_rebuild_mesh_cache() {
 
     // 1. 自由変形の拡大ドラッグ (transform_selected_from_origins) 中は既存頂点数を再利用し、
     //    commit_moved_selection 確定時に rebuild_cache() されて曲線分割頂点数が増加すること (#5)
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let undo_snapshot = app.session.snapshot_for_drag();
     let orig_shapes = app.session.selected_shapes_snapshot();
     let pivot = app.session.shapes[0].bounding_box().center();
@@ -6607,7 +6614,7 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
 
     // 3. 自由変形ツールでのスケールハンドルドラッグ (Scale) & 回転ドラッグ (Rotate) の RawInput 検証
     doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let bbox_before = app.session.selection_bounding_box(app.view.zoom).unwrap();
     let br_world = canvas_tool::ScaleHandle::BottomRight.position(bbox_before);
     let br_screen = app.view.world_to_screen(br_world);
@@ -6984,7 +6991,7 @@ fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape
         2.0,
         Color32::RED,
     );
-    app.session.selected_shapes = vec![0];
+    app.session.set_selected_indices(vec![0]);
     let bbox = app.session.selection_bounding_box(1.0).unwrap();
     let top_left = tool_transform::ScaleHandle::TopLeft.position(bbox);
     let hover = tool_transform::compute_transform_hover(&app.session, top_left, 1.0);

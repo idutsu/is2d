@@ -222,7 +222,7 @@ pub(crate) fn start_reshape_drag(
     );
     if alt_held {
         if let Some(shape_idx) = target.shape_idx() {
-            if !host.tab().session.selected_shapes.contains(&shape_idx) {
+            if !host.tab().session.is_shape_selected(shape_idx) {
                 select_single_shape_at(host, pt);
             }
             let tab = host.tab_mut();
@@ -234,7 +234,7 @@ pub(crate) fn start_reshape_drag(
     if matches!(
         target,
         HoverTarget::Vertex { .. } | HoverTarget::Edge { .. }
-    ) && (!host.tab().session.selected_shapes.is_empty()
+    ) && (!host.tab().session.selection.is_empty()
         || host.tab().session.has_unsliced_snapshot())
     {
         clear_selection(host.tab_mut());
@@ -268,7 +268,7 @@ pub(crate) fn start_reshape_drag(
                     Some((contour.segments[prev_idx].p1, contour.segments[seg_idx].p1))
                 })
             {
-                tab.session.selected_shapes.clear();
+                tab.session.selection.clear();
                 tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
                     shape_idx,
                     contour_idx,
@@ -299,7 +299,7 @@ pub(crate) fn start_reshape_drag(
                 let grab_pos = orig_seg.eval(grab_t);
                 // 実カーソル位置 pt と曲線上の最近接点 closest_pos の差、および丸め前 t と grab_t の位置差を合わせた初期オフセット
                 let grab_offset = (closest_pos - pt) + (grab_pos - closest_pos);
-                tab.session.selected_shapes.clear();
+                tab.session.selection.clear();
                 tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
                     shape_idx,
                     contour_idx,
@@ -314,7 +314,7 @@ pub(crate) fn start_reshape_drag(
             }
         }
         HoverTarget::Fill { shape_idx } => {
-            if !host.tab().session.selected_shapes.contains(&shape_idx) {
+            if !host.tab().session.is_shape_selected(shape_idx) {
                 select_single_shape_at(host, pt);
             }
             let tab = host.tab_mut();
@@ -506,7 +506,7 @@ fn handle_reshape_click(host: &mut impl ActionHost, pt: Point, shift_held: bool)
         }
     } else {
         match hit_shape {
-            Some(shape_idx) if tab.session.selected_shapes.contains(&shape_idx) => {
+            Some(shape_idx) if tab.session.is_shape_selected(shape_idx) => {
                 let unit = tab.session.expand_to_group_unit(shape_idx);
                 retain_selection_and_flush_deselected(tab, &unit);
             }

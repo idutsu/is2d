@@ -34,18 +34,14 @@ pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices:
         return;
     }
 
+    tab.session.set_selected_indices(
+        (0..is_keep.len()).filter(|&i| is_keep[i]),
+    );
     if tab.session.selection_modified {
-        let keep_ids: Vec<u64> = tab
-            .session
-            .shapes
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, s)| is_keep[idx].then_some(s.shape_id))
-            .collect();
         let insert_limit = tab.session.scope_insert_index();
         let mut base_canvas = Vec::with_capacity(tab.session.shapes.len());
         let mut deselected_raw_shapes = Vec::new();
-        let mut kept_shapes = Vec::with_capacity(keep_ids.len());
+        let mut kept_shapes = Vec::new();
         let mut trailing_outside = Vec::new();
         for (idx, shape) in tab.session.shapes.drain(..).enumerate() {
             if is_keep[idx] {
@@ -66,19 +62,16 @@ pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices:
         base_canvas.extend(trailing_outside);
         tab.session.shapes = base_canvas;
         tab.session.sort_shapes_by_layer_order(&tab.doc.root);
-        tab.session.restore_selection_by_shape_ids(&keep_ids);
+        tab.session.selection.retain_existing(&tab.session.shapes);
         if merged_any {
             tab.session.clear_unsliced_snapshot();
             sync_shapes_to_timeline(tab);
         }
-        tab.session.selection_modified = !tab.session.selected_shapes.is_empty();
+        tab.session.selection_modified = !tab.session.selection.is_empty();
     } else {
-        tab.session.selected_shapes = (0..is_keep.len()).filter(|&i| is_keep[i]).collect();
-        let any_raw_kept = tab.session.selected_shapes.iter().any(|&i| {
-            tab.session
-                .shapes
-                .get(i)
-                .is_some_and(|s| s.is_raw_at_scope(&tab.session.editing_group_path))
+        let any_raw_kept = tab.session.shapes.iter().any(|s| {
+            tab.session.selection.contains_shape(s)
+                && s.is_raw_at_scope(&tab.session.editing_group_path)
         });
         if !any_raw_kept {
             tab.session.restore_unsliced_preserving_selection();
@@ -116,12 +109,13 @@ pub(crate) fn exit_current_group(tab: &mut Tab) -> bool {
         let Some(exited_gid) = tab.session.editing_group_path.pop() else {
             return false;
         };
-        tab.session.selected_shapes = (0..tab.session.shapes.len())
+        let indices: Vec<usize> = (0..tab.session.shapes.len())
             .filter(|&i| {
                 tab.session.shapes[i].active_group_id_at_scope(&tab.session.editing_group_path)
                     == Some(exited_gid)
             })
             .collect();
+        tab.session.set_selected_indices(indices);
         tab.session.transform_pivot = None;
         return true;
     }
@@ -143,18 +137,13 @@ pub(crate) fn toggle_shape_selection(tab: &mut Tab, shape_idx: usize) {
     if sel_mask.get(shape_idx).copied().unwrap_or(false) {
         let remaining: Vec<usize> = tab
             .session
-            .selected_shapes
-            .iter()
-            .copied()
+            .selected_indices()
+            .into_iter()
             .filter(|i| unit.binary_search(i).is_err())
             .collect();
         retain_selection_and_flush_deselected(tab, &remaining);
     } else {
-        for idx in unit {
-            if !sel_mask.get(idx).copied().unwrap_or(false) {
-                tab.session.selected_shapes.push(idx);
-            }
-        }
+        tab.session.select_shape_indices(unit);
         tab.session.transform_pivot = None;
         sync_timeline_layer_from_canvas_selection(tab);
     }
@@ -173,7 +162,8 @@ pub(crate) fn select_single_shape_at(
         .topmost_shape_at(pt)
         .or_else(|| compute_hover_target(&tab.session, pt, zoom, sub_mode).shape_idx())
     {
-        tab.session.selected_shapes = tab.session.expand_to_group_unit(hit_idx);
+        let unit = tab.session.expand_to_group_unit(hit_idx);
+        tab.session.set_selected_indices(unit);
         focus_active_layer_to_shape(tab, hit_idx);
         sync_timeline_layer_from_canvas_selection(tab);
         true
@@ -269,8 +259,8 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
         }
     }
     tab.session.shapes = new_shapes;
-    tab.session.selected_shapes = new_selected;
-    if tab.session.selected_shapes.is_empty() && !tab.session.selection_modified {
+    tab.session.set_selected_indices(new_selected);
+    if tab.session.selection.is_empty() && !tab.session.selection_modified {
         if let Some(unsliced) = tab.session.take_unsliced_snapshot() {
             tab.session.shapes = unsliced;
         }
@@ -359,10 +349,10 @@ pub(crate) fn compute_hover_target(
     let (is_sel, has_sel) = session.selected_shape_mask();
 
     if sub_mode == SelectSubMode::Reshape && has_sel {
-        for &s_idx in session.selected_shapes.iter().rev() {
-            let Some(shape) = session.shapes.get(s_idx) else {
+        for (s_idx, shape) in session.shapes.iter().enumerate().rev() {
+            if !is_sel[s_idx] {
                 continue;
-            };
+            }
             if !shape.is_in_editing_scope(&session.editing_group_path)
                 || !shape
                     .bounding_box()
@@ -674,18 +664,18 @@ pub(crate) fn apply_move_vertex_to_shape(
 /// 選択中のオブジェクト（生シェイプ・既存グループ問わず）を新しい1つのグループにまとめ、`(new_gid, undo_snapshot)` を返す
 pub(crate) fn prepare_group_selected_shapes(tab: &mut Tab) -> Option<(u64, Vec<FillShape>)> {
     cancel_active_drag(tab);
-    if tab.session.selected_shapes.is_empty() {
+    let sel_indices = tab.session.selected_indices();
+    if sel_indices.is_empty() {
         return None;
     }
     let snapshot = tab.session.take_or_clone_unsliced_snapshot();
     let new_gid = tab.doc.alloc_group_id();
 
-    let target_lid =
-        topmost_layer_id_for_indices(&tab.session, &tab.doc.root, &tab.session.selected_shapes);
+    let target_lid = topmost_layer_id_for_indices(&tab.session, &tab.doc.root, &sel_indices);
 
     let depth = tab.session.editing_group_path.len();
     let mut any_grouped = false;
-    for &sel_idx in &tab.session.selected_shapes {
+    for &sel_idx in &sel_indices {
         if let Some(shape) = tab.session.shapes.get_mut(sel_idx) {
             if shape.is_in_editing_scope(&tab.session.editing_group_path) {
                 shape.layer_id = target_lid;
@@ -719,7 +709,8 @@ pub(crate) fn prepare_ungroup_selected_shapes(tab: &mut Tab) -> Option<Vec<FillS
     let depth = tab.session.editing_group_path.len();
     let mut any_became_raw = false;
     let mut detached_inner_gid_map: Vec<((u64, u64), u64)> = Vec::new();
-    for &sel_idx in &tab.session.selected_shapes {
+    let sel_indices = tab.session.selected_indices();
+    for sel_idx in sel_indices {
         if let Some(shape) = tab.session.shapes.get_mut(sel_idx) {
             if shape.is_in_editing_scope(&tab.session.editing_group_path)
                 && shape.group_path.len() > depth
@@ -730,6 +721,10 @@ pub(crate) fn prepare_ungroup_selected_shapes(tab: &mut Tab) -> Option<Vec<FillS
                     .is_some_and(|b| b.instance_gid == removed_gid)
                 {
                     shape.symbol_instance = None;
+                    tab.session.selection.instances.remove(&removed_gid);
+                    if !shape.exterior.segments.is_empty() {
+                        tab.session.selection.shapes.insert(shape.shape_id);
+                    }
                     for inner_gid in &mut shape.group_path[depth..] {
                         let key = (removed_gid, *inner_gid);
                         let mapped = if let Some(&(_, m)) =
@@ -750,23 +745,10 @@ pub(crate) fn prepare_ungroup_selected_shapes(tab: &mut Tab) -> Option<Vec<FillS
             }
         }
     }
-    let (mut is_sel, _) = tab.session.selected_shape_mask();
-    let mut write_idx = 0;
-    for read_idx in 0..tab.session.shapes.len() {
-        let keep = !tab.session.shapes[read_idx].exterior.segments.is_empty()
-            || tab.session.shapes[read_idx].symbol_instance.is_some();
-        if keep {
-            if write_idx != read_idx {
-                tab.session.shapes.swap(write_idx, read_idx);
-                is_sel[write_idx] = is_sel[read_idx];
-            }
-            write_idx += 1;
-        }
-    }
-    if write_idx < tab.session.shapes.len() {
-        tab.session.shapes.truncate(write_idx);
-        tab.session.selected_shapes = (0..write_idx).filter(|&i| is_sel[i]).collect();
-    }
+    tab.session
+        .shapes
+        .retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
+    tab.session.selection.retain_existing(&tab.session.shapes);
     if any_became_raw {
         tab.session.selection_modified = true;
     }
@@ -777,12 +759,12 @@ pub(crate) fn prepare_ungroup_selected_shapes(tab: &mut Tab) -> Option<Vec<FillS
 /// 選択中のオブジェクトをキャンバスから削除し、変更前スナップショットを返す
 pub(crate) fn prepare_delete_selected_shapes(tab: &mut Tab) -> Option<Vec<FillShape>> {
     cancel_active_drag(tab);
-    if tab.session.selected_shapes.is_empty() {
+    if tab.session.selection.is_empty() {
         return None;
     }
     let (is_sel, any_valid) = tab.session.selected_shape_mask();
     if !any_valid {
-        tab.session.selected_shapes.clear();
+        tab.session.selection.clear();
         tab.session.clear_unsliced_snapshot();
         tab.session.transform_pivot = None;
         return None;
@@ -798,7 +780,7 @@ pub(crate) fn prepare_delete_selected_shapes(tab: &mut Tab) -> Option<Vec<FillSh
     }
     tab.session.shapes = remaining;
     tab.session.selection_modified = false;
-    tab.session.selected_shapes.clear();
+    tab.session.selection.clear();
     tab.session.transform_pivot = None;
     Some(snapshot)
 }

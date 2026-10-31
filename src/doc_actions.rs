@@ -469,7 +469,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         }
         Action::SelectMarquee { p0, p1, additive } => {
             apply_marquee_selection(tab, p0, p1, additive);
-            ApplyResult::Applied(!tab.session.selected_shapes.is_empty())
+            ApplyResult::Applied(!tab.session.selection.is_empty())
         }
         Action::SelectAll => {
             clear_selection(tab);
@@ -482,7 +482,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 .map(|l| l.id)
                 .collect();
             tab.session.select_shapes_in_layers(&editable_lids);
-            ApplyResult::Applied(!tab.session.selected_shapes.is_empty())
+            ApplyResult::Applied(!tab.session.selection.is_empty())
         }
         Action::Deselect => {
             clear_selection(tab);
@@ -501,7 +501,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         } => {
             let min_move = 1.0 / (tab.view.zoom as f64);
             let rolled_back =
-                total_delta.hypot() <= min_move || tab.session.selected_shapes.is_empty();
+                total_delta.hypot() <= min_move || tab.session.selection.is_empty();
             let applied = apply_finish_move_selection_drag(tab, total_delta, undo_snapshot);
             if rolled_back && !orig_selected_ids.is_empty() {
                 tab.session
@@ -658,7 +658,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             changed,
             undo_snapshot,
         } => {
-            if changed && !tab.session.selected_shapes.is_empty() {
+            if changed && !tab.session.selection.is_empty() {
                 ApplyResult::Applied(apply_commit_moved_selection(tab, undo_snapshot, None))
             } else {
                 tab.session.restore_drag_snapshot(undo_snapshot);
@@ -942,33 +942,30 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
     }
 
     // 0. 選択領域が存在する場合：選択中の「生シェイプ」のみにバケツで色を流し込む（グループは無効）
-    if !tab.session.selected_shapes.is_empty() {
-        let clicked_selected_raw = tab.session.selected_shapes.iter().copied().any(|idx| {
-            tab.session.shapes.get(idx).is_some_and(|s| {
-                tab.doc.root.is_layer_editable_by_id(s.layer_id)
-                    && s.is_raw_at_scope(&tab.session.editing_group_path)
-                    && s.contains_point(pt)
-            })
+    if !tab.session.selection.is_empty() {
+        let clicked_selected_raw = tab.session.shapes.iter().any(|s| {
+            tab.session.selection.contains_shape(s)
+                && tab.doc.root.is_layer_editable_by_id(s.layer_id)
+                && s.is_raw_at_scope(&tab.session.editing_group_path)
+                && s.contains_point(pt)
         });
         if clicked_selected_raw {
-            let any_color_diff = tab.session.selected_shapes.iter().copied().any(|idx| {
-                tab.session.shapes.get(idx).is_some_and(|s| {
-                    tab.doc.root.is_layer_editable_by_id(s.layer_id)
-                        && s.is_raw_at_scope(&tab.session.editing_group_path)
-                        && s.color != fill_color
-                })
+            let any_color_diff = tab.session.shapes.iter().any(|s| {
+                tab.session.selection.contains_shape(s)
+                    && tab.doc.root.is_layer_editable_by_id(s.layer_id)
+                    && s.is_raw_at_scope(&tab.session.editing_group_path)
+                    && s.color != fill_color
             });
             if !any_color_diff {
                 return false;
             }
             let snapshot = tab.session.take_or_clone_unsliced_snapshot();
-            for &sel_idx in &tab.session.selected_shapes {
-                if let Some(shape) = tab.session.shapes.get_mut(sel_idx) {
-                    if tab.doc.root.is_layer_editable_by_id(shape.layer_id)
-                        && shape.is_raw_at_scope(&tab.session.editing_group_path)
-                    {
-                        shape.set_color(fill_color);
-                    }
+            for shape in &mut tab.session.shapes {
+                if tab.session.selection.contains_shape(shape)
+                    && tab.doc.root.is_layer_editable_by_id(shape.layer_id)
+                    && shape.is_raw_at_scope(&tab.session.editing_group_path)
+                {
+                    shape.set_color(fill_color);
                 }
             }
             tab.session.selection_modified = true;
@@ -1098,7 +1095,7 @@ fn apply_finish_move_selection_drag(
     undo_snapshot: Vec<FillShape>,
 ) -> bool {
     let min_move = 1.0 / (tab.view.zoom as f64);
-    if total_delta.hypot() > min_move && !tab.session.selected_shapes.is_empty() {
+    if total_delta.hypot() > min_move && !tab.session.selection.is_empty() {
         apply_commit_moved_selection(tab, undo_snapshot, None)
     } else {
         tab.session.restore_drag_snapshot(undo_snapshot);
@@ -1112,7 +1109,7 @@ fn apply_move_selected(
     coalesce: Option<CoalesceKey>,
 ) -> bool {
     cancel_active_drag(tab);
-    if delta == KVec2::ZERO || tab.session.selected_shapes.is_empty() {
+    if delta == KVec2::ZERO || tab.session.selection.is_empty() {
         return false;
     }
     let undo_snapshot = tab.session.take_or_clone_unsliced_snapshot();
@@ -1330,7 +1327,7 @@ pub(crate) fn flush_transform_pivot_to_symbol(tab: &mut Tab) {
 
 fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     cancel_active_drag(tab);
-    if tab.session.selected_shapes.is_empty() {
+    if tab.session.selection.is_empty() {
         return false;
     }
     let undo_snapshot = tab.session.take_or_clone_unsliced_snapshot();
@@ -1827,7 +1824,7 @@ fn apply_set_fps(tab: &mut Tab, next_fps: u32, coalesce: Option<CoalesceKey>) ->
     let next_fps = next_fps.clamp(1, 60);
     if next_fps != tab.doc.root.fps {
         if (tab.history.last_coalesce_key != coalesce || coalesce.is_none())
-            && tab.session.selected_shapes.is_empty()
+            && tab.session.selection.is_empty()
             && !tab.session.has_unsliced_snapshot()
         {
             flush_canvas_before_timeline_op(tab);
