@@ -220,9 +220,6 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
         return false;
     }
 
-    commit_floating(tab);
-    tab.session.selection.clear();
-
     let (parent_frame, parent_active_layer, xform_in_parent) = {
         let tl = tab.active_timeline();
         let curr_f = tl.current_frame;
@@ -266,6 +263,18 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
         };
         (curr_f, act_l, xform)
     };
+
+    let next_world = tab.session.edit_path.world_xform() * xform_in_parent;
+    if !xform_in_parent.as_coeffs().iter().all(|v| v.is_finite())
+        || xform_in_parent.determinant().abs() <= 1e-9
+        || !next_world.as_coeffs().iter().all(|v| v.is_finite())
+        || next_world.determinant().abs() <= 1e-9
+    {
+        return false;
+    }
+
+    commit_floating(tab);
+    tab.session.selection.clear();
 
     tab.view.selected_library_symbol = Some(binding.symbol_id);
     let parent_group_path = std::mem::take(&mut tab.session.editing_group_path);

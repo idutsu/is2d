@@ -1634,41 +1634,4 @@ impl Timeline {
         );
         Some((kf.start_frame, kf.tween_rotate, is_complete))
     }
-
-    /// タイムラインの描画内容・構造（レイヤー構成・表示/ロック・フレーム長・各キーフレームのセル世代とトゥイーン設定）の軽量署名ハッシュを返す
-    pub(crate) fn artwork_revision_signature(&self) -> u64 {
-        let mut h = (self.total_frames as u64)
-            .wrapping_mul(31)
-            .wrapping_add(self.layers.len() as u64);
-        for layer in &self.layers {
-            h = h
-                .wrapping_mul(31)
-                .wrapping_add(layer.id)
-                .wrapping_mul(31)
-                .wrapping_add(u64::from(layer.visible))
-                .wrapping_mul(31)
-                .wrapping_add(u64::from(layer.locked))
-                .wrapping_mul(31)
-                .wrapping_add(layer.frame_count as u64)
-                .wrapping_mul(31)
-                .wrapping_add(layer.keyframes.len() as u64);
-            for kf in &layer.keyframes {
-                let rot_code = match kf.tween_rotate {
-                    TweenRotate::Auto => 0u64,
-                    TweenRotate::Clockwise => 1u64,
-                    TweenRotate::CounterClockwise => 2u64,
-                };
-                h = h
-                    .wrapping_mul(31)
-                    .wrapping_add(kf.start_frame as u64)
-                    .wrapping_mul(31)
-                    .wrapping_add(u64::from(kf.tween))
-                    .wrapping_mul(31)
-                    .wrapping_add(rot_code)
-                    .wrapping_mul(31)
-                    .wrapping_add(kf.cel.revision);
-            }
-        }
-        h
-    }
 }

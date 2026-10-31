@@ -2558,17 +2558,13 @@ impl Tab {
                 let prev_fps = self.doc.root.fps;
                 let mut taken_tl = std::mem::take(&mut self.doc.library[idx].timeline);
                 taken_tl.fps = prev_fps;
-                let prev_sig = taken_tl.artwork_revision_signature();
                 let res = f(&mut taken_tl, &self.doc.library);
                 if taken_tl.fps != prev_fps {
                     self.doc.root.fps = taken_tl.fps;
                 }
-                let changed = taken_tl.artwork_revision_signature() != prev_sig;
                 self.doc.library[idx].timeline = taken_tl;
-                if changed {
-                    self.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
-                    self.doc.bump_revision();
-                }
+                self.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
+                self.doc.bump_revision();
                 self.refresh_scene_base();
                 return res;
             }

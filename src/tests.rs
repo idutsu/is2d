@@ -10269,6 +10269,61 @@ fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_act
     run_and_verify_scene_cache_consistency(&mut app, Action::Redo, "Redo 2");
 }
 
+#[test]
+fn test_collapsed_symbol_instance_blocks_enter_and_timeline_mut_bumps_revision() {
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(200.0, 100.0)],
+            radius: 16.0,
+            color: red,
+        }],
+    );
+    let first = app.scene().get(0).unwrap().clone();
+    app.session.selection.clear();
+    app.session.selection.insert_shape(&first);
+    run(&mut app, &[Action::ConvertToSymbol]);
+
+    let normal_binding = app
+        .scene()
+        .get(0)
+        .unwrap()
+        .symbol_instance
+        .unwrap();
+
+    // 1. 行列式がほぼ0（潰れたインスタンス）には入れないこと
+    let mut collapsed_binding = normal_binding;
+    collapsed_binding.xform = kurbo::Affine::scale_non_uniform(1.0, 0.0);
+    assert!(
+        !symbol_ops::enter_symbol_timeline(&mut app.tabs[app.active], collapsed_binding),
+        "行列式が0の潰れたインスタンスには入れないこと"
+    );
+    assert!(app.session.edit_path.is_empty());
+
+    // 2. 通常のインスタンスに入り、with_active_timeline_mut を呼ぶと必ずリビジョンが上がること
+    assert!(symbol_ops::enter_symbol_timeline(
+        &mut app.tabs[app.active],
+        normal_binding
+    ));
+    assert_eq!(app.session.edit_path.levels.len(), 1);
+    let sym_rev_before = app.doc.library[0].revision;
+    let doc_rev_before = app.doc.revision;
+    app.tabs[app.active].with_active_timeline_mut(|_tl, _| {});
+    assert_ne!(
+        app.doc.library[0].revision, sym_rev_before,
+        "with_active_timeline_mut を呼んだら手書きハッシュ判定なしで必ずシンボルのリビジョンが上がること"
+    );
+    assert_ne!(
+        app.doc.revision, doc_rev_before,
+        "with_active_timeline_mut を呼んだら文書の revision も上がること"
+    );
+}
+
+
 
 
 
