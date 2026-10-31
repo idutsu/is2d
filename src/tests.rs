@@ -9743,6 +9743,535 @@ fn test_stage7c_scene_base_cache_and_edit_layers() {
     let _ = layer_top_id;
 }
 
+#[test]
+fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
+    use crate::doc_actions::Action;
+
+    fn make_rect_shape(x0: f64, y0: f64, x1: f64, y1: f64, color: Color32) -> FillShape {
+        make_stroke(
+            Point::new(x0 + 10.0, (y0 + y1) * 0.5),
+            Point::new(x1 - 10.0, (y0 + y1) * 0.5),
+            8.0,
+            color,
+        )
+        .into_iter()
+        .next()
+        .unwrap()
+    }
+
+    let red = Color32::from_rgb(220, 60, 60);
+    let green = Color32::from_rgb(60, 200, 90);
+    let blue = Color32::from_rgb(60, 120, 220);
+    let yellow = Color32::from_rgb(240, 200, 50);
+
+    // 1. グループ化 (Cmd+G): 選択した図形を元の位置から取り除き、編集対象レイヤー・スコープの最前面に置く
+    {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                make_rect_shape(0.0, 0.0, 40.0, 40.0, red),
+                make_rect_shape(60.0, 0.0, 100.0, 40.0, green),
+                make_rect_shape(120.0, 0.0, 160.0, 40.0, blue),
+            ],
+        );
+        let red_shape = app.scene().get(0).unwrap().clone();
+        app.session.selection.clear();
+        app.session.selection.insert_shape(&red_shape);
+        run(&mut app, &[Action::Group]);
+        let colors: Vec<_> = app.scene().iter().map(|s| s.color).collect();
+        assert_eq!(colors, vec![green, blue, red], "グループ化した図形は最前面に移動すること");
+        assert_eq!(app.scene().get(2).unwrap().group_path.len(), 1);
+    }
+
+    // 2. シンボル変換 (F8) と分解 (Cmd+B): シンボル変換は最前面、分解も最前面に置かれること
+    {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                make_rect_shape(0.0, 0.0, 40.0, 40.0, red),
+                make_rect_shape(60.0, 0.0, 100.0, 40.0, green),
+            ],
+        );
+        let red_shape = app.scene().get(0).unwrap().clone();
+        app.session.selection.clear();
+        app.session.selection.insert_shape(&red_shape);
+        run(&mut app, &[Action::ConvertToSymbol]);
+        let colors: Vec<_> = app.scene().iter().map(|s| s.color).collect();
+        assert_eq!(colors, vec![green, red], "シンボル変換したインスタンスは最前面に移動すること");
+        assert!(app.scene().get(1).unwrap().symbol_instance.is_some());
+
+        // さらにもう1つ黄色の図形を最前面に描き、その下のシンボルを分解すると最前面に来ること
+        run(
+            &mut app,
+            &[Action::PaintStroke {
+                points: vec![Point::new(140.0, 20.0), Point::new(160.0, 20.0)],
+                radius: 8.0,
+                color: yellow,
+            }],
+        );
+        let sym_shape = app
+            .scene()
+            .iter()
+            .find(|s| s.symbol_instance.is_some())
+            .unwrap()
+            .clone();
+        app.session.selection.clear();
+        app.session.selection.insert_shape(&sym_shape);
+        run(&mut app, &[Action::Ungroup]);
+        let colors_after_break: Vec<_> = app.scene().iter().map(|s| s.color).collect();
+        assert_eq!(
+            colors_after_break,
+            vec![green, yellow, red],
+            "シンボル分解で展開された図形は最前面に置かれること"
+        );
+        assert!(app.scene().get(2).unwrap().symbol_instance.is_none());
+    }
+
+    // 3. グループ解除 (Cmd+B): 背面にあったグループを解除すると最前面に展開されること
+    {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                make_rect_shape(0.0, 0.0, 40.0, 40.0, red),
+                make_rect_shape(60.0, 0.0, 100.0, 40.0, green),
+            ],
+        );
+        let red_shape = app.scene().get(0).unwrap().clone();
+        app.session.selection.clear();
+        app.session.selection.insert_shape(&red_shape);
+        run(&mut app, &[Action::Group]);
+        let grouped_shape = app.scene().get(1).unwrap().clone();
+        // さらに青の図形を上に追加してグループを中間（背面側）にする
+        run(
+            &mut app,
+            &[Action::PaintStroke {
+                points: vec![Point::new(140.0, 20.0), Point::new(160.0, 20.0)],
+                radius: 8.0,
+                color: blue,
+            }],
+        );
+        app.session.selection.clear();
+        app.session.selection.insert_shape(&grouped_shape);
+        run(&mut app, &[Action::Ungroup]);
+        let colors: Vec<_> = app.scene().iter().map(|s| s.color).collect();
+        assert_eq!(colors, vec![green, blue, red], "グループ解除された図形は最前面に置かれること");
+        assert!(app.scene().get(2).unwrap().group_path.is_empty());
+    }
+
+    // 4. ペーストと Alt 複製: 最前面に置かれること（Alt 複製は元の図形を元の位置に残す）
+    {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                make_rect_shape(0.0, 0.0, 40.0, 40.0, red),
+                make_rect_shape(60.0, 0.0, 100.0, 40.0, green),
+            ],
+        );
+        let red_shape = app.scene().get(0).unwrap().clone();
+        app.session.selection.clear();
+        app.session.selection.insert_shape(&red_shape);
+        run(&mut app, &[Action::Copy, Action::Paste { in_place: false }]);
+        let colors: Vec<_> = app.scene().iter().map(|s| s.color).collect();
+        assert_eq!(colors, vec![red, green, red], "ペーストした図形は最前面に置かれること");
+        run(&mut app, &[Action::Deselect]);
+
+        // Alt 複製（元の red は index 0 に残したまま、複製された red が最前面 index 2 に置かれること）
+        let mut app_alt = Is2dApp::default();
+        put_cel_shapes(
+            &mut app_alt,
+            0,
+            0,
+            vec![
+                make_rect_shape(0.0, 0.0, 40.0, 40.0, red),
+                make_rect_shape(60.0, 0.0, 100.0, 40.0, green),
+            ],
+        );
+        let first_red = app_alt.scene().get(0).unwrap().clone();
+        app_alt.session.selection.clear();
+        app_alt.session.selection.insert_shape(&first_red);
+        run(
+            &mut app_alt,
+            &[Action::FinishMoveSelectionDrag {
+                total_delta: KVec2::new(0.0, 80.0),
+                alt_duplicate: true,
+            }],
+        );
+        let colors_after_alt: Vec<_> = app_alt.scene().iter().map(|s| s.color).collect();
+        assert_eq!(
+            colors_after_alt,
+            vec![red, green, red],
+            "Alt 複製した図形は元の図形を背面に残したまま最前面に置かれること"
+        );
+    }
+
+    // 5. 重なる2つのシンボル: 下側のシンボルを動かしても重なり順（下側のまま）を保つこと
+    {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                make_rect_shape(0.0, 0.0, 60.0, 60.0, red),
+                make_rect_shape(20.0, 20.0, 80.0, 80.0, blue),
+            ],
+        );
+        let red_shape = app.scene().get(0).unwrap().clone();
+        app.session.selection.clear();
+        app.session.selection.insert_shape(&red_shape);
+        run(&mut app, &[Action::ConvertToSymbol]);
+        // 変換で BottomSym が最前面に来たので、残りの blue もシンボル化して TopSym を最前面にする
+        let blue_shape = app.scene().get(0).unwrap().clone();
+        app.session.selection.clear();
+        app.session.selection.insert_shape(&blue_shape);
+        run(&mut app, &[Action::ConvertToSymbol]);
+        let bottom_sym = app.scene().get(0).unwrap().clone();
+        let bottom_gid = bottom_sym.symbol_instance.as_ref().unwrap().instance_gid;
+        let top_gid = app
+            .scene()
+            .get(1)
+            .unwrap()
+            .symbol_instance
+            .as_ref()
+            .unwrap()
+            .instance_gid;
+        assert_eq!(app.scene().get(0).unwrap().color, red);
+        assert_eq!(app.scene().get(1).unwrap().color, blue);
+
+        // 下側のシンボル (BottomSym) を TopSym とさらに重なる位置へ移動
+        app.session.selection.clear();
+        app.session.selection.insert_shape(&bottom_sym);
+        app.session.begin_move_overlay(false);
+        app.session.translate_move_overlay(KVec2::new(10.0, 10.0));
+        assert_eq!(
+            app.scene().get(0).unwrap().symbol_instance.as_ref().unwrap().instance_gid,
+            bottom_gid,
+            "ドラッグ中の仮表示でも下側シンボルは重なり順を維持すること"
+        );
+        run(
+            &mut app,
+            &[Action::FinishMoveSelectionDrag {
+                total_delta: KVec2::new(10.0, 10.0),
+                alt_duplicate: false,
+            }],
+        );
+        assert_eq!(
+            app.scene().get(0).unwrap().symbol_instance.as_ref().unwrap().instance_gid,
+            bottom_gid,
+            "移動確定後も下側シンボルは上側シンボルの下に留まること"
+        );
+        assert_eq!(
+            app.scene().get(1).unwrap().symbol_instance.as_ref().unwrap().instance_gid,
+            top_gid
+        );
+    }
+
+    // 6. グループを生の図形の上に動かす場合: 重なり順を維持し、生の図形を削らないこと
+    {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                make_rect_shape(0.0, 0.0, 80.0, 80.0, red),
+                make_rect_shape(120.0, 0.0, 160.0, 40.0, green),
+            ],
+        );
+        let orig_red_area = app.scene().get(0).unwrap().exterior.signed_area().abs();
+        let green_shape = app.scene().get(1).unwrap().clone();
+        app.session.selection.clear();
+        app.session.selection.insert_shape(&green_shape);
+        run(&mut app, &[Action::Group]);
+        let grouped_green = app.scene().get(1).unwrap().clone();
+
+        // グループを生の図形 (red) の上に重ねて移動し、選択解除する
+        app.session.selection.clear();
+        app.session.selection.insert_shape(&grouped_green);
+        run(
+            &mut app,
+            &[
+                Action::FinishMoveSelectionDrag {
+                    total_delta: KVec2::new(-100.0, 10.0),
+                    alt_duplicate: false,
+                },
+                Action::Deselect,
+            ],
+        );
+        assert_eq!(app.scene().len(), 2);
+        assert_eq!(app.scene().get(0).unwrap().color, red);
+        assert_eq!(app.scene().get(1).unwrap().color, green);
+        let red_area = app.scene().get(0).unwrap().exterior.signed_area().abs();
+        assert!(
+            (red_area - orig_red_area).abs() < 1.0,
+            "グループを生の図形の上に動かしても生の図形は削られないこと (area={red_area}, orig={orig_red_area})"
+        );
+    }
+}
+
+#[test]
+fn test_stage7_edit_layers_preserves_mesh_cache_without_rebuilding_from_doc() {
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let mut initial_shapes = Vec::with_capacity(2000);
+    for i in 0..2000 {
+        let col = i % 50;
+        let row = i / 50;
+        let x0 = (col as f64) * 30.0;
+        let y0 = (row as f64) * 30.0;
+        let c = Color32::from_rgb(((i * 37) % 200 + 40) as u8, ((i * 73) % 200 + 40) as u8, 150);
+        initial_shapes.extend(make_stroke(
+            Point::new(x0, y0 + 10.0),
+            Point::new(x0 + 20.0, y0 + 10.0),
+            10.0,
+            c,
+        ));
+    }
+    put_cel_shapes(&mut app, 0, 0, initial_shapes);
+
+    // 1. ルートでの 1 ストローク描画後、既存の未変更図形の描画キャッシュ (Arc<Mesh>) がそのまま引き継がれていること
+    let untouched_id = app.scene().get(0).unwrap().shape_id;
+    let mesh_before = std::sync::Arc::clone(app.scene().get(0).unwrap().fill_mesh());
+    let t0 = std::time::Instant::now();
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: vec![Point::new(1600.0, 700.0), Point::new(1640.0, 700.0)],
+            radius: 10.0,
+            color: Color32::WHITE,
+        }],
+    );
+    let root_elapsed = t0.elapsed();
+    let untouched_after = app
+        .scene()
+        .iter()
+        .find(|s| s.shape_id == untouched_id)
+        .unwrap();
+    assert!(
+        std::sync::Arc::ptr_eq(untouched_after.fill_mesh(), &mesh_before),
+        "edit_layers 後に未変更図形の描画キャッシュ (Arc<Mesh>) が複製や再構築なしでそのまま引き継がれること"
+    );
+
+    // 2. 回転したシンボル内部でも同様に描画キャッシュがそのまま引き継がれること
+    let all_shapes: Vec<_> = app.scene().iter().cloned().collect();
+    app.session.selection.clear();
+    for s in &all_shapes {
+        app.session.selection.insert_shape(s);
+    }
+    run(&mut app, &[Action::ConvertToSymbol]);
+    let sym_shape = app.scene().get(0).unwrap().clone();
+    app.session.selection.clear();
+    app.session.selection.insert_shape(&sym_shape);
+    run(
+        &mut app,
+        &[Action::RotateSelection { angle_rad: 0.35 }],
+    );
+    let binding = app
+        .scene()
+        .get(0)
+        .unwrap()
+        .symbol_instance
+        .unwrap();
+    assert!(symbol_ops::enter_symbol_timeline(
+        &mut app.tabs[app.active],
+        binding
+    ));
+    let sym_untouched_id = app.scene().get(0).unwrap().shape_id;
+    let sym_mesh_before = std::sync::Arc::clone(app.scene().get(0).unwrap().fill_mesh());
+    let t1 = std::time::Instant::now();
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: vec![Point::new(1700.0, 800.0), Point::new(1740.0, 800.0)],
+            radius: 10.0,
+            color: Color32::YELLOW,
+        }],
+    );
+    let sym_elapsed = t1.elapsed();
+    let _ = (root_elapsed, sym_elapsed);
+    let sym_untouched_after = app
+        .scene()
+        .iter()
+        .find(|s| s.shape_id == sym_untouched_id)
+        .unwrap();
+    assert!(
+        std::sync::Arc::ptr_eq(sym_untouched_after.fill_mesh(), &sym_mesh_before),
+        "回転したシンボル内の edit_layers 後も未変更図形の Arc<Mesh> がそのまま引き継がれること"
+    );
+}
+
+#[test]
+fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_action() {
+    use crate::doc_actions::Action;
+
+    fn run_and_verify_scene_cache_consistency(app: &mut Is2dApp, action: Action, label: &str) {
+        run(app, &[action]);
+        let before: Vec<FillShape> = app.scene().iter().cloned().collect();
+
+        // 1. rebuild_overlay_from_floating() と、土台のキャッシュを空から作り直す処理を実行
+        app.tabs[app.active].session.base_cache = Default::default();
+        app.tabs[app.active].refresh_scene_base();
+        app.tabs[app.active].session.rebuild_overlay_from_floating();
+
+        let after: Vec<FillShape> = app.scene().iter().cloned().collect();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "[{label}] Scene の図形数がキャッシュ再構築前後で一致すること"
+        );
+        for (idx, (a, b)) in before.iter().zip(after.iter()).enumerate() {
+            assert_eq!(a.color, b.color, "[{label} #{idx}] color mismatch");
+            assert_eq!(a.layer_id, b.layer_id, "[{label} #{idx}] layer_id mismatch");
+            assert_eq!(
+                a.group_path, b.group_path,
+                "[{label} #{idx}] group_path mismatch"
+            );
+            assert_eq!(
+                a.symbol_instance, b.symbol_instance,
+                "[{label} #{idx}] symbol_instance mismatch"
+            );
+            assert_eq!(
+                a.exterior.segments, b.exterior.segments,
+                "[{label} #{idx}] exterior mismatch"
+            );
+            assert_eq!(
+                a.holes.len(),
+                b.holes.len(),
+                "[{label} #{idx}] holes len mismatch"
+            );
+            for (ha, hb) in a.holes.iter().zip(b.holes.iter()) {
+                assert_eq!(ha.segments, hb.segments, "[{label} #{idx}] hole mismatch");
+            }
+            if a.symbol_instance.is_none() {
+                assert_eq!(a.shape_id, b.shape_id, "[{label} #{idx}] shape_id mismatch");
+                assert_eq!(
+                    a.mesh_revision, b.mesh_revision,
+                    "[{label} #{idx}] mesh_revision mismatch"
+                );
+            }
+        }
+    }
+
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 120, 220);
+    let green = Color32::from_rgb(60, 200, 90);
+
+    // ブラシ描画・消しゴム・バケツ塗り
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(50.0, 50.0), Point::new(150.0, 50.0)],
+            radius: 20.0,
+            color: red,
+        },
+        "PaintStroke 1",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(50.0, 120.0), Point::new(150.0, 120.0)],
+            radius: 20.0,
+            color: blue,
+        },
+        "PaintStroke 2",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::EraseStroke {
+            points: vec![Point::new(100.0, 40.0), Point::new(100.0, 60.0)],
+            radius: 6.0,
+        },
+        "EraseStroke",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::BucketFill {
+            pt: Point::new(60.0, 50.0),
+            color: green,
+        },
+        "BucketFill",
+    );
+
+    // 矩形スライス選択 → 移動 → 色変更 → 自由変形 → 選択解除
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::SelectMarquee {
+            p0: Point::new(40.0, 100.0),
+            p1: Point::new(100.0, 140.0),
+            additive: false,
+        },
+        "SelectMarquee slice",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::NudgeSelection {
+            delta: KVec2::new(15.0, -10.0),
+        },
+        "NudgeSelection on sliced floating",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::FlipSelection {
+            flip_x: true,
+            flip_y: false,
+        },
+        "FlipSelection on floating",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::RotateSelection { angle_rad: 0.2 },
+        "RotateSelection on floating",
+    );
+    run_and_verify_scene_cache_consistency(&mut app, Action::Deselect, "Deselect after slice edit");
+
+    // グループ化・グループ解除・シンボル変換・コピー・ペースト・タイムライン操作・Undo/Redo
+    let first_shape = app.scene().get(0).unwrap().clone();
+    app.session.selection.clear();
+    app.session.selection.insert_shape(&first_shape);
+    run_and_verify_scene_cache_consistency(&mut app, Action::Group, "Group");
+    run_and_verify_scene_cache_consistency(&mut app, Action::Ungroup, "Ungroup group");
+
+    let sym_target = app.scene().get(0).unwrap().clone();
+    app.session.selection.clear();
+    app.session.selection.insert_shape(&sym_target);
+    run_and_verify_scene_cache_consistency(&mut app, Action::ConvertToSymbol, "ConvertToSymbol");
+    run_and_verify_scene_cache_consistency(&mut app, Action::Copy, "Copy symbol");
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::Paste { in_place: false },
+        "Paste symbol",
+    );
+    run_and_verify_scene_cache_consistency(&mut app, Action::ExtendFrame, "F5");
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::InsertKeyframe { copy_prev: true },
+        "F6",
+    );
+    run_and_verify_scene_cache_consistency(&mut app, Action::AddLayer, "AddLayer");
+    run_and_verify_scene_cache_consistency(&mut app, Action::Undo, "Undo 1");
+    run_and_verify_scene_cache_consistency(&mut app, Action::Undo, "Undo 2");
+    run_and_verify_scene_cache_consistency(&mut app, Action::Undo, "Undo 3");
+    run_and_verify_scene_cache_consistency(&mut app, Action::Redo, "Redo 1");
+    run_and_verify_scene_cache_consistency(&mut app, Action::Redo, "Redo 2");
+}
+
+
+
+
 
 
 

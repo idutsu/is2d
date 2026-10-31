@@ -1860,6 +1860,8 @@ fn apply_set_symbol_playback(
         }
     });
     if updated {
+        tab.session.base_cache = Default::default();
+        tab.refresh_scene_base();
         reset_session_after_timeline_change(tab);
     }
     updated
