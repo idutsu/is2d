@@ -8334,7 +8334,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     canvas_tool::sync_shapes_to_timeline(&mut app);
     assert!(app.session.floating.is_none());
 
-    // 1. マーキー矩形スライスで Floating(Slice, IDENTITY) が生成され、未変更で選択解除すると base がそのまま復元されること
+    // 1. マーキー矩形スライスで Floating(Slice, modified=false) が生成され、未変更で選択解除すると unsliced がそのまま復元されること
     run(
         &mut app,
         &[Action::SelectMarquee {
@@ -8349,11 +8349,10 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .as_ref()
         .expect("マーキー矩形スライス直後に Floating が生成されること");
     assert_eq!(fl.origin, FloatingOrigin::Slice);
-    assert_eq!(fl.xform, kurbo::Affine::IDENTITY);
+    assert!(!fl.modified);
     assert!(fl.is_unmodified_slice());
     assert!(!fl.needs_merge_commit());
-    assert_eq!(fl.base.len(), 1);
-    assert_eq!(fl.pieces.len(), 1);
+    assert_eq!(fl.unsliced.as_ref().map(Vec::len), Some(1));
 
     run(&mut app, &[Action::Deselect]);
     assert!(app.session.floating.is_none());
@@ -8363,7 +8362,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         "未変更のマーキースライスは選択解除時に破棄され元の1図形に戻ること"
     );
 
-    // 2. マーキースライス後に移動すると Floating.xform が更新され、Action::CommitFloating で1回だけ結合確定されること
+    // 2. マーキースライス後に移動すると Floating.modified が true になり、Action::CommitFloating で1回だけ結合確定されること
     run(
         &mut app,
         &[Action::SelectMarquee {
@@ -8383,7 +8382,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .floating
         .as_ref()
         .expect("スライス断片の移動後も Floating が保持されること");
-    assert_ne!(fl_moved.xform, kurbo::Affine::IDENTITY);
+    assert!(fl_moved.modified);
     assert!(fl_moved.needs_merge_commit());
 
     // 重なっている同色断片が Action::CommitFloating で1図形に Union 結合され、Floating が空になること
@@ -8392,7 +8391,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     assert_eq!(
         app.scene().len(),
         1,
-        "CommitFloating により重なった同色断片が base と結合され1図形になること"
+        "CommitFloating により重なった同色断片が結合され1図形になること"
     );
 
     // 3. ペーストで FloatingOrigin::Paste が生成され、CommitFloating で重なった既存図形と結合されること
@@ -8412,6 +8411,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .as_ref()
         .expect("ペースト直後に Floating が生成されること");
     assert_eq!(fl_paste.origin, FloatingOrigin::Paste);
+    assert!(fl_paste.modified);
     assert!(fl_paste.needs_merge_commit());
     assert_eq!(app.scene().len(), 2);
 
@@ -8421,6 +8421,135 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         app.scene().len(),
         1,
         "インプレースペーストした同色図形が CommitFloating で1図形に結合されること"
+    );
+}
+
+#[test]
+fn test_stage5_anchor_edit_preserved_after_nudge_deselect_and_frame_scrub() {
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let lid = app.doc.root.layers[0].id;
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 120, 220);
+
+    // 上側（y=100）に赤ストローク、下側（y=260）に青ストロークを描画し、フレームを2コマへ延長しておく
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(300.0, 100.0)],
+                radius: 20.0,
+                color: red,
+            },
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 260.0), Point::new(300.0, 260.0)],
+                radius: 20.0,
+                color: blue,
+            },
+            Action::ExtendFrame,
+        ],
+    );
+    assert_eq!(app.scene().len(), 2);
+    let initial_red_segs = app.scene().shapes()[0].exterior.segments.len();
+    let initial_blue_segs = app.scene().shapes()[1].exterior.segments.len();
+
+    // 1. 選択中の図形に対する AddAnchor / DeleteAnchor → Deselect 後も線分数が保たれること
+    run(
+        &mut app,
+        &[
+            Action::SelectSingleAt {
+                pt: Point::new(200.0, 100.0),
+            },
+            Action::NudgeSelection {
+                delta: KVec2::new(10.0, 0.0),
+            },
+            // Nudge 後の赤ストローク下辺 (210, 120) にアンカーを2つ追加し、1つ削除（+2 - 1 = +1）
+            Action::AddAnchor {
+                pt: Point::new(180.0, 120.0),
+            },
+            Action::AddAnchor {
+                pt: Point::new(240.0, 120.0),
+            },
+            Action::DeleteAnchor {
+                pt: Point::new(240.0, 120.0),
+            },
+        ],
+    );
+    assert!(app.session.has_modified_floating());
+    assert_eq!(
+        app.scene().shapes()[1].exterior.segments.len(),
+        initial_red_segs + 1,
+        "選択中図形への AddAnchor(+2) と DeleteAnchor(-1) が反映されていること"
+    );
+
+    run(&mut app, &[Action::Deselect]);
+    let red_after_deselect = app
+        .scene()
+        .shapes()
+        .iter()
+        .find(|s| s.color == red)
+        .unwrap()
+        .exterior
+        .segments
+        .len();
+    assert_eq!(
+        red_after_deselect,
+        initial_red_segs + 1,
+        "Deselect 後も選択中図形に行った AddAnchor / DeleteAnchor の線分数が失われないこと"
+    );
+
+    // 2. 選択していない別の図形に対する AddAnchor / DeleteAnchor → Deselect およびフレーム移動後も線分数が保たれること
+    run(
+        &mut app,
+        &[
+            Action::SelectSingleAt {
+                pt: Point::new(210.0, 100.0),
+            },
+            Action::NudgeSelection {
+                delta: KVec2::new(10.0, 0.0),
+            },
+            // 選択していない青ストローク（y=260, 下辺 y=280）にアンカーを2つ追加し、1つ削除（+2 - 1 = +1）
+            Action::AddAnchor {
+                pt: Point::new(180.0, 280.0),
+            },
+            Action::AddAnchor {
+                pt: Point::new(240.0, 280.0),
+            },
+            Action::DeleteAnchor {
+                pt: Point::new(240.0, 280.0),
+            },
+        ],
+    );
+    assert!(app.session.has_modified_floating());
+    let blue_before_commit = app
+        .scene()
+        .shapes()
+        .iter()
+        .find(|s| s.color == blue)
+        .unwrap()
+        .exterior
+        .segments
+        .len();
+    assert_eq!(blue_before_commit, initial_blue_segs + 1);
+
+    // フレーム移動（ScrubRulerToFrame）で確定されたあとも線分数が保たれること
+    run(&mut app, &[Action::ScrubRulerToFrame { frame: 1 }]);
+    let summary_after_scrub = cel_summary(&app.doc, lid, 1);
+    assert_eq!(
+        summary_after_scrub.total_segments,
+        (initial_red_segs + 1) + (initial_blue_segs + 1),
+        "フレーム移動後も選択図形・非選択図形双方のアンカー編集後の線分数が保たれていること"
+    );
+
+    // Undo / Redo でもアンカー編集結果が失われないこと
+    app.undo();
+    app.redo();
+    let summary_after_redo = cel_summary(&app.doc, lid, 0);
+    assert_eq!(
+        summary_after_redo.total_segments,
+        (initial_red_segs + 1) + (initial_blue_segs + 1),
+        "Undo -> Redo 後もアンカー追加・削除後の線分数が維持されること"
     );
 }
 

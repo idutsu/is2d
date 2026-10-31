@@ -514,9 +514,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             }
             ApplyResult::Applied(applied)
         }
-        Action::CommitMovedSelection { undo_snapshot } => ApplyResult::Applied(
-            apply_commit_moved_selection(tab, undo_snapshot, Affine::IDENTITY, None),
-        ),
+        Action::CommitMovedSelection { undo_snapshot } => {
+            ApplyResult::Applied(apply_commit_moved_selection(tab, undo_snapshot, None))
+        }
         Action::DeleteSelection => {
             if let Some(snapshot) = prepare_delete_selected_shapes(tab) {
                 commit_canvas_mutation(tab, snapshot);
@@ -685,12 +685,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             undo_snapshot,
         } => {
             if changed && !tab.session.selection.is_empty() {
-                ApplyResult::Applied(apply_commit_moved_selection(
-                    tab,
-                    undo_snapshot,
-                    Affine::IDENTITY,
-                    None,
-                ))
+                ApplyResult::Applied(apply_commit_moved_selection(tab, undo_snapshot, None))
             } else {
                 tab.session.restore_drag_snapshot(undo_snapshot);
                 ApplyResult::Applied(false)
@@ -1000,8 +995,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                     shape.set_color(fill_color);
                 }
             }
-            tab.session
-                .update_floating_from_current_selection(FloatingOrigin::Move, Affine::IDENTITY);
+            tab.session.mark_floating_modified(FloatingOrigin::Move);
             commit_canvas_mutation(tab, snapshot);
             return true;
         }
@@ -1118,10 +1112,9 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
 fn apply_commit_moved_selection(
     tab: &mut Tab,
     undo_snapshot: Vec<FillShape>,
-    delta_xform: Affine,
     coalesce: Option<CoalesceKey>,
 ) -> bool {
-    if !prepare_moved_selection(tab, &undo_snapshot, delta_xform) {
+    if !prepare_moved_selection(tab, &undo_snapshot) {
         return false;
     }
     commit_canvas_mutation_with_coalesce(tab, undo_snapshot, coalesce);
@@ -1135,7 +1128,7 @@ fn apply_finish_move_selection_drag(
 ) -> bool {
     let min_move = 1.0 / (tab.view.zoom as f64);
     if total_delta.hypot() > min_move && !tab.session.selection.is_empty() {
-        apply_commit_moved_selection(tab, undo_snapshot, Affine::translate(total_delta), None)
+        apply_commit_moved_selection(tab, undo_snapshot, None)
     } else {
         tab.session.restore_drag_snapshot(undo_snapshot);
         false
@@ -1153,7 +1146,7 @@ fn apply_move_selected(
     }
     let undo_snapshot = tab.session.take_or_clone_unsliced_snapshot();
     tab.session.translate_selected(delta);
-    apply_commit_moved_selection(tab, undo_snapshot, Affine::translate(delta), coalesce)
+    apply_commit_moved_selection(tab, undo_snapshot, coalesce)
 }
 
 fn apply_deform_shape(
@@ -1377,7 +1370,7 @@ fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     flush_transform_pivot_to_symbol(tab);
     let any_transformed = tab.session.transform_selected(affine);
     if any_transformed {
-        apply_commit_moved_selection(tab, undo_snapshot, affine, None);
+        apply_commit_moved_selection(tab, undo_snapshot, None);
     }
     any_transformed
 }

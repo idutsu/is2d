@@ -3,15 +3,12 @@ use std::collections::HashSet;
 use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
-    Floating, FloatingOrigin, HoverTarget, Scene, SelectSubMode, Session, Tab, cancel_active_drag,
-    clear_selection, focus_active_layer_to_shape, prepare_moved_selection,
-    sync_shapes_to_timeline, sync_timeline_layer_from_canvas_selection,
-    topmost_layer_id_for_indices,
+    FloatingOrigin, HoverTarget, Scene, SelectSubMode, Session, Tab, cancel_active_drag,
+    clear_selection, commit_floating_except, focus_active_layer_to_shape, prepare_moved_selection,
+    sync_timeline_layer_from_canvas_selection, topmost_layer_id_for_indices,
 };
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
-use crate::vector_boolean::{
-    BoolOp, boolean_operation, merge_shapes_into_canvas, slice_shape_with_marquee_rect,
-};
+use crate::vector_boolean::{BoolOp, boolean_operation, slice_shape_with_marquee_rect};
 use crate::vector_engine::{FillShape, make_marquee_rect_shape, normalize_vec, rects_overlap};
 
 /// 現在の選択図形のうち `keep_indices` のみを選択に残し、選択から外れた変更済み生シェイプのみをキャンバスへ結合・切り抜き確定する
@@ -22,70 +19,15 @@ pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices:
         clear_selection(tab);
         return;
     }
-    let mut is_keep = vec![false; tab.session.shapes.len()];
-    let mut any_keep = false;
-    for &idx in keep_indices {
-        if idx < is_keep.len() && is_sel[idx] {
-            is_keep[idx] = true;
-            any_keep = true;
-        }
-    }
+    let any_keep = keep_indices
+        .iter()
+        .any(|&idx| idx < is_sel.len() && is_sel[idx]);
     if !any_keep {
         clear_selection(tab);
         return;
     }
 
-    tab.session.set_selected_indices(
-        (0..is_keep.len()).filter(|&i| is_keep[i]),
-    );
-    if tab.session.has_modified_floating() {
-        let insert_limit = tab.session.scope_insert_index();
-        let mut base_canvas = Vec::with_capacity(tab.session.shapes.len());
-        let mut deselected_raw_shapes = Vec::new();
-        let mut kept_shapes = Vec::new();
-        let mut trailing_outside = Vec::new();
-        for (idx, shape) in tab.session.shapes.drain(..).enumerate() {
-            if is_keep[idx] {
-                kept_shapes.push(shape);
-            } else if is_sel[idx] && shape.is_raw_at_scope(&tab.session.editing_group_path) {
-                deselected_raw_shapes.push(shape);
-            } else if idx < insert_limit {
-                base_canvas.push(shape);
-            } else {
-                trailing_outside.push(shape);
-            }
-        }
-        let merged_any = !deselected_raw_shapes.is_empty();
-        if merged_any {
-            merge_shapes_into_canvas(&mut base_canvas, deselected_raw_shapes);
-        }
-        base_canvas.extend(kept_shapes);
-        base_canvas.extend(trailing_outside);
-        tab.session.shapes = base_canvas;
-        tab.session.sort_shapes_by_layer_order(&tab.doc.root);
-        tab.session.selection.retain_existing(&tab.session.shapes);
-        if merged_any {
-            tab.session.clear_unsliced_snapshot();
-            sync_shapes_to_timeline(tab);
-        }
-        tab.session.update_floating_from_current_selection(
-            FloatingOrigin::Move,
-            kurbo::Affine::IDENTITY,
-        );
-    } else {
-        let any_raw_kept = tab.session.shapes.iter().any(|s| {
-            tab.session.selection.contains_shape(s)
-                && s.is_raw_at_scope(&tab.session.editing_group_path)
-        });
-        if !any_raw_kept {
-            tab.session.restore_unsliced_preserving_selection();
-        } else if tab.session.has_unmodified_slice() {
-            let pieces = tab.session.selected_raw_shapes_in_scope();
-            if let Some(f) = &mut tab.session.floating {
-                f.pieces = pieces;
-            }
-        }
-    }
+    commit_floating_except(tab, keep_indices);
     tab.session.transform_pivot = None;
     sync_timeline_layer_from_canvas_selection(tab);
 }
@@ -224,7 +166,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
         &clip_rect_shape,
     );
     let pre_slice_snapshot =
-        (tab.session.floating.is_none()).then(|| tab.session.shapes.clone());
+        (!tab.session.has_unsliced_snapshot()).then(|| tab.session.shapes.clone());
 
     let mut any_sliced = false;
     let mut new_shapes = Vec::with_capacity(tab.session.shapes.len() + 4);
@@ -276,31 +218,16 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
         }
     }
 
+    if any_sliced && !tab.session.has_unsliced_snapshot() {
+        if let Some(snap) = pre_slice_snapshot {
+            tab.session.restore_unsliced_snapshot(snap);
+        }
+    }
     tab.session.shapes = new_shapes;
     tab.session.set_selected_indices(new_selected);
-    if tab.session.has_modified_floating() {
-        tab.session.update_floating_from_current_selection(
-            FloatingOrigin::Move,
-            kurbo::Affine::IDENTITY,
-        );
-    } else if any_sliced || tab.session.has_unmodified_slice() {
-        let base_opt = tab
-            .session
-            .take_unsliced_snapshot()
-            .or(pre_slice_snapshot);
-        if let Some(base) = base_opt {
-            if tab.session.selection.is_empty() && !tab.session.has_modified_floating() {
-                tab.session.shapes = base;
-                tab.session.floating = None;
-            } else {
-                let pieces = tab.session.selected_raw_shapes_in_scope();
-                tab.session.floating = Some(Floating {
-                    base,
-                    pieces,
-                    xform: kurbo::Affine::IDENTITY,
-                    origin: FloatingOrigin::Slice,
-                });
-            }
+    if tab.session.selection.is_empty() && !tab.session.has_modified_floating() {
+        if let Some(unsliced) = tab.session.take_unsliced_snapshot() {
+            tab.session.shapes = unsliced;
         }
     }
     tab.session.transform_pivot = None;
@@ -735,7 +662,7 @@ pub(crate) fn prepare_group_selected_shapes(tab: &mut Tab) -> Option<(u64, Vec<F
     if let Some(l_idx) = tab.doc.root.layer_index_by_id(target_lid) {
         tab.doc.root.active_layer = l_idx;
     }
-    let _ = prepare_moved_selection(tab, &snapshot, kurbo::Affine::IDENTITY);
+    let _ = prepare_moved_selection(tab, &snapshot);
     tab.session.floating = None;
     tab.session.transform_pivot = None;
     Some((new_gid, snapshot))
@@ -796,12 +723,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(tab: &mut Tab) -> Option<Vec<FillS
         .retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
     tab.session.selection.retain_existing(&tab.session.shapes);
     if any_became_raw {
-        tab.session.update_floating_from_current_selection(
-            FloatingOrigin::Move,
-            kurbo::Affine::IDENTITY,
-        );
-    } else {
-        tab.session.floating = None;
+        tab.session.mark_floating_modified(FloatingOrigin::Move);
     }
     tab.session.transform_pivot = None;
     Some(snapshot)

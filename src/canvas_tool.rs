@@ -978,30 +978,29 @@ pub(crate) enum FloatingOrigin {
 }
 
 /// 選択して移動・スライス・ペースト・Alt複製中の浮き上がり図形状態
-/// （未変形のスライスは解除時に破棄して `base` を復元し、変更・確定時は `Action::CommitFloating` で `base` へ結合して書き込む）
+/// （図形の複製は持たず、未変形スライス復元用の `unsliced` と変更済み目印 `modified` のみを保持する）
 #[derive(Clone, Debug)]
 pub(crate) struct Floating {
-    /// スライス前または浮き上がり前のベース図形列
-    pub(crate) base: Vec<FillShape>,
-    /// 現在浮き上がっている（確定時にベース図形へ結合・切り抜きされる）生図形群
-    pub(crate) pieces: Vec<FillShape>,
-    /// 持ち上げ時点からの累積アフィン変換
-    pub(crate) xform: kurbo::Affine,
     /// この Floating が作られた契機
     pub(crate) origin: FloatingOrigin,
+    /// 未変形のスライスを元に戻すための、切り出す前の図形だけ
+    pub(crate) unsliced: Option<Vec<FillShape>>,
+    /// 確定時に選択中の生図形をベース図形へ結合（Merge Drawing）する必要があるか
+    pub(crate) modified: bool,
 }
 
 impl Floating {
     /// マーキー矩形スライス直後でまだ一度も移動・変形されていない状態かを返す
+    #[cfg(test)]
     #[inline]
     pub(crate) fn is_unmodified_slice(&self) -> bool {
-        self.origin == FloatingOrigin::Slice && self.xform == kurbo::Affine::IDENTITY
+        self.origin == FloatingOrigin::Slice && !self.modified && self.unsliced.is_some()
     }
 
-    /// 確定時に `pieces` をベース図形へ結合（Merge Drawing）する必要があるかを返す
+    /// 確定時に選択中の生図形をベース図形へ結合（Merge Drawing）する必要があるかを返す
     #[inline]
     pub(crate) fn needs_merge_commit(&self) -> bool {
-        !self.is_unmodified_slice() && !self.pieces.is_empty()
+        self.modified
     }
 }
 
@@ -1032,14 +1031,6 @@ impl Session {
         &self.loaded_signatures
     }
 
-    /// 未変形のマーキースライス（`FloatingOrigin::Slice` かつ `xform == IDENTITY`）が保持されているかを返す
-    #[inline]
-    pub(crate) fn has_unmodified_slice(&self) -> bool {
-        self.floating
-            .as_ref()
-            .is_some_and(Floating::is_unmodified_slice)
-    }
-
     /// 確定時に結合が必要な変更済み `Floating` が保持されているかを返す
     #[inline]
     pub(crate) fn has_modified_floating(&self) -> bool {
@@ -1048,51 +1039,63 @@ impl Session {
             .is_some_and(Floating::needs_merge_commit)
     }
 
-    /// 現在選択されている編集スコープ直下の生図形群（`Floating::pieces` 相当）を抽出する
-    pub(crate) fn selected_raw_shapes_in_scope(&self) -> Vec<FillShape> {
-        self.shapes
-            .iter()
-            .filter(|s| {
-                self.selection.contains_shape(s) && s.is_raw_at_scope(&self.editing_group_path)
-            })
-            .cloned()
-            .collect()
+    /// `Floating` を「変更済み（確定時に結合が必要）」としてマークする
+    #[inline]
+    pub(crate) fn mark_floating_modified(&mut self, origin: FloatingOrigin) {
+        if let Some(f) = &mut self.floating {
+            f.modified = true;
+            if f.origin == FloatingOrigin::Slice && f.unsliced.is_none() {
+                f.origin = origin;
+            }
+        } else {
+            self.floating = Some(Floating {
+                origin,
+                unsliced: None,
+                modified: true,
+            });
+        }
     }
 
     /// 矩形スライス前の未スライス状態スナップショットが保持されているかを返す
     #[inline]
     pub(crate) fn has_unsliced_snapshot(&self) -> bool {
-        self.has_unmodified_slice()
+        self.floating
+            .as_ref()
+            .is_some_and(|f| f.unsliced.is_some())
     }
 
     /// 矩形スライス前の未スライス状態スナップショットを取り出す
     #[inline]
     pub(crate) fn take_unsliced_snapshot(&mut self) -> Option<Vec<FillShape>> {
-        if self.has_unmodified_slice() {
-            self.floating.take().map(|f| f.base)
-        } else {
-            None
+        let snap = self.floating.as_mut().and_then(|f| f.unsliced.take());
+        if self
+            .floating
+            .as_ref()
+            .is_some_and(|f| !f.modified && f.unsliced.is_none())
+        {
+            self.floating = None;
         }
+        snap
     }
 
     /// 矩形スライス前の未スライス状態スナップショットを保存・復元する
     #[inline]
     pub(crate) fn restore_unsliced_snapshot(&mut self, snapshot: Vec<FillShape>) {
-        let pieces = self.selected_raw_shapes_in_scope();
-        self.floating = Some(Floating {
-            base: snapshot,
-            pieces,
-            xform: kurbo::Affine::IDENTITY,
-            origin: FloatingOrigin::Slice,
-        });
+        if let Some(f) = &mut self.floating {
+            f.unsliced = Some(snapshot);
+        } else {
+            self.floating = Some(Floating {
+                origin: FloatingOrigin::Slice,
+                unsliced: Some(snapshot),
+                modified: false,
+            });
+        }
     }
 
     /// 矩形スライス前の未スライス状態スナップショットを破棄する
     #[inline]
     pub(crate) fn clear_unsliced_snapshot(&mut self) {
-        if self.has_unmodified_slice() {
-            self.floating = None;
-        }
+        let _ = self.take_unsliced_snapshot();
     }
 
     /// 現在選択されている図形のキャンバスインデックス列（昇順）を返す
@@ -1182,17 +1185,10 @@ impl Session {
         let len_changed = self.shapes.len() != snapshot.len();
         self.shapes = snapshot;
         self.selection.retain_existing(&self.shapes);
-        if self.has_modified_floating() {
-            if len_changed {
-                self.floating = None;
-            } else {
-                self.update_floating_from_current_selection(
-                    FloatingOrigin::Move,
-                    kurbo::Affine::IDENTITY,
-                );
-            }
+        if len_changed {
+            self.floating = None;
         }
-        if !self.has_unmodified_slice() {
+        if !self.has_unsliced_snapshot() {
             self.record_loaded_signatures();
         }
         len_changed
@@ -1299,43 +1295,6 @@ impl Session {
         self.loaded_signatures.clear();
         self.loaded_signatures
             .extend(self.shapes.iter().map(LoadedShapeSig::from_shape));
-    }
-
-    /// 現在の選択中生シェイプ群とベース図形列から `self.floating` を構築・更新する
-    pub(crate) fn update_floating_from_current_selection(
-        &mut self,
-        origin: FloatingOrigin,
-        delta_xform: kurbo::Affine,
-    ) {
-        let mut base = Vec::with_capacity(self.shapes.len());
-        let mut pieces = Vec::new();
-        for shape in &self.shapes {
-            if self.selection.contains_shape(shape)
-                && shape.is_raw_at_scope(&self.editing_group_path)
-            {
-                pieces.push(shape.clone());
-            } else {
-                base.push(shape.clone());
-            }
-        }
-        if pieces.is_empty() {
-            self.floating = None;
-            return;
-        }
-        let next_xform = match &self.floating {
-            Some(prev) => delta_xform * prev.xform,
-            None => delta_xform,
-        };
-        let next_origin = match &self.floating {
-            Some(prev) if prev.origin != FloatingOrigin::Slice => prev.origin,
-            _ => origin,
-        };
-        self.floating = Some(Floating {
-            base,
-            pieces,
-            xform: next_xform,
-            origin: next_origin,
-        });
     }
 
     /// タイムラインから読み込んだ図形列で `self.shapes` を置き換える（既存シェイプと輪郭・色が一致するものは描画キャッシュを引き継ぐ）
@@ -2148,28 +2107,99 @@ pub(crate) fn draw_registration_cross(
     );
 }
 
-/// `tab.session.floating` を確定（未変形スライスなら `base` を復元して破棄、変更済みなら `pieces` を結合してタイムラインへ書き込み）する
-pub(crate) fn commit_floating(tab: &mut Tab) -> bool {
-    let Some(mut floating) = tab.session.floating.take() else {
-        return false;
-    };
-    if floating.is_unmodified_slice() {
-        tab.session.salvage_caches_into(&mut floating.base);
-        tab.session.shapes = floating.base;
-        tab.session.selection.retain_existing(&tab.session.shapes);
-        false
-    } else if floating.needs_merge_commit() {
-        let mut base_canvas = floating.base;
-        tab.session.salvage_caches_into(&mut base_canvas);
-        merge_shapes_into_canvas(&mut base_canvas, floating.pieces);
+/// `tab.session.floating` のうち `keep_indices` に含まれない選択図形を確定
+/// （未変形スライスなら `unsliced` を復元して破棄、変更済みならその時点の `session.shapes` から選択中生シェイプと残りを分けて結合しタイムラインへ書き込み）する
+pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> bool {
+    let (is_sel, any_valid) = tab.session.selected_shape_mask();
+    let mut is_keep = vec![false; tab.session.shapes.len()];
+    let mut any_keep = false;
+    if any_valid {
+        for &idx in keep_indices {
+            if idx < is_keep.len() && is_sel[idx] {
+                is_keep[idx] = true;
+                any_keep = true;
+            }
+        }
+    }
+
+    if !any_keep {
+        let restored = tab.session.restore_unsliced_preserving_selection();
+        if tab.session.has_modified_floating() && !tab.session.selection.is_empty() {
+            let (is_sel_now, _) = tab.session.selected_shape_mask();
+            let mut base_canvas = Vec::with_capacity(tab.session.shapes.len());
+            let mut modified_raw_shapes = Vec::new();
+            for (idx, shape) in tab.session.shapes.drain(..).enumerate() {
+                if is_sel_now[idx] && shape.is_raw_at_scope(&tab.session.editing_group_path) {
+                    modified_raw_shapes.push(shape);
+                } else {
+                    base_canvas.push(shape);
+                }
+            }
+            merge_shapes_into_canvas(&mut base_canvas, modified_raw_shapes);
+            tab.session.shapes = base_canvas;
+            tab.session.sort_shapes_by_layer_order(&tab.doc.root);
+            tab.session.selection.retain_existing(&tab.session.shapes);
+            tab.session.floating = None;
+            sync_shapes_to_timeline(tab);
+            return true;
+        }
+        tab.session.floating = None;
+        return restored;
+    }
+
+    tab.session
+        .set_selected_indices((0..is_keep.len()).filter(|&i| is_keep[i]));
+    if tab.session.has_modified_floating() {
+        let insert_limit = tab.session.scope_insert_index();
+        let mut base_canvas = Vec::with_capacity(tab.session.shapes.len());
+        let mut deselected_raw_shapes = Vec::new();
+        let mut kept_shapes = Vec::new();
+        let mut trailing_outside = Vec::new();
+        for (idx, shape) in tab.session.shapes.drain(..).enumerate() {
+            if is_keep[idx] {
+                kept_shapes.push(shape);
+            } else if is_sel[idx] && shape.is_raw_at_scope(&tab.session.editing_group_path) {
+                deselected_raw_shapes.push(shape);
+            } else if idx < insert_limit {
+                base_canvas.push(shape);
+            } else {
+                trailing_outside.push(shape);
+            }
+        }
+        let merged_any = !deselected_raw_shapes.is_empty();
+        if merged_any {
+            merge_shapes_into_canvas(&mut base_canvas, deselected_raw_shapes);
+        }
+        base_canvas.extend(kept_shapes);
+        base_canvas.extend(trailing_outside);
         tab.session.shapes = base_canvas;
         tab.session.sort_shapes_by_layer_order(&tab.doc.root);
         tab.session.selection.retain_existing(&tab.session.shapes);
-        sync_shapes_to_timeline(tab);
-        true
+        if merged_any {
+            tab.session.clear_unsliced_snapshot();
+            sync_shapes_to_timeline(tab);
+        }
+        if tab.session.selection.is_empty() {
+            tab.session.floating = None;
+        }
+        merged_any
     } else {
-        false
+        let any_raw_kept = tab.session.shapes.iter().any(|s| {
+            tab.session.selection.contains_shape(s)
+                && s.is_raw_at_scope(&tab.session.editing_group_path)
+        });
+        if !any_raw_kept {
+            tab.session.restore_unsliced_preserving_selection()
+        } else {
+            false
+        }
     }
+}
+
+/// `tab.session.floating` をすべて確定する
+#[inline]
+pub(crate) fn commit_floating(tab: &mut Tab) -> bool {
+    commit_floating_except(tab, &[])
 }
 
 pub(crate) fn clear_selection(tab: &mut Tab) {
@@ -2197,8 +2227,11 @@ pub(crate) fn insert_and_select_shapes_in_scope(
         .splice(insert_pos..insert_pos, new_shapes);
     tab.session.sort_shapes_by_layer_order(&tab.doc.root);
     if let Some(origin) = floating_origin {
-        tab.session
-            .update_floating_from_current_selection(origin, kurbo::Affine::IDENTITY);
+        tab.session.floating = Some(Floating {
+            origin,
+            unsliced: None,
+            modified: origin != FloatingOrigin::AltDuplicate,
+        });
     } else {
         tab.session.floating = None;
     }
@@ -2244,12 +2277,8 @@ pub(crate) fn reorder_selected_to_scope_front(tab: &mut Tab) -> bool {
     true
 }
 
-/// 移動・変形された選択シェイプの拡大時キャッシュ再構築とスコープ内最前面整列・`Floating` の更新を行う
-pub(crate) fn prepare_moved_selection(
-    tab: &mut Tab,
-    undo_snapshot: &[FillShape],
-    delta_xform: kurbo::Affine,
-) -> bool {
+/// 移動・変形された選択シェイプの拡大時キャッシュ再構築とスコープ内最前面整列・`Floating` の変更済みマーキングを行う
+pub(crate) fn prepare_moved_selection(tab: &mut Tab, undo_snapshot: &[FillShape]) -> bool {
     let sel_indices = tab.session.selected_indices();
     for sel_idx in sel_indices {
         let Some(shape) = tab.session.shapes.get_mut(sel_idx) else {
@@ -2283,7 +2312,6 @@ pub(crate) fn prepare_moved_selection(
     if !reorder_selected_to_scope_front(tab) {
         return false;
     }
-    tab.session
-        .update_floating_from_current_selection(FloatingOrigin::Move, delta_xform);
+    tab.session.mark_floating_modified(FloatingOrigin::Move);
     true
 }
