@@ -710,32 +710,32 @@ impl SymbolEditSession {
     }
 }
 
-/// シンボルライブラリ・シンボル編集階層スタック・グループ/シンボルID採番カウンタを保持する構造体
+/// 保存対象の文書状態（唯一の正解データ：ルートタイムライン・シンボルライブラリ・ステージサイズ・ID採番・リビジョン）
 #[derive(Clone, Debug)]
-pub(crate) struct SymbolManager {
+pub(crate) struct Document {
+    pub(crate) root: Timeline,
     pub(crate) library: Vec<SymbolDef>,
+    pub(crate) stage_size: Vec2,
     pub(crate) next_symbol_id: u64,
-    pub(crate) selected_library_symbol: Option<u64>,
-    pub(crate) edit_stack: Vec<SymbolEditSession>,
     pub(crate) next_group_id: u64,
-    /// `library` または `edit_stack` の内容変更世代番号（Undo履歴の `Arc` CoW 構造共有用）
+    /// `library` または編集スタックの内容変更世代番号（Undo履歴の `Arc` CoW 構造共有用）
     pub(crate) revision: u64,
 }
 
-impl Default for SymbolManager {
+impl Default for Document {
     fn default() -> Self {
         Self {
+            root: Timeline::default(),
             library: Vec::new(),
+            stage_size: Vec2::new(800.0, 450.0),
             next_symbol_id: 1,
-            selected_library_symbol: None,
-            edit_stack: Vec::new(),
             next_group_id: 1,
             revision: 0,
         }
     }
 }
 
-impl SymbolManager {
+impl Document {
     /// シンボルライブラリまたは編集スタックの世代番号 `revision` を一意な値へ更新する
     pub(crate) fn bump_revision(&mut self) {
         self.revision = crate::vector_engine::next_mesh_revision();
@@ -765,7 +765,6 @@ impl SymbolManager {
         }
         let sym_def = SymbolDef::new(sym_id, format!("Symbol {name_num}"), local_shapes);
         self.library.push(sym_def);
-        self.selected_library_symbol = Some(sym_id);
         self.bump_revision();
         sym_id
     }
@@ -816,10 +815,13 @@ impl SymbolManager {
 
     /// 現在の編集コンテキスト（ルートシーンまたはシンボルインプレース編集スタック）に
     /// `candidate_child_id` のシンボルインスタンスを安全に配置可能か（循環参照を起こさないか）を返す
-    pub(crate) fn can_place_symbol_in_current_context(&self, candidate_child_id: u64) -> bool {
+    pub(crate) fn can_place_symbol_in_current_context(
+        &self,
+        edit_stack: &[SymbolEditSession],
+        candidate_child_id: u64,
+    ) -> bool {
         self.find_symbol(candidate_child_id).is_some()
-            && self
-                .edit_stack
+            && edit_stack
                 .iter()
                 .all(|sess| !self.would_create_symbol_cycle(sess.symbol_id, candidate_child_id))
     }
@@ -838,25 +840,10 @@ impl SymbolManager {
         true
     }
 
-    /// ライブラリで選択中のシンボルIDが有効か検証し、未選択または削除済みの場合は先頭シンボルを選択する
-    pub(crate) fn ensure_valid_selection(&mut self) {
-        if self
-            .selected_library_symbol
-            .is_none_or(|id| !self.library.iter().any(|s| s.id == id))
-        {
-            self.selected_library_symbol = self.library.first().map(|s| s.id);
-        }
-    }
-
-    /// Undo / Redo スナップショット復元後に、ライブラリ選択状態の整合性を整える
-    pub(crate) fn sync_after_restore(&mut self) {
-        self.ensure_valid_selection();
-    }
-
-    /// シンボル内部タイムライン編集中に、現在の `working_tl`（シンボルタイムライン）の状態を
+    /// シンボル内部タイムライン編集中に、現在の `self.root`（作業用シンボルタイムライン）の状態を
     /// ライブラリ定義（`SymbolDef`）へ同期する（`backdrop_cel` は正規化保持のため再構築不要）
-    pub(crate) fn sync_active_edit(&mut self, working_tl: &Timeline) {
-        let Some((sym_id, inv_xform)) = self.edit_stack.last().map(|session| {
+    pub(crate) fn sync_active_edit(&mut self, edit_stack: &mut [SymbolEditSession]) {
+        let Some((sym_id, inv_xform)) = edit_stack.last().map(|session| {
             let inv = if session.instance_xform.determinant().abs() > 1e-9 {
                 session.instance_xform.inverse()
             } else {
@@ -867,15 +854,14 @@ impl SymbolManager {
             return;
         };
 
-        let mut cache = self
-            .edit_stack
+        let mut cache = edit_stack
             .last_mut()
             .map(|s| std::mem::take(&mut s.stage_to_local_cache))
             .unwrap_or_default();
-        if let Some(sym_def) = self.find_symbol_mut(sym_id) {
-            sym_def.update_from_working_timeline(working_tl, inv_xform, &mut cache);
+        if let Some(sym_def) = self.library.iter_mut().find(|s| s.id == sym_id) {
+            sym_def.update_from_working_timeline(&self.root, inv_xform, &mut cache);
         }
-        if let Some(session) = self.edit_stack.last_mut() {
+        if let Some(session) = edit_stack.last_mut() {
             session.stage_to_local_cache = cache;
         }
         self.bump_revision();
@@ -885,7 +871,7 @@ impl SymbolManager {
     pub(crate) fn remove_symbol_and_detach(
         &mut self,
         symbol_id: u64,
-        timeline: &mut Timeline,
+        edit_stack: &mut [SymbolEditSession],
         canvas_shapes: &mut Vec<FillShape>,
     ) -> bool {
         if !self.library.iter().any(|s| s.id == symbol_id) {
@@ -914,7 +900,7 @@ impl SymbolManager {
             }
         }
         canvas_shapes.retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
-        for layer in &mut timeline.layers {
+        for layer in &mut self.root.layers {
             layer.detach_symbol_id(symbol_id, &self.library, &mut self.next_group_id);
         }
         for i in 0..self.library.len() {
@@ -928,7 +914,7 @@ impl SymbolManager {
             self.library[i].timeline.layers = layers;
             self.library[i].revision = crate::vector_engine::next_mesh_revision();
         }
-        for sess in &mut self.edit_stack {
+        for sess in edit_stack.iter_mut() {
             for layer in &mut sess.parent_timeline.layers {
                 layer.detach_symbol_id(symbol_id, &self.library, &mut self.next_group_id);
             }
@@ -940,9 +926,6 @@ impl SymbolManager {
             );
         }
         self.library.retain(|s| s.id != symbol_id);
-        if self.selected_library_symbol == Some(symbol_id) {
-            self.selected_library_symbol = self.library.first().map(|s| s.id);
-        }
         self.bump_revision();
         true
     }

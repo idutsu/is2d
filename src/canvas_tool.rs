@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, Key, Pos2, Stroke, Vec2};
 use kurbo::{Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 
-use crate::symbol::{SymbolDef, SymbolEditSession, SymbolManager};
+pub(crate) use crate::symbol::Document;
+use crate::symbol::{SymbolDef, SymbolEditSession};
 use crate::timeline::{LoadedShapeSig, Timeline, TimelineCellSelection};
 use crate::vector_boolean::merge_shapes_into_canvas;
 use crate::vector_engine::FillShape;
@@ -344,43 +345,68 @@ pub(crate) enum ActiveCanvasDrag {
 }
 
 // ============================================================================
-// 2. ステージ・ビューポート状態（ViewportState）
+// 2. タブごとの表示状態（View）
 // ============================================================================
 
-/// キャンバスのズーム・パン・ステージ出力枠を管理するビューポート状態構造体
+/// タブごとの表示状態（ズーム・パン・枠外マスク・アンカー表示・オニオンスキン・ライブラリ選択、保存しない）
 #[derive(Clone)]
-pub(crate) struct ViewportState {
+pub(crate) struct View {
     /// キャンバスのズーム倍率（1.0 = 100%, 範囲 0.15..=16.0）
     pub(crate) zoom: f32,
     /// キャンバスのパンオフセット（スクリーンピクセル単位）
     pub(crate) pan: Vec2,
     /// スペースドラッグ / 中ボタンドラッグによるパン操作中の直前スクリーン座標
     pub(crate) pan_last_screen_pos: Option<Pos2>,
-    /// ステージ（カメラ出力枠）のワールドサイズ（幅・高さ px、デフォルト 800×450 [16:9]）
-    pub(crate) stage_size: Vec2,
     /// ステージ枠外にはみ出た図形をマスクして隠すかどうか（完成画面プレビュー用）
     pub(crate) clip_outside_stage: bool,
     /// 直近フレームの中央キャンバス描画領域（スクリーン座標、「ウィンドウに合わせる」計算用）
     pub(crate) last_canvas_rect: egui::Rect,
+    /// 選択ツール使用時に全生シェイプのベクター輪郭・アンカーを表示するか
+    pub(crate) show_wireframe: bool,
+    /// オニオンスキン表示の有効/無効
+    pub(crate) onion_skin_enabled: bool,
+    /// オニオンスキンで表示する前のフレーム数
+    pub(crate) onion_prev_frames: usize,
+    /// オニオンスキンで表示する次のフレーム数
+    pub(crate) onion_next_frames: usize,
+    /// プロパティパネルの下部表示対象（`true`: タイムラインのフレーム/トゥイーン属性、`false`: キャンバス上のシンボル属性）
+    pub(crate) inspect_timeline_frame: bool,
+    /// ライブラリパネルで現在選択中のシンボルID
+    pub(crate) selected_library_symbol: Option<u64>,
 }
 
-impl Default for ViewportState {
+impl Default for View {
     fn default() -> Self {
         Self {
             zoom: 1.0,
             pan: Vec2::ZERO,
             pan_last_screen_pos: None,
-            stage_size: Vec2::new(800.0, 450.0),
             clip_outside_stage: false,
             last_canvas_rect: egui::Rect::from_min_max(
                 Pos2::new(52.0, 30.0),
                 Pos2::new(1000.0, 590.0),
             ),
+            show_wireframe: false,
+            onion_skin_enabled: false,
+            onion_prev_frames: 2,
+            onion_next_frames: 2,
+            inspect_timeline_frame: false,
+            selected_library_symbol: None,
         }
     }
 }
 
-impl ViewportState {
+impl View {
+    /// ライブラリで選択中のシンボルIDが有効か検証し、未選択または削除済みの場合は先頭シンボルを選択する
+    pub(crate) fn ensure_valid_library_selection(&mut self, library: &[SymbolDef]) {
+        if self
+            .selected_library_symbol
+            .is_none_or(|id| !library.iter().any(|s| s.id == id))
+        {
+            self.selected_library_symbol = library.first().map(|s| s.id);
+        }
+    }
+
     /// ワールド座標 `p` を現在のズーム・パンに応じたスクリーン座標 `Pos2` へ変換する
     #[inline]
     pub(crate) fn world_to_screen(&self, p: Point) -> Pos2 {
@@ -419,9 +445,9 @@ impl ViewportState {
     }
 
     /// ステージ枠全体が中央キャンバス領域に余白付きでぴったり収まるようにズーム倍率とパン位置を自動調整する（「ウィンドウに合わせる」）
-    pub(crate) fn fit_stage_to_window(&mut self) {
-        let stage_w = self.stage_size.x.max(100.0);
-        let stage_h = self.stage_size.y.max(100.0);
+    pub(crate) fn fit_stage_to_window(&mut self, stage_size: Vec2) {
+        let stage_w = stage_size.x.max(100.0);
+        let stage_h = stage_size.y.max(100.0);
         let avail_w = (self.last_canvas_rect.width() - 48.0).max(64.0);
         let avail_h = (self.last_canvas_rect.height() - 48.0).max(64.0);
         let zoom = (avail_w / stage_w).min(avail_h / stage_h).clamp(
@@ -448,10 +474,10 @@ impl ViewportState {
 
     /// ステージ（カメラ出力枠）のワールド座標矩形 `KRect` を返す
     #[inline]
-    pub(crate) fn stage_world_rect(&self) -> KRect {
+    pub(crate) fn stage_world_rect(&self, stage_size: Vec2) -> KRect {
         let center = self.stage_center_world();
-        let half_w = (self.stage_size.x.max(100.0) as f64) * 0.5;
-        let half_h = (self.stage_size.y.max(100.0) as f64) * 0.5;
+        let half_w = (stage_size.x.max(100.0) as f64) * 0.5;
+        let half_h = (stage_size.y.max(100.0) as f64) * 0.5;
         KRect::new(
             center.x - half_w,
             center.y - half_h,
@@ -471,8 +497,8 @@ impl ViewportState {
 
     /// 現在のズーム・パンに応じたステージのスクリーン座標矩形 `egui::Rect` を返す
     #[inline]
-    pub(crate) fn stage_screen_rect(&self) -> egui::Rect {
-        self.world_rect_to_screen(self.stage_world_rect())
+    pub(crate) fn stage_screen_rect(&self, stage_size: Vec2) -> egui::Rect {
+        self.world_rect_to_screen(self.stage_world_rect(stage_size))
     }
 
     /// 現在スクリーン上に表示されるワールド座標範囲 `KRect` を返す（画面外・ステージ枠外カリング用）
@@ -480,6 +506,7 @@ impl ViewportState {
     pub(crate) fn visible_world_rect(
         &self,
         painter: &egui::Painter,
+        stage_size: Vec2,
         in_symbol_edit: bool,
     ) -> KRect {
         let clip_scr = painter.clip_rect();
@@ -488,7 +515,7 @@ impl ViewportState {
             self.screen_to_world(clip_scr.max),
         );
         if self.clip_outside_stage && !in_symbol_edit {
-            view_rect.intersect(self.stage_world_rect())
+            view_rect.intersect(self.stage_world_rect(stage_size))
         } else {
             view_rect
         }
@@ -499,6 +526,7 @@ impl ViewportState {
         &self,
         painter: &egui::Painter,
         canvas_rect: egui::Rect,
+        stage_size: Vec2,
         in_symbol_edit: bool,
     ) {
         if in_symbol_edit {
@@ -508,7 +536,7 @@ impl ViewportState {
         let pasteboard_col = Color32::from_rgb(218, 222, 228);
         painter.rect_filled(canvas_rect, 0.0, pasteboard_col);
 
-        let stage_rect = self.stage_screen_rect();
+        let stage_rect = self.stage_screen_rect(stage_size);
         if !self.clip_outside_stage {
             painter.rect_filled(
                 stage_rect.translate(Vec2::new(2.0, 2.0)),
@@ -525,10 +553,11 @@ impl ViewportState {
         &self,
         painter: &egui::Painter,
         canvas_rect: egui::Rect,
+        stage_size: Vec2,
         in_symbol_edit: bool,
     ) -> egui::Painter {
         if !in_symbol_edit && self.clip_outside_stage {
-            painter.with_clip_rect(canvas_rect.intersect(self.stage_screen_rect()))
+            painter.with_clip_rect(canvas_rect.intersect(self.stage_screen_rect(stage_size)))
         } else {
             painter.clone()
         }
@@ -539,12 +568,13 @@ impl ViewportState {
         &self,
         painter: &egui::Painter,
         _canvas_rect: egui::Rect,
+        stage_size: Vec2,
         in_symbol_edit: bool,
     ) {
         if in_symbol_edit {
             return;
         }
-        let stage_rect = self.stage_screen_rect();
+        let stage_rect = self.stage_screen_rect(stage_size);
         painter.rect_stroke(
             stage_rect,
             0.0,
@@ -608,23 +638,39 @@ impl ViewportState {
 }
 
 // ============================================================================
-// 3. キャンバスセッション状態（SharedClipboard / CanvasState）
+// 3. 共有クリップボード（Clipboard）& タブごとの編集セッション状態（Session）
 // ============================================================================
 
-/// タブ切り替えを跨いで共有されるクリップボード状態
+/// アプリ全体で1つだけ保持される内部クリップボード状態
 #[derive(Clone, Default)]
-pub(crate) struct SharedClipboard {
-    pub(crate) clipboard: Vec<FillShape>,
-    pub(crate) clipboard_source_doc_id: u64,
-    pub(crate) clipboard_source_symbol_id: Option<u64>,
-    pub(crate) clipboard_source_symbols_revision: u64,
-    pub(crate) clipboard_symbols: Vec<Arc<SymbolDef>>,
-    pub(crate) clipboard_imported_map: HashMap<(u64, u64), u64>,
+pub(crate) struct Clipboard {
+    /// コピー / カットされたシェイプ群（`group_path` はコピー時の編集スコープからの相対パス）
+    pub(crate) shapes: Vec<FillShape>,
+    /// クリップボードにコピーされた時点のコピー元ドキュメントID（別タブへのペースト判定用）
+    pub(crate) source_doc_id: u64,
+    /// クリップボードにコピーされた時点のインプレイス編集中のシンボルID（ルートシーン時は `None`）
+    pub(crate) source_symbol_id: Option<u64>,
+    /// クリップボードにコピーされた時点のコピー元 `Document::revision`
+    pub(crate) source_symbols_revision: u64,
+    /// クリップボード内のシェイプが参照しているシンボル定義のスナップショット群（依存順）
+    pub(crate) symbols: Vec<Arc<SymbolDef>>,
+    /// 現在のコピー元から各貼り付け先タブへ既にインポート済みのシンボルID対応表 `(target_doc_id, source_sym_id) -> target_sym_id`
+    pub(crate) imported_map: HashMap<(u64, u64), u64>,
+    /// `Cmd+V` 押下時に `Event::Paste` または `Key::V` (pressed) で既にペーストを実行済みかのフラグ（OSクリップボード空時のキーリリースフォールバック二重発火防止用）
+    pub(crate) paste_triggered_on_press: bool,
+    /// 直近フレームで `Cmd`/`Ctrl` 修飾キーが押されていた猶予フレーム数（`V` より先に `Cmd` を離した場合のフォールバック用）
+    pub(crate) cmd_held_grace_frames: u8,
+    /// `Cmd+V` による通常ペーストの連続回数（少しずつずらして配置するためのカウンタ）
+    pub(crate) paste_count: usize,
+    /// `Cmd+V` による通常ペーストの累積ワールド座標オフセット（途中でズーム変更しても階段状にずらす用）
+    pub(crate) paste_offset: KVec2,
 }
 
-/// 現在フレームの作業図形・選択・変形・排他ドラッグ・クリップボードを管理するキャンバスセッション状態構造体
+/// タブごとの編集セッション状態（作業図形・選択・変形・排他ドラッグ・編集階層、保存しない）
 #[derive(Default)]
-pub(crate) struct CanvasState {
+pub(crate) struct Session {
+    /// シンボルインプレイス編集時の親タイムライン退避スタック（段階6で `EditPath` に置き換える）
+    pub(crate) edit_stack: Vec<SymbolEditSession>,
     pub(crate) shapes: Vec<FillShape>,
     /// 直近の `load_shapes_from_timeline` 読み込み時点のシェイプ署名一覧（`Timeline` スナップショットに含めない作業用キャッシュ）
     loaded_signatures: Vec<LoadedShapeSig>,
@@ -636,56 +682,11 @@ pub(crate) struct CanvasState {
     pub(crate) hover_target: HoverTarget,
     /// 現在インプレイス編集で潜っているグループ階層のパス（空 `[]` ならルートシーン）
     pub(crate) editing_group_path: Vec<u64>,
-    /// コピー / カットされたシェイプ群（`group_path` はコピー時の編集スコープからの相対パス）
-    pub(crate) clipboard: Vec<FillShape>,
-    /// クリップボードにコピーされた時点のコピー元ドキュメントID（別タブへのペースト判定用）
-    pub(crate) clipboard_source_doc_id: u64,
-    /// クリップボードにコピーされた時点のインプレイス編集中のシンボルID（ルートシーン時は `None`）
-    pub(crate) clipboard_source_symbol_id: Option<u64>,
-    /// クリップボードにコピーされた時点のコピー元 `SymbolManager::revision`
-    pub(crate) clipboard_source_symbols_revision: u64,
-    /// クリップボード内のシェイプが参照しているシンボル定義のスナップショット群（依存順）
-    pub(crate) clipboard_symbols: Vec<Arc<SymbolDef>>,
-    /// 現在のコピー元から各貼り付け先タブへ既にインポート済みのシンボルID対応表 `(target_doc_id, source_sym_id) -> target_sym_id`
-    pub(crate) clipboard_imported_map: HashMap<(u64, u64), u64>,
-    /// `Cmd+V` 押下時に `Event::Paste` または `Key::V` (pressed) で既にペーストを実行済みかのフラグ（OSクリップボード空時のキーリリースフォールバック二重発火防止用）
-    pub(crate) paste_triggered_on_press: bool,
-    /// 直近フレームで `Cmd`/`Ctrl` 修飾キーが押されていた猶予フレーム数（`V` より先に `Cmd` を離した場合のフォールバック用）
-    pub(crate) cmd_held_grace_frames: u8,
-    /// `Cmd+V` による通常ペーストの連続回数（少しずつずらして配置するためのカウンタ）
-    pub(crate) paste_count: usize,
-    /// `Cmd+V` による通常ペーストの累積ワールド座標オフセット（途中でズーム変更しても階段状にずらす用）
-    pub(crate) paste_offset: KVec2,
     pub(crate) transform_pivot: Option<Point>,
     pub(crate) transform_hover: TransformHoverTarget,
 }
 
-impl CanvasState {
-    /// タブ切り替え時に共有クリップボード一式を取り出す（元のスロットには空のクリップボードを残す）
-    pub(crate) fn take_shared_clipboard(&mut self) -> SharedClipboard {
-        self.paste_count = 0;
-        self.paste_offset = KVec2::ZERO;
-        SharedClipboard {
-            clipboard: std::mem::take(&mut self.clipboard),
-            clipboard_source_doc_id: self.clipboard_source_doc_id,
-            clipboard_source_symbol_id: self.clipboard_source_symbol_id,
-            clipboard_source_symbols_revision: self.clipboard_source_symbols_revision,
-            clipboard_symbols: std::mem::take(&mut self.clipboard_symbols),
-            clipboard_imported_map: std::mem::take(&mut self.clipboard_imported_map),
-        }
-    }
-
-    /// タブ切り替え後に共有クリップボード一式を復元する
-    pub(crate) fn restore_shared_clipboard(&mut self, shared: SharedClipboard) {
-        self.clipboard = shared.clipboard;
-        self.clipboard_source_doc_id = shared.clipboard_source_doc_id;
-        self.clipboard_source_symbol_id = shared.clipboard_source_symbol_id;
-        self.clipboard_source_symbols_revision = shared.clipboard_source_symbols_revision;
-        self.clipboard_symbols = shared.clipboard_symbols;
-        self.clipboard_imported_map = shared.clipboard_imported_map;
-        self.paste_count = 0;
-        self.paste_offset = KVec2::ZERO;
-    }
+impl Session {
 
     /// 直近の読み込み・同期時点のシェイプ署名スライスを返す
     #[inline]
@@ -1312,18 +1313,19 @@ impl UndoHistory {
     /// 退避中の親タイムライン未変更セルの `Arc` を引き継ぎながら差分シンボルのみキャッシュ除去して新しい `Arc` を返す
     pub(crate) fn snapshot_symbols(
         &self,
-        symbols: &SymbolManager,
+        doc: &Document,
+        edit_stack: &[SymbolEditSession],
     ) -> (Arc<Vec<SymbolDef>>, Arc<Vec<SymbolEditSession>>, u64) {
         let prev_entry = self.undo_stack.back().or_else(|| self.redo_stack.last());
-        if let Some(reused) = prev_entry.filter(|e| e.symbols_revision == symbols.revision) {
+        if let Some(reused) = prev_entry.filter(|e| e.symbols_revision == doc.revision) {
             return (
                 Arc::clone(&reused.library),
                 Arc::clone(&reused.symbol_edit_stack),
-                symbols.revision,
+                doc.revision,
             );
         }
-        let mut lib = Vec::with_capacity(symbols.library.len());
-        for sym in &symbols.library {
+        let mut lib = Vec::with_capacity(doc.library.len());
+        for sym in &doc.library {
             if let Some(prev_sym) = prev_entry.and_then(|pe| {
                 pe.library
                     .iter()
@@ -1343,8 +1345,8 @@ impl UndoHistory {
                 lib.push(cloned);
             }
         }
-        let mut stack = Vec::with_capacity(symbols.edit_stack.len());
-        for (idx, sess) in symbols.edit_stack.iter().enumerate() {
+        let mut stack = Vec::with_capacity(edit_stack.len());
+        for (idx, sess) in edit_stack.iter().enumerate() {
             let prev_sess = prev_entry
                 .and_then(|pe| pe.symbol_edit_stack.get(idx))
                 .filter(|ps| ps.symbol_id == sess.symbol_id && ps.instance_gid == sess.instance_gid);
@@ -1352,7 +1354,7 @@ impl UndoHistory {
             cloned_sess.strip_transient_caches_with_prev(prev_sess);
             stack.push(cloned_sess);
         }
-        (Arc::new(lib), Arc::new(stack), symbols.revision)
+        (Arc::new(lib), Arc::new(stack), doc.revision)
     }
 
     /// 新しい Undo エントリをスタックへ追加し、Redo スタックをクリアして現在の状態世代IDを進める
@@ -1417,27 +1419,17 @@ impl UndoHistory {
     }
 }
 
-/// ツール選択・ブラシ/消しゴム設定・トースト通知などドキュメント編集に関わるUI設定状態
+/// アプリ全体で共有するツール選択・ブラシ/消しゴム設定
 #[derive(Clone)]
-pub(crate) struct AppUiState {
+pub(crate) struct ToolSettings {
     pub(crate) tool: Tool,
     pub(crate) select_sub_mode: SelectSubMode,
     pub(crate) brush_radius: f32,
     pub(crate) eraser_radius: f32,
     pub(crate) brush_color: Color32,
-    pub(crate) show_wireframe: bool,
-    pub(crate) onion_skin_enabled: bool,
-    pub(crate) onion_prev_frames: usize,
-    pub(crate) onion_next_frames: usize,
-    /// プロパティパネルの下部表示対象（`true`: タイムラインのフレーム/トゥイーン属性、`false`: キャンバス上のシンボル属性）
-    pub(crate) inspect_timeline_frame: bool,
-    /// 現在開いている・保存先の `.is2d` プロジェクトファイルパス（未保存の新規ドキュメント時は `None`）
-    pub(crate) current_file_path: Option<PathBuf>,
-    /// 操作トリガーで一定時間表示するトースト通知メッセージ
-    pub(crate) status_toast: Option<StatusToast>,
 }
 
-impl Default for AppUiState {
+impl Default for ToolSettings {
     fn default() -> Self {
         Self {
             tool: Tool::Brush,
@@ -1445,92 +1437,140 @@ impl Default for AppUiState {
             brush_radius: 8.0,
             eraser_radius: 22.0,
             brush_color: Color32::from_rgb(40, 45, 55),
-            show_wireframe: false,
-            onion_skin_enabled: false,
-            onion_prev_frames: 2,
-            onion_next_frames: 2,
-            inspect_timeline_frame: false,
-            current_file_path: None,
-            status_toast: None,
         }
     }
 }
 
-impl AppUiState {
-    /// キャンバス左上に一定時間自動で消えるトースト通知メッセージを登録する
-    pub(crate) fn show_notice(&mut self, kind: NoticeKind, message: impl Into<String>) {
-        self.status_toast = Some(StatusToast {
-            kind,
-            message: message.into(),
-            expires_at: Instant::now() + DEFAULT_TOAST_DURATION,
-        });
-    }
+/// キャンバス左上に一定時間自動で消えるトースト通知メッセージを登録する
+pub(crate) fn show_notice(
+    toast: &mut Option<StatusToast>,
+    kind: NoticeKind,
+    message: impl Into<String>,
+) {
+    *toast = Some(StatusToast {
+        kind,
+        message: message.into(),
+        expires_at: Instant::now() + DEFAULT_TOAST_DURATION,
+    });
 }
 
 // ============================================================================
-// 5. 単一ドキュメント編集基盤（EditorDoc）
+// 5. タブ（1つの開いているファイル/ドキュメント編集セッション：Tab）
 // ============================================================================
 
-/// 1ドキュメント分の編集状態と Undo/Redo・通知・同期トランザクションを担う基盤構造体（L3 編集コア）
-pub(crate) struct EditorDoc {
-    /// 現在のドキュメントの一意な識別ID（タブ間クリップボード・シンボル移植の同一タブ判定用）
-    pub(crate) doc_id: u64,
-    /// ツール設定・ステータストースト通知などのUI設定状態
-    pub(crate) ui: AppUiState,
-    /// キャンバスのズーム・パン・ステージ枠設定
-    pub(crate) viewport: ViewportState,
-    /// 現在フレームの作業図形・選択・変形・排他ドラッグ・クリップボード状態
-    pub(crate) canvas: CanvasState,
-    /// タイムライン・レイヤー・キーフレーム・セル構造
-    pub(crate) timeline: Timeline,
-    /// プロジェクト共通のシンボルライブラリ・シンボルインプレイス編集スタック・ID採番
-    pub(crate) symbols: SymbolManager,
+/// 1つの開いているタブ（保存対象の `Document`・操作中の `Session`・タブごとの表示設定 `View`・Undo履歴 `UndoHistory`）
+pub(crate) struct Tab {
+    /// タブの一意な識別ID（タブ間クリップボード・シンボル移植の同一タブ判定用）
+    pub(crate) id: u64,
+    /// 未保存タブ時の連番（`Untitled 1`, `Untitled 2`, ...）
+    pub(crate) untitled_number: usize,
+    /// 現在開いている・保存先の `.is2d` プロジェクトファイルパス（未保存の新規ドキュメント時は `None`）
+    pub(crate) file: Option<PathBuf>,
+    /// 保存対象のデータ（ルートタイムライン・シンボルライブラリ・ステージサイズ・採番カウンタ）
+    pub(crate) doc: Document,
+    /// 今フレームの作業図形・選択・変形・排他ドラッグ・編集スタック
+    pub(crate) session: Session,
+    /// タブごとのキャンバス表示設定（ズーム・パン・枠外クリップ・ワイヤーフレーム・オニオンスキン・選択シンボル）
+    pub(crate) view: View,
     /// Undo / Redo 履歴スタック
     pub(crate) history: UndoHistory,
 }
 
-impl Default for EditorDoc {
+impl Default for Tab {
     fn default() -> Self {
-        Self {
-            doc_id: 1,
-            ui: AppUiState::default(),
-            viewport: ViewportState::default(),
-            canvas: CanvasState::default(),
-            timeline: Timeline::default(),
-            symbols: SymbolManager::default(),
-            history: UndoHistory::default(),
-        }
+        Self::new_empty(1, 1)
     }
 }
 
-impl EditorDoc {
-    /// 指定された `doc_id` で空の初期ドキュメントを生成する
-    pub(crate) fn new_with_id(doc_id: u64) -> Self {
+impl Tab {
+    /// 指定された `id` と `untitled_number` で空の初期タブを生成する
+    pub(crate) fn new_empty(id: u64, untitled_number: usize) -> Self {
         Self {
-            doc_id,
-            ..Self::default()
+            id,
+            untitled_number,
+            file: None,
+            doc: Document::default(),
+            session: Session::default(),
+            view: View::default(),
+            history: UndoHistory::default(),
         }
+    }
+
+    /// ダーティマーク（` *`）を除いたタブのベース表示名を返す
+    pub(crate) fn base_title(&self) -> String {
+        match self
+            .file
+            .as_deref()
+            .and_then(std::path::Path::file_name)
+            .and_then(|n| n.to_str())
+        {
+            Some(name) if !name.is_empty() => name.to_owned(),
+            _ => format!("無題-{}", self.untitled_number.max(1)),
+        }
+    }
+
+    /// タブバーやタイトルバーに表示するタイトル文字列（未保存変更がある場合は末尾に ` *` 付き）を返す
+    pub(crate) fn display_title(&self) -> String {
+        let base = self.base_title();
+        if self.history.is_dirty() {
+            format!("{base} *")
+        } else {
+            base
+        }
+    }
+
+    /// ステージの中央ワールド座標を返す
+    #[inline]
+    pub(crate) fn stage_center_world(&self) -> Point {
+        self.view.stage_center_world()
+    }
+
+    /// 最後に描画されたキャンバス領域に対してステージ全体が収まるようズーム・パンを調整する
+    #[inline]
+    pub(crate) fn fit_stage_to_window(&mut self) {
+        self.view.fit_stage_to_window(self.doc.stage_size);
+    }
+
+    /// 現在編集中コンテキスト（インプレース編集スタック考慮）に指定シンボルを配置可能か（循環参照しないか）判定する
+    #[inline]
+    pub(crate) fn can_place_symbol_in_current_context(&self, symbol_id: u64) -> bool {
+        self.doc
+            .can_place_symbol_in_current_context(&self.session.edit_stack, symbol_id)
+    }
+
+    /// インプレース編集中のシンボルがある場合、現在の作業タイムラインをライブラリ定義へ同期する
+    #[inline]
+    pub(crate) fn sync_active_symbol_edit(&mut self) {
+        self.doc.sync_active_edit(&mut self.session.edit_stack);
+    }
+
+    /// ライブラリ選択中のシンボルIDが存在しない場合に先頭シンボルへ補正する
+    pub(crate) fn ensure_valid_library_selection(&mut self) {
+        self.view
+            .ensure_valid_library_selection(&self.doc.library);
     }
 
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
         self.history.last_coalesce_key = None;
-        let (prev_lib, prev_stack, prev_rev) = self.history.snapshot_symbols(&self.symbols);
+        let (prev_lib, prev_stack, prev_rev) = self
+            .history
+            .snapshot_symbols(&self.doc, &self.session.edit_stack);
         let prev_entry = UndoEntry {
-            timeline: std::mem::replace(&mut self.timeline, entry.timeline),
+            timeline: std::mem::replace(&mut self.doc.root, entry.timeline),
             library: prev_lib,
             editing_group_path: std::mem::replace(
-                &mut self.canvas.editing_group_path,
+                &mut self.session.editing_group_path,
                 entry.editing_group_path,
             ),
             symbol_edit_stack: prev_stack,
-            stage_size: std::mem::replace(&mut self.viewport.stage_size, entry.stage_size),
+            stage_size: std::mem::replace(&mut self.doc.stage_size, entry.stage_size),
             symbols_revision: prev_rev,
             commit_id: std::mem::replace(&mut self.history.current_commit_id, entry.commit_id),
         };
-        self.symbols.library = Arc::unwrap_or_clone(entry.library);
-        self.symbols.edit_stack = Arc::unwrap_or_clone(entry.symbol_edit_stack);
-        self.symbols.revision = entry.symbols_revision;
-        self.symbols.sync_after_restore();
+        self.doc.library = Arc::unwrap_or_clone(entry.library);
+        self.session.edit_stack = Arc::unwrap_or_clone(entry.symbol_edit_stack);
+        self.doc.revision = entry.symbols_revision;
+        self.ensure_valid_library_selection();
         load_shapes_from_timeline(self);
         prev_entry
     }
@@ -1550,24 +1590,6 @@ impl EditorDoc {
             self.history.push_undo_from_redo(curr);
         }
     }
-
-    /// 警告トースト通知を表示する
-    #[inline]
-    pub(crate) fn notify_warning(&mut self, message: impl Into<String>) {
-        self.ui.show_notice(NoticeKind::Warning, message);
-    }
-
-    /// エラートースト通知を表示する
-    #[inline]
-    pub(crate) fn notify_error(&mut self, message: impl Into<String>) {
-        self.ui.show_notice(NoticeKind::Error, message);
-    }
-
-    /// 情報トースト通知を表示する
-    #[inline]
-    pub(crate) fn notify_info(&mut self, message: impl Into<String>) {
-        self.ui.show_notice(NoticeKind::Info, message);
-    }
 }
 
 // ============================================================================
@@ -1575,12 +1597,12 @@ impl EditorDoc {
 // ============================================================================
 
 /// 現在の編集スコープ（グループ内であればそのグループの所属レイヤー、そうでなければ現在のアクティブレイヤー）の `layer_id` を返す
-pub(crate) fn active_scope_layer_id(canvas: &CanvasState, timeline: &Timeline) -> u64 {
-    if !canvas.editing_group_path.is_empty() {
-        if let Some(s) = canvas
+pub(crate) fn active_scope_layer_id(session: &Session, timeline: &Timeline) -> u64 {
+    if !session.editing_group_path.is_empty() {
+        if let Some(s) = session
             .shapes
             .iter()
-            .find(|s| s.is_in_editing_scope(&canvas.editing_group_path))
+            .find(|s| s.is_in_editing_scope(&session.editing_group_path))
         {
             return s.layer_id;
         }
@@ -1590,38 +1612,38 @@ pub(crate) fn active_scope_layer_id(canvas: &CanvasState, timeline: &Timeline) -
 
 /// 指定されたシェイプインデックス群が所属するレイヤーのうち最前面の `layer_id` を返す（該当なし時は `active_scope_layer_id`）
 pub(crate) fn topmost_layer_id_for_indices(
-    canvas: &CanvasState,
+    session: &Session,
     timeline: &Timeline,
     indices: &[usize],
 ) -> u64 {
     indices
         .iter()
-        .filter_map(|&idx| canvas.shapes.get(idx).map(|s| s.layer_id))
+        .filter_map(|&idx| session.shapes.get(idx).map(|s| s.layer_id))
         .max_by_key(|&lid| timeline.layer_index_by_id(lid).unwrap_or(0))
-        .unwrap_or_else(|| active_scope_layer_id(canvas, timeline))
+        .unwrap_or_else(|| active_scope_layer_id(session, timeline))
 }
 
-/// 指定したシェイプインデックス `shape_idx` が属するレイヤーへ `doc.timeline.active_layer` およびタイムライン選択状態を追従させる
-pub(crate) fn focus_active_layer_to_shape(doc: &mut EditorDoc, shape_idx: usize) {
-    doc.ui.inspect_timeline_frame = false;
-    if let Some(lid) = doc.canvas.shapes.get(shape_idx).map(|s| s.layer_id) {
-        if let Some(l_idx) = doc.timeline.layer_index_by_id(lid) {
-            doc.timeline.active_layer = l_idx;
-            let cf = doc.timeline.current_frame;
-            doc.timeline.cell_selection = Some(TimelineCellSelection::single(l_idx, cf));
+/// 指定したシェイプインデックス `shape_idx` が属するレイヤーへ `tab.doc.root.active_layer` およびタイムライン選択状態を追従させる
+pub(crate) fn focus_active_layer_to_shape(tab: &mut Tab, shape_idx: usize) {
+    tab.view.inspect_timeline_frame = false;
+    if let Some(lid) = tab.session.shapes.get(shape_idx).map(|s| s.layer_id) {
+        if let Some(l_idx) = tab.doc.root.layer_index_by_id(lid) {
+            tab.doc.root.active_layer = l_idx;
+            let cf = tab.doc.root.current_frame;
+            tab.doc.root.cell_selection = Some(TimelineCellSelection::single(l_idx, cf));
         }
     }
 }
 
-/// キャンバス上で選択されたシェイプ群（`doc.canvas.selected_shapes`）が所属するレイヤーをタイムライン上で選択状態にする
-pub(crate) fn sync_timeline_layer_from_canvas_selection(doc: &mut EditorDoc) {
-    doc.ui.inspect_timeline_frame = false;
+/// キャンバス上で選択されたシェイプ群（`tab.session.selected_shapes`）が所属するレイヤーをタイムライン上で選択状態にする
+pub(crate) fn sync_timeline_layer_from_canvas_selection(tab: &mut Tab) {
+    tab.view.inspect_timeline_frame = false;
     let mut min_l: Option<usize> = None;
     let mut max_l: Option<usize> = None;
     let mut last_l: Option<usize> = None;
-    for &idx in &doc.canvas.selected_shapes {
-        if let Some(lid) = doc.canvas.shapes.get(idx).map(|s| s.layer_id) {
-            if let Some(l_idx) = doc.timeline.layer_index_by_id(lid) {
+    for &idx in &tab.session.selected_shapes {
+        if let Some(lid) = tab.session.shapes.get(idx).map(|s| s.layer_id) {
+            if let Some(l_idx) = tab.doc.root.layer_index_by_id(lid) {
                 min_l = Some(min_l.map_or(l_idx, |m| m.min(l_idx)));
                 max_l = Some(max_l.map_or(l_idx, |m| m.max(l_idx)));
                 last_l = Some(l_idx);
@@ -1629,93 +1651,98 @@ pub(crate) fn sync_timeline_layer_from_canvas_selection(doc: &mut EditorDoc) {
         }
     }
     if let (Some(l0), Some(l1), Some(act)) = (min_l, max_l, last_l) {
-        doc.timeline.active_layer = act;
-        let cf = doc.timeline.current_frame;
-        doc.timeline.cell_selection = Some(TimelineCellSelection::from_corners(l0, cf, l1, cf));
+        tab.doc.root.active_layer = act;
+        let cf = tab.doc.root.current_frame;
+        tab.doc.root.cell_selection = Some(TimelineCellSelection::from_corners(l0, cf, l1, cf));
     }
 }
 
 /// 選択ツールまたは自由変形ツールで進行中だった図形変形・移動ドラッグのみを中断し、
 /// プレビュー変形中だった図形をドラッグ開始前の状態へ安全に巻き戻す（ブラシのストローク状態には干渉しない）
-pub(crate) fn rollback_shape_drag(doc: &mut EditorDoc) {
-    if doc.canvas.rollback_shape_drag() {
-        sync_shapes_to_timeline(doc);
+pub(crate) fn rollback_shape_drag(tab: &mut Tab) {
+    if tab.session.rollback_shape_drag() {
+        sync_shapes_to_timeline(tab);
     }
 }
 
 /// 進行中のすべてのキャンバスドラッグ操作（ブラシ/消しゴム・輪郭変形・移動・自由変形）を中断し、
 /// プレビュー変形中だった図形をドラッグ開始前の状態へ安全に巻き戻す
-pub(crate) fn cancel_active_drag(doc: &mut EditorDoc) {
-    rollback_shape_drag(doc);
-    doc.canvas.drag = ActiveCanvasDrag::None;
-    doc.canvas.hover_target = HoverTarget::None;
-    doc.canvas.transform_hover = TransformHoverTarget::None;
+pub(crate) fn cancel_active_drag(tab: &mut Tab) {
+    rollback_shape_drag(tab);
+    tab.session.drag = ActiveCanvasDrag::None;
+    tab.session.hover_target = HoverTarget::None;
+    tab.session.transform_hover = TransformHoverTarget::None;
 }
 
-pub(crate) fn set_tool(doc: &mut EditorDoc, tool: Tool) {
-    cancel_active_drag(doc);
-    doc.ui.tool = tool;
-    doc.ui.select_sub_mode = SelectSubMode::Reshape;
+pub(crate) fn set_tool(tab: &mut Tab, tool_settings: &mut ToolSettings, tool: Tool) {
+    cancel_active_drag(tab);
+    tool_settings.tool = tool;
+    tool_settings.select_sub_mode = SelectSubMode::Reshape;
 }
 
-pub(crate) fn toggle_select_sub_mode(doc: &mut EditorDoc, target_mode: SelectSubMode) {
-    doc.ui.select_sub_mode = if doc.ui.select_sub_mode == target_mode {
+pub(crate) fn toggle_select_sub_mode(
+    tab: &mut Tab,
+    tool_settings: &mut ToolSettings,
+    target_mode: SelectSubMode,
+) {
+    tool_settings.select_sub_mode = if tool_settings.select_sub_mode == target_mode {
         SelectSubMode::Reshape
     } else {
         target_mode
     };
-    clear_selection(doc);
+    clear_selection(tab);
 }
 
-/// タイムラインの構造変更前に、未確定のキャンバス選択スライスを確定解除し `doc.canvas.shapes` を現在フレームのセルへ同期する
-pub(crate) fn flush_canvas_before_timeline_op(doc: &mut EditorDoc) {
-    cancel_active_drag(doc);
-    clear_selection(doc);
-    sync_shapes_to_timeline(doc);
+/// タイムラインの構造変更前に、未確定のキャンバス選択スライスを確定解除し `tab.session.shapes` を現在フレームのセルへ同期する
+pub(crate) fn flush_canvas_before_timeline_op(tab: &mut Tab) {
+    cancel_active_drag(tab);
+    clear_selection(tab);
+    sync_shapes_to_timeline(tab);
 }
 
-/// キャンバスの作業用 `doc.canvas.shapes` を、各図形の `layer_id` ごとに現在フレームの `Cel` に振り分けて書き戻す
-pub(crate) fn sync_shapes_to_timeline(doc: &mut EditorDoc) {
-    doc.canvas.sanitize_editing_scope();
-    if doc.canvas.is_all_shapes_unchanged() {
+/// キャンバスの作業用 `tab.session.shapes` を、各図形の `layer_id` ごとに現在フレームの `Cel` に振り分けて書き戻す
+pub(crate) fn sync_shapes_to_timeline(tab: &mut Tab) {
+    tab.session.sanitize_editing_scope();
+    if tab.session.is_all_shapes_unchanged() {
         return;
     }
-    doc.timeline
-        .normalize_shape_layer_ids(&mut doc.canvas.shapes);
-    doc.canvas.sort_shapes_by_layer_order(&doc.timeline);
-    let any_modified = doc.timeline.write_shapes_to_editable_cels(
-        &doc.canvas.shapes,
-        &doc.symbols.library,
-        doc.canvas.loaded_signatures(),
+    tab.doc
+        .root
+        .normalize_shape_layer_ids(&mut tab.session.shapes);
+    tab.session.sort_shapes_by_layer_order(&tab.doc.root);
+    let any_modified = tab.doc.root.write_shapes_to_editable_cels(
+        &tab.session.shapes,
+        &tab.doc.library,
+        tab.session.loaded_signatures(),
     );
-    doc.canvas.record_loaded_signatures();
+    tab.session.record_loaded_signatures();
     if any_modified {
-        doc.symbols.sync_active_edit(&doc.timeline);
+        tab.doc.sync_active_edit(&mut tab.session.edit_stack);
     }
 }
 
 /// 現在フレームにおける全ての「表示中かつ非ロック（`visible && !locked`）」レイヤーの `Cel` から
-/// 背面レイヤー→前面レイヤーの順で（トゥイーン補間およびシンボルの内部タイムラインフレームも評価しつつ）`doc.canvas.shapes` を一括読み込みする
-pub(crate) fn load_shapes_from_timeline(doc: &mut EditorDoc) {
-    cancel_active_drag(doc);
-    let frame = doc.timeline.current_frame;
+/// 背面レイヤー→前面レイヤーの順で（トゥイーン補間およびシンボルの内部タイムラインフレームも評価しつつ）`tab.session.shapes` を一括読み込みする
+pub(crate) fn load_shapes_from_timeline(tab: &mut Tab) {
+    cancel_active_drag(tab);
+    let frame = tab.doc.root.current_frame;
     let mut loaded = Vec::new();
-    for layer_idx in 0..doc.timeline.layers.len() {
-        let layer = &doc.timeline.layers[layer_idx];
+    for layer_idx in 0..tab.doc.root.layers.len() {
+        let layer = &tab.doc.root.layers[layer_idx];
         if !layer.visible || layer.locked {
             continue;
         }
-        loaded.extend(doc.timeline.evaluate_layer_shapes_at(
-            layer_idx,
-            frame,
-            &doc.symbols.library,
-        ));
+        loaded.extend(
+            tab.doc
+                .root
+                .evaluate_layer_shapes_at(layer_idx, frame, &tab.doc.library),
+        );
     }
-    doc.canvas.replace_loaded_shapes(loaded);
-    if let Some(sym_id) = doc.symbols.edit_stack.last().map(|s| s.symbol_id) {
-        let cf = doc.timeline.current_frame;
-        let al = doc.timeline.active_layer;
-        if let Some(sym_def) = doc.symbols.find_symbol_mut(sym_id) {
+    tab.session.replace_loaded_shapes(loaded);
+    if let Some(sym_id) = tab.session.edit_stack.last().map(|s| s.symbol_id) {
+        let cf = tab.doc.root.current_frame;
+        let al = tab.doc.root.active_layer;
+        if let Some(sym_def) = tab.doc.find_symbol_mut(sym_id) {
             if sym_def.timeline.current_frame != cf || sym_def.timeline.active_layer != al {
                 sym_def.timeline.current_frame = cf;
                 sym_def.timeline.active_layer = al;
@@ -1725,18 +1752,18 @@ pub(crate) fn load_shapes_from_timeline(doc: &mut EditorDoc) {
 }
 
 /// タイムライン上で選択されたセル範囲（単一キーフレームまたは複数レイヤー範囲）に属するすべての図形をキャンバス上で選択状態にする
-pub(crate) fn select_shapes_for_timeline_selection(doc: &mut EditorDoc) {
-    clear_selection(doc);
-    let Some(sel) = doc.timeline.cell_selection else {
+pub(crate) fn select_shapes_for_timeline_selection(tab: &mut Tab) {
+    clear_selection(tab);
+    let Some(sel) = tab.doc.root.cell_selection else {
         return;
     };
     let selected_lids: HashSet<u64> = (sel.min_layer..=sel.max_layer)
-        .filter_map(|l_idx| doc.timeline.layers.get(l_idx))
+        .filter_map(|l_idx| tab.doc.root.layers.get(l_idx))
         .filter(|l| l.visible && !l.locked)
         .map(|l| l.id)
         .collect();
-    doc.canvas.select_shapes_in_layers(&selected_lids);
-    doc.ui.inspect_timeline_frame = true;
+    tab.session.select_shapes_in_layers(&selected_lids);
+    tab.view.inspect_timeline_frame = true;
 }
 
 /// シンボル基準点（Registration Point `+`）をスクリーン座標 `center` に描画する共通ヘルパー
@@ -1782,69 +1809,68 @@ pub(crate) fn draw_registration_cross(
 
 /// `selection_modified == true` の選択中生シェイプを同一レイヤー・同一スコープのキャンバス図形へ結合・切り抜き（Merge Drawing）確定し、
 /// タイムラインへ同期する（選択状態そのもののクリアは呼び出し側で行う）
-pub(crate) fn flush_modified_raw_selection_merge(doc: &mut EditorDoc) {
-    if !doc.canvas.selection_modified || doc.canvas.selected_shapes.is_empty() {
-        doc.canvas.selection_modified = false;
+pub(crate) fn flush_modified_raw_selection_merge(tab: &mut Tab) {
+    if !tab.session.selection_modified || tab.session.selected_shapes.is_empty() {
+        tab.session.selection_modified = false;
         return;
     }
-    let (is_sel, _) = doc.canvas.selected_shape_mask();
-    let mut base_canvas = Vec::with_capacity(doc.canvas.shapes.len());
-    let mut modified_raw_shapes = Vec::with_capacity(doc.canvas.selected_shapes.len());
-    for (idx, shape) in doc.canvas.shapes.drain(..).enumerate() {
-        if is_sel[idx] && shape.is_raw_at_scope(&doc.canvas.editing_group_path) {
+    let (is_sel, _) = tab.session.selected_shape_mask();
+    let mut base_canvas = Vec::with_capacity(tab.session.shapes.len());
+    let mut modified_raw_shapes = Vec::with_capacity(tab.session.selected_shapes.len());
+    for (idx, shape) in tab.session.shapes.drain(..).enumerate() {
+        if is_sel[idx] && shape.is_raw_at_scope(&tab.session.editing_group_path) {
             modified_raw_shapes.push(shape);
         } else {
             base_canvas.push(shape);
         }
     }
     merge_shapes_into_canvas(&mut base_canvas, modified_raw_shapes);
-    doc.canvas.shapes = base_canvas;
-    doc.canvas.sort_shapes_by_layer_order(&doc.timeline);
-    sync_shapes_to_timeline(doc);
-    doc.canvas.selection_modified = false;
+    tab.session.shapes = base_canvas;
+    tab.session.sort_shapes_by_layer_order(&tab.doc.root);
+    sync_shapes_to_timeline(tab);
+    tab.session.selection_modified = false;
 }
 
-pub(crate) fn clear_selection(doc: &mut EditorDoc) {
-    doc.history.end_coalesce();
-    rollback_shape_drag(doc);
-    doc.canvas.restore_unsliced_preserving_selection();
-    if doc.canvas.selection_modified && !doc.canvas.selected_shapes.is_empty() {
-        flush_modified_raw_selection_merge(doc);
+pub(crate) fn clear_selection(tab: &mut Tab) {
+    tab.history.end_coalesce();
+    rollback_shape_drag(tab);
+    tab.session.restore_unsliced_preserving_selection();
+    if tab.session.selection_modified && !tab.session.selected_shapes.is_empty() {
+        flush_modified_raw_selection_merge(tab);
     }
-    doc.canvas.selection_modified = false;
-    doc.canvas.selected_shapes.clear();
-    doc.canvas.transform_pivot = None;
-    doc.ui.inspect_timeline_frame = false;
+    tab.session.selection_modified = false;
+    tab.session.selected_shapes.clear();
+    tab.session.transform_pivot = None;
+    tab.view.inspect_timeline_frame = false;
 }
 
 /// 現在の編集スコープの最前面挿入位置へ `new_shapes` を挿入し、それらを選択状態にしてレイヤー順に整列させる
 pub(crate) fn insert_and_select_shapes_in_scope(
-    doc: &mut EditorDoc,
+    tab: &mut Tab,
     new_shapes: Vec<FillShape>,
     mark_modified: bool,
 ) {
-    let insert_pos = doc.canvas.scope_insert_index();
+    let insert_pos = tab.session.scope_insert_index();
     let count = new_shapes.len();
-    doc.canvas.shapes.splice(insert_pos..insert_pos, new_shapes);
-    doc.canvas.selected_shapes = (insert_pos..insert_pos + count).collect();
-    doc.canvas.sort_shapes_by_layer_order(&doc.timeline);
-    doc.canvas.selection_modified = mark_modified;
-    doc.canvas.transform_pivot = None;
-    if !matches!(doc.ui.tool, Tool::Select | Tool::Transform) {
-        set_tool(doc, Tool::Select);
-    }
+    tab.session
+        .shapes
+        .splice(insert_pos..insert_pos, new_shapes);
+    tab.session.selected_shapes = (insert_pos..insert_pos + count).collect();
+    tab.session.sort_shapes_by_layer_order(&tab.doc.root);
+    tab.session.selection_modified = mark_modified;
+    tab.session.transform_pivot = None;
 }
 
 /// 選択中の生シェイプ群を現在の編集スコープ内の最前面へ並べ替え、レイヤー順に整列させる
 /// （グループ・シンボルのみが選択されている場合は既存の重ね順とキャッシュを維持する）
-pub(crate) fn reorder_selected_to_scope_front(doc: &mut EditorDoc) -> bool {
-    let (is_sel, any_valid) = doc.canvas.selected_shape_mask();
+pub(crate) fn reorder_selected_to_scope_front(tab: &mut Tab) -> bool {
+    let (is_sel, any_valid) = tab.session.selected_shape_mask();
     if !any_valid {
         return false;
     }
-    let scope = doc.canvas.editing_group_path.clone();
-    let any_raw_selected = doc
-        .canvas
+    let scope = tab.session.editing_group_path.clone();
+    let any_raw_selected = tab
+        .session
         .shapes
         .iter()
         .enumerate()
@@ -1853,11 +1879,11 @@ pub(crate) fn reorder_selected_to_scope_front(doc: &mut EditorDoc) -> bool {
         return true;
     }
 
-    let insert_limit = doc.canvas.scope_insert_index();
-    let mut unselected = Vec::with_capacity(doc.canvas.shapes.len());
-    let mut moved_shapes = Vec::with_capacity(doc.canvas.selected_shapes.len());
+    let insert_limit = tab.session.scope_insert_index();
+    let mut unselected = Vec::with_capacity(tab.session.shapes.len());
+    let mut moved_shapes = Vec::with_capacity(tab.session.selected_shapes.len());
     let mut trailing_outside = Vec::new();
-    for (idx, shape) in doc.canvas.shapes.drain(..).enumerate() {
+    for (idx, shape) in tab.session.shapes.drain(..).enumerate() {
         if is_sel[idx] {
             moved_shapes.push(shape);
         } else if idx < insert_limit {
@@ -1871,16 +1897,16 @@ pub(crate) fn reorder_selected_to_scope_front(doc: &mut EditorDoc) -> bool {
     let end_sel = start_sel + moved_shapes.len();
     unselected.extend(moved_shapes);
     unselected.extend(trailing_outside);
-    doc.canvas.shapes = unselected;
-    doc.canvas.selected_shapes = (start_sel..end_sel).collect();
-    doc.canvas.sort_shapes_by_layer_order(&doc.timeline);
+    tab.session.shapes = unselected;
+    tab.session.selected_shapes = (start_sel..end_sel).collect();
+    tab.session.sort_shapes_by_layer_order(&tab.doc.root);
     true
 }
 
 /// 移動・変形された選択シェイプの拡大時キャッシュ再構築とスコープ内最前面整列・`selection_modified = true` のマーキングを行う
-pub(crate) fn prepare_moved_selection(doc: &mut EditorDoc, undo_snapshot: &[FillShape]) -> bool {
-    for &sel_idx in &doc.canvas.selected_shapes {
-        let Some(shape) = doc.canvas.shapes.get_mut(sel_idx) else {
+pub(crate) fn prepare_moved_selection(tab: &mut Tab, undo_snapshot: &[FillShape]) -> bool {
+    for &sel_idx in &tab.session.selected_shapes {
+        let Some(shape) = tab.session.shapes.get_mut(sel_idx) else {
             continue;
         };
         if shape.exterior.segments.is_empty() {
@@ -1908,9 +1934,9 @@ pub(crate) fn prepare_moved_selection(doc: &mut EditorDoc, undo_snapshot: &[Fill
             }
         }
     }
-    if !reorder_selected_to_scope_front(doc) {
+    if !reorder_selected_to_scope_front(tab) {
         return false;
     }
-    doc.canvas.selection_modified = true;
+    tab.session.selection_modified = true;
     true
 }

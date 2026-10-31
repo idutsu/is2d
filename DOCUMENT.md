@@ -480,21 +480,22 @@ Adobe Animate の核となる**「グラフィックシンボル（部品化）�
   - 矩形選択で生シェイプをスライスした際、未変更のまま選択解除された場合に数値誤差なしで元のシェイプへ戻せるよう、スライス直前の状態を保持するトランジェントなスナップショット枠を設ける。
 
 ### 8.2 状態管理（State Management）
-- **4層の状態分離**:
-  1. **永続ドキュメント状態**: `Timeline`、シンボルライブラリ、ステージサイズ。
-  2. **作業セッション状態（CanvasState）**: 現在フレームの編集対象シェイプ、選択インデックス、グループ編集パス、一時スナップショット。
-  3. **UI・ビューポート状態**: 現在のツール、ブラシ半径・色、ズーム・パン、再生中フラグ、オニオンスキン設定（これらは Undo/Redo で巻き戻らないように分離）。
-  4. **履歴状態（UndoHistory）**: ドキュメント状態と編集コンテキストの履歴スタック。
+- **状態の分離（`Document` / `Session` / `View` / `Tab` / `App`）**:
+  1. **永続ドキュメント状態（`Document`）**: ルート `Timeline`、シンボルライブラリ、ステージサイズ、ID採番カウンタ。保存しない状態は一切含まない。
+  2. **作業セッション状態（`Session`）**: 現在フレームの編集対象シェイプ、選択状態、グループ編集パス、インプレース編集スタック、ドラッグ状態、一時スナップショット。
+  3. **タブごとの表示状態（`View`）**: ズーム・パン・枠外を隠す・アンカー表示・オニオンスキン設定・ライブラリ選択（Undo/Redo で巻き戻らないように分離）。
+  4. **履歴状態（`UndoHistory`）**: `Tab` ごとにドキュメント状態と編集コンテキストの履歴スタックを保持。
+  5. **アプリ全体状態（`App`）**: タブ配列 `Vec<Tab>` と `active: usize`、ツール設定（`ToolSettings`）、アプリ共通クリップボード（`Clipboard`）、トースト通知。
 - **ドラッグ操作の排他ステートマシン化**:
   - キャンバス上のドラッグ（ブラシ描画・アンカー変形・エッジ変形・選択移動・矩形選択・自由変形・ピボット移動・パン）を `Option<bool>` フラグの寄せ集めではなく、単一の `enum ActiveCanvasDrag` として定義し、複数ツールのドラッグ状態が同時に有効になるバグを型レベルで排除する。
 
 ### 8.3 モジュール分割（Module Division）
 - **5層の厳格一方向アーキテクチャ（Layer 5 → Layer 4 → Layer 3 → Layer 2 → Layer 1）**:
   1. **Layer 1 — Geometry 層**: ベジェ曲線・輪郭・AABB・テッセレーション（`vector_engine`）、ブラシアウトライン生成と曲線フィッティング（`vector_stroke`）、ポリゴンブール演算と曲線再構築（`vector_boolean`）。上位層（ドキュメント状態やUI）への依存を一切持たない純粋な幾何計算層。
-  2. **Layer 2 — Domain / Model 層**: タイムライン・レイヤー・キーフレーム・セル・トゥイーン補間（`timeline`）およびシンボル定義・入れ子評価・インプレース編集（`symbol`）。Layer 1 のみに依存し、上位層への逆依存を持たないデータモデル層。
-  3. **Layer 3 — Document & Tool Operations 層**: ドキュメント状態 `EditorDoc`・ビューポート・Undo履歴・共通ヘルパー（`canvas_tool`）、ドキュメント変更アクションと一元 `apply`（`doc_actions`）、シンボル操作（`symbol_ops`）、選択・グループ・重なり順操作（`select_ops`）、クリップボード操作（`clipboard_ops`）、ペイント系ツール（`tool_paint`）、選択・変形ツール（`tool_select`）、自由変形ツール（`tool_transform`）、および `.is2d` プロジェクトファイルのシリアライズ・マルチタブ管理（`project_io`）。
+  2. **Layer 2 — Domain / Model 層**: タイムライン・レイヤー・キーフレーム・セル・トゥイーン補間（`timeline`）および永続ドキュメント `Document`・シンボル定義・入れ子評価・インプレース編集（`symbol`）。Layer 1 のみに依存し、上位層への逆依存を持たないデータモデル層。
+  3. **Layer 3 — Document & Tool Operations 層**: タブ状態 `Tab`・作業状態 `Session`・表示状態 `View`・Undo履歴・共通ヘルパー（`canvas_tool`）、ドキュメント変更アクションと一元 `apply`（`doc_actions`）、シンボル操作（`symbol_ops`）、選択・グループ・重なり順操作（`select_ops`）、クリップボード操作（`clipboard_ops`）、ペイント系ツール（`tool_paint`）、選択・変形ツール（`tool_select`）、自由変形ツール（`tool_transform`）、および `.is2d` プロジェクトファイルのシリアライズ・マルチタブ管理（`project_io`）。
   4. **Layer 4 — UI Presentation 層**: 下部タイムラインUI（`timeline_ui`）および最上部メニューバー・上部ステージバー・左右パネル・`UiAction`（`panels`）。
-  5. **Layer 5 — Application Shell 層**: アプリ統合状態 `Is2dApp`・ショートカット処理・`UiAction` の一元適用（`main`）。下位層から上位層への逆参照ゼロ・層内の相互循環ゼロを厳守する。
+  5. **Layer 5 — Application Shell 層**: アプリ統合状態 `Is2dApp`（`App`）・ショートカット処理・`UiAction` の一元適用（`main`）。下位層から上位層への逆参照ゼロ・層内の相互循環ゼロを厳守する。
 
 ### 8.4 描画・キャッシュ戦略（Rendering & Caching）
 - `egui` は毎フレーム `egui::Mesh` を構築して描画するため、60fps のアニメーション再生やズーム・パン時にベジェ曲線の平坦化や耳刈り法（Earcut）を走らせない **3階層メッシュキャッシュ** が不可欠となる：
@@ -505,7 +506,7 @@ Adobe Animate の核となる**「グラフィックシンボル（部品化）�
 
 ### 8.5 Undo / Redo 方式
 - 最大 100 ステップの `VecDeque<UndoEntry>`。
-- 全フレーム・全シンボルのディープコピーによるメモリ肥大化を防ぐため、`Contour` のセグメント配列（`Arc<Vec<QuadBez>>`）、`Cel` のシェイプ配列（`Arc<Vec<FillShape>>`）およびインスタンス配列（`Arc<Vec<SymbolInstance>>`）、さらに `UndoEntry` 内のシンボルライブラリ（`Arc<Vec<SymbolDef>>`、`SymbolManager::revision` 連動）を **Copy-on-Write（CoW）構造共有** とし、未変更のキーフレームやシンボルは $O(1)$ でポインタ共有する。また、履歴保存時には再計算可能な `egui::Mesh` キャッシュを除去してメモリ消費を最小化する。
+- 全フレーム・全シンボルのディープコピーによるメモリ肥大化を防ぐため、`Contour` のセグメント配列（`Arc<Vec<QuadBez>>`）、`Cel` のシェイプ配列（`Arc<Vec<FillShape>>`）およびインスタンス配列（`Arc<Vec<SymbolInstance>>`）、さらに `UndoEntry` 内のシンボルライブラリ（`Arc<Vec<SymbolDef>>`、`Document::revision` 連動）を **Copy-on-Write（CoW）構造共有** とし、未変更のキーフレームやシンボルは $O(1)$ でポインタ共有する。また、履歴保存時には再計算可能な `egui::Mesh` キャッシュを除去してメモリ消費を最小化する。
 
 ### 8.6 幾何計算パイプライン（Geometry Pipeline）
 - **スケール（ズーム）不変のブラシ曲線化**: `zoom` 倍率を受け取り、画面上のピクセル誤差許容値をワールド座標へスケーリングすることで、100% 表示でも 1600% 表示でも同一のアンカー削減率・滑らかさを保証する。

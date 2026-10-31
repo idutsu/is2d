@@ -3,13 +3,12 @@ use kurbo::{ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 pub(crate) use crate::canvas_tool::clear_selection;
 use crate::canvas_tool::{
-    ActiveCanvasDrag, CanvasState, EditorDoc, HoverTarget, MarqueeDrag, SelectDragState,
-    SelectSubMode,
+    ActiveCanvasDrag, HoverTarget, MarqueeDrag, SelectDragState, SelectSubMode, Session, Tab,
 };
 use crate::clipboard_ops::begin_move_selection_drag;
 #[cfg(test)]
 pub(crate) use crate::clipboard_ops::duplicate_selected_shapes_for_alt_drag;
-use crate::doc_actions::{Action, apply};
+use crate::doc_actions::{Action, ActionHost, apply};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{
     clear_active_frame_shapes, commit_moved_selection, copy_selected_shapes, cut_selected_shapes,
@@ -19,9 +18,7 @@ pub(crate) use crate::doc_actions::{
 use crate::select_ops::retain_selection_and_flush_deselected;
 #[cfg(not(test))]
 use crate::select_ops::{compute_hover_target, handle_canvas_double_click};
-pub(crate) use crate::select_ops::{
-    select_single_shape_at, set_moved_vertex, set_pulled_edge, toggle_shape_selection,
-};
+pub(crate) use crate::select_ops::{set_moved_vertex, set_pulled_edge, toggle_shape_selection};
 #[cfg(test)]
 pub(crate) use crate::select_ops::{
     apply_marquee_selection, apply_pull_edge_to_shape, compute_hover_target, enter_group_at,
@@ -29,25 +26,29 @@ pub(crate) use crate::select_ops::{
 };
 use crate::vector_engine::{FillShape, arc_mesh_to_shape, to_pos2};
 
+pub(crate) fn select_single_shape_at(host: &mut impl ActionHost, pt: Point) -> bool {
+    apply(host, Action::SelectSingleAt { pt }).as_bool()
+}
+
 // ============================================================================
 // 選択ツール（Tool::Select / V キー）・輪郭変形・アンカー編集・グループ・クリップボード
 // ============================================================================
 
 /// Flash風ドット柄（Polka-Dot）選択オーバーレイを描画
 pub(crate) fn draw_flash_selection_overlay(
-    app: &EditorDoc,
+    tab: &Tab,
     painter: &egui::Painter,
     shape_idx: usize,
 ) {
-    let zoom = app.viewport.zoom;
-    let pan = app.viewport.pan;
-    let Some(shape) = app.canvas.shapes.get(shape_idx) else {
+    let zoom = tab.view.zoom;
+    let pan = tab.view.pan;
+    let Some(shape) = tab.session.shapes.get(shape_idx) else {
         return;
     };
     let sel_screen_mesh = shape.cached_selection_screen_mesh(zoom, pan);
     painter.add(arc_mesh_to_shape(sel_screen_mesh));
     draw_shape_contour_lines(
-        app,
+        tab,
         painter,
         shape,
         Stroke::new(1.5_f32, Color32::from_rgb(0, 175, 255)),
@@ -56,17 +57,21 @@ pub(crate) fn draw_flash_selection_overlay(
 }
 
 pub(crate) fn draw_shape_contour_lines(
-    app: &EditorDoc,
+    tab: &Tab,
     painter: &egui::Painter,
     shape: &FillShape,
     stroke: Stroke,
     show_anchors: bool,
 ) {
-    let z = app.viewport.zoom as f64;
+    let z = tab.view.zoom as f64;
     let pad = 4.0 / z;
-    let view_rect = app
-        .viewport
-        .visible_world_rect(painter, !app.symbols.edit_stack.is_empty())
+    let view_rect = tab
+        .view
+        .visible_world_rect(
+            painter,
+            tab.doc.stage_size,
+            !tab.session.edit_stack.is_empty(),
+        )
         .inflate(pad, pad);
     for contour in shape.contours() {
         for seg in contour.segments.iter() {
@@ -81,8 +86,8 @@ pub(crate) fn draw_shape_contour_lines(
             if mid_dev <= 0.15 {
                 painter.line_segment(
                     [
-                        app.viewport.world_to_screen(seg.p0),
-                        app.viewport.world_to_screen(seg.p2),
+                        tab.view.world_to_screen(seg.p0),
+                        tab.view.world_to_screen(seg.p2),
                     ],
                     stroke,
                 );
@@ -94,8 +99,8 @@ pub(crate) fn draw_shape_contour_lines(
                     let curr = seg.eval(k as f64 / steps as f64);
                     painter.line_segment(
                         [
-                            app.viewport.world_to_screen(prev),
-                            app.viewport.world_to_screen(curr),
+                            tab.view.world_to_screen(prev),
+                            tab.view.world_to_screen(curr),
                         ],
                         stroke,
                     );
@@ -103,7 +108,7 @@ pub(crate) fn draw_shape_contour_lines(
                 }
             }
             if show_anchors {
-                let a = app.viewport.world_to_screen(seg.p0);
+                let a = tab.view.world_to_screen(seg.p0);
                 painter.circle_filled(a, 3.0, Color32::WHITE);
                 painter.circle_stroke(a, 3.0, Stroke::new(1.2_f32, Color32::from_rgb(30, 120, 230)));
             }
@@ -112,57 +117,58 @@ pub(crate) fn draw_shape_contour_lines(
 }
 
 pub(crate) fn handle_select_tool_input(
-    app: &mut EditorDoc,
+    host: &mut impl ActionHost,
     ui: &egui::Ui,
     response: &egui::Response,
     mouse_pt: Option<Point>,
 ) {
-    match app.ui.select_sub_mode {
+    let sub_mode = host.tool().select_sub_mode;
+    match sub_mode {
         SelectSubMode::AddAnchor => {
-            handle_anchor_edit_input(app, ui, response, mouse_pt, true);
+            handle_anchor_edit_input(host, ui, response, mouse_pt, true);
         }
         SelectSubMode::DeleteAnchor => {
-            handle_anchor_edit_input(app, ui, response, mouse_pt, false);
+            handle_anchor_edit_input(host, ui, response, mouse_pt, false);
         }
         SelectSubMode::Reshape => {
             let shift_held = ui.input(|i| i.modifiers.shift);
             let alt_held = ui.input(|i| i.modifiers.alt);
             if response.double_clicked_by(PointerButton::Primary) {
                 if let Some(pt) = mouse_pt {
-                    handle_canvas_double_click(app, pt);
+                    handle_canvas_double_click(host.tab_mut(), pt);
                 }
                 return;
             }
             if response.drag_started_by(PointerButton::Primary) {
                 let press_pt = ui
                     .input(|i| i.pointer.press_origin())
-                    .map(|p| app.viewport.screen_to_world(p));
+                    .map(|p| host.tab().view.screen_to_world(p));
                 if let Some(start_pt) = press_pt.or(mouse_pt) {
-                    start_reshape_drag(app, start_pt, shift_held, alt_held);
+                    start_reshape_drag(host, start_pt, shift_held, alt_held);
                     if let Some(curr_pt) = mouse_pt {
                         if (curr_pt - start_pt).hypot() > 1e-6 {
-                            update_reshape_drag(app, curr_pt);
+                            update_reshape_drag(host.tab_mut(), curr_pt);
                         }
                     }
                 }
             } else if response.dragged_by(PointerButton::Primary) {
                 if let Some(pt) = mouse_pt {
-                    update_reshape_drag(app, pt);
+                    update_reshape_drag(host.tab_mut(), pt);
                 }
             }
             if response.drag_stopped_by(PointerButton::Primary) {
-                finish_reshape_drag(app, mouse_pt);
+                finish_reshape_drag(host, mouse_pt);
             } else if response.clicked_by(PointerButton::Primary) {
                 if let Some(pt) = mouse_pt {
-                    handle_reshape_click(app, pt, shift_held);
+                    handle_reshape_click(host, pt, shift_held);
                 }
             }
 
-            if !matches!(app.canvas.drag, ActiveCanvasDrag::Select(_)) {
-                let zoom = app.viewport.zoom;
-                let sub_mode = app.ui.select_sub_mode;
-                app.canvas.hover_target = mouse_pt
-                    .map(|pt| compute_hover_target(&app.canvas, pt, zoom, sub_mode))
+            let tab = host.tab_mut();
+            if !matches!(tab.session.drag, ActiveCanvasDrag::Select(_)) {
+                let zoom = tab.view.zoom;
+                tab.session.hover_target = mouse_pt
+                    .map(|pt| compute_hover_target(&tab.session, pt, zoom, sub_mode))
                     .unwrap_or(HoverTarget::None);
             }
         }
@@ -170,14 +176,13 @@ pub(crate) fn handle_select_tool_input(
 }
 
 fn handle_anchor_edit_input(
-    app: &mut EditorDoc,
+    host: &mut impl ActionHost,
     ui: &egui::Ui,
     response: &egui::Response,
     mouse_pt: Option<Point>,
     is_add: bool,
 ) {
-    let zoom = app.viewport.zoom;
-    let sub_mode = app.ui.select_sub_mode;
+    let sub_mode = host.tool().select_sub_mode;
     let just_pressed = response.hovered() && ui.input(|i| i.pointer.primary_pressed());
     if just_pressed {
         if let Some(pt) = mouse_pt {
@@ -186,40 +191,59 @@ fn handle_anchor_edit_input(
             } else {
                 Action::DeleteAnchor { pt }
             };
-            apply(app, action);
+            apply(host, action);
         }
     }
-    app.canvas.hover_target = mouse_pt
-        .map(|pt| compute_hover_target(&app.canvas, pt, zoom, sub_mode))
+    let tab = host.tab_mut();
+    let zoom = tab.view.zoom;
+    tab.session.hover_target = mouse_pt
+        .map(|pt| compute_hover_target(&tab.session, pt, zoom, sub_mode))
         .unwrap_or(HoverTarget::None);
 }
 
-pub(crate) fn start_reshape_drag(app: &mut EditorDoc, pt: Point, shift_held: bool, alt_held: bool) {
-    app.ui.inspect_timeline_frame = false;
+pub(crate) fn start_reshape_drag(
+    host: &mut impl ActionHost,
+    pt: Point,
+    shift_held: bool,
+    alt_held: bool,
+) {
+    let sub_mode = host.tool().select_sub_mode;
+    host.tab_mut().view.inspect_timeline_frame = false;
     if shift_held {
-        app.canvas.drag =
+        host.tab_mut().session.drag =
             ActiveCanvasDrag::Select(SelectDragState::MarqueeSelect(MarqueeDrag::new(pt, true)));
         return;
     }
-    let mut target =
-        compute_hover_target(&app.canvas, pt, app.viewport.zoom, app.ui.select_sub_mode);
+    let mut target = compute_hover_target(
+        &host.tab().session,
+        pt,
+        host.tab().view.zoom,
+        sub_mode,
+    );
     if alt_held {
         if let Some(shape_idx) = target.shape_idx() {
-            if !app.canvas.selected_shapes.contains(&shape_idx) {
-                select_single_shape_at(app, pt);
+            if !host.tab().session.selected_shapes.contains(&shape_idx) {
+                select_single_shape_at(host, pt);
             }
-            let move_drag = begin_move_selection_drag(app, pt, true);
-            app.canvas.drag = ActiveCanvasDrag::Select(SelectDragState::MoveShape(move_drag));
+            let tab = host.tab_mut();
+            let move_drag = begin_move_selection_drag(tab, pt, true);
+            tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveShape(move_drag));
             return;
         }
     }
     if matches!(
         target,
         HoverTarget::Vertex { .. } | HoverTarget::Edge { .. }
-    ) && (!app.canvas.selected_shapes.is_empty() || app.canvas.has_unsliced_snapshot())
+    ) && (!host.tab().session.selected_shapes.is_empty()
+        || host.tab().session.has_unsliced_snapshot())
     {
-        clear_selection(app);
-        target = compute_hover_target(&app.canvas, pt, app.viewport.zoom, app.ui.select_sub_mode);
+        clear_selection(host.tab_mut());
+        target = compute_hover_target(
+            &host.tab().session,
+            pt,
+            host.tab().view.zoom,
+            sub_mode,
+        );
     }
     match target {
         HoverTarget::Vertex {
@@ -228,9 +252,10 @@ pub(crate) fn start_reshape_drag(app: &mut EditorDoc, pt: Point, shift_held: boo
             seg_idx,
             pos,
         } => {
-            let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
-            if let Some((orig_prev_ctrl, orig_curr_ctrl)) = app
-                .canvas
+            let tab = host.tab_mut();
+            let snapshot = tab.session.take_or_clone_unsliced_snapshot();
+            if let Some((orig_prev_ctrl, orig_curr_ctrl)) = tab
+                .session
                 .shapes
                 .get(shape_idx)
                 .and_then(|s| s.get_contour(contour_idx))
@@ -243,8 +268,8 @@ pub(crate) fn start_reshape_drag(app: &mut EditorDoc, pt: Point, shift_held: boo
                     Some((contour.segments[prev_idx].p1, contour.segments[seg_idx].p1))
                 })
             {
-                app.canvas.selected_shapes.clear();
-                app.canvas.drag = ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
+                tab.session.selected_shapes.clear();
+                tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
                     shape_idx,
                     contour_idx,
                     seg_idx,
@@ -264,17 +289,18 @@ pub(crate) fn start_reshape_drag(app: &mut EditorDoc, pt: Point, shift_held: boo
             t,
             closest_pos,
         } => {
-            let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
-            if let Some(orig_seg) = app
-                .canvas
+            let tab = host.tab_mut();
+            let snapshot = tab.session.take_or_clone_unsliced_snapshot();
+            if let Some(orig_seg) = tab
+                .session
                 .get_contour_segment(shape_idx, contour_idx, seg_idx)
             {
                 let grab_t = t.clamp(0.18, 0.82);
                 let grab_pos = orig_seg.eval(grab_t);
                 // 実カーソル位置 pt と曲線上の最近接点 closest_pos の差、および丸め前 t と grab_t の位置差を合わせた初期オフセット
                 let grab_offset = (closest_pos - pt) + (grab_pos - closest_pos);
-                app.canvas.selected_shapes.clear();
-                app.canvas.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
+                tab.session.selected_shapes.clear();
+                tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
                     shape_idx,
                     contour_idx,
                     seg_idx,
@@ -288,21 +314,22 @@ pub(crate) fn start_reshape_drag(app: &mut EditorDoc, pt: Point, shift_held: boo
             }
         }
         HoverTarget::Fill { shape_idx } => {
-            if !app.canvas.selected_shapes.contains(&shape_idx) {
-                select_single_shape_at(app, pt);
+            if !host.tab().session.selected_shapes.contains(&shape_idx) {
+                select_single_shape_at(host, pt);
             }
-            let move_drag = begin_move_selection_drag(app, pt, false);
-            app.canvas.drag = ActiveCanvasDrag::Select(SelectDragState::MoveShape(move_drag));
+            let tab = host.tab_mut();
+            let move_drag = begin_move_selection_drag(tab, pt, false);
+            tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveShape(move_drag));
         }
         HoverTarget::None => {
-            app.canvas.drag = ActiveCanvasDrag::Select(SelectDragState::MarqueeSelect(
-                MarqueeDrag::new(pt, false),
-            ));
+            host.tab_mut().session.drag = ActiveCanvasDrag::Select(
+                SelectDragState::MarqueeSelect(MarqueeDrag::new(pt, false)),
+            );
         }
     }
 }
 
-pub(crate) fn update_reshape_drag(app: &mut EditorDoc, pt: Point) {
+pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
     let vertex_drag_info = if let ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
         shape_idx,
         contour_idx,
@@ -311,7 +338,7 @@ pub(crate) fn update_reshape_drag(app: &mut EditorDoc, pt: Point) {
         orig_prev_ctrl,
         orig_curr_ctrl,
         ..
-    }) = &app.canvas.drag
+    }) = &tab.session.drag
     {
         Some((
             *shape_idx,
@@ -326,18 +353,18 @@ pub(crate) fn update_reshape_drag(app: &mut EditorDoc, pt: Point) {
     };
 
     if let Some((s_idx, c_idx, g_idx, orig_v, prev_c, curr_c)) = vertex_drag_info {
-        let snap_opt = find_snap_vertex(&app.canvas, pt, app.viewport.zoom, s_idx, c_idx, g_idx);
+        let snap_opt = find_snap_vertex(&tab.session, pt, tab.view.zoom, s_idx, c_idx, g_idx);
         let target_pt = snap_opt.unwrap_or(pt);
         if let ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
             snapped_to,
             last_pos,
             ..
-        }) = &mut app.canvas.drag
+        }) = &mut tab.session.drag
         {
             *snapped_to = snap_opt;
             *last_pos = target_pt;
         }
-        if let Some(shape) = app.canvas.shapes.get_mut(s_idx) {
+        if let Some(shape) = tab.session.shapes.get_mut(s_idx) {
             set_moved_vertex(shape, (c_idx, g_idx), orig_v, (prev_c, curr_c), target_pt);
             shape.rebuild_cache();
         }
@@ -345,7 +372,7 @@ pub(crate) fn update_reshape_drag(app: &mut EditorDoc, pt: Point) {
     }
 
     let mut move_delta: Option<KVec2> = None;
-    if let ActiveCanvasDrag::Select(select_drag) = &mut app.canvas.drag {
+    if let ActiveCanvasDrag::Select(select_drag) = &mut tab.session.drag {
         match select_drag {
             SelectDragState::MoveShape(drag) => {
                 move_delta = Some(drag.step(pt));
@@ -365,7 +392,7 @@ pub(crate) fn update_reshape_drag(app: &mut EditorDoc, pt: Point) {
             } => {
                 let target_pt = pt + *grab_offset;
                 *last_pos = target_pt;
-                if let Some(shape) = app.canvas.shapes.get_mut(*shape_idx) {
+                if let Some(shape) = tab.session.shapes.get_mut(*shape_idx) {
                     set_pulled_edge(
                         shape,
                         (*contour_idx, *seg_idx),
@@ -380,20 +407,20 @@ pub(crate) fn update_reshape_drag(app: &mut EditorDoc, pt: Point) {
         }
     }
     if let Some(delta) = move_delta {
-        app.canvas.translate_selected(delta);
+        tab.session.translate_selected(delta);
     }
 }
 
-fn finish_reshape_drag(app: &mut EditorDoc, mouse_pt: Option<Point>) {
+fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<Point>) {
     let ActiveCanvasDrag::Select(finished_drag) =
-        std::mem::replace(&mut app.canvas.drag, ActiveCanvasDrag::None)
+        std::mem::replace(&mut host.tab_mut().session.drag, ActiveCanvasDrag::None)
     else {
         return;
     };
     match finished_drag {
         SelectDragState::MoveShape(drag) => {
             apply(
-                app,
+                host,
                 Action::FinishMoveSelectionDrag {
                     total_delta: drag.total_delta,
                     undo_snapshot: drag.undo_snapshot,
@@ -404,7 +431,7 @@ fn finish_reshape_drag(app: &mut EditorDoc, mouse_pt: Option<Point>) {
         SelectDragState::MarqueeSelect(m) => {
             let end_pos = mouse_pt.unwrap_or(m.current_pos);
             apply(
-                app,
+                host,
                 Action::SelectMarquee {
                     p0: m.start_pos,
                     p1: end_pos,
@@ -424,7 +451,7 @@ fn finish_reshape_drag(app: &mut EditorDoc, mouse_pt: Option<Point>) {
             ..
         } => {
             apply(
-                app,
+                host,
                 Action::ReshapeEdge {
                     shape_idx,
                     contour_idx,
@@ -449,7 +476,7 @@ fn finish_reshape_drag(app: &mut EditorDoc, mouse_pt: Option<Point>) {
             ..
         } => {
             apply(
-                app,
+                host,
                 Action::MoveVertex {
                     shape_idx,
                     contour_idx,
@@ -464,29 +491,30 @@ fn finish_reshape_drag(app: &mut EditorDoc, mouse_pt: Option<Point>) {
     }
 }
 
-fn handle_reshape_click(app: &mut EditorDoc, pt: Point, shift_held: bool) {
-    app.ui.inspect_timeline_frame = false;
-    let zoom = app.viewport.zoom;
-    let sub_mode = app.ui.select_sub_mode;
-    let hit_shape = app
-        .canvas
+fn handle_reshape_click(host: &mut impl ActionHost, pt: Point, shift_held: bool) {
+    let sub_mode = host.tool().select_sub_mode;
+    let tab = host.tab_mut();
+    tab.view.inspect_timeline_frame = false;
+    let zoom = tab.view.zoom;
+    let hit_shape = tab
+        .session
         .topmost_shape_at(pt)
-        .or_else(|| compute_hover_target(&app.canvas, pt, zoom, sub_mode).shape_idx());
+        .or_else(|| compute_hover_target(&tab.session, pt, zoom, sub_mode).shape_idx());
     if shift_held {
         if let Some(shape_idx) = hit_shape {
-            toggle_shape_selection(app, shape_idx);
+            toggle_shape_selection(tab, shape_idx);
         }
     } else {
         match hit_shape {
-            Some(shape_idx) if app.canvas.selected_shapes.contains(&shape_idx) => {
-                let unit = app.canvas.expand_to_group_unit(shape_idx);
-                retain_selection_and_flush_deselected(app, &unit);
+            Some(shape_idx) if tab.session.selected_shapes.contains(&shape_idx) => {
+                let unit = tab.session.expand_to_group_unit(shape_idx);
+                retain_selection_and_flush_deselected(tab, &unit);
             }
             Some(_) => {
-                select_single_shape_at(app, pt);
+                select_single_shape_at(host, pt);
             }
             None => {
-                clear_selection(app);
+                clear_selection(tab);
             }
         }
     }
@@ -498,7 +526,7 @@ fn handle_reshape_click(app: &mut EditorDoc, pt: Point, shift_held: bool) {
 
 /// 頂点ドラッグ時に周囲の他の頂点へ吸着（スナップ）する座標を検索
 pub(crate) fn find_snap_vertex(
-    canvas: &CanvasState,
+    session: &Session,
     drag_pt: Point,
     zoom: f32,
     ignore_shape: usize,
@@ -508,11 +536,11 @@ pub(crate) fn find_snap_vertex(
     let snap_radius = 12.0 / (zoom as f64);
     let mut best_snap: Option<(f64, Point)> = None;
 
-    for (s_idx, shape) in canvas.shapes.iter().enumerate() {
+    for (s_idx, shape) in session.shapes.iter().enumerate() {
         let Some(bbox) = shape.geometry_bounding_box() else {
             continue;
         };
-        if !shape.is_raw_at_scope(&canvas.editing_group_path)
+        if !shape.is_raw_at_scope(&session.editing_group_path)
             || !bbox.inflate(snap_radius, snap_radius).contains(drag_pt)
         {
             continue;
@@ -533,12 +561,13 @@ pub(crate) fn find_snap_vertex(
 }
 
 pub(crate) fn draw_select_tool_cursor(
-    app: &EditorDoc,
+    tab: &Tab,
+    select_sub_mode: SelectSubMode,
     ctx: &egui::Context,
     painter: &egui::Painter,
     pos: Pos2,
 ) {
-    match &app.canvas.drag {
+    match &tab.session.drag {
         ActiveCanvasDrag::Select(SelectDragState::PullEdge {
             shape_idx,
             contour_idx,
@@ -546,12 +575,12 @@ pub(crate) fn draw_select_tool_cursor(
             ..
         }) => {
             ctx.set_cursor_icon(CursorIcon::Grabbing);
-            if app.ui.show_wireframe {
-                if let Some(seg) =
-                    app.canvas
-                        .get_contour_segment(*shape_idx, *contour_idx, *seg_idx)
+            if tab.view.show_wireframe {
+                if let Some(seg) = tab
+                    .session
+                    .get_contour_segment(*shape_idx, *contour_idx, *seg_idx)
                 {
-                    draw_highlighted_quad_segment(app, painter, seg);
+                    draw_highlighted_quad_segment(tab, painter, seg);
                 }
             }
             draw_flash_curve_cursor_badge(painter, pos);
@@ -559,7 +588,7 @@ pub(crate) fn draw_select_tool_cursor(
         ActiveCanvasDrag::Select(SelectDragState::MoveVertex { snapped_to, .. }) => {
             ctx.set_cursor_icon(CursorIcon::Grabbing);
             if let Some(snap_pt) = snapped_to {
-                let sp = app.viewport.world_to_screen(*snap_pt);
+                let sp = tab.view.world_to_screen(*snap_pt);
                 painter.circle_stroke(sp, 9.0, Stroke::new(2.5_f32, Color32::from_rgb(255, 50, 140)));
                 painter.circle_filled(sp, 4.0, Color32::from_rgb(255, 50, 140));
             }
@@ -571,17 +600,18 @@ pub(crate) fn draw_select_tool_cursor(
         ActiveCanvasDrag::Select(SelectDragState::MarqueeSelect { .. }) => {
             ctx.set_cursor_icon(CursorIcon::Crosshair);
         }
-        _ => draw_select_sub_mode_cursor(app, ctx, painter, pos),
+        _ => draw_select_sub_mode_cursor(tab, select_sub_mode, ctx, painter, pos),
     }
 }
 
 fn draw_select_sub_mode_cursor(
-    app: &EditorDoc,
+    tab: &Tab,
+    select_sub_mode: SelectSubMode,
     ctx: &egui::Context,
     painter: &egui::Painter,
     pos: Pos2,
 ) {
-    match app.ui.select_sub_mode {
+    match select_sub_mode {
         SelectSubMode::AddAnchor => {
             draw_anchor_edit_cursor_badge(painter, pos, true);
             if let HoverTarget::Edge {
@@ -590,16 +620,16 @@ fn draw_select_sub_mode_cursor(
                 seg_idx,
                 closest_pos,
                 ..
-            } = app.canvas.hover_target
+            } = tab.session.hover_target
             {
                 ctx.set_cursor_icon(CursorIcon::PointingHand);
-                if let Some(seg) = app
-                    .canvas
+                if let Some(seg) = tab
+                    .session
                     .get_contour_segment(shape_idx, contour_idx, seg_idx)
                 {
-                    draw_highlighted_quad_segment(app, painter, seg);
+                    draw_highlighted_quad_segment(tab, painter, seg);
                 }
-                let cp = app.viewport.world_to_screen(closest_pos);
+                let cp = tab.view.world_to_screen(closest_pos);
                 painter.circle_filled(cp, 5.5, Color32::from_rgb(30, 200, 95));
                 painter.circle_stroke(cp, 5.5, Stroke::new(2.0_f32, Color32::WHITE));
             } else {
@@ -608,26 +638,26 @@ fn draw_select_sub_mode_cursor(
         }
         SelectSubMode::DeleteAnchor => {
             draw_anchor_edit_cursor_badge(painter, pos, false);
-            if let HoverTarget::Vertex { pos: v_pos, .. } = app.canvas.hover_target {
+            if let HoverTarget::Vertex { pos: v_pos, .. } = tab.session.hover_target {
                 ctx.set_cursor_icon(CursorIcon::PointingHand);
-                let vp = app.viewport.world_to_screen(v_pos);
+                let vp = tab.view.world_to_screen(v_pos);
                 painter.circle_filled(vp, 6.0, Color32::from_rgb(235, 55, 55));
                 painter.circle_stroke(vp, 6.0, Stroke::new(2.0_f32, Color32::WHITE));
             } else {
                 ctx.set_cursor_icon(CursorIcon::Default);
             }
         }
-        SelectSubMode::Reshape => draw_reshape_hover_cursor(app, ctx, painter, pos),
+        SelectSubMode::Reshape => draw_reshape_hover_cursor(tab, ctx, painter, pos),
     }
 }
 
 fn draw_reshape_hover_cursor(
-    app: &EditorDoc,
+    tab: &Tab,
     ctx: &egui::Context,
     painter: &egui::Painter,
     pos: Pos2,
 ) {
-    match app.canvas.hover_target {
+    match tab.session.hover_target {
         HoverTarget::Vertex {
             pos: v_pos,
             shape_idx,
@@ -635,15 +665,15 @@ fn draw_reshape_hover_cursor(
             ..
         } => {
             ctx.set_cursor_icon(CursorIcon::PointingHand);
-            if app.ui.show_wireframe {
-                if let Some(contour) = app
-                    .canvas
+            if tab.view.show_wireframe {
+                if let Some(contour) = tab
+                    .session
                     .shapes
                     .get(shape_idx)
                     .and_then(|s| s.get_contour(contour_idx))
                 {
                     for seg in contour.segments.iter() {
-                        let p = app.viewport.world_to_screen(seg.p0);
+                        let p = tab.view.world_to_screen(seg.p0);
                         painter.circle_filled(p, 3.2, Color32::WHITE);
                         painter.circle_stroke(
                             p,
@@ -652,7 +682,7 @@ fn draw_reshape_hover_cursor(
                         );
                     }
                 }
-                let vp = app.viewport.world_to_screen(v_pos);
+                let vp = tab.view.world_to_screen(v_pos);
                 painter.circle_filled(vp, 5.5, Color32::from_rgb(255, 120, 40));
                 painter.circle_stroke(vp, 5.5, Stroke::new(2.0_f32, Color32::WHITE));
             }
@@ -666,15 +696,15 @@ fn draw_reshape_hover_cursor(
             ..
         } => {
             ctx.set_cursor_icon(CursorIcon::PointingHand);
-            if app.ui.show_wireframe {
-                if let Some(seg) = app
-                    .canvas
+            if tab.view.show_wireframe {
+                if let Some(seg) = tab
+                    .session
                     .get_contour_segment(shape_idx, contour_idx, seg_idx)
                 {
-                    draw_highlighted_quad_segment(app, painter, seg);
+                    draw_highlighted_quad_segment(tab, painter, seg);
                 }
                 painter.circle_filled(
-                    app.viewport.world_to_screen(closest_pos),
+                    tab.view.world_to_screen(closest_pos),
                     4.0,
                     Color32::from_rgb(0, 175, 255),
                 );
@@ -691,22 +721,22 @@ fn draw_reshape_hover_cursor(
 }
 
 /// ホバー・ドラッグ中の2次ベジェ曲線セグメントとその両端アンカーを強調描画（ハンドルは表示しない）
-pub(crate) fn draw_highlighted_quad_segment(app: &EditorDoc, painter: &egui::Painter, seg: QuadBez) {
+pub(crate) fn draw_highlighted_quad_segment(tab: &Tab, painter: &egui::Painter, seg: QuadBez) {
     let steps = 16;
     let mut prev = seg.p0;
     for k in 1..=steps {
         let curr = seg.eval(k as f64 / steps as f64);
         painter.line_segment(
             [
-                app.viewport.world_to_screen(prev),
-                app.viewport.world_to_screen(curr),
+                tab.view.world_to_screen(prev),
+                tab.view.world_to_screen(curr),
             ],
             Stroke::new(3.0_f32, Color32::from_rgb(0, 175, 255)),
         );
         prev = curr;
     }
     for end_pt in [seg.p0, seg.p2] {
-        let p = app.viewport.world_to_screen(end_pt);
+        let p = tab.view.world_to_screen(end_pt);
         painter.circle_filled(p, 4.0, Color32::WHITE);
         painter.circle_stroke(p, 4.0, Stroke::new(1.8_f32, Color32::from_rgb(0, 140, 230)));
     }

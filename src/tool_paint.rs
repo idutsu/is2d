@@ -1,8 +1,8 @@
 use eframe::egui::{self, Color32, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::Point;
 
-use crate::canvas_tool::{ActiveCanvasDrag, EditorDoc, Tool};
-use crate::doc_actions::{Action, apply};
+use crate::canvas_tool::{ActiveCanvasDrag, Tab, Tool};
+use crate::doc_actions::{Action, ActionHost, apply};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{bucket_fill_at, commit_raw_outline};
 use crate::vector_engine::{
@@ -19,21 +19,26 @@ const STROKE_TAIL_CHUNK_LEN: usize = 24;
 // ============================================================================
 
 pub(crate) fn handle_brush_or_eraser_input(
-    app: &mut EditorDoc,
+    host: &mut impl ActionHost,
     response: &egui::Response,
     mouse_pt: Option<Point>,
 ) {
-    let base_r = if app.ui.tool == Tool::Brush {
-        app.ui.brush_radius as f64
+    let active_tool = host.tool().tool;
+    let brush_radius = host.tool().brush_radius;
+    let eraser_radius = host.tool().eraser_radius;
+    let brush_color = host.tool().brush_color;
+
+    let base_r = if active_tool == Tool::Brush {
+        brush_radius as f64
     } else {
-        app.ui.eraser_radius as f64
+        eraser_radius as f64
     };
-    let preview_color = if app.ui.tool == Tool::Brush {
-        app.ui.brush_color
+    let preview_color = if active_tool == Tool::Brush {
+        brush_color
     } else {
         Color32::from_rgba_unmultiplied(255, 255, 255, 220)
     };
-    let z = (app.viewport.zoom as f64).clamp(MIN_VIEW_ZOOM as f64, MAX_VIEW_ZOOM as f64);
+    let z = (host.tab().view.zoom as f64).clamp(MIN_VIEW_ZOOM as f64, MAX_VIEW_ZOOM as f64);
     let screen_r = base_r * z;
     let min_sample_dist = (0.25 * screen_r).clamp(0.4, 1.5) / z;
 
@@ -41,7 +46,7 @@ pub(crate) fn handle_brush_or_eraser_input(
         let press_pt = response
             .ctx
             .input(|i| i.pointer.press_origin())
-            .map(|p| app.viewport.screen_to_world(p));
+            .map(|p| host.tab().view.screen_to_world(p));
         if let Some(start_pt) = press_pt.or(mouse_pt) {
             let mut stroke = vec![start_pt];
             if let Some(curr_pt) = mouse_pt {
@@ -51,17 +56,21 @@ pub(crate) fn handle_brush_or_eraser_input(
             }
             let tail_outline = generate_brush_outline_at_zoom(&stroke, base_r, z);
             let tail_mesh = tessellate_raw_polygon(&tail_outline, preview_color);
-            app.canvas.drag = ActiveCanvasDrag::PaintStroke {
+            let tab = host.tab_mut();
+            let zp = (tab.view.zoom, tab.view.pan);
+            tab.session.drag = ActiveCanvasDrag::PaintStroke {
                 stroke,
                 committed_world_mesh: egui::Mesh::default(),
                 committed_screen_mesh: egui::Mesh::default(),
-                committed_zoom_pan: (app.viewport.zoom, app.viewport.pan),
+                committed_zoom_pan: zp,
                 tail_outline,
                 tail_mesh,
                 tail_start_idx: 0,
             };
         }
     } else if response.dragged_by(PointerButton::Primary) {
+        let tab = host.tab_mut();
+        let curr_zp = (tab.view.zoom, tab.view.pan);
         if let (
             Some(pt),
             ActiveCanvasDrag::PaintStroke {
@@ -73,9 +82,8 @@ pub(crate) fn handle_brush_or_eraser_input(
                 tail_mesh,
                 tail_start_idx,
             },
-        ) = (mouse_pt, &mut app.canvas.drag)
+        ) = (mouse_pt, &mut tab.session.drag)
         {
-            let curr_zp = (app.viewport.zoom, app.viewport.pan);
             if *committed_zoom_pan != curr_zp {
                 *committed_screen_mesh = transform_mesh_to_screen(
                     committed_world_mesh,
@@ -104,45 +112,46 @@ pub(crate) fn handle_brush_or_eraser_input(
         }
     }
     if response.drag_stopped_by(PointerButton::Primary) {
-        if let ActiveCanvasDrag::PaintStroke { stroke, .. } = std::mem::take(&mut app.canvas.drag) {
+        let drag = std::mem::take(&mut host.tab_mut().session.drag);
+        if let ActiveCanvasDrag::PaintStroke { stroke, .. } = drag {
             if !stroke.is_empty() {
-                if app.ui.tool == Tool::Brush {
-                    let radius = app.ui.brush_radius;
-                    let color = app.ui.brush_color;
+                if active_tool == Tool::Brush {
                     apply(
-                        app,
+                        host,
                         Action::PaintStroke {
                             points: stroke,
-                            radius,
-                            color,
+                            radius: brush_radius,
+                            color: brush_color,
                         },
                     );
                 } else {
-                    let radius = app.ui.eraser_radius;
-                    apply(app, Action::EraseStroke { points: stroke, radius });
+                    apply(
+                        host,
+                        Action::EraseStroke {
+                            points: stroke,
+                            radius: eraser_radius,
+                        },
+                    );
                 }
             }
         }
     } else if response.clicked_by(PointerButton::Primary) {
         if let Some(pt) = mouse_pt {
-            if app.ui.tool == Tool::Brush {
-                let radius = app.ui.brush_radius;
-                let color = app.ui.brush_color;
+            if active_tool == Tool::Brush {
                 apply(
-                    app,
+                    host,
                     Action::PaintStroke {
                         points: vec![pt],
-                        radius,
-                        color,
+                        radius: brush_radius,
+                        color: brush_color,
                     },
                 );
             } else {
-                let radius = app.ui.eraser_radius;
                 apply(
-                    app,
+                    host,
                     Action::EraseStroke {
                         points: vec![pt],
-                        radius,
+                        radius: eraser_radius,
                     },
                 );
             }
@@ -223,17 +232,18 @@ fn symbol_binding_color_at(
 }
 
 /// 編集スコープおよび表示中の全レイヤーを対象に、指定座標 `pt` にヒットする最前面シェイプの色を返す（スポイト用）
-pub(crate) fn topmost_visible_color_at(app: &EditorDoc, pt: Point) -> Option<Color32> {
-    let num_layers = app.timeline.layers.len();
+pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> {
+    let num_layers = tab.doc.root.layers.len();
     if num_layers == 1
-        && app
-            .timeline
+        && tab
+            .doc
+            .root
             .layers
             .first()
             .is_some_and(|l| l.visible && !l.locked)
     {
-        return app
-            .canvas
+        return tab
+            .session
             .shapes
             .iter()
             .rev()
@@ -241,19 +251,19 @@ pub(crate) fn topmost_visible_color_at(app: &EditorDoc, pt: Point) -> Option<Col
             .map(|s| s.color);
     }
     for layer_idx in (0..num_layers).rev() {
-        let layer = &app.timeline.layers[layer_idx];
+        let layer = &tab.doc.root.layers[layer_idx];
         if !layer.visible {
             continue;
         }
         if layer.locked {
-            let cf = app.timeline.current_frame;
-            if let Some(col) = locked_layer_color_at(layer, cf, pt, &app.symbols.library, 0) {
+            let cf = tab.doc.root.current_frame;
+            if let Some(col) = locked_layer_color_at(layer, cf, pt, &tab.doc.library, 0) {
                 return Some(col);
             }
         } else {
             let lid = layer.id;
-            if let Some(hit) = app
-                .canvas
+            if let Some(hit) = tab
+                .session
                 .shapes
                 .iter()
                 .rev()
@@ -266,16 +276,17 @@ pub(crate) fn topmost_visible_color_at(app: &EditorDoc, pt: Point) -> Option<Col
     None
 }
 
-/// スポイトツール（色抽出）：指定位置 `pt` の最前面シェイプの色を抽出し、`app.ui.brush_color` に設定する
-pub(crate) fn pick_color_at(app: &mut EditorDoc, pt: Point) -> Option<Color32> {
-    let picked = topmost_visible_color_at(app, pt)?;
-    app.ui.brush_color = picked;
+/// スポイトツール（色抽出）：指定位置 `pt` の最前面シェイプの色を抽出し、`host.tool_mut().brush_color` に設定する
+pub(crate) fn pick_color_at(host: &mut impl ActionHost, pt: Point) -> Option<Color32> {
+    let picked = topmost_visible_color_at(host.tab(), pt)?;
+    host.tool_mut().brush_color = picked;
     Some(picked)
 }
 
 /// 進行中のブラシ・消しゴムストロークの増分プレビューメッシュを描画する
 pub(crate) fn draw_active_stroke_preview(
-    app: &EditorDoc,
+    tab: &Tab,
+    active_tool: Tool,
     artwork_painter: &egui::Painter,
     gizmo_painter: &egui::Painter,
 ) {
@@ -286,7 +297,7 @@ pub(crate) fn draw_active_stroke_preview(
         tail_outline,
         tail_mesh,
         ..
-    } = &app.canvas.drag
+    } = &tab.session.drag
     else {
         return;
     };
@@ -294,13 +305,13 @@ pub(crate) fn draw_active_stroke_preview(
         return;
     }
     if !committed_world_mesh.is_empty() {
-        let mesh = if *committed_zoom_pan == (app.viewport.zoom, app.viewport.pan) {
+        let mesh = if *committed_zoom_pan == (tab.view.zoom, tab.view.pan) {
             committed_screen_mesh.clone()
         } else {
             transform_mesh_to_screen(
                 committed_world_mesh,
-                app.viewport.zoom,
-                app.viewport.pan,
+                tab.view.zoom,
+                tab.view.pan,
                 false,
             )
         };
@@ -309,19 +320,19 @@ pub(crate) fn draw_active_stroke_preview(
     if !tail_mesh.is_empty() {
         artwork_painter.add(egui::Shape::Mesh(transform_mesh_to_screen(
             tail_mesh,
-            app.viewport.zoom,
-            app.viewport.pan,
+            tab.view.zoom,
+            tab.view.pan,
             false,
         )));
     }
 
-    if app.ui.tool == Tool::Eraser {
+    if active_tool == Tool::Eraser {
         let n = tail_outline.len();
         for i in 0..n {
             gizmo_painter.line_segment(
                 [
-                    app.viewport.world_to_screen(tail_outline[i]),
-                    app.viewport.world_to_screen(tail_outline[(i + 1) % n]),
+                    tab.view.world_to_screen(tail_outline[i]),
+                    tab.view.world_to_screen(tail_outline[(i + 1) % n]),
                 ],
                 Stroke::new(1.2_f32, Color32::from_rgb(220, 60, 60)),
             );

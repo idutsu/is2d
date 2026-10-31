@@ -2,10 +2,10 @@ use eframe::egui::{self, Color32, CursorIcon, Pos2, Stroke, Vec2};
 use kurbo::{Point, Rect as KRect};
 
 use crate::canvas_tool::{
-    ActiveCanvasDrag, CoalesceKey, EditorDoc, NoticeKind, SelectDragState, SelectSubMode, Tool,
-    TransformDragState, active_scope_layer_id, draw_registration_cross,
+    ActiveCanvasDrag, Clipboard, CoalesceKey, NoticeKind, SelectDragState, SelectSubMode, Tab,
+    Tool, ToolSettings, TransformDragState, active_scope_layer_id, draw_registration_cross,
 };
-use crate::project_io::{DocumentTabManager, PendingCloseConfirm};
+use crate::project_io::PendingCloseConfirm;
 use crate::symbol::{SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 use crate::symbol_ops::selected_single_symbol_info;
 pub(crate) use crate::timeline_ui::icons;
@@ -183,15 +183,16 @@ pub(crate) enum UiAction {
 // ------------------------------------------------------------------------
 
 pub(crate) fn draw_top_menu_bar(
-    doc: &mut EditorDoc,
+    tab: &mut Tab,
+    clipboard: &Clipboard,
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
     egui::TopBottomPanel::top("top_menu_bar").show(ctx, |ui| {
         egui::menu::bar(ui, |ui| {
             draw_file_menu(actions, ui);
-            draw_edit_menu(doc, actions, ui);
-            draw_view_menu(doc, actions, ui);
+            draw_edit_menu(tab, clipboard, actions, ui);
+            draw_view_menu(tab, actions, ui);
         });
     });
 }
@@ -241,16 +242,22 @@ fn draw_file_menu(actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     });
 }
 
-fn draw_edit_menu(doc: &EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+fn draw_edit_menu(
+    tab: &Tab,
+    clipboard: &Clipboard,
+    actions: &mut Vec<UiAction>,
+    ui: &mut egui::Ui,
+) {
     ui.menu_button("編集", |ui| {
         ui.set_min_width(230.0);
-        let can_undo = !doc.history.undo_stack.is_empty();
-        let can_redo = !doc.history.redo_stack.is_empty();
-        let has_selection = !doc.canvas.selected_shapes.is_empty();
-        let can_paste = !doc.canvas.clipboard.is_empty()
-            && doc
-                .timeline
-                .is_layer_editable_by_id(active_scope_layer_id(&doc.canvas, &doc.timeline));
+        let can_undo = !tab.history.undo_stack.is_empty();
+        let can_redo = !tab.history.redo_stack.is_empty();
+        let has_selection = !tab.session.selected_shapes.is_empty();
+        let can_paste = !clipboard.shapes.is_empty()
+            && tab
+                .doc
+                .root
+                .is_layer_editable_by_id(active_scope_layer_id(&tab.session, &tab.doc.root));
 
         if menu_action_button(ui, can_undo, "元に戻す", &format!("{MOD_KEY}+Z")) {
             actions.push(UiAction::Undo);
@@ -287,7 +294,7 @@ fn draw_edit_menu(doc: &EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egui::U
     });
 }
 
-fn draw_view_menu(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+fn draw_view_menu(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     ui.menu_button("表示", |ui| {
         ui.set_min_width(220.0);
         if menu_action_button(ui, true, "100%表示", &format!("{MOD_KEY}+1")) {
@@ -301,7 +308,7 @@ fn draw_view_menu(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egu
 
         if ui
             .checkbox(
-                &mut doc.viewport.clip_outside_stage,
+                &mut tab.view.clip_outside_stage,
                 format!("枠外を隠す ({MOD_KEY}+3)"),
             )
             .clicked()
@@ -309,13 +316,13 @@ fn draw_view_menu(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egu
             ui.close_menu();
         }
         if ui
-            .checkbox(&mut doc.ui.show_wireframe, "アンカーを表示")
+            .checkbox(&mut tab.view.show_wireframe, "アンカーを表示")
             .clicked()
         {
             ui.close_menu();
         }
         if ui
-            .checkbox(&mut doc.ui.onion_skin_enabled, "オニオンスキン (O)")
+            .checkbox(&mut tab.view.onion_skin_enabled, "オニオンスキン (O)")
             .clicked()
         {
             ui.close_menu();
@@ -328,7 +335,7 @@ fn draw_view_menu(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egu
 // ------------------------------------------------------------------------
 
 pub(crate) fn draw_left_toolbar(
-    doc: &mut EditorDoc,
+    tool: &mut ToolSettings,
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
@@ -347,12 +354,12 @@ pub(crate) fn draw_left_toolbar(
                 let btn_size = Vec2::new(34.0, 30.0);
 
                 // (1) メインツール選択ボタン群（Tool::ALL を自動ループ）
-                draw_left_main_tool_buttons(doc, actions, ui, btn_size);
+                draw_left_main_tool_buttons(tool, actions, ui, btn_size);
 
                 ui.separator();
 
                 // (2) 塗りカラーピッカーボタン
-                draw_color_picker_controls(doc, ui);
+                draw_color_picker_controls(tool, ui);
             });
         });
 }
@@ -374,7 +381,7 @@ fn add_left_selectable_icon(
 }
 
 fn draw_left_main_tool_buttons(
-    doc: &EditorDoc,
+    tool_settings: &ToolSettings,
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
     btn_size: Vec2,
@@ -383,7 +390,7 @@ fn draw_left_main_tool_buttons(
         if add_left_selectable_icon(
             ui,
             btn_size,
-            doc.ui.tool == tool,
+            tool_settings.tool == tool,
             tool_icon(tool),
             tool_tooltip(tool),
         ) {
@@ -392,8 +399,8 @@ fn draw_left_main_tool_buttons(
     }
 }
 
-fn draw_color_picker_controls(doc: &mut EditorDoc, ui: &mut egui::Ui) {
-    ui.color_edit_button_srgba(&mut doc.ui.brush_color)
+fn draw_color_picker_controls(tool: &mut ToolSettings, ui: &mut egui::Ui) {
+    ui.color_edit_button_srgba(&mut tool.brush_color)
         .on_hover_text("塗りカラー変更");
 }
 
@@ -402,8 +409,8 @@ fn draw_color_picker_controls(doc: &mut EditorDoc, ui: &mut egui::Ui) {
 // ------------------------------------------------------------------------
 
 pub(crate) fn draw_document_tab_bar(
-    doc: &EditorDoc,
-    tabs: &DocumentTabManager,
+    tabs: &[Tab],
+    active_idx: usize,
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
@@ -413,20 +420,13 @@ pub(crate) fn draw_document_tab_bar(
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    let active_idx = tabs.active_index;
-                    let active_dirty = doc.history.is_dirty();
-                    let tab_count = tabs.tabs.len();
 
                     let mut switch_target = None;
                     let mut close_target = None;
 
-                    for idx in 0..tab_count {
+                    for (idx, tab) in tabs.iter().enumerate() {
                         let is_active = idx == active_idx;
-                        let title = tabs.tabs[idx].display_title(
-                            doc.ui.current_file_path.as_deref(),
-                            active_dirty,
-                            is_active,
-                        );
+                        let title = tab.display_title();
                         let bg_fill = if is_active {
                             Color32::from_rgb(255, 255, 255)
                         } else {
@@ -454,24 +454,17 @@ pub(crate) fn draw_document_tab_bar(
                                     if btn_resp.clicked() {
                                         switch_target = Some(idx);
                                     }
-                                    btn_resp.on_hover_ui(|ui| {
-                                        let path_ref = if is_active {
-                                            doc.ui.current_file_path.as_deref()
-                                        } else {
-                                            tabs.tabs[idx].file_path.as_deref()
-                                        };
-                                        match path_ref {
-                                            Some(p) => {
-                                                ui.label(format!(
-                                                    "{}\nクリックしてこのドキュメントへ切り替え",
-                                                    p.display()
-                                                ));
-                                            }
-                                            None => {
-                                                ui.label(
-                                                    "未保存ドキュメント\nクリックしてこのドキュメントへ切り替え",
-                                                );
-                                            }
+                                    btn_resp.on_hover_ui(|ui| match tab.file.as_deref() {
+                                        Some(p) => {
+                                            ui.label(format!(
+                                                "{}\nクリックしてこのドキュメントへ切り替え",
+                                                p.display()
+                                            ));
+                                        }
+                                        None => {
+                                            ui.label(
+                                                "未保存ドキュメント\nクリックしてこのドキュメントへ切り替え",
+                                            );
                                         }
                                     });
                                     if ui
@@ -515,7 +508,7 @@ pub(crate) fn draw_document_tab_bar(
 // ------------------------------------------------------------------------
 
 pub(crate) fn draw_stage_header_bar(
-    doc: &EditorDoc,
+    tab: &Tab,
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
@@ -530,10 +523,10 @@ pub(crate) fn draw_stage_header_bar(
         .show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                draw_group_breadcrumb(doc, actions, ui);
+                draw_group_breadcrumb(tab, actions, ui);
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let zoom_pct = (doc.viewport.zoom * 100.0).round() as i32;
+                    let zoom_pct = (tab.view.zoom * 100.0).round() as i32;
                     ui.label(
                         egui::RichText::new(format!("{zoom_pct}%"))
                             .size(11.5)
@@ -544,14 +537,14 @@ pub(crate) fn draw_stage_header_bar(
         });
 }
 
-fn draw_group_breadcrumb(doc: &EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+fn draw_group_breadcrumb(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     let mut items: Vec<String> = vec![format!("{} シーン 1", icons::SCENE_MOVIE)];
-    for sess in &doc.symbols.edit_stack {
+    for sess in &tab.session.edit_stack {
         for &gid in &sess.parent_editing_group_path {
             items.push(format!("{} Group #{gid}", icons::GROUP));
         }
-        let sym_name = doc
-            .symbols
+        let sym_name = tab
+            .doc
             .library
             .iter()
             .find(|s| s.id == sess.symbol_id)
@@ -559,7 +552,7 @@ fn draw_group_breadcrumb(doc: &EditorDoc, actions: &mut Vec<UiAction>, ui: &mut 
             .unwrap_or("Symbol");
         items.push(format!("{} {sym_name}", icons::SYMBOL));
     }
-    for &gid in &doc.canvas.editing_group_path {
+    for &gid in &tab.session.editing_group_path {
         items.push(format!("{} Group #{gid}", icons::GROUP));
     }
 
@@ -610,7 +603,8 @@ fn draw_group_breadcrumb(doc: &EditorDoc, actions: &mut Vec<UiAction>, ui: &mut 
 // ------------------------------------------------------------------------
 
 pub(crate) fn draw_right_properties_panel(
-    doc: &mut EditorDoc,
+    tab: &mut Tab,
+    tool: &mut ToolSettings,
     right_panel_tab: &mut RightPanelTab,
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
@@ -634,10 +628,10 @@ pub(crate) fn draw_right_properties_panel(
 
             // アクティブなタブに応じた中身を描画
             match *right_panel_tab {
-                RightPanelTab::Properties => draw_properties_tab(doc, actions, ui),
-                RightPanelTab::Color => draw_color_palette_section(doc, ui),
-                RightPanelTab::Library => draw_library_tab(doc, actions, ui),
-                RightPanelTab::Canvas => draw_canvas_tab(doc, actions, ui),
+                RightPanelTab::Properties => draw_properties_tab(tab, tool, actions, ui),
+                RightPanelTab::Color => draw_color_palette_section(tool, ui),
+                RightPanelTab::Library => draw_library_tab(tab, actions, ui),
+                RightPanelTab::Canvas => draw_canvas_tab(tab, actions, ui),
             }
         });
 }
@@ -686,13 +680,18 @@ fn draw_right_panel_tab_bar(right_panel_tab: &mut RightPanelTab, ui: &mut egui::
     });
 }
 
-/// 「プロパティ」タブの描画（現在選択中の `doc.ui.tool` に応じてツール別の設定メソッドへ振り分け）
-fn draw_properties_tab(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+/// 「プロパティ」タブの描画（現在選択中の `tool.tool` に応じてツール別の設定メソッドへ振り分け）
+fn draw_properties_tab(
+    tab: &mut Tab,
+    tool: &mut ToolSettings,
+    actions: &mut Vec<UiAction>,
+    ui: &mut egui::Ui,
+) {
     // 現在選択中のツール見出し
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(tool_icon(doc.ui.tool)).size(16.0));
+        ui.label(egui::RichText::new(tool_icon(tool.tool)).size(16.0));
         ui.label(
-            egui::RichText::new(tool_label(doc.ui.tool))
+            egui::RichText::new(tool_label(tool.tool))
                 .size(12.5)
                 .strong()
                 .color(Color32::from_rgb(35, 40, 50)),
@@ -703,37 +702,38 @@ fn draw_properties_tab(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mu
     ui.add_space(6.0);
 
     // 選択中のツールごとに専用メソッドへディスパッチ
-    match doc.ui.tool {
-        Tool::Select => draw_select_tool_properties(doc, actions, ui),
-        Tool::Transform => draw_transform_tool_properties(doc, actions, ui),
+    match tool.tool {
+        Tool::Select => draw_select_tool_properties(tab, tool, actions, ui),
+        Tool::Transform => draw_transform_tool_properties(tab, actions, ui),
         Tool::Brush => {
-            draw_radius_slider_section(ui, "ブラシサイズ", &mut doc.ui.brush_radius, 0.5, 70.0, 0.5)
+            draw_radius_slider_section(ui, "ブラシサイズ", &mut tool.brush_radius, 0.5, 70.0, 0.5)
         }
         Tool::Eraser => draw_radius_slider_section(
             ui,
             "消しゴムサイズ",
-            &mut doc.ui.eraser_radius,
+            &mut tool.eraser_radius,
             1.0,
             80.0,
             1.0,
         ),
-        Tool::Bucket | Tool::Eyedropper => draw_color_palette_section(doc, ui),
+        Tool::Bucket | Tool::Eyedropper => draw_color_palette_section(tool, ui),
     }
 
     // 下部ぶら下がりセクション：
     // - タイムラインのフレームを明示的に選択したときは「キーフレーム / トゥイーン設定（回転の向き等）」
     // - キャンバス上のシンボルを選択したとき（選択 / 自由変形ツール時）は「シンボル再生オプション」
-    if doc.ui.inspect_timeline_frame {
-        draw_selected_frame_properties(doc, actions, ui);
+    if tab.view.inspect_timeline_frame {
+        draw_selected_frame_properties(tab, actions, ui);
     }
-    if matches!(doc.ui.tool, Tool::Select | Tool::Transform) {
-        draw_selected_symbol_properties(doc, actions, ui);
+    if matches!(tool.tool, Tool::Select | Tool::Transform) {
+        draw_selected_symbol_properties(tab, actions, ui);
     }
 }
 
 /// 選択ツール (`Tool::Select`) のプロパティ設定項目
 fn draw_select_tool_properties(
-    doc: &mut EditorDoc,
+    tab: &mut Tab,
+    tool: &ToolSettings,
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
 ) {
@@ -746,7 +746,7 @@ fn draw_select_tool_properties(
             .add_sized(
                 Vec2::new(half_w, 28.0),
                 egui::Button::new(format!("{} アンカー追加", icons::ADD))
-                    .selected(doc.ui.select_sub_mode == SelectSubMode::AddAnchor),
+                    .selected(tool.select_sub_mode == SelectSubMode::AddAnchor),
             )
             .on_hover_text("輪郭上をクリックしてアンカーポイントを追加 (+)")
             .clicked()
@@ -757,7 +757,7 @@ fn draw_select_tool_properties(
             .add_sized(
                 Vec2::new(half_w, 28.0),
                 egui::Button::new(format!("{} アンカー削除", icons::REMOVE))
-                    .selected(doc.ui.select_sub_mode == SelectSubMode::DeleteAnchor),
+                    .selected(tool.select_sub_mode == SelectSubMode::DeleteAnchor),
             )
             .on_hover_text("アンカーポイントをクリックして削除 (-)")
             .clicked()
@@ -772,19 +772,19 @@ fn draw_select_tool_properties(
         .add_sized(
             Vec2::new(ui.available_width(), 28.0),
             egui::Button::new(format!("{} アンカーを表示", icons::WIREFRAME))
-                .selected(doc.ui.show_wireframe),
+                .selected(tab.view.show_wireframe),
         )
         .on_hover_text("選択ツール使用中にベクター輪郭のアンカーポイントとパスを表示")
         .clicked()
     {
-        doc.ui.show_wireframe = !doc.ui.show_wireframe;
+        tab.view.show_wireframe = !tab.view.show_wireframe;
     }
 
     ui.add_space(10.0);
     ui.separator();
     ui.add_space(6.0);
 
-    draw_symbol_and_group_section(doc, actions, ui);
+    draw_symbol_and_group_section(tab, actions, ui);
 
     ui.add_space(10.0);
     ui.separator();
@@ -792,7 +792,7 @@ fn draw_select_tool_properties(
 
     draw_panel_section_label(ui, "消去アクション", 4.0);
 
-    let has_sel = !doc.canvas.selected_shapes.is_empty();
+    let has_sel = !tab.session.selected_shapes.is_empty();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let half_w = (ui.available_width() - 6.0) * 0.5;
@@ -807,11 +807,11 @@ fn draw_select_tool_properties(
         {
             actions.push(UiAction::DeleteSelected);
         }
-        let has_any = doc
-            .canvas
+        let has_any = tab
+            .session
             .shapes
             .iter()
-            .any(|s| s.is_in_editing_scope(&doc.canvas.editing_group_path));
+            .any(|s| s.is_in_editing_scope(&tab.session.editing_group_path));
         if ui
             .add_enabled(
                 has_any,
@@ -826,11 +826,11 @@ fn draw_select_tool_properties(
 }
 
 /// 選択・自由変形ツール共通の「シンボル・グループ」操作UIセクション
-fn draw_symbol_and_group_section(doc: &EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     draw_panel_section_label(ui, "シンボル・グループ", 4.0);
 
-    let has_sel = !doc.canvas.selected_shapes.is_empty();
-    let has_group = doc.canvas.selection_has_group();
+    let has_sel = !tab.session.selected_shapes.is_empty();
+    let has_group = tab.session.selection_has_group();
     if ui
         .add_enabled(
             has_sel,
@@ -878,11 +878,11 @@ fn draw_symbol_and_group_section(doc: &EditorDoc, actions: &mut Vec<UiAction>, u
 
 /// 自由変形ツール (`Tool::Transform`) のプロパティ設定項目
 fn draw_transform_tool_properties(
-    doc: &EditorDoc,
+    tab: &Tab,
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
 ) {
-    let has_sel = !doc.canvas.selected_shapes.is_empty();
+    let has_sel = !tab.session.selected_shapes.is_empty();
 
     draw_panel_section_label(ui, "変形アクション", 4.0);
 
@@ -950,7 +950,7 @@ fn draw_transform_tool_properties(
 
     if ui
         .add_enabled(
-            has_sel && doc.canvas.has_custom_transform_pivot(),
+            has_sel && tab.session.has_custom_transform_pivot(),
             egui::Button::new(format!(
                 "{} 変形中心（ピボット）をリセット",
                 icons::PIVOT_RESET
@@ -967,7 +967,7 @@ fn draw_transform_tool_properties(
     ui.separator();
     ui.add_space(6.0);
 
-    draw_symbol_and_group_section(doc, actions, ui);
+    draw_symbol_and_group_section(tab, actions, ui);
 }
 
 /// ブラシ・消しゴムのサイズスライダー共通UIセクション
@@ -990,7 +990,7 @@ fn draw_radius_slider_section(
 }
 
 /// カラーピッカーと10色プリセットパレットの共通UIセクション
-fn draw_color_palette_section(doc: &mut EditorDoc, ui: &mut egui::Ui) {
+fn draw_color_palette_section(tool: &mut ToolSettings, ui: &mut egui::Ui) {
     const PRESET_COLORS: [Color32; 10] = [
         Color32::from_rgb(40, 45, 55),
         Color32::from_rgb(255, 255, 255),
@@ -1006,8 +1006,8 @@ fn draw_color_palette_section(doc: &mut EditorDoc, ui: &mut egui::Ui) {
 
     draw_panel_section_label(ui, "現在の塗りカラー", 4.0);
     ui.horizontal(|ui| {
-        ui.color_edit_button_srgba(&mut doc.ui.brush_color);
-        let [r, g, b, _] = doc.ui.brush_color.to_srgba_unmultiplied();
+        ui.color_edit_button_srgba(&mut tool.brush_color);
+        let [r, g, b, _] = tool.brush_color.to_srgba_unmultiplied();
         ui.label(
             egui::RichText::new(format!("#{r:02X}{g:02X}{b:02X}"))
                 .monospace()
@@ -1024,7 +1024,7 @@ fn draw_color_palette_section(doc: &mut EditorDoc, ui: &mut egui::Ui) {
             ui.spacing_mut().item_spacing.x = 6.0;
             let swatch_w = ((ui.available_width() - 6.0 * 4.0) / 5.0).max(24.0);
             for &col in row {
-                let is_active = doc.ui.brush_color == col;
+                let is_active = tool.brush_color == col;
                 let (rect, resp) =
                     ui.allocate_exact_size(Vec2::new(swatch_w, 24.0), egui::Sense::click());
                 let painter = ui.painter();
@@ -1042,7 +1042,7 @@ fn draw_color_palette_section(doc: &mut EditorDoc, ui: &mut egui::Ui) {
                     ),
                 );
                 if resp.clicked() {
-                    doc.ui.brush_color = col;
+                    tool.brush_color = col;
                 }
             }
         });
@@ -1051,7 +1051,7 @@ fn draw_color_palette_section(doc: &mut EditorDoc, ui: &mut egui::Ui) {
 }
 
 /// 「キャンバス」タブの描画（ステージサイズ・枠外マスク・ウィンドウに合わせる・表示倍率リセット）
-fn draw_canvas_tab(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     draw_panel_section_label(ui, "キャンバス情報", 6.0);
 
     ui.horizontal(|ui| {
@@ -1060,8 +1060,8 @@ fn draw_canvas_tab(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut eg
                 .size(11.5)
                 .color(Color32::from_rgb(70, 78, 90)),
         );
-        let mut w = doc.viewport.stage_size.x.round() as i32;
-        let mut h = doc.viewport.stage_size.y.round() as i32;
+        let mut w = tab.doc.stage_size.x.round() as i32;
+        let mut h = tab.doc.stage_size.y.round() as i32;
         let w_resp = ui
             .add(
                 egui::DragValue::new(&mut w)
@@ -1084,18 +1084,18 @@ fn draw_canvas_tab(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut eg
             if w_resp.changed() {
                 w as f32
             } else {
-                doc.viewport.stage_size.x
+                tab.doc.stage_size.x
             },
             if h_resp.changed() {
                 h as f32
             } else {
-                doc.viewport.stage_size.y
+                tab.doc.stage_size.y
             },
         );
-        if (w_resp.changed() || h_resp.changed()) && next_size != doc.viewport.stage_size {
+        if (w_resp.changed() || h_resp.changed()) && next_size != tab.doc.stage_size {
             actions.push(UiAction::SetStageSize(next_size));
         }
-        if doc.history.last_coalesce_key == Some(CoalesceKey::StageSize)
+        if tab.history.last_coalesce_key == Some(CoalesceKey::StageSize)
             && (w_resp.drag_stopped()
                 || w_resp.lost_focus()
                 || h_resp.drag_stopped()
@@ -1118,14 +1118,14 @@ fn draw_canvas_tab(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut eg
     if ui
         .add_sized(
             Vec2::new(ui.available_width(), 28.0),
-            egui::Button::new("枠外を隠す").selected(doc.viewport.clip_outside_stage),
+            egui::Button::new("枠外を隠す").selected(tab.view.clip_outside_stage),
         )
         .on_hover_text(format!(
             "ステージ枠の外側にはみ出た図形を隠して完成画面をプレビューします ({MOD_KEY}+3)"
         ))
         .clicked()
     {
-        doc.viewport.clip_outside_stage = !doc.viewport.clip_outside_stage;
+        tab.view.clip_outside_stage = !tab.view.clip_outside_stage;
     }
 
     ui.add_space(6.0);
@@ -1176,12 +1176,12 @@ pub(crate) fn draw_panel_section_label(ui: &mut egui::Ui, title: &str, bottom_sp
 
 /// タイムラインでキーフレーム（またはトゥイーン区間）を明示的に選択しているときにプロパティパネル下部に表示するトゥイーン設定（回転の向き）
 pub(crate) fn draw_selected_frame_properties(
-    doc: &EditorDoc,
+    tab: &Tab,
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
 ) {
     let Some((kf_start_frame, current_rotate, is_complete)) =
-        doc.timeline.active_tween_keyframe_info()
+        tab.doc.root.active_tween_keyframe_info()
     else {
         return;
     };
@@ -1262,16 +1262,16 @@ pub(crate) fn draw_selected_frame_properties(
 
 /// キャンバス上で単一のシンボルインスタンスを選択しているときにプロパティパネル下部に表示する再生オプション（1回再生 / ループ再生 / 任意のフレーム）
 pub(crate) fn draw_selected_symbol_properties(
-    doc: &mut EditorDoc,
+    tab: &mut Tab,
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
 ) {
-    let Some((binding, sym_name, sym_total_frames)) = selected_single_symbol_info(doc) else {
+    let Some((binding, sym_name, sym_total_frames)) = selected_single_symbol_info(tab) else {
         if matches!(
-            doc.history.last_coalesce_key,
+            tab.history.last_coalesce_key,
             Some(CoalesceKey::SymbolPlayback(_))
         ) {
-            doc.history.end_coalesce();
+            tab.history.end_coalesce();
         }
         return;
     };
@@ -1430,11 +1430,11 @@ pub(crate) fn draw_selected_symbol_properties(
 
     if (next_mode != binding.loop_mode || !drag_active)
         && matches!(
-            doc.history.last_coalesce_key,
+            tab.history.last_coalesce_key,
             Some(CoalesceKey::SymbolPlayback(_))
         )
     {
-        doc.history.end_coalesce();
+        tab.history.end_coalesce();
     }
     if next_mode != binding.loop_mode || next_first_1based != current_first_1based {
         actions.push(UiAction::SetSymbolPlayback {
@@ -1459,11 +1459,11 @@ pub(crate) fn draw_selected_symbol_properties(
 
 /// 「ライブラリ」タブの描画（シンボルのプレビュー・一覧・名前変更・ステージ配置・編集・削除）
 pub(crate) fn draw_library_tab(
-    doc: &mut EditorDoc,
+    tab: &mut Tab,
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
 ) {
-    let has_sel = !doc.canvas.selected_shapes.is_empty();
+    let has_sel = !tab.session.selected_shapes.is_empty();
     if ui
         .add_enabled(
             has_sel,
@@ -1480,7 +1480,7 @@ pub(crate) fn draw_library_tab(
     ui.separator();
     ui.add_space(6.0);
 
-    if doc.symbols.library.is_empty() {
+    if tab.doc.library.is_empty() {
         ui.label(
             egui::RichText::new(
                 "シンボルがありません。\n図形を選択して F8 キーを押すとシンボルを作成できます。",
@@ -1491,41 +1491,42 @@ pub(crate) fn draw_library_tab(
         return;
     }
 
-    doc.symbols.ensure_valid_selection();
+    tab.ensure_valid_library_selection();
 
-    if let Some(sel_id) = doc.symbols.selected_library_symbol {
-        draw_selected_library_symbol_controls(doc, actions, ui, sel_id);
+    if let Some(sel_id) = tab.view.selected_library_symbol {
+        draw_selected_library_symbol_controls(tab, actions, ui, sel_id);
     }
 
     draw_panel_section_label(
         ui,
-        &format!("登録シンボル一覧 ({})", doc.symbols.library.len()),
+        &format!("登録シンボル一覧 ({})", tab.doc.library.len()),
         4.0,
     );
-    draw_library_symbol_list(doc, actions, ui);
+    draw_library_symbol_list(tab, actions, ui);
 }
 
 /// ライブラリで選択中のシンボルのミニプレビューおよび操作ボタン群（配置・編集・削除）を描画
 fn draw_selected_library_symbol_controls(
-    doc: &EditorDoc,
+    tab: &Tab,
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
     sel_id: u64,
 ) {
-    if let Some(sym) = doc.symbols.find_symbol(sel_id) {
-        draw_symbol_mini_preview(doc, ui, sym);
+    if let Some(sym) = tab.doc.find_symbol(sel_id) {
+        draw_symbol_mini_preview(tab, ui, sym);
         ui.add_space(6.0);
     }
 
-    let is_editing_self = doc
-        .symbols
+    let is_editing_self = tab
+        .session
         .edit_stack
         .iter()
         .any(|sess| sess.symbol_id == sel_id);
-    let can_place = doc.symbols.can_place_symbol_in_current_context(sel_id)
-        && doc
-            .timeline
-            .is_layer_editable_by_id(active_scope_layer_id(&doc.canvas, &doc.timeline));
+    let can_place = tab.can_place_symbol_in_current_context(sel_id)
+        && tab
+            .doc
+            .root
+            .is_layer_editable_by_id(active_scope_layer_id(&tab.session, &tab.doc.root));
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let place_w = (ui.available_width() - 116.0).max(70.0);
@@ -1569,12 +1570,12 @@ fn draw_selected_library_symbol_controls(
 
 /// ライブラリ登録シンボルのスクロール一覧を描画し、選択切替・名前変更コマンドを発行する
 fn draw_library_symbol_list(
-    doc: &EditorDoc,
+    tab: &Tab,
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
 ) {
-    let entries: Vec<(u64, String, usize)> = doc
-        .symbols
+    let entries: Vec<(u64, String, usize)> = tab
+        .doc
         .library
         .iter()
         .map(|s| (s.id, s.name.clone(), s.timeline.total_frames.max(1)))
@@ -1583,13 +1584,13 @@ fn draw_library_symbol_list(
     let mut rename_req: Option<(u64, String)> = None;
     let mut clear_renaming_id: Option<u64> = None;
 
-    let active_doc_id = doc.doc_id;
+    let active_doc_id = tab.id;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (sym_id, mut name, total_frames) in entries {
                 ui.push_id((active_doc_id, sym_id), |ui| {
-                    let is_sel = doc.symbols.selected_library_symbol == Some(sym_id);
+                    let is_sel = tab.view.selected_library_symbol == Some(sym_id);
                     let row_fill = if is_sel {
                         Color32::from_rgb(220, 234, 252)
                     } else {
@@ -1660,7 +1661,7 @@ fn draw_library_symbol_list(
 }
 
 /// ライブラリパネル上部にシンボルの縮小ベクタープレビューを描画する
-fn draw_symbol_mini_preview(doc: &EditorDoc, ui: &mut egui::Ui, sym: &SymbolDef) {
+fn draw_symbol_mini_preview(tab: &Tab, ui: &mut egui::Ui, sym: &SymbolDef) {
     let (rect, _) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 110.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
@@ -1671,7 +1672,7 @@ fn draw_symbol_mini_preview(doc: &EditorDoc, ui: &mut egui::Ui, sym: &SymbolDef)
         Stroke::new(1.0_f32, Color32::from_rgb(206, 212, 222)),
     );
 
-    let Some(bbox) = sym.preview_local_bounds(doc.symbols.revision, &doc.symbols.library) else {
+    let Some(bbox) = sym.preview_local_bounds(tab.doc.revision, &tab.doc.library) else {
         return;
     };
     let w = (bbox.x1 - bbox.x0).max(1.0) as f32;
@@ -1686,7 +1687,7 @@ fn draw_symbol_mini_preview(doc: &EditorDoc, ui: &mut egui::Ui, sym: &SymbolDef)
     let origin_scr = Pos2::new(pan.x, pan.y);
 
     if let Some(mesh) =
-        sym.cached_preview_screen_mesh(scale, pan, doc.symbols.revision, &doc.symbols.library)
+        sym.cached_preview_screen_mesh(scale, pan, tab.doc.revision, &tab.doc.library)
     {
         painter.add(arc_mesh_to_shape(mesh));
         if rect.contains(origin_scr) {
@@ -1700,34 +1701,35 @@ fn draw_symbol_mini_preview(doc: &EditorDoc, ui: &mut egui::Ui, sym: &SymbolDef)
 // ============================================================================
 
 pub(crate) fn draw_tool_cursor_and_feedback(
-    doc: &EditorDoc,
+    tab: &Tab,
+    tool: &ToolSettings,
     ctx: &egui::Context,
     painter: &egui::Painter,
     pos: Pos2,
 ) {
-    match doc.ui.tool {
+    match tool.tool {
         Tool::Brush | Tool::Eraser => {
             ctx.set_cursor_icon(CursorIcon::Crosshair);
-            let r = if doc.ui.tool == Tool::Brush {
-                doc.ui.brush_radius
+            let r = if tool.tool == Tool::Brush {
+                tool.brush_radius
             } else {
-                doc.ui.eraser_radius
+                tool.eraser_radius
             };
-            let ring_col = if doc.ui.tool == Tool::Brush {
-                doc.ui.brush_color
+            let ring_col = if tool.tool == Tool::Brush {
+                tool.brush_color
             } else {
                 Color32::from_rgb(220, 60, 60)
             };
-            painter.circle_stroke(pos, r * doc.viewport.zoom, Stroke::new(1.5_f32, ring_col));
+            painter.circle_stroke(pos, r * tab.view.zoom, Stroke::new(1.5_f32, ring_col));
         }
         Tool::Bucket => {
             ctx.set_cursor_icon(CursorIcon::PointingHand);
-            painter.circle_filled(pos, 5.5, doc.ui.brush_color);
+            painter.circle_filled(pos, 5.5, tool.brush_color);
             painter.circle_stroke(pos, 5.5, Stroke::new(1.8_f32, Color32::WHITE));
         }
         Tool::Eyedropper => {
             let hovered_color =
-                crate::tool_paint::topmost_visible_color_at(doc, doc.viewport.screen_to_world(pos));
+                crate::tool_paint::topmost_visible_color_at(tab, tab.view.screen_to_world(pos));
             ctx.set_cursor_icon(if hovered_color.is_some() {
                 CursorIcon::PointingHand
             } else {
@@ -1736,61 +1738,66 @@ pub(crate) fn draw_tool_cursor_and_feedback(
             crate::tool_paint::draw_eyedropper_cursor_badge(
                 painter,
                 pos,
-                hovered_color.unwrap_or(doc.ui.brush_color),
+                hovered_color.unwrap_or(tool.brush_color),
                 hovered_color.is_some(),
             );
         }
         Tool::Transform => {
-            crate::tool_transform::draw_transform_tool_cursor(doc, ctx, painter, pos)
+            crate::tool_transform::draw_transform_tool_cursor(tab, ctx, painter, pos)
         }
-        Tool::Select => crate::tool_select::draw_select_tool_cursor(doc, ctx, painter, pos),
+        Tool::Select => {
+            crate::tool_select::draw_select_tool_cursor(tab, tool.select_sub_mode, ctx, painter, pos)
+        }
     }
 }
 
 /// キャンバス上の全シェイプ（オニオンスキン・全可視レイヤー合成）、選択オーバーレイ、グループ選択枠、自由変形ボックス、矩形選択枠、およびストロークプレビューを描画
 pub(crate) fn draw_canvas_contents(
-    doc: &EditorDoc,
+    tab: &Tab,
+    tool: &ToolSettings,
     timeline_ui: &TimelineUiState,
     painter: &egui::Painter,
 ) {
-    let in_group_edit = !doc.canvas.editing_group_path.is_empty();
-    let in_symbol_edit = !doc.symbols.edit_stack.is_empty();
-    let zoom = doc.viewport.zoom;
-    let pan = doc.viewport.pan;
-    let artwork_painter =
-        doc.viewport
-            .artwork_painter(painter, painter.clip_rect(), in_symbol_edit);
+    let in_group_edit = !tab.session.editing_group_path.is_empty();
+    let in_symbol_edit = !tab.session.edit_stack.is_empty();
+    let zoom = tab.view.zoom;
+    let pan = tab.view.pan;
+    let stage_size = tab.doc.stage_size;
+    let artwork_painter = tab
+        .view
+        .artwork_painter(painter, painter.clip_rect(), stage_size, in_symbol_edit);
 
     // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画
-    if let Some(session) = doc.symbols.edit_stack.last() {
+    if let Some(session) = tab.session.edit_stack.last() {
         if let Some(mesh) = session.backdrop_cel.cached_backdrop_screen_mesh(
             session.parent_timeline.current_frame,
             zoom,
             pan,
-            &doc.symbols.library,
+            &tab.doc.library,
         ) {
             artwork_painter.add(arc_mesh_to_shape(mesh));
         }
     }
 
     // 0.5 オニオンスキン描画（前のフレーム＝青系半透明、次のフレーム＝緑系半透明）
-    if doc.ui.onion_skin_enabled {
-        draw_onion_skins(doc, &artwork_painter);
+    if tab.view.onion_skin_enabled {
+        draw_onion_skins(tab, &artwork_painter);
     }
 
-    // 1. 下層レイヤーから上層レイヤーへ順に合成描画（`doc.canvas.shapes` はレイヤー順に整列されているため単一カーソルで O(N) 走査）
-    let num_layers = doc.timeline.layers.len();
+    // 1. 下層レイヤーから上層レイヤーへ順に合成描画（`tab.session.shapes` はレイヤー順に整列されているため単一カーソルで O(N) 走査）
+    let num_layers = tab.doc.root.layers.len();
     let mut selected_group_boxes: Vec<(u64, Option<KRect>, KRect, Option<Point>)> = Vec::new();
-    let (is_sel, has_sel) = doc.canvas.selected_shape_mask();
-    let curr_f = doc.timeline.current_frame;
-    let view_world_rect = doc
-        .viewport
-        .visible_world_rect(&artwork_painter, in_symbol_edit);
+    let (is_sel, has_sel) = tab.session.selected_shape_mask();
+    let curr_f = tab.doc.root.current_frame;
+    let view_world_rect =
+        tab.view
+            .visible_world_rect(&artwork_painter, stage_size, in_symbol_edit);
     let mut shape_cursor = 0usize;
 
     for layer_idx in 0..num_layers {
-        let Some((lid, is_visible, is_locked)) = doc
-            .timeline
+        let Some((lid, is_visible, is_locked)) = tab
+            .doc
+            .root
             .layers
             .get(layer_idx)
             .map(|l| (l.id, l.visible, l.locked))
@@ -1801,13 +1808,13 @@ pub(crate) fn draw_canvas_contents(
             continue;
         }
         if timeline_ui.is_playing || is_locked {
-            if let Some(mesh) = doc.timeline.resolved_cel_screen_mesh(
+            if let Some(mesh) = tab.doc.root.resolved_cel_screen_mesh(
                 layer_idx,
                 curr_f,
                 zoom,
                 pan,
                 in_group_edit && !timeline_ui.is_playing,
-                &doc.symbols.library,
+                &tab.doc.library,
             ) {
                 artwork_painter.add(arc_mesh_to_shape(mesh));
             }
@@ -1815,24 +1822,26 @@ pub(crate) fn draw_canvas_contents(
         }
 
         if num_layers > 1 {
-            while shape_cursor < doc.canvas.shapes.len()
-                && doc.canvas.shapes[shape_cursor].layer_id != lid
-                && doc
-                    .timeline
-                    .layer_index_by_id(doc.canvas.shapes[shape_cursor].layer_id)
+            while shape_cursor < tab.session.shapes.len()
+                && tab.session.shapes[shape_cursor].layer_id != lid
+                && tab
+                    .doc
+                    .root
+                    .layer_index_by_id(tab.session.shapes[shape_cursor].layer_id)
                     .is_none_or(|ord| ord < layer_idx)
             {
                 shape_cursor += 1;
             }
         }
         let start_idx = shape_cursor;
-        while shape_cursor < doc.canvas.shapes.len()
-            && (num_layers <= 1 || doc.canvas.shapes[shape_cursor].layer_id == lid)
+        while shape_cursor < tab.session.shapes.len()
+            && (num_layers <= 1 || tab.session.shapes[shape_cursor].layer_id == lid)
         {
             shape_cursor += 1;
         }
         draw_editable_layer_shapes(
-            doc,
+            tab,
+            tool,
             (&artwork_painter, painter),
             start_idx..shape_cursor,
             view_world_rect,
@@ -1841,47 +1850,48 @@ pub(crate) fn draw_canvas_contents(
         );
     }
 
-    doc.viewport
-        .draw_stage_foreground_overlay(painter, painter.clip_rect(), in_symbol_edit);
-    draw_selected_group_and_symbol_boxes(doc, painter, &selected_group_boxes);
+    tab.view
+        .draw_stage_foreground_overlay(painter, painter.clip_rect(), stage_size, in_symbol_edit);
+    draw_selected_group_and_symbol_boxes(tab, painter, &selected_group_boxes);
 
-    if doc.ui.tool == Tool::Transform {
-        crate::tool_transform::draw_free_transform_box(&doc.canvas, painter, &doc.viewport);
+    if tool.tool == Tool::Transform {
+        crate::tool_transform::draw_free_transform_box(&tab.session, painter, &tab.view);
     }
-    draw_active_marquee_box(doc, painter);
-    crate::tool_paint::draw_active_stroke_preview(doc, &artwork_painter, painter);
+    draw_active_marquee_box(tab, painter);
+    crate::tool_paint::draw_active_stroke_preview(tab, tool.tool, &artwork_painter, painter);
 }
 
 /// 編集可能レイヤー1枚分の図形スライス範囲 `range` を描画し、選択中のグループ／シンボル外枠情報を集計する
 fn draw_editable_layer_shapes(
-    doc: &EditorDoc,
+    tab: &Tab,
+    tool: &ToolSettings,
     (artwork_painter, gizmo_painter): (&egui::Painter, &egui::Painter),
     range: std::ops::Range<usize>,
     view_world_rect: KRect,
     (is_sel, has_sel): (&[bool], bool),
     selected_group_boxes: &mut Vec<(u64, Option<KRect>, KRect, Option<Point>)>,
 ) {
-    let show_wf = doc.ui.tool == Tool::Select
-        && (doc.ui.show_wireframe || doc.ui.select_sub_mode != SelectSubMode::Reshape);
+    let show_wf = tool.tool == Tool::Select
+        && (tab.view.show_wireframe || tool.select_sub_mode != SelectSubMode::Reshape);
     let active_affine_drag = matches!(
-        doc.canvas.drag,
+        tab.session.drag,
         ActiveCanvasDrag::Transform(
             TransformDragState::Scale { .. } | TransformDragState::Rotate { .. }
         )
     );
-    let in_group_edit = !doc.canvas.editing_group_path.is_empty();
-    let zoom = doc.viewport.zoom;
-    let pan = doc.viewport.pan;
+    let in_group_edit = !tab.session.editing_group_path.is_empty();
+    let zoom = tab.view.zoom;
+    let pan = tab.view.pan;
 
     for idx in range {
-        let Some(shape) = doc.canvas.shapes.get(idx) else {
+        let Some(shape) = tab.session.shapes.get(idx) else {
             continue;
         };
-        let in_scope = shape.is_in_editing_scope(&doc.canvas.editing_group_path);
+        let in_scope = shape.is_in_editing_scope(&tab.session.editing_group_path);
         let shape_sel =
             in_scope && has_sel && !active_affine_drag && is_sel.get(idx).copied().unwrap_or(false);
         let sel_gid = if shape_sel {
-            let gid = shape.active_group_id_at_scope(&doc.canvas.editing_group_path);
+            let gid = shape.active_group_id_at_scope(&tab.session.editing_group_path);
             if let Some(gid) = gid {
                 let geom_bbox = shape.geometry_bounding_box();
                 let fallback_bbox = shape.bounding_box();
@@ -1918,9 +1928,9 @@ fn draw_editable_layer_shapes(
         if !in_scope {
             continue;
         }
-        if show_wf && shape.is_raw_at_scope(&doc.canvas.editing_group_path) {
+        if show_wf && shape.is_raw_at_scope(&tab.session.editing_group_path) {
             crate::tool_select::draw_shape_contour_lines(
-                doc,
+                tab,
                 gizmo_painter,
                 shape,
                 Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(30, 80, 180, 140)),
@@ -1928,27 +1938,27 @@ fn draw_editable_layer_shapes(
             );
         }
         if shape_sel && sel_gid.is_none() {
-            crate::tool_select::draw_flash_selection_overlay(doc, gizmo_painter, idx);
+            crate::tool_select::draw_flash_selection_overlay(tab, gizmo_painter, idx);
         }
     }
 }
 
 /// 選択中のグループ塊（緑枠）およびシンボルインスタンス（水色枠＋基準点 `＋` マーク）、シンボル編集中の基準点を描画
 fn draw_selected_group_and_symbol_boxes(
-    doc: &EditorDoc,
+    tab: &Tab,
     painter: &egui::Painter,
     selected_group_boxes: &[(u64, Option<KRect>, KRect, Option<Point>)],
 ) {
     for &(_, geom_bbox, fallback_bbox, sym_reg) in selected_group_boxes {
         let g_bbox = geom_bbox.unwrap_or(fallback_bbox);
-        let rect = doc.viewport.world_rect_to_screen(g_bbox).expand(2.0);
+        let rect = tab.view.world_rect_to_screen(g_bbox).expand(2.0);
         if let Some(origin) = sym_reg {
             painter.rect_stroke(
                 rect,
                 0.0,
                 Stroke::new(1.8_f32, Color32::from_rgb(0, 165, 255)),
             );
-            draw_registration_cross(painter, doc.viewport.world_to_screen(origin), 3.2, true);
+            draw_registration_cross(painter, tab.view.world_to_screen(origin), 3.2, true);
         } else {
             painter.rect_stroke(
                 rect,
@@ -1958,64 +1968,64 @@ fn draw_selected_group_and_symbol_boxes(
         }
     }
 
-    if let Some(session) = doc.symbols.edit_stack.last() {
+    if let Some(session) = tab.session.edit_stack.last() {
         let origin = session.instance_xform * Point::ZERO;
-        draw_registration_cross(painter, doc.viewport.world_to_screen(origin), 5.5, true);
+        draw_registration_cross(painter, tab.view.world_to_screen(origin), 5.5, true);
     }
 }
 
-fn draw_onion_skins(doc: &EditorDoc, painter: &egui::Painter) {
-    let curr_f = doc.timeline.current_frame;
-    for step in (1..=doc.ui.onion_prev_frames).rev() {
+fn draw_onion_skins(tab: &Tab, painter: &egui::Painter) {
+    let curr_f = tab.doc.root.current_frame;
+    for step in (1..=tab.view.onion_prev_frames).rev() {
         if curr_f >= step {
             let alpha = (84 / step as u8).clamp(24, 84);
-            draw_onion_skin_frame(doc, painter, curr_f - step, [45, 115, 245], alpha);
+            draw_onion_skin_frame(tab, painter, curr_f - step, [45, 115, 245], alpha);
         }
     }
-    for step in 1..=doc.ui.onion_next_frames {
+    for step in 1..=tab.view.onion_next_frames {
         let f = curr_f + step;
-        if f < doc.timeline.total_frames {
+        if f < tab.doc.root.total_frames {
             let alpha = (84 / step as u8).clamp(24, 84);
-            draw_onion_skin_frame(doc, painter, f, [35, 185, 105], alpha);
+            draw_onion_skin_frame(tab, painter, f, [35, 185, 105], alpha);
         }
     }
 }
 
 fn draw_onion_skin_frame(
-    doc: &EditorDoc,
+    tab: &Tab,
     painter: &egui::Painter,
     frame: usize,
     tint_rgb: [u8; 3],
     alpha: u8,
 ) {
-    let zoom = doc.viewport.zoom;
-    let pan = doc.viewport.pan;
-    for (layer_idx, layer) in doc.timeline.layers.iter().enumerate() {
+    let zoom = tab.view.zoom;
+    let pan = tab.view.pan;
+    for (layer_idx, layer) in tab.doc.root.layers.iter().enumerate() {
         if !layer.visible {
             continue;
         }
-        if let Some(mesh) = doc.timeline.resolved_cel_onion_mesh(
+        if let Some(mesh) = tab.doc.root.resolved_cel_onion_mesh(
             layer_idx,
             frame,
             zoom,
             pan,
             (tint_rgb, alpha),
-            &doc.symbols.library,
+            &tab.doc.library,
         ) {
             painter.add(arc_mesh_to_shape(mesh));
         }
     }
 }
 
-fn draw_active_marquee_box(doc: &EditorDoc, painter: &egui::Painter) {
-    let active_marquee = match &doc.canvas.drag {
+fn draw_active_marquee_box(tab: &Tab, painter: &egui::Painter) {
+    let active_marquee = match &tab.session.drag {
         ActiveCanvasDrag::Select(SelectDragState::MarqueeSelect(m))
         | ActiveCanvasDrag::Transform(TransformDragState::MarqueeSelect(m)) => Some(*m),
         _ => None,
     };
     if let Some(m) = active_marquee {
-        let marquee_rect = doc
-            .viewport
+        let marquee_rect = tab
+            .view
             .world_rect_to_screen(KRect::from_points(m.start_pos, m.current_pos));
         painter.rect_filled(
             marquee_rect,
@@ -2032,12 +2042,12 @@ fn draw_active_marquee_box(doc: &EditorDoc, painter: &egui::Painter) {
 
 /// 未保存変更があるタブを閉じる際の非ブロッキング確認モーダルダイアログ（egui Window）を描画する
 pub(crate) fn draw_unsaved_close_confirm_modal(
-    doc: &EditorDoc,
-    tabs: &DocumentTabManager,
+    tabs: &[Tab],
+    pending_close_confirm: &Option<PendingCloseConfirm>,
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
-    let Some(pending) = tabs.pending_close_confirm.clone() else {
+    let Some(pending) = pending_close_confirm.clone() else {
         return;
     };
     let tab_index = match &pending {
@@ -2047,15 +2057,8 @@ pub(crate) fn draw_unsaved_close_confirm_modal(
         } => *current_tab_index,
     };
     let tab_name = tabs
-        .tabs
         .get(tab_index)
-        .map(|slot| {
-            slot.display_title(
-                doc.ui.current_file_path.as_deref(),
-                false,
-                tab_index == tabs.active_index,
-            )
-        })
+        .map(|tab| tab.base_title())
         .unwrap_or_else(|| "無題".to_owned());
 
     egui::Area::new(egui::Id::new("unsaved_close_confirm_backdrop"))

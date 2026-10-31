@@ -22,10 +22,10 @@ use kurbo::Point;
 
 #[cfg(test)]
 pub(crate) use canvas_tool::MAX_UNDO_HISTORY;
-use canvas_tool::{EditorDoc, NoticeKind, SelectSubMode, Tool};
+use canvas_tool::{Clipboard, NoticeKind, SelectSubMode, StatusToast, Tab, Tool, ToolSettings};
 use doc_actions::{apply, Action, ActionHost};
 use panels::{RightPanelTab, UiAction};
-use project_io::{DocumentTabManager, ProjectWorkspace};
+use project_io::{PendingCloseConfirm, ProjectWorkspace};
 #[cfg(test)]
 pub(crate) use timeline::Timeline;
 use timeline_ui::{TimelineHost, TimelineUiState};
@@ -115,57 +115,178 @@ fn key_pressed_no_repeat(i: &egui::InputState, target: Key) -> bool {
 // メインアプリケーション状態 & ショートカット・アクションディスパッチ制御
 // ============================================================================
 
-/// アプリケーション全体のルート構造体（単一ドキュメント状態 `EditorDoc`・右パネルタブ・タイムラインUI状態・複数タブ管理で構成）
-#[derive(Default)]
+/// アプリケーション全体のルート構造体（開いているタブ列 `tabs`・現在タブ `active`・アプリ共通のツール/クリップボード/トースト・パネルUI状態）
 pub(crate) struct Is2dApp {
-    /// 現在アクティブなドキュメント状態（UI・ビューポート・作業キャンバス・タイムライン・シンボル・Undo履歴）
-    pub(crate) doc: EditorDoc,
+    /// 開いている全ドキュメントタブ（各タブが独立した `Document` / `Session` / `View` / `UndoHistory` を保持）
+    pub(crate) tabs: Vec<Tab>,
+    /// 現在アクティブなタブのインデックス
+    pub(crate) active: usize,
+    /// アプリ全体で共有するツール・ブラシサイズ・カラー設定
+    pub(crate) tool: ToolSettings,
+    /// アプリ全体で共有するクリップボード状態
+    pub(crate) clipboard: Clipboard,
+    /// アプリ全体で共有する一時トースト通知
+    pub(crate) toast: Option<StatusToast>,
     /// 右端パネルで現在選択中のタブ（プロパティ / カラー / ライブラリ / キャンバス）
     pub(crate) right_panel_tab: RightPanelTab,
     /// タイムラインパネルの再生・スクロール・D&D等の一時UI状態
     pub(crate) timeline_ui: TimelineUiState,
-    /// 複数ドキュメント同時オープン用のタブ管理状態（`EditorDoc` 一括スワップ方式）
-    pub(crate) tabs: DocumentTabManager,
+    /// 次回新規作成される無題タブの連番（「無題-N」）
+    pub(crate) next_untitled_number: usize,
+    /// 次回新規作成されるドキュメントタブの一意ID
+    pub(crate) next_doc_id: u64,
+    /// 直近にOSウィンドウへ送信したタイトル文字列（重複送信防止用キャッシュ）
+    pub(crate) last_window_title: String,
+    /// 未保存変更確認モーダル（egui ウィンドウ）の表示待機状態
+    pub(crate) pending_close_confirm: Option<PendingCloseConfirm>,
+    /// 全タブの未保存確認が完了し、OSウィンドウのクローズを許可するフラグ
+    pub(crate) allow_viewport_close: bool,
+}
+
+#[allow(dead_code)]
+pub(crate) type App = Is2dApp;
+
+impl Default for Is2dApp {
+    fn default() -> Self {
+        Self {
+            tabs: vec![Tab::new_empty(1, 1)],
+            active: 0,
+            tool: ToolSettings::default(),
+            clipboard: Clipboard::default(),
+            toast: None,
+            right_panel_tab: RightPanelTab::default(),
+            timeline_ui: TimelineUiState::default(),
+            next_untitled_number: 2,
+            next_doc_id: 2,
+            last_window_title: String::new(),
+            pending_close_confirm: None,
+            allow_viewport_close: false,
+        }
+    }
 }
 
 impl std::ops::Deref for Is2dApp {
-    type Target = EditorDoc;
+    type Target = Tab;
     fn deref(&self) -> &Self::Target {
-        &self.doc
+        &self.tabs[self.active]
     }
 }
 
 impl std::ops::DerefMut for Is2dApp {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.doc
+        &mut self.tabs[self.active]
     }
 }
 
 impl ActionHost for Is2dApp {
-    fn doc(&self) -> &EditorDoc {
-        &self.doc
+    fn tab(&self) -> &Tab {
+        &self.tabs[self.active]
     }
 
-    fn doc_mut(&mut self) -> &mut EditorDoc {
-        &mut self.doc
+    fn tab_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.active]
+    }
+
+    fn tool(&self) -> &ToolSettings {
+        &self.tool
+    }
+
+    fn tool_mut(&mut self) -> &mut ToolSettings {
+        &mut self.tool
+    }
+
+    fn clipboard(&self) -> &Clipboard {
+        &self.clipboard
+    }
+
+    fn clipboard_mut(&mut self) -> &mut Clipboard {
+        &mut self.clipboard
+    }
+
+    fn toast(&self) -> &Option<StatusToast> {
+        &self.toast
+    }
+
+    fn toast_mut(&mut self) -> &mut Option<StatusToast> {
+        &mut self.toast
+    }
+
+    fn parts_mut(
+        &mut self,
+    ) -> (
+        &mut Tab,
+        &mut ToolSettings,
+        &mut Clipboard,
+        &mut Option<StatusToast>,
+    ) {
+        (
+            &mut self.tabs[self.active],
+            &mut self.tool,
+            &mut self.clipboard,
+            &mut self.toast,
+        )
     }
 
     fn stop_playback(&mut self) {
-        self.timeline_ui.stop_playback(&mut self.doc);
+        self.timeline_ui.stop_playback(&mut self.tabs[self.active]);
     }
 }
 
 impl ProjectWorkspace for Is2dApp {
-    fn tabs(&self) -> &DocumentTabManager {
+    fn tabs(&self) -> &[Tab] {
         &self.tabs
     }
 
-    fn tabs_mut(&mut self) -> &mut DocumentTabManager {
+    fn tabs_mut(&mut self) -> &mut Vec<Tab> {
         &mut self.tabs
     }
 
-    fn doc_and_tabs_mut(&mut self) -> (&mut EditorDoc, &mut DocumentTabManager) {
-        (&mut self.doc, &mut self.tabs)
+    fn active_index(&self) -> usize {
+        self.active
+    }
+
+    fn set_active_index(&mut self, index: usize) {
+        self.active = index;
+    }
+
+    fn alloc_doc_id(&mut self) -> u64 {
+        let id = self.next_doc_id;
+        self.next_doc_id = self.next_doc_id.saturating_add(1);
+        id
+    }
+
+    fn alloc_untitled_number(&mut self) -> usize {
+        let num = self.next_untitled_number;
+        self.next_untitled_number = self.next_untitled_number.saturating_add(1);
+        num
+    }
+
+    fn set_next_untitled_number(&mut self, num: usize) {
+        self.next_untitled_number = num;
+    }
+
+    fn last_window_title(&self) -> &str {
+        &self.last_window_title
+    }
+
+    fn set_last_window_title(&mut self, title: String) {
+        self.last_window_title = title;
+    }
+
+    fn pending_close_confirm(&self) -> &Option<PendingCloseConfirm> {
+        &self.pending_close_confirm
+    }
+
+    fn pending_close_confirm_mut(&mut self) -> &mut Option<PendingCloseConfirm> {
+        &mut self.pending_close_confirm
+    }
+
+    fn allow_viewport_close(&self) -> bool {
+        self.allow_viewport_close
+    }
+
+    fn set_allow_viewport_close(&mut self, allow: bool) {
+        self.allow_viewport_close = allow;
     }
 }
 
@@ -178,20 +299,22 @@ impl TimelineHost for Is2dApp {
         &mut self.timeline_ui
     }
 
-    fn doc_and_timeline_ui_mut(&mut self) -> (&mut EditorDoc, &mut TimelineUiState) {
-        (&mut self.doc, &mut self.timeline_ui)
+    fn tab_and_timeline_ui_mut(&mut self) -> (&mut Tab, &mut TimelineUiState) {
+        (&mut self.tabs[self.active], &mut self.timeline_ui)
     }
 }
 
 impl Is2dApp {
     pub(crate) fn undo(&mut self) {
         apply(self, Action::Undo);
-        self.timeline_ui.ensure_timeline_context(&self.doc);
+        self.timeline_ui
+            .ensure_timeline_context(&self.tabs[self.active]);
     }
 
     pub(crate) fn redo(&mut self) {
         apply(self, Action::Redo);
-        self.timeline_ui.ensure_timeline_context(&self.doc);
+        self.timeline_ui
+            .ensure_timeline_context(&self.tabs[self.active]);
     }
 
     /// UIパネルから収集した `UiAction` を一括ディスパッチする
@@ -237,10 +360,10 @@ impl Is2dApp {
                 apply(self, Action::ToggleSelectSubMode { mode });
             }
             UiAction::ResetView => {
-                self.doc.viewport.reset_view();
+                self.tab_mut().view.reset_view();
             }
             UiAction::FitStageToWindow => {
-                self.doc.viewport.fit_stage_to_window();
+                self.tab_mut().fit_stage_to_window();
             }
             UiAction::SetStageSize(size) => {
                 apply(self, Action::SetStageSize { size });
@@ -285,7 +408,7 @@ impl Is2dApp {
                     },
                 );
                 if !drag_active {
-                    self.doc.history.end_coalesce();
+                    self.tab_mut().history.end_coalesce();
                 }
             }
             UiAction::EnterSymbolTimeline(binding) => {
@@ -301,20 +424,21 @@ impl Is2dApp {
                 apply(self, Action::DeleteSymbol { sym_id });
             }
             UiAction::SelectLibrarySymbol(sym_id) => {
-                self.doc.symbols.selected_library_symbol = Some(sym_id);
+                self.tab_mut().view.selected_library_symbol = Some(sym_id);
             }
             UiAction::RenameSymbolInLibrary { sym_id, new_name } => {
                 apply(self, Action::RenameSymbol { sym_id, new_name });
             }
             UiAction::FinishRenamingSymbol(sym_id) => {
-                if self.doc.history.last_coalesce_key
+                if self.tab().history.last_coalesce_key
                     == Some(canvas_tool::CoalesceKey::RenameSymbol(sym_id))
                 {
                     apply(self, Action::EndCoalesce);
                 }
             }
         }
-        self.timeline_ui.ensure_timeline_context(&self.doc);
+        self.timeline_ui
+            .ensure_timeline_context(&self.tabs[self.active]);
     }
 
     // ------------------------------------------------------------------------
@@ -322,7 +446,7 @@ impl Is2dApp {
     // ------------------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.tabs.pending_close_confirm.is_some() {
+        if self.pending_close_confirm.is_some() {
             return;
         }
         let input = ctx.input(|i| i.clone());
@@ -374,15 +498,15 @@ impl Is2dApp {
 
         self.handle_command_shortcuts(&input, cmd, copy_event, cut_event, paste_event);
         if cmd {
-            self.doc.canvas.cmd_held_grace_frames = 4;
+            self.clipboard.cmd_held_grace_frames = 4;
         } else {
-            self.doc.canvas.cmd_held_grace_frames =
-                self.doc.canvas.cmd_held_grace_frames.saturating_sub(1);
+            self.clipboard.cmd_held_grace_frames =
+                self.clipboard.cmd_held_grace_frames.saturating_sub(1);
         }
     }
 
     fn handle_single_key_shortcuts(&mut self, i: &egui::InputState, shift: bool) {
-        if !self.doc.canvas.selected_shapes.is_empty() {
+        if !self.tab().session.selected_shapes.is_empty() {
             let step = if shift { 10.0 } else { 1.0 };
             let mut delta = kurbo::Vec2::ZERO;
             let mut any_non_repeat = false;
@@ -417,7 +541,7 @@ impl Is2dApp {
             }
             if delta != kurbo::Vec2::ZERO {
                 if any_non_repeat {
-                    self.doc.history.end_coalesce();
+                    self.tab_mut().history.end_coalesce();
                 }
                 apply(self, Action::NudgeSelection { delta });
                 return;
@@ -431,11 +555,11 @@ impl Is2dApp {
         } else if i.key_pressed(Key::Period) || i.key_pressed(Key::ArrowRight) {
             timeline_ui::step_frame(self, 1);
         } else if key_pressed_no_repeat(i, Key::Home) {
-            let layer_idx = self.doc.timeline.active_layer;
+            let layer_idx = self.tab().doc.root.active_layer;
             apply(self, Action::SwitchLayerAndFrame { layer_idx, frame: 0 });
         } else if key_pressed_no_repeat(i, Key::End) {
-            let frame = self.doc.timeline.total_frames.saturating_sub(1);
-            let layer_idx = self.doc.timeline.active_layer;
+            let frame = self.tab().doc.root.total_frames.saturating_sub(1);
+            let layer_idx = self.tab().doc.root.active_layer;
             apply(self, Action::SwitchLayerAndFrame { layer_idx, frame });
         } else if i.key_pressed(Key::F6) {
             if shift {
@@ -454,20 +578,21 @@ impl Is2dApp {
                 apply(self, Action::ExtendFrame);
             }
         } else if key_pressed_no_repeat(i, Key::O) {
-            self.doc.ui.onion_skin_enabled = !self.doc.ui.onion_skin_enabled;
+            let next = !self.tab().view.onion_skin_enabled;
+            self.tab_mut().view.onion_skin_enabled = next;
         } else if key_pressed_no_repeat(i, Key::T) {
             apply(self, Action::ToggleTween);
         } else if let Some(tool) = Tool::from_shortcut_input(i) {
             apply(self, Action::SetTool { tool });
         } else if key_pressed_no_repeat(i, Key::Escape) {
-            canvas_tool::cancel_active_drag(&mut self.doc);
-            if !self.doc.canvas.selected_shapes.is_empty() {
+            canvas_tool::cancel_active_drag(self.tab_mut());
+            if !self.tab().session.selected_shapes.is_empty() {
                 apply(self, Action::Deselect);
             } else {
                 apply(self, Action::ExitGroup);
             }
-            self.doc.ui.select_sub_mode = SelectSubMode::Reshape;
-        } else if self.doc.ui.tool == Tool::Select {
+            self.tool.select_sub_mode = SelectSubMode::Reshape;
+        } else if self.tool.tool == Tool::Select {
             let has_repeat_key = i.events.iter().any(|ev| {
                 matches!(
                     ev,
@@ -528,12 +653,12 @@ impl Is2dApp {
                 }
             )
         });
-        let v_released_fallback = (cmd || self.doc.canvas.cmd_held_grace_frames > 0)
+        let v_released_fallback = (cmd || self.clipboard.cmd_held_grace_frames > 0)
             && v_release_event
-            && !self.doc.canvas.paste_triggered_on_press;
+            && !self.clipboard.paste_triggered_on_press;
         if v_release_event {
-            self.doc.canvas.paste_triggered_on_press = false;
-            self.doc.canvas.cmd_held_grace_frames = 0;
+            self.clipboard.paste_triggered_on_press = false;
+            self.clipboard.cmd_held_grace_frames = 0;
         }
 
         if copy_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::C)) {
@@ -541,7 +666,7 @@ impl Is2dApp {
         } else if cut_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::X)) {
             apply(self, Action::Cut);
         } else if paste_event || v_pressed_no_repeat {
-            self.doc.canvas.paste_triggered_on_press = true;
+            self.clipboard.paste_triggered_on_press = true;
             apply(
                 self,
                 Action::Paste {
@@ -558,11 +683,13 @@ impl Is2dApp {
         } else if cmd
             && (key_pressed_no_repeat(i, Key::Num1) || key_pressed_no_repeat(i, Key::Num0))
         {
-            self.doc.viewport.reset_view();
+            self.tab_mut().view.reset_view();
         } else if cmd && key_pressed_no_repeat(i, Key::Num2) {
-            self.doc.viewport.fit_stage_to_window();
+            let stage_size = self.tab().doc.stage_size;
+            self.tab_mut().view.fit_stage_to_window(stage_size);
         } else if cmd && key_pressed_no_repeat(i, Key::Num3) {
-            self.doc.viewport.clip_outside_stage = !self.doc.viewport.clip_outside_stage;
+            let next = !self.tab().view.clip_outside_stage;
+            self.tab_mut().view.clip_outside_stage = next;
         } else if cmd
             && (i.key_pressed(Key::Plus)
                 || i.key_pressed(Key::Equals)
@@ -571,14 +698,14 @@ impl Is2dApp {
             let center = i
                 .pointer
                 .hover_pos()
-                .unwrap_or_else(|| self.doc.viewport.last_canvas_rect.center());
-            self.doc.viewport.zoom_around_screen_pos(center, 1.25);
+                .unwrap_or_else(|| self.tab().view.last_canvas_rect.center());
+            self.tab_mut().view.zoom_around_screen_pos(center, 1.25);
         } else if cmd && i.key_pressed(Key::Minus) {
             let center = i
                 .pointer
                 .hover_pos()
-                .unwrap_or_else(|| self.doc.viewport.last_canvas_rect.center());
-            self.doc.viewport.zoom_around_screen_pos(center, 0.8);
+                .unwrap_or_else(|| self.tab().view.last_canvas_rect.center());
+            self.tab_mut().view.zoom_around_screen_pos(center, 0.8);
         } else if cmd && key_pressed_no_repeat(i, Key::G) {
             if i.modifiers.shift {
                 apply(self, Action::Ungroup);
@@ -603,12 +730,12 @@ impl Is2dApp {
     // ------------------------------------------------------------------------
 
     fn is_current_tool_allowed(&self) -> bool {
-        match self.doc.ui.tool {
+        match self.tool.tool {
             Tool::Eyedropper => true,
             Tool::Brush | Tool::Eraser | Tool::Bucket => {
-                self.doc.timeline.is_active_layer_editable()
+                self.tab().doc.root.is_active_layer_editable()
             }
-            Tool::Select | Tool::Transform => self.doc.timeline.has_any_editable_layer(),
+            Tool::Select | Tool::Transform => self.tab().doc.root.has_any_editable_layer(),
         }
     }
 
@@ -630,45 +757,41 @@ impl Is2dApp {
                 return;
             }
         }
-        if self.doc.ui.tool == Tool::Eyedropper {
+        if self.tool.tool == Tool::Eyedropper {
             let sampling = (response.hovered() && ui.input(|i| i.pointer.primary_pressed()))
                 || response.dragged_by(egui::PointerButton::Primary)
                 || response.clicked_by(egui::PointerButton::Primary);
             if sampling {
                 if let Some(pt) = mouse_pt {
-                    tool_paint::pick_color_at(&mut self.doc, pt);
+                    tool_paint::pick_color_at(self, pt);
                 }
             }
         } else if tool_allowed {
-            match self.doc.ui.tool {
+            match self.tool.tool {
                 Tool::Brush | Tool::Eraser => {
-                    tool_paint::handle_brush_or_eraser_input(&mut self.doc, response, mouse_pt);
+                    tool_paint::handle_brush_or_eraser_input(self, response, mouse_pt);
                 }
                 Tool::Bucket => {
                     let just_pressed =
                         response.hovered() && ui.input(|i| i.pointer.primary_pressed());
                     if just_pressed {
                         if let Some(pt) = mouse_pt {
-                            let color = self.doc.ui.brush_color;
+                            let color = self.tool.brush_color;
                             apply(self, Action::BucketFill { pt, color });
                         }
                     }
                 }
                 Tool::Eyedropper => {}
                 Tool::Select => {
-                    tool_select::handle_select_tool_input(&mut self.doc, ui, response, mouse_pt);
+                    tool_select::handle_select_tool_input(self, ui, response, mouse_pt);
                 }
                 Tool::Transform => {
-                    tool_transform::handle_transform_tool_input(
-                        &mut self.doc,
-                        ui,
-                        response,
-                        mouse_pt,
-                    );
+                    tool_transform::handle_transform_tool_input(self, ui, response, mouse_pt);
                 }
             }
         }
-        self.timeline_ui.ensure_timeline_context(&self.doc);
+        self.timeline_ui
+            .ensure_timeline_context(&self.tabs[self.active]);
     }
 
     /// 現在のレイヤー・フレーム状態から常時表示すべき状態連動メッセージを判定する
@@ -676,14 +799,11 @@ impl Is2dApp {
         if tool_allowed {
             return None;
         }
-        let is_uncreated_frame = self
-            .doc
-            .timeline
+        let tl = &self.tab().doc.root;
+        let is_uncreated_frame = tl
             .layers
-            .get(self.doc.timeline.active_layer)
-            .is_some_and(|l| {
-                l.visible && !l.locked && self.doc.timeline.current_frame >= l.frame_count
-            });
+            .get(tl.active_layer)
+            .is_some_and(|l| l.visible && !l.locked && tl.current_frame >= l.frame_count);
         if is_uncreated_frame {
             Some((
                 NoticeKind::Warning,
@@ -710,7 +830,7 @@ impl Is2dApp {
             notices.push((kind, msg.to_owned()));
         }
 
-        if let Some(toast) = &self.doc.ui.status_toast {
+        if let Some(toast) = &self.toast {
             let now = Instant::now();
             if now < toast.expires_at {
                 ctx.request_repaint_after(toast.expires_at.saturating_duration_since(now));
@@ -718,7 +838,7 @@ impl Is2dApp {
                     notices.push((toast.kind, toast.message.clone()));
                 }
             } else {
-                self.doc.ui.status_toast = None;
+                self.toast = None;
             }
         }
 
@@ -757,7 +877,7 @@ impl Is2dApp {
         };
         if !canvas_rect.contains(pos) {
             return;
-        }
+        };
         let (is_panning, pan_gesture_active) = pan_state;
         if is_panning {
             ctx.set_cursor_icon(if pan_gesture_active {
@@ -768,7 +888,7 @@ impl Is2dApp {
         } else if !tool_allowed {
             ctx.set_cursor_icon(CursorIcon::NotAllowed);
         } else {
-            panels::draw_tool_cursor_and_feedback(&self.doc, ctx, painter, pos);
+            panels::draw_tool_cursor_and_feedback(self.tab(), &self.tool, ctx, painter, pos);
         }
     }
 
@@ -777,21 +897,28 @@ impl Is2dApp {
         project_io::handle_viewport_close_request(self, ctx);
         timeline_ui::update_playback(self, ctx);
         self.handle_shortcuts(ctx);
-        self.timeline_ui.ensure_timeline_context(&self.doc);
+        self.timeline_ui
+            .ensure_timeline_context(&self.tabs[self.active]);
 
         let mut actions = Vec::new();
-        panels::draw_top_menu_bar(&mut self.doc, &mut actions, ctx);
+        panels::draw_top_menu_bar(
+            &mut self.tabs[self.active],
+            &self.clipboard,
+            &mut actions,
+            ctx,
+        );
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
         }
 
-        panels::draw_left_toolbar(&mut self.doc, &mut actions, ctx);
+        panels::draw_left_toolbar(&mut self.tool, &mut actions, ctx);
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
         }
 
         panels::draw_right_properties_panel(
-            &mut self.doc,
+            &mut self.tabs[self.active],
+            &mut self.tool,
             &mut self.right_panel_tab,
             &mut actions,
             ctx,
@@ -803,12 +930,12 @@ impl Is2dApp {
         timeline_ui::draw_timeline_panel(self, ctx);
 
         project_io::update_window_title(self, ctx);
-        panels::draw_document_tab_bar(&self.doc, &self.tabs, &mut actions, ctx);
+        panels::draw_document_tab_bar(&self.tabs, self.active, &mut actions, ctx);
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
         }
 
-        panels::draw_stage_header_bar(&self.doc, &mut actions, ctx);
+        panels::draw_stage_header_bar(&self.tabs[self.active], &mut actions, ctx);
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
         }
@@ -818,7 +945,7 @@ impl Is2dApp {
             .show(ctx, |ui| {
                 let (canvas_rect, response) =
                     ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
-                self.doc.viewport.last_canvas_rect = canvas_rect;
+                self.tab_mut().view.last_canvas_rect = canvas_rect;
                 let painter = ui.painter_at(canvas_rect);
 
                 let pointer_pos = response
@@ -826,35 +953,44 @@ impl Is2dApp {
                     .or_else(|| ctx.pointer_hover_pos());
 
                 // 0. ビューポートのズーム・パン移動操作ハンドリング
-                let modal_open = self.tabs.pending_close_confirm.is_some();
+                let modal_open = self.pending_close_confirm.is_some();
                 let pan_state @ (is_panning, _) = if modal_open {
-                    self.doc.viewport.pan_last_screen_pos = None;
+                    self.tab_mut().view.pan_last_screen_pos = None;
                     (false, false)
                 } else {
-                    self.doc
-                        .viewport
+                    self.tab_mut()
+                        .view
                         .handle_navigation(ui, canvas_rect, pointer_pos)
                 };
 
-                let mouse_pt = pointer_pos.map(|p| self.doc.viewport.screen_to_world(p));
+                let mouse_pt = pointer_pos.map(|p| self.tab().view.screen_to_world(p));
                 let tool_allowed = !modal_open && self.is_current_tool_allowed();
 
                 // 1. ツール別のマウス入力ハンドリング（パン操作開始時・モーダル表示時は進行中のドラッグをキャンセルしてスキップ）
                 if is_panning || modal_open {
-                    canvas_tool::cancel_active_drag(&mut self.doc);
+                    canvas_tool::cancel_active_drag(self.tab_mut());
                 } else {
                     self.handle_canvas_tool_input(ui, &response, mouse_pt, tool_allowed);
                 }
 
-                let in_symbol_edit = !self.doc.symbols.edit_stack.is_empty();
+                let in_symbol_edit = !self.tab().session.edit_stack.is_empty();
+                let stage_size = self.tab().doc.stage_size;
 
                 // 2. ステージ背景（ペーストボード＋白いステージ矩形）の描画
-                self.doc
-                    .viewport
-                    .draw_stage_background(&painter, canvas_rect, in_symbol_edit);
+                self.tab().view.draw_stage_background(
+                    &painter,
+                    canvas_rect,
+                    stage_size,
+                    in_symbol_edit,
+                );
 
                 // 3. キャンバス上のシェイプ・オニオンスキン・ステージ枠線・選択枠・プレビューの描画
-                panels::draw_canvas_contents(&self.doc, &self.timeline_ui, &painter);
+                panels::draw_canvas_contents(
+                    self.tab(),
+                    &self.tool,
+                    &self.timeline_ui,
+                    &painter,
+                );
 
                 // 4. 状態連動の警告バッジおよび一時トースト通知を描画
                 self.draw_canvas_notices(ctx, &painter, canvas_rect, tool_allowed);
@@ -870,7 +1006,12 @@ impl Is2dApp {
                 );
             });
 
-        panels::draw_unsaved_close_confirm_modal(&self.doc, &self.tabs, &mut actions, ctx);
+        panels::draw_unsaved_close_confirm_modal(
+            &self.tabs,
+            &self.pending_close_confirm,
+            &mut actions,
+            ctx,
+        );
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
         }
