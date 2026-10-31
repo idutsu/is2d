@@ -4,8 +4,7 @@ use crate::canvas_tool::{
     EditorDoc, active_scope_layer_id, cancel_active_drag, clear_selection,
     flush_canvas_before_timeline_op, insert_and_select_shapes_in_scope, load_shapes_from_timeline,
     mutate_timeline_with_undo, reorder_selected_to_scope_front,
-    select_shapes_for_timeline_selection, stop_playback, sync_shapes_to_timeline,
-    topmost_layer_id_for_indices,
+    select_shapes_for_timeline_selection, sync_shapes_to_timeline, topmost_layer_id_for_indices,
 };
 use crate::symbol::{
     SymbolEditSession, SymbolEvalCtx, SymbolInstanceBinding, SymbolLoopMode, TweenRotate,
@@ -16,7 +15,6 @@ use crate::vector_engine::{FillShape, union_bounding_boxes};
 
 /// 選択中のオブジェクト（生シェイプ・グループ問わず）を新しい「シンボル」に変換してライブラリに登録する（`F8`）
 pub(crate) fn convert_selection_to_symbol(doc: &mut EditorDoc) -> Option<u64> {
-    stop_playback(doc);
     cancel_active_drag(doc);
     if doc.canvas.selected_shapes.is_empty() {
         return None;
@@ -65,7 +63,7 @@ pub(crate) fn convert_selection_to_symbol(doc: &mut EditorDoc) -> Option<u64> {
         local_shapes.push(local_s);
     }
 
-    let target_lid = topmost_layer_id_for_indices(doc, &valid_indices);
+    let target_lid = topmost_layer_id_for_indices(&doc.canvas, &doc.timeline, &valid_indices);
     let binding = SymbolInstanceBinding::new(
         inst_gid,
         sym_id,
@@ -95,8 +93,7 @@ pub(crate) fn convert_selection_to_symbol(doc: &mut EditorDoc) -> Option<u64> {
 
 /// ライブラリ内の指定シンボル `symbol_id` の新しいインスタンスを現在のステージ中央へ配置する
 pub(crate) fn place_symbol_instance_from_library(doc: &mut EditorDoc, symbol_id: u64) -> bool {
-    stop_playback(doc);
-    let target_lid = active_scope_layer_id(doc);
+    let target_lid = active_scope_layer_id(&doc.canvas, &doc.timeline);
     if !doc.symbols.can_place_symbol_in_current_context(symbol_id)
         || !doc.timeline.is_layer_editable_by_id(target_lid)
     {
@@ -124,7 +121,7 @@ pub(crate) fn place_symbol_instance_from_library(doc: &mut EditorDoc, symbol_id:
             symbol_id,
             Affine::translate(KVec2::new(offset.x, offset.y)),
         );
-        let target_lid = active_scope_layer_id(doc);
+        let target_lid = active_scope_layer_id(&doc.canvas, &doc.timeline);
         let curr_frame = doc.timeline.current_frame;
         let kf_start = doc
             .timeline
@@ -168,7 +165,6 @@ pub(crate) fn rename_symbol_in_library(
     symbol_id: u64,
     new_name: impl Into<String>,
 ) -> bool {
-    stop_playback(doc);
     let new_name = new_name.into();
     if doc
         .symbols
@@ -190,7 +186,6 @@ pub(crate) fn rename_symbol_in_library(
 /// ライブラリから指定シンボル `symbol_id` を削除し、ステージ上および全フレームに配置されていた該当インスタンスは
 /// 消去せず通常のグループ図形へ自動分解（デタッチ）して残す
 pub(crate) fn delete_symbol_from_library(doc: &mut EditorDoc, symbol_id: u64) -> bool {
-    stop_playback(doc);
     if doc.symbols.find_symbol(symbol_id).is_none() {
         return false;
     }
@@ -314,7 +309,6 @@ pub(crate) fn set_selected_symbol_playback(
     loop_mode: SymbolLoopMode,
     first_frame: usize,
 ) -> bool {
-    stop_playback(doc);
     let Some((binding, _, total_frames)) = selected_single_symbol_info(doc) else {
         return false;
     };
@@ -432,7 +426,6 @@ pub(crate) fn enter_symbol_timeline(doc: &mut EditorDoc, binding: SymbolInstance
         stage_to_local_cache,
     });
     doc.symbols.bump_revision();
-    doc.timeline_switched = true;
 
     load_shapes_from_timeline(doc);
     true
@@ -440,7 +433,6 @@ pub(crate) fn enter_symbol_timeline(doc: &mut EditorDoc, binding: SymbolInstance
 
 /// ライブラリ内の指定シンボル `symbol_id` の内部タイムライン編集モードへ入る
 pub(crate) fn enter_symbol_from_library(doc: &mut EditorDoc, symbol_id: u64) -> bool {
-    stop_playback(doc);
     if doc
         .symbols
         .edit_stack
@@ -504,7 +496,6 @@ pub(crate) fn exit_symbol_timeline(doc: &mut EditorDoc) -> bool {
     session.parent_timeline.fps = doc.timeline.fps;
     let sym_timeline = std::mem::replace(&mut doc.timeline, session.parent_timeline);
     doc.canvas.editing_group_path = session.parent_editing_group_path;
-    doc.timeline_switched = true;
 
     if session.instance_xform.determinant().abs() > 1e-9 {
         let inv_xform = session.instance_xform.inverse();

@@ -5,7 +5,7 @@ use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
     EditorDoc, MoveSelectionDrag, active_scope_layer_id, cancel_active_drag, clear_selection,
-    insert_and_select_shapes_in_scope, stop_playback, sync_timeline_layer_from_canvas_selection,
+    insert_and_select_shapes_in_scope, sync_timeline_layer_from_canvas_selection,
 };
 use crate::select_ops::delete_selected_shapes;
 use crate::symbol::{SymbolDef, SymbolEvalCtx, SymbolManager};
@@ -19,7 +19,7 @@ pub(crate) fn instantiate_relative_shapes_in_scope(
     offset: KVec2,
     preserve_original_layer: bool,
 ) -> (Vec<FillShape>, bool) {
-    let active_lid = active_scope_layer_id(doc);
+    let active_lid = active_scope_layer_id(&doc.canvas, &doc.timeline);
     let mut gid_map: Vec<(u64, u64)> = Vec::new();
     let mut seen_instance_gids: HashSet<u64> = HashSet::new();
     let mut instantiated = Vec::with_capacity(rel_shapes.len());
@@ -556,7 +556,6 @@ pub(crate) fn resolve_clipboard_for_paste(doc: &mut EditorDoc) -> (Vec<FillShape
 
 /// 選択中のオブジェクト（生シェイプ・部分スライス領域・グループ問わず）を内部クリップボードにコピーする（`Cmd+C`）
 pub(crate) fn copy_selected_shapes(doc: &mut EditorDoc) -> bool {
-    stop_playback(doc);
     cancel_active_drag(doc);
     let mut extracted = doc.canvas.extract_selected_relative_to_scope();
     if extracted.is_empty() {
@@ -582,11 +581,10 @@ pub(crate) fn cut_selected_shapes(doc: &mut EditorDoc) -> bool {
 
 /// 内部クリップボードのオブジェクトを現在の編集スコープへ貼り付ける。
 pub(crate) fn paste_clipboard(doc: &mut EditorDoc, in_place: bool) -> bool {
-    stop_playback(doc);
     if doc.canvas.clipboard.is_empty() {
         return false;
     }
-    let target_lid = active_scope_layer_id(doc);
+    let target_lid = active_scope_layer_id(&doc.canvas, &doc.timeline);
     if !doc.timeline.is_layer_editable_by_id(target_lid) {
         doc.notify_warning("現在のレイヤーまたはフレームは編集できないためペーストできません");
         return false;

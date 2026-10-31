@@ -1702,6 +1702,7 @@ name = "is2d"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "fastrand",
  "i_overlay",
  "kurbo",
  "lyon_tessellation",

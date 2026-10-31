@@ -1,10 +1,9 @@
 use eframe::egui::{self, Color32, CursorIcon, Pos2, Stroke, Vec2};
 use kurbo::{Point, Rect as KRect};
 
-pub(crate) use crate::canvas_tool::RightPanelTab;
 use crate::canvas_tool::{
-    active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, EditorDoc, SelectDragState,
-    SelectSubMode, Tool, TransformDragState,
+    active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, EditorDoc, NoticeKind,
+    SelectDragState, SelectSubMode, Tool, TransformDragState,
 };
 use crate::project_io::{DocumentTabManager, PendingCloseConfirm};
 use crate::symbol::{SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
@@ -19,6 +18,94 @@ pub(crate) const MOD_KEY: &str = if cfg!(target_os = "macos") {
 } else {
     "Ctrl"
 };
+
+/// ステータスメッセージの種類に応じた配色（背景色・枠線色・テキスト色）を返す（Layer 4 プレゼンテーション定義）
+pub(crate) fn notice_kind_colors(kind: NoticeKind) -> (Color32, Color32, Color32) {
+    match kind {
+        NoticeKind::Warning => (
+            Color32::from_rgba_unmultiplied(255, 245, 232, 240),
+            Color32::from_rgb(235, 165, 95),
+            Color32::from_rgb(175, 75, 25),
+        ),
+        NoticeKind::Error => (
+            Color32::from_rgba_unmultiplied(255, 236, 236, 244),
+            Color32::from_rgb(230, 95, 95),
+            Color32::from_rgb(185, 35, 35),
+        ),
+        NoticeKind::Info => (
+            Color32::from_rgba_unmultiplied(235, 246, 255, 242),
+            Color32::from_rgb(95, 165, 235),
+            Color32::from_rgb(20, 85, 165),
+        ),
+    }
+}
+
+/// 右パネルの4タブ構成（Layer 4 UI専用状態）
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum RightPanelTab {
+    /// 現在のツール・選択中フレーム・選択中シンボルの詳細設定タブ
+    #[default]
+    Properties,
+    /// 塗りカラー・プリセットパレット選択タブ
+    Color,
+    /// シンボル一覧・プレビュー・配置・編集タブ
+    Library,
+    /// ステージサイズ・クリッピング・ズーム操作タブ
+    Canvas,
+}
+
+impl RightPanelTab {
+    pub(crate) const ALL: [Self; 4] = [Self::Properties, Self::Color, Self::Library, Self::Canvas];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Properties => "プロパティ",
+            Self::Color => "カラー",
+            Self::Library => "ライブラリ",
+            Self::Canvas => "キャンバス",
+        }
+    }
+}
+
+/// ツール種別に対応するアイコン文字（Layer 4 プレゼンテーション定義）
+pub(crate) const fn tool_icon(tool: Tool) -> &'static str {
+    match tool {
+        Tool::Select => "\u{e923}",
+        Tool::Transform => "\u{e5c3}",
+        Tool::Brush => "\u{e3ae}",
+        Tool::Eraser => "\u{e6d0}",
+        Tool::Bucket => "\u{e23a}",
+        Tool::Eyedropper => "\u{e3b8}",
+    }
+}
+
+/// ツール種別に対応する日本語見出し名（Layer 4 プレゼンテーション定義）
+pub(crate) const fn tool_label(tool: Tool) -> &'static str {
+    match tool {
+        Tool::Select => "選択ツール",
+        Tool::Transform => "自由変形ツール",
+        Tool::Brush => "ブラシツール",
+        Tool::Eraser => "消しゴムツール",
+        Tool::Bucket => "バケツ塗りツール",
+        Tool::Eyedropper => "スポイトツール",
+    }
+}
+
+/// ツール種別に対応する左ツールバー用ツールチップ文言（Layer 4 プレゼンテーション定義）
+pub(crate) const fn tool_tooltip(tool: Tool) -> &'static str {
+    match tool {
+        Tool::Select => {
+            "選択ツール (V) - クリックで選択 / 範囲スライス選択 / 輪郭ドラッグで粘土変形"
+        }
+        Tool::Transform => {
+            "自由変形ツール (Q) - バウンディングボックスで拡大縮小・回転・基準点移動"
+        }
+        Tool::Brush => "ブラシツール (B) - ベクター塗りストロークを描画",
+        Tool::Eraser => "消しゴムツール (E) - ベクターシェイプを削る・分割する",
+        Tool::Bucket => "バケツ塗りツール (K) - 閉じた隙間領域の塗りつぶし / 既存塗りの色変更",
+        Tool::Eyedropper => "スポイトツール (I) - クリックした図形の色を抽出してブラシへ設定",
+    }
+}
 
 // ============================================================================
 // UIコマンドアクション（パネル描画中に収集し、アプリケーション層で一括ディスパッチする）
@@ -50,11 +137,13 @@ pub(crate) enum UiAction {
     DeleteSelected,
     ClearActiveFrame,
 
-    // ツール・表示設定操作
+    // ツール・表示・ステージ設定操作
     SetTool(Tool),
     ToggleSelectSubMode(SelectSubMode),
     ResetView,
     FitStageToWindow,
+    SetStageSize(Vec2),
+    FinishStageSizeEdit,
 
     // グループ・階層・変形・シンボル操作
     ExitGroupSteps(usize),
@@ -93,7 +182,6 @@ pub(crate) enum UiAction {
 
 pub(crate) fn draw_top_menu_bar(
     doc: &mut EditorDoc,
-    timeline_ui: &mut TimelineUiState,
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
@@ -101,7 +189,7 @@ pub(crate) fn draw_top_menu_bar(
         egui::menu::bar(ui, |ui| {
             draw_file_menu(actions, ui);
             draw_edit_menu(doc, actions, ui);
-            draw_view_menu(doc, timeline_ui, actions, ui);
+            draw_view_menu(doc, actions, ui);
         });
     });
 }
@@ -160,7 +248,7 @@ fn draw_edit_menu(doc: &EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egui::U
         let can_paste = !doc.canvas.clipboard.is_empty()
             && doc
                 .timeline
-                .is_layer_editable_by_id(active_scope_layer_id(doc));
+                .is_layer_editable_by_id(active_scope_layer_id(&doc.canvas, &doc.timeline));
 
         if menu_action_button(ui, can_undo, "元に戻す", &format!("{MOD_KEY}+Z")) {
             actions.push(UiAction::Undo);
@@ -197,12 +285,7 @@ fn draw_edit_menu(doc: &EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egui::U
     });
 }
 
-fn draw_view_menu(
-    doc: &mut EditorDoc,
-    timeline_ui: &mut TimelineUiState,
-    actions: &mut Vec<UiAction>,
-    ui: &mut egui::Ui,
-) {
+fn draw_view_menu(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     ui.menu_button("表示", |ui| {
         ui.set_min_width(220.0);
         if menu_action_button(ui, true, "100%表示", &format!("{MOD_KEY}+1")) {
@@ -230,7 +313,7 @@ fn draw_view_menu(
             ui.close_menu();
         }
         if ui
-            .checkbox(&mut timeline_ui.onion_skin_enabled, "オニオンスキン (O)")
+            .checkbox(&mut doc.ui.onion_skin_enabled, "オニオンスキン (O)")
             .clicked()
         {
             ui.close_menu();
@@ -299,8 +382,8 @@ fn draw_left_main_tool_buttons(
             ui,
             btn_size,
             doc.ui.tool == tool,
-            tool.icon(),
-            tool.tooltip(),
+            tool_icon(tool),
+            tool_tooltip(tool),
         ) {
             actions.push(UiAction::SetTool(tool));
         }
@@ -526,6 +609,7 @@ fn draw_group_breadcrumb(doc: &EditorDoc, actions: &mut Vec<UiAction>, ui: &mut 
 
 pub(crate) fn draw_right_properties_panel(
     doc: &mut EditorDoc,
+    right_panel_tab: &mut RightPanelTab,
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
@@ -540,14 +624,14 @@ pub(crate) fn draw_right_properties_panel(
         )
         .show(ctx, |ui| {
             // 上部タブバー（プロパティ | カラー | ライブラリ | キャンバス）
-            draw_right_panel_tab_bar(doc, ui);
+            draw_right_panel_tab_bar(right_panel_tab, ui);
 
             ui.add_space(4.0);
             ui.separator();
             ui.add_space(6.0);
 
             // アクティブなタブに応じた中身を描画
-            match doc.ui.right_panel_tab {
+            match *right_panel_tab {
                 RightPanelTab::Properties => draw_properties_tab(doc, actions, ui),
                 RightPanelTab::Color => draw_color_palette_section(doc, ui),
                 RightPanelTab::Library => draw_library_tab(doc, actions, ui),
@@ -557,14 +641,14 @@ pub(crate) fn draw_right_properties_panel(
 }
 
 /// 右パネル上部の4タブ切り替えバー（`プロパティ | カラー | ライブラリ | キャンバス`）を描画
-fn draw_right_panel_tab_bar(doc: &mut EditorDoc, ui: &mut egui::Ui) {
+fn draw_right_panel_tab_bar(right_panel_tab: &mut RightPanelTab, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
         ui.spacing_mut().button_padding = Vec2::new(3.0, 4.0);
         let tab_count = RightPanelTab::ALL.len() as f32;
         let btn_w = (ui.available_width() - 3.0 * (tab_count - 1.0)) / tab_count;
         for tab in RightPanelTab::ALL {
-            let selected = doc.ui.right_panel_tab == tab;
+            let selected = *right_panel_tab == tab;
             let fill = if selected {
                 Color32::from_rgb(255, 255, 255)
             } else {
@@ -594,7 +678,7 @@ fn draw_right_panel_tab_bar(doc: &mut EditorDoc, ui: &mut egui::Ui) {
                 .min_size(Vec2::new(btn_w, 24.0));
 
             if ui.add(btn).clicked() {
-                doc.ui.right_panel_tab = tab;
+                *right_panel_tab = tab;
             }
         }
     });
@@ -604,9 +688,9 @@ fn draw_right_panel_tab_bar(doc: &mut EditorDoc, ui: &mut egui::Ui) {
 fn draw_properties_tab(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     // 現在選択中のツール見出し
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(doc.ui.tool.icon()).size(16.0));
+        ui.label(egui::RichText::new(tool_icon(doc.ui.tool)).size(16.0));
         ui.label(
-            egui::RichText::new(doc.ui.tool.label())
+            egui::RichText::new(tool_label(doc.ui.tool))
                 .size(12.5)
                 .strong()
                 .color(Color32::from_rgb(35, 40, 50)),
@@ -984,13 +1068,6 @@ fn draw_canvas_tab(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut eg
                     .update_while_editing(false),
             )
             .on_hover_text("ステージの幅 (px)");
-        if w_resp.changed() && (w as f32 - doc.viewport.stage_size.x).abs() > f32::EPSILON {
-            if !doc.viewport.editing_stage_size {
-                doc.push_undo();
-                doc.viewport.editing_stage_size = true;
-            }
-            doc.viewport.stage_size.x = w as f32;
-        }
         ui.label("×");
         let h_resp = ui
             .add(
@@ -1001,23 +1078,32 @@ fn draw_canvas_tab(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut eg
                     .update_while_editing(false),
             )
             .on_hover_text("ステージの高さ (px)");
-        if h_resp.changed() && (h as f32 - doc.viewport.stage_size.y).abs() > f32::EPSILON {
-            if !doc.viewport.editing_stage_size {
-                doc.push_undo();
-                doc.viewport.editing_stage_size = true;
-            }
-            doc.viewport.stage_size.y = h as f32;
+        let next_size = Vec2::new(
+            if w_resp.changed() {
+                w as f32
+            } else {
+                doc.viewport.stage_size.x
+            },
+            if h_resp.changed() {
+                h as f32
+            } else {
+                doc.viewport.stage_size.y
+            },
+        );
+        if (w_resp.changed() || h_resp.changed()) && next_size != doc.viewport.stage_size {
+            actions.push(UiAction::SetStageSize(next_size));
         }
-        if w_resp.drag_stopped()
-            || w_resp.lost_focus()
-            || h_resp.drag_stopped()
-            || h_resp.lost_focus()
-            || (!w_resp.dragged()
-                && !w_resp.has_focus()
-                && !h_resp.dragged()
-                && !h_resp.has_focus())
+        if doc.viewport.editing_stage_size
+            && (w_resp.drag_stopped()
+                || w_resp.lost_focus()
+                || h_resp.drag_stopped()
+                || h_resp.lost_focus()
+                || (!w_resp.dragged()
+                    && !w_resp.has_focus()
+                    && !h_resp.dragged()
+                    && !h_resp.has_focus()))
         {
-            doc.viewport.editing_stage_size = false;
+            actions.push(UiAction::FinishStageSizeEdit);
         }
     });
 
@@ -1427,7 +1513,7 @@ fn draw_selected_library_symbol_controls(
     let can_place = doc.symbols.can_place_symbol_in_current_context(sel_id)
         && doc
             .timeline
-            .is_layer_editable_by_id(active_scope_layer_id(doc));
+            .is_layer_editable_by_id(active_scope_layer_id(&doc.canvas, &doc.timeline));
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let place_w = (ui.available_width() - 116.0).max(70.0);
@@ -1635,7 +1721,7 @@ pub(crate) fn draw_tool_cursor_and_feedback(
 
 /// キャンバス上の全シェイプ（オニオンスキン・全可視レイヤー合成）、選択オーバーレイ、グループ選択枠、自由変形ボックス、矩形選択枠、およびストロークプレビューを描画
 pub(crate) fn draw_canvas_contents(
-    doc: &mut EditorDoc,
+    doc: &EditorDoc,
     timeline_ui: &TimelineUiState,
     painter: &egui::Painter,
 ) {
@@ -1660,8 +1746,8 @@ pub(crate) fn draw_canvas_contents(
     }
 
     // 0.5 オニオンスキン描画（前のフレーム＝青系半透明、次のフレーム＝緑系半透明）
-    if timeline_ui.onion_skin_enabled {
-        draw_onion_skins(doc, timeline_ui, &artwork_painter);
+    if doc.ui.onion_skin_enabled {
+        draw_onion_skins(doc, &artwork_painter);
     }
 
     // 1. 下層レイヤーから上層レイヤーへ順に合成描画（`doc.canvas.shapes` はレイヤー順に整列されているため単一カーソルで O(N) 走査）
@@ -1740,7 +1826,7 @@ pub(crate) fn draw_canvas_contents(
 
 /// 編集可能レイヤー1枚分の図形スライス範囲 `range` を描画し、選択中のグループ／シンボル外枠情報を集計する
 fn draw_editable_layer_shapes(
-    doc: &mut EditorDoc,
+    doc: &EditorDoc,
     (artwork_painter, gizmo_painter): (&egui::Painter, &egui::Painter),
     range: std::ops::Range<usize>,
     view_world_rect: KRect,
@@ -1850,15 +1936,15 @@ fn draw_selected_group_and_symbol_boxes(
     }
 }
 
-fn draw_onion_skins(doc: &EditorDoc, timeline_ui: &TimelineUiState, painter: &egui::Painter) {
+fn draw_onion_skins(doc: &EditorDoc, painter: &egui::Painter) {
     let curr_f = doc.timeline.current_frame;
-    for step in (1..=timeline_ui.onion_prev_frames).rev() {
+    for step in (1..=doc.ui.onion_prev_frames).rev() {
         if curr_f >= step {
             let alpha = (84 / step as u8).clamp(24, 84);
             draw_onion_skin_frame(doc, painter, curr_f - step, [45, 115, 245], alpha);
         }
     }
-    for step in 1..=timeline_ui.onion_next_frames {
+    for step in 1..=doc.ui.onion_next_frames {
         let f = curr_f + step;
         if f < doc.timeline.total_frames {
             let alpha = (84 / step as u8).clamp(24, 84);

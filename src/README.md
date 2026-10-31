@@ -3,17 +3,43 @@
 `is2d` のソースコードは、上位から下位への一方向呼び出しのみを許す **厳格な5層（Layer 5 → Layer 4 → Layer 3 → Layer 2 → Layer 1）アーキテクチャ** に基づき、責務ごとに **全17ファイル** に分割されています（下位層から上位層への逆参照ゼロ・層内の相互循環ゼロ）。
 本ドキュメントでは、`src/` 内のすべてのファイル・構造体・列挙型・定数・メソッド・ヘルパー関数・ユニットテストを漏れなく記載します。
 
+## 層構造とモジュール間の一方向依存グラフ（DAG）
+
+層間の依存方向および各層内部の呼び出し順序は以下の通り完全な有向非巡回グラフ（DAG）を形成しています（`A → B` は「`A` が `B` を参照する」ことを表します）：
+
+```text
+L5 (App Shell)
+  main
+   ↓
+L4 (UI Presentation)
+  panels → timeline_ui
+   ↓
+L3 (Tool / Controller / Persistence)
+  project_io / tool_select / tool_transform → clipboard_ops → select_ops → symbol_ops → canvas_tool
+  tool_paint → canvas_tool
+   ↓
+L2 (Domain / Model)
+  symbol → timeline
+   ↓
+L1 (Geometry / Vector Core)
+  vector_boolean → vector_stroke → vector_engine
+```
+
+- **L3 内部の階層順序**：`canvas_tool` を単一ドキュメント編集・Undo/Redo・タイムラインコントローラの共通土台とし、その上に `symbol_ops` → `select_ops` → `clipboard_ops` → 各ツール実装（`project_io` / `tool_select` / `tool_transform`、および `tool_paint → canvas_tool`）が一方向に積み重なります。
+- **L2 内部の階層順序**：`timeline` が `vector_engine` のみに依存し、`symbol` が `timeline` と `vector_engine` に一方向で依存します。
+- **L1 内部の階層順序**：`vector_engine` はクレート内他モジュールへの依存ゼロの純粋幾何コアであり、`vector_stroke` が `vector_engine` のみに依存し、`vector_boolean` が `vector_stroke` と `vector_engine` に一方向で依存します。
+
 ---
 
 ## ファイル構成一覧（早見表）
 
 | # | ファイル | 行数目安 | 主な責務 |
 | :-: | :--- | :---: | :--- |
-| 1 | **[`main.rs`](./main.rs)** | ~840行 | **Layer 5 (App Shell)**：アプリ起動、フォント・テーマ初期化、ルート構造体 `Is2dApp { doc: EditorDoc, timeline_ui: TimelineUiState, tabs: DocumentTabManager }`（`Deref<Target = EditorDoc>` / `ProjectWorkspace` / `TimelineHost` 実装）、UIパネルからの `UiAction` 一括ディスパッチ（`apply_action`）、ショートカット処理、メインループ |
-| 2 | **[`panels.rs`](./panels.rs)** | ~1,985行 | **Layer 4 (UI Presentation — パネル群 & `UiAction`)**：`main.rs` への逆参照ゼロ。UI操作イベント列挙型 `UiAction`、最上部メニューバー（`ファイル`・`編集`・`表示`）、複数ドキュメントタブバー（`draw_document_tab_bar`）、未保存変更確認モーダル（`draw_unsaved_close_confirm_modal`）、左端縦ツールバー、ステージ上部スリムバー（パンくずリスト）、右端4タブパネル（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`）、および中央キャンバス合成・選択/プレビュー/カーソル描画関数群 |
-| 3 | **[`timeline_ui.rs`](./timeline_ui.rs)** | ~2,250行 | **Layer 4 (UI Presentation — タイムラインUI)**：`main.rs` への逆参照ゼロ。Material Icons 定数（`pub(crate) mod icons`）、`TimelineGridDrag` / `TimelineUiState`（唯一の定義＆実装）、抽象ホストトレイト `TimelineHost`、`TimelineLayout`、再生制御・キーフレーム/フレーム/レイヤー操作コントローラ、コントロールバー・ルーラー・フレームグリッド・レイヤー一覧・D&D操作関数群 |
-| 4 | **[`project_io.rs`](./project_io.rs)** | ~1,840行 | **Layer 3 (Project Persistence & Multi-Document Tabs)**：抽象ワークスペーストレイト `ProjectWorkspace`、単一構造体 `EditorDoc` を丸ごと保持・`std::mem::swap` する `DocumentSlot` / `DocumentTabManager` / `OpenProjectOutcome` / `PendingCloseConfirm`、`.is2d`（JSON形式）保存・読み込み専用DTO群（`ProjectDocument` / `SavedTimeline` / `SavedSymbolDef` 等）、編集中シンボルの非破壊多段フラッシュ、PID付き一時ファイル＋`sync_all` 経由のアトミック保存、`rfd` OS標準ファイルダイアログ連携 |
-| 5 | **[`canvas_tool.rs`](./canvas_tool.rs)** | ~2,055行 | **Layer 3 (Tool Core — 単一ドキュメント編集基盤)**：単一ドキュメント状態 `EditorDoc`、Undo/Redo 履歴 `UndoEntry` / `UndoHistory`、UI設定状態 `AppUiState` / `RightPanelTab` / `NoticeKind` / `StatusToast`、`Tool` 列挙型、共通ドラッグ状態マシン（`ActiveCanvasDrag` / `MoveSelectionDrag` / `MarqueeDrag` / `SelectSubMode` / `HoverTarget` / `SelectDragState` / `ScaleHandle` / `TransformHoverTarget` / `TransformDragState`）、タブ間共有クリップボード `SharedClipboard`、唯一の `impl ViewportState`・`impl CanvasState`・`impl EditorDoc`、およびキャンバス⇔タイムライン双方向同期基盤 |
+| 1 | **[`main.rs`](./main.rs)** | ~860行 | **Layer 5 (App Shell)**：アプリ起動、フォント・テーマ初期化、ルート構造体 `Is2dApp { doc: EditorDoc, right_panel_tab: RightPanelTab, timeline_ui: TimelineUiState, tabs: DocumentTabManager }`（`Deref<Target = EditorDoc>` / `ProjectWorkspace` / `TimelineHost` 実装）、UIパネルからの `UiAction` 一括ディスパッチ（`apply_action`）、ショートカット処理、メインループ |
+| 2 | **[`panels.rs`](./panels.rs)** | ~2,075行 | **Layer 4 (UI Presentation — パネル群 & `UiAction`)**：`main.rs` への逆参照ゼロ。UI専用プレゼンテーション定義（`RightPanelTab` / `notice_kind_colors` / `tool_icon` / `tool_label` / `tool_tooltip`）、UI操作イベント列挙型 `UiAction`、最上部メニューバー（`ファイル`・`編集`・`表示`）、複数ドキュメントタブバー（`draw_document_tab_bar`）、未保存変更確認モーダル（`draw_unsaved_close_confirm_modal`）、左端縦ツールバー、ステージ上部スリムバー（パンくずリスト）、右端4タブパネル（`プロパティ` / `カラー` / `ライブラリ` / `キャンバス`）、および読み取り専用の `&EditorDoc` を受け取る中央キャンバス合成・選択/プレビュー/カーソル描画関数群 |
+| 3 | **[`timeline_ui.rs`](./timeline_ui.rs)** | ~2,015行 | **Layer 4 (UI Presentation — タイムラインUI)**：`main.rs` への逆参照ゼロ。Material Icons 定数（`pub(crate) mod icons`）、`TimelineGridDrag` / `TimelineUiState`（再生状態 `is_playing` の単一の真の情報源および `&EditorDoc` のキー比較によるタイムライン切替自動検知 `ensure_timeline_context`）、抽象ホストトレイト `TimelineHost`、`TimelineLayout`、再生制御（`stop_playback` / `toggle_playback` / `update_playback` / `step_frame`）、コントロールバー・ルーラー・フレームグリッド・レイヤー一覧・D&D操作関数群 |
+| 4 | **[`project_io.rs`](./project_io.rs)** | ~1,840行 | **Layer 3 (Project Persistence & Multi-Document Tabs)**：抽象ワークスペーストレイト `ProjectWorkspace`（`stop_playback` を含む）、単一構造体 `EditorDoc` を丸ごと保持・`std::mem::swap` する `DocumentSlot` / `DocumentTabManager` / `OpenProjectOutcome` / `PendingCloseConfirm`、`.is2d`（JSON形式）保存・読み込み専用DTO群（`ProjectDocument` / `SavedTimeline` / `SavedSymbolDef` 等）、編集中シンボルの非破壊多段フラッシュ、PID付き一時ファイル＋`sync_all` 経由のアトミック保存、`rfd` OS標準ファイルダイアログ連携 |
+| 5 | **[`canvas_tool.rs`](./canvas_tool.rs)** | ~2,140行 | **Layer 3 (Tool Core — 単一ドキュメント編集・Undo/Redo・タイムライン操作基盤)**：単一ドキュメント状態 `EditorDoc`、Undo/Redo 履歴 `UndoEntry` / `UndoHistory`、UI設定状態 `AppUiState` / `NoticeKind` / `StatusToast`、`Tool` 列挙型、共通ドラッグ状態マシン（`ActiveCanvasDrag` / `MoveSelectionDrag` / `MarqueeDrag` / `SelectSubMode` / `HoverTarget` / `SelectDragState` / `ScaleHandle` / `TransformHoverTarget` / `TransformDragState`）、タブ間共有クリップボード `SharedClipboard`、唯一の `impl ViewportState`・`impl CanvasState`・`impl EditorDoc`（ステージサイズ・総フレーム数・FPSの連続編集Undo統合メソッドを含む）、キャンバス⇔タイムライン双方向同期基盤、およびタイムライン操作コントローラ関数群（`select_timeline_cells` / `scrub_ruler_to_frame` / `switch_to_layer_and_frame` / `timeline_insert_keyframe` / `timeline_delete_keyframe` / `timeline_extend_frame` / `timeline_remove_frame` / `timeline_move_or_copy_frames` / `set_layer_visible` / `set_layer_locked` / `timeline_add_layer` / `timeline_delete_active_layer` / `timeline_reorder_layer` / `timeline_move_active_layer`） |
 | 6 | **[`symbol_ops.rs`](./symbol_ops.rs)** | ~525行 | **Layer 3 (Tool Logic — シンボル＆トゥイーン編集操作)**：選択図形のシンボル変換（`F8`：`convert_selection_to_symbol`）、ライブラリからのインスタンス配置・リネーム・削除＆デタッチ、単一シンボル再生モード設定、クラシックトゥイーン切替（`T`：`timeline_toggle_tween`）＆回転設定、シンボル内部タイムラインへのインプレイス進入/退出（`enter_symbol_timeline` / `exit_symbol_timeline`） |
 | 7 | **[`select_ops.rs`](./select_ops.rs)** | ~690行 | **Layer 3 (Tool Logic — 選択・マーキー・グループ階層操作)**：単一選択・Shiftトグル選択・部分解除マージフラッシュ（`retain_selection_and_flush_deselected`）、矩形マーキー選択＆部分スライス（`apply_marquee_selection`）、ホバーヒットテスト（`compute_hover_target`）、ダブルクリックによるシンボル/グループ階層進入・退出（`handle_canvas_double_click` / `enter_group_at` / `exit_current_group`）、グループ化/解除（`Cmd+G` / `Cmd+B`）、矢印キーナッジ移動、選択削除・全消去 |
 | 8 | **[`clipboard_ops.rs`](./clipboard_ops.rs)** | ~635行 | **Layer 3 (Tool Logic — クリップボード・移動開始・Alt複製ドラッグ)**：グループ/インスタンスID再採番付きスコープ配置（`instantiate_relative_shapes_in_scope`）、選択移動ドラッグ開始（`begin_move_selection_drag`）、`Alt` ドラッグ複製（`duplicate_selected_shapes_for_alt_drag`）、タブ間シンボル定義の遅延解決＆自動インポート、コピー/カット/ペースト（`copy_selected_shapes` / `cut_selected_shapes` / `paste_clipboard`） |
@@ -22,9 +48,9 @@
 | 11 | **[`tool_transform.rs`](./tool_transform.rs)** | ~705行 | **Layer 3 (Tool Logic) — 自由変形ツール（`Q`）**、自由変形バウンディングボックス＆カーソル描画（`draw_free_transform_box` / `draw_transform_tool_cursor`）、ピボット設定・リセット、8方向スケール・回転・平行移動・反転のモジュール関数群 |
 | 12 | **[`symbol.rs`](./symbol.rs)** | ~1,575行 | **Layer 2 (Domain / Model) — シンボル＆ライブラリ＆クラシックトゥイーンのデータモデル**（`timeline` と `vector_engine` のみに依存：唯一の `impl SymbolManager` / `impl SymbolDef`（内部に `timeline: Timeline` と `mini_preview_cache` / `dynamic_anim_cache` を保持）、穴輪郭ハッシュを含む複合キー `StageShapeCacheKey` による2階層 $O(1)$ ローカル復元キャッシュ `StageToLocalCache`、入れ子シンボル再帰評価、ヒープ確保ゼロの遅延署名照合クエリ `ResolvedSigQuery`、および逆方向を含む多段入れ子シンボルのトポロジカル伝播・循環参照防止） |
 | 13 | **[`timeline.rs`](./timeline.rs)** | ~1,680行 | **Layer 2 (Domain / Model) — タイムラインのデータモデル**（`vector_engine` のみに依存：`TweenRotate` / `TweenState`、`SymbolInstance`（`shape_order_index` 付き）、カスタムピボット軸TRS極分解アフィン補間 `interpolate_affine_with_pivot` / `decompose_affine_trs`、衝突ゼロ署名 `ResolvedCelSig` による `SyncCache<CelMeshCache>` 3階層共有キャッシュ、`LoadedShapeSig`、唯一の `impl Timeline` / `impl Layer` / `impl Keyframe` / `impl Cel`（`Arc<Vec<FillShape>>` ＋ `Arc<Vec<SymbolInstance>>` CoW共有）、キーフレーム・フレーム・レイヤー操作メソッド群） |
-| 14 | **[`vector_stroke.rs`](./vector_stroke.rs)** | ~1,560行 | **Layer 1 (Geometry) — アルゴリズム 1 & 2：ストローク輪郭生成＆100%スムージング曲線フィット**（`vector_boolean` と `vector_engine` のみに依存：スケール不変ブラシ輪郭生成、特徴点ロック、ゼロ収縮平滑化、G1連続2次ベジェ曲線フィット、再帰深さガード付きRDP間引き） |
-| 15 | **[`vector_boolean.rs`](./vector_boolean.rs)** | ~1,075行 | **Layer 1 (Geometry) — アルゴリズム 3：マージ描画＆ブーリアン演算エンジン**（`vector_engine` のみに依存：`BoolOp`、事前フラットニングキャッシュ `PreparedClip`、`i_overlay` ブーリアン演算、遅延構築 `QuadSpatialGrid` 2D空間インデックスによる元の `QuadBez` タグ照合＆De Casteljau 部分曲線再構築、スイープライン＋Union-Find AABBクラスタ事前カリング付き閉領域バケツ検出、自己交差解消） |
-| 16 | **[`vector_engine.rs`](./vector_engine.rs)** | ~1,215行 | **Layer 1 (Geometry) — 2Dベクター幾何コア＆メッシュ描画エンジン**（クレート内他モジュールへの依存ゼロ：スレッドセーフな `SyncCache<T>`、`SymbolLoopMode` / `SymbolInstanceBinding`、`Contour` / `FillShape`（不変エンティティID `shape_id`＋`OnceLock` 遅延メッシュ/ヒットパスキャッシュ＋スクリーンメッシュキャッシュ＋選択ドット柄スクリーンメッシュキャッシュ＋`geometry_bounding_box()`）、CoW `Arc` キャッシュ＆異常値ガード付きアフィン変換、`union_bounding_boxes`、`arc_mesh_to_shape`（`Arc::unwrap_or_clone`）、`lyon` 三角形メッシュ化） |
+| 14 | **[`vector_boolean.rs`](./vector_boolean.rs)** | ~1,075行 | **Layer 1 (Geometry) — アルゴリズム 3：マージ描画＆ブーリアン演算エンジン**（`vector_stroke` と `vector_engine` のみに依存：`BoolOp`、事前フラットニングキャッシュ `PreparedClip`、`i_overlay` ブーリアン演算、遅延構築 `QuadSpatialGrid` 2D空間インデックスによる元の `QuadBez` タグ照合＆De Casteljau 部分曲線再構築、スイープライン＋Union-Find AABBクラスタ事前カリング付き閉領域バケツ検出、自己交差解消） |
+| 15 | **[`vector_stroke.rs`](./vector_stroke.rs)** | ~1,560行 | **Layer 1 (Geometry) — アルゴリズム 1 & 2：ストローク輪郭生成＆100%スムージング曲線フィット**（`vector_engine` のみに依存：スケール不変ブラシ輪郭生成、特徴点ロック、ゼロ収縮平滑化、G1連続2次ベジェ曲線フィット、再帰深さガード付きRDP間引き） |
+| 16 | **[`vector_engine.rs`](./vector_engine.rs)** | ~1,220行 | **Layer 1 (Geometry) — 2Dベクター幾何コア＆メッシュ描画エンジン**（クレート内他モジュールへの依存ゼロ：スレッドセーフな `SyncCache<T>`、`SymbolLoopMode` / `SymbolInstanceBinding`、`Contour` / `FillShape`（不変エンティティID `shape_id`＋`OnceLock` 遅延メッシュ/ヒットパスキャッシュ＋`SyncCache` スクリーンメッシュキャッシュ＋選択ドット柄スクリーンメッシュキャッシュ＋`geometry_bounding_box()`）、CoW `Arc` キャッシュ＆異常値ガード付きアフィン変換、`union_bounding_boxes`、`arc_mesh_to_shape`（`Arc::unwrap_or_clone`）、`lyon` 三角形メッシュ化） |
 | 17 | **[`tests.rs`](./tests.rs)** | ~5,965行 | 全機能・egui入力駆動・保存/読込ラウンドトリップ・異常値・クラッシュ耐性を検証する自動ユニットテストスイート（全89テスト） |
 
 ---

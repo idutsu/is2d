@@ -18,7 +18,7 @@ const MAX_UNDO_HISTORY: usize = 100;
 const DEFAULT_TOAST_DURATION: Duration = Duration::from_millis(2800);
 
 // ============================================================================
-// 1. トースト通知・右パネルタブ・ツール・ドラッグ状態マシン
+// 1. トースト通知・ツール・ドラッグ状態マシン
 // ============================================================================
 
 /// キャンバス左上に表示する通知・警告メッセージの種別
@@ -32,64 +32,12 @@ pub(crate) enum NoticeKind {
     Info,
 }
 
-impl NoticeKind {
-    /// 種別に応じた `(背景色, 枠線色, 文字色)` を返す
-    pub(crate) fn colors(self) -> (Color32, Color32, Color32) {
-        match self {
-            NoticeKind::Warning => (
-                Color32::from_rgba_unmultiplied(255, 248, 225, 244),
-                Color32::from_rgb(215, 165, 55),
-                Color32::from_rgb(145, 90, 10),
-            ),
-            NoticeKind::Error => (
-                Color32::from_rgba_unmultiplied(255, 236, 236, 244),
-                Color32::from_rgb(220, 75, 75),
-                Color32::from_rgb(155, 25, 25),
-            ),
-            NoticeKind::Info => (
-                Color32::from_rgba_unmultiplied(235, 245, 255, 244),
-                Color32::from_rgb(55, 140, 225),
-                Color32::from_rgb(20, 75, 145),
-            ),
-        }
-    }
-}
-
 /// 操作時に一定時間表示して自動で消えるトースト通知メッセージ
 #[derive(Clone, Debug)]
 pub(crate) struct StatusToast {
     pub(crate) kind: NoticeKind,
     pub(crate) message: String,
     pub(crate) expires_at: Instant,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) enum RightPanelTab {
-    #[default]
-    Properties,
-    Color,
-    Library,
-    Canvas,
-}
-
-impl RightPanelTab {
-    /// 右パネル上部タブバーに並べる標準順序
-    pub(crate) const ALL: [RightPanelTab; 4] = [
-        RightPanelTab::Properties,
-        RightPanelTab::Color,
-        RightPanelTab::Library,
-        RightPanelTab::Canvas,
-    ];
-
-    /// 右パネルタブバーに表示する見出し文字列
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            RightPanelTab::Properties => "プロパティ",
-            RightPanelTab::Color => "カラー",
-            RightPanelTab::Library => "ライブラリ",
-            RightPanelTab::Canvas => "キャンバス",
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -103,7 +51,7 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    /// 左端縦ツールバーに並べるツールの標準順序（Adobe Animate 準拠）
+    /// 全ツールバリアントの標準順序
     pub(crate) const ALL: [Tool; 6] = [
         Tool::Select,
         Tool::Transform,
@@ -112,38 +60,6 @@ impl Tool {
         Tool::Bucket,
         Tool::Eyedropper,
     ];
-
-    /// 左ツールバーのボタンに表示するアイコン文字列（`MaterialIcons-Regular.ttf` のグリフ）
-    pub(crate) const fn icon(self) -> &'static str {
-        match self {
-            Tool::Select => "\u{e569}",     // near_me（選択ポインタ矢印）
-            Tool::Transform => "\u{e3c2}",  // crop_free（自由変形バウンディング枠）
-            Tool::Brush => "\u{e3ae}",      // brush（ブラシ）
-            Tool::Eraser => "\u{e664}",     // auto_fix_normal（消しゴム）
-            Tool::Bucket => "\u{e23a}",     // format_color_fill（バケツ塗り）
-            Tool::Eyedropper => "\u{e3b8}", // colorize（スポイト）
-        }
-    }
-
-    /// プロパティパネル等に表示するツール名（ショートカット表記付き）
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Tool::Select => "選択ツール (V)",
-            Tool::Transform => "自由変形ツール (Q)",
-            Tool::Brush => "ブラシツール (B)",
-            Tool::Eraser => "消しゴムツール (E)",
-            Tool::Bucket => "バケツ塗りツール (K)",
-            Tool::Eyedropper => "スポイトツール (I)",
-        }
-    }
-
-    /// ツールバーのホバー時に表示するツールチップ説明文
-    pub(crate) const fn tooltip(self) -> &'static str {
-        match self {
-            Tool::Select => "選択・変形ツール (V)",
-            _ => self.label(),
-        }
-    }
 
     /// ツール切り替え用の単一キーショートカット
     pub(crate) const fn shortcut_key(self) -> Key {
@@ -1460,16 +1376,18 @@ impl UndoHistory {
     }
 }
 
-/// ツール選択・ブラシ/消しゴム設定・右パネルタブ・トースト通知などアプリ全体のUI設定状態
+/// ツール選択・ブラシ/消しゴム設定・トースト通知などドキュメント編集に関わるUI設定状態
 #[derive(Clone)]
 pub(crate) struct AppUiState {
     pub(crate) tool: Tool,
     pub(crate) select_sub_mode: SelectSubMode,
-    pub(crate) right_panel_tab: RightPanelTab,
     pub(crate) brush_radius: f32,
     pub(crate) eraser_radius: f32,
     pub(crate) brush_color: Color32,
     pub(crate) show_wireframe: bool,
+    pub(crate) onion_skin_enabled: bool,
+    pub(crate) onion_prev_frames: usize,
+    pub(crate) onion_next_frames: usize,
     /// プロパティパネルの下部表示対象（`true`: タイムラインのフレーム/トゥイーン属性、`false`: キャンバス上のシンボル属性）
     pub(crate) inspect_timeline_frame: bool,
     /// シンボル再生オプションの開始/表示フレーム数値フィールドを連続編集（ドラッグ/入力）中かどうか
@@ -1485,11 +1403,13 @@ impl Default for AppUiState {
         Self {
             tool: Tool::Brush,
             select_sub_mode: SelectSubMode::Reshape,
-            right_panel_tab: RightPanelTab::default(),
             brush_radius: 8.0,
             eraser_radius: 22.0,
             brush_color: Color32::from_rgb(40, 45, 55),
             show_wireframe: false,
+            onion_skin_enabled: false,
+            onion_prev_frames: 2,
+            onion_next_frames: 2,
             inspect_timeline_frame: false,
             editing_symbol_playback: false,
             current_file_path: None,
@@ -1517,11 +1437,7 @@ impl AppUiState {
 pub(crate) struct EditorDoc {
     /// 現在のドキュメントの一意な識別ID（タブ間クリップボード・シンボル移植の同一タブ判定用）
     pub(crate) doc_id: u64,
-    /// タイムライン再生中フラグ（L3 操作による自動停止 `stop_playback` と L4 `TimelineUiState` を橋渡し）
-    pub(crate) is_playing: bool,
-    /// シンボルタイムライン進入/退出やドキュメント切り替え時に L4 `TimelineUiState` のスクロール・ドラッグをリセットする要求フラグ
-    pub(crate) timeline_switched: bool,
-    /// ツール設定・右パネルタブ・ステータストースト通知などのUI状態
+    /// ツール設定・ステータストースト通知などのUI設定状態
     pub(crate) ui: AppUiState,
     /// キャンバスのズーム・パン・ステージ枠設定
     pub(crate) viewport: ViewportState,
@@ -1539,8 +1455,6 @@ impl Default for EditorDoc {
     fn default() -> Self {
         Self {
             doc_id: 1,
-            is_playing: false,
-            timeline_switched: false,
             ui: AppUiState::default(),
             viewport: ViewportState::default(),
             canvas: CanvasState::default(),
@@ -1561,7 +1475,6 @@ impl EditorDoc {
     }
 
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
-        self.timeline_switched = true;
         self.viewport.editing_stage_size = false;
         self.symbols.actively_renaming_symbol = None;
         self.ui.editing_symbol_playback = false;
@@ -1609,9 +1522,7 @@ impl EditorDoc {
     }
 
     pub(crate) fn push_undo(&mut self) {
-        if self.is_playing {
-            stop_playback(self);
-        } else if let Some(mut unsliced) = self.canvas.take_unsliced_snapshot() {
+        if let Some(mut unsliced) = self.canvas.take_unsliced_snapshot() {
             let selected_ids = self.canvas.selected_shape_ids();
             self.timeline.normalize_shape_layer_ids(&mut unsliced);
             self.canvas.shapes = unsliced;
@@ -1635,17 +1546,15 @@ impl EditorDoc {
     }
 
     /// キャンバス図形に対する変更トランザクションを一括実行する：
-    /// 1. 再生中であれば停止して現在フレームの図形を展開 (`stop_playback`)
-    /// 2. 必要に応じて未確定選択を確定解除 (`clear_selection`)
-    /// 3. 変更前の Undo スナップショットを記録
-    /// 4. `mutate` クロージャでキャンバス図形を更新
-    /// 5. 変更後の図形を現在フレームのタイムライン `Cel` へ自動同期 (`sync_shapes_to_timeline`)
+    /// 1. 必要に応じて未確定選択を確定解除 (`clear_selection`)
+    /// 2. 変更前の Undo スナップショットを記録
+    /// 3. `mutate` クロージャでキャンバス図形を更新
+    /// 4. 変更後の図形を現在フレームのタイムライン `Cel` へ自動同期 (`sync_shapes_to_timeline`)
     pub(crate) fn mutate_canvas_with_undo(
         &mut self,
         clear_selection_first: bool,
         mutate: impl FnOnce(&mut Self),
     ) {
-        stop_playback(self);
         if clear_selection_first {
             clear_selection(self);
         }
@@ -1658,7 +1567,6 @@ impl EditorDoc {
     /// 事前取得済みの変更前スナップショット `pre_mutation_snapshot` を Undo 履歴に記録し、
     /// 現在の `self.canvas.shapes` をタイムライン `Cel` へ自動同期する単一コミットAPI
     pub(crate) fn commit_canvas_mutation(&mut self, pre_mutation_snapshot: Vec<FillShape>) {
-        stop_playback(self);
         self.record_undo_snapshot(pre_mutation_snapshot);
         sync_shapes_to_timeline(self);
     }
@@ -1677,6 +1585,70 @@ impl EditorDoc {
             let curr = self.restore_state_snapshot(next_entry);
             self.history.push_undo_from_redo(curr);
         }
+    }
+
+    /// ステージサイズの連続編集（`DragValue` ドラッグ/入力）中に初回のみ Undo 履歴を記録して更新する
+    pub(crate) fn set_stage_size_interactive(&mut self, next_size: Vec2) {
+        if (next_size.x - self.viewport.stage_size.x).abs() <= f32::EPSILON
+            && (next_size.y - self.viewport.stage_size.y).abs() <= f32::EPSILON
+        {
+            return;
+        }
+        if !self.viewport.editing_stage_size {
+            self.push_undo();
+            self.viewport.editing_stage_size = true;
+        }
+        self.viewport.stage_size = next_size;
+    }
+
+    /// ステージサイズの連続編集終了時に Undo 統合フラグを解除する
+    pub(crate) fn finish_stage_size_edit(&mut self) {
+        self.viewport.editing_stage_size = false;
+    }
+
+    /// 総フレーム数の連続編集（`DragValue` ドラッグ/入力）中に初回のみ Undo 履歴を記録して更新する
+    pub(crate) fn set_total_frames_interactive(
+        &mut self,
+        next_total: usize,
+        editing_total_frames: &mut bool,
+    ) {
+        let next_total = next_total.max(1);
+        if next_total != self.timeline.total_frames {
+            if !*editing_total_frames {
+                flush_canvas_before_timeline_op(self);
+                self.push_undo();
+                *editing_total_frames = true;
+            }
+            self.timeline.resize_total_frames(next_total);
+            self.symbols.sync_active_edit(&self.timeline);
+            load_shapes_from_timeline(self);
+        }
+    }
+
+    /// FPSの連続編集（`DragValue` ドラッグ/入力）中に初回のみ Undo 履歴を記録して更新する
+    pub(crate) fn set_fps_interactive(
+        &mut self,
+        next_fps: u32,
+        is_playing: bool,
+        editing_fps: &mut bool,
+    ) -> bool {
+        let next_fps = next_fps.clamp(1, 60);
+        if next_fps != self.timeline.fps {
+            if !*editing_fps {
+                if !is_playing {
+                    flush_canvas_before_timeline_op(self);
+                }
+                self.push_undo();
+                *editing_fps = true;
+            }
+            self.timeline.fps = next_fps;
+            for sess in &mut self.symbols.edit_stack {
+                sess.parent_timeline.fps = next_fps;
+            }
+            self.symbols.sync_active_edit(&self.timeline);
+            return true;
+        }
+        false
     }
 
     /// 警告トースト通知を表示する
@@ -1703,27 +1675,30 @@ impl EditorDoc {
 // ============================================================================
 
 /// 現在の編集スコープ（グループ内であればそのグループの所属レイヤー、そうでなければ現在のアクティブレイヤー）の `layer_id` を返す
-pub(crate) fn active_scope_layer_id(doc: &EditorDoc) -> u64 {
-    if !doc.canvas.editing_group_path.is_empty() {
-        if let Some(s) = doc
-            .canvas
+pub(crate) fn active_scope_layer_id(canvas: &CanvasState, timeline: &Timeline) -> u64 {
+    if !canvas.editing_group_path.is_empty() {
+        if let Some(s) = canvas
             .shapes
             .iter()
-            .find(|s| s.is_in_editing_scope(&doc.canvas.editing_group_path))
+            .find(|s| s.is_in_editing_scope(&canvas.editing_group_path))
         {
             return s.layer_id;
         }
     }
-    doc.timeline.active_layer_id()
+    timeline.active_layer_id()
 }
 
 /// 指定されたシェイプインデックス群が所属するレイヤーのうち最前面の `layer_id` を返す（該当なし時は `active_scope_layer_id`）
-pub(crate) fn topmost_layer_id_for_indices(doc: &EditorDoc, indices: &[usize]) -> u64 {
+pub(crate) fn topmost_layer_id_for_indices(
+    canvas: &CanvasState,
+    timeline: &Timeline,
+    indices: &[usize],
+) -> u64 {
     indices
         .iter()
-        .filter_map(|&idx| doc.canvas.shapes.get(idx).map(|s| s.layer_id))
-        .max_by_key(|&lid| doc.timeline.layer_index_by_id(lid).unwrap_or(0))
-        .unwrap_or_else(|| active_scope_layer_id(doc))
+        .filter_map(|&idx| canvas.shapes.get(idx).map(|s| s.layer_id))
+        .max_by_key(|&lid| timeline.layer_index_by_id(lid).unwrap_or(0))
+        .unwrap_or_else(|| active_scope_layer_id(canvas, timeline))
 }
 
 /// 指定したシェイプインデックス `shape_idx` が属するレイヤーへ `doc.timeline.active_layer` およびタイムライン選択状態を追従させる
@@ -1792,24 +1767,11 @@ pub(crate) fn toggle_select_sub_mode(doc: &mut EditorDoc, target_mode: SelectSub
     clear_selection(doc);
 }
 
-/// 再生中であれば停止し、停止時点のフレームの図形群を作業用 `doc.canvas.shapes` に展開する
-pub(crate) fn stop_playback(doc: &mut EditorDoc) {
-    if doc.is_playing {
-        doc.is_playing = false;
-        load_shapes_from_timeline(doc);
-    }
-}
-
 /// タイムラインの構造変更前に、未確定のキャンバス選択スライスを確定解除し `doc.canvas.shapes` を現在フレームのセルへ同期する
-/// （再生中の場合は古い `doc.canvas.shapes` で現在フレームを上書きしないよう、再生停止して現在フレームの図形を読み込む）
 pub(crate) fn flush_canvas_before_timeline_op(doc: &mut EditorDoc) {
-    if doc.is_playing {
-        stop_playback(doc);
-    } else {
-        cancel_active_drag(doc);
-        clear_selection(doc);
-        sync_shapes_to_timeline(doc);
-    }
+    cancel_active_drag(doc);
+    clear_selection(doc);
+    sync_shapes_to_timeline(doc);
 }
 
 /// 作業キャンバスを確定同期し、Undo履歴を記録した上でタイムライン変更処理 `mutate` を実行し、完了後に `doc.canvas.shapes` を再読み込みする
@@ -1824,7 +1786,7 @@ pub(crate) fn mutate_timeline_with_undo(doc: &mut EditorDoc, mutate: impl FnOnce
 /// キャンバスの作業用 `doc.canvas.shapes` を、各図形の `layer_id` ごとに現在フレームの `Cel` に振り分けて書き戻す
 pub(crate) fn sync_shapes_to_timeline(doc: &mut EditorDoc) {
     doc.canvas.sanitize_editing_scope();
-    if doc.is_playing || doc.canvas.is_all_shapes_unchanged() {
+    if doc.canvas.is_all_shapes_unchanged() {
         return;
     }
     doc.timeline
@@ -2029,6 +1991,35 @@ pub(crate) fn reorder_selected_to_scope_front(doc: &mut EditorDoc) -> bool {
 }
 
 pub(crate) fn commit_moved_selection(doc: &mut EditorDoc, undo_snapshot: Vec<FillShape>) {
+    for &sel_idx in &doc.canvas.selected_shapes {
+        let Some(shape) = doc.canvas.shapes.get_mut(sel_idx) else {
+            continue;
+        };
+        if shape.exterior.segments.is_empty() {
+            continue;
+        }
+        let orig_opt = undo_snapshot
+            .get(sel_idx)
+            .filter(|s| s.shape_id == shape.shape_id)
+            .or_else(|| undo_snapshot.iter().find(|s| s.shape_id == shape.shape_id));
+        if let Some(orig) = orig_opt {
+            if orig.exterior.segments.len() == shape.exterior.segments.len() {
+                let enlarged = orig
+                    .exterior
+                    .segments
+                    .iter()
+                    .zip(shape.exterior.segments.iter())
+                    .any(|(os, cs)| {
+                        let od = (os.p1 - os.p0).hypot2() + (os.p2 - os.p1).hypot2();
+                        let cd = (cs.p1 - cs.p0).hypot2() + (cs.p2 - cs.p1).hypot2();
+                        od > 1e-12 && cd > od * (1.01 * 1.01)
+                    });
+                if enlarged {
+                    shape.rebuild_cache();
+                }
+            }
+        }
+    }
     if !reorder_selected_to_scope_front(doc) {
         return;
     }
@@ -2051,4 +2042,214 @@ pub(crate) fn finish_move_selection_drag(
     {
         sync_shapes_to_timeline(doc);
     }
+}
+
+// ============================================================================
+// 7. タイムライン編集操作（キーフレーム・フレーム・レイヤー・セル選択）
+// ============================================================================
+
+/// タイムラインのセル範囲を選択し、そのレイヤー群の現在フレームにある全図形をキャンバス上で選択状態にする
+pub(crate) fn select_timeline_cells(
+    doc: &mut EditorDoc,
+    start_layer: usize,
+    start_frame: usize,
+    end_layer: usize,
+    end_frame: usize,
+) {
+    if doc.timeline.layers.is_empty() {
+        return;
+    }
+    let max_l = doc.timeline.layers.len() - 1;
+    let (l0, l1) = (start_layer.min(max_l), end_layer.min(max_l));
+    let (f0, f1) = (start_frame, end_frame);
+
+    switch_to_layer_and_frame(doc, l1, f1);
+    doc.timeline.cell_selection = Some(TimelineCellSelection::from_corners(l0, f0, l1, f1));
+    select_shapes_for_timeline_selection(doc);
+}
+
+/// タイムラインのレイヤー個別選択を解除し、指定フレームへ再生ヘッドのみ移動する（ルーラー操作時など）
+pub(crate) fn scrub_ruler_to_frame(doc: &mut EditorDoc, frame_idx: usize) {
+    let clamped_frame = frame_idx.min(doc.timeline.total_frames.saturating_sub(1));
+    if doc.timeline.current_frame == clamped_frame && doc.timeline.cell_selection.is_none() {
+        return;
+    }
+    flush_canvas_before_timeline_op(doc);
+    doc.timeline.current_frame = clamped_frame;
+    doc.timeline.cell_selection = None;
+    load_shapes_from_timeline(doc);
+}
+
+/// 指定したレイヤー・フレームへ切り替える
+pub(crate) fn switch_to_layer_and_frame(doc: &mut EditorDoc, layer_idx: usize, frame_idx: usize) {
+    if doc.timeline.layers.is_empty() {
+        return;
+    }
+    flush_canvas_before_timeline_op(doc);
+    doc.timeline.select_single_cell(layer_idx, frame_idx);
+    load_shapes_from_timeline(doc);
+    doc.ui.inspect_timeline_frame = true;
+}
+
+/// キーフレーム挿入（`F6`: `clone_prev = true` で前の絵を複製 / `F7`: `clone_prev = false` で空白セル作成）
+pub(crate) fn timeline_insert_keyframe(doc: &mut EditorDoc, clone_prev: bool) -> bool {
+    let targets = doc.timeline.target_layers_for_frame_op();
+    if targets.is_empty() {
+        return false;
+    }
+    mutate_timeline_with_undo(doc, |tl| {
+        tl.insert_keyframe_on_targets(&targets, clone_prev);
+    });
+    if clone_prev {
+        select_shapes_for_timeline_selection(doc);
+    }
+    true
+}
+
+/// 現在フレームのキーフレームを削除（フレーム0の場合は空白化）する（`Shift+F6`）
+pub(crate) fn timeline_delete_keyframe(doc: &mut EditorDoc) -> bool {
+    let targets = doc.timeline.target_layers_for_frame_op();
+    if targets.is_empty() {
+        return false;
+    }
+    flush_canvas_before_timeline_op(doc);
+    if !doc.timeline.can_delete_keyframe_on_targets(&targets) {
+        return false;
+    }
+    mutate_timeline_with_undo(doc, |tl| {
+        tl.delete_keyframe_on_targets(&targets);
+    });
+    true
+}
+
+/// 現在フレーム（または選択セル範囲の終端フレーム）の保持尺を延長する（`F5`）
+pub(crate) fn timeline_extend_frame(doc: &mut EditorDoc) -> bool {
+    let targets = doc.timeline.target_layers_for_frame_op();
+    if targets.is_empty() {
+        return false;
+    }
+    mutate_timeline_with_undo(doc, |tl| {
+        tl.extend_frame_on_targets(&targets);
+    });
+    true
+}
+
+/// 現在フレームの保持尺を1フレーム短縮する（`Shift+F5`）
+pub(crate) fn timeline_remove_frame(doc: &mut EditorDoc) -> bool {
+    let targets = doc.timeline.target_layers_for_frame_op();
+    if targets.is_empty() {
+        return false;
+    }
+    flush_canvas_before_timeline_op(doc);
+    if !doc.timeline.can_remove_frame_on_targets(&targets) {
+        return false;
+    }
+    let mut any_changed = false;
+    mutate_timeline_with_undo(doc, |tl| {
+        any_changed = tl.remove_frame_on_targets(&targets);
+    });
+    any_changed
+}
+
+/// 選択されたフレーム範囲 `sel` を `(delta_layer, delta_frame)` だけ移動または複製する
+pub(crate) fn timeline_move_or_copy_frames(
+    doc: &mut EditorDoc,
+    sel: TimelineCellSelection,
+    delta_layer: isize,
+    delta_frame: isize,
+    copy_mode: bool,
+) -> bool {
+    let Some((dst_sel, actual_dl)) = doc
+        .timeline
+        .resolve_frame_move_bounds(sel, delta_layer, delta_frame)
+    else {
+        return false;
+    };
+    mutate_timeline_with_undo(doc, |tl| {
+        tl.move_or_copy_frames(sel, dst_sel, actual_dl, copy_mode);
+    });
+    doc.symbols.next_group_id = doc
+        .symbols
+        .next_group_id
+        .max(doc.timeline.max_group_id().saturating_add(1));
+    select_shapes_for_timeline_selection(doc);
+    true
+}
+
+/// 指定レイヤーの表示/非表示（👁）を設定し、Undo記録と作業キャンバス `doc.canvas.shapes` の再同期を行う
+pub(crate) fn set_layer_visible(doc: &mut EditorDoc, layer_idx: usize, visible: bool) {
+    if doc
+        .timeline
+        .layers
+        .get(layer_idx)
+        .is_none_or(|l| l.visible == visible)
+    {
+        return;
+    }
+    mutate_timeline_with_undo(doc, |tl| {
+        if let Some(layer) = tl.layers.get_mut(layer_idx) {
+            layer.visible = visible;
+        }
+    });
+}
+
+/// 指定レイヤーのロック状態（🔒）を設定し、Undo記録と作業キャンバス `doc.canvas.shapes` の再同期を行う
+pub(crate) fn set_layer_locked(doc: &mut EditorDoc, layer_idx: usize, locked: bool) {
+    if doc
+        .timeline
+        .layers
+        .get(layer_idx)
+        .is_none_or(|l| l.locked == locked)
+    {
+        return;
+    }
+    mutate_timeline_with_undo(doc, |tl| {
+        if let Some(layer) = tl.layers.get_mut(layer_idx) {
+            layer.locked = locked;
+        }
+    });
+}
+
+/// 新しいレイヤーを現在のアクティブレイヤーの1つ上（前面）に追加する
+pub(crate) fn timeline_add_layer(doc: &mut EditorDoc) {
+    mutate_timeline_with_undo(doc, Timeline::add_layer_above_active);
+}
+
+/// 現在アクティブなレイヤーを削除する（最低1レイヤーは残す）
+pub(crate) fn timeline_delete_active_layer(doc: &mut EditorDoc) -> bool {
+    if doc.timeline.layers.len() <= 1 {
+        return false;
+    }
+    mutate_timeline_with_undo(doc, Timeline::delete_active_layer);
+    true
+}
+
+/// 指定したレイヤー `from_idx` を `to_idx` の重ね順位置へ移動する（ドラッグ＆ドロップ入れ替え対応）
+pub(crate) fn timeline_reorder_layer(doc: &mut EditorDoc, from_idx: usize, to_idx: usize) -> bool {
+    let len = doc.timeline.layers.len();
+    if from_idx >= len || to_idx >= len || from_idx == to_idx {
+        return false;
+    }
+    mutate_timeline_with_undo(doc, |tl| {
+        tl.reorder_layer(from_idx, to_idx);
+    });
+    true
+}
+
+/// 現在アクティブなレイヤーを1つ上（前面: `up = true`）または1つ下（背面: `up = false`）へ移動する
+pub(crate) fn timeline_move_active_layer(doc: &mut EditorDoc, up: bool) -> bool {
+    let len = doc.timeline.layers.len();
+    let curr = doc.timeline.active_layer;
+    let target = if up {
+        if curr + 1 >= len {
+            return false;
+        }
+        curr + 1
+    } else {
+        if curr == 0 {
+            return false;
+        }
+        curr - 1
+    };
+    timeline_reorder_layer(doc, curr, target)
 }

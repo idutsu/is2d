@@ -933,12 +933,43 @@ impl Layer {
         kfs
     }
 
-    /// 指定フレーム区間 `[min_frame..=max_frame]` 内のキーフレームを除去し、フレーム0のキーフレームが空になった場合は補填する
+    /// 指定フレーム区間 `[min_frame..=max_frame]` を移動元から切り取って空白化し、
+    /// 移動範囲直後（`max_frame + 1`）のフレーム姿勢を保持する境界キーフレームを自動挿入する
     pub(crate) fn remove_keyframes_in_range(&mut self, min_frame: usize, max_frame: usize) {
+        let after_frame = max_frame + 1;
+        let post_range_kf = (after_frame < self.frame_count
+            && !self
+                .keyframes
+                .iter()
+                .any(|kf| kf.start_frame == after_frame))
+        .then(|| self.snapshot_keyframe_at(after_frame, after_frame));
+
         self.keyframes
             .retain(|kf| kf.start_frame < min_frame || kf.start_frame > max_frame);
+
         if self.keyframes.is_empty() || self.keyframes[0].start_frame > 0 {
             self.keyframes.insert(0, Keyframe::new_blank(0));
+        } else if min_frame < self.frame_count {
+            let prev_idx = self
+                .keyframes
+                .partition_point(|kf| kf.start_frame <= min_frame)
+                .saturating_sub(1);
+            if !self.keyframes[prev_idx].cel.is_empty() || self.keyframes[prev_idx].tween {
+                let insert_pos = self
+                    .keyframes
+                    .partition_point(|kf| kf.start_frame < min_frame);
+                self.keyframes
+                    .insert(insert_pos, Keyframe::new_blank(min_frame));
+            }
+        }
+
+        if let Some(after_kf) = post_range_kf {
+            if !after_kf.cel.is_empty() || after_kf.tween {
+                let pos = self
+                    .keyframes
+                    .partition_point(|existing_kf| existing_kf.start_frame < after_frame);
+                self.keyframes.insert(pos, after_kf);
+            }
         }
     }
 

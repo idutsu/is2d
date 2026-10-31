@@ -110,7 +110,7 @@ pub(crate) fn handle_brush_or_eraser_input(
 }
 
 pub(crate) fn commit_raw_outline(app: &mut EditorDoc, raw: &[Point]) {
-    let target_lid = crate::canvas_tool::active_scope_layer_id(app);
+    let target_lid = crate::canvas_tool::active_scope_layer_id(&app.canvas, &app.timeline);
     if !app.timeline.is_layer_editable_by_id(target_lid) {
         return;
     }
@@ -138,7 +138,6 @@ pub(crate) fn commit_raw_outline(app: &mut EditorDoc, raw: &[Point]) {
         if !has_bbox_overlap {
             return;
         }
-        crate::canvas_tool::stop_playback(app);
         crate::canvas_tool::clear_selection(app);
         let prev_revs: Vec<(u64, u64)> = app
             .canvas
@@ -169,7 +168,7 @@ pub(crate) fn commit_raw_outline(app: &mut EditorDoc, raw: &[Point]) {
 /// バケツツール（色流し込み）
 pub(crate) fn bucket_fill_at(app: &mut EditorDoc, pt: Point) -> bool {
     let fill_color = app.ui.brush_color;
-    let target_lid = crate::canvas_tool::active_scope_layer_id(app);
+    let target_lid = crate::canvas_tool::active_scope_layer_id(&app.canvas, &app.timeline);
     if !app.timeline.is_layer_editable_by_id(target_lid) {
         return false;
     }

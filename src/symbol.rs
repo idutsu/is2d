@@ -199,24 +199,64 @@ pub(crate) struct SymbolDef {
 
 pub(crate) const MAX_SYMBOL_NEST_DEPTH: usize = 8;
 pub(crate) const MAX_EXPANDED_SYMBOL_SHAPES: usize = 10_000;
+pub(crate) const MAX_SYMBOL_EXPANSION_STEPS: usize = 10_000;
 
-/// シンボル再帰評価時の設定コンテキスト
-#[derive(Clone, Copy)]
+type SymbolEvalMemoKey = (u64, usize, usize, usize);
+
+#[derive(Default)]
+struct SymbolEvalState {
+    steps_used: usize,
+    memo: HashMap<SymbolEvalMemoKey, Arc<Vec<FillShape>>>,
+}
+
+/// シンボル再帰評価時の設定・メモ化・展開上限コンテキスト
+#[derive(Clone)]
 pub(crate) struct SymbolEvalCtx<'a> {
     pub(crate) library: &'a [SymbolDef],
     pub(crate) depth: usize,
+    state: std::rc::Rc<std::cell::RefCell<SymbolEvalState>>,
 }
 
 impl<'a> SymbolEvalCtx<'a> {
     pub(crate) fn new(library: &'a [SymbolDef]) -> Self {
-        Self { library, depth: 0 }
+        Self {
+            library,
+            depth: 0,
+            state: std::rc::Rc::new(std::cell::RefCell::new(SymbolEvalState::default())),
+        }
     }
 
-    pub(crate) fn nested(self) -> Self {
+    pub(crate) fn nested(&self) -> Self {
         Self {
             library: self.library,
             depth: self.depth + 1,
+            state: std::rc::Rc::clone(&self.state),
         }
+    }
+
+    #[inline]
+    pub(crate) fn has_remaining_steps(&self) -> bool {
+        self.state.borrow().steps_used < MAX_SYMBOL_EXPANSION_STEPS
+    }
+
+    #[inline]
+    fn try_consume_step(&self) -> bool {
+        let mut st = self.state.borrow_mut();
+        if st.steps_used >= MAX_SYMBOL_EXPANSION_STEPS {
+            return false;
+        }
+        st.steps_used += 1;
+        true
+    }
+
+    #[inline]
+    fn get_memo(&self, key: &SymbolEvalMemoKey) -> Option<Arc<Vec<FillShape>>> {
+        self.state.borrow().memo.get(key).cloned()
+    }
+
+    #[inline]
+    fn insert_memo(&self, key: SymbolEvalMemoKey, shapes: Arc<Vec<FillShape>>) {
+        self.state.borrow_mut().memo.insert(key, shapes);
     }
 }
 
@@ -233,7 +273,7 @@ pub(crate) fn resolve_cel_with_library(
             let _ = s.fill_mesh();
         }
     }
-    if ctx.depth >= MAX_SYMBOL_NEST_DEPTH || cel.instances.is_empty() {
+    if ctx.depth >= MAX_SYMBOL_NEST_DEPTH || cel.instances.is_empty() || !ctx.has_remaining_steps() {
         return (*cel.shapes).clone();
     }
 
@@ -246,7 +286,7 @@ pub(crate) fn resolve_cel_with_library(
             out.push(cel.shapes[next_shape_idx].clone());
             next_shape_idx += 1;
         }
-        if out.len() >= MAX_EXPANDED_SYMBOL_SHAPES {
+        if out.len() >= MAX_EXPANDED_SYMBOL_SHAPES || !ctx.has_remaining_steps() {
             break;
         }
         let b = inst.binding;
@@ -418,10 +458,23 @@ impl SymbolDef {
 
     /// シンボルの全フレーム（`0..total_frames`）を先頭から走査し、最初に図形が存在するフレームのローカル図形列を返す
     pub(crate) fn first_non_empty_local_shapes(&self, library: &[SymbolDef]) -> Vec<FillShape> {
+        let has_any_content = self
+            .timeline
+            .layers
+            .iter()
+            .any(|l| l.visible && l.keyframes.iter().any(|kf| !kf.cel.is_empty()));
+        if !has_any_content {
+            return Vec::new();
+        }
+        let ctx = SymbolEvalCtx::new(library).nested();
+        let binding = SymbolInstanceBinding::new(0, self.id, Affine::IDENTITY);
         for f in 0..self.timeline.total_frames.max(1) {
-            let shapes = self.evaluated_local_shapes_at(f, library);
+            if !ctx.has_remaining_steps() {
+                break;
+            }
+            let shapes = self.evaluated_local_shapes_for_instance(binding, 0, f, ctx.clone());
             if !shapes.is_empty() {
-                return shapes;
+                return Arc::unwrap_or_clone(shapes);
             }
         }
         Vec::new()
@@ -435,11 +488,11 @@ impl SymbolDef {
     ) -> Vec<FillShape> {
         let mut out = Vec::new();
         for layer in &self.timeline.layers {
-            if out.len() >= MAX_EXPANDED_SYMBOL_SHAPES {
+            if out.len() >= MAX_EXPANDED_SYMBOL_SHAPES || !ctx.has_remaining_steps() {
                 break;
             }
             if layer.visible {
-                let eval = layer.evaluate_shapes_at((frame, child_eval_frame), 1, ctx);
+                let eval = layer.evaluate_shapes_at((frame, child_eval_frame), 1, ctx.clone());
                 let remaining = MAX_EXPANDED_SYMBOL_SHAPES.saturating_sub(out.len());
                 out.extend(eval.into_iter().take(remaining));
             }
@@ -476,7 +529,10 @@ impl SymbolDef {
         kf_start_frame: usize,
         current_frame: usize,
         ctx: SymbolEvalCtx<'_>,
-    ) -> Vec<FillShape> {
+    ) -> Arc<Vec<FillShape>> {
+        if !ctx.try_consume_step() {
+            return Arc::default();
+        }
         let internal_frame = self.resolve_internal_frame(binding, kf_start_frame, current_frame);
         let child_eval_frame = if self.timeline.total_frames <= 1
             && binding.loop_mode != SymbolLoopMode::SingleFrame
@@ -488,7 +544,19 @@ impl SymbolDef {
             internal_frame
         };
         let fc = self.timeline.total_frames.max(1);
-        self.collect_visible_local_shapes_at(internal_frame % fc, child_eval_frame, ctx)
+        let frame_idx = internal_frame % fc;
+        let eval_ctx = if ctx.depth == 0 { ctx.nested() } else { ctx };
+        let memo_key = (self.id, frame_idx, child_eval_frame, eval_ctx.depth);
+        if let Some(cached) = eval_ctx.get_memo(&memo_key) {
+            return cached;
+        }
+        let evaluated = Arc::new(self.collect_visible_local_shapes_at(
+            frame_idx,
+            child_eval_frame,
+            eval_ctx.clone(),
+        ));
+        eval_ctx.insert_memo(memo_key, Arc::clone(&evaluated));
+        evaluated
     }
 
     /// 指定されたフレーム番号 `offset_frame` に対応するシンボル内部フレーム（`offset_frame % total_frames` でループ評価）の
@@ -499,12 +567,12 @@ impl SymbolDef {
         library: &[SymbolDef],
     ) -> Vec<FillShape> {
         let binding = SymbolInstanceBinding::new(0, self.id, Affine::IDENTITY);
-        self.evaluated_local_shapes_for_instance(
+        Arc::unwrap_or_clone(self.evaluated_local_shapes_for_instance(
             binding,
             0,
             offset_frame,
             SymbolEvalCtx::new(library).nested(),
-        )
+        ))
     }
 
     /// 作業用タイムライン `working_tl` と逆変換行列 `inv_xform` からシンボル定義の `timeline` を更新する
@@ -1339,7 +1407,11 @@ impl Layer {
                         ctx.nested(),
                     );
                     if !local_shapes.is_empty() {
-                        return interp_b.instantiate_shapes(&local_shapes, out_layer_id, &[]);
+                        return interp_b.instantiate_shapes(
+                            &local_shapes[..local_shapes.len().min(MAX_EXPANDED_SYMBOL_SHAPES)],
+                            out_layer_id,
+                            &[],
+                        );
                     }
                 }
             }

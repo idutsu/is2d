@@ -22,7 +22,7 @@ use kurbo::Point;
 use canvas_tool::{EditorDoc, NoticeKind, SelectSubMode, Tool};
 #[cfg(test)]
 pub(crate) use canvas_tool::MAX_UNDO_HISTORY;
-use panels::UiAction;
+use panels::{RightPanelTab, UiAction};
 use project_io::{DocumentTabManager, ProjectWorkspace};
 #[cfg(test)]
 pub(crate) use timeline::Timeline;
@@ -113,11 +113,13 @@ fn key_pressed_no_repeat(i: &egui::InputState, target: Key) -> bool {
 // メインアプリケーション状態 & ショートカット・アクションディスパッチ制御
 // ============================================================================
 
-/// アプリケーション全体のルート構造体（単一ドキュメント状態 `EditorDoc`・タイムラインUI状態・複数タブ管理で構成）
+/// アプリケーション全体のルート構造体（単一ドキュメント状態 `EditorDoc`・右パネルタブ・タイムラインUI状態・複数タブ管理で構成）
 #[derive(Default)]
 pub(crate) struct Is2dApp {
     /// 現在アクティブなドキュメント状態（UI・ビューポート・作業キャンバス・タイムライン・シンボル・Undo履歴）
     pub(crate) doc: EditorDoc,
+    /// 右端パネルで現在選択中のタブ（プロパティ / カラー / ライブラリ / キャンバス）
+    pub(crate) right_panel_tab: RightPanelTab,
     /// タイムラインパネルの再生・スクロール・D&D等の一時UI状態
     pub(crate) timeline_ui: TimelineUiState,
     /// 複数ドキュメント同時オープン用のタブ管理状態（`EditorDoc` 一括スワップ方式）
@@ -157,6 +159,10 @@ impl ProjectWorkspace for Is2dApp {
     fn doc_and_tabs_mut(&mut self) -> (&mut EditorDoc, &mut DocumentTabManager) {
         (&mut self.doc, &mut self.tabs)
     }
+
+    fn stop_playback(&mut self) {
+        self.timeline_ui.stop_playback(&mut self.doc);
+    }
 }
 
 impl TimelineHost for Is2dApp {
@@ -183,15 +189,15 @@ impl TimelineHost for Is2dApp {
 
 impl Is2dApp {
     pub(crate) fn undo(&mut self) {
-        self.timeline_ui.sync_with_doc(&mut self.doc);
+        self.timeline_ui.stop_playback(&mut self.doc);
         self.doc.undo();
-        self.timeline_ui.sync_with_doc(&mut self.doc);
+        self.timeline_ui.ensure_timeline_context(&self.doc);
     }
 
     pub(crate) fn redo(&mut self) {
-        self.timeline_ui.sync_with_doc(&mut self.doc);
+        self.timeline_ui.stop_playback(&mut self.doc);
         self.doc.redo();
-        self.timeline_ui.sync_with_doc(&mut self.doc);
+        self.timeline_ui.ensure_timeline_context(&self.doc);
     }
 
     /// UIパネルから収集した `UiAction` を一括ディスパッチする
@@ -216,28 +222,31 @@ impl Is2dApp {
             UiAction::Undo => self.undo(),
             UiAction::Redo => self.redo(),
             UiAction::CutSelected => {
-                canvas_tool::stop_playback(&mut self.doc);
+                self.timeline_ui.stop_playback(&mut self.doc);
                 clipboard_ops::cut_selected_shapes(&mut self.doc);
             }
             UiAction::CopySelected => {
-                canvas_tool::stop_playback(&mut self.doc);
+                self.timeline_ui.stop_playback(&mut self.doc);
                 clipboard_ops::copy_selected_shapes(&mut self.doc);
             }
             UiAction::PasteClipboard { in_place } => {
-                canvas_tool::stop_playback(&mut self.doc);
+                self.timeline_ui.stop_playback(&mut self.doc);
                 clipboard_ops::paste_clipboard(&mut self.doc, in_place);
             }
             UiAction::DeleteSelected => {
-                canvas_tool::stop_playback(&mut self.doc);
+                self.timeline_ui.stop_playback(&mut self.doc);
                 select_ops::delete_selected_shapes(&mut self.doc);
             }
             UiAction::ClearActiveFrame => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 select_ops::clear_active_frame_shapes(&mut self.doc);
             }
             UiAction::SetTool(tool) => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 canvas_tool::set_tool(&mut self.doc, tool);
             }
             UiAction::ToggleSelectSubMode(mode) => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 canvas_tool::toggle_select_sub_mode(&mut self.doc, mode);
             }
             UiAction::ResetView => {
@@ -246,7 +255,14 @@ impl Is2dApp {
             UiAction::FitStageToWindow => {
                 self.doc.viewport.fit_stage_to_window();
             }
+            UiAction::SetStageSize(size) => {
+                self.doc.set_stage_size_interactive(size);
+            }
+            UiAction::FinishStageSizeEdit => {
+                self.doc.finish_stage_size_edit();
+            }
             UiAction::ExitGroupSteps(steps) => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 for _ in 0..steps {
                     if !select_ops::exit_current_group(&mut self.doc) {
                         break;
@@ -254,24 +270,31 @@ impl Is2dApp {
                 }
             }
             UiAction::GroupSelected => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 select_ops::group_selected_shapes(&mut self.doc);
             }
             UiAction::UngroupSelected => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 select_ops::ungroup_selected_shapes(&mut self.doc);
             }
             UiAction::FlipSelected { flip_x, flip_y } => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 tool_transform::flip_selected_shapes(&mut self.doc, flip_x, flip_y);
             }
             UiAction::RotateSelected(angle) => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 tool_transform::rotate_selected_shapes(&mut self.doc, angle);
             }
             UiAction::ResetTransformPivot => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 tool_transform::reset_selected_transform_pivot(&mut self.doc);
             }
             UiAction::ConvertSelectionToSymbol => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 symbol_ops::convert_selection_to_symbol(&mut self.doc);
             }
             UiAction::SetTweenRotate(rotate) => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 symbol_ops::set_active_keyframe_tween_rotate(&mut self.doc, rotate);
             }
             UiAction::SetSymbolPlayback {
@@ -279,19 +302,24 @@ impl Is2dApp {
                 first_frame,
                 drag_active,
             } => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 symbol_ops::set_selected_symbol_playback(&mut self.doc, loop_mode, first_frame);
                 self.doc.ui.editing_symbol_playback = drag_active;
             }
             UiAction::EnterSymbolTimeline(binding) => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 symbol_ops::enter_symbol_timeline(&mut self.doc, binding);
             }
             UiAction::PlaceSymbolFromLibrary(sym_id) => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 symbol_ops::place_symbol_instance_from_library(&mut self.doc, sym_id);
             }
             UiAction::EnterSymbolFromLibrary(sym_id) => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 symbol_ops::enter_symbol_from_library(&mut self.doc, sym_id);
             }
             UiAction::DeleteSymbolFromLibrary(sym_id) => {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 symbol_ops::delete_symbol_from_library(&mut self.doc, sym_id);
             }
             UiAction::RenameSymbolInLibrary { sym_id, new_name } => {
@@ -300,7 +328,7 @@ impl Is2dApp {
                 }
             }
         }
-        self.timeline_ui.sync_with_doc(&mut self.doc);
+        self.timeline_ui.ensure_timeline_context(&self.doc);
     }
 
     // ------------------------------------------------------------------------
@@ -355,6 +383,7 @@ impl Is2dApp {
         if key_pressed_no_repeat(&input, Key::Delete)
             || key_pressed_no_repeat(&input, Key::Backspace)
         {
+            self.timeline_ui.stop_playback(&mut self.doc);
             select_ops::delete_selected_shapes(&mut self.doc);
         }
 
@@ -396,10 +425,10 @@ impl Is2dApp {
                 }
             }
             if delta != kurbo::Vec2::ZERO {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 if any_non_repeat {
                     let _ = select_ops::nudge_selected_shapes(&mut self.doc, delta);
                 } else {
-                    canvas_tool::stop_playback(&mut self.doc);
                     canvas_tool::cancel_active_drag(&mut self.doc);
                     self.doc.canvas.translate_selected(delta);
                     self.doc.canvas.selection_modified = true;
@@ -416,35 +445,44 @@ impl Is2dApp {
         } else if i.key_pressed(Key::Period) || i.key_pressed(Key::ArrowRight) {
             timeline_ui::step_frame(self, 1);
         } else if key_pressed_no_repeat(i, Key::Home) {
+            self.timeline_ui.stop_playback(&mut self.doc);
             let act = self.doc.timeline.active_layer;
-            timeline_ui::switch_to_layer_and_frame(&mut self.doc, act, 0);
+            canvas_tool::switch_to_layer_and_frame(&mut self.doc, act, 0);
         } else if key_pressed_no_repeat(i, Key::End) {
+            self.timeline_ui.stop_playback(&mut self.doc);
             let last = self.doc.timeline.total_frames.saturating_sub(1);
             let act = self.doc.timeline.active_layer;
-            timeline_ui::switch_to_layer_and_frame(&mut self.doc, act, last);
+            canvas_tool::switch_to_layer_and_frame(&mut self.doc, act, last);
         } else if i.key_pressed(Key::F6) {
+            self.timeline_ui.stop_playback(&mut self.doc);
             if shift {
-                timeline_ui::timeline_delete_keyframe(&mut self.doc);
+                canvas_tool::timeline_delete_keyframe(&mut self.doc);
             } else {
-                timeline_ui::timeline_insert_keyframe(&mut self.doc, true);
+                canvas_tool::timeline_insert_keyframe(&mut self.doc, true);
             }
         } else if i.key_pressed(Key::F7) {
-            timeline_ui::timeline_insert_keyframe(&mut self.doc, false);
+            self.timeline_ui.stop_playback(&mut self.doc);
+            canvas_tool::timeline_insert_keyframe(&mut self.doc, false);
         } else if key_pressed_no_repeat(i, Key::F8) {
+            self.timeline_ui.stop_playback(&mut self.doc);
             symbol_ops::convert_selection_to_symbol(&mut self.doc);
         } else if i.key_pressed(Key::F5) {
+            self.timeline_ui.stop_playback(&mut self.doc);
             if shift {
-                timeline_ui::timeline_remove_frame(&mut self.doc);
+                canvas_tool::timeline_remove_frame(&mut self.doc);
             } else {
-                timeline_ui::timeline_extend_frame(&mut self.doc);
+                canvas_tool::timeline_extend_frame(&mut self.doc);
             }
         } else if key_pressed_no_repeat(i, Key::O) {
-            self.timeline_ui.onion_skin_enabled = !self.timeline_ui.onion_skin_enabled;
+            self.doc.ui.onion_skin_enabled = !self.doc.ui.onion_skin_enabled;
         } else if key_pressed_no_repeat(i, Key::T) {
+            self.timeline_ui.stop_playback(&mut self.doc);
             symbol_ops::timeline_toggle_tween(&mut self.doc);
         } else if let Some(tool) = Tool::from_shortcut_input(i) {
+            self.timeline_ui.stop_playback(&mut self.doc);
             canvas_tool::set_tool(&mut self.doc, tool);
         } else if key_pressed_no_repeat(i, Key::Escape) {
+            self.timeline_ui.stop_playback(&mut self.doc);
             canvas_tool::cancel_active_drag(&mut self.doc);
             if !self.doc.canvas.selected_shapes.is_empty() {
                 canvas_tool::clear_selection(&mut self.doc);
@@ -477,8 +515,10 @@ impl Is2dApp {
                     ));
 
             if plus_pressed {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 canvas_tool::toggle_select_sub_mode(&mut self.doc, SelectSubMode::AddAnchor);
             } else if minus_pressed {
+                self.timeline_ui.stop_playback(&mut self.doc);
                 canvas_tool::toggle_select_sub_mode(&mut self.doc, SelectSubMode::DeleteAnchor);
             }
         }
@@ -510,13 +550,17 @@ impl Is2dApp {
         }
 
         if copy_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::C)) {
+            self.timeline_ui.stop_playback(&mut self.doc);
             clipboard_ops::copy_selected_shapes(&mut self.doc);
         } else if cut_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::X)) {
+            self.timeline_ui.stop_playback(&mut self.doc);
             clipboard_ops::cut_selected_shapes(&mut self.doc);
         } else if paste_event || v_pressed_no_repeat {
+            self.timeline_ui.stop_playback(&mut self.doc);
             self.doc.canvas.paste_triggered_on_press = true;
             clipboard_ops::paste_clipboard(&mut self.doc, i.modifiers.shift);
         } else if v_released_fallback {
+            self.timeline_ui.stop_playback(&mut self.doc);
             clipboard_ops::paste_clipboard(&mut self.doc, i.modifiers.shift);
         } else if cmd
             && (key_pressed_no_repeat(i, Key::Num1) || key_pressed_no_repeat(i, Key::Num0))
@@ -543,12 +587,14 @@ impl Is2dApp {
                 .unwrap_or_else(|| self.doc.viewport.last_canvas_rect.center());
             self.doc.viewport.zoom_around_screen_pos(center, 0.8);
         } else if cmd && key_pressed_no_repeat(i, Key::G) {
+            self.timeline_ui.stop_playback(&mut self.doc);
             if i.modifiers.shift {
                 select_ops::ungroup_selected_shapes(&mut self.doc);
             } else {
                 select_ops::group_selected_shapes(&mut self.doc);
             }
         } else if cmd && key_pressed_no_repeat(i, Key::B) {
+            self.timeline_ui.stop_playback(&mut self.doc);
             select_ops::ungroup_selected_shapes(&mut self.doc);
         } else if cmd && i.key_pressed(Key::Z) {
             if i.modifiers.shift {
@@ -588,8 +634,7 @@ impl Is2dApp {
                 || response.drag_started_by(egui::PointerButton::Primary)
                 || response.clicked_by(egui::PointerButton::Primary);
             if canvas_interacted {
-                canvas_tool::stop_playback(&mut self.doc);
-                self.timeline_ui.sync_with_doc(&mut self.doc);
+                self.timeline_ui.stop_playback(&mut self.doc);
             } else {
                 return;
             }
@@ -631,7 +676,7 @@ impl Is2dApp {
                 }
             }
         }
-        self.timeline_ui.sync_with_doc(&mut self.doc);
+        self.timeline_ui.ensure_timeline_context(&self.doc);
     }
 
     /// 現在のレイヤー・フレーム状態から常時表示すべき状態連動メッセージを判定する
@@ -687,7 +732,7 @@ impl Is2dApp {
 
         let mut y_offset = 12.0_f32;
         for (kind, text) in notices {
-            let (bg_col, border_col, text_col) = kind.colors();
+            let (bg_col, border_col, text_col) = panels::notice_kind_colors(kind);
             let galley = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), text_col);
             let badge_w = (galley.size().x + 24.0).max(200.0);
             let badge_h = 26.0;
@@ -740,10 +785,10 @@ impl Is2dApp {
         project_io::handle_viewport_close_request(self, ctx);
         timeline_ui::update_playback(self, ctx);
         self.handle_shortcuts(ctx);
-        self.timeline_ui.sync_with_doc(&mut self.doc);
+        self.timeline_ui.ensure_timeline_context(&self.doc);
 
         let mut actions = Vec::new();
-        panels::draw_top_menu_bar(&mut self.doc, &mut self.timeline_ui, &mut actions, ctx);
+        panels::draw_top_menu_bar(&mut self.doc, &mut actions, ctx);
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
         }
@@ -753,7 +798,12 @@ impl Is2dApp {
             self.apply_action(action, ctx);
         }
 
-        panels::draw_right_properties_panel(&mut self.doc, &mut actions, ctx);
+        panels::draw_right_properties_panel(
+            &mut self.doc,
+            &mut self.right_panel_tab,
+            &mut actions,
+            ctx,
+        );
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
         }
@@ -807,7 +857,7 @@ impl Is2dApp {
                     .draw_stage_background(&painter, canvas_rect, in_symbol_edit);
 
                 // 3. キャンバス上のシェイプ・オニオンスキン・ステージ枠線・選択枠・プレビューの描画
-                panels::draw_canvas_contents(&mut self.doc, &self.timeline_ui, &painter);
+                panels::draw_canvas_contents(&self.doc, &self.timeline_ui, &painter);
 
                 // 4. 状態連動の警告バッジおよび一時トースト通知を描画
                 self.draw_canvas_notices(ctx, &painter, canvas_rect, tool_allowed);

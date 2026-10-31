@@ -340,8 +340,8 @@ pub(crate) struct FillShape {
     fill_mesh: OnceLock<Arc<Mesh>>,
     hit_bez_path: OnceLock<Arc<BezPath>>,
     screen_mesh_cache: SyncCache<Option<ScreenMeshCacheEntry>>,
-    pub(crate) selection_mesh: Option<(u32, Arc<Mesh>)>,
-    pub(crate) selection_screen_mesh: Option<SelectionScreenMeshCacheEntry>,
+    selection_mesh: SyncCache<Option<(u32, Arc<Mesh>)>>,
+    selection_screen_mesh: SyncCache<Option<SelectionScreenMeshCacheEntry>>,
 }
 
 impl FillShape {
@@ -359,8 +359,8 @@ impl FillShape {
             fill_mesh: OnceLock::new(),
             hit_bez_path: OnceLock::new(),
             screen_mesh_cache: SyncCache::new(None),
-            selection_mesh: None,
-            selection_screen_mesh: None,
+            selection_mesh: SyncCache::new(None),
+            selection_screen_mesh: SyncCache::new(None),
         };
         shape.rebuild_cache();
         shape
@@ -412,8 +412,8 @@ impl FillShape {
         self.fill_mesh.get().is_some()
             || self.hit_bez_path.get().is_some()
             || self.screen_mesh_cache.lock().is_some()
-            || self.selection_mesh.is_some()
-            || self.selection_screen_mesh.is_some()
+            || self.selection_mesh.lock().is_some()
+            || self.selection_screen_mesh.lock().is_some()
     }
 
     /// Undo 履歴保存時やバックアップ時に、幾何データから随時再生成可能な描画メッシュキャッシュを破棄してメモリを解放する
@@ -421,8 +421,8 @@ impl FillShape {
         self.fill_mesh = OnceLock::new();
         self.hit_bez_path = OnceLock::new();
         *self.screen_mesh_cache.lock() = None;
-        self.selection_mesh = None;
-        self.selection_screen_mesh = None;
+        *self.selection_mesh.lock() = None;
+        *self.selection_screen_mesh.lock() = None;
     }
 
     /// 輪郭データと色が同一である既存シェイプ `donor` から描画・当たり判定キャッシュを O(1) で引き継ぐ
@@ -448,11 +448,15 @@ impl FillShape {
                 *self.screen_mesh_cache.lock() = Some(sc.clone());
             }
         }
-        if self.selection_mesh.is_none() {
-            self.selection_mesh = donor.selection_mesh.clone();
+        if self.selection_mesh.lock().is_none() {
+            if let Some(sm) = &*donor.selection_mesh.lock() {
+                *self.selection_mesh.lock() = Some(sm.clone());
+            }
         }
-        if self.selection_screen_mesh.is_none() {
-            self.selection_screen_mesh = donor.selection_screen_mesh.clone();
+        if self.selection_screen_mesh.lock().is_none() {
+            if let Some(ssm) = &*donor.selection_screen_mesh.lock() {
+                *self.selection_screen_mesh.lock() = Some(ssm.clone());
+            }
         }
         true
     }
@@ -525,8 +529,8 @@ impl FillShape {
         self.fill_mesh = OnceLock::new();
         self.hit_bez_path = OnceLock::new();
         *self.screen_mesh_cache.lock() = None;
-        self.selection_mesh = None;
-        self.selection_screen_mesh = None;
+        *self.selection_mesh.lock() = None;
+        *self.selection_screen_mesh.lock() = None;
         self.mesh_revision = next_mesh_revision();
     }
 
@@ -618,12 +622,12 @@ impl FillShape {
             }
         }
         *self.screen_mesh_cache.lock() = None;
-        if let Some((_, sel)) = &mut self.selection_mesh {
+        if let Some((_, sel)) = &mut *self.selection_mesh.lock() {
             for v in &mut Arc::make_mut(sel).vertices {
                 v.pos += d;
             }
         }
-        self.selection_screen_mesh = None;
+        *self.selection_screen_mesh.lock() = None;
         self.mesh_revision = next_mesh_revision();
     }
 
@@ -641,7 +645,7 @@ impl FillShape {
             binding.xform = affine * binding.xform;
         }
         let max_scale_sq = (a * a + b * b).max(c * c + d * d);
-        if max_scale_sq > 1.25 * 1.25 {
+        if max_scale_sq > 1.001 * 1.001 {
             self.rebuild_cache();
         } else {
             self.bbox = self.compute_bbox();
@@ -654,8 +658,8 @@ impl FillShape {
                 }
             }
             *self.screen_mesh_cache.lock() = None;
-            self.selection_mesh = None;
-            self.selection_screen_mesh = None;
+            *self.selection_mesh.lock() = None;
+            *self.selection_screen_mesh.lock() = None;
             self.mesh_revision = next_mesh_revision();
         }
     }
@@ -690,8 +694,8 @@ impl FillShape {
             }
         }
         *self.screen_mesh_cache.lock() = None;
-        self.selection_mesh = None;
-        self.selection_screen_mesh = None;
+        *self.selection_mesh.lock() = None;
+        *self.selection_screen_mesh.lock() = None;
         self.mesh_revision = next_mesh_revision();
     }
 
@@ -751,34 +755,34 @@ impl FillShape {
             self.fill_mesh = OnceLock::new();
         }
         *self.screen_mesh_cache.lock() = None;
-        self.selection_mesh = None;
-        self.selection_screen_mesh = None;
+        *self.selection_mesh.lock() = None;
+        *self.selection_screen_mesh.lock() = None;
         self.mesh_revision = next_mesh_revision();
     }
 
-    pub(crate) fn selection_overlay_mesh(&mut self, zoom: f32) -> Arc<Mesh> {
+    pub(crate) fn selection_overlay_mesh(&self, zoom: f32) -> Arc<Mesh> {
         let key = zoom.to_bits();
-        if let Some((k, mesh)) = &self.selection_mesh {
+        if let Some((k, mesh)) = &*self.selection_mesh.lock() {
             if *k == key {
                 return Arc::clone(mesh);
             }
         }
         let mesh = Arc::new(build_polka_dot_selection_mesh(self.fill_mesh(), zoom));
-        self.selection_mesh = Some((key, Arc::clone(&mesh)));
+        *self.selection_mesh.lock() = Some((key, Arc::clone(&mesh)));
         mesh
     }
 
     /// 指定された `(zoom, pan)` に対応するスクリーン座標変換済みのドット柄選択オーバーレイ `Arc<Mesh>` をキャッシュ経由で返す
-    pub(crate) fn cached_selection_screen_mesh(&mut self, zoom: f32, pan: Vec2) -> Arc<Mesh> {
+    pub(crate) fn cached_selection_screen_mesh(&self, zoom: f32, pan: Vec2) -> Arc<Mesh> {
         let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
-        if let Some((k, mesh)) = &self.selection_screen_mesh {
+        if let Some((k, mesh)) = &*self.selection_screen_mesh.lock() {
             if *k == key {
                 return Arc::clone(mesh);
             }
         }
         let world_sel = self.selection_overlay_mesh(zoom);
         let screen_sel = Arc::new(transform_mesh_to_screen(&world_sel, zoom, pan, false));
-        self.selection_screen_mesh = Some((key, Arc::clone(&screen_sel)));
+        *self.selection_screen_mesh.lock() = Some((key, Arc::clone(&screen_sel)));
         screen_sel
     }
 

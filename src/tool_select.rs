@@ -213,26 +213,24 @@ pub(crate) fn finish_deform_shape_drag(
 
 /// Flash風ドット柄（Polka-Dot）選択オーバーレイを描画
 pub(crate) fn draw_flash_selection_overlay(
-    app: &mut EditorDoc,
+    app: &EditorDoc,
     painter: &egui::Painter,
     shape_idx: usize,
 ) {
     let zoom = app.viewport.zoom;
     let pan = app.viewport.pan;
-    let Some(shape) = app.canvas.shapes.get_mut(shape_idx) else {
+    let Some(shape) = app.canvas.shapes.get(shape_idx) else {
         return;
     };
     let sel_screen_mesh = shape.cached_selection_screen_mesh(zoom, pan);
     painter.add(arc_mesh_to_shape(sel_screen_mesh));
-    if let Some(shape_ref) = app.canvas.shapes.get(shape_idx) {
-        draw_shape_contour_lines(
-            app,
-            painter,
-            shape_ref,
-            Stroke::new(1.5_f32, Color32::from_rgb(0, 175, 255)),
-            false,
-        );
-    }
+    draw_shape_contour_lines(
+        app,
+        painter,
+        shape,
+        Stroke::new(1.5_f32, Color32::from_rgb(0, 175, 255)),
+        false,
+    );
 }
 
 pub(crate) fn draw_shape_contour_lines(

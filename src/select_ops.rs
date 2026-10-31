@@ -4,9 +4,8 @@ use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect, Vec2 a
 
 use crate::canvas_tool::{
     CanvasState, EditorDoc, HoverTarget, SelectSubMode, cancel_active_drag, clear_selection,
-    commit_moved_selection, flush_modified_raw_selection_merge, focus_active_layer_to_shape,
-    stop_playback, sync_shapes_to_timeline, sync_timeline_layer_from_canvas_selection,
-    topmost_layer_id_for_indices,
+    commit_moved_selection, focus_active_layer_to_shape, sync_shapes_to_timeline,
+    sync_timeline_layer_from_canvas_selection, topmost_layer_id_for_indices,
 };
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
 use crate::vector_boolean::{
@@ -69,6 +68,7 @@ pub(crate) fn retain_selection_and_flush_deselected(doc: &mut EditorDoc, keep_in
         doc.canvas.sort_shapes_by_layer_order(&doc.timeline);
         doc.canvas.restore_selection_by_shape_ids(&keep_ids);
         if merged_any {
+            doc.canvas.clear_unsliced_snapshot();
             sync_shapes_to_timeline(doc);
         }
         doc.canvas.selection_modified = !doc.canvas.selected_shapes.is_empty();
@@ -116,7 +116,6 @@ pub(crate) fn enter_group_at(doc: &mut EditorDoc, pt: Point) -> bool {
 
 /// 現在入っているグループまたはシンボルタイムライン編集階層から1段階上の親階層へ戻る
 pub(crate) fn exit_current_group(doc: &mut EditorDoc) -> bool {
-    stop_playback(doc);
     if !doc.canvas.editing_group_path.is_empty() {
         clear_selection(doc);
         let Some(exited_gid) = doc.canvas.editing_group_path.pop() else {
@@ -201,10 +200,6 @@ pub(crate) fn apply_marquee_selection(doc: &mut EditorDoc, p0: Point, p1: Point,
 
     if !additive {
         clear_selection(doc);
-    } else if doc.canvas.selection_modified && !doc.canvas.selected_shapes.is_empty() {
-        let selected_ids = doc.canvas.selected_shape_ids();
-        flush_modified_raw_selection_merge(doc);
-        doc.canvas.restore_selection_by_shape_ids(&selected_ids);
     }
 
     let rect = KRect::new(min_x, min_y, max_x, max_y);
@@ -520,7 +515,6 @@ pub(crate) fn compute_hover_target(
 
 /// 選択中のオブジェクト（生シェイプ・既存グループ問わず）を新しい1つのグループにまとめる（`Cmd+G` / 無限入れ子対応）
 pub(crate) fn group_selected_shapes(doc: &mut EditorDoc) -> Option<u64> {
-    stop_playback(doc);
     cancel_active_drag(doc);
     if doc.canvas.selected_shapes.is_empty() {
         return None;
@@ -528,7 +522,8 @@ pub(crate) fn group_selected_shapes(doc: &mut EditorDoc) -> Option<u64> {
     let snapshot = doc.canvas.take_or_clone_unsliced_snapshot();
     let new_gid = doc.symbols.alloc_group_id();
 
-    let target_lid = topmost_layer_id_for_indices(doc, &doc.canvas.selected_shapes);
+    let target_lid =
+        topmost_layer_id_for_indices(&doc.canvas, &doc.timeline, &doc.canvas.selected_shapes);
 
     let depth = doc.canvas.editing_group_path.len();
     let mut any_grouped = false;
@@ -558,7 +553,6 @@ pub(crate) fn group_selected_shapes(doc: &mut EditorDoc) -> Option<u64> {
 /// 選択中のグループまたはシンボルインスタンスを1段階だけ解除（分離）する（`Cmd+B`）。
 /// 多段入れ子の場合は内側の子グループ構造を維持したまま最外殻のグループのみを外す。
 pub(crate) fn ungroup_selected_shapes(doc: &mut EditorDoc) -> bool {
-    stop_playback(doc);
     cancel_active_drag(doc);
     if !doc.canvas.selection_has_group() {
         return false;
@@ -626,7 +620,6 @@ pub(crate) fn ungroup_selected_shapes(doc: &mut EditorDoc) -> bool {
 
 /// 選択中のオブジェクトを十字キー等で `delta` だけ移動し、Undo 履歴記録・最前面整列・タイムライン同期を行う
 pub(crate) fn nudge_selected_shapes(doc: &mut EditorDoc, delta: KVec2) -> bool {
-    stop_playback(doc);
     cancel_active_drag(doc);
     let (_, any_valid) = doc.canvas.selected_shape_mask();
     if !any_valid {
@@ -639,7 +632,6 @@ pub(crate) fn nudge_selected_shapes(doc: &mut EditorDoc, delta: KVec2) -> bool {
 }
 
 pub(crate) fn delete_selected_shapes(doc: &mut EditorDoc) -> bool {
-    stop_playback(doc);
     cancel_active_drag(doc);
     if doc.canvas.selected_shapes.is_empty() {
         return false;
@@ -670,7 +662,6 @@ pub(crate) fn delete_selected_shapes(doc: &mut EditorDoc) -> bool {
 
 /// 現在の編集スコープ（グループ編集時はそのグループ内、通常時は現在フレームの全編集可能レイヤー）の図形をすべて消去する
 pub(crate) fn clear_active_frame_shapes(doc: &mut EditorDoc) -> bool {
-    stop_playback(doc);
     let has_any_in_scope = doc
         .canvas
         .shapes

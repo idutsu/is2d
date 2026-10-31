@@ -3,12 +3,18 @@ use std::time::Duration;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::canvas_tool::{
-    flush_canvas_before_timeline_op, load_shapes_from_timeline, mutate_timeline_with_undo,
-    select_shapes_for_timeline_selection, stop_playback, EditorDoc,
+    flush_canvas_before_timeline_op, load_shapes_from_timeline, EditorDoc,
+};
+pub(crate) use crate::canvas_tool::{
+    scrub_ruler_to_frame, select_timeline_cells, set_layer_locked, set_layer_visible,
+    switch_to_layer_and_frame, timeline_add_layer, timeline_delete_active_layer,
+    timeline_delete_keyframe, timeline_extend_frame, timeline_insert_keyframe,
+    timeline_move_active_layer, timeline_move_or_copy_frames, timeline_remove_frame,
+    timeline_reorder_layer,
 };
 use crate::symbol::TweenState;
 use crate::symbol_ops::timeline_toggle_tween;
-use crate::timeline::{Timeline, TimelineCellSelection, MAX_TIMELINE_FRAMES};
+use crate::timeline::{TimelineCellSelection, MAX_TIMELINE_FRAMES};
 
 /// タイムライングリッドの1フレームあたりのセル幅（px）
 pub(crate) const CELL_W: f32 = 16.0;
@@ -92,14 +98,11 @@ pub(crate) enum TimelineGridDrag {
     },
 }
 
-/// タイムラインパネルの再生状態・ループ/オニオンスキン表示設定・スクロール位置・ドラッグ操作等のUI状態
+/// タイムラインパネルの再生状態・ループ設定・スクロール位置・ドラッグ操作等のUI状態
 #[derive(Clone, Debug)]
 pub(crate) struct TimelineUiState {
     pub(crate) is_playing: bool,
     pub(crate) loop_playback: bool,
-    pub(crate) onion_skin_enabled: bool,
-    pub(crate) onion_prev_frames: usize,
-    pub(crate) onion_next_frames: usize,
     pub(crate) last_frame_advance_time: Option<f64>,
     pub(crate) scroll_x: f32,
     pub(crate) scroll_y: f32,
@@ -110,6 +113,8 @@ pub(crate) struct TimelineUiState {
     pub(crate) editing_total_frames: bool,
     /// FPS `DragValue` の連続ドラッグ・入力中にUndo履歴が1フレームごとに積まれるのを防ぐフラグ
     pub(crate) editing_fps: bool,
+    /// 直近に同期したタイムライン識別キー `(doc_id, edit_stack_len, active_symbol_id)`
+    last_timeline_key: (u64, usize, Option<u64>),
 }
 
 impl Default for TimelineUiState {
@@ -117,9 +122,6 @@ impl Default for TimelineUiState {
         Self {
             is_playing: false,
             loop_playback: true,
-            onion_skin_enabled: false,
-            onion_prev_frames: 2,
-            onion_next_frames: 2,
             last_frame_advance_time: None,
             scroll_x: 0.0,
             scroll_y: 0.0,
@@ -128,6 +130,7 @@ impl Default for TimelineUiState {
             grid_drag: TimelineGridDrag::None,
             editing_total_frames: false,
             editing_fps: false,
+            last_timeline_key: (1, 0, None),
         }
     }
 }
@@ -149,16 +152,26 @@ impl TimelineUiState {
         self.cancel_drag();
     }
 
-    /// ドキュメント層（L3 `EditorDoc`）での再生停止要求やタイムライン切り替え通知を `TimelineUiState` に同期する
-    pub(crate) fn sync_with_doc(&mut self, doc: &mut EditorDoc) {
-        if std::mem::take(&mut doc.timeline_switched) {
-            self.reset_for_timeline_switch(doc.timeline.current_frame);
-            doc.is_playing = false;
-        } else if !doc.is_playing && self.is_playing {
+    /// 再生中であれば停止し、停止時点のフレームの図形群を作業用 `doc.canvas.shapes` に展開する
+    pub(crate) fn stop_playback(&mut self, doc: &mut EditorDoc) {
+        if self.is_playing {
             self.is_playing = false;
             self.last_frame_advance_time = None;
-        } else if self.is_playing && !doc.is_playing {
-            doc.is_playing = true;
+            load_shapes_from_timeline(doc);
+        }
+    }
+
+    /// `doc` の現在のタイムライン識別キー `(doc_id, edit_stack_len, active_symbol_id)` を読み取り、
+    /// シンボル進入/退出やタブ切り替えが発生していればスクロール・ドラッグ状態を自動リセットする
+    pub(crate) fn ensure_timeline_context(&mut self, doc: &EditorDoc) {
+        let key = (
+            doc.doc_id,
+            doc.symbols.edit_stack.len(),
+            doc.symbols.edit_stack.last().map(|s| s.symbol_id),
+        );
+        if self.last_timeline_key != key {
+            self.last_timeline_key = key;
+            self.reset_for_timeline_switch(doc.timeline.current_frame);
         }
     }
 
@@ -349,7 +362,7 @@ fn draw_floating_drag_badge(
 pub(crate) fn draw_timeline_panel(host: &mut impl TimelineHost, ctx: &egui::Context) {
     {
         let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.sync_with_doc(doc);
+        timeline_ui.ensure_timeline_context(doc);
     }
     egui::TopBottomPanel::bottom("timeline_panel")
         .resizable(true)
@@ -429,28 +442,30 @@ fn draw_timeline_control_bar(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                draw_control_bar_layer_buttons(host.doc_mut(), ui);
+                draw_control_bar_layer_buttons(host, ui);
                 ui.separator();
                 draw_control_bar_transport_buttons(host, ui);
                 ui.separator();
-                draw_control_bar_keyframe_buttons(host.doc_mut(), ui);
+                draw_control_bar_keyframe_buttons(host, ui);
                 ui.separator();
-                draw_control_bar_onion_controls(host.timeline_ui_mut(), ui);
+                draw_control_bar_onion_controls(host.doc_mut(), ui);
             });
             let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-            timeline_ui.sync_with_doc(doc);
+            timeline_ui.ensure_timeline_context(doc);
         });
 }
 
 /// コントロールバー：レイヤー追加・削除・上下移動ボタン
-fn draw_control_bar_layer_buttons(doc: &mut EditorDoc, ui: &mut egui::Ui) {
-    let len = doc.timeline.layers.len();
-    let act = doc.timeline.active_layer;
+fn draw_control_bar_layer_buttons(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
+    let len = host.doc().timeline.layers.len();
+    let act = host.doc().timeline.active_layer;
     if ui
         .button("＋ レイヤー")
         .on_hover_text("新しいレイヤーを現在のレイヤーの前面に追加")
         .clicked()
     {
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
         timeline_add_layer(doc);
     }
     if ui
@@ -461,6 +476,8 @@ fn draw_control_bar_layer_buttons(doc: &mut EditorDoc, ui: &mut egui::Ui) {
         .on_hover_text("現在選択中のレイヤーを削除")
         .clicked()
     {
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
         timeline_delete_active_layer(doc);
     }
     if ui
@@ -468,6 +485,8 @@ fn draw_control_bar_layer_buttons(doc: &mut EditorDoc, ui: &mut egui::Ui) {
         .on_hover_text("レイヤーを1つ前面（上）へ移動（ドラッグ＆ドロップでも入れ替え可能）")
         .clicked()
     {
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
         timeline_move_active_layer(doc, true);
     }
     if ui
@@ -475,6 +494,8 @@ fn draw_control_bar_layer_buttons(doc: &mut EditorDoc, ui: &mut egui::Ui) {
         .on_hover_text("レイヤーを1つ背面（下）へ移動（ドラッグ＆ドロップでも入れ替え可能）")
         .clicked()
     {
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
         timeline_move_active_layer(doc, false);
     }
 }
@@ -486,8 +507,10 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
         .on_hover_text("最初のフレームへ (Home)")
         .clicked()
     {
-        let act = host.doc().timeline.active_layer;
-        switch_to_layer_and_frame(host.doc_mut(), act, 0);
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
+        let act = doc.timeline.active_layer;
+        switch_to_layer_and_frame(doc, act, 0);
     }
     if ui
         .button(icons::STEP_PREV)
@@ -521,9 +544,11 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
         .on_hover_text("最後のフレームへ (End)")
         .clicked()
     {
-        let last = host.doc().timeline.total_frames.saturating_sub(1);
-        let act = host.doc().timeline.active_layer;
-        switch_to_layer_and_frame(host.doc_mut(), act, last);
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
+        let last = doc.timeline.total_frames.saturating_sub(1);
+        let act = doc.timeline.active_layer;
+        switch_to_layer_and_frame(doc, act, last);
     }
     let loop_pb = host.timeline_ui().loop_playback;
     if ui
@@ -554,16 +579,7 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
     if total_resp.changed() {
         let next_total = (total_f as usize).max(1);
         let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        if next_total != doc.timeline.total_frames {
-            if !timeline_ui.editing_total_frames {
-                flush_canvas_before_timeline_op(doc);
-                doc.push_undo();
-                timeline_ui.editing_total_frames = true;
-            }
-            doc.timeline.resize_total_frames(next_total);
-            doc.symbols.sync_active_edit(&doc.timeline);
-            load_shapes_from_timeline(doc);
-        }
+        doc.set_total_frames_interactive(next_total, &mut timeline_ui.editing_total_frames);
     }
     if total_resp.drag_stopped()
         || total_resp.lost_focus()
@@ -583,22 +599,13 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
     if fps_resp.changed() {
         let next_fps = fps_val.clamp(1, 60);
         let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        if next_fps != doc.timeline.fps {
-            if !timeline_ui.editing_fps {
-                if !timeline_ui.is_playing {
-                    flush_canvas_before_timeline_op(doc);
-                }
-                doc.push_undo();
-                timeline_ui.editing_fps = true;
-            }
-            doc.timeline.fps = next_fps;
-            for sess in &mut doc.symbols.edit_stack {
-                sess.parent_timeline.fps = next_fps;
-            }
-            doc.symbols.sync_active_edit(&doc.timeline);
-            if timeline_ui.is_playing {
-                timeline_ui.last_frame_advance_time = None;
-            }
+        if doc.set_fps_interactive(
+            next_fps,
+            timeline_ui.is_playing,
+            &mut timeline_ui.editing_fps,
+        ) && timeline_ui.is_playing
+        {
+            timeline_ui.last_frame_advance_time = None;
         }
     }
     if fps_resp.drag_stopped()
@@ -610,16 +617,18 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
 }
 
 /// コントロールバー：キーフレーム挿入・削除・フレーム延長/短縮・クラシックトゥイーンボタン
-fn draw_control_bar_keyframe_buttons(doc: &mut EditorDoc, ui: &mut egui::Ui) {
-    let targets = doc.timeline.target_layers_for_frame_op();
+fn draw_control_bar_keyframe_buttons(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
+    let targets = host.doc().timeline.target_layers_for_frame_op();
     let editable = !targets.is_empty();
-    let can_remove_frame = doc.timeline.can_remove_frame_on_targets(&targets);
-    let can_delete_kf = doc.timeline.can_delete_keyframe_on_targets(&targets);
+    let can_remove_frame = host.doc().timeline.can_remove_frame_on_targets(&targets);
+    let can_delete_kf = host.doc().timeline.can_delete_keyframe_on_targets(&targets);
     if ui
         .add_enabled(editable, egui::Button::new("● キーフレーム (F6)"))
         .on_hover_text("現在の絵を複製して新しいキーフレームを挿入 (F6)")
         .clicked()
     {
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
         timeline_insert_keyframe(doc, true);
     }
     if ui
@@ -627,6 +636,8 @@ fn draw_control_bar_keyframe_buttons(doc: &mut EditorDoc, ui: &mut egui::Ui) {
         .on_hover_text("空の新しいキーフレームを挿入 (F7)")
         .clicked()
     {
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
         timeline_insert_keyframe(doc, false);
     }
     if ui
@@ -634,6 +645,8 @@ fn draw_control_bar_keyframe_buttons(doc: &mut EditorDoc, ui: &mut egui::Ui) {
         .on_hover_text("選択レイヤー（未選択時は全レイヤー）のフレーム尺を1コマ延長 (F5)")
         .clicked()
     {
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
         timeline_extend_frame(doc);
     }
     if ui
@@ -641,6 +654,8 @@ fn draw_control_bar_keyframe_buttons(doc: &mut EditorDoc, ui: &mut egui::Ui) {
         .on_hover_text("選択レイヤー（未選択時は全レイヤー）のフレームを1コマ削除・短縮 (Shift+F5)")
         .clicked()
     {
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
         timeline_remove_frame(doc);
     }
     if ui
@@ -648,10 +663,12 @@ fn draw_control_bar_keyframe_buttons(doc: &mut EditorDoc, ui: &mut egui::Ui) {
         .on_hover_text("現在のキーフレームを削除 / クリア (Shift+F6)")
         .clicked()
     {
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
         timeline_delete_keyframe(doc);
     }
 
-    let (can_tween, is_tweened) = doc.timeline.can_toggle_tween_at_current_frame();
+    let (can_tween, is_tweened) = host.doc().timeline.can_toggle_tween_at_current_frame();
     let tween_btn = egui::Button::new(egui::RichText::new("⇄ トゥイーン (T)").color(
         if is_tweened {
             Color32::from_rgb(75, 30, 150)
@@ -682,25 +699,27 @@ fn draw_control_bar_keyframe_buttons(doc: &mut EditorDoc, ui: &mut egui::Ui) {
         )
         .clicked()
     {
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
         timeline_toggle_tween(doc);
     }
 }
 
 /// コントロールバー：オニオンスキン ON/OFF・前後フレーム数設定
-fn draw_control_bar_onion_controls(timeline_ui: &mut TimelineUiState, ui: &mut egui::Ui) {
+fn draw_control_bar_onion_controls(doc: &mut EditorDoc, ui: &mut egui::Ui) {
     if ui
         .selectable_label(
-            timeline_ui.onion_skin_enabled,
+            doc.ui.onion_skin_enabled,
             format!("{} オニオンスキン (O)", icons::ONION_SKIN),
         )
         .on_hover_text("オニオンスキン（前後のフレームの透かし表示）切替 (O)")
         .clicked()
     {
-        timeline_ui.onion_skin_enabled = !timeline_ui.onion_skin_enabled;
+        doc.ui.onion_skin_enabled = !doc.ui.onion_skin_enabled;
     }
-    if timeline_ui.onion_skin_enabled {
-        let mut prev_n = timeline_ui.onion_prev_frames as u32;
-        let mut next_n = timeline_ui.onion_next_frames as u32;
+    if doc.ui.onion_skin_enabled {
+        let mut prev_n = doc.ui.onion_prev_frames as u32;
+        let mut next_n = doc.ui.onion_next_frames as u32;
         ui.label("前:");
         if ui
             .add(
@@ -711,7 +730,7 @@ fn draw_control_bar_onion_controls(timeline_ui: &mut TimelineUiState, ui: &mut e
             )
             .changed()
         {
-            timeline_ui.onion_prev_frames = prev_n as usize;
+            doc.ui.onion_prev_frames = prev_n as usize;
         }
         ui.label("後:");
         if ui
@@ -723,7 +742,7 @@ fn draw_control_bar_onion_controls(timeline_ui: &mut TimelineUiState, ui: &mut e
             )
             .changed()
         {
-            timeline_ui.onion_next_frames = next_n as usize;
+            doc.ui.onion_next_frames = next_n as usize;
         }
     }
 }
@@ -804,7 +823,7 @@ fn handle_timeline_pointer_input(
         drag_layer_feedback.is_some(),
     );
     let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-    timeline_ui.sync_with_doc(doc);
+    timeline_ui.ensure_timeline_context(doc);
     drag_layer_feedback
 }
 
@@ -817,9 +836,13 @@ fn handle_timeline_click_start(
     shift_held: bool,
 ) {
     if layout.add_hdr_rect.contains(pos) {
-        timeline_add_layer(host.doc_mut());
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
+        timeline_add_layer(doc);
     } else if layout.del_hdr_rect.contains(pos) && host.doc().timeline.layers.len() > 1 {
-        timeline_delete_active_layer(host.doc_mut());
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.stop_playback(doc);
+        timeline_delete_active_layer(doc);
     } else if pos.x < layout.grid_left && pos.y >= layout.grid_top {
         let num_layers = host.doc().timeline.layers.len();
         let scroll_y = host.timeline_ui().scroll_y;
@@ -827,10 +850,14 @@ fn handle_timeline_click_start(
             let rel_x = pos.x - layout.panel_rect.left();
             if LAYER_VIS_HIT_RANGE.contains(&rel_x) {
                 let next_vis = !host.doc().timeline.layers[layer_idx].visible;
-                set_layer_visible(host.doc_mut(), layer_idx, next_vis);
+                let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+                timeline_ui.stop_playback(doc);
+                set_layer_visible(doc, layer_idx, next_vis);
             } else if LAYER_LOCK_HIT_RANGE.contains(&rel_x) {
                 let next_lock = !host.doc().timeline.layers[layer_idx].locked;
-                set_layer_locked(host.doc_mut(), layer_idx, next_lock);
+                let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+                timeline_ui.stop_playback(doc);
+                set_layer_locked(doc, layer_idx, next_lock);
             } else {
                 let cf = host.doc().timeline.current_frame;
                 let anchor_layer = if shift_held {
@@ -841,7 +868,9 @@ fn handle_timeline_click_start(
                 } else {
                     layer_idx
                 };
-                select_timeline_cells(host.doc_mut(), anchor_layer, cf, layer_idx, cf);
+                let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+                timeline_ui.stop_playback(doc);
+                select_timeline_cells(doc, anchor_layer, cf, layer_idx, cf);
                 if !shift_held {
                     host.timeline_ui_mut().dragging_layer = Some(layer_idx);
                 }
@@ -895,14 +924,19 @@ fn handle_timeline_click_start(
         let col = layout.frame_at_x(pos.x, host.timeline_ui().scroll_x);
         if pos.y < layout.grid_top {
             let target_frame = col.min(host.doc().timeline.total_frames.saturating_sub(1));
-            host.timeline_ui_mut().grid_drag = TimelineGridDrag::ScrubRuler;
-            scrub_ruler_to_frame(host.doc_mut(), target_frame);
+            let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+            timeline_ui.grid_drag = TimelineGridDrag::ScrubRuler;
+            timeline_ui.stop_playback(doc);
+            scrub_ruler_to_frame(doc, target_frame);
         } else if let Some(target_layer) =
             layout.layer_at_y(pos.y, host.timeline_ui().scroll_y, num_layers)
         {
             let layer_fc = host.doc().timeline.layers[target_layer].frame_count;
             let target_frame = col;
-            stop_playback(host.doc_mut());
+            {
+                let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+                timeline_ui.stop_playback(doc);
+            }
 
             if shift_held {
                 let anchor_layer = host
@@ -1555,9 +1589,9 @@ fn draw_timeline_ruler(
     ruler_painter.rect_filled(ruler_rect, 0.0, Color32::from_rgb(228, 231, 237));
 
     let scroll_x = timeline_ui.scroll_x;
-    if timeline_ui.onion_skin_enabled {
+    if doc.ui.onion_skin_enabled {
         let cf = doc.timeline.current_frame;
-        let prev_start = cf.saturating_sub(timeline_ui.onion_prev_frames);
+        let prev_start = cf.saturating_sub(doc.ui.onion_prev_frames);
         if prev_start < cf {
             ruler_painter.rect_filled(
                 Rect::from_min_max(
@@ -1568,7 +1602,7 @@ fn draw_timeline_ruler(
                 Color32::from_rgba_unmultiplied(45, 125, 240, 65),
             );
         }
-        let next_end = (cf + timeline_ui.onion_next_frames)
+        let next_end = (cf + doc.ui.onion_next_frames)
             .min(doc.timeline.total_frames.saturating_sub(1));
         if next_end > cf {
             ruler_painter.rect_filled(
@@ -1955,60 +1989,14 @@ fn draw_timeline_scrollbars(
 }
 
 // ============================================================================
-// 7. タイムライン操作・フレーム移動・再生・レイヤー制御アクション
+// 7. タイムライン再生制御（コマ送り・再生/停止・自動フレーム進行）
 // ============================================================================
-
-/// タイムラインのセル範囲を選択し、そのレイヤー群の現在フレームにある全図形をキャンバス上で選択状態にする
-/// （2フレーム目以降のまだ尺が伸びていない空マスも直接選択でき、そのまま `F5` / `F6` / `F7` でその位置まで尺を伸ばせる）
-pub(crate) fn select_timeline_cells(
-    doc: &mut EditorDoc,
-    start_layer: usize,
-    start_frame: usize,
-    end_layer: usize,
-    end_frame: usize,
-) {
-    if doc.timeline.layers.is_empty() {
-        return;
-    }
-    let max_l = doc.timeline.layers.len() - 1;
-    let (l0, l1) = (start_layer.min(max_l), end_layer.min(max_l));
-    let (f0, f1) = (start_frame, end_frame);
-
-    switch_to_layer_and_frame(doc, l1, f1);
-    doc.timeline.cell_selection = Some(TimelineCellSelection::from_corners(l0, f0, l1, f1));
-    select_shapes_for_timeline_selection(doc);
-}
-
-/// タイムラインのレイヤー個別選択を解除し、指定フレームへ再生ヘッドのみ移動する（ルーラー操作時など）
-pub(crate) fn scrub_ruler_to_frame(doc: &mut EditorDoc, frame_idx: usize) {
-    let clamped_frame = frame_idx.min(doc.timeline.total_frames.saturating_sub(1));
-    if !doc.is_playing
-        && doc.timeline.current_frame == clamped_frame
-        && doc.timeline.cell_selection.is_none()
-    {
-        return;
-    }
-    flush_canvas_before_timeline_op(doc);
-    doc.timeline.current_frame = clamped_frame;
-    doc.timeline.cell_selection = None;
-    load_shapes_from_timeline(doc);
-}
-
-/// 指定したレイヤー・フレームへ切り替える
-pub(crate) fn switch_to_layer_and_frame(doc: &mut EditorDoc, layer_idx: usize, frame_idx: usize) {
-    if doc.timeline.layers.is_empty() {
-        return;
-    }
-    flush_canvas_before_timeline_op(doc);
-    doc.timeline.select_single_cell(layer_idx, frame_idx);
-    load_shapes_from_timeline(doc);
-    doc.ui.inspect_timeline_frame = true;
-}
 
 /// 前後のフレームへコマ送り移動する（`,` / `.` キーやボタン操作）
 pub(crate) fn step_frame(host: &mut impl TimelineHost, delta: isize) {
     let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-    timeline_ui.sync_with_doc(doc);
+    timeline_ui.ensure_timeline_context(doc);
+    timeline_ui.stop_playback(doc);
     let total = doc.timeline.total_frames.max(1) as isize;
     let next = if timeline_ui.loop_playback {
         (doc.timeline.current_frame as isize + delta).rem_euclid(total) as usize
@@ -2017,17 +2005,14 @@ pub(crate) fn step_frame(host: &mut impl TimelineHost, delta: isize) {
     };
     let active_layer = doc.timeline.active_layer;
     switch_to_layer_and_frame(doc, active_layer, next);
-    timeline_ui.sync_with_doc(doc);
 }
 
 /// 再生 / 一時停止を切り替える（`Enter` キーまたは Play ボタン）
 pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
     let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-    timeline_ui.sync_with_doc(doc);
+    timeline_ui.ensure_timeline_context(doc);
     if timeline_ui.is_playing {
-        stop_playback(doc);
-        timeline_ui.is_playing = false;
-        timeline_ui.last_frame_advance_time = None;
+        timeline_ui.stop_playback(doc);
     } else {
         flush_canvas_before_timeline_op(doc);
         timeline_ui.cancel_drag();
@@ -2037,7 +2022,6 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
         {
             doc.timeline.current_frame = 0;
         }
-        doc.is_playing = true;
         timeline_ui.is_playing = true;
         timeline_ui.last_frame_advance_time = None;
     }
@@ -2047,7 +2031,7 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
 /// （再生中は毎コマの `FillShape` クローンを行わず、`Cel` の結合メッシュキャッシュから直接高速描画する）
 pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context) {
     let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-    timeline_ui.sync_with_doc(doc);
+    timeline_ui.ensure_timeline_context(doc);
     if !timeline_ui.is_playing {
         timeline_ui.last_frame_advance_time = None;
         return;
@@ -2069,9 +2053,7 @@ pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context)
                 let next = doc.timeline.current_frame + steps;
                 if next >= total - 1 {
                     doc.timeline.current_frame = total - 1;
-                    stop_playback(doc);
-                    timeline_ui.is_playing = false;
-                    timeline_ui.last_frame_advance_time = None;
+                    timeline_ui.stop_playback(doc);
                     return;
                 }
                 doc.timeline.current_frame = next;
@@ -2082,171 +2064,4 @@ pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context)
     }
 
     ctx.request_repaint_after(Duration::from_secs_f64(frame_interval * 0.5));
-}
-
-/// キーフレーム挿入（`F6`: `clone_prev = true` で前の絵を複製 / `F7`: `clone_prev = false` で空白セル作成）
-pub(crate) fn timeline_insert_keyframe(doc: &mut EditorDoc, clone_prev: bool) -> bool {
-    let targets = doc.timeline.target_layers_for_frame_op();
-    if targets.is_empty() {
-        return false;
-    }
-    mutate_timeline_with_undo(doc, |tl| {
-        tl.insert_keyframe_on_targets(&targets, clone_prev);
-    });
-    if clone_prev {
-        select_shapes_for_timeline_selection(doc);
-    }
-    true
-}
-
-/// 現在フレームのキーフレームを削除（フレーム0の場合は空白化）する（`Shift+F6`）
-pub(crate) fn timeline_delete_keyframe(doc: &mut EditorDoc) -> bool {
-    let targets = doc.timeline.target_layers_for_frame_op();
-    if targets.is_empty() {
-        return false;
-    }
-    flush_canvas_before_timeline_op(doc);
-    if !doc.timeline.can_delete_keyframe_on_targets(&targets) {
-        return false;
-    }
-    mutate_timeline_with_undo(doc, |tl| {
-        tl.delete_keyframe_on_targets(&targets);
-    });
-    true
-}
-
-/// 現在フレーム（または選択セル範囲の終端フレーム）の保持尺を延長する（`F5` / Adobe Animate 仕様）：
-/// - 2フレーム目以降の未作成の空マスを選択している場合は、そのフレーム位置まで一気に尺を伸ばす。
-/// - 既存のフレーム内を選択している場合は、選択レイヤー（未選択時は全非ロックレイヤー）を +1 フレーム延長する。
-pub(crate) fn timeline_extend_frame(doc: &mut EditorDoc) -> bool {
-    let targets = doc.timeline.target_layers_for_frame_op();
-    if targets.is_empty() {
-        return false;
-    }
-    mutate_timeline_with_undo(doc, |tl| {
-        tl.extend_frame_on_targets(&targets);
-    });
-    true
-}
-
-/// 現在フレームの保持尺を1フレーム短縮する（`Shift+F5` / Adobe Animate 仕様）：
-/// - 保持フレームがあれば保持尺を -1 フレーム短縮し、1フレーム幅のキーフレームに当たった場合はそのキーフレーム自体を削除して後続を左へ詰める。
-pub(crate) fn timeline_remove_frame(doc: &mut EditorDoc) -> bool {
-    let targets = doc.timeline.target_layers_for_frame_op();
-    if targets.is_empty() {
-        return false;
-    }
-    flush_canvas_before_timeline_op(doc);
-    if !doc.timeline.can_remove_frame_on_targets(&targets) {
-        return false;
-    }
-    let mut any_changed = false;
-    mutate_timeline_with_undo(doc, |tl| {
-        any_changed = tl.remove_frame_on_targets(&targets);
-    });
-    any_changed
-}
-
-/// 選択されたフレーム範囲 `sel`（単一・複数フレーム・複数レイヤー横断）を `(delta_layer, delta_frame)` だけ移動、
-/// または `copy_mode == true`（`Alt` / `Option` 押下）の場合は移動元を残したまま移動先へ複製する
-pub(crate) fn timeline_move_or_copy_frames(
-    doc: &mut EditorDoc,
-    sel: TimelineCellSelection,
-    delta_layer: isize,
-    delta_frame: isize,
-    copy_mode: bool,
-) -> bool {
-    let Some((dst_sel, actual_dl)) = doc
-        .timeline
-        .resolve_frame_move_bounds(sel, delta_layer, delta_frame)
-    else {
-        return false;
-    };
-    mutate_timeline_with_undo(doc, |tl| {
-        tl.move_or_copy_frames(sel, dst_sel, actual_dl, copy_mode);
-    });
-    doc.symbols.next_group_id = doc
-        .symbols
-        .next_group_id
-        .max(doc.timeline.max_group_id().saturating_add(1));
-    select_shapes_for_timeline_selection(doc);
-    true
-}
-
-/// 指定レイヤーの表示/非表示（👁）を設定し、Undo記録と作業キャンバス `doc.canvas.shapes` の再同期を行う
-pub(crate) fn set_layer_visible(doc: &mut EditorDoc, layer_idx: usize, visible: bool) {
-    if doc
-        .timeline
-        .layers
-        .get(layer_idx)
-        .is_none_or(|l| l.visible == visible)
-    {
-        return;
-    }
-    mutate_timeline_with_undo(doc, |tl| {
-        if let Some(layer) = tl.layers.get_mut(layer_idx) {
-            layer.visible = visible;
-        }
-    });
-}
-
-/// 指定レイヤーのロック状態（🔒）を設定し、Undo記録と作業キャンバス `doc.canvas.shapes` の再同期を行う
-pub(crate) fn set_layer_locked(doc: &mut EditorDoc, layer_idx: usize, locked: bool) {
-    if doc
-        .timeline
-        .layers
-        .get(layer_idx)
-        .is_none_or(|l| l.locked == locked)
-    {
-        return;
-    }
-    mutate_timeline_with_undo(doc, |tl| {
-        if let Some(layer) = tl.layers.get_mut(layer_idx) {
-            layer.locked = locked;
-        }
-    });
-}
-
-/// 新しいレイヤーを現在のアクティブレイヤーの1つ上（前面）に追加する
-pub(crate) fn timeline_add_layer(doc: &mut EditorDoc) {
-    mutate_timeline_with_undo(doc, Timeline::add_layer_above_active);
-}
-
-/// 現在アクティブなレイヤーを削除する（最低1レイヤーは残す）
-pub(crate) fn timeline_delete_active_layer(doc: &mut EditorDoc) -> bool {
-    if doc.timeline.layers.len() <= 1 {
-        return false;
-    }
-    mutate_timeline_with_undo(doc, Timeline::delete_active_layer);
-    true
-}
-
-/// 指定したレイヤー `from_idx` を `to_idx` の重ね順位置へ移動する（ドラッグ＆ドロップ入れ替え対応）
-pub(crate) fn timeline_reorder_layer(doc: &mut EditorDoc, from_idx: usize, to_idx: usize) -> bool {
-    let len = doc.timeline.layers.len();
-    if from_idx >= len || to_idx >= len || from_idx == to_idx {
-        return false;
-    }
-    mutate_timeline_with_undo(doc, |tl| {
-        tl.reorder_layer(from_idx, to_idx);
-    });
-    true
-}
-
-/// 現在アクティブなレイヤーを1つ上（前面: `up = true`）または1つ下（背面: `up = false`）へ移動する
-pub(crate) fn timeline_move_active_layer(doc: &mut EditorDoc, up: bool) -> bool {
-    let len = doc.timeline.layers.len();
-    let curr = doc.timeline.active_layer;
-    let target = if up {
-        if curr + 1 >= len {
-            return false;
-        }
-        curr + 1
-    } else {
-        if curr == 0 {
-            return false;
-        }
-        curr - 1
-    };
-    timeline_reorder_layer(doc, curr, target)
 }

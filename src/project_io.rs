@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{
     cancel_active_drag, flush_modified_raw_selection_merge, load_shapes_from_timeline,
-    stop_playback, sync_shapes_to_timeline, CanvasState, EditorDoc, SelectSubMode, UndoHistory,
-    ViewportState,
+    sync_shapes_to_timeline, CanvasState, EditorDoc, SelectSubMode, UndoHistory, ViewportState,
 };
 use crate::clipboard_ops::max_group_id_in_timeline;
 use crate::symbol::{
@@ -75,6 +74,7 @@ pub(crate) trait ProjectWorkspace {
     fn tabs(&self) -> &DocumentTabManager;
     fn tabs_mut(&mut self) -> &mut DocumentTabManager;
     fn doc_and_tabs_mut(&mut self) -> (&mut EditorDoc, &mut DocumentTabManager);
+    fn stop_playback(&mut self);
 }
 
 /// 開いている1つのドキュメントタブが保持する独立状態スロット
@@ -210,7 +210,6 @@ fn surrender_focused_widget(ctx: &egui::Context) {
 /// タブ切り替えやプロジェクト保存の前に、選択状態やカスタムピボットを破壊せずに
 /// 進行中ドラッグの中断・連続編集フラグのリセット・（保存時のみ）未マージ生シェイプの結合/切り抜き確定・作業キャンバスのセル同期・多段シンボル編集スタックのライブラリ同期を行う
 fn prepare_active_tab_for_switch_or_save(doc: &mut EditorDoc, flush_raw_merge: bool) {
-    stop_playback(doc);
     cancel_active_drag(doc);
     doc.viewport.pan_last_screen_pos = None;
     doc.viewport.editing_stage_size = false;
@@ -262,7 +261,6 @@ fn swap_doc_preserving_shared_state(active: &mut EditorDoc, slot_doc: &mut Edito
     let last_canvas_rect = active.viewport.last_canvas_rect;
     let tool = active.ui.tool;
     let select_sub_mode = active.ui.select_sub_mode;
-    let right_panel_tab = active.ui.right_panel_tab;
     let brush_radius = active.ui.brush_radius;
     let eraser_radius = active.ui.eraser_radius;
     let brush_color = active.ui.brush_color;
@@ -274,7 +272,6 @@ fn swap_doc_preserving_shared_state(active: &mut EditorDoc, slot_doc: &mut Edito
     active.viewport.last_canvas_rect = last_canvas_rect;
     active.ui.tool = tool;
     active.ui.select_sub_mode = select_sub_mode;
-    active.ui.right_panel_tab = right_panel_tab;
     active.ui.brush_radius = brush_radius;
     active.ui.eraser_radius = eraser_radius;
     active.ui.brush_color = brush_color;
@@ -283,6 +280,7 @@ fn swap_doc_preserving_shared_state(active: &mut EditorDoc, slot_doc: &mut Edito
 
 /// 現在のアクティブドキュメント状態を `tabs.tabs[active_index]` スロットへ退避する
 fn pack_active_into_slot(ws: &mut impl ProjectWorkspace) {
+    ws.stop_playback();
     let (doc, tabs) = ws.doc_and_tabs_mut();
     prepare_active_tab_for_switch_or_save(doc, false);
     let idx = tabs.active_index;
@@ -303,7 +301,6 @@ fn unpack_slot_into_active(ws: &mut impl ProjectWorkspace, target_index: usize) 
     }
     doc.canvas.paste_count = 0;
     doc.canvas.paste_offset = kurbo::Vec2::ZERO;
-    doc.timeline_switched = true;
     if !doc.canvas.selected_shapes.is_empty() && doc.ui.select_sub_mode != SelectSubMode::Reshape {
         doc.ui.select_sub_mode = SelectSubMode::Reshape;
     }
@@ -333,10 +330,11 @@ fn reset_active_document_state(
     doc.viewport.reset_view();
     doc.ui.inspect_timeline_frame = false;
     doc.ui.show_wireframe = false;
+    doc.ui.onion_skin_enabled = false;
+    doc.ui.onion_prev_frames = 2;
+    doc.ui.onion_next_frames = 2;
     doc.ui.editing_symbol_playback = false;
     doc.ui.select_sub_mode = SelectSubMode::Reshape;
-    doc.is_playing = false;
-    doc.timeline_switched = true;
     load_shapes_from_timeline(doc);
 }
 
@@ -556,7 +554,7 @@ fn close_tab_immediately(
 
     if ws.tabs().tabs.len() <= 1 {
         // 最後の1タブを閉じた場合は連番をリセットし、白紙の「無題-1」へ初期化する
-        stop_playback(ws.doc_mut());
+        ws.stop_playback();
         cancel_active_drag(ws.doc_mut());
         ws.tabs_mut().next_untitled_number = 1;
         let doc_id = ws.tabs_mut().alloc_doc_id();
@@ -580,7 +578,7 @@ fn close_tab_immediately(
     }
 
     if close_index == ws.tabs().active_index {
-        stop_playback(ws.doc_mut());
+        ws.stop_playback();
         cancel_active_drag(ws.doc_mut());
         ws.doc_mut().viewport.pan_last_screen_pos = None;
 
@@ -1045,7 +1043,7 @@ impl From<SavedTimeline> for Timeline {
             .map(|l| l.frame_count)
             .max()
             .unwrap_or(1)
-            .max(s.total_frames.clamp(1, MAX_TIMELINE_FRAMES));
+            .clamp(1, MAX_TIMELINE_FRAMES);
         let active_layer = s.active_layer.min(layers.len().saturating_sub(1));
         let current_frame = s.current_frame.min(total_frames.saturating_sub(1));
         let raw_next_layer_id = if s.next_layer_id <= MAX_SAFE_ENTITY_ID {
@@ -1515,6 +1513,7 @@ pub(crate) fn save_project_to_path(
             )
         })
     };
+    ws.stop_playback();
     prepare_active_tab_for_switch_or_save(ws.doc_mut(), true);
 
     let proj_doc = ProjectDocument::from_app(ws.doc());
@@ -1680,7 +1679,7 @@ pub(crate) fn open_project_in_tab(
             .insert(insert_idx, DocumentSlot::new_empty(doc_id, 0));
         unpack_slot_into_active(ws, insert_idx);
     } else {
-        stop_playback(ws.doc_mut());
+        ws.stop_playback();
         cancel_active_drag(ws.doc_mut());
         ws.doc_mut().viewport.pan_last_screen_pos = None;
         let new_doc_id = ws.tabs_mut().alloc_doc_id();

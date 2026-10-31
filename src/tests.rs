@@ -1334,7 +1334,8 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
     assert!(timeline_ui::timeline_move_or_copy_frames(
         &mut app, sel_l1_f3, 0, 2, false
     ));
-    assert_eq!(app.timeline.layers[1].keyframes[1].start_frame, 5);
+    assert!(app.timeline.layers[1].cel_at(3).unwrap().is_empty());
+    assert_eq!(app.timeline.layers[1].keyframes.last().unwrap().start_frame, 5);
     assert!(!app.timeline.layers[1].cel_at(5).unwrap().is_empty());
 
     let sel_l0_f0 = timeline::TimelineCellSelection::single(0, 0);
@@ -1342,6 +1343,7 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
         &mut app, sel_l0_f0, 0, 2, false
     ));
     assert!(app.timeline.layers[0].cel_at(0).unwrap().is_empty());
+    assert!(!app.timeline.layers[0].cel_at(1).unwrap().is_empty());
     assert!(!app.timeline.layers[0].cel_at(2).unwrap().is_empty());
 
     app.timeline.layers[1].insert_keyframe(3, false);
@@ -2783,23 +2785,23 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
 
 #[test]
 fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
-    // オニオンスキンやループ再生などのビュー設定（TimelineUiState）を変更した後に Undo / Redo を実行しても巻き戻らないこと
+    // オニオンスキンやループ再生などのビュー設定（AppUiState / TimelineUiState）を変更した後に Undo / Redo を実行しても巻き戻らないこと
     let mut sort_app = Is2dApp::default();
     sort_app.push_undo();
-    sort_app.timeline_ui.onion_skin_enabled = true;
-    sort_app.timeline_ui.onion_prev_frames = 5;
-    sort_app.timeline_ui.onion_next_frames = 4;
+    sort_app.ui.onion_skin_enabled = true;
+    sort_app.ui.onion_prev_frames = 5;
+    sort_app.ui.onion_next_frames = 4;
     sort_app.timeline_ui.loop_playback = false;
     sort_app.timeline.fps = 30;
     sort_app.undo();
-    assert!(sort_app.timeline_ui.onion_skin_enabled);
-    assert_eq!(sort_app.timeline_ui.onion_prev_frames, 5);
-    assert_eq!(sort_app.timeline_ui.onion_next_frames, 4);
+    assert!(sort_app.ui.onion_skin_enabled);
+    assert_eq!(sort_app.ui.onion_prev_frames, 5);
+    assert_eq!(sort_app.ui.onion_next_frames, 4);
     assert!(!sort_app.timeline_ui.loop_playback);
     sort_app.redo();
-    assert!(sort_app.timeline_ui.onion_skin_enabled);
-    assert_eq!(sort_app.timeline_ui.onion_prev_frames, 5);
-    assert_eq!(sort_app.timeline_ui.onion_next_frames, 4);
+    assert!(sort_app.ui.onion_skin_enabled);
+    assert_eq!(sort_app.ui.onion_prev_frames, 5);
+    assert_eq!(sort_app.ui.onion_next_frames, 4);
     assert!(!sort_app.timeline_ui.loop_playback);
 
     // `FillShape::shape_id` によるレイヤー順ソート後の選択状態追従と `LoadedShapeSig` の一致
@@ -4818,14 +4820,38 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
     );
     assert_eq!(app.ui.tool, Tool::Transform);
 
-    // 3. Cmd+0 でキャンバスの viewport.zoom が 1.0 (100%) にリセットされ、egui 全体の UI zoom_factor が変更されないこと (#1)
-    app.viewport.zoom = 2.5;
-    app.viewport.pan = Vec2::new(120.0, -80.0);
+    // 3. Cmd+Plus でキャンバスのみがズームインし egui 全体の UI zoom_factor は 1.0 のまま維持され、Cmd+0 で viewport.zoom が 1.0 にリセットされること (#1)
     let cmd_mods = egui::Modifiers {
         command: true,
         ctrl: true,
         ..Default::default()
     };
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            modifiers: cmd_mods,
+            events: vec![egui::Event::Key {
+                key: egui::Key::Plus,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: cmd_mods,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(
+        (app.viewport.zoom - 1.25).abs() < 1e-6,
+        "Cmd+Plus でキャンバスの zoom が 1.25 に拡大されること"
+    );
+    assert!(
+        (ctx.zoom_factor() - 1.0).abs() < 1e-6,
+        "zoom_with_keyboard = false により Cmd+Plus でも egui 全体の UI スケールが変更されないこと"
+    );
+    app.viewport.pan = Vec2::new(120.0, -80.0);
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
@@ -4846,10 +4872,6 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
     assert!(
         (app.viewport.zoom - 1.0).abs() < 1e-6 && app.viewport.pan == Vec2::ZERO,
         "Cmd+0 でキャンバスの zoom が 1.0、pan が ZERO にリセットされること"
-    );
-    assert!(
-        (ctx.zoom_factor() - 1.0).abs() < 1e-6,
-        "zoom_with_keyboard = false により egui 全体の UI スケールが変更されないこと"
     );
 
     // 4. Esc で選択解除しても現在のツール (Tool::Transform) が勝手に Tool::Select へ切り替わらないこと
@@ -5088,7 +5110,7 @@ fn test_time_based_playback_advance_and_onion_skin_rendering() {
 
     // Frame 1 でオニオンスキンを有効化して update_ui を実行し、前後のオニオンスキンキャッシュが構築・描画されることを検証
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
-    app.timeline_ui.onion_skin_enabled = true;
+    app.ui.onion_skin_enabled = true;
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
@@ -5804,27 +5826,35 @@ fn test_key_repeat_suppressed_for_enter_onion_tween_and_cmd3() {
         Vec2::new(1280.0, 820.0),
     ));
 
-    // O キー初回押下でオニオンスキンが ON になり、直後の repeat: true では OFF に戻らないこと (#16)
-    assert!(!app.timeline_ui.onion_skin_enabled);
+    // 1. O キー初回押下フレーム (repeat: false) でオニオンスキンが ON になり、別フレームでの長押しリピート (repeat: true) では OFF に戻らないこと (#16)
+    assert!(!app.ui.onion_skin_enabled);
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
-            events: vec![
-                egui::Event::Key {
-                    key: egui::Key::O,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: egui::Modifiers::NONE,
-                },
-                egui::Event::Key {
-                    key: egui::Key::O,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
+            events: vec![egui::Event::Key {
+                key: egui::Key::O,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(app.ui.onion_skin_enabled);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::Key {
+                key: egui::Key::O,
+                physical_key: None,
+                pressed: true,
+                repeat: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
             ..Default::default()
         },
         |ctx| {
@@ -5832,11 +5862,11 @@ fn test_key_repeat_suppressed_for_enter_onion_tween_and_cmd3() {
         },
     );
     assert!(
-        app.timeline_ui.onion_skin_enabled,
-        "O キー長押しリピートでオニオンスキンが切り替わり続けないこと (#16)"
+        app.ui.onion_skin_enabled,
+        "別フレームの O キー長押しリピートでオニオンスキンが切り替わり続けないこと (#16)"
     );
 
-    // Cmd+3 初回押下で clip_outside_stage が ON になり、repeat: true では OFF に戻らないこと (#16)
+    // 2. Cmd+3 初回押下フレームで clip_outside_stage が ON になり、別フレームの repeat: true では OFF に戻らないこと (#16)
     let cmd_mods = egui::Modifiers {
         command: true,
         ctrl: true,
@@ -5846,22 +5876,31 @@ fn test_key_repeat_suppressed_for_enter_onion_tween_and_cmd3() {
         egui::RawInput {
             screen_rect,
             modifiers: cmd_mods,
-            events: vec![
-                egui::Event::Key {
-                    key: egui::Key::Num3,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: cmd_mods,
-                },
-                egui::Event::Key {
-                    key: egui::Key::Num3,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: true,
-                    modifiers: cmd_mods,
-                },
-            ],
+            events: vec![egui::Event::Key {
+                key: egui::Key::Num3,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: cmd_mods,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(app.viewport.clip_outside_stage);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            modifiers: cmd_mods,
+            events: vec![egui::Event::Key {
+                key: egui::Key::Num3,
+                physical_key: None,
+                pressed: true,
+                repeat: true,
+                modifiers: cmd_mods,
+            }],
             ..Default::default()
         },
         |ctx| {
@@ -5870,30 +5909,86 @@ fn test_key_repeat_suppressed_for_enter_onion_tween_and_cmd3() {
     );
     assert!(
         app.viewport.clip_outside_stage,
-        "Cmd+3 長押しリピートで枠外マスクが切り替わり続けないこと (#16)"
+        "別フレームの Cmd+3 長押しリピートで枠外マスクが切り替わり続けないこと (#16)"
     );
 
-    // Enter 初回押下で再生開始し、repeat: true では停止しないこと (#16)
+    // 3. T キー初回押下フレームでクラシックトゥイーンが ON になり、別フレームの repeat: true では OFF に戻らないこと (#16)
+    app.canvas.shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(160.0, 100.0),
+        10.0,
+        Color32::RED,
+    );
+    app.canvas.selected_shapes = vec![0];
+    assert!(symbol_ops::convert_selection_to_symbol(&mut app).is_some());
+    assert!(!app.timeline.layers[0].keyframes[0].tween);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::Key {
+                key: egui::Key::T,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(app.timeline.layers[0].keyframes[0].tween);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::Key {
+                key: egui::Key::T,
+                physical_key: None,
+                pressed: true,
+                repeat: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(
+        app.timeline.layers[0].keyframes[0].tween,
+        "別フレームの T キー長押しリピートでトゥイーンが切り替わり続けないこと (#16)"
+    );
+
+    // 4. Enter 初回押下フレームで再生開始し、別フレームの repeat: true では停止しないこと (#16)
     app.timeline.resize_total_frames(4);
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
-            events: vec![
-                egui::Event::Key {
-                    key: egui::Key::Enter,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: egui::Modifiers::NONE,
-                },
-                egui::Event::Key {
-                    key: egui::Key::Enter,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(app.timeline_ui.is_playing);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
             ..Default::default()
         },
         |ctx| {
@@ -5902,7 +5997,7 @@ fn test_key_repeat_suppressed_for_enter_onion_tween_and_cmd3() {
     );
     assert!(
         app.timeline_ui.is_playing,
-        "Enter 長押しリピートで再生/停止が切り替わり続けないこと (#16)"
+        "別フレームの Enter 長押しリピートで再生/停止が切り替わり続けないこと (#16)"
     );
 }
 
@@ -5963,5 +6058,792 @@ fn test_transform_rotate_zone_only_near_four_corners_and_paste_staircase_across_
         (c2.x - (c1.x + 4.0)).abs() < 1e-4 && c2.x > c1.x && c1.x > c0.x,
         "連続ペーストの途中でズームインしても位置が逆戻りせず階段状にずれること (#18): c0={c0:?}, c1={c1:?}, c2={c2:?}"
     );
+}
+
+#[test]
+fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source() {
+    let red = Color32::from_rgb(220, 50, 50);
+
+    // 1. 0〜5フレーム (6コマ) のキーフレームスパンのうち先頭 0〜2 のみを Frame 8〜10 へ通常移動 (Altなし)
+    // → 移動元の 0〜2 は空白になり、選択していない残りの 3〜5 は消えずに元の赤い絵を保持すること
+    let mut app = Is2dApp::default();
+    app.timeline.resize_total_frames(6);
+    app.canvas.shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(160.0, 100.0),
+        10.0,
+        red,
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+
+    let sel_prefix = timeline::TimelineCellSelection::from_corners(0, 0, 0, 2);
+    assert!(canvas_tool::timeline_move_or_copy_frames(
+        &mut app,
+        sel_prefix,
+        0,
+        8,
+        false
+    ));
+    for f in 0..=2 {
+        assert!(
+            app.timeline.layers[0].cel_at(f).unwrap().is_empty(),
+            "移動元の先頭範囲 Frame {f} は空白化されること"
+        );
+    }
+    for f in 3..=5 {
+        let cel = app.timeline.layers[0].cel_at(f).unwrap();
+        assert_eq!(
+            cel.shapes.len(),
+            1,
+            "選択していない後半スパン Frame {f} の絵が消失せず保持されること"
+        );
+        assert_eq!(cel.shapes[0].color, red);
+    }
+    for f in 8..=10 {
+        let cel = app.timeline.layers[0].cel_at(f).unwrap();
+        assert_eq!(cel.shapes.len(), 1);
+        assert_eq!(cel.shapes[0].color, red);
+    }
+
+    // 2. 0〜5フレームのキーフレームスパンのうち保持フレームのみ (2〜3) を選んで Frame 8〜9 へ通常移動
+    // → 0〜1 は保持、移動元の保持フレーム 2〜3 は空白化（コピーにならない）、後ろの 4〜5 も保持されること
+    let mut hold_app = Is2dApp::default();
+    hold_app.timeline.resize_total_frames(6);
+    hold_app.canvas.shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(160.0, 100.0),
+        10.0,
+        red,
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut hold_app);
+
+    let sel_mid_hold = timeline::TimelineCellSelection::from_corners(0, 2, 0, 3);
+    assert!(canvas_tool::timeline_move_or_copy_frames(
+        &mut hold_app,
+        sel_mid_hold,
+        0,
+        6,
+        false
+    ));
+    for f in 0..=1 {
+        assert_eq!(hold_app.timeline.layers[0].cel_at(f).unwrap().shapes.len(), 1);
+    }
+    for f in 2..=3 {
+        assert!(
+            hold_app.timeline.layers[0].cel_at(f).unwrap().is_empty(),
+            "保持フレームのみを選んで通常移動した際、移動元の Frame {f} が空白化されること"
+        );
+    }
+    for f in 4..=5 {
+        assert_eq!(
+            hold_app.timeline.layers[0].cel_at(f).unwrap().shapes.len(),
+            1,
+            "保持フレーム移動範囲直後の Frame {f} の絵も消失せず保持されること"
+        );
+    }
+    for f in 8..=9 {
+        assert_eq!(hold_app.timeline.layers[0].cel_at(f).unwrap().shapes.len(), 1);
+    }
+}
+
+#[test]
+fn test_nested_symbol_expansion_memoization_and_step_cap() {
+    let mut app = Is2dApp::default();
+
+    // 1. 中身が空の葉シンボル (id=8) を起点に、各段が子シンボルを20個ずつ持つ8段入れ子階層 (20^8 = 256億経路)
+    let leaf = symbol::SymbolDef::new(8, "EmptyLeaf".to_string(), Vec::new());
+    app.symbols.library.push(leaf);
+
+    let mut next_gid = 1u64;
+    for level in (1..=7u64).rev() {
+        let child_id = level + 1;
+        let mut sym = symbol::SymbolDef::new(level, format!("Level{level}"), Vec::new());
+        let instances: Vec<timeline::SymbolInstance> = (0..20)
+            .map(|i| timeline::SymbolInstance {
+                binding: vector_engine::SymbolInstanceBinding::new(
+                    {
+                        let gid = next_gid;
+                        next_gid += 1;
+                        gid
+                    },
+                    child_id,
+                    kurbo::Affine::translate((i as f64 * 2.0, 0.0)),
+                ),
+                layer_id: 1,
+                parent_scope: Vec::new(),
+                shape_order_index: 0,
+            })
+            .collect();
+        sym.timeline.layers[0].keyframes[0].cel =
+            timeline::Cel::new_with_instances(Vec::new(), instances);
+        app.symbols.library.push(sym);
+    }
+
+    let root_instances: Vec<timeline::SymbolInstance> = (0..20)
+        .map(|i| timeline::SymbolInstance {
+            binding: vector_engine::SymbolInstanceBinding::new(
+                {
+                    let gid = next_gid;
+                    next_gid += 1;
+                    gid
+                },
+                1,
+                kurbo::Affine::translate((i as f64 * 5.0, 0.0)),
+            ),
+            layer_id: 1,
+            parent_scope: Vec::new(),
+            shape_order_index: 0,
+        })
+        .collect();
+    app.timeline.layers[0].keyframes[0].cel =
+        timeline::Cel::new_with_instances(Vec::new(), root_instances);
+
+    let t0 = std::time::Instant::now();
+    canvas_tool::load_shapes_from_timeline(&mut app);
+    let elapsed_memo = t0.elapsed();
+    assert_eq!(
+        app.canvas.shapes.len(),
+        20,
+        "ルート直下の空シンボルインスタンス20個がそれぞれ空マーカーとして即座に展開されること"
+    );
+    assert!(
+        elapsed_memo.as_millis() < 500,
+        "メモ化により 20^8 空シンボル入れ子が瞬時に完了すること: {elapsed_memo:?}"
+    );
+
+    // 2. 各インスタンスが異なる first_frame を持ちメモ化が効かない細工ケースでも、
+    //    MAX_SYMBOL_EXPANSION_STEPS により無限展開せず即座に打ち切られること
+    for sym in &mut app.symbols.library {
+        sym.timeline.total_frames = 100_000;
+        if let Some(kf) = sym.timeline.layers[0].keyframes.first_mut() {
+            for (idx, inst) in kf.cel.instances_mut().iter_mut().enumerate() {
+                inst.binding.loop_mode = vector_engine::SymbolLoopMode::SingleFrame;
+                inst.binding.first_frame = idx * 97 + (sym.id as usize) * 13;
+            }
+        }
+        sym.revision = vector_engine::next_mesh_revision();
+    }
+    let t1 = std::time::Instant::now();
+    canvas_tool::load_shapes_from_timeline(&mut app);
+    let first_non_empty =
+        app.symbols.library[1].first_non_empty_local_shapes(&app.symbols.library);
+    let elapsed_step_cap = t1.elapsed();
+    assert!(first_non_empty.is_empty());
+    assert!(
+        elapsed_step_cap.as_millis() < 500,
+        "メモ化が効かない異なるフレーム指定の入れ子でも展開回数上限により瞬時に打ち切られること: {elapsed_step_cap:?}"
+    );
+}
+
+#[test]
+fn test_onion_skin_per_tab_isolation_and_shift_marquee_no_premature_merge() {
+    use eframe::egui;
+
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+
+    // 1. オニオンスキンの設定 (onion_skin_enabled / onion_prev_frames / onion_next_frames) がタブごとに独立して保持されること (#3)
+    app.ui.onion_skin_enabled = true;
+    app.ui.onion_prev_frames = 5;
+    app.ui.onion_next_frames = 4;
+
+    project_io::new_project(&mut app, &ctx);
+    assert_eq!(app.tabs.active_index, 1);
+    assert!(
+        !app.ui.onion_skin_enabled
+            && app.ui.onion_prev_frames == 2
+            && app.ui.onion_next_frames == 2,
+        "新規タブではオニオンスキン設定が初期値 (false, 2, 2) になること (#3)"
+    );
+
+    project_io::switch_to_tab(&mut app, 0, Some(&ctx));
+    assert!(
+        app.ui.onion_skin_enabled
+            && app.ui.onion_prev_frames == 5
+            && app.ui.onion_next_frames == 4,
+        "元のタブに戻るとそのタブのオニオンスキン設定が復元されること (#3)"
+    );
+
+    // 2. Shift＋マーキーで選択を追加しても、移動済みでまだ選択中の生図形が先に結合されないこと (#4)
+    let mut sel_app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 50, 50);
+    let blue = Color32::from_rgb(50, 120, 220);
+    // Shape 0: 左の赤図形 (100..180, 100), Shape 1: 中央の赤図形 (220..300, 100), Shape 2: 右の青図形 (400..460, 100)
+    sel_app.canvas.shapes = make_stroke(Point::new(100.0, 100.0), Point::new(180.0, 100.0), 14.0, red);
+    sel_app.canvas.shapes.extend(make_stroke(
+        Point::new(220.0, 100.0),
+        Point::new(300.0, 100.0),
+        14.0,
+        red,
+    ));
+    sel_app.canvas.shapes.extend(make_stroke(
+        Point::new(400.0, 100.0),
+        Point::new(460.0, 100.0),
+        14.0,
+        blue,
+    ));
+    canvas_tool::sync_shapes_to_timeline(&mut sel_app);
+
+    // 中央の赤図形 (idx=1) を選択して左へ -80px 移動し、Shape 0 と重ならせる（まだ選択中なので未結合で3図形のまま）
+    sel_app.canvas.selected_shapes = vec![1];
+    assert!(select_ops::nudge_selected_shapes(
+        &mut sel_app,
+        KVec2::new(-80.0, 0.0)
+    ));
+    assert_eq!(sel_app.canvas.shapes.len(), 3);
+    assert!(sel_app.canvas.selection_modified);
+
+    // Shift＋マーキー (additive = true) で右の青図形を追加選択した際、移動済みの赤図形が早期に Shape 0 と結合されないこと
+    select_ops::apply_marquee_selection(
+        &mut sel_app,
+        Point::new(380.0, 70.0),
+        Point::new(480.0, 130.0),
+        true,
+    );
+    assert_eq!(
+        sel_app.canvas.shapes.len(),
+        3,
+        "Shift＋マーキーで追加選択しても、まだ選択中の移動済み生図形は先に結合されないこと (#4)"
+    );
+    assert_eq!(sel_app.canvas.selected_shapes.len(), 2);
+
+    // その後選択解除 (clear_selection) した瞬間に同色結合が確定し、赤1個＋青1個の計2図形になること
+    canvas_tool::clear_selection(&mut sel_app);
+    assert_eq!(sel_app.canvas.shapes.len(), 2);
+}
+
+#[test]
+fn test_scale_commit_and_repeated_transform_rebuild_mesh_cache() {
+    let mut app = Is2dApp::default();
+    app.canvas.shapes = make_stroke(
+        Point::new(200.0, 200.0),
+        Point::new(210.0, 200.0),
+        6.0,
+        Color32::from_rgb(60, 130, 230),
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+    let initial_verts = app.canvas.shapes[0].fill_mesh().vertices.len();
+
+    // 1. 自由変形の拡大ドラッグ (transform_selected_from_origins) 中は既存頂点数を再利用し、
+    //    commit_moved_selection 確定時に rebuild_cache() されて曲線分割頂点数が増加すること (#5)
+    app.canvas.selected_shapes = vec![0];
+    let undo_snapshot = app.canvas.snapshot_for_drag();
+    let orig_shapes = app.canvas.selected_shapes_snapshot();
+    let pivot = app.canvas.shapes[0].bounding_box().center();
+    let scale_xform = kurbo::Affine::translate(pivot.to_vec2())
+        * kurbo::Affine::scale(4.0)
+        * kurbo::Affine::translate(-pivot.to_vec2());
+    canvas_tool::CanvasState::transform_selected_from_origins(
+        &mut app.canvas.shapes,
+        &orig_shapes,
+        scale_xform,
+    );
+    assert_eq!(
+        app.canvas.shapes[0].fill_mesh().vertices.len(),
+        initial_verts,
+        "ドラッグ中は頂点バッファを再利用すること"
+    );
+    canvas_tool::commit_moved_selection(&mut app, undo_snapshot);
+    let rebuilt_verts = app.canvas.shapes[0].fill_mesh().vertices.len();
+    assert!(
+        rebuilt_verts > initial_verts,
+        "拡大確定時 (commit_moved_selection) にメッシュが再構築され、拡大後の曲線に応じた滑らかな頂点数になること (#5): initial={initial_verts}, rebuilt={rebuilt_verts}"
+    );
+
+    // 2. 1.2倍 (<= 1.25倍) の FillShape::transform を繰り返した場合でもキャッシュが再構築されること (#5)
+    let mut s = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(110.0, 100.0),
+        6.0,
+        Color32::RED,
+    )
+    .remove(0);
+    let v0 = s.fill_mesh().vertices.len();
+    let step_scale = kurbo::Affine::scale(1.2);
+    for _ in 0..8 {
+        s.transform(step_scale);
+    }
+    let v_after = s.fill_mesh().vertices.len();
+    assert!(
+        v_after > v0,
+        "1.25倍以内の拡大 transform でもメッシュキャッシュが再構築されること (#5): v0={v0}, v_after={v_after}"
+    );
+}
+
+#[test]
+fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close() {
+    use eframe::egui;
+
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let screen_rect = Some(egui::Rect::from_min_size(
+        Pos2::ZERO,
+        Vec2::new(1280.0, 820.0),
+    ));
+
+    // 初回フレームでレイアウト確定
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+
+    // 1. 中ボタンドラッグによるパン操作 & ホイールズームの RawInput 検証
+    let canvas_center = app.viewport.last_canvas_rect.center();
+    let pan_before = app.viewport.pan;
+    let pan_to = canvas_center + Vec2::new(40.0, 25.0);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(canvas_center),
+                egui::Event::PointerButton {
+                    pos: canvas_center,
+                    button: egui::PointerButton::Middle,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerMoved(pan_to)],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerButton {
+                pos: pan_to,
+                button: egui::PointerButton::Middle,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(
+        (app.viewport.pan - (pan_before + Vec2::new(40.0, 25.0))).length() < 1e-3,
+        "中ボタンドラッグでキャンバスがパン移動すること"
+    );
+    app.viewport.reset_view();
+
+    // 2. 選択ツールでの頂点移動ドラッグ (MoveVertex) の RawInput 検証
+    app.canvas.shapes = make_stroke(
+        Point::new(300.0, 250.0),
+        Point::new(420.0, 250.0),
+        18.0,
+        Color32::from_rgb(220, 60, 60),
+    );
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+    canvas_tool::set_tool(&mut app, Tool::Select);
+    let v0_world = app.canvas.shapes[0].exterior.segments[0].p0;
+    let v0_screen = app.viewport.world_to_screen(v0_world);
+    let v0_drag_to = v0_screen + Vec2::new(25.0, 30.0);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(v0_screen),
+                egui::Event::PointerButton {
+                    pos: v0_screen,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerMoved(v0_drag_to)],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerButton {
+                pos: v0_drag_to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let expected_moved_v0 = Point::new(v0_world.x + 25.0, v0_world.y + 30.0);
+    assert!(
+        app.canvas.shapes[0]
+            .exterior
+            .segments
+            .iter()
+            .any(|seg| (seg.p0 - expected_moved_v0).hypot() < 2.0),
+        "選択ツールで頂点をドラッグして移動できること"
+    );
+
+    // 3. 自由変形ツールでのスケールハンドルドラッグ (Scale) & 回転ドラッグ (Rotate) の RawInput 検証
+    canvas_tool::set_tool(&mut app, Tool::Transform);
+    app.canvas.selected_shapes = vec![0];
+    let bbox_before = app.canvas.selection_bounding_box(app.viewport.zoom).unwrap();
+    let br_world = canvas_tool::ScaleHandle::BottomRight.position(bbox_before);
+    let br_screen = app.viewport.world_to_screen(br_world);
+    let br_drag_to = br_screen + Vec2::new(60.0, 40.0);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(br_screen),
+                egui::Event::PointerButton {
+                    pos: br_screen,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerMoved(br_drag_to)],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerButton {
+                pos: br_drag_to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let bbox_scaled = app.canvas.selection_bounding_box(app.viewport.zoom).unwrap();
+    assert!(
+        bbox_scaled.width() > bbox_before.width() + 40.0,
+        "自由変形ツールの右下スケールハンドルドラッグで拡大されること: before={bbox_before:?}, after={bbox_scaled:?}"
+    );
+
+    // 四隅外側の回転ゾーンからのドラッグで回転されること
+    let rot_start_world = Point::new(bbox_scaled.x1 + 10.0, bbox_scaled.y0 - 10.0);
+    let rot_start_scr = app.viewport.world_to_screen(rot_start_world);
+    let rot_drag_scr = rot_start_scr + Vec2::new(0.0, 80.0);
+    let p0_before_rot = app.canvas.shapes[0].exterior.segments[0].p0;
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(rot_start_scr),
+                egui::Event::PointerButton {
+                    pos: rot_start_scr,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerMoved(rot_drag_scr)],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerButton {
+                pos: rot_drag_scr,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let p0_after_rot = app.canvas.shapes[0].exterior.segments[0].p0;
+    assert!(
+        (p0_after_rot - p0_before_rot).hypot() > 5.0,
+        "自由変形ツールの四隅外側ドラッグで図形が回転されること"
+    );
+
+    // マウスホイールによるカーソル中心ズームの RawInput 検証
+    let zoom_before = app.viewport.zoom;
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(canvas_center),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(0.0, 120.0),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(
+        app.viewport.zoom > zoom_before,
+        "キャンバス上のマウスホイール入力でズームインすること"
+    );
+
+    // 4. 未保存タブを閉じる際の「保存して閉じる」 (ConfirmPendingCloseSave) 検証
+    let tmp_save_close =
+        std::env::temp_dir().join(format!("is2d_save_on_close_{}.is2d", std::process::id()));
+    project_io::new_project(&mut app, &ctx);
+    assert_eq!(app.tabs.tabs.len(), 2);
+    app.ui.current_file_path = Some(tmp_save_close.clone());
+    app.tabs.tabs[1].file_path = Some(tmp_save_close.clone());
+    app.canvas.shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(200.0, 100.0),
+        12.0,
+        Color32::BLUE,
+    );
+    app.push_undo();
+    assert!(app.history.is_dirty());
+    project_io::close_active_tab(&mut app, Some(&ctx));
+    assert!(app.tabs.pending_close_confirm.is_some());
+    app.apply_action(panels::UiAction::ConfirmPendingCloseSave, &ctx);
+    assert!(
+        app.tabs.pending_close_confirm.is_none() && app.tabs.tabs.len() == 1,
+        "『保存して閉じる』でファイルへ保存された上で対象タブが閉じられること"
+    );
+    assert!(tmp_save_close.exists());
+    let _ = std::fs::remove_file(&tmp_save_close);
+}
+
+#[test]
+fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
+    let mut rng = fastrand::Rng::with_seed(0x152D_2026_1031);
+
+    // 1. ランダムな手描き座標列に対するストローク生成・アフィン変換・ブーリアン演算の不変条件テスト (50ケース)
+    for case_idx in 0..50 {
+        let n_pts = rng.usize(2..=12);
+        let mut pts = Vec::with_capacity(n_pts);
+        let mut cur = Point::new(
+            rng.f64() * 600.0 + 50.0,
+            rng.f64() * 350.0 + 50.0,
+        );
+        pts.push(cur);
+        for _ in 1..n_pts {
+            cur.x = (cur.x + (rng.f64() - 0.5) * 80.0).clamp(10.0, 790.0);
+            cur.y = (cur.y + (rng.f64() - 0.5) * 80.0).clamp(10.0, 440.0);
+            pts.push(cur);
+        }
+        let radius = rng.f64() * 25.0 + 1.0;
+        let col_a = Color32::from_rgb(rng.u8(..), rng.u8(..), rng.u8(..));
+        let raw_outline = generate_brush_outline(&pts, radius);
+        let shapes_a = build_smoothed_stroke_shapes(&raw_outline, col_a);
+        assert!(
+            !shapes_a.is_empty(),
+            "case {case_idx}: 有効な入力点列から空でないストローク図形が生成されること"
+        );
+        for s in &shapes_a {
+            let bbox = s.bounding_box();
+            assert!(
+                bbox.x0.is_finite()
+                    && bbox.y0.is_finite()
+                    && bbox.x1.is_finite()
+                    && bbox.y1.is_finite()
+                    && bbox.x0 <= bbox.x1
+                    && bbox.y0 <= bbox.y1,
+                "case {case_idx}: 生成されたストローク図形のバウンディングボックスが有限かつ正規化されていること"
+            );
+            assert!(
+                !s.fill_mesh().vertices.is_empty(),
+                "case {case_idx}: 生成されたストローク図形が有効なメッシュを持つこと"
+            );
+        }
+
+        // 別のストロークとの Union / Difference でも全座標が有限で退化輪郭を含まないこと
+        let p0 = Point::new(rng.f64() * 500.0 + 80.0, rng.f64() * 300.0 + 60.0);
+        let p1 = Point::new(p0.x + rng.f64() * 60.0 + 5.0, p0.y + rng.f64() * 60.0 + 5.0);
+        let shapes_b = make_stroke(p0, p1, 8.0, col_a);
+        let unioned = vector_boolean::boolean_operation(
+            &shapes_a,
+            &shapes_b,
+            vector_boolean::BoolOp::Union,
+            col_a,
+        );
+        for u in &unioned {
+            for c in u.contours() {
+                assert!(c.segments.len() >= 2);
+                assert!(c.segments.iter().all(|seg| {
+                    seg.p0.x.is_finite()
+                        && seg.p0.y.is_finite()
+                        && seg.p1.x.is_finite()
+                        && seg.p1.y.is_finite()
+                        && seg.p2.x.is_finite()
+                        && seg.p2.y.is_finite()
+                }));
+            }
+        }
+    }
+
+    // 2. ランダムな異常値・参照構造を含む ProjectDocument JSON の読み込み・サニタイズ不変条件テスト (50ケース)
+    for case_idx in 0..50 {
+        let num_syms = rng.usize(1..=6);
+        let mut sym_json_list = Vec::new();
+        for i in 0..num_syms {
+            let sid = if rng.bool() { i as u64 } else { u64::MAX - (i as u64) };
+            let target_sym = rng.u64(0..=(num_syms as u64 + 2));
+            let tf = rng.usize(0..=50);
+            sym_json_list.push(format!(
+                r#"{{
+                    "id": {sid},
+                    "name": "Sym_{i}",
+                    "timeline": {{
+                        "total_frames": {tf},
+                        "fps": {},
+                        "active_layer": 99,
+                        "current_frame": 999,
+                        "next_layer_number": 0,
+                        "next_layer_id": 0,
+                        "layers": [{{
+                            "id": 0,
+                            "name": "L",
+                            "visible": true,
+                            "locked": false,
+                            "frame_count": {tf},
+                            "keyframes": [{{
+                                "start_frame": 0,
+                                "tween": true,
+                                "shapes": [],
+                                "instances": [{{
+                                    "binding": {{
+                                        "symbol_id": {target_sym},
+                                        "instance_gid": {},
+                                        "xform": [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                                        "pivot": [0.0, 0.0],
+                                        "loop_mode": "Loop",
+                                        "first_frame": {}
+                                    }},
+                                    "layer_id": 0,
+                                    "parent_scope": [],
+                                    "shape_order_index": 0
+                                }}]
+                            }}]
+                        }}]
+                    }}
+                }}"#,
+                rng.u32(0..=120),
+                rng.u64(0..=10),
+                rng.usize(0..=200),
+            ));
+        }
+        let raw_json = format!(
+            r#"{{
+                "version": 1,
+                "stage_size": [{}, {}],
+                "timeline": {{
+                    "total_frames": {},
+                    "fps": {},
+                    "active_layer": 50,
+                    "current_frame": 500,
+                    "next_layer_number": 0,
+                    "next_layer_id": 0,
+                    "layers": []
+                }},
+                "library": [{}],
+                "next_symbol_id": 0,
+                "next_group_id": 0
+            }}"#,
+            rng.f32() * 5000.0 - 500.0,
+            rng.f32() * 5000.0 - 500.0,
+            rng.usize(0..=100),
+            rng.u32(0..=200),
+            sym_json_list.join(","),
+        );
+
+        let doc: project_io::ProjectDocument = serde_json::from_str(&raw_json)
+            .expect("有効なJSON構文の ProjectDocument がパースできること");
+        let mut app = Is2dApp::default();
+        doc.apply_to_app(&mut app);
+
+        assert!(
+            !app.timeline.layers.is_empty(),
+            "case {case_idx}: 空レイヤー配列でも最低1レイヤーに補正されること"
+        );
+        assert!(
+            (1..=60).contains(&app.timeline.fps),
+            "case {case_idx}: FPS が 1..=60 にクランプされること"
+        );
+        assert!(
+            app.timeline.current_frame < app.timeline.total_frames,
+            "case {case_idx}: current_frame が total_frames 未満に収まること"
+        );
+        for sym in &app.symbols.library {
+            assert!(sym.id >= 1, "case {case_idx}: シンボルIDが 1 以上に正規化されること");
+            for l in &sym.timeline.layers {
+                for kf in &l.keyframes {
+                    for inst in kf.cel.instances.iter() {
+                        assert!(
+                            !app.symbols
+                                .would_create_symbol_cycle(sym.id, inst.binding.symbol_id),
+                            "case {case_idx}: ランダム参照グラフから循環参照が完全に除去されていること"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
