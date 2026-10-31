@@ -4,8 +4,8 @@ use std::sync::Arc;
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    Clipboard, MoveSelectionDrag, Tab, active_scope_layer_id, cancel_active_drag, clear_selection,
-    insert_and_select_shapes_in_scope, sync_timeline_layer_from_canvas_selection,
+    Clipboard, FloatingOrigin, MoveSelectionDrag, Tab, active_scope_layer_id, cancel_active_drag,
+    clear_selection, insert_and_select_shapes_in_scope, sync_timeline_layer_from_canvas_selection,
 };
 use crate::symbol::{Document, SymbolDef, SymbolEvalCtx};
 use crate::timeline::Timeline;
@@ -157,8 +157,13 @@ pub(crate) fn duplicate_selected_shapes_for_alt_drag(tab: &mut Tab) -> Vec<FillS
     let saved_pivot = tab.session.transform_pivot;
     clear_selection(tab);
     let undo_snapshot = tab.session.snapshot_for_drag();
-    let (duplicated, _) = instantiate_relative_shapes_in_scope(tab, &rel_shapes, KVec2::ZERO, true);
-    insert_and_select_shapes_in_scope(tab, duplicated, false);
+    let (duplicated, any_raw) =
+        instantiate_relative_shapes_in_scope(tab, &rel_shapes, KVec2::ZERO, true);
+    insert_and_select_shapes_in_scope(
+        tab,
+        duplicated,
+        any_raw.then_some(FloatingOrigin::AltDuplicate),
+    );
     tab.session.transform_pivot = saved_pivot;
     sync_timeline_layer_from_canvas_selection(tab);
     undo_snapshot

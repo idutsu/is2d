@@ -3,9 +3,10 @@ use std::collections::HashSet;
 use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
-    HoverTarget, Scene, SelectSubMode, Session, Tab, cancel_active_drag, clear_selection,
-    focus_active_layer_to_shape, prepare_moved_selection, sync_shapes_to_timeline,
-    sync_timeline_layer_from_canvas_selection, topmost_layer_id_for_indices,
+    Floating, FloatingOrigin, HoverTarget, Scene, SelectSubMode, Session, Tab, cancel_active_drag,
+    clear_selection, focus_active_layer_to_shape, prepare_moved_selection,
+    sync_shapes_to_timeline, sync_timeline_layer_from_canvas_selection,
+    topmost_layer_id_for_indices,
 };
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
 use crate::vector_boolean::{
@@ -14,7 +15,7 @@ use crate::vector_boolean::{
 use crate::vector_engine::{FillShape, make_marquee_rect_shape, normalize_vec, rects_overlap};
 
 /// 現在の選択図形のうち `keep_indices` のみを選択に残し、選択から外れた変更済み生シェイプのみをキャンバスへ結合・切り抜き確定する
-/// （選択に残った図形は結合せず `selection_modified = true` のまま維持する）
+/// （選択に残った図形は結合せず `Floating` のまま維持する）
 pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices: &[usize]) {
     let (is_sel, any_valid) = tab.session.selected_shape_mask();
     if !any_valid {
@@ -37,7 +38,7 @@ pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices:
     tab.session.set_selected_indices(
         (0..is_keep.len()).filter(|&i| is_keep[i]),
     );
-    if tab.session.selection_modified {
+    if tab.session.has_modified_floating() {
         let insert_limit = tab.session.scope_insert_index();
         let mut base_canvas = Vec::with_capacity(tab.session.shapes.len());
         let mut deselected_raw_shapes = Vec::new();
@@ -67,7 +68,10 @@ pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices:
             tab.session.clear_unsliced_snapshot();
             sync_shapes_to_timeline(tab);
         }
-        tab.session.selection_modified = !tab.session.selection.is_empty();
+        tab.session.update_floating_from_current_selection(
+            FloatingOrigin::Move,
+            kurbo::Affine::IDENTITY,
+        );
     } else {
         let any_raw_kept = tab.session.shapes.iter().any(|s| {
             tab.session.selection.contains_shape(s)
@@ -75,6 +79,11 @@ pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices:
         });
         if !any_raw_kept {
             tab.session.restore_unsliced_preserving_selection();
+        } else if tab.session.has_unmodified_slice() {
+            let pieces = tab.session.selected_raw_shapes_in_scope();
+            if let Some(f) = &mut tab.session.floating {
+                f.pieces = pieces;
+            }
         }
     }
     tab.session.transform_pivot = None;
@@ -215,7 +224,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
         &clip_rect_shape,
     );
     let pre_slice_snapshot =
-        (!tab.session.has_unsliced_snapshot()).then(|| tab.session.shapes.clone());
+        (tab.session.floating.is_none()).then(|| tab.session.shapes.clone());
 
     let mut any_sliced = false;
     let mut new_shapes = Vec::with_capacity(tab.session.shapes.len() + 4);
@@ -267,16 +276,31 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
         }
     }
 
-    if any_sliced && !tab.session.has_unsliced_snapshot() {
-        if let Some(snap) = pre_slice_snapshot {
-            tab.session.restore_unsliced_snapshot(snap);
-        }
-    }
     tab.session.shapes = new_shapes;
     tab.session.set_selected_indices(new_selected);
-    if tab.session.selection.is_empty() && !tab.session.selection_modified {
-        if let Some(unsliced) = tab.session.take_unsliced_snapshot() {
-            tab.session.shapes = unsliced;
+    if tab.session.has_modified_floating() {
+        tab.session.update_floating_from_current_selection(
+            FloatingOrigin::Move,
+            kurbo::Affine::IDENTITY,
+        );
+    } else if any_sliced || tab.session.has_unmodified_slice() {
+        let base_opt = tab
+            .session
+            .take_unsliced_snapshot()
+            .or(pre_slice_snapshot);
+        if let Some(base) = base_opt {
+            if tab.session.selection.is_empty() && !tab.session.has_modified_floating() {
+                tab.session.shapes = base;
+                tab.session.floating = None;
+            } else {
+                let pieces = tab.session.selected_raw_shapes_in_scope();
+                tab.session.floating = Some(Floating {
+                    base,
+                    pieces,
+                    xform: kurbo::Affine::IDENTITY,
+                    origin: FloatingOrigin::Slice,
+                });
+            }
         }
     }
     tab.session.transform_pivot = None;
@@ -711,8 +735,8 @@ pub(crate) fn prepare_group_selected_shapes(tab: &mut Tab) -> Option<(u64, Vec<F
     if let Some(l_idx) = tab.doc.root.layer_index_by_id(target_lid) {
         tab.doc.root.active_layer = l_idx;
     }
-    let _ = prepare_moved_selection(tab, &snapshot);
-    tab.session.selection_modified = false;
+    let _ = prepare_moved_selection(tab, &snapshot, kurbo::Affine::IDENTITY);
+    tab.session.floating = None;
     tab.session.transform_pivot = None;
     Some((new_gid, snapshot))
 }
@@ -772,7 +796,12 @@ pub(crate) fn prepare_ungroup_selected_shapes(tab: &mut Tab) -> Option<Vec<FillS
         .retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
     tab.session.selection.retain_existing(&tab.session.shapes);
     if any_became_raw {
-        tab.session.selection_modified = true;
+        tab.session.update_floating_from_current_selection(
+            FloatingOrigin::Move,
+            kurbo::Affine::IDENTITY,
+        );
+    } else {
+        tab.session.floating = None;
     }
     tab.session.transform_pivot = None;
     Some(snapshot)
@@ -787,7 +816,7 @@ pub(crate) fn prepare_delete_selected_shapes(tab: &mut Tab) -> Option<Vec<FillSh
     let (is_sel, any_valid) = tab.session.selected_shape_mask();
     if !any_valid {
         tab.session.selection.clear();
-        tab.session.clear_unsliced_snapshot();
+        tab.session.floating = None;
         tab.session.transform_pivot = None;
         return None;
     }
@@ -801,7 +830,7 @@ pub(crate) fn prepare_delete_selected_shapes(tab: &mut Tab) -> Option<Vec<FillSh
         }
     }
     tab.session.shapes = remaining;
-    tab.session.selection_modified = false;
+    tab.session.floating = None;
     tab.session.selection.clear();
     tab.session.transform_pivot = None;
     Some(snapshot)

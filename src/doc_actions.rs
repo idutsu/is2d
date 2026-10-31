@@ -4,11 +4,12 @@ use eframe::egui::{Color32, Vec2};
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    Clipboard, CoalesceKey, NoticeKind, SelectSubMode, StatusToast, Tab, Tool, ToolSettings,
-    UndoEntry, active_scope_layer_id, cancel_active_drag, clear_selection,
-    flush_canvas_before_timeline_op, focus_active_layer_to_shape, insert_and_select_shapes_in_scope,
-    load_shapes_from_timeline, prepare_moved_selection, select_shapes_for_timeline_selection,
-    set_tool, show_notice, sync_shapes_to_timeline, toggle_select_sub_mode,
+    Clipboard, CoalesceKey, FloatingOrigin, NoticeKind, SelectSubMode, StatusToast, Tab, Tool,
+    ToolSettings, UndoEntry, active_scope_layer_id, cancel_active_drag, clear_selection,
+    commit_floating, flush_canvas_before_timeline_op, focus_active_layer_to_shape,
+    insert_and_select_shapes_in_scope, load_shapes_from_timeline, prepare_moved_selection,
+    select_shapes_for_timeline_selection, set_tool, show_notice, sync_shapes_to_timeline,
+    toggle_select_sub_mode,
 };
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes,
@@ -133,6 +134,7 @@ pub(crate) enum Action {
     },
     SelectAll,
     Deselect,
+    CommitFloating,
     MoveSelected {
         delta: KVec2,
     },
@@ -490,6 +492,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             clear_selection(tab);
             ApplyResult::Applied(true)
         }
+        Action::CommitFloating => ApplyResult::Applied(commit_floating(tab)),
         Action::MoveSelected { delta } => {
             ApplyResult::Applied(apply_move_selected(tab, delta, None))
         }
@@ -511,9 +514,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             }
             ApplyResult::Applied(applied)
         }
-        Action::CommitMovedSelection { undo_snapshot } => {
-            ApplyResult::Applied(apply_commit_moved_selection(tab, undo_snapshot, None))
-        }
+        Action::CommitMovedSelection { undo_snapshot } => ApplyResult::Applied(
+            apply_commit_moved_selection(tab, undo_snapshot, Affine::IDENTITY, None),
+        ),
         Action::DeleteSelection => {
             if let Some(snapshot) = prepare_delete_selected_shapes(tab) {
                 commit_canvas_mutation(tab, snapshot);
@@ -682,7 +685,12 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             undo_snapshot,
         } => {
             if changed && !tab.session.selection.is_empty() {
-                ApplyResult::Applied(apply_commit_moved_selection(tab, undo_snapshot, None))
+                ApplyResult::Applied(apply_commit_moved_selection(
+                    tab,
+                    undo_snapshot,
+                    Affine::IDENTITY,
+                    None,
+                ))
             } else {
                 tab.session.restore_drag_snapshot(undo_snapshot);
                 ApplyResult::Applied(false)
@@ -729,7 +737,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 if let Some(l_idx) = tab.doc.root.layer_index_by_id(target_lid) {
                     tab.doc.root.active_layer = l_idx;
                 }
-                tab.session.selection_modified = false;
+                tab.session.floating = None;
                 tab.session.transform_pivot = None;
                 tab.view.inspect_timeline_frame = false;
                 ApplyResult::CreatedId(Some(sym_id))
@@ -992,7 +1000,8 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                     shape.set_color(fill_color);
                 }
             }
-            tab.session.selection_modified = true;
+            tab.session
+                .update_floating_from_current_selection(FloatingOrigin::Move, Affine::IDENTITY);
             commit_canvas_mutation(tab, snapshot);
             return true;
         }
@@ -1109,9 +1118,10 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
 fn apply_commit_moved_selection(
     tab: &mut Tab,
     undo_snapshot: Vec<FillShape>,
+    delta_xform: Affine,
     coalesce: Option<CoalesceKey>,
 ) -> bool {
-    if !prepare_moved_selection(tab, &undo_snapshot) {
+    if !prepare_moved_selection(tab, &undo_snapshot, delta_xform) {
         return false;
     }
     commit_canvas_mutation_with_coalesce(tab, undo_snapshot, coalesce);
@@ -1125,7 +1135,7 @@ fn apply_finish_move_selection_drag(
 ) -> bool {
     let min_move = 1.0 / (tab.view.zoom as f64);
     if total_delta.hypot() > min_move && !tab.session.selection.is_empty() {
-        apply_commit_moved_selection(tab, undo_snapshot, None)
+        apply_commit_moved_selection(tab, undo_snapshot, Affine::translate(total_delta), None)
     } else {
         tab.session.restore_drag_snapshot(undo_snapshot);
         false
@@ -1143,7 +1153,7 @@ fn apply_move_selected(
     }
     let undo_snapshot = tab.session.take_or_clone_unsliced_snapshot();
     tab.session.translate_selected(delta);
-    apply_commit_moved_selection(tab, undo_snapshot, coalesce)
+    apply_commit_moved_selection(tab, undo_snapshot, Affine::translate(delta), coalesce)
 }
 
 fn apply_deform_shape(
@@ -1337,7 +1347,7 @@ fn apply_set_selected_symbol_world_pivot(
     if (new_local_pivot - binding.pivot).hypot() <= 1e-7 {
         return true;
     }
-    if !tab.session.selection_modified {
+    if !tab.session.has_modified_floating() {
         tab.session.restore_unsliced_preserving_selection();
     }
     let undo_snapshot =
@@ -1367,7 +1377,7 @@ fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     flush_transform_pivot_to_symbol(tab);
     let any_transformed = tab.session.transform_selected(affine);
     if any_transformed {
-        apply_commit_moved_selection(tab, undo_snapshot, None);
+        apply_commit_moved_selection(tab, undo_snapshot, affine, None);
     }
     any_transformed
 }
@@ -1434,7 +1444,11 @@ fn apply_paste_clipboard(
         let (pasted_shapes, any_raw) =
             instantiate_relative_shapes_in_scope(tab, &resolved, offset, multi_layer_copy);
 
-        insert_and_select_shapes_in_scope(tab, pasted_shapes, any_raw);
+        insert_and_select_shapes_in_scope(
+            tab,
+            pasted_shapes,
+            any_raw.then_some(FloatingOrigin::Paste),
+        );
         if !matches!(tool.tool, Tool::Select | Tool::Transform) {
             set_tool(tab, tool, Tool::Select);
         }

@@ -151,7 +151,7 @@ pub(crate) fn prepare_place_symbol_instance(
             &tab.session.editing_group_path,
         )]
     };
-    insert_and_select_shapes_in_scope(tab, placed, false);
+    insert_and_select_shapes_in_scope(tab, placed, None);
     Some(snapshot)
 }
 

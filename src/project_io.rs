@@ -6,8 +6,8 @@ use kurbo::{Affine, Point, QuadBez};
 use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{
-    cancel_active_drag, flush_modified_raw_selection_merge, load_shapes_from_timeline,
-    sync_shapes_to_timeline, SelectSubMode, Session, Tab, UndoHistory, View,
+    cancel_active_drag, commit_floating, load_shapes_from_timeline, sync_shapes_to_timeline,
+    Floating, SelectSubMode, Session, Tab, UndoHistory, View,
 };
 use crate::clipboard_ops::max_group_id_in_timeline;
 use crate::symbol::{
@@ -95,9 +95,9 @@ fn prepare_active_tab_for_switch_or_save(tab: &mut Tab, flush_raw_merge: bool) {
     tab.view.pan_last_screen_pos = None;
     tab.history.end_coalesce();
 
-    if flush_raw_merge && tab.session.selection_modified && !tab.session.selection.is_empty() {
+    if flush_raw_merge && tab.session.has_modified_floating() && !tab.session.selection.is_empty() {
         let saved_pivot = tab.session.transform_pivot;
-        flush_modified_raw_selection_merge(tab);
+        commit_floating(tab);
         tab.session.transform_pivot = if tab.session.selection.is_empty() {
             None
         } else {
@@ -1289,16 +1289,17 @@ pub(crate) fn update_window_title(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
 type PreSaveRollbackState = (
     Vec<FillShape>,
     crate::canvas_tool::Selection,
+    Option<Floating>,
     Option<Point>,
     Document,
     Vec<crate::symbol::SymbolEditSession>,
 );
 
 fn restore_pre_save_state(tab: &mut Tab, pre_save_state: Option<PreSaveRollbackState>) {
-    if let Some((shapes, sel, pivot, doc, edit_stack)) = pre_save_state {
+    if let Some((shapes, sel, floating, pivot, doc, edit_stack)) = pre_save_state {
         tab.session.shapes = shapes;
         tab.session.selection = sel;
-        tab.session.selection_modified = true;
+        tab.session.floating = floating;
         tab.session.transform_pivot = pivot;
         tab.doc = doc;
         tab.session.edit_stack = edit_stack;
@@ -1313,10 +1314,11 @@ pub(crate) fn save_project_to_path(
 ) -> Result<(), String> {
     let pre_save_state = {
         let tab = ws.tab();
-        (tab.session.selection_modified && !tab.session.selection.is_empty()).then(|| {
+        (tab.session.has_modified_floating() && !tab.session.selection.is_empty()).then(|| {
             (
                 tab.session.shapes.clone(),
                 tab.session.selection.clone(),
+                tab.session.floating.clone(),
                 tab.session.transform_pivot,
                 tab.doc.clone(),
                 tab.session.edit_stack.clone(),

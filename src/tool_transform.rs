@@ -114,7 +114,7 @@ pub(crate) fn start_transform_drag(
                 .scene()
                 .selected_single_symbol_binding(&tab.session.selection)
                 .is_some()
-                && !tab.session.selection_modified
+                && !tab.session.has_modified_floating()
             {
                 tab.session.restore_unsliced_preserving_selection();
             }

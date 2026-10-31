@@ -3569,11 +3569,11 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     let snap = merge_app.session.snapshot_for_drag();
     merge_app.session.translate_selected(KVec2::new(0.0, -80.0));
     tool_select::commit_moved_selection(&mut merge_app, snap);
-    assert!(merge_app.session.selection_modified);
+    assert!(merge_app.session.has_modified_floating());
 
     crate::project_io::save_project_to_path(&mut merge_app, &tmp_merge_path)
         .expect("選択中の保存に成功すること");
-    assert!(!merge_app.session.selection_modified);
+    assert!(!merge_app.session.has_modified_floating());
     assert!(!merge_app.history.is_dirty());
     let shapes_len_on_save = merge_app.session.shapes.len();
     tool_select::clear_selection(&mut merge_app);
@@ -3697,7 +3697,7 @@ fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
     tool_select::clear_selection(&mut self_union_app);
     assert_eq!(self_union_app.session.shapes.len(), 1);
 
-    // 存在しないディレクトリへの保存（I/O失敗）時のロールバックと、selection_modified からの Undo -> Redo マージ確定
+    // 存在しないディレクトリへの保存（I/O失敗）時のロールバックと、Floating 保持状態からの Undo -> Redo マージ確定
     let mut undo_redo_merge_app = Is2dApp::default();
     undo_redo_merge_app.session.shapes = make_stroke(
         Point::new(100.0, 100.0),
@@ -3718,7 +3718,7 @@ fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
         .session
         .translate_selected(KVec2::new(0.0, -80.0));
     tool_select::commit_moved_selection(&mut undo_redo_merge_app, snap_ur);
-    assert!(undo_redo_merge_app.session.selection_modified);
+    assert!(undo_redo_merge_app.session.has_modified_floating());
 
     let bad_path = std::env::temp_dir()
         .join("is2d_nonexistent_dir_for_test_999999")
@@ -3729,7 +3729,7 @@ fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
         2,
         "保存I/O失敗時はライブキャンバス上の未マージ図形が勝手に結合されないこと"
     );
-    assert!(undo_redo_merge_app.session.selection_modified);
+    assert!(undo_redo_merge_app.session.has_modified_floating());
 
     undo_redo_merge_app.undo();
     assert_eq!(undo_redo_merge_app.session.shapes.len(), 2);
@@ -3737,7 +3737,7 @@ fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
     assert_eq!(
         undo_redo_merge_app.session.shapes.len(),
         1,
-        "selection_modified 状態からの Undo -> Redo 後もマージ描画（Union）が確定維持されること"
+        "Floating 変更済み状態からの Undo -> Redo 後もマージ描画（Union）が確定維持されること"
     );
 }
 
@@ -4220,7 +4220,7 @@ fn test_marquee_shift_deselect_restores_unsliced_for_bucket_fill() {
     let blue = Color32::from_rgb(50, 120, 220);
 
     // マーキースライスで1本のストロークを2つに分割選択したあと、Shift+クリック（toggle_shape_selection）で選択を空にした際、
-    // 即座に unsliced_canvas が復元され、直後のバケツ塗りで古い unsliced_canvas が復活しないこと
+    // 即座に未スライス状態の base が復元され、直後のバケツ塗りで古い未スライス状態が復活しないこと
     app.session.shapes = make_stroke(
         Point::new(100.0, 100.0),
         Point::new(240.0, 100.0),
@@ -5391,14 +5391,14 @@ fn test_shift_partial_deselect_only_merges_deselected_raw_shape() {
         &mut app,
         kurbo::Vec2::new(-100.0, 0.0)
     ));
-    assert!(app.session.selection_modified);
+    assert!(app.session.has_modified_floating());
 
     // Shift+クリック相当の toggle_shape_selection で、上側の赤い図形 (index 2) だけを選択解除し、下側の赤い図形 (index 3) は選択に残す (#7)
     tool_select::toggle_shape_selection(&mut app, 2);
     assert_eq!(app.session.selected_indices().len(), 1);
     assert!(
-        app.session.selection_modified,
-        "一部の図形だけを選択解除した際、残りの選択図形は selection_modified=true のまま維持されること (#7)"
+        app.session.has_modified_floating(),
+        "一部の図形だけを選択解除した際、残りの選択図形は変更済み Floating のまま維持されること (#7)"
     );
 
     // 選択に残した下側の赤い図形をさらに右へ +100px 戻してから全選択解除する
@@ -5527,7 +5527,7 @@ fn test_pivot_commit_restores_unsliced_marquee_snapshot_and_persists() {
     let saved_inst = &app.doc.root.layers[0].keyframes[0].cel.instances[0];
     assert!(
         (saved_inst.binding.world_pivot() - new_world_pivot).hypot() < 1e-4,
-        "ピボット変更後に選択解除しても stale な unsliced_canvas でピボットが上書き消失しないこと (#8)"
+        "ピボット変更後に選択解除しても stale な未スライススナップショットでピボットが上書き消失しないこと (#8)"
     );
 }
 
@@ -6421,7 +6421,7 @@ fn test_onion_skin_per_tab_isolation_and_shift_marquee_no_premature_merge() {
         KVec2::new(-80.0, 0.0)
     ));
     assert_eq!(sel_app.session.shapes.len(), 3);
-    assert!(sel_app.session.selection_modified);
+    assert!(sel_app.session.has_modified_floating());
 
     // Shift＋マーキー (additive = true) で右の青図形を追加選択した際、移動済みの赤図形が早期に Shape 0 と結合されないこと
     select_ops::apply_marquee_selection(
@@ -8315,6 +8315,115 @@ fn test_stage4_drag_2000_shapes_preserves_unmoved_mesh_caches() {
     }
     assert_eq!(unmoved_after_commit, 1999);
 }
+
+#[test]
+fn test_stage5_floating_lifecycle_and_commit_floating() {
+    use crate::canvas_tool::FloatingOrigin;
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let lid = app.doc.root.layers[0].id;
+    let mut base_stroke = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(300.0, 100.0),
+        20.0,
+        Color32::RED,
+    );
+    base_stroke[0].layer_id = lid;
+    app.session.shapes = base_stroke;
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+    assert!(app.session.floating.is_none());
+
+    // 1. マーキー矩形スライスで Floating(Slice, IDENTITY) が生成され、未変更で選択解除すると base がそのまま復元されること
+    run(
+        &mut app,
+        &[Action::SelectMarquee {
+            p0: Point::new(80.0, 70.0),
+            p1: Point::new(200.0, 130.0),
+            additive: false,
+        }],
+    );
+    let fl = app
+        .session
+        .floating
+        .as_ref()
+        .expect("マーキー矩形スライス直後に Floating が生成されること");
+    assert_eq!(fl.origin, FloatingOrigin::Slice);
+    assert_eq!(fl.xform, kurbo::Affine::IDENTITY);
+    assert!(fl.is_unmodified_slice());
+    assert!(!fl.needs_merge_commit());
+    assert_eq!(fl.base.len(), 1);
+    assert_eq!(fl.pieces.len(), 1);
+
+    run(&mut app, &[Action::Deselect]);
+    assert!(app.session.floating.is_none());
+    assert_eq!(
+        app.scene().len(),
+        1,
+        "未変更のマーキースライスは選択解除時に破棄され元の1図形に戻ること"
+    );
+
+    // 2. マーキースライス後に移動すると Floating.xform が更新され、Action::CommitFloating で1回だけ結合確定されること
+    run(
+        &mut app,
+        &[Action::SelectMarquee {
+            p0: Point::new(80.0, 70.0),
+            p1: Point::new(200.0, 130.0),
+            additive: false,
+        }],
+    );
+    run(
+        &mut app,
+        &[Action::MoveSelected {
+            delta: KVec2::new(10.0, 0.0),
+        }],
+    );
+    let fl_moved = app
+        .session
+        .floating
+        .as_ref()
+        .expect("スライス断片の移動後も Floating が保持されること");
+    assert_ne!(fl_moved.xform, kurbo::Affine::IDENTITY);
+    assert!(fl_moved.needs_merge_commit());
+
+    // 重なっている同色断片が Action::CommitFloating で1図形に Union 結合され、Floating が空になること
+    run(&mut app, &[Action::CommitFloating]);
+    assert!(app.session.floating.is_none());
+    assert_eq!(
+        app.scene().len(),
+        1,
+        "CommitFloating により重なった同色断片が base と結合され1図形になること"
+    );
+
+    // 3. ペーストで FloatingOrigin::Paste が生成され、CommitFloating で重なった既存図形と結合されること
+    run(
+        &mut app,
+        &[
+            Action::SelectSingleAt {
+                pt: Point::new(250.0, 100.0),
+            },
+            Action::Copy,
+            Action::Paste { in_place: true },
+        ],
+    );
+    let fl_paste = app
+        .session
+        .floating
+        .as_ref()
+        .expect("ペースト直後に Floating が生成されること");
+    assert_eq!(fl_paste.origin, FloatingOrigin::Paste);
+    assert!(fl_paste.needs_merge_commit());
+    assert_eq!(app.scene().len(), 2);
+
+    run(&mut app, &[Action::CommitFloating]);
+    assert!(app.session.floating.is_none());
+    assert_eq!(
+        app.scene().len(),
+        1,
+        "インプレースペーストした同色図形が CommitFloating で1図形に結合されること"
+    );
+}
+
 
 
 
