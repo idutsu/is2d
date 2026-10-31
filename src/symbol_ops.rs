@@ -179,6 +179,7 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
     };
 
     flush_canvas_before_timeline_op(tab);
+    tab.session.selection.clear();
 
     let mut backdrop_shapes: Vec<FillShape> = tab
         .session
@@ -304,6 +305,7 @@ pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
         return false;
     }
     flush_canvas_before_timeline_op(tab);
+    tab.session.selection.clear();
 
     let Some(mut session) = tab.session.edit_stack.pop() else {
         return false;

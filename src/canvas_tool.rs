@@ -711,16 +711,21 @@ impl Selection {
         if self.is_empty() {
             return;
         }
-        self.shapes.retain(|&id| {
-            shapes
+        if !self.shapes.is_empty() {
+            let valid_shapes: HashSet<ShapeId> = shapes
                 .iter()
-                .any(|s| s.symbol_instance.is_none() && s.shape_id == id)
-        });
-        self.instances.retain(|&gid| {
-            shapes
+                .filter(|s| s.symbol_instance.is_none())
+                .map(|s| s.shape_id)
+                .collect();
+            self.shapes.retain(|id| valid_shapes.contains(id));
+        }
+        if !self.instances.is_empty() {
+            let valid_instances: HashSet<InstanceGid> = shapes
                 .iter()
-                .any(|s| s.symbol_instance.is_some_and(|b| b.instance_gid == gid))
-        });
+                .filter_map(|s| s.symbol_instance.map(|b| b.instance_gid))
+                .collect();
+            self.instances.retain(|gid| valid_instances.contains(gid));
+        }
     }
 }
 
@@ -1084,20 +1089,14 @@ impl Session {
             .extend(self.shapes.iter().map(LoadedShapeSig::from_shape));
     }
 
-    /// 選択状態・部分スライス復元用バックアップ・変形ピボットを一括クリアする
-    pub(crate) fn reset_selection_state(&mut self) {
-        self.selection.clear();
-        self.unsliced_canvas = None;
-        self.selection_modified = false;
-        self.transform_pivot = None;
-    }
-
     /// タイムラインから読み込んだ図形列で `self.shapes` を置き換える（既存シェイプと輪郭・色が一致するものは描画キャッシュを引き継ぐ）
     pub(crate) fn replace_loaded_shapes(&mut self, mut loaded: Vec<FillShape>) {
         self.salvage_caches_into(&mut loaded);
         self.shapes = loaded;
         self.record_loaded_signatures();
-        self.reset_selection_state();
+        self.unsliced_canvas = None;
+        self.selection_modified = false;
+        self.transform_pivot = None;
         self.sanitize_editing_scope();
     }
 
@@ -1791,10 +1790,14 @@ pub(crate) fn toggle_select_sub_mode(
     clear_selection(tab);
 }
 
-/// タイムラインの構造変更前に、未確定のキャンバス選択スライスを確定解除し `tab.session.shapes` を現在フレームのセルへ同期する
+/// タイムラインの構造変更前に、未確定のキャンバス選択スライスや変形結合を確定し `tab.session.shapes` を現在フレームのセルへ同期する
+/// （有効な図形ID・インスタンスIDの選択状態は保持し、消滅したIDのみを除去する）
 pub(crate) fn flush_canvas_before_timeline_op(tab: &mut Tab) {
     cancel_active_drag(tab);
+    let prev_selection = tab.session.selection.clone();
     clear_selection(tab);
+    tab.session.selection = prev_selection;
+    tab.session.selection.retain_existing(&tab.session.shapes);
     sync_shapes_to_timeline(tab);
 }
 

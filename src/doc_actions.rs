@@ -1458,13 +1458,10 @@ fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -
     if targets.is_empty() {
         return false;
     }
-    let prev_selected_ids = tab.session.selected_shape_ids();
     flush_canvas_before_timeline_op(tab);
 
     let (can_toggle, is_currently_tweened) = tab.doc.root.can_toggle_tween_at_current_frame();
     if !can_toggle {
-        tab.session
-            .restore_selection_by_shape_ids(&prev_selected_ids);
         show_notice(
             toast,
             NoticeKind::Warning,
@@ -1550,8 +1547,7 @@ fn apply_set_symbol_playback(
     let inst_gid = binding.instance_gid;
     let sym_id = binding.symbol_id;
     let prev_coalesce = tab.history.last_coalesce_key;
-    clear_selection(tab);
-    sync_shapes_to_timeline(tab);
+    flush_canvas_before_timeline_op(tab);
     tab.history.last_coalesce_key = prev_coalesce;
     push_undo(tab, coalesce);
 
@@ -1583,7 +1579,6 @@ fn apply_set_symbol_playback(
     if updated {
         tab.doc.sync_active_edit(&mut tab.session.edit_stack);
         load_shapes_from_timeline(tab);
-        tab.session.select_symbol_instance_by_gid(inst_gid);
     }
     updated
 }

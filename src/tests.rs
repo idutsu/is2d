@@ -7900,4 +7900,141 @@ fn test_stage01_undo_redo_coalesce_and_save_load_on_cel() {
     assert!((before_save.evaluated_total_area - after_load.evaluated_total_area).abs() < 1e-3);
 }
 
+#[test]
+fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion() {
+    use doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(230, 70, 70);
+
+    // 1. 図形を描画して選択し、移動 → Undo → Redo → 再展開しても ShapeId による選択が保たれること
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(80.0, 110.0), Point::new(140.0, 110.0)],
+                radius: 15.0,
+                color: red,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(110.0, 110.0),
+            },
+        ],
+    );
+    assert_eq!(app.session.selection.shapes.len(), 1);
+    assert!(app.session.selection.instances.is_empty());
+    let shape_id = *app.session.selection.shapes.iter().next().unwrap();
+    assert_eq!(app.session.selected_indices(), vec![0]);
+
+    // 移動してから Undo / Redo しても同じ ShapeId の選択が維持されること
+    run(
+        &mut app,
+        &[Action::NudgeSelection {
+            delta: KVec2::new(30.0, 15.0),
+        }],
+    );
+    assert!(app.session.selection.shapes.contains(&shape_id));
+
+    run(&mut app, &[Action::Undo]);
+    assert!(
+        app.session.selection.shapes.contains(&shape_id),
+        "Undo 後も存在する ShapeId の選択が保たれること"
+    );
+    assert_eq!(app.session.selected_indices(), vec![0]);
+
+    run(&mut app, &[Action::Redo]);
+    assert!(
+        app.session.selection.shapes.contains(&shape_id),
+        "Redo 後も存在する ShapeId の選択が保たれること"
+    );
+    assert_eq!(app.session.selected_indices(), vec![0]);
+
+    // タイムラインからの再展開（load_shapes_from_timeline）やフレーム延長・フレーム移動でも選択が保たれること
+    canvas_tool::load_shapes_from_timeline(&mut app);
+    assert!(app.session.selection.shapes.contains(&shape_id));
+
+    run(
+        &mut app,
+        &[Action::ExtendFrame, Action::ScrubRulerToFrame { frame: 1 }],
+    );
+    assert_eq!(app.doc.root.current_frame, 1);
+    assert!(
+        app.session.selection.shapes.contains(&shape_id),
+        "ホールドフレーム間の移動（ScrubRulerToFrame）後も同じ ShapeId の選択が保たれること"
+    );
+
+    // 2. シンボルインスタンス（InstanceGid）に変換後、再展開で内部 FillShape の shape_id が変わっても
+    //    InstanceGid による選択が Undo / Redo / フレーム移動 / 再展開を通して保たれること
+    run(
+        &mut app,
+        &[
+            Action::ScrubRulerToFrame { frame: 0 },
+            Action::ConvertToSymbol,
+        ],
+    );
+    assert!(app.session.selection.shapes.is_empty());
+    assert_eq!(app.session.selection.instances.len(), 1);
+    let inst_gid = *app.session.selection.instances.iter().next().unwrap();
+    let eval_shape_id_before = app.session.shapes[0].shape_id;
+
+    canvas_tool::load_shapes_from_timeline(&mut app);
+    let eval_shape_id_after = app.session.shapes[0].shape_id;
+    assert_ne!(
+        eval_shape_id_before, eval_shape_id_after,
+        "シンボル再展開のたびに展開後 FillShape の shape_id は新しく割り当てられること"
+    );
+    assert!(
+        app.session.selection.instances.contains(&inst_gid),
+        "展開後 FillShape の shape_id が変わっても InstanceGid による選択が保たれること"
+    );
+    assert_eq!(app.session.selected_indices(), vec![0]);
+
+    run(
+        &mut app,
+        &[Action::NudgeSelection {
+            delta: KVec2::new(20.0, 0.0),
+        }],
+    );
+    run(&mut app, &[Action::Undo]);
+    assert!(
+        app.session.selection.instances.contains(&inst_gid),
+        "シンボル移動の Undo 後も InstanceGid 選択が保たれること"
+    );
+    run(&mut app, &[Action::Redo]);
+    assert!(
+        app.session.selection.instances.contains(&inst_gid),
+        "シンボル移動の Redo 後も InstanceGid 選択が保たれること"
+    );
+
+    // 3. シンボル移動とシンボル変換自体を Undo すると、消滅した InstanceGid は選択から除去され、
+    //    古い選択が残らないこと
+    run(&mut app, &[Action::Undo, Action::Undo]);
+    assert!(
+        !app.session.selection.instances.contains(&inst_gid),
+        "Undo で消滅した InstanceGid が古い選択として残らないこと"
+    );
+
+    // 新規図形を描画して選択した状態から描画自体を Undo すると、消滅した ShapeId が選択から除去されること
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(240.0, 105.0), Point::new(290.0, 105.0)],
+                radius: 15.0,
+                color: red,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(265.0, 105.0),
+            },
+        ],
+    );
+    let transient_shape_id = *app.session.selection.shapes.iter().next().unwrap();
+    run(&mut app, &[Action::Undo]);
+    assert!(
+        !app.session.selection.shapes.contains(&transient_shape_id),
+        "Undo で消滅した ShapeId が古い選択として残らないこと"
+    );
+    assert!(app.session.selection.is_empty());
+}
+
 

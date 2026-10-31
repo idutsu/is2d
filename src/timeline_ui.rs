@@ -2035,6 +2035,7 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
         timeline_ui.stop_playback(tab);
     } else {
         flush_canvas_before_timeline_op(tab);
+        tab.session.selection.clear();
         tab.history.end_coalesce();
         timeline_ui.cancel_drag();
         let last_f = tab.doc.root.total_frames.saturating_sub(1);
