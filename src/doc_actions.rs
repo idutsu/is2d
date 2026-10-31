@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use eframe::egui::{Color32, Vec2};
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
@@ -1583,12 +1585,37 @@ fn apply_set_symbol_playback(
     updated
 }
 
+/// フレーム移動（`prev_frame` -> `next_frame`）時に、同じキーフレームのスパン内に留まるレイヤー上の選択のみを残し、
+/// 別のキーフレームへ跨いだレイヤー上の選択を解除する
+fn retain_selection_on_same_keyframe(tab: &mut Tab, prev_frame: usize, next_frame: usize) {
+    if prev_frame == next_frame || tab.session.selection.is_empty() {
+        return;
+    }
+    let same_kf_layer_ids: HashSet<u64> = tab
+        .doc
+        .root
+        .layers
+        .iter()
+        .filter(|l| {
+            l.visible
+                && !l.locked
+                && l.keyframe_index_at(prev_frame).is_some()
+                && l.keyframe_index_at(prev_frame) == l.keyframe_index_at(next_frame)
+        })
+        .map(|l| l.id)
+        .collect();
+    tab.session.retain_selection_in_layers(&same_kf_layer_ids);
+}
+
 fn apply_switch_to_layer_and_frame(tab: &mut Tab, layer_idx: usize, frame_idx: usize) {
     if tab.doc.root.layers.is_empty() {
         return;
     }
+    let prev_frame = tab.doc.root.current_frame;
     flush_canvas_before_timeline_op(tab);
     tab.doc.root.select_single_cell(layer_idx, frame_idx);
+    let next_frame = tab.doc.root.current_frame;
+    retain_selection_on_same_keyframe(tab, prev_frame, next_frame);
     load_shapes_from_timeline(tab);
     tab.view.inspect_timeline_frame = true;
 }
@@ -1598,9 +1625,11 @@ fn apply_scrub_ruler_to_frame(tab: &mut Tab, frame_idx: usize) {
     if tab.doc.root.current_frame == clamped_frame && tab.doc.root.cell_selection.is_none() {
         return;
     }
+    let prev_frame = tab.doc.root.current_frame;
     flush_canvas_before_timeline_op(tab);
     tab.doc.root.current_frame = clamped_frame;
     tab.doc.root.cell_selection = None;
+    retain_selection_on_same_keyframe(tab, prev_frame, clamped_frame);
     load_shapes_from_timeline(tab);
 }
 

@@ -7949,7 +7949,7 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
     );
     assert_eq!(app.session.selected_indices(), vec![0]);
 
-    // タイムラインからの再展開（load_shapes_from_timeline）やフレーム延長・フレーム移動でも選択が保たれること
+    // タイムラインからの再展開（load_shapes_from_timeline）や同じキーフレーム内のホールドフレーム移動でも選択が保たれること
     canvas_tool::load_shapes_from_timeline(&mut app);
     assert!(app.session.selection.shapes.contains(&shape_id));
 
@@ -7960,15 +7960,63 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
     assert_eq!(app.doc.root.current_frame, 1);
     assert!(
         app.session.selection.shapes.contains(&shape_id),
-        "ホールドフレーム間の移動（ScrubRulerToFrame）後も同じ ShapeId の選択が保たれること"
+        "同じキーフレームのホールドフレーム間の移動（ScrubRulerToFrame）後も同じ ShapeId の選択が保たれること"
+    );
+
+    // F6 で複製キーフレームを作成し、さらに先頭キーフレームを F5 で延長して
+    // Keyframe 0 = frame 0..=1、Keyframe 1 = frame 2 の構成にする。
+    // frame 0 で図形を選び、同じキーフレーム内の frame 1 へ移動したときは選択が保たれ、
+    // 別のキーフレームである frame 2 へ移動したときは（同じ shape_id を共有していても）選択が消えること
+    run(
+        &mut app,
+        &[
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 2,
+            },
+            Action::InsertKeyframe { copy_prev: true },
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 0,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(140.0, 125.0),
+            },
+        ],
+    );
+    assert!(app.session.selection.shapes.contains(&shape_id));
+    run(
+        &mut app,
+        &[Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 1,
+        }],
+    );
+    assert!(
+        app.session.selection.shapes.contains(&shape_id),
+        "同じキーフレーム内のコマ送り移動（frame 0 -> 1）では選択が残ること"
+    );
+    run(
+        &mut app,
+        &[Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 2,
+        }],
+    );
+    assert!(
+        app.session.selection.is_empty(),
+        "F6 で複製した別のキーフレーム（frame 1 -> 2）へ移動したときは選択が解除されること"
     );
 
     // 2. シンボルインスタンス（InstanceGid）に変換後、再展開で内部 FillShape の shape_id が変わっても
-    //    InstanceGid による選択が Undo / Redo / フレーム移動 / 再展開を通して保たれること
+    //    InstanceGid による選択が Undo / Redo / 同一キーフレーム内移動 / 再展開を通して保たれること
     run(
         &mut app,
         &[
             Action::ScrubRulerToFrame { frame: 0 },
+            Action::SelectSingleAt {
+                pt: Point::new(140.0, 125.0),
+            },
             Action::ConvertToSymbol,
         ],
     );

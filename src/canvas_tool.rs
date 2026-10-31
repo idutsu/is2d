@@ -1113,6 +1113,36 @@ impl Session {
         self.transform_pivot = None;
     }
 
+    /// 指定レイヤーID集合 `layer_ids` に属する図形・シンボルインスタンスの選択のみを残し、それ以外を選択から外す
+    pub(crate) fn retain_selection_in_layers(&mut self, layer_ids: &HashSet<u64>) {
+        if self.selection.is_empty() {
+            return;
+        }
+        if !self.selection.shapes.is_empty() {
+            let valid_shapes: HashSet<ShapeId> = self
+                .shapes
+                .iter()
+                .filter(|s| s.symbol_instance.is_none() && layer_ids.contains(&s.layer_id))
+                .map(|s| s.shape_id)
+                .collect();
+            self.selection.shapes.retain(|id| valid_shapes.contains(id));
+        }
+        if !self.selection.instances.is_empty() {
+            let valid_instances: HashSet<InstanceGid> = self
+                .shapes
+                .iter()
+                .filter(|s| layer_ids.contains(&s.layer_id))
+                .filter_map(|s| s.symbol_instance.map(|b| b.instance_gid))
+                .collect();
+            self.selection
+                .instances
+                .retain(|gid| valid_instances.contains(gid));
+        }
+        if self.selection.is_empty() {
+            self.transform_pivot = None;
+        }
+    }
+
     /// `self.shapes` 全体が直近の読み込み・同期時点から一切変更されていないかを判定する（ヒープ確保なし）
     pub(crate) fn is_all_shapes_unchanged(&self) -> bool {
         self.loaded_signatures.len() == self.shapes.len()
