@@ -1,17 +1,17 @@
 use std::collections::HashSet;
 
-use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
+use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
     CanvasState, EditorDoc, HoverTarget, SelectSubMode, cancel_active_drag, clear_selection,
-    commit_moved_selection, focus_active_layer_to_shape, sync_shapes_to_timeline,
+    focus_active_layer_to_shape, prepare_moved_selection, sync_shapes_to_timeline,
     sync_timeline_layer_from_canvas_selection, topmost_layer_id_for_indices,
 };
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
 use crate::vector_boolean::{
     BoolOp, boolean_operation, merge_shapes_into_canvas, slice_shape_with_marquee_rect,
 };
-use crate::vector_engine::{FillShape, make_marquee_rect_shape, rects_overlap};
+use crate::vector_engine::{FillShape, make_marquee_rect_shape, normalize_vec, rects_overlap};
 
 /// 現在の選択図形のうち `keep_indices` のみを選択に残し、選択から外れた変更済み生シェイプのみをキャンバスへ結合・切り抜き確定する
 /// （選択に残った図形は結合せず `selection_modified = true` のまま維持する）
@@ -137,6 +137,7 @@ pub(crate) fn handle_canvas_double_click(doc: &mut EditorDoc, pt: Point) {
 
 /// Shift クリック等で指定シェイプ（またはグループ塊全体）の選択状態をトグルし、変形ピボットをリセットする
 pub(crate) fn toggle_shape_selection(doc: &mut EditorDoc, shape_idx: usize) {
+    doc.history.end_coalesce();
     let unit = doc.canvas.expand_to_group_unit(shape_idx);
     let (sel_mask, _) = doc.canvas.selected_shape_mask();
     if sel_mask.get(shape_idx).copied().unwrap_or(false) {
@@ -180,6 +181,7 @@ pub(crate) fn select_single_shape_at(doc: &mut EditorDoc, pt: Point) -> bool {
 
 /// Adobe Animate 風の矩形選択（Marquee Selection）
 pub(crate) fn apply_marquee_selection(doc: &mut EditorDoc, p0: Point, p1: Point, additive: bool) {
+    doc.history.end_coalesce();
     let min_x = p0.x.min(p1.x);
     let max_x = p0.x.max(p1.x);
     let min_y = p0.y.min(p1.y);
@@ -508,8 +510,166 @@ pub(crate) fn compute_hover_target(
     HoverTarget::None
 }
 
-/// 選択中のオブジェクト（生シェイプ・既存グループ問わず）を新しい1つのグループにまとめる（`Cmd+G` / 無限入れ子対応）
-pub(crate) fn group_selected_shapes(doc: &mut EditorDoc) -> Option<u64> {
+/// 向こう側の輪郭エッジ付近でドロップされた際に確実に貫通して分割されるよう僅かに押し出す。
+pub(crate) fn punch_through_opposite_edge(
+    shape: &FillShape,
+    contour_idx: usize,
+    ignore_segs: &[usize],
+    (anchor_a, anchor_b): (Point, Point),
+    (start_pt, drag_pt): (Point, Point),
+) -> Point {
+    let bbox = shape.bounding_box();
+    let min_dim = bbox.width().min(bbox.height());
+    let chord_len = (anchor_b - anchor_a).hypot();
+    let scale = (min_dim / 16.0).min(chord_len / 24.0).clamp(0.04, 1.0);
+    let min_drag = 6.0 * scale;
+    let min_anchor_dist = 10.0 * scale;
+    let near_thresh = 6.0 * scale;
+    let min_near_anchor = 8.0 * scale;
+    let punch_push = 4.5 * scale;
+
+    let drag_vec = drag_pt - start_pt;
+    if drag_vec.hypot() <= min_drag
+        || (drag_pt - anchor_a).hypot() <= min_anchor_dist
+        || (drag_pt - anchor_b).hypot() <= min_anchor_dist
+    {
+        return drag_pt;
+    }
+
+    let drag_dir = normalize_vec(drag_vec);
+    let mut best_near: Option<(f64, Point)> = None;
+    for (c_idx, c) in shape.contours().enumerate() {
+        for (s_idx, seg) in c.segments.iter().enumerate() {
+            if (c_idx == contour_idx && ignore_segs.contains(&s_idx))
+                || !quad_control_bbox_contains(seg, drag_pt, near_thresh)
+            {
+                continue;
+            }
+            let near = seg.nearest(drag_pt, 0.05 * scale);
+            let d = near.distance_sq.sqrt();
+            if d <= near_thresh {
+                let near_pt = seg.eval(near.t);
+                if (near_pt - anchor_a).hypot() > min_near_anchor
+                    && (near_pt - anchor_b).hypot() > min_near_anchor
+                    && best_near.is_none_or(|(bd, _)| d < bd)
+                {
+                    best_near = Some((d, near_pt));
+                }
+            }
+        }
+    }
+    if let Some((_, near_pt)) = best_near {
+        let punched = near_pt + drag_dir * punch_push;
+        if (punched - start_pt).dot(drag_dir) > (drag_pt - start_pt).dot(drag_dir) {
+            return punched;
+        }
+    }
+    drag_pt
+}
+
+/// エッジつまみ変形（PullEdge）の制御点を計算して反映する（リアルタイムプレビュー用）。
+pub(crate) fn set_pulled_edge(
+    shape: &mut FillShape,
+    (contour_idx, seg_idx): (usize, usize),
+    grab_t: f64,
+    orig_seg: QuadBez,
+    target_pt: Point,
+) {
+    let grab_pos = orig_seg.eval(grab_t);
+    let delta = target_pt - grab_pos;
+    let denom = 2.0 * grab_t * (1.0 - grab_t);
+    let new_p1 = orig_seg.p1 + delta / denom;
+    if let Some(contour) = shape.get_contour_mut(contour_idx) {
+        if seg_idx < contour.segments.len() {
+            contour.segments_mut()[seg_idx].p1 = new_p1;
+        }
+    }
+}
+
+/// エッジつまみ変形（PullEdge）を対向エッジ貫通補正込みで確定適用する。
+pub(crate) fn apply_pull_edge_to_shape(
+    shape: &mut FillShape,
+    (contour_idx, seg_idx): (usize, usize),
+    grab_t: f64,
+    orig_seg: QuadBez,
+    drag_pt: Point,
+) {
+    let grab_pos = orig_seg.eval(grab_t);
+    let effective_pt = punch_through_opposite_edge(
+        shape,
+        contour_idx,
+        &[seg_idx],
+        (orig_seg.p0, orig_seg.p2),
+        (grab_pos, drag_pt),
+    );
+    set_pulled_edge(
+        shape,
+        (contour_idx, seg_idx),
+        grab_t,
+        orig_seg,
+        effective_pt,
+    );
+}
+
+/// 頂点ドラッグ変形（MoveVertex）の頂点と前後制御点を計算して反映する（リアルタイムプレビュー用）。
+pub(crate) fn set_moved_vertex(
+    shape: &mut FillShape,
+    (contour_idx, seg_idx): (usize, usize),
+    orig_vertex: Point,
+    orig_ctrls: (Point, Point),
+    target_pt: Point,
+) {
+    let delta = target_pt - orig_vertex;
+    if let Some(contour) = shape.get_contour_mut(contour_idx) {
+        let n = contour.segments.len();
+        if n > 0 && seg_idx < n {
+            let prev_idx = (seg_idx + n - 1) % n;
+            let segs = contour.segments_mut();
+            segs[prev_idx].p2 = target_pt;
+            segs[seg_idx].p0 = target_pt;
+            segs[prev_idx].p1 = orig_ctrls.0 + delta * 0.5;
+            segs[seg_idx].p1 = orig_ctrls.1 + delta * 0.5;
+        }
+    }
+}
+
+/// 頂点ドラッグ変形（MoveVertex）を対向エッジ貫通補正込みで確定適用する。
+pub(crate) fn apply_move_vertex_to_shape(
+    shape: &mut FillShape,
+    (contour_idx, seg_idx): (usize, usize),
+    orig_vertex: Point,
+    orig_ctrls: (Point, Point),
+    drag_pt: Point,
+) {
+    let Some((prev_idx, prev_p0, curr_p2)) = shape.get_contour(contour_idx).and_then(|c| {
+        let n = c.segments.len();
+        if n == 0 || seg_idx >= n {
+            return None;
+        }
+        let prev_idx = (seg_idx + n - 1) % n;
+        Some((prev_idx, c.segments[prev_idx].p0, c.segments[seg_idx].p2))
+    }) else {
+        return;
+    };
+
+    let effective_pt = punch_through_opposite_edge(
+        shape,
+        contour_idx,
+        &[prev_idx, seg_idx],
+        (prev_p0, curr_p2),
+        (orig_vertex, drag_pt),
+    );
+    set_moved_vertex(
+        shape,
+        (contour_idx, seg_idx),
+        orig_vertex,
+        orig_ctrls,
+        effective_pt,
+    );
+}
+
+/// 選択中のオブジェクト（生シェイプ・既存グループ問わず）を新しい1つのグループにまとめ、`(new_gid, undo_snapshot)` を返す
+pub(crate) fn prepare_group_selected_shapes(doc: &mut EditorDoc) -> Option<(u64, Vec<FillShape>)> {
     cancel_active_drag(doc);
     if doc.canvas.selected_shapes.is_empty() {
         return None;
@@ -539,18 +699,17 @@ pub(crate) fn group_selected_shapes(doc: &mut EditorDoc) -> Option<u64> {
     if let Some(l_idx) = doc.timeline.layer_index_by_id(target_lid) {
         doc.timeline.active_layer = l_idx;
     }
-    commit_moved_selection(doc, snapshot);
+    let _ = prepare_moved_selection(doc, &snapshot);
     doc.canvas.selection_modified = false;
     doc.canvas.transform_pivot = None;
-    Some(new_gid)
+    Some((new_gid, snapshot))
 }
 
-/// 選択中のグループまたはシンボルインスタンスを1段階だけ解除（分離）する（`Cmd+B`）。
-/// 多段入れ子の場合は内側の子グループ構造を維持したまま最外殻のグループのみを外す。
-pub(crate) fn ungroup_selected_shapes(doc: &mut EditorDoc) -> bool {
+/// 選択中のグループまたはシンボルインスタンスを1段階だけ解除（分離）し、変更前スナップショットを返す
+pub(crate) fn prepare_ungroup_selected_shapes(doc: &mut EditorDoc) -> Option<Vec<FillShape>> {
     cancel_active_drag(doc);
     if !doc.canvas.selection_has_group() {
-        return false;
+        return None;
     }
     let snapshot = doc.canvas.take_or_clone_unsliced_snapshot();
 
@@ -609,34 +768,21 @@ pub(crate) fn ungroup_selected_shapes(doc: &mut EditorDoc) -> bool {
         doc.canvas.selection_modified = true;
     }
     doc.canvas.transform_pivot = None;
-    doc.commit_canvas_mutation(snapshot);
-    true
+    Some(snapshot)
 }
 
-/// 選択中のオブジェクトを十字キー等で `delta` だけ移動し、Undo 履歴記録・最前面整列・タイムライン同期を行う
-pub(crate) fn nudge_selected_shapes(doc: &mut EditorDoc, delta: KVec2) -> bool {
-    cancel_active_drag(doc);
-    let (_, any_valid) = doc.canvas.selected_shape_mask();
-    if !any_valid {
-        return false;
-    }
-    let undo_snapshot = doc.canvas.snapshot_for_drag();
-    doc.canvas.translate_selected(delta);
-    commit_moved_selection(doc, undo_snapshot);
-    true
-}
-
-pub(crate) fn delete_selected_shapes(doc: &mut EditorDoc) -> bool {
+/// 選択中のオブジェクトをキャンバスから削除し、変更前スナップショットを返す
+pub(crate) fn prepare_delete_selected_shapes(doc: &mut EditorDoc) -> Option<Vec<FillShape>> {
     cancel_active_drag(doc);
     if doc.canvas.selected_shapes.is_empty() {
-        return false;
+        return None;
     }
     let (is_sel, any_valid) = doc.canvas.selected_shape_mask();
     if !any_valid {
         doc.canvas.selected_shapes.clear();
         doc.canvas.clear_unsliced_snapshot();
         doc.canvas.transform_pivot = None;
-        return false;
+        return None;
     }
 
     let snapshot = doc.canvas.take_or_clone_unsliced_snapshot();
@@ -651,25 +797,23 @@ pub(crate) fn delete_selected_shapes(doc: &mut EditorDoc) -> bool {
     doc.canvas.selection_modified = false;
     doc.canvas.selected_shapes.clear();
     doc.canvas.transform_pivot = None;
-    doc.commit_canvas_mutation(snapshot);
-    true
+    Some(snapshot)
 }
 
-/// 現在の編集スコープ（グループ編集時はそのグループ内、通常時は現在フレームの全編集可能レイヤー）の図形をすべて消去する
-pub(crate) fn clear_active_frame_shapes(doc: &mut EditorDoc) -> bool {
+/// 現在の編集スコープの図形をすべて消去し、変更前スナップショットを返す
+pub(crate) fn prepare_clear_active_frame_shapes(doc: &mut EditorDoc) -> Option<Vec<FillShape>> {
     let has_any_in_scope = doc
         .canvas
         .shapes
         .iter()
         .any(|s| s.is_in_editing_scope(&doc.canvas.editing_group_path));
     if !has_any_in_scope {
-        return false;
+        return None;
     }
     clear_selection(doc);
     let snapshot = doc.canvas.take_or_clone_unsliced_snapshot();
     doc.canvas
         .shapes
         .retain(|s| !s.is_in_editing_scope(&doc.canvas.editing_group_path));
-    doc.commit_canvas_mutation(snapshot);
-    true
+    Some(snapshot)
 }

@@ -1,7 +1,7 @@
 # is2d — 描画・幾何・補間アルゴリズムの数学的根拠
 
 本ドキュメントは、is2d において Adobe Animate（旧 Macromedia Flash）のマージ描画・ベクターブラシ・輪郭粘土変形・クラシックトゥイーン補間を実現している幾何アルゴリズムと数学的根拠をまとめた技術仕様書です。
-（※ 全ファイル・構造体・関数の構成リファレンスは [`src/README.md`](./src/README.md)、操作ガイドは [`DOCUMENT.md`](./DOCUMENT.md) を参照してください。）
+（※ 操作ガイドおよびアーキテクチャ概要は [`DOCUMENT.md`](./DOCUMENT.md) を参照してください。）
 
 ---
 
@@ -177,16 +177,16 @@ Adobe Animate の「マージ描画（Merge Drawing）」では、同色スト�
 ## 5. アルゴリズム 4：インタラクティブ輪郭変形と GPU メッシュ描画
 
 ### 5.1 エッジつまみ変形（`PullEdge`）の逆算制御点更新
-選択ツールで未選択シェイプの曲線エッジ上の点 $G = B(t_g)$（$t_g \in [0.18, 0.82]$）をつかみ、変位ベクトル $\Delta = P_{\text{drag}} - G$ だけドラッグした際、両端アンカー $P_0, P_2$ を固定したまま曲線が新しい通過点 $P_{\text{drag}}$ を通るための新しい制御点 $P_1'$ は次式で一意に求まります（[`apply_pull_edge_to_shape`](./src/tool_select.rs)）。
+選択ツールで未選択シェイプの曲線エッジ上の点 $G = B(t_g)$（$t_g \in [0.18, 0.82]$）をつかみ、変位ベクトル $\Delta = P_{\text{drag}} - G$ だけドラッグした際、両端アンカー $P_0, P_2$ を固定したまま曲線が新しい通過点 $P_{\text{drag}}$ を通るための新しい制御点 $P_1'$ は次式で一意に求まります（[`apply_pull_edge_to_shape`](./src/select_ops.rs)）。
 
 $$B_{\text{new}}(t_g) = (1-t_g)^2 P_0 + 2(1-t_g)t_g P_1' + t_g^2 P_2 = B(t_g) + \Delta \implies P_1' = P_1 + \frac{\Delta}{2 t_g (1 - t_g)}$$
 
 ### 5.2 頂点ドラッグ変形（`MoveVertex`）と反対側エッジ貫通分割
-アンカー頂点 $V = P_{2,i-1} = P_{0,i}$ を変位 $\Delta = P_{\text{drag}} - V$ だけ移動する際は、前後のセグメントの曲率バランスが自然に保たれるよう、隣接する2つの制御点を $\frac{1}{2}\Delta$ ずつ追従移動させます（[`apply_move_vertex_to_shape`](./src/tool_select.rs)）。
+アンカー頂点 $V = P_{2,i-1} = P_{0,i}$ を変位 $\Delta = P_{\text{drag}} - V$ だけ移動する際は、前後のセグメントの曲率バランスが自然に保たれるよう、隣接する2つの制御点を $\frac{1}{2}\Delta$ ずつ追従移動させます（[`apply_move_vertex_to_shape`](./src/select_ops.rs)）。
 
 $$P_{1,i-1}' = P_{1,i-1} + \frac{1}{2}\Delta, \quad P_{1,i}' = P_{1,i} + \frac{1}{2}\Delta$$
 
-また、エッジや頂点を反対側の輪郭線を越えてドラッグ＆ドロップした際には、[`punch_through_opposite_edge`](./src/tool_select.rs) と [`resolve_deformed_shape`](./src/vector_boolean.rs) により、`OverlayFillRule::Positive`（正のワインディング領域のみの抽出）を適用して裏返り（負のワインディング領域）を自動消去し、くびれた図形を2つの独立した `FillShape` へ自然に分割します。
+また、エッジや頂点を反対側の輪郭線を越えてドラッグ＆ドロップした際には、[`punch_through_opposite_edge`](./src/select_ops.rs) と [`resolve_deformed_shape`](./src/vector_boolean.rs) により、`OverlayFillRule::Positive`（正のワインディング領域のみの抽出）を適用して裏返り（負のワインディング領域）を自動消去し、くびれた図形を2つの独立した `FillShape` へ自然に分割します。
 
 ### 5.3 Lyon テッセレーションと高速 Polka-Dot 選択網点メッシュ
 - **曲線テッセレーション（[`tessellate_lyon_path`](./src/vector_engine.rs)）**：
@@ -200,7 +200,7 @@ $$P_{1,i-1}' = P_{1,i-1} + \frac{1}{2}\Delta, \quad P_{1,i}' = P_{1,i} + \frac{1
 
 ## 6. アルゴリズム 5：クラシックトゥイーンの TRS 極分解とカスタムピボット軸アフィン補間
 
-[`interpolate_affine_with_pivot`](./src/symbol.rs) および [`decompose_affine_trs`](./src/symbol.rs) では、2つのキーフレームにおけるシンボルインスタンスの2Dアフィン変換行列 $M_0, M_1$ とローカル基準点（ピボット） $p_0, p_1$ から、補間中もピボット位置やスケールが歪まない Adobe Animate 準拠のアフィン補間を行います。
+[`interpolate_affine_with_pivot`](./src/timeline.rs) および [`decompose_affine_trs`](./src/timeline.rs) では、2つのキーフレームにおけるシンボルインスタンスの2Dアフィン変換行列 $M_0, M_1$ とローカル基準点（ピボット） $p_0, p_1$ から、補間中もピボット位置やスケールが歪まない Adobe Animate 準拠のアフィン補間を行います。
 
 ### 6.1 2Dアフィン行列の QR（回転・スケール・シアー）分解と水平反転の等価表現選択
 2Dアフィン行列 $M = \begin{bmatrix} a & c & t_x \\ b & d & t_y \\ 0 & 0 & 1 \end{bmatrix}$ の $2 \times 2$ 線形部 $L = \begin{bmatrix} a & c \\ b & d \end{bmatrix}$ を、回転角 $\theta = \operatorname{atan2}(b, a)$、X軸スケール $s_x = \sqrt{a^2 + b^2}$、シアー成分 $h$、Y軸符号付きスケール $s_y$ に分解します。
@@ -210,7 +210,7 @@ $$R(\theta) = \begin{bmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\thet
 ここで $R(\theta + \pi) \begin{bmatrix} -s_x & -h \\ 0 & -s_y \end{bmatrix} = R(\theta) \begin{bmatrix} s_x & h \\ 0 & s_y \end{bmatrix}$ という等価表現が存在するため、終了フレームに水平反転（$s_x < 0, s_y > 0$）が含まれる場合、標準分解（$s_x > 0$ 固定）のままでは $\theta_1 = \theta_0 + \pi, s_y < 0$ と解釈され不要な 180° 回転が発生してしまいます。そのため、開始角度 $\theta_0$ との角度差がより小さい方の等価表現 $(\theta_1 + \pi, -s_x, -s_y, -h)$ を自動選択することで、水平反転時は回転ゼロで $s_x$ のみが $+1 \to -1$ へ純粋補間されます。
 
 ### 6.2 回転の向き（`Auto` / `Clockwise` / `CounterClockwise`）に応じた角度差分 $\Delta\theta$
-開始角 $\theta_0$ と終了角 $\theta_1$ の正方向差分 $\Delta_{\text{cw}} = (\theta_1 - \theta_0) \bmod 2\pi \in [0, 2\pi)$ から、設定された [`TweenRotate`](./src/symbol.rs) モードに応じて補間角差分 $\Delta\theta$ を決定します。
+開始角 $\theta_0$ と終了角 $\theta_1$ の正方向差分 $\Delta_{\text{cw}} = (\theta_1 - \theta_0) \bmod 2\pi \in [0, 2\pi)$ から、設定された [`TweenRotate`](./src/timeline.rs) モードに応じて補間角差分 $\Delta\theta$ を決定します。
 
 - **自動・最短角度（`TweenRotate::Auto`）**：
   $$\Delta\theta = \begin{cases} \Delta_{\text{cw}} - 2\pi & (\Delta_{\text{cw}} > \pi) \\ \Delta_{\text{cw}} & (\Delta_{\text{cw}} \le \pi) \end{cases} \in (-\pi, \pi]$$

@@ -492,9 +492,9 @@ Adobe Animate の核となる**「グラフィックシンボル（部品化）�
 - **5層の厳格一方向アーキテクチャ（Layer 5 → Layer 4 → Layer 3 → Layer 2 → Layer 1）**:
   1. **Layer 1 — Geometry 層**: ベジェ曲線・輪郭・AABB・テッセレーション（`vector_engine`）、ブラシアウトライン生成と曲線フィッティング（`vector_stroke`）、ポリゴンブール演算と曲線再構築（`vector_boolean`）。上位層（ドキュメント状態やUI）への依存を一切持たない純粋な幾何計算層。
   2. **Layer 2 — Domain / Model 層**: タイムライン・レイヤー・キーフレーム・セル・トゥイーン補間（`timeline`）およびシンボル定義・入れ子評価・インプレース編集（`symbol`）。Layer 1 のみに依存し、上位層への逆依存を持たないデータモデル層。
-  3. **Layer 3 — Document & Tool Operations 層**: ドキュメント状態 `EditorDoc`・ビューポート・Undo履歴・共通ヘルパー（`canvas_tool`）、シンボル操作（`symbol_ops`）、選択・グループ・重なり順操作（`select_ops`）、クリップボード操作（`clipboard_ops`）、ペイント系ツール（`tool_paint`）、選択・変形ツール（`tool_select`）、自由変形ツール（`tool_transform`）、および `.is2d` プロジェクトファイルのシリアライズ・マルチタブ管理（`project_io`）。
-  4. **Layer 4 — UI Presentation 層**: 下部タイムラインUI・`TimelineAction`（`timeline_ui`）および最上部メニューバー・上部ステージバー・左右パネル・`UiAction`（`panels`）。
-  5. **Layer 5 — Application Shell 層**: アプリ統合状態 `Is2dApp`・ショートカット処理・`UiAction` / `TimelineAction` の一元適用（`main`）。下位層から上位層への逆参照ゼロ・層内の相互循環ゼロを厳守する。
+  3. **Layer 3 — Document & Tool Operations 層**: ドキュメント状態 `EditorDoc`・ビューポート・Undo履歴・共通ヘルパー（`canvas_tool`）、ドキュメント変更アクションと一元 `apply`（`doc_actions`）、シンボル操作（`symbol_ops`）、選択・グループ・重なり順操作（`select_ops`）、クリップボード操作（`clipboard_ops`）、ペイント系ツール（`tool_paint`）、選択・変形ツール（`tool_select`）、自由変形ツール（`tool_transform`）、および `.is2d` プロジェクトファイルのシリアライズ・マルチタブ管理（`project_io`）。
+  4. **Layer 4 — UI Presentation 層**: 下部タイムラインUI（`timeline_ui`）および最上部メニューバー・上部ステージバー・左右パネル・`UiAction`（`panels`）。
+  5. **Layer 5 — Application Shell 層**: アプリ統合状態 `Is2dApp`・ショートカット処理・`UiAction` の一元適用（`main`）。下位層から上位層への逆参照ゼロ・層内の相互循環ゼロを厳守する。
 
 ### 8.4 描画・キャッシュ戦略（Rendering & Caching）
 - `egui` は毎フレーム `egui::Mesh` を構築して描画するため、60fps のアニメーション再生やズーム・パン時にベジェ曲線の平坦化や耳刈り法（Earcut）を走らせない **3階層メッシュキャッシュ** が不可欠となる：

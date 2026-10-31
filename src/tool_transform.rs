@@ -2,122 +2,34 @@ use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2}
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    cancel_active_drag, clear_selection, commit_moved_selection, finish_move_selection_drag,
-    ActiveCanvasDrag, CanvasState, EditorDoc, MarqueeDrag, ViewportState,
+    ActiveCanvasDrag, CanvasState, EditorDoc, MarqueeDrag, ViewportState, clear_selection,
 };
 pub(crate) use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
 use crate::clipboard_ops::begin_move_selection_drag;
-use crate::select_ops::{
-    apply_marquee_selection, compute_hover_target, handle_canvas_double_click,
-    retain_selection_and_flush_deselected, select_single_shape_at, toggle_shape_selection,
+use crate::doc_actions::{
+    Action, apply, flush_transform_pivot_to_symbol, update_selected_symbol_world_pivot_live,
 };
-pub(crate) use crate::symbol_ops::selected_single_symbol_info;
+#[cfg(test)]
+pub(crate) use crate::doc_actions::{
+    convert_selection_to_symbol, delete_symbol_from_library, flip_selected_shapes,
+    place_symbol_instance_from_library, rename_symbol_in_library, rotate_selected_shapes,
+    scale_selected_shapes, set_active_keyframe_tween_rotate, set_selected_symbol_playback,
+    set_selected_symbol_world_pivot, timeline_toggle_tween,
+};
+use crate::select_ops::{
+    compute_hover_target, handle_canvas_double_click, retain_selection_and_flush_deselected,
+    select_single_shape_at, toggle_shape_selection,
+};
 #[cfg(test)]
 pub(crate) use crate::symbol_ops::{
-    convert_selection_to_symbol, delete_symbol_from_library, enter_symbol_from_library,
-    enter_symbol_timeline, exit_symbol_timeline, place_symbol_instance_from_library,
-    rename_symbol_in_library, set_active_keyframe_tween_rotate, set_selected_symbol_playback,
-    timeline_toggle_tween,
+    enter_symbol_from_library, enter_symbol_timeline, exit_symbol_timeline,
+    selected_single_symbol_info,
 };
 use crate::vector_engine::{affine_rotate_around, affine_scale_around};
 
 // ============================================================================
 // 自由変形ツール（Tool::Transform / Q キー）の型定義・操作・アフィン変換・変形枠描画
 // ============================================================================
-
-/// 単一のシンボルインスタンスが選択されている場合、ワールド座標 `world_pivot`（`None` なら初期基準点 `(0, 0)`）を
-/// シンボルローカル座標に変換してインスタンスの `binding.pivot` に保存する
-pub(crate) fn set_selected_symbol_world_pivot(
-    doc: &mut EditorDoc,
-    world_pivot: Option<Point>,
-    commit_to_timeline: bool,
-) -> bool {
-    let Some(binding) = doc.canvas.selected_single_symbol_binding() else {
-        return false;
-    };
-    let new_local_pivot = match world_pivot {
-        Some(pt) => {
-            if binding.xform.determinant().abs() <= 1e-9 {
-                return false;
-            }
-            binding.xform.inverse() * pt
-        }
-        None => Point::ZERO,
-    };
-    if (new_local_pivot - binding.pivot).hypot() <= 1e-7 {
-        return true;
-    }
-    if !doc.canvas.selection_modified {
-        doc.canvas.restore_unsliced_preserving_selection();
-    }
-    let undo_snapshot =
-        commit_to_timeline.then(|| doc.canvas.take_or_clone_unsliced_snapshot());
-    doc.canvas
-        .update_symbol_instance_binding(binding.instance_gid, |b| b.pivot = new_local_pivot);
-    if let Some(snapshot) = undo_snapshot {
-        doc.commit_canvas_mutation(snapshot);
-    }
-    true
-}
-
-/// 選択オブジェクトの変形中心（ピボット）を初期位置（選択中央、またはシンボルの基準点 `(0, 0)`）へリセットする
-pub(crate) fn reset_selected_transform_pivot(doc: &mut EditorDoc) -> bool {
-    let mut changed = doc.canvas.transform_pivot.take().is_some();
-    if set_selected_symbol_world_pivot(doc, None, true) {
-        changed = true;
-    }
-    changed
-}
-
-fn flush_transform_pivot_to_symbol(doc: &mut EditorDoc) {
-    if let Some(piv) = doc.canvas.transform_pivot {
-        if set_selected_symbol_world_pivot(doc, Some(piv), false) {
-            doc.canvas.transform_pivot = None;
-        }
-    }
-}
-
-/// 選択中のオブジェクトを現在の基準点（ピボット）中心にアフィン変換する
-pub(crate) fn apply_affine_to_selected(doc: &mut EditorDoc, affine: Affine) -> bool {
-    cancel_active_drag(doc);
-    if doc.canvas.selected_shapes.is_empty() {
-        return false;
-    }
-    let undo_snapshot = doc.canvas.take_or_clone_unsliced_snapshot();
-    flush_transform_pivot_to_symbol(doc);
-    let any_transformed = doc.canvas.transform_selected(affine);
-    if any_transformed {
-        commit_moved_selection(doc, undo_snapshot);
-    }
-    any_transformed
-}
-
-/// 選択中のオブジェクトを現在の基準点（ピボット）中心に `(sx, sy)` 倍に拡大・縮小（または反転）する
-pub(crate) fn scale_selected_shapes(doc: &mut EditorDoc, sx: f64, sy: f64) -> bool {
-    let Some(bbox) = doc.canvas.selection_bounding_box(doc.viewport.zoom) else {
-        return false;
-    };
-    let pivot = doc.canvas.active_transform_pivot(bbox);
-    apply_affine_to_selected(doc, affine_scale_around(pivot, sx, sy))
-}
-
-/// 選択中のオブジェクトを左右反転（`flip_x`）または上下反転（`flip_y`）する
-pub(crate) fn flip_selected_shapes(doc: &mut EditorDoc, flip_x: bool, flip_y: bool) -> bool {
-    scale_selected_shapes(
-        doc,
-        if flip_x { -1.0 } else { 1.0 },
-        if flip_y { -1.0 } else { 1.0 },
-    )
-}
-
-/// 選択中のオブジェクトを現在の基準点（ピボット）中心に `angle_rad` 回転する
-pub(crate) fn rotate_selected_shapes(doc: &mut EditorDoc, angle_rad: f64) -> bool {
-    let Some(bbox) = doc.canvas.selection_bounding_box(doc.viewport.zoom) else {
-        return false;
-    };
-    let pivot = doc.canvas.active_transform_pivot(bbox);
-    apply_affine_to_selected(doc, affine_rotate_around(pivot, angle_rad))
-}
 
 /// 自由変形ツール（`Tool::Transform` / `Q`）のマウス入力処理
 pub(crate) fn handle_transform_tool_input(
@@ -133,7 +45,7 @@ pub(crate) fn handle_transform_tool_input(
     if response.double_clicked_by(PointerButton::Primary) {
         if let Some(pt) = mouse_pt {
             if compute_transform_hover(&doc.canvas, pt, zoom) == TransformHoverTarget::Pivot {
-                reset_selected_transform_pivot(doc);
+                apply(doc, Action::ResetTransformPivot);
             } else {
                 handle_canvas_double_click(doc, pt);
             }
@@ -369,7 +281,7 @@ pub(crate) fn update_transform_drag(
         }
     }
     if let Some(piv_pt) = new_pivot_pt {
-        if set_selected_symbol_world_pivot(doc, Some(piv_pt), false) {
+        if update_selected_symbol_world_pivot_live(doc, Some(piv_pt)) {
             doc.canvas.transform_pivot = None;
         } else {
             doc.canvas.transform_pivot = Some(piv_pt);
@@ -388,53 +300,64 @@ pub(crate) fn finish_transform_drag(doc: &mut EditorDoc, mouse_pt: Option<Point>
     };
     match finished {
         TransformDragState::Move(drag) => {
-            let min_move = 1.0 / (doc.viewport.zoom as f64);
-            let rolled_back =
-                drag.total_delta.hypot() <= min_move || doc.canvas.selected_shapes.is_empty();
-            let orig_ids = drag.orig_selected_ids;
-            finish_move_selection_drag(doc, drag.total_delta, drag.undo_snapshot);
-            if rolled_back && !orig_ids.is_empty() {
-                doc.canvas.restore_selection_by_shape_ids(&orig_ids);
-            }
+            apply(
+                doc,
+                Action::FinishMoveSelectionDrag {
+                    total_delta: drag.total_delta,
+                    undo_snapshot: drag.undo_snapshot,
+                    orig_selected_ids: drag.orig_selected_ids,
+                },
+            );
         }
         TransformDragState::Scale {
             undo_snapshot,
             changed,
             ..
         } => {
-            if changed && !doc.canvas.selected_shapes.is_empty() {
-                commit_moved_selection(doc, undo_snapshot);
-            } else {
-                doc.canvas.restore_drag_snapshot(undo_snapshot);
-            }
+            apply(
+                doc,
+                Action::CommitTransformDrag {
+                    changed,
+                    undo_snapshot,
+                },
+            );
         }
         TransformDragState::Rotate {
             current_angle,
             undo_snapshot,
             ..
         } => {
-            if current_angle.abs() > 0.002 && !doc.canvas.selected_shapes.is_empty() {
-                commit_moved_selection(doc, undo_snapshot);
-            } else {
-                doc.canvas.restore_drag_snapshot(undo_snapshot);
-            }
+            apply(
+                doc,
+                Action::CommitTransformDrag {
+                    changed: current_angle.abs() > 0.002,
+                    undo_snapshot,
+                },
+            );
         }
         TransformDragState::MarqueeSelect(m) => {
             let end_pos = mouse_pt.unwrap_or(m.current_pos);
-            apply_marquee_selection(doc, m.start_pos, end_pos, m.additive);
+            apply(
+                doc,
+                Action::SelectMarquee {
+                    p0: m.start_pos,
+                    p1: end_pos,
+                    additive: m.additive,
+                },
+            );
         }
         TransformDragState::MovePivot {
             undo_snapshot,
             changed,
             ..
         } => {
-            if changed {
-                if selected_single_symbol_info(doc).is_some() {
-                    doc.commit_canvas_mutation(undo_snapshot);
-                }
-            } else {
-                doc.canvas.restore_drag_snapshot(undo_snapshot);
-            }
+            apply(
+                doc,
+                Action::CommitPivotDrag {
+                    changed,
+                    undo_snapshot,
+                },
+            );
         }
     }
 }

@@ -2,8 +2,8 @@ use eframe::egui::{self, Color32, CursorIcon, Pos2, Stroke, Vec2};
 use kurbo::{Point, Rect as KRect};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, EditorDoc, NoticeKind,
-    SelectDragState, SelectSubMode, Tool, TransformDragState,
+    ActiveCanvasDrag, CoalesceKey, EditorDoc, NoticeKind, SelectDragState, SelectSubMode, Tool,
+    TransformDragState, active_scope_layer_id, draw_registration_cross,
 };
 use crate::project_io::{DocumentTabManager, PendingCloseConfirm};
 use crate::symbol::{SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
@@ -1095,7 +1095,7 @@ fn draw_canvas_tab(doc: &mut EditorDoc, actions: &mut Vec<UiAction>, ui: &mut eg
         if (w_resp.changed() || h_resp.changed()) && next_size != doc.viewport.stage_size {
             actions.push(UiAction::SetStageSize(next_size));
         }
-        if doc.viewport.editing_stage_size
+        if doc.history.last_coalesce_key == Some(CoalesceKey::StageSize)
             && (w_resp.drag_stopped()
                 || w_resp.lost_focus()
                 || h_resp.drag_stopped()
@@ -1267,7 +1267,12 @@ pub(crate) fn draw_selected_symbol_properties(
     ui: &mut egui::Ui,
 ) {
     let Some((binding, sym_name, sym_total_frames)) = selected_single_symbol_info(doc) else {
-        doc.ui.editing_symbol_playback = false;
+        if matches!(
+            doc.history.last_coalesce_key,
+            Some(CoalesceKey::SymbolPlayback(_))
+        ) {
+            doc.history.end_coalesce();
+        }
         return;
     };
 
@@ -1423,8 +1428,13 @@ pub(crate) fn draw_selected_symbol_properties(
         }
     }
 
-    if next_mode != binding.loop_mode || !drag_active {
-        doc.ui.editing_symbol_playback = false;
+    if (next_mode != binding.loop_mode || !drag_active)
+        && matches!(
+            doc.history.last_coalesce_key,
+            Some(CoalesceKey::SymbolPlayback(_))
+        )
+    {
+        doc.history.end_coalesce();
     }
     if next_mode != binding.loop_mode || next_first_1based != current_first_1based {
         actions.push(UiAction::SetSymbolPlayback {

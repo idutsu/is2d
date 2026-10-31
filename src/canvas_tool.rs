@@ -362,8 +362,6 @@ pub(crate) struct ViewportState {
     pub(crate) clip_outside_stage: bool,
     /// 直近フレームの中央キャンバス描画領域（スクリーン座標、「ウィンドウに合わせる」計算用）
     pub(crate) last_canvas_rect: egui::Rect,
-    /// キャンバスタブのステージサイズ `DragValue` をドラッグ・入力中か（連続変更時のUndo重複記録防止用）
-    pub(crate) editing_stage_size: bool,
 }
 
 impl Default for ViewportState {
@@ -378,7 +376,6 @@ impl Default for ViewportState {
                 Pos2::new(52.0, 30.0),
                 Pos2::new(1000.0, 590.0),
             ),
-            editing_stage_size: false,
         }
     }
 }
@@ -1247,6 +1244,17 @@ impl UndoEntry {
     }
 }
 
+/// 連続操作（ドラッグ・キーリピート・連続タイピング）を1つの Undo エントリに合流させる識別キー
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CoalesceKey {
+    StageSize,
+    TotalFrames,
+    Fps,
+    SymbolPlayback(u64),
+    RenameSymbol(u64),
+    NudgeSelection,
+}
+
 /// Undo / Redo スナップショット履歴および保存時点のドキュメント世代IDを管理する構造体
 pub(crate) struct UndoHistory {
     pub(crate) undo_stack: VecDeque<UndoEntry>,
@@ -1257,6 +1265,8 @@ pub(crate) struct UndoHistory {
     pub(crate) saved_commit_id: Option<u64>,
     /// 次に発行する新しい状態世代ID（単調増加）
     pub(crate) next_commit_id: u64,
+    /// 直前の変更操作の `CoalesceKey`（同一キーが連続した場合は新規 Undo エントリを積まずに合流する）
+    pub(crate) last_coalesce_key: Option<CoalesceKey>,
 }
 
 impl Default for UndoHistory {
@@ -1267,11 +1277,18 @@ impl Default for UndoHistory {
             current_commit_id: 0,
             saved_commit_id: Some(0),
             next_commit_id: 1,
+            last_coalesce_key: None,
         }
     }
 }
 
 impl UndoHistory {
+    /// 連続変更の Undo 合流セッションを終了する
+    #[inline]
+    pub(crate) fn end_coalesce(&mut self) {
+        self.last_coalesce_key = None;
+    }
+
     /// 現在のドキュメントに未保存の変更があるか（保存時点の世代IDと現在世代IDが異なるか）を返す
     #[inline]
     pub(crate) fn is_dirty(&self) -> bool {
@@ -1360,11 +1377,13 @@ impl UndoHistory {
 
     /// Undo スタック末尾から直前のスナップショットを取り出す
     pub(crate) fn pop_undo(&mut self) -> Option<UndoEntry> {
+        self.last_coalesce_key = None;
         self.undo_stack.pop_back()
     }
 
     /// Redo スタック末尾から次のスナップショットを取り出す
     pub(crate) fn pop_redo(&mut self) -> Option<UndoEntry> {
+        self.last_coalesce_key = None;
         self.redo_stack.pop()
     }
 
@@ -1412,10 +1431,6 @@ pub(crate) struct AppUiState {
     pub(crate) onion_next_frames: usize,
     /// プロパティパネルの下部表示対象（`true`: タイムラインのフレーム/トゥイーン属性、`false`: キャンバス上のシンボル属性）
     pub(crate) inspect_timeline_frame: bool,
-    /// シンボル再生オプションの開始/表示フレーム数値フィールドを連続編集（ドラッグ/入力）中かどうか
-    pub(crate) editing_symbol_playback: bool,
-    /// ライブラリ一覧の `TextEdit` で現在名前編集中のシンボルID（連続タイピング時にUndoを1回だけ記録する用）
-    pub(crate) actively_renaming_symbol: Option<u64>,
     /// 現在開いている・保存先の `.is2d` プロジェクトファイルパス（未保存の新規ドキュメント時は `None`）
     pub(crate) current_file_path: Option<PathBuf>,
     /// 操作トリガーで一定時間表示するトースト通知メッセージ
@@ -1435,8 +1450,6 @@ impl Default for AppUiState {
             onion_prev_frames: 2,
             onion_next_frames: 2,
             inspect_timeline_frame: false,
-            editing_symbol_playback: false,
-            actively_renaming_symbol: None,
             current_file_path: None,
             status_toast: None,
         }
@@ -1500,9 +1513,7 @@ impl EditorDoc {
     }
 
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
-        self.viewport.editing_stage_size = false;
-        self.ui.actively_renaming_symbol = None;
-        self.ui.editing_symbol_playback = false;
+        self.history.last_coalesce_key = None;
         let (prev_lib, prev_stack, prev_rev) = self.history.snapshot_symbols(&self.symbols);
         let prev_entry = UndoEntry {
             timeline: std::mem::replace(&mut self.timeline, entry.timeline),
@@ -1524,50 +1535,6 @@ impl EditorDoc {
         prev_entry
     }
 
-    /// Undo履歴への唯一のエントリ記録メソッド。
-    /// - `pre_canvas == Some(fallback)`: キャンバス変更前のスナップショット（未スライス状態があれば自動優先）からUndoエントリを構築
-    /// - `pre_canvas == None`: 現在の未スライス選択状態を復元してタイムラインへ同期した上で現在のタイムラインからUndoエントリを構築
-    fn record_undo(&mut self, pre_canvas: Option<Vec<FillShape>>) {
-        let tl_snap = if let Some(fallback) = pre_canvas {
-            let mut snapshot = self.canvas.take_unsliced_snapshot().unwrap_or(fallback);
-            let mut tl = self.timeline.clone();
-            tl.normalize_shape_layer_ids(&mut snapshot);
-            tl.write_shapes_to_editable_cels(
-                &snapshot,
-                &self.symbols.library,
-                self.canvas.loaded_signatures(),
-            );
-            tl
-        } else {
-            self.canvas.restore_unsliced_preserving_selection();
-            sync_shapes_to_timeline(self);
-            self.timeline.clone()
-        };
-        let (library, symbol_edit_stack, symbols_revision) =
-            self.history.snapshot_symbols(&self.symbols);
-        let entry = UndoEntry {
-            timeline: tl_snap,
-            library,
-            editing_group_path: self.canvas.editing_group_path.clone(),
-            symbol_edit_stack,
-            stage_size: self.viewport.stage_size,
-            symbols_revision,
-            commit_id: self.history.current_commit_id,
-        };
-        self.history.push(entry);
-    }
-
-    pub(crate) fn push_undo(&mut self) {
-        self.record_undo(None);
-    }
-
-    /// 事前取得済みの変更前スナップショット `pre_mutation_snapshot`（未スライス状態があれば自動優先）を Undo 履歴に記録し、
-    /// 現在の `self.canvas.shapes` をタイムライン `Cel` へ自動同期する単一コミットAPI
-    pub(crate) fn commit_canvas_mutation(&mut self, pre_mutation_snapshot: Vec<FillShape>) {
-        self.record_undo(Some(pre_mutation_snapshot));
-        sync_shapes_to_timeline(self);
-    }
-
     pub(crate) fn undo(&mut self) {
         flush_canvas_before_timeline_op(self);
         if let Some(prev_entry) = self.history.pop_undo() {
@@ -1582,70 +1549,6 @@ impl EditorDoc {
             let curr = self.restore_state_snapshot(next_entry);
             self.history.push_undo_from_redo(curr);
         }
-    }
-
-    /// ステージサイズの連続編集（`DragValue` ドラッグ/入力）中に初回のみ Undo 履歴を記録して更新する
-    pub(crate) fn set_stage_size_interactive(&mut self, next_size: Vec2) {
-        if (next_size.x - self.viewport.stage_size.x).abs() <= f32::EPSILON
-            && (next_size.y - self.viewport.stage_size.y).abs() <= f32::EPSILON
-        {
-            return;
-        }
-        if !self.viewport.editing_stage_size {
-            self.push_undo();
-            self.viewport.editing_stage_size = true;
-        }
-        self.viewport.stage_size = next_size;
-    }
-
-    /// ステージサイズの連続編集終了時に Undo 統合フラグを解除する
-    pub(crate) fn finish_stage_size_edit(&mut self) {
-        self.viewport.editing_stage_size = false;
-    }
-
-    /// 総フレーム数の連続編集（`DragValue` ドラッグ/入力）中に初回のみ Undo 履歴を記録して更新する
-    pub(crate) fn set_total_frames_interactive(
-        &mut self,
-        next_total: usize,
-        editing_total_frames: &mut bool,
-    ) {
-        let next_total = next_total.max(1);
-        if next_total != self.timeline.total_frames {
-            if !*editing_total_frames {
-                flush_canvas_before_timeline_op(self);
-                self.push_undo();
-                *editing_total_frames = true;
-            }
-            self.timeline.resize_total_frames(next_total);
-            self.symbols.sync_active_edit(&self.timeline);
-            load_shapes_from_timeline(self);
-        }
-    }
-
-    /// FPSの連続編集（`DragValue` ドラッグ/入力）中に初回のみ Undo 履歴を記録して更新する
-    pub(crate) fn set_fps_interactive(
-        &mut self,
-        next_fps: u32,
-        is_playing: bool,
-        editing_fps: &mut bool,
-    ) -> bool {
-        let next_fps = next_fps.clamp(1, 60);
-        if next_fps != self.timeline.fps {
-            if !*editing_fps {
-                if !is_playing {
-                    flush_canvas_before_timeline_op(self);
-                }
-                self.push_undo();
-                *editing_fps = true;
-            }
-            self.timeline.fps = next_fps;
-            for sess in &mut self.symbols.edit_stack {
-                sess.parent_timeline.fps = next_fps;
-            }
-            self.symbols.sync_active_edit(&self.timeline);
-            return true;
-        }
-        false
     }
 
     /// 警告トースト通知を表示する
@@ -1769,15 +1672,6 @@ pub(crate) fn flush_canvas_before_timeline_op(doc: &mut EditorDoc) {
     cancel_active_drag(doc);
     clear_selection(doc);
     sync_shapes_to_timeline(doc);
-}
-
-/// 作業キャンバスを確定同期し、Undo履歴を記録した上でタイムライン変更処理 `mutate` を実行し、完了後に `doc.canvas.shapes` を再読み込みする
-fn mutate_timeline_with_undo(doc: &mut EditorDoc, mutate: impl FnOnce(&mut Timeline)) {
-    flush_canvas_before_timeline_op(doc);
-    doc.push_undo();
-    mutate(&mut doc.timeline);
-    doc.symbols.sync_active_edit(&doc.timeline);
-    load_shapes_from_timeline(doc);
 }
 
 /// キャンバスの作業用 `doc.canvas.shapes` を、各図形の `layer_id` ごとに現在フレームの `Cel` に振り分けて書き戻す
@@ -1911,6 +1805,7 @@ pub(crate) fn flush_modified_raw_selection_merge(doc: &mut EditorDoc) {
 }
 
 pub(crate) fn clear_selection(doc: &mut EditorDoc) {
+    doc.history.end_coalesce();
     rollback_shape_drag(doc);
     doc.canvas.restore_unsliced_preserving_selection();
     if doc.canvas.selection_modified && !doc.canvas.selected_shapes.is_empty() {
@@ -1982,7 +1877,8 @@ pub(crate) fn reorder_selected_to_scope_front(doc: &mut EditorDoc) -> bool {
     true
 }
 
-pub(crate) fn commit_moved_selection(doc: &mut EditorDoc, undo_snapshot: Vec<FillShape>) {
+/// 移動・変形された選択シェイプの拡大時キャッシュ再構築とスコープ内最前面整列・`selection_modified = true` のマーキングを行う
+pub(crate) fn prepare_moved_selection(doc: &mut EditorDoc, undo_snapshot: &[FillShape]) -> bool {
     for &sel_idx in &doc.canvas.selected_shapes {
         let Some(shape) = doc.canvas.shapes.get_mut(sel_idx) else {
             continue;
@@ -2013,237 +1909,8 @@ pub(crate) fn commit_moved_selection(doc: &mut EditorDoc, undo_snapshot: Vec<Fil
         }
     }
     if !reorder_selected_to_scope_front(doc) {
-        return;
+        return false;
     }
     doc.canvas.selection_modified = true;
-    doc.commit_canvas_mutation(undo_snapshot);
-}
-
-/// 選択オブジェクトの平行移動ドラッグ終了時の確定・ロールバック共通処理
-pub(crate) fn finish_move_selection_drag(
-    doc: &mut EditorDoc,
-    total_delta: KVec2,
-    undo_snapshot: Vec<FillShape>,
-) {
-    let min_move = 1.0 / (doc.viewport.zoom as f64);
-    if total_delta.hypot() > min_move && !doc.canvas.selected_shapes.is_empty() {
-        commit_moved_selection(doc, undo_snapshot);
-    } else if (total_delta.hypot() > 0.0 || doc.canvas.shapes.len() != undo_snapshot.len())
-        && doc.canvas.restore_drag_snapshot(undo_snapshot)
-    {
-        sync_shapes_to_timeline(doc);
-    }
-}
-
-// ============================================================================
-// 7. タイムライン編集操作（キーフレーム・フレーム・レイヤー・セル選択）
-// ============================================================================
-
-/// タイムラインのセル範囲を選択し、そのレイヤー群の現在フレームにある全図形をキャンバス上で選択状態にする
-pub(crate) fn select_timeline_cells(
-    doc: &mut EditorDoc,
-    start_layer: usize,
-    start_frame: usize,
-    end_layer: usize,
-    end_frame: usize,
-) {
-    if doc.timeline.layers.is_empty() {
-        return;
-    }
-    let max_l = doc.timeline.layers.len() - 1;
-    let (l0, l1) = (start_layer.min(max_l), end_layer.min(max_l));
-    let (f0, f1) = (start_frame, end_frame);
-
-    switch_to_layer_and_frame(doc, l1, f1);
-    doc.timeline.cell_selection = Some(TimelineCellSelection::from_corners(l0, f0, l1, f1));
-    select_shapes_for_timeline_selection(doc);
-}
-
-/// タイムラインのレイヤー個別選択を解除し、指定フレームへ再生ヘッドのみ移動する（ルーラー操作時など）
-pub(crate) fn scrub_ruler_to_frame(doc: &mut EditorDoc, frame_idx: usize) {
-    let clamped_frame = frame_idx.min(doc.timeline.total_frames.saturating_sub(1));
-    if doc.timeline.current_frame == clamped_frame && doc.timeline.cell_selection.is_none() {
-        return;
-    }
-    flush_canvas_before_timeline_op(doc);
-    doc.timeline.current_frame = clamped_frame;
-    doc.timeline.cell_selection = None;
-    load_shapes_from_timeline(doc);
-}
-
-/// 指定したレイヤー・フレームへ切り替える
-pub(crate) fn switch_to_layer_and_frame(doc: &mut EditorDoc, layer_idx: usize, frame_idx: usize) {
-    if doc.timeline.layers.is_empty() {
-        return;
-    }
-    flush_canvas_before_timeline_op(doc);
-    doc.timeline.select_single_cell(layer_idx, frame_idx);
-    load_shapes_from_timeline(doc);
-    doc.ui.inspect_timeline_frame = true;
-}
-
-/// キーフレーム挿入（`F6`: `clone_prev = true` で前の絵を複製 / `F7`: `clone_prev = false` で空白セル作成）
-pub(crate) fn timeline_insert_keyframe(doc: &mut EditorDoc, clone_prev: bool) -> bool {
-    let targets = doc.timeline.target_layers_for_frame_op();
-    if targets.is_empty() {
-        return false;
-    }
-    mutate_timeline_with_undo(doc, |tl| {
-        tl.insert_keyframe_on_targets(&targets, clone_prev);
-    });
-    if clone_prev {
-        select_shapes_for_timeline_selection(doc);
-    }
     true
-}
-
-/// 現在フレームのキーフレームを削除（フレーム0の場合は空白化）する（`Shift+F6`）
-pub(crate) fn timeline_delete_keyframe(doc: &mut EditorDoc) -> bool {
-    let targets = doc.timeline.target_layers_for_frame_op();
-    if targets.is_empty() {
-        return false;
-    }
-    flush_canvas_before_timeline_op(doc);
-    if !doc.timeline.can_delete_keyframe_on_targets(&targets) {
-        return false;
-    }
-    mutate_timeline_with_undo(doc, |tl| {
-        tl.delete_keyframe_on_targets(&targets);
-    });
-    true
-}
-
-/// 現在フレーム（または選択セル範囲の終端フレーム）の保持尺を延長する（`F5`）
-pub(crate) fn timeline_extend_frame(doc: &mut EditorDoc) -> bool {
-    let targets = doc.timeline.target_layers_for_frame_op();
-    if targets.is_empty() {
-        return false;
-    }
-    mutate_timeline_with_undo(doc, |tl| {
-        tl.extend_frame_on_targets(&targets);
-    });
-    true
-}
-
-/// 現在フレームの保持尺を1フレーム短縮する（`Shift+F5`）
-pub(crate) fn timeline_remove_frame(doc: &mut EditorDoc) -> bool {
-    let targets = doc.timeline.target_layers_for_frame_op();
-    if targets.is_empty() {
-        return false;
-    }
-    flush_canvas_before_timeline_op(doc);
-    if !doc.timeline.can_remove_frame_on_targets(&targets) {
-        return false;
-    }
-    let mut any_changed = false;
-    mutate_timeline_with_undo(doc, |tl| {
-        any_changed = tl.remove_frame_on_targets(&targets);
-    });
-    any_changed
-}
-
-/// 選択されたフレーム範囲 `sel` を `(delta_layer, delta_frame)` だけ移動または複製する
-pub(crate) fn timeline_move_or_copy_frames(
-    doc: &mut EditorDoc,
-    sel: TimelineCellSelection,
-    delta_layer: isize,
-    delta_frame: isize,
-    copy_mode: bool,
-) -> bool {
-    let Some((dst_sel, actual_dl)) = doc
-        .timeline
-        .resolve_frame_move_bounds(sel, delta_layer, delta_frame)
-    else {
-        return false;
-    };
-    mutate_timeline_with_undo(doc, |tl| {
-        tl.move_or_copy_frames(sel, dst_sel, actual_dl, copy_mode);
-    });
-    doc.symbols.next_group_id = doc
-        .symbols
-        .next_group_id
-        .max(doc.timeline.max_group_id().saturating_add(1));
-    select_shapes_for_timeline_selection(doc);
-    true
-}
-
-/// 指定レイヤーの表示/非表示（👁）を設定し、Undo記録と作業キャンバス `doc.canvas.shapes` の再同期を行う
-pub(crate) fn set_layer_visible(doc: &mut EditorDoc, layer_idx: usize, visible: bool) {
-    if doc
-        .timeline
-        .layers
-        .get(layer_idx)
-        .is_none_or(|l| l.visible == visible)
-    {
-        return;
-    }
-    mutate_timeline_with_undo(doc, |tl| {
-        if let Some(layer) = tl.layers.get_mut(layer_idx) {
-            layer.visible = visible;
-        }
-    });
-}
-
-/// 指定レイヤーのロック状態（🔒）を設定し、Undo記録と作業キャンバス `doc.canvas.shapes` の再同期を行う
-pub(crate) fn set_layer_locked(doc: &mut EditorDoc, layer_idx: usize, locked: bool) {
-    if doc
-        .timeline
-        .layers
-        .get(layer_idx)
-        .is_none_or(|l| l.locked == locked)
-    {
-        return;
-    }
-    mutate_timeline_with_undo(doc, |tl| {
-        if let Some(layer) = tl.layers.get_mut(layer_idx) {
-            layer.locked = locked;
-        }
-    });
-}
-
-/// 新しいレイヤーを現在のアクティブレイヤーの1つ上（前面）に追加する
-pub(crate) fn timeline_add_layer(doc: &mut EditorDoc) {
-    if doc.timeline.layers.len() >= crate::timeline::MAX_LAYERS_PER_TIMELINE {
-        return;
-    }
-    mutate_timeline_with_undo(doc, Timeline::add_layer_above_active);
-}
-
-/// 現在アクティブなレイヤーを削除する（最低1レイヤーは残す）
-pub(crate) fn timeline_delete_active_layer(doc: &mut EditorDoc) -> bool {
-    if doc.timeline.layers.len() <= 1 {
-        return false;
-    }
-    mutate_timeline_with_undo(doc, Timeline::delete_active_layer);
-    true
-}
-
-/// 指定したレイヤー `from_idx` を `to_idx` の重ね順位置へ移動する（ドラッグ＆ドロップ入れ替え対応）
-pub(crate) fn timeline_reorder_layer(doc: &mut EditorDoc, from_idx: usize, to_idx: usize) -> bool {
-    let len = doc.timeline.layers.len();
-    if from_idx >= len || to_idx >= len || from_idx == to_idx {
-        return false;
-    }
-    mutate_timeline_with_undo(doc, |tl| {
-        tl.reorder_layer(from_idx, to_idx);
-    });
-    true
-}
-
-/// 現在アクティブなレイヤーを1つ上（前面: `up = true`）または1つ下（背面: `up = false`）へ移動する
-pub(crate) fn timeline_move_active_layer(doc: &mut EditorDoc, up: bool) -> bool {
-    let len = doc.timeline.layers.len();
-    let curr = doc.timeline.active_layer;
-    let target = if up {
-        if curr + 1 >= len {
-            return false;
-        }
-        curr + 1
-    } else {
-        if curr == 0 {
-            return false;
-        }
-        curr - 1
-    };
-    timeline_reorder_layer(doc, curr, target)
 }

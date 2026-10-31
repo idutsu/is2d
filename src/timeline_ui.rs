@@ -3,9 +3,11 @@ use std::time::Duration;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::canvas_tool::{
-    flush_canvas_before_timeline_op, load_shapes_from_timeline, EditorDoc,
+    CoalesceKey, EditorDoc, flush_canvas_before_timeline_op, load_shapes_from_timeline,
 };
-pub(crate) use crate::canvas_tool::{
+use crate::doc_actions::{Action, ActionHost, apply};
+#[cfg(test)]
+pub(crate) use crate::doc_actions::{
     scrub_ruler_to_frame, select_timeline_cells, set_layer_locked, set_layer_visible,
     switch_to_layer_and_frame, timeline_add_layer, timeline_delete_active_layer,
     timeline_delete_keyframe, timeline_extend_frame, timeline_insert_keyframe,
@@ -13,8 +15,7 @@ pub(crate) use crate::canvas_tool::{
     timeline_reorder_layer,
 };
 use crate::symbol::TweenState;
-use crate::symbol_ops::timeline_toggle_tween;
-use crate::timeline::{TimelineCellSelection, MAX_TIMELINE_FRAMES};
+use crate::timeline::{MAX_TIMELINE_FRAMES, TimelineCellSelection};
 
 /// タイムライングリッドの1フレームあたりのセル幅（px）
 pub(crate) const CELL_W: f32 = 16.0;
@@ -62,9 +63,7 @@ pub(crate) mod icons {
 // ============================================================================
 
 /// ドキュメント状態（`EditorDoc`）とタイムラインUI状態（`TimelineUiState`）の組を抽象化するトレイト
-pub(crate) trait TimelineHost {
-    fn doc(&self) -> &EditorDoc;
-    fn doc_mut(&mut self) -> &mut EditorDoc;
+pub(crate) trait TimelineHost: ActionHost {
     fn timeline_ui(&self) -> &TimelineUiState;
     fn timeline_ui_mut(&mut self) -> &mut TimelineUiState;
     fn doc_and_timeline_ui_mut(&mut self) -> (&mut EditorDoc, &mut TimelineUiState);
@@ -109,10 +108,6 @@ pub(crate) struct TimelineUiState {
     pub(crate) last_ensured_frame: usize,
     pub(crate) dragging_layer: Option<usize>,
     pub(crate) grid_drag: TimelineGridDrag,
-    /// 総フレーム数 `DragValue` の連続ドラッグ・入力中にUndo履歴が1フレームごとに積まれるのを防ぐフラグ
-    pub(crate) editing_total_frames: bool,
-    /// FPS `DragValue` の連続ドラッグ・入力中にUndo履歴が1フレームごとに積まれるのを防ぐフラグ
-    pub(crate) editing_fps: bool,
     /// 直近に同期したタイムライン識別キー `(doc_id, edit_stack_len, active_symbol_id)`
     last_timeline_key: (u64, usize, Option<u64>),
 }
@@ -128,8 +123,6 @@ impl Default for TimelineUiState {
             last_ensured_frame: 0,
             dragging_layer: None,
             grid_drag: TimelineGridDrag::None,
-            editing_total_frames: false,
-            editing_fps: false,
             last_timeline_key: (1, 0, None),
         }
     }
@@ -139,8 +132,6 @@ impl TimelineUiState {
     pub(crate) fn cancel_drag(&mut self) {
         self.dragging_layer = None;
         self.grid_drag = TimelineGridDrag::None;
-        self.editing_total_frames = false;
-        self.editing_fps = false;
     }
 
     pub(crate) fn reset_for_timeline_switch(&mut self, _current_frame: usize) {
@@ -464,9 +455,7 @@ fn draw_control_bar_layer_buttons(host: &mut impl TimelineHost, ui: &mut egui::U
         .on_hover_text("新しいレイヤーを現在のレイヤーの前面に追加")
         .clicked()
     {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        timeline_add_layer(doc);
+        apply(host, Action::AddLayer);
     }
     if ui
         .add_enabled(
@@ -476,27 +465,21 @@ fn draw_control_bar_layer_buttons(host: &mut impl TimelineHost, ui: &mut egui::U
         .on_hover_text("現在選択中のレイヤーを削除")
         .clicked()
     {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        timeline_delete_active_layer(doc);
+        apply(host, Action::DeleteActiveLayer);
     }
     if ui
         .add_enabled(act + 1 < len, egui::Button::new("▲"))
         .on_hover_text("レイヤーを1つ前面（上）へ移動（ドラッグ＆ドロップでも入れ替え可能）")
         .clicked()
     {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        timeline_move_active_layer(doc, true);
+        apply(host, Action::MoveActiveLayer { up: true });
     }
     if ui
         .add_enabled(act > 0, egui::Button::new("▼"))
         .on_hover_text("レイヤーを1つ背面（下）へ移動（ドラッグ＆ドロップでも入れ替え可能）")
         .clicked()
     {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        timeline_move_active_layer(doc, false);
+        apply(host, Action::MoveActiveLayer { up: false });
     }
 }
 
@@ -507,10 +490,14 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
         .on_hover_text("最初のフレームへ (Home)")
         .clicked()
     {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        let act = doc.timeline.active_layer;
-        switch_to_layer_and_frame(doc, act, 0);
+        let act = host.doc().timeline.active_layer;
+        apply(
+            host,
+            Action::SwitchLayerAndFrame {
+                layer_idx: act,
+                frame: 0,
+            },
+        );
     }
     if ui
         .button(icons::STEP_PREV)
@@ -544,11 +531,15 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
         .on_hover_text("最後のフレームへ (End)")
         .clicked()
     {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        let last = doc.timeline.total_frames.saturating_sub(1);
-        let act = doc.timeline.active_layer;
-        switch_to_layer_and_frame(doc, act, last);
+        let last = host.doc().timeline.total_frames.saturating_sub(1);
+        let act = host.doc().timeline.active_layer;
+        apply(
+            host,
+            Action::SwitchLayerAndFrame {
+                layer_idx: act,
+                frame: last,
+            },
+        );
     }
     let loop_pb = host.timeline_ui().loop_playback;
     if ui
@@ -578,14 +569,14 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
         .on_hover_text(format!("総フレーム数 (1〜{})", MAX_TIMELINE_FRAMES));
     if total_resp.changed() {
         let next_total = (total_f as usize).max(1);
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        doc.set_total_frames_interactive(next_total, &mut timeline_ui.editing_total_frames);
+        apply(host, Action::SetTotalFrames { total: next_total });
     }
-    if total_resp.drag_stopped()
+    if (total_resp.drag_stopped()
         || total_resp.lost_focus()
-        || (!total_resp.dragged() && !total_resp.has_focus())
+        || (!total_resp.dragged() && !total_resp.has_focus()))
+        && host.doc().history.last_coalesce_key == Some(CoalesceKey::TotalFrames)
     {
-        host.timeline_ui_mut().editing_total_frames = false;
+        host.doc_mut().history.end_coalesce();
     }
 
     ui.label("FPS:");
@@ -598,21 +589,17 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
     );
     if fps_resp.changed() {
         let next_fps = fps_val.clamp(1, 60);
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        if doc.set_fps_interactive(
-            next_fps,
-            timeline_ui.is_playing,
-            &mut timeline_ui.editing_fps,
-        ) && timeline_ui.is_playing
+        if apply(host, Action::SetFps { fps: next_fps }).as_bool() && host.timeline_ui().is_playing
         {
-            timeline_ui.last_frame_advance_time = None;
+            host.timeline_ui_mut().last_frame_advance_time = None;
         }
     }
-    if fps_resp.drag_stopped()
+    if (fps_resp.drag_stopped()
         || fps_resp.lost_focus()
-        || (!fps_resp.dragged() && !fps_resp.has_focus())
+        || (!fps_resp.dragged() && !fps_resp.has_focus()))
+        && host.doc().history.last_coalesce_key == Some(CoalesceKey::Fps)
     {
-        host.timeline_ui_mut().editing_fps = false;
+        host.doc_mut().history.end_coalesce();
     }
 }
 
@@ -627,45 +614,35 @@ fn draw_control_bar_keyframe_buttons(host: &mut impl TimelineHost, ui: &mut egui
         .on_hover_text("現在の絵を複製して新しいキーフレームを挿入 (F6)")
         .clicked()
     {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        timeline_insert_keyframe(doc, true);
+        apply(host, Action::InsertKeyframe { copy_prev: true });
     }
     if ui
         .add_enabled(editable, egui::Button::new("○ 空白KF (F7)"))
         .on_hover_text("空の新しいキーフレームを挿入 (F7)")
         .clicked()
     {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        timeline_insert_keyframe(doc, false);
+        apply(host, Action::InsertKeyframe { copy_prev: false });
     }
     if ui
         .add_enabled(editable, egui::Button::new("＋ 延長 (F5)"))
         .on_hover_text("選択レイヤー（未選択時は全レイヤー）のフレーム尺を1コマ延長 (F5)")
         .clicked()
     {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        timeline_extend_frame(doc);
+        apply(host, Action::ExtendFrame);
     }
     if ui
         .add_enabled(can_remove_frame, egui::Button::new("－ 短縮"))
         .on_hover_text("選択レイヤー（未選択時は全レイヤー）のフレームを1コマ削除・短縮 (Shift+F5)")
         .clicked()
     {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        timeline_remove_frame(doc);
+        apply(host, Action::RemoveFrame);
     }
     if ui
         .add_enabled(can_delete_kf, egui::Button::new("× KF削除"))
         .on_hover_text("現在のキーフレームを削除 / クリア (Shift+F6)")
         .clicked()
     {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        timeline_delete_keyframe(doc);
+        apply(host, Action::DeleteKeyframe);
     }
 
     let (can_tween, is_tweened) = host.doc().timeline.can_toggle_tween_at_current_frame();
@@ -699,9 +676,7 @@ fn draw_control_bar_keyframe_buttons(host: &mut impl TimelineHost, ui: &mut egui
         )
         .clicked()
     {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        timeline_toggle_tween(doc);
+        apply(host, Action::ToggleTween);
     }
 }
 
@@ -836,13 +811,9 @@ fn handle_timeline_click_start(
     shift_held: bool,
 ) {
     if layout.add_hdr_rect.contains(pos) {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        timeline_add_layer(doc);
+        apply(host, Action::AddLayer);
     } else if layout.del_hdr_rect.contains(pos) && host.doc().timeline.layers.len() > 1 {
-        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-        timeline_ui.stop_playback(doc);
-        timeline_delete_active_layer(doc);
+        apply(host, Action::DeleteActiveLayer);
     } else if pos.x < layout.grid_left && pos.y >= layout.grid_top {
         let num_layers = host.doc().timeline.layers.len();
         let scroll_y = host.timeline_ui().scroll_y;
@@ -850,14 +821,22 @@ fn handle_timeline_click_start(
             let rel_x = pos.x - layout.panel_rect.left();
             if LAYER_VIS_HIT_RANGE.contains(&rel_x) {
                 let next_vis = !host.doc().timeline.layers[layer_idx].visible;
-                let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-                timeline_ui.stop_playback(doc);
-                set_layer_visible(doc, layer_idx, next_vis);
+                apply(
+                    host,
+                    Action::SetLayerVisible {
+                        layer_idx,
+                        visible: next_vis,
+                    },
+                );
             } else if LAYER_LOCK_HIT_RANGE.contains(&rel_x) {
                 let next_lock = !host.doc().timeline.layers[layer_idx].locked;
-                let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-                timeline_ui.stop_playback(doc);
-                set_layer_locked(doc, layer_idx, next_lock);
+                apply(
+                    host,
+                    Action::SetLayerLocked {
+                        layer_idx,
+                        locked: next_lock,
+                    },
+                );
             } else {
                 let cf = host.doc().timeline.current_frame;
                 let anchor_layer = if shift_held {
@@ -868,9 +847,15 @@ fn handle_timeline_click_start(
                 } else {
                     layer_idx
                 };
-                let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-                timeline_ui.stop_playback(doc);
-                select_timeline_cells(doc, anchor_layer, cf, layer_idx, cf);
+                apply(
+                    host,
+                    Action::SelectTimelineCells {
+                        l0: anchor_layer,
+                        f0: cf,
+                        l1: layer_idx,
+                        f1: cf,
+                    },
+                );
                 if !shift_held {
                     host.timeline_ui_mut().dragging_layer = Some(layer_idx);
                 }
@@ -924,19 +909,13 @@ fn handle_timeline_click_start(
         let col = layout.frame_at_x(pos.x, host.timeline_ui().scroll_x);
         if pos.y < layout.grid_top {
             let target_frame = col.min(host.doc().timeline.total_frames.saturating_sub(1));
-            let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-            timeline_ui.grid_drag = TimelineGridDrag::ScrubRuler;
-            timeline_ui.stop_playback(doc);
-            scrub_ruler_to_frame(doc, target_frame);
+            host.timeline_ui_mut().grid_drag = TimelineGridDrag::ScrubRuler;
+            apply(host, Action::ScrubRulerToFrame { frame: target_frame });
         } else if let Some(target_layer) =
             layout.layer_at_y(pos.y, host.timeline_ui().scroll_y, num_layers)
         {
             let layer_fc = host.doc().timeline.layers[target_layer].frame_count;
             let target_frame = col;
-            {
-                let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-                timeline_ui.stop_playback(doc);
-            }
 
             if shift_held {
                 let anchor_layer = host
@@ -945,12 +924,14 @@ fn handle_timeline_click_start(
                     .active_layer
                     .min(num_layers.saturating_sub(1));
                 let anchor_frame = host.doc().timeline.current_frame;
-                select_timeline_cells(
-                    host.doc_mut(),
-                    anchor_layer,
-                    anchor_frame,
-                    target_layer,
-                    target_frame,
+                apply(
+                    host,
+                    Action::SelectTimelineCells {
+                        l0: anchor_layer,
+                        f0: anchor_frame,
+                        l1: target_layer,
+                        f1: target_frame,
+                    },
                 );
                 host.timeline_ui_mut().grid_drag = TimelineGridDrag::SelectCells {
                     start_layer: anchor_layer,
@@ -976,14 +957,17 @@ fn handle_timeline_click_start(
                     .cell_selection
                     .filter(|s| s.contains(target_layer, col))
                 {
+                    apply(host, Action::EndCoalesce);
                     sel
                 } else {
-                    select_timeline_cells(
-                        host.doc_mut(),
-                        target_layer,
-                        col,
-                        target_layer,
-                        col,
+                    apply(
+                        host,
+                        Action::SelectTimelineCells {
+                            l0: target_layer,
+                            f0: col,
+                            l1: target_layer,
+                            f1: col,
+                        },
                     );
                     TimelineCellSelection::single(target_layer, col)
                 };
@@ -997,12 +981,14 @@ fn handle_timeline_click_start(
                     has_moved: false,
                 };
             } else {
-                select_timeline_cells(
-                    host.doc_mut(),
-                    target_layer,
-                    target_frame,
-                    target_layer,
-                    target_frame,
+                apply(
+                    host,
+                    Action::SelectTimelineCells {
+                        l0: target_layer,
+                        f0: target_frame,
+                        l1: target_layer,
+                        f1: target_frame,
+                    },
                 );
                 host.timeline_ui_mut().grid_drag = TimelineGridDrag::SelectCells {
                     start_layer: target_layer,
@@ -1030,7 +1016,7 @@ fn update_timeline_grid_drag(
                 if let Some(pos) = pointer_pos {
                     let col = layout.frame_at_x(pos.x, host.timeline_ui().scroll_x);
                     let target = col.min(host.doc().timeline.total_frames.saturating_sub(1));
-                    scrub_ruler_to_frame(host.doc_mut(), target);
+                    apply(host, Action::ScrubRulerToFrame { frame: target });
                 }
             } else {
                 host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
@@ -1091,12 +1077,14 @@ fn update_timeline_grid_drag(
                         || doc.timeline.active_layer != l1
                         || doc.timeline.current_frame != target_frame
                     {
-                        select_timeline_cells(
-                            host.doc_mut(),
-                            start_layer,
-                            start_frame,
-                            target_layer,
-                            target_frame,
+                        apply(
+                            host,
+                            Action::SelectTimelineCells {
+                                l0: start_layer,
+                                f0: start_frame,
+                                l1: target_layer,
+                                f1: target_frame,
+                            },
                         );
                     }
                 }
@@ -1137,20 +1125,24 @@ fn update_timeline_grid_drag(
                 if has_moved {
                     let layer_delta = curr_layer as isize - grab_layer as isize;
                     let frame_delta = curr_frame as isize - grab_frame as isize;
-                    timeline_move_or_copy_frames(
-                        host.doc_mut(),
-                        orig_sel,
-                        layer_delta,
-                        frame_delta,
-                        copy_mode || alt_held,
+                    apply(
+                        host,
+                        Action::MoveOrCopyFrames {
+                            sel: orig_sel,
+                            layer_delta,
+                            frame_delta,
+                            copy_mode: copy_mode || alt_held,
+                        },
                     );
                 } else {
-                    select_timeline_cells(
-                        host.doc_mut(),
-                        grab_layer,
-                        grab_frame,
-                        grab_layer,
-                        grab_frame,
+                    apply(
+                        host,
+                        Action::SelectTimelineCells {
+                            l0: grab_layer,
+                            f0: grab_frame,
+                            l1: grab_layer,
+                            f1: grab_frame,
+                        },
                     );
                 }
             }
@@ -1177,7 +1169,7 @@ fn update_timeline_layer_drag(
             return Some((src_idx, dst_idx, pos));
         }
         host.timeline_ui_mut().dragging_layer = None;
-        timeline_reorder_layer(host.doc_mut(), src_idx, dst_idx);
+        apply(host, Action::ReorderLayer { src_idx, dst_idx });
     } else if !primary_down {
         host.timeline_ui_mut().dragging_layer = None;
     }
@@ -2003,17 +1995,24 @@ fn draw_timeline_scrollbars(
 
 /// 前後のフレームへコマ送り移動する（`,` / `.` キーやボタン操作）
 pub(crate) fn step_frame(host: &mut impl TimelineHost, delta: isize) {
-    let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
-    timeline_ui.ensure_timeline_context(doc);
-    timeline_ui.stop_playback(doc);
-    let total = doc.timeline.total_frames.max(1) as isize;
-    let next = if timeline_ui.loop_playback {
-        (doc.timeline.current_frame as isize + delta).rem_euclid(total) as usize
-    } else {
-        (doc.timeline.current_frame as isize + delta).clamp(0, total - 1) as usize
+    let (active_layer, next) = {
+        let (doc, timeline_ui) = host.doc_and_timeline_ui_mut();
+        timeline_ui.ensure_timeline_context(doc);
+        let total = doc.timeline.total_frames.max(1) as isize;
+        let next = if timeline_ui.loop_playback {
+            (doc.timeline.current_frame as isize + delta).rem_euclid(total) as usize
+        } else {
+            (doc.timeline.current_frame as isize + delta).clamp(0, total - 1) as usize
+        };
+        (doc.timeline.active_layer, next)
     };
-    let active_layer = doc.timeline.active_layer;
-    switch_to_layer_and_frame(doc, active_layer, next);
+    apply(
+        host,
+        Action::SwitchLayerAndFrame {
+            layer_idx: active_layer,
+            frame: next,
+        },
+    );
 }
 
 /// 再生 / 一時停止を切り替える（`Enter` キーまたは Play ボタン）
@@ -2024,6 +2023,7 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
         timeline_ui.stop_playback(doc);
     } else {
         flush_canvas_before_timeline_op(doc);
+        doc.history.end_coalesce();
         timeline_ui.cancel_drag();
         let last_f = doc.timeline.total_frames.saturating_sub(1);
         if doc.timeline.current_frame >= doc.timeline.total_frames
@@ -2062,7 +2062,9 @@ pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context)
                 let next = doc.timeline.current_frame + steps;
                 if next >= total - 1 {
                     doc.timeline.current_frame = total - 1;
-                    timeline_ui.stop_playback(doc);
+                    timeline_ui.is_playing = false;
+                    timeline_ui.last_frame_advance_time = None;
+                    load_shapes_from_timeline(doc);
                     return;
                 }
                 doc.timeline.current_frame = next;

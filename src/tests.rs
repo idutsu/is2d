@@ -2303,13 +2303,17 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
         .shapes[0]
         .has_cached_fill_mesh());
     let orig_stage = sym_app.viewport.stage_size;
-    sym_app.push_undo();
+    doc_actions::apply(
+        &mut sym_app,
+        doc_actions::Action::SetStageSize {
+            size: Vec2::new(1920.0, 1080.0),
+        },
+    );
     let last_undo = sym_app.history.undo_stack.back().unwrap();
     assert!(!last_undo.library[0].timeline.layers[0].keyframes[0]
         .cel
         .shapes[0]
         .has_cached_fill_mesh());
-    sym_app.viewport.stage_size = Vec2::new(1920.0, 1080.0);
     sym_app.undo();
     assert_eq!(sym_app.viewport.stage_size, orig_stage);
     sym_app.redo();
@@ -2521,8 +2525,19 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
     );
 
     // Undo 履歴の Arc<Vec<SymbolDef>> および未変更キーフレームの Cel::shapes (Arc<Vec<FillShape>>) が連続操作間でポインタ共有（CoW）されていること
-    grp_sym_app.push_undo();
-    grp_sym_app.push_undo();
+    doc_actions::apply(
+        &mut grp_sym_app,
+        doc_actions::Action::SetStageSize {
+            size: Vec2::new(810.0, 450.0),
+        },
+    );
+    doc_actions::apply(&mut grp_sym_app, doc_actions::Action::EndCoalesce);
+    doc_actions::apply(
+        &mut grp_sym_app,
+        doc_actions::Action::SetStageSize {
+            size: Vec2::new(800.0, 450.0),
+        },
+    );
     let len_stack = grp_sym_app.history.undo_stack.len();
     let e_prev = &grp_sym_app.history.undo_stack[len_stack - 2];
     let e_last = &grp_sym_app.history.undo_stack[len_stack - 1];
@@ -2767,14 +2782,14 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
         .expect("キャッシュ済みの backdrop メッシュが返ること");
     assert!(std::sync::Arc::ptr_eq(&bd_m1, &bd_m2));
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
-    grp_sym_app.push_undo();
-    grp_sym_app.canvas.shapes.extend(make_stroke(
-        Point::new(100.0, 100.0),
-        Point::new(120.0, 100.0),
-        8.0,
-        Color32::RED,
-    ));
-    canvas_tool::sync_shapes_to_timeline(&mut grp_sym_app);
+    doc_actions::apply(
+        &mut grp_sym_app,
+        doc_actions::Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(120.0, 100.0)],
+            radius: 8.0,
+            color: Color32::RED,
+        },
+    );
     assert!(tool_transform::exit_symbol_timeline(&mut grp_sym_app));
     let f1_local_arc_after = &grp_sym_app
         .symbols
@@ -2795,12 +2810,11 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
 fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
     // オニオンスキンやループ再生などのビュー設定（AppUiState / TimelineUiState）を変更した後に Undo / Redo を実行しても巻き戻らないこと
     let mut sort_app = Is2dApp::default();
-    sort_app.push_undo();
+    doc_actions::apply(&mut sort_app, doc_actions::Action::SetFps { fps: 30 });
     sort_app.ui.onion_skin_enabled = true;
     sort_app.ui.onion_prev_frames = 5;
     sort_app.ui.onion_next_frames = 4;
     sort_app.timeline_ui.loop_playback = false;
-    sort_app.timeline.fps = 30;
     sort_app.undo();
     assert!(sort_app.ui.onion_skin_enabled);
     assert_eq!(sort_app.ui.onion_prev_frames, 5);
@@ -3321,14 +3335,14 @@ fn test_untitled_tab_numbering_and_per_tab_wireframe_state() {
 
     // ファイル読込で新規タブが増えても next_untitled_number が無駄に消費されないこと
     let mut loaded_app = Is2dApp::default();
-    loaded_app.push_undo();
-    loaded_app.canvas.shapes = make_stroke(
-        Point::new(50.0, 50.0),
-        Point::new(90.0, 50.0),
-        8.0,
-        Color32::RED,
+    doc_actions::apply(
+        &mut loaded_app,
+        doc_actions::Action::PaintStroke {
+            points: vec![Point::new(50.0, 50.0), Point::new(90.0, 50.0)],
+            radius: 8.0,
+            color: Color32::RED,
+        },
     );
-    canvas_tool::sync_shapes_to_timeline(&mut loaded_app);
     let next_untitled_before = loaded_app.tabs.next_untitled_number;
     crate::project_io::open_project_in_tab(&mut loaded_app, &tmp_path2, None)
         .expect("ファイル読込に成功すること");
@@ -3642,7 +3656,12 @@ fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
     );
     assert!(self_union_app.canvas.has_unsliced_snapshot());
     assert!(self_union_app.canvas.shapes.len() >= 2);
-    self_union_app.push_undo();
+    doc_actions::apply(
+        &mut self_union_app,
+        doc_actions::Action::SetStageSize {
+            size: Vec2::new(810.0, 450.0),
+        },
+    );
     assert_eq!(
         self_union_app.timeline.layers[0].keyframes[0]
             .cel
@@ -4229,9 +4248,9 @@ fn test_symbol_rename_consecutive_keystrokes_grouped_into_single_undo() {
     assert!(tool_transform::rename_symbol_in_library(&mut app, sym_id, "H"));
     app.symbols.ensure_valid_selection();
     assert_eq!(
-        app.ui.actively_renaming_symbol,
-        Some(sym_id),
-        "毎フレームの ensure_valid_selection 呼び出しで actively_renaming_symbol が消去されないこと"
+        app.history.last_coalesce_key,
+        Some(canvas_tool::CoalesceKey::RenameSymbol(sym_id)),
+        "毎フレームの ensure_valid_selection 呼び出しで RenameSymbol の CoalesceKey が消去されないこと"
     );
     assert!(tool_transform::rename_symbol_in_library(&mut app, sym_id, "Hero"));
     assert_eq!(
@@ -4578,8 +4597,14 @@ fn test_compact_json_serialization_nan_rejection_and_undo_history_cap() {
     save_app.viewport.stage_size = Vec2::new(800.0, 450.0);
     let _ = std::fs::remove_file(&tmp_compact);
 
-    for _ in 0..110 {
-        save_app.push_undo();
+    for i in 0..110 {
+        doc_actions::apply(&mut save_app, doc_actions::Action::EndCoalesce);
+        doc_actions::apply(
+            &mut save_app,
+            doc_actions::Action::SetStageSize {
+                size: Vec2::new(800.0 + (i as f32), 450.0),
+            },
+        );
     }
     assert_eq!(
         save_app.history.undo_stack.len(),
@@ -5438,7 +5463,7 @@ fn test_pivot_commit_restores_unsliced_marquee_snapshot_and_persists() {
     app.canvas.shapes.extend(sym_shapes);
     canvas_tool::sync_shapes_to_timeline(&mut app);
     app.canvas.selected_shapes = vec![1];
-    symbol_ops::convert_selection_to_symbol(&mut app).unwrap();
+    doc_actions::convert_selection_to_symbol(&mut app).unwrap();
 
     // 生シェイプの一部とシンボルインスタンス全体をまたぐマーキー選択を行う
     tool_select::apply_marquee_selection(
@@ -5516,8 +5541,8 @@ fn test_move_or_copy_frames_preserves_following_frames_tween_pose_and_remaps_ids
         make_stroke(Point::new(100.0, 100.0), Point::new(140.0, 100.0), 10.0, red);
     canvas_tool::sync_shapes_to_timeline(&mut tween_app);
     tween_app.canvas.selected_shapes = vec![0];
-    symbol_ops::convert_selection_to_symbol(&mut tween_app).unwrap();
-    assert!(symbol_ops::timeline_toggle_tween(&mut tween_app));
+    doc_actions::convert_selection_to_symbol(&mut tween_app).unwrap();
+    assert!(doc_actions::timeline_toggle_tween(&mut tween_app));
     timeline_ui::switch_to_layer_and_frame(&mut tween_app, 0, 4);
     timeline_ui::timeline_insert_keyframe(&mut tween_app, true);
     assert!(tool_select::nudge_selected_shapes(
@@ -5574,13 +5599,14 @@ fn test_unsaved_tab_close_modal_non_blocking_save_discard_and_cancel() {
     let mut app = Is2dApp::default();
 
     // タブ0を編集して Dirty にし、タブ1を追加してタブ0を close_tab(Some(&ctx)) で閉じる (#11)
-    app.canvas.shapes = make_stroke(
-        Point::new(100.0, 100.0),
-        Point::new(160.0, 100.0),
-        10.0,
-        Color32::RED,
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+            radius: 10.0,
+            color: Color32::RED,
+        },
     );
-    app.commit_canvas_mutation(Vec::new());
     assert!(app.history.is_dirty());
 
     project_io::new_project(&mut app, &ctx);
@@ -5987,7 +6013,7 @@ fn test_key_repeat_suppressed_for_enter_onion_tween_and_cmd3() {
         Color32::RED,
     );
     app.canvas.selected_shapes = vec![0];
-    assert!(symbol_ops::convert_selection_to_symbol(&mut app).is_some());
+    assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
     assert!(!app.timeline.layers[0].keyframes[0].tween);
     let _ = ctx.run(
         egui::RawInput {
@@ -6144,7 +6170,7 @@ fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source
     canvas_tool::sync_shapes_to_timeline(&mut app);
 
     let sel_prefix = timeline::TimelineCellSelection::from_corners(0, 0, 0, 2);
-    assert!(canvas_tool::timeline_move_or_copy_frames(
+    assert!(doc_actions::timeline_move_or_copy_frames(
         &mut app,
         sel_prefix,
         0,
@@ -6185,7 +6211,7 @@ fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source
     canvas_tool::sync_shapes_to_timeline(&mut hold_app);
 
     let sel_mid_hold = timeline::TimelineCellSelection::from_corners(0, 2, 0, 3);
-    assert!(canvas_tool::timeline_move_or_copy_frames(
+    assert!(doc_actions::timeline_move_or_copy_frames(
         &mut hold_app,
         sel_mid_hold,
         0,
@@ -6353,7 +6379,7 @@ fn test_onion_skin_per_tab_isolation_and_shift_marquee_no_premature_merge() {
 
     // 中央の赤図形 (idx=1) を選択して左へ -80px 移動し、Shape 0 と重ならせる（まだ選択中なので未結合で3図形のまま）
     sel_app.canvas.selected_shapes = vec![1];
-    assert!(select_ops::nudge_selected_shapes(
+    assert!(doc_actions::nudge_selected_shapes(
         &mut sel_app,
         KVec2::new(-80.0, 0.0)
     ));
@@ -6410,7 +6436,7 @@ fn test_scale_commit_and_repeated_transform_rebuild_mesh_cache() {
         initial_verts,
         "ドラッグ中は頂点バッファを再利用すること"
     );
-    canvas_tool::commit_moved_selection(&mut app, undo_snapshot);
+    doc_actions::commit_moved_selection(&mut app, undo_snapshot);
     let rebuilt_verts = app.canvas.shapes[0].fill_mesh().vertices.len();
     assert!(
         rebuilt_verts > initial_verts,
@@ -6718,13 +6744,14 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
     assert_eq!(app.tabs.tabs.len(), 2);
     app.ui.current_file_path = Some(tmp_save_close.clone());
     app.tabs.tabs[1].file_path = Some(tmp_save_close.clone());
-    app.canvas.shapes = make_stroke(
-        Point::new(100.0, 100.0),
-        Point::new(200.0, 100.0),
-        12.0,
-        Color32::BLUE,
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(200.0, 100.0)],
+            radius: 12.0,
+            color: Color32::BLUE,
+        },
     );
-    app.push_undo();
     assert!(app.history.is_dirty());
     project_io::close_active_tab(&mut app, Some(&ctx));
     assert!(app.tabs.pending_close_confirm.is_some());
@@ -7009,4 +7036,860 @@ fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape
         let _ = std::fs::remove_file(&target_path);
     }
 }
+
+// ============================================================================
+// 段階0・段階1：`Action` 列（`run`）とタイムラインセル検証（`cel_summary`）による安全網テスト
+// ============================================================================
+
+#[derive(Clone, Debug, PartialEq)]
+struct InstanceSummary {
+    instance_gid: u64,
+    symbol_id: u64,
+    xform_coeffs: [f64; 6],
+    pivot: Point,
+    loop_mode: crate::symbol::SymbolLoopMode,
+    first_frame: usize,
+}
+
+#[derive(Clone, Debug)]
+struct CelSummary {
+    exists: bool,
+    is_keyframe_start: bool,
+    tween: bool,
+    tween_rotate: crate::symbol::TweenRotate,
+    shape_count: usize,
+    colors: Vec<Color32>,
+    total_area: f64,
+    bbox: Option<kurbo::Rect>,
+    total_segments: usize,
+    hole_count: usize,
+    group_paths: Vec<Vec<u64>>,
+    instances: Vec<InstanceSummary>,
+    evaluated_shape_count: usize,
+    evaluated_total_area: f64,
+    evaluated_bbox: Option<kurbo::Rect>,
+}
+
+/// `canvas.shapes` を一切参照せず、タイムラインのセル（およびシンボル定義の解決結果）のみから状態を要約する
+fn cel_summary(doc: &canvas_tool::EditorDoc, layer_id: u64, frame: usize) -> CelSummary {
+    let Some(layer_idx) = doc.timeline.layer_index_by_id(layer_id) else {
+        return CelSummary {
+            exists: false,
+            is_keyframe_start: false,
+            tween: false,
+            tween_rotate: crate::symbol::TweenRotate::Auto,
+            shape_count: 0,
+            colors: Vec::new(),
+            total_area: 0.0,
+            bbox: None,
+            total_segments: 0,
+            hole_count: 0,
+            group_paths: Vec::new(),
+            instances: Vec::new(),
+            evaluated_shape_count: 0,
+            evaluated_total_area: 0.0,
+            evaluated_bbox: None,
+        };
+    };
+    let layer = &doc.timeline.layers[layer_idx];
+    let Some(kf_idx) = layer.keyframe_index_at(frame) else {
+        return CelSummary {
+            exists: false,
+            is_keyframe_start: false,
+            tween: false,
+            tween_rotate: crate::symbol::TweenRotate::Auto,
+            shape_count: 0,
+            colors: Vec::new(),
+            total_area: 0.0,
+            bbox: None,
+            total_segments: 0,
+            hole_count: 0,
+            group_paths: Vec::new(),
+            instances: Vec::new(),
+            evaluated_shape_count: 0,
+            evaluated_total_area: 0.0,
+            evaluated_bbox: None,
+        };
+    };
+    let kf = &layer.keyframes[kf_idx];
+    let cel = &kf.cel;
+    let shapes = cel.shapes.as_slice();
+    let colors = shapes.iter().map(|s| s.color).collect();
+    let total_area = shapes
+        .iter()
+        .map(|s| {
+            let ext = s.exterior.signed_area().abs();
+            let holes: f64 = s.holes.iter().map(|h| h.signed_area().abs()).sum();
+            (ext - holes).max(0.0)
+        })
+        .sum();
+    let bbox = (!shapes.is_empty()).then(|| vector_engine::union_bounding_boxes(shapes));
+    let total_segments = shapes
+        .iter()
+        .map(|s| {
+            s.exterior.segments.len()
+                + s.holes.iter().map(|h| h.segments.len()).sum::<usize>()
+        })
+        .sum();
+    let hole_count = shapes.iter().map(|s| s.holes.len()).sum();
+    let group_paths = shapes.iter().map(|s| s.group_path.clone()).collect();
+    let instances = cel
+        .instances
+        .iter()
+        .map(|inst| InstanceSummary {
+            instance_gid: inst.binding.instance_gid,
+            symbol_id: inst.binding.symbol_id,
+            xform_coeffs: inst.binding.xform.as_coeffs(),
+            pivot: inst.binding.pivot,
+            loop_mode: inst.binding.loop_mode,
+            first_frame: inst.binding.first_frame,
+        })
+        .collect();
+
+    let eval_shapes = doc
+        .timeline
+        .evaluate_layer_shapes_at(layer_idx, frame, &doc.symbols.library);
+    let evaluated_shape_count = eval_shapes.len();
+    let evaluated_total_area = eval_shapes
+        .iter()
+        .map(|s| {
+            let ext = s.exterior.signed_area().abs();
+            let holes: f64 = s.holes.iter().map(|h| h.signed_area().abs()).sum();
+            (ext - holes).max(0.0)
+        })
+        .sum();
+    let evaluated_bbox =
+        (!eval_shapes.is_empty()).then(|| vector_engine::union_bounding_boxes(&eval_shapes));
+
+    CelSummary {
+        exists: true,
+        is_keyframe_start: kf.start_frame == frame,
+        tween: kf.tween,
+        tween_rotate: kf.tween_rotate,
+        shape_count: shapes.len(),
+        colors,
+        total_area,
+        bbox,
+        total_segments,
+        hole_count,
+        group_paths,
+        instances,
+        evaluated_shape_count,
+        evaluated_total_area,
+        evaluated_bbox,
+    }
+}
+
+/// `Action` の列を順番に `doc_actions::apply` へ流すテストヘルパー
+fn run(host: &mut impl doc_actions::ActionHost, actions: &[doc_actions::Action]) {
+    for action in actions {
+        doc_actions::apply(host, action.clone());
+    }
+}
+
+#[test]
+fn test_stage01_brush_eraser_bucket_on_cel() {
+    use doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let lid = app.timeline.layers[0].id;
+    let red = Color32::from_rgb(220, 50, 50);
+    let blue = Color32::from_rgb(50, 90, 220);
+    let green = Color32::from_rgb(40, 190, 90);
+
+    // 1. ブラシ：同色ストロークの自動結合（Union）
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(200.0, 100.0)],
+                radius: 14.0,
+                color: red,
+            },
+            Action::PaintStroke {
+                points: vec![Point::new(150.0, 60.0), Point::new(150.0, 140.0)],
+                radius: 14.0,
+                color: red,
+            },
+        ],
+    );
+    let s1 = cel_summary(&app.doc, lid, 0);
+    assert_eq!(s1.shape_count, 1, "同色ストロークが1図形に結合されること");
+    assert_eq!(s1.colors, vec![red]);
+
+    // 2. ブラシ：異色ストロークによる背面図形の切り抜き（Subtraction）
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: vec![Point::new(150.0, 100.0), Point::new(250.0, 100.0)],
+            radius: 12.0,
+            color: blue,
+        }],
+    );
+    let s2 = cel_summary(&app.doc, lid, 0);
+    assert_eq!(s2.shape_count, 2);
+    assert!(s2.colors.contains(&red) && s2.colors.contains(&blue));
+
+    // 3. 消しゴム：中央を縦断して図形を分割消去
+    let area_before_erase = s2.total_area;
+    run(
+        &mut app,
+        &[Action::EraseStroke {
+            points: vec![Point::new(120.0, 50.0), Point::new(120.0, 150.0)],
+            radius: 10.0,
+        }],
+    );
+    let s3 = cel_summary(&app.doc, lid, 0);
+    assert!(
+        s3.total_area < area_before_erase,
+        "消しゴムでセル内図形の面積が減少すること"
+    );
+
+    // 4. バケツ：閉領域（ドーナツ穴）の塗りつぶし＋既存図形の色変更
+    let mut ring_app = Is2dApp::default();
+    let ring_lid = ring_app.timeline.layers[0].id;
+    let ring_pts: Vec<Point> = (0..=32)
+        .map(|i| {
+            let a = (i as f64 / 32.0) * std::f64::consts::TAU;
+            Point::new(300.0 + 50.0 * a.cos(), 220.0 + 50.0 * a.sin())
+        })
+        .collect();
+    run(
+        &mut ring_app,
+        &[
+            Action::PaintStroke {
+                points: ring_pts,
+                radius: 10.0,
+                color: red,
+            },
+            // 中央の穴を青でバケツ塗り
+            Action::BucketFill {
+                pt: Point::new(300.0, 220.0),
+                color: blue,
+            },
+            // 外周リング自体を緑へ色変更
+            Action::BucketFill {
+                pt: Point::new(350.0, 220.0),
+                color: green,
+            },
+        ],
+    );
+    let s_ring = cel_summary(&ring_app.doc, ring_lid, 0);
+    assert!(s_ring.exists);
+    assert_eq!(s_ring.hole_count, 1);
+    assert_eq!(s_ring.shape_count, 2);
+    assert!(s_ring.colors.contains(&blue) && s_ring.colors.contains(&green));
+}
+
+#[test]
+fn test_stage01_move_deselect_merge_and_marquee_slice_restore_on_cel() {
+    use doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let lid = app.timeline.layers[0].id;
+    let red = Color32::from_rgb(220, 50, 50);
+    let blue = Color32::from_rgb(50, 90, 220);
+
+    // 1. 移動と選択解除時の結合（Merge Drawing）
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+                radius: 14.0,
+                color: red,
+            },
+            Action::PaintStroke {
+                points: vec![Point::new(260.0, 100.0), Point::new(320.0, 100.0)],
+                radius: 14.0,
+                color: red,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(290.0, 100.0),
+            },
+            Action::MoveSelected {
+                delta: kurbo::Vec2::new(-140.0, 0.0),
+            },
+            Action::Deselect,
+        ],
+    );
+    let s_merged = cel_summary(&app.doc, lid, 0);
+    assert_eq!(
+        s_merged.shape_count, 1,
+        "移動後に Deselect すると重なった同色生図形が1つに結合されること"
+    );
+
+    // 2. マーキーのスライスと無劣化復元、およびスライス片の移動分割
+    let segs_before_marquee = s_merged.total_segments;
+    let area_before_marquee = s_merged.total_area;
+    run(
+        &mut app,
+        &[
+            Action::SelectMarquee {
+                p0: Point::new(80.0, 70.0),
+                p1: Point::new(140.0, 130.0),
+                additive: false,
+            },
+            Action::Deselect,
+        ],
+    );
+    let s_restored = cel_summary(&app.doc, lid, 0);
+    assert_eq!(s_restored.shape_count, 1);
+    assert_eq!(
+        s_restored.total_segments, segs_before_marquee,
+        "マーキー選択後に移動せず解除した場合は元のセグメント数に無劣化復元されること"
+    );
+    assert!((s_restored.total_area - area_before_marquee).abs() < 1e-3);
+
+    // マーキーで左半分を切り出して下へ移動し選択解除すると2図形に分割確定されること
+    run(
+        &mut app,
+        &[
+            Action::SelectMarquee {
+                p0: Point::new(80.0, 70.0),
+                p1: Point::new(140.0, 130.0),
+                additive: false,
+            },
+            Action::MoveSelected {
+                delta: kurbo::Vec2::new(0.0, 100.0),
+            },
+            Action::Deselect,
+            // 異色図形も重ねて移動→解除で背面を切り抜くこと
+            Action::PaintStroke {
+                points: vec![Point::new(300.0, 100.0), Point::new(340.0, 100.0)],
+                radius: 12.0,
+                color: blue,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(320.0, 100.0),
+            },
+            Action::MoveSelected {
+                delta: kurbo::Vec2::new(-160.0, 0.0),
+            },
+            Action::Deselect,
+        ],
+    );
+    let s_split = cel_summary(&app.doc, lid, 0);
+    assert_eq!(s_split.shape_count, 3);
+}
+
+#[test]
+fn test_stage01_reshape_and_anchor_edit_on_cel() {
+    use doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let lid = app.timeline.layers[0].id;
+    let red = Color32::from_rgb(220, 60, 60);
+
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: vec![Point::new(100.0, 200.0), Point::new(300.0, 200.0)],
+            radius: 20.0,
+            color: red,
+        }],
+    );
+    let s0 = cel_summary(&app.doc, lid, 0);
+    let bbox0 = s0.bbox.unwrap();
+
+    // 1. PullEdgeFromTo（上辺を上へ引き伸ばす）
+    run(
+        &mut app,
+        &[Action::PullEdgeFromTo {
+            from: Point::new(200.0, 180.0),
+            to: Point::new(200.0, 120.0),
+        }],
+    );
+    let s_pulled = cel_summary(&app.doc, lid, 0);
+    assert!(
+        s_pulled.bbox.unwrap().y0 < bbox0.y0 - 20.0,
+        "PullEdgeFromTo により上辺が上方向へ変形していること"
+    );
+
+    // 2. AddAnchor / DeleteAnchor（輪郭上のアンカー追加と削除）
+    let segs_before_add = s_pulled.total_segments;
+    run(
+        &mut app,
+        &[Action::AddAnchor {
+            pt: Point::new(200.0, 220.0),
+        }],
+    );
+    let s_added = cel_summary(&app.doc, lid, 0);
+    assert_eq!(
+        s_added.total_segments,
+        segs_before_add + 1,
+        "AddAnchor で輪郭セグメント数が +1 増えること"
+    );
+
+    // 追加された頂点 (200, 220) を MoveVertexFromTo で下へ移動
+    run(
+        &mut app,
+        &[Action::MoveVertexFromTo {
+            from: Point::new(200.0, 220.0),
+            to: Point::new(200.0, 270.0),
+        }],
+    );
+    let s_moved_v = cel_summary(&app.doc, lid, 0);
+    assert!(
+        s_moved_v.bbox.unwrap().y1 > s_added.bbox.unwrap().y1 + 20.0,
+        "MoveVertexFromTo で頂点が下方向へ移動していること"
+    );
+
+    // DeleteAnchor でその頂点を削除
+    run(
+        &mut app,
+        &[Action::DeleteAnchor {
+            pt: Point::new(200.0, 270.0),
+        }],
+    );
+    let s_deleted = cel_summary(&app.doc, lid, 0);
+    assert_eq!(
+        s_deleted.total_segments, segs_before_add,
+        "DeleteAnchor で輪郭セグメント数が元に戻ること"
+    );
+}
+
+#[test]
+fn test_stage01_group_ungroup_transform_and_clipboard_on_cel() {
+    use doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let lid = app.timeline.layers[0].id;
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 100, 220);
+
+    // 1. グループ化・インプレイス編集・グループ解除
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(180.0, 100.0)],
+                radius: 12.0,
+                color: red,
+            },
+            Action::SelectAll,
+            Action::Group,
+        ],
+    );
+    let s_grp = cel_summary(&app.doc, lid, 0);
+    assert_eq!(s_grp.shape_count, 1);
+    assert_eq!(s_grp.group_paths[0].len(), 1);
+
+    // グループ内へ入って青ストロークを追加し、親階層へ出る
+    run(
+        &mut app,
+        &[
+            Action::EnterGroupAt {
+                pt: Point::new(140.0, 100.0),
+            },
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 130.0), Point::new(180.0, 130.0)],
+                radius: 12.0,
+                color: blue,
+            },
+            Action::ExitGroup,
+        ],
+    );
+    let s_grp2 = cel_summary(&app.doc, lid, 0);
+    assert_eq!(s_grp2.shape_count, 2);
+    assert!(s_grp2.group_paths.iter().all(|gp| gp.len() == 1));
+
+    // 2. 自由変形（拡大・回転・反転）
+    let area_before_scale = s_grp2.total_area;
+    run(
+        &mut app,
+        &[
+            Action::ScaleSelection { sx: 2.0, sy: 1.5 },
+            Action::RotateSelection {
+                angle_rad: std::f64::consts::FRAC_PI_2,
+            },
+            Action::FlipSelection {
+                flip_x: true,
+                flip_y: false,
+            },
+        ],
+    );
+    let s_xform = cel_summary(&app.doc, lid, 0);
+    assert!(
+        (s_xform.total_area - area_before_scale * 3.0).abs() < area_before_scale * 0.15,
+        "2.0x1.5 の拡大により面積が約3倍になること"
+    );
+
+    // グループ解除
+    run(&mut app, &[Action::Ungroup, Action::Deselect]);
+    let s_ungrp = cel_summary(&app.doc, lid, 0);
+    assert!(s_ungrp.group_paths.iter().all(|gp| gp.is_empty()));
+
+    // 3. コピー・ペースト・カット・同じ位置にペースト
+    run(
+        &mut app,
+        &[
+            Action::SelectAll,
+            Action::Copy,
+            Action::Paste { in_place: false },
+            Action::MoveSelected {
+                delta: kurbo::Vec2::new(220.0, 0.0),
+            },
+            Action::Deselect,
+        ],
+    );
+    let s_pasted = cel_summary(&app.doc, lid, 0);
+    assert!(
+        s_pasted.total_area > s_ungrp.total_area * 1.5,
+        "コピー＆ペーストでセル内の図形面積が増加すること"
+    );
+
+    run(
+        &mut app,
+        &[
+            Action::SelectAll,
+            Action::Cut,
+        ],
+    );
+    assert_eq!(cel_summary(&app.doc, lid, 0).shape_count, 0);
+
+    run(
+        &mut app,
+        &[
+            Action::Paste { in_place: true },
+            Action::Deselect,
+        ],
+    );
+    assert!(cel_summary(&app.doc, lid, 0).shape_count >= 2);
+}
+
+#[test]
+fn test_stage01_timeline_f5_f6_f7_and_move_copy_frames_on_cel() {
+    use doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let lid = app.timeline.layers[0].id;
+    let red = Color32::from_rgb(220, 50, 50);
+
+    // Frame 0 に描画 → F5 で延長 → Frame 2 で F6（複製キーフレーム）→ Frame 3 で F7（空白キーフレーム）
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(180.0, 100.0)],
+                radius: 12.0,
+                color: red,
+            },
+            Action::ExtendFrame,
+            Action::ExtendFrame,
+            Action::ExtendFrame,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 2,
+            },
+            Action::InsertKeyframe { copy_prev: true },
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 3,
+            },
+            Action::InsertKeyframe { copy_prev: false },
+        ],
+    );
+    assert!(cel_summary(&app.doc, lid, 0).is_keyframe_start);
+    assert!(!cel_summary(&app.doc, lid, 1).is_keyframe_start);
+    assert_eq!(cel_summary(&app.doc, lid, 1).shape_count, 1);
+    assert!(cel_summary(&app.doc, lid, 2).is_keyframe_start);
+    assert_eq!(cel_summary(&app.doc, lid, 2).shape_count, 1);
+    assert!(cel_summary(&app.doc, lid, 3).is_keyframe_start);
+    assert_eq!(cel_summary(&app.doc, lid, 3).shape_count, 0);
+
+    // コマの複製（Frame 2 を Frame 5 へ複製）と移動
+    let sel_f2 = crate::timeline::TimelineCellSelection::single(0, 2);
+    run(
+        &mut app,
+        &[Action::MoveOrCopyFrames {
+            sel: sel_f2,
+            layer_delta: 0,
+            frame_delta: 3,
+            copy_mode: true,
+        }],
+    );
+    assert!(cel_summary(&app.doc, lid, 5).is_keyframe_start);
+    assert_eq!(cel_summary(&app.doc, lid, 5).shape_count, 1);
+
+    // Shift+F6（キーフレーム削除）と Shift+F5（フレーム削除）
+    run(
+        &mut app,
+        &[
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 2,
+            },
+            Action::DeleteKeyframe,
+        ],
+    );
+    assert!(
+        !cel_summary(&app.doc, lid, 2).is_keyframe_start,
+        "Shift+F6 で Frame 2 のキーフレームが削除され前キーフレームの保持フレームに統合されること"
+    );
+    run(&mut app, &[Action::RemoveFrame]);
+    assert!(
+        cel_summary(&app.doc, lid, 2).is_keyframe_start
+            && cel_summary(&app.doc, lid, 2).shape_count == 0,
+        "Shift+F5 で保持フレームが1コマ短縮され、Frame 3 にあった空白キーフレームが Frame 2 へ前詰めされること"
+    );
+}
+
+#[test]
+fn test_stage01_symbol_inplace_edit_and_classic_tween_on_cel() {
+    use doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let lid = app.timeline.layers[0].id;
+    let red = Color32::from_rgb(220, 50, 50);
+    let blue = Color32::from_rgb(50, 100, 220);
+
+    // 1. 図形を描いてシンボルに変換（F8）し、インプレイス編集で内部に図形を追加して戻る
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+                radius: 12.0,
+                color: red,
+            },
+            Action::SelectAll,
+            Action::ConvertToSymbol,
+        ],
+    );
+    let s0 = cel_summary(&app.doc, lid, 0);
+    assert_eq!(s0.instances.len(), 1);
+    let sym_id = s0.instances[0].symbol_id;
+    let area_before_inplace = s0.evaluated_total_area;
+
+    run(
+        &mut app,
+        &[
+            Action::EnterSymbolFromLibrary { sym_id },
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 140.0), Point::new(160.0, 140.0)],
+                radius: 12.0,
+                color: blue,
+            },
+            Action::ExitSymbolTimeline,
+        ],
+    );
+    let s_after_inplace = cel_summary(&app.doc, lid, 0);
+    assert_eq!(s_after_inplace.evaluated_shape_count, 2);
+    assert!(s_after_inplace.evaluated_total_area > area_before_inplace * 1.5);
+
+    // 2. クラシックトゥイーンの設定と中間フレーム補間
+    run(
+        &mut app,
+        &[
+            Action::ExtendFrame,
+            Action::ExtendFrame,
+            Action::ExtendFrame,
+            Action::ExtendFrame,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 4,
+            },
+            Action::InsertKeyframe { copy_prev: true },
+            Action::SelectAll,
+            Action::MoveSelected {
+                delta: kurbo::Vec2::new(200.0, 0.0),
+            },
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 0,
+            },
+            Action::ToggleTween,
+            Action::SetTweenRotate {
+                rotate: crate::symbol::TweenRotate::Clockwise,
+            },
+        ],
+    );
+    let s_kf0 = cel_summary(&app.doc, lid, 0);
+    let s_mid = cel_summary(&app.doc, lid, 2);
+    let s_kf4 = cel_summary(&app.doc, lid, 4);
+    assert!(s_kf0.tween);
+    assert_eq!(s_kf0.tween_rotate, crate::symbol::TweenRotate::Clockwise);
+    let x0 = s_kf0.evaluated_bbox.unwrap().center().x;
+    let x_mid = s_mid.evaluated_bbox.unwrap().center().x;
+    let x4 = s_kf4.evaluated_bbox.unwrap().center().x;
+    assert!(
+        (x_mid - (x0 + 100.0)).abs() < 2.0 && (x4 - (x0 + 200.0)).abs() < 2.0,
+        "中間フレーム2の補間位置が開始と終了の中央 (x0 + 100) にあること"
+    );
+}
+
+#[test]
+fn test_stage01_undo_redo_coalesce_and_save_load_on_cel() {
+    use doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let lid = app.timeline.layers[0].id;
+    let red = Color32::from_rgb(220, 50, 50);
+
+    // 1. 再生中に Action を流すと自動で stop_playback されること（SetFps 以外）
+    app.timeline_ui.is_playing = true;
+    run(&mut app, &[Action::SetFps { fps: 30 }]);
+    assert!(
+        app.timeline_ui.is_playing,
+        "SetFps は再生を止めずに FPS を変更できること"
+    );
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(180.0, 100.0)],
+            radius: 12.0,
+            color: red,
+        }],
+    );
+    assert!(
+        !app.timeline_ui.is_playing,
+        "描画などの Action 実行時に apply の入口で自動停止すること"
+    );
+
+    // 2. CoalesceKey による連続編集の Undo 1回統合テスト
+    // (a) ステージサイズの連続ドラッグが Undo 1回で初期サイズに戻ること
+    let orig_stage = app.viewport.stage_size;
+    let undo_base = app.history.undo_stack.len();
+    run(
+        &mut app,
+        &[
+            Action::SetStageSize {
+                size: Vec2::new(900.0, 500.0),
+            },
+            Action::SetStageSize {
+                size: Vec2::new(1000.0, 600.0),
+            },
+            Action::SetStageSize {
+                size: Vec2::new(1280.0, 720.0),
+            },
+            Action::EndCoalesce,
+        ],
+    );
+    assert_eq!(app.history.undo_stack.len(), undo_base + 1);
+    run(&mut app, &[Action::Undo]);
+    assert_eq!(app.viewport.stage_size, orig_stage);
+    run(&mut app, &[Action::Redo]);
+    assert_eq!(app.viewport.stage_size, Vec2::new(1280.0, 720.0));
+
+    // (b) 総フレーム数の連続ドラッグが Undo 1回で戻ること
+    let orig_total = app.timeline.total_frames;
+    let undo_before_total = app.history.undo_stack.len();
+    run(
+        &mut app,
+        &[
+            Action::SetTotalFrames { total: 80 },
+            Action::SetTotalFrames { total: 100 },
+            Action::SetTotalFrames { total: 120 },
+            Action::EndCoalesce,
+        ],
+    );
+    assert_eq!(app.history.undo_stack.len(), undo_before_total + 1);
+    run(&mut app, &[Action::Undo]);
+    assert_eq!(app.timeline.total_frames, orig_total);
+
+    // (c) 矢印キーの連続移動 (NudgeSelection) が Undo 1回で戻ること
+    run(
+        &mut app,
+        &[Action::SelectSingleAt {
+            pt: Point::new(140.0, 100.0),
+        }],
+    );
+    let x_before_nudge = cel_summary(&app.doc, lid, 0).bbox.unwrap().center().x;
+    let undo_before_nudge = app.history.undo_stack.len();
+    run(
+        &mut app,
+        &[
+            Action::NudgeSelection {
+                delta: kurbo::Vec2::new(10.0, 0.0),
+            },
+            Action::NudgeSelection {
+                delta: kurbo::Vec2::new(10.0, 0.0),
+            },
+            Action::NudgeSelection {
+                delta: kurbo::Vec2::new(10.0, 0.0),
+            },
+        ],
+    );
+    assert_eq!(app.history.undo_stack.len(), undo_before_nudge + 1);
+    run(&mut app, &[Action::Undo]);
+    let x_after_undo = cel_summary(&app.doc, lid, 0).bbox.unwrap().center().x;
+    assert!((x_after_undo - x_before_nudge).abs() < 1e-3);
+
+    // (d) シンボル再生フレームの連続変更とシンボル名の連続入力がそれぞれ Undo 1回で戻ること
+    run(&mut app, &[Action::SelectAll, Action::ConvertToSymbol]);
+    let sym_id = cel_summary(&app.doc, lid, 0).instances[0].symbol_id;
+    run(
+        &mut app,
+        &[
+            Action::EnterSymbolFromLibrary { sym_id },
+            Action::ExtendFrame,
+            Action::ExtendFrame,
+            Action::ExitSymbolTimeline,
+        ],
+    );
+    let undo_before_pb = app.history.undo_stack.len();
+    run(
+        &mut app,
+        &[
+            Action::SetSymbolPlayback {
+                loop_mode: None,
+                first_frame: Some(1),
+            },
+            Action::SetSymbolPlayback {
+                loop_mode: None,
+                first_frame: Some(2),
+            },
+            Action::EndCoalesce,
+        ],
+    );
+    assert_eq!(app.history.undo_stack.len(), undo_before_pb + 1);
+    assert_eq!(cel_summary(&app.doc, lid, 0).instances[0].first_frame, 2);
+    run(&mut app, &[Action::Undo]);
+    assert_eq!(cel_summary(&app.doc, lid, 0).instances[0].first_frame, 0);
+
+    let orig_sym_name = app.symbols.find_symbol(sym_id).unwrap().name.clone();
+    let undo_before_rename = app.history.undo_stack.len();
+    run(
+        &mut app,
+        &[
+            Action::RenameSymbol {
+                sym_id,
+                new_name: "A".to_string(),
+            },
+            Action::RenameSymbol {
+                sym_id,
+                new_name: "AB".to_string(),
+            },
+            Action::RenameSymbol {
+                sym_id,
+                new_name: "ABC".to_string(),
+            },
+            Action::EndCoalesce,
+        ],
+    );
+    assert_eq!(app.history.undo_stack.len(), undo_before_rename + 1);
+    assert_eq!(app.symbols.find_symbol(sym_id).unwrap().name, "ABC");
+    run(&mut app, &[Action::Undo]);
+    assert_eq!(app.symbols.find_symbol(sym_id).unwrap().name, orig_sym_name);
+
+    // 3. 保存と読み込みの往復検証（cel_summary で一致を確認）
+    let tmp_path = std::env::temp_dir().join(format!(
+        "is2d_stage01_roundtrip_{}.is2d",
+        std::process::id()
+    ));
+    let before_save = cel_summary(&app.doc, lid, 0);
+    project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
+    let mut loaded_app = Is2dApp::default();
+    project_io::open_project_in_tab(&mut loaded_app, &tmp_path, None).unwrap();
+    let _ = std::fs::remove_file(&tmp_path);
+    let after_load = cel_summary(&loaded_app.doc, lid, 0);
+    assert_eq!(before_save.instances, after_load.instances);
+    assert_eq!(
+        before_save.evaluated_shape_count,
+        after_load.evaluated_shape_count
+    );
+    assert!((before_save.evaluated_total_area - after_load.evaluated_total_area).abs() < 1e-3);
+}
+
 

@@ -1,215 +1,37 @@
 use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2};
-use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Vec2 as KVec2};
+use kurbo::{ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
+pub(crate) use crate::canvas_tool::clear_selection;
 use crate::canvas_tool::{
     ActiveCanvasDrag, CanvasState, EditorDoc, HoverTarget, MarqueeDrag, SelectDragState,
-    SelectSubMode, focus_active_layer_to_shape,
+    SelectSubMode,
 };
-pub(crate) use crate::canvas_tool::{clear_selection, finish_move_selection_drag};
-#[cfg(test)]
-pub(crate) use crate::canvas_tool::commit_moved_selection;
 use crate::clipboard_ops::begin_move_selection_drag;
 #[cfg(test)]
-pub(crate) use crate::clipboard_ops::{
-    copy_selected_shapes, cut_selected_shapes, duplicate_selected_shapes_for_alt_drag,
-    paste_clipboard,
+pub(crate) use crate::clipboard_ops::duplicate_selected_shapes_for_alt_drag;
+use crate::doc_actions::{Action, apply};
+#[cfg(test)]
+pub(crate) use crate::doc_actions::{
+    clear_active_frame_shapes, commit_moved_selection, copy_selected_shapes, cut_selected_shapes,
+    delete_selected_shapes, finish_move_selection_drag, group_selected_shapes,
+    nudge_selected_shapes, paste_clipboard, ungroup_selected_shapes,
 };
-use crate::select_ops::{quad_control_bbox_contains, retain_selection_and_flush_deselected};
+use crate::select_ops::retain_selection_and_flush_deselected;
+#[cfg(not(test))]
+use crate::select_ops::{compute_hover_target, handle_canvas_double_click};
 pub(crate) use crate::select_ops::{
-    apply_marquee_selection, compute_hover_target, handle_canvas_double_click,
-    select_single_shape_at, toggle_shape_selection,
+    select_single_shape_at, set_moved_vertex, set_pulled_edge, toggle_shape_selection,
 };
 #[cfg(test)]
 pub(crate) use crate::select_ops::{
-    clear_active_frame_shapes, delete_selected_shapes, enter_group_at, exit_current_group,
-    group_selected_shapes, nudge_selected_shapes, ungroup_selected_shapes,
+    apply_marquee_selection, apply_pull_edge_to_shape, compute_hover_target, enter_group_at,
+    exit_current_group, handle_canvas_double_click,
 };
-use crate::vector_boolean::{merge_shapes_into_canvas, resolve_deformed_shape};
-use crate::vector_engine::{FillShape, arc_mesh_to_shape, normalize_vec, to_pos2};
+use crate::vector_engine::{FillShape, arc_mesh_to_shape, to_pos2};
 
 // ============================================================================
 // 選択ツール（Tool::Select / V キー）・輪郭変形・アンカー編集・グループ・クリップボード
 // ============================================================================
-
-/// 向こう側の輪郭エッジ付近でドロップされた際に確実に貫通して分割されるよう僅かに押し出す。
-pub(crate) fn punch_through_opposite_edge(
-    shape: &FillShape,
-    contour_idx: usize,
-    ignore_segs: &[usize],
-    (anchor_a, anchor_b): (Point, Point),
-    (start_pt, drag_pt): (Point, Point),
-) -> Point {
-    let bbox = shape.bounding_box();
-    let min_dim = bbox.width().min(bbox.height());
-    let chord_len = (anchor_b - anchor_a).hypot();
-    let scale = (min_dim / 16.0).min(chord_len / 24.0).clamp(0.04, 1.0);
-    let min_drag = 6.0 * scale;
-    let min_anchor_dist = 10.0 * scale;
-    let near_thresh = 6.0 * scale;
-    let min_near_anchor = 8.0 * scale;
-    let punch_push = 4.5 * scale;
-
-    let drag_vec = drag_pt - start_pt;
-    if drag_vec.hypot() <= min_drag
-        || (drag_pt - anchor_a).hypot() <= min_anchor_dist
-        || (drag_pt - anchor_b).hypot() <= min_anchor_dist
-    {
-        return drag_pt;
-    }
-
-    let drag_dir = normalize_vec(drag_vec);
-    let mut best_near: Option<(f64, Point)> = None;
-    for (c_idx, c) in shape.contours().enumerate() {
-        for (s_idx, seg) in c.segments.iter().enumerate() {
-            if (c_idx == contour_idx && ignore_segs.contains(&s_idx))
-                || !quad_control_bbox_contains(seg, drag_pt, near_thresh)
-            {
-                continue;
-            }
-            let near = seg.nearest(drag_pt, 0.05 * scale);
-            let d = near.distance_sq.sqrt();
-            if d <= near_thresh {
-                let near_pt = seg.eval(near.t);
-                if (near_pt - anchor_a).hypot() > min_near_anchor
-                    && (near_pt - anchor_b).hypot() > min_near_anchor
-                    && best_near.is_none_or(|(bd, _)| d < bd)
-                {
-                    best_near = Some((d, near_pt));
-                }
-            }
-        }
-    }
-    if let Some((_, near_pt)) = best_near {
-        let punched = near_pt + drag_dir * punch_push;
-        if (punched - start_pt).dot(drag_dir) > (drag_pt - start_pt).dot(drag_dir) {
-            return punched;
-        }
-    }
-    drag_pt
-}
-
-/// エッジつまみ変形（PullEdge）の制御点を計算して反映する（リアルタイムプレビュー用）。
-pub(crate) fn set_pulled_edge(
-    shape: &mut FillShape,
-    (contour_idx, seg_idx): (usize, usize),
-    grab_t: f64,
-    orig_seg: QuadBez,
-    target_pt: Point,
-) {
-    let grab_pos = orig_seg.eval(grab_t);
-    let delta = target_pt - grab_pos;
-    let denom = 2.0 * grab_t * (1.0 - grab_t);
-    let new_p1 = orig_seg.p1 + delta / denom;
-    if let Some(contour) = shape.get_contour_mut(contour_idx) {
-        if seg_idx < contour.segments.len() {
-            contour.segments_mut()[seg_idx].p1 = new_p1;
-        }
-    }
-}
-
-/// エッジつまみ変形（PullEdge）を対向エッジ貫通補正込みで確定適用する。
-pub(crate) fn apply_pull_edge_to_shape(
-    shape: &mut FillShape,
-    (contour_idx, seg_idx): (usize, usize),
-    grab_t: f64,
-    orig_seg: QuadBez,
-    drag_pt: Point,
-) {
-    let grab_pos = orig_seg.eval(grab_t);
-    let effective_pt = punch_through_opposite_edge(
-        shape,
-        contour_idx,
-        &[seg_idx],
-        (orig_seg.p0, orig_seg.p2),
-        (grab_pos, drag_pt),
-    );
-    set_pulled_edge(
-        shape,
-        (contour_idx, seg_idx),
-        grab_t,
-        orig_seg,
-        effective_pt,
-    );
-}
-
-/// 頂点ドラッグ変形（MoveVertex）の頂点と前後制御点を計算して反映する（リアルタイムプレビュー用）。
-pub(crate) fn set_moved_vertex(
-    shape: &mut FillShape,
-    (contour_idx, seg_idx): (usize, usize),
-    orig_vertex: Point,
-    orig_ctrls: (Point, Point),
-    target_pt: Point,
-) {
-    let delta = target_pt - orig_vertex;
-    if let Some(contour) = shape.get_contour_mut(contour_idx) {
-        let n = contour.segments.len();
-        if n > 0 && seg_idx < n {
-            let prev_idx = (seg_idx + n - 1) % n;
-            let segs = contour.segments_mut();
-            segs[prev_idx].p2 = target_pt;
-            segs[seg_idx].p0 = target_pt;
-            segs[prev_idx].p1 = orig_ctrls.0 + delta * 0.5;
-            segs[seg_idx].p1 = orig_ctrls.1 + delta * 0.5;
-        }
-    }
-}
-
-/// 頂点ドラッグ変形（MoveVertex）を対向エッジ貫通補正込みで確定適用する。
-pub(crate) fn apply_move_vertex_to_shape(
-    shape: &mut FillShape,
-    (contour_idx, seg_idx): (usize, usize),
-    orig_vertex: Point,
-    orig_ctrls: (Point, Point),
-    drag_pt: Point,
-) {
-    let Some((prev_idx, prev_p0, curr_p2)) = shape.get_contour(contour_idx).and_then(|c| {
-        let n = c.segments.len();
-        if n == 0 || seg_idx >= n {
-            return None;
-        }
-        let prev_idx = (seg_idx + n - 1) % n;
-        Some((prev_idx, c.segments[prev_idx].p0, c.segments[seg_idx].p2))
-    }) else {
-        return;
-    };
-
-    let effective_pt = punch_through_opposite_edge(
-        shape,
-        contour_idx,
-        &[prev_idx, seg_idx],
-        (prev_p0, curr_p2),
-        (orig_vertex, drag_pt),
-    );
-    set_moved_vertex(
-        shape,
-        (contour_idx, seg_idx),
-        orig_vertex,
-        orig_ctrls,
-        effective_pt,
-    );
-}
-
-/// 輪郭エッジつまみ（PullEdge）または頂点移動（MoveVertex）ドラッグ終了時の確定・図形分割・ロールバック共通処理
-pub(crate) fn finish_deform_shape_drag(
-    app: &mut EditorDoc,
-    shape_idx: usize,
-    drag_dist: f64,
-    undo_snapshot: Vec<FillShape>,
-    apply_deform: impl FnOnce(&mut FillShape),
-) {
-    let min_deform = 0.5 / (app.viewport.zoom as f64);
-    if drag_dist > min_deform && shape_idx < app.canvas.shapes.len() {
-        focus_active_layer_to_shape(app, shape_idx);
-        let mut deformed = app.canvas.shapes.remove(shape_idx);
-        apply_deform(&mut deformed);
-        let resolved = resolve_deformed_shape(&deformed);
-        merge_shapes_into_canvas(&mut app.canvas.shapes, resolved);
-        app.canvas.sort_shapes_by_layer_order(&app.timeline);
-        app.commit_canvas_mutation(undo_snapshot);
-    } else {
-        app.canvas.restore_drag_snapshot(undo_snapshot);
-    }
-}
 
 /// Flash風ドット柄（Polka-Dot）選択オーバーレイを描画
 pub(crate) fn draw_flash_selection_overlay(
@@ -359,51 +181,12 @@ fn handle_anchor_edit_input(
     let just_pressed = response.hovered() && ui.input(|i| i.pointer.primary_pressed());
     if just_pressed {
         if let Some(pt) = mouse_pt {
-            let target = compute_hover_target(&app.canvas, pt, zoom, sub_mode);
-            let had_unsliced = app.canvas.has_unsliced_snapshot();
-            let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
-            let modified_shape = match (is_add, target) {
-                (
-                    true,
-                    HoverTarget::Edge {
-                        shape_idx,
-                        contour_idx,
-                        seg_idx,
-                        t,
-                        ..
-                    },
-                ) => app
-                    .canvas
-                    .shapes
-                    .get_mut(shape_idx)
-                    .and_then(|s| s.get_contour_mut(contour_idx))
-                    .is_some_and(|c| c.insert_anchor_at(seg_idx, t))
-                    .then_some(shape_idx),
-                (
-                    false,
-                    HoverTarget::Vertex {
-                        shape_idx,
-                        contour_idx,
-                        seg_idx,
-                        ..
-                    },
-                ) => app
-                    .canvas
-                    .shapes
-                    .get_mut(shape_idx)
-                    .and_then(|s| s.get_contour_mut(contour_idx))
-                    .is_some_and(|c| c.delete_anchor_at(seg_idx))
-                    .then_some(shape_idx),
-                _ => None,
+            let action = if is_add {
+                Action::AddAnchor { pt }
+            } else {
+                Action::DeleteAnchor { pt }
             };
-            if let Some(s_idx) = modified_shape {
-                if let Some(shape) = app.canvas.shapes.get_mut(s_idx) {
-                    shape.rebuild_cache();
-                }
-                app.commit_canvas_mutation(snapshot);
-            } else if had_unsliced {
-                app.canvas.restore_unsliced_snapshot(snapshot);
-            }
+            apply(app, action);
         }
     }
     app.canvas.hover_target = mouse_pt
@@ -609,18 +392,25 @@ fn finish_reshape_drag(app: &mut EditorDoc, mouse_pt: Option<Point>) {
     };
     match finished_drag {
         SelectDragState::MoveShape(drag) => {
-            let min_move = 1.0 / (app.viewport.zoom as f64);
-            let rolled_back =
-                drag.total_delta.hypot() <= min_move || app.canvas.selected_shapes.is_empty();
-            let orig_ids = drag.orig_selected_ids;
-            finish_move_selection_drag(app, drag.total_delta, drag.undo_snapshot);
-            if rolled_back && !orig_ids.is_empty() {
-                app.canvas.restore_selection_by_shape_ids(&orig_ids);
-            }
+            apply(
+                app,
+                Action::FinishMoveSelectionDrag {
+                    total_delta: drag.total_delta,
+                    undo_snapshot: drag.undo_snapshot,
+                    orig_selected_ids: drag.orig_selected_ids,
+                },
+            );
         }
         SelectDragState::MarqueeSelect(m) => {
             let end_pos = mouse_pt.unwrap_or(m.current_pos);
-            apply_marquee_selection(app, m.start_pos, end_pos, m.additive);
+            apply(
+                app,
+                Action::SelectMarquee {
+                    p0: m.start_pos,
+                    p1: end_pos,
+                    additive: m.additive,
+                },
+            );
         }
         SelectDragState::PullEdge {
             shape_idx,
@@ -633,19 +423,17 @@ fn finish_reshape_drag(app: &mut EditorDoc, mouse_pt: Option<Point>) {
             undo_snapshot,
             ..
         } => {
-            finish_deform_shape_drag(
+            apply(
                 app,
-                shape_idx,
-                (last_pos - grab_pos).hypot(),
-                undo_snapshot,
-                |deformed| {
-                    apply_pull_edge_to_shape(
-                        deformed,
-                        (contour_idx, seg_idx),
-                        grab_t,
-                        orig_seg,
-                        last_pos,
-                    );
+                Action::ReshapeEdge {
+                    shape_idx,
+                    contour_idx,
+                    seg_idx,
+                    grab_t,
+                    grab_pos,
+                    target_pos: last_pos,
+                    orig_seg,
+                    undo_snapshot,
                 },
             );
         }
@@ -660,19 +448,16 @@ fn finish_reshape_drag(app: &mut EditorDoc, mouse_pt: Option<Point>) {
             undo_snapshot,
             ..
         } => {
-            finish_deform_shape_drag(
+            apply(
                 app,
-                shape_idx,
-                (last_pos - orig_vertex).hypot(),
-                undo_snapshot,
-                |deformed| {
-                    apply_move_vertex_to_shape(
-                        deformed,
-                        (contour_idx, seg_idx),
-                        orig_vertex,
-                        (orig_prev_ctrl, orig_curr_ctrl),
-                        last_pos,
-                    );
+                Action::MoveVertex {
+                    shape_idx,
+                    contour_idx,
+                    seg_idx,
+                    orig_vertex,
+                    target_pos: last_pos,
+                    orig_ctrls: (orig_prev_ctrl, orig_curr_ctrl),
+                    undo_snapshot,
                 },
             );
         }

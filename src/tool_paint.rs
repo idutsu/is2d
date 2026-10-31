@@ -2,15 +2,13 @@ use eframe::egui::{self, Color32, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::Point;
 
 use crate::canvas_tool::{ActiveCanvasDrag, EditorDoc, Tool};
-use crate::vector_boolean::{
-    boolean_operation, erase_from_canvas, find_enclosed_region_at, merge_disjoint_fill_into_canvas,
-    merge_shapes_into_canvas, BoolOp,
-};
+use crate::doc_actions::{Action, apply};
+#[cfg(test)]
+pub(crate) use crate::doc_actions::{bucket_fill_at, commit_raw_outline};
 use crate::vector_engine::{
-    append_mesh, rects_overlap, tessellate_raw_polygon, transform_mesh_to_screen, FillShape,
-    MAX_VIEW_ZOOM, MIN_VIEW_ZOOM,
+    MAX_VIEW_ZOOM, MIN_VIEW_ZOOM, append_mesh, tessellate_raw_polygon, transform_mesh_to_screen,
 };
-use crate::vector_stroke::{build_smoothed_stroke_shapes_at_zoom, generate_brush_outline_at_zoom};
+use crate::vector_stroke::generate_brush_outline_at_zoom;
 
 /// ブラシ・消しゴムドラッグ中のリアルタイムプレビューにおいて、
 /// 1フレームあたりに再テッセレーションする末尾ストローク点数の上限（これを超えた前半区間は `committed_mesh` に確定させて O(1) 更新を保証する）
@@ -107,254 +105,49 @@ pub(crate) fn handle_brush_or_eraser_input(
     }
     if response.drag_stopped_by(PointerButton::Primary) {
         if let ActiveCanvasDrag::PaintStroke { stroke, .. } = std::mem::take(&mut app.canvas.drag) {
-            let raw_outline = generate_brush_outline_at_zoom(&stroke, base_r, z);
-            if !raw_outline.is_empty() {
-                commit_raw_outline(app, &raw_outline);
+            if !stroke.is_empty() {
+                if app.ui.tool == Tool::Brush {
+                    let radius = app.ui.brush_radius;
+                    let color = app.ui.brush_color;
+                    apply(
+                        app,
+                        Action::PaintStroke {
+                            points: stroke,
+                            radius,
+                            color,
+                        },
+                    );
+                } else {
+                    let radius = app.ui.eraser_radius;
+                    apply(app, Action::EraseStroke { points: stroke, radius });
+                }
             }
         }
     } else if response.clicked_by(PointerButton::Primary) {
         if let Some(pt) = mouse_pt {
-            let raw = generate_brush_outline_at_zoom(&[pt], base_r, z);
-            commit_raw_outline(app, &raw);
-        }
-    }
-}
-
-pub(crate) fn commit_raw_outline(app: &mut EditorDoc, raw: &[Point]) {
-    let target_lid = crate::canvas_tool::active_scope_layer_id(&app.canvas, &app.timeline);
-    if !app.timeline.is_layer_editable_by_id(target_lid) {
-        return;
-    }
-    let stroke_shapes: Vec<FillShape> =
-        build_smoothed_stroke_shapes_at_zoom(raw, app.ui.brush_color, app.viewport.zoom as f64)
-            .into_iter()
-            .map(|s| s.with_scope(target_lid, &app.canvas.editing_group_path))
-            .collect();
-    if stroke_shapes.is_empty() {
-        return;
-    }
-    if app.ui.tool == Tool::Brush {
-        crate::canvas_tool::clear_selection(app);
-        let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
-        merge_shapes_into_canvas(&mut app.canvas.shapes, stroke_shapes);
-        app.canvas.sort_shapes_by_layer_order(&app.timeline);
-        app.commit_canvas_mutation(snapshot);
-    } else {
-        let has_bbox_overlap = app.canvas.shapes.iter().any(|s| {
-            s.layer_id == target_lid
-                && s.is_raw_at_scope(&app.canvas.editing_group_path)
-                && stroke_shapes
-                    .iter()
-                    .any(|er| rects_overlap(s.bounding_box(), er.bounding_box()))
-        });
-        if !has_bbox_overlap {
-            return;
-        }
-        crate::canvas_tool::clear_selection(app);
-        let prev_revs: Vec<(u64, u64)> = app
-            .canvas
-            .shapes
-            .iter()
-            .map(|s| (s.shape_id, s.mesh_revision))
-            .collect();
-        let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
-        erase_from_canvas(
-            &mut app.canvas.shapes,
-            &stroke_shapes,
-            target_lid,
-            &app.canvas.editing_group_path,
-        );
-        let unchanged = app.canvas.shapes.len() == prev_revs.len()
-            && app
-                .canvas
-                .shapes
-                .iter()
-                .zip(prev_revs.iter())
-                .all(|(s, &(id, rev))| s.shape_id == id && s.mesh_revision == rev);
-        if !unchanged {
-            app.commit_canvas_mutation(snapshot);
-        }
-    }
-}
-
-/// バケツツール（色流し込み）
-pub(crate) fn bucket_fill_at(app: &mut EditorDoc, pt: Point) -> bool {
-    let fill_color = app.ui.brush_color;
-    let target_lid = crate::canvas_tool::active_scope_layer_id(&app.canvas, &app.timeline);
-    if !app.timeline.is_layer_editable_by_id(target_lid) {
-        return false;
-    }
-
-    // 0. 選択領域が存在する場合：選択中の「生シェイプ」のみにバケツで色を流し込む（グループは無効）
-    if !app.canvas.selected_shapes.is_empty() {
-        let clicked_selected_raw = app.canvas.selected_shapes.iter().copied().any(|idx| {
-            app.canvas.shapes.get(idx).is_some_and(|s| {
-                app.timeline.is_layer_editable_by_id(s.layer_id)
-                    && s.is_raw_at_scope(&app.canvas.editing_group_path)
-                    && s.contains_point(pt)
-            })
-        });
-        if clicked_selected_raw {
-            let any_color_diff = app.canvas.selected_shapes.iter().copied().any(|idx| {
-                app.canvas.shapes.get(idx).is_some_and(|s| {
-                    app.timeline.is_layer_editable_by_id(s.layer_id)
-                        && s.is_raw_at_scope(&app.canvas.editing_group_path)
-                        && s.color != fill_color
-                })
-            });
-            if !any_color_diff {
-                return false;
-            }
-            let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
-            for &sel_idx in &app.canvas.selected_shapes {
-                if let Some(shape) = app.canvas.shapes.get_mut(sel_idx) {
-                    if app.timeline.is_layer_editable_by_id(shape.layer_id)
-                        && shape.is_raw_at_scope(&app.canvas.editing_group_path)
-                    {
-                        shape.set_color(fill_color);
-                    }
-                }
-            }
-            app.canvas.selection_modified = true;
-            app.commit_canvas_mutation(snapshot);
-            return true;
-        }
-        return false;
-    }
-
-    // 全表示レイヤー（ロック中レイヤーやグループ・シンボルを含む）の解決済み図形を収集する
-    let all_visible_shapes = collect_all_visible_shapes(app);
-    let target_layer_ord = app.timeline.layer_index_by_id(target_lid).unwrap_or(0);
-
-    // 1. アクティブレイヤー（target_lid）の既存の生シェイプ上をクリックした場合：色の塗り替え
-    // （ただし別レイヤー・ロックレイヤー・グループの境界線で分割されている場合は分割領域の塗りを優先）
-    if let Some(hit_idx) = (0..app.canvas.shapes.len()).rev().find(|&idx| {
-        let s = &app.canvas.shapes[idx];
-        s.layer_id == target_lid
-            && s.is_in_editing_scope(&app.canvas.editing_group_path)
-            && s.contains_point(pt)
-    }) {
-        let occluded_above = (target_layer_ord + 1..app.timeline.layers.len()).any(|l_idx| {
-            let layer = &app.timeline.layers[l_idx];
-            layer.visible
-                && all_visible_shapes
-                    .iter()
-                    .any(|s| s.layer_id == layer.id && s.contains_point(pt))
-        });
-
-        let hit_shape = &app.canvas.shapes[hit_idx];
-        if !occluded_above && hit_shape.is_raw_at_scope(&app.canvas.editing_group_path) {
-            if hit_shape.color == fill_color {
-                return false;
-            }
-            // 別レイヤーやグループ・シンボルの線がこの生シェイプを横切って分割している場合は、分割された部分領域のみを塗る
-            let hit_bbox = hit_shape.bounding_box();
-            let overlapping_walls: Vec<FillShape> = all_visible_shapes
-                .iter()
-                .filter(|s| {
-                    (s.layer_id != target_lid
-                        || !s.is_raw_at_scope(&app.canvas.editing_group_path))
-                        && !s.contains_point(pt)
-                        && rects_overlap(s.bounding_box(), hit_bbox)
-                })
-                .cloned()
-                .collect();
-            if !overlapping_walls.is_empty() {
-                let pieces = boolean_operation(
-                    std::slice::from_ref(hit_shape),
-                    &overlapping_walls,
-                    BoolOp::Difference,
-                    fill_color,
+            if app.ui.tool == Tool::Brush {
+                let radius = app.ui.brush_radius;
+                let color = app.ui.brush_color;
+                apply(
+                    app,
+                    Action::PaintStroke {
+                        points: vec![pt],
+                        radius,
+                        color,
+                    },
                 );
-                if pieces.len() > 1 {
-                    if let Some(split_piece) = pieces.into_iter().find(|p| p.contains_point(pt)) {
-                        let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
-                        merge_shapes_into_canvas(
-                            &mut app.canvas.shapes,
-                            vec![split_piece
-                                .with_scope(target_lid, &app.canvas.editing_group_path)],
-                        );
-                        app.canvas.sort_shapes_by_layer_order(&app.timeline);
-                        app.commit_canvas_mutation(snapshot);
-                        return true;
-                    }
-                }
+            } else {
+                let radius = app.ui.eraser_radius;
+                apply(
+                    app,
+                    Action::EraseStroke {
+                        points: vec![pt],
+                        radius,
+                    },
+                );
             }
-
-            crate::canvas_tool::focus_active_layer_to_shape(app, hit_idx);
-            let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
-            let mut target = app.canvas.shapes.remove(hit_idx);
-            target.set_color(fill_color);
-            merge_disjoint_fill_into_canvas(&mut app.canvas.shapes, target);
-            app.canvas.sort_shapes_by_layer_order(&app.timeline);
-            app.commit_canvas_mutation(snapshot);
-            return true;
-        }
-        return false;
-    }
-
-    // 2. 全表示レイヤー（ロック中レイヤー・グループ・シンボルを含む）の境界線に囲まれた閉領域をクリックした場合：ベクター流し込み
-    // （クリック地点自体を覆っている背面レイヤーのベタ塗り図形は壁から除外し、周囲の線画・輪郭を壁として使用する）
-    let wall_shapes: Vec<FillShape> = all_visible_shapes
-        .iter()
-        .filter(|s| !s.contains_point(pt))
-        .cloned()
-        .collect();
-    let enclosed_opt = find_enclosed_region_at(&wall_shapes, pt, fill_color).or_else(|| {
-        let active_layer_raw: Vec<FillShape> = app
-            .canvas
-            .shapes
-            .iter()
-            .filter(|s| {
-                s.layer_id == target_lid
-                    && s.is_raw_at_scope(&app.canvas.editing_group_path)
-                    && !s.contains_point(pt)
-            })
-            .cloned()
-            .collect();
-        (active_layer_raw.len() < wall_shapes.len())
-            .then(|| find_enclosed_region_at(&active_layer_raw, pt, fill_color))
-            .flatten()
-    });
-    if let Some(enclosed_fill) = enclosed_opt {
-        let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
-        merge_disjoint_fill_into_canvas(
-            &mut app.canvas.shapes,
-            enclosed_fill.with_scope(target_lid, &app.canvas.editing_group_path),
-        );
-        app.canvas.sort_shapes_by_layer_order(&app.timeline);
-        app.commit_canvas_mutation(snapshot);
-        return true;
-    }
-
-    false
-}
-
-/// 現在表示されているすべてのレイヤー（ロック中レイヤーを含む）の現在フレーム解決済み図形を背面→前面順で収集する
-fn collect_all_visible_shapes(app: &EditorDoc) -> Vec<FillShape> {
-    let mut out = Vec::with_capacity(app.canvas.shapes.len());
-    for (layer_idx, layer) in app.timeline.layers.iter().enumerate() {
-        if !layer.visible {
-            continue;
-        }
-        if layer.locked {
-            out.extend(app.timeline.evaluate_layer_shapes_at(
-                layer_idx,
-                app.timeline.current_frame,
-                &app.symbols.library,
-            ));
-        } else {
-            let lid = layer.id;
-            out.extend(
-                app.canvas
-                    .shapes
-                    .iter()
-                    .filter(|s| s.layer_id == lid)
-                    .cloned(),
-            );
         }
     }
-    out
 }
 
 /// ロックされたレイヤー（またはシンボル内部タイムライン）上の指定フレーム・指定座標 `pt` にヒットする最前面図形の色を、

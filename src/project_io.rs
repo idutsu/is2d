@@ -63,13 +63,10 @@ pub(crate) enum OpenProjectOutcome {
 // ============================================================================
 
 /// ドキュメント状態（`EditorDoc`）と複数タブ管理（`DocumentTabManager`）の組を抽象化するトレイト
-pub(crate) trait ProjectWorkspace {
-    fn doc(&self) -> &EditorDoc;
-    fn doc_mut(&mut self) -> &mut EditorDoc;
+pub(crate) trait ProjectWorkspace: crate::doc_actions::ActionHost {
     fn tabs(&self) -> &DocumentTabManager;
     fn tabs_mut(&mut self) -> &mut DocumentTabManager;
     fn doc_and_tabs_mut(&mut self) -> (&mut EditorDoc, &mut DocumentTabManager);
-    fn stop_playback(&mut self);
 }
 
 /// 開いている1つのドキュメントタブが保持する独立状態スロット
@@ -207,9 +204,7 @@ fn surrender_focused_widget(ctx: &egui::Context) {
 fn prepare_active_tab_for_switch_or_save(doc: &mut EditorDoc, flush_raw_merge: bool) {
     cancel_active_drag(doc);
     doc.viewport.pan_last_screen_pos = None;
-    doc.viewport.editing_stage_size = false;
-    doc.ui.actively_renaming_symbol = None;
-    doc.ui.editing_symbol_playback = false;
+    doc.history.end_coalesce();
 
     if flush_raw_merge && doc.canvas.selection_modified && !doc.canvas.selected_shapes.is_empty() {
         let selected_ids = doc.canvas.selected_shape_ids();
@@ -275,7 +270,7 @@ fn swap_doc_preserving_shared_state(active: &mut EditorDoc, slot_doc: &mut Edito
 
 /// 現在のアクティブドキュメント状態を `tabs.tabs[active_index]` スロットへ退避する
 fn pack_active_into_slot(ws: &mut impl ProjectWorkspace) {
-    ws.stop_playback();
+    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
     let (doc, tabs) = ws.doc_and_tabs_mut();
     prepare_active_tab_for_switch_or_save(doc, false);
     let idx = tabs.active_index;
@@ -328,7 +323,6 @@ fn reset_active_document_state(
     doc.ui.onion_skin_enabled = false;
     doc.ui.onion_prev_frames = 2;
     doc.ui.onion_next_frames = 2;
-    doc.ui.editing_symbol_playback = false;
     doc.ui.select_sub_mode = SelectSubMode::Reshape;
     load_shapes_from_timeline(doc);
 }
@@ -549,7 +543,7 @@ fn close_tab_immediately(
 
     if ws.tabs().tabs.len() <= 1 {
         // 最後の1タブを閉じた場合は連番をリセットし、白紙の「無題-1」へ初期化する
-        ws.stop_playback();
+        crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
         cancel_active_drag(ws.doc_mut());
         ws.tabs_mut().next_untitled_number = 1;
         let doc_id = ws.tabs_mut().alloc_doc_id();
@@ -573,7 +567,7 @@ fn close_tab_immediately(
     }
 
     if close_index == ws.tabs().active_index {
-        ws.stop_playback();
+        crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
         cancel_active_drag(ws.doc_mut());
         ws.doc_mut().viewport.pan_last_screen_pos = None;
 
@@ -1507,7 +1501,7 @@ pub(crate) fn save_project_to_path(
             )
         })
     };
-    ws.stop_playback();
+    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
     prepare_active_tab_for_switch_or_save(ws.doc_mut(), true);
 
     let proj_doc = ProjectDocument::from_app(ws.doc());
@@ -1679,7 +1673,7 @@ pub(crate) fn open_project_in_tab(
             .insert(insert_idx, DocumentSlot::new_empty(doc_id, 0));
         unpack_slot_into_active(ws, insert_idx);
     } else {
-        ws.stop_playback();
+        crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
         cancel_active_drag(ws.doc_mut());
         ws.doc_mut().viewport.pan_last_screen_pos = None;
         let new_doc_id = ws.tabs_mut().alloc_doc_id();

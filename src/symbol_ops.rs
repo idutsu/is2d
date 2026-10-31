@@ -3,18 +3,20 @@ use kurbo::{Affine, Point, Vec2 as KVec2};
 use crate::canvas_tool::{
     EditorDoc, active_scope_layer_id, cancel_active_drag, clear_selection,
     flush_canvas_before_timeline_op, insert_and_select_shapes_in_scope, load_shapes_from_timeline,
-    reorder_selected_to_scope_front, select_shapes_for_timeline_selection, sync_shapes_to_timeline,
-    topmost_layer_id_for_indices,
+    reorder_selected_to_scope_front, topmost_layer_id_for_indices,
 };
 use crate::symbol::{
-    SymbolEditSession, SymbolEvalCtx, SymbolInstanceBinding, SymbolLoopMode, TweenRotate,
+    SymbolEditSession, SymbolEvalCtx, SymbolInstanceBinding, SymbolLoopMode,
     resolve_cel_with_library, transform_layers_with_local_cache,
 };
 use crate::timeline::Cel;
 use crate::vector_engine::{FillShape, union_bounding_boxes};
 
-/// 選択中のオブジェクト（生シェイプ・グループ問わず）を新しい「シンボル」に変換してライブラリに登録する（`F8`）
-pub(crate) fn convert_selection_to_symbol(doc: &mut EditorDoc) -> Option<u64> {
+/// 選択中のオブジェクトを新しい「シンボル」に変換するためのローカル図形抽出とインスタンスバインディング付与を行い、
+/// `(sym_id, target_lid, local_shapes, undo_snapshot)` を返す（Undo記録・ライブラリ登録は `doc_actions::apply` が行う）
+pub(crate) fn prepare_convert_selection_to_symbol(
+    doc: &mut EditorDoc,
+) -> Option<(u64, u64, Vec<FillShape>, Vec<FillShape>)> {
     cancel_active_drag(doc);
     if doc.canvas.selected_shapes.is_empty() {
         return None;
@@ -78,32 +80,24 @@ pub(crate) fn convert_selection_to_symbol(doc: &mut EditorDoc) -> Option<u64> {
     }
 
     reorder_selected_to_scope_front(doc);
-    doc.commit_canvas_mutation(snapshot);
-    doc.symbols.register_new_symbol(local_shapes);
-    if let Some(l_idx) = doc.timeline.layer_index_by_id(target_lid) {
-        doc.timeline.active_layer = l_idx;
-    }
-    doc.canvas.selection_modified = false;
-    doc.canvas.transform_pivot = None;
-    doc.ui.inspect_timeline_frame = false;
-    Some(sym_id)
+    Some((sym_id, target_lid, local_shapes, snapshot))
 }
 
-/// ライブラリ内の指定シンボル `symbol_id` の新しいインスタンスを現在のステージ中央へ配置する
-pub(crate) fn place_symbol_instance_from_library(doc: &mut EditorDoc, symbol_id: u64) -> bool {
+/// ライブラリ内の指定シンボル `symbol_id` の新しいインスタンスを現在のステージ中央へ配置し、変更前スナップショットを返す
+pub(crate) fn prepare_place_symbol_instance(
+    doc: &mut EditorDoc,
+    symbol_id: u64,
+) -> Option<Vec<FillShape>> {
     let target_lid = active_scope_layer_id(&doc.canvas, &doc.timeline);
     if !doc.symbols.can_place_symbol_in_current_context(symbol_id)
         || !doc.timeline.is_layer_editable_by_id(target_lid)
     {
-        return false;
+        return None;
     }
-    let Some(first_shapes) = doc
+    let first_shapes = doc
         .symbols
         .find_symbol(symbol_id)
-        .map(|s| s.first_non_empty_local_shapes(&doc.symbols.library))
-    else {
-        return false;
-    };
+        .map(|s| s.first_non_empty_local_shapes(&doc.symbols.library))?;
     let first_bbox_center = if first_shapes.is_empty() {
         Point::ZERO
     } else {
@@ -154,137 +148,7 @@ pub(crate) fn place_symbol_instance_from_library(doc: &mut EditorDoc, symbol_id:
         )]
     };
     insert_and_select_shapes_in_scope(doc, placed, false);
-    doc.commit_canvas_mutation(snapshot);
-    true
-}
-
-/// ライブラリ内の指定シンボル `symbol_id` の名前を変更し、Undo履歴に記録する
-pub(crate) fn rename_symbol_in_library(
-    doc: &mut EditorDoc,
-    symbol_id: u64,
-    new_name: impl Into<String>,
-) -> bool {
-    let new_name = new_name.into();
-    if doc
-        .symbols
-        .find_symbol(symbol_id)
-        .is_none_or(|s| s.name == new_name)
-    {
-        return false;
-    }
-    if doc.ui.actively_renaming_symbol != Some(symbol_id) {
-        doc.push_undo();
-    }
-    let renamed = doc.symbols.rename_symbol(symbol_id, new_name);
-    if renamed {
-        doc.ui.actively_renaming_symbol = Some(symbol_id);
-    }
-    renamed
-}
-
-/// ライブラリから指定シンボル `symbol_id` を削除し、ステージ上および全フレームに配置されていた該当インスタンスは
-/// 消去せず通常のグループ図形へ自動分解（デタッチ）して残す
-pub(crate) fn delete_symbol_from_library(doc: &mut EditorDoc, symbol_id: u64) -> bool {
-    if doc.symbols.find_symbol(symbol_id).is_none() {
-        return false;
-    }
-    while doc
-        .symbols
-        .edit_stack
-        .iter()
-        .any(|sess| sess.symbol_id == symbol_id)
-    {
-        exit_symbol_timeline(doc);
-    }
-    clear_selection(doc);
-    doc.push_undo();
-
-    doc.symbols
-        .remove_symbol_and_detach(symbol_id, &mut doc.timeline, &mut doc.canvas.shapes);
-
-    doc.symbols.sync_active_edit(&doc.timeline);
-    load_shapes_from_timeline(doc);
-    true
-}
-
-/// 現在のキーフレーム（または保持フレームが属する開始キーフレーム）に対してクラシックトゥイーンを ON / OFF トグルする（`T` キー）。
-pub(crate) fn timeline_toggle_tween(doc: &mut EditorDoc) -> bool {
-    let targets = doc.timeline.target_layers_for_frame_op();
-    if targets.is_empty() {
-        return false;
-    }
-    let prev_selected_ids = doc.canvas.selected_shape_ids();
-    flush_canvas_before_timeline_op(doc);
-
-    let (can_toggle, is_currently_tweened) = doc.timeline.can_toggle_tween_at_current_frame();
-    if !can_toggle {
-        doc.canvas
-            .restore_selection_by_shape_ids(&prev_selected_ids);
-        doc.notify_warning(
-            "トゥイーンを設定するには、キーフレームに単一のシンボルインスタンス（F8）のみを配置してください",
-        );
-        return false;
-    }
-
-    doc.push_undo();
-    let curr_f = doc.timeline.current_frame;
-    let next_tween = !is_currently_tweened;
-    let mut changed = false;
-
-    for &l_idx in &targets {
-        let layer = &mut doc.timeline.layers[l_idx];
-        if let Some(kf_idx) = layer.keyframe_index_at(curr_f) {
-            let kf = &mut layer.keyframes[kf_idx];
-            if next_tween {
-                if kf.cel.single_symbol_instance().is_some() && !kf.tween {
-                    kf.tween = true;
-                    changed = true;
-                }
-            } else if kf.tween {
-                kf.tween = false;
-                changed = true;
-            }
-        }
-    }
-
-    if changed {
-        load_shapes_from_timeline(doc);
-        select_shapes_for_timeline_selection(doc);
-        doc.ui.inspect_timeline_frame = true;
-    }
-    changed
-}
-
-/// 現在のアクティブレイヤー・現在フレームが属するトゥイーンキーフレームの回転方向 `tween_rotate` を設定する
-pub(crate) fn set_active_keyframe_tween_rotate(
-    doc: &mut EditorDoc,
-    rotate_mode: TweenRotate,
-) -> bool {
-    let Some(layer) = doc.timeline.layers.get(doc.timeline.active_layer) else {
-        return false;
-    };
-    if layer.locked || !layer.visible {
-        return false;
-    }
-    let Some(kf_idx) = layer.keyframe_index_at(doc.timeline.current_frame) else {
-        return false;
-    };
-    if !layer.keyframes[kf_idx].tween || layer.keyframes[kf_idx].tween_rotate == rotate_mode {
-        return false;
-    }
-
-    flush_canvas_before_timeline_op(doc);
-    doc.push_undo();
-    if let Some(layer_mut) = doc.timeline.layers.get_mut(doc.timeline.active_layer) {
-        if let Some(kf) = layer_mut.keyframes.get_mut(kf_idx) {
-            kf.tween_rotate = rotate_mode;
-        }
-    }
-    doc.symbols.sync_active_edit(&doc.timeline);
-    load_shapes_from_timeline(doc);
-    select_shapes_for_timeline_selection(doc);
-    doc.ui.inspect_timeline_frame = true;
-    true
+    Some(snapshot)
 }
 
 /// 現在選択されている図形（またはアクティブセル上の単一シンボル）について、その `(SymbolInstanceBinding, シンボル名, シンボル総フレーム数)` を返す
@@ -302,61 +166,6 @@ pub(crate) fn selected_single_symbol_info(
     })?;
     let sym = doc.symbols.find_symbol(binding.symbol_id)?;
     Some((binding, sym.name.clone(), sym.timeline.total_frames.max(1)))
-}
-
-/// 現在選択されている単一シンボルインスタンスの再生モードおよび開始/指定フレーム番号（0始まり）を更新する
-pub(crate) fn set_selected_symbol_playback(
-    doc: &mut EditorDoc,
-    loop_mode: SymbolLoopMode,
-    first_frame: usize,
-) -> bool {
-    let Some((binding, _, total_frames)) = selected_single_symbol_info(doc) else {
-        return false;
-    };
-    let clamped_first = first_frame.min(total_frames.saturating_sub(1));
-    if binding.loop_mode == loop_mode && binding.first_frame == clamped_first {
-        return false;
-    }
-
-    let inst_gid = binding.instance_gid;
-    let sym_id = binding.symbol_id;
-    clear_selection(doc);
-    sync_shapes_to_timeline(doc);
-    if !doc.ui.editing_symbol_playback {
-        doc.push_undo();
-    }
-
-    if doc.symbols.find_symbol(sym_id).is_none() {
-        return false;
-    }
-
-    let curr_f = doc.timeline.current_frame;
-    let mut updated = false;
-    for layer in &mut doc.timeline.layers {
-        if !layer.visible || layer.locked {
-            continue;
-        }
-        let Some(kf_idx) = layer.keyframe_index_at(curr_f) else {
-            continue;
-        };
-        let kf = &mut layer.keyframes[kf_idx];
-        if kf.cel.update_symbol_instances_with(|mut b| {
-            (b.instance_gid == inst_gid).then(|| {
-                b.loop_mode = loop_mode;
-                b.first_frame = clamped_first;
-                b
-            })
-        }) {
-            updated = true;
-        }
-    }
-
-    if updated {
-        doc.symbols.sync_active_edit(&doc.timeline);
-        load_shapes_from_timeline(doc);
-        doc.canvas.select_symbol_instance_by_gid(inst_gid);
-    }
-    updated
 }
 
 /// シンボルインスタンスをダブルクリックして、そのシンボル専用の内部タイムライン編集モードへ入る

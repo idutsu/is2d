@@ -5,10 +5,8 @@ use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
     EditorDoc, MoveSelectionDrag, active_scope_layer_id, cancel_active_drag, clear_selection,
-    insert_and_select_shapes_in_scope, sync_shapes_to_timeline,
-    sync_timeline_layer_from_canvas_selection,
+    insert_and_select_shapes_in_scope, sync_timeline_layer_from_canvas_selection,
 };
-use crate::select_ops::delete_selected_shapes;
 use crate::symbol::{SymbolDef, SymbolEvalCtx, SymbolManager};
 use crate::timeline::Timeline;
 use crate::vector_engine::{FillShape, next_shape_id};
@@ -556,7 +554,7 @@ pub(crate) fn resolve_clipboard_for_paste(doc: &mut EditorDoc) -> (Vec<FillShape
 }
 
 /// 選択中のオブジェクト（生シェイプ・部分スライス領域・グループ問わず）を内部クリップボードにコピーする（`Cmd+C`）
-pub(crate) fn copy_selected_shapes(doc: &mut EditorDoc) -> bool {
+pub(crate) fn prepare_copy_selected_shapes(doc: &mut EditorDoc) -> bool {
     cancel_active_drag(doc);
     let mut extracted = doc.canvas.extract_selected_relative_to_scope();
     if extracted.is_empty() {
@@ -569,66 +567,5 @@ pub(crate) fn copy_selected_shapes(doc: &mut EditorDoc) -> bool {
     doc.canvas.paste_count = 0;
     doc.canvas.paste_offset = KVec2::ZERO;
     capture_clipboard_symbols(doc);
-    true
-}
-
-/// 選択中のオブジェクトを内部クリップボードにコピーした上でキャンバスから削除する（`Cmd+X`）
-pub(crate) fn cut_selected_shapes(doc: &mut EditorDoc) -> bool {
-    if !copy_selected_shapes(doc) {
-        return false;
-    }
-    delete_selected_shapes(doc)
-}
-
-/// 内部クリップボードのオブジェクトを現在の編集スコープへ貼り付ける。
-pub(crate) fn paste_clipboard(doc: &mut EditorDoc, in_place: bool) -> bool {
-    if doc.canvas.clipboard.is_empty() {
-        return false;
-    }
-    let target_lid = active_scope_layer_id(&doc.canvas, &doc.timeline);
-    if !doc.timeline.is_layer_editable_by_id(target_lid) {
-        doc.notify_warning("現在のレイヤーまたはフレームは編集できないためペーストできません");
-        return false;
-    }
-    if would_clipboard_paste_all_cycle(doc) {
-        doc.notify_warning("編集中のシンボル自身や親シンボルは循環参照になるため配置できません");
-        return false;
-    }
-
-    clear_selection(doc);
-    doc.push_undo();
-    let (resolved, had_cycle) = resolve_clipboard_for_paste(doc);
-    if had_cycle {
-        doc.notify_warning(
-            "編集中のシンボル自身や親シンボルは循環参照になるため配置できません",
-        );
-    }
-    if !resolved.is_empty() {
-        let offset = if in_place {
-            KVec2::ZERO
-        } else {
-            if doc.canvas.paste_count == 0 {
-                doc.canvas.paste_offset = KVec2::ZERO;
-            }
-            doc.canvas.paste_count += 1;
-            let step = 16.0 / (doc.viewport.zoom as f64);
-            doc.canvas.paste_offset += KVec2::new(step, step);
-            doc.canvas.paste_offset
-        };
-
-        let same_timeline_context = doc.canvas.clipboard_source_doc_id == doc.doc_id
-            && doc.canvas.clipboard_source_symbol_id
-                == doc.symbols.edit_stack.last().map(|s| s.symbol_id)
-            && doc.canvas.editing_group_path.is_empty();
-        let multi_layer_copy = same_timeline_context
-            && resolved
-                .first()
-                .is_some_and(|first| resolved.iter().any(|s| s.layer_id != first.layer_id));
-        let (pasted_shapes, any_raw) =
-            instantiate_relative_shapes_in_scope(doc, &resolved, offset, multi_layer_copy);
-
-        insert_and_select_shapes_in_scope(doc, pasted_shapes, any_raw);
-        sync_shapes_to_timeline(doc);
-    }
     true
 }
