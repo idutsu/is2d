@@ -66,8 +66,6 @@ pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices:
         if merged_any {
             tab.session.clear_unsliced_snapshot();
             sync_shapes_to_timeline(tab);
-        } else {
-            tab.sync_scene_from_session();
         }
         tab.session.selection_modified = !tab.session.selection.is_empty();
     } else {
@@ -75,8 +73,8 @@ pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices:
             tab.session.selection.contains_shape(s)
                 && s.is_raw_at_scope(&tab.session.editing_group_path)
         });
-        if !any_raw_kept && tab.session.restore_unsliced_preserving_selection() {
-            tab.sync_scene_from_session();
+        if !any_raw_kept {
+            tab.session.restore_unsliced_preserving_selection();
         }
     }
     tab.session.transform_pivot = None;
@@ -85,20 +83,18 @@ pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices:
 
 /// ダブルクリック位置 `pt` にシンボルがあればそのシンボルの独自タイムラインへ入り、グループがあればインプレイス編集モードへ移行する
 pub(crate) fn enter_group_at(tab: &mut Tab, pt: Point) -> bool {
-    tab.sync_scene_from_session();
-    let Some(hit_idx) = tab
-        .scene
-        .topmost_shape_at(pt, &tab.session.editing_group_path)
-    else {
+    let scene = tab.scene();
+    let Some(hit_idx) = scene.topmost_shape_at(pt, &tab.session.editing_group_path) else {
         return false;
     };
-    let Some(hit_shape) = tab.scene.get(hit_idx) else {
+    let Some(hit_shape) = scene.get(hit_idx) else {
         return false;
     };
     let Some(gid) = hit_shape.active_group_id_at_scope(&tab.session.editing_group_path) else {
         return false;
     };
-    if let Some(binding) = hit_shape.symbol_instance.filter(|b| b.instance_gid == gid) {
+    let binding_opt = hit_shape.symbol_instance.filter(|b| b.instance_gid == gid);
+    if let Some(binding) = binding_opt {
         return enter_symbol_timeline(tab, binding);
     }
     clear_selection(tab);
@@ -108,15 +104,15 @@ pub(crate) fn enter_group_at(tab: &mut Tab, pt: Point) -> bool {
 
 /// 現在入っているグループまたはシンボルタイムライン編集階層から1段階上の親階層へ戻る
 pub(crate) fn exit_current_group(tab: &mut Tab) -> bool {
-    tab.sync_scene_from_session();
     if !tab.session.editing_group_path.is_empty() {
         clear_selection(tab);
         let Some(exited_gid) = tab.session.editing_group_path.pop() else {
             return false;
         };
-        let indices: Vec<usize> = (0..tab.scene.len())
+        let scene = tab.scene();
+        let indices: Vec<usize> = (0..scene.len())
             .filter(|&i| {
-                tab.scene
+                scene
                     .get(i)
                     .and_then(|s| s.active_group_id_at_scope(&tab.session.editing_group_path))
                     == Some(exited_gid)
@@ -133,7 +129,7 @@ pub(crate) fn exit_current_group(tab: &mut Tab) -> bool {
 pub(crate) fn handle_canvas_double_click(tab: &mut Tab, pt: Point) {
     if !enter_group_at(tab, pt)
         && tab
-            .scene
+            .scene()
             .topmost_shape_at(pt, &tab.session.editing_group_path)
             .is_none()
     {
@@ -143,12 +139,10 @@ pub(crate) fn handle_canvas_double_click(tab: &mut Tab, pt: Point) {
 
 /// Shift クリック等で指定シェイプ（またはグループ塊全体）の選択状態をトグルし、変形ピボットをリセットする
 pub(crate) fn toggle_shape_selection(tab: &mut Tab, shape_idx: usize) {
-    tab.sync_scene_from_session();
     tab.history.end_coalesce();
-    let unit = tab
-        .scene
-        .expand_to_group_unit(shape_idx, &tab.session.editing_group_path);
-    let (sel_mask, _) = tab.scene.selected_shape_mask(&tab.session.selection);
+    let scene = tab.scene();
+    let unit = scene.expand_to_group_unit(shape_idx, &tab.session.editing_group_path);
+    let (sel_mask, _) = scene.selected_shape_mask(&tab.session.selection);
     if sel_mask.get(shape_idx).copied().unwrap_or(false) {
         let remaining: Vec<usize> = tab
             .session
@@ -170,17 +164,14 @@ pub(crate) fn select_single_shape_at(
     sub_mode: SelectSubMode,
     pt: Point,
 ) -> bool {
-    tab.sync_scene_from_session();
     clear_selection(tab);
     let zoom = tab.view.zoom;
-    if let Some(hit_idx) = tab
-        .scene
+    let scene = tab.scene();
+    if let Some(hit_idx) = scene
         .topmost_shape_at(pt, &tab.session.editing_group_path)
-        .or_else(|| compute_hover_target(&tab.scene, &tab.session, pt, zoom, sub_mode).shape_idx())
+        .or_else(|| compute_hover_target(scene, &tab.session, pt, zoom, sub_mode).shape_idx())
     {
-        let unit = tab
-            .scene
-            .expand_to_group_unit(hit_idx, &tab.session.editing_group_path);
+        let unit = scene.expand_to_group_unit(hit_idx, &tab.session.editing_group_path);
         tab.session.set_selected_indices(unit);
         focus_active_layer_to_shape(tab, hit_idx);
         sync_timeline_layer_from_canvas_selection(tab);
@@ -192,7 +183,6 @@ pub(crate) fn select_single_shape_at(
 
 /// Adobe Animate 風の矩形選択（Marquee Selection）
 pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, additive: bool) {
-    tab.sync_scene_from_session();
     tab.history.end_coalesce();
     let min_x = p0.x.min(p1.x);
     let max_x = p0.x.max(p1.x);
@@ -214,12 +204,12 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     let rect = KRect::new(min_x, min_y, max_x, max_y);
     let clip_rect_shape = make_marquee_rect_shape(rect);
     let (was_selected, _) = if additive {
-        tab.scene.selected_shape_mask(&tab.session.selection)
+        tab.scene().selected_shape_mask(&tab.session.selection)
     } else {
         (vec![false; tab.session.shapes.len()], false)
     };
     let hit_group_ids = collect_marquee_hit_groups(
-        &tab.scene,
+        tab.scene(),
         &tab.session.editing_group_path,
         rect,
         &clip_rect_shape,
@@ -290,7 +280,6 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
         }
     }
     tab.session.transform_pivot = None;
-    tab.sync_scene_from_session();
     sync_timeline_layer_from_canvas_selection(tab);
 }
 
@@ -322,7 +311,7 @@ fn point_within_shape_contours(shape: &FillShape, pt: Point, radius: f64, inv_z:
 
 /// 矩形 `rect` と交差する現在の編集スコープ直下の子グループID一覧を収集する
 pub(crate) fn collect_marquee_hit_groups(
-    scene: &Scene,
+    scene: Scene<'_>,
     editing_group_path: &[u64],
     rect: KRect,
     clip_rect_shape: &FillShape,
@@ -360,7 +349,7 @@ pub(crate) fn collect_marquee_hit_groups(
 
 /// アルゴリズム 4: マウス位置に対する頂点・輪郭エッジ・塗りのヒットテスト（`Scene` を読み取る）
 pub(crate) fn compute_hover_target(
-    scene: &Scene,
+    scene: Scene<'_>,
     session: &Session,
     mouse_pt: Point,
     zoom: f32,
@@ -732,7 +721,7 @@ pub(crate) fn prepare_group_selected_shapes(tab: &mut Tab) -> Option<(u64, Vec<F
 pub(crate) fn prepare_ungroup_selected_shapes(tab: &mut Tab) -> Option<Vec<FillShape>> {
     cancel_active_drag(tab);
     if !tab
-        .scene
+        .scene()
         .selection_has_group(&tab.session.selection, &tab.session.editing_group_path)
     {
         return None;
@@ -786,7 +775,6 @@ pub(crate) fn prepare_ungroup_selected_shapes(tab: &mut Tab) -> Option<Vec<FillS
         tab.session.selection_modified = true;
     }
     tab.session.transform_pivot = None;
-    tab.sync_scene_from_session();
     Some(snapshot)
 }
 
@@ -816,14 +804,13 @@ pub(crate) fn prepare_delete_selected_shapes(tab: &mut Tab) -> Option<Vec<FillSh
     tab.session.selection_modified = false;
     tab.session.selection.clear();
     tab.session.transform_pivot = None;
-    tab.sync_scene_from_session();
     Some(snapshot)
 }
 
 /// 現在の編集スコープの図形をすべて消去し、変更前スナップショットを返す
 pub(crate) fn prepare_clear_active_frame_shapes(tab: &mut Tab) -> Option<Vec<FillShape>> {
     let has_any_in_scope = tab
-        .scene
+        .scene()
         .shapes()
         .iter()
         .any(|s| s.is_in_editing_scope(&tab.session.editing_group_path));
@@ -835,6 +822,5 @@ pub(crate) fn prepare_clear_active_frame_shapes(tab: &mut Tab) -> Option<Vec<Fil
     tab.session
         .shapes
         .retain(|s| !s.is_in_editing_scope(&tab.session.editing_group_path));
-    tab.sync_scene_from_session();
     Some(snapshot)
 }

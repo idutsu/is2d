@@ -42,7 +42,7 @@ pub(crate) fn draw_flash_selection_overlay(
 ) {
     let zoom = tab.view.zoom;
     let pan = tab.view.pan;
-    let Some(shape) = tab.scene.get(shape_idx) else {
+    let Some(shape) = tab.scene().get(shape_idx) else {
         return;
     };
     let sel_screen_mesh = shape.cached_selection_screen_mesh(zoom, pan);
@@ -167,9 +167,10 @@ pub(crate) fn handle_select_tool_input(
             let tab = host.tab_mut();
             if !matches!(tab.session.drag, ActiveCanvasDrag::Select(_)) {
                 let zoom = tab.view.zoom;
-                tab.session.hover_target = mouse_pt
-                    .map(|pt| compute_hover_target(&tab.scene, &tab.session, pt, zoom, sub_mode))
+                let hover = mouse_pt
+                    .map(|pt| compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode))
                     .unwrap_or(HoverTarget::None);
+                tab.session.hover_target = hover;
             }
         }
     }
@@ -196,9 +197,10 @@ fn handle_anchor_edit_input(
     }
     let tab = host.tab_mut();
     let zoom = tab.view.zoom;
-    tab.session.hover_target = mouse_pt
-        .map(|pt| compute_hover_target(&tab.scene, &tab.session, pt, zoom, sub_mode))
+    let hover = mouse_pt
+        .map(|pt| compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode))
         .unwrap_or(HoverTarget::None);
+    tab.session.hover_target = hover;
 }
 
 pub(crate) fn start_reshape_drag(
@@ -209,14 +211,13 @@ pub(crate) fn start_reshape_drag(
 ) {
     let sub_mode = host.tool().select_sub_mode;
     host.tab_mut().view.inspect_timeline_frame = false;
-    host.tab_mut().sync_scene_from_session();
     if shift_held {
         host.tab_mut().session.drag =
             ActiveCanvasDrag::Select(SelectDragState::MarqueeSelect(MarqueeDrag::new(pt, true)));
         return;
     }
     let mut target = compute_hover_target(
-        &host.tab().scene,
+        host.tab().scene(),
         &host.tab().session,
         pt,
         host.tab().view.zoom,
@@ -226,7 +227,7 @@ pub(crate) fn start_reshape_drag(
         if let Some(shape_idx) = target.shape_idx() {
             if !host
                 .tab()
-                .scene
+                .scene()
                 .is_shape_selected(shape_idx, &host.tab().session.selection)
             {
                 select_single_shape_at(host, pt);
@@ -245,7 +246,7 @@ pub(crate) fn start_reshape_drag(
     {
         clear_selection(host.tab_mut());
         target = compute_hover_target(
-            &host.tab().scene,
+            host.tab().scene(),
             &host.tab().session,
             pt,
             host.tab().view.zoom,
@@ -262,7 +263,7 @@ pub(crate) fn start_reshape_drag(
             let tab = host.tab_mut();
             let snapshot = tab.session.take_or_clone_unsliced_snapshot();
             if let Some((orig_prev_ctrl, orig_curr_ctrl)) = tab
-                .scene
+                .scene()
                 .get(shape_idx)
                 .and_then(|s| s.get_contour(contour_idx))
                 .and_then(|contour| {
@@ -298,7 +299,7 @@ pub(crate) fn start_reshape_drag(
             let tab = host.tab_mut();
             let snapshot = tab.session.take_or_clone_unsliced_snapshot();
             if let Some(orig_seg) = tab
-                .scene
+                .scene()
                 .get_contour_segment(shape_idx, contour_idx, seg_idx)
             {
                 let grab_t = t.clamp(0.18, 0.82);
@@ -322,7 +323,7 @@ pub(crate) fn start_reshape_drag(
         HoverTarget::Fill { shape_idx } => {
             if !host
                 .tab()
-                .scene
+                .scene()
                 .is_shape_selected(shape_idx, &host.tab().session.selection)
             {
                 select_single_shape_at(host, pt);
@@ -364,7 +365,7 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
 
     if let Some((s_idx, c_idx, g_idx, orig_v, prev_c, curr_c)) = vertex_drag_info {
         let snap_opt = find_snap_vertex(
-            &tab.scene,
+            tab.scene(),
             &tab.session.editing_group_path,
             pt,
             tab.view.zoom,
@@ -386,12 +387,10 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
             set_moved_vertex(shape, (c_idx, g_idx), orig_v, (prev_c, curr_c), target_pt);
             shape.rebuild_cache();
         }
-        tab.sync_scene_from_session();
         return;
     }
 
     let mut move_delta: Option<KVec2> = None;
-    let mut pulled_any = false;
     if let ActiveCanvasDrag::Select(select_drag) = &mut tab.session.drag {
         match select_drag {
             SelectDragState::MoveShape(drag) => {
@@ -421,7 +420,6 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
                         target_pt,
                     );
                     shape.rebuild_cache();
-                    pulled_any = true;
                 }
             }
             _ => {}
@@ -429,9 +427,6 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
     }
     if let Some(delta) = move_delta {
         tab.session.translate_selected(delta);
-        tab.sync_scene_from_session();
-    } else if pulled_any {
-        tab.sync_scene_from_session();
     }
 }
 
@@ -521,18 +516,18 @@ fn handle_reshape_click(host: &mut impl ActionHost, pt: Point, shift_held: bool)
     tab.view.inspect_timeline_frame = false;
     let zoom = tab.view.zoom;
     let hit_shape = tab
-        .scene
+        .scene()
         .topmost_shape_at(pt, &tab.session.editing_group_path)
-        .or_else(|| compute_hover_target(&tab.scene, &tab.session, pt, zoom, sub_mode).shape_idx());
+        .or_else(|| compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode).shape_idx());
     if shift_held {
         if let Some(shape_idx) = hit_shape {
             toggle_shape_selection(tab, shape_idx);
         }
     } else {
         match hit_shape {
-            Some(shape_idx) if tab.scene.is_shape_selected(shape_idx, &tab.session.selection) => {
+            Some(shape_idx) if tab.scene().is_shape_selected(shape_idx, &tab.session.selection) => {
                 let unit = tab
-                    .scene
+                    .scene()
                     .expand_to_group_unit(shape_idx, &tab.session.editing_group_path);
                 retain_selection_and_flush_deselected(tab, &unit);
             }
@@ -552,7 +547,7 @@ fn handle_reshape_click(host: &mut impl ActionHost, pt: Point, shift_held: bool)
 
 /// 頂点ドラッグ時に周囲の他の頂点へ吸着（スナップ）する座標を検索（`Scene` を読み取る）
 pub(crate) fn find_snap_vertex(
-    scene: &Scene,
+    scene: Scene<'_>,
     editing_group_path: &[u64],
     drag_pt: Point,
     zoom: f32,
@@ -604,7 +599,7 @@ pub(crate) fn draw_select_tool_cursor(
             ctx.set_cursor_icon(CursorIcon::Grabbing);
             if tab.view.show_wireframe {
                 if let Some(seg) = tab
-                    .scene
+                    .scene()
                     .get_contour_segment(*shape_idx, *contour_idx, *seg_idx)
                 {
                     draw_highlighted_quad_segment(tab, painter, seg);
@@ -651,7 +646,7 @@ fn draw_select_sub_mode_cursor(
             {
                 ctx.set_cursor_icon(CursorIcon::PointingHand);
                 if let Some(seg) = tab
-                    .scene
+                    .scene()
                     .get_contour_segment(shape_idx, contour_idx, seg_idx)
                 {
                     draw_highlighted_quad_segment(tab, painter, seg);
@@ -694,7 +689,7 @@ fn draw_reshape_hover_cursor(
             ctx.set_cursor_icon(CursorIcon::PointingHand);
             if tab.view.show_wireframe {
                 if let Some(contour) = tab
-                    .scene
+                    .scene()
                     .get(shape_idx)
                     .and_then(|s| s.get_contour(contour_idx))
                 {
@@ -724,7 +719,7 @@ fn draw_reshape_hover_cursor(
             ctx.set_cursor_icon(CursorIcon::PointingHand);
             if tab.view.show_wireframe {
                 if let Some(seg) = tab
-                    .scene
+                    .scene()
                     .get_contour_segment(shape_idx, contour_idx, seg_idx)
                 {
                     draw_highlighted_quad_segment(tab, painter, seg);

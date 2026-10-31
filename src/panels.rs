@@ -808,7 +808,7 @@ fn draw_select_tool_properties(
             actions.push(UiAction::DeleteSelected);
         }
         let has_any = tab
-            .scene
+            .scene()
             .shapes()
             .iter()
             .any(|s| s.is_in_editing_scope(&tab.session.editing_group_path));
@@ -831,7 +831,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
 
     let has_sel = !tab.session.selection.is_empty();
     let has_group = tab
-        .scene
+        .scene()
         .selection_has_group(&tab.session.selection, &tab.session.editing_group_path);
     if ui
         .add_enabled(
@@ -954,7 +954,7 @@ fn draw_transform_tool_properties(
         .add_enabled(
             has_sel
                 && tab
-                    .scene
+                    .scene()
                     .has_custom_transform_pivot(&tab.session.selection, tab.session.transform_pivot),
             egui::Button::new(format!(
                 "{} 変形中心（ピボット）をリセット",
@@ -1789,15 +1789,15 @@ pub(crate) fn draw_canvas_contents(
         draw_onion_skins(tab, &artwork_painter);
     }
 
-    // 1. 下層レイヤーから上層レイヤーへ順に合成描画（`tab.scene.shapes()` はレイヤー順に整列されているため単一カーソルで O(N) 走査）
+    // 1. 下層レイヤーから上層レイヤーへ順に合成描画（`tab.scene().shapes()` はレイヤー順に整列されているため単一カーソルで O(N) 走査）
     let num_layers = tab.doc.root.layers.len();
     let mut selected_group_boxes: Vec<(u64, Option<KRect>, KRect, Option<Point>)> = Vec::new();
-    let (is_sel, has_sel) = tab.scene.selected_shape_mask(&tab.session.selection);
+    let (is_sel, has_sel) = tab.scene().selected_shape_mask(&tab.session.selection);
     let curr_f = tab.doc.root.current_frame;
     let view_world_rect =
         tab.view
             .visible_world_rect(&artwork_painter, stage_size, in_symbol_edit);
-    let scene_shapes = tab.scene.shapes();
+    let scene_shapes = tab.scene().shapes();
     let mut shape_cursor = 0usize;
 
     for layer_idx in 0..num_layers {
@@ -1862,7 +1862,7 @@ pub(crate) fn draw_canvas_contents(
 
     if tool.tool == Tool::Transform {
         crate::tool_transform::draw_free_transform_box(
-            &tab.scene,
+            tab.scene(),
             &tab.session,
             painter,
             &tab.view,
@@ -1895,7 +1895,7 @@ fn draw_editable_layer_shapes(
     let pan = tab.view.pan;
 
     for idx in range {
-        let Some(shape) = tab.scene.get(idx) else {
+        let Some(shape) = tab.scene().get(idx) else {
             continue;
         };
         let in_scope = shape.is_in_editing_scope(&tab.session.editing_group_path);

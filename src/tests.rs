@@ -1379,7 +1379,6 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
     // 細い 2px ブラシストロークを描画（ほぼ全域が境界線の吸着範囲内になる細い線）
     let thin_stroke = make_stroke(Point::new(100.0, 200.0), Point::new(220.0, 200.0), 2.0, red);
     merge_shapes_into_canvas(&mut app.session.shapes, thin_stroke);
-    app.sync_scene_from_session();
     assert_eq!(app.session.shapes.len(), 1);
 
     let vertex_pt = app.session.shapes[0].exterior.segments[0].p0;
@@ -1388,7 +1387,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
     // 1. 未選択状態では、頂点や境界線にホバーすると Vertex / Edge（変形対象）になること
     assert!(matches!(
         tool_select::compute_hover_target(
-            &app.scene,
+            app.scene(),
             &app.session,
             vertex_pt,
             app.view.zoom,
@@ -1398,7 +1397,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
     ));
     assert!(matches!(
         tool_select::compute_hover_target(
-            &app.scene,
+            app.scene(),
             &app.session,
             edge_pt,
             app.view.zoom,
@@ -1418,7 +1417,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
     //    変形（Vertex / Edge）は無効化され、常に移動（HoverTarget::Fill）になること
     assert_eq!(
         tool_select::compute_hover_target(
-            &app.scene,
+            app.scene(),
             &app.session,
             vertex_pt,
             app.view.zoom,
@@ -1429,7 +1428,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
     );
     assert_eq!(
         tool_select::compute_hover_target(
-            &app.scene,
+            app.scene(),
             &app.session,
             edge_pt,
             app.view.zoom,
@@ -1440,7 +1439,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
     );
     assert_eq!(
         tool_select::compute_hover_target(
-            &app.scene,
+            app.scene(),
             &app.session,
             Point::new(160.0, 204.5),
             app.view.zoom,
@@ -1810,11 +1809,11 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
     tool_select::clear_selection(&mut app);
     app.session.set_selected_indices(vec![0]);
     let bbox_f4 = app
-        .scene
+        .scene()
         .selection_bounding_box(&app.session.selection, app.view.zoom)
         .unwrap();
     assert!(
-        (app.scene
+        (app.scene()
             .active_transform_pivot(&app.session.selection, app.session.transform_pivot, bbox_f4)
             - joint_world)
             .hypot()
@@ -1993,7 +1992,7 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
     canvas_tool::select_shapes_for_timeline_selection(&mut app);
     assert_eq!(app.session.selected_indices(), vec![0]);
     assert!(app
-        .scene
+        .scene()
         .selected_single_symbol_binding(&app.session.selection)
         .is_some());
     tool_select::clear_selection(&mut app);
@@ -2519,7 +2518,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
         2,
         "F1では空白シンボルマーカー1個と兄弟シェイプ1個の計2個が CanvasState::shapes 内に一元展開されていること"
     );
-    { let sel = grp_sym_app.scene.expand_to_group_unit(0, &grp_sym_app.session.editing_group_path); grp_sym_app.session.set_selected_indices(sel); }
+    { let sel = grp_sym_app.scene().expand_to_group_unit(0, &grp_sym_app.session.editing_group_path); grp_sym_app.session.set_selected_indices(sel); }
     assert_eq!(grp_sym_app.session.selected_indices(), vec![0, 1]);
     assert!(tool_select::nudge_selected_shapes(
         &mut grp_sym_app,
@@ -2574,7 +2573,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
 
     // F1に戻って親グループを +90° 回転させても、空白フレーム中のシンボルが正確なアフィン変換で追従すること
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
-    { let sel = grp_sym_app.scene.expand_to_group_unit(0, &grp_sym_app.session.editing_group_path); grp_sym_app.session.set_selected_indices(sel); }
+    { let sel = grp_sym_app.scene().expand_to_group_unit(0, &grp_sym_app.session.editing_group_path); grp_sym_app.session.set_selected_indices(sel); }
     assert!(tool_transform::rotate_selected_shapes(
         &mut grp_sym_app,
         std::f64::consts::FRAC_PI_2
@@ -2597,7 +2596,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
 
     // F1に戻って親グループを削除すると、空白フレーム状態のシンボルインスタンスも一緒に削除されること
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
-    { let sel = grp_sym_app.scene.expand_to_group_unit(0, &grp_sym_app.session.editing_group_path); grp_sym_app.session.set_selected_indices(sel); }
+    { let sel = grp_sym_app.scene().expand_to_group_unit(0, &grp_sym_app.session.editing_group_path); grp_sym_app.session.set_selected_indices(sel); }
     assert!(tool_select::delete_selected_shapes(&mut grp_sym_app));
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 2);
     assert!(
@@ -2900,10 +2899,9 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
     assert!(empty_marker.get_contour(0).is_none());
     assert!(empty_marker.geometry_bounding_box().is_none());
     sort_app.session.shapes.push(empty_marker);
-    sort_app.sync_scene_from_session();
     assert!(
         tool_select::find_snap_vertex(
-            &sort_app.scene,
+            sort_app.scene(),
             &sort_app.session.editing_group_path,
             Point::new(50.0, 50.0),
             1.0,
@@ -5466,10 +5464,10 @@ fn test_pivot_commit_restores_unsliced_marquee_snapshot_and_persists() {
 
     doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
     let bbox = app
-        .scene
+        .scene()
         .selection_bounding_box(&app.session.selection, app.view.zoom)
         .unwrap();
-    let current_pivot = app.scene.active_transform_pivot(
+    let current_pivot = app.scene().active_transform_pivot(
         &app.session.selection,
         app.session.transform_pivot,
         bbox,
@@ -5700,7 +5698,7 @@ fn test_cancel_drag_and_noop_drag_preserve_tessellated_mesh_caches() {
     // 2. 自由変形ドラッグを開始して Esc 相当の cancel_active_drag で中断してもキャッシュが失われないこと
     app.session.set_selected_indices(vec![0]);
     let bbox = app
-        .scene
+        .scene()
         .selection_bounding_box(&app.session.selection, app.view.zoom)
         .unwrap();
     tool_transform::start_transform_drag(
@@ -6143,20 +6141,20 @@ fn test_transform_rotate_zone_only_near_four_corners_and_paste_staircase_across_
     canvas_tool::sync_shapes_to_timeline(&mut app);
     app.session.set_selected_indices(vec![0]);
     let bbox = app
-        .scene
+        .scene()
         .selection_bounding_box(&app.session.selection, app.view.zoom)
         .unwrap();
 
     // 1. 四隅の少し外側 (+10px, -10px) は Rotate になるが、上辺中央の少し外側 (四隅から100px以上離れた位置) は Rotate にならないこと (#17)
     let corner_outside = Point::new(bbox.x1 + 10.0, bbox.y0 - 10.0);
     assert_eq!(
-        tool_transform::compute_transform_hover(&app.scene, &app.session, corner_outside, app.view.zoom),
+        tool_transform::compute_transform_hover(app.scene(), &app.session, corner_outside, app.view.zoom),
         canvas_tool::TransformHoverTarget::Rotate,
         "四隅の外側近傍では Rotate ゾーンになること (#17)"
     );
     let top_edge_outside = Point::new(bbox.center().x, bbox.y0 - 12.0);
     assert_eq!(
-        tool_transform::compute_transform_hover(&app.scene, &app.session, top_edge_outside, app.view.zoom),
+        tool_transform::compute_transform_hover(app.scene(), &app.session, top_edge_outside, app.view.zoom),
         canvas_tool::TransformHoverTarget::None,
         "四隅から離れた辺中央の外側は Rotate ゾーンにならないこと (#17)"
     );
@@ -6646,7 +6644,7 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
     doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
     app.session.set_selected_indices(vec![0]);
     let bbox_before = app
-        .scene
+        .scene()
         .selection_bounding_box(&app.session.selection, app.view.zoom)
         .unwrap();
     let br_world = canvas_tool::ScaleHandle::BottomRight.position(bbox_before);
@@ -6696,7 +6694,7 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
         },
     );
     let bbox_scaled = app
-        .scene
+        .scene()
         .selection_bounding_box(&app.session.selection, app.view.zoom)
         .unwrap();
     assert!(
@@ -7028,13 +7026,12 @@ fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape
         Color32::RED,
     );
     app.session.set_selected_indices(vec![0]);
-    app.sync_scene_from_session();
     let bbox = app
-        .scene
+        .scene()
         .selection_bounding_box(&app.session.selection, 1.0)
         .unwrap();
     let top_left = tool_transform::ScaleHandle::TopLeft.position(bbox);
-    let hover = tool_transform::compute_transform_hover(&app.scene, &app.session, top_left, 1.0);
+    let hover = tool_transform::compute_transform_hover(app.scene(), &app.session, top_left, 1.0);
     assert_eq!(
         hover,
         tool_transform::TransformHoverTarget::Scale(tool_transform::ScaleHandle::TopLeft),
@@ -8133,7 +8130,7 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
     let red = Color32::from_rgb(220, 60, 60);
     let blue = Color32::from_rgb(60, 120, 230);
 
-    // 1. 描画すると Tab::scene に解決済みの読み取り専用図形が構築され、Scene 経由で当たり判定が動くこと
+    // 1. 描画すると Tab::scene() に解決済みの読み取り専用借用ビューが返され、Scene 経由で当たり判定が動くこと
     run(
         &mut app,
         &[Action::PaintStroke {
@@ -8142,53 +8139,53 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
             color: red,
         }],
     );
-    assert_eq!(app.scene.len(), 1);
+    assert_eq!(app.scene().len(), 1);
     assert_eq!(
-        app.scene
+        app.scene()
             .topmost_shape_at(Point::new(140.0, 100.0), &app.session.editing_group_path),
         Some(0),
         "Scene::topmost_shape_at で現在フレームの図形がヒットすること"
     );
     assert_eq!(
         select_ops::compute_hover_target(
-            &app.scene,
+            app.scene(),
             &app.session,
             Point::new(140.0, 100.0),
             app.view.zoom,
             app.tool.select_sub_mode,
         ),
         HoverTarget::Fill { shape_idx: 0 },
-        "compute_hover_target が &Scene を読み取って当たり判定を返すこと"
+        "compute_hover_target が Scene<'_> を読み取って当たり判定を返すこと"
     );
 
-    // 2. Scene::resolve(&app.doc, Some(&app.scene)) が既存メッシュキャッシュを引き継ぎつつ解決結果を返すこと
-    let mesh_arc_before = std::sync::Arc::clone(app.scene.shapes()[0].fill_mesh());
-    let resolved = canvas_tool::Scene::resolve(&app.doc, Some(&app.scene));
+    // 2. Scene::resolve(&app.doc, &app.session.shapes) が既存メッシュキャッシュを引き継ぎつつ解決結果を返すこと
+    let mesh_arc_before = std::sync::Arc::clone(app.scene().shapes()[0].fill_mesh());
+    let resolved = canvas_tool::Scene::resolve(&app.doc, &app.session.shapes);
     assert_eq!(resolved.len(), 1);
     assert!(
-        std::sync::Arc::ptr_eq(resolved.shapes()[0].fill_mesh(), &mesh_arc_before),
+        std::sync::Arc::ptr_eq(resolved[0].fill_mesh(), &mesh_arc_before),
         "Scene::resolve は幾何・色が一致する図形のテッセレーション済みメッシュキャッシュを O(1) で引き継ぐこと"
     );
 
-    // 3. 選択・自由変形ホバー・バウンディングボックス・ピボット計算がすべて &Scene 経由で動作すること
+    // 3. 選択・自由変形ホバー・バウンディングボックス・ピボット計算がすべて Scene<'_> 経由で動作すること
     run(
         &mut app,
         &[Action::SelectSingleAt {
             pt: Point::new(140.0, 100.0),
         }],
     );
-    let (mask, any_sel) = app.scene.selected_shape_mask(&app.session.selection);
+    let (mask, any_sel) = app.scene().selected_shape_mask(&app.session.selection);
     assert!(any_sel);
     assert_eq!(mask, vec![true]);
     let bbox = app
-        .scene
+        .scene()
         .selection_bounding_box(&app.session.selection, app.view.zoom)
         .unwrap();
     let tl_handle = canvas_tool::ScaleHandle::TopLeft.position(bbox);
     assert_eq!(
-        tool_transform::compute_transform_hover(&app.scene, &app.session, tl_handle, app.view.zoom),
+        tool_transform::compute_transform_hover(app.scene(), &app.session, tl_handle, app.view.zoom),
         canvas_tool::TransformHoverTarget::Scale(canvas_tool::ScaleHandle::TopLeft),
-        "compute_transform_hover が &Scene と &Session からスケールハンドルを判定できること"
+        "compute_transform_hover が Scene<'_> と &Session からスケールハンドルを判定できること"
     );
 
     // 4. シンボル変換・インプレイス編集への出入りでも Scene が現在の編集階層に合わせて解決されること
@@ -8207,30 +8204,118 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
         ],
     );
     assert_eq!(
-        app.scene.len(),
+        app.scene().len(),
         2,
         "シンボル内タイムライン編集中も Scene にシンボル内の2図形が解決されていること"
     );
     assert_eq!(
-        app.scene
+        app.scene()
             .topmost_shape_at(Point::new(140.0, 160.0), &app.session.editing_group_path),
         Some(1)
     );
 
     run(&mut app, &[Action::ExitGroup]);
     assert_eq!(
-        app.scene.len(),
+        app.scene().len(),
         2,
         "シンボル編集から親タイムラインへ戻った後も、展開後の2図形が Scene に反映されていること"
     );
     assert!(
-        app.scene
+        app.scene()
             .shapes()
             .iter()
             .all(|s| s.symbol_instance.is_some()),
         "親タイムラインの Scene 図形にはシンボルインスタンスバインディングが付与されていること"
     );
 }
+
+#[test]
+fn test_stage4_drag_2000_shapes_preserves_unmoved_mesh_caches() {
+    use doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let lid = app.doc.root.layers[0].id;
+    let color = Color32::from_rgb(220, 80, 60);
+
+    // 2000個の独立した図形を配置（50列 × 40行）
+    let mut shapes = Vec::with_capacity(2000);
+    for idx in 0..2000usize {
+        let col = (idx % 50) as f64;
+        let row = (idx / 50) as f64;
+        let x0 = 20.0 + col * 24.0;
+        let y0 = 20.0 + row * 24.0;
+        let mut stroke = make_stroke(Point::new(x0, y0), Point::new(x0 + 10.0, y0), 3.0, color);
+        stroke[0].layer_id = lid;
+        shapes.push(stroke.remove(0));
+    }
+    app.session.shapes = shapes;
+    canvas_tool::sync_shapes_to_timeline(&mut app);
+    assert_eq!(app.scene().len(), 2000);
+
+    // ドラッグ前の描画（Scene 経由で全2000図形の fill_mesh() を評価・キャッシュ構築）
+    let meshes_before: std::collections::HashMap<u64, std::sync::Arc<egui::epaint::Mesh>> = app
+        .scene()
+        .shapes()
+        .iter()
+        .map(|s| (s.shape_id, std::sync::Arc::clone(s.fill_mesh())))
+        .collect();
+    assert_eq!(meshes_before.len(), 2000);
+
+    // 1つの図形（先頭図形: (25.0, 20.0)）を選択してドラッグ移動を開始・複数回マウス移動・確定する
+    let target_pt = Point::new(25.0, 20.0);
+    run(&mut app, &[Action::SelectSingleAt { pt: target_pt }]);
+    assert_eq!(app.session.selection.shapes.len(), 1);
+    let moved_shape_id = *app.session.selection.shapes.iter().next().unwrap();
+
+    let move_drag = clipboard_ops::begin_move_selection_drag(&mut app, target_pt, false);
+    app.session.drag = canvas_tool::ActiveCanvasDrag::Select(
+        canvas_tool::SelectDragState::MoveShape(move_drag),
+    );
+    tool_select::update_reshape_drag(&mut app, Point::new(28.0, 22.0));
+
+    // ドラッグ中（マウス移動1回目直後）に Scene から fill_mesh() を読んだとき、
+    // 動かしていない残り1999個の図形がすべてドラッグ前と同一の Arc<Mesh> を保持していること
+    let mut unmoved_during_drag = 0usize;
+    for shape in app.scene().shapes() {
+        if shape.shape_id == moved_shape_id {
+            continue;
+        }
+        let before_arc = &meshes_before[&shape.shape_id];
+        assert!(
+            std::sync::Arc::ptr_eq(shape.fill_mesh(), before_arc),
+            "ドラッグ中に動かしていない図形 (shape_id={}) の fill_mesh() キャッシュが失われず同一 Arc を返すこと",
+            shape.shape_id
+        );
+        unmoved_during_drag += 1;
+    }
+    assert_eq!(unmoved_during_drag, 1999);
+
+    // さらにマウス移動してドラッグ確定（Action::MoveSelected 相当のタイムライン同期含む）
+    tool_select::update_reshape_drag(&mut app, Point::new(32.0, 25.0));
+    run(
+        &mut app,
+        &[Action::MoveSelected {
+            delta: KVec2::new(4.0, 3.0),
+        }],
+    );
+
+    // ドラッグ確定・タイムライン同期後も、残り1999個の図形の fill_mesh() がドラッグ前と同一の Arc<Mesh> を返していること
+    let mut unmoved_after_commit = 0usize;
+    for shape in app.scene().shapes() {
+        if shape.shape_id == moved_shape_id {
+            continue;
+        }
+        let before_arc = &meshes_before[&shape.shape_id];
+        assert!(
+            std::sync::Arc::ptr_eq(shape.fill_mesh(), before_arc),
+            "ドラッグ確定後も動かしていない図形 (shape_id={}) の fill_mesh() が再テッセレーションされず同一 Arc を返すこと",
+            shape.shape_id
+        );
+        unmoved_after_commit += 1;
+    }
+    assert_eq!(unmoved_after_commit, 1999);
+}
+
 
 
 

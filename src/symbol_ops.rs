@@ -160,7 +160,7 @@ pub(crate) fn selected_single_symbol_info(
     tab: &Tab,
 ) -> Option<(SymbolInstanceBinding, String, usize)> {
     let binding = tab
-        .scene
+        .scene()
         .selected_single_symbol_binding(&tab.session.selection)
         .or_else(|| {
             let layer = tab.doc.root.layers.get(tab.doc.root.active_layer)?;

@@ -430,7 +430,6 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         host.stop_playback();
     }
     let (tab, tool, clipboard, toast) = host.parts_mut();
-    tab.sync_scene_from_session();
     let coalesce = action.coalesce_key(tab);
 
     let res = match action {
@@ -617,12 +616,12 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         }
         Action::ScaleSelection { sx, sy } => {
             let Some(bbox) = tab
-                .scene
+                .scene()
                 .selection_bounding_box(&tab.session.selection, tab.view.zoom)
             else {
                 return ApplyResult::Applied(false);
             };
-            let pivot = tab.scene.active_transform_pivot(
+            let pivot = tab.scene().active_transform_pivot(
                 &tab.session.selection,
                 tab.session.transform_pivot,
                 bbox,
@@ -634,12 +633,12 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         }
         Action::FlipSelection { flip_x, flip_y } => {
             let Some(bbox) = tab
-                .scene
+                .scene()
                 .selection_bounding_box(&tab.session.selection, tab.view.zoom)
             else {
                 return ApplyResult::Applied(false);
             };
-            let pivot = tab.scene.active_transform_pivot(
+            let pivot = tab.scene().active_transform_pivot(
                 &tab.session.selection,
                 tab.session.transform_pivot,
                 bbox,
@@ -653,12 +652,12 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         }
         Action::RotateSelection { angle_rad } => {
             let Some(bbox) = tab
-                .scene
+                .scene()
                 .selection_bounding_box(&tab.session.selection, tab.view.zoom)
             else {
                 return ApplyResult::Applied(false);
             };
-            let pivot = tab.scene.active_transform_pivot(
+            let pivot = tab.scene().active_transform_pivot(
                 &tab.session.selection,
                 tab.session.transform_pivot,
                 bbox,
@@ -866,7 +865,6 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             ApplyResult::Applied(true)
         }
     };
-    tab.sync_scene_from_session();
     res
 }
 
@@ -936,7 +934,7 @@ fn apply_raw_outline(tab: &mut Tab, active_tool: Tool, brush_color: Color32, raw
 }
 
 fn collect_all_visible_shapes(tab: &Tab) -> Vec<FillShape> {
-    let mut out = Vec::with_capacity(tab.scene.len());
+    let mut out = Vec::with_capacity(tab.scene().len());
     for (layer_idx, layer) in tab.doc.root.layers.iter().enumerate() {
         if !layer.visible {
             continue;
@@ -950,7 +948,7 @@ fn collect_all_visible_shapes(tab: &Tab) -> Vec<FillShape> {
         } else {
             let lid = layer.id;
             out.extend(
-                tab.scene
+                tab.scene()
                     .shapes()
                     .iter()
                     .filter(|s| s.layer_id == lid)
@@ -969,14 +967,14 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
 
     // 0. 選択領域が存在する場合：選択中の「生シェイプ」のみにバケツで色を流し込む（グループは無効）
     if !tab.session.selection.is_empty() {
-        let clicked_selected_raw = tab.scene.shapes().iter().any(|s| {
+        let clicked_selected_raw = tab.scene().shapes().iter().any(|s| {
             tab.session.selection.contains_shape(s)
                 && tab.doc.root.is_layer_editable_by_id(s.layer_id)
                 && s.is_raw_at_scope(&tab.session.editing_group_path)
                 && s.contains_point(pt)
         });
         if clicked_selected_raw {
-            let any_color_diff = tab.scene.shapes().iter().any(|s| {
+            let any_color_diff = tab.scene().shapes().iter().any(|s| {
                 tab.session.selection.contains_shape(s)
                     && tab.doc.root.is_layer_editable_by_id(s.layer_id)
                     && s.is_raw_at_scope(&tab.session.editing_group_path)
@@ -1004,8 +1002,9 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
     let all_visible_shapes = collect_all_visible_shapes(tab);
     let target_layer_ord = tab.doc.root.layer_index_by_id(target_lid).unwrap_or(0);
 
-    if let Some(hit_idx) = (0..tab.scene.len()).rev().find(|&idx| {
-        let Some(s) = tab.scene.get(idx) else {
+    let scene = tab.scene();
+    if let Some(hit_idx) = (0..scene.len()).rev().find(|&idx| {
+        let Some(s) = scene.get(idx) else {
             return false;
         };
         s.layer_id == target_lid
@@ -1020,7 +1019,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                     .any(|s| s.layer_id == layer.id && s.contains_point(pt))
         });
 
-        let Some(hit_shape) = tab.scene.get(hit_idx).cloned() else {
+        let Some(hit_shape) = scene.get(hit_idx).cloned() else {
             return false;
         };
         if !occluded_above && hit_shape.is_raw_at_scope(&tab.session.editing_group_path) {
@@ -1079,7 +1078,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
         .collect();
     let enclosed_opt = find_enclosed_region_at(&wall_shapes, pt, fill_color).or_else(|| {
         let active_layer_raw: Vec<FillShape> = tab
-            .scene
+            .scene()
             .shapes()
             .iter()
             .filter(|s| {
@@ -1173,7 +1172,7 @@ fn apply_deform_shape(
 fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     clear_selection(tab);
     let target = compute_hover_target(
-        &tab.scene,
+        tab.scene(),
         &tab.session,
         from,
         tab.view.zoom,
@@ -1191,7 +1190,7 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     };
     let snapshot = tab.session.take_or_clone_unsliced_snapshot();
     let Some(orig_seg) = tab
-        .scene
+        .scene()
         .get_contour_segment(shape_idx, contour_idx, seg_idx)
     else {
         return false;
@@ -1207,7 +1206,7 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
 fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     clear_selection(tab);
     let target = compute_hover_target(
-        &tab.scene,
+        tab.scene(),
         &tab.session,
         from,
         tab.view.zoom,
@@ -1224,7 +1223,7 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     };
     let snapshot = tab.session.take_or_clone_unsliced_snapshot();
     let Some((orig_prev_ctrl, orig_curr_ctrl)) = tab
-        .scene
+        .scene()
         .get(shape_idx)
         .and_then(|s| s.get_contour(contour_idx))
         .and_then(|contour| {
@@ -1257,7 +1256,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
     } else {
         SelectSubMode::DeleteAnchor
     };
-    let target = compute_hover_target(&tab.scene, &tab.session, pt, zoom, sub_mode);
+    let target = compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode);
     let had_unsliced = tab.session.has_unsliced_snapshot();
     let snapshot = tab.session.take_or_clone_unsliced_snapshot();
     let modified_shape = match (is_add, target) {
@@ -1321,7 +1320,7 @@ fn apply_set_selected_symbol_world_pivot(
     commit_to_timeline: bool,
 ) -> bool {
     let Some(binding) = tab
-        .scene
+        .scene()
         .selected_single_symbol_binding(&tab.session.selection)
     else {
         return false;
@@ -1338,14 +1337,13 @@ fn apply_set_selected_symbol_world_pivot(
     if (new_local_pivot - binding.pivot).hypot() <= 1e-7 {
         return true;
     }
-    if !tab.session.selection_modified && tab.session.restore_unsliced_preserving_selection() {
-        tab.sync_scene_from_session();
+    if !tab.session.selection_modified {
+        tab.session.restore_unsliced_preserving_selection();
     }
     let undo_snapshot =
         commit_to_timeline.then(|| tab.session.take_or_clone_unsliced_snapshot());
     tab.session
         .update_symbol_instance_binding(binding.instance_gid, |b| b.pivot = new_local_pivot);
-    tab.sync_scene_from_session();
     if let Some(snapshot) = undo_snapshot {
         commit_canvas_mutation(tab, snapshot);
     }
