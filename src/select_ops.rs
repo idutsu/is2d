@@ -784,11 +784,9 @@ pub(crate) fn prepare_group_selected_shapes(
         edit.shapes = unselected;
     });
 
-    tab.with_active_timeline_mut(|tl, _| {
-        if let Some(l_idx) = tl.layer_index_by_id(target_lid) {
-            tl.active_layer = l_idx;
-        }
-    });
+    if let Some(l_idx) = tab.active_timeline().layer_index_by_id(target_lid) {
+        tab.set_active_layer(l_idx);
+    }
     tab.session.rebuild_overlay_from_floating();
     tab.session.transform_pivot = None;
     Some(new_gid)

@@ -706,15 +706,18 @@ pub(crate) type Scope = Vec<u64>;
 mod scene_base_cache {
     use std::collections::HashMap;
     use std::ops::Range;
+    use std::sync::Arc;
 
+    use eframe::egui::{self, Vec2};
     use kurbo::Affine;
 
-    use super::{LayerId, ShapeId};
+    use super::{Document, EditPath, LayerId, ShapeId};
     use crate::symbol::{
-        compute_resolved_cel_signature, ResolvedCelSig, SymbolDef, SymbolLoopMode,
+        compute_backdrop_layer_cel_signature, compute_resolved_cel_signature, ResolvedCelSig,
+        SymbolDef, SymbolLoopMode,
     };
     use crate::timeline::{Layer, Timeline};
-    use crate::vector_engine::FillShape;
+    use crate::vector_engine::{append_mesh, transform_mesh_to_screen, FillShape};
 
     struct CachedLayer {
         layer_id: LayerId,
@@ -1083,9 +1086,335 @@ mod scene_base_cache {
             true
         }
     }
+
+    type BackdropViewKey = (u32, u32, u32);
+    type CombinedBackdropMeshCache = Option<(BackdropViewKey, Option<Arc<egui::Mesh>>)>;
+
+    struct CachedBackdropLayer {
+        level_idx: usize,
+        parent_symbol_id: Option<u64>,
+        excluded_instance_gid: u64,
+        world_xform_bits: [u64; 6],
+        layer_id: LayerId,
+        cel_sig: ResolvedCelSig,
+        eval_frame: usize,
+        shapes: Vec<FillShape>,
+        world_mesh: egui::Mesh,
+        screen_cache: Option<(BackdropViewKey, egui::Mesh)>,
+    }
+
+    /// シンボルインプレイス編集時の親シーン背景のレイヤー単位キャッシュ
+    /// （キー：階層・レイヤーID・セルのリビジョン・評価フレーム・参照しているシンボルのリビジョン）
+    #[derive(Default)]
+    pub(crate) struct BackdropCache {
+        layers: Vec<CachedBackdropLayer>,
+        combined_screen_cache: CombinedBackdropMeshCache,
+    }
+
+    fn backdrop_layer_eval_frame(
+        layer: &Layer,
+        kf_idx: usize,
+        frame: usize,
+        excluded_instance_gid: u64,
+        library: &[SymbolDef],
+    ) -> usize {
+        let kf = &layer.keyframes[kf_idx];
+        let has_tween = layer
+            .interpolated_tween_binding_at(frame)
+            .is_some_and(|(_, b)| b.instance_gid != excluded_instance_gid);
+        let all_single_frame = !has_tween
+            && kf
+                .cel
+                .instances
+                .iter()
+                .filter(|inst| inst.binding.instance_gid != excluded_instance_gid)
+                .all(|inst| inst.binding.loop_mode == SymbolLoopMode::SingleFrame);
+        let has_dyn = !all_single_frame
+            && kf
+                .cel
+                .instances
+                .iter()
+                .filter(|inst| inst.binding.instance_gid != excluded_instance_gid)
+                .any(|inst| {
+                    library.iter().any(|sym| {
+                        sym.id == inst.binding.symbol_id && sym.has_dynamic_animation(library, 0)
+                    })
+                });
+        if !all_single_frame && (has_tween || has_dyn) {
+            frame
+        } else {
+            kf.start_frame
+        }
+    }
+
+    impl BackdropCache {
+        pub(crate) fn cached_screen_mesh(
+            &mut self,
+            doc: &Document,
+            edit_path: &EditPath,
+            zoom: f32,
+            pan: Vec2,
+        ) -> Option<Arc<egui::Mesh>> {
+            if edit_path.is_empty() {
+                self.layers.clear();
+                self.combined_screen_cache = None;
+                return None;
+            }
+            let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
+            let mut active_specs = Vec::new();
+            for lvl_idx in 0..edit_path.levels.len() {
+                let lvl = &edit_path.levels[lvl_idx];
+                let (parent_sym_id, parent_tl) = if lvl_idx == 0 {
+                    (None, &doc.root)
+                } else {
+                    let prev_sym_id = edit_path.levels[lvl_idx - 1].symbol_id;
+                    let Some(sym) = doc.find_symbol(prev_sym_id) else {
+                        continue;
+                    };
+                    (Some(prev_sym_id), &sym.timeline)
+                };
+                let parent_world_xform = edit_path.levels[..lvl_idx]
+                    .iter()
+                    .fold(Affine::IDENTITY, |acc, l| acc * l.xform_in_parent);
+                let xform_bits = parent_world_xform.as_coeffs().map(f64::to_bits);
+                let curr_f = lvl
+                    .parent_frame
+                    .min(parent_tl.total_frames.saturating_sub(1));
+                for layer_idx in 0..parent_tl.layers.len() {
+                    let layer = &parent_tl.layers[layer_idx];
+                    if !layer.visible {
+                        continue;
+                    }
+                    let Some(kf_idx) = layer.keyframe_index_at(curr_f) else {
+                        continue;
+                    };
+                    let ef = backdrop_layer_eval_frame(
+                        layer,
+                        kf_idx,
+                        curr_f,
+                        lvl.instance_gid,
+                        &doc.library,
+                    );
+                    active_specs.push((
+                        lvl_idx,
+                        parent_sym_id,
+                        lvl.instance_gid,
+                        parent_world_xform,
+                        xform_bits,
+                        curr_f,
+                        layer_idx,
+                        kf_idx,
+                        ef,
+                    ));
+                }
+            }
+            self.resolve_and_build(doc, &active_specs, view_key, zoom, pan)
+        }
+
+        #[allow(clippy::type_complexity)]
+        fn resolve_and_build(
+            &mut self,
+            doc: &Document,
+            active_specs: &[(
+                usize,
+                Option<u64>,
+                u64,
+                Affine,
+                [u64; 6],
+                usize,
+                usize,
+                usize,
+                usize,
+            )],
+            view_key: (u32, u32, u32),
+            zoom: f32,
+            pan: Vec2,
+        ) -> Option<Arc<egui::Mesh>> {
+            let get_tl = |sym_id: Option<u64>| -> &Timeline {
+                match sym_id {
+                    None => &doc.root,
+                    Some(id) => &doc.find_symbol(id).expect("valid parent symbol").timeline,
+                }
+            };
+
+            let all_unchanged = self.layers.len() == active_specs.len()
+                && self.layers.iter().zip(active_specs).all(
+                    |(
+                        cl,
+                        &(
+                            lvl_idx,
+                            parent_sym_id,
+                            excl_gid,
+                            _,
+                            xform_bits,
+                            _,
+                            layer_idx,
+                            kf_idx,
+                            ef,
+                        ),
+                    )| {
+                        let layer = &get_tl(parent_sym_id).layers[layer_idx];
+                        cl.level_idx == lvl_idx
+                            && cl.parent_symbol_id == parent_sym_id
+                            && cl.excluded_instance_gid == excl_gid
+                            && cl.world_xform_bits == xform_bits
+                            && cl.layer_id == layer.id
+                            && cl.eval_frame == ef
+                            && cl.cel_sig.matches_layer_keyframe(layer, kf_idx, &doc.library)
+                    },
+                );
+
+            if all_unchanged {
+                if let Some((cached_vk, ref cached_res)) = self.combined_screen_cache {
+                    if cached_vk == view_key {
+                        return cached_res.clone();
+                    }
+                }
+            } else {
+                let mut old_by_key: HashMap<(usize, Option<u64>, LayerId), CachedBackdropLayer> =
+                    HashMap::with_capacity(self.layers.len());
+                for cl in self.layers.drain(..) {
+                    old_by_key.insert((cl.level_idx, cl.parent_symbol_id, cl.layer_id), cl);
+                }
+
+                let mut new_layers = Vec::with_capacity(active_specs.len());
+                for &(
+                    lvl_idx,
+                    parent_sym_id,
+                    excl_gid,
+                    parent_world_xform,
+                    xform_bits,
+                    curr_f,
+                    layer_idx,
+                    kf_idx,
+                    ef,
+                ) in active_specs
+                {
+                    let parent_tl = get_tl(parent_sym_id);
+                    let layer = &parent_tl.layers[layer_idx];
+                    if let Some(old_cl) =
+                        old_by_key.remove(&(lvl_idx, parent_sym_id, layer.id))
+                    {
+                        let key_unchanged = old_cl.excluded_instance_gid == excl_gid
+                            && old_cl.world_xform_bits == xform_bits
+                            && old_cl.eval_frame == ef
+                            && old_cl
+                                .cel_sig
+                                .matches_layer_keyframe(layer, kf_idx, &doc.library);
+                        if key_unchanged {
+                            new_layers.push(old_cl);
+                            continue;
+                        }
+                        new_layers.push(Self::build_layer(
+                            doc,
+                            parent_tl,
+                            (lvl_idx, parent_sym_id, excl_gid, parent_world_xform, xform_bits),
+                            (curr_f, layer_idx, kf_idx, ef),
+                            (old_cl.world_xform_bits == xform_bits).then_some(&old_cl.shapes),
+                        ));
+                    } else {
+                        new_layers.push(Self::build_layer(
+                            doc,
+                            parent_tl,
+                            (lvl_idx, parent_sym_id, excl_gid, parent_world_xform, xform_bits),
+                            (curr_f, layer_idx, kf_idx, ef),
+                            None,
+                        ));
+                    }
+                }
+                self.layers = new_layers;
+                self.combined_screen_cache = None;
+            }
+
+            let mut combined = egui::Mesh::default();
+            for cl in &mut self.layers {
+                if cl.world_mesh.is_empty() {
+                    continue;
+                }
+                let need_transform = cl
+                    .screen_cache
+                    .as_ref()
+                    .is_none_or(|(vk, _)| *vk != view_key);
+                if need_transform {
+                    let screen_m = transform_mesh_to_screen(&cl.world_mesh, zoom, pan, true);
+                    cl.screen_cache = Some((view_key, screen_m));
+                }
+                if let Some((_, ref screen_m)) = cl.screen_cache {
+                    append_mesh(&mut combined, screen_m);
+                }
+            }
+            let res = (!combined.is_empty()).then(|| Arc::new(combined));
+            self.combined_screen_cache = Some((view_key, res.clone()));
+            res
+        }
+
+        fn build_layer(
+            doc: &Document,
+            parent_tl: &Timeline,
+            (lvl_idx, parent_sym_id, excl_gid, parent_world_xform, xform_bits): (
+                usize,
+                Option<u64>,
+                u64,
+                Affine,
+                [u64; 6],
+            ),
+            (curr_f, layer_idx, kf_idx, ef): (usize, usize, usize, usize),
+            donor_shapes: Option<&[FillShape]>,
+        ) -> CachedBackdropLayer {
+            let layer = &parent_tl.layers[layer_idx];
+            if parent_world_xform == Affine::IDENTITY {
+                for s in layer.keyframes[kf_idx].cel.shapes.iter() {
+                    let _ = s.fill_mesh();
+                }
+            }
+            let resolved = parent_tl.evaluate_layer_shapes_at(layer_idx, curr_f, &doc.library);
+            let donor_map: Option<HashMap<(ShapeId, u64), &FillShape>> = donor_shapes
+                .filter(|d| !d.is_empty())
+                .map(|donors| {
+                    donors
+                        .iter()
+                        .map(|d| ((d.shape_id, d.mesh_revision), d))
+                        .collect()
+                });
+            let mut shapes = Vec::with_capacity(resolved.len());
+            let mut world_mesh = egui::Mesh::default();
+            for mut s in resolved {
+                if s.symbol_instance
+                    .is_some_and(|b| b.instance_gid == excl_gid)
+                {
+                    continue;
+                }
+                if parent_world_xform != Affine::IDENTITY {
+                    let _ = s.fill_mesh();
+                    s.transform_with_cached_mesh(parent_world_xform);
+                }
+                if let Some(ref map) = donor_map {
+                    if let Some(donor) = map.get(&(s.shape_id, s.mesh_revision)) {
+                        s.reuse_caches_from(donor);
+                    }
+                }
+                append_mesh(&mut world_mesh, s.fill_mesh());
+                shapes.push(s);
+            }
+            let cel_sig =
+                compute_backdrop_layer_cel_signature(layer, kf_idx, excl_gid, &doc.library);
+            CachedBackdropLayer {
+                level_idx: lvl_idx,
+                parent_symbol_id: parent_sym_id,
+                excluded_instance_gid: excl_gid,
+                world_xform_bits: xform_bits,
+                layer_id: layer.id,
+                cel_sig,
+                eval_frame: ef,
+                shapes,
+                world_mesh,
+                screen_cache: None,
+            }
+        }
+    }
 }
 
-use scene_base_cache::SceneBaseCache;
+use scene_base_cache::{BackdropCache, SceneBaseCache};
 
 /// `Overlay` で追加する図形の重なり順指定
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1593,8 +1922,8 @@ impl Floating {
 pub(crate) struct Session {
     /// シンボルインプレイス編集の経路（空ならルート）
     pub(crate) edit_path: EditPath,
-    /// シンボル編集中の親シーン背景薄表示セル派生キャッシュ `(doc.revision, edit_path, backdrop_cel, parent_frame)`
-    pub(crate) backdrop_cache: SyncCache<Option<(u64, EditPath, Cel, usize)>>,
+    /// シンボル編集中の親シーン背景薄表示のレイヤー単位キャッシュ
+    pub(crate) backdrop_cache: SyncCache<BackdropCache>,
     /// `Document` から構築されるレイヤー別の読み取り専用土台キャッシュ
     pub(crate) base_cache: SceneBaseCache,
     /// 土台図形列に対する上乗せ図形状態（Floating およびドラッグ中の仮表示）
@@ -2548,7 +2877,36 @@ impl Tab {
         &self.doc.root
     }
 
-    /// 現在編集中のタイムラインへの可変参照とシンボルライブラリへの読み取り専用参照を渡して処理を実行する
+    #[inline]
+    fn active_timeline_raw_mut(&mut self) -> &mut Timeline {
+        if let Some(last) = self.session.edit_path.last() {
+            if let Some(idx) = self.doc.library.iter().position(|s| s.id == last.symbol_id) {
+                return &mut self.doc.library[idx].timeline;
+            }
+        }
+        &mut self.doc.root
+    }
+
+    /// 編集中タイムラインの再生ヘッド（`current_frame`）のみを変更し、リビジョンは上げずに土台キャッシュを更新する
+    pub(crate) fn set_active_frame(&mut self, frame: usize) {
+        self.active_timeline_raw_mut().current_frame = frame;
+        self.refresh_scene_base();
+    }
+
+    /// 編集中タイムラインの選択レイヤー（`active_layer`）のみを変更し、リビジョンは上げない
+    pub(crate) fn set_active_layer(&mut self, idx: usize) {
+        let tl = self.active_timeline_raw_mut();
+        if !tl.layers.is_empty() {
+            tl.active_layer = idx.min(tl.layers.len() - 1);
+        }
+    }
+
+    /// 編集中タイムラインのセル範囲選択（`cell_selection`）のみを変更し、リビジョンは上げない
+    pub(crate) fn set_active_cell_selection(&mut self, sel: Option<TimelineCellSelection>) {
+        self.active_timeline_raw_mut().cell_selection = sel;
+    }
+
+    /// 現在編集中のタイムラインへの可変参照とシンボルライブラリへの読み取り専用参照を渡して絵を変える編集を実行し、リビジョンを上げる
     pub(crate) fn with_active_timeline_mut<R>(
         &mut self,
         f: impl FnOnce(&mut Timeline, &[SymbolDef]) -> R,
@@ -2574,84 +2932,18 @@ impl Tab {
         res
     }
 
-    /// シンボルインプレイス編集中の親シーン背景薄表示メッシュを派生データキャッシュ経由で返す
+    /// シンボルインプレイス編集中の親シーン背景薄表示メッシュをレイヤー単位キャッシュ経由で返す
     pub(crate) fn cached_backdrop_screen_mesh(
         &self,
         zoom: f32,
         pan: Vec2,
     ) -> Option<Arc<egui::Mesh>> {
-        if self.session.edit_path.is_empty() {
-            return None;
-        }
-        let mut guard = self.session.backdrop_cache.lock();
-        let needs_rebuild = guard.as_ref().is_none_or(|(rev, path, _, _)| {
-            *rev != self.doc.revision || path != &self.session.edit_path
-        });
-        if needs_rebuild {
-            let mut backdrop_shapes = Vec::new();
-            for lvl_idx in 0..self.session.edit_path.levels.len() {
-                let lvl = &self.session.edit_path.levels[lvl_idx];
-                let parent_tl = if lvl_idx == 0 {
-                    &self.doc.root
-                } else {
-                    let prev_sym_id = self.session.edit_path.levels[lvl_idx - 1].symbol_id;
-                    let Some(sym) = self.doc.find_symbol(prev_sym_id) else {
-                        continue;
-                    };
-                    &sym.timeline
-                };
-                let parent_world_xform = self.session.edit_path.levels[..lvl_idx]
-                    .iter()
-                    .fold(Affine::IDENTITY, |acc, l| acc * l.xform_in_parent);
-                let curr_f = lvl
-                    .parent_frame
-                    .min(parent_tl.total_frames.saturating_sub(1));
-                for layer_idx in 0..parent_tl.layers.len() {
-                    let layer = &parent_tl.layers[layer_idx];
-                    if !layer.visible {
-                        continue;
-                    }
-                    let kf_start = layer
-                        .keyframe_index_at(curr_f)
-                        .map(|ki| layer.keyframes[ki].start_frame)
-                        .unwrap_or(curr_f);
-                    let resolved =
-                        parent_tl.evaluate_layer_shapes_at(layer_idx, curr_f, &self.doc.library);
-                    for mut s in resolved {
-                        if s.symbol_instance
-                            .is_some_and(|b| b.instance_gid == lvl.instance_gid)
-                        {
-                            continue;
-                        }
-                        if parent_world_xform != Affine::IDENTITY {
-                            let _ = s.fill_mesh();
-                            s.transform_with_cached_mesh(parent_world_xform);
-                        }
-                        if let Some(mut b) = s.symbol_instance {
-                            if let Some(sym) = self.doc.find_symbol(b.symbol_id) {
-                                b.first_frame = sym.resolve_internal_frame(b, kf_start, curr_f);
-                                b.loop_mode = SymbolLoopMode::SingleFrame;
-                                s.symbol_instance = Some(b);
-                            }
-                        }
-                        backdrop_shapes.push(s);
-                    }
-                }
-            }
-            let parent_frame = self
-                .session
-                .edit_path
-                .last()
-                .map_or(0, |l| l.parent_frame);
-            *guard = Some((
-                self.doc.revision,
-                self.session.edit_path.clone(),
-                Cel::new(backdrop_shapes),
-                parent_frame,
-            ));
-        }
-        let (_, _, cel, parent_frame) = guard.as_ref()?;
-        cel.cached_backdrop_screen_mesh(*parent_frame, zoom, pan, &self.doc.library)
+        self.session.backdrop_cache.lock().cached_screen_mesh(
+            &self.doc,
+            &self.session.edit_path,
+            zoom,
+            pan,
+        )
     }
 
     /// ダーティマーク（` *`）を除いたタブのベース表示名を返す
@@ -2872,12 +3164,59 @@ pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
         .collect()
 }
 
+/// `writeback_edited_layer_shapes` で変更された単一シンボルインスタンス `inst` を文書と同じ経路（`local_b.xform` → `world_xform`）で再展開し、
+/// `layer_stage_shapes` 内の対応図形をビット単位で一致するステージ図形へ置き換える
+fn reinstantiate_modified_symbol_instance(
+    layer: &crate::timeline::Layer,
+    frame: usize,
+    inst: &SymbolInstance,
+    library: &[SymbolDef],
+    world_xform: Affine,
+    has_world_xform: bool,
+    layer_stage_shapes: &mut Vec<FillShape>,
+) {
+    if !library.iter().any(|sym| sym.id == inst.binding.symbol_id) {
+        return;
+    }
+    let mut rebuilt = layer.evaluate_single_symbol_instance_at(frame, inst, library);
+    if has_world_xform {
+        for rs in &mut rebuilt {
+            scene_base_cache::transform_single_shape_to_stage(rs, world_xform);
+        }
+    }
+    let gid = inst.binding.instance_gid;
+    let existing_count = layer_stage_shapes
+        .iter()
+        .filter(|s| s.symbol_instance.is_some_and(|b| b.instance_gid == gid))
+        .count();
+    if existing_count == rebuilt.len() {
+        let mut rebuilt_iter = rebuilt.into_iter();
+        for s in layer_stage_shapes.iter_mut() {
+            if s.symbol_instance.is_some_and(|b| b.instance_gid == gid) {
+                if let Some(mut new_s) = rebuilt_iter.next() {
+                    new_s.shape_id = s.shape_id;
+                    *s = new_s;
+                }
+            }
+        }
+    } else if let Some(first_pos) = layer_stage_shapes
+        .iter()
+        .position(|s| s.symbol_instance.is_some_and(|b| b.instance_gid == gid))
+    {
+        layer_stage_shapes.retain(|s| s.symbol_instance.is_none_or(|b| b.instance_gid != gid));
+        let insert_pos = first_pos.min(layer_stage_shapes.len());
+        layer_stage_shapes.splice(insert_pos..insert_pos, rebuilt);
+    }
+}
+
 /// `edit_layers` の対象レイヤー1枚分について、編集後ステージ図形列 `layer_stage_shapes` をローカル図形へ変換してセルに書き戻す
 #[allow(clippy::too_many_arguments)]
 fn writeback_edited_layer_shapes(
     tl: &mut Timeline,
     l_idx: usize,
     frame: usize,
+    library: &[SymbolDef],
+    world_xform: Affine,
     has_world_xform: bool,
     inv_xform: Affine,
     need_inv: bool,
@@ -2915,7 +3254,13 @@ fn writeback_edited_layer_shapes(
             for s in &mut non_symbol_shapes {
                 s.transform(inv_xform);
                 if let Some(stage_s) = stage_non_sym_iter.next() {
-                    stage_s.mesh_revision = s.mesh_revision;
+                    let mut rebuilt_stage = s.clone();
+                    scene_base_cache::transform_single_shape_to_stage(
+                        &mut rebuilt_stage,
+                        world_xform,
+                    );
+                    rebuilt_stage.copy_render_caches_from(stage_s);
+                    *stage_s = rebuilt_stage;
                 }
             }
         }
@@ -2934,6 +3279,23 @@ fn writeback_edited_layer_shapes(
         if has_single_sym {
             tl.layers[l_idx].keyframes[kf_idx].tween_rotate = prev_tween_rotate;
         }
+        let instances_snapshot: Vec<SymbolInstance> = tl.layers[l_idx].keyframes[kf_idx]
+            .cel
+            .instances
+            .iter()
+            .cloned()
+            .collect();
+        for inst in &instances_snapshot {
+            reinstantiate_modified_symbol_instance(
+                &tl.layers[l_idx],
+                frame,
+                inst,
+                library,
+                world_xform,
+                has_world_xform,
+                layer_stage_shapes,
+            );
+        }
         return true;
     }
 
@@ -2942,7 +3304,7 @@ fn writeback_edited_layer_shapes(
     };
     layer_stage_shapes.retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
 
-    let (non_symbol_shapes, next_instances) = {
+    let (non_symbol_shapes, next_instances, modified_inst_indices) = {
         let orig_cel = &tl.layers[l_idx].keyframes[kf_idx].cel;
         let orig_shapes = &orig_cel.shapes;
         let mut orig_shape_idx_map: HashMap<ShapeId, usize> =
@@ -2950,33 +3312,32 @@ fn writeback_edited_layer_shapes(
         for (idx, orig) in orig_shapes.iter().enumerate() {
             orig_shape_idx_map.insert(orig.shape_id, idx);
         }
-        let mut orig_local_inst_map: HashMap<(InstanceGid, u64), Affine> = HashMap::new();
-        if has_world_xform && !orig_cel.instances.is_empty() {
+        let mut orig_local_inst_map: HashMap<InstanceGid, &SymbolInstance> = HashMap::new();
+        if !orig_cel.instances.is_empty() {
             for orig_inst in orig_cel.instances.iter() {
-                orig_local_inst_map.insert(
-                    (orig_inst.binding.instance_gid, orig_inst.binding.symbol_id),
-                    orig_inst.binding.xform,
-                );
+                orig_local_inst_map.insert(orig_inst.binding.instance_gid, orig_inst);
             }
         }
 
         let mut non_symbol_shapes = Vec::with_capacity(layer_stage_shapes.len());
         let mut next_instances: Vec<SymbolInstance> = Vec::new();
+        let mut modified_inst_indices: Vec<usize> = Vec::new();
         for s in layer_stage_shapes.iter_mut() {
             if let Some(b) = s.symbol_instance {
                 if !next_instances
                     .iter()
                     .any(|inst| inst.binding.instance_gid == b.instance_gid)
                 {
+                    let key = (b.instance_gid, b.symbol_id);
+                    let stage_xform_unchanged = initial_stage_inst_xform
+                        .get(&key)
+                        .is_some_and(|&init_xf| init_xf == b.xform);
+                    let orig_inst = orig_local_inst_map.get(&b.instance_gid).copied();
                     let mut local_b = b;
                     if has_world_xform {
-                        let key = (b.instance_gid, b.symbol_id);
-                        let stage_xform_unchanged = initial_stage_inst_xform
-                            .get(&key)
-                            .is_some_and(|&init_xf| init_xf == b.xform);
                         if stage_xform_unchanged {
-                            if let Some(&orig_xf) = orig_local_inst_map.get(&key) {
-                                local_b.xform = orig_xf;
+                            if let Some(oi) = orig_inst {
+                                local_b.xform = oi.binding.xform;
                             } else if need_inv {
                                 local_b.xform = inv_xform * b.xform;
                             }
@@ -2984,12 +3345,21 @@ fn writeback_edited_layer_shapes(
                             local_b.xform = inv_xform * b.xform;
                         }
                     }
+                    let parent_scope = b.parent_scope_from_path(&s.group_path).to_vec();
+                    let inst_modified = !stage_xform_unchanged
+                        || orig_inst.is_none_or(|oi| {
+                            oi.binding != local_b || oi.parent_scope != parent_scope
+                        });
+                    let inst_idx = next_instances.len();
                     next_instances.push(SymbolInstance {
                         binding: local_b,
                         layer_id: s.layer_id,
-                        parent_scope: b.parent_scope_from_path(&s.group_path).to_vec(),
+                        parent_scope,
                         shape_order_index: non_symbol_shapes.len(),
                     });
+                    if inst_modified {
+                        modified_inst_indices.push(inst_idx);
+                    }
                 }
             } else if !s.exterior.segments.is_empty() {
                 if let Some(&orig_idx) = orig_shape_idx_map.get(&s.shape_id) {
@@ -3002,6 +3372,9 @@ fn writeback_edited_layer_shapes(
                             kept.group_path = s.group_path.clone();
                         }
                         kept.symbol_instance = s.symbol_instance;
+                        if !has_world_xform {
+                            kept.copy_render_caches_from(s);
+                        }
                         non_symbol_shapes.push(kept);
                         continue;
                     }
@@ -3009,18 +3382,38 @@ fn writeback_edited_layer_shapes(
                 let mut local_s = s.clone();
                 if has_world_xform && need_inv {
                     local_s.transform(inv_xform);
-                    s.mesh_revision = local_s.mesh_revision;
+                    let mut stage_s = local_s.clone();
+                    scene_base_cache::transform_single_shape_to_stage(&mut stage_s, world_xform);
+                    stage_s.copy_render_caches_from(s);
+                    *s = stage_s;
                 }
                 non_symbol_shapes.push(local_s);
             }
         }
-        (non_symbol_shapes, next_instances)
+        (non_symbol_shapes, next_instances, modified_inst_indices)
     };
 
     let kf = &mut tl.layers[l_idx].keyframes[kf_idx];
     kf.cel.set_parts(non_symbol_shapes, next_instances);
     if kf.tween && kf.cel.single_symbol_instance().is_none() {
         kf.tween = false;
+    }
+    if !modified_inst_indices.is_empty() {
+        let modified_insts: Vec<SymbolInstance> = modified_inst_indices
+            .into_iter()
+            .filter_map(|i| tl.layers[l_idx].keyframes[kf_idx].cel.instances.get(i).cloned())
+            .collect();
+        for inst in &modified_insts {
+            reinstantiate_modified_symbol_instance(
+                &tl.layers[l_idx],
+                frame,
+                inst,
+                library,
+                world_xform,
+                has_world_xform,
+                layer_stage_shapes,
+            );
+        }
     }
     true
 }
@@ -3096,11 +3489,9 @@ pub(crate) fn edit_layers(
     let mut initial_stage_inst_xform: HashMap<(InstanceGid, u64), Affine> = HashMap::new();
     for (lid, range) in target_ranges {
         let slice = &loaded_shapes[range];
-        if has_world_xform {
-            for s in slice {
-                if let Some(b) = s.symbol_instance {
-                    initial_stage_inst_xform.insert((b.instance_gid, b.symbol_id), b.xform);
-                }
+        for s in slice {
+            if let Some(b) = s.symbol_instance {
+                initial_stage_inst_xform.insert((b.instance_gid, b.symbol_id), b.xform);
             }
         }
         let init_states = slice
@@ -3123,7 +3514,7 @@ pub(crate) fn edit_layers(
     let mut single_layer_shapes: Option<Vec<FillShape>> = None;
     let mut edited_by_lid: HashMap<LayerId, Vec<FillShape>> = HashMap::new();
 
-    let mut mutate_tl = |tl: &mut Timeline| {
+    let mut mutate_tl = |tl: &mut Timeline, library: &[SymbolDef]| {
         let frame = tl.current_frame;
         tl.normalize_shape_layer_ids(&mut edit.shapes);
 
@@ -3143,6 +3534,8 @@ pub(crate) fn edit_layers(
                     tl,
                     l_idx,
                     frame,
+                    library,
+                    world_xform,
                     has_world_xform,
                     inv_xform,
                     need_inv,
@@ -3191,6 +3584,8 @@ pub(crate) fn edit_layers(
                 tl,
                 l_idx,
                 frame,
+                library,
+                world_xform,
                 has_world_xform,
                 inv_xform,
                 need_inv,
@@ -3207,7 +3602,7 @@ pub(crate) fn edit_layers(
             let prev_fps = tab.doc.root.fps;
             let mut taken_tl = std::mem::take(&mut tab.doc.library[idx].timeline);
             taken_tl.fps = prev_fps;
-            mutate_tl(&mut taken_tl);
+            mutate_tl(&mut taken_tl, &tab.doc.library);
             if taken_tl.fps != prev_fps {
                 tab.doc.root.fps = taken_tl.fps;
             }
@@ -3217,10 +3612,10 @@ pub(crate) fn edit_layers(
                 tab.doc.bump_revision();
             }
         } else {
-            mutate_tl(&mut tab.doc.root);
+            mutate_tl(&mut tab.doc.root, &tab.doc.library);
         }
     } else {
-        mutate_tl(&mut tab.doc.root);
+        mutate_tl(&mut tab.doc.root, &tab.doc.library);
     }
 
     let any_cel_modified = !modified_lids.is_empty();
@@ -3282,13 +3677,15 @@ pub(crate) fn topmost_layer_id_for_indices(
 pub(crate) fn focus_active_layer_to_shape(tab: &mut Tab, scene_idx: usize) {
     tab.view.inspect_timeline_frame = false;
     if let Some(lid) = tab.scene().get(scene_idx).map(|s| s.layer_id) {
-        tab.with_active_timeline_mut(|tl, _| {
-            if let Some(l_idx) = tl.layer_index_by_id(lid) {
-                tl.active_layer = l_idx;
-                let cf = tl.current_frame;
-                tl.cell_selection = Some(TimelineCellSelection::single(l_idx, cf));
-            }
-        });
+        let info = {
+            let tl = tab.active_timeline();
+            tl.layer_index_by_id(lid)
+                .map(|l_idx| (l_idx, tl.current_frame))
+        };
+        if let Some((l_idx, cf)) = info {
+            tab.set_active_layer(l_idx);
+            tab.set_active_cell_selection(Some(TimelineCellSelection::single(l_idx, cf)));
+        }
     }
 }
 
@@ -3296,13 +3693,15 @@ pub(crate) fn focus_active_layer_to_shape(tab: &mut Tab, scene_idx: usize) {
 pub(crate) fn focus_active_layer_to_shape_by_id(tab: &mut Tab, shape_id: ShapeId) {
     tab.view.inspect_timeline_frame = false;
     if let Some(lid) = tab.scene().shape_by_id(shape_id).map(|s| s.layer_id) {
-        tab.with_active_timeline_mut(|tl, _| {
-            if let Some(l_idx) = tl.layer_index_by_id(lid) {
-                tl.active_layer = l_idx;
-                let cf = tl.current_frame;
-                tl.cell_selection = Some(TimelineCellSelection::single(l_idx, cf));
-            }
-        });
+        let info = {
+            let tl = tab.active_timeline();
+            tl.layer_index_by_id(lid)
+                .map(|l_idx| (l_idx, tl.current_frame))
+        };
+        if let Some((l_idx, cf)) = info {
+            tab.set_active_layer(l_idx);
+            tab.set_active_cell_selection(Some(TimelineCellSelection::single(l_idx, cf)));
+        }
     }
 }
 
@@ -3323,11 +3722,9 @@ pub(crate) fn sync_timeline_layer_from_canvas_selection(tab: &mut Tab) {
         }
     }
     if let (Some(l0), Some(l1), Some(act)) = (min_l, max_l, last_l) {
-        tab.with_active_timeline_mut(|tl, _| {
-            tl.active_layer = act;
-            let cf = tl.current_frame;
-            tl.cell_selection = Some(TimelineCellSelection::from_corners(l0, cf, l1, cf));
-        });
+        let cf = tab.active_timeline().current_frame;
+        tab.set_active_layer(act);
+        tab.set_active_cell_selection(Some(TimelineCellSelection::from_corners(l0, cf, l1, cf)));
     }
 }
 

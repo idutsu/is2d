@@ -785,16 +785,6 @@ impl ResolvedCelSig {
             && self.next_kf == next_kf
             && self.are_referenced_symbols_current(library)
     }
-
-    /// ヒープアロケーションを一切行わずに、既存の署名 `self` が単一セル（`backdrop_cel` 等）とライブラリに対して有効かを判定する
-    pub(crate) fn matches_cel(&self, cel: &Cel, library: &[SymbolDef]) -> bool {
-        self.cel_revision == cel.revision
-            && self.start_frame == 0
-            && !self.tween
-            && self.tween_rotate == TweenRotate::Auto
-            && self.next_kf.is_none()
-            && self.are_referenced_symbols_current(library)
-    }
 }
 
 /// 解決済みセルメッシュキャッシュの署名照合・遅延構築クエリ（`Copy` かつヒープ確保ゼロ）
@@ -803,10 +793,6 @@ pub(crate) enum ResolvedSigQuery<'a> {
     LayerKeyframe {
         layer: &'a Layer,
         kf_idx: usize,
-        library: &'a [SymbolDef],
-    },
-    SingleCel {
-        cel: &'a Cel,
         library: &'a [SymbolDef],
     },
 }
@@ -821,7 +807,6 @@ impl<'a> ResolvedSigQuery<'a> {
                 kf_idx,
                 library,
             } => sig.matches_layer_keyframe(layer, kf_idx, library),
-            Self::SingleCel { cel, library } => sig.matches_cel(cel, library),
         }
     }
 
@@ -833,7 +818,6 @@ impl<'a> ResolvedSigQuery<'a> {
                 kf_idx,
                 library,
             } => compute_resolved_cel_signature(layer, kf_idx, library),
-            Self::SingleCel { cel, library } => compute_cel_signature(cel, library),
         }
     }
 }
@@ -912,11 +896,20 @@ pub(crate) fn compute_resolved_cel_signature(
     }
 }
 
-/// 単一セル（`backdrop_cel` 等）とそれが参照するシンボル群の世代番号から解決済みキャッシュ署名を計算する
-pub(crate) fn compute_cel_signature(cel: &Cel, library: &[SymbolDef]) -> ResolvedCelSig {
+/// シンボルインプレイス編集の背景レイヤー用：除外対象の `excluded_instance_gid` 以外のインスタンスが参照するシンボル群の世代番号から解決済みキャッシュ署名を計算する
+pub(crate) fn compute_backdrop_layer_cel_signature(
+    layer: &Layer,
+    kf_idx: usize,
+    excluded_instance_gid: u64,
+    library: &[SymbolDef],
+) -> ResolvedCelSig {
+    let kf = &layer.keyframes[kf_idx];
     let mut visited_syms: Vec<u64> = Vec::new();
     let mut referenced_symbols: Vec<(u64, u64)> = Vec::new();
-    for inst in cel.instances.iter() {
+    for inst in kf.cel.instances.iter() {
+        if inst.binding.instance_gid == excluded_instance_gid {
+            continue;
+        }
         collect_referenced_symbol_revisions(
             inst.binding.symbol_id,
             library,
@@ -925,12 +918,33 @@ pub(crate) fn compute_cel_signature(cel: &Cel, library: &[SymbolDef]) -> Resolve
             &mut referenced_symbols,
         );
     }
+    let mut next_kf = None;
+    if kf.tween {
+        if let Some(nkf) = layer.keyframes.get(kf_idx + 1) {
+            if let Some(nb) = nkf.cel.single_symbol_instance() {
+                next_kf = Some((nkf.start_frame, nb));
+                if kf
+                    .cel
+                    .single_symbol_instance()
+                    .is_none_or(|sb| sb.instance_gid != excluded_instance_gid)
+                {
+                    collect_referenced_symbol_revisions(
+                        nb.symbol_id,
+                        library,
+                        &mut visited_syms,
+                        0,
+                        &mut referenced_symbols,
+                    );
+                }
+            }
+        }
+    }
     ResolvedCelSig {
-        cel_revision: cel.revision,
-        start_frame: 0,
-        tween: false,
-        tween_rotate: TweenRotate::Auto,
-        next_kf: None,
+        cel_revision: kf.cel.revision,
+        start_frame: kf.start_frame,
+        tween: kf.tween,
+        tween_rotate: kf.tween_rotate,
+        next_kf,
         referenced_symbols,
     }
 }
@@ -1025,42 +1039,6 @@ impl Cel {
             Arc::clone(&screen_mesh),
         );
         Some(screen_mesh)
-    }
-
-    /// シンボルインプレイス編集時の親シーン背景セル（`backdrop_cel`）の半透明スクリーン座標メッシュをキャッシュ経由で返す
-    pub(crate) fn cached_backdrop_screen_mesh(
-        &self,
-        parent_frame: usize,
-        zoom: f32,
-        pan: Vec2,
-        library: &[SymbolDef],
-    ) -> Option<Arc<Mesh>> {
-        if self.is_empty() {
-            return None;
-        }
-        if self.instances.is_empty() {
-            return Some(self.cached_screen_mesh(zoom, pan, true));
-        }
-        let sig_query = ResolvedSigQuery::SingleCel { cel: self, library };
-        self.cached_resolved_screen_mesh(
-            (sig_query, parent_frame, Affine::IDENTITY),
-            zoom,
-            pan,
-            true,
-            || {
-                let shapes = resolve_cel_with_library(
-                    self,
-                    parent_frame,
-                    parent_frame,
-                    SymbolEvalCtx::new(library),
-                );
-                let mut batch = Mesh::default();
-                for s in &shapes {
-                    append_mesh(&mut batch, s.fill_mesh());
-                }
-                (!batch.is_empty()).then_some(batch)
-            },
-        )
     }
 
     /// シンボルインスタンスやトゥイーンを含むセルの解決済みオニオンスキン `Arc<Mesh>` をキャッシュ経由で返す
@@ -1263,6 +1241,39 @@ impl Layer {
             .into_iter()
             .map(|s| s.with_layer_id(out_layer_id))
             .collect()
+    }
+
+    /// このレイヤーの指定フレーム `frame` における単一シンボルインスタンス `inst` のみを展開して返す
+    pub(crate) fn evaluate_single_symbol_instance_at(
+        &self,
+        frame: usize,
+        inst: &SymbolInstance,
+        library: &[SymbolDef],
+    ) -> Vec<FillShape> {
+        let Some(kf_idx) = self.keyframe_index_at(frame) else {
+            return Vec::new();
+        };
+        let kf = &self.keyframes[kf_idx];
+        let b = inst.binding;
+        let Some(sym) = library.iter().find(|sym| sym.id == b.symbol_id) else {
+            return Vec::new();
+        };
+        let ctx = SymbolEvalCtx::new(library);
+        let local_shapes =
+            sym.evaluated_local_shapes_for_instance(b, kf.start_frame, frame, ctx.nested());
+        if local_shapes.is_empty() {
+            vec![FillShape::new_empty_symbol_marker(
+                b,
+                self.id,
+                &inst.parent_scope,
+            )]
+        } else {
+            b.instantiate_shapes(
+                &local_shapes[..local_shapes.len().min(MAX_EXPANDED_SYMBOL_SHAPES)],
+                self.id,
+                &inst.parent_scope,
+            )
+        }
     }
 }
 

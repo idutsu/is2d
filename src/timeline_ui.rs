@@ -862,8 +862,7 @@ fn handle_timeline_click_start(
                 }
             }
         } else {
-            host.tab_mut()
-                .with_active_timeline_mut(|tl, _| tl.cell_selection = None);
+            host.tab_mut().set_active_cell_selection(None);
         }
     } else if host.timeline_ui().dragging_layer.is_none() && pos.x >= layout.grid_left {
         let num_layers = host.tab().active_timeline().layers.len();
@@ -992,8 +991,7 @@ fn handle_timeline_click_start(
                 };
             }
         } else {
-            host.tab_mut()
-                .with_active_timeline_mut(|tl, _| tl.cell_selection = None);
+            host.tab_mut().set_active_cell_selection(None);
         }
     }
 }
@@ -2025,12 +2023,14 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
         tab.history.end_coalesce();
         timeline_ui.cancel_drag();
         let loop_pb = timeline_ui.loop_playback;
-        tab.with_active_timeline_mut(|tl, _| {
-            let last_f = tl.total_frames.saturating_sub(1);
-            if tl.current_frame >= tl.total_frames || (!loop_pb && tl.current_frame >= last_f) {
-                tl.current_frame = 0;
-            }
-        });
+        let (curr_f, total_f) = {
+            let tl = tab.active_timeline();
+            (tl.current_frame, tl.total_frames)
+        };
+        let last_f = total_f.saturating_sub(1);
+        if curr_f >= total_f || (!loop_pb && curr_f >= last_f) {
+            tab.set_active_frame(0);
+        }
         timeline_ui.is_playing = true;
         timeline_ui.last_frame_advance_time = None;
     }
@@ -2056,22 +2056,21 @@ pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context)
             timeline_ui.last_frame_advance_time =
                 Some(last_time + (steps as f64) * frame_interval);
             let loop_pb = timeline_ui.loop_playback;
-            let stopped = tab.with_active_timeline_mut(|tl, _| {
-                let total = tl.total_frames.max(1);
-                if loop_pb {
-                    tl.current_frame = (tl.current_frame + steps) % total;
-                    false
+            let (curr_f, total) = {
+                let tl = tab.active_timeline();
+                (tl.current_frame, tl.total_frames.max(1))
+            };
+            let (next_f, stopped) = if loop_pb {
+                ((curr_f + steps) % total, false)
+            } else {
+                let next = curr_f + steps;
+                if next >= total - 1 {
+                    (total - 1, true)
                 } else {
-                    let next = tl.current_frame + steps;
-                    if next >= total - 1 {
-                        tl.current_frame = total - 1;
-                        true
-                    } else {
-                        tl.current_frame = next;
-                        false
-                    }
+                    (next, false)
                 }
-            });
+            };
+            tab.set_active_frame(next_f);
             if stopped {
                 timeline_ui.is_playing = false;
                 timeline_ui.last_frame_advance_time = None;

@@ -701,11 +701,10 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             {
                 let registered_id = tab.doc.register_new_symbol(local_shapes);
                 tab.view.selected_library_symbol = Some(registered_id);
-                tab.with_active_timeline_mut(|tl, _| {
-                    if let Some(l_idx) = tl.layer_index_by_id(target_lid) {
-                        tl.active_layer = l_idx;
-                    }
-                });
+                if let Some(l_idx) = tab.active_timeline().layer_index_by_id(target_lid) {
+                    tab.set_active_layer(l_idx);
+                }
+                tab.refresh_scene_base();
                 tab.session.floating = None;
                 tab.session.transform_pivot = None;
                 tab.view.inspect_timeline_frame = false;
@@ -1894,10 +1893,14 @@ fn apply_switch_to_layer_and_frame(tab: &mut Tab, layer_idx: usize, frame_idx: u
     }
     let prev_frame = tab.active_timeline().current_frame;
     commit_floating(tab);
-    let next_frame = tab.with_active_timeline_mut(|tl, _| {
-        tl.select_single_cell(layer_idx, frame_idx);
-        tl.current_frame
-    });
+    let clamped_layer = layer_idx.min(tab.active_timeline().layers.len().saturating_sub(1));
+    tab.set_active_layer(clamped_layer);
+    tab.set_active_frame(frame_idx);
+    tab.set_active_cell_selection(Some(TimelineCellSelection::single(
+        clamped_layer,
+        frame_idx,
+    )));
+    let next_frame = tab.active_timeline().current_frame;
     retain_selection_on_same_keyframe(tab, prev_frame, next_frame);
     reset_session_after_timeline_change(tab);
     tab.view.inspect_timeline_frame = true;
@@ -1911,10 +1914,8 @@ fn apply_scrub_ruler_to_frame(tab: &mut Tab, frame_idx: usize) {
     }
     let prev_frame = tl.current_frame;
     commit_floating(tab);
-    tab.with_active_timeline_mut(|tl, _| {
-        tl.current_frame = clamped_frame;
-        tl.cell_selection = None;
-    });
+    tab.set_active_frame(clamped_frame);
+    tab.set_active_cell_selection(None);
     retain_selection_on_same_keyframe(tab, prev_frame, clamped_frame);
     reset_session_after_timeline_change(tab);
 }
@@ -1935,9 +1936,7 @@ fn apply_select_timeline_cells(
     let (f0, f1) = (start_frame, end_frame);
 
     apply_switch_to_layer_and_frame(tab, l1, f1);
-    tab.with_active_timeline_mut(|tl, _| {
-        tl.cell_selection = Some(TimelineCellSelection::from_corners(l0, f0, l1, f1));
-    });
+    tab.set_active_cell_selection(Some(TimelineCellSelection::from_corners(l0, f0, l1, f1)));
     select_shapes_for_timeline_selection(tab);
 }
 

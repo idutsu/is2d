@@ -10144,8 +10144,9 @@ fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_act
                 "[{label} #{idx}] symbol_instance mismatch"
             );
             assert_eq!(
-                a.exterior.segments, b.exterior.segments,
-                "[{label} #{idx}] exterior mismatch"
+                contour_bits(&a.exterior),
+                contour_bits(&b.exterior),
+                "[{label} #{idx}] exterior bit-level mismatch"
             );
             assert_eq!(
                 a.holes.len(),
@@ -10153,8 +10154,29 @@ fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_act
                 "[{label} #{idx}] holes len mismatch"
             );
             for (ha, hb) in a.holes.iter().zip(b.holes.iter()) {
-                assert_eq!(ha.segments, hb.segments, "[{label} #{idx}] hole mismatch");
+                assert_eq!(
+                    contour_bits(ha),
+                    contour_bits(hb),
+                    "[{label} #{idx}] hole bit-level mismatch"
+                );
             }
+            let ba = a.bounding_box();
+            let bb = b.bounding_box();
+            assert_eq!(
+                (
+                    ba.x0.to_bits(),
+                    ba.y0.to_bits(),
+                    ba.x1.to_bits(),
+                    ba.y1.to_bits()
+                ),
+                (
+                    bb.x0.to_bits(),
+                    bb.y0.to_bits(),
+                    bb.x1.to_bits(),
+                    bb.y1.to_bits()
+                ),
+                "[{label} #{idx}] bbox bit-level mismatch"
+            );
             if a.symbol_instance.is_none() {
                 assert_eq!(a.shape_id, b.shape_id, "[{label} #{idx}] shape_id mismatch");
                 assert_eq!(
@@ -10163,6 +10185,22 @@ fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_act
                 );
             }
         }
+    }
+
+    fn contour_bits(c: &vector_engine::Contour) -> Vec<[u64; 6]> {
+        c.segments
+            .iter()
+            .map(|s| {
+                [
+                    s.p0.x.to_bits(),
+                    s.p0.y.to_bits(),
+                    s.p1.x.to_bits(),
+                    s.p1.y.to_bits(),
+                    s.p2.x.to_bits(),
+                    s.p2.y.to_bits(),
+                ]
+            })
+            .collect()
     }
 
     let mut app = Is2dApp::default();
@@ -10267,6 +10305,249 @@ fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_act
     run_and_verify_scene_cache_consistency(&mut app, Action::Undo, "Undo 3");
     run_and_verify_scene_cache_consistency(&mut app, Action::Redo, "Redo 1");
     run_and_verify_scene_cache_consistency(&mut app, Action::Redo, "Redo 2");
+
+    // 回転と縦横で違う拡大率を持つシンボルの中で編集するケース（ビット単位で一致すること）
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 0,
+        },
+        "SwitchLayerAndFrame to symbol layer",
+    );
+    let sym_inst_shape = app
+        .scene()
+        .iter()
+        .find(|s| s.symbol_instance.is_some())
+        .unwrap()
+        .clone();
+    app.session.selection.clear();
+    app.session.selection.insert_shape(&sym_inst_shape);
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::ScaleSelection { sx: 1.35, sy: 0.72 },
+        "ScaleSelection non-uniform on symbol",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::RotateSelection { angle_rad: 0.43 },
+        "RotateSelection on symbol",
+    );
+    let transformed_binding = app
+        .scene()
+        .iter()
+        .find_map(|s| s.symbol_instance)
+        .unwrap();
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::EnterSymbolTimeline {
+            binding: transformed_binding,
+        },
+        "EnterSymbolTimeline rotated+non-uniform-scaled",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(70.0, 60.0), Point::new(140.0, 85.0)],
+            radius: 14.0,
+            color: blue,
+        },
+        "PaintStroke inside rotated+scaled symbol",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::EraseStroke {
+            points: vec![Point::new(90.0, 50.0), Point::new(90.0, 90.0)],
+            radius: 5.0,
+        },
+        "EraseStroke inside rotated+scaled symbol",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::SelectMarquee {
+            p0: Point::new(50.0, 40.0),
+            p1: Point::new(110.0, 95.0),
+            additive: false,
+        },
+        "SelectMarquee inside rotated+scaled symbol",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::NudgeSelection {
+            delta: KVec2::new(12.0, -8.0),
+        },
+        "NudgeSelection inside rotated+scaled symbol",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::Deselect,
+        "Deselect inside rotated+scaled symbol",
+    );
+    let inner_first = app.scene().get(0).unwrap().clone();
+    app.session.selection.clear();
+    app.session.selection.insert_shape(&inner_first);
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::Group,
+        "Group inside rotated+scaled symbol",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::Ungroup,
+        "Ungroup inside rotated+scaled symbol",
+    );
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::ExitSymbolTimeline,
+        "ExitSymbolTimeline from rotated+scaled symbol",
+    );
+}
+
+#[test]
+fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let mut parent_shapes = Vec::with_capacity(2000);
+    for i in 0..2000 {
+        let col = i % 50;
+        let row = i / 50;
+        let x0 = (col as f64) * 30.0;
+        let y0 = (row as f64) * 30.0;
+        let c = Color32::from_rgb(((i * 37) % 200 + 40) as u8, ((i * 73) % 200 + 40) as u8, 150);
+        parent_shapes.extend(make_stroke(
+            Point::new(x0, y0 + 10.0),
+            Point::new(x0 + 20.0, y0 + 10.0),
+            10.0,
+            c,
+        ));
+    }
+    put_cel_shapes(&mut app, 0, 0, parent_shapes);
+
+    // 別レイヤーにシンボルを作成して進入する
+    run(
+        &mut app,
+        &[
+            Action::AddLayer,
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(180.0, 100.0)],
+                radius: 14.0,
+                color: Color32::RED,
+            },
+        ],
+    );
+    let red_shape = app.scene().iter().last().unwrap().clone();
+    app.session.selection.clear();
+    app.session.selection.insert_shape(&red_shape);
+    run(&mut app, &[Action::ConvertToSymbol]);
+    let sym_binding = app
+        .scene()
+        .iter()
+        .find_map(|s| s.symbol_instance)
+        .unwrap();
+    // 同じレイヤーにもう1つ同じシンボルのインスタンスを配置しておく（背景に兄弟インスタンスが映る状態）
+    run(
+        &mut app,
+        &[Action::PlaceSymbol {
+            sym_id: sym_binding.symbol_id,
+        }],
+    );
+    assert!(symbol_ops::enter_symbol_timeline(
+        &mut app.tabs[app.active],
+        sym_binding
+    ));
+
+    // シンボル内で3フレームに伸ばす
+    run(
+        &mut app,
+        &[
+            Action::ExtendFrame,
+            Action::ExtendFrame,
+            Action::InsertKeyframe { copy_prev: true },
+        ],
+    );
+
+    // 1. シンボルの中で set_active_frame / set_active_layer / set_active_cell_selection を呼んでも doc.revision が変わらないこと
+    let doc_rev_before = app.doc.revision;
+    let sym_rev_before = app.doc.library[0].revision;
+    app.tabs[app.active].set_active_frame(0);
+    app.tabs[app.active].set_active_frame(1);
+    app.tabs[app.active].set_active_frame(2);
+    app.tabs[app.active].set_active_layer(0);
+    app.tabs[app.active].set_active_cell_selection(None);
+    assert_eq!(
+        app.doc.revision, doc_rev_before,
+        "シンボル内で set_active_frame 等を呼んでも doc.revision が変わらないこと"
+    );
+    assert_eq!(
+        app.doc.library[0].revision, sym_rev_before,
+        "シンボル内で set_active_frame 等を呼んでもシンボルの revision が変わらないこと"
+    );
+
+    // 2. 親シーン背景キャッシュを初回構築したあと、シンボル内で再生フレーム送りしても背景メッシュが再構築されずそのまま返ること
+    let bd_initial = app.tabs[app.active]
+        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
+        .expect("親シーン背景が存在すること");
+    let t_play = std::time::Instant::now();
+    app.tabs[app.active].set_active_frame(1);
+    app.tabs[app.active].refresh_scene_base();
+    let bd_after_step = app.tabs[app.active]
+        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
+        .unwrap();
+    for s in app.scene().iter() {
+        let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
+    }
+    let play_step_elapsed = t_play.elapsed();
+    assert!(
+        std::sync::Arc::ptr_eq(&bd_initial, &bd_after_step),
+        "シンボル内での再生フレーム送りでは親シーン背景メッシュが再計算されないこと"
+    );
+
+    // 3. シンボルの中で（親シーンが参照している先頭フレーム 0 に戻って）1本描いても、
+    //    編集中のシンボルのインスタンスを含まない親レイヤー（2000図形）は作り直されず、
+    //    兄弟インスタンスを含むレイヤーのみ更新されて背景メッシュに反映されること
+    app.tabs[app.active].set_active_frame(0);
+    app.tabs[app.active].refresh_scene_base();
+    let initial_vert_count = bd_initial.vertices.len();
+    let t_draw = std::time::Instant::now();
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: vec![Point::new(100.0, 140.0), Point::new(180.0, 140.0)],
+            radius: 12.0,
+            color: Color32::YELLOW,
+        }],
+    );
+    let bd_after_draw = app.tabs[app.active]
+        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
+        .unwrap();
+    for s in app.scene().iter() {
+        let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
+    }
+    let draw_and_render_elapsed = t_draw.elapsed();
+    assert!(
+        bd_after_draw.vertices.len() > initial_vert_count,
+        "兄弟インスタンスを含む親レイヤーの背景のみ更新され頂点数が増えること"
+    );
+    // 2回目以降の同フレーム描画では combined_screen_cache もそのまま再利用されること
+    let bd_after_draw_2 = app.tabs[app.active]
+        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
+        .unwrap();
+    assert!(std::sync::Arc::ptr_eq(&bd_after_draw, &bd_after_draw_2));
+    #[cfg(not(debug_assertions))]
+    {
+        assert!(
+            play_step_elapsed.as_secs_f64() * 1000.0 <= 0.1,
+            "シンボル内再生1コマが 0.1ms 以下であること: {:.4} ms",
+            play_step_elapsed.as_secs_f64() * 1000.0
+        );
+        assert!(
+            draw_and_render_elapsed.as_secs_f64() * 1000.0 <= 5.0,
+            "シンボル内で1本描いて背景込み描画までが 5ms 以下であること: {:.4} ms",
+            draw_and_render_elapsed.as_secs_f64() * 1000.0
+        );
+    }
+    let _ = (play_step_elapsed, draw_and_render_elapsed);
 }
 
 #[test]

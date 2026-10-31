@@ -288,17 +288,22 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
     });
 
     let fps = tab.doc.root.fps;
-    tab.with_active_timeline_mut(|tl, _| {
-        tl.total_frames = tl.total_frames.max(1);
-        let act_l = tl.active_layer.min(tl.layers.len().saturating_sub(1));
-        let act_f = tl.current_frame.min(tl.total_frames.saturating_sub(1));
-        tl.active_layer = act_l;
-        tl.current_frame = act_f;
-        tl.fps = fps;
-        tl.next_layer_number = tl.next_layer_number.max(2);
-        tl.next_layer_id = tl.next_layer_id.max(2);
-        tl.cell_selection = Some(TimelineCellSelection::single(act_l, act_f));
-    });
+    if let Some(sym) = tab.doc.find_symbol_mut(binding.symbol_id) {
+        sym.timeline.total_frames = sym.timeline.total_frames.max(1);
+        sym.timeline.fps = fps;
+        sym.timeline.next_layer_number = sym.timeline.next_layer_number.max(2);
+        sym.timeline.next_layer_id = sym.timeline.next_layer_id.max(2);
+    }
+    let (act_l, act_f) = {
+        let tl = tab.active_timeline();
+        (
+            tl.active_layer.min(tl.layers.len().saturating_sub(1)),
+            tl.current_frame.min(tl.total_frames.saturating_sub(1)),
+        )
+    };
+    tab.set_active_layer(act_l);
+    tab.set_active_frame(act_f);
+    tab.set_active_cell_selection(Some(TimelineCellSelection::single(act_l, act_f)));
 
     cancel_active_drag(tab);
     tab.session.floating = None;
@@ -377,14 +382,22 @@ pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
         return false;
     };
     let fps = tab.doc.root.fps;
-    tab.with_active_timeline_mut(|tl, _| {
-        tl.fps = fps;
-        let act_l = lvl.parent_active_layer.min(tl.layers.len().saturating_sub(1));
-        let act_f = lvl.parent_frame.min(tl.total_frames.saturating_sub(1));
-        tl.active_layer = act_l;
-        tl.current_frame = act_f;
-        tl.cell_selection = Some(TimelineCellSelection::single(act_l, act_f));
-    });
+    if let Some(last) = tab.session.edit_path.last() {
+        if let Some(sym) = tab.doc.find_symbol_mut(last.symbol_id) {
+            sym.timeline.fps = fps;
+        }
+    }
+    let (act_l, act_f) = {
+        let tl = tab.active_timeline();
+        (
+            lvl.parent_active_layer
+                .min(tl.layers.len().saturating_sub(1)),
+            lvl.parent_frame.min(tl.total_frames.saturating_sub(1)),
+        )
+    };
+    tab.set_active_layer(act_l);
+    tab.set_active_frame(act_f);
+    tab.set_active_cell_selection(Some(TimelineCellSelection::single(act_l, act_f)));
     tab.session.editing_group_path = lvl.parent_group_path;
 
     cancel_active_drag(tab);

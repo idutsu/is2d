@@ -436,6 +436,12 @@ impl FillShape {
         {
             return false;
         }
+        self.copy_render_caches_from(donor);
+        true
+    }
+
+    /// ドナー図形 `donor` が保持している描画・当たり判定キャッシュをそのまま引き継ぐ
+    pub(crate) fn copy_render_caches_from(&mut self, donor: &Self) {
         if self.fill_mesh.get().is_none() {
             if let Some(m) = donor.fill_mesh.get() {
                 let _ = self.fill_mesh.set(Arc::clone(m));
@@ -461,7 +467,6 @@ impl FillShape {
                 *self.selection_screen_mesh.lock() = Some(ssm.clone());
             }
         }
-        true
     }
 
     #[cfg(test)]
