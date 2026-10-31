@@ -4,12 +4,13 @@ use eframe::egui::{Color32, Vec2};
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    Clipboard, CoalesceKey, FloatingOrigin, NoticeKind, SelectSubMode, ShapeId, StatusToast, Tab,
-    Tool, ToolSettings, UndoEntry, active_scope_layer_id, cancel_active_drag, clear_selection,
-    commit_floating, flush_canvas_before_timeline_op, focus_active_layer_to_shape,
+    Clipboard, CoalesceKey, Floating, FloatingOrigin, NoticeKind, SelectSubMode, ShapeId,
+    StatusToast, Tab, Tool, ToolSettings, UndoEntry, active_scope_layer_id, cancel_active_drag,
+    clear_selection, commit_floating, focus_active_layer_to_shape,
     focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
-    load_shapes_from_timeline, prepare_moved_selection, select_shapes_for_timeline_selection,
-    set_tool, show_notice, sync_shapes_to_timeline, toggle_select_sub_mode,
+    load_shapes_from_timeline, merge_floating_into_base_shapes, prepare_moved_selection,
+    select_shapes_for_timeline_selection, set_tool, show_notice, sync_shapes_to_timeline,
+    toggle_select_sub_mode,
 };
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes,
@@ -360,9 +361,11 @@ impl Action {
 fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
     let tl_snap = tab.doc.root.clone();
     let (library, symbols_revision) = tab.history.snapshot_symbols(&tab.doc);
+    let floating = tab.history.snapshot_floating(tab.session.floating.as_ref());
     let entry = UndoEntry {
         timeline: tl_snap,
         library,
+        floating,
         edit_path: tab.session.edit_path.clone(),
         editing_group_path: tab.session.editing_group_path.clone(),
         stage_size: tab.doc.stage_size,
@@ -373,28 +376,14 @@ fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
     tab.history.last_coalesce_key = coalesce;
 }
 
-/// キャンバス図形（`tab.session.shapes`）を変更する直前に呼び出し、変更前の状態を Undo スタックへ記録する
+/// キャンバス図形（`tab.session.shapes` または `tab.session.floating`）を変更する直前に呼び出し、変更前の状態を Undo スタックへ記録する
 fn push_canvas_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
-    let unsliced = tab.session.take_unsliced_snapshot();
     if let Some(key) = coalesce {
         if tab.history.last_coalesce_key == Some(key) {
             return;
         }
     }
-    if let Some(mut snapshot) = unsliced {
-        let sigs = tab.session.take_loaded_signatures();
-        let world_xform = tab.session.edit_path.world_xform();
-        tab.with_active_timeline_mut(|tl, library| {
-            tl.normalize_shape_layer_ids(&mut snapshot);
-            crate::canvas_tool::Session::sort_vec_by_layer_order(&mut snapshot, tl);
-            tl.write_shapes_to_editable_cels(&snapshot, library, &sigs, world_xform)
-        });
-        let current_shapes = std::mem::replace(&mut tab.session.shapes, snapshot);
-        tab.session.restore_loaded_signatures_and_record(sigs);
-        tab.session.shapes = current_shapes;
-    } else {
-        sync_shapes_to_timeline(tab);
-    }
+    sync_shapes_to_timeline(tab);
     push_undo_entry_from_doc(tab, coalesce);
 }
 
@@ -404,13 +393,12 @@ fn push_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
             return;
         }
     }
-    tab.session.restore_unsliced_preserving_selection();
     sync_shapes_to_timeline(tab);
     push_undo_entry_from_doc(tab, coalesce);
 }
 
 fn mutate_timeline_with_undo(tab: &mut Tab, mutate: impl FnOnce(&mut Timeline)) {
-    flush_canvas_before_timeline_op(tab);
+    commit_floating(tab);
     push_undo(tab, None);
     tab.with_active_timeline_mut(|tl, _| mutate(tl));
     load_shapes_from_timeline(tab);
@@ -903,7 +891,7 @@ fn apply_raw_outline(tab: &mut Tab, active_tool: Tool, brush_color: Color32, raw
         sync_shapes_to_timeline(tab);
         true
     } else {
-        let has_bbox_overlap = tab.session.shapes.iter().any(|s| {
+        let has_bbox_overlap = tab.scene().iter().any(|s| {
             s.layer_id == target_lid
                 && s.is_raw_at_scope(&tab.session.editing_group_path)
                 && stroke_shapes
@@ -1003,20 +991,28 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 return false;
             }
             push_canvas_undo(tab, None);
-            let mut shapes = std::mem::take(&mut tab.session.shapes);
-            let tl = tab.active_timeline();
-            for shape in &mut shapes {
-                if tab.session.selection.contains_shape(shape)
-                    && tl.is_layer_editable_by_id(shape.layer_id)
-                    && shape.is_raw_at_scope(&tab.session.editing_group_path)
-                {
-                    shape.set_color(fill_color);
+            let editable_lids: HashSet<u64> = tab
+                .active_timeline()
+                .layers
+                .iter()
+                .filter(|l| l.visible && !l.locked)
+                .map(|l| l.id)
+                .collect();
+            tab.session
+                .lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
+            let scope = tab.session.editing_group_path.clone();
+            if let Some(fl) = &mut tab.session.floating {
+                for piece in &mut fl.pieces {
+                    if tab.session.selection.contains_shape(piece)
+                        && editable_lids.contains(&piece.layer_id)
+                        && piece.is_raw_at_scope(&scope)
+                    {
+                        piece.set_color(fill_color);
+                    }
                 }
             }
-            tab.session.shapes = shapes;
-            tab.session.invalidate_scene_order();
             tab.session.mark_floating_modified(FloatingOrigin::Move);
-            sync_shapes_to_timeline(tab);
+            tab.session.rebuild_overlay_from_floating();
             return true;
         }
         return false;
@@ -1156,25 +1152,18 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
 }
 
 fn apply_commit_moved_selection(tab: &mut Tab, coalesce: Option<CoalesceKey>) -> bool {
-    let unsliced = tab.session.take_unsliced_snapshot();
-    if !prepare_moved_selection(tab) {
-        return false;
-    }
+    let taken_unmodified_fl = (!tab.session.has_modified_floating())
+        .then(|| tab.session.floating.take())
+        .flatten();
     let skip_coalesce = coalesce.is_some_and(|k| tab.history.last_coalesce_key == Some(k));
     if !skip_coalesce {
-        if let Some(mut snapshot) = unsliced {
-            let sigs = tab.session.take_loaded_signatures();
-            let world_xform = tab.session.edit_path.world_xform();
-            tab.with_active_timeline_mut(|tl, library| {
-                tl.normalize_shape_layer_ids(&mut snapshot);
-                crate::canvas_tool::Session::sort_vec_by_layer_order(&mut snapshot, tl);
-                tl.write_shapes_to_editable_cels(&snapshot, library, &sigs, world_xform)
-            });
-            let current_shapes = std::mem::replace(&mut tab.session.shapes, snapshot);
-            tab.session.restore_loaded_signatures_and_record(sigs);
-            tab.session.shapes = current_shapes;
-        }
         push_undo_entry_from_doc(tab, coalesce);
+    }
+    if let Some(fl) = taken_unmodified_fl {
+        tab.session.floating = Some(fl);
+    }
+    if !prepare_moved_selection(tab) {
+        return false;
     }
     sync_shapes_to_timeline(tab);
     true
@@ -1185,11 +1174,7 @@ fn duplicate_selected_in_working_copy(tab: &mut Tab) {
     if extracted.is_empty() {
         return;
     }
-    if !tab.session.has_modified_floating() {
-        tab.session.restore_unsliced_preserving_selection();
-    } else {
-        commit_floating(tab);
-    }
+    commit_floating(tab);
     let (duplicated, any_raw) =
         instantiate_relative_shapes_in_scope(tab, &extracted, KVec2::ZERO, true);
     insert_and_select_shapes_in_scope(
@@ -1256,11 +1241,37 @@ fn apply_deform_shape(
     if drag_dist <= min_deform {
         return false;
     }
-    let Some(pos) = tab.session.shapes.iter().position(|s| s.shape_id == shape_id) else {
+    let in_remainder = tab
+        .session
+        .floating
+        .as_ref()
+        .is_some_and(|fl| fl.remainder.iter().any(|r| r.shape_id == shape_id));
+    if !in_remainder && !tab.session.shapes.iter().any(|s| s.shape_id == shape_id) {
         return false;
-    };
+    }
     focus_active_layer_to_shape_by_id(tab, shape_id);
     push_canvas_undo(tab, None);
+    if in_remainder {
+        let rem_to_commit = tab.session.floating.as_mut().map(|fl| {
+            fl.modified = true;
+            Floating {
+                origin: fl.origin,
+                pieces: Vec::new(),
+                remainder: std::mem::take(&mut fl.remainder),
+                hidden: std::mem::take(&mut fl.hidden),
+                modified: true,
+            }
+        });
+        if let Some(rem_to_commit) = rem_to_commit {
+            let mut shapes = std::mem::take(&mut tab.session.shapes);
+            merge_floating_into_base_shapes(&mut shapes, rem_to_commit, tab.active_timeline());
+            tab.session.shapes = shapes;
+        }
+    }
+    let Some(pos) = tab.session.shapes.iter().position(|s| s.shape_id == shape_id) else {
+        tab.session.rebuild_overlay_from_floating();
+        return false;
+    };
     let mut shapes = std::mem::take(&mut tab.session.shapes);
     let mut deformed = shapes.remove(pos);
     apply_deform(&mut deformed);
@@ -1268,7 +1279,7 @@ fn apply_deform_shape(
     merge_shapes_into_canvas(&mut shapes, resolved);
     crate::canvas_tool::Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
     tab.session.shapes = shapes;
-    tab.session.invalidate_scene_order();
+    tab.session.rebuild_overlay_from_floating();
     sync_shapes_to_timeline(tab);
     true
 }
@@ -1359,8 +1370,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         SelectSubMode::DeleteAnchor
     };
     let target = compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode);
-    let mut test_shapes = tab.session.shapes.clone();
-    let modified_pos = match (is_add, target) {
+    let (shape_id, contour_idx, seg_idx, t_opt) = match (is_add, target) {
         (
             true,
             crate::canvas_tool::HoverTarget::Edge {
@@ -1370,14 +1380,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
                 t,
                 ..
             },
-        ) => test_shapes
-            .iter_mut()
-            .position(|s| s.shape_id == shape_id)
-            .filter(|&pos| {
-                test_shapes[pos]
-                    .get_contour_mut(contour_idx)
-                    .is_some_and(|c| c.insert_anchor_at(seg_idx, t))
-            }),
+        ) => (shape_id, contour_idx, seg_idx, Some(t)),
         (
             false,
             crate::canvas_tool::HoverTarget::Vertex {
@@ -1386,21 +1389,62 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
                 seg_idx,
                 ..
             },
-        ) => test_shapes
-            .iter_mut()
-            .position(|s| s.shape_id == shape_id)
-            .filter(|&pos| {
-                test_shapes[pos]
-                    .get_contour_mut(contour_idx)
-                    .is_some_and(|c| c.delete_anchor_at(seg_idx))
-            }),
-        _ => None,
+        ) => (shape_id, contour_idx, seg_idx, None),
+        _ => return false,
     };
-    if let Some(pos) = modified_pos {
+
+    let apply_to_shape = |s: &mut FillShape| -> bool {
+        let Some(c) = s.get_contour_mut(contour_idx) else {
+            return false;
+        };
+        let ok = if let Some(t) = t_opt {
+            c.insert_anchor_at(seg_idx, t)
+        } else {
+            c.delete_anchor_at(seg_idx)
+        };
+        if ok {
+            s.rebuild_cache();
+        }
+        ok
+    };
+
+    if let Some(fl) = &tab.session.floating {
+        if let Some(p_idx) = fl.pieces.iter().position(|p| p.shape_id == shape_id) {
+            let mut test_piece = fl.pieces[p_idx].clone();
+            if apply_to_shape(&mut test_piece) {
+                push_canvas_undo(tab, None);
+                if let Some(fl_mut) = &mut tab.session.floating {
+                    fl_mut.pieces[p_idx] = test_piece;
+                    fl_mut.modified = true;
+                }
+                tab.session.rebuild_overlay_from_floating();
+                return true;
+            }
+            return false;
+        }
+        if let Some(r_idx) = fl.remainder.iter().position(|r| r.shape_id == shape_id) {
+            let mut test_rem = fl.remainder[r_idx].clone();
+            if apply_to_shape(&mut test_rem) {
+                push_canvas_undo(tab, None);
+                if let Some(fl_mut) = &mut tab.session.floating {
+                    fl_mut.remainder[r_idx] = test_rem;
+                    fl_mut.modified = true;
+                }
+                tab.session.rebuild_overlay_from_floating();
+                return true;
+            }
+            return false;
+        }
+    }
+
+    let Some(pos) = tab.session.shapes.iter().position(|s| s.shape_id == shape_id) else {
+        return false;
+    };
+    let mut test_shape = tab.session.shapes[pos].clone();
+    if apply_to_shape(&mut test_shape) {
         push_canvas_undo(tab, None);
-        test_shapes[pos].rebuild_cache();
-        tab.session.shapes = test_shapes;
-        tab.session.invalidate_scene_order();
+        tab.session.shapes[pos] = test_shape;
+        tab.session.rebuild_overlay_from_floating();
         sync_shapes_to_timeline(tab);
         true
     } else {
@@ -1440,8 +1484,6 @@ fn apply_set_selected_symbol_world_pivot(
     }
     if commit_to_timeline {
         push_canvas_undo(tab, None);
-    } else if !tab.session.has_modified_floating() {
-        tab.session.restore_unsliced_preserving_selection();
     }
     tab.session
         .update_symbol_instance_binding(binding.instance_gid, |b| b.pivot = new_local_pivot);
@@ -1601,7 +1643,7 @@ fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -
     if targets.is_empty() {
         return false;
     }
-    flush_canvas_before_timeline_op(tab);
+    commit_floating(tab);
 
     let (can_toggle, is_currently_tweened) =
         tab.active_timeline().can_toggle_tween_at_current_frame();
@@ -1660,7 +1702,7 @@ fn apply_set_tween_rotate(tab: &mut Tab, rotate_mode: TweenRotate) -> bool {
         return false;
     }
 
-    flush_canvas_before_timeline_op(tab);
+    commit_floating(tab);
     push_undo(tab, None);
     tab.with_active_timeline_mut(|tl, _| {
         if let Some(layer_mut) = tl.layers.get_mut(tl.active_layer) {
@@ -1695,7 +1737,7 @@ fn apply_set_symbol_playback(
     let inst_gid = binding.instance_gid;
     let sym_id = binding.symbol_id;
     let prev_coalesce = tab.history.last_coalesce_key;
-    flush_canvas_before_timeline_op(tab);
+    commit_floating(tab);
     tab.history.last_coalesce_key = prev_coalesce;
     push_undo(tab, coalesce);
 
@@ -1759,7 +1801,7 @@ fn apply_switch_to_layer_and_frame(tab: &mut Tab, layer_idx: usize, frame_idx: u
         return;
     }
     let prev_frame = tab.active_timeline().current_frame;
-    flush_canvas_before_timeline_op(tab);
+    commit_floating(tab);
     let next_frame = tab.with_active_timeline_mut(|tl, _| {
         tl.select_single_cell(layer_idx, frame_idx);
         tl.current_frame
@@ -1776,7 +1818,7 @@ fn apply_scrub_ruler_to_frame(tab: &mut Tab, frame_idx: usize) {
         return;
     }
     let prev_frame = tl.current_frame;
-    flush_canvas_before_timeline_op(tab);
+    commit_floating(tab);
     tab.with_active_timeline_mut(|tl, _| {
         tl.current_frame = clamped_frame;
         tl.cell_selection = None;
@@ -1826,7 +1868,7 @@ fn apply_timeline_delete_keyframe(tab: &mut Tab) -> bool {
     if targets.is_empty() {
         return false;
     }
-    flush_canvas_before_timeline_op(tab);
+    commit_floating(tab);
     if !tab.active_timeline().can_delete_keyframe_on_targets(&targets) {
         return false;
     }
@@ -1852,7 +1894,7 @@ fn apply_timeline_remove_frame(tab: &mut Tab) -> bool {
     if targets.is_empty() {
         return false;
     }
-    flush_canvas_before_timeline_op(tab);
+    commit_floating(tab);
     if !tab.active_timeline().can_remove_frame_on_targets(&targets) {
         return false;
     }
@@ -1984,7 +2026,7 @@ fn apply_set_total_frames(
     let next_total = next_total.max(1);
     if next_total != tab.active_timeline().total_frames {
         if tab.history.last_coalesce_key != coalesce || coalesce.is_none() {
-            flush_canvas_before_timeline_op(tab);
+            commit_floating(tab);
         }
         push_undo(tab, coalesce);
         tab.with_active_timeline_mut(|tl, _| tl.resize_total_frames(next_total));
@@ -1999,9 +2041,9 @@ fn apply_set_fps(tab: &mut Tab, next_fps: u32, coalesce: Option<CoalesceKey>) ->
     if next_fps != tab.active_timeline().fps {
         if (tab.history.last_coalesce_key != coalesce || coalesce.is_none())
             && tab.session.selection.is_empty()
-            && !tab.session.has_unsliced_snapshot()
+            && tab.session.floating.is_none()
         {
-            flush_canvas_before_timeline_op(tab);
+            commit_floating(tab);
         }
         push_undo(tab, coalesce);
         tab.doc.root.fps = next_fps;

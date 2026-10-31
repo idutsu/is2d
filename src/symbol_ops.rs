@@ -1,9 +1,8 @@
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    Tab, active_scope_layer_id, cancel_active_drag, clear_selection,
-    flush_canvas_before_timeline_op, insert_and_select_shapes_in_scope, load_shapes_from_timeline,
-    reorder_selected_to_scope_front, topmost_layer_id_for_indices,
+    Session, Tab, active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating,
+    insert_and_select_shapes_in_scope, load_shapes_from_timeline, topmost_layer_id_for_indices,
 };
 use crate::symbol::{EditLevel, SymbolEvalCtx, SymbolInstanceBinding};
 use crate::timeline::TimelineCellSelection;
@@ -19,22 +18,38 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     if tab.session.selection.is_empty() {
         return None;
     }
+    let sel_scene_indices = tab.session.selected_indices();
+    if sel_scene_indices.is_empty()
+        || !tab
+            .scene()
+            .selected_has_any_in_scope(&tab.session.selection, &tab.session.editing_group_path)
+    {
+        return None;
+    }
+
+    let target_lid =
+        topmost_layer_id_for_indices(&tab.session, tab.active_timeline(), &sel_scene_indices);
+
+    before_mutate(tab);
+
+    let layer_ids: Vec<u64> = tab.active_timeline().layers.iter().map(|l| l.id).collect();
+    tab.session.layer_order_ids = layer_ids;
+    tab.session.materialize_floating_without_merge();
+
     let valid_indices: Vec<usize> = tab
         .session
-        .selected_indices()
-        .into_iter()
-        .filter(|&idx| {
-            tab.session
-                .shapes
-                .get(idx)
-                .is_some_and(|s| s.is_in_editing_scope(&tab.session.editing_group_path))
+        .shapes
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, s)| {
+            (tab.session.selection.contains_shape(s)
+                && s.is_in_editing_scope(&tab.session.editing_group_path))
+            .then_some(idx)
         })
         .collect();
     if valid_indices.is_empty() {
         return None;
     }
-
-    before_mutate(tab);
 
     let mut bbox = tab.session.shapes[valid_indices[0]].bounding_box();
     for &idx in &valid_indices[1..] {
@@ -62,25 +77,36 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         local_shapes.push(local_s);
     }
 
-    let target_lid =
-        topmost_layer_id_for_indices(&tab.session, tab.active_timeline(), &valid_indices);
     let binding = SymbolInstanceBinding::new(
         inst_gid,
         sym_id,
         Affine::translate(KVec2::new(center.x, center.y)),
     );
-    for &idx in &valid_indices {
-        if let Some(shape) = tab.session.shapes.get_mut(idx) {
+    let insert_limit = tab.session.scope_insert_index();
+    let mut unselected = Vec::with_capacity(tab.session.shapes.len());
+    let mut converted_shapes = Vec::new();
+    let mut trailing_outside = Vec::new();
+    for (idx, mut shape) in tab.session.shapes.drain(..).enumerate() {
+        if valid_indices.binary_search(&idx).is_ok() {
             shape.layer_id = target_lid;
             shape.group_path.insert(depth, inst_gid);
             shape.symbol_instance = Some(binding);
+            converted_shapes.push(shape);
+        } else if idx < insert_limit {
+            unselected.push(shape);
+        } else {
+            trailing_outside.push(shape);
         }
     }
-    tab.session.invalidate_scene_order();
+    unselected.extend(converted_shapes);
+    unselected.extend(trailing_outside);
+    Session::sort_vec_by_layer_order(&mut unselected, tab.active_timeline());
+    tab.session.shapes = unselected;
+    tab.session.floating = None;
+    tab.session.rebuild_overlay_from_floating();
     tab.session.selection.clear();
     tab.session.selection.instances.insert(inst_gid);
 
-    reorder_selected_to_scope_front(tab);
     Some((sym_id, target_lid, local_shapes))
 }
 
@@ -187,7 +213,7 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
         return false;
     }
 
-    flush_canvas_before_timeline_op(tab);
+    commit_floating(tab);
     tab.session.selection.clear();
 
     let (parent_frame, parent_active_layer, xform_in_parent) = {
@@ -327,7 +353,7 @@ pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
     if tab.session.edit_path.is_empty() {
         return false;
     }
-    flush_canvas_before_timeline_op(tab);
+    commit_floating(tab);
     tab.session.selection.clear();
 
     let Some(lvl) = tab.session.edit_path.levels.pop() else {

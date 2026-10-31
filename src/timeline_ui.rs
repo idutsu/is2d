@@ -2,9 +2,7 @@ use std::time::Duration;
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
-use crate::canvas_tool::{
-    CoalesceKey, Tab, flush_canvas_before_timeline_op, load_shapes_from_timeline,
-};
+use crate::canvas_tool::{CoalesceKey, Tab, commit_floating, load_shapes_from_timeline};
 use crate::doc_actions::{Action, ActionHost, apply};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{
@@ -2022,7 +2020,7 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
     } else {
         apply(host, Action::Deselect);
         let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
-        flush_canvas_before_timeline_op(tab);
+        commit_floating(tab);
         tab.history.end_coalesce();
         timeline_ui.cancel_drag();
         let loop_pb = timeline_ui.loop_playback;

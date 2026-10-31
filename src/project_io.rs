@@ -6,8 +6,8 @@ use kurbo::{Affine, Point, QuadBez};
 use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{
-    cancel_active_drag, commit_floating, load_shapes_from_timeline, sync_shapes_to_timeline,
-    Floating, SelectSubMode, Session, Tab, UndoHistory, View,
+    cancel_active_drag, load_shapes_from_timeline, merge_floating_into_base_shapes,
+    sync_shapes_to_timeline, SelectSubMode, Session, Tab, UndoHistory, View,
 };
 use crate::clipboard_ops::max_group_id_in_timeline;
 use crate::symbol::{
@@ -88,28 +88,13 @@ fn surrender_focused_widget(ctx: &egui::Context) {
     });
 }
 
-/// タブ切り替えやプロジェクト保存の前に、選択状態やカスタムピボットを破壊せずに
-/// 進行中ドラッグの中断・連続編集フラグのリセット・（保存時のみ）未マージ生シェイプの結合/切り抜き確定・作業キャンバスのセル同期・多段シンボル編集スタックのライブラリ同期を行う
-fn prepare_active_tab_for_switch_or_save(tab: &mut Tab, flush_raw_merge: bool) {
+/// タブ切り替えやプロジェクト保存の前に、選択状態・`Floating`・カスタムピボットを保持したまま
+/// 進行中ドラッグの中断・連続編集フラグのリセット・作業キャンバスのセル同期を行う
+fn prepare_active_tab_for_switch_or_save(tab: &mut Tab) {
     cancel_active_drag(tab);
     tab.view.pan_last_screen_pos = None;
     tab.history.end_coalesce();
-
-    if flush_raw_merge && tab.session.has_modified_floating() && !tab.session.selection.is_empty() {
-        let saved_pivot = tab.session.transform_pivot;
-        commit_floating(tab);
-        tab.session.transform_pivot = if tab.session.selection.is_empty() {
-            None
-        } else {
-            saved_pivot
-        };
-    }
-
-    // 矩形マーキースライス直後で未編集の一時分割状態（`has_unsliced_snapshot() == true`）の間は、
-    // タイムライン側に既にスライス前の正しい図形が保持されているため上書き同期をスキップし、選択も維持する
-    if !tab.session.has_unsliced_snapshot() {
-        sync_shapes_to_timeline(tab);
-    }
+    sync_shapes_to_timeline(tab);
 }
 
 /// アクティブタブのインデックスを `target_index` へ切り替え、キャンバス矩形を引き継ぎつつペーストオフセット等をリセットする
@@ -164,6 +149,7 @@ pub(crate) fn is_active_tab_pristine_empty(tab: &Tab) -> bool {
         && tab.doc.root.layers[0].keyframes.len() == 1
         && tab.doc.root.layers[0].keyframes[0].cel.is_empty()
         && tab.session.shapes.is_empty()
+        && tab.session.floating.is_none()
 }
 
 /// 指定したインデックス `index` のタブに未保存変更（`is_dirty() == true`）があるかを返す
@@ -307,7 +293,7 @@ pub(crate) fn switch_to_tab(
     }
     *ws.pending_close_confirm_mut() = None;
     crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
-    prepare_active_tab_for_switch_or_save(ws.tab_mut(), false);
+    prepare_active_tab_for_switch_or_save(ws.tab_mut());
     activate_tab_index(ws, target_index);
 
     if let Some(c) = ctx {
@@ -913,7 +899,53 @@ pub(crate) struct ProjectDocument {
 
 impl ProjectDocument {
     /// 現在の `Tab` から保存用の `ProjectDocument` を生成する
+    /// （`Floating` がある場合は `Document` のコピーに対して確定した内容を書き出し、`Session` も `Document` も書き換えない）
     pub(crate) fn from_app(tab: &Tab) -> Self {
+        if let Some(fl) = tab
+            .session
+            .floating
+            .as_ref()
+            .filter(|fl| fl.needs_merge_commit())
+        {
+            let mut doc_copy = tab.doc.clone();
+            let mut base_shapes = tab.session.shapes.clone();
+            merge_floating_into_base_shapes(&mut base_shapes, fl.clone(), tab.active_timeline());
+            let world_xform = tab.session.edit_path.world_xform();
+            if let Some(last) = tab.session.edit_path.last() {
+                if let Some(idx) = doc_copy.library.iter().position(|s| s.id == last.symbol_id) {
+                    let mut taken_tl = std::mem::take(&mut doc_copy.library[idx].timeline);
+                    taken_tl.normalize_shape_layer_ids(&mut base_shapes);
+                    Session::sort_vec_by_layer_order(&mut base_shapes, &taken_tl);
+                    taken_tl.write_shapes_to_editable_cels(
+                        &base_shapes,
+                        &doc_copy.library,
+                        &[],
+                        world_xform,
+                    );
+                    doc_copy.library[idx].timeline = taken_tl;
+                }
+            } else {
+                doc_copy.root.normalize_shape_layer_ids(&mut base_shapes);
+                Session::sort_vec_by_layer_order(&mut base_shapes, &doc_copy.root);
+                doc_copy.root.write_shapes_to_editable_cels(
+                    &base_shapes,
+                    &doc_copy.library,
+                    &[],
+                    world_xform,
+                );
+            }
+            let mut saved_timeline: SavedTimeline = (&doc_copy.root).into();
+            saved_timeline.fps = doc_copy.root.fps.clamp(1, 60);
+            return Self {
+                version: PROJECT_FORMAT_VERSION,
+                stage_size: [doc_copy.stage_size.x, doc_copy.stage_size.y],
+                timeline: saved_timeline,
+                library: doc_copy.library.iter().map(SavedSymbolDef::from).collect(),
+                next_symbol_id: doc_copy.next_symbol_id,
+                next_group_id: doc_copy.next_group_id,
+            };
+        }
+
         let mut saved_timeline: SavedTimeline = (&tab.doc.root).into();
         saved_timeline.fps = tab.doc.root.fps.clamp(1, 60);
 
@@ -1261,63 +1293,19 @@ pub(crate) fn update_window_title(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
     }
 }
 
-type PreSaveRollbackState = (
-    Vec<FillShape>,
-    crate::canvas_tool::Selection,
-    Option<Floating>,
-    Option<Point>,
-    Document,
-    crate::symbol::EditPath,
-);
-
-fn restore_pre_save_state(tab: &mut Tab, pre_save_state: Option<PreSaveRollbackState>) {
-    if let Some((shapes, sel, floating, pivot, doc, edit_path)) = pre_save_state {
-        tab.session.shapes = shapes;
-        tab.session.selection = sel;
-        tab.session.floating = floating;
-        tab.session.transform_pivot = pivot;
-        tab.doc = doc;
-        tab.session.edit_path = edit_path;
-        tab.session.backdrop_cache = Default::default();
-        tab.session.record_loaded_signatures();
-    }
-}
-
 /// 指定されたファイルパス `path` へプロジェクトを一時ファイル経由でアトミック保存する
 pub(crate) fn save_project_to_path(
     ws: &mut impl ProjectWorkspace,
     path: &Path,
 ) -> Result<(), String> {
-    let pre_save_state = {
-        let tab = ws.tab();
-        (tab.session.has_modified_floating() && !tab.session.selection.is_empty()).then(|| {
-            (
-                tab.session.shapes.clone(),
-                tab.session.selection.clone(),
-                tab.session.floating.clone(),
-                tab.session.transform_pivot,
-                tab.doc.clone(),
-                tab.session.edit_path.clone(),
-            )
-        })
-    };
     crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
-    prepare_active_tab_for_switch_or_save(ws.tab_mut(), true);
+    prepare_active_tab_for_switch_or_save(ws.tab_mut());
 
     let proj_doc = ProjectDocument::from_app(ws.tab());
-    if let Err(err) = proj_doc.validate_finite() {
-        restore_pre_save_state(ws.tab_mut(), pre_save_state);
-        return Err(err);
-    }
-    let json = match serde_json::to_string(&proj_doc) {
-        Ok(s) => s,
-        Err(e) => {
-            restore_pre_save_state(ws.tab_mut(), pre_save_state);
-            return Err(format!("プロジェクトデータの変換に失敗しました: {e}"));
-        }
-    };
+    proj_doc.validate_finite()?;
+    let json = serde_json::to_string(&proj_doc)
+        .map_err(|e| format!("プロジェクトデータの変換に失敗しました: {e}"))?;
     if json.len() as u64 > MAX_PROJECT_FILE_BYTES {
-        restore_pre_save_state(ws.tab_mut(), pre_save_state);
         return Err(format!(
             "保存データが最大サイズ上限を超えています ({} MB > 上限 {} MB)",
             json.len() as u64 / (1024 * 1024),
@@ -1347,13 +1335,11 @@ pub(crate) fn save_project_to_path(
     })();
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&tmp_path);
-        restore_pre_save_state(ws.tab_mut(), pre_save_state);
         return Err(format!("一時ファイルの書き込みに失敗しました: {e}"));
     }
 
     if let Err(e) = std::fs::rename(&tmp_path, &target_path) {
         let _ = std::fs::remove_file(&tmp_path);
-        restore_pre_save_state(ws.tab_mut(), pre_save_state);
         return Err(format!("ファイルの保存に失敗しました: {e}"));
     }
     if let Some(parent) = target_path.parent() {
@@ -1459,7 +1445,7 @@ pub(crate) fn open_project_in_tab(
     // （ファイル読込タブでは `untitled_number` を `0` として遅延採番し、`無題-N` 連番の欠番スキップを防ぐ）
     if !is_active_tab_pristine_empty(ws.tab()) {
         crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
-        prepare_active_tab_for_switch_or_save(ws.tab_mut(), false);
+        prepare_active_tab_for_switch_or_save(ws.tab_mut());
         let doc_id = ws.alloc_doc_id();
         let insert_idx = (ws.active_index() + 1).min(ws.tabs().len());
         ws.tabs_mut().insert(insert_idx, Tab::new_empty(doc_id, 0));
@@ -1495,7 +1481,7 @@ pub(crate) fn open_project_in_tab(
 /// アクティブタブの右隣に新しい白紙ドキュメントタブを追加して切り替える（`Cmd/Ctrl + N` / タブバーの `＋` ボタン）
 pub(crate) fn new_project(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
     crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
-    prepare_active_tab_for_switch_or_save(ws.tab_mut(), false);
+    prepare_active_tab_for_switch_or_save(ws.tab_mut());
 
     let doc_id = ws.alloc_doc_id();
     let untitled_num = ws.alloc_untitled_number();

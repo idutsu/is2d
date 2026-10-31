@@ -516,7 +516,7 @@ fn test_marquee_select_partial_slice_and_shift_multi_select() {
         false,
     );
     assert_eq!(
-        app.session.shapes.len(),
+        app.scene().len(),
         2,
         "部分矩形選択で内外2つにスライスされること"
     );
@@ -526,14 +526,17 @@ fn test_marquee_select_partial_slice_and_shift_multi_select() {
         "スライスされた内側のみが選択されていること"
     );
     assert!(
-        app.session.shapes[app.session.selected_indices()[0]].contains_point(Point::new(110.0, 200.0)),
+        app.scene()
+            .get(app.session.selected_indices()[0])
+            .unwrap()
+            .contains_point(Point::new(110.0, 200.0)),
         "選択された断片が左端領域を含んでいること"
     );
 
     // 2. 移動も削除もせずに選択解除（clear_selection）すると、無劣化で元の1つのシェイプに戻ること
     tool_select::clear_selection(&mut app);
     assert_eq!(
-        app.session.shapes.len(),
+        app.scene().len(),
         1,
         "未編集で選択解除すると元の1つのシェイプに復元されること"
     );
@@ -553,7 +556,7 @@ fn test_marquee_select_partial_slice_and_shift_multi_select() {
         true,
     );
     assert_eq!(
-        app.session.shapes.len(),
+        app.scene().len(),
         3,
         "左右両端のスライスと中央の非選択領域の計3つに分割されること"
     );
@@ -630,15 +633,13 @@ fn test_keep_selection_on_tool_switch_and_bucket_fill_selected_region_only() {
         "選択領域内をクリックするとバケツで色が流し込まれること"
     );
     assert!(
-        app.session
-            .shapes
+        app.scene()
             .iter()
             .any(|s| s.color == blue && s.contains_point(Point::new(130.0, 200.0))),
         "選択された左半分が青になっていること"
     );
     assert!(
-        app.session
-            .shapes
+        app.scene()
             .iter()
             .any(|s| s.color == red && s.contains_point(Point::new(260.0, 200.0))),
         "非選択の右半分は赤のままであること"
@@ -668,20 +669,22 @@ fn test_free_transform_rotate_scale_and_flip() {
         &mut app,
         std::f64::consts::FRAC_PI_2
     ));
+    let s0 = app.scene().get(0).unwrap();
     assert!(
-        app.session.shapes[0].contains_point(Point::new(200.0, 110.0))
-            && app.session.shapes[0].contains_point(Point::new(200.0, 290.0)),
+        s0.contains_point(Point::new(200.0, 110.0))
+            && s0.contains_point(Point::new(200.0, 290.0)),
         "+90度回転で縦長シェイプになること"
     );
     assert!(
-        !app.session.shapes[0].contains_point(Point::new(110.0, 200.0)),
+        !s0.contains_point(Point::new(110.0, 200.0)),
         "元の左右端にはシェイプが存在しないこと"
     );
 
     // 2. 縮小 (0.5倍) -> 上下端 (200, 110) は範囲外になり、(200, 155) 付近に縮小されること
     assert!(tool_transform::scale_selected_shapes(&mut app, 0.5, 0.5));
-    assert!(!app.session.shapes[0].contains_point(Point::new(200.0, 110.0)));
-    assert!(app.session.shapes[0].contains_point(Point::new(200.0, 155.0)));
+    let s0 = app.scene().get(0).unwrap();
+    assert!(!s0.contains_point(Point::new(200.0, 110.0)));
+    assert!(s0.contains_point(Point::new(200.0, 155.0)));
 
     // 3. カスタムピボット点 (200, 200) に対して、左側の点 (150, 200) にあるシェイプを左右反転 -> (250, 200) に移り、ワインディングも正常に保たれること
     tool_select::clear_selection(&mut app);
@@ -697,16 +700,17 @@ fn test_free_transform_rotate_scale_and_flip() {
     app.session.transform_pivot = Some(Point::new(200.0, 200.0));
 
     assert!(tool_transform::flip_selected_shapes(&mut app, true, false));
+    let s0 = app.scene().get(0).unwrap();
     assert!(
-        !app.session.shapes[0].contains_point(Point::new(150.0, 200.0)),
+        !s0.contains_point(Point::new(150.0, 200.0)),
         "反転前の位置には存在しないこと"
     );
     assert!(
-        app.session.shapes[0].contains_point(Point::new(250.0, 200.0)),
+        s0.contains_point(Point::new(250.0, 200.0)),
         "ピボット (200, 200) を基準に左右対称の (250, 200) へ反転移動していること"
     );
     assert!(
-        app.session.shapes[0].exterior.signed_area() > 0.0,
+        s0.exterior.signed_area() > 0.0,
         "反転時にベジェ輪郭の向き（ワインディング）が自動補正され正の面積を保つこと"
     );
 }
@@ -973,7 +977,10 @@ fn test_cut_and_paste_in_place_seamlessly_remerges_raw_shape() {
     assert!(tool_select::paste_clipboard(&mut app, true));
     assert_eq!(app.session.selected_indices().len(), 1);
     assert!(
-        app.session.shapes[app.session.selected_indices()[0]].contains_point(Point::new(120.0, 200.0))
+        app.scene()
+            .get(app.session.selected_indices()[0])
+            .unwrap()
+            .contains_point(Point::new(120.0, 200.0))
     );
     tool_select::clear_selection(&mut app);
     assert_eq!(app.session.shapes.len(), 1);
@@ -3601,7 +3608,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     let tmp_merge_path =
         std::env::temp_dir().join(format!("is2d_save_merge_test_{}.is2d", std::process::id()));
 
-    // (1) 生シェイプ移動後の選択中保存（Cmd+S）時の Merge Drawing 確定検証
+    // (1) 生シェイプ移動後の選択中保存（Cmd+S）時の Merge Drawing 確定検証（保存は Document のコピー上で Floating を確定して書き出し、Session も Document も書き換えない）
     let mut merge_app = Is2dApp::default();
     let blue_stroke = make_stroke(
         Point::new(100.0, 100.0),
@@ -3619,24 +3626,33 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     merge_app.session.shapes.extend(red_stroke);
     canvas_tool::sync_shapes_to_timeline(&mut merge_app);
     merge_app.session.set_selected_indices(vec![1]);
-    merge_app.session.translate_selected(KVec2::new(0.0, -80.0));
-    tool_select::commit_moved_selection(&mut merge_app);
+    doc_actions::apply(
+        &mut merge_app,
+        doc_actions::Action::MoveSelected {
+            delta: KVec2::new(0.0, -80.0),
+        },
+    );
     assert!(merge_app.session.has_modified_floating());
 
     crate::project_io::save_project_to_path(&mut merge_app, &tmp_merge_path)
         .expect("選択中の保存に成功すること");
-    assert!(!merge_app.session.has_modified_floating());
+    assert!(
+        merge_app.session.has_modified_floating(),
+        "保存時に Session の Floating は書き換えられないこと"
+    );
     assert!(!merge_app.history.is_dirty());
-    let shapes_len_on_save = merge_app.session.shapes.len();
+    let mut loaded_merge = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut loaded_merge, &tmp_merge_path, None).unwrap();
+    assert_eq!(loaded_merge.scene().len(), 2);
     tool_select::clear_selection(&mut merge_app);
-    assert_eq!(merge_app.session.shapes.len(), shapes_len_on_save);
+    assert!(!merge_app.session.has_modified_floating());
     assert!(
         !merge_app.history.is_dirty(),
-        "保存後の選択解除でタイムラインが不整合更新されないこと"
+        "保存後の選択解除（Floating確定）で commit_id や dirty 状態が変化しないこと"
     );
 
-    // (2) 非選択の背景同色シェイプと Union 融合して保存された場合は背景を勝手に巻き込まず選択解除され、
-    //     選択中のシェイプ同士のみの自己重なり Union 保存では shape_id と選択状態が維持されること
+    // (2) 非選択の背景同色シェイプと重なる位置へ移動して保存した場合、保存ファイル上では1図形に Union 結合され、
+    //     選択解除時にも非選択の背景シェイプが勝手に選択に巻き込まれないこと
     let mut union_save_app = Is2dApp::default();
     union_save_app.session.shapes = make_stroke(
         Point::new(100.0, 100.0),
@@ -3652,21 +3668,24 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     ));
     canvas_tool::sync_shapes_to_timeline(&mut union_save_app);
     union_save_app.session.set_selected_indices(vec![1]);
-    union_save_app
-        .session
-        .translate_selected(KVec2::new(0.0, -80.0));
-    tool_select::commit_moved_selection(&mut union_save_app);
+    doc_actions::apply(
+        &mut union_save_app,
+        doc_actions::Action::MoveSelected {
+            delta: KVec2::new(0.0, -80.0),
+        },
+    );
     crate::project_io::save_project_to_path(&mut union_save_app, &tmp_merge_path)
         .expect("同色Union保存に成功すること");
+    let mut loaded_union = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut loaded_union, &tmp_merge_path, None).unwrap();
     assert_eq!(
-        union_save_app.session.shapes.len(),
+        loaded_union.scene().len(),
         1,
-        "同色シェイプが1つにUnion結合されていること"
+        "保存されたドキュメントでは同色シェイプが1つにUnion結合されていること"
     );
-    assert!(
-        union_save_app.session.selection.is_empty(),
-        "非選択の背景同色シェイプとUnion融合して保存した場合は背景シェイプが勝手に選択に巻き込まれないこと"
-    );
+    tool_select::clear_selection(&mut union_save_app);
+    assert_eq!(union_save_app.scene().len(), 1);
+    assert!(union_save_app.session.selection.is_empty());
 
     let mut self_union_app = Is2dApp::default();
     self_union_app.session.shapes = make_stroke(
@@ -3684,24 +3703,25 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     canvas_tool::sync_shapes_to_timeline(&mut self_union_app);
     self_union_app.session.set_selected_indices(vec![0, 1]);
     assert!(tool_select::copy_selected_shapes(&mut self_union_app));
-    self_union_app
-        .session
-        .translate_selected(KVec2::new(10.0, 0.0));
-    tool_select::commit_moved_selection(&mut self_union_app);
+    doc_actions::apply(
+        &mut self_union_app,
+        doc_actions::Action::MoveSelected {
+            delta: KVec2::new(10.0, 0.0),
+        },
+    );
     crate::project_io::save_project_to_path(&mut self_union_app, &tmp_merge_path)
         .expect("選択同士のUnion保存に成功すること");
-    assert_eq!(self_union_app.session.shapes.len(), 1);
-    assert_eq!(
-        self_union_app.session.selected_indices(),
-        vec![0],
-        "選択シェイプ同士のみのUnion結合では shape_id が引き継がれ選択状態が維持されること"
-    );
+    let mut loaded_self_union = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut loaded_self_union, &tmp_merge_path, None)
+        .unwrap();
+    assert_eq!(loaded_self_union.scene().len(), 1);
+    assert_eq!(self_union_app.session.selected_indices().len(), 2);
 
     let _ = std::fs::remove_file(&tmp_merge_path);
 }
 
 #[test]
-fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
+fn test_save_io_failure_rollback_and_marquee_slice_push_undo() {
     // 全レイヤーロック中は paste_clipboard が拒否され、矩形マーキースライス直後（未編集）に push_undo() が呼ばれても分割断片が早期確定されないこと
     let mut self_union_app = Is2dApp::default();
     self_union_app.session.shapes = make_stroke(
@@ -3728,8 +3748,14 @@ fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
         Point::new(150.0, 140.0),
         false,
     );
-    assert!(self_union_app.session.has_unsliced_snapshot());
-    assert!(self_union_app.session.shapes.len() >= 2);
+    assert!(
+        self_union_app
+            .session
+            .floating
+            .as_ref()
+            .is_some_and(|fl| fl.is_unmodified_slice())
+    );
+    assert!(self_union_app.scene().len() >= 2);
     doc_actions::apply(
         &mut self_union_app,
         doc_actions::Action::SetStageSize {
@@ -3763,10 +3789,12 @@ fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
     ));
     canvas_tool::sync_shapes_to_timeline(&mut undo_redo_merge_app);
     undo_redo_merge_app.session.set_selected_indices(vec![1]);
-    undo_redo_merge_app
-        .session
-        .translate_selected(KVec2::new(0.0, -80.0));
-    tool_select::commit_moved_selection(&mut undo_redo_merge_app);
+    doc_actions::apply(
+        &mut undo_redo_merge_app,
+        doc_actions::Action::MoveSelected {
+            delta: KVec2::new(0.0, -80.0),
+        },
+    );
     assert!(undo_redo_merge_app.session.has_modified_floating());
 
     let bad_path = std::env::temp_dir()
@@ -3774,19 +3802,22 @@ fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
         .join("fail.is2d");
     assert!(crate::project_io::save_project_to_path(&mut undo_redo_merge_app, &bad_path).is_err());
     assert_eq!(
-        undo_redo_merge_app.session.shapes.len(),
+        undo_redo_merge_app.scene().len(),
         2,
         "保存I/O失敗時はライブキャンバス上の未マージ図形が勝手に結合されないこと"
     );
     assert!(undo_redo_merge_app.session.has_modified_floating());
 
     undo_redo_merge_app.undo();
-    assert_eq!(undo_redo_merge_app.session.shapes.len(), 2);
+    assert!(!undo_redo_merge_app.session.has_modified_floating());
+    assert_eq!(undo_redo_merge_app.scene().len(), 2);
     undo_redo_merge_app.redo();
+    assert!(undo_redo_merge_app.session.has_modified_floating());
+    tool_select::clear_selection(&mut undo_redo_merge_app);
     assert_eq!(
-        undo_redo_merge_app.session.shapes.len(),
+        undo_redo_merge_app.scene().len(),
         1,
-        "Floating 変更済み状態からの Undo -> Redo 後もマージ描画（Union）が確定維持されること"
+        "Floating 変更済み状態からの Undo -> Redo -> 選択解除後もマージ描画（Union）が確定されること"
     );
 }
 
@@ -4263,13 +4294,13 @@ fn test_tween_state_incomplete_when_not_single_symbol_instance() {
 }
 
 #[test]
-fn test_marquee_shift_deselect_restores_unsliced_for_bucket_fill() {
+fn test_marquee_shift_deselect_restores_for_bucket_fill() {
     let mut app = Is2dApp::default();
     let red = Color32::from_rgb(220, 50, 50);
     let blue = Color32::from_rgb(50, 120, 220);
 
     // マーキースライスで1本のストロークを2つに分割選択したあと、Shift+クリック（toggle_shape_selection）で選択を空にした際、
-    // 即座に未スライス状態の base が復元され、直後のバケツ塗りで古い未スライス状態が復活しないこと
+    // 即座にスライス前の元の図形が復元され、直後のバケツ塗りで古いスライス状態が残らないこと
     app.session.shapes = make_stroke(
         Point::new(100.0, 100.0),
         Point::new(240.0, 100.0),
@@ -4283,13 +4314,13 @@ fn test_marquee_shift_deselect_restores_unsliced_for_bucket_fill() {
         Point::new(160.0, 130.0),
         false,
     );
-    assert!(app.session.has_unsliced_snapshot());
+    assert!(app.session.floating.is_some());
     assert_eq!(app.session.selected_indices().len(), 1);
     let sel_idx = app.session.selected_indices()[0];
     tool_select::toggle_shape_selection(&mut app, sel_idx);
     assert!(app.session.selection.is_empty());
     assert!(
-        !app.session.has_unsliced_snapshot(),
+        app.session.floating.is_none(),
         "Shift+クリックで選択が空になった時点で未編集のマーキースライスは即座に復元されること"
     );
     assert_eq!(app.session.shapes.len(), 1);
@@ -4860,7 +4891,7 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
             app.update_ui(ctx);
         },
     );
-    assert_eq!(app.session.shapes.len(), 2);
+    assert_eq!(app.scene().len(), 2);
 
     // OS クリップボードが空で egui-winit が押下時の Event::Paste / Key(V, pressed:true) を抑止した場合でも、
     // Cmd+V のキーリリース (pressed: false) フォールバックで確実にペーストされること (#15)
@@ -4892,7 +4923,7 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
         "OS クリップボードが空で押下イベントが吸収されても Cmd+V リリース時にペーストされること (#15)"
     );
     assert!(
-        (app.session.shapes[1].bounding_box().center().x - (140.0 + 32.0)).abs() < 2.0,
+        (app.scene().get(app.scene().len() - 1).unwrap().bounding_box().center().x - (140.0 + 32.0)).abs() < 2.0,
         "2回目のペースト図形が +32px オフセット位置に実際に配置されていること (#15)"
     );
 
@@ -4929,7 +4960,7 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
         "V より先に Cmd を離した場合でも V キーリリースでペーストされること (#15)"
     );
     assert!(
-        (app.session.shapes[1].bounding_box().center().x - (140.0 + 48.0)).abs() < 2.0,
+        (app.scene().get(app.scene().len() - 1).unwrap().bounding_box().center().x - (140.0 + 48.0)).abs() < 2.0,
         "3回目のペースト図形が +48px オフセット位置に実際に配置されていること (#15)"
     );
 
@@ -5177,7 +5208,7 @@ fn test_egui_select_and_transform_tool_raw_input_interactions() {
             app.update_ui(ctx);
         },
     );
-    let moved_center = app.session.shapes[0].bounding_box().center();
+    let moved_center = app.scene().get(0).unwrap().bounding_box().center();
     let expected_dx = 50.0 / (app.view.zoom as f64);
     assert!(
         (moved_center.x - (initial_bbox_center.x + expected_dx)).abs() < 2.0,
@@ -5462,7 +5493,7 @@ fn test_shift_partial_deselect_only_merges_deselected_raw_shape() {
 
     // 選択に残した下側の赤い図形をさらに右へ +100px 戻してから全選択解除する
     let remaining_idx = app.session.selected_indices()[0];
-    assert_eq!(app.session.shapes[remaining_idx].color, red);
+    assert_eq!(app.scene().get(remaining_idx).unwrap().color, red);
     assert!(tool_select::nudge_selected_shapes(
         &mut app,
         kurbo::Vec2::new(100.0, 0.0)
@@ -5500,7 +5531,7 @@ fn test_shift_partial_deselect_only_merges_deselected_raw_shape() {
 }
 
 #[test]
-fn test_pivot_commit_restores_unsliced_marquee_snapshot_and_persists() {
+fn test_pivot_commit_restores_marquee_slice_and_persists() {
     let mut app = Is2dApp::default();
     app.session.shapes = make_stroke(
         Point::new(100.0, 100.0),
@@ -5518,8 +5549,8 @@ fn test_pivot_commit_restores_unsliced_marquee_snapshot_and_persists() {
         Point::new(160.0, 120.0),
         false,
     );
-    assert!(app.session.has_unsliced_snapshot());
-    assert_eq!(app.session.shapes.len(), 2);
+    assert!(app.session.floating.is_some());
+    assert_eq!(app.scene().len(), 2);
 
     doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
     let bbox = app
@@ -5562,12 +5593,11 @@ fn test_pivot_commit_restores_unsliced_marquee_snapshot_and_persists() {
         Point::new(160.0, 260.0),
         false,
     );
-    assert!(app.session.has_unsliced_snapshot());
+    assert!(app.session.floating.is_some());
 
     // シンボルインスタンスのみに選択を絞り、ピボットを変更して選択解除
     let sym_indices: Vec<usize> = app
-        .session
-        .shapes
+        .scene()
         .iter()
         .enumerate()
         .filter(|(_, s)| s.symbol_instance.is_some())
@@ -5580,7 +5610,7 @@ fn test_pivot_commit_restores_unsliced_marquee_snapshot_and_persists() {
         Some(new_world_pivot),
         true
     ));
-    assert!(!app.session.has_unsliced_snapshot());
+    assert!(app.session.floating.is_none());
     tool_select::clear_selection(&mut app);
 
     let saved_inst = &app.doc.root.layers[0].keyframes[0].cel.instances[0];
@@ -6225,9 +6255,8 @@ fn test_transform_rotate_zone_only_near_four_corners_and_paste_staircase_across_
 
     tool_select::paste_clipboard(&mut app, false);
     let c1 = app
-        .session
-        .shapes
-        .last()
+        .scene()
+        .get(app.scene().len() - 1)
         .unwrap()
         .bounding_box()
         .center();
@@ -6237,9 +6266,8 @@ fn test_transform_rotate_zone_only_near_four_corners_and_paste_staircase_across_
     app.view.zoom = 4.0;
     tool_select::paste_clipboard(&mut app, false);
     let c2 = app
-        .session
-        .shapes
-        .last()
+        .scene()
+        .get(app.scene().len() - 1)
         .unwrap()
         .bounding_box()
         .center();
@@ -6537,7 +6565,7 @@ fn test_scale_commit_and_repeated_transform_rebuild_mesh_cache() {
             changed: true,
         },
     );
-    let rebuilt_verts = app.session.shapes[0].fill_mesh().vertices.len();
+    let rebuilt_verts = app.scene().get(0).unwrap().fill_mesh().vertices.len();
     assert!(
         rebuilt_verts > initial_verts,
         "拡大確定時 (CommitTransformDrag) にメッシュが再構築され、拡大後の曲線に応じた滑らかな頂点数になること (#5): initial={initial_verts}, rebuilt={rebuilt_verts}"
@@ -6813,7 +6841,7 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
             app.update_ui(ctx);
         },
     );
-    let p0_after_rot = app.session.shapes[0].exterior.segments[0].p0;
+    let p0_after_rot = app.scene().get(0).unwrap().exterior.segments[0].p0;
     assert!(
         (p0_after_rot - p0_before_rot).hypot() > 5.0,
         "自由変形ツールの四隅外側ドラッグで図形が回転されること"
@@ -8401,7 +8429,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     canvas_tool::sync_shapes_to_timeline(&mut app);
     assert!(app.session.floating.is_none());
 
-    // 1. マーキー矩形スライスで Floating(Slice, modified=false) が生成され、未変更で選択解除すると unsliced がそのまま復元されること
+    // 1. マーキー矩形スライスで Floating(Slice, modified=false) が生成され、未変更で選択解除すると元の1図形に戻ること
     run(
         &mut app,
         &[Action::SelectMarquee {
@@ -8419,7 +8447,9 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     assert!(!fl.modified);
     assert!(fl.is_unmodified_slice());
     assert!(!fl.needs_merge_commit());
-    assert_eq!(fl.unsliced.as_ref().map(Vec::len), Some(1));
+    assert_eq!(fl.pieces.len(), 1);
+    assert_eq!(fl.remainder.len(), 1);
+    assert_eq!(fl.hidden.len(), 1);
 
     run(&mut app, &[Action::Deselect]);
     assert!(app.session.floating.is_none());
@@ -9035,10 +9065,12 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
     assert_eq!(scene_last.shape_id, red_id);
     assert!((scene_last.bounding_box().y0 - (orig_red_bbox.y0 + 40.0)).abs() < 1e-5);
     tool_select::finish_reshape_drag(&mut app, Some(Point::new(120.0, 140.0)));
-    assert!((app.session.shapes[1].bounding_box().y0 - (orig_red_bbox.y0 + 40.0)).abs() < 1e-5);
+    assert!(
+        (app.scene().get(1).unwrap().bounding_box().y0 - (orig_red_bbox.y0 + 40.0)).abs() < 1e-5
+    );
     run(&mut app, &[Action::Undo]);
-    assert_eq!(app.session.shapes[0].bounding_box(), orig_red_bbox);
-    assert_eq!(app.session.shapes[1].bounding_box(), orig_blue_bbox);
+    assert_eq!(app.scene().get(0).unwrap().bounding_box(), orig_red_bbox);
+    assert_eq!(app.scene().get(1).unwrap().bounding_box(), orig_blue_bbox);
 
     // 2. Alt 複製ドラッグ中は session.shapes が増えず、Scene の Overlay に複製プレビューが追加される
     {
@@ -9094,14 +9126,172 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
         Some(Point::new(bbox.x1 + 30.0, bbox.y0 - 10.0)),
     );
     let committed_red = app
-        .session
-        .shapes
+        .scene()
         .iter()
         .find(|s| s.shape_id == red_id)
         .unwrap();
     assert!(committed_red.bounding_box().width() > orig_red_bbox.width() + 20.0);
     run(&mut app, &[Action::Undo]);
-    assert_eq!(app.session.shapes[0].bounding_box(), orig_red_bbox);
+    assert_eq!(app.scene().get(0).unwrap().bounding_box(), orig_red_bbox);
 }
+
+#[test]
+fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let lid = app.doc.root.layers[0].id;
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 120, 220);
+
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(260.0, 100.0)],
+                radius: 14.0,
+                color: red,
+            },
+            Action::PaintStroke {
+                points: vec![Point::new(180.0, 180.0), Point::new(180.0, 220.0)],
+                radius: 14.0,
+                color: blue,
+            },
+        ],
+    );
+    let rev_initial = app.doc.root.layers[0].keyframes[0].cel.revision;
+    let cel_before = cel_summary(&app.doc, lid, 0);
+    let orig_red = app
+        .doc
+        .root
+        .layers[0]
+        .keyframes[0]
+        .cel
+        .shapes
+        .iter()
+        .find(|s| s.color == red)
+        .unwrap()
+        .exterior
+        .signed_area();
+
+    // 1. マーキースライス時はすぐ Floating に持ち上げられ、文書のセルは一切書き換わらないこと
+    run(
+        &mut app,
+        &[Action::SelectMarquee {
+            p0: Point::new(80.0, 70.0),
+            p1: Point::new(170.0, 130.0),
+            additive: false,
+        }],
+    );
+    assert!(app.session.floating.is_some());
+    assert_eq!(app.scene().len(), 3);
+    assert_eq!(
+        app.doc.root.layers[0].keyframes[0].cel.revision,
+        rev_initial,
+        "マーキースライス直後は文書の Cel::revision が変化しないこと"
+    );
+    assert_eq!(
+        cel_summary(&app.doc, lid, 0).shape_count,
+        cel_before.shape_count
+    );
+
+    // 未変形のスライスを解除したときは Floating を捨てるだけで文書の Cel::revision は変化しないこと
+    run(&mut app, &[Action::Deselect]);
+    assert!(app.session.floating.is_none());
+    assert_eq!(app.scene().len(), 2);
+    assert_eq!(
+        app.doc.root.layers[0].keyframes[0].cel.revision,
+        rev_initial
+    );
+
+    // 2. 生の図形を丸ごと選んだときは、最初に動かしたときに Floating へ持ち上げられ、確定するまで文書のセルは変化しないこと
+    run(
+        &mut app,
+        &[Action::SelectSingleAt {
+            pt: Point::new(180.0, 200.0),
+        }],
+    );
+    assert!(
+        app.session.floating.is_none(),
+        "生図形を丸ごとクリック選択した時点ではまだ Floating に入らないこと"
+    );
+    run(
+        &mut app,
+        &[
+            Action::NudgeSelection {
+                delta: KVec2::new(0.0, -50.0),
+            },
+            Action::NudgeSelection {
+                delta: KVec2::new(0.0, -50.0),
+            },
+        ],
+    );
+    assert!(app.session.floating.is_some());
+    assert_eq!(
+        app.doc.root.layers[0].keyframes[0].cel.revision,
+        rev_initial,
+        "生図形を選択・移動している間（確定前）は文書のセルが変化しないこと"
+    );
+    assert_eq!(
+        cel_summary(&app.doc, lid, 0).total_area,
+        cel_before.total_area
+    );
+
+    // 3. タブ切り替えでは確定しないこと
+    let ctx = egui::Context::default();
+    crate::project_io::new_project(&mut app, &ctx);
+    assert_eq!(app.active, 1);
+    crate::project_io::switch_to_tab(&mut app, 0, Some(&ctx));
+    assert!(
+        app.session.floating.is_some(),
+        "タブ切り替えでは Floating を確定せず維持すること"
+    );
+    assert_eq!(
+        app.doc.root.layers[0].keyframes[0].cel.revision,
+        rev_initial
+    );
+
+    // 4. 保存は Document のコピーの上で Floating を確定して書き出し、Session も Document も書き換えないこと
+    let tmp_save =
+        std::env::temp_dir().join(format!("is2d_stage7b_save_{}.is2d", std::process::id()));
+    crate::project_io::save_project_to_path(&mut app, &tmp_save).unwrap();
+    assert!(
+        app.session.floating.is_some(),
+        "保存後も Session の Floating はそのまま残ること"
+    );
+    assert_eq!(
+        app.doc.root.layers[0].keyframes[0].cel.revision,
+        rev_initial,
+        "保存後も Document の Cel は書き換えられないこと"
+    );
+    let mut loaded_app = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut loaded_app, &tmp_save, None).unwrap();
+    let _ = std::fs::remove_file(&tmp_save);
+    let loaded_red: f64 = loaded_app
+        .scene()
+        .iter()
+        .filter(|s| s.color == red)
+        .map(|s| s.exterior.signed_area())
+        .sum();
+    assert!(
+        loaded_red > 0.0 && loaded_red < orig_red - 50.0,
+        "保存されたファイルには Floating を確定（切り抜き）した結果が書き出されていること"
+    );
+
+    // 5. Floating の確定は Undo の1手にならず、commit_id も変えないこと
+    let commit_before = app.history.current_commit_id;
+    let undo_len_before = app.history.undo_stack.len();
+    run(&mut app, &[Action::Deselect]);
+    assert!(app.session.floating.is_none());
+    assert_eq!(app.history.current_commit_id, commit_before);
+    assert_eq!(app.history.undo_stack.len(), undo_len_before);
+    assert!(!app.history.is_dirty());
+    assert_ne!(
+        app.doc.root.layers[0].keyframes[0].cel.revision,
+        rev_initial,
+        "確定時に1回だけ文書の Cel が更新されること"
+    );
+}
+
 
 

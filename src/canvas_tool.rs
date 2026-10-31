@@ -698,28 +698,6 @@ impl Selection {
             self.shapes.insert(shape.shape_id);
         }
     }
-
-    /// キャンバス図形列 `shapes` に現在存在するIDのみを残し、消滅したIDを除去する
-    pub(crate) fn retain_existing(&mut self, shapes: &[FillShape]) {
-        if self.is_empty() {
-            return;
-        }
-        if !self.shapes.is_empty() {
-            let valid_shapes: HashSet<ShapeId> = shapes
-                .iter()
-                .filter(|s| s.symbol_instance.is_none())
-                .map(|s| s.shape_id)
-                .collect();
-            self.shapes.retain(|id| valid_shapes.contains(id));
-        }
-        if !self.instances.is_empty() {
-            let valid_instances: HashSet<InstanceGid> = shapes
-                .iter()
-                .filter_map(|s| s.symbol_instance.map(|b| b.instance_gid))
-                .collect();
-            self.instances.retain(|gid| valid_instances.contains(gid));
-        }
-    }
 }
 
 /// 既存の `donor_shapes` から、幾何輪郭と色が一致する `target_shapes` へ描画・当たり判定キャッシュを O(1) で引き継ぐ
@@ -785,11 +763,19 @@ pub(crate) enum SceneEntry {
     Overlay(usize),
 }
 
-/// 土台の図形列 `base` と上乗せ `overlay` から画面の重なり順リストを構築する
-pub(crate) fn build_scene_order(
+#[inline]
+fn layer_order_index(layer_order_ids: &[LayerId], lid: LayerId) -> usize {
+    layer_order_ids
+        .iter()
+        .position(|&id| id == lid)
+        .unwrap_or(usize::MAX)
+}
+
+/// 土台の図形列 `base` と上乗せ `overlay` から画面の重なり順リストを構築する（レイヤーID順序配列指定）
+pub(crate) fn build_scene_order_by_layer_ids(
     base: &[FillShape],
     overlay: &Overlay,
-    timeline: &Timeline,
+    layer_order_ids: &[LayerId],
 ) -> Vec<SceneEntry> {
     if overlay.is_empty() {
         return (0..base.len()).map(SceneEntry::Base).collect();
@@ -805,10 +791,11 @@ pub(crate) fn build_scene_order(
                     replace_at_base[pos].push(add_idx);
                 } else {
                     let lid = shape.layer_id;
-                    let ord = timeline.layer_index_by_id(lid).unwrap_or(usize::MAX);
-                    if let Some(pos) = base.iter().rposition(|s| {
-                        timeline.layer_index_by_id(s.layer_id).unwrap_or(usize::MAX) <= ord
-                    }) {
+                    let ord = layer_order_index(layer_order_ids, lid);
+                    if let Some(pos) = base
+                        .iter()
+                        .rposition(|s| layer_order_index(layer_order_ids, s.layer_id) <= ord)
+                    {
                         after_base[pos].push((2 + ord.min(usize::MAX - 2), add_idx));
                     } else {
                         before_all.push((ord, add_idx));
@@ -827,10 +814,11 @@ pub(crate) fn build_scene_order(
                 } else if let Some(pos) = base.iter().rposition(|s| s.layer_id == *lid) {
                     after_base[pos].push((1, add_idx));
                 } else {
-                    let ord = timeline.layer_index_by_id(*lid).unwrap_or(usize::MAX);
-                    if let Some(pos) = base.iter().rposition(|s| {
-                        timeline.layer_index_by_id(s.layer_id).unwrap_or(usize::MAX) <= ord
-                    }) {
+                    let ord = layer_order_index(layer_order_ids, *lid);
+                    if let Some(pos) = base
+                        .iter()
+                        .rposition(|s| layer_order_index(layer_order_ids, s.layer_id) <= ord)
+                    {
                         after_base[pos].push((2 + ord.min(usize::MAX - 2), add_idx));
                     } else {
                         before_all.push((ord, add_idx));
@@ -860,6 +848,19 @@ pub(crate) fn build_scene_order(
         }
     }
     out
+}
+
+/// 土台の図形列 `base` と上乗せ `overlay` から画面の重なり順リストを構築する
+pub(crate) fn build_scene_order(
+    base: &[FillShape],
+    overlay: &Overlay,
+    timeline: &Timeline,
+) -> Vec<SceneEntry> {
+    if overlay.is_empty() {
+        return (0..base.len()).map(SceneEntry::Base).collect();
+    }
+    let layer_ids: Vec<LayerId> = timeline.layers.iter().map(|l| l.id).collect();
+    build_scene_order_by_layer_ids(base, overlay, &layer_ids)
 }
 
 /// `Scene` の図形を重なり順に走査するイテレータ
@@ -915,6 +916,7 @@ pub(crate) struct Scene<'a> {
     order: &'a [SceneEntry],
     direct_base_fallback: bool,
     overlay_only_selected: bool,
+    overlay_movable_start: usize,
 }
 
 impl Scene<'static> {
@@ -1049,11 +1051,11 @@ impl<'a> Scene<'a> {
     /// 指定 `Scene` インデックスの図形が現在選択されているかを返す
     #[inline]
     pub(crate) fn is_shape_selected(self, scene_idx: usize, selection: &Selection) -> bool {
-        if self.overlay_only_selected
-            && !self.direct_base_fallback
-            && matches!(self.order.get(scene_idx), Some(SceneEntry::Base(_)))
-        {
-            return false;
+        if self.overlay_only_selected && !self.direct_base_fallback {
+            match self.order.get(scene_idx) {
+                Some(SceneEntry::Overlay(ov_idx)) if *ov_idx >= self.overlay_movable_start => {}
+                _ => return false,
+            }
         }
         self.get(scene_idx)
             .is_some_and(|s| selection.contains_shape(s))
@@ -1199,7 +1201,7 @@ impl<'a> Scene<'a> {
 /// `Floating`（浮き上がり選択状態）が作られた契機
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum FloatingOrigin {
-    /// マーキー矩形選択によるスライス（未変形のまま選択解除されたら `base` を無劣化復元して破棄）
+    /// マーキー矩形選択によるスライス（未変形のまま選択解除されたら破棄するだけ）
     Slice,
     /// 選択図形の移動・自由変形・色変更・グループ解除
     Move,
@@ -1209,30 +1211,61 @@ pub(crate) enum FloatingOrigin {
     AltDuplicate,
 }
 
-/// 選択して移動・スライス・ペースト・Alt複製中の浮き上がり図形状態
-/// （図形の複製は持たず、未変形スライス復元用の `unsliced` と変更済み目印 `modified` のみを保持する）
+/// 選択して移動・スライス・ペースト・Alt複製中の浮き上がり図形状態（すべてステージ座標）
 #[derive(Clone, Debug)]
 pub(crate) struct Floating {
     /// この Floating が作られた契機
     pub(crate) origin: FloatingOrigin,
-    /// 未変形のスライスを元に戻すための、切り出す前の図形だけ
-    pub(crate) unsliced: Option<Vec<FillShape>>,
+    /// 浮いている片。選択中の生図形だけ
+    pub(crate) pieces: Vec<FillShape>,
+    /// スライスで切られた残り
+    pub(crate) remainder: Vec<FillShape>,
+    /// 画面から隠す元の図形（文書には残っている）
+    pub(crate) hidden: HashSet<ShapeId>,
     /// 確定時に選択中の生図形をベース図形へ結合（Merge Drawing）する必要があるか
     pub(crate) modified: bool,
 }
 
 impl Floating {
     /// マーキー矩形スライス直後でまだ一度も移動・変形されていない状態かを返す
-    #[cfg(test)]
     #[inline]
     pub(crate) fn is_unmodified_slice(&self) -> bool {
-        self.origin == FloatingOrigin::Slice && !self.modified && self.unsliced.is_some()
+        self.origin == FloatingOrigin::Slice && !self.modified
     }
 
     /// 確定時に選択中の生図形をベース図形へ結合（Merge Drawing）する必要があるかを返す
     #[inline]
     pub(crate) fn needs_merge_commit(&self) -> bool {
         self.modified
+    }
+
+    /// 一時描画キャッシュを除去して履歴保持を軽量化する
+    pub(crate) fn strip_transient_caches(&mut self) {
+        for s in &mut self.pieces {
+            s.strip_transient_caches();
+        }
+        for s in &mut self.remainder {
+            s.strip_transient_caches();
+        }
+    }
+
+    /// 直前の履歴スナップショットと同一内容であるかを判定する（`Arc` 構造共有用）
+    pub(crate) fn matches_undo_snapshot(&self, other: &Self) -> bool {
+        self.origin == other.origin
+            && self.modified == other.modified
+            && self.hidden == other.hidden
+            && self.pieces.len() == other.pieces.len()
+            && self.remainder.len() == other.remainder.len()
+            && self
+                .pieces
+                .iter()
+                .zip(&other.pieces)
+                .all(|(a, b)| LoadedShapeSig::from_shape(a).matches_with_layer(b))
+            && self
+                .remainder
+                .iter()
+                .zip(&other.remainder)
+                .all(|(a, b)| LoadedShapeSig::from_shape(a).matches_with_layer(b))
     }
 }
 
@@ -1246,10 +1279,14 @@ pub(crate) struct Session {
     pub(crate) shapes: Vec<FillShape>,
     /// 直近の `load_shapes_from_timeline` 読み込み時点のシェイプ署名一覧（`Timeline` スナップショットに含めない作業用キャッシュ）
     loaded_signatures: Vec<LoadedShapeSig>,
-    /// 土台図形列に対する上乗せ図形状態（ドラッグ中の仮表示）
+    /// 現在のタイムラインのレイヤーID順序キャッシュ（`Session::scene()` 構築用）
+    pub(crate) layer_order_ids: Vec<LayerId>,
+    /// 土台図形列に対する上乗せ図形状態（Floating およびドラッグ中の仮表示）
     pub(crate) overlay: Overlay,
-    /// `Alt` 複製ドラッグ中など、`Overlay` 内の図形のみを選択表示・境界枠対象とするフラグ
+    /// `Alt` 複製ドラッグ中など、`Overlay` 内の可動図形のみを選択表示・境界枠対象とするフラグ
     pub(crate) overlay_only_selected: bool,
+    /// `overlay.add` のうちドラッグで移動・変形する図形の開始インデックス（`0..overlay_movable_start` はスライス残り等の固定背景）
+    pub(crate) overlay_movable_start: usize,
     /// `Scene` の合成順序リストキャッシュ（土台または上乗せが変わったときだけ再構築する）
     pub(crate) scene_order: std::sync::OnceLock<Vec<SceneEntry>>,
     /// キャンバス上で進行中のドラッグ操作（ブラシ/消しゴム・選択・自由変形の排他的状態マシン）
@@ -1264,27 +1301,74 @@ pub(crate) struct Session {
 }
 
 impl Session {
+    /// `Session` 単体から読み取り専用の `Scene` ビューを返す
+    #[inline]
+    pub(crate) fn scene(&self) -> Scene<'_> {
+        let order = self.scene_order.get_or_init(|| {
+            build_scene_order_by_layer_ids(&self.shapes, &self.overlay, &self.layer_order_ids)
+        });
+        let direct_base_fallback =
+            self.overlay.is_empty() && order.len() != self.shapes.len();
+        Scene {
+            base: &self.shapes,
+            overlay: &self.overlay,
+            order,
+            direct_base_fallback,
+            overlay_only_selected: self.overlay_only_selected,
+            overlay_movable_start: self.overlay_movable_start,
+        }
+    }
+
     /// `Scene` の合成順序キャッシュを無効化する（土台 `shapes` または `overlay` の構成が変わったときに呼ぶ）
     #[inline]
     pub(crate) fn invalidate_scene_order(&mut self) {
         let _ = self.scene_order.take();
     }
 
-    /// 上乗せ `Overlay` を消去し、`Scene` 順序キャッシュを無効化する
-    #[inline]
-    pub(crate) fn clear_overlay(&mut self) {
-        let was_non_empty = !self.overlay.is_empty() || self.overlay_only_selected;
+    /// 現在の `self.floating` の状態から `self.overlay` を再構築する（ドラッグ中でない通常状態の表示用）
+    pub(crate) fn rebuild_overlay_from_floating(&mut self) {
+        let had_overlay = !self.overlay.is_empty() || self.overlay_only_selected;
         self.overlay.clear();
         self.overlay_only_selected = false;
-        if was_non_empty {
+        self.overlay_movable_start = 0;
+        if let Some(fl) = &self.floating {
+            self.overlay.hide = fl.hidden.clone();
+            let scope = self.editing_group_path.clone();
+            let mut current_hid = None;
+            for rem in &fl.remainder {
+                if fl.hidden.contains(&rem.shape_id) {
+                    current_hid = Some(rem.shape_id);
+                }
+                let placement = current_hid.map_or_else(
+                    || Placement::TopOfLayer(rem.layer_id, scope.clone()),
+                    Placement::ReplaceAt,
+                );
+                self.overlay.add.push((placement, rem.clone()));
+            }
+            self.overlay_movable_start = self.overlay.add.len();
+            for piece in &fl.pieces {
+                self.overlay.add.push((
+                    Placement::TopOfLayer(piece.layer_id, scope.clone()),
+                    piece.clone(),
+                ));
+            }
+            self.invalidate_scene_order();
+        } else if had_overlay {
             self.invalidate_scene_order();
         }
+    }
+
+    /// ドラッグ用の仮表示 `Overlay` を解除し、`Floating` のみの上乗せ状態に戻す
+    #[inline]
+    pub(crate) fn clear_overlay(&mut self) {
+        self.rebuild_overlay_from_floating();
     }
 
     /// 頂点移動・辺引っぱりの仮表示用に、指定 `shape_id` の図形を `Placement::ReplaceAt(shape_id)` で `Overlay` に載せる
     pub(crate) fn begin_deform_overlay(&mut self, shape_id: ShapeId) -> bool {
         self.overlay.clear();
         self.overlay_only_selected = false;
+        self.overlay_movable_start = 0;
         let Some(orig) = self.shapes.iter().find(|s| s.shape_id == shape_id) else {
             self.invalidate_scene_order();
             return false;
@@ -1300,17 +1384,50 @@ impl Session {
     pub(crate) fn begin_move_overlay(&mut self, alt_duplicate: bool) {
         self.overlay.clear();
         self.overlay_only_selected = alt_duplicate;
+        self.overlay_movable_start = 0;
         if self.selection.is_empty() {
-            self.invalidate_scene_order();
+            self.rebuild_overlay_from_floating();
             return;
         }
         let scope = self.editing_group_path.clone();
         let any_raw_selected = self
-            .shapes
+            .scene()
             .iter()
             .any(|s| self.selection.contains_shape(s) && s.is_raw_at_scope(&scope));
         let top_of_layer = alt_duplicate || any_raw_selected;
+
+        if let Some(fl) = &self.floating {
+            self.overlay.hide = fl.hidden.clone();
+            let mut current_hid = None;
+            for rem in &fl.remainder {
+                if fl.hidden.contains(&rem.shape_id) {
+                    current_hid = Some(rem.shape_id);
+                }
+                let placement = current_hid.map_or_else(
+                    || Placement::TopOfLayer(rem.layer_id, scope.clone()),
+                    Placement::ReplaceAt,
+                );
+                self.overlay.add.push((placement, rem.clone()));
+            }
+            if alt_duplicate {
+                for piece in &fl.pieces {
+                    self.overlay.add.push((
+                        Placement::TopOfLayer(piece.layer_id, scope.clone()),
+                        piece.clone(),
+                    ));
+                }
+            }
+        }
+        self.overlay_movable_start = self.overlay.add.len();
+
         for shape in &self.shapes {
+            if self
+                .floating
+                .as_ref()
+                .is_some_and(|fl| fl.hidden.contains(&shape.shape_id))
+            {
+                continue;
+            }
             if self.selection.contains_shape(shape) {
                 if !alt_duplicate {
                     self.overlay.hide.insert(shape.shape_id);
@@ -1323,6 +1440,16 @@ impl Session {
                 self.overlay.add.push((placement, shape.clone()));
             }
         }
+        if let Some(fl) = &self.floating {
+            for piece in &fl.pieces {
+                if self.selection.contains_shape(piece) {
+                    self.overlay.add.push((
+                        Placement::TopOfLayer(piece.layer_id, scope.clone()),
+                        piece.clone(),
+                    ));
+                }
+            }
+        }
         self.invalidate_scene_order();
     }
 
@@ -1330,13 +1457,14 @@ impl Session {
     pub(crate) fn begin_transform_overlay(&mut self) -> Vec<FillShape> {
         self.overlay.clear();
         self.overlay_only_selected = false;
+        self.overlay_movable_start = 0;
         if self.selection.is_empty() {
-            self.invalidate_scene_order();
+            self.rebuild_overlay_from_floating();
             return Vec::new();
         }
         let scope = self.editing_group_path.clone();
         let any_raw_selected = self
-            .shapes
+            .scene()
             .iter()
             .any(|s| self.selection.contains_shape(s) && s.is_raw_at_scope(&scope));
         let single_symbol_gid = (self.selection.shapes.is_empty()
@@ -1344,8 +1472,31 @@ impl Session {
             .then(|| *self.selection.instances.iter().next().unwrap());
         let custom_piv = self.transform_pivot;
 
+        if let Some(fl) = &self.floating {
+            self.overlay.hide = fl.hidden.clone();
+            let mut current_hid = None;
+            for rem in &fl.remainder {
+                if fl.hidden.contains(&rem.shape_id) {
+                    current_hid = Some(rem.shape_id);
+                }
+                let placement = current_hid.map_or_else(
+                    || Placement::TopOfLayer(rem.layer_id, scope.clone()),
+                    Placement::ReplaceAt,
+                );
+                self.overlay.add.push((placement, rem.clone()));
+            }
+        }
+        self.overlay_movable_start = self.overlay.add.len();
+
         let mut orig_shapes = Vec::new();
         for shape in &self.shapes {
+            if self
+                .floating
+                .as_ref()
+                .is_some_and(|fl| fl.hidden.contains(&shape.shape_id))
+            {
+                continue;
+            }
             if self.selection.contains_shape(shape) {
                 let _ = shape.fill_mesh();
                 let mut cloned = shape.clone();
@@ -1368,21 +1519,38 @@ impl Session {
                 self.overlay.add.push((placement, cloned));
             }
         }
+        if let Some(fl) = &self.floating {
+            for piece in &fl.pieces {
+                if self.selection.contains_shape(piece) {
+                    let _ = piece.fill_mesh();
+                    let cloned = piece.clone();
+                    orig_shapes.push(cloned.clone());
+                    self.overlay.add.push((
+                        Placement::TopOfLayer(piece.layer_id, scope.clone()),
+                        cloned,
+                    ));
+                }
+            }
+        }
         self.invalidate_scene_order();
         orig_shapes
     }
 
     /// 自由変形ドラッグ中、`orig_shapes` に対してキャッシュ済みメッシュ頂点バッファを再利用して `affine` を `overlay.add` へ適用する
     pub(crate) fn update_transform_overlay(&mut self, orig_shapes: &[FillShape], affine: Affine) {
-        for ((_, overlay_shape), orig_shape) in self.overlay.add.iter_mut().zip(orig_shapes.iter())
+        let start = self.overlay_movable_start.min(self.overlay.add.len());
+        for ((_, overlay_shape), orig_shape) in self.overlay.add[start..]
+            .iter_mut()
+            .zip(orig_shapes.iter())
         {
             overlay_shape.transform_from_origin(orig_shape, affine);
         }
     }
 
-    /// 選択移動ドラッグ中、`overlay.add` 内の図形とカスタムピボットを `delta` だけ平行移動する
+    /// 選択移動ドラッグ中、`overlay.add` 内の可動図形とカスタムピボットを `delta` だけ平行移動する
     pub(crate) fn translate_move_overlay(&mut self, delta: KVec2) {
-        for (_, shape) in &mut self.overlay.add {
+        let start = self.overlay_movable_start.min(self.overlay.add.len());
+        for (_, shape) in &mut self.overlay.add[start..] {
             shape.translate(delta);
         }
         if let Some(piv) = &mut self.transform_pivot {
@@ -1411,110 +1579,171 @@ impl Session {
             .is_some_and(Floating::needs_merge_commit)
     }
 
-    /// `Floating` を「変更済み（確定時に結合が必要）」としてマークする
+    /// `Floating` を変更済みとしてマークする
     #[inline]
-    pub(crate) fn mark_floating_modified(&mut self, origin: FloatingOrigin) {
-        if let Some(f) = &mut self.floating {
-            f.modified = true;
-            if f.origin == FloatingOrigin::Slice && f.unsliced.is_none() {
-                f.origin = origin;
+    pub(crate) fn mark_floating_modified(&mut self, _origin: FloatingOrigin) {
+        if let Some(fl) = &mut self.floating {
+            fl.modified = true;
+        }
+    }
+
+    /// 選択中の生図形のうち、まだ `Floating` に入っていないものを `Floating` に持ち上げ、変更済みとしてマークする
+    pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self, origin: FloatingOrigin) -> bool {
+        let scope = self.editing_group_path.clone();
+        let mut newly_lifted = Vec::new();
+        for shape in &self.shapes {
+            let already_hidden = self
+                .floating
+                .as_ref()
+                .is_some_and(|fl| fl.hidden.contains(&shape.shape_id));
+            if !already_hidden
+                && self.selection.contains_shape(shape)
+                && shape.is_raw_at_scope(&scope)
+            {
+                newly_lifted.push(shape.clone());
             }
-        } else {
-            self.floating = Some(Floating {
-                origin,
-                unsliced: None,
-                modified: true,
-            });
         }
+        if newly_lifted.is_empty() && self.floating.is_none() {
+            return false;
+        }
+        let fl = self.floating.get_or_insert_with(|| Floating {
+            origin,
+            pieces: Vec::new(),
+            remainder: Vec::new(),
+            hidden: HashSet::new(),
+            modified: true,
+        });
+        fl.modified = true;
+        for s in newly_lifted {
+            fl.hidden.insert(s.shape_id);
+            fl.pieces.push(s);
+        }
+        if self.layer_order_ids.len() > 1 && fl.pieces.len() > 1 {
+            let order_ids = &self.layer_order_ids;
+            fl.pieces
+                .sort_by_key(|s| layer_order_index(order_ids, s.layer_id));
+        }
+        true
     }
 
-    /// 矩形スライス前の未スライス状態スナップショットが保持されているかを返す
-    #[inline]
-    pub(crate) fn has_unsliced_snapshot(&self) -> bool {
-        self.floating
-            .as_ref()
-            .is_some_and(|f| f.unsliced.is_some())
-    }
-
-    /// 矩形スライス前の未スライス状態スナップショットを取り出す
-    #[inline]
-    pub(crate) fn take_unsliced_snapshot(&mut self) -> Option<Vec<FillShape>> {
-        let snap = self.floating.as_mut().and_then(|f| f.unsliced.take());
-        if self
-            .floating
-            .as_ref()
-            .is_some_and(|f| !f.modified && f.unsliced.is_none())
+    /// `fl.remainder` 内の図形が選択に追加された場合、`fl.pieces` へ昇格させる
+    pub(crate) fn promote_selected_remainder_to_pieces(&mut self) {
+        let Some(fl) = &mut self.floating else {
+            return;
+        };
+        if !fl
+            .remainder
+            .iter()
+            .any(|r| self.selection.shapes.contains(&r.shape_id))
         {
+            return;
+        }
+        let old_rem = std::mem::take(&mut fl.remainder);
+        let mut chunks: Vec<(Option<ShapeId>, Vec<FillShape>)> = Vec::new();
+        for rem in old_rem {
+            if fl.hidden.contains(&rem.shape_id) {
+                chunks.push((Some(rem.shape_id), vec![rem]));
+            } else if let Some((_, last_vec)) = chunks.last_mut() {
+                last_vec.push(rem);
+            } else {
+                chunks.push((None, vec![rem]));
+            }
+        }
+        let mut new_rem = Vec::new();
+        for (orig_id, chunk) in chunks {
+            let mut still_rem = Vec::new();
+            let mut newly_sel = Vec::new();
+            for s in chunk {
+                if self.selection.shapes.contains(&s.shape_id) {
+                    newly_sel.push(s);
+                } else {
+                    still_rem.push(s);
+                }
+            }
+            if !newly_sel.is_empty() && !still_rem.is_empty() {
+                for s in &mut newly_sel {
+                    if fl.hidden.contains(&s.shape_id) {
+                        let old_id = s.shape_id;
+                        let fresh_id = crate::vector_engine::next_shape_id();
+                        s.shape_id = fresh_id;
+                        self.selection.shapes.remove(&old_id);
+                        self.selection.shapes.insert(fresh_id);
+                    }
+                }
+                if let Some(hid) = orig_id {
+                    still_rem[0].shape_id = hid;
+                }
+            }
+            new_rem.extend(still_rem);
+            fl.pieces.extend(newly_sel);
+        }
+        fl.remainder = new_rem;
+        self.rebuild_overlay_from_floating();
+    }
+
+    /// 未変形スライスの `Floating` で選択中の片がなくなった場合は破棄する
+    pub(crate) fn drop_unmodified_slice_if_unselected(&mut self) -> bool {
+        if self.floating.as_ref().is_some_and(|fl| {
+            !fl.modified
+                && !fl
+                    .pieces
+                    .iter()
+                    .any(|p| self.selection.shapes.contains(&p.shape_id))
+        }) {
             self.floating = None;
-        }
-        snap
-    }
-
-    /// 矩形スライス前の未スライス状態スナップショットを保存・復元する
-    #[inline]
-    pub(crate) fn restore_unsliced_snapshot(&mut self, snapshot: Vec<FillShape>) {
-        if let Some(f) = &mut self.floating {
-            f.unsliced = Some(snapshot);
+            self.rebuild_overlay_from_floating();
+            true
         } else {
-            self.floating = Some(Floating {
-                origin: FloatingOrigin::Slice,
-                unsliced: Some(snapshot),
-                modified: false,
-            });
+            false
         }
     }
 
-    /// 矩形スライス前の未スライス状態スナップショットを破棄する
-    #[inline]
-    pub(crate) fn clear_unsliced_snapshot(&mut self) {
-        let _ = self.take_unsliced_snapshot();
-    }
-
-    /// 現在選択されている図形のキャンバスインデックス列（昇順）を返す
+    /// 現在選択されている図形の `Scene` インデックス列（昇順）を返す
     pub(crate) fn selected_indices(&self) -> Vec<usize> {
         if self.selection.is_empty() {
             return Vec::new();
         }
-        self.shapes
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, s)| self.selection.contains_shape(s).then_some(idx))
+        let scene = self.scene();
+        (0..scene.len())
+            .filter(|&idx| scene.is_shape_selected(idx, &self.selection))
             .collect()
     }
 
-    /// 指定したキャンバスインデックス列に対応する図形・シンボルインスタンスのみを選択状態にする
+    /// 指定した `Scene` インデックス列に対応する図形・シンボルインスタンスのみを選択状態にする
     pub(crate) fn set_selected_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
+        let picked: Vec<FillShape> = {
+            let scene = self.scene();
+            indices
+                .into_iter()
+                .filter_map(|idx| scene.get(idx).cloned())
+                .collect()
+        };
         self.selection.clear();
-        for idx in indices {
-            if let Some(shape) = self.shapes.get(idx) {
-                self.selection.insert_shape(shape);
-            }
+        for shape in &picked {
+            self.selection.insert_shape(shape);
         }
+        self.promote_selected_remainder_to_pieces();
+        self.drop_unmodified_slice_if_unselected();
     }
 
-    /// 指定したキャンバスインデックス列に対応する図形・シンボルインスタンスを選択状態に追加する
+    /// 指定した `Scene` インデックス列に対応する図形・シンボルインスタンスを選択状態に追加する
     pub(crate) fn select_shape_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
-        for idx in indices {
-            if let Some(shape) = self.shapes.get(idx) {
-                self.selection.insert_shape(shape);
-            }
+        let picked: Vec<FillShape> = {
+            let scene = self.scene();
+            indices
+                .into_iter()
+                .filter_map(|idx| scene.get(idx).cloned())
+                .collect()
+        };
+        for shape in &picked {
+            self.selection.insert_shape(shape);
         }
+        self.promote_selected_remainder_to_pieces();
     }
 
-    /// 現在の `self.selection` に対応する選択マスク（`Vec<bool>`）と有効な選択が1つ以上あるかを返す
+    /// 現在の `self.selection` に対応する `Scene` 選択マスク（`Vec<bool>`）と有効な選択が1つ以上あるかを返す
     pub(crate) fn selected_shape_mask(&self) -> (Vec<bool>, bool) {
-        if self.selection.is_empty() {
-            return (vec![false; self.shapes.len()], false);
-        }
-        let mut is_sel = vec![false; self.shapes.len()];
-        let mut any_valid = false;
-        for (idx, shape) in self.shapes.iter().enumerate() {
-            if self.selection.contains_shape(shape) {
-                is_sel[idx] = true;
-                any_valid = true;
-            }
-        }
-        (is_sel, any_valid)
+        self.scene().selected_shape_mask(&self.selection)
     }
 
     /// 現在の `self.shapes` から、幾何輪郭と色が一致する `target_shapes` へ描画・当たり判定キャッシュを O(1) で引き継ぐ
@@ -1522,16 +1751,74 @@ impl Session {
         salvage_caches_from_slice(&self.shapes, target_shapes);
     }
 
-    /// 矩形スライス前のキャンバス状態があれば、描画キャッシュと選択シェイプIDを維持したまま `self.shapes` へ復元し `true` を返す
-    pub(crate) fn restore_unsliced_preserving_selection(&mut self) -> bool {
-        let Some(mut unsliced) = self.take_unsliced_snapshot() else {
-            return false;
+    /// `Scene` 上に現在存在する図形・シンボルインスタンスのみを選択に残す
+    pub(crate) fn retain_existing_selection(&mut self) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let scene = self.scene();
+        let valid_shapes: HashSet<ShapeId> = scene
+            .iter()
+            .filter(|s| s.symbol_instance.is_none())
+            .map(|s| s.shape_id)
+            .collect();
+        let valid_instances: HashSet<InstanceGid> = scene
+            .iter()
+            .filter_map(|s| s.symbol_instance.map(|b| b.instance_gid))
+            .collect();
+        self.selection.shapes.retain(|id| valid_shapes.contains(id));
+        self.selection
+            .instances
+            .retain(|gid| valid_instances.contains(gid));
+    }
+
+    /// `Floating` をブーリアン結合せずにそのまま `self.shapes` に実体化する（グループ化・シンボル変換の前処理用）
+    pub(crate) fn materialize_floating_without_merge(&mut self) {
+        let Some(fl) = self.floating.take() else {
+            return;
         };
-        self.salvage_caches_into(&mut unsliced);
-        self.shapes = unsliced;
-        self.selection.retain_existing(&self.shapes);
-        self.invalidate_scene_order();
-        true
+        let insert_limit = self.scope_insert_index();
+        let mut rem_by_hid: HashMap<ShapeId, Vec<FillShape>> = HashMap::new();
+        let mut tail_rem: Vec<FillShape> = Vec::new();
+        let mut current_hid: Option<ShapeId> = None;
+        for rem in fl.remainder {
+            if fl.hidden.contains(&rem.shape_id) {
+                current_hid = Some(rem.shape_id);
+            }
+            if let Some(hid) = current_hid {
+                rem_by_hid.entry(hid).or_default().push(rem);
+            } else {
+                tail_rem.push(rem);
+            }
+        }
+        let mut prefix = Vec::with_capacity(self.shapes.len() + fl.pieces.len());
+        let mut trailing = Vec::new();
+        for (idx, shape) in self.shapes.drain(..).enumerate() {
+            let dst = if idx < insert_limit {
+                &mut prefix
+            } else {
+                &mut trailing
+            };
+            if fl.hidden.contains(&shape.shape_id) {
+                if let Some(rems) = rem_by_hid.remove(&shape.shape_id) {
+                    dst.extend(rems);
+                }
+            } else {
+                dst.push(shape);
+            }
+        }
+        for (_, rems) in rem_by_hid {
+            prefix.extend(rems);
+        }
+        prefix.extend(tail_rem);
+        prefix.extend(fl.pieces);
+        prefix.extend(trailing);
+        if self.layer_order_ids.len() > 1 && prefix.len() > 1 {
+            let order_ids = &self.layer_order_ids;
+            prefix.sort_by_key(|s| layer_order_index(order_ids, s.layer_id));
+        }
+        self.shapes = prefix;
+        self.rebuild_overlay_from_floating();
     }
 
     /// 現在の編集スコープ（`editing_group_path`）末尾に対応する挿入インデックスを返す
@@ -1547,12 +1834,28 @@ impl Session {
         }
     }
 
-    /// 選択中の全シェイプとカスタムピボット点を `delta` だけ平行移動する
+    /// 選択中の全シェイプとカスタムピボット点を `delta` だけ平行移動する（生シェイプは `Floating` に持ち上げて移動）
     pub(crate) fn translate_selected(&mut self, delta: KVec2) {
         if self.selection.is_empty() {
             return;
         }
+        self.lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
+        if let Some(fl) = &mut self.floating {
+            fl.modified = true;
+            for piece in &mut fl.pieces {
+                if self.selection.contains_shape(piece) {
+                    piece.translate(delta);
+                }
+            }
+        }
         for shape in &mut self.shapes {
+            if self
+                .floating
+                .as_ref()
+                .is_some_and(|fl| fl.hidden.contains(&shape.shape_id))
+            {
+                continue;
+            }
             if self.selection.contains_shape(shape) {
                 shape.translate(delta);
             }
@@ -1560,34 +1863,55 @@ impl Session {
         if let Some(piv) = &mut self.transform_pivot {
             *piv += delta;
         }
+        self.rebuild_overlay_from_floating();
     }
 
-    /// 選択中の全シェイプに `affine` 変換を直接適用する
+    /// 選択中の全シェイプに `affine` 変換を適用する（生シェイプは `Floating` に持ち上げて変換）
     pub(crate) fn transform_selected(&mut self, affine: kurbo::Affine) -> bool {
         if self.selection.is_empty() {
             return false;
         }
+        self.lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
         let mut any_transformed = false;
+        if let Some(fl) = &mut self.floating {
+            for piece in &mut fl.pieces {
+                if self.selection.contains_shape(piece) {
+                    piece.transform(affine);
+                    any_transformed = true;
+                }
+            }
+            if any_transformed {
+                fl.modified = true;
+            }
+        }
         for shape in &mut self.shapes {
+            if self
+                .floating
+                .as_ref()
+                .is_some_and(|fl| fl.hidden.contains(&shape.shape_id))
+            {
+                continue;
+            }
             if self.selection.contains_shape(shape) {
                 shape.transform(affine);
                 any_transformed = true;
             }
         }
+        self.rebuild_overlay_from_floating();
         any_transformed
     }
 
     /// キャンバス図形更新後に、存在しなくなった `editing_group_path`・消滅した `selection`・無効化した `hover_target` を自動補正する
     pub(crate) fn sanitize_editing_scope(&mut self) {
-        self.selection.retain_existing(&self.shapes);
+        self.retain_existing_selection();
         if let Some(id) = self.hover_target.shape_id() {
-            if !self.shapes.iter().any(|s| s.shape_id == id) {
+            if self.scene().shape_by_id(id).is_none() {
                 self.hover_target = HoverTarget::None;
             }
         }
         while !self.editing_group_path.is_empty() {
             if self
-                .shapes
+                .scene()
                 .iter()
                 .any(|s| s.is_in_editing_scope(&self.editing_group_path))
             {
@@ -1618,13 +1942,18 @@ impl Session {
 
     /// 現在の編集スコープ内で指定レイヤーID集合 `layer_ids` に属する全図形を選択状態にする
     pub(crate) fn select_shapes_in_layers(&mut self, layer_ids: &HashSet<u64>) {
+        let picked: Vec<FillShape> = self
+            .scene()
+            .iter()
+            .filter(|shape| {
+                shape.is_in_editing_scope(&self.editing_group_path)
+                    && layer_ids.contains(&shape.layer_id)
+            })
+            .cloned()
+            .collect();
         self.selection.clear();
-        for shape in &self.shapes {
-            if shape.is_in_editing_scope(&self.editing_group_path)
-                && layer_ids.contains(&shape.layer_id)
-            {
-                self.selection.insert_shape(shape);
-            }
+        for shape in &picked {
+            self.selection.insert_shape(shape);
         }
         self.transform_pivot = None;
     }
@@ -1634,22 +1963,24 @@ impl Session {
         if self.selection.is_empty() {
             return;
         }
-        if !self.selection.shapes.is_empty() {
-            let valid_shapes: HashSet<ShapeId> = self
-                .shapes
+        let (valid_shapes, valid_instances) = {
+            let scene = self.scene();
+            let valid_shapes: HashSet<ShapeId> = scene
                 .iter()
                 .filter(|s| s.symbol_instance.is_none() && layer_ids.contains(&s.layer_id))
                 .map(|s| s.shape_id)
                 .collect();
-            self.selection.shapes.retain(|id| valid_shapes.contains(id));
-        }
-        if !self.selection.instances.is_empty() {
-            let valid_instances: HashSet<InstanceGid> = self
-                .shapes
+            let valid_instances: HashSet<InstanceGid> = scene
                 .iter()
                 .filter(|s| layer_ids.contains(&s.layer_id))
                 .filter_map(|s| s.symbol_instance.map(|b| b.instance_gid))
                 .collect();
+            (valid_shapes, valid_instances)
+        };
+        if !self.selection.shapes.is_empty() {
+            self.selection.shapes.retain(|id| valid_shapes.contains(id));
+        }
+        if !self.selection.instances.is_empty() {
             self.selection
                 .instances
                 .retain(|gid| valid_instances.contains(gid));
@@ -1676,7 +2007,7 @@ impl Session {
         }
         let depth = self.editing_group_path.len();
         let mut extracted = Vec::new();
-        for shape in &self.shapes {
+        for shape in self.scene().iter() {
             if self.selection.contains_shape(shape) {
                 let rel_group_path = if shape.group_path.starts_with(&self.editing_group_path) {
                     shape.group_path[depth..].to_vec()
@@ -1801,6 +2132,7 @@ impl Session {
 pub(crate) struct UndoEntry {
     pub(crate) timeline: Timeline,
     pub(crate) library: Arc<Vec<SymbolDef>>,
+    pub(crate) floating: Option<Arc<Floating>>,
     pub(crate) edit_path: EditPath,
     pub(crate) editing_group_path: Vec<u64>,
     pub(crate) stage_size: Vec2,
@@ -1926,6 +2258,22 @@ impl UndoHistory {
             }
         }
         (Arc::new(lib), doc.revision)
+    }
+
+    /// `Floating` が直近の履歴エントリから未変更であれば `Arc` を $O(1)$ で共有し、
+    /// 変更されている場合は一時キャッシュを除去した新しい `Arc<Floating>` を返す
+    pub(crate) fn snapshot_floating(&self, floating: Option<&Floating>) -> Option<Arc<Floating>> {
+        let fl = floating?;
+        let prev_entry = self.undo_stack.back().or_else(|| self.redo_stack.last());
+        if let Some(prev_fl) = prev_entry
+            .and_then(|e| e.floating.as_ref())
+            .filter(|prev| prev.matches_undo_snapshot(fl))
+        {
+            return Some(Arc::clone(prev_fl));
+        }
+        let mut stripped = fl.clone();
+        stripped.strip_transient_caches();
+        Some(Arc::new(stripped))
     }
 
     /// 新しい Undo エントリをスタックへ追加し、Redo スタックをクリアして現在の状態世代IDを進める
@@ -2085,6 +2433,7 @@ impl Tab {
             order,
             direct_base_fallback,
             overlay_only_selected: self.session.overlay_only_selected,
+            overlay_movable_start: self.session.overlay_movable_start,
         }
     }
 
@@ -2256,10 +2605,13 @@ impl Tab {
 
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
         self.history.last_coalesce_key = None;
+        let prev_selection = self.session.selection.clone();
         let (prev_lib, prev_rev) = self.history.snapshot_symbols(&self.doc);
+        let prev_floating = self.history.snapshot_floating(self.session.floating.as_ref());
         let prev_entry = UndoEntry {
             timeline: std::mem::replace(&mut self.doc.root, entry.timeline),
             library: prev_lib,
+            floating: prev_floating,
             edit_path: std::mem::replace(&mut self.session.edit_path, entry.edit_path),
             editing_group_path: std::mem::replace(
                 &mut self.session.editing_group_path,
@@ -2277,11 +2629,19 @@ impl Tab {
         );
         self.ensure_valid_library_selection();
         load_shapes_from_timeline(self);
+        self.session.floating = entry.floating.map(Arc::unwrap_or_clone);
+        self.session.rebuild_overlay_from_floating();
+        self.session.selection = prev_selection;
+        self.session.retain_existing_selection();
+        if self.session.floating.is_some() {
+            let keep = self.session.selected_indices();
+            commit_floating_except(self, &keep);
+        }
         prev_entry
     }
 
     pub(crate) fn undo(&mut self) {
-        flush_canvas_before_timeline_op(self);
+        cancel_active_drag(self);
         if let Some(prev_entry) = self.history.pop_undo() {
             let curr = self.restore_state_snapshot(prev_entry);
             self.history.push_redo(curr);
@@ -2289,7 +2649,7 @@ impl Tab {
     }
 
     pub(crate) fn redo(&mut self) {
-        flush_canvas_before_timeline_op(self);
+        cancel_active_drag(self);
         if let Some(next_entry) = self.history.pop_redo() {
             let curr = self.restore_state_snapshot(next_entry);
             self.history.push_undo_from_redo(curr);
@@ -2315,15 +2675,16 @@ pub(crate) fn active_scope_layer_id(session: &Session, timeline: &Timeline) -> u
     timeline.active_layer_id()
 }
 
-/// 指定されたシェイプインデックス群が所属するレイヤーのうち最前面の `layer_id` を返す（該当なし時は `active_scope_layer_id`）
+/// 指定された `Scene` インデックス群が所属するレイヤーのうち最前面の `layer_id` を返す（該当なし時は `active_scope_layer_id`）
 pub(crate) fn topmost_layer_id_for_indices(
     session: &Session,
     timeline: &Timeline,
     indices: &[usize],
 ) -> u64 {
+    let scene = session.scene();
     indices
         .iter()
-        .filter_map(|&idx| session.shapes.get(idx).map(|s| s.layer_id))
+        .filter_map(|&idx| scene.get(idx).map(|s| s.layer_id))
         .max_by_key(|&lid| timeline.layer_index_by_id(lid).unwrap_or(0))
         .unwrap_or_else(|| active_scope_layer_id(session, timeline))
 }
@@ -2417,20 +2778,11 @@ pub(crate) fn toggle_select_sub_mode(
     clear_selection(tab);
 }
 
-/// タイムラインの構造変更前に、未確定のキャンバス選択スライスや変形結合を確定し `tab.session.shapes` を現在フレームのセルへ同期する
-/// （有効な図形ID・インスタンスIDの選択状態は保持し、消滅したIDのみを除去する）
-pub(crate) fn flush_canvas_before_timeline_op(tab: &mut Tab) {
-    cancel_active_drag(tab);
-    let prev_selection = tab.session.selection.clone();
-    clear_selection(tab);
-    tab.session.selection = prev_selection;
-    tab.session.selection.retain_existing(&tab.session.shapes);
-    sync_shapes_to_timeline(tab);
-}
-
 /// キャンバスの作業用 `tab.session.shapes` を、各図形の `layer_id` ごとに現在フレームの `Cel` に振り分けて書き戻す
 pub(crate) fn sync_shapes_to_timeline(tab: &mut Tab) {
     tab.session.sanitize_editing_scope();
+    let layer_ids: Vec<LayerId> = tab.active_timeline().layers.iter().map(|l| l.id).collect();
+    tab.session.layer_order_ids = layer_ids;
     tab.session.invalidate_scene_order();
     if tab.session.is_all_shapes_unchanged() {
         return;
@@ -2451,6 +2803,8 @@ pub(crate) fn sync_shapes_to_timeline(tab: &mut Tab) {
 /// 背面レイヤー→前面レイヤーの順で（トゥイーン補間およびシンボルの内部タイムラインフレームも評価しつつ）図形列を一括解決・読み込みする
 pub(crate) fn load_shapes_from_timeline(tab: &mut Tab) {
     cancel_active_drag(tab);
+    let layer_ids: Vec<LayerId> = tab.active_timeline().layers.iter().map(|l| l.id).collect();
+    tab.session.layer_order_ids = layer_ids;
     let resolved = Scene::resolve(
         tab.active_timeline(),
         &tab.doc.library,
@@ -2517,11 +2871,53 @@ pub(crate) fn draw_registration_cross(
     );
 }
 
-/// `tab.session.floating` のうち `keep_indices` に含まれない選択図形を確定
-/// （未変形スライスなら `unsliced` を復元して破棄、変更済みならその時点の `session.shapes` から選択中生シェイプと残りを分けて結合しタイムラインへ書き込み）する
+/// `Floating` の `hidden` 除去・`remainder` 追加・`pieces` 結合を `base_shapes` に対して実行する
+pub(crate) fn merge_floating_into_base_shapes(
+    base_shapes: &mut Vec<FillShape>,
+    fl: Floating,
+    timeline: &Timeline,
+) {
+    if !fl.hidden.is_empty() || !fl.remainder.is_empty() {
+        let mut rem_chunks: HashMap<ShapeId, Vec<FillShape>> = HashMap::new();
+        let mut current_orig_id: Option<ShapeId> = None;
+        let mut orphan_remainder: Vec<FillShape> = Vec::new();
+        for rem in fl.remainder {
+            if fl.hidden.contains(&rem.shape_id) {
+                current_orig_id = Some(rem.shape_id);
+            }
+            if let Some(orig_id) = current_orig_id {
+                rem_chunks.entry(orig_id).or_default().push(rem);
+            } else {
+                orphan_remainder.push(rem);
+            }
+        }
+        let mut rebuilt = Vec::with_capacity(base_shapes.len() + orphan_remainder.len());
+        for shape in base_shapes.drain(..) {
+            if fl.hidden.contains(&shape.shape_id) {
+                if let Some(chunk) = rem_chunks.remove(&shape.shape_id) {
+                    rebuilt.extend(chunk);
+                }
+            } else {
+                rebuilt.push(shape);
+            }
+        }
+        for (_, chunk) in rem_chunks {
+            rebuilt.extend(chunk);
+        }
+        rebuilt.extend(orphan_remainder);
+        *base_shapes = rebuilt;
+    }
+    if !fl.pieces.is_empty() {
+        merge_shapes_into_canvas(base_shapes, fl.pieces);
+    }
+    Session::sort_vec_by_layer_order(base_shapes, timeline);
+}
+
+/// `tab.session.floating` のうち `keep_indices`（`Scene` インデックス）に含まれない選択図形を確定
+/// （未変形スライスなら `Floating` を破棄するだけで文書は変更せず、変更済みなら `hidden` を除き `remainder` を足して `pieces` を結合し文書へ書き込み）する
 pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> bool {
     let (is_sel, any_valid) = tab.session.selected_shape_mask();
-    let mut is_keep = vec![false; tab.session.shapes.len()];
+    let mut is_keep = vec![false; is_sel.len()];
     let mut any_keep = false;
     if any_valid {
         for &idx in keep_indices {
@@ -2533,96 +2929,123 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
     }
 
     if !any_keep {
-        let restored = tab.session.restore_unsliced_preserving_selection();
-        if tab.session.has_modified_floating() && !tab.session.selection.is_empty() {
-            let (is_sel_now, _) = tab.session.selected_shape_mask();
-            let mut base_canvas = Vec::with_capacity(tab.session.shapes.len());
-            let mut modified_raw_shapes = Vec::new();
-            for (idx, shape) in tab.session.shapes.drain(..).enumerate() {
-                if is_sel_now[idx] && shape.is_raw_at_scope(&tab.session.editing_group_path) {
-                    modified_raw_shapes.push(shape);
-                } else {
-                    base_canvas.push(shape);
-                }
-            }
-            merge_shapes_into_canvas(&mut base_canvas, modified_raw_shapes);
-            Session::sort_vec_by_layer_order(&mut base_canvas, tab.active_timeline());
-            tab.session.shapes = base_canvas;
-            tab.session.selection.retain_existing(&tab.session.shapes);
-            tab.session.floating = None;
+        let Some(fl) = tab.session.floating.take() else {
+            return false;
+        };
+        if fl.is_unmodified_slice() {
+            tab.session.rebuild_overlay_from_floating();
+            tab.session.retain_existing_selection();
+            return true;
+        }
+        if fl.needs_merge_commit() {
+            let mut shapes = std::mem::take(&mut tab.session.shapes);
+            merge_floating_into_base_shapes(&mut shapes, fl, tab.active_timeline());
+            tab.session.shapes = shapes;
+            tab.session.rebuild_overlay_from_floating();
+            tab.session.retain_existing_selection();
             sync_shapes_to_timeline(tab);
             return true;
         }
-        tab.session.floating = None;
-        return restored;
+        tab.session.rebuild_overlay_from_floating();
+        tab.session.retain_existing_selection();
+        return false;
     }
 
     tab.session
         .set_selected_indices((0..is_keep.len()).filter(|&i| is_keep[i]));
-    if tab.session.has_modified_floating() {
-        let insert_limit = tab.session.scope_insert_index();
-        let mut base_canvas = Vec::with_capacity(tab.session.shapes.len());
-        let mut deselected_raw_shapes = Vec::new();
-        let mut kept_shapes = Vec::new();
-        let mut trailing_outside = Vec::new();
-        for (idx, shape) in tab.session.shapes.drain(..).enumerate() {
-            if is_keep[idx] {
-                kept_shapes.push(shape);
-            } else if is_sel[idx] && shape.is_raw_at_scope(&tab.session.editing_group_path) {
-                deselected_raw_shapes.push(shape);
-            } else if idx < insert_limit {
-                base_canvas.push(shape);
-            } else {
-                trailing_outside.push(shape);
-            }
-        }
-        let merged_any = !deselected_raw_shapes.is_empty();
-        if merged_any {
-            merge_shapes_into_canvas(&mut base_canvas, deselected_raw_shapes);
-        }
-        base_canvas.extend(kept_shapes);
-        base_canvas.extend(trailing_outside);
-        Session::sort_vec_by_layer_order(&mut base_canvas, tab.active_timeline());
-        tab.session.shapes = base_canvas;
-        tab.session.selection.retain_existing(&tab.session.shapes);
-        tab.session.invalidate_scene_order();
-        if merged_any {
-            tab.session.clear_unsliced_snapshot();
-            sync_shapes_to_timeline(tab);
-        }
-        if tab.session.selection.is_empty() {
-            tab.session.floating = None;
-        }
-        merged_any
-    } else {
-        let any_raw_kept = tab.session.shapes.iter().any(|s| {
-            tab.session.selection.contains_shape(s)
-                && s.is_raw_at_scope(&tab.session.editing_group_path)
-        });
-        if !any_raw_kept {
-            tab.session.restore_unsliced_preserving_selection()
+    let Some(mut fl) = tab.session.floating.take() else {
+        return false;
+    };
+    let mut kept_pieces = Vec::new();
+    let mut deselected_pieces = Vec::new();
+    for piece in fl.pieces.drain(..) {
+        if tab.session.selection.contains_shape(&piece) {
+            kept_pieces.push(piece);
         } else {
-            false
+            deselected_pieces.push(piece);
         }
     }
+
+    if fl.is_unmodified_slice() {
+        if kept_pieces.is_empty() {
+            tab.session.rebuild_overlay_from_floating();
+            tab.session.retain_existing_selection();
+            return true;
+        }
+        if !deselected_pieces.is_empty() {
+            let mut used_orig_ids: HashSet<ShapeId> = fl
+                .remainder
+                .iter()
+                .map(|r| r.shape_id)
+                .filter(|id| fl.hidden.contains(id))
+                .collect();
+            for mut dp in deselected_pieces {
+                let has_chunk_for_layer = fl
+                    .remainder
+                    .iter()
+                    .any(|r| r.layer_id == dp.layer_id && fl.hidden.contains(&r.shape_id));
+                if !has_chunk_for_layer {
+                    if let Some(&unused_orig_id) =
+                        fl.hidden.iter().find(|id| !used_orig_ids.contains(id))
+                    {
+                        dp.shape_id = unused_orig_id;
+                        used_orig_ids.insert(unused_orig_id);
+                    }
+                }
+                fl.remainder.push(dp);
+            }
+        }
+        fl.pieces = kept_pieces;
+        tab.session.floating = Some(fl);
+        tab.session.rebuild_overlay_from_floating();
+        tab.session.retain_existing_selection();
+        return false;
+    }
+
+    let had_hidden_or_rem = !fl.hidden.is_empty() || !fl.remainder.is_empty();
+    let merged_any = !deselected_pieces.is_empty() || (kept_pieces.is_empty() && had_hidden_or_rem);
+    if merged_any {
+        let to_commit = Floating {
+            origin: fl.origin,
+            pieces: deselected_pieces,
+            remainder: std::mem::take(&mut fl.remainder),
+            hidden: std::mem::take(&mut fl.hidden),
+            modified: true,
+        };
+        let mut shapes = std::mem::take(&mut tab.session.shapes);
+        merge_floating_into_base_shapes(&mut shapes, to_commit, tab.active_timeline());
+        tab.session.shapes = shapes;
+    }
+    if !kept_pieces.is_empty() {
+        fl.pieces = kept_pieces;
+        tab.session.floating = Some(fl);
+    }
+    tab.session.rebuild_overlay_from_floating();
+    tab.session.retain_existing_selection();
+    if merged_any {
+        sync_shapes_to_timeline(tab);
+    }
+    merged_any
 }
 
-/// `tab.session.floating` をすべて確定する
+/// 進行中のドラッグを中断し、`tab.session.floating` をすべて確定する
 #[inline]
 pub(crate) fn commit_floating(tab: &mut Tab) -> bool {
+    cancel_active_drag(tab);
     commit_floating_except(tab, &[])
 }
 
 pub(crate) fn clear_selection(tab: &mut Tab) {
     tab.history.end_coalesce();
     rollback_shape_drag(tab);
-    commit_floating(tab);
+    commit_floating_except(tab, &[]);
     tab.session.selection.clear();
     tab.session.transform_pivot = None;
     tab.view.inspect_timeline_frame = false;
 }
 
-/// 現在の編集スコープの最前面挿入位置へ `new_shapes` を挿入し、それらを選択状態にしてレイヤー順に整列させる
+/// 現在の編集スコープの最前面へ `new_shapes` を配置し、それらを選択状態にする
+/// （`floating_origin` が `Some` の場合、生図形は文書へ書き込まず最初から `Floating` の `pieces` へ入れる）
 pub(crate) fn insert_and_select_shapes_in_scope(
     tab: &mut Tab,
     new_shapes: Vec<FillShape>,
@@ -2632,69 +3055,57 @@ pub(crate) fn insert_and_select_shapes_in_scope(
     for s in &new_shapes {
         tab.session.selection.insert_shape(s);
     }
-    let insert_pos = tab.session.scope_insert_index();
-    let mut shapes = std::mem::take(&mut tab.session.shapes);
-    shapes.splice(insert_pos..insert_pos, new_shapes);
-    Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
-    tab.session.shapes = shapes;
-    tab.session.invalidate_scene_order();
     if let Some(origin) = floating_origin {
-        tab.session.floating = Some(Floating {
-            origin,
-            unsliced: None,
-            modified: origin != FloatingOrigin::AltDuplicate,
-        });
+        let scope = tab.session.editing_group_path.clone();
+        let mut raw_pieces = Vec::new();
+        let mut non_raw_shapes = Vec::new();
+        for s in new_shapes {
+            if s.is_raw_at_scope(&scope) {
+                raw_pieces.push(s);
+            } else {
+                non_raw_shapes.push(s);
+            }
+        }
+        if !non_raw_shapes.is_empty() {
+            let insert_pos = tab.session.scope_insert_index();
+            let mut shapes = std::mem::take(&mut tab.session.shapes);
+            shapes.splice(insert_pos..insert_pos, non_raw_shapes);
+            Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
+            tab.session.shapes = shapes;
+        }
+        if !raw_pieces.is_empty() {
+            tab.session.floating = Some(Floating {
+                origin,
+                pieces: raw_pieces,
+                remainder: Vec::new(),
+                hidden: HashSet::new(),
+                modified: origin != FloatingOrigin::AltDuplicate,
+            });
+        } else {
+            tab.session.floating = None;
+        }
+        tab.session.rebuild_overlay_from_floating();
     } else {
+        let insert_pos = tab.session.scope_insert_index();
+        let mut shapes = std::mem::take(&mut tab.session.shapes);
+        shapes.splice(insert_pos..insert_pos, new_shapes);
+        Session::sort_vec_by_layer_order(&mut shapes, tab.active_timeline());
+        tab.session.shapes = shapes;
         tab.session.floating = None;
+        tab.session.rebuild_overlay_from_floating();
     }
     tab.session.transform_pivot = None;
 }
 
-/// 選択中の生シェイプ群を現在の編集スコープ内の最前面へ並べ替え、レイヤー順に整列させる
-/// （グループ・シンボルのみが選択されている場合は既存の重ね順とキャッシュを維持する）
-pub(crate) fn reorder_selected_to_scope_front(tab: &mut Tab) -> bool {
-    let (is_sel, any_valid) = tab.session.selected_shape_mask();
+/// 選択中の生シェイプ群を `Floating` へ引き上げ、`Floating` の変更済みマーキングと `Overlay` 再構築を行う
+pub(crate) fn prepare_moved_selection(tab: &mut Tab) -> bool {
+    let (_, any_valid) = tab.session.selected_shape_mask();
     if !any_valid {
         return false;
     }
-    let scope = tab.session.editing_group_path.clone();
-    let any_raw_selected = tab
-        .session
-        .shapes
-        .iter()
-        .enumerate()
-        .any(|(idx, s)| is_sel[idx] && s.is_raw_at_scope(&scope));
-    if !any_raw_selected {
-        return true;
-    }
-
-    let insert_limit = tab.session.scope_insert_index();
-    let mut unselected = Vec::with_capacity(tab.session.shapes.len());
-    let mut moved_shapes = Vec::new();
-    let mut trailing_outside = Vec::new();
-    for (idx, shape) in tab.session.shapes.drain(..).enumerate() {
-        if is_sel[idx] {
-            moved_shapes.push(shape);
-        } else if idx < insert_limit {
-            unselected.push(shape);
-        } else {
-            trailing_outside.push(shape);
-        }
-    }
-
-    unselected.extend(moved_shapes);
-    unselected.extend(trailing_outside);
-    Session::sort_vec_by_layer_order(&mut unselected, tab.active_timeline());
-    tab.session.shapes = unselected;
-    tab.session.invalidate_scene_order();
-    true
-}
-
-/// 移動・変形された選択シェイプのスコープ内最前面整列・`Floating` の変更済みマーキングを行う
-pub(crate) fn prepare_moved_selection(tab: &mut Tab) -> bool {
-    if !reorder_selected_to_scope_front(tab) {
-        return false;
-    }
+    tab.session
+        .lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
     tab.session.mark_floating_modified(FloatingOrigin::Move);
+    tab.session.rebuild_overlay_from_floating();
     true
 }
