@@ -181,13 +181,13 @@ fn locked_layer_color_at(
         return cel.shapes.iter().rev().find(|s| s.contains_point(pt)).map(|s| s.color);
     }
     // `shape_order_index` の逆順（最前面→最背面）にインスタンスと生シェイプを検査
-    let mut shape_idx = cel.shapes.len();
+    let mut cel_idx = cel.shapes.len();
     for inst in cel.instances.iter().rev() {
         let target_ord = inst.shape_order_index.min(cel.shapes.len());
-        while shape_idx > target_ord {
-            shape_idx -= 1;
-            if cel.shapes[shape_idx].contains_point(pt) {
-                return Some(cel.shapes[shape_idx].color);
+        while cel_idx > target_ord {
+            cel_idx -= 1;
+            if cel.shapes[cel_idx].contains_point(pt) {
+                return Some(cel.shapes[cel_idx].color);
             }
         }
         if let Some(col) =
@@ -196,10 +196,10 @@ fn locked_layer_color_at(
             return Some(col);
         }
     }
-    while shape_idx > 0 {
-        shape_idx -= 1;
-        if cel.shapes[shape_idx].contains_point(pt) {
-            return Some(cel.shapes[shape_idx].color);
+    while cel_idx > 0 {
+        cel_idx -= 1;
+        if cel.shapes[cel_idx].contains_point(pt) {
+            return Some(cel.shapes[cel_idx].color);
         }
     }
     None
@@ -233,7 +233,7 @@ fn symbol_binding_color_at(
 
 /// 編集スコープおよび表示中の全レイヤーを対象に、指定座標 `pt` にヒットする最前面シェイプの色を返す（スポイト用）
 pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> {
-    let scene_shapes = tab.scene().shapes();
+    let scene = tab.scene();
     let tl = tab.active_timeline();
     let num_layers = tl.layers.len();
     if num_layers == 1
@@ -242,7 +242,7 @@ pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> 
             .first()
             .is_some_and(|l| l.visible && !l.locked)
     {
-        return scene_shapes
+        return scene
             .iter()
             .rev()
             .find(|s| s.contains_point(pt))
@@ -268,7 +268,7 @@ pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> 
             }
         } else {
             let lid = layer.id;
-            if let Some(hit) = scene_shapes
+            if let Some(hit) = scene
                 .iter()
                 .rev()
                 .find(|s| s.layer_id == lid && s.contains_point(pt))

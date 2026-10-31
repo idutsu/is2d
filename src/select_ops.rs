@@ -77,6 +77,7 @@ pub(crate) fn exit_current_group(tab: &mut Tab) -> bool {
 }
 
 /// キャンバス上のダブルクリックによるグループ/シンボルへのインプレイス進入、または空白背景ダブルクリックによる親階層への復帰を処理する
+#[cfg(test)]
 pub(crate) fn handle_canvas_double_click(tab: &mut Tab, pt: Point) {
     if !enter_group_at(tab, pt)
         && tab
@@ -89,12 +90,12 @@ pub(crate) fn handle_canvas_double_click(tab: &mut Tab, pt: Point) {
 }
 
 /// Shift クリック等で指定シェイプ（またはグループ塊全体）の選択状態をトグルし、変形ピボットをリセットする
-pub(crate) fn toggle_shape_selection(tab: &mut Tab, shape_idx: usize) {
+pub(crate) fn toggle_shape_selection(tab: &mut Tab, scene_idx: usize) {
     tab.history.end_coalesce();
     let scene = tab.scene();
-    let unit = scene.expand_to_group_unit(shape_idx, &tab.session.editing_group_path);
+    let unit = scene.expand_to_group_unit(scene_idx, &tab.session.editing_group_path);
     let (sel_mask, _) = scene.selected_shape_mask(&tab.session.selection);
-    if sel_mask.get(shape_idx).copied().unwrap_or(false) {
+    if sel_mask.get(scene_idx).copied().unwrap_or(false) {
         let remaining: Vec<usize> = tab
             .session
             .selected_indices()
@@ -120,7 +121,11 @@ pub(crate) fn select_single_shape_at(
     let scene = tab.scene();
     if let Some(hit_idx) = scene
         .topmost_shape_at(pt, &tab.session.editing_group_path)
-        .or_else(|| compute_hover_target(scene, &tab.session, pt, zoom, sub_mode).shape_idx())
+        .or_else(|| {
+            compute_hover_target(scene, &tab.session, pt, zoom, sub_mode)
+                .shape_id()
+                .and_then(|id| scene.index_of_shape_id(id))
+        })
     {
         let unit = scene.expand_to_group_unit(hit_idx, &tab.session.editing_group_path);
         tab.session.set_selected_indices(unit);
@@ -224,10 +229,12 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
         }
     }
     tab.session.shapes = new_shapes;
+    tab.session.invalidate_scene_order();
     tab.session.set_selected_indices(new_selected);
     if tab.session.selection.is_empty() && !tab.session.has_modified_floating() {
         if let Some(unsliced) = tab.session.take_unsliced_snapshot() {
             tab.session.shapes = unsliced;
+            tab.session.invalidate_scene_order();
         }
     }
     tab.session.transform_pivot = None;
@@ -268,7 +275,7 @@ pub(crate) fn collect_marquee_hit_groups(
     clip_rect_shape: &FillShape,
 ) -> HashSet<u64> {
     let mut hit_group_ids: HashSet<u64> = HashSet::new();
-    for shape in scene.shapes() {
+    for shape in scene.iter() {
         let Some(gid) = shape.active_group_id_at_scope(editing_group_path) else {
             continue;
         };
@@ -313,14 +320,17 @@ pub(crate) fn compute_hover_target(
     let anchor_edit_hit_radius = 12.0 * inv_z;
     let selected_grab_radius = 6.0 * inv_z;
 
-    let scene_shapes = scene.shapes();
+    let scene_len = scene.len();
     let (is_sel, has_sel) = scene.selected_shape_mask(&session.selection);
 
     if sub_mode == SelectSubMode::Reshape && has_sel {
-        for (s_idx, shape) in scene_shapes.iter().enumerate().rev() {
+        for s_idx in (0..scene_len).rev() {
             if !is_sel[s_idx] {
                 continue;
             }
+            let Some(shape) = scene.get(s_idx) else {
+                continue;
+            };
             if !shape.is_in_editing_scope(&session.editing_group_path)
                 || !shape
                     .bounding_box()
@@ -332,7 +342,9 @@ pub(crate) fn compute_hover_target(
             if shape.contains_point(mouse_pt)
                 || point_within_shape_contours(shape, mouse_pt, selected_grab_radius, inv_z)
             {
-                return HoverTarget::Fill { shape_idx: s_idx };
+                return HoverTarget::Fill {
+                    shape_id: shape.shape_id,
+                };
             }
         }
     }
@@ -346,10 +358,13 @@ pub(crate) fn compute_hover_target(
             vertex_hit_radius
         };
         let mut best_vertex: Option<(f64, HoverTarget)> = None;
-        for (s_idx, shape) in scene_shapes.iter().enumerate().rev() {
+        for s_idx in (0..scene_len).rev() {
             if topmost_fill_idx.is_some_and(|top| s_idx < top) {
                 continue;
             }
+            let Some(shape) = scene.get(s_idx) else {
+                continue;
+            };
             let Some(bbox) = shape.geometry_bounding_box() else {
                 continue;
             };
@@ -366,19 +381,19 @@ pub(crate) fn compute_hover_target(
                 for (seg_idx, seg) in contour.segments.iter().enumerate() {
                     let dist = (mouse_pt - seg.p0).hypot();
                     if dist <= v_radius && best_vertex.as_ref().is_none_or(|(d, _)| dist < *d) {
-                        let occluded_by_front =
-                            (s_idx + 1..scene_shapes.len()).any(|front_idx| {
-                                scene_shapes[front_idx]
-                                    .is_in_editing_scope(&session.editing_group_path)
-                                    && scene_shapes[front_idx].contains_point(seg.p0)
-                            });
+                        let occluded_by_front = (s_idx + 1..scene_len).any(|front_idx| {
+                            scene.get(front_idx).is_some_and(|front| {
+                                front.is_in_editing_scope(&session.editing_group_path)
+                                    && front.contains_point(seg.p0)
+                            })
+                        });
                         if occluded_by_front {
                             continue;
                         }
                         best_vertex = Some((
                             dist,
                             HoverTarget::Vertex {
-                                shape_idx: s_idx,
+                                shape_id: shape.shape_id,
                                 contour_idx: c_idx,
                                 seg_idx,
                                 pos: seg.p0,
@@ -397,10 +412,13 @@ pub(crate) fn compute_hover_target(
     }
 
     let mut best_edge: Option<(f64, HoverTarget)> = None;
-    for (s_idx, shape) in scene_shapes.iter().enumerate().rev() {
+    for s_idx in (0..scene_len).rev() {
         if topmost_fill_idx.is_some_and(|top| s_idx < top) {
             continue;
         }
+        let Some(shape) = scene.get(s_idx) else {
+            continue;
+        };
         let Some(bbox) = shape.geometry_bounding_box() else {
             continue;
         };
@@ -434,9 +452,11 @@ pub(crate) fn compute_hover_target(
                 };
                 let dist = nearest.distance_sq.sqrt();
                 if dist <= max_dist && best_edge.as_ref().is_none_or(|(d, _)| dist < *d) {
-                    let occluded_by_front = (s_idx + 1..scene_shapes.len()).any(|front_idx| {
-                        scene_shapes[front_idx].is_in_editing_scope(&session.editing_group_path)
-                            && scene_shapes[front_idx].contains_point(eval_pt)
+                    let occluded_by_front = (s_idx + 1..scene_len).any(|front_idx| {
+                        scene.get(front_idx).is_some_and(|front| {
+                            front.is_in_editing_scope(&session.editing_group_path)
+                                && front.contains_point(eval_pt)
+                        })
                     });
                     if occluded_by_front {
                         continue;
@@ -444,7 +464,7 @@ pub(crate) fn compute_hover_target(
                     best_edge = Some((
                         dist,
                         HoverTarget::Edge {
-                            shape_idx: s_idx,
+                            shape_id: shape.shape_id,
                             contour_idx: c_idx,
                             seg_idx,
                             t: if sub_mode == SelectSubMode::AddAnchor {
@@ -467,7 +487,11 @@ pub(crate) fn compute_hover_target(
     }
 
     if let Some(s_idx) = topmost_fill_idx {
-        return HoverTarget::Fill { shape_idx: s_idx };
+        if let Some(shape) = scene.get(s_idx) {
+            return HoverTarget::Fill {
+                shape_id: shape.shape_id,
+            };
+        }
     }
 
     HoverTarget::None
@@ -631,56 +655,67 @@ pub(crate) fn apply_move_vertex_to_shape(
     );
 }
 
-/// 選択中のオブジェクト（生シェイプ・既存グループ問わず）を新しい1つのグループにまとめ、`(new_gid, undo_snapshot)` を返す
-pub(crate) fn prepare_group_selected_shapes(tab: &mut Tab) -> Option<(u64, Vec<FillShape>)> {
+/// 選択中のオブジェクト（生シェイプ・既存グループ問わず）を新しい1つのグループにまとめ、`new_gid` を返す
+pub(crate) fn prepare_group_selected_shapes(
+    tab: &mut Tab,
+    before_mutate: impl FnOnce(&mut Tab),
+) -> Option<u64> {
     cancel_active_drag(tab);
     let sel_indices = tab.session.selected_indices();
     if sel_indices.is_empty() {
         return None;
     }
-    let snapshot = tab.session.take_or_clone_unsliced_snapshot();
+    let any_in_scope = sel_indices.iter().any(|&sel_idx| {
+        tab.session
+            .shapes
+            .get(sel_idx)
+            .is_some_and(|s| s.is_in_editing_scope(&tab.session.editing_group_path))
+    });
+    if !any_in_scope {
+        return None;
+    }
+
+    before_mutate(tab);
     let new_gid = tab.doc.alloc_group_id();
 
     let target_lid =
         topmost_layer_id_for_indices(&tab.session, tab.active_timeline(), &sel_indices);
 
     let depth = tab.session.editing_group_path.len();
-    let mut any_grouped = false;
     for &sel_idx in &sel_indices {
         if let Some(shape) = tab.session.shapes.get_mut(sel_idx) {
             if shape.is_in_editing_scope(&tab.session.editing_group_path) {
                 shape.layer_id = target_lid;
                 shape.group_path.insert(depth, new_gid);
-                any_grouped = true;
             }
         }
     }
-    if !any_grouped {
-        tab.session.restore_unsliced_snapshot(snapshot);
-        return None;
-    }
+    tab.session.invalidate_scene_order();
 
     tab.with_active_timeline_mut(|tl, _| {
         if let Some(l_idx) = tl.layer_index_by_id(target_lid) {
             tl.active_layer = l_idx;
         }
     });
-    let _ = prepare_moved_selection(tab, &snapshot);
+    let _ = prepare_moved_selection(tab);
     tab.session.floating = None;
     tab.session.transform_pivot = None;
-    Some((new_gid, snapshot))
+    Some(new_gid)
 }
 
-/// 選択中のグループまたはシンボルインスタンスを1段階だけ解除（分離）し、変更前スナップショットを返す
-pub(crate) fn prepare_ungroup_selected_shapes(tab: &mut Tab) -> Option<Vec<FillShape>> {
+/// 選択中のグループまたはシンボルインスタンスを1段階だけ解除（分離）する
+pub(crate) fn prepare_ungroup_selected_shapes(
+    tab: &mut Tab,
+    before_mutate: impl FnOnce(&mut Tab),
+) -> bool {
     cancel_active_drag(tab);
     if !tab
         .scene()
         .selection_has_group(&tab.session.selection, &tab.session.editing_group_path)
     {
-        return None;
+        return false;
     }
-    let snapshot = tab.session.take_or_clone_unsliced_snapshot();
+    before_mutate(tab);
 
     let depth = tab.session.editing_group_path.len();
     let mut any_became_raw = false;
@@ -724,29 +759,33 @@ pub(crate) fn prepare_ungroup_selected_shapes(tab: &mut Tab) -> Option<Vec<FillS
     tab.session
         .shapes
         .retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
+    tab.session.invalidate_scene_order();
     tab.session.selection.retain_existing(&tab.session.shapes);
     if any_became_raw {
         tab.session.mark_floating_modified(FloatingOrigin::Move);
     }
     tab.session.transform_pivot = None;
-    Some(snapshot)
+    true
 }
 
-/// 選択中のオブジェクトをキャンバスから削除し、変更前スナップショットを返す
-pub(crate) fn prepare_delete_selected_shapes(tab: &mut Tab) -> Option<Vec<FillShape>> {
+/// 選択中のオブジェクトをキャンバスから削除する
+pub(crate) fn prepare_delete_selected_shapes(
+    tab: &mut Tab,
+    before_mutate: impl FnOnce(&mut Tab),
+) -> bool {
     cancel_active_drag(tab);
     if tab.session.selection.is_empty() {
-        return None;
+        return false;
     }
     let (is_sel, any_valid) = tab.session.selected_shape_mask();
     if !any_valid {
         tab.session.selection.clear();
         tab.session.floating = None;
         tab.session.transform_pivot = None;
-        return None;
+        return false;
     }
 
-    let snapshot = tab.session.take_or_clone_unsliced_snapshot();
+    before_mutate(tab);
 
     let mut remaining = Vec::with_capacity(tab.session.shapes.len());
     for (idx, shape) in tab.session.shapes.drain(..).enumerate() {
@@ -755,26 +794,30 @@ pub(crate) fn prepare_delete_selected_shapes(tab: &mut Tab) -> Option<Vec<FillSh
         }
     }
     tab.session.shapes = remaining;
+    tab.session.invalidate_scene_order();
     tab.session.floating = None;
     tab.session.selection.clear();
     tab.session.transform_pivot = None;
-    Some(snapshot)
+    true
 }
 
-/// 現在の編集スコープの図形をすべて消去し、変更前スナップショットを返す
-pub(crate) fn prepare_clear_active_frame_shapes(tab: &mut Tab) -> Option<Vec<FillShape>> {
+/// 現在の編集スコープの図形をすべて消去する
+pub(crate) fn prepare_clear_active_frame_shapes(
+    tab: &mut Tab,
+    before_mutate: impl FnOnce(&mut Tab),
+) -> bool {
     let has_any_in_scope = tab
         .scene()
-        .shapes()
         .iter()
         .any(|s| s.is_in_editing_scope(&tab.session.editing_group_path));
     if !has_any_in_scope {
-        return None;
+        return false;
     }
     clear_selection(tab);
-    let snapshot = tab.session.take_or_clone_unsliced_snapshot();
+    before_mutate(tab);
     tab.session
         .shapes
         .retain(|s| !s.is_in_editing_scope(&tab.session.editing_group_path));
-    Some(snapshot)
+    tab.session.invalidate_scene_order();
+    true
 }

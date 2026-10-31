@@ -4,8 +4,7 @@ use std::sync::Arc;
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    Clipboard, FloatingOrigin, MoveSelectionDrag, Tab, active_scope_layer_id, cancel_active_drag,
-    clear_selection, insert_and_select_shapes_in_scope, sync_timeline_layer_from_canvas_selection,
+    Clipboard, MoveSelectionDrag, Tab, active_scope_layer_id, cancel_active_drag,
 };
 use crate::symbol::{Document, SymbolDef, SymbolEvalCtx};
 use crate::timeline::Timeline;
@@ -147,42 +146,14 @@ pub(crate) fn instantiate_relative_shapes_in_scope(
     (instantiated, any_raw)
 }
 
-/// 現在選択中のオブジェクト（生シェイプ・グループ・シンボル）をその場に複製し、
-/// 複製側を選択状態に切り替えた上でドラッグ移動用の `undo_snapshot` を返す（`Alt + ドラッグ` 複製用）
-pub(crate) fn duplicate_selected_shapes_for_alt_drag(tab: &mut Tab) -> Vec<FillShape> {
-    let rel_shapes = tab.session.extract_selected_relative_to_scope();
-    if rel_shapes.is_empty() {
-        return tab.session.snapshot_for_drag();
-    }
-    let saved_pivot = tab.session.transform_pivot;
-    clear_selection(tab);
-    let undo_snapshot = tab.session.snapshot_for_drag();
-    let (duplicated, any_raw) =
-        instantiate_relative_shapes_in_scope(tab, &rel_shapes, KVec2::ZERO, true);
-    insert_and_select_shapes_in_scope(
-        tab,
-        duplicated,
-        any_raw.then_some(FloatingOrigin::AltDuplicate),
-    );
-    tab.session.transform_pivot = saved_pivot;
-    sync_timeline_layer_from_canvas_selection(tab);
-    undo_snapshot
-}
-
 /// 選択オブジェクトの移動ドラッグ（`Alt` 複製移動を含む）の初期状態を構築する共通ヘルパー
 pub(crate) fn begin_move_selection_drag(
     tab: &mut Tab,
     pt: Point,
     alt_held: bool,
 ) -> MoveSelectionDrag {
-    if alt_held {
-        let orig_selected_ids = tab.session.selected_shape_ids();
-        let undo_snapshot = duplicate_selected_shapes_for_alt_drag(tab);
-        MoveSelectionDrag::new(pt, undo_snapshot).with_orig_selected_ids(orig_selected_ids)
-    } else {
-        let undo_snapshot = tab.session.snapshot_for_drag();
-        MoveSelectionDrag::new(pt, undo_snapshot)
-    }
+    tab.session.begin_move_overlay(alt_held);
+    MoveSelectionDrag::new(pt, alt_held)
 }
 
 fn collect_symbol_and_descendants(

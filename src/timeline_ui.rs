@@ -2012,13 +2012,17 @@ pub(crate) fn step_frame(host: &mut impl TimelineHost, delta: isize) {
 
 /// 再生 / 一時停止を切り替える（`Enter` キーまたは Play ボタン）
 pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
-    let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
-    timeline_ui.ensure_timeline_context(tab);
-    if timeline_ui.is_playing {
-        timeline_ui.stop_playback(tab);
+    let is_playing = {
+        let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
+        timeline_ui.ensure_timeline_context(tab);
+        timeline_ui.is_playing
+    };
+    if is_playing {
+        apply(host, Action::EndCoalesce);
     } else {
+        apply(host, Action::Deselect);
+        let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
         flush_canvas_before_timeline_op(tab);
-        tab.session.selection.clear();
         tab.history.end_coalesce();
         timeline_ui.cancel_drag();
         let loop_pb = timeline_ui.loop_playback;

@@ -173,13 +173,13 @@ pub(crate) fn resolve_cel_with_library(
     }
 
     let mut out = Vec::with_capacity(cel.shapes.len() + cel.instances.len());
-    let mut next_shape_idx = 0;
+    let mut next_cel_idx = 0;
 
     for inst in cel.instances.iter() {
         let target_idx = inst.shape_order_index.min(cel.shapes.len());
-        while next_shape_idx < target_idx && out.len() < MAX_EXPANDED_SYMBOL_SHAPES {
-            out.push(cel.shapes[next_shape_idx].clone());
-            next_shape_idx += 1;
+        while next_cel_idx < target_idx && out.len() < MAX_EXPANDED_SYMBOL_SHAPES {
+            out.push(cel.shapes[next_cel_idx].clone());
+            next_cel_idx += 1;
         }
         if out.len() >= MAX_EXPANDED_SYMBOL_SHAPES || !ctx.has_remaining_steps() {
             break;
@@ -208,9 +208,9 @@ pub(crate) fn resolve_cel_with_library(
         }
     }
 
-    while next_shape_idx < cel.shapes.len() && out.len() < MAX_EXPANDED_SYMBOL_SHAPES {
-        out.push(cel.shapes[next_shape_idx].clone());
-        next_shape_idx += 1;
+    while next_cel_idx < cel.shapes.len() && out.len() < MAX_EXPANDED_SYMBOL_SHAPES {
+        out.push(cel.shapes[next_cel_idx].clone());
+        next_cel_idx += 1;
     }
 
     out
@@ -1174,13 +1174,13 @@ impl Cel {
         let ctx = SymbolEvalCtx::new(library);
         let mut out_shapes = Vec::with_capacity(self.shapes.len() + self.instances.len());
         let mut out_instances = Vec::with_capacity(self.instances.len());
-        let mut next_shape_idx = 0;
+        let mut next_cel_idx = 0;
 
         for inst in self.instances.iter().cloned() {
             let target_idx = inst.shape_order_index.min(self.shapes.len());
-            while next_shape_idx < target_idx {
-                out_shapes.push(self.shapes[next_shape_idx].clone());
-                next_shape_idx += 1;
+            while next_cel_idx < target_idx {
+                out_shapes.push(self.shapes[next_cel_idx].clone());
+                next_cel_idx += 1;
             }
             if inst.binding.symbol_id == symbol_id {
                 if let Some(sym) = library.iter().find(|s| s.id == symbol_id) {
@@ -1222,9 +1222,9 @@ impl Cel {
                 out_instances.push(kept);
             }
         }
-        while next_shape_idx < self.shapes.len() {
-            out_shapes.push(self.shapes[next_shape_idx].clone());
-            next_shape_idx += 1;
+        while next_cel_idx < self.shapes.len() {
+            out_shapes.push(self.shapes[next_cel_idx].clone());
+            next_cel_idx += 1;
         }
         self.set_parts(out_shapes, out_instances);
     }

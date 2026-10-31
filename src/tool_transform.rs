@@ -1,15 +1,10 @@
 use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
-use crate::canvas_tool::{
-    ActiveCanvasDrag, MarqueeDrag, Scene, Session, Tab, View, clear_selection,
-};
+use crate::canvas_tool::{ActiveCanvasDrag, MarqueeDrag, Scene, Session, Tab, View};
 pub(crate) use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
 use crate::clipboard_ops::begin_move_selection_drag;
-use crate::doc_actions::{
-    Action, ActionHost, apply, flush_transform_pivot_to_symbol,
-    update_selected_symbol_world_pivot_live,
-};
+use crate::doc_actions::{Action, ActionHost, apply};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{
     convert_selection_to_symbol, delete_symbol_from_library, flip_selected_shapes,
@@ -17,10 +12,7 @@ pub(crate) use crate::doc_actions::{
     scale_selected_shapes, set_active_keyframe_tween_rotate, set_selected_symbol_playback,
     set_selected_symbol_world_pivot, timeline_toggle_tween,
 };
-use crate::select_ops::{
-    compute_hover_target, handle_canvas_double_click, retain_selection_and_flush_deselected,
-    select_single_shape_at, toggle_shape_selection,
-};
+use crate::select_ops::compute_hover_target;
 #[cfg(test)]
 pub(crate) use crate::symbol_ops::{
     enter_symbol_from_library, enter_symbol_timeline, exit_symbol_timeline,
@@ -49,8 +41,14 @@ pub(crate) fn handle_transform_tool_input(
                 == TransformHoverTarget::Pivot
             {
                 apply(host, Action::ResetTransformPivot);
-            } else {
-                handle_canvas_double_click(host.tab_mut(), pt);
+            } else if !apply(host, Action::EnterGroupAt { pt }).as_bool()
+                && host
+                    .tab()
+                    .scene()
+                    .topmost_shape_at(pt, &host.tab().session.editing_group_path)
+                    .is_none()
+            {
+                apply(host, Action::ExitGroup);
             }
         }
         return;
@@ -97,31 +95,24 @@ pub(crate) fn start_transform_drag(
     alt_held: bool,
 ) {
     let sub_mode = host.tool().select_sub_mode;
-    let tab = host.tab_mut();
-    tab.view.inspect_timeline_frame = false;
-    let zoom = tab.view.zoom;
-    let hover = compute_transform_hover(tab.scene(), &tab.session, pt, zoom);
+    host.tab_mut().view.inspect_timeline_frame = false;
+    let zoom = host.tab().view.zoom;
+    let hover = compute_transform_hover(host.tab().scene(), &host.tab().session, pt, zoom);
     if shift_held && hover == TransformHoverTarget::None {
-        tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::MarqueeSelect(
-            MarqueeDrag::new(pt, true),
-        ));
+        host.tab_mut().session.drag = ActiveCanvasDrag::Transform(
+            TransformDragState::MarqueeSelect(MarqueeDrag::new(pt, true)),
+        );
         return;
     }
 
     match hover {
         TransformHoverTarget::Pivot => {
-            if tab
-                .scene()
-                .selected_single_symbol_binding(&tab.session.selection)
-                .is_some()
-                && !tab.session.has_modified_floating()
-            {
-                tab.session.restore_unsliced_preserving_selection();
-            }
+            let tab = host.tab_mut();
             if let Some(bbox) = tab
                 .scene()
                 .selection_bounding_box(&tab.session.selection, zoom)
             {
+                let had_custom_pivot = tab.session.transform_pivot.is_some();
                 let orig_pivot = tab.scene().active_transform_pivot(
                     &tab.session.selection,
                     tab.session.transform_pivot,
@@ -129,23 +120,25 @@ pub(crate) fn start_transform_drag(
                 );
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::MovePivot {
                     orig_pivot,
-                    undo_snapshot: tab.session.snapshot_for_drag(),
+                    had_custom_pivot,
+                    last_pivot: orig_pivot,
                     changed: false,
                 });
             }
         }
         TransformHoverTarget::Scale(handle) => {
+            let tab = host.tab_mut();
             if let Some(orig_bbox) = tab
                 .scene()
                 .selection_bounding_box(&tab.session.selection, zoom)
             {
-                let undo_snapshot = tab.session.snapshot_for_drag();
+                let had_custom_pivot = tab.session.transform_pivot.is_some();
                 let orig_pivot = tab.scene().active_transform_pivot(
                     &tab.session.selection,
                     tab.session.transform_pivot,
                     orig_bbox,
                 );
-                flush_transform_pivot_to_symbol(tab);
+                let orig_shapes = tab.session.begin_transform_overlay();
                 let anchor = if alt_held {
                     orig_pivot
                 } else {
@@ -156,54 +149,64 @@ pub(crate) fn start_transform_drag(
                     anchor,
                     handle_start: handle.position(orig_bbox),
                     orig_pivot,
-                    orig_shapes: tab.session.selected_shapes_snapshot(),
-                    undo_snapshot,
+                    had_custom_pivot,
+                    orig_shapes,
+                    last_affine: Affine::IDENTITY,
                     changed: false,
                 });
             }
         }
         TransformHoverTarget::Rotate => {
+            let tab = host.tab_mut();
             if let Some(orig_bbox) = tab
                 .scene()
                 .selection_bounding_box(&tab.session.selection, zoom)
             {
-                let undo_snapshot = tab.session.snapshot_for_drag();
+                let had_custom_pivot = tab.session.transform_pivot.is_some();
                 let pivot = tab.scene().active_transform_pivot(
                     &tab.session.selection,
                     tab.session.transform_pivot,
                     orig_bbox,
                 );
-                flush_transform_pivot_to_symbol(tab);
+                let orig_shapes = tab.session.begin_transform_overlay();
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Rotate {
                     orig_bbox,
                     pivot,
+                    had_custom_pivot,
                     start_angle: (pt.y - pivot.y).atan2(pt.x - pivot.x),
                     current_angle: 0.0,
-                    orig_shapes: tab.session.selected_shapes_snapshot(),
-                    undo_snapshot,
+                    orig_shapes,
                 });
             }
         }
         TransformHoverTarget::Move => {
+            let tab = host.tab_mut();
             let move_drag = begin_move_selection_drag(tab, pt, alt_held);
             tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
         }
         TransformHoverTarget::None => {
-            if let Some(hit_idx) = tab
-                .scene()
-                .topmost_shape_at(pt, &tab.session.editing_group_path)
+            let scene = host.tab().scene();
+            let hit_opt = scene
+                .topmost_shape_at(pt, &host.tab().session.editing_group_path)
                 .or_else(|| {
-                    compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode).shape_idx()
-                })
-            {
-                if !tab.scene().is_shape_selected(hit_idx, &tab.session.selection) {
-                    select_single_shape_at(tab, sub_mode, pt);
+                    compute_hover_target(scene, &host.tab().session, pt, zoom, sub_mode)
+                        .shape_id()
+                        .and_then(|id| scene.index_of_shape_id(id))
+                });
+            if let Some(hit_idx) = hit_opt {
+                if !host
+                    .tab()
+                    .scene()
+                    .is_shape_selected(hit_idx, &host.tab().session.selection)
+                {
+                    apply(host, Action::SelectSingleAt { pt });
                 }
+                let tab = host.tab_mut();
                 let move_drag = begin_move_selection_drag(tab, pt, alt_held);
                 tab.session.drag =
                     ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
             } else {
-                tab.session.drag = ActiveCanvasDrag::Transform(
+                host.tab_mut().session.drag = ActiveCanvasDrag::Transform(
                     TransformDragState::MarqueeSelect(MarqueeDrag::new(pt, false)),
                 );
             }
@@ -226,12 +229,14 @@ pub(crate) fn update_transform_drag(
         match transform_drag {
             TransformDragState::MovePivot {
                 orig_pivot,
+                last_pivot,
                 changed,
                 ..
             } => {
                 if (pt - *orig_pivot).hypot() > 0.5 / (tab.view.zoom as f64) {
                     *changed = true;
                 }
+                *last_pivot = pt;
                 new_pivot_pt = Some(pt);
             }
             TransformDragState::Move(drag) => {
@@ -242,6 +247,7 @@ pub(crate) fn update_transform_drag(
                 anchor,
                 handle_start,
                 orig_pivot,
+                last_affine,
                 changed,
                 ..
             } => {
@@ -265,6 +271,7 @@ pub(crate) fn update_transform_drag(
                 sy = sy.abs().max(0.02).copysign(sy);
 
                 let affine = affine_scale_around(eff_anchor, sx, sy);
+                *last_affine = affine;
                 *changed = (sx - 1.0).abs() > 0.005 || (sy - 1.0).abs() > 0.005;
                 scale_update = Some((affine, *orig_pivot, tab.session.transform_pivot.is_some()));
             }
@@ -292,39 +299,39 @@ pub(crate) fn update_transform_drag(
     }
 
     if let Some((affine, orig_pivot, has_piv)) = scale_update {
-        if let ActiveCanvasDrag::Transform(TransformDragState::Scale { orig_shapes, .. }) =
-            &tab.session.drag
-        {
-            Session::transform_selected_from_origins(
-                &mut tab.session.shapes,
-                orig_shapes,
-                affine,
-            );
+        let orig_shapes_opt =
+            if let ActiveCanvasDrag::Transform(TransformDragState::Scale { orig_shapes, .. }) =
+                &tab.session.drag
+            {
+                Some(orig_shapes.clone())
+            } else {
+                None
+            };
+        if let Some(orig_shapes) = orig_shapes_opt {
+            tab.session.update_transform_overlay(&orig_shapes, affine);
         }
         if has_piv {
             tab.session.transform_pivot = Some(affine * orig_pivot);
         }
     }
     if let Some(affine) = rotate_update {
-        if let ActiveCanvasDrag::Transform(TransformDragState::Rotate { orig_shapes, .. }) =
-            &tab.session.drag
-        {
-            Session::transform_selected_from_origins(
-                &mut tab.session.shapes,
-                orig_shapes,
-                affine,
-            );
+        let orig_shapes_opt =
+            if let ActiveCanvasDrag::Transform(TransformDragState::Rotate { orig_shapes, .. }) =
+                &tab.session.drag
+            {
+                Some(orig_shapes.clone())
+            } else {
+                None
+            };
+        if let Some(orig_shapes) = orig_shapes_opt {
+            tab.session.update_transform_overlay(&orig_shapes, affine);
         }
     }
     if let Some(piv_pt) = new_pivot_pt {
-        if update_selected_symbol_world_pivot_live(tab, Some(piv_pt)) {
-            tab.session.transform_pivot = None;
-        } else {
-            tab.session.transform_pivot = Some(piv_pt);
-        }
+        tab.session.transform_pivot = Some(piv_pt);
     }
     if let Some(delta) = move_delta {
-        tab.session.translate_selected(delta);
+        tab.session.translate_move_overlay(delta);
     }
 }
 
@@ -340,34 +347,42 @@ pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option
                 host,
                 Action::FinishMoveSelectionDrag {
                     total_delta: drag.total_delta,
-                    undo_snapshot: drag.undo_snapshot,
-                    orig_selected_ids: drag.orig_selected_ids,
+                    alt_duplicate: drag.alt_duplicate,
                 },
             );
         }
         TransformDragState::Scale {
-            undo_snapshot,
+            orig_pivot,
+            had_custom_pivot,
+            last_affine,
             changed,
             ..
         } => {
             apply(
                 host,
                 Action::CommitTransformDrag {
+                    affine: last_affine,
+                    orig_pivot,
+                    had_custom_pivot,
                     changed,
-                    undo_snapshot,
                 },
             );
         }
         TransformDragState::Rotate {
+            pivot,
+            had_custom_pivot,
             current_angle,
-            undo_snapshot,
             ..
         } => {
+            let changed = current_angle.abs() > 0.002;
+            let affine = affine_rotate_around(pivot, current_angle);
             apply(
                 host,
                 Action::CommitTransformDrag {
-                    changed: current_angle.abs() > 0.002,
-                    undo_snapshot,
+                    affine,
+                    orig_pivot: pivot,
+                    had_custom_pivot,
+                    changed,
                 },
             );
         }
@@ -383,15 +398,18 @@ pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option
             );
         }
         TransformDragState::MovePivot {
-            undo_snapshot,
+            orig_pivot,
+            had_custom_pivot,
+            last_pivot,
             changed,
-            ..
         } => {
             apply(
                 host,
                 Action::CommitPivotDrag {
+                    new_pivot: last_pivot,
+                    orig_pivot,
+                    had_custom_pivot,
                     changed,
-                    undo_snapshot,
                 },
             );
         }
@@ -400,31 +418,39 @@ pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option
 
 fn handle_transform_click(host: &mut impl ActionHost, pt: Point, shift_held: bool) {
     let sub_mode = host.tool().select_sub_mode;
-    let tab = host.tab_mut();
-    tab.view.inspect_timeline_frame = false;
-    let zoom = tab.view.zoom;
-    let hit_opt = tab
-        .scene()
-        .topmost_shape_at(pt, &tab.session.editing_group_path)
-        .or_else(|| compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode).shape_idx());
+    host.tab_mut().view.inspect_timeline_frame = false;
+    let zoom = host.tab().view.zoom;
+    let scene = host.tab().scene();
+    let hit_opt = scene
+        .topmost_shape_at(pt, &host.tab().session.editing_group_path)
+        .or_else(|| {
+            compute_hover_target(scene, &host.tab().session, pt, zoom, sub_mode)
+                .shape_id()
+                .and_then(|id| scene.index_of_shape_id(id))
+        });
     if shift_held {
-        if let Some(hit_idx) = hit_opt {
-            toggle_shape_selection(tab, hit_idx);
+        if let Some(scene_idx) = hit_opt {
+            apply(host, Action::ToggleSelectionAt { scene_idx });
         }
-    } else if compute_transform_hover(tab.scene(), &tab.session, pt, zoom)
+    } else if compute_transform_hover(host.tab().scene(), &host.tab().session, pt, zoom)
         != TransformHoverTarget::Pivot
     {
         if let Some(hit_idx) = hit_opt {
-            if !tab.scene().is_shape_selected(hit_idx, &tab.session.selection) {
-                select_single_shape_at(tab, sub_mode, pt);
+            if !host
+                .tab()
+                .scene()
+                .is_shape_selected(hit_idx, &host.tab().session.selection)
+            {
+                apply(host, Action::SelectSingleAt { pt });
             } else {
-                let unit = tab
+                let unit = host
+                    .tab()
                     .scene()
-                    .expand_to_group_unit(hit_idx, &tab.session.editing_group_path);
-                retain_selection_and_flush_deselected(tab, &unit);
+                    .expand_to_group_unit(hit_idx, &host.tab().session.editing_group_path);
+                apply(host, Action::RetainSelection { keep_indices: unit });
             }
         } else {
-            clear_selection(tab);
+            apply(host, Action::Deselect);
         }
     }
 }
@@ -476,7 +502,6 @@ pub(crate) fn compute_transform_hover(
 
     if bbox.contains(mouse_pt)
         || scene
-            .shapes()
             .iter()
             .any(|s| session.selection.contains_shape(s) && s.contains_point(mouse_pt))
     {

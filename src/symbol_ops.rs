@@ -10,15 +10,15 @@ use crate::timeline::TimelineCellSelection;
 use crate::vector_engine::{FillShape, union_bounding_boxes};
 
 /// 選択中のオブジェクトを新しい「シンボル」に変換するためのローカル図形抽出とインスタンスバインディング付与を行い、
-/// `(sym_id, target_lid, local_shapes, undo_snapshot)` を返す（Undo記録・ライブラリ登録は `doc_actions::apply` が行う）
+/// `(sym_id, target_lid, local_shapes)` を返す（Undo記録・ライブラリ登録は `doc_actions::apply` が行う）
 pub(crate) fn prepare_convert_selection_to_symbol(
     tab: &mut Tab,
-) -> Option<(u64, u64, Vec<FillShape>, Vec<FillShape>)> {
+    before_mutate: impl FnOnce(&mut Tab),
+) -> Option<(u64, u64, Vec<FillShape>)> {
     cancel_active_drag(tab);
     if tab.session.selection.is_empty() {
         return None;
     }
-    let snapshot = tab.session.take_or_clone_unsliced_snapshot();
     let valid_indices: Vec<usize> = tab
         .session
         .selected_indices()
@@ -31,9 +31,10 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         })
         .collect();
     if valid_indices.is_empty() {
-        tab.session.restore_unsliced_snapshot(snapshot);
         return None;
     }
+
+    before_mutate(tab);
 
     let mut bbox = tab.session.shapes[valid_indices[0]].bounding_box();
     for &idx in &valid_indices[1..] {
@@ -75,30 +76,35 @@ pub(crate) fn prepare_convert_selection_to_symbol(
             shape.symbol_instance = Some(binding);
         }
     }
+    tab.session.invalidate_scene_order();
     tab.session.selection.clear();
     tab.session.selection.instances.insert(inst_gid);
 
     reorder_selected_to_scope_front(tab);
-    Some((sym_id, target_lid, local_shapes, snapshot))
+    Some((sym_id, target_lid, local_shapes))
 }
 
-/// ライブラリ内の指定シンボル `symbol_id` の新しいインスタンスを現在のステージ中央へ配置し、変更前スナップショットを返す
+/// ライブラリ内の指定シンボル `symbol_id` の新しいインスタンスを現在のステージ中央へ配置する
 pub(crate) fn prepare_place_symbol_instance(
     tab: &mut Tab,
     symbol_id: u64,
-) -> Option<Vec<FillShape>> {
+    before_mutate: impl FnOnce(&mut Tab),
+) -> bool {
     let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
     if !tab
         .doc
         .can_place_symbol_in_current_context(&tab.session.edit_path, symbol_id)
         || !tab.active_timeline().is_layer_editable_by_id(target_lid)
     {
-        return None;
+        return false;
     }
-    let first_shapes = tab
+    let Some(first_shapes) = tab
         .doc
         .find_symbol(symbol_id)
-        .map(|s| s.first_non_empty_local_shapes(&tab.doc.library))?;
+        .map(|s| s.first_non_empty_local_shapes(&tab.doc.library))
+    else {
+        return false;
+    };
     let first_bbox_center = if first_shapes.is_empty() {
         Point::ZERO
     } else {
@@ -106,7 +112,7 @@ pub(crate) fn prepare_place_symbol_instance(
     };
 
     clear_selection(tab);
-    let snapshot = tab.session.take_or_clone_unsliced_snapshot();
+    before_mutate(tab);
     let inst_gid = tab.doc.alloc_group_id();
     let stage_center = tab.stage_center_world();
     let offset = stage_center - first_bbox_center.to_vec2();
@@ -149,7 +155,7 @@ pub(crate) fn prepare_place_symbol_instance(
         )]
     };
     insert_and_select_shapes_in_scope(tab, placed, None);
-    Some(snapshot)
+    true
 }
 
 /// 現在選択されている図形（またはアクティブセル上の単一シンボル）について、その `(SymbolInstanceBinding, シンボル名, シンボル総フレーム数)` を返す

@@ -807,7 +807,6 @@ fn draw_select_tool_properties(
         }
         let has_any = tab
             .scene()
-            .shapes()
             .iter()
             .any(|s| s.is_in_editing_scope(&tab.session.editing_group_path));
         if ui
@@ -1791,7 +1790,8 @@ pub(crate) fn draw_canvas_contents(
     let view_world_rect =
         tab.view
             .visible_world_rect(&artwork_painter, stage_size, in_symbol_edit);
-    let scene_shapes = tab.scene().shapes();
+    let scene = tab.scene();
+    let scene_len = scene.len();
     let mut shape_cursor = 0usize;
 
     for layer_idx in 0..num_layers {
@@ -1821,18 +1821,20 @@ pub(crate) fn draw_canvas_contents(
         }
 
         if num_layers > 1 {
-            while shape_cursor < scene_shapes.len()
-                && scene_shapes[shape_cursor].layer_id != lid
-                && tl
-                    .layer_index_by_id(scene_shapes[shape_cursor].layer_id)
-                    .is_none_or(|ord| ord < layer_idx)
+            while shape_cursor < scene_len
+                && scene.get(shape_cursor).is_some_and(|s| {
+                    s.layer_id != lid
+                        && tl
+                            .layer_index_by_id(s.layer_id)
+                            .is_none_or(|ord| ord < layer_idx)
+                })
             {
                 shape_cursor += 1;
             }
         }
         let start_idx = shape_cursor;
-        while shape_cursor < scene_shapes.len()
-            && (num_layers <= 1 || scene_shapes[shape_cursor].layer_id == lid)
+        while shape_cursor < scene_len
+            && (num_layers <= 1 || scene.get(shape_cursor).is_some_and(|s| s.layer_id == lid))
         {
             shape_cursor += 1;
         }

@@ -818,9 +818,8 @@ fn test_group_selection_bucket_protection_and_non_destructive_overlap() {
     assert_eq!(app.session.shapes[2].color, green);
 
     // グループを赤い顔シェイプの上へ移動して選択解除しても下の生シェイプを切り抜かないこと
-    let snap = app.session.shapes.clone();
     app.session.translate_selected(KVec2::new(0.0, 100.0));
-    tool_select::commit_moved_selection(&mut app, snap);
+    tool_select::commit_moved_selection(&mut app);
     tool_select::clear_selection(&mut app);
     assert_eq!(app.session.shapes.len(), 3);
     assert!(app.session.shapes[0].contains_point(Point::new(100.0, 200.0)));
@@ -1017,10 +1016,11 @@ fn test_copy_paste_group_assigns_new_gid_and_alt_drag_symbol_undo() {
         .instance_gid;
     let count_before = app.session.shapes.len();
 
-    let undo_snapshot = tool_select::duplicate_selected_shapes_for_alt_drag(&mut app);
-    assert_eq!(app.session.shapes.len(), count_before + 1);
-    app.session.translate_selected(KVec2::new(60.0, 40.0));
-    tool_select::finish_move_selection_drag(&mut app, KVec2::new(60.0, 40.0), undo_snapshot);
+    let move_drag =
+        clipboard_ops::begin_move_selection_drag(&mut app, Point::new(136.0, 116.0), true);
+    assert_eq!(app.scene().len(), count_before + 1);
+    app.session.translate_move_overlay(KVec2::new(60.0, 40.0));
+    tool_select::finish_move_selection_drag(&mut app, KVec2::new(60.0, 40.0), move_drag.alt_duplicate);
 
     let (dup_binding, _, _) = tool_transform::selected_single_symbol_info(&app).unwrap();
     assert_eq!(dup_binding.symbol_id, sym_id);
@@ -1156,9 +1156,8 @@ fn test_multilayer_isolation_cross_layer_marquee_and_lock_protection() {
         false,
     );
     assert_eq!(app.session.selected_indices().len(), 2);
-    let undo_snap = app.session.shapes.clone();
     app.session.translate_selected(KVec2::new(30.0, 0.0));
-    tool_select::commit_moved_selection(&mut app, undo_snap);
+    tool_select::commit_moved_selection(&mut app);
     tool_select::clear_selection(&mut app);
     canvas_tool::sync_shapes_to_timeline(&mut app);
     assert!(app.doc.root.layers[0].cel_at(0).unwrap().shapes[0]
@@ -1384,6 +1383,8 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
     let vertex_pt = app.session.shapes[0].exterior.segments[0].p0;
     let edge_pt = app.session.shapes[0].exterior.segments[0].eval(0.5);
 
+    let s0_id = app.session.shapes[0].shape_id;
+
     // 1. 未選択状態では、頂点や境界線にホバーすると Vertex / Edge（変形対象）になること
     assert!(matches!(
         tool_select::compute_hover_target(
@@ -1393,7 +1394,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
             app.view.zoom,
             app.tool.select_sub_mode
         ),
-        HoverTarget::Vertex { shape_idx: 0, .. }
+        HoverTarget::Vertex { shape_id, .. } if shape_id == s0_id
     ));
     assert!(matches!(
         tool_select::compute_hover_target(
@@ -1403,7 +1404,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
             app.view.zoom,
             app.tool.select_sub_mode
         ),
-        HoverTarget::Edge { shape_idx: 0, .. } | HoverTarget::Vertex { shape_idx: 0, .. }
+        HoverTarget::Edge { shape_id, .. } | HoverTarget::Vertex { shape_id, .. } if shape_id == s0_id
     ));
 
     // 2. 細い線の境界線や頂点の上でクリック（select_single_shape_at）した際にも、確実に選択状態になること
@@ -1423,7 +1424,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
             app.view.zoom,
             app.tool.select_sub_mode
         ),
-        HoverTarget::Fill { shape_idx: 0 },
+        HoverTarget::Fill { shape_id: s0_id },
         "選択状態のシェイプの頂点上では変形ではなく移動（Fill）になること"
     );
     assert_eq!(
@@ -1434,7 +1435,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
             app.view.zoom,
             app.tool.select_sub_mode
         ),
-        HoverTarget::Fill { shape_idx: 0 },
+        HoverTarget::Fill { shape_id: s0_id },
         "選択状態のシェイプの境界線上では変形ではなく移動（Fill）になること"
     );
     assert_eq!(
@@ -1445,7 +1446,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
             app.view.zoom,
             app.tool.select_sub_mode
         ),
-        HoverTarget::Fill { shape_idx: 0 },
+        HoverTarget::Fill { shape_id: s0_id },
         "選択状態の細い線の外周マージン内でも移動（Fill）として掴めること"
     );
 }
@@ -1774,9 +1775,8 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
     ));
 
     app.session.set_selected_indices(vec![0]);
-    let snap = app.session.shapes.clone();
     app.session.translate_selected(KVec2::new(200.0, 80.0));
-    tool_select::commit_moved_selection(&mut app, snap);
+    tool_select::commit_moved_selection(&mut app);
     canvas_tool::sync_shapes_to_timeline(&mut app);
 
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
@@ -1795,9 +1795,8 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
 
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
     app.session.set_selected_indices(vec![0]);
-    let snap_reset = app.session.shapes.clone();
     app.session.translate_selected(KVec2::new(-200.0, -80.0));
-    tool_select::commit_moved_selection(&mut app, snap_reset);
+    tool_select::commit_moved_selection(&mut app);
     canvas_tool::sync_shapes_to_timeline(&mut app);
 
     let joint_world = Point::new(100.0, 150.0);
@@ -2143,17 +2142,15 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
         false
     ));
 
-    let clean_shapes = app.session.shapes.clone();
     let clean_bbox = app.session.shapes[0].bounding_box();
+    app.session.set_selected_indices(vec![0]);
+    let move_drag = clipboard_ops::begin_move_selection_drag(&mut app, Point::ZERO, false);
     app.session.drag = crate::canvas_tool::ActiveCanvasDrag::Select(
-        crate::canvas_tool::SelectDragState::MoveShape(crate::canvas_tool::MoveSelectionDrag::new(
-            Point::ZERO,
-            clean_shapes,
-        )),
+        crate::canvas_tool::SelectDragState::MoveShape(move_drag),
     );
-    app.session.shapes[0].translate(KVec2::new(500.0, 500.0));
+    app.session.translate_move_overlay(KVec2::new(500.0, 500.0));
     tool_select::clear_selection(&mut app);
-    assert_eq!(app.session.shapes[0].bounding_box(), clean_bbox);
+    assert_eq!(app.scene().get(0).unwrap().bounding_box(), clean_bbox);
 
     let stroke = vec![Point::new(10.0, 10.0), Point::new(40.0, 10.0)];
     let tail_outline = generate_brush_outline(&stroke, 8.0);
@@ -2929,7 +2926,6 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
         vec![1],
         "sort_shapes_by_layer_order 後も shape_id に基づいて選択インデックスが新しい位置へ追従すること"
     );
-    assert_eq!(sort_app.session.selected_shape_ids(), vec![top_shape_id]);
     sort_app.session.record_loaded_signatures();
     assert!(sort_app.session.is_all_shapes_unchanged());
 
@@ -2953,7 +2949,7 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
             &sort_app.session.editing_group_path,
             Point::new(50.0, 50.0),
             1.0,
-            usize::MAX,
+            u64::MAX,
             0,
             0,
         )
@@ -3623,9 +3619,8 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     merge_app.session.shapes.extend(red_stroke);
     canvas_tool::sync_shapes_to_timeline(&mut merge_app);
     merge_app.session.set_selected_indices(vec![1]);
-    let snap = merge_app.session.snapshot_for_drag();
     merge_app.session.translate_selected(KVec2::new(0.0, -80.0));
-    tool_select::commit_moved_selection(&mut merge_app, snap);
+    tool_select::commit_moved_selection(&mut merge_app);
     assert!(merge_app.session.has_modified_floating());
 
     crate::project_io::save_project_to_path(&mut merge_app, &tmp_merge_path)
@@ -3657,11 +3652,10 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     ));
     canvas_tool::sync_shapes_to_timeline(&mut union_save_app);
     union_save_app.session.set_selected_indices(vec![1]);
-    let snap_u = union_save_app.session.snapshot_for_drag();
     union_save_app
         .session
         .translate_selected(KVec2::new(0.0, -80.0));
-    tool_select::commit_moved_selection(&mut union_save_app, snap_u);
+    tool_select::commit_moved_selection(&mut union_save_app);
     crate::project_io::save_project_to_path(&mut union_save_app, &tmp_merge_path)
         .expect("同色Union保存に成功すること");
     assert_eq!(
@@ -3690,11 +3684,10 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     canvas_tool::sync_shapes_to_timeline(&mut self_union_app);
     self_union_app.session.set_selected_indices(vec![0, 1]);
     assert!(tool_select::copy_selected_shapes(&mut self_union_app));
-    let snap_su = self_union_app.session.snapshot_for_drag();
     self_union_app
         .session
         .translate_selected(KVec2::new(10.0, 0.0));
-    tool_select::commit_moved_selection(&mut self_union_app, snap_su);
+    tool_select::commit_moved_selection(&mut self_union_app);
     crate::project_io::save_project_to_path(&mut self_union_app, &tmp_merge_path)
         .expect("選択同士のUnion保存に成功すること");
     assert_eq!(self_union_app.session.shapes.len(), 1);
@@ -3770,11 +3763,10 @@ fn test_save_io_failure_rollback_and_marquee_unsliced_push_undo() {
     ));
     canvas_tool::sync_shapes_to_timeline(&mut undo_redo_merge_app);
     undo_redo_merge_app.session.set_selected_indices(vec![1]);
-    let snap_ur = undo_redo_merge_app.session.snapshot_for_drag();
     undo_redo_merge_app
         .session
         .translate_selected(KVec2::new(0.0, -80.0));
-    tool_select::commit_moved_selection(&mut undo_redo_merge_app, snap_ur);
+    tool_select::commit_moved_selection(&mut undo_redo_merge_app);
     assert!(undo_redo_merge_app.session.has_modified_floating());
 
     let bad_path = std::env::temp_dir()
@@ -4596,9 +4588,8 @@ fn test_symbol_delete_mid_tween_preserves_start_keyframe_pose() {
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
     timeline_ui::timeline_insert_keyframe(&mut app, true);
     app.session.set_selected_indices(vec![0]);
-    let snap = app.session.snapshot_for_drag();
     app.session.translate_selected(KVec2::new(200.0, 0.0));
-    tool_select::commit_moved_selection(&mut app, snap);
+    tool_select::commit_moved_selection(&mut app);
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
     assert!(tool_transform::timeline_toggle_tween(&mut app));
 
@@ -5385,7 +5376,7 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
         "エッジ端点付近のドラッグ開始で PullEdge 状態に入ること"
     );
     tool_select::update_reshape_drag(&mut app, pt_near_end);
-    let after_zero_move = app.session.shapes[0].exterior.segments[seg_idx];
+    let after_zero_move = app.scene().get(0).unwrap().exterior.segments[seg_idx];
     assert!(
         (after_zero_move.p1 - orig_seg.p1).hypot() < 1e-6,
         "端点付近 (t=0.10 < 0.18) や曲線から少し離れた位置を掴んだ瞬間 (移動量0) に曲線が跳ばないこと (#5): orig={:?}, after={:?}",
@@ -5393,11 +5384,22 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
         after_zero_move.p1
     );
 
-    // 微小移動 (dy = +2.0) でも跳びなく滑らかに移動すること
+    // 微小移動 (dy = +2.0) でも跳びなく滑らかに移動すること（ドラッグ中は Scene の Overlay に反映され、作業用コピーは不変）
     let grab_t = 0.18_f64;
     let grab_before = orig_seg.eval(grab_t);
     tool_select::update_reshape_drag(&mut app, pt_near_end + kurbo::Vec2::new(0.0, 2.0));
-    let grab_after = app.session.shapes[0].exterior.segments[seg_idx].eval(grab_t);
+    assert_eq!(
+        app.session.shapes[0].exterior.segments[seg_idx].p1,
+        orig_seg.p1,
+        "ドラッグ中は作業用コピーが書き換えられないこと"
+    );
+    let grab_after = app
+        .scene()
+        .get(0)
+        .unwrap()
+        .exterior
+        .segments[seg_idx]
+        .eval(grab_t);
     assert!(
         ((grab_after - grab_before) - kurbo::Vec2::new(0.0, 2.0)).hypot() < 1e-5,
         "微小ドラッグ時の曲線変化量がカーソル移動量と正確に一致すること (#5)"
@@ -5745,7 +5747,7 @@ fn test_cancel_drag_and_noop_drag_preserve_tessellated_mesh_caches() {
 
     // 1. 選択移動ドラッグを開始して微小移動未満で終了（noop リストア）してもキャッシュが失われないこと
     let move_drag = clipboard_ops::begin_move_selection_drag(&mut app, Point::new(150.0, 100.0), false);
-    tool_select::finish_move_selection_drag(&mut app, move_drag.total_delta, move_drag.undo_snapshot);
+    tool_select::finish_move_selection_drag(&mut app, move_drag.total_delta, move_drag.alt_duplicate);
     assert!(
         app.session.shapes[0].has_cached_fill_mesh()
             && std::sync::Arc::ptr_eq(app.session.shapes[0].fill_mesh(), &mesh_arc_before),
@@ -6511,30 +6513,34 @@ fn test_scale_commit_and_repeated_transform_rebuild_mesh_cache() {
     canvas_tool::sync_shapes_to_timeline(&mut app);
     let initial_verts = app.session.shapes[0].fill_mesh().vertices.len();
 
-    // 1. 自由変形の拡大ドラッグ (transform_selected_from_origins) 中は既存頂点数を再利用し、
-    //    commit_moved_selection 確定時に rebuild_cache() されて曲線分割頂点数が増加すること (#5)
+    // 1. 自由変形の拡大ドラッグ (update_transform_overlay) 中は既存頂点数を再利用し、
+    //    CommitTransformDrag 確定時に rebuild_cache() されて曲線分割頂点数が増加すること (#5)
     app.session.set_selected_indices(vec![0]);
-    let undo_snapshot = app.session.snapshot_for_drag();
-    let orig_shapes = app.session.selected_shapes_snapshot();
+    let orig_shapes = app.session.begin_transform_overlay();
     let pivot = app.session.shapes[0].bounding_box().center();
     let scale_xform = kurbo::Affine::translate(pivot.to_vec2())
         * kurbo::Affine::scale(4.0)
         * kurbo::Affine::translate(-pivot.to_vec2());
-    canvas_tool::Session::transform_selected_from_origins(
-        &mut app.session.shapes,
-        &orig_shapes,
-        scale_xform,
-    );
+    app.session
+        .update_transform_overlay(&orig_shapes, scale_xform);
     assert_eq!(
-        app.session.shapes[0].fill_mesh().vertices.len(),
+        app.scene().get(0).unwrap().fill_mesh().vertices.len(),
         initial_verts,
         "ドラッグ中は頂点バッファを再利用すること"
     );
-    doc_actions::commit_moved_selection(&mut app, undo_snapshot);
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::CommitTransformDrag {
+            affine: scale_xform,
+            orig_pivot: pivot,
+            had_custom_pivot: false,
+            changed: true,
+        },
+    );
     let rebuilt_verts = app.session.shapes[0].fill_mesh().vertices.len();
     assert!(
         rebuilt_verts > initial_verts,
-        "拡大確定時 (commit_moved_selection) にメッシュが再構築され、拡大後の曲線に応じた滑らかな頂点数になること (#5): initial={initial_verts}, rebuilt={rebuilt_verts}"
+        "拡大確定時 (CommitTransformDrag) にメッシュが再構築され、拡大後の曲線に応じた滑らかな頂点数になること (#5): initial={initial_verts}, rebuilt={rebuilt_verts}"
     );
 
     // 2. 1.2倍 (<= 1.25倍) の FillShape::transform を繰り返した場合でもキャッシュが再構築されること (#5)
@@ -8203,6 +8209,7 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
         Some(0),
         "Scene::topmost_shape_at で現在フレームの図形がヒットすること"
     );
+    let s0_id = app.scene().get(0).unwrap().shape_id;
     assert_eq!(
         select_ops::compute_hover_target(
             app.scene(),
@@ -8211,12 +8218,12 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
             app.view.zoom,
             app.tool.select_sub_mode,
         ),
-        HoverTarget::Fill { shape_idx: 0 },
+        HoverTarget::Fill { shape_id: s0_id },
         "compute_hover_target が Scene<'_> を読み取って当たり判定を返すこと"
     );
 
     // 2. Scene::resolve(app.active_timeline(), &app.doc.library, Affine::IDENTITY, &app.session.shapes) が既存メッシュキャッシュを引き継ぎつつ解決結果を返すこと
-    let mesh_arc_before = std::sync::Arc::clone(app.scene().shapes()[0].fill_mesh());
+    let mesh_arc_before = std::sync::Arc::clone(app.scene().get(0).unwrap().fill_mesh());
     let resolved = canvas_tool::Scene::resolve(
         app.tab().active_timeline(),
         &app.doc.library,
@@ -8284,7 +8291,6 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
     );
     assert!(
         app.scene()
-            .shapes()
             .iter()
             .all(|s| s.symbol_instance.is_some()),
         "親タイムラインの Scene 図形にはシンボルインスタンスバインディングが付与されていること"
@@ -8317,7 +8323,6 @@ fn test_stage4_drag_2000_shapes_preserves_unmoved_mesh_caches() {
     // ドラッグ前の描画（Scene 経由で全2000図形の fill_mesh() を評価・キャッシュ構築）
     let meshes_before: std::collections::HashMap<u64, std::sync::Arc<egui::epaint::Mesh>> = app
         .scene()
-        .shapes()
         .iter()
         .map(|s| (s.shape_id, std::sync::Arc::clone(s.fill_mesh())))
         .collect();
@@ -8338,7 +8343,7 @@ fn test_stage4_drag_2000_shapes_preserves_unmoved_mesh_caches() {
     // ドラッグ中（マウス移動1回目直後）に Scene から fill_mesh() を読んだとき、
     // 動かしていない残り1999個の図形がすべてドラッグ前と同一の Arc<Mesh> を保持していること
     let mut unmoved_during_drag = 0usize;
-    for shape in app.scene().shapes() {
+    for shape in app.scene().iter() {
         if shape.shape_id == moved_shape_id {
             continue;
         }
@@ -8363,7 +8368,7 @@ fn test_stage4_drag_2000_shapes_preserves_unmoved_mesh_caches() {
 
     // ドラッグ確定・タイムライン同期後も、残り1999個の図形の fill_mesh() がドラッグ前と同一の Arc<Mesh> を返していること
     let mut unmoved_after_commit = 0usize;
-    for shape in app.scene().shapes() {
+    for shape in app.scene().iter() {
         if shape.shape_id == moved_shape_id {
             continue;
         }
@@ -8513,8 +8518,8 @@ fn test_stage5_anchor_edit_preserved_after_nudge_deselect_and_frame_scrub() {
         ],
     );
     assert_eq!(app.scene().len(), 2);
-    let initial_red_segs = app.scene().shapes()[0].exterior.segments.len();
-    let initial_blue_segs = app.scene().shapes()[1].exterior.segments.len();
+    let initial_red_segs = app.scene().get(0).unwrap().exterior.segments.len();
+    let initial_blue_segs = app.scene().get(1).unwrap().exterior.segments.len();
 
     // 1. 選択中の図形に対する AddAnchor / DeleteAnchor → Deselect 後も線分数が保たれること
     run(
@@ -8540,7 +8545,7 @@ fn test_stage5_anchor_edit_preserved_after_nudge_deselect_and_frame_scrub() {
     );
     assert!(app.session.has_modified_floating());
     assert_eq!(
-        app.scene().shapes()[1].exterior.segments.len(),
+        app.scene().get(1).unwrap().exterior.segments.len(),
         initial_red_segs + 1,
         "選択中図形への AddAnchor(+2) と DeleteAnchor(-1) が反映されていること"
     );
@@ -8548,7 +8553,6 @@ fn test_stage5_anchor_edit_preserved_after_nudge_deselect_and_frame_scrub() {
     run(&mut app, &[Action::Deselect]);
     let red_after_deselect = app
         .scene()
-        .shapes()
         .iter()
         .find(|s| s.color == red)
         .unwrap()
@@ -8586,7 +8590,6 @@ fn test_stage5_anchor_edit_preserved_after_nudge_deselect_and_frame_scrub() {
     assert!(app.session.has_modified_floating());
     let blue_before_commit = app
         .scene()
-        .shapes()
         .iter()
         .find(|s| s.color == blue)
         .unwrap()
@@ -8995,8 +8998,110 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 1);
 }
 
+#[test]
+fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 120, 220);
 
+    let mut shapes = make_stroke(Point::new(100.0, 100.0), Point::new(200.0, 100.0), 20.0, red);
+    shapes.extend(make_stroke(
+        Point::new(150.0, 100.0),
+        Point::new(250.0, 100.0),
+        20.0,
+        blue,
+    ));
+    app.session.shapes = shapes;
+    canvas_tool::sync_shapes_to_timeline(&mut app);
 
+    let orig_red_bbox = app.session.shapes[0].bounding_box();
+    let orig_blue_bbox = app.session.shapes[1].bounding_box();
 
+    // 1. 選択移動ドラッグ中は session.shapes が変わらず、Scene の最前面（TopOfLayer）にプレビューが出る
+    let red_id = app.session.shapes[0].shape_id;
+    {
+        let s = &mut app.session;
+        s.selection.insert_shape(&s.shapes[0]);
+    }
+    tool_select::start_reshape_drag(&mut app, Point::new(120.0, 100.0), false, false);
+    tool_select::update_reshape_drag(&mut app, Point::new(120.0, 140.0));
+    assert_eq!(
+        app.session.shapes[0].bounding_box(),
+        orig_red_bbox,
+        "選択移動ドラッグ中は作業用コピーが書き換えられないこと"
+    );
+    // 移動中の生シェイプは TopOfLayer で青図形より手前（index 1）に表示される
+    let scene_last = app.scene().get(1).unwrap();
+    assert_eq!(scene_last.shape_id, red_id);
+    assert!((scene_last.bounding_box().y0 - (orig_red_bbox.y0 + 40.0)).abs() < 1e-5);
+    tool_select::finish_reshape_drag(&mut app, Some(Point::new(120.0, 140.0)));
+    assert!((app.session.shapes[1].bounding_box().y0 - (orig_red_bbox.y0 + 40.0)).abs() < 1e-5);
+    run(&mut app, &[Action::Undo]);
+    assert_eq!(app.session.shapes[0].bounding_box(), orig_red_bbox);
+    assert_eq!(app.session.shapes[1].bounding_box(), orig_blue_bbox);
+
+    // 2. Alt 複製ドラッグ中は session.shapes が増えず、Scene の Overlay に複製プレビューが追加される
+    {
+        let s = &mut app.session;
+        s.selection.insert_shape(&s.shapes[0]);
+    }
+    tool_select::start_reshape_drag(&mut app, Point::new(120.0, 100.0), false, true);
+    tool_select::update_reshape_drag(&mut app, Point::new(120.0, 150.0));
+    assert_eq!(
+        app.session.shapes.len(),
+        2,
+        "Alt 複製ドラッグ中は作業用コピーに複製が書き込まれないこと"
+    );
+    assert_eq!(
+        app.scene().len(),
+        3,
+        "Alt 複製ドラッグ中は Scene に元の2個 + 複製プレビュー1個の計3個が見えること"
+    );
+    tool_select::finish_reshape_drag(&mut app, Some(Point::new(120.0, 150.0)));
+    run(&mut app, &[Action::Deselect]);
+    run(&mut app, &[Action::Undo]);
+    assert_eq!(app.session.shapes.len(), 2);
+
+    // 3. 自由変形（拡大・回転）ドラッグ中は session.shapes が変わらず、Scene に変形プレビューが出る
+    {
+        let s = &mut app.session;
+        s.selection.insert_shape(&s.shapes[0]);
+    }
+    let bbox = app
+        .scene()
+        .selection_bounding_box(&app.session.selection, 1.0)
+        .unwrap();
+    let tr_corner = Point::new(bbox.x1, bbox.y0);
+    tool_transform::start_transform_drag(&mut app, tr_corner, false, false);
+    tool_transform::update_transform_drag(
+        &mut app,
+        Point::new(bbox.x1 + 30.0, bbox.y0 - 10.0),
+        false,
+        false,
+    );
+    assert_eq!(
+        app.session.shapes[0].bounding_box(),
+        orig_red_bbox,
+        "自由変形スケール中は作業用コピーが書き換えられないこと"
+    );
+    let preview_bbox = app
+        .scene()
+        .selection_bounding_box(&app.session.selection, 1.0)
+        .unwrap();
+    assert!(preview_bbox.width() > orig_red_bbox.width() + 20.0);
+    tool_transform::finish_transform_drag(
+        &mut app,
+        Some(Point::new(bbox.x1 + 30.0, bbox.y0 - 10.0)),
+    );
+    let committed_red = app
+        .session
+        .shapes
+        .iter()
+        .find(|s| s.shape_id == red_id)
+        .unwrap();
+    assert!(committed_red.bounding_box().width() > orig_red_bbox.width() + 20.0);
+    run(&mut app, &[Action::Undo]);
+    assert_eq!(app.session.shapes[0].bounding_box(), orig_red_bbox);
+}
 
 
