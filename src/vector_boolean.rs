@@ -269,6 +269,16 @@ impl PreparedClip {
         } else {
             0.04
         };
+        let intersect_result = run_float_overlay(
+            std::slice::from_ref(&subj_poly),
+            &self.clip_shapes,
+            OverlayRule::Intersect,
+            OverlayFillRule::NonZero,
+            min_area,
+        );
+        if intersect_result.is_empty() {
+            return vec![subj.clone()];
+        }
         let overlay_result = run_float_overlay(
             std::slice::from_ref(&subj_poly),
             &self.clip_shapes,

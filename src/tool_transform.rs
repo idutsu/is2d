@@ -48,11 +48,7 @@ pub(crate) fn set_selected_symbol_world_pivot(
         return true;
     }
     if !doc.canvas.selection_modified {
-        if let Some(mut unsliced) = doc.canvas.take_unsliced_snapshot() {
-            doc.canvas.salvage_caches_into(&mut unsliced);
-            doc.canvas.shapes = unsliced;
-            doc.canvas.select_symbol_instance_by_gid(binding.instance_gid);
-        }
+        doc.canvas.restore_unsliced_preserving_selection();
     }
     let undo_snapshot =
         commit_to_timeline.then(|| doc.canvas.take_or_clone_unsliced_snapshot());
@@ -195,14 +191,10 @@ pub(crate) fn start_transform_drag(
 
     match hover {
         TransformHoverTarget::Pivot => {
-            if let Some(binding) = doc.canvas.selected_single_symbol_binding() {
-                if !doc.canvas.selection_modified {
-                    if let Some(mut unsliced) = doc.canvas.take_unsliced_snapshot() {
-                        doc.canvas.salvage_caches_into(&mut unsliced);
-                        doc.canvas.shapes = unsliced;
-                        doc.canvas.select_symbol_instance_by_gid(binding.instance_gid);
-                    }
-                }
+            if doc.canvas.selected_single_symbol_binding().is_some()
+                && !doc.canvas.selection_modified
+            {
+                doc.canvas.restore_unsliced_preserving_selection();
             }
             if let Some(bbox) = doc.canvas.selection_bounding_box(zoom) {
                 let orig_pivot = doc.canvas.active_transform_pivot(bbox);
@@ -438,11 +430,7 @@ pub(crate) fn finish_transform_drag(doc: &mut EditorDoc, mouse_pt: Option<Point>
         } => {
             if changed {
                 if selected_single_symbol_info(doc).is_some() {
-                    let snapshot = doc
-                        .canvas
-                        .take_unsliced_snapshot()
-                        .unwrap_or(undo_snapshot);
-                    doc.commit_canvas_mutation(snapshot);
+                    doc.commit_canvas_mutation(undo_snapshot);
                 }
             } else {
                 doc.canvas.restore_drag_snapshot(undo_snapshot);
@@ -485,17 +473,17 @@ pub(crate) fn compute_transform_hover(
         return TransformHoverTarget::None;
     };
     let inv_z = 1.0 / (zoom as f64);
-    let pivot = canvas.active_transform_pivot(bbox);
-    if (mouse_pt - pivot).hypot() <= 8.5 * inv_z {
-        return TransformHoverTarget::Pivot;
-    }
-
     let mut best_handle: Option<(f64, ScaleHandle)> = None;
     for handle in ScaleHandle::ALL {
         let d = (mouse_pt - handle.position(bbox)).hypot();
         if d <= 9.0 * inv_z && best_handle.is_none_or(|(bd, _)| d < bd) {
             best_handle = Some((d, handle));
         }
+    }
+    let pivot = canvas.active_transform_pivot(bbox);
+    let pivot_dist = (mouse_pt - pivot).hypot();
+    if pivot_dist <= 8.5 * inv_z && best_handle.is_none_or(|(hd, _)| pivot_dist < hd) {
+        return TransformHoverTarget::Pivot;
     }
     if let Some((_, h)) = best_handle {
         return TransformHoverTarget::Scale(h);

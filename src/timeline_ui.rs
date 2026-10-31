@@ -143,12 +143,12 @@ impl TimelineUiState {
         self.editing_fps = false;
     }
 
-    pub(crate) fn reset_for_timeline_switch(&mut self, current_frame: usize) {
+    pub(crate) fn reset_for_timeline_switch(&mut self, _current_frame: usize) {
         self.is_playing = false;
         self.last_frame_advance_time = None;
         self.scroll_x = 0.0;
         self.scroll_y = 0.0;
-        self.last_ensured_frame = current_frame;
+        self.last_ensured_frame = usize::MAX;
         self.cancel_drag();
     }
 
@@ -1853,7 +1853,16 @@ fn draw_timeline_layer_list(
         }
     }
 
-    // 左上ヘッダーセル ("👁 / 🔒 / レイヤー" + [＋][🗑] ミニボタン)
+    draw_layer_list_header(painter, layout, num_layers, hover_pos);
+}
+
+/// レイヤー一覧左上ヘッダーセル（`"👁 / 🔒 / レイヤー"` + `[＋][🗑]` ミニボタン）と境界線を描画する
+fn draw_layer_list_header(
+    painter: &egui::Painter,
+    layout: &TimelineLayout,
+    num_layers: usize,
+    hover_pos: Option<Pos2>,
+) {
     let corner_rect = Rect::from_min_max(
         layout.panel_rect.left_top(),
         Pos2::new(layout.grid_left, layout.grid_top),

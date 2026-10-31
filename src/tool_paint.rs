@@ -55,7 +55,9 @@ pub(crate) fn handle_brush_or_eraser_input(
             let tail_mesh = tessellate_raw_polygon(&tail_outline, preview_color);
             app.canvas.drag = ActiveCanvasDrag::PaintStroke {
                 stroke,
-                committed_mesh: egui::Mesh::default(),
+                committed_world_mesh: egui::Mesh::default(),
+                committed_screen_mesh: egui::Mesh::default(),
+                committed_zoom_pan: (app.viewport.zoom, app.viewport.pan),
                 tail_outline,
                 tail_mesh,
                 tail_start_idx: 0,
@@ -66,25 +68,34 @@ pub(crate) fn handle_brush_or_eraser_input(
             Some(pt),
             ActiveCanvasDrag::PaintStroke {
                 stroke,
-                committed_mesh,
+                committed_world_mesh,
+                committed_screen_mesh,
+                committed_zoom_pan,
                 tail_outline,
                 tail_mesh,
                 tail_start_idx,
             },
         ) = (mouse_pt, &mut app.canvas.drag)
         {
+            let curr_zp = (app.viewport.zoom, app.viewport.pan);
+            if *committed_zoom_pan != curr_zp {
+                *committed_screen_mesh = transform_mesh_to_screen(
+                    committed_world_mesh,
+                    curr_zp.0,
+                    curr_zp.1,
+                    false,
+                );
+                *committed_zoom_pan = curr_zp;
+            }
             if stroke
                 .last()
                 .is_none_or(|&last| (pt - last).hypot() >= min_sample_dist)
             {
                 if stroke.len().saturating_sub(*tail_start_idx) >= STROKE_TAIL_CHUNK_LEN {
-                    let screen_chunk = transform_mesh_to_screen(
-                        tail_mesh,
-                        app.viewport.zoom,
-                        app.viewport.pan,
-                        false,
-                    );
-                    append_mesh(committed_mesh, &screen_chunk);
+                    append_mesh(committed_world_mesh, tail_mesh);
+                    let screen_chunk =
+                        transform_mesh_to_screen(tail_mesh, curr_zp.0, curr_zp.1, false);
+                    append_mesh(committed_screen_mesh, &screen_chunk);
                     *tail_start_idx = stroke.len().saturating_sub(2);
                 }
                 stroke.push(pt);
@@ -123,10 +134,11 @@ pub(crate) fn commit_raw_outline(app: &mut EditorDoc, raw: &[Point]) {
         return;
     }
     if app.ui.tool == Tool::Brush {
-        app.mutate_canvas_with_undo(true, |app| {
-            merge_shapes_into_canvas(&mut app.canvas.shapes, stroke_shapes);
-            app.canvas.sort_shapes_by_layer_order(&app.timeline);
-        });
+        crate::canvas_tool::clear_selection(app);
+        let snapshot = app.canvas.take_or_clone_unsliced_snapshot();
+        merge_shapes_into_canvas(&mut app.canvas.shapes, stroke_shapes);
+        app.canvas.sort_shapes_by_layer_order(&app.timeline);
+        app.commit_canvas_mutation(snapshot);
     } else {
         let has_bbox_overlap = app.canvas.shapes.iter().any(|s| {
             s.layer_id == target_lid
@@ -475,7 +487,9 @@ pub(crate) fn draw_active_stroke_preview(
     gizmo_painter: &egui::Painter,
 ) {
     let ActiveCanvasDrag::PaintStroke {
-        committed_mesh,
+        committed_world_mesh,
+        committed_screen_mesh,
+        committed_zoom_pan,
         tail_outline,
         tail_mesh,
         ..
@@ -483,11 +497,21 @@ pub(crate) fn draw_active_stroke_preview(
     else {
         return;
     };
-    if tail_outline.is_empty() && committed_mesh.is_empty() {
+    if tail_outline.is_empty() && committed_world_mesh.is_empty() {
         return;
     }
-    if !committed_mesh.is_empty() {
-        artwork_painter.add(egui::Shape::Mesh(committed_mesh.clone()));
+    if !committed_world_mesh.is_empty() {
+        let mesh = if *committed_zoom_pan == (app.viewport.zoom, app.viewport.pan) {
+            committed_screen_mesh.clone()
+        } else {
+            transform_mesh_to_screen(
+                committed_world_mesh,
+                app.viewport.zoom,
+                app.viewport.pan,
+                false,
+            )
+        };
+        artwork_painter.add(egui::Shape::Mesh(mesh));
     }
     if !tail_mesh.is_empty() {
         artwork_painter.add(egui::Shape::Mesh(transform_mesh_to_screen(

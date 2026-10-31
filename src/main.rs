@@ -322,9 +322,17 @@ impl Is2dApp {
                 self.timeline_ui.stop_playback(&mut self.doc);
                 symbol_ops::delete_symbol_from_library(&mut self.doc, sym_id);
             }
+            UiAction::SelectLibrarySymbol(sym_id) => {
+                self.doc.symbols.selected_library_symbol = Some(sym_id);
+            }
             UiAction::RenameSymbolInLibrary { sym_id, new_name } => {
                 if symbol_ops::rename_symbol_in_library(&mut self.doc, sym_id, new_name) {
-                    self.doc.symbols.actively_renaming_symbol = Some(sym_id);
+                    self.doc.ui.actively_renaming_symbol = Some(sym_id);
+                }
+            }
+            UiAction::FinishRenamingSymbol(sym_id) => {
+                if self.doc.ui.actively_renaming_symbol == Some(sym_id) {
+                    self.doc.ui.actively_renaming_symbol = None;
                 }
             }
         }
@@ -388,6 +396,12 @@ impl Is2dApp {
         }
 
         self.handle_command_shortcuts(&input, cmd, copy_event, cut_event, paste_event);
+        if cmd {
+            self.doc.canvas.cmd_held_grace_frames = 4;
+        } else {
+            self.doc.canvas.cmd_held_grace_frames =
+                self.doc.canvas.cmd_held_grace_frames.saturating_sub(1);
+        }
     }
 
     fn handle_single_key_shortcuts(&mut self, i: &egui::InputState, shift: bool) {
@@ -543,10 +557,12 @@ impl Is2dApp {
                 }
             )
         });
-        let v_released_fallback =
-            cmd && v_release_event && !self.doc.canvas.paste_triggered_on_press;
+        let v_released_fallback = (cmd || self.doc.canvas.cmd_held_grace_frames > 0)
+            && v_release_event
+            && !self.doc.canvas.paste_triggered_on_press;
         if v_release_event {
             self.doc.canvas.paste_triggered_on_press = false;
+            self.doc.canvas.cmd_held_grace_frames = 0;
         }
 
         if copy_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::C)) {
@@ -834,16 +850,21 @@ impl Is2dApp {
                     .or_else(|| ctx.pointer_hover_pos());
 
                 // 0. ビューポートのズーム・パン移動操作ハンドリング
-                let pan_state @ (is_panning, _) =
+                let modal_open = self.tabs.pending_close_confirm.is_some();
+                let pan_state @ (is_panning, _) = if modal_open {
+                    self.doc.viewport.pan_last_screen_pos = None;
+                    (false, false)
+                } else {
                     self.doc
                         .viewport
-                        .handle_navigation(ui, canvas_rect, pointer_pos);
+                        .handle_navigation(ui, canvas_rect, pointer_pos)
+                };
 
                 let mouse_pt = pointer_pos.map(|p| self.doc.viewport.screen_to_world(p));
-                let tool_allowed = self.is_current_tool_allowed();
+                let tool_allowed = !modal_open && self.is_current_tool_allowed();
 
-                // 1. ツール別のマウス入力ハンドリング（パン操作開始時は進行中のドラッグをキャンセルしてスキップ）
-                if is_panning {
+                // 1. ツール別のマウス入力ハンドリング（パン操作開始時・モーダル表示時は進行中のドラッグをキャンセルしてスキップ）
+                if is_panning || modal_open {
                     canvas_tool::cancel_active_drag(&mut self.doc);
                 } else {
                     self.handle_canvas_tool_input(ui, &response, mouse_pt, tool_allowed);

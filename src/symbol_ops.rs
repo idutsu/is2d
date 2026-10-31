@@ -3,8 +3,8 @@ use kurbo::{Affine, Point, Vec2 as KVec2};
 use crate::canvas_tool::{
     EditorDoc, active_scope_layer_id, cancel_active_drag, clear_selection,
     flush_canvas_before_timeline_op, insert_and_select_shapes_in_scope, load_shapes_from_timeline,
-    mutate_timeline_with_undo, reorder_selected_to_scope_front,
-    select_shapes_for_timeline_selection, sync_shapes_to_timeline, topmost_layer_id_for_indices,
+    reorder_selected_to_scope_front, select_shapes_for_timeline_selection, sync_shapes_to_timeline,
+    topmost_layer_id_for_indices,
 };
 use crate::symbol::{
     SymbolEditSession, SymbolEvalCtx, SymbolInstanceBinding, SymbolLoopMode, TweenRotate,
@@ -77,14 +77,12 @@ pub(crate) fn convert_selection_to_symbol(doc: &mut EditorDoc) -> Option<u64> {
         }
     }
 
+    reorder_selected_to_scope_front(doc);
+    doc.commit_canvas_mutation(snapshot);
+    doc.symbols.register_new_symbol(local_shapes);
     if let Some(l_idx) = doc.timeline.layer_index_by_id(target_lid) {
         doc.timeline.active_layer = l_idx;
     }
-    let snapshot = doc.canvas.take_unsliced_snapshot().unwrap_or(snapshot);
-    doc.record_undo_snapshot(snapshot);
-    doc.symbols.register_new_symbol(local_shapes);
-    reorder_selected_to_scope_front(doc);
-    sync_shapes_to_timeline(doc);
     doc.canvas.selection_modified = false;
     doc.canvas.transform_pivot = None;
     doc.ui.inspect_timeline_frame = false;
@@ -112,50 +110,51 @@ pub(crate) fn place_symbol_instance_from_library(doc: &mut EditorDoc, symbol_id:
         union_bounding_boxes(&first_shapes).center()
     };
 
-    doc.mutate_canvas_with_undo(true, |doc| {
-        let inst_gid = doc.symbols.alloc_group_id();
-        let stage_center = doc.viewport.stage_center_world();
-        let offset = stage_center - first_bbox_center.to_vec2();
-        let binding = SymbolInstanceBinding::new(
-            inst_gid,
-            symbol_id,
-            Affine::translate(KVec2::new(offset.x, offset.y)),
-        );
-        let target_lid = active_scope_layer_id(&doc.canvas, &doc.timeline);
-        let curr_frame = doc.timeline.current_frame;
-        let kf_start = doc
-            .timeline
-            .layer_index_by_id(target_lid)
-            .and_then(|l_idx| {
-                doc.timeline.layers[l_idx]
-                    .keyframe_index_at(curr_frame)
-                    .map(|ki| doc.timeline.layers[l_idx].keyframes[ki].start_frame)
-            })
-            .unwrap_or(curr_frame);
-        let sym_shapes = doc
-            .symbols
-            .find_symbol(symbol_id)
-            .map(|s| {
-                s.evaluated_local_shapes_for_instance(
-                    binding,
-                    kf_start,
-                    curr_frame,
-                    SymbolEvalCtx::new(&doc.symbols.library),
-                )
-            })
-            .unwrap_or_default();
-
-        let placed = if !sym_shapes.is_empty() {
-            binding.instantiate_shapes(&sym_shapes, target_lid, &doc.canvas.editing_group_path)
-        } else {
-            vec![FillShape::new_empty_symbol_marker(
+    clear_selection(doc);
+    let snapshot = doc.canvas.take_or_clone_unsliced_snapshot();
+    let inst_gid = doc.symbols.alloc_group_id();
+    let stage_center = doc.viewport.stage_center_world();
+    let offset = stage_center - first_bbox_center.to_vec2();
+    let binding = SymbolInstanceBinding::new(
+        inst_gid,
+        symbol_id,
+        Affine::translate(KVec2::new(offset.x, offset.y)),
+    );
+    let target_lid = active_scope_layer_id(&doc.canvas, &doc.timeline);
+    let curr_frame = doc.timeline.current_frame;
+    let kf_start = doc
+        .timeline
+        .layer_index_by_id(target_lid)
+        .and_then(|l_idx| {
+            doc.timeline.layers[l_idx]
+                .keyframe_index_at(curr_frame)
+                .map(|ki| doc.timeline.layers[l_idx].keyframes[ki].start_frame)
+        })
+        .unwrap_or(curr_frame);
+    let sym_shapes = doc
+        .symbols
+        .find_symbol(symbol_id)
+        .map(|s| {
+            s.evaluated_local_shapes_for_instance(
                 binding,
-                target_lid,
-                &doc.canvas.editing_group_path,
-            )]
-        };
-        insert_and_select_shapes_in_scope(doc, placed, false);
-    });
+                kf_start,
+                curr_frame,
+                SymbolEvalCtx::new(&doc.symbols.library),
+            )
+        })
+        .unwrap_or_default();
+
+    let placed = if !sym_shapes.is_empty() {
+        binding.instantiate_shapes(&sym_shapes, target_lid, &doc.canvas.editing_group_path)
+    } else {
+        vec![FillShape::new_empty_symbol_marker(
+            binding,
+            target_lid,
+            &doc.canvas.editing_group_path,
+        )]
+    };
+    insert_and_select_shapes_in_scope(doc, placed, false);
+    doc.commit_canvas_mutation(snapshot);
     true
 }
 
@@ -173,12 +172,12 @@ pub(crate) fn rename_symbol_in_library(
     {
         return false;
     }
-    if doc.symbols.actively_renaming_symbol != Some(symbol_id) {
+    if doc.ui.actively_renaming_symbol != Some(symbol_id) {
         doc.push_undo();
     }
     let renamed = doc.symbols.rename_symbol(symbol_id, new_name);
     if renamed {
-        doc.symbols.actively_renaming_symbol = Some(symbol_id);
+        doc.ui.actively_renaming_symbol = Some(symbol_id);
     }
     renamed
 }
@@ -274,13 +273,15 @@ pub(crate) fn set_active_keyframe_tween_rotate(
         return false;
     }
 
-    mutate_timeline_with_undo(doc, |tl| {
-        if let Some(layer_mut) = tl.layers.get_mut(tl.active_layer) {
-            if let Some(kf) = layer_mut.keyframes.get_mut(kf_idx) {
-                kf.tween_rotate = rotate_mode;
-            }
+    flush_canvas_before_timeline_op(doc);
+    doc.push_undo();
+    if let Some(layer_mut) = doc.timeline.layers.get_mut(doc.timeline.active_layer) {
+        if let Some(kf) = layer_mut.keyframes.get_mut(kf_idx) {
+            kf.tween_rotate = rotate_mode;
         }
-    });
+    }
+    doc.symbols.sync_active_edit(&doc.timeline);
+    load_shapes_from_timeline(doc);
     select_shapes_for_timeline_selection(doc);
     doc.ui.inspect_timeline_frame = true;
     true

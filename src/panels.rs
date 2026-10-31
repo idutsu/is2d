@@ -166,10 +166,12 @@ pub(crate) enum UiAction {
     PlaceSymbolFromLibrary(u64),
     EnterSymbolFromLibrary(u64),
     DeleteSymbolFromLibrary(u64),
+    SelectLibrarySymbol(u64),
     RenameSymbolInLibrary {
         sym_id: u64,
         new_name: String,
     },
+    FinishRenamingSymbol(u64),
 }
 
 // ============================================================================
@@ -1557,7 +1559,7 @@ fn draw_selected_library_symbol_controls(
 
 /// ライブラリ登録シンボルのスクロール一覧を描画し、選択切替・名前変更コマンドを発行する
 fn draw_library_symbol_list(
-    doc: &mut EditorDoc,
+    doc: &EditorDoc,
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
 ) {
@@ -1567,6 +1569,7 @@ fn draw_library_symbol_list(
         .iter()
         .map(|s| (s.id, s.name.clone(), s.timeline.total_frames.max(1)))
         .collect();
+    let mut select_req: Option<u64> = None;
     let mut rename_req: Option<(u64, String)> = None;
     let mut clear_renaming_id: Option<u64> = None;
 
@@ -1603,14 +1606,14 @@ fn draw_library_symbol_list(
                                     .on_hover_text("クリックして選択")
                                     .clicked()
                                 {
-                                    doc.symbols.selected_library_symbol = Some(sym_id);
+                                    select_req = Some(sym_id);
                                 }
                                 let text_w = (ui.available_width() - 36.0).max(60.0);
                                 let resp = ui.add(
                                     egui::TextEdit::singleline(&mut name).desired_width(text_w),
                                 );
                                 if resp.clicked() || resp.gained_focus() {
-                                    doc.symbols.selected_library_symbol = Some(sym_id);
+                                    select_req = Some(sym_id);
                                 }
                                 if resp.changed() {
                                     rename_req = Some((sym_id, name));
@@ -1635,13 +1638,14 @@ fn draw_library_symbol_list(
             }
         });
 
+    if let Some(sym_id) = select_req {
+        actions.push(UiAction::SelectLibrarySymbol(sym_id));
+    }
     if let Some((sym_id, new_name)) = rename_req {
         actions.push(UiAction::RenameSymbolInLibrary { sym_id, new_name });
     }
     if let Some(finished_id) = clear_renaming_id {
-        if doc.symbols.actively_renaming_symbol == Some(finished_id) {
-            doc.symbols.actively_renaming_symbol = None;
-        }
+        actions.push(UiAction::FinishRenamingSymbol(finished_id));
     }
 }
 
@@ -1657,8 +1661,22 @@ fn draw_symbol_mini_preview(doc: &EditorDoc, ui: &mut egui::Ui, sym: &SymbolDef)
         Stroke::new(1.0_f32, Color32::from_rgb(206, 212, 222)),
     );
 
-    if let Some((mesh, origin_scr)) =
-        sym.cached_mini_preview(rect, doc.symbols.revision, &doc.symbols.library)
+    let Some(bbox) = sym.preview_local_bounds(doc.symbols.revision, &doc.symbols.library) else {
+        return;
+    };
+    let w = (bbox.x1 - bbox.x0).max(1.0) as f32;
+    let h = (bbox.y1 - bbox.y0).max(1.0) as f32;
+    let pad = 14.0;
+    let avail_w = (rect.width() - pad * 2.0).max(10.0);
+    let avail_h = (rect.height() - pad * 2.0).max(10.0);
+    let scale = (avail_w / w).min(avail_h / h).clamp(0.05, 4.0);
+    let cx = ((bbox.x0 + bbox.x1) * 0.5) as f32;
+    let cy = ((bbox.y0 + bbox.y1) * 0.5) as f32;
+    let pan = rect.center().to_vec2() - Vec2::new(cx * scale, cy * scale);
+    let origin_scr = Pos2::new(pan.x, pan.y);
+
+    if let Some(mesh) =
+        sym.cached_preview_screen_mesh(scale, pan, doc.symbols.revision, &doc.symbols.library)
     {
         painter.add(arc_mesh_to_shape(mesh));
         if rect.contains(origin_scr) {

@@ -18,6 +18,9 @@ pub(crate) const REFERENCE_BRUSH_RADIUS: f64 = 8.0;
 pub(crate) const MIN_VIEW_ZOOM: f32 = 0.15;
 pub(crate) const MAX_VIEW_ZOOM: f32 = 16.0;
 
+/// 1輪郭（`Contour`）あたりの最大許容ベジェセグメント数
+pub(crate) const MAX_CONTOUR_SEGMENTS: usize = 100_000;
+
 /// シンボルインスタンスのフレーム再生モード（Adobe Animate のグラフィックシンボル相当）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) enum SymbolLoopMode {
@@ -272,7 +275,7 @@ impl Contour {
 
     /// 指定セグメント `seg_idx` のパラメータ位置 `t` を De Casteljau 分割し、形状を一切変えずに新しいアンカーを追加する
     pub(crate) fn insert_anchor_at(&mut self, seg_idx: usize, t: f64) -> bool {
-        if seg_idx >= self.segments.len() {
+        if seg_idx >= self.segments.len() || self.segments.len() >= MAX_CONTOUR_SEGMENTS {
             return false;
         }
         let t_clamped = t.clamp(0.08, 0.92);

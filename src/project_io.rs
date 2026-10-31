@@ -13,8 +13,9 @@ use crate::clipboard_ops::max_group_id_in_timeline;
 use crate::symbol::{
     SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode, SymbolManager, TweenRotate,
 };
-pub(crate) use crate::timeline::MAX_TIMELINE_FRAMES;
+pub(crate) use crate::timeline::{MAX_LAYERS_PER_TIMELINE, MAX_TIMELINE_FRAMES};
 use crate::timeline::{Cel, Keyframe, Layer, Timeline, TimelineCellSelection};
+pub(crate) use crate::vector_engine::MAX_CONTOUR_SEGMENTS;
 use crate::vector_engine::{Contour, FillShape};
 
 /// `.is2d` プロジェクトファイルの現在のフォーマットバージョン
@@ -25,12 +26,6 @@ pub(crate) const PROJECT_FILE_EXTENSION: &str = "is2d";
 
 /// 読み込み可能なプロジェクトファイルの最大バイト数（100MB：異常な巨大ファイルによるOOM防止）
 pub(crate) const MAX_PROJECT_FILE_BYTES: u64 = 100 * 1024 * 1024;
-
-/// 1タイムラインあたりの最大許容レイヤー数
-pub(crate) const MAX_LAYERS_PER_TIMELINE: usize = 1_000;
-
-/// 1輪郭（Contour）あたりの最大許容ベジェセグメント数
-pub(crate) const MAX_CONTOUR_SEGMENTS: usize = 100_000;
 
 /// 読み込み時に許容するエンティティID（`layer_id` / `symbol_id` / `group_id` / `instance_gid`）の最大安全値
 /// （`u64::MAX` 付近の細工IDによる `saturating_add` 衝突を防止するため、上限を超えるIDは読み込み時に安全な連番へ再採番する）
@@ -213,7 +208,7 @@ fn prepare_active_tab_for_switch_or_save(doc: &mut EditorDoc, flush_raw_merge: b
     cancel_active_drag(doc);
     doc.viewport.pan_last_screen_pos = None;
     doc.viewport.editing_stage_size = false;
-    doc.symbols.actively_renaming_symbol = None;
+    doc.ui.actively_renaming_symbol = None;
     doc.ui.editing_symbol_playback = false;
 
     if flush_raw_merge && doc.canvas.selection_modified && !doc.canvas.selected_shapes.is_empty() {
@@ -1333,7 +1328,6 @@ impl ProjectDocument {
             library,
             next_symbol_id: raw_next_sym_id.max(max_sym_id.saturating_add(1)).max(1),
             selected_library_symbol,
-            actively_renaming_symbol: None,
             edit_stack: Vec::new(),
             next_group_id: raw_next_gid.max(max_gid.saturating_add(1)).max(1),
             revision: crate::vector_engine::next_mesh_revision(),
@@ -1537,14 +1531,20 @@ pub(crate) fn save_project_to_path(
         ));
     }
 
+    let target_path = if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
     let tmp_name = format!(
         ".{}.{}.tmp",
-        path.file_name()
+        target_path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("project.is2d"),
         std::process::id()
     );
-    let tmp_path = path.with_file_name(tmp_name);
+    let tmp_path = target_path.with_file_name(tmp_name);
     let write_res = (|| -> std::io::Result<()> {
         use std::io::Write;
         let mut file = std::fs::File::create(&tmp_path)?;
@@ -1557,12 +1557,12 @@ pub(crate) fn save_project_to_path(
         return Err(format!("一時ファイルの書き込みに失敗しました: {e}"));
     }
 
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
+    if let Err(e) = std::fs::rename(&tmp_path, &target_path) {
         let _ = std::fs::remove_file(&tmp_path);
         restore_pre_save_state(ws.doc_mut(), pre_save_state);
         return Err(format!("ファイルの保存に失敗しました: {e}"));
     }
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = target_path.parent() {
         if let Ok(dir_file) = std::fs::File::open(parent) {
             let _ = dir_file.sync_all();
         }

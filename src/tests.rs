@@ -2138,7 +2138,9 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
     let tail_mesh = crate::vector_engine::tessellate_raw_polygon(&tail_outline, Color32::BLACK);
     app.canvas.drag = crate::canvas_tool::ActiveCanvasDrag::PaintStroke {
         stroke,
-        committed_mesh: egui::Mesh::default(),
+        committed_world_mesh: egui::Mesh::default(),
+        committed_screen_mesh: egui::Mesh::default(),
+        committed_zoom_pan: (1.0, Vec2::ZERO),
         tail_outline,
         tail_mesh,
         tail_start_idx: 0,
@@ -2316,18 +2318,24 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     let sel_m1 = sym_app.canvas.shapes[0].cached_selection_screen_mesh(1.25, Vec2::new(12.0, -8.0));
     let sel_m2 = sym_app.canvas.shapes[0].cached_selection_screen_mesh(1.25, Vec2::new(12.0, -8.0));
     assert!(std::sync::Arc::ptr_eq(&sel_m1, &sel_m2));
-    let preview_rect =
-        eframe::egui::Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(200.0, 110.0));
-    let (prev_m1, orig1) = sym_app.symbols.library[0]
-        .cached_mini_preview(
-            preview_rect,
+    let orig1 = sym_app.symbols.library[0]
+        .preview_local_bounds(sym_app.symbols.revision, &sym_app.symbols.library)
+        .unwrap();
+    let prev_m1 = sym_app.symbols.library[0]
+        .cached_preview_screen_mesh(
+            1.0,
+            Vec2::new(100.0, 55.0),
             sym_app.symbols.revision,
             &sym_app.symbols.library,
         )
         .unwrap();
-    let (prev_m2, orig2) = sym_app.symbols.library[0]
-        .cached_mini_preview(
-            preview_rect,
+    let orig2 = sym_app.symbols.library[0]
+        .preview_local_bounds(sym_app.symbols.revision, &sym_app.symbols.library)
+        .unwrap();
+    let prev_m2 = sym_app.symbols.library[0]
+        .cached_preview_screen_mesh(
+            1.0,
+            Vec2::new(100.0, 55.0),
             sym_app.symbols.revision,
             &sym_app.symbols.library,
         )
@@ -2961,15 +2969,26 @@ fn test_micro_shapes_boolean_union_and_difference_at_16x_zoom() {
     let micro_a = build_smoothed_stroke_shapes_at_zoom(&micro_raw_a, red, 16.0);
     let micro_b = build_smoothed_stroke_shapes_at_zoom(&micro_raw_b, Color32::BLUE, 16.0);
     assert!(!micro_a.is_empty() && !micro_b.is_empty());
+    let area_a: f64 = micro_a.iter().map(|s| s.exterior.signed_area()).sum();
+    let area_b: f64 = micro_b.iter().map(|s| s.exterior.signed_area()).sum();
     let micro_union = crate::vector_boolean::boolean_operation(
         &micro_a,
         &micro_b,
         crate::vector_boolean::BoolOp::Union,
         red,
     );
+    let area_union: f64 = micro_union.iter().map(|s| s.exterior.signed_area()).sum();
     assert!(
-        !micro_union.is_empty(),
-        "1600%拡大時の極小シェイプ同士の Union が min_area フィルタで消失しないこと"
+        !micro_union.is_empty()
+            && area_union > area_a
+            && area_union > area_b
+            && micro_union
+                .iter()
+                .any(|s| s.contains_point(Point::new(100.0, 100.0)))
+            && micro_union
+                .iter()
+                .any(|s| s.contains_point(Point::new(100.15, 100.09))),
+        "1600%拡大時の極小シェイプ同士の Union が両方の領域を包含し面積が増加していること"
     );
     let micro_diff = crate::vector_boolean::boolean_operation(
         &micro_a,
@@ -2977,9 +2996,17 @@ fn test_micro_shapes_boolean_union_and_difference_at_16x_zoom() {
         crate::vector_boolean::BoolOp::Difference,
         red,
     );
+    let area_diff: f64 = micro_diff.iter().map(|s| s.exterior.signed_area()).sum();
     assert!(
-        !micro_diff.is_empty(),
-        "1600%拡大時の極小シェイプ同士の Difference が消失せず正確に切り抜かれること"
+        !micro_diff.is_empty()
+            && area_diff < area_a * 0.95
+            && micro_diff
+                .iter()
+                .any(|s| s.contains_point(Point::new(100.0, 100.0)))
+            && !micro_diff
+                .iter()
+                .any(|s| s.contains_point(Point::new(100.15, 100.0))),
+        "1600%拡大時の極小シェイプ同士の Difference で交差中央部が実際に切り抜かれ面積が減少していること"
     );
 }
 
@@ -4202,7 +4229,7 @@ fn test_symbol_rename_consecutive_keystrokes_grouped_into_single_undo() {
     assert!(tool_transform::rename_symbol_in_library(&mut app, sym_id, "H"));
     app.symbols.ensure_valid_selection();
     assert_eq!(
-        app.symbols.actively_renaming_symbol,
+        app.ui.actively_renaming_symbol,
         Some(sym_id),
         "毎フレームの ensure_valid_selection 呼び出しで actively_renaming_symbol が消去されないこと"
     );
@@ -4767,7 +4794,47 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
         app.canvas.paste_count, 2,
         "OS クリップボードが空で押下イベントが吸収されても Cmd+V リリース時にペーストされること (#15)"
     );
-    assert_eq!(app.canvas.shapes.len(), 2);
+    assert!(
+        (app.canvas.shapes[1].bounding_box().center().x - (140.0 + 32.0)).abs() < 2.0,
+        "2回目のペースト図形が +32px オフセット位置に実際に配置されていること (#15)"
+    );
+
+    // V より先に Cmd を離した場合でも直前フレームの Cmd 猶予により V リリース時にペーストされること (#15)
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            modifiers: cmd_mods_v,
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            modifiers: egui::Modifiers::NONE,
+            events: vec![egui::Event::Key {
+                key: egui::Key::V,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert_eq!(
+        app.canvas.paste_count, 3,
+        "V より先に Cmd を離した場合でも V キーリリースでペーストされること (#15)"
+    );
+    assert!(
+        (app.canvas.shapes[1].bounding_box().center().x - (140.0 + 48.0)).abs() < 2.0,
+        "3回目のペースト図形が +48px オフセット位置に実際に配置されていること (#15)"
+    );
 
     // 2. F8 初回押下でシンボルが1つ作成され、直後のフレームで F8 長押しリピートイベントが来ても2重にシンボル化されないこと
     let _ = ctx.run(
@@ -6844,6 +6911,102 @@ fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape_scale_handles() {
+    // 1. #6: 異なる色の斜めストローク同士で AABB は重なるが実際の幾何形状は交差していない場合、
+    // merge_shapes_into_canvas で既存図形が不要に再構築されず shape_id・mesh_revision・Arc<Mesh> が維持されること
+    let mut canvas = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(200.0, 200.0),
+        6.0,
+        Color32::RED,
+    );
+    let orig_id = canvas[0].shape_id;
+    let orig_rev = canvas[0].mesh_revision;
+    let orig_mesh = std::sync::Arc::clone(canvas[0].fill_mesh());
+
+    // AABB ([100..200, 100..200]) の右上隅 (180, 110)->(195, 125) に青ストロークを追加（赤の対角線とは交差しない）
+    let non_intersecting_blue = make_stroke(
+        Point::new(180.0, 110.0),
+        Point::new(195.0, 125.0),
+        4.0,
+        Color32::BLUE,
+    );
+    assert!(vector_engine::rects_overlap(
+        canvas[0].bounding_box(),
+        non_intersecting_blue[0].bounding_box()
+    ));
+    vector_boolean::merge_shapes_into_canvas(&mut canvas, non_intersecting_blue);
+    assert_eq!(canvas.len(), 2);
+    assert_eq!(
+        canvas[0].shape_id, orig_id,
+        "AABBのみ重なり実交差しない異色図形の shape_id が再構築で変化しないこと (#6)"
+    );
+    assert_eq!(canvas[0].mesh_revision, orig_rev);
+    assert!(std::sync::Arc::ptr_eq(canvas[0].fill_mesh(), &orig_mesh));
+
+    // 2. #14: 12px 未満の極小図形でも四隅のスケールハンドル直上では Pivot ではなく Scale ハンドルが優先ヒットすること
+    let mut app = Is2dApp::default();
+    app.canvas.shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(104.0, 100.0),
+        2.0,
+        Color32::RED,
+    );
+    app.canvas.selected_shapes = vec![0];
+    let bbox = app.canvas.selection_bounding_box(1.0).unwrap();
+    let top_left = tool_transform::ScaleHandle::TopLeft.position(bbox);
+    let hover = tool_transform::compute_transform_hover(&app.canvas, top_left, 1.0);
+    assert_eq!(
+        hover,
+        tool_transform::TransformHoverTarget::Scale(tool_transform::ScaleHandle::TopLeft),
+        "小さな図形の四隅ハンドル座標では Pivot に遮られず Scale(TopLeft) がヒットすること (#14)"
+    );
+
+    // 3. #11: レイヤー数上限 (MAX_LAYERS_PER_TIMELINE = 1000) を超えて timeline_add_layer されないこと
+    let mut tl = timeline::Timeline::default();
+    for i in 1..project_io::MAX_LAYERS_PER_TIMELINE {
+        tl.layers
+            .push(timeline::Layer::new_with_id((i + 1) as u64, "L"));
+    }
+    assert_eq!(tl.layers.len(), project_io::MAX_LAYERS_PER_TIMELINE);
+    tl.add_layer_above_active();
+    assert_eq!(
+        tl.layers.len(),
+        project_io::MAX_LAYERS_PER_TIMELINE,
+        "編集時も MAX_LAYERS_PER_TIMELINE (1000) を超えてレイヤーが追加されないこと (#11)"
+    );
+
+    // 4. #13: シンボリックリンク先への保存時にリンク自体を壊さずリンク先実体ファイルを更新すること
+    #[cfg(unix)]
+    {
+        let target_path = std::env::temp_dir().join(format!(
+            "is2d_symlink_target_{}.is2d",
+            std::process::id()
+        ));
+        let link_path =
+            std::env::temp_dir().join(format!("is2d_symlink_link_{}.is2d", std::process::id()));
+        let _ = std::fs::remove_file(&target_path);
+        let _ = std::fs::remove_file(&link_path);
+        std::fs::write(&target_path, "{}").unwrap();
+        std::os::unix::fs::symlink(&target_path, &link_path).unwrap();
+
+        project_io::save_project_to_path(&mut app, &link_path).unwrap();
+        let link_meta = std::fs::symlink_metadata(&link_path).unwrap();
+        assert!(
+            link_meta.file_type().is_symlink(),
+            "シンボリックリンク経由で保存してもシンボリックリンク自体が通常ファイルに置換されないこと (#13)"
+        );
+        let target_content = std::fs::read_to_string(&target_path).unwrap();
+        assert!(
+            target_content.contains("\"version\":1"),
+            "シンボリックリンクの実体ファイル側が最新の内容に更新されること (#13)"
+        );
+        let _ = std::fs::remove_file(&link_path);
+        let _ = std::fs::remove_file(&target_path);
     }
 }
 

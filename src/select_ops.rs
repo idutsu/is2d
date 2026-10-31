@@ -81,12 +81,7 @@ pub(crate) fn retain_selection_and_flush_deselected(doc: &mut EditorDoc, keep_in
                 .is_some_and(|s| s.is_raw_at_scope(&doc.canvas.editing_group_path))
         });
         if !any_raw_kept {
-            if let Some(mut unsliced) = doc.canvas.take_unsliced_snapshot() {
-                doc.canvas.salvage_caches_into(&mut unsliced);
-                let keep_ids = doc.canvas.selected_shape_ids();
-                doc.canvas.shapes = unsliced;
-                doc.canvas.restore_selection_by_shape_ids(&keep_ids);
-            }
+            doc.canvas.restore_unsliced_preserving_selection();
         }
     }
     doc.canvas.transform_pivot = None;
@@ -670,10 +665,11 @@ pub(crate) fn clear_active_frame_shapes(doc: &mut EditorDoc) -> bool {
     if !has_any_in_scope {
         return false;
     }
-    doc.mutate_canvas_with_undo(true, |doc| {
-        doc.canvas
-            .shapes
-            .retain(|s| !s.is_in_editing_scope(&doc.canvas.editing_group_path));
-    });
+    clear_selection(doc);
+    let snapshot = doc.canvas.take_or_clone_unsliced_snapshot();
+    doc.canvas
+        .shapes
+        .retain(|s| !s.is_in_editing_scope(&doc.canvas.editing_group_path));
+    doc.commit_canvas_mutation(snapshot);
     true
 }

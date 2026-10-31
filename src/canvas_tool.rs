@@ -332,7 +332,9 @@ pub(crate) enum ActiveCanvasDrag {
     None,
     PaintStroke {
         stroke: Vec<Point>,
-        committed_mesh: egui::Mesh,
+        committed_world_mesh: egui::Mesh,
+        committed_screen_mesh: egui::Mesh,
+        committed_zoom_pan: (f32, Vec2),
         tail_outline: Vec<Point>,
         tail_mesh: egui::Mesh,
         tail_start_idx: usize,
@@ -576,14 +578,20 @@ impl ViewportState {
             }
         }
 
-        let (space_down, middle_down, primary_down) = ui.input(|i| {
+        let wants_kb = ui.ctx().wants_keyboard_input();
+        let (space_down, middle_down, primary_down, press_origin) = ui.input(|i| {
             (
-                i.key_down(Key::Space),
+                !wants_kb && i.key_down(Key::Space),
                 i.pointer.middle_down(),
                 i.pointer.primary_down(),
+                i.pointer.press_origin(),
             )
         });
-        let pan_gesture_active = middle_down || (space_down && primary_down);
+        let started_in_canvas = press_origin
+            .or(pointer_pos)
+            .is_some_and(|p| canvas_rect.contains(p));
+        let pan_gesture_active = (middle_down || (space_down && primary_down))
+            && (self.pan_last_screen_pos.is_some() || started_in_canvas);
         if pan_gesture_active {
             is_panning = true;
             if let Some(pos) = pointer_pos {
@@ -645,6 +653,8 @@ pub(crate) struct CanvasState {
     pub(crate) clipboard_imported_map: HashMap<(u64, u64), u64>,
     /// `Cmd+V` 押下時に `Event::Paste` または `Key::V` (pressed) で既にペーストを実行済みかのフラグ（OSクリップボード空時のキーリリースフォールバック二重発火防止用）
     pub(crate) paste_triggered_on_press: bool,
+    /// 直近フレームで `Cmd`/`Ctrl` 修飾キーが押されていた猶予フレーム数（`V` より先に `Cmd` を離した場合のフォールバック用）
+    pub(crate) cmd_held_grace_frames: u8,
     /// `Cmd+V` による通常ペーストの連続回数（少しずつずらして配置するためのカウンタ）
     pub(crate) paste_count: usize,
     /// `Cmd+V` による通常ペーストの累積ワールド座標オフセット（途中でズーム変更しても階段状にずらす用）
@@ -740,6 +750,18 @@ impl CanvasState {
                 }
             }
         }
+    }
+
+    /// 矩形スライス前のキャンバス状態があれば、描画キャッシュと選択シェイプIDを維持したまま `self.shapes` へ復元し `true` を返す
+    pub(crate) fn restore_unsliced_preserving_selection(&mut self) -> bool {
+        let Some(mut unsliced) = self.unsliced_canvas.take() else {
+            return false;
+        };
+        self.salvage_caches_into(&mut unsliced);
+        let selected_ids = self.selected_shape_ids();
+        self.shapes = unsliced;
+        self.restore_selection_by_shape_ids(&selected_ids);
+        true
     }
 
     /// 矩形スライス前のキャンバス状態があれば取り出し（既存キャッシュを引き継ぎ）、なければ現在の `self.shapes` をクローンして返す
@@ -1392,6 +1414,8 @@ pub(crate) struct AppUiState {
     pub(crate) inspect_timeline_frame: bool,
     /// シンボル再生オプションの開始/表示フレーム数値フィールドを連続編集（ドラッグ/入力）中かどうか
     pub(crate) editing_symbol_playback: bool,
+    /// ライブラリ一覧の `TextEdit` で現在名前編集中のシンボルID（連続タイピング時にUndoを1回だけ記録する用）
+    pub(crate) actively_renaming_symbol: Option<u64>,
     /// 現在開いている・保存先の `.is2d` プロジェクトファイルパス（未保存の新規ドキュメント時は `None`）
     pub(crate) current_file_path: Option<PathBuf>,
     /// 操作トリガーで一定時間表示するトースト通知メッセージ
@@ -1412,6 +1436,7 @@ impl Default for AppUiState {
             onion_next_frames: 2,
             inspect_timeline_frame: false,
             editing_symbol_playback: false,
+            actively_renaming_symbol: None,
             current_file_path: None,
             status_toast: None,
         }
@@ -1476,7 +1501,7 @@ impl EditorDoc {
 
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
         self.viewport.editing_stage_size = false;
-        self.symbols.actively_renaming_symbol = None;
+        self.ui.actively_renaming_symbol = None;
         self.ui.editing_symbol_playback = false;
         let (prev_lib, prev_stack, prev_rev) = self.history.snapshot_symbols(&self.symbols);
         let prev_entry = UndoEntry {
@@ -1499,14 +1524,25 @@ impl EditorDoc {
         prev_entry
     }
 
-    pub(crate) fn record_undo_snapshot(&mut self, mut snapshot: Vec<FillShape>) {
-        let mut tl_snap = self.timeline.clone();
-        tl_snap.normalize_shape_layer_ids(&mut snapshot);
-        tl_snap.write_shapes_to_editable_cels(
-            &snapshot,
-            &self.symbols.library,
-            self.canvas.loaded_signatures(),
-        );
+    /// Undo履歴への唯一のエントリ記録メソッド。
+    /// - `pre_canvas == Some(fallback)`: キャンバス変更前のスナップショット（未スライス状態があれば自動優先）からUndoエントリを構築
+    /// - `pre_canvas == None`: 現在の未スライス選択状態を復元してタイムラインへ同期した上で現在のタイムラインからUndoエントリを構築
+    fn record_undo(&mut self, pre_canvas: Option<Vec<FillShape>>) {
+        let tl_snap = if let Some(fallback) = pre_canvas {
+            let mut snapshot = self.canvas.take_unsliced_snapshot().unwrap_or(fallback);
+            let mut tl = self.timeline.clone();
+            tl.normalize_shape_layer_ids(&mut snapshot);
+            tl.write_shapes_to_editable_cels(
+                &snapshot,
+                &self.symbols.library,
+                self.canvas.loaded_signatures(),
+            );
+            tl
+        } else {
+            self.canvas.restore_unsliced_preserving_selection();
+            sync_shapes_to_timeline(self);
+            self.timeline.clone()
+        };
         let (library, symbol_edit_stack, symbols_revision) =
             self.history.snapshot_symbols(&self.symbols);
         let entry = UndoEntry {
@@ -1522,52 +1558,13 @@ impl EditorDoc {
     }
 
     pub(crate) fn push_undo(&mut self) {
-        if let Some(mut unsliced) = self.canvas.take_unsliced_snapshot() {
-            let selected_ids = self.canvas.selected_shape_ids();
-            self.timeline.normalize_shape_layer_ids(&mut unsliced);
-            self.canvas.shapes = unsliced;
-            self.canvas.restore_selection_by_shape_ids(&selected_ids);
-            sync_shapes_to_timeline(self);
-        } else {
-            sync_shapes_to_timeline(self);
-        }
-        let (library, symbol_edit_stack, symbols_revision) =
-            self.history.snapshot_symbols(&self.symbols);
-        let entry = UndoEntry {
-            timeline: self.timeline.clone(),
-            library,
-            editing_group_path: self.canvas.editing_group_path.clone(),
-            symbol_edit_stack,
-            stage_size: self.viewport.stage_size,
-            symbols_revision,
-            commit_id: self.history.current_commit_id,
-        };
-        self.history.push(entry);
+        self.record_undo(None);
     }
 
-    /// キャンバス図形に対する変更トランザクションを一括実行する：
-    /// 1. 必要に応じて未確定選択を確定解除 (`clear_selection`)
-    /// 2. 変更前の Undo スナップショットを記録
-    /// 3. `mutate` クロージャでキャンバス図形を更新
-    /// 4. 変更後の図形を現在フレームのタイムライン `Cel` へ自動同期 (`sync_shapes_to_timeline`)
-    pub(crate) fn mutate_canvas_with_undo(
-        &mut self,
-        clear_selection_first: bool,
-        mutate: impl FnOnce(&mut Self),
-    ) {
-        if clear_selection_first {
-            clear_selection(self);
-        }
-        let snapshot = self.canvas.take_or_clone_unsliced_snapshot();
-        self.record_undo_snapshot(snapshot);
-        mutate(self);
-        sync_shapes_to_timeline(self);
-    }
-
-    /// 事前取得済みの変更前スナップショット `pre_mutation_snapshot` を Undo 履歴に記録し、
+    /// 事前取得済みの変更前スナップショット `pre_mutation_snapshot`（未スライス状態があれば自動優先）を Undo 履歴に記録し、
     /// 現在の `self.canvas.shapes` をタイムライン `Cel` へ自動同期する単一コミットAPI
     pub(crate) fn commit_canvas_mutation(&mut self, pre_mutation_snapshot: Vec<FillShape>) {
-        self.record_undo_snapshot(pre_mutation_snapshot);
+        self.record_undo(Some(pre_mutation_snapshot));
         sync_shapes_to_timeline(self);
     }
 
@@ -1775,7 +1772,7 @@ pub(crate) fn flush_canvas_before_timeline_op(doc: &mut EditorDoc) {
 }
 
 /// 作業キャンバスを確定同期し、Undo履歴を記録した上でタイムライン変更処理 `mutate` を実行し、完了後に `doc.canvas.shapes` を再読み込みする
-pub(crate) fn mutate_timeline_with_undo(doc: &mut EditorDoc, mutate: impl FnOnce(&mut Timeline)) {
+fn mutate_timeline_with_undo(doc: &mut EditorDoc, mutate: impl FnOnce(&mut Timeline)) {
     flush_canvas_before_timeline_op(doc);
     doc.push_undo();
     mutate(&mut doc.timeline);
@@ -1915,12 +1912,7 @@ pub(crate) fn flush_modified_raw_selection_merge(doc: &mut EditorDoc) {
 
 pub(crate) fn clear_selection(doc: &mut EditorDoc) {
     rollback_shape_drag(doc);
-    if let Some(mut unsliced) = doc.canvas.take_unsliced_snapshot() {
-        doc.canvas.salvage_caches_into(&mut unsliced);
-        let selected_ids = doc.canvas.selected_shape_ids();
-        doc.canvas.shapes = unsliced;
-        doc.canvas.restore_selection_by_shape_ids(&selected_ids);
-    }
+    doc.canvas.restore_unsliced_preserving_selection();
     if doc.canvas.selection_modified && !doc.canvas.selected_shapes.is_empty() {
         flush_modified_raw_selection_merge(doc);
     }
@@ -2023,9 +2015,8 @@ pub(crate) fn commit_moved_selection(doc: &mut EditorDoc, undo_snapshot: Vec<Fil
     if !reorder_selected_to_scope_front(doc) {
         return;
     }
-    let snapshot = doc.canvas.take_unsliced_snapshot().unwrap_or(undo_snapshot);
     doc.canvas.selection_modified = true;
-    doc.commit_canvas_mutation(snapshot);
+    doc.commit_canvas_mutation(undo_snapshot);
 }
 
 /// 選択オブジェクトの平行移動ドラッグ終了時の確定・ロールバック共通処理
@@ -2212,6 +2203,9 @@ pub(crate) fn set_layer_locked(doc: &mut EditorDoc, layer_idx: usize, locked: bo
 
 /// 新しいレイヤーを現在のアクティブレイヤーの1つ上（前面）に追加する
 pub(crate) fn timeline_add_layer(doc: &mut EditorDoc) {
+    if doc.timeline.layers.len() >= crate::timeline::MAX_LAYERS_PER_TIMELINE {
+        return;
+    }
     mutate_timeline_with_undo(doc, Timeline::add_layer_above_active);
 }
 

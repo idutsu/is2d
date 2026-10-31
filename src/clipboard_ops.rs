@@ -5,7 +5,8 @@ use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
     EditorDoc, MoveSelectionDrag, active_scope_layer_id, cancel_active_drag, clear_selection,
-    insert_and_select_shapes_in_scope, sync_timeline_layer_from_canvas_selection,
+    insert_and_select_shapes_in_scope, sync_shapes_to_timeline,
+    sync_timeline_layer_from_canvas_selection,
 };
 use crate::select_ops::delete_selected_shapes;
 use crate::symbol::{SymbolDef, SymbolEvalCtx, SymbolManager};
@@ -594,17 +595,15 @@ pub(crate) fn paste_clipboard(doc: &mut EditorDoc, in_place: bool) -> bool {
         return false;
     }
 
-    doc.mutate_canvas_with_undo(true, |doc| {
-        let (resolved, had_cycle) = resolve_clipboard_for_paste(doc);
-        if had_cycle {
-            doc.notify_warning(
-                "編集中のシンボル自身や親シンボルは循環参照になるため配置できません",
-            );
-        }
-        if resolved.is_empty() {
-            return;
-        }
-
+    clear_selection(doc);
+    doc.push_undo();
+    let (resolved, had_cycle) = resolve_clipboard_for_paste(doc);
+    if had_cycle {
+        doc.notify_warning(
+            "編集中のシンボル自身や親シンボルは循環参照になるため配置できません",
+        );
+    }
+    if !resolved.is_empty() {
         let offset = if in_place {
             KVec2::ZERO
         } else {
@@ -629,6 +628,7 @@ pub(crate) fn paste_clipboard(doc: &mut EditorDoc, in_place: bool) -> bool {
             instantiate_relative_shapes_in_scope(doc, &resolved, offset, multi_layer_copy);
 
         insert_and_select_shapes_in_scope(doc, pasted_shapes, any_raw);
-    });
+        sync_shapes_to_timeline(doc);
+    }
     true
 }

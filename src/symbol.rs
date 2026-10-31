@@ -178,11 +178,13 @@ pub(crate) fn transform_layers_with_local_cache(
     (stage_layers, cache)
 }
 
-/// ライブラリパネルのミニプレビュー用バッチメッシュキャッシュのキー（`(sym_revision, library_revision, current_frame, rect_bits)`）と描画データ（`Option<(Arc<Mesh>, Pos2)>`）
-pub(crate) type SymbolMiniPreviewCacheEntry = (
-    (u64, u64, usize, [u32; 4]),
-    Option<(Arc<egui::Mesh>, egui::Pos2)>,
-);
+/// シンボル定義のプレビュー用ローカルキャッシュ（評価済み外接矩形・ワールド座標結合メッシュ・スクリーン変換済みメッシュ）
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SymbolPreviewCache {
+    key: (u64, u64, usize),
+    local_bounds_and_mesh: Option<(kurbo::Rect, egui::Mesh)>,
+    screen_mesh: Option<([u32; 3], Arc<egui::Mesh>)>,
+}
 
 /// ライブラリに登録されたシンボル定義（独自の `Timeline` とローカル基準点 `(0, 0)` を持つ）
 #[derive(Clone, Debug)]
@@ -193,7 +195,7 @@ pub(crate) struct SymbolDef {
     pub(crate) timeline: Timeline,
     /// シンボル定義の変更世代番号（解決済みセルメッシュキャッシュの署名計算用）
     pub(crate) revision: u64,
-    mini_preview_cache: SyncCache<Option<SymbolMiniPreviewCacheEntry>>,
+    mini_preview_cache: SyncCache<Option<SymbolPreviewCache>>,
     dynamic_anim_cache: SyncCache<Option<(u64, u64, bool)>>,
 }
 
@@ -350,55 +352,71 @@ impl SymbolDef {
         *self.dynamic_anim_cache.lock() = None;
     }
 
-    /// ライブラリパネルのミニプレビュー矩形 `rect` に対応するスクリーン変換済み結合 `Arc<Mesh>` と基準点スクリーン座標 `Pos2` をキャッシュ経由で返す
-    pub(crate) fn cached_mini_preview(
-        &self,
-        rect: egui::Rect,
-        library_revision: u64,
-        library: &[SymbolDef],
-    ) -> Option<(Arc<egui::Mesh>, egui::Pos2)> {
-        let key = (
-            self.revision,
-            library_revision,
-            self.timeline.current_frame,
-            [
-                rect.min.x.to_bits(),
-                rect.min.y.to_bits(),
-                rect.max.x.to_bits(),
-                rect.max.y.to_bits(),
-            ],
-        );
-        if let Some((k, cached)) = &*self.mini_preview_cache.lock() {
-            if *k == key {
-                return cached.clone();
-            }
+    fn ensure_preview_local_cache(&self, library_revision: u64, library: &[SymbolDef]) {
+        let key = (self.revision, library_revision, self.timeline.current_frame);
+        if self
+            .mini_preview_cache
+            .lock()
+            .as_ref()
+            .is_some_and(|c| c.key == key)
+        {
+            return;
         }
         let mut shapes = self.evaluated_local_shapes_at(self.timeline.current_frame, library);
         if shapes.is_empty() {
             shapes = self.first_non_empty_local_shapes(library);
         }
-        let result = if shapes.is_empty() {
+        let local_bounds_and_mesh = if shapes.is_empty() {
             None
         } else {
             let bbox = union_bounding_boxes(&shapes);
-            let w = (bbox.x1 - bbox.x0).max(1.0) as f32;
-            let h = (bbox.y1 - bbox.y0).max(1.0) as f32;
-            let pad = 14.0;
-            let avail_w = (rect.width() - pad * 2.0).max(10.0);
-            let avail_h = (rect.height() - pad * 2.0).max(10.0);
-            let scale = (avail_w / w).min(avail_h / h).clamp(0.05, 4.0);
-            let cx = ((bbox.x0 + bbox.x1) * 0.5) as f32;
-            let cy = ((bbox.y0 + bbox.y1) * 0.5) as f32;
-            let pan = rect.center().to_vec2() - egui::Vec2::new(cx * scale, cy * scale);
             let mut batch = egui::Mesh::default();
             for s in &shapes {
-                let scr = transform_mesh_to_screen(s.fill_mesh(), scale, pan, false);
-                append_mesh(&mut batch, &scr);
+                append_mesh(&mut batch, s.fill_mesh());
             }
-            Some((Arc::new(batch), egui::Pos2::new(pan.x, pan.y)))
+            Some((bbox, batch))
         };
-        *self.mini_preview_cache.lock() = Some((key, result.clone()));
-        result
+        *self.mini_preview_cache.lock() = Some(SymbolPreviewCache {
+            key,
+            local_bounds_and_mesh,
+            screen_mesh: None,
+        });
+    }
+
+    /// シンボルプレビュー用のローカル座標外接矩形をキャッシュ経由で返す
+    pub(crate) fn preview_local_bounds(
+        &self,
+        library_revision: u64,
+        library: &[SymbolDef],
+    ) -> Option<kurbo::Rect> {
+        self.ensure_preview_local_cache(library_revision, library);
+        self.mini_preview_cache
+            .lock()
+            .as_ref()
+            .and_then(|c| c.local_bounds_and_mesh.as_ref().map(|(bbox, _)| *bbox))
+    }
+
+    /// 指定された `(scale, pan)` でスクリーン座標へ変換したシンボルプレビュー用結合 `Arc<Mesh>` をキャッシュ経由で返す
+    pub(crate) fn cached_preview_screen_mesh(
+        &self,
+        scale: f32,
+        pan: Vec2,
+        library_revision: u64,
+        library: &[SymbolDef],
+    ) -> Option<Arc<egui::Mesh>> {
+        self.ensure_preview_local_cache(library_revision, library);
+        let scr_key = [scale.to_bits(), pan.x.to_bits(), pan.y.to_bits()];
+        let mut guard = self.mini_preview_cache.lock();
+        let cache = guard.as_mut()?;
+        if let Some((k, mesh)) = &cache.screen_mesh {
+            if *k == scr_key {
+                return Some(Arc::clone(mesh));
+            }
+        }
+        let (_, world_mesh) = cache.local_bounds_and_mesh.as_ref()?;
+        let scr = Arc::new(transform_mesh_to_screen(world_mesh, scale, pan, false));
+        cache.screen_mesh = Some((scr_key, Arc::clone(&scr)));
+        Some(scr)
     }
 
     /// このシンボル自身、または内部の入れ子シンボルが複数フレーム（または先頭フレーム空白）を持つかを再帰判定する
@@ -698,8 +716,6 @@ pub(crate) struct SymbolManager {
     pub(crate) library: Vec<SymbolDef>,
     pub(crate) next_symbol_id: u64,
     pub(crate) selected_library_symbol: Option<u64>,
-    /// ライブラリ一覧の `TextEdit` で現在名前編集中のシンボルID（連続タイピング時にUndoを1回だけ記録する用）
-    pub(crate) actively_renaming_symbol: Option<u64>,
     pub(crate) edit_stack: Vec<SymbolEditSession>,
     pub(crate) next_group_id: u64,
     /// `library` または `edit_stack` の内容変更世代番号（Undo履歴の `Arc` CoW 構造共有用）
@@ -712,7 +728,6 @@ impl Default for SymbolManager {
             library: Vec::new(),
             next_symbol_id: 1,
             selected_library_symbol: None,
-            actively_renaming_symbol: None,
             edit_stack: Vec::new(),
             next_group_id: 1,
             revision: 0,
@@ -835,7 +850,6 @@ impl SymbolManager {
 
     /// Undo / Redo スナップショット復元後に、ライブラリ選択状態の整合性を整える
     pub(crate) fn sync_after_restore(&mut self) {
-        self.actively_renaming_symbol = None;
         self.ensure_valid_selection();
     }
 

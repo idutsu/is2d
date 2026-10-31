@@ -10,6 +10,9 @@ use std::{collections::HashMap, sync::Arc};
 /// タイムラインおよびシンボル内タイムラインの最大許容フレーム数（破損JSONによる巨大ループ防止）
 pub(crate) const MAX_TIMELINE_FRAMES: usize = 100_000;
 
+/// 1タイムラインあたりの最大許容レイヤー数
+pub(crate) const MAX_LAYERS_PER_TIMELINE: usize = 1_000;
+
 /// クラシックトゥイーンの回転方向（Adobe Animate のトゥイーン回転設定相当）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) enum TweenRotate {
@@ -193,7 +196,7 @@ fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64, f64, f64) {
 // 1. タイムラインのデータモデル（Cel / Keyframe / Selection / Layer / Timeline）
 // ============================================================================
 
-const MAX_RESOLVED_CEL_CACHE_ENTRIES: usize = 256;
+const MAX_RESOLVED_CEL_CACHE_ENTRIES: usize = 1024;
 pub(crate) type ResolvedScreenCacheKey = (usize, u32, u32, u32, bool);
 pub(crate) type ResolvedOnionCacheKey = (usize, u32, u32, u32, [u8; 3], u8);
 pub(crate) type LruEntry<K, V> = (K, V, u64);
@@ -1634,8 +1637,11 @@ impl Timeline {
         self.cell_selection = Some(dst_sel);
     }
 
-    /// 新しいレイヤーを現在のアクティブレイヤーの1つ上（前面）に追加して選択する
+    /// 新しいレイヤーを現在のアクティブレイヤーの1つ上（前面）に追加して選択する（上限 `MAX_LAYERS_PER_TIMELINE` を超える場合は追加しない）
     pub(crate) fn add_layer_above_active(&mut self) {
+        if self.layers.len() >= MAX_LAYERS_PER_TIMELINE {
+            return;
+        }
         let name = format!("Layer {}", self.next_layer_number);
         self.next_layer_number = self.next_layer_number.saturating_add(1);
         let mut lid = self.next_layer_id.max(1);
