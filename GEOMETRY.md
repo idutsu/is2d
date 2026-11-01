@@ -72,12 +72,12 @@ flowchart LR
     Reduce --> G1["6. 接線交点射影による\nG1連続化 & ワールド座標復元"]
 ```
 
-### 3.1 スクリーン空間正規化による完全なズーム不変性
+### 3.1 スクリーン空間正規化によるズーム不変性
 100% 表示時と 400%〜1600% 拡大描画時でスムージングの強さやアンカー削減挙動が変わってしまう問題を防ぐため、入力されたワールド座標の輪郭点列 $P_{\text{world}}$ を最初に現在のズーム倍率 $z$ でスクリーン座標（px 単位）へ変換します。
 
 $$P_{\text{screen}} = z \cdot P_{\text{world}}$$
 
-以降の自己交差解消（`simplify_shape`）・ブラシ半径推定・リサンプリング（[`resample_closed_ring_uniform`](./src/vector_stroke.rs)）・平滑化・ベジェ近似のすべてを **スクリーン空間（px 基準）** で実行し、完成した [`Contour`](./src/vector_engine.rs) に最後だけ逆スケール変換 $z^{-1}$ を適用します。これにより、どのズーム倍率で描いても画面上の見た目に完全一致したズーム不変（Bit-for-Bit Zoom Invariant）な結果が得られます。
+以降の自己交差解消（`simplify_shape`）・ブラシ半径推定・リサンプリング（[`resample_closed_ring_uniform`](./src/vector_stroke.rs)）・平滑化・ベジェ近似のすべてを **スクリーン空間（px 基準）** で実行し、完成した [`Contour`](./src/vector_engine.rs) に最後だけ逆スケール変換 $z^{-1}$ を適用します。これにより、どのズーム倍率で描いても画面上の見た目に合わせた実用上同じ形が得られます（2のべき乗以外のズームでは浮動小数点演算の丸めにより $10^{-13}$ 程度の差が出ます）。
 
 ### 3.2 Steiner の管状近傍公式によるブラシ半径推定と小円保護スケーリング
 自己交差解消後のポリゴンリング群（外周＋内周穴）の正味面積 $A_{\text{net}}$ と総周長 $L$ から、[`estimate_brush_radius_from_shape_rings`](./src/vector_stroke.rs) にてスクリーン空間での実効ブラシ半径 $r_{\text{est}}$ を推定します。
@@ -112,13 +112,13 @@ $$\theta_w(i) = \operatorname{atan2}\!\left(\hat{d}_{\text{in}}(i, w) \times \ha
 1. **狭窓平均変位（高周波ジャギー＋大局曲率）**：
    高曲率特徴点からの距離 $d_{\text{hc}}(i)$ に応じて窓幅 $w = \min(d_{\text{hc}}(i), 3)$ を定め、近傍平均への変位ベクトル $\Delta_{\text{narrow}}(i)$ を求めます。
    $$\Delta_{\text{narrow}}(i) = \frac{1}{2w} \sum_{k=1}^{w} \left(D_{i-k} + D_{i+k}\right) - D_i$$
-2. **広窓平均変位（大局曲率ドリフト成分の推定）と差し引き**：
-   より広い窓 $w_{\text{wide}} \le 6$ で $\Delta_{\text{narrow}}$ の移動平均 $\Delta_{\text{wide}}(i)$ を計算し、次式で高周波のピクセル階段ノイズ成分のみを抽出します。
+2. **広窓平均変位（大局曲率ドリフト成分の推定）と減衰付き差し引き**：
+   より広い窓 $w_{\text{wide}} \le 6$ で $\Delta_{\text{narrow}}$ の移動平均 $\Delta_{\text{wide}}(i)$ を計算し、高曲率特徴点付近で減衰する係数 $\operatorname{fade}(i) = \operatorname{clamp}(d_{\text{hc}}(i) / 2.0,\; 0,\; 1)$ を掛けて高周波のピクセル階段ノイズ成分のみを抽出し、1パスあたり係数 $0.50$ で減衰更新します（$D_i \leftarrow D_i + 0.50\,\Delta_{\text{eff}}(i)$）。
    $$\Delta_{\text{eff}}(i) = \left(\Delta_{\text{narrow}}(i) - 1.02 \, \Delta_{\text{wide}}(i)\right) \cdot \operatorname{fade}(i)$$
 3. **サブピクセル変位クランプ（軌道不変保証）**：
    4パスの反復中、元のリサンプリング頂点 $D_i^{(0)}$ からの累積移動距離を最大
-   $$\left\|D_i - D_i^{(0)}\right\| \le 0.45 \cdot r_{\text{scale}} \cdot f_{\text{small}} \quad (\text{標準ブラシで最大 } 0.45\text{ px、小円で最小 } 0.11\text{ px})$$
-   に厳密クランプします。これにより、描いたストロークの軌道や小さな円の形は一切修正されず、マウス座標の整数丸めによるサブピクセルのギザギザだけが滑らかに整えられます。
+   $$\left\|D_i - D_i^{(0)}\right\| \le 0.45 \cdot r_{\text{scale}} \cdot f_{\text{small}} \cdot \operatorname{fade}(i) \quad (\text{標準ブラシで最大 } 0.45\text{ px、小円で最小 } 0.11\text{ px})$$
+   に厳密クランプします。これにより、描いたストロークの軌道や小さな円の形は維持され、マウス座標の整数丸めによるサブピクセルのギザギザだけが滑らかに整えられます。
 
 ### 3.5 弧長中点補間＋最小二乗法のハイブリッド制御点決定
 アンカー区間 $Q_0, Q_1, \dots, Q_{n-1}$（始点 $P_0 = Q_0$、終点 $P_2 = Q_{n-1}$、総弧長 $L$）に1本の2次ベジェ曲線を当てはめる際、[`fit_quad_control_point_with_arc_lengths`](./src/vector_stroke.rs) では以下の2つの制御点を $1:1$ でブレンドします。
@@ -136,13 +136,13 @@ $$\theta_w(i) = \operatorname{atan2}\!\left(\hat{d}_{\text{in}}(i, w) \times \ha
 ### 3.6 ニュートン1ステップ射影誤差と $O(K \cdot M)$ 反復アンカー削減
 [`reduce_outline_anchors_by_quad_fit`](./src/vector_stroke.rs) では、ロックされていない中間アンカー候補 $a_j$ を削除して前後区間 $a_{j-1} \to a_{j+1}$ を1本の `QuadBez` に統合できるかを判定します。
 
-- **変曲点（S字カーブ）棄却ガード**：
-  2次ベジェ曲線は単一セグメント内に変曲点を持てないため、弦 $P_0 P_2$ の法線方向符号付き距離の前半平均 $\bar{d}_1$ と後半平均 $\bar{d}_2$ が異符号（$\bar{d}_1 \cdot \bar{d}_2 < 0$）かつ共に $0.72 \cdot \text{tol}$ を超えるS字区間は統合を棄却します。
+- **回転量および変曲点（S字カーブ）による棄却ガード**：
+  区間の正味回転角 $\Theta_{\text{net}}$ と4分割マクロ絶対回転角の和 $\Theta_{\text{macro}}$ について、$\Theta_{\text{macro}} > 0.35\text{ rad}$ かつ $\Theta_{\text{macro}} - \Theta_{\text{net}} > 0.24\text{ rad}$ となる折り返し区間、および回転角上限 $\theta_{\max}$（高曲率点で $1.68\text{ rad}$、それ以外で $0.82 + 0.40 f_{\text{small}}\text{ rad}$）に対して $\Theta_{\text{net}} > \theta_{\max}$ または $\Theta_{\text{macro}} > \theta_{\max} + 0.25\text{ rad}$ を超える区間は統合を棄却します。また、2次ベジェ曲線は単一セグメント内に変曲点を持てないため、弦 $P_0 P_2$ の法線方向符号付き距離の前半平均 $\bar{d}_1$ と後半平均 $\bar{d}_2$ が異符号（$\bar{d}_1 \cdot \bar{d}_2 < 0$）かつ共に $0.72 \cdot \text{tol}$ を超えるS字区間も統合を棄却します。
 - **ニュートン1ステップ射影による高速最大距離誤差（[`max_quad_fit_error_with_arc_lengths`](./src/vector_stroke.rs)）**：
   各点 $Q_i$ の初期パラメータ $t_0 = s_i / L$ に対し、曲線の接線ベクトル $B'(t_0)$ への正射影でパラメータを1ステップ精密化します。
   $$t_1 = \operatorname{clamp}\!\left(t_0 + \frac{(Q_i - B(t_0)) \cdot B'(t_0)}{\|B'(t_0)\|^2},\; 0,\; 1\right), \quad \varepsilon_{\max} = \max_{1 \le i \le n-2} \min\!\left(\|Q_i - B(t_1)\|,\; \|Q_i - B(t_0)\|\right)$$
 - **差分更新による $O(K \cdot M)$ 優先度削減**：
-  許容誤差 $\varepsilon_{\max} \le \text{tol}$（側面で $0.50 \cdot r_{\text{scale}} \cdot f_{\text{small}}$ px、丸キャップで $0.36 \cdot r_{\text{scale}} \cdot f_{\text{small}}$ px）を満たす候補のうち、スコア $\varepsilon_{\max} + 0.18 \, \Theta_{\text{net}}^2$ が最小のアンカーから順に削除します。アンカー $j$ を削除した際、区間が変化するのは前後の隣接2アンカー（$j-1$ と $j+1$）のみであるため、この2箇所のスコアのみを再計算することで $O(K \cdot M)$ の高速性を実現しています。
+  許容誤差 $\varepsilon_{\max} \le \text{tol}$（側面で $0.50 \cdot r_{\text{scale}} \cdot f_{\text{small}}$ px、丸キャップ・高曲率部で $\max(0.36 \cdot r_{\text{scale}} \cdot f_{\text{small}},\; 0.06)$ px）を満たす候補のうち、スコア $\varepsilon_{\max} + 0.18 \, \Theta_{\text{net}}^2$ が最小のアンカーから順に削除します。アンカー $j$ を削除した際、区間が変化するのは前後の隣接2アンカー（$j-1$ と $j+1$）のみであるため、この2箇所のスコアのみを再計算することで $O(K \cdot M)$ の高速性を実現しています。
 
 ### 3.7 接線交点射影による $G^1$ 連続化
 [`enforce_g1_tangent_continuity_on_segments`](./src/vector_stroke.rs) では、鋭角でも直線接続でもない滑らかな中間アンカー $A_j$ において、前セグメントの終端接線方向 $\hat{d}_{\text{in}}$、次セグメントの始端接線方向 $\hat{d}_{\text{out}}$、および密な輪郭上の弦方向 $\hat{d}_{\text{ring}}$ の平均単位接線ベクトル $\hat{T}_j$ を求めます。
@@ -151,7 +151,7 @@ $$\theta_w(i) = \operatorname{atan2}\!\left(\hat{d}_{\text{in}}(i, w) \times \ha
 
 $$P_0 + s_0 \hat{T}_0 = P_2 - s_2 \hat{T}_2 \implies s_0 = \frac{(P_2 - P_0) \times \hat{T}_2}{\hat{T}_0 \times \hat{T}_2}, \quad s_2 = \frac{\hat{T}_0 \times (P_2 - P_0)}{\hat{T}_0 \times \hat{T}_2}$$
 
-から候補制御点 $P_{1,\text{tan}} = P_0 + s_0 \hat{T}_0$ を求め、初期制御点 $P_1$ からの中点法線変位 $\frac{1}{2}|(P_{1,\text{tan}} - P_1) \cdot N_{\text{chord}}|$ が $\min(0.85\,r_{\text{scale}},\; 0.024\,\|P_2 - P_0\|)$ 以内の場合に採用することで、形状を変えずにアンカー接続部の微小な角度折れを解消します。
+から候補制御点 $P_{1,\text{tan}} = P_0 + s_0 \hat{T}_0$（ただし $|\hat{T}_0 \times \hat{T}_2| > 0.04$ かつ $s_0, s_2 \in (0.08\,\|P_2 - P_0\|,\; 1.80\,\|P_2 - P_0\|)$）を求め、初期制御点 $P_1$ からの中点法線変位 $\frac{1}{2}|(P_{1,\text{tan}} - P_1) \cdot N_{\text{chord}}|$ が $\min(0.85\,r_{\text{scale}},\; 0.024\,\|P_2 - P_0\|)$ 以内、かつ制御点の総移動量 $\|P_{1,\text{tan}} - P_1\|$ が $0.36\,\|P_2 - P_0\|$ 以内の場合に採用することで、形状を変えずにアンカー接続部の微小な角度折れを解消します。
 
 ---
 
@@ -162,22 +162,22 @@ Adobe Animate の「マージ描画（Merge Drawing）」では、同色スト�
 ポリゴンベースのブーリアン演算ライブラリ（`i_overlay`）をそのまま使うと出力がすべて折れ線（ポリゴン）に劣化してしまうため、本エンジンでは **「元の `QuadBez` セグメントへの逆引きマッチング ＋ De Casteljau 部分切り出し」** によるハイブリッド再構築（[`reconstruct_fill_shape_from_rings`](./src/vector_boolean.rs), [`reconstruct_or_refit_quad_contour`](./src/vector_boolean.rs)）を行っています。
 
 1. **適応分割と `QuadRecord` テーブル登録（[`sample_contour_ring_for_overlay`](./src/vector_boolean.rs)）**：
-   入力シェイプの各 `QuadBez` セグメントを `quad_table` にバウンディングボックス付きで登録しつつ、直線に近いセグメントは2分割、曲線セグメントは弧長に応じた分割数（$\lceil L / 1.2 \rceil \in [4, 256]$）でポリゴン化して `i_overlay` に渡します。
+   入力シェイプの各 `QuadBez` セグメントを `quad_table` にバウンディングボックス付きで登録しつつ、弦中点からの制御点距離が $\min(0.04,\; \max(0.015\,\|P_2 - P_0\|,\; 10^{-4}))$ 以下の直線に近いセグメントは2分割、それ以外の曲線セグメントは弧長 $L$ とステップ長 $\Delta s = \min(1.2,\; \max(0.125\,L,\; 0.02))$ に応じた分割数（$\operatorname{clamp}(\lceil L / \Delta s \rceil,\; 4,\; 256)$）でポリゴン化して `i_overlay` に渡します。
 2. **出力ポリゴン辺から元の `QuadBez` への逆引きマッチング（[`match_edge_to_quad`](./src/vector_boolean.rs)）**：
    `i_overlay` が出力したポリゴンの各辺 $a \to b$（中点 $m = \frac{1}{2}(a+b)$、単位方向 $\hat{d}_{\text{chord}}$）について、`quad_table` 内の元の曲線 $B_q(t)$ との最近接距離と接線方向の一致度を判定します。
-   - 距離条件：$\operatorname{dist}(m, B_q) \le 0.45$, $\operatorname{dist}(a, B_q) \le 0.45$, $\operatorname{dist}(b, B_q) \le 0.45$
+   - 距離条件：許容距離を $d_{\text{tol}} = \min(0.45,\; \max(0.35\,\|b - a\|,\; 10^{-4}))$ として、$\operatorname{dist}(m, B_q) \le d_{\text{tol}}$, $\operatorname{dist}(a, B_q) \le d_{\text{tol}}$, $\operatorname{dist}(b, B_q) \le d_{\text{tol}}$
    - 接線整合条件：$\left|\hat{d}_{\text{chord}} \cdot \frac{B_q'(t_m)}{\|B_q'(t_m)\|}\right| \ge 0.90$
    これらを満たす最小スコアの曲線ID `quad_id = Some(q)` を各辺にタグ付けします。
-3. **De Casteljau 部分切り出しによる無劣化復元（[`extract_sub_quad`](./src/vector_boolean.rs)）**：
+3. **De Casteljau 部分切り出しによる曲線復元（[`extract_sub_quad`](./src/vector_boolean.rs)）**：
    同じ `quad_id = Some(q)` が連続する辺のラン（始点 $P_{\text{start}}$、終点 $P_{\text{end}}$）は、元の2次ベジェ曲線 $B_q$ 上のパラメータ区間 $[t_0, t_1]$（$t_0 = \operatorname{nearest}(P_{\text{start}})$, $t_1 = \operatorname{nearest}(P_{\text{end}})$）を De Casteljau 法（`orig.subsegment(t0..t1)`）で1本の `QuadBez` として切り出します（タグなしの新規交差辺ランのみ [`refit_open_polyline_to_quads`](./src/vector_boolean.rs) で再フィットします）。
-   これにより、**ブーリアン演算や消しゴム・矩形スライスを何度繰り返しても、既存の曲線部分は一切ポリゴン化・劣化せず、交差部で正確に切断された元の2次ベジェ曲線が維持されます。**
+   これにより、**ブーリアン演算や消しゴム・矩形スライスを繰り返しても既存の曲線部分はポリゴン化されず、交差部で切断された元の2次ベジェ曲線からのずれはごく小さく抑えられます（30回の繰り返しで $2.4 \times 10^{-7}$ 程度。なお再構築された図形には新しい `ShapeId` が採番されます）。**
 
 ---
 
 ## 5. アルゴリズム 4：インタラクティブ輪郭変形と GPU メッシュ描画
 
 ### 5.1 エッジつまみ変形（`PullEdge`）の逆算制御点更新
-選択ツールで未選択シェイプの曲線エッジ上の点 $G = B(t_g)$（$t_g \in [0.18, 0.82]$）をつかみ、変位ベクトル $\Delta = P_{\text{drag}} - G$ だけドラッグした際、両端アンカー $P_0, P_2$ を固定したまま曲線が新しい通過点 $P_{\text{drag}}$ を通るための新しい制御点 $P_1'$ は次式で一意に求まります（[`apply_pull_edge_to_shape`](./src/select_ops.rs)）。
+選択ツールで未選択シェイプの曲線エッジ付近（ドラッグ開始カーソル位置 $P_{\text{start}}$）をつかむと、最近接パラメータをクランプした $t_g \in [0.18, 0.82]$ における曲線上のつかんだ点 $G = B(t_g)$ と初期オフセット $G - P_{\text{start}}$ が記録されます。カーソルを $P_{\text{drag}}$ へ動かしたときの移動量を $\Delta = P_{\text{drag}} - P_{\text{start}}$ とすると、曲線が通る目標点は $P_{\text{drag}}$ そのものではなく「つかんだ点＋移動量」$G + \Delta$（ドロップ確定時は対向エッジ貫通補正 [`punch_through_opposite_edge`](./src/select_ops.rs) 適用後の点）となり、両端アンカー $P_0, P_2$ を固定したまま新しい制御点 $P_1'$ は次式で一意に求まります（[`set_pulled_edge`](./src/select_ops.rs), [`apply_pull_edge_to_shape`](./src/select_ops.rs)）。
 
 $$B_{\text{new}}(t_g) = (1-t_g)^2 P_0 + 2(1-t_g)t_g P_1' + t_g^2 P_2 = B(t_g) + \Delta \implies P_1' = P_1 + \frac{\Delta}{2 t_g (1 - t_g)}$$
 
