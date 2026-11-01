@@ -10604,6 +10604,92 @@ fn test_collapsed_symbol_instance_blocks_enter_and_timeline_mut_bumps_revision()
     );
 }
 
+#[test]
+fn test_g5_1_save_and_reopen_60_brush_strokes_f6_140_frames_over_100mb() {
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    let mut rng = fastrand::Rng::with_seed(42);
+    for i in 0..60 {
+        let color = Color32::from_rgb(
+            ((i * 37) % 200 + 30) as u8,
+            ((i * 73) % 200 + 30) as u8,
+            ((i * 113) % 200 + 30) as u8,
+        );
+        let mut pts = Vec::with_capacity(36);
+        let mut x = 50.0 + (i % 10) as f64 * 70.0;
+        let mut y = 50.0 + (i / 10) as f64 * 60.0;
+        for step in 0..36 {
+            x += 12.0 + rng.f64() * 8.0;
+            y += ((step as f64 * 0.7).sin() * 18.0) + (rng.f64() - 0.5) * 6.0;
+            pts.push(Point::new(x, y));
+        }
+        doc_actions::apply(
+            &mut app,
+            Action::PaintStroke {
+                points: pts,
+                radius: 6.0,
+                color,
+            },
+        );
+    }
+
+    let first_cel_shapes = app.doc.root.layers[0].keyframes[0].cel.shapes.len();
+    let first_cel_segs: usize = app.doc.root.layers[0].keyframes[0]
+        .cel
+        .shapes
+        .iter()
+        .map(|s| {
+            s.exterior.segments.len()
+                + s.holes.iter().map(|h| h.segments.len()).sum::<usize>()
+        })
+        .sum();
+
+    for _ in 1..140 {
+        assert!(
+            doc_actions::apply(&mut app, Action::InsertKeyframe { copy_prev: true }).as_bool()
+        );
+    }
+    assert_eq!(app.doc.root.total_frames, 140);
+    assert_eq!(app.doc.root.layers[0].keyframes.len(), 140);
+
+    let tmp_path = std::env::temp_dir().join(format!(
+        "is2d_g5_1_140kf_over_100mb_{}.is2d",
+        std::process::id()
+    ));
+
+    let t_save = std::time::Instant::now();
+    crate::project_io::save_project_to_path(&mut app, &tmp_path)
+        .expect("100MB を超える文書でも保存に成功すること (G5-1)");
+    let save_elapsed = t_save.elapsed();
+
+    let file_bytes = std::fs::metadata(&tmp_path).unwrap().len();
+    println!(
+        "[G5-1] 60 strokes ({first_cel_shapes} shapes, {first_cel_segs} segs/cel) x 140 KF: size = {:.2} MB ({file_bytes} bytes), save = {save_elapsed:?}",
+        file_bytes as f64 / (1024.0 * 1024.0)
+    );
+    assert!(
+        file_bytes > 100 * 1024 * 1024,
+        "テスト文書が旧上限 100MB を超えていること: {file_bytes} bytes"
+    );
+
+    let mut reopened = Is2dApp::default();
+    let t_open = std::time::Instant::now();
+    crate::project_io::open_project_in_tab(&mut reopened, &tmp_path, None)
+        .expect("100MB を超える保存済みファイルを開き直せること (G5-1)");
+    let open_elapsed = t_open.elapsed();
+    let _ = std::fs::remove_file(&tmp_path);
+
+    println!("[G5-1] reopen = {open_elapsed:?}");
+    assert_eq!(reopened.doc.root.total_frames, 140);
+    assert_eq!(reopened.doc.root.layers[0].keyframes.len(), 140);
+    assert_eq!(
+        reopened.doc.root.layers[0].keyframes[139].cel.shapes.len(),
+        first_cel_shapes
+    );
+}
+
+
 
 
 

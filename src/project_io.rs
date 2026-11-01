@@ -23,9 +23,6 @@ pub(crate) const PROJECT_FORMAT_VERSION: u32 = 1;
 /// プロジェクトファイルの標準拡張子
 pub(crate) const PROJECT_FILE_EXTENSION: &str = "is2d";
 
-/// 読み込み可能なプロジェクトファイルの最大バイト数（100MB：異常な巨大ファイルによるOOM防止）
-pub(crate) const MAX_PROJECT_FILE_BYTES: u64 = 100 * 1024 * 1024;
-
 /// 読み込み時に許容するエンティティID（`layer_id` / `symbol_id` / `group_id` / `instance_gid`）の最大安全値
 /// （`u64::MAX` 付近の細工IDによる `saturating_add` 衝突を防止するため、上限を超えるIDは読み込み時に安全な連番へ再採番する）
 pub(crate) const MAX_SAFE_ENTITY_ID: u64 = u64::MAX / 2;
@@ -1288,13 +1285,6 @@ pub(crate) fn save_project_to_path(
     proj_doc.validate_finite()?;
     let json = serde_json::to_string(&proj_doc)
         .map_err(|e| format!("プロジェクトデータの変換に失敗しました: {e}"))?;
-    if json.len() as u64 > MAX_PROJECT_FILE_BYTES {
-        return Err(format!(
-            "保存データが最大サイズ上限を超えています ({} MB > 上限 {} MB)",
-            json.len() as u64 / (1024 * 1024),
-            MAX_PROJECT_FILE_BYTES / (1024 * 1024)
-        ));
-    }
 
     let target_path = if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
@@ -1367,28 +1357,11 @@ pub(crate) fn save_project_to_path(
 /// 指定されたファイルパス `path` から `ProjectDocument` を読み込み・バージョン検証して返す
 fn read_project_document(path: &Path) -> Result<ProjectDocument, String> {
     use std::io::Read;
-    let file =
+    let mut file =
         std::fs::File::open(path).map_err(|e| format!("ファイルの読み込みに失敗しました: {e}"))?;
-    if let Ok(meta) = file.metadata() {
-        if meta.len() > MAX_PROJECT_FILE_BYTES {
-            return Err(format!(
-                "プロジェクトファイルが大きすぎます ({} MB > 上限 {} MB)",
-                meta.len() / (1024 * 1024),
-                MAX_PROJECT_FILE_BYTES / (1024 * 1024)
-            ));
-        }
-    }
     let mut bytes = Vec::new();
-    file.take(MAX_PROJECT_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
+    file.read_to_end(&mut bytes)
         .map_err(|e| format!("ファイルの読み込みに失敗しました: {e}"))?;
-    if bytes.len() as u64 > MAX_PROJECT_FILE_BYTES {
-        return Err(format!(
-            "プロジェクトファイルが大きすぎます ({} MB > 上限 {} MB)",
-            bytes.len() as u64 / (1024 * 1024),
-            MAX_PROJECT_FILE_BYTES / (1024 * 1024)
-        ));
-    }
     let doc: ProjectDocument = serde_json::from_slice(&bytes)
         .map_err(|e| format!("プロジェクトファイルの形式が正しくありません: {e}"))?;
 
