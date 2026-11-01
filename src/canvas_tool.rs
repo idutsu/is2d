@@ -895,16 +895,34 @@ mod scene_base_cache {
                     self.layers[0].world_xform_bits = xform_bits;
                     self.layers[0].range = 0..shapes.len();
                     self.flat_shapes = shapes;
+                    if !modified_lids.is_empty()
+                        && (self.layers[0].truncated
+                            || self.flat_shapes.len() > crate::symbol::MAX_EXPANDED_SYMBOL_SHAPES)
+                    {
+                        self.layers[0].cel_sig = None;
+                        self.rebuild(tl, library, world_xform);
+                    }
                     return;
                 }
             }
             let mut new_flat = Vec::new();
+            let mut need_rebuild = false;
             for (cl, layer) in self.layers.iter_mut().zip(&tl.layers) {
                 cl.visible = layer.visible;
                 cl.locked = layer.locked;
                 cl.world_xform_bits = xform_bits;
+                let start = new_flat.len();
+                if let Some(shapes) = edited_by_lid.remove(&layer.id) {
+                    new_flat.extend(shapes);
+                } else if let Some(shapes) = untouched.remove(&layer.id) {
+                    new_flat.extend(shapes);
+                }
+                cl.range = start..new_flat.len();
                 if modified_lids.contains(&layer.id) {
-                    if let Some(kf_idx) = layer.keyframe_index_at(frame) {
+                    if cl.truncated || cl.range.len() > crate::symbol::MAX_EXPANDED_SYMBOL_SHAPES {
+                        cl.cel_sig = None;
+                        need_rebuild = true;
+                    } else if let Some(kf_idx) = layer.keyframe_index_at(frame) {
                         cl.cel_sig = Some(compute_resolved_cel_signature(layer, kf_idx, library));
                         cl.eval_frame = layer_eval_frame(layer, kf_idx, frame, library);
                     } else {
@@ -912,16 +930,11 @@ mod scene_base_cache {
                         cl.eval_frame = 0;
                     }
                 }
-                let start = new_flat.len();
-                if let Some(shapes) = edited_by_lid.remove(&layer.id) {
-                    new_flat.extend(shapes);
-                } else if let Some(shapes) = untouched.remove(&layer.id) {
-                    new_flat.extend(shapes);
-                }
-                let end = new_flat.len();
-                cl.range = start..end;
             }
             self.flat_shapes = new_flat;
+            if need_rebuild {
+                self.rebuild(tl, library, world_xform);
+            }
         }
 
         /// キー `(layer_id, cel_revision, eval_frame, world_xform, 参照シンボルの revision)` が変わったレイヤーだけ作り直し、
@@ -3224,6 +3237,40 @@ fn reinstantiate_modified_symbol_instance(
     }
 }
 
+fn append_unexpanded_cel_elements(
+    orig_cel: &crate::timeline::Cel,
+    init_states: &[InitialLayerShapeState],
+    initial_stage_inst_xform: &HashMap<(InstanceGid, u64), Affine>,
+    non_symbol_shapes: &mut Vec<FillShape>,
+    next_instances: &mut Vec<SymbolInstance>,
+) {
+    let raw_ids: HashSet<ShapeId> = init_states
+        .iter()
+        .filter(|st| st.symbol_instance.is_none())
+        .map(|st| st.shape_id)
+        .collect();
+    let mut next_idx = 0;
+    for inst in orig_cel.instances.iter() {
+        let end = inst.shape_order_index.min(orig_cel.shapes.len());
+        for s in &orig_cel.shapes[next_idx..end] {
+            if !raw_ids.contains(&s.shape_id) {
+                non_symbol_shapes.push(s.clone());
+            }
+        }
+        next_idx = next_idx.max(end);
+        if !initial_stage_inst_xform.contains_key(&(inst.binding.instance_gid, inst.binding.symbol_id)) {
+            let mut kept = inst.clone();
+            kept.shape_order_index = non_symbol_shapes.len();
+            next_instances.push(kept);
+        }
+    }
+    for s in &orig_cel.shapes[next_idx..] {
+        if !raw_ids.contains(&s.shape_id) {
+            non_symbol_shapes.push(s.clone());
+        }
+    }
+}
+
 /// `edit_layers` の対象レイヤー1枚分について、編集後ステージ図形列 `layer_stage_shapes` をローカル図形へ変換してセルに書き戻す
 #[allow(clippy::too_many_arguments)]
 fn writeback_edited_layer_shapes(
@@ -3235,6 +3282,7 @@ fn writeback_edited_layer_shapes(
     has_world_xform: bool,
     inv_xform: Affine,
     need_inv: bool,
+    init_states: &[InitialLayerShapeState],
     initial_stage_inst_xform: &HashMap<(InstanceGid, u64), Affine>,
     layer_stage_shapes: &mut Vec<FillShape>,
 ) -> bool {
@@ -3242,13 +3290,13 @@ fn writeback_edited_layer_shapes(
         .interpolated_tween_binding_at(frame)
         .is_some();
     if is_tween_mid {
-        let (prev_kf_start, prev_tween_rotate) = tl.layers[l_idx]
+        let (prev_kf_start, prev_tween_rotate, orig_cel) = tl.layers[l_idx]
             .keyframe_index_at(frame)
             .map(|i| {
                 let kf = &tl.layers[l_idx].keyframes[i];
-                (kf.start_frame, kf.tween_rotate)
+                (kf.start_frame, kf.tween_rotate, Some(kf.cel.clone()))
             })
-            .unwrap_or((frame, TweenRotate::Auto));
+            .unwrap_or((frame, TweenRotate::Auto, None));
         let elapsed = frame.saturating_sub(prev_kf_start);
         layer_stage_shapes
             .retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
@@ -3283,6 +3331,15 @@ fn writeback_edited_layer_shapes(
             if has_world_xform && need_inv {
                 inst.binding.xform = inv_xform * inst.binding.xform;
             }
+        }
+        if let Some(ref orig_cel) = orig_cel {
+            append_unexpanded_cel_elements(
+                orig_cel,
+                init_states,
+                initial_stage_inst_xform,
+                &mut non_symbol_shapes,
+                &mut next_instances,
+            );
         }
         tl.layers[l_idx].keyframes[kf_idx].cel =
             Cel::new_with_instances(non_symbol_shapes, next_instances);
@@ -3405,6 +3462,13 @@ fn writeback_edited_layer_shapes(
                 non_symbol_shapes.push(local_s);
             }
         }
+        append_unexpanded_cel_elements(
+            orig_cel,
+            init_states,
+            initial_stage_inst_xform,
+            &mut non_symbol_shapes,
+            &mut next_instances,
+        );
         (non_symbol_shapes, next_instances, modified_inst_indices)
     };
 
@@ -3537,13 +3601,15 @@ pub(crate) fn edit_layers(
             let l_idx = target_layer_indices[0];
             let lid = tl.layers[l_idx].id;
             let mut layer_shapes = std::mem::take(&mut edit.shapes);
-            let is_unchanged = initial_layer_states.get(&lid).is_some_and(|init_list| {
-                init_list.len() == layer_shapes.len()
-                    && init_list
-                        .iter()
-                        .zip(layer_shapes.iter())
-                        .all(|(st, s)| st.matches(s))
-            });
+            let init_slice = initial_layer_states
+                .get(&lid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let is_unchanged = init_slice.len() == layer_shapes.len()
+                && init_slice
+                    .iter()
+                    .zip(layer_shapes.iter())
+                    .all(|(st, s)| st.matches(s));
             if !is_unchanged
                 && writeback_edited_layer_shapes(
                     tl,
@@ -3554,6 +3620,7 @@ pub(crate) fn edit_layers(
                     has_world_xform,
                     inv_xform,
                     need_inv,
+                    init_slice,
                     &initial_stage_inst_xform,
                     &mut layer_shapes,
                 )
@@ -3585,13 +3652,15 @@ pub(crate) fn edit_layers(
             let Some(layer_shapes) = edited_by_lid.get_mut(&lid) else {
                 continue;
             };
-            let is_unchanged = initial_layer_states.get(&lid).is_some_and(|init_list| {
-                init_list.len() == layer_shapes.len()
-                    && init_list
-                        .iter()
-                        .zip(layer_shapes.iter())
-                        .all(|(st, s)| st.matches(s))
-            });
+            let init_slice = initial_layer_states
+                .get(&lid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let is_unchanged = init_slice.len() == layer_shapes.len()
+                && init_slice
+                    .iter()
+                    .zip(layer_shapes.iter())
+                    .all(|(st, s)| st.matches(s));
             if is_unchanged {
                 continue;
             }
@@ -3604,6 +3673,7 @@ pub(crate) fn edit_layers(
                 has_world_xform,
                 inv_xform,
                 need_inv,
+                init_slice,
                 &initial_stage_inst_xform,
                 layer_shapes,
             ) {

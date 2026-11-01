@@ -10113,95 +10113,99 @@ fn test_stage7_edit_layers_preserves_mesh_cache_without_rebuilding_from_doc() {
     );
 }
 
+fn contour_bits(c: &vector_engine::Contour) -> Vec<[u64; 6]> {
+    c.segments
+        .iter()
+        .map(|s| {
+            [
+                s.p0.x.to_bits(),
+                s.p0.y.to_bits(),
+                s.p1.x.to_bits(),
+                s.p1.y.to_bits(),
+                s.p2.x.to_bits(),
+                s.p2.y.to_bits(),
+            ]
+        })
+        .collect()
+}
+
+fn run_and_verify_scene_cache_consistency(
+    app: &mut Is2dApp,
+    action: crate::doc_actions::Action,
+    label: &str,
+) {
+    run(app, &[action]);
+    let before: Vec<FillShape> = app.scene().iter().cloned().collect();
+
+    // 1. rebuild_overlay_from_floating() と、土台のキャッシュを空から作り直す処理を実行
+    app.tabs[app.active].session.base_cache = Default::default();
+    app.tabs[app.active].refresh_scene_base();
+    app.tabs[app.active].session.rebuild_overlay_from_floating();
+
+    let after: Vec<FillShape> = app.scene().iter().cloned().collect();
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "[{label}] Scene の図形数がキャッシュ再構築前後で一致すること"
+    );
+    for (idx, (a, b)) in before.iter().zip(after.iter()).enumerate() {
+        assert_eq!(a.color, b.color, "[{label} #{idx}] color mismatch");
+        assert_eq!(a.layer_id, b.layer_id, "[{label} #{idx}] layer_id mismatch");
+        assert_eq!(
+            a.group_path, b.group_path,
+            "[{label} #{idx}] group_path mismatch"
+        );
+        assert_eq!(
+            a.symbol_instance, b.symbol_instance,
+            "[{label} #{idx}] symbol_instance mismatch"
+        );
+        assert_eq!(
+            contour_bits(&a.exterior),
+            contour_bits(&b.exterior),
+            "[{label} #{idx}] exterior bit-level mismatch"
+        );
+        assert_eq!(
+            a.holes.len(),
+            b.holes.len(),
+            "[{label} #{idx}] holes len mismatch"
+        );
+        for (ha, hb) in a.holes.iter().zip(b.holes.iter()) {
+            assert_eq!(
+                contour_bits(ha),
+                contour_bits(hb),
+                "[{label} #{idx}] hole bit-level mismatch"
+            );
+        }
+        let ba = a.bounding_box();
+        let bb = b.bounding_box();
+        assert_eq!(
+            (
+                ba.x0.to_bits(),
+                ba.y0.to_bits(),
+                ba.x1.to_bits(),
+                ba.y1.to_bits()
+            ),
+            (
+                bb.x0.to_bits(),
+                bb.y0.to_bits(),
+                bb.x1.to_bits(),
+                bb.y1.to_bits()
+            ),
+            "[{label} #{idx}] bbox bit-level mismatch"
+        );
+        if a.symbol_instance.is_none() {
+            assert_eq!(a.shape_id, b.shape_id, "[{label} #{idx}] shape_id mismatch");
+            assert_eq!(
+                a.mesh_revision, b.mesh_revision,
+                "[{label} #{idx}] mesh_revision mismatch"
+            );
+        }
+    }
+}
+
 #[test]
 fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_action() {
     use crate::doc_actions::Action;
-
-    fn run_and_verify_scene_cache_consistency(app: &mut Is2dApp, action: Action, label: &str) {
-        run(app, &[action]);
-        let before: Vec<FillShape> = app.scene().iter().cloned().collect();
-
-        // 1. rebuild_overlay_from_floating() と、土台のキャッシュを空から作り直す処理を実行
-        app.tabs[app.active].session.base_cache = Default::default();
-        app.tabs[app.active].refresh_scene_base();
-        app.tabs[app.active].session.rebuild_overlay_from_floating();
-
-        let after: Vec<FillShape> = app.scene().iter().cloned().collect();
-        assert_eq!(
-            before.len(),
-            after.len(),
-            "[{label}] Scene の図形数がキャッシュ再構築前後で一致すること"
-        );
-        for (idx, (a, b)) in before.iter().zip(after.iter()).enumerate() {
-            assert_eq!(a.color, b.color, "[{label} #{idx}] color mismatch");
-            assert_eq!(a.layer_id, b.layer_id, "[{label} #{idx}] layer_id mismatch");
-            assert_eq!(
-                a.group_path, b.group_path,
-                "[{label} #{idx}] group_path mismatch"
-            );
-            assert_eq!(
-                a.symbol_instance, b.symbol_instance,
-                "[{label} #{idx}] symbol_instance mismatch"
-            );
-            assert_eq!(
-                contour_bits(&a.exterior),
-                contour_bits(&b.exterior),
-                "[{label} #{idx}] exterior bit-level mismatch"
-            );
-            assert_eq!(
-                a.holes.len(),
-                b.holes.len(),
-                "[{label} #{idx}] holes len mismatch"
-            );
-            for (ha, hb) in a.holes.iter().zip(b.holes.iter()) {
-                assert_eq!(
-                    contour_bits(ha),
-                    contour_bits(hb),
-                    "[{label} #{idx}] hole bit-level mismatch"
-                );
-            }
-            let ba = a.bounding_box();
-            let bb = b.bounding_box();
-            assert_eq!(
-                (
-                    ba.x0.to_bits(),
-                    ba.y0.to_bits(),
-                    ba.x1.to_bits(),
-                    ba.y1.to_bits()
-                ),
-                (
-                    bb.x0.to_bits(),
-                    bb.y0.to_bits(),
-                    bb.x1.to_bits(),
-                    bb.y1.to_bits()
-                ),
-                "[{label} #{idx}] bbox bit-level mismatch"
-            );
-            if a.symbol_instance.is_none() {
-                assert_eq!(a.shape_id, b.shape_id, "[{label} #{idx}] shape_id mismatch");
-                assert_eq!(
-                    a.mesh_revision, b.mesh_revision,
-                    "[{label} #{idx}] mesh_revision mismatch"
-                );
-            }
-        }
-    }
-
-    fn contour_bits(c: &vector_engine::Contour) -> Vec<[u64; 6]> {
-        c.segments
-            .iter()
-            .map(|s| {
-                [
-                    s.p0.x.to_bits(),
-                    s.p0.y.to_bits(),
-                    s.p1.x.to_bits(),
-                    s.p1.y.to_bits(),
-                    s.p2.x.to_bits(),
-                    s.p2.y.to_bits(),
-                ]
-            })
-            .collect()
-    }
 
     let mut app = Is2dApp::default();
     let red = Color32::from_rgb(220, 60, 60);
@@ -11006,6 +11010,108 @@ fn test_g1_2_truncation_flag_and_warning_above_10000_shapes() {
     assert!(
         !app.session.base_cache.has_truncated_layer(),
         "非表示レイヤーでは警告を出さないこと"
+    );
+}
+
+#[test]
+fn test_g1_1_writeback_preserves_unexpanded_and_orphan_elements() {
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+
+    // 100図形のシンボルを作成
+    let mut local_shapes = Vec::with_capacity(100);
+    for i in 0..100 {
+        let x = (i % 10) as f64 * 10.0;
+        let y = (i / 10) as f64 * 10.0;
+        let mut s = make_stroke(
+            Point::new(x, y),
+            Point::new(x + 6.0, y),
+            2.0,
+            Color32::from_rgb(30 + i as u8, 90, 180),
+        )
+        .remove(0);
+        s.layer_id = 1;
+        local_shapes.push(s);
+    }
+    let sym_id = app.doc.register_new_symbol(local_shapes);
+
+    // 120個のシンボルインスタンス（展開すると 12,000 図形で 10,000 で打ち切られる）＋
+    // 参照先のない孤児インスタンス1個をセルに設定
+    let orphan_gid = 9999_u64;
+    let orphan_sym_id = 88888_u64;
+    let mut instances: Vec<timeline::SymbolInstance> = (0..120)
+        .map(|k| timeline::SymbolInstance {
+            binding: symbol::SymbolInstanceBinding::new(
+                (k + 1) as u64,
+                sym_id,
+                kurbo::Affine::IDENTITY,
+            ),
+            layer_id: 1,
+            parent_scope: Vec::new(),
+            shape_order_index: 0,
+        })
+        .collect();
+    instances.insert(
+        50,
+        timeline::SymbolInstance {
+            binding: symbol::SymbolInstanceBinding::new(
+                orphan_gid,
+                orphan_sym_id,
+                kurbo::Affine::IDENTITY,
+            ),
+            layer_id: 1,
+            parent_scope: Vec::new(),
+            shape_order_index: 0,
+        },
+    );
+    app.doc.root.layers[0].keyframes[0]
+        .cel
+        .set_parts(Vec::new(), instances);
+    app.refresh_scene_base();
+    assert!(app.session.base_cache.has_truncated_layer());
+    assert_eq!(app.scene().len(), 10_000);
+
+    // ブラシで1回描く（完了条件4: 既存の比較ヘルパーで土台キャッシュが文書から作り直した結果と一致することも検証）
+    run_and_verify_scene_cache_consistency(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(500.0, 300.0), Point::new(540.0, 300.0)],
+            radius: 5.0,
+            color: Color32::RED,
+        },
+        "G1-1 PaintStroke on truncated cel",
+    );
+
+    // 完了条件1 & 2: 120個の有効インスタンス＋1個の孤児インスタンスがすべて文書に残ること
+    let cel = &app.doc.root.layers[0].keyframes[0].cel;
+    assert_eq!(
+        cel.instances
+            .iter()
+            .filter(|i| i.binding.symbol_id == sym_id)
+            .count(),
+        120,
+        "打ち切り外の20個を含め120個のインスタンスがすべて文書に残ること"
+    );
+    assert!(
+        cel.instances.iter().any(|i| {
+            i.binding.instance_gid == orphan_gid && i.binding.symbol_id == orphan_sym_id
+        }),
+        "参照先のない孤児インスタンスも消えずに残ること"
+    );
+    assert_eq!(cel.shapes.len(), 1, "描いたブラシ図形が保存されていること");
+
+    // 保存して読み込んでも120個の有効インスタンスが残ること（孤児インスタンスは読み込み時の正規化で除去される）
+    let tmp_path =
+        std::env::temp_dir().join(format!("is2d_g1_1_test_{}.is2d", std::process::id()));
+    crate::project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
+    let mut reopened = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut reopened, &tmp_path, None).unwrap();
+    let _ = std::fs::remove_file(&tmp_path);
+    assert_eq!(
+        reopened.doc.root.layers[0].keyframes[0].cel.instances.len(),
+        120,
+        "保存して読み込んでもインスタンスが120個残ること"
     );
 }
 
