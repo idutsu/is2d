@@ -1,9 +1,4 @@
-use crate::vector_engine::{
-    append_mesh, next_shape_id, transform_mesh_to_screen, transform_mesh_to_screen_onion,
-    FillShape, OnionMeshCacheEntry, ScreenMeshCacheEntry, SymbolInstanceBinding, SymbolLoopMode,
-    SyncCache,
-};
-use eframe::egui::{Color32, Mesh, Vec2};
+use crate::vector_engine::{next_shape_id, FillShape, SymbolInstanceBinding, SymbolLoopMode};
 use kurbo::{Affine, Point};
 use std::{collections::HashMap, sync::Arc};
 
@@ -196,27 +191,7 @@ fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64, f64, f64) {
 // 1. タイムラインのデータモデル（Cel / Keyframe / Selection / Layer / Timeline）
 // ============================================================================
 
-/// セル内の全図形を1つに統合したワールド座標バッチメッシュと、直近の `(zoom, pan)` スクリーン座標・オニオンスキン変換済みキャッシュ
-#[derive(Debug, Default)]
-pub(crate) struct CelMeshCache {
-    shape_revisions: Vec<(u64, Color32)>,
-    world_batch_mesh: Arc<Mesh>,
-    pub(crate) screen_cache: Option<ScreenMeshCacheEntry>,
-    onion_cache: Option<OnionMeshCacheEntry>,
-}
-
-impl Clone for CelMeshCache {
-    fn clone(&self) -> Self {
-        Self {
-            shape_revisions: self.shape_revisions.clone(),
-            world_batch_mesh: Arc::clone(&self.world_batch_mesh),
-            screen_cache: None,
-            onion_cache: None,
-        }
-    }
-}
-
-/// 1枚のセル画（非シンボル図形群 `Arc<Vec<FillShape>>` ＋ 正規化シンボルインスタンス配列 `Arc<Vec<SymbolInstance>>` ＋ 高速再生・表示用の結合メッシュキャッシュ）
+/// 1枚のセル画（非シンボル図形群 `Arc<Vec<FillShape>>` ＋ 正規化シンボルインスタンス配列 `Arc<Vec<SymbolInstance>>`）
 #[derive(Clone, Debug)]
 pub(crate) struct Cel {
     /// このセル内の非シンボル図形群（`symbol_instance.is_none()` の生シェイプおよび通常グループ図形のみを正規化保持、CoW `Arc` 共有）
@@ -225,7 +200,6 @@ pub(crate) struct Cel {
     pub(crate) instances: Arc<Vec<SymbolInstance>>,
     /// セル内容（`shapes` / `instances`）が更新されるたびにインクリメントされるリビジョン番号（Undo履歴の $O(1)$ CoW 共有用）
     pub(crate) revision: u64,
-    pub(crate) mesh_cache: SyncCache<CelMeshCache>,
 }
 
 impl Default for Cel {
@@ -234,7 +208,6 @@ impl Default for Cel {
             shapes: Arc::new(Vec::new()),
             instances: Arc::new(Vec::new()),
             revision: crate::vector_engine::next_mesh_revision(),
-            mesh_cache: SyncCache::new(CelMeshCache::default()),
         }
     }
 }
@@ -246,7 +219,6 @@ impl Cel {
             shapes: Arc::new(shapes),
             instances: Arc::new(instances),
             revision: crate::vector_engine::next_mesh_revision(),
-            mesh_cache: SyncCache::new(CelMeshCache::default()),
         }
     }
 
@@ -259,7 +231,6 @@ impl Cel {
             shapes: Arc::new(shapes),
             instances: Arc::new(instances),
             revision: crate::vector_engine::next_mesh_revision(),
-            mesh_cache: SyncCache::new(CelMeshCache::default()),
         }
     }
 
@@ -280,7 +251,6 @@ impl Cel {
         self.shapes = Arc::new(shapes);
         self.instances = Arc::new(instances);
         self.revision = crate::vector_engine::next_mesh_revision();
-        *self.mesh_cache.lock() = CelMeshCache::default();
     }
 
     #[inline]
@@ -290,7 +260,6 @@ impl Cel {
             self.instances = Arc::new(Vec::new());
             self.revision = crate::vector_engine::next_mesh_revision();
         }
-        *self.mesh_cache.lock() = CelMeshCache::default();
     }
 
     /// キャンバス展開図形列 `all_shapes` を「非シンボル図形列（`shapes`）」と「正規化 `SymbolInstance` リスト（`instances`）」に分離する
@@ -319,100 +288,17 @@ impl Cel {
         (non_symbol_shapes, instances)
     }
 
-    /// Undo 履歴保存時などに、セル内の全図形および結合メッシュキャッシュの一時データを破棄する
+    /// クリップボード複製時などに、セル内の全図形の一時メッシュキャッシュを破棄する
     pub(crate) fn strip_transient_caches(&mut self) {
         if self.shapes.iter().any(FillShape::has_any_transient_cache) {
             for s in Arc::make_mut(&mut self.shapes) {
                 s.strip_transient_caches();
             }
         }
-        *self.mesh_cache.lock() = CelMeshCache::default();
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.shapes.is_empty() && self.instances.is_empty()
-    }
-
-    fn ensure_world_batch_mesh(&self, cache: &mut CelMeshCache) {
-        let is_valid = cache.shape_revisions.len() == self.shapes.len()
-            && self
-                .shapes
-                .iter()
-                .zip(&cache.shape_revisions)
-                .all(|(s, &(rev, col))| s.mesh_revision == rev && s.color == col);
-        if is_valid {
-            return;
-        }
-        cache.shape_revisions = self
-            .shapes
-            .iter()
-            .map(|s| (s.mesh_revision, s.color))
-            .collect();
-        let mut batch = Mesh::default();
-        for shape in self.shapes.iter() {
-            append_mesh(&mut batch, shape.fill_mesh());
-        }
-        cache.world_batch_mesh = Arc::new(batch);
-        cache.screen_cache = None;
-        cache.onion_cache = None;
-    }
-
-    /// セル内の全図形を1つに結合し、指定された `(zoom, pan, dim_backdrop)` に変換したスクリーン座標 `Arc<Mesh>` を返す
-    pub(crate) fn cached_screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> Arc<Mesh> {
-        let mut cache = self.mesh_cache.lock();
-        self.ensure_world_batch_mesh(&mut cache);
-        let key = (
-            zoom.to_bits(),
-            pan.x.to_bits(),
-            pan.y.to_bits(),
-            dim_backdrop,
-        );
-        if let Some((k, mesh)) = &cache.screen_cache {
-            if *k == key {
-                return Arc::clone(mesh);
-            }
-        }
-        let screen_mesh = Arc::new(transform_mesh_to_screen(
-            &cache.world_batch_mesh,
-            zoom,
-            pan,
-            dim_backdrop,
-        ));
-        cache.screen_cache = Some((key, Arc::clone(&screen_mesh)));
-        screen_mesh
-    }
-
-    /// オニオンスキン表示用に、結合済みワールドメッシュをスクリーン座標＋ティント色へ一括変換してキャッシュ経由で返す
-    pub(crate) fn cached_onion_mesh(
-        &self,
-        zoom: f32,
-        pan: Vec2,
-        tint_rgb: [u8; 3],
-        alpha: u8,
-    ) -> Arc<Mesh> {
-        let mut cache = self.mesh_cache.lock();
-        self.ensure_world_batch_mesh(&mut cache);
-        let key = (
-            zoom.to_bits(),
-            pan.x.to_bits(),
-            pan.y.to_bits(),
-            tint_rgb,
-            alpha,
-        );
-        if let Some((k, mesh)) = &cache.onion_cache {
-            if *k == key {
-                return Arc::clone(mesh);
-            }
-        }
-        let onion_mesh = Arc::new(transform_mesh_to_screen_onion(
-            &cache.world_batch_mesh,
-            zoom,
-            pan,
-            tint_rgb,
-            alpha,
-        ));
-        cache.onion_cache = Some((key, Arc::clone(&onion_mesh)));
-        onion_mesh
     }
 
     /// このセル（キーフレーム）に「ルート直下の単一シンボルインスタンスのみ（1個だけ）」が存在する場合、
@@ -581,11 +467,8 @@ impl Layer {
         Self::new_with_id_and_frames(id, name, 1)
     }
 
-    /// `i` 番目のキーフレームへの可変参照を返す（Undo 履歴と共有されている場合は古い方の描画キャッシュを空にしてから複製する）
+    /// `i` 番目のキーフレームへの可変参照を返す（Undo 履歴と共有されている場合は Copy-on-Write で複製する）
     pub(crate) fn keyframe_mut(&mut self, i: usize) -> &mut Keyframe {
-        if Arc::strong_count(&self.keyframes[i]) > 1 {
-            *self.keyframes[i].cel.mesh_cache.lock() = CelMeshCache::default();
-        }
         Arc::make_mut(&mut self.keyframes[i])
     }
 

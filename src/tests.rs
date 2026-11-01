@@ -1450,11 +1450,34 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
     assert!(timeline_ui::timeline_remove_frame(&mut app));
     assert_eq!(app.doc.root.layers[1].keyframes.len(), kf_count_before - 1);
 
-    let cel = app.doc.root.layers[1].cel_at(0).unwrap();
-    let m1 = cel.cached_screen_mesh(1.0, Vec2::ZERO, false);
-    let m2 = cel.cached_screen_mesh(1.0, Vec2::ZERO, false);
+    let m1 = app
+        .doc
+        .root
+        .resolved_cel_screen_mesh(
+            1,
+            0,
+            1.0,
+            Vec2::ZERO,
+            false,
+            kurbo::Affine::IDENTITY,
+            &app.doc.library,
+        )
+        .unwrap();
+    let m2 = app
+        .doc
+        .root
+        .resolved_cel_screen_mesh(
+            1,
+            0,
+            1.0,
+            Vec2::ZERO,
+            false,
+            kurbo::Affine::IDENTITY,
+            &app.doc.library,
+        )
+        .unwrap();
     assert!(!m1.is_empty());
-    assert!(std::sync::Arc::ptr_eq(&m1, &m2));
+    assert!(!std::sync::Arc::ptr_eq(&m1, &m2) && m1.vertices == m2.vertices);
     timeline_ui::toggle_playback(&mut app);
     assert!(app.timeline_ui.is_playing);
     app.doc.root.current_frame = 0;
@@ -11106,50 +11129,6 @@ fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
     use std::sync::Arc;
     use std::time::Instant;
 
-    // 0. keyframe_mut で複製が起きる際、Undo 側に残る古いキーフレームの cel.mesh_cache が空になること
-    {
-        let mut app = Is2dApp::default();
-        let _ = apply(
-            &mut app,
-            Action::PaintStroke {
-                points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
-                radius: 5.0,
-                color: Color32::RED,
-            },
-        );
-        // 画面座標メッシュキャッシュを生成させる
-        let _ = app.doc.root.layers[0].keyframes[0]
-            .cel
-            .cached_screen_mesh(1.0, Vec2::ZERO, false);
-        assert!(
-            app.doc.root.layers[0].keyframes[0]
-                .cel
-                .mesh_cache
-                .lock()
-                .screen_cache
-                .is_some()
-        );
-        // 次のストロークで UndoEntry に記録されたのち keyframe_mut(0) で書き換えが走る
-        let _ = apply(
-            &mut app,
-            Action::PaintStroke {
-                points: vec![Point::new(100.0, 140.0), Point::new(160.0, 140.0)],
-                radius: 5.0,
-                color: Color32::BLUE,
-            },
-        );
-        let prev_entry = app.history.undo_stack.back().unwrap();
-        assert!(
-            prev_entry.timeline.layers[0].keyframes[0]
-                .cel
-                .mesh_cache
-                .lock()
-                .screen_cache
-                .is_none(),
-            "Undo スタックに残る古いキーフレームの cel.mesh_cache が空になっていること"
-        );
-    }
-
     // 1. 10レイヤー × 3,000キーフレームのタイムラインで、1ストロークの描画と1回の Undo がそれぞれ 5ms 以内
     {
         let mut app = Is2dApp::default();
@@ -12357,8 +12336,8 @@ fn test_g6_1_resolved_cel_cache_byte_limit_and_2min_playback_memory() {
         )
         .unwrap();
     assert!(
-        std::sync::Arc::ptr_eq(&pure_m1, &pure_m2),
-        "トゥイーンでない普通のセルは結合メッシュキャッシュ（Tier 2/3）を再利用すること"
+        !std::sync::Arc::ptr_eq(&pure_m1, &pure_m2) && pure_m1.vertices == pure_m2.vertices,
+        "普通のセルも結合メッシュキャッシュを持たず毎コマ FillShape::fill_mesh から構築すること"
     );
 
     // 2. 2分アニメ（2,880フレーム）のトゥイーン再生後も解決済みメッシュキャッシュが溜まらずメモリが増えないこと
@@ -12437,11 +12416,6 @@ fn test_g6_1_resolved_cel_cache_byte_limit_and_2min_playback_memory() {
         assert!(mesh.is_some());
     }
 
-    let cache = app.doc.root.layers[0].keyframes[0].cel.mesh_cache.lock();
-    assert!(
-        cache.screen_cache.is_none(),
-        "トゥイーンセルにはスクリーンメッシュキャッシュが溜まらないこと"
-    );
     #[cfg(target_os = "macos")]
     {
         let rss_after = current_process_rss_bytes();
@@ -12584,4 +12558,111 @@ fn test_other_2_cmd_q_triggers_close_confirm_and_does_not_switch_tool() {
             .contains(&egui::ViewportCommand::Close),
         "『保存せずに閉じる』を選ぶと ViewportCommand::Close が発行されて終了すること"
     );
+}
+
+#[test]
+fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+
+    // 1. 図形1を描画する
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(180.0, 100.0)],
+            radius: 10.0,
+            color: Color32::RED,
+        },
+    );
+    app.refresh_scene_base();
+    assert_eq!(app.scene().len(), 1);
+    let shape1_id = app.scene().get(0).unwrap().shape_id;
+
+    // ステージ側（SceneBaseCache）の図形1に fill_mesh, hit_bez_path, screen_mesh_cache, selection_mesh, selection_screen_mesh をすべて生成させる
+    {
+        let stage_s1 = app.scene().get(0).unwrap();
+        let _ = stage_s1.fill_mesh();
+        assert!(stage_s1.contains_point(Point::new(140.0, 100.0)));
+        let _ = stage_s1.cached_screen_mesh(1.0, Vec2::ZERO, false);
+        let _ = stage_s1.cached_selection_screen_mesh(1.0, Vec2::ZERO);
+        assert!(stage_s1.has_cached_fill_mesh());
+        assert!(stage_s1.has_cached_hit_bez_path());
+        assert!(stage_s1.has_any_screen_cache());
+    }
+
+    // 2. 離れた位置に図形2を描画して書き戻し（edit_layers）を発生させる
+    //    未変更の図形1（kept パス）は fill_mesh と hit_bez_path だけを引き継ぎ、画面用キャッシュを持たないこと
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(400.0, 300.0), Point::new(480.0, 300.0)],
+            radius: 10.0,
+            color: Color32::BLUE,
+        },
+    );
+    let doc_shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+    assert_eq!(doc_shapes.len(), 2);
+    let doc_s1 = doc_shapes.iter().find(|s| s.shape_id == shape1_id).unwrap();
+    assert!(
+        doc_s1.has_cached_fill_mesh(),
+        "書き戻し後、未変更の文書側図形には fill_mesh が引き継がれること"
+    );
+    assert!(
+        doc_s1.has_cached_hit_bez_path(),
+        "書き戻し後、未変更の文書側図形には hit_bez_path が引き継がれること"
+    );
+    for s in doc_shapes.iter() {
+        assert!(
+            !s.has_any_screen_cache(),
+            "書き戻し後、文書側の図形は screen_mesh_cache や選択表示用メッシュを持たないこと"
+        );
+    }
+
+    // 3. 図形をグループ化して選択表示・移動（変更図形の local_s 書き戻しパス）を行ったあとも、文書側の図形が画面用キャッシュを持たないこと
+    app.refresh_scene_base();
+    for s in app.scene().iter() {
+        let _ = s.cached_screen_mesh(1.25, Vec2::new(10.0, 20.0), false);
+        let _ = s.cached_selection_screen_mesh(1.25, Vec2::new(10.0, 20.0));
+        assert!(s.has_any_screen_cache());
+    }
+    let all_ids: Vec<_> = app.scene().iter().cloned().collect();
+    for s in &all_ids {
+        app.session.selection.insert_shape(s);
+    }
+    let _ = apply(&mut app, Action::Group);
+    for s in app.scene().iter() {
+        let _ = s.cached_screen_mesh(1.25, Vec2::new(10.0, 20.0), false);
+        let _ = s.cached_selection_screen_mesh(1.25, Vec2::new(10.0, 20.0));
+    }
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(15.0, -10.0),
+        },
+    );
+    for s in app.doc.root.layers[0].keyframes[0].cel.shapes.iter() {
+        assert!(
+            !s.has_any_screen_cache(),
+            "グループ移動後の書き戻しでも、文書側の図形が画面用キャッシュを持たないこと"
+        );
+    }
+
+    // 4. シンボル変換後も、シンボル定義内の文書図形が画面用キャッシュを持たないこと
+    for s in app.scene().iter() {
+        let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
+        let _ = s.cached_selection_screen_mesh(1.0, Vec2::ZERO);
+    }
+    let _ = apply(&mut app, Action::ConvertToSymbol);
+    assert_eq!(app.doc.library.len(), 1);
+    for s in app.doc.library[0].timeline.layers[0].keyframes[0]
+        .cel
+        .shapes
+        .iter()
+    {
+        assert!(
+            !s.has_any_screen_cache(),
+            "シンボル定義内の文書図形も画面用キャッシュを持たないこと"
+        );
+    }
 }

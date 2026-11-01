@@ -242,6 +242,7 @@ impl SymbolDef {
     pub(crate) fn new(id: u64, name: String, mut local_shapes: Vec<FillShape>) -> Self {
         for s in &mut local_shapes {
             s.layer_id = 1;
+            s.clear_screen_caches();
         }
         let mut timeline = Timeline::default();
         timeline.layers[0].keyframe_mut(0).cel = Cel::new(local_shapes);
@@ -1196,13 +1197,27 @@ impl Timeline {
         layer.evaluate_shapes_at((frame, frame), layer.id, SymbolEvalCtx::new(library))
     }
 
-    fn build_uncached_world_batch_mesh(
+    fn build_cel_world_batch_mesh(
         &self,
         layer_idx: usize,
         frame: usize,
         world_xform: Affine,
         library: &[SymbolDef],
     ) -> Option<Mesh> {
+        let layer = self.layers.get(layer_idx)?;
+        let kf_idx = layer.keyframe_index_at(frame)?;
+        let kf = &layer.keyframes[kf_idx];
+        if kf.cel.is_empty() {
+            return None;
+        }
+        let has_tween = layer.interpolated_tween_binding_at(frame).is_some();
+        if !has_tween && kf.cel.instances.is_empty() && world_xform == Affine::IDENTITY {
+            let mut batch = Mesh::default();
+            for s in kf.cel.shapes.iter() {
+                append_mesh(&mut batch, s.fill_mesh());
+            }
+            return (!batch.is_empty()).then_some(batch);
+        }
         let mut resolved = self.evaluate_layer_shapes_at(layer_idx, frame, library);
         if world_xform != Affine::IDENTITY {
             for s in &mut resolved {
@@ -1217,25 +1232,7 @@ impl Timeline {
         (!batch.is_empty()).then_some(batch)
     }
 
-    fn pure_shape_cel_at(
-        &self,
-        layer_idx: usize,
-        frame: usize,
-        world_xform: Affine,
-    ) -> Option<Option<&Cel>> {
-        let layer = self.layers.get(layer_idx)?;
-        let kf_idx = layer.keyframe_index_at(frame)?;
-        let kf = &layer.keyframes[kf_idx];
-        if kf.cel.is_empty() {
-            return None;
-        }
-        let has_tween = layer.interpolated_tween_binding_at(frame).is_some();
-        let is_pure_shape_cel =
-            !has_tween && kf.cel.instances.is_empty() && world_xform == Affine::IDENTITY;
-        Some(is_pure_shape_cel.then_some(&kf.cel))
-    }
-
-    /// 指定レイヤー・フレームの描画用スクリーン `Arc<Mesh>` を返す（純粋シェイプセルは `Cel` キャッシュを再利用し、シンボル・トゥイーンを含むセルはその場で構築する）
+    /// 指定レイヤー・フレームの描画用スクリーン `Arc<Mesh>` を図形ごとの `fill_mesh` からその場で構築して返す
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolved_cel_screen_mesh(
         &self,
@@ -1247,12 +1244,8 @@ impl Timeline {
         world_xform: Affine,
         library: &[SymbolDef],
     ) -> Option<Arc<Mesh>> {
-        if let Some(cel) = self.pure_shape_cel_at(layer_idx, frame, world_xform)? {
-            return (!cel.shapes.is_empty())
-                .then(|| cel.cached_screen_mesh(zoom, pan, dim_backdrop));
-        }
         let world_batch =
-            self.build_uncached_world_batch_mesh(layer_idx, frame, world_xform, library)?;
+            self.build_cel_world_batch_mesh(layer_idx, frame, world_xform, library)?;
         Some(Arc::new(transform_mesh_to_screen(
             &world_batch,
             zoom,
@@ -1261,7 +1254,7 @@ impl Timeline {
         )))
     }
 
-    /// 指定レイヤー・フレームのオニオンスキン描画用スクリーン `Arc<Mesh>` を返す（純粋シェイプセルは `Cel` キャッシュを再利用し、シンボル・トゥイーンを含むセルはその場で構築する）
+    /// 指定レイヤー・フレームのオニオンスキン描画用スクリーン `Arc<Mesh>` を図形ごとの `fill_mesh` からその場で構築して返す
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolved_cel_onion_mesh(
         &self,
@@ -1273,12 +1266,8 @@ impl Timeline {
         world_xform: Affine,
         library: &[SymbolDef],
     ) -> Option<Arc<Mesh>> {
-        if let Some(cel) = self.pure_shape_cel_at(layer_idx, frame, world_xform)? {
-            return (!cel.shapes.is_empty())
-                .then(|| cel.cached_onion_mesh(zoom, pan, tint_rgb, alpha));
-        }
         let world_batch =
-            self.build_uncached_world_batch_mesh(layer_idx, frame, world_xform, library)?;
+            self.build_cel_world_batch_mesh(layer_idx, frame, world_xform, library)?;
         Some(Arc::new(transform_mesh_to_screen_onion(
             &world_batch,
             zoom,

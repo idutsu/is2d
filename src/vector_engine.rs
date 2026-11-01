@@ -317,9 +317,6 @@ impl Contour {
 /// スクリーン座標変換済みメッシュキャッシュのキー（`(zoom_bits, pan_x_bits, pan_y_bits, dim_backdrop)`）とメッシュのペア
 pub(crate) type ScreenMeshCacheEntry = ((u32, u32, u32, bool), Arc<Mesh>);
 
-/// オニオンスキン変換済みメッシュキャッシュのキー（`(zoom_bits, pan_x_bits, pan_y_bits, tint_rgb, alpha)`）とメッシュのペア
-pub(crate) type OnionMeshCacheEntry = ((u32, u32, u32, [u8; 3], u8), Arc<Mesh>);
-
 /// 選択時ドット柄オーバーレイのスクリーン座標変換済みメッシュキャッシュのキー（`(zoom_bits, pan_x_bits, pan_y_bits)`）とメッシュのペア
 pub(crate) type SelectionScreenMeshCacheEntry = ((u32, u32, u32), Arc<Mesh>);
 
@@ -337,7 +334,7 @@ pub(crate) struct FillShape {
     pub(crate) group_path: Vec<u64>,
     /// このシェイプがシンボルインスタンスに属する場合の紐付け情報
     pub(crate) symbol_instance: Option<SymbolInstanceBinding>,
-    /// メッシュ内容が更新されるたびにインクリメントされるリビジョン番号（セル結合メッシュキャッシュの差分検知用）
+    /// メッシュ内容が更新されるたびにインクリメントされるリビジョン番号（土台キャッシュや書き戻しでの差分検知用）
     pub(crate) mesh_revision: u64,
     bbox: KRect,
     fill_mesh: OnceLock<Arc<Mesh>>,
@@ -423,6 +420,11 @@ impl FillShape {
     pub(crate) fn strip_transient_caches(&mut self) {
         self.fill_mesh = OnceLock::new();
         self.hit_bez_path = OnceLock::new();
+        self.clear_screen_caches();
+    }
+
+    /// 画面表示用の一時キャッシュ（`screen_mesh_cache`, `selection_mesh`, `selection_screen_mesh`）のみを破棄する
+    pub(crate) fn clear_screen_caches(&mut self) {
         *self.screen_mesh_cache.lock() = None;
         *self.selection_mesh.lock() = None;
         *self.selection_screen_mesh.lock() = None;
@@ -440,8 +442,8 @@ impl FillShape {
         true
     }
 
-    /// ドナー図形 `donor` が保持している描画・当たり判定キャッシュをそのまま引き継ぐ
-    pub(crate) fn copy_render_caches_from(&mut self, donor: &Self) {
+    /// ドナー図形 `donor` が保持している幾何キャッシュ（`fill_mesh`, `hit_bez_path`）のみを引き継ぐ
+    pub(crate) fn copy_geometry_caches_from(&mut self, donor: &Self) {
         if self.fill_mesh.get().is_none() {
             if let Some(m) = donor.fill_mesh.get() {
                 let _ = self.fill_mesh.set(Arc::clone(m));
@@ -452,6 +454,11 @@ impl FillShape {
                 let _ = self.hit_bez_path.set(Arc::clone(p));
             }
         }
+    }
+
+    /// ドナー図形 `donor` が保持している描画・当たり判定キャッシュをそのまま引き継ぐ
+    pub(crate) fn copy_render_caches_from(&mut self, donor: &Self) {
+        self.copy_geometry_caches_from(donor);
         if self.screen_mesh_cache.lock().is_none() {
             if let Some(sc) = &*donor.screen_mesh_cache.lock() {
                 *self.screen_mesh_cache.lock() = Some(sc.clone());
@@ -472,6 +479,18 @@ impl FillShape {
     #[cfg(test)]
     pub(crate) fn has_cached_fill_mesh(&self) -> bool {
         self.fill_mesh.get().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_cached_hit_bez_path(&self) -> bool {
+        self.hit_bez_path.get().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_any_screen_cache(&self) -> bool {
+        self.screen_mesh_cache.lock().is_some()
+            || self.selection_mesh.lock().is_some()
+            || self.selection_screen_mesh.lock().is_some()
     }
 
     pub(crate) fn with_layer_id(mut self, layer_id: u64) -> Self {

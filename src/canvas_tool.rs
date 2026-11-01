@@ -3320,6 +3320,9 @@ fn writeback_edited_layer_shapes(
                 }
             }
         }
+        for s in &mut non_symbol_shapes {
+            s.clear_screen_caches();
+        }
         for inst in &mut next_instances {
             if has_world_xform && need_inv {
                 inst.binding.xform = inv_xform * inst.binding.xform;
@@ -3430,7 +3433,7 @@ fn writeback_edited_layer_shapes(
                         }
                         kept.symbol_instance = s.symbol_instance;
                         if !has_world_xform {
-                            kept.copy_render_caches_from(s);
+                            kept.copy_geometry_caches_from(s);
                         }
                         non_symbol_shapes.push(kept);
                         continue;
@@ -3444,6 +3447,7 @@ fn writeback_edited_layer_shapes(
                     stage_s.copy_render_caches_from(s);
                     *s = stage_s;
                 }
+                local_s.clear_screen_caches();
                 non_symbol_shapes.push(local_s);
             }
         }
