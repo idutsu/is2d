@@ -11749,6 +11749,109 @@ fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
     );
 }
 
+#[test]
+fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
+    use crate::doc_actions::{apply, Action};
+    use crate::symbol::{SymbolLoopMode, TweenRotate};
+
+    let mut app = Is2dApp::default();
+
+    // 3フレームのループシンボルを作成
+    let mut s0 = make_stroke(Point::new(0.0, 0.0), Point::new(20.0, 0.0), 4.0, Color32::RED);
+    s0[0].layer_id = 1;
+    let sym_id = app.doc.register_new_symbol(s0);
+    {
+        let sym = app.doc.find_symbol_mut(sym_id).unwrap();
+        sym.timeline.resize_total_frames(3);
+    }
+
+    // ルートにシンボルを配置し、Frame 0..4 のクラシックトゥイーンを作成
+    app.doc.root.resize_total_frames(8);
+    let inst0 = timeline::SymbolInstance {
+        binding: symbol::SymbolInstanceBinding {
+            instance_gid: 1,
+            symbol_id: sym_id,
+            xform: kurbo::Affine::translate((100.0, 100.0)),
+            pivot: Point::ZERO,
+            loop_mode: SymbolLoopMode::Loop,
+            first_frame: 0,
+        },
+        layer_id: 1,
+        parent_scope: Vec::new(),
+        shape_order_index: 0,
+    };
+    app.doc.root.layers[0]
+        .keyframe_mut(0)
+        .cel
+        .set_parts(Vec::new(), vec![inst0]);
+    let _ = apply(&mut app, Action::ToggleTween);
+    let _ = apply(
+        &mut app,
+        Action::SetTweenRotate {
+            rotate: TweenRotate::Clockwise,
+        },
+    );
+
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
+    timeline_ui::timeline_insert_keyframe(&mut app, true);
+    let inst4 = timeline::SymbolInstance {
+        binding: symbol::SymbolInstanceBinding {
+            instance_gid: 1,
+            symbol_id: sym_id,
+            xform: kurbo::Affine::translate((300.0, 100.0)),
+            pivot: Point::ZERO,
+            loop_mode: SymbolLoopMode::Loop,
+            first_frame: 1,
+        },
+        layer_id: 1,
+        parent_scope: Vec::new(),
+        shape_order_index: 0,
+    };
+    app.doc.root.layers[0]
+        .keyframe_mut(1)
+        .cel
+        .set_parts(Vec::new(), vec![inst4]);
+
+    // 1. トゥイーン途中 (Frame 2) で F6 キーフレーム挿入：中割り座標 (200, 100)・first_frame=2・tween=true・Clockwise が引き継がれること
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
+    timeline_ui::timeline_insert_keyframe(&mut app, true);
+    let kf_mid = &app.doc.root.layers[0].keyframes[1];
+    assert_eq!(kf_mid.start_frame, 2);
+    assert!(kf_mid.tween);
+    assert_eq!(kf_mid.tween_rotate, TweenRotate::Clockwise);
+    let b_mid = kf_mid.cel.instances[0].binding;
+    assert!((b_mid.xform.as_coeffs()[4] - 200.0).abs() < 1e-6);
+    assert_eq!(b_mid.first_frame, 2);
+
+    // 2. 保持フレーム上 (Frame 6、Frame 4 キーフレームからの経過2コマ) で F6 キーフレーム挿入：first_frame が +2 進んだ値になること
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 6);
+    timeline_ui::timeline_insert_keyframe(&mut app, true);
+    let kf_hold = &app.doc.root.layers[0].keyframes[3];
+    assert_eq!(kf_hold.start_frame, 6);
+    assert_eq!(kf_hold.cel.instances[0].binding.first_frame, 3);
+
+    // 3. フレーム範囲の複製がこれまでどおり動くこと
+    app.doc.root.cell_selection = Some(timeline::TimelineCellSelection::from_corners(0, 1, 0, 3));
+    let _ = apply(
+        &mut app,
+        Action::MoveOrCopyFrames {
+            sel: timeline::TimelineCellSelection::from_corners(0, 1, 0, 3),
+            layer_delta: 0,
+            frame_delta: 4,
+            copy_mode: true,
+        },
+    );
+    assert!(
+        app.doc
+            .root
+            .layers[0]
+            .keyframes
+            .iter()
+            .any(|kf| kf.start_frame == 5)
+    );
+}
+
+
 
 
 

@@ -661,88 +661,13 @@ impl Layer {
             return existing_idx;
         }
 
-        let lid = self.id;
-        let prev_kf_start = self
-            .keyframe_index_at(frame)
-            .map(|i| self.keyframes[i].start_frame)
-            .unwrap_or(frame);
-        let elapsed = frame.saturating_sub(prev_kf_start);
-        let split_tween_binding = if clone_prev {
-            self.interpolated_tween_binding_at(frame)
+        let new_kf = if clone_prev {
+            self.snapshot_keyframe_at(frame, frame)
         } else {
-            None
-        };
-
-        let cloned_cel = if clone_prev {
-            self.cel_at(frame)
-                .map(|c| {
-                    let cloned_shapes: Vec<FillShape> = c
-                        .shapes
-                        .iter()
-                        .cloned()
-                        .map(|mut s| {
-                            s.layer_id = lid;
-                            if let Some((start_b, mut interp_b)) = split_tween_binding {
-                                if interp_b.loop_mode != SymbolLoopMode::SingleFrame {
-                                    interp_b.first_frame =
-                                        interp_b.first_frame.saturating_add(elapsed);
-                                }
-                                if start_b.xform.determinant().abs() > 1e-9 {
-                                    let delta = interp_b.xform * start_b.xform.inverse();
-                                    s.transform(delta);
-                                    s.symbol_instance = Some(interp_b);
-                                }
-                            } else if let Some(mut b) = s.symbol_instance {
-                                if b.loop_mode != SymbolLoopMode::SingleFrame {
-                                    b.first_frame = b.first_frame.saturating_add(elapsed);
-                                    s.symbol_instance = Some(b);
-                                }
-                            }
-                            s
-                        })
-                        .collect();
-                    let cloned_instances: Vec<SymbolInstance> = c
-                        .instances
-                        .iter()
-                        .cloned()
-                        .map(|mut inst| {
-                            inst.layer_id = lid;
-                            if let Some((start_b, interp_b)) = split_tween_binding {
-                                if inst.binding.instance_gid == start_b.instance_gid {
-                                    inst.binding = interp_b;
-                                }
-                            }
-                            if inst.binding.loop_mode != SymbolLoopMode::SingleFrame {
-                                inst.binding.first_frame =
-                                    inst.binding.first_frame.saturating_add(elapsed);
-                            }
-                            inst
-                        })
-                        .collect();
-                    Cel::new_with_instances(cloned_shapes, cloned_instances)
-                })
-                .unwrap_or_default()
-        } else {
-            Cel::default()
-        };
-
-        let inherited_rotate = if split_tween_binding.is_some() {
-            self.keyframe_index_at(frame)
-                .map(|idx| self.keyframes[idx].tween_rotate)
-                .unwrap_or(TweenRotate::Auto)
-        } else {
-            TweenRotate::Auto
+            Keyframe::new_blank(frame)
         };
         let insert_idx = self.keyframes.partition_point(|kf| kf.start_frame < frame);
-        self.keyframes.insert(
-            insert_idx,
-            Arc::new(Keyframe {
-                start_frame: frame,
-                cel: cloned_cel,
-                tween: split_tween_binding.is_some(),
-                tween_rotate: inherited_rotate,
-            }),
-        );
+        self.keyframes.insert(insert_idx, Arc::new(new_kf));
         insert_idx
     }
 
@@ -843,21 +768,6 @@ impl Layer {
             .cloned()
             .map(|mut s| {
                 s.layer_id = lid;
-                if let Some((start_b, mut interp_b)) = split_tween_binding {
-                    if interp_b.loop_mode != SymbolLoopMode::SingleFrame {
-                        interp_b.first_frame = interp_b.first_frame.saturating_add(elapsed);
-                    }
-                    if start_b.xform.determinant().abs() > 1e-9 {
-                        let delta = interp_b.xform * start_b.xform.inverse();
-                        s.transform(delta);
-                        s.symbol_instance = Some(interp_b);
-                    }
-                } else if let Some(mut b) = s.symbol_instance {
-                    if b.loop_mode != SymbolLoopMode::SingleFrame {
-                        b.first_frame = b.first_frame.saturating_add(elapsed);
-                        s.symbol_instance = Some(b);
-                    }
-                }
                 s
             })
             .collect();
