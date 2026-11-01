@@ -7,7 +7,7 @@ use kurbo::{Affine, Point};
 #[cfg(test)]
 pub(crate) use crate::timeline::interpolate_affine_with_pivot;
 pub(crate) use crate::timeline::{ResolvedCelSig, SymbolInstance, TweenRotate, TweenState};
-use crate::timeline::{lru_get, mesh_byte_size, Cel, CelMeshCache, Layer, Timeline};
+use crate::timeline::{Cel, Layer, Timeline};
 use crate::vector_engine::{
     append_mesh, next_shape_id, transform_mesh_to_screen, transform_mesh_to_screen_onion,
     union_bounding_boxes, Contour, FillShape, SyncCache,
@@ -814,7 +814,7 @@ impl Document {
 }
 
 // ============================================================================
-// 2. 解決済みセルメッシュキャッシュ署名計算（衝突ゼロ署名 `ResolvedCelSig`）
+// 2. セル署名計算（衝突ゼロ署名 `ResolvedCelSig`：土台キャッシュ・背景キャッシュ用）
 // ============================================================================
 
 impl ResolvedCelSig {
@@ -852,41 +852,6 @@ impl ResolvedCelSig {
             && self.tween_rotate == kf.tween_rotate
             && self.next_kf == next_kf
             && self.are_referenced_symbols_current(library)
-    }
-}
-
-/// 解決済みセルメッシュキャッシュの署名照合・遅延構築クエリ（`Copy` かつヒープ確保ゼロ）
-#[derive(Clone, Copy)]
-pub(crate) enum ResolvedSigQuery<'a> {
-    LayerKeyframe {
-        layer: &'a Layer,
-        kf_idx: usize,
-        library: &'a [SymbolDef],
-    },
-}
-
-impl<'a> ResolvedSigQuery<'a> {
-    /// 既存のキャッシュ済み署名 `sig` が現在も有効かをヒープアロケーションなしで高速判定する
-    #[inline]
-    pub(crate) fn matches(self, sig: &ResolvedCelSig) -> bool {
-        match self {
-            Self::LayerKeyframe {
-                layer,
-                kf_idx,
-                library,
-            } => sig.matches_layer_keyframe(layer, kf_idx, library),
-        }
-    }
-
-    /// キャッシュ署名不一致（初回またはシンボル/セル編集後）の場合にのみ新しい `ResolvedCelSig` を構築する
-    pub(crate) fn compute(self) -> ResolvedCelSig {
-        match self {
-            Self::LayerKeyframe {
-                layer,
-                kf_idx,
-                library,
-            } => compute_resolved_cel_signature(layer, kf_idx, library),
-        }
     }
 }
 
@@ -1022,149 +987,6 @@ pub(crate) fn compute_backdrop_layer_cel_signature(
 // ============================================================================
 
 impl Cel {
-    fn ensure_resolved_world_batch(
-        &self,
-        cache: &mut CelMeshCache,
-        sig_query: ResolvedSigQuery<'_>,
-        eval_frame_key: usize,
-        xform_key: [u64; 6],
-        build_fn: impl FnOnce() -> Option<Mesh>,
-    ) -> Option<Arc<Mesh>> {
-        if cache.resolved_xform_key != Some(xform_key)
-            || !cache
-                .resolved_sig
-                .as_ref()
-                .is_some_and(|sig| sig_query.matches(sig))
-        {
-            cache.resolved_xform_key = Some(xform_key);
-            cache.resolved_sig = Some(sig_query.compute());
-            cache.clear_resolved_caches();
-        }
-        if let Some(opt_mesh) = lru_get(&mut cache.resolved_world_batches, &eval_frame_key) {
-            return opt_mesh;
-        }
-        let built = build_fn().map(Arc::new);
-        cache.evict_resolved_for(built.as_deref().map_or(0, mesh_byte_size));
-        cache.resolved_world_batches.push((
-            eval_frame_key,
-            built.clone(),
-            crate::vector_engine::next_mesh_revision(),
-        ));
-        built
-    }
-
-    /// シンボルインスタンスやトゥイーンを含むセルの解決済みスクリーン座標 `Arc<Mesh>` をキャッシュ経由で返す
-    pub(crate) fn cached_resolved_screen_mesh(
-        &self,
-        (sig_query, eval_frame_key, world_xform): (ResolvedSigQuery<'_>, usize, Affine),
-        zoom: f32,
-        pan: Vec2,
-        dim_backdrop: bool,
-        build_fn: impl FnOnce() -> Option<Mesh>,
-    ) -> Option<Arc<Mesh>> {
-        let mut cache = self.mesh_cache.lock();
-        let xform_key = world_xform.as_coeffs().map(f64::to_bits);
-        let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
-        if cache.resolved_view_key != Some(view_key) {
-            cache.resolved_view_key = Some(view_key);
-            cache.clear_resolved_screen_and_onion_caches();
-        }
-        let key = (
-            eval_frame_key,
-            view_key.0,
-            view_key.1,
-            view_key.2,
-            dim_backdrop,
-        );
-        if cache.resolved_xform_key == Some(xform_key)
-            && cache
-                .resolved_sig
-                .as_ref()
-                .is_some_and(|sig| sig_query.matches(sig))
-        {
-            if let Some(mesh) = lru_get(&mut cache.resolved_screen_caches, &key) {
-                return Some(mesh);
-            }
-        }
-        let world_batch = self.ensure_resolved_world_batch(
-            &mut cache,
-            sig_query,
-            eval_frame_key,
-            xform_key,
-            build_fn,
-        )?;
-        let screen_mesh = Arc::new(transform_mesh_to_screen(
-            &world_batch,
-            zoom,
-            pan,
-            dim_backdrop,
-        ));
-        cache.evict_resolved_for(mesh_byte_size(&screen_mesh));
-        cache.resolved_screen_caches.push((
-            key,
-            Arc::clone(&screen_mesh),
-            crate::vector_engine::next_mesh_revision(),
-        ));
-        Some(screen_mesh)
-    }
-
-    /// シンボルインスタンスやトゥイーンを含むセルの解決済みオニオンスキン `Arc<Mesh>` をキャッシュ経由で返す
-    pub(crate) fn cached_resolved_onion_mesh(
-        &self,
-        (sig_query, eval_frame_key, world_xform): (ResolvedSigQuery<'_>, usize, Affine),
-        zoom: f32,
-        pan: Vec2,
-        (tint_rgb, alpha): ([u8; 3], u8),
-        build_fn: impl FnOnce() -> Option<Mesh>,
-    ) -> Option<Arc<Mesh>> {
-        let mut cache = self.mesh_cache.lock();
-        let xform_key = world_xform.as_coeffs().map(f64::to_bits);
-        let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
-        if cache.resolved_view_key != Some(view_key) {
-            cache.resolved_view_key = Some(view_key);
-            cache.clear_resolved_screen_and_onion_caches();
-        }
-        let key = (
-            eval_frame_key,
-            view_key.0,
-            view_key.1,
-            view_key.2,
-            tint_rgb,
-            alpha,
-        );
-        if cache.resolved_xform_key == Some(xform_key)
-            && cache
-                .resolved_sig
-                .as_ref()
-                .is_some_and(|sig| sig_query.matches(sig))
-        {
-            if let Some(mesh) = lru_get(&mut cache.resolved_onion_caches, &key) {
-                return Some(mesh);
-            }
-        }
-        let world_batch = self.ensure_resolved_world_batch(
-            &mut cache,
-            sig_query,
-            eval_frame_key,
-            xform_key,
-            build_fn,
-        )?;
-        let onion_mesh = Arc::new(transform_mesh_to_screen_onion(
-            &world_batch,
-            zoom,
-            pan,
-            tint_rgb,
-            alpha,
-        ));
-        cache.evict_resolved_for(mesh_byte_size(&onion_mesh));
-        cache.resolved_onion_caches.push((
-            key,
-            Arc::clone(&onion_mesh),
-            crate::vector_engine::next_mesh_revision(),
-        ));
-        Some(onion_mesh)
-    }
-
     /// このセル内に、複数フレームまたは先頭フレーム空白の動的シンボルインスタンス（入れ子含む）が含まれているかを返す
     pub(crate) fn has_dynamic_symbol(&self, library: &[SymbolDef]) -> bool {
         self.instances.iter().any(|inst| {
@@ -1395,13 +1217,12 @@ impl Timeline {
         (!batch.is_empty()).then_some(batch)
     }
 
-    fn cel_cache_context_at<'a>(
-        &'a self,
+    fn pure_shape_cel_at(
+        &self,
         layer_idx: usize,
         frame: usize,
         world_xform: Affine,
-        library: &'a [SymbolDef],
-    ) -> Option<(&'a Cel, Option<(ResolvedSigQuery<'a>, usize)>)> {
+    ) -> Option<Option<&Cel>> {
         let layer = self.layers.get(layer_idx)?;
         let kf_idx = layer.keyframe_index_at(frame)?;
         let kf = &layer.keyframes[kf_idx];
@@ -1411,26 +1232,10 @@ impl Timeline {
         let has_tween = layer.interpolated_tween_binding_at(frame).is_some();
         let is_pure_shape_cel =
             !has_tween && kf.cel.instances.is_empty() && world_xform == Affine::IDENTITY;
-        if is_pure_shape_cel {
-            return Some((&kf.cel, None));
-        }
-        let all_single_frame = !has_tween
-            && kf
-                .cel
-                .instances
-                .iter()
-                .all(|inst| inst.binding.loop_mode == SymbolLoopMode::SingleFrame);
-        let is_dynamic = !all_single_frame && (has_tween || kf.cel.has_dynamic_symbol(library));
-        let eval_frame_key = if is_dynamic { frame } else { kf.start_frame };
-        let sig_query = ResolvedSigQuery::LayerKeyframe {
-            layer,
-            kf_idx,
-            library,
-        };
-        Some((&kf.cel, Some((sig_query, eval_frame_key))))
+        Some(is_pure_shape_cel.then_some(&kf.cel))
     }
 
-    /// 指定レイヤー・フレームの描画用スクリーン `Arc<Mesh>` を返す（純粋シェイプセルもシンボル・トゥイーンを含むセルも `Cel` キャッシュを再利用する）
+    /// 指定レイヤー・フレームの描画用スクリーン `Arc<Mesh>` を返す（純粋シェイプセルは `Cel` キャッシュを再利用し、シンボル・トゥイーンを含むセルはその場で構築する）
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolved_cel_screen_mesh(
         &self,
@@ -1442,21 +1247,21 @@ impl Timeline {
         world_xform: Affine,
         library: &[SymbolDef],
     ) -> Option<Arc<Mesh>> {
-        let (cel, resolved_ctx) = self.cel_cache_context_at(layer_idx, frame, world_xform, library)?;
-        let Some((sig, eval_frame_key)) = resolved_ctx else {
+        if let Some(cel) = self.pure_shape_cel_at(layer_idx, frame, world_xform)? {
             return (!cel.shapes.is_empty())
                 .then(|| cel.cached_screen_mesh(zoom, pan, dim_backdrop));
-        };
-        cel.cached_resolved_screen_mesh(
-            (sig, eval_frame_key, world_xform),
+        }
+        let world_batch =
+            self.build_uncached_world_batch_mesh(layer_idx, frame, world_xform, library)?;
+        Some(Arc::new(transform_mesh_to_screen(
+            &world_batch,
             zoom,
             pan,
             dim_backdrop,
-            || self.build_uncached_world_batch_mesh(layer_idx, frame, world_xform, library),
-        )
+        )))
     }
 
-    /// 指定レイヤー・フレームのオニオンスキン描画用スクリーン `Arc<Mesh>` を返す（トゥイーン補間・複数フレームシンボルもキャッシュ経由で高速返却）
+    /// 指定レイヤー・フレームのオニオンスキン描画用スクリーン `Arc<Mesh>` を返す（純粋シェイプセルは `Cel` キャッシュを再利用し、シンボル・トゥイーンを含むセルはその場で構築する）
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolved_cel_onion_mesh(
         &self,
@@ -1468,17 +1273,18 @@ impl Timeline {
         world_xform: Affine,
         library: &[SymbolDef],
     ) -> Option<Arc<Mesh>> {
-        let (cel, resolved_ctx) = self.cel_cache_context_at(layer_idx, frame, world_xform, library)?;
-        let Some((sig, eval_frame_key)) = resolved_ctx else {
+        if let Some(cel) = self.pure_shape_cel_at(layer_idx, frame, world_xform)? {
             return (!cel.shapes.is_empty())
                 .then(|| cel.cached_onion_mesh(zoom, pan, tint_rgb, alpha));
-        };
-        cel.cached_resolved_onion_mesh(
-            (sig, eval_frame_key, world_xform),
+        }
+        let world_batch =
+            self.build_uncached_world_batch_mesh(layer_idx, frame, world_xform, library)?;
+        Some(Arc::new(transform_mesh_to_screen_onion(
+            &world_batch,
             zoom,
             pan,
-            (tint_rgb, alpha),
-            || self.build_uncached_world_batch_mesh(layer_idx, frame, world_xform, library),
-        )
+            tint_rgb,
+            alpha,
+        )))
     }
 }
