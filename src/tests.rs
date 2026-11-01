@@ -12367,6 +12367,215 @@ fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
     assert_eq!(app.scene().len(), 0);
 }
 
+#[test]
+fn test_g6_1_resolved_cel_cache_byte_limit_and_2min_playback_memory() {
+    use crate::symbol::SymbolLoopMode;
+    use crate::timeline::{mesh_byte_size, CelMeshCache, MAX_RESOLVED_CEL_CACHE_BYTES};
+    use eframe::egui::epaint::Vertex;
+    use eframe::egui::Mesh;
+    use std::sync::Arc;
+
+    // 1. 1セルの3種類のキャッシュで容量上限 (64MiB) を共有し、上限を超えて入れても合計が上限以下に保たれること
+    {
+        let mut cache = CelMeshCache::default();
+        // 1個あたり約 10 MiB のメッシュを作る (524,288 vertices * 20B = 10,485,760 B)
+        let make_10mb_mesh = || -> Arc<Mesh> {
+            let mut m = Mesh::default();
+            m.vertices.resize(
+                524_288,
+                Vertex {
+                    pos: Pos2::ZERO,
+                    uv: Pos2::ZERO,
+                    color: Color32::WHITE,
+                },
+            );
+            Arc::new(m)
+        };
+        let one_size = mesh_byte_size(&make_10mb_mesh());
+        assert_eq!(one_size, 524_288 * 20);
+
+        for i in 0..10 {
+            let m = make_10mb_mesh();
+            match i % 3 {
+                0 => {
+                    cache.evict_resolved_for(one_size);
+                    cache.resolved_world_batches.push((
+                        i,
+                        Some(m),
+                        vector_engine::next_mesh_revision(),
+                    ));
+                }
+                1 => {
+                    cache.evict_resolved_for(one_size);
+                    cache.resolved_screen_caches.push((
+                        (i, 0, 0, 0, false),
+                        m,
+                        vector_engine::next_mesh_revision(),
+                    ));
+                }
+                _ => {
+                    cache.evict_resolved_for(one_size);
+                    cache.resolved_onion_caches.push((
+                        (i, 0, 0, 0, [0, 0, 0], 128),
+                        m,
+                        vector_engine::next_mesh_revision(),
+                    ));
+                }
+            }
+            let actual_bytes: usize = cache
+                .resolved_world_batches
+                .iter()
+                .map(|(_, m, _)| m.as_deref().map_or(0, mesh_byte_size))
+                .sum::<usize>()
+                + cache
+                    .resolved_screen_caches
+                    .iter()
+                    .map(|(_, m, _)| mesh_byte_size(m))
+                    .sum::<usize>()
+                + cache
+                    .resolved_onion_caches
+                    .iter()
+                    .map(|(_, m, _)| mesh_byte_size(m))
+                    .sum::<usize>();
+            assert_eq!(cache.resolved_cache_bytes, actual_bytes);
+            assert!(
+                cache.resolved_cache_bytes <= MAX_RESOLVED_CEL_CACHE_BYTES,
+                "合計バイト数が常に上限 64MiB 以下であること: {} > {}",
+                cache.resolved_cache_bytes,
+                MAX_RESOLVED_CEL_CACHE_BYTES
+            );
+        }
+        // 10MiB × 6個 = 60MiB <= 64MiB なので直近6件（i = 4..=9）だけが残っていること
+        let total_entries = cache.resolved_world_batches.len()
+            + cache.resolved_screen_caches.len()
+            + cache.resolved_onion_caches.len();
+        assert_eq!(total_entries, 6);
+        assert!(cache.resolved_world_batches.iter().all(|(k, _, _)| *k >= 4));
+        assert!(
+            cache
+                .resolved_screen_caches
+                .iter()
+                .all(|((k, _, _, _, _), _, _)| *k >= 4)
+        );
+        assert!(
+            cache
+                .resolved_onion_caches
+                .iter()
+                .all(|((k, _, _, _, _, _), _, _)| *k >= 4)
+        );
+
+        // ビュー変更で screen / onion だけクリアしたとき、world のバイト数だけが残ること
+        cache.clear_resolved_screen_and_onion_caches();
+        assert_eq!(
+            cache.resolved_cache_bytes,
+            cache.resolved_world_batches.len() * one_size
+        );
+        cache.clear_resolved_caches();
+        assert_eq!(cache.resolved_cache_bytes, 0);
+    }
+
+    // 2. 2分アニメ（2,880フレーム）のトゥイーン再生後のメモリ量を計測・検証
+    {
+        let mut app = Is2dApp::default();
+        let mut sym_shapes = Vec::new();
+        for s_idx in 0..60 {
+            let y = (s_idx as f64) * 6.0;
+            let pts: Vec<Point> = (0..12)
+                .map(|p| Point::new((p as f64) * 20.0, y + ((p + s_idx) % 3) as f64 * 4.0))
+                .collect();
+            let raw = generate_brush_outline_at_zoom(&pts, 5.0, 1.0);
+            let mut shapes = build_smoothed_stroke_shapes_at_zoom(
+                &raw,
+                Color32::from_rgb((s_idx * 4) as u8, 120, 200),
+                1.0,
+            );
+            for s in &mut shapes {
+                s.layer_id = 1;
+            }
+            sym_shapes.extend(shapes);
+        }
+        let sym_id = app.doc.register_new_symbol(sym_shapes);
+
+        app.doc.root.resize_total_frames(2_880);
+        let inst_start = timeline::SymbolInstance {
+            binding: symbol::SymbolInstanceBinding {
+                instance_gid: 1,
+                symbol_id: sym_id,
+                xform: kurbo::Affine::translate((50.0, 50.0)),
+                pivot: Point::ZERO,
+                loop_mode: SymbolLoopMode::Loop,
+                first_frame: 0,
+            },
+            layer_id: 1,
+            parent_scope: Vec::new(),
+            shape_order_index: 0,
+        };
+        let inst_end = timeline::SymbolInstance {
+            binding: symbol::SymbolInstanceBinding {
+                instance_gid: 1,
+                symbol_id: sym_id,
+                xform: kurbo::Affine::translate((650.0, 350.0)) * kurbo::Affine::rotate(1.2),
+                pivot: Point::ZERO,
+                loop_mode: SymbolLoopMode::Loop,
+                first_frame: 0,
+            },
+            layer_id: 1,
+            parent_scope: Vec::new(),
+            shape_order_index: 0,
+        };
+        app.doc.root.layers[0]
+            .keyframe_mut(0)
+            .cel
+            .set_parts(Vec::new(), vec![inst_start]);
+        app.doc.root.layers[0].keyframe_mut(0).tween = true;
+        app.doc.root.layers[0].insert_keyframe(2_879, true);
+        let last_kf_idx = app.doc.root.layers[0].keyframes.len() - 1;
+        app.doc.root.layers[0]
+            .keyframe_mut(last_kf_idx)
+            .cel
+            .set_parts(Vec::new(), vec![inst_end]);
+
+        #[cfg(target_os = "macos")]
+        let rss_before = current_process_rss_bytes();
+
+        for f in 0..2_880 {
+            let mesh = app.doc.root.resolved_cel_screen_mesh(
+                0,
+                f,
+                1.0,
+                Vec2::ZERO,
+                false,
+                kurbo::Affine::IDENTITY,
+                &app.doc.library,
+            );
+            assert!(mesh.is_some());
+        }
+
+        let cache = app.doc.root.layers[0].keyframes[0].cel.mesh_cache.lock();
+        println!(
+            "[G6-1] 2-min (2,880 frames) tween playback: resolved_cache_bytes = {:.2} MiB ({} world, {} screen, {} onion)",
+            cache.resolved_cache_bytes as f64 / (1024.0 * 1024.0),
+            cache.resolved_world_batches.len(),
+            cache.resolved_screen_caches.len(),
+            cache.resolved_onion_caches.len(),
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let rss_after = current_process_rss_bytes();
+            println!(
+                "[G6-1] 2-min (2,880 frames) tween playback RSS: before = {:.2} MB, after = {:.2} MB, delta = {:.2} MB",
+                rss_before as f64 / (1024.0 * 1024.0),
+                rss_after as f64 / (1024.0 * 1024.0),
+                rss_after.saturating_sub(rss_before) as f64 / (1024.0 * 1024.0),
+            );
+        }
+        assert!(
+            cache.resolved_cache_bytes <= MAX_RESOLVED_CEL_CACHE_BYTES,
+            "2,880フレーム再生後もセル解決済みキャッシュ合計が 64MiB 以下であること"
+        );
+    }
+}
+
 
 
 

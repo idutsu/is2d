@@ -196,24 +196,21 @@ fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64, f64, f64) {
 // 1. タイムラインのデータモデル（Cel / Keyframe / Selection / Layer / Timeline）
 // ============================================================================
 
-const MAX_RESOLVED_CEL_CACHE_ENTRIES: usize = 1024;
+pub(crate) const MAX_RESOLVED_CEL_CACHE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) type ResolvedScreenCacheKey = (usize, u32, u32, u32, bool);
 pub(crate) type ResolvedOnionCacheKey = (usize, u32, u32, u32, [u8; 3], u8);
 pub(crate) type LruEntry<K, V> = (K, V, u64);
+
+#[inline]
+pub(crate) fn mesh_byte_size(mesh: &Mesh) -> usize {
+    mesh.vertices.len() * std::mem::size_of::<eframe::egui::epaint::Vertex>()
+        + mesh.indices.len() * 4
+}
 
 pub(crate) fn lru_get<K: PartialEq, V: Clone>(entries: &mut [LruEntry<K, V>], key: &K) -> Option<V> {
     let (_, val, last_used_tick) = entries.iter_mut().find(|(k, _, _)| k == key)?;
     *last_used_tick = crate::vector_engine::next_mesh_revision();
     Some(val.clone())
-}
-
-pub(crate) fn lru_insert<K, V>(entries: &mut Vec<LruEntry<K, V>>, key: K, val: V) {
-    let tick = crate::vector_engine::next_mesh_revision();
-    if entries.len() < MAX_RESOLVED_CEL_CACHE_ENTRIES {
-        entries.push((key, val, tick));
-    } else if let Some(oldest) = entries.iter_mut().min_by_key(|(_, _, t)| *t) {
-        *oldest = (key, val, tick);
-    }
 }
 
 /// セル内の全図形を1つに統合したワールド座標バッチメッシュと、直近の `(zoom, pan)` スクリーン座標・オニオンスキン変換済みキャッシュ
@@ -232,6 +229,66 @@ pub(crate) struct CelMeshCache {
     pub(crate) resolved_world_batches: Vec<LruEntry<usize, Option<Arc<Mesh>>>>,
     pub(crate) resolved_screen_caches: Vec<LruEntry<ResolvedScreenCacheKey, Arc<Mesh>>>,
     pub(crate) resolved_onion_caches: Vec<LruEntry<ResolvedOnionCacheKey, Arc<Mesh>>>,
+    pub(crate) resolved_cache_bytes: usize,
+}
+
+impl CelMeshCache {
+    pub(crate) fn clear_resolved_caches(&mut self) {
+        self.resolved_world_batches.clear();
+        self.resolved_screen_caches.clear();
+        self.resolved_onion_caches.clear();
+        self.resolved_cache_bytes = 0;
+    }
+
+    pub(crate) fn clear_resolved_screen_and_onion_caches(&mut self) {
+        self.resolved_screen_caches.clear();
+        self.resolved_onion_caches.clear();
+        self.resolved_cache_bytes = self
+            .resolved_world_batches
+            .iter()
+            .map(|(_, m, _)| m.as_deref().map_or(0, mesh_byte_size))
+            .sum();
+    }
+
+    pub(crate) fn evict_resolved_for(&mut self, add_bytes: usize) {
+        while self.resolved_cache_bytes.saturating_add(add_bytes) > MAX_RESOLVED_CEL_CACHE_BYTES {
+            let w = self
+                .resolved_world_batches
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (_, _, t))| *t)
+                .map(|(i, (_, _, t))| (0u8, i, *t));
+            let s = self
+                .resolved_screen_caches
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (_, _, t))| *t)
+                .map(|(i, (_, _, t))| (1u8, i, *t));
+            let o = self
+                .resolved_onion_caches
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (_, _, t))| *t)
+                .map(|(i, (_, _, t))| (2u8, i, *t));
+            let Some((which, idx, _)) =
+                [w, s, o].into_iter().flatten().min_by_key(|&(_, _, t)| t)
+            else {
+                break;
+            };
+            let removed = match which {
+                0 => self
+                    .resolved_world_batches
+                    .swap_remove(idx)
+                    .1
+                    .as_deref()
+                    .map_or(0, mesh_byte_size),
+                1 => mesh_byte_size(&self.resolved_screen_caches.swap_remove(idx).1),
+                _ => mesh_byte_size(&self.resolved_onion_caches.swap_remove(idx).1),
+            };
+            self.resolved_cache_bytes = self.resolved_cache_bytes.saturating_sub(removed);
+        }
+        self.resolved_cache_bytes = self.resolved_cache_bytes.saturating_add(add_bytes);
+    }
 }
 
 impl Clone for CelMeshCache {
@@ -247,6 +304,7 @@ impl Clone for CelMeshCache {
             resolved_world_batches: Vec::new(),
             resolved_screen_caches: Vec::new(),
             resolved_onion_caches: Vec::new(),
+            resolved_cache_bytes: 0,
         }
     }
 }

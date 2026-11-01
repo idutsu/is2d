@@ -7,7 +7,7 @@ use kurbo::{Affine, Point};
 #[cfg(test)]
 pub(crate) use crate::timeline::interpolate_affine_with_pivot;
 pub(crate) use crate::timeline::{ResolvedCelSig, SymbolInstance, TweenRotate, TweenState};
-use crate::timeline::{lru_get, lru_insert, Cel, CelMeshCache, Layer, Timeline};
+use crate::timeline::{lru_get, mesh_byte_size, Cel, CelMeshCache, Layer, Timeline};
 use crate::vector_engine::{
     append_mesh, next_shape_id, transform_mesh_to_screen, transform_mesh_to_screen_onion,
     union_bounding_boxes, Contour, FillShape, SyncCache,
@@ -1038,19 +1038,18 @@ impl Cel {
         {
             cache.resolved_xform_key = Some(xform_key);
             cache.resolved_sig = Some(sig_query.compute());
-            cache.resolved_world_batches.clear();
-            cache.resolved_screen_caches.clear();
-            cache.resolved_onion_caches.clear();
+            cache.clear_resolved_caches();
         }
         if let Some(opt_mesh) = lru_get(&mut cache.resolved_world_batches, &eval_frame_key) {
             return opt_mesh;
         }
         let built = build_fn().map(Arc::new);
-        lru_insert(
-            &mut cache.resolved_world_batches,
+        cache.evict_resolved_for(built.as_deref().map_or(0, mesh_byte_size));
+        cache.resolved_world_batches.push((
             eval_frame_key,
             built.clone(),
-        );
+            crate::vector_engine::next_mesh_revision(),
+        ));
         built
     }
 
@@ -1068,8 +1067,7 @@ impl Cel {
         let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
         if cache.resolved_view_key != Some(view_key) {
             cache.resolved_view_key = Some(view_key);
-            cache.resolved_screen_caches.clear();
-            cache.resolved_onion_caches.clear();
+            cache.clear_resolved_screen_and_onion_caches();
         }
         let key = (
             eval_frame_key,
@@ -1101,11 +1099,12 @@ impl Cel {
             pan,
             dim_backdrop,
         ));
-        lru_insert(
-            &mut cache.resolved_screen_caches,
+        cache.evict_resolved_for(mesh_byte_size(&screen_mesh));
+        cache.resolved_screen_caches.push((
             key,
             Arc::clone(&screen_mesh),
-        );
+            crate::vector_engine::next_mesh_revision(),
+        ));
         Some(screen_mesh)
     }
 
@@ -1123,8 +1122,7 @@ impl Cel {
         let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
         if cache.resolved_view_key != Some(view_key) {
             cache.resolved_view_key = Some(view_key);
-            cache.resolved_screen_caches.clear();
-            cache.resolved_onion_caches.clear();
+            cache.clear_resolved_screen_and_onion_caches();
         }
         let key = (
             eval_frame_key,
@@ -1158,11 +1156,12 @@ impl Cel {
             tint_rgb,
             alpha,
         ));
-        lru_insert(
-            &mut cache.resolved_onion_caches,
+        cache.evict_resolved_for(mesh_byte_size(&onion_mesh));
+        cache.resolved_onion_caches.push((
             key,
             Arc::clone(&onion_mesh),
-        );
+            crate::vector_engine::next_mesh_revision(),
+        ));
         Some(onion_mesh)
     }
 
