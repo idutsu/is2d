@@ -1165,6 +1165,8 @@ fn tessellate_lyon_path(
         return Mesh::default();
     }
 
+    buffers.vertices.shrink_to_fit();
+    buffers.indices.shrink_to_fit();
     Mesh {
         vertices: buffers.vertices,
         indices: buffers.indices,
