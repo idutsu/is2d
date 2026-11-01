@@ -11345,6 +11345,87 @@ fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
     }
 }
 
+#[test]
+fn test_g1_3_locked_layer_eyedropper_nested_20x5_fast() {
+    use std::time::Instant;
+
+    let mut app = Is2dApp::default();
+    let target_color = Color32::from_rgb(240, 120, 40);
+    // 空の葉シンボル S1 を起点に、1段あたり20個のインスタンスを5段重ねたシンボル階層（20^5 = 320万経路）を作成
+    let mut prev_sym_id = app.doc.register_new_symbol(Vec::new());
+    let mut next_gid = 100_u64;
+    for _ in 0..4 {
+        let sym_id = app.doc.register_new_symbol(Vec::new());
+        let instances: Vec<timeline::SymbolInstance> = (0..20)
+            .map(|i| {
+                let gid = next_gid;
+                next_gid += 1;
+                timeline::SymbolInstance {
+                    binding: symbol::SymbolInstanceBinding::new(
+                        gid,
+                        prev_sym_id,
+                        kurbo::Affine::translate((i as f64 * 0.5, 0.0)),
+                    ),
+                    layer_id: 1,
+                    parent_scope: Vec::new(),
+                    shape_order_index: 0,
+                }
+            })
+            .collect();
+        let sym = app.doc.find_symbol_mut(sym_id).unwrap();
+        sym.timeline.layers[0]
+            .keyframe_mut(0)
+            .cel
+            .set_parts(Vec::new(), instances);
+        prev_sym_id = sym_id;
+    }
+
+    // ルートのロックレイヤーに色付き図形1個と、最上位シンボル20個（合計 20^5 = 320万経路）を配置
+    let mut bg_shape = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(140.0, 100.0),
+        8.0,
+        target_color,
+    );
+    bg_shape[0].layer_id = 1;
+    let root_instances: Vec<timeline::SymbolInstance> = (0..20)
+        .map(|i| {
+            let gid = next_gid;
+            next_gid += 1;
+            timeline::SymbolInstance {
+                binding: symbol::SymbolInstanceBinding::new(
+                    gid,
+                    prev_sym_id,
+                    kurbo::Affine::translate((i as f64 * 0.5, 0.0)),
+                ),
+                layer_id: 1,
+                parent_scope: Vec::new(),
+                shape_order_index: 1,
+            }
+        })
+        .collect();
+    app.doc.root.layers[0]
+        .keyframe_mut(0)
+        .cel
+        .set_parts(bg_shape, root_instances);
+    app.doc.root.layers[0].locked = true;
+    app.refresh_scene_base();
+
+    let t0 = Instant::now();
+    let picked = tool_paint::pick_color_at(&mut app, Point::new(110.0, 100.0));
+    let elapsed = t0.elapsed();
+    println!(
+        "[G1-3] locked layer 20^5 nested symbol eyedropper = {:.3} ms",
+        elapsed.as_secs_f64() * 1000.0
+    );
+    assert_eq!(picked, Some(target_color));
+    assert!(
+        elapsed.as_secs_f64() * 1000.0 <= 5.0,
+        "20個×5段の入れ子シンボルがあるロックレイヤーでスポイトが数ミリ秒以内に終わること (実測: {elapsed:?})"
+    );
+}
+
+
 
 
 

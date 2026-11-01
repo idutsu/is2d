@@ -159,78 +159,6 @@ pub(crate) fn handle_brush_or_eraser_input(
     }
 }
 
-/// ロックされたレイヤー（またはシンボル内部タイムライン）上の指定フレーム・指定座標 `pt` にヒットする最前面図形の色を、
-/// 図形クローンやメッシュ再構築を行わずに逆アフィン変換で高速に判定する
-fn locked_layer_color_at(
-    layer: &crate::timeline::Layer,
-    frame: usize,
-    pt: Point,
-    library: &[crate::symbol::SymbolDef],
-    depth: usize,
-) -> Option<Color32> {
-    if depth >= crate::symbol::MAX_SYMBOL_NEST_DEPTH || !layer.visible || frame >= layer.frame_count {
-        return None;
-    }
-    let kf_idx = layer.keyframe_index_at(frame)?;
-    let kf = &layer.keyframes[kf_idx];
-    if let Some((_, binding)) = layer.interpolated_tween_binding_at(frame) {
-        return symbol_binding_color_at(binding, kf.start_frame, frame, pt, library, depth);
-    }
-    let cel = &kf.cel;
-    if cel.instances.is_empty() {
-        return cel.shapes.iter().rev().find(|s| s.contains_point(pt)).map(|s| s.color);
-    }
-    // `shape_order_index` の逆順（最前面→最背面）にインスタンスと生シェイプを検査
-    let mut cel_idx = cel.shapes.len();
-    for inst in cel.instances.iter().rev() {
-        let target_ord = inst.shape_order_index.min(cel.shapes.len());
-        while cel_idx > target_ord {
-            cel_idx -= 1;
-            if cel.shapes[cel_idx].contains_point(pt) {
-                return Some(cel.shapes[cel_idx].color);
-            }
-        }
-        if let Some(col) =
-            symbol_binding_color_at(inst.binding, kf.start_frame, frame, pt, library, depth)
-        {
-            return Some(col);
-        }
-    }
-    while cel_idx > 0 {
-        cel_idx -= 1;
-        if cel.shapes[cel_idx].contains_point(pt) {
-            return Some(cel.shapes[cel_idx].color);
-        }
-    }
-    None
-}
-
-fn symbol_binding_color_at(
-    binding: crate::symbol::SymbolInstanceBinding,
-    kf_start_frame: usize,
-    parent_frame: usize,
-    world_pt: Point,
-    library: &[crate::symbol::SymbolDef],
-    depth: usize,
-) -> Option<Color32> {
-    if depth >= crate::symbol::MAX_SYMBOL_NEST_DEPTH
-        || binding.xform.determinant().abs() <= 1e-9
-    {
-        return None;
-    }
-    let sym = library.iter().find(|s| s.id == binding.symbol_id)?;
-    let internal_frame = sym.resolve_internal_frame(binding, kf_start_frame, parent_frame);
-    let local_pt = binding.xform.inverse() * world_pt;
-    for l_idx in (0..sym.timeline.layers.len()).rev() {
-        let layer = &sym.timeline.layers[l_idx];
-        if let Some(col) = locked_layer_color_at(layer, internal_frame, local_pt, library, depth + 1)
-        {
-            return Some(col);
-        }
-    }
-    None
-}
-
 /// 編集スコープおよび表示中の全レイヤーを対象に、指定座標 `pt` にヒットする最前面シェイプの色を返す（スポイト用）
 pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> {
     let scene = tab.scene();
@@ -254,7 +182,6 @@ pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> 
             continue;
         }
         if layer.locked {
-            let cf = tl.current_frame;
             let world_xform = tab.session.edit_path.world_xform();
             let local_pt = if world_xform == kurbo::Affine::IDENTITY {
                 pt
@@ -263,8 +190,9 @@ pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> 
             } else {
                 continue;
             };
-            if let Some(col) = locked_layer_color_at(layer, cf, local_pt, &tab.doc.library, 0) {
-                return Some(col);
+            let shapes = tl.evaluate_layer_shapes_at(layer_idx, tl.current_frame, &tab.doc.library);
+            if let Some(hit) = shapes.iter().rev().find(|s| s.contains_point(local_pt)) {
+                return Some(hit.color);
             }
         } else {
             let lid = layer.id;
