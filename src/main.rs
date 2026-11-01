@@ -38,6 +38,11 @@ fn main() -> eframe::Result<()> {
             .with_title("is2d - 無題-1")
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([800.0, 520.0]),
+        #[cfg(target_os = "macos")]
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::macos::EventLoopBuilderExtMacOS;
+            builder.with_default_menu(false);
+        })),
         ..Default::default()
     };
 
@@ -500,6 +505,8 @@ impl Is2dApp {
             .iter()
             .any(|ev| matches!(ev, egui::Event::Paste(_)));
 
+        self.handle_command_shortcuts(ctx, &input, cmd, copy_event, cut_event, paste_event);
+
         if !cmd && !copy_event && !cut_event && !paste_event {
             self.handle_single_key_shortcuts(&input, input.modifiers.shift);
         }
@@ -510,7 +517,6 @@ impl Is2dApp {
             apply(self, Action::DeleteSelection);
         }
 
-        self.handle_command_shortcuts(&input, cmd, copy_event, cut_event, paste_event);
         if cmd {
             self.clipboard.cmd_held_grace_frames = 4;
         } else {
@@ -656,6 +662,7 @@ impl Is2dApp {
 
     fn handle_command_shortcuts(
         &mut self,
+        ctx: &egui::Context,
         i: &egui::InputState,
         cmd: bool,
         copy_event: bool,
@@ -681,7 +688,9 @@ impl Is2dApp {
             self.clipboard.cmd_held_grace_frames = 0;
         }
 
-        if copy_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::C)) {
+        if cmd && key_pressed_no_repeat(i, Key::Q) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if copy_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::C)) {
             apply(self, Action::Copy);
         } else if cut_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::X)) {
             apply(self, Action::Cut);

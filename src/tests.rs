@@ -12576,21 +12576,129 @@ fn test_g6_1_resolved_cel_cache_byte_limit_and_2min_playback_memory() {
     }
 }
 
+#[test]
+fn test_other_2_cmd_q_triggers_close_confirm_and_does_not_switch_tool() {
+    use crate::doc_actions::{apply, Action};
+    use crate::panels::UiAction;
+    use crate::project_io::PendingCloseConfirm;
+    use eframe::egui;
 
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let screen_rect = Some(egui::Rect::from_min_size(
+        Pos2::ZERO,
+        Vec2::new(1280.0, 820.0),
+    ));
 
+    // 未保存の編集を作る（現在のツールは Brush）
+    assert_eq!(app.tool.tool, Tool::Brush);
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(200.0, 100.0)],
+            radius: 10.0,
+            color: Color32::RED,
+        },
+    );
+    assert!(app.history.is_dirty());
 
+    // 1. Cmd+Q を押すと ViewportCommand::Close が送られ、自由変形ツール (Tool::Transform) には切り替わらないこと
+    let cmd_mods = egui::Modifiers {
+        command: true,
+        ..Default::default()
+    };
+    let out_cmd_q = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            modifiers: cmd_mods,
+            events: vec![egui::Event::Key {
+                key: egui::Key::Q,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: cmd_mods,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert_eq!(
+        app.tool.tool,
+        Tool::Brush,
+        "Cmd+Q で自由変形ツール (Tool::Transform) に切り替わらないこと"
+    );
+    let root_cmds = &out_cmd_q.viewport_output[&egui::ViewportId::ROOT].commands;
+    assert!(
+        root_cmds.contains(&egui::ViewportCommand::Close),
+        "Cmd+Q で ViewportCommand::Close が発行されること"
+    );
 
+    // 2. ViewportEvent::Close を受けると、未保存確認モーダルが出て CancelClose が送られること
+    let mut close_raw = egui::RawInput {
+        screen_rect,
+        ..Default::default()
+    };
+    close_raw
+        .viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .unwrap()
+        .events
+        .push(egui::ViewportEvent::Close);
+    let out_close_req = ctx.run(close_raw, |ctx| {
+        app.update_ui(ctx);
+    });
+    assert!(
+        matches!(
+            app.pending_close_confirm,
+            Some(PendingCloseConfirm::ViewportClose { .. })
+        ),
+        "未保存状態で Cmd+Q によるクローズ要求を受けると既存の未保存確認が出ること"
+    );
+    assert!(
+        out_close_req.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .contains(&egui::ViewportCommand::CancelClose),
+        "未保存確認モーダル表示中は CancelClose で終了が阻止されること"
+    );
 
+    // 3. キャンセルすると終了しないこと
+    app.apply_action(UiAction::ConfirmPendingCloseCancel, &ctx);
+    assert!(app.pending_close_confirm.is_none());
+    assert!(!app.allow_viewport_close);
 
+    // 4. もう一度 Cmd+Q -> Close 要求 -> 「保存せずに閉じる」を選ぶと allow_viewport_close が立ち ViewportCommand::Close が送られること
+    let mut close_raw2 = egui::RawInput {
+        screen_rect,
+        ..Default::default()
+    };
+    close_raw2
+        .viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .unwrap()
+        .events
+        .push(egui::ViewportEvent::Close);
+    let _ = ctx.run(close_raw2, |ctx| {
+        app.update_ui(ctx);
+    });
+    assert!(app.pending_close_confirm.is_some());
 
-
-
-
-
-
-
-
-
-
-
-
+    let out_discard = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            ..Default::default()
+        },
+        |ctx| {
+            app.apply_action(UiAction::ConfirmPendingCloseDiscard, ctx);
+        },
+    );
+    assert!(app.pending_close_confirm.is_none());
+    assert!(app.allow_viewport_close);
+    assert!(
+        out_discard.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .contains(&egui::ViewportCommand::Close),
+        "『保存せずに閉じる』を選ぶと ViewportCommand::Close が発行されて終了すること"
+    );
+}
