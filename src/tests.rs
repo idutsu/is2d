@@ -11898,6 +11898,58 @@ fn test_g3_5_document_single_fps_inside_symbol_undo_redo_and_save() {
     assert_eq!(reopened.doc.fps, 30);
 }
 
+#[test]
+fn test_g3_1_symbol_enter_exit_preserves_symbol_def_and_load_normalizes() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+            radius: 5.0,
+            color: Color32::RED,
+        },
+    );
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(&mut app, Action::ConvertToSymbol);
+    let sym_id = app.doc.library[0].id;
+    let rev_before = app.doc.library[0].revision;
+    let doc_rev_before = app.doc.revision;
+    let total_before = app.doc.library[0].timeline.total_frames;
+    let next_num_before = app.doc.library[0].timeline.next_layer_number;
+    let next_id_before = app.doc.library[0].timeline.next_layer_id;
+    assert_eq!(total_before, 1);
+    assert_eq!(next_num_before, 2);
+    assert_eq!(next_id_before, 2);
+
+    // シンボルへの出入りで SymbolDef の内容やリビジョンが変わらないこと
+    assert!(tool_transform::enter_symbol_from_library(&mut app, sym_id));
+    assert_eq!(app.doc.library[0].revision, rev_before);
+    assert_eq!(app.doc.revision, doc_rev_before);
+    assert!(tool_transform::exit_symbol_timeline(&mut app));
+    assert_eq!(app.doc.library[0].revision, rev_before);
+    assert_eq!(app.doc.revision, doc_rev_before);
+    assert_eq!(app.doc.library[0].timeline.total_frames, total_before);
+    assert_eq!(
+        app.doc.library[0].timeline.next_layer_number,
+        next_num_before
+    );
+    assert_eq!(app.doc.library[0].timeline.next_layer_id, next_id_before);
+
+    // 不正な total_frames=0, next_layer_number=0, next_layer_id=0 を持つファイルを読み込んだ時点で正規化されていること
+    let mut pd = project_io::ProjectDocument::from_app(&app);
+    pd.library[0].timeline.total_frames = 0;
+    pd.library[0].timeline.next_layer_number = 0;
+    pd.library[0].timeline.next_layer_id = 0;
+    pd.library[0].timeline.layers[0].frame_count = 0;
+    let loaded_doc = pd.into_document();
+    assert!(loaded_doc.library[0].timeline.total_frames >= 1);
+    assert!(loaded_doc.library[0].timeline.next_layer_number >= 2);
+    assert!(loaded_doc.library[0].timeline.next_layer_id >= 2);
+}
+
+
 
 
 

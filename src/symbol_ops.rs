@@ -287,11 +287,6 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
         parent_group_path,
     });
 
-    if let Some(sym) = tab.doc.find_symbol_mut(binding.symbol_id) {
-        sym.timeline.total_frames = sym.timeline.total_frames.max(1);
-        sym.timeline.next_layer_number = sym.timeline.next_layer_number.max(2);
-        sym.timeline.next_layer_id = sym.timeline.next_layer_id.max(2);
-    }
     let (act_l, act_f) = {
         let tl = tab.active_timeline();
         (
