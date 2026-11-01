@@ -2070,11 +2070,9 @@ pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context)
                     (next, false)
                 }
             };
-            tab.set_active_frame(next_f);
+            tab.advance_playback_frame(next_f);
             if stopped {
-                timeline_ui.is_playing = false;
-                timeline_ui.last_frame_advance_time = None;
-                tab.session.sanitize_editing_scope();
+                timeline_ui.stop_playback(tab);
                 return;
             }
         }

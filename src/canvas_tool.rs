@@ -2880,6 +2880,11 @@ impl Tab {
         self.refresh_scene_base();
     }
 
+    /// 再生中のフレーム進行用に、土台キャッシュを再構築せず編集中タイムラインの再生ヘッド（`current_frame`）のみを進める
+    pub(crate) fn advance_playback_frame(&mut self, frame: usize) {
+        self.active_timeline_raw_mut().current_frame = frame;
+    }
+
     /// 編集中タイムラインの選択レイヤー（`active_layer`）のみを変更し、リビジョンは上げない
     pub(crate) fn set_active_layer(&mut self, idx: usize) {
         let tl = self.active_timeline_raw_mut();

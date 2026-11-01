@@ -11425,6 +11425,136 @@ fn test_g1_3_locked_layer_eyedropper_nested_20x5_fast() {
     );
 }
 
+#[test]
+fn test_g1_4_playback_advance_skips_base_cache_rebuild_and_stop_refreshes() {
+    use eframe::egui;
+
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let screen_rect = Some(egui::Rect::from_min_size(
+        Pos2::ZERO,
+        Vec2::new(1280.0, 820.0),
+    ));
+
+    app.doc.root.fps = 10; // 1コマ = 0.1秒
+    app.doc.root.resize_total_frames(3);
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(150.0, 100.0),
+            10.0,
+            Color32::RED,
+        ),
+    );
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
+    timeline_ui::timeline_insert_keyframe(&mut app, false);
+    put_cel_shapes(
+        &mut app,
+        0,
+        1,
+        make_stroke(
+            Point::new(150.0, 100.0),
+            Point::new(200.0, 100.0),
+            10.0,
+            Color32::GREEN,
+        ),
+    );
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
+    timeline_ui::timeline_insert_keyframe(&mut app, false);
+    put_cel_shapes(
+        &mut app,
+        0,
+        2,
+        make_stroke(
+            Point::new(200.0, 100.0),
+            Point::new(250.0, 100.0),
+            10.0,
+            Color32::BLUE,
+        ),
+    );
+
+    // Frame 0 から再生開始（非ループ）
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    assert_eq!(app.session.base_cache.shapes()[0].color, Color32::RED);
+    app.timeline_ui.loop_playback = false;
+    timeline_ui::toggle_playback(&mut app);
+    assert!(app.timeline_ui.is_playing);
+
+    // t = 1.0s（基準時刻）
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            time: Some(1.0),
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    // t = 1.12s（Frame 1 へ進行、まだ再生中）
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            time: Some(1.12),
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(app.timeline_ui.is_playing);
+    assert_eq!(app.doc.root.current_frame, 1);
+    assert_eq!(
+        app.session.base_cache.shapes()[0].color,
+        Color32::RED,
+        "再生中のフレーム進行では SceneBaseCache の再構築が走らないこと"
+    );
+
+    // 手動停止すると Frame 1 の土台キャッシュが再構築されること
+    timeline_ui::toggle_playback(&mut app);
+    assert!(!app.timeline_ui.is_playing);
+    assert_eq!(
+        app.session.base_cache.shapes()[0].color,
+        Color32::GREEN,
+        "再生停止時点で現在フレーム (Frame 1) の土台キャッシュが揃うこと"
+    );
+
+    // 再び再生を開始し、最終フレーム (Frame 2) で自動停止した際にも stop_playback 経由で土台キャッシュが揃うこと
+    timeline_ui::toggle_playback(&mut app);
+    assert!(app.timeline_ui.is_playing);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            time: Some(2.0),
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            time: Some(2.15),
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(!app.timeline_ui.is_playing);
+    assert_eq!(app.doc.root.current_frame, 2);
+    assert_eq!(
+        app.session.base_cache.shapes()[0].color,
+        Color32::BLUE,
+        "最終フレームでの自動停止でも stop_playback により Frame 2 の土台キャッシュが揃うこと"
+    );
+}
+
+
 
 
 
