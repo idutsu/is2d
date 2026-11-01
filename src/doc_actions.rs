@@ -278,6 +278,7 @@ pub(crate) enum Action {
         l1: usize,
         f1: usize,
     },
+    ClearTimelineCells,
     InsertKeyframe {
         copy_prev: bool,
     },
@@ -767,6 +768,10 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         }
         Action::SelectTimelineCells { l0, f0, l1, f1 } => {
             apply_select_timeline_cells(tab, l0, f0, l1, f1);
+            ApplyResult::Applied(true)
+        }
+        Action::ClearTimelineCells => {
+            tab.set_active_cell_selection(None);
             ApplyResult::Applied(true)
         }
         Action::InsertKeyframe { copy_prev } => {

@@ -12233,6 +12233,63 @@ fn test_g3_2_end_coalesce_via_apply_preserves_playback_and_coalesce_boundaries()
     assert_eq!(app.history.undo_stack.len(), undo_before_pb_end);
 }
 
+#[test]
+fn test_g3_3_clear_timeline_cells_and_no_direct_ui_mutation_calls() {
+    use crate::doc_actions::{apply, Action};
+
+    // 1. UI 層（panels.rs, timeline_ui.rs, main.rs）から set_active_cell_selection と commit_floating の直接呼び出しがなくなっていること
+    for ui_file in ["src/panels.rs", "src/timeline_ui.rs", "src/main.rs"] {
+        let src = std::fs::read_to_string(ui_file).unwrap();
+        assert!(
+            !src.contains("set_active_cell_selection"),
+            "{ui_file} に set_active_cell_selection が残っていないこと"
+        );
+        assert!(
+            !src.contains("commit_floating"),
+            "{ui_file} に commit_floating が残っていないこと"
+        );
+    }
+
+    // 2. Action::ClearTimelineCells でセル範囲選択が解除されること
+    let mut app = Is2dApp::default();
+    let _ = apply(
+        &mut app,
+        Action::SelectTimelineCells {
+            l0: 0,
+            f0: 0,
+            l1: 0,
+            f1: 0,
+        },
+    );
+    assert!(app.doc.root.cell_selection.is_some());
+    let _ = apply(&mut app, Action::ClearTimelineCells);
+    assert!(app.doc.root.cell_selection.is_none());
+
+    // 3. 再生開始時に Floating が Deselect 経由で確定され、coalesce も解除されること
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+            radius: 6.0,
+            color: Color32::RED,
+        },
+    );
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(10.0, 0.0),
+        },
+    );
+    assert!(app.session.floating.is_some());
+    assert!(app.history.last_coalesce_key.is_some());
+    timeline_ui::toggle_playback(&mut app);
+    assert!(app.timeline_ui.is_playing);
+    assert!(app.session.floating.is_none());
+    assert!(app.history.last_coalesce_key.is_none());
+}
+
+
 
 
 

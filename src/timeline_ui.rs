@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
-use crate::canvas_tool::{CoalesceKey, Tab, commit_floating};
+use crate::canvas_tool::{CoalesceKey, Tab};
 use crate::doc_actions::{Action, ActionHost, apply};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{
@@ -870,7 +870,7 @@ fn handle_timeline_click_start(
                 }
             }
         } else {
-            host.tab_mut().set_active_cell_selection(None);
+            apply(host, Action::ClearTimelineCells);
         }
     } else if host.timeline_ui().dragging_layer.is_none() && pos.x >= layout.grid_left {
         let num_layers = host.tab().active_timeline().layers.len();
@@ -1000,7 +1000,7 @@ fn handle_timeline_click_start(
                 };
             }
         } else {
-            host.tab_mut().set_active_cell_selection(None);
+            apply(host, Action::ClearTimelineCells);
         }
     }
 }
@@ -2028,9 +2028,7 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
         apply(host, Action::EndCoalesce { key: None });
     } else {
         apply(host, Action::Deselect);
-        apply(host, Action::EndCoalesce { key: None });
         let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
-        commit_floating(tab);
         timeline_ui.cancel_drag();
         let loop_pb = timeline_ui.loop_playback;
         let (curr_f, total_f) = {
