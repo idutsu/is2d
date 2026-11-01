@@ -10689,6 +10689,239 @@ fn test_g5_1_save_and_reopen_60_brush_strokes_f6_140_frames_over_100mb() {
     );
 }
 
+#[test]
+fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+
+    // 1段ずつシンボル化（F8）を8回繰り返し、各段に1つずつ生図形を持つ8段の連鎖を作る
+    let mut chain_sym_ids = Vec::new();
+    for lvl in 0..8 {
+        let x = 40.0 + (lvl as f64) * 30.0;
+        let _ = apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(x, 100.0), Point::new(x + 15.0, 100.0)],
+                radius: 6.0,
+                color: Color32::from_rgb(20 + (lvl as u8) * 25, 80, 160),
+            },
+        );
+        let _ = apply(&mut app, Action::SelectAll);
+        let id = apply(&mut app, Action::ConvertToSymbol)
+            .id()
+            .expect("8段目までのシンボル化は成功すること");
+        chain_sym_ids.push(id);
+    }
+    assert_eq!(app.doc.library.len(), 8);
+    assert!(!app.doc.symbol_nest_exceeded());
+
+    // 完了条件1: 8段の連鎖が、ルートからすべて描かれる（各段の生図形8個すべてが展開される）
+    let root_eval = app.doc.root.evaluate_layer_shapes_at(0, 0, &app.doc.library);
+    assert_eq!(
+        root_eval.len(),
+        8,
+        "8段の連鎖のすべての段の図形がルートから描かれること"
+    );
+    assert_eq!(app.scene().len(), 8);
+
+    // 完了条件2: 高さ8のシンボルを含む選択で F8 -> 文書は変わらず、警告が出て、Undo履歴も増えない
+    let undo_before_f8 = app.history.undo_stack.len();
+    let lib_len_before = app.doc.library.len();
+    let root_inst_before = app.doc.root.layers[0].keyframes[0].cel.instances.clone();
+    app.toast = None;
+    let _ = apply(&mut app, Action::SelectAll);
+    let res_f8 = apply(&mut app, Action::ConvertToSymbol);
+    assert!(!res_f8.as_bool(), "9段目になるF8は拒否されること");
+    assert_eq!(app.doc.library.len(), lib_len_before);
+    assert_eq!(
+        app.doc.root.layers[0].keyframes[0].cel.instances,
+        root_inst_before
+    );
+    assert_eq!(app.history.undo_stack.len(), undo_before_f8);
+    assert_eq!(
+        app.toast.as_ref().map(|t| t.message.as_str()),
+        Some("シンボルの入れ子は8段までです")
+    );
+    assert!(!app.doc.symbol_nest_exceeded());
+
+    // 完了条件3: シンボル編集中のペースト、ライブラリからの配置で9段になる場合も同じ
+    // ルートに高さ8のシンボルインスタンスをコピーしておく
+    let top_sym_id = *chain_sym_ids.last().unwrap();
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(&mut app, Action::Copy);
+
+    // 別の単段シンボル `leaf_sym_id` を作り、その内部編集に入って高さ8のシンボルを Paste / PlaceSymbol する
+    let _ = apply(&mut app, Action::Deselect);
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(350.0, 200.0), Point::new(380.0, 200.0)],
+            radius: 6.0,
+            color: Color32::GREEN,
+        },
+    );
+    let pt_hit = Point::new(365.0, 200.0);
+    let _ = apply(&mut app, Action::SelectSingleAt { pt: pt_hit });
+    let host_sym_id = apply(&mut app, Action::ConvertToSymbol)
+        .id()
+        .expect("単段シンボルの作成は成功すること");
+    assert_eq!(app.doc.library.len(), 9);
+    let _ = apply(
+        &mut app,
+        Action::EnterSymbolFromLibrary {
+            sym_id: host_sym_id,
+        },
+    );
+    assert_eq!(app.session.edit_path.len(), 1);
+
+    // 3a. シンボル編集中のペーストで9段になる場合
+    let undo_before_paste = app.history.undo_stack.len();
+    let host_inst_before = app
+        .doc
+        .find_symbol(host_sym_id)
+        .unwrap()
+        .timeline
+        .layers[0]
+        .keyframes[0]
+        .cel
+        .instances
+        .len();
+    app.toast = None;
+    let res_paste = apply(&mut app, Action::Paste { in_place: true });
+    assert!(!res_paste.as_bool(), "9段になるペーストは拒否されること");
+    assert_eq!(app.history.undo_stack.len(), undo_before_paste);
+    assert_eq!(
+        app.doc
+            .find_symbol(host_sym_id)
+            .unwrap()
+            .timeline
+            .layers[0]
+            .keyframes[0]
+            .cel
+            .instances
+            .len(),
+        host_inst_before
+    );
+    assert_eq!(
+        app.toast.as_ref().map(|t| t.message.as_str()),
+        Some("シンボルの入れ子は8段までです")
+    );
+
+    // 3b. ライブラリからの配置で9段になる場合
+    let undo_before_place = app.history.undo_stack.len();
+    app.toast = None;
+    let res_place = apply(
+        &mut app,
+        Action::PlaceSymbol {
+            sym_id: top_sym_id,
+        },
+    );
+    assert!(
+        !res_place.as_bool(),
+        "9段になるライブラリからの配置は拒否されること"
+    );
+    assert_eq!(app.history.undo_stack.len(), undo_before_place);
+    assert_eq!(
+        app.doc
+            .find_symbol(host_sym_id)
+            .unwrap()
+            .timeline
+            .layers[0]
+            .keyframes[0]
+            .cel
+            .instances
+            .len(),
+        host_inst_before
+    );
+    assert_eq!(
+        app.toast.as_ref().map(|t| t.message.as_str()),
+        Some("シンボルの入れ子は8段までです")
+    );
+    let _ = apply(&mut app, Action::ExitSymbolTimeline);
+
+    // 完了条件4 & 5: 9段のファイル・1000段の連鎖のファイルは開けずにエラーになり、タブは増えない
+    let make_chain_project = |depth: usize| -> project_io::ProjectDocument {
+        let mut library = Vec::with_capacity(depth);
+        for i in 0..depth {
+            let sym_id = (i + 1) as u64;
+            let instances = if i + 1 < depth {
+                vec![project_io::SavedSymbolInstance {
+                    binding: project_io::SavedSymbolInstanceBinding {
+                        instance_gid: (i + 1) as u64,
+                        symbol_id: (i + 2) as u64,
+                        xform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                        pivot: [0.0, 0.0],
+                        loop_mode: project_io::SavedSymbolLoopMode::Loop,
+                        first_frame: 0,
+                    },
+                    layer_id: 1,
+                    parent_scope: Vec::new(),
+                    shape_order_index: 0,
+                }]
+            } else {
+                Vec::new()
+            };
+            library.push(project_io::SavedSymbolDef {
+                id: sym_id,
+                name: format!("Chain{sym_id}"),
+                timeline: project_io::SavedTimeline {
+                    fps: 24,
+                    total_frames: 1,
+                    current_frame: 0,
+                    active_layer: 0,
+                    next_layer_number: 2,
+                    next_layer_id: 2,
+                    layers: vec![project_io::SavedLayer {
+                        id: 1,
+                        name: "L1".to_owned(),
+                        visible: true,
+                        locked: false,
+                        frame_count: 1,
+                        keyframes: vec![project_io::SavedKeyframe {
+                            start_frame: 0,
+                            tween: false,
+                            tween_rotate: project_io::SavedTweenRotate::Auto,
+                            shapes: Vec::new(),
+                            instances,
+                        }],
+                    }],
+                },
+            });
+        }
+        project_io::ProjectDocument {
+            version: 1,
+            stage_size: [800.0, 450.0],
+            timeline: (&timeline::Timeline::default()).into(),
+            library,
+            next_symbol_id: (depth + 1) as u64,
+            next_group_id: (depth + 1) as u64,
+        }
+    };
+
+    let tabs_before = app.tabs.len();
+    for depth in [9usize, 1000usize] {
+        let path = std::env::temp_dir().join(format!(
+            "is2d_g5_2_chain_{depth}_{}.is2d",
+            std::process::id()
+        ));
+        let json = serde_json::to_string(&make_chain_project(depth)).unwrap();
+        std::fs::write(&path, json.as_bytes()).unwrap();
+        let res = crate::project_io::open_project_in_tab(&mut app, &path, None);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            res,
+            Err("シンボルの入れ子が8段を超えているため開けません".to_owned()),
+            "{depth}段のファイルはエラーで拒否されること"
+        );
+        assert_eq!(
+            app.tabs.len(),
+            tabs_before,
+            "{depth}段のファイル読み込み失敗時にタブが増えないこと"
+        );
+    }
+}
+
 
 
 

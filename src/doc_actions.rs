@@ -421,6 +421,10 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
     }
     let (tab, tool, clipboard, toast) = host.parts_mut();
     let coalesce = action.coalesce_key(tab);
+    let check_symbol_nest = matches!(
+        action,
+        Action::ConvertToSymbol | Action::Paste { .. } | Action::PlaceSymbol { .. }
+    );
 
     let res = match action {
         Action::PaintStroke {
@@ -840,6 +844,14 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             ApplyResult::Applied(true)
         }
     };
+    if check_symbol_nest && res.as_bool() && tab.doc.symbol_nest_exceeded() {
+        if let Some(prev) = tab.history.pop_undo() {
+            tab.restore_state_snapshot(prev);
+        }
+        tab.ensure_valid_library_selection();
+        show_notice(toast, NoticeKind::Warning, "シンボルの入れ子は8段までです");
+        return ApplyResult::Applied(false);
+    }
     res
 }
 

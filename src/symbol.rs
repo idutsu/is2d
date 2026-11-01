@@ -599,6 +599,46 @@ impl Document {
         self.library.iter_mut().find(|s| s.id == symbol_id)
     }
 
+    /// 高さが `MAX_SYMBOL_NEST_DEPTH`（8）を超えるシンボルが1つでもあれば `true` を返す
+    pub(crate) fn symbol_nest_exceeded(&self) -> bool {
+        fn height(
+            sym_id: u64,
+            depth: usize,
+            by_id: &HashMap<u64, &SymbolDef>,
+            memo: &mut HashMap<u64, usize>,
+        ) -> usize {
+            if let Some(&h) = memo.get(&sym_id) {
+                return h;
+            }
+            let Some(sym) = by_id.get(&sym_id) else {
+                return 0;
+            };
+            if depth > MAX_SYMBOL_NEST_DEPTH {
+                return MAX_SYMBOL_NEST_DEPTH + 1;
+            }
+            let mut max_child = 0usize;
+            for layer in &sym.timeline.layers {
+                for kf in &layer.keyframes {
+                    for inst in kf.cel.instances.iter() {
+                        let ch = height(inst.binding.symbol_id, depth + 1, by_id, memo);
+                        if ch >= MAX_SYMBOL_NEST_DEPTH {
+                            return MAX_SYMBOL_NEST_DEPTH + 1;
+                        }
+                        max_child = max_child.max(ch);
+                    }
+                }
+            }
+            let h = 1 + max_child;
+            memo.insert(sym_id, h);
+            h
+        }
+        let by_id: HashMap<u64, &SymbolDef> = self.library.iter().map(|s| (s.id, s)).collect();
+        let mut memo = HashMap::with_capacity(self.library.len());
+        self.library
+            .iter()
+            .any(|s| height(s.id, 1, &by_id, &mut memo) > MAX_SYMBOL_NEST_DEPTH)
+    }
+
     /// `parent_symbol_id` の内部に `candidate_child_id` を配置した場合に、
     /// 直接または間接的な循環参照（`A -> B -> A` 等）が発生するかを DFS で判定する
     pub(crate) fn would_create_symbol_cycle(

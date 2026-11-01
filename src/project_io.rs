@@ -976,8 +976,8 @@ impl ProjectDocument {
         Ok(())
     }
 
-    /// 読み込んだ `ProjectDocument` を現在のアクティブタブへ適用し、作業キャンバスや履歴を初期化する
-    pub(crate) fn apply_to_app(self, tab: &mut Tab) {
+    /// 読み込んだ `ProjectDocument` から正規化・循環参照除去済みの `Document` を構築する
+    pub(crate) fn into_document(self) -> Document {
         let mut timeline: Timeline = self.timeline.into();
 
         // 重複または不正（id == 0 / id > MAX_SAFE_ENTITY_ID）な SymbolDef::id を一意な安全IDへ再採番してライブラリを構築
@@ -1199,6 +1199,13 @@ impl ProjectDocument {
             }
         }
 
+        doc
+    }
+
+    /// 読み込んだ `ProjectDocument` を現在のアクティブタブへ適用し、作業キャンバスや履歴を初期化する
+    #[cfg(test)]
+    pub(crate) fn apply_to_app(self, tab: &mut Tab) {
+        let doc = self.into_document();
         reset_active_document_state(tab, doc);
     }
 }
@@ -1396,6 +1403,10 @@ pub(crate) fn open_project_in_tab(
 
     // 2. ファイル内容を先に検証・パース（エラー時にタブを増やさない）
     let proj_doc = read_project_document(path)?;
+    let doc = proj_doc.into_document();
+    if doc.symbol_nest_exceeded() {
+        return Err("シンボルの入れ子が8段を超えているため開けません".to_owned());
+    }
 
     // 3. 現在のタブが未編集の空の無題タブでなければ、アクティブタブの右隣に新しいタブを追加して切り替える
     // （ファイル読込タブでは `untitled_number` を `0` として遅延採番し、`無題-N` 連番の欠番スキップを防ぐ）
@@ -1423,7 +1434,7 @@ pub(crate) fn open_project_in_tab(
     }
 
     // 4. 読み込んだドキュメントを適用
-    proj_doc.apply_to_app(ws.tab_mut());
+    reset_active_document_state(ws.tab_mut(), doc);
     ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
     ws.tab_mut().file = Some(path.to_path_buf());
     ws.tab_mut().history.mark_saved();
