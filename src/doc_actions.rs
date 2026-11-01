@@ -375,16 +375,6 @@ fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
     tab.history.last_coalesce_key = coalesce;
 }
 
-/// キャンバス図形（文書セルまたは `tab.session.floating`）を変更する直前に呼び出し、変更前の状態を Undo スタックへ記録する
-fn push_canvas_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
-    if let Some(key) = coalesce {
-        if tab.history.last_coalesce_key == Some(key) {
-            return;
-        }
-    }
-    push_undo_entry_from_doc(tab, coalesce);
-}
-
 fn push_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
     if let Some(key) = coalesce {
         if tab.history.last_coalesce_key == Some(key) {
@@ -506,18 +496,18 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             ApplyResult::Applied(apply_commit_moved_selection(tab, None))
         }
         Action::DeleteSelection => ApplyResult::Applied(prepare_delete_selected_shapes(tab, |tab| {
-            push_canvas_undo(tab, None)
+            push_undo(tab, None)
         })),
         Action::ClearActiveFrame => {
             ApplyResult::Applied(prepare_clear_active_frame_shapes(tab, |tab| {
-                push_canvas_undo(tab, None)
+                push_undo(tab, None)
             }))
         }
         Action::Group => ApplyResult::CreatedId(prepare_group_selected_shapes(tab, |tab| {
-            push_canvas_undo(tab, None)
+            push_undo(tab, None)
         })),
         Action::Ungroup => ApplyResult::Applied(prepare_ungroup_selected_shapes(tab, |tab| {
-            push_canvas_undo(tab, None)
+            push_undo(tab, None)
         })),
         Action::EnterGroupAt { pt } => ApplyResult::Applied(enter_group_at(tab, pt)),
         Action::ExitGroup => ApplyResult::Applied(exit_current_group(tab)),
@@ -692,7 +682,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 return ApplyResult::Applied(false);
             }
             ApplyResult::Applied(prepare_delete_selected_shapes(tab, |tab| {
-                push_canvas_undo(tab, None)
+                push_undo(tab, None)
             }))
         }
         Action::Paste { in_place } => {
@@ -701,7 +691,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
 
         Action::ConvertToSymbol => {
             if let Some((sym_id, target_lid, local_shapes)) =
-                prepare_convert_selection_to_symbol(tab, |tab| push_canvas_undo(tab, None))
+                prepare_convert_selection_to_symbol(tab, |tab| push_undo(tab, None))
             {
                 let registered_id = tab.doc.register_new_symbol(local_shapes);
                 tab.view.selected_library_symbol = Some(registered_id);
@@ -718,7 +708,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             }
         }
         Action::PlaceSymbol { sym_id } => {
-            if prepare_place_symbol_instance(tab, sym_id, |tab| push_canvas_undo(tab, None)) {
+            if prepare_place_symbol_instance(tab, sym_id, |tab| push_undo(tab, None)) {
                 if !matches!(tool.tool, Tool::Select | Tool::Transform) {
                     set_tool(tab, tool, Tool::Select);
                 }
@@ -874,7 +864,7 @@ fn apply_raw_outline(tab: &mut Tab, active_tool: Tool, brush_color: Color32, raw
     }
     if active_tool == Tool::Brush {
         clear_selection(tab);
-        push_canvas_undo(tab, None);
+        push_undo(tab, None);
         edit_layers(tab, &[target_lid], |edit| {
             merge_shapes_into_canvas(&mut edit.shapes, stroke_shapes);
         });
@@ -915,7 +905,7 @@ fn apply_raw_outline(tab: &mut Tab, active_tool: Tool, brush_color: Color32, raw
                 .zip(prev_revs.iter())
                 .all(|(s, &(id, rev))| s.shape_id == id && s.mesh_revision == rev);
         if !unchanged {
-            push_canvas_undo(tab, None);
+            push_undo(tab, None);
             edit_layers(tab, &[target_lid], |edit| {
                 edit.shapes = next_shapes;
             });
@@ -984,7 +974,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
             if !any_color_diff {
                 return false;
             }
-            push_canvas_undo(tab, None);
+            push_undo(tab, None);
             let editable_lids: HashSet<u64> = tab
                 .active_timeline()
                 .layers
@@ -1063,7 +1053,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 );
                 if pieces.len() > 1 {
                     if let Some(split_piece) = pieces.into_iter().find(|p| p.contains_point(pt)) {
-                        push_canvas_undo(tab, None);
+                        push_undo(tab, None);
                         let editing_group_path = tab.session.editing_group_path.clone();
                         edit_layers(tab, &[target_lid], |edit| {
                             merge_shapes_into_canvas(
@@ -1086,7 +1076,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
             {
                 return false;
             }
-            push_canvas_undo(tab, None);
+            push_undo(tab, None);
             let hit_id = hit_shape.shape_id;
             let hit_lid = hit_shape.layer_id;
             edit_layers(tab, &[hit_lid], |edit| {
@@ -1122,7 +1112,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
             .flatten()
     });
     if let Some(enclosed_fill) = enclosed_opt {
-        push_canvas_undo(tab, None);
+        push_undo(tab, None);
         let editing_group_path = tab.session.editing_group_path.clone();
         edit_layers(tab, &[target_lid], |edit| {
             merge_disjoint_fill_into_canvas(
@@ -1301,7 +1291,7 @@ fn apply_finish_move_selection_drag(
     {
         return false;
     }
-    push_canvas_undo(tab, None);
+    push_undo(tab, None);
     if alt_duplicate {
         duplicate_selected_in_working_copy(tab);
     }
@@ -1322,7 +1312,7 @@ fn apply_move_selected(
     {
         return false;
     }
-    push_canvas_undo(tab, coalesce);
+    push_undo(tab, coalesce);
     translate_selected_shapes(tab, delta)
 }
 
@@ -1352,7 +1342,7 @@ fn apply_deform_shape(
         return false;
     }
     focus_active_layer_to_shape_by_id(tab, shape_id);
-    push_canvas_undo(tab, None);
+    push_undo(tab, None);
     let rem_to_commit = if in_remainder {
         tab.session.floating.as_mut().map(|fl| {
             fl.modified = true;
@@ -1513,7 +1503,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         if let Some(p_idx) = fl.pieces.iter().position(|p| p.shape_id == shape_id) {
             let mut test_piece = fl.pieces[p_idx].clone();
             if apply_to_shape(&mut test_piece) {
-                push_canvas_undo(tab, None);
+                push_undo(tab, None);
                 if let Some(fl_mut) = &mut tab.session.floating {
                     fl_mut.pieces[p_idx] = test_piece;
                     fl_mut.modified = true;
@@ -1526,7 +1516,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         if let Some(r_idx) = fl.remainder.iter().position(|r| r.shape_id == shape_id) {
             let mut test_rem = fl.remainder[r_idx].clone();
             if apply_to_shape(&mut test_rem) {
-                push_canvas_undo(tab, None);
+                push_undo(tab, None);
                 if let Some(fl_mut) = &mut tab.session.floating {
                     fl_mut.remainder[r_idx] = test_rem;
                     fl_mut.modified = true;
@@ -1551,7 +1541,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
     let target_lid = base_shape.layer_id;
     let mut test_shape = base_shape;
     if apply_to_shape(&mut test_shape) {
-        push_canvas_undo(tab, None);
+        push_undo(tab, None);
         edit_layers(tab, &[target_lid], |edit| {
             if let Some(pos) = edit.shapes.iter().position(|s| s.shape_id == shape_id) {
                 edit.shapes[pos] = test_shape;
@@ -1595,7 +1585,7 @@ fn apply_set_selected_symbol_world_pivot(
         return true;
     }
     if commit_to_timeline {
-        push_canvas_undo(tab, None);
+        push_undo(tab, None);
     }
     let inst_gid = binding.instance_gid;
     let layer_ids = editable_layer_ids(tab);
@@ -1628,7 +1618,7 @@ fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     {
         return false;
     }
-    push_canvas_undo(tab, None);
+    push_undo(tab, None);
     flush_transform_pivot_to_symbol(tab);
     transform_selected_shapes(tab, affine)
 }
