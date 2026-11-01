@@ -17,7 +17,7 @@
 ## 2. データ構造（Data Model）
 - **シーンとシンボルの統一タイムライン構造**:
   - ルートシーンと各 `SymbolDef` が全く同じ `Timeline` 構造体（`Vec<Layer>`）を持つ再帰的データモデル。
-  - 各 `Layer` は全フレーム分の配列を持つのではなく、スパースな `Vec<Keyframe>`（`start_frame` と保持尺 `frame_count` によるスパン表現）で保持し、ホールドフレームでのデータ重複をゼロにする。
+  - 各 `Layer` は全フレーム分の配列を持つのではなく、スパースな `Vec<Arc<Keyframe>>`（`start_frame` と保持尺 `frame_count` によるスパン表現）で保持し、ホールドフレームでのデータ重複をゼロにする。
 - **図形エンティティの正規化**:
   - 最小単位の `FillShape` は外周 `Contour` と穴 `Vec<Contour>`、色 `Color32`、事前計算された AABB（`kurbo::Rect`）、所属レイヤーID、グループ階層パス、メッシュ内容の世代番号（`mesh_revision`）を保持する。
   - セル（`Cel`）内では、Merge Drawing 対象となる生シェイプ／グループ図形の配列（`Arc<Vec<FillShape>>`）と、ライブラリを参照する `SymbolInstance` の配列（`Arc<Vec<SymbolInstance>>`。`symbol_id`, `Affine`, ピボット, `loop_mode`, `first_frame`, 図形列の中での重なり位置 `shape_order_index`）を分けて正規化保持し、内容が変わるたびにセルの世代番号（`revision`）を更新する。
@@ -104,7 +104,7 @@
 
 ## 9. Undo / Redo 方式
 - 最大 100 ステップの `VecDeque<UndoEntry>`。1件は「ルート `Timeline`・シンボルライブラリ・`Floating`・`EditPath`・グループ編集階層・ステージサイズ・ライブラリの世代番号・未保存マーク用の世代ID」で構成する。選択は含めない（2章の ID による選択保持に任せる）。
-- 全フレーム・全シンボルのディープコピーによるメモリ肥大化を防ぐため、`Contour` のセグメント配列（`Arc<Vec<QuadBez>>`）、`Cel` のシェイプ配列（`Arc<Vec<FillShape>>`）およびインスタンス配列（`Arc<Vec<SymbolInstance>>`）、さらに `UndoEntry` 内のシンボルライブラリ（`Arc<Vec<SymbolDef>>`、`Document::revision` 連動）と `Floating`（`Arc<Floating>`）を **Copy-on-Write（CoW）構造共有** とし、未変更のキーフレームやシンボルは $O(1)$ でポインタ共有する。また、履歴保存時には再計算可能な `egui::Mesh` キャッシュを除去してメモリ消費を最小化する。
+- 全フレーム・全シンボルのディープコピーによるメモリ肥大化を防ぐため、`Contour` のセグメント配列（`Arc<Vec<QuadBez>>`）、`Cel` のシェイプ配列（`Arc<Vec<FillShape>>`）およびインスタンス配列（`Arc<Vec<SymbolInstance>>`）、`Layer` のキーフレーム配列（`Vec<Arc<Keyframe>>`）、さらに `UndoEntry` 内のシンボルライブラリ（`Arc<Vec<SymbolDef>>`、`Document::revision` 連動）と `Floating`（`Arc<Floating>`）を **Copy-on-Write（CoW）構造共有** とし、未変更のキーフレームやシンボルは $O(1)$ でポインタ共有する。キーフレームを書き換える際は、履歴側と共有されている古いキーフレームの `Cel` 描画キャッシュを空にしてから複製する。
 
 ## 10. 幾何計算パイプライン（Geometry Pipeline）
 数式・閾値・アルゴリズムの詳細は [`GEOMETRY.md`](./GEOMETRY.md) を参照してください。ここでは設計上の要点だけを挙げます。

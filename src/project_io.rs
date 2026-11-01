@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use eframe::egui::{self, Color32, Vec2};
 use kurbo::{Affine, Point, QuadBez};
@@ -724,7 +725,11 @@ impl From<&Layer> for SavedLayer {
             visible: layer.visible,
             locked: layer.locked,
             frame_count: layer.frame_count,
-            keyframes: layer.keyframes.iter().map(SavedKeyframe::from).collect(),
+            keyframes: layer
+                .keyframes
+                .iter()
+                .map(|kf| SavedKeyframe::from(kf.as_ref()))
+                .collect(),
         }
     }
 }
@@ -732,16 +737,17 @@ impl From<&Layer> for SavedLayer {
 impl From<SavedLayer> for Layer {
     fn from(s: SavedLayer) -> Self {
         let frame_count = s.frame_count.clamp(1, MAX_TIMELINE_FRAMES);
-        let mut keyframes: Vec<Keyframe> = s
+        let mut keyframes: Vec<Arc<Keyframe>> = s
             .keyframes
             .into_iter()
             .map(Keyframe::from)
             .filter(|kf| kf.start_frame < frame_count)
+            .map(Arc::new)
             .collect();
         keyframes.sort_by_key(|kf| kf.start_frame);
         keyframes.dedup_by_key(|kf| kf.start_frame);
         if keyframes.first().is_none_or(|kf| kf.start_frame != 0) {
-            keyframes.insert(0, Keyframe::new_blank(0));
+            keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
         }
         Self {
             id: s.id.max(1),
@@ -814,7 +820,8 @@ impl From<SavedTimeline> for Timeline {
                 max_layer_id = max_layer_id.max(layer.id);
             }
             let lid = layer.id;
-            for kf in &mut layer.keyframes {
+            for i in 0..layer.keyframes.len() {
+                let kf = layer.keyframe_mut(i);
                 for sh in kf.cel.shapes_mut() {
                     sh.layer_id = lid;
                 }
@@ -1045,7 +1052,8 @@ impl ProjectDocument {
         for tl in std::iter::once(&mut timeline).chain(library.iter_mut().map(|s| &mut s.timeline))
         {
             for layer in &mut tl.layers {
-                for kf in &mut layer.keyframes {
+                for i in 0..layer.keyframes.len() {
+                    let kf = layer.keyframe_mut(i);
                     let has_unsafe_shape_gid = kf.cel.shapes.iter().any(|s| {
                         s.group_path
                             .iter()
@@ -1220,13 +1228,14 @@ fn collect_and_strip_cycle_back_edges(
     let mut unvisited_children = Vec::new();
     let mut seen_children = HashSet::new();
     for layer in &mut sym.timeline.layers {
-        for kf in &mut layer.keyframes {
-            let has_back_edge = kf.cel.instances.iter().any(|inst| {
+        for i in 0..layer.keyframes.len() {
+            let has_back_edge = layer.keyframes[i].cel.instances.iter().any(|inst| {
                 id_to_idx
                     .get(&inst.binding.symbol_id)
                     .is_none_or(|&v_idx| color[v_idx] == 1)
             });
             if has_back_edge {
+                let kf = layer.keyframe_mut(i);
                 kf.cel.instances_mut().retain(|inst| {
                     id_to_idx
                         .get(&inst.binding.symbol_id)
@@ -1234,7 +1243,7 @@ fn collect_and_strip_cycle_back_edges(
                 });
                 kf.tween &= kf.cel.single_symbol_instance().is_some();
             }
-            for inst in kf.cel.instances.iter() {
+            for inst in layer.keyframes[i].cel.instances.iter() {
                 if let Some(&v_idx) = id_to_idx.get(&inst.binding.symbol_id) {
                     if color[v_idx] == 0 && seen_children.insert(v_idx) {
                         unvisited_children.push(v_idx);

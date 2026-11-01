@@ -244,7 +244,7 @@ impl SymbolDef {
             s.layer_id = 1;
         }
         let mut timeline = Timeline::default();
-        timeline.layers[0].keyframes[0].cel = Cel::new(local_shapes);
+        timeline.layers[0].keyframe_mut(0).cel = Cel::new(local_shapes);
         Self {
             id,
             name,
@@ -1255,11 +1255,21 @@ impl Layer {
         library: &[SymbolDef],
         next_group_id: &mut u64,
     ) {
-        for kf in &mut self.keyframes {
-            kf.cel
-                .detach_symbol_id(symbol_id, kf.start_frame, library, next_group_id);
-            if kf.tween && kf.cel.single_symbol_instance().is_none() {
-                kf.tween = false;
+        for i in 0..self.keyframes.len() {
+            if self.keyframes[i]
+                .cel
+                .instances
+                .iter()
+                .any(|inst| inst.binding.symbol_id == symbol_id)
+                || (self.keyframes[i].tween
+                    && self.keyframes[i].cel.single_symbol_instance().is_none())
+            {
+                let kf = self.keyframe_mut(i);
+                kf.cel
+                    .detach_symbol_id(symbol_id, kf.start_frame, library, next_group_id);
+                if kf.tween && kf.cel.single_symbol_instance().is_none() {
+                    kf.tween = false;
+                }
             }
         }
     }

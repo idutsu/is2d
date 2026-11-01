@@ -222,14 +222,14 @@ fn remap_timeline_group_ids(tl: &mut Timeline, doc: &mut Document) {
             .or_insert_with(|| doc.alloc_group_id())
     };
     for layer in &mut tl.layers {
-        for kf in &mut layer.keyframes {
-            if kf
+        for i in 0..layer.keyframes.len() {
+            if layer.keyframes[i]
                 .cel
                 .shapes
                 .iter()
                 .any(|s| !s.group_path.is_empty() || s.symbol_instance.is_some())
             {
-                for sh in kf.cel.shapes_mut() {
+                for sh in layer.keyframe_mut(i).cel.shapes_mut() {
                     for gid in &mut sh.group_path {
                         *gid = map_gid(*gid, doc);
                     }
@@ -239,8 +239,8 @@ fn remap_timeline_group_ids(tl: &mut Timeline, doc: &mut Document) {
                     }
                 }
             }
-            if !kf.cel.instances.is_empty() {
-                for inst in kf.cel.instances_mut() {
+            if !layer.keyframes[i].cel.instances.is_empty() {
+                for inst in layer.keyframe_mut(i).cel.instances_mut() {
                     inst.binding.instance_gid = map_gid(inst.binding.instance_gid, doc);
                     for gid in &mut inst.parent_scope {
                         *gid = map_gid(*gid, doc);
@@ -503,10 +503,12 @@ pub(crate) fn resolve_clipboard_for_paste(
             }
         }
         for layer in &mut imported.timeline.layers {
-            for kf in &mut layer.keyframes {
-                for inst in kf.cel.instances_mut() {
-                    if let Some(&mapped_child_id) = local_sym_map.get(&inst.binding.symbol_id) {
-                        inst.binding.symbol_id = mapped_child_id;
+            for i in 0..layer.keyframes.len() {
+                if !layer.keyframes[i].cel.instances.is_empty() {
+                    for inst in layer.keyframe_mut(i).cel.instances_mut() {
+                        if let Some(&mapped_child_id) = local_sym_map.get(&inst.binding.symbol_id) {
+                            inst.binding.symbol_id = mapped_child_id;
+                        }
                     }
                 }
             }

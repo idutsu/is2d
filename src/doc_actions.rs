@@ -1776,14 +1776,14 @@ fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -
         for &l_idx in &targets {
             let layer = &mut tl.layers[l_idx];
             if let Some(kf_idx) = layer.keyframe_index_at(curr_f) {
-                let kf = &mut layer.keyframes[kf_idx];
+                let kf = &layer.keyframes[kf_idx];
                 if next_tween {
                     if kf.cel.single_symbol_instance().is_some() && !kf.tween {
-                        kf.tween = true;
+                        layer.keyframe_mut(kf_idx).tween = true;
                         changed = true;
                     }
                 } else if kf.tween {
-                    kf.tween = false;
+                    layer.keyframe_mut(kf_idx).tween = false;
                     changed = true;
                 }
             }
@@ -1818,8 +1818,8 @@ fn apply_set_tween_rotate(tab: &mut Tab, rotate_mode: TweenRotate) -> bool {
     push_undo(tab, None);
     tab.with_active_timeline_mut(|tl, _| {
         if let Some(layer_mut) = tl.layers.get_mut(tl.active_layer) {
-            if let Some(kf) = layer_mut.keyframes.get_mut(kf_idx) {
-                kf.tween_rotate = rotate_mode;
+            if kf_idx < layer_mut.keyframes.len() {
+                layer_mut.keyframe_mut(kf_idx).tween_rotate = rotate_mode;
             }
         }
     });

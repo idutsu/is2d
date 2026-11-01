@@ -2490,10 +2490,10 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
         },
     );
     let last_undo = sym_app.history.undo_stack.back().unwrap();
-    assert!(!last_undo.library[0].timeline.layers[0].keyframes[0]
-        .cel
-        .shapes[0]
-        .has_cached_fill_mesh());
+    assert!(std::sync::Arc::ptr_eq(
+        &last_undo.library[0].timeline.layers[0].keyframes[0],
+        &sym_app.doc.library[0].timeline.layers[0].keyframes[0]
+    ));
     sym_app.undo();
     assert_eq!(sym_app.doc.stage_size, orig_stage);
     sym_app.redo();
@@ -4538,7 +4538,7 @@ fn test_tween_state_incomplete_when_not_single_symbol_instance() {
             Color32::RED,
         ),
     );
-    app.doc.root.layers[0].keyframes[0].tween = true;
+    app.doc.root.layers[0].keyframe_mut(0).tween = true;
     assert_eq!(
         app.doc.root.layers[0].tween_state_at_keyframe(0),
         TweenState::Incomplete,
@@ -4688,7 +4688,7 @@ fn test_nested_static_child_symbol_is_not_treated_as_dynamic_blank_frame() {
             Color32::RED,
         ),
     );
-    sym_parent.timeline.layers[0].keyframes[0].cel = crate::timeline::Cel::new_with_instances(
+    sym_parent.timeline.layers[0].keyframe_mut(0).cel = crate::timeline::Cel::new_with_instances(
         Vec::new(),
         vec![crate::symbol::SymbolInstance {
             binding: crate::symbol::SymbolInstanceBinding::new(1, 2, kurbo::Affine::IDENTITY),
@@ -6755,7 +6755,7 @@ fn test_nested_symbol_expansion_memoization_and_step_cap() {
                 shape_order_index: 0,
             })
             .collect();
-        sym.timeline.layers[0].keyframes[0].cel =
+        sym.timeline.layers[0].keyframe_mut(0).cel =
             timeline::Cel::new_with_instances(Vec::new(), instances);
         app.doc.library.push(sym);
     }
@@ -6776,7 +6776,7 @@ fn test_nested_symbol_expansion_memoization_and_step_cap() {
             shape_order_index: 0,
         })
         .collect();
-    app.doc.root.layers[0].keyframes[0].cel =
+    app.doc.root.layers[0].keyframe_mut(0).cel =
         timeline::Cel::new_with_instances(Vec::new(), root_instances);
 
     let t0 = std::time::Instant::now();
@@ -6796,7 +6796,8 @@ fn test_nested_symbol_expansion_memoization_and_step_cap() {
     //    MAX_SYMBOL_EXPANSION_STEPS により無限展開せず即座に打ち切られること
     for sym in &mut app.doc.library {
         sym.timeline.total_frames = 100_000;
-        if let Some(kf) = sym.timeline.layers[0].keyframes.first_mut() {
+        if !sym.timeline.layers[0].keyframes.is_empty() {
+            let kf = sym.timeline.layers[0].keyframe_mut(0);
             for (idx, inst) in kf.cel.instances_mut().iter_mut().enumerate() {
                 inst.binding.loop_mode = vector_engine::SymbolLoopMode::SingleFrame;
                 inst.binding.first_frame = idx * 97 + (sym.id as usize) * 13;
@@ -10962,7 +10963,8 @@ fn test_g1_2_truncation_flag_and_warning_above_10000_shapes() {
             shape_order_index: 0,
         })
         .collect();
-    app.doc.root.layers[0].keyframes[0]
+    app.doc.root.layers[0]
+        .keyframe_mut(0)
         .cel
         .set_parts(Vec::new(), instances_100);
     app.refresh_scene_base();
@@ -10985,7 +10987,8 @@ fn test_g1_2_truncation_flag_and_warning_above_10000_shapes() {
             shape_order_index: 0,
         })
         .collect();
-    app.doc.root.layers[0].keyframes[0]
+    app.doc.root.layers[0]
+        .keyframe_mut(0)
         .cel
         .set_parts(Vec::new(), instances_101);
     app.refresh_scene_base();
@@ -11065,7 +11068,8 @@ fn test_g1_1_writeback_preserves_unexpanded_and_orphan_elements() {
             shape_order_index: 0,
         },
     );
-    app.doc.root.layers[0].keyframes[0]
+    app.doc.root.layers[0]
+        .keyframe_mut(0)
         .cel
         .set_parts(Vec::new(), instances);
     app.refresh_scene_base();
@@ -11114,6 +11118,233 @@ fn test_g1_1_writeback_preserves_unexpanded_and_orphan_elements() {
         "保存して読み込んでもインスタンスが120個残ること"
     );
 }
+
+#[cfg(target_os = "macos")]
+fn current_process_rss_bytes() -> usize {
+    #[repr(C)]
+    struct MachTaskBasicInfo {
+        virtual_size: u64,
+        resident_size: u64,
+        resident_size_max: u64,
+        user_time: [u32; 2],
+        system_time: [u32; 2],
+        policy: i32,
+        suspend_count: i32,
+    }
+    const MACH_TASK_BASIC_INFO: u32 = 20;
+    const MACH_TASK_BASIC_INFO_COUNT: u32 =
+        (std::mem::size_of::<MachTaskBasicInfo>() / std::mem::size_of::<u32>()) as u32;
+    extern "C" {
+        static mach_task_self_: u32;
+        fn task_info(
+            target_task: u32,
+            flavor: u32,
+            task_info_out: *mut MachTaskBasicInfo,
+            task_info_out_cnt: *mut u32,
+        ) -> i32;
+    }
+    let mut info = std::mem::MaybeUninit::<MachTaskBasicInfo>::zeroed();
+    let mut count = MACH_TASK_BASIC_INFO_COUNT;
+    let kr = unsafe {
+        task_info(
+            mach_task_self_,
+            MACH_TASK_BASIC_INFO,
+            info.as_mut_ptr(),
+            &mut count,
+        )
+    };
+    assert_eq!(kr, 0, "task_info failed: {kr}");
+    unsafe { info.assume_init().resident_size as usize }
+}
+
+#[test]
+fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
+    use crate::doc_actions::{apply, Action};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    // 0. keyframe_mut で複製が起きる際、Undo 側に残る古いキーフレームの cel.mesh_cache が空になること
+    {
+        let mut app = Is2dApp::default();
+        let _ = apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+                radius: 5.0,
+                color: Color32::RED,
+            },
+        );
+        // 画面座標メッシュキャッシュを生成させる
+        let _ = app.doc.root.layers[0].keyframes[0]
+            .cel
+            .cached_screen_mesh(1.0, Vec2::ZERO, false);
+        assert!(
+            app.doc.root.layers[0].keyframes[0]
+                .cel
+                .mesh_cache
+                .lock()
+                .screen_cache
+                .is_some()
+        );
+        // 次のストロークで UndoEntry に記録されたのち keyframe_mut(0) で書き換えが走る
+        let _ = apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 140.0), Point::new(160.0, 140.0)],
+                radius: 5.0,
+                color: Color32::BLUE,
+            },
+        );
+        let prev_entry = app.history.undo_stack.back().unwrap();
+        assert!(
+            prev_entry.timeline.layers[0].keyframes[0]
+                .cel
+                .mesh_cache
+                .lock()
+                .screen_cache
+                .is_none(),
+            "Undo スタックに残る古いキーフレームの cel.mesh_cache が空になっていること"
+        );
+    }
+
+    // 1. 10レイヤー × 3,000キーフレームのタイムラインで、1ストロークの描画と1回の Undo がそれぞれ 5ms 以内
+    {
+        let mut app = Is2dApp::default();
+        let sample_shape = make_stroke(
+            Point::new(50.0, 50.0),
+            Point::new(90.0, 50.0),
+            4.0,
+            Color32::from_rgb(80, 120, 200),
+        );
+        app.doc.root.total_frames = 3_000;
+        app.doc.root.layers.clear();
+        for l in 0..10 {
+            let lid = (l + 1) as u64;
+            let mut kfs = Vec::with_capacity(3_000);
+            for f in 0..3_000 {
+                let mut shapes = sample_shape.clone();
+                shapes[0].layer_id = lid;
+                kfs.push(Arc::new(timeline::Keyframe {
+                    start_frame: f,
+                    cel: timeline::Cel::new(shapes),
+                    tween: false,
+                    tween_rotate: timeline::TweenRotate::Auto,
+                }));
+            }
+            app.doc.root.layers.push(timeline::Layer {
+                id: lid,
+                name: format!("Layer {}", l + 1),
+                visible: true,
+                locked: false,
+                frame_count: 3_000,
+                keyframes: kfs,
+            });
+        }
+        app.doc.root.next_layer_id = 11;
+        app.doc.root.next_layer_number = 11;
+        app.doc.root.current_frame = 1_500;
+        app.doc.root.active_layer = 0;
+        app.refresh_scene_base();
+
+        let t_stroke = Instant::now();
+        let _ = apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(200.0, 200.0), Point::new(240.0, 200.0)],
+                radius: 4.0,
+                color: Color32::RED,
+            },
+        );
+        let stroke_elapsed = t_stroke.elapsed();
+
+        let t_undo = Instant::now();
+        app.undo();
+        let undo_elapsed = t_undo.elapsed();
+
+        println!(
+            "[G4-1] 10L x 3000KF: 1 stroke = {:.3} ms, 1 undo = {:.3} ms",
+            stroke_elapsed.as_secs_f64() * 1000.0,
+            undo_elapsed.as_secs_f64() * 1000.0,
+        );
+        assert!(
+            stroke_elapsed.as_secs_f64() * 1000.0 <= 5.0,
+            "10L x 3000KF で 1ストローク描画が 5ms 以内であること (実測: {stroke_elapsed:?})"
+        );
+        assert!(
+            undo_elapsed.as_secs_f64() * 1000.0 <= 5.0,
+            "10L x 3000KF で 1回の Undo が 5ms 以内であること (実測: {undo_elapsed:?})"
+        );
+    }
+
+    // 2. 20レイヤー × 600キーフレームのタイムラインで、ブラシ描画を100回繰り返した前後の RSS 増加が 50MB 以内
+    #[cfg(target_os = "macos")]
+    {
+        let mut app = Is2dApp::default();
+        let sample_shape = make_stroke(
+            Point::new(50.0, 50.0),
+            Point::new(90.0, 50.0),
+            4.0,
+            Color32::from_rgb(100, 160, 90),
+        );
+        app.doc.root.total_frames = 600;
+        app.doc.root.layers.clear();
+        for l in 0..20 {
+            let lid = (l + 1) as u64;
+            let mut kfs = Vec::with_capacity(600);
+            for f in 0..600 {
+                let mut shapes = sample_shape.clone();
+                shapes[0].layer_id = lid;
+                kfs.push(Arc::new(timeline::Keyframe {
+                    start_frame: f,
+                    cel: timeline::Cel::new(shapes),
+                    tween: false,
+                    tween_rotate: timeline::TweenRotate::Auto,
+                }));
+            }
+            app.doc.root.layers.push(timeline::Layer {
+                id: lid,
+                name: format!("Layer {}", l + 1),
+                visible: true,
+                locked: false,
+                frame_count: 600,
+                keyframes: kfs,
+            });
+        }
+        app.doc.root.next_layer_id = 21;
+        app.doc.root.next_layer_number = 21;
+        app.doc.root.current_frame = 0;
+        app.doc.root.active_layer = 0;
+        app.refresh_scene_base();
+
+        let rss_before = current_process_rss_bytes();
+        for i in 0..100 {
+            let y = 120.0 + (i % 10) as f64 * 12.0;
+            let x = 100.0 + (i / 10) as f64 * 30.0;
+            let _ = apply(
+                &mut app,
+                Action::PaintStroke {
+                    points: vec![Point::new(x, y), Point::new(x + 20.0, y)],
+                    radius: 3.0,
+                    color: Color32::from_rgb(200, (i * 2) as u8, 80),
+                },
+            );
+        }
+        let rss_after = current_process_rss_bytes();
+        let rss_delta_bytes = rss_after.saturating_sub(rss_before);
+        let rss_delta_mb = rss_delta_bytes as f64 / (1024.0 * 1024.0);
+        println!(
+            "[G4-1] 20L x 600KF x 100 strokes: RSS before = {:.2} MB, after = {:.2} MB, delta = {:.2} MB",
+            rss_before as f64 / (1024.0 * 1024.0),
+            rss_after as f64 / (1024.0 * 1024.0),
+            rss_delta_mb,
+        );
+        assert!(
+            rss_delta_bytes <= 50 * 1024 * 1024,
+            "20L x 600KF で 100ストローク描画後の RSS 増加が 50MB 以内であること (実測: {rss_delta_mb:.2} MB)"
+        );
+    }
+}
+
 
 
 

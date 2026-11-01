@@ -221,7 +221,7 @@ pub(crate) fn lru_insert<K, V>(entries: &mut Vec<LruEntry<K, V>>, key: K, val: V
 pub(crate) struct CelMeshCache {
     shape_revisions: Vec<(u64, Color32)>,
     world_batch_mesh: Arc<Mesh>,
-    screen_cache: Option<ScreenMeshCacheEntry>,
+    pub(crate) screen_cache: Option<ScreenMeshCacheEntry>,
     onion_cache: Option<OnionMeshCacheEntry>,
     /// シンボルインスタンスやトゥイーンを含むセルの解決済みメッシュキャッシュ署名
     pub(crate) resolved_sig: Option<ResolvedCelSig>,
@@ -493,23 +493,21 @@ impl Keyframe {
     }
 }
 
-fn max_group_id_in_keyframes(kfs: &[Keyframe]) -> u64 {
+fn max_group_id_in_keyframe(kf: &Keyframe) -> u64 {
     let mut max_gid = 0_u64;
-    for kf in kfs {
-        for s in kf.cel.shapes.iter() {
-            for &gid in &s.group_path {
-                max_gid = max_gid.max(gid);
-            }
-            if let Some(b) = s.symbol_instance {
-                max_gid = max_gid.max(b.instance_gid);
-            }
+    for s in kf.cel.shapes.iter() {
+        for &gid in &s.group_path {
+            max_gid = max_gid.max(gid);
         }
-        for inst in kf.cel.instances.iter() {
-            for &gid in &inst.parent_scope {
-                max_gid = max_gid.max(gid);
-            }
-            max_gid = max_gid.max(inst.binding.instance_gid);
+        if let Some(b) = s.symbol_instance {
+            max_gid = max_gid.max(b.instance_gid);
         }
+    }
+    for inst in kf.cel.instances.iter() {
+        for &gid in &inst.parent_scope {
+            max_gid = max_gid.max(gid);
+        }
+        max_gid = max_gid.max(inst.binding.instance_gid);
     }
     max_gid
 }
@@ -595,7 +593,7 @@ pub(crate) struct Layer {
     pub(crate) visible: bool,
     pub(crate) locked: bool,
     pub(crate) frame_count: usize,
-    pub(crate) keyframes: Vec<Keyframe>,
+    pub(crate) keyframes: Vec<Arc<Keyframe>>,
 }
 
 impl Layer {
@@ -610,12 +608,20 @@ impl Layer {
             visible: true,
             locked: false,
             frame_count: frame_count.max(1),
-            keyframes: vec![Keyframe::new_blank(0)],
+            keyframes: vec![Arc::new(Keyframe::new_blank(0))],
         }
     }
 
     pub(crate) fn new_with_id(id: u64, name: impl Into<String>) -> Self {
         Self::new_with_id_and_frames(id, name, 1)
+    }
+
+    /// `i` 番目のキーフレームへの可変参照を返す（Undo 履歴と共有されている場合は古い方の描画キャッシュを空にしてから複製する）
+    pub(crate) fn keyframe_mut(&mut self, i: usize) -> &mut Keyframe {
+        if Arc::strong_count(&self.keyframes[i]) > 1 {
+            *self.keyframes[i].cel.mesh_cache.lock() = CelMeshCache::default();
+        }
+        Arc::make_mut(&mut self.keyframes[i])
     }
 
     /// 指定フレーム番号 `frame` において有効な（保持されている）キーフレームのインデックスを返す
@@ -650,7 +656,7 @@ impl Layer {
         }
         if let Some(existing_idx) = self.keyframes.iter().position(|kf| kf.start_frame == frame) {
             if !clone_prev {
-                self.keyframes[existing_idx].clear_cel();
+                self.keyframe_mut(existing_idx).clear_cel();
             }
             return existing_idx;
         }
@@ -730,12 +736,12 @@ impl Layer {
         let insert_idx = self.keyframes.partition_point(|kf| kf.start_frame < frame);
         self.keyframes.insert(
             insert_idx,
-            Keyframe {
+            Arc::new(Keyframe {
                 start_frame: frame,
                 cel: cloned_cel,
                 tween: split_tween_binding.is_some(),
                 tween_rotate: inherited_rotate,
-            },
+            }),
         );
         insert_idx
     }
@@ -747,7 +753,7 @@ impl Layer {
         };
         if idx == 0 {
             if frame == 0 {
-                self.keyframes[0].clear_cel()
+                self.keyframe_mut(0).clear_cel()
             } else {
                 false
             }
@@ -762,9 +768,9 @@ impl Layer {
         if frame >= self.frame_count {
             self.frame_count = frame + 1;
         } else {
-            for kf in &mut self.keyframes {
-                if kf.start_frame > frame {
-                    kf.start_frame += 1;
+            for i in 0..self.keyframes.len() {
+                if self.keyframes[i].start_frame > frame {
+                    self.keyframe_mut(i).start_frame += 1;
                 }
             }
             self.frame_count += 1;
@@ -786,21 +792,23 @@ impl Layer {
         let span_len = span_end.saturating_sub(span_start) + 1;
 
         if span_len >= 2 {
-            for kf in &mut self.keyframes[(kf_idx + 1)..] {
+            for i in (kf_idx + 1)..self.keyframes.len() {
+                let kf = self.keyframe_mut(i);
                 kf.start_frame = kf.start_frame.saturating_sub(1);
             }
             self.frame_count = (self.frame_count - 1).max(1);
             true
         } else if self.frame_count <= 1 {
-            self.keyframes[0].clear_cel()
+            self.keyframe_mut(0).clear_cel()
         } else {
             self.keyframes.remove(kf_idx);
-            for kf in &mut self.keyframes[kf_idx..] {
+            for i in kf_idx..self.keyframes.len() {
+                let kf = self.keyframe_mut(i);
                 kf.start_frame = kf.start_frame.saturating_sub(1);
             }
             self.frame_count = (self.frame_count - 1).max(1);
             if self.keyframes.is_empty() || self.keyframes[0].start_frame > 0 {
-                self.keyframes.insert(0, Keyframe::new_blank(0));
+                self.keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
             }
             true
         }
@@ -888,7 +896,11 @@ impl Layer {
 
     /// このレイヤー内の全キーフレームに含まれる最大のグループID / `instance_gid` を返す
     pub(crate) fn max_group_id(&self) -> u64 {
-        max_group_id_in_keyframes(&self.keyframes)
+        self.keyframes
+            .iter()
+            .map(|kf| max_group_id_in_keyframe(kf))
+            .max()
+            .unwrap_or(0)
     }
 
     /// 指定フレーム区間 `[min_frame..=max_frame]` 内のキーフレーム群を相対フレーム位置（`0..=max_frame - min_frame`）で抽出する
@@ -931,7 +943,7 @@ impl Layer {
             .retain(|kf| kf.start_frame < min_frame || kf.start_frame > max_frame);
 
         if self.keyframes.is_empty() || self.keyframes[0].start_frame > 0 {
-            self.keyframes.insert(0, Keyframe::new_blank(0));
+            self.keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
         } else if min_frame < self.frame_count {
             let prev_idx = self
                 .keyframes
@@ -942,7 +954,7 @@ impl Layer {
                     .keyframes
                     .partition_point(|kf| kf.start_frame < min_frame);
                 self.keyframes
-                    .insert(insert_pos, Keyframe::new_blank(min_frame));
+                    .insert(insert_pos, Arc::new(Keyframe::new_blank(min_frame)));
             }
         }
 
@@ -951,7 +963,7 @@ impl Layer {
                 let pos = self
                     .keyframes
                     .partition_point(|existing_kf| existing_kf.start_frame < after_frame);
-                self.keyframes.insert(pos, after_kf);
+                self.keyframes.insert(pos, Arc::new(after_kf));
             }
         }
     }
@@ -972,7 +984,7 @@ impl Layer {
         if is_cross_layer {
             let mut next_gid = self
                 .max_group_id()
-                .max(max_group_id_in_keyframes(&kfs))
+                .max(kfs.iter().map(max_group_id_in_keyframe).max().unwrap_or(0))
                 .saturating_add(1)
                 .max(1);
             remap_keyframes_group_and_instance_ids(&mut kfs, &mut next_gid);
@@ -995,7 +1007,7 @@ impl Layer {
             let pos = self
                 .keyframes
                 .partition_point(|existing_kf| existing_kf.start_frame < after_frame);
-            self.keyframes.insert(pos, after_kf);
+            self.keyframes.insert(pos, Arc::new(after_kf));
         }
         for mut kf in kfs {
             if kf.cel.shapes.iter().any(|s| s.layer_id != dst_lid) {
@@ -1015,11 +1027,12 @@ impl Layer {
                 TweenRotate::Auto
             };
             let target_f = dst_min_frame + kf.start_frame;
-            if let Some(existing) = self
+            if let Some(existing_idx) = self
                 .keyframes
-                .iter_mut()
-                .find(|existing_kf| existing_kf.start_frame == target_f)
+                .iter()
+                .position(|existing_kf| existing_kf.start_frame == target_f)
             {
+                let existing = self.keyframe_mut(existing_idx);
                 existing.cel = kf.cel;
                 existing.tween = valid_tween;
                 existing.tween_rotate = rotate_mode;
@@ -1029,17 +1042,17 @@ impl Layer {
                     .partition_point(|existing_kf| existing_kf.start_frame < target_f);
                 self.keyframes.insert(
                     pos,
-                    Keyframe {
+                    Arc::new(Keyframe {
                         start_frame: target_f,
                         cel: kf.cel,
                         tween: valid_tween,
                         tween_rotate: rotate_mode,
-                    },
+                    }),
                 );
             }
         }
         if self.keyframes.is_empty() || self.keyframes[0].start_frame > 0 {
-            self.keyframes.insert(0, Keyframe::new_blank(0));
+            self.keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
         }
     }
 
@@ -1194,7 +1207,7 @@ impl Timeline {
                     layer.frame_count = next_total;
                     layer.keyframes.retain(|kf| kf.start_frame < next_total);
                     if layer.keyframes.is_empty() || layer.keyframes[0].start_frame > 0 {
-                        layer.keyframes.insert(0, Keyframe::new_blank(0));
+                        layer.keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
                     }
                 }
             }
@@ -1292,28 +1305,11 @@ impl Timeline {
         }
     }
 
-    /// Undo 履歴保存時などに、全レイヤー・全キーフレームの一時メッシュキャッシュを破棄する
+    /// クリップボード退避時などに、全レイヤー・全キーフレームの一時メッシュキャッシュを破棄する
     pub(crate) fn strip_transient_caches(&mut self) {
-        self.strip_transient_caches_with_prev(None);
-    }
-
-    /// 直前の履歴スナップショット `prev` と同一リビジョンの `Cel` は既にキャッシュ除去済みの `Arc` を $O(1)$ で共有し、
-    /// 変更されたキーフレームのみキャッシュ除去を実行する
-    pub(crate) fn strip_transient_caches_with_prev(&mut self, prev: Option<&Timeline>) {
         for layer in &mut self.layers {
-            let prev_layer = prev.and_then(|p| p.layers.iter().find(|pl| pl.id == layer.id));
-            for kf in &mut layer.keyframes {
-                if let Some(prev_kf) = prev_layer.and_then(|pl| {
-                    pl.keyframes
-                        .iter()
-                        .find(|pkf| pkf.cel.revision == kf.cel.revision)
-                }) {
-                    kf.cel.shapes = Arc::clone(&prev_kf.cel.shapes);
-                    kf.cel.instances = Arc::clone(&prev_kf.cel.instances);
-                    *kf.cel.mesh_cache.lock() = CelMeshCache::default();
-                } else {
-                    kf.cel.strip_transient_caches();
-                }
+            for i in 0..layer.keyframes.len() {
+                layer.keyframe_mut(i).cel.strip_transient_caches();
             }
         }
     }

@@ -2589,16 +2589,6 @@ pub(crate) struct UndoEntry {
     pub(crate) commit_id: u64,
 }
 
-impl UndoEntry {
-    /// スナップショットから随時再生成可能な一時メッシュキャッシュ（`fill_mesh`, `selection_mesh`, `CelMeshCache`）を除去し、
-    /// 直前の履歴スナップショット `prev_timeline` と未変更のセルは `Arc` を $O(1)$ 共有した軽量状態にする
-    pub(crate) fn strip_transient_caches(mut self, prev_timeline: Option<&Timeline>) -> Self {
-        self.timeline
-            .strip_transient_caches_with_prev(prev_timeline);
-        self
-    }
-}
-
 /// 連続操作（ドラッグ・キーリピート・連続タイピング）を1つの Undo エントリに合流させる識別キー
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum CoalesceKey {
@@ -2693,14 +2683,7 @@ impl UndoHistory {
             }) {
                 lib.push(prev_sym.clone());
             } else {
-                let prev_sym_tl = prev_entry.and_then(|pe| {
-                    pe.library
-                        .iter()
-                        .find(|s| s.id == sym.id)
-                        .map(|s| &s.timeline)
-                });
                 let mut cloned = sym.clone();
-                cloned.timeline.strip_transient_caches_with_prev(prev_sym_tl);
                 cloned.clear_preview_and_anim_caches();
                 lib.push(cloned);
             }
@@ -2729,18 +2712,10 @@ impl UndoHistory {
         entry.commit_id = self.current_commit_id;
         self.current_commit_id = self.next_commit_id;
         self.next_commit_id = self.next_commit_id.saturating_add(1);
-        let stripped = {
-            let prev_tl = self
-                .undo_stack
-                .back()
-                .or_else(|| self.redo_stack.last())
-                .map(|e| &e.timeline);
-            entry.strip_transient_caches(prev_tl)
-        };
         if self.undo_stack.len() >= MAX_UNDO_HISTORY {
             self.undo_stack.pop_front();
         }
-        self.undo_stack.push_back(stripped);
+        self.undo_stack.push_back(entry);
         self.redo_stack.clear();
     }
 
@@ -2758,31 +2733,15 @@ impl UndoHistory {
 
     /// Undo 実行前の現在状態を Redo スタックへ退避する
     pub(crate) fn push_redo(&mut self, entry: UndoEntry) {
-        let stripped = {
-            let prev_tl = self
-                .redo_stack
-                .last()
-                .or_else(|| self.undo_stack.back())
-                .map(|e| &e.timeline);
-            entry.strip_transient_caches(prev_tl)
-        };
-        self.redo_stack.push(stripped);
+        self.redo_stack.push(entry);
     }
 
     /// Redo 実行前の現在状態を Undo スタックへ戻す（Redo スタックは消去しない）
     pub(crate) fn push_undo_from_redo(&mut self, entry: UndoEntry) {
-        let stripped = {
-            let prev_tl = self
-                .undo_stack
-                .back()
-                .or_else(|| self.redo_stack.last())
-                .map(|e| &e.timeline);
-            entry.strip_transient_caches(prev_tl)
-        };
         if self.undo_stack.len() >= MAX_UNDO_HISTORY {
             self.undo_stack.pop_front();
         }
-        self.undo_stack.push_back(stripped);
+        self.undo_stack.push_back(entry);
     }
 }
 
@@ -3341,22 +3300,14 @@ fn writeback_edited_layer_shapes(
                 &mut next_instances,
             );
         }
-        tl.layers[l_idx].keyframes[kf_idx].cel =
-            Cel::new_with_instances(non_symbol_shapes, next_instances);
-        let has_single_sym = tl.layers[l_idx].keyframes[kf_idx]
-            .cel
-            .single_symbol_instance()
-            .is_some();
-        tl.layers[l_idx].keyframes[kf_idx].tween = has_single_sym;
+        let kf = tl.layers[l_idx].keyframe_mut(kf_idx);
+        kf.cel = Cel::new_with_instances(non_symbol_shapes, next_instances);
+        let has_single_sym = kf.cel.single_symbol_instance().is_some();
+        kf.tween = has_single_sym;
         if has_single_sym {
-            tl.layers[l_idx].keyframes[kf_idx].tween_rotate = prev_tween_rotate;
+            kf.tween_rotate = prev_tween_rotate;
         }
-        let instances_snapshot: Vec<SymbolInstance> = tl.layers[l_idx].keyframes[kf_idx]
-            .cel
-            .instances
-            .iter()
-            .cloned()
-            .collect();
+        let instances_snapshot: Vec<SymbolInstance> = kf.cel.instances.iter().cloned().collect();
         for inst in &instances_snapshot {
             reinstantiate_modified_symbol_instance(
                 &tl.layers[l_idx],
@@ -3472,7 +3423,7 @@ fn writeback_edited_layer_shapes(
         (non_symbol_shapes, next_instances, modified_inst_indices)
     };
 
-    let kf = &mut tl.layers[l_idx].keyframes[kf_idx];
+    let kf = tl.layers[l_idx].keyframe_mut(kf_idx);
     kf.cel.set_parts(non_symbol_shapes, next_instances);
     if kf.tween && kf.cel.single_symbol_instance().is_none() {
         kf.tween = false;
