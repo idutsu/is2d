@@ -421,6 +421,10 @@ fn handle_transform_click(host: &mut impl ActionHost, pt: Point, shift_held: boo
     host.tab_mut().view.inspect_timeline_frame = false;
     let zoom = host.tab().view.zoom;
     let scene = host.tab().scene();
+    let hover = compute_transform_hover(scene, &host.tab().session, pt, zoom);
+    if !shift_held && hover == TransformHoverTarget::Pivot {
+        return;
+    }
     let hit_opt = scene
         .topmost_shape_at(pt, &host.tab().session.editing_group_path)
         .or_else(|| {
@@ -432,26 +436,22 @@ fn handle_transform_click(host: &mut impl ActionHost, pt: Point, shift_held: boo
         if let Some(scene_idx) = hit_opt {
             apply(host, Action::ToggleSelectionAt { scene_idx });
         }
-    } else if compute_transform_hover(host.tab().scene(), &host.tab().session, pt, zoom)
-        != TransformHoverTarget::Pivot
-    {
-        if let Some(hit_idx) = hit_opt {
-            if !host
+    } else if let Some(hit_idx) = hit_opt {
+        if !host
+            .tab()
+            .scene()
+            .is_shape_selected(hit_idx, &host.tab().session.selection)
+        {
+            apply(host, Action::SelectSingleAt { pt });
+        } else {
+            let unit = host
                 .tab()
                 .scene()
-                .is_shape_selected(hit_idx, &host.tab().session.selection)
-            {
-                apply(host, Action::SelectSingleAt { pt });
-            } else {
-                let unit = host
-                    .tab()
-                    .scene()
-                    .expand_to_group_unit(hit_idx, &host.tab().session.editing_group_path);
-                apply(host, Action::RetainSelection { keep_indices: unit });
-            }
-        } else {
-            apply(host, Action::Deselect);
+                .expand_to_group_unit(hit_idx, &host.tab().session.editing_group_path);
+            apply(host, Action::RetainSelection { keep_indices: unit });
         }
+    } else if hover == TransformHoverTarget::None {
+        apply(host, Action::Deselect);
     }
 }
 

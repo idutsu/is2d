@@ -11554,6 +11554,202 @@ fn test_g1_4_playback_advance_skips_base_cache_rebuild_and_stop_refreshes() {
     );
 }
 
+#[test]
+fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
+    use crate::canvas_tool::{Tool, TransformHoverTarget};
+    use crate::doc_actions::{apply, Action};
+    use eframe::egui;
+
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let screen_rect = Some(egui::Rect::from_min_size(
+        Pos2::ZERO,
+        Vec2::new(1280.0, 820.0),
+    ));
+
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(300.0, 300.0), Point::new(400.0, 300.0)],
+            radius: 15.0,
+            color: Color32::RED,
+        },
+    );
+    app.tool.tool = Tool::Transform;
+    let _ = apply(
+        &mut app,
+        Action::SelectSingleAt {
+            pt: Point::new(350.0, 300.0),
+        },
+    );
+    assert!(!app.session.selection.is_empty());
+
+    // 初期レイアウトの確定
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+
+    let bbox = app
+        .scene()
+        .selection_bounding_box(&app.session.selection, app.view.zoom)
+        .unwrap();
+
+    // 1. 四隅の回転ゾーン（図形外・境界枠の左上コーナー外側）の座標を確認し、クリックしても選択が外れないこと
+    let rotate_pt = Point::new(bbox.x0 - 12.0, bbox.y0 - 12.0);
+    assert!(
+        !app.scene().get(0).unwrap().contains_point(rotate_pt),
+        "回転ゾーン座標は図形の外側であること"
+    );
+    assert_eq!(
+        tool_transform::compute_transform_hover(
+            app.scene(),
+            &app.session,
+            rotate_pt,
+            app.view.zoom
+        ),
+        TransformHoverTarget::Rotate
+    );
+    let rotate_scr = app.view.world_to_screen(rotate_pt);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(rotate_scr),
+                egui::Event::PointerButton {
+                    pos: rotate_scr,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerButton {
+                pos: rotate_scr,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(
+        !app.session.selection.is_empty(),
+        "自由変形ツールで回転ゾーンをクリックしたとき選択が外れないこと"
+    );
+
+    // 2. 拡縮ハンドルの上（図形外・境界枠の左上角の少し外側）をクリックしても選択が外れないこと
+    let scale_pt = Point::new(bbox.x0 - 3.0, bbox.y0 - 3.0);
+    assert!(
+        !app.scene().get(0).unwrap().contains_point(scale_pt),
+        "拡縮ハンドル上の座標は図形の外側であること"
+    );
+    assert!(matches!(
+        tool_transform::compute_transform_hover(app.scene(), &app.session, scale_pt, app.view.zoom),
+        TransformHoverTarget::Scale(_)
+    ));
+    let scale_scr = app.view.world_to_screen(scale_pt);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(scale_scr),
+                egui::Event::PointerButton {
+                    pos: scale_scr,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerButton {
+                pos: scale_scr,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(
+        !app.session.selection.is_empty(),
+        "自由変形ツールで拡縮ハンドルの上をクリックしたとき選択が外れないこと"
+    );
+
+    // 3. 何もない場所をクリックしたときは選択が外れること
+    let empty_pt = Point::new(bbox.x0 - 80.0, bbox.y0 - 80.0);
+    assert_eq!(
+        tool_transform::compute_transform_hover(app.scene(), &app.session, empty_pt, app.view.zoom),
+        TransformHoverTarget::None
+    );
+    let empty_scr = app.view.world_to_screen(empty_pt);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(empty_scr),
+                egui::Event::PointerButton {
+                    pos: empty_scr,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerButton {
+                pos: empty_scr,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(
+        app.session.selection.is_empty(),
+        "何もない場所をクリックしたときは選択が外れること"
+    );
+}
+
+
 
 
 
