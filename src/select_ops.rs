@@ -822,6 +822,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     let layer_ids = editable_layer_ids(tab);
     edit_layers(tab, &layer_ids, |edit| {
         let mut detached_inner_gid_map: Vec<((u64, u64), u64)> = Vec::new();
+        let mut detached_instance_gids: Vec<u64> = Vec::new();
         let editing_group_path = &edit.editing_group_path;
         let next_group_id = &mut edit.next_group_id;
         for shape in &mut edit.shapes {
@@ -835,7 +836,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
                     .is_some_and(|b| b.instance_gid == removed_gid)
                 {
                     shape.symbol_instance = None;
-                    selection.instances.remove(&removed_gid);
+                    detached_instance_gids.push(removed_gid);
                     if !shape.exterior.segments.is_empty() {
                         selection.shapes.insert(shape.shape_id);
                     }
@@ -859,6 +860,9 @@ pub(crate) fn prepare_ungroup_selected_shapes(
                 }
             }
         }
+        selection
+            .instances
+            .retain(|gid| !detached_instance_gids.contains(gid));
         edit.shapes
             .retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
     });

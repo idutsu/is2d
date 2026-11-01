@@ -12707,3 +12707,107 @@ fn test_tessellate_lyon_path_shrinks_mesh_capacity_to_len() {
         "直接輪郭メッシュの indices.capacity() が indices.len() と一致すること"
     );
 }
+
+/// M2-1: 図形10個を持つシンボルや、入れ子シンボルを含むシンボルを Cmd+B (Action::Ungroup) で分解した際、
+/// シンボルインスタンスが文書に残らず全図形が欠落・重複なく分解されることを検証する
+#[test]
+fn test_m2_1_ungroup_multi_shape_and_nested_symbol_detaches_all_shapes() {
+    use crate::doc_actions::{apply, Action};
+
+    // 1. 四角（互いに離れたストローク図形）10個のシンボルを置いて Cmd+B すると、
+    //    文書にそのシンボルのインスタンスが残らず、生の図形が10個になり、形も分解前と同じであること
+    let mut app = Is2dApp::default();
+    for i in 0..10 {
+        let x = 50.0 + (i % 5) as f64 * 120.0;
+        let y = 80.0 + (i / 5) as f64 * 120.0;
+        let _ = apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(x, y), Point::new(x + 40.0, y)],
+                radius: 8.0,
+                color: Color32::from_rgb(30 + i as u8 * 20, 100, 200),
+            },
+        );
+    }
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 10);
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(&mut app, Action::ConvertToSymbol);
+    assert_eq!(app.doc.library.len(), 1);
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.instances.len(), 1);
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 0);
+
+    let before_bboxes: Vec<kurbo::Rect> = app.scene().iter().map(|s| s.bounding_box()).collect();
+    let before_colors: Vec<Color32> = app.scene().iter().map(|s| s.color).collect();
+    assert_eq!(before_bboxes.len(), 10);
+
+    let _ = apply(&mut app, Action::Ungroup);
+    assert!(
+        app.doc.root.layers[0].keyframes[0].cel.instances.is_empty(),
+        "10図形シンボルの分解後、文書にインスタンスが残らないこと"
+    );
+
+    // 選択解除で Floating を確定した後も、生の図形が10個で形・色が分解前と一致すること
+    canvas_tool::clear_selection(&mut app);
+    let cel = &app.doc.root.layers[0].keyframes[0].cel;
+    assert!(cel.instances.is_empty());
+    assert_eq!(cel.shapes.len(), 10, "生の図形が10個になること");
+    for (idx, s) in cel.shapes.iter().enumerate() {
+        assert!(s.group_path.is_empty() && s.symbol_instance.is_none());
+        assert_eq!(s.color, before_colors[idx]);
+        let bb = s.bounding_box();
+        let exp = before_bboxes[idx];
+        assert!(
+            (bb.x0 - exp.x0).abs() < 1e-6
+                && (bb.y0 - exp.y0).abs() < 1e-6
+                && (bb.x1 - exp.x1).abs() < 1e-6
+                && (bb.y1 - exp.y1).abs() < 1e-6,
+            "分解前後の図形 #{idx} の形（bbox）が一致すること"
+        );
+    }
+
+    // 2. シンボル B と図形1つを持つシンボル A を分解すると、A のインスタンスが残らないこと
+    let mut app2 = Is2dApp::default();
+    let _ = apply(
+        &mut app2,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(150.0, 100.0)],
+            radius: 8.0,
+            color: Color32::RED,
+        },
+    );
+    let _ = apply(&mut app2, Action::SelectAll);
+    let _ = apply(&mut app2, Action::ConvertToSymbol);
+    let sym_b_id = app2.doc.library[0].id;
+
+    let _ = apply(
+        &mut app2,
+        Action::PaintStroke {
+            points: vec![Point::new(250.0, 100.0), Point::new(300.0, 100.0)],
+            radius: 8.0,
+            color: Color32::BLUE,
+        },
+    );
+    let _ = apply(&mut app2, Action::SelectAll);
+    let _ = apply(&mut app2, Action::ConvertToSymbol);
+    assert_eq!(app2.doc.library.len(), 2);
+    let sym_a_id = app2.doc.library[1].id;
+    assert_ne!(sym_a_id, sym_b_id);
+    assert_eq!(app2.doc.root.layers[0].keyframes[0].cel.instances.len(), 1);
+    assert_eq!(
+        app2.doc.root.layers[0].keyframes[0].cel.instances[0]
+            .binding
+            .symbol_id,
+        sym_a_id
+    );
+
+    let _ = apply(&mut app2, Action::Ungroup);
+    canvas_tool::clear_selection(&mut app2);
+    let cel2 = &app2.doc.root.layers[0].keyframes[0].cel;
+    assert!(
+        cel2.instances
+            .iter()
+            .all(|inst| inst.binding.symbol_id != sym_a_id),
+        "シンボル A を分解したあと、A のインスタンスが残らないこと"
+    );
+    assert_eq!(cel2.shapes.len(), 2);
+}
