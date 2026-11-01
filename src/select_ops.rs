@@ -642,11 +642,14 @@ pub(crate) fn set_pulled_edge(
     let delta = target_pt - grab_pos;
     let denom = 2.0 * grab_t * (1.0 - grab_t);
     let new_p1 = orig_seg.p1 + delta / denom;
-    if let Some(contour) = shape.get_contour_mut(contour_idx) {
+    shape.edit_contour(contour_idx, |contour| {
         if seg_idx < contour.segments.len() {
             contour.segments_mut()[seg_idx].p1 = new_p1;
+            true
+        } else {
+            false
         }
-    }
+    });
 }
 
 /// エッジつまみ変形（PullEdge）を対向エッジ貫通補正込みで確定適用する。
@@ -683,7 +686,7 @@ pub(crate) fn set_moved_vertex(
     target_pt: Point,
 ) {
     let delta = target_pt - orig_vertex;
-    if let Some(contour) = shape.get_contour_mut(contour_idx) {
+    shape.edit_contour(contour_idx, |contour| {
         let n = contour.segments.len();
         if n > 0 && seg_idx < n {
             let prev_idx = (seg_idx + n - 1) % n;
@@ -692,8 +695,11 @@ pub(crate) fn set_moved_vertex(
             segs[seg_idx].p0 = target_pt;
             segs[prev_idx].p1 = orig_ctrls.0 + delta * 0.5;
             segs[seg_idx].p1 = orig_ctrls.1 + delta * 0.5;
+            true
+        } else {
+            false
         }
-    }
+    });
 }
 
 /// 頂点ドラッグ変形（MoveVertex）を対向エッジ貫通補正込みで確定適用する。

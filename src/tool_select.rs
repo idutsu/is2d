@@ -401,7 +401,6 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
         }
         if let Some((_, shape)) = tab.session.overlay.add.first_mut() {
             set_moved_vertex(shape, (c_idx, g_idx), orig_v, (prev_c, curr_c), target_pt);
-            shape.rebuild_cache();
         }
         return;
     }
@@ -435,7 +434,6 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
     if let Some(((c_idx, g_idx), grab_t, orig_seg, target_pt)) = edge_update {
         if let Some((_, shape)) = tab.session.overlay.add.first_mut() {
             set_pulled_edge(shape, (c_idx, g_idx), grab_t, orig_seg, target_pt);
-            shape.rebuild_cache();
         }
     }
     if let Some(delta) = move_delta {

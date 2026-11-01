@@ -787,15 +787,25 @@ impl FillShape {
         }
     }
 
-    pub(crate) fn get_contour_mut(&mut self, idx: usize) -> Option<&mut Contour> {
+    pub(crate) fn edit_contour(
+        &mut self,
+        idx: usize,
+        f: impl FnOnce(&mut Contour) -> bool,
+    ) -> bool {
         if self.exterior.segments.is_empty() {
-            return None;
+            return false;
         }
-        if idx == 0 {
-            Some(&mut self.exterior)
+        let changed = if idx == 0 {
+            f(&mut self.exterior)
+        } else if let Some(h) = self.holes.get_mut(idx - 1) {
+            f(h)
         } else {
-            self.holes.get_mut(idx - 1)
+            false
+        };
+        if changed {
+            self.rebuild_cache();
         }
+        changed
     }
 }
 

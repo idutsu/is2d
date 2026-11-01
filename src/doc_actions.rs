@@ -1495,18 +1495,13 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
     };
 
     let apply_to_shape = |s: &mut FillShape| -> bool {
-        let Some(c) = s.get_contour_mut(contour_idx) else {
-            return false;
-        };
-        let ok = if let Some(t) = t_opt {
-            c.insert_anchor_at(seg_idx, t)
-        } else {
-            c.delete_anchor_at(seg_idx)
-        };
-        if ok {
-            s.rebuild_cache();
-        }
-        ok
+        s.edit_contour(contour_idx, |c| {
+            if let Some(t) = t_opt {
+                c.insert_anchor_at(seg_idx, t)
+            } else {
+                c.delete_anchor_at(seg_idx)
+            }
+        })
     };
 
     if let Some(fl) = &tab.session.floating {

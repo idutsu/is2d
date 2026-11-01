@@ -12289,6 +12289,31 @@ fn test_g3_3_clear_timeline_cells_and_no_direct_ui_mutation_calls() {
     assert!(app.history.last_coalesce_key.is_none());
 }
 
+#[test]
+fn test_g2_1_edit_contour_bumps_mesh_revision() {
+    let raw = generate_brush_outline_at_zoom(
+        &[Point::new(100.0, 100.0), Point::new(180.0, 100.0)],
+        6.0,
+        1.0,
+    );
+    let mut shape = build_smoothed_stroke_shapes_at_zoom(&raw, Color32::RED, 1.0)
+        .into_iter()
+        .next()
+        .unwrap();
+    let rev0 = shape.mesh_revision;
+
+    // 変更なし（false を返す）なら mesh_revision は変わらないこと
+    let changed_noop = shape.edit_contour(0, |_| false);
+    assert!(!changed_noop);
+    assert_eq!(shape.mesh_revision, rev0);
+
+    // 輪郭を書き換えて true を返すと mesh_revision が必ず上がること
+    let changed = shape.edit_contour(0, |c| c.insert_anchor_at(0, 0.5));
+    assert!(changed);
+    assert!(shape.mesh_revision > rev0);
+}
+
+
 
 
 
