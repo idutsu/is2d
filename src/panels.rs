@@ -2,8 +2,8 @@ use eframe::egui::{self, Color32, CursorIcon, Pos2, Stroke, Vec2};
 use kurbo::{Point, Rect as KRect};
 
 use crate::canvas_tool::{
-    ActiveCanvasDrag, Clipboard, CoalesceKey, NoticeKind, SelectDragState, SelectSubMode, Tab,
-    Tool, ToolSettings, TransformDragState, active_scope_layer_id, draw_registration_cross,
+    ActiveCanvasDrag, Clipboard, NoticeKind, SelectDragState, SelectSubMode, Tab, Tool,
+    ToolSettings, TransformDragState, active_scope_layer_id, draw_registration_cross,
 };
 use crate::project_io::PendingCloseConfirm;
 use crate::symbol::{SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
@@ -162,6 +162,7 @@ pub(crate) enum UiAction {
         first_frame: usize,
         drag_active: bool,
     },
+    FinishSymbolPlaybackEdit(u64),
     EnterSymbolTimeline(SymbolInstanceBinding),
     PlaceSymbolFromLibrary(u64),
     EnterSymbolFromLibrary(u64),
@@ -1097,15 +1098,14 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
         if (w_resp.changed() || h_resp.changed()) && next_size != tab.doc.stage_size {
             actions.push(UiAction::SetStageSize(next_size));
         }
-        if tab.history.last_coalesce_key == Some(CoalesceKey::StageSize)
-            && (w_resp.drag_stopped()
-                || w_resp.lost_focus()
-                || h_resp.drag_stopped()
-                || h_resp.lost_focus()
-                || (!w_resp.dragged()
-                    && !w_resp.has_focus()
-                    && !h_resp.dragged()
-                    && !h_resp.has_focus()))
+        if w_resp.drag_stopped()
+            || w_resp.lost_focus()
+            || h_resp.drag_stopped()
+            || h_resp.lost_focus()
+            || (!w_resp.dragged()
+                && !w_resp.has_focus()
+                && !h_resp.dragged()
+                && !h_resp.has_focus())
         {
             actions.push(UiAction::FinishStageSizeEdit);
         }
@@ -1269,12 +1269,6 @@ pub(crate) fn draw_selected_symbol_properties(
     ui: &mut egui::Ui,
 ) {
     let Some((binding, sym_name, sym_total_frames)) = selected_single_symbol_info(tab) else {
-        if matches!(
-            tab.history.last_coalesce_key,
-            Some(CoalesceKey::SymbolPlayback(_))
-        ) {
-            tab.history.end_coalesce();
-        }
         return;
     };
 
@@ -1430,13 +1424,8 @@ pub(crate) fn draw_selected_symbol_properties(
         }
     }
 
-    if (next_mode != binding.loop_mode || !drag_active)
-        && matches!(
-            tab.history.last_coalesce_key,
-            Some(CoalesceKey::SymbolPlayback(_))
-        )
-    {
-        tab.history.end_coalesce();
+    if next_mode != binding.loop_mode || !drag_active {
+        actions.push(UiAction::FinishSymbolPlaybackEdit(binding.instance_gid));
     }
     if next_mode != binding.loop_mode || next_first_1based != current_first_1based {
         actions.push(UiAction::SetSymbolPlayback {

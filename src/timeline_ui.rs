@@ -569,12 +569,16 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
         let next_total = (total_f as usize).max(1);
         apply(host, Action::SetTotalFrames { total: next_total });
     }
-    if (total_resp.drag_stopped()
+    if total_resp.drag_stopped()
         || total_resp.lost_focus()
-        || (!total_resp.dragged() && !total_resp.has_focus()))
-        && host.tab().history.last_coalesce_key == Some(CoalesceKey::TotalFrames)
+        || (!total_resp.dragged() && !total_resp.has_focus())
     {
-        host.tab_mut().history.end_coalesce();
+        apply(
+            host,
+            Action::EndCoalesce {
+                key: Some(CoalesceKey::TotalFrames),
+            },
+        );
     }
 
     ui.label("FPS:");
@@ -592,12 +596,16 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
             host.timeline_ui_mut().last_frame_advance_time = None;
         }
     }
-    if (fps_resp.drag_stopped()
+    if fps_resp.drag_stopped()
         || fps_resp.lost_focus()
-        || (!fps_resp.dragged() && !fps_resp.has_focus()))
-        && host.tab().history.last_coalesce_key == Some(CoalesceKey::Fps)
+        || (!fps_resp.dragged() && !fps_resp.has_focus())
     {
-        host.tab_mut().history.end_coalesce();
+        apply(
+            host,
+            Action::EndCoalesce {
+                key: Some(CoalesceKey::Fps),
+            },
+        );
     }
 }
 
@@ -952,7 +960,8 @@ fn handle_timeline_click_start(
                     .cell_selection
                     .filter(|s| s.contains(target_layer, col))
                 {
-                    apply(host, Action::EndCoalesce);
+                    host.stop_playback();
+                    apply(host, Action::EndCoalesce { key: None });
                     sel
                 } else {
                     apply(
@@ -2015,12 +2024,13 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
         timeline_ui.is_playing
     };
     if is_playing {
-        apply(host, Action::EndCoalesce);
+        host.stop_playback();
+        apply(host, Action::EndCoalesce { key: None });
     } else {
         apply(host, Action::Deselect);
+        apply(host, Action::EndCoalesce { key: None });
         let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
         commit_floating(tab);
-        tab.history.end_coalesce();
         timeline_ui.cancel_drag();
         let loop_pb = timeline_ui.loop_playback;
         let (curr_f, total_f) = {

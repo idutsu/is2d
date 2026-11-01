@@ -2746,7 +2746,10 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
             size: Vec2::new(810.0, 450.0),
         },
     );
-    doc_actions::apply(&mut grp_sym_app, doc_actions::Action::EndCoalesce);
+    doc_actions::apply(
+        &mut grp_sym_app,
+        doc_actions::Action::EndCoalesce { key: None },
+    );
     doc_actions::apply(
         &mut grp_sym_app,
         doc_actions::Action::SetStageSize {
@@ -4998,7 +5001,7 @@ fn test_compact_json_serialization_nan_rejection_and_undo_history_cap() {
     let _ = std::fs::remove_file(&tmp_compact);
 
     for i in 0..110 {
-        doc_actions::apply(&mut save_app, doc_actions::Action::EndCoalesce);
+        doc_actions::apply(&mut save_app, doc_actions::Action::EndCoalesce { key: None });
         doc_actions::apply(
             &mut save_app,
             doc_actions::Action::SetStageSize {
@@ -8277,7 +8280,7 @@ fn test_stage01_undo_redo_coalesce_and_save_load_on_cel() {
             Action::SetStageSize {
                 size: Vec2::new(1280.0, 720.0),
             },
-            Action::EndCoalesce,
+            Action::EndCoalesce { key: None },
         ],
     );
     assert_eq!(app.history.undo_stack.len(), undo_base + 1);
@@ -8295,7 +8298,7 @@ fn test_stage01_undo_redo_coalesce_and_save_load_on_cel() {
             Action::SetTotalFrames { total: 80 },
             Action::SetTotalFrames { total: 100 },
             Action::SetTotalFrames { total: 120 },
-            Action::EndCoalesce,
+            Action::EndCoalesce { key: None },
         ],
     );
     assert_eq!(app.history.undo_stack.len(), undo_before_total + 1);
@@ -8354,7 +8357,7 @@ fn test_stage01_undo_redo_coalesce_and_save_load_on_cel() {
                 loop_mode: None,
                 first_frame: Some(2),
             },
-            Action::EndCoalesce,
+            Action::EndCoalesce { key: None },
         ],
     );
     assert_eq!(app.history.undo_stack.len(), undo_before_pb + 1);
@@ -8379,7 +8382,7 @@ fn test_stage01_undo_redo_coalesce_and_save_load_on_cel() {
                 sym_id,
                 new_name: "ABC".to_string(),
             },
-            Action::EndCoalesce,
+            Action::EndCoalesce { key: None },
         ],
     );
     assert_eq!(app.history.undo_stack.len(), undo_before_rename + 1);
@@ -11947,6 +11950,287 @@ fn test_g3_1_symbol_enter_exit_preserves_symbol_def_and_load_normalizes() {
     assert!(loaded_doc.library[0].timeline.total_frames >= 1);
     assert!(loaded_doc.library[0].timeline.next_layer_number >= 2);
     assert!(loaded_doc.library[0].timeline.next_layer_id >= 2);
+}
+
+#[test]
+fn test_g3_2_end_coalesce_via_apply_preserves_playback_and_coalesce_boundaries() {
+    use crate::canvas_tool::CoalesceKey;
+    use crate::doc_actions::{apply, Action};
+
+    // 1. UI 層（panels.rs, timeline_ui.rs, main.rs）に last_coalesce_key と end_coalesce が出てこないこと
+    for ui_file in ["src/panels.rs", "src/timeline_ui.rs", "src/main.rs"] {
+        let src = std::fs::read_to_string(ui_file).unwrap();
+        assert!(
+            !src.contains("last_coalesce_key"),
+            "{ui_file} に last_coalesce_key が残っていないこと"
+        );
+        assert!(
+            !src.contains("end_coalesce"),
+            "{ui_file} に end_coalesce が残っていないこと"
+        );
+    }
+
+    let mut app = Is2dApp::default();
+
+    // 2. 総フレーム数：1回のドラッグなら Undo 1件、2回に分けてドラッグすると Undo 2件（他のキーの EndCoalesce では途切れないこと）
+    let base = app.history.undo_stack.len();
+    let _ = apply(&mut app, Action::SetTotalFrames { total: 70 });
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::Fps),
+        },
+    );
+    let _ = apply(&mut app, Action::SetTotalFrames { total: 80 });
+    assert_eq!(app.history.undo_stack.len(), base + 1);
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::TotalFrames),
+        },
+    );
+    let _ = apply(&mut app, Action::SetTotalFrames { total: 90 });
+    let _ = apply(&mut app, Action::SetTotalFrames { total: 100 });
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::TotalFrames),
+        },
+    );
+    assert_eq!(app.history.undo_stack.len(), base + 2);
+
+    // 3. FPS：1回なら1件、2回なら2件
+    let base = app.history.undo_stack.len();
+    let _ = apply(&mut app, Action::SetFps { fps: 12 });
+    let _ = apply(&mut app, Action::SetFps { fps: 15 });
+    assert_eq!(app.history.undo_stack.len(), base + 1);
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::Fps),
+        },
+    );
+    let _ = apply(&mut app, Action::SetFps { fps: 24 });
+    let _ = apply(&mut app, Action::SetFps { fps: 30 });
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::Fps),
+        },
+    );
+    assert_eq!(app.history.undo_stack.len(), base + 2);
+
+    // 4. ステージサイズ：1回なら1件、2回なら2件
+    let base = app.history.undo_stack.len();
+    let _ = apply(
+        &mut app,
+        Action::SetStageSize {
+            size: Vec2::new(900.0, 500.0),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::SetStageSize {
+            size: Vec2::new(1000.0, 600.0),
+        },
+    );
+    assert_eq!(app.history.undo_stack.len(), base + 1);
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::StageSize),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::SetStageSize {
+            size: Vec2::new(1100.0, 650.0),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::SetStageSize {
+            size: Vec2::new(1280.0, 720.0),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::StageSize),
+        },
+    );
+    assert_eq!(app.history.undo_stack.len(), base + 2);
+
+    // 5. 矢印キー移動・シンボル再生設定・シンボル名変更：それぞれ1回なら1件、2回なら2件
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+            radius: 6.0,
+            color: Color32::RED,
+        },
+    );
+    let _ = apply(&mut app, Action::SelectAll);
+    let base = app.history.undo_stack.len();
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(1.0, 0.0),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(1.0, 0.0),
+        },
+    );
+    assert_eq!(app.history.undo_stack.len(), base + 1);
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::NudgeSelection),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(1.0, 0.0),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(1.0, 0.0),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::NudgeSelection),
+        },
+    );
+    assert_eq!(app.history.undo_stack.len(), base + 2);
+
+    let _ = apply(&mut app, Action::ConvertToSymbol);
+    let sym_id = app.doc.library[0].id;
+    let _ = apply(&mut app, Action::EnterSymbolFromLibrary { sym_id });
+    let _ = apply(&mut app, Action::ExtendFrame);
+    let _ = apply(&mut app, Action::ExtendFrame);
+    let _ = apply(&mut app, Action::ExitSymbolTimeline);
+    let gid = app.doc.root.layers[0].keyframes[0].cel.instances[0]
+        .binding
+        .instance_gid;
+
+    let base = app.history.undo_stack.len();
+    let _ = apply(
+        &mut app,
+        Action::SetSymbolPlayback {
+            loop_mode: None,
+            first_frame: Some(1),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::SetSymbolPlayback {
+            loop_mode: None,
+            first_frame: Some(2),
+        },
+    );
+    assert_eq!(app.history.undo_stack.len(), base + 1);
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::SymbolPlayback(gid)),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::SetSymbolPlayback {
+            loop_mode: None,
+            first_frame: Some(1),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::SetSymbolPlayback {
+            loop_mode: None,
+            first_frame: Some(0),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::SymbolPlayback(gid)),
+        },
+    );
+    assert_eq!(app.history.undo_stack.len(), base + 2);
+
+    let base = app.history.undo_stack.len();
+    let _ = apply(
+        &mut app,
+        Action::RenameSymbol {
+            sym_id,
+            new_name: "S1".to_owned(),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::RenameSymbol {
+            sym_id,
+            new_name: "S12".to_owned(),
+        },
+    );
+    assert_eq!(app.history.undo_stack.len(), base + 1);
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::RenameSymbol(sym_id)),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::RenameSymbol {
+            sym_id,
+            new_name: "S123".to_owned(),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::RenameSymbol {
+            sym_id,
+            new_name: "S1234".to_owned(),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::RenameSymbol(sym_id)),
+        },
+    );
+    assert_eq!(app.history.undo_stack.len(), base + 2);
+
+    // 6. 再生中に UI が EndCoalesce を出しても再生が止まらず、Undo も増えないこと
+    timeline_ui::toggle_playback(&mut app);
+    assert!(app.timeline_ui.is_playing);
+    let undo_before_pb_end = app.history.undo_stack.len();
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::TotalFrames),
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::Fps),
+        },
+    );
+    let _ = apply(&mut app, Action::EndCoalesce { key: None });
+    assert!(
+        app.timeline_ui.is_playing,
+        "再生中に EndCoalesce を出しても再生が止まらないこと"
+    );
+    assert_eq!(app.history.undo_stack.len(), undo_before_pb_end);
 }
 
 

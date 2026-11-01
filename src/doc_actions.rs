@@ -326,7 +326,9 @@ pub(crate) enum Action {
     },
     Undo,
     Redo,
-    EndCoalesce,
+    EndCoalesce {
+        key: Option<CoalesceKey>,
+    },
 }
 
 impl Action {
@@ -407,7 +409,7 @@ fn mutate_timeline_with_undo(tab: &mut Tab, mutate: impl FnOnce(&mut Timeline)) 
 /// すべての文書変更・編集操作の唯一の入口。
 /// 再生停止・Undo記録・連続操作のCoalesce・タイムライン同期・Dirty更新を一元管理する。
 pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
-    if !matches!(action, Action::SetFps { .. }) {
+    if !matches!(action, Action::SetFps { .. } | Action::EndCoalesce { .. }) {
         host.stop_playback();
     }
     let (tab, tool, clipboard, toast) = host.parts_mut();
@@ -830,8 +832,10 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             tab.redo();
             ApplyResult::Applied(true)
         }
-        Action::EndCoalesce => {
-            tab.history.end_coalesce();
+        Action::EndCoalesce { key } => {
+            if key.is_none_or(|k| tab.history.last_coalesce_key == Some(k)) {
+                tab.history.end_coalesce();
+            }
             ApplyResult::Applied(true)
         }
     };

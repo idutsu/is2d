@@ -369,7 +369,12 @@ impl Is2dApp {
                 apply(self, Action::SetStageSize { size });
             }
             UiAction::FinishStageSizeEdit => {
-                apply(self, Action::EndCoalesce);
+                apply(
+                    self,
+                    Action::EndCoalesce {
+                        key: Some(canvas_tool::CoalesceKey::StageSize),
+                    },
+                );
             }
             UiAction::ExitGroupSteps(steps) => {
                 apply(self, Action::ExitGroupSteps { steps });
@@ -408,8 +413,16 @@ impl Is2dApp {
                     },
                 );
                 if !drag_active {
-                    self.tab_mut().history.end_coalesce();
+                    apply(self, Action::EndCoalesce { key: None });
                 }
+            }
+            UiAction::FinishSymbolPlaybackEdit(gid) => {
+                apply(
+                    self,
+                    Action::EndCoalesce {
+                        key: Some(canvas_tool::CoalesceKey::SymbolPlayback(gid)),
+                    },
+                );
             }
             UiAction::EnterSymbolTimeline(binding) => {
                 apply(self, Action::EnterSymbolTimeline { binding });
@@ -430,11 +443,12 @@ impl Is2dApp {
                 apply(self, Action::RenameSymbol { sym_id, new_name });
             }
             UiAction::FinishRenamingSymbol(sym_id) => {
-                if self.tab().history.last_coalesce_key
-                    == Some(canvas_tool::CoalesceKey::RenameSymbol(sym_id))
-                {
-                    apply(self, Action::EndCoalesce);
-                }
+                apply(
+                    self,
+                    Action::EndCoalesce {
+                        key: Some(canvas_tool::CoalesceKey::RenameSymbol(sym_id)),
+                    },
+                );
             }
         }
         self.timeline_ui
@@ -541,7 +555,12 @@ impl Is2dApp {
             }
             if delta != kurbo::Vec2::ZERO {
                 if any_non_repeat {
-                    self.tab_mut().history.end_coalesce();
+                    apply(
+                        self,
+                        Action::EndCoalesce {
+                            key: Some(canvas_tool::CoalesceKey::NudgeSelection),
+                        },
+                    );
                 }
                 apply(self, Action::NudgeSelection { delta });
                 return;
@@ -755,7 +774,8 @@ impl Is2dApp {
                 || response.drag_started_by(egui::PointerButton::Primary)
                 || response.clicked_by(egui::PointerButton::Primary);
             if canvas_interacted {
-                apply(self, Action::EndCoalesce);
+                self.stop_playback();
+                apply(self, Action::EndCoalesce { key: None });
             } else {
                 return;
             }

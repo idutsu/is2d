@@ -287,7 +287,8 @@ pub(crate) fn switch_to_tab(
         return false;
     }
     *ws.pending_close_confirm_mut() = None;
-    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
+    ws.stop_playback();
+    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
     prepare_active_tab_for_switch_or_save(ws.tab_mut());
     activate_tab_index(ws, target_index);
 
@@ -336,7 +337,8 @@ fn close_tab_immediately(
 
     if ws.tabs().len() <= 1 {
         // 最後の1タブを閉じた場合は連番をリセットし、白紙の「無題-1」へ初期化する
-        crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
+        ws.stop_playback();
+    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
         cancel_active_drag(ws.tab_mut());
         ws.set_next_untitled_number(1);
         let doc_id = ws.alloc_doc_id();
@@ -356,7 +358,8 @@ fn close_tab_immediately(
     }
 
     if close_index == ws.active_index() {
-        crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
+        ws.stop_playback();
+    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
         cancel_active_drag(ws.tab_mut());
         ws.tab_mut().view.pan_last_screen_pos = None;
         let last_canvas_rect = ws.tab().view.last_canvas_rect;
@@ -1295,7 +1298,8 @@ pub(crate) fn save_project_to_path(
     ws: &mut impl ProjectWorkspace,
     path: &Path,
 ) -> Result<(), String> {
-    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
+    ws.stop_playback();
+    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
     prepare_active_tab_for_switch_or_save(ws.tab_mut());
 
     let proj_doc = ProjectDocument::from_app(ws.tab());
@@ -1421,14 +1425,16 @@ pub(crate) fn open_project_in_tab(
     // 3. 現在のタブが未編集の空の無題タブでなければ、アクティブタブの右隣に新しいタブを追加して切り替える
     // （ファイル読込タブでは `untitled_number` を `0` として遅延採番し、`無題-N` 連番の欠番スキップを防ぐ）
     if !is_active_tab_pristine_empty(ws.tab()) {
-        crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
+        ws.stop_playback();
+    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
         prepare_active_tab_for_switch_or_save(ws.tab_mut());
         let doc_id = ws.alloc_doc_id();
         let insert_idx = (ws.active_index() + 1).min(ws.tabs().len());
         ws.tabs_mut().insert(insert_idx, Tab::new_empty(doc_id, 0));
         activate_tab_index(ws, insert_idx);
     } else {
-        crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
+        ws.stop_playback();
+    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
         cancel_active_drag(ws.tab_mut());
         ws.tab_mut().view.pan_last_screen_pos = None;
         let new_doc_id = ws.alloc_doc_id();
@@ -1457,7 +1463,8 @@ pub(crate) fn open_project_in_tab(
 
 /// アクティブタブの右隣に新しい白紙ドキュメントタブを追加して切り替える（`Cmd/Ctrl + N` / タブバーの `＋` ボタン）
 pub(crate) fn new_project(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
-    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce);
+    ws.stop_playback();
+    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
     prepare_active_tab_for_switch_or_save(ws.tab_mut());
 
     let doc_id = ws.alloc_doc_id();
