@@ -368,6 +368,7 @@ fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
         edit_path: tab.session.edit_path.clone(),
         editing_group_path: tab.session.editing_group_path.clone(),
         stage_size: tab.doc.stage_size,
+        fps: tab.doc.fps,
         symbols_revision,
         commit_id: tab.history.current_commit_id,
     };
@@ -2131,7 +2132,7 @@ fn apply_set_total_frames(
 
 fn apply_set_fps(tab: &mut Tab, next_fps: u32, coalesce: Option<CoalesceKey>) -> bool {
     let next_fps = next_fps.clamp(1, 60);
-    if next_fps != tab.active_timeline().fps {
+    if next_fps != tab.doc.fps {
         if (tab.history.last_coalesce_key != coalesce || coalesce.is_none())
             && tab.session.selection.is_empty()
             && tab.session.floating.is_none()
@@ -2139,12 +2140,7 @@ fn apply_set_fps(tab: &mut Tab, next_fps: u32, coalesce: Option<CoalesceKey>) ->
             commit_floating(tab);
         }
         push_undo(tab, coalesce);
-        tab.doc.root.fps = next_fps;
-        for lvl in &tab.session.edit_path.levels {
-            if let Some(sym) = tab.doc.find_symbol_mut(lvl.symbol_id) {
-                sym.timeline.fps = next_fps;
-            }
-        }
+        tab.doc.fps = next_fps;
         return true;
     }
     false

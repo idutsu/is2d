@@ -28,7 +28,7 @@
 ## 3. 状態の持ち方（State Management）
 状態は、保存するもの・保存しないもの・作り直せるものに分けて持つ。
 
-1. **永続ドキュメント状態（`Document`）**: ルート `Timeline`、シンボルライブラリ（`Vec<SymbolDef>`）、ステージサイズ、ID 採番カウンタ（`next_symbol_id`, `next_group_id`）、ライブラリの変更世代番号（`revision`）。
+1. **永続ドキュメント状態（`Document`）**: ルート `Timeline`、シンボルライブラリ（`Vec<SymbolDef>`）、ステージサイズ、フレームレート（`fps`）、ID 採番カウンタ（`next_symbol_id`, `next_group_id`）、ライブラリの変更世代番号（`revision`）。
    - 各 `Timeline` は再生ヘッド位置（`current_frame`）と選択レイヤー（`active_layer`）も持ち、これらはファイルに保存する。タイムラインのセル範囲選択（`cell_selection`）も `Timeline` に置くが、保存はしない。
 2. **作業セッション状態（`Session`、保存しない）**:
    - 編集位置：シンボル編集の経路（`EditPath`、6章）、グループ編集の階層パス（`editing_group_path`）
@@ -103,7 +103,7 @@
   - **ストローク増分プレビュー**: ブラシ描画中は確定済みの前半頂点メッシュをスクリーン座標で固定保持し、末尾の数十点のみを毎フレーム再テッセレーション・座標変換することで長尺ストロークでも $O(1)$ の増分コストを維持する。
 
 ## 9. Undo / Redo 方式
-- 最大 100 ステップの `VecDeque<UndoEntry>`。1件は「ルート `Timeline`・シンボルライブラリ・`Floating`・`EditPath`・グループ編集階層・ステージサイズ・ライブラリの世代番号・未保存マーク用の世代ID」で構成する。選択は含めない（2章の ID による選択保持に任せる）。
+- 最大 100 ステップの `VecDeque<UndoEntry>`。1件は「ルート `Timeline`・シンボルライブラリ・`Floating`・`EditPath`・グループ編集階層・ステージサイズ・フレームレート（`fps`）・ライブラリの世代番号・未保存マーク用の世代ID」で構成する。選択は含めない（2章の ID による選択保持に任せる）。
 - 全フレーム・全シンボルのディープコピーによるメモリ肥大化を防ぐため、`Contour` のセグメント配列（`Arc<Vec<QuadBez>>`）、`Cel` のシェイプ配列（`Arc<Vec<FillShape>>`）およびインスタンス配列（`Arc<Vec<SymbolInstance>>`）、`Layer` のキーフレーム配列（`Vec<Arc<Keyframe>>`）、さらに `UndoEntry` 内のシンボルライブラリ（`Arc<Vec<SymbolDef>>`、`Document::revision` 連動）と `Floating`（`Arc<Floating>`）を **Copy-on-Write（CoW）構造共有** とし、未変更のキーフレームやシンボルは $O(1)$ でポインタ共有する。キーフレームを書き換える際は、履歴側と共有されている古いキーフレームの `Cel` 描画キャッシュを空にしてから複製する。
 
 ## 10. 幾何計算パイプライン（Geometry Pipeline）

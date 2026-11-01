@@ -562,6 +562,7 @@ pub(crate) struct Document {
     pub(crate) root: Timeline,
     pub(crate) library: Vec<SymbolDef>,
     pub(crate) stage_size: Vec2,
+    pub(crate) fps: u32,
     pub(crate) next_symbol_id: u64,
     pub(crate) next_group_id: u64,
     /// `library` の内容変更世代番号（Undo履歴の `Arc` CoW 構造共有用）
@@ -574,6 +575,7 @@ impl Default for Document {
             root: Timeline::default(),
             library: Vec::new(),
             stage_size: Vec2::new(800.0, 450.0),
+            fps: 24,
             next_symbol_id: 1,
             next_group_id: 1,
             revision: 0,

@@ -578,7 +578,7 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
     }
 
     ui.label("FPS:");
-    let mut fps_val = host.tab().active_timeline().fps;
+    let mut fps_val = host.tab().doc.fps;
     let fps_resp = ui.add(
         egui::DragValue::new(&mut fps_val)
             .range(1..=60)
@@ -2045,7 +2045,7 @@ pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context)
         timeline_ui.last_frame_advance_time = None;
         return;
     }
-    let fps = tab.active_timeline().fps.clamp(1, 60);
+    let fps = tab.doc.fps.clamp(1, 60);
     let frame_interval = 1.0 / (fps as f64);
     let now = ctx.input(|i| i.time);
 

@@ -287,10 +287,8 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
         parent_group_path,
     });
 
-    let fps = tab.doc.root.fps;
     if let Some(sym) = tab.doc.find_symbol_mut(binding.symbol_id) {
         sym.timeline.total_frames = sym.timeline.total_frames.max(1);
-        sym.timeline.fps = fps;
         sym.timeline.next_layer_number = sym.timeline.next_layer_number.max(2);
         sym.timeline.next_layer_id = sym.timeline.next_layer_id.max(2);
     }
@@ -381,12 +379,6 @@ pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
     let Some(lvl) = tab.session.edit_path.levels.pop() else {
         return false;
     };
-    let fps = tab.doc.root.fps;
-    if let Some(last) = tab.session.edit_path.last() {
-        if let Some(sym) = tab.doc.find_symbol_mut(last.symbol_id) {
-            sym.timeline.fps = fps;
-        }
-    }
     let (act_l, act_f) = {
         let tl = tab.active_timeline();
         (

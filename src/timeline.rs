@@ -1040,14 +1040,13 @@ impl Layer {
     }
 }
 
-/// レイヤー配列・現在のフレーム・FPS・セル範囲選択を管理するタイムライン構造体（永続ドキュメント状態）
+/// レイヤー配列・現在のフレーム・セル範囲選択を管理するタイムライン構造体（永続ドキュメント状態）
 #[derive(Clone, Debug)]
 pub(crate) struct Timeline {
     pub(crate) layers: Vec<Layer>,
     pub(crate) current_frame: usize,
     pub(crate) active_layer: usize,
     pub(crate) total_frames: usize,
-    pub(crate) fps: u32,
     pub(crate) next_layer_number: usize,
     pub(crate) next_layer_id: u64,
     pub(crate) cell_selection: Option<TimelineCellSelection>,
@@ -1060,7 +1059,6 @@ impl Default for Timeline {
             current_frame: 0,
             active_layer: 0,
             total_frames: 1,
-            fps: 24,
             next_layer_number: 2,
             next_layer_id: 2,
             cell_selection: Some(TimelineCellSelection::single(0, 0)),

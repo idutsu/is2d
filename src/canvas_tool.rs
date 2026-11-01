@@ -2584,6 +2584,7 @@ pub(crate) struct UndoEntry {
     pub(crate) edit_path: EditPath,
     pub(crate) editing_group_path: Vec<u64>,
     pub(crate) stage_size: Vec2,
+    pub(crate) fps: u32,
     pub(crate) symbols_revision: u64,
     /// この履歴スナップショットが表すドキュメント状態世代ID（未保存変更 `is_dirty` 判定用）
     pub(crate) commit_id: u64,
@@ -2905,13 +2906,8 @@ impl Tab {
     ) -> R {
         if let Some(last) = self.session.edit_path.last() {
             if let Some(idx) = self.doc.library.iter().position(|s| s.id == last.symbol_id) {
-                let prev_fps = self.doc.root.fps;
                 let mut taken_tl = std::mem::take(&mut self.doc.library[idx].timeline);
-                taken_tl.fps = prev_fps;
                 let res = f(&mut taken_tl, &self.doc.library);
-                if taken_tl.fps != prev_fps {
-                    self.doc.root.fps = taken_tl.fps;
-                }
                 self.doc.library[idx].timeline = taken_tl;
                 self.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
                 self.doc.bump_revision();
@@ -3001,6 +2997,7 @@ impl Tab {
                 entry.editing_group_path,
             ),
             stage_size: std::mem::replace(&mut self.doc.stage_size, entry.stage_size),
+            fps: std::mem::replace(&mut self.doc.fps, entry.fps),
             symbols_revision: prev_rev,
             commit_id: std::mem::replace(&mut self.history.current_commit_id, entry.commit_id),
         };
@@ -3640,13 +3637,8 @@ pub(crate) fn edit_layers(
 
     if let Some(last) = tab.session.edit_path.last() {
         if let Some(idx) = tab.doc.library.iter().position(|s| s.id == last.symbol_id) {
-            let prev_fps = tab.doc.root.fps;
             let mut taken_tl = std::mem::take(&mut tab.doc.library[idx].timeline);
-            taken_tl.fps = prev_fps;
             mutate_tl(&mut taken_tl, &tab.doc.library);
-            if taken_tl.fps != prev_fps {
-                tab.doc.root.fps = taken_tl.fps;
-            }
             tab.doc.library[idx].timeline = taken_tl;
             if !modified_lids.is_empty() {
                 tab.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();

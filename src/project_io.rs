@@ -135,7 +135,7 @@ pub(crate) fn is_active_tab_pristine_empty(tab: &Tab) -> bool {
         && tab.session.edit_path.is_empty()
         && tab.doc.stage_size == Vec2::new(800.0, 450.0)
         && !tab.view.clip_outside_stage
-        && tab.doc.root.fps == 24
+        && tab.doc.fps == 24
         && tab.doc.root.total_frames == 1
         && tab.doc.root.layers.len() == 1
         && tab.doc.root.layers[0].name == "Layer 1"
@@ -776,7 +776,7 @@ pub(crate) struct SavedTimeline {
 impl From<&Timeline> for SavedTimeline {
     fn from(tl: &Timeline) -> Self {
         Self {
-            fps: tl.fps,
+            fps: 24,
             total_frames: tl.total_frames,
             current_frame: tl.current_frame,
             active_layer: tl.active_layer,
@@ -849,7 +849,6 @@ impl From<SavedTimeline> for Timeline {
             current_frame,
             active_layer,
             total_frames,
-            fps: s.fps.clamp(1, 60),
             next_layer_number: s.next_layer_number.max(2),
             next_layer_id: raw_next_layer_id.max(max_layer_id.saturating_add(1)).max(2),
             cell_selection: Some(TimelineCellSelection::single(active_layer, current_frame)),
@@ -917,7 +916,7 @@ impl ProjectDocument {
             commit_floating(&mut temp_tab);
 
             let mut saved_timeline: SavedTimeline = (&temp_tab.doc.root).into();
-            saved_timeline.fps = temp_tab.doc.root.fps.clamp(1, 60);
+            saved_timeline.fps = temp_tab.doc.fps.clamp(1, 60);
             return Self {
                 version: PROJECT_FORMAT_VERSION,
                 stage_size: [temp_tab.doc.stage_size.x, temp_tab.doc.stage_size.y],
@@ -934,7 +933,7 @@ impl ProjectDocument {
         }
 
         let mut saved_timeline: SavedTimeline = (&tab.doc.root).into();
-        saved_timeline.fps = tab.doc.root.fps.clamp(1, 60);
+        saved_timeline.fps = tab.doc.fps.clamp(1, 60);
 
         Self {
             version: PROJECT_FORMAT_VERSION,
@@ -985,6 +984,7 @@ impl ProjectDocument {
 
     /// 読み込んだ `ProjectDocument` から正規化・循環参照除去済みの `Document` を構築する
     pub(crate) fn into_document(self) -> Document {
+        let fps = self.timeline.fps.clamp(1, 60);
         let mut timeline: Timeline = self.timeline.into();
 
         // 重複または不正（id == 0 / id > MAX_SAFE_ENTITY_ID）な SymbolDef::id を一意な安全IDへ再採番してライブラリを構築
@@ -1157,6 +1157,7 @@ impl ProjectDocument {
             root: timeline,
             library,
             stage_size: Vec2::new(w, h),
+            fps,
             next_symbol_id: raw_next_sym_id.max(max_sym_id.saturating_add(1)).max(1),
             next_group_id: raw_next_gid.max(max_gid.saturating_add(1)).max(1),
             revision: crate::vector_engine::next_mesh_revision(),

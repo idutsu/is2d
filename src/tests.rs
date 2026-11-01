@@ -1134,7 +1134,7 @@ fn test_copy_paste_group_assigns_new_gid_and_alt_drag_symbol_undo() {
 #[test]
 fn test_timeline_layer_keyframe_insertion_and_cel_lookup() {
     let mut app = Is2dApp::default();
-    assert_eq!(app.doc.root.fps, 24);
+    assert_eq!(app.doc.fps, 24);
     assert_eq!(app.doc.root.total_frames, 1);
     assert_eq!(app.doc.root.layers.len(), 1);
     assert_eq!(app.doc.root.layers[0].frame_count, 1);
@@ -3387,7 +3387,7 @@ fn test_tween_lru_cache_no_thrashing() {
 fn test_project_save_and_load_roundtrip() {
     let mut app = Is2dApp::default();
     app.doc.stage_size = Vec2::new(1280.0, 720.0);
-    app.doc.root.fps = 30;
+    app.doc.fps = 30;
 
     // Layer 1: シンボル変換 + クラシックトゥイーン (Frame 0 -> Frame 5)
     put_cel_shapes(
@@ -3453,7 +3453,7 @@ fn test_project_save_and_load_roundtrip() {
         .expect("読み込みに成功すること");
 
     assert_eq!(loaded_app.doc.stage_size, Vec2::new(1280.0, 720.0));
-    assert_eq!(loaded_app.doc.root.fps, 30);
+    assert_eq!(loaded_app.doc.fps, 30);
     assert_eq!(loaded_app.doc.root.total_frames, 6);
     assert_eq!(loaded_app.doc.root.layers.len(), 2);
     assert_eq!(loaded_app.doc.library.len(), 1);
@@ -3742,7 +3742,7 @@ fn test_clipboard_symbol_evaluates_latest_symbol_def_and_shares_arc() {
     put_cel_shapes(&mut sym_paste_app, 0, 0, blue_shapes);
     assert!(tool_transform::exit_symbol_timeline(&mut sym_paste_app));
     assert_eq!(
-        sym_paste_app.doc.root.fps, 12,
+        sym_paste_app.doc.fps, 12,
         "シンボルインプレイス編集中のFPS変更が親タイムライン復帰後も維持されること"
     );
     assert_eq!(scene_summary(&sym_paste_app).len, 2);
@@ -4273,7 +4273,7 @@ fn test_malformed_json_sanitization_and_cycle_breaking() {
     crate::project_io::open_project_in_tab(&mut sanitized_app, &tmp_malformed, None)
         .expect("異常系JSONでもサニタイズされてクラッシュせず読み込めること");
     assert_eq!(sanitized_app.doc.stage_size, Vec2::new(3840.0, 100.0));
-    assert_eq!(sanitized_app.doc.root.fps, 60);
+    assert_eq!(sanitized_app.doc.fps, 60);
     assert_eq!(
         sanitized_app.doc.root.active_layer, 1,
         "範囲外の active_layer=99 が最終レイヤーインデックス 1 にクランプされていること"
@@ -5587,7 +5587,7 @@ fn test_time_based_playback_advance_and_onion_skin_rendering() {
     ));
 
     // 3フレームのアニメーションを作成し、オニオンスキンを ON にする
-    app.doc.root.fps = 10; // 1コマ = 0.1秒
+    app.doc.fps = 10; // 1コマ = 0.1秒
     app.doc.root.resize_total_frames(3);
     put_cel_shapes(
         &mut app,
@@ -7423,7 +7423,7 @@ fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
             "case {case_idx}: 空レイヤー配列でも最低1レイヤーに補正されること"
         );
         assert!(
-            (1..=60).contains(&app.doc.root.fps),
+            (1..=60).contains(&app.doc.fps),
             "case {case_idx}: FPS が 1..=60 にクランプされること"
         );
         assert!(
@@ -11436,7 +11436,7 @@ fn test_g1_4_playback_advance_skips_base_cache_rebuild_and_stop_refreshes() {
         Vec2::new(1280.0, 820.0),
     ));
 
-    app.doc.root.fps = 10; // 1コマ = 0.1秒
+    app.doc.fps = 10; // 1コマ = 0.1秒
     app.doc.root.resize_total_frames(3);
     put_cel_shapes(
         &mut app,
@@ -11850,6 +11850,54 @@ fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
             .any(|kf| kf.start_frame == 5)
     );
 }
+
+#[test]
+fn test_g3_5_document_single_fps_inside_symbol_undo_redo_and_save() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+    assert_eq!(app.doc.fps, 24);
+
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+            radius: 5.0,
+            color: Color32::RED,
+        },
+    );
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(&mut app, Action::ConvertToSymbol);
+    let sym_id = app.doc.library[0].id;
+
+    // シンボルの中に入る
+    assert!(tool_transform::enter_symbol_from_library(&mut app, sym_id));
+    assert!(!app.session.edit_path.is_empty());
+
+    // シンボル内で FPS を 30 に変更
+    let _ = apply(&mut app, Action::SetFps { fps: 30 });
+    assert_eq!(app.doc.fps, 30);
+
+    // Undo / Redo で FPS が正しく巻き戻り・やり直されること
+    app.undo();
+    assert_eq!(app.doc.fps, 24);
+    app.redo();
+    assert_eq!(app.doc.fps, 30);
+
+    // シンボルから出ても FPS が 30 のまま保たれること
+    assert!(tool_transform::exit_symbol_timeline(&mut app));
+    assert_eq!(app.doc.fps, 30);
+
+    // 保存して開き直しても FPS が 30 のまま保たれること
+    let tmp_path =
+        std::env::temp_dir().join(format!("is2d_g3_5_test_{}.is2d", std::process::id()));
+    crate::project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
+    let mut reopened = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut reopened, &tmp_path, None).unwrap();
+    let _ = std::fs::remove_file(&tmp_path);
+    assert_eq!(reopened.doc.fps, 30);
+}
+
 
 
 
