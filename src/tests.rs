@@ -12666,3 +12666,44 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
         );
     }
 }
+
+/// テッセレーション生成された Mesh（fill_mesh および直接輪郭メッシュ）の vertices / indices の
+/// 確保容量（capacity）が実データ長（len）に切り詰められていることを検証する
+#[test]
+fn test_tessellate_lyon_path_shrinks_mesh_capacity_to_len() {
+    let raw = generate_brush_outline_at_zoom(
+        &[
+            Point::new(100.0, 100.0),
+            Point::new(140.0, 115.0),
+            Point::new(180.0, 105.0),
+        ],
+        6.0,
+        1.0,
+    );
+    let shapes = build_smoothed_stroke_shapes_at_zoom(&raw, Color32::RED, 1.0);
+    assert_eq!(shapes.len(), 1);
+    let mesh = shapes[0].fill_mesh();
+    assert!(!mesh.vertices.is_empty() && !mesh.indices.is_empty());
+    assert_eq!(
+        mesh.vertices.capacity(),
+        mesh.vertices.len(),
+        "fill_mesh の vertices.capacity() が vertices.len() と一致すること"
+    );
+    assert_eq!(
+        mesh.indices.capacity(),
+        mesh.indices.len(),
+        "fill_mesh の indices.capacity() が indices.len() と一致すること"
+    );
+
+    let direct_mesh = vector_engine::tessellate_raw_polygon(&raw, Color32::BLUE);
+    assert_eq!(
+        direct_mesh.vertices.capacity(),
+        direct_mesh.vertices.len(),
+        "直接輪郭メッシュの vertices.capacity() が vertices.len() と一致すること"
+    );
+    assert_eq!(
+        direct_mesh.indices.capacity(),
+        direct_mesh.indices.len(),
+        "直接輪郭メッシュの indices.capacity() が indices.len() と一致すること"
+    );
+}
