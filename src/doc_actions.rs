@@ -363,7 +363,7 @@ impl Action {
 fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
     let tl_snap = tab.doc.root.clone();
     let (library, symbols_revision) = tab.history.snapshot_symbols(&tab.doc);
-    let floating = tab.history.snapshot_floating(tab.session.floating.as_ref());
+    let floating = tab.history.snapshot_floating(tab.session.floating());
     let entry = UndoEntry {
         timeline: tl_snap,
         library,
@@ -390,9 +390,8 @@ fn push_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
 
 fn reset_session_after_timeline_change(tab: &mut Tab) {
     cancel_active_drag(tab);
-    tab.session.floating = None;
+    tab.session.set_floating(None);
     tab.session.transform_pivot = None;
-    tab.session.clear_overlay();
     tab.session.sanitize_editing_scope();
 }
 
@@ -703,7 +702,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                     tab.set_active_layer(l_idx);
                 }
                 tab.refresh_scene_base();
-                tab.session.floating = None;
+                tab.session.set_floating(None);
                 tab.session.transform_pivot = None;
                 tab.view.inspect_timeline_frame = false;
                 ApplyResult::CreatedId(Some(sym_id))
@@ -995,18 +994,20 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
             tab.session
                 .lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
             let scope = tab.session.editing_group_path.clone();
-            if let Some(fl) = &mut tab.session.floating {
-                for piece in &mut fl.pieces {
-                    if tab.session.selection.contains_shape(piece)
-                        && editable_lids.contains(&piece.layer_id)
-                        && piece.is_raw_at_scope(&scope)
-                    {
-                        piece.set_color(fill_color);
+            let sel = tab.session.selection.clone();
+            tab.session.update_floating(|fl_opt| {
+                if let Some(fl) = fl_opt {
+                    for piece in &mut fl.pieces {
+                        if sel.contains_shape(piece)
+                            && editable_lids.contains(&piece.layer_id)
+                            && piece.is_raw_at_scope(&scope)
+                        {
+                            piece.set_color(fill_color);
+                        }
                     }
+                    fl.modified = true;
                 }
-            }
-            tab.session.mark_floating_modified(FloatingOrigin::Move);
-            tab.session.rebuild_overlay_from_floating();
+            });
             return true;
         }
         return false;
@@ -1142,23 +1143,25 @@ fn translate_selected_shapes(tab: &mut Tab, delta: KVec2) -> bool {
     }
     let _ = prepare_moved_selection(tab);
     let mut any_moved = false;
-    if let Some(fl) = &mut tab.session.floating {
-        for piece in &mut fl.pieces {
-            if tab.session.selection.contains_shape(piece) {
-                piece.translate(delta);
-                any_moved = true;
+    let selection = tab.session.selection.clone();
+    tab.session.update_floating(|fl_opt| {
+        if let Some(fl) = fl_opt {
+            for piece in &mut fl.pieces {
+                if selection.contains_shape(piece) {
+                    piece.translate(delta);
+                    any_moved = true;
+                }
+            }
+            if any_moved {
+                fl.modified = true;
             }
         }
-        if any_moved {
-            fl.modified = true;
-        }
-    }
+    });
     let mut target_lids: Vec<u64> = Vec::new();
     for s in tab.session.base_cache.shapes() {
         let hidden = tab
             .session
-            .floating
-            .as_ref()
+            .floating()
             .is_some_and(|fl| fl.hidden.contains(&s.shape_id));
         if !hidden
             && tab.session.selection.contains_shape(s)
@@ -1168,11 +1171,9 @@ fn translate_selected_shapes(tab: &mut Tab, delta: KVec2) -> bool {
         }
     }
     if !target_lids.is_empty() {
-        let selection = tab.session.selection.clone();
         let hidden = tab
             .session
-            .floating
-            .as_ref()
+            .floating()
             .map(|fl| fl.hidden.clone())
             .unwrap_or_default();
         edit_layers(tab, &target_lids, |edit| {
@@ -1187,7 +1188,6 @@ fn translate_selected_shapes(tab: &mut Tab, delta: KVec2) -> bool {
     if let Some(piv) = &mut tab.session.transform_pivot {
         *piv += delta;
     }
-    tab.session.rebuild_overlay_from_floating();
     any_moved
 }
 
@@ -1197,30 +1197,32 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     }
     let _ = prepare_moved_selection(tab);
     let mut any_transformed = false;
-    if let Some(fl) = &mut tab.session.floating {
-        for piece in &mut fl.pieces {
-            if tab.session.selection.contains_shape(piece) {
-                if piece.is_empty_symbol_marker() {
-                    if let Some(b) = &mut piece.symbol_instance {
-                        b.xform = affine * b.xform;
+    let selection = tab.session.selection.clone();
+    tab.session.update_floating(|fl_opt| {
+        if let Some(fl) = fl_opt {
+            for piece in &mut fl.pieces {
+                if selection.contains_shape(piece) {
+                    if piece.is_empty_symbol_marker() {
+                        if let Some(b) = &mut piece.symbol_instance {
+                            b.xform = affine * b.xform;
+                        }
+                        piece.rebuild_cache();
+                    } else {
+                        piece.transform(affine);
                     }
-                    piece.rebuild_cache();
-                } else {
-                    piece.transform(affine);
+                    any_transformed = true;
                 }
-                any_transformed = true;
+            }
+            if any_transformed {
+                fl.modified = true;
             }
         }
-        if any_transformed {
-            fl.modified = true;
-        }
-    }
+    });
     let mut target_lids: Vec<u64> = Vec::new();
     for s in tab.session.base_cache.shapes() {
         let hidden = tab
             .session
-            .floating
-            .as_ref()
+            .floating()
             .is_some_and(|fl| fl.hidden.contains(&s.shape_id));
         if !hidden
             && tab.session.selection.contains_shape(s)
@@ -1230,11 +1232,9 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         }
     }
     if !target_lids.is_empty() {
-        let selection = tab.session.selection.clone();
         let hidden = tab
             .session
-            .floating
-            .as_ref()
+            .floating()
             .map(|fl| fl.hidden.clone())
             .unwrap_or_default();
         edit_layers(tab, &target_lids, |edit| {
@@ -1253,20 +1253,19 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
             }
         });
     }
-    tab.session.rebuild_overlay_from_floating();
     any_transformed
 }
 
 fn apply_commit_moved_selection(tab: &mut Tab, coalesce: Option<CoalesceKey>) -> bool {
     let taken_unmodified_fl = (!tab.session.has_modified_floating())
-        .then(|| tab.session.floating.take())
+        .then(|| tab.session.take_floating())
         .flatten();
     let skip_coalesce = coalesce.is_some_and(|k| tab.history.last_coalesce_key == Some(k));
     if !skip_coalesce {
         push_undo_entry_from_doc(tab, coalesce);
     }
     if let Some(fl) = taken_unmodified_fl {
-        tab.session.floating = Some(fl);
+        tab.session.set_floating(Some(fl));
     }
     prepare_moved_selection(tab)
 }
@@ -1339,8 +1338,7 @@ fn apply_deform_shape(
     }
     let in_remainder = tab
         .session
-        .floating
-        .as_ref()
+        .floating()
         .is_some_and(|fl| fl.remainder.iter().any(|r| r.shape_id == shape_id));
     let in_base = tab
         .session
@@ -1354,15 +1352,17 @@ fn apply_deform_shape(
     focus_active_layer_to_shape_by_id(tab, shape_id);
     push_undo(tab, None);
     let rem_to_commit = if in_remainder {
-        tab.session.floating.as_mut().map(|fl| {
-            fl.modified = true;
-            Floating {
-                origin: fl.origin,
-                pieces: Vec::new(),
-                remainder: std::mem::take(&mut fl.remainder),
-                hidden: std::mem::take(&mut fl.hidden),
-                modified: true,
-            }
+        tab.session.update_floating(|fl_opt| {
+            fl_opt.as_mut().map(|fl| {
+                fl.modified = true;
+                Floating {
+                    origin: fl.origin,
+                    pieces: Vec::new(),
+                    remainder: std::mem::take(&mut fl.remainder),
+                    hidden: std::mem::take(&mut fl.hidden),
+                    modified: true,
+                }
+            })
         })
     } else {
         None
@@ -1381,7 +1381,6 @@ fn apply_deform_shape(
             deformed_ok = true;
         }
     });
-    tab.session.rebuild_overlay_from_floating();
     deformed_ok
 }
 
@@ -1504,16 +1503,17 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         })
     };
 
-    if let Some(fl) = &tab.session.floating {
+    if let Some(fl) = tab.session.floating() {
         if let Some(p_idx) = fl.pieces.iter().position(|p| p.shape_id == shape_id) {
             let mut test_piece = fl.pieces[p_idx].clone();
             if apply_to_shape(&mut test_piece) {
                 push_undo(tab, None);
-                if let Some(fl_mut) = &mut tab.session.floating {
-                    fl_mut.pieces[p_idx] = test_piece;
-                    fl_mut.modified = true;
-                }
-                tab.session.rebuild_overlay_from_floating();
+                tab.session.update_floating(|fl_opt| {
+                    if let Some(fl_mut) = fl_opt {
+                        fl_mut.pieces[p_idx] = test_piece;
+                        fl_mut.modified = true;
+                    }
+                });
                 return true;
             }
             return false;
@@ -1522,11 +1522,12 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
             let mut test_rem = fl.remainder[r_idx].clone();
             if apply_to_shape(&mut test_rem) {
                 push_undo(tab, None);
-                if let Some(fl_mut) = &mut tab.session.floating {
-                    fl_mut.remainder[r_idx] = test_rem;
-                    fl_mut.modified = true;
-                }
-                tab.session.rebuild_overlay_from_floating();
+                tab.session.update_floating(|fl_opt| {
+                    if let Some(fl_mut) = fl_opt {
+                        fl_mut.remainder[r_idx] = test_rem;
+                        fl_mut.modified = true;
+                    }
+                });
                 return true;
             }
             return false;
@@ -1552,7 +1553,6 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
                 edit.shapes[pos] = test_shape;
             }
         });
-        tab.session.rebuild_overlay_from_floating();
         true
     } else {
         false
@@ -2137,12 +2137,6 @@ fn apply_set_total_frames(
 fn apply_set_fps(tab: &mut Tab, next_fps: u32, coalesce: Option<CoalesceKey>) -> bool {
     let next_fps = next_fps.clamp(1, 60);
     if next_fps != tab.doc.fps {
-        if (tab.history.last_coalesce_key != coalesce || coalesce.is_none())
-            && tab.session.selection.is_empty()
-            && tab.session.floating.is_none()
-        {
-            commit_floating(tab);
-        }
         push_undo(tab, coalesce);
         tab.doc.fps = next_fps;
         return true;

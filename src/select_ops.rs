@@ -169,150 +169,155 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
         &clip_rect_shape,
     );
 
-    if let Some(fl) = &mut tab.session.floating {
-        let mut new_rem = Vec::with_capacity(fl.remainder.len());
-        let mut current_orig_id: Option<ShapeId> = None;
-        let mut chunk_rem: Vec<FillShape> = Vec::new();
-        let flush_chunk = |new_rem: &mut Vec<FillShape>,
-                           chunk_rem: &mut Vec<FillShape>,
-                           orig_id: Option<ShapeId>| {
-            if !chunk_rem.is_empty() {
-                if let Some(oid) = orig_id {
-                    chunk_rem[0].shape_id = oid;
+    let base_shapes = tab.session.base_cache.shapes().to_vec();
+    let editing_group_path = tab.session.editing_group_path.clone();
+    let mut selection = std::mem::take(&mut tab.session.selection);
+    tab.session.update_floating(|floating| {
+        if let Some(fl) = floating {
+            let mut new_rem = Vec::with_capacity(fl.remainder.len());
+            let mut current_orig_id: Option<ShapeId> = None;
+            let mut chunk_rem: Vec<FillShape> = Vec::new();
+            let flush_chunk = |new_rem: &mut Vec<FillShape>,
+                               chunk_rem: &mut Vec<FillShape>,
+                               orig_id: Option<ShapeId>| {
+                if !chunk_rem.is_empty() {
+                    if let Some(oid) = orig_id {
+                        chunk_rem[0].shape_id = oid;
+                    }
+                    new_rem.append(chunk_rem);
                 }
-                new_rem.append(chunk_rem);
+            };
+            for mut rem in fl.remainder.drain(..) {
+                if fl.hidden.contains(&rem.shape_id) {
+                    flush_chunk(&mut new_rem, &mut chunk_rem, current_orig_id);
+                    current_orig_id = Some(rem.shape_id);
+                }
+                if !rem.is_in_editing_scope(&editing_group_path)
+                    || !rem.is_raw_at_scope(&editing_group_path)
+                {
+                    chunk_rem.push(rem);
+                    continue;
+                }
+                let bbox = rem.bounding_box();
+                if !rects_overlap(bbox, rect) {
+                    chunk_rem.push(rem);
+                    continue;
+                }
+                if bbox.x0 >= rect.x0
+                    && bbox.x1 <= rect.x1
+                    && bbox.y0 >= rect.y0
+                    && bbox.y1 <= rect.y1
+                {
+                    if fl.hidden.contains(&rem.shape_id) {
+                        rem.shape_id = next_shape_id();
+                    }
+                    selection.insert_shape(&rem);
+                    fl.pieces.push(rem);
+                    continue;
+                }
+                let lid = rem.layer_id;
+                let gp = rem.group_path.clone();
+                let (inside, outside) = slice_shape_with_marquee_rect(&rem, &clip_rect_shape);
+                if inside.is_empty() {
+                    chunk_rem.push(rem);
+                } else if outside.is_empty() {
+                    if fl.hidden.contains(&rem.shape_id) {
+                        rem.shape_id = next_shape_id();
+                    }
+                    selection.insert_shape(&rem);
+                    fl.pieces.push(rem);
+                } else {
+                    for mut out_s in outside {
+                        if fl.hidden.contains(&out_s.shape_id) {
+                            out_s.shape_id = next_shape_id();
+                        }
+                        chunk_rem.push(out_s.with_scope(lid, &gp));
+                    }
+                    for mut piece in inside {
+                        if fl.hidden.contains(&piece.shape_id) {
+                            piece.shape_id = next_shape_id();
+                        }
+                        let piece = piece.with_scope(lid, &gp);
+                        selection.insert_shape(&piece);
+                        fl.pieces.push(piece);
+                    }
+                }
             }
-        };
-        for mut rem in fl.remainder.drain(..) {
-            if fl.hidden.contains(&rem.shape_id) {
-                flush_chunk(&mut new_rem, &mut chunk_rem, current_orig_id);
-                current_orig_id = Some(rem.shape_id);
-            }
-            if !rem.is_in_editing_scope(&tab.session.editing_group_path)
-                || !rem.is_raw_at_scope(&tab.session.editing_group_path)
+            flush_chunk(&mut new_rem, &mut chunk_rem, current_orig_id);
+            fl.remainder = new_rem;
+        }
+
+        for shape in &base_shapes {
+            if selection.contains_shape(shape)
+                || floating
+                    .as_ref()
+                    .is_some_and(|fl| fl.hidden.contains(&shape.shape_id))
             {
-                chunk_rem.push(rem);
                 continue;
             }
-            let bbox = rem.bounding_box();
+            if !shape.is_in_editing_scope(&editing_group_path) {
+                continue;
+            }
+            if let Some(gid) = shape.active_group_id_at_scope(&editing_group_path) {
+                if hit_group_ids.contains(&gid) {
+                    selection.insert_shape(shape);
+                }
+                continue;
+            }
+            let bbox = shape.bounding_box();
             if !rects_overlap(bbox, rect) {
-                chunk_rem.push(rem);
                 continue;
             }
             if bbox.x0 >= rect.x0 && bbox.x1 <= rect.x1 && bbox.y0 >= rect.y0 && bbox.y1 <= rect.y1
             {
-                if fl.hidden.contains(&rem.shape_id) {
-                    rem.shape_id = next_shape_id();
-                }
-                tab.session.selection.insert_shape(&rem);
-                fl.pieces.push(rem);
+                selection.insert_shape(shape);
                 continue;
             }
-            let lid = rem.layer_id;
-            let gp = rem.group_path.clone();
-            let (inside, outside) = slice_shape_with_marquee_rect(&rem, &clip_rect_shape);
+
+            let lid = shape.layer_id;
+            let gp = shape.group_path.clone();
+            let orig_id = shape.shape_id;
+            let (inside, outside) = slice_shape_with_marquee_rect(shape, &clip_rect_shape);
             if inside.is_empty() {
-                chunk_rem.push(rem);
+                continue;
             } else if outside.is_empty() {
-                if fl.hidden.contains(&rem.shape_id) {
-                    rem.shape_id = next_shape_id();
-                }
-                tab.session.selection.insert_shape(&rem);
-                fl.pieces.push(rem);
+                selection.insert_shape(shape);
             } else {
-                for mut out_s in outside {
-                    if fl.hidden.contains(&out_s.shape_id) {
-                        out_s.shape_id = next_shape_id();
-                    }
-                    chunk_rem.push(out_s.with_scope(lid, &gp));
+                let fl = floating.get_or_insert_with(|| Floating {
+                    origin: FloatingOrigin::Slice,
+                    pieces: Vec::new(),
+                    remainder: Vec::new(),
+                    hidden: HashSet::new(),
+                    modified: false,
+                });
+                fl.hidden.insert(orig_id);
+                let mut outside_scoped: Vec<FillShape> = outside
+                    .into_iter()
+                    .map(|mut s| {
+                        if s.shape_id == orig_id {
+                            s.shape_id = next_shape_id();
+                        }
+                        s.with_scope(lid, &gp)
+                    })
+                    .collect();
+                if let Some(first_out) = outside_scoped.first_mut() {
+                    first_out.shape_id = orig_id;
                 }
+                fl.remainder.extend(outside_scoped);
                 for mut piece in inside {
-                    if fl.hidden.contains(&piece.shape_id) {
+                    if piece.shape_id == orig_id {
                         piece.shape_id = next_shape_id();
                     }
                     let piece = piece.with_scope(lid, &gp);
-                    tab.session.selection.insert_shape(&piece);
+                    selection.insert_shape(&piece);
                     fl.pieces.push(piece);
                 }
             }
         }
-        flush_chunk(&mut new_rem, &mut chunk_rem, current_orig_id);
-        fl.remainder = new_rem;
-    }
-
-    let base_shapes = tab.session.base_cache.shapes();
-    let editing_group_path = &tab.session.editing_group_path;
-    let selection = &mut tab.session.selection;
-    let floating = &mut tab.session.floating;
-    for shape in base_shapes {
-        if selection.contains_shape(shape)
-            || floating
-                .as_ref()
-                .is_some_and(|fl| fl.hidden.contains(&shape.shape_id))
-        {
-            continue;
-        }
-        if !shape.is_in_editing_scope(editing_group_path) {
-            continue;
-        }
-        if let Some(gid) = shape.active_group_id_at_scope(editing_group_path) {
-            if hit_group_ids.contains(&gid) {
-                selection.insert_shape(shape);
-            }
-            continue;
-        }
-        let bbox = shape.bounding_box();
-        if !rects_overlap(bbox, rect) {
-            continue;
-        }
-        if bbox.x0 >= rect.x0 && bbox.x1 <= rect.x1 && bbox.y0 >= rect.y0 && bbox.y1 <= rect.y1 {
-            selection.insert_shape(shape);
-            continue;
-        }
-
-        let lid = shape.layer_id;
-        let gp = shape.group_path.clone();
-        let orig_id = shape.shape_id;
-        let (inside, outside) = slice_shape_with_marquee_rect(shape, &clip_rect_shape);
-        if inside.is_empty() {
-            continue;
-        } else if outside.is_empty() {
-            selection.insert_shape(shape);
-        } else {
-            let fl = floating.get_or_insert_with(|| Floating {
-                origin: FloatingOrigin::Slice,
-                pieces: Vec::new(),
-                remainder: Vec::new(),
-                hidden: HashSet::new(),
-                modified: false,
-            });
-            fl.hidden.insert(orig_id);
-            let mut outside_scoped: Vec<FillShape> = outside
-                .into_iter()
-                .map(|mut s| {
-                    if s.shape_id == orig_id {
-                        s.shape_id = next_shape_id();
-                    }
-                    s.with_scope(lid, &gp)
-                })
-                .collect();
-            if let Some(first_out) = outside_scoped.first_mut() {
-                first_out.shape_id = orig_id;
-            }
-            fl.remainder.extend(outside_scoped);
-            for mut piece in inside {
-                if piece.shape_id == orig_id {
-                    piece.shape_id = next_shape_id();
-                }
-                let piece = piece.with_scope(lid, &gp);
-                selection.insert_shape(&piece);
-                fl.pieces.push(piece);
-            }
-        }
-    }
+    });
+    tab.session.selection = selection;
 
     tab.session.drop_unmodified_slice_if_unselected();
-    tab.session.rebuild_overlay_from_floating();
     tab.session.transform_pivot = None;
     sync_timeline_layer_from_canvas_selection(tab);
 }
@@ -760,7 +765,7 @@ pub(crate) fn prepare_group_selected_shapes(
     before_mutate(tab);
     let new_gid = tab.doc.alloc_group_id();
 
-    let fl_opt = tab.session.floating.take();
+    let fl_opt = tab.session.take_floating();
     let selection = tab.session.selection.clone();
     let depth = tab.session.editing_group_path.len();
     let layer_ids = editable_layer_ids(tab);
@@ -793,7 +798,6 @@ pub(crate) fn prepare_group_selected_shapes(
     if let Some(l_idx) = tab.active_timeline().layer_index_by_id(target_lid) {
         tab.set_active_layer(l_idx);
     }
-    tab.session.rebuild_overlay_from_floating();
     tab.session.transform_pivot = None;
     Some(new_gid)
 }
@@ -864,7 +868,6 @@ pub(crate) fn prepare_ungroup_selected_shapes(
             .lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
         tab.session.mark_floating_modified(FloatingOrigin::Move);
     }
-    tab.session.rebuild_overlay_from_floating();
     tab.session.retain_existing_selection();
     tab.session.transform_pivot = None;
     true
@@ -882,15 +885,14 @@ pub(crate) fn prepare_delete_selected_shapes(
     let (_, any_valid) = tab.session.selected_shape_mask();
     if !any_valid {
         tab.session.selection.clear();
-        tab.session.floating = None;
-        tab.session.rebuild_overlay_from_floating();
+        tab.session.set_floating(None);
         tab.session.transform_pivot = None;
         return false;
     }
 
     before_mutate(tab);
 
-    let fl_opt = tab.session.floating.take();
+    let fl_opt = tab.session.take_floating();
     let selection = std::mem::take(&mut tab.session.selection);
     let layer_ids = editable_layer_ids(tab);
     edit_layers(tab, &layer_ids, |edit| {
@@ -900,7 +902,6 @@ pub(crate) fn prepare_delete_selected_shapes(
         }
         edit.shapes.retain(|s| !selection.contains_shape(s));
     });
-    tab.session.rebuild_overlay_from_floating();
     tab.session.transform_pivot = None;
     true
 }

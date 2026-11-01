@@ -1965,7 +1965,7 @@ pub(crate) struct Session {
     /// キャンバス上で進行中のドラッグ操作（ブラシ/消しゴム・選択・自由変形の排他的状態マシン）
     pub(crate) drag: ActiveCanvasDrag,
     pub(crate) selection: Selection,
-    pub(crate) floating: Option<Floating>,
+    floating: Option<Floating>,
     pub(crate) hover_target: HoverTarget,
     /// 現在インプレイス編集で潜っているグループ階層のパス（空 `[]` ならルートシーン）
     pub(crate) editing_group_path: Vec<u64>,
@@ -1998,8 +1998,34 @@ impl Session {
         let _ = self.scene_order.take();
     }
 
+    /// 現在の `Floating` への読み取り専用参照を返す
+    #[inline]
+    pub(crate) fn floating(&self) -> Option<&Floating> {
+        self.floating.as_ref()
+    }
+
+    /// `Floating` を置き換え、`overlay` を同期再構築する
+    pub(crate) fn set_floating(&mut self, fl: Option<Floating>) {
+        self.floating = fl;
+        self.rebuild_overlay_from_floating();
+    }
+
+    /// `Floating` を取り出し、`overlay` を同期再構築する
+    pub(crate) fn take_floating(&mut self) -> Option<Floating> {
+        let fl = self.floating.take();
+        self.rebuild_overlay_from_floating();
+        fl
+    }
+
+    /// クロージャで `Floating` を更新し、`overlay` を同期再構築する
+    pub(crate) fn update_floating<R>(&mut self, f: impl FnOnce(&mut Option<Floating>) -> R) -> R {
+        let res = f(&mut self.floating);
+        self.rebuild_overlay_from_floating();
+        res
+    }
+
     /// 現在の `self.floating` の状態から `self.overlay` を再構築する（ドラッグ中でない通常状態の表示用）
-    pub(crate) fn rebuild_overlay_from_floating(&mut self) {
+    fn rebuild_overlay_from_floating(&mut self) {
         let had_overlay = !self.overlay.is_empty() || self.overlay_only_selected;
         self.overlay.clear();
         self.overlay_only_selected = false;
@@ -2238,9 +2264,11 @@ impl Session {
     /// `Floating` を変更済みとしてマークする
     #[inline]
     pub(crate) fn mark_floating_modified(&mut self, _origin: FloatingOrigin) {
-        if let Some(fl) = &mut self.floating {
-            fl.modified = true;
-        }
+        self.update_floating(|fl_opt| {
+            if let Some(fl) = fl_opt {
+                fl.modified = true;
+            }
+        });
     }
 
     /// 選択中の生図形のうち、まだ `Floating` に入っていないものを `Floating` に持ち上げ、変更済みとしてマークする
@@ -2262,79 +2290,84 @@ impl Session {
         if newly_lifted.is_empty() && self.floating.is_none() {
             return false;
         }
-        let fl = self.floating.get_or_insert_with(|| Floating {
-            origin,
-            pieces: Vec::new(),
-            remainder: Vec::new(),
-            hidden: HashSet::new(),
-            modified: true,
+        let order_ids = self.base_cache.layer_order_ids().to_vec();
+        self.update_floating(|fl_opt| {
+            let fl = fl_opt.get_or_insert_with(|| Floating {
+                origin,
+                pieces: Vec::new(),
+                remainder: Vec::new(),
+                hidden: HashSet::new(),
+                modified: true,
+            });
+            fl.modified = true;
+            for s in newly_lifted {
+                fl.hidden.insert(s.shape_id);
+                fl.pieces.push(s);
+            }
+            if order_ids.len() > 1 && fl.pieces.len() > 1 {
+                fl.pieces
+                    .sort_by_key(|s| layer_order_index(&order_ids, s.layer_id));
+            }
         });
-        fl.modified = true;
-        for s in newly_lifted {
-            fl.hidden.insert(s.shape_id);
-            fl.pieces.push(s);
-        }
-        let order_ids = self.base_cache.layer_order_ids();
-        if order_ids.len() > 1 && fl.pieces.len() > 1 {
-            fl.pieces
-                .sort_by_key(|s| layer_order_index(order_ids, s.layer_id));
-        }
         true
     }
 
     /// `fl.remainder` 内の図形が選択に追加された場合、`fl.pieces` へ昇格させる
     pub(crate) fn promote_selected_remainder_to_pieces(&mut self) {
-        let Some(fl) = &mut self.floating else {
-            return;
-        };
-        if !fl
-            .remainder
-            .iter()
-            .any(|r| self.selection.shapes.contains(&r.shape_id))
-        {
+        if !self.floating.as_ref().is_some_and(|fl| {
+            fl.remainder
+                .iter()
+                .any(|r| self.selection.shapes.contains(&r.shape_id))
+        }) {
             return;
         }
-        let old_rem = std::mem::take(&mut fl.remainder);
-        let mut chunks: Vec<(Option<ShapeId>, Vec<FillShape>)> = Vec::new();
-        for rem in old_rem {
-            if fl.hidden.contains(&rem.shape_id) {
-                chunks.push((Some(rem.shape_id), vec![rem]));
-            } else if let Some((_, last_vec)) = chunks.last_mut() {
-                last_vec.push(rem);
-            } else {
-                chunks.push((None, vec![rem]));
-            }
-        }
-        let mut new_rem = Vec::new();
-        for (orig_id, chunk) in chunks {
-            let mut still_rem = Vec::new();
-            let mut newly_sel = Vec::new();
-            for s in chunk {
-                if self.selection.shapes.contains(&s.shape_id) {
-                    newly_sel.push(s);
+        let mut selection_shapes = std::mem::take(&mut self.selection.shapes);
+        self.update_floating(|fl_opt| {
+            let Some(fl) = fl_opt else {
+                return;
+            };
+            let old_rem = std::mem::take(&mut fl.remainder);
+            let mut chunks: Vec<(Option<ShapeId>, Vec<FillShape>)> = Vec::new();
+            for rem in old_rem {
+                if fl.hidden.contains(&rem.shape_id) {
+                    chunks.push((Some(rem.shape_id), vec![rem]));
+                } else if let Some((_, last_vec)) = chunks.last_mut() {
+                    last_vec.push(rem);
                 } else {
-                    still_rem.push(s);
+                    chunks.push((None, vec![rem]));
                 }
             }
-            if !newly_sel.is_empty() && !still_rem.is_empty() {
-                for s in &mut newly_sel {
-                    if fl.hidden.contains(&s.shape_id) {
-                        let old_id = s.shape_id;
-                        let fresh_id = crate::vector_engine::next_shape_id();
-                        s.shape_id = fresh_id;
-                        self.selection.shapes.remove(&old_id);
-                        self.selection.shapes.insert(fresh_id);
+            let mut new_rem = Vec::new();
+            for (orig_id, chunk) in chunks {
+                let mut still_rem = Vec::new();
+                let mut newly_sel = Vec::new();
+                for s in chunk {
+                    if selection_shapes.contains(&s.shape_id) {
+                        newly_sel.push(s);
+                    } else {
+                        still_rem.push(s);
                     }
                 }
-                if let Some(hid) = orig_id {
-                    still_rem[0].shape_id = hid;
+                if !newly_sel.is_empty() && !still_rem.is_empty() {
+                    for s in &mut newly_sel {
+                        if fl.hidden.contains(&s.shape_id) {
+                            let old_id = s.shape_id;
+                            let fresh_id = crate::vector_engine::next_shape_id();
+                            s.shape_id = fresh_id;
+                            selection_shapes.remove(&old_id);
+                            selection_shapes.insert(fresh_id);
+                        }
+                    }
+                    if let Some(hid) = orig_id {
+                        still_rem[0].shape_id = hid;
+                    }
                 }
+                new_rem.extend(still_rem);
+                fl.pieces.extend(newly_sel);
             }
-            new_rem.extend(still_rem);
-            fl.pieces.extend(newly_sel);
-        }
-        fl.remainder = new_rem;
-        self.rebuild_overlay_from_floating();
+            fl.remainder = new_rem;
+        });
+        self.selection.shapes = selection_shapes;
     }
 
     /// 未変形スライスの `Floating` で選択中の片がなくなった場合は破棄する
@@ -2346,8 +2379,7 @@ impl Session {
                     .iter()
                     .any(|p| self.selection.shapes.contains(&p.shape_id))
         }) {
-            self.floating = None;
-            self.rebuild_overlay_from_floating();
+            self.set_floating(None);
             true
         } else {
             false
@@ -2986,7 +3018,7 @@ impl Tab {
         self.history.last_coalesce_key = None;
         let prev_selection = self.session.selection.clone();
         let (prev_lib, prev_rev) = self.history.snapshot_symbols(&self.doc);
-        let prev_floating = self.history.snapshot_floating(self.session.floating.as_ref());
+        let prev_floating = self.history.snapshot_floating(self.session.floating());
         let prev_entry = UndoEntry {
             timeline: std::mem::replace(&mut self.doc.root, entry.timeline),
             library: prev_lib,
@@ -3011,11 +3043,11 @@ impl Tab {
         cancel_active_drag(self);
         self.session.transform_pivot = None;
         self.refresh_scene_base();
-        self.session.floating = entry.floating.map(Arc::unwrap_or_clone);
-        self.session.rebuild_overlay_from_floating();
+        self.session
+            .set_floating(entry.floating.map(Arc::unwrap_or_clone));
         self.session.selection = prev_selection;
         self.session.retain_existing_selection();
-        if self.session.floating.is_some() {
+        if self.session.floating().is_some() {
             let keep = self.session.selected_indices();
             commit_floating_except(self, &keep);
         }
@@ -3940,11 +3972,10 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
     }
 
     if !any_keep {
-        let Some(fl) = tab.session.floating.take() else {
+        let Some(fl) = tab.session.take_floating() else {
             return false;
         };
         if fl.is_unmodified_slice() {
-            tab.session.rebuild_overlay_from_floating();
             tab.session.retain_existing_selection();
             return true;
         }
@@ -3953,18 +3984,16 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             edit_layers(tab, &lids, |edit| {
                 merge_floating_into_base_shapes(&mut edit.shapes, fl, &edit.layer_order_ids);
             });
-            tab.session.rebuild_overlay_from_floating();
             tab.session.retain_existing_selection();
             return true;
         }
-        tab.session.rebuild_overlay_from_floating();
         tab.session.retain_existing_selection();
         return false;
     }
 
     tab.session
         .set_selected_indices((0..is_keep.len()).filter(|&i| is_keep[i]));
-    let Some(mut fl) = tab.session.floating.take() else {
+    let Some(mut fl) = tab.session.take_floating() else {
         return false;
     };
     let mut kept_pieces = Vec::new();
@@ -3979,7 +4008,6 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
 
     if fl.is_unmodified_slice() {
         if kept_pieces.is_empty() {
-            tab.session.rebuild_overlay_from_floating();
             tab.session.retain_existing_selection();
             return true;
         }
@@ -4007,32 +4035,30 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             }
         }
         fl.pieces = kept_pieces;
-        tab.session.floating = Some(fl);
-        tab.session.rebuild_overlay_from_floating();
+        tab.session.set_floating(Some(fl));
         tab.session.retain_existing_selection();
         return false;
     }
 
     let had_hidden_or_rem = !fl.hidden.is_empty() || !fl.remainder.is_empty();
     let merged_any = !deselected_pieces.is_empty() || (kept_pieces.is_empty() && had_hidden_or_rem);
-    if merged_any {
-        let to_commit = Floating {
-            origin: fl.origin,
-            pieces: deselected_pieces,
-            remainder: std::mem::take(&mut fl.remainder),
-            hidden: std::mem::take(&mut fl.hidden),
-            modified: true,
-        };
+    let to_commit = merged_any.then(|| Floating {
+        origin: fl.origin,
+        pieces: deselected_pieces,
+        remainder: std::mem::take(&mut fl.remainder),
+        hidden: std::mem::take(&mut fl.hidden),
+        modified: true,
+    });
+    if !kept_pieces.is_empty() {
+        fl.pieces = kept_pieces;
+        tab.session.set_floating(Some(fl));
+    }
+    if let Some(to_commit) = to_commit {
         let lids = floating_target_layer_ids(tab, &to_commit);
         edit_layers(tab, &lids, |edit| {
             merge_floating_into_base_shapes(&mut edit.shapes, to_commit, &edit.layer_order_ids);
         });
     }
-    if !kept_pieces.is_empty() {
-        fl.pieces = kept_pieces;
-        tab.session.floating = Some(fl);
-    }
-    tab.session.rebuild_overlay_from_floating();
     tab.session.retain_existing_selection();
     merged_any
 }
@@ -4090,17 +4116,16 @@ pub(crate) fn insert_and_select_shapes_in_scope(
         }
         if !raw_pieces.is_empty() {
             tab.active_timeline().normalize_shape_layer_ids(&mut raw_pieces);
-            tab.session.floating = Some(Floating {
+            tab.session.set_floating(Some(Floating {
                 origin,
                 pieces: raw_pieces,
                 remainder: Vec::new(),
                 hidden: HashSet::new(),
                 modified: origin != FloatingOrigin::AltDuplicate,
-            });
+            }));
         } else {
-            tab.session.floating = None;
+            tab.session.set_floating(None);
         }
-        tab.session.rebuild_overlay_from_floating();
     } else {
         if !new_shapes.is_empty() {
             let mut lids: Vec<LayerId> = new_shapes.iter().map(|s| s.layer_id).collect();
@@ -4110,8 +4135,7 @@ pub(crate) fn insert_and_select_shapes_in_scope(
                 edit.shapes.splice(insert_pos..insert_pos, new_shapes);
             });
         }
-        tab.session.floating = None;
-        tab.session.rebuild_overlay_from_floating();
+        tab.session.set_floating(None);
     }
     tab.session.transform_pivot = None;
 }
@@ -4125,6 +4149,5 @@ pub(crate) fn prepare_moved_selection(tab: &mut Tab) -> bool {
     tab.session
         .lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
     tab.session.mark_floating_modified(FloatingOrigin::Move);
-    tab.session.rebuild_overlay_from_floating();
     true
 }

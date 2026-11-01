@@ -144,7 +144,7 @@ pub(crate) fn is_active_tab_pristine_empty(tab: &Tab) -> bool {
         && tab.doc.root.layers[0].frame_count == 1
         && tab.doc.root.layers[0].keyframes.len() == 1
         && tab.doc.root.layers[0].keyframes[0].cel.is_empty()
-        && tab.session.floating.is_none()
+        && tab.session.floating().is_none()
 }
 
 /// 指定したインデックス `index` のタブに未保存変更（`is_dirty() == true`）があるかを返す
@@ -906,15 +906,14 @@ impl ProjectDocument {
     pub(crate) fn from_app(tab: &Tab) -> Self {
         if let Some(fl) = tab
             .session
-            .floating
-            .as_ref()
+            .floating()
             .filter(|fl| fl.needs_merge_commit())
         {
             let mut temp_tab = Tab::new_empty(tab.id, tab.untitled_number);
             temp_tab.doc = tab.doc.clone();
             temp_tab.session.edit_path = tab.session.edit_path.clone();
             temp_tab.session.editing_group_path = tab.session.editing_group_path.clone();
-            temp_tab.session.floating = Some(fl.clone());
+            temp_tab.session.set_floating(Some(fl.clone()));
             temp_tab.refresh_scene_base();
             commit_floating(&mut temp_tab);
 

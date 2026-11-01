@@ -3990,8 +3990,7 @@ fn test_save_io_failure_rollback_and_marquee_slice_push_undo() {
     assert!(
         self_union_app
             .session
-            .floating
-            .as_ref()
+            .floating()
             .is_some_and(|fl| fl.is_unmodified_slice())
     );
     assert!(self_union_app.scene().len() >= 2);
@@ -4574,13 +4573,13 @@ fn test_marquee_shift_deselect_restores_for_bucket_fill() {
         Point::new(160.0, 130.0),
         false,
     );
-    assert!(app.session.floating.is_some());
+    assert!(app.session.floating().is_some());
     assert_eq!(app.session.selected_indices().len(), 1);
     let sel_idx = app.session.selected_indices()[0];
     tool_select::toggle_shape_selection(&mut app, sel_idx);
     assert!(app.session.selection.is_empty());
     assert!(
-        app.session.floating.is_none(),
+        app.session.floating().is_none(),
         "Shift+クリックで選択が空になった時点で未編集のマーキースライスは即座に復元されること"
     );
     assert_eq!(scene_summary(&app).len, 1);
@@ -5883,7 +5882,7 @@ fn test_pivot_commit_restores_marquee_slice_and_persists() {
         Point::new(160.0, 120.0),
         false,
     );
-    assert!(app.session.floating.is_some());
+    assert!(app.session.floating().is_some());
     assert_eq!(app.scene().len(), 2);
 
     doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
@@ -5928,7 +5927,7 @@ fn test_pivot_commit_restores_marquee_slice_and_persists() {
         Point::new(160.0, 260.0),
         false,
     );
-    assert!(app.session.floating.is_some());
+    assert!(app.session.floating().is_some());
 
     // シンボルインスタンスのみに選択を絞り、ピボットを変更して選択解除
     let sym_indices: Vec<usize> = app
@@ -5945,7 +5944,7 @@ fn test_pivot_commit_restores_marquee_slice_and_persists() {
         Some(new_world_pivot),
         true
     ));
-    assert!(app.session.floating.is_none());
+    assert!(app.session.floating().is_none());
     tool_select::clear_selection(&mut app);
 
     let saved_inst = &app.doc.root.layers[0].keyframes[0].cel.instances[0];
@@ -8803,7 +8802,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     );
     base_stroke[0].layer_id = lid;
     put_cel_shapes(&mut app, 0, 0, base_stroke);
-    assert!(app.session.floating.is_none());
+    assert!(app.session.floating().is_none());
 
     // 1. マーキー矩形スライスで Floating(Slice, modified=false) が生成され、未変更で選択解除すると元の1図形に戻ること
     run(
@@ -8816,8 +8815,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     );
     let fl = app
         .session
-        .floating
-        .as_ref()
+        .floating()
         .expect("マーキー矩形スライス直後に Floating が生成されること");
     assert_eq!(fl.origin, FloatingOrigin::Slice);
     assert!(!fl.modified);
@@ -8828,7 +8826,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     assert_eq!(fl.hidden.len(), 1);
 
     run(&mut app, &[Action::Deselect]);
-    assert!(app.session.floating.is_none());
+    assert!(app.session.floating().is_none());
     assert_eq!(
         app.scene().len(),
         1,
@@ -8852,15 +8850,14 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     );
     let fl_moved = app
         .session
-        .floating
-        .as_ref()
+        .floating()
         .expect("スライス断片の移動後も Floating が保持されること");
     assert!(fl_moved.modified);
     assert!(fl_moved.needs_merge_commit());
 
     // 重なっている同色断片が Action::CommitFloating で1図形に Union 結合され、Floating が空になること
     run(&mut app, &[Action::CommitFloating]);
-    assert!(app.session.floating.is_none());
+    assert!(app.session.floating().is_none());
     assert_eq!(
         app.scene().len(),
         1,
@@ -8880,8 +8877,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     );
     let fl_paste = app
         .session
-        .floating
-        .as_ref()
+        .floating()
         .expect("ペースト直後に Floating が生成されること");
     assert_eq!(fl_paste.origin, FloatingOrigin::Paste);
     assert!(fl_paste.modified);
@@ -8889,7 +8885,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     assert_eq!(app.scene().len(), 2);
 
     run(&mut app, &[Action::CommitFloating]);
-    assert!(app.session.floating.is_none());
+    assert!(app.session.floating().is_none());
     assert_eq!(
         app.scene().len(),
         1,
@@ -9558,7 +9554,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
             additive: false,
         }],
     );
-    assert!(app.session.floating.is_some());
+    assert!(app.session.floating().is_some());
     assert_eq!(app.scene().len(), 3);
     assert_eq!(
         app.doc.root.layers[0].keyframes[0].cel.revision,
@@ -9572,7 +9568,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
 
     // 未変形のスライスを解除したときは Floating を捨てるだけで文書の Cel::revision は変化しないこと
     run(&mut app, &[Action::Deselect]);
-    assert!(app.session.floating.is_none());
+    assert!(app.session.floating().is_none());
     assert_eq!(app.scene().len(), 2);
     assert_eq!(
         app.doc.root.layers[0].keyframes[0].cel.revision,
@@ -9587,7 +9583,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
         }],
     );
     assert!(
-        app.session.floating.is_none(),
+        app.session.floating().is_none(),
         "生図形を丸ごとクリック選択した時点ではまだ Floating に入らないこと"
     );
     run(
@@ -9601,7 +9597,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
             },
         ],
     );
-    assert!(app.session.floating.is_some());
+    assert!(app.session.floating().is_some());
     assert_eq!(
         app.doc.root.layers[0].keyframes[0].cel.revision,
         rev_initial,
@@ -9618,7 +9614,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
     assert_eq!(app.active, 1);
     crate::project_io::switch_to_tab(&mut app, 0, Some(&ctx));
     assert!(
-        app.session.floating.is_some(),
+        app.session.floating().is_some(),
         "タブ切り替えでは Floating を確定せず維持すること"
     );
     assert_eq!(
@@ -9631,7 +9627,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
         std::env::temp_dir().join(format!("is2d_stage7b_save_{}.is2d", std::process::id()));
     crate::project_io::save_project_to_path(&mut app, &tmp_save).unwrap();
     assert!(
-        app.session.floating.is_some(),
+        app.session.floating().is_some(),
         "保存後も Session の Floating はそのまま残ること"
     );
     assert_eq!(
@@ -9657,7 +9653,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
     let commit_before = app.history.current_commit_id;
     let undo_len_before = app.history.undo_stack.len();
     run(&mut app, &[Action::Deselect]);
-    assert!(app.session.floating.is_none());
+    assert!(app.session.floating().is_none());
     assert_eq!(app.history.current_commit_id, commit_before);
     assert_eq!(app.history.undo_stack.len(), undo_len_before);
     assert!(!app.history.is_dirty());
@@ -10141,10 +10137,10 @@ fn run_and_verify_scene_cache_consistency(
     run(app, &[action]);
     let before: Vec<FillShape> = app.scene().iter().cloned().collect();
 
-    // 1. rebuild_overlay_from_floating() と、土台のキャッシュを空から作り直す処理を実行
+    // 1. clear_overlay() と、土台のキャッシュを空から作り直す処理を実行
     app.tabs[app.active].session.base_cache = Default::default();
     app.tabs[app.active].refresh_scene_base();
-    app.tabs[app.active].session.rebuild_overlay_from_floating();
+    app.tabs[app.active].session.clear_overlay();
 
     let after: Vec<FillShape> = app.scene().iter().cloned().collect();
     assert_eq!(
@@ -12281,11 +12277,11 @@ fn test_g3_3_clear_timeline_cells_and_no_direct_ui_mutation_calls() {
             delta: kurbo::Vec2::new(10.0, 0.0),
         },
     );
-    assert!(app.session.floating.is_some());
+    assert!(app.session.floating().is_some());
     assert!(app.history.last_coalesce_key.is_some());
     timeline_ui::toggle_playback(&mut app);
     assert!(app.timeline_ui.is_playing);
-    assert!(app.session.floating.is_none());
+    assert!(app.session.floating().is_none());
     assert!(app.history.last_coalesce_key.is_none());
 }
 
@@ -12312,6 +12308,65 @@ fn test_g2_1_edit_contour_bumps_mesh_revision() {
     assert!(changed);
     assert!(shape.mesh_revision > rev0);
 }
+
+#[test]
+fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
+    use crate::canvas_tool::{Floating, FloatingOrigin};
+    use std::collections::HashSet;
+
+    // 1. 本番コードで rebuild_overlay_from_floating を呼ぶのが canvas_tool.rs (Session 内) だけであること
+    for entry in std::fs::read_dir("src").unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let fname = path.file_name().unwrap().to_str().unwrap();
+        if fname == "canvas_tool.rs" || fname == "tests.rs" {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !src.contains("rebuild_overlay_from_floating"),
+            "{fname} に rebuild_overlay_from_floating が残っていないこと"
+        );
+    }
+
+    // 2. set_floating / update_floating / take_floating の3メソッドだけで overlay と Scene が自動的に同期されること
+    let mut app = Is2dApp::default();
+    let raw = generate_brush_outline_at_zoom(
+        &[Point::new(100.0, 100.0), Point::new(180.0, 100.0)],
+        6.0,
+        1.0,
+    );
+    let mut shape = build_smoothed_stroke_shapes_at_zoom(&raw, Color32::RED, 1.0)
+        .into_iter()
+        .next()
+        .unwrap();
+    shape.layer_id = app.doc.root.layers[0].id;
+    assert_eq!(app.scene().len(), 0);
+
+    app.tabs[0].session.set_floating(Some(Floating {
+        origin: FloatingOrigin::Paste,
+        pieces: vec![shape],
+        remainder: Vec::new(),
+        hidden: HashSet::new(),
+        modified: true,
+    }));
+    assert_eq!(app.scene().len(), 1);
+    assert_eq!(app.scene().get(0).unwrap().color, Color32::RED);
+
+    app.tabs[0].session.update_floating(|fl_opt| {
+        if let Some(fl) = fl_opt {
+            fl.pieces[0].set_color(Color32::BLUE);
+        }
+    });
+    assert_eq!(app.scene().get(0).unwrap().color, Color32::BLUE);
+
+    let taken = app.tabs[0].session.take_floating();
+    assert!(taken.is_some());
+    assert_eq!(app.scene().len(), 0);
+}
+
 
 
 

@@ -34,7 +34,7 @@ pub(crate) fn prepare_convert_selection_to_symbol(
 
     let sym_id = tab.doc.next_symbol_id;
     let inst_gid = tab.doc.alloc_group_id();
-    let fl_opt = tab.session.floating.take();
+    let fl_opt = tab.session.take_floating();
     let selection = tab.session.selection.clone();
     let depth = tab.session.editing_group_path.len();
     let layer_ids = editable_layer_ids(tab);
@@ -110,7 +110,6 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         return None;
     }
 
-    tab.session.rebuild_overlay_from_floating();
     tab.session.selection.clear();
     tab.session.selection.instances.insert(inst_gid);
 
@@ -299,9 +298,8 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
     tab.set_active_cell_selection(Some(TimelineCellSelection::single(act_l, act_f)));
 
     cancel_active_drag(tab);
-    tab.session.floating = None;
+    tab.session.set_floating(None);
     tab.session.transform_pivot = None;
-    tab.session.clear_overlay();
     tab.session.sanitize_editing_scope();
     true
 }
@@ -388,9 +386,8 @@ pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
     tab.session.editing_group_path = lvl.parent_group_path;
 
     cancel_active_drag(tab);
-    tab.session.floating = None;
+    tab.session.set_floating(None);
     tab.session.transform_pivot = None;
-    tab.session.clear_overlay();
     tab.session.sanitize_editing_scope();
 
     tab.session

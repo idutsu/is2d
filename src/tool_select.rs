@@ -253,7 +253,7 @@ pub(crate) fn start_reshape_drag(
     if matches!(
         target,
         HoverTarget::Vertex { .. } | HoverTarget::Edge { .. }
-    ) && (!host.tab().session.selection.is_empty() || host.tab().session.floating.is_some())
+    ) && (!host.tab().session.selection.is_empty() || host.tab().session.floating().is_some())
     {
         apply(host, Action::Deselect);
         target = compute_hover_target(
