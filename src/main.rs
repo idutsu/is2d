@@ -832,6 +832,13 @@ impl Is2dApp {
         if let Some((kind, msg)) = self.current_state_notice(tool_allowed) {
             notices.push((kind, msg.to_owned()));
         }
+        if self.tab().session.base_cache.has_truncated_layer() {
+            notices.push((
+                NoticeKind::Warning,
+                "図形が多すぎるため、このフレームの一部が表示されていません（データは消えていません）"
+                    .to_owned(),
+            ));
+        }
 
         if let Some(toast) = &self.toast {
             let now = Instant::now();

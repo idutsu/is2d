@@ -101,6 +101,7 @@ type SymbolEvalMemoKey = (u64, usize, usize, usize);
 #[derive(Default)]
 struct SymbolEvalState {
     steps_used: usize,
+    truncated: bool,
     memo: HashMap<SymbolEvalMemoKey, Arc<Vec<FillShape>>>,
 }
 
@@ -135,9 +136,20 @@ impl<'a> SymbolEvalCtx<'a> {
     }
 
     #[inline]
+    pub(crate) fn is_truncated(&self) -> bool {
+        self.state.borrow().truncated
+    }
+
+    #[inline]
+    fn mark_truncated(&self) {
+        self.state.borrow_mut().truncated = true;
+    }
+
+    #[inline]
     fn try_consume_step(&self) -> bool {
         let mut st = self.state.borrow_mut();
         if st.steps_used >= MAX_SYMBOL_EXPANSION_STEPS {
+            st.truncated = true;
             return false;
         }
         st.steps_used += 1;
@@ -169,6 +181,9 @@ pub(crate) fn resolve_cel_with_library(
         }
     }
     if ctx.depth >= MAX_SYMBOL_NEST_DEPTH || cel.instances.is_empty() || !ctx.has_remaining_steps() {
+        if !cel.instances.is_empty() && !ctx.has_remaining_steps() {
+            ctx.mark_truncated();
+        }
         return (*cel.shapes).clone();
     }
 
@@ -182,6 +197,7 @@ pub(crate) fn resolve_cel_with_library(
             next_cel_idx += 1;
         }
         if out.len() >= MAX_EXPANDED_SYMBOL_SHAPES || !ctx.has_remaining_steps() {
+            ctx.mark_truncated();
             break;
         }
         let b = inst.binding;
@@ -198,6 +214,9 @@ pub(crate) fn resolve_cel_with_library(
             ));
         } else {
             let remaining = MAX_EXPANDED_SYMBOL_SHAPES.saturating_sub(out.len());
+            if local_shapes.len() > remaining {
+                ctx.mark_truncated();
+            }
             out.extend(
                 b.instantiate_shapes(
                     &local_shapes[..local_shapes.len().min(remaining)],
@@ -211,6 +230,9 @@ pub(crate) fn resolve_cel_with_library(
     while next_cel_idx < cel.shapes.len() && out.len() < MAX_EXPANDED_SYMBOL_SHAPES {
         out.push(cel.shapes[next_cel_idx].clone());
         next_cel_idx += 1;
+    }
+    if next_cel_idx < cel.shapes.len() {
+        ctx.mark_truncated();
     }
 
     out
@@ -400,11 +422,15 @@ impl SymbolDef {
         let mut out = Vec::new();
         for layer in &self.timeline.layers {
             if out.len() >= MAX_EXPANDED_SYMBOL_SHAPES || !ctx.has_remaining_steps() {
+                ctx.mark_truncated();
                 break;
             }
             if layer.visible {
                 let eval = layer.evaluate_shapes_at((frame, child_eval_frame), 1, ctx.clone());
                 let remaining = MAX_EXPANDED_SYMBOL_SHAPES.saturating_sub(out.len());
+                if eval.len() > remaining {
+                    ctx.mark_truncated();
+                }
                 out.extend(eval.into_iter().take(remaining));
             }
         }
@@ -1259,6 +1285,9 @@ impl Layer {
                         ctx.nested(),
                     );
                     if !local_shapes.is_empty() {
+                        if local_shapes.len() > MAX_EXPANDED_SYMBOL_SHAPES {
+                            ctx.mark_truncated();
+                        }
                         return interp_b.instantiate_shapes(
                             &local_shapes[..local_shapes.len().min(MAX_EXPANDED_SYMBOL_SHAPES)],
                             out_layer_id,
@@ -1308,6 +1337,9 @@ impl Layer {
                 &inst.parent_scope,
             )]
         } else {
+            if local_shapes.len() > MAX_EXPANDED_SYMBOL_SHAPES {
+                ctx.mark_truncated();
+            }
             b.instantiate_shapes(
                 &local_shapes[..local_shapes.len().min(MAX_EXPANDED_SYMBOL_SHAPES)],
                 self.id,

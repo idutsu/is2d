@@ -714,7 +714,7 @@ mod scene_base_cache {
     use super::{Document, EditPath, LayerId, ShapeId};
     use crate::symbol::{
         compute_backdrop_layer_cel_signature, compute_resolved_cel_signature, ResolvedCelSig,
-        SymbolDef, SymbolLoopMode,
+        SymbolDef, SymbolEvalCtx, SymbolLoopMode,
     };
     use crate::timeline::{Layer, Timeline};
     use crate::vector_engine::{append_mesh, transform_mesh_to_screen, FillShape};
@@ -723,6 +723,7 @@ mod scene_base_cache {
         layer_id: LayerId,
         visible: bool,
         locked: bool,
+        truncated: bool,
         cel_sig: Option<ResolvedCelSig>,
         eval_frame: usize,
         world_xform_bits: [u64; 6],
@@ -799,6 +800,11 @@ mod scene_base_cache {
         #[inline]
         pub(crate) fn layer_order_ids(&self) -> &[LayerId] {
             &self.layer_order_ids
+        }
+
+        #[inline]
+        pub(crate) fn has_truncated_layer(&self) -> bool {
+            self.layers.iter().any(|l| l.visible && l.truncated)
         }
 
         /// `edit_layers` 用に、対象レイヤー群 `target_lids` のステージ座標図形を複製せずに取り出す
@@ -982,7 +988,7 @@ mod scene_base_cache {
             let mut new_flat = Vec::new();
             let mut new_order_ids = Vec::with_capacity(tl.layers.len());
 
-            for (layer_idx, layer) in tl.layers.iter().enumerate() {
+            for layer in &tl.layers {
                 new_order_ids.push(layer.id);
                 if !layer.visible || layer.locked {
                     let start = new_flat.len();
@@ -990,6 +996,7 @@ mod scene_base_cache {
                         layer_id: layer.id,
                         visible: layer.visible,
                         locked: layer.locked,
+                        truncated: false,
                         cel_sig: None,
                         eval_frame: 0,
                         world_xform_bits: xform_bits,
@@ -1003,6 +1010,7 @@ mod scene_base_cache {
                         layer_id: layer.id,
                         visible: layer.visible,
                         locked: layer.locked,
+                        truncated: false,
                         cel_sig: None,
                         eval_frame: 0,
                         world_xform_bits: xform_bits,
@@ -1028,6 +1036,7 @@ mod scene_base_cache {
                             layer_id: layer.id,
                             visible: layer.visible,
                             locked: layer.locked,
+                            truncated: old_cl.truncated,
                             cel_sig: old_cl.cel_sig,
                             eval_frame: ef,
                             world_xform_bits: xform_bits,
@@ -1035,7 +1044,9 @@ mod scene_base_cache {
                         });
                         continue;
                     }
-                    let mut evaluated = tl.evaluate_layer_shapes_at(layer_idx, frame, library);
+                    let ctx = SymbolEvalCtx::new(library);
+                    let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx.clone());
+                    let truncated = ctx.is_truncated();
                     transform_layer_shapes_to_stage(&mut evaluated, world_xform);
                     if old_cl.world_xform_bits == xform_bits && !old_shapes.is_empty() {
                         let donor_map: HashMap<(ShapeId, u64), &FillShape> = old_shapes
@@ -1056,13 +1067,16 @@ mod scene_base_cache {
                         layer_id: layer.id,
                         visible: layer.visible,
                         locked: layer.locked,
+                        truncated,
                         cel_sig: Some(sig),
                         eval_frame: ef,
                         world_xform_bits: xform_bits,
                         range: start..end,
                     });
                 } else {
-                    let mut evaluated = tl.evaluate_layer_shapes_at(layer_idx, frame, library);
+                    let ctx = SymbolEvalCtx::new(library);
+                    let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx.clone());
+                    let truncated = ctx.is_truncated();
                     transform_layer_shapes_to_stage(&mut evaluated, world_xform);
                     let sig = compute_resolved_cel_signature(layer, kf_idx, library);
                     let start = new_flat.len();
@@ -1072,6 +1086,7 @@ mod scene_base_cache {
                         layer_id: layer.id,
                         visible: layer.visible,
                         locked: layer.locked,
+                        truncated,
                         cel_sig: Some(sig),
                         eval_frame: ef,
                         world_xform_bits: xform_bits,

@@ -10922,6 +10922,93 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
     }
 }
 
+#[test]
+fn test_g1_2_truncation_flag_and_warning_above_10000_shapes() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+
+    // 100個の図形を持つシンボルを作成
+    let mut local_shapes = Vec::with_capacity(100);
+    for i in 0..100 {
+        let x = (i % 10) as f64 * 12.0;
+        let y = (i / 10) as f64 * 12.0;
+        let mut s = make_stroke(
+            Point::new(x, y),
+            Point::new(x + 8.0, y),
+            2.0,
+            Color32::from_rgb(40 + i as u8, 100, 200),
+        )
+        .remove(0);
+        s.layer_id = 1;
+        local_shapes.push(s);
+    }
+    let sym_id = app.doc.register_new_symbol(local_shapes);
+
+    // 100インスタンス（展開後ちょうど 10,000 図形 <= MAX_EXPANDED_SYMBOL_SHAPES）を配置 -> 打ち切りなし
+    let instances_100: Vec<timeline::SymbolInstance> = (0..100)
+        .map(|k| timeline::SymbolInstance {
+            binding: symbol::SymbolInstanceBinding::new(
+                (k + 1) as u64,
+                sym_id,
+                kurbo::Affine::IDENTITY,
+            ),
+            layer_id: 1,
+            parent_scope: Vec::new(),
+            shape_order_index: 0,
+        })
+        .collect();
+    app.doc.root.layers[0].keyframes[0]
+        .cel
+        .set_parts(Vec::new(), instances_100);
+    app.refresh_scene_base();
+    assert_eq!(app.scene().len(), 10_000);
+    assert!(
+        !app.session.base_cache.has_truncated_layer(),
+        "展開後 10,000 図形以下では打ち切りフラグが立たないこと"
+    );
+
+    // 101インスタンス（展開後 10,100 図形 > MAX_EXPANDED_SYMBOL_SHAPES）を配置 -> 打ち切りフラグが立つ
+    let instances_101: Vec<timeline::SymbolInstance> = (0..101)
+        .map(|k| timeline::SymbolInstance {
+            binding: symbol::SymbolInstanceBinding::new(
+                (k + 1) as u64,
+                sym_id,
+                kurbo::Affine::IDENTITY,
+            ),
+            layer_id: 1,
+            parent_scope: Vec::new(),
+            shape_order_index: 0,
+        })
+        .collect();
+    app.doc.root.layers[0].keyframes[0]
+        .cel
+        .set_parts(Vec::new(), instances_101);
+    app.refresh_scene_base();
+    assert_eq!(
+        app.doc.root.layers[0].keyframes[0].cel.instances.len(),
+        101
+    );
+    assert_eq!(app.scene().len(), 10_000);
+    assert!(
+        app.session.base_cache.has_truncated_layer(),
+        "展開後の図形が 10,000 を超えるレイヤーで打ち切りフラグが立つこと"
+    );
+
+    // 非表示レイヤーにした場合は警告対象にならないこと
+    let _ = apply(
+        &mut app,
+        Action::SetLayerVisible {
+            layer_idx: 0,
+            visible: false,
+        },
+    );
+    assert!(
+        !app.session.base_cache.has_truncated_layer(),
+        "非表示レイヤーでは警告を出さないこと"
+    );
+}
+
 
 
 
