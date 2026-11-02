@@ -565,8 +565,7 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
     );
     if fps_resp.changed() {
         let next_fps = fps_val.clamp(1, 60);
-        if apply(host, Action::SetFps { fps: next_fps }).as_bool() && host.timeline_ui().is_playing
-        {
+        if apply(host, Action::SetFps { fps: next_fps }) && host.timeline_ui().is_playing {
             host.timeline_ui_mut().last_frame_advance_time = None;
         }
     }

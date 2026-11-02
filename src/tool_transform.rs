@@ -1,5 +1,5 @@
 use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2};
-use kurbo::{Affine, Point, Vec2 as KVec2};
+use kurbo::{Affine, Point};
 
 use crate::canvas_tool::{ActiveCanvasDrag, MarqueeDrag, Scene, Session, Tab, View};
 pub(crate) use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
@@ -40,7 +40,7 @@ pub(crate) fn handle_transform_tool_input(
                 == TransformHoverTarget::Pivot
             {
                 apply(host, Action::ResetTransformPivot);
-            } else if !apply(host, Action::EnterGroupAt { pt }).as_bool()
+            } else if !apply(host, Action::EnterGroupAt { pt })
                 && host
                     .tab()
                     .scene()
@@ -213,12 +213,8 @@ pub(crate) fn update_transform_drag(
     shift_held: bool,
     alt_held: bool,
 ) {
-    let mut move_delta: Option<KVec2> = None;
-    let mut new_pivot_pt: Option<Point> = None;
-    let mut scale_update: Option<(Affine, Point, bool)> = None;
-    let mut rotate_update: Option<Affine> = None;
-
-    if let ActiveCanvasDrag::Transform(transform_drag) = &mut tab.session.drag {
+    let mut drag_state = std::mem::take(&mut tab.session.drag);
+    if let ActiveCanvasDrag::Transform(transform_drag) = &mut drag_state {
         match transform_drag {
             TransformDragState::MovePivot {
                 orig_pivot,
@@ -230,16 +226,18 @@ pub(crate) fn update_transform_drag(
                     *changed = true;
                 }
                 *last_pivot = pt;
-                new_pivot_pt = Some(pt);
+                tab.session.transform_pivot = Some(pt);
             }
             TransformDragState::Move(drag) => {
-                move_delta = Some(drag.step(pt));
+                let delta = drag.step(pt);
+                tab.session.translate_move_overlay(delta);
             }
             TransformDragState::Scale {
                 handle,
                 anchor,
                 handle_start,
                 orig_pivot,
+                orig_shapes,
                 last_affine,
                 changed,
                 ..
@@ -266,12 +264,16 @@ pub(crate) fn update_transform_drag(
                 let affine = affine_scale_around(eff_anchor, sx, sy);
                 *last_affine = affine;
                 *changed = (sx - 1.0).abs() > 0.005 || (sy - 1.0).abs() > 0.005;
-                scale_update = Some((affine, *orig_pivot, tab.session.transform_pivot.is_some()));
+                tab.session.update_transform_overlay(orig_shapes, affine);
+                if tab.session.transform_pivot.is_some() {
+                    tab.session.transform_pivot = Some(affine * *orig_pivot);
+                }
             }
             TransformDragState::Rotate {
                 pivot,
                 start_angle,
                 current_angle,
+                orig_shapes,
                 ..
             } => {
                 if (pt - *pivot).hypot() > 2.0 {
@@ -282,7 +284,8 @@ pub(crate) fn update_transform_drag(
                         delta_angle = (delta_angle / step).round() * step;
                     }
                     *current_angle = delta_angle;
-                    rotate_update = Some(affine_rotate_around(*pivot, delta_angle));
+                    let affine = affine_rotate_around(*pivot, delta_angle);
+                    tab.session.update_transform_overlay(orig_shapes, affine);
                 }
             }
             TransformDragState::MarqueeSelect(m) => {
@@ -290,42 +293,7 @@ pub(crate) fn update_transform_drag(
             }
         }
     }
-
-    if let Some((affine, orig_pivot, has_piv)) = scale_update {
-        let orig_shapes_opt =
-            if let ActiveCanvasDrag::Transform(TransformDragState::Scale { orig_shapes, .. }) =
-                &tab.session.drag
-            {
-                Some(orig_shapes.clone())
-            } else {
-                None
-            };
-        if let Some(orig_shapes) = orig_shapes_opt {
-            tab.session.update_transform_overlay(&orig_shapes, affine);
-        }
-        if has_piv {
-            tab.session.transform_pivot = Some(affine * orig_pivot);
-        }
-    }
-    if let Some(affine) = rotate_update {
-        let orig_shapes_opt =
-            if let ActiveCanvasDrag::Transform(TransformDragState::Rotate { orig_shapes, .. }) =
-                &tab.session.drag
-            {
-                Some(orig_shapes.clone())
-            } else {
-                None
-            };
-        if let Some(orig_shapes) = orig_shapes_opt {
-            tab.session.update_transform_overlay(&orig_shapes, affine);
-        }
-    }
-    if let Some(piv_pt) = new_pivot_pt {
-        tab.session.transform_pivot = Some(piv_pt);
-    }
-    if let Some(delta) = move_delta {
-        tab.session.translate_move_overlay(delta);
-    }
+    tab.session.drag = drag_state;
 }
 
 pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option<Point>) {

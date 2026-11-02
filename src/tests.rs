@@ -2451,7 +2451,7 @@ fn test_timeline_resize_total_frames_and_fill_shape_lazy_retessellation() {
         },
     );
     let undo_before = app.history.undo_stack.len();
-    assert!(apply(&mut app, Action::RemoveFrame).as_bool());
+    assert!(apply(&mut app, Action::RemoveFrame));
     assert_eq!(app.history.undo_stack.len(), undo_before + 1);
     assert_eq!(app.doc.root.total_frames, 2_000);
     assert_eq!(app.doc.root.layers[0].frame_count, 2_000);
@@ -10657,9 +10657,10 @@ fn test_g5_1_save_and_reopen_60_brush_strokes_f6_140_frames_over_100mb() {
         .sum();
 
     for _ in 1..140 {
-        assert!(
-            doc_actions::apply(&mut app, Action::InsertKeyframe { copy_prev: true }).as_bool()
-        );
+        assert!(doc_actions::apply(
+            &mut app,
+            Action::InsertKeyframe { copy_prev: true }
+        ));
     }
     assert_eq!(app.doc.root.total_frames, 140);
     assert_eq!(app.doc.root.layers[0].keyframes.len(), 140);
@@ -10719,9 +10720,11 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
             },
         );
         let _ = apply(&mut app, Action::SelectAll);
-        let id = apply(&mut app, Action::ConvertToSymbol)
-            .id()
-            .expect("8段目までのシンボル化は成功すること");
+        assert!(
+            apply(&mut app, Action::ConvertToSymbol),
+            "8段目までのシンボル化は成功すること"
+        );
+        let id = app.doc.library.last().unwrap().id;
         chain_sym_ids.push(id);
     }
     assert_eq!(app.doc.library.len(), 8);
@@ -10743,7 +10746,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
     app.toast = None;
     let _ = apply(&mut app, Action::SelectAll);
     let res_f8 = apply(&mut app, Action::ConvertToSymbol);
-    assert!(!res_f8.as_bool(), "9段目になるF8は拒否されること");
+    assert!(!res_f8, "9段目になるF8は拒否されること");
     assert_eq!(app.doc.library.len(), lib_len_before);
     assert_eq!(
         app.doc.root.layers[0].keyframes[0].cel.instances,
@@ -10774,9 +10777,11 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
     );
     let pt_hit = Point::new(365.0, 200.0);
     let _ = apply(&mut app, Action::SelectSingleAt { pt: pt_hit });
-    let host_sym_id = apply(&mut app, Action::ConvertToSymbol)
-        .id()
-        .expect("単段シンボルの作成は成功すること");
+    assert!(
+        apply(&mut app, Action::ConvertToSymbol),
+        "単段シンボルの作成は成功すること"
+    );
+    let host_sym_id = app.doc.library.last().unwrap().id;
     assert_eq!(app.doc.library.len(), 9);
     let _ = apply(
         &mut app,
@@ -10800,7 +10805,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
         .len();
     app.toast = None;
     let res_paste = apply(&mut app, Action::Paste { in_place: true });
-    assert!(!res_paste.as_bool(), "9段になるペーストは拒否されること");
+    assert!(!res_paste, "9段になるペーストは拒否されること");
     assert_eq!(app.history.undo_stack.len(), undo_before_paste);
     assert_eq!(
         app.doc
@@ -10829,7 +10834,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
         },
     );
     assert!(
-        !res_place.as_bool(),
+        !res_place,
         "9段になるライブラリからの配置は拒否されること"
     );
     assert_eq!(app.history.undo_stack.len(), undo_before_place);
@@ -14176,7 +14181,7 @@ fn test_m3_2_tween_midframe_cannot_be_selected_by_any_entry_or_deleted() {
     let tween_shape = app.scene().get(tween_scene_idx).unwrap().clone();
     app.session.selection.insert_shape(&tween_shape);
     let deleted = apply(&mut app, Action::DeleteSelection);
-    assert!(!deleted.as_bool(), "消せる図形が無ければ false が返ること");
+    assert!(!deleted, "消せる図形が無ければ false が返ること");
     assert_eq!(
         app.history.undo_stack.len(),
         undo_before,
@@ -14361,7 +14366,7 @@ fn test_m3_4_delete_keyframe_only_on_keyframe_start_frame() {
     app.history.mark_saved();
     let undo_before = app.history.undo_stack.len();
     let deleted = apply(&mut app, Action::DeleteKeyframe);
-    assert!(!deleted.as_bool(), "保持フレームでは DeleteKeyframe が false を返すこと");
+    assert!(!deleted, "保持フレームでは DeleteKeyframe が false を返すこと");
     assert_eq!(app.doc.root.layers[0].keyframes.len(), 2);
     assert_eq!(app.history.undo_stack.len(), undo_before);
     assert!(!app.history.is_dirty());
@@ -14377,7 +14382,7 @@ fn test_m3_4_delete_keyframe_only_on_keyframe_start_frame() {
         },
     );
     let deleted = apply(&mut app, Action::DeleteKeyframe);
-    assert!(deleted.as_bool());
+    assert!(deleted);
     assert_eq!(
         app.doc.root.layers[0].keyframes.len(),
         2,
@@ -14398,7 +14403,7 @@ fn test_m3_4_delete_keyframe_only_on_keyframe_start_frame() {
         },
     );
     let deleted = apply(&mut app, Action::DeleteKeyframe);
-    assert!(deleted.as_bool());
+    assert!(deleted);
     assert_eq!(app.doc.root.layers[0].keyframes.len(), 1);
 }
 

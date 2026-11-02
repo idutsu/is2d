@@ -26,7 +26,7 @@ pub(crate) use crate::select_ops::{
 use crate::vector_engine::{FillShape, arc_mesh_to_shape, to_pos2};
 
 pub(crate) fn select_single_shape_at(host: &mut impl ActionHost, pt: Point) -> bool {
-    apply(host, Action::SelectSingleAt { pt }).as_bool()
+    apply(host, Action::SelectSingleAt { pt })
 }
 
 // ============================================================================
@@ -134,7 +134,7 @@ pub(crate) fn handle_select_tool_input(
             let alt_held = ui.input(|i| i.modifiers.alt);
             if response.double_clicked_by(PointerButton::Primary) {
                 if let Some(pt) = mouse_pt {
-                    if !apply(host, Action::EnterGroupAt { pt }).as_bool()
+                    if !apply(host, Action::EnterGroupAt { pt })
                         && host
                             .tab()
                             .scene()

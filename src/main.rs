@@ -198,16 +198,8 @@ impl ActionHost for Is2dApp {
         &mut self.tool
     }
 
-    fn clipboard(&self) -> &Clipboard {
-        &self.clipboard
-    }
-
     fn clipboard_mut(&mut self) -> &mut Clipboard {
         &mut self.clipboard
-    }
-
-    fn toast(&self) -> &Option<StatusToast> {
-        &self.toast
     }
 
     fn toast_mut(&mut self) -> &mut Option<StatusToast> {

@@ -38,7 +38,7 @@ use crate::vector_engine::{
 use crate::vector_stroke::{build_smoothed_stroke_shapes_at_zoom, generate_brush_outline_at_zoom};
 
 // ============================================================================
-// 1. ActionHost / Action / ApplyResult の定義
+// 1. ActionHost / Action の定義
 // ============================================================================
 
 /// `apply` の対象となるホスト（`Is2dApp`）を抽象化するトレイト
@@ -48,11 +48,7 @@ pub(crate) trait ActionHost {
     fn tool(&self) -> &ToolSettings;
     fn tool_mut(&mut self) -> &mut ToolSettings;
     #[allow(dead_code)]
-    fn clipboard(&self) -> &Clipboard;
-    #[allow(dead_code)]
     fn clipboard_mut(&mut self) -> &mut Clipboard;
-    #[allow(dead_code)]
-    fn toast(&self) -> &Option<StatusToast>;
     fn toast_mut(&mut self) -> &mut Option<StatusToast>;
     fn parts_mut(
         &mut self,
@@ -70,30 +66,6 @@ pub(crate) trait ActionHost {
 
     fn notify_info(&mut self, message: impl Into<String>) {
         show_notice(self.toast_mut(), NoticeKind::Info, message);
-    }
-}
-
-/// `apply` の実行結果
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ApplyResult {
-    Applied(bool),
-    CreatedId(Option<u64>),
-}
-
-impl ApplyResult {
-    pub(crate) fn as_bool(self) -> bool {
-        match self {
-            Self::Applied(b) => b,
-            Self::CreatedId(opt) => opt.is_some(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn id(self) -> Option<u64> {
-        match self {
-            Self::CreatedId(opt) => opt,
-            Self::Applied(_) => None,
-        }
     }
 }
 
@@ -408,7 +380,7 @@ fn mutate_timeline_with_undo(tab: &mut Tab, mutate: impl FnOnce(&mut Timeline)) 
 
 /// すべての文書変更・編集操作の唯一の入口。
 /// 再生停止・Undo記録・連続操作のCoalesce・タイムライン同期・Dirty更新を一元管理する。
-pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
+pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     if !matches!(action, Action::SetFps { .. } | Action::EndCoalesce { .. }) {
         host.stop_playback();
     }
@@ -426,44 +398,36 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             color,
         } => {
             if points.is_empty() {
-                return ApplyResult::Applied(false);
+                return false;
             }
             let z = (tab.view.zoom as f64).clamp(MIN_VIEW_ZOOM as f64, MAX_VIEW_ZOOM as f64);
             let raw = generate_brush_outline_at_zoom(&points, radius as f64, z);
-            let changed = apply_raw_outline(tab, Tool::Brush, color, &raw);
-            ApplyResult::Applied(changed)
+            apply_raw_outline(tab, Tool::Brush, color, &raw)
         }
         Action::EraseStroke { points, radius } => {
             if points.is_empty() {
-                return ApplyResult::Applied(false);
+                return false;
             }
             let z = (tab.view.zoom as f64).clamp(MIN_VIEW_ZOOM as f64, MAX_VIEW_ZOOM as f64);
             let raw = generate_brush_outline_at_zoom(&points, radius as f64, z);
-            let changed = apply_raw_outline(tab, Tool::Eraser, tool.brush_color, &raw);
-            ApplyResult::Applied(changed)
+            apply_raw_outline(tab, Tool::Eraser, tool.brush_color, &raw)
         }
         #[cfg(test)]
-        Action::CommitRawOutline { raw } => {
-            ApplyResult::Applied(apply_raw_outline(tab, tool.tool, tool.brush_color, &raw))
-        }
-        Action::BucketFill { pt, color } => {
-            ApplyResult::Applied(apply_bucket_fill(tab, color, pt))
-        }
+        Action::CommitRawOutline { raw } => apply_raw_outline(tab, tool.tool, tool.brush_color, &raw),
+        Action::BucketFill { pt, color } => apply_bucket_fill(tab, color, pt),
 
-        Action::SelectSingleAt { pt } => {
-            ApplyResult::Applied(select_single_shape_at(tab, tool.select_sub_mode, pt))
-        }
+        Action::SelectSingleAt { pt } => select_single_shape_at(tab, tool.select_sub_mode, pt),
         Action::ToggleSelectionAt { scene_idx } => {
             toggle_shape_selection(tab, scene_idx);
-            ApplyResult::Applied(true)
+            true
         }
         Action::RetainSelection { keep_indices } => {
             retain_selection_and_flush_deselected(tab, &keep_indices);
-            ApplyResult::Applied(true)
+            true
         }
         Action::SelectMarquee { p0, p1, additive } => {
             apply_marquee_selection(tab, p0, p1, additive);
-            ApplyResult::Applied(!tab.session.selection.is_empty())
+            !tab.session.selection.is_empty()
         }
         #[cfg(test)]
         Action::SelectAll => {
@@ -471,45 +435,29 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             let editable_lids: std::collections::HashSet<u64> =
                 editable_layer_ids(tab).into_iter().collect();
             tab.session.select_shapes_in_layers(&editable_lids);
-            ApplyResult::Applied(!tab.session.selection.is_empty())
+            !tab.session.selection.is_empty()
         }
         Action::Deselect => {
             clear_selection(tab);
-            ApplyResult::Applied(true)
+            true
         }
         #[cfg(test)]
-        Action::CommitFloating => ApplyResult::Applied(commit_floating(tab)),
+        Action::CommitFloating => commit_floating(tab),
         #[cfg(test)]
-        Action::MoveSelected { delta } => {
-            ApplyResult::Applied(apply_move_selected(tab, delta, None))
-        }
-        Action::NudgeSelection { delta } => {
-            ApplyResult::Applied(apply_move_selected(tab, delta, coalesce))
-        }
+        Action::MoveSelected { delta } => apply_move_selected(tab, delta, None),
+        Action::NudgeSelection { delta } => apply_move_selected(tab, delta, coalesce),
         Action::FinishMoveSelectionDrag {
             total_delta,
             alt_duplicate,
-        } => ApplyResult::Applied(apply_finish_move_selection_drag(
-            tab,
-            total_delta,
-            alt_duplicate,
-        )),
-        Action::DeleteSelection => ApplyResult::Applied(prepare_delete_selected_shapes(tab, |tab| {
-            push_undo(tab, None)
-        })),
+        } => apply_finish_move_selection_drag(tab, total_delta, alt_duplicate),
+        Action::DeleteSelection => prepare_delete_selected_shapes(tab, |tab| push_undo(tab, None)),
         Action::ClearActiveFrame => {
-            ApplyResult::Applied(prepare_clear_active_frame_shapes(tab, |tab| {
-                push_undo(tab, None)
-            }))
+            prepare_clear_active_frame_shapes(tab, |tab| push_undo(tab, None))
         }
-        Action::Group => ApplyResult::CreatedId(prepare_group_selected_shapes(tab, |tab| {
-            push_undo(tab, None)
-        })),
-        Action::Ungroup => ApplyResult::Applied(prepare_ungroup_selected_shapes(tab, |tab| {
-            push_undo(tab, None)
-        })),
-        Action::EnterGroupAt { pt } => ApplyResult::Applied(enter_group_at(tab, pt)),
-        Action::ExitGroup => ApplyResult::Applied(exit_current_group(tab)),
+        Action::Group => prepare_group_selected_shapes(tab, |tab| push_undo(tab, None)),
+        Action::Ungroup => prepare_ungroup_selected_shapes(tab, |tab| push_undo(tab, None)),
+        Action::EnterGroupAt { pt } => enter_group_at(tab, pt),
+        Action::ExitGroup => exit_current_group(tab),
         Action::ExitGroupSteps { steps } => {
             let mut exited = false;
             for _ in 0..steps {
@@ -518,7 +466,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 }
                 exited = true;
             }
-            ApplyResult::Applied(exited)
+            exited
         }
 
         Action::ReshapeEdge {
@@ -531,7 +479,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             orig_seg,
         } => {
             let drag_dist = (target_pos - grab_pos).hypot();
-            let changed = apply_deform_shape(tab, shape_id, drag_dist, |deformed| {
+            apply_deform_shape(tab, shape_id, drag_dist, |deformed| {
                 apply_pull_edge_to_shape(
                     deformed,
                     (contour_idx, seg_idx),
@@ -539,8 +487,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                     orig_seg,
                     target_pos,
                 );
-            });
-            ApplyResult::Applied(changed)
+            })
         }
         Action::MoveVertex {
             shape_id,
@@ -551,7 +498,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             orig_ctrls,
         } => {
             let drag_dist = (target_pos - orig_vertex).hypot();
-            let changed = apply_deform_shape(tab, shape_id, drag_dist, |deformed| {
+            apply_deform_shape(tab, shape_id, drag_dist, |deformed| {
                 apply_move_vertex_to_shape(
                     deformed,
                     (contour_idx, seg_idx),
@@ -559,19 +506,14 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                     orig_ctrls,
                     target_pos,
                 );
-            });
-            ApplyResult::Applied(changed)
+            })
         }
         #[cfg(test)]
-        Action::PullEdgeFromTo { from, to } => {
-            ApplyResult::Applied(apply_pull_edge_from_to(tab, from, to))
-        }
+        Action::PullEdgeFromTo { from, to } => apply_pull_edge_from_to(tab, from, to),
         #[cfg(test)]
-        Action::MoveVertexFromTo { from, to } => {
-            ApplyResult::Applied(apply_move_vertex_from_to(tab, from, to))
-        }
-        Action::AddAnchor { pt } => ApplyResult::Applied(apply_anchor_edit_at(tab, pt, true)),
-        Action::DeleteAnchor { pt } => ApplyResult::Applied(apply_anchor_edit_at(tab, pt, false)),
+        Action::MoveVertexFromTo { from, to } => apply_move_vertex_from_to(tab, from, to),
+        Action::AddAnchor { pt } => apply_anchor_edit_at(tab, pt, true),
+        Action::DeleteAnchor { pt } => apply_anchor_edit_at(tab, pt, false),
 
         #[cfg(test)]
         Action::ScaleSelection { sx, sy } => {
@@ -579,24 +521,21 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 .scene()
                 .selection_bounding_box(&tab.session.selection, tab.view.zoom)
             else {
-                return ApplyResult::Applied(false);
+                return false;
             };
             let pivot = tab.scene().active_transform_pivot(
                 &tab.session.selection,
                 tab.session.transform_pivot,
                 bbox,
             );
-            ApplyResult::Applied(apply_affine_to_selected_inner(
-                tab,
-                affine_scale_around(pivot, sx, sy),
-            ))
+            apply_affine_to_selected_inner(tab, affine_scale_around(pivot, sx, sy))
         }
         Action::FlipSelection { flip_x, flip_y } => {
             let Some(bbox) = tab
                 .scene()
                 .selection_bounding_box(&tab.session.selection, tab.view.zoom)
             else {
-                return ApplyResult::Applied(false);
+                return false;
             };
             let pivot = tab.scene().active_transform_pivot(
                 &tab.session.selection,
@@ -605,38 +544,32 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             );
             let sx = if flip_x { -1.0 } else { 1.0 };
             let sy = if flip_y { -1.0 } else { 1.0 };
-            ApplyResult::Applied(apply_affine_to_selected_inner(
-                tab,
-                affine_scale_around(pivot, sx, sy),
-            ))
+            apply_affine_to_selected_inner(tab, affine_scale_around(pivot, sx, sy))
         }
         Action::RotateSelection { angle_rad } => {
             let Some(bbox) = tab
                 .scene()
                 .selection_bounding_box(&tab.session.selection, tab.view.zoom)
             else {
-                return ApplyResult::Applied(false);
+                return false;
             };
             let pivot = tab.scene().active_transform_pivot(
                 &tab.session.selection,
                 tab.session.transform_pivot,
                 bbox,
             );
-            ApplyResult::Applied(apply_affine_to_selected_inner(
-                tab,
-                affine_rotate_around(pivot, angle_rad),
-            ))
+            apply_affine_to_selected_inner(tab, affine_rotate_around(pivot, angle_rad))
         }
         #[cfg(test)]
         Action::SetTransformPivot { world_pivot } => {
-            ApplyResult::Applied(apply_set_selected_symbol_world_pivot(tab, world_pivot, true))
+            apply_set_selected_symbol_world_pivot(tab, world_pivot, true)
         }
         Action::ResetTransformPivot => {
             let mut changed = tab.session.transform_pivot.take().is_some();
             if apply_set_selected_symbol_world_pivot(tab, None, true) {
                 changed = true;
             }
-            ApplyResult::Applied(changed)
+            changed
         }
         Action::CommitTransformDrag {
             affine,
@@ -651,9 +584,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 if applied && had_custom_pivot && tab.session.transform_pivot.is_some() {
                     tab.session.transform_pivot = Some(affine * orig_pivot);
                 }
-                ApplyResult::Applied(applied)
+                applied
             } else {
-                ApplyResult::Applied(false)
+                false
             }
         }
         Action::CommitPivotDrag {
@@ -669,28 +602,24 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 } else {
                     tab.session.transform_pivot = Some(new_pivot);
                 }
-                ApplyResult::Applied(true)
+                true
             } else {
                 tab.session.transform_pivot = had_custom_pivot.then_some(orig_pivot);
-                ApplyResult::Applied(false)
+                false
             }
         }
 
-        Action::Copy => ApplyResult::Applied(prepare_copy_selected_shapes(tab, clipboard)),
+        Action::Copy => prepare_copy_selected_shapes(tab, clipboard),
         Action::Cut => {
             if !prepare_copy_selected_shapes(tab, clipboard) {
-                return ApplyResult::Applied(false);
+                return false;
             }
-            ApplyResult::Applied(prepare_delete_selected_shapes(tab, |tab| {
-                push_undo(tab, None)
-            }))
+            prepare_delete_selected_shapes(tab, |tab| push_undo(tab, None))
         }
-        Action::Paste { in_place } => {
-            ApplyResult::Applied(apply_paste_clipboard(tab, tool, clipboard, toast, in_place))
-        }
+        Action::Paste { in_place } => apply_paste_clipboard(tab, tool, clipboard, toast, in_place),
 
         Action::ConvertToSymbol => {
-            if let Some((sym_id, target_lid, local_shapes)) =
+            if let Some((_, target_lid, local_shapes)) =
                 prepare_convert_selection_to_symbol(tab, |tab| push_undo(tab, None))
             {
                 let registered_id = tab.doc.register_new_symbol(local_shapes);
@@ -702,9 +631,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 tab.session.set_floating(None);
                 tab.session.transform_pivot = None;
                 tab.view.inspect_timeline_frame = false;
-                ApplyResult::CreatedId(Some(sym_id))
+                true
             } else {
-                ApplyResult::CreatedId(None)
+                false
             }
         }
         Action::PlaceSymbol { sym_id } => {
@@ -712,19 +641,15 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 if !matches!(tool.tool, Tool::Select | Tool::Transform) {
                     set_tool(tab, tool, Tool::Select);
                 }
-                ApplyResult::Applied(true)
+                true
             } else {
-                ApplyResult::Applied(false)
+                false
             }
         }
-        Action::EnterSymbolTimeline { binding } => {
-            ApplyResult::Applied(enter_symbol_timeline(tab, binding))
-        }
-        Action::EnterSymbolFromLibrary { sym_id } => {
-            ApplyResult::Applied(enter_symbol_from_library(tab, sym_id))
-        }
+        Action::EnterSymbolTimeline { binding } => enter_symbol_timeline(tab, binding),
+        Action::EnterSymbolFromLibrary { sym_id } => enter_symbol_from_library(tab, sym_id),
         #[cfg(test)]
-        Action::ExitSymbolTimeline => ApplyResult::Applied(exit_symbol_timeline(tab)),
+        Action::ExitSymbolTimeline => exit_symbol_timeline(tab),
         #[cfg(test)]
         Action::ExitSymbolToDepth { depth } => {
             let mut exited = false;
@@ -734,118 +659,95 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 }
                 exited = true;
             }
-            ApplyResult::Applied(exited)
+            exited
         }
         Action::RenameSymbol { sym_id, new_name } => {
-            ApplyResult::Applied(apply_rename_symbol(tab, sym_id, new_name, coalesce))
+            apply_rename_symbol(tab, sym_id, new_name, coalesce)
         }
-        Action::DeleteSymbol { sym_id } => {
-            ApplyResult::Applied(apply_delete_symbol(tab, sym_id))
-        }
+        Action::DeleteSymbol { sym_id } => apply_delete_symbol(tab, sym_id),
         Action::SetSymbolPlayback {
             loop_mode,
             first_frame,
-        } => ApplyResult::Applied(apply_set_symbol_playback(
-            tab,
-            loop_mode,
-            first_frame,
-            coalesce,
-        )),
-        Action::ToggleTween => ApplyResult::Applied(apply_timeline_toggle_tween(tab, toast)),
-        Action::SetTweenRotate { rotate } => {
-            ApplyResult::Applied(apply_set_tween_rotate(tab, rotate))
-        }
+        } => apply_set_symbol_playback(tab, loop_mode, first_frame, coalesce),
+        Action::ToggleTween => apply_timeline_toggle_tween(tab, toast),
+        Action::SetTweenRotate { rotate } => apply_set_tween_rotate(tab, rotate),
 
         Action::SwitchLayerAndFrame { layer_idx, frame } => {
             apply_switch_to_layer_and_frame(tab, layer_idx, frame);
-            ApplyResult::Applied(true)
+            true
         }
         Action::ScrubRulerToFrame { frame } => {
             apply_scrub_ruler_to_frame(tab, frame);
-            ApplyResult::Applied(true)
+            true
         }
         Action::SelectTimelineCells { l0, f0, l1, f1 } => {
             apply_select_timeline_cells(tab, l0, f0, l1, f1);
-            ApplyResult::Applied(true)
+            true
         }
         Action::ClearTimelineCells => {
             tab.set_active_cell_selection(None);
-            ApplyResult::Applied(true)
+            true
         }
-        Action::InsertKeyframe { copy_prev } => {
-            ApplyResult::Applied(apply_timeline_insert_keyframe(tab, copy_prev))
-        }
-        Action::DeleteKeyframe => ApplyResult::Applied(apply_timeline_delete_keyframe(tab)),
-        Action::ExtendFrame => ApplyResult::Applied(apply_timeline_extend_frame(tab)),
-        Action::RemoveFrame => ApplyResult::Applied(apply_timeline_remove_frame(tab)),
+        Action::InsertKeyframe { copy_prev } => apply_timeline_insert_keyframe(tab, copy_prev),
+        Action::DeleteKeyframe => apply_timeline_delete_keyframe(tab),
+        Action::ExtendFrame => apply_timeline_extend_frame(tab),
+        Action::RemoveFrame => apply_timeline_remove_frame(tab),
         Action::MoveOrCopyFrames {
             sel,
             layer_delta,
             frame_delta,
             copy_mode,
-        } => ApplyResult::Applied(apply_timeline_move_or_copy_frames(
-            tab,
-            sel,
-            layer_delta,
-            frame_delta,
-            copy_mode,
-        )),
+        } => apply_timeline_move_or_copy_frames(tab, sel, layer_delta, frame_delta, copy_mode),
         Action::AddLayer => {
             apply_timeline_add_layer(tab);
-            ApplyResult::Applied(true)
+            true
         }
-        Action::DeleteActiveLayer => {
-            ApplyResult::Applied(apply_timeline_delete_active_layer(tab))
-        }
-        Action::MoveActiveLayer { up } => {
-            ApplyResult::Applied(apply_timeline_move_active_layer(tab, up))
-        }
+        Action::DeleteActiveLayer => apply_timeline_delete_active_layer(tab),
+        Action::MoveActiveLayer { up } => apply_timeline_move_active_layer(tab, up),
         Action::ReorderLayer { src_idx, dst_idx } => {
-            ApplyResult::Applied(apply_timeline_reorder_layer(tab, src_idx, dst_idx))
+            apply_timeline_reorder_layer(tab, src_idx, dst_idx)
         }
         Action::SetLayerVisible { layer_idx, visible } => {
             apply_set_layer_visible(tab, layer_idx, visible);
-            ApplyResult::Applied(true)
+            true
         }
         Action::SetLayerLocked { layer_idx, locked } => {
             apply_set_layer_locked(tab, layer_idx, locked);
-            ApplyResult::Applied(true)
+            true
         }
-        Action::SetFps { fps } => ApplyResult::Applied(apply_set_fps(tab, fps, coalesce)),
-        Action::SetStageSize { size } => {
-            ApplyResult::Applied(apply_set_stage_size(tab, size, coalesce))
-        }
+        Action::SetFps { fps } => apply_set_fps(tab, fps, coalesce),
+        Action::SetStageSize { size } => apply_set_stage_size(tab, size, coalesce),
 
         Action::SetTool { tool: target_tool } => {
             set_tool(tab, tool, target_tool);
-            ApplyResult::Applied(true)
+            true
         }
         Action::ToggleSelectSubMode { mode } => {
             toggle_select_sub_mode(tab, tool, mode);
-            ApplyResult::Applied(true)
+            true
         }
         Action::Undo => {
             tab.undo();
-            ApplyResult::Applied(true)
+            true
         }
         Action::Redo => {
             tab.redo();
-            ApplyResult::Applied(true)
+            true
         }
         Action::EndCoalesce { key } => {
             if key.is_none_or(|k| tab.history.last_coalesce_key == Some(k)) {
                 tab.history.end_coalesce();
             }
-            ApplyResult::Applied(true)
+            true
         }
     };
-    if check_symbol_nest && res.as_bool() && tab.doc.symbol_nest_exceeded() {
+    if check_symbol_nest && res && tab.doc.symbol_nest_exceeded() {
         if let Some(prev) = tab.history.pop_undo() {
             tab.restore_state_snapshot(prev);
         }
         tab.ensure_valid_library_selection();
         show_notice(toast, NoticeKind::Warning, "シンボルの入れ子は8段までです");
-        return ApplyResult::Applied(false);
+        return false;
     }
     res
 }
@@ -2159,7 +2061,7 @@ pub(crate) fn commit_raw_outline(host: &mut impl ActionHost, raw: &[Point]) {
 #[cfg(test)]
 pub(crate) fn bucket_fill_at(host: &mut impl ActionHost, pt: Point) -> bool {
     let color = host.tool().brush_color;
-    apply(host, Action::BucketFill { pt, color }).as_bool()
+    apply(host, Action::BucketFill { pt, color })
 }
 
 #[cfg(test)]
@@ -2179,42 +2081,50 @@ pub(crate) fn finish_move_selection_drag(
 
 #[cfg(test)]
 pub(crate) fn group_selected_shapes(host: &mut impl ActionHost) -> Option<u64> {
-    apply(host, Action::Group).id()
+    if !apply(host, Action::Group) {
+        return None;
+    }
+    let tab = host.tab();
+    tab.session
+        .selected_indices()
+        .first()
+        .and_then(|&idx| tab.scene().get(idx))
+        .and_then(|s| s.active_group_id_at_scope(&tab.session.editing_group_path))
 }
 
 #[cfg(test)]
 pub(crate) fn ungroup_selected_shapes(host: &mut impl ActionHost) -> bool {
-    apply(host, Action::Ungroup).as_bool()
+    apply(host, Action::Ungroup)
 }
 
 #[cfg(test)]
 pub(crate) fn nudge_selected_shapes(host: &mut impl ActionHost, delta: KVec2) -> bool {
-    apply(host, Action::NudgeSelection { delta }).as_bool()
+    apply(host, Action::NudgeSelection { delta })
 }
 
 #[cfg(test)]
 pub(crate) fn delete_selected_shapes(host: &mut impl ActionHost) -> bool {
-    apply(host, Action::DeleteSelection).as_bool()
+    apply(host, Action::DeleteSelection)
 }
 
 #[cfg(test)]
 pub(crate) fn clear_active_frame_shapes(host: &mut impl ActionHost) -> bool {
-    apply(host, Action::ClearActiveFrame).as_bool()
+    apply(host, Action::ClearActiveFrame)
 }
 
 #[cfg(test)]
 pub(crate) fn copy_selected_shapes(host: &mut impl ActionHost) -> bool {
-    apply(host, Action::Copy).as_bool()
+    apply(host, Action::Copy)
 }
 
 #[cfg(test)]
 pub(crate) fn cut_selected_shapes(host: &mut impl ActionHost) -> bool {
-    apply(host, Action::Cut).as_bool()
+    apply(host, Action::Cut)
 }
 
 #[cfg(test)]
 pub(crate) fn paste_clipboard(host: &mut impl ActionHost, in_place: bool) -> bool {
-    apply(host, Action::Paste { in_place }).as_bool()
+    apply(host, Action::Paste { in_place })
 }
 
 #[cfg(test)]
@@ -2224,7 +2134,7 @@ pub(crate) fn set_selected_symbol_world_pivot(
     commit_to_timeline: bool,
 ) -> bool {
     if commit_to_timeline {
-        apply(host, Action::SetTransformPivot { world_pivot }).as_bool()
+        apply(host, Action::SetTransformPivot { world_pivot })
     } else {
         update_selected_symbol_world_pivot_live(host.tab_mut(), world_pivot)
     }
@@ -2232,27 +2142,27 @@ pub(crate) fn set_selected_symbol_world_pivot(
 
 #[cfg(test)]
 pub(crate) fn scale_selected_shapes(host: &mut impl ActionHost, sx: f64, sy: f64) -> bool {
-    apply(host, Action::ScaleSelection { sx, sy }).as_bool()
+    apply(host, Action::ScaleSelection { sx, sy })
 }
 
 #[cfg(test)]
 pub(crate) fn flip_selected_shapes(host: &mut impl ActionHost, flip_x: bool, flip_y: bool) -> bool {
-    apply(host, Action::FlipSelection { flip_x, flip_y }).as_bool()
+    apply(host, Action::FlipSelection { flip_x, flip_y })
 }
 
 #[cfg(test)]
 pub(crate) fn rotate_selected_shapes(host: &mut impl ActionHost, angle_rad: f64) -> bool {
-    apply(host, Action::RotateSelection { angle_rad }).as_bool()
+    apply(host, Action::RotateSelection { angle_rad })
 }
 
 #[cfg(test)]
 pub(crate) fn convert_selection_to_symbol(host: &mut impl ActionHost) -> Option<u64> {
-    apply(host, Action::ConvertToSymbol).id()
+    apply(host, Action::ConvertToSymbol).then(|| host.tab().doc.library.last().map(|s| s.id))?
 }
 
 #[cfg(test)]
 pub(crate) fn place_symbol_instance_from_library(host: &mut impl ActionHost, sym_id: u64) -> bool {
-    apply(host, Action::PlaceSymbol { sym_id }).as_bool()
+    apply(host, Action::PlaceSymbol { sym_id })
 }
 
 #[cfg(test)]
@@ -2268,17 +2178,16 @@ pub(crate) fn rename_symbol_in_library(
             new_name: new_name.into(),
         },
     )
-    .as_bool()
 }
 
 #[cfg(test)]
 pub(crate) fn delete_symbol_from_library(host: &mut impl ActionHost, sym_id: u64) -> bool {
-    apply(host, Action::DeleteSymbol { sym_id }).as_bool()
+    apply(host, Action::DeleteSymbol { sym_id })
 }
 
 #[cfg(test)]
 pub(crate) fn timeline_toggle_tween(host: &mut impl ActionHost) -> bool {
-    apply(host, Action::ToggleTween).as_bool()
+    apply(host, Action::ToggleTween)
 }
 
 #[cfg(test)]
@@ -2286,7 +2195,7 @@ pub(crate) fn set_active_keyframe_tween_rotate(
     host: &mut impl ActionHost,
     rotate: TweenRotate,
 ) -> bool {
-    apply(host, Action::SetTweenRotate { rotate }).as_bool()
+    apply(host, Action::SetTweenRotate { rotate })
 }
 
 #[cfg(test)]
@@ -2302,7 +2211,6 @@ pub(crate) fn set_selected_symbol_playback(
             first_frame: Some(first_frame),
         },
     )
-    .as_bool()
 }
 
 #[cfg(test)]
@@ -2332,22 +2240,22 @@ pub(crate) fn select_timeline_cells(
 
 #[cfg(test)]
 pub(crate) fn timeline_insert_keyframe(host: &mut impl ActionHost, copy_prev: bool) -> bool {
-    apply(host, Action::InsertKeyframe { copy_prev }).as_bool()
+    apply(host, Action::InsertKeyframe { copy_prev })
 }
 
 #[cfg(test)]
 pub(crate) fn timeline_delete_keyframe(host: &mut impl ActionHost) -> bool {
-    apply(host, Action::DeleteKeyframe).as_bool()
+    apply(host, Action::DeleteKeyframe)
 }
 
 #[cfg(test)]
 pub(crate) fn timeline_extend_frame(host: &mut impl ActionHost) -> bool {
-    apply(host, Action::ExtendFrame).as_bool()
+    apply(host, Action::ExtendFrame)
 }
 
 #[cfg(test)]
 pub(crate) fn timeline_remove_frame(host: &mut impl ActionHost) -> bool {
-    apply(host, Action::RemoveFrame).as_bool()
+    apply(host, Action::RemoveFrame)
 }
 
 #[cfg(test)]
@@ -2367,7 +2275,6 @@ pub(crate) fn timeline_move_or_copy_frames(
             copy_mode,
         },
     )
-    .as_bool()
 }
 
 #[cfg(test)]
@@ -2377,12 +2284,12 @@ pub(crate) fn timeline_add_layer(host: &mut impl ActionHost) {
 
 #[cfg(test)]
 pub(crate) fn timeline_delete_active_layer(host: &mut impl ActionHost) -> bool {
-    apply(host, Action::DeleteActiveLayer).as_bool()
+    apply(host, Action::DeleteActiveLayer)
 }
 
 #[cfg(test)]
 pub(crate) fn timeline_move_active_layer(host: &mut impl ActionHost, up: bool) -> bool {
-    apply(host, Action::MoveActiveLayer { up }).as_bool()
+    apply(host, Action::MoveActiveLayer { up })
 }
 
 #[cfg(test)]
@@ -2391,7 +2298,7 @@ pub(crate) fn timeline_reorder_layer(
     src_idx: usize,
     dst_idx: usize,
 ) -> bool {
-    apply(host, Action::ReorderLayer { src_idx, dst_idx }).as_bool()
+    apply(host, Action::ReorderLayer { src_idx, dst_idx })
 }
 
 #[cfg(test)]

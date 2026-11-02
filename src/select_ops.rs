@@ -754,21 +754,21 @@ pub(crate) fn apply_move_vertex_to_shape(
     );
 }
 
-/// 選択中のオブジェクト（生シェイプ・既存グループ問わず）を新しい1つのグループにまとめ、`new_gid` を返す
+/// 選択中のオブジェクト（生シェイプ・既存グループ問わず）を新しい1つのグループにまとめる
 pub(crate) fn prepare_group_selected_shapes(
     tab: &mut Tab,
     before_mutate: impl FnOnce(&mut Tab),
-) -> Option<u64> {
+) -> bool {
     cancel_active_drag(tab);
     let sel_indices = tab.session.selected_indices();
     if sel_indices.is_empty() {
-        return None;
+        return false;
     }
     if !tab
         .scene()
         .selected_has_any_in_scope(&tab.session.selection, &tab.session.editing_group_path)
     {
-        return None;
+        return false;
     }
 
     let target_lid =
@@ -811,7 +811,7 @@ pub(crate) fn prepare_group_selected_shapes(
         tab.set_active_layer(l_idx);
     }
     tab.session.transform_pivot = None;
-    Some(new_gid)
+    true
 }
 
 /// 選択中のグループまたはシンボルインスタンスを1段階だけ解除（分離）する
