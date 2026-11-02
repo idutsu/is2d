@@ -121,37 +121,15 @@ pub(crate) fn merge_disjoint_pieces_into_canvas(
         .collect();
 
     let mut non_overlapping_groups: Vec<(u64, Vec<u64>, Vec<FillShape>)> = Vec::new();
-    let mut overlapping_batches: Vec<(u64, Vec<u64>, Color32, Vec<FillShape>)> = Vec::new();
+    let mut overlapping_pieces: Vec<FillShape> = Vec::new();
 
-    let piece_meta: Vec<(u64, Vec<u64>, Color32, KRect)> = pieces
-        .iter()
-        .map(|p| (p.layer_id, p.group_path.clone(), p.color, p.bounding_box()))
-        .collect();
-
-    for (i, piece) in pieces.into_iter().enumerate() {
-        let p_bbox = piece_meta[i].3.inflate(1.5, 1.5);
+    for piece in pieces {
+        let p_bbox = piece.bounding_box().inflate(1.5, 1.5);
         let overlaps_base = base_raw_bboxes.iter().any(|(lid, gp, b_bbox)| {
             *lid == piece.layer_id && *gp == piece.group_path && rects_overlap(*b_bbox, p_bbox)
-        }) || piece_meta.iter().enumerate().any(|(j, (lid, gp, col, b_bbox))| {
-            i != j
-                && *lid == piece.layer_id
-                && *gp == piece.group_path
-                && *col == piece.color
-                && rects_overlap(*b_bbox, p_bbox)
         });
         if overlaps_base {
-            if let Some((_, _, _, batch)) = overlapping_batches.iter_mut().find(|(lid, gp, c, _)| {
-                *lid == piece.layer_id && *gp == piece.group_path && *c == piece.color
-            }) {
-                batch.push(piece);
-            } else {
-                overlapping_batches.push((
-                    piece.layer_id,
-                    piece.group_path.clone(),
-                    piece.color,
-                    vec![piece],
-                ));
-            }
+            overlapping_pieces.push(piece);
         } else if let Some((_, _, group)) = non_overlapping_groups
             .iter_mut()
             .find(|(lid, gp, _)| *lid == piece.layer_id && *gp == piece.group_path)
@@ -166,8 +144,8 @@ pub(crate) fn merge_disjoint_pieces_into_canvas(
         }
     }
 
-    for (_, _, _, batch) in overlapping_batches {
-        merge_homogeneous_batch_into_canvas(canvas, batch, true);
+    if !overlapping_pieces.is_empty() {
+        merge_shapes_into_canvas(canvas, overlapping_pieces);
     }
     for (lid, gp, group) in non_overlapping_groups {
         let insert_pos = raw_scope_insert_index(canvas, lid, &gp);

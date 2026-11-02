@@ -3940,12 +3940,19 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
         Color32::RED,
     );
     self_union_strokes.extend(make_stroke(
-        Point::new(150.0, 80.0),
-        Point::new(150.0, 120.0),
+        Point::new(150.0, 180.0),
+        Point::new(150.0, 220.0),
         16.0,
         Color32::RED,
     ));
     put_cel_shapes(&mut self_union_app, 0, 0, self_union_strokes);
+    self_union_app.session.set_selected_indices(vec![1]);
+    doc_actions::apply(
+        &mut self_union_app,
+        doc_actions::Action::MoveSelected {
+            delta: KVec2::new(0.0, -80.0),
+        },
+    );
     self_union_app.session.set_selected_indices(vec![0, 1]);
     assert!(tool_select::copy_selected_shapes(&mut self_union_app));
     doc_actions::apply(
@@ -13173,6 +13180,7 @@ fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup()
         Color32::from_rgb(50, 180, 80),
         Color32::from_rgb(50, 110, 220),
         Color32::from_rgb(230, 160, 40),
+        Color32::from_rgb(160, 60, 210),
     ];
 
     let assert_same_canvas = |a: &Is2dApp, b: &Is2dApp, label: &str| {
@@ -13391,6 +13399,76 @@ fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup()
         dt_ms <= 50.0,
         "全選択して少し動かした後の選択解除が 50ms 以下であること (実測: {dt_ms:.3}ms)"
     );
+
+    // 5. 5色のコマ（3レイヤー×25本＝5色で重なり結合済み）で全選択移動・Alt複製の確定が従来経路と一致し高速であること
+    let mut app5_base = Is2dApp::default();
+    let _ = apply(&mut app5_base, Action::AddLayer);
+    let _ = apply(&mut app5_base, Action::AddLayer);
+    for l_idx in 0..3 {
+        let _ = apply(
+            &mut app5_base,
+            Action::SwitchLayerAndFrame {
+                layer_idx: l_idx,
+                frame: 0,
+            },
+        );
+        for i in 0..25 {
+            let x0 = 60.0 + (next_u64() % 440) as f64;
+            let y0 = 60.0 + (next_u64() % 240) as f64;
+            let x1 = x0 + 35.0 + (next_u64() % 40) as f64;
+            let y1 = y0 + ((next_u64() % 31) as f64 - 15.0);
+            let _ = apply(
+                &mut app5_base,
+                Action::PaintStroke {
+                    points: vec![Point::new(x0, y0), Point::new(x1, y1)],
+                    radius: 5.5,
+                    color: palette[i % palette.len()],
+                },
+            );
+        }
+    }
+    let mut app5_move_fast = Is2dApp::default();
+    app5_move_fast.tabs[0].doc = app5_base.doc.clone();
+    app5_move_fast.refresh_scene_base();
+    let _ = apply(&mut app5_move_fast, Action::SelectAll);
+    let _ = apply(
+        &mut app5_move_fast,
+        Action::NudgeSelection {
+            delta: KVec2::new(5.0, 3.0),
+        },
+    );
+    let t0_5 = Instant::now();
+    let _ = apply(&mut app5_move_fast, Action::Deselect);
+    let dt5_ms = t0_5.elapsed().as_secs_f64() * 1000.0;
+    assert!(
+        dt5_ms <= 50.0,
+        "5色のコマでも全選択移動後の選択解除が 50ms 以下であること (実測: {dt5_ms:.3}ms)"
+    );
+
+    let mut app5_alt_fast = Is2dApp::default();
+    app5_alt_fast.tabs[0].doc = app5_base.doc.clone();
+    app5_alt_fast.refresh_scene_base();
+    let mut app5_alt_ref = Is2dApp::default();
+    app5_alt_ref.tabs[0].doc = app5_base.doc.clone();
+    app5_alt_ref.refresh_scene_base();
+    for a in [&mut app5_alt_fast, &mut app5_alt_ref] {
+        let _ = apply(a, Action::SelectAll);
+        let _ = apply(
+            a,
+            Action::FinishMoveSelectionDrag {
+                total_delta: KVec2::new(12.0, 8.0),
+                alt_duplicate: true,
+            },
+        );
+    }
+    app5_alt_ref.session.update_floating(|fl_opt| {
+        if let Some(fl) = fl_opt {
+            fl.pieces_disjoint = false;
+        }
+    });
+    let _ = apply(&mut app5_alt_fast, Action::Deselect);
+    let _ = apply(&mut app5_alt_ref, Action::Deselect);
+    assert_same_canvas(&app5_alt_fast, &app5_alt_ref, "5-color AltDup");
 }
 
 #[test]
