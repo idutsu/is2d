@@ -15059,3 +15059,298 @@ fn test_m4_5_random_brush_and_eraser_area_bounds_300_steps() {
         );
     }
 }
+
+#[test]
+fn test_arrange_groups_and_symbols_z_order() {
+    let c_raw = Color32::from_rgb(100, 100, 100);
+    let c_a = Color32::from_rgb(220, 60, 60);
+    let c_b = Color32::from_rgb(60, 180, 90);
+    let c_c = Color32::from_rgb(60, 120, 220);
+
+    let paint_dot = |app: &mut Is2dApp, pt: Point, color: Color32| {
+        apply(
+            app,
+            Action::PaintStroke {
+                points: vec![pt],
+                radius: 15.0,
+                color,
+            },
+        );
+    };
+    let setup_four_items = |app: &mut Is2dApp| {
+        paint_dot(app, Point::new(100.0, 100.0), c_raw);
+        apply(app, Action::Deselect);
+        paint_dot(app, Point::new(200.0, 100.0), c_a);
+        apply(
+            app,
+            Action::SelectSingleAt {
+                pt: Point::new(200.0, 100.0),
+            },
+        );
+        apply(app, Action::Group);
+        apply(app, Action::Deselect);
+        paint_dot(app, Point::new(300.0, 100.0), c_b);
+        apply(
+            app,
+            Action::SelectSingleAt {
+                pt: Point::new(300.0, 100.0),
+            },
+        );
+        apply(app, Action::ConvertToSymbol);
+        apply(app, Action::Deselect);
+        paint_dot(app, Point::new(400.0, 100.0), c_c);
+        apply(
+            app,
+            Action::SelectSingleAt {
+                pt: Point::new(400.0, 100.0),
+            },
+        );
+        apply(app, Action::Group);
+        apply(app, Action::Deselect);
+    };
+    let colors_in_scene =
+        |app: &Is2dApp| -> Vec<Color32> { app.tab().scene().iter().map(|s| s.color).collect() };
+    let select_by_color = |app: &mut Is2dApp, target_colors: &[Color32]| {
+        apply(app, Action::Deselect);
+        let mut sel = crate::canvas_tool::Selection::default();
+        let depth = app.tab().session.editing_group_path.len();
+        for s in app.tab().scene().iter() {
+            if target_colors.contains(&s.color) {
+                if let Some(b) = s
+                    .symbol_instance
+                    .filter(|b| s.group_path.get(depth) == Some(&b.instance_gid))
+                {
+                    sel.instances.insert(b.instance_gid);
+                } else {
+                    sel.shapes.insert(s.shape_id);
+                }
+            }
+        }
+        app.tab_mut().session.selection = sel;
+    };
+
+    // 1. 生の図形・グループA・シンボルB・グループC の6ケース
+    let cases = [
+        (vec![c_a], ArrangeMode::ToFront, vec![c_raw, c_b, c_c, c_a]),
+        (vec![c_c], ArrangeMode::ToBack, vec![c_raw, c_c, c_a, c_b]),
+        (vec![c_a], ArrangeMode::Forward, vec![c_raw, c_b, c_a, c_c]),
+        (vec![c_c], ArrangeMode::Backward, vec![c_raw, c_a, c_c, c_b]),
+        (
+            vec![c_a, c_c],
+            ArrangeMode::ToFront,
+            vec![c_raw, c_b, c_a, c_c],
+        ),
+        (
+            vec![c_a, c_c],
+            ArrangeMode::ToBack,
+            vec![c_raw, c_a, c_c, c_b],
+        ),
+    ];
+    for (sel_colors, mode, expected) in cases {
+        let mut app = Is2dApp::default();
+        setup_four_items(&mut app);
+        assert_eq!(colors_in_scene(&app), vec![c_raw, c_a, c_b, c_c]);
+        select_by_color(&mut app, &sel_colors);
+        assert!(apply(&mut app, Action::Arrange { mode }));
+        assert_eq!(colors_in_scene(&app), expected);
+    }
+
+    // 2. 既に最前面にあるものを「最前面へ」、生の図形だけを選んでいるとき：Undo も `*` も付かない
+    {
+        let mut app = Is2dApp::default();
+        setup_four_items(&mut app);
+        app.tab_mut().history.mark_saved();
+        let undo_before = app.tab().history.undo_stack.len();
+
+        select_by_color(&mut app, &[c_c]);
+        assert!(!apply(
+            &mut app,
+            Action::Arrange {
+                mode: ArrangeMode::ToFront
+            }
+        ));
+        assert_eq!(app.tab().history.undo_stack.len(), undo_before);
+        assert!(!app.tab().history.is_dirty());
+
+        select_by_color(&mut app, &[c_raw]);
+        assert!(!apply(
+            &mut app,
+            Action::Arrange {
+                mode: ArrangeMode::ToFront
+            }
+        ));
+        assert_eq!(app.tab().history.undo_stack.len(), undo_before);
+        assert!(!app.tab().history.is_dirty());
+    }
+
+    // 3. 並べ替えたあと保存して読み込んでも同じ順番。Undo 1回で元の順番に戻る
+    {
+        let mut app = Is2dApp::default();
+        setup_four_items(&mut app);
+        select_by_color(&mut app, &[c_a]);
+        assert!(apply(
+            &mut app,
+            Action::Arrange {
+                mode: ArrangeMode::ToFront
+            }
+        ));
+        assert_eq!(colors_in_scene(&app), vec![c_raw, c_b, c_c, c_a]);
+
+        let tmp_path =
+            std::env::temp_dir().join(format!("arrange_test_{}.is2d", std::process::id()));
+        project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
+        let mut loaded_app = Is2dApp::default();
+        project_io::open_project_in_tab(&mut loaded_app, &tmp_path, None).unwrap();
+        let _ = std::fs::remove_file(&tmp_path);
+        assert_eq!(colors_in_scene(&loaded_app), vec![c_raw, c_b, c_c, c_a]);
+
+        app.undo();
+        assert_eq!(colors_in_scene(&app), vec![c_raw, c_a, c_b, c_c]);
+    }
+
+    // 4. 2つのレイヤーにまたがって選んでいるとき、それぞれのレイヤーの中だけで並べ替わる
+    {
+        let mut app = Is2dApp::default();
+        setup_four_items(&mut app);
+        apply(&mut app, Action::AddLayer);
+        let c_l2_1 = Color32::from_rgb(200, 180, 40);
+        let c_l2_2 = Color32::from_rgb(160, 60, 200);
+        paint_dot(&mut app, Point::new(150.0, 250.0), c_l2_1);
+        apply(
+            &mut app,
+            Action::SelectSingleAt {
+                pt: Point::new(150.0, 250.0),
+            },
+        );
+        apply(&mut app, Action::Group);
+        apply(&mut app, Action::Deselect);
+        paint_dot(&mut app, Point::new(250.0, 250.0), c_l2_2);
+        apply(
+            &mut app,
+            Action::SelectSingleAt {
+                pt: Point::new(250.0, 250.0),
+            },
+        );
+        apply(&mut app, Action::Group);
+
+        select_by_color(&mut app, &[c_a, c_l2_1]);
+        assert!(apply(
+            &mut app,
+            Action::Arrange {
+                mode: ArrangeMode::ToFront
+            }
+        ));
+        assert_eq!(
+            colors_in_scene(&app),
+            vec![c_raw, c_b, c_c, c_a, c_l2_2, c_l2_1]
+        );
+        let l1_id = app.tab().active_timeline().layers[0].id;
+        let l2_id = app.tab().active_timeline().layers[1].id;
+        assert!(app
+            .tab()
+            .scene()
+            .iter()
+            .filter(|s| [c_raw, c_a, c_b, c_c].contains(&s.color))
+            .all(|s| s.layer_id == l1_id));
+        assert!(app
+            .tab()
+            .scene()
+            .iter()
+            .filter(|s| [c_l2_1, c_l2_2].contains(&s.color))
+            .all(|s| s.layer_id == l2_id));
+    }
+
+    // 5. グループの中を編集しているとき、そのグループの中の塊だけが並べ替わり、外の図形の位置は変わらない
+    {
+        let mut app = Is2dApp::default();
+        setup_four_items(&mut app);
+        select_by_color(&mut app, &[c_a, c_c]);
+        apply(&mut app, Action::Group);
+        // 外側は [c_raw, c_b, 親グループ(c_a, c_c)]
+        assert_eq!(colors_in_scene(&app), vec![c_raw, c_b, c_a, c_c]);
+        assert!(apply(
+            &mut app,
+            Action::EnterGroupAt {
+                pt: Point::new(200.0, 100.0)
+            }
+        ));
+        assert_eq!(app.tab().session.editing_group_path.len(), 1);
+        select_by_color(&mut app, &[c_a]);
+        assert!(apply(
+            &mut app,
+            Action::Arrange {
+                mode: ArrangeMode::ToFront
+            }
+        ));
+        assert_eq!(colors_in_scene(&app), vec![c_raw, c_b, c_c, c_a]);
+        apply(&mut app, Action::ExitGroup);
+        assert_eq!(colors_in_scene(&app), vec![c_raw, c_b, c_c, c_a]);
+    }
+
+    // 6. トゥイーンの途中のコマでは何も起きない
+    {
+        let mut app = Is2dApp::default();
+        paint_dot(&mut app, Point::new(150.0, 150.0), c_b);
+        apply(
+            &mut app,
+            Action::SelectSingleAt {
+                pt: Point::new(150.0, 150.0),
+            },
+        );
+        apply(&mut app, Action::ConvertToSymbol);
+        apply(&mut app, Action::ToggleTween);
+        for _ in 0..4 {
+            apply(&mut app, Action::ExtendFrame);
+        }
+        apply(
+            &mut app,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 4,
+            },
+        );
+        apply(&mut app, Action::InsertKeyframe { copy_prev: true });
+        apply(
+            &mut app,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 2,
+            },
+        );
+        select_by_color(&mut app, &[c_b]);
+        app.tab_mut().history.mark_saved();
+        assert!(!apply(
+            &mut app,
+            Action::Arrange {
+                mode: ArrangeMode::ToFront
+            }
+        ));
+        assert!(!app.tab().history.is_dirty());
+    }
+
+    // 7. シンボルの中のタイムラインでも、1. の最初の項目と同じ結果になる
+    {
+        let mut app = Is2dApp::default();
+        paint_dot(&mut app, Point::new(100.0, 100.0), c_raw);
+        apply(
+            &mut app,
+            Action::SelectSingleAt {
+                pt: Point::new(100.0, 100.0),
+            },
+        );
+        apply(&mut app, Action::ConvertToSymbol);
+        let sym_id = app.tab().doc.library[0].id;
+        assert!(apply(&mut app, Action::EnterSymbolFromLibrary { sym_id }));
+        apply(&mut app, Action::ClearActiveFrame);
+        setup_four_items(&mut app);
+        assert_eq!(colors_in_scene(&app), vec![c_raw, c_a, c_b, c_c]);
+        select_by_color(&mut app, &[c_a]);
+        assert!(apply(
+            &mut app,
+            Action::Arrange {
+                mode: ArrangeMode::ToFront
+            }
+        ));
+        assert_eq!(colors_in_scene(&app), vec![c_raw, c_b, c_c, c_a]);
+    }
+}

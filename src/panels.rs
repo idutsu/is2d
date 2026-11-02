@@ -6,6 +6,7 @@ use crate::canvas_tool::{
     SelectDragState, SelectSubMode, Tab, Tool, ToolSettings, TransformDragState,
 };
 use crate::project_io::PendingCloseConfirm;
+use crate::select_ops::ArrangeMode;
 use crate::symbol::{SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 use crate::symbol_ops::selected_single_symbol_info;
 pub(crate) use crate::timeline_ui::icons;
@@ -149,6 +150,7 @@ pub(crate) enum UiAction {
     ExitGroupSteps(usize),
     GroupSelected,
     UngroupSelected,
+    Arrange(ArrangeMode),
     FlipSelected {
         flip_x: bool,
         flip_y: bool,
@@ -870,6 +872,37 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
             actions.push(UiAction::UngroupSelected);
         }
     });
+
+    for pair in [
+        [
+            (ArrangeMode::ToFront, "最前面へ", "+Shift+↑"),
+            (ArrangeMode::Forward, "前面へ", "+↑"),
+        ],
+        [
+            (ArrangeMode::Backward, "背面へ", "+↓"),
+            (ArrangeMode::ToBack, "最背面へ", "+Shift+↓"),
+        ],
+    ] {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let half_w = (ui.available_width() - 6.0) * 0.5;
+            for (mode, label, suffix) in pair {
+                if ui
+                    .add_enabled(
+                        has_group,
+                        egui::Button::new(label).min_size(Vec2::new(half_w, 28.0)),
+                    )
+                    .on_hover_text(format!(
+                        "選択中のグループまたはシンボルの重ね順を変更 ({MOD_KEY}{suffix})"
+                    ))
+                    .clicked()
+                {
+                    actions.push(UiAction::Arrange(mode));
+                }
+            }
+        });
+    }
 }
 
 /// 自由変形ツール (`Tool::Transform`) のプロパティ設定項目

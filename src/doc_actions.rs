@@ -17,9 +17,11 @@ use crate::clipboard_ops::{
 };
 use crate::select_ops::{
     apply_marquee_selection, apply_move_vertex_to_shape, apply_pull_edge_to_shape,
-    compute_hover_target, enter_group_at, exit_current_group, prepare_clear_active_frame_shapes,
-    prepare_delete_selected_shapes, prepare_group_selected_shapes, prepare_ungroup_selected_shapes,
+    compute_hover_target, enter_group_at, exit_current_group, prepare_arrange_selected,
+    prepare_clear_active_frame_shapes, prepare_delete_selected_shapes,
+    prepare_group_selected_shapes, prepare_ungroup_selected_shapes,
     retain_selection_and_flush_deselected, select_single_shape_at, toggle_shape_selection,
+    ArrangeMode,
 };
 use crate::symbol::{SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 use crate::symbol_ops::{
@@ -127,6 +129,9 @@ pub(crate) enum Action {
     ClearActiveFrame,
     Group,
     Ungroup,
+    Arrange {
+        mode: ArrangeMode,
+    },
     EnterGroupAt {
         pt: Point,
     },
@@ -459,6 +464,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         }
         Action::Group => prepare_group_selected_shapes(tab, |tab| push_undo(tab, None)),
         Action::Ungroup => prepare_ungroup_selected_shapes(tab, |tab| push_undo(tab, None)),
+        Action::Arrange { mode } => prepare_arrange_selected(tab, mode, |tab| push_undo(tab, None)),
         Action::EnterGroupAt { pt } => enter_group_at(tab, pt),
         Action::ExitGroup => exit_current_group(tab),
         Action::ExitGroupSteps { steps } => {

@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
-    cancel_active_drag, clear_selection, commit_floating_except, edit_layers, editable_layer_ids,
-    focus_active_layer_to_shape_by_id, merge_floating_into_base_shapes,
+    cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
+    editable_layer_ids, focus_active_layer_to_shape_by_id, merge_floating_into_base_shapes,
     sync_timeline_layer_from_canvas_selection, topmost_layer_id_for_indices, Floating,
     FloatingOrigin, HoverTarget, Scene, SelectSubMode, Session, ShapeId, Tab,
 };
@@ -873,6 +873,99 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     }
     tab.session.retain_existing_selection();
     tab.session.transform_pivot = None;
+    true
+}
+
+/// グループ・シンボルインスタンスの重ね順（前後関係）の変更モード
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ArrangeMode {
+    ToFront,
+    Forward,
+    Backward,
+    ToBack,
+}
+
+/// 選択中のグループ・シンボルインスタンスの重ね順を、各レイヤー・現在の編集スコープ内で変更する
+pub(crate) fn prepare_arrange_selected(
+    tab: &mut Tab,
+    mode: ArrangeMode,
+    before_mutate: impl FnOnce(&mut Tab),
+) -> bool {
+    commit_floating(tab);
+    if tab.session.selection.is_empty() {
+        return false;
+    }
+    let scope = &tab.session.editing_group_path;
+    let selection = &tab.session.selection;
+    let mut layer_orders: Vec<(u64, Vec<u64>)> = Vec::new();
+    for lid in editable_layer_ids(tab) {
+        let mut chunks: Vec<(u64, bool)> = Vec::new();
+        for s in tab.scene().iter() {
+            if s.layer_id == lid {
+                if let Some(gid) = s.active_group_id_at_scope(scope) {
+                    let sel = selection.contains_shape(s);
+                    if let Some(c) = chunks.iter_mut().find(|(id, _)| *id == gid) {
+                        c.1 |= sel;
+                    } else {
+                        chunks.push((gid, sel));
+                    }
+                }
+            }
+        }
+        if chunks.len() < 2 || !chunks.iter().any(|(_, sel)| *sel) {
+            continue;
+        }
+        let orig: Vec<u64> = chunks.iter().map(|(gid, _)| *gid).collect();
+        match mode {
+            ArrangeMode::ToFront => chunks.sort_by_key(|(_, sel)| *sel),
+            ArrangeMode::ToBack => chunks.sort_by_key(|(_, sel)| !*sel),
+            ArrangeMode::Forward => {
+                for i in (0..chunks.len() - 1).rev() {
+                    if chunks[i].1 && !chunks[i + 1].1 {
+                        chunks.swap(i, i + 1);
+                    }
+                }
+            }
+            ArrangeMode::Backward => {
+                for i in 1..chunks.len() {
+                    if !chunks[i - 1].1 && chunks[i].1 {
+                        chunks.swap(i - 1, i);
+                    }
+                }
+            }
+        }
+        let next: Vec<u64> = chunks.into_iter().map(|(gid, _)| gid).collect();
+        if next != orig {
+            layer_orders.push((lid, next));
+        }
+    }
+    if layer_orders.is_empty() {
+        return false;
+    }
+
+    before_mutate(tab);
+    let target_lids: Vec<u64> = layer_orders.iter().map(|(lid, _)| *lid).collect();
+    edit_layers(tab, &target_lids, |edit| {
+        for (lid, order) in &layer_orders {
+            let slots: Vec<&mut FillShape> = edit
+                .shapes
+                .iter_mut()
+                .filter(|s| {
+                    s.layer_id == *lid
+                        && s.active_group_id_at_scope(&edit.editing_group_path)
+                            .is_some()
+                })
+                .collect();
+            let mut sorted: Vec<FillShape> = slots.iter().map(|s| (*s).clone()).collect();
+            sorted.sort_by_key(|s| {
+                let gid = s.active_group_id_at_scope(&edit.editing_group_path);
+                order.iter().position(|&id| Some(id) == gid)
+            });
+            for (slot, shape) in slots.into_iter().zip(sorted) {
+                *slot = shape;
+            }
+        }
+    });
     true
 }
 

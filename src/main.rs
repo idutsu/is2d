@@ -26,6 +26,7 @@ use canvas_tool::{Clipboard, NoticeKind, SelectSubMode, StatusToast, Tab, Tool, 
 use doc_actions::{apply, Action, ActionHost};
 use panels::{RightPanelTab, UiAction};
 use project_io::{PendingCloseConfirm, ProjectWorkspace};
+use select_ops::ArrangeMode;
 use timeline_ui::{TimelineHost, TimelineUiState};
 #[cfg(test)]
 pub(crate) use vector_engine::FillShape;
@@ -372,6 +373,9 @@ impl Is2dApp {
             }
             UiAction::UngroupSelected => {
                 apply(self, Action::Ungroup);
+            }
+            UiAction::Arrange(mode) => {
+                apply(self, Action::Arrange { mode });
             }
             UiAction::FlipSelected { flip_x, flip_y } => {
                 apply(self, Action::FlipSelection { flip_x, flip_y });
@@ -725,6 +729,20 @@ impl Is2dApp {
             }
         } else if cmd && key_pressed_no_repeat(i, Key::B) {
             apply(self, Action::Ungroup);
+        } else if cmd && key_pressed_no_repeat(i, Key::ArrowUp) {
+            let mode = if i.modifiers.shift {
+                ArrangeMode::ToFront
+            } else {
+                ArrangeMode::Forward
+            };
+            apply(self, Action::Arrange { mode });
+        } else if cmd && key_pressed_no_repeat(i, Key::ArrowDown) {
+            let mode = if i.modifiers.shift {
+                ArrangeMode::ToBack
+            } else {
+                ArrangeMode::Backward
+            };
+            apply(self, Action::Arrange { mode });
         } else if cmd && i.key_pressed(Key::Z) {
             if i.modifiers.shift {
                 self.redo();
