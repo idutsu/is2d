@@ -11087,6 +11087,25 @@ fn current_process_rss_bytes() -> usize {
     unsafe { info.assume_init().resident_size as usize }
 }
 
+#[cfg(target_os = "linux")]
+fn current_process_rss_bytes() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|line| line.strip_prefix("VmRSS:"))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|kb| kb.parse::<usize>().ok())
+                .map(|kb| kb * 1024)
+        })
+        .unwrap_or(0)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn current_process_rss_bytes() -> usize {
+    0
+}
+
 #[test]
 fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
     use crate::doc_actions::{apply, Action};
