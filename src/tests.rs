@@ -13613,14 +13613,14 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
         Color32::from_rgb(160, 60, 210),
     ];
 
-    // 1. 60本・5色のセル（約135図形）で800点らせんブラシ・消しゴムの確定速度を検証
+    // 1. 800点らせんブラシ・消しゴムの速度確認（5色・約135図形セル）
     let mut seed = 12345u64;
-    let mut setup_108 = Is2dApp::default();
+    let mut setup_app = Is2dApp::default();
     for i in 0..60 {
         let pts = make_short_stroke(&mut seed, 35);
         let col = colors[i % colors.len()];
         let _ = apply(
-            &mut setup_108,
+            &mut setup_app,
             Action::PaintStroke {
                 points: pts,
                 radius: 4.5,
@@ -13628,56 +13628,51 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
             },
         );
     }
-    let tmp_108 = std::env::temp_dir().join(format!("m2_10_cel108_{}.is2d", std::process::id()));
-    project_io::save_project_to_path(&mut setup_108, &tmp_108).unwrap();
+    let tmp_path = std::env::temp_dir().join(format!("m2_10_cel_{}.is2d", std::process::id()));
+    project_io::save_project_to_path(&mut setup_app, &tmp_path).unwrap();
 
-    let mut app_108 = Is2dApp::default();
-    project_io::open_project_in_tab(&mut app_108, &tmp_108, None).unwrap();
     let spiral_800 = make_spiral_points(800, 400.0, 225.0, 210.0);
-    let t_b108 = std::time::Instant::now();
+    let mut app_brush = Is2dApp::default();
+    project_io::open_project_in_tab(&mut app_brush, &tmp_path, None).unwrap();
+    let t_b = std::time::Instant::now();
     let _ = apply(
-        &mut app_108,
+        &mut app_brush,
         Action::PaintStroke {
             points: spiral_800.clone(),
             radius: 3.5,
             color: colors[0],
         },
     );
-    for s in app_108.scene().iter() {
+    for s in app_brush.scene().iter() {
         let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
     }
-    let brush_800_108_ms = t_b108.elapsed().as_secs_f64() * 1000.0;
+    let brush_800_ms = t_b.elapsed().as_secs_f64() * 1000.0;
 
-    let mut app_108_er = Is2dApp::default();
-    project_io::open_project_in_tab(&mut app_108_er, &tmp_108, None).unwrap();
-    let _ = std::fs::remove_file(&tmp_108);
-    let t_e108 = std::time::Instant::now();
+    let mut app_erase = Is2dApp::default();
+    project_io::open_project_in_tab(&mut app_erase, &tmp_path, None).unwrap();
+    let _ = std::fs::remove_file(&tmp_path);
+    let t_e = std::time::Instant::now();
     let _ = apply(
-        &mut app_108_er,
+        &mut app_erase,
         Action::EraseStroke {
             points: spiral_800,
             radius: 4.0,
         },
     );
-    for s in app_108_er.scene().iter() {
+    for s in app_erase.scene().iter() {
         let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
     }
-    let erase_800_108_ms = t_e108.elapsed().as_secs_f64() * 1000.0;
-
+    let erase_800_ms = t_e.elapsed().as_secs_f64() * 1000.0;
     if !cfg!(debug_assertions) {
         assert!(
-            brush_800_108_ms <= 50.0,
-            "800点らせんブラシの確定が50ms以内であること（実測: {:.3}ms）",
-            brush_800_108_ms
-        );
-        assert!(
-            erase_800_108_ms <= 50.0,
-            "800点らせん消しゴムの確定が50ms以内であること（実測: {:.3}ms）",
-            erase_800_108_ms
+            brush_800_ms <= 50.0 && erase_800_ms <= 50.0,
+            "800点らせんブラシ({:.2}ms)・消しゴム({:.2}ms)が50ms以内であること",
+            brush_800_ms,
+            erase_800_ms
         );
     }
 
-    // 2. 1,000通り以上（1,050通り）のランダム比較テスト
+    // 2. 1,000通り以上（1,050通り）のランダム比較テスト（境界0.25px近傍・重なり・同色結合・セグメント数）
     fn min_dist_sq_to_shapes(pt: Point, shapes: &[FillShape]) -> f64 {
         let mut best = f64::INFINITY;
         for s in shapes {
@@ -13696,8 +13691,80 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
         best
     }
 
+    fn shape_area_approx(s: &FillShape) -> f64 {
+        use kurbo::ParamCurve;
+        let poly = |c: &vector_engine::Contour| -> f64 {
+            let mut pts = Vec::with_capacity(c.segments.len() * 8);
+            for seg in c.segments.iter() {
+                for k in 0..8 {
+                    let p = seg.eval(k as f64 / 8.0);
+                    pts.push([p.x, p.y]);
+                }
+            }
+            vector_engine::ring_area_and_perimeter_f64(&pts).0
+        };
+        let ext = poly(&s.exterior);
+        let holes: f64 = s.holes.iter().map(poly).sum();
+        (ext - holes).max(0.0)
+    }
+
+    fn check_scope_invariants(canvas: &[FillShape]) -> (usize, f64, usize) {
+        let mut overlap_viol = 0usize;
+        let mut max_area = 0.0_f64;
+        let mut unmerged_viol = 0usize;
+        for i in 0..canvas.len() {
+            for j in (i + 1)..canvas.len() {
+                let a = &canvas[i];
+                let b = &canvas[j];
+                if a.layer_id != b.layer_id
+                    || a.group_path != b.group_path
+                    || a.symbol_instance.is_some()
+                    || b.symbol_instance.is_some()
+                {
+                    continue;
+                }
+                if vector_engine::rects_overlap(a.bounding_box(), b.bounding_box()) {
+                    let inter = vector_boolean::boolean_operation(
+                        std::slice::from_ref(a),
+                        std::slice::from_ref(b),
+                        vector_boolean::BoolOp::Intersection,
+                        Color32::WHITE,
+                    );
+                    let area: f64 = inter.iter().map(shape_area_approx).sum();
+                    max_area = max_area.max(area);
+                    if area > 2.0 {
+                        overlap_viol += 1;
+                    }
+                }
+                if a.color == b.color
+                    && vector_engine::rects_overlap(
+                        a.bounding_box().inflate(1.0, 1.0),
+                        b.bounding_box(),
+                    )
+                {
+                    let unioned = vector_boolean::boolean_operation(
+                        std::slice::from_ref(a),
+                        std::slice::from_ref(b),
+                        vector_boolean::BoolOp::Union,
+                        a.color,
+                    );
+                    if unioned.len() < 2 {
+                        unmerged_viol += 1;
+                    }
+                }
+            }
+        }
+        (overlap_viol, max_area, unmerged_viol)
+    }
+
     let mut cmp_seed = 7777777u64;
-    let mut mismatches = 0usize;
+    let mut near_checked = 0usize;
+    let mut near_mismatches = 0usize;
+    let mut overlap_violations = 0usize;
+    let mut max_overlap_area = 0.0_f64;
+    let mut unmerged_same_col = 0usize;
+    let mut total_segs = 0usize;
+
     for case_idx in 0..1050 {
         let mut canvas: Vec<FillShape> = Vec::new();
         let init_strokes = 3 + (case_idx % 5);
@@ -13721,7 +13788,6 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
 
         let stroke_pts = match case_idx % 3 {
             0 => {
-                // 短いストローク
                 let mut x = 50.0 + lcg(&mut cmp_seed) * 300.0;
                 let mut y = 50.0 + lcg(&mut cmp_seed) * 200.0;
                 let mut ang = lcg(&mut cmp_seed) * std::f64::consts::TAU;
@@ -13736,7 +13802,6 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
                     .collect::<Vec<_>>()
             }
             1 => {
-                // 長いストローク
                 let mut x = 30.0 + lcg(&mut cmp_seed) * 340.0;
                 let mut y = 30.0 + lcg(&mut cmp_seed) * 240.0;
                 let mut ang = lcg(&mut cmp_seed) * std::f64::consts::TAU;
@@ -13751,7 +13816,6 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
                     .collect::<Vec<_>>()
             }
             _ => {
-                // らせん
                 let cx = 140.0 + lcg(&mut cmp_seed) * 120.0;
                 let cy = 110.0 + lcg(&mut cmp_seed) * 80.0;
                 make_spiral_points(100, cx, cy, 110.0)
@@ -13765,47 +13829,100 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
         if stroke_shapes.is_empty() {
             continue;
         }
+
         if is_eraser {
             vector_boolean::erase_from_canvas(&mut canvas, &stroke_shapes, 1, &[]);
         } else {
             vector_boolean::merge_shapes_into_canvas(&mut canvas, stroke_shapes.clone());
         }
 
+        let segs: usize = canvas
+            .iter()
+            .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+            .sum();
+        total_segs += segs;
+
+        let (ov, ma, un) = check_scope_invariants(&canvas);
+        overlap_violations += ov;
+        max_overlap_area = max_overlap_area.max(ma);
+        unmerged_same_col += un;
+
+        // 格子点 + 境界から 0.25px の法線オフセット標本点
+        let mut test_pts: Vec<Point> = Vec::with_capacity(120);
         for gx in 0..10 {
             for gy in 0..8 {
-                let pt = Point::new(25.0 + gx as f64 * 38.0, 25.0 + gy as f64 * 35.0);
-                if min_dist_sq_to_shapes(pt, &stroke_shapes) < 2.25
-                    || min_dist_sq_to_shapes(pt, &canvas_before) < 2.25
-                {
-                    continue;
-                }
-                let in_stroke = stroke_shapes.iter().any(|s| s.contains_point(pt));
-                let orig_col = canvas_before
-                    .iter()
-                    .rev()
-                    .find(|s| s.contains_point(pt))
-                    .map(|s| s.color);
-                let actual_col = canvas
-                    .iter()
-                    .rev()
-                    .find(|s| s.contains_point(pt))
-                    .map(|s| s.color);
-                let expected_col = if in_stroke {
-                    if is_eraser {
-                        None
-                    } else {
-                        Some(brush_col)
+                test_pts.push(Point::new(25.0 + gx as f64 * 38.0, 25.0 + gy as f64 * 35.0));
+            }
+        }
+        use kurbo::{ParamCurve, ParamCurveDeriv};
+        for s in stroke_shapes.iter().chain(canvas_before.iter()) {
+            for c in s.contours() {
+                let step = (c.segments.len() / 6).max(1);
+                for seg in c.segments.iter().step_by(step) {
+                    let p = seg.eval(0.5);
+                    let d = seg.deriv().eval(0.5).to_vec2();
+                    let len = d.hypot();
+                    if len > 1.0 {
+                        let n = kurbo::Vec2::new(-d.y / len, d.x / len);
+                        test_pts.push(p + n * 0.25);
+                        test_pts.push(p - n * 0.25);
                     }
-                } else {
-                    orig_col
-                };
-                if actual_col != expected_col {
-                    mismatches += 1;
                 }
             }
         }
+
+        for pt in test_pts {
+            let d_sq = min_dist_sq_to_shapes(pt, &stroke_shapes)
+                .min(min_dist_sq_to_shapes(pt, &canvas_before));
+            if d_sq < 0.24 * 0.24 {
+                continue;
+            }
+            near_checked += 1;
+            let in_stroke = stroke_shapes.iter().any(|s| s.contains_point(pt));
+            let orig_col = canvas_before
+                .iter()
+                .rev()
+                .find(|s| s.contains_point(pt))
+                .map(|s| s.color);
+            let new_col = canvas
+                .iter()
+                .rev()
+                .find(|s| s.contains_point(pt))
+                .map(|s| s.color);
+            let expected_col = if in_stroke {
+                if is_eraser {
+                    None
+                } else {
+                    Some(brush_col)
+                }
+            } else {
+                orig_col
+            };
+            if new_col != expected_col {
+                near_mismatches += 1;
+            }
+        }
     }
-    assert_eq!(mismatches, 0, "1,050通りのランダム比較テストで食い違いがないこと");
+    assert!(near_checked >= 150_000, "境界0.25px近傍を含む十分な標本点数を検査すること");
+    assert_eq!(
+        near_mismatches, 0,
+        "1,050通りのランダム比較テスト（境界0.25px近傍含む）で食い違いがないこと"
+    );
+    assert_eq!(
+        overlap_violations, 0,
+        "同じスコープの生の図形同士が重ならないこと (max_overlap_area={:.4})",
+        max_overlap_area
+    );
+    assert_eq!(
+        unmerged_same_col, 0,
+        "同じ色で接する図形が別々の図形のまま残っていないこと"
+    );
+    // M2-10前の総セグメント数は 174,097 セグメント
+    assert!(
+        total_segs <= 174_200,
+        "結果の輪郭のセグメント数がM2-10前(174,097)と比べて大きく増えていないこと: {}",
+        total_segs
+    );
 }
 
 
