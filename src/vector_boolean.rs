@@ -106,131 +106,104 @@ fn raw_scope_insert_index(
         .unwrap_or(canvas.len())
 }
 
-/// 互いに重ならず同色で接する片もない `Floating::pieces`（`pieces_disjoint == true`）をキャンバスへマージする
-pub(crate) fn merge_disjoint_pieces_into_canvas(
-    canvas: &mut Vec<FillShape>,
-    pieces: Vec<FillShape>,
-) {
-    if pieces.is_empty() {
-        return;
-    }
-    let base_raw_bboxes: Vec<(u64, Vec<u64>, KRect)> = canvas
-        .iter()
-        .filter(|s| s.symbol_instance.is_none())
-        .map(|s| (s.layer_id, s.group_path.clone(), s.bounding_box()))
-        .collect();
-
-    let mut non_overlapping_groups: Vec<(u64, Vec<u64>, Vec<FillShape>)> = Vec::new();
-    let mut overlapping_pieces: Vec<FillShape> = Vec::new();
-
-    for piece in pieces {
-        let p_bbox = piece.bounding_box().inflate(1.5, 1.5);
-        let overlaps_base = base_raw_bboxes.iter().any(|(lid, gp, b_bbox)| {
-            *lid == piece.layer_id && *gp == piece.group_path && rects_overlap(*b_bbox, p_bbox)
-        });
-        if overlaps_base {
-            overlapping_pieces.push(piece);
-        } else if let Some((_, _, group)) = non_overlapping_groups
-            .iter_mut()
-            .find(|(lid, gp, _)| *lid == piece.layer_id && *gp == piece.group_path)
-        {
-            group.push(piece);
-        } else {
-            non_overlapping_groups.push((piece.layer_id, piece.group_path.clone(), vec![piece]));
-        }
-    }
-
-    if !overlapping_pieces.is_empty() {
-        merge_shapes_into_canvas(canvas, overlapping_pieces);
-    }
-    for (lid, gp, group) in non_overlapping_groups {
-        let insert_pos = raw_scope_insert_index(canvas, lid, &gp);
-        canvas.splice(insert_pos..insert_pos, group);
+fn push_by_color(groups: &mut Vec<(Color32, Vec<FillShape>)>, s: FillShape) {
+    if let Some((_, g)) = groups.iter_mut().find(|(c, _)| *c == s.color) {
+        g.push(s);
+    } else {
+        groups.push((s.color, vec![s]));
     }
 }
 
-fn merge_homogeneous_batch_into_canvas(
-    canvas: &mut Vec<FillShape>,
-    incoming: Vec<FillShape>,
-    subtract_diff_color: bool,
-) {
-    if incoming.is_empty() {
-        return;
+/// 互いに重ならず同色で接する片もない `Floating::pieces`（`pieces_disjoint == true`）をキャンバスへマージする
+pub(crate) fn merge_disjoint_pieces_into_canvas(canvas: &mut Vec<FillShape>, pieces: Vec<FillShape>) {
+    let mut scope_groups: Vec<(u64, Vec<u64>, Vec<FillShape>)> = Vec::new();
+    for p in pieces {
+        if let Some((_, _, g)) = scope_groups.iter_mut().find(|(l, gp, _)| *l == p.layer_id && *gp == p.group_path) {
+            g.push(p);
+        } else {
+            scope_groups.push((p.layer_id, p.group_path.clone(), vec![p]));
+        }
     }
-    let target_color = incoming[0].color;
-    let target_layer_id = incoming[0].layer_id;
-    let target_group_path = incoming[0].group_path.clone();
-    let test_bbox = union_bounding_boxes(&incoming).inflate(1.5, 1.5);
-    let clip_sub_bboxes = collect_sub_bboxes(&incoming, 1.5);
-
-    let insert_limit = raw_scope_insert_index(canvas, target_layer_id, &target_group_path);
-    let trailing_outside = canvas.split_off(insert_limit);
-
-    let mut updated_canvas =
-        Vec::with_capacity(canvas.len() + incoming.len() + trailing_outside.len());
-    let mut overlapping_same_color = Vec::new();
-    let mut overlapping_diff_by_color: Vec<(Color32, Vec<FillShape>)> = Vec::new();
-
-    for existing in canvas.drain(..) {
-        if existing.layer_id != target_layer_id
-            || existing.group_path != target_group_path
-            || existing.symbol_instance.is_some()
-        {
-            updated_canvas.push(existing);
+    for (lid, gp, scope_pieces) in scope_groups {
+        let base_bboxes: Vec<KRect> = canvas
+            .iter()
+            .filter(|s| s.layer_id == lid && s.group_path == gp && s.symbol_instance.is_none())
+            .map(|s| s.bounding_box())
+            .collect();
+        let (overlapping, non_overlapping): (Vec<_>, Vec<_>) = scope_pieces.into_iter().partition(|p| {
+            let pb = p.bounding_box().inflate(1.5, 1.5);
+            base_bboxes.iter().any(|&bb| rects_overlap(bb, pb))
+        });
+        if overlapping.is_empty() {
+            let pos = raw_scope_insert_index(canvas, lid, &gp);
+            canvas.splice(pos..pos, non_overlapping);
             continue;
         }
-        let interacts = rects_overlap(existing.bounding_box(), test_bbox)
-            && shape_interacts_with_clip(&existing, &incoming, &clip_sub_bboxes);
-        if existing.color == target_color {
-            if interacts {
-                overlapping_same_color.push(existing);
+        let test_bbox = union_bounding_boxes(&overlapping).inflate(1.5, 1.5);
+        let clip = PreparedClip::new(&overlapping);
+        let trailing_outside = canvas.split_off(raw_scope_insert_index(canvas, lid, &gp));
+        let mut updated_canvas = Vec::with_capacity(canvas.len() + overlapping.len() + non_overlapping.len() + trailing_outside.len());
+        let mut base_by_color = Vec::new();
+        for existing in canvas.drain(..) {
+            if existing.layer_id == lid && existing.group_path == gp && existing.symbol_instance.is_none() && rects_overlap(existing.bounding_box(), test_bbox) {
+                push_by_color(&mut base_by_color, existing);
             } else {
                 updated_canvas.push(existing);
             }
-        } else if subtract_diff_color && interacts {
-            if let Some((_, group)) = overlapping_diff_by_color
-                .iter_mut()
-                .find(|(c, _)| *c == existing.color)
-            {
-                group.push(existing);
-            } else {
-                overlapping_diff_by_color.push((existing.color, vec![existing]));
+        }
+        for item in &clip.items {
+            if !base_by_color.iter().any(|(col, _)| *col == item.shape.color) {
+                base_by_color.push((item.shape.color, Vec::new()));
             }
+        }
+        clip.apply_to_color_groups(base_by_color, lid, &gp, true, &mut updated_canvas);
+        updated_canvas.extend(non_overlapping);
+        updated_canvas.extend(trailing_outside);
+        *canvas = updated_canvas;
+    }
+}
+
+fn merge_homogeneous_batch_into_canvas(canvas: &mut Vec<FillShape>, incoming: Vec<FillShape>, subtract_diff_color: bool) {
+    if incoming.is_empty() {
+        return;
+    }
+    let (target_color, target_layer_id, target_group_path) = (incoming[0].color, incoming[0].layer_id, incoming[0].group_path.clone());
+    let test_bbox = union_bounding_boxes(&incoming).inflate(1.5, 1.5);
+    let clip_sub_bboxes = collect_sub_bboxes(&incoming, 1.5);
+    let trailing_outside = canvas.split_off(raw_scope_insert_index(canvas, target_layer_id, &target_group_path));
+    let mut updated_canvas = Vec::with_capacity(canvas.len() + incoming.len() + trailing_outside.len());
+    let (mut overlapping_same_color, mut overlapping_diff_by_color) = (Vec::new(), Vec::new());
+
+    for existing in canvas.drain(..) {
+        if existing.layer_id != target_layer_id || existing.group_path != target_group_path || existing.symbol_instance.is_some() {
+            updated_canvas.push(existing);
+            continue;
+        }
+        let interacts = rects_overlap(existing.bounding_box(), test_bbox) && shape_interacts_with_clip(&existing, &incoming, &clip_sub_bboxes);
+        if existing.color == target_color && interacts {
+            overlapping_same_color.push(existing);
+        } else if existing.color != target_color && subtract_diff_color && interacts {
+            push_by_color(&mut overlapping_diff_by_color, existing);
         } else {
             updated_canvas.push(existing);
         }
     }
-
     if !overlapping_diff_by_color.is_empty() {
-        let clip = PreparedClip::new(&incoming);
-        for (diff_color, diff_group) in overlapping_diff_by_color {
-            updated_canvas.extend(
-                clip.subtract_from_group(diff_group, diff_color)
-                    .into_iter()
-                    .map(|s| s.with_scope(target_layer_id, &target_group_path)),
-            );
-        }
+        PreparedClip::new(&incoming).apply_to_color_groups(overlapping_diff_by_color, target_layer_id, &target_group_path, false, &mut updated_canvas);
     }
 
-    let incoming_self_overlaps = incoming.len() > 1
-        && incoming.iter().enumerate().any(|(i, a)| {
-            let a_box = a.bounding_box().inflate(1.5, 1.5);
-            incoming[i + 1..]
-                .iter()
-                .any(|b| rects_overlap(a_box, b.bounding_box()))
-        });
-
+    let incoming_self_overlaps = incoming.len() > 1 && incoming.iter().enumerate().any(|(i, a)| {
+        let a_box = a.bounding_box().inflate(1.5, 1.5);
+        incoming[i + 1..].iter().any(|b| rects_overlap(a_box, b.bounding_box()))
+    });
     if overlapping_same_color.is_empty() && !incoming_self_overlaps {
         updated_canvas.extend(incoming);
     } else if overlapping_same_color.is_empty() {
-        let unioned =
-            boolean_operation(&incoming[..1], &incoming[1..], BoolOp::Union, target_color);
+        let unioned = boolean_operation(&incoming[..1], &incoming[1..], BoolOp::Union, target_color);
         let mut used_ids = Vec::with_capacity(unioned.len());
         updated_canvas.extend(unioned.into_iter().map(|mut s| {
             let s_bbox = s.bounding_box().inflate(1.5, 1.5);
-            if let Some(inc) = incoming.iter().find(|inc| {
-                !used_ids.contains(&inc.shape_id) && rects_overlap(s_bbox, inc.bounding_box())
-            }) {
+            if let Some(inc) = incoming.iter().find(|inc| !used_ids.contains(&inc.shape_id) && rects_overlap(s_bbox, inc.bounding_box())) {
                 used_ids.push(inc.shape_id);
                 s.shape_id = inc.shape_id;
             }
@@ -238,38 +211,25 @@ fn merge_homogeneous_batch_into_canvas(
         }));
     } else {
         updated_canvas.extend(
-            boolean_operation(
-                &overlapping_same_color,
-                &incoming,
-                BoolOp::Union,
-                target_color,
-            )
-            .into_iter()
-            .map(|s| s.with_scope(target_layer_id, &target_group_path)),
+            boolean_operation(&overlapping_same_color, &incoming, BoolOp::Union, target_color)
+                .into_iter()
+                .map(|s| s.with_scope(target_layer_id, &target_group_path)),
         );
     }
-
     updated_canvas.extend(trailing_outside);
     *canvas = updated_canvas;
 }
 
 /// 消しゴムの輪郭で、指定されたアクティブレイヤー（`target_layer_id`）かつ同じ編集スコープ（`editing_scope`）直下の生シェイプに対してのみ Boolean Difference を適用する
-pub(crate) fn erase_from_canvas(
-    canvas: &mut Vec<FillShape>,
-    eraser_shapes: &[FillShape],
-    target_layer_id: u64,
-    editing_scope: &[u64],
-) {
+pub(crate) fn erase_from_canvas(canvas: &mut Vec<FillShape>, eraser_shapes: &[FillShape], target_layer_id: u64, editing_scope: &[u64]) {
     if eraser_shapes.is_empty() {
         return;
     }
     let test_bbox = union_bounding_boxes(eraser_shapes).inflate(1.5, 1.5);
     let clip_sub_bboxes = collect_sub_bboxes(eraser_shapes, 1.5);
-    let insert_limit = raw_scope_insert_index(canvas, target_layer_id, editing_scope);
-    let trailing_outside = canvas.split_off(insert_limit);
-
+    let trailing_outside = canvas.split_off(raw_scope_insert_index(canvas, target_layer_id, editing_scope));
     let mut updated_canvas = Vec::with_capacity(canvas.len() + trailing_outside.len());
-    let mut overlapping_by_color: Vec<(Color32, Vec<FillShape>)> = Vec::new();
+    let mut overlapping_by_color = Vec::new();
     for existing in canvas.drain(..) {
         if existing.layer_id == target_layer_id
             && existing.group_path == editing_scope
@@ -277,27 +237,13 @@ pub(crate) fn erase_from_canvas(
             && rects_overlap(existing.bounding_box(), test_bbox)
             && shape_interacts_with_clip(&existing, eraser_shapes, &clip_sub_bboxes)
         {
-            if let Some((_, group)) = overlapping_by_color
-                .iter_mut()
-                .find(|(c, _)| *c == existing.color)
-            {
-                group.push(existing);
-            } else {
-                overlapping_by_color.push((existing.color, vec![existing]));
-            }
+            push_by_color(&mut overlapping_by_color, existing);
         } else {
             updated_canvas.push(existing);
         }
     }
     if !overlapping_by_color.is_empty() {
-        let clip = PreparedClip::new(eraser_shapes);
-        for (color, group) in overlapping_by_color {
-            updated_canvas.extend(
-                clip.subtract_from_group(group, color)
-                    .into_iter()
-                    .map(|s| s.with_scope(target_layer_id, editing_scope)),
-            );
-        }
+        PreparedClip::new(eraser_shapes).apply_to_color_groups(overlapping_by_color, target_layer_id, editing_scope, false, &mut updated_canvas);
     }
     updated_canvas.extend(trailing_outside);
     *canvas = updated_canvas;
@@ -317,14 +263,12 @@ fn collect_sub_bboxes(shapes: &[FillShape], inflate: f64) -> Vec<KRect> {
     let mut out = Vec::new();
     for s in shapes {
         for c in s.contours() {
-            for chunk in c.segments.chunks(8) {
-                if let Some(&first) = chunk.first() {
-                    let b = chunk[1..]
-                        .iter()
-                        .fold(seg_padded_bbox(first, 0.0), |acc, &seg| {
-                            acc.union(seg_padded_bbox(seg, 0.0))
-                        });
-                    out.push(b.inflate(inflate, inflate));
+            for &seg in c.segments.iter() {
+                if (seg.p2 - seg.p0).hypot() > 16.0 {
+                    let (a, b) = seg.subdivide();
+                    out.extend([seg_padded_bbox(a, inflate), seg_padded_bbox(b, inflate)]);
+                } else {
+                    out.push(seg_padded_bbox(seg, inflate));
                 }
             }
         }
@@ -337,36 +281,23 @@ fn overlaps_any_bbox(rect: KRect, bboxes: &[KRect]) -> bool {
     bboxes.iter().any(|&b| rects_overlap(rect, b))
 }
 
-fn shape_interacts_with_clip(
-    subj: &FillShape,
-    clip: &[FillShape],
-    clip_sub_bboxes: &[KRect],
-) -> bool {
-    if !overlaps_any_bbox(subj.bounding_box(), clip_sub_bboxes) {
-        return false;
-    }
-    if subj.contours().any(|c| {
-        c.segments
-            .iter()
-            .any(|&seg| overlaps_any_bbox(seg_padded_bbox(seg, 0.6), clip_sub_bboxes))
-    }) {
-        return true;
-    }
-    subj.exterior
-        .segments
-        .first()
-        .is_some_and(|s| clip.iter().any(|cs| cs.contains_point(s.p0)))
-        || clip.iter().any(|cs| {
-            cs.exterior
-                .segments
-                .first()
-                .is_some_and(|s| subj.contains_point(s.p0))
-        })
+fn shape_interacts_with_clip(subj: &FillShape, clip: &[FillShape], clip_sub_bboxes: &[KRect]) -> bool {
+    (overlaps_any_bbox(subj.bounding_box(), clip_sub_bboxes)
+        && subj.contours().any(|c| {
+            c.segments.iter().any(|&seg| {
+                overlaps_any_bbox(seg_padded_bbox(seg, 0.1), clip_sub_bboxes)
+                    && ((seg.p2 - seg.p0).hypot() <= 16.0 || {
+                        let (a, b) = seg.subdivide();
+                        overlaps_any_bbox(seg_padded_bbox(a, 0.1), clip_sub_bboxes) || overlaps_any_bbox(seg_padded_bbox(b, 0.1), clip_sub_bboxes)
+                    })
+            })
+        }))
+        || subj.contours().any(|c| c.segments.first().is_some_and(|s| clip.iter().any(|cs| cs.contains_point(s.p0))))
+        || clip.iter().any(|cs| cs.contours().any(|c| c.segments.first().is_some_and(|s| subj.contains_point(s.p0))))
 }
 
 fn poly_shape_matches_input(out_poly: &OverlayShape, in_poly: &OverlayShape) -> bool {
-    let eq_pt =
-        |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() <= 1e-3 && (a[1] - b[1]).abs() <= 1e-3;
+    let eq_pt = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() <= 1e-3 && (a[1] - b[1]).abs() <= 1e-3;
     let is_subseq = |out_r: &[[f64; 2]], in_r: &[[f64; 2]], s: usize, rev: bool| {
         let (n, mut j) = (in_r.len(), 0);
         out_r.iter().all(|&op| {
@@ -378,90 +309,190 @@ fn poly_shape_matches_input(out_poly: &OverlayShape, in_poly: &OverlayShape) -> 
     };
     out_poly.len() == in_poly.len()
         && out_poly.iter().zip(in_poly.iter()).all(|(out_r, in_r)| {
-            let (out_a, out_p) = ring_area_and_perimeter_f64(out_r);
-            let (in_a, in_p) = ring_area_and_perimeter_f64(in_r);
-            out_r.len() >= 3
-                && out_r.len() <= in_r.len()
-                && (out_a - in_a).abs() <= 1e-2
-                && (out_p - in_p).abs() <= 1e-2
-                && in_r
-                    .iter()
-                    .position(|&p| eq_pt(p, out_r[0]))
-                    .is_some_and(|s| {
-                        is_subseq(out_r, in_r, s, false) || is_subseq(out_r, in_r, s, true)
-                    })
+            let ((out_a, out_p), (in_a, in_p)) = (ring_area_and_perimeter_f64(out_r), ring_area_and_perimeter_f64(in_r));
+            out_r.len() >= 3 && out_r.len() <= in_r.len() && (out_a - in_a).abs() <= 1e-2 && (out_p - in_p).abs() <= 1e-2
+                && in_r.iter().position(|&p| eq_pt(p, out_r[0])).is_some_and(|s| is_subseq(out_r, in_r, s, false) || is_subseq(out_r, in_r, s, true))
         })
 }
 
-/// 複数の対象シェイプに対して繰り返し Difference（減算）を行う際に、
-/// クリップ側シェイプ群のフラットニング結果と `QuadRecord` を1回だけ事前構築して使い回すキャッシュ構造体
+struct PreparedClipItem<'a> {
+    shape: &'a FillShape,
+    padded_bbox: KRect,
+    sub_bboxes: Vec<KRect>,
+    poly: OverlayShape,
+    quads: Vec<QuadRecord>,
+}
+
+/// 複数の対象シェイプに対して繰り返しブーリアン演算を行う際に、
+/// クリップ側シェイプ群のフラットニング結果・`QuadRecord`・サブAABBを1回だけ事前構築して使い回すキャッシュ構造体
 struct PreparedClip<'a> {
-    clip: &'a [FillShape],
-    clip_shapes: Vec<OverlayShape>,
-    clip_quads: Vec<QuadRecord>,
+    items: Vec<PreparedClipItem<'a>>,
 }
 
 impl<'a> PreparedClip<'a> {
     fn new(clip: &'a [FillShape]) -> Self {
-        let mut clip_quads = Vec::new();
-        let clip_shapes = clip
+        let items = clip
             .iter()
-            .map(|s| flatten_shape_for_overlay(s, &mut clip_quads))
-            .filter(|r| !r.is_empty())
+            .filter_map(|s| {
+                let mut quads = Vec::new();
+                let poly = flatten_shape_for_overlay(s, &mut quads);
+                (!poly.is_empty()).then(|| PreparedClipItem {
+                    shape: s,
+                    padded_bbox: s.bounding_box().inflate(1.5, 1.5),
+                    sub_bboxes: collect_sub_bboxes(std::slice::from_ref(s), 0.15),
+                    poly,
+                    quads,
+                })
+            })
             .collect();
-        Self {
-            clip,
-            clip_shapes,
-            clip_quads,
-        }
+        Self { items }
     }
 
-    fn subtract_from_group(&self, subjs: Vec<FillShape>, color: Color32) -> Vec<FillShape> {
-        let mut untouched = Vec::new();
-        let mut active_subjs = Vec::new();
-        let mut subj_polys = Vec::new();
-        let mut quad_table = Vec::with_capacity(16 * subjs.len() + self.clip_quads.len());
+    fn apply_to_color_groups(
+        &self,
+        groups: Vec<(Color32, Vec<FillShape>)>,
+        lid: u64,
+        gp: &[u64],
+        include_same_color: bool,
+        out: &mut Vec<FillShape>,
+    ) {
+        struct ColorJob {
+            color: Color32,
+            bbox: KRect,
+            sub_bboxes: Vec<KRect>,
+            active: Vec<FillShape>,
+            used_in: Vec<bool>,
+            subj_polys: Vec<OverlayShape>,
+            quads: Vec<QuadRecord>,
+            used_diff: Vec<bool>,
+            any_same_merged: bool,
+            out: Vec<FillShape>,
+        }
+        let mut jobs = Vec::with_capacity(groups.len());
+        for (color, subjs) in groups {
+            let (mut active, mut subj_polys, mut quads, mut job_out, mut sub_bboxes) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let (mut bbox, mut used_diff, mut used_same) =
+                (KRect::ZERO, vec![false; self.items.len()], vec![false; self.items.len()]);
+            for subj in subjs {
+                let mut touches = false;
+                for (i, it) in self.items.iter().enumerate() {
+                    if rects_overlap(subj.bounding_box(), it.padded_bbox)
+                        && shape_interacts_with_clip(&subj, std::slice::from_ref(it.shape), &it.sub_bboxes)
+                    {
+                        if include_same_color && it.shape.color == color {
+                            used_same[i] = true;
+                        } else {
+                            used_diff[i] = true;
+                        }
+                        touches = true;
+                    }
+                }
+                if !touches {
+                    job_out.push(subj.with_scope(lid, gp));
+                } else {
+                    let poly = flatten_shape_for_overlay(&subj, &mut quads);
+                    if !poly.is_empty() {
+                        let sb = subj.bounding_box().inflate(0.15, 0.15);
+                        bbox = if subj_polys.is_empty() { sb } else { bbox.union(sb) };
+                        sub_bboxes.extend(collect_sub_bboxes(std::slice::from_ref(&subj), 0.05));
+                        subj_polys.push(poly);
+                        active.push(subj);
+                    }
+                }
+            }
+            let mut any_same_merged = false;
+            if include_same_color {
+                for (i, it) in self.items.iter().enumerate().filter(|(_, it)| it.shape.color == color) {
+                    if used_same[i] {
+                        any_same_merged = true;
+                        let ib = it.shape.bounding_box().inflate(0.15, 0.15);
+                        bbox = if subj_polys.is_empty() { ib } else { bbox.union(ib) };
+                        sub_bboxes.extend_from_slice(&it.sub_bboxes);
+                        subj_polys.push(it.poly.clone());
+                        quads.extend_from_slice(&it.quads);
+                    } else {
+                        job_out.push(it.shape.clone().with_scope(lid, gp));
+                    }
+                }
+            }
+            let used_in = vec![false; active.len()];
+            jobs.push(ColorJob { color, bbox, sub_bboxes, active, used_in, subj_polys, quads, used_diff, any_same_merged, out: job_out });
+        }
 
-        for subj in subjs {
-            let poly = flatten_shape_for_overlay(&subj, &mut quad_table);
-            if !poly.is_empty() {
-                subj_polys.push(poly);
-                active_subjs.push(subj);
+        let mut to_reconstruct = vec![Vec::new(); jobs.len()];
+        let mut order: Vec<usize> = (0..jobs.len()).filter(|&i| !jobs[i].subj_polys.is_empty()).collect();
+        order.sort_unstable_by_key(|&i| std::cmp::Reverse(jobs[i].sub_bboxes.len()));
+        let mut done = vec![false; jobs.len()];
+        for (pos, &start) in order.iter().enumerate() {
+            if done[start] {
+                continue;
+            }
+            let mut batch = vec![start];
+            done[start] = true;
+            for &cand in &order[(pos + 1)..] {
+                if !done[cand]
+                    && batch.iter().all(|&b| {
+                        (!rects_overlap(jobs[b].bbox, jobs[cand].bbox)
+                            || !jobs[b].sub_bboxes.iter().any(|&ra| jobs[cand].sub_bboxes.iter().any(|&rb| rects_overlap(ra, rb))))
+                            && !self.items.iter().enumerate().any(|(i, it)| {
+                                (jobs[b].used_diff[i] && it.shape.color == jobs[cand].color)
+                                    || (jobs[cand].used_diff[i] && it.shape.color == jobs[b].color)
+                            })
+                    })
+                {
+                    batch.push(cand);
+                    done[cand] = true;
+                }
+            }
+            let (mut batch_subjs, mut batch_clips, mut min_area) = (Vec::new(), Vec::new(), 0.04_f64);
+            for &b in &batch {
+                min_area = min_area.min(adaptive_overlay_min_area(&jobs[b].active, &[]));
+                batch_subjs.extend(jobs[b].subj_polys.iter().cloned());
+            }
+            for (i, it) in self.items.iter().enumerate() {
+                if batch.iter().any(|&b| jobs[b].used_diff[i]) {
+                    batch_clips.push(it.poly.clone());
+                }
+            }
+            let rule = if batch_clips.is_empty() { OverlayRule::Subject } else { OverlayRule::Difference };
+            for poly_shape in run_float_overlay(&batch_subjs, &batch_clips, rule, OverlayFillRule::NonZero, min_area) {
+                let b = if batch.len() == 1 {
+                    batch[0]
+                } else {
+                    poly_shape[0]
+                        .iter()
+                        .find_map(|&[x, y]| {
+                            let pt = Point::new(x, y);
+                            batch.iter().copied().find(|&b| jobs[b].bbox.contains(pt) && jobs[b].sub_bboxes.iter().any(|&r| r.contains(pt)))
+                        })
+                        .unwrap_or(batch[0])
+                };
+                if let Some(idx) = (!jobs[b].any_same_merged)
+                    .then(|| (0..jobs[b].active.len()).find(|&i| !jobs[b].used_in[i] && poly_shape_matches_input(&poly_shape, &jobs[b].subj_polys[i])))
+                    .flatten()
+                {
+                    jobs[b].used_in[idx] = true;
+                    let s = jobs[b].active[idx].clone().with_scope(lid, gp);
+                    jobs[b].out.push(s);
+                } else {
+                    to_reconstruct[b].push(poly_shape);
+                }
             }
         }
-        if subj_polys.is_empty() {
-            return untouched;
-        }
-        quad_table.extend_from_slice(&self.clip_quads);
-        let min_area = adaptive_overlay_min_area(&active_subjs, self.clip);
-        let overlay_result = run_float_overlay(
-            &subj_polys,
-            &self.clip_shapes,
-            OverlayRule::Difference,
-            OverlayFillRule::NonZero,
-            min_area,
-        );
-        let mut to_reconstruct = Vec::new();
-        let mut used_input = vec![false; active_subjs.len()];
-        for poly_shape in overlay_result {
-            if let Some(idx) = (0..active_subjs.len())
-                .find(|&i| !used_input[i] && poly_shape_matches_input(&poly_shape, &subj_polys[i]))
-            {
-                used_input[idx] = true;
-                untouched.push(active_subjs[idx].clone());
-            } else {
-                to_reconstruct.push(poly_shape);
+        for (job, polys) in jobs.iter_mut().zip(to_reconstruct) {
+            if !polys.is_empty() {
+                for (_, it) in self.items.iter().enumerate().filter(|&(i, _)| job.used_diff[i]) {
+                    job.quads.extend_from_slice(&it.quads);
+                }
+                job.out.extend(
+                    reconstruct_shapes_from_overlay(&polys, &job.quads, job.color, job.any_same_merged)
+                        .into_iter()
+                        .map(|s| s.with_scope(lid, gp)),
+                );
             }
+            out.append(&mut job.out);
         }
-        if !to_reconstruct.is_empty() {
-            untouched.extend(reconstruct_shapes_from_overlay(
-                &to_reconstruct,
-                &quad_table,
-                color,
-                false,
-            ));
-        }
-        untouched
     }
 }
 
@@ -1055,14 +1086,17 @@ fn reconstruct_or_refit_quad_contour(
         return None;
     }
 
+    let mut hint_qid = None;
     let tagged_edges: Vec<TaggedEdge> = (0..n)
         .map(|i| {
             let a = pts[i];
             let b = pts[(i + 1) % n];
+            let quad_match = match_edge_to_quad(a, b, quad_table, grid, hint_qid);
+            hint_qid = quad_match.map(|(qid, _)| qid);
             TaggedEdge {
                 from: a,
                 to: b,
-                quad_match: match_edge_to_quad(a, b, quad_table, grid),
+                quad_match,
             }
         })
         .collect();
@@ -1151,6 +1185,7 @@ fn match_edge_to_quad(
     b: Point,
     quad_table: &[QuadRecord],
     grid: &QuadSpatialGrid,
+    hint_qid: Option<usize>,
 ) -> Option<(usize, f64)> {
     let chord = b - a;
     let chord_len = chord.hypot();
@@ -1166,7 +1201,7 @@ fn match_edge_to_quad(
     let mut best_match = None;
     let mut best_score = f64::INFINITY;
 
-    for &qid in grid.candidates_at(mid) {
+    for qid in hint_qid.into_iter().chain(grid.candidates_at(mid).iter().copied()) {
         let rec = &quad_table[qid];
         if !rec.bbox.contains(mid) {
             continue;
@@ -1194,6 +1229,9 @@ fn match_edge_to_quad(
         if score < best_score {
             best_score = score;
             best_match = Some((qid, n_b.t));
+            if best_score <= 1e-7 {
+                break;
+            }
         }
     }
 
