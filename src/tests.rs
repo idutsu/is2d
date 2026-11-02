@@ -14310,6 +14310,99 @@ fn test_m3_3_tween_kept_on_and_incomplete_on_draw_paste_save_delete_and_toggle_o
     );
 }
 
+#[test]
+fn test_m3_4_delete_keyframe_only_on_keyframe_start_frame() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+    // レイヤー0: Frame 0 と Frame 2 にキーフレーム (0..=4)
+    for _ in 0..4 {
+        let _ = apply(&mut app, Action::ExtendFrame);
+    }
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 2,
+        },
+    );
+    let _ = apply(&mut app, Action::InsertKeyframe { copy_prev: false });
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(150.0, 100.0)],
+            radius: 6.0,
+            color: Color32::RED,
+        },
+    );
+
+    // レイヤー1: Frame 0 と Frame 3 にキーフレーム (0..=4)
+    let _ = apply(&mut app, Action::AddLayer);
+    for _ in 0..4 {
+        let _ = apply(&mut app, Action::ExtendFrame);
+    }
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 1,
+            frame: 3,
+        },
+    );
+    let _ = apply(&mut app, Action::InsertKeyframe { copy_prev: false });
+
+    // 1. 保持フレーム (Frame 4: レイヤー0は start_frame=2 の保持中) で Shift+F6 を押しても何も変わらず Undo も積まれない
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 4,
+        },
+    );
+    app.history.mark_saved();
+    let undo_before = app.history.undo_stack.len();
+    let deleted = apply(&mut app, Action::DeleteKeyframe);
+    assert!(!deleted.as_bool(), "保持フレームでは DeleteKeyframe が false を返すこと");
+    assert_eq!(app.doc.root.layers[0].keyframes.len(), 2);
+    assert_eq!(app.history.undo_stack.len(), undo_before);
+    assert!(!app.history.is_dirty());
+
+    // 2. 複数レイヤー選択時 (Frame 3: レイヤー0は保持フレーム、レイヤー1は start_frame=3 の開始フレーム) は開始フレームのレイヤー1だけで消える
+    let _ = apply(
+        &mut app,
+        Action::SelectTimelineCells {
+            l0: 0,
+            f0: 3,
+            l1: 1,
+            f1: 3,
+        },
+    );
+    let deleted = apply(&mut app, Action::DeleteKeyframe);
+    assert!(deleted.as_bool());
+    assert_eq!(
+        app.doc.root.layers[0].keyframes.len(),
+        2,
+        "保持フレームだったレイヤー0のキーフレーム (start_frame=2) は消えないこと"
+    );
+    assert_eq!(
+        app.doc.root.layers[1].keyframes.len(),
+        1,
+        "開始フレームだったレイヤー1のキーフレーム (start_frame=3) だけ消えること"
+    );
+
+    // 3. 開始フレーム (Frame 2, レイヤー0) で押したときは今までどおり消える
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 2,
+        },
+    );
+    let deleted = apply(&mut app, Action::DeleteKeyframe);
+    assert!(deleted.as_bool());
+    assert_eq!(app.doc.root.layers[0].keyframes.len(), 1);
+}
+
+
 
 
 

@@ -504,12 +504,11 @@ impl Layer {
         let Some(idx) = self.keyframe_index_at(frame) else {
             return false;
         };
+        if self.keyframes[idx].start_frame != frame {
+            return false;
+        }
         if idx == 0 {
-            if frame == 0 {
-                self.keyframe_mut(0).clear_cel()
-            } else {
-                false
-            }
+            self.keyframe_mut(0).clear_cel()
         } else {
             self.keyframes.remove(idx);
             true
@@ -1046,12 +1045,8 @@ impl Timeline {
         targets.iter().any(|&l_idx| {
             self.layers.get(l_idx).is_some_and(|layer| {
                 layer.keyframe_index_at(curr_f).is_some_and(|idx| {
-                    idx > 0
-                        || (curr_f == 0
-                            && layer
-                                .keyframes
-                                .first()
-                                .is_some_and(|kf| !kf.cel.is_empty() || kf.tween))
+                    let kf = &layer.keyframes[idx];
+                    kf.start_frame == curr_f && (idx > 0 || !kf.cel.is_empty() || kf.tween)
                 })
             })
         })
