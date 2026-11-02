@@ -13975,6 +13975,34 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
     );
 }
 
+#[test]
+fn test_m3_1_write_project_json_reports_flush_error() {
+    let tab = crate::canvas_tool::Tab::new_empty(1, 1);
+    let doc = crate::project_io::ProjectDocument::from_app(&tab);
+
+    let tmp = std::env::temp_dir().join(format!("is2d_m3_1_ro_{}.tmp", std::process::id()));
+    std::fs::write(&tmp, b"orig").unwrap();
+    let ro_file = std::fs::File::open(&tmp).unwrap();
+    let res = crate::project_io::write_project_json(ro_file, &doc);
+    let _ = std::fs::remove_file(&tmp);
+    assert!(
+        res.is_err(),
+        "BufWriter::into_inner の flush 失敗が Err として返ること"
+    );
+
+    #[cfg(target_os = "linux")]
+    {
+        let dev_full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let err = crate::project_io::write_project_json(dev_full, &doc)
+            .expect_err("/dev/full への書き込みは Err が返ること");
+        assert_eq!(err.kind(), std::io::ErrorKind::StorageFull);
+    }
+}
+
+
 
 
 

@@ -1290,6 +1290,16 @@ pub(crate) fn update_window_title(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
     }
 }
 
+pub(crate) fn write_project_json(
+    file: std::fs::File,
+    doc: &ProjectDocument,
+) -> std::io::Result<()> {
+    let mut writer = std::io::BufWriter::new(file);
+    serde_json::to_writer(&mut writer, doc)?;
+    let file = writer.into_inner().map_err(|e| e.into_error())?;
+    file.sync_all()
+}
+
 /// 指定されたファイルパス `path` へプロジェクトを一時ファイル経由でアトミック保存する
 pub(crate) fn save_project_to_path(
     ws: &mut impl ProjectWorkspace,
@@ -1314,11 +1324,8 @@ pub(crate) fn save_project_to_path(
         std::process::id()
     );
     let tmp_path = target_path.with_file_name(tmp_name);
-    let write_res = (|| -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&tmp_path)?;
-        serde_json::to_writer(std::io::BufWriter::new(&mut file), &proj_doc)?;
-        file.sync_all()
-    })();
+    let write_res =
+        std::fs::File::create(&tmp_path).and_then(|file| write_project_json(file, &proj_doc));
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("一時ファイルの書き込みに失敗しました: {e}"));
