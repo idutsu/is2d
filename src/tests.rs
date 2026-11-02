@@ -13475,6 +13475,243 @@ fn test_m2_8_document_shapes_never_store_fill_mesh_after_playback_onion_edit_and
     );
 }
 
+#[test]
+fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
+    use kurbo::ParamCurveNearest;
+    fn lcg(state: &mut u64) -> f64 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((*state >> 32) as u32 as f64) / (u32::MAX as f64)
+    }
+
+    fn make_spiral_points(n: usize, cx: f64, cy: f64, max_r: f64) -> Vec<Point> {
+        (0..n)
+            .map(|i| {
+                let t = i as f64 / (n.saturating_sub(1).max(1) as f64);
+                let angle = t * 12.0 * std::f64::consts::PI;
+                let r = 8.0 + t * max_r;
+                Point::new(cx + r * angle.cos(), cy + r * angle.sin())
+            })
+            .collect()
+    }
+
+    fn make_short_stroke(state: &mut u64, n: usize) -> Vec<Point> {
+        let mut x = 100.0 + lcg(state) * 600.0;
+        let mut y = 60.0 + lcg(state) * 330.0;
+        let mut angle = lcg(state) * std::f64::consts::TAU;
+        let mut pts = Vec::with_capacity(n);
+        for _ in 0..n {
+            pts.push(Point::new(x, y));
+            angle += (lcg(state) - 0.5) * 0.5;
+            x = (x + angle.cos() * 6.0).clamp(20.0, 780.0);
+            y = (y + angle.sin() * 6.0).clamp(20.0, 430.0);
+        }
+        pts
+    }
+
+    let colors = [
+        Color32::from_rgb(220, 50, 50),
+        Color32::from_rgb(50, 180, 70),
+        Color32::from_rgb(50, 100, 220),
+        Color32::from_rgb(230, 160, 30),
+        Color32::from_rgb(160, 60, 210),
+    ];
+
+    // 1. 60本・5色のセル（約135図形）で800点らせんブラシ・消しゴムの確定速度を検証
+    let mut seed = 12345u64;
+    let mut setup_108 = Is2dApp::default();
+    for i in 0..60 {
+        let pts = make_short_stroke(&mut seed, 35);
+        let col = colors[i % colors.len()];
+        let _ = apply(
+            &mut setup_108,
+            Action::PaintStroke {
+                points: pts,
+                radius: 4.5,
+                color: col,
+            },
+        );
+    }
+    let tmp_108 = std::env::temp_dir().join(format!("m2_10_cel108_{}.is2d", std::process::id()));
+    project_io::save_project_to_path(&mut setup_108, &tmp_108).unwrap();
+
+    let mut app_108 = Is2dApp::default();
+    project_io::open_project_in_tab(&mut app_108, &tmp_108, None).unwrap();
+    let spiral_800 = make_spiral_points(800, 400.0, 225.0, 210.0);
+    let t_b108 = std::time::Instant::now();
+    let _ = apply(
+        &mut app_108,
+        Action::PaintStroke {
+            points: spiral_800.clone(),
+            radius: 3.5,
+            color: colors[0],
+        },
+    );
+    for s in app_108.scene().iter() {
+        let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
+    }
+    let brush_800_108_ms = t_b108.elapsed().as_secs_f64() * 1000.0;
+
+    let mut app_108_er = Is2dApp::default();
+    project_io::open_project_in_tab(&mut app_108_er, &tmp_108, None).unwrap();
+    let _ = std::fs::remove_file(&tmp_108);
+    let t_e108 = std::time::Instant::now();
+    let _ = apply(
+        &mut app_108_er,
+        Action::EraseStroke {
+            points: spiral_800,
+            radius: 4.0,
+        },
+    );
+    for s in app_108_er.scene().iter() {
+        let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
+    }
+    let erase_800_108_ms = t_e108.elapsed().as_secs_f64() * 1000.0;
+
+    if !cfg!(debug_assertions) {
+        assert!(
+            brush_800_108_ms <= 50.0,
+            "800点らせんブラシの確定が50ms以内であること（実測: {:.3}ms）",
+            brush_800_108_ms
+        );
+        assert!(
+            erase_800_108_ms <= 50.0,
+            "800点らせん消しゴムの確定が50ms以内であること（実測: {:.3}ms）",
+            erase_800_108_ms
+        );
+    }
+
+    // 2. 1,000通り以上（1,050通り）のランダム比較テスト
+    fn min_dist_sq_to_shapes(pt: Point, shapes: &[FillShape]) -> f64 {
+        let mut best = f64::INFINITY;
+        for s in shapes {
+            if !s.bounding_box().inflate(3.0, 3.0).contains(pt) {
+                continue;
+            }
+            for c in s.contours() {
+                for seg in c.segments.iter() {
+                    let d_sq = seg.nearest(pt, 1e-4).distance_sq;
+                    if d_sq < best {
+                        best = d_sq;
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    let mut cmp_seed = 7777777u64;
+    let mut mismatches = 0usize;
+    for case_idx in 0..1050 {
+        let mut canvas: Vec<FillShape> = Vec::new();
+        let init_strokes = 3 + (case_idx % 5);
+        for s_i in 0..init_strokes {
+            let n_pts = 8 + (s_i * 5);
+            let mut x = 40.0 + lcg(&mut cmp_seed) * 320.0;
+            let mut y = 40.0 + lcg(&mut cmp_seed) * 220.0;
+            let mut ang = lcg(&mut cmp_seed) * std::f64::consts::TAU;
+            let mut pts = Vec::with_capacity(n_pts);
+            for _ in 0..n_pts {
+                pts.push(Point::new(x, y));
+                ang += (lcg(&mut cmp_seed) - 0.5) * 0.8;
+                x = (x + ang.cos() * 14.0).clamp(20.0, 380.0);
+                y = (y + ang.sin() * 14.0).clamp(20.0, 280.0);
+            }
+            let raw = vector_stroke::generate_brush_outline_at_zoom(&pts, 6.0, 1.0);
+            let shapes = vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, colors[s_i % 3], 1.0);
+            vector_boolean::merge_shapes_into_canvas(&mut canvas, shapes);
+        }
+        let canvas_before = canvas.clone();
+
+        let stroke_pts = match case_idx % 3 {
+            0 => {
+                // 短いストローク
+                let mut x = 50.0 + lcg(&mut cmp_seed) * 300.0;
+                let mut y = 50.0 + lcg(&mut cmp_seed) * 200.0;
+                let mut ang = lcg(&mut cmp_seed) * std::f64::consts::TAU;
+                (0..12)
+                    .map(|_| {
+                        let p = Point::new(x, y);
+                        ang += (lcg(&mut cmp_seed) - 0.5) * 0.7;
+                        x = (x + ang.cos() * 12.0).clamp(20.0, 380.0);
+                        y = (y + ang.sin() * 12.0).clamp(20.0, 280.0);
+                        p
+                    })
+                    .collect::<Vec<_>>()
+            }
+            1 => {
+                // 長いストローク
+                let mut x = 30.0 + lcg(&mut cmp_seed) * 340.0;
+                let mut y = 30.0 + lcg(&mut cmp_seed) * 240.0;
+                let mut ang = lcg(&mut cmp_seed) * std::f64::consts::TAU;
+                (0..80)
+                    .map(|_| {
+                        let p = Point::new(x, y);
+                        ang += (lcg(&mut cmp_seed) - 0.5) * 0.9;
+                        x = (x + ang.cos() * 10.0).clamp(20.0, 380.0);
+                        y = (y + ang.sin() * 10.0).clamp(20.0, 280.0);
+                        p
+                    })
+                    .collect::<Vec<_>>()
+            }
+            _ => {
+                // らせん
+                let cx = 140.0 + lcg(&mut cmp_seed) * 120.0;
+                let cy = 110.0 + lcg(&mut cmp_seed) * 80.0;
+                make_spiral_points(100, cx, cy, 110.0)
+            }
+        };
+        let is_eraser = case_idx % 2 == 1;
+        let brush_col = colors[(case_idx / 2) % 4];
+        let radius = 5.0 + (case_idx % 3) as f64 * 1.5;
+        let raw = vector_stroke::generate_brush_outline_at_zoom(&stroke_pts, radius, 1.0);
+        let stroke_shapes = vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, brush_col, 1.0);
+        if stroke_shapes.is_empty() {
+            continue;
+        }
+        if is_eraser {
+            vector_boolean::erase_from_canvas(&mut canvas, &stroke_shapes, 1, &[]);
+        } else {
+            vector_boolean::merge_shapes_into_canvas(&mut canvas, stroke_shapes.clone());
+        }
+
+        for gx in 0..10 {
+            for gy in 0..8 {
+                let pt = Point::new(25.0 + gx as f64 * 38.0, 25.0 + gy as f64 * 35.0);
+                if min_dist_sq_to_shapes(pt, &stroke_shapes) < 2.25
+                    || min_dist_sq_to_shapes(pt, &canvas_before) < 2.25
+                {
+                    continue;
+                }
+                let in_stroke = stroke_shapes.iter().any(|s| s.contains_point(pt));
+                let orig_col = canvas_before
+                    .iter()
+                    .rev()
+                    .find(|s| s.contains_point(pt))
+                    .map(|s| s.color);
+                let actual_col = canvas
+                    .iter()
+                    .rev()
+                    .find(|s| s.contains_point(pt))
+                    .map(|s| s.color);
+                let expected_col = if in_stroke {
+                    if is_eraser {
+                        None
+                    } else {
+                        Some(brush_col)
+                    }
+                } else {
+                    orig_col
+                };
+                if actual_col != expected_col {
+                    mismatches += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(mismatches, 0, "1,050通りのランダム比較テストで食い違いがないこと");
+}
+
+
 
 
 

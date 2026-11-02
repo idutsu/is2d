@@ -187,6 +187,7 @@ fn merge_homogeneous_batch_into_canvas(
     let target_layer_id = incoming[0].layer_id;
     let target_group_path = incoming[0].group_path.clone();
     let test_bbox = union_bounding_boxes(&incoming).inflate(1.5, 1.5);
+    let clip_sub_bboxes = collect_sub_bboxes(&incoming, 1.5);
 
     let insert_limit = raw_scope_insert_index(canvas, target_layer_id, &target_group_path);
     let trailing_outside = canvas.split_off(insert_limit);
@@ -194,7 +195,7 @@ fn merge_homogeneous_batch_into_canvas(
     let mut updated_canvas =
         Vec::with_capacity(canvas.len() + incoming.len() + trailing_outside.len());
     let mut overlapping_same_color = Vec::new();
-    let mut prepared_clip: Option<PreparedClip> = None;
+    let mut overlapping_diff_by_color: Vec<(Color32, Vec<FillShape>)> = Vec::new();
 
     for existing in canvas.drain(..) {
         if existing.layer_id != target_layer_id
@@ -204,22 +205,36 @@ fn merge_homogeneous_batch_into_canvas(
             updated_canvas.push(existing);
             continue;
         }
-        let intersects_bbox = rects_overlap(existing.bounding_box(), test_bbox);
+        let interacts = rects_overlap(existing.bounding_box(), test_bbox)
+            && shape_interacts_with_clip(&existing, &incoming, &clip_sub_bboxes);
         if existing.color == target_color {
-            if intersects_bbox {
+            if interacts {
                 overlapping_same_color.push(existing);
             } else {
                 updated_canvas.push(existing);
             }
-        } else if subtract_diff_color && intersects_bbox {
-            let clip = prepared_clip.get_or_insert_with(|| PreparedClip::new(&incoming));
+        } else if subtract_diff_color && interacts {
+            if let Some((_, group)) = overlapping_diff_by_color
+                .iter_mut()
+                .find(|(c, _)| *c == existing.color)
+            {
+                group.push(existing);
+            } else {
+                overlapping_diff_by_color.push((existing.color, vec![existing]));
+            }
+        } else {
+            updated_canvas.push(existing);
+        }
+    }
+
+    if !overlapping_diff_by_color.is_empty() {
+        let clip = PreparedClip::new(&incoming, &clip_sub_bboxes);
+        for (diff_color, diff_group) in overlapping_diff_by_color {
             updated_canvas.extend(
-                clip.subtract_from(&existing)
+                clip.subtract_from_group(diff_group, diff_color)
                     .into_iter()
                     .map(|s| s.with_scope(target_layer_id, &target_group_path)),
             );
-        } else {
-            updated_canvas.push(existing);
         }
     }
 
@@ -275,76 +290,233 @@ pub(crate) fn erase_from_canvas(
         return;
     }
     let test_bbox = union_bounding_boxes(eraser_shapes).inflate(1.5, 1.5);
-    let mut prepared_clip: Option<PreparedClip> = None;
+    let clip_sub_bboxes = collect_sub_bboxes(eraser_shapes, 1.5);
+    let insert_limit = raw_scope_insert_index(canvas, target_layer_id, editing_scope);
+    let trailing_outside = canvas.split_off(insert_limit);
 
-    let mut updated_canvas = Vec::with_capacity(canvas.len());
+    let mut updated_canvas = Vec::with_capacity(canvas.len() + trailing_outside.len());
+    let mut overlapping_by_color: Vec<(Color32, Vec<FillShape>)> = Vec::new();
     for existing in canvas.drain(..) {
         if existing.layer_id == target_layer_id
             && existing.group_path == editing_scope
+            && existing.symbol_instance.is_none()
             && rects_overlap(existing.bounding_box(), test_bbox)
+            && shape_interacts_with_clip(&existing, eraser_shapes, &clip_sub_bboxes)
         {
-            let clip = prepared_clip.get_or_insert_with(|| PreparedClip::new(eraser_shapes));
-            updated_canvas.extend(
-                clip.subtract_from(&existing)
-                    .into_iter()
-                    .map(|s| s.with_scope(target_layer_id, editing_scope)),
-            );
+            if let Some((_, group)) = overlapping_by_color
+                .iter_mut()
+                .find(|(c, _)| *c == existing.color)
+            {
+                group.push(existing);
+            } else {
+                overlapping_by_color.push((existing.color, vec![existing]));
+            }
         } else {
             updated_canvas.push(existing);
         }
     }
+    if !overlapping_by_color.is_empty() {
+        let clip = PreparedClip::new(eraser_shapes, &clip_sub_bboxes);
+        for (color, group) in overlapping_by_color {
+            updated_canvas.extend(
+                clip.subtract_from_group(group, color)
+                    .into_iter()
+                    .map(|s| s.with_scope(target_layer_id, editing_scope)),
+            );
+        }
+    }
+    updated_canvas.extend(trailing_outside);
     *canvas = updated_canvas;
+}
+
+#[inline]
+fn seg_padded_bbox(seg: QuadBez, pad: f64) -> KRect {
+    KRect::new(
+        seg.p0.x.min(seg.p1.x).min(seg.p2.x) - pad,
+        seg.p0.y.min(seg.p1.y).min(seg.p2.y) - pad,
+        seg.p0.x.max(seg.p1.x).max(seg.p2.x) + pad,
+        seg.p0.y.max(seg.p1.y).max(seg.p2.y) + pad,
+    )
+}
+
+fn collect_sub_bboxes(shapes: &[FillShape], inflate: f64) -> Vec<KRect> {
+    let mut out = Vec::new();
+    for s in shapes {
+        for c in s.contours() {
+            for chunk in c.segments.chunks(8) {
+                if let Some(&first) = chunk.first() {
+                    let b = chunk[1..]
+                        .iter()
+                        .fold(seg_padded_bbox(first, 0.0), |acc, &seg| {
+                            acc.union(seg_padded_bbox(seg, 0.0))
+                        });
+                    out.push(b.inflate(inflate, inflate));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[inline]
+fn overlaps_any_bbox(rect: KRect, bboxes: &[KRect]) -> bool {
+    bboxes.iter().any(|&b| rects_overlap(rect, b))
+}
+
+fn shape_interacts_with_clip(
+    subj: &FillShape,
+    clip: &[FillShape],
+    clip_sub_bboxes: &[KRect],
+) -> bool {
+    if !overlaps_any_bbox(subj.bounding_box(), clip_sub_bboxes) {
+        return false;
+    }
+    if subj.contours().any(|c| {
+        c.segments
+            .iter()
+            .any(|&seg| overlaps_any_bbox(seg_padded_bbox(seg, 0.6), clip_sub_bboxes))
+    }) {
+        return true;
+    }
+    subj.exterior
+        .segments
+        .first()
+        .is_some_and(|s| clip.iter().any(|cs| cs.contains_point(s.p0)))
+        || clip.iter().any(|cs| {
+            cs.exterior
+                .segments
+                .first()
+                .is_some_and(|s| subj.contains_point(s.p0))
+        })
+}
+
+fn poly_shape_matches_input(out_poly: &OverlayShape, in_poly: &OverlayShape) -> bool {
+    out_poly.len() == in_poly.len()
+        && out_poly.iter().zip(in_poly.iter()).all(|(out_r, in_r)| {
+            let n = in_r.len();
+            if out_r.len() < 3 || out_r.len() > n {
+                return false;
+            }
+            let (out_a, out_p) = ring_area_and_perimeter_f64(out_r);
+            let (in_a, in_p) = ring_area_and_perimeter_f64(in_r);
+            if (out_a - in_a).abs() > 1e-2 || (out_p - in_p).abs() > 1e-2 {
+                return false;
+            }
+            let eq_pt = |a: [f64; 2], b: [f64; 2]| {
+                (a[0] - b[0]).abs() <= 1e-3 && (a[1] - b[1]).abs() <= 1e-3
+            };
+            let Some(s) = in_r.iter().position(|&p| eq_pt(p, out_r[0])) else {
+                return false;
+            };
+            let mut j = 0usize;
+            let fwd = out_r.iter().all(|&op| {
+                while j < n && !eq_pt(op, in_r[(s + j) % n]) {
+                    j += 1;
+                }
+                if j < n {
+                    j += 1;
+                    true
+                } else {
+                    false
+                }
+            });
+            if fwd {
+                return true;
+            }
+            let mut j = 0usize;
+            out_r.iter().all(|&op| {
+                while j < n && !eq_pt(op, in_r[(s + n - j) % n]) {
+                    j += 1;
+                }
+                if j < n {
+                    j += 1;
+                    true
+                } else {
+                    false
+                }
+            })
+        })
 }
 
 /// 複数の対象シェイプに対して繰り返し Difference（減算）を行う際に、
 /// クリップ側シェイプ群のフラットニング結果と `QuadRecord` を1回だけ事前構築して使い回すキャッシュ構造体
 struct PreparedClip<'a> {
     clip: &'a [FillShape],
-    clip_shapes: Vec<OverlayShape>,
-    clip_quads: Vec<QuadRecord>,
+    clip_sub_bboxes: &'a [KRect],
 }
 
 impl<'a> PreparedClip<'a> {
-    fn new(clip: &'a [FillShape]) -> Self {
-        let mut clip_quads = Vec::new();
-        let clip_shapes = clip
-            .iter()
-            .map(|s| flatten_shape_for_overlay(s, &mut clip_quads))
-            .filter(|r| !r.is_empty())
-            .collect();
+    fn new(clip: &'a [FillShape], clip_sub_bboxes: &'a [KRect]) -> Self {
         Self {
             clip,
-            clip_shapes,
-            clip_quads,
+            clip_sub_bboxes,
         }
     }
 
-    fn subtract_from(&self, subj: &FillShape) -> Vec<FillShape> {
-        let mut quad_table = Vec::with_capacity(16 + self.clip_quads.len());
-        let subj_poly = flatten_shape_for_overlay(subj, &mut quad_table);
-        if subj_poly.is_empty() {
-            return Vec::new();
+    fn subtract_from_group(&self, subjs: Vec<FillShape>, color: Color32) -> Vec<FillShape> {
+        let mut untouched = Vec::new();
+        let mut active_subjs = Vec::new();
+        let mut subj_polys = Vec::new();
+        let mut quad_table = Vec::new();
+        let mut direct_map = std::collections::HashMap::new();
+
+        for subj in subjs {
+            let poly = flatten_shape_for_overlay(
+                &subj,
+                &mut quad_table,
+                &mut direct_map,
+                Some(self.clip_sub_bboxes),
+            );
+            if !poly.is_empty() {
+                subj_polys.push(poly);
+                active_subjs.push(subj);
+            }
         }
-        quad_table.extend_from_slice(&self.clip_quads);
-        let min_area = adaptive_overlay_min_area(std::slice::from_ref(subj), self.clip);
-        let intersect_result = run_float_overlay(
-            std::slice::from_ref(&subj_poly),
-            &self.clip_shapes,
-            OverlayRule::Intersect,
-            OverlayFillRule::NonZero,
-            min_area,
-        );
-        if intersect_result.is_empty() {
-            return vec![subj.clone()];
+        if subj_polys.is_empty() {
+            return untouched;
         }
+        let subj_sub_bboxes = collect_sub_bboxes(&active_subjs, 1.5);
+        let clip_filter = if self.clip.len() <= 1 {
+            Some(subj_sub_bboxes.as_slice())
+        } else {
+            None
+        };
+        let clip_shapes: Vec<OverlayShape> = self
+            .clip
+            .iter()
+            .map(|s| flatten_shape_for_overlay(s, &mut quad_table, &mut direct_map, clip_filter))
+            .filter(|r| !r.is_empty())
+            .collect();
+        let min_area = adaptive_overlay_min_area(&active_subjs, self.clip);
         let overlay_result = run_float_overlay(
-            std::slice::from_ref(&subj_poly),
-            &self.clip_shapes,
+            &subj_polys,
+            &clip_shapes,
             OverlayRule::Difference,
             OverlayFillRule::NonZero,
             min_area,
         );
-        reconstruct_shapes_from_overlay(&overlay_result, &quad_table, subj.color, false)
+        let mut to_reconstruct = Vec::new();
+        let mut used_input = vec![false; active_subjs.len()];
+        for poly_shape in overlay_result {
+            if let Some(idx) = (0..active_subjs.len()).find(|&i| {
+                !used_input[i] && poly_shape_matches_input(&poly_shape, &subj_polys[i])
+            }) {
+                used_input[idx] = true;
+                untouched.push(active_subjs[idx].clone());
+            } else {
+                to_reconstruct.push(poly_shape);
+            }
+        }
+        if !to_reconstruct.is_empty() {
+            untouched.extend(reconstruct_shapes_from_overlay(
+                &to_reconstruct,
+                &quad_table,
+                &direct_map,
+                color,
+                false,
+            ));
+        }
+        untouched
     }
 }
 
@@ -372,15 +544,24 @@ pub(crate) fn boolean_operation(
     op: BoolOp,
     out_color: Color32,
 ) -> Vec<FillShape> {
+    let subj_sub_bboxes = collect_sub_bboxes(subj, 1.5);
+    let clip_sub_bboxes = collect_sub_bboxes(clip, 1.5);
+    let subj_filter = Some(clip_sub_bboxes.as_slice());
+    let clip_filter = if clip.len() <= 1 {
+        Some(subj_sub_bboxes.as_slice())
+    } else {
+        None
+    };
     let mut quad_table: Vec<QuadRecord> = Vec::new();
+    let mut direct_map: DirectQuadMap = std::collections::HashMap::new();
     let subj_shapes: Vec<OverlayShape> = subj
         .iter()
-        .map(|s| flatten_shape_for_overlay(s, &mut quad_table))
+        .map(|s| flatten_shape_for_overlay(s, &mut quad_table, &mut direct_map, subj_filter))
         .filter(|r| !r.is_empty())
         .collect();
     let clip_shapes: Vec<OverlayShape> = clip
         .iter()
-        .map(|s| flatten_shape_for_overlay(s, &mut quad_table))
+        .map(|s| flatten_shape_for_overlay(s, &mut quad_table, &mut direct_map, clip_filter))
         .filter(|r| !r.is_empty())
         .collect();
 
@@ -405,7 +586,13 @@ pub(crate) fn boolean_operation(
         OverlayFillRule::NonZero,
         min_area,
     );
-    reconstruct_shapes_from_overlay(&overlay_result, &quad_table, out_color, op == BoolOp::Union)
+    reconstruct_shapes_from_overlay(
+        &overlay_result,
+        &quad_table,
+        &direct_map,
+        out_color,
+        op == BoolOp::Union,
+    )
 }
 
 /// マーキー矩形 `clip_rect_shape` で単一シェイプ `shape` をスライスし、
@@ -415,8 +602,9 @@ pub(crate) fn slice_shape_with_marquee_rect(
     clip_rect_shape: &FillShape,
 ) -> (Vec<FillShape>, Vec<FillShape>) {
     let mut quad_table: Vec<QuadRecord> = Vec::new();
-    let subj = flatten_shape_for_overlay(shape, &mut quad_table);
-    let clip = flatten_shape_for_overlay(clip_rect_shape, &mut quad_table);
+    let mut direct_map: DirectQuadMap = std::collections::HashMap::new();
+    let subj = flatten_shape_for_overlay(shape, &mut quad_table, &mut direct_map, None);
+    let clip = flatten_shape_for_overlay(clip_rect_shape, &mut quad_table, &mut direct_map, None);
     if subj.is_empty() || clip.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -433,7 +621,13 @@ pub(crate) fn slice_shape_with_marquee_rect(
         OverlayFillRule::NonZero,
         min_area,
     );
-    let inside = reconstruct_shapes_from_overlay(&inside_rings, &quad_table, shape.color, false);
+    let inside = reconstruct_shapes_from_overlay(
+        &inside_rings,
+        &quad_table,
+        &direct_map,
+        shape.color,
+        false,
+    );
     if inside.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -444,13 +638,60 @@ pub(crate) fn slice_shape_with_marquee_rect(
         OverlayFillRule::NonZero,
         min_area,
     );
-    let outside = reconstruct_shapes_from_overlay(&outside_rings, &quad_table, shape.color, false);
+    let outside = reconstruct_shapes_from_overlay(
+        &outside_rings,
+        &quad_table,
+        &direct_map,
+        shape.color,
+        false,
+    );
     (inside, outside)
+}
+
+type DirectQuadMap = std::collections::HashMap<([i64; 2], [i64; 2]), (usize, bool)>;
+
+#[inline]
+fn quantize_pt_key(p: Point) -> [i64; 2] {
+    [(p.x * 256.0).round() as i64, (p.y * 256.0).round() as i64]
+}
+
+#[inline]
+fn quantize_coord_candidates(v: f64) -> ([i64; 2], usize) {
+    let scaled = v * 256.0;
+    let r = scaled.round();
+    let r_i = r as i64;
+    if (scaled - r).abs() > 0.40 {
+        if scaled > r {
+            ([r_i, r_i + 1], 2)
+        } else {
+            ([r_i - 1, r_i], 2)
+        }
+    } else {
+        ([r_i, r_i], 1)
+    }
+}
+
+fn insert_direct_quad_edge(map: &mut DirectQuadMap, a: Point, b: Point, qid: usize) {
+    let (axs, n_ax) = quantize_coord_candidates(a.x);
+    let (ays, n_ay) = quantize_coord_candidates(a.y);
+    let (bxs, n_bx) = quantize_coord_candidates(b.x);
+    let (bys, n_by) = quantize_coord_candidates(b.y);
+    for &ax in &axs[..n_ax] {
+        for &ay in &ays[..n_ay] {
+            for &bx in &bxs[..n_bx] {
+                for &by in &bys[..n_by] {
+                    map.entry(([ax, ay], [bx, by])).or_insert((qid, false));
+                    map.entry(([bx, by], [ax, ay])).or_insert((qid, true));
+                }
+            }
+        }
+    }
 }
 
 fn reconstruct_shapes_from_overlay(
     overlay_result: &[OverlayShape],
     quad_table: &[QuadRecord],
+    direct_map: &DirectQuadMap,
     color: Color32,
     filter_sliver_holes: bool,
 ) -> Vec<FillShape> {
@@ -462,6 +703,7 @@ fn reconstruct_shapes_from_overlay(
                 poly_shape,
                 quad_table,
                 &grid,
+                direct_map,
                 color,
                 filter_sliver_holes,
             )
@@ -492,13 +734,15 @@ fn reconstruct_fill_shape_from_rings(
     poly_shape: &[Vec<[f64; 2]>],
     quad_table: &[QuadRecord],
     grid: &QuadSpatialGrid,
+    direct_map: &DirectQuadMap,
     color: Color32,
     filter_sliver_holes: bool,
 ) -> Option<FillShape> {
     if poly_shape.is_empty() {
         return None;
     }
-    let exterior = reconstruct_or_refit_quad_contour(&poly_shape[0], quad_table, grid, true)?;
+    let exterior =
+        reconstruct_or_refit_quad_contour(&poly_shape[0], quad_table, grid, direct_map, true)?;
     let (_, ext_perim) = ring_area_and_perimeter_f64(&poly_shape[0]);
     let hole_scale = if ext_perim < 16.0 {
         (ext_perim / 16.0).clamp(0.005, 1.0)
@@ -522,7 +766,7 @@ fn reconstruct_fill_shape_from_rings(
             }
         })
         .filter_map(|hole_ring| {
-            reconstruct_or_refit_quad_contour(hole_ring, quad_table, grid, false)
+            reconstruct_or_refit_quad_contour(hole_ring, quad_table, grid, direct_map, false)
         })
         .collect();
     Some(FillShape::new(color, exterior, holes))
@@ -626,9 +870,10 @@ pub(crate) fn find_enclosed_region_at(
     }
 
     let mut quad_table: Vec<QuadRecord> = Vec::new();
+    let mut empty_direct_map: DirectQuadMap = std::collections::HashMap::new();
     let clip_shapes: Vec<OverlayShape> = candidates
         .iter()
-        .map(|s| flatten_shape_for_overlay(s, &mut quad_table))
+        .map(|s| flatten_shape_for_overlay(s, &mut quad_table, &mut empty_direct_map, None))
         .filter(|r| !r.is_empty())
         .collect();
     if clip_shapes.is_empty() {
@@ -676,9 +921,14 @@ pub(crate) fn find_enclosed_region_at(
         }
 
         let grid = cached_grid.get_or_insert_with(|| QuadSpatialGrid::new(&quad_table));
-        let Some(candidate) =
-            reconstruct_fill_shape_from_rings(&poly_shape, &quad_table, grid, fill_color, false)
-        else {
+        let Some(candidate) = reconstruct_fill_shape_from_rings(
+            &poly_shape,
+            &quad_table,
+            grid,
+            &empty_direct_map,
+            fill_color,
+            false,
+        ) else {
             continue;
         };
         if candidate.contains_point(pt) {
@@ -713,7 +963,9 @@ fn poly_shape_contains_point(poly_shape: &[Vec<[f64; 2]>], pt: Point) -> bool {
 #[derive(Clone, Copy, Debug)]
 struct QuadRecord {
     quad: QuadBez,
+    end_pt: Point,
     bbox: KRect,
+    active: bool,
 }
 
 /// `quad_table` 内の2次ベジェ曲線セグメント群を 2D 均一グリッドに空間インデックス化し、
@@ -730,7 +982,22 @@ struct QuadSpatialGrid {
 
 impl QuadSpatialGrid {
     fn new(quad_table: &[QuadRecord]) -> Self {
-        if quad_table.is_empty() {
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        let mut active_count = 0usize;
+        for rec in quad_table {
+            if !rec.active {
+                continue;
+            }
+            active_count += 1;
+            min_x = min_x.min(rec.bbox.x0);
+            min_y = min_y.min(rec.bbox.y0);
+            max_x = max_x.max(rec.bbox.x1);
+            max_y = max_y.max(rec.bbox.y1);
+        }
+        if active_count == 0 {
             return Self {
                 min_x: 0.0,
                 min_y: 0.0,
@@ -741,17 +1008,7 @@ impl QuadSpatialGrid {
                 cells: vec![Vec::new()],
             };
         }
-        let mut min_x = f64::INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-        for rec in quad_table {
-            min_x = min_x.min(rec.bbox.x0);
-            min_y = min_y.min(rec.bbox.y0);
-            max_x = max_x.max(rec.bbox.x1);
-            max_y = max_y.max(rec.bbox.y1);
-        }
-        let side = (quad_table.len() as f64).sqrt().ceil() as usize;
+        let side = (active_count as f64).sqrt().ceil() as usize;
         let cols = side.clamp(1, 32);
         let rows = side.clamp(1, 32);
         let span_x = (max_x - min_x).max(1.0);
@@ -761,6 +1018,9 @@ impl QuadSpatialGrid {
         let mut cells = vec![Vec::new(); cols * rows];
 
         for (qid, rec) in quad_table.iter().enumerate() {
+            if !rec.active {
+                continue;
+            }
             let cx0 = (((rec.bbox.x0 - min_x) * inv_cell_w).floor() as isize)
                 .clamp(0, cols as isize - 1) as usize;
             let cx1 = (((rec.bbox.x1 - min_x) * inv_cell_w).floor() as isize)
@@ -799,18 +1059,26 @@ impl QuadSpatialGrid {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum EdgeQuadMatch {
+    Direct(usize, bool),
+    Subdivided(usize, f64),
+}
+
+#[derive(Clone, Copy, Debug)]
 struct TaggedEdge {
     from: Point,
     to: Point,
-    quad_match: Option<(usize, f64)>,
+    quad_match: Option<EdgeQuadMatch>,
 }
 
 fn flatten_contour_for_overlay(
     contour: &Contour,
     is_outer: bool,
     quad_table: &mut Vec<QuadRecord>,
+    direct_map: &mut DirectQuadMap,
+    active_bboxes: Option<&[KRect]>,
 ) -> Option<Vec<[f64; 2]>> {
-    let mut ring = sample_contour_ring_for_overlay(contour, quad_table)?;
+    let mut ring = sample_contour_ring_for_overlay(contour, quad_table, direct_map, active_bboxes)?;
     let area = signed_area_f64(&ring);
     if area.abs() < 1e-6 {
         return None;
@@ -824,20 +1092,34 @@ fn flatten_contour_for_overlay(
 fn flatten_contour_preserving_direction(
     contour: &Contour,
     quad_table: &mut Vec<QuadRecord>,
+    direct_map: &mut DirectQuadMap,
 ) -> Option<Vec<[f64; 2]>> {
-    let mut ring = sample_contour_ring_for_overlay(contour, quad_table)?;
+    let mut ring = sample_contour_ring_for_overlay(contour, quad_table, direct_map, None)?;
     ring.reverse();
     Some(ring)
 }
 
-fn flatten_shape_for_overlay(shape: &FillShape, quad_table: &mut Vec<QuadRecord>) -> OverlayShape {
-    let Some(ext_ring) = flatten_contour_for_overlay(&shape.exterior, true, quad_table) else {
+fn flatten_shape_for_overlay(
+    shape: &FillShape,
+    quad_table: &mut Vec<QuadRecord>,
+    direct_map: &mut DirectQuadMap,
+    active_bboxes: Option<&[KRect]>,
+) -> OverlayShape {
+    let Some(ext_ring) = flatten_contour_for_overlay(
+        &shape.exterior,
+        true,
+        quad_table,
+        direct_map,
+        active_bboxes,
+    ) else {
         return Vec::new();
     };
     let mut rings = Vec::with_capacity(1 + shape.holes.len());
     rings.push(ext_ring);
     for hole in &shape.holes {
-        if let Some(hole_ring) = flatten_contour_for_overlay(hole, false, quad_table) {
+        if let Some(hole_ring) =
+            flatten_contour_for_overlay(hole, false, quad_table, direct_map, active_bboxes)
+        {
             rings.push(hole_ring);
         }
     }
@@ -848,14 +1130,18 @@ fn flatten_shape_for_overlay(shape: &FillShape, quad_table: &mut Vec<QuadRecord>
 /// 正のワインディング領域（`OverlayFillRule::Positive`）のみを残して1つまたは複数の `FillShape` に分割・再構築する。
 pub(crate) fn resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape> {
     let mut quad_table: Vec<QuadRecord> = Vec::new();
-    let Some(ext_ring) = flatten_contour_preserving_direction(&shape.exterior, &mut quad_table)
+    let mut direct_map: DirectQuadMap = std::collections::HashMap::new();
+    let Some(ext_ring) =
+        flatten_contour_preserving_direction(&shape.exterior, &mut quad_table, &mut direct_map)
     else {
         return Vec::new();
     };
     let mut rings = Vec::with_capacity(1 + shape.holes.len());
     rings.push(ext_ring);
     for hole in &shape.holes {
-        if let Some(hole_ring) = flatten_contour_preserving_direction(hole, &mut quad_table) {
+        if let Some(hole_ring) =
+            flatten_contour_preserving_direction(hole, &mut quad_table, &mut direct_map)
+        {
             rings.push(hole_ring);
         }
     }
@@ -867,7 +1153,7 @@ pub(crate) fn resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape> {
         OverlayFillRule::Positive,
         min_area,
     );
-    reconstruct_shapes_from_overlay(&overlay_result, &quad_table, shape.color, false)
+    reconstruct_shapes_from_overlay(&overlay_result, &quad_table, &direct_map, shape.color, false)
         .into_iter()
         .map(|s| s.with_scope(shape.layer_id, &shape.group_path))
         .collect()
@@ -889,13 +1175,16 @@ fn quad_subdivision_steps(seg: QuadBez) -> usize {
 fn sample_contour_ring_for_overlay(
     contour: &Contour,
     quad_table: &mut Vec<QuadRecord>,
+    direct_map: &mut DirectQuadMap,
+    active_bboxes: Option<&[KRect]>,
 ) -> Option<Vec<[f64; 2]>> {
-    if contour.segments.is_empty() {
+    let len = contour.segments.len();
+    if len == 0 {
         return None;
     }
 
-    let mut raw_pts = Vec::new();
-    for &seg in contour.segments.iter() {
+    let mut raw_pts: Vec<(Point, Option<usize>)> = Vec::new();
+    for (idx, &seg) in contour.segments.iter().enumerate() {
         if !seg.p0.x.is_finite()
             || !seg.p0.y.is_finite()
             || !seg.p1.x.is_finite()
@@ -905,31 +1194,80 @@ fn sample_contour_ring_for_overlay(
         {
             return None;
         }
+        let next_p0 = contour.segments[(idx + 1) % len].p0;
         let min_x = seg.p0.x.min(seg.p1.x).min(seg.p2.x) - 0.6;
         let max_x = seg.p0.x.max(seg.p1.x).max(seg.p2.x) + 0.6;
         let min_y = seg.p0.y.min(seg.p1.y).min(seg.p2.y) - 0.6;
         let max_y = seg.p0.y.max(seg.p1.y).max(seg.p2.y) + 0.6;
         let bbox = KRect::new(min_x, min_y, max_x, max_y);
-        quad_table.push(QuadRecord { quad: seg, bbox });
+        let active = len <= 3
+            || (next_p0 - seg.p0).hypot() <= 1e-3
+            || active_bboxes.is_none_or(|boxes| overlaps_any_bbox(bbox, boxes));
+        let qid = quad_table.len();
+        quad_table.push(QuadRecord {
+            quad: seg,
+            end_pt: next_p0,
+            bbox,
+            active,
+        });
 
-        let steps = quad_subdivision_steps(seg);
-        for k in 0..steps {
-            raw_pts.push(seg.eval(k as f64 / steps as f64));
+        if active {
+            let steps = quad_subdivision_steps(seg);
+            for k in 0..steps {
+                raw_pts.push((seg.eval(k as f64 / steps as f64), None));
+            }
+        } else {
+            let mid_dev = (seg.p1 - seg.p0.lerp(seg.p2, 0.5)).hypot();
+            let steps = if mid_dev <= 0.16 {
+                1
+            } else {
+                ((mid_dev / 0.16).sqrt().ceil() as usize).clamp(2, 8)
+            };
+            for k in 0..steps {
+                let pt = if k == 0 {
+                    seg.p0
+                } else {
+                    seg.eval(k as f64 / steps as f64)
+                };
+                raw_pts.push((pt, Some(qid)));
+            }
         }
     }
 
-    let deduped = dedup_closed_ring(raw_pts, 1e-4);
+    let mut deduped: Vec<(Point, Option<usize>)> = Vec::with_capacity(raw_pts.len());
+    for (pt, qid_opt) in raw_pts {
+        if let Some(last) = deduped.last_mut() {
+            if (last.0 - pt).hypot() < 1e-4 {
+                last.1 = qid_opt;
+                continue;
+            }
+        }
+        deduped.push((pt, qid_opt));
+    }
+    if deduped.len() >= 2
+        && (deduped.first().unwrap().0 - deduped.last().unwrap().0).hypot() < 1e-4
+    {
+        deduped.pop();
+    }
     if deduped.len() < 3 {
         return None;
     }
 
-    Some(deduped.into_iter().map(|p| [p.x, p.y]).collect())
+    let m = deduped.len();
+    for i in 0..m {
+        if let Some(qid) = deduped[i].1 {
+            insert_direct_quad_edge(direct_map, deduped[i].0, deduped[(i + 1) % m].0, qid);
+        }
+    }
+
+    Some(deduped.into_iter().map(|(p, _)| [p.x, p.y]).collect())
 }
 
 fn reconstruct_or_refit_quad_contour(
     ring_f64: &[[f64; 2]],
     quad_table: &[QuadRecord],
     grid: &QuadSpatialGrid,
+    direct_map: &DirectQuadMap,
     is_outer: bool,
 ) -> Option<Contour> {
     let pts = dedup_closed_ring(ring_f64.iter().map(|&[x, y]| Point::new(x, y)), 1e-4);
@@ -942,10 +1280,23 @@ fn reconstruct_or_refit_quad_contour(
         .map(|i| {
             let a = pts[i];
             let b = pts[(i + 1) % n];
+            let direct_hit = if direct_map.is_empty() {
+                None
+            } else {
+                direct_map
+                    .get(&(quantize_pt_key(a), quantize_pt_key(b)))
+                    .copied()
+            };
+            let quad_match = if let Some((qid, rev)) = direct_hit {
+                Some(EdgeQuadMatch::Direct(qid, rev))
+            } else {
+                match_edge_to_quad(a, b, quad_table, grid)
+                    .map(|(qid, t)| EdgeQuadMatch::Subdivided(qid, t))
+            };
             TaggedEdge {
                 from: a,
                 to: b,
-                quad_match: match_edge_to_quad(a, b, quad_table, grid),
+                quad_match,
             }
         })
         .collect();
@@ -955,10 +1306,15 @@ fn reconstruct_or_refit_quad_contour(
         return smooth_ring_to_quad_contour(&pts, r_est, is_outer);
     }
 
+    let edge_qid = |m: Option<EdgeQuadMatch>| match m {
+        Some(EdgeQuadMatch::Direct(id, _)) | Some(EdgeQuadMatch::Subdivided(id, _)) => Some(id),
+        None => None,
+    };
+
     let shift = (0..n)
         .find(|&i| {
-            tagged_edges[i].quad_match.map(|(id, _)| id)
-                != tagged_edges[(i + n - 1) % n].quad_match.map(|(id, _)| id)
+            edge_qid(tagged_edges[i].quad_match)
+                != edge_qid(tagged_edges[(i + n - 1) % n].quad_match)
         })
         .unwrap_or(0);
 
@@ -977,42 +1333,92 @@ fn reconstruct_or_refit_quad_contour(
     let min_area = 0.04 * scale * scale;
 
     while i < n {
-        if let Some((qid, mut prev_t)) = rotated[i].quad_match {
-            let orig_quad = quad_table[qid].quad;
-            let run_start_pt = rotated[i].from;
-            let mut run_end_pt = rotated[i].to;
-            let mut run_len = 1usize;
+        match rotated[i].quad_match {
+            Some(EdgeQuadMatch::Direct(qid, rev)) => {
+                let rec = &quad_table[qid];
+                let orig = rec.quad;
+                let run_start_pt = rotated[i].from;
+                let mut run_end_pt = rotated[i].to;
+                let mut run_len = 1usize;
 
-            while i + run_len < n {
-                let Some((next_qid, next_t)) = rotated[i + run_len].quad_match else {
-                    break;
-                };
-                if next_qid != qid || (next_t - prev_t).abs() > 0.65 {
+                while i + run_len < n {
+                    let Some(EdgeQuadMatch::Direct(next_qid, next_rev)) =
+                        rotated[i + run_len].quad_match
+                    else {
+                        break;
+                    };
+                    if next_qid != qid || next_rev != rev {
+                        break;
+                    }
+                    run_end_pt = rotated[i + run_len].to;
+                    run_len += 1;
+                }
+
+                if shift == 0 && i == 0 && run_len == n {
+                    let mid_pt = rotated[n / 2].from;
+                    segments.push(extract_sub_quad(orig, run_start_pt, mid_pt));
+                    segments.push(extract_sub_quad(orig, mid_pt, run_start_pt));
                     break;
                 }
-                run_end_pt = rotated[i + run_len].to;
-                prev_t = next_t;
-                run_len += 1;
-            }
 
-            if shift == 0 && i == 0 && run_len == n {
-                let mid_pt = rotated[n / 2].from;
-                segments.push(extract_sub_quad(orig_quad, run_start_pt, mid_pt));
-                segments.push(extract_sub_quad(orig_quad, mid_pt, run_start_pt));
-                break;
+                let expected_start = if rev { rec.end_pt } else { orig.p0 };
+                let expected_end = if rev { orig.p0 } else { rec.end_pt };
+                if (run_start_pt - expected_start).hypot() <= 1e-2
+                    && (run_end_pt - expected_end).hypot() <= 1e-2
+                {
+                    let mut q = if rev {
+                        QuadBez::new(orig.p2, orig.p1, orig.p0)
+                    } else {
+                        orig
+                    };
+                    q.p0 = run_start_pt;
+                    q.p2 = run_end_pt;
+                    segments.push(q);
+                } else {
+                    segments.push(extract_sub_quad(orig, run_start_pt, run_end_pt));
+                }
+                i += run_len;
             }
+            Some(EdgeQuadMatch::Subdivided(qid, mut prev_t)) => {
+                let orig_quad = quad_table[qid].quad;
+                let run_start_pt = rotated[i].from;
+                let mut run_end_pt = rotated[i].to;
+                let mut run_len = 1usize;
 
-            segments.push(extract_sub_quad(orig_quad, run_start_pt, run_end_pt));
-            i += run_len;
-        } else {
-            let mut chain_pts = vec![rotated[i].from, rotated[i].to];
-            let mut run_len = 1usize;
-            while i + run_len < n && rotated[i + run_len].quad_match.is_none() {
-                chain_pts.push(rotated[i + run_len].to);
-                run_len += 1;
+                while i + run_len < n {
+                    let Some(EdgeQuadMatch::Subdivided(next_qid, next_t)) =
+                        rotated[i + run_len].quad_match
+                    else {
+                        break;
+                    };
+                    if next_qid != qid || (next_t - prev_t).abs() > 0.65 {
+                        break;
+                    }
+                    run_end_pt = rotated[i + run_len].to;
+                    prev_t = next_t;
+                    run_len += 1;
+                }
+
+                if shift == 0 && i == 0 && run_len == n {
+                    let mid_pt = rotated[n / 2].from;
+                    segments.push(extract_sub_quad(orig_quad, run_start_pt, mid_pt));
+                    segments.push(extract_sub_quad(orig_quad, mid_pt, run_start_pt));
+                    break;
+                }
+
+                segments.push(extract_sub_quad(orig_quad, run_start_pt, run_end_pt));
+                i += run_len;
             }
-            segments.extend(refit_open_polyline_to_quads(&chain_pts, refit_eps));
-            i += run_len;
+            None => {
+                let mut chain_pts = vec![rotated[i].from, rotated[i].to];
+                let mut run_len = 1usize;
+                while i + run_len < n && rotated[i + run_len].quad_match.is_none() {
+                    chain_pts.push(rotated[i + run_len].to);
+                    run_len += 1;
+                }
+                segments.extend(refit_open_polyline_to_quads(&chain_pts, refit_eps));
+                i += run_len;
+            }
         }
     }
 
