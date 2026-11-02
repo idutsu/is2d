@@ -1374,13 +1374,9 @@ pub(crate) fn save_project_to_path(
 
 /// 指定されたファイルパス `path` から `ProjectDocument` を読み込み・バージョン検証して返す
 fn read_project_document(path: &Path) -> Result<ProjectDocument, String> {
-    use std::io::Read;
-    let mut file =
+    let file =
         std::fs::File::open(path).map_err(|e| format!("ファイルの読み込みに失敗しました: {e}"))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|e| format!("ファイルの読み込みに失敗しました: {e}"))?;
-    let doc: ProjectDocument = serde_json::from_slice(&bytes)
+    let doc: ProjectDocument = serde_json::from_reader(std::io::BufReader::new(file))
         .map_err(|e| format!("プロジェクトファイルの形式が正しくありません: {e}"))?;
 
     if doc.version == 0 || doc.version > PROJECT_FORMAT_VERSION {
