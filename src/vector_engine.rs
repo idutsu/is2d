@@ -1186,16 +1186,24 @@ pub(crate) fn transform_mesh_to_screen(
     if is_identity_view && !dim_backdrop {
         return out;
     }
+    let mut last_color: Option<(Color32, Color32)> = None;
     for v in &mut out.vertices {
         v.pos = Pos2::new(v.pos.x * zoom + pan.x, v.pos.y * zoom + pan.y);
         if dim_backdrop {
-            let [r, g, b, a] = v.color.to_srgba_unmultiplied();
-            v.color = Color32::from_rgba_unmultiplied(
-                ((r as u16 * 30 + 250 * 70) / 100) as u8,
-                ((g as u16 * 30 + 250 * 70) / 100) as u8,
-                ((b as u16 * 30 + 252 * 70) / 100) as u8,
-                a,
-            );
+            v.color = match last_color {
+                Some((src, dst)) if src == v.color => dst,
+                _ => {
+                    let [r, g, b, a] = v.color.to_srgba_unmultiplied();
+                    let dst = Color32::from_rgba_unmultiplied(
+                        ((r as u16 * 30 + 250 * 70) / 100) as u8,
+                        ((g as u16 * 30 + 250 * 70) / 100) as u8,
+                        ((b as u16 * 30 + 252 * 70) / 100) as u8,
+                        a,
+                    );
+                    last_color = Some((v.color, dst));
+                    dst
+                }
+            };
         }
     }
     out
@@ -1210,15 +1218,23 @@ pub(crate) fn transform_mesh_to_screen_onion(
     alpha: u8,
 ) -> Mesh {
     let mut out = mesh.clone();
+    let mut last_color: Option<(Color32, Color32)> = None;
     for v in &mut out.vertices {
         v.pos = Pos2::new(v.pos.x * zoom + pan.x, v.pos.y * zoom + pan.y);
-        let [r, g, b, _] = v.color.to_srgba_unmultiplied();
-        v.color = Color32::from_rgba_unmultiplied(
-            ((r as u16 * 35 + tint_rgb[0] as u16 * 65) / 100) as u8,
-            ((g as u16 * 35 + tint_rgb[1] as u16 * 65) / 100) as u8,
-            ((b as u16 * 35 + tint_rgb[2] as u16 * 65) / 100) as u8,
-            alpha,
-        );
+        v.color = match last_color {
+            Some((src, dst)) if src == v.color => dst,
+            _ => {
+                let [r, g, b, _] = v.color.to_srgba_unmultiplied();
+                let dst = Color32::from_rgba_unmultiplied(
+                    ((r as u16 * 35 + tint_rgb[0] as u16 * 65) / 100) as u8,
+                    ((g as u16 * 35 + tint_rgb[1] as u16 * 65) / 100) as u8,
+                    ((b as u16 * 35 + tint_rgb[2] as u16 * 65) / 100) as u8,
+                    alpha,
+                );
+                last_color = Some((v.color, dst));
+                dst
+            }
+        };
     }
     out
 }

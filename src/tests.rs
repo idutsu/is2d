@@ -13106,3 +13106,58 @@ fn test_m2_4_delete_symbol_2880_keyframes_fast_and_no_memory_growth() {
     );
 }
 
+#[test]
+fn test_m2_6_onion_and_dim_backdrop_color_cache_matches_per_vertex() {
+    use crate::vector_engine::{
+        append_mesh, transform_mesh_to_screen, transform_mesh_to_screen_onion,
+    };
+    use eframe::egui::Mesh;
+
+    let palette = [
+        Color32::from_rgb(220, 45, 55),
+        Color32::from_rgb(40, 175, 95),
+        Color32::from_rgb(55, 110, 230),
+        Color32::from_rgba_unmultiplied(240, 180, 30, 200),
+        Color32::from_rgb(220, 45, 55),
+        Color32::from_rgb(130, 60, 210),
+    ];
+    let mut combined = Mesh::default();
+    for (i, &c) in palette.iter().enumerate() {
+        let x = (i as f64) * 30.0 + 20.0;
+        let shapes = make_stroke(Point::new(x, 40.0), Point::new(x + 20.0, 90.0), 6.0, c);
+        for s in &shapes {
+            append_mesh(&mut combined, s.fill_mesh());
+        }
+    }
+    assert!(combined.vertices.len() > 50);
+
+    let tint = [45u8, 115, 245];
+    let alpha = 64u8;
+    let onion = transform_mesh_to_screen_onion(&combined, 1.25, Vec2::new(10.0, -5.0), tint, alpha);
+    assert_eq!(onion.vertices.len(), combined.vertices.len());
+    for (orig_v, out_v) in combined.vertices.iter().zip(onion.vertices.iter()) {
+        let [r, g, b, _] = orig_v.color.to_srgba_unmultiplied();
+        let expected = Color32::from_rgba_unmultiplied(
+            ((r as u16 * 35 + tint[0] as u16 * 65) / 100) as u8,
+            ((g as u16 * 35 + tint[1] as u16 * 65) / 100) as u8,
+            ((b as u16 * 35 + tint[2] as u16 * 65) / 100) as u8,
+            alpha,
+        );
+        assert_eq!(out_v.color, expected);
+    }
+
+    let dimmed = transform_mesh_to_screen(&combined, 1.25, Vec2::new(10.0, -5.0), true);
+    assert_eq!(dimmed.vertices.len(), combined.vertices.len());
+    for (orig_v, out_v) in combined.vertices.iter().zip(dimmed.vertices.iter()) {
+        let [r, g, b, a] = orig_v.color.to_srgba_unmultiplied();
+        let expected = Color32::from_rgba_unmultiplied(
+            ((r as u16 * 30 + 250 * 70) / 100) as u8,
+            ((g as u16 * 30 + 250 * 70) / 100) as u8,
+            ((b as u16 * 30 + 252 * 70) / 100) as u8,
+            a,
+        );
+        assert_eq!(out_v.color, expected);
+    }
+}
+
+
