@@ -657,6 +657,8 @@ pub(crate) struct Clipboard {
     pub(crate) paste_count: usize,
     /// `Cmd+V` による通常ペーストの累積ワールド座標オフセット（途中でズーム変更しても階段状にずらす用）
     pub(crate) paste_offset: KVec2,
+    /// コピー元の生図形群が互いに重ならず同色接触もなかったか（ペースト時の `Floating::pieces_disjoint` 引き継ぎ用）
+    pub(crate) pieces_disjoint: bool,
 }
 
 pub(crate) type ShapeId = u64;

@@ -1703,6 +1703,15 @@ fn apply_paste_clipboard(
             pasted_shapes,
             any_raw.then_some(FloatingOrigin::Paste),
         );
+        let raw = || resolved.iter().filter(|s| s.group_path.is_empty()).map(|s| s.layer_id);
+        if clipboard.pieces_disjoint
+            && (raw().all(|l| Some(l) == raw().next())
+                || (multi_layer_copy
+                    && raw().all(|l| tab.active_timeline().is_layer_editable_by_id(l))))
+        {
+            tab.session
+                .update_floating(|f| _ = f.as_mut().map(|f| f.pieces_disjoint = true));
+        }
         if !matches!(tool.tool, Tool::Select | Tool::Transform) {
             set_tool(tab, tool, Tool::Select);
         }

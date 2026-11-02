@@ -529,6 +529,7 @@ pub(crate) fn prepare_copy_selected_shapes(tab: &mut Tab, clipboard: &mut Clipbo
     clipboard.shapes = extracted;
     clipboard.paste_count = 0;
     clipboard.paste_offset = KVec2::ZERO;
+    clipboard.pieces_disjoint = tab.session.floating().is_none_or(|fl| fl.pieces_disjoint);
     capture_clipboard_symbols(tab, clipboard);
     true
 }
