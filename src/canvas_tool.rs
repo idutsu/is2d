@@ -327,8 +327,6 @@ pub(crate) enum ActiveCanvasDrag {
     PaintStroke {
         stroke: Vec<Point>,
         committed_world_mesh: egui::Mesh,
-        committed_screen_mesh: egui::Mesh,
-        committed_zoom_pan: (f32, Vec2),
         tail_outline: Vec<Point>,
         tail_mesh: egui::Mesh,
         tail_start_idx: usize,
@@ -717,7 +715,7 @@ mod scene_base_cache {
     };
     use crate::timeline::{Layer, Timeline};
     use crate::vector_engine::{
-        append_mesh, transform_mesh_to_screen, transform_mesh_to_screen_onion, FillShape,
+        append_mesh, dim_backdrop_color, onion_tint_color, transform_mesh_to_screen, FillShape,
     };
 
     struct CachedLayer {
@@ -1285,7 +1283,12 @@ mod scene_base_cache {
                     .as_ref()
                     .is_none_or(|(vk, _)| *vk != view_key);
                 if need_transform {
-                    let screen_m = transform_mesh_to_screen(&cl.world_mesh, zoom, pan, true);
+                    let screen_m = transform_mesh_to_screen(
+                        cl.world_mesh.clone(),
+                        zoom,
+                        pan,
+                        Some(&dim_backdrop_color),
+                    );
                     cl.screen_cache = Some((view_key, screen_m));
                 }
                 if let Some((_, ref screen_m)) = cl.screen_cache {
@@ -1448,12 +1451,11 @@ mod scene_base_cache {
                 self.entries.len() - 1
             };
             let world_batch = self.entries[idx].world_mesh.as_ref()?;
-            Some(Arc::new(transform_mesh_to_screen_onion(
-                world_batch,
+            Some(Arc::new(transform_mesh_to_screen(
+                world_batch.clone(),
                 zoom,
                 pan,
-                tint_rgb,
-                alpha,
+                Some(&|c| onion_tint_color(c, tint_rgb, alpha)),
             )))
         }
     }

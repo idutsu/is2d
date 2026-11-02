@@ -2,11 +2,11 @@ use eframe::egui::{self, Color32, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::Point;
 
 use crate::canvas_tool::{ActiveCanvasDrag, Tab, Tool};
-use crate::doc_actions::{Action, ActionHost, apply};
+use crate::doc_actions::{apply, Action, ActionHost};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{bucket_fill_at, commit_raw_outline};
 use crate::vector_engine::{
-    MAX_VIEW_ZOOM, MIN_VIEW_ZOOM, append_mesh, tessellate_raw_polygon, transform_mesh_to_screen,
+    append_mesh, tessellate_raw_polygon, transform_mesh_to_screen, MAX_VIEW_ZOOM, MIN_VIEW_ZOOM,
 };
 use crate::vector_stroke::generate_brush_outline_at_zoom;
 
@@ -57,12 +57,9 @@ pub(crate) fn handle_brush_or_eraser_input(
             let tail_outline = generate_brush_outline_at_zoom(&stroke, base_r, z);
             let tail_mesh = tessellate_raw_polygon(&tail_outline, preview_color);
             let tab = host.tab_mut();
-            let zp = (tab.view.zoom, tab.view.pan);
             tab.session.drag = ActiveCanvasDrag::PaintStroke {
                 stroke,
                 committed_world_mesh: egui::Mesh::default(),
-                committed_screen_mesh: egui::Mesh::default(),
-                committed_zoom_pan: zp,
                 tail_outline,
                 tail_mesh,
                 tail_start_idx: 0,
@@ -70,38 +67,23 @@ pub(crate) fn handle_brush_or_eraser_input(
         }
     } else if response.dragged_by(PointerButton::Primary) {
         let tab = host.tab_mut();
-        let curr_zp = (tab.view.zoom, tab.view.pan);
         if let (
             Some(pt),
             ActiveCanvasDrag::PaintStroke {
                 stroke,
                 committed_world_mesh,
-                committed_screen_mesh,
-                committed_zoom_pan,
                 tail_outline,
                 tail_mesh,
                 tail_start_idx,
             },
         ) = (mouse_pt, &mut tab.session.drag)
         {
-            if *committed_zoom_pan != curr_zp {
-                *committed_screen_mesh = transform_mesh_to_screen(
-                    committed_world_mesh,
-                    curr_zp.0,
-                    curr_zp.1,
-                    false,
-                );
-                *committed_zoom_pan = curr_zp;
-            }
             if stroke
                 .last()
                 .is_none_or(|&last| (pt - last).hypot() >= min_sample_dist)
             {
                 if stroke.len().saturating_sub(*tail_start_idx) >= STROKE_TAIL_CHUNK_LEN {
                     append_mesh(committed_world_mesh, tail_mesh);
-                    let screen_chunk =
-                        transform_mesh_to_screen(tail_mesh, curr_zp.0, curr_zp.1, false);
-                    append_mesh(committed_screen_mesh, &screen_chunk);
                     *tail_start_idx = stroke.len().saturating_sub(2);
                 }
                 stroke.push(pt);
@@ -164,12 +146,7 @@ pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> 
     let scene = tab.scene();
     let tl = tab.active_timeline();
     let num_layers = tl.layers.len();
-    if num_layers == 1
-        && tl
-            .layers
-            .first()
-            .is_some_and(|l| l.visible && !l.locked)
-    {
+    if num_layers == 1 && tl.layers.first().is_some_and(|l| l.visible && !l.locked) {
         return scene
             .iter()
             .rev()
@@ -224,8 +201,6 @@ pub(crate) fn draw_active_stroke_preview(
 ) {
     let ActiveCanvasDrag::PaintStroke {
         committed_world_mesh,
-        committed_screen_mesh,
-        committed_zoom_pan,
         tail_outline,
         tail_mesh,
         ..
@@ -237,24 +212,19 @@ pub(crate) fn draw_active_stroke_preview(
         return;
     }
     if !committed_world_mesh.is_empty() {
-        let mesh = if *committed_zoom_pan == (tab.view.zoom, tab.view.pan) {
-            committed_screen_mesh.clone()
-        } else {
-            transform_mesh_to_screen(
-                committed_world_mesh,
-                tab.view.zoom,
-                tab.view.pan,
-                false,
-            )
-        };
-        artwork_painter.add(egui::Shape::Mesh(mesh));
+        artwork_painter.add(egui::Shape::Mesh(transform_mesh_to_screen(
+            committed_world_mesh.clone(),
+            tab.view.zoom,
+            tab.view.pan,
+            None,
+        )));
     }
     if !tail_mesh.is_empty() {
         artwork_painter.add(egui::Shape::Mesh(transform_mesh_to_screen(
-            tail_mesh,
+            tail_mesh.clone(),
             tab.view.zoom,
             tab.view.pan,
-            false,
+            None,
         )));
     }
 

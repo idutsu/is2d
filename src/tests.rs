@@ -2415,8 +2415,6 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
     app.session.drag = crate::canvas_tool::ActiveCanvasDrag::PaintStroke {
         stroke,
         committed_world_mesh: egui::Mesh::default(),
-        committed_screen_mesh: egui::Mesh::default(),
-        committed_zoom_pan: (1.0, Vec2::ZERO),
         tail_outline,
         tail_mesh,
         tail_start_idx: 0,
@@ -13210,9 +13208,9 @@ fn test_m2_4_delete_symbol_2880_keyframes_fast_and_no_memory_growth() {
 #[test]
 fn test_m2_6_onion_and_dim_backdrop_color_cache_matches_per_vertex() {
     use crate::vector_engine::{
-        append_mesh, transform_mesh_to_screen, transform_mesh_to_screen_onion,
+        append_mesh, dim_backdrop_color, onion_tint_color, transform_mesh_to_screen,
     };
-    use eframe::egui::Mesh;
+    use eframe::egui::{Mesh, Pos2};
 
     let palette = [
         Color32::from_rgb(220, 45, 55),
@@ -13232,30 +13230,53 @@ fn test_m2_6_onion_and_dim_backdrop_color_cache_matches_per_vertex() {
     }
     assert!(combined.vertices.len() > 50);
 
-    let tint = [45u8, 115, 245];
-    let alpha = 64u8;
-    let onion = transform_mesh_to_screen_onion(&combined, 1.25, Vec2::new(10.0, -5.0), tint, alpha);
-    assert_eq!(onion.vertices.len(), combined.vertices.len());
-    for (orig_v, out_v) in combined.vertices.iter().zip(onion.vertices.iter()) {
-        let [r, g, b, _] = orig_v.color.to_srgba_unmultiplied();
-        let expected = Color32::from_rgba_unmultiplied(
-            ((r as u16 * 35 + tint[0] as u16 * 65) / 100) as u8,
-            ((g as u16 * 35 + tint[1] as u16 * 65) / 100) as u8,
-            ((b as u16 * 35 + tint[2] as u16 * 65) / 100) as u8,
-            alpha,
-        );
-        assert_eq!(out_v.color, expected);
+    let zoom = 1.25f32;
+    let pan = Vec2::new(10.0, -5.0);
+
+    // (a) 色を変えない場合
+    let plain = transform_mesh_to_screen(combined.clone(), zoom, pan, None);
+    assert_eq!(plain.vertices.len(), combined.vertices.len());
+    for (orig_v, out_v) in combined.vertices.iter().zip(plain.vertices.iter()) {
+        let expected_pos = Pos2::new(orig_v.pos.x * zoom + pan.x, orig_v.pos.y * zoom + pan.y);
+        assert_eq!(out_v.pos, expected_pos);
+        assert_eq!(out_v.color, orig_v.color);
     }
 
-    let dimmed = transform_mesh_to_screen(&combined, 1.25, Vec2::new(10.0, -5.0), true);
+    // (b) 背景を薄く見せる (dim_backdrop) 場合
+    let dimmed = transform_mesh_to_screen(combined.clone(), zoom, pan, Some(&dim_backdrop_color));
     assert_eq!(dimmed.vertices.len(), combined.vertices.len());
     for (orig_v, out_v) in combined.vertices.iter().zip(dimmed.vertices.iter()) {
+        let expected_pos = Pos2::new(orig_v.pos.x * zoom + pan.x, orig_v.pos.y * zoom + pan.y);
+        assert_eq!(out_v.pos, expected_pos);
         let [r, g, b, a] = orig_v.color.to_srgba_unmultiplied();
         let expected = Color32::from_rgba_unmultiplied(
             ((r as u16 * 30 + 250 * 70) / 100) as u8,
             ((g as u16 * 30 + 250 * 70) / 100) as u8,
             ((b as u16 * 30 + 252 * 70) / 100) as u8,
             a,
+        );
+        assert_eq!(out_v.color, expected);
+    }
+
+    // (c) オニオンスキンの色の場合
+    let tint = [45u8, 115, 245];
+    let alpha = 64u8;
+    let onion = transform_mesh_to_screen(
+        combined.clone(),
+        zoom,
+        pan,
+        Some(&|c| onion_tint_color(c, tint, alpha)),
+    );
+    assert_eq!(onion.vertices.len(), combined.vertices.len());
+    for (orig_v, out_v) in combined.vertices.iter().zip(onion.vertices.iter()) {
+        let expected_pos = Pos2::new(orig_v.pos.x * zoom + pan.x, orig_v.pos.y * zoom + pan.y);
+        assert_eq!(out_v.pos, expected_pos);
+        let [r, g, b, _] = orig_v.color.to_srgba_unmultiplied();
+        let expected = Color32::from_rgba_unmultiplied(
+            ((r as u16 * 35 + tint[0] as u16 * 65) / 100) as u8,
+            ((g as u16 * 35 + tint[1] as u16 * 65) / 100) as u8,
+            ((b as u16 * 35 + tint[2] as u16 * 65) / 100) as u8,
+            alpha,
         );
         assert_eq!(out_v.color, expected);
     }

@@ -407,10 +407,14 @@ impl FillShape {
             }
         }
         let screen_mesh = Arc::new(transform_mesh_to_screen(
-            self.fill_mesh(),
+            (**self.fill_mesh()).clone(),
             zoom,
             pan,
-            dim_backdrop,
+            if dim_backdrop {
+                Some(&dim_backdrop_color)
+            } else {
+                None
+            },
         ));
         *self.screen_mesh_cache.lock() = Some((key, Arc::clone(&screen_mesh)));
         screen_mesh
@@ -755,7 +759,12 @@ impl FillShape {
             }
         }
         let world_sel = self.selection_overlay_mesh(zoom);
-        let screen_sel = Arc::new(transform_mesh_to_screen(&world_sel, zoom, pan, false));
+        let screen_sel = Arc::new(transform_mesh_to_screen(
+            (*world_sel).clone(),
+            zoom,
+            pan,
+            None,
+        ));
         *self.selection_screen_mesh.lock() = Some((key, Arc::clone(&screen_sel)));
         screen_sel
     }
@@ -1148,69 +1157,55 @@ fn tessellate_lyon_path(
     }
 }
 
-/// ワールド座標で構築された `Mesh` を現在のビューポート（`zoom`, `pan`）に合わせてスクリーン座標へ変換する
+/// シンボルインプレイス編集時の親シーン背景表示用に、頂点色を薄くブレンドする
+#[inline]
+pub(crate) fn dim_backdrop_color(c: Color32) -> Color32 {
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    Color32::from_rgba_unmultiplied(
+        ((r as u16 * 30 + 250 * 70) / 100) as u8,
+        ((g as u16 * 30 + 250 * 70) / 100) as u8,
+        ((b as u16 * 30 + 252 * 70) / 100) as u8,
+        a,
+    )
+}
+
+/// オニオンスキン表示用に、頂点色を指定されたティント色・不透明度へブレンドする
+#[inline]
+pub(crate) fn onion_tint_color(c: Color32, tint_rgb: [u8; 3], alpha: u8) -> Color32 {
+    let [r, g, b, _] = c.to_srgba_unmultiplied();
+    Color32::from_rgba_unmultiplied(
+        ((r as u16 * 35 + tint_rgb[0] as u16 * 65) / 100) as u8,
+        ((g as u16 * 35 + tint_rgb[1] as u16 * 65) / 100) as u8,
+        ((b as u16 * 35 + tint_rgb[2] as u16 * 65) / 100) as u8,
+        alpha,
+    )
+}
+
+/// ワールド座標で構築された `Mesh` を複製せずその場でスクリーン座標へ変換し、任意の頂点色変換 `map_color` を適用して返す
 pub(crate) fn transform_mesh_to_screen(
-    mesh: &Mesh,
+    mut mesh: Mesh,
     zoom: f32,
     pan: Vec2,
-    dim_backdrop: bool,
+    map_color: Option<&dyn Fn(Color32) -> Color32>,
 ) -> Mesh {
-    let mut out = mesh.clone();
-    let is_identity_view = (zoom - 1.0).abs() < 1e-5 && pan == Vec2::ZERO;
-    if is_identity_view && !dim_backdrop {
-        return out;
+    if (zoom - 1.0).abs() < 1e-5 && pan == Vec2::ZERO && map_color.is_none() {
+        return mesh;
     }
     let mut last_color: Option<(Color32, Color32)> = None;
-    for v in &mut out.vertices {
+    for v in &mut mesh.vertices {
         v.pos = Pos2::new(v.pos.x * zoom + pan.x, v.pos.y * zoom + pan.y);
-        if dim_backdrop {
+        if let Some(f) = map_color {
             v.color = match last_color {
                 Some((src, dst)) if src == v.color => dst,
                 _ => {
-                    let [r, g, b, a] = v.color.to_srgba_unmultiplied();
-                    let dst = Color32::from_rgba_unmultiplied(
-                        ((r as u16 * 30 + 250 * 70) / 100) as u8,
-                        ((g as u16 * 30 + 250 * 70) / 100) as u8,
-                        ((b as u16 * 30 + 252 * 70) / 100) as u8,
-                        a,
-                    );
+                    let dst = f(v.color);
                     last_color = Some((v.color, dst));
                     dst
                 }
             };
         }
     }
-    out
-}
-
-/// オニオンスキン表示用に、ワールド座標の `Mesh` をスクリーン座標へ変換しつつ指定されたティント色・不透明度へブレンドする
-pub(crate) fn transform_mesh_to_screen_onion(
-    mesh: &Mesh,
-    zoom: f32,
-    pan: Vec2,
-    tint_rgb: [u8; 3],
-    alpha: u8,
-) -> Mesh {
-    let mut out = mesh.clone();
-    let mut last_color: Option<(Color32, Color32)> = None;
-    for v in &mut out.vertices {
-        v.pos = Pos2::new(v.pos.x * zoom + pan.x, v.pos.y * zoom + pan.y);
-        v.color = match last_color {
-            Some((src, dst)) if src == v.color => dst,
-            _ => {
-                let [r, g, b, _] = v.color.to_srgba_unmultiplied();
-                let dst = Color32::from_rgba_unmultiplied(
-                    ((r as u16 * 35 + tint_rgb[0] as u16 * 65) / 100) as u8,
-                    ((g as u16 * 35 + tint_rgb[1] as u16 * 65) / 100) as u8,
-                    ((b as u16 * 35 + tint_rgb[2] as u16 * 65) / 100) as u8,
-                    alpha,
-                );
-                last_color = Some((v.color, dst));
-                dst
-            }
-        };
-    }
-    out
+    mesh
 }
 
 /// 複数の `Mesh` を1つのバッチ `Mesh` に結合する（セル単位の一括キャッシュ構築用）

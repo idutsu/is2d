@@ -9,7 +9,8 @@ pub(crate) use crate::timeline::interpolate_affine_with_pivot;
 use crate::timeline::{Cel, Layer, Timeline};
 pub(crate) use crate::timeline::{ResolvedCelSig, SymbolInstance, TweenRotate, TweenState};
 use crate::vector_engine::{
-    next_shape_id, transform_mesh_to_screen, union_bounding_boxes, Contour, FillShape, SyncCache,
+    dim_backdrop_color, next_shape_id, transform_mesh_to_screen, union_bounding_boxes, Contour,
+    FillShape, SyncCache,
 };
 pub(crate) use crate::vector_engine::{SymbolInstanceBinding, SymbolLoopMode};
 
@@ -274,7 +275,12 @@ impl SymbolDef {
             }
         }
         let (_, world_mesh) = cache.local_bounds_and_mesh.as_ref()?;
-        let scr = Arc::new(transform_mesh_to_screen(world_mesh, scale, pan, false));
+        let scr = Arc::new(transform_mesh_to_screen(
+            world_mesh.clone(),
+            scale,
+            pan,
+            None,
+        ));
         cache.screen_mesh = Some((scr_key, Arc::clone(&scr)));
         Some(scr)
     }
@@ -992,10 +998,14 @@ impl Timeline {
         let world_batch =
             self.build_cel_world_batch_mesh(layer_idx, frame, world_xform, library)?;
         Some(Arc::new(transform_mesh_to_screen(
-            &world_batch,
+            world_batch,
             zoom,
             pan,
-            dim_backdrop,
+            if dim_backdrop {
+                Some(&dim_backdrop_color)
+            } else {
+                None
+            },
         )))
     }
 }
