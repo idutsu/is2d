@@ -69,6 +69,112 @@ fn merge_shapes_into_canvas_inner(
     }
 }
 
+fn raw_scope_insert_index(
+    canvas: &[FillShape],
+    target_layer_id: u64,
+    target_group_path: &[u64],
+) -> usize {
+    canvas
+        .iter()
+        .rposition(|s| {
+            s.layer_id == target_layer_id
+                && s.group_path == target_group_path
+                && s.symbol_instance.is_none()
+        })
+        .map(|pos| pos + 1)
+        .or_else(|| {
+            canvas.iter().position(|s| {
+                s.layer_id == target_layer_id
+                    && s.is_in_editing_scope(target_group_path)
+                    && !s.is_raw_at_scope(target_group_path)
+            })
+        })
+        .or_else(|| {
+            canvas
+                .iter()
+                .rposition(|s| {
+                    s.layer_id == target_layer_id && s.is_in_editing_scope(target_group_path)
+                })
+                .map(|pos| pos + 1)
+        })
+        .or_else(|| {
+            canvas
+                .iter()
+                .rposition(|s| s.layer_id == target_layer_id)
+                .map(|pos| pos + 1)
+        })
+        .unwrap_or(canvas.len())
+}
+
+/// 互いに重ならず同色で接する片もない `Floating::pieces`（`pieces_disjoint == true`）をキャンバスへマージする
+pub(crate) fn merge_disjoint_pieces_into_canvas(
+    canvas: &mut Vec<FillShape>,
+    pieces: Vec<FillShape>,
+) {
+    if pieces.is_empty() {
+        return;
+    }
+    let base_raw_bboxes: Vec<(u64, Vec<u64>, KRect)> = canvas
+        .iter()
+        .filter(|s| s.symbol_instance.is_none())
+        .map(|s| (s.layer_id, s.group_path.clone(), s.bounding_box()))
+        .collect();
+
+    let mut non_overlapping_groups: Vec<(u64, Vec<u64>, Vec<FillShape>)> = Vec::new();
+    let mut overlapping_batches: Vec<(u64, Vec<u64>, Color32, Vec<FillShape>)> = Vec::new();
+
+    let piece_meta: Vec<(u64, Vec<u64>, Color32, KRect)> = pieces
+        .iter()
+        .map(|p| (p.layer_id, p.group_path.clone(), p.color, p.bounding_box()))
+        .collect();
+
+    for (i, piece) in pieces.into_iter().enumerate() {
+        let p_bbox = piece_meta[i].3.inflate(1.5, 1.5);
+        let overlaps_base = base_raw_bboxes.iter().any(|(lid, gp, b_bbox)| {
+            *lid == piece.layer_id && *gp == piece.group_path && rects_overlap(*b_bbox, p_bbox)
+        }) || piece_meta.iter().enumerate().any(|(j, (lid, gp, col, b_bbox))| {
+            i != j
+                && *lid == piece.layer_id
+                && *gp == piece.group_path
+                && *col == piece.color
+                && rects_overlap(*b_bbox, p_bbox)
+        });
+        if overlaps_base {
+            if let Some((_, _, _, batch)) = overlapping_batches.iter_mut().find(|(lid, gp, c, _)| {
+                *lid == piece.layer_id && *gp == piece.group_path && *c == piece.color
+            }) {
+                batch.push(piece);
+            } else {
+                overlapping_batches.push((
+                    piece.layer_id,
+                    piece.group_path.clone(),
+                    piece.color,
+                    vec![piece],
+                ));
+            }
+        } else if let Some((_, _, group)) = non_overlapping_groups
+            .iter_mut()
+            .find(|(lid, gp, _)| *lid == piece.layer_id && *gp == piece.group_path)
+        {
+            group.push(piece);
+        } else {
+            non_overlapping_groups.push((
+                piece.layer_id,
+                piece.group_path.clone(),
+                vec![piece],
+            ));
+        }
+    }
+
+    for (_, _, _, batch) in overlapping_batches {
+        merge_homogeneous_batch_into_canvas(canvas, batch, true);
+    }
+    for (lid, gp, group) in non_overlapping_groups {
+        let insert_pos = raw_scope_insert_index(canvas, lid, &gp);
+        canvas.splice(insert_pos..insert_pos, group);
+    }
+}
+
 fn merge_homogeneous_batch_into_canvas(
     canvas: &mut Vec<FillShape>,
     incoming: Vec<FillShape>,
@@ -82,36 +188,7 @@ fn merge_homogeneous_batch_into_canvas(
     let target_group_path = incoming[0].group_path.clone();
     let test_bbox = union_bounding_boxes(&incoming).inflate(1.5, 1.5);
 
-    let insert_limit = canvas
-        .iter()
-        .rposition(|s| {
-            s.layer_id == target_layer_id
-                && s.group_path == target_group_path
-                && s.symbol_instance.is_none()
-        })
-        .map(|pos| pos + 1)
-        .or_else(|| {
-            canvas.iter().position(|s| {
-                s.layer_id == target_layer_id
-                    && s.is_in_editing_scope(&target_group_path)
-                    && !s.is_raw_at_scope(&target_group_path)
-            })
-        })
-        .or_else(|| {
-            canvas
-                .iter()
-                .rposition(|s| {
-                    s.layer_id == target_layer_id && s.is_in_editing_scope(&target_group_path)
-                })
-                .map(|pos| pos + 1)
-        })
-        .or_else(|| {
-            canvas
-                .iter()
-                .rposition(|s| s.layer_id == target_layer_id)
-                .map(|pos| pos + 1)
-        })
-        .unwrap_or(canvas.len());
+    let insert_limit = raw_scope_insert_index(canvas, target_layer_id, &target_group_path);
     let trailing_outside = canvas.split_off(insert_limit);
 
     let mut updated_canvas =

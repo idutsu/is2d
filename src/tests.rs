@@ -12238,6 +12238,7 @@ fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
         remainder: Vec::new(),
         hidden: HashSet::new(),
         modified: true,
+        pieces_disjoint: false,
     }));
     assert_eq!(app.scene().len(), 1);
     assert_eq!(app.scene().get(0).unwrap().color, Color32::RED);
@@ -13159,5 +13160,237 @@ fn test_m2_6_onion_and_dim_backdrop_color_cache_matches_per_vertex() {
         assert_eq!(out_v.color, expected);
     }
 }
+
+#[test]
+fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup() {
+    use crate::doc_actions::{apply, Action};
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    let palette = [
+        Color32::from_rgb(220, 50, 50),
+        Color32::from_rgb(50, 180, 80),
+        Color32::from_rgb(50, 110, 220),
+        Color32::from_rgb(230, 160, 40),
+    ];
+
+    let assert_same_canvas = |a: &Is2dApp, b: &Is2dApp, label: &str| {
+        for (la, lb) in a.doc.root.layers.iter().zip(b.doc.root.layers.iter()) {
+            let sa = &la.cel_at(0).unwrap().shapes;
+            let sb = &lb.cel_at(0).unwrap().shapes;
+            let mut counts_a: HashMap<(Vec<u64>, Color32), usize> = HashMap::new();
+            let mut counts_b: HashMap<(Vec<u64>, Color32), usize> = HashMap::new();
+            for s in sa.iter() {
+                *counts_a.entry((s.group_path.clone(), s.color)).or_default() += 1;
+            }
+            for s in sb.iter() {
+                *counts_b.entry((s.group_path.clone(), s.color)).or_default() += 1;
+            }
+            assert_eq!(
+                counts_a, counts_b,
+                "{label}: レイヤー {} のスコープ・色ごとの図形数が一致すること",
+                la.id
+            );
+
+            for gx in (40..=560).step_by(20) {
+                for gy in (40..=360).step_by(20) {
+                    let pt = Point::new(gx as f64, gy as f64);
+                    let col_a = sa
+                        .iter()
+                        .rev()
+                        .find(|s| s.group_path.is_empty() && s.contains_point(pt))
+                        .map(|s| s.color);
+                    let col_b = sb
+                        .iter()
+                        .rev()
+                        .find(|s| s.group_path.is_empty() && s.contains_point(pt))
+                        .map(|s| s.color);
+                    assert_eq!(
+                        col_a, col_b,
+                        "{label}: レイヤー {} の格子点 ({gx}, {gy}) の色が一致すること",
+                        la.id
+                    );
+                }
+            }
+        }
+    };
+
+    let mut seed = 0x9876_5432_10fe_dcba_u64;
+    let mut next_u64 = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        seed
+    };
+
+    for trial in 0..8 {
+        let mut base_app = Is2dApp::default();
+        let _ = apply(&mut base_app, Action::AddLayer);
+        for l_idx in 0..2 {
+            let _ = apply(
+                &mut base_app,
+                Action::SwitchLayerAndFrame {
+                    layer_idx: l_idx,
+                    frame: 0,
+                },
+            );
+            for i in 0..10 {
+                let x0 = 60.0 + (next_u64() % 420) as f64;
+                let y0 = 60.0 + (next_u64() % 240) as f64;
+                let x1 = x0 + 30.0 + (next_u64() % 45) as f64;
+                let y1 = y0 + ((next_u64() % 41) as f64 - 20.0);
+                let _ = apply(
+                    &mut base_app,
+                    Action::PaintStroke {
+                        points: vec![Point::new(x0, y0), Point::new(x1, y1)],
+                        radius: 6.0,
+                        color: palette[i % palette.len()],
+                    },
+                );
+            }
+        }
+        let dx = ((next_u64() % 51) as f64) - 25.0;
+        let dy = ((next_u64() % 51) as f64) - 25.0;
+        let delta = KVec2::new(if dx.abs() < 2.0 { 7.0 } else { dx }, dy);
+
+        let clone_app = |src: &Is2dApp| {
+            let mut dst = Is2dApp::default();
+            dst.tabs[0].doc = src.doc.clone();
+            dst.refresh_scene_base();
+            dst
+        };
+
+        // 1. 持ち上げ (Lift): 一部または全体を選んで移動 → 確定
+        {
+            let mut app_fast = clone_app(&base_app);
+            let mut app_ref = clone_app(&base_app);
+            for a in [&mut app_fast, &mut app_ref] {
+                let m_rect = kurbo::Rect::new(80.0, 70.0, 440.0, 280.0);
+                for idx in 0..a.scene().len() {
+                    let s = a.scene().get(idx).unwrap();
+                    if vector_engine::rects_overlap(s.bounding_box(), m_rect) {
+                        let sid = s.shape_id;
+                        a.session.selection.shapes.insert(sid);
+                    }
+                }
+                let _ = apply(a, Action::NudgeSelection { delta });
+            }
+            assert!(
+                app_fast
+                    .session
+                    .floating()
+                    .is_some_and(|fl| fl.pieces_disjoint)
+            );
+            app_ref.session.update_floating(|fl_opt| {
+                if let Some(fl) = fl_opt {
+                    fl.pieces_disjoint = false;
+                }
+            });
+            let _ = apply(&mut app_fast, Action::Deselect);
+            let _ = apply(&mut app_ref, Action::Deselect);
+            assert_same_canvas(&app_fast, &app_ref, &format!("Lift trial {trial}"));
+        }
+
+        // 2. スライス (Marquee Slice): 矩形選択で切って移動 → 確定
+        {
+            let mut app_fast = clone_app(&base_app);
+            let mut app_ref = clone_app(&base_app);
+            for a in [&mut app_fast, &mut app_ref] {
+                let _ = apply(
+                    a,
+                    Action::SelectMarquee {
+                        p0: Point::new(120.0, 85.0),
+                        p1: Point::new(400.0, 260.0),
+                        additive: false,
+                    },
+                );
+                let _ = apply(a, Action::NudgeSelection { delta });
+            }
+            if app_fast.session.floating().is_some() {
+                assert!(
+                    app_fast
+                        .session
+                        .floating()
+                        .is_some_and(|fl| fl.pieces_disjoint)
+                );
+            }
+            app_ref.session.update_floating(|fl_opt| {
+                if let Some(fl) = fl_opt {
+                    fl.pieces_disjoint = false;
+                }
+            });
+            let _ = apply(&mut app_fast, Action::Deselect);
+            let _ = apply(&mut app_ref, Action::Deselect);
+            assert_same_canvas(&app_fast, &app_ref, &format!("Slice trial {trial}"));
+        }
+
+        // 3. Alt 複製 (AltDuplicate): 全選択または矩形選択を Alt 複製移動 → 確定
+        {
+            let mut app_fast = clone_app(&base_app);
+            let mut app_ref = clone_app(&base_app);
+            for a in [&mut app_fast, &mut app_ref] {
+                let _ = apply(a, Action::SelectAll);
+                let _ = apply(
+                    a,
+                    Action::FinishMoveSelectionDrag {
+                        total_delta: delta,
+                        alt_duplicate: true,
+                    },
+                );
+            }
+            assert!(
+                app_fast
+                    .session
+                    .floating()
+                    .is_some_and(|fl| fl.pieces_disjoint)
+            );
+            app_ref.session.update_floating(|fl_opt| {
+                if let Some(fl) = fl_opt {
+                    fl.pieces_disjoint = false;
+                }
+            });
+            let _ = apply(&mut app_fast, Action::Deselect);
+            let _ = apply(&mut app_ref, Action::Deselect);
+            assert_same_canvas(&app_fast, &app_ref, &format!("AltDup trial {trial}"));
+        }
+    }
+
+    // 4. 作品 A 相当（3レイヤー×60ストローク）の1コマを全選択して少し動かし、選択解除が 50ms 以下であること
+    let mut dense_app = Is2dApp::default();
+    let _ = apply(&mut dense_app, Action::AddLayer);
+    let _ = apply(&mut dense_app, Action::AddLayer);
+    for l_idx in 0..3 {
+        let lid = dense_app.doc.root.layers[l_idx].id;
+        let mut shapes = Vec::new();
+        for i in 0..60 {
+            let x = 40.0 + ((i % 10) as f64) * 80.0;
+            let y = 40.0 + ((i / 10) as f64) * 70.0;
+            let mut s = make_stroke(
+                Point::new(x, y),
+                Point::new(x + 45.0, y + 15.0),
+                5.0,
+                Color32::from_rgb(((i * 37) % 255) as u8, ((l_idx * 70 + i * 13) % 255) as u8, 180),
+            )
+            .remove(0);
+            s.layer_id = lid;
+            shapes.push(s);
+        }
+        dense_app.doc.root.layers[l_idx].keyframe_mut(0).cel = timeline::Cel::new(shapes);
+    }
+    dense_app.refresh_scene_base();
+    let _ = apply(&mut dense_app, Action::SelectAll);
+    let _ = apply(
+        &mut dense_app,
+        Action::NudgeSelection {
+            delta: KVec2::new(5.0, 3.0),
+        },
+    );
+    let t0 = Instant::now();
+    let _ = apply(&mut dense_app, Action::Deselect);
+    let dt_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    assert!(
+        dt_ms <= 50.0,
+        "全選択して少し動かした後の選択解除が 50ms 以下であること (実測: {dt_ms:.3}ms)"
+    );
+}
+
 
 

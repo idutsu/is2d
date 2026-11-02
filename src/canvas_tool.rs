@@ -9,7 +9,7 @@ use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 pub(crate) use crate::symbol::Document;
 use crate::symbol::{EditPath, SymbolDef};
 use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
-use crate::vector_boolean::merge_shapes_into_canvas;
+use crate::vector_boolean::{merge_disjoint_pieces_into_canvas, merge_shapes_into_canvas};
 use crate::vector_engine::{FillShape, SyncCache};
 
 #[cfg(test)]
@@ -1863,6 +1863,8 @@ pub(crate) struct Floating {
     pub(crate) hidden: HashSet<ShapeId>,
     /// 確定時に選択中の生図形をベース図形へ結合（Merge Drawing）する必要があるか
     pub(crate) modified: bool,
+    /// 浮いている片同士が重ならず、同じレイヤー・スコープ・色で接する片もないか
+    pub(crate) pieces_disjoint: bool,
 }
 
 #[inline]
@@ -1902,6 +1904,7 @@ impl Floating {
     pub(crate) fn matches_undo_snapshot(&self, other: &Self) -> bool {
         self.origin == other.origin
             && self.modified == other.modified
+            && self.pieces_disjoint == other.pieces_disjoint
             && self.hidden == other.hidden
             && self.pieces.len() == other.pieces.len()
             && self.remainder.len() == other.remainder.len()
@@ -2265,14 +2268,19 @@ impl Session {
         }
         let order_ids = self.base_cache.layer_order_ids().to_vec();
         self.update_floating(|fl_opt| {
+            let had_existing_modified = fl_opt.as_ref().is_some_and(|fl| fl.modified);
             let fl = fl_opt.get_or_insert_with(|| Floating {
                 origin,
                 pieces: Vec::new(),
                 remainder: Vec::new(),
                 hidden: HashSet::new(),
                 modified: true,
+                pieces_disjoint: true,
             });
             fl.modified = true;
+            if had_existing_modified && !newly_lifted.is_empty() {
+                fl.pieces_disjoint = false;
+            }
             for s in newly_lifted {
                 fl.hidden.insert(s.shape_id);
                 fl.pieces.push(s);
@@ -2334,6 +2342,9 @@ impl Session {
                     if let Some(hid) = orig_id {
                         still_rem[0].shape_id = hid;
                     }
+                }
+                if !newly_sel.is_empty() {
+                    fl.pieces_disjoint = false;
                 }
                 new_rem.extend(still_rem);
                 fl.pieces.extend(newly_sel);
@@ -3774,7 +3785,11 @@ pub(crate) fn merge_floating_into_base_shapes(
         *base_shapes = rebuilt;
     }
     if !fl.pieces.is_empty() {
-        merge_shapes_into_canvas(base_shapes, fl.pieces);
+        if fl.pieces_disjoint {
+            merge_disjoint_pieces_into_canvas(base_shapes, fl.pieces);
+        } else {
+            merge_shapes_into_canvas(base_shapes, fl.pieces);
+        }
     }
     if layer_order_ids.len() > 1 && base_shapes.len() > 1 {
         base_shapes.sort_by_key(|s| layer_order_index(layer_order_ids, s.layer_id));
@@ -3901,6 +3916,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
         remainder: std::mem::take(&mut fl.remainder),
         hidden: std::mem::take(&mut fl.hidden),
         modified: true,
+        pieces_disjoint: fl.pieces_disjoint,
     });
     if !kept_pieces.is_empty() {
         fl.pieces = kept_pieces;
@@ -3975,6 +3991,7 @@ pub(crate) fn insert_and_select_shapes_in_scope(
                 remainder: Vec::new(),
                 hidden: HashSet::new(),
                 modified: origin != FloatingOrigin::AltDuplicate,
+                pieces_disjoint: origin == FloatingOrigin::AltDuplicate,
             }));
         } else {
             tab.session.set_floating(None);

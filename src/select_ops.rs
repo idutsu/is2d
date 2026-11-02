@@ -178,6 +178,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     let editing_group_path = tab.session.editing_group_path.clone();
     let mut selection = std::mem::take(&mut tab.session.selection);
     tab.session.update_floating(|floating| {
+        let had_existing_floating = floating.is_some();
         if let Some(fl) = floating {
             let mut new_rem = Vec::with_capacity(fl.remainder.len());
             let mut current_orig_id: Option<ShapeId> = None;
@@ -217,6 +218,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                         rem.shape_id = next_shape_id();
                     }
                     selection.insert_shape(&rem);
+                    fl.pieces_disjoint = false;
                     fl.pieces.push(rem);
                     continue;
                 }
@@ -230,6 +232,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                         rem.shape_id = next_shape_id();
                     }
                     selection.insert_shape(&rem);
+                    fl.pieces_disjoint = false;
                     fl.pieces.push(rem);
                 } else {
                     for mut out_s in outside {
@@ -244,6 +247,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                         }
                         let piece = piece.with_scope(lid, &gp);
                         selection.insert_shape(&piece);
+                        fl.pieces_disjoint = false;
                         fl.pieces.push(piece);
                     }
                 }
@@ -294,7 +298,11 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                     remainder: Vec::new(),
                     hidden: HashSet::new(),
                     modified: false,
+                    pieces_disjoint: true,
                 });
+                if had_existing_floating {
+                    fl.pieces_disjoint = false;
+                }
                 fl.hidden.insert(orig_id);
                 let mut outside_scoped: Vec<FillShape> = outside
                     .into_iter()
@@ -875,7 +883,12 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     if any_became_raw {
         tab.session
             .lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
-        tab.session.mark_floating_modified(FloatingOrigin::Move);
+        tab.session.update_floating(|fl_opt| {
+            if let Some(fl) = fl_opt {
+                fl.modified = true;
+                fl.pieces_disjoint = false;
+            }
+        });
     }
     tab.session.retain_existing_selection();
     tab.session.transform_pivot = None;

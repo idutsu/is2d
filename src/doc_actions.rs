@@ -994,6 +994,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                         }
                     }
                     fl.modified = true;
+                    fl.pieces_disjoint = false;
                 }
             });
             return true;
@@ -1134,14 +1135,20 @@ fn translate_selected_shapes(tab: &mut Tab, delta: KVec2) -> bool {
     let selection = tab.session.selection.clone();
     tab.session.update_floating(|fl_opt| {
         if let Some(fl) = fl_opt {
+            let mut all_selected = true;
             for piece in &mut fl.pieces {
                 if selection.contains_shape(piece) {
                     piece.translate(delta);
                     any_moved = true;
+                } else {
+                    all_selected = false;
                 }
             }
             if any_moved {
                 fl.modified = true;
+                if !all_selected {
+                    fl.pieces_disjoint = false;
+                }
             }
         }
     });
@@ -1188,6 +1195,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     let selection = tab.session.selection.clone();
     tab.session.update_floating(|fl_opt| {
         if let Some(fl) = fl_opt {
+            let mut all_selected = true;
             for piece in &mut fl.pieces {
                 if selection.contains_shape(piece) {
                     if piece.is_empty_symbol_marker() {
@@ -1199,10 +1207,15 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
                         piece.transform(affine);
                     }
                     any_transformed = true;
+                } else {
+                    all_selected = false;
                 }
             }
             if any_transformed {
                 fl.modified = true;
+                if !all_selected || affine.determinant().abs() < 1e-9 {
+                    fl.pieces_disjoint = false;
+                }
             }
         }
     });
@@ -1355,6 +1368,7 @@ fn apply_deform_shape(
                     remainder: std::mem::take(&mut fl.remainder),
                     hidden: std::mem::take(&mut fl.hidden),
                     modified: true,
+                    pieces_disjoint: false,
                 }
             })
         })
@@ -1506,6 +1520,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
                     if let Some(fl_mut) = fl_opt {
                         fl_mut.pieces[p_idx] = test_piece;
                         fl_mut.modified = true;
+                        fl_mut.pieces_disjoint = false;
                     }
                 });
                 return true;
