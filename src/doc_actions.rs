@@ -466,13 +466,8 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         }
         Action::SelectAll => {
             clear_selection(tab);
-            let editable_lids: std::collections::HashSet<u64> = tab
-                .active_timeline()
-                .layers
-                .iter()
-                .filter(|l| l.visible && !l.locked)
-                .map(|l| l.id)
-                .collect();
+            let editable_lids: std::collections::HashSet<u64> =
+                editable_layer_ids(tab).into_iter().collect();
             tab.session.select_shapes_in_layers(&editable_lids);
             ApplyResult::Applied(!tab.session.selection.is_empty())
         }
@@ -1292,11 +1287,14 @@ fn apply_finish_move_selection_drag(
 ) -> bool {
     tab.session.clear_overlay();
     let min_move = 1.0 / (tab.view.zoom as f64);
+    let editable_lids = editable_layer_ids(tab);
     if total_delta.hypot() <= min_move
         || tab.session.selection.is_empty()
-        || !tab
-            .scene()
-            .selected_has_any_in_scope(&tab.session.selection, &tab.session.editing_group_path)
+        || !tab.scene().iter().any(|s| {
+            tab.session.selection.contains_shape(s)
+                && editable_lids.contains(&s.layer_id)
+                && s.is_in_editing_scope(&tab.session.editing_group_path)
+        })
     {
         return false;
     }
@@ -1313,11 +1311,14 @@ fn apply_move_selected(
     coalesce: Option<CoalesceKey>,
 ) -> bool {
     cancel_active_drag(tab);
+    let editable_lids = editable_layer_ids(tab);
     if delta == KVec2::ZERO
         || tab.session.selection.is_empty()
-        || !tab
-            .scene()
-            .selected_has_any_in_scope(&tab.session.selection, &tab.session.editing_group_path)
+        || !tab.scene().iter().any(|s| {
+            tab.session.selection.contains_shape(s)
+                && editable_lids.contains(&s.layer_id)
+                && s.is_in_editing_scope(&tab.session.editing_group_path)
+        })
     {
         return false;
     }
@@ -1616,10 +1617,13 @@ pub(crate) fn flush_transform_pivot_to_symbol(tab: &mut Tab) {
 
 fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     cancel_active_drag(tab);
+    let editable_lids = editable_layer_ids(tab);
     if tab.session.selection.is_empty()
-        || !tab
-            .scene()
-            .selected_has_any_in_scope(&tab.session.selection, &tab.session.editing_group_path)
+        || !tab.scene().iter().any(|s| {
+            tab.session.selection.contains_shape(s)
+                && editable_lids.contains(&s.layer_id)
+                && s.is_in_editing_scope(&tab.session.editing_group_path)
+        })
     {
         return false;
     }
@@ -1843,16 +1847,22 @@ fn apply_set_symbol_playback(
 
     let inst_gid = binding.instance_gid;
     let sym_id = binding.symbol_id;
+    let layer_ids = editable_layer_ids(tab);
+    if tab.doc.find_symbol(sym_id).is_none()
+        || !tab.scene().iter().any(|s| {
+            s.symbol_instance
+                .is_some_and(|b| b.instance_gid == inst_gid)
+                && layer_ids.contains(&s.layer_id)
+        })
+    {
+        return false;
+    }
+
     let prev_coalesce = tab.history.last_coalesce_key;
     commit_floating(tab);
     tab.history.last_coalesce_key = prev_coalesce;
     push_undo(tab, coalesce);
 
-    if tab.doc.find_symbol(sym_id).is_none() {
-        return false;
-    }
-
-    let layer_ids = editable_layer_ids(tab);
     let mut updated = false;
     edit_layers(tab, &layer_ids, |edit| {
         for s in &mut edit.shapes {
@@ -1884,8 +1894,7 @@ fn retain_selection_on_same_keyframe(tab: &mut Tab, prev_frame: usize, next_fram
         .layers
         .iter()
         .filter(|l| {
-            l.visible
-                && !l.locked
+            l.is_editable_at(next_frame)
                 && l.keyframe_index_at(prev_frame).is_some()
                 && l.keyframe_index_at(prev_frame) == l.keyframe_index_at(next_frame)
         })

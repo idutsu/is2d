@@ -886,6 +886,15 @@ impl Layer {
             _ => None,
         }
     }
+
+    /// 指定フレーム `frame` においてこのレイヤーが編集可能（表示中・非ロック・フレーム作成済み・キーフレームあり・トゥイーンの途中ではない）であるかを返す
+    pub(crate) fn is_editable_at(&self, frame: usize) -> bool {
+        self.visible
+            && !self.locked
+            && frame < self.frame_count
+            && !self.keyframes.is_empty()
+            && self.interpolated_tween_binding_at(frame).is_none()
+    }
 }
 
 /// レイヤー配列・現在のフレーム・セル範囲選択を管理するタイムライン構造体（永続ドキュメント状態）
@@ -1002,20 +1011,16 @@ impl Timeline {
 
     /// 指定した `layer_id` のレイヤーが現在フレームにおいて表示中かつ非ロック（編集可能）であるかを返す
     pub(crate) fn is_layer_editable_by_id(&self, layer_id: u64) -> bool {
-        self.layers.iter().any(|l| {
-            l.id == layer_id
-                && l.visible
-                && !l.locked
-                && self.current_frame < l.frame_count
-                && !l.keyframes.is_empty()
-        })
+        self.layers
+            .iter()
+            .any(|l| l.id == layer_id && l.is_editable_at(self.current_frame))
     }
 
     /// 現在フレームにおいて表示中かつ非ロック（編集可能）なレイヤーが1つ以上存在するかを返す
     pub(crate) fn has_any_editable_layer(&self) -> bool {
         self.layers
             .iter()
-            .any(|l| l.visible && !l.locked && self.current_frame < l.frame_count)
+            .any(|l| l.is_editable_at(self.current_frame))
     }
 
     /// `F5` / `Shift+F5` 等のフレーム操作対象となるレイヤーインデックス一覧を返す：
@@ -1050,7 +1055,7 @@ impl Timeline {
         } else {
             self.layers
                 .iter()
-                .find(|l| l.visible && !l.locked && self.current_frame < l.frame_count)
+                .find(|l| l.is_editable_at(self.current_frame))
                 .map(|l| l.id)
                 .unwrap_or_else(|| self.active_layer_id())
         };
@@ -1074,7 +1079,7 @@ impl Timeline {
     pub(crate) fn is_active_layer_editable(&self) -> bool {
         self.layers
             .get(self.active_layer)
-            .is_some_and(|l| l.visible && !l.locked && self.current_frame < l.frame_count)
+            .is_some_and(|l| l.is_editable_at(self.current_frame))
     }
 
     /// 対象レイヤー群 `targets` に対して現在フレーム（または直後フレーム）へキーフレームを挿入する（`F6` / `F7`）

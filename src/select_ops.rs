@@ -129,6 +129,11 @@ pub(crate) fn select_single_shape_at(
                 .shape_id()
                 .and_then(|id| scene.index_of_shape_id(id))
         })
+        .filter(|&idx| {
+            scene
+                .get(idx)
+                .is_some_and(|s| tab.active_timeline().is_layer_editable_by_id(s.layer_id))
+        })
     {
         let unit = scene.expand_to_group_unit(hit_idx, &tab.session.editing_group_path);
         tab.session.set_selected_indices(unit);

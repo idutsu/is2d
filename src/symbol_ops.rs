@@ -200,7 +200,7 @@ pub(crate) fn selected_single_symbol_info(
         .selected_single_symbol_binding(&tab.session.selection)
         .or_else(|| {
             let layer = tl.layers.get(tl.active_layer)?;
-            if !layer.visible || layer.locked {
+            if !layer.is_editable_at(tl.current_frame) {
                 return None;
             }
             let mut b = layer

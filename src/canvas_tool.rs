@@ -7,8 +7,8 @@ use eframe::egui::{self, Color32, Key, Pos2, Stroke, Vec2};
 use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 
 pub(crate) use crate::symbol::Document;
-use crate::symbol::{EditPath, SymbolDef, SymbolLoopMode, TweenRotate};
-use crate::timeline::{Cel, SymbolInstance, Timeline, TimelineCellSelection};
+use crate::symbol::{EditPath, SymbolDef};
+use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
 use crate::vector_boolean::merge_shapes_into_canvas;
 use crate::vector_engine::{FillShape, SyncCache};
 
@@ -3174,13 +3174,13 @@ impl InitialLayerShapeState {
     }
 }
 
-/// 現在フレームで編集可能（表示中・非ロック・フレーム範囲内）な全レイヤーID一覧を背面→前面順で返す
+/// 現在フレームで編集可能（表示中・非ロック・フレーム範囲内・非トゥイーン途中）な全レイヤーID一覧を背面→前面順で返す
 pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
     let tl = tab.active_timeline();
     let frame = tl.current_frame;
     tl.layers
         .iter()
-        .filter(|l| l.visible && !l.locked && frame < l.frame_count && !l.keyframes.is_empty())
+        .filter(|l| l.is_editable_at(frame))
         .map(|l| l.id)
         .collect()
 }
@@ -3279,84 +3279,11 @@ fn writeback_edited_layer_shapes(
     initial_stage_inst_xform: &HashMap<(InstanceGid, u64), Affine>,
     layer_stage_shapes: &mut Vec<FillShape>,
 ) -> bool {
-    let is_tween_mid = tl.layers[l_idx]
+    if tl.layers[l_idx]
         .interpolated_tween_binding_at(frame)
-        .is_some();
-    if is_tween_mid {
-        let (prev_kf_start, prev_tween_rotate, orig_cel) = tl.layers[l_idx]
-            .keyframe_index_at(frame)
-            .map(|i| {
-                let kf = &tl.layers[l_idx].keyframes[i];
-                (kf.start_frame, kf.tween_rotate, Some(kf.cel.clone()))
-            })
-            .unwrap_or((frame, TweenRotate::Auto, None));
-        let elapsed = frame.saturating_sub(prev_kf_start);
-        layer_stage_shapes
-            .retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
-        for s in layer_stage_shapes.iter_mut() {
-            if let Some(b) = &mut s.symbol_instance {
-                if b.loop_mode != SymbolLoopMode::SingleFrame {
-                    b.first_frame = b.first_frame.saturating_add(elapsed);
-                }
-            }
-        }
-        let kf_idx = tl.layers[l_idx].insert_keyframe(frame, false);
-        let (mut non_symbol_shapes, mut next_instances) =
-            Cel::split_shapes_and_instances(layer_stage_shapes.clone());
-        if has_world_xform && need_inv {
-            let mut stage_non_sym_iter = layer_stage_shapes
-                .iter_mut()
-                .filter(|s| s.symbol_instance.is_none() && !s.exterior.segments.is_empty());
-            for s in &mut non_symbol_shapes {
-                s.transform(inv_xform);
-                if let Some(stage_s) = stage_non_sym_iter.next() {
-                    let mut rebuilt_stage = s.clone();
-                    scene_base_cache::transform_single_shape_to_stage(
-                        &mut rebuilt_stage,
-                        world_xform,
-                    );
-                    rebuilt_stage.copy_render_caches_from(stage_s);
-                    *stage_s = rebuilt_stage;
-                }
-            }
-        }
-        for s in &mut non_symbol_shapes {
-            s.clear_screen_caches();
-        }
-        for inst in &mut next_instances {
-            if has_world_xform && need_inv {
-                inst.binding.xform = inv_xform * inst.binding.xform;
-            }
-        }
-        if let Some(ref orig_cel) = orig_cel {
-            append_unexpanded_cel_elements(
-                orig_cel,
-                init_states,
-                initial_stage_inst_xform,
-                &mut non_symbol_shapes,
-                &mut next_instances,
-            );
-        }
-        let kf = tl.layers[l_idx].keyframe_mut(kf_idx);
-        kf.cel = Cel::new_with_instances(non_symbol_shapes, next_instances);
-        let has_single_sym = kf.cel.single_symbol_instance().is_some();
-        kf.tween = has_single_sym;
-        if has_single_sym {
-            kf.tween_rotate = prev_tween_rotate;
-        }
-        let instances_snapshot: Vec<SymbolInstance> = kf.cel.instances.iter().cloned().collect();
-        for inst in &instances_snapshot {
-            reinstantiate_modified_symbol_instance(
-                &tl.layers[l_idx],
-                frame,
-                inst,
-                library,
-                world_xform,
-                has_world_xform,
-                layer_stage_shapes,
-            );
-        }
-        return true;
+        .is_some()
+    {
+        return false;
     }
 
     let Some(kf_idx) = tl.layers[l_idx].keyframe_index_at(frame) else {
@@ -3506,9 +3433,7 @@ pub(crate) fn edit_layers(
         } else {
             tl.layers
                 .iter()
-                .find(|l| {
-                    l.visible && !l.locked && frame < l.frame_count && !l.keyframes.is_empty()
-                })
+                .find(|l| l.is_editable_at(frame))
                 .map(|l| l.id)
         };
         let include_fallback =
@@ -3517,11 +3442,7 @@ pub(crate) fn edit_layers(
         let mut indices = Vec::new();
         let mut lids = Vec::new();
         for (l_idx, layer) in tl.layers.iter().enumerate() {
-            if !layer.visible
-                || layer.locked
-                || frame >= layer.frame_count
-                || layer.keyframes.is_empty()
-            {
+            if !layer.is_editable_at(frame) {
                 continue;
             }
             if layer_ids.contains(&layer.id)

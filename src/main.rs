@@ -832,14 +832,24 @@ impl Is2dApp {
             return None;
         }
         let tl = self.tab().active_timeline();
-        let is_uncreated_frame = tl
-            .layers
-            .get(tl.active_layer)
+        let active_layer = tl.layers.get(tl.active_layer);
+        let is_uncreated_frame = active_layer
             .is_some_and(|l| l.visible && !l.locked && tl.current_frame >= l.frame_count);
+        let is_tween_mid = active_layer.is_some_and(|l| {
+            l.visible
+                && !l.locked
+                && tl.current_frame < l.frame_count
+                && l.interpolated_tween_binding_at(tl.current_frame).is_some()
+        });
         if is_uncreated_frame {
             Some((
                 NoticeKind::Warning,
                 "現在のフレームは未作成です（F5 / F6 / F7 でフレームを作成してください）",
+            ))
+        } else if is_tween_mid {
+            Some((
+                NoticeKind::Warning,
+                "トゥイーンの途中のコマは編集できません（F6 でキーフレームを挿入してください）",
             ))
         } else {
             Some((

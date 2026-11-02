@@ -4788,8 +4788,8 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
         "F6 で分割された新しいキーフレームでも Loop シンボルの表示コマ (Frame 2 = 青) がそのまま引き継がれること"
     );
 
-    // トゥイーン区間（tween_rotate = Clockwise）の途中フレームでキャンバス編集（edit_layers）により自動分割された際、
-    // 新設された中間キーフレームにも tween_rotate = Clockwise が引き継がれること (#10)
+    // トゥイーン区間（tween_rotate = Clockwise）の途中フレームでは直接のキャンバス編集は無効化され、
+    // F6 キーフレーム挿入で分割した際に tween_rotate = Clockwise が引き継がれて編集可能になること (#10, M2-2)
     timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 4);
     assert!(timeline_ui::timeline_insert_keyframe(&mut sym_f6_app, true));
     timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 2);
@@ -4800,6 +4800,19 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
     ));
     timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 3);
     sym_f6_app.session.set_selected_indices(vec![0]);
+    assert!(
+        !tool_select::nudge_selected_shapes(&mut sym_f6_app, kurbo::Vec2::new(20.0, 0.0)),
+        "トゥイーン途中のコマでは直接の移動編集ができないこと"
+    );
+    assert!(
+        sym_f6_app.doc.root.layers[0]
+            .keyframes
+            .iter()
+            .all(|kf| kf.start_frame != 3),
+        "トゥイーン途中のコマでの移動操作で自動キーフレームが生成されないこと"
+    );
+    assert!(timeline_ui::timeline_insert_keyframe(&mut sym_f6_app, true));
+    sym_f6_app.session.set_selected_indices(vec![0]);
     assert!(tool_select::nudge_selected_shapes(
         &mut sym_f6_app,
         kurbo::Vec2::new(20.0, 0.0)
@@ -4808,12 +4821,12 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
         .keyframes
         .iter()
         .find(|kf| kf.start_frame == 3)
-        .expect("Frame 3 に新キーフレームが自動分割生成されていること");
+        .expect("F6 挿入により Frame 3 に新キーフレームが生成されていること");
     assert!(kf_at_3.tween);
     assert_eq!(
         kf_at_3.tween_rotate,
         crate::symbol::TweenRotate::Clockwise,
-        "トゥイーン区間途中で自動分割されたキーフレームに前のキーフレームの tween_rotate 設定が引き継がれること"
+        "F6 で分割されたキーフレームに前のキーフレームの tween_rotate 設定が引き継がれること"
     );
 }
 
@@ -12810,4 +12823,249 @@ fn test_m2_1_ungroup_multi_shape_and_nested_symbol_detaches_all_shapes() {
         "シンボル A を分解したあと、A のインスタンスが残らないこと"
     );
     assert_eq!(cel2.shapes.len(), 2);
+}
+
+/// M2-2: トゥイーンの途中のコマでは直接編集できず警告が表示され、F6 挿入後に編集・開始フレーム指定が正しく動くこと、
+/// およびキーフレームで選択・移動した状態で途中コマへ移動すると移る前のコマで確定して選択が解除されることを検証する
+#[test]
+fn test_m2_2_tween_midframe_blocks_edit_shows_warning_and_f6_enables_edit() {
+    use crate::doc_actions::{apply, Action};
+    use crate::symbol::SymbolLoopMode;
+
+    let mut app = Is2dApp::default();
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+            radius: 10.0,
+            color: Color32::RED,
+        },
+    );
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(&mut app, Action::Copy);
+    let _ = apply(&mut app, Action::ConvertToSymbol);
+    let sym_id = app.doc.library[0].id;
+
+    // シンボル内を 8 コマのループアニメにする
+    let _ = apply(&mut app, Action::EnterSymbolFromLibrary { sym_id });
+    for _ in 0..7 {
+        let _ = apply(&mut app, Action::ExtendFrame);
+    }
+    let _ = apply(&mut app, Action::ExitSymbolTimeline);
+    assert_eq!(app.doc.library[0].timeline.total_frames, 8);
+
+    // ルートタイムラインで Frame 0..=4 の完成したクラシックトゥイーンを作成（開始 first_frame = 1）
+    app.doc.root.layers[0].keyframe_mut(0).cel.instances_mut()[0]
+        .binding
+        .first_frame = 1;
+    let _ = apply(&mut app, Action::ToggleTween);
+    for _ in 0..4 {
+        let _ = apply(&mut app, Action::ExtendFrame);
+    }
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 4,
+        },
+    );
+    let _ = apply(&mut app, Action::InsertKeyframe { copy_prev: true });
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(200.0, 0.0),
+        },
+    );
+
+    // 1. キーフレームで図形を選択して移動し、トゥイーン途中のコマへ移ると、移る前のコマで確定され選択が外れること
+    let _ = apply(&mut app, Action::AddLayer);
+    for _ in 0..4 {
+        let _ = apply(&mut app, Action::ExtendFrame);
+    }
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 0,
+        },
+    );
+    let init_kf0_ty = app.doc.root.layers[0].keyframes[0].cel.instances[0]
+        .binding
+        .xform
+        .as_coeffs()[5];
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(0.0, 40.0),
+        },
+    );
+    assert!(!app.session.selection.is_empty());
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 2,
+        },
+    );
+    assert!(
+        app.session.selection.is_empty(),
+        "トゥイーン途中のコマへ移るとそのレイヤーの選択が外れること"
+    );
+    assert!(
+        (app.doc.root.layers[0].keyframes[0].cel.instances[0]
+            .binding
+            .xform
+            .as_coeffs()[5]
+            - (init_kf0_ty + 40.0))
+            .abs()
+            < 1e-6,
+        "移る前のキーフレーム (Frame 0) で移動が確定していること"
+    );
+
+    // Layer 2 (index 1) を削除してトゥイーンレイヤー1枚だけにし、Frame 2（トゥイーン途中）へ
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 1,
+            frame: 2,
+        },
+    );
+    let _ = apply(&mut app, Action::DeleteActiveLayer);
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 2,
+        },
+    );
+    assert!(!app.tab().active_timeline().is_active_layer_editable());
+    assert!(!app.tab().active_timeline().has_any_editable_layer());
+    assert_eq!(
+        app.current_state_notice(false),
+        Some((
+            canvas_tool::NoticeKind::Warning,
+            "トゥイーンの途中のコマは編集できません（F6 でキーフレームを挿入してください）",
+        )),
+        "トゥイーン途中のコマでキャンバスの警告メッセージが返ること"
+    );
+
+    // 2. トゥイーンの途中のコマでブラシ・消しゴム・バケツ・選択と移動・自由変形・再生設定・ペースト・配置をしても文書が変わらないこと
+    let undo_len_before = app.history.undo_stack.len();
+    let kf_count_before = app.doc.root.layers[0].keyframes.len();
+    let kf0_rev_before = app.doc.root.layers[0].keyframes[0].cel.revision;
+    let kf1_rev_before = app.doc.root.layers[0].keyframes[1].cel.revision;
+
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(200.0, 120.0), Point::new(260.0, 120.0)],
+            radius: 8.0,
+            color: Color32::BLUE,
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::EraseStroke {
+            points: vec![Point::new(200.0, 120.0), Point::new(260.0, 120.0)],
+            radius: 12.0,
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::BucketFill {
+            pt: Point::new(230.0, 120.0),
+            color: Color32::GREEN,
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::SelectSingleAt {
+            pt: Point::new(230.0, 120.0),
+        },
+    );
+    assert!(app.session.selection.is_empty());
+    let _ = apply(&mut app, Action::SelectAll);
+    assert!(app.session.selection.is_empty());
+    app.session.set_selected_indices(vec![0]);
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(30.0, 0.0),
+        },
+    );
+    let _ = apply(&mut app, Action::RotateSelection { angle_rad: 0.5 });
+    let _ = apply(
+        &mut app,
+        Action::SetSymbolPlayback {
+            loop_mode: Some(SymbolLoopMode::PlayOnce),
+            first_frame: Some(3),
+        },
+    );
+    let _ = apply(&mut app, Action::Paste { in_place: true });
+    let _ = apply(&mut app, Action::PlaceSymbol { sym_id });
+
+    assert_eq!(
+        app.history.undo_stack.len(),
+        undo_len_before,
+        "トゥイーン途中の編集操作で Undo 履歴（文書状態）が進まないこと"
+    );
+    assert_eq!(app.doc.root.layers[0].keyframes.len(), kf_count_before);
+    assert_eq!(
+        app.doc.root.layers[0].keyframes[0].cel.revision,
+        kf0_rev_before
+    );
+    assert_eq!(
+        app.doc.root.layers[0].keyframes[1].cel.revision,
+        kf1_rev_before
+    );
+
+    // 3. トゥイーン途中のコマ (Frame 2) で F6 を押すと、補間された姿勢・続きの開始フレーム (1 + 2 = 3) のキーフレームができ、
+    //    その後開始フレームに 3 と入力すると経過コマ数が二重加算されず 3 になること
+    let kf0_tx = app.doc.root.layers[0].keyframes[0].cel.instances[0]
+        .binding
+        .xform
+        .as_coeffs()[4];
+    let _ = apply(&mut app, Action::InsertKeyframe { copy_prev: true });
+    assert_eq!(app.doc.root.layers[0].keyframes.len(), 3);
+    let kf_mid = &app.doc.root.layers[0].keyframes[1];
+    assert_eq!(kf_mid.start_frame, 2);
+    assert_eq!(
+        kf_mid.cel.instances[0].binding.first_frame, 3,
+        "F6 挿入時は元の開始フレーム (1) + 経過コマ数 (2) = 3 になること"
+    );
+    assert!(
+        (kf_mid.cel.instances[0].binding.xform.as_coeffs()[4] - (kf0_tx + 100.0)).abs() < 1e-6,
+        "F6 挿入時は補間された姿勢 (tx = kf0_tx + 100.0) になること"
+    );
+
+    // 続けて開始フレームを一度 0 にしてから 3 に変更すると、経過コマ数が足されずちょうど 3 になること
+    let _ = apply(
+        &mut app,
+        Action::SetSymbolPlayback {
+            loop_mode: None,
+            first_frame: Some(0),
+        },
+    );
+    assert_eq!(
+        app.doc.root.layers[0].keyframes[1].cel.instances[0]
+            .binding
+            .first_frame,
+        0
+    );
+    let _ = apply(
+        &mut app,
+        Action::SetSymbolPlayback {
+            loop_mode: None,
+            first_frame: Some(3),
+        },
+    );
+    assert_eq!(
+        app.doc.root.layers[0].keyframes[1].cel.instances[0]
+            .binding
+            .first_frame,
+        3,
+        "F6 後のキーフレームで開始フレームに 3 と入力するとそのまま 3 になること"
+    );
 }
