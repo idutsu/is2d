@@ -761,7 +761,7 @@ mod scene_base_cache {
         }
     }
 
-    pub(crate) fn transform_single_shape_to_stage(s: &mut FillShape, world_xform: Affine) {
+    fn transform_single_shape_to_stage(s: &mut FillShape, world_xform: Affine) {
         if world_xform == Affine::IDENTITY {
             return;
         }
@@ -853,39 +853,24 @@ mod scene_base_cache {
             (loaded_shapes, target_ranges, untouched)
         }
 
-        /// `edit_layers` の書き戻し後、対象レイヤーの土台キャッシュを編集結果の図形で直接置き換える
+        /// `edit_layers` の書き戻し後、図形をレイヤー順の平らな列へ戻し、変更されたレイヤーの `cel_sig` を無効化する
         pub(crate) fn replace_edited_layers(
             &mut self,
-            tl: &Timeline,
-            library: &[SymbolDef],
-            world_xform: Affine,
             modified_lids: &[LayerId],
             mut edited_by_lid: HashMap<LayerId, Vec<FillShape>>,
             mut untouched: HashMap<LayerId, Vec<FillShape>>,
         ) {
-            let frame = tl.current_frame;
-            let xform_bits = world_xform.as_coeffs().map(f64::to_bits);
             let mut new_flat = Vec::new();
-            for (cl, layer) in self.layers.iter_mut().zip(&tl.layers) {
-                cl.visible = layer.visible;
-                cl.locked = layer.locked;
-                cl.world_xform_bits = xform_bits;
+            for cl in &mut self.layers {
                 let start = new_flat.len();
-                if let Some(shapes) = edited_by_lid.remove(&layer.id) {
+                if let Some(shapes) = edited_by_lid.remove(&cl.layer_id) {
                     new_flat.extend(shapes);
-                } else if let Some(shapes) = untouched.remove(&layer.id) {
+                } else if let Some(shapes) = untouched.remove(&cl.layer_id) {
                     new_flat.extend(shapes);
                 }
                 cl.range = start..new_flat.len();
-                if modified_lids.contains(&layer.id) {
-                    if let Some(kf_idx) = layer.keyframe_index_at(frame) {
-                        cl.cel_sig =
-                            Some(compute_resolved_cel_signature(layer, kf_idx, None, library));
-                        cl.eval_frame = layer_eval_frame(layer, kf_idx, frame, library);
-                    } else {
-                        cl.cel_sig = None;
-                        cl.eval_frame = 0;
-                    }
+                if modified_lids.contains(&cl.layer_id) {
+                    cl.cel_sig = None;
                 }
             }
             self.flat_shapes = new_flat;
@@ -3210,62 +3195,13 @@ pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
         .collect()
 }
 
-/// `writeback_edited_layer_shapes` で変更された単一シンボルインスタンス `inst` を文書と同じ経路（`local_b.xform` → `world_xform`）で再展開し、
-/// `layer_stage_shapes` 内の対応図形をビット単位で一致するステージ図形へ置き換える
-fn reinstantiate_modified_symbol_instance(
-    layer: &crate::timeline::Layer,
-    frame: usize,
-    inst: &SymbolInstance,
-    library: &[SymbolDef],
-    world_xform: Affine,
-    has_world_xform: bool,
-    layer_stage_shapes: &mut Vec<FillShape>,
-) {
-    if !library.iter().any(|sym| sym.id == inst.binding.symbol_id) {
-        return;
-    }
-    let mut rebuilt = layer.evaluate_single_symbol_instance_at(frame, inst, library);
-    if has_world_xform {
-        for rs in &mut rebuilt {
-            scene_base_cache::transform_single_shape_to_stage(rs, world_xform);
-        }
-    }
-    let gid = inst.binding.instance_gid;
-    let existing_count = layer_stage_shapes
-        .iter()
-        .filter(|s| s.symbol_instance.is_some_and(|b| b.instance_gid == gid))
-        .count();
-    if existing_count == rebuilt.len() {
-        let mut rebuilt_iter = rebuilt.into_iter();
-        for s in layer_stage_shapes.iter_mut() {
-            if s.symbol_instance.is_some_and(|b| b.instance_gid == gid) {
-                if let Some(mut new_s) = rebuilt_iter.next() {
-                    new_s.shape_id = s.shape_id;
-                    *s = new_s;
-                }
-            }
-        }
-    } else if let Some(first_pos) = layer_stage_shapes
-        .iter()
-        .position(|s| s.symbol_instance.is_some_and(|b| b.instance_gid == gid))
-    {
-        layer_stage_shapes.retain(|s| s.symbol_instance.is_none_or(|b| b.instance_gid != gid));
-        let insert_pos = first_pos.min(layer_stage_shapes.len());
-        layer_stage_shapes.splice(insert_pos..insert_pos, rebuilt);
-    }
-}
-
 /// `edit_layers` の対象レイヤー1枚分について、編集後ステージ図形列 `layer_stage_shapes` をローカル図形へ変換してセルに書き戻す
-#[allow(clippy::too_many_arguments)]
 fn writeback_edited_layer_shapes(
     tl: &mut Timeline,
     l_idx: usize,
     frame: usize,
-    library: &[SymbolDef],
-    world_xform: Affine,
     has_world_xform: bool,
     inv_xform: Affine,
-    need_inv: bool,
     initial_stage_inst_xform: &HashMap<(InstanceGid, u64), Affine>,
     layer_stage_shapes: &mut Vec<FillShape>,
 ) -> bool {
@@ -3279,9 +3215,10 @@ fn writeback_edited_layer_shapes(
     let Some(kf_idx) = tl.layers[l_idx].keyframe_index_at(frame) else {
         return false;
     };
+    let need_inv = inv_xform != Affine::IDENTITY;
     layer_stage_shapes.retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
 
-    let (non_symbol_shapes, next_instances, modified_inst_indices) = {
+    let (non_symbol_shapes, next_instances) = {
         let orig_cel = &tl.layers[l_idx].keyframes[kf_idx].cel;
         let orig_shapes = &orig_cel.shapes;
         let mut orig_shape_idx_map: HashMap<ShapeId, usize> =
@@ -3298,7 +3235,6 @@ fn writeback_edited_layer_shapes(
 
         let mut non_symbol_shapes = Vec::with_capacity(layer_stage_shapes.len());
         let mut next_instances: Vec<SymbolInstance> = Vec::new();
-        let mut modified_inst_indices: Vec<usize> = Vec::new();
         for s in layer_stage_shapes.iter_mut() {
             if let Some(b) = s.symbol_instance {
                 if !next_instances
@@ -3323,20 +3259,12 @@ fn writeback_edited_layer_shapes(
                         }
                     }
                     let parent_scope = b.parent_scope_from_path(&s.group_path).to_vec();
-                    let inst_modified = !stage_xform_unchanged
-                        || orig_inst.is_none_or(|oi| {
-                            oi.binding != local_b || oi.parent_scope != parent_scope
-                        });
-                    let inst_idx = next_instances.len();
                     next_instances.push(SymbolInstance {
                         binding: local_b,
                         layer_id: s.layer_id,
                         parent_scope,
                         shape_order_index: non_symbol_shapes.len(),
                     });
-                    if inst_modified {
-                        modified_inst_indices.push(inst_idx);
-                    }
                 }
             } else if !s.exterior.segments.is_empty() {
                 if let Some(&orig_idx) = orig_shape_idx_map.get(&s.shape_id) {
@@ -3349,9 +3277,6 @@ fn writeback_edited_layer_shapes(
                             kept.group_path = s.group_path.clone();
                         }
                         kept.symbol_instance = s.symbol_instance;
-                        if !has_world_xform {
-                            kept.copy_geometry_caches_from(s);
-                        }
                         non_symbol_shapes.push(kept);
                         continue;
                     }
@@ -3359,43 +3284,17 @@ fn writeback_edited_layer_shapes(
                 let mut local_s = s.clone();
                 if has_world_xform && need_inv {
                     local_s.transform(inv_xform);
-                    let mut stage_s = local_s.clone();
-                    scene_base_cache::transform_single_shape_to_stage(&mut stage_s, world_xform);
-                    stage_s.copy_render_caches_from(s);
-                    *s = stage_s;
+                    s.mesh_revision = local_s.mesh_revision;
                 }
-                local_s.clear_screen_caches();
+                local_s.strip_transient_caches();
                 non_symbol_shapes.push(local_s);
             }
         }
-        (non_symbol_shapes, next_instances, modified_inst_indices)
+        (non_symbol_shapes, next_instances)
     };
 
     let kf = tl.layers[l_idx].keyframe_mut(kf_idx);
     kf.cel.set_parts(non_symbol_shapes, next_instances);
-    if !modified_inst_indices.is_empty() {
-        let modified_insts: Vec<SymbolInstance> = modified_inst_indices
-            .into_iter()
-            .filter_map(|i| {
-                tl.layers[l_idx].keyframes[kf_idx]
-                    .cel
-                    .instances
-                    .get(i)
-                    .cloned()
-            })
-            .collect();
-        for inst in &modified_insts {
-            reinstantiate_modified_symbol_instance(
-                &tl.layers[l_idx],
-                frame,
-                inst,
-                library,
-                world_xform,
-                has_world_xform,
-                layer_stage_shapes,
-            );
-        }
-    }
     true
 }
 
@@ -3403,7 +3302,7 @@ fn writeback_edited_layer_shapes(
 /// - 土台キャッシュ（`tab.session.base_cache`）が保持している対象レイヤーのステージ座標図形を複製せずに `f` に渡す。
 /// - `f` のあと、変わった図形だけ逆変換して書き戻す。変わっていない図形（`shape_id` と `mesh_revision` が同じ）は
 ///   `ShapeId -> セル内の番号` の `HashMap` で $O(N)$ 対応づけして元のローカル図形をそのまま使う。
-/// - 書き戻したら、そのレイヤーの土台キャッシュを編集結果の図形で直接置き換え（描画キャッシュもそのまま引き継ぎ）、文書からの再構築を省く。
+/// - 書き戻したレイヤーの土台キャッシュは文書から作り直す（描画キャッシュは `ShapeId` と `mesh_revision` が同じ図形から引き継ぐ）。
 pub(crate) fn edit_layers(
     tab: &mut Tab,
     layer_ids: &[LayerId],
@@ -3451,7 +3350,6 @@ pub(crate) fn edit_layers(
     } else {
         world_xform.inverse()
     };
-    let need_inv = inv_xform != Affine::IDENTITY;
     let editing_group_path = tab.session.editing_group_path.clone();
     let mut next_group_id = tab.doc.next_group_id.max(1);
 
@@ -3487,7 +3385,7 @@ pub(crate) fn edit_layers(
     let mut modified_lids: Vec<LayerId> = Vec::new();
     let mut edited_by_lid: HashMap<LayerId, Vec<FillShape>> = HashMap::new();
 
-    let mut mutate_tl = |tl: &mut Timeline, library: &[SymbolDef]| {
+    let mut mutate_tl = |tl: &mut Timeline| {
         let frame = tl.current_frame;
         tl.normalize_shape_layer_ids(&mut edit.shapes);
 
@@ -3528,11 +3426,8 @@ pub(crate) fn edit_layers(
                 tl,
                 l_idx,
                 frame,
-                library,
-                world_xform,
                 has_world_xform,
                 inv_xform,
-                need_inv,
                 &initial_stage_inst_xform,
                 layer_shapes,
             ) {
@@ -3544,39 +3439,24 @@ pub(crate) fn edit_layers(
     if let Some(last) = tab.session.edit_path.last() {
         if let Some(idx) = tab.doc.library.iter().position(|s| s.id == last.symbol_id) {
             let mut taken_tl = std::mem::take(&mut tab.doc.library[idx].timeline);
-            mutate_tl(&mut taken_tl, &tab.doc.library);
+            mutate_tl(&mut taken_tl);
             tab.doc.library[idx].timeline = taken_tl;
             if !modified_lids.is_empty() {
                 tab.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
                 tab.doc.bump_revision();
             }
         } else {
-            mutate_tl(&mut tab.doc.root, &tab.doc.library);
+            mutate_tl(&mut tab.doc.root);
         }
     } else {
-        mutate_tl(&mut tab.doc.root, &tab.doc.library);
+        mutate_tl(&mut tab.doc.root);
     }
 
     let any_cel_modified = !modified_lids.is_empty();
-    let tl_ref = if let Some(last) = tab.session.edit_path.last() {
-        tab.doc
-            .find_symbol(last.symbol_id)
-            .map(|s| &s.timeline)
-            .unwrap_or(&tab.doc.root)
-    } else {
-        &tab.doc.root
-    };
-    tab.session.base_cache.replace_edited_layers(
-        tl_ref,
-        &tab.doc.library,
-        world_xform,
-        &modified_lids,
-        edited_by_lid,
-        untouched_layers,
-    );
-    if any_cel_modified {
-        tab.session.invalidate_scene_order();
-    }
+    tab.session
+        .base_cache
+        .replace_edited_layers(&modified_lids, edited_by_lid, untouched_layers);
+    tab.refresh_scene_base();
 
     tab.doc.next_group_id = next_group_id;
     tab.session.sanitize_editing_scope();

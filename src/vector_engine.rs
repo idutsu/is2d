@@ -452,18 +452,13 @@ impl FillShape {
         true
     }
 
-    /// ドナー図形 `donor` が保持している当たり判定キャッシュ（`hit_bez_path`）のみを引き継ぐ
-    pub(crate) fn copy_geometry_caches_from(&mut self, donor: &Self) {
+    /// ドナー図形 `donor` が保持している描画・当たり判定キャッシュをそのまま引き継ぐ
+    pub(crate) fn copy_render_caches_from(&mut self, donor: &Self) {
         if self.hit_bez_path.get().is_none() {
             if let Some(p) = donor.hit_bez_path.get() {
                 let _ = self.hit_bez_path.set(Arc::clone(p));
             }
         }
-    }
-
-    /// ドナー図形 `donor` が保持している描画・当たり判定キャッシュをそのまま引き継ぐ
-    pub(crate) fn copy_render_caches_from(&mut self, donor: &Self) {
-        self.copy_geometry_caches_from(donor);
         if self.fill_mesh.get().is_none() {
             if let Some(m) = donor.fill_mesh.get() {
                 let _ = self.fill_mesh.set(Arc::clone(m));

@@ -6,8 +6,8 @@ use kurbo::{Affine, Point};
 
 #[cfg(test)]
 pub(crate) use crate::timeline::interpolate_affine_with_pivot;
-pub(crate) use crate::timeline::{ResolvedCelSig, SymbolInstance, TweenRotate, TweenState};
 use crate::timeline::{Cel, Layer, Timeline};
+pub(crate) use crate::timeline::{ResolvedCelSig, SymbolInstance, TweenRotate, TweenState};
 use crate::vector_engine::{
     next_shape_id, transform_mesh_to_screen, union_bounding_boxes, Contour, FillShape, SyncCache,
 };
@@ -186,7 +186,7 @@ impl SymbolDef {
     pub(crate) fn new(id: u64, name: String, mut local_shapes: Vec<FillShape>) -> Self {
         for s in &mut local_shapes {
             s.layer_id = 1;
-            s.clear_screen_caches();
+            s.strip_transient_caches();
         }
         let mut timeline = Timeline::default();
         timeline.layers[0].keyframe_mut(0).cel = Cel::new(local_shapes);
@@ -926,35 +926,6 @@ impl Layer {
             .into_iter()
             .map(|s| s.with_layer_id(out_layer_id))
             .collect()
-    }
-
-    /// このレイヤーの指定フレーム `frame` における単一シンボルインスタンス `inst` のみを展開して返す
-    pub(crate) fn evaluate_single_symbol_instance_at(
-        &self,
-        frame: usize,
-        inst: &SymbolInstance,
-        library: &[SymbolDef],
-    ) -> Vec<FillShape> {
-        let Some(kf_idx) = self.keyframe_index_at(frame) else {
-            return Vec::new();
-        };
-        let kf = &self.keyframes[kf_idx];
-        let b = inst.binding;
-        let Some(sym) = library.iter().find(|sym| sym.id == b.symbol_id) else {
-            return Vec::new();
-        };
-        let ctx = SymbolEvalCtx::new(library);
-        let local_shapes =
-            sym.evaluated_local_shapes_for_instance(b, kf.start_frame, frame, ctx.nested());
-        if local_shapes.is_empty() {
-            vec![FillShape::new_empty_symbol_marker(
-                b,
-                self.id,
-                &inst.parent_scope,
-            )]
-        } else {
-            b.instantiate_shapes(&local_shapes, self.id, &inst.parent_scope)
-        }
     }
 }
 

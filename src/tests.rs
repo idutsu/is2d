@@ -12656,7 +12656,7 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     }
 
     // 2. 離れた位置に図形2を描画して書き戻し（edit_layers）を発生させる
-    //    未変更の図形1（kept パス）は fill_mesh と hit_bez_path だけを引き継ぎ、画面用キャッシュを持たないこと
+    //    未変更の図形1（kept パス）も含め、文書側の図形には fill_mesh も hit_bez_path も画面用キャッシュも引き継がれないこと
     let _ = apply(
         &mut app,
         Action::PaintStroke {
@@ -12673,8 +12673,17 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
         "書き戻し後、未変更の文書側図形にも fill_mesh は引き継がれないこと"
     );
     assert!(
-        doc_s1.has_cached_hit_bez_path(),
-        "書き戻し後、未変更の文書側図形には hit_bez_path が引き継がれること"
+        !doc_s1.has_cached_hit_bez_path(),
+        "書き戻し後、未変更の文書側図形にも hit_bez_path は引き継がれないこと"
+    );
+    let stage_s1_after = app
+        .scene()
+        .iter()
+        .find(|s| s.shape_id == shape1_id)
+        .unwrap();
+    assert!(
+        stage_s1_after.has_cached_fill_mesh() && stage_s1_after.has_cached_hit_bez_path(),
+        "土台キャッシュ側の未変更図形には donor_map 経由で fill_mesh と hit_bez_path が引き継がれること"
     );
     for s in doc_shapes.iter() {
         assert!(
@@ -13762,8 +13771,23 @@ fn test_m2_8_document_shapes_never_store_fill_mesh_after_playback_onion_edit_and
         "再生およびオニオンスキン表示の後も文書に fill_mesh が入っていないこと"
     );
 
-    // 3. 編集する（ブラシ追加・全選択移動・確定）→ Undo する
+    // 3. ホバー（contains_point による当たり判定キャッシュ生成）→ 編集する（ブラシ追加・全選択移動・確定）→ Undo・Redo する
+    let has_any_cached_hit_bez_path = |doc: &crate::symbol::Document| {
+        let tl_has_hit = |tl: &crate::timeline::Timeline| {
+            tl.layers.iter().any(|l| {
+                l.keyframes
+                    .iter()
+                    .any(|kf| kf.cel.shapes.iter().any(FillShape::has_cached_hit_bez_path))
+            })
+        };
+        tl_has_hit(&doc.root) || doc.library.iter().any(|sym| tl_has_hit(&sym.timeline))
+    };
     let _ = apply(&mut app, Action::ScrubRulerToFrame { frame: 2 });
+    for s in app.scene().iter() {
+        let bb = s.bounding_box();
+        let center = Point::new((bb.x0 + bb.x1) * 0.5, (bb.y0 + bb.y1) * 0.5);
+        let _ = s.contains_point(center);
+    }
     let _ = apply(
         &mut app,
         Action::PaintStroke {
@@ -13773,6 +13797,9 @@ fn test_m2_8_document_shapes_never_store_fill_mesh_after_playback_onion_edit_and
         },
     );
     for s in app.scene().iter() {
+        let bb = s.bounding_box();
+        let center = Point::new((bb.x0 + bb.x1) * 0.5, (bb.y0 + bb.y1) * 0.5);
+        let _ = s.contains_point(center);
         let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
     }
     let _ = apply(&mut app, Action::SelectAll);
@@ -13787,12 +13814,22 @@ fn test_m2_8_document_shapes_never_store_fill_mesh_after_playback_onion_edit_and
         !app.doc.has_any_cached_fill_mesh(),
         "編集確定後も文書（ルートとライブラリ）のどの図形にも fill_mesh が入っていないこと"
     );
+    assert!(
+        !has_any_cached_hit_bez_path(&app.doc),
+        "ホバー＋編集確定後も文書（ルートとライブラリ）のどの図形にも hit_bez_path が入っていないこと"
+    );
 
     let _ = apply(&mut app, Action::Undo);
     let _ = apply(&mut app, Action::Undo);
     assert!(
-        !app.doc.has_any_cached_fill_mesh(),
-        "Undo の後も文書（ルートとライブラリ）のどの図形にも fill_mesh が入っていないこと"
+        !app.doc.has_any_cached_fill_mesh() && !has_any_cached_hit_bez_path(&app.doc),
+        "Undo の後も文書（ルートとライブラリ）のどの図形にも fill_mesh / hit_bez_path が入っていないこと"
+    );
+    let _ = apply(&mut app, Action::Redo);
+    let _ = apply(&mut app, Action::Redo);
+    assert!(
+        !app.doc.has_any_cached_fill_mesh() && !has_any_cached_hit_bez_path(&app.doc),
+        "Redo の後も文書（ルートとライブラリ）のどの図形にも fill_mesh / hit_bez_path が入っていないこと"
     );
 }
 
@@ -14630,5 +14667,98 @@ fn test_m4_1_alt_duplicate_touching_sliced_pieces_merges_into_single_shape_on_de
         reopened.doc.root.layers[0].cel_at(0).unwrap().shapes.len(),
         2,
         "保存して読み込んでも2図形であること"
+    );
+}
+
+#[test]
+fn test_m4_2_mid_tween_edit_restoring_classic_tween_rebuilds_base_cache_at_interpolated_position() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+
+    // 1. シンボル1つを置いたキーフレームをフレーム0とフレーム20に作り、位置を 200px ずらしてクラシックトゥイーンにする
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(140.0, 100.0)],
+            radius: 10.0,
+            color: Color32::RED,
+        },
+    );
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(&mut app, Action::ConvertToSymbol);
+    let _ = apply(&mut app, Action::ToggleTween);
+    for _ in 0..20 {
+        let _ = apply(&mut app, Action::ExtendFrame);
+    }
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 20,
+        },
+    );
+    let _ = apply(&mut app, Action::InsertKeyframe { copy_prev: true });
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: KVec2::new(200.0, 0.0),
+        },
+    );
+    let _ = apply(&mut app, Action::Deselect);
+
+    // 2. フレーム0でブラシを1本描く（生シェイプが混ざり、クラシックトゥイーンが未完になる）
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 0,
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(400.0, 300.0), Point::new(440.0, 300.0)],
+            radius: 8.0,
+            color: Color32::BLUE,
+        },
+    );
+
+    // 3. フレーム10に移り、その線を消しゴムで消す（セルがシンボル1つに戻り、クラシックトゥイーンが成り立ち直す）
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 10,
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::EraseStroke {
+            points: vec![Point::new(380.0, 300.0), Point::new(460.0, 300.0)],
+            radius: 25.0,
+        },
+    );
+
+    // 4. 土台キャッシュのインスタンスの境界矩形が、土台キャッシュを捨てて文書から作り直したものと同じ（補間位置 x+100px）であること
+    assert_eq!(app.scene().len(), 1);
+    let bbox_after_edit = app.scene().get(0).unwrap().bounding_box();
+    app.tabs[app.active].session.base_cache = Default::default();
+    app.tabs[app.active].refresh_scene_base();
+    let bbox_rebuilt = app.scene().get(0).unwrap().bounding_box();
+    assert!(
+        (bbox_after_edit.x0 - bbox_rebuilt.x0).abs() <= 1e-6
+            && (bbox_after_edit.y0 - bbox_rebuilt.y0).abs() <= 1e-6
+            && (bbox_after_edit.x1 - bbox_rebuilt.x1).abs() <= 1e-6
+            && (bbox_after_edit.y1 - bbox_rebuilt.y1).abs() <= 1e-6,
+        "トゥイーン成立回復後の土台キャッシュ位置 {:?} が文書再構築位置 {:?} と一致すること",
+        bbox_after_edit,
+        bbox_rebuilt,
+    );
+    let center_x = (bbox_after_edit.x0 + bbox_after_edit.x1) * 0.5;
+    assert!(
+        (center_x - 220.0).abs() <= 1.0,
+        "フレーム10のインスタンス中心 X 座標が補間位置 (~220.0) にあること: got {center_x}"
     );
 }
