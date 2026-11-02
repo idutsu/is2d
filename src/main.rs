@@ -310,14 +310,10 @@ impl TimelineHost for Is2dApp {
 impl Is2dApp {
     pub(crate) fn undo(&mut self) {
         apply(self, Action::Undo);
-        self.timeline_ui
-            .ensure_timeline_context(&self.tabs[self.active]);
     }
 
     pub(crate) fn redo(&mut self) {
         apply(self, Action::Redo);
-        self.timeline_ui
-            .ensure_timeline_context(&self.tabs[self.active]);
     }
 
     /// UIパネルから収集した `UiAction` を一括ディスパッチする
@@ -454,8 +450,6 @@ impl Is2dApp {
                 );
             }
         }
-        self.timeline_ui
-            .ensure_timeline_context(&self.tabs[self.active]);
     }
 
     // ------------------------------------------------------------------------
@@ -820,8 +814,6 @@ impl Is2dApp {
                 }
             }
         }
-        self.timeline_ui
-            .ensure_timeline_context(&self.tabs[self.active]);
     }
 
     /// 現在のレイヤー・フレーム状態から常時表示すべき状態連動メッセージを判定する
@@ -937,8 +929,6 @@ impl Is2dApp {
         project_io::handle_viewport_close_request(self, ctx);
         timeline_ui::update_playback(self, ctx);
         self.handle_shortcuts(ctx);
-        self.timeline_ui
-            .ensure_timeline_context(&self.tabs[self.active]);
 
         let mut actions = Vec::new();
         panels::draw_top_menu_bar(

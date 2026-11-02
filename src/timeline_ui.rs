@@ -437,8 +437,6 @@ fn draw_timeline_control_bar(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
                 ui.separator();
                 draw_control_bar_onion_controls(host.tab_mut(), ui);
             });
-            let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
-            timeline_ui.ensure_timeline_context(tab);
         });
 }
 
@@ -784,8 +782,6 @@ fn handle_timeline_pointer_input(
         hover_pos,
         drag_layer_feedback.is_some(),
     );
-    let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
-    timeline_ui.ensure_timeline_context(tab);
     drag_layer_feedback
 }
 
@@ -1972,11 +1968,9 @@ fn draw_timeline_scrollbars(
 /// 前後のフレームへコマ送り移動する（`,` / `.` キーやボタン操作）
 pub(crate) fn step_frame(host: &mut impl TimelineHost, delta: isize) {
     let (active_layer, next) = {
-        let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
-        timeline_ui.ensure_timeline_context(tab);
-        let tl = tab.active_timeline();
+        let tl = host.tab().active_timeline();
         let total = tl.total_frames.max(1) as isize;
-        let next = if timeline_ui.loop_playback {
+        let next = if host.timeline_ui().loop_playback {
             (tl.current_frame as isize + delta).rem_euclid(total) as usize
         } else {
             (tl.current_frame as isize + delta).clamp(0, total - 1) as usize
@@ -1994,12 +1988,7 @@ pub(crate) fn step_frame(host: &mut impl TimelineHost, delta: isize) {
 
 /// 再生 / 一時停止を切り替える（`Enter` キーまたは Play ボタン）
 pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
-    let is_playing = {
-        let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
-        timeline_ui.ensure_timeline_context(tab);
-        timeline_ui.is_playing
-    };
-    if is_playing {
+    if host.timeline_ui().is_playing {
         host.stop_playback();
         apply(host, Action::EndCoalesce { key: None });
     } else {

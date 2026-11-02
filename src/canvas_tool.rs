@@ -813,15 +813,6 @@ mod scene_base_cache {
             Vec<(LayerId, Range<usize>)>,
             HashMap<LayerId, Vec<FillShape>>,
         ) {
-            if self.layers.len() == 1
-                && target_lids.len() == 1
-                && self.layers[0].layer_id == target_lids[0]
-            {
-                let shapes = std::mem::take(&mut self.flat_shapes);
-                let len = shapes.len();
-                self.layers[0].range = 0..0;
-                return (shapes, vec![(target_lids[0], 0..len)], HashMap::new());
-            }
             let old_flat = std::mem::take(&mut self.flat_shapes);
             let mut old_flat_iter = old_flat.into_iter();
             let mut cursor = 0usize;
@@ -859,41 +850,17 @@ mod scene_base_cache {
         }
 
         /// `edit_layers` の書き戻し後、対象レイヤーの土台キャッシュを編集結果の図形で直接置き換える
-        #[allow(clippy::too_many_arguments)]
         pub(crate) fn replace_edited_layers(
             &mut self,
             tl: &Timeline,
             library: &[SymbolDef],
             world_xform: Affine,
             modified_lids: &[LayerId],
-            single_layer_shapes: Option<Vec<FillShape>>,
             mut edited_by_lid: HashMap<LayerId, Vec<FillShape>>,
             mut untouched: HashMap<LayerId, Vec<FillShape>>,
         ) {
             let frame = tl.current_frame;
             let xform_bits = world_xform.as_coeffs().map(f64::to_bits);
-            if self.layers.len() == 1 && tl.layers.len() == 1 {
-                if let Some(shapes) = single_layer_shapes {
-                    let layer = &tl.layers[0];
-                    if !modified_lids.is_empty() {
-                        if let Some(kf_idx) = layer.keyframe_index_at(frame) {
-                            self.layers[0].cel_sig =
-                                Some(compute_resolved_cel_signature(layer, kf_idx, library));
-                            self.layers[0].eval_frame =
-                                layer_eval_frame(layer, kf_idx, frame, library);
-                        } else {
-                            self.layers[0].cel_sig = None;
-                            self.layers[0].eval_frame = 0;
-                        }
-                    }
-                    self.layers[0].visible = layer.visible;
-                    self.layers[0].locked = layer.locked;
-                    self.layers[0].world_xform_bits = xform_bits;
-                    self.layers[0].range = 0..shapes.len();
-                    self.flat_shapes = shapes;
-                    return;
-                }
-            }
             let mut new_flat = Vec::new();
             for (cl, layer) in self.layers.iter_mut().zip(&tl.layers) {
                 cl.visible = layer.visible;
@@ -3575,45 +3542,11 @@ pub(crate) fn edit_layers(
     next_group_id = edit.next_group_id;
 
     let mut modified_lids: Vec<LayerId> = Vec::new();
-    let mut single_layer_shapes: Option<Vec<FillShape>> = None;
     let mut edited_by_lid: HashMap<LayerId, Vec<FillShape>> = HashMap::new();
 
     let mut mutate_tl = |tl: &mut Timeline, library: &[SymbolDef]| {
         let frame = tl.current_frame;
         tl.normalize_shape_layer_ids(&mut edit.shapes);
-
-        if tl.layers.len() == 1 && target_layer_indices.len() == 1 {
-            let l_idx = target_layer_indices[0];
-            let lid = tl.layers[l_idx].id;
-            let mut layer_shapes = std::mem::take(&mut edit.shapes);
-            let init_slice = initial_layer_states
-                .get(&lid)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let is_unchanged = init_slice.len() == layer_shapes.len()
-                && init_slice
-                    .iter()
-                    .zip(layer_shapes.iter())
-                    .all(|(st, s)| st.matches(s));
-            if !is_unchanged
-                && writeback_edited_layer_shapes(
-                    tl,
-                    l_idx,
-                    frame,
-                    library,
-                    world_xform,
-                    has_world_xform,
-                    inv_xform,
-                    need_inv,
-                    &initial_stage_inst_xform,
-                    &mut layer_shapes,
-                )
-            {
-                modified_lids.push(lid);
-            }
-            single_layer_shapes = Some(layer_shapes);
-            return;
-        }
 
         edited_by_lid.reserve(target_lids.len());
         for &lid in &target_lids {
@@ -3695,7 +3628,6 @@ pub(crate) fn edit_layers(
         &tab.doc.library,
         world_xform,
         &modified_lids,
-        single_layer_shapes,
         edited_by_lid,
         untouched_layers,
     );
