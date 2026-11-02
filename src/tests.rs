@@ -14762,3 +14762,112 @@ fn test_m4_2_mid_tween_edit_restoring_classic_tween_rebuilds_base_cache_at_inter
         "フレーム10のインスタンス中心 X 座標が補間位置 (~220.0) にあること: got {center_x}"
     );
 }
+
+#[test]
+fn test_m4_3_saved_contour_arc_json_matches_legacy_and_load_shrinks_capacities() {
+    use crate::doc_actions::{apply, Action};
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct LegacySavedContour {
+        segments: Vec<[[f64; 2]; 3]>,
+    }
+
+    // 1. 輪郭1つを SavedContour にして JSON にした文字列が、従来の Vec<[[f64; 2]; 3]> とバイト単位で同じになること
+    let segs = vec![
+        QuadBez::new(
+            Point::new(10.5, 20.25),
+            Point::new(30.125, 45.75),
+            Point::new(50.0, 20.25),
+        ),
+        QuadBez::new(
+            Point::new(50.0, 20.25),
+            Point::new(30.125, -5.5),
+            Point::new(10.5, 20.25),
+        ),
+    ];
+    let contour = vector_engine::Contour::new(segs.clone());
+    let saved = project_io::SavedContour::from(&contour);
+    assert!(
+        std::sync::Arc::ptr_eq(&contour.segments, &saved.segments),
+        "SavedContour::from(&Contour) は座標配列を複製せず Arc を共有すること"
+    );
+    let legacy = LegacySavedContour {
+        segments: segs
+            .iter()
+            .map(|s| [[s.p0.x, s.p0.y], [s.p1.x, s.p1.y], [s.p2.x, s.p2.y]])
+            .collect(),
+    };
+    let json_new = serde_json::to_string(&saved).unwrap();
+    let json_legacy = serde_json::to_string(&legacy).unwrap();
+    assert_eq!(
+        json_new, json_legacy,
+        "SavedContour の JSON 表現が従来形式と完全一致すること"
+    );
+
+    // 2. 保存して読み込むと、図形の形が同じで、線分の Vec・穴の Vec・図形の Vec の capacity が len と一致すること
+    let mut app = Is2dApp::default();
+    for i in 0..5 {
+        let x0 = 60.0 + i as f64 * 90.0;
+        let _ = apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![
+                    Point::new(x0, 100.0),
+                    Point::new(x0 + 50.0, 100.0),
+                    Point::new(x0 + 50.0, 150.0),
+                    Point::new(x0, 150.0),
+                    Point::new(x0, 100.0),
+                ],
+                radius: 8.0,
+                color: Color32::from_rgb((i * 40 + 40) as u8, 120, 200),
+            },
+        );
+    }
+    let tmp_path = std::env::temp_dir().join(format!("m4_3_shrink_{}.is2d", std::process::id()));
+    project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
+    let mut loaded = Is2dApp::default();
+    project_io::open_project_in_tab(&mut loaded, &tmp_path, None).unwrap();
+    let _ = std::fs::remove_file(&tmp_path);
+
+    let orig_shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+    let loaded_shapes = &loaded.doc.root.layers[0].keyframes[0].cel.shapes;
+    assert_eq!(orig_shapes.len(), loaded_shapes.len());
+    assert_eq!(
+        loaded_shapes.capacity(),
+        loaded_shapes.len(),
+        "読み込んだセルの shapes Vec の capacity が len と一致すること"
+    );
+    let contours_match = |a: &vector_engine::Contour, b: &vector_engine::Contour| {
+        a.segments.len() == b.segments.len()
+            && a.segments.iter().zip(b.segments.iter()).all(|(sa, sb)| {
+                (sa.p0.x - sb.p0.x).abs() <= 1e-12
+                    && (sa.p0.y - sb.p0.y).abs() <= 1e-12
+                    && (sa.p1.x - sb.p1.x).abs() <= 1e-12
+                    && (sa.p1.y - sb.p1.y).abs() <= 1e-12
+                    && (sa.p2.x - sb.p2.x).abs() <= 1e-12
+                    && (sa.p2.y - sb.p2.y).abs() <= 1e-12
+            })
+    };
+    for (orig_s, load_s) in orig_shapes.iter().zip(loaded_shapes.iter()) {
+        assert!(contours_match(&orig_s.exterior, &load_s.exterior));
+        assert_eq!(
+            load_s.exterior.segments.capacity(),
+            load_s.exterior.segments.len(),
+            "読み込んだ外周 segments Vec の capacity が len と一致すること"
+        );
+        assert_eq!(
+            load_s.holes.capacity(),
+            load_s.holes.len(),
+            "読み込んだ holes Vec の capacity が len と一致すること"
+        );
+        for (oh, lh) in orig_s.holes.iter().zip(load_s.holes.iter()) {
+            assert!(contours_match(oh, lh));
+            assert_eq!(
+                lh.segments.capacity(),
+                lh.segments.len(),
+                "読み込んだ穴 segments Vec の capacity が len と一致すること"
+            );
+        }
+    }
+}

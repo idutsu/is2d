@@ -7,13 +7,13 @@ use kurbo::{Affine, Point, QuadBez};
 use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{
-    SelectSubMode, Session, Tab, UndoHistory, View, cancel_active_drag, commit_floating,
+    cancel_active_drag, commit_floating, SelectSubMode, Session, Tab, UndoHistory, View,
 };
 use crate::symbol::{
     Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode, TweenRotate,
 };
-pub(crate) use crate::timeline::{MAX_LAYERS_PER_TIMELINE, MAX_TIMELINE_FRAMES};
 use crate::timeline::{Cel, Keyframe, Layer, Timeline, TimelineCellSelection};
+pub(crate) use crate::timeline::{MAX_LAYERS_PER_TIMELINE, MAX_TIMELINE_FRAMES};
 pub(crate) use crate::vector_engine::MAX_CONTOUR_SEGMENTS;
 use crate::vector_engine::{Contour, FillShape};
 
@@ -105,8 +105,7 @@ fn activate_tab_index(ws: &mut impl ProjectWorkspace, target_index: usize) {
     }
     ws.clipboard_mut().paste_count = 0;
     ws.clipboard_mut().paste_offset = kurbo::Vec2::ZERO;
-    if !ws.tab().session.selection.is_empty()
-        && ws.tool().select_sub_mode != SelectSubMode::Reshape
+    if !ws.tab().session.selection.is_empty() && ws.tool().select_sub_mode != SelectSubMode::Reshape
     {
         ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
     }
@@ -540,45 +539,56 @@ impl From<SavedSymbolInstance> for SymbolInstance {
     }
 }
 
+fn serialize_contour_segments<S: serde::Serializer>(
+    segments: &Arc<Vec<QuadBez>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(
+        segments
+            .iter()
+            .map(|s| [[s.p0.x, s.p0.y], [s.p1.x, s.p1.y], [s.p2.x, s.p2.y]]),
+    )
+}
+
+fn deserialize_contour_segments<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Arc<Vec<QuadBez>>, D::Error> {
+    let mut segs: Vec<QuadBez> = Vec::<[[f64; 2]; 3]>::deserialize(deserializer)?
+        .into_iter()
+        .take(MAX_CONTOUR_SEGMENTS)
+        .filter(|pts| pts.iter().flatten().all(|v| v.is_finite()))
+        .map(|pts| {
+            QuadBez::new(
+                Point::new(pts[0][0], pts[0][1]),
+                Point::new(pts[1][0], pts[1][1]),
+                Point::new(pts[2][0], pts[2][1]),
+            )
+        })
+        .collect();
+    segs.shrink_to_fit();
+    Ok(Arc::new(segs))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SavedContour {
-    pub(crate) segments: Vec<[[f64; 2]; 3]>,
+    #[serde(
+        serialize_with = "serialize_contour_segments",
+        deserialize_with = "deserialize_contour_segments"
+    )]
+    pub(crate) segments: Arc<Vec<QuadBez>>,
 }
 
 impl From<&Contour> for SavedContour {
     fn from(c: &Contour) -> Self {
         Self {
-            segments: c
-                .segments
-                .iter()
-                .map(|seg| {
-                    [
-                        [seg.p0.x, seg.p0.y],
-                        [seg.p1.x, seg.p1.y],
-                        [seg.p2.x, seg.p2.y],
-                    ]
-                })
-                .collect(),
+            segments: Arc::clone(&c.segments),
         }
     }
 }
 
 impl From<SavedContour> for Contour {
     fn from(s: SavedContour) -> Self {
-        let segs = s
-            .segments
-            .into_iter()
-            .take(MAX_CONTOUR_SEGMENTS)
-            .filter(|pts| pts.iter().flatten().all(|v| v.is_finite()))
-            .map(|pts| {
-                QuadBez::new(
-                    Point::new(pts[0][0], pts[0][1]),
-                    Point::new(pts[1][0], pts[1][1]),
-                    Point::new(pts[2][0], pts[2][1]),
-                )
-            })
-            .collect();
-        let mut contour = Contour::new(segs);
+        let mut contour = Contour::new(Arc::unwrap_or_clone(s.segments));
         contour.enforce_continuity();
         contour
     }
@@ -616,7 +626,7 @@ impl From<SavedFillShape> for FillShape {
         if exterior.signed_area() < 0.0 {
             exterior.reverse();
         }
-        let holes: Vec<Contour> = s
+        let mut holes: Vec<Contour> = s
             .holes
             .into_iter()
             .map(Contour::from)
@@ -628,6 +638,7 @@ impl From<SavedFillShape> for FillShape {
                 h
             })
             .collect();
+        holes.shrink_to_fit();
         FillShape::new(color, exterior, holes)
             .with_layer_id(s.layer_id)
             .with_group_path(s.group_path)
@@ -666,12 +677,13 @@ impl From<&Keyframe> for SavedKeyframe {
 
 impl From<SavedKeyframe> for Keyframe {
     fn from(s: SavedKeyframe) -> Self {
-        let shapes: Vec<FillShape> = s
+        let mut shapes: Vec<FillShape> = s
             .shapes
             .into_iter()
             .map(FillShape::from)
             .filter(|sh| sh.exterior.segments.len() >= 2 && sh.exterior.signed_area().abs() > 1e-4)
             .collect();
+        shapes.shrink_to_fit();
         let mut seen_gids = HashSet::with_capacity(s.instances.len());
         let instances: Vec<SymbolInstance> = s
             .instances
@@ -895,11 +907,7 @@ impl ProjectDocument {
     /// （`Floating` がある場合は `Document` のコピーに対して確定した内容を書き出し、`Session` も `Document` も書き換えない）
     pub(crate) fn from_app(tab: &Tab) -> Self {
         let mut temp_tab;
-        let doc = if let Some(fl) = tab
-            .session
-            .floating()
-            .filter(|fl| fl.needs_merge_commit())
-        {
+        let doc = if let Some(fl) = tab.session.floating().filter(|fl| fl.needs_merge_commit()) {
             temp_tab = Tab::new_empty(tab.id, tab.untitled_number);
             temp_tab.doc = tab.doc.clone();
             temp_tab.session.edit_path = tab.session.edit_path.clone();
@@ -930,20 +938,20 @@ impl ProjectDocument {
         if !self.stage_size[0].is_finite() || !self.stage_size[1].is_finite() {
             return Err("ステージサイズに無効な数値（NaN / Infinity）が含まれています".to_owned());
         }
+        let contour_ok = |c: &SavedContour| {
+            c.segments.iter().all(|seg| {
+                [seg.p0.x, seg.p0.y, seg.p1.x, seg.p1.y, seg.p2.x, seg.p2.y]
+                    .into_iter()
+                    .all(f64::is_finite)
+            })
+        };
         let check_timeline = |tl: &SavedTimeline| -> bool {
             tl.layers.iter().all(|layer| {
                 layer.keyframes.iter().all(|kf| {
-                    let shapes_ok = kf.shapes.iter().all(|sh| {
-                        sh.exterior
-                            .segments
-                            .iter()
-                            .all(|pts| pts.iter().flatten().all(|v| v.is_finite()))
-                            && sh.holes.iter().all(|h| {
-                                h.segments
-                                    .iter()
-                                    .all(|pts| pts.iter().flatten().all(|v| v.is_finite()))
-                            })
-                    });
+                    let shapes_ok = kf
+                        .shapes
+                        .iter()
+                        .all(|sh| contour_ok(&sh.exterior) && sh.holes.iter().all(contour_ok));
                     let instances_ok = kf.instances.iter().all(|inst| {
                         inst.binding.xform.iter().all(|v| v.is_finite())
                             && inst.binding.pivot.iter().all(|v| v.is_finite())
@@ -962,7 +970,7 @@ impl ProjectDocument {
         Ok(())
     }
 
-    /// 読み込んだ `ProjectDocument` から正規化・循環参照除去済みの `Document` を構築する
+    /// 読み込んだ `ProjectDocument` から正規化済みの `Document` を構築する
     pub(crate) fn into_document(self) -> Document {
         let fps = self.timeline.fps.clamp(1, 60);
         let mut timeline: Timeline = self.timeline.into();
