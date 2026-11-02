@@ -954,20 +954,10 @@ mod scene_base_cache {
 
             for layer in &tl.layers {
                 new_order_ids.push(layer.id);
-                if !layer.visible || layer.locked {
-                    let start = new_flat.len();
-                    new_layers.push(CachedLayer {
-                        layer_id: layer.id,
-                        visible: layer.visible,
-                        locked: layer.locked,
-                        cel_sig: None,
-                        eval_frame: 0,
-                        world_xform_bits: xform_bits,
-                        range: start..start,
-                    });
-                    continue;
-                }
-                let Some(kf_idx) = layer.keyframe_index_at(frame) else {
+                let Some(kf_idx) = (layer.visible && !layer.locked)
+                    .then(|| layer.keyframe_index_at(frame))
+                    .flatten()
+                else {
                     let start = new_flat.len();
                     new_layers.push(CachedLayer {
                         layer_id: layer.id,
@@ -981,7 +971,8 @@ mod scene_base_cache {
                     continue;
                 };
                 let ef = layer_eval_frame(layer, kf_idx, frame, library);
-                if let Some((old_cl, old_shapes)) = old_by_id.remove(&layer.id) {
+                let prev = old_by_id.remove(&layer.id);
+                if let Some((old_cl, _)) = &prev {
                     let key_unchanged = old_cl.visible == layer.visible
                         && old_cl.locked == layer.locked
                         && old_cl.world_xform_bits == xform_bits
@@ -991,6 +982,7 @@ mod scene_base_cache {
                             .as_ref()
                             .is_some_and(|sig| sig.matches_layer_keyframe(layer, kf_idx, library));
                     if key_unchanged {
+                        let (old_cl, old_shapes) = prev.unwrap();
                         let start = new_flat.len();
                         new_flat.extend(old_shapes);
                         let end = new_flat.len();
@@ -1005,9 +997,11 @@ mod scene_base_cache {
                         });
                         continue;
                     }
-                    let ctx = SymbolEvalCtx::new(library);
-                    let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx);
-                    transform_layer_shapes_to_stage(&mut evaluated, world_xform);
+                }
+                let ctx = SymbolEvalCtx::new(library);
+                let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx);
+                transform_layer_shapes_to_stage(&mut evaluated, world_xform);
+                if let Some((old_cl, old_shapes)) = prev {
                     if old_cl.world_xform_bits == xform_bits && !old_shapes.is_empty() {
                         let donor_map: HashMap<(ShapeId, u64), &FillShape> = old_shapes
                             .iter()
@@ -1019,37 +1013,20 @@ mod scene_base_cache {
                             }
                         }
                     }
-                    let sig = compute_resolved_cel_signature(layer, kf_idx, library);
-                    let start = new_flat.len();
-                    new_flat.extend(evaluated);
-                    let end = new_flat.len();
-                    new_layers.push(CachedLayer {
-                        layer_id: layer.id,
-                        visible: layer.visible,
-                        locked: layer.locked,
-                        cel_sig: Some(sig),
-                        eval_frame: ef,
-                        world_xform_bits: xform_bits,
-                        range: start..end,
-                    });
-                } else {
-                    let ctx = SymbolEvalCtx::new(library);
-                    let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx);
-                    transform_layer_shapes_to_stage(&mut evaluated, world_xform);
-                    let sig = compute_resolved_cel_signature(layer, kf_idx, library);
-                    let start = new_flat.len();
-                    new_flat.extend(evaluated);
-                    let end = new_flat.len();
-                    new_layers.push(CachedLayer {
-                        layer_id: layer.id,
-                        visible: layer.visible,
-                        locked: layer.locked,
-                        cel_sig: Some(sig),
-                        eval_frame: ef,
-                        world_xform_bits: xform_bits,
-                        range: start..end,
-                    });
                 }
+                let sig = compute_resolved_cel_signature(layer, kf_idx, library);
+                let start = new_flat.len();
+                new_flat.extend(evaluated);
+                let end = new_flat.len();
+                new_layers.push(CachedLayer {
+                    layer_id: layer.id,
+                    visible: layer.visible,
+                    locked: layer.locked,
+                    cel_sig: Some(sig),
+                    eval_frame: ef,
+                    world_xform_bits: xform_bits,
+                    range: start..end,
+                });
             }
 
             self.layers = new_layers;
@@ -2170,14 +2147,32 @@ impl Session {
 
     /// 選択移動または `Alt` 複製移動の仮表示用に、選択中図形を `Overlay` に載せる
     pub(crate) fn begin_move_overlay(&mut self, alt_duplicate: bool) {
+        self.begin_selection_overlay(alt_duplicate, false);
+    }
+
+    /// 自由変形（拡大・回転）の仮表示用に、選択中図形を `Overlay` に載せ、変形元のクローン列を返す
+    pub(crate) fn begin_transform_overlay(&mut self) -> Vec<FillShape> {
+        self.begin_selection_overlay(false, true)
+    }
+
+    fn begin_selection_overlay(
+        &mut self,
+        alt_duplicate: bool,
+        for_transform: bool,
+    ) -> Vec<FillShape> {
         self.overlay.clear();
         self.overlay_only_selected = alt_duplicate;
         self.overlay_movable_start = 0;
         if self.selection.is_empty() {
             self.rebuild_overlay_from_floating();
-            return;
+            return Vec::new();
         }
         let scope = self.editing_group_path.clone();
+        let single_symbol_gid = (for_transform
+            && self.selection.shapes.is_empty()
+            && self.selection.instances.len() == 1)
+            .then(|| *self.selection.instances.iter().next().unwrap());
+        let custom_piv = self.transform_pivot;
 
         if let Some(fl) = &self.floating {
             fl.init_overlay_from_remainder(&mut self.overlay, &scope);
@@ -2192,59 +2187,6 @@ impl Session {
         }
         self.overlay_movable_start = self.overlay.add.len();
 
-        for shape in self.base_cache.shapes() {
-            if self
-                .floating
-                .as_ref()
-                .is_some_and(|fl| fl.hidden.contains(&shape.shape_id))
-            {
-                continue;
-            }
-            if self.selection.contains_shape(shape) {
-                if !alt_duplicate {
-                    self.overlay.hide.insert(shape.shape_id);
-                }
-                let placement = if alt_duplicate || shape.is_raw_at_scope(&scope) {
-                    Placement::TopOfLayer(shape.layer_id, scope.clone())
-                } else {
-                    Placement::ReplaceAt(shape.shape_id)
-                };
-                self.overlay.add.push((placement, shape.clone()));
-            }
-        }
-        if let Some(fl) = &self.floating {
-            for piece in &fl.pieces {
-                if self.selection.contains_shape(piece) {
-                    self.overlay.add.push((
-                        Placement::TopOfLayer(piece.layer_id, scope.clone()),
-                        piece.clone(),
-                    ));
-                }
-            }
-        }
-        self.invalidate_scene_order();
-    }
-
-    /// 自由変形（拡大・回転）の仮表示用に、選択中図形を `Overlay` に載せ、変形元のクローン列を返す
-    pub(crate) fn begin_transform_overlay(&mut self) -> Vec<FillShape> {
-        self.overlay.clear();
-        self.overlay_only_selected = false;
-        self.overlay_movable_start = 0;
-        if self.selection.is_empty() {
-            self.rebuild_overlay_from_floating();
-            return Vec::new();
-        }
-        let scope = self.editing_group_path.clone();
-        let single_symbol_gid = (self.selection.shapes.is_empty()
-            && self.selection.instances.len() == 1)
-            .then(|| *self.selection.instances.iter().next().unwrap());
-        let custom_piv = self.transform_pivot;
-
-        if let Some(fl) = &self.floating {
-            fl.init_overlay_from_remainder(&mut self.overlay, &scope);
-        }
-        self.overlay_movable_start = self.overlay.add.len();
-
         let mut orig_shapes = Vec::new();
         for shape in self.base_cache.shapes() {
             if self
@@ -2255,7 +2197,9 @@ impl Session {
                 continue;
             }
             if self.selection.contains_shape(shape) {
-                let _ = shape.fill_mesh();
+                if for_transform {
+                    let _ = shape.fill_mesh();
+                }
                 let mut cloned = shape.clone();
                 if let (Some(piv), Some(gid)) = (custom_piv, single_symbol_gid) {
                     if let Some(b) = cloned
@@ -2266,22 +2210,30 @@ impl Session {
                         b.pivot = b.xform.inverse() * piv;
                     }
                 }
-                self.overlay.hide.insert(shape.shape_id);
-                let placement = if shape.is_raw_at_scope(&scope) {
+                if !alt_duplicate {
+                    self.overlay.hide.insert(shape.shape_id);
+                }
+                let placement = if alt_duplicate || shape.is_raw_at_scope(&scope) {
                     Placement::TopOfLayer(shape.layer_id, scope.clone())
                 } else {
                     Placement::ReplaceAt(shape.shape_id)
                 };
-                orig_shapes.push(cloned.clone());
+                if for_transform {
+                    orig_shapes.push(cloned.clone());
+                }
                 self.overlay.add.push((placement, cloned));
             }
         }
         if let Some(fl) = &self.floating {
             for piece in &fl.pieces {
                 if self.selection.contains_shape(piece) {
-                    let _ = piece.fill_mesh();
+                    if for_transform {
+                        let _ = piece.fill_mesh();
+                    }
                     let cloned = piece.clone();
-                    orig_shapes.push(cloned.clone());
+                    if for_transform {
+                        orig_shapes.push(cloned.clone());
+                    }
                     self.overlay.add.push((
                         Placement::TopOfLayer(piece.layer_id, scope.clone()),
                         cloned,

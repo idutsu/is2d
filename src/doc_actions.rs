@@ -1035,66 +1035,6 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
     false
 }
 
-fn translate_selected_shapes(tab: &mut Tab, delta: KVec2) -> bool {
-    if delta == KVec2::ZERO || tab.session.selection.is_empty() {
-        return false;
-    }
-    let _ = prepare_moved_selection(tab);
-    let mut any_moved = false;
-    let selection = tab.session.selection.clone();
-    tab.session.update_floating(|fl_opt| {
-        if let Some(fl) = fl_opt {
-            let mut all_selected = true;
-            for piece in &mut fl.pieces {
-                if selection.contains_shape(piece) {
-                    piece.translate(delta);
-                    any_moved = true;
-                } else {
-                    all_selected = false;
-                }
-            }
-            if any_moved {
-                fl.modified = true;
-                if !all_selected {
-                    fl.pieces_disjoint = false;
-                }
-            }
-        }
-    });
-    let mut target_lids: Vec<u64> = Vec::new();
-    for s in tab.session.base_cache.shapes() {
-        let hidden = tab
-            .session
-            .floating()
-            .is_some_and(|fl| fl.hidden.contains(&s.shape_id));
-        if !hidden
-            && tab.session.selection.contains_shape(s)
-            && !target_lids.contains(&s.layer_id)
-        {
-            target_lids.push(s.layer_id);
-        }
-    }
-    if !target_lids.is_empty() {
-        let hidden = tab
-            .session
-            .floating()
-            .map(|fl| fl.hidden.clone())
-            .unwrap_or_default();
-        edit_layers(tab, &target_lids, |edit| {
-            for s in &mut edit.shapes {
-                if !hidden.contains(&s.shape_id) && selection.contains_shape(s) {
-                    s.translate(delta);
-                    any_moved = true;
-                }
-            }
-        });
-    }
-    if let Some(piv) = &mut tab.session.transform_pivot {
-        *piv += delta;
-    }
-    any_moved
-}
-
 fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     if tab.session.selection.is_empty() {
         return false;
@@ -1203,7 +1143,11 @@ fn apply_finish_move_selection_drag(
     if alt_duplicate {
         duplicate_selected_in_working_copy(tab);
     }
-    translate_selected_shapes(tab, total_delta)
+    let moved = transform_selected_shapes(tab, Affine::translate(total_delta));
+    if let Some(piv) = &mut tab.session.transform_pivot {
+        *piv += total_delta;
+    }
+    moved
 }
 
 fn apply_move_selected(
@@ -1224,7 +1168,11 @@ fn apply_move_selected(
         return false;
     }
     push_undo(tab, coalesce);
-    translate_selected_shapes(tab, delta)
+    let moved = transform_selected_shapes(tab, Affine::translate(delta));
+    if let Some(piv) = &mut tab.session.transform_pivot {
+        *piv += delta;
+    }
+    moved
 }
 
 fn apply_deform_shape(
