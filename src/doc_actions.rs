@@ -308,9 +308,6 @@ pub(crate) enum Action {
         layer_idx: usize,
         locked: bool,
     },
-    SetTotalFrames {
-        total: usize,
-    },
     SetFps {
         fps: u32,
     },
@@ -337,7 +334,6 @@ impl Action {
     pub(crate) fn coalesce_key(&self, tab: &Tab) -> Option<CoalesceKey> {
         match self {
             Self::SetStageSize { .. } => Some(CoalesceKey::StageSize),
-            Self::SetTotalFrames { .. } => Some(CoalesceKey::TotalFrames),
             Self::SetFps { .. } => Some(CoalesceKey::Fps),
             Self::RenameSymbol { sym_id, .. } => Some(CoalesceKey::RenameSymbol(*sym_id)),
             Self::SetSymbolPlayback {
@@ -806,9 +802,6 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         Action::SetLayerLocked { layer_idx, locked } => {
             apply_set_layer_locked(tab, layer_idx, locked);
             ApplyResult::Applied(true)
-        }
-        Action::SetTotalFrames { total } => {
-            ApplyResult::Applied(apply_set_total_frames(tab, total, coalesce))
         }
         Action::SetFps { fps } => ApplyResult::Applied(apply_set_fps(tab, fps, coalesce)),
         Action::SetStageSize { size } => {
@@ -2123,24 +2116,6 @@ fn apply_set_stage_size(
     push_undo(tab, coalesce);
     tab.doc.stage_size = next_size;
     true
-}
-
-fn apply_set_total_frames(
-    tab: &mut Tab,
-    next_total: usize,
-    coalesce: Option<CoalesceKey>,
-) -> bool {
-    let next_total = next_total.max(1);
-    if next_total != tab.active_timeline().total_frames {
-        if tab.history.last_coalesce_key != coalesce || coalesce.is_none() {
-            commit_floating(tab);
-        }
-        push_undo(tab, coalesce);
-        tab.with_active_timeline_mut(|tl, _| tl.resize_total_frames(next_total));
-        reset_session_after_timeline_change(tab);
-        return true;
-    }
-    false
 }
 
 fn apply_set_fps(tab: &mut Tab, next_fps: u32, coalesce: Option<CoalesceKey>) -> bool {

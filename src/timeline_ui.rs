@@ -13,7 +13,7 @@ pub(crate) use crate::doc_actions::{
     timeline_reorder_layer,
 };
 use crate::symbol::TweenState;
-use crate::timeline::{MAX_TIMELINE_FRAMES, TimelineCellSelection};
+use crate::timeline::TimelineCellSelection;
 
 /// タイムライングリッドの1フレームあたりのセル幅（px）
 pub(crate) const CELL_W: f32 = 16.0;
@@ -209,7 +209,7 @@ impl TimelineLayout {
         let grid_top = panel_rect.top() + RULER_H;
         let grid_w = (panel_rect.right() - grid_left).max(1.0);
         let grid_h = (panel_rect.bottom() - grid_top).max(1.0);
-        let max_frames_shown = (max_reach_frames + 24).max(60);
+        let max_frames_shown = (max_reach_frames + 24).max(3000);
         let first_vis_frame = (scroll_x / CELL_W).floor() as usize;
         let last_vis_frame = (((scroll_x + grid_w) / CELL_W).ceil() as usize).min(max_frames_shown);
 
@@ -550,36 +550,12 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
 
     ui.separator();
 
+    let tl = host.tab().active_timeline();
     ui.label(format!(
-        "フレーム: {:>2} /",
-        host.tab().active_timeline().current_frame + 1
+        "フレーム: {:>2} / {} f",
+        tl.current_frame + 1,
+        tl.total_frames
     ));
-    let mut total_f = host.tab().active_timeline().total_frames as u32;
-    let total_resp = ui
-        .add(
-            egui::DragValue::new(&mut total_f)
-                .range(1..=(MAX_TIMELINE_FRAMES as u32))
-                .clamp_existing_to_range(false)
-                .update_while_editing(false)
-                .speed(0.25)
-                .suffix(" f"),
-        )
-        .on_hover_text(format!("総フレーム数 (1〜{})", MAX_TIMELINE_FRAMES));
-    if total_resp.changed() {
-        let next_total = (total_f as usize).max(1);
-        apply(host, Action::SetTotalFrames { total: next_total });
-    }
-    if total_resp.drag_stopped()
-        || total_resp.lost_focus()
-        || (!total_resp.dragged() && !total_resp.has_focus())
-    {
-        apply(
-            host,
-            Action::EndCoalesce {
-                key: Some(CoalesceKey::TotalFrames),
-            },
-        );
-    }
 
     ui.label("FPS:");
     let mut fps_val = host.tab().doc.fps;

@@ -941,52 +941,6 @@ impl Timeline {
         }
     }
 
-    /// タイムライン全体の総フレーム数を `next_total` に変更する：
-    /// - 延長時：従来 `total_frames` に達していた最長レイヤー群のみを `next_total` へ伸ばし、意図的に短い個別レイヤーの `frame_count` は上書きしない。
-    /// - 短縮時：`next_total` を超えるレイヤーの `frame_count` を切り詰め、範囲外（`start_frame >= next_total`）の孤立キーフレームも除去する。
-    pub(crate) fn resize_total_frames(&mut self, next_total: usize) {
-        let next_total = next_total.max(1);
-        let old_max = self
-            .layers
-            .iter()
-            .map(|l| l.frame_count)
-            .max()
-            .unwrap_or(self.total_frames.max(1));
-
-        if next_total > old_max {
-            let mut any_extended = false;
-            for layer in &mut self.layers {
-                if layer.frame_count >= old_max {
-                    layer.frame_count = next_total;
-                    any_extended = true;
-                }
-            }
-            if !any_extended {
-                if let Some(layer) = self.layers.get_mut(self.active_layer) {
-                    layer.frame_count = next_total;
-                }
-            }
-        } else {
-            for layer in &mut self.layers {
-                if layer.frame_count > next_total {
-                    layer.frame_count = next_total;
-                    layer.keyframes.retain(|kf| kf.start_frame < next_total);
-                    if layer.keyframes.is_empty() || layer.keyframes[0].start_frame > 0 {
-                        layer.keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
-                    }
-                }
-            }
-        }
-        self.sync_total_frames();
-        if self.current_frame >= self.total_frames {
-            self.current_frame = self.total_frames - 1;
-        }
-        if let Some(sel) = &mut self.cell_selection {
-            sel.min_frame = sel.min_frame.min(self.current_frame);
-            sel.max_frame = sel.max_frame.min(self.current_frame);
-        }
-    }
-
     /// 指定した `(layer_idx, frame_idx)` をアクティブレイヤー・現在フレーム・単一セル選択状態に設定する
     /// （`frame_idx` は現在の `total_frames` より後ろの未作成フレーム番号も選択可能）
     pub(crate) fn select_single_cell(&mut self, layer_idx: usize, frame_idx: usize) {
@@ -1169,12 +1123,15 @@ impl Timeline {
         self.sync_total_frames();
     }
 
-    /// 対象レイヤー群 `targets` の現在フレームに短縮可能なフレームが存在するかを返す
+    /// 対象レイヤー群 `targets` の現在フレーム（または範囲選択の先頭）に短縮可能なフレームが存在するかを返す
     pub(crate) fn can_remove_frame_on_targets(&self, targets: &[usize]) -> bool {
-        let curr_f = self.current_frame;
+        let start_f = self
+            .cell_selection
+            .filter(|s| s.max_frame > s.min_frame)
+            .map_or(self.current_frame, |s| s.min_frame);
         targets.iter().any(|&l_idx| {
             self.layers.get(l_idx).is_some_and(|l| {
-                curr_f < l.frame_count
+                start_f < l.frame_count
                     && (l.frame_count > 1
                         || l.keyframes
                             .first()
@@ -1183,22 +1140,45 @@ impl Timeline {
         })
     }
 
-    /// 対象レイヤー群 `targets` の現在フレームの保持尺を1フレーム短縮する（`Shift+F5`）
+    /// 対象レイヤー群 `targets` のフレーム（範囲選択時は選択範囲まとめて、単一選択時は1フレーム）を削除する（`Shift+F5`）
     pub(crate) fn remove_frame_on_targets(&mut self, targets: &[usize]) -> bool {
-        let curr_f = self.current_frame;
+        let range_sel = self.cell_selection.filter(|s| s.max_frame > s.min_frame);
         let mut any_changed = false;
-        for &l_idx in targets {
-            if let Some(layer) = self.layers.get_mut(l_idx) {
-                if layer.remove_frame_at(curr_f) {
-                    any_changed = true;
+        if let Some(sel) = range_sel {
+            for &l_idx in targets {
+                if let Some(layer) = self.layers.get_mut(l_idx) {
+                    if sel.min_frame < layer.frame_count {
+                        let count = sel.max_frame.min(layer.frame_count - 1) - sel.min_frame + 1;
+                        for _ in 0..count {
+                            if layer.remove_frame_at(sel.min_frame) {
+                                any_changed = true;
+                            }
+                        }
+                    }
                 }
             }
-        }
-        self.sync_total_frames();
-        self.current_frame = self.current_frame.min(self.total_frames.saturating_sub(1));
-        if let Some(sel) = &mut self.cell_selection {
-            sel.min_frame = sel.min_frame.min(self.current_frame);
-            sel.max_frame = sel.max_frame.min(self.current_frame);
+            self.sync_total_frames();
+            let next_f = sel.min_frame.min(self.total_frames.saturating_sub(1));
+            self.current_frame = next_f;
+            if let Some(s) = &mut self.cell_selection {
+                s.min_frame = next_f;
+                s.max_frame = next_f;
+            }
+        } else {
+            let curr_f = self.current_frame;
+            for &l_idx in targets {
+                if let Some(layer) = self.layers.get_mut(l_idx) {
+                    if layer.remove_frame_at(curr_f) {
+                        any_changed = true;
+                    }
+                }
+            }
+            self.sync_total_frames();
+            self.current_frame = self.current_frame.min(self.total_frames.saturating_sub(1));
+            if let Some(sel) = &mut self.cell_selection {
+                sel.min_frame = sel.min_frame.min(self.current_frame);
+                sel.max_frame = sel.max_frame.min(self.current_frame);
+            }
         }
         any_changed
     }

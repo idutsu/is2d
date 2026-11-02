@@ -26,8 +26,6 @@ use canvas_tool::{Clipboard, NoticeKind, SelectSubMode, StatusToast, Tab, Tool, 
 use doc_actions::{apply, Action, ActionHost};
 use panels::{RightPanelTab, UiAction};
 use project_io::{PendingCloseConfirm, ProjectWorkspace};
-#[cfg(test)]
-pub(crate) use timeline::Timeline;
 use timeline_ui::{TimelineHost, TimelineUiState};
 #[cfg(test)]
 pub(crate) use vector_engine::FillShape;

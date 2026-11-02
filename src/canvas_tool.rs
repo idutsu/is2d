@@ -2599,7 +2599,6 @@ pub(crate) struct UndoEntry {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum CoalesceKey {
     StageSize,
-    TotalFrames,
     Fps,
     SymbolPlayback(u64),
     RenameSymbol(u64),

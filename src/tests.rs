@@ -2423,20 +2423,47 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
 
 #[test]
 fn test_timeline_resize_total_frames_and_fill_shape_lazy_retessellation() {
-    let mut tl = Timeline {
-        total_frames: 10,
-        ..Default::default()
-    };
-    tl.layers[0].frame_count = 10;
-    tl.layers[0].insert_keyframe(8, false);
-    let short_layer = crate::timeline::Layer::new_with_id_and_frames(2, "Short Layer", 4);
-    tl.layers.push(short_layer);
-    tl.resize_total_frames(20);
-    assert_eq!(tl.layers[0].frame_count, 20);
-    assert_eq!(tl.layers[1].frame_count, 4);
-    tl.resize_total_frames(6);
-    assert_eq!(tl.layers[0].frame_count, 6);
-    assert!(tl.layers[0].keyframes.iter().all(|kf| kf.start_frame < 6));
+    use crate::doc_actions::{apply, Action};
+
+    // M2-5: 新しい作品で 2,880 コマ目 (index 2879) を選んで F5 を押すと、1回で 2,880 フレームになること
+    let mut app = Is2dApp::default();
+    assert_eq!(app.doc.root.total_frames, 1);
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 2_879,
+        },
+    );
+    let _ = apply(&mut app, Action::ExtendFrame);
+    assert_eq!(app.doc.root.total_frames, 2_880);
+    assert_eq!(app.doc.root.layers[0].frame_count, 2_880);
+
+    // 2,880 フレームの作品で 2,001〜2,880 コマ目 (index 2000..=2879) を選んで Shift+F5 を押すと、
+    // 1回で 2,000 フレームになり、現在コマ・選択が 2,000 コマ目 (index 1999) の1コマになり、Undo 1回で元に戻ること
+    let _ = apply(
+        &mut app,
+        Action::SelectTimelineCells {
+            l0: 0,
+            f0: 2_000,
+            l1: 0,
+            f1: 2_879,
+        },
+    );
+    let undo_before = app.history.undo_stack.len();
+    assert!(apply(&mut app, Action::RemoveFrame).as_bool());
+    assert_eq!(app.history.undo_stack.len(), undo_before + 1);
+    assert_eq!(app.doc.root.total_frames, 2_000);
+    assert_eq!(app.doc.root.layers[0].frame_count, 2_000);
+    assert_eq!(app.doc.root.current_frame, 1_999);
+    assert_eq!(
+        app.doc.root.cell_selection,
+        Some(timeline::TimelineCellSelection::single(0, 1_999))
+    );
+
+    let _ = apply(&mut app, Action::Undo);
+    assert_eq!(app.doc.root.total_frames, 2_880);
+    assert_eq!(app.doc.root.layers[0].frame_count, 2_880);
 
     let small_raw = generate_brush_outline(&[Point::new(100.0, 100.0)], 4.0);
     let mut small_circle = build_smoothed_stroke_shapes(&small_raw, Color32::WHITE)
@@ -4633,8 +4660,9 @@ fn test_symbol_rename_consecutive_keystrokes_grouped_into_single_undo() {
 fn test_step_frame_loop_mode_and_total_frames_over_600() {
     let mut app = Is2dApp::default();
 
-    // 600フレーム超（1200フレーム）のタイムラインリサイズと step_frame のループ ON / OFF 挙動
-    app.doc.root.resize_total_frames(1200);
+    // 600フレーム超（1200フレーム）のタイムライン延長と step_frame のループ ON / OFF 挙動
+    app.doc.root.layers[0].insert_frame_at(1199);
+    app.doc.root.sync_total_frames();
     assert_eq!(app.doc.root.total_frames, 1200);
     assert_eq!(app.doc.root.layers[0].frame_count, 1200);
 
@@ -4797,7 +4825,8 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
         sym_id
     ));
     sym_f6_app.with_active_timeline_mut(|tl, _| {
-        tl.resize_total_frames(4);
+        tl.layers[0].insert_frame_at(3);
+        tl.sync_total_frames();
         tl.layers[0].insert_keyframe(2, false);
     });
     put_cel_shapes(
@@ -4812,7 +4841,8 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
         ),
     );
     assert!(tool_transform::exit_symbol_timeline(&mut sym_f6_app));
-    sym_f6_app.doc.root.resize_total_frames(5);
+    sym_f6_app.doc.root.layers[0].insert_frame_at(4);
+    sym_f6_app.doc.root.sync_total_frames();
     timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 2);
     assert_eq!(scene_summary(&sym_f6_app).shapes[0].color, blue);
     assert!(timeline_ui::timeline_insert_keyframe(&mut sym_f6_app, true));
@@ -4921,7 +4951,8 @@ fn test_symbol_delete_mid_tween_preserves_start_keyframe_pose() {
     );
     app.session.set_selected_indices(vec![0]);
     let sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
-    app.doc.root.resize_total_frames(5);
+    app.doc.root.layers[0].insert_frame_at(4);
+    app.doc.root.sync_total_frames();
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
     timeline_ui::timeline_insert_keyframe(&mut app, true);
     app.session.set_selected_indices(vec![0]);
@@ -5607,7 +5638,8 @@ fn test_time_based_playback_advance_and_onion_skin_rendering() {
 
     // 3フレームのアニメーションを作成し、オニオンスキンを ON にする
     app.doc.fps = 10; // 1コマ = 0.1秒
-    app.doc.root.resize_total_frames(3);
+    app.doc.root.layers[0].insert_frame_at(2);
+    app.doc.root.sync_total_frames();
     put_cel_shapes(
         &mut app,
         0,
@@ -5979,7 +6011,8 @@ fn test_move_or_copy_frames_preserves_following_frames_tween_pose_and_remaps_ids
 
     // 1. 6フレームのレイヤー (Frame 0..=1: 赤, Frame 2..=5: 青) で Frame 0..=1 を Frame 2..=3 へ複製したとき、
     // 移動先範囲直後の Frame 4..=5 の青い絵が上書きされず保持されること (#9-1)
-    app.doc.root.resize_total_frames(6);
+    app.doc.root.layers[0].insert_frame_at(5);
+    app.doc.root.sync_total_frames();
     put_cel_shapes(
         &mut app,
         0,
@@ -6015,7 +6048,8 @@ fn test_move_or_copy_frames_preserves_following_frames_tween_pose_and_remaps_ids
 
     // 2. トゥイーン中間フレームから開始する範囲を移動/複製した際、開始フレームの中割り補間姿勢を引き継ぐこと (#9-2)
     let mut tween_app = Is2dApp::default();
-    tween_app.doc.root.resize_total_frames(5);
+    tween_app.doc.root.layers[0].insert_frame_at(4);
+    tween_app.doc.root.sync_total_frames();
     put_cel_shapes(
         &mut tween_app,
         0,
@@ -6548,7 +6582,8 @@ fn test_key_repeat_suppressed_for_enter_onion_tween_and_cmd3() {
     );
 
     // 4. Enter 初回押下フレームで再生開始し、別フレームの repeat: true では停止しないこと (#16)
-    app.doc.root.resize_total_frames(4);
+    app.doc.root.layers[0].insert_frame_at(3);
+    app.doc.root.sync_total_frames();
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
@@ -6659,7 +6694,8 @@ fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source
     // 1. 0〜5フレーム (6コマ) のキーフレームスパンのうち先頭 0〜2 のみを Frame 8〜10 へ通常移動 (Altなし)
     // → 移動元の 0〜2 は空白になり、選択していない残りの 3〜5 は消えずに元の赤い絵を保持すること
     let mut app = Is2dApp::default();
-    app.doc.root.resize_total_frames(6);
+    app.doc.root.layers[0].insert_frame_at(5);
+    app.doc.root.sync_total_frames();
     put_cel_shapes(
         &mut app,
         0,
@@ -6704,7 +6740,8 @@ fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source
     // 2. 0〜5フレームのキーフレームスパンのうち保持フレームのみ (2〜3) を選んで Frame 8〜9 へ通常移動
     // → 0〜1 は保持、移動元の保持フレーム 2〜3 は空白化（コピーにならない）、後ろの 4〜5 も保持されること
     let mut hold_app = Is2dApp::default();
-    hold_app.doc.root.resize_total_frames(6);
+    hold_app.doc.root.layers[0].insert_frame_at(5);
+    hold_app.doc.root.sync_total_frames();
     put_cel_shapes(
         &mut hold_app,
         0,
@@ -8280,22 +8317,6 @@ fn test_stage01_undo_redo_coalesce_and_save_load_on_cel() {
     assert_eq!(app.doc.stage_size, orig_stage);
     run(&mut app, &[Action::Redo]);
     assert_eq!(app.doc.stage_size, Vec2::new(1280.0, 720.0));
-
-    // (b) 総フレーム数の連続ドラッグが Undo 1回で戻ること
-    let orig_total = app.doc.root.total_frames;
-    let undo_before_total = app.history.undo_stack.len();
-    run(
-        &mut app,
-        &[
-            Action::SetTotalFrames { total: 80 },
-            Action::SetTotalFrames { total: 100 },
-            Action::SetTotalFrames { total: 120 },
-            Action::EndCoalesce { key: None },
-        ],
-    );
-    assert_eq!(app.history.undo_stack.len(), undo_before_total + 1);
-    run(&mut app, &[Action::Undo]);
-    assert_eq!(app.doc.root.total_frames, orig_total);
 
     // (c) 矢印キーの連続移動 (NudgeSelection) が Undo 1回で戻ること
     run(
@@ -11320,7 +11341,8 @@ fn test_g1_4_playback_advance_skips_base_cache_rebuild_and_stop_refreshes() {
     ));
 
     app.doc.fps = 10; // 1コマ = 0.1秒
-    app.doc.root.resize_total_frames(3);
+    app.doc.root.layers[0].insert_frame_at(2);
+    app.doc.root.sync_total_frames();
     put_cel_shapes(
         &mut app,
         0,
@@ -11645,11 +11667,13 @@ fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
     let sym_id = app.doc.register_new_symbol(s0);
     {
         let sym = app.doc.find_symbol_mut(sym_id).unwrap();
-        sym.timeline.resize_total_frames(3);
+        sym.timeline.layers[0].insert_frame_at(2);
+        sym.timeline.sync_total_frames();
     }
 
     // ルートにシンボルを配置し、Frame 0..4 のクラシックトゥイーンを作成
-    app.doc.root.resize_total_frames(8);
+    app.doc.root.layers[0].insert_frame_at(7);
+    app.doc.root.sync_total_frames();
     let inst0 = timeline::SymbolInstance {
         binding: symbol::SymbolInstanceBinding {
             instance_gid: 1,
@@ -11852,36 +11876,15 @@ fn test_g3_2_end_coalesce_via_apply_preserves_playback_and_coalesce_boundaries()
 
     let mut app = Is2dApp::default();
 
-    // 2. 総フレーム数：1回のドラッグなら Undo 1件、2回に分けてドラッグすると Undo 2件（他のキーの EndCoalesce では途切れないこと）
-    let base = app.history.undo_stack.len();
-    let _ = apply(&mut app, Action::SetTotalFrames { total: 70 });
-    let _ = apply(
-        &mut app,
-        Action::EndCoalesce {
-            key: Some(CoalesceKey::Fps),
-        },
-    );
-    let _ = apply(&mut app, Action::SetTotalFrames { total: 80 });
-    assert_eq!(app.history.undo_stack.len(), base + 1);
-    let _ = apply(
-        &mut app,
-        Action::EndCoalesce {
-            key: Some(CoalesceKey::TotalFrames),
-        },
-    );
-    let _ = apply(&mut app, Action::SetTotalFrames { total: 90 });
-    let _ = apply(&mut app, Action::SetTotalFrames { total: 100 });
-    let _ = apply(
-        &mut app,
-        Action::EndCoalesce {
-            key: Some(CoalesceKey::TotalFrames),
-        },
-    );
-    assert_eq!(app.history.undo_stack.len(), base + 2);
-
-    // 3. FPS：1回なら1件、2回なら2件
+    // 2. FPS：1回なら1件、2回なら2件（他のキーの EndCoalesce では途切れないこと）
     let base = app.history.undo_stack.len();
     let _ = apply(&mut app, Action::SetFps { fps: 12 });
+    let _ = apply(
+        &mut app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::StageSize),
+        },
+    );
     let _ = apply(&mut app, Action::SetFps { fps: 15 });
     assert_eq!(app.history.undo_stack.len(), base + 1);
     let _ = apply(
@@ -12096,7 +12099,7 @@ fn test_g3_2_end_coalesce_via_apply_preserves_playback_and_coalesce_boundaries()
     let _ = apply(
         &mut app,
         Action::EndCoalesce {
-            key: Some(CoalesceKey::TotalFrames),
+            key: Some(CoalesceKey::StageSize),
         },
     );
     let _ = apply(
@@ -12322,7 +12325,8 @@ fn test_g6_1_resolved_cel_cache_byte_limit_and_2min_playback_memory() {
     }
     let sym_id = app.doc.register_new_symbol(sym_shapes);
 
-    app.doc.root.resize_total_frames(2_880);
+    app.doc.root.layers[0].insert_frame_at(2_879);
+    app.doc.root.sync_total_frames();
     let inst_start = timeline::SymbolInstance {
         binding: symbol::SymbolInstanceBinding {
             instance_gid: 1,
