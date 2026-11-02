@@ -1107,30 +1107,6 @@ impl ProjectDocument {
         }
 
         let max_sym_id = library.iter().map(|s| s.id).max().unwrap_or(0);
-        let max_gid_in_tl = |tl: &Timeline| -> u64 {
-            let mut m = 0u64;
-            for layer in &tl.layers {
-                for kf in &layer.keyframes {
-                    for sh in kf.cel.shapes.iter() {
-                        if let Some(&gid) = sh.group_path.iter().max() {
-                            m = m.max(gid);
-                        }
-                    }
-                    for inst in kf.cel.instances.iter() {
-                        m = m.max(inst.binding.instance_gid);
-                        if let Some(&gid) = inst.parent_scope.iter().max() {
-                            m = m.max(gid);
-                        }
-                    }
-                }
-            }
-            m
-        };
-        let mut max_gid = max_gid_in_tl(&timeline);
-        for sym in &library {
-            max_gid = max_gid.max(max_gid_in_tl(&sym.timeline));
-        }
-
         let raw_next_sym_id = if self.next_symbol_id <= MAX_SAFE_ENTITY_ID {
             self.next_symbol_id
         } else {
@@ -1151,62 +1127,15 @@ impl ProjectDocument {
         } else {
             450.0
         };
-        let mut doc = Document {
+        Document {
             root: timeline,
             library,
             stage_size: Vec2::new(w, h),
             fps,
             next_symbol_id: raw_next_sym_id.max(max_sym_id.saturating_add(1)).max(1),
-            next_group_id: raw_next_gid.max(max_gid.saturating_add(1)).max(1),
+            next_group_id: raw_next_gid.max(next_safe_gid).max(1),
             revision: crate::vector_engine::next_mesh_revision(),
-        };
-
-        // 外部改変された JSON にシンボルの自己・相互循環参照が含まれていた場合は、
-        // 3色DFS（0 = 未訪問, 1 = 現在の探索経路上, 2 = 探索完了・DAG保証済み）により O(V + E) の単一パスで後退辺（サイクル辺）を除去する
-        let n_syms = doc.library.len();
-        if n_syms > 0 {
-            let id_to_idx: HashMap<u64, usize> = doc
-                .library
-                .iter()
-                .enumerate()
-                .map(|(i, s)| (s.id, i))
-                .collect();
-            let mut color = vec![0_u8; n_syms];
-            let mut dfs_stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
-            for start_idx in 0..n_syms {
-                if color[start_idx] != 0 {
-                    continue;
-                }
-                color[start_idx] = 1;
-                let children = collect_and_strip_cycle_back_edges(
-                    &mut doc.library[start_idx],
-                    &id_to_idx,
-                    &color,
-                );
-                dfs_stack.push((start_idx, children, 0));
-                while let Some((u_idx, children, next_i)) = dfs_stack.last_mut() {
-                    if *next_i < children.len() {
-                        let v_idx = children[*next_i];
-                        *next_i += 1;
-                        if color[v_idx] == 0 {
-                            color[v_idx] = 1;
-                            let v_children = collect_and_strip_cycle_back_edges(
-                                &mut doc.library[v_idx],
-                                &id_to_idx,
-                                &color,
-                            );
-                            dfs_stack.push((v_idx, v_children, 0));
-                        }
-                    } else {
-                        let u = *u_idx;
-                        color[u] = 2;
-                        dfs_stack.pop();
-                    }
-                }
-            }
         }
-
-        doc
     }
 
     /// 読み込んだ `ProjectDocument` を現在のアクティブタブへ適用し、作業キャンバスや履歴を初期化する
@@ -1215,43 +1144,6 @@ impl ProjectDocument {
         let doc = self.into_document();
         reset_active_document_state(tab, doc);
     }
-}
-
-/// シンボル定義 `sym` 内の全キーフレームを走査し、現在DFSスタック上の祖先（`color[v_idx] == 1`）へ向かう後退辺（サイクル辺）を除去しつつ、
-/// 未訪問（`color[v_idx] == 0`）の子シンボルインデックス一覧を重複なしで返す
-fn collect_and_strip_cycle_back_edges(
-    sym: &mut SymbolDef,
-    id_to_idx: &HashMap<u64, usize>,
-    color: &[u8],
-) -> Vec<usize> {
-    let mut unvisited_children = Vec::new();
-    let mut seen_children = HashSet::new();
-    for layer in &mut sym.timeline.layers {
-        for i in 0..layer.keyframes.len() {
-            let has_back_edge = layer.keyframes[i].cel.instances.iter().any(|inst| {
-                id_to_idx
-                    .get(&inst.binding.symbol_id)
-                    .is_none_or(|&v_idx| color[v_idx] == 1)
-            });
-            if has_back_edge {
-                let kf = layer.keyframe_mut(i);
-                kf.cel.instances_mut().retain(|inst| {
-                    id_to_idx
-                        .get(&inst.binding.symbol_id)
-                        .is_some_and(|&v_idx| color[v_idx] != 1)
-                });
-                kf.tween &= kf.cel.single_symbol_instance().is_some();
-            }
-            for inst in layer.keyframes[i].cel.instances.iter() {
-                if let Some(&v_idx) = id_to_idx.get(&inst.binding.symbol_id) {
-                    if color[v_idx] == 0 && seen_children.insert(v_idx) {
-                        unvisited_children.push(v_idx);
-                    }
-                }
-            }
-        }
-    }
-    unvisited_children
 }
 
 // ============================================================================
@@ -1412,7 +1304,7 @@ pub(crate) fn open_project_in_tab(
     let proj_doc = read_project_document(path)?;
     let doc = proj_doc.into_document();
     if doc.symbol_nest_exceeded() {
-        return Err("シンボルの入れ子が8段を超えているため開けません".to_owned());
+        return Err("シンボルの入れ子が8段を超えているか、循環しています".to_owned());
     }
 
     // 3. 現在のタブが未編集の空の無題タブでなければ、アクティブタブの右隣に新しいタブを追加して切り替える

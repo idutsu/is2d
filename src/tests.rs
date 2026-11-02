@@ -4297,6 +4297,20 @@ fn test_malformed_json_sanitization_and_cycle_breaking() {
         std::env::temp_dir().join(format!("is2d_malformed_test_{}.is2d", std::process::id()));
     std::fs::write(&tmp_malformed, malformed_json).unwrap();
     let mut sanitized_app = Is2dApp::default();
+    assert_eq!(
+        crate::project_io::open_project_in_tab(&mut sanitized_app, &tmp_malformed, None),
+        Err("シンボルの入れ子が8段を超えているか、循環しています".to_owned()),
+        "シンボルの循環参照を含むファイルは open_project_in_tab でエラーになること"
+    );
+
+    // 循環辺（CycleSymB 内の instance_gid=21 -> symbol_id=1）を除いた異常系 JSON ではサニタイズされて読み込めること
+    let malformed_no_cycle = malformed_json.replace(
+        r#""instance_gid": 21,
+                              "symbol_id": 1,"#,
+        r#""instance_gid": 21,
+                              "symbol_id": 9998,"#,
+    );
+    std::fs::write(&tmp_malformed, malformed_no_cycle).unwrap();
     crate::project_io::open_project_in_tab(&mut sanitized_app, &tmp_malformed, None)
         .expect("異常系JSONでもサニタイズされてクラッシュせず読み込めること");
     assert_eq!(sanitized_app.doc.stage_size, Vec2::new(3840.0, 100.0));
@@ -4346,11 +4360,6 @@ fn test_malformed_json_sanitization_and_cycle_breaking() {
             .signed_area()
             > 0.0,
         "逆向き（負面積）だった外周輪郭のワインディングが正面積に正規化されていること"
-    );
-    assert!(
-        !sanitized_app.doc.would_create_symbol_cycle(1, 2)
-            || !sanitized_app.doc.would_create_symbol_cycle(2, 1),
-        "シンボル間の循環参照 (1 <-> 2) が自動で切断され DAG が保証されていること"
     );
 
     let _ = std::fs::remove_file(&tmp_malformed);
@@ -6414,30 +6423,18 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
         next_group_id: 100_000,
     };
 
-    let start = std::time::Instant::now();
+    let path = std::env::temp_dir().join(format!(
+        "is2d_dense_cycle_{}.is2d",
+        std::process::id()
+    ));
+    std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
     let mut app = Is2dApp::default();
-    doc.apply_to_app(&mut app);
-    let elapsed = start.elapsed();
-
-    println!(
-        "[#14] dense symbol library cycle removal elapsed = {:?}",
-        elapsed
-    );
-    // 残った全インスタンス辺がサイクルを含まず、前方DAG辺は保持されていること
-    for sym in &app.doc.library {
-        for inst in sym.timeline.layers[0].keyframes[0].cel.instances.iter() {
-            assert!(
-                !app.doc.would_create_symbol_cycle(sym.id, inst.binding.symbol_id),
-                "3色DFS後はいかなるサイクル辺も残存しないこと (#14)"
-            );
-        }
-    }
-    assert!(
-        !app.doc.library[0].timeline.layers[0].keyframes[0]
-            .cel
-            .instances
-            .is_empty(),
-        "サイクルでない正当なDAG参照辺は保持されていること (#14)"
+    let res = crate::project_io::open_project_in_tab(&mut app, &path, None);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        res,
+        Err("シンボルの入れ子が8段を超えているか、循環しています".to_owned()),
+        "密な循環参照を含むファイルは symbol_nest_exceeded で即座にエラーになること (#14)"
     );
 }
 
@@ -7472,19 +7469,23 @@ fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
             app.doc.root.current_frame < app.doc.root.total_frames,
             "case {case_idx}: current_frame が total_frames 未満に収まること"
         );
+        let mut has_cycle = false;
         for sym in &app.doc.library {
             assert!(sym.id >= 1, "case {case_idx}: シンボルIDが 1 以上に正規化されること");
-            for l in &sym.timeline.layers {
-                for kf in &l.keyframes {
-                    for inst in kf.cel.instances.iter() {
-                        assert!(
-                            !app.doc
-                                .would_create_symbol_cycle(sym.id, inst.binding.symbol_id),
-                            "case {case_idx}: ランダム参照グラフから循環参照が完全に除去されていること"
-                        );
-                    }
+            for inst in sym.timeline.instances() {
+                if app
+                    .doc
+                    .would_create_symbol_cycle(sym.id, inst.binding.symbol_id)
+                {
+                    has_cycle = true;
                 }
             }
+        }
+        if has_cycle {
+            assert!(
+                app.doc.symbol_nest_exceeded(),
+                "case {case_idx}: 循環参照を含む場合は symbol_nest_exceeded() が true になること"
+            );
         }
     }
 }
@@ -10935,7 +10936,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
         let _ = std::fs::remove_file(&path);
         assert_eq!(
             res,
-            Err("シンボルの入れ子が8段を超えているため開けません".to_owned()),
+            Err("シンボルの入れ子が8段を超えているか、循環しています".to_owned()),
             "{depth}段のファイルはエラーで拒否されること"
         );
         assert_eq!(

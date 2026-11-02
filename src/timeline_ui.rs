@@ -746,9 +746,7 @@ fn handle_timeline_scroll(
     let timeline_ui = host.timeline_ui_mut();
     timeline_ui.scroll_x = timeline_ui.scroll_x.clamp(0.0, max_scroll_x);
     timeline_ui.scroll_y = timeline_ui.scroll_y.clamp(0.0, max_scroll_y);
-    layout.first_vis_frame = (timeline_ui.scroll_x / CELL_W).floor() as usize;
-    layout.last_vis_frame = (((timeline_ui.scroll_x + layout.grid_w) / CELL_W).ceil() as usize)
-        .min(layout.max_frames_shown);
+    layout.sync_visible_frames(timeline_ui.scroll_x);
 }
 
 /// 3. タイムラインパネル内のクリック・ドラッグ入力処理（ルーラースクラブ・セル範囲選択・フレーム移動/複製・レイヤーD&D・スクロールバー操作）
