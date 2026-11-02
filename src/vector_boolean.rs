@@ -190,6 +190,7 @@ pub(crate) fn merge_disjoint_pieces_into_canvas(
                     if s.color == color {
                         any_same = true;
                         subj_polys.push(poly.clone());
+                        active.push(s.clone());
                     } else {
                         clip_polys.push(poly.clone());
                     }
@@ -205,24 +206,20 @@ pub(crate) fn merge_disjoint_pieces_into_canvas(
                 OverlayRule::Difference
             };
             let min_area = adaptive_overlay_min_area(&active, &overlapping);
-            let (mut to_reconstruct, mut used_in) = (Vec::new(), vec![false; active.len()]);
-            for poly in run_float_overlay(
+            let overlay_result = run_float_overlay(
                 &subj_polys,
                 &clip_polys,
                 rule,
                 OverlayFillRule::NonZero,
                 min_area,
+            );
+            for s in reconstruct_shapes_from_overlay(
+                &overlay_result,
+                &[(&active, &subj_polys)],
+                &quads,
+                color,
+                any_same,
             ) {
-                if let Some(i) = (0..active.len()).find(|&i| {
-                    !any_same && !used_in[i] && poly_shape_matches_input(&poly, &subj_polys[i])
-                }) {
-                    used_in[i] = true;
-                    updated.push(active[i].clone().with_scope(lid, &gp));
-                } else {
-                    to_reconstruct.push(poly);
-                }
-            }
-            for s in reconstruct_shapes_from_overlay(&to_reconstruct, &quads, color, any_same) {
                 updated.push(s.with_scope(lid, &gp));
             }
         }
@@ -447,10 +444,33 @@ fn shape_interacts_with_clip(
         })
 }
 
-fn poly_shape_matches_input(out_poly: &OverlayShape, in_poly: &OverlayShape) -> bool {
+struct InputRing<'a> {
+    shape_idx: usize,
+    ring: &'a [[f64; 2]],
+    area: f64,
+    perim: f64,
+    contour: &'a Contour,
+    used: bool,
+}
+
+impl<'a> InputRing<'a> {
+    fn new(shape_idx: usize, ring: &'a [[f64; 2]], contour: &'a Contour) -> Self {
+        let (area, perim) = ring_area_and_perimeter_f64(ring);
+        Self {
+            shape_idx,
+            ring,
+            area,
+            perim,
+            contour,
+            used: false,
+        }
+    }
+}
+
+fn ring_matches_input(out_r: &[[f64; 2]], in_r: &[[f64; 2]]) -> bool {
     let eq_pt =
         |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() <= 1e-3 && (a[1] - b[1]).abs() <= 1e-3;
-    let is_subseq = |out_r: &[[f64; 2]], in_r: &[[f64; 2]], s: usize, rev: bool| {
+    let is_subseq = |s: usize, rev: bool| {
         let (n, mut j) = (in_r.len(), 0);
         out_r.iter().all(|&op| {
             while j < n && !eq_pt(op, in_r[if rev { (s + n - j) % n } else { (s + j) % n }]) {
@@ -459,21 +479,28 @@ fn poly_shape_matches_input(out_poly: &OverlayShape, in_poly: &OverlayShape) -> 
             (j < n).then(|| j += 1).is_some()
         })
     };
-    out_poly.len() == in_poly.len()
-        && out_poly.iter().zip(in_poly.iter()).all(|(out_r, in_r)| {
-            let (out_a, out_p) = ring_area_and_perimeter_f64(out_r);
-            let (in_a, in_p) = ring_area_and_perimeter_f64(in_r);
-            out_r.len() >= 3
-                && out_r.len() <= in_r.len()
-                && (out_a - in_a).abs() <= 1e-2
-                && (out_p - in_p).abs() <= 1e-2
-                && in_r
-                    .iter()
-                    .position(|&p| eq_pt(p, out_r[0]))
-                    .is_some_and(|s| {
-                        is_subseq(out_r, in_r, s, false) || is_subseq(out_r, in_r, s, true)
-                    })
-        })
+    out_r.len() >= 3
+        && out_r.len() <= in_r.len()
+        && in_r
+            .iter()
+            .position(|&p| eq_pt(p, out_r[0]))
+            .is_some_and(|s| is_subseq(s, false) || is_subseq(s, true))
+}
+
+fn take_matching_input_ring<'a>(
+    out_r: &[[f64; 2]],
+    out_a: f64,
+    out_p: f64,
+    pool: &mut [InputRing<'a>],
+) -> Option<(usize, &'a Contour)> {
+    let item = pool.iter_mut().find(|ir| {
+        !ir.used
+            && (out_a - ir.area).abs() <= 1e-2
+            && (out_p - ir.perim).abs() <= 1e-2
+            && ring_matches_input(out_r, ir.ring)
+    })?;
+    item.used = true;
+    Some((item.shape_idx, item.contour))
 }
 
 /// 複数の対象シェイプに対して繰り返し Difference（減算）を行う際に、
@@ -500,7 +527,6 @@ impl<'a> PreparedClip<'a> {
     }
 
     fn subtract_from_group(&self, subjs: Vec<FillShape>, color: Color32) -> Vec<FillShape> {
-        let mut untouched = Vec::new();
         let mut active_subjs = Vec::new();
         let mut subj_polys = Vec::new();
         let mut quad_table = Vec::with_capacity(16 * subjs.len() + self.clip_quads.len());
@@ -513,7 +539,7 @@ impl<'a> PreparedClip<'a> {
             }
         }
         if subj_polys.is_empty() {
-            return untouched;
+            return Vec::new();
         }
         quad_table.extend_from_slice(&self.clip_quads);
         let min_area = adaptive_overlay_min_area(&active_subjs, self.clip);
@@ -524,27 +550,13 @@ impl<'a> PreparedClip<'a> {
             OverlayFillRule::NonZero,
             min_area,
         );
-        let mut to_reconstruct = Vec::new();
-        let mut used_input = vec![false; active_subjs.len()];
-        for poly_shape in overlay_result {
-            if let Some(idx) = (0..active_subjs.len())
-                .find(|&i| !used_input[i] && poly_shape_matches_input(&poly_shape, &subj_polys[i]))
-            {
-                used_input[idx] = true;
-                untouched.push(active_subjs[idx].clone());
-            } else {
-                to_reconstruct.push(poly_shape);
-            }
-        }
-        if !to_reconstruct.is_empty() {
-            untouched.extend(reconstruct_shapes_from_overlay(
-                &to_reconstruct,
-                &quad_table,
-                color,
-                false,
-            ));
-        }
-        untouched
+        reconstruct_shapes_from_overlay(
+            &overlay_result,
+            &[(&active_subjs, &subj_polys)],
+            &quad_table,
+            color,
+            false,
+        )
     }
 }
 
@@ -576,17 +588,17 @@ pub(crate) fn boolean_operation(
     let subj_shapes: Vec<OverlayShape> = subj
         .iter()
         .map(|s| flatten_shape_for_overlay(s, &mut quad_table))
-        .filter(|r| !r.is_empty())
         .collect();
     let clip_shapes: Vec<OverlayShape> = clip
         .iter()
         .map(|s| flatten_shape_for_overlay(s, &mut quad_table))
-        .filter(|r| !r.is_empty())
         .collect();
+    let subj_empty = subj_shapes.iter().all(Vec::is_empty);
+    let clip_empty = clip_shapes.iter().all(Vec::is_empty);
 
-    if (subj_shapes.is_empty() && op == BoolOp::Difference)
-        || (op == BoolOp::Intersection && (subj_shapes.is_empty() || clip_shapes.is_empty()))
-        || (subj_shapes.is_empty() && clip_shapes.is_empty())
+    if (subj_empty && op == BoolOp::Difference)
+        || (op == BoolOp::Intersection && (subj_empty || clip_empty))
+        || (subj_empty && clip_empty)
     {
         return Vec::new();
     }
@@ -605,7 +617,18 @@ pub(crate) fn boolean_operation(
         OverlayFillRule::NonZero,
         min_area,
     );
-    reconstruct_shapes_from_overlay(&overlay_result, &quad_table, out_color, op == BoolOp::Union)
+    let in_groups: &[(&[FillShape], &[OverlayShape])] = if op == BoolOp::Union {
+        &[(subj, &subj_shapes), (clip, &clip_shapes)]
+    } else {
+        &[(subj, &subj_shapes)]
+    };
+    reconstruct_shapes_from_overlay(
+        &overlay_result,
+        in_groups,
+        &quad_table,
+        out_color,
+        op == BoolOp::Union,
+    )
 }
 
 /// マーキー矩形 `clip_rect_shape` で単一シェイプ `shape` をスライスし、
@@ -626,6 +649,7 @@ pub(crate) fn slice_shape_with_marquee_rect(
     );
     let subj_slice = std::slice::from_ref(&subj);
     let clip_slice = std::slice::from_ref(&clip);
+    let in_groups = &[(std::slice::from_ref(shape), subj_slice)];
     let inside_rings = run_float_overlay(
         subj_slice,
         clip_slice,
@@ -633,7 +657,8 @@ pub(crate) fn slice_shape_with_marquee_rect(
         OverlayFillRule::NonZero,
         min_area,
     );
-    let inside = reconstruct_shapes_from_overlay(&inside_rings, &quad_table, shape.color, false);
+    let inside =
+        reconstruct_shapes_from_overlay(&inside_rings, in_groups, &quad_table, shape.color, false);
     if inside.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -644,29 +669,103 @@ pub(crate) fn slice_shape_with_marquee_rect(
         OverlayFillRule::NonZero,
         min_area,
     );
-    let outside = reconstruct_shapes_from_overlay(&outside_rings, &quad_table, shape.color, false);
+    let outside =
+        reconstruct_shapes_from_overlay(&outside_rings, in_groups, &quad_table, shape.color, false);
     (inside, outside)
 }
 
 fn reconstruct_shapes_from_overlay(
     overlay_result: &[OverlayShape],
+    in_groups: &[(&[FillShape], &[OverlayShape])],
     quad_table: &[QuadRecord],
     color: Color32,
     filter_sliver_holes: bool,
 ) -> Vec<FillShape> {
-    let grid = QuadSpatialGrid::new(quad_table);
-    overlay_result
-        .iter()
-        .filter_map(|poly_shape| {
-            reconstruct_fill_shape_from_rings(
-                poly_shape,
-                quad_table,
-                &grid,
-                color,
-                filter_sliver_holes,
-            )
-        })
-        .collect()
+    let mut flat_shapes: Vec<&FillShape> = Vec::new();
+    let mut ext_pool: Vec<InputRing<'_>> = Vec::new();
+    let mut hole_pool: Vec<InputRing<'_>> = Vec::new();
+    for &(shapes, polys) in in_groups {
+        for (s, poly) in shapes.iter().zip(polys.iter()) {
+            if poly.len() != 1 + s.holes.len() {
+                continue;
+            }
+            let shape_idx = flat_shapes.len();
+            flat_shapes.push(s);
+            ext_pool.push(InputRing::new(shape_idx, &poly[0], &s.exterior));
+            for (h_ring, h_contour) in poly[1..].iter().zip(s.holes.iter()) {
+                hole_pool.push(InputRing::new(shape_idx, h_ring, h_contour));
+            }
+        }
+    }
+
+    let mut grid: Option<QuadSpatialGrid> = None;
+    let mut resolve_ring = |ring: &[[f64; 2]],
+                            (a, p): (f64, f64),
+                            is_outer: bool,
+                            pool: &mut [InputRing<'_>]|
+     -> Option<(Option<usize>, Contour)> {
+        if let Some((s_idx, c)) = take_matching_input_ring(ring, a, p, pool) {
+            return Some((Some(s_idx), c.clone()));
+        }
+        let g = grid.get_or_insert_with(|| QuadSpatialGrid::new(quad_table));
+        Some((
+            None,
+            reconstruct_or_refit_quad_contour(ring, quad_table, g, is_outer)?,
+        ))
+    };
+
+    let mut out = Vec::with_capacity(overlay_result.len());
+    for poly_shape in overlay_result {
+        if poly_shape.is_empty() {
+            continue;
+        }
+        let (ext_a, ext_p) = ring_area_and_perimeter_f64(&poly_shape[0]);
+        let Some((ext_match, exterior)) =
+            resolve_ring(&poly_shape[0], (ext_a, ext_p), true, &mut ext_pool)
+        else {
+            continue;
+        };
+        let hole_scale = if ext_p < 16.0 {
+            (ext_p / 16.0).clamp(0.005, 1.0)
+        } else {
+            1.0
+        };
+        let min_hole_area = 1.5 * hole_scale * hole_scale;
+        let min_hole_thickness = 0.15 * hole_scale;
+        let mut holes = Vec::with_capacity(poly_shape.len() - 1);
+        let mut all_holes_match_ext = ext_match.is_some();
+        for hole_ring in &poly_shape[1..] {
+            let (a, p) = ring_area_and_perimeter_f64(hole_ring);
+            if filter_sliver_holes {
+                let circularity = (4.0 * std::f64::consts::PI * a) / (p * p).max(1e-9);
+                let keep = if circularity >= 0.18 {
+                    a >= 1e-4
+                } else {
+                    a >= min_hole_area && (a / p.max(1e-5)) >= min_hole_thickness
+                };
+                if !keep {
+                    continue;
+                }
+            }
+            if let Some((h_match, c)) = resolve_ring(hole_ring, (a, p), false, &mut hole_pool) {
+                all_holes_match_ext &= h_match.is_some() && h_match == ext_match;
+                holes.push(c);
+            } else {
+                all_holes_match_ext = false;
+            }
+        }
+        if let Some(s_idx) = ext_match.filter(|&i| {
+            all_holes_match_ext
+                && holes.len() == flat_shapes[i].holes.len()
+                && flat_shapes[i].color == color
+                && flat_shapes[i].symbol_instance.is_none()
+        }) {
+            out.push(flat_shapes[s_idx].clone());
+        } else {
+            out.push(FillShape::new(color, exterior, holes));
+        }
+    }
+    out
 }
 
 fn run_float_overlay(
@@ -686,46 +785,6 @@ fn run_float_overlay(
         filter,
         Solver::AUTO,
     )
-}
-
-fn reconstruct_fill_shape_from_rings(
-    poly_shape: &[Vec<[f64; 2]>],
-    quad_table: &[QuadRecord],
-    grid: &QuadSpatialGrid,
-    color: Color32,
-    filter_sliver_holes: bool,
-) -> Option<FillShape> {
-    if poly_shape.is_empty() {
-        return None;
-    }
-    let exterior = reconstruct_or_refit_quad_contour(&poly_shape[0], quad_table, grid, true)?;
-    let (_, ext_perim) = ring_area_and_perimeter_f64(&poly_shape[0]);
-    let hole_scale = if ext_perim < 16.0 {
-        (ext_perim / 16.0).clamp(0.005, 1.0)
-    } else {
-        1.0
-    };
-    let min_hole_area = 1.5 * hole_scale * hole_scale;
-    let min_hole_thickness = 0.15 * hole_scale;
-    let holes = poly_shape[1..]
-        .iter()
-        .filter(|hole_ring| {
-            if !filter_sliver_holes {
-                return true;
-            }
-            let (a, p) = ring_area_and_perimeter_f64(hole_ring);
-            let circularity = (4.0 * std::f64::consts::PI * a) / (p * p).max(1e-9);
-            if circularity >= 0.18 {
-                a >= 1e-4
-            } else {
-                a >= min_hole_area && (a / p.max(1e-5)) >= min_hole_thickness
-            }
-        })
-        .filter_map(|hole_ring| {
-            reconstruct_or_refit_quad_contour(hole_ring, quad_table, grid, false)
-        })
-        .collect();
-    Some(FillShape::new(color, exterior, holes))
 }
 
 /// 指定座標 `pt` を囲み得る連結AABBクラスタをスイープライン＋Union-Find（素集合データ構造）で計算し、
@@ -844,7 +903,6 @@ pub(crate) fn find_enclosed_region_at(
         min_area,
     );
 
-    let mut cached_grid: Option<QuadSpatialGrid> = None;
     for poly_shape in overlay_result {
         if poly_shape.is_empty() {
             continue;
@@ -875,10 +933,15 @@ pub(crate) fn find_enclosed_region_at(
             continue;
         }
 
-        let grid = cached_grid.get_or_insert_with(|| QuadSpatialGrid::new(&quad_table));
-        let Some(candidate) =
-            reconstruct_fill_shape_from_rings(&poly_shape, &quad_table, grid, fill_color, false)
-        else {
+        let Some(candidate) = reconstruct_shapes_from_overlay(
+            std::slice::from_ref(&poly_shape),
+            &[],
+            &quad_table,
+            fill_color,
+            false,
+        )
+        .into_iter()
+        .next() else {
             continue;
         };
         if candidate.contains_point(pt) {
@@ -1067,7 +1130,7 @@ pub(crate) fn resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape> {
         OverlayFillRule::Positive,
         min_area,
     );
-    reconstruct_shapes_from_overlay(&overlay_result, &quad_table, shape.color, false)
+    reconstruct_shapes_from_overlay(&overlay_result, &[], &quad_table, shape.color, false)
         .into_iter()
         .map(|s| s.with_scope(shape.layer_id, &shape.group_path))
         .collect()

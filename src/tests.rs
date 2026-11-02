@@ -14892,3 +14892,170 @@ fn test_m4_3_saved_contour_arc_json_matches_legacy_and_load_shrinks_capacities()
         }
     }
 }
+
+/// M4-5 (N-1001): 穴の多い図形の一部の穴にだけ触れる線を1本描いたとき、
+/// 触れていない穴の `Contour` の線分が、描く前と同じ `Arc<Vec<QuadBez>>` を指していること
+#[test]
+fn test_m4_5_boolean_shares_untouched_hole_contour_arcs() {
+    use crate::doc_actions::{apply, Action};
+    use crate::vector_engine::rects_overlap;
+    use kurbo::Rect as KRect;
+
+    let mut seed = 0x9876_5432_10fe_dcba_u64;
+    let mut next_f64 = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((seed >> 32) as u32 as f64) / (u32::MAX as f64)
+    };
+    let mut gen_stroke = |len: usize| -> Vec<Point> {
+        let mut x = 150.0 + next_f64() * 500.0;
+        let mut y = 100.0 + next_f64() * 300.0;
+        let mut ang = next_f64() * std::f64::consts::TAU;
+        let mut pts = Vec::with_capacity(len);
+        for _ in 0..len {
+            pts.push(Point::new(x, y));
+            ang += (next_f64() - 0.5) * 0.6;
+            x = (x + ang.cos() * 7.5).clamp(80.0, 720.0);
+            y = (y + ang.sin() * 7.5).clamp(60.0, 440.0);
+        }
+        pts
+    };
+
+    let mut app = Is2dApp::default();
+    for _ in 0..80 {
+        let pts = gen_stroke(30);
+        let _ = apply(
+            &mut app,
+            Action::PaintStroke {
+                points: pts,
+                radius: 2.5,
+                color: Color32::BLACK,
+            },
+        );
+    }
+
+    let before_shapes = app.doc.root.layers[0].keyframes[0].cel.shapes.clone();
+    let total_holes_before: usize = before_shapes.iter().map(|s| s.holes.len()).sum();
+    assert!(
+        total_holes_before >= 100,
+        "多数の穴を持つ図形が生成されていること: holes={total_holes_before}"
+    );
+
+    // 一部の穴にだけ触れる線を1本描く
+    let stroke_pts = gen_stroke(25);
+    let stroke_bbox = stroke_pts
+        .iter()
+        .fold(
+            KRect::new(
+                stroke_pts[0].x,
+                stroke_pts[0].y,
+                stroke_pts[0].x,
+                stroke_pts[0].y,
+            ),
+            |acc, &p| acc.union_pt(p),
+        )
+        .inflate(5.0, 5.0);
+
+    let untouched_hole_arcs: Vec<std::sync::Arc<Vec<QuadBez>>> = before_shapes
+        .iter()
+        .flat_map(|s| &s.holes)
+        .filter(|h| !rects_overlap(h.bounding_box(), stroke_bbox))
+        .map(|h| std::sync::Arc::clone(&h.segments))
+        .collect();
+    assert!(
+        untouched_hole_arcs.len() >= 50,
+        "線に触れない穴が十分にあること: untouched={}",
+        untouched_hole_arcs.len()
+    );
+
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: stroke_pts,
+            radius: 2.5,
+            color: Color32::BLACK,
+        },
+    );
+
+    let after_shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+    for prev_arc in &untouched_hole_arcs {
+        let shared = after_shapes
+            .iter()
+            .flat_map(|s| &s.holes)
+            .any(|h| std::sync::Arc::ptr_eq(&h.segments, prev_arc));
+        assert!(
+            shared,
+            "触れていない穴の Contour は描く前と同じ Arc<Vec<QuadBez>> を共有していること"
+        );
+    }
+}
+
+/// M4-5 (N-1001): 3色・半径 0.5〜25・長さ1〜60点のブラシと消しゴムをランダムに300回行い、
+/// 毎回、塗られた面積が理論上の範囲（許容 1%）に入ること
+#[test]
+fn test_m4_5_random_brush_and_eraser_area_bounds_300_steps() {
+    use crate::vector_boolean::erase_from_canvas;
+
+    let colors = [
+        Color32::from_rgb(220, 60, 60),
+        Color32::from_rgb(60, 180, 90),
+        Color32::from_rgb(60, 120, 220),
+    ];
+    let shape_area = |s: &FillShape| -> f64 {
+        (s.exterior.signed_area().abs()
+            - s.holes.iter().map(|h| h.signed_area().abs()).sum::<f64>())
+        .max(0.0)
+    };
+
+    let mut seed = 0x1234_5678_9abc_def0_u64;
+    let mut next_f64 = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((seed >> 32) as u32 as f64) / (u32::MAX as f64)
+    };
+
+    let mut canvas: Vec<FillShape> = Vec::new();
+    for step in 0..300 {
+        let is_erase = step > 0 && next_f64() < 0.28;
+        let radius = 0.5 + next_f64() * 24.5;
+        let len = 1 + (next_f64() * 60.0) as usize;
+        let color = colors[(next_f64() * 3.0) as usize % 3];
+        let mut x = 100.0 + next_f64() * 600.0;
+        let mut y = 80.0 + next_f64() * 440.0;
+        let mut ang = next_f64() * std::f64::consts::TAU;
+        let mut pts = Vec::with_capacity(len);
+        for _ in 0..len {
+            pts.push(Point::new(x, y));
+            ang += (next_f64() - 0.5) * 0.7;
+            let step_d = 2.0 + next_f64() * 8.0;
+            x = (x + ang.cos() * step_d).clamp(50.0, 750.0);
+            y = (y + ang.sin() * step_d).clamp(40.0, 560.0);
+        }
+        let raw = generate_brush_outline(&pts, radius);
+        let stroke: Vec<FillShape> = build_smoothed_stroke_shapes(&raw, color)
+            .into_iter()
+            .map(|s| s.with_scope(1, &[]))
+            .collect();
+        if stroke.is_empty() {
+            continue;
+        }
+        let stroke_area: f64 = stroke.iter().map(&shape_area).sum();
+        let prev_area: f64 = canvas.iter().map(&shape_area).sum();
+
+        if is_erase {
+            erase_from_canvas(&mut canvas, &stroke, 1, &[]);
+        } else {
+            merge_shapes_into_canvas(&mut canvas, stroke);
+        }
+
+        let after_area: f64 = canvas.iter().map(&shape_area).sum();
+        let (min_exp, max_exp) = if is_erase {
+            ((prev_area - stroke_area).max(0.0), prev_area)
+        } else {
+            (prev_area.max(stroke_area), prev_area + stroke_area)
+        };
+        let tol = max_exp.max(stroke_area) * 0.01 + 1.5;
+        assert!(
+            after_area >= min_exp - tol && after_area <= max_exp + tol,
+            "step={step} is_erase={is_erase} radius={radius:.2} len={len}: prev={prev_area:.2} stroke={stroke_area:.2} after={after_area:.2} expected=[{min_exp:.2}, {max_exp:.2}] tol={tol:.2}"
+        );
+    }
+}
