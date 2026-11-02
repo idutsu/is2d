@@ -715,8 +715,7 @@ mod scene_base_cache {
 
     use super::{Document, EditPath, LayerId, ShapeId};
     use crate::symbol::{
-        compute_backdrop_layer_cel_signature, compute_resolved_cel_signature, ResolvedCelSig,
-        SymbolDef, SymbolEvalCtx, SymbolLoopMode,
+        compute_resolved_cel_signature, ResolvedCelSig, SymbolDef, SymbolEvalCtx, SymbolLoopMode,
     };
     use crate::timeline::{Layer, Timeline};
     use crate::vector_engine::{
@@ -877,7 +876,8 @@ mod scene_base_cache {
                 cl.range = start..new_flat.len();
                 if modified_lids.contains(&layer.id) {
                     if let Some(kf_idx) = layer.keyframe_index_at(frame) {
-                        cl.cel_sig = Some(compute_resolved_cel_signature(layer, kf_idx, library));
+                        cl.cel_sig =
+                            Some(compute_resolved_cel_signature(layer, kf_idx, None, library));
                         cl.eval_frame = layer_eval_frame(layer, kf_idx, frame, library);
                     } else {
                         cl.cel_sig = None;
@@ -1014,7 +1014,7 @@ mod scene_base_cache {
                         }
                     }
                 }
-                let sig = compute_resolved_cel_signature(layer, kf_idx, library);
+                let sig = compute_resolved_cel_signature(layer, kf_idx, None, library);
                 let start = new_flat.len();
                 new_flat.extend(evaluated);
                 let end = new_flat.len();
@@ -1341,7 +1341,7 @@ mod scene_base_cache {
                 shapes.push(s);
             }
             let cel_sig =
-                compute_backdrop_layer_cel_signature(layer, kf_idx, excl_gid, &doc.library);
+                compute_resolved_cel_signature(layer, kf_idx, Some(excl_gid), &doc.library);
             CachedBackdropLayer {
                 level_idx: lvl_idx,
                 parent_symbol_id: parent_sym_id,
@@ -1438,7 +1438,7 @@ mod scene_base_cache {
             } else {
                 self.entries
                     .retain(|e| !(e.layer_id == layer.id && e.eval_frame == ef));
-                let cel_sig = compute_resolved_cel_signature(layer, kf_idx, library);
+                let cel_sig = compute_resolved_cel_signature(layer, kf_idx, None, library);
                 let world_mesh =
                     tl.build_cel_world_batch_mesh(layer_idx, frame, world_xform, library);
                 self.entries.push(CachedOnionCel {

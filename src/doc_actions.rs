@@ -619,11 +619,10 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         Action::Paste { in_place } => apply_paste_clipboard(tab, tool, clipboard, toast, in_place),
 
         Action::ConvertToSymbol => {
-            if let Some((_, target_lid, local_shapes)) =
+            if let Some((sym_id, target_lid)) =
                 prepare_convert_selection_to_symbol(tab, |tab| push_undo(tab, None))
             {
-                let registered_id = tab.doc.register_new_symbol(local_shapes);
-                tab.view.selected_library_symbol = Some(registered_id);
+                tab.view.selected_library_symbol = Some(sym_id);
                 if let Some(l_idx) = tab.active_timeline().layer_index_by_id(target_lid) {
                     tab.set_active_layer(l_idx);
                 }

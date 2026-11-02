@@ -934,6 +934,14 @@ impl Timeline {
             .any(|l| l.is_editable_at(self.current_frame))
     }
 
+    /// 全レイヤー・全キーフレーム内のシンボルインスタンスを列挙する
+    pub(crate) fn instances(&self) -> impl Iterator<Item = &SymbolInstance> {
+        self.layers
+            .iter()
+            .flat_map(|l| l.keyframes.iter())
+            .flat_map(|kf| kf.cel.instances.iter())
+    }
+
     /// `F5` / `Shift+F5` 等のフレーム操作対象となるレイヤーインデックス一覧を返す：
     /// - 特定のレイヤー（または複数レイヤー範囲）が選択されていれば、その選択レイヤー群のみ。
     /// - どのレイヤーも選択されていなければ（`cell_selection == None`）、全非ロックレイヤー。

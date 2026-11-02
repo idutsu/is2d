@@ -14,6 +14,14 @@ fn make_stroke(p0: Point, p1: Point, radius: f32, color: Color32) -> Vec<FillSha
     build_smoothed_stroke_shapes(&raw, color)
 }
 
+impl symbol::Document {
+    fn register_new_symbol(&mut self, local_shapes: Vec<FillShape>) -> u64 {
+        let sym_id = self.alloc_symbol_id();
+        self.register_symbol(sym_id, local_shapes);
+        sym_id
+    }
+}
+
 /// 編集中のタイムラインの指定レイヤー・指定フレームのセル図形列を `edit_layers` 経由で配置するテスト補助関数
 fn put_cel_shapes(app: &mut Is2dApp, layer_idx: usize, frame: usize, mut shapes: Vec<FillShape>) {
     let Some((lid, prev_frame, prev_vis, prev_lock)) =

@@ -8,12 +8,12 @@ use crate::symbol::{EditLevel, SymbolEvalCtx, SymbolInstanceBinding};
 use crate::timeline::TimelineCellSelection;
 use crate::vector_engine::{FillShape, union_bounding_boxes};
 
-/// 選択中のオブジェクトを新しい「シンボル」に変換するためのローカル図形抽出とインスタンスバインディング付与を行い、
-/// `(sym_id, target_lid, local_shapes)` を返す（Undo記録・ライブラリ登録は `doc_actions::apply` が行う）
+/// 選択中のオブジェクトを新しい「シンボル」に変換するためのローカル図形抽出・インスタンスバインディング付与・ライブラリ登録を行い、
+/// `(sym_id, target_lid)` を返す
 pub(crate) fn prepare_convert_selection_to_symbol(
     tab: &mut Tab,
     before_mutate: impl FnOnce(&mut Tab),
-) -> Option<(u64, u64, Vec<FillShape>)> {
+) -> Option<(u64, u64)> {
     cancel_active_drag(tab);
     if tab.session.selection.is_empty() {
         return None;
@@ -32,7 +32,7 @@ pub(crate) fn prepare_convert_selection_to_symbol(
 
     before_mutate(tab);
 
-    let sym_id = tab.doc.next_symbol_id;
+    let sym_id = tab.doc.alloc_symbol_id();
     let inst_gid = tab.doc.alloc_group_id();
     let fl_opt = tab.session.take_floating();
     let selection = tab.session.selection.clone();
@@ -110,10 +110,11 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         return None;
     }
 
+    tab.doc.register_symbol(sym_id, local_shapes);
     tab.session.selection.clear();
     tab.session.selection.instances.insert(inst_gid);
 
-    Some((sym_id, target_lid, local_shapes))
+    Some((sym_id, target_lid))
 }
 
 /// ライブラリ内の指定シンボル `symbol_id` の新しいインスタンスを現在のステージ中央へ配置する

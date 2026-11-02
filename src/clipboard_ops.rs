@@ -170,18 +170,14 @@ fn collect_symbol_and_descendants(
     let Some(sym) = library.iter().find(|s| s.id == sym_id) else {
         return;
     };
-    for layer in &sym.timeline.layers {
-        for kf in &layer.keyframes {
-            for inst in kf.cel.instances.iter() {
-                collect_symbol_and_descendants(
-                    inst.binding.symbol_id,
-                    library,
-                    reusable,
-                    visited,
-                    out,
-                );
-            }
-        }
+    for inst in sym.timeline.instances() {
+        collect_symbol_and_descendants(
+            inst.binding.symbol_id,
+            library,
+            reusable,
+            visited,
+            out,
+        );
     }
     if let Some(existing) = reusable.iter().find(|s| s.id == sym_id) {
         out.push(Arc::clone(existing));
@@ -284,14 +280,10 @@ fn existing_reusable_target_symbol_id(
         })?;
 
     let sym_def = tab.doc.find_symbol(candidate)?;
-    let all_children_exist = sym_def.timeline.layers.iter().all(|l| {
-        l.keyframes.iter().all(|kf| {
-            kf.cel
-                .instances
-                .iter()
-                .all(|inst| tab.doc.find_symbol(inst.binding.symbol_id).is_some())
-        })
-    });
+    let all_children_exist = sym_def
+        .timeline
+        .instances()
+        .all(|inst| tab.doc.find_symbol(inst.binding.symbol_id).is_some());
     all_children_exist.then_some(candidate)
 }
 
@@ -330,18 +322,9 @@ fn can_paste_clipboard_symbol_inner(
         return true;
     };
 
-    for layer in &src_sym.timeline.layers {
-        for kf in &layer.keyframes {
-            for inst in kf.cel.instances.iter() {
-                if !can_paste_clipboard_symbol_inner(
-                    tab,
-                    clipboard,
-                    inst.binding.symbol_id,
-                    visited,
-                ) {
-                    return false;
-                }
-            }
+    for inst in src_sym.timeline.instances() {
+        if !can_paste_clipboard_symbol_inner(tab, clipboard, inst.binding.symbol_id, visited) {
+            return false;
         }
     }
     true
@@ -386,19 +369,15 @@ fn collect_needed_clipboard_imports(
     }
     needed_imports.insert(src_sym_id);
     if let Some(src_sym) = clipboard.symbols.iter().find(|s| s.id == src_sym_id) {
-        for layer in &src_sym.timeline.layers {
-            for kf in &layer.keyframes {
-                for inst in kf.cel.instances.iter() {
-                    collect_needed_clipboard_imports(
-                        tab,
-                        clipboard,
-                        inst.binding.symbol_id,
-                        local_sym_map,
-                        needed_imports,
-                        visited,
-                    );
-                }
-            }
+        for inst in src_sym.timeline.instances() {
+            collect_needed_clipboard_imports(
+                tab,
+                clipboard,
+                inst.binding.symbol_id,
+                local_sym_map,
+                needed_imports,
+                visited,
+            );
         }
     }
 }
@@ -458,9 +437,7 @@ pub(crate) fn resolve_clipboard_for_paste(
             tab.doc.next_symbol_id = tab.doc.next_symbol_id.max(imported.id.saturating_add(1));
             imported.id
         } else {
-            let id = tab.doc.next_symbol_id;
-            tab.doc.next_symbol_id = tab.doc.next_symbol_id.saturating_add(1);
-            id
+            tab.doc.alloc_symbol_id()
         };
 
         local_sym_map.insert(imported.id, new_id);

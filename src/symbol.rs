@@ -319,14 +319,10 @@ impl SymbolDef {
         let dynamic = if self.timeline.total_frames > 1 || frame_zero_empty {
             true
         } else {
-            self.timeline.layers.iter().any(|layer| {
-                layer.keyframes.iter().any(|kf| {
-                    kf.cel.instances.iter().any(|inst| {
-                        library.iter().any(|child| {
-                            child.id == inst.binding.symbol_id
-                                && child.has_dynamic_animation(library, depth + 1)
-                        })
-                    })
+            self.timeline.instances().any(|inst| {
+                library.iter().any(|child| {
+                    child.id == inst.binding.symbol_id
+                        && child.has_dynamic_animation(library, depth + 1)
                 })
             })
         };
@@ -526,13 +522,15 @@ impl Document {
         id
     }
 
-    /// 新しいシンボル定義をライブラリへ登録し、採番された `symbol_id` を返す
-    pub(crate) fn register_new_symbol(&mut self, local_shapes: Vec<FillShape>) -> u64 {
-        let mut sym_id = self.next_symbol_id.max(1);
-        while self.library.iter().any(|s| s.id == sym_id) {
-            sym_id = if sym_id < u64::MAX { sym_id + 1 } else { 1 };
-        }
-        self.next_symbol_id = sym_id.saturating_add(1);
+    /// 新しいシンボル定義用の一意な `symbol_id` を採番して返す
+    pub(crate) fn alloc_symbol_id(&mut self) -> u64 {
+        let id = self.next_symbol_id.max(1);
+        self.next_symbol_id = if id < u64::MAX { id + 1 } else { 1 };
+        id
+    }
+
+    /// 新しいシンボル定義をライブラリへ登録する
+    pub(crate) fn register_symbol(&mut self, sym_id: u64, local_shapes: Vec<FillShape>) {
         let mut name_num = sym_id;
         while self
             .library
@@ -544,7 +542,6 @@ impl Document {
         let sym_def = SymbolDef::new(sym_id, format!("Symbol {name_num}"), local_shapes);
         self.library.push(sym_def);
         self.bump_revision();
-        sym_id
     }
 
     /// 指定した `symbol_id` のシンボル定義を参照する
@@ -587,16 +584,12 @@ impl Document {
                 return MAX_SYMBOL_NEST_DEPTH + 1;
             }
             let mut max_child = 0usize;
-            for layer in &sym.timeline.layers {
-                for kf in &layer.keyframes {
-                    for inst in kf.cel.instances.iter() {
-                        let ch = height(inst.binding.symbol_id, depth + 1, by_id, memo);
-                        if ch >= MAX_SYMBOL_NEST_DEPTH {
-                            return MAX_SYMBOL_NEST_DEPTH + 1;
-                        }
-                        max_child = max_child.max(ch);
-                    }
+            for inst in sym.timeline.instances() {
+                let ch = height(inst.binding.symbol_id, depth + 1, by_id, memo);
+                if ch >= MAX_SYMBOL_NEST_DEPTH {
+                    return MAX_SYMBOL_NEST_DEPTH + 1;
                 }
+                max_child = max_child.max(ch);
             }
             let h = 1 + max_child;
             memo.insert(sym_id, h);
@@ -626,17 +619,13 @@ impl Document {
             let Some(sym) = self.find_symbol(cur_id) else {
                 continue;
             };
-            for layer in &sym.timeline.layers {
-                for kf in &layer.keyframes {
-                    for inst in kf.cel.instances.iter() {
-                        let child_id = inst.binding.symbol_id;
-                        if child_id == parent_symbol_id {
-                            return true;
-                        }
-                        if visited.insert(child_id) {
-                            stack.push(child_id);
-                        }
-                    }
+            for inst in sym.timeline.instances() {
+                let child_id = inst.binding.symbol_id;
+                if child_id == parent_symbol_id {
+                    return true;
+                }
+                if visited.insert(child_id) {
+                    stack.push(child_id);
                 }
             }
         }
@@ -725,13 +714,9 @@ impl Document {
                     };
                     &sym.timeline
                 };
-                let has_inst = parent_tl.layers.iter().any(|l| {
-                    l.keyframes.iter().any(|kf| {
-                        kf.cel.instances.iter().any(|inst| {
-                            inst.binding.instance_gid == lvl.instance_gid
-                                && inst.binding.symbol_id == lvl.symbol_id
-                        })
-                    })
+                let has_inst = parent_tl.instances().any(|inst| {
+                    inst.binding.instance_gid == lvl.instance_gid
+                        && inst.binding.symbol_id == lvl.symbol_id
                 });
                 if !has_inst {
                     break;
@@ -820,18 +805,14 @@ fn collect_referenced_symbol_revisions(
     visited.push(sym_id);
     if let Some(sym) = library.iter().find(|s| s.id == sym_id) {
         out.push((sym.id, sym.revision));
-        for layer in &sym.timeline.layers {
-            for kf in &layer.keyframes {
-                for inst in kf.cel.instances.iter() {
-                    collect_referenced_symbol_revisions(
-                        inst.binding.symbol_id,
-                        library,
-                        visited,
-                        depth + 1,
-                        out,
-                    );
-                }
-            }
+        for inst in sym.timeline.instances() {
+            collect_referenced_symbol_revisions(
+                inst.binding.symbol_id,
+                library,
+                visited,
+                depth + 1,
+                out,
+            );
         }
     } else {
         out.push((sym_id, u64::MAX));
@@ -841,57 +822,14 @@ fn collect_referenced_symbol_revisions(
 pub(crate) fn compute_resolved_cel_signature(
     layer: &Layer,
     kf_idx: usize,
+    excluded_instance_gid: Option<u64>,
     library: &[SymbolDef],
 ) -> ResolvedCelSig {
     let kf = &layer.keyframes[kf_idx];
     let mut visited_syms: Vec<u64> = Vec::new();
     let mut referenced_symbols: Vec<(u64, u64)> = Vec::new();
     for inst in kf.cel.instances.iter() {
-        collect_referenced_symbol_revisions(
-            inst.binding.symbol_id,
-            library,
-            &mut visited_syms,
-            0,
-            &mut referenced_symbols,
-        );
-    }
-    let mut next_kf = None;
-    if kf.tween {
-        if let Some(nkf) = layer.keyframes.get(kf_idx + 1) {
-            if let Some(nb) = nkf.cel.single_symbol_instance() {
-                next_kf = Some((nkf.start_frame, nb));
-                collect_referenced_symbol_revisions(
-                    nb.symbol_id,
-                    library,
-                    &mut visited_syms,
-                    0,
-                    &mut referenced_symbols,
-                );
-            }
-        }
-    }
-    ResolvedCelSig {
-        cel_revision: kf.cel.revision,
-        start_frame: kf.start_frame,
-        tween: kf.tween,
-        tween_rotate: kf.tween_rotate,
-        next_kf,
-        referenced_symbols,
-    }
-}
-
-/// シンボルインプレイス編集の背景レイヤー用：除外対象の `excluded_instance_gid` 以外のインスタンスが参照するシンボル群の世代番号から解決済みキャッシュ署名を計算する
-pub(crate) fn compute_backdrop_layer_cel_signature(
-    layer: &Layer,
-    kf_idx: usize,
-    excluded_instance_gid: u64,
-    library: &[SymbolDef],
-) -> ResolvedCelSig {
-    let kf = &layer.keyframes[kf_idx];
-    let mut visited_syms: Vec<u64> = Vec::new();
-    let mut referenced_symbols: Vec<(u64, u64)> = Vec::new();
-    for inst in kf.cel.instances.iter() {
-        if inst.binding.instance_gid == excluded_instance_gid {
+        if excluded_instance_gid == Some(inst.binding.instance_gid) {
             continue;
         }
         collect_referenced_symbol_revisions(
@@ -910,7 +848,7 @@ pub(crate) fn compute_backdrop_layer_cel_signature(
                 if kf
                     .cel
                     .single_symbol_instance()
-                    .is_none_or(|sb| sb.instance_gid != excluded_instance_gid)
+                    .is_none_or(|sb| excluded_instance_gid != Some(sb.instance_gid))
                 {
                     collect_referenced_symbol_revisions(
                         nb.symbol_id,
