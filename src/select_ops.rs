@@ -881,14 +881,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     });
     tab.session.selection = selection;
     if any_became_raw {
-        tab.session
-            .lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
-        tab.session.update_floating(|fl_opt| {
-            if let Some(fl) = fl_opt {
-                fl.modified = true;
-                fl.pieces_disjoint = false;
-            }
-        });
+        tab.session.lift_selected_raw_shapes_to_floating(false);
     }
     tab.session.retain_existing_selection();
     tab.session.transform_pivot = None;

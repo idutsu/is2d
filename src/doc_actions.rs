@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use eframe::egui::{Color32, Vec2};
-use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
+use kurbo::{Affine, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{
     Clipboard, CoalesceKey, Floating, FloatingOrigin, NoticeKind, SelectSubMode, ShapeId,
@@ -46,7 +46,6 @@ pub(crate) trait ActionHost {
     fn tab(&self) -> &Tab;
     fn tab_mut(&mut self) -> &mut Tab;
     fn tool(&self) -> &ToolSettings;
-    #[allow(dead_code)]
     fn tool_mut(&mut self) -> &mut ToolSettings;
     #[allow(dead_code)]
     fn clipboard(&self) -> &Clipboard;
@@ -99,7 +98,6 @@ impl ApplyResult {
 }
 
 /// ドキュメント状態または編集セッションを変更するすべての操作を表す列挙型
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) enum Action {
     // 描画・塗り
@@ -112,6 +110,7 @@ pub(crate) enum Action {
         points: Vec<Point>,
         radius: f32,
     },
+    #[cfg(test)]
     CommitRawOutline {
         raw: Vec<Point>,
     },
@@ -135,9 +134,12 @@ pub(crate) enum Action {
         p1: Point,
         additive: bool,
     },
+    #[cfg(test)]
     SelectAll,
     Deselect,
+    #[cfg(test)]
     CommitFloating,
+    #[cfg(test)]
     MoveSelected {
         delta: KVec2,
     },
@@ -148,7 +150,6 @@ pub(crate) enum Action {
         total_delta: KVec2,
         alt_duplicate: bool,
     },
-    CommitMovedSelection,
     DeleteSelection,
     ClearActiveFrame,
     Group,
@@ -179,10 +180,12 @@ pub(crate) enum Action {
         target_pos: Point,
         orig_ctrls: (Point, Point),
     },
+    #[cfg(test)]
     PullEdgeFromTo {
         from: Point,
         to: Point,
     },
+    #[cfg(test)]
     MoveVertexFromTo {
         from: Point,
         to: Point,
@@ -195,9 +198,7 @@ pub(crate) enum Action {
     },
 
     // 自由変形・ピボット
-    TransformSelection {
-        affine: Affine,
-    },
+    #[cfg(test)]
     ScaleSelection {
         sx: f64,
         sy: f64,
@@ -209,6 +210,7 @@ pub(crate) enum Action {
     RotateSelection {
         angle_rad: f64,
     },
+    #[cfg(test)]
     SetTransformPivot {
         world_pivot: Option<Point>,
     },
@@ -244,7 +246,9 @@ pub(crate) enum Action {
     EnterSymbolFromLibrary {
         sym_id: u64,
     },
+    #[cfg(test)]
     ExitSymbolTimeline,
+    #[cfg(test)]
     ExitSymbolToDepth {
         depth: usize,
     },
@@ -438,6 +442,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             let changed = apply_raw_outline(tab, Tool::Eraser, tool.brush_color, &raw);
             ApplyResult::Applied(changed)
         }
+        #[cfg(test)]
         Action::CommitRawOutline { raw } => {
             ApplyResult::Applied(apply_raw_outline(tab, tool.tool, tool.brush_color, &raw))
         }
@@ -460,6 +465,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             apply_marquee_selection(tab, p0, p1, additive);
             ApplyResult::Applied(!tab.session.selection.is_empty())
         }
+        #[cfg(test)]
         Action::SelectAll => {
             clear_selection(tab);
             let editable_lids: std::collections::HashSet<u64> =
@@ -471,7 +477,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             clear_selection(tab);
             ApplyResult::Applied(true)
         }
+        #[cfg(test)]
         Action::CommitFloating => ApplyResult::Applied(commit_floating(tab)),
+        #[cfg(test)]
         Action::MoveSelected { delta } => {
             ApplyResult::Applied(apply_move_selected(tab, delta, None))
         }
@@ -486,9 +494,6 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             total_delta,
             alt_duplicate,
         )),
-        Action::CommitMovedSelection => {
-            ApplyResult::Applied(apply_commit_moved_selection(tab, None))
-        }
         Action::DeleteSelection => ApplyResult::Applied(prepare_delete_selected_shapes(tab, |tab| {
             push_undo(tab, None)
         })),
@@ -557,18 +562,18 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
             });
             ApplyResult::Applied(changed)
         }
+        #[cfg(test)]
         Action::PullEdgeFromTo { from, to } => {
             ApplyResult::Applied(apply_pull_edge_from_to(tab, from, to))
         }
+        #[cfg(test)]
         Action::MoveVertexFromTo { from, to } => {
             ApplyResult::Applied(apply_move_vertex_from_to(tab, from, to))
         }
         Action::AddAnchor { pt } => ApplyResult::Applied(apply_anchor_edit_at(tab, pt, true)),
         Action::DeleteAnchor { pt } => ApplyResult::Applied(apply_anchor_edit_at(tab, pt, false)),
 
-        Action::TransformSelection { affine } => {
-            ApplyResult::Applied(apply_affine_to_selected_inner(tab, affine))
-        }
+        #[cfg(test)]
         Action::ScaleSelection { sx, sy } => {
             let Some(bbox) = tab
                 .scene()
@@ -622,6 +627,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
                 affine_rotate_around(pivot, angle_rad),
             ))
         }
+        #[cfg(test)]
         Action::SetTransformPivot { world_pivot } => {
             ApplyResult::Applied(apply_set_selected_symbol_world_pivot(tab, world_pivot, true))
         }
@@ -717,7 +723,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> ApplyResult {
         Action::EnterSymbolFromLibrary { sym_id } => {
             ApplyResult::Applied(enter_symbol_from_library(tab, sym_id))
         }
+        #[cfg(test)]
         Action::ExitSymbolTimeline => ApplyResult::Applied(exit_symbol_timeline(tab)),
+        #[cfg(test)]
         Action::ExitSymbolToDepth { depth } => {
             let mut exited = false;
             while tab.session.edit_path.len() > depth {
@@ -979,8 +987,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 .filter(|l| l.visible && !l.locked)
                 .map(|l| l.id)
                 .collect();
-            tab.session
-                .lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
+            tab.session.lift_selected_raw_shapes_to_floating(false);
             let scope = tab.session.editing_group_path.clone();
             let sel = tab.session.selection.clone();
             tab.session.update_floating(|fl_opt| {
@@ -1257,20 +1264,6 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     any_transformed
 }
 
-fn apply_commit_moved_selection(tab: &mut Tab, coalesce: Option<CoalesceKey>) -> bool {
-    let taken_unmodified_fl = (!tab.session.has_modified_floating())
-        .then(|| tab.session.take_floating())
-        .flatten();
-    let skip_coalesce = coalesce.is_some_and(|k| tab.history.last_coalesce_key == Some(k));
-    if !skip_coalesce {
-        push_undo_entry_from_doc(tab, coalesce);
-    }
-    if let Some(fl) = taken_unmodified_fl {
-        tab.session.set_floating(Some(fl));
-    }
-    prepare_moved_selection(tab)
-}
-
 fn duplicate_selected_in_working_copy(tab: &mut Tab) {
     let extracted = tab.session.extract_selected_relative_to_scope();
     if extracted.is_empty() {
@@ -1392,7 +1385,9 @@ fn apply_deform_shape(
     deformed_ok
 }
 
+#[cfg(test)]
 fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
+    use kurbo::ParamCurve;
     clear_selection(tab);
     let target = compute_hover_target(
         tab.scene(),
@@ -1425,6 +1420,7 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     })
 }
 
+#[cfg(test)]
 fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     clear_selection(tab);
     let target = compute_hover_target(
@@ -2224,12 +2220,6 @@ pub(crate) fn set_selected_symbol_world_pivot(
     } else {
         update_selected_symbol_world_pivot_live(host.tab_mut(), world_pivot)
     }
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn apply_affine_to_selected(host: &mut impl ActionHost, affine: Affine) -> bool {
-    apply(host, Action::TransformSelection { affine }).as_bool()
 }
 
 #[cfg(test)]

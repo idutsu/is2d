@@ -1303,8 +1303,6 @@ pub(crate) fn save_project_to_path(
 
     let proj_doc = ProjectDocument::from_app(ws.tab());
     proj_doc.validate_finite()?;
-    let json = serde_json::to_string(&proj_doc)
-        .map_err(|e| format!("プロジェクトデータの変換に失敗しました: {e}"))?;
 
     let target_path = if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
@@ -1321,9 +1319,8 @@ pub(crate) fn save_project_to_path(
     );
     let tmp_path = target_path.with_file_name(tmp_name);
     let write_res = (|| -> std::io::Result<()> {
-        use std::io::Write;
         let mut file = std::fs::File::create(&tmp_path)?;
-        file.write_all(json.as_bytes())?;
+        serde_json::to_writer(std::io::BufWriter::new(&mut file), &proj_doc)?;
         file.sync_all()
     })();
     if let Err(e) = write_res {

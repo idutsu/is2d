@@ -2333,6 +2333,7 @@ impl Session {
     }
 
     /// 確定時に結合が必要な変更済み `Floating` が保持されているかを返す
+    #[cfg(test)]
     #[inline]
     pub(crate) fn has_modified_floating(&self) -> bool {
         self.floating
@@ -2340,18 +2341,8 @@ impl Session {
             .is_some_and(Floating::needs_merge_commit)
     }
 
-    /// `Floating` を変更済みとしてマークする
-    #[inline]
-    pub(crate) fn mark_floating_modified(&mut self, _origin: FloatingOrigin) {
-        self.update_floating(|fl_opt| {
-            if let Some(fl) = fl_opt {
-                fl.modified = true;
-            }
-        });
-    }
-
     /// 選択中の生図形のうち、まだ `Floating` に入っていないものを `Floating` に持ち上げ、変更済みとしてマークする
-    pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self, origin: FloatingOrigin) -> bool {
+    pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self, pieces_disjoint: bool) -> bool {
         let scope = self.editing_group_path.clone();
         let mut newly_lifted = Vec::new();
         for shape in self.base_cache.shapes() {
@@ -2373,15 +2364,15 @@ impl Session {
         self.update_floating(|fl_opt| {
             let had_existing_modified = fl_opt.as_ref().is_some_and(|fl| fl.modified);
             let fl = fl_opt.get_or_insert_with(|| Floating {
-                origin,
+                origin: FloatingOrigin::Move,
                 pieces: Vec::new(),
                 remainder: Vec::new(),
                 hidden: HashSet::new(),
                 modified: true,
-                pieces_disjoint: true,
+                pieces_disjoint,
             });
             fl.modified = true;
-            if had_existing_modified && !newly_lifted.is_empty() {
+            if !pieces_disjoint || (had_existing_modified && !newly_lifted.is_empty()) {
                 fl.pieces_disjoint = false;
             }
             for s in newly_lifted {
@@ -2647,12 +2638,12 @@ impl Session {
     }
 
     /// 選択ツールまたは自由変形ツールで進行中だった図形変形・移動ドラッグのみを中断して仮表示 `Overlay` を破棄する（ブラシのストローク状態には干渉しない）
-    pub(crate) fn rollback_shape_drag(&mut self) -> bool {
+    pub(crate) fn rollback_shape_drag(&mut self) {
         if matches!(
             self.drag,
             ActiveCanvasDrag::None | ActiveCanvasDrag::PaintStroke { .. }
         ) {
-            return false;
+            return;
         }
         match std::mem::replace(&mut self.drag, ActiveCanvasDrag::None) {
             ActiveCanvasDrag::Select(SelectDragState::MoveShape(drag))
@@ -2687,7 +2678,6 @@ impl Session {
             | ActiveCanvasDrag::None => {}
         }
         self.clear_overlay();
-        false
     }
 }
 
@@ -3801,16 +3791,10 @@ pub(crate) fn sync_timeline_layer_from_canvas_selection(tab: &mut Tab) {
     }
 }
 
-/// 選択ツールまたは自由変形ツールで進行中だった図形変形・移動ドラッグのみを中断し、
-/// 仮表示 `Overlay` を破棄してドラッグ開始前の状態へ安全に巻き戻す（ブラシのストローク状態には干渉しない）
-pub(crate) fn rollback_shape_drag(tab: &mut Tab) {
-    let _ = tab.session.rollback_shape_drag();
-}
-
 /// 進行中のすべてのキャンバスドラッグ操作（ブラシ/消しゴム・輪郭変形・移動・自由変形）を中断し、
 /// プレビュー変形中だった図形をドラッグ開始前の状態へ安全に巻き戻す
 pub(crate) fn cancel_active_drag(tab: &mut Tab) {
-    rollback_shape_drag(tab);
+    tab.session.rollback_shape_drag();
     tab.session.drag = ActiveCanvasDrag::None;
     tab.session.hover_target = HoverTarget::None;
     tab.session.transform_hover = TransformHoverTarget::None;
@@ -4085,7 +4069,7 @@ pub(crate) fn commit_floating(tab: &mut Tab) -> bool {
 
 pub(crate) fn clear_selection(tab: &mut Tab) {
     tab.history.end_coalesce();
-    rollback_shape_drag(tab);
+    tab.session.rollback_shape_drag();
     commit_floating_except(tab, &[]);
     tab.session.selection.clear();
     tab.session.transform_pivot = None;
@@ -4121,11 +4105,6 @@ pub(crate) fn insert_and_select_shapes_in_scope(
                 let insert_pos = edit.scope_insert_index();
                 edit.shapes.splice(insert_pos..insert_pos, non_raw_shapes);
             });
-            for s in tab.scene().iter() {
-                if tab.session.selection.contains_shape(s) {
-                    // keep selection
-                }
-            }
         }
         if !raw_pieces.is_empty() {
             tab.active_timeline().normalize_shape_layer_ids(&mut raw_pieces);
@@ -4160,8 +4139,6 @@ pub(crate) fn prepare_moved_selection(tab: &mut Tab) -> bool {
     if !any_valid {
         return false;
     }
-    tab.session
-        .lift_selected_raw_shapes_to_floating(FloatingOrigin::Move);
-    tab.session.mark_floating_modified(FloatingOrigin::Move);
+    tab.session.lift_selected_raw_shapes_to_floating(true);
     true
 }
