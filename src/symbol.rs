@@ -665,25 +665,35 @@ impl Document {
         true
     }
 
-    /// 指定した `symbol_id` をライブラリから削除し、ルートタイムライン・入れ子シンボルから参照をデタッチする
-    pub(crate) fn remove_symbol_and_detach(&mut self, symbol_id: u64) -> bool {
+    /// 指定した `symbol_id` をライブラリから削除し、ルートおよび全シンボルのタイムラインからそのインスタンスを取り除く
+    pub(crate) fn remove_symbol_and_instances(&mut self, symbol_id: u64) -> bool {
         if !self.library.iter().any(|s| s.id == symbol_id) {
             return false;
         }
-        for layer in &mut self.root.layers {
-            layer.detach_symbol_id(symbol_id, &self.library, &mut self.next_group_id);
-        }
-        let library_snapshot = self.library.clone();
+        let remove_from_tl = |tl: &mut Timeline| {
+            for layer in &mut tl.layers {
+                for i in 0..layer.keyframes.len() {
+                    if layer.keyframes[i]
+                        .cel
+                        .instances
+                        .iter()
+                        .any(|inst| inst.binding.symbol_id == symbol_id)
+                    {
+                        let kf = layer.keyframe_mut(i);
+                        kf.cel
+                            .instances_mut()
+                            .retain(|inst| inst.binding.symbol_id != symbol_id);
+                        kf.tween &= kf.cel.single_symbol_instance().is_some();
+                    }
+                }
+            }
+        };
+        remove_from_tl(&mut self.root);
+        self.library.retain(|s| s.id != symbol_id);
         for sym_def in &mut self.library {
-            if sym_def.id == symbol_id {
-                continue;
-            }
-            for layer in &mut sym_def.timeline.layers {
-                layer.detach_symbol_id(symbol_id, &library_snapshot, &mut self.next_group_id);
-            }
+            remove_from_tl(&mut sym_def.timeline);
             sym_def.revision = crate::vector_engine::next_mesh_revision();
         }
-        self.library.retain(|s| s.id != symbol_id);
         self.bump_revision();
         true
     }
@@ -931,108 +941,9 @@ impl Cel {
             })
         })
     }
-
-    /// 指定された `symbol_id` を参照するシンボルインスタンスバインディングを解除（通常のグループ図形へ展開して `shapes` に格納）する
-    pub(crate) fn detach_symbol_id(
-        &mut self,
-        symbol_id: u64,
-        kf_start_frame: usize,
-        library: &[SymbolDef],
-        next_group_id: &mut u64,
-    ) {
-        if !self
-            .instances
-            .iter()
-            .any(|inst| inst.binding.symbol_id == symbol_id)
-        {
-            return;
-        }
-        let ctx = SymbolEvalCtx::new(library);
-        let mut out_shapes = Vec::with_capacity(self.shapes.len() + self.instances.len());
-        let mut out_instances = Vec::with_capacity(self.instances.len());
-        let mut next_cel_idx = 0;
-
-        for inst in self.instances.iter().cloned() {
-            let target_idx = inst.shape_order_index.min(self.shapes.len());
-            while next_cel_idx < target_idx {
-                out_shapes.push(self.shapes[next_cel_idx].clone());
-                next_cel_idx += 1;
-            }
-            if inst.binding.symbol_id == symbol_id {
-                if let Some(sym) = library.iter().find(|s| s.id == symbol_id) {
-                    let local_shapes = sym.evaluated_local_shapes_for_instance(
-                        inst.binding,
-                        kf_start_frame,
-                        kf_start_frame,
-                        ctx.nested(),
-                    );
-                    let mut inner_gid_map: Vec<(u64, u64)> = Vec::new();
-                    let inner_start = inst.parent_scope.len() + 1;
-                    for mut s in inst.binding.instantiate_shapes(
-                        &local_shapes,
-                        inst.layer_id,
-                        &inst.parent_scope,
-                    ) {
-                        s.symbol_instance = None;
-                        if s.group_path.len() > inner_start {
-                            for gid in &mut s.group_path[inner_start..] {
-                                let mapped = if let Some(&(_, m)) =
-                                    inner_gid_map.iter().find(|&&(old, _)| old == *gid)
-                                {
-                                    m
-                                } else {
-                                    let id = *next_group_id;
-                                    *next_group_id = next_group_id.saturating_add(1);
-                                    inner_gid_map.push((*gid, id));
-                                    id
-                                };
-                                *gid = mapped;
-                            }
-                        }
-                        out_shapes.push(s);
-                    }
-                }
-            } else {
-                let mut kept = inst;
-                kept.shape_order_index = out_shapes.len();
-                out_instances.push(kept);
-            }
-        }
-        while next_cel_idx < self.shapes.len() {
-            out_shapes.push(self.shapes[next_cel_idx].clone());
-            next_cel_idx += 1;
-        }
-        self.set_parts(out_shapes, out_instances);
-    }
 }
 
 impl Layer {
-    /// レイヤー内の全キーフレームから指定 `symbol_id` のシンボル参照をデタッチし、単一シンボル条件を失ったトゥイーンを解除する
-    pub(crate) fn detach_symbol_id(
-        &mut self,
-        symbol_id: u64,
-        library: &[SymbolDef],
-        next_group_id: &mut u64,
-    ) {
-        for i in 0..self.keyframes.len() {
-            if self.keyframes[i]
-                .cel
-                .instances
-                .iter()
-                .any(|inst| inst.binding.symbol_id == symbol_id)
-                || (self.keyframes[i].tween
-                    && self.keyframes[i].cel.single_symbol_instance().is_none())
-            {
-                let kf = self.keyframe_mut(i);
-                kf.cel
-                    .detach_symbol_id(symbol_id, kf.start_frame, library, next_group_id);
-                if kf.tween && kf.cel.single_symbol_instance().is_none() {
-                    kf.tween = false;
-                }
-            }
-        }
-    }
-
     /// このレイヤーの指定フレーム `frame` における図形列を、クラシックトゥイーン補間およびシンボル内タイムライン評価込みで返す
     pub(crate) fn evaluate_shapes_at(
         &self,

@@ -1739,7 +1739,7 @@ fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     clear_selection(tab);
     push_undo(tab, None);
 
-    tab.doc.remove_symbol_and_detach(sym_id);
+    tab.doc.remove_symbol_and_instances(sym_id);
     if tab.view.selected_library_symbol == Some(sym_id) {
         tab.view.selected_library_symbol = tab.doc.library.first().map(|s| s.id);
     }

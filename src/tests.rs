@@ -2230,13 +2230,47 @@ fn test_symbol_rename_library_delete_detach_and_inplace_child_symbol_creation() 
     app.undo();
     assert!(!app.doc.root.layers[0].locked);
 
+    // 子シンボル (child_sym_id) を削除すると、親シンボル (parent_sym_id) 内の child_sym_id インスタンスも消え、Undo 1回で元に戻ること
+    assert!(tool_transform::delete_symbol_from_library(
+        &mut app,
+        child_sym_id
+    ));
+    assert!(app.doc.find_symbol(child_sym_id).is_none());
+    assert!(
+        app.doc
+            .find_symbol(parent_sym_id)
+            .unwrap()
+            .timeline
+            .layers[0]
+            .keyframes[0]
+            .cel
+            .instances
+            .is_empty(),
+        "子シンボルを削除すると親シンボル内の子シンボルインスタンスも消えること"
+    );
+    app.undo();
+    assert!(app.doc.find_symbol(child_sym_id).is_some());
+    assert_eq!(
+        app.doc
+            .find_symbol(parent_sym_id)
+            .unwrap()
+            .timeline
+            .layers[0]
+            .keyframes[0]
+            .cel
+            .instances
+            .len(),
+        1,
+        "Undo 1回で子シンボルと親シンボル内のインスタンスが元に戻ること"
+    );
+
+    // 親シンボル (parent_sym_id) を削除すると、ルート上のインスタンスも消えること
     assert!(tool_transform::delete_symbol_from_library(
         &mut app,
         parent_sym_id
     ));
-    assert_eq!(scene_summary(&app).len, 1);
-    assert!(scene_summary(&app).shapes[0].symbol_instance.is_none());
-    assert!(!scene_summary(&app).shapes[0].group_path.is_empty());
+    assert_eq!(scene_summary(&app).len, 0);
+    assert!(app.doc.root.layers[0].keyframes[0].cel.instances.is_empty());
 
     assert!(tool_transform::enter_symbol_from_library(
         &mut app,
@@ -4876,10 +4910,9 @@ fn test_flip_tween_midpoint_and_horizontal_flip_without_spurious_rotation() {
 
 #[test]
 fn test_symbol_delete_mid_tween_preserves_start_keyframe_pose() {
-    // トゥイーンの途中フレームでシンボルをライブラリ削除した際、開始キーフレームが途中フレームの姿勢で上書きされないこと (H6)
+    // M2-4: シンボルをライブラリから削除すると全キーフレームのインスタンスが削除されトゥイーンが外れ、Undo 1回で元に戻ること
     let mut app = Is2dApp::default();
     let red = Color32::from_rgb(220, 40, 40);
-    let blue = Color32::from_rgb(40, 100, 220);
     put_cel_shapes(
         &mut app,
         0,
@@ -4895,22 +4928,26 @@ fn test_symbol_delete_mid_tween_preserves_start_keyframe_pose() {
     tool_select::nudge_selected_shapes(&mut app, KVec2::new(200.0, 0.0));
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
     assert!(tool_transform::timeline_toggle_tween(&mut app));
+    assert!(app.doc.root.layers[0].keyframes[0].tween);
 
-    // 中間フレーム (Frame 2, x ≈ 220) に移動し、別レイヤーを追加した上でシンボルを削除して別レイヤーに描画
-    timeline_ui::timeline_add_layer(&mut app);
-    timeline_ui::switch_to_layer_and_frame(&mut app, 1, 2);
+    // シンボルを削除すると、全キーフレームからインスタンスが消え、トゥイーンも外れること
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
     assert!(tool_transform::delete_symbol_from_library(&mut app, sym_id));
-    let raw_blue =
-        generate_brush_outline(&[Point::new(50.0, 300.0), Point::new(90.0, 300.0)], 8.0);
-    app.tool.brush_color = blue;
-    tool_paint::commit_raw_outline(&mut app, &raw_blue);
+    assert!(app.doc.find_symbol(sym_id).is_none());
+    for kf in &app.doc.root.layers[0].keyframes {
+        assert!(
+            kf.cel.instances.is_empty() && kf.cel.shapes.is_empty(),
+            "削除したシンボルのインスタンスも分解図形も残らないこと"
+        );
+        assert!(!kf.tween, "単一シンボル条件を失ったキーフレームのトゥイーンが外れること");
+    }
 
-    let kf0_bbox = app.doc.root.layers[0].keyframes[0].cel.shapes[0].bounding_box();
-    assert!(
-        (kf0_bbox.center().x - 120.0).abs() < 2.0,
-        "中間フレームでシンボル削除後に別レイヤーへ描画しても、Layer 1 の開始キーフレーム (Frame 0) の座標 (x≈120) が中間姿勢 (x≈220) で上書きされないこと: center={:?}",
-        kf0_bbox.center()
-    );
+    // Undo 1回でライブラリのシンボル・全インスタンス・トゥイーン設定が元に戻ること
+    app.undo();
+    assert!(app.doc.find_symbol(sym_id).is_some());
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.instances.len(), 1);
+    assert_eq!(app.doc.root.layers[0].keyframes[1].cel.instances.len(), 1);
+    assert!(app.doc.root.layers[0].keyframes[0].tween);
 }
 
 #[test]
@@ -12980,3 +13017,88 @@ fn test_m2_2_tween_midframe_blocks_edit_shows_warning_and_f6_enables_edit() {
         "F6 後のキーフレームで開始フレームに 3 と入力するとそのまま 3 になること"
     );
 }
+
+#[test]
+fn test_m2_4_delete_symbol_2880_keyframes_fast_and_no_memory_growth() {
+    use crate::doc_actions::{apply, Action};
+    use std::time::Instant;
+
+    let mut app = Is2dApp::default();
+    let mut shapes = Vec::new();
+    for i in 0..40 {
+        let y = 20.0 + i as f64 * 8.0;
+        let mut s = make_stroke(
+            Point::new(20.0, y),
+            Point::new(120.0, y + 4.0),
+            3.0,
+            Color32::from_rgb(50 + (i * 4) as u8, 100, 200),
+        )
+        .remove(0);
+        s.layer_id = 1;
+        shapes.push(s);
+    }
+    let sym_id = app.doc.register_new_symbol(shapes.clone());
+    if let Some(sym) = app.doc.find_symbol_mut(sym_id) {
+        sym.timeline.total_frames = 8;
+        sym.timeline.layers[0].frame_count = 8;
+        for f in 1..8 {
+            let kf_idx = sym.timeline.layers[0].insert_keyframe(f, false);
+            sym.timeline.layers[0].keyframe_mut(kf_idx).cel = timeline::Cel::new(shapes.clone());
+        }
+    }
+    app.doc.root.total_frames = 2880;
+    app.doc.root.layers[0].frame_count = 2880;
+    app.doc.root.layers[0].keyframes.clear();
+    for f in 0..2880 {
+        let inst = timeline::SymbolInstance {
+            binding: symbol::SymbolInstanceBinding::new(
+                (f + 1) as u64,
+                sym_id,
+                kurbo::Affine::translate(((f % 100) as f64 * 2.0, 50.0)),
+            ),
+            layer_id: 1,
+            parent_scope: Vec::new(),
+            shape_order_index: 0,
+        };
+        app.doc.root.layers[0].keyframes.push(std::sync::Arc::new(timeline::Keyframe {
+            start_frame: f,
+            tween: true,
+            tween_rotate: timeline::TweenRotate::Auto,
+            cel: timeline::Cel::new_with_instances(Vec::new(), vec![inst]),
+        }));
+    }
+    app.refresh_scene_base();
+    let rss_before = current_process_rss_bytes();
+    let t0 = Instant::now();
+    let _ = apply(&mut app, Action::DeleteSymbol { sym_id });
+    let dt_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let rss_after = current_process_rss_bytes();
+    let rss_delta_mb = (rss_after.saturating_sub(rss_before)) as f64 / (1024.0 * 1024.0);
+    assert!(
+        dt_ms <= 50.0,
+        "2,880フレームに置いたシンボルの削除が 50ms 以下であること (実測: {dt_ms:.3}ms)"
+    );
+    assert!(
+        rss_delta_mb < 8.0,
+        "2,880フレームのシンボル削除でメモリが大きく増えないこと (実測: +{rss_delta_mb:.2}MB)"
+    );
+    assert!(
+        app.doc
+            .root
+            .layers[0]
+            .keyframes
+            .iter()
+            .all(|kf| kf.cel.instances.is_empty() && !kf.tween)
+    );
+    app.undo();
+    assert!(app.doc.find_symbol(sym_id).is_some());
+    assert!(
+        app.doc
+            .root
+            .layers[0]
+            .keyframes
+            .iter()
+            .all(|kf| kf.cel.instances.len() == 1 && kf.tween)
+    );
+}
+
