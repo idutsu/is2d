@@ -9,8 +9,7 @@ pub(crate) use crate::timeline::interpolate_affine_with_pivot;
 pub(crate) use crate::timeline::{ResolvedCelSig, SymbolInstance, TweenRotate, TweenState};
 use crate::timeline::{Cel, Layer, Timeline};
 use crate::vector_engine::{
-    append_mesh, next_shape_id, transform_mesh_to_screen, transform_mesh_to_screen_onion,
-    union_bounding_boxes, Contour, FillShape, SyncCache,
+    next_shape_id, transform_mesh_to_screen, union_bounding_boxes, Contour, FillShape, SyncCache,
 };
 pub(crate) use crate::vector_engine::{SymbolInstanceBinding, SymbolLoopMode};
 
@@ -145,11 +144,6 @@ pub(crate) fn resolve_cel_with_library(
     frame: usize,
     ctx: SymbolEvalCtx<'_>,
 ) -> Vec<FillShape> {
-    if ctx.depth > 0 {
-        for s in cel.shapes.iter() {
-            let _ = s.fill_mesh();
-        }
-    }
     if ctx.depth >= MAX_SYMBOL_NEST_DEPTH || cel.instances.is_empty() {
         return (*cel.shapes).clone();
     }
@@ -238,7 +232,7 @@ impl SymbolDef {
             let bbox = union_bounding_boxes(&shapes);
             let mut batch = egui::Mesh::default();
             for s in &shapes {
-                append_mesh(&mut batch, s.fill_mesh());
+                s.append_fill_mesh_to(&mut batch);
             }
             Some((bbox, batch))
         };
@@ -561,6 +555,18 @@ impl Document {
     /// 指定した `symbol_id` のシンボル定義を可変参照する
     pub(crate) fn find_symbol_mut(&mut self, symbol_id: u64) -> Option<&mut SymbolDef> {
         self.library.iter_mut().find(|s| s.id == symbol_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_any_cached_fill_mesh(&self) -> bool {
+        let tl_has_mesh = |tl: &Timeline| {
+            tl.layers.iter().any(|l| {
+                l.keyframes
+                    .iter()
+                    .any(|kf| kf.cel.shapes.iter().any(FillShape::has_cached_fill_mesh))
+            })
+        };
+        tl_has_mesh(&self.root) || self.library.iter().any(|sym| tl_has_mesh(&sym.timeline))
     }
 
     /// 高さが `MAX_SYMBOL_NEST_DEPTH`（8）を超えるシンボルが1つでもあれば `true` を返す
@@ -1029,7 +1035,7 @@ impl Timeline {
         layer.evaluate_shapes_at((frame, frame), layer.id, SymbolEvalCtx::new(library))
     }
 
-    fn build_cel_world_batch_mesh(
+    pub(crate) fn build_cel_world_batch_mesh(
         &self,
         layer_idx: usize,
         frame: usize,
@@ -1046,25 +1052,24 @@ impl Timeline {
         if !has_tween && kf.cel.instances.is_empty() && world_xform == Affine::IDENTITY {
             let mut batch = Mesh::default();
             for s in kf.cel.shapes.iter() {
-                append_mesh(&mut batch, s.fill_mesh());
+                s.append_fill_mesh_to(&mut batch);
             }
             return (!batch.is_empty()).then_some(batch);
         }
         let mut resolved = self.evaluate_layer_shapes_at(layer_idx, frame, library);
         if world_xform != Affine::IDENTITY {
             for s in &mut resolved {
-                let _ = s.fill_mesh();
                 s.transform_with_cached_mesh(world_xform);
             }
         }
         let mut batch = Mesh::default();
         for s in &resolved {
-            append_mesh(&mut batch, s.fill_mesh());
+            s.append_fill_mesh_to(&mut batch);
         }
         (!batch.is_empty()).then_some(batch)
     }
 
-    /// 指定レイヤー・フレームの描画用スクリーン `Arc<Mesh>` を図形ごとの `fill_mesh` からその場で構築して返す
+    /// 指定レイヤー・フレームの描画用スクリーン `Arc<Mesh>` をその場で構築して返す
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolved_cel_screen_mesh(
         &self,
@@ -1083,29 +1088,6 @@ impl Timeline {
             zoom,
             pan,
             dim_backdrop,
-        )))
-    }
-
-    /// 指定レイヤー・フレームのオニオンスキン描画用スクリーン `Arc<Mesh>` を図形ごとの `fill_mesh` からその場で構築して返す
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn resolved_cel_onion_mesh(
-        &self,
-        layer_idx: usize,
-        frame: usize,
-        zoom: f32,
-        pan: Vec2,
-        (tint_rgb, alpha): ([u8; 3], u8),
-        world_xform: Affine,
-        library: &[SymbolDef],
-    ) -> Option<Arc<Mesh>> {
-        let world_batch =
-            self.build_cel_world_batch_mesh(layer_idx, frame, world_xform, library)?;
-        Some(Arc::new(transform_mesh_to_screen_onion(
-            &world_batch,
-            zoom,
-            pan,
-            tint_rgb,
-            alpha,
         )))
     }
 }

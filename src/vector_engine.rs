@@ -383,6 +383,16 @@ impl FillShape {
         })
     }
 
+    /// キャッシュ済みの `fill_mesh` があればそれを、無ければその場でテッセレーションしたメッシュを `dst` に追記する（自身の `fill_mesh` には保存しない）
+    pub(crate) fn append_fill_mesh_to(&self, dst: &mut Mesh) {
+        if let Some(m) = self.fill_mesh.get() {
+            append_mesh(dst, m);
+        } else {
+            let m = tessellate_contours_to_mesh(&self.exterior, &self.holes, self.color);
+            append_mesh(dst, &m);
+        }
+    }
+
     /// 指定された `(zoom, pan, dim_backdrop)` に対応するスクリーン座標変換済み `Arc<Mesh>` をキャッシュ経由で返す
     pub(crate) fn cached_screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> Arc<Mesh> {
         let key = (
@@ -418,13 +428,13 @@ impl FillShape {
 
     /// Undo 履歴保存時やバックアップ時に、幾何データから随時再生成可能な描画メッシュキャッシュを破棄してメモリを解放する
     pub(crate) fn strip_transient_caches(&mut self) {
-        self.fill_mesh = OnceLock::new();
         self.hit_bez_path = OnceLock::new();
         self.clear_screen_caches();
     }
 
-    /// 画面表示用の一時キャッシュ（`screen_mesh_cache`, `selection_mesh`, `selection_screen_mesh`）のみを破棄する
+    /// 文書保存時などに、描画メッシュおよび画面表示用の一時キャッシュ（`fill_mesh`, `screen_mesh_cache`, `selection_mesh`, `selection_screen_mesh`）を破棄する
     pub(crate) fn clear_screen_caches(&mut self) {
+        self.fill_mesh = OnceLock::new();
         *self.screen_mesh_cache.lock() = None;
         *self.selection_mesh.lock() = None;
         *self.selection_screen_mesh.lock() = None;
@@ -442,13 +452,8 @@ impl FillShape {
         true
     }
 
-    /// ドナー図形 `donor` が保持している幾何キャッシュ（`fill_mesh`, `hit_bez_path`）のみを引き継ぐ
+    /// ドナー図形 `donor` が保持している当たり判定キャッシュ（`hit_bez_path`）のみを引き継ぐ
     pub(crate) fn copy_geometry_caches_from(&mut self, donor: &Self) {
-        if self.fill_mesh.get().is_none() {
-            if let Some(m) = donor.fill_mesh.get() {
-                let _ = self.fill_mesh.set(Arc::clone(m));
-            }
-        }
         if self.hit_bez_path.get().is_none() {
             if let Some(p) = donor.hit_bez_path.get() {
                 let _ = self.hit_bez_path.set(Arc::clone(p));
@@ -459,6 +464,11 @@ impl FillShape {
     /// ドナー図形 `donor` が保持している描画・当たり判定キャッシュをそのまま引き継ぐ
     pub(crate) fn copy_render_caches_from(&mut self, donor: &Self) {
         self.copy_geometry_caches_from(donor);
+        if self.fill_mesh.get().is_none() {
+            if let Some(m) = donor.fill_mesh.get() {
+                let _ = self.fill_mesh.set(Arc::clone(m));
+            }
+        }
         if self.screen_mesh_cache.lock().is_none() {
             if let Some(sc) = &*donor.screen_mesh_cache.lock() {
                 *self.screen_mesh_cache.lock() = Some(sc.clone());

@@ -1768,6 +1768,8 @@ pub(crate) fn draw_canvas_contents(
     // 0.5 オニオンスキン描画（前のフレーム＝青系半透明、次のフレーム＝緑系半透明）
     if tab.view.onion_skin_enabled {
         draw_onion_skins(tab, &artwork_painter);
+    } else {
+        tab.clear_onion_skin_cache();
     }
 
     // 1. 下層レイヤーから上層レイヤーへ順に合成描画（`tab.scene().shapes()` はレイヤー順に整列されているため単一カーソルで O(N) 走査）
@@ -1968,6 +1970,7 @@ fn draw_selected_group_and_symbol_boxes(
 }
 
 fn draw_onion_skins(tab: &Tab, painter: &egui::Painter) {
+    tab.retain_active_onion_frames();
     let tl = tab.active_timeline();
     let curr_f = tl.current_frame;
     for step in (1..=tab.view.onion_prev_frames).rev() {
@@ -1994,21 +1997,14 @@ fn draw_onion_skin_frame(
 ) {
     let zoom = tab.view.zoom;
     let pan = tab.view.pan;
-    let world_xform = tab.session.edit_path.world_xform();
     let tl = tab.active_timeline();
     for (layer_idx, layer) in tl.layers.iter().enumerate() {
         if !layer.visible {
             continue;
         }
-        if let Some(mesh) = tl.resolved_cel_onion_mesh(
-            layer_idx,
-            frame,
-            zoom,
-            pan,
-            (tint_rgb, alpha),
-            world_xform,
-            &tab.doc.library,
-        ) {
+        if let Some(mesh) =
+            tab.cached_onion_cel_screen_mesh(layer_idx, frame, zoom, pan, (tint_rgb, alpha))
+        {
             painter.add(arc_mesh_to_shape(mesh));
         }
     }

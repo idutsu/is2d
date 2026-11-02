@@ -3015,28 +3015,10 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
     );
 
     let m_onion_1 = grp_sym_app
-        .doc.root
-        .resolved_cel_onion_mesh(
-            0,
-            1,
-            1.0,
-            Vec2::ZERO,
-            ([35, 175, 105], 90),
-            kurbo::Affine::IDENTITY,
-            &grp_sym_app.doc.library,
-        )
+        .cached_onion_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, ([35, 175, 105], 90))
         .unwrap();
     let m_onion_2 = grp_sym_app
-        .doc.root
-        .resolved_cel_onion_mesh(
-            0,
-            1,
-            1.0,
-            Vec2::ZERO,
-            ([35, 175, 105], 90),
-            kurbo::Affine::IDENTITY,
-            &grp_sym_app.doc.library,
-        )
+        .cached_onion_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, ([35, 175, 105], 90))
         .unwrap();
     assert!(!std::sync::Arc::ptr_eq(&m_onion_1, &m_onion_2) && m_onion_1.vertices == m_onion_2.vertices);
 
@@ -12571,8 +12553,8 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     assert_eq!(doc_shapes.len(), 2);
     let doc_s1 = doc_shapes.iter().find(|s| s.shape_id == shape1_id).unwrap();
     assert!(
-        doc_s1.has_cached_fill_mesh(),
-        "書き戻し後、未変更の文書側図形には fill_mesh が引き継がれること"
+        !doc_s1.has_cached_fill_mesh(),
+        "書き戻し後、未変更の文書側図形にも fill_mesh は引き継がれないこと"
     );
     assert!(
         doc_s1.has_cached_hit_bez_path(),
@@ -13391,6 +13373,109 @@ fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup()
         "全選択して少し動かした後の選択解除が 50ms 以下であること (実測: {dt_ms:.3}ms)"
     );
 }
+
+#[test]
+fn test_m2_8_document_shapes_never_store_fill_mesh_after_playback_onion_edit_and_undo() {
+    use crate::doc_actions::{apply, Action};
+
+    // 1. ルートとシンボルライブラリを持つ作品を作成して保存し、open_project_in_tab で開く
+    let mut setup_app = Is2dApp::default();
+    for f in 0..8 {
+        let _ = apply(&mut setup_app, Action::ScrubRulerToFrame { frame: f });
+        if f > 0 {
+            let _ = apply(&mut setup_app, Action::InsertKeyframe { copy_prev: false });
+        }
+        let _ = apply(
+            &mut setup_app,
+            Action::PaintStroke {
+                points: vec![
+                    Point::new(100.0 + f as f64 * 25.0, 120.0),
+                    Point::new(160.0 + f as f64 * 25.0, 180.0),
+                ],
+                radius: 8.0,
+                color: Color32::from_rgb(200, 60, 80),
+            },
+        );
+    }
+    let _ = apply(&mut setup_app, Action::ScrubRulerToFrame { frame: 0 });
+    let _ = apply(&mut setup_app, Action::SelectAll);
+    let _ = apply(&mut setup_app, Action::ConvertToSymbol);
+    let _ = apply(&mut setup_app, Action::Deselect);
+    let tmp_path = std::env::temp_dir().join(format!("m2_8_doc_mesh_test_{}.is2d", std::process::id()));
+    project_io::save_project_to_path(&mut setup_app, &tmp_path).unwrap();
+
+    let mut app = Is2dApp::default();
+    project_io::open_project_in_tab(&mut app, &tmp_path, None).unwrap();
+    let _ = std::fs::remove_file(&tmp_path);
+    assert!(
+        !app.doc.has_any_cached_fill_mesh(),
+        "開いた直後の文書（ルートとライブラリ）のどの図形にも fill_mesh が入っていないこと"
+    );
+
+    let ctx = egui::Context::default();
+    let raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 820.0),
+        )),
+        ..Default::default()
+    };
+
+    // 2. 再生で何コマか進める + オニオンスキンを表示する
+    app.timeline_ui.ensure_timeline_context(&app.tabs[app.active]);
+    app.view.onion_skin_enabled = true;
+    app.view.onion_prev_frames = 2;
+    app.view.onion_next_frames = 2;
+    for f in 0..8 {
+        app.advance_playback_frame(f);
+        app.timeline_ui.is_playing = true;
+        app.timeline_ui.last_frame_advance_time = None;
+        let full_output = ctx.run(raw_input.clone(), |ctx| {
+            app.update_ui(ctx);
+        });
+        let _ = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+    }
+    app.stop_playback();
+    assert!(
+        !app.doc.has_any_cached_fill_mesh(),
+        "再生およびオニオンスキン表示の後も文書に fill_mesh が入っていないこと"
+    );
+
+    // 3. 編集する（ブラシ追加・全選択移動・確定）→ Undo する
+    let _ = apply(&mut app, Action::ScrubRulerToFrame { frame: 2 });
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(300.0, 220.0), Point::new(380.0, 260.0)],
+            radius: 10.0,
+            color: Color32::from_rgb(50, 140, 220),
+        },
+    );
+    for s in app.scene().iter() {
+        let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
+    }
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: KVec2::new(12.0, -8.0),
+        },
+    );
+    let _ = apply(&mut app, Action::Deselect);
+    assert!(
+        !app.doc.has_any_cached_fill_mesh(),
+        "編集確定後も文書（ルートとライブラリ）のどの図形にも fill_mesh が入っていないこと"
+    );
+
+    let _ = apply(&mut app, Action::Undo);
+    let _ = apply(&mut app, Action::Undo);
+    assert!(
+        !app.doc.has_any_cached_fill_mesh(),
+        "Undo の後も文書（ルートとライブラリ）のどの図形にも fill_mesh が入っていないこと"
+    );
+}
+
+
 
 
 

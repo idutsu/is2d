@@ -717,7 +717,9 @@ mod scene_base_cache {
         SymbolDef, SymbolEvalCtx, SymbolLoopMode,
     };
     use crate::timeline::{Layer, Timeline};
-    use crate::vector_engine::{append_mesh, transform_mesh_to_screen, FillShape};
+    use crate::vector_engine::{
+        append_mesh, transform_mesh_to_screen, transform_mesh_to_screen_onion, FillShape,
+    };
 
     struct CachedLayer {
         layer_id: LayerId,
@@ -1363,11 +1365,6 @@ mod scene_base_cache {
             donor_shapes: Option<&[FillShape]>,
         ) -> CachedBackdropLayer {
             let layer = &parent_tl.layers[layer_idx];
-            if parent_world_xform == Affine::IDENTITY {
-                for s in layer.keyframes[kf_idx].cel.shapes.iter() {
-                    let _ = s.fill_mesh();
-                }
-            }
             let resolved = parent_tl.evaluate_layer_shapes_at(layer_idx, curr_f, &doc.library);
             let donor_map: Option<HashMap<(ShapeId, u64), &FillShape>> = donor_shapes
                 .filter(|d| !d.is_empty())
@@ -1413,9 +1410,113 @@ mod scene_base_cache {
             }
         }
     }
+
+    struct CachedOnionCel {
+        layer_id: LayerId,
+        eval_frame: usize,
+        world_xform_bits: [u64; 6],
+        cel_sig: ResolvedCelSig,
+        world_mesh: Option<egui::Mesh>,
+    }
+
+    /// 表示中の前後オニオンスキンフレームのワールド座標結合メッシュキャッシュ
+    #[derive(Default)]
+    pub(crate) struct OnionSkinCache {
+        entries: Vec<CachedOnionCel>,
+    }
+
+    impl OnionSkinCache {
+        pub(crate) fn clear(&mut self) {
+            self.entries.clear();
+        }
+
+        pub(crate) fn retain_active_frames(
+            &mut self,
+            tl: &Timeline,
+            library: &[SymbolDef],
+            world_xform: Affine,
+            prev_frames: usize,
+            next_frames: usize,
+        ) {
+            if tl.total_frames == 0 || (prev_frames == 0 && next_frames == 0) {
+                self.entries.clear();
+                return;
+            }
+            let xform_bits = world_xform.as_coeffs().map(f64::to_bits);
+            let curr_f = tl.current_frame;
+            let min_f = curr_f.saturating_sub(prev_frames);
+            let max_f = (curr_f + next_frames).min(tl.total_frames.saturating_sub(1));
+            self.entries.retain(|e| {
+                e.world_xform_bits == xform_bits
+                    && tl.layers.iter().any(|layer| {
+                        layer.visible
+                            && layer.id == e.layer_id
+                            && (min_f..=max_f).any(|f| {
+                                layer
+                                    .keyframe_index_at(f)
+                                    .is_some_and(|kf_idx| {
+                                        layer_eval_frame(layer, kf_idx, f, library) == e.eval_frame
+                                    })
+                            })
+                    })
+            });
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub(crate) fn cached_screen_mesh(
+            &mut self,
+            tl: &Timeline,
+            library: &[SymbolDef],
+            layer_idx: usize,
+            frame: usize,
+            world_xform: Affine,
+            zoom: f32,
+            pan: Vec2,
+            (tint_rgb, alpha): ([u8; 3], u8),
+        ) -> Option<Arc<egui::Mesh>> {
+            let layer = tl.layers.get(layer_idx)?;
+            let kf_idx = layer.keyframe_index_at(frame)?;
+            if layer.keyframes[kf_idx].cel.is_empty() {
+                return None;
+            }
+            let ef = layer_eval_frame(layer, kf_idx, frame, library);
+            let xform_bits = world_xform.as_coeffs().map(f64::to_bits);
+            let hit_idx = self.entries.iter().position(|e| {
+                e.layer_id == layer.id
+                    && e.eval_frame == ef
+                    && e.world_xform_bits == xform_bits
+                    && e.cel_sig.matches_layer_keyframe(layer, kf_idx, library)
+            });
+            let idx = if let Some(i) = hit_idx {
+                i
+            } else {
+                self.entries
+                    .retain(|e| !(e.layer_id == layer.id && e.eval_frame == ef));
+                let cel_sig = compute_resolved_cel_signature(layer, kf_idx, library);
+                let world_mesh =
+                    tl.build_cel_world_batch_mesh(layer_idx, frame, world_xform, library);
+                self.entries.push(CachedOnionCel {
+                    layer_id: layer.id,
+                    eval_frame: ef,
+                    world_xform_bits: xform_bits,
+                    cel_sig,
+                    world_mesh,
+                });
+                self.entries.len() - 1
+            };
+            let world_batch = self.entries[idx].world_mesh.as_ref()?;
+            Some(Arc::new(transform_mesh_to_screen_onion(
+                world_batch,
+                zoom,
+                pan,
+                tint_rgb,
+                alpha,
+            )))
+        }
+    }
 }
 
-use scene_base_cache::{BackdropCache, SceneBaseCache};
+use scene_base_cache::{BackdropCache, OnionSkinCache, SceneBaseCache};
 
 /// `Overlay` で追加する図形の重なり順指定
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1928,6 +2029,8 @@ pub(crate) struct Session {
     pub(crate) edit_path: EditPath,
     /// シンボル編集中の親シーン背景薄表示のレイヤー単位キャッシュ
     pub(crate) backdrop_cache: SyncCache<BackdropCache>,
+    /// 表示中の前後オニオンスキンフレームのレイヤー単位結合メッシュキャッシュ
+    pub(crate) onion_cache: SyncCache<OnionSkinCache>,
     /// `Document` から構築されるレイヤー別の読み取り専用土台キャッシュ
     pub(crate) base_cache: SceneBaseCache,
     /// 土台図形列に対する上乗せ図形状態（Floating およびドラッグ中の仮表示）
@@ -2946,6 +3049,47 @@ impl Tab {
             &self.session.edit_path,
             zoom,
             pan,
+        )
+    }
+
+    /// オニオンスキンの結合メッシュキャッシュを破棄する
+    pub(crate) fn clear_onion_skin_cache(&self) {
+        self.session.onion_cache.lock().clear();
+    }
+
+    /// 現在表示中の前後オニオンスキン範囲外の結合メッシュキャッシュを破棄する
+    pub(crate) fn retain_active_onion_frames(&self) {
+        let tl = self.active_timeline();
+        let world_xform = self.session.edit_path.world_xform();
+        self.session.onion_cache.lock().retain_active_frames(
+            tl,
+            &self.doc.library,
+            world_xform,
+            self.view.onion_prev_frames,
+            self.view.onion_next_frames,
+        );
+    }
+
+    /// 指定レイヤー・フレームのオニオンスキン描画用スクリーン `Arc<Mesh>` をセッションキャッシュ経由で返す
+    pub(crate) fn cached_onion_cel_screen_mesh(
+        &self,
+        layer_idx: usize,
+        frame: usize,
+        zoom: f32,
+        pan: Vec2,
+        tint_alpha: ([u8; 3], u8),
+    ) -> Option<Arc<egui::Mesh>> {
+        let tl = self.active_timeline();
+        let world_xform = self.session.edit_path.world_xform();
+        self.session.onion_cache.lock().cached_screen_mesh(
+            tl,
+            &self.doc.library,
+            layer_idx,
+            frame,
+            world_xform,
+            zoom,
+            pan,
+            tint_alpha,
         )
     }
 
