@@ -723,7 +723,6 @@ mod scene_base_cache {
         layer_id: LayerId,
         visible: bool,
         locked: bool,
-        truncated: bool,
         cel_sig: Option<ResolvedCelSig>,
         eval_frame: usize,
         world_xform_bits: [u64; 6],
@@ -800,11 +799,6 @@ mod scene_base_cache {
         #[inline]
         pub(crate) fn layer_order_ids(&self) -> &[LayerId] {
             &self.layer_order_ids
-        }
-
-        #[inline]
-        pub(crate) fn has_truncated_layer(&self) -> bool {
-            self.layers.iter().any(|l| l.visible && l.truncated)
         }
 
         /// `edit_layers` 用に、対象レイヤー群 `target_lids` のステージ座標図形を複製せずに取り出す
@@ -895,18 +889,10 @@ mod scene_base_cache {
                     self.layers[0].world_xform_bits = xform_bits;
                     self.layers[0].range = 0..shapes.len();
                     self.flat_shapes = shapes;
-                    if !modified_lids.is_empty()
-                        && (self.layers[0].truncated
-                            || self.flat_shapes.len() > crate::symbol::MAX_EXPANDED_SYMBOL_SHAPES)
-                    {
-                        self.layers[0].cel_sig = None;
-                        self.rebuild(tl, library, world_xform);
-                    }
                     return;
                 }
             }
             let mut new_flat = Vec::new();
-            let mut need_rebuild = false;
             for (cl, layer) in self.layers.iter_mut().zip(&tl.layers) {
                 cl.visible = layer.visible;
                 cl.locked = layer.locked;
@@ -919,10 +905,7 @@ mod scene_base_cache {
                 }
                 cl.range = start..new_flat.len();
                 if modified_lids.contains(&layer.id) {
-                    if cl.truncated || cl.range.len() > crate::symbol::MAX_EXPANDED_SYMBOL_SHAPES {
-                        cl.cel_sig = None;
-                        need_rebuild = true;
-                    } else if let Some(kf_idx) = layer.keyframe_index_at(frame) {
+                    if let Some(kf_idx) = layer.keyframe_index_at(frame) {
                         cl.cel_sig = Some(compute_resolved_cel_signature(layer, kf_idx, library));
                         cl.eval_frame = layer_eval_frame(layer, kf_idx, frame, library);
                     } else {
@@ -932,9 +915,6 @@ mod scene_base_cache {
                 }
             }
             self.flat_shapes = new_flat;
-            if need_rebuild {
-                self.rebuild(tl, library, world_xform);
-            }
         }
 
         /// キー `(layer_id, cel_revision, eval_frame, world_xform, 参照シンボルの revision)` が変わったレイヤーだけ作り直し、
@@ -1009,7 +989,6 @@ mod scene_base_cache {
                         layer_id: layer.id,
                         visible: layer.visible,
                         locked: layer.locked,
-                        truncated: false,
                         cel_sig: None,
                         eval_frame: 0,
                         world_xform_bits: xform_bits,
@@ -1023,7 +1002,6 @@ mod scene_base_cache {
                         layer_id: layer.id,
                         visible: layer.visible,
                         locked: layer.locked,
-                        truncated: false,
                         cel_sig: None,
                         eval_frame: 0,
                         world_xform_bits: xform_bits,
@@ -1049,7 +1027,6 @@ mod scene_base_cache {
                             layer_id: layer.id,
                             visible: layer.visible,
                             locked: layer.locked,
-                            truncated: old_cl.truncated,
                             cel_sig: old_cl.cel_sig,
                             eval_frame: ef,
                             world_xform_bits: xform_bits,
@@ -1058,8 +1035,7 @@ mod scene_base_cache {
                         continue;
                     }
                     let ctx = SymbolEvalCtx::new(library);
-                    let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx.clone());
-                    let truncated = ctx.is_truncated();
+                    let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx);
                     transform_layer_shapes_to_stage(&mut evaluated, world_xform);
                     if old_cl.world_xform_bits == xform_bits && !old_shapes.is_empty() {
                         let donor_map: HashMap<(ShapeId, u64), &FillShape> = old_shapes
@@ -1080,7 +1056,6 @@ mod scene_base_cache {
                         layer_id: layer.id,
                         visible: layer.visible,
                         locked: layer.locked,
-                        truncated,
                         cel_sig: Some(sig),
                         eval_frame: ef,
                         world_xform_bits: xform_bits,
@@ -1088,8 +1063,7 @@ mod scene_base_cache {
                     });
                 } else {
                     let ctx = SymbolEvalCtx::new(library);
-                    let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx.clone());
-                    let truncated = ctx.is_truncated();
+                    let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx);
                     transform_layer_shapes_to_stage(&mut evaluated, world_xform);
                     let sig = compute_resolved_cel_signature(layer, kf_idx, library);
                     let start = new_flat.len();
@@ -1099,7 +1073,6 @@ mod scene_base_cache {
                         layer_id: layer.id,
                         visible: layer.visible,
                         locked: layer.locked,
-                        truncated,
                         cel_sig: Some(sig),
                         eval_frame: ef,
                         world_xform_bits: xform_bits,
@@ -3230,40 +3203,6 @@ fn reinstantiate_modified_symbol_instance(
     }
 }
 
-fn append_unexpanded_cel_elements(
-    orig_cel: &crate::timeline::Cel,
-    init_states: &[InitialLayerShapeState],
-    initial_stage_inst_xform: &HashMap<(InstanceGid, u64), Affine>,
-    non_symbol_shapes: &mut Vec<FillShape>,
-    next_instances: &mut Vec<SymbolInstance>,
-) {
-    let raw_ids: HashSet<ShapeId> = init_states
-        .iter()
-        .filter(|st| st.symbol_instance.is_none())
-        .map(|st| st.shape_id)
-        .collect();
-    let mut next_idx = 0;
-    for inst in orig_cel.instances.iter() {
-        let end = inst.shape_order_index.min(orig_cel.shapes.len());
-        for s in &orig_cel.shapes[next_idx..end] {
-            if !raw_ids.contains(&s.shape_id) {
-                non_symbol_shapes.push(s.clone());
-            }
-        }
-        next_idx = next_idx.max(end);
-        if !initial_stage_inst_xform.contains_key(&(inst.binding.instance_gid, inst.binding.symbol_id)) {
-            let mut kept = inst.clone();
-            kept.shape_order_index = non_symbol_shapes.len();
-            next_instances.push(kept);
-        }
-    }
-    for s in &orig_cel.shapes[next_idx..] {
-        if !raw_ids.contains(&s.shape_id) {
-            non_symbol_shapes.push(s.clone());
-        }
-    }
-}
-
 /// `edit_layers` の対象レイヤー1枚分について、編集後ステージ図形列 `layer_stage_shapes` をローカル図形へ変換してセルに書き戻す
 #[allow(clippy::too_many_arguments)]
 fn writeback_edited_layer_shapes(
@@ -3275,7 +3214,6 @@ fn writeback_edited_layer_shapes(
     has_world_xform: bool,
     inv_xform: Affine,
     need_inv: bool,
-    init_states: &[InitialLayerShapeState],
     initial_stage_inst_xform: &HashMap<(InstanceGid, u64), Affine>,
     layer_stage_shapes: &mut Vec<FillShape>,
 ) -> bool {
@@ -3378,13 +3316,6 @@ fn writeback_edited_layer_shapes(
                 non_symbol_shapes.push(local_s);
             }
         }
-        append_unexpanded_cel_elements(
-            orig_cel,
-            init_states,
-            initial_stage_inst_xform,
-            &mut non_symbol_shapes,
-            &mut next_instances,
-        );
         (non_symbol_shapes, next_instances, modified_inst_indices)
     };
 
@@ -3530,7 +3461,6 @@ pub(crate) fn edit_layers(
                     has_world_xform,
                     inv_xform,
                     need_inv,
-                    init_slice,
                     &initial_stage_inst_xform,
                     &mut layer_shapes,
                 )
@@ -3583,7 +3513,6 @@ pub(crate) fn edit_layers(
                 has_world_xform,
                 inv_xform,
                 need_inv,
-                init_slice,
                 &initial_stage_inst_xform,
                 layer_shapes,
             ) {

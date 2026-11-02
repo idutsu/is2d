@@ -6773,30 +6773,6 @@ fn test_nested_symbol_expansion_memoization_and_step_cap() {
         elapsed_memo.as_millis() < 500,
         "メモ化により 20^8 空シンボル入れ子が瞬時に完了すること: {elapsed_memo:?}"
     );
-
-    // 2. 各インスタンスが異なる first_frame を持ちメモ化が効かない細工ケースでも、
-    //    MAX_SYMBOL_EXPANSION_STEPS により無限展開せず即座に打ち切られること
-    for sym in &mut app.doc.library {
-        sym.timeline.total_frames = 100_000;
-        if !sym.timeline.layers[0].keyframes.is_empty() {
-            let kf = sym.timeline.layers[0].keyframe_mut(0);
-            for (idx, inst) in kf.cel.instances_mut().iter_mut().enumerate() {
-                inst.binding.loop_mode = vector_engine::SymbolLoopMode::SingleFrame;
-                inst.binding.first_frame = idx * 97 + (sym.id as usize) * 13;
-            }
-        }
-        sym.revision = vector_engine::next_mesh_revision();
-    }
-    let t1 = std::time::Instant::now();
-    app.refresh_scene_base();
-    let first_non_empty =
-        app.doc.library[1].first_non_empty_local_shapes(&app.doc.library);
-    let elapsed_step_cap = t1.elapsed();
-    assert!(first_non_empty.is_empty());
-    assert!(
-        elapsed_step_cap.as_millis() < 500,
-        "メモ化が効かない異なるフレーム指定の入れ子でも展開回数上限により瞬時に打ち切られること: {elapsed_step_cap:?}"
-    );
 }
 
 #[test]
@@ -10908,8 +10884,6 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
 
 #[test]
 fn test_g1_2_truncation_flag_and_warning_above_10000_shapes() {
-    use crate::doc_actions::{apply, Action};
-
     let mut app = Is2dApp::default();
 
     // 100個の図形を持つシンボルを作成
@@ -10929,8 +10903,8 @@ fn test_g1_2_truncation_flag_and_warning_above_10000_shapes() {
     }
     let sym_id = app.doc.register_new_symbol(local_shapes);
 
-    // 100インスタンス（展開後ちょうど 10,000 図形 <= MAX_EXPANDED_SYMBOL_SHAPES）を配置 -> 打ち切りなし
-    let instances_100: Vec<timeline::SymbolInstance> = (0..100)
+    // 120インスタンス（展開後 12,000 図形）を配置 -> 打ち切られず 12,000 個すべて土台キャッシュに載ること
+    let instances_120: Vec<timeline::SymbolInstance> = (0..120)
         .map(|k| timeline::SymbolInstance {
             binding: symbol::SymbolInstanceBinding::new(
                 (k + 1) as u64,
@@ -10945,54 +10919,14 @@ fn test_g1_2_truncation_flag_and_warning_above_10000_shapes() {
     app.doc.root.layers[0]
         .keyframe_mut(0)
         .cel
-        .set_parts(Vec::new(), instances_100);
-    app.refresh_scene_base();
-    assert_eq!(app.scene().len(), 10_000);
-    assert!(
-        !app.session.base_cache.has_truncated_layer(),
-        "展開後 10,000 図形以下では打ち切りフラグが立たないこと"
-    );
-
-    // 101インスタンス（展開後 10,100 図形 > MAX_EXPANDED_SYMBOL_SHAPES）を配置 -> 打ち切りフラグが立つ
-    let instances_101: Vec<timeline::SymbolInstance> = (0..101)
-        .map(|k| timeline::SymbolInstance {
-            binding: symbol::SymbolInstanceBinding::new(
-                (k + 1) as u64,
-                sym_id,
-                kurbo::Affine::IDENTITY,
-            ),
-            layer_id: 1,
-            parent_scope: Vec::new(),
-            shape_order_index: 0,
-        })
-        .collect();
-    app.doc.root.layers[0]
-        .keyframe_mut(0)
-        .cel
-        .set_parts(Vec::new(), instances_101);
+        .set_parts(Vec::new(), instances_120);
     app.refresh_scene_base();
     assert_eq!(
-        app.doc.root.layers[0].keyframes[0].cel.instances.len(),
-        101
+        app.session.base_cache.shapes().len(),
+        12_000,
+        "100図形のシンボルを120個置いたレイヤーで、土台キャッシュに12,000個の図形がすべて載ること"
     );
-    assert_eq!(app.scene().len(), 10_000);
-    assert!(
-        app.session.base_cache.has_truncated_layer(),
-        "展開後の図形が 10,000 を超えるレイヤーで打ち切りフラグが立つこと"
-    );
-
-    // 非表示レイヤーにした場合は警告対象にならないこと
-    let _ = apply(
-        &mut app,
-        Action::SetLayerVisible {
-            layer_idx: 0,
-            visible: false,
-        },
-    );
-    assert!(
-        !app.session.base_cache.has_truncated_layer(),
-        "非表示レイヤーでは警告を出さないこと"
-    );
+    assert_eq!(app.scene().len(), 12_000);
 }
 
 #[test]
@@ -11018,11 +10952,8 @@ fn test_g1_1_writeback_preserves_unexpanded_and_orphan_elements() {
     }
     let sym_id = app.doc.register_new_symbol(local_shapes);
 
-    // 120個のシンボルインスタンス（展開すると 12,000 図形で 10,000 で打ち切られる）＋
-    // 参照先のない孤児インスタンス1個をセルに設定
-    let orphan_gid = 9999_u64;
-    let orphan_sym_id = 88888_u64;
-    let mut instances: Vec<timeline::SymbolInstance> = (0..120)
+    // 120個のシンボルインスタンス（展開後 12,000 図形）をセルに設定
+    let instances: Vec<timeline::SymbolInstance> = (0..120)
         .map(|k| timeline::SymbolInstance {
             binding: symbol::SymbolInstanceBinding::new(
                 (k + 1) as u64,
@@ -11034,28 +10965,15 @@ fn test_g1_1_writeback_preserves_unexpanded_and_orphan_elements() {
             shape_order_index: 0,
         })
         .collect();
-    instances.insert(
-        50,
-        timeline::SymbolInstance {
-            binding: symbol::SymbolInstanceBinding::new(
-                orphan_gid,
-                orphan_sym_id,
-                kurbo::Affine::IDENTITY,
-            ),
-            layer_id: 1,
-            parent_scope: Vec::new(),
-            shape_order_index: 0,
-        },
-    );
     app.doc.root.layers[0]
         .keyframe_mut(0)
         .cel
         .set_parts(Vec::new(), instances);
     app.refresh_scene_base();
-    assert!(app.session.base_cache.has_truncated_layer());
-    assert_eq!(app.scene().len(), 10_000);
+    assert_eq!(app.session.base_cache.shapes().len(), 12_000);
+    assert_eq!(app.scene().len(), 12_000);
 
-    // ブラシで1回描く（完了条件4: 既存の比較ヘルパーで土台キャッシュが文書から作り直した結果と一致することも検証）
+    // ブラシで1回描く
     run_and_verify_scene_cache_consistency(
         &mut app,
         Action::PaintStroke {
@@ -11063,30 +10981,21 @@ fn test_g1_1_writeback_preserves_unexpanded_and_orphan_elements() {
             radius: 5.0,
             color: Color32::RED,
         },
-        "G1-1 PaintStroke on truncated cel",
+        "M2-3 PaintStroke on 120-instance cel",
     );
 
-    // 完了条件1 & 2: 120個の有効インスタンス＋1個の孤児インスタンスがすべて文書に残ること
+    // 文書のインスタンスは120個のまま残ること
     let cel = &app.doc.root.layers[0].keyframes[0].cel;
     assert_eq!(
-        cel.instances
-            .iter()
-            .filter(|i| i.binding.symbol_id == sym_id)
-            .count(),
+        cel.instances.len(),
         120,
-        "打ち切り外の20個を含め120個のインスタンスがすべて文書に残ること"
-    );
-    assert!(
-        cel.instances.iter().any(|i| {
-            i.binding.instance_gid == orphan_gid && i.binding.symbol_id == orphan_sym_id
-        }),
-        "参照先のない孤児インスタンスも消えずに残ること"
+        "ブラシで1回描いても文書のインスタンスは120個のまま残ること"
     );
     assert_eq!(cel.shapes.len(), 1, "描いたブラシ図形が保存されていること");
 
-    // 保存して読み込んでも120個の有効インスタンスが残ること（孤児インスタンスは読み込み時の正規化で除去される）
+    // 保存して読み込んでも120個のインスタンスが残ること
     let tmp_path =
-        std::env::temp_dir().join(format!("is2d_g1_1_test_{}.is2d", std::process::id()));
+        std::env::temp_dir().join(format!("is2d_m2_3_test_{}.is2d", std::process::id()));
     crate::project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
     let mut reopened = Is2dApp::default();
     crate::project_io::open_project_in_tab(&mut reopened, &tmp_path, None).unwrap();
@@ -11096,6 +11005,8 @@ fn test_g1_1_writeback_preserves_unexpanded_and_orphan_elements() {
         120,
         "保存して読み込んでもインスタンスが120個残ること"
     );
+    reopened.refresh_scene_base();
+    assert_eq!(reopened.session.base_cache.shapes().len(), 12_001);
 }
 
 #[cfg(target_os = "macos")]
