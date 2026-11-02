@@ -3428,9 +3428,6 @@ fn writeback_edited_layer_shapes(
 
     let kf = tl.layers[l_idx].keyframe_mut(kf_idx);
     kf.cel.set_parts(non_symbol_shapes, next_instances);
-    if kf.tween && kf.cel.single_symbol_instance().is_none() {
-        kf.tween = false;
-    }
     if !modified_inst_indices.is_empty() {
         let modified_insts: Vec<SymbolInstance> = modified_inst_indices
             .into_iter()

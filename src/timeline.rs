@@ -1295,7 +1295,7 @@ impl Timeline {
             let layer = &self.layers[l_idx];
             if let Some(kf_idx) = layer.keyframe_index_at(curr_f) {
                 let kf = &layer.keyframes[kf_idx];
-                if kf.tween && kf.cel.single_symbol_instance().is_some() {
+                if kf.tween {
                     any_tweened = true;
                 } else if kf.cel.single_symbol_instance().is_some() {
                     any_can_enable = true;

@@ -689,7 +689,6 @@ impl Document {
                         kf.cel
                             .instances_mut()
                             .retain(|inst| inst.binding.symbol_id != symbol_id);
-                        kf.tween &= kf.cel.single_symbol_instance().is_some();
                     }
                 }
             }

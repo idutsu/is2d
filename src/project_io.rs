@@ -684,11 +684,10 @@ impl From<SavedKeyframe> for Keyframe {
             })
             .collect();
         let cel = Cel::new_with_instances(shapes, instances);
-        let tween = s.tween && cel.single_symbol_instance().is_some();
         Self {
             start_frame: s.start_frame,
             cel,
-            tween,
+            tween: s.tween,
             tween_rotate: s.tween_rotate.into(),
         }
     }
@@ -1103,7 +1102,6 @@ impl ProjectDocument {
                         }
                         *kf.cel.instances_mut() = updated_instances;
                     }
-                    kf.tween &= kf.cel.single_symbol_instance().is_some();
                 }
             }
         }

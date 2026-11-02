@@ -4311,8 +4311,13 @@ fn test_malformed_json_sanitization_and_cycle_breaking() {
         "不正だった shape.layer_id=999 が所属レイヤーの layer_id に正規化されていること"
     );
     assert!(
-        !sanitized_app.doc.root.layers[0].keyframes[0].tween,
-        "生シェイプとシンボルが混在し単一シンボル条件を満たさないキーフレームの tween=true が false に正規化されていること"
+        sanitized_app.doc.root.layers[0].keyframes[0].tween,
+        "生シェイプとシンボルが混在し単一シンボル条件を満たさないキーフレームも tween=true が保持されること"
+    );
+    assert_eq!(
+        sanitized_app.doc.root.layers[0].tween_state_at_keyframe(0),
+        timeline::TweenState::Incomplete,
+        "単一シンボル条件を満たさない tween=true キーフレームは未完（Incomplete）状態になること"
     );
     assert_eq!(
         sanitized_app.doc.root.layers[1].keyframes.len(),
@@ -4950,7 +4955,7 @@ fn test_symbol_delete_mid_tween_preserves_start_keyframe_pose() {
     assert!(tool_transform::timeline_toggle_tween(&mut app));
     assert!(app.doc.root.layers[0].keyframes[0].tween);
 
-    // シンボルを削除すると、全キーフレームからインスタンスが消え、トゥイーンも外れること
+    // シンボルを削除すると、全キーフレームからインスタンスが消え、トゥイーンは ON のまま未完になること
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
     assert!(tool_transform::delete_symbol_from_library(&mut app, sym_id));
     assert!(app.doc.find_symbol(sym_id).is_none());
@@ -4959,8 +4964,16 @@ fn test_symbol_delete_mid_tween_preserves_start_keyframe_pose() {
             kf.cel.instances.is_empty() && kf.cel.shapes.is_empty(),
             "削除したシンボルのインスタンスも分解図形も残らないこと"
         );
-        assert!(!kf.tween, "単一シンボル条件を失ったキーフレームのトゥイーンが外れること");
     }
+    assert!(
+        app.doc.root.layers[0].keyframes[0].tween,
+        "シンボル削除後も開始キーフレームの tween=true は保持されること"
+    );
+    assert_eq!(
+        app.doc.root.layers[0].tween_state_at_keyframe(0),
+        timeline::TweenState::Incomplete,
+        "シンボル削除後の開始キーフレームは未完（Incomplete）状態になること"
+    );
 
     // Undo 1回でライブラリのシンボル・全インスタンス・トゥイーン設定が元に戻ること
     app.undo();
@@ -13067,7 +13080,11 @@ fn test_m2_4_delete_symbol_2880_keyframes_fast_and_no_memory_growth() {
             .layers[0]
             .keyframes
             .iter()
-            .all(|kf| kf.cel.instances.is_empty() && !kf.tween)
+            .all(|kf| kf.cel.instances.is_empty() && kf.tween)
+    );
+    assert_eq!(
+        app.doc.root.layers[0].tween_state_at_keyframe(0),
+        timeline::TweenState::Incomplete
     );
     app.undo();
     assert!(app.doc.find_symbol(sym_id).is_some());
@@ -14167,6 +14184,132 @@ fn test_m3_2_tween_midframe_cannot_be_selected_by_any_entry_or_deleted() {
     );
     assert!(!app.history.is_dirty(), "未保存フラグ(*)が付かないこと");
 }
+
+#[test]
+fn test_m3_3_tween_kept_on_and_incomplete_on_draw_paste_save_delete_and_toggle_off() {
+    use crate::doc_actions::{apply, Action};
+    use crate::timeline::TweenState;
+
+    let mut app = Is2dApp::default();
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+            radius: 10.0,
+            color: Color32::RED,
+        },
+    );
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(&mut app, Action::Copy);
+    let _ = apply(&mut app, Action::ConvertToSymbol);
+    let sym_id = app.doc.library[0].id;
+    let _ = apply(&mut app, Action::ToggleTween);
+    for _ in 0..4 {
+        let _ = apply(&mut app, Action::ExtendFrame);
+    }
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 4,
+        },
+    );
+    let _ = apply(&mut app, Action::InsertKeyframe { copy_prev: true });
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(200.0, 0.0),
+        },
+    );
+    assert!(matches!(
+        app.doc.root.layers[0].tween_state_at_keyframe(0),
+        TweenState::Complete { .. }
+    ));
+
+    // 1. 開始キーフレームにブラシで1本描くと tween は ON のまま Incomplete になり、その線を消すと Complete に戻る
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 0,
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(300.0, 300.0), Point::new(360.0, 300.0)],
+            radius: 8.0,
+            color: Color32::BLUE,
+        },
+    );
+    assert!(app.doc.root.layers[0].keyframes[0].tween);
+    assert_eq!(
+        app.doc.root.layers[0].tween_state_at_keyframe(0),
+        TweenState::Incomplete
+    );
+    let _ = apply(
+        &mut app,
+        Action::SelectSingleAt {
+            pt: Point::new(330.0, 300.0),
+        },
+    );
+    let _ = apply(&mut app, Action::DeleteSelection);
+    assert!(app.doc.root.layers[0].keyframes[0].tween);
+    assert!(matches!(
+        app.doc.root.layers[0].tween_state_at_keyframe(0),
+        TweenState::Complete { .. }
+    ));
+
+    // 2. ペーストでも同じく tween は ON のまま Incomplete になり、消すと Complete に戻る
+    let _ = apply(&mut app, Action::Paste { in_place: true });
+    let _ = apply(&mut app, Action::Deselect);
+    assert!(app.doc.root.layers[0].keyframes[0].tween);
+    assert_eq!(
+        app.doc.root.layers[0].tween_state_at_keyframe(0),
+        TweenState::Incomplete
+    );
+
+    // 3. 保存して読み込んでも、未完のトゥイーンの tween は ON のまま
+    let tmp_path = std::env::temp_dir().join(format!("is2d_m3_3_{}.is2d", std::process::id()));
+    crate::project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
+    let mut loaded = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut loaded, &tmp_path, None).unwrap();
+    let _ = std::fs::remove_file(&tmp_path);
+    assert!(loaded.doc.root.layers[0].keyframes[0].tween);
+    assert_eq!(
+        loaded.doc.root.layers[0].tween_state_at_keyframe(0),
+        TweenState::Incomplete
+    );
+
+    // 4. 未完のトゥイーンのキーフレームで T を押すと OFF になる
+    let _ = apply(&mut loaded, Action::ToggleTween);
+    assert!(!loaded.doc.root.layers[0].keyframes[0].tween);
+    assert_eq!(
+        loaded.doc.root.layers[0].tween_state_at_keyframe(0),
+        TweenState::None
+    );
+
+    // ペーストした生シェイプを消すと Complete に戻り、シンボル削除で再び ON のまま Incomplete になる
+    let raw_idx = app
+        .scene()
+        .iter()
+        .position(|s| s.symbol_instance.is_none())
+        .unwrap();
+    app.session.set_selected_indices(vec![raw_idx]);
+    let _ = apply(&mut app, Action::DeleteSelection);
+    assert!(matches!(
+        app.doc.root.layers[0].tween_state_at_keyframe(0),
+        TweenState::Complete { .. }
+    ));
+    let _ = apply(&mut app, Action::DeleteSymbol { sym_id });
+    assert!(app.doc.root.layers[0].keyframes[0].tween);
+    assert_eq!(
+        app.doc.root.layers[0].tween_state_at_keyframe(0),
+        TweenState::Incomplete
+    );
+}
+
 
 
 
