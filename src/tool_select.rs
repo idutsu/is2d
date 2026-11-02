@@ -521,13 +521,7 @@ fn handle_reshape_click(host: &mut impl ActionHost, pt: Point, shift_held: bool)
     host.tab_mut().view.inspect_timeline_frame = false;
     let zoom = host.tab().view.zoom;
     let scene = host.tab().scene();
-    let hit_shape = scene
-        .topmost_shape_at(pt, &host.tab().session.editing_group_path)
-        .or_else(|| {
-            compute_hover_target(scene, &host.tab().session, pt, zoom, sub_mode)
-                .shape_id()
-                .and_then(|id| scene.index_of_shape_id(id))
-        });
+    let hit_shape = scene.hit_shape_or_hover_at(&host.tab().session, pt, zoom, sub_mode);
     if shift_held {
         if let Some(scene_idx) = hit_shape {
             apply(host, Action::ToggleSelectionAt { scene_idx });

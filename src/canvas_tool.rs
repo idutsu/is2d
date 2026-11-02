@@ -1732,6 +1732,22 @@ impl<'a> Scene<'a> {
         })
     }
 
+    /// 指定座標 `pt` で最前面の図形にヒットしなければ、`compute_hover_target` の図形の `Scene` インデックスを返す
+    pub(crate) fn hit_shape_or_hover_at(
+        self,
+        session: &Session,
+        pt: Point,
+        zoom: f32,
+        sub_mode: SelectSubMode,
+    ) -> Option<usize> {
+        self.topmost_shape_at(pt, &session.editing_group_path)
+            .or_else(|| {
+                crate::select_ops::compute_hover_target(self, session, pt, zoom, sub_mode)
+                    .shape_id()
+                    .and_then(|id| self.index_of_shape_id(id))
+            })
+    }
+
     /// 指定シェイプが編集スコープ `editing_group_path` で子グループに属していれば、同じ子グループに属する全シェイプの `Scene` インデックス列を返す。
     /// 生シェイプであれば `vec![scene_idx]` のみを返す。
     pub(crate) fn expand_to_group_unit(
@@ -1987,6 +2003,37 @@ impl Floating {
                 .zip(&other.remainder)
                 .all(|(a, b)| shapes_equal_for_snapshot(a, b))
     }
+
+    /// `self.hidden` と `self.remainder` を `overlay` に反映する
+    fn init_overlay_from_remainder(&self, overlay: &mut Overlay, scope: &[u64]) {
+        overlay.hide = self.hidden.clone();
+        let mut current_hid = None;
+        for rem in &self.remainder {
+            if self.hidden.contains(&rem.shape_id) {
+                current_hid = Some(rem.shape_id);
+            }
+            let placement = current_hid.map_or_else(
+                || Placement::TopOfLayer(rem.layer_id, scope.to_vec()),
+                Placement::ReplaceAt,
+            );
+            overlay.add.push((placement, rem.clone()));
+        }
+    }
+
+    /// `self.remainder` を取り出し、元の図形ID（`hidden` に含まれる先頭要素の `shape_id`）ごとの塊に分割して返す
+    fn take_remainder_chunks(&mut self) -> Vec<(Option<ShapeId>, Vec<FillShape>)> {
+        let mut chunks: Vec<(Option<ShapeId>, Vec<FillShape>)> = Vec::new();
+        for rem in std::mem::take(&mut self.remainder) {
+            if self.hidden.contains(&rem.shape_id) {
+                chunks.push((Some(rem.shape_id), vec![rem]));
+            } else if let Some((_, last_vec)) = chunks.last_mut() {
+                last_vec.push(rem);
+            } else {
+                chunks.push((None, vec![rem]));
+            }
+        }
+        chunks
+    }
 }
 
 /// タブごとの編集セッション状態（土台キャッシュ・上乗せ・選択・変形・排他ドラッグ・編集階層、保存しない）
@@ -2077,19 +2124,8 @@ impl Session {
         self.overlay_only_selected = false;
         self.overlay_movable_start = 0;
         if let Some(fl) = &self.floating {
-            self.overlay.hide = fl.hidden.clone();
             let scope = self.editing_group_path.clone();
-            let mut current_hid = None;
-            for rem in &fl.remainder {
-                if fl.hidden.contains(&rem.shape_id) {
-                    current_hid = Some(rem.shape_id);
-                }
-                let placement = current_hid.map_or_else(
-                    || Placement::TopOfLayer(rem.layer_id, scope.clone()),
-                    Placement::ReplaceAt,
-                );
-                self.overlay.add.push((placement, rem.clone()));
-            }
+            fl.init_overlay_from_remainder(&mut self.overlay, &scope);
             self.overlay_movable_start = self.overlay.add.len();
             for piece in &fl.pieces {
                 self.overlay.add.push((
@@ -2142,18 +2178,7 @@ impl Session {
         let scope = self.editing_group_path.clone();
 
         if let Some(fl) = &self.floating {
-            self.overlay.hide = fl.hidden.clone();
-            let mut current_hid = None;
-            for rem in &fl.remainder {
-                if fl.hidden.contains(&rem.shape_id) {
-                    current_hid = Some(rem.shape_id);
-                }
-                let placement = current_hid.map_or_else(
-                    || Placement::TopOfLayer(rem.layer_id, scope.clone()),
-                    Placement::ReplaceAt,
-                );
-                self.overlay.add.push((placement, rem.clone()));
-            }
+            fl.init_overlay_from_remainder(&mut self.overlay, &scope);
             if alt_duplicate {
                 for piece in &fl.pieces {
                     self.overlay.add.push((
@@ -2214,18 +2239,7 @@ impl Session {
         let custom_piv = self.transform_pivot;
 
         if let Some(fl) = &self.floating {
-            self.overlay.hide = fl.hidden.clone();
-            let mut current_hid = None;
-            for rem in &fl.remainder {
-                if fl.hidden.contains(&rem.shape_id) {
-                    current_hid = Some(rem.shape_id);
-                }
-                let placement = current_hid.map_or_else(
-                    || Placement::TopOfLayer(rem.layer_id, scope.clone()),
-                    Placement::ReplaceAt,
-                );
-                self.overlay.add.push((placement, rem.clone()));
-            }
+            fl.init_overlay_from_remainder(&mut self.overlay, &scope);
         }
         self.overlay_movable_start = self.overlay.add.len();
 
@@ -2368,19 +2382,8 @@ impl Session {
             let Some(fl) = fl_opt else {
                 return;
             };
-            let old_rem = std::mem::take(&mut fl.remainder);
-            let mut chunks: Vec<(Option<ShapeId>, Vec<FillShape>)> = Vec::new();
-            for rem in old_rem {
-                if fl.hidden.contains(&rem.shape_id) {
-                    chunks.push((Some(rem.shape_id), vec![rem]));
-                } else if let Some((_, last_vec)) = chunks.last_mut() {
-                    last_vec.push(rem);
-                } else {
-                    chunks.push((None, vec![rem]));
-                }
-            }
             let mut new_rem = Vec::new();
-            for (orig_id, chunk) in chunks {
+            for (orig_id, chunk) in fl.take_remainder_chunks() {
                 let mut still_rem = Vec::new();
                 let mut newly_sel = Vec::new();
                 for s in chunk {
@@ -2974,15 +2977,15 @@ impl Tab {
         self.active_timeline_raw_mut().cell_selection = sel;
     }
 
-    /// 現在編集中のタイムラインへの可変参照とシンボルライブラリへの読み取り専用参照を渡して絵を変える編集を実行し、リビジョンを上げる
+    /// 現在編集中のタイムラインへの可変参照と文書への可変参照を渡して絵を変える編集を実行し、リビジョンを上げる
     pub(crate) fn with_active_timeline_mut<R>(
         &mut self,
-        f: impl FnOnce(&mut Timeline, &[SymbolDef]) -> R,
+        f: impl FnOnce(&mut Timeline, &mut Document) -> R,
     ) -> R {
         if let Some(last) = self.session.edit_path.last() {
             if let Some(idx) = self.doc.library.iter().position(|s| s.id == last.symbol_id) {
                 let mut taken_tl = std::mem::take(&mut self.doc.library[idx].timeline);
-                let res = f(&mut taken_tl, &self.doc.library);
+                let res = f(&mut taken_tl, &mut self.doc);
                 self.doc.library[idx].timeline = taken_tl;
                 self.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
                 self.doc.bump_revision();
@@ -2990,7 +2993,9 @@ impl Tab {
                 return res;
             }
         }
-        let res = f(&mut self.doc.root, &self.doc.library);
+        let mut taken_root = std::mem::take(&mut self.doc.root);
+        let res = f(&mut taken_root, &mut self.doc);
+        self.doc.root = taken_root;
         self.refresh_scene_base();
         res
     }
@@ -3183,21 +3188,9 @@ impl LayerEdit {
     }
 
     /// `Floating` をブーリアン結合せずにそのまま `self.shapes` に実体化する（グループ化・シンボル変換の前処理用）
-    pub(crate) fn materialize_floating_without_merge(&mut self, fl: Floating) {
+    pub(crate) fn materialize_floating_without_merge(&mut self, mut fl: Floating) {
         let insert_limit = self.scope_insert_index();
-        let mut rem_by_hid: HashMap<ShapeId, Vec<FillShape>> = HashMap::new();
-        let mut tail_rem: Vec<FillShape> = Vec::new();
-        let mut current_hid: Option<ShapeId> = None;
-        for rem in fl.remainder {
-            if fl.hidden.contains(&rem.shape_id) {
-                current_hid = Some(rem.shape_id);
-            }
-            if let Some(hid) = current_hid {
-                rem_by_hid.entry(hid).or_default().push(rem);
-            } else {
-                tail_rem.push(rem);
-            }
-        }
+        let mut chunks = fl.take_remainder_chunks();
         let mut prefix = Vec::with_capacity(self.shapes.len() + fl.pieces.len());
         let mut trailing = Vec::new();
         for (idx, shape) in self.shapes.drain(..).enumerate() {
@@ -3207,17 +3200,18 @@ impl LayerEdit {
                 &mut trailing
             };
             if fl.hidden.contains(&shape.shape_id) {
-                if let Some(rems) = rem_by_hid.remove(&shape.shape_id) {
-                    dst.extend(rems);
+                for (id, chunk) in &mut chunks {
+                    if *id == Some(shape.shape_id) {
+                        dst.append(chunk);
+                    }
                 }
             } else {
                 dst.push(shape);
             }
         }
-        for (_, rems) in rem_by_hid {
-            prefix.extend(rems);
+        for (_, chunk) in chunks {
+            prefix.extend(chunk);
         }
-        prefix.extend(tail_rem);
         prefix.extend(fl.pieces);
         prefix.extend(trailing);
         if self.layer_order_ids.len() > 1 && prefix.len() > 1 {
@@ -3668,22 +3662,6 @@ pub(crate) fn topmost_layer_id_for_indices(
         .unwrap_or_else(|| active_scope_layer_id(session, timeline))
 }
 
-/// 指定した `Scene` インデックス `scene_idx` が属するレイヤーへ編集中タイムラインの `active_layer` およびタイムライン選択状態を追従させる
-pub(crate) fn focus_active_layer_to_shape(tab: &mut Tab, scene_idx: usize) {
-    tab.view.inspect_timeline_frame = false;
-    if let Some(lid) = tab.scene().get(scene_idx).map(|s| s.layer_id) {
-        let info = {
-            let tl = tab.active_timeline();
-            tl.layer_index_by_id(lid)
-                .map(|l_idx| (l_idx, tl.current_frame))
-        };
-        if let Some((l_idx, cf)) = info {
-            tab.set_active_layer(l_idx);
-            tab.set_active_cell_selection(Some(TimelineCellSelection::single(l_idx, cf)));
-        }
-    }
-}
-
 /// 指定した `shape_id` が属するレイヤーへ編集中タイムラインの `active_layer` およびタイムライン選択状態を追従させる
 pub(crate) fn focus_active_layer_to_shape_by_id(tab: &mut Tab, shape_id: ShapeId) {
     tab.view.inspect_timeline_frame = false;
@@ -3811,37 +3789,26 @@ pub(crate) fn draw_registration_cross(
 /// `Floating` の `hidden` 除去・`remainder` 追加・`pieces` 結合を `base_shapes` に対して実行する
 pub(crate) fn merge_floating_into_base_shapes(
     base_shapes: &mut Vec<FillShape>,
-    fl: Floating,
+    mut fl: Floating,
     layer_order_ids: &[LayerId],
 ) {
     if !fl.hidden.is_empty() || !fl.remainder.is_empty() {
-        let mut rem_chunks: HashMap<ShapeId, Vec<FillShape>> = HashMap::new();
-        let mut current_orig_id: Option<ShapeId> = None;
-        let mut orphan_remainder: Vec<FillShape> = Vec::new();
-        for rem in fl.remainder {
-            if fl.hidden.contains(&rem.shape_id) {
-                current_orig_id = Some(rem.shape_id);
-            }
-            if let Some(orig_id) = current_orig_id {
-                rem_chunks.entry(orig_id).or_default().push(rem);
-            } else {
-                orphan_remainder.push(rem);
-            }
-        }
-        let mut rebuilt = Vec::with_capacity(base_shapes.len() + orphan_remainder.len());
+        let mut chunks = fl.take_remainder_chunks();
+        let mut rebuilt = Vec::with_capacity(base_shapes.len());
         for shape in base_shapes.drain(..) {
             if fl.hidden.contains(&shape.shape_id) {
-                if let Some(chunk) = rem_chunks.remove(&shape.shape_id) {
-                    rebuilt.extend(chunk);
+                for (id, chunk) in &mut chunks {
+                    if *id == Some(shape.shape_id) {
+                        rebuilt.append(chunk);
+                    }
                 }
             } else {
                 rebuilt.push(shape);
             }
         }
-        for (_, chunk) in rem_chunks {
+        for (_, chunk) in chunks {
             rebuilt.extend(chunk);
         }
-        rebuilt.extend(orphan_remainder);
         *base_shapes = rebuilt;
     }
     if !fl.pieces.is_empty() {

@@ -12,7 +12,6 @@ pub(crate) use crate::doc_actions::{
     scale_selected_shapes, set_active_keyframe_tween_rotate, set_selected_symbol_playback,
     set_selected_symbol_world_pivot, timeline_toggle_tween,
 };
-use crate::select_ops::compute_hover_target;
 #[cfg(test)]
 pub(crate) use crate::symbol_ops::{
     enter_symbol_from_library, enter_symbol_timeline, exit_symbol_timeline,
@@ -186,13 +185,7 @@ pub(crate) fn start_transform_drag(
         }
         TransformHoverTarget::None => {
             let scene = host.tab().scene();
-            let hit_opt = scene
-                .topmost_shape_at(pt, &host.tab().session.editing_group_path)
-                .or_else(|| {
-                    compute_hover_target(scene, &host.tab().session, pt, zoom, sub_mode)
-                        .shape_id()
-                        .and_then(|id| scene.index_of_shape_id(id))
-                });
+            let hit_opt = scene.hit_shape_or_hover_at(&host.tab().session, pt, zoom, sub_mode);
             if let Some(hit_idx) = hit_opt {
                 if !host
                     .tab()
@@ -425,13 +418,7 @@ fn handle_transform_click(host: &mut impl ActionHost, pt: Point, shift_held: boo
     if !shift_held && hover == TransformHoverTarget::Pivot {
         return;
     }
-    let hit_opt = scene
-        .topmost_shape_at(pt, &host.tab().session.editing_group_path)
-        .or_else(|| {
-            compute_hover_target(scene, &host.tab().session, pt, zoom, sub_mode)
-                .shape_id()
-                .and_then(|id| scene.index_of_shape_id(id))
-        });
+    let hit_opt = scene.hit_shape_or_hover_at(&host.tab().session, pt, zoom, sub_mode);
     if shift_held {
         if let Some(scene_idx) = hit_opt {
             apply(host, Action::ToggleSelectionAt { scene_idx });

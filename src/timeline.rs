@@ -344,33 +344,13 @@ impl Keyframe {
     }
 }
 
-fn max_group_id_in_keyframe(kf: &Keyframe) -> u64 {
-    let mut max_gid = 0_u64;
-    for s in kf.cel.shapes.iter() {
-        for &gid in &s.group_path {
-            max_gid = max_gid.max(gid);
-        }
-        if let Some(b) = s.symbol_instance {
-            max_gid = max_gid.max(b.instance_gid);
-        }
-    }
-    for inst in kf.cel.instances.iter() {
-        for &gid in &inst.parent_scope {
-            max_gid = max_gid.max(gid);
-        }
-        max_gid = max_gid.max(inst.binding.instance_gid);
-    }
-    max_gid
-}
-
-fn remap_keyframes_group_and_instance_ids(kfs: &mut [Keyframe], next_gid: &mut u64) {
+fn remap_keyframes_group_and_instance_ids(
+    kfs: &mut [Keyframe],
+    mut alloc_group_id: impl FnMut() -> u64,
+) {
     let mut gid_map: HashMap<u64, u64> = HashMap::new();
     let mut alloc_gid = |old_id: u64, map: &mut HashMap<u64, u64>| -> u64 {
-        *map.entry(old_id).or_insert_with(|| {
-            let id = (*next_gid).max(1);
-            *next_gid = id.saturating_add(1);
-            id
-        })
+        *map.entry(old_id).or_insert_with(&mut alloc_group_id)
     };
     for kf in kfs {
         if !kf.cel.shapes.is_empty() {
@@ -652,15 +632,6 @@ impl Layer {
         }
     }
 
-    /// このレイヤー内の全キーフレームに含まれる最大のグループID / `instance_gid` を返す
-    pub(crate) fn max_group_id(&self) -> u64 {
-        self.keyframes
-            .iter()
-            .map(|kf| max_group_id_in_keyframe(kf))
-            .max()
-            .unwrap_or(0)
-    }
-
     /// 指定フレーム区間 `[min_frame..=max_frame]` 内のキーフレーム群を相対フレーム位置（`0..=max_frame - min_frame`）で抽出する
     /// （`min_frame` がキーフレーム途中やトゥイーン中割りフレームにある場合は、そのフレームの評価済み中割り姿勢を引き継ぐ）
     pub(crate) fn extract_keyframes_in_range(
@@ -727,27 +698,13 @@ impl Layer {
     }
 
     /// 抽出された相対キーフレーム群 `kfs` を `[dst_min_frame..=dst_max_frame]` に配置する
-    /// （移動先範囲直後のフレーム姿勢を保持する境界キーフレームを自動挿入し、別レイヤーからの配置時はグループID・`instance_gid` を再採番する）
+    /// （移動先範囲直後のフレーム姿勢を保持する境界キーフレームを自動挿入する）
     pub(crate) fn place_keyframes_at(
         &mut self,
         dst_min_frame: usize,
         dst_max_frame: usize,
-        mut kfs: Vec<Keyframe>,
+        kfs: Vec<Keyframe>,
     ) {
-        let dst_lid = self.id;
-        let is_cross_layer = kfs.iter().any(|kf| {
-            kf.cel.shapes.iter().any(|s| s.layer_id != dst_lid)
-                || kf.cel.instances.iter().any(|i| i.layer_id != dst_lid)
-        });
-        if is_cross_layer {
-            let mut next_gid = self
-                .max_group_id()
-                .max(kfs.iter().map(max_group_id_in_keyframe).max().unwrap_or(0))
-                .saturating_add(1)
-                .max(1);
-            remap_keyframes_group_and_instance_ids(&mut kfs, &mut next_gid);
-        }
-
         let after_frame = dst_max_frame + 1;
         let post_range_kf = (after_frame < self.frame_count
             && !self
@@ -767,6 +724,7 @@ impl Layer {
                 .partition_point(|existing_kf| existing_kf.start_frame < after_frame);
             self.keyframes.insert(pos, Arc::new(after_kf));
         }
+        let dst_lid = self.id;
         for mut kf in kfs {
             if kf.cel.shapes.iter().any(|s| s.layer_id != dst_lid) {
                 for shape in kf.cel.shapes_mut() {
@@ -1229,15 +1187,6 @@ impl Timeline {
         ))
     }
 
-    /// タイムライン内の全レイヤー・全キーフレームに含まれる最大のグループID / `instance_gid` を返す
-    pub(crate) fn max_group_id(&self) -> u64 {
-        self.layers
-            .iter()
-            .map(Layer::max_group_id)
-            .max()
-            .unwrap_or(0)
-    }
-
     /// 検証済みの移動先 `dst_sel` へ選択範囲 `sel` のキーフレーム群を移動または複製する
     pub(crate) fn move_or_copy_frames(
         &mut self,
@@ -1245,8 +1194,8 @@ impl Timeline {
         dst_sel: TimelineCellSelection,
         actual_dl: isize,
         copy_mode: bool,
+        mut alloc_group_id: impl FnMut() -> u64,
     ) {
-        let mut next_gid = self.max_group_id().saturating_add(1).max(1);
         let extracted: Vec<(usize, Vec<Keyframe>)> = (sel.min_layer..=sel.max_layer)
             .filter_map(|src_l| {
                 let dst_l = (src_l as isize + actual_dl) as usize;
@@ -1256,7 +1205,7 @@ impl Timeline {
                     .get(src_l)?
                     .extract_keyframes_in_range(sel.min_frame, sel.max_frame);
                 if copy_mode || actual_dl != 0 {
-                    remap_keyframes_group_and_instance_ids(&mut kfs, &mut next_gid);
+                    remap_keyframes_group_and_instance_ids(&mut kfs, &mut alloc_group_id);
                     for kf in &mut kfs {
                         if kf.cel.shapes.iter().any(|s| s.layer_id != dst_lid) {
                             for shape in kf.cel.shapes_mut() {

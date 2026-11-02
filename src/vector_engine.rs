@@ -651,9 +651,19 @@ impl FillShape {
     }
 
     pub(crate) fn transform(&mut self, affine: Affine) {
-        let [a, b, c, d, tx, ty] = affine.as_coeffs();
+        self.transform_with_max_scale_sq(affine, 1.001 * 1.001);
+    }
+
+    /// シンボルインスタンス展開やトゥイーン補間など、既にテッセレーション済みの `fill_mesh` を保持したまま
+    /// アフィン変換を適用し、再生中やオニオンスキン描画での毎フレームの再テッセレーションを回避する
+    pub(crate) fn transform_with_cached_mesh(&mut self, affine: Affine) {
+        self.transform_with_max_scale_sq(affine, 16.0);
+    }
+
+    fn transform_with_max_scale_sq(&mut self, affine: Affine, max_scale_sq_limit: f64) {
+        let coeffs @ [a, b, c, d, _, _] = affine.as_coeffs();
         let det = a * d - b * c;
-        if !affine.as_coeffs().iter().all(|v| v.is_finite()) || det.abs() < 1e-12 {
+        if !coeffs.iter().all(|v| v.is_finite()) || det.abs() < 1e-12 {
             return;
         }
         self.exterior.transform(affine);
@@ -664,17 +674,13 @@ impl FillShape {
             binding.xform = affine * binding.xform;
         }
         let max_scale_sq = (a * a + b * b).max(c * c + d * d);
-        if max_scale_sq > 1.001 * 1.001 {
+        if max_scale_sq > max_scale_sq_limit && !self.exterior.segments.is_empty() {
             self.rebuild_cache();
         } else {
             self.bbox = self.compute_bbox();
             self.hit_bez_path = OnceLock::new();
             if let Some(arc_mesh) = self.fill_mesh.get_mut() {
-                for v in &mut Arc::make_mut(arc_mesh).vertices {
-                    let x = v.pos.x as f64;
-                    let y = v.pos.y as f64;
-                    v.pos = Pos2::new((a * x + c * y + tx) as f32, (b * x + d * y + ty) as f32);
-                }
+                transform_mesh_vertices_in_place(&mut Arc::make_mut(arc_mesh).vertices, coeffs);
             }
             *self.screen_mesh_cache.lock() = None;
             *self.selection_mesh.lock() = None;
@@ -683,47 +689,12 @@ impl FillShape {
         }
     }
 
-    /// シンボルインスタンス展開やトゥイーン補間など、既にテッセレーション済みの `fill_mesh` を保持したまま
-    /// アフィン変換を適用し、再生中やオニオンスキン描画での毎フレームの再テッセレーションを回避する
-    pub(crate) fn transform_with_cached_mesh(&mut self, affine: Affine) {
-        let [a, b, c, d, tx, ty] = affine.as_coeffs();
-        let det = a * d - b * c;
-        if !affine.as_coeffs().iter().all(|v| v.is_finite()) || det.abs() < 1e-12 {
-            return;
-        }
-        self.exterior.transform(affine);
-        for hole in &mut self.holes {
-            hole.transform(affine);
-        }
-        if let Some(binding) = &mut self.symbol_instance {
-            binding.xform = affine * binding.xform;
-        }
-        let max_scale_sq = (a * a + b * b).max(c * c + d * d);
-        if max_scale_sq > 16.0 && !self.exterior.segments.is_empty() {
-            self.rebuild_cache();
-            return;
-        }
-        self.bbox = self.compute_bbox();
-        self.hit_bez_path = OnceLock::new();
-        if let Some(arc_mesh) = self.fill_mesh.get_mut() {
-            for v in &mut Arc::make_mut(arc_mesh).vertices {
-                let x = v.pos.x as f64;
-                let y = v.pos.y as f64;
-                v.pos = Pos2::new((a * x + c * y + tx) as f32, (b * x + d * y + ty) as f32);
-            }
-        }
-        *self.screen_mesh_cache.lock() = None;
-        *self.selection_mesh.lock() = None;
-        *self.selection_screen_mesh.lock() = None;
-        self.mesh_revision = next_mesh_revision();
-    }
-
     /// 自由変形ドラッグ中、ドラッグ開始時の `orig` から既存の単一所有 `fill_mesh` 頂点バッファを再利用して `affine` を適用する
     /// （`clone_from` による `Arc` 参照カウント増加と毎フレームの頂点バッファ再確保を回避する）
     pub(crate) fn transform_from_origin(&mut self, orig: &FillShape, affine: Affine) {
-        let [a, b, c, d, tx, ty] = affine.as_coeffs();
+        let coeffs @ [a, b, c, d, _, _] = affine.as_coeffs();
         let det = a * d - b * c;
-        if !affine.as_coeffs().iter().all(|v| v.is_finite()) || det.abs() < 1e-12 {
+        if !coeffs.iter().all(|v| v.is_finite()) || det.abs() < 1e-12 {
             self.clone_from(orig);
             return;
         }
@@ -745,15 +716,8 @@ impl FillShape {
                     && dst_arc.indices.len() == src_mesh.indices.len()
                 {
                     let dst_mesh = Arc::make_mut(dst_arc);
-                    for (dst_v, src_v) in dst_mesh.vertices.iter_mut().zip(src_mesh.vertices.iter())
-                    {
-                        let x = src_v.pos.x as f64;
-                        let y = src_v.pos.y as f64;
-                        dst_v.pos =
-                            Pos2::new((a * x + c * y + tx) as f32, (b * x + d * y + ty) as f32);
-                        dst_v.color = src_v.color;
-                        dst_v.uv = src_v.uv;
-                    }
+                    dst_mesh.vertices.clone_from(&src_mesh.vertices);
+                    transform_mesh_vertices_in_place(&mut dst_mesh.vertices, coeffs);
                     true
                 } else {
                     false
@@ -763,11 +727,7 @@ impl FillShape {
             };
             if !reused {
                 let mut cloned = (**src_mesh).clone();
-                for v in &mut cloned.vertices {
-                    let x = v.pos.x as f64;
-                    let y = v.pos.y as f64;
-                    v.pos = Pos2::new((a * x + c * y + tx) as f32, (b * x + d * y + ty) as f32);
-                }
+                transform_mesh_vertices_in_place(&mut cloned.vertices, coeffs);
                 self.fill_mesh = OnceLock::from(Arc::new(cloned));
             }
         } else {
@@ -841,6 +801,15 @@ impl FillShape {
 // ============================================================================
 // アフィン変換・幾何ユーティリティ関数
 // ============================================================================
+
+#[inline]
+fn transform_mesh_vertices_in_place(vertices: &mut [Vertex], [a, b, c, d, tx, ty]: [f64; 6]) {
+    for v in vertices {
+        let x = v.pos.x as f64;
+        let y = v.pos.y as f64;
+        v.pos = Pos2::new((a * x + c * y + tx) as f32, (b * x + d * y + ty) as f32);
+    }
+}
 
 /// 指定基準点 `anchor` を中心とした非一様スケーリング（および反転）のアフィン変換行列を生成する
 pub(crate) fn affine_scale_around(anchor: Point, sx: f64, sy: f64) -> Affine {

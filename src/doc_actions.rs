@@ -6,7 +6,7 @@ use kurbo::{Affine, Point, QuadBez, Vec2 as KVec2};
 use crate::canvas_tool::{
     Clipboard, CoalesceKey, Floating, FloatingOrigin, NoticeKind, SelectSubMode, ShapeId,
     StatusToast, Tab, Tool, ToolSettings, UndoEntry, active_scope_layer_id, cancel_active_drag,
-    clear_selection, commit_floating, edit_layers, editable_layer_ids, focus_active_layer_to_shape,
+    clear_selection, commit_floating, edit_layers, editable_layer_ids,
     focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
     merge_floating_into_base_shapes, prepare_moved_selection,
     select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode,
@@ -1073,7 +1073,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 }
             }
 
-            focus_active_layer_to_shape(tab, hit_idx);
+            focus_active_layer_to_shape_by_id(tab, hit_shape.shape_id);
             if !tab
                 .session
                 .base_cache
@@ -2027,11 +2027,12 @@ fn apply_timeline_move_or_copy_frames(
     else {
         return false;
     };
-    mutate_timeline_with_undo(tab, |tl| {
-        tl.move_or_copy_frames(sel, dst_sel, actual_dl, copy_mode);
+    commit_floating(tab);
+    push_undo(tab, None);
+    tab.with_active_timeline_mut(|tl, doc| {
+        tl.move_or_copy_frames(sel, dst_sel, actual_dl, copy_mode, || doc.alloc_group_id());
     });
-    let max_gid = tab.active_timeline().max_group_id().saturating_add(1);
-    tab.doc.next_group_id = tab.doc.next_group_id.max(max_gid);
+    reset_session_after_timeline_change(tab);
     select_shapes_for_timeline_selection(tab);
     true
 }

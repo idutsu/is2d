@@ -298,32 +298,24 @@ pub(crate) fn erase_from_canvas(
 
 /// 複数の対象シェイプに対して繰り返し Difference（減算）を行う際に、
 /// クリップ側シェイプ群のフラットニング結果と `QuadRecord` を1回だけ事前構築して使い回すキャッシュ構造体
-struct PreparedClip {
+struct PreparedClip<'a> {
+    clip: &'a [FillShape],
     clip_shapes: Vec<OverlayShape>,
     clip_quads: Vec<QuadRecord>,
-    clip_min_dim: f64,
 }
 
-impl PreparedClip {
-    fn new(clip: &[FillShape]) -> Self {
+impl<'a> PreparedClip<'a> {
+    fn new(clip: &'a [FillShape]) -> Self {
         let mut clip_quads = Vec::new();
         let clip_shapes = clip
             .iter()
             .map(|s| flatten_shape_for_overlay(s, &mut clip_quads))
             .filter(|r| !r.is_empty())
             .collect();
-        let clip_min_dim = clip
-            .iter()
-            .map(|s| {
-                let b = s.bounding_box();
-                b.width().min(b.height())
-            })
-            .filter(|&d| d > 1e-6)
-            .fold(f64::INFINITY, f64::min);
         Self {
+            clip,
             clip_shapes,
             clip_quads,
-            clip_min_dim,
         }
     }
 
@@ -334,18 +326,7 @@ impl PreparedClip {
             return Vec::new();
         }
         quad_table.extend_from_slice(&self.clip_quads);
-        let subj_b = subj.bounding_box();
-        let subj_dim = subj_b.width().min(subj_b.height());
-        let min_dim = if subj_dim > 1e-6 {
-            self.clip_min_dim.min(subj_dim)
-        } else {
-            self.clip_min_dim
-        };
-        let min_area = if min_dim.is_finite() && min_dim < 2.0 {
-            0.04_f64.min((min_dim * min_dim * 0.01).max(1e-5))
-        } else {
-            0.04
-        };
+        let min_area = adaptive_overlay_min_area(std::slice::from_ref(subj), self.clip);
         let intersect_result = run_float_overlay(
             std::slice::from_ref(&subj_poly),
             &self.clip_shapes,

@@ -192,27 +192,6 @@ fn collect_symbol_and_descendants(
     }
 }
 
-/// シンボルの内部タイムライン内で使用されている最大のグループID（`group_path` / `instance_gid` / `parent_scope`）を返す
-pub(crate) fn max_group_id_in_timeline(tl: &Timeline) -> u64 {
-    let mut max_gid = 0u64;
-    for layer in &tl.layers {
-        for kf in &layer.keyframes {
-            for sh in kf.cel.shapes.iter() {
-                if let Some(&gid) = sh.group_path.iter().max() {
-                    max_gid = max_gid.max(gid);
-                }
-            }
-            for inst in kf.cel.instances.iter() {
-                max_gid = max_gid.max(inst.binding.instance_gid);
-                if let Some(&gid) = inst.parent_scope.iter().max() {
-                    max_gid = max_gid.max(gid);
-                }
-            }
-        }
-    }
-    max_gid
-}
-
 /// 別タブから移植されるシンボルの内部タイムライン内の全グループIDを貼り付け先タブの `Document` で新規採番したIDへ一括リマップする
 fn remap_timeline_group_ids(tl: &mut Timeline, doc: &mut Document) {
     let mut gid_map: HashMap<u64, u64> = HashMap::new();
@@ -514,11 +493,6 @@ pub(crate) fn resolve_clipboard_for_paste(
             }
         }
         remap_timeline_group_ids(&mut imported.timeline, &mut tab.doc);
-        let max_internal_gid = max_group_id_in_timeline(&imported.timeline);
-        tab.doc.next_group_id = tab
-            .doc
-            .next_group_id
-            .max(max_internal_gid.saturating_add(1));
 
         tab.doc.library.push(imported);
         if tab.view.selected_library_symbol.is_none() {

@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use crate::canvas_tool::{
     SelectSubMode, Session, Tab, UndoHistory, View, cancel_active_drag, commit_floating,
 };
-use crate::clipboard_ops::max_group_id_in_timeline;
 use crate::symbol::{
     Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode, TweenRotate,
 };
@@ -86,18 +85,24 @@ fn surrender_focused_widget(ctx: &egui::Context) {
 }
 
 /// タブ切り替えやプロジェクト保存の前に、選択状態・`Floating`・カスタムピボットを保持したまま
-/// 進行中ドラッグの中断・連続編集フラグのリセット・作業キャンバスのセル同期を行う
-fn prepare_active_tab_for_switch_or_save(tab: &mut Tab) {
-    cancel_active_drag(tab);
-    tab.view.pan_last_screen_pos = None;
-    tab.history.end_coalesce();
+/// 進行中再生・ドラッグの中断と連続編集フラグのリセットを行う
+fn prepare_active_tab_for_switch_or_save(ws: &mut impl ProjectWorkspace) {
+    ws.stop_playback();
+    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
+    cancel_active_drag(ws.tab_mut());
+    ws.tab_mut().view.pan_last_screen_pos = None;
 }
 
 /// アクティブタブのインデックスを `target_index` へ切り替え、キャンバス矩形を引き継ぎつつペーストオフセット等をリセットする
 fn activate_tab_index(ws: &mut impl ProjectWorkspace, target_index: usize) {
-    let last_canvas_rect = ws.tab().view.last_canvas_rect;
+    let last_canvas_rect = ws
+        .tabs()
+        .get(ws.active_index())
+        .map(|t| t.view.last_canvas_rect);
     ws.set_active_index(target_index);
-    ws.tab_mut().view.last_canvas_rect = last_canvas_rect;
+    if let Some(rect) = last_canvas_rect {
+        ws.tab_mut().view.last_canvas_rect = rect;
+    }
     ws.clipboard_mut().paste_count = 0;
     ws.clipboard_mut().paste_offset = kurbo::Vec2::ZERO;
     if !ws.tab().session.selection.is_empty()
@@ -287,9 +292,7 @@ pub(crate) fn switch_to_tab(
         return false;
     }
     *ws.pending_close_confirm_mut() = None;
-    ws.stop_playback();
-    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
-    prepare_active_tab_for_switch_or_save(ws.tab_mut());
+    prepare_active_tab_for_switch_or_save(ws);
     activate_tab_index(ws, target_index);
 
     if let Some(c) = ctx {
@@ -337,9 +340,7 @@ fn close_tab_immediately(
 
     if ws.tabs().len() <= 1 {
         // 最後の1タブを閉じた場合は連番をリセットし、白紙の「無題-1」へ初期化する
-        ws.stop_playback();
-    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
-        cancel_active_drag(ws.tab_mut());
+        prepare_active_tab_for_switch_or_save(ws);
         ws.set_next_untitled_number(1);
         let doc_id = ws.alloc_doc_id();
         let untitled_num = ws.alloc_untitled_number();
@@ -358,10 +359,7 @@ fn close_tab_immediately(
     }
 
     if close_index == ws.active_index() {
-        ws.stop_playback();
-    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
-        cancel_active_drag(ws.tab_mut());
-        ws.tab_mut().view.pan_last_screen_pos = None;
+        prepare_active_tab_for_switch_or_save(ws);
         let last_canvas_rect = ws.tab().view.last_canvas_rect;
 
         ws.tabs_mut().remove(close_index);
@@ -375,15 +373,8 @@ fn close_tab_immediately(
         } else {
             close_index.min(remaining_len - 1)
         };
-        ws.set_active_index(next_active);
+        activate_tab_index(ws, next_active);
         ws.tab_mut().view.last_canvas_rect = last_canvas_rect;
-        ws.clipboard_mut().paste_count = 0;
-        ws.clipboard_mut().paste_offset = kurbo::Vec2::ZERO;
-        if !ws.tab().session.selection.is_empty()
-            && ws.tool().select_sub_mode != SelectSubMode::Reshape
-        {
-            ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
-        }
         if let Some(c) = ctx {
             surrender_focused_widget(c);
             update_window_title(ws, c);
@@ -904,46 +895,34 @@ impl ProjectDocument {
     /// 現在の `Tab` から保存用の `ProjectDocument` を生成する
     /// （`Floating` がある場合は `Document` のコピーに対して確定した内容を書き出し、`Session` も `Document` も書き換えない）
     pub(crate) fn from_app(tab: &Tab) -> Self {
-        if let Some(fl) = tab
+        let mut temp_tab;
+        let doc = if let Some(fl) = tab
             .session
             .floating()
             .filter(|fl| fl.needs_merge_commit())
         {
-            let mut temp_tab = Tab::new_empty(tab.id, tab.untitled_number);
+            temp_tab = Tab::new_empty(tab.id, tab.untitled_number);
             temp_tab.doc = tab.doc.clone();
             temp_tab.session.edit_path = tab.session.edit_path.clone();
             temp_tab.session.editing_group_path = tab.session.editing_group_path.clone();
             temp_tab.session.set_floating(Some(fl.clone()));
             temp_tab.refresh_scene_base();
             commit_floating(&mut temp_tab);
+            &temp_tab.doc
+        } else {
+            &tab.doc
+        };
 
-            let mut saved_timeline: SavedTimeline = (&temp_tab.doc.root).into();
-            saved_timeline.fps = temp_tab.doc.fps.clamp(1, 60);
-            return Self {
-                version: PROJECT_FORMAT_VERSION,
-                stage_size: [temp_tab.doc.stage_size.x, temp_tab.doc.stage_size.y],
-                timeline: saved_timeline,
-                library: temp_tab
-                    .doc
-                    .library
-                    .iter()
-                    .map(SavedSymbolDef::from)
-                    .collect(),
-                next_symbol_id: temp_tab.doc.next_symbol_id,
-                next_group_id: temp_tab.doc.next_group_id,
-            };
-        }
-
-        let mut saved_timeline: SavedTimeline = (&tab.doc.root).into();
-        saved_timeline.fps = tab.doc.fps.clamp(1, 60);
+        let mut saved_timeline: SavedTimeline = (&doc.root).into();
+        saved_timeline.fps = doc.fps.clamp(1, 60);
 
         Self {
             version: PROJECT_FORMAT_VERSION,
-            stage_size: [tab.doc.stage_size.x, tab.doc.stage_size.y],
+            stage_size: [doc.stage_size.x, doc.stage_size.y],
             timeline: saved_timeline,
-            library: tab.doc.library.iter().map(SavedSymbolDef::from).collect(),
-            next_symbol_id: tab.doc.next_symbol_id,
-            next_group_id: tab.doc.next_group_id,
+            library: doc.library.iter().map(SavedSymbolDef::from).collect(),
+            next_symbol_id: doc.next_symbol_id,
+            next_group_id: doc.next_group_id,
         }
     }
 
@@ -1130,9 +1109,28 @@ impl ProjectDocument {
         }
 
         let max_sym_id = library.iter().map(|s| s.id).max().unwrap_or(0);
-        let mut max_gid = max_group_id_in_timeline(&timeline);
+        let max_gid_in_tl = |tl: &Timeline| -> u64 {
+            let mut m = 0u64;
+            for layer in &tl.layers {
+                for kf in &layer.keyframes {
+                    for sh in kf.cel.shapes.iter() {
+                        if let Some(&gid) = sh.group_path.iter().max() {
+                            m = m.max(gid);
+                        }
+                    }
+                    for inst in kf.cel.instances.iter() {
+                        m = m.max(inst.binding.instance_gid);
+                        if let Some(&gid) = inst.parent_scope.iter().max() {
+                            m = m.max(gid);
+                        }
+                    }
+                }
+            }
+            m
+        };
+        let mut max_gid = max_gid_in_tl(&timeline);
         for sym in &library {
-            max_gid = max_gid.max(max_group_id_in_timeline(&sym.timeline));
+            max_gid = max_gid.max(max_gid_in_tl(&sym.timeline));
         }
 
         let raw_next_sym_id = if self.next_symbol_id <= MAX_SAFE_ENTITY_ID {
@@ -1297,9 +1295,7 @@ pub(crate) fn save_project_to_path(
     ws: &mut impl ProjectWorkspace,
     path: &Path,
 ) -> Result<(), String> {
-    ws.stop_playback();
-    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
-    prepare_active_tab_for_switch_or_save(ws.tab_mut());
+    prepare_active_tab_for_switch_or_save(ws);
 
     let proj_doc = ProjectDocument::from_app(ws.tab());
     proj_doc.validate_finite()?;
@@ -1420,19 +1416,13 @@ pub(crate) fn open_project_in_tab(
 
     // 3. 現在のタブが未編集の空の無題タブでなければ、アクティブタブの右隣に新しいタブを追加して切り替える
     // （ファイル読込タブでは `untitled_number` を `0` として遅延採番し、`無題-N` 連番の欠番スキップを防ぐ）
+    prepare_active_tab_for_switch_or_save(ws);
     if !is_active_tab_pristine_empty(ws.tab()) {
-        ws.stop_playback();
-    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
-        prepare_active_tab_for_switch_or_save(ws.tab_mut());
         let doc_id = ws.alloc_doc_id();
         let insert_idx = (ws.active_index() + 1).min(ws.tabs().len());
         ws.tabs_mut().insert(insert_idx, Tab::new_empty(doc_id, 0));
         activate_tab_index(ws, insert_idx);
     } else {
-        ws.stop_playback();
-    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
-        cancel_active_drag(ws.tab_mut());
-        ws.tab_mut().view.pan_last_screen_pos = None;
         let new_doc_id = ws.alloc_doc_id();
         ws.tab_mut().id = new_doc_id;
         ws.tab_mut().untitled_number = 0;
@@ -1459,9 +1449,7 @@ pub(crate) fn open_project_in_tab(
 
 /// アクティブタブの右隣に新しい白紙ドキュメントタブを追加して切り替える（`Cmd/Ctrl + N` / タブバーの `＋` ボタン）
 pub(crate) fn new_project(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
-    ws.stop_playback();
-    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
-    prepare_active_tab_for_switch_or_save(ws.tab_mut());
+    prepare_active_tab_for_switch_or_save(ws);
 
     let doc_id = ws.alloc_doc_id();
     let untitled_num = ws.alloc_untitled_number();
