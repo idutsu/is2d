@@ -14002,6 +14002,173 @@ fn test_m3_1_write_project_json_reports_flush_error() {
     }
 }
 
+#[test]
+fn test_m3_2_tween_midframe_cannot_be_selected_by_any_entry_or_deleted() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+    // レイヤー0: シンボルの完成したトゥイーン (Frame 0..=4)
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+            radius: 10.0,
+            color: Color32::RED,
+        },
+    );
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(&mut app, Action::ConvertToSymbol);
+    let _ = apply(&mut app, Action::ToggleTween);
+    for _ in 0..4 {
+        let _ = apply(&mut app, Action::ExtendFrame);
+    }
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 4,
+        },
+    );
+    let _ = apply(&mut app, Action::InsertKeyframe { copy_prev: true });
+    let _ = apply(&mut app, Action::SelectAll);
+    let _ = apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(200.0, 0.0),
+        },
+    );
+
+    // レイヤー1: 作画レイヤー (Frame 0..=4 に生シェイプ)
+    let _ = apply(&mut app, Action::AddLayer);
+    for _ in 0..4 {
+        let _ = apply(&mut app, Action::ExtendFrame);
+    }
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 1,
+            frame: 0,
+        },
+    );
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(120.0, 220.0), Point::new(220.0, 220.0)],
+            radius: 8.0,
+            color: Color32::BLUE,
+        },
+    );
+
+    // トゥイーン途中のコマ (Frame 2) へ移動
+    let _ = apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 2,
+        },
+    );
+    let tween_lid = app.doc.root.layers[0].id;
+    let draw_lid = app.doc.root.layers[1].id;
+
+    // 1. 矩形選択で両方囲んでも、作画レイヤーだけ選ばれ、トゥイーン途中レイヤーのシンボルは入らない
+    let _ = apply(
+        &mut app,
+        Action::SelectMarquee {
+            p0: Point::new(0.0, 0.0),
+            p1: Point::new(500.0, 500.0),
+            additive: false,
+        },
+    );
+    let sel_indices = app.session.selected_indices();
+    assert!(!sel_indices.is_empty(), "作画レイヤーの図形は選べること");
+    for idx in &sel_indices {
+        let s = app.scene().get(*idx).unwrap();
+        assert_eq!(
+            s.layer_id, draw_lid,
+            "矩形選択にトゥイーン途中レイヤーの図形が入らないこと"
+        );
+    }
+
+    // 2. Shift+クリック (ToggleSelectionAt) でもトゥイーン途中レイヤーのシンボルは選択に入らない
+    let _ = apply(&mut app, Action::Deselect);
+    let tween_scene_idx = app
+        .scene()
+        .iter()
+        .position(|s| s.layer_id == tween_lid)
+        .expect("シーン上にトゥイーン途中のシンボルが存在すること");
+    let draw_scene_idx = app
+        .scene()
+        .iter()
+        .position(|s| s.layer_id == draw_lid)
+        .expect("シーン上に作画レイヤーの図形が存在すること");
+    let _ = apply(
+        &mut app,
+        Action::ToggleSelectionAt {
+            scene_idx: tween_scene_idx,
+        },
+    );
+    assert!(
+        app.session.selection.is_empty(),
+        "Shift+クリックでトゥイーン途中のシンボルが選択に入らないこと"
+    );
+    let _ = apply(
+        &mut app,
+        Action::ToggleSelectionAt {
+            scene_idx: draw_scene_idx,
+        },
+    );
+    assert!(
+        !app.session.selection.is_empty(),
+        "Shift+クリックで作画レイヤーの図形は選べること"
+    );
+
+    // 3. タイムラインのセル選択でもトゥイーン途中レイヤーのシンボルは選択に入らない
+    let _ = apply(
+        &mut app,
+        Action::SelectTimelineCells {
+            l0: 0,
+            f0: 2,
+            l1: 0,
+            f1: 2,
+        },
+    );
+    assert!(
+        app.session.selection.is_empty(),
+        "タイムラインのセル選択でトゥイーン途中のシンボルが選択に入らないこと"
+    );
+    let _ = apply(
+        &mut app,
+        Action::SelectTimelineCells {
+            l0: 0,
+            f0: 2,
+            l1: 1,
+            f1: 2,
+        },
+    );
+    let sel_indices = app.session.selected_indices();
+    assert!(!sel_indices.is_empty(), "作画レイヤーの図形は選べること");
+    for idx in &sel_indices {
+        let s = app.scene().get(*idx).unwrap();
+        assert_eq!(s.layer_id, draw_lid);
+    }
+
+    // 4. トゥイーン途中のコマで Delete を押しても、Undo が積まれず、`*` も付かない
+    let _ = apply(&mut app, Action::Deselect);
+    app.history.mark_saved();
+    let undo_before = app.history.undo_stack.len();
+    let tween_shape = app.scene().get(tween_scene_idx).unwrap().clone();
+    app.session.selection.insert_shape(&tween_shape);
+    let deleted = apply(&mut app, Action::DeleteSelection);
+    assert!(!deleted.as_bool(), "消せる図形が無ければ false が返ること");
+    assert_eq!(
+        app.history.undo_stack.len(),
+        undo_before,
+        "Undo が積まれないこと"
+    );
+    assert!(!app.history.is_dirty(), "未保存フラグ(*)が付かないこと");
+}
+
+
 
 
 

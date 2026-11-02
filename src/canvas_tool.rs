@@ -3740,7 +3740,7 @@ pub(crate) fn select_shapes_for_timeline_selection(tab: &mut Tab) {
     };
     let selected_lids: HashSet<u64> = (sel.min_layer..=sel.max_layer)
         .filter_map(|l_idx| tl.layers.get(l_idx))
-        .filter(|l| l.visible && !l.locked)
+        .filter(|l| l.is_editable_at(tl.current_frame))
         .map(|l| l.id)
         .collect();
     tab.session.select_shapes_in_layers(&selected_lids);

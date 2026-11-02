@@ -106,7 +106,10 @@ pub(crate) fn toggle_shape_selection(tab: &mut Tab, scene_idx: usize) {
             .filter(|i| unit.binary_search(i).is_err())
             .collect();
         retain_selection_and_flush_deselected(tab, &remaining);
-    } else {
+    } else if scene
+        .get(scene_idx)
+        .is_some_and(|s| tab.active_timeline().is_layer_editable_by_id(s.layer_id))
+    {
         tab.session.select_shape_indices(unit);
         tab.session.transform_pivot = None;
         sync_timeline_layer_from_canvas_selection(tab);
@@ -167,6 +170,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
         &clip_rect_shape,
     );
 
+    let editable_lids = editable_layer_ids(tab);
     let base_shapes = tab.session.base_cache.shapes().to_vec();
     let editing_group_path = tab.session.editing_group_path.clone();
     let mut selection = std::mem::take(&mut tab.session.selection);
@@ -257,7 +261,9 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
             {
                 continue;
             }
-            if !shape.is_in_editing_scope(&editing_group_path) {
+            if !editable_lids.contains(&shape.layer_id)
+                || !shape.is_in_editing_scope(&editing_group_path)
+            {
                 continue;
             }
             if let Some(gid) = shape.active_group_id_at_scope(&editing_group_path) {
@@ -890,7 +896,11 @@ pub(crate) fn prepare_delete_selected_shapes(
     if tab.session.selection.is_empty() {
         return false;
     }
-    let (_, any_valid) = tab.session.selected_shape_mask();
+    let layer_ids = editable_layer_ids(tab);
+    let any_valid = tab
+        .scene()
+        .iter()
+        .any(|s| layer_ids.contains(&s.layer_id) && tab.session.selection.contains_shape(s));
     if !any_valid {
         tab.session.selection.clear();
         tab.session.set_floating(None);
@@ -902,7 +912,6 @@ pub(crate) fn prepare_delete_selected_shapes(
 
     let fl_opt = tab.session.take_floating();
     let selection = std::mem::take(&mut tab.session.selection);
-    let layer_ids = editable_layer_ids(tab);
     edit_layers(tab, &layer_ids, |edit| {
         if let Some(mut fl) = fl_opt {
             fl.pieces.clear();
