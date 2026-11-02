@@ -3,7 +3,7 @@ use std::time::Duration;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::canvas_tool::{CoalesceKey, Tab};
-use crate::doc_actions::{Action, ActionHost, apply};
+use crate::doc_actions::{apply, Action, ActionHost};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{
     scrub_ruler_to_frame, select_timeline_cells, set_layer_locked, set_layer_visible,
@@ -266,8 +266,30 @@ impl TimelineLayout {
 
     fn sync_visible_frames(&mut self, scroll_x: f32) {
         self.first_vis_frame = (scroll_x / CELL_W).floor() as usize;
-        self.last_vis_frame = (((scroll_x + self.grid_w) / CELL_W).ceil() as usize)
-            .min(self.max_frames_shown);
+        self.last_vis_frame =
+            (((scroll_x + self.grid_w) / CELL_W).ceil() as usize).min(self.max_frames_shown);
+    }
+
+    fn scroll_x_from_thumb(
+        &self,
+        pos_x: f32,
+        grab_offset_x: f32,
+        thumb_w: f32,
+        max_scroll_x: f32,
+    ) -> f32 {
+        let track_span = (self.grid_w - thumb_w).max(1.0);
+        ((pos_x - grab_offset_x - self.grid_left) / track_span).clamp(0.0, 1.0) * max_scroll_x
+    }
+
+    fn scroll_y_from_thumb(
+        &self,
+        pos_y: f32,
+        grab_offset_y: f32,
+        thumb_h: f32,
+        max_scroll_y: f32,
+    ) -> f32 {
+        let track_span = (self.grid_h - thumb_h).max(1.0);
+        ((pos_y - grab_offset_y - self.grid_top) / track_span).clamp(0.0, 1.0) * max_scroll_y
     }
 
     fn horizontal_scrollbar_metrics(&self, scroll_x: f32) -> Option<(Rect, Rect, f32, f32)> {
@@ -287,7 +309,10 @@ impl TimelineLayout {
             Pos2::new(thumb_x0 + thumb_w, track_y1),
         );
         let hit_rect = Rect::from_min_max(
-            Pos2::new(self.grid_left, (self.panel_rect.bottom() - 9.0).max(self.grid_top)),
+            Pos2::new(
+                self.grid_left,
+                (self.panel_rect.bottom() - 9.0).max(self.grid_top),
+            ),
             Pos2::new(self.panel_rect.right() - 8.0, self.panel_rect.bottom()),
         );
         Some((hit_rect, thumb_rect, thumb_w, max_scroll_x))
@@ -314,7 +339,10 @@ impl TimelineLayout {
             Pos2::new(track_x1, thumb_y0 + thumb_h),
         );
         let hit_rect = Rect::from_min_max(
-            Pos2::new((self.panel_rect.right() - 9.0).max(self.grid_left), self.grid_top),
+            Pos2::new(
+                (self.panel_rect.right() - 9.0).max(self.grid_left),
+                self.grid_top,
+            ),
             Pos2::new(self.panel_rect.right(), self.panel_rect.bottom()),
         );
         Some((hit_rect, thumb_rect, thumb_h, max_scroll_y))
@@ -378,14 +406,8 @@ pub(crate) fn draw_timeline_panel(host: &mut impl TimelineHost, ctx: &egui::Cont
             );
 
             let tl = host.tab().active_timeline();
-            let sel_max = tl
-                .cell_selection
-                .map(|s| s.max_frame + 1)
-                .unwrap_or(0);
-            let max_reach_frames = tl
-                .total_frames
-                .max(current_frame + 1)
-                .max(sel_max);
+            let sel_max = tl.cell_selection.map(|s| s.max_frame + 1).unwrap_or(0);
+            let max_reach_frames = tl.total_frames.max(current_frame + 1).max(sel_max);
             let mut layout =
                 TimelineLayout::new(panel_rect, max_reach_frames, host.timeline_ui().scroll_x);
             handle_timeline_scroll(host, ui, &response, &mut layout);
@@ -853,11 +875,10 @@ fn handle_timeline_click_start(
                 } else {
                     thumb_h * 0.5
                 };
-                let track_span = (layout.grid_h - thumb_h).max(1.0);
-                let ratio_y =
-                    ((pos.y - grab_offset_y - layout.grid_top) / track_span).clamp(0.0, 1.0);
+                let new_scroll_y =
+                    layout.scroll_y_from_thumb(pos.y, grab_offset_y, thumb_h, max_scroll_y);
                 let timeline_ui = host.timeline_ui_mut();
-                timeline_ui.scroll_y = ratio_y * max_scroll_y;
+                timeline_ui.scroll_y = new_scroll_y;
                 timeline_ui.grid_drag = TimelineGridDrag::ScrubScrollbarY { grab_offset_y };
                 return;
             }
@@ -872,10 +893,8 @@ fn handle_timeline_click_start(
                 } else {
                     thumb_w * 0.5
                 };
-                let track_span = (layout.grid_w - thumb_w).max(1.0);
-                let ratio_x =
-                    ((pos.x - grab_offset_x - layout.grid_left) / track_span).clamp(0.0, 1.0);
-                let new_scroll_x = ratio_x * max_scroll_x;
+                let new_scroll_x =
+                    layout.scroll_x_from_thumb(pos.x, grab_offset_x, thumb_w, max_scroll_x);
                 let timeline_ui = host.timeline_ui_mut();
                 timeline_ui.scroll_x = new_scroll_x;
                 layout.sync_visible_frames(new_scroll_x);
@@ -886,10 +905,14 @@ fn handle_timeline_click_start(
 
         let col = layout.frame_at_x(pos.x, host.timeline_ui().scroll_x);
         if pos.y < layout.grid_top {
-            let target_frame =
-                col.min(host.tab().active_timeline().total_frames.saturating_sub(1));
+            let target_frame = col.min(host.tab().active_timeline().total_frames.saturating_sub(1));
             host.timeline_ui_mut().grid_drag = TimelineGridDrag::ScrubRuler;
-            apply(host, Action::ScrubRulerToFrame { frame: target_frame });
+            apply(
+                host,
+                Action::ScrubRulerToFrame {
+                    frame: target_frame,
+                },
+            );
         } else if let Some(target_layer) =
             layout.layer_at_y(pos.y, host.timeline_ui().scroll_y, num_layers)
         {
@@ -925,9 +948,8 @@ fn handle_timeline_click_start(
                     .is_some_and(|s| s.contains(target_layer, col));
 
             if clicked_in_existing_sel || (clicked_on_existing_frame && alt_held) {
-                let orig_sel = if let Some(sel) = tl
-                    .cell_selection
-                    .filter(|s| s.contains(target_layer, col))
+                let orig_sel = if let Some(sel) =
+                    tl.cell_selection.filter(|s| s.contains(target_layer, col))
                 {
                     host.stop_playback();
                     apply(host, Action::EndCoalesce { key: None });
@@ -1002,10 +1024,8 @@ fn update_timeline_grid_drag(
                 if let (Some(pos), Some((_, _, thumb_w, max_scroll_x))) =
                     (pointer_pos, layout.horizontal_scrollbar_metrics(scroll_x))
                 {
-                    let track_span = (layout.grid_w - thumb_w).max(1.0);
-                    let ratio_x =
-                        ((pos.x - grab_offset_x - layout.grid_left) / track_span).clamp(0.0, 1.0);
-                    let new_scroll_x = ratio_x * max_scroll_x;
+                    let new_scroll_x =
+                        layout.scroll_x_from_thumb(pos.x, grab_offset_x, thumb_w, max_scroll_x);
                     host.timeline_ui_mut().scroll_x = new_scroll_x;
                     layout.sync_visible_frames(new_scroll_x);
                 }
@@ -1021,10 +1041,8 @@ fn update_timeline_grid_drag(
                     pointer_pos,
                     layout.vertical_scrollbar_metrics(num_layers, scroll_y),
                 ) {
-                    let track_span = (layout.grid_h - thumb_h).max(1.0);
-                    let ratio_y =
-                        ((pos.y - grab_offset_y - layout.grid_top) / track_span).clamp(0.0, 1.0);
-                    host.timeline_ui_mut().scroll_y = ratio_y * max_scroll_y;
+                    host.timeline_ui_mut().scroll_y =
+                        layout.scroll_y_from_thumb(pos.y, grab_offset_y, thumb_h, max_scroll_y);
                 }
             } else {
                 host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
@@ -1277,10 +1295,7 @@ fn draw_timeline_layer_row(
         }
     }
 
-    if let Some(sel) = tl
-        .cell_selection
-        .filter(|s| s.contains_layer(layer_idx))
-    {
+    if let Some(sel) = tl.cell_selection.filter(|s| s.contains_layer(layer_idx)) {
         let sx0 = layout.frame_x(sel.min_frame, scroll_x);
         let sx1 = layout.frame_x(sel.max_frame + 1, scroll_x);
         let sel_rect = Rect::from_min_max(
@@ -2023,8 +2038,7 @@ pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context)
         let elapsed = now - last_time;
         if elapsed >= frame_interval {
             let steps = ((elapsed / frame_interval).floor() as usize).max(1);
-            timeline_ui.last_frame_advance_time =
-                Some(last_time + (steps as f64) * frame_interval);
+            timeline_ui.last_frame_advance_time = Some(last_time + (steps as f64) * frame_interval);
             let loop_pb = timeline_ui.loop_playback;
             let (curr_f, total) = {
                 let tl = tab.active_timeline();

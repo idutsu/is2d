@@ -4,26 +4,25 @@ use kurbo::{ParamCurve, Point, QuadBez, Vec2 as KVec2};
 #[cfg(test)]
 pub(crate) use crate::canvas_tool::clear_selection;
 use crate::canvas_tool::{
-    ActiveCanvasDrag, HoverTarget, MarqueeDrag, Scene, SelectDragState, SelectSubMode, ShapeId,
-    Tab,
+    ActiveCanvasDrag, HoverTarget, MarqueeDrag, Scene, SelectDragState, SelectSubMode, ShapeId, Tab,
 };
 use crate::clipboard_ops::begin_move_selection_drag;
-use crate::doc_actions::{Action, ActionHost, apply};
+use crate::doc_actions::{apply, Action, ActionHost};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{
     clear_active_frame_shapes, copy_selected_shapes, cut_selected_shapes, delete_selected_shapes,
     finish_move_selection_drag, group_selected_shapes, nudge_selected_shapes, paste_clipboard,
     ungroup_selected_shapes,
 };
-#[cfg(not(test))]
-use crate::select_ops::compute_hover_target;
-pub(crate) use crate::select_ops::{set_moved_vertex, set_pulled_edge};
 #[cfg(test)]
 pub(crate) use crate::select_ops::{
-    apply_marquee_selection, apply_pull_edge_to_shape, compute_hover_target, enter_group_at,
-    exit_current_group, handle_canvas_double_click, toggle_shape_selection,
+    apply_marquee_selection, apply_pull_edge_to_shape, enter_group_at, exit_current_group,
+    toggle_shape_selection,
 };
-use crate::vector_engine::{FillShape, arc_mesh_to_shape, to_pos2};
+pub(crate) use crate::select_ops::{
+    compute_hover_target, handle_canvas_double_click, set_moved_vertex, set_pulled_edge,
+};
+use crate::vector_engine::{arc_mesh_to_shape, to_pos2, FillShape};
 
 pub(crate) fn select_single_shape_at(host: &mut impl ActionHost, pt: Point) -> bool {
     apply(host, Action::SelectSingleAt { pt })
@@ -34,11 +33,7 @@ pub(crate) fn select_single_shape_at(host: &mut impl ActionHost, pt: Point) -> b
 // ============================================================================
 
 /// Flash風ドット柄（Polka-Dot）選択オーバーレイを描画
-pub(crate) fn draw_flash_selection_overlay(
-    tab: &Tab,
-    painter: &egui::Painter,
-    scene_idx: usize,
-) {
+pub(crate) fn draw_flash_selection_overlay(tab: &Tab, painter: &egui::Painter, scene_idx: usize) {
     let zoom = tab.view.zoom;
     let pan = tab.view.pan;
     let Some(shape) = tab.scene().get(scene_idx) else {
@@ -109,7 +104,11 @@ pub(crate) fn draw_shape_contour_lines(
             if show_anchors {
                 let a = tab.view.world_to_screen(seg.p0);
                 painter.circle_filled(a, 3.0, Color32::WHITE);
-                painter.circle_stroke(a, 3.0, Stroke::new(1.2_f32, Color32::from_rgb(30, 120, 230)));
+                painter.circle_stroke(
+                    a,
+                    3.0,
+                    Stroke::new(1.2_f32, Color32::from_rgb(30, 120, 230)),
+                );
             }
         }
     }
@@ -134,15 +133,7 @@ pub(crate) fn handle_select_tool_input(
             let alt_held = ui.input(|i| i.modifiers.alt);
             if response.double_clicked_by(PointerButton::Primary) {
                 if let Some(pt) = mouse_pt {
-                    if !apply(host, Action::EnterGroupAt { pt })
-                        && host
-                            .tab()
-                            .scene()
-                            .topmost_shape_at(pt, &host.tab().session.editing_group_path)
-                            .is_none()
-                    {
-                        apply(host, Action::ExitGroup);
-                    }
+                    handle_canvas_double_click(host, pt);
                 }
                 return;
             }
@@ -349,9 +340,9 @@ pub(crate) fn start_reshape_drag(
             tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveShape(move_drag));
         }
         HoverTarget::None => {
-            host.tab_mut().session.drag = ActiveCanvasDrag::Select(
-                SelectDragState::MarqueeSelect(MarqueeDrag::new(pt, false)),
-            );
+            host.tab_mut().session.drag = ActiveCanvasDrag::Select(SelectDragState::MarqueeSelect(
+                MarqueeDrag::new(pt, false),
+            ));
         }
     }
 }
@@ -610,9 +601,9 @@ pub(crate) fn draw_select_tool_cursor(
         }) => {
             ctx.set_cursor_icon(CursorIcon::Grabbing);
             if tab.view.show_wireframe {
-                if let Some(seg) = tab
-                    .scene()
-                    .get_contour_segment(*shape_id, *contour_idx, *seg_idx)
+                if let Some(seg) =
+                    tab.scene()
+                        .get_contour_segment(*shape_id, *contour_idx, *seg_idx)
                 {
                     draw_highlighted_quad_segment(tab, painter, seg);
                 }
@@ -623,7 +614,11 @@ pub(crate) fn draw_select_tool_cursor(
             ctx.set_cursor_icon(CursorIcon::Grabbing);
             if let Some(snap_pt) = snapped_to {
                 let sp = tab.view.world_to_screen(*snap_pt);
-                painter.circle_stroke(sp, 9.0, Stroke::new(2.5_f32, Color32::from_rgb(255, 50, 140)));
+                painter.circle_stroke(
+                    sp,
+                    9.0,
+                    Stroke::new(2.5_f32, Color32::from_rgb(255, 50, 140)),
+                );
                 painter.circle_filled(sp, 4.0, Color32::from_rgb(255, 50, 140));
             }
             draw_flash_corner_cursor_badge(painter, pos);
@@ -685,12 +680,7 @@ fn draw_select_sub_mode_cursor(
     }
 }
 
-fn draw_reshape_hover_cursor(
-    tab: &Tab,
-    ctx: &egui::Context,
-    painter: &egui::Painter,
-    pos: Pos2,
-) {
+fn draw_reshape_hover_cursor(tab: &Tab, ctx: &egui::Context, painter: &egui::Painter, pos: Pos2) {
     match tab.session.hover_target {
         HoverTarget::Vertex {
             pos: v_pos,

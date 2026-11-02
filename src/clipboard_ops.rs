@@ -10,6 +10,12 @@ use crate::symbol::{Document, SymbolDef, SymbolEvalCtx};
 use crate::timeline::Timeline;
 use crate::vector_engine::{next_shape_id, FillShape};
 
+fn remap_gid(gid_map: &mut HashMap<u64, u64>, old_gid: u64, doc: &mut Document) -> u64 {
+    *gid_map
+        .entry(old_gid)
+        .or_insert_with(|| doc.alloc_group_id())
+}
+
 /// 相対グループパスを持つシェイプ群に対し、新しいグループID・シンボルインスタンスIDを採番して現在の編集スコープ用に変換する
 pub(crate) fn instantiate_relative_shapes_in_scope(
     tab: &mut Tab,
@@ -18,7 +24,7 @@ pub(crate) fn instantiate_relative_shapes_in_scope(
     preserve_original_layer: bool,
 ) -> (Vec<FillShape>, bool) {
     let active_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
-    let mut gid_map: Vec<(u64, u64)> = Vec::new();
+    let mut gid_map: HashMap<u64, u64> = HashMap::new();
     let mut seen_instance_gids: HashSet<u64> = HashSet::new();
     let mut instantiated = Vec::with_capacity(rel_shapes.len());
     let mut any_raw = false;
@@ -41,27 +47,9 @@ pub(crate) fn instantiate_relative_shapes_in_scope(
             }
             let mut new_parent_scope = tab.session.editing_group_path.clone();
             for &old_gid in orig_binding.parent_scope_from_path(&item.group_path) {
-                let new_gid = if let Some(&(_, mapped)) =
-                    gid_map.iter().find(|&&(orig, _)| orig == old_gid)
-                {
-                    mapped
-                } else {
-                    let alloc = tab.doc.alloc_group_id();
-                    gid_map.push((old_gid, alloc));
-                    alloc
-                };
-                new_parent_scope.push(new_gid);
+                new_parent_scope.push(remap_gid(&mut gid_map, old_gid, &mut tab.doc));
             }
-            let mapped_inst_gid = if let Some(&(_, mapped)) = gid_map
-                .iter()
-                .find(|&&(orig, _)| orig == orig_binding.instance_gid)
-            {
-                mapped
-            } else {
-                let alloc = tab.doc.alloc_group_id();
-                gid_map.push((orig_binding.instance_gid, alloc));
-                alloc
-            };
+            let mapped_inst_gid = remap_gid(&mut gid_map, orig_binding.instance_gid, &mut tab.doc);
 
             let mut new_binding = orig_binding;
             new_binding.instance_gid = mapped_inst_gid;
@@ -69,37 +57,16 @@ pub(crate) fn instantiate_relative_shapes_in_scope(
                 new_binding.xform = Affine::translate(offset) * new_binding.xform;
             }
 
-            let tl = tab.active_timeline();
-            let current_frame = tl.current_frame;
-            let kf_start_frame = tl
-                .layer_index_by_id(target_lid)
-                .and_then(|l_idx| {
-                    let layer = &tl.layers[l_idx];
-                    layer
-                        .keyframe_index_at(current_frame)
-                        .map(|kf_idx| layer.keyframes[kf_idx].start_frame)
-                })
-                .unwrap_or(current_frame);
-            if let Some(sym) = tab.doc.find_symbol(new_binding.symbol_id) {
-                let local_shapes = sym.evaluated_local_shapes_for_instance(
-                    new_binding,
-                    kf_start_frame,
-                    current_frame,
+            if tab.doc.find_symbol(new_binding.symbol_id).is_some() {
+                let tl = tab.active_timeline();
+                let curr_f = tl.current_frame;
+                let kf_start = tl.keyframe_start_frame_at(target_lid, curr_f);
+                instantiated.extend(new_binding.expand(
+                    (kf_start, curr_f),
+                    target_lid,
+                    &new_parent_scope,
                     SymbolEvalCtx::new(&tab.doc.library),
-                );
-                if local_shapes.is_empty() {
-                    instantiated.push(FillShape::new_empty_symbol_marker(
-                        new_binding,
-                        target_lid,
-                        &new_parent_scope,
-                    ));
-                } else {
-                    instantiated.extend(new_binding.instantiate_shapes(
-                        &local_shapes,
-                        target_lid,
-                        &new_parent_scope,
-                    ));
-                }
+                ));
                 continue;
             }
         }
@@ -109,16 +76,7 @@ pub(crate) fn instantiate_relative_shapes_in_scope(
             any_raw = true;
         } else {
             for &old_gid in &item.group_path {
-                let new_gid = if let Some(&(_, mapped)) =
-                    gid_map.iter().find(|&&(orig, _)| orig == old_gid)
-                {
-                    mapped
-                } else {
-                    let alloc = tab.doc.alloc_group_id();
-                    gid_map.push((old_gid, alloc));
-                    alloc
-                };
-                new_path.push(new_gid);
+                new_path.push(remap_gid(&mut gid_map, old_gid, &mut tab.doc));
             }
         }
         let mut cloned = item
@@ -127,10 +85,7 @@ pub(crate) fn instantiate_relative_shapes_in_scope(
             .with_group_path(new_path);
         cloned.shape_id = next_shape_id();
         if let Some(mut binding) = cloned.symbol_instance {
-            if let Some(&(_, mapped_inst_gid)) = gid_map
-                .iter()
-                .find(|&&(orig, _)| orig == binding.instance_gid)
-            {
+            if let Some(&mapped_inst_gid) = gid_map.get(&binding.instance_gid) {
                 binding.instance_gid = mapped_inst_gid;
                 cloned.symbol_instance = Some(binding);
             } else {
@@ -177,7 +132,7 @@ fn collect_symbol_and_descendants(
         out.push(Arc::clone(existing));
     } else {
         let mut cloned = sym.clone();
-        cloned.strip_transient_caches();
+        cloned.clear_preview_and_anim_caches();
         out.push(Arc::new(cloned));
     }
 }
@@ -185,11 +140,6 @@ fn collect_symbol_and_descendants(
 /// 別タブから移植されるシンボルの内部タイムライン内の全グループIDを貼り付け先タブの `Document` で新規採番したIDへ一括リマップする
 fn remap_timeline_group_ids(tl: &mut Timeline, doc: &mut Document) {
     let mut gid_map: HashMap<u64, u64> = HashMap::new();
-    let mut map_gid = |old_gid: u64, doc: &mut Document| -> u64 {
-        *gid_map
-            .entry(old_gid)
-            .or_insert_with(|| doc.alloc_group_id())
-    };
     for layer in &mut tl.layers {
         for i in 0..layer.keyframes.len() {
             if layer.keyframes[i]
@@ -200,19 +150,20 @@ fn remap_timeline_group_ids(tl: &mut Timeline, doc: &mut Document) {
             {
                 for sh in layer.keyframe_mut(i).cel.shapes_mut() {
                     for gid in &mut sh.group_path {
-                        *gid = map_gid(*gid, doc);
+                        *gid = remap_gid(&mut gid_map, *gid, doc);
                     }
                     if let Some(mut b) = sh.symbol_instance {
-                        b.instance_gid = map_gid(b.instance_gid, doc);
+                        b.instance_gid = remap_gid(&mut gid_map, b.instance_gid, doc);
                         sh.symbol_instance = Some(b);
                     }
                 }
             }
             if !layer.keyframes[i].cel.instances.is_empty() {
                 for inst in layer.keyframe_mut(i).cel.instances_mut() {
-                    inst.binding.instance_gid = map_gid(inst.binding.instance_gid, doc);
+                    inst.binding.instance_gid =
+                        remap_gid(&mut gid_map, inst.binding.instance_gid, doc);
                     for gid in &mut inst.parent_scope {
-                        *gid = map_gid(*gid, doc);
+                        *gid = remap_gid(&mut gid_map, *gid, doc);
                     }
                 }
             }

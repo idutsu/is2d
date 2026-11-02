@@ -288,15 +288,6 @@ impl Cel {
         (non_symbol_shapes, instances)
     }
 
-    /// クリップボード複製時などに、セル内の全図形の一時メッシュキャッシュを破棄する
-    pub(crate) fn strip_transient_caches(&mut self) {
-        if self.shapes.iter().any(FillShape::has_any_transient_cache) {
-            for s in Arc::make_mut(&mut self.shapes) {
-                s.strip_transient_caches();
-            }
-        }
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
         self.shapes.is_empty() && self.instances.is_empty()
     }
@@ -656,16 +647,16 @@ impl Layer {
         kfs
     }
 
+    fn snapshot_post_range_keyframe(&self, max_frame: usize) -> Option<Keyframe> {
+        let after = max_frame + 1;
+        (after < self.frame_count && !self.keyframes.iter().any(|kf| kf.start_frame == after))
+            .then(|| self.snapshot_keyframe_at(after, after))
+    }
+
     /// 指定フレーム区間 `[min_frame..=max_frame]` を移動元から切り取って空白化し、
     /// 移動範囲直後（`max_frame + 1`）のフレーム姿勢を保持する境界キーフレームを自動挿入する
     pub(crate) fn remove_keyframes_in_range(&mut self, min_frame: usize, max_frame: usize) {
-        let after_frame = max_frame + 1;
-        let post_range_kf = (after_frame < self.frame_count
-            && !self
-                .keyframes
-                .iter()
-                .any(|kf| kf.start_frame == after_frame))
-        .then(|| self.snapshot_keyframe_at(after_frame, after_frame));
+        let post_range_kf = self.snapshot_post_range_keyframe(max_frame);
 
         self.keyframes
             .retain(|kf| kf.start_frame < min_frame || kf.start_frame > max_frame);
@@ -690,7 +681,7 @@ impl Layer {
             if !after_kf.cel.is_empty() || after_kf.tween {
                 let pos = self
                     .keyframes
-                    .partition_point(|existing_kf| existing_kf.start_frame < after_frame);
+                    .partition_point(|existing_kf| existing_kf.start_frame < after_kf.start_frame);
                 self.keyframes.insert(pos, Arc::new(after_kf));
             }
         }
@@ -704,13 +695,7 @@ impl Layer {
         dst_max_frame: usize,
         kfs: Vec<Keyframe>,
     ) {
-        let after_frame = dst_max_frame + 1;
-        let post_range_kf = (after_frame < self.frame_count
-            && !self
-                .keyframes
-                .iter()
-                .any(|kf| kf.start_frame == after_frame))
-        .then(|| self.snapshot_keyframe_at(after_frame, after_frame));
+        let post_range_kf = self.snapshot_post_range_keyframe(dst_max_frame);
 
         if dst_max_frame >= self.frame_count {
             self.frame_count = dst_max_frame + 1;
@@ -720,7 +705,7 @@ impl Layer {
         if let Some(after_kf) = post_range_kf {
             let pos = self
                 .keyframes
-                .partition_point(|existing_kf| existing_kf.start_frame < after_frame);
+                .partition_point(|existing_kf| existing_kf.start_frame < after_kf.start_frame);
             self.keyframes.insert(pos, Arc::new(after_kf));
         }
         let dst_lid = self.id;
@@ -934,6 +919,17 @@ impl Timeline {
             .any(|l| l.is_editable_at(self.current_frame))
     }
 
+    pub(crate) fn keyframe_start_frame_at(&self, layer_id: u64, frame: usize) -> usize {
+        self.layer_index_by_id(layer_id)
+            .and_then(|l_idx| {
+                let layer = &self.layers[l_idx];
+                layer
+                    .keyframe_index_at(frame)
+                    .map(|ki| layer.keyframes[ki].start_frame)
+            })
+            .unwrap_or(frame)
+    }
+
     /// 全レイヤー・全キーフレーム内のシンボルインスタンスを列挙する
     pub(crate) fn instances(&self) -> impl Iterator<Item = &SymbolInstance> {
         self.layers
@@ -981,15 +977,6 @@ impl Timeline {
         for shape in shapes {
             if !self.is_layer_editable_by_id(shape.layer_id) {
                 shape.layer_id = fallback_lid;
-            }
-        }
-    }
-
-    /// クリップボード退避時などに、全レイヤー・全キーフレームの一時メッシュキャッシュを破棄する
-    pub(crate) fn strip_transient_caches(&mut self) {
-        for layer in &mut self.layers {
-            for i in 0..layer.keyframes.len() {
-                layer.keyframe_mut(i).cel.strip_transient_caches();
             }
         }
     }
@@ -1202,25 +1189,13 @@ impl Timeline {
         let extracted: Vec<(usize, Vec<Keyframe>)> = (sel.min_layer..=sel.max_layer)
             .filter_map(|src_l| {
                 let dst_l = (src_l as isize + actual_dl) as usize;
-                let dst_lid = self.layers.get(dst_l)?.id;
+                let _ = self.layers.get(dst_l)?;
                 let mut kfs = self
                     .layers
                     .get(src_l)?
                     .extract_keyframes_in_range(sel.min_frame, sel.max_frame);
                 if copy_mode || actual_dl != 0 {
                     remap_keyframes_group_and_instance_ids(&mut kfs, &mut alloc_group_id);
-                    for kf in &mut kfs {
-                        if kf.cel.shapes.iter().any(|s| s.layer_id != dst_lid) {
-                            for shape in kf.cel.shapes_mut() {
-                                shape.layer_id = dst_lid;
-                            }
-                        }
-                        if kf.cel.instances.iter().any(|i| i.layer_id != dst_lid) {
-                            for inst in kf.cel.instances_mut() {
-                                inst.layer_id = dst_lid;
-                            }
-                        }
-                    }
                 }
                 Some((dst_l, kfs))
             })

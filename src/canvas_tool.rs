@@ -742,21 +742,45 @@ mod scene_base_cache {
         kf_idx: usize,
         frame: usize,
         library: &[SymbolDef],
+        excluded: Option<u64>,
     ) -> usize {
         let kf = &layer.keyframes[kf_idx];
-        let has_tween = layer.interpolated_tween_binding_at(frame).is_some();
+        let keep =
+            |inst: &crate::timeline::SymbolInstance| excluded != Some(inst.binding.instance_gid);
+        let has_tween = layer
+            .interpolated_tween_binding_at(frame)
+            .is_some_and(|(_, b)| excluded != Some(b.instance_gid));
         let all_single_frame = !has_tween
             && kf
                 .cel
                 .instances
                 .iter()
+                .filter(|i| keep(i))
                 .all(|inst| inst.binding.loop_mode == SymbolLoopMode::SingleFrame);
-        let is_dynamic = !all_single_frame && (has_tween || kf.cel.has_dynamic_symbol(library));
-        if is_dynamic {
+        let has_dyn = !all_single_frame
+            && kf.cel.instances.iter().filter(|i| keep(i)).any(|inst| {
+                library.iter().any(|sym| {
+                    sym.id == inst.binding.symbol_id && sym.has_dynamic_animation(library, 0)
+                })
+            });
+        if !all_single_frame && (has_tween || has_dyn) {
             frame
         } else {
             kf.start_frame
         }
+    }
+
+    fn drain_cached_layer_range(
+        iter: &mut std::vec::IntoIter<FillShape>,
+        cursor: &mut usize,
+        range: Range<usize>,
+        out: &mut Vec<FillShape>,
+    ) {
+        for _ in 0..range.start.saturating_sub(*cursor) {
+            let _ = iter.next();
+        }
+        *cursor = range.end;
+        out.extend(iter.take(range.len()));
     }
 
     fn transform_single_shape_to_stage(s: &mut FillShape, world_xform: Affine) {
@@ -764,22 +788,15 @@ mod scene_base_cache {
             return;
         }
         let orig_rev = s.mesh_revision;
-        if s.is_empty_symbol_marker() {
+        if s.symbol_instance.is_some() {
+            let _ = s.fill_mesh();
+            s.transform_with_cached_mesh(world_xform);
+        } else {
+            s.transform(world_xform);
+        }
+        if world_xform.determinant().abs() < 1e-12 {
             if let Some(b) = &mut s.symbol_instance {
                 b.xform = world_xform * b.xform;
-            }
-            s.rebuild_cache();
-        } else {
-            if s.symbol_instance.is_some() {
-                let _ = s.fill_mesh();
-                s.transform_with_cached_mesh(world_xform);
-            } else {
-                s.transform(world_xform);
-            }
-            if world_xform.determinant().abs() < 1e-12 {
-                if let Some(b) = &mut s.symbol_instance {
-                    b.xform = world_xform * b.xform;
-                }
             }
         }
         s.mesh_revision = orig_rev;
@@ -822,29 +839,19 @@ mod scene_base_cache {
             let mut target_ranges = Vec::with_capacity(target_lids.len());
             let mut untouched = HashMap::new();
             for cl in &mut self.layers {
-                let skip = cl.range.start.saturating_sub(cursor);
-                for _ in 0..skip {
-                    let _ = old_flat_iter.next();
-                }
-                let count = cl.range.len();
-                cursor = cl.range.end;
-                cl.range = 0..0;
+                let r = std::mem::replace(&mut cl.range, 0..0);
                 if target_lids.contains(&cl.layer_id) {
                     let start = loaded_shapes.len();
-                    for _ in 0..count {
-                        if let Some(s) = old_flat_iter.next() {
-                            loaded_shapes.push(s);
-                        }
-                    }
-                    let end = loaded_shapes.len();
-                    target_ranges.push((cl.layer_id, start..end));
+                    drain_cached_layer_range(
+                        &mut old_flat_iter,
+                        &mut cursor,
+                        r,
+                        &mut loaded_shapes,
+                    );
+                    target_ranges.push((cl.layer_id, start..loaded_shapes.len()));
                 } else {
-                    let mut vec = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        if let Some(s) = old_flat_iter.next() {
-                            vec.push(s);
-                        }
-                    }
+                    let mut vec = Vec::with_capacity(r.len());
+                    drain_cached_layer_range(&mut old_flat_iter, &mut cursor, r, &mut vec);
                     untouched.insert(cl.layer_id, vec);
                 }
             }
@@ -899,7 +906,7 @@ mod scene_base_cache {
                     }
                     match l.keyframe_index_at(frame) {
                         Some(kf_idx) => {
-                            let ef = layer_eval_frame(l, kf_idx, frame, library);
+                            let ef = layer_eval_frame(l, kf_idx, frame, library, None);
                             c.eval_frame == ef
                                 && c.cel_sig.as_ref().is_some_and(|sig| {
                                     sig.matches_layer_keyframe(l, kf_idx, library)
@@ -919,18 +926,13 @@ mod scene_base_cache {
             let mut old_flat_iter = old_flat.into_iter();
             let mut cursor = 0usize;
             for cl in old_layers {
-                let skip = cl.range.start.saturating_sub(cursor);
-                for _ in 0..skip {
-                    let _ = old_flat_iter.next();
-                }
-                let count = cl.range.len();
-                let mut vec = Vec::with_capacity(count);
-                for _ in 0..count {
-                    if let Some(s) = old_flat_iter.next() {
-                        vec.push(s);
-                    }
-                }
-                cursor = cl.range.end;
+                let mut vec = Vec::with_capacity(cl.range.len());
+                drain_cached_layer_range(
+                    &mut old_flat_iter,
+                    &mut cursor,
+                    cl.range.clone(),
+                    &mut vec,
+                );
                 old_by_id.insert(cl.layer_id, (cl, vec));
             }
 
@@ -956,7 +958,7 @@ mod scene_base_cache {
                     });
                     continue;
                 };
-                let ef = layer_eval_frame(layer, kf_idx, frame, library);
+                let ef = layer_eval_frame(layer, kf_idx, frame, library, None);
                 let prev = old_by_id.remove(&layer.id);
                 if let Some((old_cl, _)) = &prev {
                     let key_unchanged = old_cl.visible == layer.visible
@@ -1046,42 +1048,6 @@ mod scene_base_cache {
         combined_screen_cache: CombinedBackdropMeshCache,
     }
 
-    fn backdrop_layer_eval_frame(
-        layer: &Layer,
-        kf_idx: usize,
-        frame: usize,
-        excluded_instance_gid: u64,
-        library: &[SymbolDef],
-    ) -> usize {
-        let kf = &layer.keyframes[kf_idx];
-        let has_tween = layer
-            .interpolated_tween_binding_at(frame)
-            .is_some_and(|(_, b)| b.instance_gid != excluded_instance_gid);
-        let all_single_frame = !has_tween
-            && kf
-                .cel
-                .instances
-                .iter()
-                .filter(|inst| inst.binding.instance_gid != excluded_instance_gid)
-                .all(|inst| inst.binding.loop_mode == SymbolLoopMode::SingleFrame);
-        let has_dyn = !all_single_frame
-            && kf
-                .cel
-                .instances
-                .iter()
-                .filter(|inst| inst.binding.instance_gid != excluded_instance_gid)
-                .any(|inst| {
-                    library.iter().any(|sym| {
-                        sym.id == inst.binding.symbol_id && sym.has_dynamic_animation(library, 0)
-                    })
-                });
-        if !all_single_frame && (has_tween || has_dyn) {
-            frame
-        } else {
-            kf.start_frame
-        }
-    }
-
     impl BackdropCache {
         pub(crate) fn cached_screen_mesh(
             &mut self,
@@ -1123,12 +1089,12 @@ mod scene_base_cache {
                     let Some(kf_idx) = layer.keyframe_index_at(curr_f) else {
                         continue;
                     };
-                    let ef = backdrop_layer_eval_frame(
+                    let ef = layer_eval_frame(
                         layer,
                         kf_idx,
                         curr_f,
-                        lvl.instance_gid,
                         &doc.library,
+                        Some(lvl.instance_gid),
                     );
                     active_specs.push((
                         lvl_idx,
@@ -1401,7 +1367,8 @@ mod scene_base_cache {
                             && layer.id == e.layer_id
                             && (min_f..=max_f).any(|f| {
                                 layer.keyframe_index_at(f).is_some_and(|kf_idx| {
-                                    layer_eval_frame(layer, kf_idx, f, library) == e.eval_frame
+                                    layer_eval_frame(layer, kf_idx, f, library, None)
+                                        == e.eval_frame
                                 })
                             })
                     })
@@ -1425,7 +1392,7 @@ mod scene_base_cache {
             if layer.keyframes[kf_idx].cel.is_empty() {
                 return None;
             }
-            let ef = layer_eval_frame(layer, kf_idx, frame, library);
+            let ef = layer_eval_frame(layer, kf_idx, frame, library, None);
             let xform_bits = world_xform.as_coeffs().map(f64::to_bits);
             let hit_idx = self.entries.iter().position(|e| {
                 e.layer_id == layer.id
@@ -2382,35 +2349,38 @@ impl Session {
             .collect()
     }
 
+    fn insert_selection_keys(
+        &mut self,
+        keys: impl IntoIterator<Item = (Option<InstanceGid>, ShapeId)>,
+    ) {
+        for (inst_gid, shape_id) in keys {
+            if let Some(gid) = inst_gid {
+                self.selection.instances.insert(gid);
+            } else {
+                self.selection.shapes.insert(shape_id);
+            }
+        }
+    }
+
     /// 指定した `Scene` インデックス列に対応する図形・シンボルインスタンスのみを選択状態にする
     pub(crate) fn set_selected_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
-        let picked: Vec<FillShape> = {
-            let scene = self.scene();
-            indices
-                .into_iter()
-                .filter_map(|idx| scene.get(idx).cloned())
-                .collect()
-        };
         self.selection.clear();
-        for shape in &picked {
-            self.selection.insert_shape(shape);
-        }
-        self.promote_selected_remainder_to_pieces();
+        self.select_shape_indices(indices);
         self.drop_unmodified_slice_if_unselected();
     }
 
     /// 指定した `Scene` インデックス列に対応する図形・シンボルインスタンスを選択状態に追加する
     pub(crate) fn select_shape_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
-        let picked: Vec<FillShape> = {
-            let scene = self.scene();
-            indices
-                .into_iter()
-                .filter_map(|idx| scene.get(idx).cloned())
-                .collect()
-        };
-        for shape in &picked {
-            self.selection.insert_shape(shape);
-        }
+        let scene = self.scene();
+        let keys: Vec<_> = indices
+            .into_iter()
+            .filter_map(|idx| {
+                scene
+                    .get(idx)
+                    .map(|s| (s.symbol_instance.map(|b| b.instance_gid), s.shape_id))
+            })
+            .collect();
+        self.insert_selection_keys(keys);
         self.promote_selected_remainder_to_pieces();
     }
 
@@ -2424,20 +2394,8 @@ impl Session {
         if self.selection.is_empty() {
             return;
         }
-        let scene = self.scene();
-        let valid_shapes: HashSet<ShapeId> = scene
-            .iter()
-            .filter(|s| s.symbol_instance.is_none())
-            .map(|s| s.shape_id)
-            .collect();
-        let valid_instances: HashSet<InstanceGid> = scene
-            .iter()
-            .filter_map(|s| s.symbol_instance.map(|b| b.instance_gid))
-            .collect();
-        self.selection.shapes.retain(|id| valid_shapes.contains(id));
-        self.selection
-            .instances
-            .retain(|gid| valid_instances.contains(gid));
+        let all_lids: HashSet<u64> = self.scene().iter().map(|s| s.layer_id).collect();
+        self.retain_selection_in_layers(&all_lids);
     }
 
     /// キャンバス図形更新後に、存在しなくなった `editing_group_path`・消滅した `selection`・無効化した `hover_target` を自動補正する
@@ -2462,19 +2420,16 @@ impl Session {
 
     /// 現在の編集スコープ内で指定レイヤーID集合 `layer_ids` に属する全図形を選択状態にする
     pub(crate) fn select_shapes_in_layers(&mut self, layer_ids: &HashSet<u64>) {
-        let picked: Vec<FillShape> = self
+        let keys: Vec<_> = self
             .scene()
             .iter()
-            .filter(|shape| {
-                shape.is_in_editing_scope(&self.editing_group_path)
-                    && layer_ids.contains(&shape.layer_id)
+            .filter(|s| {
+                s.is_in_editing_scope(&self.editing_group_path) && layer_ids.contains(&s.layer_id)
             })
-            .cloned()
+            .map(|s| (s.symbol_instance.map(|b| b.instance_gid), s.shape_id))
             .collect();
         self.selection.clear();
-        for shape in &picked {
-            self.selection.insert_shape(shape);
-        }
+        self.insert_selection_keys(keys);
         self.transform_pivot = None;
     }
 

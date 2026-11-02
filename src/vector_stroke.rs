@@ -4,8 +4,8 @@ use kurbo::{Affine, ParamCurve, ParamCurveDeriv, Point, QuadBez, Vec2 as KVec2};
 
 use crate::vector_engine::{
     dedup_closed_ring, fill_cumulative_arc_lengths, left_normal, normalize_vec,
-    point_to_segment_dist, polygon_signed_area, ring_area_and_perimeter_f64, ring_f64_to_points,
-    signed_angle, Contour, FillShape, REFERENCE_BRUSH_RADIUS,
+    point_to_segment_dist, ring_area_and_perimeter_f64, ring_f64_to_points, signed_angle,
+    signed_area_f64, Contour, FillShape, REFERENCE_BRUSH_RADIUS,
 };
 
 // ============================================================================
@@ -479,7 +479,7 @@ fn classify_and_align_ring_features(
     is_exterior: bool,
 ) -> (Vec<bool>, Vec<bool>) {
     let m = dense.len();
-    let winding_sign = if polygon_signed_area(dense) >= 0.0 {
+    let winding_sign = if signed_area_f64(dense.iter().map(|p| [p.x, p.y])) >= 0.0 {
         1.0
     } else {
         -1.0

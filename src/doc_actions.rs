@@ -520,47 +520,23 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
 
         #[cfg(test)]
         Action::ScaleSelection { sx, sy } => {
-            let Some(bbox) = tab
-                .scene()
-                .selection_bounding_box(&tab.session.selection, tab.view.zoom)
-            else {
+            let Some(pivot) = selection_pivot(tab) else {
                 return false;
             };
-            let pivot = tab.scene().active_transform_pivot(
-                &tab.session.selection,
-                tab.session.transform_pivot,
-                bbox,
-            );
             apply_affine_to_selected_inner(tab, affine_scale_around(pivot, sx, sy))
         }
         Action::FlipSelection { flip_x, flip_y } => {
-            let Some(bbox) = tab
-                .scene()
-                .selection_bounding_box(&tab.session.selection, tab.view.zoom)
-            else {
+            let Some(pivot) = selection_pivot(tab) else {
                 return false;
             };
-            let pivot = tab.scene().active_transform_pivot(
-                &tab.session.selection,
-                tab.session.transform_pivot,
-                bbox,
-            );
             let sx = if flip_x { -1.0 } else { 1.0 };
             let sy = if flip_y { -1.0 } else { 1.0 };
             apply_affine_to_selected_inner(tab, affine_scale_around(pivot, sx, sy))
         }
         Action::RotateSelection { angle_rad } => {
-            let Some(bbox) = tab
-                .scene()
-                .selection_bounding_box(&tab.session.selection, tab.view.zoom)
-            else {
+            let Some(pivot) = selection_pivot(tab) else {
                 return false;
             };
-            let pivot = tab.scene().active_transform_pivot(
-                &tab.session.selection,
-                tab.session.transform_pivot,
-                bbox,
-            );
             apply_affine_to_selected_inner(tab, affine_rotate_around(pivot, angle_rad))
         }
         #[cfg(test)]
@@ -1033,6 +1009,29 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
     false
 }
 
+fn selection_pivot(tab: &Tab) -> Option<Point> {
+    let bbox = tab
+        .scene()
+        .selection_bounding_box(&tab.session.selection, tab.view.zoom)?;
+    Some(tab.scene().active_transform_pivot(
+        &tab.session.selection,
+        tab.session.transform_pivot,
+        bbox,
+    ))
+}
+
+fn has_editable_selection(tab: &Tab) -> bool {
+    if tab.session.selection.is_empty() {
+        return false;
+    }
+    let editable_lids = editable_layer_ids(tab);
+    tab.scene().iter().any(|s| {
+        tab.session.selection.contains_shape(s)
+            && editable_lids.contains(&s.layer_id)
+            && s.is_in_editing_scope(&tab.session.editing_group_path)
+    })
+}
+
 fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     if tab.session.selection.is_empty() {
         return false;
@@ -1044,14 +1043,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         if let Some(fl) = fl_opt {
             for piece in &mut fl.pieces {
                 if selection.contains_shape(piece) {
-                    if piece.is_empty_symbol_marker() {
-                        if let Some(b) = &mut piece.symbol_instance {
-                            b.xform = affine * b.xform;
-                        }
-                        piece.rebuild_cache();
-                    } else {
-                        piece.transform(affine);
-                    }
+                    piece.transform(affine);
                     any_transformed = true;
                 }
             }
@@ -1080,14 +1072,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         edit_layers(tab, &target_lids, |edit| {
             for s in &mut edit.shapes {
                 if !hidden.contains(&s.shape_id) && selection.contains_shape(s) {
-                    if s.is_empty_symbol_marker() {
-                        if let Some(b) = &mut s.symbol_instance {
-                            b.xform = affine * b.xform;
-                        }
-                        s.rebuild_cache();
-                    } else {
-                        s.transform(affine);
-                    }
+                    s.transform(affine);
                     any_transformed = true;
                 }
             }
@@ -1118,15 +1103,7 @@ fn apply_finish_move_selection_drag(
 ) -> bool {
     tab.session.clear_overlay();
     let min_move = 1.0 / (tab.view.zoom as f64);
-    let editable_lids = editable_layer_ids(tab);
-    if total_delta.hypot() <= min_move
-        || tab.session.selection.is_empty()
-        || !tab.scene().iter().any(|s| {
-            tab.session.selection.contains_shape(s)
-                && editable_lids.contains(&s.layer_id)
-                && s.is_in_editing_scope(&tab.session.editing_group_path)
-        })
-    {
+    if total_delta.hypot() <= min_move || !has_editable_selection(tab) {
         return false;
     }
     push_undo(tab, None);
@@ -1142,15 +1119,7 @@ fn apply_finish_move_selection_drag(
 
 fn apply_move_selected(tab: &mut Tab, delta: KVec2, coalesce: Option<CoalesceKey>) -> bool {
     cancel_active_drag(tab);
-    let editable_lids = editable_layer_ids(tab);
-    if delta == KVec2::ZERO
-        || tab.session.selection.is_empty()
-        || !tab.scene().iter().any(|s| {
-            tab.session.selection.contains_shape(s)
-                && editable_lids.contains(&s.layer_id)
-                && s.is_in_editing_scope(&tab.session.editing_group_path)
-        })
-    {
+    if delta == KVec2::ZERO || !has_editable_selection(tab) {
         return false;
     }
     push_undo(tab, coalesce);
@@ -1455,14 +1424,7 @@ pub(crate) fn flush_transform_pivot_to_symbol(tab: &mut Tab) {
 
 fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     cancel_active_drag(tab);
-    let editable_lids = editable_layer_ids(tab);
-    if tab.session.selection.is_empty()
-        || !tab.scene().iter().any(|s| {
-            tab.session.selection.contains_shape(s)
-                && editable_lids.contains(&s.layer_id)
-                && s.is_in_editing_scope(&tab.session.editing_group_path)
-        })
-    {
+    if !has_editable_selection(tab) {
         return false;
     }
     push_undo(tab, None);

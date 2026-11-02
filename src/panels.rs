@@ -2,8 +2,8 @@ use eframe::egui::{self, Color32, CursorIcon, Pos2, Stroke, Vec2};
 use kurbo::{Point, Rect as KRect};
 
 use crate::canvas_tool::{
-    ActiveCanvasDrag, Clipboard, NoticeKind, SelectDragState, SelectSubMode, Tab, Tool,
-    ToolSettings, TransformDragState, active_scope_layer_id, draw_registration_cross,
+    active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, Clipboard, NoticeKind,
+    SelectDragState, SelectSubMode, Tab, Tool, ToolSettings, TransformDragState,
 };
 use crate::project_io::PendingCloseConfirm;
 use crate::symbol::{SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
@@ -506,11 +506,7 @@ pub(crate) fn draw_document_tab_bar(
 // 2. ステージ上部のスリムバー（シーン／グループ階層パンくず・右側ズーム倍率表示）
 // ------------------------------------------------------------------------
 
-pub(crate) fn draw_stage_header_bar(
-    tab: &Tab,
-    actions: &mut Vec<UiAction>,
-    ctx: &egui::Context,
-) {
+pub(crate) fn draw_stage_header_bar(tab: &Tab, actions: &mut Vec<UiAction>, ctx: &egui::Context) {
     egui::TopBottomPanel::top("stage_header_bar")
         .exact_height(30.0)
         .frame(
@@ -877,11 +873,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
 }
 
 /// 自由変形ツール (`Tool::Transform`) のプロパティ設定項目
-fn draw_transform_tool_properties(
-    tab: &Tab,
-    actions: &mut Vec<UiAction>,
-    ui: &mut egui::Ui,
-) {
+fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     let has_sel = !tab.session.selection.is_empty();
 
     draw_panel_section_label(ui, "変形アクション", 4.0);
@@ -951,9 +943,10 @@ fn draw_transform_tool_properties(
     if ui
         .add_enabled(
             has_sel
-                && tab
-                    .scene()
-                    .has_custom_transform_pivot(&tab.session.selection, tab.session.transform_pivot),
+                && tab.scene().has_custom_transform_pivot(
+                    &tab.session.selection,
+                    tab.session.transform_pivot,
+                ),
             egui::Button::new(format!(
                 "{} 変形中心（ピボット）をリセット",
                 icons::PIVOT_RESET
@@ -1449,11 +1442,7 @@ pub(crate) fn draw_selected_symbol_properties(
 }
 
 /// 「ライブラリ」タブの描画（シンボルのプレビュー・一覧・名前変更・ステージ配置・編集・削除）
-pub(crate) fn draw_library_tab(
-    tab: &mut Tab,
-    actions: &mut Vec<UiAction>,
-    ui: &mut egui::Ui,
-) {
+pub(crate) fn draw_library_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     let has_sel = !tab.session.selection.is_empty();
     if ui
         .add_enabled(
@@ -1559,11 +1548,7 @@ fn draw_selected_library_symbol_controls(
 }
 
 /// ライブラリ登録シンボルのスクロール一覧を描画し、選択切替・名前変更コマンドを発行する
-fn draw_library_symbol_list(
-    tab: &Tab,
-    actions: &mut Vec<UiAction>,
-    ui: &mut egui::Ui,
-) {
+fn draw_library_symbol_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     let entries: Vec<(u64, String, usize)> = tab
         .doc
         .library
@@ -1735,9 +1720,13 @@ pub(crate) fn draw_tool_cursor_and_feedback(
         Tool::Transform => {
             crate::tool_transform::draw_transform_tool_cursor(tab, ctx, painter, pos)
         }
-        Tool::Select => {
-            crate::tool_select::draw_select_tool_cursor(tab, tool.select_sub_mode, ctx, painter, pos)
-        }
+        Tool::Select => crate::tool_select::draw_select_tool_cursor(
+            tab,
+            tool.select_sub_mode,
+            ctx,
+            painter,
+            pos,
+        ),
     }
 }
 
@@ -1754,9 +1743,9 @@ pub(crate) fn draw_canvas_contents(
     let zoom = tab.view.zoom;
     let pan = tab.view.pan;
     let stage_size = tab.doc.stage_size;
-    let artwork_painter = tab
-        .view
-        .artwork_painter(painter, painter.clip_rect(), stage_size, in_symbol_edit);
+    let artwork_painter =
+        tab.view
+            .artwork_painter(painter, painter.clip_rect(), stage_size, in_symbol_edit);
 
     // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画
     if in_symbol_edit {
@@ -1778,9 +1767,9 @@ pub(crate) fn draw_canvas_contents(
     let mut selected_group_boxes: Vec<(u64, Option<KRect>, KRect, Option<Point>)> = Vec::new();
     let (is_sel, has_sel) = tab.scene().selected_shape_mask(&tab.session.selection);
     let curr_f = tl.current_frame;
-    let view_world_rect =
-        tab.view
-            .visible_world_rect(&artwork_painter, stage_size, in_symbol_edit);
+    let view_world_rect = tab
+        .view
+        .visible_world_rect(&artwork_painter, stage_size, in_symbol_edit);
     let scene = tab.scene();
     let scene_len = scene.len();
     let mut shape_cursor = 0usize;
@@ -1840,8 +1829,12 @@ pub(crate) fn draw_canvas_contents(
         );
     }
 
-    tab.view
-        .draw_stage_foreground_overlay(painter, painter.clip_rect(), stage_size, in_symbol_edit);
+    tab.view.draw_stage_foreground_overlay(
+        painter,
+        painter.clip_rect(),
+        stage_size,
+        in_symbol_edit,
+    );
     draw_selected_group_and_symbol_boxes(tab, painter, &selected_group_boxes);
 
     if tool.tool == Tool::Transform {

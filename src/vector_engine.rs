@@ -420,16 +420,6 @@ impl FillShape {
         screen_mesh
     }
 
-    /// いずれかの一時メッシュキャッシュ（`fill_mesh`, `hit_bez_path`, `screen_mesh_cache`, `selection_mesh`, `selection_screen_mesh`）を保持しているか
-    #[inline]
-    pub(crate) fn has_any_transient_cache(&self) -> bool {
-        self.fill_mesh.get().is_some()
-            || self.hit_bez_path.get().is_some()
-            || self.screen_mesh_cache.lock().is_some()
-            || self.selection_mesh.lock().is_some()
-            || self.selection_screen_mesh.lock().is_some()
-    }
-
     /// Undo 履歴保存時やバックアップ時に、幾何データから随時再生成可能な描画メッシュキャッシュを破棄してメモリを解放する
     pub(crate) fn strip_transient_caches(&mut self) {
         self.hit_bez_path = OnceLock::new();
@@ -901,42 +891,32 @@ pub(crate) fn dedup_closed_ring(pts: impl IntoIterator<Item = Point>, min_dist: 
     out
 }
 
-pub(crate) fn signed_area_f64(pts: &[[f64; 2]]) -> f64 {
-    let n = pts.len();
-    if n < 3 {
+pub(crate) fn signed_area_f64(pts: impl IntoIterator<Item = [f64; 2]>) -> f64 {
+    let mut it = pts.into_iter();
+    let Some(first) = it.next() else {
         return 0.0;
+    };
+    let (mut prev, mut sum, mut n) = (first, 0.0, 1usize);
+    for p in it {
+        sum += prev[0] * p[1] - p[0] * prev[1];
+        prev = p;
+        n += 1;
     }
-    let mut sum = 0.0;
-    for i in 0..n {
-        let p0 = pts[i];
-        let p1 = pts[(i + 1) % n];
-        sum += p0[0] * p1[1] - p1[0] * p0[1];
+    if n < 3 {
+        0.0
+    } else {
+        0.5 * (sum + prev[0] * first[1] - first[0] * prev[1])
     }
-    0.5 * sum
 }
 
 pub(crate) fn ring_area_and_perimeter_f64(ring: &[[f64; 2]]) -> (f64, f64) {
-    let area = signed_area_f64(ring).abs();
+    let area = signed_area_f64(ring.iter().copied()).abs();
     let mut perim = 0.0;
     for i in 0..ring.len() {
         let next = (i + 1) % ring.len();
         perim += (ring[next][0] - ring[i][0]).hypot(ring[next][1] - ring[i][1]);
     }
     (area, perim)
-}
-
-pub(crate) fn polygon_signed_area(pts: &[Point]) -> f64 {
-    let n = pts.len();
-    if n < 3 {
-        return 0.0;
-    }
-    let mut sum = 0.0;
-    for i in 0..n {
-        let p0 = pts[i];
-        let p1 = pts[(i + 1) % n];
-        sum += p0.x * p1.y - p1.x * p0.y;
-    }
-    0.5 * sum
 }
 
 pub(crate) fn point_to_segment_dist(pt: Point, a: Point, b: Point) -> f64 {

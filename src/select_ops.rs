@@ -8,6 +8,7 @@ use crate::canvas_tool::{
     sync_timeline_layer_from_canvas_selection, topmost_layer_id_for_indices, Floating,
     FloatingOrigin, HoverTarget, Scene, SelectSubMode, Session, ShapeId, Tab,
 };
+use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
 use crate::vector_boolean::{boolean_operation, slice_shape_with_marquee_rect, BoolOp};
 use crate::vector_engine::{
@@ -80,15 +81,15 @@ pub(crate) fn exit_current_group(tab: &mut Tab) -> bool {
 }
 
 /// キャンバス上のダブルクリックによるグループ/シンボルへのインプレイス進入、または空白背景ダブルクリックによる親階層への復帰を処理する
-#[cfg(test)]
-pub(crate) fn handle_canvas_double_click(tab: &mut Tab, pt: Point) {
-    if !enter_group_at(tab, pt)
-        && tab
+pub(crate) fn handle_canvas_double_click(host: &mut impl ActionHost, pt: Point) {
+    if !apply(host, Action::EnterGroupAt { pt })
+        && host
+            .tab()
             .scene()
-            .topmost_shape_at(pt, &tab.session.editing_group_path)
+            .topmost_shape_at(pt, &host.tab().session.editing_group_path)
             .is_none()
     {
-        exit_current_group(tab);
+        apply(host, Action::ExitGroup);
     }
 }
 

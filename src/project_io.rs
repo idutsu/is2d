@@ -813,7 +813,7 @@ impl From<SavedTimeline> for Timeline {
             .max()
             .unwrap_or(0);
         for layer in &mut layers {
-            if layer.id == 0 || layer.id > MAX_SAFE_ENTITY_ID || !seen_layer_ids.insert(layer.id) {
+            if layer.id > MAX_SAFE_ENTITY_ID || !seen_layer_ids.insert(layer.id) {
                 loop {
                     max_layer_id = max_layer_id.saturating_add(1).max(1);
                     if seen_layer_ids.insert(max_layer_id) {
@@ -1063,7 +1063,6 @@ impl ProjectDocument {
                     let needs_inst_update = kf.cel.instances.iter().any(|inst| {
                         sym_id_remap.contains_key(&inst.binding.symbol_id)
                             || !seen_sym_ids.contains(&inst.binding.symbol_id)
-                            || inst.binding.instance_gid == 0
                             || inst.binding.instance_gid > MAX_SAFE_ENTITY_ID
                             || inst
                                 .parent_scope
@@ -1071,7 +1070,6 @@ impl ProjectDocument {
                                 .any(|&gid| gid == 0 || gid > MAX_SAFE_ENTITY_ID)
                     });
                     if needs_inst_update {
-                        let mut seen_kf_gids = HashSet::new();
                         let mut updated_instances = Vec::with_capacity(kf.cel.instances.len());
                         for mut inst in (*kf.cel.instances).clone() {
                             if let Some(&mapped_sym_id) = sym_id_remap.get(&inst.binding.symbol_id)
@@ -1090,9 +1088,7 @@ impl ProjectDocument {
                                     });
                                 }
                             }
-                            if inst.binding.instance_gid == 0
-                                || inst.binding.instance_gid > MAX_SAFE_ENTITY_ID
-                            {
+                            if inst.binding.instance_gid > MAX_SAFE_ENTITY_ID {
                                 inst.binding.instance_gid = *unsafe_gid_remap
                                     .entry(inst.binding.instance_gid)
                                     .or_insert_with(|| {
@@ -1100,11 +1096,6 @@ impl ProjectDocument {
                                         next_safe_gid = next_safe_gid.saturating_add(1);
                                         id
                                     });
-                            }
-                            if !seen_kf_gids.insert(inst.binding.instance_gid) {
-                                inst.binding.instance_gid = next_safe_gid;
-                                next_safe_gid = next_safe_gid.saturating_add(1);
-                                seen_kf_gids.insert(inst.binding.instance_gid);
                             }
                             updated_instances.push(inst);
                         }

@@ -146,9 +146,6 @@ pub(crate) struct Is2dApp {
     pub(crate) allow_viewport_close: bool,
 }
 
-#[allow(dead_code)]
-pub(crate) type App = Is2dApp;
-
 impl Default for Is2dApp {
     fn default() -> Self {
         Self {
@@ -454,26 +451,21 @@ impl Is2dApp {
         }
         let input = ctx.input(|i| i.clone());
         let cmd = input.modifiers.command || input.modifiers.ctrl;
-        let file_cmd = if cmd && key_pressed_no_repeat(&input, Key::N) {
-            Some(0u8)
+        if cmd && key_pressed_no_repeat(&input, Key::N) {
+            project_io::new_project(self, ctx);
+            return;
         } else if cmd && key_pressed_no_repeat(&input, Key::O) {
-            Some(1u8)
+            project_io::open_project_dialog(self, ctx);
+            return;
         } else if cmd && key_pressed_no_repeat(&input, Key::S) {
-            Some(if input.modifiers.shift { 3u8 } else { 2u8 })
-        } else if cmd && key_pressed_no_repeat(&input, Key::W) {
-            Some(4u8)
-        } else {
-            None
-        };
-        if let Some(cmd_id) = file_cmd {
-            match cmd_id {
-                0 => project_io::new_project(self, ctx),
-                1 => project_io::open_project_dialog(self, ctx),
-                2 => project_io::save_project(self, ctx),
-                3 => project_io::save_project_as_dialog(self, ctx),
-                4 => project_io::close_active_tab(self, Some(ctx)),
-                _ => {}
+            if input.modifiers.shift {
+                project_io::save_project_as_dialog(self, ctx);
+            } else {
+                project_io::save_project(self, ctx);
             }
+            return;
+        } else if cmd && key_pressed_no_repeat(&input, Key::W) {
+            project_io::close_active_tab(self, Some(ctx));
             return;
         }
         if ctx.wants_keyboard_input() {
@@ -565,7 +557,13 @@ impl Is2dApp {
             timeline_ui::step_frame(self, 1);
         } else if key_pressed_no_repeat(i, Key::Home) {
             let layer_idx = self.tab().active_timeline().active_layer;
-            apply(self, Action::SwitchLayerAndFrame { layer_idx, frame: 0 });
+            apply(
+                self,
+                Action::SwitchLayerAndFrame {
+                    layer_idx,
+                    frame: 0,
+                },
+            );
         } else if key_pressed_no_repeat(i, Key::End) {
             let tl = self.tab().active_timeline();
             let frame = tl.total_frames.saturating_sub(1);
@@ -748,9 +746,7 @@ impl Is2dApp {
             Tool::Brush | Tool::Eraser | Tool::Bucket => {
                 self.tab().active_timeline().is_active_layer_editable()
             }
-            Tool::Select | Tool::Transform => {
-                self.tab().active_timeline().has_any_editable_layer()
-            }
+            Tool::Select | Tool::Transform => self.tab().active_timeline().has_any_editable_layer(),
         }
     }
 
@@ -1007,12 +1003,7 @@ impl Is2dApp {
                 );
 
                 // 3. キャンバス上のシェイプ・オニオンスキン・ステージ枠線・選択枠・プレビューの描画
-                panels::draw_canvas_contents(
-                    self.tab(),
-                    &self.tool,
-                    &self.timeline_ui,
-                    &painter,
-                );
+                panels::draw_canvas_contents(self.tab(), &self.tool, &self.timeline_ui, &painter);
 
                 // 4. 状態連動の警告バッジおよび一時トースト通知を描画
                 self.draw_canvas_notices(ctx, &painter, canvas_rect, tool_allowed);

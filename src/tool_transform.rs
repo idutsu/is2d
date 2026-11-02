@@ -4,7 +4,7 @@ use kurbo::{Affine, Point};
 use crate::canvas_tool::{ActiveCanvasDrag, MarqueeDrag, Scene, Session, Tab, View};
 pub(crate) use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
 use crate::clipboard_ops::begin_move_selection_drag;
-use crate::doc_actions::{Action, ActionHost, apply};
+use crate::doc_actions::{apply, Action, ActionHost};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{
     convert_selection_to_symbol, delete_symbol_from_library, flip_selected_shapes,
@@ -12,6 +12,7 @@ pub(crate) use crate::doc_actions::{
     scale_selected_shapes, set_active_keyframe_tween_rotate, set_selected_symbol_playback,
     set_selected_symbol_world_pivot, timeline_toggle_tween,
 };
+use crate::select_ops::handle_canvas_double_click;
 #[cfg(test)]
 pub(crate) use crate::symbol_ops::{
     enter_symbol_from_library, enter_symbol_timeline, exit_symbol_timeline,
@@ -40,14 +41,8 @@ pub(crate) fn handle_transform_tool_input(
                 == TransformHoverTarget::Pivot
             {
                 apply(host, Action::ResetTransformPivot);
-            } else if !apply(host, Action::EnterGroupAt { pt })
-                && host
-                    .tab()
-                    .scene()
-                    .topmost_shape_at(pt, &host.tab().session.editing_group_path)
-                    .is_none()
-            {
-                apply(host, Action::ExitGroup);
+            } else {
+                handle_canvas_double_click(host, pt);
             }
         }
         return;
@@ -196,8 +191,7 @@ pub(crate) fn start_transform_drag(
                 }
                 let tab = host.tab_mut();
                 let move_drag = begin_move_selection_drag(tab, pt, alt_held);
-                tab.session.drag =
-                    ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
+                tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
             } else {
                 host.tab_mut().session.drag = ActiveCanvasDrag::Transform(
                     TransformDragState::MarqueeSelect(MarqueeDrag::new(pt, false)),
@@ -207,12 +201,7 @@ pub(crate) fn start_transform_drag(
     }
 }
 
-pub(crate) fn update_transform_drag(
-    tab: &mut Tab,
-    pt: Point,
-    shift_held: bool,
-    alt_held: bool,
-) {
+pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, alt_held: bool) {
     let mut drag_state = std::mem::take(&mut tab.session.drag);
     if let ActiveCanvasDrag::Transform(transform_drag) = &mut drag_state {
         match transform_drag {
@@ -621,7 +610,11 @@ fn draw_transform_rotate_cursor_badge(painter: &egui::Painter, cursor: Pos2) {
         8.5,
         Color32::from_rgba_unmultiplied(255, 255, 255, 235),
     );
-    painter.circle_stroke(base, 8.5, Stroke::new(1.5_f32, Color32::from_rgb(0, 125, 240)));
+    painter.circle_stroke(
+        base,
+        8.5,
+        Stroke::new(1.5_f32, Color32::from_rgb(0, 125, 240)),
+    );
     let r = 5.0_f32;
     let steps = 10;
     let start_ang = -std::f32::consts::FRAC_PI_4 * 3.0;

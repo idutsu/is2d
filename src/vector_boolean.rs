@@ -880,7 +880,7 @@ pub(crate) fn find_enclosed_region_at(
         [bounds.x1, bounds.y1],
         [bounds.x0, bounds.y1],
     ];
-    if signed_area_f64(&bounds_ring) > 0.0 {
+    if signed_area_f64(bounds_ring.iter().copied()) > 0.0 {
         bounds_ring.reverse();
     }
 
@@ -1074,7 +1074,7 @@ fn flatten_contour_for_overlay(
     quad_table: &mut Vec<QuadRecord>,
 ) -> Option<Vec<[f64; 2]>> {
     let mut ring = sample_contour_ring_for_overlay(contour, quad_table)?;
-    let area = signed_area_f64(&ring);
+    let area = signed_area_f64(ring.iter().copied());
     if area.abs() < 1e-6 {
         return None;
     }

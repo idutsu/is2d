@@ -51,6 +51,33 @@ impl SymbolInstanceBinding {
         }
         out
     }
+
+    pub(crate) fn expand(
+        self,
+        (kf_start_frame, frame): (usize, usize),
+        layer_id: u64,
+        parent_scope: &[u64],
+        ctx: SymbolEvalCtx<'_>,
+    ) -> Vec<FillShape> {
+        let local_shapes = (ctx.depth < MAX_SYMBOL_NEST_DEPTH)
+            .then(|| ctx.library.iter().find(|s| s.id == self.symbol_id))
+            .flatten()
+            .map(|sym| {
+                sym.evaluated_local_shapes_for_instance(self, kf_start_frame, frame, ctx.nested())
+            })
+            .unwrap_or_default();
+        if !local_shapes.is_empty() {
+            self.instantiate_shapes(&local_shapes, layer_id, parent_scope)
+        } else if ctx.depth == 0 {
+            vec![FillShape::new_empty_symbol_marker(
+                self,
+                layer_id,
+                parent_scope,
+            )]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 impl FillShape {
@@ -158,20 +185,13 @@ pub(crate) fn resolve_cel_with_library(
             out.push(cel.shapes[next_cel_idx].clone());
             next_cel_idx += 1;
         }
-        let b = inst.binding;
-        let Some(sym) = ctx.library.iter().find(|sym| sym.id == b.symbol_id) else {
-            continue;
-        };
-        let local_shapes =
-            sym.evaluated_local_shapes_for_instance(b, kf_start_frame, frame, ctx.nested());
-        if local_shapes.is_empty() && ctx.depth == 0 {
-            out.push(FillShape::new_empty_symbol_marker(
-                b,
+        if ctx.library.iter().any(|s| s.id == inst.binding.symbol_id) {
+            out.extend(inst.binding.expand(
+                (kf_start_frame, frame),
                 inst.layer_id,
                 &inst.parent_scope,
+                ctx.clone(),
             ));
-        } else {
-            out.extend(b.instantiate_shapes(&local_shapes, inst.layer_id, &inst.parent_scope));
         }
     }
 
@@ -199,12 +219,6 @@ impl SymbolDef {
             mini_preview_cache: SyncCache::new(None),
             dynamic_anim_cache: SyncCache::new(None),
         }
-    }
-
-    /// Undo 履歴保存時などに、シンボル定義内のタイムラインおよびミニプレビューの一時メッシュキャッシュを破棄する
-    pub(crate) fn strip_transient_caches(&mut self) {
-        self.timeline.strip_transient_caches();
-        self.clear_preview_and_anim_caches();
     }
 
     /// シンボル定義のミニプレビューおよび動的アニメーション判定の一時キャッシュを破棄する
@@ -878,19 +892,8 @@ pub(crate) fn compute_resolved_cel_signature(
 }
 
 // ============================================================================
-// 3. Cel / Layer / Timeline のシンボル展開・解決済みメッシュ評価メソッド
+// 3. Layer / Timeline のシンボル展開・解決済みメッシュ評価メソッド
 // ============================================================================
-
-impl Cel {
-    /// このセル内に、複数フレームまたは先頭フレーム空白の動的シンボルインスタンス（入れ子含む）が含まれているかを返す
-    pub(crate) fn has_dynamic_symbol(&self, library: &[SymbolDef]) -> bool {
-        self.instances.iter().any(|inst| {
-            library.iter().any(|sym| {
-                sym.id == inst.binding.symbol_id && sym.has_dynamic_animation(library, 0)
-            })
-        })
-    }
-}
 
 impl Layer {
     /// このレイヤーの指定フレーム `frame` における図形列を、クラシックトゥイーン補間およびシンボル内タイムライン評価込みで返す
@@ -905,27 +908,7 @@ impl Layer {
         };
         let kf = &self.keyframes[kf_idx];
         if let Some((_, interp_b)) = self.interpolated_tween_binding_at(frame) {
-            if ctx.depth < MAX_SYMBOL_NEST_DEPTH {
-                if let Some(sym) = ctx.library.iter().find(|s| s.id == interp_b.symbol_id) {
-                    let local_shapes = sym.evaluated_local_shapes_for_instance(
-                        interp_b,
-                        kf.start_frame,
-                        child_eval_frame,
-                        ctx.nested(),
-                    );
-                    if !local_shapes.is_empty() {
-                        return interp_b.instantiate_shapes(&local_shapes, out_layer_id, &[]);
-                    }
-                }
-            }
-            if ctx.depth == 0 {
-                return vec![FillShape::new_empty_symbol_marker(
-                    interp_b,
-                    out_layer_id,
-                    &[],
-                )];
-            }
-            return Vec::new();
+            return interp_b.expand((kf.start_frame, child_eval_frame), out_layer_id, &[], ctx);
         }
 
         resolve_cel_with_library(&kf.cel, kf.start_frame, child_eval_frame, ctx)

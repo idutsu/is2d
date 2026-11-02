@@ -1,12 +1,12 @@
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    Tab, active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
-    editable_layer_ids, insert_and_select_shapes_in_scope, topmost_layer_id_for_indices,
+    active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
+    editable_layer_ids, insert_and_select_shapes_in_scope, topmost_layer_id_for_indices, Tab,
 };
 use crate::symbol::{EditLevel, SymbolEvalCtx, SymbolInstanceBinding};
 use crate::timeline::TimelineCellSelection;
-use crate::vector_engine::{FillShape, union_bounding_boxes};
+use crate::vector_engine::union_bounding_boxes;
 
 /// 選択中のオブジェクトを新しい「シンボル」に変換するためのローカル図形抽出・インスタンスバインディング付与・ライブラリ登録を行い、
 /// `(sym_id, target_lid)` を返す
@@ -157,36 +157,13 @@ pub(crate) fn prepare_place_symbol_instance(
     let tl = tab.active_timeline();
     let target_lid = active_scope_layer_id(&tab.session, tl);
     let curr_frame = tl.current_frame;
-    let kf_start = tl
-        .layer_index_by_id(target_lid)
-        .and_then(|l_idx| {
-            tl.layers[l_idx]
-                .keyframe_index_at(curr_frame)
-                .map(|ki| tl.layers[l_idx].keyframes[ki].start_frame)
-        })
-        .unwrap_or(curr_frame);
-    let sym_shapes = tab
-        .doc
-        .find_symbol(symbol_id)
-        .map(|s| {
-            s.evaluated_local_shapes_for_instance(
-                binding,
-                kf_start,
-                curr_frame,
-                SymbolEvalCtx::new(&tab.doc.library),
-            )
-        })
-        .unwrap_or_default();
-
-    let placed = if !sym_shapes.is_empty() {
-        binding.instantiate_shapes(&sym_shapes, target_lid, &tab.session.editing_group_path)
-    } else {
-        vec![FillShape::new_empty_symbol_marker(
-            binding,
-            target_lid,
-            &tab.session.editing_group_path,
-        )]
-    };
+    let kf_start = tl.keyframe_start_frame_at(target_lid, curr_frame);
+    let placed = binding.expand(
+        (kf_start, curr_frame),
+        target_lid,
+        &tab.session.editing_group_path,
+        SymbolEvalCtx::new(&tab.doc.library),
+    );
     insert_and_select_shapes_in_scope(tab, placed, None);
     true
 }
@@ -204,9 +181,7 @@ pub(crate) fn selected_single_symbol_info(
             if !layer.is_editable_at(tl.current_frame) {
                 return None;
             }
-            let mut b = layer
-                .cel_at(tl.current_frame)?
-                .single_symbol_instance()?;
+            let mut b = layer.cel_at(tl.current_frame)?.single_symbol_instance()?;
             b.xform = tab.session.edit_path.world_xform() * b.xform;
             Some(b)
         })?;
@@ -228,25 +203,27 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
         let xform = if tab.session.edit_path.is_empty() {
             binding.xform
         } else {
-            let local_inst_xform = (binding.instance_gid != 0).then(|| {
-                tl.layers.iter().find_map(|layer| {
-                    if !layer.visible {
-                        return None;
-                    }
-                    if let Some((_, interp_b)) = layer.interpolated_tween_binding_at(curr_f) {
-                        if interp_b.instance_gid == binding.instance_gid
-                            && interp_b.symbol_id == binding.symbol_id
-                        {
-                            return Some(interp_b.xform);
+            let local_inst_xform = (binding.instance_gid != 0)
+                .then(|| {
+                    tl.layers.iter().find_map(|layer| {
+                        if !layer.visible {
+                            return None;
                         }
-                    }
-                    layer.cel_at(curr_f)?.instances.iter().find_map(|inst| {
-                        (inst.binding.instance_gid == binding.instance_gid
-                            && inst.binding.symbol_id == binding.symbol_id)
-                            .then_some(inst.binding.xform)
+                        if let Some((_, interp_b)) = layer.interpolated_tween_binding_at(curr_f) {
+                            if interp_b.instance_gid == binding.instance_gid
+                                && interp_b.symbol_id == binding.symbol_id
+                            {
+                                return Some(interp_b.xform);
+                            }
+                        }
+                        layer.cel_at(curr_f)?.instances.iter().find_map(|inst| {
+                            (inst.binding.instance_gid == binding.instance_gid
+                                && inst.binding.symbol_id == binding.symbol_id)
+                                .then_some(inst.binding.xform)
+                        })
                     })
                 })
-            }).flatten();
+                .flatten();
             if let Some(local_xf) = local_inst_xform.filter(|&local_xf| {
                 (prev_world * local_xf)
                     .as_coeffs()
@@ -391,7 +368,6 @@ pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
     tab.session.transform_pivot = None;
     tab.session.sanitize_editing_scope();
 
-    tab.session
-        .select_symbol_instance_by_gid(lvl.instance_gid);
+    tab.session.select_symbol_instance_by_gid(lvl.instance_gid);
     true
 }

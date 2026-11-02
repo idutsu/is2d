@@ -37,7 +37,7 @@
 3. **タブごとの表示状態（`View`、保存しない）**: ズーム・パン・枠外を隠す・アンカー表示・オニオンスキン設定・タイムライン選択の表示フラグ・ライブラリで選んでいるシンボル。Undo / Redo で巻き戻らないように `Document` から分離する。
 4. **履歴状態（`UndoHistory`）**: タブごとに最大 100 ステップの `VecDeque<UndoEntry>`（9章）。
 5. **タブ（`Tab`）**: タブID・ファイルパス・`Document`・`Session`・`View`・`UndoHistory` を1つにまとめる。
-6. **アプリ全体状態（`App`）**: タブ配列 `Vec<Tab>` と `active: usize`、ツール設定（`ToolSettings`）、アプリ共通クリップボード（`Clipboard`）、トースト通知、右パネルのタブ、タイムライン UI の状態。
+6. **アプリ全体状態（`Is2dApp`）**: タブ配列 `Vec<Tab>` と `active: usize`、ツール設定（`ToolSettings`）、アプリ共通クリップボード（`Clipboard`）、トースト通知、右パネルのタブ、タイムライン UI の状態。
 - **ドラッグ操作の排他ステートマシン化**:
   - キャンバス上のドラッグ（ブラシ描画・アンカー変形・エッジ変形・選択移動・矩形選択・自由変形・ピボット移動・パン）を `Option<bool>` フラグの寄せ集めではなく、単一の `enum ActiveCanvasDrag` として定義し、複数ツールのドラッグ状態が同時に有効になるバグを型レベルで排除する。
   - ドラッグ開始時に、未選択図形の選択や、頂点・エッジ変形開始時の選択解除（`Floating` の確定）・移動対象の `Floating` への持ち上げが必要に応じて行われる。ドラッグ進行中は文書を書き換えず仮表示を上乗せ（`Overlay`）で行い、マウスを離したときに完了の `Action` を1回だけ発行する。
@@ -94,7 +94,7 @@
   2. **Layer 2 — Domain / Model 層**: タイムライン・レイヤー・キーフレーム・セル・トゥイーン補間（`timeline`）および永続ドキュメント `Document`・シンボル定義・入れ子評価・`EditPath`（`symbol`）。Layer 1 のみに依存し、上位層への逆依存を持たないデータモデル層。
   3. **Layer 3 — Document & Tool Operations 層**: タブ状態 `Tab`・作業状態 `Session`・表示状態 `View`・Undo履歴・`Scene`・土台キャッシュ・上乗せ・`Floating`・`edit_layers`（`canvas_tool`）、ドキュメント変更アクションと一元 `apply`（`doc_actions`）、シンボル操作（`symbol_ops`）、選択・グループ・重なり順操作（`select_ops`）、クリップボード操作（`clipboard_ops`）、ペイント系ツール（`tool_paint`）、選択・変形ツール（`tool_select`）、自由変形ツール（`tool_transform`）、および `.is2d` プロジェクトファイルのシリアライズ・マルチタブ管理（`project_io`）。
   4. **Layer 4 — UI Presentation 層**: 下部タイムラインUI（`timeline_ui`）および最上部メニューバー・上部ステージバー・左右パネル・`UiAction`（`panels`）。
-  5. **Layer 5 — Application Shell 層**: アプリ統合状態 `Is2dApp`（`App`）・ショートカット処理・`UiAction` の一元適用（`main`）。下位層から上位層への逆参照ゼロ・層内の相互循環ゼロを厳守する。
+  5. **Layer 5 — Application Shell 層**: アプリ統合状態 `Is2dApp`・ショートカット処理・`UiAction` の一元適用（`main`）。下位層から上位層への逆参照ゼロ・層内の相互循環ゼロを厳守する。
 
 ## 8. 描画・キャッシュ戦略（Rendering & Caching）
 - `egui` は毎フレーム `egui::Mesh` を構築して描画するため、アニメーション再生やズーム・パン時にベジェ曲線の平坦化や耳刈り法（Earcut）を走らせないシェイプ単位メッシュキャッシュと、毎コマその場で結合するセル描画方式を採る：
