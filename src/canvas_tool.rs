@@ -10,7 +10,7 @@ pub(crate) use crate::symbol::Document;
 use crate::symbol::{EditPath, SymbolDef};
 use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
 use crate::vector_boolean::{merge_disjoint_pieces_into_canvas, merge_shapes_into_canvas};
-use crate::vector_engine::{FillShape, SyncCache};
+use crate::vector_engine::{rects_overlap, FillShape, SyncCache};
 
 #[cfg(test)]
 pub(crate) const MAX_UNDO_HISTORY: usize = 100;
@@ -139,7 +139,7 @@ impl MarqueeDrag {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum SelectSubMode {
     #[default]
-    Reshape,      // 通常の輪郭変形・頂点移動・図形移動（V キー）
+    Reshape, // 通常の輪郭変形・頂点移動・図形移動（V キー）
     AddAnchor,    // ＋ アンカー追加モード（+ キー）
     DeleteAnchor, // － アンカー削除モード（- キー）
 }
@@ -657,8 +657,6 @@ pub(crate) struct Clipboard {
     pub(crate) paste_count: usize,
     /// `Cmd+V` による通常ペーストの累積ワールド座標オフセット（途中でズーム変更しても階段状にずらす用）
     pub(crate) paste_offset: KVec2,
-    /// コピー元の生図形群が互いに重ならず同色接触もなかったか（ペースト時の `Floating::pieces_disjoint` 引き継ぎ用）
-    pub(crate) pieces_disjoint: bool,
 }
 
 pub(crate) type ShapeId = u64;
@@ -741,7 +739,12 @@ mod scene_base_cache {
         layer_order_ids: Vec<LayerId>,
     }
 
-    fn layer_eval_frame(layer: &Layer, kf_idx: usize, frame: usize, library: &[SymbolDef]) -> usize {
+    fn layer_eval_frame(
+        layer: &Layer,
+        kf_idx: usize,
+        frame: usize,
+        library: &[SymbolDef],
+    ) -> usize {
         let kf = &layer.keyframes[kf_idx];
         let has_tween = layer.interpolated_tween_binding_at(frame).is_some();
         let all_single_frame = !has_tween
@@ -915,9 +918,9 @@ mod scene_base_cache {
                         Some(kf_idx) => {
                             let ef = layer_eval_frame(l, kf_idx, frame, library);
                             c.eval_frame == ef
-                                && c.cel_sig
-                                    .as_ref()
-                                    .is_some_and(|sig| sig.matches_layer_keyframe(l, kf_idx, library))
+                                && c.cel_sig.as_ref().is_some_and(|sig| {
+                                    sig.matches_layer_keyframe(l, kf_idx, library)
+                                })
                         }
                         None => c.cel_sig.is_none(),
                     }
@@ -1209,7 +1212,9 @@ mod scene_base_cache {
                             && cl.world_xform_bits == xform_bits
                             && cl.layer_id == layer.id
                             && cl.eval_frame == ef
-                            && cl.cel_sig.matches_layer_keyframe(layer, kf_idx, &doc.library)
+                            && cl
+                                .cel_sig
+                                .matches_layer_keyframe(layer, kf_idx, &doc.library)
                     },
                 );
 
@@ -1241,9 +1246,7 @@ mod scene_base_cache {
                 {
                     let parent_tl = get_tl(parent_sym_id);
                     let layer = &parent_tl.layers[layer_idx];
-                    if let Some(old_cl) =
-                        old_by_key.remove(&(lvl_idx, parent_sym_id, layer.id))
-                    {
+                    if let Some(old_cl) = old_by_key.remove(&(lvl_idx, parent_sym_id, layer.id)) {
                         let key_unchanged = old_cl.excluded_instance_gid == excl_gid
                             && old_cl.world_xform_bits == xform_bits
                             && old_cl.eval_frame == ef
@@ -1257,7 +1260,13 @@ mod scene_base_cache {
                         new_layers.push(Self::build_layer(
                             doc,
                             parent_tl,
-                            (lvl_idx, parent_sym_id, excl_gid, parent_world_xform, xform_bits),
+                            (
+                                lvl_idx,
+                                parent_sym_id,
+                                excl_gid,
+                                parent_world_xform,
+                                xform_bits,
+                            ),
                             (curr_f, layer_idx, kf_idx, ef),
                             (old_cl.world_xform_bits == xform_bits).then_some(&old_cl.shapes),
                         ));
@@ -1265,7 +1274,13 @@ mod scene_base_cache {
                         new_layers.push(Self::build_layer(
                             doc,
                             parent_tl,
-                            (lvl_idx, parent_sym_id, excl_gid, parent_world_xform, xform_bits),
+                            (
+                                lvl_idx,
+                                parent_sym_id,
+                                excl_gid,
+                                parent_world_xform,
+                                xform_bits,
+                            ),
                             (curr_f, layer_idx, kf_idx, ef),
                             None,
                         ));
@@ -1312,9 +1327,8 @@ mod scene_base_cache {
         ) -> CachedBackdropLayer {
             let layer = &parent_tl.layers[layer_idx];
             let resolved = parent_tl.evaluate_layer_shapes_at(layer_idx, curr_f, &doc.library);
-            let donor_map: Option<HashMap<(ShapeId, u64), &FillShape>> = donor_shapes
-                .filter(|d| !d.is_empty())
-                .map(|donors| {
+            let donor_map: Option<HashMap<(ShapeId, u64), &FillShape>> =
+                donor_shapes.filter(|d| !d.is_empty()).map(|donors| {
                     donors
                         .iter()
                         .map(|d| ((d.shape_id, d.mesh_revision), d))
@@ -1398,11 +1412,9 @@ mod scene_base_cache {
                         layer.visible
                             && layer.id == e.layer_id
                             && (min_f..=max_f).any(|f| {
-                                layer
-                                    .keyframe_index_at(f)
-                                    .is_some_and(|kf_idx| {
-                                        layer_eval_frame(layer, kf_idx, f, library) == e.eval_frame
-                                    })
+                                layer.keyframe_index_at(f).is_some_and(|kf_idx| {
+                                    layer_eval_frame(layer, kf_idx, f, library) == e.eval_frame
+                                })
                             })
                     })
             });
@@ -1705,9 +1717,8 @@ impl<'a> Scene<'a> {
     /// 編集スコープ `editing_group_path` 内で、指定座標 `pt` にヒットする最前面シェイプの `Scene` インデックスを返す
     pub(crate) fn topmost_shape_at(self, pt: Point, editing_group_path: &[u64]) -> Option<usize> {
         (0..self.len()).rev().find(|&idx| {
-            self.get(idx).is_some_and(|s| {
-                s.is_in_editing_scope(editing_group_path) && s.contains_point(pt)
-            })
+            self.get(idx)
+                .is_some_and(|s| s.is_in_editing_scope(editing_group_path) && s.contains_point(pt))
         })
     }
 
@@ -1816,11 +1827,7 @@ impl<'a> Scene<'a> {
 
     /// 選択中シェイプ群の全体のバウンディングボックスを返す
     /// （可視シェイプが含まれる場合は `geometry_bounding_box()` の外接矩形を返し、空白フレームシンボルマーカーのみの場合はその基準点から算出する）
-    pub(crate) fn selection_bounding_box(
-        self,
-        selection: &Selection,
-        zoom: f32,
-    ) -> Option<KRect> {
+    pub(crate) fn selection_bounding_box(self, selection: &Selection, zoom: f32) -> Option<KRect> {
         if selection.is_empty() {
             return None;
         }
@@ -1926,8 +1933,6 @@ pub(crate) struct Floating {
     pub(crate) hidden: HashSet<ShapeId>,
     /// 確定時に選択中の生図形をベース図形へ結合（Merge Drawing）する必要があるか
     pub(crate) modified: bool,
-    /// 浮いている片同士が重ならず、同じレイヤー・スコープ・色で接する片もないか
-    pub(crate) pieces_disjoint: bool,
 }
 
 #[inline]
@@ -1967,7 +1972,6 @@ impl Floating {
     pub(crate) fn matches_undo_snapshot(&self, other: &Self) -> bool {
         self.origin == other.origin
             && self.modified == other.modified
-            && self.pieces_disjoint == other.pieces_disjoint
             && self.hidden == other.hidden
             && self.pieces.len() == other.pieces.len()
             && self.remainder.len() == other.remainder.len()
@@ -2140,7 +2144,9 @@ impl Session {
         };
         let cloned = orig.clone();
         self.overlay.hide.insert(shape_id);
-        self.overlay.add.push((Placement::ReplaceAt(shape_id), cloned));
+        self.overlay
+            .add
+            .push((Placement::ReplaceAt(shape_id), cloned));
         self.invalidate_scene_order();
         true
     }
@@ -2234,10 +2240,9 @@ impl Session {
                     if for_transform {
                         orig_shapes.push(cloned.clone());
                     }
-                    self.overlay.add.push((
-                        Placement::TopOfLayer(piece.layer_id, scope.clone()),
-                        cloned,
-                    ));
+                    self.overlay
+                        .add
+                        .push((Placement::TopOfLayer(piece.layer_id, scope.clone()), cloned));
                 }
             }
         }
@@ -2248,9 +2253,8 @@ impl Session {
     /// 自由変形ドラッグ中、`orig_shapes` に対してキャッシュ済みメッシュ頂点バッファを再利用して `affine` を `overlay.add` へ適用する
     pub(crate) fn update_transform_overlay(&mut self, orig_shapes: &[FillShape], affine: Affine) {
         let start = self.overlay_movable_start.min(self.overlay.add.len());
-        for ((_, overlay_shape), orig_shape) in self.overlay.add[start..]
-            .iter_mut()
-            .zip(orig_shapes.iter())
+        for ((_, overlay_shape), orig_shape) in
+            self.overlay.add[start..].iter_mut().zip(orig_shapes.iter())
         {
             overlay_shape.transform_from_origin(orig_shape, affine);
         }
@@ -2277,7 +2281,7 @@ impl Session {
     }
 
     /// 選択中の生図形のうち、まだ `Floating` に入っていないものを `Floating` に持ち上げ、変更済みとしてマークする
-    pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self, pieces_disjoint: bool) -> bool {
+    pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self) -> bool {
         let scope = self.editing_group_path.clone();
         let mut newly_lifted = Vec::new();
         for shape in self.base_cache.shapes() {
@@ -2297,19 +2301,14 @@ impl Session {
         }
         let order_ids = self.base_cache.layer_order_ids().to_vec();
         self.update_floating(|fl_opt| {
-            let had_existing_modified = fl_opt.as_ref().is_some_and(|fl| fl.modified);
             let fl = fl_opt.get_or_insert_with(|| Floating {
                 origin: FloatingOrigin::Move,
                 pieces: Vec::new(),
                 remainder: Vec::new(),
                 hidden: HashSet::new(),
                 modified: true,
-                pieces_disjoint,
             });
             fl.modified = true;
-            if !pieces_disjoint || (had_existing_modified && !newly_lifted.is_empty()) {
-                fl.pieces_disjoint = false;
-            }
             for s in newly_lifted {
                 fl.hidden.insert(s.shape_id);
                 fl.pieces.push(s);
@@ -2360,9 +2359,6 @@ impl Session {
                     if let Some(hid) = orig_id {
                         still_rem[0].shape_id = hid;
                     }
-                }
-                if !newly_sel.is_empty() {
-                    fl.pieces_disjoint = false;
                 }
                 new_rem.extend(still_rem);
                 fl.pieces.extend(newly_sel);
@@ -2550,12 +2546,10 @@ impl Session {
     /// 指定した `instance_gid` に属するキャンバス上の図形をすべて選択状態にする
     pub(crate) fn select_symbol_instance_by_gid(&mut self, instance_gid: u64) {
         self.selection.clear();
-        if self
-            .base_cache
-            .shapes()
-            .iter()
-            .any(|s| s.symbol_instance.is_some_and(|b| b.instance_gid == instance_gid))
-        {
+        if self.base_cache.shapes().iter().any(|s| {
+            s.symbol_instance
+                .is_some_and(|b| b.instance_gid == instance_gid)
+        }) {
             self.selection.instances.insert(instance_gid);
         }
         self.transform_pivot = None;
@@ -3053,8 +3047,7 @@ impl Tab {
 
     /// ライブラリ選択中のシンボルIDが存在しない場合に先頭シンボルへ補正する
     pub(crate) fn ensure_valid_library_selection(&mut self) {
-        self.view
-            .ensure_valid_library_selection(&self.doc.library);
+        self.view.ensure_valid_library_selection(&self.doc.library);
     }
 
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
@@ -3383,7 +3376,13 @@ fn writeback_edited_layer_shapes(
     if !modified_inst_indices.is_empty() {
         let modified_insts: Vec<SymbolInstance> = modified_inst_indices
             .into_iter()
-            .filter_map(|i| tl.layers[l_idx].keyframes[kf_idx].cel.instances.get(i).cloned())
+            .filter_map(|i| {
+                tl.layers[l_idx].keyframes[kf_idx]
+                    .cel
+                    .instances
+                    .get(i)
+                    .cloned()
+            })
             .collect();
         for inst in &modified_insts {
             reinstantiate_modified_symbol_instance(
@@ -3432,8 +3431,7 @@ pub(crate) fn edit_layers(
             if !layer.is_editable_at(frame) {
                 continue;
             }
-            if layer_ids.contains(&layer.id)
-                || (include_fallback && fallback_lid == Some(layer.id))
+            if layer_ids.contains(&layer.id) || (include_fallback && fallback_lid == Some(layer.id))
             {
                 indices.push(l_idx);
                 lids.push(layer.id);
@@ -3737,6 +3735,22 @@ pub(crate) fn draw_registration_cross(
     );
 }
 
+/// 同じ（レイヤー、`group_path`）に属するどの2つの片も、境界矩形を 1.5 広げたもの同士が重ならないかを判定する
+pub(crate) fn pieces_are_apart(pieces: &[FillShape]) -> bool {
+    for (i, a) in pieces.iter().enumerate() {
+        let bbox_a = a.bounding_box().inflate(1.5, 1.5);
+        for b in &pieces[i + 1..] {
+            if a.layer_id == b.layer_id
+                && a.group_path == b.group_path
+                && rects_overlap(bbox_a, b.bounding_box().inflate(1.5, 1.5))
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// `Floating` の `hidden` 除去・`remainder` 追加・`pieces` 結合を `base_shapes` に対して実行する
 pub(crate) fn merge_floating_into_base_shapes(
     base_shapes: &mut Vec<FillShape>,
@@ -3763,7 +3777,7 @@ pub(crate) fn merge_floating_into_base_shapes(
         *base_shapes = rebuilt;
     }
     if !fl.pieces.is_empty() {
-        if fl.pieces_disjoint {
+        if pieces_are_apart(&fl.pieces) {
             merge_disjoint_pieces_into_canvas(base_shapes, fl.pieces);
         } else {
             merge_shapes_into_canvas(base_shapes, fl.pieces);
@@ -3894,7 +3908,6 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
         remainder: std::mem::take(&mut fl.remainder),
         hidden: std::mem::take(&mut fl.hidden),
         modified: true,
-        pieces_disjoint: fl.pieces_disjoint,
     });
     if !kept_pieces.is_empty() {
         fl.pieces = kept_pieces;
@@ -3957,14 +3970,14 @@ pub(crate) fn insert_and_select_shapes_in_scope(
             });
         }
         if !raw_pieces.is_empty() {
-            tab.active_timeline().normalize_shape_layer_ids(&mut raw_pieces);
+            tab.active_timeline()
+                .normalize_shape_layer_ids(&mut raw_pieces);
             tab.session.set_floating(Some(Floating {
                 origin,
                 pieces: raw_pieces,
                 remainder: Vec::new(),
                 hidden: HashSet::new(),
                 modified: origin != FloatingOrigin::AltDuplicate,
-                pieces_disjoint: origin == FloatingOrigin::AltDuplicate,
             }));
         } else {
             tab.session.set_floating(None);
@@ -3989,6 +4002,6 @@ pub(crate) fn prepare_moved_selection(tab: &mut Tab) -> bool {
     if !any_valid {
         return false;
     }
-    tab.session.lift_selected_raw_shapes_to_floating(true);
+    tab.session.lift_selected_raw_shapes_to_floating();
     true
 }

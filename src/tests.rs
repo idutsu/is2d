@@ -549,10 +549,7 @@ fn test_bucket_fill_enclosed_hole_and_recolor() {
         1,
         "同色でバケツ塗りすると周囲のシェイプと1つに結合されること"
     );
-    assert!(
-        s.shapes[0].holes.is_empty(),
-        "穴が埋まって消えていること"
-    );
+    assert!(s.shapes[0].holes.is_empty(), "穴が埋まって消えていること");
     assert!(s.shapes[0].contains_point(center));
 }
 
@@ -669,7 +666,10 @@ fn test_keep_selection_on_tool_switch_and_bucket_fill_selected_region_only() {
     assert_eq!(scene_summary(&app).shapes.len(), 1);
 
     // 1. 選択ツールで左半分 (x: 70..200) を矩形選択
-    doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Select });
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
     tool_select::apply_marquee_selection(
         &mut app,
         Point::new(70.0, 150.0),
@@ -679,7 +679,10 @@ fn test_keep_selection_on_tool_switch_and_bucket_fill_selected_region_only() {
     assert_eq!(app.session.selected_indices().len(), 1);
 
     // 2. バケツツールに切り替えても選択状態が解除されないこと
-    doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Bucket });
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Bucket },
+    );
     assert_eq!(
         app.session.selected_indices().len(),
         1,
@@ -728,7 +731,12 @@ fn test_free_transform_rotate_scale_and_flip() {
     put_cel_shapes(&mut app, 0, 0, stroke);
     assert_eq!(scene_summary(&app).shapes.len(), 1);
     app.session.set_selected_indices(vec![0]);
-    doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool {
+            tool: Tool::Transform,
+        },
+    );
 
     // 1. +90° 回転 -> 横長だったシェイプが中心 (200, 200) を軸に縦長 (x: 200, y: 100..300) になること
     assert!(tool_transform::rotate_selected_shapes(
@@ -737,8 +745,7 @@ fn test_free_transform_rotate_scale_and_flip() {
     ));
     let s0 = app.scene().get(0).unwrap();
     assert!(
-        s0.contains_point(Point::new(200.0, 110.0))
-            && s0.contains_point(Point::new(200.0, 290.0)),
+        s0.contains_point(Point::new(200.0, 110.0)) && s0.contains_point(Point::new(200.0, 290.0)),
         "+90度回転で縦長シェイプになること"
     );
     assert!(
@@ -809,7 +816,12 @@ fn test_eyedropper_picks_topmost_shape_color() {
     put_cel_shapes(&mut app, 0, 0, shapes);
 
     app.tool.brush_color = green;
-    doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Eyedropper });
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool {
+            tool: Tool::Eyedropper,
+        },
+    );
 
     // 1. 空白部分をクリックしても色は変わらないこと
     assert_eq!(
@@ -866,8 +878,7 @@ fn test_group_selection_bucket_protection_and_non_destructive_overlap() {
     assert_eq!(scene_summary(&app).shapes.len(), 3);
 
     app.session.set_selected_indices(vec![1, 2]);
-    let eye_gid =
-        tool_select::group_selected_shapes(&mut app).expect("グループ化が成功すること");
+    let eye_gid = tool_select::group_selected_shapes(&mut app).expect("グループ化が成功すること");
     assert_eq!(scene_summary(&app).shapes[1].group_path, vec![eye_gid]);
     assert_eq!(scene_summary(&app).shapes[2].group_path, vec![eye_gid]);
 
@@ -881,7 +892,10 @@ fn test_group_selection_bucket_protection_and_non_destructive_overlap() {
 
     // グループ選択状態でバケツツールを使っても無効であること
     app.tool.brush_color = red;
-    assert!(!tool_paint::bucket_fill_at(&mut app, Point::new(100.0, 100.0)));
+    assert!(!tool_paint::bucket_fill_at(
+        &mut app,
+        Point::new(100.0, 100.0)
+    ));
     assert_eq!(scene_summary(&app).shapes[1].color, blue);
     assert_eq!(scene_summary(&app).shapes[2].color, green);
 
@@ -905,9 +919,24 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
     let blue = Color32::from_rgb(55, 135, 245);
     let green = Color32::from_rgb(65, 195, 105);
 
-    let mut shapes = make_stroke(Point::new(100.0, 200.0), Point::new(300.0, 200.0), 30.0, red);
-    shapes.extend(make_stroke(Point::new(90.0, 200.0), Point::new(110.0, 200.0), 15.0, blue));
-    shapes.extend(make_stroke(Point::new(135.0, 200.0), Point::new(155.0, 200.0), 12.0, green));
+    let mut shapes = make_stroke(
+        Point::new(100.0, 200.0),
+        Point::new(300.0, 200.0),
+        30.0,
+        red,
+    );
+    shapes.extend(make_stroke(
+        Point::new(90.0, 200.0),
+        Point::new(110.0, 200.0),
+        15.0,
+        blue,
+    ));
+    shapes.extend(make_stroke(
+        Point::new(135.0, 200.0),
+        Point::new(155.0, 200.0),
+        12.0,
+        green,
+    ));
     put_cel_shapes(&mut app, 0, 0, shapes);
 
     app.session.set_selected_indices(vec![1, 2]);
@@ -919,7 +948,10 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
     assert_eq!(s.shapes[1].group_path, vec![head_gid, eye_gid]);
     assert_eq!(s.shapes[2].group_path, vec![head_gid, eye_gid]);
 
-    assert!(tool_select::enter_group_at(&mut app, Point::new(200.0, 200.0)));
+    assert!(tool_select::enter_group_at(
+        &mut app,
+        Point::new(200.0, 200.0)
+    ));
     assert_eq!(app.session.editing_group_path, vec![head_gid]);
     let s = scene_summary(&app);
     assert!(s.shapes[0].is_raw_at_scope(&app.session.editing_group_path));
@@ -928,7 +960,10 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
         Some(eye_gid)
     );
 
-    assert!(tool_select::enter_group_at(&mut app, Point::new(100.0, 200.0)));
+    assert!(tool_select::enter_group_at(
+        &mut app,
+        Point::new(100.0, 200.0)
+    ));
     assert_eq!(app.session.editing_group_path, vec![head_gid, eye_gid]);
     assert!(scene_summary(&app).shapes[1].is_raw_at_scope(&app.session.editing_group_path));
 
@@ -944,14 +979,13 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
     assert_eq!(cel_shapes[1].group_path, vec![eye_gid]);
     assert_eq!(cel_shapes[2].group_path, vec![eye_gid]);
     let s = scene_summary(&app);
-    assert!(
-        s.shapes
-            .iter()
-            .find(|sh| sh.color == red)
-            .unwrap()
-            .group_path
-            .is_empty()
-    );
+    assert!(s
+        .shapes
+        .iter()
+        .find(|sh| sh.color == red)
+        .unwrap()
+        .group_path
+        .is_empty());
     assert_eq!(
         s.shapes
             .iter()
@@ -1073,12 +1107,11 @@ fn test_cut_and_paste_in_place_seamlessly_remerges_raw_shape() {
 
     assert!(tool_select::paste_clipboard(&mut app, true));
     assert_eq!(app.session.selected_indices().len(), 1);
-    assert!(
-        app.scene()
-            .get(app.session.selected_indices()[0])
-            .unwrap()
-            .contains_point(Point::new(120.0, 200.0))
-    );
+    assert!(app
+        .scene()
+        .get(app.session.selected_indices()[0])
+        .unwrap()
+        .contains_point(Point::new(120.0, 200.0)));
     tool_select::clear_selection(&mut app);
     let s = scene_summary(&app);
     assert_eq!(s.shapes.len(), 1);
@@ -1126,7 +1159,11 @@ fn test_copy_paste_group_assigns_new_gid_and_alt_drag_symbol_undo() {
         clipboard_ops::begin_move_selection_drag(&mut app, Point::new(136.0, 116.0), true);
     assert_eq!(app.scene().len(), count_before + 1);
     app.session.translate_move_overlay(KVec2::new(60.0, 40.0));
-    tool_select::finish_move_selection_drag(&mut app, KVec2::new(60.0, 40.0), move_drag.alt_duplicate);
+    tool_select::finish_move_selection_drag(
+        &mut app,
+        KVec2::new(60.0, 40.0),
+        move_drag.alt_duplicate,
+    );
 
     let (dup_binding, _, _) = tool_transform::selected_single_symbol_info(&app).unwrap();
     assert_eq!(dup_binding.symbol_id, sym_id);
@@ -1289,7 +1326,8 @@ fn test_timeline_layer_reorder_move_and_delete() {
     timeline_ui::timeline_add_layer(&mut app);
     assert_eq!(app.doc.root.layers.len(), 3);
     assert_eq!(
-        app.doc.root
+        app.doc
+            .root
             .layers
             .iter()
             .map(|l| l.name.as_str())
@@ -1300,7 +1338,8 @@ fn test_timeline_layer_reorder_move_and_delete() {
     assert!(timeline_ui::timeline_reorder_layer(&mut app, 2, 0));
     assert_eq!(app.doc.root.active_layer, 0);
     assert_eq!(
-        app.doc.root
+        app.doc
+            .root
             .layers
             .iter()
             .map(|l| l.name.as_str())
@@ -1309,7 +1348,8 @@ fn test_timeline_layer_reorder_move_and_delete() {
     );
     app.undo();
     assert_eq!(
-        app.doc.root
+        app.doc
+            .root
             .layers
             .iter()
             .map(|l| l.name.as_str())
@@ -1318,7 +1358,8 @@ fn test_timeline_layer_reorder_move_and_delete() {
     );
     app.redo();
     assert_eq!(
-        app.doc.root
+        app.doc
+            .root
             .layers
             .iter()
             .map(|l| l.name.as_str())
@@ -1386,7 +1427,8 @@ fn test_timeline_cell_selection_sync_with_canvas_selection() {
     ));
     assert_eq!(app.doc.root.active_layer, 1);
     assert_eq!(
-        app.doc.root
+        app.doc
+            .root
             .cell_selection
             .map(|s| (s.min_layer, s.max_layer)),
         Some((1, 1))
@@ -1436,7 +1478,10 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
         &mut app, sel_l1_f3, 0, 2, false
     ));
     assert!(app.doc.root.layers[1].cel_at(3).unwrap().is_empty());
-    assert_eq!(app.doc.root.layers[1].keyframes.last().unwrap().start_frame, 5);
+    assert_eq!(
+        app.doc.root.layers[1].keyframes.last().unwrap().start_frame,
+        5
+    );
     assert!(!app.doc.root.layers[1].cel_at(5).unwrap().is_empty());
 
     let sel_l0_f0 = timeline::TimelineCellSelection::single(0, 0);
@@ -1498,7 +1543,10 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
 fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation() {
     let mut app = Is2dApp::default();
     let red = Color32::from_rgb(235, 75, 75);
-    doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Select });
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
 
     // 細い 2px ブラシストロークを描画（ほぼ全域が境界線の吸着範囲内になる細い線）
     let thin_stroke = make_stroke(Point::new(100.0, 200.0), Point::new(220.0, 200.0), 2.0, red);
@@ -1958,9 +2006,11 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
         .selection_bounding_box(&app.session.selection, app.view.zoom)
         .unwrap();
     assert!(
-        (app.scene()
-            .active_transform_pivot(&app.session.selection, app.session.transform_pivot, bbox_f4)
-            - joint_world)
+        (app.scene().active_transform_pivot(
+            &app.session.selection,
+            app.session.transform_pivot,
+            bbox_f4
+        ) - joint_world)
             .hypot()
             < 1e-4
     );
@@ -2171,7 +2221,8 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
         .is_some());
     tool_select::clear_selection(&mut app);
     assert!(app
-        .doc.root
+        .doc
+        .root
         .resolved_cel_screen_mesh(
             0,
             2,
@@ -2228,10 +2279,7 @@ fn test_symbol_rename_library_delete_detach_and_inplace_child_symbol_creation() 
         "HeroSymbol"
     );
     app.undo();
-    assert_eq!(
-        app.doc.find_symbol(parent_sym_id).unwrap().name,
-        orig_name
-    );
+    assert_eq!(app.doc.find_symbol(parent_sym_id).unwrap().name, orig_name);
 
     timeline_ui::set_layer_locked(&mut app, 0, true);
     assert!(app.doc.root.layers[0].locked);
@@ -2245,12 +2293,7 @@ fn test_symbol_rename_library_delete_detach_and_inplace_child_symbol_creation() 
     ));
     assert!(app.doc.find_symbol(child_sym_id).is_none());
     assert!(
-        app.doc
-            .find_symbol(parent_sym_id)
-            .unwrap()
-            .timeline
-            .layers[0]
-            .keyframes[0]
+        app.doc.find_symbol(parent_sym_id).unwrap().timeline.layers[0].keyframes[0]
             .cel
             .instances
             .is_empty(),
@@ -2259,12 +2302,7 @@ fn test_symbol_rename_library_delete_detach_and_inplace_child_symbol_creation() 
     app.undo();
     assert!(app.doc.find_symbol(child_sym_id).is_some());
     assert_eq!(
-        app.doc
-            .find_symbol(parent_sym_id)
-            .unwrap()
-            .timeline
-            .layers[0]
-            .keyframes[0]
+        app.doc.find_symbol(parent_sym_id).unwrap().timeline.layers[0].keyframes[0]
             .cel
             .instances
             .len(),
@@ -2400,13 +2438,7 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
         .find_map(|s| s.symbol_instance)
         .unwrap();
     let sym_id = b.symbol_id;
-    let orig_local_shape = app
-        .doc
-        .find_symbol(sym_id)
-        .unwrap()
-        .timeline
-        .layers[0]
-        .keyframes[0]
+    let orig_local_shape = app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
         .cel
         .shapes[0]
         .clone();
@@ -2415,13 +2447,7 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
         assert!(tool_transform::enter_symbol_timeline(&mut app, b));
         assert!(tool_transform::exit_symbol_timeline(&mut app));
     }
-    let after_local_shape = &app
-        .doc
-        .find_symbol(sym_id)
-        .unwrap()
-        .timeline
-        .layers[0]
-        .keyframes[0]
+    let after_local_shape = &app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
         .cel
         .shapes[0];
     assert!(after_local_shape
@@ -2671,7 +2697,10 @@ fn test_reverse_order_nested_symbol_topological_propagation_and_cycle_guard() {
     tool_select::delete_selected_shapes(&mut nest_app);
     assert!(sym_a < sym_b && sym_b < sym_c);
 
-    assert!(tool_transform::enter_symbol_from_library(&mut nest_app, sym_a));
+    assert!(tool_transform::enter_symbol_from_library(
+        &mut nest_app,
+        sym_a
+    ));
     assert!(tool_select::clear_active_frame_shapes(&mut nest_app));
     assert!(tool_transform::place_symbol_instance_from_library(
         &mut nest_app,
@@ -2679,7 +2708,10 @@ fn test_reverse_order_nested_symbol_topological_propagation_and_cycle_guard() {
     ));
     assert!(tool_transform::exit_symbol_timeline(&mut nest_app));
 
-    assert!(tool_transform::enter_symbol_from_library(&mut nest_app, sym_b));
+    assert!(tool_transform::enter_symbol_from_library(
+        &mut nest_app,
+        sym_b
+    ));
     assert!(tool_select::clear_active_frame_shapes(&mut nest_app));
     assert!(tool_transform::place_symbol_instance_from_library(
         &mut nest_app,
@@ -2688,7 +2720,10 @@ fn test_reverse_order_nested_symbol_topological_propagation_and_cycle_guard() {
     assert!(tool_transform::exit_symbol_timeline(&mut nest_app));
 
     let updated_green = Color32::from_rgb(20, 210, 90);
-    assert!(tool_transform::enter_symbol_from_library(&mut nest_app, sym_c));
+    assert!(tool_transform::enter_symbol_from_library(
+        &mut nest_app,
+        sym_c
+    ));
     let mut shapes = scene_summary(&nest_app).shapes;
     for s in &mut shapes {
         s.set_color(updated_green);
@@ -2708,7 +2743,10 @@ fn test_reverse_order_nested_symbol_topological_propagation_and_cycle_guard() {
     );
     assert!(inst_shapes[0].has_cached_fill_mesh());
 
-    assert!(tool_transform::enter_symbol_from_library(&mut nest_app, sym_b));
+    assert!(tool_transform::enter_symbol_from_library(
+        &mut nest_app,
+        sym_b
+    ));
     assert!(!nest_app.can_place_symbol_in_current_context(sym_a));
     assert!(!tool_transform::place_symbol_instance_from_library(
         &mut nest_app,
@@ -2768,7 +2806,9 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
     grp_sym_app.session.set_selected_indices(vec![0]);
     let blink_sym_id = tool_transform::convert_selection_to_symbol(&mut grp_sym_app).unwrap();
     // シンボル内部に入り、2フレーム目を空白キーフレーム（F7）にする（F0: 表示, F1: 空白）
-    let blink_binding = scene_summary(&grp_sym_app).shapes[0].symbol_instance.unwrap();
+    let blink_binding = scene_summary(&grp_sym_app).shapes[0]
+        .symbol_instance
+        .unwrap();
     assert!(tool_transform::enter_symbol_timeline(
         &mut grp_sym_app,
         blink_binding
@@ -2923,7 +2963,9 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
     );
     grp_sym_app.session.set_selected_indices(vec![0]);
     let blink_sym_id = tool_transform::convert_selection_to_symbol(&mut grp_sym_app).unwrap();
-    let blink_binding = scene_summary(&grp_sym_app).shapes[0].symbol_instance.unwrap();
+    let blink_binding = scene_summary(&grp_sym_app).shapes[0]
+        .symbol_instance
+        .unwrap();
     assert!(tool_transform::enter_symbol_timeline(
         &mut grp_sym_app,
         blink_binding
@@ -2976,7 +3018,8 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
 
     // シンボルを含むセルのスクリーンメッシュおよびオニオンスキンメッシュはその場で構築され、pan 変化も正確に反映されること
     let m_scr_1 = grp_sym_app
-        .doc.root
+        .doc
+        .root
         .resolved_cel_screen_mesh(
             0,
             1,
@@ -2988,7 +3031,8 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
         )
         .unwrap();
     let m_scr_2 = grp_sym_app
-        .doc.root
+        .doc
+        .root
         .resolved_cel_screen_mesh(
             0,
             1,
@@ -3006,7 +3050,8 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
 
     // パン（pan）が変化した際は resolved_cel_screen_mesh のスクリーン座標に反映されること (#3)
     let m_scr_panned = grp_sym_app
-        .doc.root
+        .doc
+        .root
         .resolved_cel_screen_mesh(
             0,
             1,
@@ -3028,7 +3073,9 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
     let m_onion_2 = grp_sym_app
         .cached_onion_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, ([35, 175, 105], 90))
         .unwrap();
-    assert!(!std::sync::Arc::ptr_eq(&m_onion_1, &m_onion_2) && m_onion_1.vertices == m_onion_2.vertices);
+    assert!(
+        !std::sync::Arc::ptr_eq(&m_onion_1, &m_onion_2) && m_onion_1.vertices == m_onion_2.vertices
+    );
 
     let second_sym_shapes = make_stroke(
         Point::new(10.0, 10.0),
@@ -3159,11 +3206,7 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
 
     // 空シンボルマーカーのデータモデル不変条件（contours=0, geometry_bounding_box=None, スナップ非対象）
     let empty_marker = FillShape::new_empty_symbol_marker(
-        crate::symbol::SymbolInstanceBinding::new(
-            777,
-            1,
-            kurbo::Affine::translate((50.0, 50.0)),
-        ),
+        crate::symbol::SymbolInstanceBinding::new(777, 1, kurbo::Affine::translate((50.0, 50.0))),
         lid_bottom,
         &[],
     );
@@ -3464,10 +3507,7 @@ fn test_project_save_and_load_roundtrip() {
     let tmp_path =
         std::env::temp_dir().join(format!("is2d_roundtrip_test_{}.is2d", std::process::id()));
     crate::project_io::save_project_to_path(&mut app, &tmp_path).expect("保存に成功すること");
-    assert_eq!(
-        app.file.as_deref(),
-        Some(tmp_path.as_path())
-    );
+    assert_eq!(app.file.as_deref(), Some(tmp_path.as_path()));
 
     let mut loaded_app = Is2dApp::default();
     crate::project_io::open_project_in_tab(&mut loaded_app, &tmp_path, None)
@@ -3479,13 +3519,7 @@ fn test_project_save_and_load_roundtrip() {
     assert_eq!(loaded_app.doc.root.layers.len(), 2);
     assert_eq!(loaded_app.doc.library.len(), 1);
     assert_eq!(
-        loaded_app
-            .doc
-            .find_symbol(sym_id)
-            .unwrap()
-            .timeline
-            .layers[0]
-            .keyframes[0]
+        loaded_app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
             .cel
             .shapes
             .len(),
@@ -3744,10 +3778,7 @@ fn test_clipboard_symbol_evaluates_latest_symbol_def_and_shares_arc() {
         &mut sym_paste_app,
         parent_sym
     ));
-    doc_actions::apply(
-        &mut sym_paste_app,
-        doc_actions::Action::SetFps { fps: 12 },
-    );
+    doc_actions::apply(&mut sym_paste_app, doc_actions::Action::SetFps { fps: 12 });
     let mut blue_shapes = make_stroke(
         Point::new(100.0, 100.0),
         Point::new(140.0, 100.0),
@@ -3972,8 +4003,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     crate::project_io::save_project_to_path(&mut self_union_app, &tmp_merge_path)
         .expect("選択同士のUnion保存に成功すること");
     let mut loaded_self_union = Is2dApp::default();
-    crate::project_io::open_project_in_tab(&mut loaded_self_union, &tmp_merge_path, None)
-        .unwrap();
+    crate::project_io::open_project_in_tab(&mut loaded_self_union, &tmp_merge_path, None).unwrap();
     assert_eq!(loaded_self_union.scene().len(), 1);
     assert_eq!(self_union_app.session.selected_indices().len(), 2);
 
@@ -4012,12 +4042,10 @@ fn test_save_io_failure_rollback_and_marquee_slice_push_undo() {
         Point::new(150.0, 140.0),
         false,
     );
-    assert!(
-        self_union_app
-            .session
-            .floating()
-            .is_some_and(|fl| fl.is_unmodified_slice())
-    );
+    assert!(self_union_app
+        .session
+        .floating()
+        .is_some_and(|fl| fl.is_unmodified_slice()));
     assert!(self_union_app.scene().len() >= 2);
     doc_actions::apply(
         &mut self_union_app,
@@ -4652,14 +4680,18 @@ fn test_symbol_rename_consecutive_keystrokes_grouped_into_single_undo() {
     let undo_before_rename = app.history.undo_stack.len();
 
     // 1文字目の入力開始時のみ Undo を積み、フレーム描画（ensure_valid_selection）を挟んで2文字目を入力しても Undo が増殖しないこと
-    assert!(tool_transform::rename_symbol_in_library(&mut app, sym_id, "H"));
+    assert!(tool_transform::rename_symbol_in_library(
+        &mut app, sym_id, "H"
+    ));
     app.ensure_valid_library_selection();
     assert_eq!(
         app.history.last_coalesce_key,
         Some(canvas_tool::CoalesceKey::RenameSymbol(sym_id)),
         "毎フレームの ensure_valid_selection 呼び出しで RenameSymbol の CoalesceKey が消去されないこと"
     );
-    assert!(tool_transform::rename_symbol_in_library(&mut app, sym_id, "Hero"));
+    assert!(tool_transform::rename_symbol_in_library(
+        &mut app, sym_id, "Hero"
+    ));
     assert_eq!(
         app.history.undo_stack.len(),
         undo_before_rename + 1,
@@ -4757,7 +4789,12 @@ fn test_f7_preserves_next_keyframe_by_pushing_tail() {
         &mut app,
         0,
         0,
-        make_stroke(Point::new(100.0, 100.0), Point::new(160.0, 100.0), 10.0, red),
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(160.0, 100.0),
+            10.0,
+            red,
+        ),
     );
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
     assert_eq!(app.doc.root.current_frame, 1);
@@ -4765,7 +4802,12 @@ fn test_f7_preserves_next_keyframe_by_pushing_tail() {
         &mut app,
         0,
         1,
-        make_stroke(Point::new(200.0, 200.0), Point::new(260.0, 200.0), 10.0, blue),
+        make_stroke(
+            Point::new(200.0, 200.0),
+            Point::new(260.0, 200.0),
+            10.0,
+            blue,
+        ),
     );
 
     // Frame 0（赤い絵）に戻って F7 を押したとき、Frame 1 の青い絵を白紙消去せず Frame 2 へ押し出して Frame 1 に空白KFを挿入すること (H4)
@@ -4792,7 +4834,12 @@ fn test_shift_f6_and_shift_f5_boundary_guards() {
         &mut hold_app,
         0,
         0,
-        make_stroke(Point::new(100.0, 100.0), Point::new(160.0, 100.0), 10.0, red),
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(160.0, 100.0),
+            10.0,
+            red,
+        ),
     );
     timeline_ui::timeline_extend_frame(&mut hold_app);
     timeline_ui::timeline_extend_frame(&mut hold_app);
@@ -4827,7 +4874,12 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
         &mut sym_f6_app,
         0,
         0,
-        make_stroke(Point::new(100.0, 100.0), Point::new(150.0, 100.0), 10.0, red),
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(150.0, 100.0),
+            10.0,
+            red,
+        ),
     );
     sym_f6_app.session.set_selected_indices(vec![0]);
     let sym_id = tool_transform::convert_selection_to_symbol(&mut sym_f6_app).unwrap();
@@ -4912,14 +4964,8 @@ fn test_flip_tween_midpoint_and_horizontal_flip_without_spurious_rotation() {
     // 1. 垂直反転 (scale_non_uniform(1.0, -1.0)) を含むトゥイーンの中間フレーム (t = 0.5) でも特異行列にならずピボット位置へ変換されること (H5)
     let a0 = kurbo::Affine::translate((100.0, 100.0));
     let a1 = kurbo::Affine::translate((300.0, 100.0)) * kurbo::Affine::scale_non_uniform(1.0, -1.0);
-    let (mid, _) = interpolate_affine_with_pivot(
-        a0,
-        Point::ZERO,
-        a1,
-        Point::ZERO,
-        TweenRotate::Auto,
-        0.5,
-    );
+    let (mid, _) =
+        interpolate_affine_with_pivot(a0, Point::ZERO, a1, Point::ZERO, TweenRotate::Auto, 0.5);
     assert!(
         mid.determinant().abs() > 1e-9,
         "反転トゥイーンの中間 (t=0.5) でも行列式が非ゼロに保たれること"
@@ -4933,14 +4979,8 @@ fn test_flip_tween_midpoint_and_horizontal_flip_without_spurious_rotation() {
 
     // 2. 水平反転 (scale_non_uniform(-1.0, 1.0)) を含むトゥイーンで不要な180°回転が発生せず、Y軸方向が反転せず X スケールのみ補間されること (#4)
     let h1 = kurbo::Affine::translate((300.0, 100.0)) * kurbo::Affine::scale_non_uniform(-1.0, 1.0);
-    let (mid_h, _) = interpolate_affine_with_pivot(
-        a0,
-        Point::ZERO,
-        h1,
-        Point::ZERO,
-        TweenRotate::Auto,
-        0.25,
-    );
+    let (mid_h, _) =
+        interpolate_affine_with_pivot(a0, Point::ZERO, h1, Point::ZERO, TweenRotate::Auto, 0.25);
     let top_pt = mid_h * Point::new(0.0, -20.0);
     assert!(
         (top_pt.y - 80.0).abs() < 1e-3,
@@ -4958,7 +4998,12 @@ fn test_symbol_delete_mid_tween_preserves_start_keyframe_pose() {
         &mut app,
         0,
         0,
-        make_stroke(Point::new(100.0, 100.0), Point::new(140.0, 100.0), 10.0, red),
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(140.0, 100.0),
+            10.0,
+            red,
+        ),
     );
     app.session.set_selected_indices(vec![0]);
     let sym_id = tool_transform::convert_selection_to_symbol(&mut app).unwrap();
@@ -5008,7 +5053,12 @@ fn test_noop_eraser_does_not_push_undo_and_active_layer_lock_blocks_paint_tools(
         &mut app,
         0,
         0,
-        make_stroke(Point::new(100.0, 100.0), Point::new(140.0, 100.0), 10.0, red),
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(140.0, 100.0),
+            10.0,
+            red,
+        ),
     );
     timeline_ui::timeline_add_layer(&mut app);
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
@@ -5067,7 +5117,10 @@ fn test_compact_json_serialization_nan_rejection_and_undo_history_cap() {
     let _ = std::fs::remove_file(&tmp_compact);
 
     for i in 0..110 {
-        doc_actions::apply(&mut save_app, doc_actions::Action::EndCoalesce { key: None });
+        doc_actions::apply(
+            &mut save_app,
+            doc_actions::Action::EndCoalesce { key: None },
+        );
         doc_actions::apply(
             &mut save_app,
             doc_actions::Action::SetStageSize {
@@ -5293,7 +5346,15 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
         "OS クリップボードが空で押下イベントが吸収されても Cmd+V リリース時にペーストされること (#15)"
     );
     assert!(
-        (app.scene().get(app.scene().len() - 1).unwrap().bounding_box().center().x - (140.0 + 32.0)).abs() < 2.0,
+        (app.scene()
+            .get(app.scene().len() - 1)
+            .unwrap()
+            .bounding_box()
+            .center()
+            .x
+            - (140.0 + 32.0))
+            .abs()
+            < 2.0,
         "2回目のペースト図形が +32px オフセット位置に実際に配置されていること (#15)"
     );
 
@@ -5330,7 +5391,15 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
         "V より先に Cmd を離した場合でも V キーリリースでペーストされること (#15)"
     );
     assert!(
-        (app.scene().get(app.scene().len() - 1).unwrap().bounding_box().center().x - (140.0 + 48.0)).abs() < 2.0,
+        (app.scene()
+            .get(app.scene().len() - 1)
+            .unwrap()
+            .bounding_box()
+            .center()
+            .x
+            - (140.0 + 48.0))
+            .abs()
+            < 2.0,
         "3回目のペースト図形が +48px オフセット位置に実際に配置されていること (#15)"
     );
 
@@ -5603,7 +5672,12 @@ fn test_hidden_layer_shapes_excluded_from_canvas_and_preserved_on_sync() {
         &mut app,
         0,
         0,
-        make_stroke(Point::new(100.0, 100.0), Point::new(160.0, 100.0), 10.0, red),
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(160.0, 100.0),
+            10.0,
+            red,
+        ),
     );
     timeline_ui::timeline_add_layer(&mut app);
     let lid2 = app.doc.root.layers[1].id;
@@ -5611,10 +5685,15 @@ fn test_hidden_layer_shapes_excluded_from_canvas_and_preserved_on_sync() {
         &mut app,
         1,
         0,
-        make_stroke(Point::new(100.0, 200.0), Point::new(160.0, 200.0), 10.0, blue)
-            .into_iter()
-            .map(|s| s.with_layer_id(lid2))
-            .collect(),
+        make_stroke(
+            Point::new(100.0, 200.0),
+            Point::new(160.0, 200.0),
+            10.0,
+            blue,
+        )
+        .into_iter()
+        .map(|s| s.with_layer_id(lid2))
+        .collect(),
     );
     assert_eq!(scene_summary(&app).len, 2);
 
@@ -5818,17 +5897,14 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
     let grab_before = orig_seg.eval(grab_t);
     tool_select::update_reshape_drag(&mut app, pt_near_end + kurbo::Vec2::new(0.0, 2.0));
     assert_eq!(
-        app.doc.root.layers[0].keyframes[0].cel.shapes[0].exterior.segments[seg_idx].p1,
+        app.doc.root.layers[0].keyframes[0].cel.shapes[0]
+            .exterior
+            .segments[seg_idx]
+            .p1,
         orig_seg.p1,
         "ドラッグ中はセル内の図形が書き換えられないこと"
     );
-    let grab_after = app
-        .scene()
-        .get(0)
-        .unwrap()
-        .exterior
-        .segments[seg_idx]
-        .eval(grab_t);
+    let grab_after = app.scene().get(0).unwrap().exterior.segments[seg_idx].eval(grab_t);
     assert!(
         ((grab_after - grab_before) - kurbo::Vec2::new(0.0, 2.0)).hypot() < 1e-5,
         "微小ドラッグ時の曲線変化量がカーソル移動量と正確に一致すること (#5)"
@@ -5953,7 +6029,12 @@ fn test_pivot_commit_restores_marquee_slice_and_persists() {
     assert!(app.session.floating().is_some());
     assert_eq!(app.scene().len(), 2);
 
-    doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool {
+            tool: Tool::Transform,
+        },
+    );
     let bbox = app
         .scene()
         .selection_bounding_box(&app.session.selection, app.view.zoom)
@@ -6073,7 +6154,12 @@ fn test_move_or_copy_frames_preserves_following_frames_tween_pose_and_remaps_ids
         &mut tween_app,
         0,
         0,
-        make_stroke(Point::new(100.0, 100.0), Point::new(140.0, 100.0), 10.0, red),
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(140.0, 100.0),
+            10.0,
+            red,
+        ),
     );
     tween_app.session.set_selected_indices(vec![0]);
     doc_actions::convert_selection_to_symbol(&mut tween_app).unwrap();
@@ -6087,7 +6173,8 @@ fn test_move_or_copy_frames_preserves_following_frames_tween_pose_and_remaps_ids
 
     // 中間フレーム Frame 2 (t = 0.5 -> dx = +100.0) のみを選択して別レイヤーへ複製
     let mid_shapes = tween_app
-        .doc.root
+        .doc
+        .root
         .evaluate_layer_shapes_at(0, 2, &tween_app.doc.library);
     let mid_center_x = mid_shapes[0].bounding_box().center().x;
     timeline_ui::timeline_add_layer(&mut tween_app);
@@ -6099,10 +6186,10 @@ fn test_move_or_copy_frames_preserves_following_frames_tween_pose_and_remaps_ids
         0,
         true
     ));
-    let copied_shapes =
-        tween_app
-            .doc.root
-            .evaluate_layer_shapes_at(1, 2, &tween_app.doc.library);
+    let copied_shapes = tween_app
+        .doc
+        .root
+        .evaluate_layer_shapes_at(1, 2, &tween_app.doc.library);
     assert!(
         (copied_shapes[0].bounding_box().center().x - mid_center_x).abs() < 1e-3,
         "トゥイーン途中フレームから複製したセルが中割り補間姿勢を引き継いでいること (#9-2)"
@@ -6112,10 +6199,7 @@ fn test_move_or_copy_frames_preserves_following_frames_tween_pose_and_remaps_ids
     let orig_gid = tween_app.doc.root.layers[0].keyframes[0].cel.instances[0]
         .binding
         .instance_gid;
-    let copied_gid = tween_app.doc.root.layers[1]
-        .cel_at(2)
-        .unwrap()
-        .instances[0]
+    let copied_gid = tween_app.doc.root.layers[1].cel_at(2).unwrap().instances[0]
         .binding
         .instance_gid;
     assert_ne!(
@@ -6195,8 +6279,13 @@ fn test_cancel_drag_and_noop_drag_preserve_tessellated_mesh_caches() {
     assert!(app.scene().get(0).unwrap().has_cached_fill_mesh());
 
     // 1. 選択移動ドラッグを開始して微小移動未満で終了（noop リストア）してもキャッシュが失われないこと
-    let move_drag = clipboard_ops::begin_move_selection_drag(&mut app, Point::new(150.0, 100.0), false);
-    tool_select::finish_move_selection_drag(&mut app, move_drag.total_delta, move_drag.alt_duplicate);
+    let move_drag =
+        clipboard_ops::begin_move_selection_drag(&mut app, Point::new(150.0, 100.0), false);
+    tool_select::finish_move_selection_drag(
+        &mut app,
+        move_drag.total_delta,
+        move_drag.alt_duplicate,
+    );
     assert!(
         app.scene().get(0).unwrap().has_cached_fill_mesh()
             && std::sync::Arc::ptr_eq(app.scene().get(0).unwrap().fill_mesh(), &mesh_arc_before),
@@ -6339,7 +6428,11 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
     timeline_ui::timeline_add_layer(&mut app);
     let layer_ids: std::collections::HashSet<u64> =
         app.doc.root.layers.iter().map(|l| l.id).collect();
-    assert_eq!(layer_ids.len(), 3, "新規レイヤーのIDが既存レイヤーと衝突しないこと (#13)");
+    assert_eq!(
+        layer_ids.len(),
+        3,
+        "新規レイヤーのIDが既存レイヤーと衝突しないこと (#13)"
+    );
 
     let new_sym_id = app.doc.register_new_symbol(Vec::new());
     assert!(
@@ -6423,10 +6516,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
         next_group_id: 100_000,
     };
 
-    let path = std::env::temp_dir().join(format!(
-        "is2d_dense_cycle_{}.is2d",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("is2d_dense_cycle_{}.is2d", std::process::id()));
     std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
     let mut app = Is2dApp::default();
     let res = crate::project_io::open_project_in_tab(&mut app, &path, None);
@@ -6654,13 +6744,23 @@ fn test_transform_rotate_zone_only_near_four_corners_and_paste_staircase_across_
     // 1. 四隅の少し外側 (+10px, -10px) は Rotate になるが、上辺中央の少し外側 (四隅から100px以上離れた位置) は Rotate にならないこと (#17)
     let corner_outside = Point::new(bbox.x1 + 10.0, bbox.y0 - 10.0);
     assert_eq!(
-        tool_transform::compute_transform_hover(app.scene(), &app.session, corner_outside, app.view.zoom),
+        tool_transform::compute_transform_hover(
+            app.scene(),
+            &app.session,
+            corner_outside,
+            app.view.zoom
+        ),
         canvas_tool::TransformHoverTarget::Rotate,
         "四隅の外側近傍では Rotate ゾーンになること (#17)"
     );
     let top_edge_outside = Point::new(bbox.center().x, bbox.y0 - 12.0);
     assert_eq!(
-        tool_transform::compute_transform_hover(app.scene(), &app.session, top_edge_outside, app.view.zoom),
+        tool_transform::compute_transform_hover(
+            app.scene(),
+            &app.session,
+            top_edge_outside,
+            app.view.zoom
+        ),
         canvas_tool::TransformHoverTarget::None,
         "四隅から離れた辺中央の外側は Rotate ゾーンにならないこと (#17)"
     );
@@ -6717,11 +6817,7 @@ fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source
 
     let sel_prefix = timeline::TimelineCellSelection::from_corners(0, 0, 0, 2);
     assert!(doc_actions::timeline_move_or_copy_frames(
-        &mut app,
-        sel_prefix,
-        0,
-        8,
-        false
+        &mut app, sel_prefix, 0, 8, false
     ));
     for f in 0..=2 {
         assert!(
@@ -6770,7 +6866,10 @@ fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source
         false
     ));
     for f in 0..=1 {
-        assert_eq!(hold_app.doc.root.layers[0].cel_at(f).unwrap().shapes.len(), 1);
+        assert_eq!(
+            hold_app.doc.root.layers[0].cel_at(f).unwrap().shapes.len(),
+            1
+        );
     }
     for f in 2..=3 {
         assert!(
@@ -6786,7 +6885,10 @@ fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source
         );
     }
     for f in 8..=9 {
-        assert_eq!(hold_app.doc.root.layers[0].cel_at(f).unwrap().shapes.len(), 1);
+        assert_eq!(
+            hold_app.doc.root.layers[0].cel_at(f).unwrap().shapes.len(),
+            1
+        );
     }
 }
 
@@ -6850,10 +6952,7 @@ fn test_nested_symbol_expansion_memoization_and_step_cap() {
         20,
         "ルート直下の空シンボルインスタンス20個がそれぞれ空マーカーとして即座に展開されること"
     );
-    println!(
-        "[20^8 empty symbol memo] elapsed = {:?}",
-        elapsed_memo
-    );
+    println!("[20^8 empty symbol memo] elapsed = {:?}", elapsed_memo);
 }
 
 #[test]
@@ -6890,7 +6989,12 @@ fn test_onion_skin_per_tab_isolation_and_shift_marquee_no_premature_merge() {
     let red = Color32::from_rgb(220, 50, 50);
     let blue = Color32::from_rgb(50, 120, 220);
     // Shape 0: 左の赤図形 (100..180, 100), Shape 1: 中央の赤図形 (220..300, 100), Shape 2: 右の青図形 (400..460, 100)
-    let mut sel_shapes = make_stroke(Point::new(100.0, 100.0), Point::new(180.0, 100.0), 14.0, red);
+    let mut sel_shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(180.0, 100.0),
+        14.0,
+        red,
+    );
     sel_shapes.extend(make_stroke(
         Point::new(220.0, 100.0),
         Point::new(300.0, 100.0),
@@ -7086,7 +7190,10 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
             Color32::from_rgb(220, 60, 60),
         ),
     );
-    doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Select });
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
     let v0_world = scene_summary(&app).shapes[0].exterior.segments[0].p0;
     let v0_screen = app.view.world_to_screen(v0_world);
     let v0_drag_to = v0_screen + Vec2::new(25.0, 30.0);
@@ -7144,7 +7251,12 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
     );
 
     // 3. 自由変形ツールでのスケールハンドルドラッグ (Scale) & 回転ドラッグ (Rotate) の RawInput 検証
-    doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool {
+            tool: Tool::Transform,
+        },
+    );
     app.session.set_selected_indices(vec![0]);
     let bbox_before = app
         .scene()
@@ -7317,10 +7429,7 @@ fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
     for case_idx in 0..50 {
         let n_pts = rng.usize(2..=12);
         let mut pts = Vec::with_capacity(n_pts);
-        let mut cur = Point::new(
-            rng.f64() * 600.0 + 50.0,
-            rng.f64() * 350.0 + 50.0,
-        );
+        let mut cur = Point::new(rng.f64() * 600.0 + 50.0, rng.f64() * 350.0 + 50.0);
         pts.push(cur);
         for _ in 1..n_pts {
             cur.x = (cur.x + (rng.f64() - 0.5) * 80.0).clamp(10.0, 790.0);
@@ -7382,7 +7491,11 @@ fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
         let num_syms = rng.usize(1..=6);
         let mut sym_json_list = Vec::new();
         for i in 0..num_syms {
-            let sid = if rng.bool() { i as u64 } else { u64::MAX - (i as u64) };
+            let sid = if rng.bool() {
+                i as u64
+            } else {
+                u64::MAX - (i as u64)
+            };
             let target_sym = rng.u64(0..=(num_syms as u64 + 2));
             let tf = rng.usize(0..=50);
             sym_json_list.push(format!(
@@ -7471,7 +7584,10 @@ fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
         );
         let mut has_cycle = false;
         for sym in &app.doc.library {
-            assert!(sym.id >= 1, "case {case_idx}: シンボルIDが 1 以上に正規化されること");
+            assert!(
+                sym.id >= 1,
+                "case {case_idx}: シンボルIDが 1 以上に正規化されること"
+            );
             for inst in sym.timeline.instances() {
                 if app
                     .doc
@@ -7567,10 +7683,8 @@ fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape
     // 4. #13: シンボリックリンク先への保存時にリンク自体を壊さずリンク先実体ファイルを更新すること
     #[cfg(unix)]
     {
-        let target_path = std::env::temp_dir().join(format!(
-            "is2d_symlink_target_{}.is2d",
-            std::process::id()
-        ));
+        let target_path =
+            std::env::temp_dir().join(format!("is2d_symlink_target_{}.is2d", std::process::id()));
         let link_path =
             std::env::temp_dir().join(format!("is2d_symlink_link_{}.is2d", std::process::id()));
         let _ = std::fs::remove_file(&target_path);
@@ -7684,8 +7798,7 @@ fn cel_summary(doc: &symbol::Document, layer_id: u64, frame: usize) -> CelSummar
     let total_segments = shapes
         .iter()
         .map(|s| {
-            s.exterior.segments.len()
-                + s.holes.iter().map(|h| h.segments.len()).sum::<usize>()
+            s.exterior.segments.len() + s.holes.iter().map(|h| h.segments.len()).sum::<usize>()
         })
         .sum();
     let hole_count = shapes.iter().map(|s| s.holes.len()).sum();
@@ -8096,21 +8209,12 @@ fn test_stage01_group_ungroup_transform_and_clipboard_on_cel() {
         "コピー＆ペーストでセル内の図形面積が増加すること"
     );
 
-    run(
-        &mut app,
-        &[
-            Action::SelectAll,
-            Action::Cut,
-        ],
-    );
+    run(&mut app, &[Action::SelectAll, Action::Cut]);
     assert_eq!(cel_summary(&app.doc, lid, 0).shape_count, 0);
 
     run(
         &mut app,
-        &[
-            Action::Paste { in_place: true },
-            Action::Deselect,
-        ],
+        &[Action::Paste { in_place: true }, Action::Deselect],
     );
     assert!(cel_summary(&app.doc, lid, 0).shape_count >= 2);
 }
@@ -8682,7 +8786,12 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
         .unwrap();
     let tl_handle = canvas_tool::ScaleHandle::TopLeft.position(bbox);
     assert_eq!(
-        tool_transform::compute_transform_hover(app.scene(), &app.session, tl_handle, app.view.zoom),
+        tool_transform::compute_transform_hover(
+            app.scene(),
+            &app.session,
+            tl_handle,
+            app.view.zoom
+        ),
         canvas_tool::TransformHoverTarget::Scale(canvas_tool::ScaleHandle::TopLeft),
         "compute_transform_hover が Scene<'_> と &Session からスケールハンドルを判定できること"
     );
@@ -8720,9 +8829,7 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
         "シンボル編集から親タイムラインへ戻った後も、展開後の2図形が Scene に反映されていること"
     );
     assert!(
-        app.scene()
-            .iter()
-            .all(|s| s.symbol_instance.is_some()),
+        app.scene().iter().all(|s| s.symbol_instance.is_some()),
         "親タイムラインの Scene 図形にはシンボルインスタンスバインディングが付与されていること"
     );
 }
@@ -8764,9 +8871,8 @@ fn test_stage4_drag_2000_shapes_preserves_unmoved_mesh_caches() {
     let moved_shape_id = *app.session.selection.shapes.iter().next().unwrap();
 
     let move_drag = clipboard_ops::begin_move_selection_drag(&mut app, target_pt, false);
-    app.session.drag = canvas_tool::ActiveCanvasDrag::Select(
-        canvas_tool::SelectDragState::MoveShape(move_drag),
-    );
+    app.session.drag =
+        canvas_tool::ActiveCanvasDrag::Select(canvas_tool::SelectDragState::MoveShape(move_drag));
     tool_select::update_reshape_drag(&mut app, Point::new(28.0, 22.0));
 
     // ドラッグ中（マウス移動1回目直後）に Scene から fill_mesh() を読んだとき、
@@ -9068,13 +9174,7 @@ fn test_stage6b_non_uniform_scale_rotated_symbol_edit_preserves_untouched_shape_
         ],
     );
     let sym_id = app.doc.library[0].id;
-    let orig_local_shape = app
-        .doc
-        .find_symbol(sym_id)
-        .unwrap()
-        .timeline
-        .layers[0]
-        .keyframes[0]
+    let orig_local_shape = app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
         .cel
         .shapes[0]
         .clone();
@@ -9121,13 +9221,7 @@ fn test_stage6b_non_uniform_scale_rotated_symbol_edit_preserves_untouched_shape_
     run(&mut app, &[Action::ExitSymbolTimeline]);
     assert!(app.session.edit_path.is_empty());
 
-    let sym_shapes = &app
-        .doc
-        .find_symbol(sym_id)
-        .unwrap()
-        .timeline
-        .layers[0]
-        .keyframes[0]
+    let sym_shapes = &app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
         .cel
         .shapes;
     let preserved = sym_shapes
@@ -9334,7 +9428,10 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
         ],
     );
     assert_eq!(app.session.edit_path.len(), 1);
-    assert_eq!(app.doc.find_symbol(sym_id).unwrap().timeline.total_frames, 2);
+    assert_eq!(
+        app.doc.find_symbol(sym_id).unwrap().timeline.total_frames,
+        2
+    );
 
     // 3. シンボルから出た後の操作（ルートに青ストローク描画）
     run(
@@ -9360,7 +9457,10 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
     run(&mut app, &[Action::Undo]);
     assert_eq!(app.session.edit_path.len(), 1);
     assert_eq!(app.session.edit_path.last().unwrap().symbol_id, sym_id);
-    assert_eq!(app.doc.find_symbol(sym_id).unwrap().timeline.total_frames, 1);
+    assert_eq!(
+        app.doc.find_symbol(sym_id).unwrap().timeline.total_frames,
+        1
+    );
     assert_eq!(
         app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
             .cel
@@ -9418,7 +9518,10 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
 
     run(&mut app, &[Action::Redo]);
     assert!(app.session.edit_path.is_empty());
-    assert_eq!(app.doc.find_symbol(sym_id).unwrap().timeline.total_frames, 2);
+    assert_eq!(
+        app.doc.find_symbol(sym_id).unwrap().timeline.total_frames,
+        2
+    );
 
     run(&mut app, &[Action::Redo]);
     assert!(app.session.edit_path.is_empty());
@@ -9431,7 +9534,12 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
     let red = Color32::from_rgb(220, 60, 60);
     let blue = Color32::from_rgb(60, 120, 220);
 
-    let mut shapes = make_stroke(Point::new(100.0, 100.0), Point::new(200.0, 100.0), 20.0, red);
+    let mut shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(200.0, 100.0),
+        20.0,
+        red,
+    );
     shapes.extend(make_stroke(
         Point::new(150.0, 100.0),
         Point::new(250.0, 100.0),
@@ -9521,11 +9629,7 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
         &mut app,
         Some(Point::new(bbox.x1 + 30.0, bbox.y0 - 10.0)),
     );
-    let committed_red = app
-        .scene()
-        .iter()
-        .find(|s| s.shape_id == red_id)
-        .unwrap();
+    let committed_red = app.scene().iter().find(|s| s.shape_id == red_id).unwrap();
     assert!(committed_red.bounding_box().width() > orig_red_bbox.width() + 20.0);
     run(&mut app, &[Action::Undo]);
     assert_eq!(app.scene().get(0).unwrap().bounding_box(), orig_red_bbox);
@@ -9557,11 +9661,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
     );
     let rev_initial = app.doc.root.layers[0].keyframes[0].cel.revision;
     let cel_before = cel_summary(&app.doc, lid, 0);
-    let orig_red = app
-        .doc
-        .root
-        .layers[0]
-        .keyframes[0]
+    let orig_red = app.doc.root.layers[0].keyframes[0]
         .cel
         .shapes
         .iter()
@@ -9582,8 +9682,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
     assert!(app.session.floating().is_some());
     assert_eq!(app.scene().len(), 3);
     assert_eq!(
-        app.doc.root.layers[0].keyframes[0].cel.revision,
-        rev_initial,
+        app.doc.root.layers[0].keyframes[0].cel.revision, rev_initial,
         "マーキースライス直後は文書の Cel::revision が変化しないこと"
     );
     assert_eq!(
@@ -9624,8 +9723,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
     );
     assert!(app.session.floating().is_some());
     assert_eq!(
-        app.doc.root.layers[0].keyframes[0].cel.revision,
-        rev_initial,
+        app.doc.root.layers[0].keyframes[0].cel.revision, rev_initial,
         "生図形を選択・移動している間（確定前）は文書のセルが変化しないこと"
     );
     assert_eq!(
@@ -9656,8 +9754,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
         "保存後も Session の Floating はそのまま残ること"
     );
     assert_eq!(
-        app.doc.root.layers[0].keyframes[0].cel.revision,
-        rev_initial,
+        app.doc.root.layers[0].keyframes[0].cel.revision, rev_initial,
         "保存後も Document の Cel は書き換えられないこと"
     );
     let mut loaded_app = Is2dApp::default();
@@ -9683,8 +9780,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
     assert_eq!(app.history.undo_stack.len(), undo_len_before);
     assert!(!app.history.is_dirty());
     assert_ne!(
-        app.doc.root.layers[0].keyframes[0].cel.revision,
-        rev_initial,
+        app.doc.root.layers[0].keyframes[0].cel.revision, rev_initial,
         "確定時に1回だけ文書の Cel が更新されること"
     );
 }
@@ -9734,13 +9830,11 @@ fn test_stage7c_scene_base_cache_and_edit_layers() {
         }],
     );
     assert_eq!(
-        app.doc.root.layers[0].keyframes[0].cel.revision,
-        rev_bottom_before,
+        app.doc.root.layers[0].keyframes[0].cel.revision, rev_bottom_before,
         "編集対象外のレイヤーの Cel::revision は変化しないこと"
     );
     assert_ne!(
-        app.doc.root.layers[1].keyframes[0].cel.revision,
-        rev_top_before,
+        app.doc.root.layers[1].keyframes[0].cel.revision, rev_top_before,
         "編集対象レイヤーの Cel::revision のみが更新されること"
     );
     let bottom_after = app
@@ -9807,7 +9901,11 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
         app.session.selection.insert_shape(&red_shape);
         run(&mut app, &[Action::Group]);
         let colors: Vec<_> = app.scene().iter().map(|s| s.color).collect();
-        assert_eq!(colors, vec![green, blue, red], "グループ化した図形は最前面に移動すること");
+        assert_eq!(
+            colors,
+            vec![green, blue, red],
+            "グループ化した図形は最前面に移動すること"
+        );
         assert_eq!(app.scene().get(2).unwrap().group_path.len(), 1);
     }
 
@@ -9828,7 +9926,11 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
         app.session.selection.insert_shape(&red_shape);
         run(&mut app, &[Action::ConvertToSymbol]);
         let colors: Vec<_> = app.scene().iter().map(|s| s.color).collect();
-        assert_eq!(colors, vec![green, red], "シンボル変換したインスタンスは最前面に移動すること");
+        assert_eq!(
+            colors,
+            vec![green, red],
+            "シンボル変換したインスタンスは最前面に移動すること"
+        );
         assert!(app.scene().get(1).unwrap().symbol_instance.is_some());
 
         // さらにもう1つ黄色の図形を最前面に描き、その下のシンボルを分解すると最前面に来ること
@@ -9888,7 +9990,11 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
         app.session.selection.insert_shape(&grouped_shape);
         run(&mut app, &[Action::Ungroup]);
         let colors: Vec<_> = app.scene().iter().map(|s| s.color).collect();
-        assert_eq!(colors, vec![green, blue, red], "グループ解除された図形は最前面に置かれること");
+        assert_eq!(
+            colors,
+            vec![green, blue, red],
+            "グループ解除された図形は最前面に置かれること"
+        );
         assert!(app.scene().get(2).unwrap().group_path.is_empty());
     }
 
@@ -9909,7 +10015,11 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
         app.session.selection.insert_shape(&red_shape);
         run(&mut app, &[Action::Copy, Action::Paste { in_place: false }]);
         let colors: Vec<_> = app.scene().iter().map(|s| s.color).collect();
-        assert_eq!(colors, vec![red, green, red], "ペーストした図形は最前面に置かれること");
+        assert_eq!(
+            colors,
+            vec![red, green, red],
+            "ペーストした図形は最前面に置かれること"
+        );
         run(&mut app, &[Action::Deselect]);
 
         // Alt 複製（元の red は index 0 に残したまま、複製された red が最前面 index 2 に置かれること）
@@ -9981,7 +10091,13 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
         app.session.begin_move_overlay(false);
         app.session.translate_move_overlay(KVec2::new(10.0, 10.0));
         assert_eq!(
-            app.scene().get(0).unwrap().symbol_instance.as_ref().unwrap().instance_gid,
+            app.scene()
+                .get(0)
+                .unwrap()
+                .symbol_instance
+                .as_ref()
+                .unwrap()
+                .instance_gid,
             bottom_gid,
             "ドラッグ中の仮表示でも下側シンボルは重なり順を維持すること"
         );
@@ -9993,12 +10109,24 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
             }],
         );
         assert_eq!(
-            app.scene().get(0).unwrap().symbol_instance.as_ref().unwrap().instance_gid,
+            app.scene()
+                .get(0)
+                .unwrap()
+                .symbol_instance
+                .as_ref()
+                .unwrap()
+                .instance_gid,
             bottom_gid,
             "移動確定後も下側シンボルは上側シンボルの下に留まること"
         );
         assert_eq!(
-            app.scene().get(1).unwrap().symbol_instance.as_ref().unwrap().instance_gid,
+            app.scene()
+                .get(1)
+                .unwrap()
+                .symbol_instance
+                .as_ref()
+                .unwrap()
+                .instance_gid,
             top_gid
         );
     }
@@ -10057,7 +10185,11 @@ fn test_stage7_edit_layers_preserves_mesh_cache_without_rebuilding_from_doc() {
         let row = i / 50;
         let x0 = (col as f64) * 30.0;
         let y0 = (row as f64) * 30.0;
-        let c = Color32::from_rgb(((i * 37) % 200 + 40) as u8, ((i * 73) % 200 + 40) as u8, 150);
+        let c = Color32::from_rgb(
+            ((i * 37) % 200 + 40) as u8,
+            ((i * 73) % 200 + 40) as u8,
+            150,
+        );
         initial_shapes.extend(make_stroke(
             Point::new(x0, y0 + 10.0),
             Point::new(x0 + 20.0, y0 + 10.0),
@@ -10100,16 +10232,8 @@ fn test_stage7_edit_layers_preserves_mesh_cache_without_rebuilding_from_doc() {
     let sym_shape = app.scene().get(0).unwrap().clone();
     app.session.selection.clear();
     app.session.selection.insert_shape(&sym_shape);
-    run(
-        &mut app,
-        &[Action::RotateSelection { angle_rad: 0.35 }],
-    );
-    let binding = app
-        .scene()
-        .get(0)
-        .unwrap()
-        .symbol_instance
-        .unwrap();
+    run(&mut app, &[Action::RotateSelection { angle_rad: 0.35 }]);
+    let binding = app.scene().get(0).unwrap().symbol_instance.unwrap();
     assert!(symbol_ops::enter_symbol_timeline(
         &mut app.tabs[app.active],
         binding
@@ -10362,11 +10486,7 @@ fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_act
         Action::RotateSelection { angle_rad: 0.43 },
         "RotateSelection on symbol",
     );
-    let transformed_binding = app
-        .scene()
-        .iter()
-        .find_map(|s| s.symbol_instance)
-        .unwrap();
+    let transformed_binding = app.scene().iter().find_map(|s| s.symbol_instance).unwrap();
     run_and_verify_scene_cache_consistency(
         &mut app,
         Action::EnterSymbolTimeline {
@@ -10443,7 +10563,11 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
         let row = i / 50;
         let x0 = (col as f64) * 30.0;
         let y0 = (row as f64) * 30.0;
-        let c = Color32::from_rgb(((i * 37) % 200 + 40) as u8, ((i * 73) % 200 + 40) as u8, 150);
+        let c = Color32::from_rgb(
+            ((i * 37) % 200 + 40) as u8,
+            ((i * 73) % 200 + 40) as u8,
+            150,
+        );
         parent_shapes.extend(make_stroke(
             Point::new(x0, y0 + 10.0),
             Point::new(x0 + 20.0, y0 + 10.0),
@@ -10469,11 +10593,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
     app.session.selection.clear();
     app.session.selection.insert_shape(&red_shape);
     run(&mut app, &[Action::ConvertToSymbol]);
-    let sym_binding = app
-        .scene()
-        .iter()
-        .find_map(|s| s.symbol_instance)
-        .unwrap();
+    let sym_binding = app.scene().iter().find_map(|s| s.symbol_instance).unwrap();
     // 同じレイヤーにもう1つ同じシンボルのインスタンスを配置しておく（背景に兄弟インスタンスが映る状態）
     run(
         &mut app,
@@ -10589,12 +10709,7 @@ fn test_collapsed_symbol_instance_blocks_enter_and_timeline_mut_bumps_revision()
     app.session.selection.insert_shape(&first);
     run(&mut app, &[Action::ConvertToSymbol]);
 
-    let normal_binding = app
-        .scene()
-        .get(0)
-        .unwrap()
-        .symbol_instance
-        .unwrap();
+    let normal_binding = app.scene().get(0).unwrap().symbol_instance.unwrap();
 
     // 1. 行列式がほぼ0（潰れたインスタンス）には入れないこと
     let mut collapsed_binding = normal_binding;
@@ -10660,8 +10775,7 @@ fn test_g5_1_save_and_reopen_60_brush_strokes_f6_140_frames_over_100mb() {
         .shapes
         .iter()
         .map(|s| {
-            s.exterior.segments.len()
-                + s.holes.iter().map(|h| h.segments.len()).sum::<usize>()
+            s.exterior.segments.len() + s.holes.iter().map(|h| h.segments.len()).sum::<usize>()
         })
         .sum();
 
@@ -10740,7 +10854,10 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
     assert!(!app.doc.symbol_nest_exceeded());
 
     // 完了条件1: 8段の連鎖が、ルートからすべて描かれる（各段の生図形8個すべてが展開される）
-    let root_eval = app.doc.root.evaluate_layer_shapes_at(0, 0, &app.doc.library);
+    let root_eval = app
+        .doc
+        .root
+        .evaluate_layer_shapes_at(0, 0, &app.doc.library);
     assert_eq!(
         root_eval.len(),
         8,
@@ -10802,27 +10919,17 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
 
     // 3a. シンボル編集中のペーストで9段になる場合
     let undo_before_paste = app.history.undo_stack.len();
-    let host_inst_before = app
-        .doc
-        .find_symbol(host_sym_id)
-        .unwrap()
-        .timeline
-        .layers[0]
-        .keyframes[0]
-        .cel
-        .instances
-        .len();
+    let host_inst_before = app.doc.find_symbol(host_sym_id).unwrap().timeline.layers[0].keyframes
+        [0]
+    .cel
+    .instances
+    .len();
     app.toast = None;
     let res_paste = apply(&mut app, Action::Paste { in_place: true });
     assert!(!res_paste, "9段になるペーストは拒否されること");
     assert_eq!(app.history.undo_stack.len(), undo_before_paste);
     assert_eq!(
-        app.doc
-            .find_symbol(host_sym_id)
-            .unwrap()
-            .timeline
-            .layers[0]
-            .keyframes[0]
+        app.doc.find_symbol(host_sym_id).unwrap().timeline.layers[0].keyframes[0]
             .cel
             .instances
             .len(),
@@ -10836,24 +10943,11 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
     // 3b. ライブラリからの配置で9段になる場合
     let undo_before_place = app.history.undo_stack.len();
     app.toast = None;
-    let res_place = apply(
-        &mut app,
-        Action::PlaceSymbol {
-            sym_id: top_sym_id,
-        },
-    );
-    assert!(
-        !res_place,
-        "9段になるライブラリからの配置は拒否されること"
-    );
+    let res_place = apply(&mut app, Action::PlaceSymbol { sym_id: top_sym_id });
+    assert!(!res_place, "9段になるライブラリからの配置は拒否されること");
     assert_eq!(app.history.undo_stack.len(), undo_before_place);
     assert_eq!(
-        app.doc
-            .find_symbol(host_sym_id)
-            .unwrap()
-            .timeline
-            .layers[0]
-            .keyframes[0]
+        app.doc.find_symbol(host_sym_id).unwrap().timeline.layers[0].keyframes[0]
             .cel
             .instances
             .len(),
@@ -11059,8 +11153,7 @@ fn test_g1_1_writeback_preserves_unexpanded_and_orphan_elements() {
     assert_eq!(cel.shapes.len(), 1, "描いたブラシ図形が保存されていること");
 
     // 保存して読み込んでも120個のインスタンスが残ること
-    let tmp_path =
-        std::env::temp_dir().join(format!("is2d_m2_3_test_{}.is2d", std::process::id()));
+    let tmp_path = std::env::temp_dir().join(format!("is2d_m2_3_test_{}.is2d", std::process::id()));
     crate::project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
     let mut reopened = Is2dApp::default();
     crate::project_io::open_project_in_tab(&mut reopened, &tmp_path, None).unwrap();
@@ -11672,7 +11765,12 @@ fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
     let mut app = Is2dApp::default();
 
     // 3フレームのループシンボルを作成
-    let mut s0 = make_stroke(Point::new(0.0, 0.0), Point::new(20.0, 0.0), 4.0, Color32::RED);
+    let mut s0 = make_stroke(
+        Point::new(0.0, 0.0),
+        Point::new(20.0, 0.0),
+        4.0,
+        Color32::RED,
+    );
     s0[0].layer_id = 1;
     let sym_id = app.doc.register_new_symbol(s0);
     {
@@ -11758,14 +11856,10 @@ fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
             copy_mode: true,
         },
     );
-    assert!(
-        app.doc
-            .root
-            .layers[0]
-            .keyframes
-            .iter()
-            .any(|kf| kf.start_frame == 5)
-    );
+    assert!(app.doc.root.layers[0]
+        .keyframes
+        .iter()
+        .any(|kf| kf.start_frame == 5));
 }
 
 #[test]
@@ -11806,8 +11900,7 @@ fn test_g3_5_document_single_fps_inside_symbol_undo_redo_and_save() {
     assert_eq!(app.doc.fps, 30);
 
     // 保存して開き直しても FPS が 30 のまま保たれること
-    let tmp_path =
-        std::env::temp_dir().join(format!("is2d_g3_5_test_{}.is2d", std::process::id()));
+    let tmp_path = std::env::temp_dir().join(format!("is2d_g3_5_test_{}.is2d", std::process::id()));
     crate::project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
     let mut reopened = Is2dApp::default();
     crate::project_io::open_project_in_tab(&mut reopened, &tmp_path, None).unwrap();
@@ -12248,7 +12341,6 @@ fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
         remainder: Vec::new(),
         hidden: HashSet::new(),
         modified: true,
-        pieces_disjoint: false,
     }));
     assert_eq!(app.scene().len(), 1);
     assert_eq!(app.scene().get(0).unwrap().color, Color32::RED);
@@ -13071,12 +13163,14 @@ fn test_m2_4_delete_symbol_2880_keyframes_fast_and_no_memory_growth() {
             parent_scope: Vec::new(),
             shape_order_index: 0,
         };
-        app.doc.root.layers[0].keyframes.push(std::sync::Arc::new(timeline::Keyframe {
-            start_frame: f,
-            tween: true,
-            tween_rotate: timeline::TweenRotate::Auto,
-            cel: timeline::Cel::new_with_instances(Vec::new(), vec![inst]),
-        }));
+        app.doc.root.layers[0]
+            .keyframes
+            .push(std::sync::Arc::new(timeline::Keyframe {
+                start_frame: f,
+                tween: true,
+                tween_rotate: timeline::TweenRotate::Auto,
+                cel: timeline::Cel::new_with_instances(Vec::new(), vec![inst]),
+            }));
     }
     app.refresh_scene_base();
     let rss_before = current_process_rss_bytes();
@@ -13088,28 +13182,20 @@ fn test_m2_4_delete_symbol_2880_keyframes_fast_and_no_memory_growth() {
     println!(
         "[M2-4] delete symbol across 2880 KF = {dt_ms:.3} ms, rss_delta = +{rss_delta_mb:.2} MB"
     );
-    assert!(
-        app.doc
-            .root
-            .layers[0]
-            .keyframes
-            .iter()
-            .all(|kf| kf.cel.instances.is_empty() && kf.tween)
-    );
+    assert!(app.doc.root.layers[0]
+        .keyframes
+        .iter()
+        .all(|kf| kf.cel.instances.is_empty() && kf.tween));
     assert_eq!(
         app.doc.root.layers[0].tween_state_at_keyframe(0),
         timeline::TweenState::Incomplete
     );
     app.undo();
     assert!(app.doc.find_symbol(sym_id).is_some());
-    assert!(
-        app.doc
-            .root
-            .layers[0]
-            .keyframes
-            .iter()
-            .all(|kf| kf.cel.instances.len() == 1 && kf.tween)
-    );
+    assert!(app.doc.root.layers[0]
+        .keyframes
+        .iter()
+        .all(|kf| kf.cel.instances.len() == 1 && kf.tween));
 }
 
 #[test]
@@ -13264,98 +13350,158 @@ fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup()
             dst
         };
 
-        // 1. 持ち上げ (Lift): 一部または全体を選んで移動 → 確定
+        // 境界矩形が離れた片群を用意して merge_disjoint_pieces_into_canvas と merge_shapes_into_canvas の結果（形・色・順番）を比較
+        let mut apart_pieces = Vec::new();
+        for l_idx in 0..2 {
+            let lid = base_app.doc.root.layers[l_idx].id;
+            for gx in 0..4 {
+                for gy in 0..3 {
+                    let x0 = 70.0 + (gx as f64) * 120.0 + ((next_u64() % 11) as f64);
+                    let y0 = 65.0 + (gy as f64) * 95.0 + ((next_u64() % 11) as f64);
+                    let col = palette[(gx * 3 + gy + l_idx + trial) % palette.len()];
+                    let mut p = make_stroke(
+                        Point::new(x0, y0),
+                        Point::new(x0 + 36.0, y0 + 14.0),
+                        5.0,
+                        col,
+                    )
+                    .remove(0);
+                    p.layer_id = lid;
+                    apart_pieces.push(p);
+                }
+            }
+        }
+        assert!(
+            canvas_tool::pieces_are_apart(&apart_pieces),
+            "グリッド配置した離れた片群で pieces_are_apart が true であること"
+        );
         {
             let mut app_fast = clone_app(&base_app);
             let mut app_ref = clone_app(&base_app);
-            for a in [&mut app_fast, &mut app_ref] {
-                let m_rect = kurbo::Rect::new(80.0, 70.0, 440.0, 280.0);
-                for idx in 0..a.scene().len() {
-                    let s = a.scene().get(idx).unwrap();
-                    if vector_engine::rects_overlap(s.bounding_box(), m_rect) {
-                        let sid = s.shape_id;
-                        a.session.selection.shapes.insert(sid);
-                    }
+            for l_idx in 0..2 {
+                let lid = base_app.doc.root.layers[l_idx].id;
+                let layer_pieces: Vec<FillShape> = apart_pieces
+                    .iter()
+                    .filter(|p| p.layer_id == lid)
+                    .cloned()
+                    .collect();
+                let mut shapes_fast = app_fast.doc.root.layers[l_idx]
+                    .cel_at(0)
+                    .unwrap()
+                    .shapes
+                    .to_vec();
+                let mut shapes_ref = app_ref.doc.root.layers[l_idx]
+                    .cel_at(0)
+                    .unwrap()
+                    .shapes
+                    .to_vec();
+                vector_boolean::merge_disjoint_pieces_into_canvas(
+                    &mut shapes_fast,
+                    layer_pieces.clone(),
+                );
+                vector_boolean::merge_shapes_into_canvas(&mut shapes_ref, layer_pieces);
+                assert_eq!(
+                    shapes_fast.len(),
+                    shapes_ref.len(),
+                    "Apart trial {trial} layer {l_idx}: 図形数が一致すること"
+                );
+                let sort_key = |s: &FillShape| {
+                    let b = s.bounding_box();
+                    (
+                        s.layer_id,
+                        s.group_path.clone(),
+                        s.color.to_array(),
+                        (b.x0 * 100.0).round() as i64,
+                        (b.y0 * 100.0).round() as i64,
+                    )
+                };
+                let mut sorted_fast = shapes_fast.clone();
+                let mut sorted_ref = shapes_ref.clone();
+                sorted_fast.sort_by_key(sort_key);
+                sorted_ref.sort_by_key(sort_key);
+                for (sf, sr) in sorted_fast.iter().zip(sorted_ref.iter()) {
+                    assert_eq!(sf.color, sr.color, "図形の色が一致すること");
+                    assert_eq!(sf.group_path, sr.group_path, "スコープが一致すること");
+                    assert_eq!(sf.holes.len(), sr.holes.len(), "穴の数が一致すること");
+                    assert!(
+                        (sf.exterior.signed_area().abs() - sr.exterior.signed_area().abs()).abs()
+                            < 1e-2,
+                        "図形の面積が一致すること"
+                    );
                 }
-                let _ = apply(a, Action::NudgeSelection { delta });
+                app_fast.doc.root.layers[l_idx].keyframe_mut(0).cel =
+                    timeline::Cel::new(shapes_fast);
+                app_ref.doc.root.layers[l_idx].keyframe_mut(0).cel = timeline::Cel::new(shapes_ref);
             }
-            assert!(
-                app_fast
-                    .session
-                    .floating()
-                    .is_some_and(|fl| fl.pieces_disjoint)
-            );
-            app_ref.session.update_floating(|fl_opt| {
-                if let Some(fl) = fl_opt {
-                    fl.pieces_disjoint = false;
-                }
-            });
-            let _ = apply(&mut app_fast, Action::Deselect);
-            let _ = apply(&mut app_ref, Action::Deselect);
-            assert_same_canvas(&app_fast, &app_ref, &format!("Lift trial {trial}"));
+            assert_same_canvas(&app_fast, &app_ref, &format!("Apart merge trial {trial}"));
         }
 
-        // 2. スライス (Marquee Slice): 矩形選択で切って移動 → 確定
+        // 1. 持ち上げ (Lift): 離れた図形群を選んで移動 → 確定
         {
-            let mut app_fast = clone_app(&base_app);
-            let mut app_ref = clone_app(&base_app);
-            for a in [&mut app_fast, &mut app_ref] {
-                let _ = apply(
-                    a,
-                    Action::SelectMarquee {
-                        p0: Point::new(120.0, 85.0),
-                        p1: Point::new(400.0, 260.0),
-                        additive: false,
-                    },
-                );
-                let _ = apply(a, Action::NudgeSelection { delta });
+            let mut apart_app = Is2dApp::default();
+            let _ = apply(&mut apart_app, Action::AddLayer);
+            for l_idx in 0..2 {
+                let lid = apart_app.doc.root.layers[l_idx].id;
+                let layer_shapes: Vec<FillShape> = apart_pieces
+                    .iter()
+                    .filter(|p| p.layer_id == lid)
+                    .cloned()
+                    .collect();
+                apart_app.doc.root.layers[l_idx].keyframe_mut(0).cel =
+                    timeline::Cel::new(layer_shapes);
             }
-            if app_fast.session.floating().is_some() {
-                assert!(
-                    app_fast
-                        .session
-                        .floating()
-                        .is_some_and(|fl| fl.pieces_disjoint)
-                );
-            }
-            app_ref.session.update_floating(|fl_opt| {
-                if let Some(fl) = fl_opt {
-                    fl.pieces_disjoint = false;
-                }
-            });
+            apart_app.refresh_scene_base();
+            let mut app_fast = clone_app(&apart_app);
+            let _ = apply(&mut app_fast, Action::SelectAll);
+            let _ = apply(&mut app_fast, Action::NudgeSelection { delta });
+            assert!(app_fast
+                .session
+                .floating()
+                .is_some_and(|fl| canvas_tool::pieces_are_apart(&fl.pieces)));
             let _ = apply(&mut app_fast, Action::Deselect);
-            let _ = apply(&mut app_ref, Action::Deselect);
-            assert_same_canvas(&app_fast, &app_ref, &format!("Slice trial {trial}"));
+            assert_eq!(
+                app_fast.doc.root.layers[0].cel_at(0).unwrap().shapes.len(),
+                12
+            );
         }
 
-        // 3. Alt 複製 (AltDuplicate): 全選択または矩形選択を Alt 複製移動 → 確定
+        // 2. スライス (Marquee Slice): 接している片は pieces_are_apart が false になること
         {
-            let mut app_fast = clone_app(&base_app);
-            let mut app_ref = clone_app(&base_app);
-            for a in [&mut app_fast, &mut app_ref] {
-                let _ = apply(a, Action::SelectAll);
-                let _ = apply(
-                    a,
-                    Action::FinishMoveSelectionDrag {
-                        total_delta: delta,
-                        alt_duplicate: true,
-                    },
-                );
-            }
+            let mut slice_app = Is2dApp::default();
+            let _ = apply(
+                &mut slice_app,
+                Action::PaintStroke {
+                    points: vec![Point::new(100.0, 200.0), Point::new(300.0, 200.0)],
+                    radius: 8.0,
+                    color: palette[0],
+                },
+            );
+            let _ = apply(
+                &mut slice_app,
+                Action::SelectMarquee {
+                    p0: Point::new(80.0, 150.0),
+                    p1: Point::new(200.0, 250.0),
+                    additive: false,
+                },
+            );
+            let right_idx = slice_app
+                .scene()
+                .iter()
+                .position(|s| s.contains_point(Point::new(250.0, 200.0)))
+                .unwrap();
+            let _ = apply(
+                &mut slice_app,
+                Action::ToggleSelectionAt {
+                    scene_idx: right_idx,
+                },
+            );
             assert!(
-                app_fast
+                slice_app
                     .session
                     .floating()
-                    .is_some_and(|fl| fl.pieces_disjoint)
+                    .is_some_and(|fl| !canvas_tool::pieces_are_apart(&fl.pieces)),
+                "スライスで分かれた接している片同士では pieces_are_apart が false になること"
             );
-            app_ref.session.update_floating(|fl_opt| {
-                if let Some(fl) = fl_opt {
-                    fl.pieces_disjoint = false;
-                }
-            });
-            let _ = apply(&mut app_fast, Action::Deselect);
-            let _ = apply(&mut app_ref, Action::Deselect);
-            assert_same_canvas(&app_fast, &app_ref, &format!("AltDup trial {trial}"));
         }
     }
 
@@ -13373,7 +13519,11 @@ fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup()
                 Point::new(x, y),
                 Point::new(x + 45.0, y + 15.0),
                 5.0,
-                Color32::from_rgb(((i * 37) % 255) as u8, ((l_idx * 70 + i * 13) % 255) as u8, 180),
+                Color32::from_rgb(
+                    ((i * 37) % 255) as u8,
+                    ((l_idx * 70 + i * 13) % 255) as u8,
+                    180,
+                ),
             )
             .remove(0);
             s.layer_id = lid;
@@ -13439,27 +13589,15 @@ fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup()
     let mut app5_alt_fast = Is2dApp::default();
     app5_alt_fast.tabs[0].doc = app5_base.doc.clone();
     app5_alt_fast.refresh_scene_base();
-    let mut app5_alt_ref = Is2dApp::default();
-    app5_alt_ref.tabs[0].doc = app5_base.doc.clone();
-    app5_alt_ref.refresh_scene_base();
-    for a in [&mut app5_alt_fast, &mut app5_alt_ref] {
-        let _ = apply(a, Action::SelectAll);
-        let _ = apply(
-            a,
-            Action::FinishMoveSelectionDrag {
-                total_delta: KVec2::new(12.0, 8.0),
-                alt_duplicate: true,
-            },
-        );
-    }
-    app5_alt_ref.session.update_floating(|fl_opt| {
-        if let Some(fl) = fl_opt {
-            fl.pieces_disjoint = false;
-        }
-    });
+    let _ = apply(&mut app5_alt_fast, Action::SelectAll);
+    let _ = apply(
+        &mut app5_alt_fast,
+        Action::FinishMoveSelectionDrag {
+            total_delta: KVec2::new(12.0, 8.0),
+            alt_duplicate: true,
+        },
+    );
     let _ = apply(&mut app5_alt_fast, Action::Deselect);
-    let _ = apply(&mut app5_alt_ref, Action::Deselect);
-    assert_same_canvas(&app5_alt_fast, &app5_alt_ref, "5-color AltDup");
 
     // 6. 赤い大きな塗りの上に青い円（Oの字）を描き、そのまま線を伸ばして離れた緑の図形にも触れさせたとき、
     //    ブラシ描画でも Floating 確定（Alt複製）でも円の内側が赤のままであること
@@ -13543,12 +13681,10 @@ fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup()
             alt_duplicate: true,
         },
     );
-    assert!(
-        app_fl_loop
-            .session
-            .floating()
-            .is_some_and(|fl| fl.pieces_disjoint)
-    );
+    assert!(app_fl_loop
+        .session
+        .floating()
+        .is_some_and(|fl| canvas_tool::pieces_are_apart(&fl.pieces)));
     let _ = apply(&mut app_fl_loop, Action::Deselect);
     assert_eq!(
         tool_paint::pick_color_at(&mut app_fl_loop, Point::new(200.0, 200.0)),
@@ -13584,7 +13720,8 @@ fn test_m2_8_document_shapes_never_store_fill_mesh_after_playback_onion_edit_and
     let _ = apply(&mut setup_app, Action::SelectAll);
     let _ = apply(&mut setup_app, Action::ConvertToSymbol);
     let _ = apply(&mut setup_app, Action::Deselect);
-    let tmp_path = std::env::temp_dir().join(format!("m2_8_doc_mesh_test_{}.is2d", std::process::id()));
+    let tmp_path =
+        std::env::temp_dir().join(format!("m2_8_doc_mesh_test_{}.is2d", std::process::id()));
     project_io::save_project_to_path(&mut setup_app, &tmp_path).unwrap();
 
     let mut app = Is2dApp::default();
@@ -13605,7 +13742,8 @@ fn test_m2_8_document_shapes_never_store_fill_mesh_after_playback_onion_edit_and
     };
 
     // 2. 再生で何コマか進める + オニオンスキンを表示する
-    app.timeline_ui.ensure_timeline_context(&app.tabs[app.active]);
+    app.timeline_ui
+        .ensure_timeline_context(&app.tabs[app.active]);
     app.view.onion_skin_enabled = true;
     app.view.onion_prev_frames = 2;
     app.view.onion_next_frames = 2;
@@ -13749,9 +13887,7 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
         let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
     }
     let erase_800_ms = t_e.elapsed().as_secs_f64() * 1000.0;
-    println!(
-        "[M2-10] 800-point spiral brush = {brush_800_ms:.2} ms, erase = {erase_800_ms:.2} ms"
-    );
+    println!("[M2-10] 800-point spiral brush = {brush_800_ms:.2} ms, erase = {erase_800_ms:.2} ms");
 
     // 2. 1,000通り以上（1,050通り）のランダム比較テスト（境界0.25px近傍・重なり・同色結合・セグメント数）
     fn min_dist_sq_to_shapes(pt: Point, shapes: &[FillShape]) -> f64 {
@@ -13862,7 +13998,8 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
                 y = (y + ang.sin() * 14.0).clamp(20.0, 280.0);
             }
             let raw = vector_stroke::generate_brush_outline_at_zoom(&pts, 6.0, 1.0);
-            let shapes = vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, colors[s_i % 3], 1.0);
+            let shapes =
+                vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, colors[s_i % 3], 1.0);
             vector_boolean::merge_shapes_into_canvas(&mut canvas, shapes);
         }
         let canvas_before = canvas.clone();
@@ -13906,7 +14043,8 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
         let brush_col = colors[(case_idx / 2) % 4];
         let radius = 5.0 + (case_idx % 3) as f64 * 1.5;
         let raw = vector_stroke::generate_brush_outline_at_zoom(&stroke_pts, radius, 1.0);
-        let stroke_shapes = vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, brush_col, 1.0);
+        let stroke_shapes =
+            vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, brush_col, 1.0);
         if stroke_shapes.is_empty() {
             continue;
         }
@@ -13984,7 +14122,10 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
             }
         }
     }
-    assert!(near_checked >= 150_000, "境界0.25px近傍を含む十分な標本点数を検査すること");
+    assert!(
+        near_checked >= 150_000,
+        "境界0.25px近傍を含む十分な標本点数を検査すること"
+    );
     assert_eq!(
         near_mismatches, 0,
         "1,050通りのランダム比較テスト（境界0.25px近傍含む）で食い違いがないこと"
@@ -14375,7 +14516,10 @@ fn test_m3_4_delete_keyframe_only_on_keyframe_start_frame() {
     app.history.mark_saved();
     let undo_before = app.history.undo_stack.len();
     let deleted = apply(&mut app, Action::DeleteKeyframe);
-    assert!(!deleted, "保持フレームでは DeleteKeyframe が false を返すこと");
+    assert!(
+        !deleted,
+        "保持フレームでは DeleteKeyframe が false を返すこと"
+    );
     assert_eq!(app.doc.root.layers[0].keyframes.len(), 2);
     assert_eq!(app.history.undo_stack.len(), undo_before);
     assert!(!app.history.is_dirty());
@@ -14416,12 +14560,75 @@ fn test_m3_4_delete_keyframe_only_on_keyframe_start_frame() {
     assert_eq!(app.doc.root.layers[0].keyframes.len(), 1);
 }
 
+#[test]
+fn test_m4_1_alt_duplicate_touching_sliced_pieces_merges_into_single_shape_on_deselect() {
+    use crate::doc_actions::{apply, Action};
 
+    let mut app = Is2dApp::default();
+    // 1. 空の文書でブラシを1本描く
+    let _ = apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 150.0), Point::new(300.0, 150.0)],
+            radius: 10.0,
+            color: Color32::from_rgb(220, 60, 60),
+        },
+    );
+    assert_eq!(app.doc.root.layers[0].cel_at(0).unwrap().shapes.len(), 1);
 
+    // 2. 左半分を矩形選択（スライス）
+    let _ = apply(
+        &mut app,
+        Action::SelectMarquee {
+            p0: Point::new(80.0, 120.0),
+            p1: Point::new(200.0, 180.0),
+            additive: false,
+        },
+    );
+    // 3. 右半分を Shift+クリックで選択に追加
+    let right_idx = app
+        .scene()
+        .iter()
+        .position(|s| s.contains_point(Point::new(250.0, 150.0)))
+        .unwrap();
+    let _ = apply(
+        &mut app,
+        Action::ToggleSelectionAt {
+            scene_idx: right_idx,
+        },
+    );
+    // 4. Alt+ドラッグで下へ 150px 複製移動
+    let _ = apply(
+        &mut app,
+        Action::FinishMoveSelectionDrag {
+            total_delta: KVec2::new(0.0, 150.0),
+            alt_duplicate: true,
+        },
+    );
+    assert!(
+        app.session
+            .floating()
+            .is_some_and(|fl| fl.pieces.len() == 2 && !canvas_tool::pieces_are_apart(&fl.pieces)),
+        "Alt複製された接している2片で pieces_are_apart が false であること"
+    );
 
+    // 5. 選択を解除すると、元の1図形と、1つに結合された複製の計2図形になること
+    let _ = apply(&mut app, Action::Deselect);
+    assert_eq!(
+        app.doc.root.layers[0].cel_at(0).unwrap().shapes.len(),
+        2,
+        "選択解除後、セルの図形は元の1本と結合された複製の2つであること"
+    );
 
-
-
-
-
-
+    // 6. 保存して読み込んでも2図形のままであること
+    let tmp_path = std::env::temp_dir().join(format!("m4_1_alt_dup_{}.is2d", std::process::id()));
+    project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
+    let mut reopened = Is2dApp::default();
+    project_io::open_project_in_tab(&mut reopened, &tmp_path, None).unwrap();
+    let _ = std::fs::remove_file(&tmp_path);
+    assert_eq!(
+        reopened.doc.root.layers[0].cel_at(0).unwrap().shapes.len(),
+        2,
+        "保存して読み込んでも2図形であること"
+    );
+}

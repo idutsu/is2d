@@ -4,11 +4,11 @@ use std::sync::Arc;
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    Clipboard, MoveSelectionDrag, Tab, active_scope_layer_id, cancel_active_drag,
+    active_scope_layer_id, cancel_active_drag, Clipboard, MoveSelectionDrag, Tab,
 };
 use crate::symbol::{Document, SymbolDef, SymbolEvalCtx};
 use crate::timeline::Timeline;
-use crate::vector_engine::{FillShape, next_shape_id};
+use crate::vector_engine::{next_shape_id, FillShape};
 
 /// 相対グループパスを持つシェイプ群に対し、新しいグループID・シンボルインスタンスIDを採番して現在の編集スコープ用に変換する
 pub(crate) fn instantiate_relative_shapes_in_scope(
@@ -171,13 +171,7 @@ fn collect_symbol_and_descendants(
         return;
     };
     for inst in sym.timeline.instances() {
-        collect_symbol_and_descendants(
-            inst.binding.symbol_id,
-            library,
-            reusable,
-            visited,
-            out,
-        );
+        collect_symbol_and_descendants(inst.binding.symbol_id, library, reusable, visited, out);
     }
     if let Some(existing) = reusable.iter().find(|s| s.id == sym_id) {
         out.push(Arc::clone(existing));
@@ -506,7 +500,6 @@ pub(crate) fn prepare_copy_selected_shapes(tab: &mut Tab, clipboard: &mut Clipbo
     clipboard.shapes = extracted;
     clipboard.paste_count = 0;
     clipboard.paste_offset = KVec2::ZERO;
-    clipboard.pieces_disjoint = tab.session.floating().is_none_or(|fl| fl.pieces_disjoint);
     capture_clipboard_symbols(tab, clipboard);
     true
 }

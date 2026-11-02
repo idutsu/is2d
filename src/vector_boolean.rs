@@ -106,7 +106,7 @@ fn raw_scope_insert_index(
         .unwrap_or(canvas.len())
 }
 
-/// 互いに重ならず同色で接する片もない `Floating::pieces`（`pieces_disjoint == true`）をキャンバスへマージする
+/// 片同士の境界矩形（1.5 広げたもの）が重ならないときに使う、`Floating::pieces` のキャンバスへの結合処理
 pub(crate) fn merge_disjoint_pieces_into_canvas(
     canvas: &mut Vec<FillShape>,
     mut pieces: Vec<FillShape>,
@@ -199,8 +199,11 @@ pub(crate) fn merge_disjoint_pieces_into_canvas(
             if subj_polys.is_empty() {
                 continue;
             }
-            let rule =
-                [OverlayRule::Difference, OverlayRule::Subject][clip_polys.is_empty() as usize];
+            let rule = if clip_polys.is_empty() {
+                OverlayRule::Subject
+            } else {
+                OverlayRule::Difference
+            };
             let min_area = adaptive_overlay_min_area(&active, &overlapping);
             let (mut to_reconstruct, mut used_in) = (Vec::new(), vec![false; active.len()]);
             for poly in run_float_overlay(

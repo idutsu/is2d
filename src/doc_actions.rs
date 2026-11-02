@@ -4,12 +4,12 @@ use eframe::egui::{Color32, Vec2};
 use kurbo::{Affine, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    Clipboard, CoalesceKey, Floating, FloatingOrigin, NoticeKind, SelectSubMode, ShapeId,
-    StatusToast, Tab, Tool, ToolSettings, UndoEntry, active_scope_layer_id, cancel_active_drag,
-    clear_selection, commit_floating, edit_layers, editable_layer_ids,
-    focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
-    merge_floating_into_base_shapes, prepare_moved_selection,
-    select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode,
+    active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
+    editable_layer_ids, focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
+    merge_floating_into_base_shapes, prepare_moved_selection, select_shapes_for_timeline_selection,
+    set_tool, show_notice, toggle_select_sub_mode, Clipboard, CoalesceKey, Floating,
+    FloatingOrigin, NoticeKind, SelectSubMode, ShapeId, StatusToast, Tab, Tool, ToolSettings,
+    UndoEntry,
 };
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes,
@@ -24,16 +24,17 @@ use crate::select_ops::{
 use crate::symbol::{SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 use crate::symbol_ops::{
     enter_symbol_from_library, enter_symbol_timeline, exit_symbol_timeline,
-    prepare_convert_selection_to_symbol, prepare_place_symbol_instance, selected_single_symbol_info,
+    prepare_convert_selection_to_symbol, prepare_place_symbol_instance,
+    selected_single_symbol_info,
 };
-use crate::timeline::{MAX_LAYERS_PER_TIMELINE, Timeline, TimelineCellSelection};
+use crate::timeline::{Timeline, TimelineCellSelection, MAX_LAYERS_PER_TIMELINE};
 use crate::vector_boolean::{
-    BoolOp, boolean_operation, erase_from_canvas, find_enclosed_region_at,
-    merge_disjoint_fill_into_canvas, merge_shapes_into_canvas, resolve_deformed_shape,
+    boolean_operation, erase_from_canvas, find_enclosed_region_at, merge_disjoint_fill_into_canvas,
+    merge_shapes_into_canvas, resolve_deformed_shape, BoolOp,
 };
 use crate::vector_engine::{
-    FillShape, MAX_VIEW_ZOOM, MIN_VIEW_ZOOM, affine_rotate_around, affine_scale_around,
-    rects_overlap,
+    affine_rotate_around, affine_scale_around, rects_overlap, FillShape, MAX_VIEW_ZOOM,
+    MIN_VIEW_ZOOM,
 };
 use crate::vector_stroke::{build_smoothed_stroke_shapes_at_zoom, generate_brush_outline_at_zoom};
 
@@ -413,7 +414,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
             apply_raw_outline(tab, Tool::Eraser, tool.brush_color, &raw)
         }
         #[cfg(test)]
-        Action::CommitRawOutline { raw } => apply_raw_outline(tab, tool.tool, tool.brush_color, &raw),
+        Action::CommitRawOutline { raw } => {
+            apply_raw_outline(tab, tool.tool, tool.brush_color, &raw)
+        }
         Action::BucketFill { pt, color } => apply_bucket_fill(tab, color, pt),
 
         Action::SelectSingleAt { pt } => select_single_shape_at(tab, tool.select_sub_mode, pt),
@@ -755,7 +758,12 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
 // 4. 各アクションの内部実装
 // ============================================================================
 
-fn apply_raw_outline(tab: &mut Tab, active_tool: Tool, brush_color: Color32, raw: &[Point]) -> bool {
+fn apply_raw_outline(
+    tab: &mut Tab,
+    active_tool: Tool,
+    brush_color: Color32,
+    raw: &[Point],
+) -> bool {
     let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
     if !tab.active_timeline().is_layer_editable_by_id(target_lid) {
         return false;
@@ -831,11 +839,8 @@ fn collect_all_visible_shapes(tab: &Tab) -> Vec<FillShape> {
             continue;
         }
         if layer.locked {
-            let mut eval = tl.evaluate_layer_shapes_at(
-                layer_idx,
-                tl.current_frame,
-                &tab.doc.library,
-            );
+            let mut eval =
+                tl.evaluate_layer_shapes_at(layer_idx, tl.current_frame, &tab.doc.library);
             if world_xform != Affine::IDENTITY {
                 for s in &mut eval {
                     s.transform(world_xform);
@@ -844,12 +849,7 @@ fn collect_all_visible_shapes(tab: &Tab) -> Vec<FillShape> {
             out.extend(eval);
         } else {
             let lid = layer.id;
-            out.extend(
-                tab.scene()
-                    .iter()
-                    .filter(|s| s.layer_id == lid)
-                    .cloned(),
-            );
+            out.extend(tab.scene().iter().filter(|s| s.layer_id == lid).cloned());
         }
     }
     out
@@ -888,7 +888,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 .filter(|l| l.visible && !l.locked)
                 .map(|l| l.id)
                 .collect();
-            tab.session.lift_selected_raw_shapes_to_floating(false);
+            tab.session.lift_selected_raw_shapes_to_floating();
             let scope = tab.session.editing_group_path.clone();
             let sel = tab.session.selection.clone();
             tab.session.update_floating(|fl_opt| {
@@ -902,7 +902,6 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                         }
                     }
                     fl.modified = true;
-                    fl.pieces_disjoint = false;
                 }
             });
             return true;
@@ -1043,7 +1042,6 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     let selection = tab.session.selection.clone();
     tab.session.update_floating(|fl_opt| {
         if let Some(fl) = fl_opt {
-            let mut all_selected = true;
             for piece in &mut fl.pieces {
                 if selection.contains_shape(piece) {
                     if piece.is_empty_symbol_marker() {
@@ -1055,15 +1053,10 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
                         piece.transform(affine);
                     }
                     any_transformed = true;
-                } else {
-                    all_selected = false;
                 }
             }
             if any_transformed {
                 fl.modified = true;
-                if !all_selected || affine.determinant().abs() < 1e-9 {
-                    fl.pieces_disjoint = false;
-                }
             }
         }
     });
@@ -1073,9 +1066,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
             .session
             .floating()
             .is_some_and(|fl| fl.hidden.contains(&s.shape_id));
-        if !hidden
-            && tab.session.selection.contains_shape(s)
-            && !target_lids.contains(&s.layer_id)
+        if !hidden && tab.session.selection.contains_shape(s) && !target_lids.contains(&s.layer_id)
         {
             target_lids.push(s.layer_id);
         }
@@ -1149,11 +1140,7 @@ fn apply_finish_move_selection_drag(
     moved
 }
 
-fn apply_move_selected(
-    tab: &mut Tab,
-    delta: KVec2,
-    coalesce: Option<CoalesceKey>,
-) -> bool {
+fn apply_move_selected(tab: &mut Tab, delta: KVec2, coalesce: Option<CoalesceKey>) -> bool {
     cancel_active_drag(tab);
     let editable_lids = editable_layer_ids(tab);
     if delta == KVec2::ZERO
@@ -1210,7 +1197,6 @@ fn apply_deform_shape(
                     remainder: std::mem::take(&mut fl.remainder),
                     hidden: std::mem::take(&mut fl.hidden),
                     modified: true,
-                    pieces_disjoint: false,
                 }
             })
         })
@@ -1365,7 +1351,6 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
                     if let Some(fl_mut) = fl_opt {
                         fl_mut.pieces[p_idx] = test_piece;
                         fl_mut.modified = true;
-                        fl_mut.pieces_disjoint = false;
                     }
                 });
                 return true;
@@ -1537,8 +1522,7 @@ fn apply_paste_clipboard(
         };
 
         let same_timeline_context = clipboard.source_doc_id == tab.id
-            && clipboard.source_symbol_id
-                == tab.session.edit_path.last().map(|s| s.symbol_id)
+            && clipboard.source_symbol_id == tab.session.edit_path.last().map(|s| s.symbol_id)
             && tab.session.editing_group_path.is_empty();
         let multi_layer_copy = same_timeline_context
             && resolved
@@ -1552,15 +1536,6 @@ fn apply_paste_clipboard(
             pasted_shapes,
             any_raw.then_some(FloatingOrigin::Paste),
         );
-        let raw = || resolved.iter().filter(|s| s.group_path.is_empty()).map(|s| s.layer_id);
-        if clipboard.pieces_disjoint
-            && (raw().all(|l| Some(l) == raw().next())
-                || (multi_layer_copy
-                    && raw().all(|l| tab.active_timeline().is_layer_editable_by_id(l))))
-        {
-            tab.session
-                .update_floating(|f| _ = f.as_mut().map(|f| f.pieces_disjoint = true));
-        }
         if !matches!(tool.tool, Tool::Select | Tool::Transform) {
             set_tool(tab, tool, Tool::Select);
         }
@@ -1836,7 +1811,10 @@ fn apply_timeline_delete_keyframe(tab: &mut Tab) -> bool {
         return false;
     }
     commit_floating(tab);
-    if !tab.active_timeline().can_delete_keyframe_on_targets(&targets) {
+    if !tab
+        .active_timeline()
+        .can_delete_keyframe_on_targets(&targets)
+    {
         return false;
     }
     mutate_timeline_with_undo(tab, |tl| {
@@ -1879,9 +1857,9 @@ fn apply_timeline_move_or_copy_frames(
     delta_frame: isize,
     copy_mode: bool,
 ) -> bool {
-    let Some((dst_sel, actual_dl)) = tab
-        .active_timeline()
-        .resolve_frame_move_bounds(sel, delta_layer, delta_frame)
+    let Some((dst_sel, actual_dl)) =
+        tab.active_timeline()
+            .resolve_frame_move_bounds(sel, delta_layer, delta_frame)
     else {
         return false;
     };
@@ -1971,11 +1949,7 @@ fn apply_set_layer_locked(tab: &mut Tab, layer_idx: usize, locked: bool) {
     });
 }
 
-fn apply_set_stage_size(
-    tab: &mut Tab,
-    next_size: Vec2,
-    coalesce: Option<CoalesceKey>,
-) -> bool {
+fn apply_set_stage_size(tab: &mut Tab, next_size: Vec2, coalesce: Option<CoalesceKey>) -> bool {
     if (next_size.x - tab.doc.stage_size.x).abs() <= f32::EPSILON
         && (next_size.y - tab.doc.stage_size.y).abs() <= f32::EPSILON
     {

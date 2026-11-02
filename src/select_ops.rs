@@ -3,15 +3,15 @@ use std::collections::HashSet;
 use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
-    Floating, FloatingOrigin, HoverTarget, Scene, SelectSubMode, Session, ShapeId, Tab,
     cancel_active_drag, clear_selection, commit_floating_except, edit_layers, editable_layer_ids,
     focus_active_layer_to_shape_by_id, merge_floating_into_base_shapes,
-    sync_timeline_layer_from_canvas_selection, topmost_layer_id_for_indices,
+    sync_timeline_layer_from_canvas_selection, topmost_layer_id_for_indices, Floating,
+    FloatingOrigin, HoverTarget, Scene, SelectSubMode, Session, ShapeId, Tab,
 };
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
-use crate::vector_boolean::{BoolOp, boolean_operation, slice_shape_with_marquee_rect};
+use crate::vector_boolean::{boolean_operation, slice_shape_with_marquee_rect, BoolOp};
 use crate::vector_engine::{
-    FillShape, make_marquee_rect_shape, next_shape_id, normalize_vec, rects_overlap,
+    make_marquee_rect_shape, next_shape_id, normalize_vec, rects_overlap, FillShape,
 };
 
 /// 現在の選択図形のうち `keep_indices` のみを選択に残し、選択から外れた変更済み生シェイプのみをキャンバスへ結合・切り抜き確定する
@@ -117,11 +117,7 @@ pub(crate) fn toggle_shape_selection(tab: &mut Tab, scene_idx: usize) {
 }
 
 /// 既存の選択を確定解除した上で、指定座標 `pt` にある最前面シェイプ（塗り・境界線・頂点、またはグループ塊全体）を選択する
-pub(crate) fn select_single_shape_at(
-    tab: &mut Tab,
-    sub_mode: SelectSubMode,
-    pt: Point,
-) -> bool {
+pub(crate) fn select_single_shape_at(tab: &mut Tab, sub_mode: SelectSubMode, pt: Point) -> bool {
     clear_selection(tab);
     let zoom = tab.view.zoom;
     let scene = tab.scene();
@@ -175,7 +171,6 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     let editing_group_path = tab.session.editing_group_path.clone();
     let mut selection = std::mem::take(&mut tab.session.selection);
     tab.session.update_floating(|floating| {
-        let had_existing_floating = floating.is_some();
         if let Some(fl) = floating {
             let mut new_rem = Vec::with_capacity(fl.remainder.len());
             let mut current_orig_id: Option<ShapeId> = None;
@@ -215,7 +210,6 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                         rem.shape_id = next_shape_id();
                     }
                     selection.insert_shape(&rem);
-                    fl.pieces_disjoint = false;
                     fl.pieces.push(rem);
                     continue;
                 }
@@ -229,7 +223,6 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                         rem.shape_id = next_shape_id();
                     }
                     selection.insert_shape(&rem);
-                    fl.pieces_disjoint = false;
                     fl.pieces.push(rem);
                 } else {
                     for mut out_s in outside {
@@ -244,7 +237,6 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                         }
                         let piece = piece.with_scope(lid, &gp);
                         selection.insert_shape(&piece);
-                        fl.pieces_disjoint = false;
                         fl.pieces.push(piece);
                     }
                 }
@@ -297,11 +289,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                     remainder: Vec::new(),
                     hidden: HashSet::new(),
                     modified: false,
-                    pieces_disjoint: true,
                 });
-                if had_existing_floating {
-                    fl.pieces_disjoint = false;
-                }
                 fl.hidden.insert(orig_id);
                 let mut outside_scoped: Vec<FillShape> = outside
                     .into_iter()
@@ -880,7 +868,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     });
     tab.session.selection = selection;
     if any_became_raw {
-        tab.session.lift_selected_raw_shapes_to_floating(false);
+        tab.session.lift_selected_raw_shapes_to_floating();
     }
     tab.session.retain_existing_selection();
     tab.session.transform_pivot = None;
