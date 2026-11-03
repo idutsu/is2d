@@ -390,16 +390,16 @@ impl SymbolDef {
     }
 
     /// インスタンスの再生設定（`binding.loop_mode`, `binding.first_frame`）とキーフレーム開始フレーム `kf_start_frame`、
-    /// 現在の親フレーム `current_frame` から、評価すべきシンボル内部フレーム番号（`0..total_frames`）を算出する
+    /// 現在の親フレーム `current_frame` から、`(内部フレーム番号, 子インスタンスを動かす時計)` を返す
     pub(crate) fn resolve_internal_frame(
         &self,
         binding: SymbolInstanceBinding,
         kf_start_frame: usize,
         current_frame: usize,
-    ) -> usize {
+    ) -> (usize, usize) {
         let fc = self.timeline.total_frames.max(1);
         let elapsed = current_frame.saturating_sub(kf_start_frame);
-        match binding.loop_mode {
+        let internal_frame = match binding.loop_mode {
             SymbolLoopMode::Loop => (binding.first_frame % fc + elapsed % fc) % fc,
             SymbolLoopMode::PlayOnce => binding
                 .first_frame
@@ -407,7 +407,60 @@ impl SymbolDef {
                 .saturating_add(elapsed)
                 .min(fc - 1),
             SymbolLoopMode::SingleFrame => binding.first_frame.min(fc - 1),
+        };
+        let child_eval_frame = if self.timeline.total_frames <= 1
+            && binding.loop_mode != SymbolLoopMode::SingleFrame
+        {
+            binding.first_frame.saturating_add(elapsed)
+        } else {
+            internal_frame
+        };
+        (internal_frame % fc, child_eval_frame)
+    }
+
+    /// シンボルインスタンス `parent_binding` を現在コマ `current_frame`（親キーフレーム開始コマ `parent_kf_start`）で分解したときに
+    /// 内部の可視レイヤーから現れる子シンボルインスタンスの新しい binding 一覧を返す
+    pub(crate) fn detached_child_bindings(
+        &self,
+        parent_binding: SymbolInstanceBinding,
+        parent_kf_start: usize,
+        current_frame: usize,
+        library: &[SymbolDef],
+    ) -> Vec<SymbolInstanceBinding> {
+        let (frame_idx, child_eval_frame) =
+            self.resolve_internal_frame(parent_binding, parent_kf_start, current_frame);
+        let stage_elapsed = current_frame.saturating_sub(parent_kf_start);
+        let mut out = Vec::new();
+        for layer in self.timeline.layers.iter().filter(|l| l.visible) {
+            let Some(kf_idx) = layer.keyframe_index_at(frame_idx) else {
+                continue;
+            };
+            let kf = &layer.keyframes[kf_idx];
+            let child_elapsed = child_eval_frame.saturating_sub(kf.start_frame);
+            let mut push_child = |mut b: SymbolInstanceBinding| {
+                let Some(child_sym) = library.iter().find(|s| s.id == b.symbol_id) else {
+                    return;
+                };
+                let child_fc = child_sym.timeline.total_frames.max(1);
+                let progress = b.first_frame.saturating_add(child_elapsed);
+                b.first_frame = match b.loop_mode {
+                    SymbolLoopMode::Loop => (progress as isize - stage_elapsed as isize)
+                        .rem_euclid(child_fc as isize)
+                        as usize,
+                    SymbolLoopMode::PlayOnce => progress.saturating_sub(stage_elapsed),
+                    SymbolLoopMode::SingleFrame => b.first_frame,
+                };
+                out.push(b);
+            };
+            if let Some((_, interp_b)) = layer.interpolated_tween_binding_at(frame_idx) {
+                push_child(interp_b);
+            } else {
+                for inst in kf.cel.instances.iter() {
+                    push_child(inst.binding);
+                }
+            }
         }
+        out
     }
 
     /// インスタンスの再生設定（ループ再生 / 1回再生 / 任意のフレーム）に基づいて、
@@ -419,18 +472,8 @@ impl SymbolDef {
         current_frame: usize,
         ctx: SymbolEvalCtx<'_>,
     ) -> Arc<Vec<FillShape>> {
-        let internal_frame = self.resolve_internal_frame(binding, kf_start_frame, current_frame);
-        let child_eval_frame = if self.timeline.total_frames <= 1
-            && binding.loop_mode != SymbolLoopMode::SingleFrame
-        {
-            binding
-                .first_frame
-                .saturating_add(current_frame.saturating_sub(kf_start_frame))
-        } else {
-            internal_frame
-        };
-        let fc = self.timeline.total_frames.max(1);
-        let frame_idx = internal_frame % fc;
+        let (frame_idx, child_eval_frame) =
+            self.resolve_internal_frame(binding, kf_start_frame, current_frame);
         let eval_ctx = if ctx.depth == 0 { ctx.nested() } else { ctx };
         let memo_key = (self.id, frame_idx, child_eval_frame, eval_ctx.depth);
         if let Some(cached) = eval_ctx.get_memo(&memo_key) {

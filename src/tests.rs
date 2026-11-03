@@ -12895,13 +12895,9 @@ fn test_m2_1_ungroup_multi_shape_and_nested_symbol_detaches_all_shapes() {
     let _ = apply(&mut app2, Action::Ungroup);
     canvas_tool::clear_selection(&mut app2);
     let cel2 = &app2.doc.root.layers[0].keyframes[0].cel;
-    assert!(
-        cel2.instances
-            .iter()
-            .all(|inst| inst.binding.symbol_id != sym_a_id),
-        "シンボル A を分解したあと、A のインスタンスが残らないこと"
-    );
-    assert_eq!(cel2.shapes.len(), 2);
+    assert_eq!(cel2.instances.len(), 1);
+    assert_eq!(cel2.instances[0].binding.symbol_id, sym_b_id);
+    assert_eq!(cel2.shapes.len(), 1);
 }
 
 /// M2-2: トゥイーンの途中のコマでは直接編集できず警告が表示され、F6 挿入後に編集・開始フレーム指定が正しく動くこと、
@@ -16361,7 +16357,7 @@ fn test_symbol_color_effect_alpha_brightness_tween_export_nested_io_undo_ungroup
         ColorEffect::default()
     );
 
-    // 8. グループ解除（アルファ 50% のインスタンスを解除すると symbol_instance が無くなり A=128±1 の生図形になる）
+    // 8. グループ解除（アルファ 50% のインスタンスを解除すると symbol_instance が無くなり効果をかける前の A=255 の生図形になり、Undo 1回で戻る）
     assert!(apply(&mut undo_app, Action::Redo));
     assert!(apply(
         &mut undo_app,
@@ -16372,8 +16368,18 @@ fn test_symbol_color_effect_alpha_brightness_tween_export_nested_io_undo_ungroup
     assert!(apply(&mut undo_app, Action::Ungroup));
     let ungrouped_shape = undo_app.scene().get(0).unwrap();
     assert!(ungrouped_shape.symbol_instance.is_none());
-    let ungrouped_a = ungrouped_shape.color.to_srgba_unmultiplied()[3] as i32;
-    assert!((ungrouped_a - 128).abs() <= 1);
+    assert_eq!(ungrouped_shape.color.to_srgba_unmultiplied()[3], 255);
+    assert!(apply(&mut undo_app, Action::Undo));
+    assert_eq!(
+        undo_app
+            .scene()
+            .get(0)
+            .unwrap()
+            .symbol_instance
+            .unwrap()
+            .color_effect,
+        ColorEffect::new(0.5, 0.0)
+    );
 }
 
 #[test]
@@ -16642,4 +16648,505 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     assert!(nan_rec_path.is_file());
 
     let _ = std::fs::remove_dir_all(&base_dir);
+}
+
+#[test]
+fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_effect() {
+    use kurbo::Affine;
+
+    use crate::doc_actions::{apply, Action};
+    use crate::symbol::{ColorEffect, SymbolLoopMode};
+
+    let c0 = Color32::from_rgb(220, 40, 40);
+    let c1 = Color32::from_rgb(40, 180, 60);
+    let c2 = Color32::from_rgb(40, 90, 220);
+    let c3 = Color32::from_rgb(220, 180, 40);
+    let raw_col = Color32::from_rgb(160, 60, 200);
+
+    // 4コマ（赤・緑・青・黄）のシンボル B と、生の図形1つ＋B を持つシンボル A を作るヘルパー
+    let build_nested_app = |a_total_frames: usize| -> (Is2dApp, u64, u64) {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            make_stroke(Point::new(100.0, 100.0), Point::new(160.0, 100.0), 8.0, c0),
+        );
+        app.session.set_selected_indices(vec![0]);
+        assert!(apply(&mut app, Action::ConvertToSymbol));
+        let sym_b_id = app.doc.library[0].id;
+
+        // B のタイムラインを 4 コマ（c0, c1, c2, c3）にする
+        assert!(apply(
+            &mut app,
+            Action::EnterSymbolFromLibrary { sym_id: sym_b_id },
+        ));
+        for (f, col) in [(1, c1), (2, c2), (3, c3)] {
+            assert!(apply(
+                &mut app,
+                Action::SwitchLayerAndFrame {
+                    layer_idx: 0,
+                    frame: f,
+                },
+            ));
+            assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: false },));
+            let s = make_stroke(Point::new(0.0, 0.0), Point::new(50.0, 0.0), 8.0, col);
+            let sym_b = app
+                .doc
+                .library
+                .iter_mut()
+                .find(|s| s.id == sym_b_id)
+                .unwrap();
+            sym_b.timeline.layers[0].keyframe_mut(f).cel = timeline::Cel::new(s);
+        }
+        assert!(apply(&mut app, Action::ExitGroup));
+
+        // ステージに生の図形を足し、B と一緒に選んでシンボル A に変換する
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(260.0, 100.0), Point::new(320.0, 100.0)],
+                radius: 8.0,
+                color: raw_col,
+            },
+        ));
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::ConvertToSymbol));
+        let sym_a_id = app.doc.library[1].id;
+
+        if a_total_frames > 1 {
+            let sym_a = app
+                .doc
+                .library
+                .iter_mut()
+                .find(|s| s.id == sym_a_id)
+                .unwrap();
+            sym_a.timeline.total_frames = a_total_frames;
+            sym_a.timeline.layers[0].frame_count = a_total_frames;
+        }
+        app.doc.root.total_frames = 20;
+        app.doc.root.layers[0].frame_count = 20;
+        app.refresh_scene_base();
+        (app, sym_a_id, sym_b_id)
+    };
+
+    // 3, 13, 14. B が残り、変形が A×B になり、B も選択され、Undo で分解前の A に戻る
+    {
+        let (mut app, sym_a_id, sym_b_id) = build_nested_app(1);
+        let orig_b_in_a = app
+            .doc
+            .library
+            .iter()
+            .find(|s| s.id == sym_a_id)
+            .unwrap()
+            .timeline
+            .layers[0]
+            .keyframes[0]
+            .cel
+            .instances[0]
+            .binding;
+        assert!(apply(
+            &mut app,
+            Action::NudgeSelection {
+                delta: kurbo::Vec2::new(30.0, 15.0),
+            },
+        ));
+        let a_binding = app.doc.root.layers[0].keyframes[0].cel.instances[0].binding;
+        let expected_xform = a_binding.xform * orig_b_in_a.xform;
+
+        assert!(apply(&mut app, Action::Ungroup));
+        let cel = &app.doc.root.layers[0].keyframes[0].cel;
+        assert_eq!(cel.instances.len(), 1);
+        let b_inst = &cel.instances[0];
+        assert_eq!(b_inst.binding.symbol_id, sym_b_id);
+        for i in 0..6 {
+            assert!(
+                (b_inst.binding.xform.as_coeffs()[i] - expected_xform.as_coeffs()[i]).abs() < 1e-6
+            );
+        }
+        assert!(app
+            .session
+            .selection
+            .instances
+            .contains(&b_inst.binding.instance_gid));
+        assert!(!app.session.selection.shapes.is_empty());
+
+        canvas_tool::clear_selection(&mut app);
+        let cel_after = &app.doc.root.layers[0].keyframes[0].cel;
+        assert_eq!(cel_after.shapes.len(), 1);
+        assert_eq!(cel_after.shapes[0].color, raw_col);
+
+        assert!(apply(&mut app, Action::Undo));
+        let cel_undo = &app.doc.root.layers[0].keyframes[0].cel;
+        assert_eq!(cel_undo.instances.len(), 1);
+        assert_eq!(cel_undo.instances[0].binding.symbol_id, sym_a_id);
+    }
+
+    // 4. 表示コマが合う: (a) A が1コマで F=5、(b) A が4コマループで F=10
+    for (a_frames, target_f) in [(1usize, 5usize), (4usize, 10usize)] {
+        let (mut app, _, sym_b_id) = build_nested_app(a_frames);
+        let sym_a = &mut app.doc.library[1];
+        sym_a.timeline.layers[0].keyframe_mut(0).cel.instances_mut()[0]
+            .binding
+            .first_frame = 1;
+        app.refresh_scene_base();
+
+        assert!(apply(
+            &mut app,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: target_f,
+            },
+        ));
+        let color_before_f = app
+            .scene()
+            .iter()
+            .find(|s| s.color != raw_col)
+            .unwrap()
+            .color;
+        assert!(apply(
+            &mut app,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: target_f + 1,
+            },
+        ));
+        let color_before_f_next = app
+            .scene()
+            .iter()
+            .find(|s| s.color != raw_col)
+            .unwrap()
+            .color;
+
+        assert!(apply(
+            &mut app,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: target_f,
+            },
+        ));
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::Ungroup));
+        let color_after_f = app
+            .scene()
+            .iter()
+            .find(|s| s.symbol_instance.is_some_and(|b| b.symbol_id == sym_b_id))
+            .unwrap()
+            .color;
+        assert_eq!(color_after_f, color_before_f);
+
+        assert!(apply(
+            &mut app,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: target_f + 1,
+            },
+        ));
+        let color_after_f_next = app
+            .scene()
+            .iter()
+            .find(|s| s.symbol_instance.is_some_and(|b| b.symbol_id == sym_b_id))
+            .unwrap()
+            .color;
+        assert_eq!(color_after_f_next, color_before_f_next);
+    }
+
+    // 5. ステージ側のキーフレームが 0 コマ目から始まっていない場合（S=3, F=7）
+    {
+        let (mut app, _, sym_b_id) = build_nested_app(4);
+        assert!(apply(
+            &mut app,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 3,
+            },
+        ));
+        assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: true }));
+        assert!(apply(
+            &mut app,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 7,
+            },
+        ));
+        let col_before = app
+            .scene()
+            .iter()
+            .find(|s| s.color != raw_col)
+            .unwrap()
+            .color;
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::Ungroup));
+        let col_after = app
+            .scene()
+            .iter()
+            .find(|s| s.symbol_instance.is_some_and(|b| b.symbol_id == sym_b_id))
+            .unwrap()
+            .color;
+        assert_eq!(col_after, col_before);
+    }
+
+    // 6 & 7. 1回再生の B（合わせられる場合と負になって 0 になる場合）および任意のフレームの B
+    {
+        let (mut app, _, _) = build_nested_app(4);
+        app.doc.library[1].timeline.layers[0]
+            .keyframe_mut(0)
+            .cel
+            .instances_mut()[0]
+            .binding
+            .loop_mode = SymbolLoopMode::PlayOnce;
+        app.doc.library[1].timeline.layers[0]
+            .keyframe_mut(0)
+            .cel
+            .instances_mut()[0]
+            .binding
+            .first_frame = 2;
+        app.refresh_scene_base();
+        assert!(apply(
+            &mut app,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 1,
+            },
+        ));
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::Ungroup));
+        assert_eq!(
+            app.doc.root.layers[0].keyframes[0].cel.instances[0]
+                .binding
+                .first_frame,
+            2
+        );
+
+        // B の進み(1) - (F - S)(5) < 0 のとき 1回再生は first_frame が 0 になる
+        let (mut app_neg, _, _) = build_nested_app(4);
+        app_neg.doc.library[1].timeline.layers[0]
+            .keyframe_mut(0)
+            .cel
+            .instances_mut()[0]
+            .binding
+            .loop_mode = SymbolLoopMode::PlayOnce;
+        app_neg.doc.library[1].timeline.layers[0]
+            .keyframe_mut(0)
+            .cel
+            .instances_mut()[0]
+            .binding
+            .first_frame = 0;
+        app_neg.refresh_scene_base();
+        assert!(apply(
+            &mut app_neg,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 5,
+            },
+        ));
+        assert!(apply(&mut app_neg, Action::SelectAll));
+        assert!(apply(&mut app_neg, Action::Ungroup));
+        assert_eq!(
+            app_neg.doc.root.layers[0].keyframes[0].cel.instances[0]
+                .binding
+                .first_frame,
+            0
+        );
+
+        // 7. 任意のフレームの B は first_frame が変わらない
+        let (mut app_sf, _, _) = build_nested_app(4);
+        app_sf.doc.library[1].timeline.layers[0]
+            .keyframe_mut(0)
+            .cel
+            .instances_mut()[0]
+            .binding
+            .loop_mode = SymbolLoopMode::SingleFrame;
+        app_sf.doc.library[1].timeline.layers[0]
+            .keyframe_mut(0)
+            .cel
+            .instances_mut()[0]
+            .binding
+            .first_frame = 2;
+        app_sf.refresh_scene_base();
+        assert!(apply(
+            &mut app_sf,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 6,
+            },
+        ));
+        assert!(apply(&mut app_sf, Action::SelectAll));
+        assert!(apply(&mut app_sf, Action::Ungroup));
+        assert_eq!(
+            app_sf.doc.root.layers[0].keyframes[0].cel.instances[0]
+                .binding
+                .first_frame,
+            2
+        );
+    }
+
+    // 8. A の中でトゥイーンしている B: トゥイーン途中のコマで分解すると B の位置が分解前と同じ
+    {
+        let (mut app, sym_a_id, sym_b_id) = build_nested_app(5);
+        {
+            let sym_a = app
+                .doc
+                .library
+                .iter_mut()
+                .find(|s| s.id == sym_a_id)
+                .unwrap();
+            sym_a.timeline.layers[0].keyframe_mut(0).cel = timeline::Cel::new_with_instances(
+                Vec::new(),
+                vec![sym_a.timeline.layers[0].keyframes[0].cel.instances[0].clone()],
+            );
+            sym_a.timeline.layers[0].keyframe_mut(0).tween = true;
+            sym_a.timeline.layers[0].insert_keyframe(4, true);
+            sym_a.timeline.layers[0].keyframe_mut(1).cel.instances_mut()[0]
+                .binding
+                .xform *= Affine::translate((80.0, 0.0));
+            sym_a.revision = crate::vector_engine::next_mesh_revision();
+        }
+        app.doc.revision = crate::vector_engine::next_mesh_revision();
+        app.refresh_scene_base();
+        assert!(apply(
+            &mut app,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 2,
+            },
+        ));
+        let bbox_before = app.scene().get(0).unwrap().bounding_box();
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::Ungroup));
+        let b_shape = app
+            .scene()
+            .iter()
+            .find(|s| s.symbol_instance.is_some_and(|b| b.symbol_id == sym_b_id))
+            .unwrap();
+        let bbox_after = b_shape.bounding_box();
+        assert!((bbox_before.x0 - bbox_after.x0).abs() < 1e-5);
+        assert!((bbox_before.y0 - bbox_after.y0).abs() < 1e-5);
+    }
+
+    // 9. 色効果のリセット: A にアルファ 50%・明度 +30%、B にアルファ 30% をかけて分解
+    {
+        let (mut app, _, sym_b_id) = build_nested_app(1);
+        app.doc.library[1].timeline.layers[0]
+            .keyframe_mut(0)
+            .cel
+            .instances_mut()[0]
+            .binding
+            .color_effect = ColorEffect::new(0.3, 0.0);
+        app.doc.library[1].revision = crate::vector_engine::next_mesh_revision();
+        app.doc.revision = crate::vector_engine::next_mesh_revision();
+        app.refresh_scene_base();
+
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(
+            &mut app,
+            Action::SetSymbolColorEffect {
+                effect: ColorEffect::new(0.5, 0.3),
+            },
+        ));
+        assert!(apply(&mut app, Action::Ungroup));
+
+        let raw_shape = app
+            .scene()
+            .iter()
+            .find(|s| s.symbol_instance.is_none())
+            .unwrap();
+        assert_eq!(raw_shape.color, raw_col);
+        assert_eq!(raw_shape.color.to_srgba_unmultiplied()[3], 255);
+
+        let b_binding = app
+            .scene()
+            .iter()
+            .find_map(|s| s.symbol_instance.filter(|b| b.symbol_id == sym_b_id))
+            .unwrap();
+        assert_eq!(b_binding.color_effect, ColorEffect::new(0.3, 0.0));
+
+        assert!(apply(&mut app, Action::Undo));
+        let restored_a = app.scene().get(0).unwrap().symbol_instance.unwrap();
+        assert_eq!(restored_a.color_effect, ColorEffect::new(0.5, 0.3));
+    }
+
+    // 10. そのコマで B が空っぽでも分解後に B が残り、B に絵があるコマに移ると見える
+    {
+        let (mut app, _, sym_b_id) = build_nested_app(1);
+        app.doc.library[0].timeline.layers[0].keyframe_mut(0).cel = timeline::Cel::default();
+        app.doc.library[0].revision = crate::vector_engine::next_mesh_revision();
+        app.doc.revision = crate::vector_engine::next_mesh_revision();
+        app.refresh_scene_base();
+
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::Ungroup));
+        assert_eq!(app.doc.root.layers[0].keyframes[0].cel.instances.len(), 1);
+        assert_eq!(
+            app.doc.root.layers[0].keyframes[0].cel.instances[0]
+                .binding
+                .symbol_id,
+            sym_b_id
+        );
+
+        assert!(apply(
+            &mut app,
+            Action::SwitchLayerAndFrame {
+                layer_idx: 0,
+                frame: 1,
+            },
+        ));
+        assert!(app.scene().iter().any(|s| s
+            .symbol_instance
+            .is_some_and(|b| b.symbol_id == sym_b_id)
+            && !s.exterior.segments.is_empty()));
+    }
+
+    // 11 & 12. B の中のシンボル C は分解後も B の中で見え、A の中でグループ G に入っていた B は分解後も G の中に入る
+    {
+        let (mut app, sym_a_id, sym_b_id) = build_nested_app(1);
+        // B の中にシンボル C を作る
+        assert!(apply(
+            &mut app,
+            Action::EnterSymbolFromLibrary { sym_id: sym_b_id },
+        ));
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::ConvertToSymbol));
+        let sym_c_id = app.doc.library.last().unwrap().id;
+        assert_ne!(sym_c_id, sym_b_id);
+        assert!(apply(&mut app, Action::ExitGroup));
+
+        // A の中で B をグループ G に入れる
+        assert!(apply(
+            &mut app,
+            Action::EnterSymbolFromLibrary { sym_id: sym_a_id },
+        ));
+        let b_gid_in_a = app
+            .doc
+            .library
+            .iter()
+            .find(|s| s.id == sym_a_id)
+            .unwrap()
+            .timeline
+            .layers[0]
+            .keyframes[0]
+            .cel
+            .instances[0]
+            .binding
+            .instance_gid;
+        app.session.selection.clear();
+        app.session.selection.instances.insert(b_gid_in_a);
+        assert!(apply(&mut app, Action::Group));
+        assert!(apply(&mut app, Action::ExitGroup));
+
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::Ungroup));
+        let cel = &app.doc.root.layers[0].keyframes[0].cel;
+        assert_eq!(cel.instances.len(), 1);
+        assert_eq!(cel.instances[0].binding.symbol_id, sym_b_id);
+        assert_eq!(
+            cel.instances[0].parent_scope.len(),
+            1,
+            "A の中でグループ G に入っていた B は分解後もグループ G の中のインスタンスになること"
+        );
+        assert!(app.scene().iter().any(|s| s
+            .symbol_instance
+            .is_some_and(|b| b.symbol_id == sym_b_id)
+            && !s.exterior.segments.is_empty()));
+    }
 }

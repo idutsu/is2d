@@ -12,7 +12,8 @@ use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
 use crate::vector_boolean::{boolean_operation, slice_shape_with_marquee_rect, BoolOp};
 use crate::vector_engine::{
-    make_marquee_rect_shape, next_shape_id, normalize_vec, rects_overlap, FillShape,
+    make_marquee_rect_shape, next_shape_id, normalize_vec, rects_overlap, ColorEffect, FillShape,
+    SymbolInstanceBinding,
 };
 
 /// 現在の選択図形のうち `keep_indices` のみを選択に残し、選択から外れた変更済み生シェイプのみをキャンバスへ結合・切り抜き確定する
@@ -809,12 +810,66 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     before_mutate(tab);
 
     let depth = tab.session.editing_group_path.len();
+    let layer_ids = editable_layer_ids(tab);
+    let sel_snapshot = tab.session.selection.clone();
+    edit_layers(tab, &layer_ids, |edit| {
+        for shape in &mut edit.shapes {
+            if sel_snapshot.contains_shape(shape)
+                && shape.is_in_editing_scope(&edit.editing_group_path)
+                && shape.group_path.len() > depth
+            {
+                let gid = shape.group_path[depth];
+                if let Some(b) = shape
+                    .symbol_instance
+                    .as_mut()
+                    .filter(|b| b.instance_gid == gid)
+                {
+                    b.color_effect = ColorEffect::default();
+                }
+            }
+        }
+    });
+
+    let mut child_map: Vec<((u64, u64), SymbolInstanceBinding)> = Vec::new();
+    let tl = tab.active_timeline();
+    let current_frame = tl.current_frame;
+    for layer in &tl.layers {
+        let Some(kf_idx) = layer.keyframe_index_at(current_frame) else {
+            continue;
+        };
+        let kf = &layer.keyframes[kf_idx];
+        for inst in kf.cel.instances.iter() {
+            if inst.parent_scope == tab.session.editing_group_path
+                && tab
+                    .session
+                    .selection
+                    .instances
+                    .contains(&inst.binding.instance_gid)
+            {
+                if let Some(sym_a) = tab
+                    .doc
+                    .library
+                    .iter()
+                    .find(|s| s.id == inst.binding.symbol_id)
+                {
+                    for cb in sym_a.detached_child_bindings(
+                        inst.binding,
+                        kf.start_frame,
+                        current_frame,
+                        &tab.doc.library,
+                    ) {
+                        child_map.push(((inst.binding.instance_gid, cb.instance_gid), cb));
+                    }
+                }
+            }
+        }
+    }
+
     let mut any_became_raw = false;
     let mut selection = std::mem::take(&mut tab.session.selection);
-    let layer_ids = editable_layer_ids(tab);
     edit_layers(tab, &layer_ids, |edit| {
         let mut detached_inner_gid_map: Vec<((u64, u64), u64)> = Vec::new();
-        let mut detached_instance_gids: Vec<u64> = Vec::new();
+        let mut detached_instances: Vec<(u64, u64, SymbolInstanceBinding)> = Vec::new();
         let editing_group_path = &edit.editing_group_path;
         let next_group_id = &mut edit.next_group_id;
         for shape in &mut edit.shapes {
@@ -823,14 +878,16 @@ pub(crate) fn prepare_ungroup_selected_shapes(
             }
             if shape.is_in_editing_scope(editing_group_path) && shape.group_path.len() > depth {
                 let removed_gid = shape.group_path.remove(depth);
-                if shape
+                if let Some(a_binding) = shape
                     .symbol_instance
-                    .is_some_and(|b| b.instance_gid == removed_gid)
+                    .filter(|b| b.instance_gid == removed_gid)
                 {
                     shape.symbol_instance = None;
-                    detached_instance_gids.push(removed_gid);
-                    if !shape.exterior.segments.is_empty() {
-                        selection.shapes.insert(shape.shape_id);
+                    if !detached_instances
+                        .iter()
+                        .any(|(gid, ..)| *gid == removed_gid)
+                    {
+                        detached_instances.push((removed_gid, shape.layer_id, a_binding));
                     }
                     for inner_gid in &mut shape.group_path[depth..] {
                         let key = (removed_gid, *inner_gid);
@@ -845,6 +902,17 @@ pub(crate) fn prepare_ungroup_selected_shapes(
                             id
                         };
                         *inner_gid = mapped;
+                        if shape.symbol_instance.is_none() {
+                            if let Some(&(_, mut cb)) = child_map.iter().find(|&&(k, _)| k == key) {
+                                cb.instance_gid = mapped;
+                                cb.xform = a_binding.xform * cb.xform;
+                                shape.symbol_instance = Some(cb);
+                                selection.instances.insert(mapped);
+                            }
+                        }
+                    }
+                    if shape.symbol_instance.is_none() && !shape.exterior.segments.is_empty() {
+                        selection.shapes.insert(shape.shape_id);
                     }
                 }
                 if shape.group_path.len() == depth && !shape.exterior.segments.is_empty() {
@@ -852,9 +920,25 @@ pub(crate) fn prepare_ungroup_selected_shapes(
                 }
             }
         }
+        for &(a_gid, layer_id, a_binding) in &detached_instances {
+            for &(key @ (p_gid, _), mut cb) in &child_map {
+                if p_gid == a_gid && !detached_inner_gid_map.iter().any(|&(k, _)| k == key) {
+                    let id = (*next_group_id).max(1);
+                    *next_group_id = if id < u64::MAX { id + 1 } else { 1 };
+                    cb.instance_gid = id;
+                    cb.xform = a_binding.xform * cb.xform;
+                    edit.shapes.push(FillShape::new_empty_symbol_marker(
+                        cb,
+                        layer_id,
+                        editing_group_path,
+                    ));
+                    selection.instances.insert(id);
+                }
+            }
+        }
         selection
             .instances
-            .retain(|gid| !detached_instance_gids.contains(gid));
+            .retain(|gid| !detached_instances.iter().any(|(d, ..)| d == gid));
         edit.shapes
             .retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
     });
