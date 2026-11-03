@@ -709,9 +709,7 @@ fn draw_select_tool_properties(
 ) {
     draw_panel_section_label(ui, "アンカー編集モード", 4.0);
 
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let half_w = (ui.available_width() - 6.0) * 0.5;
+    half_width_row(ui, |ui, half_w| {
         if ui
             .add_sized(
                 Vec2::new(half_w, 28.0),
@@ -754,22 +752,16 @@ fn draw_select_tool_properties(
         tab.view.show_wireframe = !tab.view.show_wireframe;
     }
 
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(6.0);
+    draw_panel_separator(ui);
 
     draw_symbol_and_group_section(tab, actions, ui);
 
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(6.0);
+    draw_panel_separator(ui);
 
     draw_panel_section_label(ui, "消去アクション", 4.0);
 
     let has_sel = !tab.session.selection.is_empty();
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let half_w = (ui.available_width() - 6.0) * 0.5;
+    half_width_row(ui, |ui, half_w| {
         if ui
             .add_enabled(
                 has_sel,
@@ -820,9 +812,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
 
     ui.add_space(4.0);
 
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let half_w = (ui.available_width() - 6.0) * 0.5;
+    half_width_row(ui, |ui, half_w| {
         if ui
             .add_enabled(
                 has_sel,
@@ -861,9 +851,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
         ],
     ] {
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let half_w = (ui.available_width() - 6.0) * 0.5;
+        half_width_row(ui, |ui, half_w| {
             for (mode, label, suffix) in pair {
                 if ui
                     .add_enabled(
@@ -889,9 +877,7 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
     draw_panel_section_label(ui, "変形アクション", 4.0);
 
     ui.add_enabled_ui(has_sel, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let half_w = (ui.available_width() - 6.0) * 0.5;
+        half_width_row(ui, |ui, half_w| {
             if ui
                 .add_sized(
                     Vec2::new(half_w, 28.0),
@@ -922,9 +908,7 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
 
         ui.add_space(4.0);
 
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let half_w = (ui.available_width() - 6.0) * 0.5;
+        half_width_row(ui, |ui, half_w| {
             if ui
                 .add_sized(
                     Vec2::new(half_w, 28.0),
@@ -973,9 +957,7 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
         actions.push(UiAction::Doc(Action::ResetTransformPivot));
     }
 
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(6.0);
+    draw_panel_separator(ui);
 
     draw_symbol_and_group_section(tab, actions, ui);
 }
@@ -1120,9 +1102,7 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
         }
     });
 
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(6.0);
+    draw_panel_separator(ui);
 
     draw_panel_section_label(ui, "キャンバス操作", 6.0);
 
@@ -1181,6 +1161,22 @@ pub(crate) fn draw_panel_section_label(ui: &mut egui::Ui, title: &str, bottom_sp
     ui.add_space(bottom_space);
 }
 
+/// 右パネルのセクションの間に、上下に余白を取って区切り線を引く
+fn draw_panel_separator(ui: &mut egui::Ui) {
+    ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(6.0);
+}
+
+/// ボタン2つを横に並べる行を作り、`add_contents` にボタン1つ分の幅（行の幅の半分）を渡す
+fn half_width_row(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui, f32)) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let half_w = (ui.available_width() - 6.0) * 0.5;
+        add_contents(ui, half_w);
+    });
+}
+
 // ------------------------------------------------------------------------
 // 4. フレーム（トゥイーン）プロパティ・シンボルプロパティ・ライブラリパネルUI描画
 // ------------------------------------------------------------------------
@@ -1197,9 +1193,7 @@ pub(crate) fn draw_selected_frame_properties(
         return;
     };
 
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(6.0);
+    draw_panel_separator(ui);
 
     ui.horizontal(|ui| {
         ui.label(
@@ -1239,9 +1233,7 @@ pub(crate) fn draw_selected_frame_properties(
 
     ui.add_space(4.0);
 
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let half_w = (ui.available_width() - 6.0) * 0.5;
+    half_width_row(ui, |ui, half_w| {
         if ui
             .add_sized(
                 Vec2::new(half_w, 26.0),
@@ -1283,9 +1275,7 @@ pub(crate) fn draw_selected_symbol_properties(
         return;
     };
 
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(6.0);
+    draw_panel_separator(ui);
 
     ui.horizontal(|ui| {
         ui.label(
@@ -1315,9 +1305,7 @@ pub(crate) fn draw_selected_symbol_properties(
     };
     let mut next_first_1based = current_first_1based;
 
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let half_w = (ui.available_width() - 6.0) * 0.5;
+    half_width_row(ui, |ui, half_w| {
         if ui
             .add_sized(
                 Vec2::new(half_w, 26.0),
