@@ -6,6 +6,7 @@ use lyon_tessellation::{
     math::point as lyon_point, path::Path as LyonPath, BuffersBuilder, FillOptions, FillRule,
     FillTessellator, FillVertex, VertexBuffers,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
     sync::{
@@ -22,7 +23,7 @@ pub(crate) const MAX_VIEW_ZOOM: f32 = 16.0;
 pub(crate) const MAX_CONTOUR_SEGMENTS: usize = 100_000;
 
 /// シンボルインスタンスのフレーム再生モード（Adobe Animate のグラフィックシンボル相当）
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub(crate) enum SymbolLoopMode {
     /// ループ再生：キーフレーム開始位置からシンボル内部フレームを繰り返し再生する
     #[default]

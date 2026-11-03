@@ -7,9 +7,8 @@ use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
     editable_layer_ids, focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
     merge_floating_into_base_shapes, prepare_moved_selection, select_shapes_for_timeline_selection,
-    set_tool, show_notice, toggle_select_sub_mode, Clipboard, CoalesceKey, Floating,
-    FloatingOrigin, NoticeKind, SelectSubMode, ShapeId, StatusToast, Tab, Tool, ToolSettings,
-    UndoEntry,
+    set_tool, show_notice, toggle_select_sub_mode, Clipboard, CoalesceKey, Floating, NoticeKind,
+    SelectSubMode, ShapeId, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes,
@@ -1105,11 +1104,7 @@ fn duplicate_selected_in_working_copy(tab: &mut Tab) {
     commit_floating(tab);
     let (duplicated, any_raw) =
         instantiate_relative_shapes_in_scope(tab, &extracted, KVec2::ZERO, true);
-    insert_and_select_shapes_in_scope(
-        tab,
-        duplicated,
-        any_raw.then_some(FloatingOrigin::AltDuplicate),
-    );
+    insert_and_select_shapes_in_scope(tab, duplicated, any_raw);
 }
 
 fn apply_finish_move_selection_drag(
@@ -1179,7 +1174,6 @@ fn apply_deform_shape(
             fl_opt.as_mut().map(|fl| {
                 fl.modified = true;
                 Floating {
-                    origin: fl.origin,
                     pieces: Vec::new(),
                     remainder: std::mem::take(&mut fl.remainder),
                     hidden: std::mem::take(&mut fl.hidden),
@@ -1512,11 +1506,7 @@ fn apply_paste_clipboard(
         let (pasted_shapes, any_raw) =
             instantiate_relative_shapes_in_scope(tab, &resolved, offset, multi_layer_copy);
 
-        insert_and_select_shapes_in_scope(
-            tab,
-            pasted_shapes,
-            any_raw.then_some(FloatingOrigin::Paste),
-        );
+        insert_and_select_shapes_in_scope(tab, pasted_shapes, any_raw);
         if !matches!(tool.tool, Tool::Select | Tool::Transform) {
             set_tool(tab, tool, Tool::Select);
         }

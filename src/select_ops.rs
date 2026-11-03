@@ -5,8 +5,8 @@ use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 use crate::canvas_tool::{
     cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
     editable_layer_ids, focus_active_layer_to_shape_by_id, merge_floating_into_base_shapes,
-    sync_timeline_layer_from_canvas_selection, topmost_layer_id_for_indices, Floating,
-    FloatingOrigin, HoverTarget, Scene, SelectSubMode, Session, ShapeId, Tab,
+    sync_timeline_layer_from_canvas_selection, topmost_layer_id_for_indices, Floating, HoverTarget,
+    Scene, SelectSubMode, Session, ShapeId, Tab,
 };
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
@@ -285,7 +285,6 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                 selection.insert_shape(shape);
             } else {
                 let fl = floating.get_or_insert_with(|| Floating {
-                    origin: FloatingOrigin::Slice,
                     pieces: Vec::new(),
                     remainder: Vec::new(),
                     hidden: HashSet::new(),

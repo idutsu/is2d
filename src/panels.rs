@@ -2,12 +2,13 @@ use eframe::egui::{self, Color32, CursorIcon, Pos2, Stroke, Vec2};
 use kurbo::{Point, Rect as KRect};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, Clipboard, NoticeKind,
-    SelectDragState, SelectSubMode, Tab, Tool, ToolSettings, TransformDragState,
+    active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, Clipboard, CoalesceKey,
+    NoticeKind, SelectDragState, SelectSubMode, Tab, Tool, ToolSettings, TransformDragState,
 };
+use crate::doc_actions::Action;
 use crate::project_io::PendingCloseConfirm;
 use crate::select_ops::ArrangeMode;
-use crate::symbol::{SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
+use crate::symbol::{SymbolDef, SymbolLoopMode, TweenRotate};
 use crate::symbol_ops::selected_single_symbol_info;
 pub(crate) use crate::timeline_ui::icons;
 use crate::timeline_ui::TimelineUiState;
@@ -129,54 +130,18 @@ pub(crate) enum UiAction {
     ConfirmPendingCloseDiscard,
     ConfirmPendingCloseCancel,
 
-    // 編集・履歴・クリップボード操作
-    Undo,
-    Redo,
-    CutSelected,
-    CopySelected,
-    PasteClipboard {
-        in_place: bool,
-    },
-    DeleteSelected,
-    ClearActiveFrame,
-
-    // ツール・表示・ステージ設定操作
-    SetTool(Tool),
-    ToggleSelectSubMode(SelectSubMode),
+    // 表示・UI選択状態・複合操作
     ResetView,
     FitStageToWindow,
-    SetStageSize(Vec2),
-    FinishStageSizeEdit,
-
-    // グループ・階層・変形・シンボル操作
-    ExitGroupSteps(usize),
-    GroupSelected,
-    UngroupSelected,
-    Arrange(ArrangeMode),
-    FlipSelected {
-        flip_x: bool,
-        flip_y: bool,
-    },
-    RotateSelected(f64),
-    ResetTransformPivot,
-    ConvertSelectionToSymbol,
-    SetTweenRotate(TweenRotate),
     SetSymbolPlayback {
         loop_mode: SymbolLoopMode,
         first_frame: usize,
         drag_active: bool,
     },
-    FinishSymbolPlaybackEdit(u64),
-    EnterSymbolTimeline(SymbolInstanceBinding),
-    PlaceSymbolFromLibrary(u64),
-    EnterSymbolFromLibrary(u64),
-    DeleteSymbolFromLibrary(u64),
     SelectLibrarySymbol(u64),
-    RenameSymbolInLibrary {
-        sym_id: u64,
-        new_name: String,
-    },
-    FinishRenamingSymbol(u64),
+
+    // 文書・編集アクション（`doc_actions::apply` へそのまま渡す）
+    Doc(Action),
 }
 
 // ============================================================================
@@ -269,22 +234,22 @@ fn draw_edit_menu(
             && tl.is_layer_editable_by_id(active_scope_layer_id(&tab.session, tl));
 
         if menu_action_button(ui, can_undo, "元に戻す", &format!("{MOD_KEY}+Z")) {
-            actions.push(UiAction::Undo);
+            actions.push(UiAction::Doc(Action::Undo));
         }
         if menu_action_button(ui, can_redo, "やり直し", &format!("{MOD_KEY}+Y")) {
-            actions.push(UiAction::Redo);
+            actions.push(UiAction::Doc(Action::Redo));
         }
 
         ui.separator();
 
         if menu_action_button(ui, has_selection, "カット", &format!("{MOD_KEY}+X")) {
-            actions.push(UiAction::CutSelected);
+            actions.push(UiAction::Doc(Action::Cut));
         }
         if menu_action_button(ui, has_selection, "コピー", &format!("{MOD_KEY}+C")) {
-            actions.push(UiAction::CopySelected);
+            actions.push(UiAction::Doc(Action::Copy));
         }
         if menu_action_button(ui, can_paste, "ペースト", &format!("{MOD_KEY}+V")) {
-            actions.push(UiAction::PasteClipboard { in_place: false });
+            actions.push(UiAction::Doc(Action::Paste { in_place: false }));
         }
         if menu_action_button(
             ui,
@@ -292,13 +257,13 @@ fn draw_edit_menu(
             "同じ位置にペースト",
             &format!("{MOD_KEY}+Shift+V"),
         ) {
-            actions.push(UiAction::PasteClipboard { in_place: true });
+            actions.push(UiAction::Doc(Action::Paste { in_place: true }));
         }
 
         ui.separator();
 
         if menu_action_button(ui, has_selection, "選択削除", "Backspace") {
-            actions.push(UiAction::DeleteSelected);
+            actions.push(UiAction::Doc(Action::DeleteSelection));
         }
     });
 }
@@ -403,7 +368,7 @@ fn draw_left_main_tool_buttons(
             tool_icon(tool),
             tool_tooltip(tool),
         ) {
-            actions.push(UiAction::SetTool(tool));
+            actions.push(UiAction::Doc(Action::SetTool { tool }));
         }
     }
 }
@@ -571,7 +536,7 @@ fn draw_group_breadcrumb(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::
         .on_hover_text("1つ上の階層へ戻る (Esc)")
         .clicked()
     {
-        actions.push(UiAction::ExitGroupSteps(1));
+        actions.push(UiAction::Doc(Action::ExitGroupSteps { steps: 1 }));
         return;
     }
 
@@ -599,7 +564,7 @@ fn draw_group_breadcrumb(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::
     }
 
     if exit_steps > 0 {
-        actions.push(UiAction::ExitGroupSteps(exit_steps));
+        actions.push(UiAction::Doc(Action::ExitGroupSteps { steps: exit_steps }));
     }
 }
 
@@ -756,7 +721,9 @@ fn draw_select_tool_properties(
             .on_hover_text("輪郭上をクリックしてアンカーポイントを追加 (+)")
             .clicked()
         {
-            actions.push(UiAction::ToggleSelectSubMode(SelectSubMode::AddAnchor));
+            actions.push(UiAction::Doc(Action::ToggleSelectSubMode {
+                mode: SelectSubMode::AddAnchor,
+            }));
         }
         if ui
             .add_sized(
@@ -767,7 +734,9 @@ fn draw_select_tool_properties(
             .on_hover_text("アンカーポイントをクリックして削除 (-)")
             .clicked()
         {
-            actions.push(UiAction::ToggleSelectSubMode(SelectSubMode::DeleteAnchor));
+            actions.push(UiAction::Doc(Action::ToggleSelectSubMode {
+                mode: SelectSubMode::DeleteAnchor,
+            }));
         }
     });
 
@@ -810,7 +779,7 @@ fn draw_select_tool_properties(
             .on_hover_text("選択中の図形を削除 (Backspace / Delete)")
             .clicked()
         {
-            actions.push(UiAction::DeleteSelected);
+            actions.push(UiAction::Doc(Action::DeleteSelection));
         }
         let has_any = tab
             .scene()
@@ -824,7 +793,7 @@ fn draw_select_tool_properties(
             .on_hover_text("現在の編集スコープ・フレーム内の図形をすべて消去")
             .clicked()
         {
-            actions.push(UiAction::ClearActiveFrame);
+            actions.push(UiAction::Doc(Action::ClearActiveFrame));
         }
     });
 }
@@ -846,7 +815,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
         .on_hover_text("選択中の図形をシンボルに変換してライブラリに登録します (F8)")
         .clicked()
     {
-        actions.push(UiAction::ConvertSelectionToSymbol);
+        actions.push(UiAction::Doc(Action::ConvertToSymbol));
     }
 
     ui.add_space(4.0);
@@ -865,7 +834,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
             ))
             .clicked()
         {
-            actions.push(UiAction::GroupSelected);
+            actions.push(UiAction::Doc(Action::Group));
         }
         if ui
             .add_enabled(
@@ -877,7 +846,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
             ))
             .clicked()
         {
-            actions.push(UiAction::UngroupSelected);
+            actions.push(UiAction::Doc(Action::Ungroup));
         }
     });
 
@@ -906,7 +875,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
                     ))
                     .clicked()
                 {
-                    actions.push(UiAction::Arrange(mode));
+                    actions.push(UiAction::Doc(Action::Arrange { mode }));
                 }
             }
         });
@@ -931,10 +900,10 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
                 .on_hover_text("選択シェイプを左右反転")
                 .clicked()
             {
-                actions.push(UiAction::FlipSelected {
+                actions.push(UiAction::Doc(Action::FlipSelection {
                     flip_x: true,
                     flip_y: false,
-                });
+                }));
             }
             if ui
                 .add_sized(
@@ -944,10 +913,10 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
                 .on_hover_text("選択シェイプを上下反転")
                 .clicked()
             {
-                actions.push(UiAction::FlipSelected {
+                actions.push(UiAction::Doc(Action::FlipSelection {
                     flip_x: false,
                     flip_y: true,
-                });
+                }));
             }
         });
 
@@ -964,7 +933,9 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
                 .on_hover_text("選択シェイプを反時計回りに 90° 回転")
                 .clicked()
             {
-                actions.push(UiAction::RotateSelected(-std::f64::consts::FRAC_PI_2));
+                actions.push(UiAction::Doc(Action::RotateSelection {
+                    angle_rad: -std::f64::consts::FRAC_PI_2,
+                }));
             }
             if ui
                 .add_sized(
@@ -974,7 +945,9 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
                 .on_hover_text("選択シェイプを時計回りに 90° 回転")
                 .clicked()
             {
-                actions.push(UiAction::RotateSelected(std::f64::consts::FRAC_PI_2));
+                actions.push(UiAction::Doc(Action::RotateSelection {
+                    angle_rad: std::f64::consts::FRAC_PI_2,
+                }));
             }
         });
     });
@@ -997,7 +970,7 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
         .on_hover_text("移動した変形中心（ピボット）を初期位置（選択中央 / シンボル基準点）へ戻す")
         .clicked()
     {
-        actions.push(UiAction::ResetTransformPivot);
+        actions.push(UiAction::Doc(Action::ResetTransformPivot));
     }
 
     ui.add_space(10.0);
@@ -1130,7 +1103,7 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
             },
         );
         if (w_resp.changed() || h_resp.changed()) && next_size != tab.doc.stage_size {
-            actions.push(UiAction::SetStageSize(next_size));
+            actions.push(UiAction::Doc(Action::SetStageSize { size: next_size }));
         }
         if w_resp.drag_stopped()
             || w_resp.lost_focus()
@@ -1141,7 +1114,9 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
                 && !h_resp.dragged()
                 && !h_resp.has_focus())
         {
-            actions.push(UiAction::FinishStageSizeEdit);
+            actions.push(UiAction::Doc(Action::EndCoalesce {
+                key: Some(CoalesceKey::StageSize),
+            }));
         }
     });
 
@@ -1292,7 +1267,9 @@ pub(crate) fn draw_selected_frame_properties(
     });
 
     if next_rotate != current_rotate {
-        actions.push(UiAction::SetTweenRotate(next_rotate));
+        actions.push(UiAction::Doc(Action::SetTweenRotate {
+            rotate: next_rotate,
+        }));
     }
 }
 
@@ -1459,7 +1436,9 @@ pub(crate) fn draw_selected_symbol_properties(
     }
 
     if next_mode != binding.loop_mode || !drag_active {
-        actions.push(UiAction::FinishSymbolPlaybackEdit(binding.instance_gid));
+        actions.push(UiAction::Doc(Action::EndCoalesce {
+            key: Some(CoalesceKey::SymbolPlayback(binding.instance_gid)),
+        }));
     }
     if next_mode != binding.loop_mode || next_first_1based != current_first_1based {
         actions.push(UiAction::SetSymbolPlayback {
@@ -1478,7 +1457,7 @@ pub(crate) fn draw_selected_symbol_properties(
         .on_hover_text("ダブルクリックと同様にシンボル内部のタイムライン編集モードへ入ります")
         .clicked()
     {
-        actions.push(UiAction::EnterSymbolTimeline(binding));
+        actions.push(UiAction::Doc(Action::EnterSymbolTimeline { binding }));
     }
 }
 
@@ -1494,7 +1473,7 @@ pub(crate) fn draw_library_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &
         .on_hover_text("キャンバスで選択中の図形を新しいシンボルとして登録 (F8)")
         .clicked()
     {
-        actions.push(UiAction::ConvertSelectionToSymbol);
+        actions.push(UiAction::Doc(Action::ConvertToSymbol));
     }
 
     ui.add_space(6.0);
@@ -1559,7 +1538,7 @@ fn draw_selected_library_symbol_controls(
             .on_hover_text("選択中のシンボルを現在のフレーム・レイヤーに配置します")
             .clicked()
         {
-            actions.push(UiAction::PlaceSymbolFromLibrary(sel_id));
+            actions.push(UiAction::Doc(Action::PlaceSymbol { sym_id: sel_id }));
         }
         if ui
             .add_enabled(
@@ -1570,7 +1549,9 @@ fn draw_selected_library_symbol_controls(
             .on_hover_text("選択中のシンボルの内部タイムライン編集へ入ります")
             .clicked()
         {
-            actions.push(UiAction::EnterSymbolFromLibrary(sel_id));
+            actions.push(UiAction::Doc(Action::EnterSymbolFromLibrary {
+                sym_id: sel_id,
+            }));
         }
         if ui
             .add_sized(
@@ -1580,7 +1561,7 @@ fn draw_selected_library_symbol_controls(
             .on_hover_text("選択中のシンボルをライブラリから削除します")
             .clicked()
         {
-            actions.push(UiAction::DeleteSymbolFromLibrary(sel_id));
+            actions.push(UiAction::Doc(Action::DeleteSymbol { sym_id: sel_id }));
         }
     });
     ui.add_space(6.0);
@@ -1669,10 +1650,12 @@ fn draw_library_symbol_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egu
         actions.push(UiAction::SelectLibrarySymbol(sym_id));
     }
     if let Some((sym_id, new_name)) = rename_req {
-        actions.push(UiAction::RenameSymbolInLibrary { sym_id, new_name });
+        actions.push(UiAction::Doc(Action::RenameSymbol { sym_id, new_name }));
     }
     if let Some(finished_id) = clear_renaming_id {
-        actions.push(UiAction::FinishRenamingSymbol(finished_id));
+        actions.push(UiAction::Doc(Action::EndCoalesce {
+            key: Some(CoalesceKey::RenameSymbol(finished_id)),
+        }));
     }
 }
 

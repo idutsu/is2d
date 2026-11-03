@@ -9,8 +9,8 @@ use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 pub(crate) use crate::symbol::Document;
 use crate::symbol::{EditPath, SymbolDef};
 use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
-use crate::vector_boolean::{merge_disjoint_pieces_into_canvas, merge_shapes_into_canvas};
-use crate::vector_engine::{rects_overlap, FillShape, SyncCache};
+use crate::vector_boolean::merge_shapes_into_canvas;
+use crate::vector_engine::{FillShape, SyncCache};
 
 #[cfg(test)]
 pub(crate) const MAX_UNDO_HISTORY: usize = 100;
@@ -1861,24 +1861,9 @@ impl<'a> Scene<'a> {
     }
 }
 
-/// `Floating`（浮き上がり選択状態）が作られた契機
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum FloatingOrigin {
-    /// マーキー矩形選択によるスライス（未変形のまま選択解除されたら破棄するだけ）
-    Slice,
-    /// 選択図形の移動・自由変形・色変更・グループ解除
-    Move,
-    /// クリップボードからのペースト
-    Paste,
-    /// Alt+ドラッグによる複製移動
-    AltDuplicate,
-}
-
 /// 選択して移動・スライス・ペースト・Alt複製中の浮き上がり図形状態（すべてステージ座標）
 #[derive(Clone, Debug)]
 pub(crate) struct Floating {
-    /// この Floating が作られた契機
-    pub(crate) origin: FloatingOrigin,
     /// 浮いている片。選択中の生図形だけ
     pub(crate) pieces: Vec<FillShape>,
     /// スライスで切られた残り
@@ -1903,7 +1888,7 @@ impl Floating {
     /// マーキー矩形スライス直後でまだ一度も移動・変形されていない状態かを返す
     #[inline]
     pub(crate) fn is_unmodified_slice(&self) -> bool {
-        self.origin == FloatingOrigin::Slice && !self.modified
+        !self.modified
     }
 
     /// 確定時に選択中の生図形をベース図形へ結合（Merge Drawing）する必要があるかを返す
@@ -1924,8 +1909,7 @@ impl Floating {
 
     /// 直前の履歴スナップショットと同一内容であるかを判定する（`Arc` 構造共有用）
     pub(crate) fn matches_undo_snapshot(&self, other: &Self) -> bool {
-        self.origin == other.origin
-            && self.modified == other.modified
+        self.modified == other.modified
             && self.hidden == other.hidden
             && self.pieces.len() == other.pieces.len()
             && self.remainder.len() == other.remainder.len()
@@ -2256,7 +2240,6 @@ impl Session {
         let order_ids = self.base_cache.layer_order_ids().to_vec();
         self.update_floating(|fl_opt| {
             let fl = fl_opt.get_or_insert_with(|| Floating {
-                origin: FloatingOrigin::Move,
                 pieces: Vec::new(),
                 remainder: Vec::new(),
                 hidden: HashSet::new(),
@@ -3597,22 +3580,6 @@ pub(crate) fn draw_registration_cross(
     );
 }
 
-/// 同じ（レイヤー、`group_path`）に属するどの2つの片も、境界矩形を 1.5 広げたもの同士が重ならないかを判定する
-pub(crate) fn pieces_are_apart(pieces: &[FillShape]) -> bool {
-    for (i, a) in pieces.iter().enumerate() {
-        let bbox_a = a.bounding_box().inflate(1.5, 1.5);
-        for b in &pieces[i + 1..] {
-            if a.layer_id == b.layer_id
-                && a.group_path == b.group_path
-                && rects_overlap(bbox_a, b.bounding_box().inflate(1.5, 1.5))
-            {
-                return false;
-            }
-        }
-    }
-    true
-}
-
 /// `Floating` の `hidden` 除去・`remainder` 追加・`pieces` 結合を `base_shapes` に対して実行する
 pub(crate) fn merge_floating_into_base_shapes(
     base_shapes: &mut Vec<FillShape>,
@@ -3639,11 +3606,7 @@ pub(crate) fn merge_floating_into_base_shapes(
         *base_shapes = rebuilt;
     }
     if !fl.pieces.is_empty() {
-        if pieces_are_apart(&fl.pieces) {
-            merge_disjoint_pieces_into_canvas(base_shapes, fl.pieces);
-        } else {
-            merge_shapes_into_canvas(base_shapes, fl.pieces);
-        }
+        merge_shapes_into_canvas(base_shapes, fl.pieces);
     }
     if layer_order_ids.len() > 1 && base_shapes.len() > 1 {
         base_shapes.sort_by_key(|s| layer_order_index(layer_order_ids, s.layer_id));
@@ -3697,20 +3660,14 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
         let Some(fl) = tab.session.take_floating() else {
             return false;
         };
-        if fl.is_unmodified_slice() {
-            tab.session.retain_existing_selection();
-            return true;
-        }
-        if fl.needs_merge_commit() {
+        if !fl.is_unmodified_slice() {
             let lids = floating_target_layer_ids(tab, &fl);
             edit_layers(tab, &lids, |edit| {
                 merge_floating_into_base_shapes(&mut edit.shapes, fl, &edit.layer_order_ids);
             });
-            tab.session.retain_existing_selection();
-            return true;
         }
         tab.session.retain_existing_selection();
-        return false;
+        return true;
     }
 
     tab.session
@@ -3765,7 +3722,6 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
     let had_hidden_or_rem = !fl.hidden.is_empty() || !fl.remainder.is_empty();
     let merged_any = !deselected_pieces.is_empty() || (kept_pieces.is_empty() && had_hidden_or_rem);
     let to_commit = merged_any.then(|| Floating {
-        origin: fl.origin,
         pieces: deselected_pieces,
         remainder: std::mem::take(&mut fl.remainder),
         hidden: std::mem::take(&mut fl.hidden),
@@ -3802,17 +3758,17 @@ pub(crate) fn clear_selection(tab: &mut Tab) {
 }
 
 /// 現在の編集スコープの最前面へ `new_shapes` を配置し、それらを選択状態にする
-/// （`floating_origin` が `Some` の場合、生図形は文書へ書き込まず最初から `Floating` の `pieces` へ入れる）
+/// （`as_floating` が `true` の場合、生図形は文書へ書き込まず最初から `Floating` の `pieces` へ入れる）
 pub(crate) fn insert_and_select_shapes_in_scope(
     tab: &mut Tab,
     new_shapes: Vec<FillShape>,
-    floating_origin: Option<FloatingOrigin>,
+    as_floating: bool,
 ) {
     tab.session.selection.clear();
     for s in &new_shapes {
         tab.session.selection.insert_shape(s);
     }
-    if let Some(origin) = floating_origin {
+    if as_floating {
         let scope = tab.session.editing_group_path.clone();
         let mut raw_pieces = Vec::new();
         let mut non_raw_shapes = Vec::new();
@@ -3835,11 +3791,10 @@ pub(crate) fn insert_and_select_shapes_in_scope(
             tab.active_timeline()
                 .normalize_shape_layer_ids(&mut raw_pieces);
             tab.session.set_floating(Some(Floating {
-                origin,
                 pieces: raw_pieces,
                 remainder: Vec::new(),
                 hidden: HashSet::new(),
-                modified: origin != FloatingOrigin::AltDuplicate,
+                modified: true,
             }));
         } else {
             tab.session.set_floating(None);

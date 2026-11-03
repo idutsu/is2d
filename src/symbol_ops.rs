@@ -164,7 +164,7 @@ pub(crate) fn prepare_place_symbol_instance(
         &tab.session.editing_group_path,
         SymbolEvalCtx::new(&tab.doc.library),
     );
-    insert_and_select_shapes_in_scope(tab, placed, None);
+    insert_and_select_shapes_in_scope(tab, placed, false);
     true
 }
 

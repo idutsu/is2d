@@ -1,5 +1,6 @@
 use crate::vector_engine::{next_shape_id, FillShape, SymbolInstanceBinding, SymbolLoopMode};
 use kurbo::{Affine, Point};
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
 /// タイムラインおよびシンボル内タイムラインの最大許容フレーム数（破損JSONによる巨大ループ防止）
@@ -9,7 +10,7 @@ pub(crate) const MAX_TIMELINE_FRAMES: usize = 100_000;
 pub(crate) const MAX_LAYERS_PER_TIMELINE: usize = 1_000;
 
 /// クラシックトゥイーンの回転方向（Adobe Animate のトゥイーン回転設定相当）
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub(crate) enum TweenRotate {
     /// 自動：開始角度から終了角度へ最短の角度差（`-180°..=+180°`）で回転する
     #[default]

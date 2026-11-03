@@ -397,62 +397,6 @@ pub(crate) fn close_active_tab(ws: &mut impl ProjectWorkspace, ctx: Option<&egui
 // 1. 保存用シリアライズデータ構造（DTO）
 // ============================================================================
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum SavedTweenRotate {
-    #[default]
-    Auto,
-    Clockwise,
-    CounterClockwise,
-}
-
-impl From<TweenRotate> for SavedTweenRotate {
-    fn from(value: TweenRotate) -> Self {
-        match value {
-            TweenRotate::Auto => Self::Auto,
-            TweenRotate::Clockwise => Self::Clockwise,
-            TweenRotate::CounterClockwise => Self::CounterClockwise,
-        }
-    }
-}
-
-impl From<SavedTweenRotate> for TweenRotate {
-    fn from(value: SavedTweenRotate) -> Self {
-        match value {
-            SavedTweenRotate::Auto => TweenRotate::Auto,
-            SavedTweenRotate::Clockwise => TweenRotate::Clockwise,
-            SavedTweenRotate::CounterClockwise => TweenRotate::CounterClockwise,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum SavedSymbolLoopMode {
-    #[default]
-    Loop,
-    PlayOnce,
-    SingleFrame,
-}
-
-impl From<SymbolLoopMode> for SavedSymbolLoopMode {
-    fn from(value: SymbolLoopMode) -> Self {
-        match value {
-            SymbolLoopMode::Loop => Self::Loop,
-            SymbolLoopMode::PlayOnce => Self::PlayOnce,
-            SymbolLoopMode::SingleFrame => Self::SingleFrame,
-        }
-    }
-}
-
-impl From<SavedSymbolLoopMode> for SymbolLoopMode {
-    fn from(value: SavedSymbolLoopMode) -> Self {
-        match value {
-            SavedSymbolLoopMode::Loop => SymbolLoopMode::Loop,
-            SavedSymbolLoopMode::PlayOnce => SymbolLoopMode::PlayOnce,
-            SavedSymbolLoopMode::SingleFrame => SymbolLoopMode::SingleFrame,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub(crate) struct SavedSymbolInstanceBinding {
     pub(crate) instance_gid: u64,
@@ -461,7 +405,7 @@ pub(crate) struct SavedSymbolInstanceBinding {
     #[serde(default)]
     pub(crate) pivot: [f64; 2],
     #[serde(default)]
-    pub(crate) loop_mode: SavedSymbolLoopMode,
+    pub(crate) loop_mode: SymbolLoopMode,
     #[serde(default)]
     pub(crate) first_frame: usize,
 }
@@ -473,7 +417,7 @@ impl From<SymbolInstanceBinding> for SavedSymbolInstanceBinding {
             symbol_id: b.symbol_id,
             xform: b.xform.as_coeffs(),
             pivot: [b.pivot.x, b.pivot.y],
-            loop_mode: b.loop_mode.into(),
+            loop_mode: b.loop_mode,
             first_frame: b.first_frame,
         }
     }
@@ -498,7 +442,7 @@ impl From<SavedSymbolInstanceBinding> for SymbolInstanceBinding {
             symbol_id: s.symbol_id,
             xform,
             pivot,
-            loop_mode: s.loop_mode.into(),
+            loop_mode: s.loop_mode,
             first_frame: s.first_frame.min(MAX_TIMELINE_FRAMES.saturating_sub(1)),
         }
     }
@@ -648,7 +592,7 @@ pub(crate) struct SavedKeyframe {
     #[serde(default)]
     pub(crate) tween: bool,
     #[serde(default)]
-    pub(crate) tween_rotate: SavedTweenRotate,
+    pub(crate) tween_rotate: TweenRotate,
     #[serde(default)]
     pub(crate) shapes: Vec<SavedFillShape>,
     #[serde(default)]
@@ -660,7 +604,7 @@ impl From<&Keyframe> for SavedKeyframe {
         Self {
             start_frame: kf.start_frame,
             tween: kf.tween,
-            tween_rotate: kf.tween_rotate.into(),
+            tween_rotate: kf.tween_rotate,
             shapes: kf.cel.shapes.iter().map(SavedFillShape::from).collect(),
             instances: kf
                 .cel
@@ -697,7 +641,7 @@ impl From<SavedKeyframe> for Keyframe {
             start_frame: s.start_frame,
             cel,
             tween: s.tween,
-            tween_rotate: s.tween_rotate.into(),
+            tween_rotate: s.tween_rotate,
         }
     }
 }

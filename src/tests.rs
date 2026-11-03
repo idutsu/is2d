@@ -14,6 +14,19 @@ fn make_stroke(p0: Point, p1: Point, radius: f32, color: Color32) -> Vec<FillSha
     build_smoothed_stroke_shapes(&raw, color)
 }
 
+impl std::ops::Deref for Is2dApp {
+    type Target = Tab;
+    fn deref(&self) -> &Self::Target {
+        &self.tabs[self.active]
+    }
+}
+
+impl std::ops::DerefMut for Is2dApp {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.tabs[self.active]
+    }
+}
+
 impl symbol::Document {
     fn register_new_symbol(&mut self, local_shapes: Vec<FillShape>) -> u64 {
         let sym_id = self.alloc_symbol_id();
@@ -6469,7 +6482,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
                     symbol_id: target_sym_id,
                     xform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
                     pivot: [0.0, 0.0],
-                    loop_mode: project_io::SavedSymbolLoopMode::Loop,
+                    loop_mode: vector_engine::SymbolLoopMode::Loop,
                     first_frame: 0,
                 },
                 layer_id: 1,
@@ -6496,7 +6509,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
                     keyframes: vec![project_io::SavedKeyframe {
                         start_frame: 0,
                         tween: false,
-                        tween_rotate: project_io::SavedTweenRotate::Auto,
+                        tween_rotate: timeline::TweenRotate::Auto,
                         shapes: Vec::new(),
                         instances,
                     }],
@@ -8918,7 +8931,6 @@ fn test_stage4_drag_2000_shapes_preserves_unmoved_mesh_caches() {
 
 #[test]
 fn test_stage5_floating_lifecycle_and_commit_floating() {
-    use crate::canvas_tool::FloatingOrigin;
     use crate::doc_actions::Action;
 
     let mut app = Is2dApp::default();
@@ -8933,7 +8945,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     put_cel_shapes(&mut app, 0, 0, base_stroke);
     assert!(app.session.floating().is_none());
 
-    // 1. マーキー矩形スライスで Floating(Slice, modified=false) が生成され、未変更で選択解除すると元の1図形に戻ること
+    // 1. マーキー矩形スライスで Floating(modified=false) が生成され、未変更で選択解除すると元の1図形に戻ること
     run(
         &mut app,
         &[Action::SelectMarquee {
@@ -8946,7 +8958,6 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .session
         .floating()
         .expect("マーキー矩形スライス直後に Floating が生成されること");
-    assert_eq!(fl.origin, FloatingOrigin::Slice);
     assert!(!fl.modified);
     assert!(fl.is_unmodified_slice());
     assert!(!fl.needs_merge_commit());
@@ -8993,7 +9004,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         "CommitFloating により重なった同色断片が結合され1図形になること"
     );
 
-    // 3. ペーストで FloatingOrigin::Paste が生成され、CommitFloating で重なった既存図形と結合されること
+    // 3. ペーストで Floating(modified=true) が生成され、CommitFloating で重なった既存図形と結合されること
     run(
         &mut app,
         &[
@@ -9008,7 +9019,6 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .session
         .floating()
         .expect("ペースト直後に Floating が生成されること");
-    assert_eq!(fl_paste.origin, FloatingOrigin::Paste);
     assert!(fl_paste.modified);
     assert!(fl_paste.needs_merge_commit());
     assert_eq!(app.scene().len(), 2);
@@ -10969,7 +10979,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
                         symbol_id: (i + 2) as u64,
                         xform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
                         pivot: [0.0, 0.0],
-                        loop_mode: project_io::SavedSymbolLoopMode::Loop,
+                        loop_mode: vector_engine::SymbolLoopMode::Loop,
                         first_frame: 0,
                     },
                     layer_id: 1,
@@ -10998,7 +11008,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
                         keyframes: vec![project_io::SavedKeyframe {
                             start_frame: 0,
                             tween: false,
-                            tween_rotate: project_io::SavedTweenRotate::Auto,
+                            tween_rotate: timeline::TweenRotate::Auto,
                             shapes: Vec::new(),
                             instances,
                         }],
@@ -12299,7 +12309,7 @@ fn test_g2_1_edit_contour_bumps_mesh_revision() {
 
 #[test]
 fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
-    use crate::canvas_tool::{Floating, FloatingOrigin};
+    use crate::canvas_tool::Floating;
     use std::collections::HashSet;
 
     // 1. 本番コードで rebuild_overlay_from_floating を呼ぶのが canvas_tool.rs (Session 内) だけであること
@@ -12334,7 +12344,6 @@ fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
     assert_eq!(app.scene().len(), 0);
 
     app.tabs[0].session.set_floating(Some(Floating {
-        origin: FloatingOrigin::Paste,
         pieces: vec![shape],
         remainder: Vec::new(),
         hidden: HashSet::new(),
@@ -13285,7 +13294,6 @@ fn test_m2_6_onion_and_dim_backdrop_color_cache_matches_per_vertex() {
 #[test]
 fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup() {
     use crate::doc_actions::{apply, Action};
-    use std::collections::HashMap;
     use std::time::Instant;
 
     let palette = [
@@ -13296,244 +13304,11 @@ fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup()
         Color32::from_rgb(160, 60, 210),
     ];
 
-    let assert_same_canvas = |a: &Is2dApp, b: &Is2dApp, label: &str| {
-        for (la, lb) in a.doc.root.layers.iter().zip(b.doc.root.layers.iter()) {
-            let sa = &la.cel_at(0).unwrap().shapes;
-            let sb = &lb.cel_at(0).unwrap().shapes;
-            let mut counts_a: HashMap<(Vec<u64>, Color32), usize> = HashMap::new();
-            let mut counts_b: HashMap<(Vec<u64>, Color32), usize> = HashMap::new();
-            for s in sa.iter() {
-                *counts_a.entry((s.group_path.clone(), s.color)).or_default() += 1;
-            }
-            for s in sb.iter() {
-                *counts_b.entry((s.group_path.clone(), s.color)).or_default() += 1;
-            }
-            assert_eq!(
-                counts_a, counts_b,
-                "{label}: レイヤー {} のスコープ・色ごとの図形数が一致すること",
-                la.id
-            );
-
-            for gx in (40..=560).step_by(20) {
-                for gy in (40..=360).step_by(20) {
-                    let pt = Point::new(gx as f64, gy as f64);
-                    let col_a = sa
-                        .iter()
-                        .rev()
-                        .find(|s| s.group_path.is_empty() && s.contains_point(pt))
-                        .map(|s| s.color);
-                    let col_b = sb
-                        .iter()
-                        .rev()
-                        .find(|s| s.group_path.is_empty() && s.contains_point(pt))
-                        .map(|s| s.color);
-                    assert_eq!(
-                        col_a, col_b,
-                        "{label}: レイヤー {} の格子点 ({gx}, {gy}) の色が一致すること",
-                        la.id
-                    );
-                }
-            }
-        }
-    };
-
     let mut seed = 0x9876_5432_10fe_dcba_u64;
     let mut next_u64 = || {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         seed
     };
-
-    for trial in 0..8 {
-        let mut base_app = Is2dApp::default();
-        let _ = apply(&mut base_app, Action::AddLayer);
-        for l_idx in 0..2 {
-            let _ = apply(
-                &mut base_app,
-                Action::SwitchLayerAndFrame {
-                    layer_idx: l_idx,
-                    frame: 0,
-                },
-            );
-            for i in 0..10 {
-                let x0 = 60.0 + (next_u64() % 420) as f64;
-                let y0 = 60.0 + (next_u64() % 240) as f64;
-                let x1 = x0 + 30.0 + (next_u64() % 45) as f64;
-                let y1 = y0 + ((next_u64() % 41) as f64 - 20.0);
-                let _ = apply(
-                    &mut base_app,
-                    Action::PaintStroke {
-                        points: vec![Point::new(x0, y0), Point::new(x1, y1)],
-                        radius: 6.0,
-                        color: palette[i % palette.len()],
-                    },
-                );
-            }
-        }
-        let dx = ((next_u64() % 51) as f64) - 25.0;
-        let dy = ((next_u64() % 51) as f64) - 25.0;
-        let delta = KVec2::new(if dx.abs() < 2.0 { 7.0 } else { dx }, dy);
-
-        let clone_app = |src: &Is2dApp| {
-            let mut dst = Is2dApp::default();
-            dst.tabs[0].doc = src.doc.clone();
-            dst.refresh_scene_base();
-            dst
-        };
-
-        // 境界矩形が離れた片群を用意して merge_disjoint_pieces_into_canvas と merge_shapes_into_canvas の結果（形・色・順番）を比較
-        let mut apart_pieces = Vec::new();
-        for l_idx in 0..2 {
-            let lid = base_app.doc.root.layers[l_idx].id;
-            for gx in 0..4 {
-                for gy in 0..3 {
-                    let x0 = 70.0 + (gx as f64) * 120.0 + ((next_u64() % 11) as f64);
-                    let y0 = 65.0 + (gy as f64) * 95.0 + ((next_u64() % 11) as f64);
-                    let col = palette[(gx * 3 + gy + l_idx + trial) % palette.len()];
-                    let mut p = make_stroke(
-                        Point::new(x0, y0),
-                        Point::new(x0 + 36.0, y0 + 14.0),
-                        5.0,
-                        col,
-                    )
-                    .remove(0);
-                    p.layer_id = lid;
-                    apart_pieces.push(p);
-                }
-            }
-        }
-        assert!(
-            canvas_tool::pieces_are_apart(&apart_pieces),
-            "グリッド配置した離れた片群で pieces_are_apart が true であること"
-        );
-        {
-            let mut app_fast = clone_app(&base_app);
-            let mut app_ref = clone_app(&base_app);
-            for l_idx in 0..2 {
-                let lid = base_app.doc.root.layers[l_idx].id;
-                let layer_pieces: Vec<FillShape> = apart_pieces
-                    .iter()
-                    .filter(|p| p.layer_id == lid)
-                    .cloned()
-                    .collect();
-                let mut shapes_fast = app_fast.doc.root.layers[l_idx]
-                    .cel_at(0)
-                    .unwrap()
-                    .shapes
-                    .to_vec();
-                let mut shapes_ref = app_ref.doc.root.layers[l_idx]
-                    .cel_at(0)
-                    .unwrap()
-                    .shapes
-                    .to_vec();
-                vector_boolean::merge_disjoint_pieces_into_canvas(
-                    &mut shapes_fast,
-                    layer_pieces.clone(),
-                );
-                vector_boolean::merge_shapes_into_canvas(&mut shapes_ref, layer_pieces);
-                assert_eq!(
-                    shapes_fast.len(),
-                    shapes_ref.len(),
-                    "Apart trial {trial} layer {l_idx}: 図形数が一致すること"
-                );
-                let sort_key = |s: &FillShape| {
-                    let b = s.bounding_box();
-                    (
-                        s.layer_id,
-                        s.group_path.clone(),
-                        s.color.to_array(),
-                        (b.x0 * 100.0).round() as i64,
-                        (b.y0 * 100.0).round() as i64,
-                    )
-                };
-                let mut sorted_fast = shapes_fast.clone();
-                let mut sorted_ref = shapes_ref.clone();
-                sorted_fast.sort_by_key(sort_key);
-                sorted_ref.sort_by_key(sort_key);
-                for (sf, sr) in sorted_fast.iter().zip(sorted_ref.iter()) {
-                    assert_eq!(sf.color, sr.color, "図形の色が一致すること");
-                    assert_eq!(sf.group_path, sr.group_path, "スコープが一致すること");
-                    assert_eq!(sf.holes.len(), sr.holes.len(), "穴の数が一致すること");
-                    assert!(
-                        (sf.exterior.signed_area().abs() - sr.exterior.signed_area().abs()).abs()
-                            < 1e-2,
-                        "図形の面積が一致すること"
-                    );
-                }
-                app_fast.doc.root.layers[l_idx].keyframe_mut(0).cel =
-                    timeline::Cel::new(shapes_fast);
-                app_ref.doc.root.layers[l_idx].keyframe_mut(0).cel = timeline::Cel::new(shapes_ref);
-            }
-            assert_same_canvas(&app_fast, &app_ref, &format!("Apart merge trial {trial}"));
-        }
-
-        // 1. 持ち上げ (Lift): 離れた図形群を選んで移動 → 確定
-        {
-            let mut apart_app = Is2dApp::default();
-            let _ = apply(&mut apart_app, Action::AddLayer);
-            for l_idx in 0..2 {
-                let lid = apart_app.doc.root.layers[l_idx].id;
-                let layer_shapes: Vec<FillShape> = apart_pieces
-                    .iter()
-                    .filter(|p| p.layer_id == lid)
-                    .cloned()
-                    .collect();
-                apart_app.doc.root.layers[l_idx].keyframe_mut(0).cel =
-                    timeline::Cel::new(layer_shapes);
-            }
-            apart_app.refresh_scene_base();
-            let mut app_fast = clone_app(&apart_app);
-            let _ = apply(&mut app_fast, Action::SelectAll);
-            let _ = apply(&mut app_fast, Action::NudgeSelection { delta });
-            assert!(app_fast
-                .session
-                .floating()
-                .is_some_and(|fl| canvas_tool::pieces_are_apart(&fl.pieces)));
-            let _ = apply(&mut app_fast, Action::Deselect);
-            assert_eq!(
-                app_fast.doc.root.layers[0].cel_at(0).unwrap().shapes.len(),
-                12
-            );
-        }
-
-        // 2. スライス (Marquee Slice): 接している片は pieces_are_apart が false になること
-        {
-            let mut slice_app = Is2dApp::default();
-            let _ = apply(
-                &mut slice_app,
-                Action::PaintStroke {
-                    points: vec![Point::new(100.0, 200.0), Point::new(300.0, 200.0)],
-                    radius: 8.0,
-                    color: palette[0],
-                },
-            );
-            let _ = apply(
-                &mut slice_app,
-                Action::SelectMarquee {
-                    p0: Point::new(80.0, 150.0),
-                    p1: Point::new(200.0, 250.0),
-                    additive: false,
-                },
-            );
-            let right_idx = slice_app
-                .scene()
-                .iter()
-                .position(|s| s.contains_point(Point::new(250.0, 200.0)))
-                .unwrap();
-            let _ = apply(
-                &mut slice_app,
-                Action::ToggleSelectionAt {
-                    scene_idx: right_idx,
-                },
-            );
-            assert!(
-                slice_app
-                    .session
-                    .floating()
-                    .is_some_and(|fl| !canvas_tool::pieces_are_apart(&fl.pieces)),
-                "スライスで分かれた接している片同士では pieces_are_apart が false になること"
-            );
-        }
-    }
 
     // 4. 作品 A 相当（3レイヤー×60ストローク）の1コマを全選択して少し動かし、選択解除が 50ms 以下であること
     let mut dense_app = Is2dApp::default();
@@ -13711,10 +13486,6 @@ fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup()
             alt_duplicate: true,
         },
     );
-    assert!(app_fl_loop
-        .session
-        .floating()
-        .is_some_and(|fl| canvas_tool::pieces_are_apart(&fl.pieces)));
     let _ = apply(&mut app_fl_loop, Action::Deselect);
     assert_eq!(
         tool_paint::pick_color_at(&mut app_fl_loop, Point::new(200.0, 200.0)),
@@ -14666,8 +14437,8 @@ fn test_m4_1_alt_duplicate_touching_sliced_pieces_merges_into_single_shape_on_de
     assert!(
         app.session
             .floating()
-            .is_some_and(|fl| fl.pieces.len() == 2 && !canvas_tool::pieces_are_apart(&fl.pieces)),
-        "Alt複製された接している2片で pieces_are_apart が false であること"
+            .is_some_and(|fl| fl.pieces.len() == 2),
+        "Alt複製された2片が floating に入っていること"
     );
 
     // 5. 選択を解除すると、元の1図形と、1つに結合された複製の計2図形になること

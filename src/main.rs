@@ -172,19 +172,6 @@ impl Default for Is2dApp {
     }
 }
 
-impl std::ops::Deref for Is2dApp {
-    type Target = Tab;
-    fn deref(&self) -> &Self::Target {
-        &self.tabs[self.active]
-    }
-}
-
-impl std::ops::DerefMut for Is2dApp {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.tabs[self.active]
-    }
-}
-
 impl ActionHost for Is2dApp {
     fn tab(&self) -> &Tab {
         &self.tabs[self.active]
@@ -428,72 +415,11 @@ impl Is2dApp {
             UiAction::ConfirmPendingCloseCancel => {
                 project_io::confirm_pending_close_cancel(self, ctx)
             }
-            UiAction::Undo => self.undo(),
-            UiAction::Redo => self.redo(),
-            UiAction::CutSelected => {
-                apply(self, Action::Cut);
-            }
-            UiAction::CopySelected => {
-                apply(self, Action::Copy);
-            }
-            UiAction::PasteClipboard { in_place } => {
-                apply(self, Action::Paste { in_place });
-            }
-            UiAction::DeleteSelected => {
-                apply(self, Action::DeleteSelection);
-            }
-            UiAction::ClearActiveFrame => {
-                apply(self, Action::ClearActiveFrame);
-            }
-            UiAction::SetTool(tool) => {
-                apply(self, Action::SetTool { tool });
-            }
-            UiAction::ToggleSelectSubMode(mode) => {
-                apply(self, Action::ToggleSelectSubMode { mode });
-            }
             UiAction::ResetView => {
                 self.tab_mut().view.reset_view();
             }
             UiAction::FitStageToWindow => {
                 self.tab_mut().fit_stage_to_window();
-            }
-            UiAction::SetStageSize(size) => {
-                apply(self, Action::SetStageSize { size });
-            }
-            UiAction::FinishStageSizeEdit => {
-                apply(
-                    self,
-                    Action::EndCoalesce {
-                        key: Some(canvas_tool::CoalesceKey::StageSize),
-                    },
-                );
-            }
-            UiAction::ExitGroupSteps(steps) => {
-                apply(self, Action::ExitGroupSteps { steps });
-            }
-            UiAction::GroupSelected => {
-                apply(self, Action::Group);
-            }
-            UiAction::UngroupSelected => {
-                apply(self, Action::Ungroup);
-            }
-            UiAction::Arrange(mode) => {
-                apply(self, Action::Arrange { mode });
-            }
-            UiAction::FlipSelected { flip_x, flip_y } => {
-                apply(self, Action::FlipSelection { flip_x, flip_y });
-            }
-            UiAction::RotateSelected(angle_rad) => {
-                apply(self, Action::RotateSelection { angle_rad });
-            }
-            UiAction::ResetTransformPivot => {
-                apply(self, Action::ResetTransformPivot);
-            }
-            UiAction::ConvertSelectionToSymbol => {
-                apply(self, Action::ConvertToSymbol);
-            }
-            UiAction::SetTweenRotate(rotate) => {
-                apply(self, Action::SetTweenRotate { rotate });
             }
             UiAction::SetSymbolPlayback {
                 loop_mode,
@@ -511,39 +437,11 @@ impl Is2dApp {
                     apply(self, Action::EndCoalesce { key: None });
                 }
             }
-            UiAction::FinishSymbolPlaybackEdit(gid) => {
-                apply(
-                    self,
-                    Action::EndCoalesce {
-                        key: Some(canvas_tool::CoalesceKey::SymbolPlayback(gid)),
-                    },
-                );
-            }
-            UiAction::EnterSymbolTimeline(binding) => {
-                apply(self, Action::EnterSymbolTimeline { binding });
-            }
-            UiAction::PlaceSymbolFromLibrary(sym_id) => {
-                apply(self, Action::PlaceSymbol { sym_id });
-            }
-            UiAction::EnterSymbolFromLibrary(sym_id) => {
-                apply(self, Action::EnterSymbolFromLibrary { sym_id });
-            }
-            UiAction::DeleteSymbolFromLibrary(sym_id) => {
-                apply(self, Action::DeleteSymbol { sym_id });
-            }
             UiAction::SelectLibrarySymbol(sym_id) => {
                 self.tab_mut().view.selected_library_symbol = Some(sym_id);
             }
-            UiAction::RenameSymbolInLibrary { sym_id, new_name } => {
-                apply(self, Action::RenameSymbol { sym_id, new_name });
-            }
-            UiAction::FinishRenamingSymbol(sym_id) => {
-                apply(
-                    self,
-                    Action::EndCoalesce {
-                        key: Some(canvas_tool::CoalesceKey::RenameSymbol(sym_id)),
-                    },
-                );
+            UiAction::Doc(action) => {
+                apply(self, action);
             }
         }
     }
