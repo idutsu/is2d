@@ -5,8 +5,8 @@ use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 use crate::canvas_tool::{
     cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
     editable_layer_ids, focus_active_layer_to_shape_by_id, merge_floating_into_base_shapes,
-    sync_timeline_layer_from_canvas_selection, topmost_layer_id_for_indices, Floating, HoverTarget,
-    MarqueeDrag, Scene, SelectSubMode, Session, ShapeId, Tab,
+    sync_timeline_layer_from_canvas_selection, Floating, HoverTarget, LayerId, MarqueeDrag, Scene,
+    SelectSubMode, Session, ShapeId, Tab,
 };
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
@@ -735,25 +735,33 @@ pub(crate) fn apply_move_vertex_to_shape(
     );
 }
 
+/// 選択中の図形がすべて同じレイヤーにあればその `LayerId` を返す（未選択・複数レイヤーにまたがるときは `None`）
+pub(crate) fn selected_single_layer_id(tab: &Tab) -> Option<LayerId> {
+    let scene = tab.scene();
+    let mut lids = tab
+        .session
+        .selected_indices()
+        .into_iter()
+        .filter_map(|idx| scene.get(idx).map(|s| s.layer_id));
+    let first = lids.next()?;
+    lids.all(|lid| lid == first).then_some(first)
+}
+
 /// 選択中のオブジェクト（生シェイプ・既存グループ問わず）を新しい1つのグループにまとめる
 pub(crate) fn prepare_group_selected_shapes(
     tab: &mut Tab,
     before_mutate: impl FnOnce(&mut Tab),
 ) -> bool {
     cancel_active_drag(tab);
-    let sel_indices = tab.session.selected_indices();
-    if sel_indices.is_empty() {
+    let Some(target_lid) = selected_single_layer_id(tab) else {
         return false;
-    }
+    };
     if !tab
         .scene()
         .selected_has_any_in_scope(&tab.session.selection, &tab.session.editing_group_path)
     {
         return false;
     }
-
-    let target_lid =
-        topmost_layer_id_for_indices(&tab.session, tab.active_timeline(), &sel_indices);
 
     before_mutate(tab);
     let new_gid = tab.doc.alloc_group_id();
@@ -774,7 +782,6 @@ pub(crate) fn prepare_group_selected_shapes(
             if selection.contains_shape(&shape)
                 && shape.is_in_editing_scope(&edit.editing_group_path)
             {
-                shape.layer_id = target_lid;
                 shape.group_path.insert(depth, new_gid);
                 grouped_shapes.push(shape);
             } else if idx < insert_limit {

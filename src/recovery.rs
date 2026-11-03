@@ -75,7 +75,7 @@ impl Recovery {
             let entry_path = dir.join(format!("{pid}-{}.entry", tab.id));
             let rec_name = format!("RECOVER_{name}");
             let primary_path = parent.join(&rec_name);
-            let fallback_path = dir.join(rec_name);
+            let fallback_path = dir.join(format!("{pid}-{}-{rec_name}", tab.id));
 
             if std::fs::write(&entry_path, primary_path.to_string_lossy().as_bytes()).is_err() {
                 continue;
@@ -109,22 +109,19 @@ impl Recovery {
             if !name.ends_with(".entry") {
                 continue;
             }
-            let target = std::fs::read_to_string(&path)
-                .ok()
-                .map(|s| PathBuf::from(s.trim()))
-                .and_then(|rec| {
-                    let meta = std::fs::metadata(&rec).ok().filter(|m| m.is_file())?;
-                    Some((rec, meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)))
-                });
-            match target {
-                Some((recovery_path, modified)) => self.found.push(Found {
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            };
+            let rec = PathBuf::from(content.trim());
+            if let Some(meta) = std::fs::metadata(&rec).ok().filter(|m| m.is_file()) {
+                self.found.push(Found {
                     entry_path: path,
-                    recovery_path,
-                    modified,
-                }),
-                None => {
-                    let _ = std::fs::remove_file(&path);
-                }
+                    recovery_path: rec,
+                    modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                });
+            } else if rec.parent().is_some_and(|p| p.is_dir()) {
+                let _ = std::fs::remove_file(&path);
             }
         }
         self.found.sort_by(|a, b| {

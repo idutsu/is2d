@@ -30,13 +30,9 @@ pub(crate) const MAX_SAFE_ENTITY_ID: u64 = u64::MAX / 2;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PendingCloseConfirm {
     /// 単一タブのクローズ確認（`close_tab` / `Cmd+W` / タブの `×` ボタン）
-    SingleTab {
-        tab_index: usize,
-        orig_active: usize,
-    },
+    SingleTab { orig_active: usize },
     /// アプリ終了（ウィンドウクローズ）時の未保存タブ順次確認
     ViewportClose {
-        current_tab_index: usize,
         orig_active: usize,
         discarded_doc_ids: HashSet<u64>,
     },
@@ -172,17 +168,8 @@ pub(crate) fn handle_viewport_close_request(ws: &mut impl ProjectWorkspace, ctx:
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         return;
     }
-    let tab_count = ws.tabs().len();
-    if let Some(idx) = (0..tab_count).find(|&i| is_tab_dirty(ws, i)) {
-        let orig_active = ws.active_index();
-        if idx != orig_active {
-            switch_to_tab(ws, idx, Some(ctx));
-        }
-        *ws.pending_close_confirm_mut() = Some(PendingCloseConfirm::ViewportClose {
-            current_tab_index: idx,
-            orig_active,
-            discarded_doc_ids: HashSet::new(),
-        });
+    if (0..ws.tabs().len()).any(|i| is_tab_dirty(ws, i)) {
+        advance_viewport_close_confirm(ws, ws.active_index(), HashSet::new(), ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
     }
 }
@@ -201,7 +188,6 @@ fn advance_viewport_close_confirm(
             switch_to_tab(ws, next_idx, Some(ctx));
         }
         *ws.pending_close_confirm_mut() = Some(PendingCloseConfirm::ViewportClose {
-            current_tab_index: next_idx,
             orig_active,
             discarded_doc_ids,
         });
@@ -216,12 +202,10 @@ pub(crate) fn confirm_pending_close_save(ws: &mut impl ProjectWorkspace, ctx: &e
     let Some(pending) = ws.pending_close_confirm_mut().take() else {
         return;
     };
+    let tab_index = ws.active_index();
+    save_project(ws, ctx);
     match pending {
-        PendingCloseConfirm::SingleTab {
-            tab_index,
-            orig_active,
-        } => {
-            save_project(ws, ctx);
+        PendingCloseConfirm::SingleTab { orig_active } => {
             if !is_tab_dirty(ws, tab_index) {
                 close_tab_immediately(ws, tab_index, orig_active, Some(ctx));
             } else if tab_index != orig_active && orig_active < ws.tabs().len() {
@@ -229,14 +213,12 @@ pub(crate) fn confirm_pending_close_save(ws: &mut impl ProjectWorkspace, ctx: &e
             }
         }
         PendingCloseConfirm::ViewportClose {
-            current_tab_index,
             orig_active,
             discarded_doc_ids,
         } => {
-            save_project(ws, ctx);
-            if !is_tab_dirty(ws, current_tab_index) {
+            if !is_tab_dirty(ws, tab_index) {
                 advance_viewport_close_confirm(ws, orig_active, discarded_doc_ids, ctx);
-            } else if ws.active_index() != orig_active && orig_active < ws.tabs().len() {
+            } else if tab_index != orig_active && orig_active < ws.tabs().len() {
                 switch_to_tab(ws, orig_active, Some(ctx));
             }
         }
@@ -248,19 +230,16 @@ pub(crate) fn confirm_pending_close_discard(ws: &mut impl ProjectWorkspace, ctx:
     let Some(pending) = ws.pending_close_confirm_mut().take() else {
         return;
     };
+    let tab_index = ws.active_index();
     match pending {
-        PendingCloseConfirm::SingleTab {
-            tab_index,
-            orig_active,
-        } => {
+        PendingCloseConfirm::SingleTab { orig_active } => {
             close_tab_immediately(ws, tab_index, orig_active, Some(ctx));
         }
         PendingCloseConfirm::ViewportClose {
-            current_tab_index,
             orig_active,
             mut discarded_doc_ids,
         } => {
-            if let Some(tab) = ws.tabs().get(current_tab_index) {
+            if let Some(tab) = ws.tabs().get(tab_index) {
                 discarded_doc_ids.insert(tab.id);
             }
             advance_viewport_close_confirm(ws, orig_active, discarded_doc_ids, ctx);
@@ -274,7 +253,7 @@ pub(crate) fn confirm_pending_close_cancel(ws: &mut impl ProjectWorkspace, ctx: 
         return;
     };
     let orig_active = match pending {
-        PendingCloseConfirm::SingleTab { orig_active, .. }
+        PendingCloseConfirm::SingleTab { orig_active }
         | PendingCloseConfirm::ViewportClose { orig_active, .. } => orig_active,
     };
     if ws.active_index() != orig_active && orig_active < ws.tabs().len() {
@@ -317,10 +296,7 @@ pub(crate) fn close_tab(
             if close_index != orig_active {
                 switch_to_tab(ws, close_index, Some(c));
             }
-            *ws.pending_close_confirm_mut() = Some(PendingCloseConfirm::SingleTab {
-                tab_index: close_index,
-                orig_active,
-            });
+            *ws.pending_close_confirm_mut() = Some(PendingCloseConfirm::SingleTab { orig_active });
             return;
         }
     }

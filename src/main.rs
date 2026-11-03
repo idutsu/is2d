@@ -1059,7 +1059,7 @@ impl Is2dApp {
             });
 
         panels::draw_unsaved_close_confirm_modal(
-            &self.tabs,
+            self.tab(),
             &self.pending_close_confirm,
             &mut actions,
             ctx,

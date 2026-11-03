@@ -386,6 +386,9 @@ pub(crate) fn resolve_clipboard_for_paste(
         clipboard
             .imported_map
             .insert((source_doc_id, imported.id, target_doc_id), new_id);
+        clipboard
+            .imported_map
+            .insert((target_doc_id, new_id, source_doc_id), src_sym_id);
 
         imported.id = new_id;
         if tab.doc.library.iter().any(|s| s.name == imported.name) {

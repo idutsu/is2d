@@ -3713,6 +3713,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
                 .remainder
                 .iter()
                 .map(|r| r.shape_id)
+                .chain(kept_pieces.iter().map(|p| p.shape_id))
                 .filter(|id| fl.hidden.contains(id))
                 .collect();
             for mut dp in deselected_pieces {
@@ -3797,14 +3798,6 @@ pub(crate) fn insert_and_select_shapes_in_scope(
                 non_raw_shapes.push(s);
             }
         }
-        if !non_raw_shapes.is_empty() {
-            let mut lids: Vec<LayerId> = non_raw_shapes.iter().map(|s| s.layer_id).collect();
-            lids.push(active_scope_layer_id(&tab.session, tab.active_timeline()));
-            edit_layers(tab, &lids, |edit| {
-                let insert_pos = edit.scope_insert_index();
-                edit.shapes.splice(insert_pos..insert_pos, non_raw_shapes);
-            });
-        }
         if !raw_pieces.is_empty() {
             tab.active_timeline()
                 .normalize_shape_layer_ids(&mut raw_pieces);
@@ -3816,6 +3809,14 @@ pub(crate) fn insert_and_select_shapes_in_scope(
             }));
         } else {
             tab.session.set_floating(None);
+        }
+        if !non_raw_shapes.is_empty() {
+            let mut lids: Vec<LayerId> = non_raw_shapes.iter().map(|s| s.layer_id).collect();
+            lids.push(active_scope_layer_id(&tab.session, tab.active_timeline()));
+            edit_layers(tab, &lids, |edit| {
+                let insert_pos = edit.scope_insert_index();
+                edit.shapes.splice(insert_pos..insert_pos, non_raw_shapes);
+            });
         }
     } else {
         if !new_shapes.is_empty() {

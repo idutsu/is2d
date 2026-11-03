@@ -6252,10 +6252,7 @@ fn test_unsaved_tab_close_modal_non_blocking_save_discard_and_cancel() {
     assert!(
         matches!(
             app.pending_close_confirm,
-            Some(project_io::PendingCloseConfirm::SingleTab {
-                tab_index: 0,
-                orig_active: 1
-            })
+            Some(project_io::PendingCloseConfirm::SingleTab { orig_active: 1 })
         ),
         "Dirty タブのクローズ時に OS 同期ダイアログでブロックせず非ブロッキングモーダルが開くこと (#11)"
     );
@@ -16565,13 +16562,13 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     next_app.tabs[0].file = Some(gone_proj.clone());
     next_app.tabs.truncate(1);
     next_app.recovery.write_unsaved_tabs(&next_app.tabs);
-    let fallback_rec = rec_dir.join("RECOVER_moved_work.is2d");
-    assert!(fallback_rec.is_file());
     let mut fallback_app = Is2dApp::default();
     fallback_app.recovery.dir = Some(rec_dir.clone());
     fallback_app.recovery.find_leftovers();
     assert_eq!(fallback_app.recovery.found.len(), 1);
-    assert_eq!(fallback_app.recovery.found[0].recovery_path, fallback_rec);
+    let fallback_rec = fallback_app.recovery.found[0].recovery_path.clone();
+    assert_eq!(fallback_rec.parent(), Some(rec_dir.as_path()));
+    assert!(fallback_rec.is_file());
     fallback_app.apply_action(UiAction::RestoreRecovered, &ctx);
     assert_eq!(
         fallback_app.tabs[0].file.as_deref(),
@@ -17856,4 +17853,435 @@ fn test_cross_tab_symbol_paste_preserves_imported_map_across_intermediate_copies
     assert_eq!(app.doc.library[1].name, "Symbol 1 (2)");
     assert!(app.scene().iter().any(|s| s.color == red));
     assert!(app.scene().iter().any(|s| s.color == green));
+}
+
+#[test]
+fn test_deselected_slice_piece_does_not_collide_with_kept_piece_id() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 200.0), Point::new(300.0, 200.0)],
+            radius: 20.0,
+            color: Color32::RED,
+        },
+    ));
+
+    // 1. 左半分を矩形で選ぶ（スライス）
+    crate::select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(80.0, 150.0),
+        Point::new(200.0, 250.0),
+        false,
+    );
+    assert_eq!(app.session.selection.shapes.len(), 1);
+
+    // 2. Shift+クリックで右の残りも選択に足す
+    let right_idx = app
+        .scene()
+        .iter()
+        .position(|s| s.contains_point(Point::new(260.0, 200.0)))
+        .expect("右の残りにヒットすること");
+    assert!(apply(
+        &mut app,
+        Action::ToggleSelectionAt {
+            scene_idx: right_idx
+        }
+    ));
+    assert_eq!(app.session.selection.shapes.len(), 2);
+
+    // 3. Shift+クリックで左の片を選択から外す
+    let left_idx = app
+        .scene()
+        .iter()
+        .position(|s| s.contains_point(Point::new(130.0, 200.0)))
+        .expect("左の片にヒットすること");
+    assert!(apply(
+        &mut app,
+        Action::ToggleSelectionAt {
+            scene_idx: left_idx
+        }
+    ));
+    assert_eq!(app.session.selection.shapes.len(), 1);
+
+    // 今のコマの Scene の中に同じ番号の図形が無いこと
+    let scene_ids: Vec<_> = app.scene().iter().map(|s| s.shape_id).collect();
+    let unique_ids: std::collections::HashSet<_> = scene_ids.iter().copied().collect();
+    assert_eq!(
+        scene_ids.len(),
+        unique_ids.len(),
+        "Scene の中に同じ shape_id の図形が無いこと: {scene_ids:?}"
+    );
+
+    // そのあと右を動かして選択を外し、左をクリックしても右が選ばれないこと
+    assert!(apply(
+        &mut app,
+        Action::MoveSelected {
+            delta: kurbo::Vec2::new(0.0, 80.0),
+        },
+    ));
+    assert!(apply(&mut app, Action::Deselect));
+    assert_eq!(app.scene().len(), 2);
+
+    assert!(apply(
+        &mut app,
+        Action::SelectSingleAt {
+            pt: Point::new(130.0, 200.0),
+        },
+    ));
+    assert_eq!(app.session.selection.shapes.len(), 1);
+    let right_after = app
+        .scene()
+        .iter()
+        .position(|s| s.contains_point(Point::new(260.0, 280.0)))
+        .expect("移動後の右の図形にヒットすること");
+    let right_id = app.scene().get(right_after).unwrap().shape_id;
+    assert!(
+        !app.session.selection.shapes.contains(&right_id),
+        "左をクリックしたときに右が選ばれないこと"
+    );
+}
+
+#[test]
+fn test_alt_duplicate_and_paste_raw_shape_with_group_keeps_both_selected() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(230, 50, 50);
+    let blue = Color32::from_rgb(50, 110, 230);
+
+    // 青の図形を描いてグループ化する
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(220.0, 100.0), Point::new(280.0, 100.0)],
+            radius: 10.0,
+            color: blue,
+        },
+    ));
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::Group));
+    assert!(apply(&mut app, Action::Deselect));
+
+    // 赤の生の図形を描く
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+            radius: 10.0,
+            color: red,
+        },
+    ));
+
+    // 1. 赤（生）と青（グループ）を矩形で選び、Alt+ドラッグで下へ 100px 動かして離す
+    crate::select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 50.0),
+        Point::new(350.0, 160.0),
+        false,
+    );
+    assert_eq!(app.session.selected_indices().len(), 2);
+
+    let mut drag =
+        crate::clipboard_ops::begin_move_selection_drag(&mut app, Point::new(130.0, 100.0), true);
+    drag.total_delta = kurbo::Vec2::new(0.0, 100.0);
+    crate::tool_select::finish_move_selection_drag(&mut app, drag.total_delta, drag.alt_duplicate);
+
+    // 赤と青の複製が両方とも選択されていて、移動先（y ≈ 200）にあること
+    let sel_indices = app.session.selected_indices();
+    assert_eq!(sel_indices.len(), 2);
+    for idx in sel_indices {
+        let s = app.scene().get(idx).unwrap();
+        assert!(
+            (s.bounding_box().center().y - 200.0).abs() < 5.0,
+            "複製が移動先にあること: {:?}",
+            s.bounding_box()
+        );
+    }
+
+    // 選択を外したあと、赤の元の図形と、赤の複製の両方が残っていること
+    assert!(apply(&mut app, Action::Deselect));
+    let red_count = app.scene().iter().filter(|s| s.color == red).count();
+    let blue_count = app.scene().iter().filter(|s| s.color == blue).count();
+    assert_eq!(red_count, 2, "赤の元の図形と複製の両方が残っていること");
+    assert_eq!(blue_count, 2);
+
+    // 2. 同じ2つ（y=100 の赤と青）をコピーしてペーストする → 両方選択され、そのまま動かすと両方が動く
+    crate::select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 50.0),
+        Point::new(350.0, 150.0),
+        false,
+    );
+    assert_eq!(app.session.selected_indices().len(), 2);
+    assert!(apply(&mut app, Action::Copy));
+    assert!(apply(&mut app, Action::Paste { in_place: false }));
+    assert_eq!(
+        app.session.selected_indices().len(),
+        2,
+        "貼り付けた赤と青が両方とも選択されていること"
+    );
+    assert!(apply(
+        &mut app,
+        Action::MoveSelected {
+            delta: kurbo::Vec2::new(0.0, 200.0),
+        },
+    ));
+    for idx in app.session.selected_indices() {
+        let s = app.scene().get(idx).unwrap();
+        assert!(
+            s.bounding_box().center().y > 280.0,
+            "ペースト後に動かすと赤と青の両方が動くこと: {:?}",
+            s.bounding_box()
+        );
+    }
+}
+
+#[test]
+fn test_group_rejects_cross_layer_selection_and_allows_single_layer() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(230, 50, 50);
+    let blue = Color32::from_rgb(50, 110, 230);
+
+    // レイヤー0（下）に赤を描く
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+            radius: 10.0,
+            color: red,
+        },
+    ));
+    // レイヤーを追加（新しいレイヤーが index 0 になり、元のレイヤーは index 1 になる）して青を描く
+    assert!(apply(&mut app, Action::AddLayer));
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 200.0), Point::new(160.0, 200.0)],
+            radius: 10.0,
+            color: blue,
+        },
+    ));
+
+    // 1. 下のレイヤーの赤と上のレイヤーの青を選んで Action::Group → false が返り、文書と Undo 履歴が変わらない
+    assert!(apply(&mut app, Action::SelectAll));
+    assert_eq!(app.session.selected_indices().len(), 2);
+    assert_eq!(crate::select_ops::selected_single_layer_id(&app), None);
+    let undo_len_before = app.history.undo_stack.len();
+    assert!(!apply(&mut app, Action::Group));
+    assert_eq!(app.history.undo_stack.len(), undo_len_before);
+    assert!(app.scene().iter().all(|s| s.group_path.is_empty()));
+
+    // 2. 同じレイヤーの2つの図形なら、今までどおりグループになる
+    assert!(apply(&mut app, Action::Deselect));
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(220.0, 200.0), Point::new(280.0, 200.0)],
+            radius: 10.0,
+            color: Color32::GREEN,
+        },
+    ));
+    crate::select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 160.0),
+        Point::new(320.0, 240.0),
+        false,
+    );
+    assert_eq!(app.session.selected_indices().len(), 2);
+    assert!(crate::select_ops::selected_single_layer_id(&app).is_some());
+    assert!(apply(&mut app, Action::Group));
+    assert!(app
+        .scene()
+        .iter()
+        .filter(|s| s.color != red)
+        .all(|s| !s.group_path.is_empty()));
+
+    // 3. レビューの手順（下のレイヤーで F6、上のレイヤーで F5、1コマ目で両方を選んで Cmd+G）
+    // 上のレイヤー（0）で F5、下のレイヤー（1）で F6
+    app.set_active_layer(0);
+    app.set_active_cell_selection(Some(crate::timeline::TimelineCellSelection::single(0, 0)));
+    assert!(apply(&mut app, Action::ExtendFrame));
+    app.set_active_layer(1);
+    app.set_active_cell_selection(Some(crate::timeline::TimelineCellSelection::single(1, 0)));
+    assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: true }));
+    assert_eq!(app.doc.root.current_frame, 1);
+
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(!apply(&mut app, Action::Group));
+    assert!(apply(&mut app, Action::ScrubRulerToFrame { frame: 0 }));
+    let frame0_ids: Vec<_> = app.scene().iter().map(|s| s.shape_id).collect();
+    let unique_frame0: std::collections::HashSet<_> = frame0_ids.iter().copied().collect();
+    assert_eq!(frame0_ids.len(), unique_frame0.len());
+}
+
+#[test]
+fn test_cross_tab_symbol_roundtrip_paste_reuses_original_symbol() {
+    use crate::doc_actions::{apply, Action};
+
+    let ctx = eframe::egui::Context::default();
+    let mut app = Is2dApp::default();
+
+    // タブ1（index 0）で図形を F8 → コピー
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+            radius: 10.0,
+            color: Color32::RED,
+        },
+    ));
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    let orig_sym_id = app.doc.library[0].id;
+    assert!(apply(&mut app, Action::Copy));
+
+    // タブ2（index 1）へペースト → タブ2でそのインスタンスをコピー
+    crate::project_io::new_project(&mut app, &ctx);
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    assert_eq!(app.doc.library.len(), 1);
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::Copy));
+
+    // タブ1へ戻してペースト → タブ1のライブラリはシンボル1つのままで、貼ったインスタンスは元のシンボルを指す
+    crate::project_io::switch_to_tab(&mut app, 0, Some(&ctx));
+    assert!(apply(&mut app, Action::Paste { in_place: false }));
+    assert_eq!(app.doc.library.len(), 1);
+    let instances = &app.doc.root.layers[0].keyframes[0].cel.instances;
+    assert_eq!(instances.len(), 2);
+    assert!(instances
+        .iter()
+        .all(|inst| inst.binding.symbol_id == orig_sym_id));
+
+    // 続けてタブ1でコピー → タブ2へペーストしても、タブ2のライブラリはシンボル1つのまま
+    assert!(apply(&mut app, Action::Copy));
+    crate::project_io::switch_to_tab(&mut app, 1, Some(&ctx));
+    assert!(apply(&mut app, Action::Paste { in_place: false }));
+    assert_eq!(app.doc.library.len(), 1);
+}
+
+#[test]
+fn test_recovery_fallback_same_filename_and_missing_parent_dir() {
+    use crate::doc_actions::{apply, Action};
+    use crate::panels::UiAction;
+
+    let ctx = eframe::egui::Context::default();
+    let base_dir = std::env::temp_dir().join(format!(
+        "is2d_rec_fix5_6_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let rec_dir = base_dir.join("recovery_dir");
+    std::fs::create_dir_all(&rec_dir).unwrap();
+
+    let red = Color32::from_rgb(230, 40, 40);
+    let blue = Color32::from_rgb(40, 100, 230);
+
+    // 1. 修正5（N-4001）：無いフォルダ gone1/scene.is2d と gone2/scene.is2d を中身の違う未保存のタブ2つにして書く
+    let mut app = Is2dApp::default();
+    app.recovery.dir = Some(rec_dir.clone());
+    let gone1 = base_dir.join("gone1").join("scene.is2d");
+    let gone2 = base_dir.join("gone2").join("scene.is2d");
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(50.0, 50.0), Point::new(100.0, 50.0)],
+            radius: 8.0,
+            color: red,
+        },
+    ));
+    app.tabs[0].file = Some(gone1.clone());
+
+    crate::project_io::new_project(&mut app, &ctx);
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(150.0, 150.0), Point::new(200.0, 150.0)],
+            radius: 8.0,
+            color: blue,
+        },
+    ));
+    app.tabs[1].file = Some(gone2.clone());
+
+    app.recovery.write_unsaved_tabs(&app.tabs);
+
+    let mut next_app = Is2dApp::default();
+    next_app.recovery.dir = Some(rec_dir.clone());
+    next_app.recovery.find_leftovers();
+    assert_eq!(
+        next_app.recovery.found.len(),
+        2,
+        "同じファイル名でも別タブなら上書きされず2件見つかること"
+    );
+    next_app.apply_action(UiAction::RestoreRecovered, &ctx);
+    assert_eq!(next_app.tabs.len(), 2);
+    let tab_gone1 = next_app
+        .tabs
+        .iter()
+        .find(|t| t.file.as_deref() == Some(gone1.as_path()))
+        .expect("gone1/scene.is2d が復元されること");
+    let tab_gone2 = next_app
+        .tabs
+        .iter()
+        .find(|t| t.file.as_deref() == Some(gone2.as_path()))
+        .expect("gone2/scene.is2d が復元されること");
+    assert_eq!(
+        tab_gone1.doc.root.layers[0].keyframes[0].cel.shapes[0].color,
+        red
+    );
+    assert_eq!(
+        tab_gone2.doc.root.layers[0].keyframes[0].cel.shapes[0].color,
+        blue
+    );
+
+    // 2. 修正6（N-4002）：vol/scene.is2d を未保存のタブにして書く → vol の名前を変える → find_leftovers で found は 0、一覧ファイルは残る → vol の名前を戻して find_leftovers → found は 1
+    let vol_dir = base_dir.join("vol");
+    let vol_unmounted = base_dir.join("vol_unmounted");
+    std::fs::create_dir_all(&vol_dir).unwrap();
+    let vol_proj = vol_dir.join("scene.is2d");
+
+    let mut vol_app = Is2dApp::default();
+    vol_app.recovery.dir = Some(rec_dir.clone());
+    assert!(apply(
+        &mut vol_app,
+        Action::PaintStroke {
+            points: vec![Point::new(80.0, 80.0), Point::new(140.0, 80.0)],
+            radius: 8.0,
+            color: red,
+        },
+    ));
+    vol_app.tabs[0].file = Some(vol_proj);
+    vol_app.recovery.write_unsaved_tabs(&vol_app.tabs);
+
+    std::fs::rename(&vol_dir, &vol_unmounted).unwrap();
+    let mut check_app = Is2dApp::default();
+    check_app.recovery.dir = Some(rec_dir.clone());
+    check_app.recovery.find_leftovers();
+    assert_eq!(check_app.recovery.found.len(), 0);
+    let entry_count = std::fs::read_dir(&rec_dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("entry"))
+        .count();
+    assert_eq!(
+        entry_count, 1,
+        "フォルダ自体が見えないときは一覧ファイルを消さずに残すこと"
+    );
+
+    std::fs::rename(&vol_unmounted, &vol_dir).unwrap();
+    check_app.recovery.find_leftovers();
+    assert_eq!(
+        check_app.recovery.found.len(),
+        1,
+        "フォルダが戻った後の起動で復元対象として見つかること"
+    );
+
+    let _ = std::fs::remove_dir_all(&base_dir);
 }

@@ -1661,9 +1661,7 @@ fn update_selected_symbol_binding(
         return false;
     }
 
-    let prev_coalesce = tab.history.last_coalesce_key;
     commit_floating(tab);
-    tab.history.last_coalesce_key = prev_coalesce;
     push_undo(tab, coalesce);
 
     let mut updated = false;

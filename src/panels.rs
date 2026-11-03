@@ -821,13 +821,14 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
     half_width_row(ui, |ui, half_w| {
         if ui
             .add_enabled(
-                has_sel,
+                crate::select_ops::selected_single_layer_id(tab).is_some(),
                 egui::Button::new(format!("{} グループ化", icons::GROUP))
                     .min_size(Vec2::new(half_w, 28.0)),
             )
             .on_hover_text(format!(
                 "選択中のオブジェクトを1つのグループにまとめる ({MOD_KEY}+G)"
             ))
+            .on_disabled_hover_text("グループにできるのは、1つのレイヤーの中で選んだ図形だけです")
             .clicked()
         {
             actions.push(UiAction::Doc(Action::Group));
@@ -2121,24 +2122,15 @@ fn modal_window(ctx: &egui::Context, title: &str, add_contents: impl FnOnce(&mut
 
 /// 未保存変更があるタブを閉じる際の非ブロッキング確認モーダルダイアログ（egui Window）を描画する
 pub(crate) fn draw_unsaved_close_confirm_modal(
-    tabs: &[Tab],
+    tab: &Tab,
     pending_close_confirm: &Option<PendingCloseConfirm>,
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
-    let Some(pending) = pending_close_confirm.clone() else {
+    if pending_close_confirm.is_none() {
         return;
-    };
-    let tab_index = match &pending {
-        PendingCloseConfirm::SingleTab { tab_index, .. } => *tab_index,
-        PendingCloseConfirm::ViewportClose {
-            current_tab_index, ..
-        } => *current_tab_index,
-    };
-    let tab_name = tabs
-        .get(tab_index)
-        .map(|tab| tab.base_title())
-        .unwrap_or_else(|| "無題".to_owned());
+    }
+    let tab_name = tab.base_title();
 
     modal_window(ctx, "未保存の変更の確認", |ui| {
         ui.set_min_width(320.0);
@@ -2183,7 +2175,7 @@ pub(crate) fn draw_recovery_modal(
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or_default();
-            let name = raw_name.strip_prefix("RECOVER_").unwrap_or(raw_name);
+            let name = raw_name.split_once("RECOVER_").map_or(raw_name, |(_, n)| n);
             let secs = now
                 .duration_since(item.modified)
                 .map(|d| d.as_secs())
