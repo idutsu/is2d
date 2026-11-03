@@ -17626,3 +17626,140 @@ fn test_toggle_playback_cancels_in_progress_brush_and_eraser_stroke() {
     assert!(matches!(app.session.drag, ActiveCanvasDrag::None));
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 1);
 }
+
+#[test]
+fn test_timeline_move_or_copy_frames_clips_range_per_source_layer_frame_count() {
+    use crate::doc_actions::{apply, Action};
+    use crate::timeline::TimelineCellSelection;
+
+    let red = Color32::from_rgb(220, 40, 40);
+    let blue = Color32::from_rgb(40, 90, 230);
+
+    // レイヤー A（layer 0, 100コマ, 赤）と レイヤー B（layer 1, 5コマ, 青）を作るヘルパー
+    let build_app = || -> Is2dApp {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            make_stroke(Point::new(50.0, 50.0), Point::new(120.0, 50.0), 8.0, red),
+        );
+        app.doc.root.layers[0].frame_count = 100;
+
+        assert!(apply(&mut app, Action::AddLayer));
+        put_cel_shapes(
+            &mut app,
+            1,
+            0,
+            make_stroke(Point::new(50.0, 120.0), Point::new(120.0, 120.0), 8.0, blue),
+        );
+        app.doc.root.layers[1].frame_count = 5;
+        app.doc.root.sync_total_frames();
+        app.refresh_scene_base();
+        app
+    };
+
+    // 1. 0〜99 コマを +10 移動すると、B の絵が見えるのは 10〜14 コマ目の5コマだけ、A は 10〜109 コマ目
+    {
+        let mut app = build_app();
+        let sel = TimelineCellSelection {
+            min_layer: 0,
+            max_layer: 1,
+            min_frame: 0,
+            max_frame: 99,
+        };
+        assert!(apply(
+            &mut app,
+            Action::MoveOrCopyFrames {
+                sel,
+                layer_delta: 0,
+                frame_delta: 10,
+                copy_mode: false,
+            },
+        ));
+        let layer_a = &app.doc.root.layers[0];
+        let layer_b = &app.doc.root.layers[1];
+        assert_eq!(layer_a.frame_count, 110);
+        assert_eq!(layer_b.frame_count, 15);
+        for f in 0..115 {
+            let a_has = layer_a.cel_at(f).is_some_and(|c| !c.shapes.is_empty());
+            let b_has = layer_b.cel_at(f).is_some_and(|c| !c.shapes.is_empty());
+            assert_eq!(
+                a_has,
+                (10..=109).contains(&f),
+                "移動後のレイヤー A の {f} コマ目の有無"
+            );
+            assert_eq!(
+                b_has,
+                (10..=14).contains(&f),
+                "移動後のレイヤー B の {f} コマ目の有無"
+            );
+        }
+    }
+
+    // 2. 同じ例で複製すると、B の複製先は 10〜14 コマ目の5コマだけで終わり（frame_count = 15）、15〜109 コマ目には延びない
+    {
+        let mut app = build_app();
+        let sel = TimelineCellSelection {
+            min_layer: 0,
+            max_layer: 1,
+            min_frame: 0,
+            max_frame: 99,
+        };
+        assert!(apply(
+            &mut app,
+            Action::MoveOrCopyFrames {
+                sel,
+                layer_delta: 0,
+                frame_delta: 10,
+                copy_mode: true,
+            },
+        ));
+        let layer_a = &app.doc.root.layers[0];
+        let layer_b = &app.doc.root.layers[1];
+        assert_eq!(layer_a.frame_count, 110);
+        assert_eq!(layer_b.frame_count, 15);
+        assert_eq!(layer_b.keyframes.len(), 2);
+        assert_eq!(layer_b.keyframes[0].start_frame, 0);
+        assert_eq!(layer_b.keyframes[1].start_frame, 10);
+        assert_eq!(layer_b.span_end_for_keyframe(1), 14);
+        for f in 10..=14 {
+            assert!(layer_b.cel_at(f).is_some_and(|c| !c.shapes.is_empty()));
+        }
+        for f in 15..110 {
+            assert!(
+                layer_b.cel_at(f).is_none(),
+                "複製後のレイヤー B は 14 コマ目で終わり、{f} コマ目には延びないこと"
+            );
+        }
+    }
+
+    // 3. 選んだ範囲（20〜30 コマ）がレイヤー B（0〜4 コマ）の最後のコマより全部後ろにあるとき、B は何も変わらない
+    {
+        let mut app = build_app();
+        let b_before_fc = app.doc.root.layers[1].frame_count;
+        let b_before_kfs = app.doc.root.layers[1].keyframes.clone();
+        let sel = TimelineCellSelection {
+            min_layer: 0,
+            max_layer: 1,
+            min_frame: 20,
+            max_frame: 30,
+        };
+        assert!(apply(
+            &mut app,
+            Action::MoveOrCopyFrames {
+                sel,
+                layer_delta: 0,
+                frame_delta: 15,
+                copy_mode: false,
+            },
+        ));
+        let layer_b = &app.doc.root.layers[1];
+        assert_eq!(layer_b.frame_count, b_before_fc);
+        assert_eq!(layer_b.keyframes.len(), b_before_kfs.len());
+        for f in 0..20 {
+            let b_has = layer_b.cel_at(f).is_some_and(|c| !c.shapes.is_empty());
+            assert_eq!(b_has, (0..=4).contains(&f));
+        }
+    }
+}

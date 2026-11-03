@@ -1195,32 +1195,36 @@ impl Timeline {
         copy_mode: bool,
         mut alloc_group_id: impl FnMut() -> u64,
     ) {
-        let extracted: Vec<(usize, Vec<Keyframe>)> = (sel.min_layer..=sel.max_layer)
+        let extracted: Vec<(usize, usize, usize, usize, Vec<Keyframe>)> = (sel.min_layer
+            ..=sel.max_layer)
             .filter_map(|src_l| {
                 let dst_l = (src_l as isize + actual_dl) as usize;
                 let _ = self.layers.get(dst_l)?;
-                let mut kfs = self
-                    .layers
-                    .get(src_l)?
-                    .extract_keyframes_in_range(sel.min_frame, sel.max_frame);
+                let src_layer = self.layers.get(src_l)?;
+                if sel.min_frame >= src_layer.frame_count {
+                    return None;
+                }
+                let src_max_frame = sel.max_frame.min(src_layer.frame_count - 1);
+                let dst_max_frame = dst_sel.min_frame + (src_max_frame - sel.min_frame);
+                let mut kfs = src_layer.extract_keyframes_in_range(sel.min_frame, src_max_frame);
                 if copy_mode || actual_dl != 0 {
                     remap_keyframes_group_and_instance_ids(&mut kfs, &mut alloc_group_id);
                 }
-                Some((dst_l, kfs))
+                Some((src_l, dst_l, src_max_frame, dst_max_frame, kfs))
             })
             .collect();
 
         if !copy_mode {
-            for src_l in sel.min_layer..=sel.max_layer {
+            for &(src_l, _, src_max_frame, _, _) in &extracted {
                 if let Some(layer) = self.layers.get_mut(src_l) {
-                    layer.remove_keyframes_in_range(sel.min_frame, sel.max_frame);
+                    layer.remove_keyframes_in_range(sel.min_frame, src_max_frame);
                 }
             }
         }
 
-        for (dst_l, kfs) in extracted {
+        for (_, dst_l, _, dst_max_frame, kfs) in extracted {
             if let Some(layer) = self.layers.get_mut(dst_l) {
-                layer.place_keyframes_at(dst_sel.min_frame, dst_sel.max_frame, kfs);
+                layer.place_keyframes_at(dst_sel.min_frame, dst_max_frame, kfs);
             }
         }
 
