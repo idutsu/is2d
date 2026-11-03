@@ -1104,17 +1104,16 @@ fn apply_finish_move_selection_drag(
     tab.session.clear_overlay();
     let min_move = 1.0 / (tab.view.zoom as f64);
     if total_delta.hypot() <= min_move || !has_editable_selection(tab) {
+        if let Some(piv) = &mut tab.session.transform_pivot {
+            *piv -= total_delta;
+        }
         return false;
     }
     push_undo(tab, None);
     if alt_duplicate {
         duplicate_selected_in_working_copy(tab);
     }
-    let moved = transform_selected_shapes(tab, Affine::translate(total_delta));
-    if let Some(piv) = &mut tab.session.transform_pivot {
-        *piv += total_delta;
-    }
-    moved
+    transform_selected_shapes(tab, Affine::translate(total_delta))
 }
 
 fn apply_move_selected(tab: &mut Tab, delta: KVec2, coalesce: Option<CoalesceKey>) -> bool {

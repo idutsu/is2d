@@ -16040,3 +16040,35 @@ fn test_m5_2_n1001_contour_segments_capacity_equals_len_after_merge_insert_and_r
     loaded_doc.apply_to_app(&mut reopened);
     assert_all_contours_shrunk(&reopened.tab().doc, "after save and reopen");
 }
+
+#[test]
+fn test_transform_move_drag_translates_custom_pivot_once() {
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(10.0, 50.0),
+            Point::new(50.0, 50.0),
+            8.0,
+            Color32::RED,
+        ),
+    );
+    app.tool_mut().tool = Tool::Transform;
+    app.session.set_selected_indices(vec![0]);
+
+    let (_, init_pivot) = app
+        .session
+        .selection_bbox_and_pivot(app.view.zoom)
+        .expect("selection bbox and pivot should exist");
+    tool_transform::start_transform_drag(&mut app, init_pivot, false, false);
+    tool_transform::update_transform_drag(app.tab_mut(), Point::new(20.0, 60.0), false, false);
+    tool_transform::finish_transform_drag(&mut app, Some(Point::new(20.0, 60.0)));
+    assert_eq!(app.session.transform_pivot, Some(Point::new(20.0, 60.0)));
+
+    tool_transform::start_transform_drag(&mut app, Point::new(40.0, 50.0), false, false);
+    tool_transform::update_transform_drag(app.tab_mut(), Point::new(90.0, 50.0), false, false);
+    tool_transform::finish_transform_drag(&mut app, Some(Point::new(90.0, 50.0)));
+    assert_eq!(app.session.transform_pivot, Some(Point::new(70.0, 60.0)));
+}
