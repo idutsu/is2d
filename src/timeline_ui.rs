@@ -132,7 +132,7 @@ impl TimelineUiState {
         self.grid_drag = TimelineGridDrag::None;
     }
 
-    pub(crate) fn reset_for_timeline_switch(&mut self, _current_frame: usize) {
+    pub(crate) fn reset_for_timeline_switch(&mut self) {
         self.is_playing = false;
         self.last_frame_advance_time = None;
         self.scroll_x = 0.0;
@@ -161,7 +161,7 @@ impl TimelineUiState {
         );
         if self.last_timeline_key != key {
             self.last_timeline_key = key;
-            self.reset_for_timeline_switch(tab.active_timeline().current_frame);
+            self.reset_for_timeline_switch();
         }
     }
 
@@ -210,8 +210,6 @@ impl TimelineLayout {
         let grid_w = (panel_rect.right() - grid_left).max(1.0);
         let grid_h = (panel_rect.bottom() - grid_top).max(1.0);
         let max_frames_shown = (max_reach_frames + 24).max(3000);
-        let first_vis_frame = (scroll_x / CELL_W).floor() as usize;
-        let last_vis_frame = (((scroll_x + grid_w) / CELL_W).ceil() as usize).min(max_frames_shown);
 
         let add_hdr_rect = Rect::from_min_max(
             Pos2::new(grid_left - 44.0, panel_rect.top() + 2.0),
@@ -222,18 +220,20 @@ impl TimelineLayout {
             Pos2::new(grid_left - 2.0, grid_top - 2.0),
         );
 
-        Self {
+        let mut layout = Self {
             panel_rect,
             grid_left,
             grid_top,
             grid_w,
             grid_h,
             max_frames_shown,
-            first_vis_frame,
-            last_vis_frame,
+            first_vis_frame: 0,
+            last_vis_frame: 0,
             add_hdr_rect,
             del_hdr_rect,
-        }
+        };
+        layout.sync_visible_frames(scroll_x);
+        layout
     }
 
     fn frame_at_x(&self, x: f32, scroll_x: f32) -> usize {
@@ -418,9 +418,9 @@ pub(crate) fn draw_timeline_panel(host: &mut impl TimelineHost, ctx: &egui::Cont
                 .input(|i| i.pointer.interact_pos())
                 .or_else(|| response.interact_pointer_pos());
             let hover_pos = ui.input(|i| i.pointer.hover_pos());
-
+            let ptr = (primary_down, alt_held, pointer_pos, hover_pos);
             let drag_layer_feedback =
-                handle_timeline_pointer_input(host, ui, &response, &mut layout);
+                handle_timeline_pointer_input(host, ui, &response, &mut layout, ptr);
 
             let grid_rect = Rect::from_min_max(
                 Pos2::new(layout.grid_left, layout.grid_top),
@@ -777,15 +777,10 @@ fn handle_timeline_pointer_input(
     ui: &egui::Ui,
     response: &egui::Response,
     layout: &mut TimelineLayout,
+    (primary_down, alt_held, pointer_pos, hover_pos): (bool, bool, Option<Pos2>, Option<Pos2>),
 ) -> Option<(usize, usize, Pos2)> {
-    let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
-    let primary_down = ui.input(|i| i.pointer.primary_down());
-    let alt_held = ui.input(|i| i.modifiers.alt);
-    let shift_held = ui.input(|i| i.modifiers.shift);
-    let pointer_pos = ui
-        .input(|i| i.pointer.interact_pos())
-        .or_else(|| response.interact_pointer_pos());
-    let hover_pos = ui.input(|i| i.pointer.hover_pos());
+    let (primary_pressed, shift_held) =
+        ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift));
     if response.hovered() && primary_pressed {
         if let Some(pos) = pointer_pos {
             handle_timeline_click_start(host, layout, pos, alt_held, shift_held);

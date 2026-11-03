@@ -2050,6 +2050,29 @@ fn draw_active_marquee_box(tab: &Tab, painter: &egui::Painter) {
     }
 }
 
+fn modal_window(ctx: &egui::Context, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Area::new(egui::Id::new((title, "backdrop")))
+        .order(egui::Order::Foreground)
+        .fixed_pos(Pos2::ZERO)
+        .show(ctx, |ui| {
+            let screen_rect = ctx.screen_rect();
+            ui.allocate_rect(screen_rect, egui::Sense::click_and_drag());
+            ui.painter().rect_filled(
+                screen_rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(15, 20, 28, 96),
+            );
+        });
+
+    egui::Window::new(title)
+        .id(egui::Id::new((title, "modal")))
+        .order(egui::Order::Tooltip)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, add_contents);
+}
+
 /// 未保存変更があるタブを閉じる際の非ブロッキング確認モーダルダイアログ（egui Window）を描画する
 pub(crate) fn draw_unsaved_close_confirm_modal(
     tabs: &[Tab],
@@ -2071,44 +2094,25 @@ pub(crate) fn draw_unsaved_close_confirm_modal(
         .map(|tab| tab.base_title())
         .unwrap_or_else(|| "無題".to_owned());
 
-    egui::Area::new(egui::Id::new("unsaved_close_confirm_backdrop"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(Pos2::ZERO)
-        .show(ctx, |ui| {
-            let screen_rect = ctx.screen_rect();
-            ui.allocate_rect(screen_rect, egui::Sense::click_and_drag());
-            ui.painter().rect_filled(
-                screen_rect,
-                0.0,
-                Color32::from_rgba_unmultiplied(15, 20, 28, 96),
-            );
+    modal_window(ctx, "未保存の変更の確認", |ui| {
+        ui.set_min_width(320.0);
+        ui.add_space(4.0);
+        ui.label(format!(
+            "「{tab_name}」には未保存の変更があります。\n閉じる前に変更を保存しますか？"
+        ));
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button("保存して閉じる").clicked() {
+                actions.push(UiAction::ConfirmPendingCloseSave);
+            }
+            if ui.button("保存せずに破棄").clicked() {
+                actions.push(UiAction::ConfirmPendingCloseDiscard);
+            }
+            if ui.button("キャンセル").clicked() {
+                actions.push(UiAction::ConfirmPendingCloseCancel);
+            }
         });
-
-    egui::Window::new("未保存の変更の確認")
-        .id(egui::Id::new("unsaved_close_confirm_modal"))
-        .order(egui::Order::Tooltip)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-        .show(ctx, |ui| {
-            ui.set_min_width(320.0);
-            ui.add_space(4.0);
-            ui.label(format!(
-                "「{tab_name}」には未保存の変更があります。\n閉じる前に変更を保存しますか？"
-            ));
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                if ui.button("保存して閉じる").clicked() {
-                    actions.push(UiAction::ConfirmPendingCloseSave);
-                }
-                if ui.button("保存せずに破棄").clicked() {
-                    actions.push(UiAction::ConfirmPendingCloseDiscard);
-                }
-                if ui.button("キャンセル").clicked() {
-                    actions.push(UiAction::ConfirmPendingCloseCancel);
-                }
-            });
-        });
+    });
 }
 
 /// 動画書き出し中の進み具合と「中止」ボタンを画面中央に表示し、背後の操作をブロックするモーダルダイアログ
@@ -2123,36 +2127,17 @@ pub(crate) fn draw_video_export_modal(
     let total = total.max(1);
     let done = done.min(total);
 
-    egui::Area::new(egui::Id::new("video_export_backdrop"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(Pos2::ZERO)
-        .show(ctx, |ui| {
-            let screen_rect = ctx.screen_rect();
-            ui.allocate_rect(screen_rect, egui::Sense::click_and_drag());
-            ui.painter().rect_filled(
-                screen_rect,
-                0.0,
-                Color32::from_rgba_unmultiplied(15, 20, 28, 96),
-            );
+    modal_window(ctx, "動画を書き出し（MP4）", |ui| {
+        ui.set_min_width(300.0);
+        ui.add_space(4.0);
+        ui.label(format!("動画を書き出しています　{done} / {total}"));
+        ui.add_space(8.0);
+        ui.add(egui::ProgressBar::new((done as f32) / (total as f32)).desired_width(280.0));
+        ui.add_space(12.0);
+        ui.vertical_centered(|ui| {
+            if ui.button("中止").clicked() {
+                actions.push(UiAction::CancelVideoExport);
+            }
         });
-
-    egui::Window::new("動画を書き出し（MP4）")
-        .id(egui::Id::new("video_export_modal"))
-        .order(egui::Order::Tooltip)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-        .show(ctx, |ui| {
-            ui.set_min_width(300.0);
-            ui.add_space(4.0);
-            ui.label(format!("動画を書き出しています　{done} / {total}"));
-            ui.add_space(8.0);
-            ui.add(egui::ProgressBar::new((done as f32) / (total as f32)).desired_width(280.0));
-            ui.add_space(12.0);
-            ui.vertical_centered(|ui| {
-                if ui.button("中止").clicked() {
-                    actions.push(UiAction::CancelVideoExport);
-                }
-            });
-        });
+    });
 }

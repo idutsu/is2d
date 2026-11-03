@@ -115,6 +115,16 @@ pub(crate) struct Contour {
     pub(crate) segments: Arc<Vec<QuadBez>>,
 }
 
+#[inline]
+pub(crate) fn is_quad_finite(s: &QuadBez) -> bool {
+    s.p0.x.is_finite()
+        && s.p0.y.is_finite()
+        && s.p1.x.is_finite()
+        && s.p1.y.is_finite()
+        && s.p2.x.is_finite()
+        && s.p2.y.is_finite()
+}
+
 impl Contour {
     pub(crate) fn new(mut segments: Vec<QuadBez>) -> Self {
         segments.shrink_to_fit();
@@ -203,28 +213,13 @@ impl Contour {
 
     /// 極端に短い退化セグメントや非有限座標セグメントを除去し、端点の連続性を保証する
     fn cleanup_degenerate(&mut self, min_len: f64) {
-        let has_non_finite = self.segments.iter().any(|s| {
-            !s.p0.x.is_finite()
-                || !s.p0.y.is_finite()
-                || !s.p1.x.is_finite()
-                || !s.p1.y.is_finite()
-                || !s.p2.x.is_finite()
-                || !s.p2.y.is_finite()
-        });
+        let has_non_finite = !self.segments.iter().all(is_quad_finite);
         if has_non_finite || self.segments.len() > 3 {
             let mut kept: Vec<QuadBez> = self
                 .segments
                 .iter()
                 .copied()
-                .filter(|s| {
-                    s.p0.x.is_finite()
-                        && s.p0.y.is_finite()
-                        && s.p1.x.is_finite()
-                        && s.p1.y.is_finite()
-                        && s.p2.x.is_finite()
-                        && s.p2.y.is_finite()
-                        && (s.p2 - s.p0).hypot() >= min_len
-                })
+                .filter(|s| is_quad_finite(s) && (s.p2 - s.p0).hypot() >= min_len)
                 .collect();
             if has_non_finite || (kept.len() >= 3 && kept.len() != self.segments.len()) {
                 kept.shrink_to_fit();
@@ -424,6 +419,12 @@ impl FillShape {
         screen_mesh
     }
 
+    fn clear_screen_mesh_caches(&mut self) {
+        *self.screen_mesh_cache.lock() = None;
+        *self.selection_mesh.lock() = None;
+        *self.selection_screen_mesh.lock() = None;
+    }
+
     /// Undo 履歴保存時やバックアップ時に、幾何データから随時再生成可能な描画メッシュキャッシュを破棄してメモリを解放する
     pub(crate) fn strip_transient_caches(&mut self) {
         self.hit_bez_path = OnceLock::new();
@@ -433,9 +434,7 @@ impl FillShape {
     /// 文書保存時などに、描画メッシュおよび画面表示用の一時キャッシュ（`fill_mesh`, `screen_mesh_cache`, `selection_mesh`, `selection_screen_mesh`）を破棄する
     pub(crate) fn clear_screen_caches(&mut self) {
         self.fill_mesh = OnceLock::new();
-        *self.screen_mesh_cache.lock() = None;
-        *self.selection_mesh.lock() = None;
-        *self.selection_screen_mesh.lock() = None;
+        self.clear_screen_mesh_caches();
     }
 
     /// 輪郭データと色が同一である既存シェイプ `donor` から描画・当たり判定キャッシュを O(1) で引き継ぐ
@@ -556,11 +555,7 @@ impl FillShape {
 
     pub(crate) fn rebuild_cache(&mut self) {
         self.bbox = self.compute_bbox();
-        self.fill_mesh = OnceLock::new();
-        self.hit_bez_path = OnceLock::new();
-        *self.screen_mesh_cache.lock() = None;
-        *self.selection_mesh.lock() = None;
-        *self.selection_screen_mesh.lock() = None;
+        self.strip_transient_caches();
         self.mesh_revision = next_mesh_revision();
     }
 
@@ -675,9 +670,7 @@ impl FillShape {
             if let Some(arc_mesh) = self.fill_mesh.get_mut() {
                 transform_mesh_vertices_in_place(&mut Arc::make_mut(arc_mesh).vertices, coeffs);
             }
-            *self.screen_mesh_cache.lock() = None;
-            *self.selection_mesh.lock() = None;
-            *self.selection_screen_mesh.lock() = None;
+            self.clear_screen_mesh_caches();
             self.mesh_revision = next_mesh_revision();
         }
     }
@@ -726,9 +719,7 @@ impl FillShape {
         } else {
             self.fill_mesh = OnceLock::new();
         }
-        *self.screen_mesh_cache.lock() = None;
-        *self.selection_mesh.lock() = None;
-        *self.selection_screen_mesh.lock() = None;
+        self.clear_screen_mesh_caches();
         self.mesh_revision = next_mesh_revision();
     }
 

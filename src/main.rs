@@ -317,19 +317,11 @@ impl Is2dApp {
             .unwrap_or_else(|| self.tab().base_title());
         let default_name = format!("{stem}.mp4");
 
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter("MP4 動画 (*.mp4)", &["mp4"])
-            .set_file_name(&default_name);
-        if let Some(parent) = self.tab().file.as_deref().and_then(std::path::Path::parent) {
-            dialog = dialog.set_directory(parent);
-        }
-
-        let Some(mut path) = dialog.save_file() else {
+        let Some(path) =
+            project_io::pick_save_path(self.tab(), "MP4 動画 (*.mp4)", "mp4", &default_name)
+        else {
             return;
         };
-        if path.extension().is_none() {
-            path.set_extension("mp4");
-        }
 
         let doc = self.tab().committed_document_copy();
         self.video_export = Some(video_export::VideoExportJob::start(doc, path));

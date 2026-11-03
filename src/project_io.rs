@@ -843,6 +843,14 @@ pub(crate) struct ProjectDocument {
     pub(crate) next_group_id: u64,
 }
 
+fn remap_unsafe_gid(map: &mut HashMap<u64, u64>, next: &mut u64, gid: &mut u64) {
+    *gid = *map.entry(*gid).or_insert_with(|| {
+        let id = *next;
+        *next = next.saturating_add(1);
+        id
+    });
+}
+
 impl ProjectDocument {
     /// 現在の `Tab` から保存用の `ProjectDocument` を生成する
     /// （`Floating` がある場合は `Document` のコピーに対して確定した内容を書き出し、`Session` も `Document` も書き換えない）
@@ -961,8 +969,8 @@ impl ProjectDocument {
                 }
             }
         }
-        let mut next_safe_gid = max_valid_gid.saturating_add(1).max(1);
-        let mut unsafe_gid_remap: HashMap<u64, u64> = HashMap::new();
+        let mut next_gid = max_valid_gid.saturating_add(1).max(1);
+        let mut gid_map: HashMap<u64, u64> = HashMap::new();
 
         // 存在しない symbol_id（孤児インスタンス）をルートタイムラインおよび各シンボルタイムラインから除去し、
         // 再採番された symbol_id / group_id / instance_gid の反映と tween フラグの正規化を行う
@@ -980,11 +988,7 @@ impl ProjectDocument {
                         for s in kf.cel.shapes_mut() {
                             for gid in &mut s.group_path {
                                 if *gid == 0 || *gid > MAX_SAFE_ENTITY_ID {
-                                    *gid = *unsafe_gid_remap.entry(*gid).or_insert_with(|| {
-                                        let id = next_safe_gid;
-                                        next_safe_gid = next_safe_gid.saturating_add(1);
-                                        id
-                                    });
+                                    remap_unsafe_gid(&mut gid_map, &mut next_gid, gid);
                                 }
                             }
                         }
@@ -1010,21 +1014,12 @@ impl ProjectDocument {
                             }
                             for gid in &mut inst.parent_scope {
                                 if *gid == 0 || *gid > MAX_SAFE_ENTITY_ID {
-                                    *gid = *unsafe_gid_remap.entry(*gid).or_insert_with(|| {
-                                        let id = next_safe_gid;
-                                        next_safe_gid = next_safe_gid.saturating_add(1);
-                                        id
-                                    });
+                                    remap_unsafe_gid(&mut gid_map, &mut next_gid, gid);
                                 }
                             }
-                            if inst.binding.instance_gid > MAX_SAFE_ENTITY_ID {
-                                inst.binding.instance_gid = *unsafe_gid_remap
-                                    .entry(inst.binding.instance_gid)
-                                    .or_insert_with(|| {
-                                        let id = next_safe_gid;
-                                        next_safe_gid = next_safe_gid.saturating_add(1);
-                                        id
-                                    });
+                            let igid = &mut inst.binding.instance_gid;
+                            if *igid > MAX_SAFE_ENTITY_ID {
+                                remap_unsafe_gid(&mut gid_map, &mut next_gid, igid);
                             }
                             updated_instances.push(inst);
                         }
@@ -1061,7 +1056,7 @@ impl ProjectDocument {
             stage_size: Vec2::new(w, h),
             fps,
             next_symbol_id: raw_next_sym_id.max(max_sym_id.saturating_add(1)).max(1),
-            next_group_id: raw_next_gid.max(next_safe_gid).max(1),
+            next_group_id: raw_next_gid.max(next_gid).max(1),
             revision: crate::vector_engine::next_mesh_revision(),
         }
     }
@@ -1290,15 +1285,50 @@ pub(crate) fn new_project(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
     ws.notify_info(format!("新規タブ「無題-{untitled_num}」を作成しました"));
 }
 
+const PROJECT_FILTER: &str = "is2d プロジェクト (*.is2d)";
+
+fn file_dialog_in_tab_dir(tab: &Tab, filter: &str, ext: &str) -> rfd::FileDialog {
+    let dialog = rfd::FileDialog::new().add_filter(filter, &[ext]);
+    match tab.file.as_deref().and_then(Path::parent) {
+        Some(parent) => dialog.set_directory(parent),
+        None => dialog,
+    }
+}
+
+pub(crate) fn pick_save_path(tab: &Tab, filter: &str, ext: &str, name: &str) -> Option<PathBuf> {
+    let mut path = file_dialog_in_tab_dir(tab, filter, ext)
+        .set_file_name(name)
+        .save_file()?;
+    if path.extension().is_none() {
+        path.set_extension(ext);
+    }
+    Some(path)
+}
+
+fn save_project_and_notify(
+    ws: &mut impl ProjectWorkspace,
+    ctx: &egui::Context,
+    path: &Path,
+    action_desc: &str,
+) {
+    match save_project_to_path(ws, path) {
+        Ok(()) => {
+            update_window_title(ws, ctx);
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("ファイル");
+            ws.notify_info(format!("「{name}」{action_desc}"));
+        }
+        Err(err) => ws.notify_error(err),
+    }
+}
+
 /// OS標準の「開く」ダイアログを表示し、選択された `.is2d` ファイルを新しいタブ（または空の無題タブ）に読み込む
 pub(crate) fn open_project_dialog(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
-    let mut dialog =
-        rfd::FileDialog::new().add_filter("is2d プロジェクト (*.is2d)", &[PROJECT_FILE_EXTENSION]);
-    if let Some(parent) = ws.tab().file.as_deref().and_then(Path::parent) {
-        dialog = dialog.set_directory(parent);
-    }
-
-    let Some(path) = dialog.pick_file() else {
+    let Some(path) =
+        file_dialog_in_tab_dir(ws.tab(), PROJECT_FILTER, PROJECT_FILE_EXTENSION).pick_file()
+    else {
         return;
     };
 
@@ -1328,25 +1358,12 @@ pub(crate) fn save_project(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) 
         save_project_as_dialog(ws, ctx);
         return;
     };
-
-    match save_project_to_path(ws, &path) {
-        Ok(()) => {
-            update_window_title(ws, ctx);
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("ファイル");
-            ws.notify_info(format!("「{name}」に上書き保存しました"));
-        }
-        Err(err) => {
-            ws.notify_error(err);
-        }
-    }
+    save_project_and_notify(ws, ctx, &path, "に上書き保存しました");
 }
 
 /// OS標準の「名前を付けて保存」ダイアログを表示し、選択されたパスへ `.is2d` ファイルを保存する
 pub(crate) fn save_project_as_dialog(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
-    let default_name = ws
+    let name = ws
         .tab()
         .file
         .as_deref()
@@ -1358,31 +1375,8 @@ pub(crate) fn save_project_as_dialog(ws: &mut impl ProjectWorkspace, ctx: &egui:
             format!("untitled-{num}.is2d")
         });
 
-    let mut dialog = rfd::FileDialog::new()
-        .add_filter("is2d プロジェクト (*.is2d)", &[PROJECT_FILE_EXTENSION])
-        .set_file_name(&default_name);
-    if let Some(parent) = ws.tab().file.as_deref().and_then(Path::parent) {
-        dialog = dialog.set_directory(parent);
-    }
-
-    let Some(mut path): Option<PathBuf> = dialog.save_file() else {
+    let Some(path) = pick_save_path(ws.tab(), PROJECT_FILTER, PROJECT_FILE_EXTENSION, &name) else {
         return;
     };
-    if path.extension().is_none() {
-        path.set_extension(PROJECT_FILE_EXTENSION);
-    }
-
-    match save_project_to_path(ws, &path) {
-        Ok(()) => {
-            update_window_title(ws, ctx);
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("ファイル");
-            ws.notify_info(format!("「{name}」を保存しました"));
-        }
-        Err(err) => {
-            ws.notify_error(err);
-        }
-    }
+    save_project_and_notify(ws, ctx, &path, "を保存しました");
 }

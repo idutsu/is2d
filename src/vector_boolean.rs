@@ -9,8 +9,9 @@ use kurbo::{
 
 use crate::{
     vector_engine::{
-        dedup_closed_ring, fill_cumulative_arc_lengths, normalize_vec, rects_overlap,
-        ring_area_and_perimeter_f64, signed_area_f64, union_bounding_boxes, Contour, FillShape,
+        dedup_closed_ring, fill_cumulative_arc_lengths, is_quad_finite, normalize_vec,
+        rects_overlap, ring_area_and_perimeter_f64, signed_area_f64, union_bounding_boxes, Contour,
+        FillShape,
     },
     vector_stroke::{
         estimate_brush_radius_from_ring, fit_quad_control_point_with_arc_lengths, rdp_recursive,
@@ -106,6 +107,54 @@ fn raw_scope_insert_index(
         .unwrap_or(canvas.len())
 }
 
+fn subtract_clip_in_scope(
+    canvas: &mut Vec<FillShape>,
+    clip_shapes: &[FillShape],
+    target_layer_id: u64,
+    editing_scope: &[u64],
+    subtract_color: impl Fn(Color32) -> bool,
+) {
+    let test_bbox = union_bounding_boxes(clip_shapes).inflate(1.5, 1.5);
+    let clip_sub_bboxes = collect_sub_bboxes(clip_shapes, 1.5);
+    let insert_limit = raw_scope_insert_index(canvas, target_layer_id, editing_scope);
+    let trailing_outside = canvas.split_off(insert_limit);
+
+    let mut updated_canvas = Vec::with_capacity(canvas.len() + trailing_outside.len());
+    let mut overlapping_by_color: Vec<(Color32, Vec<FillShape>)> = Vec::new();
+    for existing in canvas.drain(..) {
+        if existing.layer_id == target_layer_id
+            && existing.group_path == editing_scope
+            && existing.symbol_instance.is_none()
+            && subtract_color(existing.color)
+            && rects_overlap(existing.bounding_box(), test_bbox)
+            && shape_interacts_with_clip(&existing, clip_shapes, &clip_sub_bboxes)
+        {
+            if let Some((_, group)) = overlapping_by_color
+                .iter_mut()
+                .find(|(c, _)| *c == existing.color)
+            {
+                group.push(existing);
+            } else {
+                overlapping_by_color.push((existing.color, vec![existing]));
+            }
+        } else {
+            updated_canvas.push(existing);
+        }
+    }
+    if !overlapping_by_color.is_empty() {
+        let clip = PreparedClip::new(clip_shapes);
+        for (color, group) in overlapping_by_color {
+            updated_canvas.extend(
+                clip.subtract_from_group(group, color)
+                    .into_iter()
+                    .map(|s| s.with_scope(target_layer_id, editing_scope)),
+            );
+        }
+    }
+    updated_canvas.extend(trailing_outside);
+    *canvas = updated_canvas;
+}
+
 fn merge_homogeneous_batch_into_canvas(
     canvas: &mut Vec<FillShape>,
     incoming: Vec<FillShape>,
@@ -115,57 +164,32 @@ fn merge_homogeneous_batch_into_canvas(
         return;
     }
     let target_color = incoming[0].color;
-    let target_layer_id = incoming[0].layer_id;
-    let target_group_path = incoming[0].group_path.clone();
+    let layer_id = incoming[0].layer_id;
+    let scope = incoming[0].group_path.clone();
+    if subtract_diff_color {
+        subtract_clip_in_scope(canvas, &incoming, layer_id, &scope, |c| c != target_color);
+    }
+
     let test_bbox = union_bounding_boxes(&incoming).inflate(1.5, 1.5);
     let clip_sub_bboxes = collect_sub_bboxes(&incoming, 1.5);
-
-    let insert_limit = raw_scope_insert_index(canvas, target_layer_id, &target_group_path);
+    let insert_limit = raw_scope_insert_index(canvas, layer_id, &scope);
     let trailing_outside = canvas.split_off(insert_limit);
 
     let mut updated_canvas =
         Vec::with_capacity(canvas.len() + incoming.len() + trailing_outside.len());
     let mut overlapping_same_color = Vec::new();
-    let mut overlapping_diff_by_color: Vec<(Color32, Vec<FillShape>)> = Vec::new();
 
     for existing in canvas.drain(..) {
-        if existing.layer_id != target_layer_id
-            || existing.group_path != target_group_path
-            || existing.symbol_instance.is_some()
+        if existing.layer_id == layer_id
+            && existing.group_path == scope
+            && existing.symbol_instance.is_none()
+            && existing.color == target_color
+            && rects_overlap(existing.bounding_box(), test_bbox)
+            && shape_interacts_with_clip(&existing, &incoming, &clip_sub_bboxes)
         {
-            updated_canvas.push(existing);
-            continue;
-        }
-        let interacts = rects_overlap(existing.bounding_box(), test_bbox)
-            && shape_interacts_with_clip(&existing, &incoming, &clip_sub_bboxes);
-        if existing.color == target_color {
-            if interacts {
-                overlapping_same_color.push(existing);
-            } else {
-                updated_canvas.push(existing);
-            }
-        } else if subtract_diff_color && interacts {
-            if let Some((_, group)) = overlapping_diff_by_color
-                .iter_mut()
-                .find(|(c, _)| *c == existing.color)
-            {
-                group.push(existing);
-            } else {
-                overlapping_diff_by_color.push((existing.color, vec![existing]));
-            }
+            overlapping_same_color.push(existing);
         } else {
             updated_canvas.push(existing);
-        }
-    }
-
-    if !overlapping_diff_by_color.is_empty() {
-        let clip = PreparedClip::new(&incoming);
-        for (diff_color, diff_group) in overlapping_diff_by_color {
-            updated_canvas.extend(
-                clip.subtract_from_group(diff_group, diff_color)
-                    .into_iter()
-                    .map(|s| s.with_scope(target_layer_id, &target_group_path)),
-            );
         }
     }
 
@@ -191,7 +215,7 @@ fn merge_homogeneous_batch_into_canvas(
                 used_ids.push(inc.shape_id);
                 s.shape_id = inc.shape_id;
             }
-            s.with_scope(target_layer_id, &target_group_path)
+            s.with_scope(layer_id, &scope)
         }));
     } else {
         updated_canvas.extend(
@@ -202,7 +226,7 @@ fn merge_homogeneous_batch_into_canvas(
                 target_color,
             )
             .into_iter()
-            .map(|s| s.with_scope(target_layer_id, &target_group_path)),
+            .map(|s| s.with_scope(layer_id, &scope)),
         );
     }
 
@@ -210,54 +234,16 @@ fn merge_homogeneous_batch_into_canvas(
     *canvas = updated_canvas;
 }
 
-/// 消しゴムの輪郭で、指定されたアクティブレイヤー（`target_layer_id`）かつ同じ編集スコープ（`editing_scope`）直下の生シェイプに対してのみ Boolean Difference を適用する
+/// 消しゴムの輪郭で、指定されたアクティブレイヤー（`layer_id`）かつ同じ編集スコープ（`scope`）直下の生シェイプに対してのみ Boolean Difference を適用する
 pub(crate) fn erase_from_canvas(
     canvas: &mut Vec<FillShape>,
     eraser_shapes: &[FillShape],
-    target_layer_id: u64,
-    editing_scope: &[u64],
+    layer_id: u64,
+    scope: &[u64],
 ) {
-    if eraser_shapes.is_empty() {
-        return;
+    if !eraser_shapes.is_empty() {
+        subtract_clip_in_scope(canvas, eraser_shapes, layer_id, scope, |_| true);
     }
-    let test_bbox = union_bounding_boxes(eraser_shapes).inflate(1.5, 1.5);
-    let clip_sub_bboxes = collect_sub_bboxes(eraser_shapes, 1.5);
-    let insert_limit = raw_scope_insert_index(canvas, target_layer_id, editing_scope);
-    let trailing_outside = canvas.split_off(insert_limit);
-
-    let mut updated_canvas = Vec::with_capacity(canvas.len() + trailing_outside.len());
-    let mut overlapping_by_color: Vec<(Color32, Vec<FillShape>)> = Vec::new();
-    for existing in canvas.drain(..) {
-        if existing.layer_id == target_layer_id
-            && existing.group_path == editing_scope
-            && existing.symbol_instance.is_none()
-            && rects_overlap(existing.bounding_box(), test_bbox)
-            && shape_interacts_with_clip(&existing, eraser_shapes, &clip_sub_bboxes)
-        {
-            if let Some((_, group)) = overlapping_by_color
-                .iter_mut()
-                .find(|(c, _)| *c == existing.color)
-            {
-                group.push(existing);
-            } else {
-                overlapping_by_color.push((existing.color, vec![existing]));
-            }
-        } else {
-            updated_canvas.push(existing);
-        }
-    }
-    if !overlapping_by_color.is_empty() {
-        let clip = PreparedClip::new(eraser_shapes);
-        for (color, group) in overlapping_by_color {
-            updated_canvas.extend(
-                clip.subtract_from_group(group, color)
-                    .into_iter()
-                    .map(|s| s.with_scope(target_layer_id, editing_scope)),
-            );
-        }
-    }
-    updated_canvas.extend(trailing_outside);
-    *canvas = updated_canvas;
 }
 
 #[inline]
@@ -1036,21 +1022,13 @@ fn sample_contour_ring_for_overlay(
 
     let mut raw_pts = Vec::new();
     for &seg in contour.segments.iter() {
-        if !seg.p0.x.is_finite()
-            || !seg.p0.y.is_finite()
-            || !seg.p1.x.is_finite()
-            || !seg.p1.y.is_finite()
-            || !seg.p2.x.is_finite()
-            || !seg.p2.y.is_finite()
-        {
+        if !is_quad_finite(&seg) {
             return None;
         }
-        let min_x = seg.p0.x.min(seg.p1.x).min(seg.p2.x) - 0.6;
-        let max_x = seg.p0.x.max(seg.p1.x).max(seg.p2.x) + 0.6;
-        let min_y = seg.p0.y.min(seg.p1.y).min(seg.p2.y) - 0.6;
-        let max_y = seg.p0.y.max(seg.p1.y).max(seg.p2.y) + 0.6;
-        let bbox = KRect::new(min_x, min_y, max_x, max_y);
-        quad_table.push(QuadRecord { quad: seg, bbox });
+        quad_table.push(QuadRecord {
+            quad: seg,
+            bbox: seg_padded_bbox(seg, 0.6),
+        });
 
         let steps = quad_subdivision_steps(seg);
         for k in 0..steps {
