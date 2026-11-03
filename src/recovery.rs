@@ -44,43 +44,46 @@ pub(crate) fn default_recovery_dir() -> Option<PathBuf> {
 }
 
 impl Recovery {
-    /// 確認なしにアプリが終了するとき、未保存のタブすべての復旧ファイルと一覧を書き出す
+    /// 確認なしにアプリが終了するとき、保存したことのある未保存タブの復旧ファイルと一覧を書き出す
     pub(crate) fn write_unsaved_tabs(&self, tabs: &[Tab]) {
         let Some(dir) = &self.dir else {
             return;
         };
-        if !tabs.iter().any(|t| t.history.is_dirty()) || std::fs::create_dir_all(dir).is_err() {
+        if !tabs
+            .iter()
+            .any(|t| t.history.is_dirty() && t.file.is_some())
+            || std::fs::create_dir_all(dir).is_err()
+        {
             return;
         }
         let pid = std::process::id();
-        for tab in tabs.iter().filter(|t| t.history.is_dirty()) {
+        for tab in tabs
+            .iter()
+            .filter(|t| t.history.is_dirty() && t.file.is_some())
+        {
+            let Some((parent, name)) = tab
+                .file
+                .as_deref()
+                .and_then(|p| Some((p.parent()?, p.file_name()?.to_str()?)))
+            else {
+                continue;
+            };
             let mut proj_doc = ProjectDocument::from_app(tab);
             proj_doc.recovery_source = tab.file.clone();
             proj_doc.remove_non_finite();
 
             let entry_path = dir.join(format!("{pid}-{}.entry", tab.id));
-            let untitled_name = format!("RECOVER_無題-{pid}-{}.is2d", tab.id);
-            let (primary_path, fallback_path) = match tab
-                .file
-                .as_deref()
-                .and_then(|p| Some((p.parent()?, p.file_name()?.to_str()?)))
-            {
-                Some((parent, name)) => {
-                    let rec_name = format!("RECOVER_{name}");
-                    (parent.join(&rec_name), Some(dir.join(rec_name)))
-                }
-                None => (dir.join(untitled_name), None),
-            };
+            let rec_name = format!("RECOVER_{name}");
+            let primary_path = parent.join(&rec_name);
+            let fallback_path = dir.join(rec_name);
 
             if std::fs::write(&entry_path, primary_path.to_string_lossy().as_bytes()).is_err() {
                 continue;
             }
-            if write_project_file_atomically(&primary_path, &proj_doc).is_err() {
-                if let Some(fallback) = fallback_path {
-                    if std::fs::write(&entry_path, fallback.to_string_lossy().as_bytes()).is_ok() {
-                        let _ = write_project_file_atomically(&fallback, &proj_doc);
-                    }
-                }
+            if write_project_file_atomically(&primary_path, &proj_doc).is_err()
+                && std::fs::write(&entry_path, fallback_path.to_string_lossy().as_bytes()).is_ok()
+            {
+                let _ = write_project_file_atomically(&fallback_path, &proj_doc);
             }
         }
     }
@@ -141,15 +144,13 @@ impl Recovery {
         let mut broken_paths = Vec::new();
 
         for item in self.found.drain(..) {
-            let res = read_project_document(&item.recovery_path).and_then(|proj_doc| {
-                let source = proj_doc.recovery_source.clone();
+            let res = read_project_document(&item.recovery_path).and_then(|mut proj_doc| {
+                let src = proj_doc
+                    .recovery_source
+                    .take()
+                    .ok_or_else(|| "復旧ファイルに元のファイル場所がありません".to_owned())?;
                 open_document_in_new_tab(ws, proj_doc.into_document())?;
-                if let Some(src) = source {
-                    ws.tab_mut().file = Some(src);
-                } else {
-                    ws.tab_mut().untitled_number = ws.alloc_untitled_number();
-                    ws.tab_mut().file = None;
-                }
+                ws.tab_mut().file = Some(src);
                 ws.tab_mut().history.mark_unsaved();
                 Ok(())
             });

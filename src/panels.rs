@@ -2178,13 +2178,8 @@ pub(crate) fn draw_recovery_modal(
                 .recovery_path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or("無題");
-            let stripped = raw_name.strip_prefix("RECOVER_").unwrap_or(raw_name);
-            let name = if stripped.starts_with("無題-") {
-                "無題"
-            } else {
-                stripped
-            };
+                .unwrap_or_default();
+            let name = raw_name.strip_prefix("RECOVER_").unwrap_or(raw_name);
             let secs = now
                 .duration_since(item.modified)
                 .map(|d| d.as_secs())

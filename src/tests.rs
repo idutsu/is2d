@@ -16455,7 +16455,6 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     assert!(app.tabs[1].file.is_none());
     assert!(app.tabs[1].history.is_dirty());
     let tab1_id = app.tabs[1].id;
-    let tab1_shape_count = app.tabs[1].scene().len();
 
     // タブ2: 保存済みのタブ
     let clean_proj_path = proj_dir.join("clean_b.is2d");
@@ -16477,7 +16476,7 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     assert!(!proj_dir.join("RECOVER_work_a.is2d").exists());
     assert!(!rec_dir.exists());
 
-    // 1. allow_viewport_close が false のとき、未保存の2つだけ書かれる
+    // 1. allow_viewport_close が false のとき、保存したことのある未保存タブ（タブ0）だけ書かれ、無題の未保存タブ（タブ1）は書かれない
     app.allow_viewport_close = false;
     app.on_exit(None);
     let rec_work_a = proj_dir.join("RECOVER_work_a.is2d");
@@ -16486,7 +16485,7 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
         std::process::id()
     ));
     assert!(rec_work_a.is_file());
-    assert!(rec_untitled.is_file());
+    assert!(!rec_untitled.exists());
     assert!(!proj_dir.join("RECOVER_clean_b.is2d").exists());
 
     let entry_files: Vec<_> = std::fs::read_dir(&rec_dir)
@@ -16495,7 +16494,7 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("entry"))
         .collect();
-    assert_eq!(entry_files.len(), 2);
+    assert_eq!(entry_files.len(), 1);
 
     // 7. 指している復旧ファイルが無い一覧と .tmp ファイルは find_leftovers で黙って消える
     let stale_entry = rec_dir.join("stale-999.entry");
@@ -16510,24 +16509,23 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     let leftover_tmp = rec_dir.join(".partial.123.tmp");
     std::fs::write(&leftover_tmp, b"partial").unwrap();
 
-    // 4. 起動したときに探す: 新しい Is2dApp から find_leftovers を呼ぶと found に2件入り、まだタブは開かない
+    // 4. 起動したときに探す: 新しい Is2dApp から find_leftovers を呼ぶと found に1件入り、まだタブは開かない
     let mut next_app = Is2dApp::default();
     next_app.recovery.dir = Some(rec_dir.clone());
     next_app.recovery.find_leftovers();
     assert!(!stale_entry.exists());
     assert!(!leftover_tmp.exists());
-    assert_eq!(next_app.recovery.found.len(), 2);
+    assert_eq!(next_app.recovery.found.len(), 1);
     assert_eq!(next_app.tabs.len(), 1);
     assert!(crate::project_io::is_active_tab_pristine_empty(
         &next_app.tabs[0]
     ));
 
-    // 5. 開く: 2つのタブが未保存の状態で開き、図形の数と色が元と同じ、復旧ファイルと一覧が消える
+    // 5. 開く: 元のファイルがある作品だけが未保存のタブとして開き（最初の空の無題タブが使い回されてタブは1つ）、復旧ファイルと一覧が消える
     next_app.apply_action(UiAction::RestoreRecovered, &ctx);
     assert!(next_app.recovery.found.is_empty());
-    assert_eq!(next_app.tabs.len(), 2);
+    assert_eq!(next_app.tabs.len(), 1);
     assert!(next_app.tabs[0].history.is_dirty());
-    assert!(next_app.tabs[1].history.is_dirty());
     assert_eq!(
         next_app.tabs[0].file.as_deref(),
         Some(saved_proj_path.as_path())
@@ -16535,12 +16533,7 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     assert_eq!(next_app.tabs[0].scene().len(), tab0_shape_count);
     assert_eq!(next_app.tabs[0].scene().get(0).unwrap().color, red);
     assert_eq!(next_app.tabs[0].scene().get(1).unwrap().color, blue);
-    assert!(next_app.tabs[1].file.is_none());
-    assert_eq!(next_app.tabs[1].untitled_number, 1);
-    assert_eq!(next_app.tabs[1].scene().len(), tab1_shape_count);
-    assert_eq!(next_app.tabs[1].scene().get(0).unwrap().color, green);
     assert!(!rec_work_a.exists());
-    assert!(!rec_untitled.exists());
     assert_eq!(
         std::fs::read_dir(&rec_dir)
             .unwrap()
@@ -16556,7 +16549,7 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     let mut discard_app = Is2dApp::default();
     discard_app.recovery.dir = Some(rec_dir.clone());
     discard_app.recovery.find_leftovers();
-    assert_eq!(discard_app.recovery.found.len(), 2);
+    assert_eq!(discard_app.recovery.found.len(), 1);
     discard_app.apply_action(UiAction::DiscardRecovered, &ctx);
     assert!(discard_app.recovery.found.is_empty());
     assert_eq!(discard_app.tabs.len(), 1);
@@ -16586,23 +16579,31 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     );
     assert!(!fallback_rec.exists());
 
-    // 8. 壊れた復旧ファイル（中身が JSON でない）は .broken に名前が変わり、エラーが出て、ほかのファイルは開く
+    // 8. 壊れた復旧ファイル（中身が JSON でない）や recovery_source が無い復旧ファイルは .broken に名前が変わり、エラーが出て、ほかのファイルは開く
     next_app.tabs[0].file = Some(saved_proj_path.clone());
     next_app.recovery.write_unsaved_tabs(&next_app.tabs);
     let bad_rec = rec_dir.join("RECOVER_corrupted.is2d");
     let bad_entry = rec_dir.join("0-9999.entry");
     std::fs::write(&bad_rec, b"not valid json").unwrap();
     std::fs::write(&bad_entry, bad_rec.to_string_lossy().as_bytes()).unwrap();
+    let no_src_rec = rec_dir.join("RECOVER_no_source.is2d");
+    let no_src_entry = rec_dir.join("0-9998.entry");
+    std::fs::copy(&saved_proj_path, &no_src_rec).unwrap();
+    std::fs::write(&no_src_entry, no_src_rec.to_string_lossy().as_bytes()).unwrap();
 
     let mut broken_app = Is2dApp::default();
     broken_app.recovery.dir = Some(rec_dir.clone());
     broken_app.recovery.find_leftovers();
-    assert_eq!(broken_app.recovery.found.len(), 2);
+    assert_eq!(broken_app.recovery.found.len(), 3);
     broken_app.apply_action(UiAction::RestoreRecovered, &ctx);
     let broken_renamed = rec_dir.join("RECOVER_corrupted.is2d.broken");
+    let no_src_broken = rec_dir.join("RECOVER_no_source.is2d.broken");
     assert!(broken_renamed.is_file());
+    assert!(no_src_broken.is_file());
     assert!(!bad_rec.exists());
     assert!(!bad_entry.exists());
+    assert!(!no_src_rec.exists());
+    assert!(!no_src_entry.exists());
     assert_eq!(broken_app.tabs.len(), 1);
     assert_eq!(
         broken_app.tabs[0].file.as_deref(),
@@ -16615,7 +16616,8 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     assert!(broken_app
         .toast
         .as_ref()
-        .is_some_and(|t| t.message.contains("RECOVER_corrupted.is2d.broken")));
+        .is_some_and(|t| t.message.contains("RECOVER_corrupted.is2d.broken")
+            && t.message.contains("RECOVER_no_source.is2d.broken")));
 
     // 9. 壊れた数値: 輪郭に NaN がある図形を1つ含む文書を保存すると成功し、警告一覧に入り、復旧ファイル書き出しも成功する
     let mut nan_app = Is2dApp::default();
