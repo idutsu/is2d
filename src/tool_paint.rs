@@ -93,50 +93,31 @@ pub(crate) fn handle_brush_or_eraser_input(
             }
         }
     }
+    // 点の列から、ブラシなら塗り、消しゴムなら消す操作を作る
+    let stroke_action = |points: Vec<Point>| {
+        if active_tool == Tool::Brush {
+            Action::PaintStroke {
+                points,
+                radius: brush_radius,
+                color: brush_color,
+            }
+        } else {
+            Action::EraseStroke {
+                points,
+                radius: eraser_radius,
+            }
+        }
+    };
     if response.drag_stopped_by(PointerButton::Primary) {
         let drag = std::mem::take(&mut host.tab_mut().session.drag);
         if let ActiveCanvasDrag::PaintStroke { stroke, .. } = drag {
             if !stroke.is_empty() {
-                if active_tool == Tool::Brush {
-                    apply(
-                        host,
-                        Action::PaintStroke {
-                            points: stroke,
-                            radius: brush_radius,
-                            color: brush_color,
-                        },
-                    );
-                } else {
-                    apply(
-                        host,
-                        Action::EraseStroke {
-                            points: stroke,
-                            radius: eraser_radius,
-                        },
-                    );
-                }
+                apply(host, stroke_action(stroke));
             }
         }
     } else if response.clicked_by(PointerButton::Primary) {
         if let Some(pt) = mouse_pt {
-            if active_tool == Tool::Brush {
-                apply(
-                    host,
-                    Action::PaintStroke {
-                        points: vec![pt],
-                        radius: brush_radius,
-                        color: brush_color,
-                    },
-                );
-            } else {
-                apply(
-                    host,
-                    Action::EraseStroke {
-                        points: vec![pt],
-                        radius: eraser_radius,
-                    },
-                );
-            }
+            apply(host, stroke_action(vec![pt]));
         }
     }
 }
