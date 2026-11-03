@@ -9,9 +9,9 @@ use kurbo::{
 
 use crate::{
     vector_engine::{
-        dedup_closed_ring, fill_cumulative_arc_lengths, is_quad_finite, normalize_vec,
-        rects_overlap, ring_area_and_perimeter_f64, signed_area_f64, union_bounding_boxes, Contour,
-        FillShape,
+        dedup_closed_ring, fill_cumulative_arc_lengths, is_quad_finite, next_shape_id,
+        normalize_vec, rects_overlap, ring_area_and_perimeter_f64, signed_area_f64,
+        union_bounding_boxes, Contour, FillShape,
     },
     vector_stroke::{
         estimate_brush_radius_from_ring, fit_quad_control_point_with_arc_lengths, rdp_recursive,
@@ -204,10 +204,10 @@ fn merge_homogeneous_batch_into_canvas(
     if overlapping_same_color.is_empty() && !incoming_self_overlaps {
         updated_canvas.extend(incoming);
     } else if overlapping_same_color.is_empty() {
-        let unioned =
+        let mut unioned =
             boolean_operation(&incoming[..1], &incoming[1..], BoolOp::Union, target_color);
         let mut used_ids = Vec::with_capacity(unioned.len());
-        updated_canvas.extend(unioned.into_iter().map(|mut s| {
+        for s in &mut unioned {
             let s_bbox = s.bounding_box().inflate(1.5, 1.5);
             if let Some(inc) = incoming.iter().find(|inc| {
                 !used_ids.contains(&inc.shape_id) && rects_overlap(s_bbox, inc.bounding_box())
@@ -215,8 +215,16 @@ fn merge_homogeneous_batch_into_canvas(
                 used_ids.push(inc.shape_id);
                 s.shape_id = inc.shape_id;
             }
-            s.with_scope(layer_id, &scope)
-        }));
+        }
+        let mut seen_ids = Vec::with_capacity(unioned.len());
+        for mut s in unioned {
+            if seen_ids.contains(&s.shape_id) {
+                s.shape_id = next_shape_id();
+            } else {
+                seen_ids.push(s.shape_id);
+            }
+            updated_canvas.push(s.with_scope(layer_id, &scope));
+        }
     } else {
         updated_canvas.extend(
             boolean_operation(

@@ -17418,3 +17418,164 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
 
     let _ = std::fs::remove_dir_all(&base_dir);
 }
+
+#[test]
+fn test_merge_self_overlapping_batch_never_produces_duplicate_shape_ids() {
+    use std::collections::HashSet;
+
+    use crate::doc_actions::{apply, Action};
+
+    let col = Color32::from_rgb(220, 40, 40);
+
+    // 1. 半径5の同じ色の点を間隔11で 3 個・4 個並べ、入ってくる順番（順列）をすべて試して shape_id が重複しないこと
+    fn permutations(n: usize) -> Vec<Vec<usize>> {
+        if n == 0 {
+            return vec![vec![]];
+        }
+        let mut out = Vec::new();
+        for i in 0..n {
+            for mut sub in permutations(n - 1) {
+                for v in &mut sub {
+                    if *v >= i {
+                        *v += 1;
+                    }
+                }
+                sub.insert(0, i);
+                out.push(sub);
+            }
+        }
+        out
+    }
+
+    for count in [3usize, 4usize] {
+        let base_dots: Vec<FillShape> = (0..count)
+            .map(|i| {
+                let pt = Point::new(100.0 + (i as f64) * 11.0, 100.0);
+                make_stroke(pt, pt, 5.0, col).into_iter().next().unwrap()
+            })
+            .collect();
+
+        for perm in permutations(count) {
+            let incoming: Vec<FillShape> = perm.iter().map(|&idx| base_dots[idx].clone()).collect();
+            let mut canvas = Vec::new();
+            vector_boolean::merge_shapes_into_canvas(&mut canvas, incoming);
+            assert_eq!(canvas.len(), count);
+            let ids: HashSet<u64> = canvas.iter().map(|s| s.shape_id).collect();
+            assert_eq!(
+                ids.len(),
+                canvas.len(),
+                "順列 {perm:?} の結合結果に重複する shape_id が無いこと"
+            );
+        }
+    }
+
+    // 3. 重複が起きていた形（間隔11の3点を [真ん中, 左, 右] の順で結合）で、片方だけを選んで矢印キーで動かすとその1つだけが動くこと
+    {
+        let mut app = Is2dApp::default();
+        let dots: Vec<FillShape> = [1usize, 0, 2]
+            .into_iter()
+            .map(|i| {
+                let pt = Point::new(100.0 + (i as f64) * 11.0, 100.0);
+                make_stroke(pt, pt, 5.0, col).into_iter().next().unwrap()
+            })
+            .collect();
+        let mut canvas = Vec::new();
+        vector_boolean::merge_shapes_into_canvas(&mut canvas, dots);
+        put_cel_shapes(&mut app, 0, 0, canvas);
+
+        let before_centers: Vec<Point> = app.doc.root.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .iter()
+            .map(|s| s.bounding_box().center())
+            .collect();
+        assert_eq!(before_centers.len(), 3);
+
+        let target_id = app.doc.root.layers[0].keyframes[0].cel.shapes[0].shape_id;
+        app.session.selection.clear();
+        app.session.selection.shapes.insert(target_id);
+        assert!(apply(
+            &mut app,
+            Action::NudgeSelection {
+                delta: kurbo::Vec2::new(0.0, 30.0),
+            },
+        ));
+        assert!(apply(&mut app, Action::Deselect));
+
+        let after_shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        assert_eq!(after_shapes.len(), 3);
+        let moved_count = after_shapes
+            .iter()
+            .filter(|s| (s.bounding_box().center().y - 130.0).abs() < 2.0)
+            .count();
+        let stayed_count = after_shapes
+            .iter()
+            .filter(|s| (s.bounding_box().center().y - 100.0).abs() < 2.0)
+            .count();
+        assert_eq!(moved_count, 1, "選んだ1つだけが動くこと");
+        assert_eq!(
+            stayed_count, 2,
+            "選ばれていない残り2つは元の位置に留まること"
+        );
+    }
+
+    // 2. 点を描いて、いくつか選んで移動（ふつうの移動と Alt 複製の両方）して選択を外す流れを乱数で繰り返し、shape_id が重複しないこと
+    {
+        let mut rng = fastrand::Rng::with_seed(0x2026_1103);
+        let mut app = Is2dApp::default();
+
+        for step in 0..300 {
+            if app.doc.root.layers[0].keyframes[0].cel.shapes.len() > 25 {
+                assert!(apply(&mut app, Action::ClearActiveFrame));
+            }
+            if app.doc.root.layers[0].keyframes[0].cel.shapes.len() < 3 || rng.bool() {
+                let gx = 100.0 + (rng.usize(0..6) as f64) * 11.0;
+                let gy = 100.0 + (rng.usize(0..4) as f64) * 11.0;
+                let pt = Point::new(gx, gy);
+                let _ = apply(
+                    &mut app,
+                    Action::PaintStroke {
+                        points: vec![pt, Point::new(gx + 0.5, gy)],
+                        radius: 5.0,
+                        color: col,
+                    },
+                );
+            } else {
+                let shape_ids: Vec<u64> = app.doc.root.layers[0].keyframes[0]
+                    .cel
+                    .shapes
+                    .iter()
+                    .map(|s| s.shape_id)
+                    .collect();
+                app.session.selection.clear();
+                for &sid in &shape_ids {
+                    if rng.bool() {
+                        app.session.selection.shapes.insert(sid);
+                    }
+                }
+                if app.session.selection.shapes.is_empty() {
+                    app.session.selection.shapes.insert(shape_ids[0]);
+                }
+                let dx = (rng.i32(-2..=2) as f64) * 11.0;
+                let dy = (rng.i32(-2..=2) as f64) * 11.0;
+                let alt_duplicate = rng.bool();
+                let _ = apply(
+                    &mut app,
+                    Action::FinishMoveSelectionDrag {
+                        total_delta: kurbo::Vec2::new(dx, dy),
+                        alt_duplicate,
+                    },
+                );
+                let _ = apply(&mut app, Action::Deselect);
+            }
+
+            let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+            let unique_ids: HashSet<u64> = shapes.iter().map(|s| s.shape_id).collect();
+            assert_eq!(
+                unique_ids.len(),
+                shapes.len(),
+                "step {step}: セルの図形に重複する shape_id が発生しないこと"
+            );
+        }
+    }
+}
