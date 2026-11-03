@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+mod app_menu_macos;
 mod canvas_tool;
 mod clipboard_ops;
 mod doc_actions;
@@ -56,6 +58,8 @@ fn main() -> eframe::Result<()> {
         "is2d",
         native_options,
         Box::new(|cc| {
+            #[cfg(target_os = "macos")]
+            app_menu_macos::install();
             configure_japanese_fonts(&cc.egui_ctx);
             configure_sharp_light_theme(&cc.egui_ctx);
             let mut app = Is2dApp::default();

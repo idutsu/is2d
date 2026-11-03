@@ -95,10 +95,10 @@
   2. **Layer 2 — Domain / Model 層**: タイムライン・レイヤー・キーフレーム・セル・トゥイーン補間（`timeline`）および永続ドキュメント `Document`・シンボル定義・入れ子評価・`EditPath`（`symbol`）。Layer 1 のみに依存し、上位層への逆依存を持たないデータモデル層。
   3. **Layer 3 — Document & Tool Operations 層**: タブ状態 `Tab`・作業状態 `Session`・表示状態 `View`・Undo履歴・`Scene`・土台キャッシュ・上乗せ・`Floating`・`edit_layers`（`canvas_tool`）、ドキュメント変更アクションと一元 `apply`（`doc_actions`）、シンボル操作（`symbol_ops`）、選択・グループ・重なり順操作（`select_ops`）、クリップボード操作（`clipboard_ops`）、ペイント系ツール（`tool_paint`）、選択・変形ツール（`tool_select`）、自由変形ツール（`tool_transform`）、`.is2d` プロジェクトファイルのシリアライズ・マルチタブ管理（`project_io`）、確認なし終了時の復旧ファイル書き出し・次回起動時の復元（`recovery`）、および動画（MP4）書き出しの共通処理・1コマラスタライズ・OS別エンコーダ入口（`video_export`）と macOS 版 AVFoundation H.264 エンコーダ実装（`video_export_macos`、`#[cfg(target_os = "macos")]`）。
   4. **Layer 4 — UI Presentation 層**: 下部タイムラインUI（`timeline_ui`）および最上部メニューバー・上部ステージバー・左右パネル・モーダル・`UiAction`（`panels`）。
-  5. **Layer 5 — Application Shell 層**: アプリ統合状態 `Is2dApp`・ショートカット処理・`UiAction` の一元適用（`main`）。下位層から上位層への逆参照ゼロ・層内の相互循環ゼロを厳守する。
-- **動画書き出しの OS 抽象化と `unsafe` の隔離**:
+  5. **Layer 5 — Application Shell 層**: アプリ統合状態 `Is2dApp`・ショートカット処理・`UiAction` の一元適用（`main`）および macOS ネイティブメニューバー構築（`app_menu_macos`、`#[cfg(target_os = "macos")]`）。下位層から上位層への逆参照ゼロ・層内の相互循環ゼロを厳守する。
+- **OS 固有処理の抽象化と `unsafe` の隔離**:
   - 共通モジュール `video_export` は `tiny-skia` による1コマ描画（`render_frame`）とバックグラウンドスレッド進行・進捗/中止管理・一時ファイルアトミック置換（`VideoExportJob`）を担い、OS 固有の動画符号化は小さなトレイト `VideoEncoder`（`push_frame` / `finish`）と生成関数 `create_video_encoder` の内側に閉じ込める。
-  - OS のネイティブ API（macOS の AVFoundation / CoreMedia / CoreVideo）を呼ぶための `unsafe` は `video_export_macos` の中だけに閉じ込め、共通部分を含む他のすべての本番モジュールには `unsafe` を一切書かない。将来 Windows 版（Media Foundation）を追加する際も、共通部分を変えずに `create_video_encoder` の分岐先を足すだけで対応できる構造とする。
+  - OS のネイティブ API（macOS の AVFoundation / CoreMedia / CoreVideo / AppKit）を呼ぶための `unsafe` は macOS 専用モジュール（`video_export_macos` と `app_menu_macos`）の中だけに閉じ込め、共通部分を含む他のすべての本番モジュールには `unsafe` を一切書かない。将来 Windows 版（Media Foundation）を追加する際も、共通部分を変えずに `create_video_encoder` の分岐先を足すだけで対応できる構造とする。
 
 ## 8. 描画・キャッシュ戦略（Rendering & Caching）
 - `egui` は毎フレーム `egui::Mesh` を構築して描画するため、アニメーション再生やズーム・パン時にベジェ曲線の平坦化や耳刈り法（Earcut）を走らせないシェイプ単位メッシュキャッシュと、毎コマその場で結合するセル描画方式を採る：

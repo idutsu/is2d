@@ -16,6 +16,7 @@ tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", 
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = "0.30"
 objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder", "NSWindow"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL", "NSValue"] }
 objc2-av-foundation = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-media", "objc2-core-video", "AVAssetWriter", "AVAssetWriterInput", "AVMediaFormat", "AVVideoSettings"] }
 objc2-core-media = { version = "=0.3.2", default-features = false, features = ["std", "CMTime"] }
