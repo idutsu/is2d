@@ -317,10 +317,7 @@ impl Is2dApp {
         if self.video_export.is_some() {
             return;
         }
-        self.stop_playback();
-        apply(self, Action::EndCoalesce { key: None });
-        canvas_tool::cancel_active_drag(self.tab_mut());
-        self.tab_mut().view.pan_last_screen_pos = None;
+        project_io::prepare_active_tab_for_switch_or_save(self);
 
         let stem = self
             .tab()

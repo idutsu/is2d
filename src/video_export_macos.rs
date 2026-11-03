@@ -19,8 +19,9 @@ use objc2_core_media::CMTime;
 use objc2_core_video::{
     kCVPixelBufferHeightKey, kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
     kCVPixelFormatType_32BGRA, kCVReturnSuccess, CVPixelBuffer, CVPixelBufferGetBaseAddress,
-    CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
-    CVPixelBufferPool, CVPixelBufferUnlockBaseAddress,
+    CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
+    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool,
+    CVPixelBufferUnlockBaseAddress,
 };
 use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
 
@@ -190,8 +191,8 @@ impl VideoEncoder for MacosVideoEncoder {
         }
 
         autoreleasepool(|_| {
-            // SAFETY: アダプタのプールから取得した `CVPixelBuffer` をロック中のみ `bytes_per_row` と `height` の範囲内で書き込み、
-            // アンロック後に `appendPixelBuffer_withPresentationTime` へ渡す。
+            // SAFETY: プールから取得した `CVPixelBuffer` をロックし、幅・高さ・`bytes_per_row` が書き込み範囲以上であることを確認した上で
+            // ロック中のみ書き込み、アンロック後に `appendPixelBuffer_withPresentationTime` へ渡す。
             unsafe {
                 while !self.input.isReadyForMoreMediaData() {
                     if self.writer.status() != AVAssetWriterStatus::Writing {
@@ -230,10 +231,12 @@ impl VideoEncoder for MacosVideoEncoder {
 
                 let base_ptr = CVPixelBufferGetBaseAddress(&pixel_buffer) as *mut u8;
                 let bytes_per_row = CVPixelBufferGetBytesPerRow(&pixel_buffer);
-                if base_ptr.is_null() || bytes_per_row < row_bytes {
+                let buf_w = CVPixelBufferGetWidth(&pixel_buffer);
+                let buf_h = CVPixelBufferGetHeight(&pixel_buffer);
+                if base_ptr.is_null() || bytes_per_row < row_bytes || buf_w < w || buf_h < h {
                     let _ =
                         CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags(0));
-                    return Err("画素バッファのメモリアドレスまたは行幅が不正です".to_owned());
+                    return Err("画素バッファのメモリアドレスまたはサイズが不正です".to_owned());
                 }
 
                 for y in 0..h {
@@ -267,15 +270,21 @@ impl VideoEncoder for MacosVideoEncoder {
     }
 
     fn finish(mut self: Box<Self>) -> Result<(), String> {
-        self.finished = true;
         let (tx, rx) = mpsc::sync_channel::<()>(1);
         let block = RcBlock::new(move || {
             let _ = tx.send(());
         });
 
-        // SAFETY: 書き込み中の `input` / `writer` に対して完了処理を呼び出し、
+        // SAFETY: `writer` が `Writing` 状態であることを確認した上で `markAsFinished` / `finishWritingWithCompletionHandler` を呼び、
         // 完了ハンドラ `block` の通知を待ってから最終ステータスを読み取る。
         unsafe {
+            if self.writer.status() != AVAssetWriterStatus::Writing {
+                return Err(writer_error_message(
+                    &self.writer,
+                    "動画ファイルの完了処理を開始できませんでした",
+                ));
+            }
+            self.finished = true;
             self.input.markAsFinished();
             self.writer.finishWritingWithCompletionHandler(&block);
             let _ = rx.recv();

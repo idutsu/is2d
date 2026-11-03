@@ -82,9 +82,9 @@ fn surrender_focused_widget(ctx: &egui::Context) {
     });
 }
 
-/// タブ切り替えやプロジェクト保存の前に、選択状態・`Floating`・カスタムピボットを保持したまま
+/// タブ切り替えやプロジェクト保存・動画書き出しの前に、選択状態・`Floating`・カスタムピボットを保持したまま
 /// 進行中再生・ドラッグの中断と連続編集フラグのリセットを行う
-fn prepare_active_tab_for_switch_or_save(ws: &mut impl ProjectWorkspace) {
+pub(crate) fn prepare_active_tab_for_switch_or_save(ws: &mut impl ProjectWorkspace) {
     ws.stop_playback();
     crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
     cancel_active_drag(ws.tab_mut());
@@ -1175,6 +1175,15 @@ pub(crate) fn write_project_json(
     file.sync_all()
 }
 
+/// 保存・書き出し先のパスがシンボリックリンクである場合は実体パスへ解決して返す
+pub(crate) fn resolve_target_path(path: &Path) -> PathBuf {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// 指定されたファイルパス `path` へプロジェクトを一時ファイル経由でアトミック保存する
 pub(crate) fn save_project_to_path(
     ws: &mut impl ProjectWorkspace,
@@ -1185,11 +1194,7 @@ pub(crate) fn save_project_to_path(
     let proj_doc = ProjectDocument::from_app(ws.tab());
     proj_doc.validate_finite()?;
 
-    let target_path = if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-    } else {
-        path.to_path_buf()
-    };
+    let target_path = resolve_target_path(path);
     let tmp_name = format!(
         ".{}.{}.tmp",
         target_path

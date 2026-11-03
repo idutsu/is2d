@@ -150,12 +150,7 @@ pub(crate) struct VideoExportJob {
 impl VideoExportJob {
     /// 文書の写し `doc` を受け取り、`target_path` へのバックグラウンド書き出しを開始する
     pub(crate) fn start(doc: Document, target_path: PathBuf) -> Self {
-        let target_path =
-            if std::fs::symlink_metadata(&target_path).is_ok_and(|m| m.file_type().is_symlink()) {
-                std::fs::canonicalize(&target_path).unwrap_or(target_path)
-            } else {
-                target_path
-            };
+        let target_path = crate::project_io::resolve_target_path(&target_path);
         let tmp_path = tmp_export_path(&target_path);
         let total_frames = doc.root.total_frames.max(1);
         let completed_frames = Arc::new(AtomicUsize::new(0));
