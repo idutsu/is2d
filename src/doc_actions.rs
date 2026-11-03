@@ -22,7 +22,7 @@ use crate::select_ops::{
     retain_selection_and_flush_deselected, select_single_shape_at, toggle_shape_selection,
     ArrangeMode,
 };
-use crate::symbol::{SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
+use crate::symbol::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 use crate::symbol_ops::{
     enter_symbol_from_library, enter_symbol_timeline, exit_symbol_timeline,
     prepare_convert_selection_to_symbol, prepare_place_symbol_instance,
@@ -240,6 +240,9 @@ pub(crate) enum Action {
         loop_mode: Option<SymbolLoopMode>,
         first_frame: Option<usize>,
     },
+    SetSymbolColorEffect {
+        effect: ColorEffect,
+    },
     ToggleTween,
     SetTweenRotate {
         rotate: TweenRotate,
@@ -327,6 +330,8 @@ impl Action {
                     None
                 }
             }),
+            Self::SetSymbolColorEffect { .. } => selected_single_symbol_info(tab)
+                .map(|(b, _, _)| CoalesceKey::SymbolColorEffect(b.instance_gid)),
             Self::NudgeSelection { .. } => Some(CoalesceKey::NudgeSelection),
             _ => None,
         }
@@ -682,6 +687,9 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             loop_mode,
             first_frame,
         } => apply_set_symbol_playback(tab, loop_mode, first_frame, coalesce),
+        Action::SetSymbolColorEffect { effect } => {
+            update_selected_symbol_binding(tab, coalesce, |b| b.color_effect = effect)
+        }
         Action::ToggleTween => apply_timeline_toggle_tween(tab, toast),
         Action::SetTweenRotate { rotate } => apply_set_tween_rotate(tab, rotate),
 
@@ -1620,20 +1628,18 @@ fn apply_set_tween_rotate(tab: &mut Tab, rotate_mode: TweenRotate) -> bool {
     true
 }
 
-fn apply_set_symbol_playback(
+/// 選ばれている1つのシンボルインスタンスの設定を `update` で書き換える（取り消し1回分）
+fn update_selected_symbol_binding(
     tab: &mut Tab,
-    loop_mode: Option<SymbolLoopMode>,
-    first_frame: Option<usize>,
     coalesce: Option<CoalesceKey>,
+    update: impl Fn(&mut SymbolInstanceBinding),
 ) -> bool {
-    let Some((binding, _, total_frames)) = selected_single_symbol_info(tab) else {
+    let Some((binding, _, _)) = selected_single_symbol_info(tab) else {
         return false;
     };
-    let next_mode = loop_mode.unwrap_or(binding.loop_mode);
-    let clamped_first = first_frame
-        .unwrap_or(binding.first_frame)
-        .min(total_frames.saturating_sub(1));
-    if binding.loop_mode == next_mode && binding.first_frame == clamped_first {
+    let mut next_binding = binding;
+    update(&mut next_binding);
+    if next_binding == binding {
         return false;
     }
 
@@ -1660,8 +1666,7 @@ fn apply_set_symbol_playback(
         for s in &mut edit.shapes {
             if let Some(b) = &mut s.symbol_instance {
                 if b.instance_gid == inst_gid {
-                    b.loop_mode = next_mode;
-                    b.first_frame = clamped_first;
+                    update(b);
                     updated = true;
                 }
             }
@@ -1671,6 +1676,25 @@ fn apply_set_symbol_playback(
         reset_session_after_timeline_change(tab);
     }
     updated
+}
+
+fn apply_set_symbol_playback(
+    tab: &mut Tab,
+    loop_mode: Option<SymbolLoopMode>,
+    first_frame: Option<usize>,
+    coalesce: Option<CoalesceKey>,
+) -> bool {
+    let Some((binding, _, total_frames)) = selected_single_symbol_info(tab) else {
+        return false;
+    };
+    let next_mode = loop_mode.unwrap_or(binding.loop_mode);
+    let clamped_first = first_frame
+        .unwrap_or(binding.first_frame)
+        .min(total_frames.saturating_sub(1));
+    update_selected_symbol_binding(tab, coalesce, |b| {
+        b.loop_mode = next_mode;
+        b.first_frame = clamped_first;
+    })
 }
 
 /// フレーム移動（`prev_frame` -> `next_frame`）時に、同じキーフレームのスパン内に留まるレイヤー上の選択のみを残し、

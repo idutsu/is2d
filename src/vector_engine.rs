@@ -34,6 +34,67 @@ pub(crate) enum SymbolLoopMode {
     SingleFrame,
 }
 
+/// シンボルインスタンスの色効果（アルファ 0〜1、明度 -1〜1）
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ColorEffect {
+    pub(crate) alpha: f32,
+    pub(crate) brightness: f32,
+}
+
+impl Default for ColorEffect {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            alpha: 1.0,
+            brightness: 0.0,
+        }
+    }
+}
+
+impl ColorEffect {
+    #[inline]
+    pub(crate) fn new(alpha: f32, brightness: f32) -> Self {
+        Self {
+            alpha: if alpha.is_finite() {
+                alpha.clamp(0.0, 1.0)
+            } else {
+                1.0
+            },
+            brightness: if brightness.is_finite() {
+                brightness.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            },
+        }
+    }
+
+    #[inline]
+    pub(crate) fn lerp(self, other: Self, t: f64) -> Self {
+        let t = t.clamp(0.0, 1.0) as f32;
+        Self::new(
+            self.alpha + (other.alpha - self.alpha) * t,
+            self.brightness + (other.brightness - self.brightness) * t,
+        )
+    }
+
+    pub(crate) fn apply(self, c: Color32) -> Color32 {
+        let [r, g, b, a] = c.to_srgba_unmultiplied();
+        let br = self.brightness;
+        let apply_ch = |v: u8| -> u8 {
+            let vf = v as f32;
+            let out = if br >= 0.0 {
+                vf + (255.0 - vf) * br
+            } else {
+                vf * (1.0 + br)
+            };
+            out.round().clamp(0.0, 255.0) as u8
+        };
+        let out_a = (a as f32 * self.alpha).round().clamp(0.0, 255.0) as u8;
+        Color32::from_rgba_unmultiplied(apply_ch(r), apply_ch(g), apply_ch(b), out_a)
+    }
+}
+
 /// シンボルインスタンスに属するシェイプが持つ幾何変換・再生紐付け情報
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SymbolInstanceBinding {
@@ -44,6 +105,7 @@ pub(crate) struct SymbolInstanceBinding {
     pub(crate) pivot: Point,
     pub(crate) loop_mode: SymbolLoopMode,
     pub(crate) first_frame: usize,
+    pub(crate) color_effect: ColorEffect,
 }
 
 impl SymbolInstanceBinding {
@@ -56,6 +118,7 @@ impl SymbolInstanceBinding {
             pivot: Point::ZERO,
             loop_mode: SymbolLoopMode::Loop,
             first_frame: 0,
+            color_effect: ColorEffect::default(),
         }
     }
 }

@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{cancel_active_drag, SelectSubMode, Session, Tab, UndoHistory, View};
 use crate::symbol::{
-    Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode, TweenRotate,
+    ColorEffect, Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode,
+    TweenRotate,
 };
 use crate::timeline::{Cel, Keyframe, Layer, Timeline, TimelineCellSelection};
 pub(crate) use crate::timeline::{MAX_LAYERS_PER_TIMELINE, MAX_TIMELINE_FRAMES};
@@ -408,6 +409,8 @@ pub(crate) struct SavedSymbolInstanceBinding {
     pub(crate) loop_mode: SymbolLoopMode,
     #[serde(default)]
     pub(crate) first_frame: usize,
+    #[serde(default)]
+    pub(crate) color_effect: ColorEffect,
 }
 
 impl From<SymbolInstanceBinding> for SavedSymbolInstanceBinding {
@@ -419,6 +422,7 @@ impl From<SymbolInstanceBinding> for SavedSymbolInstanceBinding {
             pivot: [b.pivot.x, b.pivot.y],
             loop_mode: b.loop_mode,
             first_frame: b.first_frame,
+            color_effect: b.color_effect,
         }
     }
 }
@@ -444,6 +448,7 @@ impl From<SavedSymbolInstanceBinding> for SymbolInstanceBinding {
             pivot,
             loop_mode: s.loop_mode,
             first_frame: s.first_frame.min(MAX_TIMELINE_FRAMES.saturating_sub(1)),
+            color_effect: ColorEffect::new(s.color_effect.alpha, s.color_effect.brightness),
         }
     }
 }

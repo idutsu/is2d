@@ -20,7 +20,7 @@
   - 各 `Layer` は全フレーム分の配列を持つのではなく、スパースな `Vec<Arc<Keyframe>>`（`start_frame` と保持尺 `frame_count` によるスパン表現）で保持し、ホールドフレームでのデータ重複をゼロにする。
 - **図形エンティティの正規化**:
   - 最小単位の `FillShape` は外周 `Contour` と穴 `Vec<Contour>`、色 `Color32`、事前計算された AABB（`kurbo::Rect`）、所属レイヤーID、グループ階層パス、メッシュ内容の世代番号（`mesh_revision`）を保持する。
-  - セル（`Cel`）内では、Merge Drawing 対象となる生シェイプ／グループ図形の配列（`Arc<Vec<FillShape>>`）と、ライブラリを参照する `SymbolInstance` の配列（`Arc<Vec<SymbolInstance>>`。`symbol_id`, `Affine`, ピボット, `loop_mode`, `first_frame`, 図形列の中での重なり位置 `shape_order_index`）を分けて正規化保持し、内容が変わるたびにセルの世代番号（`revision`）を更新する。
+  - セル（`Cel`）内では、Merge Drawing 対象となる生シェイプ／グループ図形の配列（`Arc<Vec<FillShape>>`）と、ライブラリを参照する `SymbolInstance` の配列（`Arc<Vec<SymbolInstance>>`。`symbol_id`, `Affine`, ピボット, `loop_mode`, `first_frame`, 色効果 `color_effect`（アルファ・明度）, 図形列の中での重なり位置 `shape_order_index`）を分けて正規化保持し、内容が変わるたびにセルの世代番号（`revision`）を更新する。シンボル展開時（`SymbolInstanceBinding::instantiate_shapes`）に色効果が初期値でない場合のみ `FillShape::set_color` で頂点色を更新し、文書書き戻し時は `SymbolInstanceBinding` のみを保存することで色効果適用後の色が文書へ混入しない構造とする。
 - **ID による識別**:
   - 生シェイプ・グループ図形は `ShapeId`、シンボルインスタンスは `InstanceGid` で識別する。シンボルを展開して作る図形は展開のたびに新しい `ShapeId` を持つため、シンボルインスタンスは常に `InstanceGid` で扱う。
   - 選択状態は `Selection { shapes: HashSet<ShapeId>, instances: HashSet<InstanceGid> }` として ID で持ち、配列の番号では持たない。並べ替え・Undo・フレーム移動のあとも、対象が残っていれば選択が保たれる。
@@ -46,7 +46,7 @@
 - **変更の入口は `apply` だけ**:
   - UI の操作は `Action` に変換し、`doc_actions::apply(host, action)` に渡す。`apply` は再生を止め（FPS 変更と `EndCoalesce` を除く）、Undo を記録し、連続操作をまとめ、未保存マーク用の世代ID（`commit_id`）を更新する。
   - Undo の履歴に入れるのも `apply` の最後の1か所だけ。各処理は変わる前の状態を取っておくだけで、文書を変えたときだけ履歴に入る。
-  - 連続操作のまとめは `CoalesceKey`（ステージサイズ・FPS・シンボル再生設定・シンボル名・矢印キー移動）で行い、同じキーが続く間は Undo を1手にまとめる。`Action::EndCoalesce` でまとめを区切る。
+  - 連続操作のまとめは `CoalesceKey`（ステージサイズ・FPS・シンボル再生設定・シンボル色効果・シンボル名・矢印キー移動）で行い、同じキーが続く間は Undo を1手にまとめる。`Action::EndCoalesce` でまとめを区切る。
 - **文書を書き換える経路**:
   1. **図形の描画・変形**（ブラシ・消しゴム・バケツ・輪郭変形・アンカー編集・グループ化・シンボル変換など）：`edit_layers`。対象レイヤーの現在フレームの図形を受け取って書き換え、動くシンボルを含むセルの扱い、レイヤー順の整列もここで行う。
   2. **選択中の浮いた図形の確定**：`commit_floating` / `commit_floating_except`（5章）。

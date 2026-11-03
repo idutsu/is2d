@@ -12,7 +12,7 @@ use crate::vector_engine::{
     dim_backdrop_color, next_shape_id, transform_mesh_to_screen, union_bounding_boxes, Contour,
     FillShape, SyncCache,
 };
-pub(crate) use crate::vector_engine::{SymbolInstanceBinding, SymbolLoopMode};
+pub(crate) use crate::vector_engine::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode};
 
 // ============================================================================
 // 1. シンボル定義（SymbolDef）・インスタンス紐付け・トゥイーン状態・編集セッション
@@ -47,6 +47,9 @@ impl SymbolInstanceBinding {
             inst_s.layer_id = layer_id;
             inst_s.group_path = full_path;
             inst_s.symbol_instance = Some(self);
+            if self.color_effect != ColorEffect::default() {
+                inst_s.set_color(self.color_effect.apply(inst_s.color));
+            }
             out.push(inst_s);
         }
         out

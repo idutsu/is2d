@@ -6484,6 +6484,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
                     pivot: [0.0, 0.0],
                     loop_mode: vector_engine::SymbolLoopMode::Loop,
                     first_frame: 0,
+                    color_effect: vector_engine::ColorEffect::default(),
                 },
                 layer_id: 1,
                 parent_scope: Vec::new(),
@@ -10981,6 +10982,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
                         pivot: [0.0, 0.0],
                         loop_mode: vector_engine::SymbolLoopMode::Loop,
                         first_frame: 0,
+                        color_effect: vector_engine::ColorEffect::default(),
                     },
                     layer_id: 1,
                     parent_scope: Vec::new(),
@@ -11798,6 +11800,7 @@ fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
             pivot: Point::ZERO,
             loop_mode: SymbolLoopMode::Loop,
             first_frame: 0,
+            color_effect: vector_engine::ColorEffect::default(),
         },
         layer_id: 1,
         parent_scope: Vec::new(),
@@ -11825,6 +11828,7 @@ fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
             pivot: Point::ZERO,
             loop_mode: SymbolLoopMode::Loop,
             first_frame: 1,
+            color_effect: vector_engine::ColorEffect::default(),
         },
         layer_id: 1,
         parent_scope: Vec::new(),
@@ -12445,6 +12449,7 @@ fn test_g6_1_resolved_cel_cache_byte_limit_and_2min_playback_memory() {
             pivot: Point::ZERO,
             loop_mode: SymbolLoopMode::Loop,
             first_frame: 0,
+            color_effect: vector_engine::ColorEffect::default(),
         },
         layer_id: 1,
         parent_scope: Vec::new(),
@@ -12458,6 +12463,7 @@ fn test_g6_1_resolved_cel_cache_byte_limit_and_2min_playback_memory() {
             pivot: Point::ZERO,
             loop_mode: SymbolLoopMode::Loop,
             first_frame: 0,
+            color_effect: vector_engine::ColorEffect::default(),
         },
         layer_id: 1,
         parent_scope: Vec::new(),
@@ -16071,4 +16077,295 @@ fn test_transform_move_drag_translates_custom_pivot_once() {
     tool_transform::update_transform_drag(app.tab_mut(), Point::new(90.0, 50.0), false, false);
     tool_transform::finish_transform_drag(&mut app, Some(Point::new(90.0, 50.0)));
     assert_eq!(app.session.transform_pivot, Some(Point::new(70.0, 60.0)));
+}
+
+#[test]
+fn test_symbol_color_effect_alpha_brightness_tween_export_nested_io_undo_ungroup() {
+    use crate::canvas_tool::{CoalesceKey, View};
+    use crate::doc_actions::{apply, Action};
+    use crate::project_io::{ProjectDocument, SavedSymbolInstanceBinding};
+    use crate::symbol::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode};
+    use crate::vector_engine::Contour;
+    use crate::video_export::{export_dimensions, render_frame};
+    use kurbo::QuadBez;
+
+    // 1. ColorEffect::apply
+    let sample = Color32::from_rgb(200, 100, 0);
+    assert_eq!(ColorEffect::default().apply(sample), sample);
+    assert_eq!(
+        ColorEffect::new(0.5, 0.0)
+            .apply(Color32::from_rgb(255, 0, 0))
+            .to_srgba_unmultiplied(),
+        [255, 0, 0, 128]
+    );
+    assert_eq!(
+        ColorEffect::new(1.0, 1.0).apply(sample),
+        Color32::from_rgb(255, 255, 255)
+    );
+    assert_eq!(
+        ColorEffect::new(1.0, -1.0).apply(sample),
+        Color32::from_rgb(0, 0, 0)
+    );
+    assert_eq!(
+        ColorEffect::new(1.0, 0.5).apply(sample),
+        Color32::from_rgb(228, 178, 128)
+    );
+    assert_eq!(
+        ColorEffect::new(1.0, -0.5).apply(sample),
+        Color32::from_rgb(100, 50, 0)
+    );
+
+    // 2. ColorEffect::new
+    assert_eq!(
+        ColorEffect::new(2.0, -3.0),
+        ColorEffect {
+            alpha: 1.0,
+            brightness: -1.0,
+        }
+    );
+    assert_eq!(
+        ColorEffect::new(f32::NAN, f32::INFINITY),
+        ColorEffect::default()
+    );
+    assert_eq!(
+        ColorEffect::new(f32::NEG_INFINITY, f32::NAN),
+        ColorEffect::default()
+    );
+
+    // 3. トゥイーン（開始 0% → 4コマ後 100% の 2コマ目でアルファ 128±1）
+    let mut tween_app = Is2dApp::default();
+    let center = View::DEFAULT_STAGE_CENTER;
+    put_cel_shapes(
+        &mut tween_app,
+        0,
+        0,
+        make_stroke(
+            Point::new(center.x - 40.0, center.y),
+            Point::new(center.x + 40.0, center.y),
+            12.0,
+            Color32::from_rgb(255, 0, 0),
+        ),
+    );
+    tween_app.session.set_selected_indices(vec![0]);
+    assert!(apply(&mut tween_app, Action::ConvertToSymbol));
+    assert!(apply(
+        &mut tween_app,
+        Action::SetSymbolColorEffect {
+            effect: ColorEffect::new(0.0, 0.0),
+        },
+    ));
+    assert!(apply(&mut tween_app, Action::ToggleTween));
+    for _ in 0..4 {
+        assert!(apply(&mut tween_app, Action::ExtendFrame));
+    }
+    apply(
+        &mut tween_app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 4,
+        },
+    );
+    assert!(apply(
+        &mut tween_app,
+        Action::InsertKeyframe { copy_prev: true },
+    ));
+    tween_app.session.set_selected_indices(vec![0]);
+    assert!(apply(
+        &mut tween_app,
+        Action::SetSymbolColorEffect {
+            effect: ColorEffect::new(1.0, 0.0),
+        },
+    ));
+    let mid_shapes = tween_app
+        .doc
+        .root
+        .evaluate_layer_shapes_at(0, 2, &tween_app.doc.library);
+    assert_eq!(mid_shapes.len(), 1);
+    let mid_alpha = mid_shapes[0].color.to_srgba_unmultiplied()[3] as i32;
+    assert!(
+        (mid_alpha - 128).abs() <= 1,
+        "mid_alpha expected ~128, got {mid_alpha}"
+    );
+
+    // 4. 画面と書き出しが同じ（アルファ 50% の赤 → scene の A=128±1、render_frame の画素が約 (255, 128, 128)）
+    let mut export_app = Is2dApp::default();
+    let p00 = Point::new(center.x - 50.0, center.y - 50.0);
+    let p10 = Point::new(center.x + 50.0, center.y - 50.0);
+    let p11 = Point::new(center.x + 50.0, center.y + 50.0);
+    let p01 = Point::new(center.x - 50.0, center.y + 50.0);
+    let red_box = FillShape::new(
+        Color32::from_rgb(255, 0, 0),
+        Contour::new(vec![
+            QuadBez::new(p00, p00.midpoint(p10), p10),
+            QuadBez::new(p10, p10.midpoint(p11), p11),
+            QuadBez::new(p11, p11.midpoint(p01), p01),
+            QuadBez::new(p01, p01.midpoint(p00), p00),
+        ]),
+        Vec::new(),
+    );
+    put_cel_shapes(&mut export_app, 0, 0, vec![red_box]);
+    export_app.session.set_selected_indices(vec![0]);
+    assert!(apply(&mut export_app, Action::ConvertToSymbol));
+    assert!(apply(
+        &mut export_app,
+        Action::SetSymbolColorEffect {
+            effect: ColorEffect::new(0.5, 0.0),
+        },
+    ));
+    let scene_a = export_app
+        .scene()
+        .get(0)
+        .unwrap()
+        .color
+        .to_srgba_unmultiplied()[3] as i32;
+    assert!((scene_a - 128).abs() <= 1);
+    let (w, h) = export_dimensions(export_app.doc.stage_size);
+    let rgba = render_frame(&export_app.doc, 0, w, h);
+    let cx_idx = (((h / 2) as usize) * (w as usize) + ((w / 2) as usize)) * 4;
+    let px = [
+        rgba[cx_idx],
+        rgba[cx_idx + 1],
+        rgba[cx_idx + 2],
+        rgba[cx_idx + 3],
+    ];
+    assert_eq!(px[0], 255);
+    assert!(
+        (px[1] as i32 - 128).abs() <= 1,
+        "expected g ~128, got {}",
+        px[1]
+    );
+    assert!(
+        (px[2] as i32 - 128).abs() <= 1,
+        "expected b ~128, got {}",
+        px[2]
+    );
+    assert_eq!(px[3], 255);
+
+    // 5. 入れ子（内側 50%、外側 50% → アルファ 64±1）
+    export_app.session.set_selected_indices(vec![0]);
+    assert!(apply(&mut export_app, Action::ConvertToSymbol));
+    assert!(apply(
+        &mut export_app,
+        Action::SetSymbolColorEffect {
+            effect: ColorEffect::new(0.5, 0.0),
+        },
+    ));
+    let nested_a = export_app
+        .scene()
+        .get(0)
+        .unwrap()
+        .color
+        .to_srgba_unmultiplied()[3] as i32;
+    assert!(
+        (nested_a - 64).abs() <= 1,
+        "nested alpha expected ~64, got {nested_a}"
+    );
+
+    // 6. 保存と読み込み（値の保持、欄がない古い JSON、範囲外・NaN の正規化）
+    assert!(apply(
+        &mut export_app,
+        Action::SetSymbolColorEffect {
+            effect: ColorEffect::new(0.35, -0.25),
+        },
+    ));
+    let saved_str = serde_json::to_string(&ProjectDocument::from_app(&export_app)).unwrap();
+    let loaded_doc: ProjectDocument = serde_json::from_str(&saved_str).unwrap();
+    let mut reopened = Is2dApp::default();
+    loaded_doc.apply_to_app(&mut reopened);
+    let reopened_eff = reopened.doc.root.layers[0].keyframes[0].cel.instances[0]
+        .binding
+        .color_effect;
+    assert_eq!(reopened_eff, ColorEffect::new(0.35, -0.25));
+
+    let legacy_binding_json =
+        r#"{"instance_gid":1,"symbol_id":1,"xform":[1.0,0.0,0.0,1.0,0.0,0.0]}"#;
+    let legacy_saved: SavedSymbolInstanceBinding =
+        serde_json::from_str(legacy_binding_json).unwrap();
+    let legacy_binding = SymbolInstanceBinding::from(legacy_saved);
+    assert_eq!(legacy_binding.color_effect, ColorEffect::default());
+
+    let out_of_range_saved = SavedSymbolInstanceBinding {
+        instance_gid: 1,
+        symbol_id: 1,
+        xform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        pivot: [0.0, 0.0],
+        loop_mode: SymbolLoopMode::Loop,
+        first_frame: 0,
+        color_effect: ColorEffect {
+            alpha: 5.0,
+            brightness: f32::NAN,
+        },
+    };
+    let sanitized_binding = SymbolInstanceBinding::from(out_of_range_saved);
+    assert_eq!(
+        sanitized_binding.color_effect,
+        ColorEffect {
+            alpha: 1.0,
+            brightness: 0.0,
+        }
+    );
+
+    // 7. 取り消し（SetSymbolColorEffect を3回続けて送り EndCoalesce → Undo 1回で元の値に戻る）
+    let mut undo_app = Is2dApp::default();
+    put_cel_shapes(
+        &mut undo_app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(200.0, 100.0),
+            10.0,
+            Color32::from_rgb(200, 50, 50),
+        ),
+    );
+    undo_app.session.set_selected_indices(vec![0]);
+    assert!(apply(&mut undo_app, Action::ConvertToSymbol));
+    let inst_gid = undo_app
+        .scene()
+        .get(0)
+        .unwrap()
+        .symbol_instance
+        .unwrap()
+        .instance_gid;
+    let undo_before = undo_app.history.undo_stack.len();
+    for a in [0.8, 0.6, 0.5] {
+        assert!(apply(
+            &mut undo_app,
+            Action::SetSymbolColorEffect {
+                effect: ColorEffect::new(a, 0.2),
+            },
+        ));
+    }
+    apply(
+        &mut undo_app,
+        Action::EndCoalesce {
+            key: Some(CoalesceKey::SymbolColorEffect(inst_gid)),
+        },
+    );
+    assert_eq!(undo_app.history.undo_stack.len(), undo_before + 1);
+    assert!(apply(&mut undo_app, Action::Undo));
+    assert_eq!(
+        undo_app
+            .scene()
+            .get(0)
+            .unwrap()
+            .symbol_instance
+            .unwrap()
+            .color_effect,
+        ColorEffect::default()
+    );
+
+    // 8. グループ解除（アルファ 50% のインスタンスを解除すると symbol_instance が無くなり A=128±1 の生図形になる）
+    assert!(apply(&mut undo_app, Action::Redo));
+    assert!(apply(
+        &mut undo_app,
+        Action::SetSymbolColorEffect {
+            effect: ColorEffect::new(0.5, 0.0),
+        },
+    ));
+    assert!(apply(&mut undo_app, Action::Ungroup));
+    let ungrouped_shape = undo_app.scene().get(0).unwrap();
+    assert!(ungrouped_shape.symbol_instance.is_none());
+    let ungrouped_a = ungrouped_shape.color.to_srgba_unmultiplied()[3] as i32;
+    assert!((ungrouped_a - 128).abs() <= 1);
 }

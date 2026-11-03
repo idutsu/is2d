@@ -8,7 +8,7 @@ use crate::canvas_tool::{
 use crate::doc_actions::Action;
 use crate::project_io::PendingCloseConfirm;
 use crate::select_ops::ArrangeMode;
-use crate::symbol::{SymbolDef, SymbolLoopMode, TweenRotate};
+use crate::symbol::{ColorEffect, SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 use crate::symbol_ops::selected_single_symbol_info;
 pub(crate) use crate::timeline_ui::icons;
 use crate::timeline_ui::TimelineUiState;
@@ -1436,6 +1436,8 @@ pub(crate) fn draw_selected_symbol_properties(
         });
     }
 
+    draw_symbol_color_effect(binding, actions, ui);
+
     ui.add_space(6.0);
     if ui
         .add_sized(
@@ -1446,6 +1448,61 @@ pub(crate) fn draw_selected_symbol_properties(
         .clicked()
     {
         actions.push(UiAction::Doc(Action::EnterSymbolTimeline { binding }));
+    }
+}
+
+fn draw_symbol_color_effect(
+    binding: SymbolInstanceBinding,
+    actions: &mut Vec<UiAction>,
+    ui: &mut egui::Ui,
+) {
+    ui.add_space(6.0);
+    draw_panel_section_label(ui, "色効果", 4.0);
+
+    let mut alpha_pct = (binding.color_effect.alpha * 100.0).round() as i32;
+    let mut brightness_pct = (binding.color_effect.brightness * 100.0).round() as i32;
+
+    let a_resp = ui
+        .add(
+            egui::Slider::new(&mut alpha_pct, 0..=100)
+                .text("アルファ")
+                .suffix(" %"),
+        )
+        .on_hover_text("シンボル全体の不透明度（0% で見えなくなります）");
+    let b_resp = ui
+        .add(
+            egui::Slider::new(&mut brightness_pct, -100..=100)
+                .text("明度")
+                .suffix(" %"),
+        )
+        .on_hover_text("シンボル全体の明るさ（−100% で黒、+100% で白）");
+
+    let next_effect = ColorEffect::new(
+        if a_resp.changed() {
+            alpha_pct as f32 / 100.0
+        } else {
+            binding.color_effect.alpha
+        },
+        if b_resp.changed() {
+            brightness_pct as f32 / 100.0
+        } else {
+            binding.color_effect.brightness
+        },
+    );
+    if (a_resp.changed() || b_resp.changed()) && next_effect != binding.color_effect {
+        actions.push(UiAction::Doc(Action::SetSymbolColorEffect {
+            effect: next_effect,
+        }));
+    }
+    if a_resp.drag_stopped()
+        || a_resp.lost_focus()
+        || b_resp.drag_stopped()
+        || b_resp.lost_focus()
+        || (!a_resp.dragged() && !a_resp.has_focus() && !b_resp.dragged() && !b_resp.has_focus())
+    {
+        actions.push(UiAction::Doc(Action::EndCoalesce {
+            key: Some(CoalesceKey::SymbolColorEffect(binding.instance_gid)),
+        }));
     }
 }
 

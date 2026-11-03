@@ -2566,6 +2566,7 @@ pub(crate) enum CoalesceKey {
     StageSize,
     Fps,
     SymbolPlayback(u64),
+    SymbolColorEffect(u64),
     RenameSymbol(u64),
     NudgeSelection,
 }

@@ -824,6 +824,7 @@ impl Layer {
                         pivot: interp_pivot,
                         loop_mode: start_binding.loop_mode,
                         first_frame: start_binding.first_frame,
+                        color_effect: start_binding.color_effect.lerp(end_binding.color_effect, t),
                     },
                 ))
             }
