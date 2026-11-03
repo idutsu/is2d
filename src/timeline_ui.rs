@@ -698,31 +698,23 @@ fn draw_control_bar_onion_controls(tab: &mut Tab, ui: &mut egui::Ui) {
         tab.view.onion_skin_enabled = !tab.view.onion_skin_enabled;
     }
     if tab.view.onion_skin_enabled {
-        let mut prev_n = tab.view.onion_prev_frames as u32;
-        let mut next_n = tab.view.onion_next_frames as u32;
-        ui.label("前:");
-        if ui
-            .add(
-                egui::DragValue::new(&mut prev_n)
-                    .range(0..=10)
-                    .update_while_editing(false)
-                    .speed(0.1),
-            )
-            .changed()
-        {
-            tab.view.onion_prev_frames = prev_n as usize;
-        }
-        ui.label("後:");
-        if ui
-            .add(
-                egui::DragValue::new(&mut next_n)
-                    .range(0..=10)
-                    .update_while_editing(false)
-                    .speed(0.1),
-            )
-            .changed()
-        {
-            tab.view.onion_next_frames = next_n as usize;
+        for (label, frames) in [
+            ("前:", &mut tab.view.onion_prev_frames),
+            ("後:", &mut tab.view.onion_next_frames),
+        ] {
+            let mut n = *frames as u32;
+            ui.label(label);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut n)
+                        .range(0..=10)
+                        .update_while_editing(false)
+                        .speed(0.1),
+                )
+                .changed()
+            {
+                *frames = n as usize;
+            }
         }
     }
 }
