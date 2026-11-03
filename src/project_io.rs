@@ -551,7 +551,7 @@ fn serialize_contour_segments<S: serde::Serializer>(
 fn deserialize_contour_segments<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Arc<Vec<QuadBez>>, D::Error> {
-    let mut segs: Vec<QuadBez> = Vec::<[[f64; 2]; 3]>::deserialize(deserializer)?
+    let segs: Vec<QuadBez> = Vec::<[[f64; 2]; 3]>::deserialize(deserializer)?
         .into_iter()
         .take(MAX_CONTOUR_SEGMENTS)
         .filter(|pts| pts.iter().flatten().all(|v| v.is_finite()))
@@ -563,7 +563,6 @@ fn deserialize_contour_segments<'de, D: serde::Deserializer<'de>>(
             )
         })
         .collect();
-    segs.shrink_to_fit();
     Ok(Arc::new(segs))
 }
 

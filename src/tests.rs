@@ -16180,3 +16180,92 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
         "F7 must never return true and push Undo without changing ProjectDocument JSON"
     );
 }
+
+#[test]
+fn test_m5_2_n1001_contour_segments_capacity_equals_len_after_merge_insert_and_reload() {
+    fn assert_all_contours_shrunk(doc: &symbol::Document, phase: &str) {
+        let mut count = 0usize;
+        for layer in &doc.root.layers {
+            for kf in &layer.keyframes {
+                for sh in kf.cel.shapes.iter() {
+                    for c in sh.contours() {
+                        count += 1;
+                        assert_eq!(
+                            c.segments.capacity(),
+                            c.segments.len(),
+                            "{phase}: root contour capacity ({}) != len ({})",
+                            c.segments.capacity(),
+                            c.segments.len()
+                        );
+                    }
+                }
+            }
+        }
+        for sym in &doc.library {
+            for layer in &sym.timeline.layers {
+                for kf in &layer.keyframes {
+                    for sh in kf.cel.shapes.iter() {
+                        for c in sh.contours() {
+                            count += 1;
+                            assert_eq!(
+                                c.segments.capacity(),
+                                c.segments.len(),
+                                "{phase}: symbol contour capacity ({}) != len ({})",
+                                c.segments.capacity(),
+                                c.segments.len()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(count > 0, "{phase}: expected at least 1 contour");
+    }
+
+    let mut app = Is2dApp::default();
+    let color = Color32::from_rgb(220, 60, 70);
+    for i in 0..100 {
+        let row = (i / 10) as f64;
+        let col = (i % 10) as f64;
+        let x0 = 60.0 + col * 50.0;
+        let y0 = 60.0 + row * 30.0;
+        let pts: Vec<Point> = (0..18)
+            .map(|k| {
+                let t = k as f64 / 17.0;
+                Point::new(
+                    x0 + t * 80.0,
+                    y0 + t * 45.0 + (t * std::f64::consts::TAU).sin() * 6.0,
+                )
+            })
+            .collect();
+        doc_actions::apply(
+            &mut app,
+            doc_actions::Action::PaintStroke {
+                points: pts,
+                radius: 4.5,
+                color,
+            },
+        );
+    }
+    assert_all_contours_shrunk(&app.tab().doc, "after 100 overlapping same-color strokes");
+
+    use kurbo::ParamCurve;
+    let edge_pt = app
+        .scene()
+        .get(0)
+        .expect("at least one shape")
+        .exterior
+        .segments[0]
+        .eval(0.5);
+    assert!(doc_actions::apply(
+        &mut app,
+        doc_actions::Action::AddAnchor { pt: edge_pt },
+    ));
+    assert_all_contours_shrunk(&app.tab().doc, "after AddAnchor");
+
+    let saved_json = serde_json::to_vec(&project_io::ProjectDocument::from_app(&app)).unwrap();
+    let loaded_doc: project_io::ProjectDocument = serde_json::from_slice(&saved_json).unwrap();
+    let mut reopened = Is2dApp::default();
+    loaded_doc.apply_to_app(&mut reopened);
+    assert_all_contours_shrunk(&reopened.tab().doc, "after save and reopen");
+}

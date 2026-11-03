@@ -115,7 +115,8 @@ pub(crate) struct Contour {
 }
 
 impl Contour {
-    pub(crate) fn new(segments: Vec<QuadBez>) -> Self {
+    pub(crate) fn new(mut segments: Vec<QuadBez>) -> Self {
+        segments.shrink_to_fit();
         Self {
             contour_id: next_contour_id(),
             segments: Arc::new(segments),
@@ -210,7 +211,7 @@ impl Contour {
                 || !s.p2.y.is_finite()
         });
         if has_non_finite || self.segments.len() > 3 {
-            let kept: Vec<QuadBez> = self
+            let mut kept: Vec<QuadBez> = self
                 .segments
                 .iter()
                 .copied()
@@ -225,6 +226,7 @@ impl Contour {
                 })
                 .collect();
             if has_non_finite || (kept.len() >= 3 && kept.len() != self.segments.len()) {
+                kept.shrink_to_fit();
                 self.segments = Arc::new(kept);
             }
         }
@@ -284,6 +286,7 @@ impl Contour {
         let right = seg.subsegment(t_clamped..1.0);
         let segs = self.segments_mut();
         segs[seg_idx] = left;
+        segs.reserve_exact(1);
         segs.insert(seg_idx + 1, right);
         self.enforce_continuity();
         true
