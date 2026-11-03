@@ -284,12 +284,13 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
 
 /// ライブラリ内の指定シンボル `symbol_id` の内部タイムライン編集モードへ入る
 pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
-    if tab
-        .session
-        .edit_path
-        .levels
-        .iter()
-        .any(|lvl| lvl.symbol_id == symbol_id)
+    if tab.doc.find_symbol(symbol_id).is_none()
+        || tab
+            .session
+            .edit_path
+            .levels
+            .iter()
+            .any(|lvl| lvl.symbol_id == symbol_id)
     {
         return false;
     }

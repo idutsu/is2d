@@ -13152,8 +13152,8 @@ fn test_m2_4_delete_symbol_2880_keyframes_fast_and_no_memory_growth() {
         sym.timeline.total_frames = 8;
         sym.timeline.layers[0].frame_count = 8;
         for f in 1..8 {
-            let kf_idx = sym.timeline.layers[0].insert_keyframe(f, false);
-            sym.timeline.layers[0].keyframe_mut(kf_idx).cel = timeline::Cel::new(shapes.clone());
+            sym.timeline.layers[0].insert_keyframe(f, false);
+            sym.timeline.layers[0].keyframe_mut(f).cel = timeline::Cel::new(shapes.clone());
         }
     }
     app.doc.root.total_frames = 2880;
@@ -15573,4 +15573,610 @@ fn test_video_export_macos_mp4_cancel_and_error() {
     }
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_m5_1_n3002_f7_on_empty_frame_preserves_redo_and_clean_state() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+    let c = app.tab().stage_center_world();
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![c, Point::new(c.x + 80.0, c.y)],
+            radius: 6.0,
+            color: Color32::from_rgb(220, 40, 40),
+        },
+    ));
+    assert_eq!(app.tab().history.undo_stack.len(), 1);
+    assert!(app.tab().history.is_dirty());
+
+    assert!(app.tab_mut().undo());
+    assert_eq!(app.tab().history.undo_stack.len(), 0);
+    assert_eq!(app.tab().history.redo_stack.len(), 1);
+    assert!(!app.tab().history.is_dirty());
+
+    // 空のコマで F7 を押しても false が返り、Undo=0・未保存マークなし・Redo=1 が保たれること
+    assert!(!apply(
+        &mut app,
+        Action::InsertKeyframe { copy_prev: false }
+    ));
+    assert!(app.tab().history.pending.is_none());
+    assert_eq!(app.tab().history.undo_stack.len(), 0);
+    assert_eq!(app.tab().history.redo_stack.len(), 1);
+    assert!(!app.tab().history.is_dirty());
+
+    // Redo で元の線が戻ること
+    assert!(app.tab_mut().redo());
+    assert_eq!(app.tab().doc.root.active_cel_shapes().len(), 1);
+}
+
+#[test]
+fn test_m5_1_f7_twice_on_drawn_frame_second_is_noop() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+    let c = app.tab().stage_center_world();
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![c, Point::new(c.x + 80.0, c.y)],
+            radius: 6.0,
+            color: Color32::from_rgb(40, 120, 220),
+        },
+    ));
+    // 1回目の F7 で次のコマに空のキーフレームが作られる
+    assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: false }));
+    assert_eq!(app.tab().doc.root.current_frame, 1);
+    assert!(app.tab().doc.root.active_cel_shapes().is_empty());
+
+    let undo_after_first = app.tab().history.undo_stack.len();
+    app.tab_mut().history.mark_saved();
+    assert!(!app.tab().history.is_dirty());
+
+    // 2回目の F7 はすでに空なので false を返し、Undo 件数も未保存マークも変わらないこと
+    assert!(!apply(
+        &mut app,
+        Action::InsertKeyframe { copy_prev: false }
+    ));
+    assert!(app.tab().history.pending.is_none());
+    assert_eq!(app.tab().history.undo_stack.len(), undo_after_first);
+    assert!(!app.tab().history.is_dirty());
+}
+
+#[test]
+fn test_m5_1_n3001_f8_nest_limit_preserves_redo_and_oldest_undo() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+    let c = app.tab().stage_center_world();
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![c, Point::new(c.x + 60.0, c.y)],
+            radius: 6.0,
+            color: Color32::from_rgb(30, 180, 90),
+        },
+    ));
+    assert!(apply(&mut app, Action::SelectSingleAt { pt: c }));
+    // F8 を 8 回（8段入れ子）
+    for _ in 0..8 {
+        assert!(apply(&mut app, Action::ConvertToSymbol));
+    }
+    assert_eq!(app.tab().doc.library.len(), 8);
+
+    // 別の線を描いて Undo（Redo 1件）
+    let p2 = Point::new(c.x, c.y + 120.0);
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![p2, Point::new(p2.x + 60.0, p2.y)],
+            radius: 6.0,
+            color: Color32::from_rgb(200, 80, 30),
+        },
+    ));
+    assert!(app.tab_mut().undo());
+    assert_eq!(app.tab().history.redo_stack.len(), 1);
+    let undo_before_reject = app.tab().history.undo_stack.len();
+
+    // 一番外のインスタンスを選んで F8 → 9段目は拒否され、Redo 1件が残り、Redo で線が戻ること
+    assert!(apply(&mut app, Action::SelectSingleAt { pt: c }));
+    assert!(!apply(&mut app, Action::ConvertToSymbol));
+    assert!(app.tab().history.pending.is_none());
+    assert_eq!(app.tab().doc.library.len(), 8);
+    assert_eq!(app.tab().history.undo_stack.len(), undo_before_reject);
+    assert_eq!(app.tab().history.redo_stack.len(), 1);
+    assert!(app.tab_mut().redo());
+    assert_eq!(app.tab().doc.root.active_cel_shapes().len(), 1);
+
+    // Undo が上限 100 件いっぱいでも、F8 拒否時に一番古い履歴が消えないこと
+    while app.tab().history.undo_stack.len() < 100 {
+        assert!(apply(&mut app, Action::ExtendFrame));
+    }
+    assert_eq!(app.tab().history.undo_stack.len(), 100);
+    let oldest_commit_id = app.tab().history.undo_stack.front().unwrap().commit_id;
+    let newest_commit_id = app.tab().history.undo_stack.back().unwrap().commit_id;
+
+    assert!(apply(&mut app, Action::SelectSingleAt { pt: c }));
+    assert!(!apply(&mut app, Action::ConvertToSymbol));
+    assert_eq!(app.tab().history.undo_stack.len(), 100);
+    assert_eq!(
+        app.tab().history.undo_stack.front().unwrap().commit_id,
+        oldest_commit_id
+    );
+    assert_eq!(
+        app.tab().history.undo_stack.back().unwrap().commit_id,
+        newest_commit_id
+    );
+}
+
+#[test]
+fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state() {
+    use crate::doc_actions::{apply, Action};
+    use kurbo::QuadBez;
+
+    let mut app = Is2dApp::default();
+    let c = app.tab().stage_center_world();
+    let dummy_seg = QuadBez::new(c, Point::new(c.x + 20.0, c.y), Point::new(c.x + 40.0, c.y));
+
+    // 図形が存在しない状態で ReshapeEdge / MoveVertex を呼んでも Undo や未保存マークが増えないこと
+    assert!(!apply(
+        &mut app,
+        Action::ReshapeEdge {
+            shape_id: 999_999,
+            contour_idx: 0,
+            seg_idx: 0,
+            grab_t: 0.5,
+            grab_pos: c,
+            target_pos: Point::new(c.x, c.y + 30.0),
+            orig_seg: dummy_seg,
+        },
+    ));
+    assert!(!apply(
+        &mut app,
+        Action::MoveVertex {
+            shape_id: 999_999,
+            contour_idx: 0,
+            seg_idx: 0,
+            orig_vertex: c,
+            target_pos: Point::new(c.x, c.y + 30.0),
+            orig_ctrls: (c, c),
+        },
+    ));
+    assert_eq!(app.tab().history.undo_stack.len(), 0);
+    assert!(!app.tab().history.is_dirty());
+
+    // ロックされたレイヤー上の図形に対して呼んでも Undo や未保存マークが増えないこと
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![c, Point::new(c.x + 60.0, c.y)],
+            radius: 6.0,
+            color: Color32::from_rgb(50, 50, 200),
+        },
+    ));
+    let shape_id = app.tab().doc.root.active_cel_shapes()[0].shape_id;
+    assert!(apply(
+        &mut app,
+        Action::SetLayerLocked {
+            layer_idx: 0,
+            locked: true,
+        },
+    ));
+    app.tab_mut().history.mark_saved();
+    let undo_len = app.tab().history.undo_stack.len();
+
+    assert!(!apply(
+        &mut app,
+        Action::ReshapeEdge {
+            shape_id,
+            contour_idx: 0,
+            seg_idx: 0,
+            grab_t: 0.5,
+            grab_pos: c,
+            target_pos: Point::new(c.x, c.y + 30.0),
+            orig_seg: dummy_seg,
+        },
+    ));
+    assert_eq!(app.tab().history.undo_stack.len(), undo_len);
+    assert!(!app.tab().history.is_dirty());
+}
+
+#[test]
+fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
+    use crate::doc_actions::{apply, Action};
+    use crate::project_io::ProjectDocument;
+    use crate::select_ops::ArrangeMode;
+    use crate::timeline::TimelineCellSelection;
+    use std::collections::BTreeMap;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 32) as u32
+        }
+        fn range(&mut self, max: usize) -> usize {
+            if max == 0 {
+                0
+            } else {
+                (self.next_u32() as usize) % max
+            }
+        }
+        fn f64_range(&mut self, lo: f64, hi: f64) -> f64 {
+            let t = (self.next_u32() as f64) / (u32::MAX as f64);
+            lo + (hi - lo) * t
+        }
+    }
+
+    let doc_json = |app: &Is2dApp| -> String {
+        serde_json::to_string(&ProjectDocument::from_app(app.tab())).unwrap()
+    };
+    let doc_json_ignoring_active_layer = |app: &Is2dApp| -> String {
+        let mut pd = ProjectDocument::from_app(app.tab());
+        pd.timeline.active_layer = 0;
+        pd.timeline.current_frame = 0;
+        for sym in &mut pd.library {
+            sym.timeline.active_layer = 0;
+            sym.timeline.current_frame = 0;
+        }
+        serde_json::to_string(&pd).unwrap()
+    };
+
+    let mut true_without_json_change: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut total_true_by_op: BTreeMap<&'static str, usize> = BTreeMap::new();
+
+    for &seed in &[
+        0x1234_5678_9abc_def0u64,
+        0xfedc_ba98_7654_3210,
+        0x2026_1103_cafe_babe,
+    ] {
+        let mut rng = Rng(seed);
+        let mut app = Is2dApp::default();
+        let c = app.tab().stage_center_world();
+
+        for step in 0..1050 {
+            let op_idx = rng.range(26);
+            if op_idx == 24 {
+                let before_undo = app.tab().history.undo_stack.len();
+                let before_redo = app.tab().history.redo_stack.len();
+                let before_json = doc_json(&app);
+                let ok = app.tab_mut().undo();
+                assert!(app.tab().history.pending.is_none());
+                if !ok {
+                    assert_eq!(before_undo, 0);
+                    assert_eq!(app.tab().history.redo_stack.len(), before_redo);
+                    assert_eq!(doc_json(&app), before_json);
+                } else {
+                    assert_eq!(app.tab().history.undo_stack.len() + 1, before_undo);
+                    assert_eq!(app.tab().history.redo_stack.len(), before_redo + 1);
+                }
+                continue;
+            }
+            if op_idx == 25 {
+                let before_undo = app.tab().history.undo_stack.len();
+                let before_redo = app.tab().history.redo_stack.len();
+                let before_json = doc_json(&app);
+                let ok = app.tab_mut().redo();
+                assert!(app.tab().history.pending.is_none());
+                if !ok {
+                    assert_eq!(before_redo, 0);
+                    assert_eq!(app.tab().history.undo_stack.len(), before_undo);
+                    assert_eq!(doc_json(&app), before_json);
+                } else {
+                    assert_eq!(app.tab().history.undo_stack.len(), before_undo + 1);
+                    assert_eq!(app.tab().history.redo_stack.len() + 1, before_redo);
+                }
+                continue;
+            }
+
+            // ペーストのときは事前に選択図形があれば Copy しておく
+            if op_idx == 13 && !app.tab().session.selection.is_empty() {
+                let _ = apply(&mut app, Action::Copy);
+            }
+
+            let (op_name, action, is_navigation_or_selection): (&'static str, Action, bool) =
+                match op_idx {
+                    0 => {
+                        let x0 = rng.f64_range(c.x - 120.0, c.x + 120.0);
+                        let y0 = rng.f64_range(c.y - 90.0, c.y + 90.0);
+                        let dx = rng.f64_range(20.0, 70.0);
+                        let dy = rng.f64_range(-40.0, 40.0);
+                        let colors = [
+                            Color32::from_rgb(220, 50, 50),
+                            Color32::from_rgb(50, 160, 80),
+                            Color32::from_rgb(50, 100, 220),
+                        ];
+                        (
+                            "PaintStroke",
+                            Action::PaintStroke {
+                                points: vec![Point::new(x0, y0), Point::new(x0 + dx, y0 + dy)],
+                                radius: 6.0,
+                                color: colors[rng.range(colors.len())],
+                            },
+                            false,
+                        )
+                    }
+                    1 => {
+                        let x0 = rng.f64_range(c.x - 100.0, c.x + 100.0);
+                        let y0 = rng.f64_range(c.y - 80.0, c.y + 80.0);
+                        (
+                            "EraseStroke",
+                            Action::EraseStroke {
+                                points: vec![Point::new(x0, y0), Point::new(x0 + 50.0, y0 + 20.0)],
+                                radius: 8.0,
+                            },
+                            false,
+                        )
+                    }
+                    2 => {
+                        let pt = Point::new(
+                            rng.f64_range(c.x - 100.0, c.x + 100.0),
+                            rng.f64_range(c.y - 80.0, c.y + 80.0),
+                        );
+                        (
+                            "BucketFill",
+                            Action::BucketFill {
+                                pt,
+                                color: Color32::from_rgb(240, 180, 40),
+                            },
+                            false,
+                        )
+                    }
+                    3 => {
+                        if rng.range(2) == 0 {
+                            let pt = if let Some(s) = app.tab().scene().iter().next() {
+                                let b = s.bounding_box();
+                                Point::new((b.x0 + b.x1) * 0.5, (b.y0 + b.y1) * 0.5)
+                            } else {
+                                Point::new(
+                                    rng.f64_range(c.x - 100.0, c.x + 100.0),
+                                    rng.f64_range(c.y - 80.0, c.y + 80.0),
+                                )
+                            };
+                            ("SelectSingleAt", Action::SelectSingleAt { pt }, true)
+                        } else {
+                            let x0 = rng.f64_range(c.x - 140.0, c.x + 20.0);
+                            let y0 = rng.f64_range(c.y - 100.0, c.y + 20.0);
+                            let w = rng.f64_range(30.0, 160.0);
+                            let h = rng.f64_range(30.0, 120.0);
+                            (
+                                "SelectMarquee",
+                                Action::SelectMarquee {
+                                    p0: Point::new(x0, y0),
+                                    p1: Point::new(x0 + w, y0 + h),
+                                    additive: false,
+                                },
+                                true,
+                            )
+                        }
+                    }
+                    4 => (
+                        "MoveSelected",
+                        Action::MoveSelected {
+                            delta: KVec2::new(
+                                rng.f64_range(-20.0, 20.0),
+                                rng.f64_range(-20.0, 20.0),
+                            ),
+                        },
+                        false,
+                    ),
+                    5 => (
+                        "AltDuplicate",
+                        Action::FinishMoveSelectionDrag {
+                            total_delta: KVec2::new(15.0, 12.0),
+                            alt_duplicate: true,
+                        },
+                        false,
+                    ),
+                    6 => ("DeleteSelection", Action::DeleteSelection, false),
+                    7 => ("Group", Action::Group, false),
+                    8 => ("Ungroup", Action::Ungroup, false),
+                    9 => {
+                        let modes = [
+                            ArrangeMode::ToFront,
+                            ArrangeMode::Forward,
+                            ArrangeMode::Backward,
+                            ArrangeMode::ToBack,
+                        ];
+                        (
+                            "Arrange",
+                            Action::Arrange {
+                                mode: modes[rng.range(4)],
+                            },
+                            false,
+                        )
+                    }
+                    10 => {
+                        let (fx, fy) = match rng.range(3) {
+                            0 => (true, false),
+                            1 => (false, true),
+                            _ => (true, true),
+                        };
+                        (
+                            "FlipSelection",
+                            Action::FlipSelection {
+                                flip_x: fx,
+                                flip_y: fy,
+                            },
+                            false,
+                        )
+                    }
+                    11 => (
+                        "RotateSelection",
+                        Action::RotateSelection { angle_rad: 0.35 },
+                        false,
+                    ),
+                    12 => ("ConvertToSymbol", Action::ConvertToSymbol, false),
+                    13 => (
+                        "Paste",
+                        Action::Paste {
+                            in_place: rng.range(2) == 0,
+                        },
+                        false,
+                    ),
+                    14 => {
+                        let sym_id = app
+                            .tab()
+                            .doc
+                            .library
+                            .get(rng.range(app.tab().doc.library.len().max(1)))
+                            .map(|s| s.id)
+                            .unwrap_or(999);
+                        ("PlaceSymbol", Action::PlaceSymbol { sym_id }, false)
+                    }
+                    15 => {
+                        if !app.tab().session.edit_path.is_empty()
+                            || !app.tab().session.editing_group_path.is_empty()
+                        {
+                            ("ExitGroup", Action::ExitGroup, true)
+                        } else if let Some(sym) = app
+                            .tab()
+                            .doc
+                            .library
+                            .get(rng.range(app.tab().doc.library.len().max(1)))
+                        {
+                            (
+                                "EnterSymbolFromLibrary",
+                                Action::EnterSymbolFromLibrary { sym_id: sym.id },
+                                true,
+                            )
+                        } else {
+                            ("EnterGroupAt", Action::EnterGroupAt { pt: c }, true)
+                        }
+                    }
+                    16 => ("ExtendFrame(F5)", Action::ExtendFrame, false),
+                    17 => (
+                        "InsertKeyframe(F6)",
+                        Action::InsertKeyframe { copy_prev: true },
+                        false,
+                    ),
+                    18 => (
+                        "InsertBlankKeyframe(F7)",
+                        Action::InsertKeyframe { copy_prev: false },
+                        false,
+                    ),
+                    19 => ("RemoveFrame(Shift+F5)", Action::RemoveFrame, false),
+                    20 => ("DeleteKeyframe(Shift+F6)", Action::DeleteKeyframe, false),
+                    21 => {
+                        if app.tab().active_timeline().layers.len() < 4 {
+                            ("AddLayer", Action::AddLayer, false)
+                        } else {
+                            ("DeleteActiveLayer", Action::DeleteActiveLayer, false)
+                        }
+                    }
+                    22 => ("ToggleTween", Action::ToggleTween, false),
+                    _ => {
+                        let tl = app.tab().active_timeline();
+                        let sel = tl.cell_selection.unwrap_or(TimelineCellSelection::single(
+                            tl.active_layer,
+                            tl.current_frame,
+                        ));
+                        let df = if rng.range(2) == 0 { 1 } else { -1 };
+                        (
+                            "MoveOrCopyFrames",
+                            Action::MoveOrCopyFrames {
+                                sel,
+                                layer_delta: 0,
+                                frame_delta: df,
+                                copy_mode: rng.range(2) == 0,
+                            },
+                            false,
+                        )
+                    }
+                };
+
+            let before_json = doc_json(&app);
+            let before_no_act_layer_json = doc_json_ignoring_active_layer(&app);
+            let before_undo = app.tab().history.undo_stack.len();
+            let before_redo = app.tab().history.redo_stack.len();
+            let before_dirty = app.tab().history.is_dirty();
+            let coalesce_key = action.coalesce_key(app.tab());
+            let was_coalesced =
+                coalesce_key.is_some() && app.tab().history.last_coalesce_key == coalesce_key;
+
+            let res = apply(&mut app, action);
+
+            // 3. apply のあと、pending は必ず None
+            assert!(
+                app.tab().history.pending.is_none(),
+                "seed={seed:#x} step={step} op={op_name}: pending must be None after apply"
+            );
+
+            let after_json = doc_json(&app);
+            let after_no_act_layer_json = doc_json_ignoring_active_layer(&app);
+            let after_undo = app.tab().history.undo_stack.len();
+            let after_redo = app.tab().history.redo_stack.len();
+            let after_dirty = app.tab().history.is_dirty();
+
+            // 1. apply が false を返したときは、前後の ProjectDocument::from_app の JSON も、Undo/Redo の件数も、is_dirty() も変わらない
+            if !res {
+                assert_eq!(
+                    after_json, before_json,
+                    "seed={seed:#x} step={step} op={op_name}: JSON changed when apply returned false"
+                );
+                assert_eq!(
+                    after_undo, before_undo,
+                    "seed={seed:#x} step={step} op={op_name}: undo count changed when apply returned false"
+                );
+                assert_eq!(
+                    after_redo, before_redo,
+                    "seed={seed:#x} step={step} op={op_name}: redo count changed when apply returned false"
+                );
+                assert_eq!(
+                    after_dirty, before_dirty,
+                    "seed={seed:#x} step={step} op={op_name}: is_dirty changed when apply returned false"
+                );
+                continue;
+            }
+
+            if is_navigation_or_selection {
+                assert_eq!(
+                    after_no_act_layer_json, before_no_act_layer_json,
+                    "seed={seed:#x} step={step} op={op_name}: navigation/selection changed document content"
+                );
+                assert_eq!(after_undo, before_undo);
+                assert_eq!(after_redo, before_redo);
+                assert_eq!(after_dirty, before_dirty);
+            } else {
+                *total_true_by_op.entry(op_name).or_insert(0) += 1;
+                let expected_undo = if was_coalesced {
+                    before_undo
+                } else {
+                    (before_undo + 1).min(100)
+                };
+                // 2. ProjectDocument::from_app の JSON が変わったときは、Undo が 1 件増え（連続操作のまとめ中は 0 件）、is_dirty() が true になる
+                if after_json != before_json {
+                    assert_eq!(
+                        after_undo, expected_undo,
+                        "seed={seed:#x} step={step} op={op_name}: undo count did not increase as expected on JSON change"
+                    );
+                    assert!(
+                        after_dirty,
+                        "seed={seed:#x} step={step} op={op_name}: is_dirty must be true on JSON change"
+                    );
+                } else if after_undo == expected_undo {
+                    *true_without_json_change.entry(op_name).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    println!("=== M5-1 Random Test Summary (3 seeds x 1050 steps) ===");
+    for (op, total_true) in &total_true_by_op {
+        let no_json = true_without_json_change.get(op).copied().unwrap_or(0);
+        println!("  {op:<26}: true={total_true:>4}, true_without_json_change={no_json:>4}");
+    }
+    assert_eq!(
+        true_without_json_change
+            .get("InsertBlankKeyframe(F7)")
+            .copied()
+            .unwrap_or(0),
+        0,
+        "F7 must never return true and push Undo without changing ProjectDocument JSON"
+    );
 }

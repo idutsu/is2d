@@ -1010,16 +1010,15 @@ pub(crate) fn prepare_clear_active_frame_shapes(
     tab: &mut Tab,
     before_mutate: impl FnOnce(&mut Tab),
 ) -> bool {
-    let has_any_in_scope = tab
-        .scene()
-        .iter()
-        .any(|s| s.is_in_editing_scope(&tab.session.editing_group_path));
+    let layer_ids = editable_layer_ids(tab);
+    let has_any_in_scope = tab.scene().iter().any(|s| {
+        layer_ids.contains(&s.layer_id) && s.is_in_editing_scope(&tab.session.editing_group_path)
+    });
     if !has_any_in_scope {
         return false;
     }
     clear_selection(tab);
     before_mutate(tab);
-    let layer_ids = editable_layer_ids(tab);
     edit_layers(tab, &layer_ids, |edit| {
         edit.shapes
             .retain(|s| !s.is_in_editing_scope(&edit.editing_group_path));

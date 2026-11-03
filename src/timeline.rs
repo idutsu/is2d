@@ -469,15 +469,20 @@ impl Layer {
     }
 
     /// 指定フレーム `frame` にキーフレームを挿入する（`clone_prev == true`: `F6` 複製 / `false`: `F7` 空白）
-    pub(crate) fn insert_keyframe(&mut self, frame: usize, clone_prev: bool) -> usize {
+    pub(crate) fn insert_keyframe(&mut self, frame: usize, clone_prev: bool) -> bool {
+        let mut changed = false;
         if frame >= self.frame_count {
             self.frame_count = frame + 1;
+            changed = true;
         }
         if let Some(existing_idx) = self.keyframes.iter().position(|kf| kf.start_frame == frame) {
-            if !clone_prev {
-                self.keyframe_mut(existing_idx).clear_cel();
+            if !clone_prev
+                && (!self.keyframes[existing_idx].cel.is_empty()
+                    || self.keyframes[existing_idx].tween)
+            {
+                changed |= self.keyframe_mut(existing_idx).clear_cel();
             }
-            return existing_idx;
+            return changed;
         }
 
         let new_kf = if clone_prev {
@@ -487,7 +492,7 @@ impl Layer {
         };
         let insert_idx = self.keyframes.partition_point(|kf| kf.start_frame < frame);
         self.keyframes.insert(insert_idx, Arc::new(new_kf));
-        insert_idx
+        true
     }
 
     /// 指定フレーム `frame` を含むキーフレームを削除（フレーム0の先頭の場合は空白化）する（`Shift+F6`）
@@ -989,7 +994,11 @@ impl Timeline {
     }
 
     /// 対象レイヤー群 `targets` に対して現在フレーム（または直後フレーム）へキーフレームを挿入する（`F6` / `F7`）
-    pub(crate) fn insert_keyframe_on_targets(&mut self, targets: &[usize], clone_prev: bool) {
+    pub(crate) fn insert_keyframe_on_targets(
+        &mut self,
+        targets: &[usize],
+        clone_prev: bool,
+    ) -> bool {
         let curr_f = self.current_frame;
         let should_advance = if clone_prev {
             targets.iter().all(|&l_idx| {
@@ -1018,12 +1027,13 @@ impl Timeline {
                 })
             });
 
+        let mut changed = should_advance || shift_for_blank;
         for &l_idx in targets {
             if let Some(layer) = self.layers.get_mut(l_idx) {
                 if shift_for_blank {
                     layer.insert_frame_at(curr_f);
                 }
-                layer.insert_keyframe(target_frame, clone_prev);
+                changed |= layer.insert_keyframe(target_frame, clone_prev);
             }
         }
         self.sync_total_frames();
@@ -1032,6 +1042,7 @@ impl Timeline {
             sel.min_frame = target_frame;
             sel.max_frame = target_frame;
         }
+        changed
     }
 
     /// 対象レイヤー群 `targets` の現在フレームに削除可能なキーフレームが存在するかを返す

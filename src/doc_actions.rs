@@ -339,6 +339,9 @@ impl Action {
 // ============================================================================
 
 fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
+    if tab.history.pending.is_some() {
+        return;
+    }
     let tl_snap = tab.doc.root.clone();
     let (library, symbols_revision) = tab.history.snapshot_symbols(&tab.doc);
     let floating = tab.history.snapshot_floating(tab.session.floating());
@@ -353,8 +356,7 @@ fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
         symbols_revision,
         commit_id: tab.history.current_commit_id,
     };
-    tab.history.push(entry);
-    tab.history.last_coalesce_key = coalesce;
+    tab.history.pending = Some((entry, coalesce));
 }
 
 fn push_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
@@ -373,11 +375,14 @@ fn reset_session_after_timeline_change(tab: &mut Tab) {
     tab.session.sanitize_editing_scope();
 }
 
-fn mutate_timeline_with_undo(tab: &mut Tab, mutate: impl FnOnce(&mut Timeline)) {
+fn mutate_timeline_with_undo(tab: &mut Tab, mutate: impl FnOnce(&mut Timeline) -> bool) -> bool {
     commit_floating(tab);
     push_undo(tab, None);
-    tab.with_active_timeline_mut(|tl, _| mutate(tl));
-    reset_session_after_timeline_change(tab);
+    let changed = tab.with_active_timeline_mut(|tl, _| mutate(tl));
+    if changed {
+        reset_session_after_timeline_change(tab);
+    }
+    changed
 }
 
 // ============================================================================
@@ -387,17 +392,42 @@ fn mutate_timeline_with_undo(tab: &mut Tab, mutate: impl FnOnce(&mut Timeline)) 
 /// すべての文書変更・編集操作の唯一の入口。
 /// 再生停止・Undo記録・連続操作のCoalesce・タイムライン同期・Dirty更新を一元管理する。
 pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
+    debug_assert!(host.tab().history.pending.is_none());
     if !matches!(action, Action::SetFps { .. } | Action::EndCoalesce { .. }) {
         host.stop_playback();
     }
-    let (tab, tool, clipboard, toast) = host.parts_mut();
-    let coalesce = action.coalesce_key(tab);
     let check_symbol_nest = matches!(
         action,
         Action::ConvertToSymbol | Action::Paste { .. } | Action::PlaceSymbol { .. }
     );
+    let prev_ids = (host.tab().doc.next_symbol_id, host.tab().doc.next_group_id);
+    let mut res = dispatch(host, action);
+    let (tab, _, _, toast) = host.parts_mut();
+    if check_symbol_nest && res && tab.doc.symbol_nest_exceeded() {
+        if let Some((prev, _)) = tab.history.pending.take() {
+            tab.restore_state_snapshot(prev);
+        }
+        tab.ensure_valid_library_selection();
+        show_notice(toast, NoticeKind::Warning, "シンボルの入れ子は8段までです");
+        res = false;
+    }
+    if res {
+        if let Some((entry, coalesce)) = tab.history.pending.take() {
+            tab.history.push(entry);
+            tab.history.last_coalesce_key = coalesce;
+        }
+    } else {
+        tab.history.pending = None;
+        (tab.doc.next_symbol_id, tab.doc.next_group_id) = prev_ids;
+    }
+    res
+}
 
-    let res = match action {
+fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
+    let (tab, tool, clipboard, toast) = host.parts_mut();
+    let coalesce = action.coalesce_key(tab);
+
+    match action {
         Action::PaintStroke {
             points,
             radius,
@@ -682,22 +712,17 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
             frame_delta,
             copy_mode,
         } => apply_timeline_move_or_copy_frames(tab, sel, layer_delta, frame_delta, copy_mode),
-        Action::AddLayer => {
-            apply_timeline_add_layer(tab);
-            true
-        }
+        Action::AddLayer => apply_timeline_add_layer(tab),
         Action::DeleteActiveLayer => apply_timeline_delete_active_layer(tab),
         Action::MoveActiveLayer { up } => apply_timeline_move_active_layer(tab, up),
         Action::ReorderLayer { src_idx, dst_idx } => {
             apply_timeline_reorder_layer(tab, src_idx, dst_idx)
         }
         Action::SetLayerVisible { layer_idx, visible } => {
-            apply_set_layer_visible(tab, layer_idx, visible);
-            true
+            apply_set_layer_visible(tab, layer_idx, visible)
         }
         Action::SetLayerLocked { layer_idx, locked } => {
-            apply_set_layer_locked(tab, layer_idx, locked);
-            true
+            apply_set_layer_locked(tab, layer_idx, locked)
         }
         Action::SetFps { fps } => apply_set_fps(tab, fps, coalesce),
         Action::SetStageSize { size } => apply_set_stage_size(tab, size, coalesce),
@@ -710,30 +735,15 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
             toggle_select_sub_mode(tab, tool, mode);
             true
         }
-        Action::Undo => {
-            tab.undo();
-            true
-        }
-        Action::Redo => {
-            tab.redo();
-            true
-        }
+        Action::Undo => tab.undo(),
+        Action::Redo => tab.redo(),
         Action::EndCoalesce { key } => {
             if key.is_none_or(|k| tab.history.last_coalesce_key == Some(k)) {
                 tab.history.end_coalesce();
             }
             true
         }
-    };
-    if check_symbol_nest && res && tab.doc.symbol_nest_exceeded() {
-        if let Some(prev) = tab.history.pop_undo() {
-            tab.restore_state_snapshot(prev);
-        }
-        tab.ensure_valid_library_selection();
-        show_notice(toast, NoticeKind::Warning, "シンボルの入れ子は8段までです");
-        return false;
     }
-    res
 }
 
 // ============================================================================
@@ -1147,21 +1157,23 @@ fn apply_deform_shape(
     if drag_dist <= min_deform {
         return false;
     }
-    let in_remainder = tab
-        .session
-        .floating()
-        .is_some_and(|fl| fl.remainder.iter().any(|r| r.shape_id == shape_id));
+    let layer_ids = editable_layer_ids(tab);
+    let in_remainder = tab.session.floating().is_some_and(|fl| {
+        fl.remainder
+            .iter()
+            .any(|r| r.shape_id == shape_id && layer_ids.contains(&r.layer_id))
+    });
     let in_base = tab
         .session
         .base_cache
         .shapes()
         .iter()
-        .any(|s| s.shape_id == shape_id);
+        .any(|s| s.shape_id == shape_id && layer_ids.contains(&s.layer_id));
     if !in_remainder && !in_base {
         return false;
     }
-    focus_active_layer_to_shape_by_id(tab, shape_id);
     push_undo(tab, None);
+    focus_active_layer_to_shape_by_id(tab, shape_id);
     let rem_to_commit = if in_remainder {
         tab.session.update_floating(|fl_opt| {
             fl_opt.as_mut().map(|fl| {
@@ -1178,7 +1190,6 @@ fn apply_deform_shape(
     } else {
         None
     };
-    let layer_ids = editable_layer_ids(tab);
     let mut deformed_ok = false;
     edit_layers(tab, &layer_ids, |edit| {
         if let Some(rem_fl) = rem_to_commit {
@@ -1408,16 +1419,18 @@ fn apply_set_selected_symbol_world_pivot(
     }
     let inst_gid = binding.instance_gid;
     let layer_ids = editable_layer_ids(tab);
+    let mut updated = false;
     edit_layers(tab, &layer_ids, |edit| {
         for s in &mut edit.shapes {
             if let Some(b) = &mut s.symbol_instance {
                 if b.instance_gid == inst_gid {
                     b.pivot = new_local_pivot;
+                    updated = true;
                 }
             }
         }
     });
-    true
+    updated
 }
 
 pub(crate) fn flush_transform_pivot_to_symbol(tab: &mut Tab) {
@@ -1430,7 +1443,7 @@ pub(crate) fn flush_transform_pivot_to_symbol(tab: &mut Tab) {
 
 fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     cancel_active_drag(tab);
-    if !has_editable_selection(tab) {
+    if affine == Affine::IDENTITY || !has_editable_selection(tab) {
         return false;
     }
     push_undo(tab, None);
@@ -1764,13 +1777,13 @@ fn apply_timeline_insert_keyframe(tab: &mut Tab, clone_prev: bool) -> bool {
     if targets.is_empty() {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl| {
-        tl.insert_keyframe_on_targets(&targets, clone_prev);
+    let changed = mutate_timeline_with_undo(tab, |tl| {
+        tl.insert_keyframe_on_targets(&targets, clone_prev)
     });
-    if clone_prev {
+    if changed && clone_prev {
         select_shapes_for_timeline_selection(tab);
     }
-    true
+    changed
 }
 
 fn apply_timeline_delete_keyframe(tab: &mut Tab) -> bool {
@@ -1787,8 +1800,8 @@ fn apply_timeline_delete_keyframe(tab: &mut Tab) -> bool {
     }
     mutate_timeline_with_undo(tab, |tl| {
         tl.delete_keyframe_on_targets(&targets);
-    });
-    true
+        true
+    })
 }
 
 fn apply_timeline_extend_frame(tab: &mut Tab) -> bool {
@@ -1798,8 +1811,8 @@ fn apply_timeline_extend_frame(tab: &mut Tab) -> bool {
     }
     mutate_timeline_with_undo(tab, |tl| {
         tl.extend_frame_on_targets(&targets);
-    });
-    true
+        true
+    })
 }
 
 fn apply_timeline_remove_frame(tab: &mut Tab) -> bool {
@@ -1811,11 +1824,7 @@ fn apply_timeline_remove_frame(tab: &mut Tab) -> bool {
     if !tab.active_timeline().can_remove_frame_on_targets(&targets) {
         return false;
     }
-    let mut any_changed = false;
-    mutate_timeline_with_undo(tab, |tl| {
-        any_changed = tl.remove_frame_on_targets(&targets);
-    });
-    any_changed
+    mutate_timeline_with_undo(tab, |tl| tl.remove_frame_on_targets(&targets))
 }
 
 fn apply_timeline_move_or_copy_frames(
@@ -1841,19 +1850,24 @@ fn apply_timeline_move_or_copy_frames(
     true
 }
 
-fn apply_timeline_add_layer(tab: &mut Tab) {
+fn apply_timeline_add_layer(tab: &mut Tab) -> bool {
     if tab.active_timeline().layers.len() >= MAX_LAYERS_PER_TIMELINE {
-        return;
+        return false;
     }
-    mutate_timeline_with_undo(tab, Timeline::add_layer_above_active);
+    mutate_timeline_with_undo(tab, |tl| {
+        tl.add_layer_above_active();
+        true
+    })
 }
 
 fn apply_timeline_delete_active_layer(tab: &mut Tab) -> bool {
     if tab.active_timeline().layers.len() <= 1 {
         return false;
     }
-    mutate_timeline_with_undo(tab, Timeline::delete_active_layer);
-    true
+    mutate_timeline_with_undo(tab, |tl| {
+        tl.delete_active_layer();
+        true
+    })
 }
 
 fn apply_timeline_reorder_layer(tab: &mut Tab, from_idx: usize, to_idx: usize) -> bool {
@@ -1863,8 +1877,8 @@ fn apply_timeline_reorder_layer(tab: &mut Tab, from_idx: usize, to_idx: usize) -
     }
     mutate_timeline_with_undo(tab, |tl| {
         tl.reorder_layer(from_idx, to_idx);
-    });
-    true
+        true
+    })
 }
 
 fn apply_timeline_move_active_layer(tab: &mut Tab, up: bool) -> bool {
@@ -1885,36 +1899,38 @@ fn apply_timeline_move_active_layer(tab: &mut Tab, up: bool) -> bool {
     apply_timeline_reorder_layer(tab, curr, target)
 }
 
-fn apply_set_layer_visible(tab: &mut Tab, layer_idx: usize, visible: bool) {
+fn apply_set_layer_visible(tab: &mut Tab, layer_idx: usize, visible: bool) -> bool {
     if tab
         .active_timeline()
         .layers
         .get(layer_idx)
         .is_none_or(|l| l.visible == visible)
     {
-        return;
+        return false;
     }
     mutate_timeline_with_undo(tab, |tl| {
         if let Some(layer) = tl.layers.get_mut(layer_idx) {
             layer.visible = visible;
         }
-    });
+        true
+    })
 }
 
-fn apply_set_layer_locked(tab: &mut Tab, layer_idx: usize, locked: bool) {
+fn apply_set_layer_locked(tab: &mut Tab, layer_idx: usize, locked: bool) -> bool {
     if tab
         .active_timeline()
         .layers
         .get(layer_idx)
         .is_none_or(|l| l.locked == locked)
     {
-        return;
+        return false;
     }
     mutate_timeline_with_undo(tab, |tl| {
         if let Some(layer) = tl.layers.get_mut(layer_idx) {
             layer.locked = locked;
         }
-    });
+        true
+    })
 }
 
 fn apply_set_stage_size(tab: &mut Tab, next_size: Vec2, coalesce: Option<CoalesceKey>) -> bool {

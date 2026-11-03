@@ -2581,6 +2581,8 @@ pub(crate) struct UndoHistory {
     pub(crate) next_commit_id: u64,
     /// 直前の変更操作の `CoalesceKey`（同一キーが連続した場合は新規 Undo エントリを積まずに合流する）
     pub(crate) last_coalesce_key: Option<CoalesceKey>,
+    /// `apply` 実行中に保持される変更前スナップショットと合流キー（`apply` の末尾でのみ確定または破棄される）
+    pub(crate) pending: Option<(UndoEntry, Option<CoalesceKey>)>,
 }
 
 impl Default for UndoHistory {
@@ -2592,6 +2594,7 @@ impl Default for UndoHistory {
             saved_commit_id: Some(0),
             next_commit_id: 1,
             last_coalesce_key: None,
+            pending: None,
         }
     }
 }
@@ -3049,19 +3052,25 @@ impl Tab {
         prev_entry
     }
 
-    pub(crate) fn undo(&mut self) {
+    pub(crate) fn undo(&mut self) -> bool {
         cancel_active_drag(self);
         if let Some(prev_entry) = self.history.pop_undo() {
             let curr = self.restore_state_snapshot(prev_entry);
             self.history.push_redo(curr);
+            true
+        } else {
+            false
         }
     }
 
-    pub(crate) fn redo(&mut self) {
+    pub(crate) fn redo(&mut self) -> bool {
         cancel_active_drag(self);
         if let Some(next_entry) = self.history.pop_redo() {
             let curr = self.restore_state_snapshot(next_entry);
             self.history.push_undo_from_redo(curr);
+            true
+        } else {
+            false
         }
     }
 }
