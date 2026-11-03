@@ -17579,3 +17579,50 @@ fn test_merge_self_overlapping_batch_never_produces_duplicate_shape_ids() {
         }
     }
 }
+
+#[test]
+fn test_toggle_playback_cancels_in_progress_brush_and_eraser_stroke() {
+    use crate::canvas_tool::ActiveCanvasDrag;
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+
+    // 1. ブラシで描いている途中（session.drag = PaintStroke）に toggle_playback で再生を始めると、drag が None になり図形が増えないこと
+    app.tool.tool = Tool::Brush;
+    app.session.drag = ActiveCanvasDrag::PaintStroke {
+        stroke: vec![Point::new(50.0, 50.0), Point::new(150.0, 50.0)],
+        committed_world_mesh: egui::Mesh::default(),
+        tail_outline: vec![Point::new(50.0, 45.0), Point::new(150.0, 45.0)],
+        tail_mesh: egui::Mesh::default(),
+        tail_start_idx: 0,
+    };
+    timeline_ui::toggle_playback(&mut app);
+    assert!(app.timeline_ui.is_playing);
+    assert!(matches!(app.session.drag, ActiveCanvasDrag::None));
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 0);
+    timeline_ui::toggle_playback(&mut app);
+    assert!(!app.timeline_ui.is_playing);
+
+    // 2. 消しゴムのストロークの途中でも同じく drag が None になり、既存の図形も変わらないこと
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(40.0, 40.0), Point::new(160.0, 40.0)],
+            radius: 10.0,
+            color: Color32::from_rgb(220, 40, 40),
+        },
+    ));
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 1);
+    app.tool.tool = Tool::Eraser;
+    app.session.drag = ActiveCanvasDrag::PaintStroke {
+        stroke: vec![Point::new(40.0, 40.0), Point::new(160.0, 40.0)],
+        committed_world_mesh: egui::Mesh::default(),
+        tail_outline: vec![Point::new(40.0, 35.0), Point::new(160.0, 35.0)],
+        tail_mesh: egui::Mesh::default(),
+        tail_start_idx: 0,
+    };
+    timeline_ui::toggle_playback(&mut app);
+    assert!(app.timeline_ui.is_playing);
+    assert!(matches!(app.session.drag, ActiveCanvasDrag::None));
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 1);
+}
