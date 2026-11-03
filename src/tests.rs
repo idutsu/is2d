@@ -17066,24 +17066,57 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         assert_eq!(restored_a.color_effect, ColorEffect::new(0.5, 0.3));
     }
 
-    // 10. そのコマで B が空っぽでも分解後に B が残り、B に絵があるコマに移ると見える
+    // 10. 分解したコマで B が空っぽでも分解後に B が残り、A より手前にあったシンボル C との前後も変わらない（B に絵があるコマで確かめる）
     {
-        let (mut app, _, sym_b_id) = build_nested_app(1);
+        let (mut app, sym_a_id, sym_b_id) = build_nested_app(1);
+        // ステージ上で A の手前に別のシンボル C を置く
+        let c_col = Color32::from_rgb(20, 200, 120);
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(400.0, 100.0), Point::new(450.0, 100.0)],
+                radius: 8.0,
+                color: c_col,
+            },
+        ));
+        let c_stroke_id = app.doc.root.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .last()
+            .unwrap()
+            .shape_id;
+        app.session.selection.clear();
+        app.session.selection.shapes.insert(c_stroke_id);
+        assert!(apply(&mut app, Action::ConvertToSymbol));
+        let sym_c_id = app.doc.library.last().unwrap().id;
+        assert_ne!(sym_c_id, sym_a_id);
+        assert_ne!(sym_c_id, sym_b_id);
+
+        let instances_before = &app.doc.root.layers[0].keyframes[0].cel.instances;
+        assert_eq!(instances_before.len(), 2);
+        assert_eq!(instances_before[0].binding.symbol_id, sym_a_id);
+        assert_eq!(instances_before[1].binding.symbol_id, sym_c_id);
+        let a_gid = instances_before[0].binding.instance_gid;
+
+        // 0 コマ目の B を空っぽにしてから A だけを分解する
         app.doc.library[0].timeline.layers[0].keyframe_mut(0).cel = timeline::Cel::default();
         app.doc.library[0].revision = crate::vector_engine::next_mesh_revision();
         app.doc.revision = crate::vector_engine::next_mesh_revision();
         app.refresh_scene_base();
 
-        assert!(apply(&mut app, Action::SelectAll));
+        app.session.selection.clear();
+        app.session.selection.instances.insert(a_gid);
         assert!(apply(&mut app, Action::Ungroup));
-        assert_eq!(app.doc.root.layers[0].keyframes[0].cel.instances.len(), 1);
-        assert_eq!(
-            app.doc.root.layers[0].keyframes[0].cel.instances[0]
-                .binding
-                .symbol_id,
-            sym_b_id
-        );
 
+        let instances_after = &app.doc.root.layers[0].keyframes[0].cel.instances;
+        assert_eq!(instances_after.len(), 2);
+        assert_eq!(
+            instances_after[0].binding.symbol_id, sym_b_id,
+            "空っぽの B の印が A の位置に入り、C より奥（前）に保たれること"
+        );
+        assert_eq!(instances_after[1].binding.symbol_id, sym_c_id);
+
+        // B に絵がある 1 コマ目に移り、シーン上でも B が C より奥にあることを確かめる
         assert!(apply(
             &mut app,
             Action::SwitchLayerAndFrame {
@@ -17091,14 +17124,30 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
                 frame: 1,
             },
         ));
-        assert!(app.scene().iter().any(|s| s
-            .symbol_instance
-            .is_some_and(|b| b.symbol_id == sym_b_id)
-            && !s.exterior.segments.is_empty()));
+        let b_scene_idx = app
+            .scene()
+            .iter()
+            .position(|s| {
+                s.symbol_instance.is_some_and(|b| b.symbol_id == sym_b_id)
+                    && !s.exterior.segments.is_empty()
+            })
+            .expect("1 コマ目で B の図形が見えること");
+        let c_scene_idx = app
+            .scene()
+            .iter()
+            .position(|s| {
+                s.symbol_instance.is_some_and(|b| b.symbol_id == sym_c_id)
+                    && !s.exterior.segments.is_empty()
+            })
+            .expect("1 コマ目で C の図形が見えること");
+        assert!(
+            b_scene_idx < c_scene_idx,
+            "B に絵があるコマで、A より手前にあった C との前後関係（B が奥、C が手前）が変わらないこと"
+        );
     }
 
-    // 11 & 12. B の中のシンボル C は分解後も B の中で見え、A の中でグループ G に入っていた B は分解後も G の中に入る
-    {
+    // 11 & 12. B の中のシンボル C は分解後も B の中で見え、A の中でグループ G に入っていた B（空っぽの場合も含む）は分解後も G の中に入る
+    for b_empty_on_ungroup_frame in [false, true] {
         let (mut app, sym_a_id, sym_b_id) = build_nested_app(1);
         // B の中にシンボル C を作る
         assert!(apply(
@@ -17111,7 +17160,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         assert_ne!(sym_c_id, sym_b_id);
         assert!(apply(&mut app, Action::ExitGroup));
 
-        // A の中で B をグループ G に入れる
+        // A の中で B だけを内側グループ G_inner に入れ、さらに生の図形と一緒に外側グループ G_outer に入れる
         assert!(apply(
             &mut app,
             Action::EnterSymbolFromLibrary { sym_id: sym_a_id },
@@ -17132,7 +17181,16 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         app.session.selection.clear();
         app.session.selection.instances.insert(b_gid_in_a);
         assert!(apply(&mut app, Action::Group));
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::Group));
         assert!(apply(&mut app, Action::ExitGroup));
+
+        if b_empty_on_ungroup_frame {
+            app.doc.library[0].timeline.layers[0].keyframe_mut(0).cel = timeline::Cel::default();
+            app.doc.library[0].revision = crate::vector_engine::next_mesh_revision();
+            app.doc.revision = crate::vector_engine::next_mesh_revision();
+            app.refresh_scene_base();
+        }
 
         assert!(apply(&mut app, Action::SelectAll));
         assert!(apply(&mut app, Action::Ungroup));
@@ -17141,12 +17199,23 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         assert_eq!(cel.instances[0].binding.symbol_id, sym_b_id);
         assert_eq!(
             cel.instances[0].parent_scope.len(),
-            1,
-            "A の中でグループ G に入っていた B は分解後もグループ G の中のインスタンスになること"
+            2,
+            "A の中で 2 重グループ [G_outer, G_inner] に入っていた B（b_empty={b_empty_on_ungroup_frame}）は分解後も両方のグループの中にいること"
         );
-        assert!(app.scene().iter().any(|s| s
-            .symbol_instance
-            .is_some_and(|b| b.symbol_id == sym_b_id)
-            && !s.exterior.segments.is_empty()));
+        assert_eq!(
+            cel.instances[0].parent_scope[0],
+            cel.shapes[0].group_path[0],
+            "同じ外側グループ G_outer に入っていた生図形と B（b_empty={b_empty_on_ungroup_frame}）が分解後も同じグループ番号を持つこと"
+        );
+        assert_ne!(
+            cel.instances[0].parent_scope[1], cel.shapes[0].group_path[0],
+            "B だけが入っていた内側グループ G_inner にも新しいグループ番号が振られること"
+        );
+        if !b_empty_on_ungroup_frame {
+            assert!(app.scene().iter().any(|s| s
+                .symbol_instance
+                .is_some_and(|b| b.symbol_id == sym_b_id)
+                && !s.exterior.segments.is_empty()));
+        }
     }
 }

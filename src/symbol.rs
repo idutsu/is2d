@@ -419,14 +419,14 @@ impl SymbolDef {
     }
 
     /// シンボルインスタンス `parent_binding` を現在コマ `current_frame`（親キーフレーム開始コマ `parent_kf_start`）で分解したときに
-    /// 内部の可視レイヤーから現れる子シンボルインスタンスの新しい binding 一覧を返す
+    /// 内部の可視レイヤーから現れる子シンボルインスタンスの `(親グループ経路, 新しい binding)` 一覧を返す
     pub(crate) fn detached_child_bindings(
         &self,
         parent_binding: SymbolInstanceBinding,
         parent_kf_start: usize,
         current_frame: usize,
         library: &[SymbolDef],
-    ) -> Vec<SymbolInstanceBinding> {
+    ) -> Vec<(Vec<u64>, SymbolInstanceBinding)> {
         let (frame_idx, child_eval_frame) =
             self.resolve_internal_frame(parent_binding, parent_kf_start, current_frame);
         let stage_elapsed = current_frame.saturating_sub(parent_kf_start);
@@ -437,7 +437,7 @@ impl SymbolDef {
             };
             let kf = &layer.keyframes[kf_idx];
             let child_elapsed = child_eval_frame.saturating_sub(kf.start_frame);
-            let mut push_child = |mut b: SymbolInstanceBinding| {
+            let mut push_child = |scope: Vec<u64>, mut b: SymbolInstanceBinding| {
                 let Some(child_sym) = library.iter().find(|s| s.id == b.symbol_id) else {
                     return;
                 };
@@ -450,13 +450,13 @@ impl SymbolDef {
                     SymbolLoopMode::PlayOnce => progress.saturating_sub(stage_elapsed),
                     SymbolLoopMode::SingleFrame => b.first_frame,
                 };
-                out.push(b);
+                out.push((scope, b));
             };
             if let Some((_, interp_b)) = layer.interpolated_tween_binding_at(frame_idx) {
-                push_child(interp_b);
+                push_child(Vec::new(), interp_b);
             } else {
                 for inst in kf.cel.instances.iter() {
-                    push_child(inst.binding);
+                    push_child(inst.parent_scope.clone(), inst.binding);
                 }
             }
         }
