@@ -18442,3 +18442,188 @@ fn test_merge_touching_sliced_pieces_on_additive_select() {
         ));
     }
 }
+
+#[test]
+fn test_deselected_slice_piece_merges_into_touching_remainder() {
+    use crate::doc_actions::{apply, Action};
+
+    let make_app_with_long_bar = || {
+        let mut app = Is2dApp::default();
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 200.0), Point::new(500.0, 200.0)],
+                radius: 20.0,
+                color: Color32::RED,
+            },
+        ));
+        app
+    };
+
+    // 1. A（x 80〜150）を矩形で選び、Shift+矩形で B（x 280〜340）を足し、Shift+クリックで B を外す
+    //    → 片が1つ、残りが1つ。B のあたり（x 310）にある図形の外接矩形が x 150 より左から x 500 より右まで続いている
+    // 2. 1 のあと、B のあたりを Shift+クリック → 片が1つ・残りが0・選択が1つ（図形全体）
+    {
+        let mut app = make_app_with_long_bar();
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(80.0, 150.0),
+                p1: Point::new(150.0, 250.0),
+                additive: false,
+            },
+        ));
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(280.0, 150.0),
+                p1: Point::new(340.0, 250.0),
+                additive: true,
+            },
+        ));
+        let fl_before = app.session.floating().unwrap();
+        assert_eq!(fl_before.pieces.len(), 2);
+        assert_eq!(fl_before.remainder.len(), 2);
+
+        let b_idx = app
+            .scene()
+            .iter()
+            .position(|s| s.contains_point(Point::new(310.0, 200.0)))
+            .expect("B の片にヒットすること");
+        assert!(apply(
+            &mut app,
+            Action::ToggleSelectionAt { scene_idx: b_idx }
+        ));
+
+        let fl_after = app.session.floating().unwrap();
+        assert_eq!(fl_after.pieces.len(), 1);
+        assert_eq!(fl_after.remainder.len(), 1);
+        let rem_idx = app
+            .scene()
+            .iter()
+            .position(|s| s.contains_point(Point::new(310.0, 200.0)))
+            .expect("B のあたりの残りにヒットすること");
+        let rem_bbox = app.scene().get(rem_idx).unwrap().bounding_box();
+        assert!(
+            rem_bbox.x0 <= 150.5 && rem_bbox.x1 >= 500.0,
+            "B のあたりの図形が A 以外の残り全体になっていること: {rem_bbox:?}"
+        );
+
+        assert!(apply(
+            &mut app,
+            Action::ToggleSelectionAt { scene_idx: rem_idx }
+        ));
+        let fl_all = app.session.floating().unwrap();
+        assert_eq!(fl_all.pieces.len(), 1);
+        assert_eq!(fl_all.remainder.len(), 0);
+        assert_eq!(app.session.selection.shapes.len(), 1);
+    }
+
+    // 3. 1 のあと、動かさずに選択を外す → 図形は1つで、元の番号のまま。Undo の履歴は増えない
+    {
+        let mut app = make_app_with_long_bar();
+        let orig_id = app.doc.root.layers[0].keyframes[0].cel.shapes[0].shape_id;
+        let undo_before = app.history.undo_stack.len();
+
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(80.0, 150.0),
+                p1: Point::new(150.0, 250.0),
+                additive: false,
+            },
+        ));
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(280.0, 150.0),
+                p1: Point::new(340.0, 250.0),
+                additive: true,
+            },
+        ));
+        let b_idx = app
+            .scene()
+            .iter()
+            .position(|s| s.contains_point(Point::new(310.0, 200.0)))
+            .unwrap();
+        assert!(apply(
+            &mut app,
+            Action::ToggleSelectionAt { scene_idx: b_idx }
+        ));
+        assert!(apply(&mut app, Action::Deselect));
+        assert_eq!(app.history.undo_stack.len(), undo_before);
+        let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].shape_id, orig_id);
+    }
+
+    // 4. つながっていない片を外すとき（赤の左半分を選び→Shift+クリックで赤の右半分も足して赤の残りを0にし→Shift+矩形で青の左半分を足し→赤をShift+クリックで外す）は、今までどおり残りに入り、Scene に同じ番号の図形が無い
+    {
+        let mut app = Is2dApp::default();
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(300.0, 100.0)],
+                radius: 15.0,
+                color: Color32::RED,
+            },
+        ));
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 250.0), Point::new(300.0, 250.0)],
+                radius: 15.0,
+                color: Color32::BLUE,
+            },
+        ));
+        // 赤の左半分をスライス → Shift+クリックで赤の右半分も足す（赤の残りは 0 になる）
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(70.0, 60.0),
+                p1: Point::new(200.0, 140.0),
+                additive: false,
+            },
+        ));
+        let red_right_idx = app
+            .scene()
+            .iter()
+            .position(|s| s.contains_point(Point::new(260.0, 100.0)))
+            .unwrap();
+        assert!(apply(
+            &mut app,
+            Action::ToggleSelectionAt {
+                scene_idx: red_right_idx
+            }
+        ));
+        // Shift+矩形で青の左半分をスライス追加
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(70.0, 210.0),
+                p1: Point::new(200.0, 290.0),
+                additive: true,
+            },
+        ));
+        assert_eq!(app.session.floating().unwrap().pieces.len(), 2);
+        assert_eq!(app.session.floating().unwrap().remainder.len(), 1);
+
+        // 上の赤（残りが無い片）を Shift+クリックで外す
+        let red_idx = app
+            .scene()
+            .iter()
+            .position(|s| s.contains_point(Point::new(150.0, 100.0)))
+            .unwrap();
+        assert!(apply(
+            &mut app,
+            Action::ToggleSelectionAt { scene_idx: red_idx }
+        ));
+        let fl = app.session.floating().unwrap();
+        assert_eq!(fl.pieces.len(), 1);
+        assert_eq!(fl.remainder.len(), 2);
+
+        let scene_ids: Vec<_> = app.scene().iter().map(|s| s.shape_id).collect();
+        let unique_ids: std::collections::HashSet<_> = scene_ids.iter().copied().collect();
+        assert_eq!(scene_ids.len(), unique_ids.len());
+    }
+}

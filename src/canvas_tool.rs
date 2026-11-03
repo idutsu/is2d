@@ -10,7 +10,7 @@ pub(crate) use crate::symbol::Document;
 use crate::symbol::{EditPath, SymbolDef};
 use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
 use crate::vector_boolean::{merge_disjoint_fill_into_canvas, merge_shapes_into_canvas};
-use crate::vector_engine::{FillShape, SyncCache};
+use crate::vector_engine::{rects_overlap, FillShape, SyncCache};
 
 #[cfg(test)]
 pub(crate) const MAX_UNDO_HISTORY: usize = 100;
@@ -3738,21 +3738,43 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
                 .chain(kept_pieces.iter().map(|p| p.shape_id))
                 .filter(|id| fl.hidden.contains(id))
                 .collect();
+            let mut chunks = fl.take_remainder_chunks();
             for mut dp in deselected_pieces {
-                let has_chunk_for_layer = fl
-                    .remainder
-                    .iter()
-                    .any(|r| r.layer_id == dp.layer_id && fl.hidden.contains(&r.shape_id));
+                let dp_box = dp.bounding_box().inflate(1.5, 1.5);
+                let touching = chunks.iter_mut().find(|(_, chunk)| {
+                    chunk.iter().any(|r| {
+                        r.layer_id == dp.layer_id
+                            && r.color == dp.color
+                            && r.group_path == dp.group_path
+                            && rects_overlap(r.bounding_box(), dp_box)
+                    })
+                });
+                if let Some((orig_id, chunk)) = touching {
+                    merge_disjoint_fill_into_canvas(chunk, dp);
+                    if let (Some(id), Some(head)) = (*orig_id, chunk.first_mut()) {
+                        head.shape_id = id;
+                    }
+                    continue;
+                }
+                let has_chunk_for_layer = chunks.iter().any(|(orig_id, chunk)| {
+                    orig_id.is_some() && chunk.iter().any(|r| r.layer_id == dp.layer_id)
+                });
                 if !has_chunk_for_layer {
                     if let Some(&unused_orig_id) =
                         fl.hidden.iter().find(|id| !used_orig_ids.contains(id))
                     {
                         dp.shape_id = unused_orig_id;
                         used_orig_ids.insert(unused_orig_id);
+                        chunks.push((Some(unused_orig_id), vec![dp]));
+                        continue;
                     }
                 }
-                fl.remainder.push(dp);
+                match chunks.last_mut() {
+                    Some((_, chunk)) => chunk.push(dp),
+                    None => chunks.push((None, vec![dp])),
+                }
             }
+            fl.remainder = chunks.into_iter().flat_map(|(_, chunk)| chunk).collect();
         }
         fl.pieces = kept_pieces;
         tab.session.set_floating(Some(fl));
