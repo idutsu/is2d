@@ -3241,7 +3241,6 @@ fn writeback_edited_layer_shapes(
                         if kept.group_path != s.group_path {
                             kept.group_path = s.group_path.clone();
                         }
-                        kept.symbol_instance = s.symbol_instance;
                         non_symbol_shapes.push(kept);
                         continue;
                     }

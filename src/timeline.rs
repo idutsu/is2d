@@ -351,10 +351,6 @@ fn remap_keyframes_group_and_instance_ids(
                 for gid in &mut shape.group_path {
                     *gid = alloc_gid(*gid, &mut gid_map);
                 }
-                if let Some(mut b) = shape.symbol_instance {
-                    b.instance_gid = alloc_gid(b.instance_gid, &mut gid_map);
-                    shape.symbol_instance = Some(b);
-                }
             }
         }
         if !kf.cel.instances.is_empty() {
