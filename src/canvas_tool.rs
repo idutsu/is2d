@@ -2330,6 +2330,14 @@ impl Session {
             .collect()
     }
 
+    /// 選択の外接矩形と、自由変形の基準点（ピボット）を返す（選択が無ければ `None`）
+    pub(crate) fn selection_bbox_and_pivot(&self, zoom: f32) -> Option<(KRect, Point)> {
+        let scene = self.scene();
+        let bbox = scene.selection_bounding_box(&self.selection, zoom)?;
+        let pivot = scene.active_transform_pivot(&self.selection, self.transform_pivot, bbox);
+        Some((bbox, pivot))
+    }
+
     /// 指定 `Scene` インデックスの図形が現在選択されているかを返す
     pub(crate) fn is_selected_at(&self, scene_idx: usize) -> bool {
         self.scene().is_shape_selected(scene_idx, &self.selection)

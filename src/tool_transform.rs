@@ -99,16 +99,8 @@ pub(crate) fn start_transform_drag(
     match hover {
         TransformHoverTarget::Pivot => {
             let tab = host.tab_mut();
-            if let Some(bbox) = tab
-                .scene()
-                .selection_bounding_box(&tab.session.selection, zoom)
-            {
+            if let Some((_, orig_pivot)) = tab.session.selection_bbox_and_pivot(zoom) {
                 let had_custom_pivot = tab.session.transform_pivot.is_some();
-                let orig_pivot = tab.scene().active_transform_pivot(
-                    &tab.session.selection,
-                    tab.session.transform_pivot,
-                    bbox,
-                );
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::MovePivot {
                     orig_pivot,
                     had_custom_pivot,
@@ -119,16 +111,8 @@ pub(crate) fn start_transform_drag(
         }
         TransformHoverTarget::Scale(handle) => {
             let tab = host.tab_mut();
-            if let Some(orig_bbox) = tab
-                .scene()
-                .selection_bounding_box(&tab.session.selection, zoom)
-            {
+            if let Some((orig_bbox, orig_pivot)) = tab.session.selection_bbox_and_pivot(zoom) {
                 let had_custom_pivot = tab.session.transform_pivot.is_some();
-                let orig_pivot = tab.scene().active_transform_pivot(
-                    &tab.session.selection,
-                    tab.session.transform_pivot,
-                    orig_bbox,
-                );
                 let orig_shapes = tab.session.begin_transform_overlay();
                 let anchor = if alt_held {
                     orig_pivot
@@ -149,16 +133,8 @@ pub(crate) fn start_transform_drag(
         }
         TransformHoverTarget::Rotate => {
             let tab = host.tab_mut();
-            if let Some(orig_bbox) = tab
-                .scene()
-                .selection_bounding_box(&tab.session.selection, zoom)
-            {
+            if let Some((orig_bbox, pivot)) = tab.session.selection_bbox_and_pivot(zoom) {
                 let had_custom_pivot = tab.session.transform_pivot.is_some();
-                let pivot = tab.scene().active_transform_pivot(
-                    &tab.session.selection,
-                    tab.session.transform_pivot,
-                    orig_bbox,
-                );
                 let orig_shapes = tab.session.begin_transform_overlay();
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Rotate {
                     orig_bbox,
@@ -385,7 +361,7 @@ pub(crate) fn compute_transform_hover(
     mouse_pt: Point,
     zoom: f32,
 ) -> TransformHoverTarget {
-    let Some(bbox) = scene.selection_bounding_box(&session.selection, zoom) else {
+    let Some((bbox, pivot)) = session.selection_bbox_and_pivot(zoom) else {
         return TransformHoverTarget::None;
     };
     let inv_z = 1.0 / (zoom as f64);
@@ -396,7 +372,6 @@ pub(crate) fn compute_transform_hover(
             best_handle = Some((d, handle));
         }
     }
-    let pivot = scene.active_transform_pivot(&session.selection, session.transform_pivot, bbox);
     let pivot_dist = (mouse_pt - pivot).hypot();
     if pivot_dist <= 8.5 * inv_z && best_handle.is_none_or(|(hd, _)| pivot_dist < hd) {
         return TransformHoverTarget::Pivot;
@@ -435,12 +410,7 @@ pub(crate) fn compute_transform_hover(
 }
 
 /// 自由変形ツール（`Tool::Transform`）のバウンディングボックス・8ハンドル・基準点（ピボット）を描画（`Scene` を読み取る）
-pub(crate) fn draw_free_transform_box(
-    scene: Scene<'_>,
-    session: &Session,
-    painter: &egui::Painter,
-    view: &View,
-) {
+pub(crate) fn draw_free_transform_box(session: &Session, painter: &egui::Painter, view: &View) {
     if session.selection.is_empty() {
         return;
     }
@@ -458,9 +428,7 @@ pub(crate) fn draw_free_transform_box(
                 affine_rotate_around(*pivot, *current_angle),
                 *pivot,
             )
-        } else if let Some(bbox) = scene.selection_bounding_box(&session.selection, view.zoom) {
-            let piv =
-                scene.active_transform_pivot(&session.selection, session.transform_pivot, bbox);
+        } else if let Some((bbox, piv)) = session.selection_bbox_and_pivot(view.zoom) {
             (bbox, Affine::IDENTITY, piv)
         } else {
             return;

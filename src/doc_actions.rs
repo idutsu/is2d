@@ -555,13 +555,13 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
 
         #[cfg(test)]
         Action::ScaleSelection { sx, sy } => {
-            let Some(pivot) = selection_pivot(tab) else {
+            let Some((_, pivot)) = tab.session.selection_bbox_and_pivot(tab.view.zoom) else {
                 return false;
             };
             apply_affine_to_selected_inner(tab, affine_scale_around(pivot, sx, sy))
         }
         Action::FlipSelection { flip_x, flip_y } => {
-            let Some(pivot) = selection_pivot(tab) else {
+            let Some((_, pivot)) = tab.session.selection_bbox_and_pivot(tab.view.zoom) else {
                 return false;
             };
             let sx = if flip_x { -1.0 } else { 1.0 };
@@ -569,7 +569,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             apply_affine_to_selected_inner(tab, affine_scale_around(pivot, sx, sy))
         }
         Action::RotateSelection { angle_rad } => {
-            let Some(pivot) = selection_pivot(tab) else {
+            let Some((_, pivot)) = tab.session.selection_bbox_and_pivot(tab.view.zoom) else {
                 return false;
             };
             apply_affine_to_selected_inner(tab, affine_rotate_around(pivot, angle_rad))
@@ -1022,17 +1022,6 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
     }
 
     false
-}
-
-fn selection_pivot(tab: &Tab) -> Option<Point> {
-    let bbox = tab
-        .scene()
-        .selection_bounding_box(&tab.session.selection, tab.view.zoom)?;
-    Some(tab.scene().active_transform_pivot(
-        &tab.session.selection,
-        tab.session.transform_pivot,
-        bbox,
-    ))
 }
 
 fn has_editable_selection(tab: &Tab) -> bool {

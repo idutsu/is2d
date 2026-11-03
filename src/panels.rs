@@ -1850,12 +1850,7 @@ pub(crate) fn draw_canvas_contents(
     draw_selected_group_and_symbol_boxes(tab, painter, &selected_group_boxes);
 
     if tool.tool == Tool::Transform {
-        crate::tool_transform::draw_free_transform_box(
-            tab.scene(),
-            &tab.session,
-            painter,
-            &tab.view,
-        );
+        crate::tool_transform::draw_free_transform_box(&tab.session, painter, &tab.view);
     }
     draw_active_marquee_box(tab, painter);
     crate::tool_paint::draw_active_stroke_preview(tab, tool.tool, &artwork_painter, painter);
