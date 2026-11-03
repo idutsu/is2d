@@ -47,6 +47,8 @@ pub(crate) enum PendingCloseConfirm {
 pub(crate) enum OpenProjectOutcome {
     /// 新規タブ（または未編集の無題タブ）にプロジェクトを読み込んだ
     Loaded,
+    /// 一部の上限超過・不正データを除いてプロジェクトを読み込んだ
+    LoadedWithTrimmedData,
     /// 既に別タブで同じファイルが開かれていたため、そのタブへ切り替えた
     SwitchedToExistingTab,
     /// 既に現在のアクティブタブで開かれているファイルだった
@@ -1274,6 +1276,40 @@ pub(crate) fn open_document_in_new_tab(
     Ok(())
 }
 
+/// 保存用データ（`ProjectDocument`）のルートと全シンボルのタイムラインを合わせた
+/// `[レイヤー数, キーフレーム数, インスタンス数, レイヤー長合計]` を返す
+fn saved_element_counts(proj: &ProjectDocument) -> [usize; 4] {
+    let mut counts = [0usize; 4];
+    for tl in std::iter::once(&proj.timeline).chain(proj.library.iter().map(|s| &s.timeline)) {
+        counts[0] += tl.layers.len();
+        for layer in &tl.layers {
+            counts[1] += layer.keyframes.len();
+            for kf in &layer.keyframes {
+                counts[2] += kf.instances.len();
+            }
+            counts[3] += layer.frame_count.min(MAX_TIMELINE_FRAMES);
+        }
+    }
+    counts
+}
+
+/// 変換後の文書（`Document`）のルートと全シンボルのタイムラインを合わせた
+/// `[レイヤー数, キーフレーム数, インスタンス数, レイヤー長合計]` を返す
+fn document_element_counts(doc: &Document) -> [usize; 4] {
+    let mut counts = [0usize; 4];
+    for tl in std::iter::once(&doc.root).chain(doc.library.iter().map(|s| &s.timeline)) {
+        counts[0] += tl.layers.len();
+        for layer in &tl.layers {
+            counts[1] += layer.keyframes.len();
+            for kf in &layer.keyframes {
+                counts[2] += kf.cel.instances.len();
+            }
+            counts[3] += layer.frame_count;
+        }
+    }
+    counts
+}
+
 /// 指定パスのプロジェクトを「新しいタブ」（または既存の同一ファイルタブ／空の無題タブ）として開く
 pub(crate) fn open_project_in_tab(
     ws: &mut impl ProjectWorkspace,
@@ -1296,15 +1332,30 @@ pub(crate) fn open_project_in_tab(
 
     // 2. ファイル内容を先に検証・パース（エラー時にタブを増やさない）
     let proj_doc = read_project_document(path)?;
-    open_document_in_new_tab(ws, proj_doc.into_document())?;
+    let before_counts = saved_element_counts(&proj_doc);
+    let doc = proj_doc.into_document();
+    let after_counts = document_element_counts(&doc);
+    let trimmed = after_counts
+        .into_iter()
+        .zip(before_counts)
+        .any(|(after, before)| after < before);
+    open_document_in_new_tab(ws, doc)?;
 
     ws.tab_mut().file = Some(path.to_path_buf());
-    ws.tab_mut().history.mark_saved();
+    if trimmed {
+        ws.tab_mut().history.mark_unsaved();
+    } else {
+        ws.tab_mut().history.mark_saved();
+    }
     if let Some(c) = ctx {
         surrender_focused_widget(c);
         update_window_title(ws, c);
     }
-    Ok(OpenProjectOutcome::Loaded)
+    Ok(if trimmed {
+        OpenProjectOutcome::LoadedWithTrimmedData
+    } else {
+        OpenProjectOutcome::Loaded
+    })
 }
 
 /// アクティブタブの右隣に新しい白紙ドキュメントタブを追加して切り替える（`Cmd/Ctrl + N` / タブバーの `＋` ボタン）
@@ -1386,6 +1437,15 @@ pub(crate) fn open_project_dialog(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
     match open_project_in_tab(ws, &path, Some(ctx)) {
         Ok(OpenProjectOutcome::Loaded) => {
             ws.notify_info(format!("「{name}」を開きました"));
+        }
+        Ok(OpenProjectOutcome::LoadedWithTrimmedData) => {
+            crate::canvas_tool::show_notice(
+                ws.toast_mut(),
+                crate::canvas_tool::NoticeKind::Warning,
+                format!(
+                    "「{name}」の一部を読み込めなかったため除きました（保存すると元のファイルからも消えます）"
+                ),
+            );
         }
         Ok(OpenProjectOutcome::SwitchedToExistingTab) => {
             ws.notify_info(format!("既に開いている「{name}」のタブへ切り替えました"));

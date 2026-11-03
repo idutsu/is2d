@@ -17221,3 +17221,200 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         }
     }
 }
+
+#[test]
+fn test_failed_paste_due_to_nest_limit_rolls_back_clipboard_imported_map() {
+    use crate::doc_actions::{apply, Action};
+
+    let ctx = egui::Context::default();
+    let red = Color32::from_rgb(220, 40, 40);
+    let blue = Color32::from_rgb(40, 90, 230);
+
+    // 1. タブ X で入れ子が8段ある赤いシンボルを作ってコピーする
+    let mut app = Is2dApp::default();
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)],
+            radius: 8.0,
+            color: red,
+        },
+    ));
+    for _ in 0..8 {
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::ConvertToSymbol));
+    }
+    assert_eq!(app.doc.library.len(), 8);
+    assert!(apply(&mut app, Action::Copy));
+
+    // 2. タブ Y で別のシンボルの中に入って貼り付ける（9段になるため失敗する）
+    crate::project_io::new_project(&mut app, &ctx);
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(200.0, 200.0), Point::new(260.0, 200.0)],
+            radius: 8.0,
+            color: Color32::from_rgb(40, 180, 80),
+        },
+    ));
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    let host_sym_id = app.doc.library[0].id;
+    assert!(apply(
+        &mut app,
+        Action::EnterSymbolFromLibrary {
+            sym_id: host_sym_id
+        },
+    ));
+    assert!(!apply(&mut app, Action::Paste { in_place: true }));
+    assert_eq!(app.doc.library.len(), 1);
+    assert!(apply(&mut app, Action::ExitGroup));
+
+    // 3. タブ Y で新しい青いシンボルを作る
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(300.0, 200.0), Point::new(360.0, 200.0)],
+            radius: 8.0,
+            color: blue,
+        },
+    ));
+    let blue_stroke_id = app.doc.root.layers[0].keyframes[0]
+        .cel
+        .shapes
+        .last()
+        .unwrap()
+        .shape_id;
+    app.session.selection.clear();
+    app.session.selection.shapes.insert(blue_stroke_id);
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    assert_eq!(app.doc.library.len(), 2);
+
+    // 4. ルートステージ（入れ子上限に引っかからない場所）に貼り付けると、青いシンボルに化けず赤いシンボルが新しく登録されて貼られる
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    assert_eq!(
+        app.doc.library.len(),
+        10,
+        "8段の赤いシンボル群がタブ Y のライブラリに新しくインポートされること"
+    );
+    let pasted_inst_gid = *app.session.selection.instances.iter().next().unwrap();
+    let pasted_shapes: Vec<_> = app
+        .scene()
+        .iter()
+        .filter(|s| s.group_path.first() == Some(&pasted_inst_gid))
+        .collect();
+    assert!(!pasted_shapes.is_empty());
+    assert!(
+        pasted_shapes.iter().all(|s| s.color == red),
+        "貼り付けたシンボルの図形が元の赤色であること"
+    );
+}
+
+#[test]
+fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
+    use crate::doc_actions::{apply, Action};
+    use crate::project_io::{open_project_in_tab, save_project_to_path, OpenProjectOutcome};
+
+    let base_dir =
+        std::env::temp_dir().join(format!("is2d_open_trimmed_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    std::fs::create_dir_all(&base_dir).unwrap();
+
+    // 3. ふつうに保存したファイルを開くと Loaded が返り、保存済みのまま
+    let normal_path = base_dir.join("normal.is2d");
+    let mut src_app = Is2dApp::default();
+    assert!(apply(
+        &mut src_app,
+        Action::PaintStroke {
+            points: vec![Point::new(40.0, 40.0), Point::new(120.0, 40.0)],
+            radius: 6.0,
+            color: Color32::from_rgb(220, 50, 50),
+        },
+    ));
+    save_project_to_path(&mut src_app, &normal_path).unwrap();
+
+    let mut app_normal = Is2dApp::default();
+    assert_eq!(
+        open_project_in_tab(&mut app_normal, &normal_path, None).unwrap(),
+        OpenProjectOutcome::Loaded
+    );
+    assert!(!app_normal.history.is_dirty());
+    assert_eq!(app_normal.file.as_deref(), Some(normal_path.as_path()));
+
+    // 1. レイヤーの長さ（frame_count）より後ろにキーフレームがあるファイルを開くと LoadedWithTrimmedData が返り、未保存になる
+    let out_of_range_kf_path = base_dir.join("out_of_range_kf.is2d");
+    let mut proj_kf = crate::project_io::read_project_document(&normal_path).unwrap();
+    proj_kf.timeline.layers[0].frame_count = 1;
+    proj_kf.timeline.layers[0]
+        .keyframes
+        .push(crate::project_io::SavedKeyframe {
+            start_frame: 5,
+            tween: false,
+            tween_rotate: crate::symbol::TweenRotate::Auto,
+            shapes: Vec::new(),
+            instances: Vec::new(),
+        });
+    crate::project_io::write_project_file_atomically(&out_of_range_kf_path, &proj_kf).unwrap();
+
+    let mut app_kf = Is2dApp::default();
+    assert_eq!(
+        open_project_in_tab(&mut app_kf, &out_of_range_kf_path, None).unwrap(),
+        OpenProjectOutcome::LoadedWithTrimmedData
+    );
+    assert!(app_kf.history.is_dirty());
+    assert_eq!(app_kf.file.as_deref(), Some(out_of_range_kf_path.as_path()));
+
+    // 2. レイヤーが 1001 個あるファイルを開いても LoadedWithTrimmedData が返り、未保存になる
+    let over_layers_path = base_dir.join("over_1001_layers.is2d");
+    let mut proj_layers = crate::project_io::read_project_document(&normal_path).unwrap();
+    let sample_layer = proj_layers.timeline.layers[0].clone();
+    while proj_layers.timeline.layers.len() < 1001 {
+        let mut l = sample_layer.clone();
+        l.id = (proj_layers.timeline.layers.len() + 1) as u64;
+        proj_layers.timeline.layers.push(l);
+    }
+    crate::project_io::write_project_file_atomically(&over_layers_path, &proj_layers).unwrap();
+
+    let mut app_layers = Is2dApp::default();
+    assert_eq!(
+        open_project_in_tab(&mut app_layers, &over_layers_path, None).unwrap(),
+        OpenProjectOutcome::LoadedWithTrimmedData
+    );
+    assert!(app_layers.history.is_dirty());
+    assert_eq!(app_layers.file.as_deref(), Some(over_layers_path.as_path()));
+    assert_eq!(app_layers.doc.root.layers.len(), 1000);
+
+    // 4. 面積がほぼ 0 の図形だけを含むファイルを開いても Loaded が返る（警告は出ない）
+    let tiny_shape_path = base_dir.join("tiny_shape.is2d");
+    let mut proj_tiny = crate::project_io::read_project_document(&normal_path).unwrap();
+    proj_tiny.timeline.layers[0].keyframes[0].shapes = vec![crate::project_io::SavedFillShape {
+        color: [255, 0, 0, 255],
+        exterior: crate::project_io::SavedContour {
+            segments: std::sync::Arc::new(vec![
+                kurbo::QuadBez::new(
+                    Point::new(10.0, 10.0),
+                    Point::new(10.0, 10.0),
+                    Point::new(10.0, 10.0),
+                ),
+                kurbo::QuadBez::new(
+                    Point::new(10.0, 10.0),
+                    Point::new(10.0, 10.0),
+                    Point::new(10.0, 10.0),
+                ),
+            ]),
+        },
+        holes: Vec::new(),
+        layer_id: 1,
+        group_path: Vec::new(),
+    }];
+    crate::project_io::write_project_file_atomically(&tiny_shape_path, &proj_tiny).unwrap();
+
+    let mut app_tiny = Is2dApp::default();
+    assert_eq!(
+        open_project_in_tab(&mut app_tiny, &tiny_shape_path, None).unwrap(),
+        OpenProjectOutcome::Loaded
+    );
+    assert!(!app_tiny.history.is_dirty());
+
+    let _ = std::fs::remove_dir_all(&base_dir);
+}

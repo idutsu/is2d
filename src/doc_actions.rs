@@ -405,8 +405,10 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         Action::ConvertToSymbol | Action::Paste { .. } | Action::PlaceSymbol { .. }
     );
     let prev_ids = (host.tab().doc.next_symbol_id, host.tab().doc.next_group_id);
+    let prev_imported_map =
+        matches!(action, Action::Paste { .. }).then(|| host.parts_mut().2.imported_map.clone());
     let mut res = dispatch(host, action);
-    let (tab, _, _, toast) = host.parts_mut();
+    let (tab, _, clipboard, toast) = host.parts_mut();
     if check_symbol_nest && res && tab.doc.symbol_nest_exceeded() {
         if let Some((prev, _)) = tab.history.pending.take() {
             tab.restore_state_snapshot(prev);
@@ -423,6 +425,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     } else {
         tab.history.pending = None;
         (tab.doc.next_symbol_id, tab.doc.next_group_id) = prev_ids;
+        if let Some(map) = prev_imported_map {
+            clipboard.imported_map = map;
+        }
     }
     res
 }
