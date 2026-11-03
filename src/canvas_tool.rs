@@ -1199,45 +1199,39 @@ mod scene_base_cache {
                 {
                     let parent_tl = get_tl(parent_sym_id);
                     let layer = &parent_tl.layers[layer_idx];
-                    if let Some(old_cl) = old_by_key.remove(&(lvl_idx, parent_sym_id, layer.id)) {
-                        let key_unchanged = old_cl.excluded_instance_gid == excl_gid
-                            && old_cl.world_xform_bits == xform_bits
-                            && old_cl.eval_frame == ef
-                            && old_cl
-                                .cel_sig
-                                .matches_layer_keyframe(layer, kf_idx, &doc.library);
-                        if key_unchanged {
+                    let old_cl = match old_by_key.remove(&(lvl_idx, parent_sym_id, layer.id)) {
+                        Some(old_cl)
+                            if old_cl.excluded_instance_gid == excl_gid
+                                && old_cl.world_xform_bits == xform_bits
+                                && old_cl.eval_frame == ef
+                                && old_cl.cel_sig.matches_layer_keyframe(
+                                    layer,
+                                    kf_idx,
+                                    &doc.library,
+                                ) =>
+                        {
                             new_layers.push(old_cl);
                             continue;
                         }
-                        new_layers.push(Self::build_layer(
-                            doc,
-                            parent_tl,
-                            (
-                                lvl_idx,
-                                parent_sym_id,
-                                excl_gid,
-                                parent_world_xform,
-                                xform_bits,
-                            ),
-                            (curr_f, layer_idx, kf_idx, ef),
-                            (old_cl.world_xform_bits == xform_bits).then_some(&old_cl.shapes),
-                        ));
-                    } else {
-                        new_layers.push(Self::build_layer(
-                            doc,
-                            parent_tl,
-                            (
-                                lvl_idx,
-                                parent_sym_id,
-                                excl_gid,
-                                parent_world_xform,
-                                xform_bits,
-                            ),
-                            (curr_f, layer_idx, kf_idx, ef),
-                            None,
-                        ));
-                    }
+                        old_cl => old_cl,
+                    };
+                    let reusable_shapes = old_cl
+                        .as_ref()
+                        .filter(|old_cl| old_cl.world_xform_bits == xform_bits)
+                        .map(|old_cl| old_cl.shapes.as_slice());
+                    new_layers.push(Self::build_layer(
+                        doc,
+                        parent_tl,
+                        (
+                            lvl_idx,
+                            parent_sym_id,
+                            excl_gid,
+                            parent_world_xform,
+                            xform_bits,
+                        ),
+                        (curr_f, layer_idx, kf_idx, ef),
+                        reusable_shapes,
+                    ));
                 }
                 self.layers = new_layers;
                 self.combined_screen_cache = None;
@@ -1494,21 +1488,14 @@ pub(crate) fn build_scene_order_by_layer_ids(
     let mut replace_at_base: Vec<Vec<usize>> = vec![Vec::new(); base.len()];
 
     for (add_idx, (placement, shape)) in overlay.add.iter().enumerate() {
-        match placement {
+        // 置き場が見つからなかったときに、レイヤーの順番で入れる位置を決めるレイヤー
+        let layer_order_fallback = match placement {
             Placement::ReplaceAt(target_id) => {
                 if let Some(pos) = base.iter().position(|s| s.shape_id == *target_id) {
                     replace_at_base[pos].push(add_idx);
+                    None
                 } else {
-                    let lid = shape.layer_id;
-                    let ord = layer_order_index(layer_order_ids, lid);
-                    if let Some(pos) = base
-                        .iter()
-                        .rposition(|s| layer_order_index(layer_order_ids, s.layer_id) <= ord)
-                    {
-                        after_base[pos].push((2 + ord.min(usize::MAX - 2), add_idx));
-                    } else {
-                        before_all.push((ord, add_idx));
-                    }
+                    Some(shape.layer_id)
                 }
             }
             Placement::TopOfLayer(lid, scope) => {
@@ -1520,19 +1507,24 @@ pub(crate) fn build_scene_order_by_layer_ids(
                     .flatten();
                 if let Some(pos) = scope_pos {
                     after_base[pos].push((0, add_idx));
+                    None
                 } else if let Some(pos) = base.iter().rposition(|s| s.layer_id == *lid) {
                     after_base[pos].push((1, add_idx));
+                    None
                 } else {
-                    let ord = layer_order_index(layer_order_ids, *lid);
-                    if let Some(pos) = base
-                        .iter()
-                        .rposition(|s| layer_order_index(layer_order_ids, s.layer_id) <= ord)
-                    {
-                        after_base[pos].push((2 + ord.min(usize::MAX - 2), add_idx));
-                    } else {
-                        before_all.push((ord, add_idx));
-                    }
+                    Some(*lid)
                 }
+            }
+        };
+        if let Some(lid) = layer_order_fallback {
+            let ord = layer_order_index(layer_order_ids, lid);
+            if let Some(pos) = base
+                .iter()
+                .rposition(|s| layer_order_index(layer_order_ids, s.layer_id) <= ord)
+            {
+                after_base[pos].push((2 + ord.min(usize::MAX - 2), add_idx));
+            } else {
+                before_all.push((ord, add_idx));
             }
         }
     }
