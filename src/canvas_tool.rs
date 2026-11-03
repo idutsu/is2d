@@ -655,8 +655,8 @@ pub(crate) struct Clipboard {
     pub(crate) source_symbols_revision: u64,
     /// クリップボード内のシェイプが参照しているシンボル定義のスナップショット群（依存順）
     pub(crate) symbols: Vec<Arc<SymbolDef>>,
-    /// 現在のコピー元から各貼り付け先タブへ既にインポート済みのシンボルID対応表 `(target_doc_id, source_sym_id) -> target_sym_id`
-    pub(crate) imported_map: HashMap<(u64, u64), u64>,
+    /// 各コピー元タブから貼り付け先タブへ既にインポート済みのシンボルID対応表 `(source_doc_id, source_sym_id, target_doc_id) -> target_sym_id`
+    pub(crate) imported_map: HashMap<(u64, u64, u64), u64>,
     /// `Cmd+V` 押下時に `Event::Paste` または `Key::V` (pressed) で既にペーストを実行済みかのフラグ（OSクリップボード空時のキーリリースフォールバック二重発火防止用）
     pub(crate) paste_triggered_on_press: bool,
     /// 直近フレームで `Cmd`/`Ctrl` 修飾キーが押されていた猶予フレーム数（`V` より先に `Cmd` を離した場合のフォールバック用）

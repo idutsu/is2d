@@ -17763,3 +17763,97 @@ fn test_timeline_move_or_copy_frames_clips_range_per_source_layer_frame_count() 
         }
     }
 }
+
+#[test]
+fn test_cross_tab_symbol_paste_preserves_imported_map_across_intermediate_copies() {
+    use crate::doc_actions::{apply, Action};
+
+    let ctx = egui::Context::default();
+    let red = Color32::from_rgb(220, 40, 40);
+    let blue = Color32::from_rgb(40, 90, 230);
+    let green = Color32::from_rgb(40, 180, 90);
+
+    // 1. タブ A（idx 0）のシンボル S をコピーしてタブ B（idx 1）に貼る → B で別の図形を選んでコピー →
+    //    A に戻って S をもう一度コピーして B に貼ると、B のライブラリは「Symbol 1」の1つだけ
+    let mut app = Is2dApp::default();
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(50.0, 50.0), Point::new(120.0, 50.0)],
+            radius: 8.0,
+            color: red,
+        },
+    ));
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    assert_eq!(app.doc.library.len(), 1);
+    assert_eq!(app.doc.library[0].id, 1);
+    assert_eq!(app.doc.library[0].name, "Symbol 1");
+    assert!(apply(&mut app, Action::Copy));
+
+    // タブ B（idx 1）を作って 1 回目の貼り付け
+    crate::project_io::new_project(&mut app, &ctx);
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    assert_eq!(app.doc.library.len(), 1);
+    assert_eq!(app.doc.library[0].name, "Symbol 1");
+
+    // タブ B で別の生の図形を描いてそれだけを選んでコピーする
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(200.0, 200.0), Point::new(260.0, 200.0)],
+            radius: 8.0,
+            color: blue,
+        },
+    ));
+    let raw_id = app.doc.root.layers[0].keyframes[0]
+        .cel
+        .shapes
+        .last()
+        .unwrap()
+        .shape_id;
+    app.session.selection.clear();
+    app.session.selection.shapes.insert(raw_id);
+    assert!(apply(&mut app, Action::Copy));
+
+    // タブ A（idx 0）に戻ってシンボル S をもう一度コピーし、タブ B（idx 1）に戻って貼り付ける
+    crate::project_io::switch_to_tab(&mut app, 0, Some(&ctx));
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::Copy));
+    crate::project_io::switch_to_tab(&mut app, 1, Some(&ctx));
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    assert_eq!(
+        app.doc.library.len(),
+        1,
+        "2回目の貼り付けの後もタブ B のライブラリが「Symbol 1」の1つだけであること"
+    );
+    assert_eq!(app.doc.library[0].name, "Symbol 1");
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.instances.len(), 2);
+
+    // 2. 別のタブ C（idx 2）にも同じ番号（1番）の緑のシンボルがあるとき、タブ B に貼ると別々のシンボルとして2つ取り込まれる
+    crate::project_io::new_project(&mut app, &ctx);
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(80.0, 80.0), Point::new(150.0, 80.0)],
+            radius: 8.0,
+            color: green,
+        },
+    ));
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    assert_eq!(app.doc.library[0].id, 1);
+    assert!(apply(&mut app, Action::Copy));
+
+    crate::project_io::switch_to_tab(&mut app, 1, Some(&ctx));
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    assert_eq!(
+        app.doc.library.len(),
+        2,
+        "タブ A の 1 番とタブ C の 1 番が取り違えられず、別々のシンボルとして 2 つ取り込まれること"
+    );
+    assert_eq!(app.doc.library[0].name, "Symbol 1");
+    assert_eq!(app.doc.library[1].name, "Symbol 1 (2)");
+    assert!(app.scene().iter().any(|s| s.color == red));
+    assert!(app.scene().iter().any(|s| s.color == green));
+}

@@ -174,9 +174,6 @@ fn remap_timeline_group_ids(tl: &mut Timeline, doc: &mut Document) {
 /// `copy_selected_shapes`（`Cmd+C`）実行時に、クリップボード内の図形が参照しているシンボル定義（入れ子含む）を `Arc` 共有スナップショットとして退避する
 pub(crate) fn capture_clipboard_symbols(tab: &Tab, clipboard: &mut Clipboard) {
     let active_doc_id = tab.id;
-    if active_doc_id != clipboard.source_doc_id {
-        clipboard.imported_map.clear();
-    }
     let reusable = if active_doc_id == clipboard.source_doc_id
         && tab.doc.revision == clipboard.source_symbols_revision
     {
@@ -219,7 +216,7 @@ fn existing_reusable_target_symbol_id(
         .or_else(|| {
             clipboard
                 .imported_map
-                .get(&(target_doc_id, src_sym_id))
+                .get(&(source_doc_id, src_sym_id, target_doc_id))
                 .copied()
                 .filter(|&id| tab.doc.find_symbol(id).is_some())
         })?;
@@ -388,7 +385,7 @@ pub(crate) fn resolve_clipboard_for_paste(
         local_sym_map.insert(imported.id, new_id);
         clipboard
             .imported_map
-            .insert((target_doc_id, imported.id), new_id);
+            .insert((source_doc_id, imported.id, target_doc_id), new_id);
 
         imported.id = new_id;
         if tab.doc.library.iter().any(|s| s.name == imported.name) {
