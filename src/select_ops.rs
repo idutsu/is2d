@@ -692,18 +692,15 @@ pub(crate) fn set_moved_vertex(
 ) {
     let delta = target_pt - orig_vertex;
     shape.edit_contour(contour_idx, |contour| {
-        let n = contour.segments.len();
-        if n > 0 && seg_idx < n {
-            let prev_idx = (seg_idx + n - 1) % n;
-            let segs = contour.segments_mut();
-            segs[prev_idx].p2 = target_pt;
-            segs[seg_idx].p0 = target_pt;
-            segs[prev_idx].p1 = orig_ctrls.0 + delta * 0.5;
-            segs[seg_idx].p1 = orig_ctrls.1 + delta * 0.5;
-            true
-        } else {
-            false
-        }
+        let Some(prev_idx) = contour.prev_seg_idx(seg_idx) else {
+            return false;
+        };
+        let segs = contour.segments_mut();
+        segs[prev_idx].p2 = target_pt;
+        segs[seg_idx].p0 = target_pt;
+        segs[prev_idx].p1 = orig_ctrls.0 + delta * 0.5;
+        segs[seg_idx].p1 = orig_ctrls.1 + delta * 0.5;
+        true
     });
 }
 
@@ -716,11 +713,7 @@ pub(crate) fn apply_move_vertex_to_shape(
     drag_pt: Point,
 ) {
     let Some((prev_idx, prev_p0, curr_p2)) = shape.get_contour(contour_idx).and_then(|c| {
-        let n = c.segments.len();
-        if n == 0 || seg_idx >= n {
-            return None;
-        }
-        let prev_idx = (seg_idx + n - 1) % n;
+        let prev_idx = c.prev_seg_idx(seg_idx)?;
         Some((prev_idx, c.segments[prev_idx].p0, c.segments[seg_idx].p2))
     }) else {
         return;

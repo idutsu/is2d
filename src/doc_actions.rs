@@ -1259,11 +1259,7 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         .shape_by_id(shape_id)
         .and_then(|s| s.get_contour(contour_idx))
         .and_then(|contour| {
-            let n = contour.segments.len();
-            if n == 0 || seg_idx >= n {
-                return None;
-            }
-            let prev_idx = (seg_idx + n - 1) % n;
+            let prev_idx = contour.prev_seg_idx(seg_idx)?;
             Some((contour.segments[prev_idx].p1, contour.segments[seg_idx].p1))
         })
     else {
