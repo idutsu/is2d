@@ -25,7 +25,10 @@ use kurbo::Point;
 
 #[cfg(test)]
 pub(crate) use canvas_tool::MAX_UNDO_HISTORY;
-use canvas_tool::{Clipboard, NoticeKind, SelectSubMode, StatusToast, Tab, Tool, ToolSettings};
+use canvas_tool::{
+    key_pressed_no_repeat, Clipboard, NoticeKind, SelectSubMode, StatusToast, Tab, Tool,
+    ToolSettings,
+};
 use doc_actions::{apply, Action, ActionHost};
 use panels::{RightPanelTab, UiAction};
 use project_io::{PendingCloseConfirm, ProjectWorkspace};
@@ -101,21 +104,6 @@ fn configure_sharp_light_theme(ctx: &egui::Context) {
     visuals.widgets.active.rounding = egui::Rounding::ZERO;
     visuals.widgets.open.rounding = egui::Rounding::ZERO;
     ctx.set_visuals(visuals);
-}
-
-/// キーリピートを除外して「押された最初のフレームのみ `true`」を返すヘルパー
-fn key_pressed_no_repeat(i: &egui::InputState, target: Key) -> bool {
-    i.events.iter().any(|ev| {
-        matches!(
-            ev,
-            egui::Event::Key {
-                key,
-                pressed: true,
-                repeat: false,
-                ..
-            } if *key == target
-        )
-    })
 }
 
 // ============================================================================

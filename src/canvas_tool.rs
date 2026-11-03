@@ -76,21 +76,25 @@ impl Tool {
 
     /// 押下されたショートカットキー（キーリピート除外）から対応するツールを返す
     pub(crate) fn from_shortcut_input(i: &egui::InputState) -> Option<Tool> {
-        Self::ALL.into_iter().find(|tool| {
-            let target = tool.shortcut_key();
-            i.events.iter().any(|ev| {
-                matches!(
-                    ev,
-                    egui::Event::Key {
-                        key,
-                        pressed: true,
-                        repeat: false,
-                        ..
-                    } if *key == target
-                )
-            })
-        })
+        Self::ALL
+            .into_iter()
+            .find(|tool| key_pressed_no_repeat(i, tool.shortcut_key()))
     }
+}
+
+/// キーリピートを除外して「押された最初のフレームのみ `true`」を返すヘルパー
+pub(crate) fn key_pressed_no_repeat(i: &egui::InputState, target: Key) -> bool {
+    i.events.iter().any(|ev| {
+        matches!(
+            ev,
+            egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                ..
+            } if *key == target
+        )
+    })
 }
 
 /// 選択ツール (`Tool::Select`) と自由変形ツール (`Tool::Transform`) で共通利用する選択オブジェクト平行移動ドラッグ状態
