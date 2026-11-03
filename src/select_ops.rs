@@ -431,6 +431,33 @@ pub(crate) fn compute_hover_target(
     }
 
     let topmost_fill_idx = scene.topmost_shape_at(mouse_pt, &session.editing_group_path);
+    let is_sel = is_sel.as_slice();
+    // 頂点・辺の当たり判定の候補になる図形を前から順に返す
+    // （最前面の塗りより後ろの図形と、外接矩形を `radius` だけ広げてもマウスが入らない図形は除く）
+    let candidate_shapes = |radius: f64| {
+        (0..scene_len).rev().filter_map(move |s_idx| {
+            if topmost_fill_idx.is_some_and(|top| s_idx < top) {
+                return None;
+            }
+            let shape = scene.get(s_idx)?;
+            let bbox = shape.geometry_bounding_box()?;
+            if (sub_mode == SelectSubMode::Reshape && is_sel[s_idx])
+                || !shape.is_raw_at_scope(&session.editing_group_path)
+                || !bbox.inflate(radius, radius).contains(mouse_pt)
+            {
+                return None;
+            }
+            Some((s_idx, shape))
+        })
+    };
+    // `s_idx` の図形より前面にある編集スコープ内の図形が、点 `pt` を覆っているか
+    let hidden_by_front = |s_idx: usize, pt: Point| {
+        (s_idx + 1..scene_len).any(|front_idx| {
+            scene.get(front_idx).is_some_and(|front| {
+                front.is_in_editing_scope(&session.editing_group_path) && front.contains_point(pt)
+            })
+        })
+    };
 
     if sub_mode != SelectSubMode::AddAnchor {
         let v_radius = if sub_mode == SelectSubMode::DeleteAnchor {
@@ -439,22 +466,7 @@ pub(crate) fn compute_hover_target(
             vertex_hit_radius
         };
         let mut best_vertex: Option<(f64, HoverTarget)> = None;
-        for s_idx in (0..scene_len).rev() {
-            if topmost_fill_idx.is_some_and(|top| s_idx < top) {
-                continue;
-            }
-            let Some(shape) = scene.get(s_idx) else {
-                continue;
-            };
-            let Some(bbox) = shape.geometry_bounding_box() else {
-                continue;
-            };
-            if (sub_mode == SelectSubMode::Reshape && is_sel[s_idx])
-                || !shape.is_raw_at_scope(&session.editing_group_path)
-                || !bbox.inflate(v_radius, v_radius).contains(mouse_pt)
-            {
-                continue;
-            }
+        for (s_idx, shape) in candidate_shapes(v_radius) {
             for (c_idx, contour) in shape.contours().enumerate() {
                 if sub_mode == SelectSubMode::DeleteAnchor && contour.segments.len() <= 2 {
                     continue;
@@ -462,13 +474,7 @@ pub(crate) fn compute_hover_target(
                 for (seg_idx, seg) in contour.segments.iter().enumerate() {
                     let dist = (mouse_pt - seg.p0).hypot();
                     if dist <= v_radius && best_vertex.as_ref().is_none_or(|(d, _)| dist < *d) {
-                        let occluded_by_front = (s_idx + 1..scene_len).any(|front_idx| {
-                            scene.get(front_idx).is_some_and(|front| {
-                                front.is_in_editing_scope(&session.editing_group_path)
-                                    && front.contains_point(seg.p0)
-                            })
-                        });
-                        if occluded_by_front {
+                        if hidden_by_front(s_idx, seg.p0) {
                             continue;
                         }
                         best_vertex = Some((
@@ -493,24 +499,7 @@ pub(crate) fn compute_hover_target(
     }
 
     let mut best_edge: Option<(f64, HoverTarget)> = None;
-    for s_idx in (0..scene_len).rev() {
-        if topmost_fill_idx.is_some_and(|top| s_idx < top) {
-            continue;
-        }
-        let Some(shape) = scene.get(s_idx) else {
-            continue;
-        };
-        let Some(bbox) = shape.geometry_bounding_box() else {
-            continue;
-        };
-        if (sub_mode == SelectSubMode::Reshape && is_sel[s_idx])
-            || !shape.is_raw_at_scope(&session.editing_group_path)
-            || !bbox
-                .inflate(anchor_edit_hit_radius, anchor_edit_hit_radius)
-                .contains(mouse_pt)
-        {
-            continue;
-        }
+    for (s_idx, shape) in candidate_shapes(anchor_edit_hit_radius) {
         let max_dist = if sub_mode == SelectSubMode::AddAnchor {
             anchor_edit_hit_radius
         } else if shape.contains_point(mouse_pt) {
@@ -533,13 +522,7 @@ pub(crate) fn compute_hover_target(
                 };
                 let dist = nearest.distance_sq.sqrt();
                 if dist <= max_dist && best_edge.as_ref().is_none_or(|(d, _)| dist < *d) {
-                    let occluded_by_front = (s_idx + 1..scene_len).any(|front_idx| {
-                        scene.get(front_idx).is_some_and(|front| {
-                            front.is_in_editing_scope(&session.editing_group_path)
-                                && front.contains_point(eval_pt)
-                        })
-                    });
-                    if occluded_by_front {
+                    if hidden_by_front(s_idx, eval_pt) {
                         continue;
                     }
                     best_edge = Some((
