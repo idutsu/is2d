@@ -2992,6 +2992,22 @@ impl Tab {
         self.view.ensure_valid_library_selection(&self.doc.library);
     }
 
+    /// 浮いている片（`Floating`）がある場合は一時タブ上で確定した `Document` の写しを返し、元のタブや文書には触れない
+    pub(crate) fn committed_document_copy(&self) -> Document {
+        if let Some(fl) = self.session.floating().filter(|fl| fl.needs_merge_commit()) {
+            let mut temp_tab = Self::new_empty(self.id, self.untitled_number);
+            temp_tab.doc = self.doc.clone();
+            temp_tab.session.edit_path = self.session.edit_path.clone();
+            temp_tab.session.editing_group_path = self.session.editing_group_path.clone();
+            temp_tab.session.set_floating(Some(fl.clone()));
+            temp_tab.refresh_scene_base();
+            commit_floating(&mut temp_tab);
+            temp_tab.doc
+        } else {
+            self.doc.clone()
+        }
+    }
+
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
         self.history.last_coalesce_key = None;
         let prev_selection = self.session.selection.clone();

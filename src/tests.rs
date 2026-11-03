@@ -15354,3 +15354,223 @@ fn test_arrange_groups_and_symbols_z_order() {
         assert_eq!(colors_in_scene(&app), vec![c_raw, c_b, c_c, c_a]);
     }
 }
+
+#[test]
+fn test_video_export_common_render_and_dimensions() {
+    use crate::canvas_tool::View;
+    use crate::vector_engine::Contour;
+    use crate::video_export::{export_dimensions, render_frame};
+
+    let make_rect_shape = |x: f64, y: f64, w: f64, h: f64, color: Color32| -> FillShape {
+        let p00 = Point::new(x, y);
+        let p10 = Point::new(x + w, y);
+        let p11 = Point::new(x + w, y + h);
+        let p01 = Point::new(x, y + h);
+        FillShape::new(
+            color,
+            Contour::new(vec![
+                QuadBez::new(p00, p00.midpoint(p10), p10),
+                QuadBez::new(p10, p10.midpoint(p11), p11),
+                QuadBez::new(p11, p11.midpoint(p01), p01),
+                QuadBez::new(p01, p01.midpoint(p00), p00),
+            ]),
+            Vec::new(),
+        )
+    };
+
+    let pixel_at = |rgba: &[u8], width: u32, x: u32, y: u32| -> [u8; 4] {
+        let idx = ((y as usize) * (width as usize) + (x as usize)) * 4;
+        [rgba[idx], rgba[idx + 1], rgba[idx + 2], rgba[idx + 3]]
+    };
+
+    let center = View::DEFAULT_STAGE_CENTER;
+    let red = Color32::from_rgb(255, 0, 0);
+    let blue = Color32::from_rgb(0, 0, 255);
+
+    // 1. ステージ 800×450、背景だけの作品で、render_frame の画像がすべて白
+    let mut app = Is2dApp::default();
+    let (w, h) = export_dimensions(app.tab().doc.stage_size);
+    assert_eq!((w, h), (800, 450));
+    let bg_only = render_frame(&app.tab().doc, 0, w, h);
+    assert_eq!(bg_only.len(), (w as usize) * (h as usize) * 4);
+    assert!(bg_only.iter().all(|&b| b == 255));
+
+    // 2. ステージの真ん中に赤い四角を描いた作品で、画像の真ん中が赤、四隅が白
+    let rect_shape = make_rect_shape(center.x - 50.0, center.y - 50.0, 100.0, 100.0, red);
+    put_cel_shapes(&mut app, 0, 0, vec![rect_shape]);
+    let red_center_img = render_frame(&app.tab().doc, 0, w, h);
+    assert_eq!(pixel_at(&red_center_img, w, w / 2, h / 2), [255, 0, 0, 255]);
+    assert_eq!(pixel_at(&red_center_img, w, 0, 0), [255, 255, 255, 255]);
+    assert_eq!(pixel_at(&red_center_img, w, w - 1, 0), [255, 255, 255, 255]);
+    assert_eq!(pixel_at(&red_center_img, w, 0, h - 1), [255, 255, 255, 255]);
+    assert_eq!(
+        pixel_at(&red_center_img, w, w - 1, h - 1),
+        [255, 255, 255, 255]
+    );
+
+    // 3. その赤い四角のレイヤーを非表示にすると、画像がすべて白
+    app.tab_mut().doc.root.layers[0].visible = false;
+    let hidden_img = render_frame(&app.tab().doc, 0, w, h);
+    assert!(hidden_img.iter().all(|&b| b == 255));
+    app.tab_mut().doc.root.layers[0].visible = true;
+
+    // 4. 2つのレイヤーを重ねたとき、手前のレイヤー（tl.layers の後ろのほう）の色が上に塗られる
+    apply(&mut app, Action::AddLayer);
+    assert_eq!(app.tab().doc.root.layers.len(), 2);
+    let blue_rect = make_rect_shape(center.x - 40.0, center.y - 40.0, 80.0, 80.0, blue);
+    put_cel_shapes(&mut app, 1, 0, vec![blue_rect]);
+    let layered_img = render_frame(&app.tab().doc, 0, w, h);
+    assert_eq!(pixel_at(&layered_img, w, w / 2, h / 2), [0, 0, 255, 255]);
+
+    // 5. シンボルのクラシックトゥイーン（左端から右端へ移動）の途中のコマで、四角が途中の位置に塗られる
+    let mut tween_app = Is2dApp::default();
+    let stage_left = center.x - 400.0;
+    let start_cx = stage_left + 100.0;
+    let end_cx = stage_left + 700.0;
+    let box_shape = make_rect_shape(start_cx - 30.0, center.y - 30.0, 60.0, 60.0, red);
+    put_cel_shapes(&mut tween_app, 0, 0, vec![box_shape]);
+    tween_app.tab_mut().session.set_selected_indices(vec![0]);
+    apply(&mut tween_app, Action::ConvertToSymbol);
+    apply(&mut tween_app, Action::ToggleTween);
+    for _ in 0..4 {
+        apply(&mut tween_app, Action::ExtendFrame);
+    }
+    apply(
+        &mut tween_app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 4,
+        },
+    );
+    apply(&mut tween_app, Action::InsertKeyframe { copy_prev: true });
+    tween_app.tab_mut().session.set_selected_indices(vec![0]);
+    apply(
+        &mut tween_app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(end_cx - start_cx, 0.0),
+        },
+    );
+    let mid_img = render_frame(&tween_app.tab().doc, 2, w, h);
+    assert_eq!(pixel_at(&mid_img, w, 400, 225), [255, 0, 0, 255]);
+    assert_eq!(pixel_at(&mid_img, w, 100, 225), [255, 255, 255, 255]);
+    assert_eq!(pixel_at(&mid_img, w, 700, 225), [255, 255, 255, 255]);
+
+    // 6. ステージ 801×451 のとき、書き出しの大きさが 802×452 になり、右端と下端が白
+    let mut odd_app = Is2dApp::default();
+    apply(
+        &mut odd_app,
+        Action::SetStageSize {
+            size: Vec2::new(801.0, 451.0),
+        },
+    );
+    let (odd_w, odd_h) = export_dimensions(odd_app.tab().doc.stage_size);
+    assert_eq!((odd_w, odd_h), (802, 452));
+    let full_cover = make_rect_shape(center.x - 600.0, center.y - 400.0, 1200.0, 800.0, red);
+    put_cel_shapes(&mut odd_app, 0, 0, vec![full_cover]);
+    let odd_img = render_frame(&odd_app.tab().doc, 0, odd_w, odd_h);
+    assert_eq!(pixel_at(&odd_img, odd_w, 400, 225), [255, 0, 0, 255]);
+    for y in 0..odd_h {
+        assert_eq!(
+            pixel_at(&odd_img, odd_w, odd_w - 1, y),
+            [255, 255, 255, 255],
+            "右端の1ピクセル列 (x = 801) は白であること"
+        );
+    }
+    for x in 0..odd_w {
+        assert_eq!(
+            pixel_at(&odd_img, odd_w, x, odd_h - 1),
+            [255, 255, 255, 255],
+            "下端の1ピクセル行 (y = 451) は白であること"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_video_export_macos_mp4_cancel_and_error() {
+    use crate::canvas_tool::View;
+    use crate::vector_engine::Contour;
+    use crate::video_export::{tmp_export_path, VideoExportJob, VideoExportOutcome};
+
+    let make_rect_shape = |x: f64, y: f64, w: f64, h: f64, color: Color32| -> FillShape {
+        let p00 = Point::new(x, y);
+        let p10 = Point::new(x + w, y);
+        let p11 = Point::new(x + w, y + h);
+        let p01 = Point::new(x, y + h);
+        FillShape::new(
+            color,
+            Contour::new(vec![
+                QuadBez::new(p00, p00.midpoint(p10), p10),
+                QuadBez::new(p10, p10.midpoint(p11), p11),
+                QuadBez::new(p11, p11.midpoint(p01), p01),
+                QuadBez::new(p01, p01.midpoint(p00), p00),
+            ]),
+            Vec::new(),
+        )
+    };
+
+    let tmp_dir = std::env::temp_dir().join(format!("is2d_video_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let center = View::DEFAULT_STAGE_CENTER;
+    let red = Color32::from_rgb(255, 0, 0);
+
+    // 7. 10 コマの小さな作品を一時フォルダに書き出し、ファイルができていること、大きさが 0 でないこと、先頭から 4〜8 バイト目が ftyp であること
+    {
+        let mut app = Is2dApp::default();
+        let rect = make_rect_shape(center.x - 40.0, center.y - 40.0, 80.0, 80.0, red);
+        put_cel_shapes(&mut app, 0, 0, vec![rect]);
+        for _ in 0..9 {
+            apply(&mut app, Action::ExtendFrame);
+        }
+        assert_eq!(app.tab().doc.root.total_frames, 10);
+
+        let out_path = tmp_dir.join("ten_frames.mp4");
+        let tmp_file = tmp_export_path(&out_path);
+        let mut job = VideoExportJob::start(app.tab().committed_document_copy(), out_path.clone());
+        let outcome = job.wait();
+        assert_eq!(outcome, VideoExportOutcome::Completed);
+        assert!(out_path.exists());
+        assert!(!tmp_file.exists());
+        let bytes = std::fs::read(&out_path).unwrap();
+        assert!(bytes.len() > 8);
+        assert_eq!(&bytes[4..8], b"ftyp");
+    }
+
+    // 8. 3 コマ目で中止すると、目的の名前のファイルも一時ファイルも残らないこと
+    {
+        let mut app = Is2dApp::default();
+        let rect = make_rect_shape(center.x - 40.0, center.y - 40.0, 80.0, 80.0, red);
+        put_cel_shapes(&mut app, 0, 0, vec![rect]);
+        app.tab_mut().doc.root.layers[0].frame_count = 500;
+        app.tab_mut().doc.root.total_frames = 500;
+
+        let cancel_path = tmp_dir.join("cancelled.mp4");
+        let cancel_tmp = tmp_export_path(&cancel_path);
+        let mut job =
+            VideoExportJob::start(app.tab().committed_document_copy(), cancel_path.clone());
+        while job.progress().0 < 3 {
+            std::hint::spin_loop();
+        }
+        let outcome = job.cancel_and_wait();
+        assert_eq!(outcome, VideoExportOutcome::Cancelled);
+        assert!(!cancel_path.exists());
+        assert!(!cancel_tmp.exists());
+    }
+
+    // 9. 書き込めない場所を書き出し先にすると Err になり、ファイルが残らないこと
+    {
+        let app = Is2dApp::default();
+        let bad_dir = tmp_dir.join("nonexistent_subdir");
+        let bad_path = bad_dir.join("out.mp4");
+        let bad_tmp = tmp_export_path(&bad_path);
+        let mut job = VideoExportJob::start(app.tab().committed_document_copy(), bad_path.clone());
+        let outcome = job.wait();
+        assert!(matches!(outcome, VideoExportOutcome::Failed(_)));
+        assert!(!bad_path.exists());
+        assert!(!bad_tmp.exists());
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

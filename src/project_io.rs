@@ -6,9 +6,7 @@ use eframe::egui::{self, Color32, Vec2};
 use kurbo::{Affine, Point, QuadBez};
 use serde::{Deserialize, Serialize};
 
-use crate::canvas_tool::{
-    cancel_active_drag, commit_floating, SelectSubMode, Session, Tab, UndoHistory, View,
-};
+use crate::canvas_tool::{cancel_active_drag, SelectSubMode, Session, Tab, UndoHistory, View};
 use crate::symbol::{
     Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode, TweenRotate,
 };
@@ -906,19 +904,7 @@ impl ProjectDocument {
     /// 現在の `Tab` から保存用の `ProjectDocument` を生成する
     /// （`Floating` がある場合は `Document` のコピーに対して確定した内容を書き出し、`Session` も `Document` も書き換えない）
     pub(crate) fn from_app(tab: &Tab) -> Self {
-        let mut temp_tab;
-        let doc = if let Some(fl) = tab.session.floating().filter(|fl| fl.needs_merge_commit()) {
-            temp_tab = Tab::new_empty(tab.id, tab.untitled_number);
-            temp_tab.doc = tab.doc.clone();
-            temp_tab.session.edit_path = tab.session.edit_path.clone();
-            temp_tab.session.editing_group_path = tab.session.editing_group_path.clone();
-            temp_tab.session.set_floating(Some(fl.clone()));
-            temp_tab.refresh_scene_base();
-            commit_floating(&mut temp_tab);
-            &temp_tab.doc
-        } else {
-            &tab.doc
-        };
+        let doc = tab.committed_document_copy();
 
         let mut saved_timeline: SavedTimeline = (&doc.root).into();
         saved_timeline.fps = doc.fps.clamp(1, 60);

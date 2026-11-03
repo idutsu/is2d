@@ -120,6 +120,8 @@ pub(crate) enum UiAction {
     OpenProjectDialog,
     SaveProject,
     SaveProjectAsDialog,
+    ExportVideoDialog,
+    CancelVideoExport,
     CloseActiveTab,
     CloseTab(usize),
     SwitchToTab(usize),
@@ -235,6 +237,12 @@ fn draw_file_menu(actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
             &format!("{MOD_KEY}+Shift+S"),
         ) {
             actions.push(UiAction::SaveProjectAsDialog);
+        }
+
+        ui.separator();
+
+        if menu_action_button(ui, true, "動画を書き出し（MP4）…", "") {
+            actions.push(UiAction::ExportVideoDialog);
         }
 
         ui.separator();
@@ -2115,6 +2123,52 @@ pub(crate) fn draw_unsaved_close_confirm_modal(
                 }
                 if ui.button("キャンセル").clicked() {
                     actions.push(UiAction::ConfirmPendingCloseCancel);
+                }
+            });
+        });
+}
+
+/// 動画書き出し中の進み具合と「中止」ボタンを画面中央に表示し、背後の操作をブロックするモーダルダイアログ
+pub(crate) fn draw_video_export_modal(
+    progress: Option<(usize, usize)>,
+    actions: &mut Vec<UiAction>,
+    ctx: &egui::Context,
+) {
+    let Some((done, total)) = progress else {
+        return;
+    };
+    let total = total.max(1);
+    let done = done.min(total);
+
+    egui::Area::new(egui::Id::new("video_export_backdrop"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(Pos2::ZERO)
+        .show(ctx, |ui| {
+            let screen_rect = ctx.screen_rect();
+            ui.allocate_rect(screen_rect, egui::Sense::click_and_drag());
+            ui.painter().rect_filled(
+                screen_rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(15, 20, 28, 96),
+            );
+        });
+
+    egui::Window::new("動画を書き出し（MP4）")
+        .id(egui::Id::new("video_export_modal"))
+        .order(egui::Order::Tooltip)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.set_min_width(300.0);
+            ui.add_space(4.0);
+            ui.label(format!("動画を書き出しています　{done} / {total}"));
+            ui.add_space(8.0);
+            ui.add(egui::ProgressBar::new((done as f32) / (total as f32)).desired_width(280.0));
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| {
+                if ui.button("中止").clicked() {
+                    actions.push(UiAction::CancelVideoExport);
                 }
             });
         });

@@ -14,6 +14,9 @@ mod tool_transform;
 mod vector_boolean;
 mod vector_engine;
 mod vector_stroke;
+mod video_export;
+#[cfg(target_os = "macos")]
+mod video_export_macos;
 
 use std::time::Instant;
 
@@ -145,6 +148,8 @@ pub(crate) struct Is2dApp {
     pub(crate) pending_close_confirm: Option<PendingCloseConfirm>,
     /// 全タブの未保存確認が完了し、OSウィンドウのクローズを許可するフラグ
     pub(crate) allow_viewport_close: bool,
+    /// バックグラウンドで進行中の動画（MP4）書き出しジョブ
+    pub(crate) video_export: Option<video_export::VideoExportJob>,
 }
 
 impl Default for Is2dApp {
@@ -162,6 +167,7 @@ impl Default for Is2dApp {
             last_window_title: String::new(),
             pending_close_confirm: None,
             allow_viewport_close: false,
+            video_export: None,
         }
     }
 }
@@ -306,13 +312,113 @@ impl Is2dApp {
         apply(self, Action::Redo);
     }
 
+    /// 保存先選択ダイアログを表示し、現在のタブの動画（MP4）書き出しをバックグラウンドで開始する
+    pub(crate) fn export_video_dialog(&mut self) {
+        if self.video_export.is_some() {
+            return;
+        }
+        self.stop_playback();
+        apply(self, Action::EndCoalesce { key: None });
+        canvas_tool::cancel_active_drag(self.tab_mut());
+        self.tab_mut().view.pan_last_screen_pos = None;
+
+        let stem = self
+            .tab()
+            .file
+            .as_deref()
+            .and_then(std::path::Path::file_stem)
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.tab().base_title());
+        let default_name = format!("{stem}.mp4");
+
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("MP4 動画 (*.mp4)", &["mp4"])
+            .set_file_name(&default_name);
+        if let Some(parent) = self.tab().file.as_deref().and_then(std::path::Path::parent) {
+            dialog = dialog.set_directory(parent);
+        }
+
+        let Some(mut path) = dialog.save_file() else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension("mp4");
+        }
+
+        let doc = self.tab().committed_document_copy();
+        self.video_export = Some(video_export::VideoExportJob::start(doc, path));
+    }
+
+    fn finish_video_export_outcome(
+        &mut self,
+        path: &std::path::Path,
+        outcome: video_export::VideoExportOutcome,
+    ) {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("動画");
+        match outcome {
+            video_export::VideoExportOutcome::Completed => {
+                self.notify_info(format!("「{name}」を書き出しました"));
+            }
+            video_export::VideoExportOutcome::Cancelled => {
+                self.notify_info("動画の書き出しを中止しました");
+            }
+            video_export::VideoExportOutcome::Failed(err) => {
+                self.notify_error(format!("動画の書き出しに失敗しました: {err}"));
+            }
+        }
+    }
+
+    /// 進行中の動画書き出しを中止し、裏の処理が終わるまで待ってからトースト通知を出す
+    pub(crate) fn cancel_active_video_export(&mut self) {
+        if let Some(mut job) = self.video_export.take() {
+            let path = job.target_path.clone();
+            let outcome = job.cancel_and_wait();
+            self.finish_video_export_outcome(&path, outcome);
+        }
+    }
+
+    fn poll_video_export(&mut self, ctx: &egui::Context) {
+        let Some(outcome) = self
+            .video_export
+            .as_mut()
+            .and_then(video_export::VideoExportJob::try_take_outcome)
+        else {
+            if self.video_export.is_some() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            }
+            return;
+        };
+        if let Some(job) = self.video_export.take() {
+            self.finish_video_export_outcome(&job.target_path, outcome);
+        }
+    }
+
     /// UIパネルから収集した `UiAction` を一括ディスパッチする
     pub(crate) fn apply_action(&mut self, action: UiAction, ctx: &egui::Context) {
+        if self.video_export.is_some() {
+            match action {
+                UiAction::CancelVideoExport => self.cancel_active_video_export(),
+                UiAction::CloseActiveTab => {
+                    self.cancel_active_video_export();
+                    project_io::close_active_tab(self, Some(ctx));
+                }
+                UiAction::CloseTab(idx) => {
+                    self.cancel_active_video_export();
+                    project_io::close_tab(self, idx, Some(ctx));
+                }
+                _ => {}
+            }
+            return;
+        }
         match action {
             UiAction::NewProject => project_io::new_project(self, ctx),
             UiAction::OpenProjectDialog => project_io::open_project_dialog(self, ctx),
             UiAction::SaveProject => project_io::save_project(self, ctx),
             UiAction::SaveProjectAsDialog => project_io::save_project_as_dialog(self, ctx),
+            UiAction::ExportVideoDialog => self.export_video_dialog(),
+            UiAction::CancelVideoExport => self.cancel_active_video_export(),
             UiAction::CloseActiveTab => project_io::close_active_tab(self, Some(ctx)),
             UiAction::CloseTab(idx) => project_io::close_tab(self, idx, Some(ctx)),
             UiAction::SwitchToTab(idx) => {
@@ -455,6 +561,16 @@ impl Is2dApp {
         }
         let input = ctx.input(|i| i.clone());
         let cmd = input.modifiers.command || input.modifiers.ctrl;
+        if self.video_export.is_some() {
+            if cmd && key_pressed_no_repeat(&input, Key::W) {
+                self.cancel_active_video_export();
+                project_io::close_active_tab(self, Some(ctx));
+            } else if cmd && key_pressed_no_repeat(&input, Key::Q) {
+                self.cancel_active_video_export();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
         if cmd && key_pressed_no_repeat(&input, Key::N) {
             project_io::new_project(self, ctx);
             return;
@@ -932,6 +1048,10 @@ impl Is2dApp {
 
     pub(crate) fn update_ui(&mut self, ctx: &egui::Context) {
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        if ctx.input(|i| i.viewport().close_requested()) && self.video_export.is_some() {
+            self.cancel_active_video_export();
+        }
+        self.poll_video_export(ctx);
         project_io::handle_viewport_close_request(self, ctx);
         timeline_ui::update_playback(self, ctx);
         self.handle_shortcuts(ctx);
@@ -989,7 +1109,8 @@ impl Is2dApp {
                     .or_else(|| ctx.pointer_hover_pos());
 
                 // 0. ビューポートのズーム・パン移動操作ハンドリング
-                let modal_open = self.pending_close_confirm.is_some();
+                let modal_open =
+                    self.pending_close_confirm.is_some() || self.video_export.is_some();
                 let pan_state @ (is_panning, _) = if modal_open {
                     self.tab_mut().view.pan_last_screen_pos = None;
                     (false, false)
@@ -1040,6 +1161,11 @@ impl Is2dApp {
         panels::draw_unsaved_close_confirm_modal(
             &self.tabs,
             &self.pending_close_confirm,
+            &mut actions,
+            ctx,
+        );
+        panels::draw_video_export_modal(
+            self.video_export.as_ref().map(|j| j.progress()),
             &mut actions,
             ctx,
         );
