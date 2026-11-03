@@ -43,7 +43,7 @@ pub(crate) use vector_engine::FillShape;
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("is2d - 無題-1")
+            .with_title("is2d")
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([800.0, 520.0]),
         #[cfg(target_os = "macos")]
