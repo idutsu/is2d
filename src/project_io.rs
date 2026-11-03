@@ -846,6 +846,8 @@ pub(crate) struct ProjectDocument {
     pub(crate) next_symbol_id: u64,
     #[serde(default)]
     pub(crate) next_group_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery_source: Option<PathBuf>,
 }
 
 fn remap_unsafe_gid(map: &mut HashMap<u64, u64>, next: &mut u64, gid: &mut u64) {
@@ -872,13 +874,16 @@ impl ProjectDocument {
             library: doc.library.iter().map(SavedSymbolDef::from).collect(),
             next_symbol_id: doc.next_symbol_id,
             next_group_id: doc.next_group_id,
+            recovery_source: None,
         }
     }
 
-    /// 保存前にドキュメント内の全浮動小数点値（ステージサイズ・座標・変換行列・ピボット）が有限値（非 `NaN` / 非 `Infinity`）であるかを検証する
-    pub(crate) fn validate_finite(&self) -> Result<(), String> {
+    /// 保存用の写しから非有限値（`NaN` / `Infinity`）を除去・補正し、補正した箇所の説明一覧を返す
+    pub(crate) fn remove_non_finite(&mut self) -> Vec<String> {
+        let mut fixed = Vec::new();
         if !self.stage_size[0].is_finite() || !self.stage_size[1].is_finite() {
-            return Err("ステージサイズに無効な数値（NaN / Infinity）が含まれています".to_owned());
+            self.stage_size = [800.0, 450.0];
+            fixed.push("ステージサイズ".to_owned());
         }
         let contour_ok = |c: &SavedContour| {
             c.segments.iter().all(|seg| {
@@ -887,29 +892,41 @@ impl ProjectDocument {
                     .all(f64::is_finite)
             })
         };
-        let check_timeline = |tl: &SavedTimeline| -> bool {
-            tl.layers.iter().all(|layer| {
-                layer.keyframes.iter().all(|kf| {
-                    let shapes_ok = kf
-                        .shapes
-                        .iter()
-                        .all(|sh| contour_ok(&sh.exterior) && sh.holes.iter().all(contour_ok));
-                    let instances_ok = kf.instances.iter().all(|inst| {
-                        inst.binding.xform.iter().all(|v| v.is_finite())
-                            && inst.binding.pivot.iter().all(|v| v.is_finite())
-                    });
-                    shapes_ok && instances_ok
-                })
-            })
+        let mut clean_timeline = |tl: &mut SavedTimeline, sym_name: Option<&str>| {
+            for layer in &mut tl.layers {
+                for kf in &mut layer.keyframes {
+                    let before = kf.shapes.len();
+                    kf.shapes
+                        .retain(|sh| contour_ok(&sh.exterior) && sh.holes.iter().all(contour_ok));
+                    let mut kf_fixed = kf.shapes.len() < before;
+                    for inst in &mut kf.instances {
+                        if !inst.binding.xform.iter().all(|v| v.is_finite()) {
+                            inst.binding.xform = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+                            kf_fixed = true;
+                        }
+                        if !inst.binding.pivot.iter().all(|v| v.is_finite()) {
+                            inst.binding.pivot = [0.0, 0.0];
+                            kf_fixed = true;
+                        }
+                    }
+                    if kf_fixed {
+                        let frame_no = kf.start_frame + 1;
+                        let loc = match sym_name {
+                            Some(sym) => {
+                                format!("シンボル「{sym}」の「{}」の {frame_no} コマ目", layer.name)
+                            }
+                            None => format!("「{}」の {frame_no} コマ目", layer.name),
+                        };
+                        fixed.push(loc);
+                    }
+                }
+            }
         };
-        if !check_timeline(&self.timeline)
-            || !self.library.iter().all(|sym| check_timeline(&sym.timeline))
-        {
-            return Err(
-                "プロジェクトデータに無効な数値（NaN / Infinity）が含まれています".to_owned(),
-            );
+        clean_timeline(&mut self.timeline, None);
+        for sym in &mut self.library {
+            clean_timeline(&mut sym.timeline, Some(&sym.name));
         }
-        Ok(())
+        fixed
     }
 
     /// 読み込んだ `ProjectDocument` から正規化済みの `Document` を構築する
@@ -1127,17 +1144,11 @@ pub(crate) fn resolve_target_path(path: &Path) -> PathBuf {
     }
 }
 
-/// 指定されたファイルパス `path` へプロジェクトを一時ファイル経由でアトミック保存する
-pub(crate) fn save_project_to_path(
-    ws: &mut impl ProjectWorkspace,
-    path: &Path,
+/// 指定されたパスへ `ProjectDocument` を一時ファイル経由でアトミックに書き出し、親ディレクトリを同期する
+pub(crate) fn write_project_file_atomically(
+    target_path: &Path,
+    proj_doc: &ProjectDocument,
 ) -> Result<(), String> {
-    prepare_active_tab_for_switch_or_save(ws);
-
-    let proj_doc = ProjectDocument::from_app(ws.tab());
-    proj_doc.validate_finite()?;
-
-    let target_path = resolve_target_path(path);
     let tmp_name = format!(
         ".{}.{}.tmp",
         target_path
@@ -1148,13 +1159,13 @@ pub(crate) fn save_project_to_path(
     );
     let tmp_path = target_path.with_file_name(tmp_name);
     let write_res =
-        std::fs::File::create(&tmp_path).and_then(|file| write_project_json(file, &proj_doc));
+        std::fs::File::create(&tmp_path).and_then(|file| write_project_json(file, proj_doc));
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("一時ファイルの書き込みに失敗しました: {e}"));
     }
 
-    if let Err(e) = std::fs::rename(&tmp_path, &target_path) {
+    if let Err(e) = std::fs::rename(&tmp_path, target_path) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("ファイルの保存に失敗しました: {e}"));
     }
@@ -1163,6 +1174,21 @@ pub(crate) fn save_project_to_path(
             let _ = dir_file.sync_all();
         }
     }
+    Ok(())
+}
+
+/// 指定されたファイルパス `path` へプロジェクトを一時ファイル経由でアトミック保存する
+pub(crate) fn save_project_to_path(
+    ws: &mut impl ProjectWorkspace,
+    path: &Path,
+) -> Result<Vec<String>, String> {
+    prepare_active_tab_for_switch_or_save(ws);
+
+    let mut proj_doc = ProjectDocument::from_app(ws.tab());
+    let fixed = proj_doc.remove_non_finite();
+
+    let target_path = resolve_target_path(path);
+    write_project_file_atomically(&target_path, &proj_doc)?;
 
     // 別タブが同じファイルパスを開いていた場合、重複タブ化を防ぐため別タブ側のファイル紐付けを解除して未保存状態にする
     let active_idx = ws.active_index();
@@ -1194,11 +1220,11 @@ pub(crate) fn save_project_to_path(
 
     ws.tab_mut().file = Some(path.to_path_buf());
     ws.tab_mut().history.mark_saved();
-    Ok(())
+    Ok(fixed)
 }
 
 /// 指定されたファイルパス `path` から `ProjectDocument` を読み込み・バージョン検証して返す
-fn read_project_document(path: &Path) -> Result<ProjectDocument, String> {
+pub(crate) fn read_project_document(path: &Path) -> Result<ProjectDocument, String> {
     let file =
         std::fs::File::open(path).map_err(|e| format!("ファイルの読み込みに失敗しました: {e}"))?;
     let doc: ProjectDocument = serde_json::from_reader(std::io::BufReader::new(file))
@@ -1211,6 +1237,41 @@ fn read_project_document(path: &Path) -> Result<ProjectDocument, String> {
         ));
     }
     Ok(doc)
+}
+
+/// 検証済みの `Document` を新しいタブ（または未編集の白紙無題タブ）へ読み込んでアクティブ化する
+pub(crate) fn open_document_in_new_tab(
+    ws: &mut impl ProjectWorkspace,
+    doc: Document,
+) -> Result<(), String> {
+    if doc.symbol_nest_exceeded() {
+        return Err("シンボルの入れ子が8段を超えているか、循環しています".to_owned());
+    }
+
+    // 現在のタブが未編集の空の無題タブでなければ、アクティブタブの右隣に新しいタブを追加して切り替える
+    // （ファイル読込タブでは `untitled_number` を `0` として遅延採番し、`無題-N` 連番の欠番スキップを防ぐ）
+    prepare_active_tab_for_switch_or_save(ws);
+    if !is_active_tab_pristine_empty(ws.tab()) {
+        let doc_id = ws.alloc_doc_id();
+        let insert_idx = (ws.active_index() + 1).min(ws.tabs().len());
+        ws.tabs_mut().insert(insert_idx, Tab::new_empty(doc_id, 0));
+        activate_tab_index(ws, insert_idx);
+    } else {
+        let new_doc_id = ws.alloc_doc_id();
+        ws.tab_mut().id = new_doc_id;
+        ws.tab_mut().untitled_number = 0;
+        let max_untitled = ws
+            .tabs()
+            .iter()
+            .map(|t| t.untitled_number)
+            .max()
+            .unwrap_or(0);
+        ws.set_next_untitled_number(max_untitled + 1);
+    }
+
+    reset_active_document_state(ws.tab_mut(), doc);
+    ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
+    Ok(())
 }
 
 /// 指定パスのプロジェクトを「新しいタブ」（または既存の同一ファイルタブ／空の無題タブ）として開く
@@ -1235,35 +1296,8 @@ pub(crate) fn open_project_in_tab(
 
     // 2. ファイル内容を先に検証・パース（エラー時にタブを増やさない）
     let proj_doc = read_project_document(path)?;
-    let doc = proj_doc.into_document();
-    if doc.symbol_nest_exceeded() {
-        return Err("シンボルの入れ子が8段を超えているか、循環しています".to_owned());
-    }
+    open_document_in_new_tab(ws, proj_doc.into_document())?;
 
-    // 3. 現在のタブが未編集の空の無題タブでなければ、アクティブタブの右隣に新しいタブを追加して切り替える
-    // （ファイル読込タブでは `untitled_number` を `0` として遅延採番し、`無題-N` 連番の欠番スキップを防ぐ）
-    prepare_active_tab_for_switch_or_save(ws);
-    if !is_active_tab_pristine_empty(ws.tab()) {
-        let doc_id = ws.alloc_doc_id();
-        let insert_idx = (ws.active_index() + 1).min(ws.tabs().len());
-        ws.tabs_mut().insert(insert_idx, Tab::new_empty(doc_id, 0));
-        activate_tab_index(ws, insert_idx);
-    } else {
-        let new_doc_id = ws.alloc_doc_id();
-        ws.tab_mut().id = new_doc_id;
-        ws.tab_mut().untitled_number = 0;
-        let max_untitled = ws
-            .tabs()
-            .iter()
-            .map(|t| t.untitled_number)
-            .max()
-            .unwrap_or(0);
-        ws.set_next_untitled_number(max_untitled + 1);
-    }
-
-    // 4. 読み込んだドキュメントを適用
-    reset_active_document_state(ws.tab_mut(), doc);
-    ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
     ws.tab_mut().file = Some(path.to_path_buf());
     ws.tab_mut().history.mark_saved();
     if let Some(c) = ctx {
@@ -1317,13 +1351,21 @@ fn save_project_and_notify(
     action_desc: &str,
 ) {
     match save_project_to_path(ws, path) {
-        Ok(()) => {
+        Ok(fixed) => {
             update_window_title(ws, ctx);
             let name = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("ファイル");
-            ws.notify_info(format!("「{name}」{action_desc}"));
+            if fixed.is_empty() {
+                ws.notify_info(format!("「{name}」{action_desc}"));
+            } else {
+                crate::canvas_tool::show_notice(
+                    ws.toast_mut(),
+                    crate::canvas_tool::NoticeKind::Warning,
+                    format!("壊れたデータを除いて保存しました：{}", fixed.join("、")),
+                );
+            }
         }
         Err(err) => ws.notify_error(err),
     }

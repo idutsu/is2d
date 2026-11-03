@@ -129,6 +129,8 @@ pub(crate) enum UiAction {
     ConfirmPendingCloseSave,
     ConfirmPendingCloseDiscard,
     ConfirmPendingCloseCancel,
+    RestoreRecovered,
+    DiscardRecovered,
 
     // 表示・UI選択状態・複合操作
     ResetView,
@@ -2150,6 +2152,59 @@ pub(crate) fn draw_unsaved_close_confirm_modal(
             }
             if ui.button("キャンセル").clicked() {
                 actions.push(UiAction::ConfirmPendingCloseCancel);
+            }
+        });
+    });
+}
+
+/// 前回保存されないまま終了した作業の復元モーダルダイアログを描画する
+pub(crate) fn draw_recovery_modal(
+    found: &[crate::recovery::Found],
+    actions: &mut Vec<UiAction>,
+    ctx: &egui::Context,
+) {
+    if found.is_empty() {
+        return;
+    }
+
+    let now = std::time::SystemTime::now();
+    modal_window(ctx, "作業の復元", |ui| {
+        ui.set_min_width(320.0);
+        ui.add_space(4.0);
+        ui.label("前回、保存されないまま終了した作業があります。");
+        ui.add_space(8.0);
+        for item in found {
+            let raw_name = item
+                .recovery_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("無題");
+            let stripped = raw_name.strip_prefix("RECOVER_").unwrap_or(raw_name);
+            let name = if stripped.starts_with("無題-") {
+                "無題"
+            } else {
+                stripped
+            };
+            let secs = now
+                .duration_since(item.modified)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let age = if secs < 3600 {
+                format!("{} 分前", (secs / 60).max(1))
+            } else if secs < 86400 {
+                format!("{} 時間前", secs / 3600)
+            } else {
+                format!("{} 日前", secs / 86400)
+            };
+            ui.label(format!("・{name}（{age}）"));
+        }
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button("開く").clicked() {
+                actions.push(UiAction::RestoreRecovered);
+            }
+            if ui.button("破棄").clicked() {
+                actions.push(UiAction::DiscardRecovered);
             }
         });
     });

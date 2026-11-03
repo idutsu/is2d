@@ -3,6 +3,7 @@ mod clipboard_ops;
 mod doc_actions;
 mod panels;
 mod project_io;
+mod recovery;
 mod select_ops;
 mod symbol;
 mod symbol_ops;
@@ -57,7 +58,10 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             configure_japanese_fonts(&cc.egui_ctx);
             configure_sharp_light_theme(&cc.egui_ctx);
-            Ok(Box::new(Is2dApp::default()))
+            let mut app = Is2dApp::default();
+            app.recovery.dir = recovery::default_recovery_dir();
+            app.recovery.find_leftovers();
+            Ok(Box::new(app))
         }),
     )
 }
@@ -138,6 +142,8 @@ pub(crate) struct Is2dApp {
     pub(crate) allow_viewport_close: bool,
     /// バックグラウンドで進行中の動画（MP4）書き出しジョブ
     pub(crate) video_export: Option<video_export::VideoExportJob>,
+    /// 確認なし終了時の復旧ファイル書き出し・次回起動時の復元管理状態
+    pub(crate) recovery: recovery::Recovery,
 }
 
 impl Default for Is2dApp {
@@ -156,6 +162,7 @@ impl Default for Is2dApp {
             pending_close_confirm: None,
             allow_viewport_close: false,
             video_export: None,
+            recovery: recovery::Recovery::default(),
         }
     }
 }
@@ -361,6 +368,18 @@ impl Is2dApp {
 
     /// UIパネルから収集した `UiAction` を一括ディスパッチする
     pub(crate) fn apply_action(&mut self, action: UiAction, ctx: &egui::Context) {
+        if !self.recovery.found.is_empty() {
+            match action {
+                UiAction::RestoreRecovered => {
+                    let mut recovery = std::mem::take(&mut self.recovery);
+                    recovery.restore_found(self, Some(ctx));
+                    self.recovery = recovery;
+                }
+                UiAction::DiscardRecovered => self.recovery.discard_found(),
+                _ => {}
+            }
+            return;
+        }
         if self.video_export.is_some() {
             match action {
                 UiAction::CancelVideoExport => self.cancel_active_video_export(),
@@ -395,6 +414,7 @@ impl Is2dApp {
             UiAction::ConfirmPendingCloseCancel => {
                 project_io::confirm_pending_close_cancel(self, ctx)
             }
+            UiAction::RestoreRecovered | UiAction::DiscardRecovered => {}
             UiAction::ResetView => {
                 self.tab_mut().view.reset_view();
             }
@@ -431,7 +451,7 @@ impl Is2dApp {
     // ------------------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.pending_close_confirm.is_some() {
+        if self.pending_close_confirm.is_some() || !self.recovery.found.is_empty() {
             return;
         }
         let input = ctx.input(|i| i.clone());
@@ -984,8 +1004,9 @@ impl Is2dApp {
                     .or_else(|| ctx.pointer_hover_pos());
 
                 // 0. ビューポートのズーム・パン移動操作ハンドリング
-                let modal_open =
-                    self.pending_close_confirm.is_some() || self.video_export.is_some();
+                let modal_open = self.pending_close_confirm.is_some()
+                    || self.video_export.is_some()
+                    || !self.recovery.found.is_empty();
                 let pan_state @ (is_panning, _) = if modal_open {
                     self.tab_mut().view.pan_last_screen_pos = None;
                     (false, false)
@@ -1039,6 +1060,7 @@ impl Is2dApp {
             &mut actions,
             ctx,
         );
+        panels::draw_recovery_modal(&self.recovery.found, &mut actions, ctx);
         panels::draw_video_export_modal(
             self.video_export.as_ref().map(|j| j.progress()),
             &mut actions,
@@ -1053,6 +1075,12 @@ impl Is2dApp {
 impl eframe::App for Is2dApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_ui(ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if !self.allow_viewport_close {
+            self.recovery.write_unsaved_tabs(&self.tabs);
+        }
     }
 }
 
