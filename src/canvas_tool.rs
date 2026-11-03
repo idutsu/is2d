@@ -1724,6 +1724,16 @@ impl<'a> Scene<'a> {
             .is_some_and(|s| selection.contains_shape(s))
     }
 
+    /// `selection` で選択されている図形を `Scene` の順に返す
+    pub(crate) fn selected_shapes<'s>(
+        self,
+        selection: &'s Selection,
+    ) -> impl Iterator<Item = &'a FillShape> + use<'a, 's> {
+        (0..self.len())
+            .filter(move |&idx| self.is_shape_selected(idx, selection))
+            .filter_map(move |idx| self.get(idx))
+    }
+
     /// `selection` に対応する選択マスク（`Vec<bool>`）と有効な選択が1つ以上あるかを返す
     pub(crate) fn selected_shape_mask(self, selection: &Selection) -> (Vec<bool>, bool) {
         let len = self.len();
@@ -1750,12 +1760,8 @@ impl<'a> Scene<'a> {
         if selection.is_empty() {
             return false;
         }
-        (0..self.len()).any(|idx| {
-            self.is_shape_selected(idx, selection)
-                && self
-                    .get(idx)
-                    .is_some_and(|s| s.is_in_editing_scope(editing_group_path))
-        })
+        self.selected_shapes(selection)
+            .any(|s| s.is_in_editing_scope(editing_group_path))
     }
 
     /// 現在の選択対象にグループ化されたオブジェクトが含まれているか
@@ -1767,12 +1773,8 @@ impl<'a> Scene<'a> {
         if selection.is_empty() {
             return false;
         }
-        (0..self.len()).any(|idx| {
-            self.is_shape_selected(idx, selection)
-                && self
-                    .get(idx)
-                    .is_some_and(|s| s.active_group_id_at_scope(editing_group_path).is_some())
-        })
+        self.selected_shapes(selection)
+            .any(|s| s.active_group_id_at_scope(editing_group_path).is_some())
     }
 
     /// 選択中シェイプ群の全体のバウンディングボックスを返す
@@ -1781,17 +1783,13 @@ impl<'a> Scene<'a> {
         if selection.is_empty() {
             return None;
         }
-        let mut geom_iter = (0..self.len())
-            .filter(|&idx| self.is_shape_selected(idx, selection))
-            .filter_map(|idx| self.get(idx))
+        let mut geom_iter = self
+            .selected_shapes(selection)
             .filter_map(|s| s.geometry_bounding_box());
         let mut bbox = match geom_iter.next() {
             Some(first) => geom_iter.fold(first, |acc, r| acc.union(r)),
             None => {
-                let mut fallback = (0..self.len())
-                    .filter(|&idx| self.is_shape_selected(idx, selection))
-                    .filter_map(|idx| self.get(idx))
-                    .map(|s| s.bounding_box());
+                let mut fallback = self.selected_shapes(selection).map(|s| s.bounding_box());
                 let first_fb = fallback.next()?;
                 fallback.fold(first_fb, |acc, r| acc.union(r))
             }
@@ -1820,9 +1818,7 @@ impl<'a> Scene<'a> {
             return None;
         }
         let &gid = selection.instances.iter().next()?;
-        (0..self.len())
-            .filter(|&idx| self.is_shape_selected(idx, selection))
-            .filter_map(|idx| self.get(idx))
+        self.selected_shapes(selection)
             .find_map(|s| s.symbol_instance.filter(|b| b.instance_gid == gid))
     }
 
@@ -2326,6 +2322,18 @@ impl Session {
         (0..scene.len())
             .filter(|&idx| scene.is_shape_selected(idx, &self.selection))
             .collect()
+    }
+
+    /// 指定 `Scene` インデックスの図形が現在選択されているかを返す
+    pub(crate) fn is_selected_at(&self, scene_idx: usize) -> bool {
+        self.scene().is_shape_selected(scene_idx, &self.selection)
+    }
+
+    /// 指定した `shape_id` を持つ図形が現在選択されているかを返す
+    pub(crate) fn is_shape_id_selected(&self, shape_id: ShapeId) -> bool {
+        self.scene()
+            .index_of_shape_id(shape_id)
+            .is_some_and(|idx| self.is_selected_at(idx))
     }
 
     fn insert_selection_keys(

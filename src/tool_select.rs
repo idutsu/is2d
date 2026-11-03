@@ -223,16 +223,7 @@ pub(crate) fn start_reshape_drag(
     );
     if alt_held {
         if let Some(shape_id) = target.shape_id() {
-            let is_sel = host
-                .tab()
-                .scene()
-                .index_of_shape_id(shape_id)
-                .is_some_and(|idx| {
-                    host.tab()
-                        .scene()
-                        .is_shape_selected(idx, &host.tab().session.selection)
-                });
-            if !is_sel {
+            if !host.tab().session.is_shape_id_selected(shape_id) {
                 select_single_shape_at(host, pt);
             }
             let tab = host.tab_mut();
@@ -323,16 +314,7 @@ pub(crate) fn start_reshape_drag(
             }
         }
         HoverTarget::Fill { shape_id } => {
-            let is_sel = host
-                .tab()
-                .scene()
-                .index_of_shape_id(shape_id)
-                .is_some_and(|idx| {
-                    host.tab()
-                        .scene()
-                        .is_shape_selected(idx, &host.tab().session.selection)
-                });
-            if !is_sel {
+            if !host.tab().session.is_shape_id_selected(shape_id) {
                 select_single_shape_at(host, pt);
             }
             let tab = host.tab_mut();
@@ -519,12 +501,7 @@ fn handle_reshape_click(host: &mut impl ActionHost, pt: Point, shift_held: bool)
         }
     } else {
         match hit_shape {
-            Some(scene_idx)
-                if host
-                    .tab()
-                    .scene()
-                    .is_shape_selected(scene_idx, &host.tab().session.selection) =>
-            {
+            Some(scene_idx) if host.tab().session.is_selected_at(scene_idx) => {
                 let unit = host
                     .tab()
                     .scene()
