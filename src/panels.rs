@@ -376,8 +376,12 @@ fn draw_left_main_tool_buttons(
 }
 
 fn draw_color_picker_controls(tool: &mut ToolSettings, ui: &mut egui::Ui) {
-    ui.color_edit_button_srgba(&mut tool.brush_color)
-        .on_hover_text("塗りカラー変更");
+    egui::color_picker::color_edit_button_srgba(
+        ui,
+        &mut tool.brush_color,
+        egui::color_picker::Alpha::OnlyBlend,
+    )
+    .on_hover_text("塗りカラー変更");
 }
 
 // ------------------------------------------------------------------------
@@ -1000,7 +1004,7 @@ fn draw_color_palette_section(tool: &mut ToolSettings, ui: &mut egui::Ui) {
 
     draw_panel_section_label(ui, "現在の塗りカラー", 4.0);
     ui.horizontal(|ui| {
-        ui.color_edit_button_srgba(&mut tool.brush_color);
+        draw_color_picker_controls(tool, ui);
         let [r, g, b, _] = tool.brush_color.to_srgba_unmultiplied();
         ui.label(
             egui::RichText::new(format!("#{r:02X}{g:02X}{b:02X}"))
