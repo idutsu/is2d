@@ -420,6 +420,12 @@ impl View {
         )
     }
 
+    /// ポインタを押した位置をワールド座標で返す（押していなければ `None`）
+    pub(crate) fn press_origin_world(&self, ctx: &egui::Context) -> Option<Point> {
+        ctx.input(|i| i.pointer.press_origin())
+            .map(|p| self.screen_to_world(p))
+    }
+
     /// スクリーン上の指定位置 `anchor_screen`（マウスカーソル位置）がズーム前後で動かないように倍率 `factor` を掛ける
     pub(crate) fn zoom_around_screen_pos(&mut self, anchor_screen: Pos2, factor: f32) {
         let world_before = self.screen_to_world(anchor_screen);

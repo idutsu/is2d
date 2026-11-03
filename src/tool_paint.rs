@@ -43,10 +43,7 @@ pub(crate) fn handle_brush_or_eraser_input(
     let min_sample_dist = (0.25 * screen_r).clamp(0.4, 1.5) / z;
 
     if response.drag_started_by(PointerButton::Primary) {
-        let press_pt = response
-            .ctx
-            .input(|i| i.pointer.press_origin())
-            .map(|p| host.tab().view.screen_to_world(p));
+        let press_pt = host.tab().view.press_origin_world(&response.ctx);
         if let Some(start_pt) = press_pt.or(mouse_pt) {
             let mut stroke = vec![start_pt];
             if let Some(curr_pt) = mouse_pt {

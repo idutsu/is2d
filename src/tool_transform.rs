@@ -12,7 +12,7 @@ pub(crate) use crate::doc_actions::{
     scale_selected_shapes, set_active_keyframe_tween_rotate, set_selected_symbol_playback,
     set_selected_symbol_world_pivot, timeline_toggle_tween,
 };
-use crate::select_ops::handle_canvas_double_click;
+use crate::select_ops::{finish_marquee_drag, handle_canvas_double_click};
 #[cfg(test)]
 pub(crate) use crate::symbol_ops::{
     enter_symbol_from_library, enter_symbol_timeline, exit_symbol_timeline,
@@ -49,10 +49,7 @@ pub(crate) fn handle_transform_tool_input(
     }
 
     if response.drag_started_by(PointerButton::Primary) {
-        let press_pt = ui
-            .input(|i| i.pointer.press_origin())
-            .map(|p| host.tab().view.screen_to_world(p));
-        if let Some(start_pt) = press_pt.or(mouse_pt) {
+        if let Some(start_pt) = host.tab().view.press_origin_world(ui.ctx()).or(mouse_pt) {
             start_transform_drag(host, start_pt, shift_held, alt_held);
             if let Some(curr_pt) = mouse_pt {
                 if (curr_pt - start_pt).hypot() > 1e-6 {
@@ -332,17 +329,7 @@ pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option
                 },
             );
         }
-        TransformDragState::MarqueeSelect(m) => {
-            let end_pos = mouse_pt.unwrap_or(m.current_pos);
-            apply(
-                host,
-                Action::SelectMarquee {
-                    p0: m.start_pos,
-                    p1: end_pos,
-                    additive: m.additive,
-                },
-            );
-        }
+        TransformDragState::MarqueeSelect(m) => finish_marquee_drag(host, m, mouse_pt),
         TransformDragState::MovePivot {
             orig_pivot,
             had_custom_pivot,

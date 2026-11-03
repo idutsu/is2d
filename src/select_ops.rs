@@ -6,7 +6,7 @@ use crate::canvas_tool::{
     cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
     editable_layer_ids, focus_active_layer_to_shape_by_id, merge_floating_into_base_shapes,
     sync_timeline_layer_from_canvas_selection, topmost_layer_id_for_indices, Floating, HoverTarget,
-    Scene, SelectSubMode, Session, ShapeId, Tab,
+    MarqueeDrag, Scene, SelectSubMode, Session, ShapeId, Tab,
 };
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
@@ -136,6 +136,22 @@ pub(crate) fn select_single_shape_at(tab: &mut Tab, sub_mode: SelectSubMode, pt:
     } else {
         false
     }
+}
+
+/// 矩形選択のドラッグ `m` を確定する（離した位置 `mouse_pt` が無ければ最後のドラッグ位置で確定する）
+pub(crate) fn finish_marquee_drag(
+    host: &mut impl ActionHost,
+    m: MarqueeDrag,
+    mouse_pt: Option<Point>,
+) {
+    apply(
+        host,
+        Action::SelectMarquee {
+            p0: m.start_pos,
+            p1: mouse_pt.unwrap_or(m.current_pos),
+            additive: m.additive,
+        },
+    );
 }
 
 /// Adobe Animate 風の矩形選択（Marquee Selection）

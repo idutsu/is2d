@@ -14,6 +14,7 @@ pub(crate) use crate::doc_actions::{
     finish_move_selection_drag, group_selected_shapes, nudge_selected_shapes, paste_clipboard,
     ungroup_selected_shapes,
 };
+use crate::select_ops::finish_marquee_drag;
 #[cfg(test)]
 pub(crate) use crate::select_ops::{
     apply_marquee_selection, apply_pull_edge_to_shape, enter_group_at, exit_current_group,
@@ -138,10 +139,7 @@ pub(crate) fn handle_select_tool_input(
                 return;
             }
             if response.drag_started_by(PointerButton::Primary) {
-                let press_pt = ui
-                    .input(|i| i.pointer.press_origin())
-                    .map(|p| host.tab().view.screen_to_world(p));
-                if let Some(start_pt) = press_pt.or(mouse_pt) {
+                if let Some(start_pt) = host.tab().view.press_origin_world(ui.ctx()).or(mouse_pt) {
                     start_reshape_drag(host, start_pt, shift_held, alt_held);
                     if let Some(curr_pt) = mouse_pt {
                         if (curr_pt - start_pt).hypot() > 1e-6 {
@@ -426,17 +424,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
                 },
             );
         }
-        SelectDragState::MarqueeSelect(m) => {
-            let end_pos = mouse_pt.unwrap_or(m.current_pos);
-            apply(
-                host,
-                Action::SelectMarquee {
-                    p0: m.start_pos,
-                    p1: end_pos,
-                    additive: m.additive,
-                },
-            );
-        }
+        SelectDragState::MarqueeSelect(m) => finish_marquee_drag(host, m, mouse_pt),
         SelectDragState::PullEdge {
             shape_id,
             contour_idx,
