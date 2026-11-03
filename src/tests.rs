@@ -14442,8 +14442,8 @@ fn test_m4_1_alt_duplicate_touching_sliced_pieces_merges_into_single_shape_on_de
     assert!(
         app.session
             .floating()
-            .is_some_and(|fl| fl.pieces.len() == 2),
-        "Alt複製された2片が floating に入っていること"
+            .is_some_and(|fl| fl.pieces.len() == 1),
+        "つながったスライス片は選び足した時点で1片に結合され、Alt複製後も1片が floating に入っていること"
     );
 
     // 5. 選択を解除すると、元の1図形と、1つに結合された複製の計2図形になること
@@ -17868,6 +17868,7 @@ fn test_deselected_slice_piece_does_not_collide_with_kept_piece_id() {
             color: Color32::RED,
         },
     ));
+    let orig_id = app.doc.root.layers[0].keyframes[0].cel.shapes[0].shape_id;
 
     // 1. 左半分を矩形で選ぶ（スライス）
     crate::select_ops::apply_marquee_selection(
@@ -17878,7 +17879,7 @@ fn test_deselected_slice_piece_does_not_collide_with_kept_piece_id() {
     );
     assert_eq!(app.session.selection.shapes.len(), 1);
 
-    // 2. Shift+クリックで右の残りも選択に足す
+    // 2. Shift+クリックで右の残りも選択に足す → つながっているので選択は1つになる
     let right_idx = app
         .scene()
         .iter()
@@ -17888,20 +17889,6 @@ fn test_deselected_slice_piece_does_not_collide_with_kept_piece_id() {
         &mut app,
         Action::ToggleSelectionAt {
             scene_idx: right_idx
-        }
-    ));
-    assert_eq!(app.session.selection.shapes.len(), 2);
-
-    // 3. Shift+クリックで左の片を選択から外す
-    let left_idx = app
-        .scene()
-        .iter()
-        .position(|s| s.contains_point(Point::new(130.0, 200.0)))
-        .expect("左の片にヒットすること");
-    assert!(apply(
-        &mut app,
-        Action::ToggleSelectionAt {
-            scene_idx: left_idx
         }
     ));
     assert_eq!(app.session.selection.shapes.len(), 1);
@@ -17915,33 +17902,22 @@ fn test_deselected_slice_piece_does_not_collide_with_kept_piece_id() {
         "Scene の中に同じ shape_id の図形が無いこと: {scene_ids:?}"
     );
 
-    // そのあと右を動かして選択を外し、左をクリックしても右が選ばれないこと
-    assert!(apply(
-        &mut app,
-        Action::MoveSelected {
-            delta: kurbo::Vec2::new(0.0, 80.0),
-        },
-    ));
-    assert!(apply(&mut app, Action::Deselect));
-    assert_eq!(app.scene().len(), 2);
-
-    assert!(apply(
-        &mut app,
-        Action::SelectSingleAt {
-            pt: Point::new(130.0, 200.0),
-        },
-    ));
-    assert_eq!(app.session.selection.shapes.len(), 1);
-    let right_after = app
+    // 3. Shift+クリックで左の所を押すと、全体が外れて元の図形（同じ番号）に戻る
+    let left_idx = app
         .scene()
         .iter()
-        .position(|s| s.contains_point(Point::new(260.0, 280.0)))
-        .expect("移動後の右の図形にヒットすること");
-    let right_id = app.scene().get(right_after).unwrap().shape_id;
-    assert!(
-        !app.session.selection.shapes.contains(&right_id),
-        "左をクリックしたときに右が選ばれないこと"
-    );
+        .position(|s| s.contains_point(Point::new(130.0, 200.0)))
+        .expect("結合された片にヒットすること");
+    assert!(apply(
+        &mut app,
+        Action::ToggleSelectionAt {
+            scene_idx: left_idx
+        }
+    ));
+    assert!(app.session.selection.shapes.is_empty());
+    assert!(app.session.floating().is_none());
+    assert_eq!(app.scene().len(), 1);
+    assert_eq!(app.scene().get(0).unwrap().shape_id, orig_id);
 }
 
 #[test]
@@ -18284,4 +18260,185 @@ fn test_recovery_fallback_same_filename_and_missing_parent_dir() {
     );
 
     let _ = std::fs::remove_dir_all(&base_dir);
+}
+
+#[test]
+fn test_merge_touching_sliced_pieces_on_additive_select() {
+    use crate::doc_actions::{apply, Action};
+
+    let make_app_with_bar = || {
+        let mut app = Is2dApp::default();
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 200.0), Point::new(300.0, 200.0)],
+                radius: 20.0,
+                color: Color32::RED,
+            },
+        ));
+        app
+    };
+
+    // 1. 左半分を矩形で選び、Shift+クリックで右半分を足す → 片が1つ、選択が1つ、残りが0
+    // 2. 1 のあと、左の所を Shift+クリック → 選択が0、Floating が無い、図形は元の図形（番号と外周の Contour が同じ）
+    {
+        let mut app = make_app_with_bar();
+        let orig_shape = app.doc.root.layers[0].keyframes[0].cel.shapes[0].clone();
+
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(70.0, 150.0),
+                p1: Point::new(200.0, 250.0),
+                additive: false,
+            },
+        ));
+        let right_idx = app
+            .scene()
+            .iter()
+            .position(|s| s.contains_point(Point::new(260.0, 200.0)))
+            .unwrap();
+        assert!(apply(
+            &mut app,
+            Action::ToggleSelectionAt {
+                scene_idx: right_idx
+            }
+        ));
+        let fl = app.session.floating().expect("Floating が存在すること");
+        assert_eq!(fl.pieces.len(), 1);
+        assert_eq!(fl.remainder.len(), 0);
+        assert_eq!(app.session.selection.shapes.len(), 1);
+
+        let left_idx = app
+            .scene()
+            .iter()
+            .position(|s| s.contains_point(Point::new(130.0, 200.0)))
+            .unwrap();
+        assert!(apply(
+            &mut app,
+            Action::ToggleSelectionAt {
+                scene_idx: left_idx
+            }
+        ));
+        assert_eq!(app.session.selection.shapes.len(), 0);
+        assert!(app.session.floating().is_none());
+        let restored = &app.doc.root.layers[0].keyframes[0].cel.shapes[0];
+        assert_eq!(restored.shape_id, orig_shape.shape_id);
+        assert!(std::sync::Arc::ptr_eq(
+            &restored.exterior.segments,
+            &orig_shape.exterior.segments
+        ));
+    }
+
+    // 3. 1 のあとグループ化して選択を外す → セルの図形は1つで、グループの中にある
+    {
+        let mut app = make_app_with_bar();
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(70.0, 150.0),
+                p1: Point::new(200.0, 250.0),
+                additive: false,
+            },
+        ));
+        let right_idx = app
+            .scene()
+            .iter()
+            .position(|s| s.contains_point(Point::new(260.0, 200.0)))
+            .unwrap();
+        assert!(apply(
+            &mut app,
+            Action::ToggleSelectionAt {
+                scene_idx: right_idx
+            }
+        ));
+        assert!(apply(&mut app, Action::Group));
+        assert!(apply(&mut app, Action::Deselect));
+        let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].group_path.len(), 1);
+    }
+
+    // 4. 左1/3 を選び、Shift+矩形で真ん中 1/3 を足す → 片が1つ、残りが1つ
+    {
+        let mut app = make_app_with_bar();
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(70.0, 150.0),
+                p1: Point::new(160.0, 250.0),
+                additive: false,
+            },
+        ));
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(160.0, 150.0),
+                p1: Point::new(240.0, 250.0),
+                additive: true,
+            },
+        ));
+        let fl = app.session.floating().expect("Floating が存在すること");
+        assert_eq!(fl.pieces.len(), 1);
+        assert_eq!(fl.remainder.len(), 1);
+    }
+
+    // 5. 左端を選び、Shift+矩形で右端を足す（つながっていない）→ 片が2つ
+    {
+        let mut app = make_app_with_bar();
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(70.0, 150.0),
+                p1: Point::new(140.0, 250.0),
+                additive: false,
+            },
+        ));
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(260.0, 150.0),
+                p1: Point::new(330.0, 250.0),
+                additive: true,
+            },
+        ));
+        let fl = app.session.floating().expect("Floating が存在すること");
+        assert_eq!(fl.pieces.len(), 2);
+    }
+
+    // 6. 1 のあと動かさずに選択を外す → 元の図形のまま（番号も同じ）で、Undo の履歴が増えない
+    {
+        let mut app = make_app_with_bar();
+        let orig_shape = app.doc.root.layers[0].keyframes[0].cel.shapes[0].clone();
+        let undo_before = app.history.undo_stack.len();
+
+        assert!(apply(
+            &mut app,
+            Action::SelectMarquee {
+                p0: Point::new(70.0, 150.0),
+                p1: Point::new(200.0, 250.0),
+                additive: false,
+            },
+        ));
+        let right_idx = app
+            .scene()
+            .iter()
+            .position(|s| s.contains_point(Point::new(260.0, 200.0)))
+            .unwrap();
+        assert!(apply(
+            &mut app,
+            Action::ToggleSelectionAt {
+                scene_idx: right_idx
+            }
+        ));
+        assert!(apply(&mut app, Action::Deselect));
+        assert_eq!(app.history.undo_stack.len(), undo_before);
+        let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].shape_id, orig_shape.shape_id);
+        assert!(std::sync::Arc::ptr_eq(
+            &shapes[0].exterior.segments,
+            &orig_shape.exterior.segments
+        ));
+    }
 }

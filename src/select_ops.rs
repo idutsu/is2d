@@ -333,6 +333,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
         }
     });
     tab.session.selection = selection;
+    tab.session.merge_touching_pieces();
 
     tab.session.drop_unmodified_slice_if_unselected();
     tab.session.transform_pivot = None;

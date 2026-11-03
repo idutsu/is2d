@@ -9,7 +9,7 @@ use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 pub(crate) use crate::symbol::Document;
 use crate::symbol::{EditPath, SymbolDef};
 use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
-use crate::vector_boolean::merge_shapes_into_canvas;
+use crate::vector_boolean::{merge_disjoint_fill_into_canvas, merge_shapes_into_canvas};
 use crate::vector_engine::{FillShape, SyncCache};
 
 #[cfg(test)]
@@ -2299,6 +2299,28 @@ impl Session {
                 fl.pieces.extend(newly_sel);
             }
             fl.remainder = new_rem;
+        });
+        self.selection.shapes = selection_shapes;
+        self.merge_touching_pieces();
+    }
+
+    /// `Floating` の選択中の片のうち、つながっている同じ色の片どうしを1つに結合し、選択の番号を入れ替える
+    pub(crate) fn merge_touching_pieces(&mut self) {
+        if self.floating.as_ref().is_none_or(|fl| fl.pieces.len() <= 1) {
+            return;
+        }
+        let mut selection_shapes = std::mem::take(&mut self.selection.shapes);
+        self.update_floating(|fl_opt| {
+            let Some(fl) = fl_opt else {
+                return;
+            };
+            let mut merged = Vec::with_capacity(fl.pieces.len());
+            for piece in std::mem::take(&mut fl.pieces) {
+                selection_shapes.remove(&piece.shape_id);
+                merge_disjoint_fill_into_canvas(&mut merged, piece);
+            }
+            selection_shapes.extend(merged.iter().map(|p| p.shape_id));
+            fl.pieces = merged;
         });
         self.selection.shapes = selection_shapes;
     }
