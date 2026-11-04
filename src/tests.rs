@@ -19799,3 +19799,117 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
     assert!(apply(&mut app, Action::Paste { in_place: true }));
     assert_eq!(app.doc.library.len(), 7);
 }
+
+#[test]
+fn test_adding_base_shape_to_floating_selection_keeps_floating_piece_on_top() {
+    use crate::doc_actions::{apply, Action};
+    use crate::vector_engine::Contour;
+
+    let make_rect = |x0: f64, y0: f64, x1: f64, y1: f64, color: Color32| -> FillShape {
+        let p00 = Point::new(x0, y0);
+        let p10 = Point::new(x1, y0);
+        let p11 = Point::new(x1, y1);
+        let p01 = Point::new(x0, y1);
+        FillShape::new(
+            color,
+            Contour::new(vec![
+                QuadBez::new(p00, p00.midpoint(p10), p10),
+                QuadBez::new(p10, p10.midpoint(p11), p11),
+                QuadBez::new(p11, p11.midpoint(p01), p01),
+                QuadBez::new(p01, p01.midpoint(p00), p00),
+            ]),
+            Vec::new(),
+        )
+    };
+    let shape_area = |s: &FillShape| -> f64 {
+        let holes_area: f64 = s.holes.iter().map(|h| h.signed_area().abs()).sum();
+        s.exterior.signed_area().abs() - holes_area
+    };
+
+    let red = Color32::from_rgb(220, 50, 50);
+    let blue = Color32::from_rgb(50, 80, 220);
+
+    let cases = [
+        (
+            "Shift+クリックで選び足して移動",
+            vec![
+                Action::ToggleSelectionAt { scene_idx: 0 },
+                Action::FinishMoveSelectionDrag {
+                    total_delta: kurbo::Vec2::new(10.0, 10.0),
+                    alt_duplicate: false,
+                },
+            ],
+            Point::new(260.0, 210.0),
+        ),
+        (
+            "Shift+矩形で一部を選び足す",
+            vec![Action::SelectMarquee {
+                p0: Point::new(150.0, 120.0),
+                p1: Point::new(350.0, 280.0),
+                additive: true,
+            }],
+            Point::new(250.0, 200.0),
+        ),
+    ];
+
+    for (label, add_actions, overlap_pt) in cases {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                make_rect(100.0, 100.0, 300.0, 300.0, red),
+                make_rect(400.0, 100.0, 500.0, 200.0, blue),
+            ],
+        );
+
+        assert!(apply(
+            &mut app,
+            Action::SelectSingleAt {
+                pt: Point::new(450.0, 150.0),
+            },
+        ));
+        assert!(apply(
+            &mut app,
+            Action::NudgeSelection {
+                delta: kurbo::Vec2::new(-200.0, 50.0),
+            },
+        ));
+
+        run(&mut app, &add_actions);
+
+        let top_color = app
+            .scene()
+            .iter()
+            .rev()
+            .find(|s| s.contains_point(overlap_pt))
+            .map(|s| s.color);
+        assert_eq!(
+            top_color,
+            Some(blue),
+            "{label}: 選び足した後の重なり部分の一番上が青であること"
+        );
+
+        assert!(apply(&mut app, Action::Deselect));
+        let cel_shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        let blue_area: f64 = cel_shapes
+            .iter()
+            .filter(|s| s.color == blue)
+            .map(shape_area)
+            .sum();
+        let red_area: f64 = cel_shapes
+            .iter()
+            .filter(|s| s.color == red)
+            .map(shape_area)
+            .sum();
+        assert!(
+            (blue_area - 10_000.0).abs() < 10.0,
+            "{label}: 確定後の青の面積が 10,000 であること (actual={blue_area})"
+        );
+        assert!(
+            (red_area - 30_000.0).abs() < 10.0,
+            "{label}: 確定後の赤の面積が 30,000 であること (actual={red_area})"
+        );
+    }
+}

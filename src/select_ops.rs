@@ -230,6 +230,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     let editing_group_path = tab.session.editing_group_path.clone();
     let mut selection = std::mem::take(&mut tab.session.selection);
     tab.session.update_floating(|floating| {
+        let mut lifted = Vec::new();
         if let Some(fl) = floating {
             let mut new_chunks = Vec::new();
             for (orig_id, chunk) in fl.take_remainder_chunks() {
@@ -248,7 +249,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                                 rem.shape_id = next_shape_id();
                             }
                             selection.insert_shape(&rem);
-                            fl.pieces.push(rem);
+                            lifted.push(rem);
                         }
                         MarqueeHit::Split { inside, outside } => {
                             for mut out_s in outside {
@@ -262,7 +263,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                                     piece.shape_id = next_shape_id();
                                 }
                                 selection.insert_shape(&piece);
-                                fl.pieces.push(piece);
+                                lifted.push(piece);
                             }
                         }
                     }
@@ -322,10 +323,13 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                             piece.shape_id = next_shape_id();
                         }
                         selection.insert_shape(&piece);
-                        fl.pieces.push(piece);
+                        lifted.push(piece);
                     }
                 }
             }
+        }
+        if let Some(fl) = floating {
+            fl.pieces.splice(0..0, lifted);
         }
     });
     tab.session.selection = selection;

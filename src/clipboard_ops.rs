@@ -287,18 +287,6 @@ pub(crate) fn can_paste_clipboard_symbol(
     can_paste_clipboard_symbol_inner(tab, clipboard, src_sym_id, &mut visited)
 }
 
-/// `paste_clipboard`（`Cmd+V`）実行前に、現在のタブでクリップボード内の図形がすべて自己・親シンボルの循環参照により配置不可能かを判定する
-pub(crate) fn would_clipboard_paste_all_cycle(tab: &Tab, clipboard: &Clipboard) -> bool {
-    if clipboard.shapes.is_empty() || tab.session.edit_path.is_empty() {
-        return false;
-    }
-    clipboard.shapes.iter().all(|shape| {
-        shape
-            .symbol_instance
-            .is_some_and(|b| !can_paste_clipboard_symbol(tab, clipboard, b.symbol_id))
-    })
-}
-
 fn collect_needed_clipboard_imports(
     tab: &Tab,
     clipboard: &Clipboard,
@@ -334,6 +322,7 @@ fn collect_needed_clipboard_imports(
 pub(crate) fn resolve_clipboard_for_paste(
     tab: &mut Tab,
     clipboard: &mut Clipboard,
+    before_mutate: impl FnOnce(&mut Tab),
 ) -> (Vec<FillShape>, bool) {
     let mut had_cycle = false;
     let mut resolved_shapes = Vec::with_capacity(clipboard.shapes.len());
@@ -347,7 +336,11 @@ pub(crate) fn resolve_clipboard_for_paste(
         resolved_shapes.push(shape.clone());
     }
 
-    if resolved_shapes.is_empty() || clipboard.symbols.is_empty() {
+    if resolved_shapes.is_empty() {
+        return (resolved_shapes, had_cycle);
+    }
+    before_mutate(tab);
+    if clipboard.symbols.is_empty() {
         return (resolved_shapes, had_cycle);
     }
 

@@ -407,23 +407,16 @@ impl From<SymbolInstanceBinding> for SavedSymbolInstanceBinding {
 
 impl From<SavedSymbolInstanceBinding> for SymbolInstanceBinding {
     fn from(s: SavedSymbolInstanceBinding) -> Self {
-        let xform = if s.xform.iter().all(|v| v.is_finite())
-            && (s.xform[0] * s.xform[3] - s.xform[1] * s.xform[2]).abs() > 1e-12
-        {
+        let xform = if (s.xform[0] * s.xform[3] - s.xform[1] * s.xform[2]).abs() > 1e-12 {
             Affine::new(s.xform)
         } else {
             Affine::IDENTITY
-        };
-        let pivot = if s.pivot[0].is_finite() && s.pivot[1].is_finite() {
-            Point::new(s.pivot[0], s.pivot[1])
-        } else {
-            Point::ZERO
         };
         Self {
             instance_gid: s.instance_gid,
             symbol_id: s.symbol_id,
             xform,
-            pivot,
+            pivot: Point::new(s.pivot[0], s.pivot[1]),
             loop_mode: s.loop_mode,
             first_frame: s.first_frame.min(MAX_TIMELINE_FRAMES.saturating_sub(1)),
             color_effect: ColorEffect::new(s.color_effect.alpha, s.color_effect.brightness),
@@ -1042,16 +1035,8 @@ impl ProjectDocument {
         } else {
             1
         };
-        let w = if self.stage_size[0].is_finite() {
-            self.stage_size[0].clamp(100.0, 3840.0)
-        } else {
-            800.0
-        };
-        let h = if self.stage_size[1].is_finite() {
-            self.stage_size[1].clamp(100.0, 2160.0)
-        } else {
-            450.0
-        };
+        let w = self.stage_size[0].clamp(100.0, 3840.0);
+        let h = self.stage_size[1].clamp(100.0, 2160.0);
         Document {
             root: timeline,
             library,

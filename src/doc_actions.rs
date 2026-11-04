@@ -12,8 +12,7 @@ use crate::canvas_tool::{
     UndoEntry,
 };
 use crate::clipboard_ops::{
-    instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes,
-    resolve_clipboard_for_paste, would_clipboard_paste_all_cycle,
+    instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
 };
 use crate::select_ops::{
     apply_marquee_selection, apply_move_vertex_to_shape, apply_pull_edge_to_shape,
@@ -676,7 +675,8 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             exited
         }
         Action::RenameSymbol { sym_id, new_name } => {
-            apply_rename_symbol(tab, sym_id, new_name, coalesce)
+            push_undo(tab, coalesce);
+            tab.doc.rename_symbol(sym_id, new_name)
         }
         Action::DeleteSymbol { sym_id } => apply_delete_symbol(tab, sym_id),
         Action::SetSymbolPlayback {
@@ -1419,18 +1419,11 @@ fn apply_paste_clipboard(
         );
         return false;
     }
-    if would_clipboard_paste_all_cycle(tab, clipboard) {
-        show_notice(
-            toast,
-            NoticeKind::Warning,
-            "編集中のシンボル自身や親シンボルは循環参照になるため配置できません",
-        );
-        return false;
-    }
 
-    clear_selection(tab);
-    push_undo(tab, None);
-    let (resolved, had_cycle) = resolve_clipboard_for_paste(tab, clipboard);
+    let (resolved, had_cycle) = resolve_clipboard_for_paste(tab, clipboard, |tab| {
+        clear_selection(tab);
+        push_undo(tab, None);
+    });
     if had_cycle {
         show_notice(
             toast,
@@ -1438,52 +1431,37 @@ fn apply_paste_clipboard(
             "編集中のシンボル自身や親シンボルは循環参照になるため配置できません",
         );
     }
-    if !resolved.is_empty() {
-        let offset = if in_place {
-            KVec2::ZERO
-        } else {
-            if clipboard.paste_count == 0 {
-                clipboard.paste_offset = KVec2::ZERO;
-            }
-            clipboard.paste_count += 1;
-            let step = 16.0 / (tab.view.zoom as f64);
-            clipboard.paste_offset += KVec2::new(step, step);
-            clipboard.paste_offset
-        };
-
-        let same_timeline_context = clipboard.source_doc_id == tab.id
-            && clipboard.source_symbol_id == tab.session.edit_path.last().map(|s| s.symbol_id)
-            && tab.session.editing_group_path.is_empty();
-        let multi_layer_copy = same_timeline_context
-            && resolved
-                .first()
-                .is_some_and(|first| resolved.iter().any(|s| s.layer_id != first.layer_id));
-        let (pasted_shapes, any_raw) =
-            instantiate_relative_shapes_in_scope(tab, &resolved, offset, multi_layer_copy);
-
-        insert_and_select_shapes_in_scope(tab, pasted_shapes, any_raw);
-        if !matches!(tool.tool, Tool::Select | Tool::Transform) {
-            set_tool(tab, tool, Tool::Select);
-        }
-    }
-    true
-}
-
-fn apply_rename_symbol(
-    tab: &mut Tab,
-    sym_id: u64,
-    new_name: String,
-    coalesce: Option<CoalesceKey>,
-) -> bool {
-    if tab
-        .doc
-        .find_symbol(sym_id)
-        .is_none_or(|s| s.name == new_name)
-    {
+    if resolved.is_empty() {
         return false;
     }
-    push_undo(tab, coalesce);
-    tab.doc.rename_symbol(sym_id, new_name)
+
+    let offset = if in_place {
+        KVec2::ZERO
+    } else {
+        if clipboard.paste_count == 0 {
+            clipboard.paste_offset = KVec2::ZERO;
+        }
+        clipboard.paste_count += 1;
+        let step = 16.0 / (tab.view.zoom as f64);
+        clipboard.paste_offset += KVec2::new(step, step);
+        clipboard.paste_offset
+    };
+
+    let same_timeline_context = clipboard.source_doc_id == tab.id
+        && clipboard.source_symbol_id == tab.session.edit_path.last().map(|s| s.symbol_id)
+        && tab.session.editing_group_path.is_empty();
+    let multi_layer_copy = same_timeline_context
+        && resolved
+            .first()
+            .is_some_and(|first| resolved.iter().any(|s| s.layer_id != first.layer_id));
+    let (pasted_shapes, any_raw) =
+        instantiate_relative_shapes_in_scope(tab, &resolved, offset, multi_layer_copy);
+
+    insert_and_select_shapes_in_scope(tab, pasted_shapes, any_raw);
+    if !matches!(tool.tool, Tool::Select | Tool::Transform) {
+        set_tool(tab, tool, Tool::Select);
+    }
+    true
 }
 
 fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {

@@ -591,10 +591,7 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
             host.timeline_ui_mut().last_frame_advance_time = None;
         }
     }
-    if fps_resp.drag_stopped()
-        || fps_resp.lost_focus()
-        || (!fps_resp.dragged() && !fps_resp.has_focus())
-    {
+    if editing_idle(&[&fps_resp]) {
         apply(
             host,
             Action::EndCoalesce {
@@ -602,6 +599,12 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
             },
         );
     }
+}
+
+/// 数値の欄 `resps` の編集が一区切りした（どれかがフォーカスを失った、またはどれもドラッグ中・フォーカス中でない）かを返す。
+/// `true` のフレームで連続操作のまとめ（`EndCoalesce`）を区切る
+pub(crate) fn editing_idle(resps: &[&egui::Response]) -> bool {
+    resps.iter().any(|r| r.lost_focus()) || !resps.iter().any(|r| r.dragged() || r.has_focus())
 }
 
 /// コントロールバー：キーフレーム挿入・削除・フレーム延長/短縮・クラシックトゥイーンボタン

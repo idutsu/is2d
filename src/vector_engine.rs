@@ -483,11 +483,6 @@ impl FillShape {
     /// Undo 履歴保存時やバックアップ時に、幾何データから随時再生成可能な描画メッシュキャッシュを破棄してメモリを解放する
     pub(crate) fn strip_transient_caches(&mut self) {
         self.hit_bez_path = OnceLock::new();
-        self.clear_screen_caches();
-    }
-
-    /// 文書保存時などに、描画メッシュおよび画面表示用の一時キャッシュ（`fill_mesh`, `screen_mesh_cache`, `selection_mesh`, `selection_screen_mesh`）を破棄する
-    pub(crate) fn clear_screen_caches(&mut self) {
         self.fill_mesh = OnceLock::new();
         self.clear_screen_mesh_caches();
     }

@@ -11,7 +11,7 @@ use crate::select_ops::ArrangeMode;
 use crate::symbol::{ColorEffect, SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 use crate::symbol_ops::selected_single_symbol_info;
 pub(crate) use crate::timeline_ui::icons;
-use crate::timeline_ui::TimelineUiState;
+use crate::timeline_ui::{editing_idle, TimelineUiState};
 use crate::vector_engine::arc_mesh_to_shape;
 
 /// OS標準の修飾キー表記（macOS では `"Cmd"`、Windows / Linux では `"Ctrl"`）
@@ -1089,15 +1089,7 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
         if (w_resp.changed() || h_resp.changed()) && next_size != tab.doc.stage_size {
             actions.push(UiAction::Doc(Action::SetStageSize { size: next_size }));
         }
-        if w_resp.drag_stopped()
-            || w_resp.lost_focus()
-            || h_resp.drag_stopped()
-            || h_resp.lost_focus()
-            || (!w_resp.dragged()
-                && !w_resp.has_focus()
-                && !h_resp.dragged()
-                && !h_resp.has_focus())
-        {
+        if editing_idle(&[&w_resp, &h_resp]) {
             actions.push(UiAction::Doc(Action::EndCoalesce {
                 key: Some(CoalesceKey::StageSize),
             }));
@@ -1495,12 +1487,7 @@ fn draw_symbol_color_effect(
             effect: next_effect,
         }));
     }
-    if a_resp.drag_stopped()
-        || a_resp.lost_focus()
-        || b_resp.drag_stopped()
-        || b_resp.lost_focus()
-        || (!a_resp.dragged() && !a_resp.has_focus() && !b_resp.dragged() && !b_resp.has_focus())
-    {
+    if editing_idle(&[&a_resp, &b_resp]) {
         actions.push(UiAction::Doc(Action::EndCoalesce {
             key: Some(CoalesceKey::SymbolColorEffect(binding.instance_gid)),
         }));

@@ -2287,10 +2287,8 @@ impl Session {
                 modified: true,
             });
             fl.modified = true;
-            for s in newly_lifted {
-                fl.hidden.insert(s.shape_id);
-                fl.pieces.push(s);
-            }
+            fl.hidden.extend(newly_lifted.iter().map(|s| s.shape_id));
+            fl.pieces.splice(0..0, newly_lifted);
             if order_ids.len() > 1 && fl.pieces.len() > 1 {
                 fl.pieces
                     .sort_by_key(|s| layer_order_index(&order_ids, s.layer_id));
@@ -2314,6 +2312,7 @@ impl Session {
                 return;
             };
             let mut new_chunks = Vec::new();
+            let mut lifted = Vec::new();
             for (orig_id, chunk) in fl.take_remainder_chunks() {
                 let mut still_rem = Vec::new();
                 let mut newly_sel = Vec::new();
@@ -2338,8 +2337,9 @@ impl Session {
                 if !still_rem.is_empty() {
                     new_chunks.push((orig_id, still_rem));
                 }
-                fl.pieces.extend(newly_sel);
+                lifted.extend(newly_sel);
             }
+            fl.pieces.splice(0..0, lifted);
             fl.set_remainder_chunks(new_chunks);
         });
         self.selection.shapes = selection_shapes;
@@ -3213,7 +3213,8 @@ pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
         .collect()
 }
 
-/// `edit_layers` の対象レイヤー1枚分について、編集後ステージ図形列 `layer_stage_shapes` をローカル図形へ変換してセルに書き戻す
+/// `edit_layers` の対象レイヤー1枚分について、編集後ステージ図形列 `layer_stage_shapes` をローカル図形へ変換してセルに書き戻す。
+/// `edit_layers` は編集できる（トゥイーンの中割りでない）レイヤーだけを渡す
 fn writeback_edited_layer_shapes(
     tl: &mut Timeline,
     l_idx: usize,
@@ -3223,13 +3224,6 @@ fn writeback_edited_layer_shapes(
     initial_stage_inst_xform: &HashMap<(InstanceGid, u64), Affine>,
     layer_stage_shapes: &mut Vec<FillShape>,
 ) -> bool {
-    if tl.layers[l_idx]
-        .interpolated_tween_binding_at(frame)
-        .is_some()
-    {
-        return false;
-    }
-
     let Some(kf_idx) = tl.layers[l_idx].keyframe_index_at(frame) else {
         return false;
     };
