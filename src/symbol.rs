@@ -32,11 +32,17 @@ impl SymbolInstanceBinding {
         local_shapes: &[FillShape],
         layer_id: u64,
         scope_prefix: &[u64],
+        with_mesh: bool,
     ) -> Vec<FillShape> {
         let mut out = Vec::with_capacity(local_shapes.len());
         for s in local_shapes {
-            let _ = s.fill_mesh();
+            if with_mesh {
+                let _ = s.fill_mesh();
+            }
             let mut inst_s = s.clone();
+            if !with_mesh {
+                inst_s.clear_screen_caches();
+            }
             inst_s.shape_id = next_shape_id();
             let mut full_path =
                 Vec::with_capacity(scope_prefix.len() + 1 + inst_s.group_path.len());
@@ -62,6 +68,7 @@ impl SymbolInstanceBinding {
         parent_scope: &[u64],
         ctx: SymbolEvalCtx<'_>,
     ) -> Vec<FillShape> {
+        let with_mesh = ctx.with_mesh;
         let local_shapes = (ctx.depth < MAX_SYMBOL_NEST_DEPTH)
             .then(|| ctx.library.iter().find(|s| s.id == self.symbol_id))
             .flatten()
@@ -70,7 +77,7 @@ impl SymbolInstanceBinding {
             })
             .unwrap_or_default();
         if !local_shapes.is_empty() {
-            self.instantiate_shapes(&local_shapes, layer_id, parent_scope)
+            self.instantiate_shapes(&local_shapes, layer_id, parent_scope, with_mesh)
         } else if ctx.depth == 0 {
             vec![FillShape::new_empty_symbol_marker(
                 self,
@@ -136,6 +143,8 @@ struct SymbolEvalState {
 pub(crate) struct SymbolEvalCtx<'a> {
     pub(crate) library: &'a [SymbolDef],
     pub(crate) depth: usize,
+    /// 展開した図形に画面表示用のメッシュを作るか（動画の書き出しでは作らない）
+    with_mesh: bool,
     state: std::rc::Rc<std::cell::RefCell<SymbolEvalState>>,
 }
 
@@ -144,14 +153,22 @@ impl<'a> SymbolEvalCtx<'a> {
         Self {
             library,
             depth: 0,
+            with_mesh: true,
             state: std::rc::Rc::new(std::cell::RefCell::new(SymbolEvalState::default())),
         }
+    }
+
+    /// 画面表示用のメッシュを作らない（動画の書き出し用）
+    pub(crate) fn without_mesh(mut self) -> Self {
+        self.with_mesh = false;
+        self
     }
 
     pub(crate) fn nested(&self) -> Self {
         Self {
             library: self.library,
             depth: self.depth + 1,
+            with_mesh: self.with_mesh,
             state: std::rc::Rc::clone(&self.state),
         }
     }

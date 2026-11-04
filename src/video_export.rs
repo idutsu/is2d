@@ -57,13 +57,15 @@ pub(crate) fn render_frame(doc: &Document, frame: usize, width: u32, height: u32
     let origin_x = (View::DEFAULT_STAGE_CENTER.x - stage_w_f * 0.5) as f32;
     let origin_y = (View::DEFAULT_STAGE_CENTER.y - stage_h_f * 0.5) as f32;
 
-    for (layer_idx, layer) in doc.root.layers.iter().enumerate() {
+    for layer in &doc.root.layers {
         if !layer.visible {
             continue;
         }
-        let shapes = doc
-            .root
-            .evaluate_layer_shapes_at(layer_idx, frame, &doc.library);
+        let shapes = layer.evaluate_shapes_at(
+            (frame, frame),
+            layer.id,
+            crate::symbol::SymbolEvalCtx::new(&doc.library).without_mesh(),
+        );
         for shape in &shapes {
             if shape.is_empty_symbol_marker() {
                 continue;
@@ -224,6 +226,40 @@ impl Drop for VideoExportJob {
     }
 }
 
+/// 書き出しでコマを塗るスレッドの数の上限
+const MAX_RENDER_THREADS: usize = 4;
+
+/// コマ 0 から最後のコマまでを、`threads` コマずつ別々のスレッドで同時に塗り、コマの順に `push` へ渡す
+pub(crate) fn render_frames_in_order(
+    doc: &Document,
+    (width, height): (u32, u32),
+    threads: usize,
+    cancel_flag: &AtomicBool,
+    mut push: impl FnMut(usize, &[u8]) -> Result<(), String>,
+) -> VideoExportOutcome {
+    let total_frames = doc.root.total_frames.max(1);
+    for first in (0..total_frames).step_by(threads) {
+        if cancel_flag.load(Ordering::Acquire) {
+            return VideoExportOutcome::Cancelled;
+        }
+        let frames: Vec<Vec<u8>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (first..(first + threads).min(total_frames))
+                .map(|frame| scope.spawn(move || render_frame(doc, frame, width, height)))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        if cancel_flag.load(Ordering::Acquire) {
+            return VideoExportOutcome::Cancelled;
+        }
+        for (frame, rgba) in (first..).zip(&frames) {
+            if let Err(err) = push(frame, rgba) {
+                return VideoExportOutcome::Failed(err);
+            }
+        }
+    }
+    VideoExportOutcome::Completed
+}
+
 fn run_video_export(
     doc: &Document,
     target_path: &Path,
@@ -241,25 +277,25 @@ fn run_video_export(
 
     let (width, height) = export_dimensions(doc.stage_size);
     let fps = doc.fps.clamp(1, 60);
-    let total_frames = doc.root.total_frames.max(1);
 
     let mut encoder = match create_video_encoder(tmp_path, width, height, fps) {
         Ok(enc) => enc,
         Err(err) => return VideoExportOutcome::Failed(err),
     };
 
-    for frame in 0..total_frames {
-        if cancel_flag.load(Ordering::Acquire) {
-            return VideoExportOutcome::Cancelled;
-        }
-        let rgba = render_frame(doc, frame, width, height);
-        if cancel_flag.load(Ordering::Acquire) {
-            return VideoExportOutcome::Cancelled;
-        }
-        if let Err(err) = encoder.push_frame(&rgba) {
-            return VideoExportOutcome::Failed(err);
-        }
-        completed_frames.store(frame + 1, Ordering::Release);
+    let outcome = render_frames_in_order(
+        doc,
+        (width, height),
+        std::thread::available_parallelism().map_or(1, |n| n.get().min(MAX_RENDER_THREADS)),
+        cancel_flag,
+        |frame, rgba| {
+            encoder.push_frame(rgba)?;
+            completed_frames.store(frame + 1, Ordering::Release);
+            Ok(())
+        },
+    );
+    if outcome != VideoExportOutcome::Completed {
+        return outcome;
     }
 
     if cancel_flag.load(Ordering::Acquire) {

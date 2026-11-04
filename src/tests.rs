@@ -2751,6 +2751,7 @@ fn test_reverse_order_nested_symbol_topological_propagation_and_cycle_guard() {
         &sym_c_def.timeline.layers[0].keyframes[0].cel.shapes,
         1,
         &[],
+        true,
     );
     assert!(inst_shapes[0].has_cached_fill_mesh());
 
@@ -19345,4 +19346,152 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
             "シンボルインスタンスの変換行列は小数第3位に丸められず元の精度が保たれること: {a} vs {b}"
         );
     }
+}
+
+#[test]
+fn test_video_export_parallel_render_frames_and_without_mesh() {
+    use crate::canvas_tool::View;
+    use crate::doc_actions::{apply, Action};
+    use crate::symbol::SymbolEvalCtx;
+    use crate::vector_engine::Contour;
+    use crate::video_export::{
+        export_dimensions, render_frame, render_frames_in_order, VideoExportOutcome,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // コマごとに絵が違う作品を作る（クラシックトゥイーンで動くシンボル、10 コマ）
+    let mut app = Is2dApp::default();
+    let center = View::DEFAULT_STAGE_CENTER;
+    let p00 = Point::new(center.x - 320.0, center.y - 30.0);
+    let p10 = Point::new(center.x - 260.0, center.y - 30.0);
+    let p11 = Point::new(center.x - 260.0, center.y + 30.0);
+    let p01 = Point::new(center.x - 320.0, center.y + 30.0);
+    let rect_shape = FillShape::new(
+        Color32::from_rgb(230, 50, 50),
+        Contour::new(vec![
+            QuadBez::new(p00, p00.midpoint(p10), p10),
+            QuadBez::new(p10, p10.midpoint(p11), p11),
+            QuadBez::new(p11, p11.midpoint(p01), p01),
+            QuadBez::new(p01, p01.midpoint(p00), p00),
+        ]),
+        Vec::new(),
+    );
+    put_cel_shapes(&mut app, 0, 0, vec![rect_shape]);
+    app.tab_mut().session.set_selected_indices(vec![0]);
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    assert!(apply(&mut app, Action::ToggleTween));
+    for _ in 0..9 {
+        assert!(apply(&mut app, Action::ExtendFrame));
+    }
+    assert!(apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 9,
+        },
+    ));
+    assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: true },));
+    app.tab_mut().session.set_selected_indices(vec![0]);
+    assert!(apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: kurbo::Vec2::new(540.0, 0.0),
+        },
+    ));
+    assert_eq!(app.tab().doc.root.total_frames, 10);
+
+    let doc = app.tab().committed_document_copy();
+    let (w, h) = export_dimensions(doc.stage_size);
+    let expected_frames: Vec<Vec<u8>> = (0..10).map(|f| render_frame(&doc, f, w, h)).collect();
+    for f in 1..10 {
+        assert_ne!(
+            expected_frames[f - 1],
+            expected_frames[f],
+            "コマごとに絵が異なること"
+        );
+    }
+
+    // 1. スレッドの数を 1・3・4・16 にして render_frames_in_order を呼ぶ
+    for threads in [1usize, 3, 4, 16] {
+        let cancel_flag = AtomicBool::new(false);
+        let mut received_indices = Vec::new();
+        let mut received_frames = Vec::new();
+        let outcome = render_frames_in_order(&doc, (w, h), threads, &cancel_flag, |frame, rgba| {
+            received_indices.push(frame);
+            received_frames.push(rgba.to_vec());
+            Ok(())
+        });
+        assert_eq!(outcome, VideoExportOutcome::Completed);
+        assert_eq!(received_indices, (0..10).collect::<Vec<usize>>());
+        assert_eq!(received_frames, expected_frames);
+    }
+
+    // 2. 3本で、4 コマ目（番号 3）を渡したところで中止の合図を立てる
+    {
+        let cancel_flag = AtomicBool::new(false);
+        let mut pushed_count = 0usize;
+        let outcome = render_frames_in_order(&doc, (w, h), 3, &cancel_flag, |frame, _rgba| {
+            pushed_count += 1;
+            if frame == 3 {
+                cancel_flag.store(true, Ordering::Release);
+            }
+            Ok(())
+        });
+        assert_eq!(outcome, VideoExportOutcome::Cancelled);
+        assert!(
+            pushed_count <= 6,
+            "4コマ目（番号3）で中止したとき渡ったコマは6コマ以下であること: {pushed_count}"
+        );
+    }
+
+    // 3. 3本で、5 コマ目（番号 4）で push がエラーを返す
+    {
+        let cancel_flag = AtomicBool::new(false);
+        let mut pushed_count = 0usize;
+        let outcome = render_frames_in_order(&doc, (w, h), 3, &cancel_flag, |frame, _rgba| {
+            pushed_count += 1;
+            if frame == 4 {
+                return Err("mock push error".to_owned());
+            }
+            Ok(())
+        });
+        assert_eq!(
+            outcome,
+            VideoExportOutcome::Failed("mock push error".to_owned())
+        );
+        assert_eq!(pushed_count, 5);
+    }
+
+    // 4. シンボルの中の図形に先にメッシュを作っておいてから展開する
+    for sym in &doc.library {
+        for layer in &sym.timeline.layers {
+            for kf in &layer.keyframes {
+                for s in kf.cel.shapes.iter() {
+                    let _ = s.fill_mesh();
+                    assert!(s.has_cached_fill_mesh());
+                }
+            }
+        }
+    }
+    let layer = &doc.root.layers[0];
+    let without_mesh_shapes = layer.evaluate_shapes_at(
+        (2, 2),
+        layer.id,
+        SymbolEvalCtx::new(&doc.library).without_mesh(),
+    );
+    assert!(!without_mesh_shapes.is_empty());
+    assert!(
+        without_mesh_shapes
+            .iter()
+            .all(|s| !s.has_cached_fill_mesh()),
+        "書き出し用（without_mesh）の展開の図形はどれもメッシュを持たないこと"
+    );
+
+    let with_mesh_shapes =
+        layer.evaluate_shapes_at((2, 2), layer.id, SymbolEvalCtx::new(&doc.library));
+    assert!(!with_mesh_shapes.is_empty());
+    assert!(
+        with_mesh_shapes.iter().all(|s| s.has_cached_fill_mesh()),
+        "画面用（SymbolEvalCtx::new）の展開の図形はどれもメッシュを持つこと"
+    );
 }
