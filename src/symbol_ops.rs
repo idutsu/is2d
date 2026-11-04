@@ -2,7 +2,8 @@ use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
-    editable_layer_ids, insert_and_select_shapes_in_scope, topmost_layer_id_for_indices, Tab,
+    editable_layer_ids, insert_and_select_shapes_in_scope, reset_session_after_timeline_change,
+    topmost_layer_id_for_indices, Tab,
 };
 use crate::symbol::{EditLevel, SymbolEvalCtx, SymbolInstanceBinding};
 use crate::timeline::TimelineCellSelection;
@@ -275,10 +276,7 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
     tab.set_active_frame(act_f);
     tab.set_active_cell_selection(Some(TimelineCellSelection::single(act_l, act_f)));
 
-    cancel_active_drag(tab);
-    tab.session.set_floating(None);
-    tab.session.transform_pivot = None;
-    tab.session.sanitize_editing_scope();
+    reset_session_after_timeline_change(tab);
     true
 }
 
@@ -364,10 +362,7 @@ pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
     tab.set_active_cell_selection(Some(TimelineCellSelection::single(act_l, act_f)));
     tab.session.editing_group_path = lvl.parent_group_path;
 
-    cancel_active_drag(tab);
-    tab.session.set_floating(None);
-    tab.session.transform_pivot = None;
-    tab.session.sanitize_editing_scope();
+    reset_session_after_timeline_change(tab);
 
     tab.session.select_symbol_instance_by_gid(lvl.instance_gid);
     true

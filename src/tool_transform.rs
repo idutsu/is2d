@@ -5,19 +5,7 @@ use crate::canvas_tool::{ActiveCanvasDrag, MarqueeDrag, Scene, Session, Tab, Vie
 pub(crate) use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
-#[cfg(test)]
-pub(crate) use crate::doc_actions::{
-    convert_selection_to_symbol, delete_symbol_from_library, flip_selected_shapes,
-    place_symbol_instance_from_library, rename_symbol_in_library, rotate_selected_shapes,
-    scale_selected_shapes, set_active_keyframe_tween_rotate, set_selected_symbol_playback,
-    set_selected_symbol_world_pivot, timeline_toggle_tween,
-};
 use crate::select_ops::{finish_marquee_drag, handle_canvas_double_click};
-#[cfg(test)]
-pub(crate) use crate::symbol_ops::{
-    enter_symbol_from_library, enter_symbol_timeline, exit_symbol_timeline,
-    selected_single_symbol_info,
-};
 use crate::vector_engine::{affine_rotate_around, affine_scale_around};
 
 // ============================================================================

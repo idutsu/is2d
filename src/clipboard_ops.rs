@@ -132,8 +132,8 @@ fn collect_symbol_and_descendants(
     out.push(Arc::new(cloned));
 }
 
-/// 別タブから移植されるシンボルの内部タイムライン内の全グループIDを貼り付け先タブの `Document` で新規採番したIDへ一括リマップする
-fn remap_timeline_group_ids(tl: &mut Timeline, doc: &mut Document) {
+/// 別タブから移植されるシンボルの内部タイムライン内の子シンボル参照ID（`sym_map` にあるもの）と全グループIDを、貼り付け先タブの `Document` のIDへ一括リマップする
+fn remap_timeline_ids(tl: &mut Timeline, doc: &mut Document, sym_map: &HashMap<u64, u64>) {
     let mut gid_map: HashMap<u64, u64> = HashMap::new();
     for layer in &mut tl.layers {
         for i in 0..layer.keyframes.len() {
@@ -155,6 +155,9 @@ fn remap_timeline_group_ids(tl: &mut Timeline, doc: &mut Document) {
             }
             if !layer.keyframes[i].cel.instances.is_empty() {
                 for inst in layer.keyframe_mut(i).cel.instances_mut() {
+                    if let Some(&mapped_child_id) = sym_map.get(&inst.binding.symbol_id) {
+                        inst.binding.symbol_id = mapped_child_id;
+                    }
                     inst.binding.instance_gid =
                         remap_gid(&mut gid_map, inst.binding.instance_gid, doc);
                     for gid in &mut inst.parent_scope {
@@ -185,6 +188,9 @@ pub(crate) fn capture_clipboard_symbols(tab: &Tab, clipboard: &mut Clipboard) {
     }
 }
 
+/// クリップボードのシンボル `src_sym_id` の代わりに使える、貼り先のタブのシンボルの番号を返す。
+/// 同じタブなら同じ番号のシンボルを使う。別のタブから前に移植した写しは、中身（`revision`）が同じで、
+/// 子もすべてそのまま使えるものを指しているときだけ使う
 fn existing_reusable_target_symbol_id(
     tab: &Tab,
     clipboard: &Clipboard,
@@ -192,23 +198,40 @@ fn existing_reusable_target_symbol_id(
 ) -> Option<u64> {
     let target_doc_id = tab.id;
     let source_doc_id = clipboard.source_doc_id;
-    let candidate = (target_doc_id == source_doc_id)
-        .then_some(src_sym_id)
-        .filter(|&id| tab.doc.find_symbol(id).is_some())
-        .or_else(|| {
-            clipboard
-                .imported_map
-                .get(&(source_doc_id, src_sym_id, target_doc_id))
-                .copied()
-                .filter(|&id| tab.doc.find_symbol(id).is_some())
-        })?;
-
-    let sym_def = tab.doc.find_symbol(candidate)?;
-    let all_children_exist = sym_def
+    if target_doc_id == source_doc_id {
+        if let Some(sym_def) = tab.doc.find_symbol(src_sym_id) {
+            return sym_def
+                .timeline
+                .instances()
+                .all(|inst| tab.doc.find_symbol(inst.binding.symbol_id).is_some())
+                .then_some(src_sym_id);
+        }
+    }
+    let src = clipboard.symbols.iter().find(|s| s.id == src_sym_id)?;
+    let candidate = *clipboard
+        .imported_map
+        .get(&(source_doc_id, src_sym_id, target_doc_id))?;
+    let target = tab
+        .doc
+        .find_symbol(candidate)
+        .filter(|t| t.revision == src.revision)?;
+    let target_children: HashSet<u64> = target
         .timeline
         .instances()
-        .all(|inst| tab.doc.find_symbol(inst.binding.symbol_id).is_some());
-    all_children_exist.then_some(candidate)
+        .map(|inst| inst.binding.symbol_id)
+        .collect();
+    let src_children: HashSet<u64> = src
+        .timeline
+        .instances()
+        .map(|inst| inst.binding.symbol_id)
+        .collect();
+    src_children
+        .into_iter()
+        .all(|child| {
+            existing_reusable_target_symbol_id(tab, clipboard, child)
+                .is_some_and(|id| target_children.contains(&id))
+        })
+        .then_some(candidate)
 }
 
 fn can_paste_clipboard_symbol_inner(
@@ -385,18 +408,7 @@ pub(crate) fn resolve_clipboard_for_paste(
                 suffix = suffix.saturating_add(1);
             }
         }
-        for layer in &mut imported.timeline.layers {
-            for i in 0..layer.keyframes.len() {
-                if !layer.keyframes[i].cel.instances.is_empty() {
-                    for inst in layer.keyframe_mut(i).cel.instances_mut() {
-                        if let Some(&mapped_child_id) = local_sym_map.get(&inst.binding.symbol_id) {
-                            inst.binding.symbol_id = mapped_child_id;
-                        }
-                    }
-                }
-            }
-        }
-        remap_timeline_group_ids(&mut imported.timeline, &mut tab.doc);
+        remap_timeline_ids(&mut imported.timeline, &mut tab.doc, &local_sym_map);
 
         tab.doc.library.push(imported);
         if tab.view.selected_library_symbol.is_none() {

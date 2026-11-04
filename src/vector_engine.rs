@@ -494,13 +494,9 @@ impl FillShape {
 
     /// 同じ `shape_id`・`mesh_revision` の図形 `donor` から、色が同じなら描画・当たり判定キャッシュを O(1) で引き継ぐ
     pub(crate) fn reuse_caches_from(&mut self, donor: &FillShape) {
-        if self.color == donor.color {
-            self.copy_render_caches_from(donor);
+        if self.color != donor.color {
+            return;
         }
-    }
-
-    /// ドナー図形 `donor` が保持している描画・当たり判定キャッシュをそのまま引き継ぐ
-    pub(crate) fn copy_render_caches_from(&mut self, donor: &Self) {
         if self.hit_bez_path.get().is_none() {
             if let Some(p) = donor.hit_bez_path.get() {
                 let _ = self.hit_bez_path.set(Arc::clone(p));

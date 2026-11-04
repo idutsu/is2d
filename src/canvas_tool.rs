@@ -12,10 +12,7 @@ use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
 use crate::vector_boolean::{merge_disjoint_fill_into_canvas, merge_shapes_into_canvas};
 use crate::vector_engine::{rects_overlap, FillShape, SyncCache};
 
-#[cfg(test)]
 pub(crate) const MAX_UNDO_HISTORY: usize = 100;
-#[cfg(not(test))]
-const MAX_UNDO_HISTORY: usize = 100;
 const DEFAULT_TOAST_DURATION: Duration = Duration::from_millis(2800);
 
 // ============================================================================
@@ -2753,10 +2750,7 @@ impl UndoHistory {
         entry.commit_id = self.current_commit_id;
         self.current_commit_id = self.next_commit_id;
         self.next_commit_id = self.next_commit_id.saturating_add(1);
-        if self.undo_stack.len() >= MAX_UNDO_HISTORY {
-            self.undo_stack.pop_front();
-        }
-        self.undo_stack.push_back(entry);
+        self.push_undo_from_redo(entry);
         self.redo_stack.clear();
     }
 
@@ -3552,6 +3546,13 @@ pub(crate) fn cancel_active_drag(tab: &mut Tab) {
     tab.session.drag = ActiveCanvasDrag::None;
     tab.session.hover_target = HoverTarget::None;
     tab.session.transform_hover = TransformHoverTarget::None;
+}
+
+pub(crate) fn reset_session_after_timeline_change(tab: &mut Tab) {
+    cancel_active_drag(tab);
+    tab.session.set_floating(None);
+    tab.session.transform_pivot = None;
+    tab.session.sanitize_editing_scope();
 }
 
 pub(crate) fn set_tool(tab: &mut Tab, tool_settings: &mut ToolSettings, tool: Tool) {

@@ -6,9 +6,10 @@ use kurbo::{Affine, Point, QuadBez, Vec2 as KVec2};
 use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
     editable_layer_ids, focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
-    prepare_moved_selection, select_shapes_for_timeline_selection, set_tool, show_notice,
-    toggle_select_sub_mode, Clipboard, CoalesceKey, NoticeKind, SelectSubMode, ShapeId,
-    StatusToast, Tab, Tool, ToolSettings, UndoEntry,
+    prepare_moved_selection, reset_session_after_timeline_change,
+    select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode, Clipboard,
+    CoalesceKey, NoticeKind, SelectSubMode, ShapeId, StatusToast, Tab, Tool, ToolSettings,
+    UndoEntry,
 };
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes,
@@ -28,7 +29,7 @@ use crate::symbol_ops::{
     prepare_convert_selection_to_symbol, prepare_place_symbol_instance,
     selected_single_symbol_info,
 };
-use crate::timeline::{Timeline, TimelineCellSelection, MAX_LAYERS_PER_TIMELINE};
+use crate::timeline::{Layer, Timeline, TimelineCellSelection, MAX_LAYERS_PER_TIMELINE};
 use crate::vector_boolean::{
     boolean_operation, erase_from_canvas, find_enclosed_region_at, merge_disjoint_fill_into_canvas,
     merge_shapes_into_canvas, resolve_deformed_shape, BoolOp,
@@ -49,7 +50,6 @@ pub(crate) trait ActionHost {
     fn tab_mut(&mut self) -> &mut Tab;
     fn tool(&self) -> &ToolSettings;
     fn tool_mut(&mut self) -> &mut ToolSettings;
-    #[allow(dead_code)]
     fn clipboard_mut(&mut self) -> &mut Clipboard;
     fn toast_mut(&mut self) -> &mut Option<StatusToast>;
     fn parts_mut(
@@ -369,13 +369,6 @@ fn push_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
         }
     }
     push_undo_entry_from_doc(tab, coalesce);
-}
-
-fn reset_session_after_timeline_change(tab: &mut Tab) {
-    cancel_active_drag(tab);
-    tab.session.set_floating(None);
-    tab.session.transform_pivot = None;
-    tab.session.sanitize_editing_scope();
 }
 
 fn mutate_timeline_with_undo(tab: &mut Tab, mutate: impl FnOnce(&mut Timeline) -> bool) -> bool {
@@ -729,10 +722,10 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             apply_timeline_reorder_layer(tab, src_idx, dst_idx)
         }
         Action::SetLayerVisible { layer_idx, visible } => {
-            apply_set_layer_visible(tab, layer_idx, visible)
+            apply_set_layer_flag(tab, layer_idx, visible, |l| l.visible, |l| &mut l.visible)
         }
         Action::SetLayerLocked { layer_idx, locked } => {
-            apply_set_layer_locked(tab, layer_idx, locked)
+            apply_set_layer_flag(tab, layer_idx, locked, |l| l.locked, |l| &mut l.locked)
         }
         Action::SetFps { fps } => apply_set_fps(tab, fps, coalesce),
         Action::SetStageSize { size } => apply_set_stage_size(tab, size, coalesce),
@@ -1865,35 +1858,25 @@ fn apply_timeline_move_active_layer(tab: &mut Tab, up: bool) -> bool {
     apply_timeline_reorder_layer(tab, curr, target)
 }
 
-fn apply_set_layer_visible(tab: &mut Tab, layer_idx: usize, visible: bool) -> bool {
+/// レイヤー `layer_idx` の表示・ロックの印（`get` で読み、`get_mut` で書く）を `value` にする
+fn apply_set_layer_flag(
+    tab: &mut Tab,
+    layer_idx: usize,
+    value: bool,
+    get: fn(&Layer) -> bool,
+    get_mut: fn(&mut Layer) -> &mut bool,
+) -> bool {
     if tab
         .active_timeline()
         .layers
         .get(layer_idx)
-        .is_none_or(|l| l.visible == visible)
+        .is_none_or(|l| get(l) == value)
     {
         return false;
     }
     mutate_timeline_with_undo(tab, |tl| {
         if let Some(layer) = tl.layers.get_mut(layer_idx) {
-            layer.visible = visible;
-        }
-        true
-    })
-}
-
-fn apply_set_layer_locked(tab: &mut Tab, layer_idx: usize, locked: bool) -> bool {
-    if tab
-        .active_timeline()
-        .layers
-        .get(layer_idx)
-        .is_none_or(|l| l.locked == locked)
-    {
-        return false;
-    }
-    mutate_timeline_with_undo(tab, |tl| {
-        if let Some(layer) = tl.layers.get_mut(layer_idx) {
-            layer.locked = locked;
+            *get_mut(layer) = value;
         }
         true
     })

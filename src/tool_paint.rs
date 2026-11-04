@@ -3,8 +3,6 @@ use kurbo::Point;
 
 use crate::canvas_tool::{ActiveCanvasDrag, Tab, Tool};
 use crate::doc_actions::{apply, Action, ActionHost};
-#[cfg(test)]
-pub(crate) use crate::doc_actions::{bucket_fill_at, commit_raw_outline};
 use crate::vector_engine::{
     append_mesh, tessellate_raw_polygon, transform_mesh_to_screen, MAX_VIEW_ZOOM, MIN_VIEW_ZOOM,
 };

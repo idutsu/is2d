@@ -40,9 +40,6 @@ impl SymbolInstanceBinding {
                 let _ = s.fill_mesh();
             }
             let mut inst_s = s.clone();
-            if !with_mesh {
-                inst_s.clear_screen_caches();
-            }
             inst_s.shape_id = next_shape_id();
             let mut full_path =
                 Vec::with_capacity(scope_prefix.len() + 1 + inst_s.group_path.len());
@@ -748,7 +745,8 @@ impl Document {
         if !self.library.iter().any(|s| s.id == symbol_id) {
             return false;
         }
-        let remove_from_tl = |tl: &mut Timeline| {
+        let remove_from_tl = |tl: &mut Timeline| -> bool {
+            let mut removed = false;
             for layer in &mut tl.layers {
                 for i in 0..layer.keyframes.len() {
                     if layer.keyframes[i]
@@ -761,15 +759,18 @@ impl Document {
                         kf.cel
                             .instances_mut()
                             .retain(|inst| inst.binding.symbol_id != symbol_id);
+                        removed = true;
                     }
                 }
             }
+            removed
         };
         remove_from_tl(&mut self.root);
         self.library.retain(|s| s.id != symbol_id);
         for sym_def in &mut self.library {
-            remove_from_tl(&mut sym_def.timeline);
-            sym_def.revision = crate::vector_engine::next_mesh_revision();
+            if remove_from_tl(&mut sym_def.timeline) {
+                sym_def.revision = crate::vector_engine::next_mesh_revision();
+            }
         }
         self.bump_revision();
         true

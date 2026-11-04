@@ -14,8 +14,8 @@ use crate::{
         union_bounding_boxes, Contour, FillShape,
     },
     vector_stroke::{
-        estimate_brush_radius_from_ring, fit_quad_control_point_with_arc_lengths, rdp_recursive,
-        smooth_ring_to_quad_contour,
+        estimate_brush_radius_from_ring, fit_quad_control_point_with_arc_lengths,
+        rdp_recursive_bounded, smooth_ring_to_quad_contour,
     },
 };
 
@@ -371,9 +371,6 @@ fn shape_interacts_with_clip(
     clip: &[FillShape],
     clip_sub_bboxes: &[KRect],
 ) -> bool {
-    if !overlaps_any_bbox(subj.bounding_box(), clip_sub_bboxes) {
-        return false;
-    }
     if subj.contours().any(|c| {
         c.segments
             .iter()
@@ -1313,7 +1310,7 @@ fn refit_open_polyline_to_quads(pts: &[Point], epsilon: f64) -> Vec<QuadBez> {
     let mut seg_start = 0;
     for i in 1..n {
         if keep[i] {
-            rdp_recursive(pts, seg_start, i, epsilon, &mut keep);
+            rdp_recursive_bounded(pts, seg_start, i, epsilon, &mut keep, 0);
             seg_start = i;
         }
     }

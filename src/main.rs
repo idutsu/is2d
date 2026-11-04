@@ -26,8 +26,6 @@ use std::time::Instant;
 use eframe::egui::{self, Color32, CursorIcon, Key, Pos2, Sense, Stroke, Vec2};
 use kurbo::Point;
 
-#[cfg(test)]
-pub(crate) use canvas_tool::MAX_UNDO_HISTORY;
 use canvas_tool::{
     key_pressed_no_repeat, Clipboard, NoticeKind, SelectSubMode, StatusToast, Tab, Tool,
     ToolSettings,
@@ -446,10 +444,8 @@ impl Is2dApp {
         let cmd = input.modifiers.command || input.modifiers.ctrl;
         if self.video_export.is_some() {
             if cmd && key_pressed_no_repeat(&input, Key::W) {
-                self.cancel_active_video_export();
-                project_io::close_active_tab(self, Some(ctx));
+                self.apply_action(UiAction::CloseActiveTab, ctx);
             } else if cmd && key_pressed_no_repeat(&input, Key::Q) {
-                self.cancel_active_video_export();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             return;

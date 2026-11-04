@@ -1510,17 +1510,7 @@ fn max_deviation_from_chord(pts: &[Point]) -> f64 {
 
 const MAX_RDP_RECURSION_DEPTH: usize = 64;
 
-pub(crate) fn rdp_recursive(
-    all_pts: &[Point],
-    start: usize,
-    end: usize,
-    epsilon: f64,
-    keep: &mut [bool],
-) {
-    rdp_recursive_bounded(all_pts, start, end, epsilon, keep, 0);
-}
-
-fn rdp_recursive_bounded(
+pub(crate) fn rdp_recursive_bounded(
     all_pts: &[Point],
     start: usize,
     end: usize,

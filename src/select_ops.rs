@@ -4,9 +4,8 @@ use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
     cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
-    editable_layer_ids, focus_active_layer_to_shape_by_id, merge_floating_into_base_shapes,
-    sync_timeline_layer_from_canvas_selection, Floating, HoverTarget, LayerId, MarqueeDrag, Scene,
-    SelectSubMode, Session, Tab,
+    editable_layer_ids, merge_floating_into_base_shapes, sync_timeline_layer_from_canvas_selection,
+    Floating, HoverTarget, LayerId, MarqueeDrag, Scene, SelectSubMode, Session, Tab,
 };
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
@@ -123,15 +122,16 @@ pub(crate) fn select_single_shape_at(tab: &mut Tab, sub_mode: SelectSubMode, pt:
     clear_selection(tab);
     let zoom = tab.view.zoom;
     let scene = tab.scene();
-    if let Some((hit_idx, hit_id)) = scene
+    if let Some(hit_idx) = scene
         .hit_shape_or_hover_at(&tab.session, pt, zoom, sub_mode)
-        .and_then(|idx| scene.get(idx).map(|s| (idx, s.shape_id, s.layer_id)))
-        .filter(|&(_, _, lid)| tab.active_timeline().is_layer_editable_by_id(lid))
-        .map(|(idx, id, _)| (idx, id))
+        .filter(|&idx| {
+            scene
+                .get(idx)
+                .is_some_and(|s| tab.active_timeline().is_layer_editable_by_id(s.layer_id))
+        })
     {
         let unit = scene.expand_to_group_unit(hit_idx, &tab.session.editing_group_path);
         tab.session.set_selected_indices(unit);
-        focus_active_layer_to_shape_by_id(tab, hit_id);
         sync_timeline_layer_from_canvas_selection(tab);
         true
     } else {

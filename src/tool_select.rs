@@ -1,25 +1,12 @@
 use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::{ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
-#[cfg(test)]
-pub(crate) use crate::canvas_tool::clear_selection;
 use crate::canvas_tool::{
     ActiveCanvasDrag, HoverTarget, MarqueeDrag, Scene, SelectDragState, SelectSubMode, ShapeId, Tab,
 };
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
-#[cfg(test)]
-pub(crate) use crate::doc_actions::{
-    clear_active_frame_shapes, copy_selected_shapes, cut_selected_shapes, delete_selected_shapes,
-    finish_move_selection_drag, group_selected_shapes, nudge_selected_shapes, paste_clipboard,
-    ungroup_selected_shapes,
-};
 use crate::select_ops::finish_marquee_drag;
-#[cfg(test)]
-pub(crate) use crate::select_ops::{
-    apply_marquee_selection, apply_pull_edge_to_shape, enter_group_at, exit_current_group,
-    toggle_shape_selection,
-};
 pub(crate) use crate::select_ops::{
     compute_hover_target, handle_canvas_double_click, set_moved_vertex, set_pulled_edge,
 };
