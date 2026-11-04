@@ -94,6 +94,7 @@
   1. **Layer 1 — Geometry 層**: ベジェ曲線・輪郭・AABB・テッセレーション（`vector_engine`）、ブラシアウトライン生成と曲線フィッティング（`vector_stroke`）、ポリゴンブール演算と曲線再構築（`vector_boolean`）。上位層（ドキュメント状態やUI）への依存を一切持たない純粋な幾何計算層。
   2. **Layer 2 — Domain / Model 層**: タイムライン・レイヤー・キーフレーム・セル・トゥイーン補間（`timeline`）および永続ドキュメント `Document`・シンボル定義・入れ子評価・`EditPath`（`symbol`）。Layer 1 のみに依存し、上位層への逆依存を持たないデータモデル層。
   3. **Layer 3 — Document & Tool Operations 層**: タブ状態 `Tab`・作業状態 `Session`・表示状態 `View`・Undo履歴・`Scene`・土台キャッシュ・上乗せ・`Floating`・`edit_layers`（`canvas_tool`）、ドキュメント変更アクションと一元 `apply`（`doc_actions`）、シンボル操作（`symbol_ops`）、選択・グループ・重なり順操作（`select_ops`）、クリップボード操作（`clipboard_ops`）、ペイント系ツール（`tool_paint`）、選択・変形ツール（`tool_select`）、自由変形ツール（`tool_transform`）、`.is2d` プロジェクトファイルのシリアライズ・マルチタブ管理（`project_io`）、確認なし終了時の復旧ファイル書き出し・次回起動時の復元（`recovery`）、および動画（MP4）書き出しの共通処理・1コマラスタライズ・OS別エンコーダ入口（`video_export`）と macOS 版 AVFoundation H.264 エンコーダ実装（`video_export_macos`、`#[cfg(target_os = "macos")]`）。
+     - 輪郭は点と制御点を平らに並べ、小数第3位までに丸めて保存する（形式の版 2）。
   4. **Layer 4 — UI Presentation 層**: 下部タイムラインUI（`timeline_ui`）および最上部メニューバー・上部ステージバー・左右パネル・モーダル・`UiAction`（`panels`）。
   5. **Layer 5 — Application Shell 層**: アプリ統合状態 `Is2dApp`・ショートカット処理・`UiAction` の一元適用（`main`）および macOS ネイティブメニューバー構築（`app_menu_macos`、`#[cfg(target_os = "macos")]`）。下位層から上位層への逆参照ゼロ・層内の相互循環ゼロを厳守する。
 - **OS 固有処理の抽象化と `unsafe` の隔離**:

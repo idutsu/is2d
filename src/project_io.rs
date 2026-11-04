@@ -17,7 +17,7 @@ pub(crate) use crate::vector_engine::MAX_CONTOUR_SEGMENTS;
 use crate::vector_engine::{Contour, FillShape};
 
 /// `.is2d` プロジェクトファイルの現在のフォーマットバージョン
-pub(crate) const PROJECT_FORMAT_VERSION: u32 = 1;
+pub(crate) const PROJECT_FORMAT_VERSION: u32 = 2;
 
 /// プロジェクトファイルの標準拡張子
 pub(crate) const PROJECT_FILE_EXTENSION: &str = "is2d";
@@ -468,25 +468,29 @@ fn serialize_contour_segments<S: serde::Serializer>(
     segments: &Arc<Vec<QuadBez>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
+    let round = |v: f64| (v * 1000.0).round() / 1000.0;
     serializer.collect_seq(
         segments
             .iter()
-            .map(|s| [[s.p0.x, s.p0.y], [s.p1.x, s.p1.y], [s.p2.x, s.p2.y]]),
+            .flat_map(|s| [round(s.p0.x), round(s.p0.y), round(s.p1.x), round(s.p1.y)]),
     )
 }
 
 fn deserialize_contour_segments<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Arc<Vec<QuadBez>>, D::Error> {
-    let segs: Vec<QuadBez> = Vec::<[[f64; 2]; 3]>::deserialize(deserializer)?
-        .into_iter()
-        .take(MAX_CONTOUR_SEGMENTS)
-        .filter(|pts| pts.iter().flatten().all(|v| v.is_finite()))
-        .map(|pts| {
+    let nums = Vec::<f64>::deserialize(deserializer)?;
+    if !nums.iter().all(|v| v.is_finite()) {
+        return Ok(Arc::new(Vec::new()));
+    }
+    let n = (nums.len() / 4).min(MAX_CONTOUR_SEGMENTS);
+    let point = |i: usize| Point::new(nums[4 * (i % n)], nums[4 * (i % n) + 1]);
+    let segs = (0..n)
+        .map(|i| {
             QuadBez::new(
-                Point::new(pts[0][0], pts[0][1]),
-                Point::new(pts[1][0], pts[1][1]),
-                Point::new(pts[2][0], pts[2][1]),
+                point(i),
+                Point::new(nums[4 * i + 2], nums[4 * i + 3]),
+                point(i + 1),
             )
         })
         .collect();

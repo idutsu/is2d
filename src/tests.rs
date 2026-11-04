@@ -4165,7 +4165,7 @@ fn test_corrupt_and_truncated_json_returns_error_without_modifying_app() {
 fn test_malformed_json_sanitization_and_cycle_breaking() {
     // 破損・外部改変された異常系 `.is2d` JSON（シンボル循環参照 A⇄B・重複レイヤーID・孤児インスタンス・逆向きワインディング・範囲外パラメータ）のサニタイズ検証
     let malformed_json = r#"{
-          "version": 1,
+          "version": 2,
           "stage_size": [99999.0, 10.0],
           "next_symbol_id": 1,
           "next_group_id": 1,
@@ -4192,9 +4192,9 @@ fn test_malformed_json_sanitization_and_cycle_breaking() {
                         "color": [255, 0, 0, 255],
                         "exterior": {
                           "segments": [
-                            [[100.0, 100.0], [100.0, 150.0], [100.0, 200.0]],
-                            [[100.0, 200.0], [150.0, 200.0], [200.0, 200.0]],
-                            [[200.0, 200.0], [150.0, 150.0], [100.0, 100.0]]
+                            100.0, 100.0, 100.0, 150.0,
+                            100.0, 200.0, 150.0, 200.0,
+                            200.0, 200.0, 150.0, 150.0
                           ]
                         },
                         "holes": [],
@@ -6329,7 +6329,7 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
     // u64::MAX の layer.id, symbol.id, instance_gid, group_path を含む細工ファイル (#13)
     let crafted_json = format!(
         r#"{{
-          "version": 1,
+          "version": 2,
           "stage_size": [800.0, 450.0],
           "next_symbol_id": {max},
           "next_group_id": {max},
@@ -6356,9 +6356,9 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
                         "color": [255, 0, 0, 255],
                         "exterior": {{
                           "segments": [
-                            [[100.0, 100.0], [150.0, 100.0], [200.0, 100.0]],
-                            [[200.0, 100.0], [200.0, 150.0], [200.0, 200.0]],
-                            [[200.0, 200.0], [150.0, 150.0], [100.0, 100.0]]
+                            100.0, 100.0, 150.0, 100.0,
+                            200.0, 100.0, 200.0, 150.0,
+                            200.0, 200.0, 150.0, 150.0
                           ]
                         }},
                         "holes": [],
@@ -7714,7 +7714,7 @@ fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape
         );
         let target_content = std::fs::read_to_string(&target_path).unwrap();
         assert!(
-            target_content.contains("\"version\":1"),
+            target_content.contains("\"version\":2"),
             "シンボリックリンクの実体ファイル側が最新の内容に更新されること (#13)"
         );
         let _ = std::fs::remove_file(&link_path);
@@ -8548,7 +8548,11 @@ fn test_stage01_undo_redo_coalesce_and_save_load_on_cel() {
         before_save.evaluated_shape_count,
         after_load.evaluated_shape_count
     );
-    assert!((before_save.evaluated_total_area - after_load.evaluated_total_area).abs() < 1e-3);
+    assert!(
+        (before_save.evaluated_total_area - after_load.evaluated_total_area).abs()
+            / before_save.evaluated_total_area
+            < 1e-4
+    );
 }
 
 #[test]
@@ -10751,7 +10755,7 @@ fn test_collapsed_symbol_instance_blocks_enter_and_timeline_mut_bumps_revision()
 }
 
 #[test]
-fn test_g5_1_save_and_reopen_60_brush_strokes_f6_140_frames_over_100mb() {
+fn test_g5_1_save_and_reopen_60_brush_strokes_f6_480_frames_over_100mb() {
     use crate::doc_actions::Action;
 
     let mut app = Is2dApp::default();
@@ -10790,17 +10794,17 @@ fn test_g5_1_save_and_reopen_60_brush_strokes_f6_140_frames_over_100mb() {
         })
         .sum();
 
-    for _ in 1..140 {
+    for _ in 1..480 {
         assert!(doc_actions::apply(
             &mut app,
             Action::InsertKeyframe { copy_prev: true }
         ));
     }
-    assert_eq!(app.doc.root.total_frames, 140);
-    assert_eq!(app.doc.root.layers[0].keyframes.len(), 140);
+    assert_eq!(app.doc.root.total_frames, 480);
+    assert_eq!(app.doc.root.layers[0].keyframes.len(), 480);
 
     let tmp_path = std::env::temp_dir().join(format!(
-        "is2d_g5_1_140kf_over_100mb_{}.is2d",
+        "is2d_g5_1_480kf_over_100mb_{}.is2d",
         std::process::id()
     ));
 
@@ -10811,7 +10815,7 @@ fn test_g5_1_save_and_reopen_60_brush_strokes_f6_140_frames_over_100mb() {
 
     let file_bytes = std::fs::metadata(&tmp_path).unwrap().len();
     println!(
-        "[G5-1] 60 strokes ({first_cel_shapes} shapes, {first_cel_segs} segs/cel) x 140 KF: size = {:.2} MB ({file_bytes} bytes), save = {save_elapsed:?}",
+        "[G5-1] 60 strokes ({first_cel_shapes} shapes, {first_cel_segs} segs/cel) x 480 KF: size = {:.2} MB ({file_bytes} bytes), save = {save_elapsed:?}",
         file_bytes as f64 / (1024.0 * 1024.0)
     );
     assert!(
@@ -10827,10 +10831,10 @@ fn test_g5_1_save_and_reopen_60_brush_strokes_f6_140_frames_over_100mb() {
     let _ = std::fs::remove_file(&tmp_path);
 
     println!("[G5-1] reopen = {open_elapsed:?}");
-    assert_eq!(reopened.doc.root.total_frames, 140);
-    assert_eq!(reopened.doc.root.layers[0].keyframes.len(), 140);
+    assert_eq!(reopened.doc.root.total_frames, 480);
+    assert_eq!(reopened.doc.root.layers[0].keyframes.len(), 480);
     assert_eq!(
-        reopened.doc.root.layers[0].keyframes[139].cel.shapes.len(),
+        reopened.doc.root.layers[0].keyframes[479].cel.shapes.len(),
         first_cel_shapes
     );
 }
@@ -14563,14 +14567,8 @@ fn test_m4_2_mid_tween_edit_restoring_classic_tween_rebuilds_base_cache_at_inter
 #[test]
 fn test_m4_3_saved_contour_arc_json_matches_legacy_and_load_shrinks_capacities() {
     use crate::doc_actions::{apply, Action};
-    use serde::Serialize;
 
-    #[derive(Serialize)]
-    struct LegacySavedContour {
-        segments: Vec<[[f64; 2]; 3]>,
-    }
-
-    // 1. 輪郭1つを SavedContour にして JSON にした文字列が、従来の Vec<[[f64; 2]; 3]> とバイト単位で同じになること
+    // 1. 輪郭1つを SavedContour にして JSON にした文字列が、版 2 の平らな配列形式になること
     let segs = vec![
         QuadBez::new(
             Point::new(10.5, 20.25),
@@ -14583,23 +14581,16 @@ fn test_m4_3_saved_contour_arc_json_matches_legacy_and_load_shrinks_capacities()
             Point::new(10.5, 20.25),
         ),
     ];
-    let contour = vector_engine::Contour::new(segs.clone());
+    let contour = vector_engine::Contour::new(segs);
     let saved = project_io::SavedContour::from(&contour);
     assert!(
         std::sync::Arc::ptr_eq(&contour.segments, &saved.segments),
         "SavedContour::from(&Contour) は座標配列を複製せず Arc を共有すること"
     );
-    let legacy = LegacySavedContour {
-        segments: segs
-            .iter()
-            .map(|s| [[s.p0.x, s.p0.y], [s.p1.x, s.p1.y], [s.p2.x, s.p2.y]])
-            .collect(),
-    };
     let json_new = serde_json::to_string(&saved).unwrap();
-    let json_legacy = serde_json::to_string(&legacy).unwrap();
     assert_eq!(
-        json_new, json_legacy,
-        "SavedContour の JSON 表現が従来形式と完全一致すること"
+        json_new, r#"{"segments":[10.5,20.25,30.125,45.75,50.0,20.25,30.125,-5.5]}"#,
+        "SavedContour の JSON 表現が版 2 の形式と完全一致すること"
     );
 
     // 2. 保存して読み込むと、図形の形が同じで、線分の Vec・穴の Vec・図形の Vec の capacity が len と一致すること
@@ -14638,12 +14629,12 @@ fn test_m4_3_saved_contour_arc_json_matches_legacy_and_load_shrinks_capacities()
     let contours_match = |a: &vector_engine::Contour, b: &vector_engine::Contour| {
         a.segments.len() == b.segments.len()
             && a.segments.iter().zip(b.segments.iter()).all(|(sa, sb)| {
-                (sa.p0.x - sb.p0.x).abs() <= 1e-12
-                    && (sa.p0.y - sb.p0.y).abs() <= 1e-12
-                    && (sa.p1.x - sb.p1.x).abs() <= 1e-12
-                    && (sa.p1.y - sb.p1.y).abs() <= 1e-12
-                    && (sa.p2.x - sb.p2.x).abs() <= 1e-12
-                    && (sa.p2.y - sb.p2.y).abs() <= 1e-12
+                (sa.p0.x - sb.p0.x).abs() <= 5e-4 + 1e-9
+                    && (sa.p0.y - sb.p0.y).abs() <= 5e-4 + 1e-9
+                    && (sa.p1.x - sb.p1.x).abs() <= 5e-4 + 1e-9
+                    && (sa.p1.y - sb.p1.y).abs() <= 5e-4 + 1e-9
+                    && (sa.p2.x - sb.p2.x).abs() <= 5e-4 + 1e-9
+                    && (sa.p2.y - sb.p2.y).abs() <= 5e-4 + 1e-9
             })
     };
     for (orig_s, load_s) in orig_shapes.iter().zip(loaded_shapes.iter()) {
@@ -19144,4 +19135,214 @@ fn test_space_during_brush_drag_preserves_stroke_and_idle_space_drag_pans() {
         "Space パン中に余分な図形が描かれないこと"
     );
     assert_eq!(app.history.undo_stack.len(), 1);
+}
+
+#[test]
+fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+    let mut rng = fastrand::Rng::with_seed(12345);
+    for i in 0..8 {
+        let color = Color32::from_rgb((40 + i * 25) as u8, (80 + i * 15) as u8, 190);
+        let mut pts = Vec::with_capacity(14);
+        let mut x = 100.0 + i as f64 * 45.1234567;
+        let mut y = 120.0 + (i % 3) as f64 * 55.9876543;
+        for step in 0..14 {
+            x += 11.1234567 + rng.f64() * 9.8765432;
+            y += ((step as f64 * 0.63).sin() * 21.3456789) + (rng.f64() - 0.5) * 7.654321;
+            pts.push(Point::new(x, y));
+        }
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: pts,
+                radius: 5.5,
+                color,
+            },
+        ));
+    }
+
+    let orig_shapes = app.doc.root.layers[0].keyframes[0].cel.shapes.clone();
+    assert!(!orig_shapes.is_empty());
+
+    let path1 = std::env::temp_dir().join(format!("is2d_fmt_v2_1_{}.is2d", std::process::id()));
+    let path2 = std::env::temp_dir().join(format!("is2d_fmt_v2_2_{}.is2d", std::process::id()));
+    let path3 = std::env::temp_dir().join(format!("is2d_fmt_v2_3_{}.is2d", std::process::id()));
+
+    project_io::save_project_to_path(&mut app, &path1).unwrap();
+    let json1 = std::fs::read_to_string(&path1).unwrap();
+
+    // 3. 形式：保存したファイルの輪郭が、数の平らな配列で、数の個数が区間の数の4倍であること
+    let parsed_val: serde_json::Value = serde_json::from_str(&json1).unwrap();
+    assert_eq!(parsed_val["version"], 2);
+    let saved_shapes_json = parsed_val["timeline"]["layers"][0]["keyframes"][0]["shapes"]
+        .as_array()
+        .unwrap();
+    assert_eq!(saved_shapes_json.len(), orig_shapes.len());
+    for (s_json, orig_s) in saved_shapes_json.iter().zip(orig_shapes.iter()) {
+        let ext_arr = s_json["exterior"]["segments"].as_array().unwrap();
+        assert_eq!(ext_arr.len(), orig_s.exterior.segments.len() * 4);
+        assert!(ext_arr.iter().all(|v| v.is_number()));
+        let holes_arr = s_json["holes"].as_array().unwrap();
+        assert_eq!(holes_arr.len(), orig_s.holes.len());
+        for (h_json, orig_h) in holes_arr.iter().zip(orig_s.holes.iter()) {
+            let h_seg_arr = h_json["segments"].as_array().unwrap();
+            assert_eq!(h_seg_arr.len(), orig_h.segments.len() * 4);
+            assert!(h_seg_arr.iter().all(|v| v.is_number()));
+        }
+    }
+
+    // 1. 丸めの幅：保存して開くと区間の数は同じで、どの点（p0・p1・p2）も元から 0.0005 px 以内。
+    //    開いた図形のどの輪郭も、区間の終わりの点が次の区間の始まりの点と同じであること
+    let mut app2 = Is2dApp::default();
+    project_io::open_project_in_tab(&mut app2, &path1, None).unwrap();
+    let loaded_shapes = &app2.doc.root.layers[0].keyframes[0].cel.shapes;
+    assert_eq!(loaded_shapes.len(), orig_shapes.len());
+
+    let check_contour = |orig: &vector_engine::Contour, loaded: &vector_engine::Contour| {
+        assert_eq!(loaded.segments.len(), orig.segments.len());
+        let n = loaded.segments.len();
+        for i in 0..n {
+            let os = orig.segments[i];
+            let ls = loaded.segments[i];
+            assert!((ls.p0.x - os.p0.x).abs() <= 0.0005 + 1e-9);
+            assert!((ls.p0.y - os.p0.y).abs() <= 0.0005 + 1e-9);
+            assert!((ls.p1.x - os.p1.x).abs() <= 0.0005 + 1e-9);
+            assert!((ls.p1.y - os.p1.y).abs() <= 0.0005 + 1e-9);
+            assert!((ls.p2.x - os.p2.x).abs() <= 0.0005 + 1e-9);
+            assert!((ls.p2.y - os.p2.y).abs() <= 0.0005 + 1e-9);
+            assert_eq!(
+                ls.p2,
+                loaded.segments[(i + 1) % n].p0,
+                "区間の終わりの点 p2 が次の区間の始まりの点 p0 と完全に同じであること"
+            );
+        }
+    };
+    for (orig_s, load_s) in orig_shapes.iter().zip(loaded_shapes.iter()) {
+        check_contour(&orig_s.exterior, &load_s.exterior);
+        assert_eq!(load_s.holes.len(), orig_s.holes.len());
+        for (oh, lh) in orig_s.holes.iter().zip(load_s.holes.iter()) {
+            check_contour(oh, lh);
+        }
+    }
+
+    // 2. 保存し直しても変わらない：開いて保存（2回目）し、もう一度開いて保存（3回目）すると、
+    //    2回目と3回目のファイルの中身が1バイトも違わないこと
+    project_io::save_project_to_path(&mut app2, &path2).unwrap();
+    let mut app3 = Is2dApp::default();
+    project_io::open_project_in_tab(&mut app3, &path2, None).unwrap();
+    project_io::save_project_to_path(&mut app3, &path3).unwrap();
+    let bytes2 = std::fs::read(&path2).unwrap();
+    let bytes3 = std::fs::read(&path3).unwrap();
+    let _ = std::fs::remove_file(&path1);
+    let _ = std::fs::remove_file(&path2);
+    let _ = std::fs::remove_file(&path3);
+    assert_eq!(
+        bytes2, bytes3,
+        "2回目の保存と3回目の保存でファイルの中身が1バイトも違わないこと"
+    );
+
+    // 4. 版 1 のファイル：版 1 の形の輪郭を持つ JSON を開くとエラーが返り、タブは増えず、落ちないこと
+    let v1_json = r#"{
+        "version": 1,
+        "stage_size": [800.0, 450.0],
+        "next_symbol_id": 1,
+        "next_group_id": 1,
+        "timeline": {
+            "fps": 24,
+            "total_frames": 1,
+            "active_layer": 0,
+            "current_frame": 0,
+            "next_layer_id": 2,
+            "layers": [{
+                "id": 1,
+                "name": "Layer 1",
+                "visible": true,
+                "locked": false,
+                "frame_count": 1,
+                "keyframes": [{
+                    "start_frame": 0,
+                    "tween": false,
+                    "tween_rotate": "Auto",
+                    "shapes": [{
+                        "color": [255, 0, 0, 255],
+                        "exterior": {
+                            "segments": [
+                                [[100.0, 100.0], [150.0, 100.0], [200.0, 100.0]],
+                                [[200.0, 100.0], [200.0, 150.0], [200.0, 200.0]],
+                                [[200.0, 200.0], [150.0, 150.0], [100.0, 100.0]]
+                            ]
+                        },
+                        "holes": [],
+                        "layer_id": 1,
+                        "group_path": []
+                    }],
+                    "instances": []
+                }]
+            }]
+        },
+        "library": []
+    }"#;
+    let v1_path = std::env::temp_dir().join(format!("is2d_fmt_v1_err_{}.is2d", std::process::id()));
+    std::fs::write(&v1_path, v1_json).unwrap();
+    let tabs_before = app3.tabs.len();
+    let v1_res = project_io::open_project_in_tab(&mut app3, &v1_path, None);
+    let _ = std::fs::remove_file(&v1_path);
+    assert!(
+        v1_res.is_err(),
+        "版 1 の輪郭形式を持つファイルを開くとエラーが返ること"
+    );
+    assert_eq!(
+        app3.tabs.len(),
+        tabs_before,
+        "版 1 のファイルの読み込み失敗でタブが増えないこと"
+    );
+
+    // 5. ほかの数は丸めない：拡大・回転したシンボルのインスタンスを持つ作品を保存して開くと、
+    //    インスタンスの変換の行列が元と同じ（丸めていない）であること
+    let mut sym_app = Is2dApp::default();
+    assert!(apply(
+        &mut sym_app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(180.0, 140.0)],
+            radius: 8.0,
+            color: Color32::RED,
+        },
+    ));
+    sym_app.session.set_selected_indices(vec![0]);
+    doc_actions::convert_selection_to_symbol(&mut sym_app).unwrap();
+    assert!(apply(
+        &mut sym_app,
+        Action::ScaleSelection {
+            sx: 1.3456789012345,
+            sy: 0.8765432109876,
+        },
+    ));
+    assert!(apply(
+        &mut sym_app,
+        Action::RotateSelection {
+            angle_rad: 0.4321098765432,
+        },
+    ));
+    let orig_coeffs = sym_app.doc.root.layers[0].keyframes[0].cel.instances[0]
+        .binding
+        .xform
+        .as_coeffs();
+    let sym_path =
+        std::env::temp_dir().join(format!("is2d_fmt_v2_sym_{}.is2d", std::process::id()));
+    project_io::save_project_to_path(&mut sym_app, &sym_path).unwrap();
+    let mut sym_loaded = Is2dApp::default();
+    project_io::open_project_in_tab(&mut sym_loaded, &sym_path, None).unwrap();
+    let _ = std::fs::remove_file(&sym_path);
+    let loaded_coeffs = sym_loaded.doc.root.layers[0].keyframes[0].cel.instances[0]
+        .binding
+        .xform
+        .as_coeffs();
+    for (a, b) in orig_coeffs.iter().zip(loaded_coeffs.iter()) {
+        assert!(
+            (a - b).abs() < 1e-13,
+            "シンボルインスタンスの変換行列は小数第3位に丸められず元の精度が保たれること: {a} vs {b}"
+        );
+    }
 }
