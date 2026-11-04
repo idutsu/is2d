@@ -998,22 +998,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
         .filter(|s| !s.contains_point(pt))
         .cloned()
         .collect();
-    let enclosed_opt = find_enclosed_region_at(&wall_shapes, pt, fill_color).or_else(|| {
-        let active_layer_raw: Vec<FillShape> = tab
-            .scene()
-            .iter()
-            .filter(|s| {
-                s.layer_id == target_lid
-                    && s.is_raw_at_scope(&tab.session.editing_group_path)
-                    && !s.contains_point(pt)
-            })
-            .cloned()
-            .collect();
-        (active_layer_raw.len() < wall_shapes.len())
-            .then(|| find_enclosed_region_at(&active_layer_raw, pt, fill_color))
-            .flatten()
-    });
-    if let Some(enclosed_fill) = enclosed_opt {
+    if let Some(enclosed_fill) = find_enclosed_region_at(&wall_shapes, pt, fill_color) {
         push_undo(tab, None);
         let editing_group_path = tab.session.editing_group_path.clone();
         edit_layers(tab, &[target_lid], |edit| {

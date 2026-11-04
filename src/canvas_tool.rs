@@ -3625,6 +3625,41 @@ pub(crate) fn draw_registration_cross(
     );
 }
 
+/// 片 `pieces` を `base_shapes` に結合する。結合・切り抜きはレイヤーをまたがないので、片のあるレイヤーが2枚以上あれば、
+/// レイヤーごとに分けて同時に結合する（レイヤーの中の図形の順番は、まとめて結合したときと同じ。レイヤーの並びは呼び出し側で直す）
+fn merge_pieces_layer_by_layer(base_shapes: &mut Vec<FillShape>, pieces: Vec<FillShape>) {
+    let mut parts: Vec<(LayerId, Vec<FillShape>, Vec<FillShape>)> = Vec::new();
+    for p in pieces {
+        match parts.iter_mut().find(|(lid, ..)| *lid == p.layer_id) {
+            Some((_, _, layer_pieces)) => layer_pieces.push(p),
+            None => parts.push((p.layer_id, Vec::new(), vec![p])),
+        }
+    }
+    if parts.len() < 2 {
+        let (_, _, layer_pieces) = parts.pop().unwrap_or_default();
+        merge_shapes_into_canvas(base_shapes, layer_pieces);
+        return;
+    }
+    let mut untouched = Vec::new();
+    for s in base_shapes.drain(..) {
+        match parts.iter_mut().find(|(lid, ..)| *lid == s.layer_id) {
+            Some((_, layer_shapes, _)) => layer_shapes.push(s),
+            None => untouched.push(s),
+        }
+    }
+    std::thread::scope(|scope| {
+        for (_, layer_shapes, layer_pieces) in &mut parts {
+            scope.spawn(move || {
+                merge_shapes_into_canvas(layer_shapes, std::mem::take(layer_pieces))
+            });
+        }
+    });
+    base_shapes.extend(untouched);
+    for (_, layer_shapes, _) in parts {
+        base_shapes.extend(layer_shapes);
+    }
+}
+
 /// `Floating` の `hidden` 除去・`remainder` 追加・`pieces` 結合を `base_shapes` に対して実行する
 pub(crate) fn merge_floating_into_base_shapes(
     base_shapes: &mut Vec<FillShape>,
@@ -3637,7 +3672,7 @@ pub(crate) fn merge_floating_into_base_shapes(
         *base_shapes = rebuilt;
     }
     if !fl.pieces.is_empty() {
-        merge_shapes_into_canvas(base_shapes, fl.pieces);
+        merge_pieces_layer_by_layer(base_shapes, fl.pieces);
     }
     if layer_order_ids.len() > 1 && base_shapes.len() > 1 {
         base_shapes.sort_by_key(|s| layer_order_index(layer_order_ids, s.layer_id));

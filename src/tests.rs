@@ -19913,3 +19913,89 @@ fn test_adding_base_shape_to_floating_selection_keeps_floating_piece_on_top() {
         );
     }
 }
+
+#[test]
+fn test_merging_floating_pieces_layer_by_layer_matches_merging_all_at_once() {
+    use crate::canvas_tool::{merge_floating_into_base_shapes, Floating};
+    use crate::vector_engine::next_shape_id;
+
+    let mut rng = fastrand::Rng::with_seed(7);
+    let palette = [
+        Color32::BLACK,
+        Color32::from_rgb(220, 50, 50),
+        Color32::from_rgb(50, 80, 220),
+    ];
+
+    let mut base_shapes = Vec::new();
+    for lid in 1u64..=3 {
+        for _ in 0..25 {
+            let color = palette[rng.usize(..palette.len())];
+            let radius = 1.5 + rng.f64() * 4.5;
+            let p0 = Point::new(80.0 + rng.f64() * 340.0, 60.0 + rng.f64() * 240.0);
+            let p1 = Point::new(80.0 + rng.f64() * 340.0, 60.0 + rng.f64() * 240.0);
+            let pts: Vec<Point> = (0..=16)
+                .map(|i| {
+                    let t = i as f64 / 16.0;
+                    p0.lerp(p1, t) + KVec2::new(0.0, (t * std::f64::consts::TAU).sin() * 8.0)
+                })
+                .collect();
+            let raw = generate_brush_outline(&pts, radius);
+            let stroke_shapes: Vec<FillShape> = build_smoothed_stroke_shapes(&raw, color)
+                .into_iter()
+                .map(|s| s.with_scope(lid, &[]))
+                .collect();
+            merge_shapes_into_canvas(&mut base_shapes, stroke_shapes);
+        }
+    }
+    let orig_count = base_shapes.len();
+    assert!(orig_count > 10);
+
+    let pieces: Vec<FillShape> = base_shapes
+        .iter()
+        .map(|s| {
+            let mut copy = s.clone();
+            copy.shape_id = next_shape_id();
+            copy.translate(KVec2::new(23.0, 17.0));
+            copy
+        })
+        .collect();
+
+    let mut all_at_once = base_shapes.clone();
+    merge_shapes_into_canvas(&mut all_at_once, pieces.clone());
+    all_at_once.sort_by_key(|s| s.layer_id);
+
+    let mut layer_by_layer = base_shapes;
+    merge_floating_into_base_shapes(
+        &mut layer_by_layer,
+        Floating {
+            pieces,
+            remainder: Vec::new(),
+            hidden: std::collections::HashSet::new(),
+            modified: true,
+        },
+        &[1, 2, 3],
+    );
+
+    assert!(layer_by_layer.len() > orig_count);
+
+    let summarize = |shapes: &[FillShape]| -> Vec<(u64, Color32, i64, i64, i64, usize)> {
+        shapes
+            .iter()
+            .map(|s| {
+                let holes_area: f64 = s.holes.iter().map(|h| h.signed_area().abs()).sum();
+                let area = s.exterior.signed_area().abs() - holes_area;
+                let bbox = s.bounding_box();
+                (
+                    s.layer_id,
+                    s.color,
+                    (area * 100.0).round() as i64,
+                    (bbox.x0 * 100.0).round() as i64,
+                    (bbox.y0 * 100.0).round() as i64,
+                    s.holes.len(),
+                )
+            })
+            .collect()
+    };
+
+    assert_eq!(summarize(&layer_by_layer), summarize(&all_at_once));
+}
