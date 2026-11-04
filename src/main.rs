@@ -425,22 +425,6 @@ impl Is2dApp {
             UiAction::FitStageToWindow => {
                 self.tab_mut().fit_stage_to_window();
             }
-            UiAction::SetSymbolPlayback {
-                loop_mode,
-                first_frame,
-                drag_active,
-            } => {
-                apply(
-                    self,
-                    Action::SetSymbolPlayback {
-                        loop_mode: Some(loop_mode),
-                        first_frame: Some(first_frame),
-                    },
-                );
-                if !drag_active {
-                    apply(self, Action::EndCoalesce { key: None });
-                }
-            }
             UiAction::SelectLibrarySymbol(sym_id) => {
                 self.tab_mut().view.selected_library_symbol = Some(sym_id);
             }
@@ -616,7 +600,7 @@ impl Is2dApp {
             if !self.tab().session.selection.is_empty() {
                 apply(self, Action::Deselect);
             } else {
-                apply(self, Action::ExitGroup);
+                apply(self, Action::ExitGroupSteps { steps: 1 });
             }
             self.tool.select_sub_mode = SelectSubMode::Reshape;
         } else if self.tool.tool == Tool::Select {
@@ -946,7 +930,6 @@ impl Is2dApp {
     }
 
     pub(crate) fn update_ui(&mut self, ctx: &egui::Context) {
-        ctx.options_mut(|o| o.zoom_with_keyboard = false);
         if ctx.input(|i| i.viewport().close_requested()) && self.video_export.is_some() {
             self.cancel_active_video_export();
         }

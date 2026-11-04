@@ -2461,8 +2461,10 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
     let after_local_shape = &app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
         .cel
         .shapes[0];
-    assert!(after_local_shape
-        .has_same_contour_arcs(&orig_local_shape.exterior, &orig_local_shape.holes));
+    assert!(std::sync::Arc::ptr_eq(
+        &after_local_shape.exterior.segments,
+        &orig_local_shape.exterior.segments
+    ));
     assert_eq!(after_local_shape.mesh_revision, orig_rev);
 }
 
@@ -3751,7 +3753,7 @@ fn test_untitled_tab_numbering_and_per_tab_wireframe_state() {
 }
 
 #[test]
-fn test_clipboard_symbol_evaluates_latest_symbol_def_and_shares_arc() {
+fn test_clipboard_symbol_evaluates_latest_symbol_def() {
     // コピー後にシンボル定義を編集して再ペーストした際、古い展開図形ではなく最新の SymbolDef が評価されること
     let mut sym_paste_app = Is2dApp::default();
     put_cel_shapes(
@@ -3771,12 +3773,6 @@ fn test_clipboard_symbol_evaluates_latest_symbol_def_and_shares_arc() {
     let parent_sym = tool_transform::convert_selection_to_symbol(&mut sym_paste_app).unwrap();
     sym_paste_app.session.set_selected_indices(vec![0]);
     assert!(tool_select::copy_selected_shapes(&mut sym_paste_app));
-    let first_clip_sym_arc = std::sync::Arc::clone(&sym_paste_app.clipboard.symbols[0]);
-    assert!(tool_select::copy_selected_shapes(&mut sym_paste_app));
-    assert!(
-        std::sync::Arc::ptr_eq(&first_clip_sym_arc, &sym_paste_app.clipboard.symbols[0]),
-        "同一シンボルリビジョンでの再コピー時は clipboard_symbols の Arc<SymbolDef> が O(1) ポインタ共有されること"
-    );
 
     // 子シンボルをライブラリから削除（親シンボル内では通常グループへデタッチされる）
     assert!(tool_transform::delete_symbol_from_library(
@@ -4057,7 +4053,7 @@ fn test_save_io_failure_rollback_and_marquee_slice_push_undo() {
     assert!(self_union_app
         .session
         .floating()
-        .is_some_and(|fl| fl.is_unmodified_slice()));
+        .is_some_and(|fl| !fl.modified));
     assert!(self_union_app.scene().len() >= 2);
     doc_actions::apply(
         &mut self_union_app,
@@ -5284,6 +5280,7 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
     use eframe::egui;
 
     let ctx = egui::Context::default();
+    crate::configure_sharp_light_theme(&ctx);
     let mut app = Is2dApp::default();
     let screen_rect = Some(egui::Rect::from_min_size(
         Pos2::ZERO,
@@ -6522,7 +6519,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
     }
 
     let doc = project_io::ProjectDocument {
-        version: 1,
+        version: project_io::PROJECT_FORMAT_VERSION,
         stage_size: [800.0, 450.0],
         timeline: (&timeline::Timeline::default()).into(),
         library,
@@ -8172,7 +8169,7 @@ fn test_stage01_group_ungroup_transform_and_clipboard_on_cel() {
                 radius: 12.0,
                 color: blue,
             },
-            Action::ExitGroup,
+            Action::ExitGroupSteps { steps: 1 },
         ],
     );
     let s_grp2 = cel_summary(&app.doc, lid, 0);
@@ -8841,7 +8838,7 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
         Some(1)
     );
 
-    run(&mut app, &[Action::ExitGroup]);
+    run(&mut app, &[Action::ExitGroupSteps { steps: 1 }]);
     assert_eq!(
         app.scene().len(),
         2,
@@ -8967,8 +8964,6 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .floating()
         .expect("マーキー矩形スライス直後に Floating が生成されること");
     assert!(!fl.modified);
-    assert!(fl.is_unmodified_slice());
-    assert!(!fl.needs_merge_commit());
     assert_eq!(fl.pieces.len(), 1);
     assert_eq!(fl.remainder.len(), 1);
     assert_eq!(fl.hidden.len(), 1);
@@ -9001,7 +8996,6 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .floating()
         .expect("スライス断片の移動後も Floating が保持されること");
     assert!(fl_moved.modified);
-    assert!(fl_moved.needs_merge_commit());
 
     // 重なっている同色断片が Action::CommitFloating で1図形に Union 結合され、Floating が空になること
     run(&mut app, &[Action::CommitFloating]);
@@ -9028,7 +9022,6 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .floating()
         .expect("ペースト直後に Floating が生成されること");
     assert!(fl_paste.modified);
-    assert!(fl_paste.needs_merge_commit());
     assert_eq!(app.scene().len(), 2);
 
     run(&mut app, &[Action::CommitFloating]);
@@ -11026,7 +11019,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
             });
         }
         project_io::ProjectDocument {
-            version: 1,
+            version: project_io::PROJECT_FORMAT_VERSION,
             stage_size: [800.0, 450.0],
             timeline: (&timeline::Timeline::default()).into(),
             library,
@@ -15051,7 +15044,7 @@ fn test_arrange_groups_and_symbols_z_order() {
             }
         ));
         assert_eq!(colors_in_scene(&app), vec![c_raw, c_b, c_c, c_a]);
-        apply(&mut app, Action::ExitGroup);
+        apply(&mut app, Action::ExitGroupSteps { steps: 1 });
         assert_eq!(colors_in_scene(&app), vec![c_raw, c_b, c_c, c_a]);
     }
 
@@ -15801,7 +15794,7 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
                         if !app.tab().session.edit_path.is_empty()
                             || !app.tab().session.editing_group_path.is_empty()
                         {
-                            ("ExitGroup", Action::ExitGroup, true)
+                            ("ExitGroup", Action::ExitGroupSteps { steps: 1 }, true)
                         } else if let Some(sym) = app
                             .tab()
                             .doc
@@ -16690,7 +16683,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
                 .unwrap();
             sym_b.timeline.layers[0].keyframe_mut(f).cel = timeline::Cel::new(s);
         }
-        assert!(apply(&mut app, Action::ExitGroup));
+        assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
 
         // ステージに生の図形を足し、B と一緒に選んでシンボル A に変換する
         assert!(apply(
@@ -17149,7 +17142,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         assert!(apply(&mut app, Action::ConvertToSymbol));
         let sym_c_id = app.doc.library.last().unwrap().id;
         assert_ne!(sym_c_id, sym_b_id);
-        assert!(apply(&mut app, Action::ExitGroup));
+        assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
 
         // A の中で B だけを内側グループ G_inner に入れ、さらに生の図形と一緒に外側グループ G_outer に入れる
         assert!(apply(
@@ -17174,7 +17167,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         assert!(apply(&mut app, Action::Group));
         assert!(apply(&mut app, Action::SelectAll));
         assert!(apply(&mut app, Action::Group));
-        assert!(apply(&mut app, Action::ExitGroup));
+        assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
 
         if b_empty_on_ungroup_frame {
             app.doc.library[0].timeline.layers[0].keyframe_mut(0).cel = timeline::Cel::default();
@@ -17257,7 +17250,7 @@ fn test_failed_paste_due_to_nest_limit_rolls_back_clipboard_imported_map() {
     ));
     assert!(!apply(&mut app, Action::Paste { in_place: true }));
     assert_eq!(app.doc.library.len(), 1);
-    assert!(apply(&mut app, Action::ExitGroup));
+    assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
 
     // 3. タブ Y で新しい青いシンボルを作る
     assert!(apply(
@@ -18931,7 +18924,10 @@ fn test_resolve_deformed_shape_and_move_vertex_preserve_untouched_hole_contours(
     assert_eq!(resolved[0].holes.len(), orig_shape.holes.len());
     for untouched_hole in &orig_shape.holes[1..] {
         assert!(
-            resolved[0].holes.iter().any(|h| h.ptr_eq(untouched_hole)),
+            resolved[0]
+                .holes
+                .iter()
+                .any(|h| std::sync::Arc::ptr_eq(&h.segments, &untouched_hole.segments)),
             "resolve_deformed_shape 後も変形していない穴が入力の Contour と ptr_eq で共有されていること"
         );
     }
@@ -18950,7 +18946,10 @@ fn test_resolve_deformed_shape_and_move_vertex_preserve_untouched_hole_contours(
     assert_eq!(after_shape.holes.len(), orig_shape.holes.len());
     for untouched_hole in &orig_shape.holes[1..] {
         assert!(
-            after_shape.holes.iter().any(|h| h.ptr_eq(untouched_hole)),
+            after_shape
+                .holes
+                .iter()
+                .any(|h| std::sync::Arc::ptr_eq(&h.segments, &untouched_hole.segments)),
             "MoveVertexFromTo 後も触っていない穴が操作前の Contour と ptr_eq で共有されていること"
         );
     }
@@ -19494,4 +19493,79 @@ fn test_video_export_parallel_render_frames_and_without_mesh() {
         with_mesh_shapes.iter().all(|s| s.has_cached_fill_mesh()),
         "画面用（SymbolEvalCtx::new）の展開の図形はどれもメッシュを持つこと"
     );
+}
+
+#[test]
+fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
+    use crate::doc_actions::{apply, Action};
+    use kurbo::ParamCurve;
+
+    // 1. Floating があるときの輪郭の変形は何もしない
+    let mut app = Is2dApp::default();
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 200.0), Point::new(300.0, 200.0)],
+            radius: 10.0,
+            color: Color32::RED,
+        },
+    ));
+    let orig_shape = app.doc.root.layers[0].keyframes[0].cel.shapes[0].clone();
+    let orig_id = orig_shape.shape_id;
+    let orig_bbox = orig_shape.bounding_box();
+    let orig_seg_count = orig_shape.exterior.segments.len();
+    let orig_seg = orig_shape.exterior.segments[0];
+    let grab_t = 0.5;
+    let grab_pos = orig_seg.eval(grab_t);
+
+    assert!(apply(
+        &mut app,
+        Action::SelectMarquee {
+            p0: Point::new(200.0, 150.0),
+            p1: Point::new(350.0, 250.0),
+            additive: false,
+        },
+    ));
+    assert!(app.session.floating().is_some());
+    let undo_before = app.history.undo_stack.len();
+
+    assert!(!apply(
+        &mut app,
+        Action::ReshapeEdge {
+            shape_id: orig_id,
+            contour_idx: 0,
+            seg_idx: 0,
+            grab_t,
+            grab_pos,
+            target_pos: grab_pos + kurbo::Vec2::new(0.0, 50.0),
+            orig_seg,
+        },
+    ));
+    assert_eq!(app.history.undo_stack.len(), undo_before);
+    assert!(app.session.floating().is_some());
+    let after_shape = &app.doc.root.layers[0].keyframes[0].cel.shapes[0];
+    assert_eq!(after_shape.bounding_box(), orig_bbox);
+    assert_eq!(after_shape.exterior.segments.len(), orig_seg_count);
+
+    // 2. 図形のない版 1 のファイルを開くと「未対応のプロジェクトバージョン」エラーが返り、タブが増えない
+    let empty_v1_doc = project_io::ProjectDocument {
+        version: 1,
+        stage_size: [800.0, 450.0],
+        timeline: (&timeline::Timeline::default()).into(),
+        library: Vec::new(),
+        next_symbol_id: 1,
+        next_group_id: 1,
+        recovery_source: None,
+    };
+    let v1_path = std::env::temp_dir().join(format!("is2d_empty_v1_{}.is2d", std::process::id()));
+    std::fs::write(&v1_path, serde_json::to_string(&empty_v1_doc).unwrap()).unwrap();
+    let tabs_before = app.tabs.len();
+    let err = project_io::open_project_in_tab(&mut app, &v1_path, None)
+        .expect_err("図形のない版 1 のファイルも開けないこと");
+    let _ = std::fs::remove_file(&v1_path);
+    assert!(
+        err.contains("未対応のプロジェクトバージョン"),
+        "想定外のエラー: {err}"
+    );
+    assert_eq!(app.tabs.len(), tabs_before);
 }

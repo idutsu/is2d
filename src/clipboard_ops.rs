@@ -114,7 +114,6 @@ pub(crate) fn begin_move_selection_drag(
 fn collect_symbol_and_descendants(
     sym_id: u64,
     library: &[SymbolDef],
-    reusable: &[Arc<SymbolDef>],
     visited: &mut Vec<u64>,
     out: &mut Vec<Arc<SymbolDef>>,
 ) {
@@ -126,15 +125,11 @@ fn collect_symbol_and_descendants(
         return;
     };
     for inst in sym.timeline.instances() {
-        collect_symbol_and_descendants(inst.binding.symbol_id, library, reusable, visited, out);
+        collect_symbol_and_descendants(inst.binding.symbol_id, library, visited, out);
     }
-    if let Some(existing) = reusable.iter().find(|s| s.id == sym_id) {
-        out.push(Arc::clone(existing));
-    } else {
-        let mut cloned = sym.clone();
-        cloned.clear_preview_and_anim_caches();
-        out.push(Arc::new(cloned));
-    }
+    let mut cloned = sym.clone();
+    cloned.clear_preview_and_anim_caches();
+    out.push(Arc::new(cloned));
 }
 
 /// 別タブから移植されるシンボルの内部タイムライン内の全グループIDを貼り付け先タブの `Document` で新規採番したIDへ一括リマップする
@@ -173,34 +168,21 @@ fn remap_timeline_group_ids(tl: &mut Timeline, doc: &mut Document) {
 
 /// `copy_selected_shapes`（`Cmd+C`）実行時に、クリップボード内の図形が参照しているシンボル定義（入れ子含む）を `Arc` 共有スナップショットとして退避する
 pub(crate) fn capture_clipboard_symbols(tab: &Tab, clipboard: &mut Clipboard) {
-    let active_doc_id = tab.id;
-    let reusable = if active_doc_id == clipboard.source_doc_id
-        && tab.doc.revision == clipboard.source_symbols_revision
-    {
-        std::mem::take(&mut clipboard.symbols)
-    } else {
-        clipboard.symbols.clear();
-        Vec::new()
-    };
-
-    clipboard.source_doc_id = active_doc_id;
+    clipboard.source_doc_id = tab.id;
     clipboard.source_symbol_id = tab.session.edit_path.last().map(|s| s.symbol_id);
-    clipboard.source_symbols_revision = tab.doc.revision;
+    clipboard.symbols.clear();
 
     let mut visited = Vec::new();
-    let mut collected = Vec::new();
     for shape in &clipboard.shapes {
         if let Some(b) = shape.symbol_instance {
             collect_symbol_and_descendants(
                 b.symbol_id,
                 &tab.doc.library,
-                &reusable,
                 &mut visited,
-                &mut collected,
+                &mut clipboard.symbols,
             );
         }
     }
-    clipboard.symbols = collected;
 }
 
 fn existing_reusable_target_symbol_id(

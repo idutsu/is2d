@@ -135,11 +135,6 @@ pub(crate) enum UiAction {
     // 表示・UI選択状態・複合操作
     ResetView,
     FitStageToWindow,
-    SetSymbolPlayback {
-        loop_mode: SymbolLoopMode,
-        first_frame: usize,
-        drag_active: bool,
-    },
     SelectLibrarySymbol(u64),
 
     // 文書・編集アクション（`doc_actions::apply` へそのまま渡す）
@@ -1436,11 +1431,10 @@ pub(crate) fn draw_selected_symbol_properties(
         }));
     }
     if next_mode != binding.loop_mode || next_first_1based != current_first_1based {
-        actions.push(UiAction::SetSymbolPlayback {
-            loop_mode: next_mode,
-            first_frame: next_first_1based.saturating_sub(1),
-            drag_active: drag_active && next_mode == binding.loop_mode,
-        });
+        actions.push(UiAction::Doc(Action::SetSymbolPlayback {
+            loop_mode: Some(next_mode),
+            first_frame: Some(next_first_1based.saturating_sub(1)),
+        }));
     }
 
     draw_symbol_color_effect(binding, actions, ui);

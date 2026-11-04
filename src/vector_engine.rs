@@ -125,7 +125,6 @@ impl SymbolInstanceBinding {
 
 static NEXT_MESH_REVISION: AtomicU64 = AtomicU64::new(1);
 static NEXT_SHAPE_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_CONTOUR_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn next_mesh_revision() -> u64 {
     NEXT_MESH_REVISION.fetch_add(1, Ordering::Relaxed)
@@ -133,10 +132,6 @@ pub(crate) fn next_mesh_revision() -> u64 {
 
 pub(crate) fn next_shape_id() -> u64 {
     NEXT_SHAPE_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-pub(crate) fn next_contour_id() -> u64 {
-    NEXT_CONTOUR_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// `Arc` と共存可能なスレッドセーフ（`Send + Sync`）かつ `Clone` 対応の内部可変キャッシュラッパー
@@ -173,8 +168,6 @@ thread_local! {
 /// 隣接セグメント間で `segments[i].p2 == segments[(i + 1) % len].p0` を常に満たす。
 #[derive(Clone, Debug)]
 pub(crate) struct Contour {
-    /// 輪郭セグメント内容の単調増加リビジョンID（メモリアドレスに依存しない O(1) 同一性比較・逆引きキー用）
-    pub(crate) contour_id: u64,
     pub(crate) segments: Arc<Vec<QuadBez>>,
 }
 
@@ -192,18 +185,11 @@ impl Contour {
     pub(crate) fn new(mut segments: Vec<QuadBez>) -> Self {
         segments.shrink_to_fit();
         Self {
-            contour_id: next_contour_id(),
             segments: Arc::new(segments),
         }
     }
 
-    #[inline]
-    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
-        self.contour_id == other.contour_id && Arc::ptr_eq(&self.segments, &other.segments)
-    }
-
     pub(crate) fn segments_mut(&mut self) -> &mut Vec<QuadBez> {
-        self.contour_id = next_contour_id();
         Arc::make_mut(&mut self.segments)
     }
 
@@ -506,16 +492,11 @@ impl FillShape {
         self.clear_screen_mesh_caches();
     }
 
-    /// 輪郭データと色が同一である既存シェイプ `donor` から描画・当たり判定キャッシュを O(1) で引き継ぐ
-    pub(crate) fn reuse_caches_from(&mut self, donor: &FillShape) -> bool {
-        if self.color != donor.color
-            || (self.mesh_revision != donor.mesh_revision
-                && !self.has_same_contour_arcs(&donor.exterior, &donor.holes))
-        {
-            return false;
+    /// 同じ `shape_id`・`mesh_revision` の図形 `donor` から、色が同じなら描画・当たり判定キャッシュを O(1) で引き継ぐ
+    pub(crate) fn reuse_caches_from(&mut self, donor: &FillShape) {
+        if self.color == donor.color {
+            self.copy_render_caches_from(donor);
         }
-        self.copy_render_caches_from(donor);
-        true
     }
 
     /// ドナー図形 `donor` が保持している描画・当たり判定キャッシュをそのまま引き継ぐ
@@ -641,17 +622,6 @@ impl FillShape {
         }
         *self.screen_mesh_cache.lock() = None;
         self.mesh_revision = next_mesh_revision();
-    }
-
-    /// 外周・穴のすべてが指定した `Contour` の `Arc` とポインタ一致するかを返す
-    pub(crate) fn has_same_contour_arcs(&self, exterior: &Contour, holes: &[Contour]) -> bool {
-        self.exterior.ptr_eq(exterior)
-            && self.holes.len() == holes.len()
-            && self
-                .holes
-                .iter()
-                .zip(holes.iter())
-                .all(|(a, b)| a.ptr_eq(b))
     }
 
     pub(crate) fn bounding_box(&self) -> KRect {

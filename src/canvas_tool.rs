@@ -653,8 +653,6 @@ pub(crate) struct Clipboard {
     pub(crate) source_doc_id: u64,
     /// クリップボードにコピーされた時点のインプレイス編集中のシンボルID（ルートシーン時は `None`）
     pub(crate) source_symbol_id: Option<u64>,
-    /// クリップボードにコピーされた時点のコピー元 `Document::revision`
-    pub(crate) source_symbols_revision: u64,
     /// クリップボード内のシェイプが参照しているシンボル定義のスナップショット群（依存順）
     pub(crate) symbols: Vec<Arc<SymbolDef>>,
     /// 各コピー元タブから貼り付け先タブへ既にインポート済みのシンボルID対応表 `(source_doc_id, source_sym_id, target_doc_id) -> target_sym_id`
@@ -782,6 +780,46 @@ mod scene_base_cache {
         }
     }
 
+    fn shown_keyframe_and_eval_frame(
+        layer: &Layer,
+        frame: usize,
+        library: &[SymbolDef],
+    ) -> Option<(usize, usize)> {
+        let kf_idx = (layer.visible && !layer.locked)
+            .then(|| layer.keyframe_index_at(frame))
+            .flatten()?;
+        Some((
+            kf_idx,
+            layer_eval_frame(layer, kf_idx, frame, library, None),
+        ))
+    }
+
+    impl CachedLayer {
+        /// 前に作ったこのレイヤーを、作り直さずにそのまま使えるか。
+        /// `shown` は、表示中・ロックなしで絵があるときの（キーフレームの位置、評価するコマ）
+        fn matches(
+            &self,
+            layer: &Layer,
+            shown: Option<(usize, usize)>,
+            library: &[SymbolDef],
+            xform_bits: [u64; 6],
+        ) -> bool {
+            self.layer_id == layer.id
+                && self.visible == layer.visible
+                && self.locked == layer.locked
+                && self.world_xform_bits == xform_bits
+                && match shown {
+                    Some((kf_idx, ef)) => {
+                        self.eval_frame == ef
+                            && self.cel_sig.as_ref().is_some_and(|sig| {
+                                sig.matches_layer_keyframe(layer, kf_idx, library)
+                            })
+                    }
+                    None => self.cel_sig.is_none(),
+                }
+        }
+    }
+
     fn drain_cached_layer_range(
         iter: &mut std::vec::IntoIter<FillShape>,
         cursor: &mut usize,
@@ -906,26 +944,12 @@ mod scene_base_cache {
 
             let same_layer_list = self.layers.len() == tl.layers.len()
                 && self.layers.iter().zip(&tl.layers).all(|(c, l)| {
-                    if c.layer_id != l.id
-                        || c.visible != l.visible
-                        || c.locked != l.locked
-                        || c.world_xform_bits != xform_bits
-                    {
-                        return false;
-                    }
-                    if !l.visible || l.locked {
-                        return c.cel_sig.is_none();
-                    }
-                    match l.keyframe_index_at(frame) {
-                        Some(kf_idx) => {
-                            let ef = layer_eval_frame(l, kf_idx, frame, library, None);
-                            c.eval_frame == ef
-                                && c.cel_sig.as_ref().is_some_and(|sig| {
-                                    sig.matches_layer_keyframe(l, kf_idx, library)
-                                })
-                        }
-                        None => c.cel_sig.is_none(),
-                    }
+                    c.matches(
+                        l,
+                        shown_keyframe_and_eval_frame(l, frame, library),
+                        library,
+                        xform_bits,
+                    )
                 });
             if same_layer_list {
                 return false;
@@ -954,9 +978,7 @@ mod scene_base_cache {
 
             for layer in &tl.layers {
                 new_order_ids.push(layer.id);
-                let Some(kf_idx) = (layer.visible && !layer.locked)
-                    .then(|| layer.keyframe_index_at(frame))
-                    .flatten()
+                let Some((kf_idx, ef)) = shown_keyframe_and_eval_frame(layer, frame, library)
                 else {
                     let start = new_flat.len();
                     new_layers.push(CachedLayer {
@@ -970,18 +992,9 @@ mod scene_base_cache {
                     });
                     continue;
                 };
-                let ef = layer_eval_frame(layer, kf_idx, frame, library, None);
                 let prev = old_by_id.remove(&layer.id);
                 if let Some((old_cl, _)) = &prev {
-                    let key_unchanged = old_cl.visible == layer.visible
-                        && old_cl.locked == layer.locked
-                        && old_cl.world_xform_bits == xform_bits
-                        && old_cl.eval_frame == ef
-                        && old_cl
-                            .cel_sig
-                            .as_ref()
-                            .is_some_and(|sig| sig.matches_layer_keyframe(layer, kf_idx, library));
-                    if key_unchanged {
+                    if old_cl.matches(layer, Some((kf_idx, ef)), library, xform_bits) {
                         let (old_cl, old_shapes) = prev.unwrap();
                         let start = new_flat.len();
                         new_flat.extend(old_shapes);
@@ -1038,6 +1051,17 @@ mod scene_base_cache {
 
     type BackdropViewKey = (u32, u32, u32);
     type CombinedBackdropMeshCache = Option<(BackdropViewKey, Option<Arc<egui::Mesh>>)>;
+    type BackdropLayerSpec = (
+        usize,
+        Option<u64>,
+        u64,
+        Affine,
+        [u64; 6],
+        usize,
+        usize,
+        usize,
+        usize,
+    );
 
     struct CachedBackdropLayer {
         level_idx: usize,
@@ -1124,21 +1148,10 @@ mod scene_base_cache {
             self.resolve_and_build(doc, &active_specs, view_key, zoom, pan)
         }
 
-        #[allow(clippy::type_complexity)]
         fn resolve_and_build(
             &mut self,
             doc: &Document,
-            active_specs: &[(
-                usize,
-                Option<u64>,
-                u64,
-                Affine,
-                [u64; 6],
-                usize,
-                usize,
-                usize,
-                usize,
-            )],
+            active_specs: &[BackdropLayerSpec],
             view_key: (u32, u32, u32),
             zoom: f32,
             pan: Vec2,
@@ -1149,35 +1162,27 @@ mod scene_base_cache {
                     Some(id) => &doc.find_symbol(id).expect("valid parent symbol").timeline,
                 }
             };
+            let matches_spec = |cl: &CachedBackdropLayer, spec: &BackdropLayerSpec| -> bool {
+                let &(lvl_idx, parent_sym_id, excl_gid, _, xform_bits, _, layer_idx, kf_idx, ef) =
+                    spec;
+                let layer = &get_tl(parent_sym_id).layers[layer_idx];
+                cl.level_idx == lvl_idx
+                    && cl.parent_symbol_id == parent_sym_id
+                    && cl.excluded_instance_gid == excl_gid
+                    && cl.world_xform_bits == xform_bits
+                    && cl.layer_id == layer.id
+                    && cl.eval_frame == ef
+                    && cl
+                        .cel_sig
+                        .matches_layer_keyframe(layer, kf_idx, &doc.library)
+            };
 
             let all_unchanged = self.layers.len() == active_specs.len()
-                && self.layers.iter().zip(active_specs).all(
-                    |(
-                        cl,
-                        &(
-                            lvl_idx,
-                            parent_sym_id,
-                            excl_gid,
-                            _,
-                            xform_bits,
-                            _,
-                            layer_idx,
-                            kf_idx,
-                            ef,
-                        ),
-                    )| {
-                        let layer = &get_tl(parent_sym_id).layers[layer_idx];
-                        cl.level_idx == lvl_idx
-                            && cl.parent_symbol_id == parent_sym_id
-                            && cl.excluded_instance_gid == excl_gid
-                            && cl.world_xform_bits == xform_bits
-                            && cl.layer_id == layer.id
-                            && cl.eval_frame == ef
-                            && cl
-                                .cel_sig
-                                .matches_layer_keyframe(layer, kf_idx, &doc.library)
-                    },
-                );
+                && self
+                    .layers
+                    .iter()
+                    .zip(active_specs)
+                    .all(|(cl, spec)| matches_spec(cl, spec));
 
             if all_unchanged {
                 if let Some((cached_vk, ref cached_res)) = self.combined_screen_cache {
@@ -1193,31 +1198,22 @@ mod scene_base_cache {
                 }
 
                 let mut new_layers = Vec::with_capacity(active_specs.len());
-                for &(
-                    lvl_idx,
-                    parent_sym_id,
-                    excl_gid,
-                    parent_world_xform,
-                    xform_bits,
-                    curr_f,
-                    layer_idx,
-                    kf_idx,
-                    ef,
-                ) in active_specs
-                {
+                for spec in active_specs {
+                    let &(
+                        lvl_idx,
+                        parent_sym_id,
+                        excl_gid,
+                        parent_world_xform,
+                        xform_bits,
+                        curr_f,
+                        layer_idx,
+                        kf_idx,
+                        ef,
+                    ) = spec;
                     let parent_tl = get_tl(parent_sym_id);
                     let layer = &parent_tl.layers[layer_idx];
                     let old_cl = match old_by_key.remove(&(lvl_idx, parent_sym_id, layer.id)) {
-                        Some(old_cl)
-                            if old_cl.excluded_instance_gid == excl_gid
-                                && old_cl.world_xform_bits == xform_bits
-                                && old_cl.eval_frame == ef
-                                && old_cl.cel_sig.matches_layer_keyframe(
-                                    layer,
-                                    kf_idx,
-                                    &doc.library,
-                                ) =>
-                        {
+                        Some(old_cl) if matches_spec(&old_cl, spec) => {
                             new_layers.push(old_cl);
                             continue;
                         }
@@ -1488,9 +1484,6 @@ pub(crate) fn build_scene_order_by_layer_ids(
     overlay: &Overlay,
     layer_order_ids: &[LayerId],
 ) -> Vec<SceneEntry> {
-    if overlay.is_empty() {
-        return (0..base.len()).map(SceneEntry::Base).collect();
-    }
     let mut before_all: Vec<(usize, usize)> = Vec::new();
     let mut after_base: Vec<Vec<(usize, usize)>> = vec![Vec::new(); base.len()];
     let mut replace_at_base: Vec<Vec<usize>> = vec![Vec::new(); base.len()];
@@ -1610,7 +1603,7 @@ pub(crate) struct Scene<'a> {
     base: &'a [FillShape],
     overlay: &'a Overlay,
     order: &'a [SceneEntry],
-    direct_base_fallback: bool,
+    base_only: bool,
     overlay_only_selected: bool,
     overlay_movable_start: usize,
 }
@@ -1618,7 +1611,7 @@ pub(crate) struct Scene<'a> {
 impl<'a> Scene<'a> {
     #[inline]
     pub(crate) fn len(self) -> usize {
-        if self.direct_base_fallback {
+        if self.base_only {
             self.base.len()
         } else {
             self.order.len()
@@ -1627,7 +1620,7 @@ impl<'a> Scene<'a> {
 
     #[inline]
     pub(crate) fn get(self, idx: usize) -> Option<&'a FillShape> {
-        if self.direct_base_fallback {
+        if self.base_only {
             return self.base.get(idx);
         }
         match self.order.get(idx)? {
@@ -1722,7 +1715,7 @@ impl<'a> Scene<'a> {
     /// 指定 `Scene` インデックスの図形が現在選択されているかを返す
     #[inline]
     pub(crate) fn is_shape_selected(self, scene_idx: usize, selection: &Selection) -> bool {
-        if self.overlay_only_selected && !self.direct_base_fallback {
+        if self.overlay_only_selected && !self.base_only {
             match self.order.get(scene_idx) {
                 Some(SceneEntry::Overlay(ov_idx)) if *ov_idx >= self.overlay_movable_start => {}
                 _ => return false,
@@ -1870,7 +1863,7 @@ pub(crate) struct Floating {
     pub(crate) remainder: Vec<FillShape>,
     /// 画面から隠す元の図形（文書には残っている）
     pub(crate) hidden: HashSet<ShapeId>,
-    /// 確定時に選択中の生図形をベース図形へ結合（Merge Drawing）する必要があるか
+    /// 動かした・変形したか。`true` なら確定のときに Merge Drawing で結合する。`false` は動かしていない矩形選択の切り口で、捨てれば元に戻る
     pub(crate) modified: bool,
 }
 
@@ -1885,18 +1878,6 @@ fn shapes_equal_for_snapshot(a: &FillShape, b: &FillShape) -> bool {
 }
 
 impl Floating {
-    /// マーキー矩形スライス直後でまだ一度も移動・変形されていない状態かを返す
-    #[inline]
-    pub(crate) fn is_unmodified_slice(&self) -> bool {
-        !self.modified
-    }
-
-    /// 確定時に選択中の生図形をベース図形へ結合（Merge Drawing）する必要があるかを返す
-    #[inline]
-    pub(crate) fn needs_merge_commit(&self) -> bool {
-        self.modified
-    }
-
     /// 一時描画キャッシュを除去して履歴保持を軽量化する
     pub(crate) fn strip_transient_caches(&mut self) {
         for s in &mut self.pieces {
@@ -2046,15 +2027,23 @@ impl Session {
     #[inline]
     pub(crate) fn scene(&self) -> Scene<'_> {
         let base = self.base_cache.shapes();
-        let order = self.scene_order.get_or_init(|| {
-            build_scene_order_by_layer_ids(base, &self.overlay, self.base_cache.layer_order_ids())
-        });
-        let direct_base_fallback = self.overlay.is_empty() && order.len() != base.len();
+        let base_only = self.overlay.is_empty();
+        let order: &[SceneEntry] = if base_only {
+            &[]
+        } else {
+            self.scene_order.get_or_init(|| {
+                build_scene_order_by_layer_ids(
+                    base,
+                    &self.overlay,
+                    self.base_cache.layer_order_ids(),
+                )
+            })
+        };
         Scene {
             base,
             overlay: &self.overlay,
             order,
-            direct_base_fallback,
+            base_only,
             overlay_only_selected: self.overlay_only_selected,
             overlay_movable_start: self.overlay_movable_start,
         }
@@ -2267,9 +2256,7 @@ impl Session {
     #[cfg(test)]
     #[inline]
     pub(crate) fn has_modified_floating(&self) -> bool {
-        self.floating
-            .as_ref()
-            .is_some_and(Floating::needs_merge_commit)
+        self.floating.as_ref().is_some_and(|fl| fl.modified)
     }
 
     /// 選択中の生図形のうち、まだ `Floating` に入っていないものを `Floating` に持ち上げ、変更済みとしてマークする
@@ -2881,25 +2868,24 @@ impl Tab {
         self.session.scene()
     }
 
+    /// 編集中のシンボルのライブラリでの位置を返す（ルートを編集中なら `None`）
+    fn active_symbol_index(&self) -> Option<usize> {
+        let last = self.session.edit_path.last()?;
+        self.doc.library.iter().position(|s| s.id == last.symbol_id)
+    }
+
     /// `Document` の現在フレームおよび `edit_path` から `Scene` のレイヤー別土台キャッシュを再構築する
     pub(crate) fn refresh_scene_base(&mut self) {
         let world_xform = self.session.edit_path.world_xform();
-        let changed = if let Some(last) = self.session.edit_path.last() {
-            if let Some(sym) = self.doc.library.iter().find(|s| s.id == last.symbol_id) {
-                self.session
-                    .base_cache
-                    .rebuild(&sym.timeline, &self.doc.library, world_xform)
-            } else {
-                self.session
-                    .base_cache
-                    .rebuild(&self.doc.root, &self.doc.library, world_xform)
-            }
-        } else {
-            self.session
-                .base_cache
-                .rebuild(&self.doc.root, &self.doc.library, world_xform)
+        let tl = match self.active_symbol_index() {
+            Some(idx) => &self.doc.library[idx].timeline,
+            None => &self.doc.root,
         };
-        if changed {
+        if self
+            .session
+            .base_cache
+            .rebuild(tl, &self.doc.library, world_xform)
+        {
             self.session.invalidate_scene_order();
         }
     }
@@ -2907,22 +2893,18 @@ impl Tab {
     /// 現在編集中のタイムラインへの不変参照を返す
     #[inline]
     pub(crate) fn active_timeline(&self) -> &Timeline {
-        if let Some(last) = self.session.edit_path.last() {
-            if let Some(sym) = self.doc.find_symbol(last.symbol_id) {
-                return &sym.timeline;
-            }
+        match self.active_symbol_index() {
+            Some(idx) => &self.doc.library[idx].timeline,
+            None => &self.doc.root,
         }
-        &self.doc.root
     }
 
     #[inline]
     fn active_timeline_raw_mut(&mut self) -> &mut Timeline {
-        if let Some(last) = self.session.edit_path.last() {
-            if let Some(idx) = self.doc.library.iter().position(|s| s.id == last.symbol_id) {
-                return &mut self.doc.library[idx].timeline;
-            }
+        match self.active_symbol_index() {
+            Some(idx) => &mut self.doc.library[idx].timeline,
+            None => &mut self.doc.root,
         }
-        &mut self.doc.root
     }
 
     /// 編集中タイムラインの再生ヘッド（`current_frame`）のみを変更し、リビジョンは上げずに土台キャッシュを更新する
@@ -2954,16 +2936,14 @@ impl Tab {
         &mut self,
         f: impl FnOnce(&mut Timeline, &mut Document) -> R,
     ) -> R {
-        if let Some(last) = self.session.edit_path.last() {
-            if let Some(idx) = self.doc.library.iter().position(|s| s.id == last.symbol_id) {
-                let mut taken_tl = std::mem::take(&mut self.doc.library[idx].timeline);
-                let res = f(&mut taken_tl, &mut self.doc);
-                self.doc.library[idx].timeline = taken_tl;
-                self.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
-                self.doc.bump_revision();
-                self.refresh_scene_base();
-                return res;
-            }
+        if let Some(idx) = self.active_symbol_index() {
+            let mut taken_tl = std::mem::take(&mut self.doc.library[idx].timeline);
+            let res = f(&mut taken_tl, &mut self.doc);
+            self.doc.library[idx].timeline = taken_tl;
+            self.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
+            self.doc.bump_revision();
+            self.refresh_scene_base();
+            return res;
         }
         let mut taken_root = std::mem::take(&mut self.doc.root);
         let res = f(&mut taken_root, &mut self.doc);
@@ -3076,7 +3056,7 @@ impl Tab {
 
     /// 浮いている片（`Floating`）がある場合は一時タブ上で確定した `Document` の写しを返し、元のタブや文書には触れない
     pub(crate) fn committed_document_copy(&self) -> Document {
-        if let Some(fl) = self.session.floating().filter(|fl| fl.needs_merge_commit()) {
+        if let Some(fl) = self.session.floating().filter(|fl| fl.modified) {
             let mut temp_tab = Self::new_empty(self.id, self.untitled_number);
             temp_tab.doc = self.doc.clone();
             temp_tab.session.edit_path = self.session.edit_path.clone();
@@ -3476,20 +3456,12 @@ pub(crate) fn edit_layers(
         }
     };
 
-    if let Some(last) = tab.session.edit_path.last() {
-        if let Some(idx) = tab.doc.library.iter().position(|s| s.id == last.symbol_id) {
-            let mut taken_tl = std::mem::take(&mut tab.doc.library[idx].timeline);
-            mutate_tl(&mut taken_tl);
-            tab.doc.library[idx].timeline = taken_tl;
-            if !modified_lids.is_empty() {
-                tab.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
-                tab.doc.bump_revision();
-            }
-        } else {
-            mutate_tl(&mut tab.doc.root);
+    mutate_tl(tab.active_timeline_raw_mut());
+    if !modified_lids.is_empty() {
+        if let Some(idx) = tab.active_symbol_index() {
+            tab.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
+            tab.doc.bump_revision();
         }
-    } else {
-        mutate_tl(&mut tab.doc.root);
     }
 
     let any_cel_modified = !modified_lids.is_empty();
@@ -3721,7 +3693,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
         let Some(fl) = tab.session.take_floating() else {
             return false;
         };
-        if !fl.is_unmodified_slice() {
+        if fl.modified {
             let lids = floating_target_layer_ids(tab, &fl);
             edit_layers(tab, &lids, |edit| {
                 merge_floating_into_base_shapes(&mut edit.shapes, fl, &edit.layer_order_ids);
@@ -3746,7 +3718,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
         }
     }
 
-    if fl.is_unmodified_slice() {
+    if !fl.modified {
         if kept_pieces.is_empty() {
             tab.session.retain_existing_selection();
             return true;

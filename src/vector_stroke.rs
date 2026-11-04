@@ -1247,6 +1247,8 @@ fn enforce_g1_tangent_continuity_on_segments(
     }
 }
 
+/// 3点以上・全長 1e-6 以上の点列から最小二乗法で2次ベジェ曲線の制御点 `p1` を求める
+/// （`t` を `[0.05, 0.95]` に丸めるため `denom` は常に 0.009 以上になる）
 fn fit_quad_control_point_least_squares(pts: &[Point], cum: &[f64], p0: Point, p2: Point) -> Point {
     let n = pts.len();
     let total_len = cum[n - 1];
@@ -1267,15 +1269,7 @@ fn fit_quad_control_point_least_squares(pts: &[Point], cum: &[f64], p0: Point, p
         denom += b1 * b1;
     }
 
-    if denom > 1e-9 {
-        (num / denom).to_point()
-    } else {
-        let mid_pt = pts[n / 2];
-        Point::new(
-            2.0 * mid_pt.x - 0.5 * (p0.x + p2.x),
-            2.0 * mid_pt.y - 0.5 * (p0.y + p2.y),
-        )
-    }
+    (num / denom).to_point()
 }
 
 fn reduce_outline_anchors_by_quad_fit(

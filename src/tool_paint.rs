@@ -124,13 +124,6 @@ pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> 
     let scene = tab.scene();
     let tl = tab.active_timeline();
     let num_layers = tl.layers.len();
-    if num_layers == 1 && tl.layers.first().is_some_and(|l| l.visible && !l.locked) {
-        return scene
-            .iter()
-            .rev()
-            .find(|s| s.contains_point(pt))
-            .map(|s| s.color);
-    }
     for layer_idx in (0..num_layers).rev() {
         let layer = &tl.layers[layer_idx];
         if !layer.visible {

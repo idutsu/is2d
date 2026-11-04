@@ -336,6 +336,15 @@ impl Keyframe {
     }
 }
 
+/// クラシックトゥイーンは単一シンボルのセルでだけ有効にする。無効なら回転も `Auto` に戻した `(tween, tween_rotate)` を返す
+fn valid_tween_settings(tween: bool, rotate: TweenRotate, cel: &Cel) -> (bool, TweenRotate) {
+    if tween && cel.single_symbol_instance().is_some() {
+        (true, rotate)
+    } else {
+        (false, TweenRotate::Auto)
+    }
+}
+
 fn remap_keyframes_group_and_instance_ids(
     kfs: &mut [Keyframe],
     mut alloc_group_id: impl FnMut() -> u64,
@@ -552,10 +561,15 @@ impl Layer {
                 kf.start_frame = kf.start_frame.saturating_sub(1);
             }
             self.frame_count = (self.frame_count - 1).max(1);
-            if self.keyframes.is_empty() || self.keyframes[0].start_frame > 0 {
-                self.keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
-            }
+            self.ensure_head_keyframe();
             true
+        }
+    }
+
+    /// 先頭（0 フレーム目）のキーフレームが無ければ、空白のキーフレームを入れる
+    fn ensure_head_keyframe(&mut self) {
+        if self.keyframes.first().is_none_or(|kf| kf.start_frame > 0) {
+            self.keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
         }
     }
 
@@ -610,16 +624,11 @@ impl Layer {
             })
             .collect();
         let cel = Cel::new_with_instances(cloned_shapes, cloned_instances);
-        let valid_tween = kf.tween && cel.single_symbol_instance().is_some();
-        let tween_rotate = if valid_tween {
-            kf.tween_rotate
-        } else {
-            TweenRotate::Auto
-        };
+        let (tween, tween_rotate) = valid_tween_settings(kf.tween, kf.tween_rotate, &cel);
         Keyframe {
             start_frame,
             cel,
-            tween: valid_tween,
+            tween,
             tween_rotate,
         }
     }
@@ -663,9 +672,8 @@ impl Layer {
         self.keyframes
             .retain(|kf| kf.start_frame < min_frame || kf.start_frame > max_frame);
 
-        if self.keyframes.is_empty() || self.keyframes[0].start_frame > 0 {
-            self.keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
-        } else if min_frame < self.frame_count {
+        self.ensure_head_keyframe();
+        if min_frame < self.frame_count {
             let prev_idx = self
                 .keyframes
                 .partition_point(|kf| kf.start_frame <= min_frame)
@@ -722,12 +730,8 @@ impl Layer {
                     inst.layer_id = dst_lid;
                 }
             }
-            let valid_tween = kf.tween && kf.cel.single_symbol_instance().is_some();
-            let rotate_mode = if valid_tween {
-                kf.tween_rotate
-            } else {
-                TweenRotate::Auto
-            };
+            let (valid_tween, rotate_mode) =
+                valid_tween_settings(kf.tween, kf.tween_rotate, &kf.cel);
             let target_f = dst_min_frame + kf.start_frame;
             if let Some(existing_idx) = self
                 .keyframes
@@ -753,9 +757,7 @@ impl Layer {
                 );
             }
         }
-        if self.keyframes.is_empty() || self.keyframes[0].start_frame > 0 {
-            self.keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
-        }
+        self.ensure_head_keyframe();
     }
 
     /// `kf_idx` 番目のキーフレームにおけるトゥイーン状態（未設定 / 点線の未完トゥイーン / 実線矢印の完全トゥイーン）を判定する

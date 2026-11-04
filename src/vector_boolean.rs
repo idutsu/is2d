@@ -107,6 +107,33 @@ fn raw_scope_insert_index(
         .unwrap_or(canvas.len())
 }
 
+/// `canvas` の、レイヤー `layer_id`・階層 `scope` の置き場（`raw_scope_insert_index`）より前にある生の図形のうち、
+/// 色が `color_pred` に合い `clip_shapes` に触れるものを取り出す。
+/// 返り値は（取り出した図形、置き場より後ろの図形）で、`canvas` には触れない図形だけが元の順で残る
+fn take_interacting_raw_shapes(
+    canvas: &mut Vec<FillShape>,
+    clip_shapes: &[FillShape],
+    test_bbox: KRect,
+    layer_id: u64,
+    scope: &[u64],
+    color_pred: impl Fn(Color32) -> bool,
+) -> (Vec<FillShape>, Vec<FillShape>) {
+    let clip_sub_bboxes = collect_sub_bboxes(clip_shapes, 1.5);
+    let insert_limit = raw_scope_insert_index(canvas, layer_id, scope);
+    let trailing_outside = canvas.split_off(insert_limit);
+    let (hits, kept): (Vec<FillShape>, Vec<FillShape>) =
+        std::mem::take(canvas).into_iter().partition(|existing| {
+            existing.layer_id == layer_id
+                && existing.group_path == scope
+                && existing.symbol_instance.is_none()
+                && color_pred(existing.color)
+                && rects_overlap(existing.bounding_box(), test_bbox)
+                && shape_interacts_with_clip(existing, clip_shapes, &clip_sub_bboxes)
+        });
+    *canvas = kept;
+    (hits, trailing_outside)
+}
+
 fn subtract_clip_in_scope(
     canvas: &mut Vec<FillShape>,
     clip_shapes: &[FillShape],
@@ -115,36 +142,29 @@ fn subtract_clip_in_scope(
     subtract_color: impl Fn(Color32) -> bool,
 ) {
     let test_bbox = union_bounding_boxes(clip_shapes).inflate(1.5, 1.5);
-    let clip_sub_bboxes = collect_sub_bboxes(clip_shapes, 1.5);
-    let insert_limit = raw_scope_insert_index(canvas, target_layer_id, editing_scope);
-    let trailing_outside = canvas.split_off(insert_limit);
-
-    let mut updated_canvas = Vec::with_capacity(canvas.len() + trailing_outside.len());
+    let (hits, trailing_outside) = take_interacting_raw_shapes(
+        canvas,
+        clip_shapes,
+        test_bbox,
+        target_layer_id,
+        editing_scope,
+        subtract_color,
+    );
     let mut overlapping_by_color: Vec<(Color32, Vec<FillShape>)> = Vec::new();
-    for existing in canvas.drain(..) {
-        if existing.layer_id == target_layer_id
-            && existing.group_path == editing_scope
-            && existing.symbol_instance.is_none()
-            && subtract_color(existing.color)
-            && rects_overlap(existing.bounding_box(), test_bbox)
-            && shape_interacts_with_clip(&existing, clip_shapes, &clip_sub_bboxes)
+    for existing in hits {
+        if let Some((_, group)) = overlapping_by_color
+            .iter_mut()
+            .find(|(c, _)| *c == existing.color)
         {
-            if let Some((_, group)) = overlapping_by_color
-                .iter_mut()
-                .find(|(c, _)| *c == existing.color)
-            {
-                group.push(existing);
-            } else {
-                overlapping_by_color.push((existing.color, vec![existing]));
-            }
+            group.push(existing);
         } else {
-            updated_canvas.push(existing);
+            overlapping_by_color.push((existing.color, vec![existing]));
         }
     }
     if !overlapping_by_color.is_empty() {
         let clip = PreparedClip::new(clip_shapes);
         for (color, group) in overlapping_by_color {
-            updated_canvas.extend(
+            canvas.extend(
                 op_with_far_holes_detached(&group, test_bbox, |g| {
                     clip.subtract_from_group(g, color)
                 })
@@ -153,8 +173,7 @@ fn subtract_clip_in_scope(
             );
         }
     }
-    updated_canvas.extend(trailing_outside);
-    *canvas = updated_canvas;
+    canvas.extend(trailing_outside);
 }
 
 fn merge_homogeneous_batch_into_canvas(
@@ -173,27 +192,10 @@ fn merge_homogeneous_batch_into_canvas(
     }
 
     let test_bbox = union_bounding_boxes(&incoming).inflate(1.5, 1.5);
-    let clip_sub_bboxes = collect_sub_bboxes(&incoming, 1.5);
-    let insert_limit = raw_scope_insert_index(canvas, layer_id, &scope);
-    let trailing_outside = canvas.split_off(insert_limit);
-
-    let mut updated_canvas =
-        Vec::with_capacity(canvas.len() + incoming.len() + trailing_outside.len());
-    let mut overlapping_same_color = Vec::new();
-
-    for existing in canvas.drain(..) {
-        if existing.layer_id == layer_id
-            && existing.group_path == scope
-            && existing.symbol_instance.is_none()
-            && existing.color == target_color
-            && rects_overlap(existing.bounding_box(), test_bbox)
-            && shape_interacts_with_clip(&existing, &incoming, &clip_sub_bboxes)
-        {
-            overlapping_same_color.push(existing);
-        } else {
-            updated_canvas.push(existing);
-        }
-    }
+    let (overlapping_same_color, trailing_outside) =
+        take_interacting_raw_shapes(canvas, &incoming, test_bbox, layer_id, &scope, |c| {
+            c == target_color
+        });
 
     let incoming_self_overlaps = incoming.len() > 1
         && incoming.iter().enumerate().any(|(i, a)| {
@@ -204,7 +206,7 @@ fn merge_homogeneous_batch_into_canvas(
         });
 
     if overlapping_same_color.is_empty() && !incoming_self_overlaps {
-        updated_canvas.extend(incoming);
+        canvas.extend(incoming);
     } else if overlapping_same_color.is_empty() {
         let mut unioned =
             boolean_operation(&incoming[..1], &incoming[1..], BoolOp::Union, target_color);
@@ -225,10 +227,10 @@ fn merge_homogeneous_batch_into_canvas(
             } else {
                 seen_ids.push(s.shape_id);
             }
-            updated_canvas.push(s.with_scope(layer_id, &scope));
+            canvas.push(s.with_scope(layer_id, &scope));
         }
     } else {
-        updated_canvas.extend(
+        canvas.extend(
             op_with_far_holes_detached(&overlapping_same_color, test_bbox, |existing| {
                 boolean_operation(existing, &incoming, BoolOp::Union, target_color)
             })
@@ -237,8 +239,7 @@ fn merge_homogeneous_batch_into_canvas(
         );
     }
 
-    updated_canvas.extend(trailing_outside);
-    *canvas = updated_canvas;
+    canvas.extend(trailing_outside);
 }
 
 /// `shapes` の穴のうち `near` に重ならない穴（遠い穴）を外した写しで `op` を行い、

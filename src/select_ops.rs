@@ -90,7 +90,7 @@ pub(crate) fn handle_canvas_double_click(host: &mut impl ActionHost, pt: Point) 
             .topmost_shape_at(pt, &host.tab().session.editing_group_path)
             .is_none()
     {
-        apply(host, Action::ExitGroup);
+        apply(host, Action::ExitGroupSteps { steps: 1 });
     }
 }
 
@@ -155,6 +155,47 @@ pub(crate) fn finish_marquee_drag(
     );
 }
 
+/// 矩形選択と図形の関係
+enum MarqueeHit {
+    /// 矩形に触れない
+    Outside,
+    /// 図形全体が矩形の中にある
+    Inside,
+    /// 矩形で切った中と外の片（どちらも元の図形のレイヤー・階層に置いてある）
+    Split {
+        inside: Vec<FillShape>,
+        outside: Vec<FillShape>,
+    },
+}
+
+/// 図形 `shape` と矩形 `rect`（その形が `clip_rect_shape`）の関係を調べ、かかっていれば切り分ける
+fn marquee_hit(shape: &FillShape, rect: KRect, clip_rect_shape: &FillShape) -> MarqueeHit {
+    let bbox = shape.bounding_box();
+    if !rects_overlap(bbox, rect) {
+        return MarqueeHit::Outside;
+    }
+    if bbox.x0 >= rect.x0 && bbox.x1 <= rect.x1 && bbox.y0 >= rect.y0 && bbox.y1 <= rect.y1 {
+        return MarqueeHit::Inside;
+    }
+    let (inside, outside) = slice_shape_with_marquee_rect(shape, clip_rect_shape);
+    if inside.is_empty() {
+        return MarqueeHit::Outside;
+    }
+    if outside.is_empty() {
+        return MarqueeHit::Inside;
+    }
+    let in_scope = |pieces: Vec<FillShape>| -> Vec<FillShape> {
+        pieces
+            .into_iter()
+            .map(|s| s.with_scope(shape.layer_id, &shape.group_path))
+            .collect()
+    };
+    MarqueeHit::Split {
+        inside: in_scope(inside),
+        outside: in_scope(outside),
+    }
+}
+
 /// Adobe Animate 風の矩形選択（Marquee Selection）
 pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, additive: bool) {
     tab.history.end_coalesce();
@@ -200,48 +241,29 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                         chunk_rem.push(rem);
                         continue;
                     }
-                    let bbox = rem.bounding_box();
-                    if !rects_overlap(bbox, rect) {
-                        chunk_rem.push(rem);
-                        continue;
-                    }
-                    if bbox.x0 >= rect.x0
-                        && bbox.x1 <= rect.x1
-                        && bbox.y0 >= rect.y0
-                        && bbox.y1 <= rect.y1
-                    {
-                        if fl.hidden.contains(&rem.shape_id) {
-                            rem.shape_id = next_shape_id();
-                        }
-                        selection.insert_shape(&rem);
-                        fl.pieces.push(rem);
-                        continue;
-                    }
-                    let lid = rem.layer_id;
-                    let gp = rem.group_path.clone();
-                    let (inside, outside) = slice_shape_with_marquee_rect(&rem, &clip_rect_shape);
-                    if inside.is_empty() {
-                        chunk_rem.push(rem);
-                    } else if outside.is_empty() {
-                        if fl.hidden.contains(&rem.shape_id) {
-                            rem.shape_id = next_shape_id();
-                        }
-                        selection.insert_shape(&rem);
-                        fl.pieces.push(rem);
-                    } else {
-                        for mut out_s in outside {
-                            if fl.hidden.contains(&out_s.shape_id) {
-                                out_s.shape_id = next_shape_id();
+                    match marquee_hit(&rem, rect, &clip_rect_shape) {
+                        MarqueeHit::Outside => chunk_rem.push(rem),
+                        MarqueeHit::Inside => {
+                            if fl.hidden.contains(&rem.shape_id) {
+                                rem.shape_id = next_shape_id();
                             }
-                            chunk_rem.push(out_s.with_scope(lid, &gp));
+                            selection.insert_shape(&rem);
+                            fl.pieces.push(rem);
                         }
-                        for mut piece in inside {
-                            if fl.hidden.contains(&piece.shape_id) {
-                                piece.shape_id = next_shape_id();
+                        MarqueeHit::Split { inside, outside } => {
+                            for mut out_s in outside {
+                                if fl.hidden.contains(&out_s.shape_id) {
+                                    out_s.shape_id = next_shape_id();
+                                }
+                                chunk_rem.push(out_s);
                             }
-                            let piece = piece.with_scope(lid, &gp);
-                            selection.insert_shape(&piece);
-                            fl.pieces.push(piece);
+                            for mut piece in inside {
+                                if fl.hidden.contains(&piece.shape_id) {
+                                    piece.shape_id = next_shape_id();
+                                }
+                                selection.insert_shape(&piece);
+                                fl.pieces.push(piece);
+                            }
                         }
                     }
                 }
@@ -271,52 +293,37 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                 }
                 continue;
             }
-            let bbox = shape.bounding_box();
-            if !rects_overlap(bbox, rect) {
-                continue;
-            }
-            if bbox.x0 >= rect.x0 && bbox.x1 <= rect.x1 && bbox.y0 >= rect.y0 && bbox.y1 <= rect.y1
-            {
-                selection.insert_shape(shape);
-                continue;
-            }
-
-            let lid = shape.layer_id;
-            let gp = shape.group_path.clone();
-            let orig_id = shape.shape_id;
-            let (inside, outside) = slice_shape_with_marquee_rect(shape, &clip_rect_shape);
-            if inside.is_empty() {
-                continue;
-            } else if outside.is_empty() {
-                selection.insert_shape(shape);
-            } else {
-                let fl = floating.get_or_insert_with(|| Floating {
-                    pieces: Vec::new(),
-                    remainder: Vec::new(),
-                    hidden: HashSet::new(),
-                    modified: false,
-                });
-                fl.hidden.insert(orig_id);
-                let mut outside_scoped: Vec<FillShape> = outside
-                    .into_iter()
-                    .map(|mut s| {
+            match marquee_hit(shape, rect, &clip_rect_shape) {
+                MarqueeHit::Outside => {}
+                MarqueeHit::Inside => selection.insert_shape(shape),
+                MarqueeHit::Split {
+                    inside,
+                    mut outside,
+                } => {
+                    let orig_id = shape.shape_id;
+                    let fl = floating.get_or_insert_with(|| Floating {
+                        pieces: Vec::new(),
+                        remainder: Vec::new(),
+                        hidden: HashSet::new(),
+                        modified: false,
+                    });
+                    fl.hidden.insert(orig_id);
+                    for s in &mut outside {
                         if s.shape_id == orig_id {
                             s.shape_id = next_shape_id();
                         }
-                        s.with_scope(lid, &gp)
-                    })
-                    .collect();
-                if let Some(first_out) = outside_scoped.first_mut() {
-                    first_out.shape_id = orig_id;
-                }
-                fl.remainder.extend(outside_scoped);
-                for mut piece in inside {
-                    if piece.shape_id == orig_id {
-                        piece.shape_id = next_shape_id();
                     }
-                    let piece = piece.with_scope(lid, &gp);
-                    selection.insert_shape(&piece);
-                    fl.pieces.push(piece);
+                    if let Some(first_out) = outside.first_mut() {
+                        first_out.shape_id = orig_id;
+                    }
+                    fl.remainder.extend(outside);
+                    for mut piece in inside {
+                        if piece.shape_id == orig_id {
+                            piece.shape_id = next_shape_id();
+                        }
+                        selection.insert_shape(&piece);
+                        fl.pieces.push(piece);
+                    }
                 }
             }
         }

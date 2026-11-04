@@ -6,9 +6,9 @@ use kurbo::{Affine, Point, QuadBez, Vec2 as KVec2};
 use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
     editable_layer_ids, focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
-    merge_floating_into_base_shapes, prepare_moved_selection, select_shapes_for_timeline_selection,
-    set_tool, show_notice, toggle_select_sub_mode, Clipboard, CoalesceKey, Floating, NoticeKind,
-    SelectSubMode, ShapeId, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
+    prepare_moved_selection, select_shapes_for_timeline_selection, set_tool, show_notice,
+    toggle_select_sub_mode, Clipboard, CoalesceKey, NoticeKind, SelectSubMode, ShapeId,
+    StatusToast, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes,
@@ -134,7 +134,6 @@ pub(crate) enum Action {
     EnterGroupAt {
         pt: Point,
     },
-    ExitGroup,
     ExitGroupSteps {
         steps: usize,
     },
@@ -505,7 +504,6 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         Action::Ungroup => prepare_ungroup_selected_shapes(tab, |tab| push_undo(tab, None)),
         Action::Arrange { mode } => prepare_arrange_selected(tab, mode, |tab| push_undo(tab, None)),
         Action::EnterGroupAt { pt } => enter_group_at(tab, pt),
-        Action::ExitGroup => exit_current_group(tab),
         Action::ExitGroupSteps { steps } => {
             let mut exited = false;
             for _ in 0..steps {
@@ -1154,42 +1152,20 @@ fn apply_deform_shape(
         return false;
     }
     let layer_ids = editable_layer_ids(tab);
-    let in_remainder = tab.session.floating().is_some_and(|fl| {
-        fl.remainder
-            .iter()
-            .any(|r| r.shape_id == shape_id && layer_ids.contains(&r.layer_id))
-    });
     let in_base = tab
         .session
         .base_cache
         .shapes()
         .iter()
         .any(|s| s.shape_id == shape_id && layer_ids.contains(&s.layer_id));
-    if !in_remainder && !in_base {
+    // 輪郭の変形は、始めるときに選択を解除して `Floating` を確定している。`Floating` があるときは何もしない
+    if tab.session.floating().is_some() || !in_base {
         return false;
     }
     push_undo(tab, None);
     focus_active_layer_to_shape_by_id(tab, shape_id);
-    let rem_to_commit = if in_remainder {
-        tab.session.update_floating(|fl_opt| {
-            fl_opt.as_mut().map(|fl| {
-                fl.modified = true;
-                Floating {
-                    pieces: Vec::new(),
-                    remainder: std::mem::take(&mut fl.remainder),
-                    hidden: std::mem::take(&mut fl.hidden),
-                    modified: true,
-                }
-            })
-        })
-    } else {
-        None
-    };
     let mut deformed_ok = false;
     edit_layers(tab, &layer_ids, |edit| {
-        if let Some(rem_fl) = rem_to_commit {
-            merge_floating_into_base_shapes(&mut edit.shapes, rem_fl, &edit.layer_order_ids);
-        }
         if let Some(pos) = edit.shapes.iter().position(|s| s.shape_id == shape_id) {
             let mut deformed = edit.shapes.remove(pos);
             apply_deform(&mut deformed);
@@ -1375,13 +1351,6 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
     }
 }
 
-pub(crate) fn update_selected_symbol_world_pivot_live(
-    tab: &mut Tab,
-    world_pivot: Option<Point>,
-) -> bool {
-    apply_set_selected_symbol_world_pivot(tab, world_pivot, false)
-}
-
 fn apply_set_selected_symbol_world_pivot(
     tab: &mut Tab,
     world_pivot: Option<Point>,
@@ -1424,21 +1393,17 @@ fn apply_set_selected_symbol_world_pivot(
     updated
 }
 
-pub(crate) fn flush_transform_pivot_to_symbol(tab: &mut Tab) {
-    if let Some(piv) = tab.session.transform_pivot {
-        if update_selected_symbol_world_pivot_live(tab, Some(piv)) {
-            tab.session.transform_pivot = None;
-        }
-    }
-}
-
 fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     cancel_active_drag(tab);
     if affine == Affine::IDENTITY || !has_editable_selection(tab) {
         return false;
     }
     push_undo(tab, None);
-    flush_transform_pivot_to_symbol(tab);
+    if let Some(piv) = tab.session.transform_pivot {
+        if apply_set_selected_symbol_world_pivot(tab, Some(piv), false) {
+            tab.session.transform_pivot = None;
+        }
+    }
     transform_selected_shapes(tab, affine)
 }
 
@@ -2042,7 +2007,7 @@ pub(crate) fn set_selected_symbol_world_pivot(
     if commit_to_timeline {
         apply(host, Action::SetTransformPivot { world_pivot })
     } else {
-        update_selected_symbol_world_pivot_live(host.tab_mut(), world_pivot)
+        apply_set_selected_symbol_world_pivot(host.tab_mut(), world_pivot, false)
     }
 }
 

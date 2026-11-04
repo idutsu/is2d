@@ -479,10 +479,8 @@ fn serialize_contour_segments<S: serde::Serializer>(
 fn deserialize_contour_segments<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Arc<Vec<QuadBez>>, D::Error> {
+    // serde_json は有限でない数を読み込みのエラーにするので、ここには有限の数だけが来る
     let nums = Vec::<f64>::deserialize(deserializer)?;
-    if !nums.iter().all(|v| v.is_finite()) {
-        return Ok(Arc::new(Vec::new()));
-    }
     let n = (nums.len() / 4).min(MAX_CONTOUR_SEGMENTS);
     let point = |i: usize| Point::new(nums[4 * (i % n)], nums[4 * (i % n) + 1]);
     let segs = (0..n)
@@ -1212,7 +1210,7 @@ pub(crate) fn read_project_document(path: &Path) -> Result<ProjectDocument, Stri
     let doc: ProjectDocument = serde_json::from_reader(std::io::BufReader::new(file))
         .map_err(|e| format!("プロジェクトファイルの形式が正しくありません: {e}"))?;
 
-    if doc.version == 0 || doc.version > PROJECT_FORMAT_VERSION {
+    if doc.version != PROJECT_FORMAT_VERSION {
         return Err(format!(
             "未対応のプロジェクトバージョンです (version: {})",
             doc.version
