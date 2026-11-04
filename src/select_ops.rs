@@ -6,7 +6,7 @@ use crate::canvas_tool::{
     cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
     editable_layer_ids, focus_active_layer_to_shape_by_id, merge_floating_into_base_shapes,
     sync_timeline_layer_from_canvas_selection, Floating, HoverTarget, LayerId, MarqueeDrag, Scene,
-    SelectSubMode, Session, ShapeId, Tab,
+    SelectSubMode, Session, Tab,
 };
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
@@ -190,77 +190,66 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     let mut selection = std::mem::take(&mut tab.session.selection);
     tab.session.update_floating(|floating| {
         if let Some(fl) = floating {
-            let mut new_rem = Vec::with_capacity(fl.remainder.len());
-            let mut current_orig_id: Option<ShapeId> = None;
-            let mut chunk_rem: Vec<FillShape> = Vec::new();
-            let flush_chunk = |new_rem: &mut Vec<FillShape>,
-                               chunk_rem: &mut Vec<FillShape>,
-                               orig_id: Option<ShapeId>| {
+            let mut new_chunks = Vec::new();
+            for (orig_id, chunk) in fl.take_remainder_chunks() {
+                let mut chunk_rem: Vec<FillShape> = Vec::new();
+                for mut rem in chunk {
+                    if !rem.is_in_editing_scope(&editing_group_path)
+                        || !rem.is_raw_at_scope(&editing_group_path)
+                    {
+                        chunk_rem.push(rem);
+                        continue;
+                    }
+                    let bbox = rem.bounding_box();
+                    if !rects_overlap(bbox, rect) {
+                        chunk_rem.push(rem);
+                        continue;
+                    }
+                    if bbox.x0 >= rect.x0
+                        && bbox.x1 <= rect.x1
+                        && bbox.y0 >= rect.y0
+                        && bbox.y1 <= rect.y1
+                    {
+                        if fl.hidden.contains(&rem.shape_id) {
+                            rem.shape_id = next_shape_id();
+                        }
+                        selection.insert_shape(&rem);
+                        fl.pieces.push(rem);
+                        continue;
+                    }
+                    let lid = rem.layer_id;
+                    let gp = rem.group_path.clone();
+                    let (inside, outside) = slice_shape_with_marquee_rect(&rem, &clip_rect_shape);
+                    if inside.is_empty() {
+                        chunk_rem.push(rem);
+                    } else if outside.is_empty() {
+                        if fl.hidden.contains(&rem.shape_id) {
+                            rem.shape_id = next_shape_id();
+                        }
+                        selection.insert_shape(&rem);
+                        fl.pieces.push(rem);
+                    } else {
+                        for mut out_s in outside {
+                            if fl.hidden.contains(&out_s.shape_id) {
+                                out_s.shape_id = next_shape_id();
+                            }
+                            chunk_rem.push(out_s.with_scope(lid, &gp));
+                        }
+                        for mut piece in inside {
+                            if fl.hidden.contains(&piece.shape_id) {
+                                piece.shape_id = next_shape_id();
+                            }
+                            let piece = piece.with_scope(lid, &gp);
+                            selection.insert_shape(&piece);
+                            fl.pieces.push(piece);
+                        }
+                    }
+                }
                 if !chunk_rem.is_empty() {
-                    if let Some(oid) = orig_id {
-                        chunk_rem[0].shape_id = oid;
-                    }
-                    new_rem.append(chunk_rem);
-                }
-            };
-            for mut rem in fl.remainder.drain(..) {
-                if fl.hidden.contains(&rem.shape_id) {
-                    flush_chunk(&mut new_rem, &mut chunk_rem, current_orig_id);
-                    current_orig_id = Some(rem.shape_id);
-                }
-                if !rem.is_in_editing_scope(&editing_group_path)
-                    || !rem.is_raw_at_scope(&editing_group_path)
-                {
-                    chunk_rem.push(rem);
-                    continue;
-                }
-                let bbox = rem.bounding_box();
-                if !rects_overlap(bbox, rect) {
-                    chunk_rem.push(rem);
-                    continue;
-                }
-                if bbox.x0 >= rect.x0
-                    && bbox.x1 <= rect.x1
-                    && bbox.y0 >= rect.y0
-                    && bbox.y1 <= rect.y1
-                {
-                    if fl.hidden.contains(&rem.shape_id) {
-                        rem.shape_id = next_shape_id();
-                    }
-                    selection.insert_shape(&rem);
-                    fl.pieces.push(rem);
-                    continue;
-                }
-                let lid = rem.layer_id;
-                let gp = rem.group_path.clone();
-                let (inside, outside) = slice_shape_with_marquee_rect(&rem, &clip_rect_shape);
-                if inside.is_empty() {
-                    chunk_rem.push(rem);
-                } else if outside.is_empty() {
-                    if fl.hidden.contains(&rem.shape_id) {
-                        rem.shape_id = next_shape_id();
-                    }
-                    selection.insert_shape(&rem);
-                    fl.pieces.push(rem);
-                } else {
-                    for mut out_s in outside {
-                        if fl.hidden.contains(&out_s.shape_id) {
-                            out_s.shape_id = next_shape_id();
-                        }
-                        chunk_rem.push(out_s.with_scope(lid, &gp));
-                    }
-                    for mut piece in inside {
-                        if fl.hidden.contains(&piece.shape_id) {
-                            piece.shape_id = next_shape_id();
-                        }
-                        let piece = piece.with_scope(lid, &gp);
-                        selection.insert_shape(&piece);
-                        fl.pieces.push(piece);
-                    }
+                    new_chunks.push((orig_id, chunk_rem));
                 }
             }
-            flush_chunk(&mut new_rem, &mut chunk_rem, current_orig_id);
-            fl.remainder = new_rem;
+            fl.set_remainder_chunks(new_chunks);
         }
 
         for shape in &base_shapes {

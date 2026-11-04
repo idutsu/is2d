@@ -1015,9 +1015,11 @@ impl Is2dApp {
                     self.tab_mut().view.pan_last_screen_pos = None;
                     (false, false)
                 } else {
+                    let allow_pan =
+                        matches!(self.tab().session.drag, canvas_tool::ActiveCanvasDrag::None);
                     self.tab_mut()
                         .view
-                        .handle_navigation(ui, canvas_rect, pointer_pos)
+                        .handle_navigation(ui, canvas_rect, pointer_pos, allow_pan)
                 };
 
                 let mouse_pt = pointer_pos.map(|p| self.tab().view.screen_to_world(p));

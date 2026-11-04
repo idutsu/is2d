@@ -1071,14 +1071,16 @@ pub(crate) fn resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape> {
         }
     }
     let min_area = adaptive_overlay_min_area(std::slice::from_ref(shape), &[]);
+    let subj = [rings];
     let overlay_result = run_float_overlay(
-        &[rings],
+        &subj,
         &[],
         OverlayRule::Subject,
         OverlayFillRule::Positive,
         min_area,
     );
-    reconstruct_shapes_from_overlay(&overlay_result, &[], &quad_table, shape.color, false)
+    let in_groups = [(std::slice::from_ref(shape), &subj[..])];
+    reconstruct_shapes_from_overlay(&overlay_result, &in_groups, &quad_table, shape.color, false)
         .into_iter()
         .map(|s| s.with_scope(shape.layer_id, &shape.group_path))
         .collect()

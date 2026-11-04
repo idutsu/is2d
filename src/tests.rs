@@ -18893,3 +18893,255 @@ fn test_boolean_ops_with_far_holes_detached() {
         assert_eq!(res[0].holes.len(), orig_shape.holes.len());
     }
 }
+
+#[test]
+fn test_resolve_deformed_shape_and_move_vertex_preserve_untouched_hole_contours() {
+    let mut app = Is2dApp::default();
+    for i in 0..7 {
+        let y = 100.0 + i as f64 * 40.0;
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(80.0, y), Point::new(480.0, y)],
+                radius: 5.0,
+                color: Color32::RED,
+            },
+        ));
+    }
+    for j in 0..7 {
+        let x = 100.0 + j as f64 * 60.0;
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(x, 80.0), Point::new(x, 360.0)],
+                radius: 5.0,
+                color: Color32::RED,
+            },
+        ));
+    }
+    let orig_shape = app.doc.root.layers[0].keyframes[0].cel.shapes[0].clone();
+    assert!(orig_shape.holes.len() >= 30);
+
+    // 1. 1つの穴を少し変形して resolve_deformed_shape を呼ぶと、変形していない穴は入力の Contour と同じもの（ptr_eq）が残ること
+    let mut deformed = orig_shape.clone();
+    deformed.edit_contour(1, |contour| {
+        let segs = contour.segments_mut();
+        let last_idx = segs.len() - 1;
+        let delta = kurbo::Vec2::new(1.0, 1.0);
+        segs[0].p0 += delta;
+        segs[0].p1 += delta * 0.5;
+        segs[last_idx].p2 += delta;
+        segs[last_idx].p1 += delta * 0.5;
+        true
+    });
+    let resolved = resolve_deformed_shape(&deformed);
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].holes.len(), orig_shape.holes.len());
+    for untouched_hole in &orig_shape.holes[1..] {
+        assert!(
+            resolved[0].holes.iter().any(|h| h.ptr_eq(untouched_hole)),
+            "resolve_deformed_shape 後も変形していない穴が入力の Contour と ptr_eq で共有されていること"
+        );
+    }
+
+    // 2. Action::MoveVertexFromTo を穴の多い図形に行ったとき、触っていない穴が操作前の Contour と同じもの（ptr_eq）として残ること
+    let v_from = orig_shape.holes[0].segments[0].p0;
+    let v_to = v_from + kurbo::Vec2::new(1.0, 1.0);
+    assert!(apply(
+        &mut app,
+        Action::MoveVertexFromTo {
+            from: v_from,
+            to: v_to,
+        },
+    ));
+    let after_shape = &app.doc.root.layers[0].keyframes[0].cel.shapes[0];
+    assert_eq!(after_shape.holes.len(), orig_shape.holes.len());
+    for untouched_hole in &orig_shape.holes[1..] {
+        assert!(
+            after_shape.holes.iter().any(|h| h.ptr_eq(untouched_hole)),
+            "MoveVertexFromTo 後も触っていない穴が操作前の Contour と ptr_eq で共有されていること"
+        );
+    }
+}
+
+#[test]
+fn test_space_during_brush_drag_preserves_stroke_and_idle_space_drag_pans() {
+    use eframe::egui;
+
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let screen_rect = Some(egui::Rect::from_min_size(
+        Pos2::ZERO,
+        Vec2::new(1280.0, 820.0),
+    ));
+
+    // 1. ブラシのドラッグの途中に Space を押して離し、そのあとマウスを離すと、線が1本残り Undo が1つ積まれること
+    let press_pos = Pos2::new(300.0, 300.0);
+    let mid_pos = Pos2::new(360.0, 300.0);
+    let end_pos = Pos2::new(420.0, 300.0);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerMoved(press_pos)],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(press_pos),
+                egui::Event::PointerButton {
+                    pos: press_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerMoved(mid_pos)],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::Key {
+                    key: egui::Key::Space,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerMoved(end_pos),
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::Key {
+                    key: egui::Key::Space,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: end_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert_eq!(
+        scene_summary(&app).len,
+        1,
+        "ブラシのドラッグ中に Space に触れても描いていた線が消えず1本残ること"
+    );
+    assert_eq!(
+        app.history.undo_stack.len(),
+        1,
+        "ブラシのドラッグ完了で Undo が1つ積まれること"
+    );
+
+    // 2. ドラッグをしていないときに Space を押しながら左ボタンでドラッグすると、今までどおりパンになり、絵は描かれないこと
+    let pan_before = app.view.pan;
+    let pan_start = Pos2::new(500.0, 300.0);
+    let pan_end = Pos2::new(580.0, 350.0);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerMoved(pan_start),
+                egui::Event::Key {
+                    key: egui::Key::Space,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: pan_start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![egui::Event::PointerMoved(pan_end)],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            events: vec![
+                egui::Event::PointerButton {
+                    pos: pan_end,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::Key {
+                    key: egui::Key::Space,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert!(
+        (app.view.pan - (pan_before + (pan_end - pan_start))).length() < 1e-3,
+        "ドラッグしていないときの Space + 左ボタンドラッグでキャンバスがパンすること"
+    );
+    assert_eq!(
+        scene_summary(&app).len,
+        1,
+        "Space パン中に余分な図形が描かれないこと"
+    );
+    assert_eq!(app.history.undo_stack.len(), 1);
+}

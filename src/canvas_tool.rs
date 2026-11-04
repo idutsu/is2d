@@ -591,6 +591,7 @@ impl View {
         ui: &egui::Ui,
         canvas_rect: egui::Rect,
         pointer_pos: Option<Pos2>,
+        allow_pan: bool,
     ) -> (bool, bool) {
         let mut is_panning = false;
         if let Some(pos) = pointer_pos {
@@ -618,7 +619,8 @@ impl View {
         let started_in_canvas = press_origin
             .or(pointer_pos)
             .is_some_and(|p| canvas_rect.contains(p));
-        let pan_gesture_active = (middle_down || (space_down && primary_down))
+        let pan_gesture_active = allow_pan
+            && (middle_down || (space_down && primary_down))
             && (self.pan_last_screen_pos.is_some() || started_in_canvas);
         if pan_gesture_active {
             is_panning = true;
@@ -630,7 +632,7 @@ impl View {
             }
         } else {
             self.pan_last_screen_pos = None;
-            if space_down {
+            if space_down && allow_pan {
                 is_panning = true;
             }
         }
@@ -1923,15 +1925,26 @@ impl Floating {
                 .all(|(a, b)| shapes_equal_for_snapshot(a, b))
     }
 
+    /// `remainder` の各要素が、どの元の図形（`hidden` の番号）の塊に入るかを返す。
+    /// 塊は「`hidden` の番号を持つ要素から、次のそのような要素の手前まで」（この決まりを読むのはここだけ）
+    fn remainder_owners(&self) -> Vec<Option<ShapeId>> {
+        let mut current = None;
+        self.remainder
+            .iter()
+            .map(|rem| {
+                if self.hidden.contains(&rem.shape_id) {
+                    current = Some(rem.shape_id);
+                }
+                current
+            })
+            .collect()
+    }
+
     /// `self.hidden` と `self.remainder` を `overlay` に反映する
     fn init_overlay_from_remainder(&self, overlay: &mut Overlay, scope: &[u64]) {
         overlay.hide = self.hidden.clone();
-        let mut current_hid = None;
-        for rem in &self.remainder {
-            if self.hidden.contains(&rem.shape_id) {
-                current_hid = Some(rem.shape_id);
-            }
-            let placement = current_hid.map_or_else(
+        for (owner, rem) in self.remainder_owners().into_iter().zip(&self.remainder) {
+            let placement = owner.map_or_else(
                 || Placement::TopOfLayer(rem.layer_id, scope.to_vec()),
                 Placement::ReplaceAt,
             );
@@ -1939,19 +1952,62 @@ impl Floating {
         }
     }
 
-    /// `self.remainder` を取り出し、元の図形ID（`hidden` に含まれる先頭要素の `shape_id`）ごとの塊に分割して返す
-    fn take_remainder_chunks(&mut self) -> Vec<(Option<ShapeId>, Vec<FillShape>)> {
+    /// `self.remainder` を取り出し、元の図形ID ごとの塊に分割して返す
+    pub(crate) fn take_remainder_chunks(&mut self) -> Vec<(Option<ShapeId>, Vec<FillShape>)> {
+        let owners = self.remainder_owners();
         let mut chunks: Vec<(Option<ShapeId>, Vec<FillShape>)> = Vec::new();
-        for rem in std::mem::take(&mut self.remainder) {
-            if self.hidden.contains(&rem.shape_id) {
-                chunks.push((Some(rem.shape_id), vec![rem]));
-            } else if let Some((_, last_vec)) = chunks.last_mut() {
-                last_vec.push(rem);
-            } else {
-                chunks.push((None, vec![rem]));
+        for (owner, rem) in owners.into_iter().zip(std::mem::take(&mut self.remainder)) {
+            match chunks.last_mut() {
+                Some((last_owner, last_vec)) if *last_owner == owner => last_vec.push(rem),
+                _ => chunks.push((owner, vec![rem])),
             }
         }
         chunks
+    }
+
+    /// 塊を `remainder` に戻す。元の図形がある塊は、先頭の要素にその番号を付ける（この決まりを書くのはここだけ）
+    pub(crate) fn set_remainder_chunks(&mut self, chunks: Vec<(Option<ShapeId>, Vec<FillShape>)>) {
+        self.remainder = chunks
+            .into_iter()
+            .flat_map(|(owner, mut chunk)| {
+                if let (Some(id), Some(head)) = (owner, chunk.first_mut()) {
+                    head.shape_id = id;
+                }
+                chunk
+            })
+            .collect();
+    }
+
+    /// `shapes` から `hidden` の図形を除き、その位置に `remainder` の塊を差し込む。
+    /// `insert_limit` より前を1つ目、後ろを2つ目に返す（差し込む位置の無い塊は1つ目の末尾に足す）
+    fn replace_hidden_with_remainder(
+        &mut self,
+        shapes: Vec<FillShape>,
+        insert_limit: usize,
+    ) -> (Vec<FillShape>, Vec<FillShape>) {
+        let mut chunks = self.take_remainder_chunks();
+        let mut prefix = Vec::with_capacity(shapes.len() + self.pieces.len());
+        let mut trailing = Vec::new();
+        for (idx, shape) in shapes.into_iter().enumerate() {
+            let dst = if idx < insert_limit {
+                &mut prefix
+            } else {
+                &mut trailing
+            };
+            if self.hidden.contains(&shape.shape_id) {
+                for (owner, chunk) in &mut chunks {
+                    if *owner == Some(shape.shape_id) {
+                        dst.append(chunk);
+                    }
+                }
+            } else {
+                dst.push(shape);
+            }
+        }
+        for (_, chunk) in chunks {
+            prefix.extend(chunk);
+        }
+        (prefix, trailing)
     }
 }
 
@@ -2270,7 +2326,7 @@ impl Session {
             let Some(fl) = fl_opt else {
                 return;
             };
-            let mut new_rem = Vec::new();
+            let mut new_chunks = Vec::new();
             for (orig_id, chunk) in fl.take_remainder_chunks() {
                 let mut still_rem = Vec::new();
                 let mut newly_sel = Vec::new();
@@ -2291,14 +2347,13 @@ impl Session {
                             selection_shapes.insert(fresh_id);
                         }
                     }
-                    if let Some(hid) = orig_id {
-                        still_rem[0].shape_id = hid;
-                    }
                 }
-                new_rem.extend(still_rem);
+                if !still_rem.is_empty() {
+                    new_chunks.push((orig_id, still_rem));
+                }
                 fl.pieces.extend(newly_sel);
             }
-            fl.remainder = new_rem;
+            fl.set_remainder_chunks(new_chunks);
         });
         self.selection.shapes = selection_shapes;
         self.merge_touching_pieces();
@@ -3128,28 +3183,8 @@ impl LayerEdit {
     /// `Floating` をブーリアン結合せずにそのまま `self.shapes` に実体化する（グループ化・シンボル変換の前処理用）
     pub(crate) fn materialize_floating_without_merge(&mut self, mut fl: Floating) {
         let insert_limit = self.scope_insert_index();
-        let mut chunks = fl.take_remainder_chunks();
-        let mut prefix = Vec::with_capacity(self.shapes.len() + fl.pieces.len());
-        let mut trailing = Vec::new();
-        for (idx, shape) in self.shapes.drain(..).enumerate() {
-            let dst = if idx < insert_limit {
-                &mut prefix
-            } else {
-                &mut trailing
-            };
-            if fl.hidden.contains(&shape.shape_id) {
-                for (id, chunk) in &mut chunks {
-                    if *id == Some(shape.shape_id) {
-                        dst.append(chunk);
-                    }
-                }
-            } else {
-                dst.push(shape);
-            }
-        }
-        for (_, chunk) in chunks {
-            prefix.extend(chunk);
-        }
+        let (mut prefix, trailing) =
+            fl.replace_hidden_with_remainder(std::mem::take(&mut self.shapes), insert_limit);
         prefix.extend(fl.pieces);
         prefix.extend(trailing);
         if self.layer_order_ids.len() > 1 && prefix.len() > 1 {
@@ -3627,22 +3662,8 @@ pub(crate) fn merge_floating_into_base_shapes(
     layer_order_ids: &[LayerId],
 ) {
     if !fl.hidden.is_empty() || !fl.remainder.is_empty() {
-        let mut chunks = fl.take_remainder_chunks();
-        let mut rebuilt = Vec::with_capacity(base_shapes.len());
-        for shape in base_shapes.drain(..) {
-            if fl.hidden.contains(&shape.shape_id) {
-                for (id, chunk) in &mut chunks {
-                    if *id == Some(shape.shape_id) {
-                        rebuilt.append(chunk);
-                    }
-                }
-            } else {
-                rebuilt.push(shape);
-            }
-        }
-        for (_, chunk) in chunks {
-            rebuilt.extend(chunk);
-        }
+        let (rebuilt, _) =
+            fl.replace_hidden_with_remainder(std::mem::take(base_shapes), usize::MAX);
         *base_shapes = rebuilt;
     }
     if !fl.pieces.is_empty() {
@@ -3739,7 +3760,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
                 .filter(|id| fl.hidden.contains(id))
                 .collect();
             let mut chunks = fl.take_remainder_chunks();
-            for mut dp in deselected_pieces {
+            for dp in deselected_pieces {
                 let dp_box = dp.bounding_box().inflate(1.5, 1.5);
                 let touching = chunks.iter_mut().find(|(_, chunk)| {
                     chunk.iter().any(|r| {
@@ -3749,11 +3770,8 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
                             && rects_overlap(r.bounding_box(), dp_box)
                     })
                 });
-                if let Some((orig_id, chunk)) = touching {
+                if let Some((_, chunk)) = touching {
                     merge_disjoint_fill_into_canvas(chunk, dp);
-                    if let (Some(id), Some(head)) = (*orig_id, chunk.first_mut()) {
-                        head.shape_id = id;
-                    }
                     continue;
                 }
                 let has_chunk_for_layer = chunks.iter().any(|(orig_id, chunk)| {
@@ -3763,7 +3781,6 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
                     if let Some(&unused_orig_id) =
                         fl.hidden.iter().find(|id| !used_orig_ids.contains(id))
                     {
-                        dp.shape_id = unused_orig_id;
                         used_orig_ids.insert(unused_orig_id);
                         chunks.push((Some(unused_orig_id), vec![dp]));
                         continue;
@@ -3774,7 +3791,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
                     None => chunks.push((None, vec![dp])),
                 }
             }
-            fl.remainder = chunks.into_iter().flat_map(|(_, chunk)| chunk).collect();
+            fl.set_remainder_chunks(chunks);
         }
         fl.pieces = kept_pieces;
         tab.session.set_floating(Some(fl));
