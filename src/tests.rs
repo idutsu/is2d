@@ -18627,3 +18627,269 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
         assert_eq!(scene_ids.len(), unique_ids.len());
     }
 }
+
+#[test]
+fn test_boolean_ops_with_far_holes_detached() {
+    use crate::doc_actions::{apply, Action};
+    use crate::vector_boolean::{boolean_operation, BoolOp};
+    use crate::vector_engine::{rects_overlap, union_bounding_boxes, FillShape};
+    use crate::vector_stroke::{
+        build_smoothed_stroke_shapes_at_zoom, generate_brush_outline_at_zoom,
+    };
+
+    let shape_net_area = |s: &FillShape| -> f64 {
+        s.exterior.signed_area().abs() - s.holes.iter().map(|h| h.signed_area().abs()).sum::<f64>()
+    };
+    let make_stroke_shapes = |pts: &[Point], radius: f64, color: Color32| -> Vec<FillShape> {
+        let raw = generate_brush_outline_at_zoom(pts, radius, 1.0);
+        build_smoothed_stroke_shapes_at_zoom(&raw, color, 1.0)
+    };
+
+    let mut app = Is2dApp::default();
+    for i in 0..7 {
+        let y = 100.0 + i as f64 * 40.0;
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(80.0, y), Point::new(480.0, y)],
+                radius: 5.0,
+                color: Color32::RED,
+            },
+        ));
+    }
+    for j in 0..7 {
+        let x = 100.0 + j as f64 * 60.0;
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(x, 80.0), Point::new(x, 360.0)],
+                radius: 5.0,
+                color: Color32::RED,
+            },
+        ));
+    }
+    let orig_shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+    assert_eq!(orig_shapes.len(), 1);
+    let orig_shape = orig_shapes[0].clone();
+    assert!(
+        orig_shape.holes.len() >= 30,
+        "格子図形が 30 個以上の穴を持つこと: {}",
+        orig_shape.holes.len()
+    );
+
+    let corner_pts = vec![Point::new(85.0, 90.0), Point::new(115.0, 115.0)];
+
+    // 1. 結合（Union）：片隅に同じ色の短い線を足す
+    {
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: corner_pts.clone(),
+                radius: 5.0,
+                color: Color32::RED,
+            },
+        ));
+        let res = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        let incoming = make_stroke_shapes(&corner_pts, 5.0, Color32::RED);
+        let direct = boolean_operation(
+            std::slice::from_ref(&orig_shape),
+            &incoming,
+            BoolOp::Union,
+            Color32::RED,
+        );
+        assert_eq!(res.len(), 1);
+        assert_eq!(direct.len(), 1);
+        assert_eq!(res[0].holes.len(), direct[0].holes.len());
+        let a_res = shape_net_area(&res[0]);
+        let a_dir = shape_net_area(&direct[0]);
+        assert!(
+            ((a_res - a_dir).abs() / a_dir) <= 1e-6,
+            "Union 面積が一致すること: {a_res} vs {a_dir}"
+        );
+        let near = union_bounding_boxes(&incoming).inflate(1.5, 1.5);
+        let far_holes: Vec<_> = orig_shape
+            .holes
+            .iter()
+            .filter(|h| !rects_overlap(h.bounding_box(), near))
+            .collect();
+        assert!(!far_holes.is_empty());
+        for fh in far_holes {
+            assert!(
+                res[0]
+                    .holes
+                    .iter()
+                    .any(|h| std::sync::Arc::ptr_eq(&h.segments, &fh.segments)),
+                "遠い穴の Contour が Arc::ptr_eq で保たれていること"
+            );
+        }
+        assert!(apply(&mut app, Action::Undo));
+    }
+
+    // 2. 切り抜き（消しゴム）：片隅を消しゴムで短く消す
+    {
+        assert!(apply(
+            &mut app,
+            Action::EraseStroke {
+                points: corner_pts.clone(),
+                radius: 6.0,
+            },
+        ));
+        let res = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        let eraser = make_stroke_shapes(&corner_pts, 6.0, Color32::WHITE);
+        let direct = boolean_operation(
+            std::slice::from_ref(&orig_shape),
+            &eraser,
+            BoolOp::Difference,
+            Color32::RED,
+        );
+        assert_eq!(res.len(), direct.len());
+        assert_eq!(
+            res.iter().map(|s| s.holes.len()).sum::<usize>(),
+            direct.iter().map(|s| s.holes.len()).sum::<usize>()
+        );
+        let a_res: f64 = res.iter().map(&shape_net_area).sum();
+        let a_dir: f64 = direct.iter().map(&shape_net_area).sum();
+        assert!(
+            ((a_res - a_dir).abs() / a_dir) <= 1e-6,
+            "Difference 面積が一致すること: {a_res} vs {a_dir}"
+        );
+        let near = union_bounding_boxes(&eraser).inflate(1.5, 1.5);
+        for fh in orig_shape
+            .holes
+            .iter()
+            .filter(|h| !rects_overlap(h.bounding_box(), near))
+        {
+            assert!(
+                res.iter()
+                    .flat_map(|s| s.holes.iter())
+                    .any(|h| std::sync::Arc::ptr_eq(&h.segments, &fh.segments)),
+                "消しゴム後も遠い穴の Contour が Arc::ptr_eq で保たれていること"
+            );
+        }
+        assert!(apply(&mut app, Action::Undo));
+    }
+
+    // 3. 別の色：片隅に別の色の短い線を描く
+    {
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: corner_pts.clone(),
+                radius: 6.0,
+                color: Color32::BLUE,
+            },
+        ));
+        let red_res: Vec<_> = app.doc.root.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .iter()
+            .filter(|s| s.color == Color32::RED)
+            .collect();
+        let diff_stroke = make_stroke_shapes(&corner_pts, 6.0, Color32::BLUE);
+        let direct = boolean_operation(
+            std::slice::from_ref(&orig_shape),
+            &diff_stroke,
+            BoolOp::Difference,
+            Color32::RED,
+        );
+        assert_eq!(red_res.len(), direct.len());
+        assert_eq!(
+            red_res.iter().map(|s| s.holes.len()).sum::<usize>(),
+            direct.iter().map(|s| s.holes.len()).sum::<usize>()
+        );
+        let a_res: f64 = red_res.iter().map(|s| shape_net_area(s)).sum();
+        let a_dir: f64 = direct.iter().map(&shape_net_area).sum();
+        assert!(
+            ((a_res - a_dir).abs() / a_dir) <= 1e-6,
+            "異色ストローク後の元色面積が Difference と一致すること: {a_res} vs {a_dir}"
+        );
+        let near = union_bounding_boxes(&diff_stroke).inflate(1.5, 1.5);
+        for fh in orig_shape
+            .holes
+            .iter()
+            .filter(|h| !rects_overlap(h.bounding_box(), near))
+        {
+            assert!(
+                red_res
+                    .iter()
+                    .flat_map(|s| s.holes.iter())
+                    .any(|h| std::sync::Arc::ptr_eq(&h.segments, &fh.segments)),
+                "異色ストローク後も遠い穴の Contour が Arc::ptr_eq で保たれていること"
+            );
+        }
+        assert!(apply(&mut app, Action::Undo));
+    }
+
+    // 4. 分かれる切り抜き：消しゴムで真ん中から2つに切る（左右どちらにも遠い穴がある）
+    {
+        let split_pts = vec![Point::new(280.0, 50.0), Point::new(280.0, 400.0)];
+        assert!(apply(
+            &mut app,
+            Action::EraseStroke {
+                points: split_pts.clone(),
+                radius: 10.0,
+            },
+        ));
+        let res = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        let eraser = make_stroke_shapes(&split_pts, 10.0, Color32::WHITE);
+        let direct = boolean_operation(
+            std::slice::from_ref(&orig_shape),
+            &eraser,
+            BoolOp::Difference,
+            Color32::RED,
+        );
+        assert_eq!(res.len(), 2);
+        assert_eq!(direct.len(), 2);
+        assert_eq!(
+            res.iter().map(|s| s.holes.len()).sum::<usize>(),
+            direct.iter().map(|s| s.holes.len()).sum::<usize>()
+        );
+        let a_res: f64 = res.iter().map(&shape_net_area).sum();
+        let a_dir: f64 = direct.iter().map(&shape_net_area).sum();
+        assert!(
+            ((a_res - a_dir).abs() / a_dir) <= 1e-6,
+            "分割切り抜き後の合計面積が一致すること: {a_res} vs {a_dir}"
+        );
+        let near = union_bounding_boxes(&eraser).inflate(1.5, 1.5);
+        let far_holes: Vec<_> = orig_shape
+            .holes
+            .iter()
+            .filter(|h| !rects_overlap(h.bounding_box(), near))
+            .collect();
+        assert!(far_holes.iter().any(|h| h.bounding_box().x1 < 260.0));
+        assert!(far_holes.iter().any(|h| h.bounding_box().x0 > 300.0));
+        for fh in far_holes {
+            let pt = fh.segments[0].p0;
+            let owner_piece = res
+                .iter()
+                .find(|piece| {
+                    piece
+                        .holes
+                        .iter()
+                        .any(|h| std::sync::Arc::ptr_eq(&h.segments, &fh.segments))
+                })
+                .expect("どの遠い穴も分かれた図形のどちらかに付いていること");
+            assert!(
+                owner_piece.bounding_box().inflate(1e-6, 1e-6).contains(pt),
+                "遠い穴がそれを含む側の図形に付いていること"
+            );
+        }
+        assert!(apply(&mut app, Action::Undo));
+    }
+
+    // 5. 変わらないとき：塗られた所の中に同じ色の短い線を描く → shape_id が変わらない
+    {
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(180.0, 100.0), Point::new(200.0, 100.0)],
+                radius: 2.0,
+                color: Color32::RED,
+            },
+        ));
+        let res = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].shape_id, orig_shape.shape_id);
+        assert_eq!(res[0].holes.len(), orig_shape.holes.len());
+    }
+}

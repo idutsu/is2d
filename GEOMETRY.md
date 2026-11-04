@@ -171,6 +171,8 @@ Adobe Animate の「マージ描画（Merge Drawing）」では、同色スト�
 3. **De Casteljau 部分切り出しによる曲線復元（[`extract_sub_quad`](./src/vector_boolean.rs)）**：
    同じ `quad_id = Some(q)` が連続する辺のラン（始点 $P_{\text{start}}$、終点 $P_{\text{end}}$）は、元の2次ベジェ曲線 $B_q$ 上のパラメータ区間 $[t_0, t_1]$（$t_0 = \operatorname{nearest}(P_{\text{start}})$, $t_1 = \operatorname{nearest}(P_{\text{end}})$）を De Casteljau 法（`orig.subsegment(t0..t1)`）で1本の `QuadBez` として切り出します（タグなしの新規交差辺ランのみ [`refit_open_polyline_to_quads`](./src/vector_boolean.rs) で再フィットします）。
    これにより、**ブーリアン演算や消しゴム・矩形スライスを繰り返しても既存の曲線部分はポリゴン化されず、交差部で切断された元の2次ベジェ曲線からのずれはごく小さく抑えられます（30回の繰り返しで $2.4 \times 10^{-7}$ 程度。なお再構築された図形には新しい `ShapeId` が採番されます）。**
+4. **遠い穴の切り離しと再付与（[`op_with_far_holes_detached`](./src/vector_boolean.rs)）**：
+   結合（`Union`）・切り抜き（`Difference`）では、既存図形の穴のうち新しい線の外接矩形（`test_bbox`）に重なる近い穴だけを演算に渡し、重ならない遠い穴は演算後にそれを含む結果の図形へ付け直します（変わらなかった図形は元の図形に戻し、行き先が決まらないときは全穴を渡してやり直します）。新しい線は `test_bbox` の中にあり遠い穴に触れず、また遠い穴を囲むこともない（囲むなら外接矩形が重なって近い穴になる）ため、結合でも切り抜きで図形が分かれたときでも、各遠い穴はそのままの形でただ1つの結果図形の塗られた領域に含まれる穴として残ります。
 
 ---
 

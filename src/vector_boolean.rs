@@ -145,9 +145,11 @@ fn subtract_clip_in_scope(
         let clip = PreparedClip::new(clip_shapes);
         for (color, group) in overlapping_by_color {
             updated_canvas.extend(
-                clip.subtract_from_group(group, color)
-                    .into_iter()
-                    .map(|s| s.with_scope(target_layer_id, editing_scope)),
+                op_with_far_holes_detached(&group, test_bbox, |g| {
+                    clip.subtract_from_group(g, color)
+                })
+                .into_iter()
+                .map(|s| s.with_scope(target_layer_id, editing_scope)),
             );
         }
     }
@@ -227,12 +229,9 @@ fn merge_homogeneous_batch_into_canvas(
         }
     } else {
         updated_canvas.extend(
-            boolean_operation(
-                &overlapping_same_color,
-                &incoming,
-                BoolOp::Union,
-                target_color,
-            )
+            op_with_far_holes_detached(&overlapping_same_color, test_bbox, |existing| {
+                boolean_operation(existing, &incoming, BoolOp::Union, target_color)
+            })
             .into_iter()
             .map(|s| s.with_scope(layer_id, &scope)),
         );
@@ -240,6 +239,84 @@ fn merge_homogeneous_batch_into_canvas(
 
     updated_canvas.extend(trailing_outside);
     *canvas = updated_canvas;
+}
+
+/// `shapes` の穴のうち `near` に重ならない穴（遠い穴）を外した写しで `op` を行い、
+/// 遠い穴を、それを含む結果の図形へ付け直す。変わらなかった図形は元の図形に戻す。
+/// 遠い穴の行き先が決まらないときは、穴を全部渡して `op` をやり直す
+fn op_with_far_holes_detached(
+    shapes: &[FillShape],
+    near: KRect,
+    op: impl Fn(&[FillShape]) -> Vec<FillShape>,
+) -> Vec<FillShape> {
+    let mut far: Vec<(usize, Contour, KRect)> = Vec::new();
+    let trimmed: Vec<FillShape> = shapes
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let mut near_holes = Vec::with_capacity(s.holes.len());
+            for h in &s.holes {
+                let b = h.bounding_box();
+                if rects_overlap(b, near) {
+                    near_holes.push(h.clone());
+                } else {
+                    far.push((i, h.clone(), b));
+                }
+            }
+            if near_holes.len() == s.holes.len() {
+                return s.clone();
+            }
+            let mut t = FillShape::new(s.color, s.exterior.clone(), near_holes);
+            t.shape_id = s.shape_id;
+            t
+        })
+        .collect();
+    if far.is_empty() {
+        return op(shapes);
+    }
+    let mut out = op(&trimmed);
+    let mut extra: Vec<Vec<Contour>> = vec![Vec::new(); out.len()];
+    for (owner, hole, hole_box) in far {
+        if let Some(k) = out
+            .iter()
+            .position(|p| p.shape_id == shapes[owner].shape_id)
+        {
+            out[k] = shapes[owner].clone();
+            continue;
+        }
+        let candidates: Vec<usize> = (0..out.len())
+            .filter(|&k| {
+                !shapes.iter().any(|s| s.shape_id == out[k].shape_id)
+                    && out[k]
+                        .bounding_box()
+                        .inflate(1e-6, 1e-6)
+                        .contains_rect(hole_box)
+            })
+            .collect();
+        let pt = hole.segments.first().map(|seg| seg.p0);
+        let dest = match candidates.as_slice() {
+            [k] => Some(*k),
+            _ => candidates
+                .iter()
+                .copied()
+                .find(|&k| pt.is_some_and(|pt| out[k].contains_point(pt))),
+        };
+        let Some(k) = dest else {
+            return op(shapes);
+        };
+        extra[k].push(hole);
+    }
+    out.into_iter()
+        .zip(extra)
+        .map(|(piece, extra)| {
+            if extra.is_empty() {
+                return piece;
+            }
+            let mut holes = piece.holes.clone();
+            holes.extend(extra);
+            FillShape::new(piece.color, piece.exterior.clone(), holes)
+        })
+        .collect()
 }
 
 /// 消しゴムの輪郭で、指定されたアクティブレイヤー（`layer_id`）かつ同じ編集スコープ（`scope`）直下の生シェイプに対してのみ Boolean Difference を適用する
@@ -397,16 +474,16 @@ impl<'a> PreparedClip<'a> {
         }
     }
 
-    fn subtract_from_group(&self, subjs: Vec<FillShape>, color: Color32) -> Vec<FillShape> {
+    fn subtract_from_group(&self, subjs: &[FillShape], color: Color32) -> Vec<FillShape> {
         let mut active_subjs = Vec::new();
         let mut subj_polys = Vec::new();
         let mut quad_table = Vec::with_capacity(16 * subjs.len() + self.clip_quads.len());
 
         for subj in subjs {
-            let poly = flatten_shape_for_overlay(&subj, &mut quad_table);
+            let poly = flatten_shape_for_overlay(subj, &mut quad_table);
             if !poly.is_empty() {
                 subj_polys.push(poly);
-                active_subjs.push(subj);
+                active_subjs.push(subj.clone());
             }
         }
         if subj_polys.is_empty() {
