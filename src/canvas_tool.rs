@@ -780,6 +780,7 @@ mod scene_base_cache {
         }
     }
 
+    /// 表示中・ロックなしのレイヤーが `frame` で絵を持つとき、その（キーフレームの位置、評価するコマ）を返す
     fn shown_keyframe_and_eval_frame(
         layer: &Layer,
         frame: usize,
@@ -1051,6 +1052,7 @@ mod scene_base_cache {
 
     type BackdropViewKey = (u32, u32, u32);
     type CombinedBackdropMeshCache = Option<(BackdropViewKey, Option<Arc<egui::Mesh>>)>;
+    /// 親シーンの背景のレイヤー1枚分の指定 `(階層, 親のシンボル ID, 除くインスタンス, 親のワールド変換, その bits, 親のコマ, レイヤーの位置, キーフレームの位置, 評価するコマ)`
     type BackdropLayerSpec = (
         usize,
         Option<u64>,
@@ -1603,6 +1605,7 @@ pub(crate) struct Scene<'a> {
     base: &'a [FillShape],
     overlay: &'a Overlay,
     order: &'a [SceneEntry],
+    /// 上乗せが空なので、土台をそのまま読む（`order` は空）
     base_only: bool,
     overlay_only_selected: bool,
     overlay_movable_start: usize,
