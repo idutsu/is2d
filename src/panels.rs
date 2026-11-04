@@ -2164,11 +2164,7 @@ pub(crate) fn draw_recovery_modal(
         ui.label("前回、保存されないまま終了した作業があります。");
         ui.add_space(8.0);
         for item in found {
-            let raw_name = item
-                .recovery_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
+            let raw_name = crate::project_io::file_name_or(&item.recovery_path, "");
             let name = raw_name.split_once("RECOVER_").map_or(raw_name, |(_, n)| n);
             let secs = now
                 .duration_since(item.modified)

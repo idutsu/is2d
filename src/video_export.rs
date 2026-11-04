@@ -124,10 +124,7 @@ pub(crate) fn render_frame(doc: &Document, frame: usize, width: u32, height: u32
 
 /// 書き出し先 `target_path` と同じフォルダに置く一時ファイルパス（`.<名前>.<プロセスID>.mp4.tmp`）を返す
 pub(crate) fn tmp_export_path(target_path: &Path) -> PathBuf {
-    let file_name = target_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("video.mp4");
+    let file_name = crate::project_io::file_name_or(target_path, "video.mp4");
     let stem = file_name.strip_suffix(".mp4").unwrap_or(file_name);
     target_path.with_file_name(format!(".{stem}.{}.mp4.tmp", std::process::id()))
 }

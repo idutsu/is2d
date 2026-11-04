@@ -331,7 +331,7 @@ impl Is2dApp {
         path: &std::path::Path,
         outcome: video_export::VideoExportOutcome,
     ) {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("動画");
+        let name = project_io::file_name_or(path, "動画");
         match outcome {
             video_export::VideoExportOutcome::Completed => {
                 self.notify_info(format!("「{name}」を書き出しました"));

@@ -1124,6 +1124,13 @@ pub(crate) fn resolve_target_path(path: &Path) -> PathBuf {
     }
 }
 
+/// パスのファイル名を文字列で返す（取り出せなければ `fallback`）
+pub(crate) fn file_name_or<'a>(path: &'a Path, fallback: &'a str) -> &'a str {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(fallback)
+}
+
 /// 指定されたパスへ `ProjectDocument` を一時ファイル経由でアトミックに書き出し、親ディレクトリを同期する
 pub(crate) fn write_project_file_atomically(
     target_path: &Path,
@@ -1131,10 +1138,7 @@ pub(crate) fn write_project_file_atomically(
 ) -> Result<(), String> {
     let tmp_name = format!(
         ".{}.{}.tmp",
-        target_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("project.is2d"),
+        file_name_or(target_path, "project.is2d"),
         std::process::id()
     );
     let tmp_path = target_path.with_file_name(tmp_name);
@@ -1382,10 +1386,7 @@ fn save_project_and_notify(
     match save_project_to_path(ws, path) {
         Ok(fixed) => {
             update_window_title(ws, ctx);
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("ファイル");
+            let name = file_name_or(path, "ファイル");
             if fixed.is_empty() {
                 ws.notify_info(format!("「{name}」{action_desc}"));
             } else {
@@ -1408,10 +1409,7 @@ pub(crate) fn open_project_dialog(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
         return;
     };
 
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("ファイル");
+    let name = file_name_or(&path, "ファイル");
     match open_project_in_tab(ws, &path, Some(ctx)) {
         Ok(OpenProjectOutcome::Loaded) => {
             ws.notify_info(format!("「{name}」を開きました"));
