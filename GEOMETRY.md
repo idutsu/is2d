@@ -188,7 +188,7 @@ $$B_{\text{new}}(t_g) = (1-t_g)^2 P_0 + 2(1-t_g)t_g P_1' + t_g^2 P_2 = B(t_g) + 
 
 $$P_{1,i-1}' = P_{1,i-1} + \frac{1}{2}\Delta, \quad P_{1,i}' = P_{1,i} + \frac{1}{2}\Delta$$
 
-また、エッジや頂点を反対側の輪郭線を越えてドラッグ＆ドロップした際には、[`punch_through_opposite_edge`](./src/select_ops.rs) と [`resolve_deformed_shape`](./src/vector_boolean.rs) により、`OverlayFillRule::Positive`（正のワインディング領域のみの抽出）を適用して裏返り（負のワインディング領域）を自動消去し、くびれた図形を2つの独立した `FillShape` へ自然に分割します。
+また、エッジや頂点を反対側の輪郭線を越えてドラッグ＆ドロップした際には、[`punch_through_opposite_edge`](./src/select_ops.rs) と [`resolve_deformed_shape`](./src/vector_boolean.rs) により、`OverlayFillRule::Positive`（正のワインディング領域のみの抽出）を適用して裏返り（負のワインディング領域）を自動消去し、くびれた図形を2つの独立した `FillShape` へ自然に分割します。図形全体が裏返って正の領域が残らないときだけは、`OverlayFillRule::Negative` で解き直し、裏返った形のまま残します（図形が消えないように）。
 
 ### 5.3 Lyon テッセレーションと高速 Polka-Dot 選択網点メッシュ
 - **曲線テッセレーション（[`tessellate_lyon_path`](./src/vector_engine.rs)）**：

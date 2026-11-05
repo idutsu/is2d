@@ -3,7 +3,7 @@ use kurbo::{Point, Rect as KRect};
 
 use crate::canvas_tool::{
     active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, Clipboard, CoalesceKey,
-    NoticeKind, SelectDragState, SelectSubMode, Tab, Tool, ToolSettings, TransformDragState,
+    NoticeKind, SelectSubMode, Tab, Tool, ToolSettings, TransformDragState,
 };
 use crate::doc_actions::Action;
 use crate::project_io::PendingCloseConfirm;
@@ -2045,12 +2045,7 @@ fn draw_onion_skin_frame(
 }
 
 fn draw_active_marquee_box(tab: &Tab, painter: &egui::Painter) {
-    let active_marquee = match &tab.session.drag {
-        ActiveCanvasDrag::Select(SelectDragState::MarqueeSelect(m))
-        | ActiveCanvasDrag::Transform(TransformDragState::MarqueeSelect(m)) => Some(*m),
-        _ => None,
-    };
-    if let Some(m) = active_marquee {
+    if let ActiveCanvasDrag::Marquee(m) = tab.session.drag {
         let marquee_rect = tab
             .view
             .world_rect_to_screen(KRect::from_points(m.start_pos, m.current_pos));

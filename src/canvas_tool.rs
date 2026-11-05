@@ -180,8 +180,6 @@ impl HoverTarget {
 
 #[derive(Clone, Debug)]
 pub(crate) enum SelectDragState {
-    MoveShape(MoveSelectionDrag),
-    MarqueeSelect(MarqueeDrag),
     PullEdge {
         shape_id: ShapeId,
         contour_idx: usize,
@@ -297,7 +295,6 @@ pub(crate) enum TransformDragState {
         last_pivot: Point,
         changed: bool,
     },
-    Move(MoveSelectionDrag),
     Scale {
         handle: ScaleHandle,
         anchor: Point,
@@ -316,7 +313,6 @@ pub(crate) enum TransformDragState {
         current_angle: f64,
         orig_shapes: Vec<FillShape>,
     },
-    MarqueeSelect(MarqueeDrag),
 }
 
 /// キャンバス上で進行中のドラッグ操作を表す排他的状態マシン
@@ -332,6 +328,10 @@ pub(crate) enum ActiveCanvasDrag {
         tail_mesh: egui::Mesh,
         tail_start_idx: usize,
     },
+    /// 選択した図形の移動（選択ツール・自由変形ツール共通）
+    MoveSelection(MoveSelectionDrag),
+    /// 矩形選択（選択ツール・自由変形ツール共通）
+    Marquee(MarqueeDrag),
     Select(SelectDragState),
     Transform(TransformDragState),
 }
@@ -2560,8 +2560,7 @@ impl Session {
             return;
         }
         match std::mem::replace(&mut self.drag, ActiveCanvasDrag::None) {
-            ActiveCanvasDrag::Select(SelectDragState::MoveShape(drag))
-            | ActiveCanvasDrag::Transform(TransformDragState::Move(drag)) => {
+            ActiveCanvasDrag::MoveSelection(drag) => {
                 if let Some(piv) = &mut self.transform_pivot {
                     *piv -= drag.total_delta;
                 }
@@ -2580,14 +2579,9 @@ impl Session {
             ) => {
                 self.transform_pivot = had_custom_pivot.then_some(orig_pivot);
             }
-            ActiveCanvasDrag::Select(
-                SelectDragState::PullEdge { .. }
-                | SelectDragState::MoveVertex { .. }
-                | SelectDragState::MarqueeSelect(_),
-            )
-            | ActiveCanvasDrag::Transform(
-                TransformDragState::Rotate { .. } | TransformDragState::MarqueeSelect(_),
-            )
+            ActiveCanvasDrag::Select(_)
+            | ActiveCanvasDrag::Transform(TransformDragState::Rotate { .. })
+            | ActiveCanvasDrag::Marquee(_)
             | ActiveCanvasDrag::PaintStroke { .. }
             | ActiveCanvasDrag::None => {}
         }

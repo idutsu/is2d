@@ -1,12 +1,12 @@
 use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2};
-use kurbo::{ParamCurve, Point, QuadBez, Vec2 as KVec2};
+use kurbo::{ParamCurve, Point, QuadBez};
 
 use crate::canvas_tool::{
     ActiveCanvasDrag, HoverTarget, MarqueeDrag, Scene, SelectDragState, SelectSubMode, ShapeId, Tab,
 };
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
-use crate::select_ops::{apply_click_selection, finish_marquee_drag};
+use crate::select_ops::{apply_click_selection, finish_selection_drag, update_selection_drag};
 pub(crate) use crate::select_ops::{
     compute_hover_target, handle_canvas_double_click, set_moved_vertex, set_pulled_edge,
 };
@@ -146,7 +146,7 @@ pub(crate) fn handle_select_tool_input(
     }
     // アンカーの追加・削除のモードではドラッグを始めないので、どのモードでも同じ条件でよい
     let tab = host.tab_mut();
-    if !matches!(tab.session.drag, ActiveCanvasDrag::Select(_)) {
+    if matches!(tab.session.drag, ActiveCanvasDrag::None) {
         let zoom = tab.view.zoom;
         let hover = mouse_pt
             .map(|pt| compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode))
@@ -184,8 +184,7 @@ pub(crate) fn start_reshape_drag(
     let sub_mode = host.tool().select_sub_mode;
     host.tab_mut().view.inspect_timeline_frame = false;
     if shift_held {
-        host.tab_mut().session.drag =
-            ActiveCanvasDrag::Select(SelectDragState::MarqueeSelect(MarqueeDrag::new(pt, true)));
+        host.tab_mut().session.drag = ActiveCanvasDrag::Marquee(MarqueeDrag::new(pt, true));
         return;
     }
     let mut target = compute_hover_target(
@@ -202,7 +201,7 @@ pub(crate) fn start_reshape_drag(
             }
             let tab = host.tab_mut();
             let move_drag = begin_move_selection_drag(tab, pt, true);
-            tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveShape(move_drag));
+            tab.session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
             return;
         }
     }
@@ -289,17 +288,18 @@ pub(crate) fn start_reshape_drag(
             }
             let tab = host.tab_mut();
             let move_drag = begin_move_selection_drag(tab, pt, false);
-            tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveShape(move_drag));
+            tab.session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
         }
         HoverTarget::None => {
-            host.tab_mut().session.drag = ActiveCanvasDrag::Select(SelectDragState::MarqueeSelect(
-                MarqueeDrag::new(pt, false),
-            ));
+            host.tab_mut().session.drag = ActiveCanvasDrag::Marquee(MarqueeDrag::new(pt, false));
         }
     }
 }
 
 pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
+    if update_selection_drag(tab, pt) {
+        return;
+    }
     let vertex_drag_info = if let ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
         shape_id,
         contour_idx,
@@ -348,59 +348,39 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
         return;
     }
 
-    let mut move_delta: Option<KVec2> = None;
-    let mut edge_update: Option<((usize, usize), f64, QuadBez, Point)> = None;
-    if let ActiveCanvasDrag::Select(select_drag) = &mut tab.session.drag {
-        match select_drag {
-            SelectDragState::MoveShape(drag) => {
-                move_delta = Some(drag.step(pt));
-            }
-            SelectDragState::MarqueeSelect(m) => {
-                m.current_pos = pt;
-            }
-            SelectDragState::PullEdge {
-                contour_idx,
-                seg_idx,
-                grab_t,
-                grab_offset,
-                last_pos,
-                orig_seg,
-                ..
-            } => {
-                let target_pt = pt + *grab_offset;
-                *last_pos = target_pt;
-                edge_update = Some(((*contour_idx, *seg_idx), *grab_t, *orig_seg, target_pt));
-            }
-            _ => {}
-        }
-    }
+    let edge_update = if let ActiveCanvasDrag::Select(SelectDragState::PullEdge {
+        contour_idx,
+        seg_idx,
+        grab_t,
+        grab_offset,
+        last_pos,
+        orig_seg,
+        ..
+    }) = &mut tab.session.drag
+    {
+        let target_pt = pt + *grab_offset;
+        *last_pos = target_pt;
+        Some(((*contour_idx, *seg_idx), *grab_t, *orig_seg, target_pt))
+    } else {
+        None
+    };
     if let Some(((c_idx, g_idx), grab_t, orig_seg, target_pt)) = edge_update {
         if let Some((_, shape)) = tab.session.overlay.add.first_mut() {
             set_pulled_edge(shape, (c_idx, g_idx), grab_t, orig_seg, target_pt);
         }
     }
-    if let Some(delta) = move_delta {
-        tab.session.translate_move_overlay(delta);
-    }
 }
 
 pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<Point>) {
+    if finish_selection_drag(host, mouse_pt) {
+        return;
+    }
     let ActiveCanvasDrag::Select(finished_drag) =
         std::mem::replace(&mut host.tab_mut().session.drag, ActiveCanvasDrag::None)
     else {
         return;
     };
     match finished_drag {
-        SelectDragState::MoveShape(drag) => {
-            apply(
-                host,
-                Action::FinishMoveSelectionDrag {
-                    total_delta: drag.total_delta,
-                    alt_duplicate: drag.alt_duplicate,
-                },
-            );
-        }
-        SelectDragState::MarqueeSelect(m) => finish_marquee_drag(host, m, mouse_pt),
         SelectDragState::PullEdge {
             shape_id,
             contour_idx,
@@ -531,10 +511,10 @@ pub(crate) fn draw_select_tool_cursor(
             }
             draw_flash_corner_cursor_badge(painter, pos);
         }
-        ActiveCanvasDrag::Select(SelectDragState::MoveShape { .. }) => {
+        ActiveCanvasDrag::MoveSelection(_) => {
             ctx.set_cursor_icon(CursorIcon::Grabbing);
         }
-        ActiveCanvasDrag::Select(SelectDragState::MarqueeSelect { .. }) => {
+        ActiveCanvasDrag::Marquee(_) => {
             ctx.set_cursor_icon(CursorIcon::Crosshair);
         }
         _ => draw_select_sub_mode_cursor(tab, select_sub_mode, ctx, painter, pos),

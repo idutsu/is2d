@@ -209,9 +209,19 @@ impl VideoExportJob {
         }
     }
 
+    /// 書き出しに中止の合図を送る（待たない。結果は `try_take_outcome` で受け取る）
+    pub(crate) fn cancel(&self) {
+        self.cancel_flag.store(true, Ordering::Release);
+    }
+
+    /// 中止の合図を送ったか
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel_flag.load(Ordering::Acquire)
+    }
+
     /// 書き出しに中止の合図を送り、裏の処理が終わるまで待って結果を返す
     pub(crate) fn cancel_and_wait(&mut self) -> VideoExportOutcome {
-        self.cancel_flag.store(true, Ordering::Release);
+        self.cancel();
         self.wait()
     }
 }

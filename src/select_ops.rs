@@ -5,7 +5,7 @@ use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 use crate::canvas_tool::{
     cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
     editable_layer_ids, merge_floating_into_base_shapes, sync_timeline_layer_from_canvas_selection,
-    Floating, HoverTarget, LayerId, MarqueeDrag, Scene, SelectSubMode, Session, Tab,
+    ActiveCanvasDrag, Floating, HoverTarget, LayerId, Scene, SelectSubMode, Session, Tab,
 };
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
@@ -173,20 +173,39 @@ pub(crate) fn select_single_shape_at(tab: &mut Tab, sub_mode: SelectSubMode, pt:
     }
 }
 
-/// 矩形選択のドラッグ `m` を確定する（離した位置 `mouse_pt` が無ければ最後のドラッグ位置で確定する）
-pub(crate) fn finish_marquee_drag(
-    host: &mut impl ActionHost,
-    m: MarqueeDrag,
-    mouse_pt: Option<Point>,
-) {
-    apply(
-        host,
-        Action::SelectMarquee {
+/// 進行中の選択の移動・矩形選択のドラッグを `pt` へ進める（選択ツール・自由変形ツール共通）
+pub(crate) fn update_selection_drag(tab: &mut Tab, pt: Point) -> bool {
+    match &mut tab.session.drag {
+        ActiveCanvasDrag::MoveSelection(drag) => {
+            let delta = drag.step(pt);
+            tab.session.translate_move_overlay(delta);
+            true
+        }
+        ActiveCanvasDrag::Marquee(m) => {
+            m.current_pos = pt;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// 進行中の選択の移動・矩形選択のドラッグを確定する（離した位置 `mouse_pt` が無ければ最後のドラッグ位置）
+pub(crate) fn finish_selection_drag(host: &mut impl ActionHost, mouse_pt: Option<Point>) -> bool {
+    let action = match host.tab().session.drag {
+        ActiveCanvasDrag::MoveSelection(ref drag) => Action::FinishMoveSelectionDrag {
+            total_delta: drag.total_delta,
+            alt_duplicate: drag.alt_duplicate,
+        },
+        ActiveCanvasDrag::Marquee(ref m) => Action::SelectMarquee {
             p0: m.start_pos,
             p1: mouse_pt.unwrap_or(m.current_pos),
             additive: m.additive,
         },
-    );
+        _ => return false,
+    };
+    host.tab_mut().session.drag = ActiveCanvasDrag::None;
+    apply(host, action);
+    true
 }
 
 /// 矩形選択と図形の関係

@@ -5,7 +5,9 @@ use crate::canvas_tool::{ActiveCanvasDrag, MarqueeDrag, Scene, Session, Tab, Vie
 pub(crate) use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
-use crate::select_ops::{apply_click_selection, finish_marquee_drag, handle_canvas_double_click};
+use crate::select_ops::{
+    apply_click_selection, finish_selection_drag, handle_canvas_double_click, update_selection_drag,
+};
 use crate::vector_engine::{affine_rotate_around, affine_scale_around};
 
 // ============================================================================
@@ -59,7 +61,7 @@ pub(crate) fn handle_transform_tool_input(
     }
 
     let tab = host.tab_mut();
-    if !matches!(tab.session.drag, ActiveCanvasDrag::Transform(_)) {
+    if matches!(tab.session.drag, ActiveCanvasDrag::None) {
         let hover = mouse_pt
             .map(|pt| compute_transform_hover(tab.scene(), &tab.session, pt, tab.view.zoom))
             .unwrap_or(TransformHoverTarget::None);
@@ -78,9 +80,7 @@ pub(crate) fn start_transform_drag(
     let zoom = host.tab().view.zoom;
     let hover = compute_transform_hover(host.tab().scene(), &host.tab().session, pt, zoom);
     if shift_held && hover == TransformHoverTarget::None {
-        host.tab_mut().session.drag = ActiveCanvasDrag::Transform(
-            TransformDragState::MarqueeSelect(MarqueeDrag::new(pt, true)),
-        );
+        host.tab_mut().session.drag = ActiveCanvasDrag::Marquee(MarqueeDrag::new(pt, true));
         return;
     }
 
@@ -137,7 +137,7 @@ pub(crate) fn start_transform_drag(
         TransformHoverTarget::Move => {
             let tab = host.tab_mut();
             let move_drag = begin_move_selection_drag(tab, pt, alt_held);
-            tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
+            tab.session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
         }
         TransformHoverTarget::None => {
             let scene = host.tab().scene();
@@ -148,17 +148,19 @@ pub(crate) fn start_transform_drag(
                 }
                 let tab = host.tab_mut();
                 let move_drag = begin_move_selection_drag(tab, pt, alt_held);
-                tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Move(move_drag));
+                tab.session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
             } else {
-                host.tab_mut().session.drag = ActiveCanvasDrag::Transform(
-                    TransformDragState::MarqueeSelect(MarqueeDrag::new(pt, false)),
-                );
+                host.tab_mut().session.drag =
+                    ActiveCanvasDrag::Marquee(MarqueeDrag::new(pt, false));
             }
         }
     }
 }
 
 pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, alt_held: bool) {
+    if update_selection_drag(tab, pt) {
+        return;
+    }
     let mut drag_state = std::mem::take(&mut tab.session.drag);
     if let ActiveCanvasDrag::Transform(transform_drag) = &mut drag_state {
         match transform_drag {
@@ -173,10 +175,6 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                 }
                 *last_pivot = pt;
                 tab.session.transform_pivot = Some(pt);
-            }
-            TransformDragState::Move(drag) => {
-                let delta = drag.step(pt);
-                tab.session.translate_move_overlay(delta);
             }
             TransformDragState::Scale {
                 handle,
@@ -234,30 +232,21 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                     tab.session.update_transform_overlay(orig_shapes, affine);
                 }
             }
-            TransformDragState::MarqueeSelect(m) => {
-                m.current_pos = pt;
-            }
         }
     }
     tab.session.drag = drag_state;
 }
 
 pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option<Point>) {
+    if finish_selection_drag(host, mouse_pt) {
+        return;
+    }
     let ActiveCanvasDrag::Transform(finished) =
         std::mem::replace(&mut host.tab_mut().session.drag, ActiveCanvasDrag::None)
     else {
         return;
     };
     match finished {
-        TransformDragState::Move(drag) => {
-            apply(
-                host,
-                Action::FinishMoveSelectionDrag {
-                    total_delta: drag.total_delta,
-                    alt_duplicate: drag.alt_duplicate,
-                },
-            );
-        }
         TransformDragState::Scale {
             orig_pivot,
             had_custom_pivot,
@@ -293,7 +282,6 @@ pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option
                 },
             );
         }
-        TransformDragState::MarqueeSelect(m) => finish_marquee_drag(host, m, mouse_pt),
         TransformDragState::MovePivot {
             orig_pivot,
             had_custom_pivot,
@@ -422,7 +410,7 @@ pub(crate) fn draw_free_transform_box(session: &Session, painter: &egui::Painter
     }
 
     // 8個の変形ハンドル（四隅＋各辺の中央）を描画
-    let is_drag_idle = !matches!(session.drag, ActiveCanvasDrag::Transform(_));
+    let is_drag_idle = matches!(session.drag, ActiveCanvasDrag::None);
     for handle in ScaleHandle::ALL {
         let hp = view.world_to_screen(rot_affine * handle.position(base_bbox));
         let is_active = matches!(
@@ -472,9 +460,8 @@ pub(crate) fn draw_transform_tool_cursor(
     pos: Pos2,
 ) {
     match &tab.session.drag {
-        ActiveCanvasDrag::Transform(
-            TransformDragState::Move { .. } | TransformDragState::MovePivot { .. },
-        ) => {
+        ActiveCanvasDrag::MoveSelection(_)
+        | ActiveCanvasDrag::Transform(TransformDragState::MovePivot { .. }) => {
             ctx.set_cursor_icon(CursorIcon::Grabbing);
         }
         ActiveCanvasDrag::Transform(TransformDragState::Scale { handle, .. }) => {
@@ -484,7 +471,7 @@ pub(crate) fn draw_transform_tool_cursor(
             ctx.set_cursor_icon(CursorIcon::Grabbing);
             draw_transform_rotate_cursor_badge(painter, pos);
         }
-        ActiveCanvasDrag::Transform(TransformDragState::MarqueeSelect { .. }) => {
+        ActiveCanvasDrag::Marquee(_) => {
             ctx.set_cursor_icon(CursorIcon::Crosshair);
         }
         _ => match tab.session.transform_hover {

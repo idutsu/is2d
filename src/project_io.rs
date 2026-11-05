@@ -184,9 +184,7 @@ fn advance_viewport_close_confirm(
     let next_idx = (0..tab_count)
         .find(|&i| is_tab_dirty(ws, i) && !discarded_doc_ids.contains(&ws.tabs()[i].id));
     if let Some(next_idx) = next_idx {
-        if next_idx != ws.active_index() {
-            switch_to_tab(ws, next_idx, Some(ctx));
-        }
+        switch_to_tab(ws, next_idx, Some(ctx));
         *ws.pending_close_confirm_mut() = Some(PendingCloseConfirm::ViewportClose {
             orig_active,
             discarded_doc_ids,
@@ -208,7 +206,7 @@ pub(crate) fn confirm_pending_close_save(ws: &mut impl ProjectWorkspace, ctx: &e
         PendingCloseConfirm::SingleTab { orig_active } => {
             if !is_tab_dirty(ws, tab_index) {
                 close_tab_immediately(ws, tab_index, orig_active, Some(ctx));
-            } else if tab_index != orig_active && orig_active < ws.tabs().len() {
+            } else {
                 switch_to_tab(ws, orig_active, Some(ctx));
             }
         }
@@ -218,7 +216,7 @@ pub(crate) fn confirm_pending_close_save(ws: &mut impl ProjectWorkspace, ctx: &e
         } => {
             if !is_tab_dirty(ws, tab_index) {
                 advance_viewport_close_confirm(ws, orig_active, discarded_doc_ids, ctx);
-            } else if tab_index != orig_active && orig_active < ws.tabs().len() {
+            } else {
                 switch_to_tab(ws, orig_active, Some(ctx));
             }
         }
@@ -256,9 +254,7 @@ pub(crate) fn confirm_pending_close_cancel(ws: &mut impl ProjectWorkspace, ctx: 
         PendingCloseConfirm::SingleTab { orig_active }
         | PendingCloseConfirm::ViewportClose { orig_active, .. } => orig_active,
     };
-    if ws.active_index() != orig_active && orig_active < ws.tabs().len() {
-        switch_to_tab(ws, orig_active, Some(ctx));
-    }
+    switch_to_tab(ws, orig_active, Some(ctx));
 }
 
 /// 指定したインデックス `target_index` のドキュメントタブへ切り替える
@@ -292,9 +288,7 @@ pub(crate) fn close_tab(
     let orig_active = ws.active_index();
     if let Some(c) = ctx {
         if is_tab_dirty(ws, close_index) {
-            if close_index != orig_active {
-                switch_to_tab(ws, close_index, Some(c));
-            }
+            switch_to_tab(ws, close_index, Some(c));
             *ws.pending_close_confirm_mut() = Some(PendingCloseConfirm::SingleTab { orig_active });
             return;
         }
@@ -543,7 +537,7 @@ impl From<SavedFillShape> for FillShape {
             .holes
             .into_iter()
             .map(Contour::from)
-            .filter(|h| h.segments.len() >= 2 && h.signed_area().abs() > 1e-4)
+            .filter(|h| h.segments.len() >= 2 && h.signed_area().abs() > 0.0)
             .map(|mut h| {
                 if h.signed_area() > 0.0 {
                     h.reverse();
@@ -590,11 +584,12 @@ impl From<&Keyframe> for SavedKeyframe {
 
 impl From<SavedKeyframe> for Keyframe {
     fn from(s: SavedKeyframe) -> Self {
+        // 保存したとおりに読む（結合でできたごく小さな図形も残す）。外周・穴とも、線分が2本未満か面積が 0 のものだけを除く
         let mut shapes: Vec<FillShape> = s
             .shapes
             .into_iter()
             .map(FillShape::from)
-            .filter(|sh| sh.exterior.segments.len() >= 2 && sh.exterior.signed_area().abs() > 1e-4)
+            .filter(|sh| sh.exterior.segments.len() >= 2 && sh.exterior.signed_area().abs() > 0.0)
             .collect();
         shapes.shrink_to_fit();
         let mut seen_gids = HashSet::with_capacity(s.instances.len());

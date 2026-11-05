@@ -596,26 +596,13 @@ impl Layer {
             };
         }
 
-        let lid = self.id;
-        let elapsed = frame.saturating_sub(kf.start_frame);
-        let split_tween_binding = self.interpolated_tween_binding_at(frame);
-        let cloned_shapes: Vec<FillShape> = kf
-            .cel
-            .shapes
-            .iter()
-            .cloned()
-            .map(|mut s| {
-                s.layer_id = lid;
-                s
-            })
-            .collect();
-        let cloned_instances: Vec<SymbolInstance> = kf
-            .cel
-            .instances
-            .iter()
-            .cloned()
-            .map(|mut inst| {
-                inst.layer_id = lid;
+        // 図形の列は元のキーフレームと共有する（このレイヤーのセルの図形は、もともと layer_id がこのレイヤー）。
+        // 変えるのは、インスタンスの再生位置と、トゥイーンの中割りの姿勢だけ
+        let mut cel = kf.cel.clone();
+        if !cel.instances.is_empty() {
+            let elapsed = frame.saturating_sub(kf.start_frame);
+            let split_tween_binding = self.interpolated_tween_binding_at(frame);
+            for inst in cel.instances_mut() {
                 if let Some((start_b, interp_b)) = split_tween_binding {
                     if inst.binding.instance_gid == start_b.instance_gid {
                         inst.binding = interp_b;
@@ -624,10 +611,8 @@ impl Layer {
                 if inst.binding.loop_mode != SymbolLoopMode::SingleFrame {
                     inst.binding.first_frame = inst.binding.first_frame.saturating_add(elapsed);
                 }
-                inst
-            })
-            .collect();
-        let cel = Cel::new_with_instances(cloned_shapes, cloned_instances);
+            }
+        }
         let (tween, tween_rotate) = valid_tween_settings(kf.tween, kf.tween_rotate, &cel);
         Keyframe {
             start_frame,
@@ -1213,7 +1198,9 @@ impl Timeline {
                 let src_max_frame = sel.max_frame.min(src_layer.frame_count - 1);
                 let dst_max_frame = dst_sel.min_frame + (src_max_frame - sel.min_frame);
                 let mut kfs = src_layer.extract_keyframes_in_range(sel.min_frame, src_max_frame);
-                if copy_mode || actual_dl != 0 {
+                // 番号を振り直すのは、別のレイヤーへ移す・複製するときだけ。同じレイヤーの別のコマは
+                // 同時に表示されないので、F6 と同じく番号のまま置き、セルを元と共有する
+                if actual_dl != 0 {
                     remap_keyframes_group_and_instance_ids(&mut kfs, &mut alloc_group_id);
                 }
                 Some((src_l, dst_l, src_max_frame, dst_max_frame, kfs))

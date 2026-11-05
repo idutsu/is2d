@@ -2017,7 +2017,6 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
     assert!(doc_actions::set_selected_symbol_world_pivot(
         &mut app,
         Some(joint_world),
-        true
     ));
     canvas_tool::clear_selection(&mut app);
     app.session.set_selected_indices(vec![0]);
@@ -2424,9 +2423,7 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
     let clean_bbox = scene_summary(&app).shapes[0].bounding_box();
     app.session.set_selected_indices(vec![0]);
     let move_drag = clipboard_ops::begin_move_selection_drag(&mut app, Point::ZERO, false);
-    app.session.drag = crate::canvas_tool::ActiveCanvasDrag::Select(
-        crate::canvas_tool::SelectDragState::MoveShape(move_drag),
-    );
+    app.session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(move_drag);
     app.session.translate_move_overlay(KVec2::new(500.0, 500.0));
     canvas_tool::clear_selection(&mut app);
     assert_eq!(app.scene().get(0).unwrap().bounding_box(), clean_bbox);
@@ -6088,7 +6085,6 @@ fn test_pivot_commit_restores_marquee_slice_and_persists() {
     assert!(doc_actions::set_selected_symbol_world_pivot(
         &mut app,
         Some(new_world_pivot),
-        true
     ));
     assert!(app.session.floating().is_none());
     canvas_tool::clear_selection(&mut app);
@@ -6098,6 +6094,50 @@ fn test_pivot_commit_restores_marquee_slice_and_persists() {
         (saved_inst.binding.world_pivot() - new_world_pivot).hypot() < 1e-4,
         "ピボット変更後に選択解除しても stale な未スライススナップショットでピボットが上書き消失しないこと (#8)"
     );
+}
+
+#[test]
+fn test_copy_frames_within_layer_shares_cels_and_keeps_ids() {
+    use std::sync::Arc;
+
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 50, 50);
+    let blue = Color32::from_rgb(50, 120, 220);
+
+    app.doc.root.layers[0].insert_frame_at(5);
+    app.doc.root.sync_total_frames();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(Point::new(60.0, 60.0), Point::new(100.0, 60.0), 10.0, red),
+    );
+    let sel = crate::timeline::TimelineCellSelection {
+        min_layer: 0,
+        max_layer: 0,
+        min_frame: 0,
+        max_frame: 1,
+    };
+    assert!(timeline_ui::timeline_move_or_copy_frames(
+        &mut app, sel, 0, 3, true
+    ));
+
+    let cel0 = app.doc.root.layers[0].cel_at(0).unwrap();
+    let cel3 = app.doc.root.layers[0].cel_at(3).unwrap();
+    assert!(Arc::ptr_eq(&cel0.shapes, &cel3.shapes));
+    assert_eq!(cel0.shapes[0].shape_id, cel3.shapes[0].shape_id);
+
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 3);
+    assert!(doc_actions::apply(
+        &mut app,
+        doc_actions::Action::PaintStroke {
+            points: vec![Point::new(60.0, 160.0), Point::new(100.0, 160.0)],
+            radius: 6.0,
+            color: blue,
+        },
+    ));
+    assert_eq!(app.doc.root.layers[0].cel_at(0).unwrap().shapes.len(), 1);
+    assert_eq!(app.doc.root.layers[0].cel_at(3).unwrap().shapes.len(), 2);
 }
 
 #[test]
@@ -8871,8 +8911,7 @@ fn test_stage4_drag_2000_shapes_preserves_unmoved_mesh_caches() {
     let moved_shape_id = *app.session.selection.shapes.iter().next().unwrap();
 
     let move_drag = clipboard_ops::begin_move_selection_drag(&mut app, target_pt, false);
-    app.session.drag =
-        canvas_tool::ActiveCanvasDrag::Select(canvas_tool::SelectDragState::MoveShape(move_drag));
+    app.session.drag = canvas_tool::ActiveCanvasDrag::MoveSelection(move_drag);
     tool_select::update_reshape_drag(&mut app, Point::new(28.0, 22.0));
 
     // ドラッグ中（マウス移動1回目直後）に Scene から fill_mesh() を読んだとき、
@@ -11750,6 +11789,32 @@ fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
         app.session.selection.is_empty(),
         "何もない場所をクリックしたときは選択が外れること"
     );
+}
+
+#[test]
+fn test_insert_keyframe_on_held_frame_shares_shapes() {
+    use std::sync::Arc;
+
+    let mut app = Is2dApp::default();
+    app.doc.root.layers[0].insert_frame_at(5);
+    app.doc.root.sync_total_frames();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(60.0, 60.0),
+            Point::new(120.0, 60.0),
+            8.0,
+            Color32::RED,
+        ),
+    );
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 3);
+    assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
+    let kfs = &app.doc.root.layers[0].keyframes;
+    assert_eq!(kfs.len(), 2);
+    assert_eq!(kfs[1].start_frame, 3);
+    assert!(Arc::ptr_eq(&kfs[0].cel.shapes, &kfs[1].cel.shapes));
 }
 
 #[test]
@@ -20311,4 +20376,142 @@ fn test_instance_only_cel_keeps_no_spare_shape_capacity() {
     assert_eq!(cel.instances.len(), 1);
     assert_eq!(cel.shapes.len(), 0);
     assert_eq!(cel.shapes.capacity(), 0);
+}
+
+#[test]
+fn test_vertex_drag_flipping_whole_shape_keeps_shape() {
+    use crate::doc_actions::{apply, Action};
+    use crate::vector_engine::{Contour, FillShape};
+    use kurbo::QuadBez;
+
+    let make_poly = |pts: &[Point], lid: u64| -> FillShape {
+        let segs: Vec<QuadBez> = (0..pts.len())
+            .map(|i| {
+                let p0 = pts[i];
+                let p2 = pts[(i + 1) % pts.len()];
+                QuadBez::new(p0, p0.lerp(p2, 0.5), p2)
+            })
+            .collect();
+        let ext = Contour::from_segments_oriented(segs, 0.0, 0.0, true).unwrap();
+        FillShape::new(Color32::BLACK, ext, Vec::new()).with_layer_id(lid)
+    };
+
+    let square_pts = [
+        Point::new(100.0, 100.0),
+        Point::new(200.0, 100.0),
+        Point::new(200.0, 200.0),
+        Point::new(100.0, 200.0),
+    ];
+    let tri_pts = [
+        Point::new(200.0, 100.0),
+        Point::new(250.0, 200.0),
+        Point::new(150.0, 200.0),
+    ];
+
+    for (pts, from_pt, to_pt) in [
+        (
+            &square_pts[..],
+            Point::new(100.0, 100.0),
+            Point::new(230.0, 230.0),
+        ),
+        (
+            &square_pts[..],
+            Point::new(100.0, 100.0),
+            Point::new(320.0, 320.0),
+        ),
+        (
+            &tri_pts[..],
+            Point::new(200.0, 100.0),
+            Point::new(200.0, 320.0),
+        ),
+    ] {
+        let mut app = Is2dApp::default();
+        let lid = app.doc.root.layers[0].id;
+        put_cel_shapes(&mut app, 0, 0, vec![make_poly(pts, lid)]);
+        assert!(apply(
+            &mut app,
+            Action::MoveVertexFromTo {
+                from: from_pt,
+                to: to_pt,
+            },
+        ));
+        let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        assert_eq!(shapes.len(), 1);
+        assert!(shapes[0].exterior.signed_area() > 1000.0);
+    }
+
+    // 一部だけが裏返る場合：裏返っていない側（面積 1,250）だけが残ること
+    let mut app = Is2dApp::default();
+    let lid = app.doc.root.layers[0].id;
+    put_cel_shapes(&mut app, 0, 0, vec![make_poly(&square_pts, lid)]);
+    assert!(apply(
+        &mut app,
+        Action::MoveVertexFromTo {
+            from: Point::new(100.0, 100.0),
+            to: Point::new(300.0, 150.0),
+        },
+    ));
+    let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+    assert_eq!(shapes.len(), 1);
+    let area = shapes[0].exterior.signed_area();
+    assert!(
+        (area - 1250.0).abs() < 20.0,
+        "裏返っていない側の三角形（約 1,250）が残ること: {area}"
+    );
+}
+
+#[test]
+fn test_tiny_shape_survives_save_and_reopen() {
+    use crate::doc_actions::{apply, Action};
+    use crate::project_io::OpenProjectOutcome;
+    use crate::vector_engine::{Contour, FillShape};
+    use kurbo::QuadBez;
+
+    let mut app = Is2dApp::default();
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(200.0, 100.0)],
+            radius: 6.0,
+            color: Color32::RED,
+        },
+    ));
+    let lid = app.doc.root.layers[0].id;
+    let pts = [
+        Point::new(300.0, 300.0),
+        Point::new(300.02, 300.0),
+        Point::new(300.0, 300.002),
+    ];
+    let segs: Vec<QuadBez> = (0..3)
+        .map(|i| {
+            let p0 = pts[i];
+            let p2 = pts[(i + 1) % 3];
+            QuadBez::new(p0, p0.lerp(p2, 0.5), p2)
+        })
+        .collect();
+    let tiny = FillShape::new(
+        Color32::BLUE,
+        Contour::from_segments_oriented(segs, 0.0, 0.0, true).unwrap(),
+        Vec::new(),
+    )
+    .with_layer_id(lid);
+    app.doc.root.layers[0]
+        .keyframe_mut(0)
+        .cel
+        .shapes_mut()
+        .push(tiny);
+    app.refresh_scene_base();
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 2);
+
+    let dir = std::env::temp_dir().join(format!("is2d_tiny_shape_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("tiny.is2d");
+    project_io::save_project_to_path(&mut app, &path).expect("save tiny project");
+
+    let mut reopened = Is2dApp::default();
+    let outcome = project_io::open_project_in_tab(&mut reopened, &path, None).expect("reopen");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(outcome, OpenProjectOutcome::Loaded);
+    assert_eq!(reopened.doc.root.layers[0].keyframes[0].cel.shapes.len(), 2);
 }

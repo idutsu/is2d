@@ -484,10 +484,10 @@ impl<'a> InputRing<'a> {
 fn ring_matches_input(out_r: &[[f64; 2]], in_r: &[[f64; 2]]) -> bool {
     let eq_pt =
         |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() <= 1e-3 && (a[1] - b[1]).abs() <= 1e-3;
-    let is_subseq = |s: usize, rev: bool| {
+    let is_subseq = |s: usize| {
         let (n, mut j) = (in_r.len(), 0);
         out_r.iter().all(|&op| {
-            while j < n && !eq_pt(op, in_r[if rev { (s + n - j) % n } else { (s + j) % n }]) {
+            while j < n && !eq_pt(op, in_r[(s + j) % n]) {
                 j += 1;
             }
             (j < n).then(|| j += 1).is_some()
@@ -498,7 +498,7 @@ fn ring_matches_input(out_r: &[[f64; 2]], in_r: &[[f64; 2]]) -> bool {
         && in_r
             .iter()
             .position(|&p| eq_pt(p, out_r[0]))
-            .is_some_and(|s| is_subseq(s, false) || is_subseq(s, true))
+            .is_some_and(is_subseq)
 }
 
 fn take_matching_input_ring<'a>(
@@ -1118,7 +1118,8 @@ fn flatten_shape_for_overlay(shape: &FillShape, quad_table: &mut Vec<QuadRecord>
 }
 
 /// 輪郭変形（エッジつまみ変形・頂点移動）後のシェイプの自己交差・反対側輪郭の突き抜けを解消し、
-/// 正のワインディング領域（`OverlayFillRule::Positive`）のみを残して1つまたは複数の `FillShape` に分割・再構築する。
+/// 正のワインディング領域（`OverlayFillRule::Positive`）のみを残して1つまたは複数の `FillShape` に分割・再構築する
+/// （丸ごと裏返って何も残らないときだけ、負のワインディング領域を残す）
 pub(crate) fn resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape> {
     let mut quad_table: Vec<QuadRecord> = Vec::new();
     let Some(ext_ring) = flatten_contour_preserving_direction(&shape.exterior, &mut quad_table)
@@ -1134,13 +1135,13 @@ pub(crate) fn resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape> {
     }
     let min_area = adaptive_overlay_min_area(std::slice::from_ref(shape), &[]);
     let subj = [rings];
-    let overlay_result = run_float_overlay(
-        &subj,
-        &[],
-        OverlayRule::Subject,
-        OverlayFillRule::Positive,
-        min_area,
-    );
+    let run = |rule| run_float_overlay(&subj, &[], OverlayRule::Subject, rule, min_area);
+    // 図形が丸ごと裏返ると、巻き数が全部負になって何も残らない。そのときは裏返った形のまま残す
+    // （一部だけが裏返ったときは、今までどおり裏返った側が消えて図形が分かれる）
+    let mut overlay_result = run(OverlayFillRule::Positive);
+    if overlay_result.is_empty() {
+        overlay_result = run(OverlayFillRule::Negative);
+    }
     let in_groups = [(std::slice::from_ref(shape), &subj[..])];
     reconstruct_shapes_from_overlay(&overlay_result, &in_groups, &quad_table, shape.color, false)
         .into_iter()

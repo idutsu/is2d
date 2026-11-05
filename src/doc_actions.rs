@@ -579,11 +579,11 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         }
         #[cfg(test)]
         Action::SetTransformPivot { world_pivot } => {
-            apply_set_selected_symbol_world_pivot(tab, world_pivot, true)
+            apply_set_selected_symbol_world_pivot(tab, world_pivot)
         }
         Action::ResetTransformPivot => {
             let mut changed = tab.session.transform_pivot.take().is_some();
-            if apply_set_selected_symbol_world_pivot(tab, None, true) {
+            if apply_set_selected_symbol_world_pivot(tab, None) {
                 changed = true;
             }
             changed
@@ -614,7 +614,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         } => {
             tab.session.clear_overlay();
             if changed {
-                if apply_set_selected_symbol_world_pivot(tab, Some(new_pivot), true) {
+                if apply_set_selected_symbol_world_pivot(tab, Some(new_pivot)) {
                     tab.session.transform_pivot = None;
                 } else {
                     tab.session.transform_pivot = Some(new_pivot);
@@ -793,24 +793,15 @@ fn apply_raw_outline(
             return false;
         }
         clear_selection(tab);
-        let mut next_shapes: Vec<FillShape> = tab
-            .session
-            .base_cache
-            .shapes()
-            .iter()
-            .filter(|s| s.layer_id == target_lid)
-            .cloned()
-            .collect();
-        erase_from_canvas(
-            &mut next_shapes,
-            &stroke_shapes,
-            target_lid,
-            &tab.session.editing_group_path,
-        );
         // 何も消えなければ edit_layers が false を返し、apply が Undo の控えを捨てる
         push_undo(tab, None);
         edit_layers(tab, &[target_lid], |edit| {
-            edit.shapes = next_shapes;
+            erase_from_canvas(
+                &mut edit.shapes,
+                &stroke_shapes,
+                target_lid,
+                &edit.editing_group_path,
+            );
         })
     }
 }
@@ -1319,11 +1310,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
     }
 }
 
-fn apply_set_selected_symbol_world_pivot(
-    tab: &mut Tab,
-    world_pivot: Option<Point>,
-    commit_to_timeline: bool,
-) -> bool {
+fn apply_set_selected_symbol_world_pivot(tab: &mut Tab, world_pivot: Option<Point>) -> bool {
     let Some(binding) = tab
         .scene()
         .selected_single_symbol_binding(&tab.session.selection)
@@ -1342,9 +1329,8 @@ fn apply_set_selected_symbol_world_pivot(
     if (new_local_pivot - binding.pivot).hypot() <= 1e-7 {
         return true;
     }
-    if commit_to_timeline {
-        push_undo(tab, None);
-    }
+    // 変形の確定（apply_affine_to_selected_inner）から呼ぶときは、もう控えがあるので何もしない
+    push_undo(tab, None);
     let inst_gid = binding.instance_gid;
     let layer_ids = editable_layer_ids(tab);
     let mut updated = false;
@@ -1368,7 +1354,7 @@ fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     }
     push_undo(tab, None);
     if let Some(piv) = tab.session.transform_pivot {
-        if apply_set_selected_symbol_world_pivot(tab, Some(piv), false) {
+        if apply_set_selected_symbol_world_pivot(tab, Some(piv)) {
             tab.session.transform_pivot = None;
         }
     }
@@ -1935,13 +1921,8 @@ pub(crate) fn paste_clipboard(host: &mut impl ActionHost, in_place: bool) -> boo
 pub(crate) fn set_selected_symbol_world_pivot(
     host: &mut impl ActionHost,
     world_pivot: Option<Point>,
-    commit_to_timeline: bool,
 ) -> bool {
-    if commit_to_timeline {
-        apply(host, Action::SetTransformPivot { world_pivot })
-    } else {
-        apply_set_selected_symbol_world_pivot(host.tab_mut(), world_pivot, false)
-    }
+    apply(host, Action::SetTransformPivot { world_pivot })
 }
 
 #[cfg(test)]

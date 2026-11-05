@@ -343,12 +343,17 @@ impl Is2dApp {
         }
     }
 
-    /// 進行中の動画書き出しを中止し、裏の処理が終わるまで待ってからトースト通知を出す
+    /// 動画を書き出している途中か（中止の合図を送った後は、裏の処理が残っていても偽）
+    pub(crate) fn is_exporting_video(&self) -> bool {
+        self.video_export
+            .as_ref()
+            .is_some_and(|j| !j.is_cancelled())
+    }
+
+    /// 進行中の動画書き出しに中止の合図を送る（裏の処理の終わりと通知は `poll_video_export` が受け取る）
     pub(crate) fn cancel_active_video_export(&mut self) {
-        if let Some(mut job) = self.video_export.take() {
-            let path = job.target_path.clone();
-            let outcome = job.cancel_and_wait();
-            self.finish_video_export_outcome(&path, outcome);
+        if let Some(job) = &self.video_export {
+            job.cancel();
         }
     }
 
@@ -382,7 +387,7 @@ impl Is2dApp {
             }
             return;
         }
-        if self.video_export.is_some() {
+        if self.is_exporting_video() {
             match action {
                 UiAction::CancelVideoExport => self.cancel_active_video_export(),
                 UiAction::CloseActiveTab => {
@@ -433,7 +438,7 @@ impl Is2dApp {
         }
         let input = ctx.input(|i| i.clone());
         let cmd = input.modifiers.command || input.modifiers.ctrl;
-        if self.video_export.is_some() {
+        if self.is_exporting_video() {
             if cmd && key_pressed_no_repeat(&input, Key::W) {
                 self.apply_action(UiAction::CloseActiveTab, ctx);
             } else if cmd && key_pressed_no_repeat(&input, Key::Q) {
@@ -908,7 +913,7 @@ impl Is2dApp {
     }
 
     pub(crate) fn update_ui(&mut self, ctx: &egui::Context) {
-        if ctx.input(|i| i.viewport().close_requested()) && self.video_export.is_some() {
+        if ctx.input(|i| i.viewport().close_requested()) {
             self.cancel_active_video_export();
         }
         self.poll_video_export(ctx);
@@ -969,7 +974,7 @@ impl Is2dApp {
 
                 // 0. ビューポートのズーム・パン移動操作ハンドリング
                 let modal_open = self.pending_close_confirm.is_some()
-                    || self.video_export.is_some()
+                    || self.is_exporting_video()
                     || !self.recovery.found.is_empty();
                 let pan_state @ (is_panning, _) = if modal_open {
                     self.tab_mut().view.pan_last_screen_pos = None;
@@ -1028,7 +1033,10 @@ impl Is2dApp {
         );
         panels::draw_recovery_modal(&self.recovery.found, &mut actions, ctx);
         panels::draw_video_export_modal(
-            self.video_export.as_ref().map(|j| j.progress()),
+            self.video_export
+                .as_ref()
+                .filter(|j| !j.is_cancelled())
+                .map(|j| j.progress()),
             &mut actions,
             ctx,
         );
