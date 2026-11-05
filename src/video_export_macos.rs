@@ -52,10 +52,6 @@ pub(crate) fn create_macos_encoder(
     height: u32,
     fps: u32,
 ) -> Result<Box<dyn VideoEncoder>, String> {
-    if width == 0 || height == 0 || (width & 1) != 0 || (height & 1) != 0 {
-        return Err("動画の幅と高さは正の偶数である必要があります".to_owned());
-    }
-    let fps = fps.clamp(1, 60);
     let path_str = path
         .to_str()
         .ok_or_else(|| "書き出し先のパスに無効な文字が含まれています".to_owned())?;
@@ -64,7 +60,6 @@ pub(crate) fn create_macos_encoder(
             return Err("書き出し先のフォルダが存在しません".to_owned());
         }
     }
-    let _ = std::fs::remove_file(path);
 
     let url = NSURL::fileURLWithPath(&NSString::from_str(path_str));
     let bitrate = ((width as f64) * (height as f64) * (fps as f64) * 0.15).round() as u64;

@@ -5,7 +5,7 @@ use crate::canvas_tool::{ActiveCanvasDrag, MarqueeDrag, Scene, Session, Tab, Vie
 pub(crate) use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
-use crate::select_ops::{finish_marquee_drag, handle_canvas_double_click};
+use crate::select_ops::{apply_click_selection, finish_marquee_drag, handle_canvas_double_click};
 use crate::vector_engine::{affine_rotate_around, affine_scale_around};
 
 // ============================================================================
@@ -314,31 +314,12 @@ pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option
 }
 
 fn handle_transform_click(host: &mut impl ActionHost, pt: Point, shift_held: bool) {
-    let sub_mode = host.tool().select_sub_mode;
     host.tab_mut().view.inspect_timeline_frame = false;
     let zoom = host.tab().view.zoom;
-    let scene = host.tab().scene();
-    let hover = compute_transform_hover(scene, &host.tab().session, pt, zoom);
-    if !shift_held && hover == TransformHoverTarget::Pivot {
-        return;
-    }
-    let hit_opt = scene.hit_shape_or_hover_at(&host.tab().session, pt, zoom, sub_mode);
-    if shift_held {
-        if let Some(scene_idx) = hit_opt {
-            apply(host, Action::ToggleSelectionAt { scene_idx });
-        }
-    } else if let Some(hit_idx) = hit_opt {
-        if !host.tab().session.is_selected_at(hit_idx) {
-            apply(host, Action::SelectSingleAt { pt });
-        } else {
-            let unit = host
-                .tab()
-                .scene()
-                .expand_to_group_unit(hit_idx, &host.tab().session.editing_group_path);
-            apply(host, Action::RetainSelection { keep_indices: unit });
-        }
-    } else if hover == TransformHoverTarget::None {
-        apply(host, Action::Deselect);
+    let hover = compute_transform_hover(host.tab().scene(), &host.tab().session, pt, zoom);
+    // ピボットのクリックでは選択を変えない。変形枠の中の空白では選択を外さない
+    if shift_held || hover != TransformHoverTarget::Pivot {
+        apply_click_selection(host, pt, shift_held, hover == TransformHoverTarget::None);
     }
 }
 

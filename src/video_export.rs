@@ -15,7 +15,8 @@ pub(crate) trait VideoEncoder {
     fn finish(self: Box<Self>) -> Result<(), String>;
 }
 
-/// `path` に、幅 `width`・高さ `height`（どちらも偶数）・`fps` の H.264 MP4 を書き出す入口を作る
+/// `path` に、幅 `width`・高さ `height`（どちらも偶数）・`fps`（1〜60）の H.264 MP4 を書き出す入口を作る。
+/// 入力を整えて `path` を消しておくのは、呼び出し元（`run_video_export`）
 pub(crate) fn create_video_encoder(
     path: &Path,
     width: u32,

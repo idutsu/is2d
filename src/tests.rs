@@ -18598,6 +18598,72 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
 }
 
 #[test]
+fn test_island_in_far_hole_survives_union_and_erase() {
+    use crate::doc_actions::{apply, Action};
+
+    let circle_pts = |cx: f64, cy: f64, r: f64, n: usize| -> Vec<Point> {
+        (0..n)
+            .map(|i| {
+                let a = 2.0 * std::f64::consts::PI * (i as f64) / ((n - 1) as f64);
+                Point::new(cx + r * a.cos(), cy + r * a.sin())
+            })
+            .collect()
+    };
+    let hair_arc: Vec<Point> = (0..81)
+        .map(|i| {
+            let a = -std::f64::consts::PI * (i as f64) / 80.0;
+            Point::new(200.0 + 104.0 * a.cos(), 150.0 + 104.0 * a.sin())
+        })
+        .collect();
+
+    for use_erase in [false, true] {
+        let mut app = Is2dApp::default();
+        for (points, radius) in [
+            (circle_pts(200.0, 150.0, 100.0, 121), 3.0),
+            (circle_pts(240.0, 130.0, 12.0, 41), 2.0),
+            (
+                vec![Point::new(252.0, 130.0), Point::new(297.0, 130.0)],
+                2.0,
+            ),
+            (
+                vec![Point::new(240.0, 130.0), Point::new(240.1, 130.0)],
+                4.0,
+            ),
+        ] {
+            assert!(apply(
+                &mut app,
+                Action::PaintStroke {
+                    points,
+                    radius,
+                    color: Color32::BLACK,
+                },
+            ));
+        }
+        assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 2);
+
+        let action = if use_erase {
+            Action::EraseStroke {
+                points: hair_arc.clone(),
+                radius: 3.0,
+            }
+        } else {
+            Action::PaintStroke {
+                points: hair_arc.clone(),
+                radius: 3.0,
+                color: Color32::BLACK,
+            }
+        };
+        assert!(apply(&mut app, action));
+
+        let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        assert_eq!(shapes.len(), 2);
+        assert!(shapes
+            .iter()
+            .any(|s| s.contains_point(Point::new(240.0, 130.0))));
+    }
+}
+
+#[test]
 fn test_boolean_ops_with_far_holes_detached() {
     use crate::doc_actions::{apply, Action};
     use crate::vector_boolean::{boolean_operation, BoolOp};

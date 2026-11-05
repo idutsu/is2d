@@ -462,7 +462,8 @@ impl SymbolDef {
     }
 
     /// インスタンスの再生設定（ループ再生 / 1回再生 / 任意のフレーム）に基づいて、
-    /// 指定フレーム `current_frame`（開始キーフレーム `kf_start_frame`）でのローカル図形列を返す
+    /// 指定フレーム `current_frame`（開始キーフレーム `kf_start_frame`）でのローカル図形列を返す。
+    /// `ctx` は、呼び出し元が1段 `nested()` したもの
     pub(crate) fn evaluated_local_shapes_for_instance(
         &self,
         binding: SymbolInstanceBinding,
@@ -472,17 +473,16 @@ impl SymbolDef {
     ) -> Arc<Vec<FillShape>> {
         let (frame_idx, child_eval_frame) =
             self.resolve_internal_frame(binding, kf_start_frame, current_frame);
-        let eval_ctx = if ctx.depth == 0 { ctx.nested() } else { ctx };
-        let memo_key = (self.id, frame_idx, child_eval_frame, eval_ctx.depth);
-        if let Some(cached) = eval_ctx.get_memo(&memo_key) {
+        let memo_key = (self.id, frame_idx, child_eval_frame, ctx.depth);
+        if let Some(cached) = ctx.get_memo(&memo_key) {
             return cached;
         }
         let evaluated = Arc::new(self.collect_visible_local_shapes_at(
             frame_idx,
             child_eval_frame,
-            eval_ctx.clone(),
+            ctx.clone(),
         ));
-        eval_ctx.insert_memo(memo_key, Arc::clone(&evaluated));
+        ctx.insert_memo(memo_key, Arc::clone(&evaluated));
         evaluated
     }
 

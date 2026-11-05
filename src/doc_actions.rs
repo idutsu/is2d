@@ -815,7 +815,8 @@ fn apply_raw_outline(
     }
 }
 
-fn collect_all_visible_shapes(tab: &Tab) -> Vec<FillShape> {
+/// 表示中の全レイヤーの図形を、下のレイヤーから順に、ステージ座標で集める（バケツとスポイト用）
+pub(crate) fn collect_all_visible_shapes(tab: &Tab) -> Vec<FillShape> {
     let mut out = Vec::with_capacity(tab.scene().len());
     let tl = tab.active_timeline();
     let world_xform = tab.session.edit_path.world_xform();
@@ -984,9 +985,8 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
     }
 
     let wall_shapes: Vec<FillShape> = all_visible_shapes
-        .iter()
+        .into_iter()
         .filter(|s| !s.contains_point(pt))
-        .cloned()
         .collect();
     if let Some(enclosed_fill) = find_enclosed_region_at(&wall_shapes, pt, fill_color) {
         push_undo(tab, None);

@@ -132,11 +132,6 @@ pub(crate) enum UiAction {
     RestoreRecovered,
     DiscardRecovered,
 
-    // 表示・UI選択状態・複合操作
-    ResetView,
-    FitStageToWindow,
-    SelectLibrarySymbol(u64),
-
     // 文書・編集アクション（`doc_actions::apply` へそのまま渡す）
     Doc(Action),
 }
@@ -159,7 +154,7 @@ pub(crate) fn draw_top_menu_bar(
         egui::menu::bar(ui, |ui| {
             draw_file_menu(actions, ui);
             draw_edit_menu(tab, clipboard, actions, ui);
-            draw_view_menu(tab, actions, ui);
+            draw_view_menu(tab, ui);
         });
     });
 }
@@ -265,14 +260,14 @@ fn draw_edit_menu(
     });
 }
 
-fn draw_view_menu(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+fn draw_view_menu(tab: &mut Tab, ui: &mut egui::Ui) {
     ui.menu_button("表示", |ui| {
         ui.set_min_width(220.0);
         if menu_action_button(ui, true, "100%表示", &format!("{MOD_KEY}+1")) {
-            actions.push(UiAction::ResetView);
+            tab.view.reset_view();
         }
         if menu_action_button(ui, true, "ウィンドウに合わせる", &format!("{MOD_KEY}+2")) {
-            actions.push(UiAction::FitStageToWindow);
+            tab.fit_stage_to_window();
         }
 
         ui.separator();
@@ -1125,7 +1120,7 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
         ))
         .clicked()
     {
-        actions.push(UiAction::FitStageToWindow);
+        tab.fit_stage_to_window();
     }
 
     ui.add_space(6.0);
@@ -1140,7 +1135,7 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
         ))
         .clicked()
     {
-        actions.push(UiAction::ResetView);
+        tab.view.reset_view();
     }
 }
 
@@ -1603,7 +1598,7 @@ fn draw_selected_library_symbol_controls(
 }
 
 /// ライブラリ登録シンボルのスクロール一覧を描画し、選択切替・名前変更コマンドを発行する
-fn draw_library_symbol_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+fn draw_library_symbol_list(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     let entries: Vec<(u64, String, usize)> = tab
         .doc
         .library
@@ -1680,7 +1675,7 @@ fn draw_library_symbol_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egu
         });
 
     if let Some(sym_id) = select_req {
-        actions.push(UiAction::SelectLibrarySymbol(sym_id));
+        tab.view.selected_library_symbol = Some(sym_id);
     }
     if let Some((sym_id, new_name)) = rename_req {
         actions.push(UiAction::Doc(Action::RenameSymbol { sym_id, new_name }));

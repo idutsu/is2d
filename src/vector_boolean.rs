@@ -249,7 +249,7 @@ fn with_holes_kept(s: &FillShape, mut keep: impl FnMut(&Contour) -> bool) -> Fil
     t
 }
 
-/// `shapes` の穴のうち `clip` の輪郭から離れていて内側にもない穴（遠い穴）を外した写しで `op` を行い、
+/// `shapes` の穴のうち `clip` の輪郭から離れていて内側にもなく、中に `shapes` のほかの図形も無い穴（遠い穴）を外した写しで `op` を行い、
 /// 遠い穴を、それを含む結果の図形へ付け直す。変わらなかった図形は元の図形に戻す。
 /// 遠い穴の行き先が決まらないときは、穴を全部渡して `op` をやり直す
 fn op_with_far_holes_detached(
@@ -264,7 +264,13 @@ fn op_with_far_holes_detached(
         .map(|(i, s)| {
             with_holes_kept(s, |h| {
                 let b = h.bounding_box();
-                if clip.needs_hole(h, b) {
+                // 穴の中にほかの図形（目の中の瞳など）があれば渡す。外すと、その図形が穴の無い外側の図形に
+                // 吸い込まれ、穴を付け直したときに消える
+                let island_inside = shapes
+                    .iter()
+                    .enumerate()
+                    .any(|(j, o)| j != i && b.inflate(2.0, 2.0).contains_rect(o.bounding_box()));
+                if island_inside || clip.needs_hole(h, b) {
                     true
                 } else {
                     far.push((i, h.clone(), b));

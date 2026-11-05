@@ -417,15 +417,6 @@ impl Is2dApp {
                 project_io::confirm_pending_close_cancel(self, ctx)
             }
             UiAction::RestoreRecovered | UiAction::DiscardRecovered => {}
-            UiAction::ResetView => {
-                self.tab_mut().view.reset_view();
-            }
-            UiAction::FitStageToWindow => {
-                self.tab_mut().fit_stage_to_window();
-            }
-            UiAction::SelectLibrarySymbol(sym_id) => {
-                self.tab_mut().view.selected_library_symbol = Some(sym_id);
-            }
             UiAction::Doc(action) => {
                 apply(self, action);
             }
@@ -555,19 +546,10 @@ impl Is2dApp {
         } else if i.key_pressed(Key::Period) || i.key_pressed(Key::ArrowRight) {
             timeline_ui::step_frame(self, 1);
         } else if key_pressed_no_repeat(i, Key::Home) {
-            let layer_idx = self.tab().active_timeline().active_layer;
-            apply(
-                self,
-                Action::SwitchLayerAndFrame {
-                    layer_idx,
-                    frame: 0,
-                },
-            );
+            timeline_ui::go_to_frame(self, 0);
         } else if key_pressed_no_repeat(i, Key::End) {
-            let tl = self.tab().active_timeline();
-            let frame = tl.total_frames.saturating_sub(1);
-            let layer_idx = tl.active_layer;
-            apply(self, Action::SwitchLayerAndFrame { layer_idx, frame });
+            let last = self.tab().active_timeline().total_frames.saturating_sub(1);
+            timeline_ui::go_to_frame(self, last);
         } else if i.key_pressed(Key::F6) {
             if shift {
                 apply(self, Action::DeleteKeyframe);

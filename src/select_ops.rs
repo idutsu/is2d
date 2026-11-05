@@ -93,6 +93,40 @@ pub(crate) fn handle_canvas_double_click(host: &mut impl ActionHost, pt: Point) 
     }
 }
 
+/// クリックした点 `pt` の図形に応じて選択を切り替える（選択ツール・自由変形ツール共通）
+pub(crate) fn apply_click_selection(
+    host: &mut impl ActionHost,
+    pt: Point,
+    shift_held: bool,
+    deselect_on_miss: bool,
+) {
+    let sub_mode = host.tool().select_sub_mode;
+    let zoom = host.tab().view.zoom;
+    let hit_shape =
+        host.tab()
+            .scene()
+            .hit_shape_or_hover_at(&host.tab().session, pt, zoom, sub_mode);
+    match hit_shape {
+        Some(scene_idx) if shift_held => {
+            apply(host, Action::ToggleSelectionAt { scene_idx });
+        }
+        Some(scene_idx) if host.tab().session.is_selected_at(scene_idx) => {
+            let unit = host
+                .tab()
+                .scene()
+                .expand_to_group_unit(scene_idx, &host.tab().session.editing_group_path);
+            apply(host, Action::RetainSelection { keep_indices: unit });
+        }
+        Some(_) => {
+            apply(host, Action::SelectSingleAt { pt });
+        }
+        None if !shift_held && deselect_on_miss => {
+            apply(host, Action::Deselect);
+        }
+        None => {}
+    }
+}
+
 /// Shift クリック等で指定シェイプ（またはグループ塊全体）の選択状態をトグルし、変形ピボットをリセットする
 pub(crate) fn toggle_shape_selection(tab: &mut Tab, scene_idx: usize) {
     tab.history.end_coalesce();

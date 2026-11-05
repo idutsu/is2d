@@ -2,7 +2,7 @@ use eframe::egui::{self, Color32, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::Point;
 
 use crate::canvas_tool::{ActiveCanvasDrag, Tab, Tool};
-use crate::doc_actions::{apply, Action, ActionHost};
+use crate::doc_actions::{apply, collect_all_visible_shapes, Action, ActionHost};
 use crate::vector_engine::{
     append_mesh, tessellate_raw_polygon, transform_mesh_to_screen, MAX_VIEW_ZOOM, MIN_VIEW_ZOOM,
 };
@@ -119,39 +119,11 @@ pub(crate) fn handle_brush_or_eraser_input(
 
 /// 編集スコープおよび表示中の全レイヤーを対象に、指定座標 `pt` にヒットする最前面シェイプの色を返す（スポイト用）
 pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> {
-    let scene = tab.scene();
-    let tl = tab.active_timeline();
-    let num_layers = tl.layers.len();
-    for layer_idx in (0..num_layers).rev() {
-        let layer = &tl.layers[layer_idx];
-        if !layer.visible {
-            continue;
-        }
-        if layer.locked {
-            let world_xform = tab.session.edit_path.world_xform();
-            let local_pt = if world_xform == kurbo::Affine::IDENTITY {
-                pt
-            } else if world_xform.determinant().abs() > 1e-9 {
-                world_xform.inverse() * pt
-            } else {
-                continue;
-            };
-            let shapes = tl.evaluate_layer_shapes_at(layer_idx, tl.current_frame, &tab.doc.library);
-            if let Some(hit) = shapes.iter().rev().find(|s| s.contains_point(local_pt)) {
-                return Some(hit.color);
-            }
-        } else {
-            let lid = layer.id;
-            if let Some(hit) = scene
-                .iter()
-                .rev()
-                .find(|s| s.layer_id == lid && s.contains_point(pt))
-            {
-                return Some(hit.color);
-            }
-        }
-    }
-    None
+    collect_all_visible_shapes(tab)
+        .iter()
+        .rev()
+        .find(|s| s.contains_point(pt))
+        .map(|s| s.color)
 }
 
 /// スポイトツール（色抽出）：指定位置 `pt` の最前面シェイプの色を抽出し、`host.tool_mut().brush_color` に設定する

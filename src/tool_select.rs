@@ -6,7 +6,7 @@ use crate::canvas_tool::{
 };
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
-use crate::select_ops::finish_marquee_drag;
+use crate::select_ops::{apply_click_selection, finish_marquee_drag};
 pub(crate) use crate::select_ops::{
     compute_hover_target, handle_canvas_double_click, set_moved_vertex, set_pulled_edge,
 };
@@ -138,7 +138,8 @@ pub(crate) fn handle_select_tool_input(
                 finish_reshape_drag(host, mouse_pt);
             } else if response.clicked_by(PointerButton::Primary) {
                 if let Some(pt) = mouse_pt {
-                    handle_reshape_click(host, pt, shift_held);
+                    host.tab_mut().view.inspect_timeline_frame = false;
+                    apply_click_selection(host, pt, shift_held, true);
                 }
             }
         }
@@ -444,35 +445,6 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
                     orig_ctrls: (orig_prev_ctrl, orig_curr_ctrl),
                 },
             );
-        }
-    }
-}
-
-fn handle_reshape_click(host: &mut impl ActionHost, pt: Point, shift_held: bool) {
-    let sub_mode = host.tool().select_sub_mode;
-    host.tab_mut().view.inspect_timeline_frame = false;
-    let zoom = host.tab().view.zoom;
-    let scene = host.tab().scene();
-    let hit_shape = scene.hit_shape_or_hover_at(&host.tab().session, pt, zoom, sub_mode);
-    if shift_held {
-        if let Some(scene_idx) = hit_shape {
-            apply(host, Action::ToggleSelectionAt { scene_idx });
-        }
-    } else {
-        match hit_shape {
-            Some(scene_idx) if host.tab().session.is_selected_at(scene_idx) => {
-                let unit = host
-                    .tab()
-                    .scene()
-                    .expand_to_group_unit(scene_idx, &host.tab().session.editing_group_path);
-                apply(host, Action::RetainSelection { keep_indices: unit });
-            }
-            Some(_) => {
-                apply(host, Action::SelectSingleAt { pt });
-            }
-            None => {
-                apply(host, Action::Deselect);
-            }
         }
     }
 }

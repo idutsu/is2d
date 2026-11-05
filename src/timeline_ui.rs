@@ -520,14 +520,7 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
         .on_hover_text("最初のフレームへ (Home)")
         .clicked()
     {
-        let act = host.tab().active_timeline().active_layer;
-        apply(
-            host,
-            Action::SwitchLayerAndFrame {
-                layer_idx: act,
-                frame: 0,
-            },
-        );
+        go_to_frame(host, 0);
     }
     if ui
         .button(icons::STEP_PREV)
@@ -561,16 +554,8 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
         .on_hover_text("最後のフレームへ (End)")
         .clicked()
     {
-        let tl = host.tab().active_timeline();
-        let last = tl.total_frames.saturating_sub(1);
-        let act = tl.active_layer;
-        apply(
-            host,
-            Action::SwitchLayerAndFrame {
-                layer_idx: act,
-                frame: last,
-            },
-        );
+        let last = host.tab().active_timeline().total_frames.saturating_sub(1);
+        go_to_frame(host, last);
     }
     let loop_pb = host.timeline_ui().loop_playback;
     if ui
@@ -1968,23 +1953,20 @@ fn draw_timeline_scrollbars(
 
 /// 前後のフレームへコマ送り移動する（`,` / `.` キーやボタン操作）
 pub(crate) fn step_frame(host: &mut impl TimelineHost, delta: isize) {
-    let (active_layer, next) = {
-        let tl = host.tab().active_timeline();
-        let total = tl.total_frames.max(1) as isize;
-        let next = if host.timeline_ui().loop_playback {
-            (tl.current_frame as isize + delta).rem_euclid(total) as usize
-        } else {
-            (tl.current_frame as isize + delta).clamp(0, total - 1) as usize
-        };
-        (tl.active_layer, next)
+    let tl = host.tab().active_timeline();
+    let total = tl.total_frames.max(1) as isize;
+    let next = if host.timeline_ui().loop_playback {
+        (tl.current_frame as isize + delta).rem_euclid(total) as usize
+    } else {
+        (tl.current_frame as isize + delta).clamp(0, total - 1) as usize
     };
-    apply(
-        host,
-        Action::SwitchLayerAndFrame {
-            layer_idx: active_layer,
-            frame: next,
-        },
-    );
+    go_to_frame(host, next);
+}
+
+/// 今のレイヤーのまま、コマ `frame` へ移る（コマ送り・Home / End キー・コントロールバーのボタン）
+pub(crate) fn go_to_frame(host: &mut impl TimelineHost, frame: usize) {
+    let layer_idx = host.tab().active_timeline().active_layer;
+    apply(host, Action::SwitchLayerAndFrame { layer_idx, frame });
 }
 
 /// 再生 / 一時停止を切り替える（`Enter` キーまたは Play ボタン）
