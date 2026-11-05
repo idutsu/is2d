@@ -374,7 +374,7 @@ impl Is2dApp {
             match action {
                 UiAction::RestoreRecovered => {
                     let mut recovery = std::mem::take(&mut self.recovery);
-                    recovery.restore_found(self, Some(ctx));
+                    recovery.restore_found(self);
                     self.recovery = recovery;
                 }
                 UiAction::DiscardRecovered => self.recovery.discard_found(),
@@ -400,8 +400,8 @@ impl Is2dApp {
         match action {
             UiAction::NewProject => project_io::new_project(self, ctx),
             UiAction::OpenProjectDialog => project_io::open_project_dialog(self, ctx),
-            UiAction::SaveProject => project_io::save_project(self, ctx),
-            UiAction::SaveProjectAsDialog => project_io::save_project_as_dialog(self, ctx),
+            UiAction::SaveProject => project_io::save_project(self),
+            UiAction::SaveProjectAsDialog => project_io::save_project_as_dialog(self),
             UiAction::ExportVideoDialog => self.export_video_dialog(),
             UiAction::CancelVideoExport => self.cancel_active_video_export(),
             UiAction::CloseActiveTab => project_io::close_active_tab(self, Some(ctx)),
@@ -458,9 +458,9 @@ impl Is2dApp {
             return;
         } else if cmd && key_pressed_no_repeat(&input, Key::S) {
             if input.modifiers.shift {
-                project_io::save_project_as_dialog(self, ctx);
+                project_io::save_project_as_dialog(self);
             } else {
-                project_io::save_project(self, ctx);
+                project_io::save_project(self);
             }
             return;
         } else if cmd && key_pressed_no_repeat(&input, Key::W) {
@@ -963,7 +963,6 @@ impl Is2dApp {
 
         timeline_ui::draw_timeline_panel(self, ctx);
 
-        project_io::update_window_title(self, ctx);
         panels::draw_document_tab_bar(&self.tabs, self.active, &mut actions, ctx);
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
@@ -1054,6 +1053,8 @@ impl Is2dApp {
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
         }
+        // そのフレームの操作をすべて適用した後の状態からウィンドウタイトルを更新する
+        project_io::update_window_title(self, ctx);
     }
 }
 

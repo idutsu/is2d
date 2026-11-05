@@ -897,9 +897,11 @@ fn test_group_selection_bucket_protection_and_non_destructive_overlap() {
 
     // 1つクリックするだけでグループ全体の2シェイプが同時選択されること
     canvas_tool::clear_selection(&mut app);
-    assert!(tool_select::select_single_shape_at(
+    assert!(doc_actions::apply(
         &mut app,
-        Point::new(100.0, 100.0)
+        doc_actions::Action::SelectSingleAt {
+            pt: Point::new(100.0, 100.0),
+        }
     ));
     assert_eq!(app.session.selected_indices().len(), 2);
 
@@ -1434,9 +1436,11 @@ fn test_timeline_cell_selection_sync_with_canvas_selection() {
 
     canvas_tool::clear_selection(&mut app);
     timeline_ui::scrub_ruler_to_frame(&mut app, 0);
-    assert!(tool_select::select_single_shape_at(
+    assert!(doc_actions::apply(
         &mut app,
-        Point::new(160.0, 60.0)
+        doc_actions::Action::SelectSingleAt {
+            pt: Point::new(160.0, 60.0),
+        }
     ));
     assert_eq!(app.doc.root.active_layer, 1);
     assert_eq!(
@@ -1594,9 +1598,12 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
         HoverTarget::Edge { shape_id, .. } | HoverTarget::Vertex { shape_id, .. } if shape_id == s0_id
     ));
 
-    // 2. 細い線の境界線や頂点の上でクリック（select_single_shape_at）した際にも、確実に選択状態になること
+    // 2. 細い線の境界線や頂点の上でクリック（SelectSingleAt）した際にも、確実に選択状態になること
     assert!(
-        tool_select::select_single_shape_at(&mut app, vertex_pt),
+        doc_actions::apply(
+            &mut app,
+            doc_actions::Action::SelectSingleAt { pt: vertex_pt },
+        ),
         "頂点や境界線上をクリックしてもシェイプが選択状態になること"
     );
     assert_eq!(app.session.selected_indices(), vec![0]);
@@ -2043,7 +2050,12 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
 
     timeline_ui::select_timeline_cells(&mut app, 0, 0, 0, 0);
     assert!(app.view.inspect_timeline_frame);
-    tool_select::select_single_shape_at(&mut app, Point::new(150.0, 150.0));
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SelectSingleAt {
+            pt: Point::new(150.0, 150.0),
+        },
+    );
     assert!(!app.view.inspect_timeline_frame);
 
     timeline_ui::select_timeline_cells(&mut app, 0, 0, 0, 0);
@@ -2627,16 +2639,8 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     sym_app.redo();
     assert_eq!(sym_app.doc.stage_size, Vec2::new(1920.0, 1080.0));
 
-    let sel_m1 = sym_app
-        .scene()
-        .get(0)
-        .unwrap()
-        .cached_selection_screen_mesh(1.25, Vec2::new(12.0, -8.0));
-    let sel_m2 = sym_app
-        .scene()
-        .get(0)
-        .unwrap()
-        .cached_selection_screen_mesh(1.25, Vec2::new(12.0, -8.0));
+    let sel_m1 = sym_app.scene().get(0).unwrap().selection_overlay_mesh(1.25);
+    let sel_m2 = sym_app.scene().get(0).unwrap().selection_overlay_mesh(1.25);
     assert!(std::sync::Arc::ptr_eq(&sel_m1, &sel_m2));
     let orig1 = sym_app.doc.library[0]
         .preview_local_bounds(sym_app.doc.revision, &sym_app.doc.library)
@@ -3012,7 +3016,7 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
         1,
         "Frame 1 に進むと配置したシンボルの2コマ目の図形がステージ中央に出現すること"
     );
-    let stage_center = grp_sym_app.view.stage_center_world();
+    let stage_center = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
     assert!(scene_summary(&grp_sym_app).shapes[0].contains_point(stage_center));
 
     // シンボルを含むセルのスクリーンメッシュおよびオニオンスキンメッシュはその場で構築され、pan 変化も正確に反映されること
@@ -5549,7 +5553,7 @@ fn test_egui_select_and_transform_tool_raw_input_interactions() {
     );
 
     // ステージ中央にシェイプを配置
-    let center_world = app.view.stage_center_world();
+    let center_world = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
     put_cel_shapes(
         &mut app,
         0,
@@ -10633,7 +10637,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
         .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
         .unwrap();
     for s in app.scene().iter() {
-        let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
+        let _ = s.screen_mesh(1.0, Vec2::ZERO, false);
     }
     let play_step_elapsed = t_play.elapsed();
     assert!(
@@ -10660,7 +10664,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
         .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
         .unwrap();
     for s in app.scene().iter() {
-        let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
+        let _ = s.screen_mesh(1.0, Vec2::ZERO, false);
     }
     let draw_and_render_elapsed = t_draw.elapsed();
     assert!(
@@ -12637,20 +12641,20 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     assert_eq!(app.scene().len(), 1);
     let shape1_id = app.scene().get(0).unwrap().shape_id;
 
-    // ステージ側（SceneBaseCache）の図形1に fill_mesh, hit_bez_path, screen_mesh_cache, selection_mesh, selection_screen_mesh をすべて生成させる
+    // ステージ側（SceneBaseCache）の図形1に fill_mesh, hit_bez_path, selection_mesh をすべて生成させる
     {
         let stage_s1 = app.scene().get(0).unwrap();
         let _ = stage_s1.fill_mesh();
         assert!(stage_s1.contains_point(Point::new(140.0, 100.0)));
-        let _ = stage_s1.cached_screen_mesh(1.0, Vec2::ZERO, false);
-        let _ = stage_s1.cached_selection_screen_mesh(1.0, Vec2::ZERO);
+        let _ = stage_s1.screen_mesh(1.0, Vec2::ZERO, false);
+        let _ = stage_s1.selection_screen_mesh(1.0, Vec2::ZERO);
         assert!(stage_s1.has_cached_fill_mesh());
         assert!(stage_s1.has_cached_hit_bez_path());
-        assert!(stage_s1.has_any_screen_cache());
+        assert!(stage_s1.has_cached_selection_mesh());
     }
 
     // 2. 離れた位置に図形2を描画して書き戻し（edit_layers）を発生させる
-    //    未変更の図形1（kept パス）も含め、文書側の図形には fill_mesh も hit_bez_path も画面用キャッシュも引き継がれないこと
+    //    未変更の図形1（kept パス）も含め、文書側の図形には fill_mesh も hit_bez_path も選択表示用メッシュも引き継がれないこと
     let _ = apply(
         &mut app,
         Action::PaintStroke {
@@ -12681,17 +12685,17 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     );
     for s in doc_shapes.iter() {
         assert!(
-            !s.has_any_screen_cache(),
-            "書き戻し後、文書側の図形は screen_mesh_cache や選択表示用メッシュを持たないこと"
+            !s.has_cached_selection_mesh(),
+            "書き戻し後、文書側の図形は選択表示用メッシュを持たないこと"
         );
     }
 
-    // 3. 図形をグループ化して選択表示・移動（変更図形の local_s 書き戻しパス）を行ったあとも、文書側の図形が画面用キャッシュを持たないこと
+    // 3. 図形をグループ化して選択表示・移動（変更図形の local_s 書き戻しパス）を行ったあとも、文書側の図形が選択表示用メッシュを持たないこと
     app.refresh_scene_base();
     for s in app.scene().iter() {
-        let _ = s.cached_screen_mesh(1.25, Vec2::new(10.0, 20.0), false);
-        let _ = s.cached_selection_screen_mesh(1.25, Vec2::new(10.0, 20.0));
-        assert!(s.has_any_screen_cache());
+        let _ = s.screen_mesh(1.25, Vec2::new(10.0, 20.0), false);
+        let _ = s.selection_screen_mesh(1.25, Vec2::new(10.0, 20.0));
+        assert!(s.has_cached_selection_mesh());
     }
     let all_ids: Vec<_> = app.scene().iter().cloned().collect();
     for s in &all_ids {
@@ -12699,8 +12703,8 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     }
     let _ = apply(&mut app, Action::Group);
     for s in app.scene().iter() {
-        let _ = s.cached_screen_mesh(1.25, Vec2::new(10.0, 20.0), false);
-        let _ = s.cached_selection_screen_mesh(1.25, Vec2::new(10.0, 20.0));
+        let _ = s.screen_mesh(1.25, Vec2::new(10.0, 20.0), false);
+        let _ = s.selection_screen_mesh(1.25, Vec2::new(10.0, 20.0));
     }
     let _ = apply(
         &mut app,
@@ -12710,15 +12714,15 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     );
     for s in app.doc.root.layers[0].keyframes[0].cel.shapes.iter() {
         assert!(
-            !s.has_any_screen_cache(),
-            "グループ移動後の書き戻しでも、文書側の図形が画面用キャッシュを持たないこと"
+            !s.has_cached_selection_mesh(),
+            "グループ移動後の書き戻しでも、文書側の図形が選択表示用メッシュを持たないこと"
         );
     }
 
-    // 4. シンボル変換後も、シンボル定義内の文書図形が画面用キャッシュを持たないこと
+    // 4. シンボル変換後も、シンボル定義内の文書図形が選択表示用メッシュを持たないこと
     for s in app.scene().iter() {
-        let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
-        let _ = s.cached_selection_screen_mesh(1.0, Vec2::ZERO);
+        let _ = s.screen_mesh(1.0, Vec2::ZERO, false);
+        let _ = s.selection_screen_mesh(1.0, Vec2::ZERO);
     }
     let _ = apply(&mut app, Action::ConvertToSymbol);
     assert_eq!(app.doc.library.len(), 1);
@@ -12728,8 +12732,8 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
         .iter()
     {
         assert!(
-            !s.has_any_screen_cache(),
-            "シンボル定義内の文書図形も画面用キャッシュを持たないこと"
+            !s.has_cached_selection_mesh(),
+            "シンボル定義内の文書図形も選択表示用メッシュを持たないこと"
         );
     }
 }
@@ -13575,7 +13579,7 @@ fn test_m2_8_document_shapes_never_store_fill_mesh_after_playback_onion_edit_and
         let bb = s.bounding_box();
         let center = Point::new((bb.x0 + bb.x1) * 0.5, (bb.y0 + bb.y1) * 0.5);
         let _ = s.contains_point(center);
-        let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
+        let _ = s.screen_mesh(1.0, Vec2::ZERO, false);
     }
     let _ = apply(&mut app, Action::SelectAll);
     let _ = apply(
@@ -13680,7 +13684,7 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
         },
     );
     for s in app_brush.scene().iter() {
-        let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
+        let _ = s.screen_mesh(1.0, Vec2::ZERO, false);
     }
     let brush_800_ms = t_b.elapsed().as_secs_f64() * 1000.0;
 
@@ -13696,7 +13700,7 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
         },
     );
     for s in app_erase.scene().iter() {
-        let _ = s.cached_screen_mesh(1.0, Vec2::ZERO, false);
+        let _ = s.screen_mesh(1.0, Vec2::ZERO, false);
     }
     let erase_800_ms = t_e.elapsed().as_secs_f64() * 1000.0;
     println!("[M2-10] 800-point spiral brush = {brush_800_ms:.2} ms, erase = {erase_800_ms:.2} ms");
@@ -15321,7 +15325,7 @@ fn test_m5_1_n3002_f7_on_empty_frame_preserves_redo_and_clean_state() {
     use crate::doc_actions::{apply, Action};
 
     let mut app = Is2dApp::default();
-    let c = app.tab().stage_center_world();
+    let c = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
     assert!(apply(
         &mut app,
         Action::PaintStroke {
@@ -15358,7 +15362,7 @@ fn test_m5_1_f7_twice_on_drawn_frame_second_is_noop() {
     use crate::doc_actions::{apply, Action};
 
     let mut app = Is2dApp::default();
-    let c = app.tab().stage_center_world();
+    let c = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
     assert!(apply(
         &mut app,
         Action::PaintStroke {
@@ -15391,7 +15395,7 @@ fn test_m5_1_n3001_f8_nest_limit_preserves_redo_and_oldest_undo() {
     use crate::doc_actions::{apply, Action};
 
     let mut app = Is2dApp::default();
-    let c = app.tab().stage_center_world();
+    let c = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
     assert!(apply(
         &mut app,
         Action::PaintStroke {
@@ -15458,7 +15462,7 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
     use kurbo::QuadBez;
 
     let mut app = Is2dApp::default();
-    let c = app.tab().stage_center_world();
+    let c = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
     let dummy_seg = QuadBez::new(c, Point::new(c.x + 20.0, c.y), Point::new(c.x + 40.0, c.y));
 
     // 図形が存在しない状態で ReshapeEdge / MoveVertex を呼んでも Undo や未保存マークが増えないこと
@@ -15578,7 +15582,7 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
     ] {
         let mut rng = Rng(seed);
         let mut app = Is2dApp::default();
-        let c = app.tab().stage_center_world();
+        let c = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
 
         for step in 0..1050 {
             let op_idx = rng.range(26);
@@ -19998,4 +20002,109 @@ fn test_merging_floating_pieces_layer_by_layer_matches_merging_all_at_once() {
     };
 
     assert_eq!(summarize(&layer_by_layer), summarize(&all_at_once));
+}
+
+fn blob_with_small_hole_and_wavy_stroke(color: Color32) -> (Vec<FillShape>, Vec<FillShape>) {
+    let mut canvas = Vec::new();
+    let base_raw =
+        generate_brush_outline(&[Point::new(-250.0, 0.0), Point::new(250.0, 0.0)], 120.0);
+    let base_shapes = build_smoothed_stroke_shapes(&base_raw, Color32::BLACK);
+    merge_shapes_into_canvas(&mut canvas, base_shapes);
+
+    let hole_raw = generate_brush_outline(&[Point::new(-1.0, 0.0), Point::new(1.0, 0.0)], 4.0);
+    let hole_shapes = build_smoothed_stroke_shapes(&hole_raw, Color32::BLACK);
+    vector_boolean::erase_from_canvas(&mut canvas, &hole_shapes, 1, &[]);
+    assert_eq!(canvas.len(), 1);
+    assert_eq!(canvas[0].holes.len(), 1);
+    assert!(!canvas[0].contains_point(Point::ZERO));
+
+    let wavy_pts: Vec<Point> = (-400..=400)
+        .map(|i| {
+            let x = i as f64 * 0.5;
+            Point::new(x, 6.0 * (x / 6.0).sin())
+        })
+        .collect();
+    let wavy_raw = generate_brush_outline(&wavy_pts, 30.0);
+    let wavy_shapes = build_smoothed_stroke_shapes(&wavy_raw, color);
+    (canvas, wavy_shapes)
+}
+
+#[test]
+fn test_thick_stroke_covering_small_hole_fills_it() {
+    let (mut canvas, wavy_shapes) = blob_with_small_hole_and_wavy_stroke(Color32::BLACK);
+    merge_shapes_into_canvas(&mut canvas, wavy_shapes);
+    assert!(canvas.iter().any(|s| s.contains_point(Point::ZERO)));
+    assert_eq!(canvas.iter().map(|s| s.holes.len()).sum::<usize>(), 0);
+}
+
+#[test]
+fn test_thick_other_color_stroke_covering_small_hole_leaves_no_island() {
+    let red = Color32::from_rgb(220, 60, 60);
+    let (mut canvas, wavy_shapes) = blob_with_small_hole_and_wavy_stroke(red);
+    merge_shapes_into_canvas(&mut canvas, wavy_shapes);
+    assert_eq!(
+        canvas
+            .iter()
+            .filter(|s| s.color == Color32::BLACK && s.contains_point(Point::ZERO))
+            .count(),
+        0
+    );
+    assert_eq!(
+        canvas
+            .iter()
+            .filter(|s| s.color == red && s.contains_point(Point::ZERO))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn test_thick_eraser_covering_small_hole_leaves_no_island() {
+    let (mut canvas, wavy_shapes) = blob_with_small_hole_and_wavy_stroke(Color32::BLACK);
+    vector_boolean::erase_from_canvas(&mut canvas, &wavy_shapes, 1, &[]);
+    assert!(!canvas.iter().any(|s| s.contains_point(Point::ZERO)));
+    assert!(!canvas
+        .iter()
+        .any(|s| s.contains_point(Point::new(20.0, 10.0))));
+    assert!(canvas
+        .iter()
+        .any(|s| s.contains_point(Point::new(0.0, 80.0))));
+}
+
+#[test]
+fn test_bucket_in_grid_line_art_fills_only_that_cell() {
+    let n = 21;
+    let step = 15.0;
+    let span = (n - 1) as f64 * step;
+    let mut strokes = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        let pos = i as f64 * step;
+        let h_pts: Vec<Point> = (0..=60)
+            .map(|k| Point::new(span * (k as f64 / 60.0), pos))
+            .collect();
+        let h_raw = generate_brush_outline(&h_pts, 1.5);
+        strokes.extend(build_smoothed_stroke_shapes(&h_raw, Color32::BLACK));
+
+        let v_pts: Vec<Point> = (0..=60)
+            .map(|k| Point::new(pos, span * (k as f64 / 60.0)))
+            .collect();
+        let v_raw = generate_brush_outline(&v_pts, 1.5);
+        strokes.extend(build_smoothed_stroke_shapes(&v_raw, Color32::BLACK));
+    }
+    let mut canvas = Vec::new();
+    merge_shapes_into_canvas(&mut canvas, strokes);
+    assert_eq!(canvas.len(), 1);
+    assert_eq!(canvas[0].holes.len(), 400);
+
+    let fill_col = Color32::from_rgb(80, 180, 240);
+    for (cx, cy) in [(0, 0), (5, 7), (19, 19), (10, 3)] {
+        let center = Point::new((cx as f64 + 0.5) * step, (cy as f64 + 0.5) * step);
+        let filled = vector_boolean::find_enclosed_region_at(&canvas, center, fill_col)
+            .expect("格子のマスの中央で閉領域が見つかること");
+        assert!(filled.contains_point(center));
+        for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+            let neighbor = Point::new(center.x + dx * step, center.y + dy * step);
+            assert!(!filled.contains_point(neighbor));
+        }
+    }
 }

@@ -4,7 +4,8 @@ use i_overlay::{
     float::{filter::ContourFilter, overlay::FloatOverlay},
 };
 use kurbo::{
-    ParamCurve, ParamCurveArclen, ParamCurveDeriv, ParamCurveNearest, Point, QuadBez, Rect as KRect,
+    BezPath, ParamCurve, ParamCurveArclen, ParamCurveDeriv, ParamCurveNearest, Point, QuadBez,
+    Rect as KRect, Shape as KurboShape,
 };
 
 use crate::{
@@ -108,17 +109,15 @@ fn raw_scope_insert_index(
 }
 
 /// `canvas` の、レイヤー `layer_id`・階層 `scope` の置き場（`raw_scope_insert_index`）より前にある生の図形のうち、
-/// 色が `color_pred` に合い `clip_shapes` に触れるものを取り出す。
+/// 色が `color_pred` に合い `clip` に触れるものを取り出す。
 /// 返り値は（取り出した図形、置き場より後ろの図形）で、`canvas` には触れない図形だけが元の順で残る
 fn take_interacting_raw_shapes(
     canvas: &mut Vec<FillShape>,
-    clip_shapes: &[FillShape],
-    test_bbox: KRect,
+    clip: &ClipOutline,
     layer_id: u64,
     scope: &[u64],
     color_pred: impl Fn(Color32) -> bool,
 ) -> (Vec<FillShape>, Vec<FillShape>) {
-    let clip_sub_bboxes = collect_sub_bboxes(clip_shapes, 1.5);
     let insert_limit = raw_scope_insert_index(canvas, layer_id, scope);
     let trailing_outside = canvas.split_off(insert_limit);
     let (hits, kept): (Vec<FillShape>, Vec<FillShape>) =
@@ -127,8 +126,8 @@ fn take_interacting_raw_shapes(
                 && existing.group_path == scope
                 && existing.symbol_instance.is_none()
                 && color_pred(existing.color)
-                && rects_overlap(existing.bounding_box(), test_bbox)
-                && shape_interacts_with_clip(existing, clip_shapes, &clip_sub_bboxes)
+                && rects_overlap(existing.bounding_box(), clip.bbox)
+                && shape_interacts_with_clip(existing, clip)
         });
     *canvas = kept;
     (hits, trailing_outside)
@@ -141,11 +140,10 @@ fn subtract_clip_in_scope(
     editing_scope: &[u64],
     subtract_color: impl Fn(Color32) -> bool,
 ) {
-    let test_bbox = union_bounding_boxes(clip_shapes).inflate(1.5, 1.5);
+    let outline = ClipOutline::new(clip_shapes);
     let (hits, trailing_outside) = take_interacting_raw_shapes(
         canvas,
-        clip_shapes,
-        test_bbox,
+        &outline,
         target_layer_id,
         editing_scope,
         subtract_color,
@@ -165,7 +163,7 @@ fn subtract_clip_in_scope(
         let clip = PreparedClip::new(clip_shapes);
         for (color, group) in overlapping_by_color {
             canvas.extend(
-                op_with_far_holes_detached(&group, test_bbox, |g| {
+                op_with_far_holes_detached(&group, &outline, |g| {
                     clip.subtract_from_group(g, color)
                 })
                 .into_iter()
@@ -191,11 +189,9 @@ fn merge_homogeneous_batch_into_canvas(
         subtract_clip_in_scope(canvas, &incoming, layer_id, &scope, |c| c != target_color);
     }
 
-    let test_bbox = union_bounding_boxes(&incoming).inflate(1.5, 1.5);
+    let outline = ClipOutline::new(&incoming);
     let (overlapping_same_color, trailing_outside) =
-        take_interacting_raw_shapes(canvas, &incoming, test_bbox, layer_id, &scope, |c| {
-            c == target_color
-        });
+        take_interacting_raw_shapes(canvas, &outline, layer_id, &scope, |c| c == target_color);
 
     let incoming_self_overlaps = incoming.len() > 1
         && incoming.iter().enumerate().any(|(i, a)| {
@@ -231,7 +227,7 @@ fn merge_homogeneous_batch_into_canvas(
         }
     } else {
         canvas.extend(
-            op_with_far_holes_detached(&overlapping_same_color, test_bbox, |existing| {
+            op_with_far_holes_detached(&overlapping_same_color, &outline, |existing| {
                 boolean_operation(existing, &incoming, BoolOp::Union, target_color)
             })
             .into_iter()
@@ -242,12 +238,22 @@ fn merge_homogeneous_batch_into_canvas(
     canvas.extend(trailing_outside);
 }
 
-/// `shapes` の穴のうち `near` に重ならない穴（遠い穴）を外した写しで `op` を行い、
+fn with_holes_kept(s: &FillShape, mut keep: impl FnMut(&Contour) -> bool) -> FillShape {
+    let holes: Vec<Contour> = s.holes.iter().filter(|h| keep(h)).cloned().collect();
+    if holes.len() == s.holes.len() {
+        return s.clone();
+    }
+    let mut t = FillShape::new(s.color, s.exterior.clone(), holes);
+    t.shape_id = s.shape_id;
+    t
+}
+
+/// `shapes` の穴のうち `clip` の輪郭から離れていて内側にもない穴（遠い穴）を外した写しで `op` を行い、
 /// 遠い穴を、それを含む結果の図形へ付け直す。変わらなかった図形は元の図形に戻す。
 /// 遠い穴の行き先が決まらないときは、穴を全部渡して `op` をやり直す
 fn op_with_far_holes_detached(
     shapes: &[FillShape],
-    near: KRect,
+    clip: &ClipOutline,
     op: impl Fn(&[FillShape]) -> Vec<FillShape>,
 ) -> Vec<FillShape> {
     let mut far: Vec<(usize, Contour, KRect)> = Vec::new();
@@ -255,21 +261,15 @@ fn op_with_far_holes_detached(
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let mut near_holes = Vec::with_capacity(s.holes.len());
-            for h in &s.holes {
+            with_holes_kept(s, |h| {
                 let b = h.bounding_box();
-                if rects_overlap(b, near) {
-                    near_holes.push(h.clone());
+                if clip.needs_hole(h, b) {
+                    true
                 } else {
                     far.push((i, h.clone(), b));
+                    false
                 }
-            }
-            if near_holes.len() == s.holes.len() {
-                return s.clone();
-            }
-            let mut t = FillShape::new(s.color, s.exterior.clone(), near_holes);
-            t.shape_id = s.shape_id;
-            t
+            })
         })
         .collect();
     if far.is_empty() {
@@ -342,47 +342,103 @@ fn seg_padded_bbox(seg: QuadBez, pad: f64) -> KRect {
     )
 }
 
-fn collect_sub_bboxes(shapes: &[FillShape], inflate: f64) -> Vec<KRect> {
-    let mut out = Vec::new();
-    for s in shapes {
-        for c in s.contours() {
-            for chunk in c.segments.chunks(8) {
-                if let Some(&first) = chunk.first() {
-                    let b = chunk[1..]
-                        .iter()
-                        .fold(seg_padded_bbox(first, 0.0), |acc, &seg| {
-                            acc.union(seg_padded_bbox(seg, 0.0))
-                        });
-                    out.push(b.inflate(inflate, inflate));
+struct ClipOutline<'a> {
+    clip: &'a [FillShape],
+    /// clip 全体の外接矩形（1.5 広げる）
+    bbox: KRect,
+    /// 図形ごとの、輪郭の区間（8 本ずつ。外接矩形は 1.5 広げる）と、その線分
+    chunks: Vec<Vec<(KRect, &'a [QuadBez])>>,
+}
+
+impl<'a> ClipOutline<'a> {
+    fn new(clip: &'a [FillShape]) -> Self {
+        let bbox = union_bounding_boxes(clip).inflate(1.5, 1.5);
+        let chunks = clip
+            .iter()
+            .map(|s| {
+                let mut out = Vec::new();
+                for c in s.contours() {
+                    for chunk in c.segments.chunks(8) {
+                        if let Some(&first) = chunk.first() {
+                            let b = chunk[1..]
+                                .iter()
+                                .fold(seg_padded_bbox(first, 0.0), |acc, &seg| {
+                                    acc.union(seg_padded_bbox(seg, 0.0))
+                                })
+                                .inflate(1.5, 1.5);
+                            out.push((b, chunk));
+                        }
+                    }
+                }
+                out
+            })
+            .collect();
+        Self { clip, bbox, chunks }
+    }
+
+    #[inline]
+    fn near_outline(&self, r: KRect) -> bool {
+        self.chunks
+            .iter()
+            .flatten()
+            .any(|&(b, _)| rects_overlap(r, b))
+    }
+
+    fn contains(&self, p: Point) -> bool {
+        if !p.x.is_finite() || !p.y.is_finite() || !self.bbox.contains(p) {
+            return false;
+        }
+        self.clip.iter().zip(&self.chunks).any(|(s, s_chunks)| {
+            if !s.bounding_box().inflate(2.0, 2.0).contains(p) {
+                return false;
+            }
+            let mut path = BezPath::new();
+            for &(b, segs) in s_chunks {
+                if p.y >= b.y0 && p.y <= b.y1 {
+                    for seg in segs {
+                        path.move_to(seg.p0);
+                        path.quad_to(seg.p1, seg.p2);
+                    }
                 }
             }
-        }
+            (path.winding(p) & 1) != 0
+        })
     }
-    out
+
+    fn needs_hole(&self, hole: &Contour, b: KRect) -> bool {
+        if !rects_overlap(b, self.bbox) {
+            return false;
+        }
+        let center = b.center();
+        let max_dist = 0.5 * b.width().hypot(b.height()) + 1.5;
+        let max_dist_sq = max_dist * max_dist;
+        for &(cb, segs) in self.chunks.iter().flatten() {
+            if rects_overlap(b, cb)
+                && segs.iter().any(|&seg| {
+                    rects_overlap(b, seg_padded_bbox(seg, 1.5))
+                        && seg.nearest(center, 1e-3).distance_sq <= max_dist_sq
+                })
+            {
+                return true;
+            }
+        }
+        hole.segments.first().is_some_and(|s| self.contains(s.p0))
+    }
 }
 
-#[inline]
-fn overlaps_any_bbox(rect: KRect, bboxes: &[KRect]) -> bool {
-    bboxes.iter().any(|&b| rects_overlap(rect, b))
-}
-
-fn shape_interacts_with_clip(
-    subj: &FillShape,
-    clip: &[FillShape],
-    clip_sub_bboxes: &[KRect],
-) -> bool {
+fn shape_interacts_with_clip(subj: &FillShape, clip: &ClipOutline) -> bool {
     if subj.contours().any(|c| {
         c.segments
             .iter()
-            .any(|&seg| overlaps_any_bbox(seg_padded_bbox(seg, 0.6), clip_sub_bboxes))
+            .any(|&seg| clip.near_outline(seg_padded_bbox(seg, 0.6)))
     }) {
         return true;
     }
     subj.exterior
         .segments
         .first()
-        .is_some_and(|s| clip.iter().any(|cs| cs.contains_point(s.p0)))
-        || clip.iter().any(|cs| {
+        .is_some_and(|s| clip.contains(s.p0))
+        || clip.clip.iter().any(|cs| {
             cs.exterior
                 .segments
                 .first()
@@ -817,7 +873,18 @@ pub(crate) fn find_enclosed_region_at(
     pt: Point,
     fill_color: Color32,
 ) -> Option<FillShape> {
-    let (active_bbox, candidates) = cull_enclosed_region_candidates(canvas, pt)?;
+    let (active_bbox, mut candidates) = cull_enclosed_region_candidates(canvas, pt)?;
+    // 点を含まない穴は、その図形の塗りに囲まれていて、点のある領域とつながらない
+    for s in &mut candidates {
+        *s = with_holes_kept(s, |h| {
+            if !h.bounding_box().inflate(1.0, 1.0).contains(pt) {
+                return false;
+            }
+            let mut path = BezPath::new();
+            h.append_to_bez_path(&mut path);
+            path.winding(pt) != 0
+        });
+    }
 
     let bounds = active_bbox.inflate(32.0, 32.0);
     let mut bounds_ring = vec![
@@ -860,22 +927,7 @@ pub(crate) fn find_enclosed_region_at(
                 || (y - bounds.y0).abs() < 4.0
                 || (y - bounds.y1).abs() < 4.0
         });
-        if touches_bounds {
-            continue;
-        }
-
-        let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
-        let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
-        for &[x, y] in ext_ring {
-            min_x = min_x.min(x);
-            max_x = max_x.max(x);
-            min_y = min_y.min(y);
-            max_y = max_y.max(y);
-        }
-        if pt.x < min_x - 1.0 || pt.x > max_x + 1.0 || pt.y < min_y - 1.0 || pt.y > max_y + 1.0 {
-            continue;
-        }
-        if !poly_shape_contains_point(&poly_shape, pt) {
+        if touches_bounds || !poly_shape_contains_point(&poly_shape, pt) {
             continue;
         }
 

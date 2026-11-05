@@ -203,7 +203,7 @@ pub(crate) fn confirm_pending_close_save(ws: &mut impl ProjectWorkspace, ctx: &e
         return;
     };
     let tab_index = ws.active_index();
-    save_project(ws, ctx);
+    save_project(ws);
     match pending {
         PendingCloseConfirm::SingleTab { orig_active } => {
             if !is_tab_dirty(ws, tab_index) {
@@ -276,7 +276,6 @@ pub(crate) fn switch_to_tab(
 
     if let Some(c) = ctx {
         surrender_focused_widget(c);
-        update_window_title(ws, c);
     }
     true
 }
@@ -329,7 +328,6 @@ fn close_tab_immediately(
         ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
         if let Some(c) = ctx {
             surrender_focused_widget(c);
-            update_window_title(ws, c);
         }
         return;
     }
@@ -353,15 +351,11 @@ fn close_tab_immediately(
         ws.tab_mut().view.last_canvas_rect = last_canvas_rect;
         if let Some(c) = ctx {
             surrender_focused_widget(c);
-            update_window_title(ws, c);
         }
     } else {
         ws.tabs_mut().remove(close_index);
         if close_index < ws.active_index() {
             ws.set_active_index(ws.active_index() - 1);
-        }
-        if let Some(c) = ctx {
-            update_window_title(ws, c);
         }
     }
 }
@@ -1316,7 +1310,6 @@ pub(crate) fn open_project_in_tab(
     }
     if let Some(c) = ctx {
         surrender_focused_widget(c);
-        update_window_title(ws, c);
     }
     Ok(if trimmed {
         OpenProjectOutcome::LoadedWithTrimmedData
@@ -1338,7 +1331,6 @@ pub(crate) fn new_project(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
     ws.tab_mut().view.reset_view();
 
     surrender_focused_widget(ctx);
-    update_window_title(ws, ctx);
     ws.notify_info(format!("新規タブ「無題-{untitled_num}」を作成しました"));
 }
 
@@ -1362,15 +1354,9 @@ pub(crate) fn pick_save_path(tab: &Tab, filter: &str, ext: &str, name: &str) -> 
     Some(path)
 }
 
-fn save_project_and_notify(
-    ws: &mut impl ProjectWorkspace,
-    ctx: &egui::Context,
-    path: &Path,
-    action_desc: &str,
-) {
+fn save_project_and_notify(ws: &mut impl ProjectWorkspace, path: &Path, action_desc: &str) {
     match save_project_to_path(ws, path) {
         Ok(fixed) => {
-            update_window_title(ws, ctx);
             let name = file_name_or(path, "ファイル");
             if fixed.is_empty() {
                 ws.notify_info(format!("「{name}」{action_desc}"));
@@ -1421,16 +1407,16 @@ pub(crate) fn open_project_dialog(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
 }
 
 /// 上書き保存（`file` が未設定なら「名前を付けて保存」ダイアログを開く）
-pub(crate) fn save_project(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
+pub(crate) fn save_project(ws: &mut impl ProjectWorkspace) {
     let Some(path) = ws.tab().file.clone() else {
-        save_project_as_dialog(ws, ctx);
+        save_project_as_dialog(ws);
         return;
     };
-    save_project_and_notify(ws, ctx, &path, "に上書き保存しました");
+    save_project_and_notify(ws, &path, "に上書き保存しました");
 }
 
 /// OS標準の「名前を付けて保存」ダイアログを表示し、選択されたパスへ `.is2d` ファイルを保存する
-pub(crate) fn save_project_as_dialog(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
+pub(crate) fn save_project_as_dialog(ws: &mut impl ProjectWorkspace) {
     let name = ws
         .tab()
         .file
@@ -1446,5 +1432,5 @@ pub(crate) fn save_project_as_dialog(ws: &mut impl ProjectWorkspace, ctx: &egui:
     let Some(path) = pick_save_path(ws.tab(), PROJECT_FILTER, PROJECT_FILE_EXTENSION, &name) else {
         return;
     };
-    save_project_and_notify(ws, ctx, &path, "を保存しました");
+    save_project_and_notify(ws, &path, "を保存しました");
 }

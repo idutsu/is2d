@@ -1886,12 +1886,8 @@ pub(crate) fn draw_canvas_contents(
         );
     }
 
-    tab.view.draw_stage_foreground_overlay(
-        painter,
-        painter.clip_rect(),
-        stage_size,
-        in_symbol_edit,
-    );
+    tab.view
+        .draw_stage_foreground_overlay(painter, stage_size, in_symbol_edit);
     draw_selected_group_and_symbol_boxes(tab, painter, &selected_group_boxes);
 
     if tool.tool == Tool::Transform {
@@ -1964,7 +1960,7 @@ fn draw_editable_layer_shapes(
         }
 
         let dim = in_group_edit && !in_scope;
-        artwork_painter.add(arc_mesh_to_shape(shape.cached_screen_mesh(zoom, pan, dim)));
+        artwork_painter.add(egui::Shape::Mesh(shape.screen_mesh(zoom, pan, dim)));
         if !in_scope {
             continue;
         }

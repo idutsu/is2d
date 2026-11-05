@@ -3,7 +3,7 @@ use kurbo::{Affine, Point, Vec2 as KVec2};
 use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
     editable_layer_ids, insert_and_select_shapes_in_scope, reset_session_after_timeline_change,
-    topmost_layer_id_for_indices, Tab,
+    topmost_layer_id_for_indices, Tab, View,
 };
 use crate::symbol::{EditLevel, SymbolEvalCtx, SymbolInstanceBinding};
 use crate::timeline::TimelineCellSelection;
@@ -148,7 +148,7 @@ pub(crate) fn prepare_place_symbol_instance(
     clear_selection(tab);
     before_mutate(tab);
     let inst_gid = tab.doc.alloc_group_id();
-    let stage_center = tab.stage_center_world();
+    let stage_center = View::DEFAULT_STAGE_CENTER;
     let offset = stage_center - first_bbox_center.to_vec2();
     let binding = SymbolInstanceBinding::new(
         inst_gid,
@@ -328,7 +328,7 @@ pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
             })
         })
         .unwrap_or_else(|| {
-            let stage_center = tab.stage_center_world();
+            let stage_center = View::DEFAULT_STAGE_CENTER;
             SymbolInstanceBinding::new(
                 0,
                 symbol_id,

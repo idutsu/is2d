@@ -10,11 +10,7 @@ use crate::select_ops::finish_marquee_drag;
 pub(crate) use crate::select_ops::{
     compute_hover_target, handle_canvas_double_click, set_moved_vertex, set_pulled_edge,
 };
-use crate::vector_engine::{arc_mesh_to_shape, to_pos2, FillShape};
-
-pub(crate) fn select_single_shape_at(host: &mut impl ActionHost, pt: Point) -> bool {
-    apply(host, Action::SelectSingleAt { pt })
-}
+use crate::vector_engine::{to_pos2, FillShape};
 
 // ============================================================================
 // 選択ツール（Tool::Select / V キー）・輪郭変形・アンカー編集・グループ・クリップボード
@@ -27,8 +23,7 @@ pub(crate) fn draw_flash_selection_overlay(tab: &Tab, painter: &egui::Painter, s
     let Some(shape) = tab.scene().get(scene_idx) else {
         return;
     };
-    let sel_screen_mesh = shape.cached_selection_screen_mesh(zoom, pan);
-    painter.add(arc_mesh_to_shape(sel_screen_mesh));
+    painter.add(egui::Shape::Mesh(shape.selection_screen_mesh(zoom, pan)));
     draw_shape_contour_lines(
         tab,
         painter,
@@ -209,7 +204,7 @@ pub(crate) fn start_reshape_drag(
     if alt_held {
         if let Some(shape_id) = target.shape_id() {
             if !host.tab().session.is_shape_id_selected(shape_id) {
-                select_single_shape_at(host, pt);
+                apply(host, Action::SelectSingleAt { pt });
             }
             let tab = host.tab_mut();
             let move_drag = begin_move_selection_drag(tab, pt, true);
@@ -296,7 +291,7 @@ pub(crate) fn start_reshape_drag(
         }
         HoverTarget::Fill { shape_id } => {
             if !host.tab().session.is_shape_id_selected(shape_id) {
-                select_single_shape_at(host, pt);
+                apply(host, Action::SelectSingleAt { pt });
             }
             let tab = host.tab_mut();
             let move_drag = begin_move_selection_drag(tab, pt, false);
@@ -480,7 +475,7 @@ fn handle_reshape_click(host: &mut impl ActionHost, pt: Point, shift_held: bool)
                 apply(host, Action::RetainSelection { keep_indices: unit });
             }
             Some(_) => {
-                select_single_shape_at(host, pt);
+                apply(host, Action::SelectSingleAt { pt });
             }
             None => {
                 apply(host, Action::Deselect);

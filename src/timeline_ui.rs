@@ -67,6 +67,23 @@ pub(crate) trait TimelineHost: ActionHost {
     fn tab_and_timeline_ui_mut(&mut self) -> (&mut Tab, &mut TimelineUiState);
 }
 
+/// タイムラインのスクロールバーの向き
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScrollAxis {
+    X,
+    Y,
+}
+
+impl ScrollAxis {
+    #[inline]
+    fn of(self, pos: Pos2) -> f32 {
+        match self {
+            Self::X => pos.x,
+            Self::Y => pos.y,
+        }
+    }
+}
+
 /// タイムライン右側領域（ルーラー・フレームグリッド・スクロールバー）でのマウスドラッグ状態
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) enum TimelineGridDrag {
@@ -74,10 +91,8 @@ pub(crate) enum TimelineGridDrag {
     None,
     /// 上部フレーム番号ルーラーのドラッグによる再生ヘッドスクラブ（レイヤー個別選択を解除）
     ScrubRuler,
-    /// 下部横スクロールバーのドラッグ操作
-    ScrubScrollbarX { grab_offset_x: f32 },
-    /// 右端縦スクロールバーのドラッグ操作
-    ScrubScrollbarY { grab_offset_y: f32 },
+    /// 横・縦スクロールバーのドラッグ操作
+    ScrubScrollbar { axis: ScrollAxis, grab_offset: f32 },
     /// フレームグリッド上でのセル範囲選択ドラッグ（複数レイヤー・複数フレーム横断）
     SelectCells {
         start_layer: usize,
@@ -270,82 +285,78 @@ impl TimelineLayout {
             (((scroll_x + self.grid_w) / CELL_W).ceil() as usize).min(self.max_frames_shown);
     }
 
-    fn scroll_x_from_thumb(
+    fn scroll_from_thumb(
         &self,
-        pos_x: f32,
-        grab_offset_x: f32,
-        thumb_w: f32,
-        max_scroll_x: f32,
+        axis: ScrollAxis,
+        pos: Pos2,
+        grab_offset: f32,
+        thumb_len: f32,
+        max_scroll: f32,
     ) -> f32 {
-        let track_span = (self.grid_w - thumb_w).max(1.0);
-        ((pos_x - grab_offset_x - self.grid_left) / track_span).clamp(0.0, 1.0) * max_scroll_x
+        let (view_len, start) = match axis {
+            ScrollAxis::X => (self.grid_w, self.grid_left),
+            ScrollAxis::Y => (self.grid_h, self.grid_top),
+        };
+        let track_span = (view_len - thumb_len).max(1.0);
+        ((axis.of(pos) - grab_offset - start) / track_span).clamp(0.0, 1.0) * max_scroll
     }
 
-    fn scroll_y_from_thumb(
+    fn scrollbar_metrics(
         &self,
-        pos_y: f32,
-        grab_offset_y: f32,
-        thumb_h: f32,
-        max_scroll_y: f32,
-    ) -> f32 {
-        let track_span = (self.grid_h - thumb_h).max(1.0);
-        ((pos_y - grab_offset_y - self.grid_top) / track_span).clamp(0.0, 1.0) * max_scroll_y
-    }
-
-    fn horizontal_scrollbar_metrics(&self, scroll_x: f32) -> Option<(Rect, Rect, f32, f32)> {
-        let total_w = (self.max_frames_shown as f32) * CELL_W;
-        if total_w <= self.grid_w || self.grid_w <= 16.0 {
-            return None;
-        }
-        let bar_h = 5.0;
-        let track_y0 = self.panel_rect.bottom() - bar_h - 1.0;
-        let track_y1 = self.panel_rect.bottom() - 1.0;
-        let thumb_w = ((self.grid_w / total_w) * self.grid_w).clamp(24.0, self.grid_w);
-        let max_scroll_x = (total_w - self.grid_w).max(1.0);
-        let ratio_x = (scroll_x / max_scroll_x).clamp(0.0, 1.0);
-        let thumb_x0 = self.grid_left + ratio_x * (self.grid_w - thumb_w);
-        let thumb_rect = Rect::from_min_max(
-            Pos2::new(thumb_x0, track_y0),
-            Pos2::new(thumb_x0 + thumb_w, track_y1),
-        );
-        let hit_rect = Rect::from_min_max(
-            Pos2::new(
-                self.grid_left,
-                (self.panel_rect.bottom() - 9.0).max(self.grid_top),
-            ),
-            Pos2::new(self.panel_rect.right() - 8.0, self.panel_rect.bottom()),
-        );
-        Some((hit_rect, thumb_rect, thumb_w, max_scroll_x))
-    }
-
-    fn vertical_scrollbar_metrics(
-        &self,
+        axis: ScrollAxis,
         num_layers: usize,
-        scroll_y: f32,
+        scroll: f32,
     ) -> Option<(Rect, Rect, f32, f32)> {
-        let total_h = (num_layers as f32) * ROW_H;
-        if total_h <= self.grid_h || self.grid_h <= 16.0 {
+        let (total, view_len, start, min_thumb) = match axis {
+            ScrollAxis::X => (
+                (self.max_frames_shown as f32) * CELL_W,
+                self.grid_w,
+                self.grid_left,
+                24.0,
+            ),
+            ScrollAxis::Y => (
+                (num_layers as f32) * ROW_H,
+                self.grid_h,
+                self.grid_top,
+                20.0,
+            ),
+        };
+        if total <= view_len || view_len <= 16.0 {
             return None;
         }
-        let bar_w = 5.0;
-        let track_x0 = self.panel_rect.right() - bar_w - 1.0;
-        let track_x1 = self.panel_rect.right() - 1.0;
-        let thumb_h = ((self.grid_h / total_h) * self.grid_h).clamp(20.0, self.grid_h);
-        let max_scroll_y = (total_h - self.grid_h).max(1.0);
-        let ratio_y = (scroll_y / max_scroll_y).clamp(0.0, 1.0);
-        let thumb_y0 = self.grid_top + ratio_y * (self.grid_h - thumb_h);
-        let thumb_rect = Rect::from_min_max(
-            Pos2::new(track_x0, thumb_y0),
-            Pos2::new(track_x1, thumb_y0 + thumb_h),
-        );
-        let hit_rect = Rect::from_min_max(
-            Pos2::new(
-                (self.panel_rect.right() - 9.0).max(self.grid_left),
-                self.grid_top,
+        let thumb_len = ((view_len / total) * view_len).clamp(min_thumb, view_len);
+        let max_scroll = (total - view_len).max(1.0);
+        let ratio = (scroll / max_scroll).clamp(0.0, 1.0);
+        let thumb_0 = start + ratio * (view_len - thumb_len);
+        let (hit_rect, thumb_rect) = match axis {
+            ScrollAxis::X => (
+                Rect::from_min_max(
+                    Pos2::new(
+                        self.grid_left,
+                        (self.panel_rect.bottom() - 9.0).max(self.grid_top),
+                    ),
+                    Pos2::new(self.panel_rect.right() - 8.0, self.panel_rect.bottom()),
+                ),
+                Rect::from_min_max(
+                    Pos2::new(thumb_0, self.panel_rect.bottom() - 6.0),
+                    Pos2::new(thumb_0 + thumb_len, self.panel_rect.bottom() - 1.0),
+                ),
             ),
-            Pos2::new(self.panel_rect.right(), self.panel_rect.bottom()),
-        );
-        Some((hit_rect, thumb_rect, thumb_h, max_scroll_y))
+            ScrollAxis::Y => (
+                Rect::from_min_max(
+                    Pos2::new(
+                        (self.panel_rect.right() - 9.0).max(self.grid_left),
+                        self.grid_top,
+                    ),
+                    Pos2::new(self.panel_rect.right(), self.panel_rect.bottom()),
+                ),
+                Rect::from_min_max(
+                    Pos2::new(self.panel_rect.right() - 6.0, thumb_0),
+                    Pos2::new(self.panel_rect.right() - 1.0, thumb_0 + thumb_len),
+                ),
+            ),
+        };
+        Some((hit_rect, thumb_rect, thumb_len, max_scroll))
     }
 }
 
@@ -855,41 +866,27 @@ fn handle_timeline_click_start(
         }
     } else if host.timeline_ui().dragging_layer.is_none() && pos.x >= layout.grid_left {
         let num_layers = host.tab().active_timeline().layers.len();
-        let scroll_y = host.timeline_ui().scroll_y;
-        if let Some((hit_rect, thumb_rect, thumb_h, max_scroll_y)) =
-            layout.vertical_scrollbar_metrics(num_layers, scroll_y)
-        {
-            if hit_rect.contains(pos) {
-                let grab_offset_y = if pos.y >= thumb_rect.top() && pos.y <= thumb_rect.bottom() {
-                    pos.y - thumb_rect.top()
-                } else {
-                    thumb_h * 0.5
-                };
-                let new_scroll_y =
-                    layout.scroll_y_from_thumb(pos.y, grab_offset_y, thumb_h, max_scroll_y);
-                let timeline_ui = host.timeline_ui_mut();
-                timeline_ui.scroll_y = new_scroll_y;
-                timeline_ui.grid_drag = TimelineGridDrag::ScrubScrollbarY { grab_offset_y };
-                return;
-            }
-        }
-        let scroll_x = host.timeline_ui().scroll_x;
-        if let Some((hit_rect, thumb_rect, thumb_w, max_scroll_x)) =
-            layout.horizontal_scrollbar_metrics(scroll_x)
-        {
-            if hit_rect.contains(pos) {
-                let grab_offset_x = if pos.x >= thumb_rect.left() && pos.x <= thumb_rect.right() {
-                    pos.x - thumb_rect.left()
-                } else {
-                    thumb_w * 0.5
-                };
-                let new_scroll_x =
-                    layout.scroll_x_from_thumb(pos.x, grab_offset_x, thumb_w, max_scroll_x);
-                let timeline_ui = host.timeline_ui_mut();
-                timeline_ui.scroll_x = new_scroll_x;
-                layout.sync_visible_frames(new_scroll_x);
-                timeline_ui.grid_drag = TimelineGridDrag::ScrubScrollbarX { grab_offset_x };
-                return;
+        for axis in [ScrollAxis::Y, ScrollAxis::X] {
+            let scroll = match axis {
+                ScrollAxis::X => host.timeline_ui().scroll_x,
+                ScrollAxis::Y => host.timeline_ui().scroll_y,
+            };
+            if let Some((hit_rect, thumb_rect, thumb_len, _)) =
+                layout.scrollbar_metrics(axis, num_layers, scroll)
+            {
+                if hit_rect.contains(pos) {
+                    let p = axis.of(pos);
+                    let grab_offset =
+                        if p >= axis.of(thumb_rect.min) && p <= axis.of(thumb_rect.max) {
+                            p - axis.of(thumb_rect.min)
+                        } else {
+                            thumb_len * 0.5
+                        };
+                    drag_scrollbar_thumb(host, layout, axis, pos, grab_offset);
+                    host.timeline_ui_mut().grid_drag =
+                        TimelineGridDrag::ScrubScrollbar { axis, grab_offset };
+                    return;
+                }
             }
         }
 
@@ -986,6 +983,33 @@ fn handle_timeline_click_start(
     }
 }
 
+fn drag_scrollbar_thumb(
+    host: &mut impl TimelineHost,
+    layout: &mut TimelineLayout,
+    axis: ScrollAxis,
+    pos: Pos2,
+    grab_offset: f32,
+) {
+    let num_layers = host.tab().active_timeline().layers.len();
+    let scroll = match axis {
+        ScrollAxis::X => host.timeline_ui().scroll_x,
+        ScrollAxis::Y => host.timeline_ui().scroll_y,
+    };
+    if let Some((_, _, thumb_len, max_scroll)) = layout.scrollbar_metrics(axis, num_layers, scroll)
+    {
+        let new_scroll = layout.scroll_from_thumb(axis, pos, grab_offset, thumb_len, max_scroll);
+        match axis {
+            ScrollAxis::X => {
+                host.timeline_ui_mut().scroll_x = new_scroll;
+                layout.sync_visible_frames(new_scroll);
+            }
+            ScrollAxis::Y => {
+                host.timeline_ui_mut().scroll_y = new_scroll;
+            }
+        }
+    }
+}
+
 /// ルーラースクラブ・スクロールバー操作・セル範囲選択・フレーム移動/複製ドラッグの継続および確定処理
 fn update_timeline_grid_drag(
     host: &mut impl TimelineHost,
@@ -1008,31 +1032,10 @@ fn update_timeline_grid_drag(
                 host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
             }
         }
-        TimelineGridDrag::ScrubScrollbarX { grab_offset_x } => {
+        TimelineGridDrag::ScrubScrollbar { axis, grab_offset } => {
             if primary_down {
-                let scroll_x = host.timeline_ui().scroll_x;
-                if let (Some(pos), Some((_, _, thumb_w, max_scroll_x))) =
-                    (pointer_pos, layout.horizontal_scrollbar_metrics(scroll_x))
-                {
-                    let new_scroll_x =
-                        layout.scroll_x_from_thumb(pos.x, grab_offset_x, thumb_w, max_scroll_x);
-                    host.timeline_ui_mut().scroll_x = new_scroll_x;
-                    layout.sync_visible_frames(new_scroll_x);
-                }
-            } else {
-                host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
-            }
-        }
-        TimelineGridDrag::ScrubScrollbarY { grab_offset_y } => {
-            if primary_down {
-                let num_layers = host.tab().active_timeline().layers.len();
-                let scroll_y = host.timeline_ui().scroll_y;
-                if let (Some(pos), Some((_, _, thumb_h, max_scroll_y))) = (
-                    pointer_pos,
-                    layout.vertical_scrollbar_metrics(num_layers, scroll_y),
-                ) {
-                    host.timeline_ui_mut().scroll_y =
-                        layout.scroll_y_from_thumb(pos.y, grab_offset_y, thumb_h, max_scroll_y);
+                if let Some(pos) = pointer_pos {
+                    drag_scrollbar_thumb(host, layout, axis, pos, grab_offset);
                 }
             } else {
                 host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
@@ -1941,25 +1944,18 @@ fn draw_timeline_scrollbars(
     painter: &egui::Painter,
     layout: &TimelineLayout,
 ) {
-    if let Some((_, thumb_rect, _, _)) =
-        layout.horizontal_scrollbar_metrics(host.timeline_ui().scroll_x)
-    {
-        painter.rect_filled(
-            thumb_rect,
-            2.0,
-            Color32::from_rgba_unmultiplied(110, 118, 134, 150),
-        );
-    }
-
-    if let Some((_, thumb_rect, _, _)) = layout.vertical_scrollbar_metrics(
-        host.tab().active_timeline().layers.len(),
-        host.timeline_ui().scroll_y,
-    ) {
-        painter.rect_filled(
-            thumb_rect,
-            2.0,
-            Color32::from_rgba_unmultiplied(110, 118, 134, 150),
-        );
+    let num_layers = host.tab().active_timeline().layers.len();
+    for (axis, scroll) in [
+        (ScrollAxis::X, host.timeline_ui().scroll_x),
+        (ScrollAxis::Y, host.timeline_ui().scroll_y),
+    ] {
+        if let Some((_, thumb_rect, _, _)) = layout.scrollbar_metrics(axis, num_layers, scroll) {
+            painter.rect_filled(
+                thumb_rect,
+                2.0,
+                Color32::from_rgba_unmultiplied(110, 118, 134, 150),
+            );
+        }
     }
 }
 

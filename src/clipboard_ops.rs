@@ -84,14 +84,7 @@ pub(crate) fn instantiate_relative_shapes_in_scope(
             .with_layer_id(target_lid)
             .with_group_path(new_path);
         cloned.shape_id = next_shape_id();
-        if let Some(mut binding) = cloned.symbol_instance {
-            if let Some(&mapped_inst_gid) = gid_map.get(&binding.instance_gid) {
-                binding.instance_gid = mapped_inst_gid;
-                cloned.symbol_instance = Some(binding);
-            } else {
-                cloned.symbol_instance = None;
-            }
-        }
+        cloned.symbol_instance = None;
         if offset != KVec2::ZERO {
             cloned.translate(offset);
         }
@@ -141,15 +134,11 @@ fn remap_timeline_ids(tl: &mut Timeline, doc: &mut Document, sym_map: &HashMap<u
                 .cel
                 .shapes
                 .iter()
-                .any(|s| !s.group_path.is_empty() || s.symbol_instance.is_some())
+                .any(|s| !s.group_path.is_empty())
             {
                 for sh in layer.keyframe_mut(i).cel.shapes_mut() {
                     for gid in &mut sh.group_path {
                         *gid = remap_gid(&mut gid_map, *gid, doc);
-                    }
-                    if let Some(mut b) = sh.symbol_instance {
-                        b.instance_gid = remap_gid(&mut gid_map, b.instance_gid, doc);
-                        sh.symbol_instance = Some(b);
                     }
                 }
             }
@@ -318,7 +307,8 @@ fn collect_needed_clipboard_imports(
 }
 
 /// `paste_clipboard`（`Cmd+V`）実行時に、クリップボードの不変スナップショットを破壊せず、
-/// 現在のタブのライブラリに不足しているシンボル定義のみを自動移植してペースト用 `(Vec<FillShape>, had_cycle)` を返す
+/// 現在のタブのライブラリに不足しているシンボル定義のみを自動移植してペースト用 `(Vec<FillShape>, had_cycle)` を返す。
+/// 循環参照で貼れる図形が1つも無いときは文書に触れずに空の列を返し、貼れる図形があるときは文書を変える前に `before_mutate` を呼ぶ
 pub(crate) fn resolve_clipboard_for_paste(
     tab: &mut Tab,
     clipboard: &mut Clipboard,

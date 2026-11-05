@@ -368,12 +368,6 @@ impl Contour {
     }
 }
 
-/// スクリーン座標変換済みメッシュキャッシュのキー（`(zoom_bits, pan_x_bits, pan_y_bits, dim_backdrop)`）とメッシュのペア
-pub(crate) type ScreenMeshCacheEntry = ((u32, u32, u32, bool), Arc<Mesh>);
-
-/// 選択時ドット柄オーバーレイのスクリーン座標変換済みメッシュキャッシュのキー（`(zoom_bits, pan_x_bits, pan_y_bits)`）とメッシュのペア
-pub(crate) type SelectionScreenMeshCacheEntry = ((u32, u32, u32), Arc<Mesh>);
-
 /// キャンバス上の1つの塗りシェイプ（色 + 外周2次ベジェ輪郭 + 穴の2次ベジェ輪郭リスト + 所属レイヤーID + グループ階層 + シンボル紐付け + 描画・判定キャッシュ）
 #[derive(Clone, Debug)]
 pub(crate) struct FillShape {
@@ -393,9 +387,7 @@ pub(crate) struct FillShape {
     bbox: KRect,
     fill_mesh: OnceLock<Arc<Mesh>>,
     hit_bez_path: OnceLock<Arc<BezPath>>,
-    screen_mesh_cache: SyncCache<Option<ScreenMeshCacheEntry>>,
     selection_mesh: SyncCache<Option<(u32, Arc<Mesh>)>>,
-    selection_screen_mesh: SyncCache<Option<SelectionScreenMeshCacheEntry>>,
 }
 
 impl FillShape {
@@ -412,9 +404,7 @@ impl FillShape {
             bbox: KRect::ZERO,
             fill_mesh: OnceLock::new(),
             hit_bez_path: OnceLock::new(),
-            screen_mesh_cache: SyncCache::new(None),
             selection_mesh: SyncCache::new(None),
-            selection_screen_mesh: SyncCache::new(None),
         };
         shape.rebuild_cache();
         shape
@@ -447,20 +437,9 @@ impl FillShape {
         }
     }
 
-    /// 指定された `(zoom, pan, dim_backdrop)` に対応するスクリーン座標変換済み `Arc<Mesh>` をキャッシュ経由で返す
-    pub(crate) fn cached_screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> Arc<Mesh> {
-        let key = (
-            zoom.to_bits(),
-            pan.x.to_bits(),
-            pan.y.to_bits(),
-            dim_backdrop,
-        );
-        if let Some((k, mesh)) = &*self.screen_mesh_cache.lock() {
-            if *k == key {
-                return Arc::clone(mesh);
-            }
-        }
-        let screen_mesh = Arc::new(transform_mesh_to_screen(
+    /// 指定された `(zoom, pan, dim_backdrop)` に対応するスクリーン座標変換済み `Mesh` を返す
+    pub(crate) fn screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> Mesh {
+        transform_mesh_to_screen(
             (**self.fill_mesh()).clone(),
             zoom,
             pan,
@@ -469,22 +448,14 @@ impl FillShape {
             } else {
                 None
             },
-        ));
-        *self.screen_mesh_cache.lock() = Some((key, Arc::clone(&screen_mesh)));
-        screen_mesh
-    }
-
-    fn clear_screen_mesh_caches(&mut self) {
-        *self.screen_mesh_cache.lock() = None;
-        *self.selection_mesh.lock() = None;
-        *self.selection_screen_mesh.lock() = None;
+        )
     }
 
     /// Undo 履歴保存時やバックアップ時に、幾何データから随時再生成可能な描画メッシュキャッシュを破棄してメモリを解放する
     pub(crate) fn strip_transient_caches(&mut self) {
         self.hit_bez_path = OnceLock::new();
         self.fill_mesh = OnceLock::new();
-        self.clear_screen_mesh_caches();
+        *self.selection_mesh.lock() = None;
     }
 
     /// 同じ `shape_id`・`mesh_revision` の図形 `donor` から、色が同じなら描画・当たり判定キャッシュを O(1) で引き継ぐ
@@ -502,19 +473,9 @@ impl FillShape {
                 let _ = self.fill_mesh.set(Arc::clone(m));
             }
         }
-        if self.screen_mesh_cache.lock().is_none() {
-            if let Some(sc) = &*donor.screen_mesh_cache.lock() {
-                *self.screen_mesh_cache.lock() = Some(sc.clone());
-            }
-        }
         if self.selection_mesh.lock().is_none() {
             if let Some(sm) = &*donor.selection_mesh.lock() {
                 *self.selection_mesh.lock() = Some(sm.clone());
-            }
-        }
-        if self.selection_screen_mesh.lock().is_none() {
-            if let Some(ssm) = &*donor.selection_screen_mesh.lock() {
-                *self.selection_screen_mesh.lock() = Some(ssm.clone());
             }
         }
     }
@@ -530,10 +491,8 @@ impl FillShape {
     }
 
     #[cfg(test)]
-    pub(crate) fn has_any_screen_cache(&self) -> bool {
-        self.screen_mesh_cache.lock().is_some()
-            || self.selection_mesh.lock().is_some()
-            || self.selection_screen_mesh.lock().is_some()
+    pub(crate) fn has_cached_selection_mesh(&self) -> bool {
+        self.selection_mesh.lock().is_some()
     }
 
     pub(crate) fn with_layer_id(mut self, layer_id: u64) -> Self {
@@ -611,7 +570,6 @@ impl FillShape {
                 v.color = color;
             }
         }
-        *self.screen_mesh_cache.lock() = None;
         self.mesh_revision = next_mesh_revision();
     }
 
@@ -658,13 +616,11 @@ impl FillShape {
                 v.pos += d;
             }
         }
-        *self.screen_mesh_cache.lock() = None;
         if let Some((_, sel)) = &mut *self.selection_mesh.lock() {
             for v in &mut Arc::make_mut(sel).vertices {
                 v.pos += d;
             }
         }
-        *self.selection_screen_mesh.lock() = None;
         self.mesh_revision = next_mesh_revision();
     }
 
@@ -700,7 +656,7 @@ impl FillShape {
             if let Some(arc_mesh) = self.fill_mesh.get_mut() {
                 transform_mesh_vertices_in_place(&mut Arc::make_mut(arc_mesh).vertices, coeffs);
             }
-            self.clear_screen_mesh_caches();
+            *self.selection_mesh.lock() = None;
             self.mesh_revision = next_mesh_revision();
         }
     }
@@ -749,7 +705,7 @@ impl FillShape {
         } else {
             self.fill_mesh = OnceLock::new();
         }
-        self.clear_screen_mesh_caches();
+        *self.selection_mesh.lock() = None;
         self.mesh_revision = next_mesh_revision();
     }
 
@@ -765,23 +721,14 @@ impl FillShape {
         mesh
     }
 
-    /// 指定された `(zoom, pan)` に対応するスクリーン座標変換済みのドット柄選択オーバーレイ `Arc<Mesh>` をキャッシュ経由で返す
-    pub(crate) fn cached_selection_screen_mesh(&self, zoom: f32, pan: Vec2) -> Arc<Mesh> {
-        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
-        if let Some((k, mesh)) = &*self.selection_screen_mesh.lock() {
-            if *k == key {
-                return Arc::clone(mesh);
-            }
-        }
-        let world_sel = self.selection_overlay_mesh(zoom);
-        let screen_sel = Arc::new(transform_mesh_to_screen(
-            (*world_sel).clone(),
+    /// 指定された `(zoom, pan)` に対応するスクリーン座標変換済みのドット柄選択オーバーレイ `Mesh` を返す
+    pub(crate) fn selection_screen_mesh(&self, zoom: f32, pan: Vec2) -> Mesh {
+        transform_mesh_to_screen(
+            (*self.selection_overlay_mesh(zoom)).clone(),
             zoom,
             pan,
             None,
-        ));
-        *self.selection_screen_mesh.lock() = Some((key, Arc::clone(&screen_sel)));
-        screen_sel
+        )
     }
 
     pub(crate) fn get_contour(&self, idx: usize) -> Option<&Contour> {

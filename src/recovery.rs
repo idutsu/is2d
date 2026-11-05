@@ -1,12 +1,10 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use eframe::egui;
-
 use crate::canvas_tool::Tab;
 use crate::project_io::{
-    open_document_in_new_tab, read_project_document, update_window_title,
-    write_project_file_atomically, ProjectDocument, ProjectWorkspace,
+    open_document_in_new_tab, read_project_document, write_project_file_atomically,
+    ProjectDocument, ProjectWorkspace,
 };
 
 /// 起動時に見つかった未保存作業1件分の一覧ファイルと復旧ファイルの情報
@@ -132,11 +130,7 @@ impl Recovery {
     }
 
     /// 見つかった復旧ファイルを古い順に未保存タブとして開き、復旧ファイルと一覧を消す
-    pub(crate) fn restore_found(
-        &mut self,
-        ws: &mut impl ProjectWorkspace,
-        ctx: Option<&egui::Context>,
-    ) {
+    pub(crate) fn restore_found(&mut self, ws: &mut impl ProjectWorkspace) {
         let mut restored = 0usize;
         let mut broken_paths = Vec::new();
 
@@ -167,9 +161,6 @@ impl Recovery {
             }
         }
 
-        if let Some(c) = ctx {
-            update_window_title(ws, c);
-        }
         if !broken_paths.is_empty() {
             ws.notify_error(format!(
                 "一部の復旧ファイルを読み込めませんでした（{}）",

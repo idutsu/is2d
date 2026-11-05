@@ -452,7 +452,7 @@ impl View {
             crate::vector_engine::MIN_VIEW_ZOOM,
             crate::vector_engine::MAX_VIEW_ZOOM,
         );
-        let center = self.stage_center_world();
+        let center = Self::DEFAULT_STAGE_CENTER;
         let screen_center = self.last_canvas_rect.center();
         self.zoom = zoom;
         self.pan = Vec2::new(
@@ -464,16 +464,10 @@ impl View {
     /// ステージ（カメラ出力枠）の初期ワールド中心座標
     pub(crate) const DEFAULT_STAGE_CENTER: Point = Point::new(536.0, 310.0);
 
-    /// ステージ（カメラ出力枠）のワールド中心座標を返す（初期 100% ビューで中央キャンバス領域の真ん中に配置）
-    #[inline]
-    pub(crate) fn stage_center_world(&self) -> Point {
-        Self::DEFAULT_STAGE_CENTER
-    }
-
     /// ステージ（カメラ出力枠）のワールド座標矩形 `KRect` を返す
     #[inline]
     pub(crate) fn stage_world_rect(&self, stage_size: Vec2) -> KRect {
-        let center = self.stage_center_world();
+        let center = Self::DEFAULT_STAGE_CENTER;
         let half_w = (stage_size.x.max(100.0) as f64) * 0.5;
         let half_h = (stage_size.y.max(100.0) as f64) * 0.5;
         KRect::new(
@@ -565,7 +559,6 @@ impl View {
     pub(crate) fn draw_stage_foreground_overlay(
         &self,
         painter: &egui::Painter,
-        _canvas_rect: egui::Rect,
         stage_size: Vec2,
         in_symbol_edit: bool,
     ) {
@@ -1013,16 +1006,8 @@ mod scene_base_cache {
                 let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx);
                 transform_layer_shapes_to_stage(&mut evaluated, world_xform);
                 if let Some((old_cl, old_shapes)) = prev {
-                    if old_cl.world_xform_bits == xform_bits && !old_shapes.is_empty() {
-                        let donor_map: HashMap<(ShapeId, u64), &FillShape> = old_shapes
-                            .iter()
-                            .map(|d| ((d.shape_id, d.mesh_revision), d))
-                            .collect();
-                        for s in &mut evaluated {
-                            if let Some(donor) = donor_map.get(&(s.shape_id, s.mesh_revision)) {
-                                s.reuse_caches_from(donor);
-                            }
-                        }
+                    if old_cl.world_xform_bits == xform_bits {
+                        reuse_caches_by_key(&mut evaluated, &old_shapes);
                     }
                 }
                 let sig = compute_resolved_cel_signature(layer, kf_idx, None, library);
@@ -1044,6 +1029,21 @@ mod scene_base_cache {
             self.flat_shapes = new_flat;
             self.layer_order_ids = new_order_ids;
             true
+        }
+    }
+
+    fn reuse_caches_by_key(shapes: &mut [FillShape], donors: &[FillShape]) {
+        if donors.is_empty() {
+            return;
+        }
+        let donor_map: HashMap<(ShapeId, u64), &FillShape> = donors
+            .iter()
+            .map(|d| ((d.shape_id, d.mesh_revision), d))
+            .collect();
+        for s in shapes {
+            if let Some(donor) = donor_map.get(&(s.shape_id, s.mesh_revision)) {
+                s.reuse_caches_from(donor);
+            }
         }
     }
 
@@ -1282,15 +1282,7 @@ mod scene_base_cache {
         ) -> CachedBackdropLayer {
             let layer = &parent_tl.layers[layer_idx];
             let resolved = parent_tl.evaluate_layer_shapes_at(layer_idx, curr_f, &doc.library);
-            let donor_map: Option<HashMap<(ShapeId, u64), &FillShape>> =
-                donor_shapes.filter(|d| !d.is_empty()).map(|donors| {
-                    donors
-                        .iter()
-                        .map(|d| ((d.shape_id, d.mesh_revision), d))
-                        .collect()
-                });
             let mut shapes = Vec::with_capacity(resolved.len());
-            let mut world_mesh = egui::Mesh::default();
             for mut s in resolved {
                 if s.symbol_instance
                     .is_some_and(|b| b.instance_gid == excl_gid)
@@ -1301,13 +1293,14 @@ mod scene_base_cache {
                     let _ = s.fill_mesh();
                     s.transform_with_cached_mesh(parent_world_xform);
                 }
-                if let Some(ref map) = donor_map {
-                    if let Some(donor) = map.get(&(s.shape_id, s.mesh_revision)) {
-                        s.reuse_caches_from(donor);
-                    }
-                }
-                append_mesh(&mut world_mesh, s.fill_mesh());
                 shapes.push(s);
+            }
+            if let Some(donors) = donor_shapes {
+                reuse_caches_by_key(&mut shapes, donors);
+            }
+            let mut world_mesh = egui::Mesh::default();
+            for s in &shapes {
+                append_mesh(&mut world_mesh, s.fill_mesh());
             }
             let cel_sig =
                 compute_resolved_cel_signature(layer, kf_idx, Some(excl_gid), &doc.library);
@@ -1867,16 +1860,6 @@ pub(crate) struct Floating {
     pub(crate) modified: bool,
 }
 
-#[inline]
-fn shapes_equal_for_snapshot(a: &FillShape, b: &FillShape) -> bool {
-    a.shape_id == b.shape_id
-        && a.layer_id == b.layer_id
-        && a.mesh_revision == b.mesh_revision
-        && a.color == b.color
-        && a.group_path == b.group_path
-        && a.symbol_instance == b.symbol_instance
-}
-
 impl Floating {
     /// 一時描画キャッシュを除去して履歴保持を軽量化する
     pub(crate) fn strip_transient_caches(&mut self) {
@@ -1898,12 +1881,12 @@ impl Floating {
                 .pieces
                 .iter()
                 .zip(&other.pieces)
-                .all(|(a, b)| shapes_equal_for_snapshot(a, b))
+                .all(|(a, b)| InitialLayerShapeState::from_shape(a).matches(b))
             && self
                 .remainder
                 .iter()
                 .zip(&other.remainder)
-                .all(|(a, b)| shapes_equal_for_snapshot(a, b))
+                .all(|(a, b)| InitialLayerShapeState::from_shape(a).matches(b))
     }
 
     /// `remainder` の各要素が、どの元の図形（`hidden` の番号）の塊に入るかを返す。
@@ -3027,12 +3010,6 @@ impl Tab {
         }
     }
 
-    /// ステージの中央ワールド座標を返す
-    #[inline]
-    pub(crate) fn stage_center_world(&self) -> Point {
-        self.view.stage_center_world()
-    }
-
     /// 最後に描画されたキャンバス領域に対してステージ全体が収まるようズーム・パンを調整する
     #[inline]
     pub(crate) fn fit_stage_to_window(&mut self) {
@@ -3172,8 +3149,10 @@ impl LayerEdit {
     }
 }
 
+/// 図形が変更されていないかを判定するための状態（`edit_layers` の書き戻しと `Floating` の履歴比較で共通）
 struct InitialLayerShapeState {
     shape_id: ShapeId,
+    layer_id: LayerId,
     mesh_revision: u64,
     color: Color32,
     group_path: Vec<u64>,
@@ -3185,6 +3164,7 @@ impl InitialLayerShapeState {
     fn from_shape(s: &FillShape) -> Self {
         Self {
             shape_id: s.shape_id,
+            layer_id: s.layer_id,
             mesh_revision: s.mesh_revision,
             color: s.color,
             group_path: s.group_path.clone(),
@@ -3195,6 +3175,7 @@ impl InitialLayerShapeState {
     #[inline]
     fn matches(&self, s: &FillShape) -> bool {
         self.shape_id == s.shape_id
+            && self.layer_id == s.layer_id
             && self.mesh_revision == s.mesh_revision
             && self.color == s.color
             && self.group_path == s.group_path
