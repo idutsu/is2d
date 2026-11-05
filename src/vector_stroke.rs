@@ -12,14 +12,16 @@ use crate::vector_engine::{
 // アルゴリズム 1: ブラシ軌跡からのスケール不変な「閉じた輪郭（アウトライン）」生成
 // ============================================================================
 
-/// マウスドラッグ中の座標列 `points` とブラシ半径 `radius` から、左右の法線オフセット点列・角の丸ジョイン（Round Join）・
-/// 始点終点の半円キャップ（Round Cap）を計算し、マイター突出のない厳密な丸ブラシ包絡線を生成する。
+/// ズーム 100% で `generate_brush_outline_at_zoom` を呼ぶ（テスト用）
 #[cfg(test)]
 pub(crate) fn generate_brush_outline(points: &[Point], radius: f64) -> Vec<Point> {
     generate_brush_outline_at_zoom(points, radius, 1.0)
 }
 
-/// ズーム倍率 `zoom` に応じてスクリーン空間で100%表示時と完全に同一のサンプリング精度を保つ丸ブラシ包絡線生成
+/// マウスドラッグ中の座標列 `points` とブラシ半径 `radius` から、丸いブラシでなぞった形の輪郭を作る。
+/// 各区間の左右の帯・曲がる外側の円弧（Round Join）・内側で中心線の点を通る折り返し・始点終点の半円キャップ（Round Cap）を
+/// つないだ1本の輪郭で、NonZero で塗ると、中心線の各区間を半径 `radius` で太らせた形を合わせたものと一致する。
+/// 点の間引きは、ズーム倍率 `zoom` に合わせて画面上で決める（どのズームでも、画面上で同じ細かさになる）
 pub(crate) fn generate_brush_outline_at_zoom(
     points: &[Point],
     radius: f64,
@@ -36,6 +38,8 @@ pub(crate) fn generate_brush_outline_at_zoom(
     let r = radius.clamp(0.05, 2000.0);
     let screen_r = r * z;
     let min_step = (0.15 * screen_r).clamp(0.2, 0.8) / z;
+    // 中心線を間引くときに許すずれ。画面上で半径の 3%（0.5〜2px）
+    let thin_tol = (0.03 * screen_r).clamp(0.5, 2.0) / z;
 
     // スクリーン空間のブラシ半径に比例した最小ステップ閾値で近接重複サンプルおよび非有限座標を除去
     let mut clean: Vec<Point> = Vec::with_capacity(points.len());
@@ -52,6 +56,22 @@ pub(crate) fn generate_brush_outline_at_zoom(
     }
     if clean.is_empty() {
         return Vec::new();
+    }
+    // 中心線を、thin_tol 以内のずれで間引く。なぞった形は、そのずれの分しか変わらない。
+    // 手で描いた点は 1px ほどの間隔で並ぶので、間引かないと、下の折り返しが多くなり、
+    // 線が自分と重なる所で輪郭の重なりを解く処理（NonZero の整理）が重くなる
+    if clean.len() > 2 {
+        let last = clean.len() - 1;
+        let mut keep = vec![false; clean.len()];
+        keep[0] = true;
+        keep[last] = true;
+        rdp_recursive_bounded(&clean, 0, last, thin_tol, &mut keep, 0);
+        clean = clean
+            .iter()
+            .zip(&keep)
+            .filter(|(_, &k)| k)
+            .map(|(&p, _)| p)
+            .collect();
     }
 
     // 単一クリック（スタンプ）の場合は円形輪郭を生成
@@ -75,57 +95,48 @@ pub(crate) fn generate_brush_outline_at_zoom(
         seg_normals.push(left_normal(t));
     }
 
-    // 始点・終点キャップの向きは、微小な手ブレに振られないよう 2 ステップ先の弦方向も加味する
-    let end_step = 2usize.min(n - 1);
-    let t_start = normalize_vec(clean[end_step] - clean[0]);
-    let n_start = left_normal(t_start);
-    let t_end = normalize_vec(clean[n - 1] - clean[n - 1 - end_step]);
-    let n_end = left_normal(t_end);
+    // 始点・終点のキャップは、最初と最後の区間の向きに合わせた半円にする（区間の帯とすき間なくつながる）
+    let t_start = seg_tangents[0];
+    let n_start = seg_normals[0];
+    let t_end = seg_tangents[n - 2];
+    let n_end = seg_normals[n - 2];
 
-    let mut left_pts = Vec::with_capacity(n * 2);
-    let mut right_pts = Vec::with_capacity(n * 2);
+    let mut left_pts = Vec::with_capacity(n * 4);
+    let mut right_pts = Vec::with_capacity(n * 4);
 
     left_pts.push(clean[0] + n_start * r);
     right_pts.push(clean[0] - n_start * r);
 
+    // 点ごとに、曲がる外側には半径 r の円弧を、内側には中心線の点 p を通る折り返しを置く。
+    // こうすると、輪郭を NonZero で塗った形が、中心線の各区間を半径 r で太らせた帯と各点の円を合わせた形
+    // （丸いブラシでなぞった形）と一致する。手ぶれや角の行き過ぎで向きが細かく変わっても、切れ込みができない
     for i in 1..(n - 1) {
         let p = clean[i];
         let t_in = seg_tangents[i - 1];
-        let t_out = seg_tangents[i];
         let n_in = seg_normals[i - 1];
         let n_out = seg_normals[i];
 
-        let turn_angle = signed_angle(t_in, t_out);
-        let w = 2usize.min(i).min(n - 1 - i).max(1);
-        let tw_in = normalize_vec(clean[i] - clean[i - w]);
-        let tw_out = normalize_vec(clean[i + w] - clean[i]);
-        let macro_turn = signed_angle(tw_in, tw_out);
-
-        if turn_angle.abs() > 0.08 && macro_turn.abs() > 0.25 && turn_angle * macro_turn > 0.0 {
-            let abs_ang = turn_angle.abs();
-            let arc_steps =
-                ((abs_ang / (std::f64::consts::PI / 12.0)).ceil() as usize).clamp(1, 16);
-            if turn_angle > 0.0 {
-                // 右側がターンの外側（凸側） -> 半径 r の円弧を挿入
-                for k in 0..=arc_steps {
-                    let a = (k as f64 / arc_steps as f64) * abs_ang;
-                    right_pts.push(p + (-n_in * a.cos() + t_in * a.sin()) * r);
-                }
-                left_pts.push(p + n_in * r);
-                left_pts.push(p + n_out * r);
-            } else {
-                // 左側がターンの外側（凸側） -> 半径 r の円弧を挿入
-                for k in 0..=arc_steps {
-                    let a = (k as f64 / arc_steps as f64) * abs_ang;
-                    left_pts.push(p + (n_in * a.cos() + t_in * a.sin()) * r);
-                }
-                right_pts.push(p - n_in * r);
-                right_pts.push(p - n_out * r);
+        let turn_angle = signed_angle(t_in, seg_tangents[i]);
+        let abs_ang = turn_angle.abs();
+        let arc_steps = ((abs_ang / (std::f64::consts::PI / 12.0)).ceil() as usize).clamp(1, 16);
+        if turn_angle > 0.0 {
+            // 右側がターンの外側（凸側） -> 半径 r の円弧を挿入
+            for k in 0..=arc_steps {
+                let a = (k as f64 / arc_steps as f64) * abs_ang;
+                right_pts.push(p + (-n_in * a.cos() + t_in * a.sin()) * r);
             }
+            left_pts.push(p + n_in * r);
+            left_pts.push(p);
+            left_pts.push(p + n_out * r);
         } else {
-            let n_smooth = left_normal(normalize_vec(tw_in + tw_out));
-            left_pts.push(p + n_smooth * r);
-            right_pts.push(p - n_smooth * r);
+            // 左側がターンの外側（凸側） -> 半径 r の円弧を挿入
+            for k in 0..=arc_steps {
+                let a = (k as f64 / arc_steps as f64) * abs_ang;
+                left_pts.push(p + (n_in * a.cos() + t_in * a.sin()) * r);
+            }
+            right_pts.push(p - n_in * r);
+            right_pts.push(p);
+            right_pts.push(p - n_out * r);
         }
     }
 

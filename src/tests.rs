@@ -191,6 +191,85 @@ fn test_smoothing_100_preserves_width_round_caps_and_minimal_anchors() {
     assert!(shape.contains_point(Point::new(300.0 + diag, 200.0 + diag)));
 }
 
+/// 手でジグザグを描くと、角を少し行き過ぎて戻ったり、手ぶれで向きが細かく変わったりする。そのような線でも、角の内側・外側に切れ込み（ひげ）ができず、丸いブラシでなぞった形になること
+#[test]
+fn test_hand_drawn_zigzag_corners_have_no_notch() {
+    use crate::vector_engine::point_to_segment_dist;
+
+    let verts = [
+        Point::new(400.0, 0.0),
+        Point::new(170.0, 240.0),
+        Point::new(390.0, 470.0),
+        Point::new(140.0, 760.0),
+        Point::new(400.0, 970.0),
+    ];
+
+    for (overshoot, jitter) in [(4.0, 0.0), (10.0, 0.0), (0.0, 0.8), (4.0, 0.8)] {
+        let mut pts: Vec<Point> = Vec::new();
+        let mut k = 0usize;
+        for seg_idx in 0..(verts.len() - 1) {
+            let a = verts[seg_idx];
+            let b = verts[seg_idx + 1];
+            let dir = normalize_vec(b - a);
+            let len = (b - a).hypot();
+            let end_s = if seg_idx + 2 < verts.len() {
+                len + overshoot
+            } else {
+                len
+            };
+            let mut s = 0.0;
+            loop {
+                let base = a + dir * s;
+                let kf = k as f64;
+                let j = KVec2::new((kf * 1.7).sin(), (kf * 2.3).cos()) * jitter;
+                let raw_p = base + j;
+                let p = Point::new((raw_p.x * 2.0).round() * 0.5, (raw_p.y * 2.0).round() * 0.5);
+                if pts.last().is_none_or(|&last| (p - last).hypot() >= 1.5) {
+                    pts.push(p);
+                }
+                k += 1;
+                if s >= end_s {
+                    break;
+                }
+                let dist_corner = s.min((len - s).abs());
+                let step = (0.5 + dist_corner / 20.0).min(9.0);
+                s = (s + step).min(end_s);
+            }
+        }
+
+        for r in [10.0, 25.0, 45.0] {
+            let raw = generate_brush_outline(&pts, r);
+            let shapes = build_smoothed_stroke_shapes(&raw, Color32::BLACK);
+            assert!(!shapes.is_empty());
+
+            let span = (r as i32) + 6;
+            for &corner in &verts[1..4] {
+                for dy in -span..=span {
+                    for dx in -span..=span {
+                        let p = Point::new(corner.x + dx as f64, corner.y + dy as f64);
+                        let d = pts
+                            .windows(2)
+                            .map(|w| point_to_segment_dist(p, w[0], w[1]))
+                            .fold(f64::INFINITY, f64::min);
+                        let inside = shapes.iter().any(|sh| sh.contains_point(p));
+                        if d < r - 2.5 {
+                            assert!(
+                                inside,
+                                "切れ込み: corner={corner:?} p={p:?} d={d:.2} r={r} overshoot={overshoot} jitter={jitter}"
+                            );
+                        } else if d > r + 2.5 {
+                            assert!(
+                                !inside,
+                                "はみ出し: corner={corner:?} p={p:?} d={d:.2} r={r} overshoot={overshoot} jitter={jitter}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn test_curved_stroke_has_strictly_uniform_width() {
     let r = 12.0;
