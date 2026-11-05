@@ -285,6 +285,7 @@ impl TimelineLayout {
             (((scroll_x + self.grid_w) / CELL_W).ceil() as usize).min(self.max_frames_shown);
     }
 
+    /// スクロールバーのつまみを掴んだ位置と現在のポインタ位置からスクロール量を計算する
     fn scroll_from_thumb(
         &self,
         axis: ScrollAxis,
@@ -301,6 +302,7 @@ impl TimelineLayout {
         ((axis.of(pos) - grab_offset - start) / track_span).clamp(0.0, 1.0) * max_scroll
     }
 
+    /// 指定した軸のスクロールバーの当たり判定矩形・つまみ矩形・つまみ長・最大スクロール量を返す（不要なら `None`）
     fn scrollbar_metrics(
         &self,
         axis: ScrollAxis,
@@ -983,6 +985,7 @@ fn handle_timeline_click_start(
     }
 }
 
+/// スクロールバーのつまみドラッグ（またはトラッククリック）に応じて指定した軸のスクロール位置を更新する
 fn drag_scrollbar_thumb(
     host: &mut impl TimelineHost,
     layout: &mut TimelineLayout,

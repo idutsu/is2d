@@ -22,7 +22,7 @@ use crate::select_ops::{
     retain_selection_and_flush_deselected, select_single_shape_at, toggle_shape_selection,
     ArrangeMode,
 };
-use crate::symbol::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
+use crate::symbol::{ColorEffect, Document, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 use crate::symbol_ops::{
     enter_symbol_from_library, enter_symbol_timeline, exit_symbol_timeline,
     prepare_convert_selection_to_symbol, prepare_place_symbol_instance,
@@ -370,10 +370,13 @@ fn push_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
     push_undo_entry_from_doc(tab, coalesce);
 }
 
-fn mutate_timeline_with_undo(tab: &mut Tab, mutate: impl FnOnce(&mut Timeline) -> bool) -> bool {
+fn mutate_timeline_with_undo(
+    tab: &mut Tab,
+    mutate: impl FnOnce(&mut Timeline, &mut Document) -> bool,
+) -> bool {
     commit_floating(tab);
     push_undo(tab, None);
-    let changed = tab.with_active_timeline_mut(|tl, _| mutate(tl));
+    let changed = tab.with_active_timeline_mut(mutate);
     if changed {
         reset_session_after_timeline_change(tab);
     }
@@ -798,30 +801,17 @@ fn apply_raw_outline(
             .filter(|s| s.layer_id == target_lid)
             .cloned()
             .collect();
-        let prev_revs: Vec<(u64, u64)> = next_shapes
-            .iter()
-            .map(|s| (s.shape_id, s.mesh_revision))
-            .collect();
         erase_from_canvas(
             &mut next_shapes,
             &stroke_shapes,
             target_lid,
             &tab.session.editing_group_path,
         );
-        let unchanged = next_shapes.len() == prev_revs.len()
-            && next_shapes
-                .iter()
-                .zip(prev_revs.iter())
-                .all(|(s, &(id, rev))| s.shape_id == id && s.mesh_revision == rev);
-        if !unchanged {
-            push_undo(tab, None);
-            edit_layers(tab, &[target_lid], |edit| {
-                edit.shapes = next_shapes;
-            });
-            true
-        } else {
-            false
-        }
+        // 何も消えなければ edit_layers が false を返し、apply が Undo の控えを捨てる
+        push_undo(tab, None);
+        edit_layers(tab, &[target_lid], |edit| {
+            edit.shapes = next_shapes;
+        })
     }
 }
 
@@ -1493,9 +1483,8 @@ fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -
         return false;
     }
 
-    push_undo(tab, None);
     let next_tween = !is_currently_tweened;
-    let changed = tab.with_active_timeline_mut(|tl, _| {
+    let changed = mutate_timeline_with_undo(tab, |tl, _| {
         let curr_f = tl.current_frame;
         let mut changed = false;
         for &l_idx in &targets {
@@ -1517,7 +1506,6 @@ fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -
     });
 
     if changed {
-        reset_session_after_timeline_change(tab);
         select_shapes_for_timeline_selection(tab);
         tab.view.inspect_timeline_frame = true;
     }
@@ -1539,19 +1527,20 @@ fn apply_set_tween_rotate(tab: &mut Tab, rotate_mode: TweenRotate) -> bool {
         return false;
     }
 
-    commit_floating(tab);
-    push_undo(tab, None);
-    tab.with_active_timeline_mut(|tl, _| {
+    let changed = mutate_timeline_with_undo(tab, |tl, _| {
         if let Some(layer_mut) = tl.layers.get_mut(tl.active_layer) {
             if kf_idx < layer_mut.keyframes.len() {
                 layer_mut.keyframe_mut(kf_idx).tween_rotate = rotate_mode;
+                return true;
             }
         }
+        false
     });
-    reset_session_after_timeline_change(tab);
-    select_shapes_for_timeline_selection(tab);
-    tab.view.inspect_timeline_frame = true;
-    true
+    if changed {
+        select_shapes_for_timeline_selection(tab);
+        tab.view.inspect_timeline_frame = true;
+    }
+    changed
 }
 
 /// 選ばれている1つのシンボルインスタンスの設定を `update` で書き換える（取り消し1回分）
@@ -1699,7 +1688,7 @@ fn apply_timeline_insert_keyframe(tab: &mut Tab, clone_prev: bool) -> bool {
     if targets.is_empty() {
         return false;
     }
-    let changed = mutate_timeline_with_undo(tab, |tl| {
+    let changed = mutate_timeline_with_undo(tab, |tl, _| {
         tl.insert_keyframe_on_targets(&targets, clone_prev)
     });
     if changed && clone_prev {
@@ -1720,7 +1709,7 @@ fn apply_timeline_delete_keyframe(tab: &mut Tab) -> bool {
     {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl| {
+    mutate_timeline_with_undo(tab, |tl, _| {
         tl.delete_keyframe_on_targets(&targets);
         true
     })
@@ -1731,7 +1720,7 @@ fn apply_timeline_extend_frame(tab: &mut Tab) -> bool {
     if targets.is_empty() {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl| {
+    mutate_timeline_with_undo(tab, |tl, _| {
         tl.extend_frame_on_targets(&targets);
         true
     })
@@ -1746,7 +1735,7 @@ fn apply_timeline_remove_frame(tab: &mut Tab) -> bool {
     if !tab.active_timeline().can_remove_frame_on_targets(&targets) {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl| tl.remove_frame_on_targets(&targets))
+    mutate_timeline_with_undo(tab, |tl, _| tl.remove_frame_on_targets(&targets))
 }
 
 fn apply_timeline_move_or_copy_frames(
@@ -1762,12 +1751,10 @@ fn apply_timeline_move_or_copy_frames(
     else {
         return false;
     };
-    commit_floating(tab);
-    push_undo(tab, None);
-    tab.with_active_timeline_mut(|tl, doc| {
+    mutate_timeline_with_undo(tab, |tl, doc| {
         tl.move_or_copy_frames(sel, dst_sel, actual_dl, copy_mode, || doc.alloc_group_id());
+        true
     });
-    reset_session_after_timeline_change(tab);
     select_shapes_for_timeline_selection(tab);
     true
 }
@@ -1776,7 +1763,7 @@ fn apply_timeline_add_layer(tab: &mut Tab) -> bool {
     if tab.active_timeline().layers.len() >= MAX_LAYERS_PER_TIMELINE {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl| {
+    mutate_timeline_with_undo(tab, |tl, _| {
         tl.add_layer_above_active();
         true
     })
@@ -1786,7 +1773,7 @@ fn apply_timeline_delete_active_layer(tab: &mut Tab) -> bool {
     if tab.active_timeline().layers.len() <= 1 {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl| {
+    mutate_timeline_with_undo(tab, |tl, _| {
         tl.delete_active_layer();
         true
     })
@@ -1797,7 +1784,7 @@ fn apply_timeline_reorder_layer(tab: &mut Tab, from_idx: usize, to_idx: usize) -
     if from_idx >= len || to_idx >= len || from_idx == to_idx {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl| {
+    mutate_timeline_with_undo(tab, |tl, _| {
         tl.reorder_layer(from_idx, to_idx);
         true
     })
@@ -1837,7 +1824,7 @@ fn apply_set_layer_flag(
     {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl| {
+    mutate_timeline_with_undo(tab, |tl, _| {
         if let Some(layer) = tl.layers.get_mut(layer_idx) {
             *get_mut(layer) = value;
         }

@@ -4765,7 +4765,7 @@ fn test_nested_static_child_symbol_is_not_treated_as_dynamic_blank_frame() {
     );
     let lib = vec![sym_parent, sym_child];
     assert!(
-        !lib[0].has_dynamic_animation(&lib, 0),
+        !lib[0].has_dynamic_animation(&lib),
         "Frame 0 に shapes が無くても単一フレームの子シンボルインスタンスが存在する場合は空白フレームと誤判定されないこと"
     );
 }
@@ -20107,4 +20107,142 @@ fn test_bucket_in_grid_line_art_fills_only_that_cell() {
             assert!(!filled.contains_point(neighbor));
         }
     }
+}
+
+#[test]
+fn test_onion_skin_is_not_drawn_during_playback() {
+    let mut app = Is2dApp::default();
+    for (f, y) in [(0usize, 100.0), (1usize, 180.0), (2usize, 260.0)] {
+        if f > 0 {
+            apply(
+                &mut app,
+                Action::SwitchLayerAndFrame {
+                    layer_idx: 0,
+                    frame: f,
+                },
+            );
+            apply(&mut app, Action::InsertKeyframe { copy_prev: false });
+        }
+        apply(
+            &mut app,
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, y), Point::new(260.0, y)],
+                radius: 6.0,
+                color: Color32::from_rgb(220, 60, 60),
+            },
+        );
+    }
+    apply(
+        &mut app,
+        Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 1,
+        },
+    );
+    app.tab_mut().view.onion_skin_enabled = true;
+
+    let ctx = egui::Context::default();
+    let raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 820.0),
+        )),
+        ..Default::default()
+    };
+
+    let _ = ctx.run(raw_input.clone(), |ctx| app.update_ui(ctx));
+    assert!(app.tab().session.onion_cache.lock().entry_count() > 0);
+
+    timeline_ui::toggle_playback(&mut app);
+    assert!(app.timeline_ui.is_playing);
+    let _ = ctx.run(raw_input.clone(), |ctx| app.update_ui(ctx));
+    assert_eq!(app.tab().session.onion_cache.lock().entry_count(), 0);
+
+    timeline_ui::toggle_playback(&mut app);
+    assert!(!app.timeline_ui.is_playing);
+    let _ = ctx.run(raw_input, |ctx| app.update_ui(ctx));
+    assert!(app.tab().session.onion_cache.lock().entry_count() > 0);
+}
+
+#[test]
+fn test_leaving_symbol_releases_backdrop_cache() {
+    let mut app = Is2dApp::default();
+    apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(200.0, 100.0)],
+            radius: 8.0,
+            color: Color32::RED,
+        },
+    );
+    apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 220.0), Point::new(200.0, 220.0)],
+            radius: 8.0,
+            color: Color32::BLUE,
+        },
+    );
+    apply(
+        &mut app,
+        Action::SelectSingleAt {
+            pt: Point::new(150.0, 100.0),
+        },
+    );
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    let binding = app
+        .tab()
+        .scene()
+        .iter()
+        .find_map(|s| s.symbol_instance)
+        .expect("シンボルインスタンスが存在すること");
+    assert!(apply(&mut app, Action::EnterSymbolTimeline { binding }));
+
+    let ctx = egui::Context::default();
+    let raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 820.0),
+        )),
+        ..Default::default()
+    };
+    let _ = ctx.run(raw_input.clone(), |ctx| app.update_ui(ctx));
+    assert!(app.tab().session.backdrop_cache.lock().layer_count() > 0);
+
+    assert!(apply(&mut app, Action::ExitSymbolTimeline));
+    let _ = ctx.run(raw_input, |ctx| app.update_ui(ctx));
+    assert_eq!(app.tab().session.backdrop_cache.lock().layer_count(), 0);
+}
+
+#[test]
+fn test_instance_only_cel_keeps_no_spare_shape_capacity() {
+    let mut app = Is2dApp::default();
+    apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(200.0, 100.0)],
+            radius: 6.0,
+            color: Color32::RED,
+        },
+    );
+    apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 180.0), Point::new(200.0, 180.0)],
+            radius: 6.0,
+            color: Color32::BLUE,
+        },
+    );
+    apply(&mut app, Action::SelectAll);
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    assert!(apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: KVec2::new(4.0, 2.0),
+        }
+    ));
+    let cel = &app.tab().doc.root.layers[0].keyframes[0].cel;
+    assert_eq!(cel.instances.len(), 1);
+    assert_eq!(cel.shapes.len(), 0);
+    assert_eq!(cel.shapes.capacity(), 0);
 }

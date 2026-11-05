@@ -141,16 +141,16 @@ pub(crate) fn handle_select_tool_input(
                     handle_reshape_click(host, pt, shift_held);
                 }
             }
-
-            let tab = host.tab_mut();
-            if !matches!(tab.session.drag, ActiveCanvasDrag::Select(_)) {
-                let zoom = tab.view.zoom;
-                let hover = mouse_pt
-                    .map(|pt| compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode))
-                    .unwrap_or(HoverTarget::None);
-                tab.session.hover_target = hover;
-            }
         }
+    }
+    // アンカーの追加・削除のモードではドラッグを始めないので、どのモードでも同じ条件でよい
+    let tab = host.tab_mut();
+    if !matches!(tab.session.drag, ActiveCanvasDrag::Select(_)) {
+        let zoom = tab.view.zoom;
+        let hover = mouse_pt
+            .map(|pt| compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode))
+            .unwrap_or(HoverTarget::None);
+        tab.session.hover_target = hover;
     }
 }
 
@@ -161,7 +161,6 @@ fn handle_anchor_edit_input(
     mouse_pt: Option<Point>,
     is_add: bool,
 ) {
-    let sub_mode = host.tool().select_sub_mode;
     let just_pressed = response.hovered() && ui.input(|i| i.pointer.primary_pressed());
     if just_pressed {
         if let Some(pt) = mouse_pt {
@@ -173,12 +172,6 @@ fn handle_anchor_edit_input(
             apply(host, action);
         }
     }
-    let tab = host.tab_mut();
-    let zoom = tab.view.zoom;
-    let hover = mouse_pt
-        .map(|pt| compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode))
-        .unwrap_or(HoverTarget::None);
-    tab.session.hover_target = hover;
 }
 
 pub(crate) fn start_reshape_drag(

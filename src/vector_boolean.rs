@@ -238,6 +238,7 @@ fn merge_homogeneous_batch_into_canvas(
     canvas.extend(trailing_outside);
 }
 
+/// `s` の穴のうち `keep` が真を返すものだけを残した写し（`shape_id` は同じ）
 fn with_holes_kept(s: &FillShape, mut keep: impl FnMut(&Contour) -> bool) -> FillShape {
     let holes: Vec<Contour> = s.holes.iter().filter(|h| keep(h)).cloned().collect();
     if holes.len() == s.holes.len() {
@@ -342,6 +343,7 @@ fn seg_padded_bbox(seg: QuadBez, pad: f64) -> KRect {
     )
 }
 
+/// 切り抜き・結合に使う図形の列と、その輪郭を 8 本ずつの区間に分けたもの。区間の外接矩形で絞ってから線分を調べる
 struct ClipOutline<'a> {
     clip: &'a [FillShape],
     /// clip 全体の外接矩形（1.5 広げる）
@@ -376,6 +378,7 @@ impl<'a> ClipOutline<'a> {
         Self { clip, bbox, chunks }
     }
 
+    /// 矩形 `r` が、`clip` の輪郭の区間の外接矩形（1.5 広げたもの）のどれかと重なるか
     #[inline]
     fn near_outline(&self, r: KRect) -> bool {
         self.chunks
@@ -384,6 +387,7 @@ impl<'a> ClipOutline<'a> {
             .any(|&(b, _)| rects_overlap(r, b))
     }
 
+    /// 点 `p` が `clip` の図形のどれかの内側にあるか（y 範囲が重なる区間だけから巻き数を調べる）
     fn contains(&self, p: Point) -> bool {
         if !p.x.is_finite() || !p.y.is_finite() || !self.bbox.contains(p) {
             return false;
@@ -405,6 +409,7 @@ impl<'a> ClipOutline<'a> {
         })
     }
 
+    /// 穴 `hole`（外接矩形 `b`）をブール演算に渡す必要があるか（`clip` の輪郭が近くを通るか、穴が `clip` の内側にあるか）
     fn needs_hole(&self, hole: &Contour, b: KRect) -> bool {
         if !rects_overlap(b, self.bbox) {
             return false;
@@ -422,6 +427,7 @@ impl<'a> ClipOutline<'a> {
                 return true;
             }
         }
+        // 輪郭が近くを通らない穴は、全体が clip の内側か外側にあるので、穴の1点で決まる
         hole.segments.first().is_some_and(|s| self.contains(s.p0))
     }
 }

@@ -121,7 +121,7 @@ fn collect_symbol_and_descendants(
         collect_symbol_and_descendants(inst.binding.symbol_id, library, visited, out);
     }
     let mut cloned = sym.clone();
-    cloned.clear_preview_and_anim_caches();
+    cloned.clear_preview_cache();
     out.push(Arc::new(cloned));
 }
 

@@ -1804,15 +1804,13 @@ pub(crate) fn draw_canvas_contents(
         tab.view
             .artwork_painter(painter, painter.clip_rect(), stage_size, in_symbol_edit);
 
-    // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画
-    if in_symbol_edit {
-        if let Some(mesh) = tab.cached_backdrop_screen_mesh(zoom, pan) {
-            artwork_painter.add(arc_mesh_to_shape(mesh));
-        }
+    // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画（ルートでは何も返さず、キャッシュが空になる）
+    if let Some(mesh) = tab.cached_backdrop_screen_mesh(zoom, pan) {
+        artwork_painter.add(arc_mesh_to_shape(mesh));
     }
 
     // 0.5 オニオンスキン描画（前のフレーム＝青系半透明、次のフレーム＝緑系半透明）
-    if tab.view.onion_skin_enabled {
+    if tab.view.onion_skin_enabled && !timeline_ui.is_playing {
         draw_onion_skins(tab, &artwork_painter);
     } else {
         tab.clear_onion_skin_cache();

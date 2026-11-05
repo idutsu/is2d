@@ -100,8 +100,8 @@ pub(crate) fn interpolate_affine_with_pivot(
         return (end, p1);
     }
 
-    let (_, _, rot0, sx0, sy0, sh0) = decompose_affine_trs(start);
-    let (_, _, mut rot1, mut sx1, mut sy1, mut sh1) = decompose_affine_trs(end);
+    let (rot0, sx0, sy0, sh0) = decompose_affine_trs(start);
+    let (mut rot1, mut sx1, mut sy1, mut sh1) = decompose_affine_trs(end);
     // 開始と終了で行列式の符号（反転状態）が異なり、かつ双対表現 (-sx, -sy, -sh, rot + π) の方が
     // 回転角の差分が小さい場合（水平反転など）、不要な 180° 回転を防ぐため水平スケール反転表現を採用する
     if sy0 * sy1 < 0.0 {
@@ -175,8 +175,9 @@ pub(crate) fn interpolate_affine_with_pivot(
     (interp_xform, local_pivot)
 }
 
-fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64, f64, f64) {
-    let [a, b, c, d, tx, ty] = affine.as_coeffs();
+/// 2D アフィン変換から回転・拡大縮小・せん断 `(rot, sx, sy, shear)` を取り出す（平行移動はトゥイーンでピボットから作り直すので返さない）
+fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64) {
+    let [a, b, c, d, _, _] = affine.as_coeffs();
     let sx = a.hypot(b);
     let (cos_r, sin_r, rot) = if sx > 1e-9 {
         (a / sx, b / sx, b.atan2(a))
@@ -185,7 +186,7 @@ fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64, f64, f64) {
     };
     let shear = c * cos_r + d * sin_r;
     let sy = -c * sin_r + d * cos_r;
-    (tx, ty, rot, sx, sy, shear)
+    (rot, sx, sy, shear)
 }
 
 // ============================================================================
@@ -216,11 +217,9 @@ impl Default for Cel {
 impl Cel {
     pub(crate) fn new(all_shapes: Vec<FillShape>) -> Self {
         let (shapes, instances) = Self::split_shapes_and_instances(all_shapes);
-        Self {
-            shapes: Arc::new(shapes),
-            instances: Arc::new(instances),
-            revision: crate::vector_engine::next_mesh_revision(),
-        }
+        let mut cel = Self::default();
+        cel.set_parts(shapes, instances);
+        cel
     }
 
     pub(crate) fn new_with_instances(
@@ -228,11 +227,9 @@ impl Cel {
         instances: Vec<SymbolInstance>,
     ) -> Self {
         shapes.retain(|s| s.symbol_instance.is_none() && !s.exterior.segments.is_empty());
-        Self {
-            shapes: Arc::new(shapes),
-            instances: Arc::new(instances),
-            revision: crate::vector_engine::next_mesh_revision(),
-        }
+        let mut cel = Self::default();
+        cel.set_parts(shapes, instances);
+        cel
     }
 
     #[inline]
@@ -247,8 +244,15 @@ impl Cel {
         Arc::make_mut(&mut self.instances)
     }
 
+    /// セルの図形列とインスタンス列を入れ替える（文書と Undo の履歴に、中身より大きい領域を残さないよう余った容量を詰める）
     #[inline]
-    pub(crate) fn set_parts(&mut self, shapes: Vec<FillShape>, instances: Vec<SymbolInstance>) {
+    pub(crate) fn set_parts(
+        &mut self,
+        mut shapes: Vec<FillShape>,
+        mut instances: Vec<SymbolInstance>,
+    ) {
+        shapes.shrink_to_fit();
+        instances.shrink_to_fit();
         self.shapes = Arc::new(shapes);
         self.instances = Arc::new(instances);
         self.revision = crate::vector_engine::next_mesh_revision();

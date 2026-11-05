@@ -760,7 +760,7 @@ mod scene_base_cache {
         let has_dyn = !all_single_frame
             && kf.cel.instances.iter().filter(|i| keep(i)).any(|inst| {
                 library.iter().any(|sym| {
-                    sym.id == inst.binding.symbol_id && sym.has_dynamic_animation(library, 0)
+                    sym.id == inst.binding.symbol_id && sym.has_dynamic_animation(library)
                 })
             });
         if !all_single_frame && (has_tween || has_dyn) {
@@ -1032,6 +1032,7 @@ mod scene_base_cache {
         }
     }
 
+    /// `(shape_id, mesh_revision)` が同じ図形から描画・当たり判定のキャッシュを引き継ぐ
     fn reuse_caches_by_key(shapes: &mut [FillShape], donors: &[FillShape]) {
         if donors.is_empty() {
             return;
@@ -1084,6 +1085,11 @@ mod scene_base_cache {
     }
 
     impl BackdropCache {
+        #[cfg(test)]
+        pub(crate) fn layer_count(&self) -> usize {
+            self.layers.len()
+        }
+
         pub(crate) fn cached_screen_mesh(
             &mut self,
             doc: &Document,
@@ -1091,11 +1097,6 @@ mod scene_base_cache {
             zoom: f32,
             pan: Vec2,
         ) -> Option<Arc<egui::Mesh>> {
-            if edit_path.is_empty() {
-                self.layers.clear();
-                self.combined_screen_cache = None;
-                return None;
-            }
             let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
             let mut active_specs = Vec::new();
             for lvl_idx in 0..edit_path.levels.len() {
@@ -1367,6 +1368,11 @@ mod scene_base_cache {
                             })
                     })
             });
+        }
+
+        #[cfg(test)]
+        pub(crate) fn entry_count(&self) -> usize {
+            self.entries.len()
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -2705,7 +2711,7 @@ impl UndoHistory {
                 lib.push(prev_sym.clone());
             } else {
                 let mut cloned = sym.clone();
-                cloned.clear_preview_and_anim_caches();
+                cloned.clear_preview_cache();
                 lib.push(cloned);
             }
         }
@@ -3834,47 +3840,29 @@ pub(crate) fn insert_and_select_shapes_in_scope(
     for s in &new_shapes {
         tab.session.selection.insert_shape(s);
     }
-    if as_floating {
-        let scope = tab.session.editing_group_path.clone();
-        let mut raw_pieces = Vec::new();
-        let mut non_raw_shapes = Vec::new();
-        for s in new_shapes {
-            if s.is_raw_at_scope(&scope) {
-                raw_pieces.push(s);
-            } else {
-                non_raw_shapes.push(s);
-            }
-        }
-        if !raw_pieces.is_empty() {
-            tab.active_timeline()
-                .normalize_shape_layer_ids(&mut raw_pieces);
-            tab.session.set_floating(Some(Floating {
-                pieces: raw_pieces,
-                remainder: Vec::new(),
-                hidden: HashSet::new(),
-                modified: true,
-            }));
-        } else {
-            tab.session.set_floating(None);
-        }
-        if !non_raw_shapes.is_empty() {
-            let mut lids: Vec<LayerId> = non_raw_shapes.iter().map(|s| s.layer_id).collect();
-            lids.push(active_scope_layer_id(&tab.session, tab.active_timeline()));
-            edit_layers(tab, &lids, |edit| {
-                let insert_pos = edit.scope_insert_index();
-                edit.shapes.splice(insert_pos..insert_pos, non_raw_shapes);
-            });
-        }
-    } else {
-        if !new_shapes.is_empty() {
-            let mut lids: Vec<LayerId> = new_shapes.iter().map(|s| s.layer_id).collect();
-            lids.push(active_scope_layer_id(&tab.session, tab.active_timeline()));
-            edit_layers(tab, &lids, |edit| {
-                let insert_pos = edit.scope_insert_index();
-                edit.shapes.splice(insert_pos..insert_pos, new_shapes);
-            });
-        }
+    let scope = tab.session.editing_group_path.clone();
+    let (mut raw_pieces, doc_shapes): (Vec<FillShape>, Vec<FillShape>) = new_shapes
+        .into_iter()
+        .partition(|s| as_floating && s.is_raw_at_scope(&scope));
+    if raw_pieces.is_empty() {
         tab.session.set_floating(None);
+    } else {
+        tab.active_timeline()
+            .normalize_shape_layer_ids(&mut raw_pieces);
+        tab.session.set_floating(Some(Floating {
+            pieces: raw_pieces,
+            remainder: Vec::new(),
+            hidden: HashSet::new(),
+            modified: true,
+        }));
+    }
+    if !doc_shapes.is_empty() {
+        let mut lids: Vec<LayerId> = doc_shapes.iter().map(|s| s.layer_id).collect();
+        lids.push(active_scope_layer_id(&tab.session, tab.active_timeline()));
+        edit_layers(tab, &lids, |edit| {
+            let insert_pos = edit.scope_insert_index();
+            edit.shapes.splice(insert_pos..insert_pos, doc_shapes);
+        });
     }
     tab.session.transform_pivot = None;
 }

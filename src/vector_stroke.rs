@@ -203,15 +203,6 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
     let raw_f64: Vec<[f64; 2]> = raw_outline.iter().map(|&p| [p.x * z, p.y * z]).collect();
     let simplified = raw_f64.simplify_shape(OverlayFillRule::NonZero, 0.05);
 
-    if simplified.is_empty() {
-        let screen_outline = ring_f64_to_points(&raw_f64);
-        let r_est = estimate_brush_radius_from_ring(&screen_outline);
-        return smooth_ring_to_quad_contour(&screen_outline, r_est, true)
-            .into_iter()
-            .map(|exterior| FillShape::new(color, scale_to_world(exterior), Vec::new()))
-            .collect();
-    }
-
     let mut result = Vec::with_capacity(simplified.len());
     for shape_rings in simplified {
         if shape_rings.is_empty() {

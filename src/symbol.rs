@@ -123,7 +123,6 @@ pub(crate) struct SymbolDef {
     /// シンボル定義の変更世代番号（解決済みセルメッシュキャッシュの署名計算用）
     pub(crate) revision: u64,
     mini_preview_cache: SyncCache<Option<SymbolPreviewCache>>,
-    dynamic_anim_cache: SyncCache<Option<(u64, u64, bool)>>,
 }
 
 pub(crate) const MAX_SYMBOL_NEST_DEPTH: usize = 8;
@@ -234,14 +233,12 @@ impl SymbolDef {
             timeline,
             revision: crate::vector_engine::next_mesh_revision(),
             mini_preview_cache: SyncCache::new(None),
-            dynamic_anim_cache: SyncCache::new(None),
         }
     }
 
-    /// シンボル定義のミニプレビューおよび動的アニメーション判定の一時キャッシュを破棄する
-    pub(crate) fn clear_preview_and_anim_caches(&mut self) {
+    /// シンボル定義のミニプレビューの一時キャッシュを破棄する
+    pub(crate) fn clear_preview_cache(&mut self) {
         *self.mini_preview_cache.lock() = None;
-        *self.dynamic_anim_cache.lock() = None;
     }
 
     fn ensure_preview_local_cache(&self, library_revision: u64, library: &[SymbolDef]) {
@@ -317,54 +314,41 @@ impl SymbolDef {
     }
 
     /// このシンボル自身、または内部の入れ子シンボルが複数フレーム（または先頭フレーム空白）を持つかを再帰判定する
-    pub(crate) fn has_dynamic_animation(&self, library: &[SymbolDef], depth: usize) -> bool {
+    pub(crate) fn has_dynamic_animation(&self, library: &[SymbolDef]) -> bool {
+        let mut known = Vec::new();
+        self.has_dynamic_animation_inner(library, 0, &mut known)
+    }
+
+    /// 1回の判定の中で調べ終えた子のシンボル ID と結果 `known` を覚え、入れ子のインスタンスの数だけ同じ子を調べ直さないようにする
+    fn has_dynamic_animation_inner(
+        &self,
+        library: &[SymbolDef],
+        depth: usize,
+        known: &mut Vec<(u64, bool)>,
+    ) -> bool {
         if depth >= MAX_SYMBOL_NEST_DEPTH {
             return false;
-        }
-        let self_sig = self.timeline.layers.iter().fold(
-            self.revision
-                .wrapping_mul(31)
-                .wrapping_add(self.timeline.total_frames as u64),
-            |acc, l| {
-                let c0 = l
-                    .cel_at(0)
-                    .map_or(0, |c| c.revision.wrapping_add(u64::from(!c.is_empty())));
-                acc.wrapping_mul(31)
-                    .wrapping_add(u64::from(l.visible))
-                    .wrapping_mul(31)
-                    .wrapping_add(c0)
-            },
-        );
-        let lib_sig = library.iter().fold(library.len() as u64, |acc, s| {
-            acc.wrapping_mul(31)
-                .wrapping_add(s.id)
-                .wrapping_mul(31)
-                .wrapping_add(s.revision)
-                .wrapping_mul(31)
-                .wrapping_add(s.timeline.total_frames as u64)
-        });
-        if let Some((rev, sig, cached)) = *self.dynamic_anim_cache.lock() {
-            if rev == self_sig && sig == lib_sig {
-                return cached;
-            }
         }
         let frame_zero_empty = self
             .timeline
             .layers
             .iter()
             .all(|l| !l.visible || l.cel_at(0).is_none_or(|c| c.is_empty()));
-        let dynamic = if self.timeline.total_frames > 1 || frame_zero_empty {
-            true
-        } else {
-            self.timeline.instances().any(|inst| {
-                library.iter().any(|child| {
-                    child.id == inst.binding.symbol_id
-                        && child.has_dynamic_animation(library, depth + 1)
-                })
-            })
-        };
-        *self.dynamic_anim_cache.lock() = Some((self_sig, lib_sig, dynamic));
-        dynamic
+        if self.timeline.total_frames > 1 || frame_zero_empty {
+            return true;
+        }
+        self.timeline.instances().any(|inst| {
+            let sid = inst.binding.symbol_id;
+            if let Some(&(_, res)) = known.iter().find(|&&(id, _)| id == sid) {
+                return res;
+            }
+            let res = library
+                .iter()
+                .find(|child| child.id == sid)
+                .is_some_and(|child| child.has_dynamic_animation_inner(library, depth + 1, known));
+            known.push((sid, res));
+            res
+        })
     }
 
     /// シンボルの全フレーム（`0..total_frames`）を先頭から走査し、最初に図形が存在するフレームのローカル図形列を返す
