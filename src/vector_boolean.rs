@@ -1119,7 +1119,7 @@ fn flatten_shape_for_overlay(shape: &FillShape, quad_table: &mut Vec<QuadRecord>
 
 /// 輪郭変形（エッジつまみ変形・頂点移動）後のシェイプの自己交差・反対側輪郭の突き抜けを解消し、
 /// 正のワインディング領域（`OverlayFillRule::Positive`）のみを残して1つまたは複数の `FillShape` に分割・再構築する
-/// （丸ごと裏返って何も残らないときだけ、負のワインディング領域を残す）
+/// （丸ごと裏返ったときは何も残らず、図形は消える）
 pub(crate) fn resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape> {
     let mut quad_table: Vec<QuadRecord> = Vec::new();
     let Some(ext_ring) = flatten_contour_preserving_direction(&shape.exterior, &mut quad_table)
@@ -1135,13 +1135,13 @@ pub(crate) fn resolve_deformed_shape(shape: &FillShape) -> Vec<FillShape> {
     }
     let min_area = adaptive_overlay_min_area(std::slice::from_ref(shape), &[]);
     let subj = [rings];
-    let run = |rule| run_float_overlay(&subj, &[], OverlayRule::Subject, rule, min_area);
-    // 図形が丸ごと裏返ると、巻き数が全部負になって何も残らない。そのときは裏返った形のまま残す
-    // （一部だけが裏返ったときは、今までどおり裏返った側が消えて図形が分かれる）
-    let mut overlay_result = run(OverlayFillRule::Positive);
-    if overlay_result.is_empty() {
-        overlay_result = run(OverlayFillRule::Negative);
-    }
+    let overlay_result = run_float_overlay(
+        &subj,
+        &[],
+        OverlayRule::Subject,
+        OverlayFillRule::Positive,
+        min_area,
+    );
     let in_groups = [(std::slice::from_ref(shape), &subj[..])];
     reconstruct_shapes_from_overlay(&overlay_result, &in_groups, &quad_table, shape.color, false)
         .into_iter()

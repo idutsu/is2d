@@ -20378,8 +20378,9 @@ fn test_instance_only_cel_keeps_no_spare_shape_capacity() {
     assert_eq!(cel.shapes.capacity(), 0);
 }
 
+/// 頂点を動かして図形が丸ごと裏返ると、図形は消える（Undo で戻る）。一部だけが裏返ったときは、裏返った側だけが消える（利用者と決めた動き。2026-11-06）
 #[test]
-fn test_vertex_drag_flipping_whole_shape_keeps_shape() {
+fn test_vertex_drag_flip_removes_flipped_part() {
     use crate::doc_actions::{apply, Action};
     use crate::vector_engine::{Contour, FillShape};
     use kurbo::QuadBez;
@@ -20435,9 +20436,9 @@ fn test_vertex_drag_flipping_whole_shape_keeps_shape() {
                 to: to_pt,
             },
         ));
-        let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
-        assert_eq!(shapes.len(), 1);
-        assert!(shapes[0].exterior.signed_area() > 1000.0);
+        assert!(app.doc.root.layers[0].keyframes[0].cel.shapes.is_empty());
+        assert!(apply(&mut app, Action::Undo));
+        assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 1);
     }
 
     // 一部だけが裏返る場合：裏返っていない側（面積 1,250）だけが残ること
