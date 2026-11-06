@@ -831,11 +831,6 @@ pub(crate) fn signed_angle(a: KVec2, b: KVec2) -> f64 {
     (a.x * b.y - a.y * b.x).atan2((a.x * b.x + a.y * b.y).clamp(-1.0, 1.0))
 }
 
-#[inline]
-pub(crate) fn to_pos2(p: Point) -> Pos2 {
-    Pos2::new(p.x as f32, p.y as f32)
-}
-
 pub(crate) fn fill_cumulative_arc_lengths(pts: &[Point], cum: &mut Vec<f64>) {
     cum.clear();
     cum.reserve(pts.len());
@@ -941,7 +936,7 @@ fn tessellate_contours_to_mesh(exterior: &Contour, holes: &[Contour], color: Col
 
 fn build_polka_dot_selection_mesh(fill_mesh: &Mesh, zoom: f32) -> Mesh {
     const MAX_POLKA_DOT_GRID_CELLS: f32 = 25_000.0;
-    const MAX_POLKA_DOT_VERTICES: usize = (MAX_POLKA_DOT_GRID_CELLS as usize) * 8;
+    const MAX_POLKA_DOT_VERTICES: usize = (MAX_POLKA_DOT_GRID_CELLS as usize) * 4;
 
     let mut sel_mesh = Mesh::default();
     if fill_mesh.vertices.is_empty() || fill_mesh.indices.len() < 3 {
@@ -967,11 +962,8 @@ fn build_polka_dot_selection_mesh(fill_mesh: &Mesh, zoom: f32) -> Mesh {
     let min_step_for_budget = (bbox_area / MAX_POLKA_DOT_GRID_CELLS).sqrt();
     let step: f32 = (6.0 * base_inv_z).max(min_step_for_budget).max(1e-3);
     let scale = step / 6.0;
-    let r_white = 1.15 * scale;
-    let r_dark = 0.85 * scale;
-    let offset_dark = 0.7 * scale;
-    let white = Color32::from_rgba_unmultiplied(255, 255, 255, 220);
-    let dark = Color32::from_rgba_unmultiplied(20, 20, 20, 180);
+    let r_dot = 1.0 * scale;
+    let dot_color = Color32::from_rgba_unmultiplied(180, 184, 192, 195);
 
     let push_dot_quad = |mesh: &mut Mesh, center: Pos2, r: f32, color: Color32| {
         let base = mesh.vertices.len() as u32;
@@ -1040,17 +1032,10 @@ fn build_polka_dot_selection_mesh(fill_mesh: &Mesh, zoom: f32) -> Mesh {
                 let c1 = bc.x * (y - b.y) - bc.y * (x - b.x);
                 let c2 = ca.x * (y - c.y) - ca.y * (x - c.x);
                 if (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0) || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0) {
-                    if sel_mesh.vertices.len() + 8 > MAX_POLKA_DOT_VERTICES {
+                    if sel_mesh.vertices.len() + 4 > MAX_POLKA_DOT_VERTICES {
                         break 'tri_loop;
                     }
-                    let pt = Pos2::new(x, y);
-                    push_dot_quad(&mut sel_mesh, pt, r_white, white);
-                    push_dot_quad(
-                        &mut sel_mesh,
-                        Pos2::new(pt.x + offset_dark, pt.y + offset_dark),
-                        r_dark,
-                        dark,
-                    );
+                    push_dot_quad(&mut sel_mesh, Pos2::new(x, y), r_dot, dot_color);
                 }
             }
         }

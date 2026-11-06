@@ -932,7 +932,7 @@ impl Is2dApp {
             self.apply_action(action, ctx);
         }
 
-        panels::draw_left_toolbar(&mut self.tool, &mut actions, ctx);
+        panels::draw_left_toolbar(&self.tool, &mut actions, ctx);
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
         }

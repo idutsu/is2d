@@ -55,7 +55,6 @@ pub(crate) fn handle_brush_or_eraser_input(
             tab.session.drag = ActiveCanvasDrag::PaintStroke {
                 stroke,
                 committed_world_mesh: egui::Mesh::default(),
-                tail_outline,
                 tail_mesh,
                 tail_start_idx: 0,
             };
@@ -67,7 +66,6 @@ pub(crate) fn handle_brush_or_eraser_input(
             ActiveCanvasDrag::PaintStroke {
                 stroke,
                 committed_world_mesh,
-                tail_outline,
                 tail_mesh,
                 tail_start_idx,
             },
@@ -82,9 +80,9 @@ pub(crate) fn handle_brush_or_eraser_input(
                     *tail_start_idx = stroke.len().saturating_sub(2);
                 }
                 stroke.push(pt);
-                *tail_outline =
+                let tail_outline =
                     generate_brush_outline_at_zoom(&stroke[*tail_start_idx..], base_r, z);
-                *tail_mesh = tessellate_raw_polygon(tail_outline, preview_color);
+                *tail_mesh = tessellate_raw_polygon(&tail_outline, preview_color);
             }
         }
     }
@@ -134,24 +132,15 @@ pub(crate) fn pick_color_at(host: &mut impl ActionHost, pt: Point) -> Option<Col
 }
 
 /// 進行中のブラシ・消しゴムストロークの増分プレビューメッシュを描画する
-pub(crate) fn draw_active_stroke_preview(
-    tab: &Tab,
-    active_tool: Tool,
-    artwork_painter: &egui::Painter,
-    gizmo_painter: &egui::Painter,
-) {
+pub(crate) fn draw_active_stroke_preview(tab: &Tab, artwork_painter: &egui::Painter) {
     let ActiveCanvasDrag::PaintStroke {
         committed_world_mesh,
-        tail_outline,
         tail_mesh,
         ..
     } = &tab.session.drag
     else {
         return;
     };
-    if tail_outline.is_empty() && committed_world_mesh.is_empty() {
-        return;
-    }
     if !committed_world_mesh.is_empty() {
         artwork_painter.add(egui::Shape::Mesh(transform_mesh_to_screen(
             committed_world_mesh.clone(),
@@ -167,19 +156,6 @@ pub(crate) fn draw_active_stroke_preview(
             tab.view.pan,
             None,
         )));
-    }
-
-    if active_tool == Tool::Eraser {
-        let n = tail_outline.len();
-        for i in 0..n {
-            gizmo_painter.line_segment(
-                [
-                    tab.view.world_to_screen(tail_outline[i]),
-                    tab.view.world_to_screen(tail_outline[(i + 1) % n]),
-                ],
-                Stroke::new(1.2_f32, Color32::from_rgb(220, 60, 60)),
-            );
-        }
     }
 }
 

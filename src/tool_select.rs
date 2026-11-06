@@ -10,7 +10,7 @@ use crate::select_ops::{apply_click_selection, finish_selection_drag, update_sel
 pub(crate) use crate::select_ops::{
     compute_hover_target, handle_canvas_double_click, set_moved_vertex, set_pulled_edge,
 };
-use crate::vector_engine::{to_pos2, FillShape};
+use crate::vector_engine::FillShape;
 
 // ============================================================================
 // 選択ツール（Tool::Select / V キー）・輪郭変形・アンカー編集・グループ・クリップボード
@@ -24,13 +24,6 @@ pub(crate) fn draw_flash_selection_overlay(tab: &Tab, painter: &egui::Painter, s
         return;
     };
     painter.add(egui::Shape::Mesh(shape.selection_screen_mesh(zoom, pan)));
-    draw_shape_contour_lines(
-        tab,
-        painter,
-        shape,
-        Stroke::new(1.5_f32, Color32::from_rgb(0, 175, 255)),
-        false,
-    );
 }
 
 pub(crate) fn draw_shape_contour_lines(
@@ -480,6 +473,7 @@ pub(crate) fn draw_select_tool_cursor(
     painter: &egui::Painter,
     pos: Pos2,
 ) {
+    ctx.set_cursor_icon(CursorIcon::Default);
     match &tab.session.drag {
         ActiveCanvasDrag::Select(SelectDragState::PullEdge {
             shape_id,
@@ -487,7 +481,6 @@ pub(crate) fn draw_select_tool_cursor(
             seg_idx,
             ..
         }) => {
-            ctx.set_cursor_icon(CursorIcon::Grabbing);
             if tab.view.show_wireframe {
                 if let Some(seg) =
                     tab.scene()
@@ -496,10 +489,8 @@ pub(crate) fn draw_select_tool_cursor(
                     draw_highlighted_quad_segment(tab, painter, seg);
                 }
             }
-            draw_flash_curve_cursor_badge(painter, pos);
         }
         ActiveCanvasDrag::Select(SelectDragState::MoveVertex { snapped_to, .. }) => {
-            ctx.set_cursor_icon(CursorIcon::Grabbing);
             if let Some(snap_pt) = snapped_to {
                 let sp = tab.view.world_to_screen(*snap_pt);
                 painter.circle_stroke(
@@ -509,22 +500,15 @@ pub(crate) fn draw_select_tool_cursor(
                 );
                 painter.circle_filled(sp, 4.0, Color32::from_rgb(255, 50, 140));
             }
-            draw_flash_corner_cursor_badge(painter, pos);
         }
-        ActiveCanvasDrag::MoveSelection(_) => {
-            ctx.set_cursor_icon(CursorIcon::Grabbing);
-        }
-        ActiveCanvasDrag::Marquee(_) => {
-            ctx.set_cursor_icon(CursorIcon::Crosshair);
-        }
-        _ => draw_select_sub_mode_cursor(tab, select_sub_mode, ctx, painter, pos),
+        ActiveCanvasDrag::MoveSelection(_) | ActiveCanvasDrag::Marquee(_) => {}
+        _ => draw_select_sub_mode_cursor(tab, select_sub_mode, painter, pos),
     }
 }
 
 fn draw_select_sub_mode_cursor(
     tab: &Tab,
     select_sub_mode: SelectSubMode,
-    ctx: &egui::Context,
     painter: &egui::Painter,
     pos: Pos2,
 ) {
@@ -539,7 +523,6 @@ fn draw_select_sub_mode_cursor(
                 ..
             } = tab.session.hover_target
             {
-                ctx.set_cursor_icon(CursorIcon::PointingHand);
                 if let Some(seg) = tab
                     .scene()
                     .get_contour_segment(shape_id, contour_idx, seg_idx)
@@ -549,26 +532,24 @@ fn draw_select_sub_mode_cursor(
                 let cp = tab.view.world_to_screen(closest_pos);
                 painter.circle_filled(cp, 5.5, Color32::from_rgb(30, 200, 95));
                 painter.circle_stroke(cp, 5.5, Stroke::new(2.0_f32, Color32::WHITE));
-            } else {
-                ctx.set_cursor_icon(CursorIcon::Default);
             }
         }
         SelectSubMode::DeleteAnchor => {
             draw_anchor_edit_cursor_badge(painter, pos, false);
             if let HoverTarget::Vertex { pos: v_pos, .. } = tab.session.hover_target {
-                ctx.set_cursor_icon(CursorIcon::PointingHand);
                 let vp = tab.view.world_to_screen(v_pos);
                 painter.circle_filled(vp, 6.0, Color32::from_rgb(235, 55, 55));
                 painter.circle_stroke(vp, 6.0, Stroke::new(2.0_f32, Color32::WHITE));
-            } else {
-                ctx.set_cursor_icon(CursorIcon::Default);
             }
         }
-        SelectSubMode::Reshape => draw_reshape_hover_cursor(tab, ctx, painter, pos),
+        SelectSubMode::Reshape => draw_reshape_hover_cursor(tab, painter),
     }
 }
 
-fn draw_reshape_hover_cursor(tab: &Tab, ctx: &egui::Context, painter: &egui::Painter, pos: Pos2) {
+fn draw_reshape_hover_cursor(tab: &Tab, painter: &egui::Painter) {
+    if !tab.view.show_wireframe {
+        return;
+    }
     match tab.session.hover_target {
         HoverTarget::Vertex {
             pos: v_pos,
@@ -576,28 +557,24 @@ fn draw_reshape_hover_cursor(tab: &Tab, ctx: &egui::Context, painter: &egui::Pai
             contour_idx,
             ..
         } => {
-            ctx.set_cursor_icon(CursorIcon::PointingHand);
-            if tab.view.show_wireframe {
-                if let Some(contour) = tab
-                    .scene()
-                    .shape_by_id(shape_id)
-                    .and_then(|s| s.get_contour(contour_idx))
-                {
-                    for seg in contour.segments.iter() {
-                        let p = tab.view.world_to_screen(seg.p0);
-                        painter.circle_filled(p, 3.2, Color32::WHITE);
-                        painter.circle_stroke(
-                            p,
-                            3.2,
-                            Stroke::new(1.2_f32, Color32::from_rgb(30, 130, 240)),
-                        );
-                    }
+            if let Some(contour) = tab
+                .scene()
+                .shape_by_id(shape_id)
+                .and_then(|s| s.get_contour(contour_idx))
+            {
+                for seg in contour.segments.iter() {
+                    let p = tab.view.world_to_screen(seg.p0);
+                    painter.circle_filled(p, 3.2, Color32::WHITE);
+                    painter.circle_stroke(
+                        p,
+                        3.2,
+                        Stroke::new(1.2_f32, Color32::from_rgb(30, 130, 240)),
+                    );
                 }
-                let vp = tab.view.world_to_screen(v_pos);
-                painter.circle_filled(vp, 5.5, Color32::from_rgb(255, 120, 40));
-                painter.circle_stroke(vp, 5.5, Stroke::new(2.0_f32, Color32::WHITE));
             }
-            draw_flash_corner_cursor_badge(painter, pos);
+            let vp = tab.view.world_to_screen(v_pos);
+            painter.circle_filled(vp, 5.5, Color32::from_rgb(255, 120, 40));
+            painter.circle_stroke(vp, 5.5, Stroke::new(2.0_f32, Color32::WHITE));
         }
         HoverTarget::Edge {
             shape_id,
@@ -606,28 +583,19 @@ fn draw_reshape_hover_cursor(tab: &Tab, ctx: &egui::Context, painter: &egui::Pai
             closest_pos,
             ..
         } => {
-            ctx.set_cursor_icon(CursorIcon::PointingHand);
-            if tab.view.show_wireframe {
-                if let Some(seg) = tab
-                    .scene()
-                    .get_contour_segment(shape_id, contour_idx, seg_idx)
-                {
-                    draw_highlighted_quad_segment(tab, painter, seg);
-                }
-                painter.circle_filled(
-                    tab.view.world_to_screen(closest_pos),
-                    4.0,
-                    Color32::from_rgb(0, 175, 255),
-                );
+            if let Some(seg) = tab
+                .scene()
+                .get_contour_segment(shape_id, contour_idx, seg_idx)
+            {
+                draw_highlighted_quad_segment(tab, painter, seg);
             }
-            draw_flash_curve_cursor_badge(painter, pos);
+            painter.circle_filled(
+                tab.view.world_to_screen(closest_pos),
+                4.0,
+                Color32::from_rgb(0, 175, 255),
+            );
         }
-        HoverTarget::Fill { .. } => {
-            ctx.set_cursor_icon(CursorIcon::Move);
-        }
-        HoverTarget::None => {
-            ctx.set_cursor_icon(CursorIcon::Default);
-        }
+        HoverTarget::Fill { .. } | HoverTarget::None => {}
     }
 }
 
@@ -651,36 +619,6 @@ pub(crate) fn draw_highlighted_quad_segment(tab: &Tab, painter: &egui::Painter, 
         painter.circle_filled(p, 4.0, Color32::WHITE);
         painter.circle_stroke(p, 4.0, Stroke::new(1.8_f32, Color32::from_rgb(0, 140, 230)));
     }
-}
-
-/// Flash の選択ツールでエッジに近づいた際の「曲線アーク」カーソルバッジを描画
-fn draw_flash_curve_cursor_badge(painter: &egui::Painter, cursor: Pos2) {
-    let base = cursor + Vec2::new(14.0, 14.0);
-    let arc = QuadBez::new(
-        Point::new(base.x as f64 - 6.0, base.y as f64 + 4.0),
-        Point::new(base.x as f64, base.y as f64 - 8.0),
-        Point::new(base.x as f64 + 8.0, base.y as f64 + 4.0),
-    );
-    let mut prev = arc.p0;
-    for k in 1..=10 {
-        let curr = arc.eval(k as f64 / 10.0);
-        painter.line_segment(
-            [to_pos2(prev), to_pos2(curr)],
-            Stroke::new(2.2_f32, Color32::from_rgb(20, 20, 25)),
-        );
-        prev = curr;
-    }
-}
-
-/// Flash の選択ツールで頂点（アンカー）に近づいた際の「角（コーナー）」カーソルバッジを描画
-fn draw_flash_corner_cursor_badge(painter: &egui::Painter, cursor: Pos2) {
-    let base = cursor + Vec2::new(14.0, 14.0);
-    let p0 = Pos2::new(base.x - 6.0, base.y + 5.0);
-    let p1 = Pos2::new(base.x + 1.0, base.y - 5.0);
-    let p2 = Pos2::new(base.x + 8.0, base.y + 5.0);
-    let stroke = Stroke::new(2.2_f32, Color32::from_rgb(20, 20, 25));
-    painter.line_segment([p0, p1], stroke);
-    painter.line_segment([p1, p2], stroke);
 }
 
 /// アンカー追加（`is_plus = true`: 緑「＋」）およびアンカー削除（`is_plus = false`: 赤「－」）のカーソルバッジを描画

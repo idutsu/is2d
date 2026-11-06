@@ -275,9 +275,6 @@ pub(crate) enum Action {
     },
     AddLayer,
     DeleteActiveLayer,
-    MoveActiveLayer {
-        up: bool,
-    },
     ReorderLayer {
         src_idx: usize,
         dst_idx: usize,
@@ -720,7 +717,6 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         } => apply_timeline_move_or_copy_frames(tab, sel, layer_delta, frame_delta, copy_mode),
         Action::AddLayer => apply_timeline_add_layer(tab),
         Action::DeleteActiveLayer => apply_timeline_delete_active_layer(tab),
-        Action::MoveActiveLayer { up } => apply_timeline_move_active_layer(tab, up),
         Action::ReorderLayer { src_idx, dst_idx } => {
             apply_timeline_reorder_layer(tab, src_idx, dst_idx)
         }
@@ -1776,24 +1772,6 @@ fn apply_timeline_reorder_layer(tab: &mut Tab, from_idx: usize, to_idx: usize) -
     })
 }
 
-fn apply_timeline_move_active_layer(tab: &mut Tab, up: bool) -> bool {
-    let tl = tab.active_timeline();
-    let len = tl.layers.len();
-    let curr = tl.active_layer;
-    let target = if up {
-        if curr + 1 >= len {
-            return false;
-        }
-        curr + 1
-    } else {
-        if curr == 0 {
-            return false;
-        }
-        curr - 1
-    };
-    apply_timeline_reorder_layer(tab, curr, target)
-}
-
 /// レイヤー `layer_idx` の表示・ロックの印（`get` で読み、`get_mut` で書く）を `value` にする
 fn apply_set_layer_flag(
     tab: &mut Tab,
@@ -2070,11 +2048,6 @@ pub(crate) fn timeline_add_layer(host: &mut impl ActionHost) {
 #[cfg(test)]
 pub(crate) fn timeline_delete_active_layer(host: &mut impl ActionHost) -> bool {
     apply(host, Action::DeleteActiveLayer)
-}
-
-#[cfg(test)]
-pub(crate) fn timeline_move_active_layer(host: &mut impl ActionHost, up: bool) -> bool {
-    apply(host, Action::MoveActiveLayer { up })
 }
 
 #[cfg(test)]

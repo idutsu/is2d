@@ -9,8 +9,7 @@ pub(crate) use crate::doc_actions::{
     scrub_ruler_to_frame, select_timeline_cells, set_layer_locked, set_layer_visible,
     switch_to_layer_and_frame, timeline_add_layer, timeline_delete_active_layer,
     timeline_delete_keyframe, timeline_extend_frame, timeline_insert_keyframe,
-    timeline_move_active_layer, timeline_move_or_copy_frames, timeline_remove_frame,
-    timeline_reorder_layer,
+    timeline_move_or_copy_frames, timeline_remove_frame, timeline_reorder_layer,
 };
 use crate::symbol::TweenState;
 use crate::timeline::TimelineCellSelection;
@@ -464,56 +463,18 @@ fn draw_timeline_control_bar(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                draw_control_bar_layer_buttons(host, ui);
-                ui.separator();
                 draw_control_bar_transport_buttons(host, ui);
                 ui.separator();
                 draw_control_bar_keyframe_buttons(host, ui);
                 ui.separator();
                 draw_control_bar_onion_controls(host.tab_mut(), ui);
+                ui.separator();
+                draw_control_bar_frame_and_fps(host, ui);
             });
         });
 }
 
-/// コントロールバー：レイヤー追加・削除・上下移動ボタン
-fn draw_control_bar_layer_buttons(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
-    let tl = host.tab().active_timeline();
-    let len = tl.layers.len();
-    let act = tl.active_layer;
-    if ui
-        .button("＋ レイヤー")
-        .on_hover_text("新しいレイヤーを現在のレイヤーの前面に追加")
-        .clicked()
-    {
-        apply(host, Action::AddLayer);
-    }
-    if ui
-        .add_enabled(
-            len > 1,
-            egui::Button::new(format!("{} 削除", icons::DELETE)),
-        )
-        .on_hover_text("現在選択中のレイヤーを削除")
-        .clicked()
-    {
-        apply(host, Action::DeleteActiveLayer);
-    }
-    if ui
-        .add_enabled(act + 1 < len, egui::Button::new("▲"))
-        .on_hover_text("レイヤーを1つ前面（上）へ移動（ドラッグ＆ドロップでも入れ替え可能）")
-        .clicked()
-    {
-        apply(host, Action::MoveActiveLayer { up: true });
-    }
-    if ui
-        .add_enabled(act > 0, egui::Button::new("▼"))
-        .on_hover_text("レイヤーを1つ背面（下）へ移動（ドラッグ＆ドロップでも入れ替え可能）")
-        .clicked()
-    {
-        apply(host, Action::MoveActiveLayer { up: false });
-    }
-}
-
-/// コントロールバー：再生・コマ送り・総フレーム数・FPS設定
+/// コントロールバー：再生・コマ送り・ループ設定
 fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
     if ui
         .button(icons::SKIP_PREV)
@@ -531,9 +492,9 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
     }
     let is_playing = host.timeline_ui().is_playing;
     let play_label = if is_playing {
-        format!("{} 停止 (Enter)", icons::PAUSE)
+        icons::PAUSE
     } else {
-        format!("{} 再生 (Enter)", icons::PLAY)
+        icons::PLAY
     };
     if ui
         .selectable_label(is_playing, play_label)
@@ -565,17 +526,13 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
     {
         host.timeline_ui_mut().loop_playback = !loop_pb;
     }
+}
 
-    ui.separator();
+/// コントロールバー右端：現在フレーム表示・FPS設定
+fn draw_control_bar_frame_and_fps(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
+    let current_frame = host.tab().active_timeline().current_frame + 1;
+    ui.label(format!("{current_frame}F"));
 
-    let tl = host.tab().active_timeline();
-    ui.label(format!(
-        "フレーム: {:>2} / {} f",
-        tl.current_frame + 1,
-        tl.total_frames
-    ));
-
-    ui.label("FPS:");
     let mut fps_val = host.tab().doc.fps;
     let fps_resp = ui.add(
         egui::DragValue::new(&mut fps_val)
@@ -583,6 +540,7 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
             .update_while_editing(false)
             .speed(0.25),
     );
+    ui.label("FPS");
     if fps_resp.changed() {
         let next_fps = fps_val.clamp(1, 60);
         if apply(host, Action::SetFps { fps: next_fps }) && host.timeline_ui().is_playing {
@@ -613,35 +571,35 @@ fn draw_control_bar_keyframe_buttons(host: &mut impl TimelineHost, ui: &mut egui
     let can_remove_frame = tl.can_remove_frame_on_targets(&targets);
     let can_delete_kf = tl.can_delete_keyframe_on_targets(&targets);
     if ui
-        .add_enabled(editable, egui::Button::new("● キーフレーム (F6)"))
+        .add_enabled(editable, egui::Button::new("●"))
         .on_hover_text("現在の絵を複製して新しいキーフレームを挿入 (F6)")
         .clicked()
     {
         apply(host, Action::InsertKeyframe { copy_prev: true });
     }
     if ui
-        .add_enabled(editable, egui::Button::new("○ 空白KF (F7)"))
+        .add_enabled(editable, egui::Button::new("○"))
         .on_hover_text("空の新しいキーフレームを挿入 (F7)")
         .clicked()
     {
         apply(host, Action::InsertKeyframe { copy_prev: false });
     }
     if ui
-        .add_enabled(editable, egui::Button::new("＋ 延長 (F5)"))
+        .add_enabled(editable, egui::Button::new("＋"))
         .on_hover_text("選択レイヤー（未選択時は全レイヤー）のフレーム尺を1コマ延長 (F5)")
         .clicked()
     {
         apply(host, Action::ExtendFrame);
     }
     if ui
-        .add_enabled(can_remove_frame, egui::Button::new("－ 短縮"))
+        .add_enabled(can_remove_frame, egui::Button::new("－"))
         .on_hover_text("選択レイヤー（未選択時は全レイヤー）のフレームを1コマ削除・短縮 (Shift+F5)")
         .clicked()
     {
         apply(host, Action::RemoveFrame);
     }
     if ui
-        .add_enabled(can_delete_kf, egui::Button::new("× KF削除"))
+        .add_enabled(can_delete_kf, egui::Button::new("×"))
         .on_hover_text("現在のキーフレームを削除 / クリア (Shift+F6)")
         .clicked()
     {
@@ -652,15 +610,13 @@ fn draw_control_bar_keyframe_buttons(host: &mut impl TimelineHost, ui: &mut egui
         .tab()
         .active_timeline()
         .can_toggle_tween_at_current_frame();
-    let tween_btn = egui::Button::new(egui::RichText::new("⇄ トゥイーン (T)").color(
-        if is_tweened {
-            Color32::from_rgb(75, 30, 150)
-        } else if can_tween {
-            Color32::from_rgb(35, 40, 48)
-        } else {
-            Color32::from_rgb(150, 156, 168)
-        },
-    ))
+    let tween_btn = egui::Button::new(egui::RichText::new("⇄").color(if is_tweened {
+        Color32::from_rgb(75, 30, 150)
+    } else if can_tween {
+        Color32::from_rgb(35, 40, 48)
+    } else {
+        Color32::from_rgb(150, 156, 168)
+    }))
     .fill(if is_tweened {
         Color32::from_rgb(218, 198, 250)
     } else {
@@ -689,10 +645,7 @@ fn draw_control_bar_keyframe_buttons(host: &mut impl TimelineHost, ui: &mut egui
 /// コントロールバー：オニオンスキン ON/OFF・前後フレーム数設定
 fn draw_control_bar_onion_controls(tab: &mut Tab, ui: &mut egui::Ui) {
     if ui
-        .selectable_label(
-            tab.view.onion_skin_enabled,
-            format!("{} オニオンスキン (O)", icons::ONION_SKIN),
-        )
+        .selectable_label(tab.view.onion_skin_enabled, icons::ONION_SKIN)
         .on_hover_text("オニオンスキン（前後のフレームの透かし表示）切替 (O)")
         .clicked()
     {

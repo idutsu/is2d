@@ -48,7 +48,7 @@ pub(crate) enum RightPanelTab {
     /// 現在のツール・選択中フレーム・選択中シンボルの詳細設定タブ
     #[default]
     Properties,
-    /// 塗りカラー・プリセットパレット選択タブ
+    /// 塗りカラーピッカー選択タブ
     Color,
     /// シンボル一覧・プレビュー・配置・編集タブ
     Library,
@@ -72,7 +72,7 @@ impl RightPanelTab {
 /// ツール種別に対応するアイコン文字（Layer 4 プレゼンテーション定義）
 pub(crate) const fn tool_icon(tool: Tool) -> &'static str {
     match tool {
-        Tool::Select => "\u{e923}",
+        Tool::Select => "\u{f1e2}",
         Tool::Transform => "\u{e5c3}",
         Tool::Brush => "\u{e3ae}",
         Tool::Eraser => "\u{e6d0}",
@@ -301,7 +301,7 @@ fn draw_view_menu(tab: &mut Tab, ui: &mut egui::Ui) {
 // ------------------------------------------------------------------------
 
 pub(crate) fn draw_left_toolbar(
-    tool: &mut ToolSettings,
+    tool: &ToolSettings,
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
@@ -319,13 +319,7 @@ pub(crate) fn draw_left_toolbar(
                 ui.spacing_mut().item_spacing.y = 4.0;
                 let btn_size = Vec2::new(34.0, 30.0);
 
-                // (1) メインツール選択ボタン群（Tool::ALL を自動ループ）
                 draw_left_main_tool_buttons(tool, actions, ui, btn_size);
-
-                ui.separator();
-
-                // (2) 塗りカラーピッカーボタン
-                draw_color_picker_controls(tool, ui);
             });
         });
 }
@@ -365,18 +359,16 @@ fn draw_left_main_tool_buttons(
     }
 }
 
-fn draw_color_picker_controls(tool: &mut ToolSettings, ui: &mut egui::Ui) {
-    egui::color_picker::color_edit_button_srgba(
-        ui,
-        &mut tool.brush_color,
-        egui::color_picker::Alpha::OnlyBlend,
-    )
-    .on_hover_text("塗りカラー変更");
-}
-
 // ------------------------------------------------------------------------
 // 1.5 ドキュメントタブバー（複数ファイルの同時オープン・切り替え・閉じる・新規追加）
 // ------------------------------------------------------------------------
+
+const TAB_BAR_HEIGHT: f32 = 26.0;
+const TAB_ACTIVE_BG: Color32 = Color32::from_rgb(245, 246, 248);
+const TAB_INACTIVE_BG: Color32 = Color32::from_rgb(250, 250, 252);
+const TAB_ACTIVE_FG: Color32 = Color32::from_rgb(62, 62, 62);
+const TAB_INACTIVE_FG: Color32 = Color32::from_rgb(185, 188, 194);
+const TAB_BORDER_COLOR: Color32 = Color32::from_rgb(222, 224, 228);
 
 pub(crate) fn draw_document_tab_bar(
     tabs: &[Tab],
@@ -384,93 +376,118 @@ pub(crate) fn draw_document_tab_bar(
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
-    egui::TopBottomPanel::top("document_tab_bar").show(ctx, |ui| {
-        egui::ScrollArea::horizontal()
-            .id_salt("document_tab_scroll")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+    let border_stroke = Stroke::new(1.0, TAB_BORDER_COLOR);
 
-                    let mut switch_target = None;
-                    let mut close_target = None;
+    egui::TopBottomPanel::top("document_tab_bar")
+        .exact_height(TAB_BAR_HEIGHT)
+        .show_separator_line(false)
+        .frame(
+            egui::Frame::none()
+                .fill(TAB_INACTIVE_BG)
+                .inner_margin(egui::Margin::ZERO),
+        )
+        .show(ctx, |ui| {
+            let bar_rect = ui.max_rect();
+            let y_bot = bar_rect.max.y - 0.5;
 
-                    for (idx, tab) in tabs.iter().enumerate() {
-                        let is_active = idx == active_idx;
-                        let title = tab.display_title();
-                        let bg_fill = if is_active {
-                            Color32::from_rgb(255, 255, 255)
-                        } else {
-                            Color32::from_rgb(232, 235, 240)
-                        };
-                        let border_color = if is_active {
-                            Color32::from_rgb(0, 120, 215)
-                        } else {
-                            Color32::from_rgb(205, 210, 218)
-                        };
+            egui::ScrollArea::horizontal()
+                .id_salt("document_tab_scroll")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::ZERO;
 
-                        egui::Frame::none()
-                            .fill(bg_fill)
-                            .stroke(Stroke::new(1.0_f32, border_color))
-                            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
-                                    let text = egui::RichText::new(title).color(if is_active {
-                                        Color32::from_rgb(15, 25, 40)
-                                    } else {
-                                        Color32::from_rgb(90, 98, 110)
-                                    });
-                                    let btn_resp = ui.add(egui::Button::new(text).frame(false));
-                                    if btn_resp.clicked() {
-                                        switch_target = Some(idx);
-                                    }
-                                    btn_resp.on_hover_ui(|ui| match tab.file.as_deref() {
-                                        Some(p) => {
-                                            ui.label(format!(
-                                                "{}\nクリックしてこのドキュメントへ切り替え",
-                                                p.display()
-                                            ));
+                        let mut switch_target = None;
+                        let mut close_target = None;
+
+                        for (idx, tab) in tabs.iter().enumerate() {
+                            let is_active = idx == active_idx;
+                            let (bg_fill, text_color, close_color) = if is_active {
+                                (TAB_ACTIVE_BG, TAB_ACTIVE_FG, Color32::from_rgb(115, 120, 128))
+                            } else {
+                                (TAB_INACTIVE_BG, TAB_INACTIVE_FG, TAB_INACTIVE_FG)
+                            };
+
+                            let inner = egui::Frame::none()
+                                .fill(bg_fill)
+                                .inner_margin(egui::Margin::symmetric(12.0, 0.0))
+                                .show(ui, |ui| {
+                                    ui.set_height(TAB_BAR_HEIGHT);
+                                    ui.horizontal_centered(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        let text = egui::RichText::new(tab.display_title())
+                                            .size(12.0)
+                                            .strong()
+                                            .color(text_color);
+                                        let btn_resp = ui.add(egui::Button::new(text).frame(false));
+                                        if btn_resp.clicked() {
+                                            switch_target = Some(idx);
                                         }
-                                        None => {
-                                            ui.label(
-                                                "未保存ドキュメント\nクリックしてこのドキュメントへ切り替え",
-                                            );
-                                        }
-                                    });
-                                    if ui
-                                        .add(
-                                            egui::Button::new(
-                                                egui::RichText::new("×")
-                                                    .size(12.0)
-                                                    .color(Color32::from_rgb(120, 128, 140)),
+                                        btn_resp.on_hover_ui(|ui| match tab.file.as_deref() {
+                                            Some(p) => {
+                                                ui.label(format!(
+                                                    "{}\nクリックしてこのドキュメントへ切り替え",
+                                                    p.display()
+                                                ));
+                                            }
+                                            None => {
+                                                ui.label(
+                                                    "未保存ドキュメント\nクリックしてこのドキュメントへ切り替え",
+                                                );
+                                            }
+                                        });
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("×")
+                                                        .size(12.0)
+                                                        .color(close_color),
+                                                )
+                                                .frame(false),
                                             )
-                                            .frame(false),
-                                        )
-                                        .on_hover_text(format!("タブを閉じる ({MOD_KEY}+W)"))
-                                        .clicked()
-                                    {
-                                        close_target = Some(idx);
-                                    }
+                                            .on_hover_text(format!("タブを閉じる ({MOD_KEY}+W)"))
+                                            .clicked()
+                                        {
+                                            close_target = Some(idx);
+                                        }
+                                    });
                                 });
-                            });
-                    }
 
-                    if ui
-                        .button(icons::ADD)
-                        .on_hover_text(format!("新規ドキュメントタブを追加 ({MOD_KEY}+N)"))
-                        .clicked()
-                    {
-                        actions.push(UiAction::NewProject);
-                    }
+                            let tab_rect = inner.response.rect;
+                            ui.painter()
+                                .vline(tab_rect.max.x, bar_rect.y_range(), border_stroke);
+                            if !is_active {
+                                ui.painter().hline(tab_rect.x_range(), y_bot, border_stroke);
+                            }
+                        }
 
-                    if let Some(close_idx) = close_target {
-                        actions.push(UiAction::CloseTab(close_idx));
-                    } else if let Some(target_idx) = switch_target {
-                        actions.push(UiAction::SwitchToTab(target_idx));
-                    }
+                        let plus_btn = egui::Button::new(
+                            egui::RichText::new(icons::ADD)
+                                .size(13.0)
+                                .color(Color32::from_rgb(130, 136, 146)),
+                        )
+                        .frame(false);
+                        let plus_resp = ui
+                            .add_sized([TAB_BAR_HEIGHT, TAB_BAR_HEIGHT], plus_btn)
+                            .on_hover_text(format!("新規ドキュメントタブを追加 ({MOD_KEY}+N)"));
+                        ui.painter()
+                            .vline(plus_resp.rect.max.x, bar_rect.y_range(), border_stroke);
+                        ui.painter().hline(
+                            plus_resp.rect.min.x..=bar_rect.max.x.max(plus_resp.rect.max.x),
+                            y_bot,
+                            border_stroke,
+                        );
+                        if plus_resp.clicked() {
+                            actions.push(UiAction::NewProject);
+                        }
+
+                        if let Some(close_idx) = close_target {
+                            actions.push(UiAction::CloseTab(close_idx));
+                        } else if let Some(target_idx) = switch_target {
+                            actions.push(UiAction::SwitchToTab(target_idx));
+                        }
+                    });
                 });
-            });
-    });
+        });
 }
 
 // ------------------------------------------------------------------------
@@ -480,13 +497,19 @@ pub(crate) fn draw_document_tab_bar(
 pub(crate) fn draw_stage_header_bar(tab: &Tab, actions: &mut Vec<UiAction>, ctx: &egui::Context) {
     egui::TopBottomPanel::top("stage_header_bar")
         .exact_height(30.0)
+        .show_separator_line(false)
         .frame(
             egui::Frame::none()
                 .fill(Color32::from_rgb(245, 246, 248))
-                .inner_margin(egui::Margin::symmetric(10.0, 0.0))
-                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(214, 218, 226))),
+                .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
         )
         .show(ctx, |ui| {
+            let rect = ui.max_rect();
+            ui.painter().hline(
+                rect.x_range(),
+                rect.max.y - 0.5,
+                Stroke::new(1.0_f32, Color32::from_rgb(214, 218, 226)),
+            );
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 draw_group_breadcrumb(tab, actions, ui);
@@ -580,67 +603,61 @@ pub(crate) fn draw_right_properties_panel(
         .resizable(false)
         .frame(
             egui::Frame::none()
-                .fill(Color32::from_rgb(245, 246, 248))
-                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                .fill(TAB_ACTIVE_BG)
+                .inner_margin(egui::Margin::ZERO)
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(214, 218, 226))),
         )
         .show(ctx, |ui| {
             // 上部タブバー（プロパティ | カラー | ライブラリ | キャンバス）
             draw_right_panel_tab_bar(right_panel_tab, ui);
 
-            ui.add_space(4.0);
-            ui.separator();
-            ui.add_space(6.0);
-
             // アクティブなタブに応じた中身を描画
-            match *right_panel_tab {
-                RightPanelTab::Properties => draw_properties_tab(tab, tool, actions, ui),
-                RightPanelTab::Color => draw_color_palette_section(tool, ui),
-                RightPanelTab::Library => draw_library_tab(tab, actions, ui),
-                RightPanelTab::Canvas => draw_canvas_tab(tab, actions, ui),
-            }
+            egui::Frame::none()
+                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                .show(ui, |ui| match *right_panel_tab {
+                    RightPanelTab::Properties => draw_properties_tab(tab, tool, actions, ui),
+                    RightPanelTab::Color => draw_color_palette_section(tool, ui),
+                    RightPanelTab::Library => draw_library_tab(tab, actions, ui),
+                    RightPanelTab::Canvas => draw_canvas_tab(tab, actions, ui),
+                });
         });
 }
 
 /// 右パネル上部の4タブ切り替えバー（`プロパティ | カラー | ライブラリ | キャンバス`）を描画
 fn draw_right_panel_tab_bar(right_panel_tab: &mut RightPanelTab, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 3.0;
-        ui.spacing_mut().button_padding = Vec2::new(3.0, 4.0);
-        let tab_count = RightPanelTab::ALL.len() as f32;
-        let btn_w = (ui.available_width() - 3.0 * (tab_count - 1.0)) / tab_count;
-        for tab in RightPanelTab::ALL {
-            let selected = *right_panel_tab == tab;
-            let fill = if selected {
-                Color32::from_rgb(255, 255, 255)
-            } else {
-                Color32::from_rgb(235, 237, 242)
-            };
-            let text_color = if selected {
-                Color32::from_rgb(20, 25, 35)
-            } else {
-                Color32::from_rgb(115, 122, 135)
-            };
-            let mut text = egui::RichText::new(tab.label())
-                .size(11.0)
-                .color(text_color);
-            if selected {
-                text = text.strong();
-            }
-            let btn = egui::Button::new(text)
-                .fill(fill)
-                .stroke(Stroke::new(
-                    1.0_f32,
-                    if selected {
-                        Color32::from_rgb(190, 196, 208)
-                    } else {
-                        Color32::from_rgb(216, 220, 228)
-                    },
-                ))
-                .min_size(Vec2::new(btn_w, 24.0));
+    let border_stroke = Stroke::new(1.0, TAB_BORDER_COLOR);
+    let tab_w = ui.available_width() / RightPanelTab::ALL.len() as f32;
 
-            if ui.add(btn).clicked() {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        for (i, tab) in RightPanelTab::ALL.into_iter().enumerate() {
+            let selected = *right_panel_tab == tab;
+            let (bg_fill, text_color) = if selected {
+                (TAB_ACTIVE_BG, TAB_ACTIVE_FG)
+            } else {
+                (TAB_INACTIVE_BG, TAB_INACTIVE_FG)
+            };
+            let text = egui::RichText::new(tab.label())
+                .size(11.5)
+                .strong()
+                .color(text_color);
+            let inner = egui::Frame::none().fill(bg_fill).show(ui, |ui| {
+                ui.add_sized(
+                    [tab_w, TAB_BAR_HEIGHT],
+                    egui::Button::new(text).frame(false),
+                )
+            });
+            if inner.inner.clicked() {
                 *right_panel_tab = tab;
+            }
+            let rect = inner.response.rect;
+            if i + 1 < RightPanelTab::ALL.len() {
+                ui.painter()
+                    .vline(rect.max.x, rect.y_range(), border_stroke);
+            }
+            if !selected {
+                ui.painter()
+                    .hline(rect.x_range(), rect.max.y - 0.5, border_stroke);
             }
         }
     });
@@ -978,65 +995,47 @@ fn draw_radius_slider_section(
     ui.add(slider);
 }
 
-/// カラーピッカーと10色プリセットパレットの共通UIセクション
+/// カラーピッカーの共通UIセクション
 fn draw_color_palette_section(tool: &mut ToolSettings, ui: &mut egui::Ui) {
-    const PRESET_COLORS: [Color32; 10] = [
-        Color32::from_rgb(40, 45, 55),
-        Color32::from_rgb(255, 255, 255),
-        Color32::from_rgb(235, 75, 75),
-        Color32::from_rgb(245, 145, 55),
-        Color32::from_rgb(245, 210, 60),
-        Color32::from_rgb(65, 195, 105),
-        Color32::from_rgb(50, 190, 210),
-        Color32::from_rgb(55, 135, 245),
-        Color32::from_rgb(145, 95, 235),
-        Color32::from_rgb(235, 105, 175),
-    ];
-
-    draw_panel_section_label(ui, "現在の塗りカラー", 4.0);
     ui.horizontal(|ui| {
-        draw_color_picker_controls(tool, ui);
-        let [r, g, b, _] = tool.brush_color.to_srgba_unmultiplied();
-        ui.label(
-            egui::RichText::new(format!("#{r:02X}{g:02X}{b:02X}"))
-                .monospace()
-                .size(11.5)
-                .color(Color32::from_rgb(70, 78, 90)),
+        draw_panel_section_label(ui, "現在の塗りカラー", 0.0);
+        let [r, g, b, a] = tool.brush_color.to_srgba_unmultiplied();
+        let current_hex = format!("#{r:02X}{g:02X}{b:02X}");
+        let hex_id = ui.make_persistent_id("brush_color_hex_edit");
+        let mut hex_buf = ui
+            .data_mut(|d| d.get_temp::<String>(hex_id))
+            .unwrap_or_else(|| current_hex.clone());
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut hex_buf)
+                .id(hex_id)
+                .desired_width(68.0)
+                .font(egui::TextStyle::Monospace),
         );
-    });
-
-    ui.add_space(8.0);
-    draw_panel_section_label(ui, "プリセットパレット (10色)", 4.0);
-
-    for row in PRESET_COLORS.chunks(5) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let swatch_w = ((ui.available_width() - 6.0 * 4.0) / 5.0).max(24.0);
-            for &col in row {
-                let is_active = tool.brush_color == col;
-                let (rect, resp) =
-                    ui.allocate_exact_size(Vec2::new(swatch_w, 24.0), egui::Sense::click());
-                let painter = ui.painter();
-                painter.rect_filled(rect, 0.0, col);
-                painter.rect_stroke(
-                    rect,
-                    0.0,
-                    Stroke::new(
-                        if is_active { 2.0_f32 } else { 1.0_f32 },
-                        if is_active {
-                            Color32::from_rgb(0, 125, 230)
-                        } else {
-                            Color32::from_rgb(185, 192, 204)
-                        },
-                    ),
-                );
-                if resp.clicked() {
-                    tool.brush_color = col;
+        if resp.changed() {
+            let trimmed = hex_buf.trim().trim_start_matches('#');
+            if matches!(trimmed.len(), 6 | 8) {
+                if let Ok(parsed) = egui::ecolor::HexColor::from_str_without_hash(trimmed) {
+                    let [pr, pg, pb, pa] = parsed.color().to_srgba_unmultiplied();
+                    let next_a = if trimmed.len() == 8 { pa } else { a };
+                    tool.brush_color = Color32::from_rgba_unmultiplied(pr, pg, pb, next_a);
                 }
             }
-        });
-        ui.add_space(4.0);
-    }
+        }
+        if resp.has_focus() {
+            ui.data_mut(|d| d.insert_temp(hex_id, hex_buf));
+        } else {
+            ui.data_mut(|d| d.insert_temp(hex_id, current_hex));
+        }
+    });
+    ui.add_space(4.0);
+    let prev_slider_w = ui.spacing().slider_width;
+    ui.spacing_mut().slider_width = ui.available_width();
+    egui::color_picker::color_picker_color32(
+        ui,
+        &mut tool.brush_color,
+        egui::color_picker::Alpha::OnlyBlend,
+    );
+    ui.spacing_mut().slider_width = prev_slider_w;
 }
 
 /// 「キャンバス」タブの描画（ステージサイズ・枠外マスク・ウィンドウに合わせる・表示倍率リセット）
@@ -1887,7 +1886,7 @@ pub(crate) fn draw_canvas_contents(
         crate::tool_transform::draw_free_transform_box(&tab.session, painter, &tab.view);
     }
     draw_active_marquee_box(tab, painter);
-    crate::tool_paint::draw_active_stroke_preview(tab, tool.tool, &artwork_painter, painter);
+    crate::tool_paint::draw_active_stroke_preview(tab, &artwork_painter);
 }
 
 /// 編集可能レイヤー1枚分の図形スライス範囲 `range` を描画し、選択中のグループ／シンボル外枠情報を集計する
@@ -1972,7 +1971,7 @@ fn draw_editable_layer_shapes(
     }
 }
 
-/// 選択中のグループ塊（緑枠）およびシンボルインスタンス（水色枠＋基準点 `＋` マーク）、シンボル編集中の基準点を描画
+/// 選択中のグループ塊およびシンボルインスタンス（水色枠＋シンボルは基準点 `＋` マーク）、シンボル編集中の基準点を描画
 fn draw_selected_group_and_symbol_boxes(
     tab: &Tab,
     painter: &egui::Painter,
@@ -1981,19 +1980,13 @@ fn draw_selected_group_and_symbol_boxes(
     for &(_, geom_bbox, fallback_bbox, sym_reg) in selected_group_boxes {
         let g_bbox = geom_bbox.unwrap_or(fallback_bbox);
         let rect = tab.view.world_rect_to_screen(g_bbox).expand(2.0);
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0_f32, Color32::from_rgb(0, 165, 255)),
+        );
         if let Some(origin) = sym_reg {
-            painter.rect_stroke(
-                rect,
-                0.0,
-                Stroke::new(1.8_f32, Color32::from_rgb(0, 165, 255)),
-            );
             draw_registration_cross(painter, tab.view.world_to_screen(origin), 3.2, true);
-        } else {
-            painter.rect_stroke(
-                rect,
-                0.0,
-                Stroke::new(1.8_f32, Color32::from_rgb(30, 185, 95)),
-            );
         }
     }
 
@@ -2052,12 +2045,12 @@ fn draw_active_marquee_box(tab: &Tab, painter: &egui::Painter) {
         painter.rect_filled(
             marquee_rect,
             0.0,
-            Color32::from_rgba_unmultiplied(0, 145, 255, 32),
+            Color32::from_rgba_unmultiplied(0, 145, 255, 12),
         );
         painter.rect_stroke(
             marquee_rect,
             0.0,
-            Stroke::new(1.5_f32, Color32::from_rgb(0, 145, 255)),
+            Stroke::new(1.0_f32, Color32::from_rgb(0, 145, 255)),
         );
     }
 }

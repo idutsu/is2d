@@ -398,7 +398,7 @@ pub(crate) fn draw_free_transform_box(session: &Session, painter: &egui::Painter
         rot_affine * Point::new(base_bbox.x0, base_bbox.y1),
     ];
 
-    let box_stroke = Stroke::new(1.5_f32, Color32::from_rgb(20, 115, 225));
+    let box_stroke = Stroke::new(1.0_f32, Color32::from_rgb(20, 115, 225));
     for i in 0..4 {
         painter.line_segment(
             [

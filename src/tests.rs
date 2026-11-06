@@ -1461,7 +1461,7 @@ fn test_timeline_layer_reorder_move_and_delete() {
         vec!["Layer 3", "Layer 1", "Layer 2"]
     );
 
-    assert!(timeline_ui::timeline_move_active_layer(&mut app, true));
+    assert!(timeline_ui::timeline_reorder_layer(&mut app, 0, 1));
     assert_eq!(app.doc.root.active_layer, 1);
     assert!(timeline_ui::timeline_delete_active_layer(&mut app));
     assert_eq!(app.doc.root.layers.len(), 2);
@@ -2513,7 +2513,6 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
     app.session.drag = crate::canvas_tool::ActiveCanvasDrag::PaintStroke {
         stroke,
         committed_world_mesh: egui::Mesh::default(),
-        tail_outline,
         tail_mesh,
         tail_start_idx: 0,
     };
@@ -17702,7 +17701,6 @@ fn test_toggle_playback_cancels_in_progress_brush_and_eraser_stroke() {
     app.session.drag = ActiveCanvasDrag::PaintStroke {
         stroke: vec![Point::new(50.0, 50.0), Point::new(150.0, 50.0)],
         committed_world_mesh: egui::Mesh::default(),
-        tail_outline: vec![Point::new(50.0, 45.0), Point::new(150.0, 45.0)],
         tail_mesh: egui::Mesh::default(),
         tail_start_idx: 0,
     };
@@ -17727,7 +17725,6 @@ fn test_toggle_playback_cancels_in_progress_brush_and_eraser_stroke() {
     app.session.drag = ActiveCanvasDrag::PaintStroke {
         stroke: vec![Point::new(40.0, 40.0), Point::new(160.0, 40.0)],
         committed_world_mesh: egui::Mesh::default(),
-        tail_outline: vec![Point::new(40.0, 35.0), Point::new(160.0, 35.0)],
         tail_mesh: egui::Mesh::default(),
         tail_start_idx: 0,
     };

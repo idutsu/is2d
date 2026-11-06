@@ -324,7 +324,6 @@ pub(crate) enum ActiveCanvasDrag {
     PaintStroke {
         stroke: Vec<Point>,
         committed_world_mesh: egui::Mesh,
-        tail_outline: Vec<Point>,
         tail_mesh: egui::Mesh,
         tail_start_idx: usize,
     },
