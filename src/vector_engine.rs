@@ -963,7 +963,7 @@ fn build_polka_dot_selection_mesh(fill_mesh: &Mesh, zoom: f32) -> Mesh {
     let step: f32 = (6.0 * base_inv_z).max(min_step_for_budget).max(1e-3);
     let scale = step / 6.0;
     let r_dot = 1.0 * scale;
-    let dot_color = Color32::from_rgba_unmultiplied(180, 184, 192, 195);
+    let dot_color = Color32::from_rgba_unmultiplied(255, 255, 255, 220);
 
     let push_dot_quad = |mesh: &mut Mesh, center: Pos2, r: f32, color: Color32| {
         let base = mesh.vertices.len() as u32;
