@@ -2097,13 +2097,8 @@ impl Session {
         self.rebuild_overlay_from_floating();
     }
 
-    /// 頂点移動・辺引っぱりの仮表示用に、指定 `shape_id` の図形を `Placement::ReplaceAt(shape_id)` で `Overlay` に載せる。
-    /// 動かす区間 `moving_segs` に触れる隣の図形（同じレイヤー・同じ階層の生の図形）も載せ、境目を一緒に動かして見せる
-    pub(crate) fn begin_deform_overlay(
-        &mut self,
-        shape_id: ShapeId,
-        moving_segs: &[QuadBez],
-    ) -> bool {
+    /// 頂点移動・辺引っぱりの仮表示用に、指定 `shape_id` の図形を `Placement::ReplaceAt(shape_id)` で `Overlay` に載せる
+    pub(crate) fn begin_deform_overlay(&mut self, shape_id: ShapeId) -> bool {
         self.overlay.clear();
         self.overlay_only_selected = false;
         self.overlay_movable_start = 0;
@@ -2121,54 +2116,8 @@ impl Session {
         self.overlay
             .add
             .push((Placement::ReplaceAt(shape_id), cloned));
-        let neighbors: Vec<FillShape> = self
-            .base_cache
-            .shapes()
-            .iter()
-            .filter(|s| crate::select_ops::is_boundary_neighbor(s, orig, moving_segs))
-            .cloned()
-            .collect();
-        for s in neighbors {
-            self.overlay.hide.insert(s.shape_id);
-            self.overlay.add.push((Placement::ReplaceAt(s.shape_id), s));
-        }
         self.invalidate_scene_order();
         true
-    }
-
-    /// 頂点移動・辺引っぱりの仮表示で、先頭の図形を元の形から `deform` で変形し、一緒に載せた隣の図形の境目も動かす
-    pub(crate) fn update_deform_overlay(
-        &mut self,
-        deform: impl FnOnce(&mut FillShape, &[Point]) -> FillShape,
-    ) {
-        let shapes = self.base_cache.shapes();
-        let originals: Vec<&FillShape> = self
-            .overlay
-            .add
-            .iter()
-            .filter_map(|(placement, _)| match placement {
-                Placement::ReplaceAt(id) => shapes.iter().find(|s| s.shape_id == *id),
-                _ => None,
-            })
-            .collect();
-        let Some((main, neighbors)) = originals.split_first() else {
-            return;
-        };
-        if originals.len() != self.overlay.add.len() {
-            return;
-        }
-        let mut base = (*main).clone();
-        let (deformed, followed) =
-            crate::select_ops::deform_with_neighbors(&mut base, neighbors, deform);
-        let shapes_now = std::iter::once(deformed).chain(
-            neighbors
-                .iter()
-                .zip(followed)
-                .map(|(orig, f)| f.unwrap_or_else(|| (*orig).clone())),
-        );
-        for ((_, shape), next) in self.overlay.add.iter_mut().zip(shapes_now) {
-            *shape = next;
-        }
     }
 
     /// 選択移動または `Alt` 複製移動の仮表示用に、選択中図形を `Overlay` に載せる

@@ -6,9 +6,7 @@ use crate::canvas_tool::{
 };
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
-use crate::select_ops::{
-    apply_click_selection, finish_selection_drag, split_edge_at_junctions, update_selection_drag,
-};
+use crate::select_ops::{apply_click_selection, finish_selection_drag, update_selection_drag};
 pub(crate) use crate::select_ops::{
     compute_hover_target, handle_canvas_double_click, set_moved_vertex, set_pulled_edge,
 };
@@ -231,19 +229,8 @@ pub(crate) fn start_reshape_drag(
                     Some((contour.segments[prev_idx].p1, contour.segments[seg_idx].p1))
                 })
             {
-                let moving_segs: Vec<QuadBez> = tab
-                    .scene()
-                    .shape_by_id(shape_id)
-                    .and_then(|s| s.get_contour(contour_idx))
-                    .and_then(|c| {
-                        Some(vec![
-                            c.segments[c.prev_seg_idx(seg_idx)?],
-                            c.segments[seg_idx],
-                        ])
-                    })
-                    .unwrap_or_default();
                 tab.session.selection.clear();
-                if tab.session.begin_deform_overlay(shape_id, &moving_segs) {
+                if tab.session.begin_deform_overlay(shape_id) {
                     tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
                         shape_id,
                         contour_idx,
@@ -274,7 +261,7 @@ pub(crate) fn start_reshape_drag(
                 // 実カーソル位置 pt と曲線上の最近接点 closest_pos の差、および丸め前 t と grab_t の位置差を合わせた初期オフセット
                 let grab_offset = (closest_pos - pt) + (grab_pos - closest_pos);
                 tab.session.selection.clear();
-                if tab.session.begin_deform_overlay(shape_id, &[orig_seg]) {
+                if tab.session.begin_deform_overlay(shape_id) {
                     tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
                         shape_id,
                         contour_idx,
@@ -348,17 +335,9 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
             *snapped_to = snap_opt;
             *last_pos = target_pt;
         }
-        tab.session.update_deform_overlay(|base, _| {
-            let mut deformed = base.clone();
-            set_moved_vertex(
-                &mut deformed,
-                (c_idx, g_idx),
-                orig_v,
-                (prev_c, curr_c),
-                target_pt,
-            );
-            deformed
-        });
+        if let Some((_, shape)) = tab.session.overlay.add.first_mut() {
+            set_moved_vertex(shape, (c_idx, g_idx), orig_v, (prev_c, curr_c), target_pt);
+        }
         return;
     }
 
@@ -379,13 +358,9 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
         None
     };
     if let Some(((c_idx, g_idx), grab_t, orig_seg, target_pt)) = edge_update {
-        tab.session.update_deform_overlay(|base, junctions| {
-            let (piece_idx, piece_t, piece) =
-                split_edge_at_junctions(base, (c_idx, g_idx), grab_t, orig_seg, junctions);
-            let mut deformed = base.clone();
-            set_pulled_edge(&mut deformed, (c_idx, piece_idx), piece_t, piece, target_pt);
-            deformed
-        });
+        if let Some((_, shape)) = tab.session.overlay.add.first_mut() {
+            set_pulled_edge(shape, (c_idx, g_idx), grab_t, orig_seg, target_pt);
+        }
     }
 }
 

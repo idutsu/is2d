@@ -1117,57 +1117,6 @@ fn flatten_shape_for_overlay(shape: &FillShape, quad_table: &mut Vec<QuadRecord>
     rings
 }
 
-/// 図形が、境目の食い違いでできる細い切れ端より太いか（面積 ÷ 周りの長さ が 0.05 より大きいか）
-fn is_thick_region(s: &FillShape) -> bool {
-    let area: f64 = s.contours().map(|c| c.signed_area()).sum::<f64>().abs();
-    let perimeter: f64 = s
-        .contours()
-        .flat_map(|c| c.segments.iter().map(|q| (q.p2 - q.p0).hypot()))
-        .sum();
-    perimeter > 0.0 && area / perimeter > 0.05
-}
-
-/// 輪郭の変形で動かした図形を（動かす前, 動かした後）の組で受け取り、キャンバスへ戻す。
-/// 先頭は変形した図形、続きは境目を一緒に動かした隣の図形。
-/// 1. 動かした後の形の自己交差を解く（`resolve_deformed_shape`）
-/// 2. 隣の図形が折り返して、変形した図形と本当に重なった所（境目の細い食い違いより太い所）は、隣の図形から取り除く
-/// 3. それぞれ新しく覆った所（後 − 前）だけを、ほかの図形から切り抜く。変わっていない境目や、動かした図形どうしの境目では
-///    切り抜かない（切り抜くと、重なった境目の折れ線どうしが細かく交わり、輪郭が細切れになる）
-/// 4. 同じ色のつながった図形とは結合して戻す
-pub(crate) fn place_deformed_shapes(
-    canvas: &mut Vec<FillShape>,
-    moved: Vec<(FillShape, FillShape)>,
-) {
-    let mut moved: Vec<(FillShape, Vec<FillShape>)> = moved
-        .into_iter()
-        .map(|(before, after)| (before, resolve_deformed_shape(&after)))
-        .collect();
-    if let Some(((_, main), rest)) = moved.split_first_mut() {
-        for (before, pieces) in rest.iter_mut() {
-            let overlaps = pieces.iter().any(|p| {
-                boolean_operation(std::slice::from_ref(p), main, BoolOp::Intersection, p.color)
-                    .iter()
-                    .any(is_thick_region)
-            });
-            if overlaps {
-                *pieces = boolean_operation(pieces, main, BoolOp::Difference, before.color);
-            }
-        }
-    }
-    for (before, after) in &moved {
-        let gained = boolean_operation(
-            after,
-            std::slice::from_ref(before),
-            BoolOp::Difference,
-            before.color,
-        );
-        erase_from_canvas(canvas, &gained, before.layer_id, &before.group_path);
-    }
-    for piece in moved.into_iter().flat_map(|(_, after)| after) {
-        merge_disjoint_fill_into_canvas(canvas, piece);
-    }
-}
-
 /// 輪郭変形（エッジつまみ変形・頂点移動）後のシェイプの自己交差・反対側輪郭の突き抜けを解消し、
 /// 正のワインディング領域（`OverlayFillRule::Positive`）のみを残して1つまたは複数の `FillShape` に分割・再構築する
 /// （丸ごと裏返ったときは何も残らず、図形は消える）

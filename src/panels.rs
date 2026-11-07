@@ -376,7 +376,7 @@ pub(crate) fn draw_document_tab_bar(
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
-    let border_stroke = Stroke::new(1.0_f32, TAB_BORDER_COLOR);
+    let border_stroke = Stroke::new(1.0, TAB_BORDER_COLOR);
 
     egui::TopBottomPanel::top("document_tab_bar")
         .exact_height(TAB_BAR_HEIGHT)
@@ -625,7 +625,7 @@ pub(crate) fn draw_right_properties_panel(
 
 /// 右パネル上部の4タブ切り替えバー（`プロパティ | カラー | ライブラリ | キャンバス`）を描画
 fn draw_right_panel_tab_bar(right_panel_tab: &mut RightPanelTab, ui: &mut egui::Ui) {
-    let border_stroke = Stroke::new(1.0_f32, TAB_BORDER_COLOR);
+    let border_stroke = Stroke::new(1.0, TAB_BORDER_COLOR);
     let tab_w = ui.available_width() / RightPanelTab::ALL.len() as f32;
 
     ui.horizontal(|ui| {
