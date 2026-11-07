@@ -505,9 +505,10 @@ pub(crate) fn compute_hover_target(
     let is_sel = is_sel.as_slice();
     // 頂点・辺の当たり判定の候補になる図形を前から順に返す
     // （最前面の塗りより後ろの図形と、外接矩形を `radius` だけ広げてもマウスが入らない図形は除く）
-    let candidate_shapes = |radius: f64| {
+    // 頂点は、最前面の塗りより後ろの図形のものも候補にする（前面の図形の輪郭の上にある頂点は、隠れていないので）
+    let candidate_shapes = |radius: f64, include_behind_top: bool| {
         (0..scene_len).rev().filter_map(move |s_idx| {
-            if topmost_fill_idx.is_some_and(|top| s_idx < top) {
+            if !include_behind_top && topmost_fill_idx.is_some_and(|top| s_idx < top) {
                 return None;
             }
             let shape = scene.get(s_idx)?;
@@ -525,7 +526,9 @@ pub(crate) fn compute_hover_target(
     let hidden_by_front = |s_idx: usize, pt: Point| {
         (s_idx + 1..scene_len).any(|front_idx| {
             scene.get(front_idx).is_some_and(|front| {
-                front.is_in_editing_scope(&session.editing_group_path) && front.contains_point(pt)
+                front.is_in_editing_scope(&session.editing_group_path)
+                    && front.contains_point(pt)
+                    && !point_within_shape_contours(front, pt, SHARED_BOUNDARY_TOL, 1.0)
             })
         })
     };
@@ -537,7 +540,7 @@ pub(crate) fn compute_hover_target(
             vertex_hit_radius
         };
         let mut best_vertex: Option<(f64, HoverTarget)> = None;
-        for (s_idx, shape) in candidate_shapes(v_radius) {
+        for (s_idx, shape) in candidate_shapes(v_radius, true) {
             for (c_idx, contour) in shape.contours().enumerate() {
                 if sub_mode == SelectSubMode::DeleteAnchor && contour.segments.len() <= 2 {
                     continue;
@@ -570,7 +573,7 @@ pub(crate) fn compute_hover_target(
     }
 
     let mut best_edge: Option<(f64, HoverTarget)> = None;
-    for (s_idx, shape) in candidate_shapes(anchor_edit_hit_radius) {
+    for (s_idx, shape) in candidate_shapes(anchor_edit_hit_radius, false) {
         let max_dist = if sub_mode == SelectSubMode::AddAnchor {
             anchor_edit_hit_radius
         } else if shape.contains_point(mouse_pt) {
@@ -787,6 +790,275 @@ pub(crate) fn apply_move_vertex_to_shape(
         orig_ctrls,
         effective_pt,
     );
+}
+
+/// 隣の図形の輪郭が、変形した図形の輪郭と同じ線（境目）かを見るときの距離。
+/// 切り抜きやバケツの境目は、相手の曲線の一部を切り出して作るので、ずれは曲線を折れ線にしたときの誤差（0.04 以下）だけ
+const SHARED_BOUNDARY_TOL: f64 = 0.05;
+
+/// 点 `p` が曲線 `q` の上（`SHARED_BOUNDARY_TOL` 以内）にあれば、そのパラメータを返す。
+/// kurbo の `nearest` は、ほぼまっすぐな曲線で端の点を取り違えることがある（端の点そのものに 0.6px の距離を返す）ので使わず、
+/// 9 点の中でいちばん近い所から、ニュートン法で詰める
+fn param_on_quad(q: &QuadBez, p: Point) -> Option<f64> {
+    let dist_sq = |t: f64| (q.eval(t) - p).hypot2();
+    let mut t = (0..=8)
+        .map(|k| k as f64 / 8.0)
+        .min_by(|a, b| dist_sq(*a).total_cmp(&dist_sq(*b)))
+        .unwrap_or(0.0);
+    let second = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()) * 2.0;
+    for _ in 0..4 {
+        let b = q.eval(t) - p;
+        let first = (q.p1 - q.p0) * (2.0 * (1.0 - t)) + (q.p2 - q.p1) * (2.0 * t);
+        let slope = first.dot(first) + b.dot(second);
+        if slope.abs() < 1e-12 {
+            break;
+        }
+        t = (t - b.dot(first) / slope).clamp(0.0, 1.0);
+    }
+    (dist_sq(t) <= SHARED_BOUNDARY_TOL * SHARED_BOUNDARY_TOL).then_some(t)
+}
+
+/// 点 `p` が曲線 `q` の途中（両端から `SHARED_BOUNDARY_TOL` より離れた所）にあれば、そのパラメータを返す
+fn interior_param_on_quad(q: &QuadBez, p: Point) -> Option<f64> {
+    let near_end =
+        (p - q.p0).hypot() <= SHARED_BOUNDARY_TOL || (p - q.p2).hypot() <= SHARED_BOUNDARY_TOL;
+    (!near_end).then(|| param_on_quad(q, p)).flatten()
+}
+
+/// 曲線 `q` を、パラメータ `cuts` の所で切り分ける。戻り値は（切れ目（0 と 1 を含む）, 切れ端）。切れ端どうしの端はそろえてある
+fn split_quad(q: &QuadBez, mut cuts: Vec<f64>) -> (Vec<f64>, Vec<QuadBez>) {
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    cuts.insert(0, 0.0);
+    cuts.push(1.0);
+    let mut pieces: Vec<QuadBez> = cuts.windows(2).map(|w| q.subsegment(w[0]..w[1])).collect();
+    for i in 1..pieces.len() {
+        pieces[i].p0 = pieces[i - 1].p2;
+    }
+    (cuts, pieces)
+}
+
+/// 点の列 `points` のうち、曲線 `q` の途中にあるものの、パラメータの列
+fn interior_params(q: &QuadBez, points: impl Iterator<Item = Point>) -> Vec<f64> {
+    points
+        .filter_map(|p| interior_param_on_quad(q, p))
+        .collect()
+}
+
+/// 変わる前の区間 `o` の上の点 `p`（パラメータ `u`）が、変わった後の区間 `n` のどこへ動くか。
+/// 区間の端の点は、端の動きのとおりに動かす（辺のつまみでは端は動かないので、そのまま）
+fn moved_point(o: &QuadBez, n: &QuadBez, p: Point, u: f64) -> Point {
+    if (p - o.p0).hypot() <= SHARED_BOUNDARY_TOL {
+        n.p0 + (p - o.p0)
+    } else if (p - o.p2).hypot() <= SHARED_BOUNDARY_TOL {
+        n.p2 + (p - o.p2)
+    } else {
+        n.eval(u)
+    }
+}
+
+/// 曲線 `piece` が、変わる前の区間 `o` の上にそっくり乗っていれば、変わった後の区間 `n` の同じ範囲を返す
+fn follow_piece(piece: &QuadBez, o: &QuadBez, n: &QuadBez) -> Option<QuadBez> {
+    let u0 = param_on_quad(o, piece.p0)?;
+    let u1 = param_on_quad(o, piece.p2)?;
+    if (u1 - u0).abs() < 1e-9
+        || (1..4).any(|k| param_on_quad(o, piece.eval(k as f64 / 4.0)).is_none())
+    {
+        return None;
+    }
+    let mut s = n.subsegment(u0..u1);
+    s.p0 = moved_point(o, n, piece.p0, u0);
+    s.p2 = moved_point(o, n, piece.p2, u1);
+    Some(s)
+}
+
+/// 辺をつかんだとき、その区間 `seg` の途中にほかの図形の頂点（境目の分かれ目 `junctions`）があれば、そこで区間を切り分け、
+/// つかんだ所（`grab_t`）を含む切れ端の（区間の番号, 切れ端の中でのつかんだ位置, 切れ端）を返す。
+/// Animate と同じく、分かれ目と分かれ目の間の線だけが曲がり、分かれ目は動かない
+pub(crate) fn split_edge_at_junctions(
+    shape: &mut FillShape,
+    (contour_idx, seg_idx): (usize, usize),
+    grab_t: f64,
+    seg: QuadBez,
+    junctions: &[Point],
+) -> (usize, f64, QuadBez) {
+    let (bounds, pieces) = split_quad(&seg, interior_params(&seg, junctions.iter().copied()));
+    if pieces.len() == 1 {
+        return (seg_idx, grab_t, seg);
+    }
+    let k = bounds
+        .windows(2)
+        .position(|w| grab_t <= w[1])
+        .unwrap_or(pieces.len() - 1);
+    let piece_t = ((grab_t - bounds[k]) / (bounds[k + 1] - bounds[k])).clamp(0.0, 1.0);
+    let piece = pieces[k];
+    shape.edit_contour(contour_idx, |c| {
+        c.segments_mut().splice(seg_idx..=seg_idx, pieces);
+        true
+    });
+    (seg_idx + k, piece_t, piece)
+}
+
+/// 図形の列の、すべての頂点（境目の分かれ目の候補）
+fn shape_vertices<'a>(shapes: impl Iterator<Item = &'a FillShape>) -> Vec<Point> {
+    shapes
+        .flat_map(|s| s.contours().flat_map(|c| c.segments.iter().map(|q| q.p0)))
+        .collect()
+}
+
+/// 輪郭の変形で、境目を一緒に動かす候補か（`main` と同じレイヤー・同じ階層の生の図形で、動かす区間 `moving` に外接矩形が触れるもの）
+pub(crate) fn is_boundary_neighbor(s: &FillShape, main: &FillShape, moving: &[QuadBez]) -> bool {
+    let near = moving
+        .iter()
+        .map(|q| kurbo::Shape::bounding_box(q).inflate(SHARED_BOUNDARY_TOL, SHARED_BOUNDARY_TOL))
+        .reduce(|a, b| a.union(b));
+    s.shape_id != main.shape_id
+        && s.layer_id == main.layer_id
+        && s.is_raw_at_scope(&main.group_path)
+        && near.is_some_and(|r| rects_overlap(s.bounding_box(), r))
+}
+
+/// 変形の前後で値が変わった区間の組（変わる前, 変わった後）。変形は区間の数を変えない
+pub(crate) fn changed_segments(orig: &FillShape, deformed: &FillShape) -> Vec<(QuadBez, QuadBez)> {
+    orig.contours()
+        .zip(deformed.contours())
+        .flat_map(|(a, b)| a.segments.iter().zip(b.segments.iter()))
+        .filter(|(a, b)| a != b)
+        .map(|(a, b)| (*a, *b))
+        .collect()
+}
+
+/// 図形 `base` を `deform` で変形し、境目を共有する隣の図形 `neighbors` も一緒に動かす（ドラッグ中の表示と確定で共通）。
+/// `deform` には隣の図形の頂点（境目の分かれ目）を渡す。辺のつまみは、`base` の区間をそこで切り分けてから曲げる。
+/// 戻り値は（変形した形, 隣の図形ごとの動かした形（動かないものは `None`））。`base` は切り分けた形になる
+pub(crate) fn deform_with_neighbors(
+    base: &mut FillShape,
+    neighbors: &[&FillShape],
+    deform: impl FnOnce(&mut FillShape, &[Point]) -> FillShape,
+) -> (FillShape, Vec<Option<FillShape>>) {
+    let junctions = shape_vertices(neighbors.iter().copied());
+    let deformed = deform(base, &junctions);
+    let changes = changed_segments(base, &deformed);
+    let nodes = shape_vertices(std::iter::once(&*base).chain(neighbors.iter().copied()));
+    let followed = neighbors
+        .iter()
+        .map(|n| follow_shared_boundary(n, &changes, &nodes))
+        .collect();
+    (deformed, followed)
+}
+
+/// 隣の図形 `neighbor` の輪郭のうち、変わる前の区間（`changes` の左）と同じ線の所を、変わった後の区間に合わせて動かす。
+/// どこも同じ線でなく、動く点にも触れていなければ `None` を返す。
+/// - 変わる区間の端が、隣の図形の区間の途中にあれば、そこで区間を切り分ける
+/// - 同じ線ではないが、端が動く点にある区間（3つ以上の図形が接する点から出る区間）は、その端を動かす。
+///   区間の途中に分かれ目（`nodes`）があれば、動いた端から一番近い分かれ目までだけを曲げる。
+///   同じ線を持つ別の図形の区間も同じ範囲が同じように曲がるので、すき間や重なりができない
+fn follow_shared_boundary(
+    neighbor: &FillShape,
+    changes: &[(QuadBez, QuadBez)],
+    nodes: &[Point],
+) -> Option<FillShape> {
+    // 点 `p` の動き（動く区間の上にない点、動かない点は `None`）
+    let shift = |p: Point| {
+        changes
+            .iter()
+            .find_map(|(o, n)| param_on_quad(o, p).map(|u| moved_point(o, n, p, u) - p))
+            .filter(|d| d.hypot() > 1e-9)
+    };
+    // 同じ線ではない区間 `q` の、動く端を動かす。途中に分かれ目があれば、動いた端から一番近い分かれ目までだけを曲げる
+    let bend = |q: QuadBez| -> Option<Vec<QuadBez>> {
+        let (d0, d2) = (shift(q.p0), shift(q.p2));
+        if d0.is_none() && d2.is_none() {
+            return None;
+        }
+        let at_nodes = interior_params(&q, nodes.iter().copied());
+        let mut cuts = Vec::new();
+        if d0.is_some() {
+            cuts.extend(at_nodes.iter().copied().reduce(f64::min));
+        }
+        if d2.is_some() {
+            cuts.extend(at_nodes.iter().copied().reduce(f64::max));
+        }
+        let (_, mut pieces) = split_quad(&q, cuts);
+        let last = pieces.len() - 1;
+        for (k, pc) in pieces.iter_mut().enumerate() {
+            let a = if k == 0 {
+                d0.unwrap_or_default()
+            } else {
+                kurbo::Vec2::ZERO
+            };
+            let b = if k == last {
+                d2.unwrap_or_default()
+            } else {
+                kurbo::Vec2::ZERO
+            };
+            pc.p0 += a;
+            pc.p2 += b;
+            pc.p1 += (a + b) * 0.5;
+        }
+        Some(pieces)
+    };
+    // 変わる区間から離れた区間は、何もしない（先に外接矩形で見分ける）
+    let near = changes
+        .iter()
+        .map(|(o, _)| {
+            kurbo::Shape::bounding_box(o).inflate(SHARED_BOUNDARY_TOL, SHARED_BOUNDARY_TOL)
+        })
+        .reduce(|a, b| a.union(b))?;
+    let mut out = neighbor.clone();
+    let mut touched = false;
+    for (c_idx, contour) in neighbor.contours().enumerate() {
+        let mut contour_moved = false;
+        // (区間, 同じ線として置き換えたか)
+        let mut segs: Vec<(QuadBez, bool)> = Vec::with_capacity(contour.segments.len() + 4);
+        for &seg in contour.segments.iter() {
+            if !rects_overlap(kurbo::Shape::bounding_box(&seg), near) {
+                segs.push((seg, false));
+                continue;
+            }
+            // 変わる区間の端が途中にあれば、そこで切り分けてから、切れ端ごとに見る
+            let ends = changes.iter().flat_map(|(o, _)| [o.p0, o.p2]);
+            let (_, pieces) = split_quad(&seg, interior_params(&seg, ends));
+            let mut moved: Vec<(QuadBez, bool)> = Vec::new();
+            let mut any = false;
+            for pc in pieces {
+                if let Some(f) = changes.iter().find_map(|(o, n)| follow_piece(&pc, o, n)) {
+                    any = true;
+                    moved.push((f, true));
+                } else if let Some(bent) = bend(pc) {
+                    any = true;
+                    moved.extend(bent.into_iter().map(|q| (q, false)));
+                } else {
+                    moved.push((pc, false));
+                }
+            }
+            if any {
+                contour_moved = true;
+                segs.extend(moved);
+            } else {
+                segs.push((seg, false));
+            }
+        }
+        if !contour_moved {
+            continue;
+        }
+        touched = true;
+        // つなぎ目をそろえる（置き換えた区間の端に合わせる）
+        let n = segs.len();
+        for i in 0..n {
+            let next = (i + 1) % n;
+            if segs[next].1 && !segs[i].1 {
+                segs[i].0.p2 = segs[next].0.p0;
+            } else {
+                segs[next].0.p0 = segs[i].0.p2;
+            }
+        }
+        out.edit_contour(c_idx, |c| {
+            *c.segments_mut() = segs.into_iter().map(|(q, _)| q).collect();
+            true
+        });
+    }
+    touched.then_some(out)
 }
 
 /// 選択中の図形がすべて同じレイヤーにあればその `LayerId` を返す（未選択・複数レイヤーにまたがるときは `None`）

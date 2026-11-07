@@ -16,11 +16,12 @@ use crate::clipboard_ops::{
 };
 use crate::select_ops::{
     apply_marquee_selection, apply_move_vertex_to_shape, apply_pull_edge_to_shape,
-    compute_hover_target, enter_group_at, exit_current_group, prepare_arrange_selected,
+    changed_segments, compute_hover_target, deform_with_neighbors, enter_group_at,
+    exit_current_group, is_boundary_neighbor, prepare_arrange_selected,
     prepare_clear_active_frame_shapes, prepare_delete_selected_shapes,
     prepare_group_selected_shapes, prepare_ungroup_selected_shapes,
-    retain_selection_and_flush_deselected, select_single_shape_at, toggle_shape_selection,
-    ArrangeMode,
+    retain_selection_and_flush_deselected, select_single_shape_at, split_edge_at_junctions,
+    toggle_shape_selection, ArrangeMode,
 };
 use crate::symbol::{ColorEffect, Document, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 use crate::symbol_ops::{
@@ -31,7 +32,7 @@ use crate::symbol_ops::{
 use crate::timeline::{Layer, Timeline, TimelineCellSelection, MAX_LAYERS_PER_TIMELINE};
 use crate::vector_boolean::{
     boolean_operation, erase_from_canvas, find_enclosed_region_at, merge_disjoint_fill_into_canvas,
-    merge_shapes_into_canvas, resolve_deformed_shape, BoolOp,
+    merge_shapes_into_canvas, place_deformed_shapes, BoolOp,
 };
 use crate::vector_engine::{
     affine_rotate_around, affine_scale_around, rects_overlap, FillShape, MAX_VIEW_ZOOM,
@@ -517,15 +518,12 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             orig_seg,
         } => {
             let drag_dist = (target_pos - grab_pos).hypot();
-            apply_deform_shape(tab, shape_id, drag_dist, |deformed| {
-                apply_pull_edge_to_shape(
-                    deformed,
-                    (contour_idx, seg_idx),
-                    grab_t,
-                    orig_seg,
-                    target_pos,
-                );
-            })
+            apply_deform_shape(
+                tab,
+                shape_id,
+                drag_dist,
+                pull_edge_deform((contour_idx, seg_idx), grab_t, orig_seg, target_pos),
+            )
         }
         Action::MoveVertex {
             shape_id,
@@ -536,15 +534,12 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             orig_ctrls,
         } => {
             let drag_dist = (target_pos - orig_vertex).hypot();
-            apply_deform_shape(tab, shape_id, drag_dist, |deformed| {
-                apply_move_vertex_to_shape(
-                    deformed,
-                    (contour_idx, seg_idx),
-                    orig_vertex,
-                    orig_ctrls,
-                    target_pos,
-                );
-            })
+            apply_deform_shape(
+                tab,
+                shape_id,
+                drag_dist,
+                move_vertex_deform((contour_idx, seg_idx), orig_vertex, orig_ctrls, target_pos),
+            )
         }
         #[cfg(test)]
         Action::PullEdgeFromTo { from, to } => apply_pull_edge_from_to(tab, from, to),
@@ -1095,11 +1090,53 @@ fn apply_move_selected(tab: &mut Tab, delta: KVec2, coalesce: Option<CoalesceKey
     moved
 }
 
+/// 辺のつまみの変形（`Action::ReshapeEdge`）。つかんだ区間を途中の分かれ目（`junctions`）で切り分け、つかんだ切れ端だけを曲げる
+fn pull_edge_deform(
+    (contour_idx, seg_idx): (usize, usize),
+    grab_t: f64,
+    orig_seg: QuadBez,
+    target_pos: Point,
+) -> impl Fn(&mut FillShape, &[Point]) -> FillShape {
+    move |base, junctions| {
+        let (piece_idx, piece_t, piece) =
+            split_edge_at_junctions(base, (contour_idx, seg_idx), grab_t, orig_seg, junctions);
+        let mut deformed = base.clone();
+        apply_pull_edge_to_shape(
+            &mut deformed,
+            (contour_idx, piece_idx),
+            piece_t,
+            piece,
+            target_pos,
+        );
+        deformed
+    }
+}
+
+/// 頂点の移動の変形（`Action::MoveVertex`）
+fn move_vertex_deform(
+    (contour_idx, seg_idx): (usize, usize),
+    orig_vertex: Point,
+    orig_ctrls: (Point, Point),
+    target_pos: Point,
+) -> impl Fn(&mut FillShape, &[Point]) -> FillShape {
+    move |base, _| {
+        let mut deformed = base.clone();
+        apply_move_vertex_to_shape(
+            &mut deformed,
+            (contour_idx, seg_idx),
+            orig_vertex,
+            orig_ctrls,
+            target_pos,
+        );
+        deformed
+    }
+}
+
 fn apply_deform_shape(
     tab: &mut Tab,
     shape_id: ShapeId,
     drag_dist: f64,
-    apply_deform: impl FnOnce(&mut FillShape),
+    apply_deform: impl Fn(&mut FillShape, &[Point]) -> FillShape,
 ) -> bool {
     tab.session.clear_overlay();
     let min_deform = 0.5 / (tab.view.zoom as f64);
@@ -1122,10 +1159,32 @@ fn apply_deform_shape(
     let mut deformed_ok = false;
     edit_layers(tab, &layer_ids, |edit| {
         if let Some(pos) = edit.shapes.iter().position(|s| s.shape_id == shape_id) {
-            let mut deformed = edit.shapes.remove(pos);
-            apply_deform(&mut deformed);
-            let resolved = resolve_deformed_shape(&deformed);
-            merge_shapes_into_canvas(&mut edit.shapes, resolved);
+            let mut orig = edit.shapes.remove(pos);
+            // 境目を一緒に動かす候補は、動かす区間に触れる図形（ドラッグ中の表示と同じ）。
+            // 動かす区間は、分かれ目で切り分けずに一度変形してみて、変わった区間から求める
+            let moving: Vec<QuadBez> =
+                changed_segments(&orig, &apply_deform(&mut orig.clone(), &[]))
+                    .into_iter()
+                    .map(|(o, _)| o)
+                    .collect();
+            let neighbors: Vec<&FillShape> = edit
+                .shapes
+                .iter()
+                .filter(|s| is_boundary_neighbor(s, &orig, &moving))
+                .collect();
+            let (deformed, followed) = deform_with_neighbors(&mut orig, &neighbors, apply_deform);
+            let followed: Vec<(ShapeId, FillShape)> = neighbors
+                .iter()
+                .zip(followed)
+                .filter_map(|(n, f)| Some((n.shape_id, f?)))
+                .collect();
+            let mut moved = vec![(orig, deformed)];
+            for (id, f) in followed {
+                if let Some(i) = edit.shapes.iter().position(|s| s.shape_id == id) {
+                    moved.push((edit.shapes.remove(i), f));
+                }
+            }
+            place_deformed_shapes(&mut edit.shapes, moved);
             deformed_ok = true;
         }
     });
@@ -1162,9 +1221,12 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     let grab_t = t.clamp(0.18, 0.82);
     let grab_pos = orig_seg.eval(grab_t);
     let drag_dist = (to - grab_pos).hypot();
-    apply_deform_shape(tab, shape_id, drag_dist, |deformed| {
-        apply_pull_edge_to_shape(deformed, (contour_idx, seg_idx), grab_t, orig_seg, to);
-    })
+    apply_deform_shape(
+        tab,
+        shape_id,
+        drag_dist,
+        pull_edge_deform((contour_idx, seg_idx), grab_t, orig_seg, to),
+    )
 }
 
 #[cfg(test)]
@@ -1198,15 +1260,17 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         return false;
     };
     let drag_dist = (to - pos).hypot();
-    apply_deform_shape(tab, shape_id, drag_dist, |deformed| {
-        apply_move_vertex_to_shape(
-            deformed,
+    apply_deform_shape(
+        tab,
+        shape_id,
+        drag_dist,
+        move_vertex_deform(
             (contour_idx, seg_idx),
             pos,
             (orig_prev_ctrl, orig_curr_ctrl),
             to,
-        );
-    })
+        ),
+    )
 }
 
 fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {

@@ -195,7 +195,10 @@ $$P_{1,i-1}' = P_{1,i-1} + \frac{1}{2}\Delta, \quad P_{1,i}' = P_{1,i} + \frac{1
 
 また、エッジや頂点を反対側の輪郭線を越えてドラッグ＆ドロップした際には、[`punch_through_opposite_edge`](./src/select_ops.rs) と [`resolve_deformed_shape`](./src/vector_boolean.rs) により、`OverlayFillRule::Positive`（正のワインディング領域のみの抽出）を適用して裏返り（負のワインディング領域）を自動消去し、くびれた図形を2つの独立した `FillShape` へ自然に分割します。図形全体が裏返ったとき（頂点を対角の角より先まで動かしたときなど）は、正の領域が残らないので図形は消えます（利用者と決めた動き。Undo で戻せます）。
 
-### 5.3 Lyon テッセレーションと高速 Polka-Dot 選択網点メッシュ
+### 5.3 境目を共有する隣の図形の追従（`deform_with_neighbors`）
+色の違う図形の境目は、切り抜きやバケツの結果を曲線に戻すとき相手の曲線の一部を切り出して作るので、両側の輪郭は同じ曲線（ずれは折れ線化の誤差 0.04 以下）になっている。輪郭を変形するときは、変わった区間 $(Q_{\text{old}}, Q_{\text{new}})$ を求め、同じレイヤー・同じ階層の生の図形の区間のうち $Q_{\text{old}}$ の上（距離 0.05 以内）にそっくり乗っている部分を、$Q_{\text{new}}$ の同じパラメータ範囲（`subsegment`）に置き換える（[`follow_shared_boundary`](./src/select_ops.rs)）。区切りが違うときは、$Q_{\text{old}}$ の端で隣の区間を切り分ける。頂点の移動で動く点から出る隣の区間は、動いた端から一番近い分かれ目（ほかの図形の頂点）までを、5.2 と同じ決まり（制御点を変位の半分だけ動かす）で曲げる。辺のつまみでは、つかんだ区間を途中の分かれ目で切り分け、つかんだ切れ端だけを 5.1 の式で曲げる（[`split_edge_at_junctions`](./src/select_ops.rs)。Adobe Animate と同じく、分かれ目は動かない）。確定では、変形した図形と追従した図形のそれぞれが新しく覆った領域（後 − 前）だけをほかの図形から切り抜く（[`place_deformed_shapes`](./src/vector_boolean.rs)）。変わっていない境目で切り抜き直すと、重なった境目の折れ線どうしが細かく交わり、輪郭が細切れになるため。ドラッグ中の表示も同じ関数で作る。
+
+### 5.4 Lyon テッセレーションと高速 Polka-Dot 選択網点メッシュ
 - **曲線テッセレーション（[`tessellate_lyon_path`](./src/vector_engine.rs)）**：
   各 [`FillShape`](./src/vector_engine.rs) の外周・内周穴の2次ベジェパスを `lyon_tessellation::FillTessellator`（許容誤差 `0.04`、`FillRule::EvenOdd`）で三角形メッシュ `fill_mesh` に変換してキャッシュし、描画フレームごとに [`transform_mesh_to_screen`](./src/vector_engine.rs) でビューポート変換（$P_{\text{screen}} = z \cdot P_{\text{world}} + \text{pan}$）のみを行って GPU へ送出します。
 - **三角形外積判定による選択網点オーバーレイ（[`build_polka_dot_selection_mesh`](./src/vector_engine.rs)）**：
