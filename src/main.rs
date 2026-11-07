@@ -4,6 +4,7 @@ mod canvas_tool;
 mod clipboard_ops;
 mod doc_actions;
 mod panels;
+mod planar_map;
 mod project_io;
 mod recovery;
 mod select_ops;

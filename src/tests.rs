@@ -1,7 +1,7 @@
 use super::*;
 use crate::canvas_tool::HoverTarget;
-use kurbo::{ParamCurve, ParamCurveDeriv, ParamCurveNearest, QuadBez, Vec2 as KVec2};
-use vector_boolean::{merge_shapes_into_canvas, resolve_deformed_shape};
+use kurbo::{ParamCurve, ParamCurveDeriv, QuadBez, Vec2 as KVec2};
+use vector_boolean::merge_shapes_into_canvas;
 use vector_engine::{left_normal, normalize_vec};
 use vector_stroke::{
     build_smoothed_stroke_shapes, build_smoothed_stroke_shapes_at_zoom, generate_brush_outline,
@@ -467,43 +467,48 @@ fn test_thin_2px_stroke_and_su_loop_keep_round_caps_and_uniform_width() {
 #[test]
 fn test_pull_edge_across_circle_splits_into_two_shapes() {
     let center = Point::new(200.0, 200.0);
-    let r = 50.0;
-    let raw = generate_brush_outline(&[center], r);
-    let shapes = build_smoothed_stroke_shapes(&raw, Color32::BLACK);
-    assert_eq!(shapes.len(), 1);
-
-    let mut circle = shapes[0].clone();
-    // 上端 (200, 150) に最も近いエッジを探す
-    let top_probe = Point::new(200.0, 150.0);
-    let (seg_idx, grab_t, orig_seg) = circle
-        .exterior
-        .segments
-        .iter()
-        .enumerate()
-        .map(|(i, seg)| {
-            let n = seg.nearest(top_probe, 0.01);
-            (i, n.t, *seg, n.distance_sq)
-        })
-        .min_by(|a, b| a.3.partial_cmp(&b.3).unwrap())
-        .map(|(i, t, s, _)| (i, t.clamp(0.18, 0.82), s))
-        .unwrap();
+    let circle_app = || {
+        let mut app = Is2dApp::default();
+        run(
+            &mut app,
+            &[Action::PaintStroke {
+                points: vec![center, center + KVec2::new(0.01, 0.0)],
+                radius: 50.0,
+                color: Color32::BLACK,
+            }],
+        );
+        assert_eq!(scene_summary(&app).shapes.len(), 1);
+        app
+    };
+    // 上端 (200, 150) にいちばん近い区間の真ん中（頂点から離れた所）をつかむ
+    let grab_point = |app: &Is2dApp| {
+        let top = Point::new(200.0, 150.0);
+        scene_summary(app).shapes[0]
+            .exterior
+            .segments
+            .iter()
+            .map(|q| q.eval(0.5))
+            .min_by(|a, b| (*a - top).hypot().total_cmp(&(*b - top).hypot()))
+            .unwrap()
+    };
 
     // 円の上端エッジを円内部を通って下端 (200, 250) の向こう側 (200, 275) まで突っ切るようにドラッグ
-    crate::select_ops::apply_pull_edge_to_shape(
-        &mut circle,
-        (0, seg_idx),
-        grab_t,
-        orig_seg,
-        Point::new(200.0, 275.0),
-    );
-
-    let split_shapes = resolve_deformed_shape(&circle);
+    let mut app = circle_app();
+    let from = grab_point(&app);
+    assert!(apply(
+        &mut app,
+        Action::PullEdgeFromTo {
+            from,
+            to: Point::new(200.0, 275.0),
+        },
+    ));
+    let split_shapes = scene_summary(&app).shapes.clone();
     assert_eq!(
-            split_shapes.len(),
-            2,
-            "円を向こう側の円周へ突っ切るようにドラッグすると2つのシェイプに分割されること (actual = {})",
-            split_shapes.len()
-        );
+        split_shapes.len(),
+        2,
+        "円を向こう側の円周へ突っ切るようにドラッグすると2つのシェイプに分割されること (actual = {})",
+        split_shapes.len()
+    );
 
     // 左右の半円領域は塗られており、突っ切った中央 (200, 200) と突き抜けた先 (200, 265) は空であること
     let any_contains = |pt: Point| split_shapes.iter().any(|s| s.contains_point(pt));
@@ -524,18 +529,18 @@ fn test_pull_edge_across_circle_splits_into_two_shapes() {
         "向こう側の円周を突き抜けた裏返りループが消えていること"
     );
 
-    // 向こう側の円周ギリギリ (200, 249) でドロップした場合も punch_opposite により2分割されること
-    let mut circle_on_edge = shapes[0].clone();
-    crate::select_ops::apply_pull_edge_to_shape(
-        &mut circle_on_edge,
-        (0, seg_idx),
-        grab_t,
-        orig_seg,
-        Point::new(200.0, 249.0),
-    );
-    let split_on_edge = resolve_deformed_shape(&circle_on_edge);
+    // 向こう側の円周ギリギリ (200, 249) でドロップした場合も押し出し補正により2分割されること
+    let mut app = circle_app();
+    let from = grab_point(&app);
+    assert!(apply(
+        &mut app,
+        Action::PullEdgeFromTo {
+            from,
+            to: Point::new(200.0, 249.0),
+        },
+    ));
     assert_eq!(
-        split_on_edge.len(),
+        scene_summary(&app).shapes.len(),
         2,
         "向こう側の円周上でドロップした場合も2つのシェイプに分割されること"
     );
@@ -3293,18 +3298,12 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
         empty_marker,
     ));
     sort_app.refresh_scene_base();
+    let maps = crate::planar_map::scope_maps(sort_app.scene(), &sort_app.session);
     assert!(
-        tool_select::find_snap_vertex(
-            sort_app.scene(),
-            &sort_app.session.editing_group_path,
-            Point::new(50.0, 50.0),
-            1.0,
-            u64::MAX,
-            0,
-            0,
-        )
-        .is_none(),
-        "空白フレームのシンボルマーカーの基準点に対して頂点磁気スナップが発生しないこと"
+        maps.maps
+            .iter()
+            .all(|m| m.map.nodes.iter().all(|p| (*p - Point::new(50.0, 50.0)).hypot() > 1.0)),
+        "空白フレームのシンボルマーカーの基準点が、輪郭の変形の頂点（磁気スナップの吸い付き先）にならないこと"
     );
 }
 
@@ -15613,8 +15612,6 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
         &mut app,
         Action::ReshapeEdge {
             shape_id: 999_999,
-            contour_idx: 0,
-            seg_idx: 0,
             grab_t: 0.5,
             grab_pos: c,
             target_pos: Point::new(c.x, c.y + 30.0),
@@ -15625,11 +15622,8 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
         &mut app,
         Action::MoveVertex {
             shape_id: 999_999,
-            contour_idx: 0,
-            seg_idx: 0,
             orig_vertex: c,
             target_pos: Point::new(c.x, c.y + 30.0),
-            orig_ctrls: (c, c),
         },
     ));
     assert_eq!(app.tab().history.undo_stack.len(), 0);
@@ -15659,8 +15653,6 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
         &mut app,
         Action::ReshapeEdge {
             shape_id,
-            contour_idx: 0,
-            seg_idx: 0,
             grab_t: 0.5,
             grab_pos: c,
             target_pos: Point::new(c.x, c.y + 30.0),
@@ -19071,7 +19063,7 @@ fn test_boolean_ops_with_far_holes_detached() {
 }
 
 #[test]
-fn test_resolve_deformed_shape_and_move_vertex_preserve_untouched_hole_contours() {
+fn test_move_vertex_preserves_untouched_hole_contours() {
     let mut app = Is2dApp::default();
     for i in 0..7 {
         let y = 100.0 + i as f64 * 40.0;
@@ -19098,32 +19090,7 @@ fn test_resolve_deformed_shape_and_move_vertex_preserve_untouched_hole_contours(
     let orig_shape = app.doc.root.layers[0].keyframes[0].cel.shapes[0].clone();
     assert!(orig_shape.holes.len() >= 30);
 
-    // 1. 1つの穴を少し変形して resolve_deformed_shape を呼ぶと、変形していない穴は入力の Contour と同じもの（ptr_eq）が残ること
-    let mut deformed = orig_shape.clone();
-    deformed.edit_contour(1, |contour| {
-        let segs = contour.segments_mut();
-        let last_idx = segs.len() - 1;
-        let delta = kurbo::Vec2::new(1.0, 1.0);
-        segs[0].p0 += delta;
-        segs[0].p1 += delta * 0.5;
-        segs[last_idx].p2 += delta;
-        segs[last_idx].p1 += delta * 0.5;
-        true
-    });
-    let resolved = resolve_deformed_shape(&deformed);
-    assert_eq!(resolved.len(), 1);
-    assert_eq!(resolved[0].holes.len(), orig_shape.holes.len());
-    for untouched_hole in &orig_shape.holes[1..] {
-        assert!(
-            resolved[0]
-                .holes
-                .iter()
-                .any(|h| std::sync::Arc::ptr_eq(&h.segments, &untouched_hole.segments)),
-            "resolve_deformed_shape 後も変形していない穴が入力の Contour と ptr_eq で共有されていること"
-        );
-    }
-
-    // 2. Action::MoveVertexFromTo を穴の多い図形に行ったとき、触っていない穴が操作前の Contour と同じもの（ptr_eq）として残ること
+    // Action::MoveVertexFromTo を穴の多い図形に行ったとき、触っていない穴が操作前の Contour と同じもの（ptr_eq）として残ること
     let v_from = orig_shape.holes[0].segments[0].p0;
     let v_to = v_from + kurbo::Vec2::new(1.0, 1.0);
     assert!(apply(
@@ -19723,8 +19690,6 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
         &mut app,
         Action::ReshapeEdge {
             shape_id: orig_id,
-            contour_idx: 0,
-            seg_idx: 0,
             grab_t,
             grab_pos,
             target_pos: grab_pos + kurbo::Vec2::new(0.0, 50.0),
@@ -20591,4 +20556,493 @@ fn test_tiny_shape_survives_save_and_reopen() {
 
     assert_eq!(outcome, OpenProjectOutcome::Loaded);
     assert_eq!(reopened.doc.root.layers[0].keyframes[0].cel.shapes.len(), 2);
+}
+
+// ---- 色の違う図形の境目をドラッグしても剥がれない（境目を一緒に動かす） ----
+
+/// 範囲 `inside` の中を 1px おきに調べ、（どの図形にも塗られていない点の数, 2つ以上の図形に塗られている点の数）を返す。
+/// 点は境目の上に乗らないよう、少しずらして置く
+fn shared_boundary_coverage(
+    app: &Is2dApp,
+    inside: impl Fn(Point) -> bool,
+    area: (f64, f64, f64, f64),
+) -> (usize, usize) {
+    let shapes = scene_summary(app).shapes.clone();
+    let (mut gaps, mut overlaps) = (0, 0);
+    let mut y = area.1;
+    while y <= area.3 {
+        let mut x = area.0;
+        while x <= area.2 {
+            let p = Point::new(x + 0.137, y + 0.173);
+            if inside(p) {
+                match shapes.iter().filter(|s| s.contains_point(p)).count() {
+                    0 => gaps += 1,
+                    1 => {}
+                    _ => overlaps += 1,
+                }
+            }
+            x += 1.0;
+        }
+        y += 1.0;
+    }
+    (gaps, overlaps)
+}
+
+/// 黒い円の線（中心 (300,300)、半径 100、太さ 16）の内側を、バケツで赤に塗る
+fn ring_with_bucket_fill() -> Is2dApp {
+    let mut app = Is2dApp::default();
+    let c = Point::new(300.0, 300.0);
+    let pts: Vec<Point> = (0..=240)
+        .map(|i| {
+            let a = i as f64 / 240.0 * std::f64::consts::TAU;
+            Point::new(c.x + 100.0 * a.cos(), c.y + 100.0 * a.sin())
+        })
+        .collect();
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: pts,
+            radius: 8.0,
+            color: Color32::BLACK,
+        }],
+    );
+    run(
+        &mut app,
+        &[Action::BucketFill {
+            pt: c,
+            color: Color32::RED,
+        }],
+    );
+    app
+}
+
+/// 赤の横線（y = 200、太さ 40）の上に、青の縦線（x = 300、太さ 30）を重ねて描く
+fn crossed_brush_strokes() -> Is2dApp {
+    let mut app = Is2dApp::default();
+    let line = |a: Point, b: Point| -> Vec<Point> {
+        (0..=200).map(|i| a.lerp(b, i as f64 / 200.0)).collect()
+    };
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: line(Point::new(100.0, 200.0), Point::new(500.0, 200.0)),
+                radius: 20.0,
+                color: Color32::RED,
+            },
+            Action::PaintStroke {
+                points: line(Point::new(300.0, 100.0), Point::new(300.0, 300.0)),
+                radius: 15.0,
+                color: Color32::BLUE,
+            },
+        ],
+    );
+    app
+}
+
+/// バケツで塗った境目の辺・頂点をドラッグすると、円の線の内側のふちも一緒に動き、すき間も重なりもできない。Undo 1回で両方戻る
+#[test]
+fn test_drag_bucket_fill_boundary_moves_both_sides() {
+    let in_disk = |p: Point| (p - Point::new(300.0, 300.0)).hypot() < 106.0;
+    let area = (190.0, 190.0, 410.0, 410.0);
+    for (from, to) in [
+        (Point::new(392.0, 300.0), Point::new(370.0, 300.0)),
+        (Point::new(392.0, 300.0), Point::new(400.0, 300.0)),
+    ] {
+        let mut app = ring_with_bucket_fill();
+        assert!(apply(&mut app, Action::PullEdgeFromTo { from, to }));
+        assert_eq!(
+            shared_boundary_coverage(&app, in_disk, area),
+            (0, 0),
+            "辺を {from:?} から {to:?} へ"
+        );
+    }
+    let mut app = ring_with_bucket_fill();
+    let before: Vec<(Color32, f64)> = scene_summary(&app)
+        .shapes
+        .iter()
+        .map(|s| (s.color, s.exterior.signed_area()))
+        .collect();
+    let v = scene_summary(&app)
+        .shapes
+        .iter()
+        .find(|s| s.color == Color32::RED)
+        .unwrap()
+        .exterior
+        .segments[2]
+        .p0;
+    let to = v + (Point::new(300.0, 300.0) - v) * (15.0 / (Point::new(300.0, 300.0) - v).hypot());
+    assert!(apply(&mut app, Action::MoveVertexFromTo { from: v, to }));
+    assert_eq!(
+        shared_boundary_coverage(&app, in_disk, area),
+        (0, 0),
+        "頂点を動かす"
+    );
+    run(&mut app, &[Action::Undo]);
+    let after: Vec<(Color32, f64)> = scene_summary(&app)
+        .shapes
+        .iter()
+        .map(|s| (s.color, s.exterior.signed_area()))
+        .collect();
+    assert_eq!(before, after, "Undo 1回で両方戻る");
+}
+
+/// ブラシを重ねた境目をドラッグすると、下の図形の切り口も一緒に動く。下の図形の短い切り口や角をつかんでも、
+/// 上の図形の長い辺が境目の端で切り分けられて一緒に動く
+#[test]
+fn test_drag_overpainted_brush_boundary_moves_both_sides() {
+    let in_strip = |p: Point| p.y > 181.0 && p.y < 219.0;
+    let area = (110.0, 181.0, 490.0, 219.0);
+    // 青の右の辺を、赤の帯の所で青の中へ
+    let mut app = crossed_brush_strokes();
+    assert!(apply(
+        &mut app,
+        Action::PullEdgeFromTo {
+            from: Point::new(315.0, 200.0),
+            to: Point::new(305.0, 200.0)
+        }
+    ));
+    assert_eq!(shared_boundary_coverage(&app, in_strip, area), (0, 0));
+    // 赤（左）の切り口を直接つかんで右へ、赤（左）の角の頂点を直接動かす
+    for move_vertex in [false, true] {
+        let mut app = crossed_brush_strokes();
+        let s = scene_summary(&app);
+        let red = s
+            .shapes
+            .iter()
+            .find(|x| x.color == Color32::RED && x.bounding_box().x1 < 300.0)
+            .unwrap();
+        let si = red
+            .exterior
+            .segments
+            .iter()
+            .position(|q| (q.p0.x - 285.0).abs() < 1.0 && (q.p2.x - 285.0).abs() < 1.0)
+            .unwrap();
+        let seg = red.exterior.segments[si];
+        // 境目の線は1本なので、赤の側からつかんでも同じ辺・同じ頂点になる
+        let action = if move_vertex {
+            Action::MoveVertexFromTo {
+                from: seg.p0,
+                to: seg.p0 + KVec2::new(-9.0, -8.0),
+            }
+        } else {
+            Action::PullEdgeFromTo {
+                from: seg.eval(0.5),
+                to: seg.eval(0.5) + KVec2::new(12.0, 0.0),
+            }
+        };
+        assert!(apply(&mut app, action));
+        assert_eq!(
+            shared_boundary_coverage(&app, in_strip, area),
+            (0, 0),
+            "頂点 {move_vertex}"
+        );
+        let blue_segs: usize = scene_summary(&app)
+            .shapes
+            .iter()
+            .filter(|x| x.color == Color32::BLUE)
+            .map(|x| x.exterior.segments.len())
+            .sum();
+        assert_eq!(
+            blue_segs, 10,
+            "青の輪郭が、左右の境目にある赤の角 4 か所で切り分けられる"
+        );
+    }
+}
+
+/// 3つの図形が接する点（分かれ目）をまたぐ辺を、分かれ目より外でつかむと、分かれ目と分かれ目の間だけが曲がり、
+/// 分かれ目の向こうの図形は変わらない（Animate と同じ）。ドラッグ中の表示も、離した後と同じ
+#[test]
+fn test_drag_edge_bends_only_between_junctions() {
+    let reds = |app: &Is2dApp| -> Vec<Vec<QuadBez>> {
+        let mut v: Vec<Vec<QuadBez>> = scene_summary(app)
+            .shapes
+            .iter()
+            .filter(|s| s.color == Color32::RED)
+            .map(|s| s.exterior.segments.to_vec())
+            .collect();
+        v.sort_by(|a, b| a[0].p0.x.total_cmp(&b[0].p0.x));
+        v
+    };
+    let mut app = crossed_brush_strokes();
+    let reds_before = reds(&app);
+    tool_select::start_reshape_drag(&mut app, Point::new(285.0, 140.0), false, false);
+    tool_select::update_reshape_drag(&mut app, Point::new(270.0, 140.0));
+    let during: Vec<QuadBez> = app
+        .scene()
+        .iter()
+        .filter(|s| s.color == Color32::BLUE)
+        .flat_map(|s| s.exterior.segments.to_vec())
+        .collect();
+    let reds_during: Vec<Vec<QuadBez>> = {
+        let mut v: Vec<Vec<QuadBez>> = app
+            .scene()
+            .iter()
+            .filter(|s| s.color == Color32::RED)
+            .map(|s| s.exterior.segments.to_vec())
+            .collect();
+        v.sort_by(|a, b| a[0].p0.x.total_cmp(&b[0].p0.x));
+        v
+    };
+    tool_select::finish_reshape_drag(&mut app, None);
+    let after: Vec<QuadBez> = scene_summary(&app)
+        .shapes
+        .iter()
+        .filter(|s| s.color == Color32::BLUE)
+        .flat_map(|s| s.exterior.segments.to_vec())
+        .collect();
+    assert_eq!(reds_during, reds_before, "ドラッグ中も赤は変わらない");
+    assert_eq!(reds(&app), reds_before, "離した後も赤は変わらない");
+    assert_eq!(
+        after.len(),
+        10,
+        "青の輪郭が、左右の境目にある赤の角 4 か所で切り分けられる"
+    );
+    assert_eq!(during, after, "ドラッグ中の表示と、離した後の形が同じ");
+}
+
+/// 黒い円の線・円をまたぐ赤の横線・上下をバケツで青と緑（3色が接する点が4つある）
+fn three_color_junction_scene() -> Is2dApp {
+    let mut app = ring_with_bucket_fill();
+    run(&mut app, &[Action::Undo]);
+    let line: Vec<Point> = (0..=150)
+        .map(|i| Point::new(195.0 + 210.0 * i as f64 / 150.0, 300.0))
+        .collect();
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: line,
+                radius: 6.0,
+                color: Color32::RED,
+            },
+            Action::BucketFill {
+                pt: Point::new(300.0, 250.0),
+                color: Color32::BLUE,
+            },
+            Action::BucketFill {
+                pt: Point::new(300.0, 350.0),
+                color: Color32::GREEN,
+            },
+        ],
+    );
+    app
+}
+
+/// 3色が接する点の頂点をつかんで動かせ、すき間も重なりもできない
+#[test]
+fn test_drag_three_color_junction_vertex() {
+    let c = Point::new(300.0, 300.0);
+    let app0 = three_color_junction_scene();
+    let s = scene_summary(&app0);
+    let mut junctions: Vec<Point> = s
+        .shapes
+        .iter()
+        .filter(|x| x.color == Color32::BLUE || x.color == Color32::GREEN)
+        .flat_map(|x| x.exterior.segments.iter().map(|q| q.p0))
+        .filter(|p| {
+            ((*p - c).hypot() - 92.0).abs() < 1.5
+                && ((p.y - 294.0).abs() < 1.0 || (p.y - 306.0).abs() < 1.0)
+        })
+        .collect();
+    junctions.dedup_by(|a, b| (*a - *b).hypot() < 0.1);
+    assert_eq!(junctions.len(), 4);
+    for j in junctions {
+        let mut app = three_color_junction_scene();
+        let to = j
+            + (c - j) * (6.0 / (c - j).hypot())
+            + KVec2::new(0.0, if j.y < 300.0 { -2.0 } else { 2.0 });
+        assert!(
+            apply(&mut app, Action::MoveVertexFromTo { from: j, to }),
+            "{j:?} の頂点をつかめる"
+        );
+        assert_eq!(
+            shared_boundary_coverage(
+                &app,
+                |p| (p - c).hypot() < 106.0,
+                (190.0, 190.0, 410.0, 410.0)
+            ),
+            (0, 0),
+            "{j:?}"
+        );
+    }
+}
+
+/// 境目の辺や頂点をランダムに 40 回ドラッグしても、図形どうしの間にすき間も重なりもできず、区間が細切れにならない
+#[test]
+fn test_random_shared_boundary_drags_keep_shapes_together() {
+    let c = Point::new(300.0, 300.0);
+    let mut app = three_color_junction_scene();
+    let segs_before: usize = scene_summary(&app)
+        .shapes
+        .iter()
+        .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+        .sum();
+    let mut state = 3u64;
+    let mut rnd = || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 11) as f64) / ((1u64 << 53) as f64)
+    };
+    for k in 0..40 {
+        let s = scene_summary(&app);
+        let fills: Vec<&FillShape> = s
+            .shapes
+            .iter()
+            .filter(|x| x.color == Color32::BLUE || x.color == Color32::GREEN)
+            .collect();
+        let f = fills[(rnd() * fills.len() as f64) as usize % fills.len()];
+        let q = f.exterior.segments
+            [(rnd() * f.exterior.segments.len() as f64) as usize % f.exterior.segments.len()];
+        let ang = rnd() * std::f64::consts::TAU;
+        let d = KVec2::new(ang.cos(), ang.sin()) * (2.0 + 4.0 * rnd());
+        if rnd() < 0.5 {
+            let p = q.eval(0.3 + 0.4 * rnd());
+            let _ = apply(&mut app, Action::PullEdgeFromTo { from: p, to: p + d });
+        } else {
+            let _ = apply(
+                &mut app,
+                Action::MoveVertexFromTo {
+                    from: q.p0,
+                    to: q.p0 + d,
+                },
+            );
+        }
+        assert_eq!(
+            shared_boundary_coverage(
+                &app,
+                |p| (p - c).hypot() < 106.0,
+                (190.0, 190.0, 410.0, 410.0)
+            ),
+            (0, 0),
+            "{k} 回目"
+        );
+    }
+    let segs_after: usize = scene_summary(&app)
+        .shapes
+        .iter()
+        .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+        .sum();
+    assert!(
+        segs_after < segs_before * 2,
+        "区間 {segs_before} → {segs_after}"
+    );
+}
+
+/// 輪郭の変形のカーソル合わせに前後は無い：下の図形（赤）の角が上の図形（青）の辺の上にあってもつかめ、
+/// 境目の辺は分かれ目（赤の角）と分かれ目の間だけが強調される
+#[test]
+fn test_reshape_hover_has_no_front_and_back() {
+    let app = crossed_brush_strokes();
+    let s = scene_summary(&app);
+    let red = s
+        .shapes
+        .iter()
+        .find(|x| x.color == Color32::RED && x.bounding_box().x1 < 300.0)
+        .unwrap();
+    let corner = red
+        .exterior
+        .segments
+        .iter()
+        .map(|q| q.p0)
+        .filter(|p| (p.x - 285.0).abs() < 1.0)
+        .min_by(|a, b| a.y.total_cmp(&b.y))
+        .unwrap();
+    let hover = |pt: Point| {
+        crate::select_ops::compute_hover_target(
+            app.scene(),
+            &app.session,
+            pt,
+            app.view.zoom,
+            crate::canvas_tool::SelectSubMode::Reshape,
+        )
+    };
+    match hover(corner + KVec2::new(0.5, 0.5)) {
+        crate::canvas_tool::HoverTarget::Vertex {
+            pos,
+            map_node: Some(_),
+            ..
+        } => {
+            assert!((pos - corner).hypot() < 1e-9, "赤の角そのものをつかむ");
+        }
+        other => panic!("赤の角は頂点としてつかめる：{other:?}"),
+    }
+    match hover(Point::new(285.5, 200.0)) {
+        crate::canvas_tool::HoverTarget::Edge {
+            seg,
+            map_edge: Some(_),
+            ..
+        } => {
+            assert!(
+                seg.p0.y > 175.0 && seg.p0.y < 225.0 && seg.p2.y > 175.0 && seg.p2.y < 225.0,
+                "境目の辺は赤の角と角の間だけ：{seg:?}"
+            );
+        }
+        other => panic!("境目は辺としてつかめる：{other:?}"),
+    }
+}
+
+/// 境目をドラッグしても、境目に接していない図形はそのまま（作り直さない）。触れた図形だけが差し替わる
+#[test]
+fn test_reshape_rewrites_only_touched_shapes() {
+    let mut app = three_color_junction_scene();
+    let before = scene_summary(&app).shapes.clone();
+    let red_ids: Vec<u64> = before
+        .iter()
+        .filter(|s| s.color == Color32::RED)
+        .map(|s| s.shape_id)
+        .collect();
+    // 青と黒の境目（円の内側のふち、上のほう）を少しだけ外へ
+    let from = Point::new(300.0, 300.0 - 92.0);
+    assert!(apply(
+        &mut app,
+        Action::PullEdgeFromTo {
+            from,
+            to: from + KVec2::new(0.0, -2.0),
+        },
+    ));
+    let after = scene_summary(&app).shapes.clone();
+    for id in &red_ids {
+        let (b, a) = (
+            before.iter().find(|s| s.shape_id == *id).unwrap(),
+            after
+                .iter()
+                .find(|s| s.shape_id == *id)
+                .expect("赤はそのまま残る"),
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &b.exterior.segments,
+            &a.exterior.segments
+        ));
+    }
+    assert!(
+        !after
+            .iter()
+            .any(|s| s.color == Color32::BLUE && before.iter().any(|b| b.shape_id == s.shape_id)),
+        "青は差し替わる"
+    );
+}
+
+/// 今の図形から境目の線で持つ地図を作って図形に戻しても、塗りは変わらない
+#[test]
+fn test_planar_map_round_trip_keeps_fills() {
+    let app = three_color_junction_scene();
+    let faces: Vec<FillShape> = scene_summary(&app).shapes.clone();
+    let map = crate::planar_map::PlanarMap::from_faces(&faces);
+    let (back, broken) = map.to_faces_checked(1, &[]);
+    assert_eq!(broken, 0);
+    assert_eq!(back.len(), faces.len());
+    let color_at =
+        |fs: &[FillShape], p: Point| fs.iter().find(|s| s.contains_point(p)).map(|s| s.color);
+    let mut y = 180.0;
+    while y < 420.0 {
+        let mut x = 180.0;
+        while x < 420.0 {
+            let p = Point::new(x + 0.137, y + 0.173);
+            assert_eq!(color_at(&faces, p), color_at(&back, p), "{p:?}");
+            x += 2.0;
+        }
+        y += 2.0;
+    }
 }

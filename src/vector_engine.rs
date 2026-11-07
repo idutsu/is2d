@@ -337,12 +337,6 @@ impl Contour {
         true
     }
 
-    /// セグメント `seg_idx` の1つ前のセグメントの番号を返す（`seg_idx` が範囲外なら `None`）
-    pub(crate) fn prev_seg_idx(&self, seg_idx: usize) -> Option<usize> {
-        let n = self.segments.len();
-        (seg_idx < n).then(|| (seg_idx + n - 1) % n)
-    }
-
     /// 指定アンカー `seg_idx`（`segments[seg_idx].p0`）を削除し、前後のアンカー（点Aと点C）を直線セグメントで結ぶ
     /// （削除後に輪郭面積が潰れてゼロになる場合は削除を行わず `false` を返す）
     pub(crate) fn delete_anchor_at(&mut self, seg_idx: usize) -> bool {

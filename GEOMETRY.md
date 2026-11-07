@@ -184,18 +184,21 @@ Adobe Animate の「マージ描画（Merge Drawing）」では、同色スト�
 ## 5. アルゴリズム 4：インタラクティブ輪郭変形と GPU メッシュ描画
 
 ### 5.1 エッジつまみ変形（`PullEdge`）の逆算制御点更新
-選択ツールで未選択シェイプの曲線エッジ付近（ドラッグ開始カーソル位置 $P_{\text{start}}$）をつかむと、最近接パラメータをクランプした $t_g \in [0.18, 0.82]$ における曲線上のつかんだ点 $G = B(t_g)$ と初期オフセット $G - P_{\text{start}}$ が記録されます。カーソルを $P_{\text{drag}}$ へ動かしたときの移動量を $\Delta = P_{\text{drag}} - P_{\text{start}}$ とすると、曲線が通る目標点は $P_{\text{drag}}$ そのものではなく「つかんだ点＋移動量」$G + \Delta$（ドロップ確定時は対向エッジ貫通補正 [`punch_through_opposite_edge`](./src/select_ops.rs) 適用後の点）となり、両端アンカー $P_0, P_2$ を固定したまま新しい制御点 $P_1'$ は次式で一意に求まります（[`set_pulled_edge`](./src/select_ops.rs), [`apply_pull_edge_to_shape`](./src/select_ops.rs)）。
+選択ツールで未選択シェイプの曲線エッジ付近（ドラッグ開始カーソル位置 $P_{\text{start}}$）をつかむと、最近接パラメータをクランプした $t_g \in [0.18, 0.82]$ における曲線上のつかんだ点 $G = B(t_g)$ と初期オフセット $G - P_{\text{start}}$ が記録されます。カーソルを $P_{\text{drag}}$ へ動かしたときの移動量を $\Delta = P_{\text{drag}} - P_{\text{start}}$ とすると、曲線が通る目標点は $P_{\text{drag}}$ そのものではなく「つかんだ点＋移動量」$G + \Delta$（ドロップ確定時は対向エッジ貫通補正 [`punch_through_opposite_edge`](./src/select_ops.rs) 適用後の点）となり、両端アンカー $P_0, P_2$ を固定したまま新しい制御点 $P_1'$ は次式で一意に求まります（[`PlanarMap::with_edge_pulled`](./src/planar_map.rs)）。
 
 $$B_{\text{new}}(t_g) = (1-t_g)^2 P_0 + 2(1-t_g)t_g P_1' + t_g^2 P_2 = B(t_g) + \Delta \implies P_1' = P_1 + \frac{\Delta}{2 t_g (1 - t_g)}$$
 
 ### 5.2 頂点ドラッグ変形（`MoveVertex`）と反対側エッジ貫通分割
-アンカー頂点 $V = P_{2,i-1} = P_{0,i}$ を変位 $\Delta = P_{\text{drag}} - V$ だけ移動する際は、前後のセグメントの曲率バランスが自然に保たれるよう、隣接する2つの制御点を $\frac{1}{2}\Delta$ ずつ追従移動させます（[`apply_move_vertex_to_shape`](./src/select_ops.rs)）。
+アンカー頂点 $V = P_{2,i-1} = P_{0,i}$ を変位 $\Delta = P_{\text{drag}} - V$ だけ移動する際は、前後のセグメントの曲率バランスが自然に保たれるよう、隣接する2つの制御点を $\frac{1}{2}\Delta$ ずつ追従移動させます（[`PlanarMap::with_node_moved`](./src/planar_map.rs)。頂点につながる辺がいくつあっても、それぞれの制御点を $\frac{1}{2}\Delta$ ずつ動かす）。
 
 $$P_{1,i-1}' = P_{1,i-1} + \frac{1}{2}\Delta, \quad P_{1,i}' = P_{1,i} + \frac{1}{2}\Delta$$
 
-また、エッジや頂点を反対側の輪郭線を越えてドラッグ＆ドロップした際には、[`punch_through_opposite_edge`](./src/select_ops.rs) と [`resolve_deformed_shape`](./src/vector_boolean.rs) により、`OverlayFillRule::Positive`（正のワインディング領域のみの抽出）を適用して裏返り（負のワインディング領域）を自動消去し、くびれた図形を2つの独立した `FillShape` へ自然に分割します。図形全体が裏返ったとき（頂点を対角の角より先まで動かしたときなど）は、正の領域が残らないので図形は消えます（利用者と決めた動き。Undo で戻せます）。
+また、エッジや頂点を反対側の輪郭線を越えてドラッグ＆ドロップした際には、離した点を含む面について [`punch_through_opposite_edge`](./src/select_ops.rs) で離した点を少し押し出してから、[`commit_edit`](./src/planar_map.rs) で、前の位置の線も仮に入れて交わる所で辺を切り、面ごとに色を決め直します（その点を前は持っていなかった色が勝ち、巻き数が正の所だけを中とするので、裏返った所は消えます）。くびれた図形は2つの独立した面になり、図形全体が裏返ったときは何も残りません（利用者と決めた動き。Undo で戻せます）。
 
-### 5.3 Lyon テッセレーションと高速 Polka-Dot 選択網点メッシュ
+### 5.3 境目の線で持つ地図（[`PlanarMap`](./src/planar_map.rs)）
+輪郭の変形とそのカーソル合わせは、同じレイヤー・同じ階層の生の図形を、頂点と辺（曲線・左の色・右の色）で持つ地図で行います（Adobe Animate のマージ描画と同じ持ち方）。図形から作るときは、区間の端を 0.05 以内で頂点にまとめ、区間の途中にある頂点で切り分け、同じ2頂点を逆向きに結ぶ形の近い区間を1本の辺にします（[`from_faces`](./src/planar_map.rs)。切り抜きやバケツの境目は、相手の曲線の一部を切り出して作るので、2本のずれは 0.024 以下）。境目は1本なので、辺を動かせば両側の面が一緒に変わり、3色以上が接する点は頂点になって動きません。面は、頂点で時計回りに次の辺を選んで輪郭をたどって取り出します（[`face_cycles`](./src/planar_map.rs)）。確定した地図は、変わった面だけを図形に書き戻します（[`rewrite_shapes`](./src/planar_map.rs)）。保存する形は今のまま色ごとの図形で、地図はドラッグを始めるとき（カーソル合わせでは図形が変わるまで使い回し）と確定するときに作ります。
+
+### 5.4 Lyon テッセレーションと高速 Polka-Dot 選択網点メッシュ
 - **曲線テッセレーション（[`tessellate_lyon_path`](./src/vector_engine.rs)）**：
   各 [`FillShape`](./src/vector_engine.rs) の外周・内周穴の2次ベジェパスを `lyon_tessellation::FillTessellator`（許容誤差 `0.04`、`FillRule::EvenOdd`）で三角形メッシュ `fill_mesh` に変換してキャッシュし、描画フレームごとに [`transform_mesh_to_screen`](./src/vector_engine.rs) でビューポート変換（$P_{\text{screen}} = z \cdot P_{\text{world}} + \text{pan}$）のみを行って GPU へ送出します。
 - **三角形外積判定による選択網点オーバーレイ（[`build_polka_dot_selection_mesh`](./src/vector_engine.rs)）**：

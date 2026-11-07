@@ -1,15 +1,16 @@
+use std::sync::Arc;
+
 use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::{ParamCurve, Point, QuadBez};
 
 use crate::canvas_tool::{
-    ActiveCanvasDrag, HoverTarget, MarqueeDrag, Scene, SelectDragState, SelectSubMode, ShapeId, Tab,
+    ActiveCanvasDrag, HoverTarget, MarqueeDrag, SelectDragState, SelectSubMode, Tab,
 };
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
+use crate::planar_map::scope_maps;
 use crate::select_ops::{apply_click_selection, finish_selection_drag, update_selection_drag};
-pub(crate) use crate::select_ops::{
-    compute_hover_target, handle_canvas_double_click, set_moved_vertex, set_pulled_edge,
-};
+pub(crate) use crate::select_ops::{compute_hover_target, handle_canvas_double_click};
 use crate::vector_engine::FillShape;
 
 // ============================================================================
@@ -215,66 +216,75 @@ pub(crate) fn start_reshape_drag(
     match target {
         HoverTarget::Vertex {
             shape_id,
-            contour_idx,
-            seg_idx,
             pos,
+            map_node: Some((layer_id, node)),
+            ..
         } => {
             let tab = host.tab_mut();
-            if let Some((orig_prev_ctrl, orig_curr_ctrl)) = tab
-                .scene()
-                .shape_by_id(shape_id)
-                .and_then(|s| s.get_contour(contour_idx))
-                .and_then(|contour| {
-                    let prev_idx = contour.prev_seg_idx(seg_idx)?;
-                    Some((contour.segments[prev_idx].p1, contour.segments[seg_idx].p1))
-                })
+            let maps = scope_maps(tab.scene(), &tab.session);
+            let Some(lm) = maps.maps.iter().find(|m| m.layer_id == layer_id) else {
+                return;
+            };
+            let (map, group_path) = (lm.map.clone(), lm.group_path.clone());
+            let faces = Arc::new(map.faces_touching(&map.edges_at(node)));
+            tab.session.selection.clear();
+            if tab
+                .session
+                .begin_map_overlay(&map, &faces, layer_id, &group_path)
             {
-                tab.session.selection.clear();
-                if tab.session.begin_deform_overlay(shape_id) {
-                    tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
-                        shape_id,
-                        contour_idx,
-                        seg_idx,
-                        orig_vertex: pos,
-                        last_pos: pos,
-                        orig_prev_ctrl,
-                        orig_curr_ctrl,
-                        snapped_to: None,
-                    });
-                }
+                tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
+                    shape_id,
+                    layer_id,
+                    group_path,
+                    map,
+                    faces,
+                    node,
+                    orig_vertex: pos,
+                    last_pos: pos,
+                    snapped_to: None,
+                });
             }
         }
         HoverTarget::Edge {
             shape_id,
-            contour_idx,
-            seg_idx,
             t,
             closest_pos,
+            seg,
+            map_edge: Some((layer_id, edge)),
+            ..
         } => {
             let tab = host.tab_mut();
-            if let Some(orig_seg) = tab
-                .scene()
-                .get_contour_segment(shape_id, contour_idx, seg_idx)
+            let maps = scope_maps(tab.scene(), &tab.session);
+            let Some(lm) = maps.maps.iter().find(|m| m.layer_id == layer_id) else {
+                return;
+            };
+            let (map, group_path) = (lm.map.clone(), lm.group_path.clone());
+            let grab_t = t.clamp(0.18, 0.82);
+            let grab_pos = seg.eval(grab_t);
+            // 実カーソル位置 pt と曲線上の最近接点 closest_pos の差、および丸め前 t と grab_t の位置差を合わせた初期オフセット
+            let grab_offset = (closest_pos - pt) + (grab_pos - closest_pos);
+            let faces = Arc::new(map.faces_touching(&[edge]));
+            tab.session.selection.clear();
+            if tab
+                .session
+                .begin_map_overlay(&map, &faces, layer_id, &group_path)
             {
-                let grab_t = t.clamp(0.18, 0.82);
-                let grab_pos = orig_seg.eval(grab_t);
-                // 実カーソル位置 pt と曲線上の最近接点 closest_pos の差、および丸め前 t と grab_t の位置差を合わせた初期オフセット
-                let grab_offset = (closest_pos - pt) + (grab_pos - closest_pos);
-                tab.session.selection.clear();
-                if tab.session.begin_deform_overlay(shape_id) {
-                    tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
-                        shape_id,
-                        contour_idx,
-                        seg_idx,
-                        grab_t,
-                        grab_pos,
-                        grab_offset,
-                        last_pos: grab_pos,
-                        orig_seg,
-                    });
-                }
+                tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
+                    shape_id,
+                    layer_id,
+                    group_path,
+                    map,
+                    faces,
+                    edge,
+                    grab_t,
+                    grab_pos,
+                    grab_offset,
+                    last_pos: grab_pos,
+                    orig_seg: seg,
+                });
             }
         }
+        HoverTarget::Vertex { .. } | HoverTarget::Edge { .. } => {}
         HoverTarget::Fill { shape_id } => {
             if !host.tab().session.is_shape_id_selected(shape_id) {
                 apply(host, Action::SelectSingleAt { pt });
@@ -293,74 +303,54 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
     if update_selection_drag(tab, pt) {
         return;
     }
-    let vertex_drag_info = if let ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
-        shape_id,
-        contour_idx,
-        seg_idx,
-        orig_vertex,
-        orig_prev_ctrl,
-        orig_curr_ctrl,
-        ..
-    }) = &tab.session.drag
-    {
-        Some((
-            *shape_id,
-            *contour_idx,
-            *seg_idx,
-            *orig_vertex,
-            *orig_prev_ctrl,
-            *orig_curr_ctrl,
-        ))
-    } else {
-        None
-    };
-
-    if let Some((s_id, c_idx, g_idx, orig_v, prev_c, curr_c)) = vertex_drag_info {
-        let snap_opt = find_snap_vertex(
-            tab.scene(),
-            &tab.session.editing_group_path,
-            pt,
-            tab.view.zoom,
-            s_id,
-            c_idx,
-            g_idx,
-        );
-        let target_pt = snap_opt.unwrap_or(pt);
-        if let ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
+    let snap_radius = 12.0 / (tab.view.zoom as f64);
+    let update = match &mut tab.session.drag {
+        ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
+            layer_id,
+            group_path,
+            map,
+            faces,
+            node,
+            last_pos,
             snapped_to,
+            ..
+        }) => {
+            let snap = map.snap_target(*node, pt, snap_radius);
+            let target = snap.unwrap_or(pt);
+            *snapped_to = snap;
+            *last_pos = target;
+            Some((
+                map.with_node_moved(*node, target),
+                faces.clone(),
+                *layer_id,
+                group_path.clone(),
+            ))
+        }
+        ActiveCanvasDrag::Select(SelectDragState::PullEdge {
+            layer_id,
+            group_path,
+            map,
+            faces,
+            edge,
+            grab_t,
+            grab_offset,
             last_pos,
             ..
-        }) = &mut tab.session.drag
-        {
-            *snapped_to = snap_opt;
-            *last_pos = target_pt;
+        }) => {
+            let target = pt + *grab_offset;
+            *last_pos = target;
+            Some((
+                map.with_edge_pulled(*edge, *grab_t, target),
+                faces.clone(),
+                *layer_id,
+                group_path.clone(),
+            ))
         }
-        if let Some((_, shape)) = tab.session.overlay.add.first_mut() {
-            set_moved_vertex(shape, (c_idx, g_idx), orig_v, (prev_c, curr_c), target_pt);
-        }
-        return;
-    }
-
-    let edge_update = if let ActiveCanvasDrag::Select(SelectDragState::PullEdge {
-        contour_idx,
-        seg_idx,
-        grab_t,
-        grab_offset,
-        last_pos,
-        orig_seg,
-        ..
-    }) = &mut tab.session.drag
-    {
-        let target_pt = pt + *grab_offset;
-        *last_pos = target_pt;
-        Some(((*contour_idx, *seg_idx), *grab_t, *orig_seg, target_pt))
-    } else {
-        None
+        _ => None,
     };
-    if let Some(((c_idx, g_idx), grab_t, orig_seg, target_pt)) = edge_update {
-        if let Some((_, shape)) = tab.session.overlay.add.first_mut() {
-            set_pulled_edge(shape, (c_idx, g_idx), grab_t, orig_seg, target_pt);
-        }
+    if let Some((edited, faces, layer_id, group_path)) = update {
+        tab.session
+            .update_map_overlay(&edited, &faces, layer_id, &group_path);
     }
 }
 
@@ -376,8 +366,6 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
     match finished_drag {
         SelectDragState::PullEdge {
             shape_id,
-            contour_idx,
-            seg_idx,
             grab_t,
             grab_pos,
             last_pos,
@@ -388,8 +376,6 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
                 host,
                 Action::ReshapeEdge {
                     shape_id,
-                    contour_idx,
-                    seg_idx,
                     grab_t,
                     grab_pos,
                     target_pos: last_pos,
@@ -399,23 +385,16 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
         }
         SelectDragState::MoveVertex {
             shape_id,
-            contour_idx,
-            seg_idx,
             orig_vertex,
             last_pos,
-            orig_prev_ctrl,
-            orig_curr_ctrl,
             ..
         } => {
             apply(
                 host,
                 Action::MoveVertex {
                     shape_id,
-                    contour_idx,
-                    seg_idx,
                     orig_vertex,
                     target_pos: last_pos,
-                    orig_ctrls: (orig_prev_ctrl, orig_curr_ctrl),
                 },
             );
         }
@@ -423,48 +402,8 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
 }
 
 // ------------------------------------------------------------------------
-// 3. 頂点スナップ・選択ツールカーソル描画
+// 3. 選択ツールカーソル描画
 // ------------------------------------------------------------------------
-
-/// 頂点ドラッグ時に周囲の他の頂点へ吸着（スナップ）する座標を検索（`Scene` を読み取る）
-pub(crate) fn find_snap_vertex(
-    scene: Scene<'_>,
-    editing_group_path: &[u64],
-    drag_pt: Point,
-    zoom: f32,
-    ignore_shape_id: ShapeId,
-    ignore_contour: usize,
-    ignore_seg: usize,
-) -> Option<Point> {
-    let snap_radius = 12.0 / (zoom as f64);
-    let mut best_snap: Option<(f64, Point)> = None;
-
-    for shape in scene.iter() {
-        let Some(bbox) = shape.geometry_bounding_box() else {
-            continue;
-        };
-        if !shape.is_raw_at_scope(editing_group_path)
-            || !bbox.inflate(snap_radius, snap_radius).contains(drag_pt)
-        {
-            continue;
-        }
-        for (c_idx, contour) in shape.contours().enumerate() {
-            for (seg_idx, seg) in contour.segments.iter().enumerate() {
-                if shape.shape_id == ignore_shape_id
-                    && c_idx == ignore_contour
-                    && seg_idx == ignore_seg
-                {
-                    continue;
-                }
-                let dist = (drag_pt - seg.p0).hypot();
-                if dist <= snap_radius && best_snap.as_ref().is_none_or(|(d, _)| dist < *d) {
-                    best_snap = Some((dist, seg.p0));
-                }
-            }
-        }
-    }
-    best_snap.map(|(_, pt)| pt)
-}
 
 pub(crate) fn draw_select_tool_cursor(
     tab: &Tab,
@@ -476,18 +415,16 @@ pub(crate) fn draw_select_tool_cursor(
     ctx.set_cursor_icon(CursorIcon::Default);
     match &tab.session.drag {
         ActiveCanvasDrag::Select(SelectDragState::PullEdge {
-            shape_id,
-            contour_idx,
-            seg_idx,
+            orig_seg,
+            grab_t,
+            last_pos,
             ..
         }) => {
             if tab.view.show_wireframe {
-                if let Some(seg) =
-                    tab.scene()
-                        .get_contour_segment(*shape_id, *contour_idx, *seg_idx)
-                {
-                    draw_highlighted_quad_segment(tab, painter, seg);
-                }
+                // 引っぱっている辺の今の形（`PlanarMap::with_edge_pulled` と同じ式）
+                let mut seg = *orig_seg;
+                seg.p1 += (*last_pos - orig_seg.eval(*grab_t)) / (2.0 * grab_t * (1.0 - grab_t));
+                draw_highlighted_quad_segment(tab, painter, seg);
             }
         }
         ActiveCanvasDrag::Select(SelectDragState::MoveVertex { snapped_to, .. }) => {
@@ -516,19 +453,10 @@ fn draw_select_sub_mode_cursor(
         SelectSubMode::AddAnchor => {
             draw_anchor_edit_cursor_badge(painter, pos, true);
             if let HoverTarget::Edge {
-                shape_id,
-                contour_idx,
-                seg_idx,
-                closest_pos,
-                ..
+                seg, closest_pos, ..
             } = tab.session.hover_target
             {
-                if let Some(seg) = tab
-                    .scene()
-                    .get_contour_segment(shape_id, contour_idx, seg_idx)
-                {
-                    draw_highlighted_quad_segment(tab, painter, seg);
-                }
+                draw_highlighted_quad_segment(tab, painter, seg);
                 let cp = tab.view.world_to_screen(closest_pos);
                 painter.circle_filled(cp, 5.5, Color32::from_rgb(30, 200, 95));
                 painter.circle_stroke(cp, 5.5, Stroke::new(2.0_f32, Color32::WHITE));
@@ -577,18 +505,9 @@ fn draw_reshape_hover_cursor(tab: &Tab, painter: &egui::Painter) {
             painter.circle_stroke(vp, 5.5, Stroke::new(2.0_f32, Color32::WHITE));
         }
         HoverTarget::Edge {
-            shape_id,
-            contour_idx,
-            seg_idx,
-            closest_pos,
-            ..
+            seg, closest_pos, ..
         } => {
-            if let Some(seg) = tab
-                .scene()
-                .get_contour_segment(shape_id, contour_idx, seg_idx)
-            {
-                draw_highlighted_quad_segment(tab, painter, seg);
-            }
+            draw_highlighted_quad_segment(tab, painter, seg);
             painter.circle_filled(
                 tab.view.world_to_screen(closest_pos),
                 4.0,

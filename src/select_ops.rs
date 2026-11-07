@@ -501,6 +501,14 @@ pub(crate) fn compute_hover_target(
         }
     }
 
+    // 輪郭の変形は、境目の線で持つ地図で頂点・辺を探す（同じレイヤーの生の図形どうしに前後は無い）
+    if sub_mode == SelectSubMode::Reshape {
+        let target = crate::planar_map::reshape_hover(scene, session, mouse_pt, zoom);
+        if !matches!(target, HoverTarget::None) {
+            return target;
+        }
+    }
+
     let topmost_fill_idx = scene.topmost_shape_at(mouse_pt, &session.editing_group_path);
     let is_sel = is_sel.as_slice();
     // 頂点・辺の当たり判定の候補になる図形を前から順に返す
@@ -530,7 +538,7 @@ pub(crate) fn compute_hover_target(
         })
     };
 
-    if sub_mode != SelectSubMode::AddAnchor {
+    if sub_mode == SelectSubMode::DeleteAnchor {
         let v_radius = if sub_mode == SelectSubMode::DeleteAnchor {
             anchor_edit_hit_radius
         } else {
@@ -555,6 +563,7 @@ pub(crate) fn compute_hover_target(
                                 contour_idx: c_idx,
                                 seg_idx,
                                 pos: seg.p0,
+                                map_node: None,
                             },
                         ));
                     }
@@ -570,7 +579,11 @@ pub(crate) fn compute_hover_target(
     }
 
     let mut best_edge: Option<(f64, HoverTarget)> = None;
-    for (s_idx, shape) in candidate_shapes(anchor_edit_hit_radius) {
+    let edge_candidates = (sub_mode == SelectSubMode::AddAnchor)
+        .then(|| candidate_shapes(anchor_edit_hit_radius))
+        .into_iter()
+        .flatten();
+    for (s_idx, shape) in edge_candidates {
         let max_dist = if sub_mode == SelectSubMode::AddAnchor {
             anchor_edit_hit_radius
         } else if shape.contains_point(mouse_pt) {
@@ -608,6 +621,8 @@ pub(crate) fn compute_hover_target(
                                 nearest.t
                             },
                             closest_pos: eval_pt,
+                            seg: *seg,
+                            map_edge: None,
                         },
                     ));
                 }
@@ -687,106 +702,6 @@ pub(crate) fn punch_through_opposite_edge(
         }
     }
     drag_pt
-}
-
-/// エッジつまみ変形（PullEdge）の制御点を計算して反映する（リアルタイムプレビュー用）。
-pub(crate) fn set_pulled_edge(
-    shape: &mut FillShape,
-    (contour_idx, seg_idx): (usize, usize),
-    grab_t: f64,
-    orig_seg: QuadBez,
-    target_pt: Point,
-) {
-    let grab_pos = orig_seg.eval(grab_t);
-    let delta = target_pt - grab_pos;
-    let denom = 2.0 * grab_t * (1.0 - grab_t);
-    let new_p1 = orig_seg.p1 + delta / denom;
-    shape.edit_contour(contour_idx, |contour| {
-        if seg_idx < contour.segments.len() {
-            contour.segments_mut()[seg_idx].p1 = new_p1;
-            true
-        } else {
-            false
-        }
-    });
-}
-
-/// エッジつまみ変形（PullEdge）を対向エッジ貫通補正込みで確定適用する。
-pub(crate) fn apply_pull_edge_to_shape(
-    shape: &mut FillShape,
-    (contour_idx, seg_idx): (usize, usize),
-    grab_t: f64,
-    orig_seg: QuadBez,
-    drag_pt: Point,
-) {
-    let grab_pos = orig_seg.eval(grab_t);
-    let effective_pt = punch_through_opposite_edge(
-        shape,
-        contour_idx,
-        &[seg_idx],
-        (orig_seg.p0, orig_seg.p2),
-        (grab_pos, drag_pt),
-    );
-    set_pulled_edge(
-        shape,
-        (contour_idx, seg_idx),
-        grab_t,
-        orig_seg,
-        effective_pt,
-    );
-}
-
-/// 頂点ドラッグ変形（MoveVertex）の頂点と前後制御点を計算して反映する（リアルタイムプレビュー用）。
-pub(crate) fn set_moved_vertex(
-    shape: &mut FillShape,
-    (contour_idx, seg_idx): (usize, usize),
-    orig_vertex: Point,
-    orig_ctrls: (Point, Point),
-    target_pt: Point,
-) {
-    let delta = target_pt - orig_vertex;
-    shape.edit_contour(contour_idx, |contour| {
-        let Some(prev_idx) = contour.prev_seg_idx(seg_idx) else {
-            return false;
-        };
-        let segs = contour.segments_mut();
-        segs[prev_idx].p2 = target_pt;
-        segs[seg_idx].p0 = target_pt;
-        segs[prev_idx].p1 = orig_ctrls.0 + delta * 0.5;
-        segs[seg_idx].p1 = orig_ctrls.1 + delta * 0.5;
-        true
-    });
-}
-
-/// 頂点ドラッグ変形（MoveVertex）を対向エッジ貫通補正込みで確定適用する。
-pub(crate) fn apply_move_vertex_to_shape(
-    shape: &mut FillShape,
-    (contour_idx, seg_idx): (usize, usize),
-    orig_vertex: Point,
-    orig_ctrls: (Point, Point),
-    drag_pt: Point,
-) {
-    let Some((prev_idx, prev_p0, curr_p2)) = shape.get_contour(contour_idx).and_then(|c| {
-        let prev_idx = c.prev_seg_idx(seg_idx)?;
-        Some((prev_idx, c.segments[prev_idx].p0, c.segments[seg_idx].p2))
-    }) else {
-        return;
-    };
-
-    let effective_pt = punch_through_opposite_edge(
-        shape,
-        contour_idx,
-        &[prev_idx, seg_idx],
-        (prev_p0, curr_p2),
-        (orig_vertex, drag_pt),
-    );
-    set_moved_vertex(
-        shape,
-        (contour_idx, seg_idx),
-        orig_vertex,
-        orig_ctrls,
-        effective_pt,
-    );
 }
 
 /// 選択中の図形がすべて同じレイヤーにあればその `LayerId` を返す（未選択・複数レイヤーにまたがるときは `None`）

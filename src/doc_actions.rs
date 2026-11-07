@@ -14,10 +14,10 @@ use crate::canvas_tool::{
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
 };
+use crate::planar_map::{reshape_shapes, MapEdit};
 use crate::select_ops::{
-    apply_marquee_selection, apply_move_vertex_to_shape, apply_pull_edge_to_shape,
-    compute_hover_target, enter_group_at, exit_current_group, prepare_arrange_selected,
-    prepare_clear_active_frame_shapes, prepare_delete_selected_shapes,
+    apply_marquee_selection, compute_hover_target, enter_group_at, exit_current_group,
+    prepare_arrange_selected, prepare_clear_active_frame_shapes, prepare_delete_selected_shapes,
     prepare_group_selected_shapes, prepare_ungroup_selected_shapes,
     retain_selection_and_flush_deselected, select_single_shape_at, toggle_shape_selection,
     ArrangeMode,
@@ -31,7 +31,7 @@ use crate::symbol_ops::{
 use crate::timeline::{Layer, Timeline, TimelineCellSelection, MAX_LAYERS_PER_TIMELINE};
 use crate::vector_boolean::{
     boolean_operation, erase_from_canvas, find_enclosed_region_at, merge_disjoint_fill_into_canvas,
-    merge_shapes_into_canvas, resolve_deformed_shape, BoolOp,
+    merge_shapes_into_canvas, BoolOp,
 };
 use crate::vector_engine::{
     affine_rotate_around, affine_scale_around, rects_overlap, FillShape, MAX_VIEW_ZOOM,
@@ -138,22 +138,20 @@ pub(crate) enum Action {
     },
 
     // 輪郭変形・アンカー編集
+    /// 境目の線で持つ地図で、形が `orig_seg` の辺の `grab_t` の所を `target_pos` へ引っぱる
+    /// （`shape_id` は、どのレイヤー・階層の図形かを決めるための、辺の側の図形）
     ReshapeEdge {
         shape_id: ShapeId,
-        contour_idx: usize,
-        seg_idx: usize,
         grab_t: f64,
         grab_pos: Point,
         target_pos: Point,
         orig_seg: QuadBez,
     },
+    /// 境目の線で持つ地図で、`orig_vertex` にある頂点を `target_pos` へ動かす
     MoveVertex {
         shape_id: ShapeId,
-        contour_idx: usize,
-        seg_idx: usize,
         orig_vertex: Point,
         target_pos: Point,
-        orig_ctrls: (Point, Point),
     },
     #[cfg(test)]
     PullEdgeFromTo {
@@ -509,43 +507,33 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
 
         Action::ReshapeEdge {
             shape_id,
-            contour_idx,
-            seg_idx,
             grab_t,
             grab_pos,
             target_pos,
             orig_seg,
-        } => {
-            let drag_dist = (target_pos - grab_pos).hypot();
-            apply_deform_shape(tab, shape_id, drag_dist, |deformed| {
-                apply_pull_edge_to_shape(
-                    deformed,
-                    (contour_idx, seg_idx),
-                    grab_t,
-                    orig_seg,
-                    target_pos,
-                );
-            })
-        }
+        } => apply_map_reshape(
+            tab,
+            shape_id,
+            (target_pos - grab_pos).hypot(),
+            MapEdit::PullEdge {
+                orig_seg,
+                grab_t,
+                target: target_pos,
+            },
+        ),
         Action::MoveVertex {
             shape_id,
-            contour_idx,
-            seg_idx,
             orig_vertex,
             target_pos,
-            orig_ctrls,
-        } => {
-            let drag_dist = (target_pos - orig_vertex).hypot();
-            apply_deform_shape(tab, shape_id, drag_dist, |deformed| {
-                apply_move_vertex_to_shape(
-                    deformed,
-                    (contour_idx, seg_idx),
-                    orig_vertex,
-                    orig_ctrls,
-                    target_pos,
-                );
-            })
-        }
+        } => apply_map_reshape(
+            tab,
+            shape_id,
+            (target_pos - orig_vertex).hypot(),
+            MapEdit::MoveVertex {
+                orig_vertex,
+                target: target_pos,
+            },
+        ),
         #[cfg(test)]
         Action::PullEdgeFromTo { from, to } => apply_pull_edge_from_to(tab, from, to),
         #[cfg(test)]
@@ -1095,41 +1083,35 @@ fn apply_move_selected(tab: &mut Tab, delta: KVec2, coalesce: Option<CoalesceKey
     moved
 }
 
-fn apply_deform_shape(
-    tab: &mut Tab,
-    shape_id: ShapeId,
-    drag_dist: f64,
-    apply_deform: impl FnOnce(&mut FillShape),
-) -> bool {
+/// 輪郭の変形を確定する。図形のレイヤー・階層の生の図形を境目の線で持つ地図にして編集し、変わった図形だけを差し替える
+fn apply_map_reshape(tab: &mut Tab, shape_id: ShapeId, drag_dist: f64, map_edit: MapEdit) -> bool {
     tab.session.clear_overlay();
     let min_deform = 0.5 / (tab.view.zoom as f64);
     if drag_dist <= min_deform {
         return false;
     }
     let layer_ids = editable_layer_ids(tab);
-    let in_base = tab
+    let Some((layer_id, group_path)) = tab
         .session
         .base_cache
         .shapes()
         .iter()
-        .any(|s| s.shape_id == shape_id && layer_ids.contains(&s.layer_id));
+        .find(|s| s.shape_id == shape_id && layer_ids.contains(&s.layer_id))
+        .map(|s| (s.layer_id, s.group_path.clone()))
+    else {
+        return false;
+    };
     // 輪郭の変形は、始めるときに選択を解除して `Floating` を確定している。`Floating` があるときは何もしない
-    if tab.session.floating().is_some() || !in_base {
+    if tab.session.floating().is_some() {
         return false;
     }
     push_undo(tab, None);
     focus_active_layer_to_shape_by_id(tab, shape_id);
-    let mut deformed_ok = false;
-    edit_layers(tab, &layer_ids, |edit| {
-        if let Some(pos) = edit.shapes.iter().position(|s| s.shape_id == shape_id) {
-            let mut deformed = edit.shapes.remove(pos);
-            apply_deform(&mut deformed);
-            let resolved = resolve_deformed_shape(&deformed);
-            merge_shapes_into_canvas(&mut edit.shapes, resolved);
-            deformed_ok = true;
-        }
+    let mut changed = false;
+    edit_layers(tab, &[layer_id], |edit| {
+        changed |= reshape_shapes(&mut edit.shapes, layer_id, &group_path, map_edit);
     });
-    deformed_ok
+    changed
 }
 
 #[cfg(test)]
@@ -1145,26 +1127,26 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     );
     let crate::canvas_tool::HoverTarget::Edge {
         shape_id,
-        contour_idx,
-        seg_idx,
         t,
+        seg,
+        map_edge: Some(_),
         ..
     } = target
     else {
         return false;
     };
-    let Some(orig_seg) = tab
-        .scene()
-        .get_contour_segment(shape_id, contour_idx, seg_idx)
-    else {
-        return false;
-    };
     let grab_t = t.clamp(0.18, 0.82);
-    let grab_pos = orig_seg.eval(grab_t);
-    let drag_dist = (to - grab_pos).hypot();
-    apply_deform_shape(tab, shape_id, drag_dist, |deformed| {
-        apply_pull_edge_to_shape(deformed, (contour_idx, seg_idx), grab_t, orig_seg, to);
-    })
+    let grab_pos = seg.eval(grab_t);
+    apply_map_reshape(
+        tab,
+        shape_id,
+        (to - grab_pos).hypot(),
+        MapEdit::PullEdge {
+            orig_seg: seg,
+            grab_t,
+            target: to,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1179,34 +1161,22 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     );
     let crate::canvas_tool::HoverTarget::Vertex {
         shape_id,
-        contour_idx,
-        seg_idx,
         pos,
+        map_node: Some(_),
+        ..
     } = target
     else {
         return false;
     };
-    let Some((orig_prev_ctrl, orig_curr_ctrl)) = tab
-        .scene()
-        .shape_by_id(shape_id)
-        .and_then(|s| s.get_contour(contour_idx))
-        .and_then(|contour| {
-            let prev_idx = contour.prev_seg_idx(seg_idx)?;
-            Some((contour.segments[prev_idx].p1, contour.segments[seg_idx].p1))
-        })
-    else {
-        return false;
-    };
-    let drag_dist = (to - pos).hypot();
-    apply_deform_shape(tab, shape_id, drag_dist, |deformed| {
-        apply_move_vertex_to_shape(
-            deformed,
-            (contour_idx, seg_idx),
-            pos,
-            (orig_prev_ctrl, orig_curr_ctrl),
-            to,
-        );
-    })
+    apply_map_reshape(
+        tab,
+        shape_id,
+        (to - pos).hypot(),
+        MapEdit::MoveVertex {
+            orig_vertex: pos,
+            target: to,
+        },
+    )
 }
 
 fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
