@@ -1,4 +1,4 @@
-//! 試作（本番には入れない）：同じレイヤー・同じ階層の生の図形を、境目の線（辺）で持つ。
+//! 同じレイヤー・同じ階層の生の図形を、境目の線（辺）で持つ地図。選択ツールの輪郭の変形とカーソル合わせで使う。
 //! Adobe Animate のマージ描画と同じく、辺が「曲線・左の色・右の色」を持つ。境目は1本で、重ね順は無い。
 //! 塗りの形（`FillShape`）は、辺から作って描画・当たり判定に使う。
 
@@ -948,7 +948,7 @@ impl PlanarMap {
 impl PlanarMap {
     /// 範囲 `area` の中で、2本の辺だけがつながる頂点のうち、両側の色が同じで、2本を1本の曲線で表せるものを消す
     /// （交わりで切った点が、相手の辺が消えた後に残らないように）
-    fn merge_degree2(&mut self, area: KRect) {
+    pub(crate) fn merge_degree2(&mut self, area: KRect) {
         loop {
             let mut at: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
             for (i, e) in self.edges.iter().enumerate() {
@@ -979,9 +979,15 @@ impl PlanarMap {
                 }
                 let s = (q2.p2 - q1.p0).cross(d2) / den;
                 let q = QuadBez::new(q1.p0, q1.p0 + d1 * s, q2.p2);
+                // 2本が1本の曲線に近く、1本の曲線も2本に近いときだけ（片側だけ確かめると、
+                // ほぼ一直線の2本で制御点が端の後ろに来て、曲線が端を越えて折り返すのを見逃す）
                 let fits = [&q1, &q2].iter().all(|qq| {
                     (1..4).all(|k| nearest_on_quad(&q, qq.eval(k as f64 / 4.0)).1 < 0.01)
-                }) && nearest_on_quad(&q, self.nodes[v]).1 < 0.01;
+                }) && nearest_on_quad(&q, self.nodes[v]).1 < 0.01
+                    && (1..8).all(|k| {
+                        let p = q.eval(k as f64 / 8.0);
+                        nearest_on_quad(&q1, p).1 < 0.01 || nearest_on_quad(&q2, p).1 < 0.01
+                    });
                 if !fits {
                     continue;
                 }
@@ -1438,6 +1444,20 @@ pub(crate) fn reshape_result(
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
     let map = &base.map;
     let (edited, moved) = map.apply_edit(edit)?;
+    // 動かす辺が、元の地図の壊れた面の輪郭（閉じない・色がまざる）に入っていれば編集しない。
+    // 壊れた輪郭の面は図形に書き戻せないので、編集するとその面の図形が消えてしまう
+    let broken = |c: &Vec<(usize, bool)>| {
+        c.iter().any(|h| h.0 == usize::MAX)
+            || c.windows(2)
+                .any(|w| map.side_color(w[0]) != map.side_color(w[1]))
+    };
+    if base
+        .cycles
+        .iter()
+        .any(|c| broken(c) && c.iter().any(|h| moved.contains(&h.0)))
+    {
+        return None;
+    }
     let (next, _) = commit_edit(map, &base.cycles, edited, &moved);
     Some(rewrite_shapes(
         map,

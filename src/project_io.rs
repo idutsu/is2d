@@ -495,9 +495,7 @@ impl From<&Contour> for SavedContour {
 
 impl From<SavedContour> for Contour {
     fn from(s: SavedContour) -> Self {
-        let mut contour = Contour::new(Arc::unwrap_or_clone(s.segments));
-        contour.enforce_continuity();
-        contour
+        Contour::new(Arc::unwrap_or_clone(s.segments))
     }
 }
 

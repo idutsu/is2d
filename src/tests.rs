@@ -2726,7 +2726,7 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
         .preview_local_bounds(sym_app.doc.revision, &sym_app.doc.library)
         .unwrap();
     let prev_m1 = sym_app.doc.library[0]
-        .cached_preview_screen_mesh(
+        .preview_screen_mesh(
             1.0,
             Vec2::new(100.0, 55.0),
             sym_app.doc.revision,
@@ -2737,14 +2737,15 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
         .preview_local_bounds(sym_app.doc.revision, &sym_app.doc.library)
         .unwrap();
     let prev_m2 = sym_app.doc.library[0]
-        .cached_preview_screen_mesh(
+        .preview_screen_mesh(
             1.0,
             Vec2::new(100.0, 55.0),
             sym_app.doc.revision,
             &sym_app.doc.library,
         )
         .unwrap();
-    assert!(std::sync::Arc::ptr_eq(&prev_m1, &prev_m2) && orig1 == orig2);
+    // 画面座標への変換は描くたびに行う（ワールド座標のメッシュはキャッシュから）。同じ倍率・位置なら同じメッシュになる
+    assert!(prev_m1 == prev_m2 && orig1 == orig2);
 }
 
 #[test]
@@ -21168,4 +21169,99 @@ fn test_reshape_drag_near_opposite_edge_does_not_jump() {
     let after = scene_summary(&app).shapes.clone();
     assert_eq!(after.len(), 1);
     assert!(covered(&after, Point::new(200.0, 249.3)));
+}
+
+/// 図形から作った地図に壊れた面の輪郭（色がまざる）があっても、その輪郭の頂点・辺を動かして図形が消えないこと（N-4001）。
+/// 赤の右のフチは少し右へふくらみ、緑の左のフチの上の端は 0.06 右にずれている（0.05 ではまとまらない）ので、
+/// 下の角で2色の辺の並びが入れ違い、赤の面の輪郭が緑の辺をまたぐ
+#[test]
+fn test_reshape_keeps_shape_on_broken_face_contour() {
+    let mut app = Is2dApp::default();
+    let lid = app.doc.root.layers[0].id;
+    let p = Point::new;
+    let line = |a: Point, b: Point| QuadBez::new(a, a.midpoint(b), b);
+    let red = vector_engine::Contour::new(vec![
+        line(p(100.0, 100.0), p(200.0, 100.0)),
+        QuadBez::new(p(200.0, 100.0), p(200.1, 150.0), p(200.0, 200.0)),
+        line(p(200.0, 200.0), p(100.0, 200.0)),
+        line(p(100.0, 200.0), p(100.0, 100.0)),
+    ]);
+    let green = vector_engine::Contour::new(vec![
+        line(p(200.0, 100.0), p(300.0, 100.0)),
+        line(p(300.0, 100.0), p(300.0, 200.0)),
+        line(p(300.0, 200.0), p(200.06, 200.0)),
+        line(p(200.06, 200.0), p(200.0, 100.0)),
+    ]);
+    let shapes = vec![
+        FillShape::new(Color32::RED, red, Vec::new()).with_scope(lid, &[]),
+        FillShape::new(Color32::GREEN, green, Vec::new()).with_scope(lid, &[]),
+    ];
+    app.doc.root.layers[0].keyframe_mut(0).cel = timeline::Cel::new(shapes);
+    app.refresh_scene_base();
+    let map = crate::planar_map::PlanarMap::from_faces(app.scene().iter());
+    assert!(map.faces().1 > 0, "前提：地図に壊れた面の輪郭がある");
+    let red_area = |app: &Is2dApp| {
+        app.scene()
+            .iter()
+            .filter(|s| s.color == Color32::RED)
+            .map(|s| s.contours().map(|c| c.signed_area()).sum::<f64>())
+            .sum::<f64>()
+    };
+    let area0 = red_area(&app);
+    let undo0 = app.history.undo_stack.len();
+    // 赤の左上の角を 2px 動かす・上のフチを 2px 引っぱる：赤は消えず、何も変わらず、Undo も積まない
+    assert!(!apply(
+        &mut app,
+        Action::MoveVertexFromTo {
+            from: p(100.0, 100.0),
+            to: p(98.0, 100.0),
+        }
+    ));
+    assert!(!apply(
+        &mut app,
+        Action::PullEdgeFromTo {
+            from: p(150.0, 100.0),
+            to: p(150.0, 98.0),
+        }
+    ));
+    assert!((red_area(&app) - area0).abs() < 1e-9, "赤が残る");
+    assert_eq!(app.history.undo_stack.len(), undo0, "Undo も積まない");
+}
+
+/// 両側の色が同じ頂点で2本の辺を1本にまとめるとき、ほぼ一直線の2本でも、端を越えて折り返す曲線にしないこと
+#[test]
+fn test_merge_degree2_does_not_fold_nearly_straight_pair() {
+    use crate::planar_map::{MapEdge, PlanarMap};
+    // 実際の地図で折り返した2本（どちらも直線で、ほぼ一直線）
+    let a = Point::new(296.526581476974, 305.3533702973108);
+    let v = Point::new(299.65683216934156, 294.0170251015405);
+    let b = Point::new(310.28849425127237, 255.5139719986355);
+    let edge = |from: usize, to: usize, ctrl: Point| MapEdge {
+        a: from,
+        b: to,
+        ctrl,
+        left: Some(Color32::RED),
+        right: Some(Color32::BLUE),
+        left_src: None,
+        right_src: None,
+    };
+    let mut map = PlanarMap {
+        nodes: vec![a, v, b],
+        edges: vec![
+            edge(0, 1, Point::new(298.09170660744206, 299.68519765994796)),
+            edge(1, 2, Point::new(304.9726635572615, 274.7654969283734)),
+        ],
+        node_src: vec![None; 3],
+    };
+    map.merge_degree2(kurbo::Rect::new(0.0, 0.0, 1000.0, 1000.0));
+    let hull = kurbo::Rect::from_points(a, b)
+        .union_pt(v)
+        .inflate(0.05, 0.05);
+    for e in 0..map.edges.len() {
+        let bb = kurbo::Shape::bounding_box(&map.quad(e));
+        assert!(
+            hull.contains(Point::new(bb.x0, bb.y0)) && hull.contains(Point::new(bb.x1, bb.y1)),
+            "まとめた曲線が元の2本の範囲から出ない：{bb:?}"
+        );
+    }
 }

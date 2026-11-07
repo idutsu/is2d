@@ -603,8 +603,8 @@ impl Layer {
             let elapsed = frame.saturating_sub(kf.start_frame);
             let split_tween_binding = self.interpolated_tween_binding_at(frame);
             for inst in cel.instances_mut() {
-                if let Some((start_b, interp_b)) = split_tween_binding {
-                    if inst.binding.instance_gid == start_b.instance_gid {
+                if let Some(interp_b) = split_tween_binding {
+                    if inst.binding.instance_gid == interp_b.instance_gid {
                         inst.binding = interp_b;
                     }
                 }
@@ -783,11 +783,11 @@ impl Layer {
     }
 
     /// 指定フレーム `frame` が完全トゥイーン（`TweenState::Complete`）の中間フレーム（`start_frame < frame < end_frame`）である場合、
-    /// TRS補間後の `(開始バインディング, 補間後バインディング)` を返す
+    /// TRS補間後のバインディング（`instance_gid` は開始バインディングと同じ）を返す
     pub(crate) fn interpolated_tween_binding_at(
         &self,
         frame: usize,
-    ) -> Option<(SymbolInstanceBinding, SymbolInstanceBinding)> {
+    ) -> Option<SymbolInstanceBinding> {
         let kf_idx = self.keyframe_index_at(frame)?;
         match self.tween_state_at_keyframe(kf_idx) {
             TweenState::Complete {
@@ -806,18 +806,15 @@ impl Layer {
                     rotate_mode,
                     t,
                 );
-                Some((
-                    start_binding,
-                    SymbolInstanceBinding {
-                        instance_gid: start_binding.instance_gid,
-                        symbol_id: start_binding.symbol_id,
-                        xform: interp_xform,
-                        pivot: interp_pivot,
-                        loop_mode: start_binding.loop_mode,
-                        first_frame: start_binding.first_frame,
-                        color_effect: start_binding.color_effect.lerp(end_binding.color_effect, t),
-                    },
-                ))
+                Some(SymbolInstanceBinding {
+                    instance_gid: start_binding.instance_gid,
+                    symbol_id: start_binding.symbol_id,
+                    xform: interp_xform,
+                    pivot: interp_pivot,
+                    loop_mode: start_binding.loop_mode,
+                    first_frame: start_binding.first_frame,
+                    color_effect: start_binding.color_effect.lerp(end_binding.color_effect, t),
+                })
             }
             _ => None,
         }

@@ -210,7 +210,7 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
                         if !layer.visible {
                             return None;
                         }
-                        if let Some((_, interp_b)) = layer.interpolated_tween_binding_at(curr_f) {
+                        if let Some(interp_b) = layer.interpolated_tween_binding_at(curr_f) {
                             if interp_b.instance_gid == binding.instance_gid
                                 && interp_b.symbol_id == binding.symbol_id
                             {

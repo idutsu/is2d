@@ -758,7 +758,7 @@ mod scene_base_cache {
             |inst: &crate::timeline::SymbolInstance| excluded != Some(inst.binding.instance_gid);
         let has_tween = layer
             .interpolated_tween_binding_at(frame)
-            .is_some_and(|(_, b)| excluded != Some(b.instance_gid));
+            .is_some_and(|b| excluded != Some(b.instance_gid));
         let all_single_frame = !has_tween
             && kf
                 .cel
@@ -2246,7 +2246,7 @@ impl Session {
     }
 
     /// 選択中の生図形のうち、まだ `Floating` に入っていないものを `Floating` に持ち上げ、変更済みとしてマークする
-    pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self) -> bool {
+    pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self) {
         let scope = self.editing_group_path.clone();
         let mut newly_lifted = Vec::new();
         for shape in self.base_cache.shapes() {
@@ -2262,7 +2262,7 @@ impl Session {
             }
         }
         if newly_lifted.is_empty() && self.floating.is_none() {
-            return false;
+            return;
         }
         let order_ids = self.base_cache.layer_order_ids().to_vec();
         self.update_floating(|fl_opt| {
@@ -2280,7 +2280,6 @@ impl Session {
                     .sort_by_key(|s| layer_order_index(&order_ids, s.layer_id));
             }
         });
-        true
     }
 
     /// `fl.remainder` 内の図形が選択に追加された場合、`fl.pieces` へ昇格させる
@@ -3856,14 +3855,4 @@ pub(crate) fn insert_and_select_shapes_in_scope(
         });
     }
     tab.session.transform_pivot = None;
-}
-
-/// 選択中の生シェイプ群を `Floating` へ引き上げ、`Floating` の変更済みマーキングと `Overlay` 再構築を行う
-pub(crate) fn prepare_moved_selection(tab: &mut Tab) -> bool {
-    let (_, any_valid) = tab.session.selected_shape_mask();
-    if !any_valid {
-        return false;
-    }
-    tab.session.lift_selected_raw_shapes_to_floating();
-    true
 }

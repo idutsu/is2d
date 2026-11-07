@@ -105,12 +105,12 @@ impl FillShape {
     }
 }
 
-/// シンボル定義のプレビュー用ローカルキャッシュ（評価済み外接矩形・ワールド座標結合メッシュ・スクリーン変換済みメッシュ）
+/// シンボル定義のプレビュー用ローカルキャッシュ（評価済み外接矩形・ワールド座標結合メッシュ）。
+/// 画面座標への変換は描くたびに行う（`egui::Shape::Mesh` がメッシュを値で受け取るので、変換済みを持っても複製は減らない）
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SymbolPreviewCache {
     key: (u64, u64, usize),
     local_bounds_and_mesh: Option<(kurbo::Rect, egui::Mesh)>,
-    screen_mesh: Option<([u32; 3], Arc<egui::Mesh>)>,
 }
 
 /// ライブラリに登録されたシンボル定義（独自の `Timeline` とローカル基準点 `(0, 0)` を持つ）
@@ -268,7 +268,6 @@ impl SymbolDef {
         *self.mini_preview_cache.lock() = Some(SymbolPreviewCache {
             key,
             local_bounds_and_mesh,
-            screen_mesh: None,
         });
     }
 
@@ -285,32 +284,23 @@ impl SymbolDef {
             .and_then(|c| c.local_bounds_and_mesh.as_ref().map(|(bbox, _)| *bbox))
     }
 
-    /// 指定された `(scale, pan)` でスクリーン座標へ変換したシンボルプレビュー用結合 `Arc<Mesh>` をキャッシュ経由で返す
-    pub(crate) fn cached_preview_screen_mesh(
+    /// 指定された `(scale, pan)` でスクリーン座標へ変換したシンボルプレビュー用結合 `Mesh` を返す（ワールド座標のメッシュはキャッシュから）
+    pub(crate) fn preview_screen_mesh(
         &self,
         scale: f32,
         pan: Vec2,
         library_revision: u64,
         library: &[SymbolDef],
-    ) -> Option<Arc<egui::Mesh>> {
+    ) -> Option<egui::Mesh> {
         self.ensure_preview_local_cache(library_revision, library);
-        let scr_key = [scale.to_bits(), pan.x.to_bits(), pan.y.to_bits()];
-        let mut guard = self.mini_preview_cache.lock();
-        let cache = guard.as_mut()?;
-        if let Some((k, mesh)) = &cache.screen_mesh {
-            if *k == scr_key {
-                return Some(Arc::clone(mesh));
-            }
-        }
-        let (_, world_mesh) = cache.local_bounds_and_mesh.as_ref()?;
-        let scr = Arc::new(transform_mesh_to_screen(
+        let guard = self.mini_preview_cache.lock();
+        let (_, world_mesh) = guard.as_ref()?.local_bounds_and_mesh.as_ref()?;
+        Some(transform_mesh_to_screen(
             world_mesh.clone(),
             scale,
             pan,
             None,
-        ));
-        cache.screen_mesh = Some((scr_key, Arc::clone(&scr)));
-        Some(scr)
+        ))
     }
 
     /// このシンボル自身、または内部の入れ子シンボルが複数フレーム（または先頭フレーム空白）を持つかを再帰判定する
@@ -450,7 +440,7 @@ impl SymbolDef {
                 };
                 out.push((scope, b));
             };
-            if let Some((_, interp_b)) = layer.interpolated_tween_binding_at(frame_idx) {
+            if let Some(interp_b) = layer.interpolated_tween_binding_at(frame_idx) {
                 push_child(Vec::new(), interp_b);
             } else {
                 for inst in kf.cel.instances.iter() {
@@ -955,7 +945,7 @@ impl Layer {
             return Vec::new();
         };
         let kf = &self.keyframes[kf_idx];
-        if let Some((_, interp_b)) = self.interpolated_tween_binding_at(frame) {
+        if let Some(interp_b) = self.interpolated_tween_binding_at(frame) {
             return interp_b.expand((kf.start_frame, child_eval_frame), out_layer_id, &[], ctx);
         }
 

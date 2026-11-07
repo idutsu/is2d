@@ -6,10 +6,9 @@ use kurbo::{Affine, Point, QuadBez, Vec2 as KVec2};
 use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
     editable_layer_ids, focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
-    prepare_moved_selection, reset_session_after_timeline_change,
-    select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode, Clipboard,
-    CoalesceKey, NoticeKind, SelectSubMode, ShapeId, StatusToast, Tab, Tool, ToolSettings,
-    UndoEntry,
+    reset_session_after_timeline_change, select_shapes_for_timeline_selection, set_tool,
+    show_notice, toggle_select_sub_mode, Clipboard, CoalesceKey, NoticeKind, SelectSubMode,
+    ShapeId, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
@@ -994,7 +993,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     if tab.session.selection.is_empty() {
         return false;
     }
-    let _ = prepare_moved_selection(tab);
+    tab.session.lift_selected_raw_shapes_to_floating();
     let mut any_transformed = false;
     let selection = tab.session.selection.clone();
     tab.session.update_floating(|fl_opt| {

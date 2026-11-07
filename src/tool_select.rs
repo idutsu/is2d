@@ -4,7 +4,7 @@ use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2}
 use kurbo::{ParamCurve, Point, QuadBez};
 
 use crate::canvas_tool::{
-    ActiveCanvasDrag, HoverTarget, MarqueeDrag, SelectDragState, SelectSubMode, Tab,
+    ActiveCanvasDrag, HoverTarget, LayerId, MarqueeDrag, SelectDragState, SelectSubMode, Tab,
 };
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
@@ -169,6 +169,20 @@ fn handle_anchor_edit_input(
     }
 }
 
+/// 地図での変形のドラッグを始める：レイヤー `layer_id` の地図から、ドラッグのあいだ使う元の地図と階層を作り、選択と仮表示を空にする
+fn begin_map_drag(tab: &mut Tab, layer_id: LayerId) -> Option<(Arc<ReshapeBase>, Vec<u64>)> {
+    let maps = scope_maps(tab.scene(), &tab.session);
+    let lm = maps.maps.iter().find(|m| m.layer_id == layer_id)?;
+    let (base, group_path) = (
+        Arc::new(ReshapeBase::new(lm.map.clone())),
+        lm.group_path.clone(),
+    );
+    tab.session.selection.clear();
+    tab.session
+        .set_reshape_overlay(&[], Vec::new(), layer_id, &group_path);
+    Some((base, group_path))
+}
+
 pub(crate) fn start_reshape_drag(
     host: &mut impl ActionHost,
     pt: Point,
@@ -221,17 +235,9 @@ pub(crate) fn start_reshape_drag(
             ..
         } => {
             let tab = host.tab_mut();
-            let maps = scope_maps(tab.scene(), &tab.session);
-            let Some(lm) = maps.maps.iter().find(|m| m.layer_id == layer_id) else {
+            let Some((base, group_path)) = begin_map_drag(tab, layer_id) else {
                 return;
             };
-            let (base, group_path) = (
-                Arc::new(ReshapeBase::new(lm.map.clone())),
-                lm.group_path.clone(),
-            );
-            tab.session.selection.clear();
-            tab.session
-                .set_reshape_overlay(&[], Vec::new(), layer_id, &group_path);
             tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
                 shape_id,
                 layer_id,
@@ -252,21 +258,13 @@ pub(crate) fn start_reshape_drag(
             ..
         } => {
             let tab = host.tab_mut();
-            let maps = scope_maps(tab.scene(), &tab.session);
-            let Some(lm) = maps.maps.iter().find(|m| m.layer_id == layer_id) else {
+            let Some((base, group_path)) = begin_map_drag(tab, layer_id) else {
                 return;
             };
-            let (base, group_path) = (
-                Arc::new(ReshapeBase::new(lm.map.clone())),
-                lm.group_path.clone(),
-            );
             let grab_t = t.clamp(0.18, 0.82);
             let grab_pos = seg.eval(grab_t);
             // 実カーソル位置 pt と曲線上の最近接点 closest_pos の差、および丸め前 t と grab_t の位置差を合わせた初期オフセット
             let grab_offset = (closest_pos - pt) + (grab_pos - closest_pos);
-            tab.session.selection.clear();
-            tab.session
-                .set_reshape_overlay(&[], Vec::new(), layer_id, &group_path);
             tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
                 shape_id,
                 layer_id,

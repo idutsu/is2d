@@ -1712,10 +1712,8 @@ fn draw_symbol_mini_preview(tab: &Tab, ui: &mut egui::Ui, sym: &SymbolDef) {
     let pan = rect.center().to_vec2() - Vec2::new(cx * scale, cy * scale);
     let origin_scr = Pos2::new(pan.x, pan.y);
 
-    if let Some(mesh) =
-        sym.cached_preview_screen_mesh(scale, pan, tab.doc.revision, &tab.doc.library)
-    {
-        painter.add(arc_mesh_to_shape(mesh));
+    if let Some(mesh) = sym.preview_screen_mesh(scale, pan, tab.doc.revision, &tab.doc.library) {
+        painter.add(egui::Shape::Mesh(mesh));
         if rect.contains(origin_scr) {
             draw_registration_cross(&painter, origin_scr, 4.0, false);
         }
