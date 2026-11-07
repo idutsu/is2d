@@ -529,7 +529,7 @@ fn test_pull_edge_across_circle_splits_into_two_shapes() {
         "向こう側の円周を突き抜けた裏返りループが消えていること"
     );
 
-    // 向こう側の円周ギリギリ (200, 249) でドロップした場合も押し出し補正により2分割されること
+    // 向こう側の円周の手前 (200, 249) で離したときは、押し出さず見えているとおりに確定し、分かれず1つのまま
     let mut app = circle_app();
     let from = grab_point(&app);
     assert!(apply(
@@ -541,8 +541,8 @@ fn test_pull_edge_across_circle_splits_into_two_shapes() {
     ));
     assert_eq!(
         scene_summary(&app).shapes.len(),
-        2,
-        "向こう側の円周上でドロップした場合も2つのシェイプに分割されること"
+        1,
+        "向こう側の円周の手前で離したときは、勝手に押し出して分けない"
     );
 }
 
@@ -21125,4 +21125,47 @@ fn test_reshape_preview_shows_split_during_drag() {
     assert_eq!(during, 2, "ドラッグ中から2つに分かれて見える");
     tool_select::finish_reshape_drag(&mut app, None);
     assert_eq!(scene_summary(&app).shapes.len(), 2);
+}
+
+/// 向こう側のフチの近くまで引っぱっても、ドラッグ中に形が勝手に先へ飛ばない（押し出さない）。離した後も同じ
+#[test]
+fn test_reshape_drag_near_opposite_edge_does_not_jump() {
+    let mut app = Is2dApp::default();
+    let center = Point::new(200.0, 200.0);
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: vec![center, center + KVec2::new(0.01, 0.0)],
+            radius: 50.0,
+            color: Color32::BLACK,
+        }],
+    );
+    let top = Point::new(200.0, 150.0);
+    let from = scene_summary(&app).shapes[0]
+        .exterior
+        .segments
+        .iter()
+        .map(|q| q.eval(0.5))
+        .min_by(|a, b| (*a - top).hypot().total_cmp(&(*b - top).hypot()))
+        .unwrap();
+    tool_select::start_reshape_drag(&mut app, from, false, false);
+    tool_select::update_reshape_drag(&mut app, Point::new(200.0, 248.0));
+    let covered = |shapes: &[FillShape], p: Point| shapes.iter().any(|s| s.contains_point(p));
+    let during: Vec<FillShape> = app.scene().iter().cloned().collect();
+    assert_eq!(
+        during
+            .iter()
+            .filter(|s| !s.exterior.segments.is_empty())
+            .count(),
+        1,
+        "向こう側のフチの手前では、分かれて見えない"
+    );
+    assert!(
+        covered(&during, Point::new(200.0, 249.3)),
+        "引っぱった辺と向こう側のフチの間の細い所が残って見える"
+    );
+    tool_select::finish_reshape_drag(&mut app, None);
+    let after = scene_summary(&app).shapes.clone();
+    assert_eq!(after.len(), 1);
+    assert!(covered(&after, Point::new(200.0, 249.3)));
 }

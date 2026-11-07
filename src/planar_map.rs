@@ -12,7 +12,6 @@ use kurbo::{
 };
 
 use crate::canvas_tool::{HoverTarget, LayerId, Scene, Session, ShapeId};
-use crate::select_ops::punch_through_opposite_edge;
 use crate::vector_engine::{rects_overlap, Contour, FillShape};
 
 /// 2本の線（2つの点）を同じとみなす距離。今の図形の境目のずれは、測って最大 0.024
@@ -478,7 +477,8 @@ impl PlanarMap {
         (faces, broken)
     }
 
-    /// 面 `f` の今の形を、塗りの形にする（辺のつながりは変えずに位置だけ動かしたときも使える）
+    /// 面 `f` の今の形を、塗りの形にする
+    #[cfg(test)]
     pub(crate) fn face_shape(&self, f: &MapFace, layer_id: u64, group_path: &[u64]) -> FillShape {
         let mut contours = f
             .cycles
@@ -1410,27 +1410,20 @@ impl PlanarMap {
     }
 }
 
-/// 輪郭の変形の元になる地図と、ドラッグのあいだ変わらない下ごしらえ（面の輪郭・面・辺の鍵）。
+/// 輪郭の変形の元になる地図と、ドラッグのあいだ変わらない下ごしらえ（面の輪郭・辺の鍵）。
 /// ドラッグを始めるときに1回だけ作り、ドラッグ中の毎回の計算で使い回す
 #[derive(Debug)]
 pub(crate) struct ReshapeBase {
     pub(crate) map: Arc<PlanarMap>,
     cycles: Vec<Vec<(usize, bool)>>,
-    faces: Vec<MapFace>,
     keys: HashSet<[u64; 8]>,
 }
 
 impl ReshapeBase {
     pub(crate) fn new(map: Arc<PlanarMap>) -> Self {
         let cycles = map.face_cycles();
-        let faces = map.faces_of(&cycles).0;
         let keys = (0..map.edges.len()).map(|e| edge_key(&map, e)).collect();
-        Self {
-            map,
-            cycles,
-            faces,
-            keys,
-        }
+        Self { map, cycles, keys }
     }
 }
 
@@ -1444,7 +1437,7 @@ pub(crate) fn reshape_result(
     group_path: &[u64],
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
     let map = &base.map;
-    let (edited, moved) = map.apply_edit(punch_target(map, &base.faces, edit))?;
+    let (edited, moved) = map.apply_edit(edit)?;
     let (next, _) = commit_edit(map, &base.cycles, edited, &moved);
     Some(rewrite_shapes(
         map,
@@ -1480,81 +1473,4 @@ pub(crate) fn reshape_shapes(
     let at = at.unwrap_or(shapes.len()).min(shapes.len());
     shapes.splice(at..at, added);
     true
-}
-
-/// 向こう側の輪郭の近くで離したとき、確実に突き抜けて分かれるよう、離した点を少し押し出す（今までと同じ補正）。
-/// 動かす辺・頂点が接する面のうち、離した点を含む面について行う
-fn punch_target(map: &PlanarMap, faces: &[MapFace], edit: MapEdit) -> MapEdit {
-    let tail = |h: (usize, bool)| {
-        if h.1 {
-            map.edges[h.0].a
-        } else {
-            map.edges[h.0].b
-        }
-    };
-    match edit {
-        MapEdit::PullEdge {
-            orig_seg,
-            grab_t,
-            target,
-        } => {
-            let Some((e, _)) = map.find_edge(&orig_seg) else {
-                return edit;
-            };
-            for f in faces {
-                let shape = map.face_shape(f, 0, &[]);
-                if !shape.contains_point(target) {
-                    continue;
-                }
-                for (ci, cycle) in f.cycles.iter().enumerate() {
-                    if let Some(si) = cycle.iter().position(|h| h.0 == e) {
-                        let target = punch_through_opposite_edge(
-                            &shape,
-                            ci,
-                            &[si],
-                            (orig_seg.p0, orig_seg.p2),
-                            (orig_seg.eval(grab_t), target),
-                        );
-                        return MapEdit::PullEdge {
-                            orig_seg,
-                            grab_t,
-                            target,
-                        };
-                    }
-                }
-            }
-            edit
-        }
-        MapEdit::MoveVertex {
-            orig_vertex,
-            target,
-        } => {
-            let Some(v) = (0..map.nodes.len()).find(|&v| map.nodes[v] == orig_vertex) else {
-                return edit;
-            };
-            for f in faces {
-                let shape = map.face_shape(f, 0, &[]);
-                if !shape.contains_point(target) {
-                    continue;
-                }
-                for (ci, cycle) in f.cycles.iter().enumerate() {
-                    if let Some(si) = cycle.iter().position(|h| tail(*h) == v) {
-                        let prev = (si + cycle.len() - 1) % cycle.len();
-                        let target = punch_through_opposite_edge(
-                            &shape,
-                            ci,
-                            &[prev, si],
-                            (map.half_quad(cycle[prev]).p0, map.half_quad(cycle[si]).p2),
-                            (orig_vertex, target),
-                        );
-                        return MapEdit::MoveVertex {
-                            orig_vertex,
-                            target,
-                        };
-                    }
-                }
-            }
-            edit
-        }
-    }
 }

@@ -11,7 +11,7 @@ use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
 use crate::vector_boolean::{boolean_operation, slice_shape_with_marquee_rect, BoolOp};
 use crate::vector_engine::{
-    make_marquee_rect_shape, next_shape_id, normalize_vec, rects_overlap, ColorEffect, FillShape,
+    make_marquee_rect_shape, next_shape_id, rects_overlap, ColorEffect, FillShape,
     SymbolInstanceBinding,
 };
 
@@ -645,63 +645,6 @@ pub(crate) fn compute_hover_target(
     }
 
     HoverTarget::None
-}
-
-/// 向こう側の輪郭エッジ付近でドロップされた際に確実に貫通して分割されるよう僅かに押し出す。
-pub(crate) fn punch_through_opposite_edge(
-    shape: &FillShape,
-    contour_idx: usize,
-    ignore_segs: &[usize],
-    (anchor_a, anchor_b): (Point, Point),
-    (start_pt, drag_pt): (Point, Point),
-) -> Point {
-    let bbox = shape.bounding_box();
-    let min_dim = bbox.width().min(bbox.height());
-    let chord_len = (anchor_b - anchor_a).hypot();
-    let scale = (min_dim / 16.0).min(chord_len / 24.0).clamp(0.04, 1.0);
-    let min_drag = 6.0 * scale;
-    let min_anchor_dist = 10.0 * scale;
-    let near_thresh = 6.0 * scale;
-    let min_near_anchor = 8.0 * scale;
-    let punch_push = 4.5 * scale;
-
-    let drag_vec = drag_pt - start_pt;
-    if drag_vec.hypot() <= min_drag
-        || (drag_pt - anchor_a).hypot() <= min_anchor_dist
-        || (drag_pt - anchor_b).hypot() <= min_anchor_dist
-    {
-        return drag_pt;
-    }
-
-    let drag_dir = normalize_vec(drag_vec);
-    let mut best_near: Option<(f64, Point)> = None;
-    for (c_idx, c) in shape.contours().enumerate() {
-        for (s_idx, seg) in c.segments.iter().enumerate() {
-            if (c_idx == contour_idx && ignore_segs.contains(&s_idx))
-                || !quad_control_bbox_contains(seg, drag_pt, near_thresh)
-            {
-                continue;
-            }
-            let near = seg.nearest(drag_pt, 0.05 * scale);
-            let d = near.distance_sq.sqrt();
-            if d <= near_thresh {
-                let near_pt = seg.eval(near.t);
-                if (near_pt - anchor_a).hypot() > min_near_anchor
-                    && (near_pt - anchor_b).hypot() > min_near_anchor
-                    && best_near.is_none_or(|(bd, _)| d < bd)
-                {
-                    best_near = Some((d, near_pt));
-                }
-            }
-        }
-    }
-    if let Some((_, near_pt)) = best_near {
-        let punched = near_pt + drag_dir * punch_push;
-        if (punched - start_pt).dot(drag_dir) > (drag_pt - start_pt).dot(drag_dir) {
-            return punched;
-        }
-    }
-    drag_pt
 }
 
 /// 選択中の図形がすべて同じレイヤーにあればその `LayerId` を返す（未選択・複数レイヤーにまたがるときは `None`）
