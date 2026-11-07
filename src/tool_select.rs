@@ -8,7 +8,7 @@ use crate::canvas_tool::{
 };
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
-use crate::planar_map::scope_maps;
+use crate::planar_map::{reshape_result, scope_maps, MapEdit, ReshapeBase};
 use crate::select_ops::{apply_click_selection, finish_selection_drag, update_selection_drag};
 pub(crate) use crate::select_ops::{compute_hover_target, handle_canvas_double_click};
 use crate::vector_engine::FillShape;
@@ -225,32 +225,30 @@ pub(crate) fn start_reshape_drag(
             let Some(lm) = maps.maps.iter().find(|m| m.layer_id == layer_id) else {
                 return;
             };
-            let (map, group_path) = (lm.map.clone(), lm.group_path.clone());
-            let faces = Arc::new(map.faces_touching(&map.edges_at(node)));
+            let (base, group_path) = (
+                Arc::new(ReshapeBase::new(lm.map.clone())),
+                lm.group_path.clone(),
+            );
             tab.session.selection.clear();
-            if tab
-                .session
-                .begin_map_overlay(&map, &faces, layer_id, &group_path)
-            {
-                tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
-                    shape_id,
-                    layer_id,
-                    group_path,
-                    map,
-                    faces,
-                    node,
-                    orig_vertex: pos,
-                    last_pos: pos,
-                    snapped_to: None,
-                });
-            }
+            tab.session
+                .set_reshape_overlay(&[], Vec::new(), layer_id, &group_path);
+            tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
+                shape_id,
+                layer_id,
+                group_path,
+                base,
+                node,
+                orig_vertex: pos,
+                last_pos: pos,
+                snapped_to: None,
+            });
         }
         HoverTarget::Edge {
             shape_id,
             t,
             closest_pos,
             seg,
-            map_edge: Some((layer_id, edge)),
+            map_edge: Some((layer_id, _)),
             ..
         } => {
             let tab = host.tab_mut();
@@ -258,31 +256,28 @@ pub(crate) fn start_reshape_drag(
             let Some(lm) = maps.maps.iter().find(|m| m.layer_id == layer_id) else {
                 return;
             };
-            let (map, group_path) = (lm.map.clone(), lm.group_path.clone());
+            let (base, group_path) = (
+                Arc::new(ReshapeBase::new(lm.map.clone())),
+                lm.group_path.clone(),
+            );
             let grab_t = t.clamp(0.18, 0.82);
             let grab_pos = seg.eval(grab_t);
             // 実カーソル位置 pt と曲線上の最近接点 closest_pos の差、および丸め前 t と grab_t の位置差を合わせた初期オフセット
             let grab_offset = (closest_pos - pt) + (grab_pos - closest_pos);
-            let faces = Arc::new(map.faces_touching(&[edge]));
             tab.session.selection.clear();
-            if tab
-                .session
-                .begin_map_overlay(&map, &faces, layer_id, &group_path)
-            {
-                tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
-                    shape_id,
-                    layer_id,
-                    group_path,
-                    map,
-                    faces,
-                    edge,
-                    grab_t,
-                    grab_pos,
-                    grab_offset,
-                    last_pos: grab_pos,
-                    orig_seg: seg,
-                });
-            }
+            tab.session
+                .set_reshape_overlay(&[], Vec::new(), layer_id, &group_path);
+            tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
+                shape_id,
+                layer_id,
+                group_path,
+                base,
+                grab_t,
+                grab_pos,
+                grab_offset,
+                last_pos: grab_pos,
+                orig_seg: seg,
+            });
         }
         HoverTarget::Vertex { .. } | HoverTarget::Edge { .. } => {}
         HoverTarget::Fill { shape_id } => {
@@ -304,24 +299,28 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
         return;
     }
     let snap_radius = 12.0 / (tab.view.zoom as f64);
+    // ドラッグ中も、離したときと同じ計算（交われば辺を切って色を決め直す）をして、その結果を見せる
     let update = match &mut tab.session.drag {
         ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
             layer_id,
             group_path,
-            map,
-            faces,
+            base,
             node,
+            orig_vertex,
             last_pos,
             snapped_to,
             ..
         }) => {
-            let snap = map.snap_target(*node, pt, snap_radius);
+            let snap = base.map.snap_target(*node, pt, snap_radius);
             let target = snap.unwrap_or(pt);
             *snapped_to = snap;
             *last_pos = target;
             Some((
-                map.with_node_moved(*node, target),
-                faces.clone(),
+                base.clone(),
+                MapEdit::MoveVertex {
+                    orig_vertex: *orig_vertex,
+                    target,
+                },
                 *layer_id,
                 group_path.clone(),
             ))
@@ -329,29 +328,41 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
         ActiveCanvasDrag::Select(SelectDragState::PullEdge {
             layer_id,
             group_path,
-            map,
-            faces,
-            edge,
+            base,
             grab_t,
             grab_offset,
             last_pos,
+            orig_seg,
             ..
         }) => {
             let target = pt + *grab_offset;
             *last_pos = target;
             Some((
-                map.with_edge_pulled(*edge, *grab_t, target),
-                faces.clone(),
+                base.clone(),
+                MapEdit::PullEdge {
+                    orig_seg: *orig_seg,
+                    grab_t: *grab_t,
+                    target,
+                },
                 *layer_id,
                 group_path.clone(),
             ))
         }
         _ => None,
     };
-    if let Some((edited, faces, layer_id, group_path)) = update {
-        tab.session
-            .update_map_overlay(&edited, &faces, layer_id, &group_path);
-    }
+    let Some((base, edit, layer_id, group_path)) = update else {
+        return;
+    };
+    let (removed, added) = reshape_result(
+        &base,
+        edit,
+        tab.session.base_cache.shapes(),
+        layer_id,
+        &group_path,
+    )
+    .unwrap_or_default();
+    tab.session
+        .set_reshape_overlay(&removed, added, layer_id, &group_path);
 }
 
 pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<Point>) {

@@ -2,7 +2,7 @@
 //! Adobe Animate のマージ描画と同じく、辺が「曲線・左の色・右の色」を持つ。境目は1本で、重ね順は無い。
 //! 塗りの形（`FillShape`）は、辺から作って描画・当たり判定に使う。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::TAU;
 use std::sync::Arc;
 
@@ -404,10 +404,15 @@ impl PlanarMap {
     /// 面を取り出す。外周（面積が正）に、それを含むいちばん小さい同じ色の外周の穴（面積が負）を入れる。
     /// 戻り値の2つ目は、閉じなかった輪郭・色がまざった輪郭・入れ先の無い穴の数（壊れていれば 0 より大きい）
     pub(crate) fn faces(&self) -> (Vec<MapFace>, usize) {
+        self.faces_of(&self.face_cycles())
+    }
+
+    /// `faces` と同じ。面の輪郭 `cycles`（`face_cycles` の結果）を先に求めてあるときに使う
+    fn faces_of(&self, cycles: &[Vec<(usize, bool)>]) -> (Vec<MapFace>, usize) {
         let mut broken = 0;
-        let mut exteriors: Vec<(MapFace, f64, BezPath)> = Vec::new();
+        let mut exteriors: Vec<(MapFace, f64, BezPath, KRect)> = Vec::new();
         let mut holes: Vec<(Color32, Vec<(usize, bool)>)> = Vec::new();
-        for cycle in self.face_cycles() {
+        for cycle in cycles.iter().cloned() {
             if cycle.iter().any(|h| h.0 == usize::MAX) {
                 broken += 1;
                 continue;
@@ -425,6 +430,7 @@ impl PlanarMap {
             if area > 0.0 {
                 let mut path = BezPath::new();
                 contour.append_to_bez_path(&mut path);
+                let bbox = contour.bounding_box();
                 exteriors.push((
                     MapFace {
                         color,
@@ -433,6 +439,7 @@ impl PlanarMap {
                     },
                     area,
                     path,
+                    bbox,
                 ));
             } else {
                 holes.push((color, cycle));
@@ -443,7 +450,9 @@ impl PlanarMap {
             let owner = exteriors
                 .iter()
                 .enumerate()
-                .filter(|(_, e)| e.0.color == color && e.2.winding(probe) != 0)
+                .filter(|(_, e)| {
+                    e.0.color == color && e.3.contains(probe) && e.2.winding(probe) != 0
+                })
                 .min_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
                 .map(|(i, _)| i);
             match owner {
@@ -453,7 +462,7 @@ impl PlanarMap {
         }
         let faces = exteriors
             .into_iter()
-            .map(|(mut f, _, _)| {
+            .map(|(mut f, _, _, _)| {
                 let mut srcs: Vec<ShapeId> = f
                     .cycles
                     .iter()
@@ -660,9 +669,10 @@ impl PlanarMap {
 
 /// ドラッグの確定。辺がほかの辺と交わらず、ほかの頂点もまたいでいなければ、そのまま。
 /// そうでなければ、交わる所で辺を切り、ドラッグで掃いた所の色を決め直す（広がった側が勝つ。Animate と同じ考え方）。
-/// 戻り値の2つ目は、色を決め直したか
+/// `orig_cycles` は `orig` の面の輪郭（`face_cycles` の結果）。戻り値の2つ目は、色を決め直したか
 pub(crate) fn commit_edit(
     orig: &PlanarMap,
+    orig_cycles: &[Vec<(usize, bool)>],
     edited: PlanarMap,
     moved: &[usize],
 ) -> (PlanarMap, bool) {
@@ -700,7 +710,7 @@ pub(crate) fn commit_edit(
         let area_of = |m: &PlanarMap, cycle: &[(usize, bool)]| {
             Contour::new(cycle.iter().map(|h| m.half_quad(*h)).collect()).signed_area()
         };
-        orig.face_cycles().iter().any(|cycle| {
+        orig_cycles.iter().any(|cycle| {
             cycle.iter().all(|h| h.0 != usize::MAX)
                 && cycle.iter().any(|h| moved.contains(&h.0))
                 && area_of(orig, cycle).signum() != area_of(&edited, cycle).signum()
@@ -1112,20 +1122,19 @@ fn edge_key(m: &PlanarMap, e: usize) -> [u64; 8] {
     ]
 }
 
-/// 確定した地図 `next` を、元の図形に書き戻すときの差分。図形から作った地図 `orig` と比べる。
+/// 確定した地図 `next` を、元の図形に書き戻すときの差分。図形から作った地図 `orig`（`orig_keys` はその辺の鍵）と比べる。
 /// 戻り値は（消す元の図形, 新しく入れる塗りの形）。
 /// - 形か色が変わった辺の両側の図形は消す
 /// - 面のすべての辺が変わらず、側に記された元の図形が1つで、その図形を消さないなら、その面は元の図形のまま残す
 /// - それ以外の面は、新しい塗りの形にして入れ、その面に記された元の図形も消す
 pub(crate) fn rewrite_shapes(
     orig: &PlanarMap,
+    orig_keys: &HashSet<[u64; 8]>,
     next: &PlanarMap,
     orig_shapes: &[FillShape],
     layer_id: u64,
     group_path: &[u64],
 ) -> (Vec<ShapeId>, Vec<FillShape>) {
-    use std::collections::HashSet;
-    let orig_keys: HashSet<[u64; 8]> = (0..orig.edges.len()).map(|e| edge_key(orig, e)).collect();
     let next_keys: HashSet<[u64; 8]> = (0..next.edges.len()).map(|e| edge_key(next, e)).collect();
     let mut removed: HashSet<ShapeId> = HashSet::new();
     for e in 0..orig.edges.len() {
@@ -1390,15 +1399,6 @@ impl PlanarMap {
         }
     }
 
-    /// 辺 `moved` に接する面（ドラッグ中に形が変わる面）
-    pub(crate) fn faces_touching(&self, moved: &[usize]) -> Vec<MapFace> {
-        self.faces()
-            .0
-            .into_iter()
-            .filter(|f| f.cycles.iter().flatten().any(|h| moved.contains(&h.0)))
-            .collect()
-    }
-
     /// 頂点 `v` を `p` へ動かすときに吸い付く、ほかの頂点（`radius` 以内でいちばん近いもの）
     pub(crate) fn snap_target(&self, v: usize, p: Point, radius: f64) -> Option<Point> {
         (0..self.nodes.len())
@@ -1410,6 +1410,52 @@ impl PlanarMap {
     }
 }
 
+/// 輪郭の変形の元になる地図と、ドラッグのあいだ変わらない下ごしらえ（面の輪郭・面・辺の鍵）。
+/// ドラッグを始めるときに1回だけ作り、ドラッグ中の毎回の計算で使い回す
+#[derive(Debug)]
+pub(crate) struct ReshapeBase {
+    pub(crate) map: Arc<PlanarMap>,
+    cycles: Vec<Vec<(usize, bool)>>,
+    faces: Vec<MapFace>,
+    keys: HashSet<[u64; 8]>,
+}
+
+impl ReshapeBase {
+    pub(crate) fn new(map: Arc<PlanarMap>) -> Self {
+        let cycles = map.face_cycles();
+        let faces = map.faces_of(&cycles).0;
+        let keys = (0..map.edges.len()).map(|e| edge_key(&map, e)).collect();
+        Self {
+            map,
+            cycles,
+            faces,
+            keys,
+        }
+    }
+}
+
+/// 地図 `base.map` に編集 `edit` をかけて確定した結果を、図形の差分で返す（ドラッグ中の表示と確定で同じ計算）。
+/// 戻り値は（消す元の図形, 新しく入れる塗りの形）。`orig_shapes` は、形の変わらない輪郭を使い回すために元の図形を探す所
+pub(crate) fn reshape_result(
+    base: &ReshapeBase,
+    edit: MapEdit,
+    orig_shapes: &[FillShape],
+    layer_id: LayerId,
+    group_path: &[u64],
+) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
+    let map = &base.map;
+    let (edited, moved) = map.apply_edit(punch_target(map, &base.faces, edit))?;
+    let (next, _) = commit_edit(map, &base.cycles, edited, &moved);
+    Some(rewrite_shapes(
+        map,
+        &base.keys,
+        &next,
+        orig_shapes,
+        layer_id,
+        group_path,
+    ))
+}
+
 /// 図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の生の図形を地図にして、編集 `edit` をかけて確定し、
 /// 変わった図形だけを差し替える（差し替えた図形は、消した図形のうち最初のものの位置に入れる）。変わらなければ false
 pub(crate) fn reshape_shapes(
@@ -1418,16 +1464,14 @@ pub(crate) fn reshape_shapes(
     group_path: &[u64],
     edit: MapEdit,
 ) -> bool {
-    let map = PlanarMap::from_faces(
+    let base = ReshapeBase::new(Arc::new(PlanarMap::from_faces(
         shapes
             .iter()
             .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path)),
-    );
-    let Some((edited, moved)) = map.apply_edit(punch_target(&map, edit)) else {
+    )));
+    let Some((removed, added)) = reshape_result(&base, edit, shapes, layer_id, group_path) else {
         return false;
     };
-    let (next, _) = commit_edit(&map, edited, &moved);
-    let (removed, added) = rewrite_shapes(&map, &next, shapes, layer_id, group_path);
     if removed.is_empty() && added.is_empty() {
         return false;
     }
@@ -1440,8 +1484,7 @@ pub(crate) fn reshape_shapes(
 
 /// 向こう側の輪郭の近くで離したとき、確実に突き抜けて分かれるよう、離した点を少し押し出す（今までと同じ補正）。
 /// 動かす辺・頂点が接する面のうち、離した点を含む面について行う
-fn punch_target(map: &PlanarMap, edit: MapEdit) -> MapEdit {
-    let (faces, _) = map.faces();
+fn punch_target(map: &PlanarMap, faces: &[MapFace], edit: MapEdit) -> MapEdit {
     let tail = |h: (usize, bool)| {
         if h.1 {
             map.edges[h.0].a
@@ -1458,7 +1501,7 @@ fn punch_target(map: &PlanarMap, edit: MapEdit) -> MapEdit {
             let Some((e, _)) = map.find_edge(&orig_seg) else {
                 return edit;
             };
-            for f in &faces {
+            for f in faces {
                 let shape = map.face_shape(f, 0, &[]);
                 if !shape.contains_point(target) {
                     continue;
@@ -1489,7 +1532,7 @@ fn punch_target(map: &PlanarMap, edit: MapEdit) -> MapEdit {
             let Some(v) = (0..map.nodes.len()).find(|&v| map.nodes[v] == orig_vertex) else {
                 return edit;
             };
-            for f in &faces {
+            for f in faces {
                 let shape = map.face_shape(f, 0, &[]);
                 if !shape.contains_point(target) {
                     continue;

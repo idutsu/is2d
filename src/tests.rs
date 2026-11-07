@@ -21046,3 +21046,83 @@ fn test_planar_map_round_trip_keeps_fills() {
         y += 2.0;
     }
 }
+
+/// 輪郭の変形のドラッグ中も、離したときと同じ計算の結果を見せる：線を交わらせて引っぱっても、
+/// ドラッグ中の見た目（どの点が何色か）と離した後の形が同じ（重ね順で潜ったり乗ったりしない）
+#[test]
+fn test_reshape_preview_matches_commit_when_crossing() {
+    let colors_on_grid = |shapes: &[FillShape]| -> Vec<Option<Color32>> {
+        let mut out = Vec::new();
+        let mut y = 182.0;
+        while y < 420.0 {
+            let mut x = 182.0;
+            while x < 420.0 {
+                let p = Point::new(x + 0.137, y + 0.173);
+                let hits: Vec<Color32> = shapes
+                    .iter()
+                    .filter(|s| s.contains_point(p))
+                    .map(|s| s.color)
+                    .collect();
+                assert!(hits.len() <= 1, "重なりがない {p:?}");
+                out.push(hits.first().copied());
+                x += 2.0;
+            }
+            y += 2.0;
+        }
+        out
+    };
+    // 3色の場面で、青と赤の境目（赤の帯の上のふち）を、赤の帯と緑を突き抜けるまで下へ
+    for (from, to) in [
+        (Point::new(250.0, 294.0), Point::new(250.0, 340.0)),
+        (Point::new(330.0, 294.0), Point::new(345.0, 330.0)),
+    ] {
+        let mut app = three_color_junction_scene();
+        tool_select::start_reshape_drag(&mut app, from, false, false);
+        assert!(matches!(
+            app.session.drag,
+            crate::canvas_tool::ActiveCanvasDrag::Select(_)
+        ));
+        tool_select::update_reshape_drag(&mut app, to);
+        let during: Vec<FillShape> = app.scene().iter().cloned().collect();
+        let during = colors_on_grid(&during);
+        tool_select::finish_reshape_drag(&mut app, None);
+        let after = colors_on_grid(&scene_summary(&app).shapes);
+        assert_eq!(
+            during, after,
+            "ドラッグ中の見た目と離した後が同じ（{from:?} → {to:?}）"
+        );
+    }
+}
+
+/// 円の上のフチを下のフチの向こうまで引っぱると、離す前から2つに分かれて見える
+#[test]
+fn test_reshape_preview_shows_split_during_drag() {
+    let mut app = Is2dApp::default();
+    let center = Point::new(200.0, 200.0);
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: vec![center, center + KVec2::new(0.01, 0.0)],
+            radius: 50.0,
+            color: Color32::BLACK,
+        }],
+    );
+    let top = Point::new(200.0, 150.0);
+    let from = scene_summary(&app).shapes[0]
+        .exterior
+        .segments
+        .iter()
+        .map(|q| q.eval(0.5))
+        .min_by(|a, b| (*a - top).hypot().total_cmp(&(*b - top).hypot()))
+        .unwrap();
+    tool_select::start_reshape_drag(&mut app, from, false, false);
+    tool_select::update_reshape_drag(&mut app, Point::new(200.0, 275.0));
+    let during = app
+        .scene()
+        .iter()
+        .filter(|s| !s.exterior.segments.is_empty())
+        .count();
+    assert_eq!(during, 2, "ドラッグ中から2つに分かれて見える");
+    tool_select::finish_reshape_drag(&mut app, None);
+    assert_eq!(scene_summary(&app).shapes.len(), 2);
+}

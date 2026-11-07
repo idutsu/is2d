@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, Key, Pos2, Stroke, Vec2};
 use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 
-use crate::planar_map::{MapFace, PlanarMap, ScopeMaps};
+use crate::planar_map::{ReshapeBase, ScopeMaps};
 pub(crate) use crate::symbol::Document;
 use crate::symbol::{EditPath, SymbolDef};
 use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
@@ -187,14 +187,12 @@ impl HoverTarget {
 
 #[derive(Clone, Debug)]
 pub(crate) enum SelectDragState {
-    /// 地図の辺 `edge` を引っぱる（`faces` はドラッグ中に形が変わる面）
+    /// 地図の、形が `orig_seg` の辺を引っぱる
     PullEdge {
         shape_id: ShapeId,
         layer_id: LayerId,
         group_path: Vec<u64>,
-        map: Arc<PlanarMap>,
-        faces: Arc<Vec<MapFace>>,
-        edge: usize,
+        base: Arc<ReshapeBase>,
         grab_t: f64,
         grab_pos: Point,
         grab_offset: KVec2,
@@ -206,8 +204,7 @@ pub(crate) enum SelectDragState {
         shape_id: ShapeId,
         layer_id: LayerId,
         group_path: Vec<u64>,
-        map: Arc<PlanarMap>,
-        faces: Arc<Vec<MapFace>>,
+        base: Arc<ReshapeBase>,
         node: usize,
         orig_vertex: Point,
         last_pos: Point,
@@ -2098,46 +2095,27 @@ impl Session {
         self.rebuild_overlay_from_floating();
     }
 
-    /// 輪郭の変形の仮表示用に、地図の面 `faces` を載せ、その面の元の図形を隠す
-    pub(crate) fn begin_map_overlay(
+    /// 輪郭の変形の仮表示を、確定と同じ計算の結果（消す元の図形 `removed`、新しく入れる塗りの形 `added`）にする。
+    /// 新しい形は、消した図形のうち最初のものの位置に置く（生の図形どうしは重ならないので、並びは見た目に出ない）
+    pub(crate) fn set_reshape_overlay(
         &mut self,
-        map: &PlanarMap,
-        faces: &[MapFace],
-        layer_id: LayerId,
-        group_path: &[u64],
-    ) -> bool {
-        self.overlay.clear();
-        self.overlay_only_selected = false;
-        self.overlay_movable_start = 0;
-        if faces.is_empty() {
-            self.invalidate_scene_order();
-            return false;
-        }
-        for f in faces {
-            self.overlay.hide.extend(f.srcs.iter().copied());
-            let placement = match f.srcs.first() {
-                Some(&id) => Placement::ReplaceAt(id),
-                None => Placement::TopOfLayer(layer_id, group_path.to_vec()),
-            };
-            self.overlay
-                .add
-                .push((placement, map.face_shape(f, layer_id, group_path)));
-        }
-        self.invalidate_scene_order();
-        true
-    }
-
-    /// 輪郭の変形の仮表示を、動かした地図 `edited` の形にする（面の並びは `begin_map_overlay` と同じ）
-    pub(crate) fn update_map_overlay(
-        &mut self,
-        edited: &PlanarMap,
-        faces: &[MapFace],
+        removed: &[ShapeId],
+        added: Vec<FillShape>,
         layer_id: LayerId,
         group_path: &[u64],
     ) {
-        for ((_, shape), f) in self.overlay.add.iter_mut().zip(faces) {
-            *shape = edited.face_shape(f, layer_id, group_path);
-        }
+        self.overlay.clear();
+        self.overlay_only_selected = false;
+        self.overlay_movable_start = 0;
+        self.overlay.hide.extend(removed.iter().copied());
+        let placement = match removed.first() {
+            Some(&id) => Placement::ReplaceAt(id),
+            None => Placement::TopOfLayer(layer_id, group_path.to_vec()),
+        };
+        self.overlay
+            .add
+            .extend(added.into_iter().map(|s| (placement.clone(), s)));
+        self.invalidate_scene_order();
     }
 
     /// 選択移動または `Alt` 複製移動の仮表示用に、選択中図形を `Overlay` に載せる
