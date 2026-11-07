@@ -511,7 +511,19 @@ pub(crate) fn compute_hover_target(
             });
     }
 
-    // アンカーの追加・削除：頂点・辺の当たり判定の候補になる図形を前から順に返す
+    // アンカーの追加・削除も、選択が無ければ地図で探す（前後は無い）。選択中（浮いている図形がほかの図形と
+    // 重なることがある）は、今までどおり図形ごとに探す
+    if session.selection.is_empty() && session.floating().is_none() {
+        return crate::planar_map::anchor_hover(
+            scene,
+            session,
+            mouse_pt,
+            zoom,
+            sub_mode == SelectSubMode::AddAnchor,
+        );
+    }
+
+    // 選択中のアンカーの追加・削除：頂点・辺の当たり判定の候補になる図形を前から順に返す
     // （最前面の塗りより後ろの図形と、外接矩形を半径だけ広げてもマウスが入らない図形は除く）
     let topmost_fill_idx = scene.topmost_shape_at(mouse_pt, &session.editing_group_path);
     let candidate_shapes = (0..scene_len).rev().filter_map(|s_idx| {

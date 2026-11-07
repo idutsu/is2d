@@ -21171,11 +21171,10 @@ fn test_reshape_drag_near_opposite_edge_does_not_jump() {
     assert!(covered(&after, Point::new(200.0, 249.3)));
 }
 
-/// 図形から作った地図に壊れた面の輪郭（色がまざる）があっても、その輪郭の頂点・辺を動かして図形が消えないこと（N-4001）。
+/// 地図に壊れた面の輪郭（色がまざる）ができる場面（N-4001）。
 /// 赤の右のフチは少し右へふくらみ、緑の左のフチの上の端は 0.06 右にずれている（0.05 ではまとまらない）ので、
 /// 下の角で2色の辺の並びが入れ違い、赤の面の輪郭が緑の辺をまたぐ
-#[test]
-fn test_reshape_keeps_shape_on_broken_face_contour() {
+fn broken_face_contour_app() -> Is2dApp {
     let mut app = Is2dApp::default();
     let lid = app.doc.root.layers[0].id;
     let p = Point::new;
@@ -21200,13 +21199,22 @@ fn test_reshape_keeps_shape_on_broken_face_contour() {
     app.refresh_scene_base();
     let map = crate::planar_map::PlanarMap::from_faces(app.scene().iter());
     assert!(map.faces().1 > 0, "前提：地図に壊れた面の輪郭がある");
-    let red_area = |app: &Is2dApp| {
-        app.scene()
-            .iter()
-            .filter(|s| s.color == Color32::RED)
-            .map(|s| s.contours().map(|c| c.signed_area()).sum::<f64>())
-            .sum::<f64>()
-    };
+    app
+}
+
+fn red_area(app: &Is2dApp) -> f64 {
+    app.scene()
+        .iter()
+        .filter(|s| s.color == Color32::RED)
+        .map(|s| s.contours().map(|c| c.signed_area()).sum::<f64>())
+        .sum()
+}
+
+/// 図形から作った地図に壊れた面の輪郭があっても、その輪郭の頂点・辺を動かして図形が消えないこと（N-4001）
+#[test]
+fn test_reshape_keeps_shape_on_broken_face_contour() {
+    let mut app = broken_face_contour_app();
+    let p = Point::new;
     let area0 = red_area(&app);
     let undo0 = app.history.undo_stack.len();
     // 赤の左上の角を 2px 動かす・上のフチを 2px 引っぱる：赤は消えず、何も変わらず、Undo も積まない
@@ -21222,6 +21230,28 @@ fn test_reshape_keeps_shape_on_broken_face_contour() {
         Action::PullEdgeFromTo {
             from: p(150.0, 100.0),
             to: p(150.0, 98.0),
+        }
+    ));
+    assert!((red_area(&app) - area0).abs() < 1e-9, "赤が残る");
+    assert_eq!(app.history.undo_stack.len(), undo0, "Undo も積まない");
+}
+
+/// 壊れた面の輪郭の辺にアンカーを足しても、角を消しても、図形が消えず、何も変わらないこと
+#[test]
+fn test_anchor_edit_keeps_shape_on_broken_face_contour() {
+    let mut app = broken_face_contour_app();
+    let area0 = red_area(&app);
+    let undo0 = app.history.undo_stack.len();
+    assert!(!apply(
+        &mut app,
+        Action::AddAnchor {
+            pt: Point::new(150.0, 100.0),
+        }
+    ));
+    assert!(!apply(
+        &mut app,
+        Action::DeleteAnchor {
+            pt: Point::new(100.0, 100.0),
         }
     ));
     assert!((red_area(&app) - area0).abs() < 1e-9, "赤が残る");
@@ -21264,4 +21294,137 @@ fn test_merge_degree2_does_not_fold_nearly_straight_pair() {
             "まとめた曲線が元の2本の範囲から出ない：{bb:?}"
         );
     }
+}
+
+/// 両側に色がある地図の辺の真ん中（アンカーの追加でつかむ点）
+fn shared_edge_midpoint(app: &Is2dApp, color_a: Color32, color_b: Color32) -> Point {
+    let maps = crate::planar_map::scope_maps(app.scene(), &app.session);
+    let m = &maps.maps[0].map;
+    let e = (0..m.edges.len())
+        .find(|&e| {
+            let ed = &m.edges[e];
+            (ed.left, ed.right) == (Some(color_a), Some(color_b))
+                || (ed.left, ed.right) == (Some(color_b), Some(color_a))
+        })
+        .expect("境目の辺");
+    m.quad(e).eval(0.5)
+}
+
+fn has_vertex_at(shape: &FillShape, p: Point) -> bool {
+    shape
+        .contours()
+        .any(|c| c.segments.iter().any(|q| (q.p0 - p).hypot() < 1e-9))
+}
+
+/// アンカーの追加・削除も境目の線は1本：境目に頂点を足すと両側の図形に同じ頂点が入り、消すと両側から消える
+#[test]
+fn test_anchor_add_and_delete_on_shared_boundary_change_both_sides() {
+    let mut app = ring_with_bucket_fill();
+    let red = Color32::RED;
+    let segs = |app: &Is2dApp, color: Color32| -> usize {
+        scene_summary(app)
+            .shapes
+            .iter()
+            .filter(|s| s.color == color)
+            .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+            .sum()
+    };
+    let (black0, red0) = (segs(&app, Color32::BLACK), segs(&app, red));
+    let pt = shared_edge_midpoint(&app, Color32::BLACK, red);
+    let target = crate::select_ops::compute_hover_target(
+        app.scene(),
+        &app.session,
+        pt,
+        app.view.zoom,
+        crate::canvas_tool::SelectSubMode::AddAnchor,
+    );
+    let crate::canvas_tool::HoverTarget::Edge {
+        closest_pos,
+        map_edge: Some(_),
+        ..
+    } = target
+    else {
+        panic!("境目の辺をつかむ：{target:?}");
+    };
+    assert!(apply(&mut app, Action::AddAnchor { pt }));
+    let s = scene_summary(&app).shapes.clone();
+    let black = s.iter().find(|x| x.color == Color32::BLACK).unwrap();
+    let red_shape = s.iter().find(|x| x.color == red).unwrap();
+    assert!(has_vertex_at(black, closest_pos), "黒にも頂点が入る");
+    assert!(has_vertex_at(red_shape, closest_pos), "赤にも頂点が入る");
+    assert_eq!(segs(&app, Color32::BLACK), black0 + 1);
+    assert_eq!(segs(&app, red), red0 + 1);
+    assert_eq!(
+        shared_boundary_coverage(
+            &app,
+            |p| (p - Point::new(300.0, 300.0)).hypot() < 106.0,
+            (180.0, 180.0, 420.0, 420.0)
+        ),
+        (0, 0)
+    );
+
+    // 足した頂点を消すと、両側から消えて元の区間の数に戻る
+    let undo_before = app.history.undo_stack.len();
+    assert!(apply(&mut app, Action::DeleteAnchor { pt: closest_pos }));
+    assert_eq!(app.history.undo_stack.len(), undo_before + 1);
+    let s = scene_summary(&app).shapes.clone();
+    assert!(
+        s.iter().all(|x| !has_vertex_at(x, closest_pos)),
+        "両側から消える"
+    );
+    assert_eq!(segs(&app, Color32::BLACK), black0);
+    assert_eq!(segs(&app, red), red0);
+    assert_eq!(
+        shared_boundary_coverage(
+            &app,
+            |p| (p - Point::new(300.0, 300.0)).hypot() < 106.0,
+            (180.0, 180.0, 420.0, 420.0)
+        ),
+        (0, 0)
+    );
+}
+
+/// 3色以上が接する角は消せない（カーソルを合わせても削除の対象にならず、押しても何も変わらず Undo も積まない）
+#[test]
+fn test_anchor_delete_refuses_junction_vertex() {
+    let mut app = crossed_brush_strokes();
+    let s = scene_summary(&app);
+    let red = s
+        .shapes
+        .iter()
+        .find(|x| x.color == Color32::RED && x.bounding_box().x1 < 300.0)
+        .unwrap();
+    let corner = red
+        .exterior
+        .segments
+        .iter()
+        .map(|q| q.p0)
+        .filter(|p| (p.x - 285.0).abs() < 1.0)
+        .min_by(|a, b| a.y.total_cmp(&b.y))
+        .unwrap();
+    let target = crate::select_ops::compute_hover_target(
+        app.scene(),
+        &app.session,
+        corner,
+        app.view.zoom,
+        crate::canvas_tool::SelectSubMode::DeleteAnchor,
+    );
+    assert!(
+        !matches!(target, crate::canvas_tool::HoverTarget::Vertex { pos, .. } if (pos - corner).hypot() < 1e-9),
+        "分かれ目の角は削除の対象にならない：{target:?}"
+    );
+    let undo_before = app.history.undo_stack.len();
+    let shapes_before: Vec<u64> = scene_summary(&app)
+        .shapes
+        .iter()
+        .map(|s| s.shape_id)
+        .collect();
+    assert!(!apply(&mut app, Action::DeleteAnchor { pt: corner }));
+    let shapes_after: Vec<u64> = scene_summary(&app)
+        .shapes
+        .iter()
+        .map(|s| s.shape_id)
+        .collect();
+    assert_eq!(shapes_before, shapes_after, "何も変わらない");
+    assert_eq!(app.history.undo_stack.len(), undo_before, "Undo も積まない");
 }

@@ -13,7 +13,7 @@ use crate::canvas_tool::{
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
 };
-use crate::planar_map::{reshape_shapes, MapEdit};
+use crate::planar_map::{apply_shape_diff, reshape_diff, MapEdit};
 use crate::select_ops::{
     apply_marquee_selection, compute_hover_target, enter_group_at, exit_current_group,
     prepare_arrange_selected, prepare_clear_active_frame_shapes, prepare_delete_selected_shapes,
@@ -1089,6 +1089,12 @@ fn apply_map_reshape(tab: &mut Tab, shape_id: ShapeId, drag_dist: f64, map_edit:
     if drag_dist <= min_deform {
         return false;
     }
+    apply_map_edit(tab, shape_id, map_edit)
+}
+
+/// 地図での編集（輪郭の変形・アンカーの追加・削除）を確定する。図形のレイヤー・階層の生の図形を境目の線で持つ地図にして編集し、
+/// 変わった図形だけを差し替える
+fn apply_map_edit(tab: &mut Tab, shape_id: ShapeId, map_edit: MapEdit) -> bool {
     let layer_ids = editable_layer_ids(tab);
     let Some((layer_id, group_path)) = tab
         .session
@@ -1104,13 +1110,21 @@ fn apply_map_reshape(tab: &mut Tab, shape_id: ShapeId, drag_dist: f64, map_edit:
     if tab.session.floating().is_some() {
         return false;
     }
+    // 土台の図形で差分を求め、形が変わらないとき（消せない頂点など）は Undo も積まない
+    let Some((removed, added)) = reshape_diff(
+        tab.session.base_cache.shapes(),
+        layer_id,
+        &group_path,
+        map_edit,
+    ) else {
+        return false;
+    };
     push_undo(tab, None);
     focus_active_layer_to_shape_by_id(tab, shape_id);
-    let mut changed = false;
     edit_layers(tab, &[layer_id], |edit| {
-        changed |= reshape_shapes(&mut edit.shapes, layer_id, &group_path, map_edit);
+        apply_shape_diff(&mut edit.shapes, &removed, added.clone());
     });
-    changed
+    true
 }
 
 #[cfg(test)]
@@ -1186,6 +1200,29 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         SelectSubMode::DeleteAnchor
     };
     let target = compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode);
+    // 地図で探した辺・頂点（選択が無いとき）は、地図で編集する（境目なら両側の図形が変わる）
+    match (is_add, target) {
+        (
+            true,
+            crate::canvas_tool::HoverTarget::Edge {
+                shape_id,
+                t,
+                seg,
+                map_edge: Some(_),
+                ..
+            },
+        ) => return apply_map_edit(tab, shape_id, MapEdit::AddAnchor { orig_seg: seg, t }),
+        (
+            false,
+            crate::canvas_tool::HoverTarget::Vertex {
+                shape_id,
+                pos,
+                map_node: Some(_),
+                ..
+            },
+        ) => return apply_map_edit(tab, shape_id, MapEdit::DeleteAnchor { orig_vertex: pos }),
+        _ => {}
+    }
     let (shape_id, contour_idx, seg_idx, t_opt) = match (is_add, target) {
         (
             true,

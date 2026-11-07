@@ -816,6 +816,42 @@ impl PlanarMap {
         }
     }
 
+    /// 向きのある辺 `start` から、左側が同じ面になる輪を1つたどる（`face_cycles` と同じ決まり）
+    fn cycle_from(&self, start: (usize, bool)) -> Vec<(usize, bool)> {
+        let head = |h: (usize, bool)| {
+            if h.1 {
+                self.edges[h.0].b
+            } else {
+                self.edges[h.0].a
+            }
+        };
+        let mut cycle = vec![start];
+        let mut cur = start;
+        while cycle.len() <= 2 * self.edges.len() {
+            let v = head(cur);
+            let back = -tangent_end(&self.half_quad(cur));
+            let twin = (cur.0, !cur.1);
+            let next = (0..self.edges.len())
+                .flat_map(|i| [(i, true), (i, false)])
+                .filter(|h| {
+                    *h != twin
+                        && (if h.1 {
+                            self.edges[h.0].a
+                        } else {
+                            self.edges[h.0].b
+                        }) == v
+                })
+                .min_by(|x, y| cmp_turn(back, &self.half_quad(*x), &self.half_quad(*y)))
+                .unwrap_or(twin);
+            if next == start {
+                break;
+            }
+            cycle.push(next);
+            cur = next;
+        }
+        cycle
+    }
+
     /// 面の輪郭（左側が同じ面になる、向きのある辺の輪）をすべて取り出す。どの向きのある辺も、ちょうど1つの輪に入る
     pub(crate) fn face_cycles(&self) -> Vec<Vec<(usize, bool)>> {
         let mut out_of: Vec<Vec<(usize, bool)>> = vec![Vec::new(); self.nodes.len()];
@@ -1234,13 +1270,15 @@ fn is_map_shape(s: &FillShape, scope: &[u64]) -> bool {
     s.is_raw_at_scope(scope) && s.symbol_instance.is_none() && !s.exterior.segments.is_empty()
 }
 
-/// 編集中の階層の生の図形から、レイヤーごとに地図を作る（前回と図形が同じなら作り直さない）
+/// 編集中の階層の生の図形（選択中の図形を除く）から、レイヤーごとに地図を作る（前回と図形が同じなら作り直さない）
 pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> {
     use std::hash::{Hash, Hasher};
     let scope = &session.editing_group_path;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     scope.hash(&mut h);
-    for s in scene.iter().filter(|s| is_map_shape(s, scope)) {
+    // 選択中の図形（浮いている図形は、ほかの図形と重なることがある）は入れない
+    let in_map = |s: &FillShape| is_map_shape(s, scope) && !session.selection.contains_shape(s);
+    for s in scene.iter().filter(|s| in_map(s)) {
         (s.layer_id, s.shape_id, s.mesh_revision).hash(&mut h);
     }
     let key = h.finish();
@@ -1249,11 +1287,7 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
         return c.clone();
     }
     let mut by_layer: Vec<(LayerId, usize, Vec<&FillShape>)> = Vec::new();
-    for (idx, s) in scene
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| is_map_shape(s, scope))
-    {
+    for (idx, s) in scene.iter().enumerate().filter(|(_, s)| in_map(s)) {
         match by_layer.iter_mut().find(|x| x.0 == s.layer_id) {
             Some(x) => x.2.push(s),
             None => by_layer.push((s.layer_id, idx, vec![s])),
@@ -1273,6 +1307,86 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     built
 }
 
+/// 点 `p` が、地図 `lm` のレイヤーの生の図形より前面にある、ほかの図形（前面のレイヤー・同じレイヤーのグループ）に覆われているか
+fn hidden_by_front(scene: Scene<'_>, session: &Session, lm: &LayerMap, p: Point) -> bool {
+    (lm.first_idx + 1..scene.len()).any(|i| {
+        scene.get(i).is_some_and(|s| {
+            !(s.layer_id == lm.layer_id && s.is_raw_at_scope(&lm.group_path))
+                && s.is_in_editing_scope(&session.editing_group_path)
+                && s.contains_point(p)
+        })
+    })
+}
+
+/// アンカーの追加（`add`）・削除で、マウスにいちばん近い辺・頂点を探す（半径 `12 / zoom`。同じレイヤーの生の図形どうしに前後は無い）。
+/// 追加は辺の上の位置を 0.08〜0.92 に収める。削除は、消せる頂点（`with_anchor_deleted` が形を返す頂点）だけ
+pub(crate) fn anchor_hover(
+    scene: Scene<'_>,
+    session: &Session,
+    mouse_pt: Point,
+    zoom: f32,
+    add: bool,
+) -> HoverTarget {
+    let r = 12.0 / (zoom as f64);
+    let maps = scope_maps(scene, session);
+    if add {
+        let mut best: Option<(f64, &LayerMap, usize, f64)> = None;
+        for lm in &maps.maps {
+            let Some((e, t)) = lm.map.hit_edge(mouse_pt, r) else {
+                continue;
+            };
+            let p = lm.map.quad(e).eval(t);
+            let d = (p - mouse_pt).hypot();
+            if best.as_ref().is_none_or(|b| d < b.0) && !hidden_by_front(scene, session, lm, p) {
+                best = Some((d, lm, e, t.clamp(0.08, 0.92)));
+            }
+        }
+        return best.map_or(HoverTarget::None, |(_, lm, e, t)| {
+            let q = lm.map.quad(e);
+            let ed = &lm.map.edges[e];
+            HoverTarget::Edge {
+                shape_id: ed.left_src.or(ed.right_src).unwrap_or(0),
+                contour_idx: 0,
+                seg_idx: 0,
+                t,
+                closest_pos: q.eval(t),
+                seg: q,
+                map_edge: Some((lm.layer_id, e)),
+            }
+        });
+    }
+    let mut best: Option<(f64, &LayerMap, usize)> = None;
+    for lm in &maps.maps {
+        let Some(v) = lm.map.hit_node(mouse_pt, r) else {
+            continue;
+        };
+        let p = lm.map.nodes[v];
+        let d = (p - mouse_pt).hypot();
+        if best.as_ref().is_none_or(|b| d < b.0)
+            && !hidden_by_front(scene, session, lm, p)
+            && lm.map.with_anchor_deleted(v).is_some()
+        {
+            best = Some((d, lm, v));
+        }
+    }
+    best.map_or(HoverTarget::None, |(_, lm, v)| {
+        let (shape_id, contour_idx, seg_idx) = lm
+            .map
+            .node_src
+            .get(v)
+            .copied()
+            .flatten()
+            .unwrap_or((0, 0, 0));
+        HoverTarget::Vertex {
+            shape_id,
+            contour_idx,
+            seg_idx,
+            pos: lm.map.nodes[v],
+            map_node: Some((lm.layer_id, v)),
+        }
+    })
+}
+
 /// 選択ツールの輪郭の変形で、マウスにいちばん近い頂点か辺を探す。
 /// 同じレイヤーの生の図形どうしに前後は無い（境目の線は1本）。前面のレイヤーやグループに隠れた所は除く
 pub(crate) fn reshape_hover(
@@ -1284,15 +1398,7 @@ pub(crate) fn reshape_hover(
     let inv_z = 1.0 / (zoom as f64);
     let (vertex_r, inner_r, outer_r) = (9.0 * inv_z, 5.5 * inv_z, 9.5 * inv_z);
     let maps = scope_maps(scene, session);
-    let hidden = |lm: &LayerMap, p: Point| {
-        (lm.first_idx + 1..scene.len()).any(|i| {
-            scene.get(i).is_some_and(|s| {
-                !(s.layer_id == lm.layer_id && s.is_raw_at_scope(&lm.group_path))
-                    && s.is_in_editing_scope(&session.editing_group_path)
-                    && s.contains_point(p)
-            })
-        })
-    };
+    let hidden = |lm: &LayerMap, p: Point| hidden_by_front(scene, session, lm, p);
     let mut best_v: Option<(f64, &LayerMap, usize)> = None;
     for lm in &maps.maps {
         if let Some(v) = lm.map.hit_node(mouse_pt, vertex_r) {
@@ -1366,6 +1472,10 @@ pub(crate) enum MapEdit {
     },
     /// `orig_vertex` にある頂点を `target` へ動かす
     MoveVertex { orig_vertex: Point, target: Point },
+    /// 形が `orig_seg` の辺の `t` の所に頂点を足す（境目なら両側の図形に入る）
+    AddAnchor { orig_seg: QuadBez, t: f64 },
+    /// `orig_vertex` にある頂点を消し、前後の辺を1本の直線にする
+    DeleteAnchor { orig_vertex: Point },
 }
 
 impl PlanarMap {
@@ -1402,7 +1512,103 @@ impl PlanarMap {
                 let v = (0..self.nodes.len()).find(|&v| self.nodes[v] == orig_vertex)?;
                 Some((self.with_node_moved(v, target), self.edges_at(v)))
             }
+            MapEdit::AddAnchor { .. } | MapEdit::DeleteAnchor { .. } => None,
         }
+    }
+
+    /// 辺 `e` を `t`（0.08〜0.92 に収める）の所で2本に切った形（形は変わらない）
+    pub(crate) fn with_anchor_added(&self, e: usize, t: f64) -> PlanarMap {
+        let t = t.clamp(0.08, 0.92);
+        let mut m = self.clone();
+        let ed = m.edges[e];
+        let q = m.quad(e);
+        m.nodes.push(q.eval(t));
+        let v = m.nodes.len() - 1;
+        m.edges[e] = MapEdge {
+            b: v,
+            ctrl: q.subsegment(0.0..t).p1,
+            ..ed
+        };
+        m.edges.push(MapEdge {
+            a: v,
+            ctrl: q.subsegment(t..1.0).p1,
+            ..ed
+        });
+        m
+    }
+
+    /// 頂点 `v` を消し、前後の辺を1本の直線にした形。消せないときは `None`：
+    /// つながる辺が2本でない（3色以上が接する点など）、前後が同じ頂点（細いレンズ形）、
+    /// 直線がほかの辺と交わる・ほかの頂点や辺をまたぐ、両側の面が潰れる・裏返る
+    pub(crate) fn with_anchor_deleted(&self, v: usize) -> Option<PlanarMap> {
+        let at = self.edges_at(v);
+        if at.len() != 2 {
+            return None;
+        }
+        let (e1, e2) = (
+            self.oriented(at[0], false, v),
+            self.oriented(at[1], true, v),
+        );
+        if e1.a == e2.b || e1.a == v || e2.b == v || e1.left != e2.left || e1.right != e2.right {
+            return None;
+        }
+        let (pa, pb) = (self.nodes[e1.a], self.nodes[e2.b]);
+        let mut m = self.clone();
+        m.edges[at[0]] = MapEdge {
+            a: e1.a,
+            b: e2.b,
+            ctrl: pa.midpoint(pb),
+            ..e1
+        };
+        let ne = if at[0] == m.edges.len() - 1 {
+            at[1]
+        } else {
+            at[0]
+        };
+        m.edges.swap_remove(at[1]);
+        if !m.crossings(&[ne]).is_empty() {
+            return None;
+        }
+        // 前の道筋（消す頂点を通る2本）と直線で囲む所に、ほかの頂点や辺が入らないか
+        let mut swept = BezPath::new();
+        swept.move_to(pa);
+        swept.quad_to(e1.ctrl, self.nodes[v]);
+        swept.quad_to(e2.ctrl, pb);
+        swept.close_path();
+        let others_inside = (0..m.nodes.len())
+            .filter(|&w| w != v && w != e1.a && w != e2.b)
+            .any(|w| swept.winding(m.nodes[w]) != 0)
+            || (0..m.edges.len())
+                .filter(|&f| f != ne)
+                .any(|f| swept.winding(m.quad(f).eval(0.5)) != 0);
+        if others_inside {
+            return None;
+        }
+        // 色のある側の面が、潰れたり裏返ったりしないか（前の面と面積の正負が同じで、面積が 1e-4 より大きい）
+        let forward = self.edges[at[0]].b == v;
+        for (before, after, color) in [
+            ((at[0], forward), (ne, true), e1.left),
+            ((at[0], !forward), (ne, false), e1.right),
+        ] {
+            if color.is_none() {
+                continue;
+            }
+            let area = |map: &PlanarMap, h: (usize, bool)| {
+                Contour::new(
+                    map.cycle_from(h)
+                        .iter()
+                        .map(|x| map.half_quad(*x))
+                        .collect(),
+                )
+                .signed_area()
+            };
+            let (a0, a1) = (area(self, before), area(&m, after));
+            if a1.abs() <= 1e-4 || a0.signum() != a1.signum() {
+                return None;
+            }
+        }
+        m.compact_nodes();
+        Some(m)
     }
 
     /// 頂点 `v` を `p` へ動かすときに吸い付く、ほかの頂点（`radius` 以内でいちばん近いもの）
@@ -1443,8 +1649,25 @@ pub(crate) fn reshape_result(
     group_path: &[u64],
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
     let map = &base.map;
-    let (edited, moved) = map.apply_edit(edit)?;
-    // 動かす辺が、元の地図の壊れた面の輪郭（閉じない・色がまざる）に入っていれば編集しない。
+    // 編集した地図と、編集で変わる元の辺（アンカーの追加は切る辺、削除は消す頂点の2本、ドラッグは動かす辺）
+    let (next, touched) = match edit {
+        MapEdit::AddAnchor { orig_seg, t } => {
+            let (e, forward) = map.find_edge(&orig_seg)?;
+            (
+                map.with_anchor_added(e, if forward { t } else { 1.0 - t }),
+                vec![e],
+            )
+        }
+        MapEdit::DeleteAnchor { orig_vertex } => {
+            let v = (0..map.nodes.len()).find(|&v| map.nodes[v] == orig_vertex)?;
+            (map.with_anchor_deleted(v)?, map.edges_at(v))
+        }
+        MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => {
+            let (edited, moved) = map.apply_edit(edit)?;
+            (commit_edit(map, &base.cycles, edited, &moved).0, moved)
+        }
+    };
+    // 変わる辺が、元の地図の壊れた面の輪郭（閉じない・色がまざる）に入っていれば編集しない。
     // 壊れた輪郭の面は図形に書き戻せないので、編集するとその面の図形が消えてしまう
     let broken = |c: &Vec<(usize, bool)>| {
         c.iter().any(|h| h.0 == usize::MAX)
@@ -1454,11 +1677,10 @@ pub(crate) fn reshape_result(
     if base
         .cycles
         .iter()
-        .any(|c| broken(c) && c.iter().any(|h| moved.contains(&h.0)))
+        .any(|c| broken(c) && c.iter().any(|h| touched.contains(&h.0)))
     {
         return None;
     }
-    let (next, _) = commit_edit(map, &base.cycles, edited, &moved);
     Some(rewrite_shapes(
         map,
         &base.keys,
@@ -1469,28 +1691,31 @@ pub(crate) fn reshape_result(
     ))
 }
 
-/// 図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の生の図形を地図にして、編集 `edit` をかけて確定し、
-/// 変わった図形だけを差し替える（差し替えた図形は、消した図形のうち最初のものの位置に入れる）。変わらなければ false
-pub(crate) fn reshape_shapes(
-    shapes: &mut Vec<FillShape>,
+/// 図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の生の図形を地図にして、編集 `edit` をかけて確定した差分
+/// （消す元の図形, 新しく入れる塗りの形）。形が変わらないときは `None`
+pub(crate) fn reshape_diff(
+    shapes: &[FillShape],
     layer_id: LayerId,
     group_path: &[u64],
     edit: MapEdit,
-) -> bool {
+) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
     let base = ReshapeBase::new(Arc::new(PlanarMap::from_faces(
         shapes
             .iter()
             .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path)),
     )));
-    let Some((removed, added)) = reshape_result(&base, edit, shapes, layer_id, group_path) else {
-        return false;
-    };
-    if removed.is_empty() && added.is_empty() {
-        return false;
-    }
+    reshape_result(&base, edit, shapes, layer_id, group_path)
+        .filter(|(removed, added)| !removed.is_empty() || !added.is_empty())
+}
+
+/// 差分を図形の並びに入れる。新しい形は、消した図形のうち最初のものの位置に入れる
+pub(crate) fn apply_shape_diff(
+    shapes: &mut Vec<FillShape>,
+    removed: &[ShapeId],
+    added: Vec<FillShape>,
+) {
     let at = shapes.iter().position(|s| removed.contains(&s.shape_id));
     shapes.retain(|s| !removed.contains(&s.shape_id));
     let at = at.unwrap_or(shapes.len()).min(shapes.len());
     shapes.splice(at..at, added);
-    true
 }
