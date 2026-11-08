@@ -21428,3 +21428,236 @@ fn test_anchor_delete_refuses_junction_vertex() {
     assert_eq!(shapes_before, shapes_after, "何も変わらない");
     assert_eq!(app.history.undo_stack.len(), undo_before, "Undo も積まない");
 }
+
+// ============================================================================
+// 形・地図を地図に重ねる（PlanarMap::overlay）
+// ============================================================================
+
+mod map_overlay {
+    use super::*;
+    use crate::planar_map::{nearest_on_quad, MapInput, MapRule, PlanarMap};
+
+    /// 小さな乱数（同じ種なら同じ並び）
+    pub(super) struct Rng(pub(super) u64);
+    impl Rng {
+        pub(super) fn f(&mut self) -> f64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+        }
+    }
+
+    pub(super) fn rect_shape(x0: f64, y0: f64, x1: f64, y1: f64, color: Color32) -> FillShape {
+        let mut s = crate::vector_engine::make_marquee_rect_shape(kurbo::Rect::new(x0, y0, x1, y1));
+        s.color = color;
+        s
+    }
+
+    /// 地図が壊れていないか（輪郭が閉じて色がそろう・面が取り出せる・辺が交わらない）
+    pub(super) fn valid(m: &PlanarMap) -> bool {
+        let all: Vec<usize> = (0..m.edges.len()).collect();
+        m.cycle_check() == (0, 0) && m.faces().1 == 0 && m.crossings_pub(&all).is_empty()
+    }
+
+    /// 2つの図形の並び（後ろほど上）の色を、格子の点で比べる。境目から 0.3px 以内の点は数えない
+    pub(super) fn color_diff(a: &[FillShape], b: &[FillShape], step: f64) -> usize {
+        let mut diff = 0;
+        let mut y = 90.0;
+        while y <= 510.0 {
+            let mut x = 90.0;
+            while x <= 510.0 {
+                let p = Point::new(x + 0.0137, y + 0.0173);
+                let ca = a.iter().rev().find(|s| s.contains_point(p)).map(|s| s.color);
+                let cb = b.iter().rev().find(|s| s.contains_point(p)).map(|s| s.color);
+                if ca != cb {
+                    let near = a.iter().chain(b.iter()).any(|s| {
+                        s.contours().any(|c| {
+                            c.segments.iter().any(|q| {
+                                kurbo::Shape::bounding_box(q).inflate(0.3, 0.3).contains(p)
+                                    && nearest_on_quad(q, p).1 <= 0.3
+                            })
+                        })
+                    });
+                    if !near {
+                        diff += 1;
+                    }
+                }
+                x += step;
+            }
+            y += step;
+        }
+        diff
+    }
+
+    /// 地図だけで描いた絵（ブラシの形を重ね、ときどき消しゴム・バケツ）
+    pub(super) fn native_scene(seed: u64, n: usize) -> PlanarMap {
+        let mut r = Rng(seed);
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+        let mut m = PlanarMap { nodes: Vec::new(), edges: Vec::new(), node_src: Vec::new() };
+        for k in 0..n {
+            let next = if k % 4 == 3 {
+                let p = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
+                m.with_face_filled(p, colors[(r.f() * 4.0) as usize % 4])
+            } else {
+                let cnt = 2 + (r.f() * 4.0) as usize;
+                let mut pts = Vec::new();
+                let mut p = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
+                for _ in 0..cnt {
+                    let q = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
+                    for j in 0..10 {
+                        pts.push(p.lerp(q, j as f64 / 10.0));
+                    }
+                    p = q;
+                }
+                pts.push(p);
+                let radius = 3.0 + r.f() * 10.0;
+                let color = colors[(r.f() * 4.0) as usize % 4];
+                let stroke = build_smoothed_stroke_shapes_at_zoom(&generate_brush_outline_at_zoom(&pts, radius, 1.0), color, 1.0);
+                let rule = MapRule::Paint(if k % 6 == 5 { None } else { Some(color) });
+                m.overlay(MapInput::Shapes(&stroke), rule)
+            };
+            if let Some(next) = next {
+                m = next;
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn paint_square_over_square() {
+        let base = PlanarMap::from_faces(std::iter::once(&rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)));
+        let blue = rect_shape(200.0, 200.0, 400.0, 400.0, Color32::BLUE);
+        let m = base.overlay(MapInput::Shapes(std::slice::from_ref(&blue)), MapRule::Paint(Some(Color32::BLUE))).unwrap();
+        assert!(valid(&m));
+        let (faces, _) = m.to_faces_checked(1, &[]);
+        let at = |p: Point| faces.iter().find(|s| s.contains_point(p)).map(|s| s.color);
+        assert_eq!(at(Point::new(150.0, 150.0)), Some(Color32::RED));
+        assert_eq!(at(Point::new(250.0, 250.0)), Some(Color32::BLUE));
+        assert_eq!(at(Point::new(350.0, 350.0)), Some(Color32::BLUE));
+        assert_eq!(at(Point::new(350.0, 150.0)), None);
+        // 消しゴム
+        let erased = m.overlay(MapInput::Shapes(&[rect_shape(120.0, 120.0, 180.0, 180.0, Color32::WHITE)]), MapRule::Paint(None)).unwrap();
+        let (faces, _) = erased.to_faces_checked(1, &[]);
+        assert_eq!(faces.iter().find(|s| s.contains_point(Point::new(150.0, 150.0))).map(|s| s.color), None);
+        assert_eq!(faces.iter().find(|s| s.contains_point(Point::new(110.0, 110.0))).map(|s| s.color), Some(Color32::RED));
+    }
+
+    #[test]
+    fn same_color_paint_merges_without_new_edges() {
+        let base = PlanarMap::from_faces(std::iter::once(&rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)));
+        let inner = rect_shape(150.0, 150.0, 250.0, 250.0, Color32::RED);
+        let m = base.overlay(MapInput::Shapes(std::slice::from_ref(&inner)), MapRule::Paint(Some(Color32::RED))).unwrap();
+        assert!(valid(&m));
+        assert_eq!(m.edges.len(), base.edges.len());
+        // 元の辺と元の図形の印がそのまま残る（図形を書き直さずに済む）
+        assert!(m.edges.iter().all(|e| e.left_src.is_some() || e.right_src.is_some()));
+    }
+
+    /// 矩形で中を取り出して空けたあと、そのまま上に置くと元の色に戻る
+    #[test]
+    fn marquee_lift_and_drop_back() {
+        let base = native_scene(1, 24);
+        let (orig, _) = base.to_faces_checked(1, &[]);
+        let rect = PlanarMap::from_faces(std::iter::once(&rect_shape(180.0, 170.0, 330.0, 290.0, Color32::WHITE)));
+        let inside = base.overlay(MapInput::Map(&rect), MapRule::KeepInside).unwrap();
+        let rest = base.overlay(MapInput::Map(&rect), MapRule::Paint(None)).unwrap();
+        assert!(valid(&inside) && valid(&rest));
+        let back = rest.overlay(MapInput::Map(&inside), MapRule::Overlay).unwrap();
+        assert!(valid(&back));
+        let (faces, _) = back.to_faces_checked(1, &[]);
+        assert_eq!(color_diff(&orig, &faces, 3.0), 0);
+    }
+
+    /// 面をほんの少しずらして置く（ずらす量が地図の許容のあたり）。取り消されず、色も合う
+    #[test]
+    fn move_face_by_tiny_offsets() {
+        let base = native_scene(2, 24);
+        let (faces, _) = base.to_faces_checked(1, &[]);
+        let mut biggest: Vec<usize> = (0..faces.len()).collect();
+        biggest.sort_by_key(|&k| std::cmp::Reverse(faces[k].contours().map(|c| c.segments.len()).sum::<usize>()));
+        for &k in biggest.iter().take(3) {
+            for d in [0.0, 0.01, 0.049, 0.051, 0.07, 1.0] {
+                let piece = PlanarMap::from_faces(std::iter::once(&faces[k]));
+                let rest = base.overlay(MapInput::Map(&piece), MapRule::Paint(None)).unwrap();
+                let moved = piece.transformed(kurbo::Affine::translate((d, d * 0.5)));
+                let m = rest.overlay(MapInput::Map(&moved), MapRule::Overlay).unwrap();
+                assert!(valid(&m), "面{k} ずらす量 {d}");
+                let mut expected = rest.to_faces_checked(1, &[]).0;
+                expected.extend(moved.to_faces_checked(1, &[]).0);
+                let (out, _) = m.to_faces_checked(1, &[]);
+                assert_eq!(color_diff(&expected, &out, 3.0), 0, "面{k} ずらす量 {d}");
+            }
+        }
+    }
+
+    /// 地図から書き出した図形を `from_faces` で読み直すと、同じように壊れていない地図になる
+    /// （重ねると 0.05px より近い頂点ができることがあるので、許容はほぼ 0 にしてある）
+    #[test]
+    fn faces_read_back_stays_valid() {
+        let m = native_scene(13, 36);
+        assert!(valid(&m));
+        let (faces, broken) = m.to_faces_checked(1, &[]);
+        assert_eq!(broken, 0);
+        let back = PlanarMap::from_faces(faces.iter());
+        assert!(valid(&back));
+        assert_eq!(back.edges.len(), m.edges.len());
+    }
+
+    /// 2本の辺を1本にまとめると制御点が両端の外に出る（曲線が端を越えて折り返す）ときは、まとめない
+    #[test]
+    fn merge_degree2_skips_folding_merge() {
+        use crate::planar_map::MapEdge;
+        // A→V はまっすぐ、V→B はごく短く少し戻る（V は両側が同じ色の、2本だけがつながる頂点）
+        let (a, v, b, c) = (Point::new(0.0, 0.0), Point::new(10.0, 0.0), Point::new(9.999, 0.002), Point::new(0.0, 10.0));
+        let edge = |x: usize, y: usize, ctrl: Point| MapEdge { a: x, b: y, ctrl, left: Some(Color32::RED), right: None, left_src: None, right_src: None };
+        let mut m = PlanarMap {
+            nodes: vec![a, v, b, c],
+            edges: vec![
+                edge(0, 1, a.midpoint(v)),
+                edge(1, 2, Point::new(10.001, 0.001)),
+                edge(2, 3, b.midpoint(c)),
+                edge(3, 0, c.midpoint(a)),
+            ],
+            node_src: vec![None; 4],
+        };
+        assert!(valid(&m));
+        m.merge_degree2(kurbo::Rect::new(-1.0, -1.0, 20.0, 20.0));
+        assert_eq!(m.edges.len(), 4, "折り返す曲線になるので、まとめない");
+        assert!(valid(&m));
+    }
+
+    /// ほぼ平行に並ぶ2本の曲線（0.01px 離れて長く並ぶ）は交わらず、交わる2本は交わると分かる
+    #[test]
+    fn quad_intersections_near_parallel() {
+        let a = QuadBez::new(Point::new(0.0, 0.0), Point::new(50.0, 30.0), Point::new(100.0, 0.0));
+        let b = QuadBez::new(Point::new(0.0, 0.01), Point::new(50.0, 30.01), Point::new(100.0, 0.01));
+        let mut m = PlanarMap { nodes: vec![a.p0, a.p2, b.p0, b.p2], edges: Vec::new(), node_src: vec![None; 4] };
+        let edge = |a, b, ctrl| crate::planar_map::MapEdge { a, b, ctrl, left: Some(Color32::RED), right: None, left_src: None, right_src: None };
+        m.edges.push(edge(0, 1, a.p1));
+        m.edges.push(edge(2, 3, b.p1));
+        assert!(m.crossings_pub(&[0, 1]).is_empty());
+        let c = QuadBez::new(Point::new(0.0, 5.0), Point::new(50.0, 0.0), Point::new(100.0, 5.0));
+        m.nodes.extend([c.p0, c.p2]);
+        m.edges.push(edge(4, 5, c.p1));
+        assert!(!m.crossings_pub(&[2]).is_empty());
+    }
+
+    /// ほぼ重なった2本の辺（間がごく細い面）の上に重ねても壊れない
+    #[test]
+    fn overlay_across_hairline_lens() {
+        let mut m = PlanarMap::from_faces(std::iter::once(&rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)));
+        // 真ん中に、幅 0.00006px の黄色の細い面（同じ2頂点を結ぶ、ほぼ同じ2本の曲線）
+        let (a, b) = (m.nodes.len(), m.nodes.len() + 1);
+        m.nodes.push(Point::new(150.0, 150.0));
+        m.nodes.push(Point::new(250.0, 200.0));
+        let yellow = Color32::YELLOW;
+        // 2本目（制御点が 0.00012 下）が左にあるので、間（1本目の左・2本目の右）が黄色
+        m.edges.push(crate::planar_map::MapEdge { a, b, ctrl: Point::new(200.0, 160.0), left: Some(yellow), right: Some(Color32::RED), left_src: None, right_src: None });
+        m.edges.push(crate::planar_map::MapEdge { a, b, ctrl: Point::new(200.0, 160.00012), left: Some(Color32::RED), right: Some(yellow), left_src: None, right_src: None });
+        m.node_src = vec![None; m.nodes.len()];
+        assert!(valid(&m));
+        let stroke = rect_shape(140.0, 140.0, 260.0, 175.0, Color32::BLUE);
+        let out = m.overlay(MapInput::Shapes(std::slice::from_ref(&stroke)), MapRule::Paint(Some(Color32::BLUE)));
+        let out = out.expect("細い面にかかっても重ねられる");
+        assert!(valid(&out));
+    }
+}

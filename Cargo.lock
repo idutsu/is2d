@@ -1527,10 +1527,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "i_float"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ecaff1ce29bcacd72cdf581ba6fce636ef4c4e0b2da7e7846dd0137d98141e2"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "i_key_sort"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "347c253b4748a1a28baf94c9ce133b6b166f08573157e05afe718812bc599fcd"
+
+[[package]]
+name = "i_key_sort"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14269ee362009550495e20650ff3c2bca14a8147fe251e216760381ffed90b6f"
 
 [[package]]
 name = "i_overlay"
@@ -1538,11 +1553,21 @@ version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "efc99d863511ee3f7f8d7375c7f477314bd5a36bc409bb6c2ac2037939bb8391"
 dependencies = [
- "i_float",
- "i_key_sort",
- "i_shape",
- "i_tree",
+ "i_float 1.6.0",
+ "i_key_sort 0.2.0",
+ "i_shape 1.6.0",
+ "i_tree 0.8.3",
  "rayon",
+]
+
+[[package]]
+name = "i_overlay"
+version = "9.1.0"
+dependencies = [
+ "i_float 5.0.0",
+ "i_key_sort 0.12.0",
+ "i_shape 5.0.0",
+ "i_tree 0.20.0",
 ]
 
 [[package]]
@@ -1551,8 +1576,17 @@ version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27dbe9e5238d6b9c694c08415bf00fb370b089949bd818ab01f41f8927b8774c"
 dependencies = [
- "i_float",
+ "i_float 1.6.0",
  "serde",
+]
+
+[[package]]
+name = "i_shape"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa1878f91ef7921feaf1b2346253ebc5e661878b22d5715195c1d5dcf0f20ae5"
+dependencies = [
+ "i_float 5.0.0",
 ]
 
 [[package]]
@@ -1560,6 +1594,12 @@ name = "i_tree"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "155181bc97d770181cf9477da51218a19ee92a8e5be642e796661aee2b601139"
+
+[[package]]
+name = "i_tree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "048af31de955890c62a8506fec511335a5089e91e1c516537add16f96c507d84"
 
 [[package]]
 name = "icu_collections"
@@ -1704,7 +1744,8 @@ dependencies = [
  "block2 0.6.2",
  "eframe",
  "fastrand",
- "i_overlay",
+ "i_overlay 1.10.0",
+ "i_overlay 9.1.0",
  "kurbo",
  "lyon_tessellation",
  "objc2 0.6.5",

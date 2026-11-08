@@ -8,6 +8,8 @@ eframe = "0.29"
 kurbo = "0.13"
 lyon_tessellation = "1.0"
 i_overlay = "1"
+# 地図の重ね合わせ用（vendor/i_overlay。9.1.0 に1か所足した写し。vendor/i_overlay/PATCH.md）
+i_overlay9 = { package = "i_overlay", path = "vendor/i_overlay" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rfd = "0.15"
