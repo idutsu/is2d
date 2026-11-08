@@ -21742,4 +21742,80 @@ mod map_overlay {
         assert!(layer_map_valid(&app, 0));
     }
 
+
+    /// 3色がとなり合う絵（ブラシで描いた3本の太い線が重なる）を作る
+    fn three_band_app() -> Is2dApp {
+        let mut app = Is2dApp::default();
+        for (y, c) in [(180.0, Color32::RED), (200.0, Color32::BLUE), (220.0, Color32::GREEN)] {
+            app.tool.brush_color = c;
+            doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&[Point::new(100.0, y), Point::new(300.0, y + 3.0)], 14.0));
+        }
+        app
+    }
+
+    /// 画面の点の色（いちばん上の図形の色）
+    fn color_at(app: &Is2dApp, p: Point) -> Option<Color32> {
+        app.scene().iter().rev().find(|s| s.contains_point(p)).map(|s| s.color)
+    }
+
+    /// 3色にまたがる矩形で選び、ほんの少しずらす・回す・拡大して離しても、レイヤーの地図は壊れず、片はちゃんと動く
+    #[test]
+    fn marquee_move_rotate_scale_keeps_layer_map_valid() {
+        let probes = [Point::new(160.0, 182.0), Point::new(160.0, 201.0), Point::new(160.0, 221.0)];
+        for (k, action) in [
+            doc_actions::Action::MoveSelected { delta: KVec2::new(0.051, 0.0) },
+            doc_actions::Action::MoveSelected { delta: KVec2::new(0.0, 0.01) },
+            doc_actions::Action::MoveSelected { delta: KVec2::new(30.0, 0.0) },
+            doc_actions::Action::RotateSelection { angle_rad: 0.003 },
+            doc_actions::Action::ScaleSelection { sx: 1.02, sy: 1.02 },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut app = three_band_app();
+            let before: Vec<Option<Color32>> = probes.iter().map(|p| color_at(&app, *p)).collect();
+            select_ops::apply_marquee_selection(&mut app, Point::new(140.0, 150.0), Point::new(200.0, 250.0), false);
+            assert!(!app.session.selection.is_empty(), "{k}");
+            assert!(doc_actions::apply(&mut app, action));
+            canvas_tool::clear_selection(&mut app);
+            assert!(layer_map_valid(&app, 0), "{k}");
+            if k < 2 {
+                // ごくわずかに動かしただけなので、色はそのまま
+                let after: Vec<Option<Color32>> = probes.iter().map(|p| color_at(&app, *p)).collect();
+                assert_eq!(before, after, "{k}");
+            }
+            if k == 2 {
+                // 30px 右へ動いた（矩形の左の所は空き、右へ 30px の所に片がある）
+                assert_eq!(color_at(&app, Point::new(150.0, 201.0)), None);
+                assert_eq!(color_at(&app, Point::new(180.0, 201.0)), Some(Color32::BLUE));
+            }
+        }
+    }
+
+    /// 矩形で選んで、動かさずに選択を外すと、元の図形がそのまま戻る
+    #[test]
+    fn marquee_without_moving_restores_original_shapes() {
+        let mut app = three_band_app();
+        let before: Vec<(u64, Color32)> = app.doc.root.layers[0].keyframes[0].cel.shapes.iter().map(|s| (s.shape_id, s.color)).collect();
+        select_ops::apply_marquee_selection(&mut app, Point::new(140.0, 150.0), Point::new(200.0, 250.0), false);
+        canvas_tool::clear_selection(&mut app);
+        let after: Vec<(u64, Color32)> = app.doc.root.layers[0].keyframes[0].cel.shapes.iter().map(|s| (s.shape_id, s.color)).collect();
+        assert_eq!(before, after);
+    }
+
+    /// 貼り付けた片を、今の図形に重なる所へ置いても、レイヤーの地図は壊れない
+    #[test]
+    fn paste_over_existing_shapes_keeps_layer_map_valid() {
+        let mut app = three_band_app();
+        select_ops::apply_marquee_selection(&mut app, Point::new(140.0, 150.0), Point::new(200.0, 250.0), false);
+        assert!(doc_actions::copy_selected_shapes(&mut app));
+        canvas_tool::clear_selection(&mut app);
+        assert!(doc_actions::paste_clipboard(&mut app, true));
+        assert!(doc_actions::apply(&mut app, doc_actions::Action::MoveSelected { delta: KVec2::new(37.0, 9.0) }));
+        canvas_tool::clear_selection(&mut app);
+        assert!(layer_map_valid(&app, 0));
+        // 貼り付けた片の上の色（元の 160,201 の青が 197,210 に来る）
+        assert_eq!(color_at(&app, Point::new(197.0, 210.0)), Some(Color32::BLUE));
+    }
+
 }

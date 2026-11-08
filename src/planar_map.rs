@@ -505,7 +505,6 @@ impl PlanarMap {
     }
 
     /// 面 `f` の今の形を、塗りの形にする
-    #[cfg(test)]
     pub(crate) fn face_shape(&self, f: &MapFace, layer_id: u64, group_path: &[u64]) -> FillShape {
         let mut contours = f
             .cycles
@@ -1844,6 +1843,125 @@ pub(crate) fn apply_shape_diff(
     shapes.splice(at..at, added);
 }
 
+/// 矩形選択で切った結果（レイヤー1枚・階層1つ分）
+#[derive(Debug, Default)]
+pub(crate) struct MarqueeSplit {
+    /// 矩形にかかって切れた図形（文書には残し、画面から隠す元の図形）
+    pub(crate) hidden: Vec<ShapeId>,
+    /// 丸ごと矩形の中にある図形（切らずに、そのまま選ぶ）
+    pub(crate) whole: Vec<ShapeId>,
+    /// 切れた図形の、矩形の外の部分
+    pub(crate) remainder: Vec<FillShape>,
+    /// 切れた図形の、矩形の中の部分（持ち上げる片）
+    pub(crate) pieces: Vec<FillShape>,
+}
+
+/// 矩形選択：図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の生の図形（`skip` に当たるものは除く）を地図にして、
+/// 矩形の形 `rect` で切る。矩形の中の部分と外の部分は、同じ地図から作るので、境目が両側でビットまで同じになる。
+/// 地図で切れないとき（安全網で止まった）は `None`
+pub(crate) fn marquee_split(
+    shapes: &[FillShape],
+    layer_id: LayerId,
+    group_path: &[u64],
+    skip: impl Fn(&FillShape) -> bool,
+    rect: &FillShape,
+) -> Option<MarqueeSplit> {
+    let own: Vec<FillShape> = shapes
+        .iter()
+        .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path) && !skip(s))
+        .cloned()
+        .collect();
+    let map = PlanarMap::from_faces(own.iter());
+    let rect_map = PlanarMap::from_faces(std::iter::once(rect));
+    let inside = map.overlay(MapInput::Map(&rect_map), MapRule::KeepInside)?;
+    let rest = map.overlay(MapInput::Map(&rect_map), MapRule::Paint(None))?;
+    let keys: HashSet<[u64; 8]> = (0..map.edges.len()).map(|e| edge_key(&map, e)).collect();
+    let (removed_rest, remainder) = rewrite_shapes(&map, &keys, &rest, &own, layer_id, group_path);
+    let (removed_inside, pieces) = rewrite_shapes(&map, &keys, &inside, &own, layer_id, group_path);
+    // 残りから消えて、中では変わらない図形が、丸ごと中にある図形。どちらでも変わった図形が、切れた図形
+    let hidden: Vec<ShapeId> = removed_rest.iter().copied().filter(|id| removed_inside.contains(id)).collect();
+    let whole: Vec<ShapeId> = removed_rest.iter().copied().filter(|id| !removed_inside.contains(id)).collect();
+    Some(MarqueeSplit { hidden, whole, remainder, pieces })
+}
+
+/// 持ち上げた片 `pieces`（同じ地図から作った、重ならない片）を、図形の並び `shapes` のレイヤー `layer_id`・階層 `group_path` の
+/// 生の図形の上に置いた差分。片を1つの地図にして、今の地図に重ねる（片どうしの境目は1本の辺のまま）。
+/// 片を置く所に今の図形の線が1本も無く、何も塗られていないときは、片をそのまま足す（形も番号も変えない）
+pub(crate) fn place_pieces_diff(
+    shapes: &[FillShape],
+    layer_id: LayerId,
+    group_path: &[u64],
+    pieces: &[FillShape],
+) -> MapEditOutcome {
+    let piece_map = PlanarMap::from_faces(pieces.iter());
+    let all: Vec<usize> = (0..piece_map.edges.len()).collect();
+    if piece_map.cycle_check() != (0, 0)
+        || piece_map.faces().1 != 0
+        || !piece_map.crossings_grid(&all, &vec![false; all.len()]).is_empty()
+    {
+        // 片どうしが重なっている・境目がそろっていない（地図にならない）
+        return MapEditOutcome::Refused;
+    }
+    let Some(area) = (0..piece_map.edges.len())
+        .map(|e| piece_map.quad(e).bounding_box())
+        .reduce(|a, b| a.union(b))
+        .map(|r| r.inflate(1.0, 1.0))
+    else {
+        return MapEditOutcome::Unchanged;
+    };
+    let own: Vec<&FillShape> = shapes
+        .iter()
+        .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path))
+        .collect();
+    let near = own.iter().any(|s| {
+        rects_overlap(s.bounding_box(), area) && s.contours().any(|c| c.segments.iter().any(|q| rects_overlap(q.bounding_box(), area)))
+    });
+    // 置く所（外接矩形）に線が1本も無ければ、そこは1つの面の中か、何も無い所。真ん中の点が何も無い所なら、そのまま足す
+    if !near && !own.iter().any(|s| s.contains_point(area.center())) {
+        return MapEditOutcome::Changed(Vec::new(), pieces.iter().map(|p| p.clone().with_scope(layer_id, group_path)).collect());
+    }
+    map_edit_diff(shapes, layer_id, group_path, |m| m.overlay(MapInput::Map(&piece_map), MapRule::Overlay))
+}
+
+/// 境目がビットまで同じ図形どうし（同じ地図から作った片）の、同じ色でとなり合うものを1つにまとめる。
+/// 図形どうしは重ならないこと。レイヤー・階層ごとにまとめる
+pub(crate) fn merge_touching_faces(shapes: Vec<FillShape>) -> Vec<FillShape> {
+    let mut groups: Vec<(LayerId, Vec<u64>, Vec<FillShape>)> = Vec::new();
+    for s in shapes {
+        match groups.iter_mut().find(|g| g.0 == s.layer_id && g.1 == s.group_path) {
+            Some(g) => g.2.push(s),
+            None => groups.push((s.layer_id, s.group_path.clone(), vec![s])),
+        }
+    }
+    let mut out = Vec::new();
+    for (layer_id, group_path, list) in groups {
+        if list.len() <= 1 {
+            out.extend(list);
+            continue;
+        }
+        let map = PlanarMap::from_faces(list.iter());
+        let (map_faces, broken) = map.faces();
+        let faces: Vec<FillShape> = map_faces.iter().map(|f| map.face_shape(f, layer_id, &group_path)).collect();
+        let all: Vec<usize> = (0..map.edges.len()).collect();
+        if broken > 0
+            || map.cycle_check() != (0, 0)
+            || !map.crossings_grid(&all, &vec![false; all.len()]).is_empty()
+        {
+            // 境目がそろっていない（地図にならない）ときは、まとめずにそのまま
+            out.extend(list);
+            continue;
+        }
+        // 形の変わらない片は、元の図形（番号）をそのまま使う
+        for f in faces {
+            match list.iter().find(|s| s.color == f.color && s.exterior.segments == f.exterior.segments && s.holes.len() == f.holes.len()) {
+                Some(orig) => out.push(orig.clone()),
+                None => out.push(f),
+            }
+        }
+    }
+    out
+}
+
 /// 地図で編集した結果
 #[derive(Debug)]
 pub(crate) enum MapEditOutcome {
@@ -2075,6 +2193,7 @@ impl PlanarMap {
     }
 
     /// 地図全体を `aff` で動かした写し（頂点と制御点を動かす。辺のつながりはそのまま）
+    #[cfg(test)]
     pub(crate) fn transformed(&self, aff: kurbo::Affine) -> PlanarMap {
         let mut m = self.clone();
         for p in &mut m.nodes {

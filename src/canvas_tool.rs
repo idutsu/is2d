@@ -10,7 +10,7 @@ use crate::planar_map::{ReshapeBase, ScopeMaps};
 pub(crate) use crate::symbol::Document;
 use crate::symbol::{EditPath, SymbolDef};
 use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
-use crate::vector_boolean::{merge_disjoint_fill_into_canvas, merge_shapes_into_canvas};
+use crate::vector_boolean::merge_shapes_into_canvas;
 use crate::vector_engine::{rects_overlap, FillShape, SyncCache};
 
 pub(crate) const MAX_UNDO_HISTORY: usize = 100;
@@ -2341,11 +2341,12 @@ impl Session {
             let Some(fl) = fl_opt else {
                 return;
             };
-            let mut merged = Vec::with_capacity(fl.pieces.len());
-            for piece in std::mem::take(&mut fl.pieces) {
+            let pieces = std::mem::take(&mut fl.pieces);
+            for piece in &pieces {
                 selection_shapes.remove(&piece.shape_id);
-                merge_disjoint_fill_into_canvas(&mut merged, piece);
             }
+            // 片は同じ地図から作ったもので、境目がビットまで同じなので、地図でまとめる
+            let merged = crate::planar_map::merge_touching_faces(pieces);
             selection_shapes.extend(merged.iter().map(|p| p.shape_id));
             fl.pieces = merged;
         });
@@ -3602,38 +3603,25 @@ pub(crate) fn draw_registration_cross(
     );
 }
 
-/// 片 `pieces` を `base_shapes` に結合する。結合・切り抜きはレイヤーをまたがないので、片のあるレイヤーが2枚以上あれば、
-/// レイヤーごとに分けて同時に結合する（レイヤーの中の図形の順番は、まとめて結合したときと同じ。レイヤーの並びは呼び出し側で直す）
+/// 片 `pieces` を `base_shapes` に結合する。レイヤー・階層ごとに、片を1つの地図にして、そのレイヤーの生の図形の地図の上に置く
+/// （片どうしの境目は1本の辺のまま。変わった図形だけを差し替える）。地図で置けないときは、今までのやり方で結合する
 fn merge_pieces_layer_by_layer(base_shapes: &mut Vec<FillShape>, pieces: Vec<FillShape>) {
-    let mut parts: Vec<(LayerId, Vec<FillShape>, Vec<FillShape>)> = Vec::new();
+    use crate::planar_map::{apply_shape_diff, place_pieces_diff, MapEditOutcome};
+    let mut parts: Vec<(LayerId, Vec<u64>, Vec<FillShape>)> = Vec::new();
     for p in pieces {
-        match parts.iter_mut().find(|(lid, ..)| *lid == p.layer_id) {
+        match parts.iter_mut().find(|(lid, gp, _)| *lid == p.layer_id && *gp == p.group_path) {
             Some((_, _, layer_pieces)) => layer_pieces.push(p),
-            None => parts.push((p.layer_id, Vec::new(), vec![p])),
+            None => parts.push((p.layer_id, p.group_path.clone(), vec![p])),
         }
     }
-    if parts.len() < 2 {
-        let (_, _, layer_pieces) = parts.pop().unwrap_or_default();
-        merge_shapes_into_canvas(base_shapes, layer_pieces);
-        return;
-    }
-    let mut untouched = Vec::new();
-    for s in base_shapes.drain(..) {
-        match parts.iter_mut().find(|(lid, ..)| *lid == s.layer_id) {
-            Some((_, layer_shapes, _)) => layer_shapes.push(s),
-            None => untouched.push(s),
+    for (layer_id, group_path, layer_pieces) in parts {
+        match place_pieces_diff(base_shapes, layer_id, &group_path, &layer_pieces) {
+            MapEditOutcome::Changed(removed, added) => {
+                apply_shape_diff(base_shapes, &removed, added, layer_id, &group_path)
+            }
+            MapEditOutcome::Unchanged => {}
+            MapEditOutcome::Refused => merge_shapes_into_canvas(base_shapes, layer_pieces),
         }
-    }
-    std::thread::scope(|scope| {
-        for (_, layer_shapes, layer_pieces) in &mut parts {
-            scope.spawn(move || {
-                merge_shapes_into_canvas(layer_shapes, std::mem::take(layer_pieces))
-            });
-        }
-    });
-    base_shapes.extend(untouched);
-    for (_, layer_shapes, _) in parts {
-        base_shapes.extend(layer_shapes);
     }
 }
 
@@ -3753,7 +3741,10 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
                     })
                 });
                 if let Some((_, chunk)) = touching {
-                    merge_disjoint_fill_into_canvas(chunk, dp);
+                    // 動かしていない片は、残りと同じ地図から作ったもので境目がそろっているので、地図でまとめる
+                    let mut list = std::mem::take(chunk);
+                    list.push(dp);
+                    *chunk = crate::planar_map::merge_touching_faces(list);
                     continue;
                 }
                 let has_chunk_for_layer = chunks.iter().any(|(orig_id, chunk)| {
