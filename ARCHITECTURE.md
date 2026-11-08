@@ -73,7 +73,7 @@
   - 図形を丸ごと選んだとき：最初に動かす・変形する・色を変えるときに持ち上げる
   - ペースト・`Alt` 複製：その場で作る
 - **確定するまで文書は変えない**。そのため、矩形選択で切った図形を何もせず選択解除したときは、`Floating` を捨てるだけで元の図形が数値誤差なく残る。
-- **確定（`commit_floating`）**: 該当レイヤーで「文書の図形から `hidden` を除き、`remainder` を加え、`pieces` を Merge Drawing で結合」して、文書に1回だけ書き込む。確定は選択解除、タイムライン・レイヤー操作、シンボルやグループへの出入り、再生開始の前に行う。タブの切り替えでは確定しない。Shift クリックで一部の選択だけを外したときは、外した片だけを確定する（`commit_floating_except`）。
+- **確定（`commit_floating`）**: 該当レイヤーで「文書の図形から `hidden` を除き、`remainder` を加え、`pieces` を Merge Drawing で結合」して、文書に1回だけ書き込む。結合は、`pieces` を1つの地図にして、そのレイヤーの生の図形の地図の上に置く（`place_pieces_diff`。[`GEOMETRY.md`](./GEOMETRY.md) 5.4）。矩形で一部を選んだときの `pieces` と `remainder` も、レイヤーの地図を矩形で1回切って作る（`marquee_split`）。確定は選択解除、タイムライン・レイヤー操作、シンボルやグループへの出入り、再生開始の前に行う。タブの切り替えでは確定しない。Shift クリックで一部の選択だけを外したときは、外した片だけを確定する（`commit_floating_except`）。
 - **利用者から見た文書 ＝ `Document` ＋ `Floating` を確定したもの**:
   - 保存と動画の書き出しは、`Tab::committed_document_copy` で作った文書のコピーの上で `Floating` を確定した結果を書き出す。前後でセッションや文書は変えない。
   - 確定は利用者から見た文書を変えないので、Undo の1手にせず、未保存マーク用の世代IDも変えない。
@@ -91,7 +91,7 @@
 
 ## 7. モジュール分割（Module Division）
 - **5層の厳格一方向アーキテクチャ（Layer 5 → Layer 4 → Layer 3 → Layer 2 → Layer 1）**:
-  1. **Layer 1 — Geometry 層**: ベジェ曲線・輪郭・AABB・テッセレーション（`vector_engine`）、ブラシアウトライン生成と曲線フィッティング（`vector_stroke`）、ポリゴンブール演算と曲線再構築（`vector_boolean`）。上位層（ドキュメント状態やUI）への依存を一切持たない純粋な幾何計算層。
+  1. **Layer 1 — Geometry 層**: ベジェ曲線・輪郭・AABB・テッセレーション（`vector_engine`）、ブラシアウトライン生成と曲線フィッティング（`vector_stroke`）、ポリゴンブール演算と曲線再構築（`vector_boolean`）、境目の線で持つ地図と、形・地図の重ね合わせ（`planar_map`。重ね合わせの交わりの計算は `vendor/i_overlay`：i_overlay 9.1.0 に1か所足した写し。`vendor/i_overlay/PATCH.md`）。上位層（ドキュメント状態やUI）への依存を一切持たない純粋な幾何計算層。
   2. **Layer 2 — Domain / Model 層**: タイムライン・レイヤー・キーフレーム・セル・トゥイーン補間（`timeline`）および永続ドキュメント `Document`・シンボル定義・入れ子評価・`EditPath`（`symbol`）。Layer 1 のみに依存し、上位層への逆依存を持たないデータモデル層。
   3. **Layer 3 — Document & Tool Operations 層**: タブ状態 `Tab`・作業状態 `Session`・表示状態 `View`・Undo履歴・`Scene`・土台キャッシュ・上乗せ・`Floating`・`edit_layers`（`canvas_tool`）、ドキュメント変更アクションと一元 `apply`（`doc_actions`）、シンボル操作（`symbol_ops`）、選択・グループ・重なり順操作（`select_ops`）、クリップボード操作（`clipboard_ops`）、ペイント系ツール（`tool_paint`）、選択・変形ツール（`tool_select`）、自由変形ツール（`tool_transform`）、`.is2d` プロジェクトファイルのシリアライズ・マルチタブ管理（`project_io`）、確認なし終了時の復旧ファイル書き出し・次回起動時の復元（`recovery`）、および動画（MP4）書き出しの共通処理・1コマラスタライズ・OS別エンコーダ入口（`video_export`）と macOS 版 AVFoundation H.264 エンコーダ実装（`video_export_macos`、`#[cfg(target_os = "macos")]`）。
      - 輪郭は点と制御点を平らに並べ、小数第3位までに丸めて保存する（形式の版 2）。

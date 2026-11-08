@@ -330,7 +330,10 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
 
         // 地図で切る：レイヤーごとに、そのレイヤーの生の図形を1つの地図にして矩形で切る（矩形の中の片と外の残りの境目が、
         // 両側でビットまで同じになる）。地図で切れないレイヤーは、今までどおり図形ごとに切る
-        let hidden_now: HashSet<u64> = floating.as_ref().map(|fl| fl.hidden.clone()).unwrap_or_default();
+        let hidden_now: HashSet<u64> = floating
+            .as_ref()
+            .map(|fl| fl.hidden.clone())
+            .unwrap_or_default();
         let mut splits: Vec<(u64, Option<crate::planar_map::MarqueeSplit>)> = Vec::new();
         for shape in &base_shapes {
             if !editable_lids.contains(&shape.layer_id)

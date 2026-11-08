@@ -3609,7 +3609,10 @@ fn merge_pieces_layer_by_layer(base_shapes: &mut Vec<FillShape>, pieces: Vec<Fil
     use crate::planar_map::{apply_shape_diff, place_pieces_diff, MapEditOutcome};
     let mut parts: Vec<(LayerId, Vec<u64>, Vec<FillShape>)> = Vec::new();
     for p in pieces {
-        match parts.iter_mut().find(|(lid, gp, _)| *lid == p.layer_id && *gp == p.group_path) {
+        match parts
+            .iter_mut()
+            .find(|(lid, gp, _)| *lid == p.layer_id && *gp == p.group_path)
+        {
             Some((_, _, layer_pieces)) => layer_pieces.push(p),
             None => parts.push((p.layer_id, p.group_path.clone(), vec![p])),
         }

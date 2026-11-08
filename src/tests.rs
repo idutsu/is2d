@@ -21444,7 +21444,10 @@ mod map_overlay {
     pub(super) struct Rng(pub(super) u64);
     impl Rng {
         pub(super) fn f(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
         }
     }
@@ -21469,8 +21472,16 @@ mod map_overlay {
             let mut x = 90.0;
             while x <= 510.0 {
                 let p = Point::new(x + 0.0137, y + 0.0173);
-                let ca = a.iter().rev().find(|s| s.contains_point(p)).map(|s| s.color);
-                let cb = b.iter().rev().find(|s| s.contains_point(p)).map(|s| s.color);
+                let ca = a
+                    .iter()
+                    .rev()
+                    .find(|s| s.contains_point(p))
+                    .map(|s| s.color);
+                let cb = b
+                    .iter()
+                    .rev()
+                    .find(|s| s.contains_point(p))
+                    .map(|s| s.color);
                 if ca != cb {
                     let near = a.iter().chain(b.iter()).any(|s| {
                         s.contours().any(|c| {
@@ -21495,7 +21506,11 @@ mod map_overlay {
     pub(super) fn native_scene(seed: u64, n: usize) -> PlanarMap {
         let mut r = Rng(seed);
         let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
-        let mut m = PlanarMap { nodes: Vec::new(), edges: Vec::new(), node_src: Vec::new() };
+        let mut m = PlanarMap {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            node_src: Vec::new(),
+        };
         for k in 0..n {
             let next = if k % 4 == 3 {
                 let p = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
@@ -21514,7 +21529,11 @@ mod map_overlay {
                 pts.push(p);
                 let radius = 3.0 + r.f() * 10.0;
                 let color = colors[(r.f() * 4.0) as usize % 4];
-                let stroke = build_smoothed_stroke_shapes_at_zoom(&generate_brush_outline_at_zoom(&pts, radius, 1.0), color, 1.0);
+                let stroke = build_smoothed_stroke_shapes_at_zoom(
+                    &generate_brush_outline_at_zoom(&pts, radius, 1.0),
+                    color,
+                    1.0,
+                );
                 let rule = MapRule::Paint(if k % 6 == 5 { None } else { Some(color) });
                 m.overlay(MapInput::Shapes(&stroke), rule)
             };
@@ -21527,9 +21546,20 @@ mod map_overlay {
 
     #[test]
     fn paint_square_over_square() {
-        let base = PlanarMap::from_faces(std::iter::once(&rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)));
+        let base = PlanarMap::from_faces(std::iter::once(&rect_shape(
+            100.0,
+            100.0,
+            300.0,
+            300.0,
+            Color32::RED,
+        )));
         let blue = rect_shape(200.0, 200.0, 400.0, 400.0, Color32::BLUE);
-        let m = base.overlay(MapInput::Shapes(std::slice::from_ref(&blue)), MapRule::Paint(Some(Color32::BLUE))).unwrap();
+        let m = base
+            .overlay(
+                MapInput::Shapes(std::slice::from_ref(&blue)),
+                MapRule::Paint(Some(Color32::BLUE)),
+            )
+            .unwrap();
         assert!(valid(&m));
         let (faces, _) = m.to_faces_checked(1, &[]);
         let at = |p: Point| faces.iter().find(|s| s.contains_point(p)).map(|s| s.color);
@@ -21538,21 +21568,52 @@ mod map_overlay {
         assert_eq!(at(Point::new(350.0, 350.0)), Some(Color32::BLUE));
         assert_eq!(at(Point::new(350.0, 150.0)), None);
         // 消しゴム
-        let erased = m.overlay(MapInput::Shapes(&[rect_shape(120.0, 120.0, 180.0, 180.0, Color32::WHITE)]), MapRule::Paint(None)).unwrap();
+        let erased = m
+            .overlay(
+                MapInput::Shapes(&[rect_shape(120.0, 120.0, 180.0, 180.0, Color32::WHITE)]),
+                MapRule::Paint(None),
+            )
+            .unwrap();
         let (faces, _) = erased.to_faces_checked(1, &[]);
-        assert_eq!(faces.iter().find(|s| s.contains_point(Point::new(150.0, 150.0))).map(|s| s.color), None);
-        assert_eq!(faces.iter().find(|s| s.contains_point(Point::new(110.0, 110.0))).map(|s| s.color), Some(Color32::RED));
+        assert_eq!(
+            faces
+                .iter()
+                .find(|s| s.contains_point(Point::new(150.0, 150.0)))
+                .map(|s| s.color),
+            None
+        );
+        assert_eq!(
+            faces
+                .iter()
+                .find(|s| s.contains_point(Point::new(110.0, 110.0)))
+                .map(|s| s.color),
+            Some(Color32::RED)
+        );
     }
 
     #[test]
     fn same_color_paint_merges_without_new_edges() {
-        let base = PlanarMap::from_faces(std::iter::once(&rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)));
+        let base = PlanarMap::from_faces(std::iter::once(&rect_shape(
+            100.0,
+            100.0,
+            300.0,
+            300.0,
+            Color32::RED,
+        )));
         let inner = rect_shape(150.0, 150.0, 250.0, 250.0, Color32::RED);
-        let m = base.overlay(MapInput::Shapes(std::slice::from_ref(&inner)), MapRule::Paint(Some(Color32::RED))).unwrap();
+        let m = base
+            .overlay(
+                MapInput::Shapes(std::slice::from_ref(&inner)),
+                MapRule::Paint(Some(Color32::RED)),
+            )
+            .unwrap();
         assert!(valid(&m));
         assert_eq!(m.edges.len(), base.edges.len());
         // 元の辺と元の図形の印がそのまま残る（図形を書き直さずに済む）
-        assert!(m.edges.iter().all(|e| e.left_src.is_some() || e.right_src.is_some()));
+        assert!(m
+            .edges
+            .iter()
+            .all(|e| e.left_src.is_some() || e.right_src.is_some()));
     }
 
     /// 矩形で中を取り出して空けたあと、そのまま上に置くと元の色に戻る
@@ -21560,11 +21621,23 @@ mod map_overlay {
     fn marquee_lift_and_drop_back() {
         let base = native_scene(1, 24);
         let (orig, _) = base.to_faces_checked(1, &[]);
-        let rect = PlanarMap::from_faces(std::iter::once(&rect_shape(180.0, 170.0, 330.0, 290.0, Color32::WHITE)));
-        let inside = base.overlay(MapInput::Map(&rect), MapRule::KeepInside).unwrap();
-        let rest = base.overlay(MapInput::Map(&rect), MapRule::Paint(None)).unwrap();
+        let rect = PlanarMap::from_faces(std::iter::once(&rect_shape(
+            180.0,
+            170.0,
+            330.0,
+            290.0,
+            Color32::WHITE,
+        )));
+        let inside = base
+            .overlay(MapInput::Map(&rect), MapRule::KeepInside)
+            .unwrap();
+        let rest = base
+            .overlay(MapInput::Map(&rect), MapRule::Paint(None))
+            .unwrap();
         assert!(valid(&inside) && valid(&rest));
-        let back = rest.overlay(MapInput::Map(&inside), MapRule::Overlay).unwrap();
+        let back = rest
+            .overlay(MapInput::Map(&inside), MapRule::Overlay)
+            .unwrap();
         assert!(valid(&back));
         let (faces, _) = back.to_faces_checked(1, &[]);
         assert_eq!(color_diff(&orig, &faces, 3.0), 0);
@@ -21576,13 +21649,19 @@ mod map_overlay {
         let base = native_scene(2, 24);
         let (faces, _) = base.to_faces_checked(1, &[]);
         let mut biggest: Vec<usize> = (0..faces.len()).collect();
-        biggest.sort_by_key(|&k| std::cmp::Reverse(faces[k].contours().map(|c| c.segments.len()).sum::<usize>()));
+        biggest.sort_by_key(|&k| {
+            std::cmp::Reverse(faces[k].contours().map(|c| c.segments.len()).sum::<usize>())
+        });
         for &k in biggest.iter().take(3) {
             for d in [0.0, 0.01, 0.049, 0.051, 0.07, 1.0] {
                 let piece = PlanarMap::from_faces(std::iter::once(&faces[k]));
-                let rest = base.overlay(MapInput::Map(&piece), MapRule::Paint(None)).unwrap();
+                let rest = base
+                    .overlay(MapInput::Map(&piece), MapRule::Paint(None))
+                    .unwrap();
                 let moved = piece.transformed(kurbo::Affine::translate((d, d * 0.5)));
-                let m = rest.overlay(MapInput::Map(&moved), MapRule::Overlay).unwrap();
+                let m = rest
+                    .overlay(MapInput::Map(&moved), MapRule::Overlay)
+                    .unwrap();
                 assert!(valid(&m), "面{k} ずらす量 {d}");
                 let mut expected = rest.to_faces_checked(1, &[]).0;
                 expected.extend(moved.to_faces_checked(1, &[]).0);
@@ -21610,8 +21689,21 @@ mod map_overlay {
     fn merge_degree2_skips_folding_merge() {
         use crate::planar_map::MapEdge;
         // A→V はまっすぐ、V→B はごく短く少し戻る（V は両側が同じ色の、2本だけがつながる頂点）
-        let (a, v, b, c) = (Point::new(0.0, 0.0), Point::new(10.0, 0.0), Point::new(9.999, 0.002), Point::new(0.0, 10.0));
-        let edge = |x: usize, y: usize, ctrl: Point| MapEdge { a: x, b: y, ctrl, left: Some(Color32::RED), right: None, left_src: None, right_src: None };
+        let (a, v, b, c) = (
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(9.999, 0.002),
+            Point::new(0.0, 10.0),
+        );
+        let edge = |x: usize, y: usize, ctrl: Point| MapEdge {
+            a: x,
+            b: y,
+            ctrl,
+            left: Some(Color32::RED),
+            right: None,
+            left_src: None,
+            right_src: None,
+        };
         let mut m = PlanarMap {
             nodes: vec![a, v, b, c],
             edges: vec![
@@ -21631,14 +21723,38 @@ mod map_overlay {
     /// ほぼ平行に並ぶ2本の曲線（0.01px 離れて長く並ぶ）は交わらず、交わる2本は交わると分かる
     #[test]
     fn quad_intersections_near_parallel() {
-        let a = QuadBez::new(Point::new(0.0, 0.0), Point::new(50.0, 30.0), Point::new(100.0, 0.0));
-        let b = QuadBez::new(Point::new(0.0, 0.01), Point::new(50.0, 30.01), Point::new(100.0, 0.01));
-        let mut m = PlanarMap { nodes: vec![a.p0, a.p2, b.p0, b.p2], edges: Vec::new(), node_src: vec![None; 4] };
-        let edge = |a, b, ctrl| crate::planar_map::MapEdge { a, b, ctrl, left: Some(Color32::RED), right: None, left_src: None, right_src: None };
+        let a = QuadBez::new(
+            Point::new(0.0, 0.0),
+            Point::new(50.0, 30.0),
+            Point::new(100.0, 0.0),
+        );
+        let b = QuadBez::new(
+            Point::new(0.0, 0.01),
+            Point::new(50.0, 30.01),
+            Point::new(100.0, 0.01),
+        );
+        let mut m = PlanarMap {
+            nodes: vec![a.p0, a.p2, b.p0, b.p2],
+            edges: Vec::new(),
+            node_src: vec![None; 4],
+        };
+        let edge = |a, b, ctrl| crate::planar_map::MapEdge {
+            a,
+            b,
+            ctrl,
+            left: Some(Color32::RED),
+            right: None,
+            left_src: None,
+            right_src: None,
+        };
         m.edges.push(edge(0, 1, a.p1));
         m.edges.push(edge(2, 3, b.p1));
         assert!(m.crossings_pub(&[0, 1]).is_empty());
-        let c = QuadBez::new(Point::new(0.0, 5.0), Point::new(50.0, 0.0), Point::new(100.0, 5.0));
+        let c = QuadBez::new(
+            Point::new(0.0, 5.0),
+            Point::new(50.0, 0.0),
+            Point::new(100.0, 5.0),
+        );
         m.nodes.extend([c.p0, c.p2]);
         m.edges.push(edge(4, 5, c.p1));
         assert!(!m.crossings_pub(&[2]).is_empty());
@@ -21647,19 +21763,44 @@ mod map_overlay {
     /// ほぼ重なった2本の辺（間がごく細い面）の上に重ねても壊れない
     #[test]
     fn overlay_across_hairline_lens() {
-        let mut m = PlanarMap::from_faces(std::iter::once(&rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)));
+        let mut m = PlanarMap::from_faces(std::iter::once(&rect_shape(
+            100.0,
+            100.0,
+            300.0,
+            300.0,
+            Color32::RED,
+        )));
         // 真ん中に、幅 0.00006px の黄色の細い面（同じ2頂点を結ぶ、ほぼ同じ2本の曲線）
         let (a, b) = (m.nodes.len(), m.nodes.len() + 1);
         m.nodes.push(Point::new(150.0, 150.0));
         m.nodes.push(Point::new(250.0, 200.0));
         let yellow = Color32::YELLOW;
         // 2本目（制御点が 0.00012 下）が左にあるので、間（1本目の左・2本目の右）が黄色
-        m.edges.push(crate::planar_map::MapEdge { a, b, ctrl: Point::new(200.0, 160.0), left: Some(yellow), right: Some(Color32::RED), left_src: None, right_src: None });
-        m.edges.push(crate::planar_map::MapEdge { a, b, ctrl: Point::new(200.0, 160.00012), left: Some(Color32::RED), right: Some(yellow), left_src: None, right_src: None });
+        m.edges.push(crate::planar_map::MapEdge {
+            a,
+            b,
+            ctrl: Point::new(200.0, 160.0),
+            left: Some(yellow),
+            right: Some(Color32::RED),
+            left_src: None,
+            right_src: None,
+        });
+        m.edges.push(crate::planar_map::MapEdge {
+            a,
+            b,
+            ctrl: Point::new(200.0, 160.00012),
+            left: Some(Color32::RED),
+            right: Some(yellow),
+            left_src: None,
+            right_src: None,
+        });
         m.node_src = vec![None; m.nodes.len()];
         assert!(valid(&m));
         let stroke = rect_shape(140.0, 140.0, 260.0, 175.0, Color32::BLUE);
-        let out = m.overlay(MapInput::Shapes(std::slice::from_ref(&stroke)), MapRule::Paint(Some(Color32::BLUE)));
+        let out = m.overlay(
+            MapInput::Shapes(std::slice::from_ref(&stroke)),
+            MapRule::Paint(Some(Color32::BLUE)),
+        );
         let out = out.expect("細い面にかかっても重ねられる");
         assert!(valid(&out));
     }
@@ -21685,7 +21826,11 @@ mod map_overlay {
         let colors = [Color32::RED, Color32::BLUE, Color32::GREEN];
         let mut r = Rng(5);
         for k in 0..24 {
-            app.tool.tool = if k % 5 == 4 { Tool::Eraser } else { Tool::Brush };
+            app.tool.tool = if k % 5 == 4 {
+                Tool::Eraser
+            } else {
+                Tool::Brush
+            };
             app.tool.brush_color = colors[k % 3];
             let y = 150.0 + (k % 6) as f64 * 0.051;
             let a = Point::new(100.0 + r.f() * 50.0, y + r.f() * 80.0);
@@ -21701,16 +21846,28 @@ mod map_overlay {
     fn brush_into_empty_area_goes_below_groups() {
         let mut app = Is2dApp::default();
         app.tool.brush_color = Color32::RED;
-        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&[Point::new(100.0, 100.0), Point::new(200.0, 100.0)], 10.0));
+        doc_actions::commit_raw_outline(
+            &mut app,
+            &generate_brush_outline(&[Point::new(100.0, 100.0), Point::new(200.0, 100.0)], 10.0),
+        );
         app.session.set_selected_indices(vec![0]);
         let gid = doc_actions::group_selected_shapes(&mut app).unwrap();
         canvas_tool::clear_selection(&mut app);
         app.tool.brush_color = Color32::BLUE;
-        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&[Point::new(100.0, 300.0), Point::new(200.0, 300.0)], 10.0));
+        doc_actions::commit_raw_outline(
+            &mut app,
+            &generate_brush_outline(&[Point::new(100.0, 300.0), Point::new(200.0, 300.0)], 10.0),
+        );
         let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
         let raw = shapes.iter().position(|s| s.group_path.is_empty()).unwrap();
-        let grouped = shapes.iter().position(|s| s.group_path == vec![gid]).unwrap();
-        assert!(raw < grouped, "生の図形（{raw}）がグループ（{grouped}）より下");
+        let grouped = shapes
+            .iter()
+            .position(|s| s.group_path == vec![gid])
+            .unwrap();
+        assert!(
+            raw < grouped,
+            "生の図形（{raw}）がグループ（{grouped}）より下"
+        );
     }
 
     /// バケツは、同じレイヤーの生の図形の線で囲まれた所を塗る。グループの図形は壁にしない（Animate と同じ）
@@ -21727,45 +21884,88 @@ mod map_overlay {
             .collect();
         doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&ring, 6.0));
         // 円環の中を横切る線を、同じレイヤーのグループとして置く
-        let mut shapes: Vec<FillShape> = app.doc.root.layers[0].keyframes[0].cel.shapes.as_ref().clone();
-        for mut g in make_stroke(Point::new(200.0, 120.0), Point::new(200.0, 280.0), 6.0, Color32::GREEN) {
+        let mut shapes: Vec<FillShape> = app.doc.root.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .as_ref()
+            .clone();
+        for mut g in make_stroke(
+            Point::new(200.0, 120.0),
+            Point::new(200.0, 280.0),
+            6.0,
+            Color32::GREEN,
+        ) {
             g.group_path = vec![77];
             shapes.push(g);
         }
         put_cel_shapes(&mut app, 0, 0, shapes);
         app.tool.brush_color = Color32::RED;
-        assert!(doc_actions::bucket_fill_at(&mut app, Point::new(170.0, 200.0)));
-        let red: Vec<&FillShape> = app.doc.root.layers[0].keyframes[0].cel.shapes.iter().filter(|s| s.color == Color32::RED).collect();
+        assert!(doc_actions::bucket_fill_at(
+            &mut app,
+            Point::new(170.0, 200.0)
+        ));
+        let red: Vec<&FillShape> = app.doc.root.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .iter()
+            .filter(|s| s.color == Color32::RED)
+            .collect();
         assert_eq!(red.len(), 1);
-        assert!(red[0].contains_point(Point::new(230.0, 200.0)), "グループの線は壁にならない");
-        assert!(!red[0].contains_point(Point::new(100.0, 200.0)), "円環の外は塗らない");
+        assert!(
+            red[0].contains_point(Point::new(230.0, 200.0)),
+            "グループの線は壁にならない"
+        );
+        assert!(
+            !red[0].contains_point(Point::new(100.0, 200.0)),
+            "円環の外は塗らない"
+        );
         assert!(layer_map_valid(&app, 0));
     }
-
 
     /// 3色がとなり合う絵（ブラシで描いた3本の太い線が重なる）を作る
     fn three_band_app() -> Is2dApp {
         let mut app = Is2dApp::default();
-        for (y, c) in [(180.0, Color32::RED), (200.0, Color32::BLUE), (220.0, Color32::GREEN)] {
+        for (y, c) in [
+            (180.0, Color32::RED),
+            (200.0, Color32::BLUE),
+            (220.0, Color32::GREEN),
+        ] {
             app.tool.brush_color = c;
-            doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&[Point::new(100.0, y), Point::new(300.0, y + 3.0)], 14.0));
+            doc_actions::commit_raw_outline(
+                &mut app,
+                &generate_brush_outline(&[Point::new(100.0, y), Point::new(300.0, y + 3.0)], 14.0),
+            );
         }
         app
     }
 
     /// 画面の点の色（いちばん上の図形の色）
     fn color_at(app: &Is2dApp, p: Point) -> Option<Color32> {
-        app.scene().iter().rev().find(|s| s.contains_point(p)).map(|s| s.color)
+        app.scene()
+            .iter()
+            .rev()
+            .find(|s| s.contains_point(p))
+            .map(|s| s.color)
     }
 
     /// 3色にまたがる矩形で選び、ほんの少しずらす・回す・拡大して離しても、レイヤーの地図は壊れず、片はちゃんと動く
     #[test]
     fn marquee_move_rotate_scale_keeps_layer_map_valid() {
-        let probes = [Point::new(160.0, 182.0), Point::new(160.0, 201.0), Point::new(160.0, 221.0)];
+        let probes = [
+            Point::new(160.0, 182.0),
+            Point::new(160.0, 201.0),
+            Point::new(160.0, 221.0),
+        ];
         for (k, action) in [
-            doc_actions::Action::MoveSelected { delta: KVec2::new(0.051, 0.0) },
-            doc_actions::Action::MoveSelected { delta: KVec2::new(0.0, 0.01) },
-            doc_actions::Action::MoveSelected { delta: KVec2::new(30.0, 0.0) },
+            doc_actions::Action::MoveSelected {
+                delta: KVec2::new(0.051, 0.0),
+            },
+            doc_actions::Action::MoveSelected {
+                delta: KVec2::new(0.0, 0.01),
+            },
+            doc_actions::Action::MoveSelected {
+                delta: KVec2::new(30.0, 0.0),
+            },
             doc_actions::Action::RotateSelection { angle_rad: 0.003 },
             doc_actions::Action::ScaleSelection { sx: 1.02, sy: 1.02 },
         ]
@@ -21774,20 +21974,29 @@ mod map_overlay {
         {
             let mut app = three_band_app();
             let before: Vec<Option<Color32>> = probes.iter().map(|p| color_at(&app, *p)).collect();
-            select_ops::apply_marquee_selection(&mut app, Point::new(140.0, 150.0), Point::new(200.0, 250.0), false);
+            select_ops::apply_marquee_selection(
+                &mut app,
+                Point::new(140.0, 150.0),
+                Point::new(200.0, 250.0),
+                false,
+            );
             assert!(!app.session.selection.is_empty(), "{k}");
             assert!(doc_actions::apply(&mut app, action));
             canvas_tool::clear_selection(&mut app);
             assert!(layer_map_valid(&app, 0), "{k}");
             if k < 2 {
                 // ごくわずかに動かしただけなので、色はそのまま
-                let after: Vec<Option<Color32>> = probes.iter().map(|p| color_at(&app, *p)).collect();
+                let after: Vec<Option<Color32>> =
+                    probes.iter().map(|p| color_at(&app, *p)).collect();
                 assert_eq!(before, after, "{k}");
             }
             if k == 2 {
                 // 30px 右へ動いた（矩形の左の所は空き、右へ 30px の所に片がある）
                 assert_eq!(color_at(&app, Point::new(150.0, 201.0)), None);
-                assert_eq!(color_at(&app, Point::new(180.0, 201.0)), Some(Color32::BLUE));
+                assert_eq!(
+                    color_at(&app, Point::new(180.0, 201.0)),
+                    Some(Color32::BLUE)
+                );
             }
         }
     }
@@ -21796,10 +22005,25 @@ mod map_overlay {
     #[test]
     fn marquee_without_moving_restores_original_shapes() {
         let mut app = three_band_app();
-        let before: Vec<(u64, Color32)> = app.doc.root.layers[0].keyframes[0].cel.shapes.iter().map(|s| (s.shape_id, s.color)).collect();
-        select_ops::apply_marquee_selection(&mut app, Point::new(140.0, 150.0), Point::new(200.0, 250.0), false);
+        let before: Vec<(u64, Color32)> = app.doc.root.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .iter()
+            .map(|s| (s.shape_id, s.color))
+            .collect();
+        select_ops::apply_marquee_selection(
+            &mut app,
+            Point::new(140.0, 150.0),
+            Point::new(200.0, 250.0),
+            false,
+        );
         canvas_tool::clear_selection(&mut app);
-        let after: Vec<(u64, Color32)> = app.doc.root.layers[0].keyframes[0].cel.shapes.iter().map(|s| (s.shape_id, s.color)).collect();
+        let after: Vec<(u64, Color32)> = app.doc.root.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .iter()
+            .map(|s| (s.shape_id, s.color))
+            .collect();
         assert_eq!(before, after);
     }
 
@@ -21807,15 +22031,208 @@ mod map_overlay {
     #[test]
     fn paste_over_existing_shapes_keeps_layer_map_valid() {
         let mut app = three_band_app();
-        select_ops::apply_marquee_selection(&mut app, Point::new(140.0, 150.0), Point::new(200.0, 250.0), false);
+        select_ops::apply_marquee_selection(
+            &mut app,
+            Point::new(140.0, 150.0),
+            Point::new(200.0, 250.0),
+            false,
+        );
         assert!(doc_actions::copy_selected_shapes(&mut app));
         canvas_tool::clear_selection(&mut app);
         assert!(doc_actions::paste_clipboard(&mut app, true));
-        assert!(doc_actions::apply(&mut app, doc_actions::Action::MoveSelected { delta: KVec2::new(37.0, 9.0) }));
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::MoveSelected {
+                delta: KVec2::new(37.0, 9.0)
+            }
+        ));
         canvas_tool::clear_selection(&mut app);
         assert!(layer_map_valid(&app, 0));
         // 貼り付けた片の上の色（元の 160,201 の青が 197,210 に来る）
-        assert_eq!(color_at(&app, Point::new(197.0, 210.0)), Some(Color32::BLUE));
+        assert_eq!(
+            color_at(&app, Point::new(197.0, 210.0)),
+            Some(Color32::BLUE)
+        );
     }
 
+    /// 強さの試し（時間がかかるので、ふだんは流さない）：地図だけで描いた絵の面を、ずらして置く。
+    /// 環境変数 PROBE_SEEDS（例 "1,2,3"）・PROBE_FACES（面の数、ふだん 60）
+    #[test]
+    #[ignore]
+    fn probe_move_faces() {
+        let offsets = [0.0, 0.01, 0.03, 0.049, 0.051, 0.07, 0.2, 1.0, 10.0, 30.0];
+        let seeds: Vec<u64> = std::env::var("PROBE_SEEDS")
+            .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
+            .unwrap_or(vec![1, 2, 3]);
+        let nfaces: usize = std::env::var("PROBE_FACES")
+            .map(|v| v.parse().unwrap())
+            .unwrap_or(60);
+        let (mut total, mut refused, mut broken, mut diffs, mut t_sum, mut t_max) =
+            (0, 0, 0, 0, 0f64, 0f64);
+        for seed in seeds {
+            let base = native_scene(seed, 48);
+            let (faces, _) = base.to_faces_checked(1, &[]);
+            for k in 0..faces.len().min(nfaces) {
+                for (oi, &o) in offsets.iter().enumerate() {
+                    let d = if oi % 2 == 0 { (o, 0.0) } else { (0.0, o) };
+                    let piece = PlanarMap::from_faces(std::iter::once(&faces[k]));
+                    let t = std::time::Instant::now();
+                    let rest = base.overlay(MapInput::Map(&piece), MapRule::Paint(None));
+                    let moved = piece.transformed(kurbo::Affine::translate(d));
+                    let m = rest
+                        .as_ref()
+                        .and_then(|r| r.overlay(MapInput::Map(&moved), MapRule::Overlay));
+                    let el = t.elapsed().as_secs_f64() * 1e3;
+                    total += 1;
+                    t_sum += el;
+                    t_max = t_max.max(el);
+                    let (Some(rest), Some(m)) = (rest, m) else {
+                        refused += 1;
+                        continue;
+                    };
+                    if !valid(&m) {
+                        broken += 1;
+                    }
+                    if k % 6 == 0 {
+                        let mut expected = rest.to_faces_checked(1, &[]).0;
+                        expected.extend(moved.to_faces_checked(1, &[]).0);
+                        if color_diff(&expected, &m.to_faces_checked(1, &[]).0, 1.0) > 0 {
+                            diffs += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("PROBE 面をずらして置く {total} 回（持ち上げと置くの2回の重ね）｜取り消し {refused}｜壊れた地図 {broken}｜色の違う回 {diffs}｜1回 平均 {:.1}ms・最大 {t_max:.1}ms", t_sum / total as f64);
+    }
+
+    /// 強さの試し（ふだんは流さない）：アプリの操作（ブラシ・消しゴム・バケツ・矩形で選んで動かす・回す・貼り付け・ドラッグ）を
+    /// ランダムに続け、毎回レイヤーの地図が壊れていないか（地図で行えずに今までのやり方へ回ると、境目がずれて壊れる）を見る。
+    /// 環境変数 PROBE_SEEDS・PROBE_STEPS（ふだん 200）
+    #[test]
+    #[ignore]
+    fn probe_random_app_ops() {
+        let seeds: Vec<u64> = std::env::var("PROBE_SEEDS")
+            .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
+            .unwrap_or(vec![11, 12, 13, 14]);
+        let steps: usize = std::env::var("PROBE_STEPS")
+            .map(|v| v.parse().unwrap())
+            .unwrap_or(200);
+        let colors = [
+            Color32::RED,
+            Color32::BLUE,
+            Color32::GREEN,
+            Color32::BLACK,
+            Color32::YELLOW,
+        ];
+        let names = [
+            "ブラシ",
+            "消しゴム",
+            "バケツ",
+            "矩形で動かす",
+            "矩形で回す",
+            "貼り付け",
+            "ドラッグ",
+        ];
+        for seed in seeds {
+            let mut app = Is2dApp::default();
+            let mut r = Rng(seed);
+            let mut counts = [0usize; 7];
+            let mut t_max = [0f64; 7];
+            let mut first_bad: Option<String> = None;
+            for step in 0..steps {
+                let kind = (r.f() * 7.0) as usize % 7;
+                let rp = |r: &mut Rng| Point::new(120.0 + r.f() * 360.0, 120.0 + r.f() * 360.0);
+                let t = std::time::Instant::now();
+                match kind {
+                    0 | 1 => {
+                        app.tool.tool = if kind == 0 { Tool::Brush } else { Tool::Eraser };
+                        app.tool.brush_color = colors[(r.f() * 5.0) as usize % 5];
+                        let n = 2 + (r.f() * 4.0) as usize;
+                        let pts: Vec<Point> = (0..n).map(|_| rp(&mut r)).collect();
+                        let mut dense = Vec::new();
+                        for w in pts.windows(2) {
+                            for j in 0..10 {
+                                dense.push(w[0].lerp(w[1], j as f64 / 10.0));
+                            }
+                        }
+                        dense.push(*pts.last().unwrap());
+                        doc_actions::commit_raw_outline(
+                            &mut app,
+                            &generate_brush_outline(&dense, 3.0 + r.f() * 12.0),
+                        );
+                        app.tool.tool = Tool::Brush;
+                    }
+                    2 => {
+                        app.tool.brush_color = colors[(r.f() * 5.0) as usize % 5];
+                        let _ = doc_actions::bucket_fill_at(&mut app, rp(&mut r));
+                    }
+                    3 | 4 => {
+                        let a = rp(&mut r);
+                        let b = a + KVec2::new(20.0 + r.f() * 120.0, 20.0 + r.f() * 120.0);
+                        select_ops::apply_marquee_selection(&mut app, a, b, false);
+                        if !app.session.selection.is_empty() {
+                            let action = if kind == 3 {
+                                let o =
+                                    [0.0, 0.01, 0.051, 0.2, 1.0, 15.0][(r.f() * 6.0) as usize % 6];
+                                doc_actions::Action::MoveSelected {
+                                    delta: KVec2::new(o, o * 0.5),
+                                }
+                            } else {
+                                doc_actions::Action::RotateSelection {
+                                    angle_rad: (r.f() - 0.5) * 0.4,
+                                }
+                            };
+                            let _ = doc_actions::apply(&mut app, action);
+                        }
+                        canvas_tool::clear_selection(&mut app);
+                    }
+                    5 => {
+                        let a = rp(&mut r);
+                        select_ops::apply_marquee_selection(
+                            &mut app,
+                            a,
+                            a + KVec2::new(80.0, 80.0),
+                            false,
+                        );
+                        if doc_actions::copy_selected_shapes(&mut app) {
+                            canvas_tool::clear_selection(&mut app);
+                            if doc_actions::paste_clipboard(&mut app, true) {
+                                let _ = doc_actions::apply(
+                                    &mut app,
+                                    doc_actions::Action::MoveSelected {
+                                        delta: KVec2::new(r.f() * 40.0 - 20.0, r.f() * 40.0 - 20.0),
+                                    },
+                                );
+                            }
+                        }
+                        canvas_tool::clear_selection(&mut app);
+                    }
+                    _ => {
+                        let a = rp(&mut r);
+                        let to = a + KVec2::new(r.f() * 30.0 - 15.0, r.f() * 30.0 - 15.0);
+                        let _ = doc_actions::apply(
+                            &mut app,
+                            doc_actions::Action::PullEdgeFromTo { from: a, to },
+                        );
+                    }
+                }
+                let el = t.elapsed().as_secs_f64() * 1e3;
+                counts[kind] += 1;
+                t_max[kind] = t_max[kind].max(el);
+                if first_bad.is_none() && !layer_map_valid(&app, 0) {
+                    first_bad = Some(format!("{step} 回目（{}）", names[kind]));
+                }
+            }
+            let ts: Vec<String> = (0..7)
+                .map(|k| format!("{} {} 回・最大 {:.0}ms", names[k], counts[k], t_max[k]))
+                .collect();
+            eprintln!(
+                "PROBE 種{seed}：{}｜地図が最初に壊れた所 {:?}｜図形 {}",
+                ts.join("、"),
+                first_bad,
+                app.doc.root.layers[0].keyframes[0].cel.shapes.len()
+            );
+        }
+    }
 }

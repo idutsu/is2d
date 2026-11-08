@@ -638,7 +638,9 @@ impl PlanarMap {
     /// `orig` が両方 `true` の組（元の地図のまま残った辺どうし。元の地図で交わっていない）は調べない
     fn crossings_grid(&self, check: &[usize], orig: &[bool]) -> Vec<(usize, f64, usize, f64)> {
         const CELL: f64 = 8.0;
-        let boxes: Vec<KRect> = (0..self.edges.len()).map(|e| self.quad(e).bounding_box()).collect();
+        let boxes: Vec<KRect> = (0..self.edges.len())
+            .map(|e| self.quad(e).bounding_box())
+            .collect();
         let cells = |r: &KRect| {
             let (x0, x1) = ((r.x0 / CELL).floor() as i64, (r.x1 / CELL).floor() as i64);
             let (y0, y1) = ((r.y0 / CELL).floor() as i64, (r.y1 / CELL).floor() as i64);
@@ -661,14 +663,20 @@ impl PlanarMap {
             for c in cells(&boxes[e]) {
                 let Some(list) = grid.get(&c) else { continue };
                 for &f in list {
-                    if f == e || pos[f] < mi || seen[f] == mi || !rects_overlap(boxes[e], boxes[f]) {
+                    if f == e || pos[f] < mi || seen[f] == mi || !rects_overlap(boxes[e], boxes[f])
+                    {
                         continue;
                     }
                     seen[f] = mi;
                     if orig[e] && orig[f] {
                         continue;
                     }
-                    let (ea, eb, fa, fb) = (self.edges[e].a, self.edges[e].b, self.edges[f].a, self.edges[f].b);
+                    let (ea, eb, fa, fb) = (
+                        self.edges[e].a,
+                        self.edges[e].b,
+                        self.edges[f].a,
+                        self.edges[f].b,
+                    );
                     let shared: Vec<Point> = [ea, eb]
                         .into_iter()
                         .filter(|v| *v == fa || *v == fb)
@@ -1838,7 +1846,9 @@ pub(crate) fn apply_shape_diff(
     let at = shapes.iter().position(|s| removed.contains(&s.shape_id));
     shapes.retain(|s| !removed.contains(&s.shape_id));
     let at = at
-        .unwrap_or_else(|| crate::vector_boolean::raw_scope_insert_index(shapes, layer_id, group_path))
+        .unwrap_or_else(|| {
+            crate::vector_boolean::raw_scope_insert_index(shapes, layer_id, group_path)
+        })
         .min(shapes.len());
     shapes.splice(at..at, added);
 }
@@ -1879,9 +1889,22 @@ pub(crate) fn marquee_split(
     let (removed_rest, remainder) = rewrite_shapes(&map, &keys, &rest, &own, layer_id, group_path);
     let (removed_inside, pieces) = rewrite_shapes(&map, &keys, &inside, &own, layer_id, group_path);
     // 残りから消えて、中では変わらない図形が、丸ごと中にある図形。どちらでも変わった図形が、切れた図形
-    let hidden: Vec<ShapeId> = removed_rest.iter().copied().filter(|id| removed_inside.contains(id)).collect();
-    let whole: Vec<ShapeId> = removed_rest.iter().copied().filter(|id| !removed_inside.contains(id)).collect();
-    Some(MarqueeSplit { hidden, whole, remainder, pieces })
+    let hidden: Vec<ShapeId> = removed_rest
+        .iter()
+        .copied()
+        .filter(|id| removed_inside.contains(id))
+        .collect();
+    let whole: Vec<ShapeId> = removed_rest
+        .iter()
+        .copied()
+        .filter(|id| !removed_inside.contains(id))
+        .collect();
+    Some(MarqueeSplit {
+        hidden,
+        whole,
+        remainder,
+        pieces,
+    })
 }
 
 /// 持ち上げた片 `pieces`（同じ地図から作った、重ならない片）を、図形の並び `shapes` のレイヤー `layer_id`・階層 `group_path` の
@@ -1897,7 +1920,9 @@ pub(crate) fn place_pieces_diff(
     let all: Vec<usize> = (0..piece_map.edges.len()).collect();
     if piece_map.cycle_check() != (0, 0)
         || piece_map.faces().1 != 0
-        || !piece_map.crossings_grid(&all, &vec![false; all.len()]).is_empty()
+        || !piece_map
+            .crossings_grid(&all, &vec![false; all.len()])
+            .is_empty()
     {
         // 片どうしが重なっている・境目がそろっていない（地図にならない）
         return MapEditOutcome::Refused;
@@ -1914,13 +1939,26 @@ pub(crate) fn place_pieces_diff(
         .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path))
         .collect();
     let near = own.iter().any(|s| {
-        rects_overlap(s.bounding_box(), area) && s.contours().any(|c| c.segments.iter().any(|q| rects_overlap(q.bounding_box(), area)))
+        rects_overlap(s.bounding_box(), area)
+            && s.contours().any(|c| {
+                c.segments
+                    .iter()
+                    .any(|q| rects_overlap(q.bounding_box(), area))
+            })
     });
     // 置く所（外接矩形）に線が1本も無ければ、そこは1つの面の中か、何も無い所。真ん中の点が何も無い所なら、そのまま足す
     if !near && !own.iter().any(|s| s.contains_point(area.center())) {
-        return MapEditOutcome::Changed(Vec::new(), pieces.iter().map(|p| p.clone().with_scope(layer_id, group_path)).collect());
+        return MapEditOutcome::Changed(
+            Vec::new(),
+            pieces
+                .iter()
+                .map(|p| p.clone().with_scope(layer_id, group_path))
+                .collect(),
+        );
     }
-    map_edit_diff(shapes, layer_id, group_path, |m| m.overlay(MapInput::Map(&piece_map), MapRule::Overlay))
+    map_edit_diff(shapes, layer_id, group_path, |m| {
+        m.overlay(MapInput::Map(&piece_map), MapRule::Overlay)
+    })
 }
 
 /// 境目がビットまで同じ図形どうし（同じ地図から作った片）の、同じ色でとなり合うものを1つにまとめる。
@@ -1928,7 +1966,10 @@ pub(crate) fn place_pieces_diff(
 pub(crate) fn merge_touching_faces(shapes: Vec<FillShape>) -> Vec<FillShape> {
     let mut groups: Vec<(LayerId, Vec<u64>, Vec<FillShape>)> = Vec::new();
     for s in shapes {
-        match groups.iter_mut().find(|g| g.0 == s.layer_id && g.1 == s.group_path) {
+        match groups
+            .iter_mut()
+            .find(|g| g.0 == s.layer_id && g.1 == s.group_path)
+        {
             Some(g) => g.2.push(s),
             None => groups.push((s.layer_id, s.group_path.clone(), vec![s])),
         }
@@ -1941,7 +1982,10 @@ pub(crate) fn merge_touching_faces(shapes: Vec<FillShape>) -> Vec<FillShape> {
         }
         let map = PlanarMap::from_faces(list.iter());
         let (map_faces, broken) = map.faces();
-        let faces: Vec<FillShape> = map_faces.iter().map(|f| map.face_shape(f, layer_id, &group_path)).collect();
+        let faces: Vec<FillShape> = map_faces
+            .iter()
+            .map(|f| map.face_shape(f, layer_id, &group_path))
+            .collect();
         let all: Vec<usize> = (0..map.edges.len()).collect();
         if broken > 0
             || map.cycle_check() != (0, 0)
@@ -1953,7 +1997,11 @@ pub(crate) fn merge_touching_faces(shapes: Vec<FillShape>) -> Vec<FillShape> {
         }
         // 形の変わらない片は、元の図形（番号）をそのまま使う
         for f in faces {
-            match list.iter().find(|s| s.color == f.color && s.exterior.segments == f.exterior.segments && s.holes.len() == f.holes.len()) {
+            match list.iter().find(|s| {
+                s.color == f.color
+                    && s.exterior.segments == f.exterior.segments
+                    && s.holes.len() == f.holes.len()
+            }) {
                 Some(orig) => out.push(orig.clone()),
                 None => out.push(f),
             }
@@ -1993,7 +2041,8 @@ pub(crate) fn map_edit_diff(
     let next_keys: HashSet<[u64; 8]> = (0..next.edges.len()).map(|e| edge_key(&next, e)).collect();
     let broken_touched = map.face_cycles().iter().any(|c| {
         let broken = c.iter().any(|h| h.0 == usize::MAX)
-            || c.windows(2).any(|w| map.side_color(w[0]) != map.side_color(w[1]));
+            || c.windows(2)
+                .any(|w| map.side_color(w[0]) != map.side_color(w[1]));
         broken
             && c.iter()
                 .any(|h| h.0 != usize::MAX && !next_keys.contains(&edge_key(&map, h.0)))
@@ -2099,7 +2148,11 @@ impl i_overlay9::core::edge_data::OverlayEdgeData for ProvId {
     fn reversed(self, store: &mut ProvStore) -> Self {
         let v = store.0[self.0 as usize]
             .iter()
-            .map(|p| Prov { src: p.src, t0: p.t1, t1: p.t0 })
+            .map(|p| Prov {
+                src: p.src,
+                t0: p.t1,
+                t1: p.t0,
+            })
             .collect();
         store.push(v)
     }
@@ -2119,8 +2172,22 @@ impl i_overlay9::core::edge_data::OverlayEdgeData for ProvId {
         };
         let src = store.0[self.0 as usize].clone();
         let mid = |p: &Prov| p.t0 + (p.t1 - p.t0) * f;
-        let first = src.iter().map(|p| Prov { src: p.src, t0: p.t0, t1: mid(p) }).collect();
-        let second = src.iter().map(|p| Prov { src: p.src, t0: mid(p), t1: p.t1 }).collect();
+        let first = src
+            .iter()
+            .map(|p| Prov {
+                src: p.src,
+                t0: p.t0,
+                t1: mid(p),
+            })
+            .collect();
+        let second = src
+            .iter()
+            .map(|p| Prov {
+                src: p.src,
+                t0: mid(p),
+                t1: p.t1,
+            })
+            .collect();
         (store.push(first), store.push(second))
     }
 
@@ -2161,7 +2228,13 @@ fn flatten_with_t(q: &QuadBez, tol: f64) -> Vec<(Point, f64)> {
 
 /// 整数の向きを、角度の順（x 軸の正の向きから、面積の式で正の回り方）に比べる
 fn cmp_dir(a: (i64, i64), b: (i64, i64)) -> std::cmp::Ordering {
-    let half = |d: (i64, i64)| if d.1 > 0 || (d.1 == 0 && d.0 > 0) { 0u8 } else { 1 };
+    let half = |d: (i64, i64)| {
+        if d.1 > 0 || (d.1 == 0 && d.0 > 0) {
+            0u8
+        } else {
+            1
+        }
+    };
     half(a).cmp(&half(b)).then_with(|| {
         let c = a.0 as i128 * b.1 as i128 - a.1 as i128 * b.0 as i128;
         0i128.cmp(&c)
@@ -2334,7 +2407,11 @@ impl PlanarMap {
         let mut ov: EdgeOverlay<i32, ProvId> = EdgeOverlay::new(srcs.len() * 8);
         for (si, (q, kind)) in srcs.iter().enumerate() {
             let old = matches!(kind, OverlaySrc::Old(_));
-            let st = if old { ShapeType::Subject } else { ShapeType::Clip };
+            let st = if old {
+                ShapeType::Subject
+            } else {
+                ShapeType::Clip
+            };
             let pts = flatten_with_t(q, FLAT_TOL);
             let mut prev = (to_int(pts[0].0)?, pts[0].1);
             for &(p, t) in &pts[1..] {
@@ -2349,7 +2426,11 @@ impl PlanarMap {
                 } else {
                     (prev.0, ip, prev.1, t)
                 };
-                let id = ov.data_store_mut().push(vec![Prov { src: si as u32, t0, t1 }]);
+                let id = ov.data_store_mut().push(vec![Prov {
+                    src: si as u32,
+                    t0,
+                    t1,
+                }]);
                 ov.add_edge(InputEdge { a, b, data: id }, st);
                 prev = (ip, t);
             }
@@ -2500,11 +2581,12 @@ impl PlanarMap {
         };
         let mut old_regions: Option<Vec<(Color32, BezPath)>> = None;
         let mut new_regions: Option<Vec<(Color32, BezPath)>> = None;
-        let mut old_fallback = |q: Point| {
-            Self::color_in(old_regions.get_or_insert_with(|| self.color_regions()), q)
-        };
+        let mut old_fallback =
+            |q: Point| Self::color_in(old_regions.get_or_insert_with(|| self.color_regions()), q);
         let mut new_fallback = |q: Point| match input {
-            MapInput::Map(pm) => Self::color_in(new_regions.get_or_insert_with(|| pm.color_regions()), q),
+            MapInput::Map(pm) => {
+                Self::color_in(new_regions.get_or_insert_with(|| pm.color_regions()), q)
+            }
             MapInput::Shapes(_) => None,
         };
         let (mut old_memo, mut new_memo) = (HashMap::new(), HashMap::new());
@@ -2517,7 +2599,14 @@ impl PlanarMap {
                 let (inside, p) = match input {
                     MapInput::Shapes(_) => {
                         let f = pieces[k].fill;
-                        (if fwd { f & CLIP_LEFT != 0 } else { f & CLIP_RIGHT != 0 }, None)
+                        (
+                            if fwd {
+                                f & CLIP_LEFT != 0
+                            } else {
+                                f & CLIP_RIGHT != 0
+                            },
+                            None,
+                        )
                     }
                     MapInput::Map(_) => {
                         let c = walk((k, fwd), &new_of, &mut new_memo, &mut new_fallback);
@@ -2589,7 +2678,11 @@ impl PlanarMap {
             let s_src = main_src(start).src;
             for forward in [true, false] {
                 loop {
-                    let cur = if forward { *chain.back().unwrap() } else { *chain.front().unwrap() };
+                    let cur = if forward {
+                        *chain.back().unwrap()
+                    } else {
+                        *chain.front().unwrap()
+                    };
                     let (pa, pb, ta, tb) = piece_ends(&cur);
                     let (end, t_end) = if forward { (pb, tb) } else { (pa, ta) };
                     let deg = at.get(&end).map_or(0, |v| v.len())
@@ -2634,7 +2727,16 @@ impl PlanarMap {
                         (ed.right, ed.left, ed.right_src, ed.left_src)
                     };
                     whole_old.insert(edges.len());
-                    restored.insert(edges.len(), chain.iter().map(|c| { let (a, b, ..) = piece_ends(c); (a, b) }).collect());
+                    restored.insert(
+                        edges.len(),
+                        chain
+                            .iter()
+                            .map(|c| {
+                                let (a, b, ..) = piece_ends(c);
+                                (a, b)
+                            })
+                            .collect(),
+                    );
                     edges.push(MapEdge {
                         a: n0,
                         b: n1,
@@ -2667,8 +2769,25 @@ impl PlanarMap {
                 .map(|sub| sub.p1);
             match ctrl {
                 Some(ctrl) => {
-                    restored.insert(edges.len(), chain.iter().map(|c| { let (a, b, ..) = piece_ends(c); (a, b) }).collect());
-                    edges.push(MapEdge { a: n0, b: n1, ctrl, left: sl, right: sr, left_src: None, right_src: None });
+                    restored.insert(
+                        edges.len(),
+                        chain
+                            .iter()
+                            .map(|c| {
+                                let (a, b, ..) = piece_ends(c);
+                                (a, b)
+                            })
+                            .collect(),
+                    );
+                    edges.push(MapEdge {
+                        a: n0,
+                        b: n1,
+                        ctrl,
+                        left: sl,
+                        right: sr,
+                        left_src: None,
+                        right_src: None,
+                    });
                 }
                 None => {
                     for c in &chain {
@@ -2686,7 +2805,11 @@ impl PlanarMap {
                 }
             }
         }
-        let mut m = PlanarMap { node_src: vec![None; nodes.len()], nodes, edges };
+        let mut m = PlanarMap {
+            node_src: vec![None; nodes.len()],
+            nodes,
+            edges,
+        };
 
         // 7. 当て直した曲線は、折れ線から最大 4 × FLAT_TOL ずれるので、ほかの辺と交わったり、細い面で左右が入れ替わったり
         //    することがある。そうなった辺は折れ線のまま（短い直線の辺）にする。折れ線どうしは交わらない（i_overlay の切り分けそのもの）
@@ -2703,10 +2826,20 @@ impl PlanarMap {
                            e: usize,
                            restored: &mut HashMap<usize, Vec<(usize, usize)>>,
                            near_untouched: &mut Vec<usize>| {
-            let Some(segs) = restored.remove(&e) else { return };
+            let Some(segs) = restored.remove(&e) else {
+                return;
+            };
             let (l, r) = (m.edges[e].left, m.edges[e].right);
             for (j, &(a, b)) in segs.iter().enumerate() {
-                let ed = MapEdge { a, b, ctrl: m.nodes[a].midpoint(m.nodes[b]), left: l, right: r, left_src: None, right_src: None };
+                let ed = MapEdge {
+                    a,
+                    b,
+                    ctrl: m.nodes[a].midpoint(m.nodes[b]),
+                    left: l,
+                    right: r,
+                    left_src: None,
+                    right_src: None,
+                };
                 let idx = if j == 0 {
                     m.edges[e] = ed;
                     e
@@ -2719,11 +2852,17 @@ impl PlanarMap {
                 }
             }
         };
-        let check_list = |restored: &HashMap<usize, Vec<(usize, usize)>>, near_untouched: &[usize], len: usize| {
+        let check_list = |restored: &HashMap<usize, Vec<(usize, usize)>>,
+                          near_untouched: &[usize],
+                          len: usize| {
             let orig: Vec<bool> = (0..len)
                 .map(|e| e < n_untouched || (whole_old.contains(&e) && restored.contains_key(&e)))
                 .collect();
-            let mut check: Vec<usize> = restored.keys().copied().chain(near_untouched.iter().copied()).collect();
+            let mut check: Vec<usize> = restored
+                .keys()
+                .copied()
+                .chain(near_untouched.iter().copied())
+                .collect();
             check.sort_unstable();
             check.dedup();
             (check, orig)
@@ -2751,9 +2890,14 @@ impl PlanarMap {
             let mut hit: Vec<usize> = Vec::new();
             for c in m.face_cycles() {
                 let bad = c.iter().any(|h| h.0 == usize::MAX)
-                    || c.windows(2).any(|w| m.side_color(w[0]) != m.side_color(w[1]));
+                    || c.windows(2)
+                        .any(|w| m.side_color(w[0]) != m.side_color(w[1]));
                 if bad {
-                    hit.extend(c.iter().filter(|h| h.0 != usize::MAX && restored.contains_key(&h.0)).map(|h| h.0));
+                    hit.extend(
+                        c.iter()
+                            .filter(|h| h.0 != usize::MAX && restored.contains_key(&h.0))
+                            .map(|h| h.0),
+                    );
                 }
             }
             hit.sort_unstable();

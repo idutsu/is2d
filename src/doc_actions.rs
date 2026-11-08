@@ -773,7 +773,9 @@ fn apply_raw_outline(
                 }
                 MapEditOutcome::Unchanged => {}
                 // 地図で重ねられないとき（安全網で止まった・壊れた輪郭に触れる）は、今までのやり方で結合する
-                MapEditOutcome::Refused => merge_shapes_into_canvas(&mut edit.shapes, stroke_shapes),
+                MapEditOutcome::Refused => {
+                    merge_shapes_into_canvas(&mut edit.shapes, stroke_shapes)
+                }
             }
         });
         true
@@ -939,7 +941,13 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
         MapEditOutcome::Changed(removed, added) => {
             push_undo(tab, None);
             edit_layers(tab, &[target_lid], |edit| {
-                apply_shape_diff(&mut edit.shapes, &removed, added.clone(), target_lid, &scope);
+                apply_shape_diff(
+                    &mut edit.shapes,
+                    &removed,
+                    added.clone(),
+                    target_lid,
+                    &scope,
+                );
             });
             true
         }
@@ -950,7 +958,12 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
 
 /// 地図で塗れないとき（壊れた輪郭がある所）の、今までのやり方：点を含む生の図形の色を変えて結合する。
 /// 何も無い所は、同じレイヤー・同じ階層の生の図形を壁にして囲まれた所を探す
-fn fill_face_at_with_shapes(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) -> bool {
+fn fill_face_at_with_shapes(
+    tab: &mut Tab,
+    target_lid: u64,
+    fill_color: Color32,
+    pt: Point,
+) -> bool {
     let scope = tab.session.editing_group_path.clone();
     let own: Vec<FillShape> = tab
         .session
@@ -1133,7 +1146,13 @@ fn apply_map_edit(tab: &mut Tab, shape_id: ShapeId, map_edit: MapEdit) -> bool {
     push_undo(tab, None);
     focus_active_layer_to_shape_by_id(tab, shape_id);
     edit_layers(tab, &[layer_id], |edit| {
-        apply_shape_diff(&mut edit.shapes, &removed, added.clone(), layer_id, &group_path);
+        apply_shape_diff(
+            &mut edit.shapes,
+            &removed,
+            added.clone(),
+            layer_id,
+            &group_path,
+        );
     });
     true
 }
