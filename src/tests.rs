@@ -21815,7 +21815,8 @@ mod map_overlay {
             .cloned()
             .collect();
         let m = PlanarMap::from_faces(shapes.iter());
-        m.cycle_check() == (0, 0) && m.faces().1 == 0
+        let all: Vec<usize> = (0..m.edges.len()).collect();
+        m.cycle_check() == (0, 0) && m.faces().1 == 0 && m.crossings_pub(&all).is_empty()
     }
 
     /// ブラシ・消しゴムを、少しずつずらしながら重ねても、生の図形はいつも地図として壊れていない
@@ -22234,5 +22235,256 @@ mod map_overlay {
                 app.doc.root.layers[0].keyframes[0].cel.shapes.len()
             );
         }
+    }
+
+    /// レビュー（e0769c0）と同じ密度の絵：3レイヤー × ランダムなブラシ 60 本（4色・半径 2〜10・ステージ 800×450 全体）
+    pub(super) fn dense_scene_app(seed: u64) -> Is2dApp {
+        let mut app = Is2dApp::default();
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+        let mut r = Rng(seed);
+        for layer in 0..3 {
+            if layer > 0 {
+                timeline_ui::timeline_add_layer(&mut app);
+            }
+            for _ in 0..60 {
+                app.tool.brush_color = colors[(r.f() * 4.0) as usize % 4];
+                let n = 2 + (r.f() * 3.0) as usize;
+                let pts: Vec<Point> = (0..n)
+                    .map(|_| Point::new(-390.0 + r.f() * 780.0, -215.0 + r.f() * 430.0))
+                    .collect();
+                let mut dense = Vec::new();
+                for w in pts.windows(2) {
+                    for j in 0..12 {
+                        dense.push(w[0].lerp(w[1], j as f64 / 12.0));
+                    }
+                }
+                dense.push(*pts.last().unwrap());
+                doc_actions::commit_raw_outline(
+                    &mut app,
+                    &generate_brush_outline(&dense, 2.0 + r.f() * 8.0),
+                );
+            }
+        }
+        app
+    }
+
+    /// レビュー（e0769c0 第4回）の手順：60 本の線（4色・太さ 1〜8・長さ 50〜300、800×450 全体）を描いたセルで、
+    /// 矩形選択 → (7, 3) 動かす → 選択を外す、を矩形を変えながら 60 回繰り返す（120 角 ×20、400 角を左右から縮めて ×20、
+    /// 800 角 ×20）。毎回、地図が壊れていないこと
+    fn review_repeat_scene(seed: u64) -> Is2dApp {
+        let mut app = Is2dApp::default();
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+        let mut r = Rng(seed);
+        for _ in 0..60 {
+            app.tool.brush_color = colors[(r.f() * 4.0) as usize % 4];
+            let p0 = Point::new(-400.0 + r.f() * 800.0, -225.0 + r.f() * 450.0);
+            let (len, ang) = (50.0 + r.f() * 250.0, r.f() * std::f64::consts::TAU);
+            let p1 = p0 + KVec2::new(ang.cos(), ang.sin()) * len;
+            let pts: Vec<Point> = (0..=16).map(|j| p0.lerp(p1, j as f64 / 16.0)).collect();
+            doc_actions::commit_raw_outline(
+                &mut app,
+                &generate_brush_outline(&pts, 0.5 + r.f() * 3.5),
+            );
+        }
+        app
+    }
+
+    fn review_repeat_rects() -> Vec<(Point, Point)> {
+        let mut rects = Vec::new();
+        for i in 0..20 {
+            let (x, y) = (-400.0 + 36.0 * i as f64, -225.0 + 16.0 * i as f64);
+            rects.push((Point::new(x, y), Point::new(x + 120.0, y + 120.0)));
+        }
+        for i in 0..20 {
+            let d = 9.0 * i as f64;
+            rects.push((Point::new(-200.0 + d, -200.0), Point::new(200.0 - d, 200.0)));
+        }
+        for i in 0..20 {
+            let x = -420.0 + 5.0 * i as f64;
+            rects.push((Point::new(x, -400.0), Point::new(x + 800.0, 400.0)));
+        }
+        rects
+    }
+
+    #[test]
+    fn repeated_marquee_move_deselect_keeps_layer_map_valid() {
+        let mut app = review_repeat_scene(5);
+        for (step, (a, b)) in review_repeat_rects().into_iter().enumerate() {
+            select_ops::apply_marquee_selection(&mut app, a, b, false);
+            doc_actions::apply(
+                &mut app,
+                doc_actions::Action::MoveSelected {
+                    delta: KVec2::new(7.0, 3.0),
+                },
+            );
+            canvas_tool::clear_selection(&mut app);
+            assert!(layer_map_valid(&app, 0), "{} 回目で地図が壊れた", step + 1);
+        }
+    }
+
+    /// 強さの試し（ふだんは流さない）：上の繰り返しを、種を変えて何通りも行う
+    #[test]
+    #[ignore]
+    fn probe_repeated_marquee_many_seeds() {
+        let n: u64 = std::env::var("PROBE_SEEDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let mut worst = 0.0f64;
+        for seed in 1..=n {
+            let mut app = review_repeat_scene(seed);
+            for (step, (a, b)) in review_repeat_rects().into_iter().enumerate() {
+                let t = std::time::Instant::now();
+                select_ops::apply_marquee_selection(&mut app, a, b, false);
+                doc_actions::apply(
+                    &mut app,
+                    doc_actions::Action::MoveSelected {
+                        delta: KVec2::new(7.0, 3.0),
+                    },
+                );
+                canvas_tool::clear_selection(&mut app);
+                worst = worst.max(t.elapsed().as_secs_f64() * 1e3);
+                if !layer_map_valid(&app, 0) {
+                    eprintln!("PROBE 種 {seed}：{} 回目で地図が壊れた", step + 1);
+                    break;
+                }
+            }
+        }
+        eprintln!("PROBE 1回（選択＋移動＋確定）の最大 {worst:.1}ms");
+    }
+
+    /// 点の色を半直線で調べた答えが、色ごとの輪郭で調べた答えと同じ（重ね合わせの色決めの最後の手段に使う）
+    #[test]
+    fn ray_color_matches_color_regions() {
+        let app = dense_scene_app(3);
+        let mut r = Rng(11);
+        let mut checked = 0;
+        for layer in 0..3 {
+            let shapes: Vec<FillShape> = app.doc.root.layers[layer].keyframes[0]
+                .cel
+                .shapes
+                .iter()
+                .filter(|s| s.is_raw_at_scope(&[]))
+                .cloned()
+                .collect();
+            let m = PlanarMap::from_faces(shapes.iter());
+            for _ in 0..300 {
+                let p = Point::new(-420.0 + r.f() * 840.0, -245.0 + r.f() * 490.0);
+                // 辺にごく近い点は、どちらの答えも当てにならないので除く
+                let near = (0..m.edges.len()).any(|e| {
+                    let q = QuadBez::new(
+                        m.nodes[m.edges[e].a],
+                        m.edges[e].ctrl,
+                        m.nodes[m.edges[e].b],
+                    );
+                    kurbo::ParamCurveExtrema::bounding_box(&q)
+                        .inflate(0.01, 0.01)
+                        .contains(p)
+                        && nearest_on_quad(&q, p).1 < 0.01
+                });
+                if near {
+                    continue;
+                }
+                let (ray, regions) = m.ray_color_pub(p);
+                assert_eq!(ray, Some(regions), "レイヤー {layer} の点 {p:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 800);
+    }
+
+    /// 強さ・速さの試し（ふだんは流さない）：レビューと同じ条件で、矩形選択・動かして離す・`Alt` 複製・貼り付けの時間を測る。
+    /// 結果の各レイヤーの地図が壊れていないかも見る
+    #[test]
+    #[ignore]
+    fn probe_dense_scene_selection_timing() {
+        let rects = [
+            (
+                "ステージ全体",
+                Point::new(-410.0, -235.0),
+                Point::new(410.0, 235.0),
+            ),
+            ("左半分", Point::new(-410.0, -235.0), Point::new(0.0, 235.0)),
+            (
+                "中央 500×300",
+                Point::new(-250.0, -150.0),
+                Point::new(250.0, 150.0),
+            ),
+            (
+                "200×150",
+                Point::new(-100.0, -75.0),
+                Point::new(100.0, 75.0),
+            ),
+        ];
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
+        let all_valid = |app: &Is2dApp| (0..3).all(|l| layer_map_valid(app, l));
+        for (name, a, b) in rects {
+            // 3回測って、いちばん短いもの
+            let (mut t_sel, mut t_commit, mut valid) = (f64::MAX, f64::MAX, true);
+            for _ in 0..3 {
+                let mut app = dense_scene_app(7);
+                let t = std::time::Instant::now();
+                select_ops::apply_marquee_selection(&mut app, a, b, false);
+                t_sel = t_sel.min(ms(t));
+                assert!(doc_actions::apply(
+                    &mut app,
+                    doc_actions::Action::MoveSelected {
+                        delta: KVec2::new(25.0, 0.0)
+                    }
+                ));
+                let t = std::time::Instant::now();
+                canvas_tool::clear_selection(&mut app);
+                t_commit = t_commit.min(ms(t));
+                valid &= all_valid(&app);
+            }
+            eprintln!(
+                "PROBE {name}：矩形選択 {t_sel:.1}ms｜25px 動かして離す {t_commit:.1}ms｜地図 {}",
+                if valid { "正常" } else { "壊れた" }
+            );
+        }
+        // 全部を Alt 複製して 6px ずらして確定
+        let mut app = dense_scene_app(7);
+        select_ops::apply_marquee_selection(&mut app, rects[0].1, rects[0].2, false);
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::FinishMoveSelectionDrag {
+                total_delta: KVec2::new(6.0, 0.0),
+                alt_duplicate: true
+            }
+        ));
+        let t = std::time::Instant::now();
+        canvas_tool::clear_selection(&mut app);
+        eprintln!(
+            "PROBE 全部を Alt 複製して確定 {:.1}ms｜地図 {}",
+            ms(t),
+            if all_valid(&app) {
+                "正常"
+            } else {
+                "壊れた"
+            }
+        );
+        // 全部をコピーして貼り付け、16px ずらして確定
+        let mut app = dense_scene_app(7);
+        select_ops::apply_marquee_selection(&mut app, rects[0].1, rects[0].2, false);
+        assert!(doc_actions::copy_selected_shapes(&mut app));
+        canvas_tool::clear_selection(&mut app);
+        assert!(doc_actions::paste_clipboard(&mut app, true));
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::MoveSelected {
+                delta: KVec2::new(16.0, 16.0)
+            }
+        ));
+        let t = std::time::Instant::now();
+        canvas_tool::clear_selection(&mut app);
+        eprintln!(
+            "PROBE 全部をコピーして貼り付け、確定 {:.1}ms｜地図 {}",
+            ms(t),
+            if all_valid(&app) {
+                "正常"
+            } else {
+                "壊れた"
+            }
+        );
     }
 }

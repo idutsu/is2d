@@ -72,17 +72,47 @@ pub(crate) fn nearest_on_quad(q: &QuadBez, p: Point) -> (f64, f64) {
     (t, dist_sq(t).sqrt())
 }
 
+/// 整数（頂点・辺・格子の番号）を鍵にする表のハッシュ。標準の SipHash は、頂点の格子のように何十万回も引くと重いので、
+/// 掛け算1回で混ぜる軽いものを使う（鍵は外から来ない値なので、偏りを狙われる心配は無い）
+#[derive(Default, Clone, Copy)]
+struct IntHasher(u64);
+
+impl std::hash::Hasher for IntHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn write_i64(&mut self, i: i64) {
+        self.write_u64(i as u64);
+    }
+    fn write_i32(&mut self, i: i32) {
+        self.write_u64(i as u32 as u64);
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
+}
+
+type IntMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IntHasher>>;
+
 /// 頂点を探すための格子
 struct NodeGrid {
     cell: f64,
-    cells: HashMap<(i64, i64), Vec<usize>>,
+    cells: IntMap<(i64, i64), Vec<usize>>,
 }
 
 impl NodeGrid {
     fn new(cell: f64) -> Self {
         Self {
             cell,
-            cells: HashMap::new(),
+            cells: IntMap::default(),
         }
     }
     fn key(&self, p: Point) -> (i64, i64) {
@@ -95,12 +125,14 @@ impl NodeGrid {
         self.cells.entry(self.key(p)).or_default().push(id);
     }
     fn nearest(&self, nodes: &[Point], p: Point, tol: f64) -> Option<usize> {
-        let (kx, ky) = self.key(p);
+        // `tol` より近い頂点がありうるマス（ふつうは自分のマスだけ）
+        let (x0, y0) = self.key(Point::new(p.x - tol, p.y - tol));
+        let (x1, y1) = self.key(Point::new(p.x + tol, p.y + tol));
         let mut best = None;
         let mut best_d = tol;
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for &id in self.cells.get(&(kx + dx, ky + dy)).into_iter().flatten() {
+        for kx in x0..=x1 {
+            for ky in y0..=y1 {
+                for &id in self.cells.get(&(kx, ky)).into_iter().flatten() {
                     let d = (nodes[id] - p).hypot();
                     if d <= best_d {
                         best_d = d;
@@ -178,7 +210,12 @@ fn cmp_turn(back: KVec2, x: &QuadBez, y: &QuadBez) -> std::cmp::Ordering {
 
 /// `u` から時計回り（面積の式の向きで）に `w` まで回る角度（0 は 2π とみなす）
 fn cw_angle(u: KVec2, w: KVec2) -> f64 {
-    let a = (u.y.atan2(u.x) - w.y.atan2(w.x)).rem_euclid(TAU);
+    cw_angle_of(u.y.atan2(u.x), w.y.atan2(w.x))
+}
+
+/// `cw_angle` の、向きの角度（atan2）を先に求めてあるとき
+fn cw_angle_of(u: f64, w: f64) -> f64 {
+    let a = (u - w).rem_euclid(TAU);
     if a < 1e-12 {
         TAU
     } else {
@@ -193,11 +230,44 @@ fn quad_deriv(q: &QuadBez, t: f64) -> KVec2 {
 /// 2本の曲線の交わる所の（t, u）。曲線を半分ずつに割って、外接矩形が重なる所だけを細かく見ていき、
 /// 小さくなったらニュートン法で交点に詰める。`shared` の点（共有する頂点）そのものは除く
 fn quad_intersections(qa: &QuadBez, qb: &QuadBez, shared: &[Point]) -> Vec<(f64, f64)> {
+    /// 共有する頂点が、両方の曲線のどの端か：（qa の t, qb の t）
+    type Ends = [(f64, f64); 2];
+    /// 頂点 `v` を端に持つ曲線の一部 `x`・`y`（制御多角形の三角形）が、`v` から見て角度で離れているか
+    /// （三角形はそれぞれ `v` から出る2本の向きの間に入るので、向きの範囲が重ならなければ `v` のほかで交わらない）
+    fn apart_at(v: Point, x: &QuadBez, y: &QuadBez) -> bool {
+        let rays = |q: &QuadBez| -> Option<(KVec2, KVec2)> {
+            let (r1, r2) = if q.p0 == v {
+                (q.p1 - v, q.p2 - v)
+            } else if q.p2 == v {
+                (q.p1 - v, q.p0 - v)
+            } else {
+                return None;
+            };
+            let (l1, l2) = (r1.hypot(), r2.hypot());
+            if l1 < 1e-12 || l2 < 1e-12 {
+                return None;
+            }
+            let (r1, r2) = (r1 / l1, r2 / l2);
+            Some(if r1.cross(r2) >= 0.0 {
+                (r1, r2)
+            } else {
+                (r2, r1)
+            })
+        };
+        let (Some((a1, b1)), Some((a2, b2))) = (rays(x), rays(y)) else {
+            return false;
+        };
+        // 向きの範囲（半周より狭い）に `w` が入るか。境目の近くは入るとみなす（離れていると言わない）
+        let inside = |a: KVec2, b: KVec2, w: KVec2| a.cross(w) > -1e-9 && w.cross(b) > -1e-9;
+        !(inside(a1, b1, a2) || inside(a1, b1, b2) || inside(a2, b2, a1) || inside(a2, b2, b1))
+    }
+    #[allow(clippy::too_many_arguments)]
     fn rec(
         qa: &QuadBez,
         (a0, a1): (f64, f64),
         qb: &QuadBez,
         (b0, b1): (f64, f64),
+        ends: &Ends,
         depth: u32,
         out: &mut Vec<(f64, f64)>,
     ) {
@@ -205,6 +275,15 @@ fn quad_intersections(qa: &QuadBez, qb: &QuadBez, shared: &[Point]) -> Vec<(f64,
         let (ra, rb) = (sa.bounding_box(), sb.bounding_box());
         if !rects_overlap(ra.inflate(1e-9, 1e-9), rb) {
             return;
+        }
+        // 共有する頂点を両方とも端に持つ組：頂点から見て離れていれば、そこで触れるだけ（交わりに数えない点）
+        for &(ta, tb) in ends {
+            if (ta == a0 || ta == a1) && (tb == b0 || tb == b1) {
+                let v = if ta == 0.0 { qa.p0 } else { qa.p2 };
+                if apart_at(v, &sa, &sb) {
+                    return;
+                }
+            }
         }
         // 太い線で分ける：片方の曲線は、両端を結ぶ線から、制御点までの距離の半分の帯に入る。
         // もう片方の制御多角形がその帯の外にあれば交わらない（ほぼ平行に並ぶ2本を、外接矩形より早く見分ける）
@@ -244,12 +323,26 @@ fn quad_intersections(qa: &QuadBez, qb: &QuadBez, shared: &[Point]) -> Vec<(f64,
         let (am, bm) = ((a0 + a1) * 0.5, (b0 + b1) * 0.5);
         for ra in [(a0, am), (am, a1)] {
             for rb in [(b0, bm), (bm, b1)] {
-                rec(qa, ra, qb, rb, depth + 1, out);
+                rec(qa, ra, qb, rb, ends, depth + 1, out);
+            }
+        }
+    }
+    // 共有する頂点（ビットまで同じ点）が、それぞれの曲線のどの端か。無い所は t = 2（どの範囲の端にもならない）
+    let mut ends: Ends = [(2.0, 2.0); 2];
+    let mut k = 0;
+    for v in shared {
+        for ta in [0.0, 1.0] {
+            for tb in [0.0, 1.0] {
+                let end = |q: &QuadBez, t: f64| if t == 0.0 { q.p0 } else { q.p2 };
+                if k < 2 && end(qa, ta) == *v && end(qb, tb) == *v {
+                    ends[k] = (ta, tb);
+                    k += 1;
+                }
             }
         }
     }
     let mut raw = Vec::new();
-    rec(qa, (0.0, 1.0), qb, (0.0, 1.0), 0, &mut raw);
+    rec(qa, (0.0, 1.0), qb, (0.0, 1.0), &ends, 0, &mut raw);
     let mut out: Vec<(f64, f64)> = Vec::new();
     for (t, u) in raw {
         let p = qa.eval(t);
@@ -317,6 +410,14 @@ impl PlanarMap {
         let mut split: Vec<Seg> = Vec::with_capacity(segs.len());
         for s in segs {
             let bbox = s.q.bounding_box().inflate(FACE_TOL, FACE_TOL);
+            // 曲線は、両端を結ぶ線と、そこから制御点までの距離の半分の線の間の帯に入る。帯から離れた頂点は調べない
+            let chord = s.q.p2 - s.q.p0;
+            let len = chord.hypot();
+            let band = (len > 1e-12).then(|| {
+                let n = KVec2::new(-chord.y, chord.x) / len;
+                let h = n.dot(s.q.p1 - s.q.p0) * 0.5;
+                (n, h.min(0.0) - FACE_TOL, h.max(0.0) + FACE_TOL)
+            });
             let mut cuts: Vec<(f64, usize)> = grid
                 .in_rect(bbox)
                 .filter(|&v| v != s.a && v != s.b)
@@ -324,6 +425,12 @@ impl PlanarMap {
                     let p = nodes[v];
                     if (p - s.q.p0).hypot() <= FACE_TOL || (p - s.q.p2).hypot() <= FACE_TOL {
                         return None;
+                    }
+                    if let Some((n, lo, hi)) = band {
+                        let o = n.dot(p - s.q.p0);
+                        if o < lo || o > hi {
+                            return None;
+                        }
                     }
                     let (t, d) = nearest_on_quad(&s.q, p);
                     (d <= FACE_TOL && t > 1e-6 && t < 1.0 - 1e-6).then_some((t, v))
@@ -355,7 +462,7 @@ impl PlanarMap {
             }
         }
         // 3. 同じ2頂点を結び、向きが逆で形の近い区間を、1本の辺にまとめる
-        let mut groups: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        let mut groups: IntMap<(usize, usize), Vec<usize>> = IntMap::default();
         for (i, s) in split.iter().enumerate() {
             groups
                 .entry((s.a.min(s.b), s.a.max(s.b)))
@@ -436,9 +543,10 @@ impl PlanarMap {
     /// `faces` と同じ。面の輪郭 `cycles`（`face_cycles` の結果）を先に求めてあるときに使う
     fn faces_of(&self, cycles: &[Vec<(usize, bool)>]) -> (Vec<MapFace>, usize) {
         let mut broken = 0;
-        let mut exteriors: Vec<(MapFace, f64, BezPath, KRect)> = Vec::new();
+        // （面, 面積, 巻き数を調べる道筋（要るときに作る）, 外接矩形）
+        let mut exteriors: Vec<(MapFace, f64, Option<BezPath>, KRect)> = Vec::new();
         let mut holes: Vec<(Color32, Vec<(usize, bool)>)> = Vec::new();
-        for cycle in cycles.iter().cloned() {
+        for cycle in cycles {
             if cycle.iter().any(|h| h.0 == usize::MAX) {
                 broken += 1;
                 continue;
@@ -451,36 +559,49 @@ impl PlanarMap {
             let Some(color) = color else {
                 continue;
             };
-            let contour = Contour::new(cycle.iter().map(|h| self.half_quad(*h)).collect());
-            let area = contour.signed_area();
+            let area = self.cycle_area(cycle);
             if area > 0.0 {
-                let mut path = BezPath::new();
-                contour.append_to_bez_path(&mut path);
-                let bbox = contour.bounding_box();
+                let bbox = cycle
+                    .iter()
+                    .map(|h| self.half_quad(*h).bounding_box())
+                    .reduce(|a, b| a.union(b))
+                    .unwrap_or(KRect::ZERO);
                 exteriors.push((
                     MapFace {
                         color,
-                        cycles: vec![cycle],
+                        cycles: vec![cycle.clone()],
                         srcs: Vec::new(),
                     },
                     area,
-                    path,
+                    None,
                     bbox,
                 ));
             } else {
-                holes.push((color, cycle));
+                holes.push((color, cycle.clone()));
             }
         }
+        // 穴の入れ先は、穴を含む同じ色の外周のうち、いちばん小さいもの。小さい外周から順に調べ、最初に含むものを選ぶ
+        let mut by_area: Vec<usize> = (0..exteriors.len()).collect();
+        by_area.sort_by(|&a, &b| exteriors[a].1.total_cmp(&exteriors[b].1));
         for (color, cycle) in holes {
             let probe = self.half_quad(cycle[0]).eval(0.5);
-            let owner = exteriors
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| {
-                    e.0.color == color && e.3.contains(probe) && e.2.winding(probe) != 0
-                })
-                .min_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
-                .map(|(i, _)| i);
+            let owner = by_area.iter().copied().find(|&i| {
+                let e = &mut exteriors[i];
+                if e.0.color != color || !e.3.contains(probe) {
+                    return false;
+                }
+                let path = e.2.get_or_insert_with(|| {
+                    let mut path = BezPath::new();
+                    path.move_to(self.half_quad(e.0.cycles[0][0]).p0);
+                    for h in &e.0.cycles[0] {
+                        let q = self.half_quad(*h);
+                        path.quad_to(q.p1, q.p2);
+                    }
+                    path.close_path();
+                    path
+                });
+                path.winding(probe) != 0
+            });
             match owner {
                 Some(i) => exteriors[i].0.cycles.push(cycle),
                 None => broken += 1,
@@ -502,6 +623,24 @@ impl PlanarMap {
             })
             .collect();
         (faces, broken)
+    }
+
+    /// 面の輪郭の符号付き面積（`Contour::signed_area` と同じ計算を、輪郭を作らずに行う）
+    fn cycle_area(&self, cycle: &[(usize, bool)]) -> f64 {
+        const SUBDIVS: usize = 8;
+        let first_pt = self.half_quad(cycle[0]).eval(0.0);
+        let mut prev = first_pt;
+        let mut sum = 0.0;
+        for h in cycle {
+            let seg = self.half_quad(*h);
+            for k in 0..SUBDIVS {
+                let curr = seg.eval(k as f64 / SUBDIVS as f64);
+                sum += prev.x * curr.y - curr.x * prev.y;
+                prev = curr;
+            }
+        }
+        sum += prev.x * first_pt.y - first_pt.x * prev.y;
+        0.5 * sum
     }
 
     /// 面 `f` の今の形を、塗りの形にする
@@ -634,6 +773,15 @@ impl PlanarMap {
         self.crossings(moved)
     }
 
+    /// テスト用：点 `p` の色を、半直線で調べた答えと、色ごとの輪郭で調べた答え
+    #[cfg(test)]
+    pub(crate) fn ray_color_pub(&self, p: Point) -> (Option<Option<Color32>>, Option<Color32>) {
+        (
+            RayColor::new(self).color_at(p),
+            Self::color_in(&self.color_regions(), p),
+        )
+    }
+
     /// `check` の辺と、ほかの辺の交わる所（`crossings` と同じ形）。格子で近くの辺だけを調べる。
     /// `orig` が両方 `true` の組（元の地図のまま残った辺どうし。元の地図で交わっていない）は調べない
     fn crossings_grid(&self, check: &[usize], orig: &[bool]) -> Vec<(usize, f64, usize, f64)> {
@@ -646,10 +794,26 @@ impl PlanarMap {
             let (y0, y1) = ((r.y0 / CELL).floor() as i64, (r.y1 / CELL).floor() as i64);
             (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
         };
-        let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
-        for (e, b) in boxes.iter().enumerate() {
-            for c in cells(b) {
-                grid.entry(c).or_default().push(e);
+        // 格子には、調べる辺のマスにかかる辺だけを入れる（調べる辺が少ないとき、遠くの辺を入れずに済む）
+        let mut grid: IntMap<(i64, i64), Vec<usize>> = IntMap::default();
+        if 2 * check.len() < self.edges.len() {
+            for &e in check {
+                for c in cells(&boxes[e]) {
+                    grid.entry(c).or_default();
+                }
+            }
+            for (e, b) in boxes.iter().enumerate() {
+                for c in cells(b) {
+                    if let Some(list) = grid.get_mut(&c) {
+                        list.push(e);
+                    }
+                }
+            }
+        } else {
+            for (e, b) in boxes.iter().enumerate() {
+                for c in cells(b) {
+                    grid.entry(c).or_default().push(e);
+                }
             }
         }
         let mut pos = vec![usize::MAX; self.edges.len()];
@@ -961,6 +1125,19 @@ impl PlanarMap {
             }
         };
         let idx = |h: (usize, bool)| 2 * h.0 + h.1 as usize;
+        // 向きのある辺ごとの（出ていく向きの角度, 曲がり具合）。`cmp_turn` と同じ材料を1回だけ求める
+        // （入ってきた辺を引き返す向きは、逆向きの辺の出ていく向きそのもの）
+        let turn: Vec<(f64, f64)> = (0..2 * self.edges.len())
+            .map(|k| {
+                let q = self.half_quad((k / 2, k % 2 == 1));
+                let d = tangent_start(&q);
+                (d.y.atan2(d.x), -curvature_start(&q))
+            })
+            .collect();
+        let key = |back: f64, h: (usize, bool)| {
+            let (ang, curv) = turn[idx(h)];
+            ((cw_angle_of(back, ang) * 1e9).round() / 1e9, curv)
+        };
         let mut used = vec![false; 2 * self.edges.len()];
         let mut cycles = Vec::new();
         for i in 0..self.edges.len() {
@@ -973,14 +1150,17 @@ impl PlanarMap {
                 loop {
                     used[idx(cur)] = true;
                     cycle.push(cur);
-                    let back = -tangent_end(&self.half_quad(cur));
                     let twin = (cur.0, !cur.1);
+                    let back = turn[idx(twin)].0;
                     // 引き返す向き（同じ辺の逆向き）は、ほかに辺が無いときだけ選ぶ
                     let next = out_of[head(cur)]
                         .iter()
                         .copied()
                         .filter(|&h| h != twin)
-                        .min_by(|&x, &y| cmp_turn(back, &self.half_quad(x), &self.half_quad(y)))
+                        .min_by(|&x, &y| {
+                            let (kx, ky) = (key(back, x), key(back, y));
+                            kx.0.total_cmp(&ky.0).then(kx.1.total_cmp(&ky.1))
+                        })
                         .unwrap_or(twin);
                     if next == start {
                         break;
@@ -1049,7 +1229,11 @@ impl PlanarMap {
 impl PlanarMap {
     /// 調べる用：（閉じない面の輪郭の数, 色がそろわない面の輪郭の数）
     pub(crate) fn cycle_check(&self) -> (usize, usize) {
-        let cycles = self.face_cycles();
+        self.cycle_counts(&self.face_cycles())
+    }
+
+    /// `cycle_check` と同じ。面の輪郭 `cycles`（`face_cycles` の結果）を先に求めてあるときに使う
+    fn cycle_counts(&self, cycles: &[Vec<(usize, bool)>]) -> (usize, usize) {
         let open = cycles
             .iter()
             .filter(|c| c.iter().any(|h| h.0 == usize::MAX))
@@ -1833,6 +2017,25 @@ pub(crate) fn reshape_diff(
         .filter(|(removed, added)| !removed.is_empty() || !added.is_empty())
 }
 
+/// `items` のそれぞれに `f` をかけた結果（`items` の順）。2つ以上あれば、別々のスレッドで同時に計算する
+/// （レイヤーごとの地図の計算は、ほかのレイヤーを見ないので、同時に計算しても結果は同じ）
+pub(crate) fn per_layer_parallel<T: Sync, R: Send>(
+    items: &[T],
+    f: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    if items.len() < 2 {
+        return items.iter().map(&f).collect();
+    }
+    std::thread::scope(|scope| {
+        let f = &f;
+        let handles: Vec<_> = items.iter().map(|it| scope.spawn(move || f(it))).collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    })
+}
+
 /// 差分を図形の並びに入れる。新しい形は、消した図形のうち最初のものの位置に入れる。
 /// 何も消さないとき（何も無い所へのブラシなど）は、レイヤー `layer_id`・階層 `group_path` の生の図形の置き場
 /// （グループ・シンボルより下）に入れる
@@ -1882,9 +2085,10 @@ pub(crate) fn marquee_split(
         .cloned()
         .collect();
     let map = PlanarMap::from_faces(own.iter());
-    let rect_map = PlanarMap::from_faces(std::iter::once(rect));
-    let inside = map.overlay(MapInput::Map(&rect_map), MapRule::KeepInside)?;
-    let rest = map.overlay(MapInput::Map(&rect_map), MapRule::Paint(None))?;
+    // 矩形は形として重ねる（中か外かは i_overlay が数えるので、地図として重ねるより軽い）
+    let rect_input = MapInput::Shapes(std::slice::from_ref(rect));
+    let inside = map.overlay(rect_input, MapRule::KeepInside)?;
+    let rest = map.overlay(rect_input, MapRule::Paint(None))?;
     let keys: HashSet<[u64; 8]> = (0..map.edges.len()).map(|e| edge_key(&map, e)).collect();
     let (removed_rest, remainder) = rewrite_shapes(&map, &keys, &rest, &own, layer_id, group_path);
     let (removed_inside, pieces) = rewrite_shapes(&map, &keys, &inside, &own, layer_id, group_path);
@@ -1918,8 +2122,8 @@ pub(crate) fn place_pieces_diff(
 ) -> MapEditOutcome {
     let piece_map = PlanarMap::from_faces(pieces.iter());
     let all: Vec<usize> = (0..piece_map.edges.len()).collect();
-    if piece_map.cycle_check() != (0, 0)
-        || piece_map.faces().1 != 0
+    // 壊れた数（`faces` の2つ目）には、閉じない輪郭と色がまざる輪郭も入っている
+    if piece_map.faces().1 != 0
         || !piece_map
             .crossings_grid(&all, &vec![false; all.len()])
             .is_empty()
@@ -1987,10 +2191,8 @@ pub(crate) fn merge_touching_faces(shapes: Vec<FillShape>) -> Vec<FillShape> {
             .map(|f| map.face_shape(f, layer_id, &group_path))
             .collect();
         let all: Vec<usize> = (0..map.edges.len()).collect();
-        if broken > 0
-            || map.cycle_check() != (0, 0)
-            || !map.crossings_grid(&all, &vec![false; all.len()]).is_empty()
-        {
+        // 壊れた数（`faces` の2つ目）には、閉じない輪郭と色がまざる輪郭も入っている
+        if broken > 0 || !map.crossings_grid(&all, &vec![false; all.len()]).is_empty() {
             // 境目がそろっていない（地図にならない）ときは、まとめずにそのまま
             out.extend(list);
             continue;
@@ -2256,6 +2458,127 @@ fn combine_sides(
     Some((entries[0].0 .0, entries[entries.len() - 1].0 .1))
 }
 
+/// 地図の点の色を、点から半直線を飛ばして調べる道具。いちばん近くで交わる辺の、点の側の色がその点の色
+/// （面を作らないので、大きな地図でも数点を調べるだけなら速い）。半直線の向きごとに、向きに直角な座標で
+/// 辺を帯に分けておき、点の帯の辺だけを見る
+struct RayColor<'a> {
+    map: &'a PlanarMap,
+    /// 向きごとの（向き, 帯の始まり, 帯の幅, 帯ごとの辺）。使う向きのものだけ作る
+    dirs: Vec<(KVec2, f64, f64, Vec<Vec<u32>>)>,
+}
+
+impl<'a> RayColor<'a> {
+    /// 半直線の向き（ラジアン）。軸にそろった形の辺や頂点にちょうど当たりにくい角度
+    const ANGLES: [f64; 3] = [0.3, 1.97, 4.12];
+
+    fn new(map: &'a PlanarMap) -> Self {
+        Self {
+            map,
+            dirs: Vec::new(),
+        }
+    }
+
+    fn bands(&mut self, k: usize) -> &(KVec2, f64, f64, Vec<Vec<u32>>) {
+        while self.dirs.len() <= k {
+            let a = Self::ANGLES[self.dirs.len()];
+            let d = KVec2::new(a.cos(), a.sin());
+            let span: Vec<(f64, f64)> = (0..self.map.edges.len())
+                .map(|i| {
+                    let q = self.map.quad(i);
+                    let v = [q.p0, q.p1, q.p2].map(|p| d.cross(p.to_vec2()));
+                    (v[0].min(v[1]).min(v[2]), v[0].max(v[1]).max(v[2]))
+                })
+                .collect();
+            let lo = span.iter().map(|s| s.0).fold(f64::INFINITY, f64::min);
+            let hi = span.iter().map(|s| s.1).fold(f64::NEG_INFINITY, f64::max);
+            let n = ((self.map.edges.len() as f64).sqrt() as usize).clamp(1, 256);
+            let w = ((hi - lo) / n as f64).max(1e-9);
+            let mut bands = vec![Vec::new(); n];
+            for (i, &(a, b)) in span.iter().enumerate() {
+                let (ba, bb) = (((a - lo) / w) as usize, ((b - lo) / w) as usize);
+                for band in bands.iter_mut().take(bb.min(n - 1) + 1).skip(ba.min(n - 1)) {
+                    band.push(i as u32);
+                }
+            }
+            self.dirs.push((d, lo, w, bands));
+        }
+        &self.dirs[k]
+    }
+
+    /// 点 `p` の色。どの向きでも辺の端や接する所に当たって決められないときは `None`
+    fn color_at(&mut self, p: Point) -> Option<Option<Color32>> {
+        for k in 0..Self::ANGLES.len() {
+            let map = self.map;
+            let (d, lo, w, bands) = self.bands(k);
+            let v = d.cross(p.to_vec2());
+            let band = ((v - lo) / w).floor();
+            if band < 0.0 || band >= bands.len() as f64 {
+                return Some(None);
+            }
+            // （半直線の上の距離, 交わる向きの外積, 辺, t）。近い方から2つ
+            let mut best: [Option<(f64, f64, usize, f64)>; 2] = [None, None];
+            for &i in &bands[band as usize] {
+                let i = i as usize;
+                let q = map.quad(i);
+                let f = [q.p0, q.p1, q.p2].map(|c| d.cross(c - p));
+                if f.iter().all(|&x| x > 0.0) || f.iter().all(|&x| x < 0.0) {
+                    continue;
+                }
+                if [q.p0, q.p1, q.p2].iter().all(|&c| d.dot(c - p) < 0.0) {
+                    continue;
+                }
+                // f(t) = (1-t)²f0 + 2t(1-t)f1 + t²f2 = 0
+                let (a2, a1, a0) = (f[0] - 2.0 * f[1] + f[2], 2.0 * (f[1] - f[0]), f[0]);
+                let mut roots = [f64::NAN; 2];
+                if a2.abs() < 1e-14 * (a1.abs() + a0.abs()).max(1e-300) {
+                    if a1 != 0.0 {
+                        roots[0] = -a0 / a1;
+                    }
+                } else {
+                    let disc = a1 * a1 - 4.0 * a2 * a0;
+                    if disc >= 0.0 {
+                        let sq = disc.sqrt();
+                        let qq = -0.5 * (a1 + a1.signum() * sq);
+                        roots = [qq / a2, if qq != 0.0 { a0 / qq } else { f64::NAN }];
+                    }
+                }
+                for t in roots {
+                    if !(-1e-12..=1.0 + 1e-12).contains(&t) {
+                        continue;
+                    }
+                    let s = d.dot(q.eval(t) - p);
+                    let c = d.cross(quad_deriv(&q, t));
+                    let hit = Some((s, c, i, t));
+                    if s < -1e-9 {
+                        continue;
+                    }
+                    if best[0].is_none_or(|b| s < b.0) {
+                        best[1] = best[0];
+                        best[0] = hit;
+                    } else if best[1].is_none_or(|b| s < b.0) {
+                        best[1] = hit;
+                    }
+                }
+            }
+            let Some((s, c, i, t)) = best[0] else {
+                return Some(None);
+            };
+            let tan = quad_deriv(&map.quad(i), t).hypot();
+            // 点が辺の上・頂点や接する所に当たった・ほかの交わりとほぼ同じ所：向きを変えて調べ直す
+            let clean = s > 1e-9
+                && c.abs() > 1e-6 * tan
+                && t > 1e-9
+                && t < 1.0 - 1e-9
+                && best[1].is_none_or(|b| b.0 - s > 1e-9);
+            if clean {
+                let e = &map.edges[i];
+                return Some(if c > 0.0 { e.left } else { e.right });
+            }
+        }
+        None
+    }
+}
+
 impl PlanarMap {
     /// 点 `p` の色（`color_regions` の結果から）
     fn color_in(regions: &[(Color32, BezPath)], p: Point) -> Option<Color32> {
@@ -2383,13 +2706,46 @@ impl PlanarMap {
             .map(|q| q.bounding_box())
             .reduce(|a, b| a.union(b))?
             .inflate(1.0, 1.0);
+        // 重ねる線の近くを通る辺（線の区間の外接矩形を少し広げたものに、外接矩形が重なる辺）だけを i_overlay で切る。
+        // 重ねるものの範囲の中にあって線から離れた辺（中の辺）は線と交わらないので、あとで辺ごとに1回だけ色を決める
+        const NEAR: f64 = 0.01;
+        const CELL: f64 = 16.0;
+        let cells = |r: &KRect| {
+            let (x0, x1) = ((r.x0 / CELL).floor() as i64, (r.x1 / CELL).floor() as i64);
+            let (y0, y1) = ((r.y0 / CELL).floor() as i64, (r.y1 / CELL).floor() as i64);
+            (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
+        };
+        let seg_boxes: Vec<KRect> = new_quads
+            .iter()
+            .map(|q| q.bounding_box().inflate(NEAR, NEAR))
+            .collect();
+        let mut seg_grid: IntMap<(i64, i64), Vec<usize>> = IntMap::default();
+        for (i, b) in seg_boxes.iter().enumerate() {
+            for c in cells(b) {
+                seg_grid.entry(c).or_default().push(i);
+            }
+        }
+        let near_line = |b: &KRect| {
+            cells(b).any(|c| {
+                seg_grid
+                    .get(&c)
+                    .is_some_and(|list| list.iter().any(|&i| rects_overlap(seg_boxes[i], *b)))
+            })
+        };
         let mut srcs: Vec<(QuadBez, OverlaySrc)> = Vec::new();
         let mut touched = vec![false; self.edges.len()];
+        let mut interior = vec![false; self.edges.len()];
         for e in 0..self.edges.len() {
             let q = self.quad(e);
-            if rects_overlap(q.bounding_box(), area) {
+            let b = q.bounding_box();
+            if !rects_overlap(b, area) {
+                continue;
+            }
+            if near_line(&b) {
                 touched[e] = true;
                 srcs.push((q, OverlaySrc::Old(e)));
+            } else {
+                interior[e] = true;
             }
         }
         for (i, q) in new_quads.iter().enumerate() {
@@ -2441,7 +2797,7 @@ impl PlanarMap {
 
         // 2. 頂点：前からある頂点（格子に丸めた所が同じ）は、その番号のまま格子の上に置く。新しい頂点は後ろに足す
         let mut nodes: Vec<Point> = self.nodes.clone();
-        let mut node_of: HashMap<(i32, i32), usize> = HashMap::new();
+        let mut node_of: IntMap<(i32, i32), usize> = IntMap::default();
         for (e, ed) in self.edges.iter().enumerate() {
             if touched[e] {
                 for v in [ed.a, ed.b] {
@@ -2501,7 +2857,7 @@ impl PlanarMap {
         }
 
         // 3. 頂点ごとに、出ていく区間を角度の順に並べる：（区間, 区間の向きに出ていくか）
-        let mut around: HashMap<usize, Vec<(usize, bool)>> = HashMap::new();
+        let mut around: IntMap<usize, Vec<(usize, bool)>> = IntMap::default();
         for (k, p) in pieces.iter().enumerate() {
             around.entry(p.a).or_default().push((k, true));
             around.entry(p.b).or_default().push((k, false));
@@ -2517,13 +2873,15 @@ impl PlanarMap {
         for list in around.values_mut() {
             list.sort_by(|x, y| cmp_dir(dir_of(x), dir_of(y)));
         }
-        // 向きのある区間の左の面を、次にたどる区間（角度の順で、来た向きの逆のすぐ前）
-        let next = |h: (usize, bool)| -> (usize, bool) {
-            let v = if h.1 { pieces[h.0].b } else { pieces[h.0].a };
-            let list = &around[&v];
-            let i = list.iter().position(|x| *x == (h.0, !h.1)).unwrap_or(0);
-            list[(i + list.len() - 1) % list.len()]
-        };
+        // 向きのある区間の左の面を、次にたどる区間（角度の順で、来た向きの逆のすぐ前）。番号は 2 × 区間 + 向き
+        let mut next_of = vec![(0, false); 2 * pieces.len()];
+        for list in around.values() {
+            for (i, &(k, fwd)) in list.iter().enumerate() {
+                // 頂点へ入ってくる向き（出ていく (k, fwd) の逆）の次は、角度の順で一つ前
+                next_of[2 * k + (!fwd) as usize] = list[(i + list.len() - 1) % list.len()];
+            }
+        }
+        let next = |h: (usize, bool)| -> (usize, bool) { next_of[2 * h.0 + h.1 as usize] };
 
         // 4. 区間の左右の色の材料
         let side_of = |p: &Piece, want_old: bool| -> Option<(Option<Color32>, Option<Color32>)> {
@@ -2547,15 +2905,17 @@ impl PlanarMap {
         let new_of: Vec<_> = pieces.iter().map(|p| side_of(p, false)).collect();
         // 向きのある区間 `h` の左の色：`of` に色があればそれ。無ければ、左の面の輪郭をたどって最初に出会う、色のある区間の
         // 面の側の色（色の無い区間は、その地図の面を分けないので、越えてよい）。出会わなければ `fallback` で調べる
+        // `memo` は向きのある区間ごと（番号は 2 × 区間 + 向き）の、決まった色。たどった道の区間は、みな同じ色になる
         let walk = |h: (usize, bool),
                     of: &[Option<(Option<Color32>, Option<Color32>)>],
-                    memo: &mut HashMap<(usize, bool), Option<Color32>>,
+                    memo: &mut Vec<Option<Option<Color32>>>,
                     fallback: &mut dyn FnMut(Point) -> Option<Color32>|
          -> Option<Color32> {
+            let idx = |x: (usize, bool)| 2 * x.0 + x.1 as usize;
             if let Some((l, r)) = of[h.0] {
                 return if h.1 { l } else { r };
             }
-            if let Some(&c) = memo.get(&h) {
+            if let Some(c) = memo[idx(h)] {
                 return c;
             }
             let mut path = vec![h];
@@ -2564,6 +2924,9 @@ impl PlanarMap {
                 cur = next(cur);
                 if let Some((l, r)) = of[cur.0] {
                     break Some(if cur.1 { l } else { r });
+                }
+                if let Some(c) = memo[idx(cur)] {
+                    break Some(c);
                 }
                 if cur == h || path.len() > pieces.len() {
                     break None;
@@ -2575,21 +2938,30 @@ impl PlanarMap {
                 fallback(nodes[p.a].midpoint(nodes[p.b]))
             });
             for x in path {
-                memo.insert(x, c);
+                memo[idx(x)] = Some(c);
             }
             c
         };
+        // 半直線で決められないとき（ごくまれ）は、色ごとの輪郭で調べる
+        let mut old_ray = RayColor::new(self);
         let mut old_regions: Option<Vec<(Color32, BezPath)>> = None;
-        let mut new_regions: Option<Vec<(Color32, BezPath)>> = None;
-        let mut old_fallback =
-            |q: Point| Self::color_in(old_regions.get_or_insert_with(|| self.color_regions()), q);
-        let mut new_fallback = |q: Point| match input {
-            MapInput::Map(pm) => {
-                Self::color_in(new_regions.get_or_insert_with(|| pm.color_regions()), q)
-            }
+        let mut old_fallback = |q: Point| {
+            old_ray.color_at(q).unwrap_or_else(|| {
+                Self::color_in(old_regions.get_or_insert_with(|| self.color_regions()), q)
+            })
+        };
+        let mut new_ray = match input {
+            MapInput::Map(pm) => Some((RayColor::new(pm), None)),
             MapInput::Shapes(_) => None,
         };
-        let (mut old_memo, mut new_memo) = (HashMap::new(), HashMap::new());
+        let mut new_fallback = |q: Point| {
+            let (ray, regions) = new_ray.as_mut()?;
+            ray.color_at(q).unwrap_or_else(|| {
+                Self::color_in(regions.get_or_insert_with(|| ray.map.color_regions()), q)
+            })
+        };
+        let (mut old_memo, mut new_memo) =
+            (vec![None; 2 * pieces.len()], vec![None; 2 * pieces.len()]);
 
         // 5. 区間の新しい色。左右が違う区間だけ残す：（始点, 終点, 左の色, 右の色, 区間の番号）
         let mut kept: Vec<(usize, usize, Option<Color32>, Option<Color32>, usize)> = Vec::new();
@@ -2622,19 +2994,51 @@ impl PlanarMap {
         }
 
         // 6. 区間をつないで辺にする。頂点の次数が 2 で、出どころと左右の色が同じで、t が続いていれば、つなげる
-        let mut at: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut at: IntMap<usize, Vec<usize>> = IntMap::default();
         for (ki, &(a, b, ..)) in kept.iter().enumerate() {
             at.entry(a).or_default().push(ki);
             at.entry(b).or_default().push(ki);
         }
-        let mut untouched_deg: HashMap<usize, usize> = HashMap::new();
-        if copy_untouched {
-            for (e, ed) in self.edges.iter().enumerate() {
-                if !touched[e] {
-                    *untouched_deg.entry(ed.a).or_insert(0) += 1;
-                    *untouched_deg.entry(ed.b).or_insert(0) += 1;
+        // 中の辺（重ねるものの範囲の中にあって、線から離れた辺）：辺の真ん中の点で、重ねるものの中か（地図なら色）を決めて
+        // 両側に `rule` を当てる。線と交わらないので、辺のどこでも同じ。左右が同じ色になれば消える
+        let mut interior_kept: Vec<MapEdge> = Vec::new();
+        for e in (0..self.edges.len()).filter(|&e| interior[e]) {
+            let ed = self.edges[e];
+            let m = self.quad(e).eval(0.5);
+            let (inside, p) = match input {
+                MapInput::Shapes(shapes) => (
+                    shapes.iter().filter(|s| s.contains_point(m)).count() % 2 == 1,
+                    None,
+                ),
+                MapInput::Map(_) => {
+                    let c = new_fallback(m);
+                    (c.is_some(), c)
                 }
+            };
+            let (l, r) = (
+                rule.apply(inside, p, ed.left),
+                rule.apply(inside, p, ed.right),
+            );
+            if l != r {
+                interior_kept.push(MapEdge {
+                    left: l,
+                    right: r,
+                    left_src: if l == ed.left { ed.left_src } else { None },
+                    right_src: if r == ed.right { ed.right_src } else { None },
+                    ..ed
+                });
             }
+        }
+        let mut untouched_deg: IntMap<usize, usize> = IntMap::default();
+        for (e, ed) in self.edges.iter().enumerate() {
+            if !touched[e] && !interior[e] && copy_untouched {
+                *untouched_deg.entry(ed.a).or_insert(0) += 1;
+                *untouched_deg.entry(ed.b).or_insert(0) += 1;
+            }
+        }
+        for ed in &interior_kept {
+            *untouched_deg.entry(ed.a).or_insert(0) += 1;
+            *untouched_deg.entry(ed.b).or_insert(0) += 1;
         }
         // 区間の主な出どころ（前からある辺を先に）。区間の向き（a→b）での t
         let main_src = |ki: usize| -> Prov {
@@ -2656,16 +3060,17 @@ impl PlanarMap {
         // 重ねるものから離れた辺は、そのまま（元の図形の印も残す）
         let mut edges: Vec<MapEdge> = if copy_untouched {
             (0..self.edges.len())
-                .filter(|&e| !touched[e])
+                .filter(|&e| !touched[e] && !interior[e])
                 .map(|e| self.edges[e])
                 .collect()
         } else {
             Vec::new()
         };
+        edges.extend(interior_kept);
         let n_untouched = edges.len();
         let mut used = vec![false; kept.len()];
         // 当て直した辺（辺の番号 → 折れ線の区間）と、そのうち前からある辺が丸ごと元の曲線のまま残ったもの
-        let mut restored: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
+        let mut restored: IntMap<usize, Vec<(usize, usize)>> = IntMap::default();
         let mut whole_old: HashSet<usize> = HashSet::new();
         for start in 0..kept.len() {
             if used[start] {
@@ -2761,9 +3166,13 @@ impl PlanarMap {
                 })
                 .filter(|sub| {
                     // 鎖の折れ線が、当て直した曲線から離れていないか
+                    // （まず、区間の t に当たる曲線の点との距離を見る。これが近ければ、いちばん近い点を探すまでもない）
                     chain.iter().all(|c| {
-                        let (a, b, ..) = piece_ends(c);
-                        nearest_on_quad(sub, nodes[a].midpoint(nodes[b])).1 <= 4.0 * FLAT_TOL
+                        let (a, b, ta, tb) = piece_ends(c);
+                        let mid = nodes[a].midpoint(nodes[b]);
+                        let s = ((ta + tb) * 0.5 - t0) / (t1 - t0);
+                        (sub.eval(s.clamp(0.0, 1.0)) - mid).hypot() <= 4.0 * FLAT_TOL
+                            || nearest_on_quad(sub, mid).1 <= 4.0 * FLAT_TOL
                     })
                 })
                 .map(|sub| sub.p1);
@@ -2824,7 +3233,7 @@ impl PlanarMap {
             .collect();
         let to_straight = |m: &mut PlanarMap,
                            e: usize,
-                           restored: &mut HashMap<usize, Vec<(usize, usize)>>,
+                           restored: &mut IntMap<usize, Vec<(usize, usize)>>,
                            near_untouched: &mut Vec<usize>| {
             let Some(segs) = restored.remove(&e) else {
                 return;
@@ -2852,7 +3261,7 @@ impl PlanarMap {
                 }
             }
         };
-        let check_list = |restored: &HashMap<usize, Vec<(usize, usize)>>,
+        let check_list = |restored: &IntMap<usize, Vec<(usize, usize)>>,
                           near_untouched: &[usize],
                           len: usize| {
             let orig: Vec<bool> = (0..len)
@@ -2867,11 +3276,23 @@ impl PlanarMap {
             check.dedup();
             (check, orig)
         };
+        // 最後に調べた面の輪郭と、そのあと辺を変えていないか（安全網でそのまま使う）
+        let mut cycles: Option<Vec<Vec<(usize, bool)>>> = None;
+        let mut crossing_free = false;
         for _ in 0..4 {
             // 交わり：交わった当て直しの辺を折れ線にして、交わりが無くなるまで
+            crossing_free = false;
             for _ in 0..8 {
                 let (check, orig) = check_list(&restored, &near_untouched, m.edges.len());
                 let hits = m.crossings_grid(&check, &orig);
+                // 当て直していない辺どうしの交わりは、折れ線にしても消えない（元の地図が壊れている）。最後の安全網で
+                // 止まるのと同じなので、ここで止める
+                if hits
+                    .iter()
+                    .any(|(e, _, f, _)| !restored.contains_key(e) && !restored.contains_key(f))
+                {
+                    return None;
+                }
                 let mut hit: Vec<usize> = hits
                     .iter()
                     .flat_map(|&(e, _, f, _)| [e, f])
@@ -2879,6 +3300,9 @@ impl PlanarMap {
                     .collect();
                 hit.sort_unstable();
                 hit.dedup();
+                if hits.is_empty() {
+                    crossing_free = true;
+                }
                 if hit.is_empty() {
                     break;
                 }
@@ -2887,8 +3311,9 @@ impl PlanarMap {
                 }
             }
             // 面の輪郭の色
+            let cs = m.face_cycles();
             let mut hit: Vec<usize> = Vec::new();
-            for c in m.face_cycles() {
+            for c in &cs {
                 let bad = c.iter().any(|h| h.0 == usize::MAX)
                     || c.windows(2)
                         .any(|w| m.side_color(w[0]) != m.side_color(w[1]));
@@ -2903,21 +3328,27 @@ impl PlanarMap {
             hit.sort_unstable();
             hit.dedup();
             if hit.is_empty() {
+                cycles = Some(cs);
                 break;
             }
+            crossing_free = false;
             for e in hit {
                 to_straight(&mut m, e, &mut restored, &mut near_untouched);
             }
         }
         // 安全網：交わりが残っていないこと
-        let (check, orig) = check_list(&restored, &near_untouched, m.edges.len());
-        if !m.crossings_grid(&check, &orig).is_empty() {
-            return None;
+        if !crossing_free {
+            let (check, orig) = check_list(&restored, &near_untouched, m.edges.len());
+            if !m.crossings_grid(&check, &orig).is_empty() {
+                return None;
+            }
         }
         m.compact_nodes();
         // 安全網：面の輪郭が閉じて色がそろい、面が取り出せること（元の地図にもともとある壊れた所は数に入れる）
-        let (open, mixed) = m.cycle_check();
-        let broken = m.faces().1;
+        // 頂点の番号を詰めても辺の番号は変わらないので、面の輪郭はそのまま使える
+        let cycles = cycles.unwrap_or_else(|| m.face_cycles());
+        let (open, mixed) = m.cycle_counts(&cycles);
+        let broken = m.faces_of(&cycles).1;
         if open + mixed + broken > 0 {
             let (o_open, o_mixed) = self.cycle_check();
             if open > o_open || mixed > o_mixed || broken > self.faces().1 {

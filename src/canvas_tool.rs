@@ -3604,9 +3604,12 @@ pub(crate) fn draw_registration_cross(
 }
 
 /// 片 `pieces` を `base_shapes` に結合する。レイヤー・階層ごとに、片を1つの地図にして、そのレイヤーの生の図形の地図の上に置く
-/// （片どうしの境目は1本の辺のまま。変わった図形だけを差し替える）。地図で置けないときは、今までのやり方で結合する
+/// （片どうしの境目は1本の辺のまま。変わった図形だけを差し替える）。地図で置けないときは、今までのやり方で結合する。
+/// 置く計算はレイヤーをまたがないので、2つ以上あれば同時に計算する
 fn merge_pieces_layer_by_layer(base_shapes: &mut Vec<FillShape>, pieces: Vec<FillShape>) {
-    use crate::planar_map::{apply_shape_diff, place_pieces_diff, MapEditOutcome};
+    use crate::planar_map::{
+        apply_shape_diff, per_layer_parallel, place_pieces_diff, MapEditOutcome,
+    };
     let mut parts: Vec<(LayerId, Vec<u64>, Vec<FillShape>)> = Vec::new();
     for p in pieces {
         match parts
@@ -3617,8 +3620,12 @@ fn merge_pieces_layer_by_layer(base_shapes: &mut Vec<FillShape>, pieces: Vec<Fil
             None => parts.push((p.layer_id, p.group_path.clone(), vec![p])),
         }
     }
-    for (layer_id, group_path, layer_pieces) in parts {
-        match place_pieces_diff(base_shapes, layer_id, &group_path, &layer_pieces) {
+    let shapes: &[FillShape] = base_shapes;
+    let outcomes = per_layer_parallel(&parts, |(layer_id, group_path, layer_pieces)| {
+        place_pieces_diff(shapes, *layer_id, group_path, layer_pieces)
+    });
+    for ((layer_id, group_path, layer_pieces), outcome) in parts.into_iter().zip(outcomes) {
+        match outcome {
             MapEditOutcome::Changed(removed, added) => {
                 apply_shape_diff(base_shapes, &removed, added, layer_id, &group_path)
             }

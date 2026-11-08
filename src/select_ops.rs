@@ -334,26 +334,31 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
             .as_ref()
             .map(|fl| fl.hidden.clone())
             .unwrap_or_default();
-        let mut splits: Vec<(u64, Option<crate::planar_map::MarqueeSplit>)> = Vec::new();
+        let mut split_lids: Vec<u64> = Vec::new();
         for shape in &base_shapes {
             if !editable_lids.contains(&shape.layer_id)
                 || !shape.is_raw_at_scope(&editing_group_path)
                 || selection.contains_shape(shape)
                 || hidden_now.contains(&shape.shape_id)
                 || !rects_overlap(shape.bounding_box(), rect)
-                || splits.iter().any(|(lid, _)| *lid == shape.layer_id)
+                || split_lids.contains(&shape.layer_id)
             {
                 continue;
             }
-            let split = crate::planar_map::marquee_split(
+            split_lids.push(shape.layer_id);
+        }
+        // レイヤーごとの切り分けは、ほかのレイヤーを見ないので同時に計算する
+        let split_results = crate::planar_map::per_layer_parallel(&split_lids, |&lid| {
+            crate::planar_map::marquee_split(
                 &base_shapes,
-                shape.layer_id,
+                lid,
                 &editing_group_path,
                 |s| selection.contains_shape(s) || hidden_now.contains(&s.shape_id),
                 &clip_rect_shape,
-            );
-            splits.push((shape.layer_id, split));
-        }
+            )
+        });
+        let splits: Vec<(u64, Option<crate::planar_map::MarqueeSplit>)> =
+            split_lids.into_iter().zip(split_results).collect();
         // 切った片と残りを入れ終えたレイヤー
         let mut lifted_layers: Vec<u64> = Vec::new();
         for shape in &base_shapes {
