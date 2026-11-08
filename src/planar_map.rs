@@ -1826,16 +1826,69 @@ pub(crate) fn reshape_diff(
         .filter(|(removed, added)| !removed.is_empty() || !added.is_empty())
 }
 
-/// 差分を図形の並びに入れる。新しい形は、消した図形のうち最初のものの位置に入れる
+/// 差分を図形の並びに入れる。新しい形は、消した図形のうち最初のものの位置に入れる。
+/// 何も消さないとき（何も無い所へのブラシなど）は、レイヤー `layer_id`・階層 `group_path` の生の図形の置き場
+/// （グループ・シンボルより下）に入れる
 pub(crate) fn apply_shape_diff(
     shapes: &mut Vec<FillShape>,
     removed: &[ShapeId],
     added: Vec<FillShape>,
+    layer_id: LayerId,
+    group_path: &[u64],
 ) {
     let at = shapes.iter().position(|s| removed.contains(&s.shape_id));
     shapes.retain(|s| !removed.contains(&s.shape_id));
-    let at = at.unwrap_or(shapes.len()).min(shapes.len());
+    let at = at
+        .unwrap_or_else(|| crate::vector_boolean::raw_scope_insert_index(shapes, layer_id, group_path))
+        .min(shapes.len());
     shapes.splice(at..at, added);
+}
+
+/// 地図で編集した結果
+#[derive(Debug)]
+pub(crate) enum MapEditOutcome {
+    /// 形が変わった：（消す元の図形, 新しく入れる塗りの形）
+    Changed(Vec<ShapeId>, Vec<FillShape>),
+    /// 形が変わらない
+    Unchanged,
+    /// 地図では編集できない（重ねた結果が安全網で止まった・壊れた輪郭の面に触れる）
+    Refused,
+}
+
+/// 図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の生の図形を地図にして、`edit` で編集した差分。
+/// 元の地図の壊れた輪郭（閉じない・色がまざる）の辺を変える編集は `Refused`（壊れた輪郭の面は図形に書き戻せず、消えてしまうため）
+pub(crate) fn map_edit_diff(
+    shapes: &[FillShape],
+    layer_id: LayerId,
+    group_path: &[u64],
+    edit: impl FnOnce(&PlanarMap) -> Option<PlanarMap>,
+) -> MapEditOutcome {
+    let map = PlanarMap::from_faces(
+        shapes
+            .iter()
+            .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path)),
+    );
+    let Some(next) = edit(&map) else {
+        return MapEditOutcome::Refused;
+    };
+    let keys: HashSet<[u64; 8]> = (0..map.edges.len()).map(|e| edge_key(&map, e)).collect();
+    let next_keys: HashSet<[u64; 8]> = (0..next.edges.len()).map(|e| edge_key(&next, e)).collect();
+    let broken_touched = map.face_cycles().iter().any(|c| {
+        let broken = c.iter().any(|h| h.0 == usize::MAX)
+            || c.windows(2).any(|w| map.side_color(w[0]) != map.side_color(w[1]));
+        broken
+            && c.iter()
+                .any(|h| h.0 != usize::MAX && !next_keys.contains(&edge_key(&map, h.0)))
+    });
+    if broken_touched {
+        return MapEditOutcome::Refused;
+    }
+    let (removed, added) = rewrite_shapes(&map, &keys, &next, shapes, layer_id, group_path);
+    if removed.is_empty() && added.is_empty() {
+        MapEditOutcome::Unchanged
+    } else {
+        MapEditOutcome::Changed(removed, added)
+    }
 }
 
 // ============================================================================
@@ -2036,10 +2089,12 @@ impl PlanarMap {
     /// バケツ：点 `p` を含む面（辺で囲まれた所。何も塗っていない所も）を `color` にする。
     /// どの輪郭にも囲まれていない所・すでに `color` の面は `None`
     pub(crate) fn with_face_filled(&self, p: Point, color: Color32) -> Option<PlanarMap> {
-        let cycles = self.face_cycles();
-        if cycles.iter().any(|c| c.iter().any(|h| h.0 == usize::MAX)) {
-            return None;
-        }
+        // 閉じない輪郭（壊れた所）は使わない
+        let cycles: Vec<Vec<(usize, bool)>> = self
+            .face_cycles()
+            .into_iter()
+            .filter(|c| c.iter().all(|h| h.0 != usize::MAX))
+            .collect();
         let info: Vec<(f64, BezPath, KRect)> = cycles
             .iter()
             .map(|c| {
@@ -2597,9 +2652,14 @@ impl PlanarMap {
             return None;
         }
         m.compact_nodes();
-        // 安全網：面の輪郭が閉じて色がそろい、面が取り出せること
-        if m.cycle_check() != (0, 0) || m.faces().1 != 0 {
-            return None;
+        // 安全網：面の輪郭が閉じて色がそろい、面が取り出せること（元の地図にもともとある壊れた所は数に入れる）
+        let (open, mixed) = m.cycle_check();
+        let broken = m.faces().1;
+        if open + mixed + broken > 0 {
+            let (o_open, o_mixed) = self.cycle_check();
+            if open > o_open || mixed > o_mixed || broken > self.faces().1 {
+                return None;
+            }
         }
         Some(m)
     }

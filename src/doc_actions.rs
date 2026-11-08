@@ -13,7 +13,9 @@ use crate::canvas_tool::{
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
 };
-use crate::planar_map::{apply_shape_diff, reshape_diff, MapEdit};
+use crate::planar_map::{
+    apply_shape_diff, map_edit_diff, reshape_diff, MapEdit, MapEditOutcome, MapInput, MapRule,
+};
 use crate::select_ops::{
     apply_marquee_selection, compute_hover_target, enter_group_at, exit_current_group,
     prepare_arrange_selected, prepare_clear_active_frame_shapes, prepare_delete_selected_shapes,
@@ -29,8 +31,8 @@ use crate::symbol_ops::{
 };
 use crate::timeline::{Layer, Timeline, TimelineCellSelection, MAX_LAYERS_PER_TIMELINE};
 use crate::vector_boolean::{
-    boolean_operation, erase_from_canvas, find_enclosed_region_at, merge_disjoint_fill_into_canvas,
-    merge_shapes_into_canvas, BoolOp,
+    erase_from_canvas, find_enclosed_region_at, merge_disjoint_fill_into_canvas,
+    merge_shapes_into_canvas,
 };
 use crate::vector_engine::{
     affine_rotate_around, affine_scale_around, rects_overlap, FillShape, MAX_VIEW_ZOOM,
@@ -761,7 +763,18 @@ fn apply_raw_outline(
         clear_selection(tab);
         push_undo(tab, None);
         edit_layers(tab, &[target_lid], |edit| {
-            merge_shapes_into_canvas(&mut edit.shapes, stroke_shapes);
+            let scope = edit.editing_group_path.clone();
+            let paint = MapRule::Paint(Some(brush_color));
+            match map_edit_diff(&edit.shapes, target_lid, &scope, |m| {
+                m.overlay(MapInput::Shapes(&stroke_shapes), paint)
+            }) {
+                MapEditOutcome::Changed(removed, added) => {
+                    apply_shape_diff(&mut edit.shapes, &removed, added, target_lid, &scope)
+                }
+                MapEditOutcome::Unchanged => {}
+                // 地図で重ねられないとき（安全網で止まった・壊れた輪郭に触れる）は、今までのやり方で結合する
+                MapEditOutcome::Refused => merge_shapes_into_canvas(&mut edit.shapes, stroke_shapes),
+            }
         });
         true
     } else {
@@ -779,12 +792,18 @@ fn apply_raw_outline(
         // 何も消えなければ edit_layers が false を返し、apply が Undo の控えを捨てる
         push_undo(tab, None);
         edit_layers(tab, &[target_lid], |edit| {
-            erase_from_canvas(
-                &mut edit.shapes,
-                &stroke_shapes,
-                target_lid,
-                &edit.editing_group_path,
-            );
+            let scope = edit.editing_group_path.clone();
+            match map_edit_diff(&edit.shapes, target_lid, &scope, |m| {
+                m.overlay(MapInput::Shapes(&stroke_shapes), MapRule::Paint(None))
+            }) {
+                MapEditOutcome::Changed(removed, added) => {
+                    apply_shape_diff(&mut edit.shapes, &removed, added, target_lid, &scope)
+                }
+                MapEditOutcome::Unchanged => {}
+                MapEditOutcome::Refused => {
+                    erase_from_canvas(&mut edit.shapes, &stroke_shapes, target_lid, &scope)
+                }
+            }
         })
     }
 }
@@ -896,84 +915,76 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
         let Some(hit_shape) = scene.get(hit_idx).cloned() else {
             return false;
         };
-        if !occluded_above && hit_shape.is_raw_at_scope(&tab.session.editing_group_path) {
-            if hit_shape.color == fill_color {
-                return false;
-            }
-            let hit_bbox = hit_shape.bounding_box();
-            let overlapping_walls: Vec<FillShape> = all_visible_shapes
-                .iter()
-                .filter(|s| {
-                    (s.layer_id != target_lid
-                        || !s.is_raw_at_scope(&tab.session.editing_group_path))
-                        && !s.contains_point(pt)
-                        && rects_overlap(s.bounding_box(), hit_bbox)
-                })
-                .cloned()
-                .collect();
-            if !overlapping_walls.is_empty() {
-                let pieces = boolean_operation(
-                    std::slice::from_ref(&hit_shape),
-                    &overlapping_walls,
-                    BoolOp::Difference,
-                    fill_color,
-                );
-                if pieces.len() > 1 {
-                    if let Some(split_piece) = pieces.into_iter().find(|p| p.contains_point(pt)) {
-                        push_undo(tab, None);
-                        let editing_group_path = tab.session.editing_group_path.clone();
-                        edit_layers(tab, &[target_lid], |edit| {
-                            merge_shapes_into_canvas(
-                                &mut edit.shapes,
-                                vec![split_piece.with_scope(target_lid, &editing_group_path)],
-                            );
-                        });
-                        return true;
-                    }
-                }
-            }
-
-            focus_active_layer_to_shape_by_id(tab, hit_shape.shape_id);
-            if !tab
-                .session
-                .base_cache
-                .shapes()
-                .iter()
-                .any(|s| s.shape_id == hit_shape.shape_id)
-            {
-                return false;
-            }
-            push_undo(tab, None);
-            let hit_id = hit_shape.shape_id;
-            let hit_lid = hit_shape.layer_id;
-            edit_layers(tab, &[hit_lid], |edit| {
-                if let Some(pos) = edit.shapes.iter().position(|s| s.shape_id == hit_id) {
-                    let mut target = edit.shapes.remove(pos);
-                    target.set_color(fill_color);
-                    merge_disjoint_fill_into_canvas(&mut edit.shapes, target);
-                }
-            });
-            return true;
+        // 前面のレイヤーに覆われている所・グループやシンボルの上は塗らない
+        if occluded_above || !hit_shape.is_raw_at_scope(&tab.session.editing_group_path) {
+            return false;
         }
-        return false;
+        if hit_shape.color == fill_color {
+            return false;
+        }
+        focus_active_layer_to_shape_by_id(tab, hit_shape.shape_id);
     }
+    fill_face_at(tab, target_lid, fill_color, pt)
+}
 
-    let wall_shapes: Vec<FillShape> = all_visible_shapes
-        .into_iter()
-        .filter(|s| !s.contains_point(pt))
+/// バケツ：レイヤー `target_lid`・編集中の階層の生の図形を地図にして、点 `pt` を含む面（色のある面、または
+/// 同じレイヤー・同じ階層の線で囲まれた何も無い所）を `fill_color` にする（Animate と同じく、ほかのレイヤーや
+/// グループの図形は壁にしない）
+fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) -> bool {
+    let scope = tab.session.editing_group_path.clone();
+    let outcome = map_edit_diff(tab.session.base_cache.shapes(), target_lid, &scope, |m| {
+        m.with_face_filled(pt, fill_color)
+    });
+    match outcome {
+        MapEditOutcome::Changed(removed, added) => {
+            push_undo(tab, None);
+            edit_layers(tab, &[target_lid], |edit| {
+                apply_shape_diff(&mut edit.shapes, &removed, added.clone(), target_lid, &scope);
+            });
+            true
+        }
+        MapEditOutcome::Unchanged => false,
+        MapEditOutcome::Refused => fill_face_at_with_shapes(tab, target_lid, fill_color, pt),
+    }
+}
+
+/// 地図で塗れないとき（壊れた輪郭がある所）の、今までのやり方：点を含む生の図形の色を変えて結合する。
+/// 何も無い所は、同じレイヤー・同じ階層の生の図形を壁にして囲まれた所を探す
+fn fill_face_at_with_shapes(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) -> bool {
+    let scope = tab.session.editing_group_path.clone();
+    let own: Vec<FillShape> = tab
+        .session
+        .base_cache
+        .shapes()
+        .iter()
+        .filter(|s| s.layer_id == target_lid && s.is_raw_at_scope(&scope))
+        .cloned()
         .collect();
-    if let Some(enclosed_fill) = find_enclosed_region_at(&wall_shapes, pt, fill_color) {
+    if let Some(hit) = own.iter().rev().find(|s| s.contains_point(pt)) {
+        if hit.color == fill_color {
+            return false;
+        }
         push_undo(tab, None);
-        let editing_group_path = tab.session.editing_group_path.clone();
+        let hit_id = hit.shape_id;
+        edit_layers(tab, &[target_lid], |edit| {
+            if let Some(pos) = edit.shapes.iter().position(|s| s.shape_id == hit_id) {
+                let mut target = edit.shapes.remove(pos);
+                target.set_color(fill_color);
+                merge_disjoint_fill_into_canvas(&mut edit.shapes, target);
+            }
+        });
+        return true;
+    }
+    if let Some(enclosed_fill) = find_enclosed_region_at(&own, pt, fill_color) {
+        push_undo(tab, None);
         edit_layers(tab, &[target_lid], |edit| {
             merge_disjoint_fill_into_canvas(
                 &mut edit.shapes,
-                enclosed_fill.with_scope(target_lid, &editing_group_path),
+                enclosed_fill.with_scope(target_lid, &scope),
             );
         });
         return true;
     }
-
     false
 }
 
@@ -1122,7 +1133,7 @@ fn apply_map_edit(tab: &mut Tab, shape_id: ShapeId, map_edit: MapEdit) -> bool {
     push_undo(tab, None);
     focus_active_layer_to_shape_by_id(tab, shape_id);
     edit_layers(tab, &[layer_id], |edit| {
-        apply_shape_diff(&mut edit.shapes, &removed, added.clone());
+        apply_shape_diff(&mut edit.shapes, &removed, added.clone(), layer_id, &group_path);
     });
     true
 }

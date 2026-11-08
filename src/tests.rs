@@ -3309,9 +3309,10 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
 }
 
 #[test]
-fn test_bucket_fill_locked_walls_and_cluster_culling() {
+fn test_bucket_fill_ignores_other_layer_walls_and_cluster_culling() {
     let red = Color32::from_rgb(220, 50, 50);
-    // (a) バケツツール：アクティブレイヤーの円環を、ロックされた別レイヤーの分割線で2分割した際、分割線が優先されて片側のみ塗られること
+    // (a) バケツツール：アクティブレイヤーの円環の中を、ロックされた別レイヤーの線が横切っていても、その線は壁にしない
+    //     （Adobe Animate と同じく、同じレイヤー・同じ階層の線だけが壁）。円環の中が全部塗られること
     let mut bucket_app = Is2dApp::default();
     let center = Point::new(200.0, 200.0);
     let ring_pts: Vec<Point> = (0..=48)
@@ -3329,6 +3330,8 @@ fn test_bucket_fill_locked_walls_and_cluster_culling() {
     let raw_div =
         generate_brush_outline(&[Point::new(200.0, 120.0), Point::new(200.0, 280.0)], 6.0);
     doc_actions::commit_raw_outline(&mut bucket_app, &raw_div);
+    // (b) で使う壁（円環と分割線）
+    let walls_before = scene_summary(&bucket_app).shapes;
     timeline_ui::set_layer_locked(&mut bucket_app, 1, true);
     timeline_ui::switch_to_layer_and_frame(&mut bucket_app, 0, 0);
 
@@ -3345,13 +3348,13 @@ fn test_bucket_fill_locked_walls_and_cluster_culling() {
         .expect("赤の塗りシェイプが生成されていること");
     assert!(red_fill.contains_point(Point::new(170.0, 200.0)));
     assert!(
-        !red_fill.contains_point(Point::new(230.0, 200.0)),
-        "ロックされた別レイヤーの分割線が壁として機能し、反対側の右半分までは塗りつぶされないこと"
+        red_fill.contains_point(Point::new(230.0, 200.0)),
+        "別のレイヤーの線は壁にならず、円環の中の反対側まで塗られること"
     );
 
     // (b) 大量の無関係な遠方シェイプが存在する場合も スイープライン＋Union-Find AABB 連結クラスタ事前カリングにより
     // クラスタ外クリックは即座に None を返し、対象閉領域内クリックは正確に抽出されること
-    let mut many_walls = summary_bucket.shapes;
+    let mut many_walls = walls_before;
     for idx in 0..80 {
         let ox = 1500.0 + (idx % 10) as f64 * 120.0;
         let oy = 1500.0 + (idx / 10) as f64 * 120.0;
@@ -21660,4 +21663,83 @@ mod map_overlay {
         let out = out.expect("細い面にかかっても重ねられる");
         assert!(valid(&out));
     }
+
+    /// レイヤー `layer` の生の図形から作った地図が壊れていないか
+    fn layer_map_valid(app: &Is2dApp, layer: usize) -> bool {
+        let shapes: Vec<FillShape> = app.doc.root.layers[layer].keyframes[0]
+            .cel
+            .shapes
+            .iter()
+            .filter(|s| s.is_raw_at_scope(&[]))
+            .cloned()
+            .collect();
+        let m = PlanarMap::from_faces(shapes.iter());
+        m.cycle_check() == (0, 0) && m.faces().1 == 0
+    }
+
+    /// ブラシ・消しゴムを、少しずつずらしながら重ねても、生の図形はいつも地図として壊れていない
+    /// （境目は両側の図形でビットまで同じ曲線になるので、図形から地図を作り直しても許容が要らない）
+    #[test]
+    fn brush_and_eraser_keep_layer_map_valid() {
+        let mut app = Is2dApp::default();
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN];
+        let mut r = Rng(5);
+        for k in 0..24 {
+            app.tool.tool = if k % 5 == 4 { Tool::Eraser } else { Tool::Brush };
+            app.tool.brush_color = colors[k % 3];
+            let y = 150.0 + (k % 6) as f64 * 0.051;
+            let a = Point::new(100.0 + r.f() * 50.0, y + r.f() * 80.0);
+            let b = Point::new(300.0 + r.f() * 50.0, y + r.f() * 80.0);
+            let raw = generate_brush_outline(&[a, a.midpoint(b), b], 8.0 + r.f() * 6.0);
+            doc_actions::commit_raw_outline(&mut app, &raw);
+            assert!(layer_map_valid(&app, 0), "{k} 回目");
+        }
+    }
+
+    /// 何も無い所にブラシで描いた図形は、同じレイヤーのグループより下に入る
+    #[test]
+    fn brush_into_empty_area_goes_below_groups() {
+        let mut app = Is2dApp::default();
+        app.tool.brush_color = Color32::RED;
+        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&[Point::new(100.0, 100.0), Point::new(200.0, 100.0)], 10.0));
+        app.session.set_selected_indices(vec![0]);
+        let gid = doc_actions::group_selected_shapes(&mut app).unwrap();
+        canvas_tool::clear_selection(&mut app);
+        app.tool.brush_color = Color32::BLUE;
+        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&[Point::new(100.0, 300.0), Point::new(200.0, 300.0)], 10.0));
+        let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        let raw = shapes.iter().position(|s| s.group_path.is_empty()).unwrap();
+        let grouped = shapes.iter().position(|s| s.group_path == vec![gid]).unwrap();
+        assert!(raw < grouped, "生の図形（{raw}）がグループ（{grouped}）より下");
+    }
+
+    /// バケツは、同じレイヤーの生の図形の線で囲まれた所を塗る。グループの図形は壁にしない（Animate と同じ）
+    #[test]
+    fn bucket_uses_only_raw_lines_of_the_layer_as_walls() {
+        let mut app = Is2dApp::default();
+        app.tool.brush_color = Color32::BLACK;
+        let center = Point::new(200.0, 200.0);
+        let ring: Vec<Point> = (0..=48)
+            .map(|i| {
+                let a = (i as f64 / 48.0) * std::f64::consts::TAU;
+                Point::new(center.x + 60.0 * a.cos(), center.y + 60.0 * a.sin())
+            })
+            .collect();
+        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&ring, 6.0));
+        // 円環の中を横切る線を、同じレイヤーのグループとして置く
+        let mut shapes: Vec<FillShape> = app.doc.root.layers[0].keyframes[0].cel.shapes.as_ref().clone();
+        for mut g in make_stroke(Point::new(200.0, 120.0), Point::new(200.0, 280.0), 6.0, Color32::GREEN) {
+            g.group_path = vec![77];
+            shapes.push(g);
+        }
+        put_cel_shapes(&mut app, 0, 0, shapes);
+        app.tool.brush_color = Color32::RED;
+        assert!(doc_actions::bucket_fill_at(&mut app, Point::new(170.0, 200.0)));
+        let red: Vec<&FillShape> = app.doc.root.layers[0].keyframes[0].cel.shapes.iter().filter(|s| s.color == Color32::RED).collect();
+        assert_eq!(red.len(), 1);
+        assert!(red[0].contains_point(Point::new(230.0, 200.0)), "グループの線は壁にならない");
+        assert!(!red[0].contains_point(Point::new(100.0, 200.0)), "円環の外は塗らない");
+        assert!(layer_map_valid(&app, 0));
+    }
+
 }

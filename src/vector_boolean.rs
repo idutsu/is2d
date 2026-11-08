@@ -71,7 +71,8 @@ fn merge_shapes_into_canvas_inner(
     }
 }
 
-fn raw_scope_insert_index(
+/// レイヤー `target_layer_id`・階層 `target_group_path` の生の図形の置き場（その階層の生の図形の後ろ。グループ・シンボルより下）
+pub(crate) fn raw_scope_insert_index(
     canvas: &[FillShape],
     target_layer_id: u64,
     target_group_path: &[u64],
