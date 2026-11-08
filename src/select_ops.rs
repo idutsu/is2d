@@ -578,9 +578,9 @@ pub(crate) fn compute_hover_target(
             });
     }
 
-    // アンカーの追加・削除も、選択が無ければ地図で探す（前後は無い）。選択中（浮いている図形がほかの図形と
-    // 重なることがある）は、今までどおり図形ごとに探す
-    if session.selection.is_empty() && session.floating().is_none() {
+    // アンカーの追加・削除は地図で探す（前後は無い）。浮いている片と残り（ほかの図形と重なることがある）だけは、
+    // 先に図形ごとに探す
+    let Some(fl) = session.floating() else {
         return crate::planar_map::anchor_hover(
             scene,
             session,
@@ -588,9 +588,15 @@ pub(crate) fn compute_hover_target(
             zoom,
             sub_mode == SelectSubMode::AddAnchor,
         );
-    }
+    };
+    let floating_ids: HashSet<u64> = fl
+        .pieces
+        .iter()
+        .chain(&fl.remainder)
+        .map(|s| s.shape_id)
+        .collect();
 
-    // 選択中のアンカーの追加・削除：頂点・辺の当たり判定の候補になる図形を前から順に返す
+    // 浮いている図形の頂点・辺の当たり判定の候補になる図形を前から順に返す
     // （最前面の塗りより後ろの図形と、外接矩形を半径だけ広げてもマウスが入らない図形は除く）
     let topmost_fill_idx = scene.topmost_shape_at(mouse_pt, &session.editing_group_path);
     let candidate_shapes = (0..scene_len).rev().filter_map(|s_idx| {
@@ -599,7 +605,8 @@ pub(crate) fn compute_hover_target(
         }
         let shape = scene.get(s_idx)?;
         let bbox = shape.geometry_bounding_box()?;
-        if !shape.is_raw_at_scope(&session.editing_group_path)
+        if !floating_ids.contains(&shape.shape_id)
+            || !shape.is_raw_at_scope(&session.editing_group_path)
             || !bbox
                 .inflate(anchor_edit_hit_radius, anchor_edit_hit_radius)
                 .contains(mouse_pt)
@@ -669,7 +676,16 @@ pub(crate) fn compute_hover_target(
             }
         }
     }
-    best.map_or(HoverTarget::None, |(_, target)| target)
+    match best {
+        Some((_, target)) => target,
+        None => crate::planar_map::anchor_hover(
+            scene,
+            session,
+            mouse_pt,
+            zoom,
+            sub_mode == SelectSubMode::AddAnchor,
+        ),
+    }
 }
 
 /// 選択中の図形がすべて同じレイヤーにあればその `LayerId` を返す（未選択・複数レイヤーにまたがるときは `None`）

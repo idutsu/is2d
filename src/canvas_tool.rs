@@ -3630,7 +3630,22 @@ fn merge_pieces_layer_by_layer(base_shapes: &mut Vec<FillShape>, pieces: Vec<Fil
                 apply_shape_diff(base_shapes, &removed, added, layer_id, &group_path)
             }
             MapEditOutcome::Unchanged => {}
-            MapEditOutcome::Refused => merge_shapes_into_canvas(base_shapes, layer_pieces),
+            // 片どうしが重なっていて1つの地図にならない（別のレイヤーの絵を1枚のレイヤーへ貼ったときなど）：
+            // 重なり順（下から）に1つずつ置く。それでも置けない片だけ、今までのやり方で結合する
+            MapEditOutcome::Refused => {
+                for piece in layer_pieces {
+                    let one = std::slice::from_ref(&piece);
+                    match place_pieces_diff(base_shapes, layer_id, &group_path, one) {
+                        MapEditOutcome::Changed(removed, added) => {
+                            apply_shape_diff(base_shapes, &removed, added, layer_id, &group_path)
+                        }
+                        MapEditOutcome::Unchanged => {}
+                        MapEditOutcome::Refused => {
+                            merge_shapes_into_canvas(base_shapes, vec![piece])
+                        }
+                    }
+                }
+            }
         }
     }
 }

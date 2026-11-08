@@ -9233,7 +9233,8 @@ fn test_stage5_anchor_edit_preserved_after_nudge_deselect_and_frame_scrub() {
             },
         ],
     );
-    assert!(app.session.has_modified_floating());
+    // 浮いている図形のほかのアンカー編集は地図で行うので、先に浮いている図形（動かした赤）を確定する
+    assert!(app.session.floating().is_none());
     let blue_before_commit = app
         .scene()
         .iter()
@@ -19049,9 +19050,10 @@ fn test_boolean_ops_with_far_holes_detached() {
         assert!(apply(&mut app, Action::Undo));
     }
 
-    // 5. 変わらないとき：塗られた所の中に同じ色の短い線を描く → shape_id が変わらない
+    // 5. 変わらないとき：塗られた所の中に同じ色の短い線を描く → shape_id が変わらず、Undo の1手も積まない
     {
-        assert!(apply(
+        let undo0 = app.history.undo_stack.len();
+        assert!(!apply(
             &mut app,
             Action::PaintStroke {
                 points: vec![Point::new(180.0, 100.0), Point::new(200.0, 100.0)],
@@ -19059,6 +19061,7 @@ fn test_boolean_ops_with_far_holes_detached() {
                 color: Color32::RED,
             },
         ));
+        assert_eq!(app.history.undo_stack.len(), undo0);
         let res = &app.doc.root.layers[0].keyframes[0].cel.shapes;
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].shape_id, orig_shape.shape_id);
@@ -20094,8 +20097,9 @@ fn test_adding_base_shape_to_floating_selection_keeps_floating_piece_on_top() {
     }
 }
 
+/// 片のあるレイヤーが複数あるとき、レイヤーごとに同時に置いても、1レイヤーずつ順に置いたときと同じになる
 #[test]
-fn test_merging_floating_pieces_layer_by_layer_matches_merging_all_at_once() {
+fn test_merging_floating_pieces_layer_by_layer_matches_merging_each_layer_in_turn() {
     use crate::canvas_tool::{merge_floating_into_base_shapes, Floating};
     use crate::vector_engine::next_shape_id;
 
@@ -20140,9 +20144,21 @@ fn test_merging_floating_pieces_layer_by_layer_matches_merging_all_at_once() {
         })
         .collect();
 
-    let mut all_at_once = base_shapes.clone();
-    merge_shapes_into_canvas(&mut all_at_once, pieces.clone());
-    all_at_once.sort_by_key(|s| s.layer_id);
+    let floating_of = |pieces: Vec<FillShape>| Floating {
+        pieces,
+        remainder: Vec::new(),
+        hidden: std::collections::HashSet::new(),
+        modified: true,
+    };
+    let mut in_turn = base_shapes.clone();
+    for lid in 1u64..=3 {
+        let layer_pieces = pieces
+            .iter()
+            .filter(|p| p.layer_id == lid)
+            .cloned()
+            .collect();
+        merge_floating_into_base_shapes(&mut in_turn, floating_of(layer_pieces), &[1, 2, 3]);
+    }
 
     let mut layer_by_layer = base_shapes;
     merge_floating_into_base_shapes(
@@ -20177,7 +20193,7 @@ fn test_merging_floating_pieces_layer_by_layer_matches_merging_all_at_once() {
             .collect()
     };
 
-    assert_eq!(summarize(&layer_by_layer), summarize(&all_at_once));
+    assert_eq!(summarize(&layer_by_layer), summarize(&in_turn));
 }
 
 fn blob_with_small_hole_and_wavy_stroke(color: Color32) -> (Vec<FillShape>, Vec<FillShape>) {
@@ -21461,7 +21477,7 @@ mod map_overlay {
     /// 地図が壊れていないか（輪郭が閉じて色がそろう・面が取り出せる・辺が交わらない）
     pub(super) fn valid(m: &PlanarMap) -> bool {
         let all: Vec<usize> = (0..m.edges.len()).collect();
-        m.cycle_check() == (0, 0) && m.faces().1 == 0 && m.crossings_pub(&all).is_empty()
+        m.cycle_check() == (0, 0) && m.faces().1 == 0 && m.crossings_grid_pub(&all).is_empty()
     }
 
     /// 2つの図形の並び（後ろほど上）の色を、格子の点で比べる。境目から 0.3px 以内の点は数えない
@@ -21749,7 +21765,7 @@ mod map_overlay {
         };
         m.edges.push(edge(0, 1, a.p1));
         m.edges.push(edge(2, 3, b.p1));
-        assert!(m.crossings_pub(&[0, 1]).is_empty());
+        assert!(m.crossings_grid_pub(&[0, 1]).is_empty());
         let c = QuadBez::new(
             Point::new(0.0, 5.0),
             Point::new(50.0, 0.0),
@@ -21757,7 +21773,7 @@ mod map_overlay {
         );
         m.nodes.extend([c.p0, c.p2]);
         m.edges.push(edge(4, 5, c.p1));
-        assert!(!m.crossings_pub(&[2]).is_empty());
+        assert!(!m.crossings_grid_pub(&[2]).is_empty());
     }
 
     /// ほぼ重なった2本の辺（間がごく細い面）の上に重ねても壊れない
@@ -21816,7 +21832,7 @@ mod map_overlay {
             .collect();
         let m = PlanarMap::from_faces(shapes.iter());
         let all: Vec<usize> = (0..m.edges.len()).collect();
-        m.cycle_check() == (0, 0) && m.faces().1 == 0 && m.crossings_pub(&all).is_empty()
+        m.cycle_check() == (0, 0) && m.faces().1 == 0 && m.crossings_grid_pub(&all).is_empty()
     }
 
     /// ブラシ・消しゴムを、少しずつずらしながら重ねても、生の図形はいつも地図として壊れていない
@@ -22268,6 +22284,228 @@ mod map_overlay {
         app
     }
 
+    /// 何かを選んでいても、色の違う2つの図形の境目にアンカーを足す・消すと、両側の図形が一緒に変わる（地図で編集する）。
+    /// 浮いている片（動かした図形）のアンカーは、その片だけが変わる
+    #[test]
+    fn anchor_edit_on_shared_border_changes_both_sides_even_with_selection() {
+        let mut app = Is2dApp::default();
+        let shapes = vec![
+            rect_shape(0.0, 0.0, 100.0, 100.0, Color32::RED),
+            rect_shape(100.0, 0.0, 200.0, 100.0, Color32::BLUE),
+            rect_shape(300.0, 0.0, 400.0, 100.0, Color32::GREEN),
+        ];
+        put_cel_shapes(&mut app, 0, 0, shapes);
+        let border_count = |app: &Is2dApp| {
+            // 境目 x = 100 の上にある頂点の数（赤と青それぞれ）
+            let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+            [Color32::RED, Color32::BLUE].map(|c| {
+                shapes
+                    .iter()
+                    .filter(|s| s.color == c)
+                    .flat_map(|s| {
+                        s.contours()
+                            .flat_map(|k| k.segments.iter().map(|q| q.p0))
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|p| (p.x - 100.0).abs() < 1e-6)
+                    .count()
+            })
+        };
+        let before = border_count(&app);
+        // 緑を選んでおく
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::SelectSingleAt {
+                pt: Point::new(350.0, 50.0)
+            }
+        ));
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::AddAnchor {
+                pt: Point::new(100.0, 50.0)
+            }
+        ));
+        let added = border_count(&app);
+        assert_eq!(
+            added,
+            [before[0] + 1, before[1] + 1],
+            "赤と青の両方にアンカーが足される"
+        );
+        assert!(layer_map_valid(&app, 0));
+        // また緑を選んで、足したアンカーを消す
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::SelectSingleAt {
+                pt: Point::new(350.0, 50.0)
+            }
+        ));
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::DeleteAnchor {
+                pt: Point::new(100.0, 50.0)
+            }
+        ));
+        assert_eq!(border_count(&app), before, "赤と青の両方から消える");
+        assert!(layer_map_valid(&app, 0));
+        // 緑を持ち上げて動かす（浮いている片）：その辺にアンカーを足すと、片だけが変わる
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::SelectSingleAt {
+                pt: Point::new(350.0, 50.0)
+            }
+        ));
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::MoveSelected {
+                delta: KVec2::new(0.0, 150.0)
+            }
+        ));
+        let piece_segs = |app: &Is2dApp| {
+            app.session.floating().map(|fl| {
+                fl.pieces
+                    .iter()
+                    .map(|p| p.exterior.segments.len())
+                    .sum::<usize>()
+            })
+        };
+        let n0 = piece_segs(&app).expect("緑は浮いている");
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::AddAnchor {
+                pt: Point::new(350.0, 150.0)
+            }
+        ));
+        assert_eq!(
+            piece_segs(&app),
+            Some(n0 + 1),
+            "浮いている片だけが変わり、確定はしない"
+        );
+    }
+
+    /// 重なり合う片（別のレイヤーの絵を1枚のレイヤーへまとめて貼ったときなど）は1つの地図にならないので、
+    /// 重なり順に1つずつ地図で置く。結果のレイヤーは地図として壊れず、上の片が上に来る
+    #[test]
+    fn overlapping_pieces_are_placed_one_by_one_on_the_map() {
+        use crate::canvas_tool::{merge_floating_into_base_shapes, Floating};
+        use crate::vector_engine::next_shape_id;
+        // 線 60 本の絵と、それを (13, 7) ずらした写しを、1枚のレイヤーの片にする（片どうしが重なる）
+        let app = review_repeat_scene(5);
+        let drawn: Vec<FillShape> = app.doc.root.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .iter()
+            .cloned()
+            .collect();
+        let lid = drawn[0].layer_id;
+        let mut pieces = drawn.clone();
+        pieces.extend(drawn.iter().map(|s| {
+            let mut c = s.clone();
+            c.shape_id = next_shape_id();
+            c.translate(KVec2::new(13.0, 7.0));
+            c
+        }));
+        let mut shapes =
+            vec![rect_shape(-300.0, -150.0, 300.0, 150.0, Color32::RED).with_scope(lid, &[])];
+        let top = pieces.last().unwrap().clone();
+        merge_floating_into_base_shapes(
+            &mut shapes,
+            Floating {
+                pieces,
+                remainder: Vec::new(),
+                hidden: std::collections::HashSet::new(),
+                modified: true,
+            },
+            &[lid],
+        );
+        let m = PlanarMap::from_faces(shapes.iter());
+        let all: Vec<usize> = (0..m.edges.len()).collect();
+        assert_eq!(m.cycle_check(), (0, 0));
+        assert_eq!(m.faces().1, 0);
+        assert!(m.crossings_grid_pub(&all).is_empty());
+        // いちばん上の片の中の点は、その片の色
+        let p = (0..64)
+            .map(|i| {
+                top.bounding_box().center() + KVec2::new((i % 8) as f64 - 4.0, (i / 8) as f64 - 4.0)
+            })
+            .find(|p| top.contains_point(*p))
+            .expect("片の中の点");
+        let found: Vec<Color32> = shapes
+            .iter()
+            .filter(|s| s.contains_point(p))
+            .map(|s| s.color)
+            .collect();
+        assert_eq!(found, vec![top.color], "後の片が上");
+    }
+
+    /// 前の版の結合（境目がビットまで同じにならない）で描いた図形のセルでも、ブラシ・消しゴム・バケツで、図形を重ね直して
+    /// 地図に戻してから編集する。編集のあとのセルは地図として壊れていない
+    #[test]
+    fn broken_layer_is_rebuilt_before_map_edit() {
+        let broken_app = || {
+            let mut app = Is2dApp::default();
+            let lid = app.doc.root.layers[0].id;
+            let mut r = Rng(3);
+            let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+            let mut shapes: Vec<FillShape> = Vec::new();
+            for _ in 0..30 {
+                let p0 = Point::new(-300.0 + r.f() * 600.0, -180.0 + r.f() * 360.0);
+                let p1 = Point::new(-300.0 + r.f() * 600.0, -180.0 + r.f() * 360.0);
+                let color = colors[(r.f() * 4.0) as usize % 4];
+                let stroke = make_stroke(p0, p1, (2.0 + r.f() * 8.0) as f32, color);
+                merge_shapes_into_canvas(
+                    &mut shapes,
+                    stroke.into_iter().map(|s| s.with_scope(lid, &[])).collect(),
+                );
+            }
+            put_cel_shapes(&mut app, 0, 0, shapes);
+            assert!(
+                !layer_map_valid(&app, 0),
+                "前の版の結合で描いたセルは、地図として壊れている"
+            );
+            app
+        };
+        let cyan = Color32::from_rgb(10, 200, 200);
+        let colors_at = |app: &Is2dApp, p: Point| {
+            app.doc.root.layers[0].keyframes[0]
+                .cel
+                .shapes
+                .iter()
+                .filter(|s| s.contains_point(p))
+                .map(|s| s.color)
+                .collect::<Vec<_>>()
+        };
+        let line: Vec<Point> = (0..=12)
+            .map(|i| Point::new(-200.0 + 30.0 * i as f64, 10.0))
+            .collect();
+        // ブラシ
+        let mut app = broken_app();
+        app.tool.brush_color = cyan;
+        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&line, 6.0));
+        assert!(layer_map_valid(&app, 0), "ブラシのあと、地図に戻っている");
+        assert_eq!(colors_at(&app, Point::new(-50.0, 10.0)), vec![cyan]);
+        // 消しゴム
+        let mut app = broken_app();
+        app.tool.tool = Tool::Eraser;
+        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&line, 6.0));
+        assert!(layer_map_valid(&app, 0), "消しゴムのあと、地図に戻っている");
+        assert!(colors_at(&app, Point::new(-50.0, 10.0)).is_empty());
+        // バケツ：何かの色の面の中の点を塗る
+        let mut app = broken_app();
+        let p = (0..400)
+            .map(|i| {
+                Point::new(
+                    -200.0 + (i % 20) as f64 * 20.0,
+                    -150.0 + (i / 20) as f64 * 15.0,
+                )
+            })
+            .find(|p| colors_at(&app, *p).len() == 1)
+            .expect("塗られた点");
+        app.tool.brush_color = cyan;
+        assert!(doc_actions::bucket_fill_at(&mut app, p));
+        assert!(layer_map_valid(&app, 0), "バケツのあと、地図に戻っている");
+        assert_eq!(colors_at(&app, p), vec![cyan]);
+    }
+
     /// レビュー（e0769c0 第4回）の手順：60 本の線（4色・太さ 1〜8・長さ 50〜300、800×450 全体）を描いたセルで、
     /// 矩形選択 → (7, 3) 動かす → 選択を外す、を矩形を変えながら 60 回繰り返す（120 角 ×20、400 角を左右から縮めて ×20、
     /// 800 角 ×20）。毎回、地図が壊れていないこと
@@ -22351,6 +22589,64 @@ mod map_overlay {
             }
         }
         eprintln!("PROBE 1回（選択＋移動＋確定）の最大 {worst:.1}ms");
+    }
+
+    /// 速さの試し（ふだんは流さない）：前の版の結合で描いたセルで、最初のブラシ（重ね直しを含む）と2本目の時間
+    #[test]
+    #[ignore]
+    fn probe_rebuild_cost() {
+        for n in [60usize, 150] {
+            let mut app = Is2dApp::default();
+            let lid = app.doc.root.layers[0].id;
+            let mut r = Rng(9);
+            let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+            let mut shapes: Vec<FillShape> = Vec::new();
+            for _ in 0..n {
+                let p0 = Point::new(-390.0 + r.f() * 780.0, -215.0 + r.f() * 430.0);
+                let (len, ang) = (50.0 + r.f() * 250.0, r.f() * std::f64::consts::TAU);
+                let p1 = p0 + KVec2::new(ang.cos(), ang.sin()) * len;
+                let color = colors[(r.f() * 4.0) as usize % 4];
+                let stroke = make_stroke(p0, p1, (1.0 + r.f() * 7.0) as f32, color);
+                merge_shapes_into_canvas(
+                    &mut shapes,
+                    stroke.into_iter().map(|s| s.with_scope(lid, &[])).collect(),
+                );
+            }
+            let count = shapes.len();
+            put_cel_shapes(&mut app, 0, 0, shapes);
+            let valid0 = layer_map_valid(&app, 0);
+            // 壊れたままのセルで、400 角の矩形選択（地図で切れずに、図形ごとに切る）
+            let t = std::time::Instant::now();
+            select_ops::apply_marquee_selection(
+                &mut app,
+                Point::new(-200.0, -200.0),
+                Point::new(200.0, 200.0),
+                false,
+            );
+            let t_sel = t.elapsed().as_secs_f64() * 1e3;
+            canvas_tool::clear_selection(&mut app);
+            eprintln!(
+                "PROBE 線 {n} 本：壊れたセルの矩形選択 {t_sel:.1}ms｜選択を外したあとの地図 {}",
+                if layer_map_valid(&app, 0) {
+                    "正常"
+                } else {
+                    "壊れた"
+                }
+            );
+            let valid0 = valid0 && layer_map_valid(&app, 0);
+            app.tool.brush_color = Color32::from_rgb(10, 200, 200);
+            let mut times = Vec::new();
+            for k in 0..2 {
+                let y = -100.0 + 80.0 * k as f64;
+                let pts: Vec<Point> = (0..=12)
+                    .map(|i| Point::new(-200.0 + 30.0 * i as f64, y))
+                    .collect();
+                let t = std::time::Instant::now();
+                doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 6.0));
+                times.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            eprintln!("PROBE 線 {n} 本（図形 {count}、地図 {}）：1本目 {:.1}ms｜2本目 {:.1}ms｜あとの地図 {}", if valid0 { "正常" } else { "壊れた" }, times[0], times[1], if layer_map_valid(&app, 0) { "正常" } else { "壊れた" });
+        }
     }
 
     /// 点の色を半直線で調べた答えが、色ごとの輪郭で調べた答えと同じ（重ね合わせの色決めの最後の手段に使う）

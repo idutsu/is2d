@@ -761,6 +761,7 @@ fn apply_raw_outline(
     }
     if active_tool == Tool::Brush {
         clear_selection(tab);
+        // 絵が変わらなければ（同じ色で塗られた所の中をなぞったなど）edit_layers が false を返し、apply が Undo の控えを捨てる
         push_undo(tab, None);
         edit_layers(tab, &[target_lid], |edit| {
             let scope = edit.editing_group_path.clone();
@@ -777,8 +778,7 @@ fn apply_raw_outline(
                     merge_shapes_into_canvas(&mut edit.shapes, stroke_shapes)
                 }
             }
-        });
-        true
+        })
     } else {
         let has_bbox_overlap = tab.scene().iter().any(|s| {
             s.layer_id == target_lid
@@ -1229,8 +1229,16 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
     } else {
         SelectSubMode::DeleteAnchor
     };
-    let target = compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode);
-    // 地図で探した辺・頂点（選択が無いとき）は、地図で編集する（境目なら両側の図形が変わる）
+    let mut target = compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode);
+    // 浮いている片・残り（ほかの図形と重なることがある）の頂点・辺は、図形ごとに編集する
+    if let Some(done) = edit_floating_anchor(tab, &target, is_add) {
+        return done;
+    }
+    // ほかは地図で編集する（境目なら両側の図形が変わる）。選択・浮いている図形があれば、先に確定して探し直す
+    if !tab.session.selection.is_empty() || tab.session.floating().is_some() {
+        clear_selection(tab);
+        target = compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode);
+    }
     match (is_add, target) {
         (
             true,
@@ -1241,7 +1249,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
                 map_edge: Some(_),
                 ..
             },
-        ) => return apply_map_edit(tab, shape_id, MapEdit::AddAnchor { orig_seg: seg, t }),
+        ) => apply_map_edit(tab, shape_id, MapEdit::AddAnchor { orig_seg: seg, t }),
         (
             false,
             crate::canvas_tool::HoverTarget::Vertex {
@@ -1250,10 +1258,18 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
                 map_node: Some(_),
                 ..
             },
-        ) => return apply_map_edit(tab, shape_id, MapEdit::DeleteAnchor { orig_vertex: pos }),
-        _ => {}
+        ) => apply_map_edit(tab, shape_id, MapEdit::DeleteAnchor { orig_vertex: pos }),
+        _ => false,
     }
-    let (shape_id, contour_idx, seg_idx, t_opt) = match (is_add, target) {
+}
+
+/// 浮いている片・残りの頂点・辺 `target` に、アンカーを足す（`is_add`）・消す。`target` が浮いている図形のものでなければ `None`
+fn edit_floating_anchor(
+    tab: &mut Tab,
+    target: &crate::canvas_tool::HoverTarget,
+    is_add: bool,
+) -> Option<bool> {
+    let (shape_id, contour_idx, seg_idx, t_opt) = match (is_add, *target) {
         (
             true,
             crate::canvas_tool::HoverTarget::Edge {
@@ -1261,6 +1277,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
                 contour_idx,
                 seg_idx,
                 t,
+                map_edge: None,
                 ..
             },
         ) => (shape_id, contour_idx, seg_idx, Some(t)),
@@ -1270,76 +1287,44 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
                 shape_id,
                 contour_idx,
                 seg_idx,
+                map_node: None,
                 ..
             },
         ) => (shape_id, contour_idx, seg_idx, None),
-        _ => return false,
+        _ => return None,
     };
-
-    let apply_to_shape = |s: &mut FillShape| -> bool {
-        s.edit_contour(contour_idx, |c| {
-            if let Some(t) = t_opt {
-                c.insert_anchor_at(seg_idx, t)
-            } else {
-                c.delete_anchor_at(seg_idx)
-            }
-        })
+    let fl = tab.session.floating()?;
+    let (in_pieces, idx) = match fl.pieces.iter().position(|p| p.shape_id == shape_id) {
+        Some(i) => (true, i),
+        None => (
+            false,
+            fl.remainder.iter().position(|r| r.shape_id == shape_id)?,
+        ),
     };
-
-    if let Some(fl) = tab.session.floating() {
-        if let Some(p_idx) = fl.pieces.iter().position(|p| p.shape_id == shape_id) {
-            let mut test_piece = fl.pieces[p_idx].clone();
-            if apply_to_shape(&mut test_piece) {
-                push_undo(tab, None);
-                tab.session.update_floating(|fl_opt| {
-                    if let Some(fl_mut) = fl_opt {
-                        fl_mut.pieces[p_idx] = test_piece;
-                        fl_mut.modified = true;
-                    }
-                });
-                return true;
-            }
-            return false;
-        }
-        if let Some(r_idx) = fl.remainder.iter().position(|r| r.shape_id == shape_id) {
-            let mut test_rem = fl.remainder[r_idx].clone();
-            if apply_to_shape(&mut test_rem) {
-                push_undo(tab, None);
-                tab.session.update_floating(|fl_opt| {
-                    if let Some(fl_mut) = fl_opt {
-                        fl_mut.remainder[r_idx] = test_rem;
-                        fl_mut.modified = true;
-                    }
-                });
-                return true;
-            }
-            return false;
-        }
-    }
-
-    let Some(base_shape) = tab
-        .session
-        .base_cache
-        .shapes()
-        .iter()
-        .find(|s| s.shape_id == shape_id)
-        .cloned()
-    else {
-        return false;
-    };
-    let target_lid = base_shape.layer_id;
-    let mut test_shape = base_shape;
-    if apply_to_shape(&mut test_shape) {
-        push_undo(tab, None);
-        edit_layers(tab, &[target_lid], |edit| {
-            if let Some(pos) = edit.shapes.iter().position(|s| s.shape_id == shape_id) {
-                edit.shapes[pos] = test_shape;
-            }
-        });
-        true
+    let mut edited = if in_pieces {
+        fl.pieces[idx].clone()
     } else {
-        false
+        fl.remainder[idx].clone()
+    };
+    let changed = edited.edit_contour(contour_idx, |c| match t_opt {
+        Some(t) => c.insert_anchor_at(seg_idx, t),
+        None => c.delete_anchor_at(seg_idx),
+    });
+    if !changed {
+        return Some(false);
     }
+    push_undo(tab, None);
+    tab.session.update_floating(|fl_opt| {
+        if let Some(fl_mut) = fl_opt {
+            if in_pieces {
+                fl_mut.pieces[idx] = edited;
+            } else {
+                fl_mut.remainder[idx] = edited;
+            }
+            fl_mut.modified = true;
+        }
+    });
+    Some(true)
 }
 
 fn apply_set_selected_symbol_world_pivot(tab: &mut Tab, world_pivot: Option<Point>) -> bool {
