@@ -1207,7 +1207,8 @@ impl PlanarMap {
             let (x1, y1) = ((b.x1 / CELL).floor() as i64, (b.y1 / CELL).floor() as i64);
             (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
         };
-        let mut index: Option<(Vec<KRect>, IntMap<(i64, i64), Vec<usize>>)> = None;
+        type EdgeIndex = (Vec<KRect>, IntMap<(i64, i64), Vec<usize>>);
+        let mut index: Option<EdgeIndex> = None;
         let candidate =
             |v: usize, at: &[Vec<usize>]| at[v].len() == 2 && area.contains(self.nodes[v]);
         let mut pending: std::collections::BTreeSet<usize> = (0..self.nodes.len())

@@ -189,7 +189,7 @@ pub(crate) fn resolve_cel_with_library(
     ctx: SymbolEvalCtx<'_>,
 ) -> Vec<FillShape> {
     if ctx.depth >= MAX_SYMBOL_NEST_DEPTH || cel.instances.is_empty() {
-        return (*cel.shapes).clone();
+        return cel.shapes.iter().map(|s| (**s).clone()).collect();
     }
 
     let mut out = Vec::with_capacity(cel.shapes.len() + cel.instances.len());
@@ -198,7 +198,7 @@ pub(crate) fn resolve_cel_with_library(
     for inst in cel.instances.iter() {
         let target_idx = inst.shape_order_index.min(cel.shapes.len());
         while next_cel_idx < target_idx {
-            out.push(cel.shapes[next_cel_idx].clone());
+            out.push((*cel.shapes[next_cel_idx]).clone());
             next_cel_idx += 1;
         }
         if ctx.library.iter().any(|s| s.id == inst.binding.symbol_id) {
@@ -212,7 +212,7 @@ pub(crate) fn resolve_cel_with_library(
     }
 
     while next_cel_idx < cel.shapes.len() {
-        out.push(cel.shapes[next_cel_idx].clone());
+        out.push((*cel.shapes[next_cel_idx]).clone());
         next_cel_idx += 1;
     }
 
@@ -614,7 +614,7 @@ impl Document {
             tl.layers.iter().any(|l| {
                 l.keyframes
                     .iter()
-                    .any(|kf| kf.cel.shapes.iter().any(FillShape::has_cached_fill_mesh))
+                    .any(|kf| kf.cel.shapes.iter().any(|s| s.has_cached_fill_mesh()))
             })
         };
         tl_has_mesh(&self.root) || self.library.iter().any(|sym| tl_has_mesh(&sym.timeline))

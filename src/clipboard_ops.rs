@@ -136,11 +136,11 @@ fn remap_timeline_ids(tl: &mut Timeline, doc: &mut Document, sym_map: &HashMap<u
                 .iter()
                 .any(|s| !s.group_path.is_empty())
             {
-                for sh in layer.keyframe_mut(i).cel.shapes_mut() {
+                layer.keyframe_mut(i).cel.for_each_shape_mut(|sh| {
                     for gid in &mut sh.group_path {
                         *gid = remap_gid(&mut gid_map, *gid, doc);
                     }
-                }
+                });
             }
             if !layer.keyframes[i].cel.instances.is_empty() {
                 for inst in layer.keyframe_mut(i).cel.instances_mut() {

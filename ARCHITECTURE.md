@@ -20,7 +20,7 @@
   - 各 `Layer` は全フレーム分の配列を持つのではなく、スパースな `Vec<Arc<Keyframe>>`（`start_frame` と保持尺 `frame_count` によるスパン表現）で保持し、ホールドフレームでのデータ重複をゼロにする。
 - **図形エンティティの正規化**:
   - 最小単位の `FillShape` は外周 `Contour` と穴 `Vec<Contour>`、色 `Color32`、事前計算された AABB（`kurbo::Rect`）、所属レイヤーID、グループ階層パス、メッシュ内容の世代番号（`mesh_revision`）を保持する。
-  - セル（`Cel`）内では、Merge Drawing 対象となる生シェイプ／グループ図形の配列（`Arc<Vec<FillShape>>`）と、ライブラリを参照する `SymbolInstance` の配列（`Arc<Vec<SymbolInstance>>`。`symbol_id`, `Affine`, ピボット, `loop_mode`, `first_frame`, 色効果 `color_effect`（アルファ・明度）, 図形列の中での重なり位置 `shape_order_index`）を分けて正規化保持し、内容が変わるたびにセルの世代番号（`revision`）を更新する。シンボル展開時（`SymbolInstanceBinding::instantiate_shapes`）に色効果が初期値でない場合のみ `FillShape::set_color` で頂点色を更新し、文書書き戻し時は `SymbolInstanceBinding` のみを保存することで色効果適用後の色が文書へ混入しない構造とする。
+  - セル（`Cel`）内では、Merge Drawing 対象となる生シェイプ／グループ図形の配列（`Arc<Vec<Arc<FillShape>>>`。図形も1つずつ共有する）と、ライブラリを参照する `SymbolInstance` の配列（`Arc<Vec<SymbolInstance>>`。`symbol_id`, `Affine`, ピボット, `loop_mode`, `first_frame`, 色効果 `color_effect`（アルファ・明度）, 図形列の中での重なり位置 `shape_order_index`）を分けて正規化保持し、内容が変わるたびにセルの世代番号（`revision`）を更新する。シンボル展開時（`SymbolInstanceBinding::instantiate_shapes`）に色効果が初期値でない場合のみ `FillShape::set_color` で頂点色を更新し、文書書き戻し時は `SymbolInstanceBinding` のみを保存することで色効果適用後の色が文書へ混入しない構造とする。
 - **ID による識別**:
   - 生シェイプ・グループ図形は `ShapeId`、シンボルインスタンスは `InstanceGid` で識別する。シンボルを展開して作る図形は展開のたびに新しい `ShapeId` を持つため、シンボルインスタンスは常に `InstanceGid` で扱う。
   - 選択状態は `Selection { shapes: HashSet<ShapeId>, instances: HashSet<InstanceGid> }` として ID で持ち、配列の番号では持たない。並べ替え・Undo・フレーム移動のあとも、対象が残っていれば選択が保たれる。
@@ -73,7 +73,7 @@
   - 図形を丸ごと選んだとき：最初に動かす・変形する・色を変えるときに持ち上げる
   - ペースト・`Alt` 複製：その場で作る
 - **確定するまで文書は変えない**。そのため、矩形選択で切った図形を何もせず選択解除したときは、`Floating` を捨てるだけで元の図形が数値誤差なく残る。
-- **確定（`commit_floating`）**: 該当レイヤーで「文書の図形から `hidden` を除き、`remainder` を加え、`pieces` を Merge Drawing で結合」して、文書に1回だけ書き込む。結合は、`pieces` を1つの地図にして、そのレイヤーの生の図形の地図の上に置く（`place_pieces_diff`。[`GEOMETRY.md`](./GEOMETRY.md) 5.4）。片どうしが重なって1つの地図にならないとき（別のレイヤーの絵を1枚のレイヤーへ貼ったときなど）は、重なり順に1つずつ置く。矩形で一部を選んだときの `pieces` と `remainder` も、レイヤーの地図を矩形で1回切って作る（`marquee_split`）。どちらもレイヤーをまたがないので、片のあるレイヤーが2枚以上あれば、レイヤーごとに同時に計算する（`per_layer_parallel`。`std::thread::scope`）。確定は選択解除、タイムライン・レイヤー操作、シンボルやグループへの出入り、再生開始の前に行う。タブの切り替えでは確定しない。Shift クリックで一部の選択だけを外したときは、外した片だけを確定する（`commit_floating_except`）。
+- **確定（`commit_floating`）**: 該当レイヤーで「文書の図形から `hidden` を除き、`remainder` を加え、`pieces` を Merge Drawing で結合」して、文書に1回だけ書き込む。結合は、`pieces` を1つの地図にして、そのレイヤーの生の図形の地図の上に置く（`place_pieces_diff`。[`GEOMETRY.md`](./GEOMETRY.md) 5.4）。まとめて置けないとき（片どうしが重なる・まとめて重ねると安全網で止まる）は、1回の編集の中で、同じ地図へ片を下から1つずつ塗る（`paint_pieces_diff`）。レイヤーの地図が壊れているとき（前の版で描いた図形など）は、片をまとめて今までの結合に渡す。矩形で一部を選んだときの `pieces` と `remainder` も、レイヤーの地図を矩形で1回切って作る（`marquee_split`）。どちらもレイヤーをまたがないので、片のあるレイヤーが2枚以上あれば、レイヤーごとに同時に計算する（`per_layer_parallel`。`std::thread::scope`）。確定は選択解除、タイムライン・レイヤー操作、シンボルやグループへの出入り、再生開始の前に行う。タブの切り替えでは確定しない。Shift クリックで一部の選択だけを外したときは、外した片だけを確定する（`commit_floating_except`）。
 - **利用者から見た文書 ＝ `Document` ＋ `Floating` を確定したもの**:
   - 保存と動画の書き出しは、`Tab::committed_document_copy` で作った文書のコピーの上で `Floating` を確定した結果を書き出す。前後でセッションや文書は変えない。
   - 確定は利用者から見た文書を変えないので、Undo の1手にせず、未保存マーク用の世代IDも変えない。
@@ -109,7 +109,7 @@
 
 ## 9. Undo / Redo 方式
 - 最大 100 ステップの `VecDeque<UndoEntry>`。1件は「ルート `Timeline`・シンボルライブラリ・`Floating`・`EditPath`・グループ編集階層・ステージサイズ・フレームレート（`fps`）・ライブラリの世代番号・未保存マーク用の世代ID」で構成する。選択は含めない（2章の ID による選択保持に任せる）。
-- 全フレーム・全シンボルのディープコピーによるメモリ肥大化を防ぐため、`Contour` のセグメント配列（`Arc<Vec<QuadBez>>`）、`Cel` のシェイプ配列（`Arc<Vec<FillShape>>`）およびインスタンス配列（`Arc<Vec<SymbolInstance>>`）、`Layer` のキーフレーム配列（`Vec<Arc<Keyframe>>`）、さらに `UndoEntry` 内のシンボルライブラリ（`Arc<Vec<SymbolDef>>`、`Document::revision` 連動）と `Floating`（`Arc<Floating>`）を **Copy-on-Write（CoW）構造共有** とし、未変更のキーフレームやシンボルは $O(1)$ でポインタ共有する。
+- 全フレーム・全シンボルのディープコピーによるメモリ肥大化を防ぐため、`Contour` のセグメント配列（`Arc<Vec<QuadBez>>`）、`Cel` のシェイプ配列（`Arc<Vec<Arc<FillShape>>>`。書き戻しでは変わらない図形の `Arc` をそのまま使うので、Undo 1件はセルの図形の数でなく、変えた図形の分だけ大きくなる）およびインスタンス配列（`Arc<Vec<SymbolInstance>>`）、`Layer` のキーフレーム配列（`Vec<Arc<Keyframe>>`）、さらに `UndoEntry` 内のシンボルライブラリ（`Arc<Vec<SymbolDef>>`、`Document::revision` 連動）と `Floating`（`Arc<Floating>`）を **Copy-on-Write（CoW）構造共有** とし、未変更のキーフレームやシンボルは $O(1)$ でポインタ共有する。
 
 ## 10. 幾何計算パイプライン（Geometry Pipeline）
 数式・閾値・アルゴリズムの詳細は [`GEOMETRY.md`](./GEOMETRY.md) を参照してください。ここでは設計上の要点だけを挙げます。

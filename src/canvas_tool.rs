@@ -3260,13 +3260,19 @@ fn writeback_edited_layer_shapes(
                 if let Some(&orig_idx) = orig_shape_idx_map.get(&s.shape_id) {
                     let orig = &orig_shapes[orig_idx];
                     if orig.mesh_revision == s.mesh_revision {
-                        let mut kept = orig.clone();
-                        kept.color = s.color;
-                        kept.layer_id = s.layer_id;
-                        if kept.group_path != s.group_path {
+                        // 変わらない図形は、前の列と同じ `Arc` を使う（Undo の控えと共有する）
+                        if orig.color == s.color
+                            && orig.layer_id == s.layer_id
+                            && orig.group_path == s.group_path
+                        {
+                            non_symbol_shapes.push(Arc::clone(orig));
+                        } else {
+                            let mut kept = (**orig).clone();
+                            kept.color = s.color;
+                            kept.layer_id = s.layer_id;
                             kept.group_path = s.group_path.clone();
+                            non_symbol_shapes.push(Arc::new(kept));
                         }
-                        non_symbol_shapes.push(kept);
                         continue;
                     }
                 }
@@ -3276,14 +3282,14 @@ fn writeback_edited_layer_shapes(
                     s.mesh_revision = local_s.mesh_revision;
                 }
                 local_s.strip_transient_caches();
-                non_symbol_shapes.push(local_s);
+                non_symbol_shapes.push(Arc::new(local_s));
             }
         }
         (non_symbol_shapes, next_instances)
     };
 
     let kf = tl.layers[l_idx].keyframe_mut(kf_idx);
-    kf.cel.set_parts(non_symbol_shapes, next_instances);
+    kf.cel.set_shared_parts(non_symbol_shapes, next_instances);
     true
 }
 

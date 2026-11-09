@@ -2823,7 +2823,12 @@ fn test_reverse_order_nested_symbol_topological_propagation_and_cycle_guard() {
         crate::symbol::SymbolInstanceBinding::new(999, sym_c, kurbo::Affine::scale(3.0));
     let sym_c_def = nest_app.doc.find_symbol(sym_c).unwrap();
     let inst_shapes = scaled_binding.instantiate_shapes(
-        &sym_c_def.timeline.layers[0].keyframes[0].cel.shapes,
+        &sym_c_def.timeline.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .iter()
+            .map(|s| (**s).clone())
+            .collect::<Vec<_>>(),
         1,
         &[],
         true,
@@ -7901,7 +7906,8 @@ fn cel_summary(doc: &symbol::Document, layer_id: u64, frame: usize) -> CelSummar
     };
     let kf = &layer.keyframes[kf_idx];
     let cel = &kf.cel;
-    let shapes = cel.shapes.as_slice();
+    let shapes: Vec<FillShape> = cel.shapes.iter().map(|s| (**s).clone()).collect();
+    let shapes = shapes.as_slice();
     let colors = shapes.iter().map(|s| s.color).collect();
     let total_area = shapes
         .iter()
@@ -13703,7 +13709,7 @@ fn test_m2_8_document_shapes_never_store_fill_mesh_after_playback_onion_edit_and
             tl.layers.iter().any(|l| {
                 l.keyframes
                     .iter()
-                    .any(|kf| kf.cel.shapes.iter().any(FillShape::has_cached_hit_bez_path))
+                    .any(|kf| kf.cel.shapes.iter().any(|s| s.has_cached_hit_bez_path()))
             })
         };
         tl_has_hit(&doc.root) || doc.library.iter().any(|sym| tl_has_hit(&sym.timeline))
@@ -18920,7 +18926,7 @@ fn test_boolean_ops_with_far_holes_detached() {
             res.iter().map(|s| s.holes.len()).sum::<usize>(),
             direct.iter().map(|s| s.holes.len()).sum::<usize>()
         );
-        let a_res: f64 = res.iter().map(&shape_net_area).sum();
+        let a_res: f64 = res.iter().map(|s| shape_net_area(s)).sum();
         let a_dir: f64 = direct.iter().map(&shape_net_area).sum();
         assert!(
             ((a_res - a_dir).abs() / a_dir) <= 1e-6,
@@ -19017,7 +19023,7 @@ fn test_boolean_ops_with_far_holes_detached() {
             res.iter().map(|s| s.holes.len()).sum::<usize>(),
             direct.iter().map(|s| s.holes.len()).sum::<usize>()
         );
-        let a_res: f64 = res.iter().map(&shape_net_area).sum();
+        let a_res: f64 = res.iter().map(|s| shape_net_area(s)).sum();
         let a_dir: f64 = direct.iter().map(&shape_net_area).sum();
         assert!(
             ((a_res - a_dir).abs() / a_dir) <= 1e-6,
@@ -20079,12 +20085,12 @@ fn test_adding_base_shape_to_floating_selection_keeps_floating_piece_on_top() {
         let blue_area: f64 = cel_shapes
             .iter()
             .filter(|s| s.color == blue)
-            .map(shape_area)
+            .map(|s| shape_area(s))
             .sum();
         let red_area: f64 = cel_shapes
             .iter()
             .filter(|s| s.color == red)
-            .map(shape_area)
+            .map(|s| shape_area(s))
             .sum();
         assert!(
             (blue_area - 10_000.0).abs() < 10.0,
@@ -20557,11 +20563,11 @@ fn test_tiny_shape_survives_save_and_reopen() {
         Vec::new(),
     )
     .with_layer_id(lid);
-    app.doc.root.layers[0]
-        .keyframe_mut(0)
-        .cel
-        .shapes_mut()
-        .push(tiny);
+    let cel = &mut app.doc.root.layers[0].keyframe_mut(0).cel;
+    let mut shapes: Vec<FillShape> = cel.shapes.iter().map(|s| (**s).clone()).collect();
+    shapes.push(tiny);
+    let instances = cel.instances.as_ref().clone();
+    cel.set_parts(shapes, instances);
     app.refresh_scene_base();
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 2);
 
@@ -21828,7 +21834,7 @@ mod map_overlay {
             .shapes
             .iter()
             .filter(|s| s.is_raw_at_scope(&[]))
-            .cloned()
+            .map(|s| (**s).clone())
             .collect();
         let m = PlanarMap::from_faces(shapes.iter());
         let all: Vec<usize> = (0..m.edges.len()).collect();
@@ -21904,8 +21910,9 @@ mod map_overlay {
         let mut shapes: Vec<FillShape> = app.doc.root.layers[0].keyframes[0]
             .cel
             .shapes
-            .as_ref()
-            .clone();
+            .iter()
+            .map(|s| (**s).clone())
+            .collect::<Vec<FillShape>>();
         for mut g in make_stroke(
             Point::new(200.0, 120.0),
             Point::new(200.0, 280.0),
@@ -21926,6 +21933,7 @@ mod map_overlay {
             .shapes
             .iter()
             .filter(|s| s.color == Color32::RED)
+            .map(|s| &**s)
             .collect();
         assert_eq!(red.len(), 1);
         assert!(
@@ -22394,7 +22402,7 @@ mod map_overlay {
             .cel
             .shapes
             .iter()
-            .cloned()
+            .map(|s| (**s).clone())
             .collect();
         let lid = drawn[0].layer_id;
         let mut pieces = drawn.clone();
@@ -22492,8 +22500,9 @@ mod map_overlay {
             app.doc.root.layers[0].keyframes[0]
                 .cel
                 .shapes
-                .as_ref()
-                .clone()
+                .iter()
+                .map(|s| (**s).clone())
+                .collect::<Vec<FillShape>>()
         };
         let colors_at = |shapes: &[FillShape], p: Point| {
             shapes
@@ -22628,8 +22637,9 @@ mod map_overlay {
             let before = app.doc.root.layers[0].keyframes[0]
                 .cel
                 .shapes
-                .as_ref()
-                .clone();
+                .iter()
+                .map(|s| (**s).clone())
+                .collect::<Vec<FillShape>>();
             let (a, b) = (Point::new(100.0, 50.0), Point::new(300.0, 200.0));
             select_ops::apply_marquee_selection(&mut app, a, b, false);
             assert!(doc_actions::apply(
@@ -22648,8 +22658,9 @@ mod map_overlay {
             let after = app.doc.root.layers[0].keyframes[0]
                 .cel
                 .shapes
-                .as_ref()
-                .clone();
+                .iter()
+                .map(|s| (**s).clone())
+                .collect::<Vec<FillShape>>();
             let (mut lost_in, mut lost_out) = (0, 0);
             for i in 0..390 {
                 for j in 0..215 {
@@ -22686,7 +22697,7 @@ mod map_overlay {
                 .shapes
                 .iter()
                 .filter(|s| s.is_raw_at_scope(&[]))
-                .cloned()
+                .map(|s| (**s).clone())
                 .collect();
             let m = PlanarMap::from_faces(shapes.iter());
             for _ in 0..300 {
@@ -22754,6 +22765,35 @@ mod map_overlay {
             let n = app.doc.root.layers[0].keyframes[0].cel.shapes.len();
             eprintln!("PROBE 線 {target} 本（図形 {n}）：バケツ 30 回 平均 {avg:.1}ms・最大 {max:.1}ms｜地図 {}", if layer_map_valid(&app, 0) { "正常" } else { "壊れた" });
         }
+    }
+
+    /// レビュー（a116357 N-1003）：線を1本描いても、セルの変わらない図形は Undo の控えと共有したまま（控えの大きさが
+    /// セルの図形の数でなく、変えた図形の分になる）
+    #[test]
+    fn undo_snapshot_shares_unchanged_shapes() {
+        let mut app = review_repeat_scene(5);
+        let before: Vec<std::sync::Arc<FillShape>> = app.doc.root.layers[0].keyframes[0]
+            .cel
+            .shapes
+            .as_ref()
+            .clone();
+        app.tool.brush_color = Color32::RED;
+        let pts: Vec<Point> = (0..=8)
+            .map(|i| Point::new(-390.0 + 2.0 * i as f64, -220.0))
+            .collect();
+        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 1.5));
+        let after = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        let shared = after
+            .iter()
+            .filter(|a| before.iter().any(|b| std::sync::Arc::ptr_eq(a, b)))
+            .count();
+        assert!(before.len() > 40);
+        assert!(
+            shared + 3 >= before.len(),
+            "共有 {shared} / 前 {}・後 {}",
+            before.len(),
+            after.len()
+        );
     }
 
     /// レビュー（e0769c0 第4回）の手順：60 本の線（4色・太さ 1〜8・長さ 50〜300、800×450 全体）を描いたセルで、

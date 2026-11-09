@@ -569,7 +569,12 @@ impl From<&Keyframe> for SavedKeyframe {
             start_frame: kf.start_frame,
             tween: kf.tween,
             tween_rotate: kf.tween_rotate,
-            shapes: kf.cel.shapes.iter().map(SavedFillShape::from).collect(),
+            shapes: kf
+                .cel
+                .shapes
+                .iter()
+                .map(|s| SavedFillShape::from(&**s))
+                .collect(),
             instances: kf
                 .cel
                 .instances
@@ -733,9 +738,7 @@ impl From<SavedTimeline> for Timeline {
             let lid = layer.id;
             for i in 0..layer.keyframes.len() {
                 let kf = layer.keyframe_mut(i);
-                for sh in kf.cel.shapes_mut() {
-                    sh.layer_id = lid;
-                }
+                kf.cel.for_each_shape_mut(|sh| sh.layer_id = lid);
                 for inst in kf.cel.instances_mut() {
                     inst.layer_id = lid;
                 }
@@ -967,13 +970,13 @@ impl ProjectDocument {
                             .any(|&gid| gid == 0 || gid > MAX_SAFE_ENTITY_ID)
                     });
                     if has_unsafe_shape_gid {
-                        for s in kf.cel.shapes_mut() {
+                        kf.cel.for_each_shape_mut(|s| {
                             for gid in &mut s.group_path {
                                 if *gid == 0 || *gid > MAX_SAFE_ENTITY_ID {
                                     remap_unsafe_gid(&mut gid_map, &mut next_gid, gid);
                                 }
                             }
-                        }
+                        });
                     }
                     let needs_inst_update = kf.cel.instances.iter().any(|inst| {
                         sym_id_remap.contains_key(&inst.binding.symbol_id)

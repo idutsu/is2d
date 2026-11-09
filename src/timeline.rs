@@ -193,11 +193,13 @@ fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64) {
 // 1. タイムラインのデータモデル（Cel / Keyframe / Selection / Layer / Timeline）
 // ============================================================================
 
-/// 1枚のセル画（非シンボル図形群 `Arc<Vec<FillShape>>` ＋ 正規化シンボルインスタンス配列 `Arc<Vec<SymbolInstance>>`）
+/// 1枚のセル画（非シンボル図形群 `Arc<Vec<Arc<FillShape>>>` ＋ 正規化シンボルインスタンス配列 `Arc<Vec<SymbolInstance>>`）
 #[derive(Clone, Debug)]
 pub(crate) struct Cel {
-    /// このセル内の非シンボル図形群（`symbol_instance.is_none()` の生シェイプおよび通常グループ図形のみを正規化保持、CoW `Arc` 共有）
-    pub(crate) shapes: Arc<Vec<FillShape>>,
+    /// このセル内の非シンボル図形群（`symbol_instance.is_none()` の生シェイプおよび通常グループ図形のみを正規化保持）。
+    /// 列も図形も `Arc` で共有する：書き換えでは変えた図形だけを新しくするので、Undo の控えはセルの図形の数でなく、
+    /// 変えた図形の分だけ大きくなる
+    pub(crate) shapes: Arc<Vec<Arc<FillShape>>>,
     /// このセル内に配置されているシンボルインスタンスの正規化リスト（`instance_gid` 単位で重複なし、CoW `Arc` 共有）
     pub(crate) instances: Arc<Vec<SymbolInstance>>,
     /// セル内容（`shapes` / `instances`）が更新されるたびにインクリメントされるリビジョン番号（Undo履歴の $O(1)$ CoW 共有用）
@@ -232,10 +234,13 @@ impl Cel {
         cel
     }
 
+    /// 図形を1つずつ書き換える（書き換えた図形だけが新しくなる。ほかは Undo の控えと共有したまま）
     #[inline]
-    pub(crate) fn shapes_mut(&mut self) -> &mut Vec<FillShape> {
+    pub(crate) fn for_each_shape_mut(&mut self, mut f: impl FnMut(&mut FillShape)) {
         self.revision = crate::vector_engine::next_mesh_revision();
-        Arc::make_mut(&mut self.shapes)
+        for s in Arc::make_mut(&mut self.shapes) {
+            f(Arc::make_mut(s));
+        }
     }
 
     #[inline]
@@ -246,9 +251,15 @@ impl Cel {
 
     /// セルの図形列とインスタンス列を入れ替える（文書と Undo の履歴に、中身より大きい領域を残さないよう余った容量を詰める）
     #[inline]
-    pub(crate) fn set_parts(
+    pub(crate) fn set_parts(&mut self, shapes: Vec<FillShape>, instances: Vec<SymbolInstance>) {
+        self.set_shared_parts(shapes.into_iter().map(Arc::new).collect(), instances);
+    }
+
+    /// `set_parts` と同じ。図形は共有したまま入れる（変わらない図形は、前の列と同じ `Arc` を渡す）
+    #[inline]
+    pub(crate) fn set_shared_parts(
         &mut self,
-        mut shapes: Vec<FillShape>,
+        mut shapes: Vec<Arc<FillShape>>,
         mut instances: Vec<SymbolInstance>,
     ) {
         shapes.shrink_to_fit();
@@ -359,12 +370,12 @@ fn remap_keyframes_group_and_instance_ids(
     };
     for kf in kfs {
         if !kf.cel.shapes.is_empty() {
-            for shape in kf.cel.shapes_mut() {
+            kf.cel.for_each_shape_mut(|shape| {
                 shape.shape_id = next_shape_id();
                 for gid in &mut shape.group_path {
                     *gid = alloc_gid(*gid, &mut gid_map);
                 }
-            }
+            });
         }
         if !kf.cel.instances.is_empty() {
             for inst in kf.cel.instances_mut() {
@@ -710,9 +721,7 @@ impl Layer {
         let dst_lid = self.id;
         for mut kf in kfs {
             if kf.cel.shapes.iter().any(|s| s.layer_id != dst_lid) {
-                for shape in kf.cel.shapes_mut() {
-                    shape.layer_id = dst_lid;
-                }
+                kf.cel.for_each_shape_mut(|shape| shape.layer_id = dst_lid);
             }
             if kf.cel.instances.iter().any(|i| i.layer_id != dst_lid) {
                 for inst in kf.cel.instances_mut() {
@@ -946,7 +955,7 @@ impl Timeline {
 
     /// 現在アクティブなレイヤー・フレームの `Cel` 内の図形スライスを返す
     #[cfg(test)]
-    pub(crate) fn active_cel_shapes(&self) -> &[FillShape] {
+    pub(crate) fn active_cel_shapes(&self) -> &[std::sync::Arc<FillShape>] {
         self.layers
             .get(self.active_layer)
             .and_then(|layer| layer.cel_at(self.current_frame))
