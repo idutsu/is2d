@@ -449,7 +449,8 @@ impl PlanarMap {
         // 何も無い側の輪郭：その最初の区間の真ん中の点が、その辺を輪郭に持たない色のある面の中（外周の中で、どの穴の外）
         // にあれば、入り込んでいる
         let mut edge_faces: Vec<[usize; 2]> = vec![[usize::MAX; 2]; self.edges.len()];
-        let mut regions: Vec<Vec<(GridRect, Option<GridPolygon>)>> = Vec::with_capacity(faces.len());
+        let mut regions: Vec<Vec<(GridRect, Option<GridPolygon>)>> =
+            Vec::with_capacity(faces.len());
         for (fi, f) in faces.iter().enumerate() {
             for h in f.cycles.iter().flatten() {
                 let slot = &mut edge_faces[h.0];
@@ -466,13 +467,24 @@ impl PlanarMap {
                     .collect(),
             );
         }
+        // 面の外周の外接矩形の格子（px で引く）
+        let px = |v: i64| v as f64 / OVERLAY_GRID;
+        let mut face_grid = BoxGrid::new(64.0);
+        for (fi, reg) in regions.iter().enumerate() {
+            let r = reg[0].0;
+            face_grid.insert(fi, KRect::new(px(r.x0), px(r.y0), px(r.x1), px(r.y1)));
+        }
+        let mut found = Vec::new();
         for c in &cycles {
             if c.is_empty() || self.side_color(c[0]).is_some() {
                 continue;
             }
             let h = c[0];
             let probe = half_mid2(&polys, h);
-            for (fi, f) in faces.iter().enumerate() {
+            let at = Point::new(px(probe.0) * 0.5, px(probe.1) * 0.5);
+            face_grid.query(KRect::from_points(at, at), &mut found);
+            for &fi in &found {
+                let f = &faces[fi];
                 if edge_faces[h.0].contains(&fi) || !regions[fi][0].0.contains2(probe) {
                     continue;
                 }
@@ -481,8 +493,10 @@ impl PlanarMap {
                     if !bbox.contains2(probe) {
                         return Some(0);
                     }
-                    poly.get_or_insert_with(|| GridPolygon::new(&cycle_points(&polys, &f.cycles[k])))
-                        .winding(probe)
+                    poly.get_or_insert_with(|| {
+                        GridPolygon::new(&cycle_points(&polys, &f.cycles[k]))
+                    })
+                    .winding(probe)
                 };
                 let inside = |w: Option<i32>| w.map(|w| w != 0);
                 match inside(wind(0)) {
@@ -548,7 +562,8 @@ impl PlanarMap {
                         continue;
                     }
                     let ed = self.edges[h.0];
-                    let straight = (ed.ctrl - self.nodes[ed.a].midpoint(self.nodes[ed.b])).hypot() < 1e-12;
+                    let straight =
+                        (ed.ctrl - self.nodes[ed.a].midpoint(self.nodes[ed.b])).hypot() < 1e-12;
                     out += &format!(
                         "e{}{}({}->{}, {:?}, {}, {}) ",
                         h.0,
@@ -567,7 +582,9 @@ impl PlanarMap {
 
     /// 全部の辺の判定の形（格子の上の折れ線）
     fn polys(&self) -> Vec<Vec<IPt>> {
-        (0..self.edges.len()).map(|e| grid_poly(&self.quad(e))).collect()
+        (0..self.edges.len())
+            .map(|e| grid_poly(&self.quad(e)))
+            .collect()
     }
 
     /// 判定の形の 1〜3（設計 2-2）：折れ線どうしが共有する頂点のほかで触れない・1本の折れ線が自分と触れない・
@@ -581,7 +598,7 @@ impl PlanarMap {
             deg[ed.a] += 1;
             deg[ed.b] += 1;
         }
-        let mut node_at: HashMap<IPt, usize> = HashMap::new();
+        let mut node_at: IntMap<IPt, usize> = IntMap::default();
         for (v, p) in self.nodes.iter().enumerate() {
             if deg[v] > 0 && node_at.insert(gpt(*p), v).is_some_and(|w| w != v) {
                 return false;
@@ -592,26 +609,63 @@ impl PlanarMap {
             .enumerate()
             .flat_map(|(e, p)| (0..p.len() - 1).map(move |k| (e, k)))
             .collect();
-        let seg = |&(e, k): &(usize, usize)| (polys[e][k], polys[e][k + 1]);
-        let mut grid: IntMap<(i64, i64), Vec<u32>> = IntMap::default();
-        for (i, sg) in segs.iter().enumerate() {
-            for c in grid_cells(seg(sg)) {
-                grid.entry(c).or_default().push(i as u32);
+        let rects: Vec<GridRect> = segs
+            .iter()
+            .map(|&(e, k)| GridRect::of(&polys[e][k..k + 2]))
+            .collect();
+        // （マス, 区間の左端の x, 区間）を並べ、マスごとに左端の順に見る。区間の右端より左端が右にある区間から先は、
+        // そのマスでは重ならない。並べる鍵は、マスの x・y と区間の左端の x を1つの数にしたもの（座標は ±2^28）
+        let key = |c: (i64, i64), x0: i64| -> u128 {
+            ((c.0 + (1 << 31)) as u128) << 96
+                | ((c.1 + (1 << 31)) as u128) << 64
+                | (x0 + (1 << 62)) as u128
+        };
+        let mut ent: Vec<(u128, u32)> = Vec::with_capacity(segs.len() * 2);
+        for (i, r) in rects.iter().enumerate() {
+            for c in cells_of(((r.x0, r.y0), (r.x1, r.y1)), GRID_CELL) {
+                ent.push((key(c, r.x0), i as u32));
             }
         }
-        let mut seen: HashSet<(u32, u32)> = HashSet::new();
-        for list in grid.values() {
-            for (x, &i) in list.iter().enumerate() {
-                for &j in &list[x + 1..] {
-                    let (i, j) = (i.min(j), i.max(j));
-                    if !seen.insert((i, j)) {
+        ent.sort_unstable();
+        let cell0 = |r: &GridRect| (r.x0.div_euclid(GRID_CELL), r.y0.div_euclid(GRID_CELL));
+        let cell_of_key = |k: u128| {
+            (
+                (k >> 96) as i64 - (1 << 31),
+                ((k >> 64) as u32) as i64 - (1 << 31),
+            )
+        };
+        let mut start = 0;
+        while start < ent.len() {
+            let ck = ent[start].0 >> 64;
+            let c = cell_of_key(ent[start].0);
+            let mut end = start + 1;
+            while end < ent.len() && ent[end].0 >> 64 == ck {
+                end += 1;
+            }
+            for x in start..end {
+                let i = ent[x].1 as usize;
+                let ri = rects[i];
+                for &(_, j) in &ent[x + 1..end] {
+                    let j = j as usize;
+                    let rj = rects[j];
+                    if rj.x0 > ri.x1 {
+                        break;
+                    }
+                    // 重ならない組と、両方が入る最初のマス（左下）でないマスの組は飛ばす（同じ組を2度調べない）
+                    if !ri.overlaps(&rj) {
                         continue;
                     }
-                    if self.segs_clash(polys, segs[i as usize], segs[j as usize]) {
+                    let (ci, cj) = (cell0(&ri), cell0(&rj));
+                    if (ci.0.max(cj.0), ci.1.max(cj.1)) != c {
+                        continue;
+                    }
+                    let (i, j) = (i.min(j), i.max(j));
+                    if self.segs_clash(polys, segs[i], segs[j]) {
                         return false;
                     }
                 }
             }
+            start = end;
         }
         true
     }
@@ -619,7 +673,12 @@ impl PlanarMap {
     /// 辺 `e` の区間 `k` と、辺 `f` の区間 `m`（`(e, k)` が前）が、許されない所で触れるか。
     /// 許されるのは、端を1つだけ共有し、そこから同じ向きに重ならず、その端が「2つの辺が共有する頂点」か
     /// 「1本の辺のとなり合う区間のつなぎ目」のときだけ
-    fn segs_clash(&self, polys: &[Vec<IPt>], (e, k): (usize, usize), (f, m): (usize, usize)) -> bool {
+    fn segs_clash(
+        &self,
+        polys: &[Vec<IPt>],
+        (e, k): (usize, usize),
+        (f, m): (usize, usize),
+    ) -> bool {
         let (a, b) = (polys[e][k], polys[e][k + 1]);
         let (c, d) = (polys[f][m], polys[f][m + 1]);
         if !segs_touch(a, b, c, d) {
@@ -1312,7 +1371,11 @@ impl PlanarMap {
             .iter()
             .flat_map(|&v| at[v].iter())
             .map(|&i| {
-                let (a, c, b) = (self.nodes[edges[i].a], edges[i].ctrl, self.nodes[edges[i].b]);
+                let (a, c, b) = (
+                    self.nodes[edges[i].a],
+                    edges[i].ctrl,
+                    self.nodes[edges[i].b],
+                );
                 KRect::from_points(a, b).union_pt(c)
             })
             .reduce(|a, b| a.union(b))
@@ -2604,15 +2667,20 @@ enum OverlaySrc {
 
 /// 曲線を折れ線にする（`t` つき）。曲線と折れ線の離れ具合が `tol` 以下になる等分
 fn flatten_with_t(q: &QuadBez, tol: f64) -> Vec<(Point, f64)> {
-    let dd = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()).hypot();
-    // 2次ベジェを n 等分した折れ線の離れ具合は、およそ |p0 - 2p1 + p2| / (4 n²)
-    let n = ((dd / (4.0 * tol)).sqrt().ceil() as usize).clamp(1, 512);
+    let n = flat_count(q, tol);
     (0..=n)
         .map(|i| {
             let t = i as f64 / n as f64;
             (q.eval(t), t)
         })
         .collect()
+}
+
+/// 曲線を、折れ線とのずれが `tol` ほどになるように等分する数
+fn flat_count(q: &QuadBez, tol: f64) -> usize {
+    let dd = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()).hypot();
+    // 2次ベジェを n 等分した折れ線の離れ具合は、およそ |p0 - 2p1 + p2| / (4 n²)
+    ((dd / (4.0 * tol)).sqrt().ceil() as usize).clamp(1, 512)
 }
 
 /// 整数の向きを、角度の順（x 軸の正の向きから、面積の式で正の回り方）に比べる
@@ -2752,18 +2820,24 @@ impl PlanarMap {
         // あるので、1目広げる）
         let r = info[ext].2;
         let g = |v: i64| v as f64 / OVERLAY_GRID;
-        m.merge_degree2(KRect::new(g(r.x0 - 1), g(r.y0 - 1), g(r.x1 + 1), g(r.y1 + 1)));
+        m.merge_degree2(KRect::new(
+            g(r.x0 - 1),
+            g(r.y0 - 1),
+            g(r.x1 + 1),
+            g(r.y1 + 1),
+        ));
         m.compact_nodes();
         Some(m)
     }
 
     /// 形か地図 `input` を、`rule` の決め方で重ねた地図
-    /// （設計：claude/曲線の当て直しを決まりで行う設計_7215b88.md）。
+    /// （設計：claude/曲線の当て直しを決まりで行う設計_7215b88.md、claude/格子の折れ線で判定する設計_段階2_d90cabe.md）。
     ///
     /// 1. i_overlay に入れる前からある辺を、交わりで決める（`fed_edges`）。重ねる線と一緒に細かい折れ線にして格子に置き、
     ///    i_overlay で交わる所で切る。前からある辺は Subject、重ねる線は Clip（偶奇の規則。重ねる形は重なりの無い形にしておくこと）
-    /// 2. 入れなかった辺が、切った区間と交わっていたら（交点を格子に丸めたずれなど）、その辺も入れて切り直す
-    ///    （入れる辺は増える一方なので、必ず終わる）
+    /// 2. 入れなかった辺の判定の形が、切った区間に触れていたら、その辺も入れて切り直す（i_overlay は交点を格子の点に丸め、
+    ///    区間の端に近い交点は端へ寄せ、寄せる距離をくり返しのたびに広げるので、区間は折れ線から半目より遠くへ動くことが
+    ///    ある。入れる辺は増える一方なので、必ず終わる）
     /// 3. 切った区間ごとに、左右の前の色・重ねるものの中か（重ねる地図の色）を決め、`rule` で新しい色にする。左右が同じ区間は捨てる
     /// 4. 区間をすべて直線の辺にした地図から始め、同じ曲線から来た区間の鎖ごとに、決まりを満たすときだけ元の曲線の一部に
     ///    置き換える（`ChainRestorer`）
@@ -2808,7 +2882,8 @@ impl PlanarMap {
 
     /// i_overlay に入れる前からある辺（設計 2-1）。`fed` の辺と重ねる線 `new_quads` の折れ線の近くを通る辺を足し、
     /// 足した辺の折れ線の近くを通る辺を足し…と、増えなくなるまで続ける。「近く」は格子の目の対角線の半分
-    /// （`GRID_REACH`）以内：i_overlay は交点を格子の点に丸めるので、切った区間は折れ線からその距離まで動く。
+    /// （`GRID_REACH`）以内：i_overlay は交点を格子の点に丸めるので、切った区間は折れ線からその距離まで動く（端へ寄せて
+    /// それより遠くへ動いた所は、切ったあとに確かめて切り直す）。
     /// ただし、入れた辺と頂点を共有する辺は、その頂点でいつも触れているので、共有する頂点のほかで交わるかで見る。
     /// 入れた辺の端の頂点は格子に置き直すので、その頂点につながる入れない辺は、置き直した形で調べ直す
     /// （ほかの入れない辺と交わらないかも見る）。`None`：格子に置けない座標がある
@@ -2847,9 +2922,8 @@ impl PlanarMap {
         type GridSeg = (IPt, IPt, Option<usize>, Option<usize>);
         // 折れ線：（外接矩形, 区間の範囲）
         type GridLine = (KRect, std::ops::Range<usize>);
-        let seg_rect = |a: IPt, b: IPt| {
-            KRect::from_points(from_grid(a.0, a.1), from_grid(b.0, b.1))
-        };
+        let seg_rect =
+            |a: IPt, b: IPt| KRect::from_points(from_grid(a.0, a.1), from_grid(b.0, b.1));
         let add_polyline = |q: &QuadBez,
                             ends: (Option<usize>, Option<usize>),
                             segs: &mut Vec<GridSeg>,
@@ -2868,12 +2942,7 @@ impl PlanarMap {
                 bbox = Some(bbox.map_or(r, |x| x.union(r)));
                 seg_grid.insert(segs.len(), r);
                 let (ta, tb) = seg_tags(&line, k, usize::MAX, usize::MAX);
-                segs.push((
-                    a,
-                    b,
-                    ta.and(ends.0),
-                    tb.and(ends.1),
-                ));
+                segs.push((a, b, ta.and(ends.0), tb.and(ends.1)));
             }
             if let Some(r) = bbox {
                 lines.push((r, start..segs.len()));
@@ -2890,9 +2959,9 @@ impl PlanarMap {
             (0..pe.len().saturating_sub(1)).any(|k| {
                 let (a, b) = (pe[k], pe[k + 1]);
                 let tags = seg_tags(pe, k, ed.a, ed.b);
-                let shares = [(tags.0, a), (tags.1, b)].into_iter().any(|(t, p)| {
-                    t.is_some() && [(s.2, s.0), (s.3, s.1)].contains(&(t, p))
-                });
+                let shares = [(tags.0, a), (tags.1, b)]
+                    .into_iter()
+                    .any(|(t, p)| t.is_some() && [(s.2, s.0), (s.3, s.1)].contains(&(t, p)));
                 if shares {
                     seg_pair_clash((a, b), tags, (s.0, s.1), (s.2, s.3), None)
                 } else {
@@ -3653,8 +3722,9 @@ struct FaceColors {
 /// 両側（その地図の面を分けない）。面の色の材料は、面の中の区間の出どころの辺の色（`of`）と、たどって止まった
 /// 入れなかった前からある辺の色（`stop_sides`）。材料がみな同じなら、その色。
 ///
-/// 材料が食い違うのは、その地図に、折れ線にして格子に置く間に裏返るほど細い面がある所だけ（細い面をはさむ2本の辺の
-/// 折れ線が入れかわると、それぞれの辺が、自分の側だと思っている面が、格子の上では別の面になる）。そのときは、面の中の
+/// 材料が食い違うのは、その地図の2本の辺の判定の形が、格子の目ほどの所まで近づいている所だけ（i_overlay が交点を
+/// 格子の点に丸めたり端へ寄せたりするときに、片方の区間がもう片方の向こう側へ移ると、それぞれの辺が自分の側だと
+/// 思っている面が、切った区間の上では別の面になる）。そのときは、面の中の
 /// 奥の点の色を、その地図の元の形（`truth`）で調べる。奥の点：面のいちばん長い区間の真ん中から、面の側へ垂直に
 /// 伸ばした半直線が、その地図の面を分ける最初の線（色を持つ区間と `bounds`）に当たるまでの、半分の所
 /// （当たらなければ、面は外へ開いているので、色は無い）
@@ -3801,11 +3871,12 @@ struct Chain {
     whole: Option<(Point, Option<ShapeId>, Option<ShapeId>)>,
 }
 
-/// 直線の区間の鎖を、元の曲線の一部へ置き換える（設計 2-3）。置き換えてよいのは、今の地図で次の3つを満たすときだけ：
-/// 1. 曲線 C が、ほかの辺と、共有する端のほかで交わらない（触れるのも交わりとみなす）
-/// 2. 区間の列 P と C で囲まれた所（帯）の中に、ほかの頂点が無い。読み直し（`from_faces`）で辺が切られないよう、
-///    C から `SPLIT_TOL` 以内にも頂点が無い
-/// 3. 帯の両端の頂点につながるほかの辺が、帯の中に無い（その辺は P とも C とも交わらないので、真ん中の点1つで決まる）
+/// 直線の区間の鎖を、元の曲線の一部へ置き換える。置き換えてよいのは、今の地図で、曲線 C の判定の形が次の3つを
+/// 満たすときだけ（`PolyIndex::can_replace`。設計 段階2 の 2-4）：
+/// 1. C が、自分とも、ほかの辺とも、共有する端のほかで触れない
+/// 2. 区間の列 P と C で囲まれた所（帯。境目の上を含む）に、ほかの頂点が無い
+/// 3. 帯の両端の頂点につながるほかの辺が、帯の中に無い（その辺は P とも C とも触れないので、最初の区間の真ん中の点1つで
+///    決まる）
 ///
 /// 満たさなければ鎖を真ん中で2つに分け、区間1つでも満たさなければ直線のまま残す
 struct ChainRestorer {
@@ -3975,9 +4046,11 @@ fn gpt(p: Point) -> IPt {
 
 /// 曲線の判定の形：重ねるときと同じ数に等分した折れ線の点を、格子に丸めたもの（続けて同じ点は1つにする）
 fn grid_poly(q: &QuadBez) -> Vec<IPt> {
-    let mut out: Vec<IPt> = Vec::new();
-    for (p, _) in flatten_with_t(q, FLAT_TOL) {
-        let ip = gpt(p);
+    // 点は `flatten_with_t` と同じ（同じ t で同じ式）
+    let n = flat_count(q, FLAT_TOL);
+    let mut out: Vec<IPt> = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let ip = gpt(q.eval(i as f64 / n as f64));
         if out.last() != Some(&ip) {
             out.push(ip);
         }
@@ -4001,6 +4074,14 @@ fn on_seg(a: IPt, b: IPt, p: IPt) -> bool {
 
 /// 区間 `a`–`b` と `c`–`d` が、どこかで触れるか（端・重なりを含む）
 fn segs_touch(a: IPt, b: IPt, c: IPt, d: IPt) -> bool {
+    // 外接矩形が離れていれば触れない（向きの計算をしないで済ませる）
+    if a.0.max(b.0) < c.0.min(d.0)
+        || c.0.max(d.0) < a.0.min(b.0)
+        || a.1.max(b.1) < c.1.min(d.1)
+        || c.1.max(d.1) < a.1.min(b.1)
+    {
+        return false;
+    }
     let (o1, o2) = (orient(a, b, c).signum(), orient(a, b, d).signum());
     let (o3, o4) = (orient(c, d, a).signum(), orient(c, d, b).signum());
     if o1 != o2 && o3 != o4 && o1 != 0 && o2 != 0 && o3 != 0 && o4 != 0 {
@@ -4011,7 +4092,8 @@ fn segs_touch(a: IPt, b: IPt, c: IPt, d: IPt) -> bool {
 
 /// 共有する端 `v` から出る2つの区間 `v`–`p` と `v`–`q` が、`v` のほかでも触れるか（同じ向きに重なるときだけ）
 fn fan_overlap(v: IPt, p: IPt, q: IPt) -> bool {
-    orient(v, p, q) == 0 && (p.0 - v.0) as i128 * (q.0 - v.0) as i128 + (p.1 - v.1) as i128 * (q.1 - v.1) as i128 > 0
+    orient(v, p, q) == 0
+        && (p.0 - v.0) as i128 * (q.0 - v.0) as i128 + (p.1 - v.1) as i128 * (q.1 - v.1) as i128 > 0
 }
 
 /// 区間 `a`–`b` と `c`–`d` の距離が、格子の目の対角線の半分（`GRID_REACH`）以下か（2乗で 1/2 以下か）
@@ -4036,7 +4118,10 @@ fn segs_within_reach(a: IPt, b: IPt, c: IPt, d: IPt) -> bool {
         let cross = dx * py - dy * px;
         2 * cross * cross <= len2
     };
-    pt_seg_le_half(a, c, d) || pt_seg_le_half(b, c, d) || pt_seg_le_half(c, a, b) || pt_seg_le_half(d, a, b)
+    pt_seg_le_half(a, c, d)
+        || pt_seg_le_half(b, c, d)
+        || pt_seg_le_half(c, a, b)
+        || pt_seg_le_half(d, a, b)
 }
 
 /// 整数の向きを、角度の順に比べる（`cmp_dir` を i128 で）
@@ -4105,7 +4190,10 @@ fn seg_pair_clash(
 fn poly_items<T: Copy>(poly: &[IPt], sides: (T, T)) -> Vec<(QuadBez, (T, T))> {
     (0..poly.len().saturating_sub(1))
         .map(|k| {
-            let (a, b) = (from_grid(poly[k].0, poly[k].1), from_grid(poly[k + 1].0, poly[k + 1].1));
+            let (a, b) = (
+                from_grid(poly[k].0, poly[k].1),
+                from_grid(poly[k + 1].0, poly[k + 1].1),
+            );
             (QuadBez::new(a, a.midpoint(b), b), sides)
         })
         .collect()
@@ -4113,7 +4201,14 @@ fn poly_items<T: Copy>(poly: &[IPt], sides: (T, T)) -> Vec<(QuadBez, (T, T))> {
 
 /// 2本の辺の判定の形 `pa`（端の頂点 `ea`）と `pb`（`eb`）が、共有する頂点のほかで触れるか
 fn polys_clash(pa: &[IPt], ea: (usize, usize), pb: &[IPt], eb: (usize, usize)) -> bool {
+    let rb = GridRect::of(pb);
+    if !GridRect::of(pa).overlaps(&rb) {
+        return false;
+    }
     (0..pa.len().saturating_sub(1)).any(|k| {
+        if !GridRect::of(&pa[k..k + 2]).overlaps(&rb) {
+            return false;
+        }
         let ta = seg_tags(pa, k, ea.0, ea.1);
         (0..pb.len().saturating_sub(1)).any(|m| {
             seg_pair_clash(
@@ -4129,10 +4224,7 @@ fn polys_clash(pa: &[IPt], ea: (usize, usize), pb: &[IPt], eb: (usize, usize)) -
 
 /// 折れ線 `poly` の区間 `k` の両端の頂点の番号（折れ線の端で、頂点 `na`・`nb` にあたるときだけ）
 fn seg_tags(poly: &[IPt], k: usize, na: usize, nb: usize) -> (Option<usize>, Option<usize>) {
-    (
-        (k == 0).then_some(na),
-        (k + 2 == poly.len()).then_some(nb),
-    )
+    ((k == 0).then_some(na), (k + 2 == poly.len()).then_some(nb))
 }
 
 /// 判定の形（格子の上の折れ線）の索引。地図の一部の辺を1本の曲線に置き換えてよいかを、整数で調べる
@@ -4260,7 +4352,15 @@ impl PolyIndex {
     /// 1. `pc` が自分とも、ほかの辺の折れ線とも、共有する端のほかで触れない
     /// 2. `path` と `pc` で囲まれた所（境目の上を含む）に、ほかの頂点が無い
     /// 3. `na`・`nb` につながるほかの辺の最初の区間の真ん中が、囲まれた所（境目の上を含む）に無い
-    fn can_replace(&self, part: &[usize], path: &[IPt], inner: &[usize], pc: &[IPt], na: usize, nb: usize) -> bool {
+    fn can_replace(
+        &self,
+        part: &[usize],
+        path: &[IPt],
+        inner: &[usize],
+        pc: &[IPt],
+        na: usize,
+        nb: usize,
+    ) -> bool {
         if pc.len() < 2 || na == nb {
             return false;
         }
@@ -4296,7 +4396,13 @@ impl PolyIndex {
                     }
                     let poly = &self.polys[f];
                     let (fa, fb) = self.ends[f];
-                    if seg_pair_clash(sg, tags, (poly[m], poly[m + 1]), seg_tags(poly, m, fa, fb), None) {
+                    if seg_pair_clash(
+                        sg,
+                        tags,
+                        (poly[m], poly[m + 1]),
+                        seg_tags(poly, m, fa, fb),
+                        None,
+                    ) {
                         return false;
                     }
                 }
@@ -4471,12 +4577,19 @@ impl GridRect {
     }
 }
 
-/// 区間がかかる、近さを調べる格子のマス（1マスは 8px）
-fn grid_cells((a, b): (IPt, IPt)) -> impl Iterator<Item = (i64, i64)> {
-    const CELL: i64 = 8 * OVERLAY_GRID as i64;
-    let (x0, x1) = (a.0.min(b.0).div_euclid(CELL), a.0.max(b.0).div_euclid(CELL));
-    let (y0, y1) = (a.1.min(b.1).div_euclid(CELL), a.1.max(b.1).div_euclid(CELL));
+/// 近さを調べる格子の1マス（8px）
+const GRID_CELL: i64 = 8 * OVERLAY_GRID as i64;
+
+/// 区間がかかる、1マス `cell` の格子のマス
+fn cells_of((a, b): (IPt, IPt), cell: i64) -> impl Iterator<Item = (i64, i64)> {
+    let (x0, x1) = (a.0.min(b.0).div_euclid(cell), a.0.max(b.0).div_euclid(cell));
+    let (y0, y1) = (a.1.min(b.1).div_euclid(cell), a.1.max(b.1).div_euclid(cell));
     (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
+}
+
+/// 区間がかかる、近さを調べる格子のマス
+fn grid_cells(sg: (IPt, IPt)) -> impl Iterator<Item = (i64, i64)> {
+    cells_of(sg, GRID_CELL)
 }
 
 /// 向きのある辺 `h` の判定の形の点（向きどおりの順）
@@ -4671,4 +4784,3 @@ impl<T: Copy> RayIndex<T> {
         best.map(|b| b.2)
     }
 }
-

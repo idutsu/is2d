@@ -21788,10 +21788,22 @@ mod map_overlay {
         assert!(valid(&m));
         let before = m.clone();
         m.merge_degree2(kurbo::Rect::new(-1.0, -1.0, 20.0, 20.0));
-        assert_eq!(m.edges.len(), 3, "折り返しはほかの辺に触れないので、まとめる");
+        assert_eq!(
+            m.edges.len(),
+            3,
+            "折り返しはほかの辺に触れないので、まとめる"
+        );
         assert!(valid(&m));
         // まとめた曲線は、元の2本から 0.01px 以内（それより離れた点の色は変わらない）
-        for (x, y) in [(1.0, 1.0), (5.0, 0.02), (9.9, 0.05), (3.0, 6.0), (11.0, 0.0), (-1.0, 1.0), (5.0, -0.02)] {
+        for (x, y) in [
+            (1.0, 1.0),
+            (5.0, 0.02),
+            (9.9, 0.05),
+            (3.0, 6.0),
+            (11.0, 0.0),
+            (-1.0, 1.0),
+            (5.0, -0.02),
+        ] {
             let p = Point::new(x, y);
             assert_eq!(m.color_at(p), before.color_at(p), "{p:?}");
         }
@@ -21876,7 +21888,10 @@ mod map_overlay {
             m.node_src = vec![None; m.nodes.len()];
             m
         };
-        assert!(!valid(&lens(0.00006)), "格子の目より細い面は正しい地図ではない");
+        assert!(
+            !valid(&lens(0.00006)),
+            "格子の目より細い面は正しい地図ではない"
+        );
         // 細い面（真ん中の幅 0.025px。両端の頂点のすぐ近くの、折れ線の最初の点でも、格子の目の数倍離れる）
         let m = lens(0.025);
         assert!(valid(&m));
@@ -23125,16 +23140,26 @@ mod map_overlay {
                 .collect();
             let radius = 2.0 + r.f() * 6.0;
             let raw = generate_brush_outline(&pts, radius);
-            let s_shapes = crate::vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, Color32::RED, 1.0);
+            let s_shapes =
+                crate::vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, Color32::RED, 1.0);
             for k in 0..13 {
                 let eps = 1e-4 * 10f64.powf(k as f64 / 6.0);
-                let shifted: Vec<Point> = raw.iter().map(|p| *p + KVec2::new(eps, eps * 0.7)).collect();
+                let shifted: Vec<Point> = raw
+                    .iter()
+                    .map(|p| *p + KVec2::new(eps, eps * 0.7))
+                    .collect();
                 let mut app = Is2dApp::default();
                 let mut ok = true;
-                for (outline, color) in [(&raw, Color32::RED), (&shifted, Color32::BLUE), (&raw, Color32::RED)] {
+                for (outline, color) in [
+                    (&raw, Color32::RED),
+                    (&shifted, Color32::BLUE),
+                    (&raw, Color32::RED),
+                ] {
                     // 重ね合わせの結果そのものが正しい地図か（図形に書き戻す前）
                     let before: Vec<FillShape> = app.scene().iter().cloned().collect();
-                    let stroke = crate::vector_stroke::build_smoothed_stroke_shapes_at_zoom(outline, color, 1.0);
+                    let stroke = crate::vector_stroke::build_smoothed_stroke_shapes_at_zoom(
+                        outline, color, 1.0,
+                    );
                     let base = PlanarMap::from_faces(before.iter());
                     if let Some(m) = base.overlay(
                         crate::planar_map::MapInput::Shapes(&stroke),
@@ -23151,7 +23176,11 @@ mod map_overlay {
                     invalid += 1;
                 }
                 let scene: Vec<FillShape> = app.scene().iter().cloned().collect();
-                let bbox = s_shapes.iter().map(|s| s.bounding_box()).reduce(|a, b| a.union(b)).unwrap();
+                let bbox = s_shapes
+                    .iter()
+                    .map(|s| s.bounding_box())
+                    .reduce(|a, b| a.union(b))
+                    .unwrap();
                 let mut bad = false;
                 'grid: for i in 0..120 {
                     for j in 0..120 {
@@ -23159,10 +23188,18 @@ mod map_overlay {
                             bbox.x0 + bbox.width() * (i as f64 + 0.5) / 120.0,
                             bbox.y0 + bbox.height() * (j as f64 + 0.5) / 120.0,
                         );
-                        if !s_shapes.iter().any(|s| s.contains_point(p)) || near_boundary(&s_shapes, p, 0.05) {
+                        if !s_shapes.iter().any(|s| s.contains_point(p))
+                            || near_boundary(&s_shapes, p, 0.05)
+                        {
                             continue;
                         }
-                        if scene.iter().rev().find(|s| s.contains_point(p)).map(|s| s.color) != Some(Color32::RED) {
+                        if scene
+                            .iter()
+                            .rev()
+                            .find(|s| s.contains_point(p))
+                            .map(|s| s.color)
+                            != Some(Color32::RED)
+                        {
                             bad = true;
                             break 'grid;
                         }
@@ -23181,7 +23218,11 @@ mod map_overlay {
     #[test]
     fn near_coincident_retrace_keeps_map_valid_and_paint() {
         let (invalid, lost, total) = near_coincident_retrace(3);
-        assert_eq!((invalid, lost), (0, 0), "正しくない地図・赤でない所（{total}通り中）");
+        assert_eq!(
+            (invalid, lost),
+            (0, 0),
+            "正しくない地図・赤でない所（{total}通り中）"
+        );
     }
 
     /// 回転・拡大縮小したシンボルの中で、重なる線を何本も描いても、レイヤーの地図（ステージの座標で作る）はいつも正しく、
