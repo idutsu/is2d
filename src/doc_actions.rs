@@ -1154,7 +1154,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         SelectSubMode::DeleteAnchor
     };
     let mut target = compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode);
-    // 浮いている片・残り（ほかの図形と重なることがある）の頂点・辺は、図形ごとに編集する
+    // 動かして浮いている片（ほかの図形と重なることがある）の頂点・辺は、図形ごとに編集する
     if let Some(done) = edit_floating_anchor(tab, &target, is_add) {
         return done;
     }
@@ -1185,7 +1185,8 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
     }
 }
 
-/// 浮いている片・残りの頂点・辺 `target` に、アンカーを足す（`is_add`）・消す。`target` が浮いている図形のものでなければ `None`
+/// 動かして浮いている片の頂点・辺 `target` に、アンカーを足す（`is_add`）・消す。`target` がその片のものでなければ `None`。
+/// 残りと、動かしていない片は、地図から切り出したもので境目を隣の図形と共有するので、ここでは編集しない（選択を外して地図で編集する）
 fn edit_floating_anchor(
     tab: &mut Tab,
     target: &crate::canvas_tool::HoverTarget,
@@ -1215,19 +1216,9 @@ fn edit_floating_anchor(
         ) => (shape_id, contour_idx, seg_idx, None),
         _ => return None,
     };
-    let fl = tab.session.floating()?;
-    let (in_pieces, idx) = match fl.pieces.iter().position(|p| p.shape_id == shape_id) {
-        Some(i) => (true, i),
-        None => (
-            false,
-            fl.remainder.iter().position(|r| r.shape_id == shape_id)?,
-        ),
-    };
-    let mut edited = if in_pieces {
-        fl.pieces[idx].clone()
-    } else {
-        fl.remainder[idx].clone()
-    };
+    let fl = tab.session.floating().filter(|fl| fl.modified)?;
+    let idx = fl.pieces.iter().position(|p| p.shape_id == shape_id)?;
+    let mut edited = fl.pieces[idx].clone();
     let changed = edited.edit_contour(contour_idx, |c| match t_opt {
         Some(t) => c.insert_anchor_at(seg_idx, t),
         None => c.delete_anchor_at(seg_idx),
@@ -1238,12 +1229,7 @@ fn edit_floating_anchor(
     push_undo(tab, None);
     tab.session.update_floating(|fl_opt| {
         if let Some(fl_mut) = fl_opt {
-            if in_pieces {
-                fl_mut.pieces[idx] = edited;
-            } else {
-                fl_mut.remainder[idx] = edited;
-            }
-            fl_mut.modified = true;
+            fl_mut.pieces[idx] = edited;
         }
     });
     Some(true)

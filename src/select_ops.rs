@@ -562,9 +562,9 @@ pub(crate) fn compute_hover_target(
             });
     }
 
-    // アンカーの追加・削除は地図で探す（前後は無い）。浮いている片と残り（ほかの図形と重なることがある）だけは、
-    // 先に図形ごとに探す
-    let Some(fl) = session.floating() else {
+    // アンカーの追加・削除は地図で探す（前後は無い）。動かして浮いている片（ほかの図形と重なることがある）だけは、
+    // 先に図形ごとに探す。残りと動かしていない片は、地図から切り出したもので境目を隣と共有するので地図で探す
+    let Some(fl) = session.floating().filter(|fl| fl.modified) else {
         return crate::planar_map::anchor_hover(
             scene,
             session,
@@ -573,12 +573,7 @@ pub(crate) fn compute_hover_target(
             sub_mode == SelectSubMode::AddAnchor,
         );
     };
-    let floating_ids: HashSet<u64> = fl
-        .pieces
-        .iter()
-        .chain(&fl.remainder)
-        .map(|s| s.shape_id)
-        .collect();
+    let floating_ids: HashSet<u64> = fl.pieces.iter().map(|s| s.shape_id).collect();
 
     // 浮いている図形の頂点・辺の当たり判定の候補になる図形を前から順に返す
     // （最前面の塗りより後ろの図形と、外接矩形を半径だけ広げてもマウスが入らない図形は除く）

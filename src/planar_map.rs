@@ -2259,18 +2259,17 @@ pub(crate) fn merge_touching_faces(shapes: Vec<FillShape>) -> Vec<FillShape> {
             continue;
         }
         let map = PlanarMap::from_faces(list.iter());
-        let (map_faces, broken) = map.faces();
-        let faces: Vec<FillShape> = map_faces
-            .iter()
-            .map(|f| map.face_shape(f, layer_id, &group_path))
-            .collect();
-        let all: Vec<usize> = (0..map.edges.len()).collect();
-        // 壊れた数（`faces` の2つ目）には、閉じない輪郭と色がまざる輪郭も入っている
-        if broken > 0 || !map.crossings_grid(&all, &vec![false; all.len()]).is_empty() {
-            // 境目がそろっていない（地図にならない）ときは、まとめずにそのまま
+        if !map.is_valid() {
+            // 正しい地図にならない（境目がそろっていない・重なる）ときは、まとめずにそのまま
             out.extend(list);
             continue;
         }
+        let faces: Vec<FillShape> = map
+            .faces()
+            .0
+            .iter()
+            .map(|f| map.face_shape(f, layer_id, &group_path))
+            .collect();
         // 形の変わらない片は、元の図形（番号）をそのまま使う
         for f in faces {
             match list.iter().find(|s| {
@@ -2366,12 +2365,12 @@ pub(crate) fn map_edit_diff(
     }
 }
 
-/// 生の図形 `own`（下から上への並び）の地図と、塗り重ねて作り直したか。図形から作った地図に壊れた輪郭（閉じない・色がまざる。
-/// 前の版で描いた、重なった図形など）があれば、並びの順に塗り重ねて作り直す（`painted_map`。絵は同じ）。
-/// `None`：格子に置けない座標がある
+/// 生の図形 `own`（下から上への並び）の地図と、塗り重ねて作り直したか。図形から作った地図が正しい地図でなければ
+/// （`is_valid`。前の版で描いた、境目がそろっていない図形や重なった図形など）、並びの順に塗り重ねて作り直す
+/// （`painted_map`。絵は同じ）。`None`：格子に置けない座標がある
 fn layer_map(own: &[&FillShape]) -> Option<(PlanarMap, bool)> {
     let map = PlanarMap::from_faces(own.iter().copied());
-    if map.face_cycles().iter().any(|c| map.is_broken_cycle(c)) {
+    if !map.is_valid() {
         return Some((painted_map(own)?, true));
     }
     Some((map, false))

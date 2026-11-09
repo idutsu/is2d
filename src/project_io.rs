@@ -434,15 +434,17 @@ impl From<SavedSymbolInstance> for SymbolInstance {
     }
 }
 
+/// 輪郭は丸めずに書く。serde_json は f64 を、読み戻すと同じ値になる最短の10進で書き、読むときも
+/// （`float_roundtrip`）ビットまで同じ値に戻す。地図は、となり合う図形の境目がビットまで同じことを前提に
+/// 図形から作るので、保存と読み込みで座標が動くと地図が壊れる
 fn serialize_contour_segments<S: serde::Serializer>(
     segments: &Arc<Vec<QuadBez>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    let round = |v: f64| (v * 1000.0).round() / 1000.0;
     serializer.collect_seq(
         segments
             .iter()
-            .flat_map(|s| [round(s.p0.x), round(s.p0.y), round(s.p1.x), round(s.p1.y)]),
+            .flat_map(|s| [s.p0.x, s.p0.y, s.p1.x, s.p1.y]),
     )
 }
 
@@ -660,7 +662,7 @@ impl From<SavedLayer> for Layer {
             visible: s.visible,
             locked: s.locked,
             frame_count,
-            keyframes,
+            keyframes: keyframes.into(),
         }
     }
 }

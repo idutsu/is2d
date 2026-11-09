@@ -17,7 +17,7 @@
 ## 2. データ構造（Data Model）
 - **シーンとシンボルの統一タイムライン構造**:
   - ルートシーンと各 `SymbolDef` が全く同じ `Timeline` 構造体（`Vec<Layer>`）を持つ再帰的データモデル。
-  - 各 `Layer` は全フレーム分の配列を持つのではなく、スパースな `Vec<Arc<Keyframe>>`（`start_frame` と保持尺 `frame_count` によるスパン表現）で保持し、ホールドフレームでのデータ重複をゼロにする。
+  - 各 `Layer` は全フレーム分の配列を持つのではなく、スパースなキーフレームの列（`KeyframeList`。`start_frame` と保持尺 `frame_count` によるスパン表現）で保持し、ホールドフレームでのデータ重複をゼロにする。列は 64 個ほどずつの塊に分け、塊も塊の並びも `Arc` で共有する（複製は `Arc` 1つ、書き換えは塊の並びと触った塊だけを写す）。
 - **図形エンティティの正規化**:
   - 最小単位の `FillShape` は外周 `Contour` と穴 `Vec<Contour>`、色 `Color32`、事前計算された AABB（`kurbo::Rect`）、所属レイヤーID、グループ階層パス、メッシュ内容の世代番号（`mesh_revision`）を保持する。
   - セル（`Cel`）内では、Merge Drawing 対象となる生シェイプ／グループ図形の配列（`Arc<Vec<Arc<FillShape>>>`。図形も1つずつ共有する）と、ライブラリを参照する `SymbolInstance` の配列（`Arc<Vec<SymbolInstance>>`。`symbol_id`, `Affine`, ピボット, `loop_mode`, `first_frame`, 色効果 `color_effect`（アルファ・明度）, 図形列の中での重なり位置 `shape_order_index`）を分けて正規化保持し、内容が変わるたびにセルの世代番号（`revision`）を更新する。シンボル展開時（`SymbolInstanceBinding::instantiate_shapes`）に色効果が初期値でない場合のみ `FillShape::set_color` で頂点色を更新し、文書書き戻し時は `SymbolInstanceBinding` のみを保存することで色効果適用後の色が文書へ混入しない構造とする。
@@ -94,7 +94,7 @@
   1. **Layer 1 — Geometry 層**: ベジェ曲線・輪郭・AABB・テッセレーション（`vector_engine`）、ブラシアウトライン生成と曲線フィッティング（`vector_stroke`）、境目の線で持つ地図と、形・地図の重ね合わせ（`planar_map`。重ね合わせの交わりの計算は `vendor/i_overlay`：i_overlay 9.1.0 に1か所足した写し。`vendor/i_overlay/PATCH.md`）。上位層（ドキュメント状態やUI）への依存を一切持たない純粋な幾何計算層。
   2. **Layer 2 — Domain / Model 層**: タイムライン・レイヤー・キーフレーム・セル・トゥイーン補間（`timeline`）および永続ドキュメント `Document`・シンボル定義・入れ子評価・`EditPath`（`symbol`）。Layer 1 のみに依存し、上位層への逆依存を持たないデータモデル層。
   3. **Layer 3 — Document & Tool Operations 層**: タブ状態 `Tab`・作業状態 `Session`・表示状態 `View`・Undo履歴・`Scene`・土台キャッシュ・上乗せ・`Floating`・`edit_layers`（`canvas_tool`）、ドキュメント変更アクションと一元 `apply`（`doc_actions`）、シンボル操作（`symbol_ops`）、選択・グループ・重なり順操作（`select_ops`）、クリップボード操作（`clipboard_ops`）、ペイント系ツール（`tool_paint`）、選択・変形ツール（`tool_select`）、自由変形ツール（`tool_transform`）、`.is2d` プロジェクトファイルのシリアライズ・マルチタブ管理（`project_io`）、確認なし終了時の復旧ファイル書き出し・次回起動時の復元（`recovery`）、および動画（MP4）書き出しの共通処理・1コマラスタライズ・OS別エンコーダ入口（`video_export`）と macOS 版 AVFoundation H.264 エンコーダ実装（`video_export_macos`、`#[cfg(target_os = "macos")]`）。
-     - 輪郭は点と制御点を平らに並べ、小数第3位までに丸めて保存する（形式の版 2）。
+     - 輪郭は点と制御点を平らに並べ、丸めずに保存する（形式の版 2）。serde_json は f64 を読み戻すと同じ値になる最短の10進で書き、`float_roundtrip` で読むので、保存と読み込みで座標がビットまで変わらない（地図は、となり合う図形の境目がビットまで同じことを前提に図形から作るため）。
   4. **Layer 4 — UI Presentation 層**: 下部タイムラインUI（`timeline_ui`）および最上部メニューバー・上部ステージバー・左右パネル・モーダル・`UiAction`（`panels`）。
   5. **Layer 5 — Application Shell 層**: アプリ統合状態 `Is2dApp`・ショートカット処理・`UiAction` の一元適用（`main`）および macOS ネイティブメニューバー構築（`app_menu_macos`、`#[cfg(target_os = "macos")]`）。下位層から上位層への逆参照ゼロ・層内の相互循環ゼロを厳守する。
 - **OS 固有処理の抽象化と `unsafe` の隔離**:
@@ -109,7 +109,7 @@
 
 ## 9. Undo / Redo 方式
 - 最大 100 ステップの `VecDeque<UndoEntry>`。1件は「ルート `Timeline`・シンボルライブラリ・`Floating`・`EditPath`・グループ編集階層・ステージサイズ・フレームレート（`fps`）・ライブラリの世代番号・未保存マーク用の世代ID」で構成する。選択は含めない（2章の ID による選択保持に任せる）。
-- 全フレーム・全シンボルのディープコピーによるメモリ肥大化を防ぐため、`Contour` のセグメント配列（`Arc<Vec<QuadBez>>`）、`Cel` のシェイプ配列（`Arc<Vec<Arc<FillShape>>>`。書き戻しでは変わらない図形の `Arc` をそのまま使うので、Undo 1件はセルの図形の数でなく、変えた図形の分だけ大きくなる）およびインスタンス配列（`Arc<Vec<SymbolInstance>>`）、`Layer` のキーフレーム配列（`Vec<Arc<Keyframe>>`）、さらに `UndoEntry` 内のシンボルライブラリ（`Arc<Vec<SymbolDef>>`、`Document::revision` 連動）と `Floating`（`Arc<Floating>`）を **Copy-on-Write（CoW）構造共有** とし、未変更のキーフレームやシンボルは $O(1)$ でポインタ共有する。
+- 全フレーム・全シンボルのディープコピーによるメモリ肥大化を防ぐため、`Contour` のセグメント配列（`Arc<Vec<QuadBez>>`）、`Cel` のシェイプ配列（`Arc<Vec<Arc<FillShape>>>`。書き戻しでは変わらない図形の `Arc` をそのまま使うので、Undo 1件はセルの図形の数でなく、変えた図形の分だけ大きくなる）およびインスタンス配列（`Arc<Vec<SymbolInstance>>`）、`Layer` のキーフレームの列（`KeyframeList`。塊ごとの `Arc` と塊の並びの `Arc` で持つので、Undo 1件のキーフレームの分は、作品の長さでなく、変えたレイヤーの塊の並びと触った塊1つ分になる）、さらに `UndoEntry` 内のシンボルライブラリ（`Arc<Vec<SymbolDef>>`、`Document::revision` 連動）と `Floating`（`Arc<Floating>`）を **Copy-on-Write（CoW）構造共有** とし、未変更のキーフレームやシンボルは $O(1)$ でポインタ共有する。
 
 ## 10. 幾何計算パイプライン（Geometry Pipeline）
 数式・閾値・アルゴリズムの詳細は [`GEOMETRY.md`](./GEOMETRY.md) を参照してください。ここでは設計上の要点だけを挙げます。

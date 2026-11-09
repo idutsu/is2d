@@ -3597,6 +3597,65 @@ fn test_tween_lru_cache_no_thrashing() {
     }
 }
 
+/// キーフレームの列（塊で共有する列）は、足す・消す・書き換える・ふるいにかける、を続けても、ふつうの配列と同じ中身になる
+#[test]
+fn test_keyframe_list_matches_plain_vec() {
+    use crate::timeline::{Keyframe, KeyframeList};
+    let mut r = map_overlay::Rng(3);
+    let mut list = KeyframeList::default();
+    let mut plain: Vec<usize> = Vec::new();
+    let mut next = 0usize;
+    for step in 0..4000 {
+        let op = (r.f() * 10.0) as usize;
+        if op < 6 || plain.is_empty() {
+            let i = (r.f() * (plain.len() + 1) as f64) as usize % (plain.len() + 1);
+            list.insert(i, std::sync::Arc::new(Keyframe::new_blank(next)));
+            plain.insert(i, next);
+            next += 1;
+        } else if op < 8 {
+            let i = (r.f() * plain.len() as f64) as usize % plain.len();
+            assert_eq!(list.remove(i).start_frame, plain.remove(i));
+        } else if op < 9 {
+            let i = (r.f() * plain.len() as f64) as usize % plain.len();
+            std::sync::Arc::make_mut(&mut list[i]).start_frame += 1_000_000;
+            plain[i] += 1_000_000;
+        } else {
+            let m = 2 + (r.f() * 5.0) as usize;
+            list.retain(|kf| kf.start_frame % m != 0);
+            plain.retain(|f| f % m != 0);
+        }
+        assert_eq!(list.len(), plain.len(), "step {step}");
+        if step % 97 == 0 {
+            let got: Vec<usize> = list.iter().map(|kf| kf.start_frame).collect();
+            assert_eq!(got, plain, "step {step}");
+            for (i, f) in plain.iter().enumerate() {
+                assert_eq!(list[i].start_frame, *f);
+            }
+        }
+    }
+    let got: Vec<usize> = list.iter().map(|kf| kf.start_frame).collect();
+    assert_eq!(got, plain);
+}
+
+/// Undo の控え（文書の複製）と、そのあと1つのキーフレームを書き換えた列は、触った塊のほかを共有する（N-2004）
+#[test]
+fn test_keyframe_list_copy_shares_untouched_chunks() {
+    use crate::timeline::{Keyframe, Layer};
+    let mut layer = Layer::new_with_id_and_frames(1, "L", 3000);
+    for f in 1..3000 {
+        layer
+            .keyframes
+            .insert(f, std::sync::Arc::new(Keyframe::new_blank(f)));
+    }
+    let snapshot = layer.clone();
+    layer.keyframe_mut(1500).tween = true;
+    let (shared, total) = layer.keyframes.shared_chunks_with(&snapshot.keyframes);
+    assert!(total > 20, "塊の数 {total}");
+    assert_eq!(shared, total - 1, "触った塊だけが写される");
+    assert!(!snapshot.keyframes[1500].tween, "控えは変わらない");
+    assert!(layer.keyframes[1500].tween);
+}
+
 #[test]
 fn test_project_save_and_load_roundtrip() {
     let mut app = Is2dApp::default();
@@ -10370,16 +10429,18 @@ fn test_stage7_edit_layers_preserves_mesh_cache_without_rebuilding_from_doc() {
     for i in 0..2000 {
         let col = i % 50;
         let row = i / 50;
-        let x0 = (col as f64) * 30.0;
+        let x0 = (col as f64) * 40.0;
         let y0 = (row as f64) * 30.0;
         let c = Color32::from_rgb(
             ((i * 37) % 200 + 40) as u8,
             ((i * 73) % 200 + 40) as u8,
             150,
         );
+        // 隣の線と重ならない間隔にする（同じレイヤーの生の図形が重なると、地図として正しくないので、
+        // レイヤーを塗り重ねて作り直し、図形が全部書き換わる）
         initial_shapes.extend(make_stroke(
             Point::new(x0, y0 + 10.0),
-            Point::new(x0 + 20.0, y0 + 10.0),
+            Point::new(x0 + 10.0, y0 + 10.0),
             10.0,
             c,
         ));
@@ -11544,7 +11605,7 @@ fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
                 visible: true,
                 locked: false,
                 frame_count: 3_000,
-                keyframes: kfs,
+                keyframes: kfs.into(),
             });
         }
         app.doc.root.next_layer_id = 11;
@@ -20888,6 +20949,49 @@ fn test_reshape_rewrites_only_touched_shapes() {
     );
 }
 
+/// 地図で描いた図形を保存して開き直すと、輪郭はビットまで同じで、地図も壊れない（保存で座標を丸めない）
+#[test]
+fn test_save_and_open_keeps_contours_bit_exact() {
+    let mut app = Is2dApp::default();
+    let mut r = map_overlay::Rng(17);
+    let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+    for k in 0..40 {
+        app.tool.brush_color = colors[k % 4];
+        let p0 = Point::new(-300.0 + r.f() * 600.0, -180.0 + r.f() * 360.0);
+        let p1 = Point::new(-300.0 + r.f() * 600.0, -180.0 + r.f() * 360.0);
+        let pts: Vec<Point> = (0..=12).map(|i| p0.lerp(p1, i as f64 / 12.0)).collect();
+        doc_actions::commit_raw_outline(
+            &mut app,
+            &generate_brush_outline(&pts, 2.0 + r.f() * 10.0),
+        );
+    }
+    assert!(layer_map_is_valid(&app), "保存する前の地図が壊れている");
+    let bits = |app: &Is2dApp| {
+        app.scene()
+            .iter()
+            .map(|s| {
+                s.contours()
+                    .flat_map(|c| c.segments.iter().copied().collect::<Vec<_>>())
+                    .flat_map(|q| [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y])
+                    .map(f64::to_bits)
+                    .collect::<Vec<u64>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = bits(&app);
+    let path = std::env::temp_dir().join(format!("is2d_bit_exact_{}.is2d", std::process::id()));
+    crate::project_io::save_project_to_path(&mut app, &path).expect("保存");
+    let mut loaded = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut loaded, &path, None).expect("読み込み");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        bits(&loaded),
+        before,
+        "保存と読み込みで輪郭の座標が変わった"
+    );
+    assert!(layer_map_is_valid(&loaded), "開き直した地図が壊れている");
+}
+
 /// 今の図形から境目の線で持つ地図を作って図形に戻しても、塗りは変わらない
 #[test]
 fn test_planar_map_round_trip_keeps_fills() {
@@ -21136,6 +21240,89 @@ fn test_anchor_edit_on_broken_face_contour_repaints_layer() {
     assert!((green_area(&app) - green0).abs() < 0.01, "緑はそのまま");
     assert_eq!(app.history.undo_stack.len(), undo0 + 2, "Undo を積む");
     assert!(layer_map_is_valid(&app), "書き戻した図形は正しい地図になる");
+}
+
+/// 矩形で一部を選んで動かさずに、残りや片の境目の角を消しても、隣の図形との間に穴があかない（N-2001）。
+/// 動かしていない片と残りは地図から切り出したもので、境目を隣と共有するので、選択を外して地図で両側を一緒に変える
+#[test]
+fn test_anchor_delete_on_unmoved_selection_keeps_shared_border() {
+    for right_side in [false, true] {
+        let mut app = Is2dApp::default();
+        app.tool.brush_color = Color32::RED;
+        let red: Vec<Point> = (0..=10)
+            .map(|i| Point::new(-150.0 + 30.0 * i as f64, 0.0))
+            .collect();
+        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&red, 40.0));
+        app.tool.brush_color = Color32::BLACK;
+        // 曲がった線（輪郭の途中に頂点ができる）を、赤の帯に沿わせる
+        let black: Vec<Point> = (0..=24)
+            .map(|i| {
+                let x = -120.0 + 10.0 * i as f64;
+                Point::new(x, 6.0 * (x / 25.0).sin())
+            })
+            .collect();
+        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&black, 16.0));
+        let covered = |app: &Is2dApp, p: Point| app.scene().iter().any(|s| s.contains_point(p));
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::SelectMarquee {
+                p0: Point::new(0.0, -200.0),
+                p1: Point::new(300.0, 200.0),
+                additive: false,
+            },
+        ));
+        // 赤と黒の境目にある頂点（赤の図形と黒の図形の両方の輪郭にある点）を、残り（左）か片（右）から選ぶ
+        let fl = app.session.floating().expect("選択");
+        let side: Vec<FillShape> = if right_side {
+            fl.pieces.clone()
+        } else {
+            fl.remainder.clone()
+        };
+        let verts = |c: Color32| -> Vec<Point> {
+            side.iter()
+                .filter(|s| s.color == c)
+                .flat_map(|s| {
+                    s.contours()
+                        .flat_map(|k| k.segments.iter().map(|q| q.p0).collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        let blacks = verts(Color32::BLACK);
+        let v = verts(Color32::RED)
+            .into_iter()
+            .filter(|p| p.y.abs() < 15.0 && (p.x > 5.0) == right_side && p.x.abs() > 5.0)
+            .find(|p| blacks.iter().any(|b| b == p))
+            .expect("赤と黒の境目の頂点");
+        let probe: Vec<Point> = (0..80)
+            .flat_map(|i| {
+                (0..80).map(move |j| {
+                    Point::new(
+                        v.x - 20.0 + 0.5 * i as f64 + 0.13,
+                        v.y - 20.0 + 0.5 * j as f64 + 0.17,
+                    )
+                })
+            })
+            .collect();
+        let before: Vec<bool> = probe.iter().map(|p| covered(&app, *p)).collect();
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::DeleteAnchor { pt: v }
+        ));
+        doc_actions::apply(&mut app, doc_actions::Action::Deselect);
+        let holes = probe
+            .iter()
+            .zip(&before)
+            .filter(|(p, was)| **was && !covered(&app, **p))
+            .count();
+        assert_eq!(
+            holes,
+            0,
+            "角を消したら穴があいた（{}）",
+            if right_side { "片" } else { "残り" }
+        );
+        assert!(layer_map_is_valid(&app), "地図が壊れた");
+    }
 }
 
 fn layer_map_is_valid(app: &Is2dApp) -> bool {
@@ -22367,8 +22554,77 @@ mod map_overlay {
         assert_eq!(found, vec![top.color], "後の片が上");
     }
 
+    /// 同じレイヤーに重なった生の図形がある（前の版のファイルなど）セルで、離れた所にブラシを描いても、ほかの所の絵が
+    /// 変わらない。重なった図形は、頂点を共有しないと輪郭は閉じて色もそろうので、交わりまで見て（`is_valid`）見つける（N-1004）
+    #[test]
+    fn overlapping_raw_shapes_are_repainted_before_edit() {
+        let top_color = |shapes: &[FillShape], p: Point| {
+            shapes
+                .iter()
+                .rev()
+                .find(|s| s.contains_point(p))
+                .map(|s| s.color)
+        };
+        for seed in 0..11u64 {
+            let mut r = Rng(seed + 100);
+            let mut app = Is2dApp::default();
+            let lid = app.doc.root.layers[0].id;
+            let rnd = |r: &mut Rng, x0: f64, x1: f64| x0 + r.f() * (x1 - x0);
+            let red = make_stroke(
+                Point::new(rnd(&mut r, -200.0, -120.0), rnd(&mut r, -60.0, 60.0)),
+                Point::new(rnd(&mut r, 120.0, 200.0), rnd(&mut r, -60.0, 60.0)),
+                (8.0 + r.f() * 12.0) as f32,
+                Color32::RED,
+            );
+            let blue = make_stroke(
+                Point::new(rnd(&mut r, -60.0, 60.0), rnd(&mut r, -150.0, -100.0)),
+                Point::new(rnd(&mut r, -60.0, 60.0), rnd(&mut r, 100.0, 150.0)),
+                (8.0 + r.f() * 12.0) as f32,
+                Color32::BLUE,
+            );
+            let shapes: Vec<FillShape> = red
+                .into_iter()
+                .chain(blue)
+                .map(|s| s.with_scope(lid, &[]))
+                .collect();
+            put_cel_shapes(&mut app, 0, 0, shapes.clone());
+            assert!(
+                !PlanarMap::from_faces(shapes.iter()).is_valid(),
+                "seed {seed}: 重なった図形が正しい地図になっている"
+            );
+            app.tool.brush_color = Color32::GREEN;
+            let green: Vec<Point> = (0..=10)
+                .map(|i| Point::new(-200.0 + 40.0 * i as f64, 170.0 + 4.0 * (i % 2) as f64))
+                .collect();
+            doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&green, 6.0));
+            let after: Vec<FillShape> = app.scene().iter().cloned().collect();
+            let mut changed = Vec::new();
+            for i in 0..100 {
+                for j in 0..80 {
+                    let p = Point::new(
+                        -200.0 + 4.0 * i as f64 + 0.31,
+                        -160.0 + 4.0 * j as f64 + 0.27,
+                    );
+                    let now = top_color(&after, p);
+                    if now != Some(Color32::GREEN)
+                        && now != top_color(&shapes, p)
+                        && !near_boundary(&shapes, p, 0.25)
+                    {
+                        changed.push(p);
+                    }
+                }
+            }
+            assert!(
+                changed.is_empty(),
+                "seed {seed}: 色が変わった点 {}",
+                changed.len()
+            );
+            assert!(layer_map_valid(&app, 0), "seed {seed}: 地図が壊れた");
+        }
+    }
+
     /// 前の版の結合（境目がビットまで同じにならない）で描いた図形のセル（地図が壊れている）でも、ブラシ・消しゴム・バケツ・
-    /// 矩形で選んで動かす、が正しく効き、ほかの所の絵が消えない。図形を作り直さないので、区間の数も膨らまない
+    /// 矩形で選んで動かす、が正しく効き、ほかの所の絵が消えない（レイヤーを塗り重ねて作り直してから編集する）
     #[test]
     fn broken_layer_edits_repaint_layer_and_keep_other_paint() {
         let broken_app = || {
