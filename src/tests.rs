@@ -22838,7 +22838,7 @@ mod map_overlay {
 
     /// 速さの試し（ふだんは流さない）：前の版の結合で描いたセル（地図が壊れている）での、矩形選択・確定・ブラシの時間と、
     /// 区間の数
-    /// レビュー（7215b88 地図）N-1002 の再現：同じ線を2色交互に手ぶれ付きでなぞる
+    /// 同じ線を2色交互に手ぶれ付きでなぞったときの、地図の健全さを数える
     #[test]
     #[ignore]
     fn probe_review_two_color_retrace() {
@@ -22900,7 +22900,7 @@ mod map_overlay {
         eprintln!("PROBE 手ぶれなし・太さを変える 8 本：壊れた地図 {bad}/8");
     }
 
-    /// レビュー（7215b88 地図）N-2004 の再現：Shift で選び足した片が、前の片とつながっていてもまとまらない
+    /// 矩形で選んだあと、境目をまたぐ矩形を Shift で選び足したときの、同じ色の片どうしの接し方を数える
     #[test]
     #[ignore]
     fn probe_review_shift_marquee_merges() {
@@ -22958,7 +22958,7 @@ mod map_overlay {
             );
             let fl = app.session.floating().expect("選択");
             let pieces: Vec<FillShape> = fl.pieces.to_vec();
-            // 同じ色の片どうしが接している所（まとまっていない境目）：片の輪郭の区間の真ん中から、
+            // 同じ色の片どうしが接している所：片の輪郭の区間の真ん中から、
             // 片の外へ 0.05px 出た点が、同じ色の別の片に入るか
             let mut seams = 0;
             for (ai, a) in pieces.iter().enumerate() {
@@ -22989,17 +22989,17 @@ mod map_overlay {
             seams_total += seams;
             if case < 5 || seams > 0 {
                 eprintln!(
-                    "PROBE case {case}: 片 {before} → {}・まとまっていない境目の辺 {seams}",
+                    "PROBE case {case}: 片 {before} → {}・同じ色の片と接する区間 {seams}",
                     pieces.len()
                 );
             }
         }
         eprintln!(
-            "PROBE まとまらなかった回 {cases_with_seam}/40（境目の辺 合わせて {seams_total}）"
+            "PROBE 同じ色の片どうしが接した回 {cases_with_seam}/40（区間 合わせて {seams_total}）"
         );
     }
 
-    /// レビュー（7215b88 地図）N-2001 の再現：3レイヤーの絵を1レイヤーに貼って確定（片どうしが重なる）
+    /// 3レイヤーの絵を1レイヤーに貼って確定する時間（片どうしが重なる）
     #[test]
     #[ignore]
     fn probe_review_paste_three_layers_into_one() {
