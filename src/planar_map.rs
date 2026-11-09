@@ -560,6 +560,73 @@ impl PlanarMap {
         }
     }
 
+    /// 正しい地図か：辺どうしが端のほかで交わらず、面の輪郭が閉じて色がそろい（`faces` の壊れた数が 0）、何も無い側の輪郭が
+    /// 色のある面の中に入り込んでいない（重なった図形をそのまま地図にしたものでない）。何も無い側の輪郭は、辺の真ん中の点が、
+    /// その辺を輪郭に持たない色のある面の中（外周の中で、どの穴の外）にあれば、入り込んでいる
+    pub(crate) fn is_valid(&self) -> bool {
+        let cycles = self.face_cycles();
+        let (faces, broken) = self.faces_of(&cycles);
+        if broken > 0 {
+            return false;
+        }
+        let all: Vec<usize> = (0..self.edges.len()).collect();
+        if !self
+            .crossings_grid(&all, &vec![false; self.edges.len()])
+            .is_empty()
+        {
+            return false;
+        }
+        let mut edge_faces: Vec<[usize; 2]> = vec![[usize::MAX; 2]; self.edges.len()];
+        let mut regions: Vec<Vec<(KRect, Option<BandedCycle>)>> = Vec::with_capacity(faces.len());
+        for (fi, f) in faces.iter().enumerate() {
+            for h in f.cycles.iter().flatten() {
+                let slot = &mut edge_faces[h.0];
+                if slot[0] == usize::MAX {
+                    slot[0] = fi;
+                } else {
+                    slot[1] = fi;
+                }
+            }
+            regions.push(
+                f.cycles
+                    .iter()
+                    .map(|c| {
+                        let bbox = c
+                            .iter()
+                            .map(|h| self.half_quad(*h).bounding_box())
+                            .reduce(|a, b| a.union(b))
+                            .unwrap_or(KRect::ZERO);
+                        (bbox, None)
+                    })
+                    .collect(),
+            );
+        }
+        for c in &cycles {
+            if c.is_empty() || self.side_color(c[0]).is_some() {
+                continue;
+            }
+            let h = c[0];
+            let probe = self.half_quad(h).eval(0.5);
+            for (fi, f) in faces.iter().enumerate() {
+                if edge_faces[h.0].contains(&fi) || !regions[fi][0].0.contains(probe) {
+                    continue;
+                }
+                let mut inside = |k: usize| {
+                    let (bbox, banded) = &mut regions[fi][k];
+                    bbox.contains(probe)
+                        && banded
+                            .get_or_insert_with(|| BandedCycle::new(self, &f.cycles[k], *bbox))
+                            .winding(probe)
+                            != 0
+                };
+                if inside(0) && !(1..f.cycles.len()).any(&mut inside) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// 面を取り出す。外周（面積が正）に、それを含むいちばん小さい同じ色の外周の穴（面積が負）を入れる。
     /// 戻り値の2つ目は、閉じなかった輪郭・色がまざった輪郭・入れ先の無い穴の数（壊れていれば 0 より大きい）
     pub(crate) fn faces(&self) -> (Vec<MapFace>, usize) {
@@ -1540,6 +1607,8 @@ pub(crate) struct LayerMap {
     pub(crate) layer_id: LayerId,
     pub(crate) group_path: Vec<u64>,
     pub(crate) map: Arc<PlanarMap>,
+    /// 図形から作った地図が壊れていて、塗り重ねて作り直したか（`layer_map`。書き戻すときは図形を全部書き換える）
+    pub(crate) repainted: bool,
     /// 場面の並びで、このレイヤーの生の図形が最初に出てくる番号（これより後ろの、ほかの図形が前面）
     first_idx: usize,
 }
@@ -1578,13 +1647,18 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
             None => by_layer.push((s.layer_id, idx, vec![s])),
         }
     }
+    // 地図にできないレイヤー（格子に置けない座標がある）は入れない（カーソル合わせも変形もしない）
     let maps = by_layer
         .into_iter()
-        .map(|(layer_id, first_idx, shapes)| LayerMap {
-            layer_id,
-            group_path: scope.clone(),
-            map: Arc::new(PlanarMap::from_faces(shapes)),
-            first_idx,
+        .filter_map(|(layer_id, first_idx, shapes)| {
+            let (map, repainted) = layer_map(&shapes)?;
+            Some(LayerMap {
+                layer_id,
+                group_path: scope.clone(),
+                map: Arc::new(map),
+                repainted,
+                first_idx,
+            })
         })
         .collect();
     let built = Arc::new(ScopeMaps { key, maps });
@@ -1920,15 +1994,22 @@ impl PlanarMap {
 #[derive(Debug)]
 pub(crate) struct ReshapeBase {
     pub(crate) map: Arc<PlanarMap>,
+    /// 塗り重ねて作り直した地図か（`layer_map`）。書き戻すときは、そのレイヤーの図形を全部書き換える
+    repainted: bool,
     cycles: Vec<Vec<(usize, bool)>>,
     keys: HashSet<[u64; 8]>,
 }
 
 impl ReshapeBase {
-    pub(crate) fn new(map: Arc<PlanarMap>) -> Self {
+    pub(crate) fn new(map: Arc<PlanarMap>, repainted: bool) -> Self {
         let cycles = map.face_cycles();
         let keys = (0..map.edges.len()).map(|e| edge_key(&map, e)).collect();
-        Self { map, cycles, keys }
+        Self {
+            map,
+            repainted,
+            cycles,
+            keys,
+        }
     }
 }
 
@@ -1942,32 +2023,27 @@ pub(crate) fn reshape_result(
     group_path: &[u64],
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
     let map = &base.map;
-    // 編集した地図と、編集で変わる元の辺（アンカーの追加は切る辺、削除は消す頂点の2本、ドラッグは動かす辺）
-    let (next, touched) = match edit {
+    // 編集した地図
+    let next = match edit {
         MapEdit::AddAnchor { orig_seg, t } => {
             let (e, forward) = map.find_edge(&orig_seg)?;
-            (
-                map.with_anchor_added(e, if forward { t } else { 1.0 - t }),
-                vec![e],
-            )
+            map.with_anchor_added(e, if forward { t } else { 1.0 - t })
         }
         MapEdit::DeleteAnchor { orig_vertex } => {
             let v = (0..map.nodes.len()).find(|&v| map.nodes[v] == orig_vertex)?;
-            (map.with_anchor_deleted(v)?, map.edges_at(v))
+            map.with_anchor_deleted(v)?
         }
         MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => {
             let (edited, moved) = map.apply_edit(edit)?;
-            (commit_edit(map, &base.cycles, edited, &moved).0, moved)
+            commit_edit(map, &base.cycles, edited, &moved).0
         }
     };
-    // 変わる辺が、元の地図の壊れた面の輪郭（閉じない・色がまざる）に入っていれば編集しない。
-    // 壊れた輪郭の面は図形に書き戻せないので、編集するとその面の図形が消えてしまう
-    if base
-        .cycles
-        .iter()
-        .any(|c| map.is_broken_cycle(c) && c.iter().any(|h| touched.contains(&h.0)))
-    {
-        return None;
+    if base.repainted {
+        let own: Vec<&FillShape> = orig_shapes
+            .iter()
+            .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path))
+            .collect();
+        return Some(all_rewritten(&own, &next, layer_id, group_path));
     }
     Some(rewrite_shapes(
         map,
@@ -1987,11 +2063,12 @@ pub(crate) fn reshape_diff(
     group_path: &[u64],
     edit: MapEdit,
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
-    let base = ReshapeBase::new(Arc::new(PlanarMap::from_faces(
-        shapes
-            .iter()
-            .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path)),
-    )));
+    let own: Vec<&FillShape> = shapes
+        .iter()
+        .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path))
+        .collect();
+    let (map, repainted) = layer_map(&own)?;
+    let base = ReshapeBase::new(Arc::new(map), repainted);
     reshape_result(&base, edit, shapes, layer_id, group_path)
         .filter(|(removed, added)| !removed.is_empty() || !added.is_empty())
 }
@@ -2028,9 +2105,7 @@ pub(crate) fn apply_shape_diff(
     let at = shapes.iter().position(|s| removed.contains(&s.shape_id));
     shapes.retain(|s| !removed.contains(&s.shape_id));
     let at = at
-        .unwrap_or_else(|| {
-            crate::vector_boolean::raw_scope_insert_index(shapes, layer_id, group_path)
-        })
+        .unwrap_or_else(|| raw_scope_insert_index(shapes, layer_id, group_path))
         .min(shapes.len());
     shapes.splice(at..at, added);
 }
@@ -2063,16 +2138,23 @@ pub(crate) fn marquee_split(
         .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path) && !skip(s))
         .cloned()
         .collect();
-    let map = PlanarMap::from_faces(own.iter());
-    // 壊れた地図（境目がそろっていない。前の版で描いた図形など）は使わない：壊れた輪郭の面は図形に書き戻せず、
-    // その元の図形は隠されるので、絵が消えてしまう。呼び出し側が図形ごとに切る
-    if map.face_cycles().iter().any(|c| map.is_broken_cycle(c)) {
-        return None;
-    }
+    let own_refs: Vec<&FillShape> = own.iter().collect();
+    let (map, repainted) = layer_map(&own_refs)?;
     // 矩形は形として重ねる（中か外かは i_overlay が数えるので、地図として重ねるより軽い）
     let rect_input = MapInput::Shapes(std::slice::from_ref(rect));
     let inside = map.overlay(rect_input, MapRule::KeepInside)?;
     let rest = map.overlay(rect_input, MapRule::Paint(None))?;
+    if repainted {
+        // 地図を塗り重ねて作り直したときは、レイヤーの生の図形を全部隠して、中の片と外の残りに置き換える
+        let (hidden, remainder) = all_rewritten(&own_refs, &rest, layer_id, group_path);
+        let (_, pieces) = all_rewritten(&own_refs, &inside, layer_id, group_path);
+        return Some(MarqueeSplit {
+            hidden,
+            whole: Vec::new(),
+            remainder,
+            pieces,
+        });
+    }
     let keys: HashSet<[u64; 8]> = (0..map.edges.len()).map(|e| edge_key(&map, e)).collect();
     let (removed_rest, remainder) = rewrite_shapes(&map, &keys, &rest, &own, layer_id, group_path);
     let (removed_inside, pieces) = rewrite_shapes(&map, &keys, &inside, &own, layer_id, group_path);
@@ -2104,17 +2186,18 @@ pub(crate) fn place_pieces_diff(
     group_path: &[u64],
     pieces: &[FillShape],
 ) -> MapEditOutcome {
-    let piece_map = PlanarMap::from_faces(pieces.iter());
-    let all: Vec<usize> = (0..piece_map.edges.len()).collect();
-    // 壊れた数（`faces` の2つ目）には、閉じない輪郭と色がまざる輪郭も入っている
-    if piece_map.faces().1 != 0
-        || !piece_map
-            .crossings_grid(&all, &vec![false; all.len()])
-            .is_empty()
-    {
-        // 片どうしが重なっている・境目がそろっていない（地図にならない）
-        return MapEditOutcome::Refused;
-    }
+    // 片の地図：そのまま正しい地図になればそれを、ならなければ（片どうしが重なる：浮いている片の上に別の図形を足したときなど）
+    // 並びの順に塗り重ねた地図
+    let as_is = PlanarMap::from_faces(pieces.iter());
+    let (piece_map, valid) = if as_is.is_valid() {
+        (as_is, true)
+    } else {
+        let refs: Vec<&FillShape> = pieces.iter().collect();
+        match painted_map(&refs) {
+            Some(m) => (m, false),
+            None => return MapEditOutcome::Refused,
+        }
+    };
     let Some(area) = (0..piece_map.edges.len())
         .map(|e| piece_map.quad(e).bounding_box())
         .reduce(|a, b| a.union(b))
@@ -2136,38 +2219,23 @@ pub(crate) fn place_pieces_diff(
     });
     // 置く所（外接矩形）に線が1本も無ければ、そこは1つの面の中か、何も無い所。真ん中の点が何も無い所なら、そのまま足す
     if !near && !own.iter().any(|s| s.contains_point(area.center())) {
-        return MapEditOutcome::Changed(
-            Vec::new(),
+        let added = if valid {
             pieces
                 .iter()
                 .map(|p| p.clone().with_scope(layer_id, group_path))
-                .collect(),
-        );
+                .collect()
+        } else {
+            piece_map
+                .faces()
+                .0
+                .iter()
+                .map(|f| piece_map.face_shape(f, layer_id, group_path))
+                .collect()
+        };
+        return MapEditOutcome::Changed(Vec::new(), added);
     }
     map_edit_diff(shapes, layer_id, group_path, |m| {
         m.overlay(MapInput::Map(&piece_map), MapRule::Overlay)
-    })
-}
-
-/// 片 `pieces` を、図形の並び `shapes` のレイヤー `layer_id`・階層 `group_path` の生の図形の地図へ、下から1つずつ塗り重ねた差分。
-/// 片をまとめて1つの地図にして置けないとき（片どうしが重なる・まとめて重ねると安全網で止まる）に使う。
-/// 地図が壊れているときは、塗らずに `Refused`
-pub(crate) fn paint_pieces_diff(
-    shapes: &[FillShape],
-    layer_id: LayerId,
-    group_path: &[u64],
-    pieces: &[FillShape],
-) -> MapEditOutcome {
-    map_edit_diff(shapes, layer_id, group_path, |m| {
-        if m.face_cycles().iter().any(|c| m.is_broken_cycle(c)) {
-            return None;
-        }
-        let mut m = m.clone();
-        for p in pieces {
-            let paint = MapRule::Paint(Some(p.color));
-            m = m.overlay(MapInput::Shapes(std::slice::from_ref(p)), paint)?;
-        }
-        Some(m)
     })
 }
 
@@ -2225,47 +2293,72 @@ pub(crate) enum MapEditOutcome {
     Changed(Vec<ShapeId>, Vec<FillShape>),
     /// 形が変わらない
     Unchanged,
-    /// 地図では編集できない（重ねた結果が安全網で止まった・壊れた輪郭の面に触れる）
+    /// 地図にできない（格子に置けない座標がある：±65,536px の外）
     Refused,
 }
 
-/// 図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の生の図形を地図にして、`edit` で編集した差分。
-/// 元の地図の壊れた輪郭（閉じない・色がまざる。前の版で描いた図形など）に触れる編集は `Refused`（呼び出し側が今までの
-/// ブール演算で行う）。壊れた輪郭の面は図形に書き戻せないので、その辺を変えたり、その面の元の図形を書き換えたりすると、
-/// 絵が消えてしまうため
+/// レイヤー `target_layer_id`・階層 `target_group_path` の生の図形の置き場（その階層の生の図形の後ろ。グループ・シンボルより下）
+pub(crate) fn raw_scope_insert_index(
+    canvas: &[FillShape],
+    target_layer_id: u64,
+    target_group_path: &[u64],
+) -> usize {
+    canvas
+        .iter()
+        .rposition(|s| {
+            s.layer_id == target_layer_id
+                && s.group_path == target_group_path
+                && s.symbol_instance.is_none()
+        })
+        .map(|pos| pos + 1)
+        .or_else(|| {
+            canvas.iter().position(|s| {
+                s.layer_id == target_layer_id
+                    && s.is_in_editing_scope(target_group_path)
+                    && !s.is_raw_at_scope(target_group_path)
+            })
+        })
+        .or_else(|| {
+            canvas
+                .iter()
+                .rposition(|s| {
+                    s.layer_id == target_layer_id && s.is_in_editing_scope(target_group_path)
+                })
+                .map(|pos| pos + 1)
+        })
+        .or_else(|| {
+            canvas
+                .iter()
+                .rposition(|s| s.layer_id == target_layer_id)
+                .map(|pos| pos + 1)
+        })
+        .unwrap_or(canvas.len())
+}
+
+/// 図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の生の図形を地図にして（`layer_map`）、`edit` で編集した差分。
+/// 地図を塗り重ねて作り直したとき（壊れた地図）は、レイヤーの生の図形を全部書き直す
 pub(crate) fn map_edit_diff(
     shapes: &[FillShape],
     layer_id: LayerId,
     group_path: &[u64],
     edit: impl FnOnce(&PlanarMap) -> Option<PlanarMap>,
 ) -> MapEditOutcome {
-    let map = PlanarMap::from_faces(
-        shapes
-            .iter()
-            .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path)),
-    );
+    let own: Vec<&FillShape> = shapes
+        .iter()
+        .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path))
+        .collect();
+    let Some((map, repainted)) = layer_map(&own) else {
+        return MapEditOutcome::Refused;
+    };
     let Some(next) = edit(&map) else {
         return MapEditOutcome::Refused;
     };
-    let keys: HashSet<[u64; 8]> = (0..map.edges.len()).map(|e| edge_key(&map, e)).collect();
-    let next_keys: HashSet<[u64; 8]> = (0..next.edges.len()).map(|e| edge_key(&next, e)).collect();
-    // 壊れた輪郭の辺と、その面の元の図形
-    let mut broken_srcs: HashSet<ShapeId> = HashSet::new();
-    for c in map.face_cycles() {
-        if !map.is_broken_cycle(&c) {
-            continue;
-        }
-        for &h in c.iter().filter(|h| h.0 != usize::MAX) {
-            if !next_keys.contains(&edge_key(&map, h.0)) {
-                return MapEditOutcome::Refused;
-            }
-            broken_srcs.extend(map.side_src(h));
-        }
-    }
-    let (removed, added) = rewrite_shapes(&map, &keys, &next, shapes, layer_id, group_path);
-    if removed.iter().any(|id| broken_srcs.contains(id)) {
-        return MapEditOutcome::Refused;
-    }
+    let (removed, added) = if repainted {
+        all_rewritten(&own, &next, layer_id, group_path)
+    } else {
+        let keys: HashSet<[u64; 8]> = (0..map.edges.len()).map(|e| edge_key(&map, e)).collect();
+        rewrite_shapes(&map, &keys, &next, shapes, layer_id, group_path)
+    };
     if removed.is_empty() && added.is_empty() {
         MapEditOutcome::Unchanged
     } else {
@@ -2273,13 +2366,82 @@ pub(crate) fn map_edit_diff(
     }
 }
 
+/// 生の図形 `own`（下から上への並び）の地図と、塗り重ねて作り直したか。図形から作った地図に壊れた輪郭（閉じない・色がまざる。
+/// 前の版で描いた、重なった図形など）があれば、並びの順に塗り重ねて作り直す（`painted_map`。絵は同じ）。
+/// `None`：格子に置けない座標がある
+fn layer_map(own: &[&FillShape]) -> Option<(PlanarMap, bool)> {
+    let map = PlanarMap::from_faces(own.iter().copied());
+    if map.face_cycles().iter().any(|c| map.is_broken_cycle(c)) {
+        return Some((painted_map(own)?, true));
+    }
+    Some((map, false))
+}
+
+/// 図形 `shapes`（下から上への並び）を、並びの順に空の地図へ塗り重ねた地図（重なる所は上の図形が見える。絵の決まりそのもの）。
+/// 重ならずにそのまま正しい地図になる続きの図形は、まとめて1回で重ねる（正しい地図の一部はいつも正しいので、いちばん長い続きを
+/// 二分法で探す）。1つだけでも正しい地図にならない図形（輪郭が自分と交わる）は、塗りの形として重ねる（偶奇の規則）。
+/// `None`：格子に置けない座標がある
+fn painted_map(shapes: &[&FillShape]) -> Option<PlanarMap> {
+    let valid = |r: &[&FillShape]| PlanarMap::from_faces(r.iter().copied()).is_valid();
+    let mut acc = PlanarMap::default();
+    let mut i = 0;
+    while i < shapes.len() {
+        if !valid(&shapes[i..i + 1]) {
+            let one = (*shapes[i]).clone();
+            acc = acc.overlay(
+                MapInput::Shapes(std::slice::from_ref(&one)),
+                MapRule::Paint(Some(one.color)),
+            )?;
+            i += 1;
+            continue;
+        }
+        let (mut lo, mut hi) = (i + 1, shapes.len());
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if valid(&shapes[i..mid]) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        let run = PlanarMap::from_faces(shapes[i..lo].iter().copied());
+        acc = acc.overlay(MapInput::Map(&run), MapRule::Overlay)?;
+        i = lo;
+    }
+    Some(acc)
+}
+
+/// テスト用：図形 `shapes`（下から上への並び）を塗り重ねた地図（`painted_map`）
+#[cfg(test)]
+pub(crate) fn painted_map_pub(shapes: &[FillShape]) -> Option<PlanarMap> {
+    let refs: Vec<&FillShape> = shapes.iter().collect();
+    painted_map(&refs)
+}
+
+/// 地図を作り直したときの差分：生の図形 `own` を全部消し、地図 `next` の面を全部入れる
+fn all_rewritten(
+    own: &[&FillShape],
+    next: &PlanarMap,
+    layer_id: LayerId,
+    group_path: &[u64],
+) -> (Vec<ShapeId>, Vec<FillShape>) {
+    (
+        own.iter().map(|s| s.shape_id).collect(),
+        next.faces()
+            .0
+            .iter()
+            .map(|f| next.face_shape(f, layer_id, group_path))
+            .collect(),
+    )
+}
+
 // ============================================================================
 // 形・地図を地図に重ねる（ブラシ・消しゴム・矩形で選んだ片の取り出し・持ち上げた片を置く・貼り付け）
 //
 // 重ねる線と前からある辺を細かい折れ線にして、i_overlay（vendor/i_overlay）の `EdgeOverlay` で交わる所で切る。
 // 交わりは整数の格子（1/4096px）で計算するので、ほぼ重なった線でも食い違わない。切った区間ごとに、
-// 左右が重ねる形の中か（i_overlay が数える）と、出どころ（どの曲線の t のどこからどこまでか）が分かるので、
-// 面をたどったり穴の入れ先を決めたりせずに、区間の左右の色が決まる。境目の曲線は、出どころの曲線から当て直す。
+// 左右が重ねる形の中か（i_overlay が数える）と、出どころ（どの曲線の t のどこからどこまでか）が分かる。
+// 区間の左右の色は、切った区間でできる面ごとに決める（`face_colors`）。境目の曲線は、出どころの曲線から当て直す。
 // ============================================================================
 
 /// 重ねるときの格子（1px をいくつに分けるか）。地図の頂点のうち重ねる所にかかるものは、この格子の上に置き直す
@@ -2886,8 +3048,11 @@ impl PlanarMap {
 
         // 1. 折れ線にして格子に置き、i_overlay で切る。格子は原点から（何回重ねても、格子の上の点は動かない）
         let mut ov: EdgeOverlay<i32, ProvId> = EdgeOverlay::new(srcs.len() * 8);
+        // 重ねる地図の辺も、塗り（Clip の左右）を使わないので、前からある辺と同じく向きをそろえて入れる
+        let fill_unused_for_new = matches!(input, MapInput::Map(_));
         for (si, (q, kind)) in srcs.iter().enumerate() {
             let old = matches!(kind, OverlaySrc::Old(_));
+            let canonical = old || fill_unused_for_new;
             let st = if old {
                 ShapeType::Subject
             } else {
@@ -2900,9 +3065,9 @@ impl PlanarMap {
                 if ip == prev.0 {
                     continue;
                 }
-                // 前からある辺の区間は、いつも小さい点から大きい点の向きで入れる（ほぼ重なった2本の辺が、
-                // 格子で同じ区間になったときに打ち消し合って消えないように。Subject の塗りは使わない）
-                let (a, b, t0, t1) = if old && ip < prev.0 {
+                // 塗りを使わない辺（前からある辺と、重ねる地図の辺）の区間は、いつも小さい点から大きい点の向きで入れる
+                // （ほぼ重なった2本の辺が、格子で同じ区間になったときに打ち消し合って消えないように）
+                let (a, b, t0, t1) = if canonical && ip < prev.0 {
                     (ip, prev.0, t, prev.1)
                 } else {
                     (prev.0, ip, prev.1, t)
@@ -3118,82 +3283,109 @@ impl PlanarMap {
         };
         let old_of: Vec<_> = pieces.iter().map(|p| side_of(p, true)).collect();
         let new_of: Vec<_> = pieces.iter().map(|p| side_of(p, false)).collect();
-        // 向きのある区間 `h` の左の色：`of` に色があればそれ。無ければ、左の面の輪郭をたどって最初に出会う、色のある区間の
-        // 面の側の色（色の無い区間は、その地図の面を分けないので、越えてよい）。出会わなければ `fallback` で調べる
-        // `memo` は向きのある区間ごと（番号は 2 × 区間 + 向き）の、決まった色。たどった道の区間は、みな同じ色になる
-        let walk = |h: (usize, bool),
-                    of: &[Option<(Option<Color32>, Option<Color32>)>],
-                    next: &dyn Fn((usize, bool)) -> Turn,
-                    memo: &mut Vec<Option<Option<Color32>>>,
-                    fallback: &mut dyn FnMut(Point) -> Option<Color32>|
-         -> Option<Color32> {
-            let idx = |x: (usize, bool)| 2 * x.0 + x.1 as usize;
-            if let Some((l, r)) = of[h.0] {
-                return if h.1 { l } else { r };
-            }
-            if let Some(c) = memo[idx(h)] {
-                return c;
-            }
-            let mut path = vec![h];
-            let mut cur = h;
-            let found = loop {
-                cur = match next(cur) {
-                    Turn::Piece(k, fwd) => (k, fwd),
-                    // 入れなかった前からある辺：その辺の、頂点から出ていく向きの左の色
-                    Turn::Stop(e, at_start) => {
-                        let ed = self.edges[e];
-                        break Some(if at_start { ed.left } else { ed.right });
-                    }
-                };
-                if let Some((l, r)) = of[cur.0] {
-                    break Some(if cur.1 { l } else { r });
-                }
-                if let Some(c) = memo[idx(cur)] {
-                    break Some(c);
-                }
-                if cur == h || path.len() > pieces.len() {
-                    break None;
-                }
-                path.push(cur);
-            };
-            let c = found.unwrap_or_else(|| {
-                let p = &pieces[h.0];
-                fallback(nodes[p.a].midpoint(nodes[p.b]))
-            });
-            for x in path {
-                memo[idx(x)] = Some(c);
-            }
-            c
-        };
         // 輪郭をたどっても決まらない所の色は、点から右へ伸ばした半直線が最初に当たる辺の、点の側の色で決める
         // （`first_right_hit`）。前の色：前の色を持つ区間と、入れなかった前からある辺。重ねる地図の色：重ねる地図の色を
-        // 持つ区間。どれも、結果の地図と同じ形（切った区間・格子に置き直した頂点）で見る
+        // 持つ区間。どれも、結果の地図と同じ形（切った区間・格子に置き直した頂点）で、面ごとに決めた色（`face_colors`）で見る
         let piece_quad = |k: usize| {
             let (a, b) = (nodes[pieces[k].a], nodes[pieces[k].b]);
             QuadBez::new(a, a.midpoint(b), b)
         };
-        // 前の色の索引は、輪郭をたどって決まらない所が出たときだけ作る
+        // 入れなかった前からある辺（結果の地図と同じ形）。前の地図の面を分ける
+        let unfed_quads: Vec<(QuadBez, Sides)> = self
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(e, _)| !fed[*e])
+            .map(|(_, ed)| {
+                (
+                    QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]),
+                    (ed.left, ed.right),
+                )
+            })
+            .collect();
+        // 地図の元の形での点の色（面の色の材料が食い違うときだけ使う）
+        let old_truth = |q: Point| {
+            let items: Vec<(QuadBez, Sides)> = (0..self.edges.len())
+                .map(|e| (self.quad(e), (self.edges[e].left, self.edges[e].right)))
+                .collect();
+            first_right_hit(q, &items).flatten()
+        };
+        let new_truth = |q: Point| {
+            let items: Vec<(QuadBez, Sides)> = new_quads
+                .iter()
+                .copied()
+                .zip(new_cols.iter().copied())
+                .collect();
+            first_right_hit(q, &items).flatten()
+        };
+        let piece_segs: Vec<(Point, Point)> =
+            pieces.iter().map(|p| (nodes[p.a], nodes[p.b])).collect();
+        let old_faces = face_colors(
+            &old_of,
+            &next_old,
+            &|e| {
+                let ed = self.edges[e];
+                (ed.left, ed.right)
+            },
+            &piece_segs,
+            &unfed_quads,
+            &old_truth,
+        );
+        let new_faces = match input {
+            MapInput::Shapes(_) => None,
+            MapInput::Map(_) => Some(face_colors(
+                &new_of,
+                &next_new,
+                &|_| unreachable!("重ねる地図の辺はみな区間になる"),
+                &piece_segs,
+                &[],
+                &new_truth,
+            )),
+        };
+        // 面ごとに決めた色での、区間の左右の色
+        let resolved = |faces: &FaceColors, k: usize| -> Sides {
+            (
+                faces.color[faces.root[2 * k + 1] as usize].flatten(),
+                faces.color[faces.root[2 * k] as usize].flatten(),
+            )
+        };
+        // 前の色の索引は、材料の無い面が出たときだけ作る
         let old_index: std::cell::OnceCell<RayIndex<Option<Color32>>> = std::cell::OnceCell::new();
         let build_old_index = || {
             let mut old_items: Vec<(QuadBez, Sides)> = (0..pieces.len())
-                .filter_map(|k| old_of[k].map(|lr| (piece_quad(k), lr)))
+                .filter(|&k| old_of[k].is_some())
+                .map(|k| (piece_quad(k), resolved(&old_faces, k)))
                 .collect();
-            old_items.extend(self.edges.iter().enumerate().filter(|(e, _)| !fed[*e]).map(
-                |(_, ed)| {
-                    (
-                        QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]),
-                        (ed.left, ed.right),
-                    )
-                },
-            ));
+            old_items.extend(unfed_quads.iter().copied());
             RayIndex::new(old_items)
         };
-        let new_items: Vec<(QuadBez, Sides)> = (0..pieces.len())
-            .filter_map(|k| new_of[k].map(|lr| (piece_quad(k), lr)))
-            .collect();
-        let new_index = RayIndex::new(new_items);
-        let mut old_fallback = |q: Point| old_index.get_or_init(build_old_index).hit(q).flatten();
-        let mut new_fallback = |q: Point| new_index.hit(q).flatten();
+        let new_index = new_faces.as_ref().map(|nf| {
+            RayIndex::new(
+                (0..pieces.len())
+                    .filter(|&k| new_of[k].is_some())
+                    .map(|k| (piece_quad(k), resolved(nf, k)))
+                    .collect(),
+            )
+        });
+        let new_fallback = |q: Point| new_index.as_ref().and_then(|ix| ix.hit(q)).flatten();
+        // 材料の無い面の色：面の中の区間の真ん中の点から、半直線で調べる（面ごとに1回）
+        let mut old_memo: IntMap<u32, Option<Color32>> = IntMap::default();
+        let mut new_memo: IntMap<u32, Option<Color32>> = IntMap::default();
+        let color_of = |faces: &FaceColors,
+                        memo: &mut IntMap<u32, Option<Color32>>,
+                        h: (usize, bool),
+                        fallback: &dyn Fn(Point) -> Option<Color32>|
+         -> Option<Color32> {
+            let r = faces.root[2 * h.0 + h.1 as usize];
+            if let Some(c) = faces.color[r as usize] {
+                return c;
+            }
+            *memo.entry(r).or_insert_with(|| {
+                let p = &pieces[h.0];
+                fallback(nodes[p.a].midpoint(nodes[p.b]))
+            })
+        };
+        let old_fallback = |q: Point| old_index.get_or_init(build_old_index).hit(q).flatten();
         // 重ねる形の中か：区間ごとに i_overlay が数えた、左右が重ねる形の中か
         let fill_index = match input {
             MapInput::Shapes(_) => Some(RayIndex::new(
@@ -3206,19 +3398,11 @@ impl PlanarMap {
             )),
             MapInput::Map(_) => None,
         };
-        let (mut old_memo, mut new_memo) =
-            (vec![None; 2 * pieces.len()], vec![None; 2 * pieces.len()]);
         // 5. 区間の新しい色。左右が違う区間だけ残す：（始点, 終点, (左の色, 右の色), 区間の番号）
         let mut kept: Vec<(usize, usize, Sides, usize)> = Vec::new();
         for (k, piece) in pieces.iter().enumerate() {
             let mut side = |fwd: bool| {
-                let old = walk(
-                    (k, fwd),
-                    &old_of,
-                    &next_old,
-                    &mut old_memo,
-                    &mut old_fallback,
-                );
+                let old = color_of(&old_faces, &mut old_memo, (k, fwd), &old_fallback);
                 let (inside, p) = match input {
                     MapInput::Shapes(_) => {
                         let f = piece.fill;
@@ -3232,13 +3416,8 @@ impl PlanarMap {
                         )
                     }
                     MapInput::Map(_) => {
-                        let c = walk(
-                            (k, fwd),
-                            &new_of,
-                            &next_new,
-                            &mut new_memo,
-                            &mut new_fallback,
-                        );
+                        let nf = new_faces.as_ref().expect("重ねる地図の面の色");
+                        let c = color_of(nf, &mut new_memo, (k, fwd), &new_fallback);
                         (c.is_some(), c)
                     }
                 };
@@ -3472,6 +3651,148 @@ enum Turn {
     Piece(usize, bool),
     /// 入れなかった前からある辺（番号, 頂点がその辺の始点か）。たどるのはここで止める
     Stop(usize, bool),
+}
+
+/// 重ね合わせで、片方の地図（前の地図か重ねる地図）の色を、切った区間の面ごとに1つに決めたもの
+struct FaceColors {
+    /// 向きのある区間（番号は 2 × 区間 + 向き）ごとの、左の面の代表
+    root: Vec<u32>,
+    /// 代表ごとの面の色。材料が無い面は `None`
+    color: Vec<Option<Option<Color32>>>,
+}
+
+/// 片方の地図の色を、切った区間（端は `segs`）の面ごとに1つに決める（`FaceColors`）。
+///
+/// 同じ面とみなすのは、面の輪郭をたどってつながる向きのある区間（`next` が区間を返す）と、その地図の色を持たない区間の
+/// 両側（その地図の面を分けない）。面の色の材料は、面の中の区間の出どころの辺の色（`of`）と、たどって止まった
+/// 入れなかった前からある辺の色（`stop_sides`）。材料がみな同じなら、その色。
+///
+/// 材料が食い違うのは、その地図に、折れ線にして格子に置く間に裏返るほど細い面がある所だけ（細い面をはさむ2本の辺の
+/// 折れ線が入れかわると、それぞれの辺が、自分の側だと思っている面が、格子の上では別の面になる）。そのときは、面の中の
+/// 奥の点の色を、その地図の元の形（`truth`）で調べる。奥の点：面のいちばん長い区間の真ん中から、面の側へ垂直に
+/// 伸ばした半直線が、その地図の面を分ける最初の線（色を持つ区間と `bounds`）に当たるまでの、半分の所
+/// （当たらなければ、面は外へ開いているので、色は無い）
+fn face_colors(
+    of: &[Option<Sides>],
+    next: &dyn Fn((usize, bool)) -> Turn,
+    stop_sides: &dyn Fn(usize) -> Sides,
+    segs: &[(Point, Point)],
+    bounds: &[(QuadBez, Sides)],
+    truth: &dyn Fn(Point) -> Option<Color32>,
+) -> FaceColors {
+    fn find(parent: &mut [u32], mut x: u32) -> u32 {
+        while parent[x as usize] != x {
+            let up = parent[parent[x as usize] as usize];
+            parent[x as usize] = up;
+            x = up;
+        }
+        x
+    }
+    let n = segs.len();
+    let half = |h: usize| (h / 2, h % 2 == 1);
+    // 向きのある区間の始点と終点
+    let ends = |h: usize| {
+        let (a, b) = segs[h / 2];
+        if h % 2 == 1 {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    };
+    let mut parent: Vec<u32> = (0..2 * n as u32).collect();
+    let union = |parent: &mut Vec<u32>, x: usize, y: usize| {
+        let (rx, ry) = (find(parent, x as u32), find(parent, y as u32));
+        if rx != ry {
+            parent[rx.max(ry) as usize] = rx.min(ry);
+        }
+    };
+    for h in 0..2 * n {
+        if let Turn::Piece(k, fwd) = next(half(h)) {
+            union(&mut parent, h, 2 * k + fwd as usize);
+        }
+    }
+    for (k, o) in of.iter().enumerate() {
+        if o.is_none() {
+            union(&mut parent, 2 * k, 2 * k + 1);
+        }
+    }
+    let root: Vec<u32> = (0..2 * n as u32).map(|h| find(&mut parent, h)).collect();
+    // 代表ごとの材料：まだ無い / 1つの色 / 食い違う
+    #[derive(Clone, Copy, PartialEq)]
+    enum Claim {
+        Empty,
+        One(Option<Color32>),
+        Mixed,
+    }
+    let mut claim = vec![Claim::Empty; 2 * n];
+    for (h, &r) in root.iter().enumerate() {
+        let (k, fwd) = half(h);
+        let r = r as usize;
+        let mut add = |c: Option<Color32>| {
+            claim[r] = match claim[r] {
+                Claim::Empty => Claim::One(c),
+                Claim::One(x) if x == c => Claim::One(x),
+                _ => Claim::Mixed,
+            };
+        };
+        if let Some((l, r)) = of[k] {
+            add(if fwd { l } else { r });
+        }
+        if let Turn::Stop(e, at_start) = next((k, fwd)) {
+            let (l, r) = stop_sides(e);
+            add(if at_start { l } else { r });
+        }
+    }
+    // 食い違う面：いちばん長い区間
+    let mut longest: IntMap<u32, (f64, usize)> = IntMap::default();
+    for (h, &r) in root.iter().enumerate() {
+        if claim[r as usize] != Claim::Mixed {
+            continue;
+        }
+        let (a, b) = ends(h);
+        let len2 = (b - a).hypot2();
+        let slot = longest.entry(r).or_insert((-1.0, h));
+        if len2 > slot.0 {
+            *slot = (len2, h);
+        }
+    }
+    let mut color: Vec<Option<Option<Color32>>> = claim
+        .iter()
+        .map(|c| match c {
+            Claim::One(c) => Some(*c),
+            _ => None,
+        })
+        .collect();
+    for (r, (_, h)) in longest {
+        let (a, b) = ends(h);
+        let d = (b - a) / (b - a).hypot();
+        let (m, nrm) = (a.midpoint(b), KVec2::new(-d.y, d.x));
+        let k = h / 2;
+        let hit = (0..n)
+            .filter(|&j| j != k && of[j].is_some())
+            .map(|j| {
+                let (pa, pb) = segs[j];
+                QuadBez::new(pa, pa.midpoint(pb), pb)
+            })
+            .chain(bounds.iter().map(|(q, _)| *q))
+            .filter_map(|q| ray_quad_dist(m, nrm, q))
+            .reduce(f64::min);
+        color[r as usize] = Some(hit.and_then(|s| truth(m + nrm * (s * 0.5))));
+    }
+    FaceColors { root, color }
+}
+
+/// 点 `m` から向き `dir`（長さ1）へ伸ばした半直線が、曲線 `q` に最初に当たるまでの距離（当たらなければ `None`）
+fn ray_quad_dist(m: Point, dir: KVec2, q: QuadBez) -> Option<f64> {
+    // 半直線に垂直な向きの成分 g(t) = dir × (q(t) − m) が 0 になる t
+    let g = |p: Point| dir.cross(p - m);
+    let (g0, g1, g2) = (g(q.p0), g(q.p1), g(q.p2));
+    kurbo::common::solve_quadratic(g0, 2.0 * (g1 - g0), g0 - 2.0 * g1 + g2)
+        .into_iter()
+        .filter(|t| (0.0..=1.0).contains(t))
+        .map(|t| dir.dot(q.eval(t) - m))
+        .filter(|s| *s > 0.0)
+        .reduce(f64::min)
 }
 
 /// 向きを、角度の順（x 軸の正の向きから、面積の式で正の回り方）に比べる（`cmp_dir` の小数版）
@@ -3810,7 +4131,6 @@ fn grid_polyline(q: &QuadBez) -> Option<Vec<(Point, Point)>> {
 /// 点の側の値（当たらなければ `None`）。曲線は y について単調な部分に分け、部分の下の端は含め、上の端は含めない
 /// （半開区間）ので、頂点にちょうど当たっても、そこを通る辺のどちらか一方だけに当たる。同じ所に当たる辺どうしは、
 /// 点を上へごくわずか動かしたときに先に当たるもの（上へ進むと左へ寄るもの）を選ぶ
-#[cfg(test)]
 fn first_right_hit<'a, T: Copy + 'a>(
     p: Point,
     items: impl IntoIterator<Item = &'a (QuadBez, (T, T))>,

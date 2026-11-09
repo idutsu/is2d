@@ -5,10 +5,11 @@ use kurbo::{Affine, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
-    editable_layer_ids, focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
-    reset_session_after_timeline_change, select_shapes_for_timeline_selection, set_tool,
-    show_notice, toggle_select_sub_mode, Clipboard, CoalesceKey, NoticeKind, SelectSubMode,
-    ShapeId, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
+    editable_layer_ids, focus_active_layer_by_id, focus_active_layer_to_shape_by_id,
+    insert_and_select_shapes_in_scope, reset_session_after_timeline_change,
+    select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode, Clipboard,
+    CoalesceKey, LayerId, NoticeKind, SelectSubMode, StatusToast, Tab, Tool, ToolSettings,
+    UndoEntry,
 };
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
@@ -30,10 +31,6 @@ use crate::symbol_ops::{
     selected_single_symbol_info,
 };
 use crate::timeline::{Layer, Timeline, TimelineCellSelection, MAX_LAYERS_PER_TIMELINE};
-use crate::vector_boolean::{
-    erase_from_canvas, find_enclosed_region_at, merge_disjoint_fill_into_canvas,
-    merge_shapes_into_canvas,
-};
 use crate::vector_engine::{
     affine_rotate_around, affine_scale_around, rects_overlap, FillShape, MAX_VIEW_ZOOM,
     MIN_VIEW_ZOOM,
@@ -139,18 +136,18 @@ pub(crate) enum Action {
     },
 
     // 輪郭変形・アンカー編集
-    /// 境目の線で持つ地図で、形が `orig_seg` の辺の `grab_t` の所を `target_pos` へ引っぱる
-    /// （`shape_id` は、どのレイヤー・階層の図形かを決めるための、辺の側の図形）
+    /// 境目の線で持つ地図（レイヤー `layer_id` の、編集中の階層の生の図形）で、形が `orig_seg` の辺の `grab_t` の所を
+    /// `target_pos` へ引っぱる
     ReshapeEdge {
-        shape_id: ShapeId,
+        layer_id: LayerId,
         grab_t: f64,
         grab_pos: Point,
         target_pos: Point,
         orig_seg: QuadBez,
     },
-    /// 境目の線で持つ地図で、`orig_vertex` にある頂点を `target_pos` へ動かす
+    /// 境目の線で持つ地図（レイヤー `layer_id` の、編集中の階層の生の図形）で、`orig_vertex` にある頂点を `target_pos` へ動かす
     MoveVertex {
-        shape_id: ShapeId,
+        layer_id: LayerId,
         orig_vertex: Point,
         target_pos: Point,
     },
@@ -507,14 +504,14 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         }
 
         Action::ReshapeEdge {
-            shape_id,
+            layer_id,
             grab_t,
             grab_pos,
             target_pos,
             orig_seg,
         } => apply_map_reshape(
             tab,
-            shape_id,
+            layer_id,
             (target_pos - grab_pos).hypot(),
             MapEdit::PullEdge {
                 orig_seg,
@@ -523,12 +520,12 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             },
         ),
         Action::MoveVertex {
-            shape_id,
+            layer_id,
             orig_vertex,
             target_pos,
         } => apply_map_reshape(
             tab,
-            shape_id,
+            layer_id,
             (target_pos - orig_vertex).hypot(),
             MapEdit::MoveVertex {
                 orig_vertex,
@@ -785,14 +782,8 @@ fn apply_raw_outline(
             MapEditOutcome::Changed(removed, added) => {
                 apply_shape_diff(&mut edit.shapes, &removed, added, target_lid, &scope)
             }
-            MapEditOutcome::Unchanged => {}
-            // 地図で重ねられないとき（安全網で止まった・壊れた輪郭に触れる）は、今までのやり方で結合する・消す
-            MapEditOutcome::Refused if is_brush => {
-                merge_shapes_into_canvas(&mut edit.shapes, stroke_shapes)
-            }
-            MapEditOutcome::Refused => {
-                erase_from_canvas(&mut edit.shapes, &stroke_shapes, target_lid, &scope)
-            }
+            // 格子に置けない所（±65,536px の外）の線は描かない
+            MapEditOutcome::Unchanged | MapEditOutcome::Refused => {}
         }
     })
 }
@@ -938,54 +929,9 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
             });
             true
         }
-        MapEditOutcome::Unchanged => false,
-        MapEditOutcome::Refused => fill_face_at_with_shapes(tab, target_lid, fill_color, pt),
+        // 格子に置けない所（±65,536px の外）は塗らない
+        MapEditOutcome::Unchanged | MapEditOutcome::Refused => false,
     }
-}
-
-/// 地図で塗れないとき（壊れた輪郭がある所）の、今までのやり方：点を含む生の図形の色を変えて結合する。
-/// 何も無い所は、同じレイヤー・同じ階層の生の図形を壁にして囲まれた所を探す
-fn fill_face_at_with_shapes(
-    tab: &mut Tab,
-    target_lid: u64,
-    fill_color: Color32,
-    pt: Point,
-) -> bool {
-    let scope = tab.session.editing_group_path.clone();
-    let own: Vec<FillShape> = tab
-        .session
-        .base_cache
-        .shapes()
-        .iter()
-        .filter(|s| s.layer_id == target_lid && s.is_raw_at_scope(&scope))
-        .cloned()
-        .collect();
-    if let Some(hit) = own.iter().rev().find(|s| s.contains_point(pt)) {
-        if hit.color == fill_color {
-            return false;
-        }
-        push_undo(tab, None);
-        let hit_id = hit.shape_id;
-        edit_layers(tab, &[target_lid], |edit| {
-            if let Some(pos) = edit.shapes.iter().position(|s| s.shape_id == hit_id) {
-                let mut target = edit.shapes.remove(pos);
-                target.set_color(fill_color);
-                merge_disjoint_fill_into_canvas(&mut edit.shapes, target);
-            }
-        });
-        return true;
-    }
-    if let Some(enclosed_fill) = find_enclosed_region_at(&own, pt, fill_color) {
-        push_undo(tab, None);
-        edit_layers(tab, &[target_lid], |edit| {
-            merge_disjoint_fill_into_canvas(
-                &mut edit.shapes,
-                enclosed_fill.with_scope(target_lid, &scope),
-            );
-        });
-        return true;
-    }
-    false
 }
 
 fn has_editable_selection(tab: &Tab) -> bool {
@@ -1094,29 +1040,22 @@ fn apply_move_selected(tab: &mut Tab, delta: KVec2, coalesce: Option<CoalesceKey
 }
 
 /// 輪郭の変形を確定する。図形のレイヤー・階層の生の図形を境目の線で持つ地図にして編集し、変わった図形だけを差し替える
-fn apply_map_reshape(tab: &mut Tab, shape_id: ShapeId, drag_dist: f64, map_edit: MapEdit) -> bool {
+fn apply_map_reshape(tab: &mut Tab, layer_id: LayerId, drag_dist: f64, map_edit: MapEdit) -> bool {
     tab.session.clear_overlay();
     let min_deform = 0.5 / (tab.view.zoom as f64);
     if drag_dist <= min_deform {
         return false;
     }
-    apply_map_edit(tab, shape_id, map_edit)
+    apply_map_edit(tab, layer_id, map_edit)
 }
 
-/// 地図での編集（輪郭の変形・アンカーの追加・削除）を確定する。図形のレイヤー・階層の生の図形を境目の線で持つ地図にして編集し、
-/// 変わった図形だけを差し替える
-fn apply_map_edit(tab: &mut Tab, shape_id: ShapeId, map_edit: MapEdit) -> bool {
-    let layer_ids = editable_layer_ids(tab);
-    let Some((layer_id, group_path)) = tab
-        .session
-        .base_cache
-        .shapes()
-        .iter()
-        .find(|s| s.shape_id == shape_id && layer_ids.contains(&s.layer_id))
-        .map(|s| (s.layer_id, s.group_path.clone()))
-    else {
+/// 地図での編集（輪郭の変形・アンカーの追加・削除）を確定する。レイヤー `layer_id` の、編集中の階層の生の図形を境目の線で持つ
+/// 地図にして編集し、変わった図形だけを差し替える
+fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
+    if !editable_layer_ids(tab).contains(&layer_id) {
         return false;
-    };
+    }
+    let group_path = tab.session.editing_group_path.clone();
     // 輪郭の変形は、始めるときに選択を解除して `Floating` を確定している。`Floating` があるときは何もしない
     if tab.session.floating().is_some() {
         return false;
@@ -1131,7 +1070,7 @@ fn apply_map_edit(tab: &mut Tab, shape_id: ShapeId, map_edit: MapEdit) -> bool {
         return false;
     };
     push_undo(tab, None);
-    focus_active_layer_to_shape_by_id(tab, shape_id);
+    focus_active_layer_by_id(tab, layer_id);
     edit_layers(tab, &[layer_id], |edit| {
         apply_shape_diff(
             &mut edit.shapes,
@@ -1156,10 +1095,9 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         SelectSubMode::Reshape,
     );
     let crate::canvas_tool::HoverTarget::Edge {
-        shape_id,
         t,
         seg,
-        map_edge: Some(_),
+        map_edge: Some((layer_id, _)),
         ..
     } = target
     else {
@@ -1169,7 +1107,7 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     let grab_pos = seg.eval(grab_t);
     apply_map_reshape(
         tab,
-        shape_id,
+        layer_id,
         (to - grab_pos).hypot(),
         MapEdit::PullEdge {
             orig_seg: seg,
@@ -1190,9 +1128,8 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         SelectSubMode::Reshape,
     );
     let crate::canvas_tool::HoverTarget::Vertex {
-        shape_id,
         pos,
-        map_node: Some(_),
+        map_node: Some((layer_id, _)),
         ..
     } = target
     else {
@@ -1200,7 +1137,7 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     };
     apply_map_reshape(
         tab,
-        shape_id,
+        layer_id,
         (to - pos).hypot(),
         MapEdit::MoveVertex {
             orig_vertex: pos,
@@ -1230,22 +1167,20 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         (
             true,
             crate::canvas_tool::HoverTarget::Edge {
-                shape_id,
                 t,
                 seg,
-                map_edge: Some(_),
+                map_edge: Some((layer_id, _)),
                 ..
             },
-        ) => apply_map_edit(tab, shape_id, MapEdit::AddAnchor { orig_seg: seg, t }),
+        ) => apply_map_edit(tab, layer_id, MapEdit::AddAnchor { orig_seg: seg, t }),
         (
             false,
             crate::canvas_tool::HoverTarget::Vertex {
-                shape_id,
                 pos,
-                map_node: Some(_),
+                map_node: Some((layer_id, _)),
                 ..
             },
-        ) => apply_map_edit(tab, shape_id, MapEdit::DeleteAnchor { orig_vertex: pos }),
+        ) => apply_map_edit(tab, layer_id, MapEdit::DeleteAnchor { orig_vertex: pos }),
         _ => false,
     }
 }

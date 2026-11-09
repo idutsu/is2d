@@ -174,7 +174,7 @@ fn begin_map_drag(tab: &mut Tab, layer_id: LayerId) -> Option<(Arc<ReshapeBase>,
     let maps = scope_maps(tab.scene(), &tab.session);
     let lm = maps.maps.iter().find(|m| m.layer_id == layer_id)?;
     let (base, group_path) = (
-        Arc::new(ReshapeBase::new(lm.map.clone())),
+        Arc::new(ReshapeBase::new(lm.map.clone(), lm.repainted)),
         lm.group_path.clone(),
     );
     tab.session.selection.clear();
@@ -229,7 +229,6 @@ pub(crate) fn start_reshape_drag(
     }
     match target {
         HoverTarget::Vertex {
-            shape_id,
             pos,
             map_node: Some((layer_id, node)),
             ..
@@ -239,7 +238,6 @@ pub(crate) fn start_reshape_drag(
                 return;
             };
             tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
-                shape_id,
                 layer_id,
                 group_path,
                 base,
@@ -250,7 +248,6 @@ pub(crate) fn start_reshape_drag(
             });
         }
         HoverTarget::Edge {
-            shape_id,
             t,
             closest_pos,
             seg,
@@ -266,7 +263,6 @@ pub(crate) fn start_reshape_drag(
             // 実カーソル位置 pt と曲線上の最近接点 closest_pos の差、および丸め前 t と grab_t の位置差を合わせた初期オフセット
             let grab_offset = (closest_pos - pt) + (grab_pos - closest_pos);
             tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
-                shape_id,
                 layer_id,
                 group_path,
                 base,
@@ -374,7 +370,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
     };
     match finished_drag {
         SelectDragState::PullEdge {
-            shape_id,
+            layer_id,
             grab_t,
             grab_pos,
             last_pos,
@@ -384,7 +380,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
             apply(
                 host,
                 Action::ReshapeEdge {
-                    shape_id,
+                    layer_id,
                     grab_t,
                     grab_pos,
                     target_pos: last_pos,
@@ -393,7 +389,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
             );
         }
         SelectDragState::MoveVertex {
-            shape_id,
+            layer_id,
             orig_vertex,
             last_pos,
             ..
@@ -401,7 +397,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
             apply(
                 host,
                 Action::MoveVertex {
-                    shape_id,
+                    layer_id,
                     orig_vertex,
                     target_pos: last_pos,
                 },

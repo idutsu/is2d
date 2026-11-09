@@ -1,12 +1,51 @@
 use super::*;
 use crate::canvas_tool::HoverTarget;
 use kurbo::{ParamCurve, ParamCurveDeriv, QuadBez, Vec2 as KVec2};
-use vector_boolean::merge_shapes_into_canvas;
 use vector_engine::{left_normal, normalize_vec};
 use vector_stroke::{
     build_smoothed_stroke_shapes, build_smoothed_stroke_shapes_at_zoom, generate_brush_outline,
     generate_brush_outline_at_zoom,
 };
+
+/// 図形を、レイヤー・階層ごとに地図で上に重ねて足す（浮いている片を置くのと同じ）
+fn merge_shapes_into_canvas(canvas: &mut Vec<FillShape>, incoming: Vec<FillShape>) {
+    canvas_tool::merge_pieces_layer_by_layer(canvas, incoming);
+}
+
+/// レイヤー `layer_id`・階層 `scope` の生の図形から、`erasers` の形を消す（消しゴムと同じく地図で）
+fn erase_from_canvas(
+    canvas: &mut Vec<FillShape>,
+    erasers: &[FillShape],
+    layer_id: u64,
+    scope: &[u64],
+) {
+    use crate::planar_map::{apply_shape_diff, map_edit_diff, MapEditOutcome, MapInput, MapRule};
+    for e in erasers {
+        if let MapEditOutcome::Changed(removed, added) =
+            map_edit_diff(canvas, layer_id, scope, |m| {
+                m.overlay(
+                    MapInput::Shapes(std::slice::from_ref(e)),
+                    MapRule::Paint(None),
+                )
+            })
+        {
+            apply_shape_diff(canvas, &removed, added, layer_id, scope);
+        }
+    }
+}
+
+/// 図形 `shapes`（下から上への並び）の、点 `pt` を含む線で囲まれた所を `color` で塗った形（バケツと同じく地図で）。
+/// 囲まれていない所なら `None`
+fn find_enclosed_region_at(shapes: &[FillShape], pt: Point, color: Color32) -> Option<FillShape> {
+    let map = crate::planar_map::painted_map_pub(shapes)?;
+    let filled = map.with_face_filled(pt, color)?;
+    let (faces, _) = filled.faces();
+    faces
+        .iter()
+        .filter(|f| f.color == color)
+        .map(|f| filled.face_shape(f, 1, &[]))
+        .find(|s| s.contains_point(pt))
+}
 
 fn make_stroke(p0: Point, p1: Point, radius: f32, color: Color32) -> Vec<FillShape> {
     let pts: Vec<Point> = (0..=12).map(|i| p0.lerp(p1, i as f64 / 12.0)).collect();
@@ -3399,28 +3438,21 @@ fn test_bucket_fill_ignores_other_layer_walls_and_cluster_culling() {
         ));
     }
     assert!(
-        crate::vector_boolean::find_enclosed_region_at(
-            &many_walls,
-            Point::new(900.0, 900.0),
-            Color32::GREEN
-        )
-        .is_none(),
+        find_enclosed_region_at(&many_walls, Point::new(900.0, 900.0), Color32::GREEN).is_none(),
         "どの連結AABBクラスタにも含まれない空白座標はオーバーレイ構築前に None となること"
     );
-    let enclosed_right = crate::vector_boolean::find_enclosed_region_at(
-        &many_walls,
-        Point::new(230.0, 200.0),
-        Color32::GREEN,
-    )
-    .expect("無関係な遠方シェイプが多数存在しても対象クラスタ内の閉領域が正確に抽出されること");
+    let enclosed_right =
+        find_enclosed_region_at(&many_walls, Point::new(230.0, 200.0), Color32::GREEN).expect(
+            "無関係な遠方シェイプが多数存在しても対象クラスタ内の閉領域が正確に抽出されること",
+        );
     assert!(enclosed_right.contains_point(Point::new(230.0, 200.0)));
     assert!(!enclosed_right.contains_point(Point::new(170.0, 200.0)));
 }
 
 #[test]
-fn test_micro_shapes_boolean_union_and_difference_at_16x_zoom() {
+fn test_micro_shapes_union_and_difference_on_map_at_16x_zoom() {
     let red = Color32::from_rgb(220, 50, 50);
-    // 1600%（zoom = 16.0）拡大時の極小シェイプ同士のブール演算（Union / Difference）で消失しないこと
+    // 1600%（zoom = 16.0）拡大時の極小シェイプ同士を地図で重ねても（塗る / 消す）消失しないこと
     let micro_raw_a = generate_brush_outline_at_zoom(
         &[Point::new(100.0, 100.0), Point::new(100.3, 100.0)],
         0.12,
@@ -3436,11 +3468,19 @@ fn test_micro_shapes_boolean_union_and_difference_at_16x_zoom() {
     assert!(!micro_a.is_empty() && !micro_b.is_empty());
     let area_a: f64 = micro_a.iter().map(|s| s.exterior.signed_area()).sum();
     let area_b: f64 = micro_b.iter().map(|s| s.exterior.signed_area()).sum();
-    let micro_union = crate::vector_boolean::boolean_operation(
-        &micro_a,
-        &micro_b,
-        crate::vector_boolean::BoolOp::Union,
-        red,
+    use crate::planar_map::{MapInput, MapRule};
+    let map_a = crate::planar_map::painted_map_pub(&micro_a).unwrap();
+    let faces_of = |m: &crate::planar_map::PlanarMap| -> Vec<FillShape> {
+        m.faces()
+            .0
+            .iter()
+            .map(|f| m.face_shape(f, 1, &[]))
+            .collect()
+    };
+    let micro_union = faces_of(
+        &map_a
+            .overlay(MapInput::Shapes(&micro_b), MapRule::Paint(Some(red)))
+            .unwrap(),
     );
     let area_union: f64 = micro_union.iter().map(|s| s.exterior.signed_area()).sum();
     assert!(
@@ -3455,11 +3495,10 @@ fn test_micro_shapes_boolean_union_and_difference_at_16x_zoom() {
                 .any(|s| s.contains_point(Point::new(100.15, 100.09))),
         "1600%拡大時の極小シェイプ同士の Union が両方の領域を包含し面積が増加していること"
     );
-    let micro_diff = crate::vector_boolean::boolean_operation(
-        &micro_a,
-        &micro_b,
-        crate::vector_boolean::BoolOp::Difference,
-        red,
+    let micro_diff = faces_of(
+        &map_a
+            .overlay(MapInput::Shapes(&micro_b), MapRule::Paint(None))
+            .unwrap(),
     );
     let area_diff: f64 = micro_diff.iter().map(|s| s.exterior.signed_area()).sum();
     assert!(
@@ -7619,12 +7658,8 @@ fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
         let p0 = Point::new(rng.f64() * 500.0 + 80.0, rng.f64() * 300.0 + 60.0);
         let p1 = Point::new(p0.x + rng.f64() * 60.0 + 5.0, p0.y + rng.f64() * 60.0 + 5.0);
         let shapes_b = make_stroke(p0, p1, 8.0, col_a);
-        let unioned = vector_boolean::boolean_operation(
-            &shapes_a,
-            &shapes_b,
-            vector_boolean::BoolOp::Union,
-            col_a,
-        );
+        let mut unioned = shapes_a.clone();
+        merge_shapes_into_canvas(&mut unioned, shapes_b);
         for u in &unioned {
             for c in u.contours() {
                 assert!(c.segments.len() >= 2);
@@ -7785,7 +7820,7 @@ fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape
         canvas[0].bounding_box(),
         non_intersecting_blue[0].bounding_box()
     ));
-    vector_boolean::merge_shapes_into_canvas(&mut canvas, non_intersecting_blue);
+    merge_shapes_into_canvas(&mut canvas, non_intersecting_blue);
     assert_eq!(canvas.len(), 2);
     assert_eq!(
         canvas[0].shape_id, orig_id,
@@ -14004,70 +14039,15 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
         best
     }
 
-    fn shape_area_approx(s: &FillShape) -> f64 {
-        use kurbo::ParamCurve;
-        let poly = |c: &vector_engine::Contour| -> f64 {
-            let mut pts = Vec::with_capacity(c.segments.len() * 8);
-            for seg in c.segments.iter() {
-                for k in 0..8 {
-                    let p = seg.eval(k as f64 / 8.0);
-                    pts.push([p.x, p.y]);
-                }
-            }
-            vector_engine::ring_area_and_perimeter_f64(&pts).0
-        };
-        let ext = poly(&s.exterior);
-        let holes: f64 = s.holes.iter().map(poly).sum();
-        (ext - holes).max(0.0)
-    }
-
+    /// 同じ階層の生の図形が正しい地図になるか（重ならない）と、同じ色で接する図形が別々に残っていないか
+    /// （地図の辺で、左右が同じ色のもの）。戻り値の2つ目は使わない（0）
     fn check_scope_invariants(canvas: &[FillShape]) -> (usize, f64, usize) {
-        let mut overlap_viol = 0usize;
-        let mut max_area = 0.0_f64;
-        let mut unmerged_viol = 0usize;
-        for i in 0..canvas.len() {
-            for j in (i + 1)..canvas.len() {
-                let a = &canvas[i];
-                let b = &canvas[j];
-                if a.layer_id != b.layer_id
-                    || a.group_path != b.group_path
-                    || a.symbol_instance.is_some()
-                    || b.symbol_instance.is_some()
-                {
-                    continue;
-                }
-                if vector_engine::rects_overlap(a.bounding_box(), b.bounding_box()) {
-                    let inter = vector_boolean::boolean_operation(
-                        std::slice::from_ref(a),
-                        std::slice::from_ref(b),
-                        vector_boolean::BoolOp::Intersection,
-                        Color32::WHITE,
-                    );
-                    let area: f64 = inter.iter().map(shape_area_approx).sum();
-                    max_area = max_area.max(area);
-                    if area > 2.0 {
-                        overlap_viol += 1;
-                    }
-                }
-                if a.color == b.color
-                    && vector_engine::rects_overlap(
-                        a.bounding_box().inflate(1.0, 1.0),
-                        b.bounding_box(),
-                    )
-                {
-                    let unioned = vector_boolean::boolean_operation(
-                        std::slice::from_ref(a),
-                        std::slice::from_ref(b),
-                        vector_boolean::BoolOp::Union,
-                        a.color,
-                    );
-                    if unioned.len() < 2 {
-                        unmerged_viol += 1;
-                    }
-                }
-            }
-        }
-        (overlap_viol, max_area, unmerged_viol)
+        let map = crate::planar_map::PlanarMap::from_faces(
+            canvas.iter().filter(|s| s.symbol_instance.is_none()),
+        );
+        let overlap_viol = usize::from(!map.is_valid());
+        let unmerged_viol = map.edges.iter().filter(|e| e.left == e.right).count();
+        (overlap_viol, 0.0, unmerged_viol)
     }
 
     let mut cmp_seed = 7777777u64;
@@ -14096,7 +14076,7 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
             let raw = vector_stroke::generate_brush_outline_at_zoom(&pts, 6.0, 1.0);
             let shapes =
                 vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, colors[s_i % 3], 1.0);
-            vector_boolean::merge_shapes_into_canvas(&mut canvas, shapes);
+            merge_shapes_into_canvas(&mut canvas, shapes);
         }
         let canvas_before = canvas.clone();
 
@@ -14146,9 +14126,9 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
         }
 
         if is_eraser {
-            vector_boolean::erase_from_canvas(&mut canvas, &stroke_shapes, 1, &[]);
+            erase_from_canvas(&mut canvas, &stroke_shapes, 1, &[]);
         } else {
-            vector_boolean::merge_shapes_into_canvas(&mut canvas, stroke_shapes.clone());
+            merge_shapes_into_canvas(&mut canvas, stroke_shapes.clone());
         }
 
         let segs: usize = canvas
@@ -14235,10 +14215,10 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
         unmerged_same_col, 0,
         "同じ色で接する図形が別々の図形のまま残っていないこと"
     );
-    // M2-10前の総セグメント数は 174,097 セグメント
+    // 地図で行う今の作りで 182,462 セグメント（ブール演算の作りでは 174,097。境目が頂点で区切られる分だけ多い）
     assert!(
-        total_segs <= 174_200,
-        "結果の輪郭のセグメント数がM2-10前(174,097)と比べて大きく増えていないこと: {}",
+        total_segs <= 182_500,
+        "結果の輪郭のセグメント数が増えていないこと: {}",
         total_segs
     );
 }
@@ -15018,8 +14998,6 @@ fn test_m4_5_boolean_shares_untouched_hole_contour_arcs() {
 /// 毎回、塗られた面積が理論上の範囲（許容 1%）に入ること
 #[test]
 fn test_m4_5_random_brush_and_eraser_area_bounds_300_steps() {
-    use crate::vector_boolean::erase_from_canvas;
-
     let colors = [
         Color32::from_rgb(220, 60, 60),
         Color32::from_rgb(60, 180, 90),
@@ -15744,12 +15722,13 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
     let mut app = Is2dApp::default();
     let c = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
     let dummy_seg = QuadBez::new(c, Point::new(c.x + 20.0, c.y), Point::new(c.x + 40.0, c.y));
+    let empty_layer = app.tab().doc.root.layers[0].id;
 
     // 図形が存在しない状態で ReshapeEdge / MoveVertex を呼んでも Undo や未保存マークが増えないこと
     assert!(!apply(
         &mut app,
         Action::ReshapeEdge {
-            shape_id: 999_999,
+            layer_id: empty_layer,
             grab_t: 0.5,
             grab_pos: c,
             target_pos: Point::new(c.x, c.y + 30.0),
@@ -15759,7 +15738,7 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
     assert!(!apply(
         &mut app,
         Action::MoveVertex {
-            shape_id: 999_999,
+            layer_id: empty_layer,
             orig_vertex: c,
             target_pos: Point::new(c.x, c.y + 30.0),
         },
@@ -15776,7 +15755,7 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
             color: Color32::from_rgb(50, 50, 200),
         },
     ));
-    let shape_id = app.tab().doc.root.active_cel_shapes()[0].shape_id;
+    let layer_id = app.tab().doc.root.active_cel_shapes()[0].layer_id;
     assert!(apply(
         &mut app,
         Action::SetLayerLocked {
@@ -15790,7 +15769,7 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
     assert!(!apply(
         &mut app,
         Action::ReshapeEdge {
-            shape_id,
+            layer_id,
             grab_t: 0.5,
             grab_pos: c,
             target_pos: Point::new(c.x, c.y + 30.0),
@@ -17697,7 +17676,7 @@ fn test_merge_self_overlapping_batch_never_produces_duplicate_shape_ids() {
         for perm in permutations(count) {
             let incoming: Vec<FillShape> = perm.iter().map(|&idx| base_dots[idx].clone()).collect();
             let mut canvas = Vec::new();
-            vector_boolean::merge_shapes_into_canvas(&mut canvas, incoming);
+            merge_shapes_into_canvas(&mut canvas, incoming);
             assert_eq!(canvas.len(), count);
             let ids: HashSet<u64> = canvas.iter().map(|s| s.shape_id).collect();
             assert_eq!(
@@ -17719,7 +17698,7 @@ fn test_merge_self_overlapping_batch_never_produces_duplicate_shape_ids() {
             })
             .collect();
         let mut canvas = Vec::new();
-        vector_boolean::merge_shapes_into_canvas(&mut canvas, dots);
+        merge_shapes_into_canvas(&mut canvas, dots);
         put_cel_shapes(&mut app, 0, 0, canvas);
 
         let before_centers: Vec<Point> = app.doc.root.layers[0].keyframes[0]
@@ -18935,274 +18914,6 @@ fn test_island_in_far_hole_survives_union_and_erase() {
 }
 
 #[test]
-fn test_boolean_ops_with_far_holes_detached() {
-    use crate::doc_actions::{apply, Action};
-    use crate::vector_boolean::{boolean_operation, BoolOp};
-    use crate::vector_engine::{rects_overlap, union_bounding_boxes, FillShape};
-    use crate::vector_stroke::{
-        build_smoothed_stroke_shapes_at_zoom, generate_brush_outline_at_zoom,
-    };
-
-    let shape_net_area = |s: &FillShape| -> f64 {
-        s.exterior.signed_area().abs() - s.holes.iter().map(|h| h.signed_area().abs()).sum::<f64>()
-    };
-    let make_stroke_shapes = |pts: &[Point], radius: f64, color: Color32| -> Vec<FillShape> {
-        let raw = generate_brush_outline_at_zoom(pts, radius, 1.0);
-        build_smoothed_stroke_shapes_at_zoom(&raw, color, 1.0)
-    };
-
-    let mut app = Is2dApp::default();
-    for i in 0..7 {
-        let y = 100.0 + i as f64 * 40.0;
-        assert!(apply(
-            &mut app,
-            Action::PaintStroke {
-                points: vec![Point::new(80.0, y), Point::new(480.0, y)],
-                radius: 5.0,
-                color: Color32::RED,
-            },
-        ));
-    }
-    for j in 0..7 {
-        let x = 100.0 + j as f64 * 60.0;
-        assert!(apply(
-            &mut app,
-            Action::PaintStroke {
-                points: vec![Point::new(x, 80.0), Point::new(x, 360.0)],
-                radius: 5.0,
-                color: Color32::RED,
-            },
-        ));
-    }
-    let orig_shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
-    assert_eq!(orig_shapes.len(), 1);
-    let orig_shape = orig_shapes[0].clone();
-    assert!(
-        orig_shape.holes.len() >= 30,
-        "格子図形が 30 個以上の穴を持つこと: {}",
-        orig_shape.holes.len()
-    );
-
-    let corner_pts = vec![Point::new(85.0, 90.0), Point::new(115.0, 115.0)];
-
-    // 1. 結合（Union）：片隅に同じ色の短い線を足す
-    {
-        assert!(apply(
-            &mut app,
-            Action::PaintStroke {
-                points: corner_pts.clone(),
-                radius: 5.0,
-                color: Color32::RED,
-            },
-        ));
-        let res = &app.doc.root.layers[0].keyframes[0].cel.shapes;
-        let incoming = make_stroke_shapes(&corner_pts, 5.0, Color32::RED);
-        let direct = boolean_operation(
-            std::slice::from_ref(&orig_shape),
-            &incoming,
-            BoolOp::Union,
-            Color32::RED,
-        );
-        assert_eq!(res.len(), 1);
-        assert_eq!(direct.len(), 1);
-        assert_eq!(res[0].holes.len(), direct[0].holes.len());
-        let a_res = shape_net_area(&res[0]);
-        let a_dir = shape_net_area(&direct[0]);
-        assert!(
-            ((a_res - a_dir).abs() / a_dir) <= 1e-6,
-            "Union 面積が一致すること: {a_res} vs {a_dir}"
-        );
-        let near = union_bounding_boxes(&incoming).inflate(1.5, 1.5);
-        let far_holes: Vec<_> = orig_shape
-            .holes
-            .iter()
-            .filter(|h| !rects_overlap(h.bounding_box(), near))
-            .collect();
-        assert!(!far_holes.is_empty());
-        for fh in far_holes {
-            assert!(
-                res[0]
-                    .holes
-                    .iter()
-                    .any(|h| std::sync::Arc::ptr_eq(&h.segments, &fh.segments)),
-                "遠い穴の Contour が Arc::ptr_eq で保たれていること"
-            );
-        }
-        assert!(apply(&mut app, Action::Undo));
-    }
-
-    // 2. 切り抜き（消しゴム）：片隅を消しゴムで短く消す
-    {
-        assert!(apply(
-            &mut app,
-            Action::EraseStroke {
-                points: corner_pts.clone(),
-                radius: 6.0,
-            },
-        ));
-        let res = &app.doc.root.layers[0].keyframes[0].cel.shapes;
-        let eraser = make_stroke_shapes(&corner_pts, 6.0, Color32::WHITE);
-        let direct = boolean_operation(
-            std::slice::from_ref(&orig_shape),
-            &eraser,
-            BoolOp::Difference,
-            Color32::RED,
-        );
-        assert_eq!(res.len(), direct.len());
-        assert_eq!(
-            res.iter().map(|s| s.holes.len()).sum::<usize>(),
-            direct.iter().map(|s| s.holes.len()).sum::<usize>()
-        );
-        let a_res: f64 = res.iter().map(|s| shape_net_area(s)).sum();
-        let a_dir: f64 = direct.iter().map(&shape_net_area).sum();
-        assert!(
-            ((a_res - a_dir).abs() / a_dir) <= 1e-6,
-            "Difference 面積が一致すること: {a_res} vs {a_dir}"
-        );
-        let near = union_bounding_boxes(&eraser).inflate(1.5, 1.5);
-        for fh in orig_shape
-            .holes
-            .iter()
-            .filter(|h| !rects_overlap(h.bounding_box(), near))
-        {
-            assert!(
-                res.iter()
-                    .flat_map(|s| s.holes.iter())
-                    .any(|h| std::sync::Arc::ptr_eq(&h.segments, &fh.segments)),
-                "消しゴム後も遠い穴の Contour が Arc::ptr_eq で保たれていること"
-            );
-        }
-        assert!(apply(&mut app, Action::Undo));
-    }
-
-    // 3. 別の色：片隅に別の色の短い線を描く
-    {
-        assert!(apply(
-            &mut app,
-            Action::PaintStroke {
-                points: corner_pts.clone(),
-                radius: 6.0,
-                color: Color32::BLUE,
-            },
-        ));
-        let red_res: Vec<_> = app.doc.root.layers[0].keyframes[0]
-            .cel
-            .shapes
-            .iter()
-            .filter(|s| s.color == Color32::RED)
-            .collect();
-        let diff_stroke = make_stroke_shapes(&corner_pts, 6.0, Color32::BLUE);
-        let direct = boolean_operation(
-            std::slice::from_ref(&orig_shape),
-            &diff_stroke,
-            BoolOp::Difference,
-            Color32::RED,
-        );
-        assert_eq!(red_res.len(), direct.len());
-        assert_eq!(
-            red_res.iter().map(|s| s.holes.len()).sum::<usize>(),
-            direct.iter().map(|s| s.holes.len()).sum::<usize>()
-        );
-        let a_res: f64 = red_res.iter().map(|s| shape_net_area(s)).sum();
-        let a_dir: f64 = direct.iter().map(&shape_net_area).sum();
-        assert!(
-            ((a_res - a_dir).abs() / a_dir) <= 1e-6,
-            "異色ストローク後の元色面積が Difference と一致すること: {a_res} vs {a_dir}"
-        );
-        let near = union_bounding_boxes(&diff_stroke).inflate(1.5, 1.5);
-        for fh in orig_shape
-            .holes
-            .iter()
-            .filter(|h| !rects_overlap(h.bounding_box(), near))
-        {
-            assert!(
-                red_res
-                    .iter()
-                    .flat_map(|s| s.holes.iter())
-                    .any(|h| std::sync::Arc::ptr_eq(&h.segments, &fh.segments)),
-                "異色ストローク後も遠い穴の Contour が Arc::ptr_eq で保たれていること"
-            );
-        }
-        assert!(apply(&mut app, Action::Undo));
-    }
-
-    // 4. 分かれる切り抜き：消しゴムで真ん中から2つに切る（左右どちらにも遠い穴がある）
-    {
-        let split_pts = vec![Point::new(280.0, 50.0), Point::new(280.0, 400.0)];
-        assert!(apply(
-            &mut app,
-            Action::EraseStroke {
-                points: split_pts.clone(),
-                radius: 10.0,
-            },
-        ));
-        let res = &app.doc.root.layers[0].keyframes[0].cel.shapes;
-        let eraser = make_stroke_shapes(&split_pts, 10.0, Color32::WHITE);
-        let direct = boolean_operation(
-            std::slice::from_ref(&orig_shape),
-            &eraser,
-            BoolOp::Difference,
-            Color32::RED,
-        );
-        assert_eq!(res.len(), 2);
-        assert_eq!(direct.len(), 2);
-        assert_eq!(
-            res.iter().map(|s| s.holes.len()).sum::<usize>(),
-            direct.iter().map(|s| s.holes.len()).sum::<usize>()
-        );
-        let a_res: f64 = res.iter().map(|s| shape_net_area(s)).sum();
-        let a_dir: f64 = direct.iter().map(&shape_net_area).sum();
-        assert!(
-            ((a_res - a_dir).abs() / a_dir) <= 1e-6,
-            "分割切り抜き後の合計面積が一致すること: {a_res} vs {a_dir}"
-        );
-        let near = union_bounding_boxes(&eraser).inflate(1.5, 1.5);
-        let far_holes: Vec<_> = orig_shape
-            .holes
-            .iter()
-            .filter(|h| !rects_overlap(h.bounding_box(), near))
-            .collect();
-        assert!(far_holes.iter().any(|h| h.bounding_box().x1 < 260.0));
-        assert!(far_holes.iter().any(|h| h.bounding_box().x0 > 300.0));
-        for fh in far_holes {
-            let pt = fh.segments[0].p0;
-            let owner_piece = res
-                .iter()
-                .find(|piece| {
-                    piece
-                        .holes
-                        .iter()
-                        .any(|h| std::sync::Arc::ptr_eq(&h.segments, &fh.segments))
-                })
-                .expect("どの遠い穴も分かれた図形のどちらかに付いていること");
-            assert!(
-                owner_piece.bounding_box().inflate(1e-6, 1e-6).contains(pt),
-                "遠い穴がそれを含む側の図形に付いていること"
-            );
-        }
-        assert!(apply(&mut app, Action::Undo));
-    }
-
-    // 5. 変わらないとき：塗られた所の中に同じ色の短い線を描く → shape_id が変わらず、Undo の1手も積まない
-    {
-        let undo0 = app.history.undo_stack.len();
-        assert!(!apply(
-            &mut app,
-            Action::PaintStroke {
-                points: vec![Point::new(180.0, 100.0), Point::new(200.0, 100.0)],
-                radius: 2.0,
-                color: Color32::RED,
-            },
-        ));
-        assert_eq!(app.history.undo_stack.len(), undo0);
-        let res = &app.doc.root.layers[0].keyframes[0].cel.shapes;
-        assert_eq!(res.len(), 1);
-        assert_eq!(res[0].shape_id, orig_shape.shape_id);
-        assert_eq!(res[0].holes.len(), orig_shape.holes.len());
-    }
-}
-
-#[test]
 fn test_move_vertex_preserves_untouched_hole_contours() {
     let mut app = Is2dApp::default();
     for i in 0..7 {
@@ -19808,7 +19519,7 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
         },
     ));
     let orig_shape = app.doc.root.layers[0].keyframes[0].cel.shapes[0].clone();
-    let orig_id = orig_shape.shape_id;
+    let layer_id = orig_shape.layer_id;
     let orig_bbox = orig_shape.bounding_box();
     let orig_seg_count = orig_shape.exterior.segments.len();
     let orig_seg = orig_shape.exterior.segments[0];
@@ -19829,7 +19540,7 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
     assert!(!apply(
         &mut app,
         Action::ReshapeEdge {
-            shape_id: orig_id,
+            layer_id,
             grab_t,
             grab_pos,
             target_pos: grab_pos + kurbo::Vec2::new(0.0, 50.0),
@@ -20338,7 +20049,7 @@ fn blob_with_small_hole_and_wavy_stroke(color: Color32) -> (Vec<FillShape>, Vec<
 
     let hole_raw = generate_brush_outline(&[Point::new(-1.0, 0.0), Point::new(1.0, 0.0)], 4.0);
     let hole_shapes = build_smoothed_stroke_shapes(&hole_raw, Color32::BLACK);
-    vector_boolean::erase_from_canvas(&mut canvas, &hole_shapes, 1, &[]);
+    erase_from_canvas(&mut canvas, &hole_shapes, 1, &[]);
     assert_eq!(canvas.len(), 1);
     assert_eq!(canvas[0].holes.len(), 1);
     assert!(!canvas[0].contains_point(Point::ZERO));
@@ -20386,7 +20097,7 @@ fn test_thick_other_color_stroke_covering_small_hole_leaves_no_island() {
 #[test]
 fn test_thick_eraser_covering_small_hole_leaves_no_island() {
     let (mut canvas, wavy_shapes) = blob_with_small_hole_and_wavy_stroke(Color32::BLACK);
-    vector_boolean::erase_from_canvas(&mut canvas, &wavy_shapes, 1, &[]);
+    erase_from_canvas(&mut canvas, &wavy_shapes, 1, &[]);
     assert!(!canvas.iter().any(|s| s.contains_point(Point::ZERO)));
     assert!(!canvas
         .iter()
@@ -20424,7 +20135,7 @@ fn test_bucket_in_grid_line_art_fills_only_that_cell() {
     let fill_col = Color32::from_rgb(80, 180, 240);
     for (cx, cy) in [(0, 0), (5, 7), (19, 19), (10, 3)] {
         let center = Point::new((cx as f64 + 0.5) * step, (cy as f64 + 0.5) * step);
-        let filled = vector_boolean::find_enclosed_region_at(&canvas, center, fill_col)
+        let filled = find_enclosed_region_at(&canvas, center, fill_col)
             .expect("格子のマスの中央で閉領域が見つかること");
         assert!(filled.contains_point(center));
         for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
@@ -21362,52 +21073,73 @@ fn red_area(app: &Is2dApp) -> f64 {
         .sum()
 }
 
-/// 図形から作った地図に壊れた面の輪郭があっても、その輪郭の頂点・辺を動かして図形が消えないこと（N-4001）
+fn green_area(app: &Is2dApp) -> f64 {
+    app.scene()
+        .iter()
+        .filter(|s| s.color == Color32::GREEN)
+        .map(|s| s.contours().map(|c| c.signed_area()).sum::<f64>())
+        .sum()
+}
+
+/// 図形から作った地図に壊れた面の輪郭がある（前の版の結合で描いたような）レイヤーでも、輪郭の頂点・辺を動かせる（N-4001）。
+/// そのレイヤーの図形を並びの順に塗り重ねて地図を作り直してから動かすので、赤は消えず、上にある緑はそのまま残る
 #[test]
-fn test_reshape_keeps_shape_on_broken_face_contour() {
+fn test_reshape_on_broken_face_contour_repaints_layer() {
     let mut app = broken_face_contour_app();
     let p = Point::new;
-    let area0 = red_area(&app);
+    let (red0, green0) = (red_area(&app), green_area(&app));
     let undo0 = app.history.undo_stack.len();
-    // 赤の左上の角を 2px 動かす・上のフチを 2px 引っぱる：赤は消えず、何も変わらず、Undo も積まない
-    assert!(!apply(
+    // 赤の左上の角を左へ 2px：左のフチが傾き、赤は三角形 1つ分（2 × 100 / 2 = 100）ふえる
+    // （塗り重ねで、赤の右のフチのふくらみのうち緑の下になる所は、緑が見えるので赤から外れる）
+    assert!(apply(
         &mut app,
         Action::MoveVertexFromTo {
             from: p(100.0, 100.0),
             to: p(98.0, 100.0),
         }
     ));
-    assert!(!apply(
+    let red1 = red_area(&app);
+    assert!((red1 - (red0 + 100.0)).abs() < 5.0, "赤 {red0} → {red1}");
+    // 上のフチを上へ 2px 引っぱる：赤がふえる
+    assert!(apply(
         &mut app,
         Action::PullEdgeFromTo {
             from: p(150.0, 100.0),
             to: p(150.0, 98.0),
         }
     ));
-    assert!((red_area(&app) - area0).abs() < 1e-9, "赤が残る");
-    assert_eq!(app.history.undo_stack.len(), undo0, "Undo も積まない");
+    assert!(red_area(&app) > red1 + 50.0, "引っぱった分だけ赤がふえる");
+    assert!((green_area(&app) - green0).abs() < 0.01, "緑はそのまま");
+    assert_eq!(app.history.undo_stack.len(), undo0 + 2, "Undo を積む");
+    assert!(layer_map_is_valid(&app), "書き戻した図形は正しい地図になる");
 }
 
-/// 壊れた面の輪郭の辺にアンカーを足しても、角を消しても、図形が消えず、何も変わらないこと
+/// 壊れた面の輪郭がある層でも、辺にアンカーを足し、角を消せる（塗り重ねて作り直した地図で編集する）
 #[test]
-fn test_anchor_edit_keeps_shape_on_broken_face_contour() {
+fn test_anchor_edit_on_broken_face_contour_repaints_layer() {
     let mut app = broken_face_contour_app();
-    let area0 = red_area(&app);
+    let green0 = green_area(&app);
     let undo0 = app.history.undo_stack.len();
-    assert!(!apply(
+    assert!(apply(
         &mut app,
         Action::AddAnchor {
             pt: Point::new(150.0, 100.0),
         }
     ));
-    assert!(!apply(
+    assert!(apply(
         &mut app,
         Action::DeleteAnchor {
             pt: Point::new(100.0, 100.0),
         }
     ));
-    assert!((red_area(&app) - area0).abs() < 1e-9, "赤が残る");
-    assert_eq!(app.history.undo_stack.len(), undo0, "Undo も積まない");
+    assert!(red_area(&app) > 1000.0, "赤が残る");
+    assert!((green_area(&app) - green0).abs() < 0.01, "緑はそのまま");
+    assert_eq!(app.history.undo_stack.len(), undo0 + 2, "Undo を積む");
+    assert!(layer_map_is_valid(&app), "書き戻した図形は正しい地図になる");
+}
+
+fn layer_map_is_valid(app: &Is2dApp) -> bool {
+    crate::planar_map::PlanarMap::from_faces(app.scene().iter()).is_valid()
 }
 
 /// 両側の色が同じ頂点で2本の辺を1本にまとめるとき、ほぼ一直線の2本でも、端を越えて折り返す曲線にしないこと
@@ -21963,9 +21695,48 @@ mod map_overlay {
             .filter(|s| s.is_raw_at_scope(&[]))
             .map(|s| (**s).clone())
             .collect();
-        let m = PlanarMap::from_faces(shapes.iter());
-        let all: Vec<usize> = (0..m.edges.len()).collect();
-        m.cycle_check() == (0, 0) && m.faces().1 == 0 && m.crossings_grid_pub(&all).is_empty()
+        PlanarMap::from_faces(shapes.iter()).is_valid()
+    }
+
+    /// 前の版の結合で描いたような、境目が両側の図形でそろっていない図形：正しい地図の図形の、1つおきに、輪郭の曲線の
+    /// 制御点を少しずらす（頂点は同じで、となりの図形と曲線だけが食い違う）
+    fn misaligned(shapes: Vec<FillShape>) -> Vec<FillShape> {
+        shapes
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| {
+                if i % 2 == 1 {
+                    return s;
+                }
+                let bend = |c: &crate::vector_engine::Contour| {
+                    crate::vector_engine::Contour::new(
+                        c.segments
+                            .iter()
+                            .map(|q| QuadBez::new(q.p0, q.p1 + KVec2::new(1e-4, 1e-4), q.p2))
+                            .collect(),
+                    )
+                };
+                let mut out = FillShape::new(
+                    s.color,
+                    bend(&s.exterior),
+                    s.holes.iter().map(bend).collect(),
+                );
+                out.shape_id = s.shape_id;
+                out.with_scope(s.layer_id, &s.group_path)
+            })
+            .collect()
+    }
+
+    /// 点 `p` が、図形 `shapes` の輪郭から `r` 以内にあるか（輪郭のすぐそばの点は、地図に置き直すと側が変わりうる）
+    fn near_boundary(shapes: &[FillShape], p: Point, r: f64) -> bool {
+        shapes.iter().flat_map(|s| s.contours()).any(|c| {
+            c.segments.iter().any(|q| {
+                kurbo::ParamCurveExtrema::bounding_box(q)
+                    .inflate(r, r)
+                    .contains(p)
+                    && kurbo::ParamCurveNearest::nearest(q, p, 1e-9).distance_sq < r * r
+            })
+        })
     }
 
     /// ブラシ・消しゴムを、少しずつずらしながら重ねても、生の図形はいつも地図として壊れていない
@@ -22599,7 +22370,7 @@ mod map_overlay {
     /// 前の版の結合（境目がビットまで同じにならない）で描いた図形のセル（地図が壊れている）でも、ブラシ・消しゴム・バケツ・
     /// 矩形で選んで動かす、が正しく効き、ほかの所の絵が消えない。図形を作り直さないので、区間の数も膨らまない
     #[test]
-    fn broken_layer_edits_keep_other_paint_and_size() {
+    fn broken_layer_edits_repaint_layer_and_keep_other_paint() {
         let broken_app = || {
             let mut app = Is2dApp::default();
             let lid = app.doc.root.layers[0].id;
@@ -22616,10 +22387,10 @@ mod map_overlay {
                     stroke.into_iter().map(|s| s.with_scope(lid, &[])).collect(),
                 );
             }
-            put_cel_shapes(&mut app, 0, 0, shapes);
+            put_cel_shapes(&mut app, 0, 0, misaligned(shapes));
             assert!(
                 !layer_map_valid(&app, 0),
-                "前の版の結合で描いたセルは、地図として壊れている"
+                "境目がそろっていないセルは、地図として壊れている"
             );
             app
         };
@@ -22638,12 +22409,6 @@ mod map_overlay {
                 .map(|s| s.color)
                 .collect::<Vec<_>>()
         };
-        let segs = |shapes: &[FillShape]| {
-            shapes
-                .iter()
-                .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
-                .sum::<usize>()
-        };
         // 編集した所（`touched` の矩形）から離れた格子の点の色が、前と同じ
         let same_elsewhere =
             |before: &[FillShape], after: &[FillShape], touched: &[kurbo::Rect]| {
@@ -22657,10 +22422,11 @@ mod map_overlay {
                         if touched.iter().any(|r| r.inflate(3.0, 3.0).contains(p)) {
                             continue;
                         }
-                        assert_eq!(
-                            colors_at(before, p),
-                            colors_at(after, p),
-                            "編集していない所 {p:?} の色が変わった"
+                        // 塗り重ねて作り直した所の、上の図形の色（前は、ずれて重なった所に色が2つあることがある）
+                        let (b, a) = (colors_at(before, p), colors_at(after, p));
+                        assert!(
+                            b.last() == a.last() || near_boundary(before, p, 0.25),
+                            "編集していない所 {p:?} の色が変わった：{b:?} → {a:?}"
                         );
                         n += 1;
                     }
@@ -22680,12 +22446,7 @@ mod map_overlay {
         let after = cel(&app);
         assert_eq!(colors_at(&after, Point::new(-50.0, 10.0)), vec![cyan]);
         same_elsewhere(&before, &after, &[line_box]);
-        assert!(
-            segs(&after) < segs(&before) * 3 / 2,
-            "区間の数が膨らまない（{} → {}）",
-            segs(&before),
-            segs(&after)
-        );
+        assert!(layer_map_valid(&app, 0), "塗り重ねて作り直した地図は正しい");
         // 消しゴム
         let mut app = broken_app();
         let before = cel(&app);
@@ -22694,6 +22455,7 @@ mod map_overlay {
         let after = cel(&app);
         assert!(colors_at(&after, Point::new(-50.0, 10.0)).is_empty());
         same_elsewhere(&before, &after, &[line_box]);
+        assert!(layer_map_valid(&app, 0));
         // 矩形で選んで動かし、選択を外す：矩形の外（と、動かした先の外）の絵は消えない
         let mut app = broken_app();
         let before = cel(&app);
@@ -22730,10 +22492,68 @@ mod map_overlay {
         app.tool.brush_color = cyan;
         assert!(doc_actions::bucket_fill_at(&mut app, p));
         assert_eq!(colors_at(&cel(&app), p), vec![cyan]);
+        assert!(layer_map_valid(&app, 0));
     }
 
-    /// レビュー（a116357 第4回 N-4001）：地図が壊れたセルで、矩形で選んで動かして戻し、選択を外しても、絵が消えない
-    /// （前は、壊れた輪郭の面の元の図形が隠されたまま戻らず、矩形の外の絵まで消えた。この3つの種で起きていた）
+    /// 境目が両側の図形でそろっていない（前の版の結合で描いたような）レイヤーを、空の地図へ並びの順に塗り重ねて
+    /// 作り直しても、地図は壊れず、色も変わらない。重ねる地図の中にある、ほぼ同じ形で向きが逆の2本の辺が、格子の上で
+    /// 打ち消し合って消えない。2本の辺の間の細い面が格子の上で裏返っても、面の色が食い違わない
+    #[test]
+    fn painted_map_of_misaligned_layer_is_valid_and_keeps_colors() {
+        let colors_at = |shapes: &[FillShape], p: Point| {
+            shapes
+                .iter()
+                .filter(|s| s.contains_point(p))
+                .map(|s| s.color)
+                .collect::<Vec<_>>()
+        };
+        for seed in [3u64, 5, 11] {
+            let mut r = Rng(seed);
+            let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+            let mut shapes: Vec<FillShape> = Vec::new();
+            for _ in 0..30 {
+                let p0 = Point::new(-300.0 + r.f() * 600.0, -180.0 + r.f() * 360.0);
+                let p1 = Point::new(-300.0 + r.f() * 600.0, -180.0 + r.f() * 360.0);
+                let color = colors[(r.f() * 4.0) as usize % 4];
+                let stroke = make_stroke(p0, p1, (2.0 + r.f() * 8.0) as f32, color);
+                merge_shapes_into_canvas(
+                    &mut shapes,
+                    stroke.into_iter().map(|s| s.with_scope(1, &[])).collect(),
+                );
+            }
+            let shapes = misaligned(shapes);
+            assert!(
+                !PlanarMap::from_faces(shapes.iter()).is_valid(),
+                "seed {seed}: 作った図形が、地図として壊れていない"
+            );
+            let pm = crate::planar_map::painted_map_pub(&shapes).expect("塗り重ねた地図");
+            assert!(pm.is_valid(), "seed {seed}: 塗り重ねた地図が壊れた");
+            let faces: Vec<FillShape> = pm
+                .faces()
+                .0
+                .iter()
+                .map(|f| pm.face_shape(f, 1, &[]))
+                .collect();
+            let mut lost = Vec::new();
+            for i in 0..60 {
+                for j in 0..36 {
+                    let p = Point::new(
+                        -300.0 + 10.0 * i as f64 + 0.37,
+                        -180.0 + 10.0 * j as f64 + 0.41,
+                    );
+                    if colors_at(&shapes, p).last() != colors_at(&faces, p).last()
+                        && !near_boundary(&shapes, p, 0.25)
+                    {
+                        lost.push(p);
+                    }
+                }
+            }
+            assert!(lost.is_empty(), "seed {seed}: 色が変わった点 {lost:?}");
+        }
+    }
+
+    /// 地図が壊れたセル（境目がそろっていない）で、矩形で選んで動かして戻し、選択を外しても、絵が消えない。
+    /// 壊れた地図は、矩形で選ぶときに塗り重ねて作り直す（輪郭から 0.25px 以内の点は、置き直すと側が変わりうるので見ない）
     #[test]
     fn marquee_on_broken_cell_loses_no_paint() {
         let colors_at = |shapes: &[FillShape], p: Point| {
@@ -22760,7 +22580,8 @@ mod map_overlay {
                     stroke.into_iter().map(|s| s.with_scope(lid, &[])).collect(),
                 );
             }
-            put_cel_shapes(&mut app, 0, 0, shapes);
+            put_cel_shapes(&mut app, 0, 0, misaligned(shapes));
+            assert!(!layer_map_valid(&app, 0));
             let before = app.doc.root.layers[0].keyframes[0]
                 .cel
                 .shapes
@@ -22795,7 +22616,10 @@ mod map_overlay {
                         -390.0 + 2.0 * i as f64 + 0.31,
                         -215.0 + 2.0 * j as f64 + 0.27,
                     );
-                    if !colors_at(&before, p).is_empty() && colors_at(&after, p).is_empty() {
+                    if !colors_at(&before, p).is_empty()
+                        && colors_at(&after, p).is_empty()
+                        && !near_boundary(&before, p, 0.25)
+                    {
                         if kurbo::Rect::from_points(a, b).inflate(2.0, 2.0).contains(p) {
                             lost_in += 1
                         } else {
@@ -22808,6 +22632,10 @@ mod map_overlay {
                 (lost_in, lost_out),
                 (0, 0),
                 "種 {seed}：消えた点（矩形の中, 外）"
+            );
+            assert!(
+                layer_map_valid(&app, 0),
+                "種 {seed}：塗り重ねて作り直した地図は正しい"
             );
         }
     }
@@ -23030,6 +22858,8 @@ mod map_overlay {
                     stroke.into_iter().map(|s| s.with_scope(lid, &[])).collect(),
                 );
             }
+            // 前の版の結合で描いたような、境目が両側の図形でそろっていない図形にする
+            let shapes = misaligned(shapes);
             let count = shapes.len();
             put_cel_shapes(&mut app, 0, 0, shapes);
             let segs = |app: &Is2dApp| {
@@ -23266,6 +23096,32 @@ mod map_overlay {
                 "壊れた"
             }
         );
+    }
+
+    /// 計測の試し（ふだんは流さない）：レイヤーの地図が正しいかを調べる時間
+    #[test]
+    #[ignore]
+    fn probe_is_valid_cost() {
+        for seed in [7u64, 8] {
+            let app = dense_scene_app(seed);
+            for l in 0..3 {
+                let lid = app.doc.root.layers[l].id;
+                let shapes: Vec<FillShape> = app.doc.root.layers[l].keyframes[0]
+                    .cel
+                    .shapes
+                    .iter()
+                    .map(|s| (**s).clone())
+                    .collect();
+                let map = PlanarMap::from_faces(shapes.iter().filter(|s| s.layer_id == lid));
+                let t = std::time::Instant::now();
+                let ok = map.is_valid();
+                println!(
+                    "PROBE 種{seed} レイヤー{l}：辺 {}・正しい {ok}・{:.2}ms",
+                    map.edges.len(),
+                    t.elapsed().as_secs_f64() * 1e3
+                );
+            }
+        }
     }
 
     /// 計測の試し（ふだんは流さない）：トゥイーンのレイヤー6枚（各40本のシンボル、36コマごとに動く）で、

@@ -15,7 +15,6 @@ mod timeline_ui;
 mod tool_paint;
 mod tool_select;
 mod tool_transform;
-mod vector_boolean;
 mod vector_engine;
 mod vector_stroke;
 mod video_export;

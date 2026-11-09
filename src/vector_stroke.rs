@@ -268,11 +268,6 @@ fn estimate_brush_radius_from_shape_rings(shape_rings: &[Vec<[f64; 2]>]) -> f64 
     r.clamp(0.3, 80.0)
 }
 
-pub(crate) fn estimate_brush_radius_from_ring(ring: &[Point]) -> f64 {
-    let f64_ring: Vec<[f64; 2]> = ring.iter().map(|p| [p.x, p.y]).collect();
-    estimate_brush_radius_from_shape_rings(&[f64_ring])
-}
-
 /// スクリーン空間の閉じたポリゴン頂点リング `ring` の全体の図形・線幅・角の丸みを損なわずに、
 /// ブラシ半径 `r_est` とリング自身の周長半径に応じたスケール不変パラメータでピクセルジャギーだけを整え、
 /// 単一の `QuadBez` で近似できる中間アンカーを統合して最小アンカー数の `Contour` を構築する。

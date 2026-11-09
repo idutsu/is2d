@@ -10,7 +10,6 @@ use crate::planar_map::{ReshapeBase, ScopeMaps};
 pub(crate) use crate::symbol::Document;
 use crate::symbol::{EditPath, SymbolDef, SymbolEvalCtx, SymbolEvalState};
 use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
-use crate::vector_boolean::merge_shapes_into_canvas;
 use crate::vector_engine::{rects_overlap, FillShape, SyncCache};
 
 pub(crate) const MAX_UNDO_HISTORY: usize = 100;
@@ -189,7 +188,6 @@ impl HoverTarget {
 pub(crate) enum SelectDragState {
     /// 地図の、形が `orig_seg` の辺を引っぱる
     PullEdge {
-        shape_id: ShapeId,
         layer_id: LayerId,
         group_path: Vec<u64>,
         base: Arc<ReshapeBase>,
@@ -201,7 +199,6 @@ pub(crate) enum SelectDragState {
     },
     /// 地図の頂点 `node` を動かす
     MoveVertex {
-        shape_id: ShapeId,
         layer_id: LayerId,
         group_path: Vec<u64>,
         base: Arc<ReshapeBase>,
@@ -3491,15 +3488,21 @@ pub(crate) fn topmost_layer_id_for_indices(
 pub(crate) fn focus_active_layer_to_shape_by_id(tab: &mut Tab, shape_id: ShapeId) {
     tab.view.inspect_timeline_frame = false;
     if let Some(lid) = tab.scene().shape_by_id(shape_id).map(|s| s.layer_id) {
-        let info = {
-            let tl = tab.active_timeline();
-            tl.layer_index_by_id(lid)
-                .map(|l_idx| (l_idx, tl.current_frame))
-        };
-        if let Some((l_idx, cf)) = info {
-            tab.set_active_layer(l_idx);
-            tab.set_active_cell_selection(Some(TimelineCellSelection::single(l_idx, cf)));
-        }
+        focus_active_layer_by_id(tab, lid);
+    }
+}
+
+/// レイヤー `lid` へ編集中タイムラインの `active_layer` およびタイムライン選択状態を追従させる
+pub(crate) fn focus_active_layer_by_id(tab: &mut Tab, lid: LayerId) {
+    tab.view.inspect_timeline_frame = false;
+    let info = {
+        let tl = tab.active_timeline();
+        tl.layer_index_by_id(lid)
+            .map(|l_idx| (l_idx, tl.current_frame))
+    };
+    if let Some((l_idx, cf)) = info {
+        tab.set_active_layer(l_idx);
+        tab.set_active_cell_selection(Some(TimelineCellSelection::single(l_idx, cf)));
     }
 }
 
@@ -3619,12 +3622,14 @@ pub(crate) fn draw_registration_cross(
 }
 
 /// 片 `pieces` を `base_shapes` に結合する。レイヤー・階層ごとに、片を1つの地図にして、そのレイヤーの生の図形の地図の上に置く
-/// （片どうしの境目は1本の辺のまま。変わった図形だけを差し替える）。まとめて置けないときは、同じ地図へ片を1つずつ塗り、
-/// それもできない（地図が壊れているなど）ときは、そのレイヤーの片をまとめて今までのやり方で結合する。
-/// 置く計算はレイヤーをまたがないので、2つ以上あれば同時に計算する
-fn merge_pieces_layer_by_layer(base_shapes: &mut Vec<FillShape>, pieces: Vec<FillShape>) {
+/// （片どうしの境目は1本の辺のまま。変わった図形だけを差し替える。片どうしが重なるときは、片を並びの順に塗り重ねた地図にする：
+/// `place_pieces_diff`）。置く計算はレイヤーをまたがないので、2つ以上あれば同時に計算する
+pub(crate) fn merge_pieces_layer_by_layer(
+    base_shapes: &mut Vec<FillShape>,
+    pieces: Vec<FillShape>,
+) {
     use crate::planar_map::{
-        apply_shape_diff, paint_pieces_diff, per_layer_parallel, place_pieces_diff, MapEditOutcome,
+        apply_shape_diff, per_layer_parallel, place_pieces_diff, MapEditOutcome,
     };
     let mut parts: Vec<(LayerId, Vec<u64>, Vec<FillShape>)> = Vec::new();
     for p in pieces {
@@ -3646,16 +3651,9 @@ fn merge_pieces_layer_by_layer(base_shapes: &mut Vec<FillShape>, pieces: Vec<Fil
                 apply_shape_diff(base_shapes, &removed, added, layer_id, &group_path)
             }
             MapEditOutcome::Unchanged => {}
-            // まとめて置けない（片どうしが重なる・まとめて重ねると安全網で止まる）：同じ地図へ片を下から1つずつ塗る。
-            // それもできない（地図が壊れているなど）ときは、片をまとめて今までのやり方で結合する
+            // 格子に置けない所（±65,536px の外）では重ねられない。片を失わないよう、重ねずにそのまま足す
             MapEditOutcome::Refused => {
-                match paint_pieces_diff(base_shapes, layer_id, &group_path, &layer_pieces) {
-                    MapEditOutcome::Changed(removed, added) => {
-                        apply_shape_diff(base_shapes, &removed, added, layer_id, &group_path)
-                    }
-                    MapEditOutcome::Unchanged => {}
-                    MapEditOutcome::Refused => merge_shapes_into_canvas(base_shapes, layer_pieces),
-                }
+                apply_shape_diff(base_shapes, &[], layer_pieces, layer_id, &group_path)
             }
         }
     }
