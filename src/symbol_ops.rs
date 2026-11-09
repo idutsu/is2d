@@ -39,6 +39,10 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     let selection = tab.session.selection.clone();
     let depth = tab.session.editing_group_path.len();
     let layer_ids = editable_layer_ids(tab);
+    // `edit_layers` の図形はステージ座標。新しいシンボルの中身は、今いるシンボルの座標に戻してから、
+    // その外接矩形の中心が原点になるように置く（中に入ったインスタンスは逆行列を持つ：`enter_symbol_timeline`）
+    let world = tab.session.edit_path.world_xform();
+    let to_parent = world.inverse();
     let mut local_shapes = Vec::new();
 
     edit_layers(tab, &layer_ids, |edit| {
@@ -59,32 +63,41 @@ pub(crate) fn prepare_convert_selection_to_symbol(
             return;
         }
 
-        let mut bbox = edit.shapes[valid_indices[0]].bounding_box();
-        for &idx in &valid_indices[1..] {
-            bbox = bbox.union(edit.shapes[idx].bounding_box());
-        }
-        let center = Point::new((bbox.x0 + bbox.x1) * 0.5, (bbox.y0 + bbox.y1) * 0.5);
-
-        let to_local = KVec2::new(-center.x, -center.y);
-        local_shapes.reserve(valid_indices.len());
-        for &idx in &valid_indices {
-            let mut local_s = edit.shapes[idx].clone();
-            local_s.layer_id = 1;
-            local_s.group_path = local_s.group_path.get(depth..).unwrap_or_default().to_vec();
-            if local_s
-                .symbol_instance
-                .is_some_and(|b| !local_s.group_path.contains(&b.instance_gid))
-            {
-                local_s.symbol_instance = None;
-            }
-            local_s.translate(to_local);
+        let parent_shapes: Vec<_> = valid_indices
+            .iter()
+            .map(|&idx| {
+                let mut local_s = edit.shapes[idx].clone();
+                local_s.layer_id = 1;
+                local_s.group_path = local_s.group_path.get(depth..).unwrap_or_default().to_vec();
+                if local_s
+                    .symbol_instance
+                    .is_some_and(|b| !local_s.group_path.contains(&b.instance_gid))
+                {
+                    local_s.symbol_instance = None;
+                }
+                if world != Affine::IDENTITY {
+                    local_s.transform(to_parent);
+                }
+                local_s
+            })
+            .collect();
+        let bbox = parent_shapes[1..]
+            .iter()
+            .fold(parent_shapes[0].bounding_box(), |acc, s| {
+                acc.union(s.bounding_box())
+            });
+        let center = bbox.center();
+        local_shapes.reserve(parent_shapes.len());
+        for mut local_s in parent_shapes {
+            local_s.translate(-center.to_vec2());
             local_shapes.push(local_s);
         }
 
+        // インスタンスはステージ座標で置き、書き戻しで今いるシンボルの座標（`translate(center)`）になる
         let binding = SymbolInstanceBinding::new(
             inst_gid,
             sym_id,
-            Affine::translate(KVec2::new(center.x, center.y)),
+            world * Affine::translate(center.to_vec2()),
         );
         let insert_limit = edit.scope_insert_index();
         let mut unselected = Vec::with_capacity(edit.shapes.len());

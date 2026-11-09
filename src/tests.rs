@@ -464,6 +464,34 @@ fn test_thin_2px_stroke_and_su_loop_keep_round_caps_and_uniform_width() {
     }
 }
 
+/// 1回のドラッグで往復の多いジグザグを描いても、なぞった点がすべて塗られる（中心線の間引きが途中で打ち切らない）
+#[test]
+fn long_zigzag_stroke_covers_every_input_point() {
+    let mut points = Vec::new();
+    for k in 0..100 {
+        let y = 20.0 + k as f64 * 3.0;
+        for i in 0..=20 {
+            let x = if k % 2 == 0 { i } else { 20 - i } as f64 * 6.0 + 20.0;
+            points.push(Point::new(x, y));
+        }
+    }
+    let mut app = Is2dApp::default();
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: points.clone(),
+            radius: 4.0,
+            color: Color32::BLACK,
+        }],
+    );
+    let shapes = scene_summary(&app).shapes.clone();
+    let missing = points
+        .iter()
+        .filter(|&&p| !shapes.iter().any(|s| s.contains_point(p)))
+        .count();
+    assert_eq!(missing, 0, "塗られなかった点 {missing} / {}", points.len());
+}
+
 #[test]
 fn test_pull_edge_across_circle_splits_into_two_shapes() {
     let center = Point::new(200.0, 200.0);
@@ -1614,7 +1642,7 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
             Vec2::ZERO,
             false,
             kurbo::Affine::IDENTITY,
-            &app.doc.library,
+            crate::symbol::SymbolEvalCtx::new(&app.doc.library),
         )
         .unwrap();
     let m2 = app
@@ -1627,7 +1655,7 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
             Vec2::ZERO,
             false,
             kurbo::Affine::IDENTITY,
-            &app.doc.library,
+            crate::symbol::SymbolEvalCtx::new(&app.doc.library),
         )
         .unwrap();
     assert!(!m1.is_empty());
@@ -2335,7 +2363,7 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
             Vec2::ZERO,
             false,
             kurbo::Affine::IDENTITY,
-            &app.doc.library,
+            crate::symbol::SymbolEvalCtx::new(&app.doc.library),
         )
         .is_none());
 
@@ -3116,7 +3144,7 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
             Vec2::ZERO,
             false,
             kurbo::Affine::IDENTITY,
-            &grp_sym_app.doc.library,
+            crate::symbol::SymbolEvalCtx::new(&grp_sym_app.doc.library),
         )
         .unwrap();
     let m_scr_2 = grp_sym_app
@@ -3129,7 +3157,7 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
             Vec2::ZERO,
             false,
             kurbo::Affine::IDENTITY,
-            &grp_sym_app.doc.library,
+            crate::symbol::SymbolEvalCtx::new(&grp_sym_app.doc.library),
         )
         .unwrap();
     assert!(
@@ -3148,7 +3176,7 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
             Vec2::new(50.0, -30.0),
             false,
             kurbo::Affine::IDENTITY,
-            &grp_sym_app.doc.library,
+            crate::symbol::SymbolEvalCtx::new(&grp_sym_app.doc.library),
         )
         .unwrap();
     assert!(
@@ -3504,7 +3532,7 @@ fn test_tween_lru_cache_no_thrashing() {
                     Vec2::ZERO,
                     false,
                     kurbo::Affine::IDENTITY,
-                    &lru_tween_app.doc.library,
+                    crate::symbol::SymbolEvalCtx::new(&lru_tween_app.doc.library),
                 )
                 .unwrap()
         })
@@ -3520,7 +3548,7 @@ fn test_tween_lru_cache_no_thrashing() {
                 Vec2::ZERO,
                 false,
                 kurbo::Affine::IDENTITY,
-                &lru_tween_app.doc.library,
+                crate::symbol::SymbolEvalCtx::new(&lru_tween_app.doc.library),
             )
             .unwrap();
         assert!(
@@ -4803,9 +4831,13 @@ fn test_step_frame_loop_mode_and_total_frames_over_600() {
 
 #[test]
 fn test_viewport_fit_stage_to_window() {
-    let mut app = Is2dApp::default();
-    app.view.last_canvas_rect =
-        eframe::egui::Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1600.0, 900.0));
+    let mut app = Is2dApp {
+        canvas_rect: eframe::egui::Rect::from_min_max(
+            Pos2::new(0.0, 0.0),
+            Pos2::new(1600.0, 900.0),
+        ),
+        ..Default::default()
+    };
     app.doc.stage_size = Vec2::new(800.0, 450.0);
     app.fit_stage_to_window();
     assert!(
@@ -4813,7 +4845,7 @@ fn test_viewport_fit_stage_to_window() {
         "1600x900 キャンバスに対して 800x450 ステージがマージン付きでフィット拡大されること: zoom={}",
         app.view.zoom
     );
-    let center = app.view.last_canvas_rect.center();
+    let center = app.canvas_rect.center();
     let world_before = app.view.screen_to_world(center);
     app.view.zoom_around_screen_pos(center, 1.5);
     let world_after = app.view.screen_to_world(center);
@@ -5624,7 +5656,7 @@ fn test_egui_select_and_transform_tool_raw_input_interactions() {
         Vec2::new(1280.0, 820.0),
     ));
 
-    // 初回フレームで viewport.last_canvas_rect を確定させる
+    // 初回フレームで app.canvas_rect を確定させる
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
@@ -7248,7 +7280,7 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
     );
 
     // 1. 中ボタンドラッグによるパン操作 & ホイールズームの RawInput 検証
-    let canvas_center = app.view.last_canvas_rect.center();
+    let canvas_center = app.canvas_rect.center();
     let pan_before = app.view.pan;
     let pan_to = canvas_center + Vec2::new(40.0, 25.0);
     let _ = ctx.run(
@@ -10859,6 +10891,101 @@ fn test_collapsed_symbol_instance_blocks_enter_and_timeline_mut_bumps_revision()
     );
 }
 
+/// 回転・拡大したインスタンスの中で F8 を押すと、新しいシンボルの中身は今いるシンボルの座標（向き・大きさ）のままで、
+/// 新しいインスタンスは平行移動だけを持つ。画面上の絵は変わらない
+#[test]
+fn convert_to_symbol_inside_rotated_instance_keeps_local_coordinates() {
+    use crate::doc_actions::Action;
+
+    let mut app = Is2dApp::default();
+    run(
+        &mut app,
+        &[Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(200.0, 100.0)],
+            radius: 16.0,
+            color: Color32::from_rgb(220, 60, 60),
+        }],
+    );
+    let first = app.scene().get(0).unwrap().clone();
+    app.session.selection.clear();
+    app.session.selection.insert_shape(&first);
+    run(&mut app, &[Action::ConvertToSymbol]);
+    let outer_id = app.doc.library[0].id;
+    let local_box = |app: &Is2dApp, sym_id: u64| {
+        let def = app.doc.find_symbol(sym_id).unwrap();
+        let cel = def.timeline.layers[0].cel_at(0).unwrap();
+        cel.shapes[1..]
+            .iter()
+            .fold(cel.shapes[0].bounding_box(), |acc, s| {
+                acc.union(s.bounding_box())
+            })
+    };
+    let outer_box = local_box(&app, outer_id);
+
+    let xform = kurbo::Affine::translate(KVec2::new(300.0, 200.0))
+        * kurbo::Affine::rotate(1.0)
+        * kurbo::Affine::scale(1.5);
+    app.tabs[app.active].with_active_timeline_mut(|tl, _| {
+        tl.layers[0].keyframe_mut(0).cel.instances_mut()[0]
+            .binding
+            .xform = xform;
+    });
+    let binding = app.scene().get(0).unwrap().symbol_instance.unwrap();
+    assert_eq!(binding.xform, xform);
+    assert!(symbol_ops::enter_symbol_timeline(
+        &mut app.tabs[app.active],
+        binding
+    ));
+    let stage_box_before = app.scene().get(0).unwrap().bounding_box();
+
+    let inner = app.scene().get(0).unwrap().clone();
+    app.session.selection.clear();
+    app.session.selection.insert_shape(&inner);
+    run(&mut app, &[Action::ConvertToSymbol]);
+    let new_id = app.doc.library.last().unwrap().id;
+    assert_ne!(new_id, outer_id);
+
+    // 中身の大きさは、外のシンボルの中での大きさのまま（ステージ上の 1.5 倍・回転した大きさではない）
+    let new_box = local_box(&app, new_id);
+    assert!(
+        (new_box.width() - outer_box.width()).abs() < 1e-6,
+        "{new_box:?} / {outer_box:?}"
+    );
+    assert!(
+        (new_box.height() - outer_box.height()).abs() < 1e-6,
+        "{new_box:?} / {outer_box:?}"
+    );
+    assert!(
+        new_box.center().to_vec2().hypot() < 1e-6,
+        "中身の中心が原点: {new_box:?}"
+    );
+
+    // 外のシンボルの中の新しいインスタンスは、平行移動だけ
+    let outer_def = app.doc.find_symbol(outer_id).unwrap();
+    let inst = outer_def
+        .timeline
+        .instances()
+        .find(|i| i.binding.symbol_id == new_id)
+        .unwrap();
+    let [a, b, c, d, ..] = inst.binding.xform.as_coeffs();
+    assert!((a - 1.0).abs() < 1e-9 && b.abs() < 1e-9 && c.abs() < 1e-9 && (d - 1.0).abs() < 1e-9);
+
+    // 画面上の絵は変わらない
+    let stage_box_after = app.scene().get(0).unwrap().bounding_box();
+    for (p, q) in [
+        (stage_box_before.origin(), stage_box_after.origin()),
+        (
+            Point::new(stage_box_before.x1, stage_box_before.y1),
+            Point::new(stage_box_after.x1, stage_box_after.y1),
+        ),
+    ] {
+        assert!(
+            (p - q).hypot() < 1e-6,
+            "{stage_box_before:?} / {stage_box_after:?}"
+        );
+    }
+}
+
 #[test]
 fn test_g5_1_save_and_reopen_60_brush_strokes_f6_480_frames_over_100mb() {
     use crate::doc_actions::Action;
@@ -12535,7 +12662,7 @@ fn test_g6_1_resolved_cel_cache_byte_limit_and_2min_playback_memory() {
             Vec2::ZERO,
             false,
             kurbo::Affine::IDENTITY,
-            &app.doc.library,
+            crate::symbol::SymbolEvalCtx::new(&app.doc.library),
         )
         .unwrap();
     let pure_m2 = app
@@ -12548,7 +12675,7 @@ fn test_g6_1_resolved_cel_cache_byte_limit_and_2min_playback_memory() {
             Vec2::ZERO,
             false,
             kurbo::Affine::IDENTITY,
-            &app.doc.library,
+            crate::symbol::SymbolEvalCtx::new(&app.doc.library),
         )
         .unwrap();
     assert!(
@@ -12630,7 +12757,7 @@ fn test_g6_1_resolved_cel_cache_byte_limit_and_2min_playback_memory() {
             Vec2::ZERO,
             false,
             kurbo::Affine::IDENTITY,
-            &app.doc.library,
+            crate::symbol::SymbolEvalCtx::new(&app.doc.library),
         );
         assert!(mesh.is_some());
     }
@@ -22097,10 +22224,10 @@ mod map_overlay {
         for seed in seeds {
             let base = native_scene(seed, 48);
             let (faces, _) = base.to_faces_checked(1, &[]);
-            for k in 0..faces.len().min(nfaces) {
+            for (k, face) in faces.iter().enumerate().take(nfaces) {
                 for (oi, &o) in offsets.iter().enumerate() {
                     let d = if oi % 2 == 0 { (o, 0.0) } else { (0.0, o) };
-                    let piece = PlanarMap::from_faces(std::iter::once(&faces[k]));
+                    let piece = PlanarMap::from_faces(std::iter::once(face));
                     let t = std::time::Instant::now();
                     let rest = base.overlay(MapInput::Map(&piece), MapRule::Paint(None));
                     let moved = piece.transformed(kurbo::Affine::translate(d));
@@ -22968,6 +23095,84 @@ mod map_overlay {
         }
     }
 
+    /// 全部を `Alt` 複製してずらして確定する、をくり返しても、地図は壊れず、直線の区間がたまらない
+    /// （重ねた所の曲線は、元の曲線の一部のまま残る。直線に戻るのは、ほかの辺や頂点がすぐ近くにある所だけ。
+    /// 前の作りでは、当て直せない辺を丸ごと細かい直線にしたので、3回目で区間の6割が 0.5px 未満の直線になった）
+    #[test]
+    fn repeated_alt_duplicate_keeps_curves() {
+        let stage = (Point::new(-410.0, -235.0), Point::new(410.0, 235.0));
+        let mut app = dense_scene_app(7);
+        let straight = |app: &Is2dApp| {
+            let mut n = 0usize;
+            for l in 0..3 {
+                for s in app.doc.root.layers[l].keyframes[0].cel.shapes.iter() {
+                    for c in s.contours() {
+                        n += c
+                            .segments
+                            .iter()
+                            .filter(|q| q.p1 == q.p0.midpoint(q.p2))
+                            .count();
+                    }
+                }
+            }
+            n
+        };
+        let stats = |app: &Is2dApp| {
+            let (mut total, mut short) = (0usize, 0usize);
+            for l in 0..3 {
+                for s in app.doc.root.layers[l].keyframes[0].cel.shapes.iter() {
+                    for c in s.contours() {
+                        for q in c.segments.iter() {
+                            total += 1;
+                            if (q.p2 - q.p0).hypot() < 0.5 {
+                                short += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            (total, short)
+        };
+        let first = stats(&app);
+        eprintln!(
+            "はじめ：区間 {}（弦 0.5px 未満 {}、直線 {}）",
+            first.0,
+            first.1,
+            straight(&app)
+        );
+        for k in 0..3 {
+            select_ops::apply_marquee_selection(&mut app, stage.0, stage.1, false);
+            assert!(doc_actions::apply(
+                &mut app,
+                doc_actions::Action::FinishMoveSelectionDrag {
+                    total_delta: KVec2::new(6.0, 4.0),
+                    alt_duplicate: true
+                }
+            ));
+            let t = std::time::Instant::now();
+            canvas_tool::clear_selection(&mut app);
+            eprintln!(
+                "Alt 複製 {} 回目の確定 {:.1}ms",
+                k + 1,
+                t.elapsed().as_secs_f64() * 1e3
+            );
+            for l in 0..3 {
+                assert!(layer_map_valid(&app, l), "{} 回目、レイヤー {l}", k + 1);
+            }
+            let (total, short) = stats(&app);
+            let n_straight = straight(&app);
+            eprintln!(
+                "Alt 複製 {} 回目：区間 {total}（弦 0.5px 未満 {short}、直線 {n_straight}）",
+                k + 1
+            );
+            assert!(
+                n_straight * 100 < total,
+                "{} 回目：区間 {total}・直線 {n_straight}",
+                k + 1
+            );
+        }
+    }
+
     /// 強さ・速さの試し（ふだんは流さない）：レビューと同じ条件で、矩形選択・動かして離す・`Alt` 複製・貼り付けの時間を測る。
     /// 結果の各レイヤーの地図が壊れていないかも見る
     #[test]
@@ -23061,5 +23266,110 @@ mod map_overlay {
                 "壊れた"
             }
         );
+    }
+
+    /// 計測の試し（ふだんは流さない）：トゥイーンのレイヤー6枚（各40本のシンボル、36コマごとに動く）で、
+    /// オニオンスキン前後10コマを付けて24コマずつスクラブしたときの、オニオンスキンを作る時間。
+    /// シンボルの中身のメモを使う（今の作り）と、毎回捨てる（前の作り）を比べる
+    #[test]
+    #[ignore]
+    fn probe_onion_skin_tween_scrub() {
+        use doc_actions::Action;
+        let mut app = Is2dApp::default();
+        let mut rng = fastrand::Rng::with_seed(5);
+        let frames = 288;
+        for l in 0..6 {
+            if l > 0 {
+                doc_actions::timeline_add_layer(&mut app);
+            }
+            let layer_idx = app.doc.root.active_layer;
+            let lid = app.doc.root.layers[layer_idx].id;
+            doc_actions::switch_to_layer_and_frame(&mut app, layer_idx, 0);
+            for _ in 0..40 {
+                let c = Point::new(rng.f64() * 200.0 + 300.0, rng.f64() * 200.0 + 200.0);
+                let pts: Vec<Point> = (0..12)
+                    .map(|i| c + KVec2::new(i as f64 * 6.0, (i as f64 * 0.7).sin() * 20.0))
+                    .collect();
+                let color = Color32::from_rgb(rng.u8(..), rng.u8(..), rng.u8(..));
+                run(
+                    &mut app,
+                    &[Action::PaintStroke {
+                        points: pts,
+                        radius: 3.0 + rng.f32() * 5.0,
+                        color,
+                    }],
+                );
+            }
+            let idx: Vec<usize> = (0..app.scene().len())
+                .filter(|&i| app.scene().get(i).unwrap().layer_id == lid)
+                .collect();
+            app.session.set_selected_indices(idx);
+            assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
+            assert!(doc_actions::timeline_toggle_tween(&mut app));
+            while app.doc.root.total_frames < frames {
+                assert!(doc_actions::timeline_extend_frame(&mut app));
+            }
+            for k in 1..frames / 36 {
+                doc_actions::switch_to_layer_and_frame(&mut app, layer_idx, k * 36);
+                assert!(doc_actions::timeline_insert_keyframe(&mut app, true));
+                let idx: Vec<usize> = (0..app.scene().len())
+                    .filter(|&i| app.scene().get(i).unwrap().layer_id == lid)
+                    .collect();
+                app.session.set_selected_indices(idx);
+                doc_actions::nudge_selected_shapes(
+                    &mut app,
+                    KVec2::new(rng.f64() * 60.0 - 30.0, rng.f64() * 60.0 - 30.0),
+                );
+                canvas_tool::clear_selection(&mut app);
+            }
+        }
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
+        for (span, step) in [(2usize, 1usize), (5, 4), (10, 1), (10, 24)] {
+            app.view.onion_prev_frames = span;
+            app.view.onion_next_frames = span;
+            for keep_memo in [false, true] {
+                let mut times = Vec::new();
+                app.clear_onion_skin_cache();
+                *app.session.symbol_memo.lock() = Default::default();
+                for f in (0..frames).step_by(step) {
+                    doc_actions::switch_to_layer_and_frame(&mut app, 0, f);
+                    if !keep_memo {
+                        *app.session.symbol_memo.lock() = Default::default();
+                    }
+                    let t = std::time::Instant::now();
+                    app.start_symbol_eval_pass();
+                    app.retain_active_onion_frames();
+                    let tl = app.active_timeline();
+                    let (lo, hi) = (f.saturating_sub(span), (f + span).min(tl.total_frames - 1));
+                    let n_layers = tl.layers.len();
+                    for g in lo..=hi {
+                        if g == f {
+                            continue;
+                        }
+                        for layer_idx in 0..n_layers {
+                            let _ = app.cached_onion_cel_screen_mesh(
+                                layer_idx,
+                                g,
+                                1.0,
+                                eframe::egui::Vec2::ZERO,
+                                ([0, 0, 0], 80),
+                            );
+                        }
+                    }
+                    times.push(ms(t));
+                }
+                let avg = times.iter().sum::<f64>() / times.len() as f64;
+                let max = times.iter().copied().fold(0.0, f64::max);
+                println!(
+                    "前後{span}コマ・{step}コマずつ・{}: 平均 {avg:.2}ms・最大 {max:.2}ms（{} 回）",
+                    if keep_memo {
+                        "メモを使う"
+                    } else {
+                        "1回ごとに捨てる"
+                    },
+                    times.len()
+                );
+            }
+        }
     }
 }

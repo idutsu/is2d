@@ -65,7 +65,7 @@ pub(crate) fn generate_brush_outline_at_zoom(
         let mut keep = vec![false; clean.len()];
         keep[0] = true;
         keep[last] = true;
-        rdp_recursive_bounded(&clean, 0, last, thin_tol, &mut keep, 0);
+        rdp_keep(&clean, 0, last, thin_tol, &mut keep);
         clean = clean
             .iter()
             .zip(&keep)
@@ -1510,35 +1510,29 @@ fn max_deviation_from_chord(pts: &[Point]) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
-const MAX_RDP_RECURSION_DEPTH: usize = 64;
-
-pub(crate) fn rdp_recursive_bounded(
+/// 点の列 `all_pts[start..=end]` を、両端を結ぶ線から `epsilon` 以内のずれで間引き（Ramer–Douglas–Peucker）、
+/// 残す点の `keep` を立てる。分ける区間を積んで1つずつ処理するので、点がいくつあっても途中で打ち切らない
+/// （積む区間は、残す点の数を超えない）
+pub(crate) fn rdp_keep(
     all_pts: &[Point],
     start: usize,
     end: usize,
     epsilon: f64,
     keep: &mut [bool],
-    depth: usize,
 ) {
-    if end <= start + 1 || depth >= MAX_RDP_RECURSION_DEPTH {
-        return;
-    }
-    let a = all_pts[start];
-    let b = all_pts[end];
-
-    let mut max_dist = -1.0;
-    let mut split_idx = start;
-    for (i, &pt) in all_pts.iter().enumerate().take(end).skip(start + 1) {
-        let d = point_to_segment_dist(pt, a, b);
-        if d > max_dist {
-            max_dist = d;
-            split_idx = i;
+    let mut spans = vec![(start, end)];
+    while let Some((s, e)) = spans.pop() {
+        if e <= s + 1 {
+            continue;
         }
-    }
-
-    if max_dist > epsilon {
-        keep[split_idx] = true;
-        rdp_recursive_bounded(all_pts, start, split_idx, epsilon, keep, depth + 1);
-        rdp_recursive_bounded(all_pts, split_idx, end, epsilon, keep, depth + 1);
+        let (a, b) = (all_pts[s], all_pts[e]);
+        let (split, max_dist) = (s + 1..e)
+            .map(|i| (i, point_to_segment_dist(all_pts[i], a, b)))
+            .fold((s, -1.0), |best, c| if c.1 > best.1 { c } else { best });
+        if max_dist > epsilon {
+            keep[split] = true;
+            spans.push((s, split));
+            spans.push((split, e));
+        }
     }
 }

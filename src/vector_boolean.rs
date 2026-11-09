@@ -15,8 +15,8 @@ use crate::{
         union_bounding_boxes, Contour, FillShape,
     },
     vector_stroke::{
-        estimate_brush_radius_from_ring, fit_quad_control_point_with_arc_lengths,
-        rdp_recursive_bounded, smooth_ring_to_quad_contour,
+        estimate_brush_radius_from_ring, fit_quad_control_point_with_arc_lengths, rdp_keep,
+        smooth_ring_to_quad_contour,
     },
 };
 
@@ -1335,7 +1335,7 @@ fn refit_open_polyline_to_quads(pts: &[Point], epsilon: f64) -> Vec<QuadBez> {
     let mut seg_start = 0;
     for i in 1..n {
         if keep[i] {
-            rdp_recursive_bounded(pts, seg_start, i, epsilon, &mut keep, 0);
+            rdp_keep(pts, seg_start, i, epsilon, &mut keep);
             seg_start = i;
         }
     }

@@ -132,6 +132,9 @@ pub(crate) enum UiAction {
     RestoreRecovered,
     DiscardRecovered,
 
+    // 表示（キャンバス領域を知っているアプリ側で行う）
+    FitStageToWindow,
+
     // 文書・編集アクション（`doc_actions::apply` へそのまま渡す）
     Doc(Action),
 }
@@ -154,7 +157,7 @@ pub(crate) fn draw_top_menu_bar(
         egui::menu::bar(ui, |ui| {
             draw_file_menu(actions, ui);
             draw_edit_menu(tab, clipboard, actions, ui);
-            draw_view_menu(tab, ui);
+            draw_view_menu(tab, actions, ui);
         });
     });
 }
@@ -260,14 +263,14 @@ fn draw_edit_menu(
     });
 }
 
-fn draw_view_menu(tab: &mut Tab, ui: &mut egui::Ui) {
+fn draw_view_menu(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     ui.menu_button("表示", |ui| {
         ui.set_min_width(220.0);
         if menu_action_button(ui, true, "100%表示", &format!("{MOD_KEY}+1")) {
             tab.view.reset_view();
         }
         if menu_action_button(ui, true, "ウィンドウに合わせる", &format!("{MOD_KEY}+2")) {
-            tab.fit_stage_to_window();
+            actions.push(UiAction::FitStageToWindow);
         }
 
         ui.separator();
@@ -1119,7 +1122,7 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
         ))
         .clicked()
     {
-        tab.fit_stage_to_window();
+        actions.push(UiAction::FitStageToWindow);
     }
 
     ui.add_space(6.0);
@@ -1795,6 +1798,7 @@ pub(crate) fn draw_canvas_contents(
     let artwork_painter =
         tab.view
             .artwork_painter(painter, painter.clip_rect(), stage_size, in_symbol_edit);
+    tab.start_symbol_eval_pass();
 
     // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画（ルートでは何も返さず、キャッシュが空になる）
     if let Some(mesh) = tab.cached_backdrop_screen_mesh(zoom, pan) {
@@ -1833,15 +1837,17 @@ pub(crate) fn draw_canvas_contents(
             continue;
         }
         if timeline_ui.is_playing || is_locked {
-            if let Some(mesh) = tl.resolved_cel_screen_mesh(
-                layer_idx,
-                curr_f,
-                zoom,
-                pan,
-                in_group_edit && !timeline_ui.is_playing,
-                world_xform,
-                &tab.doc.library,
-            ) {
+            if let Some(mesh) = tab.with_symbol_eval(|ctx| {
+                tl.resolved_cel_screen_mesh(
+                    layer_idx,
+                    curr_f,
+                    zoom,
+                    pan,
+                    in_group_edit && !timeline_ui.is_playing,
+                    world_xform,
+                    ctx,
+                )
+            }) {
                 artwork_painter.add(arc_mesh_to_shape(mesh));
             }
             continue;

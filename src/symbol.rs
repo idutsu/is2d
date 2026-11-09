@@ -129,9 +129,37 @@ pub(crate) const MAX_SYMBOL_NEST_DEPTH: usize = 8;
 
 type SymbolEvalMemoKey = (u64, usize, usize, usize);
 
+/// シンボルの中身を評価した結果（シンボルの座標の図形。画面に出すときはメッシュも持つ）のメモ。
+/// `SymbolEvalCtx::new` のものは1回の評価の間だけ使う。セッションが持つもの（`Session::symbol_memo`）は、
+/// 描くたびの評価（オニオンスキン・再生・ロック中のレイヤー）で使い回し、次の2つの決まりで捨てる
+/// - ライブラリのどれかのシンボルが変わったら（ID と世代番号の並びが変わったら）全部捨てる
+/// - 直前の1回の描画で使わなかったものは捨てる（持つのは、今の画面が使う分だけ）
 #[derive(Default)]
-struct SymbolEvalState {
+pub(crate) struct SymbolEvalState {
+    /// この回の描画で使ったもの
     memo: HashMap<SymbolEvalMemoKey, Arc<Vec<FillShape>>>,
+    /// 前の回の描画で使ったもの（この回でも使うと `memo` へ移す）
+    prev: HashMap<SymbolEvalMemoKey, Arc<Vec<FillShape>>>,
+    library_sig: Vec<(u64, u64)>,
+}
+
+impl SymbolEvalState {
+    /// 1回の描画の始めに呼ぶ
+    pub(crate) fn start_pass(&mut self, library: &[SymbolDef]) {
+        let same_library = self.library_sig.len() == library.len()
+            && self
+                .library_sig
+                .iter()
+                .zip(library)
+                .all(|(&(id, rev), s)| id == s.id && rev == s.revision);
+        if same_library {
+            self.prev = std::mem::take(&mut self.memo);
+        } else {
+            self.memo.clear();
+            self.prev.clear();
+            self.library_sig = library.iter().map(|s| (s.id, s.revision)).collect();
+        }
+    }
 }
 
 /// シンボル再帰評価時の設定・メモ化コンテキスト
@@ -146,12 +174,25 @@ pub(crate) struct SymbolEvalCtx<'a> {
 
 impl<'a> SymbolEvalCtx<'a> {
     pub(crate) fn new(library: &'a [SymbolDef]) -> Self {
+        Self::with_state(library, SymbolEvalState::default())
+    }
+
+    /// 前の評価のメモ `state` を引き継いで評価する（`SymbolEvalState::start_pass` を呼んでから渡す）
+    pub(crate) fn with_state(library: &'a [SymbolDef], state: SymbolEvalState) -> Self {
         Self {
             library,
             depth: 0,
             with_mesh: true,
-            state: std::rc::Rc::new(std::cell::RefCell::new(SymbolEvalState::default())),
+            state: std::rc::Rc::new(std::cell::RefCell::new(state)),
         }
+    }
+
+    /// 評価を終えて、メモを返す。写し（`clone`・`nested`）はすべて評価の中で作って捨てるので、ここでは自分だけが持っている
+    pub(crate) fn into_state(self) -> SymbolEvalState {
+        std::rc::Rc::try_unwrap(self.state)
+            .ok()
+            .expect("評価の写しが残っている")
+            .into_inner()
     }
 
     /// 画面表示用のメッシュを作らない（動画の書き出し用）
@@ -171,7 +212,13 @@ impl<'a> SymbolEvalCtx<'a> {
 
     #[inline]
     fn get_memo(&self, key: &SymbolEvalMemoKey) -> Option<Arc<Vec<FillShape>>> {
-        self.state.borrow().memo.get(key).cloned()
+        let mut state = self.state.borrow_mut();
+        if let Some(hit) = state.memo.get(key) {
+            return Some(Arc::clone(hit));
+        }
+        let hit = state.prev.remove(key)?;
+        state.memo.insert(*key, Arc::clone(&hit));
+        Some(hit)
     }
 
     #[inline]
@@ -463,7 +510,19 @@ impl SymbolDef {
     ) -> Arc<Vec<FillShape>> {
         let (frame_idx, child_eval_frame) =
             self.resolve_internal_frame(binding, kf_start_frame, current_frame);
-        let memo_key = (self.id, frame_idx, child_eval_frame, ctx.depth);
+        // `child_eval_frame`（子インスタンスを動かす時計）が結果を変えるのは、このフレームに子インスタンス
+        // （トゥイーンを含む）があるときだけ。無いときは鍵に入れない（親のコマが進んでも同じ中身を使い回す）
+        let uses_clock = self.timeline.layers.iter().any(|l| {
+            l.visible
+                && (l.interpolated_tween_binding_at(frame_idx).is_some()
+                    || l.cel_at(frame_idx).is_some_and(|c| !c.instances.is_empty()))
+        });
+        let memo_key = (
+            self.id,
+            frame_idx,
+            if uses_clock { child_eval_frame } else { 0 },
+            ctx.depth,
+        );
         if let Some(cached) = ctx.get_memo(&memo_key) {
             return cached;
         }
@@ -964,10 +1023,20 @@ impl Timeline {
         frame: usize,
         library: &[SymbolDef],
     ) -> Vec<FillShape> {
+        self.evaluate_layer_shapes_with(layer_idx, frame, SymbolEvalCtx::new(library))
+    }
+
+    /// `evaluate_layer_shapes_at` と同じ。シンボルの評価に `ctx` のメモを使う
+    pub(crate) fn evaluate_layer_shapes_with(
+        &self,
+        layer_idx: usize,
+        frame: usize,
+        ctx: SymbolEvalCtx<'_>,
+    ) -> Vec<FillShape> {
         let Some(layer) = self.layers.get(layer_idx) else {
             return Vec::new();
         };
-        layer.evaluate_shapes_at((frame, frame), layer.id, SymbolEvalCtx::new(library))
+        layer.evaluate_shapes_at((frame, frame), layer.id, ctx)
     }
 
     pub(crate) fn build_cel_world_batch_mesh(
@@ -975,7 +1044,7 @@ impl Timeline {
         layer_idx: usize,
         frame: usize,
         world_xform: Affine,
-        library: &[SymbolDef],
+        ctx: SymbolEvalCtx<'_>,
     ) -> Option<Mesh> {
         let layer = self.layers.get(layer_idx)?;
         let kf_idx = layer.keyframe_index_at(frame)?;
@@ -991,7 +1060,7 @@ impl Timeline {
             }
             return (!batch.is_empty()).then_some(batch);
         }
-        let mut resolved = self.evaluate_layer_shapes_at(layer_idx, frame, library);
+        let mut resolved = self.evaluate_layer_shapes_with(layer_idx, frame, ctx);
         if world_xform != Affine::IDENTITY {
             for s in &mut resolved {
                 s.transform_with_cached_mesh(world_xform);
@@ -1014,10 +1083,9 @@ impl Timeline {
         pan: Vec2,
         dim_backdrop: bool,
         world_xform: Affine,
-        library: &[SymbolDef],
+        ctx: SymbolEvalCtx<'_>,
     ) -> Option<Arc<Mesh>> {
-        let world_batch =
-            self.build_cel_world_batch_mesh(layer_idx, frame, world_xform, library)?;
+        let world_batch = self.build_cel_world_batch_mesh(layer_idx, frame, world_xform, ctx)?;
         Some(Arc::new(transform_mesh_to_screen(
             world_batch,
             zoom,

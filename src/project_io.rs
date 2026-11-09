@@ -90,16 +90,9 @@ pub(crate) fn prepare_active_tab_for_switch_or_save(ws: &mut impl ProjectWorkspa
     ws.tab_mut().view.pan_last_screen_pos = None;
 }
 
-/// アクティブタブのインデックスを `target_index` へ切り替え、キャンバス矩形を引き継ぎつつペーストオフセット等をリセットする
+/// アクティブタブのインデックスを `target_index` へ切り替え、ペーストオフセット等をリセットする
 fn activate_tab_index(ws: &mut impl ProjectWorkspace, target_index: usize) {
-    let last_canvas_rect = ws
-        .tabs()
-        .get(ws.active_index())
-        .map(|t| t.view.last_canvas_rect);
     ws.set_active_index(target_index);
-    if let Some(rect) = last_canvas_rect {
-        ws.tab_mut().view.last_canvas_rect = rect;
-    }
     ws.clipboard_mut().paste_count = 0;
     ws.clipboard_mut().paste_offset = kurbo::Vec2::ZERO;
     if !ws.tab().session.selection.is_empty() && ws.tool().select_sub_mode != SelectSubMode::Reshape
@@ -109,16 +102,14 @@ fn activate_tab_index(ws: &mut impl ProjectWorkspace, target_index: usize) {
 }
 
 /// アクティブタブのドキュメント・履歴・作業セッション・ビュー表示を一括初期化し、
-/// `last_canvas_rect` を引き継いだ上で現在フレームの土台キャッシュを構築する共通ヘルパー
+/// 現在フレームの土台キャッシュを構築する共通ヘルパー
 fn reset_active_document_state(tab: &mut Tab, doc: Document) {
-    let last_canvas_rect = tab.view.last_canvas_rect;
     let selected_library_symbol = doc.library.first().map(|s| s.id);
 
     tab.doc = doc;
     tab.history = UndoHistory::default();
     tab.session = Session::default();
     tab.view = View {
-        last_canvas_rect,
         selected_library_symbol,
         ..Default::default()
     };
@@ -328,7 +319,6 @@ fn close_tab_immediately(
 
     if close_index == ws.active_index() {
         prepare_active_tab_for_switch_or_save(ws);
-        let last_canvas_rect = ws.tab().view.last_canvas_rect;
 
         ws.tabs_mut().remove(close_index);
         let remaining_len = ws.tabs().len();
@@ -342,7 +332,6 @@ fn close_tab_immediately(
             close_index.min(remaining_len - 1)
         };
         activate_tab_index(ws, next_active);
-        ws.tab_mut().view.last_canvas_rect = last_canvas_rect;
         if let Some(c) = ctx {
             surrender_focused_widget(c);
         }

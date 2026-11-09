@@ -147,6 +147,8 @@ pub(crate) struct Is2dApp {
     pub(crate) video_export: Option<video_export::VideoExportJob>,
     /// 確認なし終了時の復旧ファイル書き出し・次回起動時の復元管理状態
     pub(crate) recovery: recovery::Recovery,
+    /// 直近フレームの中央キャンバス描画領域（スクリーン座標。画面に1つだけで、どのタブでも同じ）
+    pub(crate) canvas_rect: egui::Rect,
 }
 
 impl Default for Is2dApp {
@@ -166,7 +168,16 @@ impl Default for Is2dApp {
             allow_viewport_close: false,
             video_export: None,
             recovery: recovery::Recovery::default(),
+            canvas_rect: egui::Rect::from_min_max(Pos2::new(52.0, 30.0), Pos2::new(1000.0, 590.0)),
         }
+    }
+}
+
+impl Is2dApp {
+    /// 今のタブのステージ全体が、キャンバス領域に収まるようズーム・パンを調整する（「ウィンドウに合わせる」）
+    pub(crate) fn fit_stage_to_window(&mut self) {
+        let (stage_size, rect) = (self.tab().doc.stage_size, self.canvas_rect);
+        self.tab_mut().view.fit_stage_to_window(stage_size, rect);
     }
 }
 
@@ -405,6 +416,7 @@ impl Is2dApp {
         }
         match action {
             UiAction::NewProject => project_io::new_project(self, ctx),
+            UiAction::FitStageToWindow => self.fit_stage_to_window(),
             UiAction::OpenProjectDialog => project_io::open_project_dialog(self, ctx),
             UiAction::SaveProject => project_io::save_project(self),
             UiAction::SaveProjectAsDialog => project_io::save_project_as_dialog(self),
@@ -683,8 +695,7 @@ impl Is2dApp {
         {
             self.tab_mut().view.reset_view();
         } else if cmd && key_pressed_no_repeat(i, Key::Num2) {
-            let stage_size = self.tab().doc.stage_size;
-            self.tab_mut().view.fit_stage_to_window(stage_size);
+            self.fit_stage_to_window();
         } else if cmd && key_pressed_no_repeat(i, Key::Num3) {
             let next = !self.tab().view.clip_outside_stage;
             self.tab_mut().view.clip_outside_stage = next;
@@ -696,13 +707,13 @@ impl Is2dApp {
             let center = i
                 .pointer
                 .hover_pos()
-                .unwrap_or_else(|| self.tab().view.last_canvas_rect.center());
+                .unwrap_or_else(|| self.canvas_rect.center());
             self.tab_mut().view.zoom_around_screen_pos(center, 1.25);
         } else if cmd && i.key_pressed(Key::Minus) {
             let center = i
                 .pointer
                 .hover_pos()
-                .unwrap_or_else(|| self.tab().view.last_canvas_rect.center());
+                .unwrap_or_else(|| self.canvas_rect.center());
             self.tab_mut().view.zoom_around_screen_pos(center, 0.8);
         } else if cmd && key_pressed_no_repeat(i, Key::G) {
             if i.modifiers.shift {
@@ -966,7 +977,7 @@ impl Is2dApp {
             .show(ctx, |ui| {
                 let (canvas_rect, response) =
                     ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
-                self.tab_mut().view.last_canvas_rect = canvas_rect;
+                self.canvas_rect = canvas_rect;
                 let painter = ui.painter_at(canvas_rect);
 
                 let pointer_pos = response

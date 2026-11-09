@@ -8,7 +8,7 @@ use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 
 use crate::planar_map::{ReshapeBase, ScopeMaps};
 pub(crate) use crate::symbol::Document;
-use crate::symbol::{EditPath, SymbolDef};
+use crate::symbol::{EditPath, SymbolDef, SymbolEvalCtx, SymbolEvalState};
 use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
 use crate::vector_boolean::merge_shapes_into_canvas;
 use crate::vector_engine::{rects_overlap, FillShape, SyncCache};
@@ -360,8 +360,6 @@ pub(crate) struct View {
     pub(crate) pan_last_screen_pos: Option<Pos2>,
     /// ステージ枠外にはみ出た図形をマスクして隠すかどうか（完成画面プレビュー用）
     pub(crate) clip_outside_stage: bool,
-    /// 直近フレームの中央キャンバス描画領域（スクリーン座標、「ウィンドウに合わせる」計算用）
-    pub(crate) last_canvas_rect: egui::Rect,
     /// 選択ツール使用時に全生シェイプのベクター輪郭・アンカーを表示するか
     pub(crate) show_wireframe: bool,
     /// オニオンスキン表示の有効/無効
@@ -383,10 +381,6 @@ impl Default for View {
             pan: Vec2::ZERO,
             pan_last_screen_pos: None,
             clip_outside_stage: false,
-            last_canvas_rect: egui::Rect::from_min_max(
-                Pos2::new(52.0, 30.0),
-                Pos2::new(1000.0, 590.0),
-            ),
             show_wireframe: false,
             onion_skin_enabled: false,
             onion_prev_frames: 2,
@@ -451,18 +445,18 @@ impl View {
         self.pan = Vec2::ZERO;
     }
 
-    /// ステージ枠全体が中央キャンバス領域に余白付きでぴったり収まるようにズーム倍率とパン位置を自動調整する（「ウィンドウに合わせる」）
-    pub(crate) fn fit_stage_to_window(&mut self, stage_size: Vec2) {
+    /// ステージ枠全体が中央キャンバス領域 `canvas_rect` に余白付きでぴったり収まるようにズーム倍率とパン位置を自動調整する（「ウィンドウに合わせる」）
+    pub(crate) fn fit_stage_to_window(&mut self, stage_size: Vec2, canvas_rect: egui::Rect) {
         let stage_w = stage_size.x.max(100.0);
         let stage_h = stage_size.y.max(100.0);
-        let avail_w = (self.last_canvas_rect.width() - 48.0).max(64.0);
-        let avail_h = (self.last_canvas_rect.height() - 48.0).max(64.0);
+        let avail_w = (canvas_rect.width() - 48.0).max(64.0);
+        let avail_h = (canvas_rect.height() - 48.0).max(64.0);
         let zoom = (avail_w / stage_w).min(avail_h / stage_h).clamp(
             crate::vector_engine::MIN_VIEW_ZOOM,
             crate::vector_engine::MAX_VIEW_ZOOM,
         );
         let center = Self::DEFAULT_STAGE_CENTER;
-        let screen_center = self.last_canvas_rect.center();
+        let screen_center = canvas_rect.center();
         self.zoom = zoom;
         self.pan = Vec2::new(
             screen_center.x - (center.x as f32) * zoom,
@@ -1388,7 +1382,7 @@ mod scene_base_cache {
         pub(crate) fn cached_screen_mesh(
             &mut self,
             tl: &Timeline,
-            library: &[SymbolDef],
+            ctx: SymbolEvalCtx<'_>,
             layer_idx: usize,
             frame: usize,
             world_xform: Affine,
@@ -1401,6 +1395,7 @@ mod scene_base_cache {
             if layer.keyframes[kf_idx].cel.is_empty() {
                 return None;
             }
+            let library = ctx.library;
             let ef = layer_eval_frame(layer, kf_idx, frame, library, None);
             let xform_bits = world_xform.as_coeffs().map(f64::to_bits);
             let hit_idx = self.entries.iter().position(|e| {
@@ -1415,8 +1410,7 @@ mod scene_base_cache {
                 self.entries
                     .retain(|e| !(e.layer_id == layer.id && e.eval_frame == ef));
                 let cel_sig = compute_resolved_cel_signature(layer, kf_idx, None, library);
-                let world_mesh =
-                    tl.build_cel_world_batch_mesh(layer_idx, frame, world_xform, library);
+                let world_mesh = tl.build_cel_world_batch_mesh(layer_idx, frame, world_xform, ctx);
                 self.entries.push(CachedOnionCel {
                     layer_id: layer.id,
                     eval_frame: ef,
@@ -1985,6 +1979,8 @@ pub(crate) struct Session {
     pub(crate) backdrop_cache: SyncCache<BackdropCache>,
     /// 表示中の前後オニオンスキンフレームのレイヤー単位結合メッシュキャッシュ
     pub(crate) onion_cache: SyncCache<OnionSkinCache>,
+    /// 描くたびのシンボルの評価（オニオンスキン・再生・ロック中のレイヤー）で使い回す、シンボルの中身のメモ
+    pub(crate) symbol_memo: SyncCache<SymbolEvalState>,
     /// `Document` から構築されるレイヤー別の読み取り専用土台キャッシュ
     pub(crate) base_cache: SceneBaseCache,
     /// 土台図形列に対する上乗せ図形状態（Floating およびドラッグ中の仮表示）
@@ -2972,16 +2968,35 @@ impl Tab {
     ) -> Option<Arc<egui::Mesh>> {
         let tl = self.active_timeline();
         let world_xform = self.session.edit_path.world_xform();
-        self.session.onion_cache.lock().cached_screen_mesh(
-            tl,
-            &self.doc.library,
-            layer_idx,
-            frame,
-            world_xform,
-            zoom,
-            pan,
-            tint_alpha,
-        )
+        self.with_symbol_eval(|ctx| {
+            self.session.onion_cache.lock().cached_screen_mesh(
+                tl,
+                ctx,
+                layer_idx,
+                frame,
+                world_xform,
+                zoom,
+                pan,
+                tint_alpha,
+            )
+        })
+    }
+
+    /// 1回の描画の始めに呼ぶ（`SymbolEvalState::start_pass`）
+    pub(crate) fn start_symbol_eval_pass(&self) {
+        self.session
+            .symbol_memo
+            .lock()
+            .start_pass(&self.doc.library);
+    }
+
+    /// 描くたびのシンボルの評価を、セッションのメモ（`Session::symbol_memo`）を使って行う
+    pub(crate) fn with_symbol_eval<R>(&self, f: impl FnOnce(SymbolEvalCtx<'_>) -> R) -> R {
+        let state = std::mem::take(&mut *self.session.symbol_memo.lock());
+        let ctx = SymbolEvalCtx::with_state(&self.doc.library, state);
+        let out = f(ctx.clone());
+        *self.session.symbol_memo.lock() = ctx.into_state();
+        out
     }
 
     /// ダーティマーク（` *`）を除いたタブのベース表示名を返す
@@ -3005,12 +3020,6 @@ impl Tab {
         } else {
             base
         }
-    }
-
-    /// 最後に描画されたキャンバス領域に対してステージ全体が収まるようズーム・パンを調整する
-    #[inline]
-    pub(crate) fn fit_stage_to_window(&mut self) {
-        self.view.fit_stage_to_window(self.doc.stage_size);
     }
 
     /// 現在編集中コンテキスト（インプレース編集経路考慮）に指定シンボルを配置可能か（循環参照しないか）判定する
