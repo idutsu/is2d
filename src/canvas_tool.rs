@@ -3604,11 +3604,12 @@ pub(crate) fn draw_registration_cross(
 }
 
 /// 片 `pieces` を `base_shapes` に結合する。レイヤー・階層ごとに、片を1つの地図にして、そのレイヤーの生の図形の地図の上に置く
-/// （片どうしの境目は1本の辺のまま。変わった図形だけを差し替える）。地図で置けないときは、今までのやり方で結合する。
+/// （片どうしの境目は1本の辺のまま。変わった図形だけを差し替える）。まとめて置けないときは、同じ地図へ片を1つずつ塗り、
+/// それもできない（地図が壊れているなど）ときは、そのレイヤーの片をまとめて今までのやり方で結合する。
 /// 置く計算はレイヤーをまたがないので、2つ以上あれば同時に計算する
 fn merge_pieces_layer_by_layer(base_shapes: &mut Vec<FillShape>, pieces: Vec<FillShape>) {
     use crate::planar_map::{
-        apply_shape_diff, per_layer_parallel, place_pieces_diff, MapEditOutcome,
+        apply_shape_diff, paint_pieces_diff, per_layer_parallel, place_pieces_diff, MapEditOutcome,
     };
     let mut parts: Vec<(LayerId, Vec<u64>, Vec<FillShape>)> = Vec::new();
     for p in pieces {
@@ -3630,20 +3631,15 @@ fn merge_pieces_layer_by_layer(base_shapes: &mut Vec<FillShape>, pieces: Vec<Fil
                 apply_shape_diff(base_shapes, &removed, added, layer_id, &group_path)
             }
             MapEditOutcome::Unchanged => {}
-            // 片どうしが重なっていて1つの地図にならない（別のレイヤーの絵を1枚のレイヤーへ貼ったときなど）：
-            // 重なり順（下から）に1つずつ置く。それでも置けない片だけ、今までのやり方で結合する
+            // まとめて置けない（片どうしが重なる・まとめて重ねると安全網で止まる）：同じ地図へ片を下から1つずつ塗る。
+            // それもできない（地図が壊れているなど）ときは、片をまとめて今までのやり方で結合する
             MapEditOutcome::Refused => {
-                for piece in layer_pieces {
-                    let one = std::slice::from_ref(&piece);
-                    match place_pieces_diff(base_shapes, layer_id, &group_path, one) {
-                        MapEditOutcome::Changed(removed, added) => {
-                            apply_shape_diff(base_shapes, &removed, added, layer_id, &group_path)
-                        }
-                        MapEditOutcome::Unchanged => {}
-                        MapEditOutcome::Refused => {
-                            merge_shapes_into_canvas(base_shapes, vec![piece])
-                        }
+                match paint_pieces_diff(base_shapes, layer_id, &group_path, &layer_pieces) {
+                    MapEditOutcome::Changed(removed, added) => {
+                        apply_shape_diff(base_shapes, &removed, added, layer_id, &group_path)
                     }
+                    MapEditOutcome::Unchanged => {}
+                    MapEditOutcome::Refused => merge_shapes_into_canvas(base_shapes, layer_pieces),
                 }
             }
         }

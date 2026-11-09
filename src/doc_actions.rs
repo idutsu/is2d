@@ -759,55 +759,42 @@ fn apply_raw_outline(
     if stroke_shapes.is_empty() {
         return false;
     }
-    if active_tool == Tool::Brush {
-        clear_selection(tab);
-        // 絵が変わらなければ（同じ色で塗られた所の中をなぞったなど）edit_layers が false を返し、apply が Undo の控えを捨てる
-        push_undo(tab, None);
-        edit_layers(tab, &[target_lid], |edit| {
-            let scope = edit.editing_group_path.clone();
-            let paint = MapRule::Paint(Some(brush_color));
-            match map_edit_diff(&edit.shapes, target_lid, &scope, |m| {
-                m.overlay(MapInput::Shapes(&stroke_shapes), paint)
-            }) {
-                MapEditOutcome::Changed(removed, added) => {
-                    apply_shape_diff(&mut edit.shapes, &removed, added, target_lid, &scope)
-                }
-                MapEditOutcome::Unchanged => {}
-                // 地図で重ねられないとき（安全網で止まった・壊れた輪郭に触れる）は、今までのやり方で結合する
-                MapEditOutcome::Refused => {
-                    merge_shapes_into_canvas(&mut edit.shapes, stroke_shapes)
-                }
-            }
-        })
-    } else {
-        let has_bbox_overlap = tab.scene().iter().any(|s| {
+    let is_brush = active_tool == Tool::Brush;
+    // 消しゴムは、消す線がどの図形にもかからなければ何もしない
+    if !is_brush
+        && !tab.scene().iter().any(|s| {
             s.layer_id == target_lid
                 && s.is_raw_at_scope(&tab.session.editing_group_path)
                 && stroke_shapes
                     .iter()
                     .any(|er| rects_overlap(s.bounding_box(), er.bounding_box()))
-        });
-        if !has_bbox_overlap {
-            return false;
-        }
-        clear_selection(tab);
-        // 何も消えなければ edit_layers が false を返し、apply が Undo の控えを捨てる
-        push_undo(tab, None);
-        edit_layers(tab, &[target_lid], |edit| {
-            let scope = edit.editing_group_path.clone();
-            match map_edit_diff(&edit.shapes, target_lid, &scope, |m| {
-                m.overlay(MapInput::Shapes(&stroke_shapes), MapRule::Paint(None))
-            }) {
-                MapEditOutcome::Changed(removed, added) => {
-                    apply_shape_diff(&mut edit.shapes, &removed, added, target_lid, &scope)
-                }
-                MapEditOutcome::Unchanged => {}
-                MapEditOutcome::Refused => {
-                    erase_from_canvas(&mut edit.shapes, &stroke_shapes, target_lid, &scope)
-                }
-            }
         })
+    {
+        return false;
     }
+    clear_selection(tab);
+    // 絵が変わらなければ（同じ色で塗られた所の中をなぞった・何も消えないなど）edit_layers が false を返し、
+    // apply が Undo の控えを捨てる
+    push_undo(tab, None);
+    edit_layers(tab, &[target_lid], |edit| {
+        let scope = edit.editing_group_path.clone();
+        let rule = MapRule::Paint(is_brush.then_some(brush_color));
+        match map_edit_diff(&edit.shapes, target_lid, &scope, |m| {
+            m.overlay(MapInput::Shapes(&stroke_shapes), rule)
+        }) {
+            MapEditOutcome::Changed(removed, added) => {
+                apply_shape_diff(&mut edit.shapes, &removed, added, target_lid, &scope)
+            }
+            MapEditOutcome::Unchanged => {}
+            // 地図で重ねられないとき（安全網で止まった・壊れた輪郭に触れる）は、今までのやり方で結合する・消す
+            MapEditOutcome::Refused if is_brush => {
+                merge_shapes_into_canvas(&mut edit.shapes, stroke_shapes)
+            }
+            MapEditOutcome::Refused => {
+                erase_from_canvas(&mut edit.shapes, &stroke_shapes, target_lid, &scope)
+            }
+        }
+    })
 }
 
 /// 表示中の全レイヤーの図形を、下のレイヤーから順に、ステージ座標で集める（バケツとスポイト用）
