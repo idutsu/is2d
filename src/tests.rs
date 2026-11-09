@@ -22838,6 +22838,201 @@ mod map_overlay {
 
     /// 速さの試し（ふだんは流さない）：前の版の結合で描いたセル（地図が壊れている）での、矩形選択・確定・ブラシの時間と、
     /// 区間の数
+    /// レビュー（7215b88 地図）N-1002 の再現：同じ線を2色交互に手ぶれ付きでなぞる
+    #[test]
+    #[ignore]
+    fn probe_review_two_color_retrace() {
+        for seed in [1u64, 2, 3] {
+            let mut app = Is2dApp::default();
+            let mut r = Rng(seed);
+            let mut bad = 0;
+            let mut first_bad = None;
+            for k in 0..100 {
+                app.tool.brush_color = if k % 2 == 0 {
+                    Color32::RED
+                } else {
+                    Color32::GREEN
+                };
+                let pts: Vec<Point> = (0..31)
+                    .map(|i| {
+                        let x = -250.0 + 500.0 * i as f64 / 30.0;
+                        let y = 80.0 * (x / 500.0 * std::f64::consts::TAU).sin();
+                        Point::new(x + r.f() - 0.5, y + r.f() - 0.5)
+                    })
+                    .collect();
+                let w = 5.0 + r.f() * 2.0;
+                doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, w));
+                if !layer_map_valid(&app, 0) {
+                    bad += 1;
+                    first_bad.get_or_insert(k + 1);
+                }
+            }
+            let segs: usize = app
+                .scene()
+                .iter()
+                .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+                .sum();
+            eprintln!("PROBE seed {seed}: 壊れた地図 {bad}/100（最初 {first_bad:?}）・図形 {}・区間 {segs}", app.scene().len());
+        }
+        // 手ぶれなし、太さを少しずつ変える
+        let mut app = Is2dApp::default();
+        let pts: Vec<Point> = (0..31)
+            .map(|i| {
+                let x = -250.0 + 500.0 * i as f64 / 30.0;
+                Point::new(x, 80.0 * (x / 500.0 * std::f64::consts::TAU).sin())
+            })
+            .collect();
+        let mut bad = 0;
+        for k in 0..8 {
+            app.tool.brush_color = if k % 2 == 0 {
+                Color32::RED
+            } else {
+                Color32::GREEN
+            };
+            doc_actions::commit_raw_outline(
+                &mut app,
+                &generate_brush_outline(&pts, 6.0 + 0.37 * k as f64),
+            );
+            if !layer_map_valid(&app, 0) {
+                bad += 1;
+            }
+        }
+        eprintln!("PROBE 手ぶれなし・太さを変える 8 本：壊れた地図 {bad}/8");
+    }
+
+    /// レビュー（7215b88 地図）N-2004 の再現：Shift で選び足した片が、前の片とつながっていてもまとまらない
+    #[test]
+    #[ignore]
+    fn probe_review_shift_marquee_merges() {
+        let mut seams_total = 0;
+        let mut cases_with_seam = 0;
+        let mut r = Rng(5);
+        for case in 0..40 {
+            let mut app = Is2dApp::default();
+            let strokes = [
+                (
+                    Point::new(-200.0, -40.0),
+                    Point::new(200.0, -40.0),
+                    Color32::RED,
+                ),
+                (
+                    Point::new(-200.0, 0.0),
+                    Point::new(200.0, 0.0),
+                    Color32::BLUE,
+                ),
+                (
+                    Point::new(-200.0, 40.0),
+                    Point::new(200.0, 40.0),
+                    Color32::GREEN,
+                ),
+                (
+                    Point::new(-200.0, -80.0),
+                    Point::new(200.0, 80.0),
+                    Color32::RED,
+                ),
+            ];
+            for (a, b, c) in strokes {
+                app.tool.brush_color = c;
+                let pts: Vec<Point> = (0..=10).map(|i| a.lerp(b, i as f64 / 10.0)).collect();
+                doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 36.0));
+            }
+            let x1 = -100.0 + r.f() * 150.0;
+            assert!(doc_actions::apply(
+                &mut app,
+                doc_actions::Action::SelectMarquee {
+                    p0: Point::new(-260.0, -130.0),
+                    p1: Point::new(x1, 130.0),
+                    additive: false,
+                },
+            ));
+            let before = app.session.floating().map_or(0, |f| f.pieces.len());
+            let (y0, y1) = (-130.0 + r.f() * 80.0, 30.0 + r.f() * 100.0);
+            let x2 = x1 + 20.0 + r.f() * 80.0;
+            doc_actions::apply(
+                &mut app,
+                doc_actions::Action::SelectMarquee {
+                    p0: Point::new(x1 - 30.0, y0),
+                    p1: Point::new(x2, y1),
+                    additive: true,
+                },
+            );
+            let fl = app.session.floating().expect("選択");
+            let pieces: Vec<FillShape> = fl.pieces.to_vec();
+            // 同じ色の片どうしが接している所（まとまっていない境目）：片の輪郭の区間の真ん中から、
+            // 片の外へ 0.05px 出た点が、同じ色の別の片に入るか
+            let mut seams = 0;
+            for (ai, a) in pieces.iter().enumerate() {
+                for c in a.contours() {
+                    for q in c.segments.iter() {
+                        let m = q.eval(0.5);
+                        let d = q.deriv().eval(0.5).to_vec2();
+                        if d.hypot() == 0.0 {
+                            continue;
+                        }
+                        let n = KVec2::new(-d.y, d.x) / d.hypot() * 0.05;
+                        for p in [m + n, m - n] {
+                            if a.contains_point(p) {
+                                continue;
+                            }
+                            if pieces.iter().enumerate().any(|(bi, b)| {
+                                bi != ai && b.color == a.color && b.contains_point(p)
+                            }) {
+                                seams += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if seams > 0 {
+                cases_with_seam += 1;
+            }
+            seams_total += seams;
+            if case < 5 || seams > 0 {
+                eprintln!(
+                    "PROBE case {case}: 片 {before} → {}・まとまっていない境目の辺 {seams}",
+                    pieces.len()
+                );
+            }
+        }
+        eprintln!(
+            "PROBE まとまらなかった回 {cases_with_seam}/40（境目の辺 合わせて {seams_total}）"
+        );
+    }
+
+    /// レビュー（7215b88 地図）N-2001 の再現：3レイヤーの絵を1レイヤーに貼って確定（片どうしが重なる）
+    #[test]
+    #[ignore]
+    fn probe_review_paste_three_layers_into_one() {
+        for seed in [7u64, 8] {
+            let app = dense_scene_app(seed);
+            let lid0 = app.doc.root.layers[0].id;
+            let base: Vec<FillShape> = app.scene().iter().cloned().collect();
+            // 3レイヤーの生の図形を、下のレイヤーから順に、レイヤー 0 の片にする（新しい番号）
+            let mut pieces: Vec<FillShape> = Vec::new();
+            for l in 0..3 {
+                let lid = app.doc.root.layers[l].id;
+                for s in base
+                    .iter()
+                    .filter(|s| s.layer_id == lid && s.is_raw_at_scope(&[]))
+                {
+                    let mut p = s.clone().with_scope(lid0, &[]);
+                    p.shape_id = crate::vector_engine::next_shape_id();
+                    pieces.push(p);
+                }
+            }
+            for _ in 0..3 {
+                let t = std::time::Instant::now();
+                let out = crate::planar_map::place_pieces_diff(&base, lid0, &[], &pieces);
+                let ms = t.elapsed().as_secs_f64() * 1000.0;
+                let ok = matches!(out, crate::planar_map::MapEditOutcome::Changed(..));
+                eprintln!(
+                    "PROBE seed {seed}: 片 {}・{ms:.1}ms・置けた {ok}",
+                    pieces.len()
+                );
+            }
+        }
+    }
+
     #[test]
     #[ignore]
     fn probe_broken_cell_cost() {
