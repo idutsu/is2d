@@ -14276,9 +14276,11 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
         unmerged_same_col, 0,
         "同じ色で接する図形が別々の図形のまま残っていないこと"
     );
-    // 地図で行う今の作りで 182,462 セグメント（ブール演算の作りでは 174,097。境目が頂点で区切られる分だけ多い）
+    // 地図で行う今の作りで 182,599 セグメント（ブール演算の作りでは 174,097。境目が頂点で区切られる分だけ多い）。
+    // 段階1（d90cabe）の 182,462 より 137 多い：曲線に戻すかを判定の形（格子の上の折れ線）で決めるようになり、
+    // 折れ線がほかの辺に触れる所（この試しで 193 か所。前は曲線にして、判定の形では触れる地図になっていた）を曲線にしない
     assert!(
-        total_segs <= 182_500,
+        total_segs <= 182_600,
         "結果の輪郭のセグメント数が増えていないこと: {}",
         total_segs
     );
@@ -21526,10 +21528,9 @@ mod map_overlay {
         s
     }
 
-    /// 地図が壊れていないか（輪郭が閉じて色がそろう・面が取り出せる・辺が交わらない）
+    /// 地図が壊れていないか（`is_valid`：判定の形で、辺が触れない・輪郭が閉じて色がそろう・面が取り出せる）
     pub(super) fn valid(m: &PlanarMap) -> bool {
-        let all: Vec<usize> = (0..m.edges.len()).collect();
-        m.cycle_check() == (0, 0) && m.faces().1 == 0 && m.crossings_grid_pub(&all).is_empty()
+        m.is_valid()
     }
 
     /// 2つの図形の並び（後ろほど上）の色を、格子の点で比べる。境目から 0.3px 以内の点は数えない
@@ -21730,7 +21731,7 @@ mod map_overlay {
                 let m = rest
                     .overlay(MapInput::Map(&moved), MapRule::Overlay)
                     .unwrap();
-                assert!(valid(&m), "面{k} ずらす量 {d}");
+                assert!(valid(&m), "面{k} ずらす量 {d}: {}", m.validity_report());
                 let mut expected = rest.to_faces_checked(1, &[]).0;
                 expected.extend(moved.to_faces_checked(1, &[]).0);
                 let (out, _) = m.to_faces_checked(1, &[]);
@@ -21752,9 +21753,11 @@ mod map_overlay {
         assert_eq!(back.edges.len(), m.edges.len());
     }
 
-    /// 2本の辺を1本にまとめると制御点が両端の外に出る（曲線が端を越えて折り返す）ときは、まとめない
+    /// 2本の辺を1本にまとめると制御点が両端の外に出る（曲線が端を越えて折り返す）ときも、まとめてよいかは判定の形で
+    /// 決める（折り返しが、ほかの辺に触れず、頂点のまわりの順番も変えなければ、まとめてよい）。まとめた後も正しい地図で、
+    /// 塗りは変わらない
     #[test]
-    fn merge_degree2_skips_folding_merge() {
+    fn merge_degree2_folding_merge_keeps_map_valid() {
         use crate::planar_map::MapEdge;
         // A→V はまっすぐ、V→B はごく短く少し戻る（V は両側が同じ色の、2本だけがつながる頂点）
         let (a, v, b, c) = (
@@ -21783,9 +21786,15 @@ mod map_overlay {
             node_src: vec![None; 4],
         };
         assert!(valid(&m));
+        let before = m.clone();
         m.merge_degree2(kurbo::Rect::new(-1.0, -1.0, 20.0, 20.0));
-        assert_eq!(m.edges.len(), 4, "折り返す曲線になるので、まとめない");
+        assert_eq!(m.edges.len(), 3, "折り返しはほかの辺に触れないので、まとめる");
         assert!(valid(&m));
+        // まとめた曲線は、元の2本から 0.01px 以内（それより離れた点の色は変わらない）
+        for (x, y) in [(1.0, 1.0), (5.0, 0.02), (9.9, 0.05), (3.0, 6.0), (11.0, 0.0), (-1.0, 1.0), (5.0, -0.02)] {
+            let p = Point::new(x, y);
+            assert_eq!(m.color_at(p), before.color_at(p), "{p:?}");
+        }
     }
 
     /// ほぼ平行に並ぶ2本の曲線（0.01px 離れて長く並ぶ）は交わらず、交わる2本は交わると分かる
@@ -21828,41 +21837,48 @@ mod map_overlay {
         assert!(!m.crossings_grid_pub(&[2]).is_empty());
     }
 
-    /// ほぼ重なった2本の辺（間がごく細い面）の上に重ねても壊れない
+    /// ほぼ重なった2本の辺（間がごく細い面）の上に重ねても壊れない。間が格子の目（1/4096px）より細いと、2本の
+    /// 判定の形が重なるので、正しい地図ではない（重ね合わせの結果には、そういう面はできない）
     #[test]
     fn overlay_across_hairline_lens() {
-        let mut m = PlanarMap::from_faces(std::iter::once(&rect_shape(
-            100.0,
-            100.0,
-            300.0,
-            300.0,
-            Color32::RED,
-        )));
-        // 真ん中に、幅 0.00006px の黄色の細い面（同じ2頂点を結ぶ、ほぼ同じ2本の曲線）
-        let (a, b) = (m.nodes.len(), m.nodes.len() + 1);
-        m.nodes.push(Point::new(150.0, 150.0));
-        m.nodes.push(Point::new(250.0, 200.0));
-        let yellow = Color32::YELLOW;
-        // 2本目（制御点が 0.00012 下）が左にあるので、間（1本目の左・2本目の右）が黄色
-        m.edges.push(crate::planar_map::MapEdge {
-            a,
-            b,
-            ctrl: Point::new(200.0, 160.0),
-            left: Some(yellow),
-            right: Some(Color32::RED),
-            left_src: None,
-            right_src: None,
-        });
-        m.edges.push(crate::planar_map::MapEdge {
-            a,
-            b,
-            ctrl: Point::new(200.0, 160.00012),
-            left: Some(Color32::RED),
-            right: Some(yellow),
-            left_src: None,
-            right_src: None,
-        });
-        m.node_src = vec![None; m.nodes.len()];
+        // 真ん中に、幅 `width` の黄色の細い面（同じ2頂点を結ぶ、ほぼ同じ2本の曲線）を持つ赤の矩形
+        let lens = |width: f64| {
+            let mut m = PlanarMap::from_faces(std::iter::once(&rect_shape(
+                100.0,
+                100.0,
+                300.0,
+                300.0,
+                Color32::RED,
+            )));
+            let (a, b) = (m.nodes.len(), m.nodes.len() + 1);
+            m.nodes.push(Point::new(150.0, 150.0));
+            m.nodes.push(Point::new(250.0, 200.0));
+            let yellow = Color32::YELLOW;
+            // 2本目（制御点が 2 × width 下。曲線の間は真ん中で width）が左にあるので、間（1本目の左・2本目の右）が黄色
+            m.edges.push(crate::planar_map::MapEdge {
+                a,
+                b,
+                ctrl: Point::new(200.0, 160.0),
+                left: Some(yellow),
+                right: Some(Color32::RED),
+                left_src: None,
+                right_src: None,
+            });
+            m.edges.push(crate::planar_map::MapEdge {
+                a,
+                b,
+                ctrl: Point::new(200.0, 160.0 + 2.0 * width),
+                left: Some(Color32::RED),
+                right: Some(yellow),
+                left_src: None,
+                right_src: None,
+            });
+            m.node_src = vec![None; m.nodes.len()];
+            m
+        };
+        assert!(!valid(&lens(0.00006)), "格子の目より細い面は正しい地図ではない");
+        // 細い面（真ん中の幅 0.025px。両端の頂点のすぐ近くの、折れ線の最初の点でも、格子の目の数倍離れる）
+        let m = lens(0.025);
         assert!(valid(&m));
         let stroke = rect_shape(140.0, 140.0, 260.0, 175.0, Color32::BLUE);
         let out = m.overlay(
@@ -22526,10 +22542,7 @@ mod map_overlay {
             t.elapsed().as_secs_f64() * 1e3
         );
         let m = PlanarMap::from_faces(shapes.iter());
-        let all: Vec<usize> = (0..m.edges.len()).collect();
-        assert_eq!(m.cycle_check(), (0, 0));
-        assert_eq!(m.faces().1, 0);
-        assert!(m.crossings_grid_pub(&all).is_empty());
+        assert!(m.is_valid());
         // 片に覆われていない所は、下の赤のまま
         assert_eq!(
             shapes
@@ -23094,6 +23107,153 @@ mod map_overlay {
 
     /// 速さの試し（ふだんは流さない）：前の版の結合で描いたセル（地図が壊れている）での、矩形選択・確定・ブラシの時間と、
     /// 区間の数
+    /// ほぼ重なった線：線 S を赤、S を ε ずらした線を青、もう一度 S を赤で描く（ε は 1e-4〜1e-2 の13通り × 線 `lines` 本）。
+    /// （正しくない地図の数, S の中で赤でない所が出た数, 試した数）
+    pub(super) fn near_coincident_retrace(lines: usize) -> (usize, usize, usize) {
+        let mut r = Rng(2024);
+        let (mut invalid, mut lost, mut total) = (0, 0, 0);
+        for _ in 0..lines {
+            let p0 = Point::new(-150.0 + r.f() * 60.0, -60.0 + r.f() * 120.0);
+            let bend = Point::new(r.f() * 160.0 - 80.0, r.f() * 160.0 - 80.0);
+            let p1 = Point::new(90.0 + r.f() * 60.0, -60.0 + r.f() * 120.0);
+            let pts: Vec<Point> = (0..=16)
+                .map(|i| {
+                    let t = i as f64 / 16.0;
+                    let a = p0.lerp(bend, t);
+                    a.lerp(bend.lerp(p1, t), t)
+                })
+                .collect();
+            let radius = 2.0 + r.f() * 6.0;
+            let raw = generate_brush_outline(&pts, radius);
+            let s_shapes = crate::vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, Color32::RED, 1.0);
+            for k in 0..13 {
+                let eps = 1e-4 * 10f64.powf(k as f64 / 6.0);
+                let shifted: Vec<Point> = raw.iter().map(|p| *p + KVec2::new(eps, eps * 0.7)).collect();
+                let mut app = Is2dApp::default();
+                let mut ok = true;
+                for (outline, color) in [(&raw, Color32::RED), (&shifted, Color32::BLUE), (&raw, Color32::RED)] {
+                    // 重ね合わせの結果そのものが正しい地図か（図形に書き戻す前）
+                    let before: Vec<FillShape> = app.scene().iter().cloned().collect();
+                    let stroke = crate::vector_stroke::build_smoothed_stroke_shapes_at_zoom(outline, color, 1.0);
+                    let base = PlanarMap::from_faces(before.iter());
+                    if let Some(m) = base.overlay(
+                        crate::planar_map::MapInput::Shapes(&stroke),
+                        crate::planar_map::MapRule::Paint(Some(color)),
+                    ) {
+                        ok &= m.is_valid();
+                    }
+                    app.tool.brush_color = color;
+                    doc_actions::commit_raw_outline(&mut app, outline);
+                    ok &= layer_map_valid(&app, 0);
+                }
+                total += 1;
+                if !ok {
+                    invalid += 1;
+                }
+                let scene: Vec<FillShape> = app.scene().iter().cloned().collect();
+                let bbox = s_shapes.iter().map(|s| s.bounding_box()).reduce(|a, b| a.union(b)).unwrap();
+                let mut bad = false;
+                'grid: for i in 0..120 {
+                    for j in 0..120 {
+                        let p = Point::new(
+                            bbox.x0 + bbox.width() * (i as f64 + 0.5) / 120.0,
+                            bbox.y0 + bbox.height() * (j as f64 + 0.5) / 120.0,
+                        );
+                        if !s_shapes.iter().any(|s| s.contains_point(p)) || near_boundary(&s_shapes, p, 0.05) {
+                            continue;
+                        }
+                        if scene.iter().rev().find(|s| s.contains_point(p)).map(|s| s.color) != Some(Color32::RED) {
+                            bad = true;
+                            break 'grid;
+                        }
+                    }
+                }
+                if bad {
+                    lost += 1;
+                }
+            }
+        }
+        (invalid, lost, total)
+    }
+
+    /// 線 S を赤、ε（1e-4〜1e-2）ずらした S を青、もう一度 S を赤で描いても、重ね合わせの結果とレイヤーの地図は
+    /// いつも正しく、S の中は赤（判定の形と重ね合わせの形が同じ。レビュー N-1001）
+    #[test]
+    fn near_coincident_retrace_keeps_map_valid_and_paint() {
+        let (invalid, lost, total) = near_coincident_retrace(3);
+        assert_eq!((invalid, lost), (0, 0), "正しくない地図・赤でない所（{total}通り中）");
+    }
+
+    /// 回転・拡大縮小したシンボルの中で、重なる線を何本も描いても、レイヤーの地図（ステージの座標で作る）はいつも正しく、
+    /// 塗り重ねて作り直すことにならない（図形はシンボルの座標で持つので、座標を行き来する丸めが入る。設計 段階2 の5章）
+    #[test]
+    fn drawing_inside_rotated_scaled_symbol_keeps_layer_map_valid() {
+        use doc_actions::Action;
+        let mut app = Is2dApp::default();
+        let colors = [
+            Color32::from_rgb(220, 60, 60),
+            Color32::from_rgb(60, 120, 220),
+            Color32::from_rgb(40, 180, 90),
+        ];
+        run(
+            &mut app,
+            &[
+                Action::PaintStroke {
+                    points: vec![Point::new(100.0, 100.0), Point::new(220.0, 115.0)],
+                    radius: 14.0,
+                    color: colors[0],
+                },
+                Action::SelectSingleAt {
+                    pt: Point::new(160.0, 107.0),
+                },
+                Action::ConvertToSymbol,
+                Action::ScaleSelection { sx: 1.73, sy: 0.61 },
+                Action::RotateSelection { angle_rad: 0.47 },
+            ],
+        );
+        let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
+        run(&mut app, &[Action::EnterSymbolTimeline { binding }]);
+        // 編集中の階層の生の図形（ステージの座標）から作った地図
+        let map_of = |app: &Is2dApp| {
+            let scope = app.session.editing_group_path.clone();
+            let shapes: Vec<FillShape> = app
+                .scene()
+                .iter()
+                .filter(|s| s.is_raw_at_scope(&scope) && s.symbol_instance.is_none())
+                .cloned()
+                .collect();
+            PlanarMap::from_faces(shapes.iter())
+        };
+        let mut r = Rng(7);
+        let mut invalid = 0;
+        for i in 0..40 {
+            let a = Point::new(60.0 + r.f() * 220.0, 20.0 + r.f() * 220.0);
+            let b = Point::new(60.0 + r.f() * 220.0, 20.0 + r.f() * 220.0);
+            let bend = KVec2::new(r.f() * 60.0 - 30.0, r.f() * 60.0 - 30.0);
+            run(
+                &mut app,
+                &[Action::PaintStroke {
+                    points: vec![a, a.midpoint(b) + bend, b],
+                    radius: (3.0 + r.f() * 6.0) as f32,
+                    color: colors[i % 3],
+                }],
+            );
+            if !map_of(&app).is_valid() {
+                invalid += 1;
+            }
+        }
+        let m = map_of(&app);
+        assert!(m.edges.len() > 200, "線が重なって境目が多い");
+        assert_eq!(invalid, 0, "塗り重ねて作り直すことになった回");
+    }
+
+    #[test]
+    #[ignore]
+    fn probe_near_coincident_retrace() {
+        let (invalid, lost, total) = near_coincident_retrace(20);
+        eprintln!("PROBE ほぼ重なった線：正しくない地図 {invalid}/{total}・S の中が赤でない {lost}/{total}");
+    }
+
     /// 同じ線を2色交互に手ぶれ付きでなぞったときの、地図の健全さを数える
     #[test]
     #[ignore]
