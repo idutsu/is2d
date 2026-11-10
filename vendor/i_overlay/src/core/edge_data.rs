@@ -16,6 +16,12 @@ pub trait OverlayEdgeData<C = ShapeCountBoolean>: Copy + PartialEq + Send + Sync
     }
 
     fn merge(ctx: EdgeDataMerge<C, Self>, store: &mut Self::Store) -> Self;
+
+    /// is2d で足したもの（PATCH.md）：重なった区間をまとめて数（count）が打ち消し合っても、区間を残すか
+    #[inline(always)]
+    fn keep_when_count_cancels(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone)]

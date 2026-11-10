@@ -2616,6 +2616,12 @@ struct ProvId(u32);
 impl i_overlay9::core::edge_data::OverlayEdgeData for ProvId {
     type Store = ProvStore;
 
+    /// 重なった区間の数が打ち消し合っても、区間は残す（交点を格子に丸めて向きが変わった2本の区間が重なると、i_overlay は
+    /// 数の符号を変えて足すので 0 になる。vendor/i_overlay/PATCH.md）
+    fn keep_when_count_cancels(&self) -> bool {
+        true
+    }
+
     fn reversed(self, store: &mut ProvStore) -> Self {
         let v = store.0[self.0 as usize]
             .iter()
@@ -2734,13 +2740,18 @@ fn combine_sides(mut entries: Vec<(Sides, Point)>, mid: Point, dir: KVec2) -> Op
 }
 
 impl PlanarMap {
-    /// 点 `p` の色：右へ伸ばした半直線が最初に当たる辺の、点の側の色（`first_right_hit`）
+    /// 点 `p`（格子の点に丸める）の色：判定の形で、点のある所の色（`LabeledSegs::at`）
     #[cfg(test)]
     pub(crate) fn color_at(&self, p: Point) -> Option<Color32> {
-        let items: Vec<_> = (0..self.edges.len())
-            .map(|e| (self.quad(e), (self.edges[e].left, self.edges[e].right)))
-            .collect();
-        first_right_hit(p, &items).flatten()
+        let segs = LabeledSegs::new((0..self.edges.len()).flat_map(|e| {
+            let (l, r) = (self.edges[e].left, self.edges[e].right);
+            let pl = grid_poly(&self.quad(e));
+            (0..pl.len().saturating_sub(1))
+                .map(|k| (pl[k], pl[k + 1], l, r))
+                .collect::<Vec<_>>()
+        }));
+        let g = gpt(p);
+        segs.at((2 * g.0, 2 * g.1)).flatten()
     }
 
     /// 点 `p` の色（`color_regions` の結果から）
@@ -3127,12 +3138,8 @@ impl PlanarMap {
 
         // 1. 折れ線にして格子に置き、i_overlay で切る。格子は原点から（何回重ねても、格子の上の点は動かない）
         let mut ov: EdgeOverlay<i32, ProvId> = EdgeOverlay::new(srcs.len() * 8);
-        // 重ねる地図の辺も、塗り（Clip の左右）を使わないので、前からある辺と同じく向きをそろえて入れる
-        let fill_unused_for_new = matches!(input, MapInput::Map(_));
         for (si, (q, kind)) in srcs.iter().enumerate() {
-            let old = matches!(kind, OverlaySrc::Old(_));
-            let canonical = old || fill_unused_for_new;
-            let st = if old {
+            let st = if matches!(kind, OverlaySrc::Old(_)) {
                 ShapeType::Subject
             } else {
                 ShapeType::Clip
@@ -3144,19 +3151,19 @@ impl PlanarMap {
                 if ip == prev.0 {
                     continue;
                 }
-                // 塗りを使わない辺（前からある辺と、重ねる地図の辺）の区間は、いつも小さい点から大きい点の向きで入れる
-                // （ほぼ重なった2本の辺が、格子で同じ区間になったときに打ち消し合って消えないように）
-                let (a, b, t0, t1) = if canonical && ip < prev.0 {
-                    (ip, prev.0, t, prev.1)
-                } else {
-                    (prev.0, ip, prev.1, t)
-                };
                 let id = ov.data_store_mut().push(vec![Prov {
                     src: si as u32,
-                    t0,
-                    t1,
+                    t0: prev.1,
+                    t1: t,
                 }]);
-                ov.add_edge(InputEdge { a, b, data: id }, st);
+                ov.add_edge(
+                    InputEdge {
+                        a: prev.0,
+                        b: ip,
+                        data: id,
+                    },
+                    st,
+                );
                 prev = (ip, t);
             }
         }
@@ -3348,69 +3355,91 @@ impl PlanarMap {
         };
         let old_of: Vec<_> = pieces.iter().map(|p| side_of(p, true)).collect();
         let new_of: Vec<_> = pieces.iter().map(|p| side_of(p, false)).collect();
-        // 輪郭をたどっても決まらない所の色は、点から右へ伸ばした半直線が最初に当たる辺の、点の側の色で決める
-        // （`first_right_hit`）。前の色：前の色を持つ区間と、入れなかった前からある辺。重ねる地図の色：重ねる地図の色を
-        // 持つ区間。どれも、結果の地図と同じ形（切った区間・格子に置き直した頂点）で、面ごとに決めた色（`face_colors`）で見る
-        let piece_quad = |k: usize| {
-            let (a, b) = (nodes[pieces[k].a], nodes[pieces[k].b]);
-            QuadBez::new(a, a.midpoint(b), b)
-        };
-        // 入れなかった前からある辺（結果の地図と同じ形＝判定の形の区間）。前の地図の面を分ける
-        let unfed_quads: Vec<(QuadBez, Sides)> = self
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(e, _)| !fed[*e])
-            .flat_map(|(_, ed)| {
-                poly_items(
-                    &grid_poly(&QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b])),
-                    (ed.left, ed.right),
-                )
-            })
-            .collect();
-        // 地図の元の形（判定の形）での点の色（面の色の材料が食い違うときだけ使う）
-        let old_truth = |q: Point| {
-            let items: Vec<(QuadBez, Sides)> = (0..self.edges.len())
-                .flat_map(|e| {
-                    poly_items(
-                        &grid_poly(&self.quad(e)),
-                        (self.edges[e].left, self.edges[e].right),
-                    )
+        // 面ごとの色は、材料（出どころの辺の色）で決める（`face_colors`）。材料の無い面と食い違う面の色、中の辺の内外は、
+        // 点のある所の印を整数で決める（`LabeledSegs`。設計：claude/重ね合わせの色と内外を整数で決める設計_08c15dd段階2_8702663.md）
+        let dbl = |p: IPt| (2 * p.0, 2 * p.1);
+        let piece_ends: Vec<(IPt, IPt)> = pieces.iter().map(|p| (p.ia, p.ib)).collect();
+        // 奥の点：向きのある区間 `h` の真ん中から、面の側へ垂直に伸ばした半直線が、その地図の面を分ける最初の線（その地図の
+        // 色を持つ区間 `material`、前の色なら入れなかった前からある辺の判定の形も）に当たるまでの半分の所。当たらなければ、
+        // 面は外へ開いているので `None`。見る所を選ぶだけで、色は整数で決める（点は `FINE` 倍の座標。食い違う面は格子の目
+        // より細いことがあるので、格子の点に丸めると面の外に出る）
+        let deep_point =
+            |h: usize, material: &dyn Fn(usize) -> bool, with_unfed: bool| -> Option<IPt> {
+                let k = h / 2;
+                let (a, b) = (nodes[pieces[k].a], nodes[pieces[k].b]);
+                let (a, b) = if h % 2 == 1 { (a, b) } else { (b, a) };
+                let d = (b - a) / (b - a).hypot();
+                let (m, nrm) = (a.midpoint(b), KVec2::new(-d.y, d.x));
+                let mut best = (0..pieces.len())
+                    .filter(|&j| j != k && material(j))
+                    .filter_map(|j| ray_seg_dist(m, nrm, nodes[pieces[j].a], nodes[pieces[j].b]))
+                    .reduce(f64::min);
+                if with_unfed {
+                    for e in (0..self.edges.len()).filter(|&e| !fed[e]) {
+                        let ed = self.edges[e];
+                        let q = QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]);
+                        if !ray_meets_rect(m, nrm, best, reach_of(&q)) {
+                            continue;
+                        }
+                        for w in grid_poly(&q).windows(2) {
+                            let (pa, pb) = (from_grid(w[0].0, w[0].1), from_grid(w[1].0, w[1].1));
+                            if let Some(t) = ray_seg_dist(m, nrm, pa, pb) {
+                                best = Some(best.map_or(t, |x| x.min(t)));
+                            }
+                        }
+                    }
+                }
+                best.map(|s| {
+                    let q = (m + nrm * (s * 0.5)).to_vec2() * (OVERLAY_GRID * FINE as f64);
+                    (q.x.round() as i64, q.y.round() as i64)
                 })
-                .collect();
-            first_right_hit(q, &items).flatten()
+            };
+        // 地図の元の形（判定の形）での、点（`FINE` 倍の座標）のある所の色。半直線の高さにかかる辺だけを見る
+        let truth_at = |p: IPt, quads: &dyn Fn(usize) -> Option<(QuadBez, Sides)>, n: usize| {
+            let fine = |g: IPt| (FINE * g.0, FINE * g.1);
+            let mut w = Vec::new();
+            for (q, (l, r)) in (0..n).filter_map(quads) {
+                let rr = reach_of(&q);
+                if FINE * rr.y0 <= p.1 && p.1 <= FINE * rr.y1 && FINE * rr.x1 >= p.0 {
+                    for s in grid_poly(&q).windows(2) {
+                        wind_into(fine(s[0]), fine(s[1]), l, r, p, &mut w);
+                    }
+                }
+            }
+            top_label(&w).flatten()
         };
-        let new_truth = |q: Point| {
-            let items: Vec<(QuadBez, Sides)> = new_quads
-                .iter()
-                .zip(new_cols.iter().copied())
-                .flat_map(|(q, sides)| poly_items(&grid_poly(q), sides))
-                .collect();
-            first_right_hit(q, &items).flatten()
-        };
-        let piece_segs: Vec<(Point, Point)> =
-            pieces.iter().map(|p| (nodes[p.a], nodes[p.b])).collect();
-        let old_faces = face_colors(
+        let old_quad = |e: usize| Some((self.quad(e), (self.edges[e].left, self.edges[e].right)));
+        let new_quad = |i: usize| Some((new_quads[i], new_cols[i]));
+        let mut old_faces = face_colors(
             &old_of,
             &next_old,
             &|e| {
                 let ed = self.edges[e];
                 (ed.left, ed.right)
             },
-            &piece_segs,
-            &unfed_quads,
-            &old_truth,
+            &piece_ends,
         );
+        for (r, h) in std::mem::take(&mut old_faces.mixed) {
+            let c = deep_point(h, &|j| old_of[j].is_some(), true)
+                .and_then(|p2| truth_at(p2, &old_quad, self.edges.len()));
+            old_faces.color[r as usize] = Some(c);
+        }
         let new_faces = match input {
             MapInput::Shapes(_) => None,
-            MapInput::Map(_) => Some(face_colors(
-                &new_of,
-                &next_new,
-                &|_| unreachable!("重ねる地図の辺はみな区間になる"),
-                &piece_segs,
-                &[],
-                &new_truth,
-            )),
+            MapInput::Map(_) => {
+                let mut nf = face_colors(
+                    &new_of,
+                    &next_new,
+                    &|_| unreachable!("重ねる地図の辺はみな区間になる"),
+                    &piece_ends,
+                );
+                for (r, h) in std::mem::take(&mut nf.mixed) {
+                    let c = deep_point(h, &|j| new_of[j].is_some(), false)
+                        .and_then(|p2| truth_at(p2, &new_quad, new_quads.len()));
+                    nf.color[r as usize] = Some(c);
+                }
+                Some(nf)
+            }
         };
         // 面ごとに決めた色での、区間の左右の色
         let resolved = |faces: &FaceColors, k: usize| -> Sides {
@@ -3419,60 +3448,66 @@ impl PlanarMap {
                 faces.color[faces.root[2 * k] as usize].flatten(),
             )
         };
-        // 前の色の索引は、材料の無い面が出たときだけ作る
-        let old_index: std::cell::OnceCell<RayIndex<Option<Color32>>> = std::cell::OnceCell::new();
-        let build_old_index = || {
-            let mut old_items: Vec<(QuadBez, Sides)> = (0..pieces.len())
-                .filter(|&k| old_of[k].is_some())
-                .map(|k| (piece_quad(k), resolved(&old_faces, k)))
-                .collect();
-            old_items.extend(unfed_quads.iter().copied());
-            RayIndex::new(old_items)
+        // その地図の色を持つ区間（面ごとに決めた色）。材料の無い面の色と、中の辺の重ねる地図の色を調べる相手
+        let labeled = |faces: &FaceColors, of: &[Option<Sides>]| {
+            LabeledSegs::new((0..pieces.len()).filter(|&k| of[k].is_some()).map(|k| {
+                let (l, r) = resolved(faces, k);
+                (pieces[k].ia, pieces[k].ib, l, r)
+            }))
         };
-        let new_index = new_faces.as_ref().map(|nf| {
-            RayIndex::new(
-                (0..pieces.len())
-                    .filter(|&k| new_of[k].is_some())
-                    .map(|k| (piece_quad(k), resolved(nf, k)))
-                    .collect(),
-            )
-        });
-        let new_fallback = |q: Point| new_index.as_ref().and_then(|ix| ix.hit(q)).flatten();
-        // 材料の無い面の色：面の中の区間の真ん中の点から、半直線で調べる（面ごとに1回）
+        let old_pieces: std::cell::OnceCell<LabeledSegs<Option<Color32>>> =
+            std::cell::OnceCell::new();
+        let new_pieces = new_faces.as_ref().map(|nf| labeled(nf, &new_of));
+        // 材料の無い面の前の色：前の色を持つ区間と、半直線の高さにかかる入れなかった前からある辺で
+        let old_at = |p2: IPt| {
+            let mut w = Vec::new();
+            old_pieces
+                .get_or_init(|| labeled(&old_faces, &old_of))
+                .winding_into(p2, &mut w);
+            for e in (0..self.edges.len()).filter(|&e| !fed[e]) {
+                let ed = self.edges[e];
+                let q = QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]);
+                if ray_meets_row(reach_of(&q), p2) {
+                    for s in grid_poly(&q).windows(2) {
+                        wind_into(dbl(s[0]), dbl(s[1]), ed.left, ed.right, p2, &mut w);
+                    }
+                }
+            }
+            top_label(&w).flatten()
+        };
+        let new_at = |p2: IPt| new_pieces.as_ref().and_then(|ix| ix.at(p2)).flatten();
+        // 材料の無い面の色：面の区間の頂点で調べる（面ごとに1回）。その頂点は、その地図の色を持つ区間の上に無い
+        // （あれば、頂点のまわりでその区間が同じ面に入り、材料になる）。入れなかった辺は区間に触れない
         let mut old_memo: IntMap<u32, Option<Color32>> = IntMap::default();
         let mut new_memo: IntMap<u32, Option<Color32>> = IntMap::default();
         let color_of = |faces: &FaceColors,
                         memo: &mut IntMap<u32, Option<Color32>>,
                         h: (usize, bool),
-                        fallback: &dyn Fn(Point) -> Option<Color32>|
+                        at: &dyn Fn(IPt) -> Option<Color32>|
          -> Option<Color32> {
             let r = faces.root[2 * h.0 + h.1 as usize];
             if let Some(c) = faces.color[r as usize] {
                 return c;
             }
-            *memo.entry(r).or_insert_with(|| {
-                let p = &pieces[h.0];
-                fallback(nodes[p.a].midpoint(nodes[p.b]))
-            })
+            *memo.entry(r).or_insert_with(|| at(dbl(pieces[h.0].ia)))
         };
-        let old_fallback = |q: Point| old_index.get_or_init(build_old_index).hit(q).flatten();
-        // 重ねる形の中か：区間ごとに i_overlay が数えた、左右が重ねる形の中か
-        let fill_index = match input {
-            MapInput::Shapes(_) => Some(RayIndex::new(
-                (0..pieces.len())
-                    .map(|k| {
-                        let f = pieces[k].fill;
-                        (piece_quad(k), (f & CLIP_LEFT != 0, f & CLIP_RIGHT != 0))
-                    })
-                    .collect(),
-            )),
+        // 重ねる形の中か：区間ごとに i_overlay が数えた、左右が重ねる形の中か（中の辺を調べる相手）
+        let fill_at = match input {
+            MapInput::Shapes(_) => Some(LabeledSegs::new(pieces.iter().map(|p| {
+                (
+                    p.ia,
+                    p.ib,
+                    p.fill & CLIP_LEFT != 0,
+                    p.fill & CLIP_RIGHT != 0,
+                )
+            }))),
             MapInput::Map(_) => None,
         };
         // 5. 区間の新しい色。左右が違う区間だけ残す：（始点, 終点, (左の色, 右の色), 区間の番号）
         let mut kept: Vec<(usize, usize, Sides, usize)> = Vec::new();
         for (k, piece) in pieces.iter().enumerate() {
             let mut side = |fwd: bool| {
-                let old = color_of(&old_faces, &mut old_memo, (k, fwd), &old_fallback);
+                let old = color_of(&old_faces, &mut old_memo, (k, fwd), &old_at);
                 let (inside, p) = match input {
                     MapInput::Shapes(_) => {
                         let f = piece.fill;
@@ -3487,7 +3522,7 @@ impl PlanarMap {
                     }
                     MapInput::Map(_) => {
                         let nf = new_faces.as_ref().expect("重ねる地図の面の色");
-                        let c = color_of(nf, &mut new_memo, (k, fwd), &new_fallback);
+                        let c = color_of(nf, &mut new_memo, (k, fwd), &new_at);
                         (c.is_some(), c)
                     }
                 };
@@ -3504,28 +3539,24 @@ impl PlanarMap {
             at.entry(a).or_default().push(ki);
             at.entry(b).or_default().push(ki);
         }
-        // 中の辺（重ねるものの範囲の中にあって、入れなかった辺）：辺の真ん中の点で、重ねるものの中か（地図なら色）を決めて
-        // 両側に `rule` を当てる。区間と交わらないので、辺のどこでも同じ。左右が同じ色になれば消える
+        // 中の辺（重ねるものの範囲の中にあって、入れなかった辺）：重ねるものの中か（地図なら色）を、切った区間の印で整数で
+        // 決めて、両側に `rule` を当てる。区間に触れないので、辺のどこでも同じ。左右が同じ色になれば消える
         let mut interior_kept: Vec<(usize, MapEdge)> = Vec::new();
         for e in (0..self.edges.len()).filter(|&e| interior[e]) {
             let ed = self.edges[e];
-            // 調べる点は、判定の形（結果の地図と同じ形）の区間の真ん中。曲線の上の点は、判定の形から格子の目ほど離れ、
-            // 近くを通る区間の向こう側に出ることがある
-            let q = QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]);
-            let pe = grid_poly(&q);
-            let m = if pe.len() >= 2 {
-                let k = (pe.len() - 2) / 2;
-                from_grid(pe[k].0, pe[k].1).midpoint(from_grid(pe[k + 1].0, pe[k + 1].1))
-            } else {
-                q.eval(0.5)
-            };
+            // 調べる点は、判定の形の真ん中の区間の真ん中（2倍の座標で、区間の両端の和）。中の辺は両端の頂点のほかで区間に
+            // 触れない（両端の頂点は区間と共有することがあるので使わない）
+            let pe = grid_poly(&QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]));
+            let k = pe.len().saturating_sub(2) / 2;
+            let (a, b) = (pe[k], pe[(k + 1).min(pe.len() - 1)]);
+            let p2 = (a.0 + b.0, a.1 + b.1);
             let (inside, p) = match input {
                 MapInput::Shapes(_) => (
-                    fill_index.as_ref().and_then(|f| f.hit(m)).unwrap_or(false),
+                    fill_at.as_ref().and_then(|f| f.at(p2)).unwrap_or(false),
                     None,
                 ),
                 MapInput::Map(_) => {
-                    let c = new_fallback(m);
+                    let c = new_at(p2);
                     (c.is_some(), c)
                 }
             };
@@ -3736,8 +3767,10 @@ enum Turn {
 struct FaceColors {
     /// 向きのある区間（番号は 2 × 区間 + 向き）ごとの、左の面の代表
     root: Vec<u32>,
-    /// 代表ごとの面の色。材料が無い面は `None`
+    /// 代表ごとの面の色。材料の無い面（と、食い違いを決める前の面）は `None`
     color: Vec<Option<Option<Color32>>>,
+    /// 材料が食い違う面：（代表, 面のいちばん長い向きのある区間）。色は呼び出し側が奥の点で決める
+    mixed: Vec<(u32, usize)>,
 }
 
 /// 片方の地図の色を、切った区間（端は `segs`）の面ごとに1つに決める（`FaceColors`）。
@@ -3748,17 +3781,12 @@ struct FaceColors {
 ///
 /// 材料が食い違うのは、その地図の2本の辺の判定の形が、格子の目ほどの所まで近づいている所だけ（i_overlay が交点を
 /// 格子の点に丸めたり端へ寄せたりするときに、片方の区間がもう片方の向こう側へ移ると、それぞれの辺が自分の側だと
-/// 思っている面が、切った区間の上では別の面になる）。そのときは、面の中の
-/// 奥の点の色を、その地図の元の形（`truth`）で調べる。奥の点：面のいちばん長い区間の真ん中から、面の側へ垂直に
-/// 伸ばした半直線が、その地図の面を分ける最初の線（色を持つ区間と `bounds`）に当たるまでの、半分の所
-/// （当たらなければ、面は外へ開いているので、色は無い）
+/// 思っている面が、切った区間の上では別の面になる）。その面は `mixed` に入れる
 fn face_colors(
     of: &[Option<Sides>],
     next: &dyn Fn((usize, bool)) -> Turn,
     stop_sides: &dyn Fn(usize) -> Sides,
-    segs: &[(Point, Point)],
-    bounds: &[(QuadBez, Sides)],
-    truth: &dyn Fn(Point) -> Option<Color32>,
+    segs: &[(IPt, IPt)],
 ) -> FaceColors {
     fn find(parent: &mut [u32], mut x: u32) -> u32 {
         while parent[x as usize] != x {
@@ -3770,15 +3798,6 @@ fn face_colors(
     }
     let n = segs.len();
     let half = |h: usize| (h / 2, h % 2 == 1);
-    // 向きのある区間の始点と終点
-    let ends = |h: usize| {
-        let (a, b) = segs[h / 2];
-        if h % 2 == 1 {
-            (a, b)
-        } else {
-            (b, a)
-        }
-    };
     let mut parent: Vec<u32> = (0..2 * n as u32).collect();
     let union = |parent: &mut Vec<u32>, x: usize, y: usize| {
         let (rx, ry) = (find(parent, x as u32), find(parent, y as u32));
@@ -3824,55 +3843,64 @@ fn face_colors(
         }
     }
     // 食い違う面：いちばん長い区間
-    let mut longest: IntMap<u32, (f64, usize)> = IntMap::default();
+    let mut longest: IntMap<u32, (i128, usize)> = IntMap::default();
     for (h, &r) in root.iter().enumerate() {
         if claim[r as usize] != Claim::Mixed {
             continue;
         }
-        let (a, b) = ends(h);
-        let len2 = (b - a).hypot2();
-        let slot = longest.entry(r).or_insert((-1.0, h));
-        if len2 > slot.0 {
-            *slot = (len2, h);
+        let (a, b) = segs[h / 2];
+        let (dx, dy) = ((b.0 - a.0) as i128, (b.1 - a.1) as i128);
+        let slot = longest.entry(r).or_insert((-1, h));
+        if dx * dx + dy * dy > slot.0 {
+            *slot = (dx * dx + dy * dy, h);
         }
     }
-    let mut color: Vec<Option<Option<Color32>>> = claim
+    let color = claim
         .iter()
         .map(|c| match c {
             Claim::One(c) => Some(*c),
             _ => None,
         })
         .collect();
-    for (r, (_, h)) in longest {
-        let (a, b) = ends(h);
-        let d = (b - a) / (b - a).hypot();
-        let (m, nrm) = (a.midpoint(b), KVec2::new(-d.y, d.x));
-        let k = h / 2;
-        let hit = (0..n)
-            .filter(|&j| j != k && of[j].is_some())
-            .map(|j| {
-                let (pa, pb) = segs[j];
-                QuadBez::new(pa, pa.midpoint(pb), pb)
-            })
-            .chain(bounds.iter().map(|(q, _)| *q))
-            .filter_map(|q| ray_quad_dist(m, nrm, q))
-            .reduce(f64::min);
-        color[r as usize] = Some(hit.and_then(|s| truth(m + nrm * (s * 0.5))));
-    }
-    FaceColors { root, color }
+    let mut mixed: Vec<(u32, usize)> = longest.into_iter().map(|(r, (_, h))| (r, h)).collect();
+    mixed.sort_unstable();
+    FaceColors { root, color, mixed }
 }
 
-/// 点 `m` から向き `dir`（長さ1）へ伸ばした半直線が、曲線 `q` に最初に当たるまでの距離（当たらなければ `None`）
-fn ray_quad_dist(m: Point, dir: KVec2, q: QuadBez) -> Option<f64> {
-    // 半直線に垂直な向きの成分 g(t) = dir × (q(t) − m) が 0 になる t
-    let g = |p: Point| dir.cross(p - m);
-    let (g0, g1, g2) = (g(q.p0), g(q.p1), g(q.p2));
-    kurbo::common::solve_quadratic(g0, 2.0 * (g1 - g0), g0 - 2.0 * g1 + g2)
-        .into_iter()
-        .filter(|t| (0.0..=1.0).contains(t))
-        .map(|t| dir.dot(q.eval(t) - m))
-        .filter(|s| *s > 0.0)
-        .reduce(f64::min)
+/// 点 `m` から向き `dir`（長さ1）へ伸ばした半直線が、区間 `a`〜`b` に最初に当たるまでの距離（当たらなければ `None`）
+fn ray_seg_dist(m: Point, dir: KVec2, a: Point, b: Point) -> Option<f64> {
+    let e = b - a;
+    let den = dir.cross(e);
+    if den == 0.0 {
+        return None;
+    }
+    let w = a - m;
+    let (s, t) = (w.cross(e) / den, w.cross(dir) / den);
+    (s > 0.0 && (0.0..=1.0).contains(&t)).then_some(s)
+}
+
+/// 点 `m` から向き `dir` へ伸ばした半直線（`reach` があれば、その長さまで）が、格子の点の矩形 `r` にかかるか
+fn ray_meets_rect(m: Point, dir: KVec2, reach: Option<f64>, r: GridRect) -> bool {
+    // 浮動小数で比べるので、矩形を1目広げてから比べる（かかる矩形を落とさない）
+    let g = 1.0 / OVERLAY_GRID;
+    let (lo, hi) = (
+        Point::new((r.x0 - 1) as f64 * g, (r.y0 - 1) as f64 * g),
+        Point::new((r.x1 + 1) as f64 * g, (r.y1 + 1) as f64 * g),
+    );
+    // 矩形の左右・上下の帯に入る半直線の長さの範囲（slab）を重ねる
+    let (mut t0, mut t1) = (0.0f64, reach.unwrap_or(f64::INFINITY));
+    for (o, d, a, b) in [(m.x, dir.x, lo.x, hi.x), (m.y, dir.y, lo.y, hi.y)] {
+        if d == 0.0 {
+            if o < a || o > b {
+                return false;
+            }
+        } else {
+            let (u, v) = ((a - o) / d, (b - o) / d);
+            t0 = t0.max(u.min(v));
+            t1 = t1.min(u.max(v));
+        }
+    }
+    t0 <= t1
 }
 
 /// `overlay_with` が止まった理由
@@ -4196,19 +4224,6 @@ fn seg_pair_clash(
     !((t1.is_some() && t1 == t2) || joint == Some(v))
 }
 
-/// 判定の形の区間を、直線の曲線にしたもの（両側の値 `sides` を付ける。半直線で点の色を調べるとき）
-fn poly_items<T: Copy>(poly: &[IPt], sides: (T, T)) -> Vec<(QuadBez, (T, T))> {
-    (0..poly.len().saturating_sub(1))
-        .map(|k| {
-            let (a, b) = (
-                from_grid(poly[k].0, poly[k].1),
-                from_grid(poly[k + 1].0, poly[k + 1].1),
-            );
-            (QuadBez::new(a, a.midpoint(b), b), sides)
-        })
-        .collect()
-}
-
 /// 2本の辺の判定の形 `pa`（端の頂点 `ea`）と `pb`（`eb`）が、共有する頂点のほかで触れるか
 fn polys_clash(pa: &[IPt], ea: (usize, usize), pb: &[IPt], eb: (usize, usize)) -> bool {
     let rb = GridRect::of(pb);
@@ -4290,15 +4305,7 @@ impl PolyIndex {
         };
         for (e, ed) in edges.iter().enumerate() {
             let q = QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]);
-            // 判定の形の点は、制御点の外接矩形を格子に丸めた所（切り下げ〜切り上げ）に入る
-            let cb = q.bounding_box();
-            let reach = GridRect {
-                x0: (cb.x0.min(q.p1.x) * OVERLAY_GRID).floor() as i64,
-                y0: (cb.y0.min(q.p1.y) * OVERLAY_GRID).floor() as i64,
-                x1: (cb.x1.max(q.p1.x) * OVERLAY_GRID).ceil() as i64,
-                y1: (cb.y1.max(q.p1.y) * OVERLAY_GRID).ceil() as i64,
-            };
-            let poly = if area.is_none_or(|a| a.overlaps(&reach)) {
+            let poly = if area.is_none_or(|a| a.overlaps(&reach_of(&q))) {
                 grid_poly(&q)
             } else {
                 Vec::new()
@@ -4475,6 +4482,123 @@ fn node_cell(p: IPt) -> (i64, i64) {
     (p.0.div_euclid(CELL), p.1.div_euclid(CELL))
 }
 
+/// 区間（2倍の座標の y の範囲 `spans`）を、横の帯に分けた索引：（いちばん下の y, 帯の高さ, 帯ごとの区間の番号）。
+/// 帯の数は区間の数の平方根（上限 256。速さだけに関わる）
+fn y_bands(spans: impl ExactSizeIterator<Item = (i64, i64)> + Clone) -> (i64, i64, Vec<Vec<u32>>) {
+    if spans.len() == 0 {
+        return (0, 1, vec![Vec::new()]);
+    }
+    let (y0, y1) = spans
+        .clone()
+        .fold((i64::MAX, i64::MIN), |(lo, hi), (a, b)| {
+            (lo.min(a), hi.max(b))
+        });
+    let n = ((spans.len() as f64).sqrt().ceil() as usize).clamp(1, 256);
+    let band_h = ((y1 - y0) / n as i64 + 1).max(1);
+    let mut bands = vec![Vec::new(); n];
+    for (i, (lo, hi)) in spans.enumerate() {
+        let (k0, k1) = (((lo - y0) / band_h) as usize, ((hi - y0) / band_h) as usize);
+        for band in bands.iter_mut().take(k1.min(n - 1) + 1).skip(k0.min(n - 1)) {
+            band.push(i as u32);
+        }
+    }
+    (y0, band_h, bands)
+}
+
+/// 帯の索引で、点の y（2倍の座標）の帯にかかる区間の番号
+fn band_at(y0: i64, band_h: i64, bands: &[Vec<u32>], y: i64) -> &[u32] {
+    let k = (y - y0).div_euclid(band_h);
+    if k < 0 || k as usize >= bands.len() {
+        &[]
+    } else {
+        &bands[k as usize]
+    }
+}
+
+/// 右へ伸ばした半直線と区間 `a`〜`b`（2倍の座標）の交わりを、印ごとの巻き数 `w` に足す。上へ横切れば左の印 `l` に +1・
+/// 右の印 `r` に −1、下へ横切れば逆。下の端は含め、上の端は含めない（半開区間）。点が区間の上にあれば数えない（点を
+/// 右上へごくわずかずらした所として数えるのと同じ）
+fn wind_into<L: Copy + PartialEq>(a: IPt, b: IPt, l: L, r: L, p: IPt, w: &mut Vec<(L, i32)>) {
+    let d = if a.1 <= p.1 && b.1 > p.1 && orient(a, b, p) > 0 {
+        1
+    } else if b.1 <= p.1 && a.1 > p.1 && orient(a, b, p) < 0 {
+        -1
+    } else {
+        return;
+    };
+    for (lab, v) in [(l, d), (r, -d)] {
+        match w.iter_mut().find(|x| x.0 == lab) {
+            Some(x) => x.1 += v,
+            None => w.push((lab, v)),
+        }
+    }
+}
+
+/// 巻き数が正の印（印が閉じた境目を作っていれば、点のある所の印。無ければ `None`＝いちばん外）
+fn top_label<L: Copy>(w: &[(L, i32)]) -> Option<L> {
+    w.iter().find(|x| x.1 > 0).map(|x| x.0)
+}
+
+/// 曲線の判定の形が入る、格子の点の矩形（制御点の外接矩形を、切り下げ〜切り上げ）
+fn reach_of(q: &QuadBez) -> GridRect {
+    let lo = |a: f64, b: f64, c: f64| (a.min(b).min(c) * OVERLAY_GRID).floor() as i64;
+    let hi = |a: f64, b: f64, c: f64| (a.max(b).max(c) * OVERLAY_GRID).ceil() as i64;
+    GridRect {
+        x0: lo(q.p0.x, q.p1.x, q.p2.x),
+        y0: lo(q.p0.y, q.p1.y, q.p2.y),
+        x1: hi(q.p0.x, q.p1.x, q.p2.x),
+        y1: hi(q.p0.y, q.p1.y, q.p2.y),
+    }
+}
+
+/// 点 `p`（2倍の座標）から右へ伸ばした半直線が、格子の点の矩形 `r` にかかるか
+fn ray_meets_row(r: GridRect, p: IPt) -> bool {
+    2 * r.y0 <= p.1 && p.1 <= 2 * r.y1 && 2 * r.x1 >= p.0
+}
+
+/// 左右に印（色・重ねる形の中か）のある格子の区間の集まり。点のある所の印を、整数で決める（`at`）
+struct LabeledSegs<L> {
+    /// （始点, 終点, 左の印, 右の印）。座標は格子の点の2倍
+    segs: Vec<(IPt, IPt, L, L)>,
+    y0: i64,
+    band_h: i64,
+    bands: Vec<Vec<u32>>,
+}
+
+impl<L: Copy + PartialEq> LabeledSegs<L> {
+    /// 区間（格子の点）と左右の印
+    fn new(items: impl Iterator<Item = (IPt, IPt, L, L)>) -> Self {
+        let segs: Vec<(IPt, IPt, L, L)> = items
+            .filter(|(a, b, ..)| a != b)
+            .map(|(a, b, l, r)| ((2 * a.0, 2 * a.1), (2 * b.0, 2 * b.1), l, r))
+            .collect();
+        let (y0, band_h, bands) =
+            y_bands(segs.iter().map(|(a, b, ..)| (a.1.min(b.1), a.1.max(b.1))));
+        Self {
+            segs,
+            y0,
+            band_h,
+            bands,
+        }
+    }
+
+    /// 点 `p`（2倍の座標）での巻き数を `w` に足す（`wind_into`）
+    fn winding_into(&self, p: IPt, w: &mut Vec<(L, i32)>) {
+        for &i in band_at(self.y0, self.band_h, &self.bands, p.1) {
+            let (a, b, l, r) = self.segs[i as usize];
+            wind_into(a, b, l, r, p, w);
+        }
+    }
+
+    /// 点 `p`（2倍の座標）のある所の印。区間の印が閉じた境目を作っていれば（正しい地図の色、i_overlay が数えた塗り）、
+    /// どの点でも1つに決まる。点が区間の上にあれば、点を右上へごくわずかずらした所の印になる
+    fn at(&self, p: IPt) -> Option<L> {
+        let mut w = Vec::new();
+        self.winding_into(p, &mut w);
+        top_label(&w)
+    }
+}
+
 /// 格子の多角形（点は2倍の座標）。帯に分けて、点の巻き数を整数で数える
 struct GridPolygon {
     /// （区間の始点, 終点）。座標は格子の点の2倍
@@ -4492,19 +4616,7 @@ impl GridPolygon {
             .map(|i| (dbl(pts[i]), dbl(pts[(i + 1) % pts.len()])))
             .filter(|(a, b)| a != b)
             .collect();
-        let (y0, y1) = segs.iter().fold((i64::MAX, i64::MIN), |(lo, hi), (a, b)| {
-            (lo.min(a.1).min(b.1), hi.max(a.1).max(b.1))
-        });
-        let n = ((segs.len() as f64).sqrt().ceil() as usize).clamp(1, 256);
-        let band_h = ((y1 - y0) / n as i64 + 1).max(1);
-        let mut bands = vec![Vec::new(); n];
-        for (i, (a, b)) in segs.iter().enumerate() {
-            let (lo, hi) = (a.1.min(b.1), a.1.max(b.1));
-            let (k0, k1) = (((lo - y0) / band_h) as usize, ((hi - y0) / band_h) as usize);
-            for band in bands.iter_mut().take(k1.min(n - 1) + 1).skip(k0.min(n - 1)) {
-                band.push(i as u32);
-            }
-        }
+        let (y0, band_h, bands) = y_bands(segs.iter().map(|(a, b)| (a.1.min(b.1), a.1.max(b.1))));
         Self {
             segs,
             y0,
@@ -4515,15 +4627,8 @@ impl GridPolygon {
 
     /// 点 `p`（2倍の座標）の巻き数。`p` が輪郭の上にあれば `None`
     fn winding(&self, p: IPt) -> Option<i32> {
-        if self.segs.is_empty() {
-            return Some(0);
-        }
-        let k = (p.1 - self.y0).div_euclid(self.band_h);
-        if k < 0 || k as usize >= self.bands.len() {
-            return Some(0);
-        }
         let mut w = 0;
-        for &i in &self.bands[k as usize] {
+        for &i in band_at(self.y0, self.band_h, &self.bands, p.1) {
             let (a, b) = self.segs[i as usize];
             if on_seg(a, b, p) {
                 return None;
@@ -4586,6 +4691,10 @@ impl GridRect {
         p.0 >= 2 * self.x0 && p.0 <= 2 * self.x1 && p.1 >= 2 * self.y0 && p.1 <= 2 * self.y1
     }
 }
+
+/// 奥の点を調べるときの座標の細かさ（格子の目の 1/2^24）。座標の上限（±2^28 目）の f64 は、この細かさまでしか持たないので、
+/// 浮動小数で選んだ点をそのまま整数で調べられる。区間の端の座標は ±2^52 になり、外積は i128 に収まる
+const FINE: i64 = 1 << 24;
 
 /// 近さを調べる格子の1マス（8px）
 const GRID_CELL: i64 = 8 * OVERLAY_GRID as i64;
@@ -4659,138 +4768,4 @@ fn from_grid(x: i64, y: i64) -> Point {
 /// 点を格子の点に丸めた座標（格子に置けない点はそのまま。その点を使う重ね合わせは `to_grid` で断る）
 fn grid_round(p: Point) -> Point {
     to_grid(p).map_or(p, |ip| from_grid(ip.x as i64, ip.y as i64))
-}
-
-/// 点 `p` から右（+x の向き）へ伸ばした半直線が、`items` の辺（曲線, (左の値, 右の値)）のうち最初に当たるものの、
-/// 点の側の値（当たらなければ `None`）。曲線は y について単調な部分に分け、部分の下の端は含め、上の端は含めない
-/// （半開区間）ので、頂点にちょうど当たっても、そこを通る辺のどちらか一方だけに当たる。同じ所に当たる辺どうしは、
-/// 点を上へごくわずか動かしたときに先に当たるもの（上へ進むと左へ寄るもの）を選ぶ
-fn first_right_hit<'a, T: Copy + 'a>(
-    p: Point,
-    items: impl IntoIterator<Item = &'a (QuadBez, (T, T))>,
-) -> Option<T> {
-    let mut best: Option<(f64, f64, T)> = None;
-    for (q, sides) in items {
-        ray_hit_into(p, q, *sides, &mut best);
-    }
-    best.map(|b| b.2)
-}
-
-/// `first_right_hit` の辺1本分：辺 `q` に当たれば、今までの一番近い当たり `best`（x, 傾き, 値）と比べて入れ替える
-fn ray_hit_into<T: Copy>(
-    p: Point,
-    q: &QuadBez,
-    (left, right): (T, T),
-    best: &mut Option<(f64, f64, T)>,
-) {
-    let b = q.bounding_box();
-    if p.y < b.y0 || p.y >= b.y1 || b.x1 <= p.x {
-        return;
-    }
-    // y の極値で単調な部分に分ける
-    let den = q.p0.y - 2.0 * q.p1.y + q.p2.y;
-    let t_ext = if den != 0.0 {
-        (q.p0.y - q.p1.y) / den
-    } else {
-        -1.0
-    };
-    let mut cuts = [0.0, 1.0, 1.0];
-    let n = if t_ext > 0.0 && t_ext < 1.0 {
-        cuts[1] = t_ext;
-        3
-    } else {
-        2
-    };
-    for w in cuts[..n].windows(2) {
-        let (ta, tb) = (w[0], w[1]);
-        let (ya, yb) = (q.eval(ta).y, q.eval(tb).y);
-        if !(ya.min(yb) <= p.y && p.y < ya.max(yb)) {
-            continue;
-        }
-        // 単調な部分の中で y(t) = p.y になる t（二分法。y は ta から tb へ単調。区間がそれ以上縮まなくなるまで）
-        let up = yb > ya;
-        let (mut lo, mut hi) = (ta, tb);
-        loop {
-            let mid = 0.5 * (lo + hi);
-            if mid <= lo || mid >= hi {
-                break;
-            }
-            if (q.eval(mid).y < p.y) == up {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        let t = 0.5 * (lo + hi);
-        let x = q.eval(t).x;
-        if x <= p.x {
-            continue;
-        }
-        let d = quad_deriv(q, t);
-        let slope = if d.y != 0.0 { d.x / d.y } else { 0.0 };
-        if best.is_none_or(|(bx, bs, _)| x < bx || (x == bx && slope < bs)) {
-            *best = Some((x, slope, if up { left } else { right }));
-        }
-    }
-}
-
-/// `first_right_hit` を速く行うための、辺を横の帯に分けた索引（点の帯にかかる辺だけを見る。答えは全部を見たときと同じ）
-struct RayIndex<T> {
-    items: Vec<(QuadBez, (T, T))>,
-    x0s: Vec<f64>,
-    y0: f64,
-    band_h: f64,
-    bands: Vec<Vec<u32>>,
-}
-
-impl<T: Copy> RayIndex<T> {
-    fn new(items: Vec<(QuadBez, (T, T))>) -> Self {
-        let boxes: Vec<KRect> = items.iter().map(|(q, _)| q.bounding_box()).collect();
-        let (y0, y1) = boxes
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), b| {
-                (lo.min(b.y0), hi.max(b.y1))
-            });
-        // 帯の数は辺の数の平方根（速さだけに関わる）
-        let n = ((items.len() as f64).sqrt().ceil() as usize).max(1);
-        let band_h = if y1 > y0 { (y1 - y0) / n as f64 } else { 1.0 };
-        let mut me = Self {
-            items,
-            x0s: Vec::new(),
-            y0,
-            band_h,
-            bands: vec![Vec::new(); n],
-        };
-        for (i, b) in boxes.iter().enumerate() {
-            let (lo, hi) = (me.band_of(b.y0), me.band_of(b.y1));
-            for band in &mut me.bands[lo..=hi] {
-                band.push(i as u32);
-            }
-        }
-        // 帯の中は、外接矩形の左端の順（左から見ていき、いちばん近い当たりより右から始まる辺で止める）
-        for band in &mut me.bands {
-            band.sort_by(|&x, &y| boxes[x as usize].x0.total_cmp(&boxes[y as usize].x0));
-        }
-        me.x0s = boxes.iter().map(|b| b.x0).collect();
-        me
-    }
-
-    fn band_of(&self, y: f64) -> usize {
-        (((y - self.y0) / self.band_h).max(0.0) as usize).min(self.bands.len() - 1)
-    }
-
-    fn hit(&self, p: Point) -> Option<T> {
-        if self.items.is_empty() {
-            return None;
-        }
-        let mut best: Option<(f64, f64, T)> = None;
-        for &i in &self.bands[self.band_of(p.y)] {
-            if best.is_some_and(|b| self.x0s[i as usize] > b.0) {
-                break;
-            }
-            let (q, sides) = &self.items[i as usize];
-            ray_hit_into(p, q, *sides, &mut best);
-        }
-        best.map(|b| b.2)
-    }
 }

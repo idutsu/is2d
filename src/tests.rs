@@ -21651,6 +21651,101 @@ mod map_overlay {
         m
     }
 
+    /// 地図だけで描く試し（`native_scene` と同じ作り方）を種 `seed` で `steps` 手行い、結果が正しい地図でなくなった最初の手
+    /// （無ければ `None`）
+    fn native_steps(seed: u64, steps: usize) -> Option<String> {
+        let mut r = Rng(seed);
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+        let mut m = PlanarMap {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            node_src: Vec::new(),
+        };
+        for k in 0..steps {
+            let next = if k % 4 == 3 {
+                let p = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
+                m.with_face_filled(p, colors[(r.f() * 4.0) as usize % 4])
+            } else {
+                let cnt = 2 + (r.f() * 4.0) as usize;
+                let mut pts = Vec::new();
+                let mut p = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
+                for _ in 0..cnt {
+                    let q = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
+                    for j in 0..10 {
+                        pts.push(p.lerp(q, j as f64 / 10.0));
+                    }
+                    p = q;
+                }
+                pts.push(p);
+                let radius = 3.0 + r.f() * 10.0;
+                let color = colors[(r.f() * 4.0) as usize % 4];
+                let stroke = build_smoothed_stroke_shapes_at_zoom(
+                    &generate_brush_outline_at_zoom(&pts, radius, 1.0),
+                    color,
+                    1.0,
+                );
+                let rule = MapRule::Paint(if k % 6 == 5 { None } else { Some(color) });
+                m.overlay(MapInput::Shapes(&stroke), rule)
+            };
+            if let Some(next) = next {
+                if !next.is_valid() {
+                    return Some(format!("seed {seed} step {k}: {}", next.validity_report()));
+                }
+                m = next;
+            }
+        }
+        None
+    }
+
+    /// 重ね合わせが正しい地図を保つ（レビュー 08c15dd の N-1001 の再現）。種 31 の 64 手目：中の辺の内外を浮動小数の半直線で
+    /// 決めて反対の側を読んでいた。種 2342 の 28 手目：i_overlay が、向きが逆になって重なった2本の区間の数を打ち消して、
+    /// 区間ごと消していた
+    #[test]
+    fn native_overlay_seeds_31_and_2342_stay_valid() {
+        assert_eq!(native_steps(31, 65), None);
+        assert_eq!(native_steps(2342, 29), None);
+    }
+
+    /// 点のある所の色（判定の形の整数の位置決め）：半直線が頂点や水平な区間を通るとき、点が辺の上にあるとき
+    #[test]
+    fn color_at_through_vertices_and_on_edges() {
+        // 赤の正方形の中に、頂点を共有する青の三角形（頂点 (200,150) を通る横の半直線、底辺が水平）
+        let red = rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED);
+        let tri = [
+            Point::new(150.0, 150.0),
+            Point::new(250.0, 150.0),
+            Point::new(200.0, 250.0),
+        ];
+        let segs = (0..3)
+            .map(|i| {
+                let (a, b) = (tri[i], tri[(i + 1) % 3]);
+                QuadBez::new(a, a.midpoint(b), b)
+            })
+            .collect();
+        let blue = FillShape::new(
+            Color32::BLUE,
+            crate::vector_engine::Contour::new(segs),
+            Vec::new(),
+        );
+        let m = PlanarMap::from_faces(std::iter::once(&red)).overlay(
+            MapInput::Shapes(std::slice::from_ref(&blue)),
+            MapRule::Paint(Some(Color32::BLUE)),
+        );
+        let m = m.expect("重ねられる");
+        assert!(valid(&m));
+        for (p, want) in [
+            ((120.0, 150.0), Some(Color32::RED)), // 横の半直線が三角形の底辺（水平）と右上の正方形の角を通る
+            ((175.0, 150.0), Some(Color32::BLUE)), // 底辺の上（右上へずらした所＝三角形の中）
+            ((120.0, 250.0), Some(Color32::RED)), // 半直線が三角形の頂点 (200,250) を通る
+            ((200.0, 200.0), Some(Color32::BLUE)),
+            ((50.0, 150.0), None), // 外（半直線が正方形の左の辺・三角形を横切る）
+            ((300.0, 200.0), None), // 正方形の右の辺の上（右へずらした所＝外）
+            ((100.0, 200.0), Some(Color32::RED)), // 正方形の左の辺の上（右へずらした所＝中）
+        ] {
+            assert_eq!(m.color_at(Point::new(p.0, p.1)), want, "{p:?}");
+        }
+    }
+
     /// 地図だけで描く試し（`native_scene` と同じ作り方）を多くの種で行い、重ね合わせの結果が正しい地図でなくなった所を数える
     /// （レビュー 08c15dd の N-1001 の再現）
     #[test]
@@ -21664,51 +21759,7 @@ mod map_overlay {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(70);
-        let run = |seed: u64| -> Vec<String> {
-            let mut out = Vec::new();
-            let mut r = Rng(seed);
-            let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
-            let mut m = PlanarMap {
-                nodes: Vec::new(),
-                edges: Vec::new(),
-                node_src: Vec::new(),
-            };
-            for k in 0..steps {
-                let next = if k % 4 == 3 {
-                    let p = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
-                    m.with_face_filled(p, colors[(r.f() * 4.0) as usize % 4])
-                } else {
-                    let cnt = 2 + (r.f() * 4.0) as usize;
-                    let mut pts = Vec::new();
-                    let mut p = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
-                    for _ in 0..cnt {
-                        let q = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
-                        for j in 0..10 {
-                            pts.push(p.lerp(q, j as f64 / 10.0));
-                        }
-                        p = q;
-                    }
-                    pts.push(p);
-                    let radius = 3.0 + r.f() * 10.0;
-                    let color = colors[(r.f() * 4.0) as usize % 4];
-                    let stroke = build_smoothed_stroke_shapes_at_zoom(
-                        &generate_brush_outline_at_zoom(&pts, radius, 1.0),
-                        color,
-                        1.0,
-                    );
-                    let rule = MapRule::Paint(if k % 6 == 5 { None } else { Some(color) });
-                    m.overlay(MapInput::Shapes(&stroke), rule)
-                };
-                if let Some(next) = next {
-                    if !next.is_valid() {
-                        out.push(format!("seed {seed} step {k}: {}", next.validity_report()));
-                        break;
-                    }
-                    m = next;
-                }
-            }
-            out
-        };
+        let run = |seed: u64| -> Vec<String> { native_steps(seed, steps).into_iter().collect() };
         let threads = 2u64;
         let t0 = std::time::Instant::now();
         let fails: Vec<String> = std::thread::scope(|sc| {

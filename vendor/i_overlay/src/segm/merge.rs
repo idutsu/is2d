@@ -69,7 +69,7 @@ fn merge<I: IntNumber, C: WindingCount, D: OverlayEdgeData<C>>(
             );
             prev.count = out_count;
         } else {
-            if prev.count.is_not_empty() {
+            if prev.count.is_not_empty() || prev.data.keep_when_count_cancels() {
                 segments[j] = prev;
                 j += 1;
             }
@@ -78,7 +78,7 @@ fn merge<I: IntNumber, C: WindingCount, D: OverlayEdgeData<C>>(
         i += 1;
     }
 
-    if prev.count.is_not_empty() {
+    if prev.count.is_not_empty() || prev.data.keep_when_count_cancels() {
         segments[j] = prev;
         j += 1;
     }
