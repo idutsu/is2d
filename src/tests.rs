@@ -6056,17 +6056,38 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
     use kurbo::ParamCurve;
 
     let mut app = Is2dApp::default();
-    put_cel_shapes(
-        &mut app,
-        0,
-        0,
-        make_stroke(
-            Point::new(100.0, 200.0),
-            Point::new(300.0, 200.0),
-            20.0,
-            Color32::from_rgb(220, 60, 60),
-        ),
-    );
+    // 地図の図形は重ね合わせで作るので、頂点はいつも格子（1/4096px）の上にある。この試しの図形も頂点を格子の上に置く
+    // （輪郭の変形の確定は重ね合わせで行い、入れた辺の頂点を格子に置くので）
+    let g = |p: Point| {
+        Point::new(
+            (p.x * 4096.0).round() / 4096.0,
+            (p.y * 4096.0).round() / 4096.0,
+        )
+    };
+    let on_grid = |c: &crate::vector_engine::Contour| {
+        crate::vector_engine::Contour::new(
+            c.segments
+                .iter()
+                .map(|q| QuadBez::new(g(q.p0), q.p1, g(q.p2)))
+                .collect(),
+        )
+    };
+    let shapes = make_stroke(
+        Point::new(100.0, 200.0),
+        Point::new(300.0, 200.0),
+        20.0,
+        Color32::from_rgb(220, 60, 60),
+    )
+    .into_iter()
+    .map(|s| {
+        FillShape::new(
+            s.color,
+            on_grid(&s.exterior),
+            s.holes.iter().map(on_grid).collect(),
+        )
+    })
+    .collect();
+    put_cel_shapes(&mut app, 0, 0, shapes);
 
     // 最も長いセグメントを選び、端点付近 (t = 0.05 < 0.18) かつ曲線から少し外れた座標でドラッグ開始 (#5)
     let seg_idx = scene_summary(&app).shapes[0]
@@ -21724,17 +21745,16 @@ mod map_overlay {
             if m.edges.is_empty() {
                 return (0, 0, 0, 0, notes);
             }
-            let base = crate::planar_map::ReshapeBase::new(std::sync::Arc::new(m.clone()), false);
             let before = m.color_locator();
             let mut r = Rng(seed * 7919 + 1);
             for i in 0..per {
                 let dist = 2.0 + r.f() * 60.0;
                 let ang = r.f() * std::f64::consts::TAU;
                 let d = KVec2::new(ang.cos(), ang.sin()) * dist;
-                let (next, moved): (PlanarMap, Vec<usize>) = if i % 2 == 0 {
+                let (next, moved): (Option<PlanarMap>, Vec<usize>) = if i % 2 == 0 {
                     let v = (r.f() * m.nodes.len() as f64) as usize % m.nodes.len();
                     let target = m.nodes[v] + d;
-                    (base.edit_vertex(v, target), m.edges_at(v))
+                    (m.commit_move_vertex(v, target), m.edges_at(v))
                 } else {
                     let e = (r.f() * m.edges.len() as f64) as usize % m.edges.len();
                     let t = 0.18 + r.f() * 0.64;
@@ -21743,9 +21763,13 @@ mod map_overlay {
                     if (p - q.p0).hypot() <= 9.0 || (p - q.p2).hypot() <= 9.0 {
                         continue;
                     }
-                    (base.edit_edge(e, t, p + d), vec![e])
+                    (m.commit_pull_edge(e, t, p + d), vec![e])
                 };
                 n += 1;
+                let Some(next) = next else {
+                    cancelled += 1;
+                    continue;
+                };
                 if !next.is_valid() {
                     invalid += 1;
                     if notes.len() < 3 {
@@ -22113,44 +22137,34 @@ mod map_overlay {
         }
     }
 
-    /// ほぼ平行に並ぶ2本の曲線（0.01px 離れて長く並ぶ）は交わらず、交わる2本は交わると分かる
+    /// 角の吸着（レビュー 08c15dd の N-2004）：頂点を別の面の頂点の座標へ動かして確定すると、2つの頂点は1つになり、
+    /// 地図は正しい（書き戻しの座標の一致に頼らない）
     #[test]
-    fn quad_intersections_near_parallel() {
-        let a = QuadBez::new(
-            Point::new(0.0, 0.0),
-            Point::new(50.0, 30.0),
-            Point::new(100.0, 0.0),
+    fn move_vertex_onto_other_vertex_merges_them() {
+        let red = rect_shape(100.0, 100.0, 200.0, 200.0, Color32::RED);
+        let blue = rect_shape(250.0, 100.0, 350.0, 200.0, Color32::BLUE);
+        let m = PlanarMap::from_faces([&red, &blue]);
+        assert!(valid(&m));
+        let v = (0..m.nodes.len())
+            .find(|&v| m.nodes[v] == Point::new(200.0, 100.0))
+            .expect("赤の右上の頂点");
+        let w = Point::new(250.0, 100.0);
+        let next = m.commit_move_vertex(v, w).expect("確定できる");
+        assert!(valid(&next));
+        assert_eq!(
+            next.nodes.iter().filter(|&&p| p == w).count(),
+            1,
+            "頂点は1つ"
         );
-        let b = QuadBez::new(
-            Point::new(0.0, 0.01),
-            Point::new(50.0, 30.01),
-            Point::new(100.0, 0.01),
+        assert_eq!(
+            next.edges_at(next.nodes.iter().position(|&p| p == w).unwrap())
+                .len(),
+            4
         );
-        let mut m = PlanarMap {
-            nodes: vec![a.p0, a.p2, b.p0, b.p2],
-            edges: Vec::new(),
-            node_src: vec![None; 4],
-        };
-        let edge = |a, b, ctrl| crate::planar_map::MapEdge {
-            a,
-            b,
-            ctrl,
-            left: Some(Color32::RED),
-            right: None,
-            left_src: None,
-            right_src: None,
-        };
-        m.edges.push(edge(0, 1, a.p1));
-        m.edges.push(edge(2, 3, b.p1));
-        assert!(m.crossings_grid_pub(&[0, 1]).is_empty());
-        let c = QuadBez::new(
-            Point::new(0.0, 5.0),
-            Point::new(50.0, 0.0),
-            Point::new(100.0, 5.0),
-        );
-        m.nodes.extend([c.p0, c.p2]);
-        m.edges.push(edge(4, 5, c.p1));
-        assert!(!m.crossings_grid_pub(&[2]).is_empty());
+        // 赤は (100,100)・(250,100)・(200,200)・(100,200) の四角形になる
+        assert_eq!(next.color_at(Point::new(230.0, 110.0)), Some(Color32::RED));
+        assert_eq!(next.color_at(Point::new(230.0, 190.0)), None);
+        assert_eq!(next.color_at(Point::new(300.0, 150.0)), Some(Color32::BLUE));
     }
 
     /// ほぼ重なった2本の辺（間がごく細い面）の上に重ねても壊れない。間が格子の目（1/4096px）より細いと、2本の
@@ -23228,9 +23242,9 @@ mod map_overlay {
         }
     }
 
-    /// 点の色を半直線で調べた答えが、色ごとの輪郭で調べた答えと同じ（重ね合わせの色決めの最後の手段に使う）
+    /// 地図で調べた点の色（`color_at`）が、地図を作った図形で調べた色と同じ
     #[test]
-    fn ray_color_matches_color_regions() {
+    fn color_at_matches_source_shapes() {
         let app = dense_scene_app(3);
         let mut r = Rng(11);
         let mut checked = 0;
@@ -23260,8 +23274,12 @@ mod map_overlay {
                 if near {
                     continue;
                 }
-                let (ray, regions) = m.ray_color_pub(p);
-                assert_eq!(ray, Some(regions), "レイヤー {layer} の点 {p:?}");
+                let from_shapes = shapes
+                    .iter()
+                    .rev()
+                    .find(|s| s.contains_point(p))
+                    .map(|s| s.color);
+                assert_eq!(m.color_at(p), from_shapes, "レイヤー {layer} の点 {p:?}");
                 checked += 1;
             }
         }
@@ -24052,6 +24070,75 @@ mod map_overlay {
                 "壊れた"
             }
         );
+    }
+
+    /// 計測の試し（ふだんは流さない）：輪郭の変形のドラッグ1回分（`reshape_result`。離したときの確定も同じ計算）の時間。
+    /// 図形の多い場面の3レイヤーで、辺の真ん中の引っぱりと頂点の移動を、5・20・60px ずつ 50回ずつ
+    #[test]
+    #[ignore]
+    fn probe_reshape_timing() {
+        use crate::planar_map::{reshape_result, MapEdit, ReshapeBase};
+        let app = dense_scene_app(7);
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
+        let stats = |v: &[f64]| {
+            let mut s = v.to_vec();
+            s.sort_by(f64::total_cmp);
+            (
+                s.iter().sum::<f64>() / s.len() as f64,
+                s[s.len() * 9 / 10],
+                s[s.len() - 1],
+            )
+        };
+        for layer in 0..3 {
+            let shapes: Vec<FillShape> = app.doc.root.layers[layer].keyframes[0]
+                .cel
+                .shapes
+                .iter()
+                .filter(|s| s.is_raw_at_scope(&[]))
+                .map(|s| (**s).clone())
+                .collect();
+            let map = PlanarMap::from_faces(shapes.iter());
+            assert!(map.is_valid(), "レイヤー {layer} の地図");
+            let base = ReshapeBase::new(std::sync::Arc::new(map.clone()), false);
+            let layer_id = shapes[0].layer_id;
+            let mut r = Rng(layer as u64 + 1);
+            for dist in [5.0, 20.0, 60.0] {
+                let (mut pull, mut moved) = (Vec::new(), Vec::new());
+                for i in 0..100 {
+                    let ang = r.f() * std::f64::consts::TAU;
+                    let d = KVec2::new(ang.cos(), ang.sin()) * dist;
+                    let edit = if i % 2 == 0 {
+                        let e = (r.f() * map.edges.len() as f64) as usize % map.edges.len();
+                        let q = map.quad(e);
+                        MapEdit::PullEdge {
+                            orig_seg: q,
+                            grab_t: 0.5,
+                            target: q.eval(0.5) + d,
+                        }
+                    } else {
+                        let v = (r.f() * map.nodes.len() as f64) as usize % map.nodes.len();
+                        MapEdit::MoveVertex {
+                            orig_vertex: map.nodes[v],
+                            target: map.nodes[v] + d,
+                        }
+                    };
+                    let t = std::time::Instant::now();
+                    let out = reshape_result(&base, edit, &shapes, layer_id, &[]);
+                    std::hint::black_box(out);
+                    if i % 2 == 0 {
+                        pull.push(ms(t));
+                    } else {
+                        moved.push(ms(t));
+                    }
+                }
+                let (pa, p9, pm) = stats(&pull);
+                let (ma, m9, mm) = stats(&moved);
+                eprintln!(
+                    "PROBE レイヤー {layer}（辺 {}）{dist}px：辺の引っぱり 平均 {pa:.2}・9割 {p9:.2}・最大 {pm:.2}ms｜頂点の移動 平均 {ma:.2}・9割 {m9:.2}・最大 {mm:.2}ms",
+                    map.edges.len()
+                );
+            }
+        }
     }
 
     /// 計測の試し（ふだんは流さない）：レイヤーの地図が正しいかを調べる時間

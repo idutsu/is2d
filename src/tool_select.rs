@@ -426,7 +426,7 @@ pub(crate) fn draw_select_tool_cursor(
             ..
         }) => {
             if tab.view.show_wireframe {
-                // 引っぱっている辺の今の形（`PlanarMap::with_edge_pulled` と同じ式）
+                // 引っぱっている辺の今の形（`PlanarMap::commit_pull_edge` と同じ式）
                 let mut seg = *orig_seg;
                 seg.p1 += (*last_pos - orig_seg.eval(*grab_t)) / (2.0 * grab_t * (1.0 - grab_t));
                 draw_highlighted_quad_segment(tab, painter, seg);
