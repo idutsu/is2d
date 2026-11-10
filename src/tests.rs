@@ -21718,7 +21718,7 @@ mod map_overlay {
         let run = |seed: u64| -> (usize, usize, usize, usize, Vec<String>) {
             let (mut n, mut invalid, mut cancelled, mut outside) = (0, 0, 0, 0);
             let mut notes = Vec::new();
-            let Ok(m) = native_run(seed, if seed % 2 == 0 { 30 } else { 70 }) else {
+            let Ok(m) = native_run(seed, if seed.is_multiple_of(2) { 30 } else { 70 }) else {
                 return (0, 0, 0, 0, notes);
             };
             if m.edges.is_empty() {
@@ -21807,9 +21807,8 @@ mod map_overlay {
                 .collect();
             hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
         });
-        let sum = |f: fn(&(usize, usize, usize, usize, Vec<String>)) -> usize| {
-            res.iter().map(f).sum::<usize>()
-        };
+        type Row = (usize, usize, usize, usize, Vec<String>);
+        let sum = |f: fn(&Row) -> usize| res.iter().map(f).sum::<usize>();
         for r in &res {
             for n in &r.4 {
                 eprintln!("PROBE {n}");
