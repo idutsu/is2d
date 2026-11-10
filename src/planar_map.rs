@@ -1219,7 +1219,7 @@ impl PlanarMap {
         // 頂点ごとに、出ていく向きのある辺を角度の順に並べ、並びの中の位置を覚える
         let mut pos = vec![0usize; 2 * self.edges.len()];
         for list in &mut out_of {
-            list.sort_by(|&x, &y| cmp_dir(dir(x), dir(y)).then(idx(x).cmp(&idx(y))));
+            list.sort_by(|&x, &y| cmp_dir(wide(dir(x)), wide(dir(y))).then(idx(x).cmp(&idx(y))));
             for (k, &h) in list.iter().enumerate() {
                 pos[idx(h)] = k;
             }
@@ -1690,6 +1690,8 @@ pub(crate) struct LayerMap {
     pub(crate) repainted: bool,
     /// 場面の並びで、このレイヤーの生の図形が最初に出てくる番号（これより後ろの、ほかの図形が前面）
     first_idx: usize,
+    /// このレイヤーの、地図にした図形の鍵（図形が同じなら、地図を作り直さずに使い回す）
+    key: u64,
 }
 
 /// カーソル合わせ用の地図（場面の生の図形が変わるまで使い回す）
@@ -1703,22 +1705,13 @@ fn is_map_shape(s: &FillShape, scope: &[u64]) -> bool {
     s.is_raw_at_scope(scope) && s.symbol_instance.is_none() && !s.exterior.segments.is_empty()
 }
 
-/// 編集中の階層の生の図形（選択中の図形を除く）から、レイヤーごとに地図を作る（前回と図形が同じなら作り直さない）
+/// 編集中の階層の生の図形（選択中の図形を除く）から、レイヤーごとに地図を作る。前回と図形が同じレイヤーは作り直さない
+/// （1回の編集で変わるのは触ったレイヤーだけなので、作り直すのもそのレイヤーだけになる）
 pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> {
     use std::hash::{Hash, Hasher};
     let scope = &session.editing_group_path;
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    scope.hash(&mut h);
     // 選択中の図形（浮いている図形は、ほかの図形と重なることがある）は入れない
     let in_map = |s: &FillShape| is_map_shape(s, scope) && !session.selection.contains_shape(s);
-    for s in scene.iter().filter(|s| in_map(s)) {
-        (s.layer_id, s.shape_id, s.mesh_revision).hash(&mut h);
-    }
-    let key = h.finish();
-    let mut cache = session.planar_maps.lock();
-    if let Some(c) = cache.as_ref().filter(|c| c.key == key) {
-        return c.clone();
-    }
     let mut by_layer: Vec<(LayerId, usize, Vec<&FillShape>)> = Vec::new();
     for (idx, s) in scene.iter().enumerate().filter(|(_, s)| in_map(s)) {
         match by_layer.iter_mut().find(|x| x.0 == s.layer_id) {
@@ -1726,17 +1719,48 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
             None => by_layer.push((s.layer_id, idx, vec![s])),
         }
     }
+    let layer_key = |layer_id: LayerId, shapes: &[&FillShape]| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (scope, layer_id).hash(&mut h);
+        for s in shapes {
+            (s.shape_id, s.mesh_revision).hash(&mut h);
+        }
+        h.finish()
+    };
+    let keys: Vec<u64> = by_layer
+        .iter()
+        .map(|(layer_id, _, shapes)| layer_key(*layer_id, shapes))
+        .collect();
+    let key = {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        keys.hash(&mut h);
+        h.finish()
+    };
+    let mut cache = session.planar_maps.lock();
+    let prev = match cache.as_ref() {
+        Some(c) if c.key == key => return c.clone(),
+        Some(c) => c.clone(),
+        None => Arc::new(ScopeMaps::default()),
+    };
     // 地図にできないレイヤー（格子に置けない座標がある）は入れない（カーソル合わせも変形もしない）
     let maps = by_layer
         .into_iter()
-        .filter_map(|(layer_id, first_idx, shapes)| {
-            let (map, repainted) = layer_map(&shapes)?;
+        .zip(keys)
+        .filter_map(|((layer_id, first_idx, shapes), key)| {
+            let (map, repainted) = match prev.maps.iter().find(|m| m.key == key) {
+                Some(old) => (old.map.clone(), old.repainted),
+                None => {
+                    let (map, repainted) = layer_map(&shapes)?;
+                    (Arc::new(map), repainted)
+                }
+            };
             Some(LayerMap {
                 layer_id,
                 group_path: scope.clone(),
-                map: Arc::new(map),
+                map,
                 repainted,
                 first_idx,
+                key,
             })
         })
         .collect();
@@ -1935,29 +1959,6 @@ impl PlanarMap {
         })
     }
 
-    /// 編集をかけた形と、動いた辺
-    pub(crate) fn apply_edit(&self, edit: MapEdit) -> Option<(PlanarMap, Vec<usize>)> {
-        match edit {
-            MapEdit::PullEdge {
-                orig_seg,
-                grab_t,
-                target,
-            } => {
-                let (e, forward) = self.find_edge(&orig_seg)?;
-                let t = if forward { grab_t } else { 1.0 - grab_t };
-                Some((self.with_edge_pulled(e, t, target), vec![e]))
-            }
-            MapEdit::MoveVertex {
-                orig_vertex,
-                target,
-            } => {
-                let v = (0..self.nodes.len()).find(|&v| self.nodes[v] == orig_vertex)?;
-                Some((self.with_node_moved(v, target), self.edges_at(v)))
-            }
-            MapEdit::AddAnchor { .. } | MapEdit::DeleteAnchor { .. } => None,
-        }
-    }
-
     /// 辺 `e` を `t`（0.08〜0.92 に収める）の所で2本に切った形（形は変わらない）
     pub(crate) fn with_anchor_added(&self, e: usize, t: f64) -> Option<PlanarMap> {
         let t = t.clamp(0.08, 0.92);
@@ -2107,9 +2108,27 @@ pub(crate) fn reshape_result(
             let v = (0..map.nodes.len()).find(|&v| map.nodes[v] == orig_vertex)?;
             map.with_anchor_deleted(v)?
         }
-        MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => {
-            let (edited, moved) = map.apply_edit(edit)?;
-            commit_edit(map, &base.cycles, edited, &moved).0
+        MapEdit::PullEdge {
+            orig_seg,
+            grab_t,
+            target,
+        } => {
+            let (e, forward) = map.find_edge(&orig_seg)?;
+            let t = if forward { grab_t } else { 1.0 - grab_t };
+            commit_edit(map, &base.cycles, map.with_edge_pulled(e, t, target), &[e]).0
+        }
+        MapEdit::MoveVertex {
+            orig_vertex,
+            target,
+        } => {
+            let v = (0..map.nodes.len()).find(|&v| map.nodes[v] == orig_vertex)?;
+            commit_edit(
+                map,
+                &base.cycles,
+                map.with_node_moved(v, target),
+                &map.edges_at(v),
+            )
+            .0
         }
     };
     if base.repainted {
@@ -2683,19 +2702,24 @@ fn flat_count(q: &QuadBez, tol: f64) -> usize {
     ((dd / (4.0 * tol)).sqrt().ceil() as usize).clamp(1, 512)
 }
 
-/// 整数の向きを、角度の順（x 軸の正の向きから、面積の式で正の回り方）に比べる
-fn cmp_dir(a: (i64, i64), b: (i64, i64)) -> std::cmp::Ordering {
-    let half = |d: (i64, i64)| {
+/// 整数の向きを、角度の順（x 軸の正の向きから、面積の式で正の回り方）に比べる（向きは格子の点の差か、その積。
+/// 外積は i128 に収まる）
+fn cmp_dir(a: (i128, i128), b: (i128, i128)) -> std::cmp::Ordering {
+    let half = |d: (i128, i128)| {
         if d.1 > 0 || (d.1 == 0 && d.0 > 0) {
             0u8
         } else {
             1
         }
     };
-    half(a).cmp(&half(b)).then_with(|| {
-        let c = a.0 as i128 * b.1 as i128 - a.1 as i128 * b.0 as i128;
-        0i128.cmp(&c)
-    })
+    half(a)
+        .cmp(&half(b))
+        .then_with(|| 0i128.cmp(&(a.0 * b.1 - a.1 * b.0)))
+}
+
+/// 格子の点の差を、`cmp_dir` で比べる幅にする
+fn wide(d: IPt) -> (i128, i128) {
+    (d.0 as i128, d.1 as i128)
 }
 
 /// 格子に丸めて同じ区間になった、ほぼ重なった辺の左右の色（区間の向きにそろえたもの）を1組にまとめる。
@@ -3241,7 +3265,7 @@ impl PlanarMap {
             }
         };
         for list in around.values_mut() {
-            list.sort_by(|x, y| cmp_dir(dir_of(x), dir_of(y)));
+            list.sort_by(|x, y| cmp_dir(wide(dir_of(x)), wide(dir_of(y))));
         }
         // 向きのある区間の左の面を、次にたどる区間（角度の順で、来た向きの逆のすぐ前）。番号は 2 × 区間 + 向き
         let mut next_of = vec![(0, false); 2 * pieces.len()];
@@ -3289,7 +3313,7 @@ impl PlanarMap {
             if let Some(extra) = stops.get(&v) {
                 turns.extend(extra.iter().copied());
             }
-            turns.sort_by(|x, y| cmp_dir(x.1, y.1));
+            turns.sort_by(|x, y| cmp_dir(wide(x.1), wide(y.1)));
             for (i, &(t, _)) in turns.iter().enumerate() {
                 if let Turn::Piece(k, fwd) = t {
                     next_old_of[2 * k + (!fwd) as usize] =
@@ -4124,20 +4148,6 @@ fn segs_within_reach(a: IPt, b: IPt, c: IPt, d: IPt) -> bool {
         || pt_seg_le_half(d, a, b)
 }
 
-/// 整数の向きを、角度の順に比べる（`cmp_dir` を i128 で）
-fn cmp_dir128(a: (i128, i128), b: (i128, i128)) -> std::cmp::Ordering {
-    let half = |d: (i128, i128)| {
-        if d.1 > 0 || (d.1 == 0 && d.0 > 0) {
-            0u8
-        } else {
-            1
-        }
-    };
-    half(a)
-        .cmp(&half(b))
-        .then_with(|| 0i128.cmp(&(a.0 * b.1 - a.1 * b.0)))
-}
-
 /// 頂点で、`back`（入ってきた辺を引き返す向き）から時計回りに見たとき、`x` が `y` より先に来るか
 /// （面の輪郭をたどるとき、次に選ぶのは時計回りに最初の辺。`back` と同じ向きはいちばん後）
 fn cmp_cw_from(back: IPt, x: IPt, y: IPt) -> std::cmp::Ordering {
@@ -4152,7 +4162,7 @@ fn cmp_cw_from(back: IPt, x: IPt, y: IPt) -> std::cmp::Ordering {
         (true, true) => std::cmp::Ordering::Equal,
         (true, false) => std::cmp::Ordering::Greater,
         (false, true) => std::cmp::Ordering::Less,
-        (false, false) => cmp_dir128(ry, rx),
+        (false, false) => cmp_dir(ry, rx),
     }
 }
 

@@ -11667,7 +11667,7 @@ fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
                 visible: true,
                 locked: false,
                 frame_count: 600,
-                keyframes: kfs,
+                keyframes: kfs.into(),
             });
         }
         app.doc.root.next_layer_id = 21;
@@ -21365,6 +21365,44 @@ fn test_merge_degree2_does_not_fold_nearly_straight_pair() {
         assert!(
             hull.contains(Point::new(bb.x0, bb.y0)) && hull.contains(Point::new(bb.x1, bb.y1)),
             "まとめた曲線が元の2本の範囲から出ない：{bb:?}"
+        );
+    }
+}
+
+/// カーソル合わせ用の地図は、編集したレイヤーの分だけ作り直し、触っていないレイヤーの地図は使い回す（N-2001）
+#[test]
+fn test_scope_maps_rebuild_only_edited_layer() {
+    use crate::doc_actions::Action;
+    let mut app = Is2dApp::default();
+    let stroke = |y: f64, color: Color32| Action::PaintStroke {
+        points: vec![Point::new(100.0, y), Point::new(300.0, y + 10.0)],
+        radius: 8.0,
+        color,
+    };
+    run(
+        &mut app,
+        &[
+            stroke(100.0, Color32::RED),
+            Action::AddLayer,
+            stroke(200.0, Color32::BLUE),
+        ],
+    );
+    let before = crate::planar_map::scope_maps(app.scene(), &app.session);
+    assert_eq!(before.maps.len(), 2);
+    let edited = app.active_timeline().active_layer_id();
+    run(&mut app, &[stroke(220.0, Color32::GREEN)]);
+    let after = crate::planar_map::scope_maps(app.scene(), &app.session);
+    assert_eq!(after.maps.len(), 2);
+    for m in &after.maps {
+        let old = before
+            .maps
+            .iter()
+            .find(|o| o.layer_id == m.layer_id)
+            .unwrap();
+        assert_eq!(
+            std::sync::Arc::ptr_eq(&old.map, &m.map),
+            m.layer_id != edited,
+            "編集したレイヤーだけ作り直す"
         );
     }
 }
