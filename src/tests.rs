@@ -21651,6 +21651,94 @@ mod map_overlay {
         m
     }
 
+    /// 地図だけで描く試し（`native_scene` と同じ作り方）を多くの種で行い、重ね合わせの結果が正しい地図でなくなった所を数える
+    /// （レビュー 08c15dd の N-1001 の再現）
+    #[test]
+    #[ignore]
+    fn probe_native_overlay_failures() {
+        let seeds: u64 = std::env::var("PROBE_SEEDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3000);
+        let steps: usize = std::env::var("PROBE_STEPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(70);
+        let run = |seed: u64| -> Vec<String> {
+            let mut out = Vec::new();
+            let mut r = Rng(seed);
+            let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+            let mut m = PlanarMap {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                node_src: Vec::new(),
+            };
+            for k in 0..steps {
+                let next = if k % 4 == 3 {
+                    let p = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
+                    m.with_face_filled(p, colors[(r.f() * 4.0) as usize % 4])
+                } else {
+                    let cnt = 2 + (r.f() * 4.0) as usize;
+                    let mut pts = Vec::new();
+                    let mut p = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
+                    for _ in 0..cnt {
+                        let q = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
+                        for j in 0..10 {
+                            pts.push(p.lerp(q, j as f64 / 10.0));
+                        }
+                        p = q;
+                    }
+                    pts.push(p);
+                    let radius = 3.0 + r.f() * 10.0;
+                    let color = colors[(r.f() * 4.0) as usize % 4];
+                    let stroke = build_smoothed_stroke_shapes_at_zoom(
+                        &generate_brush_outline_at_zoom(&pts, radius, 1.0),
+                        color,
+                        1.0,
+                    );
+                    let rule = MapRule::Paint(if k % 6 == 5 { None } else { Some(color) });
+                    m.overlay(MapInput::Shapes(&stroke), rule)
+                };
+                if let Some(next) = next {
+                    if !next.is_valid() {
+                        out.push(format!("seed {seed} step {k}: {}", next.validity_report()));
+                        break;
+                    }
+                    m = next;
+                }
+            }
+            out
+        };
+        let threads = 2u64;
+        let t0 = std::time::Instant::now();
+        let fails: Vec<String> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..threads)
+                .map(|t| {
+                    sc.spawn(move || {
+                        // PROBE_ONLY：その種だけ回す
+                        let only: Option<u64> = std::env::var("PROBE_ONLY")
+                            .ok()
+                            .and_then(|v| v.parse().ok());
+                        (0..seeds)
+                            .filter(|s| only.is_none_or(|o| *s == o))
+                            .filter(|s| s % threads == t)
+                            .flat_map(run)
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        });
+        for f in &fails {
+            eprintln!("PROBE {}", f.chars().take(300).collect::<String>());
+        }
+        eprintln!(
+            "PROBE 種 {seeds}・{steps} 手：正しくない地図になった種 {}（{:.1}s）",
+            fails.len(),
+            t0.elapsed().as_secs_f64()
+        );
+    }
+
     #[test]
     fn paint_square_over_square() {
         let base = PlanarMap::from_faces(std::iter::once(&rect_shape(
