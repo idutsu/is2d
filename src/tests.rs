@@ -21654,6 +21654,11 @@ mod map_overlay {
     /// 地図だけで描く試し（`native_scene` と同じ作り方）を種 `seed` で `steps` 手行い、結果が正しい地図でなくなった最初の手
     /// （無ければ `None`）
     fn native_steps(seed: u64, steps: usize) -> Option<String> {
+        native_run(seed, steps).err()
+    }
+
+    /// `native_steps` と同じ試しで、できた地図（途中で正しい地図でなくなれば、その手の説明）
+    fn native_run(seed: u64, steps: usize) -> Result<PlanarMap, String> {
         let mut r = Rng(seed);
         let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
         let mut m = PlanarMap {
@@ -21689,12 +21694,135 @@ mod map_overlay {
             };
             if let Some(next) = next {
                 if !next.is_valid() {
-                    return Some(format!("seed {seed} step {k}: {}", next.validity_report()));
+                    return Err(format!("seed {seed} step {k}: {}", next.validity_report()));
                 }
                 m = next;
             }
         }
-        None
+        Ok(m)
+    }
+
+    /// 地図だけで描いた地図で、画面から届く輪郭の変形（頂点の移動と、両端から 9px より遠い所の引っぱり。2〜62px）を確定し、
+    /// 正しい地図でない結果・取り消し（結果が元のまま）・動かした所の外で色が変わった所を数える（レビュー 08c15dd の N-1002）
+    #[test]
+    #[ignore]
+    fn probe_reshape_commits() {
+        let maps: u64 = std::env::var("PROBE_MAPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+        let per: usize = std::env::var("PROBE_EDITS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40);
+        let run = |seed: u64| -> (usize, usize, usize, usize, Vec<String>) {
+            let (mut n, mut invalid, mut cancelled, mut outside) = (0, 0, 0, 0);
+            let mut notes = Vec::new();
+            let Ok(m) = native_run(seed, if seed % 2 == 0 { 30 } else { 70 }) else {
+                return (0, 0, 0, 0, notes);
+            };
+            if m.edges.is_empty() {
+                return (0, 0, 0, 0, notes);
+            }
+            let base = crate::planar_map::ReshapeBase::new(std::sync::Arc::new(m.clone()), false);
+            let before = m.color_locator();
+            let mut r = Rng(seed * 7919 + 1);
+            for i in 0..per {
+                let dist = 2.0 + r.f() * 60.0;
+                let ang = r.f() * std::f64::consts::TAU;
+                let d = KVec2::new(ang.cos(), ang.sin()) * dist;
+                let (next, moved): (PlanarMap, Vec<usize>) = if i % 2 == 0 {
+                    let v = (r.f() * m.nodes.len() as f64) as usize % m.nodes.len();
+                    let target = m.nodes[v] + d;
+                    (base.edit_vertex(v, target), m.edges_at(v))
+                } else {
+                    let e = (r.f() * m.edges.len() as f64) as usize % m.edges.len();
+                    let t = 0.18 + r.f() * 0.64;
+                    let q = m.quad(e);
+                    let p = q.eval(t);
+                    if (p - q.p0).hypot() <= 9.0 || (p - q.p2).hypot() <= 9.0 {
+                        continue;
+                    }
+                    (base.edit_edge(e, t, p + d), vec![e])
+                };
+                n += 1;
+                if !next.is_valid() {
+                    invalid += 1;
+                    if notes.len() < 3 {
+                        notes.push(format!(
+                            "seed {seed} edit {i}: {}",
+                            next.validity_report().chars().take(200).collect::<String>()
+                        ));
+                    }
+                    continue;
+                }
+                if next.edges.len() == m.edges.len()
+                    && (0..m.edges.len()).all(|e| next.quad(e) == m.quad(e))
+                {
+                    cancelled += 1;
+                    continue;
+                }
+                // 動かした辺が届く所（元の外接矩形を、動かした量の2倍と 1px 広げる）の外で、色が変わった点（4px おき）
+                let reach = moved
+                    .iter()
+                    .map(|&e| kurbo::ParamCurveExtrema::bounding_box(&m.quad(e)))
+                    .reduce(|a, b| a.union(b))
+                    .unwrap_or_default()
+                    .inflate(2.0 * dist + 1.0, 2.0 * dist + 1.0);
+                let mut changed = 0;
+                let after = next.color_locator();
+                for gx in 0..150 {
+                    for gy in 0..150 {
+                        let p = Point::new(
+                            100.0 + gx as f64 * 4.0 + 0.37,
+                            100.0 + gy as f64 * 4.0 + 0.61,
+                        );
+                        if !reach.contains(p) && before(p) != after(p) {
+                            changed += 1;
+                        }
+                    }
+                }
+                if changed > 0 {
+                    outside += 1;
+                    if notes.len() < 3 {
+                        notes.push(format!(
+                            "seed {seed} edit {i}: 外で色が変わった点 {changed}"
+                        ));
+                    }
+                }
+            }
+            (n, invalid, cancelled, outside, notes)
+        };
+        let t0 = std::time::Instant::now();
+        let res: Vec<(usize, usize, usize, usize, Vec<String>)> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..2u64)
+                .map(|t| {
+                    sc.spawn(move || {
+                        (0..maps)
+                            .filter(|s| s % 2 == t)
+                            .map(run)
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        });
+        let sum = |f: fn(&(usize, usize, usize, usize, Vec<String>)) -> usize| {
+            res.iter().map(f).sum::<usize>()
+        };
+        for r in &res {
+            for n in &r.4 {
+                eprintln!("PROBE {n}");
+            }
+        }
+        eprintln!(
+            "PROBE 変形の確定 {} 回：正しくない結果 {}・取り消し {}・外で色が変わった回 {}（{:.1}s）",
+            sum(|r| r.0),
+            sum(|r| r.1),
+            sum(|r| r.2),
+            sum(|r| r.3),
+            t0.elapsed().as_secs_f64()
+        );
     }
 
     /// 重ね合わせが正しい地図を保つ（レビュー 08c15dd の N-1001 の再現）。種 31 の 64 手目：中の辺の内外を浮動小数の半直線で

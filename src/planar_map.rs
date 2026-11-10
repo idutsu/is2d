@@ -2088,6 +2088,31 @@ impl ReshapeBase {
     }
 }
 
+#[cfg(test)]
+impl ReshapeBase {
+    /// テスト用：頂点 `v` を `target` へ動かして確定した地図
+    pub(crate) fn edit_vertex(&self, v: usize, target: Point) -> PlanarMap {
+        commit_edit(
+            &self.map,
+            &self.cycles,
+            self.map.with_node_moved(v, target),
+            &self.map.edges_at(v),
+        )
+        .0
+    }
+
+    /// テスト用：辺 `e` の `t` の所を `target` へ引っぱって確定した地図
+    pub(crate) fn edit_edge(&self, e: usize, t: f64, target: Point) -> PlanarMap {
+        commit_edit(
+            &self.map,
+            &self.cycles,
+            self.map.with_edge_pulled(e, t, target),
+            &[e],
+        )
+        .0
+    }
+}
+
 /// 地図 `base.map` に編集 `edit` をかけて確定した結果を、図形の差分で返す（ドラッグ中の表示と確定で同じ計算）。
 /// 戻り値は（消す元の図形, 新しく入れる塗りの形）。`orig_shapes` は、形の変わらない輪郭を使い回すために元の図形を探す所
 pub(crate) fn reshape_result(
@@ -2743,6 +2768,12 @@ impl PlanarMap {
     /// 点 `p`（格子の点に丸める）の色：判定の形で、点のある所の色（`LabeledSegs::at`）
     #[cfg(test)]
     pub(crate) fn color_at(&self, p: Point) -> Option<Color32> {
+        self.color_locator()(p)
+    }
+
+    /// テスト用：点の色を何度も調べるときの `color_at`（判定の形を1回だけ作る）
+    #[cfg(test)]
+    pub(crate) fn color_locator(&self) -> impl Fn(Point) -> Option<Color32> {
         let segs = LabeledSegs::new((0..self.edges.len()).flat_map(|e| {
             let (l, r) = (self.edges[e].left, self.edges[e].right);
             let pl = grid_poly(&self.quad(e));
@@ -2750,8 +2781,10 @@ impl PlanarMap {
                 .map(|k| (pl[k], pl[k + 1], l, r))
                 .collect::<Vec<_>>()
         }));
-        let g = gpt(p);
-        segs.at((2 * g.0, 2 * g.1)).flatten()
+        move |p| {
+            let g = gpt(p);
+            segs.at((2 * g.0, 2 * g.1)).flatten()
+        }
     }
 
     /// 点 `p` の色（`color_regions` の結果から）
