@@ -119,55 +119,29 @@ impl std::hash::Hasher for IntHasher {
 
 type IntMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IntHasher>>;
 
-/// 頂点を探すための格子
-struct NodeGrid {
-    cell: f64,
-    cells: IntMap<(i64, i64), Vec<usize>>,
-}
-
-impl NodeGrid {
-    fn new(cell: f64) -> Self {
-        Self {
-            cell,
-            cells: IntMap::default(),
-        }
-    }
-    fn key(&self, p: Point) -> (i64, i64) {
-        (
-            (p.x / self.cell).floor() as i64,
-            (p.y / self.cell).floor() as i64,
-        )
-    }
-    fn insert(&mut self, p: Point, id: usize) {
-        self.cells.entry(self.key(p)).or_default().push(id);
-    }
-    fn nearest(&self, nodes: &[Point], p: Point, tol: f64) -> Option<usize> {
-        // `tol` より近い頂点がありうるマス（ふつうは自分のマスだけ）
-        let (x0, y0) = self.key(Point::new(p.x - tol, p.y - tol));
-        let (x1, y1) = self.key(Point::new(p.x + tol, p.y + tol));
-        let mut best = None;
-        let mut best_d = tol;
-        for kx in x0..=x1 {
-            for ky in y0..=y1 {
-                for &id in self.cells.get(&(kx, ky)).into_iter().flatten() {
-                    let d = (nodes[id] - p).hypot();
-                    if d <= best_d {
-                        best_d = d;
-                        best = Some(id);
-                    }
-                }
-            }
-        }
-        best
-    }
-}
-
-fn snap_node(nodes: &mut Vec<Point>, grid: &mut NodeGrid, p: Point) -> usize {
-    if let Some(id) = grid.nearest(nodes, p, FACE_TOL) {
+/// 点 `p` から `FACE_TOL` 以内の頂点（いちばん近いもの）の番号。無ければ頂点を足す（`found` は探すときの入れ物）
+fn snap_node(
+    nodes: &mut Vec<Point>,
+    grid: &mut CellGrid,
+    found: &mut Vec<usize>,
+    p: Point,
+) -> usize {
+    let t = KVec2::new(FACE_TOL, FACE_TOL);
+    let (lo, hi) = (cell_of(gpt(p - t)), cell_of(gpt(p + t)));
+    grid.query(
+        (lo.0..=hi.0).flat_map(|x| (lo.1..=hi.1).map(move |y| (x, y))),
+        found,
+    );
+    let near = found
+        .iter()
+        .map(|&id| ((nodes[id] - p).hypot(), id))
+        .filter(|&(d, _)| d <= FACE_TOL)
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+    if let Some((_, id)) = near {
         return id;
     }
     nodes.push(p);
-    grid.insert(p, nodes.len() - 1);
+    grid.insert(nodes.len() - 1, [cell_of(gpt(p))]);
     nodes.len() - 1
 }
 
@@ -195,17 +169,18 @@ impl PlanarMap {
     pub(crate) fn from_faces<'a>(faces: impl IntoIterator<Item = &'a FillShape>) -> Self {
         let mut nodes: Vec<Point> = Vec::new();
         let mut node_src: Vec<Option<(ShapeId, usize, usize)>> = Vec::new();
-        let mut grid = NodeGrid::new(4.0);
+        let mut grid = CellGrid::new();
+        let mut found = Vec::new();
         // 1. 向きのある区間（左が面の色）。端を頂点にまとめる
         let mut segs: Vec<Seg> = Vec::new();
         for (order, f) in faces.into_iter().enumerate() {
             for (ci, c) in f.contours().enumerate() {
                 for (si, q) in c.segments.iter().enumerate() {
-                    let a = snap_node(&mut nodes, &mut grid, q.p0);
+                    let a = snap_node(&mut nodes, &mut grid, &mut found, q.p0);
                     if node_src.len() < nodes.len() {
                         node_src.push(Some((f.shape_id, ci, si)));
                     }
-                    let b = snap_node(&mut nodes, &mut grid, q.p2);
+                    let b = snap_node(&mut nodes, &mut grid, &mut found, q.p2);
                     if node_src.len() < nodes.len() {
                         node_src.push(Some((f.shape_id, ci, (si + 1) % c.segments.len())));
                     }
@@ -333,23 +308,17 @@ impl PlanarMap {
                     .collect(),
             );
         }
-        // 面の外周の外接矩形の格子（px で引く）
-        let px = |v: i64| v as f64 / OVERLAY_GRID;
-        let mut face_grid = BoxGrid::new(64.0);
-        for (fi, reg) in regions.iter().enumerate() {
-            let r = reg[0].0;
-            face_grid.insert(fi, KRect::new(px(r.x0), px(r.y0), px(r.x1), px(r.y1)));
-        }
-        let mut found = Vec::new();
+        // 面の外周の外接矩形を、高さの帯に分けた索引（2倍の座標。大きい面でも、入れる帯の数は帯の数まで）
+        let (fy0, fband_h, fbands) =
+            y_bands(regions.iter().map(|reg| (2 * reg[0].0.y0, 2 * reg[0].0.y1)));
         for c in &cycles {
             if c.is_empty() || self.side_color(c[0]).is_some() {
                 continue;
             }
             let h = c[0];
             let probe = half_mid2(&polys, h);
-            let at = Point::new(px(probe.0) * 0.5, px(probe.1) * 0.5);
-            face_grid.query(KRect::from_points(at, at), &mut found);
-            for &fi in &found {
+            for &fi in band_at(fy0, fband_h, &fbands, probe.1) {
+                let fi = fi as usize;
                 let f = &faces[fi];
                 if edge_faces[h.0].contains(&fi) || !regions[fi][0].0.contains2(probe) {
                     continue;
@@ -486,24 +455,18 @@ impl PlanarMap {
                 | ((c.1 + (1 << 31)) as u128) << 64
                 | (x0 + (1 << 62)) as u128
         };
+        // 区間は、通るマスだけに入れる（`seg_cells`）。触れる区間どうしは必ず同じマスを持つ。2つ以上のマスを共有する組は
+        // 2度以上調べる（調べる中身は同じ）
         let mut ent: Vec<(u128, u32)> = Vec::with_capacity(segs.len() * 2);
-        for (i, r) in rects.iter().enumerate() {
-            for c in cells_of(((r.x0, r.y0), (r.x1, r.y1)), GRID_CELL) {
-                ent.push((key(c, r.x0), i as u32));
+        for (i, &(e, k)) in segs.iter().enumerate() {
+            for c in seg_cells((polys[e][k], polys[e][k + 1]), 0) {
+                ent.push((key(c, rects[i].x0), i as u32));
             }
         }
         ent.sort_unstable();
-        let cell0 = |r: &GridRect| (r.x0.div_euclid(GRID_CELL), r.y0.div_euclid(GRID_CELL));
-        let cell_of_key = |k: u128| {
-            (
-                (k >> 96) as i64 - (1 << 31),
-                ((k >> 64) as u32) as i64 - (1 << 31),
-            )
-        };
         let mut start = 0;
         while start < ent.len() {
             let ck = ent[start].0 >> 64;
-            let c = cell_of_key(ent[start].0);
             let mut end = start + 1;
             while end < ent.len() && ent[end].0 >> 64 == ck {
                 end += 1;
@@ -517,12 +480,7 @@ impl PlanarMap {
                     if rj.x0 > ri.x1 {
                         break;
                     }
-                    // 重ならない組と、両方が入る最初のマス（左下）でないマスの組は飛ばす（同じ組を2度調べない）
                     if !ri.overlaps(&rj) {
-                        continue;
-                    }
-                    let (ci, cj) = (cell0(&ri), cell0(&rj));
-                    if (ci.0.max(cj.0), ci.1.max(cj.1)) != c {
                         continue;
                     }
                     let (i, j) = (i.min(j), i.max(j));
@@ -2442,21 +2400,25 @@ impl PlanarMap {
     ) -> Option<FedEdges> {
         let mut snapped = vec![false; self.nodes.len()];
         let mut adj: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
-        let mut edge_grid = BoxGrid::new(64.0);
-        // 辺の外接矩形。端を格子に置き直すと曲線は最大で `GRID_REACH` 動き、判定の形の点は丸めでさらに `GRID_REACH`
-        // 動くので、その分と、近くとみなす距離（`GRID_REACH`）の分を広げておく
+        // 辺の外接矩形と、辺がかかるマス。端を格子に置き直すと曲線は最大で `GRID_REACH` 動き、判定の形の点は丸めでさらに
+        // `GRID_REACH` 動くので、その分と、近くとみなす距離（`GRID_REACH`）の分を広げておく
         let boxes: Vec<KRect> = (0..self.edges.len())
             .map(|e| {
                 let r = 3.0 * GRID_REACH;
                 self.quad(e).bounding_box().inflate(r, r)
             })
             .collect();
+        let reach_pad = (3.0 * GRID_REACH * OVERLAY_GRID).ceil() as i64;
+        let edge_cells: Vec<Vec<(i64, i64)>> = (0..self.edges.len())
+            .map(|e| quad_cells(&self.quad(e), reach_pad))
+            .collect();
+        let mut edge_grid = CellGrid::new();
         for (e, ed) in self.edges.iter().enumerate() {
             adj[ed.a].push(e);
             if ed.b != ed.a {
                 adj[ed.b].push(e);
             }
-            edge_grid.insert(e, boxes[e]);
+            edge_grid.insert(e, edge_cells[e].iter().copied());
         }
         // 頂点 `v` を格子に置き直すと動くか
         let moves = |v: usize| grid_round(self.nodes[v]) != self.nodes[v];
@@ -2476,12 +2438,16 @@ impl PlanarMap {
         type GridSeg = (IPt, IPt, Option<usize>, Option<usize>);
         // 折れ線：（外接矩形, 区間の範囲）
         type GridLine = (KRect, std::ops::Range<usize>);
+        // 折れ線の区間がかかるマス
+        let line_cells = |segs: &[GridSeg]| -> Vec<(i64, i64)> {
+            segs.iter().flat_map(|s| seg_cells((s.0, s.1), 0)).collect()
+        };
         let seg_rect =
             |a: IPt, b: IPt| KRect::from_points(from_grid(a.0, a.1), from_grid(b.0, b.1));
         let add_polyline = |q: &QuadBez,
                             ends: (Option<usize>, Option<usize>),
                             segs: &mut Vec<GridSeg>,
-                            seg_grid: &mut BoxGrid,
+                            seg_grid: &mut CellGrid,
                             lines: &mut Vec<GridLine>|
          -> Option<()> {
             // 格子に置けない座標は、ここで断る
@@ -2494,7 +2460,7 @@ impl PlanarMap {
                 let (a, b) = (line[k], line[k + 1]);
                 let r = seg_rect(a, b);
                 bbox = Some(bbox.map_or(r, |x| x.union(r)));
-                seg_grid.insert(segs.len(), r);
+                seg_grid.insert(segs.len(), seg_cells((a, b), 0));
                 let (ta, tb) = seg_tags(&line, k, usize::MAX, usize::MAX);
                 segs.push((a, b, ta.and(ends.0), tb.and(ends.1)));
             }
@@ -2524,7 +2490,7 @@ impl PlanarMap {
             })
         };
         let mut segs: Vec<GridSeg> = Vec::new();
-        let mut seg_grid = BoxGrid::new(16.0);
+        let mut seg_grid = CellGrid::new();
         let mut lines: Vec<GridLine> = Vec::new();
         let mut edge_queue: Vec<usize> = check.clone().collect();
         for q in seeds {
@@ -2561,8 +2527,8 @@ impl PlanarMap {
                 )?;
             }
             if let Some((r, range)) = lines.pop() {
-                // 折れ線の外接矩形にかかる辺だけを、折れ線の区間のうち辺の外接矩形にかかるものと比べる
-                edge_grid.query(r, &mut found);
+                // 折れ線の区間のマスにかかる辺だけを、折れ線の区間のうち辺の外接矩形にかかるものと比べる
+                edge_grid.query(line_cells(&segs[range.clone()]), &mut found);
                 for &e in &found {
                     if fed[e] || !rects_overlap(boxes[e], r) {
                         continue;
@@ -2582,16 +2548,15 @@ impl PlanarMap {
                     let moved = |v: usize| snapped[v] && moves(v);
                     check.contains(&f) && !moved(fd.a) && !moved(fd.b)
                 };
-                let r = boxes[e];
                 let ed = self.edges[e];
                 let mut pe: Option<Vec<IPt>> = None;
-                seg_grid.query(r, &mut found);
+                seg_grid.query(edge_cells[e].iter().copied(), &mut found);
                 let mut hit = found.iter().any(|&i| {
                     near_seg(e, pe.get_or_insert_with(|| poly_of(e, &snapped)), &segs[i])
                 });
                 if !hit {
                     // 端を置き直した形が、ほかの入れない辺と触れないか（共有する頂点は除く）
-                    edge_grid.query(r, &mut found);
+                    edge_grid.query(edge_cells[e].iter().copied(), &mut found);
                     let given = as_given(e);
                     hit = found.iter().any(|&f| {
                         if f == e || fed[f] || (given && as_given(f)) {
@@ -2794,7 +2759,7 @@ impl PlanarMap {
             for p in &pieces {
                 let (a, b) = (nodes[p.a], nodes[p.b]);
                 let r = KRect::from_points(a, b);
-                fed_set.grid.query(r, &mut found);
+                fed_set.grid.query(seg_cells((p.ia, p.ib), 0), &mut found);
                 for &e in &found {
                     if fed[e] || flagged[e] || !(interior[e] || copy_untouched) {
                         continue;
@@ -3418,7 +3383,8 @@ struct FedEdges {
     fed: Vec<bool>,
     /// 辺の外接矩形（格子に置き直す分と、近くとみなす距離の分を広げたもの）
     boxes: Vec<KRect>,
-    grid: BoxGrid,
+    /// 辺がかかるマス（同じだけ広げたもの）
+    grid: CellGrid,
     adj: Vec<Vec<usize>>,
 }
 
@@ -3690,70 +3656,6 @@ impl ChainRestorer {
     }
 }
 
-/// 外接矩形で引く格子（`query` は、矩形に重なるマスにある番号を、重なりなく返す）
-struct BoxGrid {
-    cell: f64,
-    cells: IntMap<(i64, i64), Vec<usize>>,
-    /// 番号ごとに、最後に返した `query` の回（同じ番号を2度返さないため）
-    seen: Vec<u32>,
-    stamp: u32,
-}
-
-impl BoxGrid {
-    fn new(cell: f64) -> Self {
-        Self {
-            cell,
-            cells: IntMap::default(),
-            seen: Vec::new(),
-            stamp: 0,
-        }
-    }
-
-    fn range(&self, r: KRect) -> (i64, i64, i64, i64) {
-        let c = self.cell;
-        (
-            (r.x0 / c).floor() as i64,
-            (r.x1 / c).floor() as i64,
-            (r.y0 / c).floor() as i64,
-            (r.y1 / c).floor() as i64,
-        )
-    }
-
-    fn insert(&mut self, id: usize, r: KRect) {
-        let (x0, x1, y0, y1) = self.range(r);
-        for x in x0..=x1 {
-            for y in y0..=y1 {
-                self.cells.entry((x, y)).or_default().push(id);
-            }
-        }
-        if self.seen.len() <= id {
-            self.seen.resize(id + 1, 0);
-        }
-    }
-
-    fn query(&mut self, r: KRect, out: &mut Vec<usize>) {
-        out.clear();
-        self.stamp = self.stamp.wrapping_add(1);
-        if self.stamp == 0 {
-            self.seen.fill(0);
-            self.stamp = 1;
-        }
-        let (x0, x1, y0, y1) = self.range(r);
-        for x in x0..=x1 {
-            for y in y0..=y1 {
-                if let Some(list) = self.cells.get(&(x, y)) {
-                    for &id in list {
-                        if self.seen[id] != self.stamp {
-                            self.seen[id] = self.stamp;
-                            out.push(id);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 // ---- 判定の形：格子の上の折れ線（設計 段階2） ----
 //
 // 地図のつながり（頂点のまわりの辺の順番）・外周か穴か・辺の交わりは、各辺の曲線を重ね合わせと同じ折れ線にし、
@@ -3916,9 +3818,9 @@ struct PolyIndex {
     alive: Vec<bool>,
     /// 区間の番号 → （辺, 区間の位置）
     segs: Vec<(u32, u32)>,
-    grid: IntMap<(i64, i64), Vec<u32>>,
+    grid: CellGrid,
     node_pos: Vec<IPt>,
-    node_grid: IntMap<(i64, i64), Vec<usize>>,
+    node_grid: CellGrid,
     adj: Vec<Vec<usize>>,
     deg: Vec<usize>,
     /// 索引に入れる範囲（格子の点。`None` なら全部）
@@ -3952,9 +3854,9 @@ impl PolyIndex {
             ends: Vec::with_capacity(edges.len()),
             alive: Vec::with_capacity(edges.len()),
             segs: Vec::new(),
-            grid: IntMap::default(),
+            grid: CellGrid::new(),
             node_pos: nodes.iter().map(|p| gpt(*p)).collect(),
-            node_grid: IntMap::default(),
+            node_grid: CellGrid::new(),
             adj: vec![Vec::new(); nodes.len()],
             deg: vec![0; nodes.len()],
             area,
@@ -3974,7 +3876,7 @@ impl PolyIndex {
         for v in 0..nodes.len() {
             let p = ix.node_pos[v];
             if ix.area.is_none_or(|r| r.contains2((2 * p.0, 2 * p.1))) {
-                ix.node_grid.entry(node_cell(p)).or_default().push(v);
+                ix.node_grid.insert(v, [cell_of(p)]);
             }
         }
         ix
@@ -3989,11 +3891,8 @@ impl PolyIndex {
             if self.area.is_some_and(|x| !x.overlaps(&r)) {
                 continue;
             }
-            let id = self.segs.len() as u32;
+            self.grid.insert(self.segs.len(), seg_cells(sg, 0));
             self.segs.push((e as u32, k as u32));
-            for c in grid_cells(sg) {
-                self.grid.entry(c).or_default().push(id);
-            }
         }
         self.polys.push(poly);
         self.ends.push((a, b));
@@ -4057,11 +3956,8 @@ impl PolyIndex {
         for k in 0..=last {
             let sg = (pc[k], pc[k + 1]);
             let tags = seg_tags(pc, k, na, nb);
-            for c in grid_cells(sg) {
-                let Some(list) = self.grid.get(&c) else {
-                    continue;
-                };
-                for &id in list {
+            for c in seg_cells(sg, 0) {
+                for &id in self.grid.at(c) {
                     let (f, m) = self.segs[id as usize];
                     let (f, m) = (f as usize, m as usize);
                     if !self.alive[f] || part.contains(&f) {
@@ -4088,21 +3984,16 @@ impl PolyIndex {
         let rect = GridRect::of(&band);
         debug_assert!(self.covers(&rect), "索引の範囲の外の帯");
         let inside = |p2: IPt| poly.winding(p2).is_none_or(|w| w != 0);
-        // 2. 帯の中の頂点
-        let (c0, c1) = (node_cell((rect.x0, rect.y0)), node_cell((rect.x1, rect.y1)));
-        for cx in c0.0..=c1.0 {
-            for cy in c0.1..=c1.1 {
-                let Some(list) = self.node_grid.get(&(cx, cy)) else {
+        // 2. 帯の中の頂点（帯の中と輪郭がかかるマスにある）
+        for c in polygon_cells(&band) {
+            for &v in self.node_grid.at(c) {
+                let v = v as usize;
+                if self.deg[v] == 0 || v == na || v == nb || inner.contains(&v) {
                     continue;
-                };
-                for &v in list {
-                    if self.deg[v] == 0 || v == na || v == nb || inner.contains(&v) {
-                        continue;
-                    }
-                    let p = self.node_pos[v];
-                    if rect.contains2((2 * p.0, 2 * p.1)) && inside((2 * p.0, 2 * p.1)) {
-                        return false;
-                    }
+                }
+                let p = self.node_pos[v];
+                if rect.contains2((2 * p.0, 2 * p.1)) && inside((2 * p.0, 2 * p.1)) {
+                    return false;
                 }
             }
         }
@@ -4130,12 +4021,6 @@ impl PolyIndex {
         }
         true
     }
-}
-
-/// 頂点を入れる格子のマス（1マスは 16px）
-fn node_cell(p: IPt) -> (i64, i64) {
-    const CELL: i64 = 16 * OVERLAY_GRID as i64;
-    (p.0.div_euclid(CELL), p.1.div_euclid(CELL))
 }
 
 /// 区間（2倍の座標の y の範囲 `spans`）を、横の帯に分けた索引：（いちばん下の y, 帯の高さ, 帯ごとの区間の番号）。
@@ -4356,19 +4241,133 @@ impl GridRect {
 /// 浮動小数で選んだ点をそのまま整数で調べられる。区間の端の座標は ±2^52 になり、外積は i128 に収まる
 const FINE: i64 = 1 << 24;
 
-/// 近さを調べる格子の1マス（8px）
+// ---- 近さを調べる格子（08c15dd レビューの段階6。N-1004） ----
+//
+// 区間・曲線は、通るマスだけに入れ、通るマスだけで探す。手間は長さに比例し、形の大きさの2乗では増えない。マスの大きさは
+// 1つ（`GRID_CELL`）で、格子は1つの作り（`CellGrid`）
+
+/// 近さを調べる格子の1マス（8px。格子の点で数える）
 const GRID_CELL: i64 = 8 * OVERLAY_GRID as i64;
 
-/// 区間がかかる、1マス `cell` の格子のマス
-fn cells_of((a, b): (IPt, IPt), cell: i64) -> impl Iterator<Item = (i64, i64)> {
-    let (x0, x1) = (a.0.min(b.0).div_euclid(cell), a.0.max(b.0).div_euclid(cell));
-    let (y0, y1) = (a.1.min(b.1).div_euclid(cell), a.1.max(b.1).div_euclid(cell));
-    (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
+/// 点（格子の点）を含むマス
+fn cell_of(p: IPt) -> (i64, i64) {
+    (p.0.div_euclid(GRID_CELL), p.1.div_euclid(GRID_CELL))
 }
 
-/// 区間がかかる、近さを調べる格子のマス
-fn grid_cells(sg: (IPt, IPt)) -> impl Iterator<Item = (i64, i64)> {
-    cells_of(sg, GRID_CELL)
+/// 区間 `a`–`b`（格子の点）を、どの向きにも `pad` 目だけ太らせたものがかかるマス。列ごとに、その列にかかる区間の y の
+/// 範囲のマスをたどる。区間の上（太らせたなら `pad` 以内）のどの点も、その点を含むマスが返るので、触れる区間どうし
+/// （`pad` 以内に近づく区間どうし）は、必ず同じマスを持つ
+fn seg_cells((a, b): (IPt, IPt), pad: i64) -> impl Iterator<Item = (i64, i64)> {
+    let (a, b) = if a.0 <= b.0 { (a, b) } else { (b, a) };
+    let (dx, dy) = ((b.0 - a.0) as i128, (b.1 - a.1) as i128);
+    // x（a.0 ≤ x ≤ b.0）での区間の y の切り捨て（`up` なら切り上げ）
+    let y_at = move |x: i64, up: bool| -> i64 {
+        if dx == 0 {
+            return if up { a.1.max(b.1) } else { a.1.min(b.1) };
+        }
+        let n = (x - a.0) as i128 * dy;
+        let q = if up {
+            -(-n).div_euclid(dx)
+        } else {
+            n.div_euclid(dx)
+        };
+        a.1 + q as i64
+    };
+    let c = GRID_CELL;
+    ((a.0 - pad).div_euclid(c)..=(b.0 + pad).div_euclid(c)).flat_map(move |cx| {
+        let (lo, hi) = ((cx * c - pad).max(a.0), ((cx + 1) * c + pad).min(b.0));
+        let ylo = y_at(lo, false).min(y_at(hi, false));
+        let yhi = y_at(lo, true).max(y_at(hi, true));
+        ((ylo - pad).div_euclid(c)..=(yhi + pad).div_euclid(c)).map(move |cy| (cx, cy))
+    })
+}
+
+/// 曲線 `q`（px）と、その判定の形を、`pad` 目だけ太らせたものがかかるマス。曲線を、弦とのずれが半マスほどになる数に
+/// 等分し（`flat_count`）、弦を、ずれの分と `pad` だけ太らせてたどる
+fn quad_cells(q: &QuadBez, pad: i64) -> Vec<(i64, i64)> {
+    // n 等分した弦と曲線のずれは |p0 − 2·p1 + p2| / (4 n²) 以下
+    let dd = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()).hypot();
+    let dev = |n: usize| dd / (4.0 * (n * n) as f64);
+    let n = flat_count(q, GRID_CELL as f64 / OVERLAY_GRID / 2.0);
+    // 太らせる分：弦と曲線のずれ、判定の形（同じ等分の、`FLAT_TOL` の数）と曲線のずれ、両方の点の丸め（それぞれ
+    // 対角線の半分まで）
+    let pad = pad + ((dev(n) + dev(flat_count(q, FLAT_TOL))) * OVERLAY_GRID).ceil() as i64 + 2;
+    let pts: Vec<IPt> = (0..=n).map(|i| gpt(q.eval(i as f64 / n as f64))).collect();
+    let mut cells: Vec<(i64, i64)> = pts
+        .windows(2)
+        .flat_map(|w| seg_cells((w[0], w[1]), pad))
+        .collect();
+    cells.sort_unstable();
+    cells.dedup();
+    cells
+}
+
+/// 多角形（格子の点）の中と輪郭がかかるマス：輪郭の区間がかかるマスを列ごとに集め、列の中では一番下から一番上までの
+/// マス（細い帯なら、輪郭のマスとほとんど同じ）
+fn polygon_cells(pts: &[IPt]) -> Vec<(i64, i64)> {
+    let mut span: IntMap<i64, (i64, i64)> = IntMap::default();
+    for k in 0..pts.len() {
+        for (cx, cy) in seg_cells((pts[k], pts[(k + 1) % pts.len()]), 0) {
+            let e = span.entry(cx).or_insert((cy, cy));
+            *e = (e.0.min(cy), e.1.max(cy));
+        }
+    }
+    span.into_iter()
+        .flat_map(|(cx, (y0, y1))| (y0..=y1).map(move |cy| (cx, cy)))
+        .collect()
+}
+
+/// 近さを調べる格子：マスごとの番号の一覧
+struct CellGrid {
+    cells: IntMap<(i64, i64), Vec<u32>>,
+    /// 番号ごとに、最後に返した `query` の回（同じ番号を2度返さないため）
+    seen: Vec<u32>,
+    stamp: u32,
+}
+
+impl CellGrid {
+    fn new() -> Self {
+        Self {
+            cells: IntMap::default(),
+            seen: Vec::new(),
+            stamp: 0,
+        }
+    }
+
+    /// 番号 `id` を、マス `cells` に入れる
+    fn insert(&mut self, id: usize, cells: impl IntoIterator<Item = (i64, i64)>) {
+        for c in cells {
+            self.cells.entry(c).or_default().push(id as u32);
+        }
+        if self.seen.len() <= id {
+            self.seen.resize(id + 1, 0);
+        }
+    }
+
+    /// マス `c` の番号
+    fn at(&self, c: (i64, i64)) -> &[u32] {
+        self.cells.get(&c).map_or(&[], |v| v.as_slice())
+    }
+
+    /// マス `cells` のどれかに入っている番号（1つずつ）
+    fn query(&mut self, cells: impl IntoIterator<Item = (i64, i64)>, out: &mut Vec<usize>) {
+        out.clear();
+        self.stamp = self.stamp.wrapping_add(1);
+        if self.stamp == 0 {
+            self.seen.fill(0);
+            self.stamp = 1;
+        }
+        for c in cells {
+            if let Some(list) = self.cells.get(&c) {
+                for &id in list {
+                    if self.seen[id as usize] != self.stamp {
+                        self.seen[id as usize] = self.stamp;
+                        out.push(id as usize);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// 向きのある辺 `h` の判定の形の点（向きどおりの順）
