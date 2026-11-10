@@ -2409,17 +2409,21 @@ impl PlanarMap {
             })
             .collect();
         let reach_pad = (3.0 * GRID_REACH * OVERLAY_GRID).ceil() as i64;
-        let edge_cells: Vec<Vec<(i64, i64)>> = (0..self.edges.len())
-            .map(|e| quad_cells(&self.quad(e), reach_pad))
-            .collect();
+        // 辺 `e` がかかるマスは `all_cells[cell_range[e]]`
+        let mut all_cells: Vec<(i64, i64)> = Vec::new();
+        let mut cell_range: Vec<std::ops::Range<usize>> = Vec::with_capacity(self.edges.len());
         let mut edge_grid = CellGrid::new();
         for (e, ed) in self.edges.iter().enumerate() {
             adj[ed.a].push(e);
             if ed.b != ed.a {
                 adj[ed.b].push(e);
             }
-            edge_grid.insert(e, edge_cells[e].iter().copied());
+            let start = all_cells.len();
+            all_cells.extend(quad_cells(self.quad(e), reach_pad));
+            cell_range.push(start..all_cells.len());
+            edge_grid.insert(e, all_cells[start..].iter().copied());
         }
+        let edge_cells = |e: usize| all_cells[cell_range[e].clone()].iter().copied();
         // 頂点 `v` を格子に置き直すと動くか
         let moves = |v: usize| grid_round(self.nodes[v]) != self.nodes[v];
         // 入れない辺 `e` の判定の形。端の頂点が格子に置き直されていれば、置き直した形で
@@ -2550,13 +2554,13 @@ impl PlanarMap {
                 };
                 let ed = self.edges[e];
                 let mut pe: Option<Vec<IPt>> = None;
-                seg_grid.query(edge_cells[e].iter().copied(), &mut found);
+                seg_grid.query(edge_cells(e), &mut found);
                 let mut hit = found.iter().any(|&i| {
                     near_seg(e, pe.get_or_insert_with(|| poly_of(e, &snapped)), &segs[i])
                 });
                 if !hit {
                     // 端を置き直した形が、ほかの入れない辺と触れないか（共有する頂点は除く）
-                    edge_grid.query(edge_cells[e].iter().copied(), &mut found);
+                    edge_grid.query(edge_cells(e), &mut found);
                     let given = as_given(e);
                     hit = found.iter().any(|&f| {
                         if f == e || fed[f] || (given && as_given(f)) {
@@ -4284,22 +4288,16 @@ fn seg_cells((a, b): (IPt, IPt), pad: i64) -> impl Iterator<Item = (i64, i64)> {
 
 /// 曲線 `q`（px）と、その判定の形を、`pad` 目だけ太らせたものがかかるマス。曲線を、弦とのずれが半マスほどになる数に
 /// 等分し（`flat_count`）、弦を、ずれの分と `pad` だけ太らせてたどる
-fn quad_cells(q: &QuadBez, pad: i64) -> Vec<(i64, i64)> {
+fn quad_cells(q: QuadBez, pad: i64) -> impl Iterator<Item = (i64, i64)> {
     // n 等分した弦と曲線のずれは |p0 − 2·p1 + p2| / (4 n²) 以下
     let dd = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()).hypot();
     let dev = |n: usize| dd / (4.0 * (n * n) as f64);
-    let n = flat_count(q, GRID_CELL as f64 / OVERLAY_GRID / 2.0);
+    let n = flat_count(&q, GRID_CELL as f64 / OVERLAY_GRID / 2.0);
     // 太らせる分：弦と曲線のずれ、判定の形（同じ等分の、`FLAT_TOL` の数）と曲線のずれ、両方の点の丸め（それぞれ
     // 対角線の半分まで）
-    let pad = pad + ((dev(n) + dev(flat_count(q, FLAT_TOL))) * OVERLAY_GRID).ceil() as i64 + 2;
-    let pts: Vec<IPt> = (0..=n).map(|i| gpt(q.eval(i as f64 / n as f64))).collect();
-    let mut cells: Vec<(i64, i64)> = pts
-        .windows(2)
-        .flat_map(|w| seg_cells((w[0], w[1]), pad))
-        .collect();
-    cells.sort_unstable();
-    cells.dedup();
-    cells
+    let pad = pad + ((dev(n) + dev(flat_count(&q, FLAT_TOL))) * OVERLAY_GRID).ceil() as i64 + 2;
+    let at = move |i: usize| gpt(q.eval(i as f64 / n as f64));
+    (0..n).flat_map(move |i| seg_cells((at(i), at(i + 1)), pad))
 }
 
 /// 多角形（格子の点）の中と輪郭がかかるマス：輪郭の区間がかかるマスを列ごとに集め、列の中では一番下から一番上までの
