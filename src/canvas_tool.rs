@@ -10,7 +10,7 @@ use crate::planar_map::{ReshapeBase, ScopeMaps};
 pub(crate) use crate::symbol::Document;
 use crate::symbol::{EditPath, SymbolDef, SymbolEvalCtx, SymbolEvalState};
 use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
-use crate::vector_engine::{rects_overlap, FillShape, SyncCache};
+use crate::vector_engine::{FillShape, SyncCache};
 
 pub(crate) const MAX_UNDO_HISTORY: usize = 100;
 const DEFAULT_TOAST_DURATION: Duration = Duration::from_millis(2800);
@@ -1921,6 +1921,16 @@ impl Floating {
         chunks
     }
 
+    /// 塊を組み直すとき：残りの図形のうち、隠した図形の番号（塊の先頭の印）を持つものは新しい番号にする（組み直した塊の
+    /// 先頭には、`set_remainder_chunks` が改めて付ける）
+    pub(crate) fn unmark_remainder(hidden: &HashSet<ShapeId>, shapes: &mut [FillShape]) {
+        for s in shapes {
+            if hidden.contains(&s.shape_id) {
+                s.shape_id = crate::vector_engine::next_shape_id();
+            }
+        }
+    }
+
     /// 塊を `remainder` に戻す。元の図形がある塊は、先頭の要素にその番号を付ける（この決まりを書くのはここだけ）
     pub(crate) fn set_remainder_chunks(&mut self, chunks: Vec<(Option<ShapeId>, Vec<FillShape>)>) {
         self.remainder = chunks
@@ -3756,6 +3766,9 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             return true;
         }
         if !deselected_pieces.is_empty() {
+            // 外した片は同じレイヤーの残りに入れ、そのレイヤーの残りをまとめて、同じ色でつながる所を1つにする（動かして
+            // いない片と残りは同じ地図から作ったもので、境目がビットまで同じ）。塊の位置は、そのレイヤーの残りの塊か、
+            // まだ塊の無い隠した図形
             let mut used_orig_ids: HashSet<ShapeId> = fl
                 .remainder
                 .iter()
@@ -3764,40 +3777,35 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
                 .filter(|id| fl.hidden.contains(id))
                 .collect();
             let mut chunks = fl.take_remainder_chunks();
-            for dp in deselected_pieces {
-                let dp_box = dp.bounding_box().inflate(1.5, 1.5);
-                let touching = chunks.iter_mut().find(|(_, chunk)| {
-                    chunk.iter().any(|r| {
-                        r.layer_id == dp.layer_id
-                            && r.color == dp.color
-                            && r.group_path == dp.group_path
-                            && rects_overlap(r.bounding_box(), dp_box)
-                    })
-                });
-                if let Some((_, chunk)) = touching {
-                    // 動かしていない片は、残りと同じ地図から作ったもので境目がそろっているので、地図でまとめる
-                    let mut list = std::mem::take(chunk);
-                    list.push(dp);
-                    *chunk = crate::planar_map::merge_touching_faces(list);
-                    continue;
-                }
-                let has_chunk_for_layer = chunks.iter().any(|(orig_id, chunk)| {
-                    orig_id.is_some() && chunk.iter().any(|r| r.layer_id == dp.layer_id)
-                });
-                if !has_chunk_for_layer {
-                    if let Some(&unused_orig_id) =
-                        fl.hidden.iter().find(|id| !used_orig_ids.contains(id))
-                    {
-                        used_orig_ids.insert(unused_orig_id);
-                        chunks.push((Some(unused_orig_id), vec![dp]));
-                        continue;
+            while let Some(first) = deselected_pieces.first() {
+                let (lid, gp) = (first.layer_id, first.group_path.clone());
+                let same = |s: &FillShape| s.layer_id == lid && s.group_path == gp;
+                let (mut list, others): (Vec<FillShape>, Vec<FillShape>) =
+                    deselected_pieces.drain(..).partition(|p| same(p));
+                deselected_pieces = others;
+                let mut owner = None;
+                for (o, chunk) in &mut chunks {
+                    let (mine, rest): (Vec<FillShape>, Vec<FillShape>) =
+                        chunk.drain(..).partition(|r| same(r));
+                    *chunk = rest;
+                    if !mine.is_empty() {
+                        owner = owner.or(*o);
                     }
+                    list.extend(mine);
                 }
-                match chunks.last_mut() {
-                    Some((_, chunk)) => chunk.push(dp),
-                    None => chunks.push((None, vec![dp])),
-                }
+                let owner = owner.or_else(|| {
+                    let id = fl
+                        .hidden
+                        .iter()
+                        .copied()
+                        .find(|id| !used_orig_ids.contains(id))?;
+                    used_orig_ids.insert(id);
+                    Some(id)
+                });
+                Floating::unmark_remainder(&fl.hidden, &mut list);
+                chunks.push((owner, crate::planar_map::merge_touching_faces(list)));
             }
+            chunks.retain(|(_, c)| !c.is_empty());
             fl.set_remainder_chunks(chunks);
         }
         fl.pieces = kept_pieces;

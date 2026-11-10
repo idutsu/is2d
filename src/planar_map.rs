@@ -1665,31 +1665,23 @@ pub(crate) struct MarqueeSplit {
     pub(crate) pieces: Vec<FillShape>,
 }
 
-/// 矩形選択：図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の生の図形（`skip` に当たるものは除く）を地図にして、
-/// 矩形の形 `rect` で切る。矩形の中の部分と外の部分は、同じ地図から作るので、境目が両側でビットまで同じになる。
-/// 地図で切れないとき（安全網で止まった）は `None`
+/// 矩形選択：レイヤー `layer_id`・階層 `group_path` の中身 `own`（隠していない生の図形と、浮いている残り・動かしていない片）を
+/// 1つの地図にして、選ぶ所 `region`（矩形の形か、前に選んだ所に矩形を足した地図：`selection_region`）で切る。中の部分と外の
+/// 部分は同じ地図から作るので、境目が両側でビットまで同じになり、選ぶ所の中でつながった同じ色の部分は1つの片になる。
+/// 戻り値の番号は `own` の図形の番号。格子に置けない座標があるときは `None`
 pub(crate) fn marquee_split(
-    shapes: &[FillShape],
+    own: &[&FillShape],
     layer_id: LayerId,
     group_path: &[u64],
-    skip: impl Fn(&FillShape) -> bool,
-    rect: &FillShape,
+    region: MapInput<'_>,
 ) -> Option<MarqueeSplit> {
-    let own: Vec<FillShape> = shapes
-        .iter()
-        .filter(|s| s.layer_id == layer_id && is_map_shape(s, group_path) && !skip(s))
-        .cloned()
-        .collect();
-    let own_refs: Vec<&FillShape> = own.iter().collect();
-    let (map, repainted) = layer_map(&own_refs)?;
-    // 矩形は形として重ねる（中か外かは i_overlay が数えるので、地図として重ねるより軽い）
-    let rect_input = MapInput::Shapes(std::slice::from_ref(rect));
-    let inside = map.overlay(rect_input, MapRule::KeepInside)?;
-    let rest = map.overlay(rect_input, MapRule::Paint(None))?;
+    let (map, repainted) = layer_map(own)?;
+    let inside = map.overlay(region, MapRule::KeepInside)?;
+    let rest = map.overlay(region, MapRule::Paint(None))?;
     if repainted {
         // 地図を塗り重ねて作り直したときは、レイヤーの生の図形を全部隠して、中の片と外の残りに置き換える
-        let (hidden, remainder) = all_rewritten(&own_refs, &rest, layer_id, group_path);
-        let (_, pieces) = all_rewritten(&own_refs, &inside, layer_id, group_path);
+        let (hidden, remainder) = all_rewritten(own, &rest, layer_id, group_path);
+        let (_, pieces) = all_rewritten(own, &inside, layer_id, group_path);
         return Some(MarqueeSplit {
             hidden,
             whole: Vec::new(),
@@ -1698,27 +1690,29 @@ pub(crate) fn marquee_split(
         });
     }
     let keys: HashSet<[u64; 8]> = (0..map.edges.len()).map(|e| edge_key(&map, e)).collect();
-    let (removed_rest, remainder) =
-        rewrite_shapes(&map, &keys, &rest, &own_refs, layer_id, group_path);
-    let (removed_inside, pieces) =
-        rewrite_shapes(&map, &keys, &inside, &own_refs, layer_id, group_path);
+    let (removed_rest, remainder) = rewrite_shapes(&map, &keys, &rest, own, layer_id, group_path);
+    let (removed_inside, pieces) = rewrite_shapes(&map, &keys, &inside, own, layer_id, group_path);
     // 残りから消えて、中では変わらない図形が、丸ごと中にある図形。どちらでも変わった図形が、切れた図形
-    let hidden: Vec<ShapeId> = removed_rest
-        .iter()
-        .copied()
-        .filter(|id| removed_inside.contains(id))
-        .collect();
-    let whole: Vec<ShapeId> = removed_rest
-        .iter()
-        .copied()
-        .filter(|id| !removed_inside.contains(id))
-        .collect();
+    let removed_inside: HashSet<ShapeId> = removed_inside.into_iter().collect();
+    let (hidden, whole): (Vec<ShapeId>, Vec<ShapeId>) = removed_rest
+        .into_iter()
+        .partition(|id| removed_inside.contains(id));
     Some(MarqueeSplit {
         hidden,
         whole,
         remainder,
         pieces,
     })
+}
+
+/// 選び足すときの選ぶ所：前に選んだ図形 `selected` の地図に、矩形 `rect` を足した地図（`marquee_split` は中か外かだけを
+/// 使う）。`None`：格子に置けない座標がある
+pub(crate) fn selection_region(selected: &[&FillShape], rect: &FillShape) -> Option<PlanarMap> {
+    let (map, _) = layer_map(selected)?;
+    map.overlay(
+        MapInput::Shapes(std::slice::from_ref(rect)),
+        MapRule::Paint(Some(rect.color)),
+    )
 }
 
 /// 持ち上げた片 `pieces`（同じ地図から作った、重ならない片）を、図形の並び `shapes` のレイヤー `layer_id`・階層 `group_path` の

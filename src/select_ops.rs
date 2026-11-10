@@ -5,9 +5,10 @@ use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 use crate::canvas_tool::{
     cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
     editable_layer_ids, merge_floating_into_base_shapes, sync_timeline_layer_from_canvas_selection,
-    ActiveCanvasDrag, Floating, HoverTarget, LayerId, Scene, SelectSubMode, Session, Tab,
+    ActiveCanvasDrag, Floating, HoverTarget, LayerId, Scene, SelectSubMode, Session, ShapeId, Tab,
 };
 use crate::doc_actions::{apply, Action, ActionHost};
+use crate::planar_map::MapInput;
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
 use crate::vector_engine::{
     make_marquee_rect_shape, next_shape_id, rects_overlap, ColorEffect, FillShape,
@@ -234,170 +235,165 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
 
     let editable_lids = editable_layer_ids(tab);
     let base_shapes = tab.session.base_cache.shapes().to_vec();
-    let editing_group_path = tab.session.editing_group_path.clone();
+    let scope = tab.session.editing_group_path.clone();
     let mut selection = std::mem::take(&mut tab.session.selection);
     tab.session.update_floating(|floating| {
-        let mut lifted = Vec::new();
-        if let Some(fl) = floating {
-            // すでに浮いている片の残り（前の矩形選択の外側）を、レイヤーごとに地図で切り直す（残りは同じ地図から作ったもの）
-            let mut chunks = fl.take_remainder_chunks();
-            let eligible = |s: &FillShape| {
-                s.is_in_editing_scope(&editing_group_path) && s.is_raw_at_scope(&editing_group_path)
-            };
-            let mut rem_lids: Vec<u64> = Vec::new();
-            for s in chunks
-                .iter()
-                .flat_map(|(_, c)| c.iter())
-                .filter(|s| eligible(s))
-            {
-                if !rem_lids.contains(&s.layer_id) {
-                    rem_lids.push(s.layer_id);
-                }
-            }
-            for lid in rem_lids {
-                let own: Vec<FillShape> = chunks
-                    .iter()
-                    .flat_map(|(_, c)| c.iter())
-                    .filter(|s| s.layer_id == lid && eligible(s))
-                    .cloned()
-                    .collect();
-                let Some(sp) = crate::planar_map::marquee_split(
-                    &own,
-                    lid,
-                    &editing_group_path,
-                    |_| false,
-                    &clip_rect_shape,
-                ) else {
-                    continue;
-                };
-                let mut cut_chunk = None;
-                for (ci, (_, chunk)) in chunks.iter_mut().enumerate() {
-                    let mut kept = Vec::with_capacity(chunk.len());
-                    for mut rem in chunk.drain(..) {
-                        if rem.layer_id == lid && eligible(&rem) {
-                            if sp.whole.contains(&rem.shape_id) {
-                                if fl.hidden.contains(&rem.shape_id) {
-                                    rem.shape_id = next_shape_id();
-                                }
-                                selection.insert_shape(&rem);
-                                lifted.push(rem);
-                                continue;
-                            }
-                            if sp.hidden.contains(&rem.shape_id) {
-                                cut_chunk.get_or_insert(ci);
-                                continue;
-                            }
-                        }
-                        kept.push(rem);
-                    }
-                    *chunk = kept;
-                }
-                if let Some(ci) = cut_chunk {
-                    chunks[ci].1.extend(sp.remainder);
-                }
-                for piece in sp.pieces {
-                    selection.insert_shape(&piece);
-                    lifted.push(piece);
-                }
-            }
-            chunks.retain(|(_, c)| !c.is_empty());
-            fl.set_remainder_chunks(chunks);
-        }
-
-        // 地図で切る：レイヤーごとに、そのレイヤーの生の図形を1つの地図にして矩形で切る（矩形の中の片と外の残りの境目が、
-        // 両側でビットまで同じになる）。地図で切れないレイヤーは、今までどおり図形ごとに切る
-        let hidden_now: HashSet<u64> = floating
+        let hidden_now: HashSet<ShapeId> = floating
             .as_ref()
             .map(|fl| fl.hidden.clone())
             .unwrap_or_default();
-        let mut split_lids: Vec<u64> = Vec::new();
-        for shape in &base_shapes {
-            if !editable_lids.contains(&shape.layer_id)
-                || !shape.is_raw_at_scope(&editing_group_path)
-                || selection.contains_shape(shape)
-                || hidden_now.contains(&shape.shape_id)
-                || !rects_overlap(shape.bounding_box(), rect)
-                || split_lids.contains(&shape.layer_id)
+        let mut chunks = floating
+            .as_mut()
+            .map(|fl| fl.take_remainder_chunks())
+            .unwrap_or_default();
+        // 動かしていない片は元の所にあるので、レイヤーの中身として一緒に切る（動かした片は、そのまま浮かせておく）
+        let mut pieces: Vec<FillShape> = match floating.as_mut() {
+            Some(fl) if !fl.modified => std::mem::take(&mut fl.pieces),
+            _ => Vec::new(),
+        };
+        let raw = |s: &FillShape| editable_lids.contains(&s.layer_id) && s.is_raw_at_scope(&scope);
+        let unhidden = |s: &&FillShape| !hidden_now.contains(&s.shape_id);
+        // 切るレイヤー：中身（隠していない生の図形・浮いている残り・動かしていない片）が矩形にかかるレイヤー
+        let mut split_lids: Vec<LayerId> = Vec::new();
+        for s in base_shapes
+            .iter()
+            .filter(unhidden)
+            .chain(chunks.iter().flat_map(|(_, c)| c))
+            .chain(&pieces)
+        {
+            if raw(s) && rects_overlap(s.bounding_box(), rect) && !split_lids.contains(&s.layer_id)
             {
-                continue;
+                split_lids.push(s.layer_id);
             }
-            split_lids.push(shape.layer_id);
         }
-        // レイヤーごとの切り分けは、ほかのレイヤーを見ないので同時に計算する
-        let split_results = crate::planar_map::per_layer_parallel(&split_lids, |&lid| {
-            crate::planar_map::marquee_split(
-                &base_shapes,
-                lid,
-                &editing_group_path,
-                |s| selection.contains_shape(s) || hidden_now.contains(&s.shape_id),
-                &clip_rect_shape,
-            )
+        // レイヤーごとに、中身を1つの地図にして、選ぶ所（そのレイヤーで選んでいる図形と矩形）で1回だけ切る。片と残りが
+        // いつも同じ地図から出るので、何回選び足しても境目がそろい、選ぶ所の中でつながった同じ色の部分は1つの片になる。
+        // ほかのレイヤーを見ないので、同時に計算する
+        let splits = crate::planar_map::per_layer_parallel(&split_lids, |&lid| {
+            let own: Vec<&FillShape> = base_shapes
+                .iter()
+                .filter(unhidden)
+                .chain(chunks.iter().flat_map(|(_, c)| c))
+                .chain(&pieces)
+                .filter(|s| s.layer_id == lid && raw(s))
+                .collect();
+            let selected: Vec<&FillShape> = own
+                .iter()
+                .copied()
+                .filter(|s| selection.contains_shape(s))
+                .collect();
+            let rect_only = MapInput::Shapes(std::slice::from_ref(&clip_rect_shape));
+            if selected.is_empty() {
+                return crate::planar_map::marquee_split(&own, lid, &scope, rect_only);
+            }
+            let region = crate::planar_map::selection_region(&selected, &clip_rect_shape)?;
+            crate::planar_map::marquee_split(&own, lid, &scope, MapInput::Map(&region))
         });
-        let splits: Vec<(u64, Option<crate::planar_map::MarqueeSplit>)> =
-            split_lids.into_iter().zip(split_results).collect();
-        // 切った片と残りを入れ終えたレイヤー
-        let mut lifted_layers: Vec<u64> = Vec::new();
+        let mut lifted: Vec<FillShape> = Vec::new();
+        let mut new_hidden: Vec<ShapeId> = Vec::new();
+        // 地図にできなかったレイヤー（格子に置けない座標がある）
+        let mut unsplit: Vec<LayerId> = Vec::new();
+        for (&lid, sp) in split_lids.iter().zip(splits) {
+            let Some(sp) = sp else {
+                unsplit.push(lid);
+                continue;
+            };
+            let hidden: HashSet<ShapeId> = sp.hidden.iter().copied().collect();
+            let whole: HashSet<ShapeId> = sp.whole.iter().copied().collect();
+            let layer_hidden_start = new_hidden.len();
+            // 生の図形：切れたものは隠し、丸ごと中にあるものは、そのまま選ぶ
+            for s in base_shapes
+                .iter()
+                .filter(unhidden)
+                .filter(|s| s.layer_id == lid && raw(s))
+            {
+                if hidden.contains(&s.shape_id) {
+                    selection.shapes.remove(&s.shape_id);
+                    new_hidden.push(s.shape_id);
+                } else if whole.contains(&s.shape_id) {
+                    selection.insert_shape(s);
+                }
+            }
+            // 動かしていない片：切れたもの（つながった片と1つになったもの）は外す
+            pieces.retain(|p| {
+                let gone = p.layer_id == lid && hidden.contains(&p.shape_id);
+                if gone {
+                    selection.shapes.remove(&p.shape_id);
+                }
+                !gone
+            });
+            // 浮いている残り：このレイヤーの分を取り出し、丸ごと中のものは片にし、切れたものは捨て、新しい残りを足して
+            // 1つの塊にする（塊の位置は、そのレイヤーの残りの塊か、隠した図形のどれか）
+            let mut owner = None;
+            let mut rest = Vec::new();
+            for (o, chunk) in &mut chunks {
+                let (mine, others): (Vec<FillShape>, Vec<FillShape>) =
+                    chunk.drain(..).partition(|s| s.layer_id == lid && raw(s));
+                *chunk = others;
+                if !mine.is_empty() {
+                    owner = owner.or(*o);
+                }
+                for mut s in mine {
+                    if whole.contains(&s.shape_id) {
+                        // 隠した図形の番号を持つ残り（塊の先頭）は、片にするときに新しい番号にする
+                        if hidden_now.contains(&s.shape_id) {
+                            s.shape_id = next_shape_id();
+                        }
+                        selection.insert_shape(&s);
+                        lifted.push(s);
+                    } else if !hidden.contains(&s.shape_id) {
+                        rest.push(s);
+                    }
+                }
+            }
+            Floating::unmark_remainder(&hidden_now, &mut rest);
+            rest.extend(sp.remainder);
+            if !rest.is_empty() {
+                let owner = owner.or(new_hidden.get(layer_hidden_start).copied());
+                chunks.push((owner, rest));
+            }
+            for p in sp.pieces {
+                selection.insert_shape(&p);
+                lifted.push(p);
+            }
+        }
+        chunks.retain(|(_, c)| !c.is_empty());
+        if floating.is_some() || !new_hidden.is_empty() {
+            let fl = floating.get_or_insert_with(|| Floating {
+                pieces: Vec::new(),
+                remainder: Vec::new(),
+                hidden: HashSet::new(),
+                modified: false,
+            });
+            fl.hidden.extend(new_hidden);
+            lifted.append(&mut pieces);
+            lifted.append(&mut fl.pieces);
+            fl.pieces = lifted;
+            fl.set_remainder_chunks(chunks);
+        }
+        // グループは矩形にかかれば丸ごと選ぶ。地図にできないレイヤーの図形と、生の図形でないものは、切らずに、丸ごと
+        // 矩形の中にあるときだけ選ぶ
         for shape in &base_shapes {
             if selection.contains_shape(shape)
-                || floating
-                    .as_ref()
-                    .is_some_and(|fl| fl.hidden.contains(&shape.shape_id))
+                || hidden_now.contains(&shape.shape_id)
+                || !editable_lids.contains(&shape.layer_id)
+                || !shape.is_in_editing_scope(&scope)
             {
                 continue;
             }
-            if !editable_lids.contains(&shape.layer_id)
-                || !shape.is_in_editing_scope(&editing_group_path)
-            {
-                continue;
-            }
-            if let Some(gid) = shape.active_group_id_at_scope(&editing_group_path) {
+            if let Some(gid) = shape.active_group_id_at_scope(&scope) {
                 if hit_group_ids.contains(&gid) {
                     selection.insert_shape(shape);
                 }
                 continue;
             }
-            let map_split = splits
-                .iter()
-                .find(|(lid, _)| *lid == shape.layer_id)
-                .and_then(|(_, sp)| sp.as_ref())
-                .filter(|_| shape.is_raw_at_scope(&editing_group_path));
-            if let Some(sp) = map_split {
-                if sp.whole.contains(&shape.shape_id) {
-                    selection.insert_shape(shape);
-                } else if sp.hidden.contains(&shape.shape_id) {
-                    let orig_id = shape.shape_id;
-                    let fl = floating.get_or_insert_with(|| Floating {
-                        pieces: Vec::new(),
-                        remainder: Vec::new(),
-                        hidden: HashSet::new(),
-                        modified: false,
-                    });
-                    fl.hidden.insert(orig_id);
-                    if !lifted_layers.contains(&shape.layer_id) {
-                        lifted_layers.push(shape.layer_id);
-                        // そのレイヤーの残りは全部、最初に隠した図形の塊に入れる（生の図形どうしは重ならないので、
-                        // 並びの位置は見た目に関係しない）
-                        let mut remainder = sp.remainder.clone();
-                        if let Some(first) = remainder.first_mut() {
-                            first.shape_id = orig_id;
-                        }
-                        fl.remainder.extend(remainder);
-                        for piece in &sp.pieces {
-                            selection.insert_shape(piece);
-                            lifted.push(piece.clone());
-                        }
-                    }
-                }
+            if raw(shape) && !unsplit.contains(&shape.layer_id) {
                 continue;
             }
-            // 地図にできないレイヤー（格子に置けない座標がある）の図形は、切らずに、丸ごと矩形の中にあるときだけ選ぶ
             let b = shape.bounding_box();
             if b.x0 >= rect.x0 && b.x1 <= rect.x1 && b.y0 >= rect.y0 && b.y1 <= rect.y1 {
                 selection.insert_shape(shape);
             }
-        }
-        if let Some(fl) = floating {
-            fl.pieces.splice(0..0, lifted);
         }
     });
     tab.session.selection = selection;

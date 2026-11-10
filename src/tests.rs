@@ -23681,6 +23681,59 @@ mod map_overlay {
         eprintln!("PROBE 手ぶれなし・太さを変える 8 本：壊れた地図 {bad}/8");
     }
 
+    /// 選び足し（レビュー 08c15dd の N-2003）：前の矩形とつながる所を Shift で選び足すと、つながった同じ色の片は1つになり、
+    /// 動かして確定しても、レイヤーは正しい地図のまま（塗り重ねの作り直しに回らない）
+    #[test]
+    fn shift_marquee_merges_connected_pieces_and_keeps_layer_valid() {
+        let mut app = Is2dApp::default();
+        for (y, c) in [
+            (-40.0, Color32::RED),
+            (0.0, Color32::BLUE),
+            (40.0, Color32::GREEN),
+        ] {
+            app.tool.brush_color = c;
+            let pts: Vec<Point> = (0..=10)
+                .map(|i| Point::new(-200.0 + 40.0 * i as f64, y))
+                .collect();
+            doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 36.0));
+        }
+        let marquee = |app: &mut Is2dApp, p0: Point, p1: Point, additive: bool| {
+            assert!(doc_actions::apply(
+                app,
+                doc_actions::Action::SelectMarquee { p0, p1, additive },
+            ));
+        };
+        marquee(
+            &mut app,
+            Point::new(-260.0, -130.0),
+            Point::new(0.0, 130.0),
+            false,
+        );
+        marquee(
+            &mut app,
+            Point::new(-30.0, -100.0),
+            Point::new(80.0, 20.0),
+            true,
+        );
+        let fl = app.session.floating().expect("選択");
+        let colors: Vec<Color32> = fl.pieces.iter().map(|p| p.color).collect();
+        for c in [Color32::RED, Color32::BLUE, Color32::GREEN] {
+            assert_eq!(
+                colors.iter().filter(|&&x| x == c).count(),
+                1,
+                "{c:?} の片は1つ"
+            );
+        }
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::MoveSelected {
+                delta: KVec2::new(0.0, 200.0)
+            }
+        ));
+        canvas_tool::clear_selection(&mut app);
+        assert!(layer_map_valid(&app, 0));
+    }
+
     /// 矩形で選んだあと、境目をまたぐ矩形を Shift で選び足したときの、同じ色の片どうしの接し方を数える
     #[test]
     #[ignore]
@@ -23840,6 +23893,44 @@ mod map_overlay {
                 shapes.len(),
                 m.edges.len()
             );
+        }
+    }
+
+    /// 計測の試し（ふだんは流さない）：大きい斜めの三角形（一辺 5,000・20,000・60,000px）のあるレイヤーに、ブラシを1本
+    /// 描く時間（辺の数は同じで、形の大きさだけが違う）
+    #[test]
+    #[ignore]
+    fn probe_large_shape_cost() {
+        for size in [5_000.0f64, 20_000.0, 60_000.0] {
+            let mut app = Is2dApp::default();
+            let pts = [
+                Point::new(0.0, 0.0),
+                Point::new(size, size * 0.6),
+                Point::new(size * 0.2, size),
+            ];
+            let segs: Vec<QuadBez> = (0..3)
+                .map(|i| {
+                    let (a, b) = (pts[i], pts[(i + 1) % 3]);
+                    QuadBez::new(a, a.midpoint(b), b)
+                })
+                .collect();
+            let tri = FillShape::new(
+                Color32::RED,
+                crate::vector_engine::Contour::new(segs),
+                Vec::new(),
+            );
+            put_cel_shapes(&mut app, 0, 0, vec![tri]);
+            // 斜めの辺の真ん中を横切るブラシ
+            let m = pts[0].midpoint(pts[1]);
+            let line: Vec<Point> = (0..=8)
+                .map(|i| Point::new(m.x - 40.0 + 10.0 * i as f64, m.y + 30.0 - 7.5 * i as f64))
+                .collect();
+            app.tool.brush_color = Color32::BLUE;
+            let t = std::time::Instant::now();
+            doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&line, 6.0));
+            let el = t.elapsed().as_secs_f64() * 1e3;
+            assert!(layer_map_valid(&app, 0));
+            eprintln!("PROBE 三角形 {size}px：ブラシ 1 本 {el:.1}ms");
         }
     }
 
