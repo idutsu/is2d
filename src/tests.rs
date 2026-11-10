@@ -14297,11 +14297,13 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
         unmerged_same_col, 0,
         "同じ色で接する図形が別々の図形のまま残っていないこと"
     );
-    // 地図で行う今の作りで 182,599 セグメント（ブール演算の作りでは 174,097。境目が頂点で区切られる分だけ多い）。
+    // 地図で行う今の作りで 182,616 セグメント（ブール演算の作りでは 174,097。境目が頂点で区切られる分だけ多い）。
     // 段階1（d90cabe）の 182,462 より 137 多い：曲線に戻すかを判定の形（格子の上の折れ線）で決めるようになり、
-    // 折れ線がほかの辺に触れる所（この試しで 193 か所。前は曲線にして、判定の形では触れる地図になっていた）を曲線にしない
+    // 折れ線がほかの辺に触れる所（この試しで 193 か所。前は曲線にして、判定の形では触れる地図になっていた）を曲線にしない。
+    // 08c15dd レビューの段階4でさらに 17 多い：置いた線のうち、前の線に触れない辺を切り直さずにそのまま写すようになり、
+    // 1,050 通りのうち 5 通りで図形の分かれ方が変わった（−5〜+18）
     assert!(
-        total_segs <= 182_600,
+        total_segs <= 182_616,
         "結果の輪郭のセグメント数が増えていないこと: {}",
         total_segs
     );
@@ -23809,6 +23811,35 @@ mod map_overlay {
                     pieces.len()
                 );
             }
+        }
+    }
+
+    /// 計測の試し（ふだんは流さない）：重なった線の図形 30・60・120・240・480 個を塗り重ねる時間（`painted_map`。
+    /// 前の版の、境目のそろっていないセルを最初に編集するときに作る地図）
+    #[test]
+    #[ignore]
+    fn probe_painted_map_scaling() {
+        for n in [30usize, 60, 120, 240, 480] {
+            let mut r = Rng(5);
+            let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+            let shapes: Vec<FillShape> = (0..n)
+                .flat_map(|_| {
+                    let p0 = Point::new(-390.0 + r.f() * 780.0, -215.0 + r.f() * 430.0);
+                    let (len, ang) = (50.0 + r.f() * 250.0, r.f() * std::f64::consts::TAU);
+                    let p1 = p0 + KVec2::new(ang.cos(), ang.sin()) * len;
+                    let color = colors[(r.f() * 4.0) as usize % 4];
+                    make_stroke(p0, p1, (1.0 + r.f() * 7.0) as f32, color)
+                })
+                .collect();
+            let t = std::time::Instant::now();
+            let m = crate::planar_map::painted_map_pub(&shapes).expect("塗り重ねた地図");
+            let el = t.elapsed().as_secs_f64() * 1e3;
+            assert!(m.is_valid());
+            eprintln!(
+                "PROBE 重なった図形 {}：塗り重ね {el:.1}ms｜辺 {}",
+                shapes.len(),
+                m.edges.len()
+            );
         }
     }
 
