@@ -24966,14 +24966,16 @@ mod map_overlay {
                     index_bytes += i;
                     map_bytes += e;
                 }
-                for sh in kf.cel.shapes().iter() {
-                    if seen_shapes.insert(std::sync::Arc::as_ptr(sh) as usize) {
-                        shape_bytes +=
-                            sh.contours().map(|c| c.segments.len() * 48).sum::<usize>() + 200;
-                    }
-                }
             }
         };
+        // 面の図形は文書に無い（地図から作る写し）。前の作りで文書が持っていた分の目安として、今のセルの面の図形の大きさ
+        for kf in app.doc.root.layers.iter().flat_map(|l| &l.keyframes) {
+            for sh in kf.cel.shapes().iter() {
+                if seen_shapes.insert(std::sync::Arc::as_ptr(sh) as usize) {
+                    shape_bytes += sh.contours().map(|c| c.segments.len() * 48).sum::<usize>() + 288;
+                }
+            }
+        }
         let steps = app.history.undo_stack.len();
         for e in app.history.undo_stack.iter() {
             count(&e.timeline);
@@ -24986,12 +24988,78 @@ mod map_overlay {
             }
         }
         eprintln!(
-            "PROBE Undo の控え {steps} 件：地図の辺 {:.2}MB・塊の並び {:.2}MB・図形 {:.1}MB（同じものは1回）。今の地図の辺 {edges} 本・塊 {tiles} 個。辺1本 {} バイト。100 本で {elapsed:.0}ms",
+            "PROBE Undo の控え {steps} 件：地図の辺 {:.2}MB・塊の並び {:.2}MB（同じものは1回。面の図形は持たない。今のセルの面の図形は {:.2}MB）。今の地図の辺 {edges} 本・塊 {tiles} 個。辺1本 {} バイト。100 本で {elapsed:.0}ms",
             map_bytes as f64 / 1e6,
             index_bytes as f64 / 1e6,
             shape_bytes as f64 / 1e6,
             crate::stored_map::edge_size()
         );
+    }
+
+    /// 再生・スクラブで初めて出すセルの手間：図形の多い場面（3 レイヤー・線 180 本）で、地図のしまい場所を空にして
+    /// （初めて出すセルと同じ）画面の土台を作り直す時間と、再生の1コマ（レイヤーごとの結合メッシュ）の時間。あわせて、
+    /// キーフレームを 30 個に増やして保存した作品を開く時間
+    #[test]
+    #[ignore]
+    fn probe_unseen_cel_display() {
+        let mut app = dense_scene_app(7);
+        let n = app.scene().len();
+        let ids: Vec<u64> = app.doc.root.layers.iter().map(|l| l.id).collect();
+        let (mut rebuild, mut playback) = (Vec::new(), Vec::new());
+        for _ in 0..20 {
+            crate::planar_map::clear_layer_bases();
+            for &id in &ids {
+                app.session.base_cache.invalidate_layer(id);
+            }
+            let t = std::time::Instant::now();
+            app.refresh_scene_base();
+            rebuild.push(t.elapsed().as_secs_f64() * 1e3);
+            crate::planar_map::clear_layer_bases();
+            let t = std::time::Instant::now();
+            for i in 0..ids.len() {
+                let _ = app.doc.root.build_cel_world_batch_mesh(
+                    i,
+                    0,
+                    kurbo::Affine::IDENTITY,
+                    symbol::SymbolEvalCtx::new(&app.doc.library),
+                );
+            }
+            playback.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        let stat = |v: &[f64]| {
+            (
+                v.iter().sum::<f64>() / v.len() as f64,
+                v.iter().cloned().fold(0.0, f64::max),
+            )
+        };
+        let (ra, rm) = stat(&rebuild);
+        let (pa, pm) = stat(&playback);
+        eprintln!(
+            "PROBE 初めて出すセル（図形 {n}）：画面の土台 平均 {ra:.1}ms・最大 {rm:.1}ms｜再生の1コマ 平均 {pa:.1}ms・最大 {pm:.1}ms"
+        );
+        for l in 0..ids.len() {
+            timeline_ui::switch_to_layer_and_frame(&mut app, l, 0);
+            for f in 1..30 {
+                timeline_ui::switch_to_layer_and_frame(&mut app, l, f);
+                doc_actions::timeline_insert_keyframe(&mut app, true);
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("is2d-probe-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("open.is2d");
+        crate::project_io::save_project_to_path(&mut app, &path).unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        let t = std::time::Instant::now();
+        let doc = crate::project_io::read_project_document(&path)
+            .unwrap()
+            .into_document();
+        let open_ms = t.elapsed().as_secs_f64() * 1e3;
+        let cels: usize = doc.root.layers.iter().map(|l| l.keyframes.len()).sum();
+        eprintln!(
+            "PROBE 開く：セル {cels}・ファイル {:.1}MB・{open_ms:.0}ms",
+            size as f64 / 1e6
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// セル画の地図は場所ごとの塊でしまう：ブラシ1本で新しくなるのは、線の近くの塊だけ（ほかは前の地図・Undo の控えと

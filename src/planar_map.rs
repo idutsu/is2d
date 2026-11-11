@@ -1268,10 +1268,15 @@ impl LayerBase {
 
     /// 面の図形を地図から作る（`faces`）
     fn face_shapes(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
-        faces_with_ids(&self.map, 0, group_path)
-            .1
-            .into_iter()
-            .map(Arc::new)
+        let (faces, ids) = face_ids(&self.map);
+        faces
+            .iter()
+            .zip(ids)
+            .map(|(f, id)| {
+                let mut s = self.map.face_shape(f, 0, group_path);
+                s.shape_id = id;
+                Arc::new(s)
+            })
             .collect()
     }
 
