@@ -2223,6 +2223,19 @@ impl Session {
         });
     }
 
+    /// 地図 `maps`（レイヤーごと。文書の座標。面の番号が片の番号）を、浮いた片の組として足す（グループの解除：グループの
+    /// 地図そのもの）
+    pub(crate) fn add_floating_maps(&mut self, maps: Vec<(LayerId, Arc<crate::planar_map::LayerBase>)>) {
+        if maps.is_empty() {
+            return;
+        }
+        self.with_floating(|fl, stage| {
+            for (layer_id, base) in &maps {
+                fl.add_map(stage, *layer_id, &base.map);
+            }
+        });
+    }
+
     /// 浮いている残りの図形が選択に入ったら、片に持ち上げる（動かしていなければ、ほかの片と一緒に切り直して1つの組に
     /// する：同じ色でつながる片は1つになる）
     pub(crate) fn promote_selected_remainder_to_pieces(&mut self) {

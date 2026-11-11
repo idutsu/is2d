@@ -1457,8 +1457,6 @@ pub(crate) struct LayerMap {
     xform: Affine,
     /// 場面の並びで、このレイヤーの生の図形が最初に出てくる番号（これより後ろの、ほかの図形が前面）
     first_idx: usize,
-    /// 地図を決めるもの（次に作るとき、同じなら地図を使い回す。浮いた片の地図・残りの地図は持たない）
-    key: Option<MapKey>,
     /// 地図の持ち主（編集するとき、どの地図か）
     pub(crate) owner: MapOwner,
 }
@@ -1486,9 +1484,8 @@ fn is_map_shape(s: &FillShape, scope: &[u64]) -> bool {
     s.is_raw_at_scope(scope) && s.symbol_instance.is_none() && !s.exterior.segments.is_empty()
 }
 
-/// 編集中の階層の生の図形（浮いた片を除く）の、レイヤーごとの地図。場面の生の図形が前回と同じなら、前回の並びを
-/// そのまま返す。違えば、図形が前回と同じレイヤー（鍵 `MapKey` が同じ）は前回の地図を使い、ほかのレイヤーだけ引く
-/// （`LayerBase::of`：セル画の地図）。浮いた片を持ち上げたレイヤーは、その残りの地図
+/// 編集中の階層の生の図形（浮いた片を除く）の、レイヤーごとの地図：画面に出しているセル画の地図（`Cel::scope_base`）。
+/// 浮いた片を持ち上げたレイヤーは、その残りの地図。場面の生の図形が前回と同じなら、前回の並びをそのまま返す
 pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> {
     use std::hash::{Hash, Hasher};
     let scope = &session.editing_group_path;
@@ -1519,28 +1516,16 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     if let Some(c) = cache.as_ref().filter(|c| c.key == key) {
         return c.clone();
     }
-    let prev = cache.clone();
     // 地図にできないレイヤー（格子に置けない座標がある）は入れない（カーソル合わせも変形もしない）。作り直すレイヤーが
     // いくつあっても待つ時間が増えないよう、同時に作る
-    let maps = per_layer_parallel(&by_layer, |(layer_id, first_idx, shapes)| {
+    let maps = per_layer_parallel(&by_layer, |(layer_id, first_idx, _)| {
         let rest = floating
             .and_then(|fl| fl.layers().iter().find(|l| l.layer_id == *layer_id))
             .and_then(|l| l.origin.as_ref())
             .map(|o| o.rest.clone());
-        let (base, key) = match rest {
-            Some(rest) => (rest, None),
-            None => {
-                let key = MapKey::new(shapes, xform);
-                let reused = prev
-                    .as_ref()
-                    .and_then(|p| p.maps.iter().find(|m| m.key.as_ref() == Some(&key)))
-                    .map(|m| m.base.clone());
-                let base = match reused {
-                    Some(base) => base,
-                    None => LayerBase::keyed(shapes, xform, key.clone())?,
-                };
-                (base, Some(key))
-            }
+        let base = match rest {
+            Some(rest) => rest,
+            None => session.base_cache.cel(*layer_id)?.scope_base(scope)?,
         };
         Some(LayerMap {
             layer_id: *layer_id,
@@ -1548,7 +1533,6 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
             base,
             xform,
             first_idx: *first_idx,
-            key,
             owner: MapOwner::Layer(*layer_id),
         })
     })
@@ -1697,7 +1681,6 @@ fn floating_maps(scene: Scene<'_>, session: &Session) -> Vec<LayerMap> {
                 base: g.base.clone(),
                 xform: world * g.xform,
                 first_idx,
-                key: None,
                 owner: MapOwner::Floating(l.layer_id, gi),
             });
         }
@@ -1948,25 +1931,25 @@ impl PlanarMap {
 }
 
 /// 輪郭の変形のドラッグ中の表示：地図 `base.map` に編集 `edit`（文書の座標）をかけて確定した結果を、図形の差分で返す
-/// （離したときの確定 `map_edit_diff` と同じ計算）。`orig_shapes` は、地図を作った図形（座標の変換 `xform` で置いた図形）
-/// を含む並び
+/// （離したときの確定 `Cel::edit_map` と同じ計算）。`own` は地図の面の文書の図形。新しい形は、座標の変換 `xform` で置いた写し
 pub(crate) fn reshape_result(
     base: &LayerBase,
     edit: MapEdit,
-    orig_shapes: &[FillShape],
+    own: &[&FillShape],
     layer_id: LayerId,
     group_path: &[u64],
     xform: Affine,
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
     let next = edit.apply(&base.map)?;
-    let change = base.diff_placed(
-        &next,
-        &layer_own(orig_shapes, layer_id, group_path),
-        layer_id,
-        group_path,
-        xform,
-    )?;
-    Some((change.removed, change.added))
+    let change = base.diff(&next, own, layer_id, group_path)?;
+    Some((
+        change.removed,
+        change
+            .added
+            .into_iter()
+            .map(|d| placed(d, xform))
+            .collect(),
+    ))
 }
 
 /// `items` のそれぞれに `f` をかけた結果（`items` の順）。2つ以上あれば、別々のスレッドで同時に計算する

@@ -25440,7 +25440,8 @@ mod map_overlay {
                         }
                     };
                     let t = std::time::Instant::now();
-                    let out = reshape_result(&base, edit, &shapes, layer_id, &[], Affine::IDENTITY);
+                    let own: Vec<&FillShape> = shapes.iter().collect();
+                    let out = reshape_result(&base, edit, &own, layer_id, &[], Affine::IDENTITY);
                     std::hint::black_box(out);
                     if i % 2 == 0 {
                         pull.push(ms(t));

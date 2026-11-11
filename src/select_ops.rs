@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 
@@ -601,8 +602,33 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     }
 
     let mut any_became_raw = false;
-    // 生に戻った図形は、文書の階層の地図に入れずに浮いた片にする（選んだまま。確定のときに、その階層の地図に重ねる）
+    // 生に戻った図形は、文書の階層の地図に入れずに浮いた片にする（選んだまま。確定のときに、その階層の地図に重ねる）。
+    // グループの中の生の図形の片の地図は、そのグループの階層の地図そのもの（図形はその面）
     let mut became_raw: Vec<FillShape> = Vec::new();
+    let mut group_maps: Vec<(LayerId, Arc<crate::planar_map::LayerBase>)> = Vec::new();
+    let mut group_raw: Vec<(LayerId, Vec<u64>)> = Vec::new();
+    for s in tab.session.base_cache.shapes() {
+        if tab.session.selection.contains_shape(s)
+            && s.symbol_instance.is_none()
+            && s.is_in_editing_scope(&tab.session.editing_group_path)
+            && s.group_path.len() == depth + 1
+            && !group_raw
+                .iter()
+                .any(|g| g.0 == s.layer_id && g.1 == s.group_path)
+        {
+            group_raw.push((s.layer_id, s.group_path.clone()));
+        }
+    }
+    let mut from_groups: HashSet<ShapeId> = HashSet::new();
+    for (layer_id, path) in &group_raw {
+        let Some(cel) = tab.session.base_cache.cel(*layer_id) else {
+            continue;
+        };
+        if let Some(base) = cel.scope_base(path) {
+            group_maps.push((*layer_id, base));
+            from_groups.extend(cel.scope_shapes(path).iter().map(|s| s.shape_id));
+        }
+    }
     let mut selection = std::mem::take(&mut tab.session.selection);
     edit_layers(tab, &layer_ids, |edit| {
         let mut detached_inner_gid_map: Vec<((u64, u64), u64)> = Vec::new();
@@ -705,6 +731,9 @@ pub(crate) fn prepare_ungroup_selected_shapes(
         became_raw = raw;
     });
     tab.session.selection = selection;
+    // グループから生に戻った図形は、そのグループの地図を片の地図にする。ほか（シンボルの分解）は図形から作る
+    became_raw.retain(|s| !from_groups.contains(&s.shape_id));
+    tab.session.add_floating_maps(group_maps);
     tab.session.add_floating_pieces(became_raw);
     if any_became_raw {
         tab.session.lift_selected_raw_shapes_to_floating();

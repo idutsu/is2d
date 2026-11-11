@@ -497,6 +497,13 @@ impl Floating {
         }
     }
 
+    /// 地図 `map`（文書の座標。面の番号が片の番号）を、レイヤー `layer_id` の片の組として一番上に足す
+    pub(crate) fn add_map(&mut self, stage: Stage<'_>, layer_id: LayerId, map: &PlanarMap) {
+        let group = PieceGroup::new(map, layer_id, stage.scope, Affine::IDENTITY);
+        self.layer_mut(layer_id).groups.push(group);
+        self.modified = true;
+    }
+
     /// 片を捨てる（削除：残りだけを確定する）
     pub(crate) fn drop_pieces(&mut self) {
         for l in &mut self.layers {
