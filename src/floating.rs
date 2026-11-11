@@ -130,6 +130,21 @@ impl FloatLayer {
         self.origin.as_ref().map_or(&cel.map, |o| &o.rest.map)
     }
 
+    /// 片の組を下から順に重ねた地図（組ごとに変換をかけて、その座標の格子で正しい地図にする：`realized`）。片が無ければ
+    /// 空の地図。`None`：格子に置けない座標がある
+    pub(crate) fn pieces_map(&self) -> Option<PlanarMap> {
+        let mut map = PlanarMap::default();
+        for g in &self.groups {
+            let piece = realized(&g.base.map, g.xform)?;
+            map = if map.edges.is_empty() {
+                piece
+            } else {
+                map.overlay(MapInput::Map(&piece), MapRule::Overlay)?
+            };
+        }
+        Some(map)
+    }
+
     /// 画面の土台 `stage` のセル画の地図の上で確定した地図（`committed`）
     pub(crate) fn committed_on(&self, stage: Stage<'_>) -> Option<PlanarMap> {
         let (_, cel) = stage.cel(self.layer_id)?;
@@ -509,43 +524,6 @@ impl Floating {
         for l in &mut self.layers {
             l.groups.clear();
         }
-    }
-
-    /// 片を重ねずに、図形として `shapes`（ステージの写し）に入れる（グループ化・シンボル化の前）：隠す図形を除いて、
-    /// その所に残りの図形を入れ、片の図形を `insert_limit`（編集中の階層の図形の後ろ）に足す
-    pub(crate) fn materialize_into(self, shapes: &mut Vec<FillShape>, insert_limit: usize) {
-        let mut out: Vec<FillShape> = Vec::with_capacity(shapes.len() + self.pieces.len());
-        let mut trailing: Vec<FillShape> = Vec::new();
-        let mut placed: HashSet<ShapeId> = HashSet::new();
-        let mut leftover: Vec<FillShape> = Vec::new();
-        for (idx, s) in std::mem::take(shapes).into_iter().enumerate() {
-            let dst = if idx < insert_limit {
-                &mut out
-            } else {
-                &mut trailing
-            };
-            if self.hidden.contains(&s.shape_id) {
-                if placed.insert(s.shape_id) {
-                    dst.extend(
-                        self.remainder
-                            .iter()
-                            .filter(|(at, _)| *at == Placement::ReplaceAt(s.shape_id))
-                            .map(|(_, r)| r.clone()),
-                    );
-                }
-            } else {
-                dst.push(s);
-            }
-        }
-        for (at, r) in &self.remainder {
-            if !matches!(at, Placement::ReplaceAt(id) if placed.contains(id)) {
-                leftover.push(r.clone());
-            }
-        }
-        out.extend(leftover);
-        out.extend(self.pieces);
-        out.extend(trailing);
-        *shapes = out;
     }
 }
 

@@ -35,8 +35,18 @@ pub(crate) fn prepare_convert_selection_to_symbol(
 
     let sym_id = tab.doc.alloc_symbol_id();
     let inst_gid = tab.doc.alloc_group_id();
-    let fl_opt = tab.session.take_floating();
+    // 浮いた片の残りは、そのままセル画の地図にする。片（ステージの写し）は、シンボルの中身にするので図形のまま入れる
+    // （選択は、残りを書く前のもの：片も選んでいる）
     let selection = tab.session.selection.clone();
+    let fl_opt = tab.session.take_floating();
+    let pieces: Vec<crate::vector_engine::FillShape> = fl_opt
+        .as_ref()
+        .map(|fl| fl.pieces().to_vec())
+        .unwrap_or_default();
+    if let Some(mut rest) = fl_opt {
+        rest.drop_pieces();
+        crate::canvas_tool::commit_floating_layers(tab, rest);
+    }
     let depth = tab.session.editing_group_path.len();
     let layer_ids = editable_layer_ids(tab);
     // `edit_layers` の図形はステージ座標。新しいシンボルの中身は、今いるシンボルの座標に戻してから、
@@ -46,8 +56,9 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     let mut local_shapes = Vec::new();
 
     edit_layers(tab, &layer_ids, |edit| {
-        if let Some(fl) = fl_opt {
-            edit.materialize_floating_without_merge(fl);
+        if !pieces.is_empty() {
+            let at = edit.scope_insert_index();
+            edit.shapes.splice(at..at, pieces);
         }
 
         let valid_indices: Vec<usize> = edit

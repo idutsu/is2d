@@ -492,17 +492,32 @@ pub(crate) fn prepare_group_selected_shapes(
         return false;
     }
 
+    // 浮いた片は、レイヤーごとに片の組を重ねた地図（変換をかけて、その座標の格子で正しい地図にしたもの）にして、新しい
+    // グループの階層の地図にする。地図にできない片（格子に置けない座標がある）があれば、グループにしない
+    let pieces: Option<Vec<(LayerId, crate::planar_map::PlanarMap)>> =
+        tab.session.floating().map_or(Some(Vec::new()), |fl| {
+            fl.layers()
+                .iter()
+                .filter(|l| !l.groups.is_empty())
+                .map(|l| Some((l.layer_id, l.pieces_map()?)))
+                .collect()
+        });
+    let Some(pieces) = pieces else {
+        return false;
+    };
+
     before_mutate(tab);
     let new_gid = tab.doc.alloc_group_id();
 
-    let fl_opt = tab.session.take_floating();
+    // 浮いた片の残りは、そのままセル画の地図にする（片は重ねない。選択は、残りを書く前のもの：片も選んでいる）
     let selection = tab.session.selection.clone();
+    if let Some(mut rest) = tab.session.take_floating() {
+        rest.drop_pieces();
+        crate::canvas_tool::commit_floating_layers(tab, rest);
+    }
     let depth = tab.session.editing_group_path.len();
     let layer_ids = editable_layer_ids(tab);
     edit_layers(tab, &layer_ids, |edit| {
-        if let Some(fl) = fl_opt {
-            edit.materialize_floating_without_merge(fl);
-        }
         let insert_limit = edit.scope_insert_index();
         let mut unselected = Vec::with_capacity(edit.shapes.len());
         let mut grouped_shapes = Vec::new();
@@ -523,6 +538,14 @@ pub(crate) fn prepare_group_selected_shapes(
         unselected.extend(trailing_outside);
         edit.shapes = unselected;
     });
+    // 浮いた片の地図を、新しいグループの階層の地図にする（図形はその面。番号は片の番号のまま）
+    let mut group_path = tab.session.editing_group_path.clone();
+    group_path.push(new_gid);
+    for (layer_id, map) in pieces {
+        crate::canvas_tool::edit_scope_map(tab, layer_id, &group_path, |_| Some(map));
+    }
+    tab.session.selection = selection;
+    tab.session.retain_existing_selection();
 
     if let Some(l_idx) = tab.active_timeline().layer_index_by_id(target_lid) {
         tab.set_active_layer(l_idx);

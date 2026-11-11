@@ -2225,7 +2225,10 @@ impl Session {
 
     /// 地図 `maps`（レイヤーごと。文書の座標。面の番号が片の番号）を、浮いた片の組として足す（グループの解除：グループの
     /// 地図そのもの）
-    pub(crate) fn add_floating_maps(&mut self, maps: Vec<(LayerId, Arc<crate::planar_map::LayerBase>)>) {
+    pub(crate) fn add_floating_maps(
+        &mut self,
+        maps: Vec<(LayerId, Arc<crate::planar_map::LayerBase>)>,
+    ) {
         if maps.is_empty() {
             return;
         }
@@ -3021,7 +3024,6 @@ impl Tab {
 pub(crate) struct LayerEdit {
     pub(crate) shapes: Vec<FillShape>,
     pub(crate) editing_group_path: Vec<u64>,
-    pub(crate) layer_order_ids: Vec<LayerId>,
     pub(crate) next_group_id: u64,
 }
 
@@ -3036,17 +3038,6 @@ impl LayerEdit {
                 .rposition(|s| s.is_in_editing_scope(&self.editing_group_path))
                 .map(|pos| pos + 1)
                 .unwrap_or(self.shapes.len())
-        }
-    }
-
-    /// `Floating` を重ねずにそのまま `self.shapes` に入れる（グループ化・シンボル変換の前処理用）
-    pub(crate) fn materialize_floating_without_merge(&mut self, fl: Floating) {
-        let insert_limit = self.scope_insert_index();
-        fl.materialize_into(&mut self.shapes, insert_limit);
-        if self.layer_order_ids.len() > 1 && self.shapes.len() > 1 {
-            let order_ids = &self.layer_order_ids;
-            self.shapes
-                .sort_by_key(|s| layer_order_index(order_ids, s.layer_id));
         }
     }
 }
@@ -3215,7 +3206,7 @@ pub(crate) fn edit_layers(
 ) -> bool {
     tab.refresh_scene_base();
 
-    let (target_layer_indices, target_lids, layer_order_ids) = {
+    let (target_layer_indices, target_lids) = {
         let tl = tab.active_timeline();
         let frame = tl.current_frame;
         let fallback_lid = if tl.is_active_layer_editable() {
@@ -3241,8 +3232,7 @@ pub(crate) fn edit_layers(
                 lids.push(layer.id);
             }
         }
-        let order_ids: Vec<LayerId> = tl.layers.iter().map(|l| l.id).collect();
-        (indices, lids, order_ids)
+        (indices, lids)
     };
     if target_layer_indices.is_empty() {
         return false;
@@ -3281,7 +3271,6 @@ pub(crate) fn edit_layers(
     let mut edit = LayerEdit {
         shapes: loaded_shapes,
         editing_group_path,
-        layer_order_ids,
         next_group_id,
     };
     f(&mut edit);

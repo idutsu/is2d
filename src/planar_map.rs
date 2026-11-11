@@ -1313,7 +1313,8 @@ impl LayerBase {
         })
     }
 
-    /// `diff` を、座標の変換 `xform` で置いた図形 `own` で受け取り、新しい形を `xform` で置いた写しで返すもの
+    /// テスト用：`diff` を、座標の変換 `xform` で置いた図形 `own` で受け取り、新しい形を `xform` で置いた写しで返すもの
+    #[cfg(test)]
     pub(crate) fn diff_placed(
         &self,
         next: &PlanarMap,
@@ -1436,6 +1437,7 @@ fn placed(mut d: FillShape, xform: Affine) -> FillShape {
 }
 
 /// 図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の、地図にする生の図形（並びの順）
+#[cfg(test)]
 pub(crate) fn layer_own<'a>(
     shapes: &'a [FillShape],
     layer_id: LayerId,
@@ -1944,11 +1946,7 @@ pub(crate) fn reshape_result(
     let change = base.diff(&next, own, layer_id, group_path)?;
     Some((
         change.removed,
-        change
-            .added
-            .into_iter()
-            .map(|d| placed(d, xform))
-            .collect(),
+        change.added.into_iter().map(|d| placed(d, xform)).collect(),
     ))
 }
 
