@@ -228,7 +228,10 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     }
 
     let rect = KRect::new(min_x, min_y, max_x, max_y);
-    let clip_rect_shape = make_marquee_rect_shape(rect);
+    // 地図は文書の座標で持つので、切る形（矩形）は文書の座標へ写して渡す（ほかの入力と同じ：`FillShape::to_doc`）
+    let clip_rect_shape = make_marquee_rect_shape(rect)
+        .to_doc(tab.session.edit_path.world_xform())
+        .into_owned();
     let hit_group_ids =
         collect_marquee_hit_groups(tab.scene(), &tab.session.editing_group_path, rect);
 

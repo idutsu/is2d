@@ -3214,13 +3214,10 @@ pub(crate) fn edit_layers(
         return false;
     }
 
+    // 潰れた（行列式が 0 に近い）インスタンスには入れない（`enter_symbol_timeline`）ので、逆の変換はいつもある
     let world_xform = tab.session.edit_path.world_xform();
     let has_world_xform = world_xform != Affine::IDENTITY;
-    let inv_xform = if !has_world_xform || world_xform.determinant().abs() <= 1e-9 {
-        Affine::IDENTITY
-    } else {
-        world_xform.inverse()
-    };
+    let inv_xform = world_xform.inverse();
     let editing_group_path = tab.session.editing_group_path.clone();
     let mut next_group_id = tab.doc.next_group_id.max(1);
 

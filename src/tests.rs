@@ -24972,7 +24972,8 @@ mod map_overlay {
         for kf in app.doc.root.layers.iter().flat_map(|l| &l.keyframes) {
             for sh in kf.cel.shapes().iter() {
                 if seen_shapes.insert(std::sync::Arc::as_ptr(sh) as usize) {
-                    shape_bytes += sh.contours().map(|c| c.segments.len() * 48).sum::<usize>() + 288;
+                    shape_bytes +=
+                        sh.contours().map(|c| c.segments.len() * 48).sum::<usize>() + 288;
                 }
             }
         }
@@ -25302,6 +25303,74 @@ mod map_overlay {
             built,
             "図形から地図を作り直さない"
         );
+    }
+
+    /// シンボルの中（インスタンスに平行移動・回転・拡大がかかっている）で矩形で選ぶと、囲んだ所（ステージ座標）が切られる：
+    /// 切る形は文書の座標へ写して地図に渡す
+    #[test]
+    fn marquee_inside_transformed_symbol_cuts_the_enclosed_part() {
+        let mut app = Is2dApp::default();
+        let pts: Vec<Point> = (0..=20)
+            .map(|j| Point::new(100.0 + j as f64 * 11.0, 100.0))
+            .collect();
+        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 10.0));
+        assert!(doc_actions::apply(&mut app, doc_actions::Action::SelectAll));
+        doc_actions::convert_selection_to_symbol(&mut app).expect("シンボル化");
+        for action in [
+            doc_actions::Action::MoveSelected {
+                delta: KVec2::new(300.0, 0.0),
+            },
+            doc_actions::Action::RotateSelection { angle_rad: 0.3 },
+            doc_actions::Action::ScaleSelection { sx: 1.4, sy: 0.8 },
+        ] {
+            assert!(doc_actions::apply(&mut app, action));
+        }
+        let binding = app.scene().iter().find_map(|s| s.symbol_instance).unwrap();
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::EnterSymbolTimeline { binding },
+        ));
+        let line = app
+            .scene()
+            .iter()
+            .map(|s| s.bounding_box())
+            .reduce(|a, b| a.union(b))
+            .unwrap();
+        // 線の右半分を囲む（ステージ座標）
+        let rect = kurbo::Rect::new(
+            line.center().x,
+            line.y0 - 20.0,
+            line.x1 + 20.0,
+            line.y1 + 20.0,
+        );
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::SelectMarquee {
+                p0: Point::new(rect.x0, rect.y0),
+                p1: Point::new(rect.x1, rect.y1),
+                additive: false,
+            },
+        ));
+        let pieces = app
+            .session
+            .floating()
+            .map(|fl| fl.pieces().to_vec())
+            .unwrap_or_default();
+        assert!(!pieces.is_empty(), "囲んだ所が片になる");
+        // 切り口の頂点は文書の座標の格子（1/4096px）に置くので、ステージではその拡大の分（1.4 倍）まで外へ出うる
+        let eps = 1e-3;
+        for p in &pieces {
+            let b = p.bounding_box();
+            assert!(
+                b.x0 >= rect.x0 - eps
+                    && b.x1 <= rect.x1 + eps
+                    && b.y0 >= rect.y0 - eps
+                    && b.y1 <= rect.y1 + eps,
+                "片 {b:?} が矩形 {rect:?} の中にある"
+            );
+        }
+        let area: f64 = pieces.iter().map(|p| p.bounding_box().area()).sum();
+        assert!(area > 0.0);
     }
 
     /// セル画は階層ごとの地図とインスタンスだけを持ち、生の図形はその階層のいちばん下（Adobe Animate と同じ）。図形の
