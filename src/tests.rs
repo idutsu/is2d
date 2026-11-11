@@ -24524,7 +24524,7 @@ mod map_overlay {
             let layer_id = shapes[0].layer_id;
             let mut r = Rng(layer as u64 + 1);
             for dist in [5.0, 20.0, 60.0] {
-                let (mut pull, mut moved) = (Vec::new(), Vec::new());
+                let (mut pull, mut moved, mut commit) = (Vec::new(), Vec::new(), Vec::new());
                 for i in 0..100 {
                     let ang = r.f() * std::f64::consts::TAU;
                     let d = KVec2::new(ang.cos(), ang.sin()) * dist;
@@ -24551,11 +24551,18 @@ mod map_overlay {
                     } else {
                         moved.push(ms(t));
                     }
+                    // 離したときの確定（レイヤーの図形から差分を出す）
+                    let t = std::time::Instant::now();
+                    let out =
+                        crate::planar_map::map_edit_diff(&shapes, layer_id, &[], |m| edit.apply(m));
+                    std::hint::black_box(out);
+                    commit.push(ms(t));
                 }
                 let (pa, p9, pm) = stats(&pull);
                 let (ma, m9, mm) = stats(&moved);
+                let (ca, c9, cm) = stats(&commit);
                 eprintln!(
-                    "PROBE レイヤー {layer}（辺 {}）{dist}px：辺の引っぱり 平均 {pa:.2}・9割 {p9:.2}・最大 {pm:.2}ms｜頂点の移動 平均 {ma:.2}・9割 {m9:.2}・最大 {mm:.2}ms",
+                    "PROBE レイヤー {layer}（辺 {}）{dist}px：辺の引っぱり 平均 {pa:.2}・9割 {p9:.2}・最大 {pm:.2}ms｜頂点の移動 平均 {ma:.2}・9割 {m9:.2}・最大 {mm:.2}ms｜確定 平均 {ca:.2}・9割 {c9:.2}・最大 {cm:.2}ms",
                     map.edges.len()
                 );
             }
