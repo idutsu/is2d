@@ -15759,7 +15759,6 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
         Action::ReshapeEdge {
             layer_id: empty_layer,
             grab_t: 0.5,
-            grab_pos: c,
             target_pos: Point::new(c.x, c.y + 30.0),
             orig_seg: dummy_seg,
         },
@@ -15800,7 +15799,6 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
         Action::ReshapeEdge {
             layer_id,
             grab_t: 0.5,
-            grab_pos: c,
             target_pos: Point::new(c.x, c.y + 30.0),
             orig_seg: dummy_seg,
         },
@@ -19571,7 +19569,6 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
         Action::ReshapeEdge {
             layer_id,
             grab_t,
-            grab_pos,
             target_pos: grab_pos + kurbo::Vec2::new(0.0, 50.0),
             orig_seg,
         },
@@ -21630,14 +21627,7 @@ fn test_merge_touching_faces_keeps_piece_in_remainder_hole() {
     assert!((area(&ring[0]) - 38_400.0).abs() < 1e-6);
     let own: Vec<&FillShape> = ring.iter().collect();
     let center = make_marquee_rect_shape(KRect::new(50.0, 50.0, 150.0, 150.0));
-    let sp = marquee_split(
-        &own,
-        lid,
-        &[],
-        Affine::IDENTITY,
-        MapInput::Shapes(std::slice::from_ref(&center)),
-    )
-    .expect("切る");
+    let sp = marquee_split(&own, lid, &[], Affine::IDENTITY, &[], &center).expect("切る");
     let parts: Vec<FillShape> = sp.remainder.into_iter().chain(sp.pieces).collect();
     assert_eq!(parts.len(), 2, "残りと片");
     let merged = merge_touching_faces(parts, Affine::IDENTITY);
@@ -22961,6 +22951,169 @@ mod map_overlay {
         eprintln!("PROBE 面をずらして置く {total} 回（持ち上げと置くの2回の重ね）｜取り消し {refused}｜壊れた地図 {broken}｜色の違う回 {diffs}｜1回 平均 {:.1}ms・最大 {t_max:.1}ms", t_sum / total as f64);
     }
 
+    /// 回して縦横別に拡大したインスタンスからシンボルの中に入って編集しても、文書（シンボルの座標）の図形は、いつもその座標で
+    /// 正しい地図の面のまま（地図は文書の座標で作り、書き戻しで逆変換しない。レビュー 6cca852 の N-2001。直す前は、同じ
+    /// 操作で 300 回中 15 回、正しい地図でなくなった）。別の変換のインスタンスから入って、どの図形にもかからない所に描いても、
+    /// ほかの図形は番号も形もそのまま
+    #[test]
+    fn symbol_edit_in_rotated_scaled_instance_keeps_local_map_valid() {
+        if let Err(e) = symbol_random_ops(2, 220) {
+            panic!("{e}");
+        }
+    }
+
+    /// 強さの試し（ふだんは流さない）：`symbol_edit_in_rotated_scaled_instance_keeps_local_map_valid` の操作を、種と回数を
+    /// 変えて続ける。環境変数 PROBE_SEEDS・PROBE_STEPS（ふだん 300）
+    #[test]
+    #[ignore]
+    fn probe_symbol_random_ops() {
+        let seeds: Vec<u64> = std::env::var("PROBE_SEEDS")
+            .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
+            .unwrap_or((1..=10).collect());
+        let steps: usize = std::env::var("PROBE_STEPS")
+            .map(|v| v.parse().unwrap())
+            .unwrap_or(300);
+        for seed in seeds {
+            eprintln!("PROBE 種{seed}：{:?}", symbol_random_ops(seed, steps));
+        }
+    }
+
+    /// 1つのインスタンスを回して縦横別に拡大し、中に入って、種 `seed` の乱数で描画の操作を `steps` 回続ける。毎回、文書の
+    /// 図形がその座標で正しい地図か確かめる。最後に、別の変換のインスタンスから入って、どの図形にもかからない所に描き、
+    /// ほかの図形が番号も形もそのままか確かめる
+    fn symbol_random_ops(seed: u64, steps: usize) -> Result<(), String> {
+        use crate::doc_actions::Action;
+        let mut app = Is2dApp::default();
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+        let stroke = |app: &mut Is2dApp, pts: &[Point], radius: f64| {
+            let mut dense = Vec::new();
+            for w in pts.windows(2) {
+                for j in 0..10 {
+                    dense.push(w[0].lerp(w[1], j as f64 / 10.0));
+                }
+            }
+            dense.push(*pts.last().unwrap());
+            doc_actions::commit_raw_outline(app, &generate_brush_outline(&dense, radius));
+        };
+        stroke(
+            &mut app,
+            &[Point::new(200.0, 300.0), Point::new(400.0, 300.0)],
+            30.0,
+        );
+        app.session.set_selected_indices(vec![0]);
+        assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
+        let place_instance = |app: &mut Is2dApp, angle: f64, sx: f64, sy: f64| {
+            let c = KVec2::new(300.0, 300.0);
+            let xf = Affine::translate(c)
+                * Affine::rotate(angle)
+                * Affine::scale_non_uniform(sx, sy)
+                * Affine::translate(-c);
+            let b = &mut app.doc.root.layers[0].keyframe_mut(0).cel.instances_mut()[0].binding;
+            b.xform = xf * b.xform;
+            app.doc.bump_revision();
+            app.refresh_scene_base();
+        };
+        let enter = |app: &mut Is2dApp| {
+            app.session.set_selected_indices(vec![0]);
+            let (binding, _, _) = symbol_ops::selected_single_symbol_info(app).unwrap();
+            assert!(symbol_ops::enter_symbol_timeline(app, binding));
+        };
+        let local = |app: &Is2dApp| -> Vec<FillShape> {
+            app.active_timeline().layers[0].keyframes[0]
+                .cel
+                .shapes
+                .iter()
+                .map(|s| (**s).clone())
+                .collect()
+        };
+        place_instance(&mut app, 0.4, 1.3, 0.8);
+        enter(&mut app);
+        let mut r = Rng(seed);
+        let rp = |r: &mut Rng| Point::new(180.0 + r.f() * 240.0, 200.0 + r.f() * 200.0);
+        for step in 0..steps {
+            let kind = (r.f() * 10.0) as usize % 10;
+            match kind {
+                0 | 1 => {
+                    app.tool.tool = if kind == 0 { Tool::Brush } else { Tool::Eraser };
+                    let pts: Vec<Point> = (0..3).map(|_| rp(&mut r)).collect();
+                    stroke(&mut app, &pts, 4.0 + r.f() * 10.0);
+                    app.tool.tool = Tool::Brush;
+                }
+                2 => {
+                    app.tool.brush_color = colors[(r.f() * 4.0) as usize % 4];
+                    let _ = doc_actions::bucket_fill_at(&mut app, rp(&mut r));
+                }
+                3..=5 => {
+                    let a = rp(&mut r);
+                    let b = a + KVec2::new(20.0 + r.f() * 80.0, 20.0 + r.f() * 80.0);
+                    select_ops::apply_marquee_selection(&mut app, a, b, false);
+                    if !app.session.selection.is_empty() {
+                        let action = match kind {
+                            3 => Action::MoveSelected {
+                                delta: KVec2::new(r.f() * 30.0 - 15.0, r.f() * 30.0 - 15.0),
+                            },
+                            4 => Action::RotateSelection {
+                                angle_rad: (r.f() - 0.5) * 0.6,
+                            },
+                            _ => Action::ScaleSelection {
+                                sx: 0.7 + r.f() * 0.6,
+                                sy: 0.7 + r.f() * 0.6,
+                            },
+                        };
+                        let _ = doc_actions::apply(&mut app, action);
+                    }
+                    canvas_tool::clear_selection(&mut app);
+                }
+                6 | 7 => {
+                    let from = rp(&mut r);
+                    let to = from + KVec2::new(r.f() * 30.0 - 15.0, r.f() * 30.0 - 15.0);
+                    let action = if kind == 6 {
+                        Action::PullEdgeFromTo { from, to }
+                    } else {
+                        Action::MoveVertexFromTo { from, to }
+                    };
+                    let _ = doc_actions::apply(&mut app, action);
+                }
+                8 => {
+                    let _ = doc_actions::apply(&mut app, Action::AddAnchor { pt: rp(&mut r) });
+                }
+                _ => {
+                    let _ = doc_actions::apply(&mut app, Action::DeleteAnchor { pt: rp(&mut r) });
+                }
+            }
+            let shapes = local(&app);
+            let m = PlanarMap::from_faces(shapes.iter());
+            if !m.is_valid() {
+                return Err(format!(
+                    "{step} 回目（種類 {kind}）のあと、シンボルの中の図形が正しい地図でない: {}",
+                    m.validity_report()
+                ));
+            }
+        }
+        // 別の変換のインスタンスから入り、どの図形にもかからない所（ステージの左上の隅）に小さく描く
+        let before: Vec<(u64, u64)> = local(&app)
+            .iter()
+            .map(|s| (s.shape_id, s.mesh_revision))
+            .collect();
+        assert!(symbol_ops::exit_symbol_timeline(&mut app));
+        place_instance(&mut app, -1.1, 0.6, 1.4);
+        enter(&mut app);
+        let corner = app.session.edit_path.world_xform() * Point::new(-2000.0, -2000.0);
+        stroke(&mut app, &[corner, corner + KVec2::new(10.0, 0.0)], 3.0);
+        let after: Vec<(u64, u64)> = local(&app)
+            .iter()
+            .map(|s| (s.shape_id, s.mesh_revision))
+            .collect();
+        if after.len() != before.len() + 1 || !before.iter().all(|b| after.contains(b)) {
+            return Err(format!(
+                "別のインスタンスから入って描いたら、触っていない図形が書き直された（{} → {} 個）",
+                before.len(),
+                after.len()
+            ));
+        }
+        Ok(())
+    }
+
     /// 強さの試し（ふだんは流さない）：アプリの操作（ブラシ・消しゴム・バケツ・矩形で選んで動かす・回す・貼り付け・ドラッグ）を
     /// ランダムに続け、毎回レイヤーの地図が壊れていないか（地図で行えずに今までのやり方へ回ると、境目がずれて壊れる）を見る。
     /// 環境変数 PROBE_SEEDS・PROBE_STEPS（ふだん 200）
@@ -24014,6 +24167,77 @@ mod map_overlay {
         eprintln!("PROBE ほぼ重なった線：正しくない地図 {invalid}/{total}・S の中が赤でない {lost}/{total}");
     }
 
+    /// 同じ点列から作ったブラシを、色を替えて何度も重ねたときの欠片（レビュー 6cca852 の N-1001）を数える：20 本描いた
+    /// セルに 30 回重ね、図形の数・面積 0.01px² 未満の図形の数・1回の時間・断った回数。ずらし（`PROBE_SHIFT`、px）を
+    /// 交互に足すこともできる
+    #[test]
+    #[ignore]
+    fn probe_same_stroke_repeated() {
+        let shift: f64 = std::env::var("PROBE_SHIFT")
+            .map(|v| v.parse().unwrap())
+            .unwrap_or(0.0);
+        let colors = [
+            Color32::RED,
+            Color32::BLUE,
+            Color32::GREEN,
+            Color32::BLACK,
+            Color32::YELLOW,
+        ];
+        let mut app = Is2dApp::default();
+        let mut r = Rng(5);
+        let line = |r: &mut Rng| -> Vec<Point> {
+            let pts: Vec<Point> = (0..3)
+                .map(|_| Point::new(-200.0 + r.f() * 400.0, -150.0 + r.f() * 300.0))
+                .collect();
+            let mut dense = Vec::new();
+            for w in pts.windows(2) {
+                for j in 0..12 {
+                    dense.push(w[0].lerp(w[1], j as f64 / 12.0));
+                }
+            }
+            dense.push(*pts.last().unwrap());
+            dense
+        };
+        for k in 0..20 {
+            app.tool.brush_color = colors[k % 5];
+            let pts = line(&mut r);
+            doc_actions::commit_raw_outline(
+                &mut app,
+                &generate_brush_outline(&pts, 4.0 + r.f() * 8.0),
+            );
+        }
+        let same = line(&mut r);
+        let area = |s: &FillShape| {
+            s.exterior.signed_area().abs()
+                - s.holes.iter().map(|h| h.signed_area().abs()).sum::<f64>()
+        };
+        let mut t_max = 0f64;
+        let mut refused = 0;
+        for k in 0..30 {
+            app.tool.brush_color = colors[k % 5];
+            let d = if k % 2 == 1 { shift } else { 0.0 };
+            let pts: Vec<Point> = same.iter().map(|p| *p + KVec2::new(d, d)).collect();
+            let undo = app.history.undo_stack.len();
+            let t = std::time::Instant::now();
+            doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 9.0));
+            t_max = t_max.max(t.elapsed().as_secs_f64() * 1e3);
+            if app.history.undo_stack.len() == undo {
+                refused += 1;
+            }
+        }
+        let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+        let tiny = shapes.iter().filter(|s| area(s) < 0.01).count();
+        let segs: usize = shapes
+            .iter()
+            .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+            .sum();
+        eprintln!(
+            "PROBE 同じ線を30回（ずらし {shift}px）：図形 {}（0.01px² 未満 {tiny}）・区間 {segs}・1回の最大 {t_max:.1}ms・断った回 {refused}・地図 {}",
+            shapes.len(),
+            if layer_map_valid(&app, 0) { "正しい" } else { "正しくない" }
+        );
+    }
+
     /// 同じ線を2色交互に手ぶれ付きでなぞったときの、地図の健全さを数える
     #[test]
     #[ignore]
@@ -24735,7 +24959,7 @@ mod map_overlay {
                         }
                     };
                     let t = std::time::Instant::now();
-                    let out = reshape_result(&base, edit, &shapes, layer_id, &[]);
+                    let out = reshape_result(&base, edit, &shapes, layer_id, &[], Affine::IDENTITY);
                     std::hint::black_box(out);
                     if i % 2 == 0 {
                         pull.push(ms(t));

@@ -163,8 +163,9 @@ pub(crate) enum HoverTarget {
         contour_idx: usize,
         seg_idx: usize,
         pos: Point,
-        /// 地図の頂点（どの地図か, 頂点の番号）
-        map_node: Option<(MapOwner, usize)>,
+        /// 地図の頂点（どの地図か, 頂点の番号, 文書の座標の位置）。`pos` はステージの座標の位置（表示と距離）、編集
+        /// （`MapEdit`）は文書の座標の位置で頂点を探す
+        map_node: Option<(MapOwner, usize, Point)>,
     },
     Edge {
         shape_id: ShapeId,
@@ -172,10 +173,10 @@ pub(crate) enum HoverTarget {
         seg_idx: usize,
         t: f64,
         closest_pos: Point,
-        /// 強調表示する曲線（地図の辺）
+        /// 強調表示する曲線（地図の辺のステージの座標の形）
         seg: QuadBez,
-        /// 地図の辺（どの地図か, 辺の番号）
-        map_edge: Option<(MapOwner, usize)>,
+        /// 地図の辺（どの地図か, 文書の座標の形）。編集（`MapEdit`）はこの形で辺を探す
+        map_edge: Option<(MapOwner, QuadBez)>,
     },
     Fill {
         shape_id: ShapeId,
@@ -195,25 +196,26 @@ impl HoverTarget {
 
 #[derive(Clone, Debug)]
 pub(crate) enum SelectDragState {
-    /// 地図の、形が `orig_seg` の辺を引っぱる
+    /// 地図の、形が `orig_seg` の辺の `grab_t` の所を `target` へ引っぱる（形と位置は地図の文書の座標）
     PullEdge {
         layer_id: LayerId,
         group_path: Vec<u64>,
         base: Arc<LayerBase>,
         grab_t: f64,
-        grab_pos: Point,
+        /// マウスから、つかんだ所までのずれ（ステージの座標）
         grab_offset: KVec2,
-        last_pos: Point,
+        target: Point,
         orig_seg: QuadBez,
     },
-    /// 地図の頂点 `node` を動かす
+    /// 地図の頂点 `node`（`orig_vertex` にある）を `target` へ動かす（位置は地図の文書の座標）
     MoveVertex {
         layer_id: LayerId,
         group_path: Vec<u64>,
         base: Arc<LayerBase>,
         node: usize,
         orig_vertex: Point,
-        last_pos: Point,
+        target: Point,
+        /// 吸い付いた頂点の、ステージの座標の位置（表示）
         snapped_to: Option<Point>,
     },
 }
@@ -833,34 +835,6 @@ mod scene_base_cache {
         out.extend(iter.take(range.len()));
     }
 
-    fn transform_single_shape_to_stage(s: &mut FillShape, world_xform: Affine) {
-        if world_xform == Affine::IDENTITY {
-            return;
-        }
-        let orig_rev = s.mesh_revision;
-        if s.symbol_instance.is_some() {
-            let _ = s.fill_mesh();
-            s.transform_with_cached_mesh(world_xform);
-        } else {
-            s.transform(world_xform);
-        }
-        if world_xform.determinant().abs() < 1e-12 {
-            if let Some(b) = &mut s.symbol_instance {
-                b.xform = world_xform * b.xform;
-            }
-        }
-        s.mesh_revision = orig_rev;
-    }
-
-    fn transform_layer_shapes_to_stage(shapes: &mut [FillShape], world_xform: Affine) {
-        if world_xform == Affine::IDENTITY {
-            return;
-        }
-        for s in shapes {
-            transform_single_shape_to_stage(s, world_xform);
-        }
-    }
-
     impl SceneBaseCache {
         #[inline]
         pub(crate) fn shapes(&self) -> &[FillShape] {
@@ -1013,7 +987,9 @@ mod scene_base_cache {
                 }
                 let ctx = SymbolEvalCtx::new(library);
                 let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx);
-                transform_layer_shapes_to_stage(&mut evaluated, world_xform);
+                for s in &mut evaluated {
+                    s.place(world_xform);
+                }
                 if let Some((old_cl, old_shapes)) = prev {
                     if old_cl.world_xform_bits == xform_bits {
                         reuse_caches_by_key(&mut evaluated, &old_shapes);
@@ -3312,31 +3288,34 @@ fn writeback_edited_layer_shapes(
                     });
                 }
             } else if !s.exterior.segments.is_empty() {
-                if let Some(&orig_idx) = orig_shape_idx_map.get(&s.shape_id) {
-                    let orig = &orig_shapes[orig_idx];
-                    if orig.mesh_revision == s.mesh_revision {
-                        // 変わらない図形は、前の列と同じ `Arc` を使う（Undo の控えと共有する）
-                        if orig.color == s.color
-                            && orig.layer_id == s.layer_id
-                            && orig.group_path == s.group_path
-                        {
-                            non_symbol_shapes.push(Arc::clone(orig));
-                        } else {
-                            let mut kept = (**orig).clone();
-                            kept.color = s.color;
-                            kept.layer_id = s.layer_id;
-                            kept.group_path = s.group_path.clone();
-                            non_symbol_shapes.push(Arc::new(kept));
-                        }
-                        continue;
+                // 文書の図形がある図形：変わらない図形（前の列と同じ `Arc` を使い、Undo の控えと共有する）と、シンボルの
+                // 中で地図が文書の座標で作った図形（`FillShape::in_doc`）。色・レイヤー・階層だけは今の図形に合わせる
+                let doc = orig_shape_idx_map
+                    .get(&s.shape_id)
+                    .map(|&i| &orig_shapes[i])
+                    .filter(|orig| orig.mesh_revision == s.mesh_revision)
+                    .or_else(|| s.doc_original());
+                if let Some(doc) = doc {
+                    if doc.color == s.color
+                        && doc.layer_id == s.layer_id
+                        && doc.group_path == s.group_path
+                    {
+                        non_symbol_shapes.push(Arc::clone(doc));
+                    } else {
+                        let mut kept = (**doc).clone();
+                        kept.color = s.color;
+                        kept.layer_id = s.layer_id;
+                        kept.group_path = s.group_path.clone();
+                        non_symbol_shapes.push(Arc::new(kept));
                     }
+                    continue;
                 }
                 let mut local_s = s.clone();
                 if has_world_xform && need_inv {
                     local_s.transform(inv_xform);
                     s.mesh_revision = local_s.mesh_revision;
                 }
-                local_s.strip_transient_caches();
+                local_s.strip_for_storage();
                 non_symbol_shapes.push(Arc::new(local_s));
             }
         }

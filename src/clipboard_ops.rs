@@ -423,7 +423,7 @@ pub(crate) fn prepare_copy_selected_shapes(tab: &mut Tab, clipboard: &mut Clipbo
         return false;
     }
     for s in &mut extracted {
-        s.strip_transient_caches();
+        s.strip_for_storage();
     }
     clipboard.shapes = extracted;
     clipboard.paste_count = 0;

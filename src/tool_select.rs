@@ -227,8 +227,7 @@ pub(crate) fn start_reshape_drag(
     }
     match target {
         HoverTarget::Vertex {
-            pos,
-            map_node: Some((MapOwner::Layer(layer_id), node)),
+            map_node: Some((MapOwner::Layer(layer_id), node, orig_vertex)),
             ..
         } => {
             let tab = host.tab_mut();
@@ -240,16 +239,15 @@ pub(crate) fn start_reshape_drag(
                 group_path,
                 base,
                 node,
-                orig_vertex: pos,
-                last_pos: pos,
+                orig_vertex,
+                target: orig_vertex,
                 snapped_to: None,
             });
         }
         HoverTarget::Edge {
             t,
-            closest_pos,
             seg,
-            map_edge: Some((MapOwner::Layer(layer_id), _)),
+            map_edge: Some((MapOwner::Layer(layer_id), orig_seg)),
             ..
         } => {
             let tab = host.tab_mut();
@@ -257,18 +255,16 @@ pub(crate) fn start_reshape_drag(
                 return;
             };
             let grab_t = t.clamp(0.18, 0.82);
-            let grab_pos = seg.eval(grab_t);
-            // 実カーソル位置 pt と曲線上の最近接点 closest_pos の差、および丸め前 t と grab_t の位置差を合わせた初期オフセット
-            let grab_offset = (closest_pos - pt) + (grab_pos - closest_pos);
+            // マウス pt から、つかむ所（丸めた grab_t の所）までのずれ（ステージの座標）
+            let grab_offset = seg.eval(grab_t) - pt;
             tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
                 layer_id,
                 group_path,
                 base,
                 grab_t,
-                grab_pos,
                 grab_offset,
-                last_pos: grab_pos,
-                orig_seg: seg,
+                target: orig_seg.eval(grab_t),
+                orig_seg,
             });
         }
         HoverTarget::Vertex { .. } | HoverTarget::Edge { .. } => {}
@@ -291,6 +287,8 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
         return;
     }
     let snap_radius = 12.0 / (tab.view.zoom as f64);
+    // 地図は文書の座標。マウスの位置は、変換の逆で文書の座標へ写す（吸い付く距離はステージで測る）
+    let xform = tab.session.edit_path.world_xform();
     // ドラッグ中も、離したときと同じ計算（交われば辺を切って色を決め直す）をして、その結果を見せる
     let update = match &mut tab.session.drag {
         ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
@@ -299,19 +297,17 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
             base,
             node,
             orig_vertex,
-            last_pos,
+            target,
             snapped_to,
-            ..
         }) => {
-            let snap = base.map.snap_target(*node, pt, snap_radius);
-            let target = snap.unwrap_or(pt);
-            *snapped_to = snap;
-            *last_pos = target;
+            let snap = base.map.snap_target(*node, pt, snap_radius, xform);
+            *target = snap.unwrap_or_else(|| xform.inverse() * pt);
+            *snapped_to = snap.map(|p| xform * p);
             Some((
                 base.clone(),
                 MapEdit::MoveVertex {
                     orig_vertex: *orig_vertex,
-                    target,
+                    target: *target,
                 },
                 *layer_id,
                 group_path.clone(),
@@ -323,12 +319,11 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
             base,
             grab_t,
             grab_offset,
-            last_pos,
+            target,
             orig_seg,
-            ..
         }) => {
-            let target = pt + *grab_offset;
-            *last_pos = target;
+            *target = xform.inverse() * (pt + *grab_offset);
+            let target = *target;
             Some((
                 base.clone(),
                 MapEdit::PullEdge {
@@ -351,6 +346,7 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
         tab.session.base_cache.shapes(),
         layer_id,
         &group_path,
+        xform,
     )
     .unwrap_or_default();
     tab.session
@@ -370,8 +366,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
         SelectDragState::PullEdge {
             layer_id,
             grab_t,
-            grab_pos,
-            last_pos,
+            target,
             orig_seg,
             ..
         } => {
@@ -380,8 +375,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
                 Action::ReshapeEdge {
                     layer_id,
                     grab_t,
-                    grab_pos,
-                    target_pos: last_pos,
+                    target_pos: target,
                     orig_seg,
                 },
             );
@@ -389,7 +383,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
         SelectDragState::MoveVertex {
             layer_id,
             orig_vertex,
-            last_pos,
+            target,
             ..
         } => {
             apply(
@@ -397,7 +391,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
                 Action::MoveVertex {
                     layer_id,
                     orig_vertex,
-                    target_pos: last_pos,
+                    target_pos: target,
                 },
             );
         }
@@ -420,14 +414,18 @@ pub(crate) fn draw_select_tool_cursor(
         ActiveCanvasDrag::Select(SelectDragState::PullEdge {
             orig_seg,
             grab_t,
-            last_pos,
+            target,
             ..
         }) => {
             if tab.view.show_wireframe {
-                // 引っぱっている辺の今の形（`PlanarMap::commit_pull_edge` と同じ式）
+                // 引っぱっている辺の今の形（`PlanarMap::commit_pull_edge` と同じ式）を、ステージに置いて見せる
                 let mut seg = *orig_seg;
-                seg.p1 += (*last_pos - orig_seg.eval(*grab_t)) / (2.0 * grab_t * (1.0 - grab_t));
-                draw_highlighted_quad_segment(tab, painter, seg);
+                seg.p1 += (*target - orig_seg.eval(*grab_t)) / (2.0 * grab_t * (1.0 - grab_t));
+                draw_highlighted_quad_segment(
+                    tab,
+                    painter,
+                    tab.session.edit_path.world_xform() * seg,
+                );
             }
         }
         ActiveCanvasDrag::Select(SelectDragState::MoveVertex { snapped_to, .. }) => {

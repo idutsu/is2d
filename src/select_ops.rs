@@ -8,7 +8,6 @@ use crate::canvas_tool::{
     ActiveCanvasDrag, Floating, HoverTarget, LayerId, Scene, SelectSubMode, Session, ShapeId, Tab,
 };
 use crate::doc_actions::{apply, Action, ActionHost};
-use crate::planar_map::MapInput;
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
 use crate::vector_engine::{
     make_marquee_rect_shape, rects_overlap, ColorEffect, FillShape, SymbolInstanceBinding,
@@ -282,12 +281,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                 .copied()
                 .filter(|s| selection.contains_shape(s))
                 .collect();
-            let rect_only = MapInput::Shapes(std::slice::from_ref(&clip_rect_shape));
-            if selected.is_empty() {
-                return crate::planar_map::marquee_split(&own, lid, &scope, xform, rect_only);
-            }
-            let region = crate::planar_map::selection_region(&selected, xform, &clip_rect_shape)?;
-            crate::planar_map::marquee_split(&own, lid, &scope, xform, MapInput::Map(&region))
+            crate::planar_map::marquee_split(&own, lid, &scope, xform, &selected, &clip_rect_shape)
         });
         let mut lifted: Vec<FillShape> = Vec::new();
         let mut new_hidden: Vec<ShapeId> = Vec::new();

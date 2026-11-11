@@ -2,6 +2,7 @@
 //! Adobe Animate のマージ描画と同じく、辺が「曲線・左の色・右の色」を持つ。境目は1本で、重ね順は無い。
 //! 塗りの形（`FillShape`）は、辺から作って描画・当たり判定に使う。
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
@@ -696,26 +697,24 @@ impl PlanarMap {
         )
     }
 
-    /// `p` から `r` 以内でいちばん近い頂点
-    pub(crate) fn hit_node(&self, p: Point, r: f64) -> Option<usize> {
+    /// 地図を座標の変換 `xform` で置いたとき、`p` から `r` 以内でいちばん近い頂点（距離は置いた座標で測る）
+    pub(crate) fn hit_node(&self, p: Point, r: f64, xform: Affine) -> Option<usize> {
         (0..self.nodes.len())
-            .map(|v| (v, (self.nodes[v] - p).hypot()))
+            .map(|v| (v, (xform * self.nodes[v] - p).hypot()))
             .filter(|(_, d)| *d <= r)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(v, _)| v)
     }
 
-    /// `p` から `r` 以内でいちばん近い辺と、その上のパラメータ
-    pub(crate) fn hit_edge(&self, p: Point, r: f64) -> Option<(usize, f64)> {
+    /// 地図を座標の変換 `xform` で置いたとき、`p` から `r` 以内でいちばん近い辺と、その上のパラメータ（距離は置いた座標で
+    /// 測る。パラメータはアフィン変換で変わらない）
+    pub(crate) fn hit_edge(&self, p: Point, r: f64, xform: Affine) -> Option<(usize, f64)> {
+        let near = KRect::from_center_size(p, (2.0 * r, 2.0 * r));
         (0..self.edges.len())
-            .filter(|&e| {
-                rects_overlap(
-                    self.quad(e).bounding_box(),
-                    KRect::from_center_size(p, (2.0 * r, 2.0 * r)),
-                )
-            })
-            .map(|e| {
-                let (t, d) = nearest_on_quad(&self.quad(e), p);
+            .map(|e| (e, xform * self.quad(e)))
+            .filter(|(_, q)| rects_overlap(q.bounding_box(), near))
+            .map(|(e, q)| {
+                let (t, d) = nearest_on_quad(&q, p);
                 (e, t, d)
             })
             .filter(|x| x.2 <= r)
@@ -1135,16 +1134,16 @@ impl LayerBase {
         }
     }
 
-    /// 座標の変換 `xform` で置いた図形 `own`（下から上への並び。変換したあとの座標）の地図。前に同じ図形・同じ変換から
-    /// 作った地図があれば、それを使い回す（`MapKey`・`LAYER_BASES`）。図形から地図を作るのも、正しい地図でない図形
-    /// （重なった片など）を並びの順に塗り重ねて作り直すのも（`painted_map`。絵は同じ）、ここだけ。`None`：格子に置けない
-    /// 座標がある
+    /// 座標の変換 `xform` で置いた図形 `own`（下から上への並び。変換したあとの座標）の地図。地図は文書の座標で作る
+    /// （`with_doc_shapes`）。前に同じ図形・同じ変換から作った地図があれば、それを使い回す（`MapKey`・`LAYER_BASES`）。
+    /// 図形から地図を作るのも、正しい地図でない図形（重なった片など）を並びの順に塗り重ねて作り直すのも（`painted_map`。
+    /// 絵は同じ）、ここだけ。`None`：格子に置けない座標がある
     pub(crate) fn of(own: &[&FillShape], xform: Affine) -> Option<Arc<Self>> {
-        Self::keyed(own, MapKey::new(own, xform))
+        Self::keyed(own, xform, MapKey::new(own, xform))
     }
 
     /// `of` の、鍵を作ったあと
-    fn keyed(own: &[&FillShape], key: MapKey) -> Option<Arc<Self>> {
+    fn keyed(own: &[&FillShape], xform: Affine, key: MapKey) -> Option<Arc<Self>> {
         {
             let mut cache = LAYER_BASES.lock();
             if let Some(i) = cache.iter().position(|(k, _)| *k == key) {
@@ -1154,52 +1153,62 @@ impl LayerBase {
                 return Some(base);
             }
         }
-        let map = PlanarMap::from_faces(own.iter().copied());
-        let base = Arc::new(if map.is_valid() {
-            Self::new(map, false)
-        } else {
-            Self::new(painted_map(own)?, true)
-        });
+        let base = Arc::new(with_doc_shapes(own, xform, |own| {
+            let map = PlanarMap::from_faces(own.iter().copied());
+            Some(if map.is_valid() {
+                Self::new(map, false)
+            } else {
+                Self::new(painted_map(own)?, true)
+            })
+        })?);
         let mut cache = LAYER_BASES.lock();
         cache.insert(0, (key, base.clone()));
         cache.truncate(LAYER_BASES_LEN);
         Some(base)
     }
 
-    /// この地図を図形 `own` から作ったとして、編集した地図 `next` を図形に書き戻す差分（消す元の図形, 新しく入れる塗りの
-    /// 形）。塗り重ねて作り直した地図なら、図形を全部書き換える。`None`：`next` に壊れた輪郭がある（`written_faces`）
+    /// この地図を、座標の変換 `xform` で置いた図形 `own` から作ったとして（`of`）、編集した地図 `next` を図形に書き戻す
+    /// 差分（消す元の図形, 新しく入れる塗りの形）。新しい形は、文書の座標の地図の面を `xform` で置いた写し（書き戻しで
+    /// 文書の座標の形をそのまま使う：`FillShape::place`）。塗り重ねて作り直した地図なら、図形を全部書き換える。
+    /// `None`：`next` に壊れた輪郭がある（`written_faces`）
     fn diff(
         &self,
         next: &PlanarMap,
         own: &[&FillShape],
         layer_id: LayerId,
         group_path: &[u64],
+        xform: Affine,
     ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
         let faces = written_faces(next)?;
-        if self.repainted {
-            return Some((
+        let (removed, added) = if self.repainted {
+            (
                 own.iter().map(|s| s.shape_id).collect(),
                 faces
                     .iter()
                     .map(|f| next.face_shape(f, layer_id, group_path))
                     .collect(),
-            ));
-        }
-        let keys = self.keys.get_or_init(|| {
-            (0..self.map.edges.len())
-                .map(|e| edge_key(&self.map, e))
-                .collect()
-        });
-        Some(rewrite_shapes(
-            &self.map, keys, next, &faces, own, layer_id, group_path,
+            )
+        } else {
+            let keys = self.keys.get_or_init(|| {
+                (0..self.map.edges.len())
+                    .map(|e| edge_key(&self.map, e))
+                    .collect()
+            });
+            with_doc_shapes(own, xform, |own| {
+                rewrite_shapes(&self.map, keys, next, &faces, own, layer_id, group_path)
+            })
+        };
+        Some((
+            removed,
+            added.into_iter().map(|d| placed(d, xform)).collect(),
         ))
     }
 }
 
 /// 地図を決めるもの：図形を置いた座標の変換（係数6つのビット）と、図形の（番号, `mesh_revision`）の並び。
-/// `mesh_revision` は図形の形か色を変えるたびにアプリ全体で新しい値になるので、並びが同じなら文書の図形も同じ。
-/// シンボルの中では、文書の図形をステージへ変換して地図にするが、変換した図形は番号も `mesh_revision` も文書の図形の
-/// まま（書き戻しで、変わっていない図形を見分けるため）なので、変換も入れて、はじめて地図が1つに決まる
+/// `mesh_revision` は図形の形か色を変えるたびにアプリ全体で新しい値になるので、並びが同じなら図形も同じ。置いた写しで
+/// ない図形（動かした片など）は変換の逆で文書の座標へ写すので（`FillShape::in_doc`）、変換も入れて、はじめて地図が1つに
+/// 決まる
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MapKey {
     xform: [u64; 6],
@@ -1221,6 +1230,25 @@ impl MapKey {
 static LAYER_BASES: SyncCache<Vec<(MapKey, Arc<LayerBase>)>> = SyncCache::new(Vec::new());
 const LAYER_BASES_LEN: usize = 16;
 
+/// 図形 `shapes`（座標の変換 `xform` で置いた図形）を文書の座標の形（`FillShape::in_doc`）にして `f` に渡す。地図は
+/// いつも文書の座標で作る：文書の図形はその座標で正しい地図の面で、格子の上の判定はアフィン変換で保たれないので、置いた
+/// 座標の地図は正しい地図とは限らない。どのインスタンスから入っても同じ地図になる
+fn with_doc_shapes<R>(
+    shapes: &[&FillShape],
+    xform: Affine,
+    f: impl FnOnce(&[&FillShape]) -> R,
+) -> R {
+    let docs: Vec<Cow<'_, FillShape>> = shapes.iter().map(|s| s.in_doc(xform)).collect();
+    let refs: Vec<&FillShape> = docs.iter().map(|d| d.as_ref()).collect();
+    f(&refs)
+}
+
+/// 文書の座標の図形 `d` を、座標の変換 `xform` で置いた写し（`FillShape::place`）
+fn placed(mut d: FillShape, xform: Affine) -> FillShape {
+    d.place(xform);
+    d
+}
+
 /// 図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の、地図にする生の図形（並びの順）
 fn layer_own<'a>(
     shapes: &'a [FillShape],
@@ -1237,11 +1265,26 @@ fn layer_own<'a>(
 pub(crate) struct LayerMap {
     pub(crate) layer_id: LayerId,
     pub(crate) group_path: Vec<u64>,
+    /// 文書の座標の地図
     pub(crate) base: Arc<LayerBase>,
+    /// 地図を置く座標の変換（シンボルの中ではステージへの変換。カーソル合わせの距離と表示は、置いた座標で測る）
+    xform: Affine,
     /// 場面の並びで、このレイヤーの生の図形が最初に出てくる番号（これより後ろの、ほかの図形が前面）
     first_idx: usize,
     /// 地図を決めるもの（次に作るとき、同じなら地図を使い回す）
     key: MapKey,
+}
+
+impl LayerMap {
+    /// 辺 `e` の、置いた座標の形
+    fn placed_quad(&self, e: usize) -> QuadBez {
+        self.xform * self.base.map.quad(e)
+    }
+
+    /// 頂点 `v` の、置いた座標の位置
+    fn placed_node(&self, v: usize) -> Point {
+        self.xform * self.base.map.nodes[v]
+    }
 }
 
 /// カーソル合わせ用の地図（場面の生の図形が変わるまで使い回す）
@@ -1300,8 +1343,9 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
             group_path: scope.clone(),
             base: match reused {
                 Some(base) => base,
-                None => LayerBase::keyed(shapes, key.clone())?,
+                None => LayerBase::keyed(shapes, xform, key.clone())?,
             },
+            xform,
             first_idx: *first_idx,
             key,
         })
@@ -1376,10 +1420,10 @@ fn anchor_hover_in(
     if add {
         let mut best: Option<(f64, &LayerMap, usize, f64)> = None;
         for lm in maps {
-            let Some((e, t)) = lm.base.map.hit_edge(mouse_pt, r) else {
+            let Some((e, t)) = lm.base.map.hit_edge(mouse_pt, r, lm.xform) else {
                 continue;
             };
-            let p = lm.base.map.quad(e).eval(t);
+            let p = lm.placed_quad(e).eval(t);
             let d = (p - mouse_pt).hypot();
             if best.as_ref().is_none_or(|b| d < b.0)
                 && !hidden_by_front(scene, session, lm, p)
@@ -1389,7 +1433,7 @@ fn anchor_hover_in(
             }
         }
         return best.map_or(HoverTarget::None, |(_, lm, e, t)| {
-            let q = lm.base.map.quad(e);
+            let q = lm.placed_quad(e);
             let ed = &lm.base.map.edges[e];
             HoverTarget::Edge {
                 shape_id: ed.left_src.or(ed.right_src).unwrap_or(0),
@@ -1398,16 +1442,16 @@ fn anchor_hover_in(
                 t,
                 closest_pos: q.eval(t),
                 seg: q,
-                map_edge: Some((owner(lm.layer_id), e)),
+                map_edge: Some((owner(lm.layer_id), lm.base.map.quad(e))),
             }
         });
     }
     let mut best: Option<(f64, &LayerMap, usize)> = None;
     for lm in maps {
-        let Some(v) = lm.base.map.hit_node(mouse_pt, r) else {
+        let Some(v) = lm.base.map.hit_node(mouse_pt, r, lm.xform) else {
             continue;
         };
-        let p = lm.base.map.nodes[v];
+        let p = lm.placed_node(v);
         let d = (p - mouse_pt).hypot();
         if best.as_ref().is_none_or(|b| d < b.0)
             && !hidden_by_front(scene, session, lm, p)
@@ -1429,8 +1473,8 @@ fn anchor_hover_in(
             shape_id,
             contour_idx,
             seg_idx,
-            pos: lm.base.map.nodes[v],
-            map_node: Some((owner(lm.layer_id), v)),
+            pos: lm.placed_node(v),
+            map_node: Some((owner(lm.layer_id), v, lm.base.map.nodes[v])),
         }
     })
 }
@@ -1451,12 +1495,14 @@ fn floating_maps(scene: Scene<'_>, session: &Session) -> Vec<LayerMap> {
         .into_iter()
         .filter_map(|layer_id| {
             let own = layer_own(&fl.pieces, layer_id, scope);
-            let key = MapKey::new(&own, session.edit_path.world_xform());
+            let xform = session.edit_path.world_xform();
+            let key = MapKey::new(&own, xform);
             Some(LayerMap {
                 layer_id,
                 group_path: scope.clone(),
                 first_idx: scene.index_of_shape_id(own.first()?.shape_id)?,
-                base: LayerBase::keyed(&own, key.clone())?,
+                base: LayerBase::keyed(&own, xform, key.clone())?,
+                xform,
                 key,
             })
         })
@@ -1477,9 +1523,10 @@ pub(crate) fn reshape_hover(
     let hidden = |lm: &LayerMap, p: Point| hidden_by_front(scene, session, lm, p);
     let mut best_v: Option<(f64, &LayerMap, usize)> = None;
     for lm in &maps.maps {
-        if let Some(v) = lm.base.map.hit_node(mouse_pt, vertex_r) {
-            let d = (lm.base.map.nodes[v] - mouse_pt).hypot();
-            if best_v.as_ref().is_none_or(|b| d < b.0) && !hidden(lm, lm.base.map.nodes[v]) {
+        if let Some(v) = lm.base.map.hit_node(mouse_pt, vertex_r, lm.xform) {
+            let p = lm.placed_node(v);
+            let d = (p - mouse_pt).hypot();
+            if best_v.as_ref().is_none_or(|b| d < b.0) && !hidden(lm, p) {
                 best_v = Some((d, lm, v));
             }
         }
@@ -1497,20 +1544,22 @@ pub(crate) fn reshape_hover(
             shape_id,
             contour_idx,
             seg_idx,
-            pos: lm.base.map.nodes[v],
-            map_node: Some((MapOwner::Layer(lm.layer_id), v)),
+            pos: lm.placed_node(v),
+            map_node: Some((MapOwner::Layer(lm.layer_id), v, lm.base.map.nodes[v])),
         };
     }
     let mut best_e: Option<(f64, &LayerMap, usize, f64, ShapeId)> = None;
     for lm in &maps.maps {
-        let Some((e, t)) = lm.base.map.hit_edge(mouse_pt, outer_r) else {
+        let Some((e, t)) = lm.base.map.hit_edge(mouse_pt, outer_r, lm.xform) else {
             continue;
         };
-        let q = lm.base.map.quad(e);
+        let q = lm.placed_quad(e);
         let p = q.eval(t);
         let d = (p - mouse_pt).hypot();
         let tan = quad_deriv(&q, t);
-        let on_left = (mouse_pt - p).dot(KVec2::new(-tan.y, tan.x)) >= 0.0;
+        // 辺の左右は地図の座標で決まる（裏返して置いた地図では、置いた座標の左右と逆になる）
+        let on_left = ((mouse_pt - p).dot(KVec2::new(-tan.y, tan.x)) >= 0.0)
+            == (lm.xform.determinant() >= 0.0);
         let ed = &lm.base.map.edges[e];
         let (side, side_src) = if on_left {
             (ed.left, ed.left_src)
@@ -1524,7 +1573,7 @@ pub(crate) fn reshape_hover(
         }
     }
     if let Some((_, lm, e, t, shape_id)) = best_e {
-        let q = lm.base.map.quad(e);
+        let q = lm.placed_quad(e);
         return HoverTarget::Edge {
             shape_id,
             contour_idx: 0,
@@ -1532,7 +1581,7 @@ pub(crate) fn reshape_hover(
             t,
             closest_pos: q.eval(t),
             seg: q,
-            map_edge: Some((MapOwner::Layer(lm.layer_id), e)),
+            map_edge: Some((MapOwner::Layer(lm.layer_id), lm.base.map.quad(e))),
         };
     }
     HoverTarget::None
@@ -1691,25 +1740,34 @@ impl PlanarMap {
         PolyIndex::new(self, Some(area)).can_replace(part, &path, &inner, pc, na, nb)
     }
 
-    /// 頂点 `v` を `p` へ動かすときに吸い付く、ほかの頂点（`radius` 以内でいちばん近いもの）
-    pub(crate) fn snap_target(&self, v: usize, p: Point, radius: f64) -> Option<Point> {
+    /// 地図を座標の変換 `xform` で置いたとき、頂点 `v` を `p` へ動かすときに吸い付く、ほかの頂点（`radius` 以内でいちばん
+    /// 近いもの。距離は置いた座標で測る）の位置（地図の座標）
+    pub(crate) fn snap_target(
+        &self,
+        v: usize,
+        p: Point,
+        radius: f64,
+        xform: Affine,
+    ) -> Option<Point> {
         (0..self.nodes.len())
             .filter(|&w| w != v)
-            .map(|w| (self.nodes[w], (self.nodes[w] - p).hypot()))
+            .map(|w| (self.nodes[w], (xform * self.nodes[w] - p).hypot()))
             .filter(|(_, d)| *d <= radius)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(q, _)| q)
     }
 }
 
-/// 輪郭の変形のドラッグ中の表示：地図 `base.map` に編集 `edit` をかけて確定した結果を、図形の差分で返す（離したときの確定
-/// `map_edit_diff` と同じ計算）。`orig_shapes` は、地図を作った図形を含む並び
+/// 輪郭の変形のドラッグ中の表示：地図 `base.map` に編集 `edit`（文書の座標）をかけて確定した結果を、図形の差分で返す
+/// （離したときの確定 `map_edit_diff` と同じ計算）。`orig_shapes` は、地図を作った図形（座標の変換 `xform` で置いた図形）
+/// を含む並び
 pub(crate) fn reshape_result(
     base: &LayerBase,
     edit: MapEdit,
     orig_shapes: &[FillShape],
     layer_id: LayerId,
     group_path: &[u64],
+    xform: Affine,
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
     let next = edit.apply(&base.map)?;
     base.diff(
@@ -1717,6 +1775,7 @@ pub(crate) fn reshape_result(
         &layer_own(orig_shapes, layer_id, group_path),
         layer_id,
         group_path,
+        xform,
     )
 }
 
@@ -1770,22 +1829,37 @@ pub(crate) struct MarqueeSplit {
     pub(crate) pieces: Vec<FillShape>,
 }
 
-/// 矩形選択：レイヤー `layer_id`・階層 `group_path` の中身 `own`（隠していない生の図形と、浮いている残り・動かしていない片）を
-/// 1つの地図にして、選ぶ所 `region`（矩形の形か、前に選んだ所に矩形を足した地図：`selection_region`）で切る。中の部分と外の
-/// 部分は同じ地図から作るので、境目が両側でビットまで同じになり、選ぶ所の中でつながった同じ色の部分は1つの片になる。
-/// 戻り値の番号は `own` の図形の番号。格子に置けない座標があるか、結果に壊れた輪郭があるときは `None`
+/// 矩形選択：レイヤー `layer_id`・階層 `group_path` の中身 `own`（隠していない生の図形と、浮いている残り・動かしていない片。
+/// 座標の変換 `xform` で置いた図形）を1つの地図にして、選ぶ所で切る。選ぶ所は矩形 `rect`、前に選んだ図形 `selected` が
+/// あれば、その地図に矩形を足した地図（中か外かだけを使う）。中の部分と外の部分は同じ地図から作るので、境目が両側で
+/// ビットまで同じになり、選ぶ所の中でつながった同じ色の部分は1つの片になる。戻り値の番号は `own` の図形の番号。格子に
+/// 置けない座標があるか、結果に壊れた輪郭があるときは `None`
 pub(crate) fn marquee_split(
     own: &[&FillShape],
     layer_id: LayerId,
     group_path: &[u64],
     xform: Affine,
-    region: MapInput<'_>,
+    selected: &[&FillShape],
+    rect: &FillShape,
 ) -> Option<MarqueeSplit> {
     let base = LayerBase::of(own, xform)?;
+    let rect = rect.in_doc(xform);
+    let rect = std::slice::from_ref(rect.as_ref());
+    let selected_region = match selected {
+        [] => None,
+        _ => Some(
+            LayerBase::of(selected, xform)?
+                .map
+                .overlay(MapInput::Shapes(rect), MapRule::Paint(Some(rect[0].color)))?,
+        ),
+    };
+    let region = selected_region
+        .as_ref()
+        .map_or(MapInput::Shapes(rect), MapInput::Map);
     let inside = base.map.overlay(region, MapRule::KeepInside)?;
     let rest = base.map.overlay(region, MapRule::Paint(None))?;
-    let (removed_rest, remainder) = base.diff(&rest, own, layer_id, group_path)?;
-    let (removed_inside, pieces) = base.diff(&inside, own, layer_id, group_path)?;
+    let (removed_rest, remainder) = base.diff(&rest, own, layer_id, group_path, xform)?;
+    let (removed_inside, pieces) = base.diff(&inside, own, layer_id, group_path, xform)?;
     // 残りから消えて、中では変わらない図形が、丸ごと中にある図形。どちらでも変わった図形が、切れた図形（地図を塗り重ねて
     // 作り直したときは、図形はみな両方で消えるので、みな切れた図形になる）
     let removed_inside: HashSet<ShapeId> = removed_inside.into_iter().collect();
@@ -1800,23 +1874,11 @@ pub(crate) fn marquee_split(
     })
 }
 
-/// 選び足すときの選ぶ所：座標の変換 `xform` で置いた、前に選んだ図形 `selected` の地図に、矩形 `rect` を足した地図
-/// （`marquee_split` は中か外かだけを使う）。`None`：格子に置けない座標がある
-pub(crate) fn selection_region(
-    selected: &[&FillShape],
-    xform: Affine,
-    rect: &FillShape,
-) -> Option<PlanarMap> {
-    LayerBase::of(selected, xform)?.map.overlay(
-        MapInput::Shapes(std::slice::from_ref(rect)),
-        MapRule::Paint(Some(rect.color)),
-    )
-}
-
 /// 持ち上げた片 `pieces`（同じ地図から作った、重ならない片）を、図形の並び `shapes` のレイヤー `layer_id`・階層 `group_path` の
 /// 生の図形の上に置いた差分。片を1つの地図にして、今の地図に重ねる（片どうしの境目は1本の辺のまま）。重ね合わせは、
 /// 今の線に触れる片の辺だけを切り、ほかの片の辺はそのまま写して色だけ決める。置く前の形を「レイヤーの図形と片を並べた
-/// もの」として書き戻すので、どの線にも触れずに変わらなかった片は、形も番号もそのまま残る
+/// もの」として書き戻すので、どの線にも触れずに変わらなかった片は、形も番号もそのまま残る。図形も片も、座標の変換
+/// `xform` で置いた図形（地図は文書の座標で作る）
 pub(crate) fn place_pieces_diff(
     shapes: &[FillShape],
     layer_id: LayerId,
@@ -1848,16 +1910,20 @@ pub(crate) fn place_pieces_diff(
     let mut before_shapes = own.clone();
     before_shapes.extend(piece_shapes);
     let before = LayerBase::new(base.map.joined(&piece_base.map), base.repainted);
-    let Some((removed, added)) = before.diff(&next, &before_shapes, layer_id, group_path) else {
+    let Some((removed, added)) = before.diff(&next, &before_shapes, layer_id, group_path, xform)
+    else {
         return MapEditOutcome::Refused;
     };
-    // 片はまだレイヤーに無いので、消す図形から外し、残った片を足す
+    // 片はまだレイヤーに無いので、消す図形から外し、残った片（地図に入れた文書の座標の形を置いた写し）を足す
     let gone: HashSet<ShapeId> = removed.iter().copied().collect();
     let piece_ids: HashSet<ShapeId> = piece_shapes.iter().map(|p| p.shape_id).collect();
     let kept: Vec<FillShape> = piece_shapes
         .iter()
         .filter(|p| !gone.contains(&p.shape_id))
-        .map(|p| p.clone().with_scope(layer_id, group_path))
+        .map(|p| {
+            let doc = p.in_doc(xform).into_owned();
+            placed(doc.with_scope(layer_id, group_path), xform)
+        })
         .collect();
     let removed: Vec<ShapeId> = removed
         .into_iter()
@@ -1891,7 +1957,7 @@ pub(crate) fn merge_touching_faces(shapes: Vec<FillShape>, xform: Affine) -> Vec
         let refs: Vec<&FillShape> = list.iter().collect();
         // 格子に置けない座標（±65,536px の外）があるときは、まとめずにそのまま
         let diff = LayerBase::of(&refs, xform)
-            .and_then(|base| base.diff(&base.map, &refs, layer_id, &group_path));
+            .and_then(|base| base.diff(&base.map, &refs, layer_id, &group_path, xform));
         if let Some((removed, added)) = diff {
             apply_shape_diff(&mut list, &removed, added, layer_id, &group_path);
         }
@@ -1950,8 +2016,8 @@ pub(crate) fn raw_scope_insert_index(
 }
 
 /// 図形の並び `shapes`（座標の変換 `xform` で置いた図形）のうち、レイヤー `layer_id`・階層 `group_path` の生の図形を地図に
-/// して（`LayerBase::of`）、`edit` で編集した差分。地図を塗り重ねて作り直したとき（壊れた地図）は、レイヤーの生の図形を
-/// 全部書き直す
+/// して（`LayerBase::of`。文書の座標の地図）、`edit` で編集した差分。`edit` に渡す形・点も文書の座標にしておく。地図を
+/// 塗り重ねて作り直したとき（壊れた地図）は、レイヤーの生の図形を全部書き直す
 pub(crate) fn map_edit_diff(
     shapes: &[FillShape],
     layer_id: LayerId,
@@ -1964,7 +2030,7 @@ pub(crate) fn map_edit_diff(
         return MapEditOutcome::Refused;
     };
     let Some((removed, added)) =
-        edit(&base.map).and_then(|next| base.diff(&next, &own, layer_id, group_path))
+        edit(&base.map).and_then(|next| base.diff(&next, &own, layer_id, group_path, xform))
     else {
         return MapEditOutcome::Refused;
     };

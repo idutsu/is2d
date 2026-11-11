@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use eframe::egui::{Color32, Vec2};
-use kurbo::{Affine, Point, QuadBez, Vec2 as KVec2};
+use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
@@ -137,15 +137,15 @@ pub(crate) enum Action {
 
     // 輪郭変形・アンカー編集
     /// 境目の線で持つ地図（レイヤー `layer_id` の、編集中の階層の生の図形）で、形が `orig_seg` の辺の `grab_t` の所を
-    /// `target_pos` へ引っぱる
+    /// `target_pos` へ引っぱる（形と位置は文書の座標。シンボルの中ではシンボルの座標）
     ReshapeEdge {
         layer_id: LayerId,
         grab_t: f64,
-        grab_pos: Point,
         target_pos: Point,
         orig_seg: QuadBez,
     },
-    /// 境目の線で持つ地図（レイヤー `layer_id` の、編集中の階層の生の図形）で、`orig_vertex` にある頂点を `target_pos` へ動かす
+    /// 境目の線で持つ地図（レイヤー `layer_id` の、編集中の階層の生の図形）で、`orig_vertex` にある頂点を `target_pos` へ
+    /// 動かす（位置は文書の座標）
     MoveVertex {
         layer_id: LayerId,
         orig_vertex: Point,
@@ -506,13 +506,12 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         Action::ReshapeEdge {
             layer_id,
             grab_t,
-            grab_pos,
             target_pos,
             orig_seg,
         } => apply_map_reshape(
             tab,
             layer_id,
-            (target_pos - grab_pos).hypot(),
+            (orig_seg.eval(grab_t), target_pos),
             MapEdit::PullEdge {
                 orig_seg,
                 grab_t,
@@ -526,7 +525,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         } => apply_map_reshape(
             tab,
             layer_id,
-            (target_pos - orig_vertex).hypot(),
+            (orig_vertex, target_pos),
             MapEdit::MoveVertex {
                 orig_vertex,
                 target: target_pos,
@@ -776,8 +775,13 @@ fn apply_raw_outline(
     edit_layers(tab, &[target_lid], |edit| {
         let scope = edit.editing_group_path.clone();
         let rule = MapRule::Paint(is_brush.then_some(brush_color));
+        // 地図は文書の座標なので、線の形も文書の座標へ写す
+        let strokes: Vec<FillShape> = stroke_shapes
+            .iter()
+            .map(|s| s.in_doc(edit.world_xform).into_owned())
+            .collect();
         match map_edit_diff(&edit.shapes, target_lid, &scope, edit.world_xform, |m| {
-            m.overlay(MapInput::Shapes(&stroke_shapes), rule)
+            m.overlay(MapInput::Shapes(&strokes), rule)
         }) {
             MapEditOutcome::Changed(removed, added) => {
                 apply_shape_diff(&mut edit.shapes, &removed, added, target_lid, &scope)
@@ -916,9 +920,11 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
     push_undo(tab, None);
     edit_layers(tab, &[target_lid], |edit| {
         let scope = edit.editing_group_path.clone();
+        // 地図は文書の座標なので、点も文書の座標へ写す
+        let doc_pt = edit.world_xform.inverse() * pt;
         if let MapEditOutcome::Changed(removed, added) =
             map_edit_diff(&edit.shapes, target_lid, &scope, edit.world_xform, |m| {
-                m.with_face_filled(pt, fill_color)
+                m.with_face_filled(doc_pt, fill_color)
             })
         {
             apply_shape_diff(&mut edit.shapes, &removed, added, target_lid, &scope);
@@ -1031,11 +1037,18 @@ fn apply_move_selected(tab: &mut Tab, delta: KVec2, coalesce: Option<CoalesceKey
     moved
 }
 
-/// 輪郭の変形を確定する。図形のレイヤー・階層の生の図形を境目の線で持つ地図にして編集し、変わった図形だけを差し替える
-fn apply_map_reshape(tab: &mut Tab, layer_id: LayerId, drag_dist: f64, map_edit: MapEdit) -> bool {
+/// 輪郭の変形を確定する。図形のレイヤー・階層の生の図形を境目の線で持つ地図にして編集し、変わった図形だけを差し替える。
+/// つかんだ所の、動かす前と後の位置（`from`・`to`。文書の座標）の距離は、ステージで測る
+fn apply_map_reshape(
+    tab: &mut Tab,
+    layer_id: LayerId,
+    (from, to): (Point, Point),
+    map_edit: MapEdit,
+) -> bool {
     tab.session.clear_overlay();
+    let xform = tab.session.edit_path.world_xform();
     let min_deform = 0.5 / (tab.view.zoom as f64);
-    if drag_dist <= min_deform {
+    if (xform * to - xform * from).hypot() <= min_deform {
         return false;
     }
     apply_map_edit(tab, layer_id, map_edit)
@@ -1071,7 +1084,6 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
 
 #[cfg(test)]
 fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
-    use kurbo::ParamCurve;
     clear_selection(tab);
     let target = compute_hover_target(
         tab.scene(),
@@ -1082,23 +1094,22 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     );
     let HoverTarget::Edge {
         t,
-        seg,
-        map_edge: Some((MapOwner::Layer(layer_id), _)),
+        map_edge: Some((MapOwner::Layer(layer_id), orig_seg)),
         ..
     } = target
     else {
         return false;
     };
     let grab_t = t.clamp(0.18, 0.82);
-    let grab_pos = seg.eval(grab_t);
+    let target = tab.session.edit_path.world_xform().inverse() * to;
     apply_map_reshape(
         tab,
         layer_id,
-        (to - grab_pos).hypot(),
+        (orig_seg.eval(grab_t), target),
         MapEdit::PullEdge {
-            orig_seg: seg,
+            orig_seg,
             grab_t,
-            target: to,
+            target,
         },
     )
 }
@@ -1114,20 +1125,20 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         SelectSubMode::Reshape,
     );
     let HoverTarget::Vertex {
-        pos,
-        map_node: Some((MapOwner::Layer(layer_id), _)),
+        map_node: Some((MapOwner::Layer(layer_id), _, orig_vertex)),
         ..
     } = target
     else {
         return false;
     };
+    let target = tab.session.edit_path.world_xform().inverse() * to;
     apply_map_reshape(
         tab,
         layer_id,
-        (to - pos).hypot(),
+        (orig_vertex, target),
         MapEdit::MoveVertex {
-            orig_vertex: pos,
-            target: to,
+            orig_vertex,
+            target,
         },
     )
 }
@@ -1145,19 +1156,17 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
             true,
             HoverTarget::Edge {
                 t,
-                seg,
-                map_edge: Some((owner, _)),
+                map_edge: Some((owner, orig_seg)),
                 ..
             },
-        ) => Some((owner, MapEdit::AddAnchor { orig_seg: seg, t })),
+        ) => Some((owner, MapEdit::AddAnchor { orig_seg, t })),
         (
             false,
             HoverTarget::Vertex {
-                pos,
-                map_node: Some((owner, _)),
+                map_node: Some((owner, _, orig_vertex)),
                 ..
             },
-        ) => Some((owner, MapEdit::DeleteAnchor { orig_vertex: pos })),
+        ) => Some((owner, MapEdit::DeleteAnchor { orig_vertex })),
         _ => None,
     };
     // 動かして浮いている片は、そのレイヤーの片の地図で編集する（境目なら両側の片が変わる）

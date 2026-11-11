@@ -270,7 +270,7 @@ impl SymbolDef {
     pub(crate) fn new(id: u64, name: String, mut local_shapes: Vec<FillShape>) -> Self {
         for s in &mut local_shapes {
             s.layer_id = 1;
-            s.strip_transient_caches();
+            s.strip_for_storage();
         }
         let mut timeline = Timeline::default();
         timeline.layers[0].keyframe_mut(0).cel = Cel::new(local_shapes);
