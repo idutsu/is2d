@@ -140,7 +140,7 @@ pub(crate) struct SyncCache<T>(Mutex<T>);
 
 impl<T> SyncCache<T> {
     #[inline]
-    pub(crate) fn new(val: T) -> Self {
+    pub(crate) const fn new(val: T) -> Self {
         Self(Mutex::new(val))
     }
 
