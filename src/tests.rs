@@ -1125,7 +1125,7 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
     assert!(cel_shapes.iter().all(|s| s.group_path == vec![eye_gid]));
     let fl = app.session.floating().expect("生に戻った図形は浮いた片");
     assert!(fl
-        .pieces
+        .pieces()
         .iter()
         .any(|p| p.color == red && p.group_path.is_empty()));
     let s = scene_summary(&app);
@@ -9226,9 +9226,9 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .floating()
         .expect("マーキー矩形スライス直後に Floating が生成されること");
     assert!(!fl.modified);
-    assert_eq!(fl.pieces.len(), 1);
-    assert_eq!(fl.remainder.len(), 1);
-    assert_eq!(fl.hidden.len(), 1);
+    assert_eq!(fl.pieces().len(), 1);
+    assert_eq!(fl.remainder().count(), 1);
+    assert_eq!(fl.hidden().len(), 1);
 
     run(&mut app, &[Action::Deselect]);
     assert!(app.session.floating().is_none());
@@ -12676,7 +12676,6 @@ fn test_g3_3_clear_timeline_cells_and_no_direct_ui_mutation_calls() {
 
 #[test]
 fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
-    use crate::canvas_tool::Floating;
     use std::collections::HashSet;
 
     // 1. 本番コードで rebuild_overlay_from_floating を呼ぶのが canvas_tool.rs (Session 内) だけであること
@@ -12710,18 +12709,15 @@ fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
     shape.layer_id = app.doc.root.layers[0].id;
     assert_eq!(app.scene().len(), 0);
 
-    app.tabs[0].session.set_floating(Some(Floating {
-        pieces: vec![shape],
-        remainder: Vec::new(),
-        hidden: HashSet::new(),
-        modified: true,
-    }));
+    app.tabs[0].session.add_floating_pieces(vec![shape]);
     assert_eq!(app.scene().len(), 1);
     assert_eq!(app.scene().get(0).unwrap().color, Color32::RED);
 
+    let layers: HashSet<u64> = [app.doc.root.layers[0].id].into();
     app.tabs[0].session.update_floating(|fl_opt| {
         if let Some(fl) = fl_opt {
-            fl.pieces[0].set_color(Color32::BLUE);
+            let ids = fl.piece_ids();
+            fl.recolor(&ids, Color32::BLUE, &layers, &[]);
         }
     });
     assert_eq!(app.scene().get(0).unwrap().color, Color32::BLUE);
@@ -13185,8 +13181,16 @@ fn test_m2_1_ungroup_multi_shape_and_nested_symbol_detaches_all_shapes() {
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.instances.len(), 1);
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 0);
 
-    let before_bboxes: Vec<kurbo::Rect> = app.scene().iter().map(|s| s.bounding_box()).collect();
-    let before_colors: Vec<Color32> = app.scene().iter().map(|s| s.color).collect();
+    // 生の図形どうしは重ならないので、並びの順は絵に出ない（左上の順に並べて比べる）
+    let sorted = |shapes: &mut dyn Iterator<Item = &FillShape>| -> Vec<(kurbo::Rect, Color32)> {
+        let mut v: Vec<(kurbo::Rect, Color32)> =
+            shapes.map(|s| (s.bounding_box(), s.color)).collect();
+        v.sort_by(|a, b| (a.0.x0, a.0.y0).partial_cmp(&(b.0.x0, b.0.y0)).unwrap());
+        v
+    };
+    let before = sorted(&mut app.scene().iter());
+    let before_bboxes: Vec<kurbo::Rect> = before.iter().map(|x| x.0).collect();
+    let before_colors: Vec<Color32> = before.iter().map(|x| x.1).collect();
     assert_eq!(before_bboxes.len(), 10);
 
     let _ = apply(&mut app, Action::Ungroup);
@@ -13200,10 +13204,12 @@ fn test_m2_1_ungroup_multi_shape_and_nested_symbol_detaches_all_shapes() {
     let cel = &app.doc.root.layers[0].keyframes[0].cel;
     assert!(cel.instances.is_empty());
     assert_eq!(cel.shapes.len(), 10, "生の図形が10個になること");
-    for (idx, s) in cel.shapes.iter().enumerate() {
+    for s in cel.shapes.iter() {
         assert!(s.group_path.is_empty() && s.symbol_instance.is_none());
-        assert_eq!(s.color, before_colors[idx]);
-        let bb = s.bounding_box();
+    }
+    let after = sorted(&mut cel.shapes.iter().map(|s| &**s));
+    for (idx, (bb, color)) in after.into_iter().enumerate() {
+        assert_eq!(color, before_colors[idx]);
         let exp = before_bboxes[idx];
         assert!(
             (bb.x0 - exp.x0).abs() < 1e-6
@@ -14751,7 +14757,7 @@ fn test_m4_1_alt_duplicate_touching_sliced_pieces_merges_into_single_shape_on_de
     assert!(
         app.session
             .floating()
-            .is_some_and(|fl| fl.pieces.len() == 1),
+            .is_some_and(|fl| fl.pieces().len() == 1),
         "つながったスライス片は選び足した時点で1片に結合され、Alt複製後も1片が floating に入っていること"
     );
 
@@ -18593,8 +18599,8 @@ fn test_merge_touching_sliced_pieces_on_additive_select() {
             }
         ));
         let fl = app.session.floating().expect("Floating が存在すること");
-        assert_eq!(fl.pieces.len(), 1);
-        assert_eq!(fl.remainder.len(), 0);
+        assert_eq!(fl.pieces().len(), 1);
+        assert_eq!(fl.remainder().count(), 0);
         assert_eq!(app.session.selection.shapes.len(), 1);
 
         let left_idx = app
@@ -18667,8 +18673,8 @@ fn test_merge_touching_sliced_pieces_on_additive_select() {
             },
         ));
         let fl = app.session.floating().expect("Floating が存在すること");
-        assert_eq!(fl.pieces.len(), 1);
-        assert_eq!(fl.remainder.len(), 1);
+        assert_eq!(fl.pieces().len(), 1);
+        assert_eq!(fl.remainder().count(), 1);
     }
 
     // 5. 左端を選び、Shift+矩形で右端を足す（つながっていない）→ 片が2つ
@@ -18691,7 +18697,7 @@ fn test_merge_touching_sliced_pieces_on_additive_select() {
             },
         ));
         let fl = app.session.floating().expect("Floating が存在すること");
-        assert_eq!(fl.pieces.len(), 2);
+        assert_eq!(fl.pieces().len(), 2);
     }
 
     // 6. 1 のあと動かさずに選択を外す → 元の図形のまま（番号も同じ）で、Undo の履歴が増えない
@@ -18770,8 +18776,8 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
             },
         ));
         let fl_before = app.session.floating().unwrap();
-        assert_eq!(fl_before.pieces.len(), 2);
-        assert_eq!(fl_before.remainder.len(), 2);
+        assert_eq!(fl_before.pieces().len(), 2);
+        assert_eq!(fl_before.remainder().count(), 2);
 
         let b_idx = app
             .scene()
@@ -18784,8 +18790,8 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
         ));
 
         let fl_after = app.session.floating().unwrap();
-        assert_eq!(fl_after.pieces.len(), 1);
-        assert_eq!(fl_after.remainder.len(), 1);
+        assert_eq!(fl_after.pieces().len(), 1);
+        assert_eq!(fl_after.remainder().count(), 1);
         let rem_idx = app
             .scene()
             .iter()
@@ -18802,8 +18808,8 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
             Action::ToggleSelectionAt { scene_idx: rem_idx }
         ));
         let fl_all = app.session.floating().unwrap();
-        assert_eq!(fl_all.pieces.len(), 1);
-        assert_eq!(fl_all.remainder.len(), 0);
+        assert_eq!(fl_all.pieces().len(), 1);
+        assert_eq!(fl_all.remainder().count(), 0);
         assert_eq!(app.session.selection.shapes.len(), 1);
     }
 
@@ -18893,8 +18899,8 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
                 additive: true,
             },
         ));
-        assert_eq!(app.session.floating().unwrap().pieces.len(), 2);
-        assert_eq!(app.session.floating().unwrap().remainder.len(), 1);
+        assert_eq!(app.session.floating().unwrap().pieces().len(), 2);
+        assert_eq!(app.session.floating().unwrap().remainder().count(), 1);
 
         // 上の赤（残りが無い片）を Shift+クリックで外す
         let red_idx = app
@@ -18907,8 +18913,8 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
             Action::ToggleSelectionAt { scene_idx: red_idx }
         ));
         let fl = app.session.floating().unwrap();
-        assert_eq!(fl.pieces.len(), 1);
-        assert_eq!(fl.remainder.len(), 2);
+        assert_eq!(fl.pieces().len(), 1);
+        assert_eq!(fl.remainder().count(), 2);
 
         let scene_ids: Vec<_> = app.scene().iter().map(|s| s.shape_id).collect();
         let unique_ids: std::collections::HashSet<_> = scene_ids.iter().copied().collect();
@@ -20026,11 +20032,16 @@ fn test_merging_floating_pieces_layer_by_layer_matches_merging_each_layer_in_tur
         })
         .collect();
 
-    let floating_of = |pieces: Vec<FillShape>| Floating {
-        pieces,
-        remainder: Vec::new(),
-        hidden: std::collections::HashSet::new(),
-        modified: true,
+    let floating_of = |pieces: Vec<FillShape>| {
+        let mut fl = Floating::new(true);
+        let stage = crate::floating::Stage {
+            shapes: &[],
+            scope: &[],
+            world: Affine::IDENTITY,
+        };
+        fl.add_pieces(stage, &pieces);
+        fl.refresh(Affine::IDENTITY, &[], &[1, 2, 3]);
+        fl
     };
     let mut in_turn = base_shapes.clone();
     for lid in 1u64..=3 {
@@ -20042,6 +20053,7 @@ fn test_merging_floating_pieces_layer_by_layer_matches_merging_each_layer_in_tur
         merge_floating_into_base_shapes(
             &mut in_turn,
             floating_of(layer_pieces),
+            &[],
             &[1, 2, 3],
             Affine::IDENTITY,
         );
@@ -20050,12 +20062,8 @@ fn test_merging_floating_pieces_layer_by_layer_matches_merging_each_layer_in_tur
     let mut layer_by_layer = base_shapes;
     merge_floating_into_base_shapes(
         &mut layer_by_layer,
-        Floating {
-            pieces,
-            remainder: Vec::new(),
-            hidden: std::collections::HashSet::new(),
-            modified: true,
-        },
+        floating_of(pieces),
+        &[],
         &[1, 2, 3],
         Affine::IDENTITY,
     );
@@ -21280,9 +21288,9 @@ fn test_anchor_delete_on_unmoved_selection_keeps_shared_border() {
         // 赤と黒の境目にある頂点（赤の図形と黒の図形の両方の輪郭にある点）を、残り（左）か片（右）から選ぶ
         let fl = app.session.floating().expect("選択");
         let side: Vec<FillShape> = if right_side {
-            fl.pieces.clone()
+            fl.pieces().to_vec()
         } else {
-            fl.remainder.clone()
+            fl.remainder().cloned().collect()
         };
         let verts = |c: Color32| -> Vec<Point> {
             side.iter()
@@ -21399,7 +21407,7 @@ fn test_floating_anchor_delete_on_shared_border_changes_both_pieces() {
     ] {
         assert!(doc_actions::apply(&mut app, action));
     }
-    let pieces = |app: &Is2dApp| app.session.floating().expect("浮いた片").pieces.clone();
+    let pieces = |app: &Is2dApp| app.session.floating().expect("浮いた片").pieces().to_vec();
     assert!(app.session.has_modified_floating());
     // 赤と黒の境目にある角（赤の片と黒の片の両方の輪郭にある点）
     let verts = |c: Color32| -> Vec<Point> {
@@ -21631,11 +21639,11 @@ fn test_symbol_edit_after_moving_instance_keeps_untouched_shapes() {
     assert_eq!(after.len(), red_before.len() + 1, "{after:?}");
 }
 
-/// 同じ地図から切った残り（穴のあいた外側）と、残りの穴にはまる片（穴のあいた中央）をまとめても、何も消えない
-/// （まとめた面は元の図形が2つなので、新しい図形になる。レビュー 8b33f96 の N-1002）
+/// 同じ地図から切った残り（穴のあいた外側）に、残りの穴にはまる片（穴のあいた中央）を戻しても（重ねる）、何も消えない
+/// （同じ色でつながる所は1つの面になる。レビュー 8b33f96 の N-1002）
 #[test]
 fn test_merge_touching_faces_keeps_piece_in_remainder_hole() {
-    use crate::planar_map::{marquee_split, merge_touching_faces, MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
     use crate::vector_engine::make_marquee_rect_shape;
     use kurbo::Rect as KRect;
     let area = |s: &FillShape| {
@@ -21651,25 +21659,23 @@ fn test_merge_touching_faces_keeps_piece_in_remainder_hole() {
             MapRule::Paint(None),
         )
         .expect("穴をあける");
-    let ring: Vec<FillShape> = map
-        .faces()
-        .0
-        .iter()
-        .map(|f| map.face_shape(f, lid, &[]))
-        .collect();
+    let ring = map.faces().0;
     assert_eq!(ring.len(), 1);
-    assert!((area(&ring[0]) - 38_400.0).abs() < 1e-6);
-    let own: Vec<&FillShape> = ring.iter().collect();
+    assert!((area(&map.face_shape(&ring[0], lid, &[])) - 38_400.0).abs() < 1e-6);
     let center = make_marquee_rect_shape(KRect::new(50.0, 50.0, 150.0, 150.0));
-    let sp = marquee_split(&own, lid, &[], Affine::IDENTITY, &[], &center).expect("切る");
-    let parts: Vec<FillShape> = sp.remainder.into_iter().chain(sp.pieces).collect();
-    assert_eq!(parts.len(), 2, "残りと片");
-    let merged = merge_touching_faces(parts, Affine::IDENTITY);
-    assert_eq!(merged.len(), 1);
-    let total: f64 = merged.iter().map(area).sum();
+    let region = MapInput::Shapes(std::slice::from_ref(&center));
+    let rest = map.overlay(region, MapRule::Paint(None)).expect("残り");
+    let inside = map.overlay(region, MapRule::KeepInside).expect("片");
+    assert_eq!(rest.faces().0.len() + inside.faces().0.len(), 2, "残りと片");
+    let merged = rest
+        .overlay(MapInput::Map(&inside), MapRule::Overlay)
+        .expect("戻す");
+    let faces = merged.faces().0;
+    assert_eq!(faces.len(), 1);
+    let total = area(&merged.face_shape(&faces[0], lid, &[]));
     assert!(
         (total - 38_400.0).abs() < 1e-6,
-        "まとめたら面積が {total} になった"
+        "戻したら面積が {total} になった"
     );
 }
 
@@ -23383,7 +23389,7 @@ mod map_overlay {
         ));
         let piece_segs = |app: &Is2dApp| {
             app.session.floating().map(|fl| {
-                fl.pieces
+                fl.pieces()
                     .iter()
                     .map(|p| p.exterior.segments.len())
                     .sum::<usize>()
@@ -23439,17 +23445,15 @@ mod map_overlay {
             .find(|p| !pieces.iter().any(|s| s.contains_point(*p)))
             .expect("覆われていない点");
         let t = std::time::Instant::now();
-        merge_floating_into_base_shapes(
-            &mut shapes,
-            Floating {
-                pieces,
-                remainder: Vec::new(),
-                hidden: std::collections::HashSet::new(),
-                modified: true,
-            },
-            &[lid],
-            Affine::IDENTITY,
-        );
+        let mut fl = Floating::new(true);
+        let stage = crate::floating::Stage {
+            shapes: &shapes,
+            scope: &[],
+            world: Affine::IDENTITY,
+        };
+        fl.add_pieces(stage, &pieces);
+        fl.refresh(Affine::IDENTITY, &[], &[lid]);
+        merge_floating_into_base_shapes(&mut shapes, fl, &[], &[lid], Affine::IDENTITY);
         eprintln!(
             "PROBE 重なり合う片の確定 {:.1}ms",
             t.elapsed().as_secs_f64() * 1e3
@@ -24436,7 +24440,7 @@ mod map_overlay {
             true,
         );
         let fl = app.session.floating().expect("選択");
-        let colors: Vec<Color32> = fl.pieces.iter().map(|p| p.color).collect();
+        let colors: Vec<Color32> = fl.pieces().iter().map(|p| p.color).collect();
         for c in [Color32::RED, Color32::BLUE, Color32::GREEN] {
             assert_eq!(
                 colors.iter().filter(|&&x| x == c).count(),
@@ -24511,7 +24515,7 @@ mod map_overlay {
                     break;
                 };
                 let segs: Vec<QuadBez> = fl
-                    .pieces
+                    .pieces()
                     .iter()
                     .flat_map(|s| s.contours())
                     .flat_map(|c| c.segments.iter().copied())
@@ -24533,7 +24537,7 @@ mod map_overlay {
                     break;
                 };
                 edits += 1;
-                if !PlanarMap::from_faces(fl.pieces.iter()).is_valid() {
+                if !PlanarMap::from_faces(fl.pieces().iter()).is_valid() {
                     bad += 1;
                 }
             }
@@ -24588,7 +24592,7 @@ mod map_overlay {
                     additive: false,
                 },
             ));
-            let before = app.session.floating().map_or(0, |f| f.pieces.len());
+            let before = app.session.floating().map_or(0, |f| f.pieces().len());
             let (y0, y1) = (-130.0 + r.f() * 80.0, 30.0 + r.f() * 100.0);
             let x2 = x1 + 20.0 + r.f() * 80.0;
             doc_actions::apply(
@@ -24600,7 +24604,7 @@ mod map_overlay {
                 },
             );
             let fl = app.session.floating().expect("選択");
-            let pieces: Vec<FillShape> = fl.pieces.to_vec();
+            let pieces: Vec<FillShape> = fl.pieces().to_vec();
             // 同じ色の片どうしが接している所：片の輪郭の区間の真ん中から、
             // 片の外へ 0.05px 出た点が、同じ色の別の片に入るか
             let mut seams = 0;
@@ -24665,15 +24669,18 @@ mod map_overlay {
             }
             for _ in 0..3 {
                 let t = std::time::Instant::now();
-                let out = crate::planar_map::place_pieces_diff(
-                    &base,
-                    lid0,
-                    &[],
-                    Affine::IDENTITY,
-                    &pieces,
-                );
+                let mut out = base.clone();
+                let mut fl = crate::canvas_tool::Floating::new(true);
+                let stage = crate::floating::Stage {
+                    shapes: &base,
+                    scope: &[],
+                    world: Affine::IDENTITY,
+                };
+                fl.add_pieces(stage, &pieces);
+                fl.refresh(Affine::IDENTITY, &[], &[]);
+                fl.commit_into(&mut out, &[], Affine::IDENTITY);
                 let ms = t.elapsed().as_secs_f64() * 1000.0;
-                let ok = matches!(out, crate::planar_map::MapEditOutcome::Changed(..));
+                let ok = out.len() != base.len();
                 eprintln!(
                     "PROBE seed {seed}: 片 {}・{ms:.1}ms・置けた {ok}",
                     pieces.len()
@@ -25140,6 +25147,119 @@ mod map_overlay {
         };
         assert!(map_of(&[]).same_content(&restricted(&[Color32::GREEN])));
         assert!(map_of(&[gid]).same_content(&restricted(&[Color32::RED, Color32::BLUE])));
+    }
+
+    /// 浮いた片は地図で持つ：矩形で選ぶ・選び足す・動かす・確定する・一部を外す、のどれでも図形から地図を作らない
+    /// （片と残りは、セル画の地図を切った地図。確定は、残りの地図に片の地図を重ねる）
+    #[test]
+    fn floating_ops_never_build_maps_from_shapes() {
+        let mut app = Is2dApp::default();
+        let mut r = Rng(3);
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN];
+        for i in 0..30 {
+            app.tool.brush_color = colors[i % 3];
+            let a = Point::new(-300.0 + r.f() * 600.0, -150.0 + r.f() * 300.0);
+            let b = Point::new(-300.0 + r.f() * 600.0, -150.0 + r.f() * 300.0);
+            let pts: Vec<Point> = (0..=12).map(|j| a.lerp(b, j as f64 / 12.0)).collect();
+            doc_actions::commit_raw_outline(
+                &mut app,
+                &generate_brush_outline(&pts, 5.0 + r.f() * 5.0),
+            );
+        }
+        let built = crate::planar_map::from_shape_builds();
+        // 矩形で選んで、選び足して、動かして、確定する
+        select_ops::apply_marquee_selection(
+            &mut app,
+            Point::new(-120.0, -80.0),
+            Point::new(0.0, 40.0),
+            false,
+        );
+        select_ops::apply_marquee_selection(
+            &mut app,
+            Point::new(-20.0, -60.0),
+            Point::new(90.0, 60.0),
+            true,
+        );
+        assert!(app
+            .session
+            .floating()
+            .is_some_and(|fl| !fl.pieces().is_empty()));
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::MoveSelected {
+                delta: KVec2::new(37.0, -21.0),
+            },
+        ));
+        canvas_tool::clear_selection(&mut app);
+        assert!(app.session.floating().is_none());
+        // 矩形で選んで、動かさずに一部だけ外す（外した片は残りに戻る）
+        select_ops::apply_marquee_selection(
+            &mut app,
+            Point::new(-250.0, -120.0),
+            Point::new(250.0, 120.0),
+            false,
+        );
+        let keep: Vec<usize> = app.session.selected_indices().into_iter().take(1).collect();
+        crate::canvas_tool::commit_floating_except(app.tab_mut(), &keep);
+        canvas_tool::clear_selection(&mut app);
+        assert_eq!(
+            crate::planar_map::from_shape_builds(),
+            built,
+            "浮いた片の操作で、図形から地図を作らない"
+        );
+        let cel = &app.doc.root.layers[0].keyframes[0].cel;
+        assert!(cel.maps_mismatch().is_none());
+    }
+
+    /// 計測の試し（ふだんは流さない）：図形の多い場面（`dense_scene_app`）で、矩形で選ぶ・選び足す・動かす・確定するの時間
+    #[test]
+    #[ignore]
+    fn probe_floating_timing() {
+        let mut app = dense_scene_app(7);
+        let mut r = Rng(21);
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
+        let (mut cut, mut add, mut mv, mut commit) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..12 {
+            let c = Point::new(-300.0 + r.f() * 600.0, -150.0 + r.f() * 300.0);
+            let t = std::time::Instant::now();
+            select_ops::apply_marquee_selection(&mut app, c, c + KVec2::new(90.0, 70.0), false);
+            cut.push(ms(t));
+            let t = std::time::Instant::now();
+            select_ops::apply_marquee_selection(
+                &mut app,
+                c + KVec2::new(60.0, 40.0),
+                c + KVec2::new(150.0, 110.0),
+                true,
+            );
+            add.push(ms(t));
+            let t = std::time::Instant::now();
+            doc_actions::apply(
+                &mut app,
+                doc_actions::Action::MoveSelected {
+                    delta: KVec2::new(23.0, -17.0),
+                },
+            );
+            mv.push(ms(t));
+            let t = std::time::Instant::now();
+            canvas_tool::clear_selection(&mut app);
+            commit.push(ms(t));
+        }
+        let stat = |v: &[f64]| {
+            (
+                v.iter().sum::<f64>() / v.len() as f64,
+                v.iter().cloned().fold(0.0, f64::max),
+            )
+        };
+        for (name, v) in [
+            ("矩形で選ぶ", &cut),
+            ("選び足す", &add),
+            ("動かす", &mv),
+            ("確定", &commit),
+        ] {
+            let (a, m) = stat(v);
+            eprintln!("PROBE {name}：平均 {a:.1}ms・最大 {m:.1}ms");
+        }
     }
 
     /// 図形の多い場面（`dense_scene_app`）での、ブラシ・消しゴム1本の時間（30 本ずつ、平均と最大）

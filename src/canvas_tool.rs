@@ -150,8 +150,8 @@ pub(crate) enum SelectSubMode {
 pub(crate) enum MapOwner {
     /// レイヤーの、編集中の階層の生の図形（選択中の図形を除く）の地図
     Layer(LayerId),
-    /// 動かして浮いている片のうち、そのレイヤーの片の地図
-    Floating(LayerId),
+    /// 動かして浮いている片のうち、そのレイヤーの、その番目の片の組の地図
+    Floating(LayerId, usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -1824,170 +1824,8 @@ impl<'a> Scene<'a> {
     }
 }
 
-/// 選択して移動・スライス・ペースト・Alt複製中の浮き上がり図形状態（すべてステージ座標）
-#[derive(Clone, Debug)]
-pub(crate) struct Floating {
-    /// 浮いている片。選択中の生図形だけ
-    pub(crate) pieces: Vec<FillShape>,
-    /// スライスで切られた残り
-    pub(crate) remainder: Vec<FillShape>,
-    /// 画面から隠す元の図形（文書には残っている）
-    pub(crate) hidden: HashSet<ShapeId>,
-    /// 動かした・変形したか。`true` なら確定のときに Merge Drawing で結合する。`false` は動かしていない矩形選択の切り口で、捨てれば元に戻る
-    pub(crate) modified: bool,
-}
-
-impl Floating {
-    /// 一時描画キャッシュを除去して履歴保持を軽量化する
-    pub(crate) fn strip_transient_caches(&mut self) {
-        for s in &mut self.pieces {
-            s.strip_transient_caches();
-        }
-        for s in &mut self.remainder {
-            s.strip_transient_caches();
-        }
-    }
-
-    /// 直前の履歴スナップショットと同一内容であるかを判定する（`Arc` 構造共有用）
-    pub(crate) fn matches_undo_snapshot(&self, other: &Self) -> bool {
-        self.modified == other.modified
-            && self.hidden == other.hidden
-            && self.pieces.len() == other.pieces.len()
-            && self.remainder.len() == other.remainder.len()
-            && self
-                .pieces
-                .iter()
-                .zip(&other.pieces)
-                .all(|(a, b)| InitialLayerShapeState::from_shape(a).matches(b))
-            && self
-                .remainder
-                .iter()
-                .zip(&other.remainder)
-                .all(|(a, b)| InitialLayerShapeState::from_shape(a).matches(b))
-    }
-
-    /// `remainder` の各要素が、どの元の図形（`hidden` の番号）の塊に入るかを返す。
-    /// 塊は「`hidden` の番号を持つ要素から、次のそのような要素の手前まで」（この決まりを読むのはここだけ）
-    fn remainder_owners(&self) -> Vec<Option<ShapeId>> {
-        let mut current = None;
-        self.remainder
-            .iter()
-            .map(|rem| {
-                if self.hidden.contains(&rem.shape_id) {
-                    current = Some(rem.shape_id);
-                }
-                current
-            })
-            .collect()
-    }
-
-    /// `self.hidden` と `self.remainder` を `overlay` に反映する
-    fn init_overlay_from_remainder(&self, overlay: &mut Overlay, scope: &[u64]) {
-        overlay.hide = self.hidden.clone();
-        for (owner, rem) in self.remainder_owners().into_iter().zip(&self.remainder) {
-            let placement = owner.map_or_else(
-                || Placement::TopOfLayer(rem.layer_id, scope.to_vec()),
-                Placement::ReplaceAt,
-            );
-            overlay.add.push((placement, rem.clone()));
-        }
-    }
-
-    /// `self.remainder` を取り出し、元の図形ID ごとの塊に分割して返す
-    pub(crate) fn take_remainder_chunks(&mut self) -> Vec<(Option<ShapeId>, Vec<FillShape>)> {
-        let owners = self.remainder_owners();
-        let mut chunks: Vec<(Option<ShapeId>, Vec<FillShape>)> = Vec::new();
-        for (owner, rem) in owners.into_iter().zip(std::mem::take(&mut self.remainder)) {
-            match chunks.last_mut() {
-                Some((last_owner, last_vec)) if *last_owner == owner => last_vec.push(rem),
-                _ => chunks.push((owner, vec![rem])),
-            }
-        }
-        chunks
-    }
-
-    /// 残りの塊 `chunks` から、`same` に当たる残り（1つのレイヤー・階層の分）を取り出して `rebuild` に渡し、返った図形を
-    /// 1つの塊に組み直して足す。塊の位置は、取り出した残りがあった最初の塊のもの、無ければ `fallback()`
-    pub(crate) fn regroup_remainder(
-        chunks: &mut Vec<(Option<ShapeId>, Vec<FillShape>)>,
-        hidden: &HashSet<ShapeId>,
-        same: impl Fn(&FillShape) -> bool,
-        rebuild: impl FnOnce(Vec<FillShape>) -> Vec<FillShape>,
-        fallback: impl FnOnce() -> Option<ShapeId>,
-    ) {
-        let mut owner = None;
-        let mut mine = Vec::new();
-        for (o, chunk) in chunks.iter_mut() {
-            let (m, rest): (Vec<FillShape>, Vec<FillShape>) = chunk.drain(..).partition(&same);
-            *chunk = rest;
-            if !m.is_empty() {
-                owner = owner.or(*o);
-            }
-            mine.extend(m);
-        }
-        chunks.retain(|(_, c)| !c.is_empty());
-        let mut list = rebuild(mine);
-        if !list.is_empty() {
-            Self::unmark_remainder(hidden, &mut list);
-            chunks.push((owner.or_else(fallback), list));
-        }
-    }
-
-    /// 塊を組み直すとき：残りの図形のうち、隠した図形の番号（塊の先頭の印）を持つものは新しい番号にする（組み直した塊の
-    /// 先頭には、`set_remainder_chunks` が改めて付ける）
-    pub(crate) fn unmark_remainder(hidden: &HashSet<ShapeId>, shapes: &mut [FillShape]) {
-        for s in shapes {
-            if hidden.contains(&s.shape_id) {
-                s.shape_id = crate::vector_engine::next_shape_id();
-            }
-        }
-    }
-
-    /// 塊を `remainder` に戻す。元の図形がある塊は、先頭の要素にその番号を付ける（この決まりを書くのはここだけ）
-    pub(crate) fn set_remainder_chunks(&mut self, chunks: Vec<(Option<ShapeId>, Vec<FillShape>)>) {
-        self.remainder = chunks
-            .into_iter()
-            .flat_map(|(owner, mut chunk)| {
-                if let (Some(id), Some(head)) = (owner, chunk.first_mut()) {
-                    head.shape_id = id;
-                }
-                chunk
-            })
-            .collect();
-    }
-
-    /// `shapes` から `hidden` の図形を除き、その位置に `remainder` の塊を差し込む。
-    /// `insert_limit` より前を1つ目、後ろを2つ目に返す（差し込む位置の無い塊は1つ目の末尾に足す）
-    fn replace_hidden_with_remainder(
-        &mut self,
-        shapes: Vec<FillShape>,
-        insert_limit: usize,
-    ) -> (Vec<FillShape>, Vec<FillShape>) {
-        let mut chunks = self.take_remainder_chunks();
-        let mut prefix = Vec::with_capacity(shapes.len() + self.pieces.len());
-        let mut trailing = Vec::new();
-        for (idx, shape) in shapes.into_iter().enumerate() {
-            let dst = if idx < insert_limit {
-                &mut prefix
-            } else {
-                &mut trailing
-            };
-            if self.hidden.contains(&shape.shape_id) {
-                for (owner, chunk) in &mut chunks {
-                    if *owner == Some(shape.shape_id) {
-                        dst.append(chunk);
-                    }
-                }
-            } else {
-                dst.push(shape);
-            }
-        }
-        for (_, chunk) in chunks {
-            prefix.extend(chunk);
-        }
-        (prefix, trailing)
-    }
-}
+pub(crate) use crate::floating::Floating;
+use crate::floating::Stage;
 
 /// タブごとの編集セッション状態（土台キャッシュ・上乗せ・選択・変形・排他ドラッグ・編集階層、保存しない）
 #[derive(Default)]
@@ -2065,7 +1903,7 @@ impl Session {
     /// `Floating` を置き換え、`overlay` を同期再構築する
     pub(crate) fn set_floating(&mut self, fl: Option<Floating>) {
         self.floating = fl;
-        self.rebuild_overlay_from_floating();
+        self.sync_floating();
     }
 
     /// `Floating` を取り出し、`overlay` を同期再構築する
@@ -2078,8 +1916,52 @@ impl Session {
     /// クロージャで `Floating` を更新し、`overlay` を同期再構築する
     pub(crate) fn update_floating<R>(&mut self, f: impl FnOnce(&mut Option<Floating>) -> R) -> R {
         let res = f(&mut self.floating);
-        self.rebuild_overlay_from_floating();
+        self.sync_floating();
         res
+    }
+
+    /// 浮いた片の操作に要る画面の土台（セル画の図形のステージの写し・編集中の階層・ステージへの変換）
+    pub(crate) fn stage(&self) -> Stage<'_> {
+        Stage {
+            shapes: self.base_cache.shapes(),
+            scope: &self.editing_group_path,
+            world: self.edit_path.world_xform(),
+        }
+    }
+
+    /// 浮いた片の写しを作り直し（片も残りも無ければ外す）、`overlay` を同期再構築する
+    fn sync_floating(&mut self) {
+        let world = self.edit_path.world_xform();
+        if let Some(fl) = &mut self.floating {
+            fl.refresh(
+                world,
+                &self.editing_group_path,
+                self.base_cache.layer_order_ids(),
+            );
+            if fl.is_empty() {
+                self.floating = None;
+            }
+        }
+        self.rebuild_overlay_from_floating();
+    }
+
+    /// 浮いた片の操作 `f` をする（浮いた片が無ければ、`modified` が `false` の空の浮いた片に）。片の番号が変わるので、
+    /// 選択は、片をみな選び、もう無い図形を外す（浮いた片はいつもみな選ばれている）
+    pub(crate) fn with_floating<R>(&mut self, f: impl FnOnce(&mut Floating, Stage<'_>) -> R) -> R {
+        let mut fl = self.floating.take().unwrap_or_else(|| Floating::new(false));
+        let res = f(&mut fl, self.stage());
+        self.floating = Some(fl);
+        self.sync_floating();
+        self.select_floating_pieces();
+        res
+    }
+
+    /// 浮いた片をみな選び、もう無い図形を選択から外す（片の番号が変わる操作のあと。浮いた片はいつもみな選ばれている）
+    pub(crate) fn select_floating_pieces(&mut self) {
+        if let Some(fl) = &self.floating {
+            self.selection.shapes.extend(fl.piece_ids());
+        }
+        self.retain_existing_selection();
     }
 
     /// 現在の `self.floating` の状態から `self.overlay` を再構築する（ドラッグ中でない通常状態の表示用）
@@ -2090,9 +1972,12 @@ impl Session {
         self.overlay_movable_start = 0;
         if let Some(fl) = &self.floating {
             let scope = self.editing_group_path.clone();
-            fl.init_overlay_from_remainder(&mut self.overlay, &scope);
+            self.overlay.hide = fl.hidden().clone();
+            self.overlay
+                .add
+                .extend(fl.placed_remainder().iter().cloned());
             self.overlay_movable_start = self.overlay.add.len();
-            for piece in &fl.pieces {
+            for piece in fl.pieces() {
                 self.overlay.add.push((
                     Placement::TopOfLayer(piece.layer_id, scope.clone()),
                     piece.clone(),
@@ -2163,9 +2048,12 @@ impl Session {
         let custom_piv = self.transform_pivot;
 
         if let Some(fl) = &self.floating {
-            fl.init_overlay_from_remainder(&mut self.overlay, &scope);
+            self.overlay.hide = fl.hidden().clone();
+            self.overlay
+                .add
+                .extend(fl.placed_remainder().iter().cloned());
             if alt_duplicate {
-                for piece in &fl.pieces {
+                for piece in fl.pieces() {
                     self.overlay.add.push((
                         Placement::TopOfLayer(piece.layer_id, scope.clone()),
                         piece.clone(),
@@ -2180,7 +2068,7 @@ impl Session {
             if self
                 .floating
                 .as_ref()
-                .is_some_and(|fl| fl.hidden.contains(&shape.shape_id))
+                .is_some_and(|fl| fl.hidden().contains(&shape.shape_id))
             {
                 continue;
             }
@@ -2213,7 +2101,7 @@ impl Session {
             }
         }
         if let Some(fl) = &self.floating {
-            for piece in &fl.pieces {
+            for piece in fl.pieces() {
                 if self.selection.contains_shape(piece) {
                     if for_transform {
                         let _ = piece.fill_mesh();
@@ -2260,41 +2148,48 @@ impl Session {
         self.floating.as_ref().is_some_and(|fl| fl.modified)
     }
 
-    /// 選択中の生図形のうち、まだ `Floating` に入っていないものを `Floating` に持ち上げ、変更済みとしてマークする
+    /// 選択中の生の図形（隠していないセル画の図形と、浮いている残り）を片に持ち上げ、動かした扱いにする（動かす・変形・
+    /// 色を変える前）。レイヤーごとに、その面の所を選ぶ所にして切る（`Floating::cut`）
     pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self) {
-        let scope = self.editing_group_path.clone();
-        let mut newly_lifted = Vec::new();
-        for shape in self.base_cache.shapes() {
-            let already_hidden = self
-                .floating
-                .as_ref()
-                .is_some_and(|fl| fl.hidden.contains(&shape.shape_id));
-            if !already_hidden
-                && self.selection.contains_shape(shape)
-                && shape.is_raw_at_scope(&scope)
-            {
-                newly_lifted.push(shape.clone());
-            }
-        }
-        if newly_lifted.is_empty() && self.floating.is_none() {
+        let by_layer = self.selected_raw_ids_by_layer(true);
+        if by_layer.is_empty() && self.floating.is_none() {
             return;
         }
-        let order_ids = self.base_cache.layer_order_ids().to_vec();
-        self.update_floating(|fl_opt| {
-            let fl = fl_opt.get_or_insert_with(|| Floating {
-                pieces: Vec::new(),
-                remainder: Vec::new(),
-                hidden: HashSet::new(),
-                modified: true,
-            });
+        self.with_floating(|fl, stage| {
+            fl.cut(stage, &by_layer, None);
             fl.modified = true;
-            fl.hidden.extend(newly_lifted.iter().map(|s| s.shape_id));
-            fl.pieces.splice(0..0, newly_lifted);
-            if order_ids.len() > 1 && fl.pieces.len() > 1 {
-                fl.pieces
-                    .sort_by_key(|s| layer_order_index(&order_ids, s.layer_id));
-            }
         });
+    }
+
+    /// 選択中の生の図形の、レイヤーごとの番号。`base` なら隠していないセル画の図形も、そうでなければ浮いている残りだけ
+    fn selected_raw_ids_by_layer(&self, base: bool) -> Vec<(LayerId, HashSet<ShapeId>)> {
+        let scope = &self.editing_group_path;
+        let mut by_layer: Vec<(LayerId, HashSet<ShapeId>)> = Vec::new();
+        let mut add = |s: &FillShape| match by_layer.iter_mut().find(|x| x.0 == s.layer_id) {
+            Some(x) => {
+                x.1.insert(s.shape_id);
+            }
+            None => by_layer.push((s.layer_id, HashSet::from([s.shape_id]))),
+        };
+        let hidden = self.floating.as_ref().map(|fl| fl.hidden());
+        if base {
+            for s in self.base_cache.shapes() {
+                if !hidden.is_some_and(|h| h.contains(&s.shape_id))
+                    && self.selection.contains_shape(s)
+                    && s.is_raw_at_scope(scope)
+                {
+                    add(s);
+                }
+            }
+        }
+        if let Some(fl) = &self.floating {
+            for r in fl.remainder() {
+                if self.selection.shapes.contains(&r.shape_id) {
+                    add(r);
+                }
+            }
+        }
+        by_layer
     }
 
     /// 文書に無い図形 `pieces`（ステージ座標）を、浮いた片に足す（動かした扱い。確定のときに、その階層の地図に重ねる）
@@ -2302,93 +2197,21 @@ impl Session {
         if pieces.is_empty() {
             return;
         }
-        let order_ids = self.base_cache.layer_order_ids().to_vec();
-        self.update_floating(|fl_opt| {
-            let fl = fl_opt.get_or_insert_with(|| Floating {
-                pieces: Vec::new(),
-                remainder: Vec::new(),
-                hidden: HashSet::new(),
-                modified: true,
-            });
-            fl.modified = true;
-            fl.pieces.extend(pieces);
-            if order_ids.len() > 1 && fl.pieces.len() > 1 {
-                fl.pieces
-                    .sort_by_key(|s| layer_order_index(&order_ids, s.layer_id));
-            }
+        self.with_floating(|fl, stage| {
+            fl.add_pieces(stage, &pieces);
         });
     }
 
-    /// `fl.remainder` 内の図形が選択に追加された場合、`fl.pieces` へ昇格させる
+    /// 浮いている残りの図形が選択に入ったら、片に持ち上げる（動かしていなければ、ほかの片と一緒に切り直して1つの組に
+    /// する：同じ色でつながる片は1つになる）
     pub(crate) fn promote_selected_remainder_to_pieces(&mut self) {
-        if !self.floating.as_ref().is_some_and(|fl| {
-            fl.remainder
-                .iter()
-                .any(|r| self.selection.shapes.contains(&r.shape_id))
-        }) {
+        let by_layer = self.selected_raw_ids_by_layer(false);
+        if by_layer.is_empty() {
             return;
         }
-        let mut selection_shapes = std::mem::take(&mut self.selection.shapes);
-        self.update_floating(|fl_opt| {
-            let Some(fl) = fl_opt else {
-                return;
-            };
-            let mut new_chunks = Vec::new();
-            let mut lifted = Vec::new();
-            for (orig_id, chunk) in fl.take_remainder_chunks() {
-                let mut still_rem = Vec::new();
-                let mut newly_sel = Vec::new();
-                for s in chunk {
-                    if selection_shapes.contains(&s.shape_id) {
-                        newly_sel.push(s);
-                    } else {
-                        still_rem.push(s);
-                    }
-                }
-                if !newly_sel.is_empty() && !still_rem.is_empty() {
-                    for s in &mut newly_sel {
-                        if fl.hidden.contains(&s.shape_id) {
-                            let old_id = s.shape_id;
-                            let fresh_id = crate::vector_engine::next_shape_id();
-                            s.shape_id = fresh_id;
-                            selection_shapes.remove(&old_id);
-                            selection_shapes.insert(fresh_id);
-                        }
-                    }
-                }
-                if !still_rem.is_empty() {
-                    new_chunks.push((orig_id, still_rem));
-                }
-                lifted.extend(newly_sel);
-            }
-            fl.pieces.splice(0..0, lifted);
-            fl.set_remainder_chunks(new_chunks);
+        self.with_floating(|fl, stage| {
+            fl.cut(stage, &by_layer, None);
         });
-        self.selection.shapes = selection_shapes;
-        self.merge_touching_pieces();
-    }
-
-    /// `Floating` の選択中の片のうち、つながっている同じ色の片どうしを1つに結合し、選択の番号を入れ替える
-    pub(crate) fn merge_touching_pieces(&mut self) {
-        if self.floating.as_ref().is_none_or(|fl| fl.pieces.len() <= 1) {
-            return;
-        }
-        let mut selection_shapes = std::mem::take(&mut self.selection.shapes);
-        let xform = self.edit_path.world_xform();
-        self.update_floating(|fl_opt| {
-            let Some(fl) = fl_opt else {
-                return;
-            };
-            let pieces = std::mem::take(&mut fl.pieces);
-            for piece in &pieces {
-                selection_shapes.remove(&piece.shape_id);
-            }
-            // 片は同じ地図から作ったもので、境目がビットまで同じなので、地図でまとめる
-            let merged = crate::planar_map::merge_touching_faces(pieces, xform);
-            selection_shapes.extend(merged.iter().map(|p| p.shape_id));
-            fl.pieces = merged;
-        });
-        self.selection.shapes = selection_shapes;
     }
 
     /// 未変形スライスの `Floating` で選択中の片がなくなった場合は破棄する
@@ -2396,7 +2219,7 @@ impl Session {
         if self.floating.as_ref().is_some_and(|fl| {
             !fl.modified
                 && !fl
-                    .pieces
+                    .pieces()
                     .iter()
                     .any(|p| self.selection.shapes.contains(&p.shape_id))
         }) {
@@ -3184,18 +3007,15 @@ impl LayerEdit {
         }
     }
 
-    /// `Floating` をブーリアン結合せずにそのまま `self.shapes` に実体化する（グループ化・シンボル変換の前処理用）
-    pub(crate) fn materialize_floating_without_merge(&mut self, mut fl: Floating) {
+    /// `Floating` を重ねずにそのまま `self.shapes` に入れる（グループ化・シンボル変換の前処理用）
+    pub(crate) fn materialize_floating_without_merge(&mut self, fl: Floating) {
         let insert_limit = self.scope_insert_index();
-        let (mut prefix, trailing) =
-            fl.replace_hidden_with_remainder(std::mem::take(&mut self.shapes), insert_limit);
-        prefix.extend(fl.pieces);
-        prefix.extend(trailing);
-        if self.layer_order_ids.len() > 1 && prefix.len() > 1 {
+        fl.materialize_into(&mut self.shapes, insert_limit);
+        if self.layer_order_ids.len() > 1 && self.shapes.len() > 1 {
             let order_ids = &self.layer_order_ids;
-            prefix.sort_by_key(|s| layer_order_index(order_ids, s.layer_id));
+            self.shapes
+                .sort_by_key(|s| layer_order_index(order_ids, s.layer_id));
         }
-        self.shapes = prefix;
     }
 }
 
@@ -3674,60 +3494,49 @@ pub(crate) fn draw_registration_cross(
     );
 }
 
-/// 片 `pieces` を `base_shapes` に結合する。レイヤー・階層ごとに、片を1つの地図にして、そのレイヤーの生の図形の地図の上に置く
-/// （片どうしの境目は1本の辺のまま。変わった図形だけを差し替える。片どうしが重なるときは、片を並びの順に塗り重ねた地図にする：
-/// `place_pieces_diff`）。置く計算はレイヤーをまたがないので、2つ以上あれば同時に計算する
+/// テスト用：片 `pieces`（座標の変換 `xform` で置いた図形）を `base_shapes` に、階層ごとに浮いた片として足して確定する
+/// （浮いている片を置くのと同じ）
+#[cfg(test)]
 pub(crate) fn merge_pieces_layer_by_layer(
     base_shapes: &mut Vec<FillShape>,
     pieces: Vec<FillShape>,
     xform: Affine,
 ) {
-    use crate::planar_map::{
-        apply_map_change, apply_shape_diff, per_layer_parallel, place_pieces_diff, MapEditOutcome,
-    };
-    let mut parts: Vec<(LayerId, Vec<u64>, Vec<FillShape>)> = Vec::new();
-    for p in pieces {
-        match parts
-            .iter_mut()
-            .find(|(lid, gp, _)| *lid == p.layer_id && *gp == p.group_path)
-        {
-            Some((_, _, layer_pieces)) => layer_pieces.push(p),
-            None => parts.push((p.layer_id, p.group_path.clone(), vec![p])),
+    let mut scopes: Vec<Vec<u64>> = Vec::new();
+    for p in &pieces {
+        if !scopes.contains(&p.group_path) {
+            scopes.push(p.group_path.clone());
         }
     }
-    let shapes: &[FillShape] = base_shapes;
-    let outcomes = per_layer_parallel(&parts, |(layer_id, group_path, layer_pieces)| {
-        place_pieces_diff(shapes, *layer_id, group_path, xform, layer_pieces)
-    });
-    for ((layer_id, group_path, layer_pieces), outcome) in parts.into_iter().zip(outcomes) {
-        match outcome {
-            MapEditOutcome::Changed(change) => {
-                apply_map_change(base_shapes, change, layer_id, &group_path, xform)
-            }
-            MapEditOutcome::Unchanged => {}
-            // 格子に置けない所（±65,536px の外）では重ねられない。片を失わないよう、重ねずにそのまま足す
-            MapEditOutcome::Refused => {
-                apply_shape_diff(base_shapes, &[], layer_pieces, layer_id, &group_path)
-            }
-        }
+    for scope in scopes {
+        let mine: Vec<FillShape> = pieces
+            .iter()
+            .filter(|p| p.group_path == scope)
+            .cloned()
+            .collect();
+        let mut fl = Floating::new(true);
+        fl.add_pieces(
+            Stage {
+                shapes: base_shapes,
+                scope: &scope,
+                world: xform,
+            },
+            &mine,
+        );
+        fl.refresh(xform, &scope, &[]);
+        fl.commit_into(base_shapes, &scope, xform);
     }
 }
 
-/// `Floating` の `hidden` 除去・`remainder` 追加・`pieces` 結合を `base_shapes`（座標の変換 `xform` で置いた図形）に対して実行する
+/// `Floating` を `base_shapes`（編集中の階層 `scope` の、座標の変換 `xform` で置いた図形）に確定する（`Floating::commit_into`）
 pub(crate) fn merge_floating_into_base_shapes(
     base_shapes: &mut Vec<FillShape>,
-    mut fl: Floating,
+    fl: Floating,
+    scope: &[u64],
     layer_order_ids: &[LayerId],
     xform: Affine,
 ) {
-    if !fl.hidden.is_empty() || !fl.remainder.is_empty() {
-        let (rebuilt, _) =
-            fl.replace_hidden_with_remainder(std::mem::take(base_shapes), usize::MAX);
-        *base_shapes = rebuilt;
-    }
-    if !fl.pieces.is_empty() {
-        merge_pieces_layer_by_layer(base_shapes, fl.pieces, xform);
-    }
+    fl.commit_into(base_shapes, scope, xform);
     if layer_order_ids.len() > 1 && base_shapes.len() > 1 {
         base_shapes.sort_by_key(|s| layer_order_index(layer_order_ids, s.layer_id));
     }
@@ -3735,36 +3544,16 @@ pub(crate) fn merge_floating_into_base_shapes(
 
 /// `Floating` が影響するレイヤーID一覧を収集する
 pub(crate) fn floating_target_layer_ids(tab: &Tab, fl: &Floating) -> Vec<LayerId> {
-    let mut lids: Vec<LayerId> = Vec::new();
-    let mut push_unique = |lid: LayerId| {
-        if !lids.contains(&lid) {
-            lids.push(lid);
-        }
-    };
-    for p in &fl.pieces {
-        push_unique(p.layer_id);
-    }
-    for r in &fl.remainder {
-        push_unique(r.layer_id);
-    }
-    if !fl.hidden.is_empty() {
-        for s in tab.session.base_cache.shapes() {
-            if fl.hidden.contains(&s.shape_id) {
-                push_unique(s.layer_id);
-            }
-        }
-    }
+    let mut lids = fl.layer_ids();
     if lids.is_empty() {
-        let lid = active_scope_layer_id(&tab.session, tab.active_timeline());
-        lids.push(lid);
+        lids.push(active_scope_layer_id(&tab.session, tab.active_timeline()));
     }
     lids
 }
 
 /// `tab.session.floating` のうち `keep_indices`（`Scene` インデックス）に含まれない選択図形を確定
-/// （未変形スライスなら `Floating` を破棄するだけで文書は変更せず、変更済みなら `hidden` を除き `remainder` を足して `pieces` を結合し文書へ書き込み）する
+/// （未変形スライスなら外した片を残りに戻すだけで文書は変更せず、変更済みなら外した片と残りを確定して文書へ書き込む）
 pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> bool {
-    let xform = tab.session.edit_path.world_xform();
     let (is_sel, any_valid) = tab.session.selected_shape_mask();
     let mut is_keep = vec![false; is_sel.len()];
     let mut any_keep = false;
@@ -3787,6 +3576,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
                 merge_floating_into_base_shapes(
                     &mut edit.shapes,
                     fl,
+                    &edit.editing_group_path,
                     &edit.layer_order_ids,
                     edit.world_xform,
                 );
@@ -3801,78 +3591,32 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
     let Some(mut fl) = tab.session.take_floating() else {
         return false;
     };
-    let mut kept_pieces = Vec::new();
-    let mut deselected_pieces = Vec::new();
-    for piece in fl.pieces.drain(..) {
-        if tab.session.selection.contains_shape(&piece) {
-            kept_pieces.push(piece);
-        } else {
-            deselected_pieces.push(piece);
-        }
-    }
+    let keep: HashSet<ShapeId> = fl
+        .pieces()
+        .iter()
+        .filter(|p| tab.session.selection.contains_shape(p))
+        .map(|p| p.shape_id)
+        .collect();
+    let all_kept = keep.len() == fl.pieces().len();
 
     if !fl.modified {
-        if kept_pieces.is_empty() {
+        if keep.is_empty() {
             tab.session.retain_existing_selection();
             return true;
         }
-        if !deselected_pieces.is_empty() {
-            // 外した片は同じレイヤーの残りに入れ、そのレイヤーの残りをまとめて、同じ色でつながる所を1つにする（動かして
-            // いない片と残りは同じ地図から作ったもので、境目がビットまで同じ）。塊の位置は、そのレイヤーの残りの塊か、
-            // まだ塊の無い隠した図形
-            let mut used_orig_ids: HashSet<ShapeId> = fl
-                .remainder
-                .iter()
-                .map(|r| r.shape_id)
-                .chain(kept_pieces.iter().map(|p| p.shape_id))
-                .filter(|id| fl.hidden.contains(id))
-                .collect();
-            let mut chunks = fl.take_remainder_chunks();
-            while let Some(first) = deselected_pieces.first() {
-                let (lid, gp) = (first.layer_id, first.group_path.clone());
-                let same = |s: &FillShape| s.layer_id == lid && s.group_path == gp;
-                let (list, others): (Vec<FillShape>, Vec<FillShape>) =
-                    deselected_pieces.drain(..).partition(same);
-                deselected_pieces = others;
-                Floating::regroup_remainder(
-                    &mut chunks,
-                    &fl.hidden,
-                    same,
-                    |mine| {
-                        crate::planar_map::merge_touching_faces(
-                            list.into_iter().chain(mine).collect(),
-                            xform,
-                        )
-                    },
-                    || {
-                        let id = fl
-                            .hidden
-                            .iter()
-                            .copied()
-                            .find(|id| !used_orig_ids.contains(id))?;
-                        used_orig_ids.insert(id);
-                        Some(id)
-                    },
-                );
-            }
-            fl.set_remainder_chunks(chunks);
+        // 外した片は残りに戻す（残す片の所だけで、セル画の地図を切り直す。同じ色でつながる所は1つになる）
+        if !all_kept {
+            fl.return_pieces(tab.session.stage(), &keep);
         }
-        fl.pieces = kept_pieces;
         tab.session.set_floating(Some(fl));
         tab.session.retain_existing_selection();
         return false;
     }
 
-    let had_hidden_or_rem = !fl.hidden.is_empty() || !fl.remainder.is_empty();
-    let merged_any = !deselected_pieces.is_empty() || (kept_pieces.is_empty() && had_hidden_or_rem);
-    let to_commit = merged_any.then(|| Floating {
-        pieces: deselected_pieces,
-        remainder: std::mem::take(&mut fl.remainder),
-        hidden: std::mem::take(&mut fl.hidden),
-        modified: true,
-    });
-    if !kept_pieces.is_empty() {
-        fl.pieces = kept_pieces;
+    let had_rest = fl.layers().iter().any(|l| l.origin.is_some());
+    let merged_any = !all_kept || (keep.is_empty() && had_rest);
+    let to_commit = merged_any.then(|| fl.split_off(&keep, &tab.session.editing_group_path));
+    if !keep.is_empty() {
         tab.session.set_floating(Some(fl));
     }
     if let Some(to_commit) = to_commit {
@@ -3881,6 +3625,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             merge_floating_into_base_shapes(
                 &mut edit.shapes,
                 to_commit,
+                &edit.editing_group_path,
                 &edit.layer_order_ids,
                 edit.world_xform,
             );
@@ -3921,18 +3666,7 @@ pub(crate) fn insert_and_select_shapes_in_scope(
     let (mut raw_pieces, doc_shapes): (Vec<FillShape>, Vec<FillShape>) = new_shapes
         .into_iter()
         .partition(|s| as_floating && s.is_raw_at_scope(&scope));
-    if raw_pieces.is_empty() {
-        tab.session.set_floating(None);
-    } else {
-        tab.active_timeline()
-            .normalize_shape_layer_ids(&mut raw_pieces);
-        tab.session.set_floating(Some(Floating {
-            pieces: raw_pieces,
-            remainder: Vec::new(),
-            hidden: HashSet::new(),
-            modified: true,
-        }));
-    }
+    tab.session.set_floating(None);
     if !doc_shapes.is_empty() {
         let mut lids: Vec<LayerId> = doc_shapes.iter().map(|s| s.layer_id).collect();
         lids.push(active_scope_layer_id(&tab.session, tab.active_timeline()));
@@ -3940,6 +3674,12 @@ pub(crate) fn insert_and_select_shapes_in_scope(
             let insert_pos = edit.scope_insert_index();
             edit.shapes.splice(insert_pos..insert_pos, doc_shapes);
         });
+    }
+    // 生の図形は浮いた片にする（片の番号は片の地図の面の番号になるので、選択も片に合わせる）
+    if !raw_pieces.is_empty() {
+        tab.active_timeline()
+            .normalize_shape_layer_ids(&mut raw_pieces);
+        tab.session.add_floating_pieces(raw_pieces);
     }
     tab.session.transform_pivot = None;
 }

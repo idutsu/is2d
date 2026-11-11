@@ -3,6 +3,7 @@ mod app_menu_macos;
 mod canvas_tool;
 mod clipboard_ops;
 mod doc_actions;
+mod floating;
 mod panels;
 mod planar_map;
 mod project_io;

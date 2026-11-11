@@ -5,7 +5,7 @@ use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 use crate::canvas_tool::{
     cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
     editable_layer_ids, merge_floating_into_base_shapes, sync_timeline_layer_from_canvas_selection,
-    ActiveCanvasDrag, Floating, HoverTarget, LayerId, Scene, SelectSubMode, Session, ShapeId, Tab,
+    ActiveCanvasDrag, HoverTarget, LayerId, Scene, SelectSubMode, Session, ShapeId, Tab,
 };
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
@@ -232,157 +232,68 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
         collect_marquee_hit_groups(tab.scene(), &tab.session.editing_group_path, rect);
 
     let editable_lids = editable_layer_ids(tab);
-    let base_shapes = tab.session.base_cache.shapes().to_vec();
     let scope = tab.session.editing_group_path.clone();
-    let xform = tab.session.edit_path.world_xform();
-    let mut selection = std::mem::take(&mut tab.session.selection);
-    tab.session.update_floating(|floating| {
-        let hidden_now: HashSet<ShapeId> = floating
-            .as_ref()
-            .map(|fl| fl.hidden.clone())
-            .unwrap_or_default();
-        let mut chunks = floating
-            .as_mut()
-            .map(|fl| fl.take_remainder_chunks())
-            .unwrap_or_default();
-        // 動かしていない片は元の所にあるので、レイヤーの中身として一緒に切る（動かした片は、そのまま浮かせておく）
-        let mut pieces: Vec<FillShape> = match floating.as_mut() {
-            Some(fl) if !fl.modified => std::mem::take(&mut fl.pieces),
-            _ => Vec::new(),
-        };
-        let raw = |s: &FillShape| editable_lids.contains(&s.layer_id) && s.is_raw_at_scope(&scope);
-        let unhidden = |s: &&FillShape| !hidden_now.contains(&s.shape_id);
-        // 切るレイヤー：中身（隠していない生の図形・浮いている残り・動かしていない片）が矩形にかかるレイヤー
-        let mut split_lids: Vec<LayerId> = Vec::new();
-        for s in base_shapes
-            .iter()
-            .filter(unhidden)
-            .chain(chunks.iter().flat_map(|(_, c)| c))
-            .chain(&pieces)
+    let floating = tab.session.floating();
+    let modified = floating.is_some_and(|fl| fl.modified);
+    let pieces: HashSet<ShapeId> = floating.map(|fl| fl.piece_ids()).unwrap_or_default();
+    let raw = |s: &FillShape| editable_lids.contains(&s.layer_id) && s.is_raw_at_scope(&scope);
+    // 切るレイヤー：中身（隠していない生の図形・浮いている残り・動かしていない片）が矩形にかかるレイヤー。レイヤーごとに、
+    // 中身を、選ぶ所（そのレイヤーで選んでいる面・動かしていない片・矩形）で1回だけ切る（`Floating::cut`）。片と残りが
+    // いつも同じ地図から出るので、何回選び足しても境目がそろい、選ぶ所の中でつながった同じ色の部分は1つの片になる
+    let mut split: Vec<(LayerId, HashSet<ShapeId>)> = Vec::new();
+    for s in tab.scene().iter() {
+        let content = raw(s) && (!modified || !pieces.contains(&s.shape_id));
+        if content
+            && rects_overlap(s.bounding_box(), rect)
+            && !split.iter().any(|x| x.0 == s.layer_id)
         {
-            if raw(s) && rects_overlap(s.bounding_box(), rect) && !split_lids.contains(&s.layer_id)
-            {
-                split_lids.push(s.layer_id);
+            split.push((s.layer_id, HashSet::new()));
+        }
+    }
+    for s in tab.scene().iter() {
+        if raw(s) && !pieces.contains(&s.shape_id) && tab.session.selection.contains_shape(s) {
+            if let Some(x) = split.iter_mut().find(|x| x.0 == s.layer_id) {
+                x.1.insert(s.shape_id);
             }
         }
-        // レイヤーごとに、中身を1つの地図にして、選ぶ所（そのレイヤーで選んでいる図形と矩形）で1回だけ切る。片と残りが
-        // いつも同じ地図から出るので、何回選び足しても境目がそろい、選ぶ所の中でつながった同じ色の部分は1つの片になる。
-        // ほかのレイヤーを見ないので、同時に計算する
-        let splits = crate::planar_map::per_layer_parallel(&split_lids, |&lid| {
-            let own: Vec<&FillShape> = base_shapes
-                .iter()
-                .filter(unhidden)
-                .chain(chunks.iter().flat_map(|(_, c)| c))
-                .chain(&pieces)
-                .filter(|s| s.layer_id == lid && raw(s))
-                .collect();
-            let selected: Vec<&FillShape> = own
-                .iter()
-                .copied()
-                .filter(|s| selection.contains_shape(s))
-                .collect();
-            crate::planar_map::marquee_split(&own, lid, &scope, xform, &selected, &clip_rect_shape)
-        });
-        let mut lifted: Vec<FillShape> = Vec::new();
-        let mut new_hidden: Vec<ShapeId> = Vec::new();
-        // 地図にできなかったレイヤー（格子に置けない座標がある）
-        let mut unsplit: Vec<LayerId> = Vec::new();
-        for (&lid, sp) in split_lids.iter().zip(splits) {
-            let Some(sp) = sp else {
-                unsplit.push(lid);
-                continue;
-            };
-            let hidden: HashSet<ShapeId> = sp.hidden.iter().copied().collect();
-            let whole: HashSet<ShapeId> = sp.whole.iter().copied().collect();
-            let layer_hidden_start = new_hidden.len();
-            // 生の図形：切れたものは隠し、丸ごと中にあるものは、そのまま選ぶ
-            for s in base_shapes
-                .iter()
-                .filter(unhidden)
-                .filter(|s| s.layer_id == lid && raw(s))
-            {
-                if hidden.contains(&s.shape_id) {
-                    selection.shapes.remove(&s.shape_id);
-                    new_hidden.push(s.shape_id);
-                } else if whole.contains(&s.shape_id) {
-                    selection.insert_shape(s);
-                }
-            }
-            // 動かしていない片：切れたもの（つながった片と1つになったもの）は外す
-            pieces.retain(|p| {
-                let gone = p.layer_id == lid && hidden.contains(&p.shape_id);
-                if gone {
-                    selection.shapes.remove(&p.shape_id);
-                }
-                !gone
-            });
-            // 浮いている残り：このレイヤーの分を取り出し、丸ごと中のものは片にし、切れたものは捨て、新しい残りを足して
-            // 1つの塊にする（塊の位置は、そのレイヤーの残りの塊か、隠した図形のどれか）
-            let fallback = new_hidden.get(layer_hidden_start).copied();
-            Floating::regroup_remainder(
-                &mut chunks,
-                &hidden_now,
-                |s| s.layer_id == lid && raw(s),
-                |mine| {
-                    let (mut whole_rem, rest): (Vec<FillShape>, Vec<FillShape>) = mine
-                        .into_iter()
-                        .filter(|s| !hidden.contains(&s.shape_id))
-                        .partition(|s| whole.contains(&s.shape_id));
-                    // 隠した図形の番号を持つ残り（塊の先頭）は、片にするときに新しい番号にする
-                    Floating::unmark_remainder(&hidden_now, &mut whole_rem);
-                    for s in whole_rem {
-                        selection.insert_shape(&s);
-                        lifted.push(s);
-                    }
-                    rest.into_iter().chain(sp.remainder).collect()
-                },
-                || fallback,
-            );
-            for p in sp.pieces {
-                selection.insert_shape(&p);
-                lifted.push(p);
-            }
+    }
+    let unsplit = if split.is_empty() {
+        Vec::new()
+    } else {
+        tab.session
+            .with_floating(|fl, stage| fl.cut(stage, &split, Some(&clip_rect_shape)))
+    };
+    // グループは矩形にかかれば丸ごと選ぶ。地図にできないレイヤーの図形と、生の図形でないものは、切らずに、丸ごと
+    // 矩形の中にあるときだけ選ぶ
+    let hidden_now: HashSet<ShapeId> = tab
+        .session
+        .floating()
+        .map(|fl| fl.hidden().clone())
+        .unwrap_or_default();
+    let mut selection = std::mem::take(&mut tab.session.selection);
+    for shape in tab.session.base_cache.shapes() {
+        if selection.contains_shape(shape)
+            || hidden_now.contains(&shape.shape_id)
+            || !editable_lids.contains(&shape.layer_id)
+            || !shape.is_in_editing_scope(&scope)
+        {
+            continue;
         }
-        if floating.is_some() || !new_hidden.is_empty() {
-            let fl = floating.get_or_insert_with(|| Floating {
-                pieces: Vec::new(),
-                remainder: Vec::new(),
-                hidden: HashSet::new(),
-                modified: false,
-            });
-            fl.hidden.extend(new_hidden);
-            lifted.append(&mut pieces);
-            lifted.append(&mut fl.pieces);
-            fl.pieces = lifted;
-            fl.set_remainder_chunks(chunks);
-        }
-        // グループは矩形にかかれば丸ごと選ぶ。地図にできないレイヤーの図形と、生の図形でないものは、切らずに、丸ごと
-        // 矩形の中にあるときだけ選ぶ
-        for shape in &base_shapes {
-            if selection.contains_shape(shape)
-                || hidden_now.contains(&shape.shape_id)
-                || !editable_lids.contains(&shape.layer_id)
-                || !shape.is_in_editing_scope(&scope)
-            {
-                continue;
-            }
-            if let Some(gid) = shape.active_group_id_at_scope(&scope) {
-                if hit_group_ids.contains(&gid) {
-                    selection.insert_shape(shape);
-                }
-                continue;
-            }
-            if raw(shape) && !unsplit.contains(&shape.layer_id) {
-                continue;
-            }
-            let b = shape.bounding_box();
-            if b.x0 >= rect.x0 && b.x1 <= rect.x1 && b.y0 >= rect.y0 && b.y1 <= rect.y1 {
+        if let Some(gid) = shape.active_group_id_at_scope(&scope) {
+            if hit_group_ids.contains(&gid) {
                 selection.insert_shape(shape);
             }
+            continue;
         }
-    });
+        if raw(shape) && !unsplit.contains(&shape.layer_id) {
+            continue;
+        }
+        let b = shape.bounding_box();
+        if b.x0 >= rect.x0 && b.x1 <= rect.x1 && b.y0 >= rect.y0 && b.y1 <= rect.y1 {
+            selection.insert_shape(shape);
+        }
+    }
     tab.session.selection = selection;
-    tab.session.merge_touching_pieces();
 
     tab.session.drop_unmodified_slice_if_unselected();
     tab.session.transform_pivot = None;
@@ -923,10 +834,11 @@ pub(crate) fn prepare_delete_selected_shapes(
     let selection = std::mem::take(&mut tab.session.selection);
     edit_layers(tab, &layer_ids, |edit| {
         if let Some(mut fl) = fl_opt {
-            fl.pieces.clear();
+            fl.drop_pieces();
             merge_floating_into_base_shapes(
                 &mut edit.shapes,
                 fl,
+                &edit.editing_group_path,
                 &edit.layer_order_ids,
                 edit.world_xform,
             );

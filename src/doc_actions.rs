@@ -15,8 +15,7 @@ use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
 };
 use crate::planar_map::{
-    apply_map_change, apply_shape_diff, map_edit_diff, MapChange, MapEdit, MapEditOutcome,
-    MapInput, MapRule,
+    apply_map_change, map_edit_diff, MapEdit, MapEditOutcome, MapInput, MapRule,
 };
 use crate::select_ops::{
     apply_marquee_selection, compute_hover_target, enter_group_at, exit_current_group,
@@ -858,20 +857,15 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 .collect();
             tab.session.lift_selected_raw_shapes_to_floating();
             let scope = tab.session.editing_group_path.clone();
-            let sel = tab.session.selection.clone();
+            let ids = tab.session.selection.shapes.clone();
             tab.session.update_floating(|fl_opt| {
                 if let Some(fl) = fl_opt {
-                    for piece in &mut fl.pieces {
-                        if sel.contains_shape(piece)
-                            && editable_lids.contains(&piece.layer_id)
-                            && piece.is_raw_at_scope(&scope)
-                        {
-                            piece.set_color(fill_color);
-                        }
-                    }
+                    fl.recolor(&ids, fill_color, &editable_lids, &scope);
                     fl.modified = true;
                 }
             });
+            // 同じ色でとなり合う片は1つになる（新しい番号）
+            tab.session.select_floating_pieces();
             return true;
         }
         return false;
@@ -965,48 +959,39 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     // 地図は格子の内の形しか持てないので、片が格子の外（±65,536px の外）へ出る変形はしない
     let xform = tab.session.edit_path.world_xform();
     let fits = tab.session.floating().is_none_or(|fl| {
-        fl.pieces
-            .iter()
-            .filter(|p| selection.contains_shape(p))
-            .all(|p| {
-                let mut moved = p.clone();
-                moved.transform(affine);
-                crate::planar_map::fits_grid(&moved, xform)
-            })
+        fl.pieces().iter().all(|p| {
+            let mut moved = p.clone();
+            moved.transform(affine);
+            crate::planar_map::fits_grid(&moved, xform)
+        })
     });
     if !fits {
         return false;
     }
+    // 浮いた片（いつもみな選ばれている）は、片の組の変換に、文書の座標の変換を重ねる（確定のときに地図にかける）
     tab.session.update_floating(|fl_opt| {
         if let Some(fl) = fl_opt {
-            for piece in &mut fl.pieces {
-                if selection.contains_shape(piece) {
-                    piece.transform(affine);
-                    any_transformed = true;
-                }
-            }
-            if any_transformed {
-                fl.modified = true;
+            if !fl.pieces().is_empty() {
+                fl.transform(xform.inverse() * affine * xform);
+                any_transformed = true;
             }
         }
     });
+    let hidden = tab
+        .session
+        .floating()
+        .map(|fl| fl.hidden().clone())
+        .unwrap_or_default();
     let mut target_lids: Vec<u64> = Vec::new();
     for s in tab.session.base_cache.shapes() {
-        let hidden = tab
-            .session
-            .floating()
-            .is_some_and(|fl| fl.hidden.contains(&s.shape_id));
-        if !hidden && tab.session.selection.contains_shape(s) && !target_lids.contains(&s.layer_id)
+        if !hidden.contains(&s.shape_id)
+            && selection.contains_shape(s)
+            && !target_lids.contains(&s.layer_id)
         {
             target_lids.push(s.layer_id);
         }
     }
     if !target_lids.is_empty() {
-        let hidden = tab
-            .session
-            .floating()
-            .map(|fl| fl.hidden.clone())
-            .unwrap_or_default();
         edit_layers(tab, &target_lids, |edit| {
             for s in &mut edit.shapes {
                 if !hidden.contains(&s.shape_id) && selection.contains_shape(s) {
@@ -1202,8 +1187,8 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         _ => None,
     };
     // 動かして浮いている片は、そのレイヤーの片の地図で編集する（境目なら両側の片が変わる）
-    if let Some((MapOwner::Floating(layer_id), edit)) = edit_of(target) {
-        return edit_floating_anchor(tab, layer_id, edit);
+    if let Some((MapOwner::Floating(layer_id, group), edit)) = edit_of(target) {
+        return edit_floating_anchor(tab, layer_id, group, edit);
     }
     // ほかはレイヤーの地図で編集する（境目なら両側の図形が変わる）。選択・浮いている図形があれば、先に確定して探し直す
     if !tab.session.selection.is_empty() || tab.session.floating().is_some() {
@@ -1216,34 +1201,19 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
     }
 }
 
-/// 動かして浮いている片のうち、レイヤー `layer_id` の片を1つの地図にして（アンカーのカーソル合わせと同じ地図）、`edit` で
-/// 編集し、変わった片を差し替える（選択も入れ替える）
-fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, edit: MapEdit) -> bool {
-    let Some(fl) = tab.session.floating().filter(|fl| fl.modified) else {
-        return false;
-    };
+/// 動かして浮いている片のうち、レイヤー `layer_id` の組 `group` の片の地図（アンカーのカーソル合わせと同じ地図）を `edit` で
+/// 編集する（境目なら両側の片が変わる。選択も入れ替える）
+fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, group: usize, edit: MapEdit) -> bool {
     let scope = tab.session.editing_group_path.clone();
-    let MapEditOutcome::Changed(MapChange { removed, added, .. }) = map_edit_diff(
-        &fl.pieces,
-        layer_id,
-        &scope,
-        tab.session.edit_path.world_xform(),
-        |m| edit.apply(m),
-    ) else {
+    let Some(mut fl) = tab.session.floating().filter(|fl| fl.modified).cloned() else {
         return false;
     };
+    if !fl.edit_group(layer_id, group, &scope, |m| edit.apply(m)) {
+        return false;
+    }
     push_undo(tab, None);
-    for id in &removed {
-        tab.session.selection.shapes.remove(id);
-    }
-    for s in &added {
-        tab.session.selection.insert_shape(s);
-    }
-    tab.session.update_floating(|fl_opt| {
-        if let Some(fl) = fl_opt {
-            apply_shape_diff(&mut fl.pieces, &removed, added, layer_id, &scope);
-        }
-    });
+    tab.session.set_floating(Some(fl));
+    tab.session.select_floating_pieces();
     true
 }
 

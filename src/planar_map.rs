@@ -165,6 +165,16 @@ impl PlanarMap {
     /// 正しい地図の面の一部はそのまま正しい地図で、残した面の輪郭も変わらない（頂点で次の辺を選ぶとき、残した面の
     /// 角の中に辺が増えることは無い）
     pub(crate) fn restricted(&self, keep: &HashSet<ShapeId>) -> PlanarMap {
+        self.restricted_by(|id| keep.contains(&id))
+    }
+
+    /// 面の番号が `ids` にある面を外した地図（`restricted` の逆）
+    pub(crate) fn without(&self, ids: &HashSet<ShapeId>) -> PlanarMap {
+        self.restricted_by(|id| !ids.contains(&id))
+    }
+
+    /// 面の番号が `keep` に合う面だけを残した地図（`restricted`）
+    fn restricted_by(&self, keep: impl Fn(ShapeId) -> bool) -> PlanarMap {
         let mut index: Vec<usize> = vec![usize::MAX; self.nodes.len()];
         let mut nodes: Vec<Point> = Vec::new();
         let mut node = |v: usize| {
@@ -176,8 +186,8 @@ impl PlanarMap {
         };
         let mut edges = Vec::new();
         for e in &self.edges {
-            let left_src = e.left_src.filter(|id| keep.contains(id));
-            let right_src = e.right_src.filter(|id| keep.contains(id));
+            let left_src = e.left_src.filter(|&id| keep(id));
+            let right_src = e.right_src.filter(|&id| keep(id));
             if left_src.is_none() && right_src.is_none() {
                 continue;
             }
@@ -1274,7 +1284,7 @@ impl LayerBase {
     /// 差分（`MapChange`）。新しい形は、文書の座標の地図の面を `xform` で置いた写し（書き戻しで文書の座標の形をそのまま
     /// 使う：`FillShape::place`）。塗り重ねて作り直した地図なら、図形を全部書き換える。
     /// `None`：`next` に壊れた輪郭がある（`written_faces`）
-    fn diff(
+    pub(crate) fn diff(
         &self,
         next: &PlanarMap,
         own: &[&FillShape],
@@ -1415,7 +1425,7 @@ fn placed(mut d: FillShape, xform: Affine) -> FillShape {
 }
 
 /// 図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の、地図にする生の図形（並びの順）
-fn layer_own<'a>(
+pub(crate) fn layer_own<'a>(
     shapes: &'a [FillShape],
     layer_id: LayerId,
     group_path: &[u64],
@@ -1436,8 +1446,10 @@ pub(crate) struct LayerMap {
     xform: Affine,
     /// 場面の並びで、このレイヤーの生の図形が最初に出てくる番号（これより後ろの、ほかの図形が前面）
     first_idx: usize,
-    /// 地図を決めるもの（次に作るとき、同じなら地図を使い回す）
-    key: MapKey,
+    /// 地図を決めるもの（次に作るとき、同じなら地図を使い回す。浮いた片の地図・残りの地図は持たない）
+    key: Option<MapKey>,
+    /// 地図の持ち主（編集するとき、どの地図か）
+    pub(crate) owner: MapOwner,
 }
 
 impl LayerMap {
@@ -1463,15 +1475,17 @@ fn is_map_shape(s: &FillShape, scope: &[u64]) -> bool {
     s.is_raw_at_scope(scope) && s.symbol_instance.is_none() && !s.exterior.segments.is_empty()
 }
 
-/// 編集中の階層の生の図形（選択中の図形を除く）の、レイヤーごとの地図。場面の生の図形が前回と同じなら、前回の並びを
-/// そのまま返す。違えば、図形が前回と同じレイヤー（鍵 `MapKey` が同じ）は前回の地図を使い、ほかのレイヤーだけ作る
-/// （`LayerBase::of`。レイヤーがいくつあっても、作り直すのは図形が変わったレイヤーだけ）
+/// 編集中の階層の生の図形（浮いた片を除く）の、レイヤーごとの地図。場面の生の図形が前回と同じなら、前回の並びを
+/// そのまま返す。違えば、図形が前回と同じレイヤー（鍵 `MapKey` が同じ）は前回の地図を使い、ほかのレイヤーだけ引く
+/// （`LayerBase::of`：セル画の地図）。浮いた片を持ち上げたレイヤーは、その残りの地図
 pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> {
     use std::hash::{Hash, Hasher};
     let scope = &session.editing_group_path;
     let xform = session.edit_path.world_xform();
-    // 選択中の図形（浮いている図形は、ほかの図形と重なることがある）は入れない
-    let in_map = |s: &FillShape| is_map_shape(s, scope) && !session.selection.contains_shape(s);
+    let floating = session.floating();
+    let pieces: HashSet<ShapeId> = floating.map(|fl| fl.piece_ids()).unwrap_or_default();
+    // 浮いた片（ほかの図形と重なることがある）は入れない
+    let in_map = |s: &FillShape| is_map_shape(s, scope) && !pieces.contains(&s.shape_id);
     let mut by_layer: Vec<(LayerId, usize, Vec<&FillShape>)> = Vec::new();
     for (idx, s) in scene.iter().enumerate().filter(|(_, s)| in_map(s)) {
         match by_layer.iter_mut().find(|x| x.0 == s.layer_id) {
@@ -1498,21 +1512,33 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     // 地図にできないレイヤー（格子に置けない座標がある）は入れない（カーソル合わせも変形もしない）。作り直すレイヤーが
     // いくつあっても待つ時間が増えないよう、同時に作る
     let maps = per_layer_parallel(&by_layer, |(layer_id, first_idx, shapes)| {
-        let key = MapKey::new(shapes, xform);
-        let reused = prev
-            .as_ref()
-            .and_then(|p| p.maps.iter().find(|m| m.key == key))
-            .map(|m| m.base.clone());
+        let rest = floating
+            .and_then(|fl| fl.layers().iter().find(|l| l.layer_id == *layer_id))
+            .and_then(|l| l.origin.as_ref())
+            .map(|o| o.rest.clone());
+        let (base, key) = match rest {
+            Some(rest) => (rest, None),
+            None => {
+                let key = MapKey::new(shapes, xform);
+                let reused = prev
+                    .as_ref()
+                    .and_then(|p| p.maps.iter().find(|m| m.key.as_ref() == Some(&key)))
+                    .map(|m| m.base.clone());
+                let base = match reused {
+                    Some(base) => base,
+                    None => LayerBase::keyed(shapes, xform, key.clone())?,
+                };
+                (base, Some(key))
+            }
+        };
         Some(LayerMap {
             layer_id: *layer_id,
             group_path: scope.clone(),
-            base: match reused {
-                Some(base) => base,
-                None => LayerBase::keyed(shapes, xform, key.clone())?,
-            },
+            base,
             xform,
             first_idx: *first_idx,
             key,
+            owner: MapOwner::Layer(*layer_id),
         })
     })
     .into_iter()
@@ -1568,38 +1594,21 @@ pub(crate) fn anchor_hover(
 ) -> HoverTarget {
     let r = 12.0 / (zoom as f64);
     let floating = floating_maps(scene, session);
-    match anchor_hover_in(
-        scene,
-        session,
-        &floating,
-        MapOwner::Floating,
-        mouse_pt,
-        r,
-        add,
-    ) {
+    match anchor_hover_in(scene, session, &floating, mouse_pt, r, add) {
         HoverTarget::None => {
             let maps = scope_maps(scene, session);
-            anchor_hover_in(
-                scene,
-                session,
-                &maps.maps,
-                MapOwner::Layer,
-                mouse_pt,
-                r,
-                add,
-            )
+            anchor_hover_in(scene, session, &maps.maps, mouse_pt, r, add)
         }
         found => found,
     }
 }
 
-/// 地図 `maps`（`owner` はその持ち主）で、マウスにいちばん近い辺・頂点を探す（`anchor_hover`）。追加は、足せる所
-/// （`with_anchor_added` が形を返す所）だけ。削除は、消せる頂点（`with_anchor_deleted` が形を返す頂点）だけ
+/// 地図 `maps` で、マウスにいちばん近い辺・頂点を探す（`anchor_hover`）。追加は、足せる所（`with_anchor_added` が形を
+/// 返す所）だけ。削除は、消せる頂点（`with_anchor_deleted` が形を返す頂点）だけ
 fn anchor_hover_in(
     scene: Scene<'_>,
     session: &Session,
     maps: &[LayerMap],
-    owner: fn(LayerId) -> MapOwner,
     mouse_pt: Point,
     r: f64,
     add: bool,
@@ -1629,7 +1638,7 @@ fn anchor_hover_in(
                 t,
                 closest_pos: q.eval(t),
                 seg: q,
-                map_edge: Some((owner(lm.layer_id), lm.base.map.quad(e))),
+                map_edge: Some((lm.owner, lm.base.map.quad(e))),
             }
         });
     }
@@ -1654,39 +1663,35 @@ fn anchor_hover_in(
             contour_idx,
             seg_idx,
             pos: lm.placed_node(v),
-            map_node: Some((owner(lm.layer_id), v, lm.base.map.nodes[v])),
+            map_node: Some((lm.owner, v, lm.base.map.nodes[v])),
         }
     })
 }
 
-/// 動かして浮いている片の、レイヤーごとの地図（そのレイヤーの片だけで作る：`LayerBase::of`。片を置くときと同じ地図）
+/// 動かして浮いている片の、片の組ごとの地図（片の地図を「ステージへの変換 ∘ 片の変換」で置く）
 fn floating_maps(scene: Scene<'_>, session: &Session) -> Vec<LayerMap> {
     let Some(fl) = session.floating().filter(|fl| fl.modified) else {
         return Vec::new();
     };
-    let scope = &session.editing_group_path;
-    let mut layer_ids: Vec<LayerId> = Vec::new();
-    for p in &fl.pieces {
-        if !layer_ids.contains(&p.layer_id) {
-            layer_ids.push(p.layer_id);
+    let world = session.edit_path.world_xform();
+    let mut out = Vec::new();
+    for l in fl.layers() {
+        for (gi, g) in l.groups.iter().enumerate() {
+            let Some(first_idx) = g.first_id().and_then(|id| scene.index_of_shape_id(id)) else {
+                continue;
+            };
+            out.push(LayerMap {
+                layer_id: l.layer_id,
+                group_path: session.editing_group_path.clone(),
+                base: g.base.clone(),
+                xform: world * g.xform,
+                first_idx,
+                key: None,
+                owner: MapOwner::Floating(l.layer_id, gi),
+            });
         }
     }
-    layer_ids
-        .into_iter()
-        .filter_map(|layer_id| {
-            let own = layer_own(&fl.pieces, layer_id, scope);
-            let xform = session.edit_path.world_xform();
-            let key = MapKey::new(&own, xform);
-            Some(LayerMap {
-                layer_id,
-                group_path: scope.clone(),
-                first_idx: scene.index_of_shape_id(own.first()?.shape_id)?,
-                base: LayerBase::keyed(&own, xform, key.clone())?,
-                xform,
-                key,
-            })
-        })
-        .collect()
+    out
 }
 
 /// 選択ツールの輪郭の変形で、マウスにいちばん近い頂点か辺を探す。
@@ -1718,7 +1723,7 @@ pub(crate) fn reshape_hover(
             contour_idx,
             seg_idx,
             pos: lm.placed_node(v),
-            map_node: Some((MapOwner::Layer(lm.layer_id), v, lm.base.map.nodes[v])),
+            map_node: Some((lm.owner, v, lm.base.map.nodes[v])),
         };
     }
     let mut best_e: Option<(f64, &LayerMap, usize, f64, ShapeId)> = None;
@@ -1754,7 +1759,7 @@ pub(crate) fn reshape_hover(
             t,
             closest_pos: q.eval(t),
             seg: q,
-            map_edge: Some((MapOwner::Layer(lm.layer_id), lm.base.map.quad(e))),
+            map_edge: Some((lm.owner, lm.base.map.quad(e))),
         };
     }
     HoverTarget::None
@@ -1990,182 +1995,6 @@ pub(crate) fn apply_shape_diff(
     shapes.splice(at..at, added);
 }
 
-/// 矩形選択で切った結果（レイヤー1枚・階層1つ分）
-#[derive(Debug, Default)]
-pub(crate) struct MarqueeSplit {
-    /// 矩形にかかって切れた図形（文書には残し、画面から隠す元の図形）
-    pub(crate) hidden: Vec<ShapeId>,
-    /// 丸ごと矩形の中にある図形（切らずに、そのまま選ぶ）
-    pub(crate) whole: Vec<ShapeId>,
-    /// 切れた図形の、矩形の外の部分
-    pub(crate) remainder: Vec<FillShape>,
-    /// 切れた図形の、矩形の中の部分（持ち上げる片）
-    pub(crate) pieces: Vec<FillShape>,
-}
-
-/// 矩形選択：レイヤー `layer_id`・階層 `group_path` の中身 `own`（隠していない生の図形と、浮いている残り・動かしていない片。
-/// 座標の変換 `xform` で置いた図形）を1つの地図にして、選ぶ所で切る。選ぶ所は矩形 `rect`、前に選んだ図形 `selected` が
-/// あれば、その地図に矩形を足した地図（中か外かだけを使う）。中の部分と外の部分は同じ地図から作るので、境目が両側で
-/// ビットまで同じになり、選ぶ所の中でつながった同じ色の部分は1つの片になる。戻り値の番号は `own` の図形の番号。格子に
-/// 置けない座標があるか、結果に壊れた輪郭があるときは `None`
-pub(crate) fn marquee_split(
-    own: &[&FillShape],
-    layer_id: LayerId,
-    group_path: &[u64],
-    xform: Affine,
-    selected: &[&FillShape],
-    rect: &FillShape,
-) -> Option<MarqueeSplit> {
-    let base = LayerBase::of(own, xform)?;
-    let rect = rect.in_doc(xform);
-    let rect = std::slice::from_ref(rect.as_ref());
-    let selected_region = match selected {
-        [] => None,
-        _ => Some(
-            LayerBase::of(selected, xform)?
-                .map
-                .overlay(MapInput::Shapes(rect), MapRule::Paint(Some(rect[0].color)))?,
-        ),
-    };
-    let region = selected_region
-        .as_ref()
-        .map_or(MapInput::Shapes(rect), MapInput::Map);
-    let inside = base.map.overlay(region, MapRule::KeepInside)?;
-    let rest = base.map.overlay(region, MapRule::Paint(None))?;
-    let MapChange {
-        removed: removed_rest,
-        added: mut remainder,
-        ..
-    } = base.diff(&rest, own, layer_id, group_path, xform)?;
-    let MapChange {
-        removed: removed_inside,
-        added: mut pieces,
-        ..
-    } = base.diff(&inside, own, layer_id, group_path, xform)?;
-    // 残りと片は、隠す元の図形とは別の新しい図形（元の番号を引き継いだ形も、番号を新しく振る）
-    for s in remainder.iter_mut().chain(pieces.iter_mut()) {
-        s.shape_id = crate::vector_engine::next_shape_id();
-    }
-    // 残りから消えて、中では変わらない図形が、丸ごと中にある図形。どちらでも変わった図形が、切れた図形（地図を塗り重ねて
-    // 作り直したときは、図形はみな両方で消えるので、みな切れた図形になる）
-    let removed_inside: HashSet<ShapeId> = removed_inside.into_iter().collect();
-    let (hidden, whole): (Vec<ShapeId>, Vec<ShapeId>) = removed_rest
-        .into_iter()
-        .partition(|id| removed_inside.contains(id));
-    Some(MarqueeSplit {
-        hidden,
-        whole,
-        remainder,
-        pieces,
-    })
-}
-
-/// 持ち上げた片 `pieces`（同じ地図から作った、重ならない片）を、図形の並び `shapes` のレイヤー `layer_id`・階層 `group_path` の
-/// 生の図形の上に置いた差分。片を1つの地図にして、今の地図に重ねる（片どうしの境目は1本の辺のまま）。重ね合わせは、
-/// 今の線に触れる片の辺だけを切り、ほかの片の辺はそのまま写して色だけ決める。置く前の形を「レイヤーの図形と片を並べた
-/// もの」として書き戻すので、どの線にも触れずに変わらなかった片は、形も番号もそのまま残る。図形も片も、座標の変換
-/// `xform` で置いた図形（地図は文書の座標で作る）
-pub(crate) fn place_pieces_diff(
-    shapes: &[FillShape],
-    layer_id: LayerId,
-    group_path: &[u64],
-    xform: Affine,
-    pieces: &[FillShape],
-) -> MapEditOutcome {
-    // 片の地図（`LayerBase::of`）：片どうしが重なれば（浮いている片の上に別の図形を足したときなど）塗り重ねて作り直した
-    // 地図になるので、片はみな書き直す
-    let piece_refs: Vec<&FillShape> = pieces.iter().collect();
-    let Some(piece_base) = LayerBase::of(&piece_refs, xform) else {
-        return MapEditOutcome::Refused;
-    };
-    let piece_shapes = if piece_base.repainted {
-        &[][..]
-    } else {
-        pieces
-    };
-    let own = layer_own(shapes, layer_id, group_path);
-    let Some(base) = LayerBase::of(&own, xform) else {
-        return MapEditOutcome::Refused;
-    };
-    let Some(next) = base
-        .map
-        .overlay(MapInput::Map(&piece_base.map), MapRule::Overlay)
-    else {
-        return MapEditOutcome::Refused;
-    };
-    let mut before_shapes = own.clone();
-    before_shapes.extend(piece_shapes);
-    let before = LayerBase::new(&base.map.joined(&piece_base.map), base.repainted);
-    let Some(MapChange {
-        removed,
-        added,
-        map,
-    }) = before.diff(&next, &before_shapes, layer_id, group_path, xform)
-    else {
-        return MapEditOutcome::Refused;
-    };
-    // 片はまだレイヤーに無いので、消す図形から外し、残った片（地図に入れた文書の座標の形を置いた写し）を足す
-    let gone: HashSet<ShapeId> = removed.iter().copied().collect();
-    let piece_ids: HashSet<ShapeId> = piece_shapes.iter().map(|p| p.shape_id).collect();
-    let kept: Vec<FillShape> = piece_shapes
-        .iter()
-        .filter(|p| !gone.contains(&p.shape_id))
-        .map(|p| {
-            let doc = p.in_doc(xform).into_owned();
-            placed(doc.with_scope(layer_id, group_path), xform)
-        })
-        .collect();
-    let removed: Vec<ShapeId> = removed
-        .into_iter()
-        .filter(|id| !piece_ids.contains(id))
-        .collect();
-    let added: Vec<FillShape> = added.into_iter().chain(kept).collect();
-    if removed.is_empty() && added.is_empty() {
-        MapEditOutcome::Unchanged
-    } else {
-        MapEditOutcome::Changed(MapChange {
-            removed,
-            added,
-            map,
-        })
-    }
-}
-
-/// 座標の変換 `xform` で置いた、境目がビットまで同じ図形どうし（同じ地図から作った片）の、同じ色でとなり合うものを1つに
-/// まとめる。レイヤー・階層ごとに、図形を地図にして（`LayerBase::of`。地図の面は、同じ色でとなり合う所を1つにした形）、
-/// ほかの編集と同じく書き戻す（`LayerBase::diff`）：変わらない図形は番号もそのまま残り、まとめた面は新しい図形になる。
-/// 図形が重なって正しい地図にならないときは、塗り重ねて作り直した地図で全部書き直す
-pub(crate) fn merge_touching_faces(shapes: Vec<FillShape>, xform: Affine) -> Vec<FillShape> {
-    let mut groups: Vec<(LayerId, Vec<u64>, Vec<FillShape>)> = Vec::new();
-    for s in shapes {
-        match groups
-            .iter_mut()
-            .find(|g| g.0 == s.layer_id && g.1 == s.group_path)
-        {
-            Some(g) => g.2.push(s),
-            None => groups.push((s.layer_id, s.group_path.clone(), vec![s])),
-        }
-    }
-    let mut out = Vec::new();
-    for (layer_id, group_path, mut list) in groups {
-        let refs: Vec<&FillShape> = list.iter().collect();
-        // 格子に置けない座標（±65,536px の外）があるときは、まとめずにそのまま
-        let diff = LayerBase::of(&refs, xform)
-            .and_then(|base| base.diff(&base.map, &refs, layer_id, &group_path, xform));
-        if let Some(change) = diff {
-            apply_shape_diff(
-                &mut list,
-                &change.removed,
-                change.added,
-                layer_id,
-                &group_path,
-            );
-        }
-        out.extend(list);
-    }
-    out
-}
-
 /// 地図で編集した図形の差分
 #[derive(Debug)]
 pub(crate) struct MapChange {
@@ -2292,6 +2121,184 @@ pub(crate) fn map_with_faces(
         .collect();
     let ids: Vec<ShapeId> = shapes.iter().map(|s| s.shape_id).collect();
     (StoredMap::from_dense(&labeled(map, &faces, &ids)), shapes)
+}
+
+// ============================================================================
+// 浮いた片の地図（設計：claude/浮いた片を地図で持つ設計_2-2c_6c167ae.md）
+// ============================================================================
+
+impl PlanarMap {
+    /// 変換 `a` をかけた地図（頂点と制御点を写す。裏返る変換では、辺の左右を入れ替える）。格子の上で正しい地図とは
+    /// 限らない（`realized`）
+    pub(crate) fn transformed(&self, a: Affine) -> PlanarMap {
+        let flip = a.determinant() < 0.0;
+        PlanarMap {
+            nodes: self.nodes.iter().map(|&p| a * p).collect(),
+            edges: self
+                .edges
+                .iter()
+                .map(|e| {
+                    let e = MapEdge {
+                        ctrl: a * e.ctrl,
+                        ..*e
+                    };
+                    if flip {
+                        MapEdge {
+                            left: e.right,
+                            right: e.left,
+                            left_src: e.right_src,
+                            right_src: e.left_src,
+                            ..e
+                        }
+                    } else {
+                        e
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// 面の番号が `ids` にある面の色を `color` にした地図（同じ色でとなり合う面の間の辺は消え、面は1つになる）
+    pub(crate) fn recolored(&self, ids: &HashSet<ShapeId>, color: Color32) -> PlanarMap {
+        let mut m = self.clone();
+        for e in &mut m.edges {
+            if e.left_src.is_some_and(|id| ids.contains(&id)) {
+                e.left = Some(color);
+            }
+            if e.right_src.is_some_and(|id| ids.contains(&id)) {
+                e.right = Some(color);
+            }
+        }
+        m.edges.retain(|e| e.left != e.right);
+        m.compact_nodes();
+        m
+    }
+}
+
+/// 地図 `map`（文書の座標）に変換 `xform` をかけ、その座標の格子で正しい地図にしたもの。変換した地図が正しくなければ
+/// （縮小で頂点が近づくなど）、変換した面を塗り重ねて作る（面は重ならないので、絵は同じ。面の番号は消える）。
+/// 「変形した形を、その座標の格子で地図にする」決まり。`None`：格子に置けない座標がある
+pub(crate) fn realized(map: &PlanarMap, xform: Affine) -> Option<PlanarMap> {
+    if xform == Affine::IDENTITY {
+        return Some(map.clone());
+    }
+    let t = map.transformed(xform);
+    let on_grid = t
+        .nodes
+        .iter()
+        .chain(t.edges.iter().map(|e| &e.ctrl))
+        .all(|&p| to_grid(p).is_some());
+    if !on_grid {
+        return None;
+    }
+    if t.is_valid() {
+        return Some(t);
+    }
+    let (faces, _) = map.faces();
+    let shapes: Vec<FillShape> = faces
+        .iter()
+        .map(|f| {
+            let mut s = map.face_shape(f, 0, &[]);
+            s.transform(xform);
+            s
+        })
+        .collect();
+    let refs: Vec<&FillShape> = shapes.iter().collect();
+    painted_map(&refs)
+}
+
+/// 地図 `map`（文書の座標）の面の図形と、面の辺の側にその番号を記した地図。面の番号は、辺の側に記された番号が1つの面は
+/// その番号（同じ番号の面が2つ以上あれば、面の順で前の面だけ）、ほかは新しい番号
+pub(crate) fn faces_with_ids(
+    map: &PlanarMap,
+    layer_id: LayerId,
+    group_path: &[u64],
+) -> (PlanarMap, Vec<FillShape>) {
+    let (faces, _) = map.faces();
+    let mut used: HashSet<ShapeId> = HashSet::new();
+    let ids: Vec<ShapeId> = faces
+        .iter()
+        .map(|f| match f.srcs[..] {
+            [id] if used.insert(id) => id,
+            _ => crate::vector_engine::next_shape_id(),
+        })
+        .collect();
+    let shapes = faces
+        .iter()
+        .zip(&ids)
+        .map(|(f, &id)| {
+            let mut s = map.face_shape(f, layer_id, group_path);
+            s.shape_id = id;
+            s
+        })
+        .collect();
+    (labeled(map.clone(), &faces, &ids), shapes)
+}
+
+/// 選ぶ所の地図：地図 `parts`（同じ地図から切り出した、重ならない面）を合わせた所に、形 `rect` を足した所（色のある所が
+/// 中）。`None`：格子に置けない座標がある
+pub(crate) fn region_map(parts: &[&PlanarMap], rect: Option<&FillShape>) -> Option<PlanarMap> {
+    let mut m = match parts {
+        [one] => (*one).clone(),
+        _ => {
+            let mut m = PlanarMap::default();
+            for p in parts {
+                m = m.overlay(MapInput::Map(p), MapRule::Overlay)?;
+            }
+            m
+        }
+    };
+    if let Some(r) = rect {
+        m = m.overlay(
+            MapInput::Shapes(std::slice::from_ref(r)),
+            MapRule::Paint(Some(r.color)),
+        )?;
+    }
+    Some(m)
+}
+
+/// 浮いた片を切り出す：セル画の地図 `cel`（座標の変換 `xform` で置いた図形 `own` から引いた地図）の、中身 `content`
+/// （`cel` の地図そのものか、前に切り出した残り）を、選ぶ所 `region` で1回切る。（残りの差分, 中の差分）：残りの差分の
+/// 消す図形が隠す図形、新しく入れる形が残りの図形、地図が残りの地図。中の差分の地図が片の地図（丸ごと中にあるセル画の
+/// 面は、その番号のまま）。新しく入れる形は、隠す元の図形とは別の新しい図形なので、番号を新しく振る（地図の印も）。
+/// 中と外は同じ地図から作るので、境目が両側でビットまで同じ。`None`：格子に置けない座標がある
+pub(crate) fn cut_out(
+    cel: &LayerBase,
+    own: &[&FillShape],
+    content: &PlanarMap,
+    region: MapInput<'_>,
+    layer_id: LayerId,
+    group_path: &[u64],
+    xform: Affine,
+) -> Option<(MapChange, MapChange)> {
+    let inside = content.overlay(region, MapRule::KeepInside)?;
+    let rest = content.overlay(region, MapRule::Paint(None))?;
+    let mut rest_change = cel.diff(&rest, own, layer_id, group_path, xform)?;
+    let mut inside_change = cel.diff(&inside, own, layer_id, group_path, xform)?;
+    rest_change.renew_ids();
+    inside_change.renew_ids();
+    Some((rest_change, inside_change))
+}
+
+impl MapChange {
+    /// 新しく入れる形に新しい番号を振る（地図の、その面の辺の側の印も付け替える）。元の図形の番号を引き継いだ形も新しくする
+    pub(crate) fn renew_ids(&mut self) {
+        let mut renamed: HashMap<ShapeId, ShapeId> = HashMap::new();
+        for s in &mut self.added {
+            let id = crate::vector_engine::next_shape_id();
+            renamed.insert(s.shape_id, id);
+            s.shape_id = id;
+        }
+        let rename = |id: &mut Option<ShapeId>| {
+            if let Some(n) = id.and_then(|i| renamed.get(&i)) {
+                *id = Some(*n);
+            }
+        };
+        for e in &mut self.map.edges {
+            rename(&mut e.left_src);
+            rename(&mut e.right_src);
+        }
+    }
 }
 
 /// 地図 `base` を、鍵 `key` の図形の地図としてしまい場所（`LAYER_BASES`）に入れる
@@ -2661,19 +2668,6 @@ impl PlanarMap {
             let g = gpt(p);
             segs.at((2 * g.0, 2 * g.1)).flatten()
         }
-    }
-
-    /// 地図全体を `aff` で動かした写し（頂点と制御点を動かす。辺のつながりはそのまま）
-    #[cfg(test)]
-    pub(crate) fn transformed(&self, aff: kurbo::Affine) -> PlanarMap {
-        let mut m = self.clone();
-        for p in &mut m.nodes {
-            *p = aff * *p;
-        }
-        for e in &mut m.edges {
-            e.ctrl = aff * e.ctrl;
-        }
-        m
     }
 
     /// バケツ：点 `p` を含む面（辺で囲まれた所。何も塗っていない所も）を `color` にする。
