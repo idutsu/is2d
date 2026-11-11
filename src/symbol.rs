@@ -227,53 +227,53 @@ impl<'a> SymbolEvalCtx<'a> {
     }
 }
 
-/// 入れ子シンボル対応で正規化セル（`cel.shapes`＝非シンボル図形群、`cel.instances`＝シンボルインスタンス群）を
-/// 背面→前面の `shape_order_index` 順に再帰展開して返す共通ヘルパー
+/// 入れ子シンボル対応でセル画（階層の地図の面の図形と、シンボルインスタンス）を、背面→前面の重なりの順
+/// （`Cel::parts`）に再帰展開して返す共通ヘルパー
 pub(crate) fn resolve_cel_with_library(
     cel: &Cel,
     kf_start_frame: usize,
     frame: usize,
     ctx: SymbolEvalCtx<'_>,
 ) -> Vec<FillShape> {
-    if ctx.depth >= MAX_SYMBOL_NEST_DEPTH || cel.instances.is_empty() {
-        return cel.shapes.iter().map(|s| (**s).clone()).collect();
-    }
-
-    let mut out = Vec::with_capacity(cel.shapes.len() + cel.instances.len());
-    let mut next_cel_idx = 0;
-
-    for inst in cel.instances.iter() {
-        let target_idx = inst.shape_order_index.min(cel.shapes.len());
-        while next_cel_idx < target_idx {
-            out.push((*cel.shapes[next_cel_idx]).clone());
-            next_cel_idx += 1;
-        }
-        if ctx.library.iter().any(|s| s.id == inst.binding.symbol_id) {
-            out.extend(inst.binding.expand(
-                (kf_start_frame, frame),
-                inst.layer_id,
-                &inst.parent_scope,
-                ctx.clone(),
-            ));
+    let mut out = Vec::new();
+    for part in cel.parts() {
+        match part {
+            crate::timeline::Part::Shape(s) => out.push((*s).clone()),
+            crate::timeline::Part::Instance(inst) => {
+                if ctx.depth < MAX_SYMBOL_NEST_DEPTH
+                    && ctx.library.iter().any(|s| s.id == inst.binding.symbol_id)
+                {
+                    out.extend(inst.binding.expand(
+                        (kf_start_frame, frame),
+                        inst.layer_id,
+                        &inst.parent_scope,
+                        ctx.clone(),
+                    ));
+                }
+            }
         }
     }
-
-    while next_cel_idx < cel.shapes.len() {
-        out.push((*cel.shapes[next_cel_idx]).clone());
-        next_cel_idx += 1;
-    }
-
     out
 }
 
 impl SymbolDef {
-    pub(crate) fn new(id: u64, name: String, mut local_shapes: Vec<FillShape>) -> Self {
+    /// 図形 `local_shapes`（シンボルの座標）を中身にしたシンボル。`Err`：地図にできない形がある
+    pub(crate) fn new(
+        id: u64,
+        name: String,
+        mut local_shapes: Vec<FillShape>,
+    ) -> Result<Self, crate::timeline::Unmappable> {
         for s in &mut local_shapes {
             s.layer_id = 1;
             s.strip_transient_caches();
         }
         let mut timeline = Timeline::default();
-        timeline.layers[0].keyframe_mut(0).cel = Cel::new(local_shapes);
+        timeline.layers[0].keyframe_mut(0).cel = Cel::from_shapes(local_shapes)?;
+        Ok(Self::with_timeline(id, name, timeline))
+    }
+
+    /// タイムライン `timeline` を中身にしたシンボル
+    pub(crate) fn with_timeline(id: u64, name: String, timeline: Timeline) -> Self {
         Self {
             id,
             name,
@@ -642,8 +642,9 @@ impl Document {
         id
     }
 
-    /// 新しいシンボル定義をライブラリへ登録する
-    pub(crate) fn register_symbol(&mut self, sym_id: u64, local_shapes: Vec<FillShape>) {
+    /// 新しいシンボル定義 `sym_def`（`SymbolDef::new`）をライブラリへ登録する。名前はここで付ける
+    pub(crate) fn register_symbol(&mut self, mut sym_def: SymbolDef) {
+        let sym_id = sym_def.id;
         let mut name_num = sym_id;
         while self
             .library
@@ -652,7 +653,7 @@ impl Document {
         {
             name_num = if name_num < u64::MAX { name_num + 1 } else { 1 };
         }
-        let sym_def = SymbolDef::new(sym_id, format!("Symbol {name_num}"), local_shapes);
+        sym_def.name = format!("Symbol {name_num}");
         self.library.push(sym_def);
         self.bump_revision();
     }
@@ -673,7 +674,7 @@ impl Document {
             tl.layers.iter().any(|l| {
                 l.keyframes
                     .iter()
-                    .any(|kf| kf.cel.shapes.iter().any(|s| s.has_cached_fill_mesh()))
+                    .any(|kf| kf.cel.shapes().iter().any(|s| s.has_cached_fill_mesh()))
             })
         };
         tl_has_mesh(&self.root) || self.library.iter().any(|sym| tl_has_mesh(&sym.timeline))
@@ -1055,7 +1056,7 @@ impl Timeline {
         let has_tween = layer.interpolated_tween_binding_at(frame).is_some();
         if !has_tween && kf.cel.instances.is_empty() && world_xform == Affine::IDENTITY {
             let mut batch = Mesh::default();
-            for s in kf.cel.shapes.iter() {
+            for s in kf.cel.shapes() {
                 s.append_fill_mesh_to(&mut batch);
             }
             return (!batch.is_empty()).then_some(batch);

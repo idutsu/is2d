@@ -15,10 +15,10 @@ use crate::symbol::{
 use crate::timeline::{Cel, Keyframe, Layer, Timeline, TimelineCellSelection};
 pub(crate) use crate::timeline::{MAX_LAYERS_PER_TIMELINE, MAX_TIMELINE_FRAMES};
 
-/// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。版 4 は、セル画の階層ごとの地図（頂点と、境目の線を1本で
-/// 持つ辺）をそのまま書く（Adobe Animate と同じ持ち方）。図形は読むときに地図の面から作る。それより前の版（色ごとの図形を
-/// 書いた版）は開かない
-pub(crate) const PROJECT_FORMAT_VERSION: u32 = 4;
+/// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。版 5 は、セル画の階層ごとの地図（頂点と、境目の線を1本で
+/// 持つ辺）をそのまま書き（Adobe Animate と同じ持ち方）、インスタンスの重なり位置を階層の地図の並びで書く（`order`）。
+/// 面の図形は文書に持たず、使うときに地図から作る。それより前の版は開かない
+pub(crate) const PROJECT_FORMAT_VERSION: u32 = 5;
 
 /// プロジェクトファイルの標準拡張子
 pub(crate) const PROJECT_FILE_EXTENSION: &str = "is2d";
@@ -409,8 +409,9 @@ pub(crate) struct SavedSymbolInstance {
     pub(crate) layer_id: u64,
     #[serde(default)]
     pub(crate) parent_scope: Vec<u64>,
+    /// 重なり位置：セル画の階層の地図の並びの何番目の手前か
     #[serde(default)]
-    pub(crate) shape_order_index: usize,
+    pub(crate) order: usize,
 }
 
 impl From<&SymbolInstance> for SavedSymbolInstance {
@@ -419,7 +420,7 @@ impl From<&SymbolInstance> for SavedSymbolInstance {
             binding: inst.binding.into(),
             layer_id: inst.layer_id,
             parent_scope: inst.parent_scope.clone(),
-            shape_order_index: inst.shape_order_index,
+            order: inst.order,
         }
     }
 }
@@ -430,7 +431,7 @@ impl From<SavedSymbolInstance> for SymbolInstance {
             binding: s.binding.into(),
             layer_id: s.layer_id,
             parent_scope: s.parent_scope,
-            shape_order_index: s.shape_order_index,
+            order: s.order,
         }
     }
 }
@@ -719,7 +720,6 @@ impl From<SavedTimeline> for Timeline {
             let lid = layer.id;
             for i in 0..layer.keyframes.len() {
                 let kf = layer.keyframe_mut(i);
-                kf.cel.for_each_shape_mut(|sh| sh.layer_id = lid);
                 for inst in kf.cel.instances_mut() {
                     inst.layer_id = lid;
                 }
@@ -772,9 +772,7 @@ impl From<&SymbolDef> for SavedSymbolDef {
 
 impl From<SavedSymbolDef> for SymbolDef {
     fn from(s: SavedSymbolDef) -> Self {
-        let mut sym = SymbolDef::new(s.id, s.name, Vec::new());
-        sym.timeline = s.timeline.into();
-        sym
+        SymbolDef::with_timeline(s.id, s.name, s.timeline.into())
     }
 }
 
@@ -829,7 +827,8 @@ impl ProjectDocument {
             self.stage_size = [800.0, 450.0];
             fixed.push("ステージサイズ".to_owned());
         }
-        // 地図はいつも正しい地図なので、座標は有限（`Cel::set_shared_parts`）。インスタンスの変換だけを確かめる
+        // 地図はいつも正しい地図なので、座標は有限（地図にできない形はセル画に書かない：`Cel::set_parts`）。インスタンスの
+        // 変換だけを確かめる
         let mut clean_timeline = |tl: &mut SavedTimeline, sym_name: Option<&str>| {
             for layer in &mut tl.layers {
                 for kf in &mut layer.keyframes {
@@ -918,8 +917,8 @@ impl ProjectDocument {
         for tl in std::iter::once(&timeline).chain(library.iter().map(|s| &s.timeline)) {
             for layer in &tl.layers {
                 for kf in &layer.keyframes {
-                    for s in kf.cel.shapes.iter() {
-                        for &gid in &s.group_path {
+                    for m in kf.cel.maps.iter() {
+                        for &gid in &m.group_path {
                             if gid > 0 && gid <= MAX_SAFE_ENTITY_ID {
                                 max_valid_gid = max_valid_gid.max(gid);
                             }
@@ -950,18 +949,17 @@ impl ProjectDocument {
             for layer in &mut tl.layers {
                 for i in 0..layer.keyframes.len() {
                     let kf = layer.keyframe_mut(i);
-                    let has_unsafe_shape_gid = kf.cel.shapes.iter().any(|s| {
-                        s.group_path
+                    let has_unsafe_shape_gid = kf.cel.maps.iter().any(|m| {
+                        m.group_path
                             .iter()
                             .any(|&gid| gid == 0 || gid > MAX_SAFE_ENTITY_ID)
                     });
                     if has_unsafe_shape_gid {
-                        kf.cel.for_each_shape_mut(|s| {
-                            for gid in &mut s.group_path {
-                                if *gid == 0 || *gid > MAX_SAFE_ENTITY_ID {
-                                    remap_unsafe_gid(&mut gid_map, &mut next_gid, gid);
-                                }
+                        kf.cel.remap_group_ids(|mut gid| {
+                            if gid == 0 || gid > MAX_SAFE_ENTITY_ID {
+                                remap_unsafe_gid(&mut gid_map, &mut next_gid, &mut gid);
                             }
+                            gid
                         });
                     }
                     let needs_inst_update = kf.cel.instances.iter().any(|inst| {

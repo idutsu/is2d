@@ -570,9 +570,28 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     {
         return false;
     }
+    let depth = tab.session.editing_group_path.len();
+    let world = tab.session.edit_path.world_xform();
+    // 分解するシンボルの中身（選んだインスタンスの図形）が地図にできない（格子の外にかかる）なら、文書を変える前に断る
+    let fits = tab
+        .session
+        .base_cache
+        .shapes()
+        .iter()
+        .filter(|s| {
+            tab.session.selection.contains_shape(s)
+                && s.is_in_editing_scope(&tab.session.editing_group_path)
+                && s.group_path.len() > depth
+                && s.symbol_instance
+                    .is_some_and(|b| b.instance_gid == s.group_path[depth])
+        })
+        .all(|s| crate::planar_map::fits_grid(s, world));
+    if !fits {
+        tab.session.off_grid = true;
+        return false;
+    }
     before_mutate(tab);
 
-    let depth = tab.session.editing_group_path.len();
     let layer_ids = editable_layer_ids(tab);
     let sel_snapshot = tab.session.selection.clone();
     edit_layers(tab, &layer_ids, |edit| {
@@ -631,7 +650,6 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     let mut any_became_raw = false;
     // 生に戻った図形は、文書の階層の地図に入れずに浮いた片にする（選んだまま。確定のときに、その階層の地図に重ねる）。
     // グループの中の生の図形の片の地図は、そのグループの階層の地図そのもの（図形はその面）
-    let mut became_raw: Vec<FillShape> = Vec::new();
     let mut group_maps: Vec<(LayerId, Arc<crate::planar_map::LayerBase>)> = Vec::new();
     let mut group_raw: Vec<(LayerId, Vec<u64>)> = Vec::new();
     for s in tab.session.base_cache.shapes() {
@@ -651,13 +669,14 @@ pub(crate) fn prepare_ungroup_selected_shapes(
         let Some(cel) = tab.session.base_cache.cel(*layer_id) else {
             continue;
         };
-        if let Some(base) = cel.scope_base(path) {
-            group_maps.push((*layer_id, base));
-            from_groups.extend(cel.scope_shapes(path).iter().map(|s| s.shape_id));
-        }
+        let base = cel.scope_base(path);
+        from_groups.extend(base.faces(path).iter().map(|s| s.shape_id));
+        group_maps.push((*layer_id, base));
     }
     let mut selection = std::mem::take(&mut tab.session.selection);
+    let mut piece_maps: Option<Vec<(LayerId, Arc<crate::planar_map::LayerBase>)>> = None;
     edit_layers(tab, &layer_ids, |edit| {
+        let original = edit.shapes.clone();
         let mut detached_inner_gid_map: Vec<((u64, u64), u64)> = Vec::new();
         let mut detached_instances: Vec<(u64, usize, u64, SymbolInstanceBinding)> = Vec::new();
         let editing_group_path = &edit.editing_group_path;
@@ -754,14 +773,26 @@ pub(crate) fn prepare_ungroup_selected_shapes(
             .shapes
             .drain(..)
             .partition(|s| raw_ids.contains(&s.shape_id));
-        edit.shapes = rest;
-        became_raw = raw;
+        // グループから生に戻った図形は、そのグループの地図を片の地図にする。ほか（シンボルの分解）は、文書から外す前に
+        // 図形から片の地図を作る（地図にできなければ、このレイヤーは書かない）
+        let from_symbols: Vec<FillShape> = raw
+            .into_iter()
+            .filter(|s| !from_groups.contains(&s.shape_id))
+            .collect();
+        piece_maps = crate::floating::piece_maps(&from_symbols, world);
+        if piece_maps.is_some() {
+            edit.shapes = rest;
+        } else {
+            edit.shapes = original;
+        }
     });
     tab.session.selection = selection;
-    // グループから生に戻った図形は、そのグループの地図を片の地図にする。ほか（シンボルの分解）は図形から作る
-    became_raw.retain(|s| !from_groups.contains(&s.shape_id));
+    let Some(piece_maps) = piece_maps else {
+        tab.session.off_grid = true;
+        return false;
+    };
     tab.session.add_floating_maps(group_maps);
-    tab.session.add_floating_pieces(became_raw);
+    tab.session.add_floating_maps(piece_maps);
     if any_became_raw {
         tab.session.lift_selected_raw_shapes_to_floating();
     }

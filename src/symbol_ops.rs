@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
@@ -5,9 +7,9 @@ use crate::canvas_tool::{
     editable_layer_ids, insert_and_select_shapes_in_scope, reset_session_after_timeline_change,
     topmost_layer_id_for_indices, Tab, View,
 };
-use crate::symbol::{EditLevel, SymbolEvalCtx, SymbolInstanceBinding};
+use crate::symbol::{EditLevel, SymbolDef, SymbolEvalCtx, SymbolInstanceBinding};
 use crate::timeline::TimelineCellSelection;
-use crate::vector_engine::union_bounding_boxes;
+use crate::vector_engine::{union_bounding_boxes, FillShape};
 
 /// 選択中のオブジェクトを新しい「シンボル」に変換するためのローカル図形抽出・インスタンスバインディング付与・ライブラリ登録を行い、
 /// `(sym_id, target_lid)` を返す
@@ -31,36 +33,49 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     let target_lid =
         topmost_layer_id_for_indices(&tab.session, tab.active_timeline(), &sel_scene_indices);
 
+    let depth = tab.session.editing_group_path.len();
+    let layer_ids = editable_layer_ids(tab);
+    let world = tab.session.edit_path.world_xform();
+    let selection = tab.session.selection.clone();
+    // シンボルの中身は、文書を変える前に作る（地図にできなければ断る）。選んでいるもの：画面の土台の図形（浮いた片が
+    // 隠している元の図形を除く）と、浮いた片（いつも選ばれている）。並びは、書き戻す図形の並び（土台のあとに片）と同じ
+    let (pieces, hidden): (Vec<FillShape>, HashSet<u64>) = tab
+        .session
+        .floating()
+        .map(|fl| (fl.pieces().to_vec(), fl.hidden().clone()))
+        .unwrap_or_default();
+    let scope = tab.session.editing_group_path.clone();
+    let picked: Vec<&FillShape> = tab
+        .session
+        .base_cache
+        .shapes()
+        .iter()
+        .filter(|s| layer_ids.contains(&s.layer_id) && !hidden.contains(&s.shape_id))
+        .chain(pieces.iter())
+        .filter(|s| selection.contains_shape(s) && s.is_in_editing_scope(&scope))
+        .collect();
+    let (local_shapes, center) = symbol_content(&picked, depth, world)?;
+    let Ok(sym_def) = SymbolDef::new(0, String::new(), local_shapes) else {
+        tab.session.off_grid = true;
+        return None;
+    };
+
     before_mutate(tab);
 
     let sym_id = tab.doc.alloc_symbol_id();
     let inst_gid = tab.doc.alloc_group_id();
-    // 浮いた片の残りは、そのままセル画の地図にする。片（ステージの写し）は、シンボルの中身にするので図形のまま入れる
-    // （選択は、残りを書く前のもの：片も選んでいる）
-    let selection = tab.session.selection.clone();
-    let fl_opt = tab.session.take_floating();
-    let pieces: Vec<crate::vector_engine::FillShape> = fl_opt
-        .as_ref()
-        .map(|fl| fl.pieces().to_vec())
-        .unwrap_or_default();
-    if let Some(mut rest) = fl_opt {
+    // 浮いた片の残りは、そのままセル画の地図にする。片（ステージの写し）は、シンボルのインスタンスの中身の印にするので
+    // 図形のまま入れる（選択は、残りを書く前のもの：片も選んでいる）
+    if let Some(mut rest) = tab.session.take_floating() {
         rest.drop_pieces();
         crate::canvas_tool::commit_floating_layers(tab, rest);
     }
-    let depth = tab.session.editing_group_path.len();
-    let layer_ids = editable_layer_ids(tab);
-    // `edit_layers` の図形はステージ座標。新しいシンボルの中身は、今いるシンボルの座標に戻してから、
-    // その外接矩形の中心が原点になるように置く（中に入ったインスタンスは逆行列を持つ：`enter_symbol_timeline`）
-    let world = tab.session.edit_path.world_xform();
-    let to_parent = world.inverse();
-    let mut local_shapes = Vec::new();
 
     edit_layers(tab, &layer_ids, |edit| {
         if !pieces.is_empty() {
             let at = edit.scope_insert_index();
             edit.shapes.splice(at..at, pieces);
         }
-
         let valid_indices: Vec<usize> = edit
             .shapes
             .iter()
@@ -73,37 +88,6 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         if valid_indices.is_empty() {
             return;
         }
-
-        let parent_shapes: Vec<_> = valid_indices
-            .iter()
-            .map(|&idx| {
-                let mut local_s = edit.shapes[idx].clone();
-                local_s.layer_id = 1;
-                local_s.group_path = local_s.group_path.get(depth..).unwrap_or_default().to_vec();
-                if local_s
-                    .symbol_instance
-                    .is_some_and(|b| !local_s.group_path.contains(&b.instance_gid))
-                {
-                    local_s.symbol_instance = None;
-                }
-                if world != Affine::IDENTITY {
-                    local_s.transform(to_parent);
-                }
-                local_s
-            })
-            .collect();
-        let bbox = parent_shapes[1..]
-            .iter()
-            .fold(parent_shapes[0].bounding_box(), |acc, s| {
-                acc.union(s.bounding_box())
-            });
-        let center = bbox.center();
-        local_shapes.reserve(parent_shapes.len());
-        for mut local_s in parent_shapes {
-            local_s.translate(-center.to_vec2());
-            local_shapes.push(local_s);
-        }
-
         // インスタンスはステージ座標で置き、書き戻しで今いるシンボルの座標（`translate(center)`）になる
         let binding = SymbolInstanceBinding::new(
             inst_gid,
@@ -131,15 +115,55 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         edit.shapes = unselected;
     });
 
-    if local_shapes.is_empty() {
-        return None;
-    }
-
-    tab.doc.register_symbol(sym_id, local_shapes);
+    let mut sym_def = sym_def;
+    sym_def.id = sym_id;
+    tab.doc.register_symbol(sym_def);
     tab.session.selection.clear();
     tab.session.selection.instances.insert(inst_gid);
 
     Some((sym_id, target_lid))
+}
+
+/// 選んでいる図形 `picked`（ステージ座標、下から順）を、新しいシンボルの中身にする：今いるシンボルの座標（`world` の逆）に
+/// 戻し、その外接矩形の中心が原点になるように置いたもの（中に入ったインスタンスは逆行列を持つ：`enter_symbol_timeline`）
+/// と、その中心（今いるシンボルの座標）。`depth` は今いる階層の深さ。`None`：選んでいるものが無い
+fn symbol_content(
+    picked: &[&FillShape],
+    depth: usize,
+    world: Affine,
+) -> Option<(Vec<FillShape>, Point)> {
+    let to_parent = world.inverse();
+    let parent_shapes: Vec<FillShape> = picked
+        .iter()
+        .map(|s| {
+            let mut local_s = (*s).clone();
+            local_s.layer_id = 1;
+            local_s.group_path = local_s.group_path.get(depth..).unwrap_or_default().to_vec();
+            if local_s
+                .symbol_instance
+                .is_some_and(|b| !local_s.group_path.contains(&b.instance_gid))
+            {
+                local_s.symbol_instance = None;
+            }
+            if world != Affine::IDENTITY {
+                local_s.transform(to_parent);
+            }
+            local_s
+        })
+        .collect();
+    let first = parent_shapes.first()?.bounding_box();
+    let center = parent_shapes[1..]
+        .iter()
+        .fold(first, |acc, s| acc.union(s.bounding_box()))
+        .center();
+    let local = parent_shapes
+        .into_iter()
+        .map(|mut s| {
+            s.translate(-center.to_vec2());
+            s
+        })
+        .collect();
+    Some((local, center))
 }
 
 /// ライブラリ内の指定シンボル `symbol_id` の新しいインスタンスを現在のステージ中央へ配置する

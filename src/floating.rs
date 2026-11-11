@@ -16,21 +16,18 @@ use crate::planar_map::{
 };
 use crate::vector_engine::FillShape;
 
-/// 浮いた片の操作に要る画面の土台：画面に出しているセル画（`SceneBaseCache`）・編集中の階層・ステージへの変換
+/// 浮いた片の操作に要る画面の土台：画面に出しているセル画（`SceneBaseCache`）と編集中の階層
 #[derive(Clone, Copy)]
 pub(crate) struct Stage<'a> {
     pub(crate) base: &'a SceneBaseCache,
     pub(crate) scope: &'a [u64],
-    pub(crate) world: Affine,
 }
 
 impl Stage<'_> {
-    /// レイヤー `layer_id` の、編集中の階層の生の図形（文書の図形）と、その地図（セル画の地図）。`None`：編集できない
-    /// レイヤーか、地図にできない
-    fn cel(&self, layer_id: LayerId) -> Option<(Vec<&FillShape>, Arc<LayerBase>)> {
-        let cel = self.base.cel(layer_id)?;
-        let base = cel.scope_base(self.scope)?;
-        Some((cel.scope_shapes(self.scope), base))
+    /// レイヤー `layer_id` の、編集中の階層の地図（セル画の地図。生の図形はその面：`LayerBase::faces`）。`None`：画面に
+    /// 出していないレイヤー
+    fn cel(&self, layer_id: LayerId) -> Option<Arc<LayerBase>> {
+        Some(self.base.cel(layer_id)?.scope_base(self.scope))
     }
 }
 
@@ -147,8 +144,7 @@ impl FloatLayer {
 
     /// 画面の土台 `stage` のセル画の地図の上で確定した地図（`committed`）
     pub(crate) fn committed_on(&self, stage: Stage<'_>) -> Option<PlanarMap> {
-        let (_, cel) = stage.cel(self.layer_id)?;
-        self.committed(&cel)
+        self.committed(&*stage.cel(self.layer_id)?)
     }
 
     /// 確定した地図：中身の地図に、片の組を下から順に重ねる（組ごとに変換をかけて、その座標の格子で正しい地図にする：
@@ -428,7 +424,7 @@ impl Floating {
             if back.is_empty() {
                 continue;
             }
-            let Some((own, cel)) = stage.cel(layer_id) else {
+            let Some(cel) = stage.cel(layer_id) else {
                 return false;
             };
             let mut rest = l.content(&cel).clone();
@@ -438,6 +434,8 @@ impl Floating {
                 };
                 rest = m;
             }
+            let faces = cel.faces(stage.scope);
+            let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
             let Some(mut change) = cel.diff(&rest, &own, layer_id, stage.scope) else {
                 return false;
             };
@@ -480,27 +478,6 @@ impl Floating {
         out
     }
 
-    /// 文書に無い片 `pieces`（ステージの写し）を、レイヤーごとに片の組として一番上に足す。片の地図は、片の図形の地図
-    /// （`LayerBase::of`。グループの解除ならグループの地図そのもの、貼り付けなら図形から作る）。`false`：地図にできない
-    pub(crate) fn add_pieces(&mut self, stage: Stage<'_>, pieces: &[FillShape]) -> bool {
-        let mut layer_ids: Vec<LayerId> = Vec::new();
-        for p in pieces {
-            if !layer_ids.contains(&p.layer_id) {
-                layer_ids.push(p.layer_id);
-            }
-        }
-        for layer_id in layer_ids {
-            let own: Vec<&FillShape> = pieces.iter().filter(|p| p.layer_id == layer_id).collect();
-            let Some(base) = LayerBase::of(&own, stage.world) else {
-                return false;
-            };
-            let group = PieceGroup::new(&base.map, layer_id, stage.scope, Affine::IDENTITY);
-            self.layer_mut(layer_id).groups.push(group);
-        }
-        self.modified = true;
-        true
-    }
-
     /// レイヤー `l` の片の組を、残りなしで足す（確定できなかった片を浮いたまま残す）
     pub(crate) fn keep_pieces_of(&mut self, l: &FloatLayer) {
         if !l.groups.is_empty() {
@@ -527,6 +504,28 @@ impl Floating {
     }
 }
 
+/// 文書に無い片 `pieces`（ステージの写し。座標の変換 `world` で置いたもの）の、レイヤーごとの片の地図（文書の座標。
+/// `LayerBase::of`：正しい地図にならない図形は塗り重ねて作る）。浮いた片に足す前に作る（貼り付け・シンボルの分解）。
+/// `None`：地図にできない形がある
+pub(crate) fn piece_maps(
+    pieces: &[FillShape],
+    world: Affine,
+) -> Option<Vec<(LayerId, Arc<LayerBase>)>> {
+    let mut layer_ids: Vec<LayerId> = Vec::new();
+    for p in pieces {
+        if !layer_ids.contains(&p.layer_id) {
+            layer_ids.push(p.layer_id);
+        }
+    }
+    layer_ids
+        .into_iter()
+        .map(|layer_id| {
+            let own: Vec<&FillShape> = pieces.iter().filter(|p| p.layer_id == layer_id).collect();
+            Some((layer_id, LayerBase::of(&own, world)?))
+        })
+        .collect()
+}
+
 /// 1つのレイヤーの切り出し：中身（残りの地図か、セル画の地図）を、選ぶ所（番号が `ids` の中身の面の所と、形 `rect` の
 /// 所）で1回切り、中を片の組にする（`cut_out`。中と外は同じ地図から切るので、境目が両側でビットまで同じ）。矩形が無い
 /// とき（選んだ面を丸ごと持ち上げる）は切らずに、中身からその面を外す（番号はそのまま）。動かして
@@ -541,7 +540,9 @@ fn cut_layer(
     ids: &HashSet<ShapeId>,
     rect: Option<&FillShape>,
 ) -> Option<FloatLayer> {
-    let (own, cel) = stage.cel(layer_id)?;
+    let cel = stage.cel(layer_id)?;
+    let faces = cel.faces(stage.scope);
+    let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
     let empty = FloatLayer {
         layer_id,
         origin: None,

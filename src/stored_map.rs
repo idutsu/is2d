@@ -157,20 +157,6 @@ impl StoredMap {
         Self(tiles.into())
     }
 
-    /// この地図の塊のうち、置き換える前の地図 `prev` の同じ升目の塊と中身が同じものを、その塊に替えた地図
-    pub(crate) fn shared_with(&self, prev: Option<&StoredMap>) -> Self {
-        let Some(prev) = prev else {
-            return self.clone();
-        };
-        let mut j = 0;
-        Self(
-            self.0
-                .iter()
-                .map(|t| same_tile(&prev.0, &mut j, t).unwrap_or_else(|| t.clone()))
-                .collect(),
-        )
-    }
-
     /// 計算に使うふつうの地図：辺は塊の順・塊の中の順に並べ、頂点は最初に出てきた順に番号を振る（番号が中身だけで決まる）
     pub(crate) fn to_dense(&self) -> PlanarMap {
         let n: usize = self.0.iter().map(|t| t.len()).sum();
@@ -204,8 +190,19 @@ impl StoredMap {
     }
 
     /// 同じ `Arc` か（同じしまった地図）
+    #[cfg(test)]
     pub(crate) fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// この地図の番地（同じ `Arc` なら同じ。その地図を持っている間は、ほかの地図に使い回されない）
+    pub(crate) fn id(&self) -> usize {
+        Arc::as_ptr(&self.0) as *const u8 as usize
+    }
+
+    /// 辺の無い地図か
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// 中身が同じか（塊と辺が、ビットまで同じ）

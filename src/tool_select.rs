@@ -340,12 +340,8 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
     let Some((base, edit, layer_id, group_path)) = update else {
         return;
     };
-    let own = tab
-        .session
-        .base_cache
-        .cel(layer_id)
-        .map(|c| c.scope_shapes(&group_path))
-        .unwrap_or_default();
+    let faces = base.faces(&group_path);
+    let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
     let (removed, added) =
         reshape_result(&base, edit, &own, layer_id, &group_path, xform).unwrap_or_default();
     tab.session

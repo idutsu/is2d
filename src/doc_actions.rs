@@ -394,6 +394,14 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         matches!(action, Action::Paste { .. }).then(|| host.parts_mut().2.imported_map.clone());
     let mut res = dispatch(host, action);
     let (tab, _, clipboard, toast) = host.parts_mut();
+    // 地図にできない形を作る編集は、文書を変える前に断ってある（どの入口も同じ決まり）。ここで知らせる
+    if std::mem::take(&mut tab.session.off_grid) {
+        show_notice(
+            toast,
+            NoticeKind::Warning,
+            "地図の範囲（±65,536px）の外には置けません",
+        );
+    }
     if check_symbol_nest && res && tab.doc.symbol_nest_exceeded() {
         if let Some((prev, _)) = tab.history.pending.take() {
             tab.restore_state_snapshot(prev);
@@ -929,16 +937,36 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     tab.session.lift_selected_raw_shapes_to_floating();
     let mut any_transformed = false;
     let selection = tab.session.selection.clone();
-    // 地図は格子の内の形しか持てないので、片が格子の外（±65,536px の外）へ出る変形はしない
+    // 地図は格子の内の形しか持てないので、生の図形（浮いた片と、選んだグループの中の生の図形）が格子の外（±65,536px の
+    // 外）へ出る変形は、文書を変える前に断る（インスタンスは地図を持たないので、どこへでも動かせる）
     let xform = tab.session.edit_path.world_xform();
-    let fits = tab.session.floating().is_none_or(|fl| {
-        fl.pieces().iter().all(|p| {
-            let mut moved = p.clone();
-            moved.transform(affine);
-            crate::planar_map::fits_grid(&moved, xform)
-        })
-    });
+    let hidden = tab
+        .session
+        .floating()
+        .map(|fl| fl.hidden().clone())
+        .unwrap_or_default();
+    let fits_moved = |s: &FillShape| {
+        let mut moved = s.clone();
+        moved.transform(affine);
+        crate::planar_map::fits_grid(&moved, xform)
+    };
+    let fits = tab
+        .session
+        .floating()
+        .is_none_or(|fl| fl.pieces().iter().all(fits_moved))
+        && tab
+            .session
+            .base_cache
+            .shapes()
+            .iter()
+            .filter(|s| {
+                s.symbol_instance.is_none()
+                    && !hidden.contains(&s.shape_id)
+                    && selection.contains_shape(s)
+            })
+            .all(fits_moved);
     if !fits {
+        tab.session.off_grid = true;
         return false;
     }
     // 浮いた片（いつもみな選ばれている）は、片の組の変換に、文書の座標の変換を重ねる（確定のときに地図にかける）
@@ -950,11 +978,6 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
             }
         }
     });
-    let hidden = tab
-        .session
-        .floating()
-        .map(|fl| fl.hidden().clone())
-        .unwrap_or_default();
     let mut target_lids: Vec<u64> = Vec::new();
     for s in tab.session.base_cache.shapes() {
         if !hidden.contains(&s.shape_id)
