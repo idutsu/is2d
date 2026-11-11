@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 use eframe::egui::Color32;
 use kurbo::{ParamCurve, Point, QuadBez, Rect as KRect, Shape as KurboShape, Vec2 as KVec2};
 
-use crate::canvas_tool::{HoverTarget, LayerId, Scene, Session, ShapeId};
+use crate::canvas_tool::{HoverTarget, LayerId, MapOwner, Scene, Session, ShapeId};
 use crate::vector_engine::{rects_overlap, Contour, FillShape, SyncCache};
 
 /// 図形から地図を作るとき（`from_faces`）に、同じ点・同じ線とみなす距離。生の図形はどれも地図から書き出したもので、
@@ -1288,9 +1288,9 @@ fn hidden_by_front(scene: Scene<'_>, session: &Session, lm: &LayerMap, p: Point)
     })
 }
 
-/// アンカーの追加（`add`）・削除で、マウスにいちばん近い辺・頂点を探す（半径 `12 / zoom`。同じレイヤーの生の図形どうしに前後は無い）。
-/// 追加は辺の上の位置を 0.08〜0.92 に収め、足せる所（`with_anchor_added` が形を返す所）だけ。削除は、消せる頂点
-/// （`with_anchor_deleted` が形を返す頂点）だけ
+/// アンカーの追加（`add`）・削除で、マウスにいちばん近い辺・頂点を探す（半径 `12 / zoom`。同じ地図の図形どうしに前後は無い）。
+/// 動かして浮いている片（ほかの図形と重なることがある）は、レイヤーごとに片だけの地図で先に探し（`floating_maps`）、
+/// 無ければレイヤーの地図で探す（`scope_maps`）
 pub(crate) fn anchor_hover(
     scene: Scene<'_>,
     session: &Session,
@@ -1299,10 +1299,47 @@ pub(crate) fn anchor_hover(
     add: bool,
 ) -> HoverTarget {
     let r = 12.0 / (zoom as f64);
-    let maps = scope_maps(scene, session);
+    let floating = floating_maps(scene, session);
+    match anchor_hover_in(
+        scene,
+        session,
+        &floating,
+        MapOwner::Floating,
+        mouse_pt,
+        r,
+        add,
+    ) {
+        HoverTarget::None => {
+            let maps = scope_maps(scene, session);
+            anchor_hover_in(
+                scene,
+                session,
+                &maps.maps,
+                MapOwner::Layer,
+                mouse_pt,
+                r,
+                add,
+            )
+        }
+        found => found,
+    }
+}
+
+/// 地図 `maps`（`owner` はその持ち主）で、マウスにいちばん近い辺・頂点を探す（`anchor_hover`）。追加は辺の上の位置を
+/// 0.08〜0.92 に収め、足せる所（`with_anchor_added` が形を返す所）だけ。削除は、消せる頂点（`with_anchor_deleted` が形を
+/// 返す頂点）だけ
+fn anchor_hover_in(
+    scene: Scene<'_>,
+    session: &Session,
+    maps: &[LayerMap],
+    owner: fn(LayerId) -> MapOwner,
+    mouse_pt: Point,
+    r: f64,
+    add: bool,
+) -> HoverTarget {
     if add {
         let mut best: Option<(f64, &LayerMap, usize, f64)> = None;
-        for lm in &maps.maps {
+        for lm in maps {
             let Some((e, t)) = lm.base.map.hit_edge(mouse_pt, r) else {
                 continue;
             };
@@ -1325,12 +1362,12 @@ pub(crate) fn anchor_hover(
                 t,
                 closest_pos: q.eval(t),
                 seg: q,
-                map_edge: Some((lm.layer_id, e)),
+                map_edge: Some((owner(lm.layer_id), e)),
             }
         });
     }
     let mut best: Option<(f64, &LayerMap, usize)> = None;
-    for lm in &maps.maps {
+    for lm in maps {
         let Some(v) = lm.base.map.hit_node(mouse_pt, r) else {
             continue;
         };
@@ -1357,9 +1394,35 @@ pub(crate) fn anchor_hover(
             contour_idx,
             seg_idx,
             pos: lm.base.map.nodes[v],
-            map_node: Some((lm.layer_id, v)),
+            map_node: Some((owner(lm.layer_id), v)),
         }
     })
+}
+
+/// 動かして浮いている片の、レイヤーごとの地図（そのレイヤーの片だけで作る：`LayerBase::of`。片を置くときと同じ地図）
+fn floating_maps(scene: Scene<'_>, session: &Session) -> Vec<LayerMap> {
+    let Some(fl) = session.floating().filter(|fl| fl.modified) else {
+        return Vec::new();
+    };
+    let scope = &session.editing_group_path;
+    let mut layer_ids: Vec<LayerId> = Vec::new();
+    for p in &fl.pieces {
+        if !layer_ids.contains(&p.layer_id) {
+            layer_ids.push(p.layer_id);
+        }
+    }
+    layer_ids
+        .into_iter()
+        .filter_map(|layer_id| {
+            let own = layer_own(&fl.pieces, layer_id, scope);
+            Some(LayerMap {
+                layer_id,
+                group_path: scope.clone(),
+                first_idx: scene.index_of_shape_id(own.first()?.shape_id)?,
+                base: LayerBase::of(&own)?,
+            })
+        })
+        .collect()
 }
 
 /// 選択ツールの輪郭の変形で、マウスにいちばん近い頂点か辺を探す。
@@ -1397,7 +1460,7 @@ pub(crate) fn reshape_hover(
             contour_idx,
             seg_idx,
             pos: lm.base.map.nodes[v],
-            map_node: Some((lm.layer_id, v)),
+            map_node: Some((MapOwner::Layer(lm.layer_id), v)),
         };
     }
     let mut best_e: Option<(f64, &LayerMap, usize, f64, ShapeId)> = None;
@@ -1431,7 +1494,7 @@ pub(crate) fn reshape_hover(
             t,
             closest_pos: q.eval(t),
             seg: q,
-            map_edge: Some((lm.layer_id, e)),
+            map_edge: Some((MapOwner::Layer(lm.layer_id), e)),
         };
     }
     HoverTarget::None

@@ -614,42 +614,6 @@ fn test_pull_edge_across_circle_splits_into_two_shapes() {
 }
 
 #[test]
-fn test_add_and_delete_anchor_on_contour() {
-    let center = Point::new(200.0, 200.0);
-    let raw = generate_brush_outline(&[center], 40.0);
-    let mut shapes = build_smoothed_stroke_shapes(&raw, Color32::BLACK);
-    assert_eq!(shapes.len(), 1);
-
-    let orig_n = shapes[0].exterior.segments.len();
-    let orig_mid = shapes[0].exterior.segments[0].eval(0.5);
-
-    // 1. アンカー追加（De Casteljau 分割）で形状が変わらずアンカー数が +1 されること
-    assert!(shapes[0].exterior.insert_anchor_at(0, 0.5));
-    shapes[0].rebuild_cache();
-    assert_eq!(shapes[0].exterior.segments.len(), orig_n + 1);
-    assert!(
-        (shapes[0].exterior.segments[1].p0 - orig_mid).hypot() < 1e-6,
-        "追加されたアンカーが元のベジェ曲線上の正確な座標にあること"
-    );
-
-    // 2. 追加したアンカー（インデックス 1）を削除すると元のアンカー数に戻り、点Aと点Cを結ぶ直線セグメントになること
-    let pt_a = shapes[0].exterior.segments[0].p0;
-    let pt_c = shapes[0].exterior.segments[1].p2;
-    assert!(shapes[0].exterior.delete_anchor_at(1));
-    shapes[0].rebuild_cache();
-    assert_eq!(shapes[0].exterior.segments.len(), orig_n);
-    let merged_seg = shapes[0].exterior.segments[0];
-    assert!(
-        (merged_seg.p0 - pt_a).hypot() < 1e-6 && (merged_seg.p2 - pt_c).hypot() < 1e-6,
-        "アンカー削除後の始点と終点が点A・点Cと一致すること"
-    );
-    assert!(
-        (merged_seg.p1 - pt_a.lerp(pt_c, 0.5)).hypot() < 1e-6,
-        "点Bを削除したとき、山なりを残さず点Aと点Cを結ぶ直線（制御点が中点）になること"
-    );
-}
-
-#[test]
 fn test_bucket_fill_enclosed_hole_and_recolor() {
     let mut app = Is2dApp::default();
     let black = Color32::from_rgb(40, 45, 55);
@@ -12670,30 +12634,6 @@ fn test_g3_3_clear_timeline_cells_and_no_direct_ui_mutation_calls() {
 }
 
 #[test]
-fn test_g2_1_edit_contour_bumps_mesh_revision() {
-    let raw = generate_brush_outline_at_zoom(
-        &[Point::new(100.0, 100.0), Point::new(180.0, 100.0)],
-        6.0,
-        1.0,
-    );
-    let mut shape = build_smoothed_stroke_shapes_at_zoom(&raw, Color32::RED, 1.0)
-        .into_iter()
-        .next()
-        .unwrap();
-    let rev0 = shape.mesh_revision;
-
-    // 変更なし（false を返す）なら mesh_revision は変わらないこと
-    let changed_noop = shape.edit_contour(0, |_| false);
-    assert!(!changed_noop);
-    assert_eq!(shape.mesh_revision, rev0);
-
-    // 輪郭を書き換えて true を返すと mesh_revision が必ず上がること
-    let changed = shape.edit_contour(0, |c| c.insert_anchor_at(0, 0.5));
-    assert!(changed);
-    assert!(shape.mesh_revision > rev0);
-}
-
-#[test]
 fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
     use crate::canvas_tool::Floating;
     use std::collections::HashSet;
@@ -21386,6 +21326,93 @@ fn test_bucket_recolor_keeps_neighbor_shapes() {
     assert_eq!(added[0].color, Color32::BLACK);
 }
 
+/// 動かして浮いている片の、色の違う片どうしの境目の角を消すと、両側の片が一緒に変わる（片側だけ変えて、隙間や重なりを
+/// 作らない。レビュー 4a9ea60 の N-2002）
+#[test]
+fn test_floating_anchor_delete_on_shared_border_changes_both_pieces() {
+    let mut app = Is2dApp::default();
+    app.tool.brush_color = Color32::RED;
+    let red: Vec<Point> = (0..=10)
+        .map(|i| Point::new(-150.0 + 30.0 * i as f64, 0.0))
+        .collect();
+    doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&red, 40.0));
+    app.tool.brush_color = Color32::BLACK;
+    let black: Vec<Point> = (0..=24)
+        .map(|i| {
+            let x = -120.0 + 10.0 * i as f64;
+            Point::new(x, 6.0 * (x / 25.0).sin())
+        })
+        .collect();
+    doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&black, 16.0));
+    for action in [
+        doc_actions::Action::SelectMarquee {
+            p0: Point::new(0.0, -200.0),
+            p1: Point::new(300.0, 200.0),
+            additive: false,
+        },
+        doc_actions::Action::NudgeSelection {
+            delta: KVec2::new(0.0, 40.0),
+        },
+    ] {
+        assert!(doc_actions::apply(&mut app, action));
+    }
+    let pieces = |app: &Is2dApp| app.session.floating().expect("浮いた片").pieces.clone();
+    assert!(app.session.has_modified_floating());
+    // 赤と黒の境目にある角（赤の片と黒の片の両方の輪郭にある点）
+    let verts = |c: Color32| -> Vec<Point> {
+        pieces(&app)
+            .iter()
+            .filter(|s| s.color == c)
+            .flat_map(|s| {
+                s.contours()
+                    .flat_map(|k| k.segments.iter().map(|q| q.p0).collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let blacks = verts(Color32::BLACK);
+    let v = verts(Color32::RED)
+        .into_iter()
+        .filter(|p| (p.y - 40.0).abs() < 15.0 && p.x > 20.0)
+        .find(|p| blacks.contains(p))
+        .expect("赤と黒の境目の角");
+    let probe: Vec<Point> = (0..80)
+        .flat_map(|i| {
+            (0..80).map(move |j| {
+                Point::new(
+                    v.x - 20.0 + 0.5 * i as f64 + 0.13,
+                    v.y - 20.0 + 0.5 * j as f64 + 0.17,
+                )
+            })
+        })
+        .collect();
+    let covered = |ps: &[FillShape], p: Point| ps.iter().filter(|s| s.contains_point(p)).count();
+    let before_pieces = pieces(&app);
+    let before: Vec<usize> = probe.iter().map(|p| covered(&before_pieces, *p)).collect();
+    assert!(doc_actions::apply(
+        &mut app,
+        doc_actions::Action::DeleteAnchor { pt: v }
+    ));
+    let after_pieces = pieces(&app);
+    assert!(
+        crate::planar_map::PlanarMap::from_faces(after_pieces.iter()).is_valid(),
+        "片どうしの境目がそろわない"
+    );
+    let gaps = probe
+        .iter()
+        .zip(&before)
+        .filter(|(p, was)| **was > 0 && covered(&after_pieces, **p) == 0)
+        .count();
+    assert_eq!(gaps, 0, "角を消したら片の間に隙間があいた");
+    assert!(
+        !after_pieces.iter().any(|s| s.color == Color32::RED
+            && s.contours().any(|k| k.segments.iter().any(|q| q.p0 == v)))
+            && !after_pieces.iter().any(|s| s.color == Color32::BLACK
+                && s.contours().any(|k| k.segments.iter().any(|q| q.p0 == v))),
+        "角が両側の片から消えていない"
+    );
+}
+
 fn layer_map_is_valid(app: &Is2dApp) -> bool {
     crate::planar_map::PlanarMap::from_faces(app.scene().iter()).is_valid()
 }
@@ -23900,6 +23927,95 @@ mod map_overlay {
         ));
         canvas_tool::clear_selection(&mut app);
         assert!(layer_map_valid(&app, 0));
+    }
+
+    /// 動かして浮いている片で、境目の角を消す・辺に角を足すのをランダムにくり返し、片どうしが正しい地図でなくなった回
+    /// （片側だけ変わって隙間や重なりができた回）を数える（レビュー 4a9ea60 の N-2002）。環境変数 PROBE_CASES（ふだん 400）
+    #[test]
+    #[ignore]
+    fn probe_floating_anchor_edits() {
+        let cases: usize = std::env::var("PROBE_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(400);
+        let (mut edits, mut bad) = (0, 0);
+        let mut r = Rng(17);
+        for _ in 0..cases {
+            let mut app = Is2dApp::default();
+            for (a, b, c) in [
+                (
+                    Point::new(-200.0, -40.0),
+                    Point::new(200.0, -40.0),
+                    Color32::RED,
+                ),
+                (
+                    Point::new(-200.0, 0.0),
+                    Point::new(200.0, 0.0),
+                    Color32::BLUE,
+                ),
+                (
+                    Point::new(-200.0, 40.0),
+                    Point::new(200.0, 40.0),
+                    Color32::GREEN,
+                ),
+                (
+                    Point::new(-200.0, -80.0),
+                    Point::new(200.0, 80.0),
+                    Color32::RED,
+                ),
+            ] {
+                app.tool.brush_color = c;
+                let pts: Vec<Point> = (0..=10).map(|i| a.lerp(b, i as f64 / 10.0)).collect();
+                doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 36.0));
+            }
+            let x0 = -150.0 + r.f() * 100.0;
+            for action in [
+                doc_actions::Action::SelectMarquee {
+                    p0: Point::new(x0, -130.0),
+                    p1: Point::new(x0 + 150.0 + r.f() * 100.0, 130.0),
+                    additive: false,
+                },
+                doc_actions::Action::NudgeSelection {
+                    delta: KVec2::new(0.0, 7.0),
+                },
+            ] {
+                doc_actions::apply(&mut app, action);
+            }
+            for _ in 0..20 {
+                let Some(fl) = app.session.floating() else {
+                    break;
+                };
+                let segs: Vec<QuadBez> = fl
+                    .pieces
+                    .iter()
+                    .flat_map(|s| s.contours())
+                    .flat_map(|c| c.segments.iter().copied())
+                    .collect();
+                if segs.is_empty() {
+                    break;
+                }
+                let q = segs[(r.f() * segs.len() as f64) as usize % segs.len()];
+                let action = if r.f() < 0.6 {
+                    doc_actions::Action::DeleteAnchor { pt: q.p0 }
+                } else {
+                    doc_actions::Action::AddAnchor { pt: q.eval(0.5) }
+                };
+                if !doc_actions::apply(&mut app, action) {
+                    continue;
+                }
+                // 片の外（レイヤーの図形）の角だったときは、選択を外してレイヤーの地図で編集している
+                let Some(fl) = app.session.floating() else {
+                    break;
+                };
+                edits += 1;
+                if !PlanarMap::from_faces(fl.pieces.iter()).is_valid() {
+                    bad += 1;
+                }
+            }
+        }
+        eprintln!(
+            "PROBE 浮いた片のアンカーの編集 {edits} 回：片どうしが正しい地図でなくなった回 {bad}"
+        );
     }
 
     /// 矩形で選んだあと、境目をまたぐ矩形を Shift で選び足したときの、同じ色の片どうしの接し方を数える

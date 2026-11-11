@@ -4,7 +4,8 @@ use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2}
 use kurbo::{ParamCurve, Point, QuadBez};
 
 use crate::canvas_tool::{
-    ActiveCanvasDrag, HoverTarget, LayerId, MarqueeDrag, SelectDragState, SelectSubMode, Tab,
+    ActiveCanvasDrag, HoverTarget, LayerId, MapOwner, MarqueeDrag, SelectDragState, SelectSubMode,
+    Tab,
 };
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
@@ -227,7 +228,7 @@ pub(crate) fn start_reshape_drag(
     match target {
         HoverTarget::Vertex {
             pos,
-            map_node: Some((layer_id, node)),
+            map_node: Some((MapOwner::Layer(layer_id), node)),
             ..
         } => {
             let tab = host.tab_mut();
@@ -248,7 +249,7 @@ pub(crate) fn start_reshape_drag(
             t,
             closest_pos,
             seg,
-            map_edge: Some((layer_id, _)),
+            map_edge: Some((MapOwner::Layer(layer_id), _)),
             ..
         } => {
             let tab = host.tab_mut();

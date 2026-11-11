@@ -495,7 +495,7 @@ pub(crate) fn collect_marquee_hit_groups(
 }
 
 /// アルゴリズム 4: マウス位置に対する頂点・輪郭エッジ・塗りのヒットテスト（`Scene` を読み取る）。
-/// 変形モードは選択中の塗り → 地図の頂点・辺 → 最前面の塗り、アンカー削除モードは図形の頂点、アンカー追加モードは図形の辺を探す
+/// 変形モードは選択中の塗り → 地図の頂点・辺 → 最前面の塗り、アンカー削除モードは地図の頂点、アンカー追加モードは地図の辺を探す
 pub(crate) fn compute_hover_target(
     scene: Scene<'_>,
     session: &Session,
@@ -504,7 +504,6 @@ pub(crate) fn compute_hover_target(
     sub_mode: SelectSubMode,
 ) -> HoverTarget {
     let inv_z = 1.0 / (zoom as f64);
-    let anchor_edit_hit_radius = 12.0 * inv_z;
     let scene_len = scene.len();
 
     if sub_mode == SelectSubMode::Reshape {
@@ -548,109 +547,14 @@ pub(crate) fn compute_hover_target(
             });
     }
 
-    // アンカーの追加・削除は地図で探す（前後は無い）。動かして浮いている片（ほかの図形と重なることがある）だけは、
-    // 先に図形ごとに探す。残りと動かしていない片は、地図から切り出したもので境目を隣と共有するので地図で探す
-    let Some(fl) = session.floating().filter(|fl| fl.modified) else {
-        return crate::planar_map::anchor_hover(
-            scene,
-            session,
-            mouse_pt,
-            zoom,
-            sub_mode == SelectSubMode::AddAnchor,
-        );
-    };
-    let floating_ids: HashSet<u64> = fl.pieces.iter().map(|s| s.shape_id).collect();
-
-    // 浮いている図形の頂点・辺の当たり判定の候補になる図形を前から順に返す
-    // （最前面の塗りより後ろの図形と、外接矩形を半径だけ広げてもマウスが入らない図形は除く）
-    let topmost_fill_idx = scene.topmost_shape_at(mouse_pt, &session.editing_group_path);
-    let candidate_shapes = (0..scene_len).rev().filter_map(|s_idx| {
-        if topmost_fill_idx.is_some_and(|top| s_idx < top) {
-            return None;
-        }
-        let shape = scene.get(s_idx)?;
-        let bbox = shape.geometry_bounding_box()?;
-        if !floating_ids.contains(&shape.shape_id)
-            || !shape.is_raw_at_scope(&session.editing_group_path)
-            || !bbox
-                .inflate(anchor_edit_hit_radius, anchor_edit_hit_radius)
-                .contains(mouse_pt)
-        {
-            return None;
-        }
-        Some((s_idx, shape))
-    });
-    // `s_idx` の図形より前面にある編集スコープ内の図形が、点 `pt` を覆っているか
-    let hidden_by_front = |s_idx: usize, pt: Point| {
-        (s_idx + 1..scene_len).any(|front_idx| {
-            scene.get(front_idx).is_some_and(|front| {
-                front.is_in_editing_scope(&session.editing_group_path) && front.contains_point(pt)
-            })
-        })
-    };
-
-    let mut best: Option<(f64, HoverTarget)> = None;
-    for (s_idx, shape) in candidate_shapes {
-        for (c_idx, contour) in shape.contours().enumerate() {
-            if sub_mode == SelectSubMode::DeleteAnchor && contour.segments.len() <= 2 {
-                continue;
-            }
-            for (seg_idx, seg) in contour.segments.iter().enumerate() {
-                let found = if sub_mode == SelectSubMode::DeleteAnchor {
-                    let dist = (mouse_pt - seg.p0).hypot();
-                    (dist <= anchor_edit_hit_radius).then_some((
-                        dist,
-                        seg.p0,
-                        HoverTarget::Vertex {
-                            shape_id: shape.shape_id,
-                            contour_idx: c_idx,
-                            seg_idx,
-                            pos: seg.p0,
-                            map_node: None,
-                        },
-                    ))
-                } else {
-                    if !quad_control_bbox_contains(seg, mouse_pt, anchor_edit_hit_radius) {
-                        continue;
-                    }
-                    let nearest = seg.nearest(mouse_pt, 0.05 * inv_z);
-                    let t = nearest.t.clamp(0.08, 0.92);
-                    let dist = nearest.distance_sq.sqrt();
-                    (dist <= anchor_edit_hit_radius).then(|| {
-                        (
-                            dist,
-                            seg.eval(t),
-                            HoverTarget::Edge {
-                                shape_id: shape.shape_id,
-                                contour_idx: c_idx,
-                                seg_idx,
-                                t,
-                                closest_pos: seg.eval(t),
-                                seg: *seg,
-                                map_edge: None,
-                            },
-                        )
-                    })
-                };
-                if let Some((dist, pos, target)) = found {
-                    if best.as_ref().is_none_or(|(d, _)| dist < *d) && !hidden_by_front(s_idx, pos)
-                    {
-                        best = Some((dist, target));
-                    }
-                }
-            }
-        }
-    }
-    match best {
-        Some((_, target)) => target,
-        None => crate::planar_map::anchor_hover(
-            scene,
-            session,
-            mouse_pt,
-            zoom,
-            sub_mode == SelectSubMode::AddAnchor,
-        ),
-    }
+    // アンカーの追加・削除は地図で探す（同じ地図の図形どうしに前後は無い。動かして浮いている片は、片だけの地図で先に探す）
+    crate::planar_map::anchor_hover(
+        scene,
+        session,
+        mouse_pt,
+        zoom,
+        sub_mode == SelectSubMode::AddAnchor,
+    )
 }
 
 /// 選択中の図形がすべて同じレイヤーにあればその `LayerId` を返す（未選択・複数レイヤーにまたがるときは `None`）

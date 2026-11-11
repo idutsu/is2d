@@ -145,6 +145,15 @@ pub(crate) enum SelectSubMode {
     DeleteAnchor, // － アンカー削除モード（- キー）
 }
 
+/// 地図の頂点・辺が、どの地図のものか
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MapOwner {
+    /// レイヤーの、編集中の階層の生の図形（選択中の図形を除く）の地図
+    Layer(LayerId),
+    /// 動かして浮いている片のうち、そのレイヤーの片の地図
+    Floating(LayerId),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub(crate) enum HoverTarget {
     #[default]
@@ -154,8 +163,8 @@ pub(crate) enum HoverTarget {
         contour_idx: usize,
         seg_idx: usize,
         pos: Point,
-        /// 輪郭の変形では、地図の頂点（レイヤー, 頂点の番号）
-        map_node: Option<(LayerId, usize)>,
+        /// 地図の頂点（どの地図か, 頂点の番号）
+        map_node: Option<(MapOwner, usize)>,
     },
     Edge {
         shape_id: ShapeId,
@@ -163,10 +172,10 @@ pub(crate) enum HoverTarget {
         seg_idx: usize,
         t: f64,
         closest_pos: Point,
-        /// 強調表示する曲線（輪郭の変形では地図の辺、アンカー追加では図形の区間）
+        /// 強調表示する曲線（地図の辺）
         seg: QuadBez,
-        /// 輪郭の変形では、地図の辺（レイヤー, 辺の番号）
-        map_edge: Option<(LayerId, usize)>,
+        /// 地図の辺（どの地図か, 辺の番号）
+        map_edge: Option<(MapOwner, usize)>,
     },
     Fill {
         shape_id: ShapeId,

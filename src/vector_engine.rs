@@ -319,47 +319,6 @@ impl Contour {
             segs[next].p0 = mid;
         }
     }
-
-    /// 指定セグメント `seg_idx` のパラメータ位置 `t` を De Casteljau 分割し、形状を一切変えずに新しいアンカーを追加する
-    pub(crate) fn insert_anchor_at(&mut self, seg_idx: usize, t: f64) -> bool {
-        if seg_idx >= self.segments.len() || self.segments.len() >= MAX_CONTOUR_SEGMENTS {
-            return false;
-        }
-        let t_clamped = t.clamp(0.08, 0.92);
-        let seg = self.segments[seg_idx];
-        let left = seg.subsegment(0.0..t_clamped);
-        let right = seg.subsegment(t_clamped..1.0);
-        let segs = self.segments_mut();
-        segs[seg_idx] = left;
-        segs.reserve_exact(1);
-        segs.insert(seg_idx + 1, right);
-        self.enforce_continuity();
-        true
-    }
-
-    /// 指定アンカー `seg_idx`（`segments[seg_idx].p0`）を削除し、前後のアンカー（点Aと点C）を直線セグメントで結ぶ
-    /// （削除後に輪郭面積が潰れてゼロになる場合は削除を行わず `false` を返す）
-    pub(crate) fn delete_anchor_at(&mut self, seg_idx: usize) -> bool {
-        let n = self.segments.len();
-        if n <= 2 || seg_idx >= n {
-            return false;
-        }
-        let prev_idx = (seg_idx + n - 1) % n;
-        let p0 = self.segments[prev_idx].p0;
-        let p2 = self.segments[seg_idx].p2;
-        let p1 = p0.lerp(p2, 0.5);
-
-        let mut candidate = self.clone();
-        let segs = candidate.segments_mut();
-        segs[prev_idx] = QuadBez::new(p0, p1, p2);
-        segs.remove(seg_idx);
-        candidate.enforce_continuity();
-        if candidate.signed_area().abs() <= 1e-4 {
-            return false;
-        }
-        *self = candidate;
-        true
-    }
 }
 
 /// キャンバス上の1つの塗りシェイプ（色 + 外周2次ベジェ輪郭 + 穴の2次ベジェ輪郭リスト + 所属レイヤーID + グループ階層 + シンボル紐付け + 描画・判定キャッシュ）
@@ -734,27 +693,6 @@ impl FillShape {
         } else {
             self.holes.get(idx - 1)
         }
-    }
-
-    pub(crate) fn edit_contour(
-        &mut self,
-        idx: usize,
-        f: impl FnOnce(&mut Contour) -> bool,
-    ) -> bool {
-        if self.exterior.segments.is_empty() {
-            return false;
-        }
-        let changed = if idx == 0 {
-            f(&mut self.exterior)
-        } else if let Some(h) = self.holes.get_mut(idx - 1) {
-            f(h)
-        } else {
-            false
-        };
-        if changed {
-            self.rebuild_cache();
-        }
-        changed
     }
 }
 

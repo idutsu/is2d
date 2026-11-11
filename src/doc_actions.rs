@@ -8,8 +8,8 @@ use crate::canvas_tool::{
     editable_layer_ids, focus_active_layer_by_id, focus_active_layer_to_shape_by_id,
     insert_and_select_shapes_in_scope, reset_session_after_timeline_change,
     select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode, Clipboard,
-    CoalesceKey, LayerId, NoticeKind, SelectSubMode, StatusToast, Tab, Tool, ToolSettings,
-    UndoEntry,
+    CoalesceKey, HoverTarget, LayerId, MapOwner, NoticeKind, SelectSubMode, StatusToast, Tab, Tool,
+    ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
@@ -1094,10 +1094,10 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         tab.view.zoom,
         SelectSubMode::Reshape,
     );
-    let crate::canvas_tool::HoverTarget::Edge {
+    let HoverTarget::Edge {
         t,
         seg,
-        map_edge: Some((layer_id, _)),
+        map_edge: Some((MapOwner::Layer(layer_id), _)),
         ..
     } = target
     else {
@@ -1127,9 +1127,9 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         tab.view.zoom,
         SelectSubMode::Reshape,
     );
-    let crate::canvas_tool::HoverTarget::Vertex {
+    let HoverTarget::Vertex {
         pos,
-        map_node: Some((layer_id, _)),
+        map_node: Some((MapOwner::Layer(layer_id), _)),
         ..
     } = target
     else {
@@ -1154,85 +1154,66 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         SelectSubMode::DeleteAnchor
     };
     let mut target = compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode);
-    // 動かして浮いている片（ほかの図形と重なることがある）の頂点・辺は、図形ごとに編集する
-    if let Some(done) = edit_floating_anchor(tab, &target, is_add) {
-        return done;
+    let edit_of = |target: HoverTarget| match (is_add, target) {
+        (
+            true,
+            HoverTarget::Edge {
+                t,
+                seg,
+                map_edge: Some((owner, _)),
+                ..
+            },
+        ) => Some((owner, MapEdit::AddAnchor { orig_seg: seg, t })),
+        (
+            false,
+            HoverTarget::Vertex {
+                pos,
+                map_node: Some((owner, _)),
+                ..
+            },
+        ) => Some((owner, MapEdit::DeleteAnchor { orig_vertex: pos })),
+        _ => None,
+    };
+    // 動かして浮いている片は、そのレイヤーの片の地図で編集する（境目なら両側の片が変わる）
+    if let Some((MapOwner::Floating(layer_id), edit)) = edit_of(target) {
+        return edit_floating_anchor(tab, layer_id, edit);
     }
-    // ほかは地図で編集する（境目なら両側の図形が変わる）。選択・浮いている図形があれば、先に確定して探し直す
+    // ほかはレイヤーの地図で編集する（境目なら両側の図形が変わる）。選択・浮いている図形があれば、先に確定して探し直す
     if !tab.session.selection.is_empty() || tab.session.floating().is_some() {
         clear_selection(tab);
         target = compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode);
     }
-    match (is_add, target) {
-        (
-            true,
-            crate::canvas_tool::HoverTarget::Edge {
-                t,
-                seg,
-                map_edge: Some((layer_id, _)),
-                ..
-            },
-        ) => apply_map_edit(tab, layer_id, MapEdit::AddAnchor { orig_seg: seg, t }),
-        (
-            false,
-            crate::canvas_tool::HoverTarget::Vertex {
-                pos,
-                map_node: Some((layer_id, _)),
-                ..
-            },
-        ) => apply_map_edit(tab, layer_id, MapEdit::DeleteAnchor { orig_vertex: pos }),
+    match edit_of(target) {
+        Some((MapOwner::Layer(layer_id), edit)) => apply_map_edit(tab, layer_id, edit),
         _ => false,
     }
 }
 
-/// 動かして浮いている片の頂点・辺 `target` に、アンカーを足す（`is_add`）・消す。`target` がその片のものでなければ `None`。
-/// 残りと、動かしていない片は、地図から切り出したもので境目を隣の図形と共有するので、ここでは編集しない（選択を外して地図で編集する）
-fn edit_floating_anchor(
-    tab: &mut Tab,
-    target: &crate::canvas_tool::HoverTarget,
-    is_add: bool,
-) -> Option<bool> {
-    let (shape_id, contour_idx, seg_idx, t_opt) = match (is_add, *target) {
-        (
-            true,
-            crate::canvas_tool::HoverTarget::Edge {
-                shape_id,
-                contour_idx,
-                seg_idx,
-                t,
-                map_edge: None,
-                ..
-            },
-        ) => (shape_id, contour_idx, seg_idx, Some(t)),
-        (
-            false,
-            crate::canvas_tool::HoverTarget::Vertex {
-                shape_id,
-                contour_idx,
-                seg_idx,
-                map_node: None,
-                ..
-            },
-        ) => (shape_id, contour_idx, seg_idx, None),
-        _ => return None,
+/// 動かして浮いている片のうち、レイヤー `layer_id` の片を1つの地図にして（アンカーのカーソル合わせと同じ地図）、`edit` で
+/// 編集し、変わった片を差し替える（選択も入れ替える）
+fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, edit: MapEdit) -> bool {
+    let Some(fl) = tab.session.floating().filter(|fl| fl.modified) else {
+        return false;
     };
-    let fl = tab.session.floating().filter(|fl| fl.modified)?;
-    let idx = fl.pieces.iter().position(|p| p.shape_id == shape_id)?;
-    let mut edited = fl.pieces[idx].clone();
-    let changed = edited.edit_contour(contour_idx, |c| match t_opt {
-        Some(t) => c.insert_anchor_at(seg_idx, t),
-        None => c.delete_anchor_at(seg_idx),
-    });
-    if !changed {
-        return Some(false);
-    }
+    let scope = tab.session.editing_group_path.clone();
+    let MapEditOutcome::Changed(removed, added) =
+        map_edit_diff(&fl.pieces, layer_id, &scope, |m| edit.apply(m))
+    else {
+        return false;
+    };
     push_undo(tab, None);
+    for id in &removed {
+        tab.session.selection.shapes.remove(id);
+    }
+    for s in &added {
+        tab.session.selection.insert_shape(s);
+    }
     tab.session.update_floating(|fl_opt| {
-        if let Some(fl_mut) = fl_opt {
-            fl_mut.pieces[idx] = edited;
+        if let Some(fl) = fl_opt {
+            apply_shape_diff(&mut fl.pieces, &removed, added, layer_id, &scope);
         }
     });
-    Some(true)
+    true
 }
 
 fn apply_set_selected_symbol_world_pivot(tab: &mut Tab, world_pivot: Option<Point>) -> bool {
