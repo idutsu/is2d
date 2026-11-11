@@ -8,7 +8,7 @@ use crate::canvas_tool::{
 };
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
-use crate::planar_map::{reshape_result, scope_maps, MapEdit, ReshapeBase};
+use crate::planar_map::{reshape_result, scope_maps, LayerBase, MapEdit};
 use crate::select_ops::{apply_click_selection, finish_selection_drag, update_selection_drag};
 pub(crate) use crate::select_ops::{compute_hover_target, handle_canvas_double_click};
 use crate::vector_engine::FillShape;
@@ -170,13 +170,10 @@ fn handle_anchor_edit_input(
 }
 
 /// 地図での変形のドラッグを始める：レイヤー `layer_id` の地図から、ドラッグのあいだ使う元の地図と階層を作り、選択と仮表示を空にする
-fn begin_map_drag(tab: &mut Tab, layer_id: LayerId) -> Option<(Arc<ReshapeBase>, Vec<u64>)> {
+fn begin_map_drag(tab: &mut Tab, layer_id: LayerId) -> Option<(Arc<LayerBase>, Vec<u64>)> {
     let maps = scope_maps(tab.scene(), &tab.session);
     let lm = maps.maps.iter().find(|m| m.layer_id == layer_id)?;
-    let (base, group_path) = (
-        Arc::new(ReshapeBase::new(lm.map.clone(), lm.repainted)),
-        lm.group_path.clone(),
-    );
+    let (base, group_path) = (lm.base.clone(), lm.group_path.clone());
     tab.session.selection.clear();
     tab.session
         .set_reshape_overlay(&[], Vec::new(), layer_id, &group_path);

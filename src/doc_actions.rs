@@ -15,7 +15,7 @@ use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
 };
 use crate::planar_map::{
-    apply_shape_diff, map_edit_diff, reshape_diff, MapEdit, MapEditOutcome, MapInput, MapRule,
+    apply_shape_diff, map_edit_diff, MapEdit, MapEditOutcome, MapInput, MapRule,
 };
 use crate::select_ops::{
     apply_marquee_selection, compute_hover_target, enter_group_at, exit_current_group,
@@ -1060,12 +1060,12 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
     if tab.session.floating().is_some() {
         return false;
     }
-    // 土台の図形で差分を求め、形が変わらないとき（消せない頂点など）は Undo も積まない
-    let Some((removed, added)) = reshape_diff(
+    // 土台の図形で差分を求め、形が変わらないとき・編集できないとき（消せない頂点など）は Undo も積まない
+    let MapEditOutcome::Changed(removed, added) = map_edit_diff(
         tab.session.base_cache.shapes(),
         layer_id,
         &group_path,
-        map_edit,
+        |m| map_edit.apply(m),
     ) else {
         return false;
     };

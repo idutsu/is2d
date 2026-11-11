@@ -11,8 +11,7 @@ use crate::doc_actions::{apply, Action, ActionHost};
 use crate::planar_map::MapInput;
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
 use crate::vector_engine::{
-    make_marquee_rect_shape, next_shape_id, rects_overlap, ColorEffect, FillShape,
-    SymbolInstanceBinding,
+    make_marquee_rect_shape, rects_overlap, ColorEffect, FillShape, SymbolInstanceBinding,
 };
 
 /// 現在の選択図形のうち `keep_indices` のみを選択に残し、選択から外れた変更済み生シェイプのみをキャンバスへ結合・切り抜き確定する
@@ -324,40 +323,31 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
             });
             // 浮いている残り：このレイヤーの分を取り出し、丸ごと中のものは片にし、切れたものは捨て、新しい残りを足して
             // 1つの塊にする（塊の位置は、そのレイヤーの残りの塊か、隠した図形のどれか）
-            let mut owner = None;
-            let mut rest = Vec::new();
-            for (o, chunk) in &mut chunks {
-                let (mine, others): (Vec<FillShape>, Vec<FillShape>) =
-                    chunk.drain(..).partition(|s| s.layer_id == lid && raw(s));
-                *chunk = others;
-                if !mine.is_empty() {
-                    owner = owner.or(*o);
-                }
-                for mut s in mine {
-                    if whole.contains(&s.shape_id) {
-                        // 隠した図形の番号を持つ残り（塊の先頭）は、片にするときに新しい番号にする
-                        if hidden_now.contains(&s.shape_id) {
-                            s.shape_id = next_shape_id();
-                        }
+            let fallback = new_hidden.get(layer_hidden_start).copied();
+            Floating::regroup_remainder(
+                &mut chunks,
+                &hidden_now,
+                |s| s.layer_id == lid && raw(s),
+                |mine| {
+                    let (mut whole_rem, rest): (Vec<FillShape>, Vec<FillShape>) = mine
+                        .into_iter()
+                        .filter(|s| !hidden.contains(&s.shape_id))
+                        .partition(|s| whole.contains(&s.shape_id));
+                    // 隠した図形の番号を持つ残り（塊の先頭）は、片にするときに新しい番号にする
+                    Floating::unmark_remainder(&hidden_now, &mut whole_rem);
+                    for s in whole_rem {
                         selection.insert_shape(&s);
                         lifted.push(s);
-                    } else if !hidden.contains(&s.shape_id) {
-                        rest.push(s);
                     }
-                }
-            }
-            Floating::unmark_remainder(&hidden_now, &mut rest);
-            rest.extend(sp.remainder);
-            if !rest.is_empty() {
-                let owner = owner.or(new_hidden.get(layer_hidden_start).copied());
-                chunks.push((owner, rest));
-            }
+                    rest.into_iter().chain(sp.remainder).collect()
+                },
+                || fallback,
+            );
             for p in sp.pieces {
                 selection.insert_shape(&p);
                 lifted.push(p);
             }
         }
-        chunks.retain(|(_, c)| !c.is_empty());
         if floating.is_some() || !new_hidden.is_empty() {
             let fl = floating.get_or_insert_with(|| Floating {
                 pieces: Vec::new(),

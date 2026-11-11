@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, Key, Pos2, Stroke, Vec2};
 use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 
-use crate::planar_map::{ReshapeBase, ScopeMaps};
+use crate::planar_map::{LayerBase, ScopeMaps};
 pub(crate) use crate::symbol::Document;
 use crate::symbol::{EditPath, SymbolDef, SymbolEvalCtx, SymbolEvalState};
 use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
@@ -190,7 +190,7 @@ pub(crate) enum SelectDragState {
     PullEdge {
         layer_id: LayerId,
         group_path: Vec<u64>,
-        base: Arc<ReshapeBase>,
+        base: Arc<LayerBase>,
         grab_t: f64,
         grab_pos: Point,
         grab_offset: KVec2,
@@ -201,7 +201,7 @@ pub(crate) enum SelectDragState {
     MoveVertex {
         layer_id: LayerId,
         group_path: Vec<u64>,
-        base: Arc<ReshapeBase>,
+        base: Arc<LayerBase>,
         node: usize,
         orig_vertex: Point,
         last_pos: Point,
@@ -1919,6 +1919,33 @@ impl Floating {
             }
         }
         chunks
+    }
+
+    /// 残りの塊 `chunks` から、`same` に当たる残り（1つのレイヤー・階層の分）を取り出して `rebuild` に渡し、返った図形を
+    /// 1つの塊に組み直して足す。塊の位置は、取り出した残りがあった最初の塊のもの、無ければ `fallback()`
+    pub(crate) fn regroup_remainder(
+        chunks: &mut Vec<(Option<ShapeId>, Vec<FillShape>)>,
+        hidden: &HashSet<ShapeId>,
+        same: impl Fn(&FillShape) -> bool,
+        rebuild: impl FnOnce(Vec<FillShape>) -> Vec<FillShape>,
+        fallback: impl FnOnce() -> Option<ShapeId>,
+    ) {
+        let mut owner = None;
+        let mut mine = Vec::new();
+        for (o, chunk) in chunks.iter_mut() {
+            let (m, rest): (Vec<FillShape>, Vec<FillShape>) = chunk.drain(..).partition(&same);
+            *chunk = rest;
+            if !m.is_empty() {
+                owner = owner.or(*o);
+            }
+            mine.extend(m);
+        }
+        chunks.retain(|(_, c)| !c.is_empty());
+        let mut list = rebuild(mine);
+        if !list.is_empty() {
+            Self::unmark_remainder(hidden, &mut list);
+            chunks.push((owner.or_else(fallback), list));
+        }
     }
 
     /// 塊を組み直すとき：残りの図形のうち、隠した図形の番号（塊の先頭の印）を持つものは新しい番号にする（組み直した塊の
@@ -3780,32 +3807,29 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             while let Some(first) = deselected_pieces.first() {
                 let (lid, gp) = (first.layer_id, first.group_path.clone());
                 let same = |s: &FillShape| s.layer_id == lid && s.group_path == gp;
-                let (mut list, others): (Vec<FillShape>, Vec<FillShape>) =
-                    deselected_pieces.drain(..).partition(|p| same(p));
+                let (list, others): (Vec<FillShape>, Vec<FillShape>) =
+                    deselected_pieces.drain(..).partition(same);
                 deselected_pieces = others;
-                let mut owner = None;
-                for (o, chunk) in &mut chunks {
-                    let (mine, rest): (Vec<FillShape>, Vec<FillShape>) =
-                        chunk.drain(..).partition(|r| same(r));
-                    *chunk = rest;
-                    if !mine.is_empty() {
-                        owner = owner.or(*o);
-                    }
-                    list.extend(mine);
-                }
-                let owner = owner.or_else(|| {
-                    let id = fl
-                        .hidden
-                        .iter()
-                        .copied()
-                        .find(|id| !used_orig_ids.contains(id))?;
-                    used_orig_ids.insert(id);
-                    Some(id)
-                });
-                Floating::unmark_remainder(&fl.hidden, &mut list);
-                chunks.push((owner, crate::planar_map::merge_touching_faces(list)));
+                Floating::regroup_remainder(
+                    &mut chunks,
+                    &fl.hidden,
+                    same,
+                    |mine| {
+                        crate::planar_map::merge_touching_faces(
+                            list.into_iter().chain(mine).collect(),
+                        )
+                    },
+                    || {
+                        let id = fl
+                            .hidden
+                            .iter()
+                            .copied()
+                            .find(|id| !used_orig_ids.contains(id))?;
+                        used_orig_ids.insert(id);
+                        Some(id)
+                    },
+                );
             }
-            chunks.retain(|(_, c)| !c.is_empty());
             fl.set_remainder_chunks(chunks);
         }
         fl.pieces = kept_pieces;

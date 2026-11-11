@@ -3375,7 +3375,7 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
     assert!(
         maps.maps
             .iter()
-            .all(|m| m.map.nodes.iter().all(|p| (*p - Point::new(50.0, 50.0)).hypot() > 1.0)),
+            .all(|m| m.base.map.nodes.iter().all(|p| (*p - Point::new(50.0, 50.0)).hypot() > 1.0)),
         "空白フレームのシンボルマーカーの基準点が、輪郭の変形の頂点（磁気スナップの吸い付き先）にならないこと"
     );
 }
@@ -21350,6 +21350,42 @@ fn test_anchor_delete_on_unmoved_selection_keeps_shared_border() {
     }
 }
 
+/// バケツで面の色を塗り替えても、形も色も変わらないとなりの図形は書き換えない（その側の印で、変わっていないと分かる。
+/// レビュー 4a9ea60 の N-1003）
+#[test]
+fn test_bucket_recolor_keeps_neighbor_shapes() {
+    use crate::planar_map::{map_edit_diff, MapEditOutcome};
+    let mut app = Is2dApp::default();
+    let lid = app.doc.root.layers[0].id;
+    // 横に並べた3本の帯（となりどうしが触れる）
+    for (i, color) in [Color32::RED, Color32::BLUE, Color32::GREEN]
+        .into_iter()
+        .enumerate()
+    {
+        app.tool.brush_color = color;
+        let y = 40.0 * i as f64;
+        let pts: Vec<Point> = (0..=8)
+            .map(|k| Point::new(-120.0 + 30.0 * k as f64, y))
+            .collect();
+        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 24.0));
+    }
+    let shapes = app.scene().iter().cloned().collect::<Vec<_>>();
+    assert!(crate::planar_map::PlanarMap::from_faces(shapes.iter()).is_valid());
+    let blue = shapes
+        .iter()
+        .find(|s| s.color == Color32::BLUE)
+        .expect("青の帯")
+        .shape_id;
+    let MapEditOutcome::Changed(removed, added) = map_edit_diff(&shapes, lid, &[], |m| {
+        m.with_face_filled(Point::new(0.0, 40.0), Color32::BLACK)
+    }) else {
+        panic!("塗り替えられない");
+    };
+    assert_eq!(removed, vec![blue], "となりの図形まで書き換えた");
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].color, Color32::BLACK);
+}
+
 fn layer_map_is_valid(app: &Is2dApp) -> bool {
     crate::planar_map::PlanarMap::from_faces(app.scene().iter()).is_valid()
 }
@@ -21423,7 +21459,7 @@ fn test_scope_maps_rebuild_only_edited_layer() {
             .find(|o| o.layer_id == m.layer_id)
             .unwrap();
         assert_eq!(
-            std::sync::Arc::ptr_eq(&old.map, &m.map),
+            std::sync::Arc::ptr_eq(&old.base, &m.base),
             m.layer_id != edited,
             "編集したレイヤーだけ作り直す"
         );
@@ -21433,7 +21469,7 @@ fn test_scope_maps_rebuild_only_edited_layer() {
 /// 両側に色がある地図の辺の真ん中（アンカーの追加でつかむ点）
 fn shared_edge_midpoint(app: &Is2dApp, color_a: Color32, color_b: Color32) -> Point {
     let maps = crate::planar_map::scope_maps(app.scene(), &app.session);
-    let m = &maps.maps[0].map;
+    let m = &maps.maps[0].base.map;
     let e = (0..m.edges.len())
         .find(|&e| {
             let ed = &m.edges[e];
@@ -24331,7 +24367,7 @@ mod map_overlay {
     #[test]
     #[ignore]
     fn probe_reshape_timing() {
-        use crate::planar_map::{reshape_result, MapEdit, ReshapeBase};
+        use crate::planar_map::{reshape_result, LayerBase, MapEdit};
         let app = dense_scene_app(7);
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
         let stats = |v: &[f64]| {
@@ -24353,7 +24389,7 @@ mod map_overlay {
                 .collect();
             let map = PlanarMap::from_faces(shapes.iter());
             assert!(map.is_valid(), "レイヤー {layer} の地図");
-            let base = ReshapeBase::new(std::sync::Arc::new(map.clone()), false);
+            let base = LayerBase::new(map.clone(), false);
             let layer_id = shapes[0].layer_id;
             let mut r = Rng(layer as u64 + 1);
             for dist in [5.0, 20.0, 60.0] {
