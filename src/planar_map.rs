@@ -60,8 +60,6 @@ impl MapEdge {
 pub(crate) struct PlanarMap {
     pub(crate) nodes: Vec<Point>,
     pub(crate) edges: Vec<MapEdge>,
-    /// 頂点ごとに、その位置にある元の図形の頂点のひとつ（図形, 輪郭, 区間）。カーソル合わせの表示に使う
-    pub(crate) node_src: Vec<Option<(ShapeId, usize, usize)>>,
 }
 
 /// 面。外周の輪郭と穴の輪郭（向きのある辺の輪）を持つ。`srcs` は、この面の辺の側に記された元の図形
@@ -171,22 +169,15 @@ impl PlanarMap {
     /// 2本の線の曲線が少し違うときは、並びの前の図形（古い図形）の曲線を使う
     pub(crate) fn from_faces<'a>(faces: impl IntoIterator<Item = &'a FillShape>) -> Self {
         let mut nodes: Vec<Point> = Vec::new();
-        let mut node_src: Vec<Option<(ShapeId, usize, usize)>> = Vec::new();
         let mut grid = CellGrid::new();
         let mut found = Vec::new();
         // 1. 向きのある区間（左が面の色）。端を頂点にまとめる
         let mut segs: Vec<Seg> = Vec::new();
         for (order, f) in faces.into_iter().enumerate() {
-            for (ci, c) in f.contours().enumerate() {
-                for (si, q) in c.segments.iter().enumerate() {
+            for c in f.contours() {
+                for q in c.segments.iter() {
                     let a = snap_node(&mut nodes, &mut grid, &mut found, q.p0);
-                    if node_src.len() < nodes.len() {
-                        node_src.push(Some((f.shape_id, ci, si)));
-                    }
                     let b = snap_node(&mut nodes, &mut grid, &mut found, q.p2);
-                    if node_src.len() < nodes.len() {
-                        node_src.push(Some((f.shape_id, ci, (si + 1) % c.segments.len())));
-                    }
                     if a != b {
                         segs.push(Seg {
                             a,
@@ -251,11 +242,7 @@ impl PlanarMap {
                 right_src,
             });
         }
-        Self {
-            nodes,
-            edges,
-            node_src,
-        }
+        Self { nodes, edges }
     }
 
     /// 向きのある辺の左側の色
@@ -987,7 +974,6 @@ impl PlanarMap {
             e.b = remap[e.b];
         }
         self.nodes = nodes;
-        self.node_src.clear();
     }
 }
 
@@ -1398,6 +1384,28 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     built
 }
 
+/// 地図 `lm` の頂点 `v` を通る面の図形と、その図形の輪郭のうち `v` から始まる区間（輪郭の番号, 区間の番号）。カーソルを
+/// 合わせた頂点の輪郭を見せるのに使う。面が無ければ番号 0
+fn node_on_shape(scene: Scene<'_>, lm: &LayerMap, v: usize) -> (ShapeId, usize, usize) {
+    let map = &lm.base.map;
+    let Some(id) = map
+        .edges
+        .iter()
+        .filter(|e| e.a == v || e.b == v)
+        .find_map(|e| e.left_src.or(e.right_src))
+    else {
+        return (0, 0, 0);
+    };
+    let p = lm.placed_node(v);
+    let at = scene.shape_by_id(id).and_then(|s| {
+        s.contours()
+            .enumerate()
+            .find_map(|(ci, c)| c.segments.iter().position(|q| q.p0 == p).map(|si| (ci, si)))
+    });
+    let (ci, si) = at.unwrap_or((0, 0));
+    (id, ci, si)
+}
+
 /// 点 `p` が、地図 `lm` のレイヤーの生の図形より前面にある、ほかの図形（前面のレイヤー・同じレイヤーのグループ）に覆われているか
 fn hidden_by_front(scene: Scene<'_>, session: &Session, lm: &LayerMap, p: Point) -> bool {
     (lm.first_idx + 1..scene.len()).any(|i| {
@@ -1501,14 +1509,7 @@ fn anchor_hover_in(
         }
     }
     best.map_or(HoverTarget::None, |(_, lm, v)| {
-        let (shape_id, contour_idx, seg_idx) = lm
-            .base
-            .map
-            .node_src
-            .get(v)
-            .copied()
-            .flatten()
-            .unwrap_or((0, 0, 0));
+        let (shape_id, contour_idx, seg_idx) = node_on_shape(scene, lm, v);
         HoverTarget::Vertex {
             shape_id,
             contour_idx,
@@ -1572,14 +1573,7 @@ pub(crate) fn reshape_hover(
         }
     }
     if let Some((_, lm, v)) = best_v {
-        let (shape_id, contour_idx, seg_idx) = lm
-            .base
-            .map
-            .node_src
-            .get(v)
-            .copied()
-            .flatten()
-            .unwrap_or((0, 0, 0));
+        let (shape_id, contour_idx, seg_idx) = node_on_shape(scene, lm, v);
         return HoverTarget::Vertex {
             shape_id,
             contour_idx,
@@ -2721,11 +2715,7 @@ impl PlanarMap {
                 ..*e
             }))
             .collect();
-        PlanarMap {
-            node_src: vec![None; nodes.len()],
-            nodes,
-            edges,
-        }
+        PlanarMap { nodes, edges }
     }
 
     /// i_overlay に入れる辺（設計 2-1）。`fed` の辺と重ねる線 `seeds` の折れ線の近くを通る辺を足し、
@@ -3825,11 +3815,7 @@ impl PlanarMap {
             })
             .reduce(|x, y| x.union(y))
             .map(|r| r.inflate(GRID_REACH, GRID_REACH));
-        let map = PlanarMap {
-            node_src: vec![None; nodes.len()],
-            nodes,
-            edges,
-        };
+        let map = PlanarMap { nodes, edges };
         let mut restorer = ChainRestorer::new(map, active);
         for (c, ids) in chains.iter().zip(&chain_edges) {
             restorer.restore(c, ids);

@@ -520,7 +520,6 @@ impl SavedScopeMap {
                 .map(|i| Point::new(self.nodes[2 * i], self.nodes[2 * i + 1]))
                 .collect(),
             edges,
-            node_src: vec![None; n],
         };
         if !map.is_valid() {
             return Err(broken());

@@ -21440,7 +21440,6 @@ fn test_merge_degree2_does_not_fold_nearly_straight_pair() {
             edge(0, 1, Point::new(298.09170660744206, 299.68519765994796)),
             edge(1, 2, Point::new(304.9726635572615, 274.7654969283734)),
         ],
-        node_src: vec![None; 3],
     };
     map.merge_degree2(kurbo::Rect::new(0.0, 0.0, 1000.0, 1000.0));
     let hull = kurbo::Rect::from_points(a, b)
@@ -21868,7 +21867,6 @@ mod map_overlay {
         let mut m = PlanarMap {
             nodes: Vec::new(),
             edges: Vec::new(),
-            node_src: Vec::new(),
         };
         for k in 0..n {
             let next = if k % 4 == 3 {
@@ -21916,7 +21914,6 @@ mod map_overlay {
         let mut m = PlanarMap {
             nodes: Vec::new(),
             edges: Vec::new(),
-            node_src: Vec::new(),
         };
         for k in 0..steps {
             let next = if k % 4 == 3 {
@@ -22489,7 +22486,6 @@ mod map_overlay {
                 edge(2, 3, b.midpoint(c)),
                 edge(3, 0, c.midpoint(a)),
             ],
-            node_src: vec![None; 4],
         };
         assert!(valid(&m));
         let before = m.clone();
@@ -22581,7 +22577,6 @@ mod map_overlay {
                 left_src: None,
                 right_src: None,
             });
-            m.node_src = vec![None; m.nodes.len()];
             m
         };
         assert!(
@@ -24905,10 +24900,8 @@ mod map_overlay {
                 for m in kf.cel.maps.iter() {
                     if seen_maps.insert(std::sync::Arc::as_ptr(&m.base) as usize) {
                         let pm = &m.base.map;
-                        map_bytes += pm.edges.len() * std::mem::size_of::<MapEdge>()
-                            + pm.nodes.len() * 16
-                            + pm.node_src.len()
-                                * std::mem::size_of::<Option<(u64, usize, usize)>>();
+                        map_bytes +=
+                            pm.edges.len() * std::mem::size_of::<MapEdge>() + pm.nodes.len() * 16;
                     }
                 }
                 for sh in kf.cel.shapes.iter() {
