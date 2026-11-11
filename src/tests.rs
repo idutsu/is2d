@@ -21725,6 +21725,138 @@ mod map_overlay {
         Ok(m)
     }
 
+    /// 地図だけで描いた地図に、頂点のすぐそば（1e-6〜1e-3px）を通る直線の縁の形と、前に重ねた形を 0〜1e-3px ずらした形を
+    /// 重ね、正しい地図でない結果を数える（レビュー 4a9ea60 の N-1001）
+    #[test]
+    #[ignore]
+    fn probe_near_vertex_overlays() {
+        let seeds: u64 = std::env::var("PROBE_SEEDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+        let steps: usize = std::env::var("PROBE_STEPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+        // 中心 `c`、向き `u`、長さ 2·len・幅 w の長方形（直線の縁）
+        let bar = |c: Point, u: KVec2, len: f64, w: f64, color: Color32| {
+            let n = KVec2::new(-u.y, u.x);
+            let pts = [
+                c - u * len,
+                c + u * len,
+                c + u * len + n * w,
+                c - u * len + n * w,
+            ];
+            let segs: Vec<QuadBez> = (0..4)
+                .map(|i| {
+                    let (a, b) = (pts[i], pts[(i + 1) % 4]);
+                    QuadBez::new(a, a.midpoint(b), b)
+                })
+                .collect();
+            FillShape::new(color, crate::vector_engine::Contour::new(segs), Vec::new())
+        };
+        let run = |seed: u64| -> (usize, usize, Vec<String>) {
+            let (mut n, mut bad) = (0, 0);
+            let mut notes = Vec::new();
+            let Ok(mut m) = native_run(seed, 40) else {
+                return (0, 0, notes);
+            };
+            let mut r = Rng(seed * 104_729 + 7);
+            let mut last: Vec<FillShape> = Vec::new();
+            for k in 0..steps {
+                if m.edges.is_empty() {
+                    break;
+                }
+                let color = colors[(r.f() * 4.0) as usize % 4];
+                let shapes: Vec<FillShape> = if k % 2 == 0 || last.is_empty() {
+                    // 頂点のすぐそばを通る縁（直線の縁か、ブラシの縁。縁のいちばん近い点が、頂点から d の所に来るよう動かす）
+                    let v = m.edges[(r.f() * m.edges.len() as f64) as usize % m.edges.len()].a;
+                    let ang = r.f() * std::f64::consts::TAU;
+                    let u = KVec2::new(ang.cos(), ang.sin());
+                    let d = [0.0, 1e-6, 1e-5, 1e-4, 1e-3][(r.f() * 5.0) as usize % 5];
+                    let shape = if k % 4 == 0 {
+                        bar(
+                            m.nodes[v],
+                            u,
+                            20.0 + r.f() * 60.0,
+                            2.0 + r.f() * 10.0,
+                            color,
+                        )
+                    } else {
+                        let p0 = m.nodes[v] + u * (r.f() * 40.0 - 20.0);
+                        let pts: Vec<Point> = (0..=12)
+                            .map(|j| {
+                                let t = j as f64 / 12.0;
+                                p0 + u * (t * 80.0)
+                                    + KVec2::new(-u.y, u.x) * ((t * 6.0).sin() * 8.0)
+                            })
+                            .collect();
+                        build_smoothed_stroke_shapes_at_zoom(
+                            &generate_brush_outline_at_zoom(&pts, 2.0 + r.f() * 8.0, 1.0),
+                            color,
+                            1.0,
+                        )
+                        .remove(0)
+                    };
+                    let near = shape
+                        .contours()
+                        .flat_map(|c| c.segments.iter())
+                        .map(|q| q.eval(kurbo::ParamCurveNearest::nearest(q, m.nodes[v], 1e-12).t))
+                        .min_by(|a, b| {
+                            (*a - m.nodes[v])
+                                .hypot()
+                                .total_cmp(&(*b - m.nodes[v]).hypot())
+                        })
+                        .unwrap_or(m.nodes[v]);
+                    let ang2 = r.f() * std::f64::consts::TAU;
+                    let t = kurbo::Affine::translate(
+                        (m.nodes[v] - near) + KVec2::new(ang2.cos(), ang2.sin()) * d,
+                    );
+                    let mut shape = shape;
+                    shape.transform(t);
+                    vec![shape]
+                } else {
+                    // 前に重ねた形を、ごくわずかずらしてなぞり直す
+                    let ang = r.f() * std::f64::consts::TAU;
+                    let d = r.f() * 1e-3;
+                    let t = kurbo::Affine::translate(KVec2::new(ang.cos(), ang.sin()) * d);
+                    last.iter()
+                        .map(|s| {
+                            let mut s = s.clone();
+                            s.transform(t);
+                            s
+                        })
+                        .collect()
+                };
+                let rule = MapRule::Paint(if k % 5 == 4 { None } else { Some(color) });
+                let Some(next) = m.overlay(MapInput::Shapes(&shapes), rule) else {
+                    continue;
+                };
+                n += 1;
+                if !next.is_valid() {
+                    bad += 1;
+                    if notes.len() < 3 {
+                        notes.push(format!("seed {seed} step {k}: {}", next.validity_report()));
+                    }
+                    continue;
+                }
+                last = shapes;
+                m = next;
+            }
+            (n, bad, notes)
+        };
+        let results =
+            crate::planar_map::per_layer_parallel(&(0..seeds).collect::<Vec<_>>(), |&s| run(s));
+        let (n, bad) = results.iter().fold((0, 0), |a, x| (a.0 + x.0, a.1 + x.1));
+        for x in &results {
+            for note in &x.2 {
+                eprintln!("PROBE   {note}");
+            }
+        }
+        eprintln!("PROBE 頂点のそば・ずらしたなぞり直し {n} 回：正しくない地図 {bad}");
+    }
+
     /// 地図だけで描いた地図で、画面から届く輪郭の変形（頂点の移動と、両端から 9px より遠い所の引っぱり。2〜62px）を確定し、
     /// 正しい地図でない結果・取り消し（結果が元のまま）・動かした所の外で色が変わった所を数える（レビュー 08c15dd の N-1002）
     #[test]
