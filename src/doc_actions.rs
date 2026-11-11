@@ -5,11 +5,11 @@ use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layer_map,
-    edit_layers, edit_scope_map, editable_layer_ids, focus_active_layer_by_id,
+    edit_layers, editable_layer_ids, finish_cel_writes, focus_active_layer_by_id,
     focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
     reset_session_after_timeline_change, select_shapes_for_timeline_selection, set_tool,
-    show_notice, toggle_select_sub_mode, Clipboard, CoalesceKey, HoverTarget, LayerId, MapOwner,
-    NoticeKind, SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
+    show_notice, toggle_select_sub_mode, write_scope_map, Clipboard, CoalesceKey, HoverTarget,
+    LayerId, MapOwner, NoticeKind, SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
@@ -990,22 +990,29 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
                 .filter(|s| s.layer_id == *layer_id && s.group_path == *group_path)
                 .all(&picked)
         });
-        let mut moved: HashSet<crate::canvas_tool::ShapeId> = HashSet::new();
-        for (layer_id, group_path) in &scopes {
-            moved.extend(
-                tab.session
-                    .base_cache
-                    .shapes()
+        let moved: HashSet<crate::canvas_tool::ShapeId> = tab
+            .session
+            .base_cache
+            .shapes()
+            .iter()
+            .filter(|s| {
+                scopes
                     .iter()
-                    .filter(|s| s.layer_id == *layer_id && s.group_path == *group_path)
-                    .map(|s| s.shape_id),
-            );
-            if edit_scope_map(tab, *layer_id, group_path, |base| {
+                    .any(|x| x.0 == s.layer_id && x.1 == s.group_path)
+            })
+            .map(|s| s.shape_id)
+            .collect();
+        let mut written: Vec<LayerId> = Vec::new();
+        for (layer_id, group_path) in &scopes {
+            if write_scope_map(tab, *layer_id, group_path, |base| {
                 crate::planar_map::realized(&base.map, doc)
-            }) {
-                any_transformed = true;
+            }) && !written.contains(layer_id)
+            {
+                written.push(*layer_id);
             }
         }
+        any_transformed |= !written.is_empty();
+        finish_cel_writes(tab, &written);
         // インスタンスと、地図ごと動かさなかった図形は、図形を動かす
         edit_layers(tab, &target_lids, |edit| {
             for s in &mut edit.shapes {

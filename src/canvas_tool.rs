@@ -899,10 +899,9 @@ mod scene_base_cache {
             (loaded_shapes, target_ranges, untouched)
         }
 
-        /// `edit_layers` の書き戻し後、図形をレイヤー順の平らな列へ戻し、変更されたレイヤーの `cel_sig` を無効化する
+        /// `edit_layers` の書き戻し後、図形をレイヤー順の平らな列へ戻す（書いたレイヤーの作り直しは `finish_cel_writes`）
         pub(crate) fn replace_edited_layers(
             &mut self,
-            modified_lids: &[LayerId],
             mut edited_by_lid: HashMap<LayerId, Vec<FillShape>>,
             mut untouched: HashMap<LayerId, Vec<FillShape>>,
         ) {
@@ -915,9 +914,6 @@ mod scene_base_cache {
                     new_flat.extend(shapes);
                 }
                 cl.range = start..new_flat.len();
-                if modified_lids.contains(&cl.layer_id) {
-                    cl.cel_sig = None;
-                }
             }
             self.flat_shapes = new_flat;
         }
@@ -3330,22 +3326,29 @@ pub(crate) fn edit_layers(
     };
 
     mutate_tl(tab.active_timeline_raw_mut());
-    if !modified_lids.is_empty() {
+    tab.session
+        .base_cache
+        .replace_edited_layers(edited_by_lid, untouched_layers);
+    tab.doc.next_group_id = next_group_id;
+    finish_cel_writes(tab, &modified_lids);
+    !modified_lids.is_empty()
+}
+
+/// セル画を書いたあとの後始末。セル画を書く入口（`edit_layers`・`write_scope_map`）のあとに、書いたレイヤーの一覧
+/// `lids` で1回だけ呼ぶ：書いたレイヤーがあれば、編集中のシンボルの版と `Document::revision` を上げ、画面の土台のその
+/// レイヤーを作り直す。編集中の階層が無くなっていれば、ある所まで戻る
+pub(crate) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
+    if !lids.is_empty() {
         if let Some(idx) = tab.active_symbol_index() {
             tab.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
             tab.doc.bump_revision();
         }
+        for &lid in lids {
+            tab.session.base_cache.invalidate_layer(lid);
+        }
     }
-
-    let any_cel_modified = !modified_lids.is_empty();
-    tab.session
-        .base_cache
-        .replace_edited_layers(&modified_lids, edited_by_lid, untouched_layers);
     tab.refresh_scene_base();
-
-    tab.doc.next_group_id = next_group_id;
     tab.session.sanitize_editing_scope();
-    any_cel_modified
 }
 
 /// 地図の編集：今のコマ・今の階層の、レイヤー `layer_id` のセル画の地図（文書の座標）を `f` で編集する（`Cel::edit_map`。
@@ -3366,34 +3369,38 @@ pub(crate) fn edit_scope_map(
     scope: &[u64],
     f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::PlanarMap>,
 ) -> bool {
-    tab.refresh_scene_base();
-    let changed = {
-        let tl = tab.active_timeline_raw_mut();
-        let frame = tl.current_frame;
-        let Some(layer) = tl
-            .layers
-            .iter_mut()
-            .find(|l| l.id == layer_id && l.is_editable_at(frame))
-        else {
-            return false;
-        };
-        let Some(kf) = layer.keyframe_index_at(frame) else {
-            return false;
-        };
-        Arc::make_mut(&mut layer.keyframes[kf])
-            .cel
-            .edit_map(layer_id, scope, f)
+    let written: Vec<LayerId> = write_scope_map(tab, layer_id, scope, f)
+        .then_some(layer_id)
+        .into_iter()
+        .collect();
+    finish_cel_writes(tab, &written);
+    !written.is_empty()
+}
+
+/// 今のコマの、レイヤー `layer_id` の階層 `scope` のセル画の地図を `f` で編集する（`Cel::edit_map`）。後始末はしない
+/// ので、いくつかのレイヤー・階層を書いたあとに、書いたレイヤーで `finish_cel_writes` を1回呼ぶ。`false`：編集できない
+/// （ロック・非表示・キーフレームが無い・地図にできない）か、変わらない
+pub(crate) fn write_scope_map(
+    tab: &mut Tab,
+    layer_id: LayerId,
+    scope: &[u64],
+    f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::PlanarMap>,
+) -> bool {
+    let tl = tab.active_timeline_raw_mut();
+    let frame = tl.current_frame;
+    let Some(layer) = tl
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id && l.is_editable_at(frame))
+    else {
+        return false;
     };
-    if changed {
-        if let Some(idx) = tab.active_symbol_index() {
-            tab.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
-            tab.doc.bump_revision();
-        }
-        tab.session.base_cache.invalidate_layer(layer_id);
-        tab.refresh_scene_base();
-        tab.session.sanitize_editing_scope();
-    }
-    changed
+    let Some(kf) = layer.keyframe_index_at(frame) else {
+        return false;
+    };
+    Arc::make_mut(&mut layer.keyframes[kf])
+        .cel
+        .edit_map(layer_id, scope, f)
 }
 
 /// 現在の編集スコープ（グループ内であればそのグループの所属レイヤー、そうでなければ現在のアクティブレイヤー）の `layer_id` を返す
@@ -3600,7 +3607,7 @@ pub(crate) fn merge_pieces_layer_by_layer(
 }
 
 /// 浮いた片 `fl` を確定する：レイヤーごとに、残りの地図（無ければセル画の地図）に片の組を下から順に重ねた地図
-/// （`FloatLayer::committed`）を、そのセル画の地図にする（`edit_layer_map`。図形はその地図の面）。重ねる計算は
+/// （`FloatLayer::committed`）を、そのセル画の地図にする（`write_scope_map`。図形はその地図の面）。重ねる計算は
 /// レイヤーをまたがないので、2つ以上あれば同時にする。片を重ねられない（格子に置けない座標がある）レイヤーは、残りだけを
 /// 書き、片は浮いた片のまま残す（失わない）。戻り値は、セル画を書き換えたか
 pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: Floating) -> bool {
@@ -3609,7 +3616,8 @@ pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: Floating) -> bool {
         let stage = tab.session.stage();
         crate::planar_map::per_layer_parallel(fl.layers(), |l| l.committed_on(stage))
     };
-    let mut any = false;
+    let scope = tab.session.editing_group_path.clone();
+    let mut written: Vec<LayerId> = Vec::new();
     let mut left = Floating::new(true);
     for (l, next) in fl.layers().iter().zip(nexts) {
         let next = match next {
@@ -3620,9 +3628,13 @@ pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: Floating) -> bool {
             }
         };
         if let Some(next) = next {
-            any |= edit_layer_map(tab, l.layer_id, |_| Some(next));
+            if write_scope_map(tab, l.layer_id, &scope, |_| Some(next)) {
+                written.push(l.layer_id);
+            }
         }
     }
+    finish_cel_writes(tab, &written);
+    let any = !written.is_empty();
     if !left.is_empty() {
         tab.session.set_floating(Some(left));
         tab.session.select_floating_pieces();

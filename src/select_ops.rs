@@ -541,9 +541,13 @@ pub(crate) fn prepare_group_selected_shapes(
     // 浮いた片の地図を、新しいグループの階層の地図にする（図形はその面。番号は片の番号のまま）
     let mut group_path = tab.session.editing_group_path.clone();
     group_path.push(new_gid);
+    let mut written = Vec::new();
     for (layer_id, map) in pieces {
-        crate::canvas_tool::edit_scope_map(tab, layer_id, &group_path, |_| Some(map));
+        if crate::canvas_tool::write_scope_map(tab, layer_id, &group_path, |_| Some(map)) {
+            written.push(layer_id);
+        }
     }
+    crate::canvas_tool::finish_cel_writes(tab, &written);
     tab.session.selection = selection;
     tab.session.retain_existing_selection();
 
