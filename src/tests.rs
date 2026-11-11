@@ -24878,6 +24878,59 @@ mod map_overlay {
 
     /// 強さ・速さの試し（ふだんは流さない）：レビューと同じ条件で、矩形選択・動かして離す・`Alt` 複製・貼り付けの時間を測る。
     /// 結果の各レイヤーの地図が壊れていないかも見る
+    /// Undo の控えのメモリ（2-2 の設計 3章）：図形の多い場面で、ブラシを 100 本描いたあとの Undo の控えが持つ地図と図形の
+    /// 大きさ（同じ `Arc` は1回だけ数える）
+    #[test]
+    #[ignore]
+    fn probe_undo_memory() {
+        use crate::planar_map::MapEdge;
+        let mut app = dense_scene_app(7);
+        let mut r = Rng(11);
+        for _ in 0..100 {
+            app.tool.brush_color = Color32::from_rgb((r.f() * 255.0) as u8, 90, 160);
+            let a = Point::new(-350.0 + r.f() * 700.0, -200.0 + r.f() * 400.0);
+            let pts: Vec<Point> = (0..=12)
+                .map(|j| a + KVec2::new(j as f64 * 4.0, 20.0 * (j as f64 * 0.4).sin()))
+                .collect();
+            doc_actions::commit_raw_outline(
+                &mut app,
+                &generate_brush_outline(&pts, 3.0 + r.f() * 5.0),
+            );
+        }
+        let mut seen_maps: std::collections::HashSet<usize> = Default::default();
+        let mut seen_shapes: std::collections::HashSet<usize> = Default::default();
+        let (mut map_bytes, mut shape_bytes) = (0usize, 0usize);
+        let mut count = |tl: &timeline::Timeline| {
+            for kf in tl.layers.iter().flat_map(|l| &l.keyframes) {
+                for m in kf.cel.maps.iter() {
+                    if seen_maps.insert(std::sync::Arc::as_ptr(&m.base) as usize) {
+                        let pm = &m.base.map;
+                        map_bytes += pm.edges.len() * std::mem::size_of::<MapEdge>()
+                            + pm.nodes.len() * 16
+                            + pm.node_src.len()
+                                * std::mem::size_of::<Option<(u64, usize, usize)>>();
+                    }
+                }
+                for sh in kf.cel.shapes.iter() {
+                    if seen_shapes.insert(std::sync::Arc::as_ptr(sh) as usize) {
+                        shape_bytes +=
+                            sh.contours().map(|c| c.segments.len() * 48).sum::<usize>() + 200;
+                    }
+                }
+            }
+        };
+        let steps = app.history.undo_stack.len();
+        for e in app.history.undo_stack.iter() {
+            count(&e.timeline);
+        }
+        count(&app.doc.root);
+        eprintln!(
+            "PROBE Undo の控え {steps} 件：地図 {:.1}MB・図形 {:.1}MB（同じものは1回）",
+            map_bytes as f64 / 1e6,
+            shape_bytes as f64 / 1e6
+        );
+    }
+
     /// 図形の多い場面（`dense_scene_app`）での、ブラシ・消しゴム1本の時間（30 本ずつ、平均と最大）
     #[test]
     #[ignore]
