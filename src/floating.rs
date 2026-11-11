@@ -9,27 +9,28 @@ use std::sync::Arc;
 use eframe::egui::Color32;
 use kurbo::Affine;
 
-use crate::canvas_tool::{LayerId, Placement, ShapeId};
+use crate::canvas_tool::{LayerId, Placement, SceneBaseCache, ShapeId};
 use crate::planar_map::{
-    apply_map_change, apply_shape_diff, cut_out, faces_with_ids, layer_own, per_layer_parallel,
-    realized, region_map, LayerBase, MapChange, MapInput, MapRule, PlanarMap,
+    cut_out, faces_with_ids, per_layer_parallel, realized, region_map, LayerBase, MapChange,
+    MapInput, MapRule, PlanarMap,
 };
 use crate::vector_engine::FillShape;
 
-/// 浮いた片の操作に要る画面の土台：セル画の図形（ステージの写し）・編集中の階層・ステージへの変換
+/// 浮いた片の操作に要る画面の土台：画面に出しているセル画（`SceneBaseCache`）・編集中の階層・ステージへの変換
 #[derive(Clone, Copy)]
 pub(crate) struct Stage<'a> {
-    pub(crate) shapes: &'a [FillShape],
+    pub(crate) base: &'a SceneBaseCache,
     pub(crate) scope: &'a [u64],
     pub(crate) world: Affine,
 }
 
 impl Stage<'_> {
-    /// レイヤー `layer_id` の、編集中の階層の生の図形（ステージの写し）と、その地図（セル画の地図）
+    /// レイヤー `layer_id` の、編集中の階層の生の図形（文書の図形）と、その地図（セル画の地図）。`None`：編集できない
+    /// レイヤーか、地図にできない
     fn cel(&self, layer_id: LayerId) -> Option<(Vec<&FillShape>, Arc<LayerBase>)> {
-        let own = layer_own(self.shapes, layer_id, self.scope);
-        let base = LayerBase::of(&own, self.world)?;
-        Some((own, base))
+        let cel = self.base.cel(layer_id)?;
+        let base = cel.scope_base(self.scope)?;
+        Some((cel.scope_shapes(self.scope), base))
     }
 }
 
@@ -97,19 +98,15 @@ pub(crate) struct Origin {
 }
 
 impl Origin {
-    /// セル画との差分 `change`（残りの地図）から。差分が無ければ（何も切れていない）`None`
-    fn of(change: MapChange, world: Affine) -> Option<Self> {
+    /// セル画との差分 `change`（残りの地図。文書の座標）から。差分が無ければ（何も切れていない）`None`
+    fn of(change: MapChange) -> Option<Self> {
         if change.removed.is_empty() && change.added.is_empty() {
             return None;
         }
         Some(Self {
             rest: Arc::new(LayerBase::new(&change.map, false)),
             hidden: change.removed,
-            remainder: change
-                .added
-                .iter()
-                .map(|s| s.in_doc(world).into_owned())
-                .collect(),
+            remainder: change.added,
         })
     }
 }
@@ -133,9 +130,15 @@ impl FloatLayer {
         self.origin.as_ref().map_or(&cel.map, |o| &o.rest.map)
     }
 
+    /// 画面の土台 `stage` のセル画の地図の上で確定した地図（`committed`）
+    pub(crate) fn committed_on(&self, stage: Stage<'_>) -> Option<PlanarMap> {
+        let (_, cel) = stage.cel(self.layer_id)?;
+        self.committed(&cel)
+    }
+
     /// 確定した地図：中身の地図に、片の組を下から順に重ねる（組ごとに変換をかけて、その座標の格子で正しい地図にする：
     /// `realized`）。`None`：格子に置けない座標がある
-    fn committed(&self, cel: &LayerBase) -> Option<PlanarMap> {
+    pub(crate) fn committed(&self, cel: &LayerBase) -> Option<PlanarMap> {
         let mut map = self.content(cel).clone();
         for g in &self.groups {
             let piece = realized(&g.base.map, g.xform)?;
@@ -193,10 +196,6 @@ impl Floating {
 
     pub(crate) fn layers(&self) -> &[FloatLayer] {
         &self.layers
-    }
-
-    pub(crate) fn layer_ids(&self) -> Vec<LayerId> {
-        self.layers.iter().map(|l| l.layer_id).collect()
     }
 
     /// 片の番号
@@ -424,11 +423,11 @@ impl Floating {
                 };
                 rest = m;
             }
-            let Some(mut change) = cel.diff(&rest, &own, layer_id, stage.scope, stage.world) else {
+            let Some(mut change) = cel.diff(&rest, &own, layer_id, stage.scope) else {
                 return false;
             };
             change.renew_ids();
-            l.origin = Origin::of(change, stage.world);
+            l.origin = Origin::of(change);
             l.groups = kept;
         }
         true
@@ -487,51 +486,21 @@ impl Floating {
         true
     }
 
+    /// レイヤー `l` の片の組を、残りなしで足す（確定できなかった片を浮いたまま残す）
+    pub(crate) fn keep_pieces_of(&mut self, l: &FloatLayer) {
+        if !l.groups.is_empty() {
+            self.layers.push(FloatLayer {
+                layer_id: l.layer_id,
+                origin: None,
+                groups: l.groups.clone(),
+            });
+        }
+    }
+
     /// 片を捨てる（削除：残りだけを確定する）
     pub(crate) fn drop_pieces(&mut self) {
         for l in &mut self.layers {
             l.groups.clear();
-        }
-    }
-
-    /// 確定：レイヤーごとに、残りの地図（無ければセル画の地図）に片の組を下から順に重ね（`FloatLayer::committed`）、
-    /// セル画の地図と比べて変わった図形だけを `shapes`（ステージの写し）に書き戻す（`apply_map_change`）。片を重ねられない
-    /// （格子に置けない座標がある）レイヤーは、残りを書き戻し、片を失わないよう重ねずに図形のまま足す。レイヤーをまたがない
-    /// ので、2つ以上あれば同時に計算する
-    pub(crate) fn commit_into(self, shapes: &mut Vec<FillShape>, scope: &[u64], world: Affine) {
-        let stage = Stage {
-            shapes,
-            scope,
-            world,
-        };
-        let changes: Vec<Option<(Option<MapChange>, bool)>> =
-            per_layer_parallel(&self.layers, |l| {
-                let (own, cel) = stage.cel(l.layer_id)?;
-                let (next, merged) = match l.committed(&cel) {
-                    Some(m) => (m, true),
-                    None => (l.content(&cel).clone(), false),
-                };
-                let change = cel.diff(&next, &own, l.layer_id, scope, world);
-                Some((change, merged))
-            });
-        for (l, change) in self.layers.iter().zip(changes) {
-            let Some((change, merged)) = change else {
-                continue;
-            };
-            if let Some(change) = change {
-                if !change.removed.is_empty() || !change.added.is_empty() {
-                    apply_map_change(shapes, change, l.layer_id, scope, world);
-                }
-            }
-            if !merged {
-                let raw: Vec<FillShape> = self
-                    .pieces
-                    .iter()
-                    .filter(|p| p.layer_id == l.layer_id)
-                    .cloned()
-                    .collect();
-                apply_shape_diff(shapes, &[], raw, l.layer_id, scope);
-            }
         }
     }
 
@@ -602,13 +571,7 @@ fn cut_layer(
         (None, None) => return Some(cur.clone()),
         // 面を丸ごと持ち上げる：中身から、その面を外す（面の番号はそのまま。片は前と同じ番号の図形）
         (Some(part), None) => (
-            cel.diff(
-                &content.without(ids),
-                &own,
-                layer_id,
-                stage.scope,
-                stage.world,
-            )?,
+            cel.diff(&content.without(ids), &own, layer_id, stage.scope)?,
             part,
         ),
         (part, Some(r)) => {
@@ -620,15 +583,7 @@ fn cut_layer(
                     MapInput::Map(&region_owned)
                 }
             };
-            let (rest, inside) = cut_out(
-                &cel,
-                &own,
-                content,
-                region,
-                layer_id,
-                stage.scope,
-                stage.world,
-            )?;
+            let (rest, inside) = cut_out(&cel, &own, content, region, layer_id, stage.scope)?;
             (rest, inside.map)
         }
     };
@@ -650,7 +605,7 @@ fn cut_layer(
     }
     Some(FloatLayer {
         layer_id,
-        origin: Origin::of(rest, stage.world),
+        origin: Origin::of(rest),
         groups,
     })
 }

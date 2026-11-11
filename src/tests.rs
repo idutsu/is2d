@@ -19988,7 +19988,6 @@ fn test_adding_base_shape_to_floating_selection_keeps_floating_piece_on_top() {
 /// 片のあるレイヤーが複数あるとき、レイヤーごとに同時に置いても、1レイヤーずつ順に置いたときと同じになる
 #[test]
 fn test_merging_floating_pieces_layer_by_layer_matches_merging_each_layer_in_turn() {
-    use crate::canvas_tool::{merge_floating_into_base_shapes, Floating};
     use crate::vector_engine::next_shape_id;
 
     let mut rng = fastrand::Rng::with_seed(7);
@@ -20032,17 +20031,6 @@ fn test_merging_floating_pieces_layer_by_layer_matches_merging_each_layer_in_tur
         })
         .collect();
 
-    let floating_of = |pieces: Vec<FillShape>| {
-        let mut fl = Floating::new(true);
-        let stage = crate::floating::Stage {
-            shapes: &[],
-            scope: &[],
-            world: Affine::IDENTITY,
-        };
-        fl.add_pieces(stage, &pieces);
-        fl.refresh(Affine::IDENTITY, &[], &[1, 2, 3]);
-        fl
-    };
     let mut in_turn = base_shapes.clone();
     for lid in 1u64..=3 {
         let layer_pieces = pieces
@@ -20050,23 +20038,11 @@ fn test_merging_floating_pieces_layer_by_layer_matches_merging_each_layer_in_tur
             .filter(|p| p.layer_id == lid)
             .cloned()
             .collect();
-        merge_floating_into_base_shapes(
-            &mut in_turn,
-            floating_of(layer_pieces),
-            &[],
-            &[1, 2, 3],
-            Affine::IDENTITY,
-        );
+        merge_shapes_into_canvas(&mut in_turn, layer_pieces);
     }
 
     let mut layer_by_layer = base_shapes;
-    merge_floating_into_base_shapes(
-        &mut layer_by_layer,
-        floating_of(pieces),
-        &[],
-        &[1, 2, 3],
-        Affine::IDENTITY,
-    );
+    merge_shapes_into_canvas(&mut layer_by_layer, pieces);
 
     assert!(layer_by_layer.len() > orig_count);
 
@@ -23413,7 +23389,6 @@ mod map_overlay {
     /// 同じ地図へ片を下から1つずつ塗る。結果のレイヤーは地図として壊れず、上の片が上に来て、下の絵は残る
     #[test]
     fn overlapping_pieces_are_painted_one_by_one_on_the_map() {
-        use crate::canvas_tool::{merge_floating_into_base_shapes, Floating};
         use crate::vector_engine::next_shape_id;
         // 線 60 本の絵と、それを (13, 7) ずらした写しを、1枚のレイヤーの片にする（片どうしが重なる）
         let app = review_repeat_scene(5);
@@ -23445,15 +23420,7 @@ mod map_overlay {
             .find(|p| !pieces.iter().any(|s| s.contains_point(*p)))
             .expect("覆われていない点");
         let t = std::time::Instant::now();
-        let mut fl = Floating::new(true);
-        let stage = crate::floating::Stage {
-            shapes: &shapes,
-            scope: &[],
-            world: Affine::IDENTITY,
-        };
-        fl.add_pieces(stage, &pieces);
-        fl.refresh(Affine::IDENTITY, &[], &[lid]);
-        merge_floating_into_base_shapes(&mut shapes, fl, &[], &[lid], Affine::IDENTITY);
+        merge_shapes_into_canvas(&mut shapes, pieces);
         eprintln!(
             "PROBE 重なり合う片の確定 {:.1}ms",
             t.elapsed().as_secs_f64() * 1e3
@@ -24670,15 +24637,7 @@ mod map_overlay {
             for _ in 0..3 {
                 let t = std::time::Instant::now();
                 let mut out = base.clone();
-                let mut fl = crate::canvas_tool::Floating::new(true);
-                let stage = crate::floating::Stage {
-                    shapes: &base,
-                    scope: &[],
-                    world: Affine::IDENTITY,
-                };
-                fl.add_pieces(stage, &pieces);
-                fl.refresh(Affine::IDENTITY, &[], &[]);
-                fl.commit_into(&mut out, &[], Affine::IDENTITY);
+                merge_shapes_into_canvas(&mut out, pieces.clone());
                 let ms = t.elapsed().as_secs_f64() * 1000.0;
                 let ok = out.len() != base.len();
                 eprintln!(

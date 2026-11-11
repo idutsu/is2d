@@ -1280,9 +1280,8 @@ impl LayerBase {
         Some(base)
     }
 
-    /// この地図を、座標の変換 `xform` で置いた図形 `own` から作ったとして（`of`）、編集した地図 `next` を図形に書き戻す
-    /// 差分（`MapChange`）。新しい形は、文書の座標の地図の面を `xform` で置いた写し（書き戻しで文書の座標の形をそのまま
-    /// 使う：`FillShape::place`）。塗り重ねて作り直した地図なら、図形を全部書き換える。
+    /// この地図（文書の座標）を、文書の図形 `own`（この地図の面）から作ったとして、編集した地図 `next` を図形に書き戻す
+    /// 差分（`MapChange`。新しい形も文書の座標）。塗り重ねて作り直した地図なら、図形を全部書き換える。
     /// `None`：`next` に壊れた輪郭がある（`written_faces`）
     pub(crate) fn diff(
         &self,
@@ -1290,7 +1289,6 @@ impl LayerBase {
         own: &[&FillShape],
         layer_id: LayerId,
         group_path: &[u64],
-        xform: Affine,
     ) -> Option<MapChange> {
         let faces = written_faces(next)?;
         let (removed, added, ids) = if self.repainted {
@@ -1306,15 +1304,28 @@ impl LayerBase {
                     .map(|e| edge_key(&self.map, e))
                     .collect()
             });
-            with_doc_shapes(own, xform, |own| {
-                rewrite_shapes(&self.map, keys, next, &faces, own, layer_id, group_path)
-            })
+            rewrite_shapes(&self.map, keys, next, &faces, own, layer_id, group_path)
         };
         Some(MapChange {
             removed,
-            added: added.into_iter().map(|d| placed(d, xform)).collect(),
+            added,
             map: labeled(next.clone(), &faces, &ids),
         })
+    }
+
+    /// `diff` を、座標の変換 `xform` で置いた図形 `own` で受け取り、新しい形を `xform` で置いた写しで返すもの
+    pub(crate) fn diff_placed(
+        &self,
+        next: &PlanarMap,
+        own: &[&FillShape],
+        layer_id: LayerId,
+        group_path: &[u64],
+        xform: Affine,
+    ) -> Option<MapChange> {
+        let mut change =
+            with_doc_shapes(own, xform, |own| self.diff(next, own, layer_id, group_path))?;
+        change.added = change.added.into_iter().map(|d| placed(d, xform)).collect();
+        Some(change)
     }
 }
 
@@ -1948,7 +1959,7 @@ pub(crate) fn reshape_result(
     xform: Affine,
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
     let next = edit.apply(&base.map)?;
-    let change = base.diff(
+    let change = base.diff_placed(
         &next,
         &layer_own(orig_shapes, layer_id, group_path),
         layer_id,
@@ -1980,6 +1991,7 @@ pub(crate) fn per_layer_parallel<T: Sync, R: Send>(
 /// 差分を図形の並びに入れる。新しい形は、消した図形のうち最初のものの位置に入れる。
 /// 何も消さないとき（何も無い所へのブラシなど）は、レイヤー `layer_id`・階層 `group_path` の生の図形の置き場
 /// （グループ・シンボルより下）に入れる
+#[cfg(test)]
 pub(crate) fn apply_shape_diff(
     shapes: &mut Vec<FillShape>,
     removed: &[ShapeId],
@@ -2009,6 +2021,7 @@ pub(crate) struct MapChange {
 /// 地図で編集した差分 `change` を、図形の並び `shapes`（座標の変換 `xform` で置いた図形）のレイヤー `layer_id`・階層
 /// `group_path` に入れ（`apply_shape_diff`）、入れたあとのその階層の生の図形の本当の地図として、結果の地図を索引と
 /// しまい場所に入れる（セル画に書き戻すときに、その階層の地図をこれにする：`Cel::set_shared_parts`）
+#[cfg(test)]
 pub(crate) fn apply_map_change(
     shapes: &mut Vec<FillShape>,
     change: MapChange,
@@ -2235,30 +2248,6 @@ pub(crate) fn faces_with_ids(
     (labeled(map.clone(), &faces, &ids), shapes)
 }
 
-/// 地図ごと動かす・変形する階層（選んだグループの中の階層）：図形 `own`（1つの階層の生の図形を全部。座標の変換 `world`
-/// で置いた写し）の地図に、文書の座標の変換 `doc` をかけて、その座標の格子で正しい地図にし（`realized`）、その面を新しい
-/// 図形にする（番号はそのまま。面の番号が1つに決まらない面は新しい番号：`faces_with_ids`）。新しい図形の地図として、
-/// 本当の地図の索引に入れる（セル画に書くとき、図形から作り直さない。書き終えるまで、返す地図を持っておくこと）。
-/// 戻り値は（新しい図形（`world` で置いた写し）, 地図）。`None`：格子に置けない座標がある
-pub(crate) fn transformed_scope(
-    own: &[&FillShape],
-    world: Affine,
-    doc: Affine,
-) -> Option<(Vec<FillShape>, StoredMap)> {
-    let base = LayerBase::of(own, world)?;
-    let (layer_id, group_path) = (own.first()?.layer_id, own[0].group_path.clone());
-    let (map, faces) = faces_with_ids(&realized(&base.map, doc)?, layer_id, &group_path);
-    let refs: Vec<&FillShape> = faces.iter().collect();
-    let stored = register_map(
-        &MapKey::new(&refs, Affine::IDENTITY),
-        StoredMap::from_dense(&map),
-    );
-    Some((
-        faces.into_iter().map(|f| placed(f, world)).collect(),
-        stored,
-    ))
-}
-
 /// 選ぶ所の地図：地図 `parts`（同じ地図から切り出した、重ならない面）を合わせた所に、形 `rect` を足した所（色のある所が
 /// 中）。`None`：格子に置けない座標がある
 pub(crate) fn region_map(parts: &[&PlanarMap], rect: Option<&FillShape>) -> Option<PlanarMap> {
@@ -2281,7 +2270,7 @@ pub(crate) fn region_map(parts: &[&PlanarMap], rect: Option<&FillShape>) -> Opti
     Some(m)
 }
 
-/// 浮いた片を切り出す：セル画の地図 `cel`（座標の変換 `xform` で置いた図形 `own` から引いた地図）の、中身 `content`
+/// 浮いた片を切り出す：セル画の地図 `cel`（文書の図形 `own` の地図）の、中身 `content`
 /// （`cel` の地図そのものか、前に切り出した残り）を、選ぶ所 `region` で1回切る。（残りの差分, 中の差分）：残りの差分の
 /// 消す図形が隠す図形、新しく入れる形が残りの図形、地図が残りの地図。中の差分の地図が片の地図（丸ごと中にあるセル画の
 /// 面は、その番号のまま）。新しく入れる形は、隠す元の図形とは別の新しい図形なので、番号を新しく振る（地図の印も）。
@@ -2293,12 +2282,11 @@ pub(crate) fn cut_out(
     region: MapInput<'_>,
     layer_id: LayerId,
     group_path: &[u64],
-    xform: Affine,
 ) -> Option<(MapChange, MapChange)> {
     let inside = content.overlay(region, MapRule::KeepInside)?;
     let rest = content.overlay(region, MapRule::Paint(None))?;
-    let mut rest_change = cel.diff(&rest, own, layer_id, group_path, xform)?;
-    let mut inside_change = cel.diff(&inside, own, layer_id, group_path, xform)?;
+    let mut rest_change = cel.diff(&rest, own, layer_id, group_path)?;
+    let mut inside_change = cel.diff(&inside, own, layer_id, group_path)?;
     rest_change.renew_ids();
     inside_change.renew_ids();
     Some((rest_change, inside_change))
@@ -2335,6 +2323,7 @@ pub(crate) fn remember_map(key: MapKey, base: Arc<LayerBase>) {
 
 /// 地図で編集した結果
 #[derive(Debug)]
+#[cfg(test)]
 pub(crate) enum MapEditOutcome {
     /// 形が変わった
     Changed(MapChange),
@@ -2345,46 +2334,52 @@ pub(crate) enum MapEditOutcome {
 }
 
 /// レイヤー `target_layer_id`・階層 `target_group_path` の生の図形の置き場（その階層の生の図形の後ろ。グループ・シンボルより下）
-pub(crate) fn raw_scope_insert_index(
-    canvas: &[FillShape],
+pub(crate) fn raw_scope_insert_index<S: std::borrow::Borrow<FillShape>>(
+    canvas: &[S],
     target_layer_id: u64,
     target_group_path: &[u64],
 ) -> usize {
-    canvas
-        .iter()
-        .rposition(|s| {
+    let at = |i: usize| canvas[i].borrow();
+    let n = canvas.len();
+    (0..n)
+        .rev()
+        .find(|&i| {
+            let s = at(i);
             s.layer_id == target_layer_id
                 && s.group_path == target_group_path
                 && s.symbol_instance.is_none()
         })
         .map(|pos| pos + 1)
         .or_else(|| {
-            canvas.iter().position(|s| {
+            (0..n).find(|&i| {
+                let s = at(i);
                 s.layer_id == target_layer_id
                     && s.is_in_editing_scope(target_group_path)
                     && !s.is_raw_at_scope(target_group_path)
             })
         })
         .or_else(|| {
-            canvas
-                .iter()
-                .rposition(|s| {
+            (0..n)
+                .rev()
+                .find(|&i| {
+                    let s = at(i);
                     s.layer_id == target_layer_id && s.is_in_editing_scope(target_group_path)
                 })
                 .map(|pos| pos + 1)
         })
         .or_else(|| {
-            canvas
-                .iter()
-                .rposition(|s| s.layer_id == target_layer_id)
+            (0..n)
+                .rev()
+                .find(|&i| at(i).layer_id == target_layer_id)
                 .map(|pos| pos + 1)
         })
-        .unwrap_or(canvas.len())
+        .unwrap_or(n)
 }
 
 /// 図形の並び `shapes`（座標の変換 `xform` で置いた図形）のうち、レイヤー `layer_id`・階層 `group_path` の生の図形を地図に
 /// して（`LayerBase::of`。文書の座標の地図）、`edit` で編集した差分。`edit` に渡す形・点も文書の座標にしておく。地図を
 /// 塗り重ねて作り直したとき（壊れた地図）は、レイヤーの生の図形を全部書き直す
+#[cfg(test)]
 pub(crate) fn map_edit_diff(
     shapes: &[FillShape],
     layer_id: LayerId,
@@ -2397,7 +2392,7 @@ pub(crate) fn map_edit_diff(
         return MapEditOutcome::Refused;
     };
     let Some(change) =
-        edit(&base.map).and_then(|next| base.diff(&next, &own, layer_id, group_path, xform))
+        edit(&base.map).and_then(|next| base.diff_placed(&next, &own, layer_id, group_path, xform))
     else {
         return MapEditOutcome::Refused;
     };

@@ -4,8 +4,8 @@ use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
     cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
-    editable_layer_ids, merge_floating_into_base_shapes, sync_timeline_layer_from_canvas_selection,
-    ActiveCanvasDrag, HoverTarget, LayerId, Scene, SelectSubMode, Session, ShapeId, Tab,
+    editable_layer_ids, sync_timeline_layer_from_canvas_selection, ActiveCanvasDrag, HoverTarget,
+    LayerId, Scene, SelectSubMode, Session, ShapeId, Tab,
 };
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
@@ -830,19 +830,13 @@ pub(crate) fn prepare_delete_selected_shapes(
 
     before_mutate(tab);
 
-    let fl_opt = tab.session.take_floating();
+    // 浮いた片は捨て、残りだけを確定する
+    if let Some(mut fl) = tab.session.take_floating() {
+        fl.drop_pieces();
+        crate::canvas_tool::commit_floating_layers(tab, fl);
+    }
     let selection = std::mem::take(&mut tab.session.selection);
     edit_layers(tab, &layer_ids, |edit| {
-        if let Some(mut fl) = fl_opt {
-            fl.drop_pieces();
-            merge_floating_into_base_shapes(
-                &mut edit.shapes,
-                fl,
-                &edit.editing_group_path,
-                &edit.layer_order_ids,
-                edit.world_xform,
-            );
-        }
         edit.shapes.retain(|s| !selection.contains_shape(s));
     });
     tab.session.transform_pivot = None;

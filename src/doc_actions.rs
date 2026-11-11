@@ -4,19 +4,17 @@ use eframe::egui::{Color32, Vec2};
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
-    editable_layer_ids, focus_active_layer_by_id, focus_active_layer_to_shape_by_id,
-    insert_and_select_shapes_in_scope, reset_session_after_timeline_change,
-    select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode, Clipboard,
-    CoalesceKey, HoverTarget, LayerId, MapOwner, NoticeKind, SelectSubMode, StatusToast, Tab, Tool,
-    ToolSettings, UndoEntry,
+    active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layer_map,
+    edit_layers, edit_scope_map, editable_layer_ids, focus_active_layer_by_id,
+    focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
+    reset_session_after_timeline_change, select_shapes_for_timeline_selection, set_tool,
+    show_notice, toggle_select_sub_mode, Clipboard, CoalesceKey, HoverTarget, LayerId, MapOwner,
+    NoticeKind, SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
 };
-use crate::planar_map::{
-    apply_map_change, map_edit_diff, MapEdit, MapEditOutcome, MapInput, MapRule,
-};
+use crate::planar_map::{MapEdit, MapInput, MapRule};
 use crate::select_ops::{
     apply_marquee_selection, compute_hover_target, enter_group_at, exit_current_group,
     prepare_arrange_selected, prepare_clear_active_frame_shapes, prepare_delete_selected_shapes,
@@ -772,27 +770,15 @@ fn apply_raw_outline(
     // 絵が変わらなければ（同じ色で塗られた所の中をなぞった・何も消えないなど）edit_layers が false を返し、
     // apply が Undo の控えを捨てる
     push_undo(tab, None);
-    edit_layers(tab, &[target_lid], |edit| {
-        let scope = edit.editing_group_path.clone();
-        let rule = MapRule::Paint(is_brush.then_some(brush_color));
-        // 地図は文書の座標なので、線の形も文書の座標へ写す
-        let strokes: Vec<FillShape> = stroke_shapes
-            .iter()
-            .map(|s| s.in_doc(edit.world_xform).into_owned())
-            .collect();
-        match map_edit_diff(&edit.shapes, target_lid, &scope, edit.world_xform, |m| {
-            m.overlay(MapInput::Shapes(&strokes), rule)
-        }) {
-            MapEditOutcome::Changed(change) => apply_map_change(
-                &mut edit.shapes,
-                change,
-                target_lid,
-                &scope,
-                edit.world_xform,
-            ),
-            // 格子に置けない所（±65,536px の外）の線は描かない
-            MapEditOutcome::Unchanged | MapEditOutcome::Refused => {}
-        }
+    let rule = MapRule::Paint(is_brush.then_some(brush_color));
+    // 地図は文書の座標なので、線の形も文書の座標へ写す。格子に置けない所（±65,536px の外）の線は描かない
+    let world = tab.session.edit_path.world_xform();
+    let strokes: Vec<FillShape> = stroke_shapes
+        .iter()
+        .map(|s| s.in_doc(world).into_owned())
+        .collect();
+    edit_layer_map(tab, target_lid, |base| {
+        base.map.overlay(MapInput::Shapes(&strokes), rule)
     })
 }
 
@@ -917,23 +903,10 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
     // 塗っても絵が変わらないとき（同じ色・囲まれていない所）と、格子に置けない所（±65,536px の外）では、edit_layers が
     // false を返し、apply が Undo の控えを捨てる
     push_undo(tab, None);
-    edit_layers(tab, &[target_lid], |edit| {
-        let scope = edit.editing_group_path.clone();
-        // 地図は文書の座標なので、点も文書の座標へ写す
-        let doc_pt = edit.world_xform.inverse() * pt;
-        if let MapEditOutcome::Changed(change) =
-            map_edit_diff(&edit.shapes, target_lid, &scope, edit.world_xform, |m| {
-                m.with_face_filled(doc_pt, fill_color)
-            })
-        {
-            apply_map_change(
-                &mut edit.shapes,
-                change,
-                target_lid,
-                &scope,
-                edit.world_xform,
-            );
-        }
+    // 地図は文書の座標なので、点も文書の座標へ写す
+    let doc_pt = tab.session.edit_path.world_xform().inverse() * pt;
+    edit_layer_map(tab, target_lid, |base| {
+        base.map.with_face_filled(doc_pt, fill_color)
     })
 }
 
@@ -992,59 +965,56 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         }
     }
     if !target_lids.is_empty() {
-        // 選んだグループの中の生の図形は、階層ごとに地図ごと変形する（`transformed_scope`。図形はその地図の面）。
-        // 新しい地図は、セル画に書き終えるまで持っておく
-        let mut new_maps = Vec::new();
-        edit_layers(tab, &target_lids, |edit| {
-            let world = edit.world_xform;
-            let doc = world.inverse() * affine * world;
-            let picked =
-                |s: &FillShape| !hidden.contains(&s.shape_id) && selection.contains_shape(s);
-            let mut scopes: Vec<(LayerId, Vec<u64>)> = Vec::new();
-            let mut done: HashSet<crate::canvas_tool::ShapeId> = HashSet::new();
-            for s in edit.shapes.iter().filter(|s| picked(s)) {
-                if s.symbol_instance.is_none()
-                    && !scopes
-                        .iter()
-                        .any(|x| x.0 == s.layer_id && x.1 == s.group_path)
-                {
-                    scopes.push((s.layer_id, s.group_path.clone()));
-                }
-            }
-            for (layer_id, group_path) in scopes {
-                let in_scope = |s: &FillShape| {
-                    s.layer_id == layer_id
-                        && s.group_path == group_path
-                        && s.symbol_instance.is_none()
-                };
-                let own: Vec<&FillShape> = edit.shapes.iter().filter(|s| in_scope(s)).collect();
-                // 階層の一部だけを選んでいるとき（持ち上げられなかった生の図形）は、選んだ図形だけを動かす（下で）
-                if !own.iter().all(|s| picked(s)) {
-                    continue;
-                }
-                let Some((moved, stored)) = crate::planar_map::transformed_scope(&own, world, doc)
-                else {
-                    continue;
-                };
-                new_maps.push(stored);
-                done.extend(moved.iter().map(|s| s.shape_id));
-                let at = edit
-                    .shapes
+        // 選んだグループの中の生の図形は、階層ごとに、セル画の地図に文書の座標の変換をかけて、その座標の格子で正しい地図に
+        // する（`realized`。図形はその地図の面で、番号はそのまま）
+        let world = tab.session.edit_path.world_xform();
+        let doc = world.inverse() * affine * world;
+        let picked = |s: &FillShape| !hidden.contains(&s.shape_id) && selection.contains_shape(s);
+        let mut scopes: Vec<(LayerId, Vec<u64>)> = Vec::new();
+        for s in tab.session.base_cache.shapes() {
+            if picked(s)
+                && s.symbol_instance.is_none()
+                && !scopes
                     .iter()
-                    .position(&in_scope)
-                    .unwrap_or(edit.shapes.len());
-                edit.shapes.retain(|s| !in_scope(s));
-                edit.shapes.splice(at..at, moved);
+                    .any(|x| x.0 == s.layer_id && x.1 == s.group_path)
+            {
+                scopes.push((s.layer_id, s.group_path.clone()));
+            }
+        }
+        // 階層の一部だけを選んでいるとき（持ち上げられなかった生の図形）は、地図ごとは動かさない
+        scopes.retain(|(layer_id, group_path)| {
+            tab.session
+                .base_cache
+                .shapes()
+                .iter()
+                .filter(|s| s.layer_id == *layer_id && s.group_path == *group_path)
+                .all(&picked)
+        });
+        let mut moved: HashSet<crate::canvas_tool::ShapeId> = HashSet::new();
+        for (layer_id, group_path) in &scopes {
+            moved.extend(
+                tab.session
+                    .base_cache
+                    .shapes()
+                    .iter()
+                    .filter(|s| s.layer_id == *layer_id && s.group_path == *group_path)
+                    .map(|s| s.shape_id),
+            );
+            if edit_scope_map(tab, *layer_id, group_path, |base| {
+                crate::planar_map::realized(&base.map, doc)
+            }) {
                 any_transformed = true;
             }
+        }
+        // インスタンスと、地図ごと動かさなかった図形は、図形を動かす
+        edit_layers(tab, &target_lids, |edit| {
             for s in &mut edit.shapes {
-                if picked(s) && !done.contains(&s.shape_id) {
+                if picked(s) && !moved.contains(&s.shape_id) {
                     s.transform(affine);
                     any_transformed = true;
                 }
             }
         });
-        drop(new_maps);
     }
     any_transformed
 }
@@ -1116,28 +1086,13 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
     if !editable_layer_ids(tab).contains(&layer_id) {
         return false;
     }
-    let group_path = tab.session.editing_group_path.clone();
     // 輪郭の変形は、始めるときに選択を解除して `Floating` を確定している。`Floating` があるときは何もしない
     if tab.session.floating().is_some() {
         return false;
     }
-    // 形が変わらないとき・編集できないとき（消せない頂点など）は、edit_layers が false を返し、apply が Undo の控えを捨てる
+    // 形が変わらないとき・編集できないとき（消せない頂点など）は、edit_layer_map が false を返し、apply が Undo の控えを捨てる
     push_undo(tab, None);
-    let changed = edit_layers(tab, &[layer_id], |edit| {
-        if let MapEditOutcome::Changed(change) =
-            map_edit_diff(&edit.shapes, layer_id, &group_path, edit.world_xform, |m| {
-                map_edit.apply(m)
-            })
-        {
-            apply_map_change(
-                &mut edit.shapes,
-                change,
-                layer_id,
-                &group_path,
-                edit.world_xform,
-            );
-        }
-    });
+    let changed = edit_layer_map(tab, layer_id, |base| map_edit.apply(&base.map));
     if changed {
         focus_active_layer_by_id(tab, layer_id);
     }

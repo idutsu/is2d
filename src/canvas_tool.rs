@@ -737,6 +737,8 @@ mod scene_base_cache {
         eval_frame: usize,
         world_xform_bits: [u64; 6],
         range: Range<usize>,
+        /// 画面に出しているキーフレームのセル画（文書の形。地図の編集・カーソル合わせ・浮いた片が、地図をここから読む）
+        cel: Option<crate::timeline::Cel>,
     }
 
     /// `Document`（編集中タイムライン＋シンボルライブラリ＋`world_xform`）から構築されるレイヤー別の読み取り専用土台キャッシュ
@@ -844,6 +846,21 @@ mod scene_base_cache {
         #[inline]
         pub(crate) fn layer_order_ids(&self) -> &[LayerId] {
             &self.layer_order_ids
+        }
+
+        /// レイヤー `layer_id` の、画面に出しているキーフレームのセル画（表示中・ロックなしで絵があるときだけ）
+        pub(crate) fn cel(&self, layer_id: LayerId) -> Option<&crate::timeline::Cel> {
+            self.layers
+                .iter()
+                .find(|l| l.layer_id == layer_id)
+                .and_then(|l| l.cel.as_ref())
+        }
+
+        /// レイヤー `layer_id` を、次の `rebuild` で作り直す（セル画を書き換えたあと）
+        pub(crate) fn invalidate_layer(&mut self, layer_id: LayerId) {
+            if let Some(l) = self.layers.iter_mut().find(|l| l.layer_id == layer_id) {
+                l.cel_sig = None;
+            }
         }
 
         /// `edit_layers` 用に、対象レイヤー群 `target_lids` のステージ座標図形を複製せずに取り出す
@@ -963,6 +980,7 @@ mod scene_base_cache {
                         eval_frame: 0,
                         world_xform_bits: xform_bits,
                         range: start..start,
+                        cel: None,
                     });
                     continue;
                 };
@@ -981,6 +999,7 @@ mod scene_base_cache {
                             eval_frame: ef,
                             world_xform_bits: xform_bits,
                             range: start..end,
+                            cel: Some(layer.keyframes[kf_idx].cel.clone()),
                         });
                         continue;
                     }
@@ -1007,6 +1026,7 @@ mod scene_base_cache {
                     eval_frame: ef,
                     world_xform_bits: xform_bits,
                     range: start..end,
+                    cel: Some(layer.keyframes[kf_idx].cel.clone()),
                 });
             }
 
@@ -1413,7 +1433,8 @@ mod scene_base_cache {
     }
 }
 
-use scene_base_cache::{BackdropCache, OnionSkinCache, SceneBaseCache};
+pub(crate) use scene_base_cache::SceneBaseCache;
+use scene_base_cache::{BackdropCache, OnionSkinCache};
 
 /// `Overlay` で追加する図形の重なり順指定
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1923,7 +1944,7 @@ impl Session {
     /// 浮いた片の操作に要る画面の土台（セル画の図形のステージの写し・編集中の階層・ステージへの変換）
     pub(crate) fn stage(&self) -> Stage<'_> {
         Stage {
-            shapes: self.base_cache.shapes(),
+            base: &self.base_cache,
             scope: &self.editing_group_path,
             world: self.edit_path.world_xform(),
         }
@@ -2987,8 +3008,6 @@ impl Tab {
 pub(crate) struct LayerEdit {
     pub(crate) shapes: Vec<FillShape>,
     pub(crate) editing_group_path: Vec<u64>,
-    /// 図形を置いた座標の変換（シンボルの中ではステージへの変換。`shapes` は変換したあとの座標）
-    pub(crate) world_xform: Affine,
     pub(crate) layer_order_ids: Vec<LayerId>,
     pub(crate) next_group_id: u64,
 }
@@ -3249,7 +3268,6 @@ pub(crate) fn edit_layers(
     let mut edit = LayerEdit {
         shapes: loaded_shapes,
         editing_group_path,
-        world_xform,
         layer_order_ids,
         next_group_id,
     };
@@ -3327,6 +3345,54 @@ pub(crate) fn edit_layers(
     tab.doc.next_group_id = next_group_id;
     tab.session.sanitize_editing_scope();
     any_cel_modified
+}
+
+/// 地図の編集：今のコマ・今の階層の、レイヤー `layer_id` のセル画の地図（文書の座標）を `f` で編集する（`Cel::edit_map`。
+/// 図形はその地図の面から作る）。`false`：編集できない（ロック・非表示・キーフレームが無い・地図にできない）か、変わらない
+pub(crate) fn edit_layer_map(
+    tab: &mut Tab,
+    layer_id: LayerId,
+    f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::PlanarMap>,
+) -> bool {
+    let scope = tab.session.editing_group_path.clone();
+    edit_scope_map(tab, layer_id, &scope, f)
+}
+
+/// `edit_layer_map` の、階層 `scope`（グループの中の階層など）を編集するもの
+pub(crate) fn edit_scope_map(
+    tab: &mut Tab,
+    layer_id: LayerId,
+    scope: &[u64],
+    f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::PlanarMap>,
+) -> bool {
+    tab.refresh_scene_base();
+    let changed = {
+        let tl = tab.active_timeline_raw_mut();
+        let frame = tl.current_frame;
+        let Some(layer) = tl
+            .layers
+            .iter_mut()
+            .find(|l| l.id == layer_id && l.is_editable_at(frame))
+        else {
+            return false;
+        };
+        let Some(kf) = layer.keyframe_index_at(frame) else {
+            return false;
+        };
+        Arc::make_mut(&mut layer.keyframes[kf])
+            .cel
+            .edit_map(layer_id, scope, f)
+    };
+    if changed {
+        if let Some(idx) = tab.active_symbol_index() {
+            tab.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
+            tab.doc.bump_revision();
+        }
+        tab.session.base_cache.invalidate_layer(layer_id);
+        tab.refresh_scene_base();
+        tab.session.sanitize_editing_scope();
+    }
+    changed
 }
 
 /// 現在の編集スコープ（グループ内であればそのグループの所属レイヤー、そうでなければ現在のアクティブレイヤー）の `layer_id` を返す
@@ -3494,61 +3560,73 @@ pub(crate) fn draw_registration_cross(
     );
 }
 
-/// テスト用：片 `pieces`（座標の変換 `xform` で置いた図形）を `base_shapes` に、階層ごとに浮いた片として足して確定する
-/// （浮いている片を置くのと同じ）
+/// テスト用：片 `pieces`（座標の変換 `xform` で置いた図形）を、図形の並び `base_shapes`（文書の無い、ただの並び）の
+/// レイヤー・階層ごとに、地図にして上に重ねる（浮いている片を置くのと同じ重ね方）
 #[cfg(test)]
 pub(crate) fn merge_pieces_layer_by_layer(
     base_shapes: &mut Vec<FillShape>,
     pieces: Vec<FillShape>,
     xform: Affine,
 ) {
-    let mut scopes: Vec<Vec<u64>> = Vec::new();
+    use crate::planar_map::{apply_map_change, layer_own, LayerBase, MapInput, MapRule};
+    let mut scopes: Vec<(LayerId, Vec<u64>)> = Vec::new();
     for p in &pieces {
-        if !scopes.contains(&p.group_path) {
-            scopes.push(p.group_path.clone());
+        if !scopes
+            .iter()
+            .any(|x| x.0 == p.layer_id && x.1 == p.group_path)
+        {
+            scopes.push((p.layer_id, p.group_path.clone()));
         }
     }
-    for scope in scopes {
-        let mine: Vec<FillShape> = pieces
+    for (layer_id, scope) in scopes {
+        let mine: Vec<&FillShape> = pieces
             .iter()
-            .filter(|p| p.group_path == scope)
-            .cloned()
+            .filter(|p| p.layer_id == layer_id && p.group_path == scope)
             .collect();
-        let mut fl = Floating::new(true);
-        fl.add_pieces(
-            Stage {
-                shapes: base_shapes,
-                scope: &scope,
-                world: xform,
-            },
-            &mine,
-        );
-        fl.refresh(xform, &scope, &[]);
-        fl.commit_into(base_shapes, &scope, xform);
+        let own = layer_own(base_shapes, layer_id, &scope);
+        let (Some(base), Some(piece)) = (LayerBase::of(&own, xform), LayerBase::of(&mine, xform))
+        else {
+            continue;
+        };
+        let change = base
+            .map
+            .overlay(MapInput::Map(&piece.map), MapRule::Overlay)
+            .and_then(|next| base.diff_placed(&next, &own, layer_id, &scope, xform));
+        if let Some(change) = change {
+            apply_map_change(base_shapes, change, layer_id, &scope, xform);
+        }
     }
 }
 
-/// `Floating` を `base_shapes`（編集中の階層 `scope` の、座標の変換 `xform` で置いた図形）に確定する（`Floating::commit_into`）
-pub(crate) fn merge_floating_into_base_shapes(
-    base_shapes: &mut Vec<FillShape>,
-    fl: Floating,
-    scope: &[u64],
-    layer_order_ids: &[LayerId],
-    xform: Affine,
-) {
-    fl.commit_into(base_shapes, scope, xform);
-    if layer_order_ids.len() > 1 && base_shapes.len() > 1 {
-        base_shapes.sort_by_key(|s| layer_order_index(layer_order_ids, s.layer_id));
+/// 浮いた片 `fl` を確定する：レイヤーごとに、残りの地図（無ければセル画の地図）に片の組を下から順に重ねた地図
+/// （`FloatLayer::committed`）を、そのセル画の地図にする（`edit_layer_map`。図形はその地図の面）。重ねる計算は
+/// レイヤーをまたがないので、2つ以上あれば同時にする。片を重ねられない（格子に置けない座標がある）レイヤーは、残りだけを
+/// 書き、片は浮いた片のまま残す（失わない）。戻り値は、セル画を書き換えたか
+pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: Floating) -> bool {
+    tab.refresh_scene_base();
+    let nexts: Vec<Option<crate::planar_map::PlanarMap>> = {
+        let stage = tab.session.stage();
+        crate::planar_map::per_layer_parallel(fl.layers(), |l| l.committed_on(stage))
+    };
+    let mut any = false;
+    let mut left = Floating::new(true);
+    for (l, next) in fl.layers().iter().zip(nexts) {
+        let next = match next {
+            Some(m) => Some(m),
+            None => {
+                left.keep_pieces_of(l);
+                l.origin.as_ref().map(|o| o.rest.map.clone())
+            }
+        };
+        if let Some(next) = next {
+            any |= edit_layer_map(tab, l.layer_id, |_| Some(next));
+        }
     }
-}
-
-/// `Floating` が影響するレイヤーID一覧を収集する
-pub(crate) fn floating_target_layer_ids(tab: &Tab, fl: &Floating) -> Vec<LayerId> {
-    let mut lids = fl.layer_ids();
-    if lids.is_empty() {
-        lids.push(active_scope_layer_id(&tab.session, tab.active_timeline()));
+    if !left.is_empty() {
+        tab.session.set_floating(Some(left));
+        tab.session.select_floating_pieces();
     }
-    lids
+    any
 }
 
 /// `tab.session.floating` のうち `keep_indices`（`Scene` インデックス）に含まれない選択図形を確定
@@ -3571,16 +3649,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             return false;
         };
         if fl.modified {
-            let lids = floating_target_layer_ids(tab, &fl);
-            edit_layers(tab, &lids, |edit| {
-                merge_floating_into_base_shapes(
-                    &mut edit.shapes,
-                    fl,
-                    &edit.editing_group_path,
-                    &edit.layer_order_ids,
-                    edit.world_xform,
-                );
-            });
+            commit_floating_layers(tab, fl);
         }
         tab.session.retain_existing_selection();
         return true;
@@ -3620,16 +3689,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
         tab.session.set_floating(Some(fl));
     }
     if let Some(to_commit) = to_commit {
-        let lids = floating_target_layer_ids(tab, &to_commit);
-        edit_layers(tab, &lids, |edit| {
-            merge_floating_into_base_shapes(
-                &mut edit.shapes,
-                to_commit,
-                &edit.editing_group_path,
-                &edit.layer_order_ids,
-                edit.world_xform,
-            );
-        });
+        commit_floating_layers(tab, to_commit);
     }
     tab.session.retain_existing_selection();
     merged_any

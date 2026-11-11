@@ -1,4 +1,7 @@
-use crate::planar_map::{cel_scope_map, register_map, stored_map, LayerBase, MapKey};
+use crate::planar_map::{
+    cel_scope_map, raw_scope_insert_index, register_map, stored_map, LayerBase, MapChange, MapKey,
+    PlanarMap,
+};
 use crate::stored_map::StoredMap;
 use crate::vector_engine::{next_shape_id, FillShape, SymbolInstanceBinding, SymbolLoopMode};
 use kurbo::{Affine, Point};
@@ -323,6 +326,99 @@ impl Cel {
         self.set_shared_parts(shapes.into_iter().map(Arc::new).collect(), instances);
     }
 
+    /// 階層 `group_path` の生の図形（文書の図形。並びの順）
+    pub(crate) fn scope_shapes(&self, group_path: &[u64]) -> Vec<&FillShape> {
+        self.shapes
+            .iter()
+            .filter(|s| s.group_path == group_path)
+            .map(|s| &**s)
+            .collect()
+    }
+
+    /// 階層 `group_path` の地図（計算に使う形）。生の図形の無い階層は空の地図。`None`：図形はあるのに地図が無い（格子に
+    /// 置けない座標がある）
+    pub(crate) fn scope_base(&self, group_path: &[u64]) -> Option<Arc<LayerBase>> {
+        match self.maps.iter().find(|m| m.group_path == group_path) {
+            Some(m) => Some(m.base()),
+            None if self.shapes.iter().any(|s| s.group_path == group_path) => None,
+            None => Some(Arc::new(LayerBase::new(&PlanarMap::default(), false))),
+        }
+    }
+
+    /// 地図の編集：階層 `group_path` の地図（文書の座標）を `f` で編集し、返った地図をしまう。図形はその地図の面（変わらない
+    /// 面は前の図形のまま、形の変わった面は番号を引き継いだ新しい図形：`LayerBase::diff`）。`false`：変わらない・編集できない
+    pub(crate) fn edit_map(
+        &mut self,
+        layer_id: u64,
+        group_path: &[u64],
+        f: impl FnOnce(&LayerBase) -> Option<PlanarMap>,
+    ) -> bool {
+        let Some(base) = self.scope_base(group_path) else {
+            return false;
+        };
+        let Some(next) = f(&base) else {
+            return false;
+        };
+        let Some(change) = base.diff(&next, &self.scope_shapes(group_path), layer_id, group_path)
+        else {
+            return false;
+        };
+        if change.removed.is_empty() && change.added.is_empty() {
+            return false;
+        }
+        self.put_map_change(layer_id, group_path, change);
+        true
+    }
+
+    /// 地図の差分 `change`（文書の座標）を入れる：消す図形を除き、新しい形をその所（無ければ階層の生の図形の後ろ）に
+    /// 入れ（後ろのインスタンスの位置 `shape_order_index` もずらす）、階層の地図を差分の地図にする
+    pub(crate) fn put_map_change(&mut self, layer_id: u64, group_path: &[u64], change: MapChange) {
+        let removed: std::collections::HashSet<u64> = change.removed.iter().copied().collect();
+        let old = &self.shapes;
+        let n = old.len();
+        let at = old
+            .iter()
+            .position(|s| removed.contains(&s.shape_id))
+            .unwrap_or_else(|| raw_scope_insert_index(old, layer_id, group_path));
+        let mut added: Option<Vec<Arc<FillShape>>> = Some(
+            change
+                .added
+                .into_iter()
+                .map(|mut s| {
+                    s.strip_for_storage();
+                    Arc::new(s)
+                })
+                .collect(),
+        );
+        // 古い並びの位置 i の手前に来る、新しい並びの図形の数（インスタンスの位置を写す）。新しい形は、消した図形の所の
+        // その図形の手前に入れるので、その位置のインスタンスより上
+        let mut index_after = vec![0; n + 1];
+        let mut shapes: Vec<Arc<FillShape>> = Vec::with_capacity(n);
+        for i in 0..=n {
+            index_after[i] = shapes.len();
+            if i == at {
+                shapes.extend(added.take().unwrap_or_default());
+            }
+            if i < n && !removed.contains(&old[i].shape_id) {
+                shapes.push(old[i].clone());
+            }
+        }
+        let mut instances = (*self.instances).clone();
+        for inst in &mut instances {
+            inst.shape_order_index = index_after[inst.shape_order_index.min(n)];
+        }
+        let own: Vec<&FillShape> = shapes
+            .iter()
+            .filter(|s| s.group_path == group_path)
+            .map(|s| &**s)
+            .collect();
+        let known = vec![(
+            MapKey::new(&own, Affine::IDENTITY),
+            StoredMap::from_dense(&change.map),
+        )];
+        self.set_parts_with_maps(shapes, instances, &known);
+    }
+
     /// `set_parts` と同じ。図形は共有したまま入れる（変わらない図形は、前の列と同じ `Arc` を渡す）。
     /// 階層ごとの地図を、図形に合わせる：図形（番号, `mesh_revision` の並び）が前と同じ階層は前の地図を使い、ほかは
     /// 本当の地図の索引から引く（地図で編集した結果は `apply_map_change` が入れてある）。図形がみな前の地図の面なら
@@ -330,10 +426,20 @@ impl Cel {
     /// 図形から作る（`cel_scope_map`。正しい地図にならない図形は、塗り重ねて作り直した地図の面に置き換える）
     pub(crate) fn set_shared_parts(
         &mut self,
+        shapes: Vec<Arc<FillShape>>,
+        instances: Vec<SymbolInstance>,
+    ) {
+        self.set_parts_with_maps(shapes, instances, &[]);
+    }
+
+    /// `set_shared_parts` と同じ。地図 `known`（鍵、地図）は、その鍵の図形の階層の地図として使う（地図の編集の結果）
+    fn set_parts_with_maps(
+        &mut self,
         mut shapes: Vec<Arc<FillShape>>,
         mut instances: Vec<SymbolInstance>,
+        known: &[(MapKey, StoredMap)],
     ) {
-        let maps = scope_maps_of(&self.maps, &mut shapes, &mut instances);
+        let maps = scope_maps_of(&self.maps, known, &mut shapes, &mut instances);
         shapes.shrink_to_fit();
         instances.shrink_to_fit();
         self.maps = Arc::new(maps);
@@ -487,6 +593,7 @@ impl Cel {
 /// 図形の位置に入れ、後ろのインスタンスの位置 `shape_order_index` をずらす）。格子に置けない座標がある階層は地図を持たない
 fn scope_maps_of(
     old: &[ScopeMap],
+    known: &[(MapKey, StoredMap)],
     shapes: &mut Vec<Arc<FillShape>>,
     instances: &mut [SymbolInstance],
 ) -> Vec<ScopeMap> {
@@ -534,6 +641,10 @@ fn scope_maps_of(
                 key,
                 stored: m.stored.clone(),
             });
+            continue;
+        }
+        if let Some((_, stored)) = known.iter().find(|(k, _)| *k == key) {
+            maps.push(ScopeMap::new(group_path, key, stored.clone()));
             continue;
         }
         if let Some(stored) = stored_map(&key) {
