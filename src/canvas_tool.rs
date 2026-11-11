@@ -990,6 +990,9 @@ mod scene_base_cache {
                 for s in &mut evaluated {
                     s.place(world_xform);
                 }
+                // 画面に出すセル画の地図を、地図のしまい場所に入れる（Undo・コマの移動のあとも、編集がしまってある
+                // 地図から始まるように）
+                layer.keyframes[kf_idx].cel.remember_maps();
                 if let Some((old_cl, old_shapes)) = prev {
                     if old_cl.world_xform_bits == xform_bits {
                         reuse_caches_by_key(&mut evaluated, &old_shapes);

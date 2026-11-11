@@ -1126,16 +1126,25 @@ fn labeled(mut map: PlanarMap, faces: &[MapFace], ids: &[ShapeId]) -> PlanarMap 
     map
 }
 
+/// テストで、書くたびに地図を確かめるか（速さを測る試しでは、環境変数 `IS2D_NO_CHECKS` で外す）
+#[cfg(test)]
+pub(crate) fn test_checks() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("IS2D_NO_CHECKS").is_err())
+}
+
 /// 図形に書き戻す地図 `next` の面。壊れた輪郭（閉じないか、左の色がそろわない輪郭。`faces` は飛ばす）が1つでもあれば `None`
 /// を返し、書き戻さずに断る：飛ばした面の元の図形は消すほうに入るので、書くと絵の一部が知らせなく消える。テストでは、書く
 /// 地図が正しい地図であることを確かめる（壊れた結果を作った操作が、そこで見つかる）
 fn written_faces(next: &PlanarMap) -> Option<Vec<MapFace>> {
     #[cfg(test)]
-    assert!(
-        next.is_valid(),
-        "書き戻す地図が正しい地図でない: {}",
-        next.validity_report()
-    );
+    if test_checks() {
+        assert!(
+            next.is_valid(),
+            "書き戻す地図が正しい地図でない: {}",
+            next.validity_report()
+        );
+    }
     let (faces, broken) = next.faces();
     (broken == 0).then_some(faces)
 }
@@ -1253,11 +1262,13 @@ impl MapKey {
     }
 }
 
-/// 図形から作った地図のしまい場所（`LayerBase::of`）：（鍵, 地図）。鍵が同じなら地図も同じなので、どの文書・どの操作
-/// から引いても正しい。新しく使ったものを前に、`LAYER_BASES_LEN` 個まで（編集の前後の地図が入る数。カーソル合わせの
-/// 地図は、レイヤーごとに `ScopeMaps` が持つ）
+/// 地図のしまい場所（`LayerBase::of` が引く）：（鍵, 地図）。鍵が同じなら地図も同じなので、どの文書・どの操作から
+/// 引いても正しい。セル画にしまってある地図（`Cel::remember_maps`：セル画に書いたときと、画面に出すセル画を作り直した
+/// とき）と、地図で編集した結果（`apply_map_change`）を入れるので、編集はふつう、図形から地図を作らずにしまってある
+/// 地図から始まる。新しく使ったものを前に、`LAYER_BASES_LEN` 個まで（無いときは図形から作る。セル画の図形はいつも
+/// その地図の面なので、作った地図はしまってある地図と同じ形になる）
 static LAYER_BASES: SyncCache<Vec<(MapKey, Arc<LayerBase>)>> = SyncCache::new(Vec::new());
-const LAYER_BASES_LEN: usize = 16;
+const LAYER_BASES_LEN: usize = 64;
 
 /// 図形 `shapes`（座標の変換 `xform` で置いた図形）を文書の座標の形（`FillShape::in_doc`）にして `f` に渡す。地図は
 /// いつも文書の座標で作る：文書の図形はその座標で正しい地図の面で、格子の上の判定はアフィン変換で保たれないので、置いた

@@ -318,10 +318,20 @@ impl Cel {
         self.shapes = Arc::new(shapes);
         self.instances = Arc::new(instances);
         self.revision = crate::vector_engine::next_mesh_revision();
+        self.remember_maps();
         // テストでは、セル画に書くたびに、地図が図形と合っているかを確かめる
         #[cfg(test)]
-        if let Some(m) = self.maps_mismatch() {
-            panic!("セル画の地図が図形と合っていない: {m}");
+        if crate::planar_map::test_checks() {
+            if let Some(m) = self.maps_mismatch() {
+                panic!("セル画の地図が図形と合っていない: {m}");
+            }
+        }
+    }
+
+    /// 階層ごとの地図を、地図のしまい場所に入れる（編集が、図形から地図を作らずにしまってある地図から始まるように）
+    pub(crate) fn remember_maps(&self) {
+        for m in self.maps.iter() {
+            crate::planar_map::remember_map(m.key.clone(), m.base.clone());
         }
     }
 
