@@ -16,8 +16,10 @@ pub(crate) use crate::timeline::{MAX_LAYERS_PER_TIMELINE, MAX_TIMELINE_FRAMES};
 pub(crate) use crate::vector_engine::MAX_CONTOUR_SEGMENTS;
 use crate::vector_engine::{Contour, FillShape};
 
-/// `.is2d` プロジェクトファイルの現在のフォーマットバージョン
-pub(crate) const PROJECT_FORMAT_VERSION: u32 = 2;
+/// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。版 3 のファイルでは、セルごとの生の図形がいつも地図の面
+/// （となり合う図形の境目がビットまで同じで、重ならない）になっている（アプリの操作は正しい地図しか書かない）。それより
+/// 前の版は開かない（境目のそろっていない図形が入っていると、触るたびに塗り重ねて直すことになるため）
+pub(crate) const PROJECT_FORMAT_VERSION: u32 = 3;
 
 /// プロジェクトファイルの標準拡張子
 pub(crate) const PROJECT_FILE_EXTENSION: &str = "is2d";

@@ -4321,7 +4321,7 @@ fn test_corrupt_and_truncated_json_returns_error_without_modifying_app() {
 fn test_malformed_json_sanitization_and_cycle_breaking() {
     // 破損・外部改変された異常系 `.is2d` JSON（シンボル循環参照 A⇄B・重複レイヤーID・孤児インスタンス・逆向きワインディング・範囲外パラメータ）のサニタイズ検証
     let malformed_json = r#"{
-          "version": 2,
+          "version": 3,
           "stage_size": [99999.0, 10.0],
           "next_symbol_id": 1,
           "next_group_id": 1,
@@ -6552,7 +6552,7 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
     // u64::MAX の layer.id, symbol.id, instance_gid, group_path を含む細工ファイル (#13)
     let crafted_json = format!(
         r#"{{
-          "version": 2,
+          "version": 3,
           "stage_size": [800.0, 450.0],
           "next_symbol_id": {max},
           "next_group_id": {max},
@@ -7933,7 +7933,10 @@ fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape
         );
         let target_content = std::fs::read_to_string(&target_path).unwrap();
         assert!(
-            target_content.contains("\"version\":2"),
+            target_content.contains(&format!(
+                "\"version\":{}",
+                project_io::PROJECT_FORMAT_VERSION
+            )),
             "シンボリックリンクの実体ファイル側が最新の内容に更新されること (#13)"
         );
         let _ = std::fs::remove_file(&link_path);
@@ -19210,7 +19213,7 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
 
     // 3. 形式：保存したファイルの輪郭が、数の平らな配列で、数の個数が区間の数の4倍であること
     let parsed_val: serde_json::Value = serde_json::from_str(&json1).unwrap();
-    assert_eq!(parsed_val["version"], 2);
+    assert_eq!(parsed_val["version"], project_io::PROJECT_FORMAT_VERSION);
     let saved_shapes_json = parsed_val["timeline"]["layers"][0]["keyframes"][0]["shapes"]
         .as_array()
         .unwrap();
@@ -19579,9 +19582,9 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
     assert_eq!(after_shape.bounding_box(), orig_bbox);
     assert_eq!(after_shape.exterior.segments.len(), orig_seg_count);
 
-    // 2. 図形のない版 1 のファイルを開くと「未対応のプロジェクトバージョン」エラーが返り、タブが増えない
-    let empty_v1_doc = project_io::ProjectDocument {
-        version: 1,
+    // 2. 前の版（版 2）のファイルは、図形がなくても開くと「未対応のプロジェクトバージョン」エラーが返り、タブが増えない
+    let empty_v2_doc = project_io::ProjectDocument {
+        version: 2,
         stage_size: [800.0, 450.0],
         timeline: (&timeline::Timeline::default()).into(),
         library: Vec::new(),
@@ -19589,12 +19592,12 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
         next_group_id: 1,
         recovery_source: None,
     };
-    let v1_path = std::env::temp_dir().join(format!("is2d_empty_v1_{}.is2d", std::process::id()));
-    std::fs::write(&v1_path, serde_json::to_string(&empty_v1_doc).unwrap()).unwrap();
+    let v2_path = std::env::temp_dir().join(format!("is2d_empty_v2_{}.is2d", std::process::id()));
+    std::fs::write(&v2_path, serde_json::to_string(&empty_v2_doc).unwrap()).unwrap();
     let tabs_before = app.tabs.len();
-    let err = project_io::open_project_in_tab(&mut app, &v1_path, None)
-        .expect_err("図形のない版 1 のファイルも開けないこと");
-    let _ = std::fs::remove_file(&v1_path);
+    let err = project_io::open_project_in_tab(&mut app, &v2_path, None)
+        .expect_err("図形のない版 2 のファイルも開けないこと");
+    let _ = std::fs::remove_file(&v2_path);
     assert!(
         err.contains("未対応のプロジェクトバージョン"),
         "想定外のエラー: {err}"
