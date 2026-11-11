@@ -8,6 +8,7 @@ mod planar_map;
 mod project_io;
 mod recovery;
 mod select_ops;
+mod stored_map;
 mod symbol;
 mod symbol_ops;
 mod timeline;

@@ -1,4 +1,5 @@
-use crate::planar_map::{cel_scope_map, LayerBase, MapKey};
+use crate::planar_map::{cel_scope_map, register_map, stored_map, LayerBase, MapKey};
+use crate::stored_map::StoredMap;
 use crate::vector_engine::{next_shape_id, FillShape, SymbolInstanceBinding, SymbolLoopMode};
 use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
@@ -216,7 +217,31 @@ pub(crate) struct ScopeMap {
     pub(crate) group_path: Vec<u64>,
     /// 地図の面の図形（番号, `mesh_revision`）の並び（`MapKey`。図形が同じなら、作り直さずに使う）
     key: MapKey,
-    pub(crate) base: Arc<LayerBase>,
+    /// 地図（場所ごとの塊。変わらない塊は Undo の控えと共有する）
+    stored: StoredMap,
+}
+
+impl ScopeMap {
+    /// 鍵 `key` の図形の地図 `stored`。本当の地図の索引に入れる（鍵で、いつも引けるように：`LayerBase::of`）
+    fn new(group_path: Vec<u64>, key: MapKey, stored: StoredMap) -> Self {
+        let stored = register_map(&key, stored);
+        Self {
+            group_path,
+            key,
+            stored,
+        }
+    }
+
+    /// 計算に使う形の地図（地図のしまい場所から引くか、塊から作る）
+    pub(crate) fn base(&self) -> Arc<LayerBase> {
+        LayerBase::of_stored(&self.key, &self.stored)
+    }
+
+    /// しまった地図
+    #[cfg(test)]
+    pub(crate) fn stored(&self) -> &StoredMap {
+        &self.stored
+    }
 }
 
 impl Default for Cel {
@@ -246,18 +271,14 @@ impl Cel {
         let mut shapes: Vec<Arc<FillShape>> = Vec::new();
         let mut scope_maps = Vec::with_capacity(maps.len());
         for (group_path, map) in maps {
-            let (base, faces) = crate::planar_map::map_with_faces(map, 1, &group_path);
+            let (stored, faces) = crate::planar_map::map_with_faces(map, 1, &group_path);
             if faces.is_empty() {
                 continue;
             }
             let refs: Vec<&FillShape> = faces.iter().collect();
             let key = MapKey::new(&refs, Affine::IDENTITY);
             shapes.extend(faces.into_iter().map(Arc::new));
-            scope_maps.push(ScopeMap {
-                group_path,
-                key,
-                base,
-            });
+            scope_maps.push(ScopeMap::new(group_path, key, stored));
         }
         let mut cel = Self {
             maps: Arc::new(scope_maps),
@@ -304,8 +325,8 @@ impl Cel {
 
     /// `set_parts` と同じ。図形は共有したまま入れる（変わらない図形は、前の列と同じ `Arc` を渡す）。
     /// 階層ごとの地図を、図形に合わせる：図形（番号, `mesh_revision` の並び）が前と同じ階層は前の地図を使い、ほかは
-    /// 地図のしまい場所から引く（地図で編集した結果は `apply_map_change` が入れてある）か、図形から作る（`cel_scope_map`。
-    /// 正しい地図にならない図形は、塗り重ねて作り直した地図の面に置き換える）
+    /// 本当の地図の索引から引く（地図で編集した結果は `apply_map_change` が入れてある）か、図形から作る（`cel_scope_map`。
+    /// 地図で形を変えない操作のとき。正しい地図にならない図形は、塗り重ねて作り直した地図の面に置き換える）
     pub(crate) fn set_shared_parts(
         &mut self,
         mut shapes: Vec<Arc<FillShape>>,
@@ -318,20 +339,12 @@ impl Cel {
         self.shapes = Arc::new(shapes);
         self.instances = Arc::new(instances);
         self.revision = crate::vector_engine::next_mesh_revision();
-        self.remember_maps();
         // テストでは、セル画に書くたびに、地図が図形と合っているかを確かめる
         #[cfg(test)]
         if crate::planar_map::test_checks() {
             if let Some(m) = self.maps_mismatch() {
                 panic!("セル画の地図が図形と合っていない: {m}");
             }
-        }
-    }
-
-    /// 階層ごとの地図を、地図のしまい場所に入れる（編集が、図形から地図を作らずにしまってある地図から始まるように）
-    pub(crate) fn remember_maps(&self) {
-        for m in self.maps.iter() {
-            crate::planar_map::remember_map(m.key.clone(), m.base.clone());
         }
     }
 
@@ -410,11 +423,11 @@ impl Cel {
 
     /// 階層 `group_path` の地図
     #[cfg(test)]
-    pub(crate) fn map_of(&self, group_path: &[u64]) -> Option<&Arc<LayerBase>> {
+    pub(crate) fn map_of(&self, group_path: &[u64]) -> Option<Arc<LayerBase>> {
         self.maps
             .iter()
             .find(|m| m.group_path == group_path)
-            .map(|m| &m.base)
+            .map(ScopeMap::base)
     }
 
     #[inline]
@@ -518,8 +531,12 @@ fn scope_maps_of(
             maps.push(ScopeMap {
                 group_path,
                 key,
-                base: m.base.clone(),
+                stored: m.stored.clone(),
             });
+            continue;
+        }
+        if let Some(stored) = stored_map(&key) {
+            maps.push(ScopeMap::new(group_path, key, stored));
             continue;
         }
         let own: Vec<Arc<FillShape>> = shapes
@@ -527,7 +544,7 @@ fn scope_maps_of(
             .filter(|s| s.group_path == group_path)
             .cloned()
             .collect();
-        let Some((base, replaced)) = cel_scope_map(&own) else {
+        let Some((stored, replaced)) = cel_scope_map(&own) else {
             continue;
         };
         let key = match replaced {
@@ -555,11 +572,7 @@ fn scope_maps_of(
                 MapKey::new(&own, Affine::IDENTITY)
             }
         };
-        maps.push(ScopeMap {
-            group_path,
-            key,
-            base,
-        });
+        maps.push(ScopeMap::new(group_path, key, stored));
     }
     maps
 }

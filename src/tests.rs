@@ -1005,10 +1005,25 @@ fn test_group_selection_bucket_protection_and_non_destructive_overlap() {
     put_cel_shapes(&mut app, 0, 0, shapes);
     assert_eq!(scene_summary(&app).shapes.len(), 3);
 
-    app.session.set_selected_indices(vec![1, 2]);
+    // 青と緑は重なっているので、セル画に入れると地図の面に置き換わる（並びは地図の面の順）。色で選ぶ
+    let eyes: Vec<usize> = scene_summary(&app)
+        .shapes
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.color != red)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(eyes.len(), 2);
+    app.session.set_selected_indices(eyes);
     let eye_gid = doc_actions::group_selected_shapes(&mut app).expect("グループ化が成功すること");
-    assert_eq!(scene_summary(&app).shapes[1].group_path, vec![eye_gid]);
-    assert_eq!(scene_summary(&app).shapes[2].group_path, vec![eye_gid]);
+    let in_group: Vec<Color32> = scene_summary(&app)
+        .shapes
+        .iter()
+        .filter(|s| s.group_path == vec![eye_gid])
+        .map(|s| s.color)
+        .collect();
+    assert_eq!(in_group.len(), 2);
+    assert!(!in_group.contains(&red));
 
     // 1つクリックするだけでグループ全体の2シェイプが同時選択されること
     canvas_tool::clear_selection(&mut app);
@@ -6107,7 +6122,25 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
         orig_seg.p1,
         "ドラッグ中はセル内の図形が書き換えられないこと"
     );
-    let grab_after = app.scene().get(0).unwrap().exterior.segments[seg_idx].eval(grab_t);
+    // 引っぱった辺は、両端が同じ区間（書き直した輪郭は、区間の並びの始まりが元と違うことがある）
+    let pulled = app
+        .scene()
+        .get(0)
+        .unwrap()
+        .exterior
+        .segments
+        .iter()
+        .find_map(|q| {
+            if (q.p0, q.p2) == (orig_seg.p0, orig_seg.p2) {
+                Some(*q)
+            } else if (q.p2, q.p0) == (orig_seg.p0, orig_seg.p2) {
+                Some(QuadBez::new(q.p2, q.p1, q.p0))
+            } else {
+                None
+            }
+        })
+        .expect("引っぱった辺が輪郭にあること");
+    let grab_after = pulled.eval(grab_t);
     assert!(
         ((grab_after - grab_before) - kurbo::Vec2::new(0.0, 2.0)).hypot() < 1e-5,
         "微小ドラッグ時の曲線変化量がカーソル移動量と正確に一致すること (#5)"
@@ -14892,7 +14925,8 @@ fn test_m4_3_saved_map_roundtrip_bit_exact_and_load_shrinks_capacities() {
     }
     // 1. 地図1枚を JSON にして読み戻すと、ビットまで同じ地図に戻る
     let cel = &app.doc.root.layers[0].keyframes[0].cel;
-    let map = &cel.maps[0].base.map;
+    let base0 = cel.maps[0].base();
+    let map = &base0.map;
     let saved = project_io::SavedScopeMap::new(&[], map);
     let json = serde_json::to_string(&saved).unwrap();
     let back: project_io::SavedScopeMap = serde_json::from_str(&json).unwrap();
@@ -14931,7 +14965,7 @@ fn test_m4_3_saved_map_roundtrip_bit_exact_and_load_shrinks_capacities() {
     assert_eq!(orig.maps.len(), load.maps.len());
     for (a, b) in orig.maps.iter().zip(load.maps.iter()) {
         assert_eq!(a.group_path, b.group_path);
-        assert_eq!(bits(&a.base.map), bits(&b.base.map));
+        assert_eq!(bits(&a.base().map), bits(&b.base().map));
     }
     assert_eq!(orig.shapes.len(), load.shapes.len());
     assert_eq!(
@@ -19227,9 +19261,9 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
     assert_eq!(maps_json.len(), cel.maps.len());
     for (m_json, m) in maps_json.iter().zip(cel.maps.iter()) {
         let nodes = m_json["nodes"].as_array().unwrap();
-        assert_eq!(nodes.len(), m.base.map.nodes.len() * 2);
+        assert_eq!(nodes.len(), m.base().map.nodes.len() * 2);
         let edges = m_json["edges"].as_array().unwrap();
-        assert_eq!(edges.len(), m.base.map.edges.len());
+        assert_eq!(edges.len(), m.base().map.edges.len());
         assert!(edges
             .iter()
             .all(|e| e.as_array().is_some_and(|a| a.len() == 6)));
@@ -20890,11 +20924,20 @@ fn test_reshape_rewrites_only_touched_shapes() {
             &a.exterior.segments
         ));
     }
+    // 青は新しい形に差し替わる（形の変わった図形は、番号はそのままで新しい版になる）
     assert!(
-        !after
-            .iter()
-            .any(|s| s.color == Color32::BLUE && before.iter().any(|b| b.shape_id == s.shape_id)),
+        !after.iter().any(|s| s.color == Color32::BLUE
+            && before
+                .iter()
+                .any(|b| (b.shape_id, b.mesh_revision) == (s.shape_id, s.mesh_revision))),
         "青は差し替わる"
+    );
+    assert!(
+        after.iter().any(|s| s.color == Color32::BLUE
+            && before
+                .iter()
+                .any(|b| b.color == Color32::BLUE && b.shape_id == s.shape_id)),
+        "形の変わった青は、元の番号を引き継ぐ"
     );
 }
 
@@ -24878,9 +24921,9 @@ mod map_overlay {
     #[test]
     #[ignore]
     fn probe_undo_memory() {
-        use crate::planar_map::MapEdge;
         let mut app = dense_scene_app(7);
         let mut r = Rng(11);
+        let t0 = std::time::Instant::now();
         for _ in 0..100 {
             app.tool.brush_color = Color32::from_rgb((r.f() * 255.0) as u8, 90, 160);
             let a = Point::new(-350.0 + r.f() * 700.0, -200.0 + r.f() * 400.0);
@@ -24892,17 +24935,17 @@ mod map_overlay {
                 &generate_brush_outline(&pts, 3.0 + r.f() * 5.0),
             );
         }
+        let elapsed = t0.elapsed().as_secs_f64() * 1e3;
         let mut seen_maps: std::collections::HashSet<usize> = Default::default();
         let mut seen_shapes: std::collections::HashSet<usize> = Default::default();
-        let (mut map_bytes, mut shape_bytes) = (0usize, 0usize);
+        let (mut map_bytes, mut index_bytes, mut shape_bytes, mut edges, mut tiles) =
+            (0usize, 0usize, 0usize, 0usize, 0usize);
         let mut count = |tl: &timeline::Timeline| {
             for kf in tl.layers.iter().flat_map(|l| &l.keyframes) {
                 for m in kf.cel.maps.iter() {
-                    if seen_maps.insert(std::sync::Arc::as_ptr(&m.base) as usize) {
-                        let pm = &m.base.map;
-                        map_bytes +=
-                            pm.edges.len() * std::mem::size_of::<MapEdge>() + pm.nodes.len() * 16;
-                    }
+                    let (i, e) = m.stored().bytes_unseen(&mut seen_maps);
+                    index_bytes += i;
+                    map_bytes += e;
                 }
                 for sh in kf.cel.shapes.iter() {
                     if seen_shapes.insert(std::sync::Arc::as_ptr(sh) as usize) {
@@ -24917,11 +24960,104 @@ mod map_overlay {
             count(&e.timeline);
         }
         count(&app.doc.root);
+        for kf in app.doc.root.layers.iter().flat_map(|l| &l.keyframes) {
+            for m in kf.cel.maps.iter() {
+                edges += m.base().map.edges.len();
+                tiles += m.stored().tiles();
+            }
+        }
         eprintln!(
-            "PROBE Undo の控え {steps} 件：地図 {:.1}MB・図形 {:.1}MB（同じものは1回）",
+            "PROBE Undo の控え {steps} 件：地図の辺 {:.2}MB・塊の並び {:.2}MB・図形 {:.1}MB（同じものは1回）。今の地図の辺 {edges} 本・塊 {tiles} 個。辺1本 {} バイト。100 本で {elapsed:.0}ms",
             map_bytes as f64 / 1e6,
-            shape_bytes as f64 / 1e6
+            index_bytes as f64 / 1e6,
+            shape_bytes as f64 / 1e6,
+            crate::stored_map::edge_size()
         );
+    }
+
+    /// セル画の地図は場所ごとの塊でしまう：ブラシ1本で新しくなるのは、線の近くの塊だけ（ほかは前の地図・Undo の控えと
+    /// 共有する）。計算に使う形は塊から決まった順で作るので、地図のしまい場所が空になっても、作り直した地図はビットまで
+    /// 同じで、編集はセル画の地図から始まる（図形から作り直さない）。Undo で戻ると、前の地図そのもの（同じ塊）に戻る
+    #[test]
+    fn stored_map_shares_tiles_and_rebuilds_identically() {
+        let mut app = Is2dApp::default();
+        let mut r = Rng(5);
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN];
+        for i in 0..40 {
+            app.tool.brush_color = colors[i % 3];
+            let a = Point::new(-380.0 + r.f() * 760.0, -200.0 + r.f() * 400.0);
+            let b = Point::new(-380.0 + r.f() * 760.0, -200.0 + r.f() * 400.0);
+            let pts: Vec<Point> = (0..=16).map(|j| a.lerp(b, j as f64 / 16.0)).collect();
+            doc_actions::commit_raw_outline(
+                &mut app,
+                &generate_brush_outline(&pts, 4.0 + r.f() * 6.0),
+            );
+        }
+        let scope = |app: &Is2dApp| app.doc.root.layers[0].keyframes[0].cel.maps[0].clone();
+        let bits = |m: &PlanarMap| {
+            (
+                m.nodes
+                    .iter()
+                    .map(|p| [p.x.to_bits(), p.y.to_bits()])
+                    .collect::<Vec<_>>(),
+                m.edges
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.a,
+                            e.b,
+                            e.ctrl.x.to_bits(),
+                            e.ctrl.y.to_bits(),
+                            e.left,
+                            e.right,
+                            e.left_src,
+                            e.right_src,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let before = scope(&app);
+        let before_bits = bits(&before.base().map);
+        assert!(before.stored().tiles() > 50, "塊が十分ある場面");
+
+        // しまい場所が空でも、塊から作った地図はビットまで同じで、操作が引く地図はセル画の地図から作ったもの
+        crate::planar_map::clear_layer_bases();
+        assert_eq!(bits(&before.base().map), before_bits);
+        crate::planar_map::clear_layer_bases();
+        let stage: Vec<&FillShape> = app
+            .scene()
+            .iter()
+            .filter(|s| s.layer_id == app.doc.root.layers[0].id && s.is_raw_at_scope(&[]))
+            .collect();
+        let base = crate::planar_map::LayerBase::of(&stage, Affine::IDENTITY).unwrap();
+        assert!(base.stored.same(before.stored()), "図形から作り直さない");
+        assert_eq!(bits(&base.map), before_bits);
+
+        // ブラシ1本（小さな線）で新しくなるのは、線の近くの塊だけ
+        app.tool.brush_color = Color32::BLACK;
+        let pts: Vec<Point> = (0..=8)
+            .map(|j| Point::new(10.0 + j as f64 * 3.0, 5.0))
+            .collect();
+        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 4.0));
+        let after = scope(&app);
+        let (n, shared) = (
+            after.stored().tiles(),
+            after.stored().shared_tiles(before.stored()),
+        );
+        assert!(
+            n - shared <= 12,
+            "新しい塊は線の近くだけ：{} 個のうち {} 個",
+            n,
+            n - shared
+        );
+
+        // Undo で、前の地図そのものに戻る
+        app.undo();
+        let undone = scope(&app);
+        assert!(undone.stored().same(before.stored()));
+        crate::planar_map::clear_layer_bases();
+        assert_eq!(bits(&undone.base().map), before_bits);
     }
 
     /// 図形の多い場面（`dense_scene_app`）での、ブラシ・消しゴム1本の時間（30 本ずつ、平均と最大）
@@ -25072,7 +25208,7 @@ mod map_overlay {
                 .collect();
             let map = PlanarMap::from_faces(shapes.iter());
             assert!(map.is_valid(), "レイヤー {layer} の地図");
-            let base = LayerBase::new(map.clone(), false);
+            let base = LayerBase::new(&map, false);
             let layer_id = shapes[0].layer_id;
             let mut r = Rng(layer as u64 + 1);
             for dist in [5.0, 20.0, 60.0] {
