@@ -15,11 +15,6 @@ use crate::canvas_tool::{HoverTarget, LayerId, MapOwner, Scene, Session, ShapeId
 use crate::stored_map::StoredMap;
 use crate::vector_engine::{rects_overlap, Contour, FillShape, SyncCache};
 
-/// 図形から地図を作るとき（`from_faces`）に、同じ点・同じ線とみなす距離。生の図形はどれも地図から書き出したもので、
-/// 境目は両側の図形でビットまで同じ曲線なので、許容はほぼ 0 でよい（0.05 にすると、地図の上で 0.05 より近くに
-/// できた2つの頂点がまとめられて、地図が壊れることがある）
-pub(crate) const FACE_TOL: f64 = 1e-6;
-
 /// 辺の（左の色, 右の色）
 type Sides = (Option<Color32>, Option<Color32>);
 
@@ -121,32 +116,6 @@ impl std::hash::Hasher for IntHasher {
 
 type IntMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IntHasher>>;
 
-/// 点 `p` から `FACE_TOL` 以内の頂点（いちばん近いもの）の番号。無ければ頂点を足す（`found` は探すときの入れ物）
-fn snap_node(
-    nodes: &mut Vec<Point>,
-    grid: &mut CellGrid,
-    found: &mut Vec<usize>,
-    p: Point,
-) -> usize {
-    let t = KVec2::new(FACE_TOL, FACE_TOL);
-    let (lo, hi) = (cell_of(gpt(p - t)), cell_of(gpt(p + t)));
-    grid.query(
-        (lo.0..=hi.0).flat_map(|x| (lo.1..=hi.1).map(move |y| (x, y))),
-        found,
-    );
-    let near = found
-        .iter()
-        .map(|&id| ((nodes[id] - p).hypot(), id))
-        .filter(|&(d, _)| d <= FACE_TOL)
-        .min_by(|a, b| a.0.total_cmp(&b.0));
-    if let Some((_, id)) = near {
-        return id;
-    }
-    nodes.push(p);
-    grid.insert(nodes.len() - 1, [cell_of(gpt(p))]);
-    nodes.len() - 1
-}
-
 fn quad_deriv(q: &QuadBez, t: f64) -> KVec2 {
     (q.p1 - q.p0) * (2.0 * (1.0 - t)) + (q.p2 - q.p1) * (2.0 * t)
 }
@@ -156,7 +125,6 @@ struct Seg {
     b: usize,
     q: QuadBez,
     color: Color32,
-    order: usize,
     src: ShapeId,
 }
 
@@ -209,26 +177,33 @@ impl PlanarMap {
         QuadBez::new(self.nodes[ed.a], ed.ctrl, self.nodes[ed.b])
     }
 
-    /// 生の図形の並びから作る。境目の2本の線をそろえて1本の辺にする。
-    /// 2本の線の曲線が少し違うときは、並びの前の図形（古い図形）の曲線を使う
+    /// 生の図形の並びから作る。境目の2本の線を1本の辺にする。地図の面から書き出した図形は、境目の線を両側の図形で
+    /// ビットまで同じに持つ（頂点も制御点も同じ点。変換をかけても両側に同じ計算がかかる）ので、頂点は座標がビットまで
+    /// 同じ点を1つにし、境目は「両端が逆で制御点がビットまで同じ」2本の線を1本にする。そろわない図形（ずれた図形・重なった
+    /// 図形）は、正しい地図にならないので見つかり（`is_valid`）、塗り重ねて作る（`LayerBase::of`）
     pub(crate) fn from_faces<'a>(faces: impl IntoIterator<Item = &'a FillShape>) -> Self {
         let mut nodes: Vec<Point> = Vec::new();
-        let mut grid = CellGrid::new();
-        let mut found = Vec::new();
+        let mut index: HashMap<[u64; 2], usize> = HashMap::new();
+        let mut node = |p: Point| {
+            *index
+                .entry([p.x.to_bits(), p.y.to_bits()])
+                .or_insert_with(|| {
+                    nodes.push(p);
+                    nodes.len() - 1
+                })
+        };
         // 1. 向きのある区間（左が面の色）。端を頂点にまとめる
         let mut segs: Vec<Seg> = Vec::new();
-        for (order, f) in faces.into_iter().enumerate() {
+        for f in faces {
             for c in f.contours() {
                 for q in c.segments.iter() {
-                    let a = snap_node(&mut nodes, &mut grid, &mut found, q.p0);
-                    let b = snap_node(&mut nodes, &mut grid, &mut found, q.p2);
+                    let (a, b) = (node(q.p0), node(q.p2));
                     if a != b {
                         segs.push(Seg {
                             a,
                             b,
-                            q: QuadBez::new(nodes[a], q.p1, nodes[b]),
+                            q: *q,
                             color: f.color,
-                            order,
                             src: f.shape_id,
                         });
                     }
@@ -238,7 +213,7 @@ impl PlanarMap {
         // 区間の途中にある頂点では切らない（地図から書き出した図形では、頂点はいつも区間の端にある。前の版の図形で、
         // 区間の途中に頂点があれば、判定の形で辺が頂点に触れるので正しい地図にならず、塗り重ねて作り直す）
         let split = segs;
-        // 2. 同じ2頂点を結び、向きが逆で形の近い区間を、1本の辺にまとめる
+        // 2. 同じ2頂点を結び、向きが逆で制御点が同じ区間を、1本の辺にまとめる
         let mut groups: IntMap<(usize, usize), Vec<usize>> = IntMap::default();
         for (i, s) in split.iter().enumerate() {
             groups
@@ -254,7 +229,7 @@ impl PlanarMap {
             }
             used[i] = true;
             let s = &split[i];
-            let mid = s.q.eval(0.5);
+            let ctrl = [s.q.p1.x.to_bits(), s.q.p1.y.to_bits()];
             let twin = groups[&(s.a.min(s.b), s.a.max(s.b))]
                 .iter()
                 .copied()
@@ -262,16 +237,14 @@ impl PlanarMap {
                     !used[j]
                         && split[j].a == s.b
                         && split[j].b == s.a
-                        && (split[j].q.eval(0.5) - mid).hypot() <= FACE_TOL
+                        && [split[j].q.p1.x.to_bits(), split[j].q.p1.y.to_bits()] == ctrl
                 });
-            let (ctrl, right, right_src) = match twin {
+            let (right, right_src) = match twin {
                 Some(j) => {
                     used[j] = true;
-                    let t = &split[j];
-                    let ctrl = if t.order < s.order { t.q.p1 } else { s.q.p1 };
-                    (ctrl, Some(t.color), Some(t.src))
+                    (Some(split[j].color), Some(split[j].src))
                 }
-                None => (s.q.p1, None, None),
+                None => (None, None),
             };
             if right == Some(s.color) {
                 continue;
@@ -279,7 +252,7 @@ impl PlanarMap {
             edges.push(MapEdge {
                 a: s.a,
                 b: s.b,
-                ctrl,
+                ctrl: s.q.p1,
                 left: Some(s.color),
                 right,
                 left_src: Some(s.src),
@@ -3847,7 +3820,9 @@ impl PlanarMap {
                     let colors = if n_same { (nl, nr) } else { (nr, nl) };
                     let (_, _, nta, ntb) = piece_ends(&(nk, n_same));
                     let t_join = if forward { nta } else { ntb };
-                    if colors != (sl, sr) || (t_join - t_end).abs() > 1e-6 {
+                    // 同じ出どころの続いた区間は、つなぎ目の t がビットまで同じ（入れるときは前の区間の終わりの t を
+                    // 次の区間の始めにし、i_overlay が切るときは2つに同じ t を渡す：`ProvId::split`）
+                    if colors != (sl, sr) || t_join != t_end {
                         break;
                     }
                     used[nk] = true;
@@ -3875,7 +3850,8 @@ impl PlanarMap {
             };
             if let Some(e) = fed_edge {
                 let ed = self.edges[e];
-                let full = t0.min(t1) < 1e-9 && t0.max(t1) > 1.0 - 1e-9;
+                // 辺の端の t はちょうど 0 と 1（`flatten_with_t`。切っても外側の t は変わらない）
+                let full = t0.min(t1) == 0.0 && t0.max(t1) == 1.0;
                 let (ea, eb) = (node_at(ed.a), node_at(ed.b));
                 let same_dir = (n0, n1) == (ea, eb);
                 if full && n0 != n1 && (same_dir || (n0, n1) == (eb, ea)) {
