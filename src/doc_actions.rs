@@ -911,31 +911,19 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
 /// 同じレイヤー・同じ階層の線で囲まれた何も無い所）を `fill_color` にする（Animate と同じく、ほかのレイヤーや
 /// グループの図形は壁にしない）
 fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) -> bool {
-    let scope = tab.session.editing_group_path.clone();
-    let outcome = map_edit_diff(
-        tab.session.base_cache.shapes(),
-        target_lid,
-        &scope,
-        tab.session.edit_path.world_xform(),
-        |m| m.with_face_filled(pt, fill_color),
-    );
-    match outcome {
-        MapEditOutcome::Changed(removed, added) => {
-            push_undo(tab, None);
-            edit_layers(tab, &[target_lid], |edit| {
-                apply_shape_diff(
-                    &mut edit.shapes,
-                    &removed,
-                    added.clone(),
-                    target_lid,
-                    &scope,
-                );
-            });
-            true
+    // 塗っても絵が変わらないとき（同じ色・囲まれていない所）と、格子に置けない所（±65,536px の外）では、edit_layers が
+    // false を返し、apply が Undo の控えを捨てる
+    push_undo(tab, None);
+    edit_layers(tab, &[target_lid], |edit| {
+        let scope = edit.editing_group_path.clone();
+        if let MapEditOutcome::Changed(removed, added) =
+            map_edit_diff(&edit.shapes, target_lid, &scope, edit.world_xform, |m| {
+                m.with_face_filled(pt, fill_color)
+            })
+        {
+            apply_shape_diff(&mut edit.shapes, &removed, added, target_lid, &scope);
         }
-        // 格子に置けない所（±65,536px の外）は塗らない
-        MapEditOutcome::Unchanged | MapEditOutcome::Refused => false,
-    }
+    })
 }
 
 fn has_editable_selection(tab: &Tab) -> bool {
@@ -1064,28 +1052,21 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
     if tab.session.floating().is_some() {
         return false;
     }
-    // 土台の図形で差分を求め、形が変わらないとき・編集できないとき（消せない頂点など）は Undo も積まない
-    let MapEditOutcome::Changed(removed, added) = map_edit_diff(
-        tab.session.base_cache.shapes(),
-        layer_id,
-        &group_path,
-        tab.session.edit_path.world_xform(),
-        |m| map_edit.apply(m),
-    ) else {
-        return false;
-    };
+    // 形が変わらないとき・編集できないとき（消せない頂点など）は、edit_layers が false を返し、apply が Undo の控えを捨てる
     push_undo(tab, None);
-    focus_active_layer_by_id(tab, layer_id);
-    edit_layers(tab, &[layer_id], |edit| {
-        apply_shape_diff(
-            &mut edit.shapes,
-            &removed,
-            added.clone(),
-            layer_id,
-            &group_path,
-        );
+    let changed = edit_layers(tab, &[layer_id], |edit| {
+        if let MapEditOutcome::Changed(removed, added) =
+            map_edit_diff(&edit.shapes, layer_id, &group_path, edit.world_xform, |m| {
+                map_edit.apply(m)
+            })
+        {
+            apply_shape_diff(&mut edit.shapes, &removed, added, layer_id, &group_path);
+        }
     });
-    true
+    if changed {
+        focus_active_layer_by_id(tab, layer_id);
+    }
+    changed
 }
 
 #[cfg(test)]
