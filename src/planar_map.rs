@@ -1227,7 +1227,7 @@ pub(crate) struct LayerBase {
 impl LayerBase {
     /// 地図 `map` を、しまう形にして決まった順に並べ直したもの
     pub(crate) fn new(map: &PlanarMap, repainted: bool) -> Self {
-        Self::from_stored(StoredMap::from_dense(map), repainted)
+        Self::from_stored(StoredMap::from_dense(map, None), repainted)
     }
 
     fn from_stored(stored: StoredMap, repainted: bool) -> Self {
@@ -1998,8 +1998,11 @@ pub(crate) type CelScopeMap = (StoredMap, Option<Vec<Arc<FillShape>>>);
 /// 本当の地図があればそれ。無ければ図形から作り、図形が地図の面とそのままは合わないとき（正しい地図にならない図形を
 /// 塗り重ねて作り直したとき、図形を地図にして頂点を格子へ寄せたとき）は、図形を地図の面にする：（地図, 置き換えた図形の
 /// 並び）。形の同じ図形は番号も `Arc` もそのまま、形の変わった図形は同じ番号の新しい図形、塗り重ねて作り直したときは
-/// 全部を新しい図形にする。`None`：格子に置けない座標がある
-pub(crate) fn cel_scope_map(own: &[Arc<FillShape>]) -> Option<CelScopeMap> {
+/// 全部を新しい図形にする。地図の塊は、置き換える前の地図 `prev` と同じものを共有する。`None`：格子に置けない座標がある
+pub(crate) fn cel_scope_map(
+    own: &[Arc<FillShape>],
+    prev: Option<&StoredMap>,
+) -> Option<CelScopeMap> {
     let refs: Vec<&FillShape> = own.iter().map(|s| &**s).collect();
     let base = LayerBase::of(&refs, Affine::IDENTITY)?;
     let (layer_id, group_path) = (own[0].layer_id, own[0].group_path.clone());
@@ -2047,7 +2050,7 @@ pub(crate) fn cel_scope_map(own: &[Arc<FillShape>]) -> Option<CelScopeMap> {
             .map(|f| base.map.face_shape(f, layer_id, &group_path))
             .collect();
         let ids: Vec<ShapeId> = shapes.iter().map(|s| s.shape_id).collect();
-        let stored = StoredMap::from_dense(&labeled(base.map.clone(), &faces, &ids));
+        let stored = StoredMap::from_dense(&labeled(base.map.clone(), &faces, &ids), prev);
         return Some((stored, Some(shapes.into_iter().map(Arc::new).collect())));
     };
     let mut replaced: Vec<(ShapeId, Arc<FillShape>)> = Vec::new();
@@ -2060,8 +2063,9 @@ pub(crate) fn cel_scope_map(own: &[Arc<FillShape>]) -> Option<CelScopeMap> {
             replaced.push((s.shape_id, Arc::new(n)));
         }
     }
+    let stored = base.stored.shared_with(prev);
     if replaced.is_empty() {
-        return Some((base.stored.clone(), None));
+        return Some((stored, None));
     }
 
     let shapes: Vec<Arc<FillShape>> = own
@@ -2073,14 +2077,16 @@ pub(crate) fn cel_scope_map(own: &[Arc<FillShape>]) -> Option<CelScopeMap> {
                 .map_or_else(|| s.clone(), |r| r.1.clone())
         })
         .collect();
-    Some((base.stored.clone(), Some(shapes)))
+    Some((stored, Some(shapes)))
 }
 
-/// 読み込んだ地図 `map`（正しい地図）の面の図形（並び）と、面の辺の側に図形の番号を記した地図。番号は新しく振る
+/// 読み込んだ地図 `map`（正しい地図）の面の図形（並び）と、面の辺の側に図形の番号を記した地図。番号は新しく振る。
+/// 地図の塊は、同じレイヤーの直前のセルの同じ階層の地図 `prev` と同じものを共有する
 pub(crate) fn map_with_faces(
     map: PlanarMap,
     layer_id: LayerId,
     group_path: &[u64],
+    prev: Option<&StoredMap>,
 ) -> (StoredMap, Vec<FillShape>) {
     let (faces, _) = map.faces();
     let shapes: Vec<FillShape> = faces
@@ -2088,7 +2094,10 @@ pub(crate) fn map_with_faces(
         .map(|f| map.face_shape(f, layer_id, group_path))
         .collect();
     let ids: Vec<ShapeId> = shapes.iter().map(|s| s.shape_id).collect();
-    (StoredMap::from_dense(&labeled(map, &faces, &ids)), shapes)
+    (
+        StoredMap::from_dense(&labeled(map, &faces, &ids), prev),
+        shapes,
+    )
 }
 
 // ============================================================================

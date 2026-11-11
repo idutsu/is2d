@@ -264,15 +264,18 @@ impl Cel {
         cel
     }
 
-    /// 階層ごとの地図 `maps`（正しい地図。図形の並びで階層が出てくる順）から作る（ファイルを読むとき）。図形は地図の面
+    /// 階層ごとの地図 `maps`（正しい地図。図形の並びで階層が出てくる順）から作る（ファイルを読むとき）。図形は地図の面。
+    /// 地図の塊は、同じレイヤーの直前のセル `prev` の同じ階層の地図と同じものを共有する
     pub(crate) fn from_maps(
         maps: Vec<(Vec<u64>, crate::planar_map::PlanarMap)>,
         instances: Vec<SymbolInstance>,
+        prev: Option<&Cel>,
     ) -> Self {
         let mut shapes: Vec<Arc<FillShape>> = Vec::new();
         let mut scope_maps = Vec::with_capacity(maps.len());
         for (group_path, map) in maps {
-            let (stored, faces) = crate::planar_map::map_with_faces(map, 1, &group_path);
+            let prev_map = prev.and_then(|c| c.scope_stored(&group_path));
+            let (stored, faces) = crate::planar_map::map_with_faces(map, 1, &group_path, prev_map);
             if faces.is_empty() {
                 continue;
             }
@@ -331,6 +334,14 @@ impl Cel {
             .filter(|s| s.group_path == group_path)
             .map(|s| &**s)
             .collect()
+    }
+
+    /// 階層 `group_path` のしまった地図
+    fn scope_stored(&self, group_path: &[u64]) -> Option<&StoredMap> {
+        self.maps
+            .iter()
+            .find(|m| m.group_path == group_path)
+            .map(|m| &m.stored)
     }
 
     /// 階層 `group_path` の地図（計算に使う形）。生の図形の無い階層は空の地図。`None`：図形はあるのに地図が無い（格子に
@@ -412,7 +423,7 @@ impl Cel {
             .collect();
         let known = vec![(
             MapKey::new(&own, Affine::IDENTITY),
-            StoredMap::from_dense(&change.map),
+            StoredMap::from_dense(&change.map, self.scope_stored(group_path)),
         )];
         self.set_parts_with_maps(shapes, instances, &known);
     }
@@ -648,7 +659,7 @@ fn scope_maps_of(
         // 図形がみな前の地図の面なら（面を外す操作：グループ化・削除・シンボル化など）、地図はその面だけを残した地図
         if let Some(m) = old.iter().find(|m| m.key.contains_all(&key)) {
             let map = m.base().map.restricted(&key.ids());
-            let stored = StoredMap::from_dense(&map);
+            let stored = StoredMap::from_dense(&map, Some(&m.stored));
             maps.push(ScopeMap::new(group_path, key, stored));
             continue;
         }
@@ -657,7 +668,11 @@ fn scope_maps_of(
             .filter(|s| s.group_path == group_path)
             .cloned()
             .collect();
-        let Some((stored, replaced)) = cel_scope_map(&own) else {
+        let prev = old
+            .iter()
+            .find(|m| m.group_path == group_path)
+            .map(|m| &m.stored);
+        let Some((stored, replaced)) = cel_scope_map(&own, prev) else {
             continue;
         };
         let key = match replaced {

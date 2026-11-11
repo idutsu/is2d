@@ -567,8 +567,9 @@ impl From<&Keyframe> for SavedKeyframe {
     }
 }
 
-impl From<SavedKeyframe> for Keyframe {
-    fn from(s: SavedKeyframe) -> Self {
+impl Keyframe {
+    /// 読んだキーフレーム `s`。地図の塊は、同じレイヤーの直前のキーフレーム `prev` のセル画と同じものを共有する
+    fn from_saved(s: SavedKeyframe, prev: Option<&Keyframe>) -> Self {
         // 正しくない地図は、読み込みの確かめ（`ProjectDocument::check_maps`）で断ってある。ここでは飛ばすだけ
         let maps: Vec<(Vec<u64>, PlanarMap)> = s
             .maps
@@ -586,7 +587,7 @@ impl From<SavedKeyframe> for Keyframe {
                     && seen_gids.insert(inst.binding.instance_gid)
             })
             .collect();
-        let cel = Cel::from_maps(maps, instances);
+        let cel = Cel::from_maps(maps, instances, prev.map(|kf| &kf.cel));
         Self {
             start_frame: s.start_frame,
             cel,
@@ -633,13 +634,13 @@ impl From<&Layer> for SavedLayer {
 impl From<SavedLayer> for Layer {
     fn from(s: SavedLayer) -> Self {
         let frame_count = s.frame_count.clamp(1, MAX_TIMELINE_FRAMES);
-        let mut keyframes: Vec<Arc<Keyframe>> = s
-            .keyframes
-            .into_iter()
-            .map(Keyframe::from)
-            .filter(|kf| kf.start_frame < frame_count)
-            .map(Arc::new)
-            .collect();
+        let mut keyframes: Vec<Arc<Keyframe>> = Vec::with_capacity(s.keyframes.len());
+        for saved in s.keyframes {
+            let kf = Keyframe::from_saved(saved, keyframes.last().map(|kf| &**kf));
+            if kf.start_frame < frame_count {
+                keyframes.push(Arc::new(kf));
+            }
+        }
         keyframes.sort_by_key(|kf| kf.start_frame);
         keyframes.dedup_by_key(|kf| kf.start_frame);
         if keyframes.first().is_none_or(|kf| kf.start_frame != 0) {

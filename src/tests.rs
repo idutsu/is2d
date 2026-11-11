@@ -25034,6 +25034,28 @@ mod map_overlay {
         assert!(undone.stored().same(before.stored()));
         crate::planar_map::clear_layer_bases();
         assert_eq!(bits(&undone.base().map), before_bits);
+
+        // 塊を持つのは地図だけ：前の地図と共有した塊も、前の地図を捨てれば持ち主はその地図1つに戻る（アプリ全体の
+        // 置き場は無い）
+        use crate::stored_map::StoredMap;
+        let map = before.base().map.clone();
+        let first = StoredMap::from_dense(&map, None);
+        assert!(first.tile_owners().iter().all(|&n| n == 1));
+        let same = StoredMap::from_dense(&map, Some(&first));
+        assert!(same.same_content(&first));
+        assert_eq!(same.shared_tiles(&first), first.tiles());
+        let ids: std::collections::HashSet<u64> = before
+            .base()
+            .map
+            .edges
+            .iter()
+            .filter_map(|e| e.left_src)
+            .take(3)
+            .collect();
+        let fewer = StoredMap::from_dense(&map.restricted(&ids), Some(&first));
+        assert!(fewer.shared_tiles(&first) > 0);
+        drop((first, same));
+        assert!(fewer.tile_owners().iter().all(|&n| n == 1));
     }
 
     /// 面を外す操作（削除・グループ化）のあとの地図は、前の地図からその面を外した地図（図形から作り直さない）。外した面の
@@ -25066,7 +25088,10 @@ mod map_overlay {
                 .filter(|s| keep.contains(&s.color))
                 .map(|s| s.shape_id)
                 .collect();
-            crate::stored_map::StoredMap::from_dense(&before.maps[0].base().map.restricted(&ids))
+            crate::stored_map::StoredMap::from_dense(
+                &before.maps[0].base().map.restricted(&ids),
+                None,
+            )
         };
 
         // 削除：残った面だけの地図

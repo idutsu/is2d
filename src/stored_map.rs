@@ -1,24 +1,23 @@
 //! セル画にしまう地図（境目の線を1本で持つ本当の形）：場所ごとの塊に分けた辺の並び。
 //!
 //! 辺は両端を座標で指し（頂点の番号を持たない）、決まった向き・決まった順に並べる。塊は、辺の弦の中点がある `TILE` px の
-//! 升目ごとの辺の並び。中身が同じ塊はアプリ全体で1つを共有する（`TILES`）ので、編集で変わらなかった場所の塊は、Undo の
-//! 控えとも共有したまま（控え1つ分の大きさは、変わった場所の塊の分だけ）。
+//! 升目ごとの辺の並び。地図をしまうときは、置き換える前の地図（読み込みでは同じレイヤーの直前のセル）の同じ升目の塊と
+//! 中身が同じなら、その塊を使う（`StoredMap::from_dense`）。Undo の控えが持つのは置き換える前の地図そのものなので、編集で
+//! 変わらなかった場所の塊は控えと共有したまま（控え1つ分の大きさは、変わった場所の塊の分だけ）。塊を持つのは地図だけ
+//! なので、どの地図も持たなくなった塊は、その場で返る。
 //!
 //! 計算に使うふつうの地図（`PlanarMap`）は、いつも塊から決まった順で作る（`StoredMap::to_dense`）。頂点と辺の番号が中身
 //! だけで決まるので、しまい場所から出した地図も、塊から作り直した地図も同じになる（編集の結果が、しまい場所の具合に
 //! よらない）。
 
-use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use eframe::egui::Color32;
 use kurbo::Point;
 
 use crate::canvas_tool::ShapeId;
 use crate::planar_map::{MapEdge, PlanarMap};
-use crate::vector_engine::SyncCache;
 
 /// 塊の升目の大きさ（文書の座標の px）。ブラシ1本・消しゴム1本で変わるのは、ふつう升目の数個分
 const TILE: f64 = 32.0;
@@ -103,13 +102,6 @@ impl PartialEq for StoredEdge {
 
 impl Eq for StoredEdge {}
 
-impl Hash for StoredEdge {
-    fn hash<H: Hasher>(&self, h: &mut H) {
-        self.geom_bits().hash(h);
-        (self.left, self.right, self.left_src, self.right_src).hash(h);
-    }
-}
-
 /// テスト用：しまう辺1本の大きさ（バイト）
 #[cfg(test)]
 pub(crate) fn edge_size() -> usize {
@@ -121,17 +113,27 @@ fn coord_order(p: Point, q: Point) -> std::cmp::Ordering {
     p.x.total_cmp(&q.x).then_with(|| p.y.total_cmp(&q.y))
 }
 
-/// 塊：1つの升目に入る辺の並び（決まった順）
+/// 塊：1つの升目に入る辺の並び（決まった順。空の塊は無い）
 type Tile = Arc<[StoredEdge]>;
+
+/// 升目の順の塊 `prev` のうち、辺の並び `run`（1つの升目の、決まった順の辺）と中身が同じ塊。`j` は `prev` をなめた位置
+/// （升目の順に呼ぶ）。中身が同じなら升目も同じ（升目は辺で決まる）
+fn same_tile(prev: &[Tile], j: &mut usize, run: &[StoredEdge]) -> Option<Tile> {
+    let at = run[0].tile();
+    while prev.get(*j).is_some_and(|t| t[0].tile() < at) {
+        *j += 1;
+    }
+    prev.get(*j).filter(|t| t[..] == *run).cloned()
+}
 
 /// セル画にしまう地図：塊の並び（升目の順）。写しは `Arc` を1つ数えるだけ
 #[derive(Clone, Debug)]
 pub(crate) struct StoredMap(Arc<[Tile]>);
 
 impl StoredMap {
-    /// 地図 `map` のしまう形。辺を決まった向きにして升目ごとに分け、塊の中を決まった順に並べる。中身が前からある塊と
-    /// 同じ塊は、その塊を共有する（`TILES`）
-    pub(crate) fn from_dense(map: &PlanarMap) -> Self {
+    /// 地図 `map` のしまう形。辺を決まった向きにして升目ごとに分け、塊の中を決まった順に並べる。置き換える前の地図
+    /// `prev` の同じ升目の塊と中身が同じ塊は、その塊を共有する（塊はどちらも升目の順なので、並べて1回なめるだけ）
+    pub(crate) fn from_dense(map: &PlanarMap, prev: Option<&StoredMap>) -> Self {
         let mut all: Vec<((i32, i32), StoredEdge)> = map
             .edges
             .iter()
@@ -141,12 +143,32 @@ impl StoredMap {
             })
             .collect();
         all.sort_unstable_by(|x, y| x.0.cmp(&y.0).then_with(|| x.1.order(&y.1)));
-        let mut table = TILES.lock();
-        let tiles: Vec<Tile> = all
-            .chunk_by(|x, y| x.0 == y.0)
-            .map(|run| table.intern(run.iter().map(|x| x.1).collect()))
+        let (keys, edges): (Vec<(i32, i32)>, Vec<StoredEdge>) = all.into_iter().unzip();
+        let prev: &[Tile] = prev.map_or(&[], |p| &p.0);
+        let (mut j, mut start) = (0, 0);
+        let tiles: Vec<Tile> = keys
+            .chunk_by(|a, b| a == b)
+            .map(|k| {
+                let run = &edges[start..start + k.len()];
+                start += k.len();
+                same_tile(prev, &mut j, run).unwrap_or_else(|| run.into())
+            })
             .collect();
         Self(tiles.into())
+    }
+
+    /// この地図の塊のうち、置き換える前の地図 `prev` の同じ升目の塊と中身が同じものを、その塊に替えた地図
+    pub(crate) fn shared_with(&self, prev: Option<&StoredMap>) -> Self {
+        let Some(prev) = prev else {
+            return self.clone();
+        };
+        let mut j = 0;
+        Self(
+            self.0
+                .iter()
+                .map(|t| same_tile(&prev.0, &mut j, t).unwrap_or_else(|| t.clone()))
+                .collect(),
+        )
     }
 
     /// 計算に使うふつうの地図：辺は塊の順・塊の中の順に並べ、頂点は最初に出てきた順に番号を振る（番号が中身だけで決まる）
@@ -222,6 +244,12 @@ impl StoredMap {
         self.0.len()
     }
 
+    /// テスト用：塊ごとの持ち主の数（この地図のほかに持っている地図の数＋1）
+    #[cfg(test)]
+    pub(crate) fn tile_owners(&self) -> Vec<usize> {
+        self.0.iter().map(Arc::strong_count).collect()
+    }
+
     /// テスト用：`other` と共有している塊（同じ `Arc`）の数
     #[cfg(test)]
     pub(crate) fn shared_tiles(&self, other: &Self) -> usize {
@@ -234,46 +262,5 @@ impl StoredMap {
             .iter()
             .filter(|t| theirs.contains(&(Arc::as_ptr(t) as *const u8 as usize)))
             .count()
-    }
-}
-
-/// 塊の置き場：中身のハッシュごとの、生きている塊（弱い参照）。持ち主（セル画・Undo の控え・地図のしまい場所）がみな
-/// 手放した塊は消え、置き場からも、入れた数が生きている数を超えたときにまとめて外す
-struct TileTable {
-    by_hash: BTreeMap<u64, Vec<Weak<[StoredEdge]>>>,
-    /// 前にまとめて外してから入れた数
-    inserted: usize,
-}
-
-static TILES: SyncCache<TileTable> = SyncCache::new(TileTable {
-    by_hash: BTreeMap::new(),
-    inserted: 0,
-});
-
-impl TileTable {
-    /// 辺の並び `edges` の塊。中身が同じ生きている塊があれば、それを返す
-    fn intern(&mut self, edges: Vec<StoredEdge>) -> Arc<[StoredEdge]> {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        edges.hash(&mut h);
-        let bucket = self.by_hash.entry(h.finish()).or_default();
-        bucket.retain(|w| w.strong_count() > 0);
-        if let Some(t) = bucket
-            .iter()
-            .filter_map(Weak::upgrade)
-            .find(|t| t[..] == edges[..])
-        {
-            return t;
-        }
-        let t: Arc<[StoredEdge]> = edges.into();
-        bucket.push(Arc::downgrade(&t));
-        self.inserted += 1;
-        if self.inserted > self.by_hash.len().max(1024) {
-            self.by_hash.retain(|_, b| {
-                b.retain(|w| w.strong_count() > 0);
-                !b.is_empty()
-            });
-            self.inserted = 0;
-        }
-        t
     }
 }
