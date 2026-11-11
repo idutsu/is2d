@@ -2601,16 +2601,11 @@ impl PlanarMap {
         };
         let seg_rect =
             |a: IPt, b: IPt| KRect::from_points(from_grid(a.0, a.1), from_grid(b.0, b.1));
-        let add_polyline = |q: &QuadBez,
+        let add_polyline = |line: &[IPt],
                             ends: (Option<usize>, Option<usize>),
                             segs: &mut Vec<GridSeg>,
                             seg_grid: &mut CellGrid,
-                            lines: &mut Vec<GridLine>|
-         -> Option<()> {
-            // 格子に置けない座標は、ここで断る
-            to_grid(q.p0)?;
-            to_grid(q.p2)?;
-            let line = grid_poly(q);
+                            lines: &mut Vec<GridLine>| {
             let start = segs.len();
             let mut bbox: Option<KRect> = None;
             for k in 0..line.len().saturating_sub(1) {
@@ -2618,13 +2613,12 @@ impl PlanarMap {
                 let r = seg_rect(a, b);
                 bbox = Some(bbox.map_or(r, |x| x.union(r)));
                 seg_grid.insert(segs.len(), seg_cells((a, b), 0));
-                let (ta, tb) = seg_tags(&line, k, usize::MAX, usize::MAX);
+                let (ta, tb) = seg_tags(line, k, usize::MAX, usize::MAX);
                 segs.push((a, b, ta.and(ends.0), tb.and(ends.1)));
             }
             if let Some(r) = bbox {
                 lines.push((r, start..segs.len()));
             }
-            Some(())
         };
         // 入れない辺 `e`（判定の形 `pe`）が、区間 `s` の近くを通るか：共有する頂点から出る区間どうしは、そこのほかで
         // 触れるか。ほかは、`GRID_REACH` 以内に来るか
@@ -2648,16 +2642,40 @@ impl PlanarMap {
         };
         let mut segs: Vec<GridSeg> = Vec::new();
         let mut seg_grid = CellGrid::new();
+        let mut found = Vec::new();
         let mut lines: Vec<GridLine> = Vec::new();
         let mut edge_queue: Vec<usize> = check.clone().collect();
-        for q in seeds {
-            add_polyline(q, (None, None), &mut segs, &mut seg_grid, &mut lines)?;
-        }
         let mut to_feed: Vec<usize> = (0..self.edges.len()).filter(|&e| fed[e]).collect();
+        // 重ねる線に乗っている前からある辺（`Cover`。輪郭の変形で動かした辺は除く）。その辺は入れ、重ねる線のその所は
+        // その辺と同じ折れ線にする
+        let flat_pad = (FLAT_TOL * OVERLAY_GRID).ceil() as i64;
+        let mut covers: Vec<Vec<Cover>> = Vec::with_capacity(seeds.len());
+        for q in seeds {
+            // 格子に置けない座標は、ここで断る
+            to_grid(q.p0)?;
+            to_grid(q.p2)?;
+            edge_grid.query(quad_cells(*q, flat_pad), &mut found);
+            let c = self.covers_of(
+                q,
+                found
+                    .iter()
+                    .copied()
+                    .filter(|&e| e < check.start && !fed[e]),
+            );
+            to_feed.extend(c.iter().map(|c| c.edge));
+            let mut line: Vec<IPt> = Vec::new();
+            for (p, _) in self.stitched_points(q, &c) {
+                let ip = gpt(p);
+                if line.last() != Some(&ip) {
+                    line.push(ip);
+                }
+            }
+            add_polyline(&line, (None, None), &mut segs, &mut seg_grid, &mut lines);
+            covers.push(c);
+        }
         for e in &to_feed {
             fed[*e] = false;
         }
-        let mut found = Vec::new();
         loop {
             // 入れる辺：端の頂点を格子に置き直し、その頂点につながる入れない辺を調べ直す。辺の折れ線を足す
             while let Some(e) = to_feed.pop() {
@@ -2675,13 +2693,17 @@ impl PlanarMap {
                         }
                     }
                 }
+                let q = self.quad(e);
+                // 格子に置けない座標は、ここで断る
+                to_grid(q.p0)?;
+                to_grid(q.p2)?;
                 add_polyline(
-                    &self.quad(e),
+                    &grid_poly(&q),
                     (Some(ed.a), Some(ed.b)),
                     &mut segs,
                     &mut seg_grid,
                     &mut lines,
-                )?;
+                );
             }
             if let Some((r, range)) = lines.pop() {
                 // 折れ線の区間のマスにかかる辺だけを、折れ線の区間のうち辺の外接矩形にかかるものと比べる
@@ -2731,6 +2753,7 @@ impl PlanarMap {
             } else {
                 return Some(FedEdges {
                     fed,
+                    covers,
                     boxes,
                     grid: edge_grid,
                     adj,
@@ -2816,7 +2839,13 @@ impl PlanarMap {
             } else {
                 ShapeType::Clip
             };
-            let pts = flatten_with_t(q, FLAT_TOL);
+            // 重ねる線のうち、前からある辺が乗っている所は、その辺と同じ折れ線にする（`Cover`）
+            let pts = match kind {
+                OverlaySrc::New(i) if !matches!(input, MapInput::Map(_)) => {
+                    self.stitched_points(q, &fed_set.covers[*i])
+                }
+                _ => flatten_with_t(q, FLAT_TOL),
+            };
             let mut prev = (to_grid(pts[0].0).ok_or(OverlayStop::Refused)?, pts[0].1);
             for &(p, t) in &pts[1..] {
                 let ip = to_grid(p).ok_or(OverlayStop::Refused)?;
@@ -3620,9 +3649,95 @@ impl PlanarMap {
     }
 }
 
+/// 重ねる曲線の上に乗っている前からある辺：（辺, 重ねる曲線の上の、辺の始点の t, 終点の t）。辺が、重ねる曲線のその
+/// 部分から、どこでも `FLAT_TOL` 以内にある。地図は曲線を `FLAT_TOL` の精度でしか表さないので、この辺と重ねる曲線の
+/// その部分は同じ線として扱い、同じ折れ線にする（同じ線を重ねても、折れ線どうしが格子の数目の幅で交わって、見えない
+/// 欠片の面ができない。レビュー 6cca852 の N-1001）
+#[derive(Clone, Copy, Debug)]
+struct Cover {
+    edge: usize,
+    s0: f64,
+    s1: f64,
+}
+
+impl Cover {
+    /// 重ねる曲線の上の範囲（小さい方, 大きい方）
+    fn span(&self) -> (f64, f64) {
+        (self.s0.min(self.s1), self.s0.max(self.s1))
+    }
+}
+
+impl PlanarMap {
+    /// 曲線 `q` に乗っている辺（`cands` のうち。`Cover`）を、`q` の上の位置の順に返す。範囲が重なる辺は、先の辺だけ
+    fn covers_of(&self, q: &QuadBez, cands: impl Iterator<Item = usize>) -> Vec<Cover> {
+        let near = q.bounding_box().inflate(FLAT_TOL, FLAT_TOL);
+        let mut out: Vec<Cover> = cands
+            .filter_map(|e| {
+                let m = self.quad(e);
+                if near.union(m.bounding_box()) != near {
+                    return None;
+                }
+                let (s0, d0) = nearest_on_quad(q, m.p0);
+                let (s1, d1) = nearest_on_quad(q, m.p2);
+                if d0 > FLAT_TOL || d1 > FLAT_TOL || s0 == s1 {
+                    return None;
+                }
+                // 辺の t と重ねる曲線の t は、同じ曲線の部分なら1次式で対応する
+                let on = flatten_with_t(&m, FLAT_TOL)
+                    .iter()
+                    .all(|&(p, t)| (q.eval(s0 + (s1 - s0) * t) - p).hypot() <= FLAT_TOL);
+                on.then_some(Cover { edge: e, s0, s1 })
+            })
+            .collect();
+        out.sort_by(|a, b| a.span().0.total_cmp(&b.span().0));
+        let mut end = f64::NEG_INFINITY;
+        out.retain(|c| {
+            let (lo, hi) = c.span();
+            let free = lo >= end;
+            if free {
+                end = hi;
+            }
+            free
+        });
+        out
+    }
+
+    /// 曲線 `q` を折れ線にした点と、その点の `q` の上の t。`q` に乗っている辺 `covers` の所は、その辺の折れ線の点を
+    /// 使う（同じ線が同じ折れ線になり、i_overlay が1本の区間にまとめる）。両端はいつも `q` の端
+    fn stitched_points(&self, q: &QuadBez, covers: &[Cover]) -> Vec<(Point, f64)> {
+        let own = flatten_with_t(q, FLAT_TOL);
+        if covers.is_empty() {
+            return own;
+        }
+        let n = own.len();
+        let mut out = vec![own[0]];
+        let mut k = 1;
+        for c in covers {
+            let (lo, hi) = c.span();
+            while k < n - 1 && own[k].1 < lo {
+                out.push(own[k]);
+                k += 1;
+            }
+            let mut pts = flatten_with_t(&self.quad(c.edge), FLAT_TOL);
+            if c.s0 > c.s1 {
+                pts.reverse();
+            }
+            out.extend(pts.into_iter().map(|(p, t)| (p, c.s0 + (c.s1 - c.s0) * t)));
+            while k < n - 1 && own[k].1 <= hi {
+                k += 1;
+            }
+        }
+        out.extend_from_slice(&own[k..n - 1]);
+        out.push(own[n - 1]);
+        out
+    }
+}
+
 /// i_overlay に入れる前からある辺（`fed`）と、そのときに作った辺の外接矩形・格子・頂点ごとの辺
 struct FedEdges {
     fed: Vec<bool>,
+    /// 重ねる線（`fed_edges` の `seeds`）ごとの、その線に乗っている前からある辺
+    covers: Vec<Vec<Cover>>,
     /// 辺の外接矩形（格子に置き直す分と、近くとみなす距離の分を広げたもの）
     boxes: Vec<KRect>,
     /// 辺がかかるマス（同じだけ広げたもの）

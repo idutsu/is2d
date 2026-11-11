@@ -24167,6 +24167,67 @@ mod map_overlay {
         eprintln!("PROBE ほぼ重なった線：正しくない地図 {invalid}/{total}・S の中が赤でない {lost}/{total}");
     }
 
+    /// 同じ点列から作ったブラシを色を替えて何度も重ねても、見えない欠片の図形が溜まらない（重ねる線に乗っている前からの辺は
+    /// 同じ折れ線にする：`Cover`。レビュー 6cca852 の N-1001。直す前は、12 回目に壊れた地図ができ、それまでに図形が
+    /// 24 個から 1,779 個に増えた）
+    #[test]
+    fn same_stroke_repeated_leaves_no_slivers() {
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+        let mut app = Is2dApp::default();
+        let mut r = Rng(5);
+        let line = |r: &mut Rng| -> Vec<Point> {
+            let pts: Vec<Point> = (0..3)
+                .map(|_| Point::new(-200.0 + r.f() * 400.0, -150.0 + r.f() * 300.0))
+                .collect();
+            let mut dense = Vec::new();
+            for w in pts.windows(2) {
+                for j in 0..12 {
+                    dense.push(w[0].lerp(w[1], j as f64 / 12.0));
+                }
+            }
+            dense.push(*pts.last().unwrap());
+            dense
+        };
+        for k in 0..20 {
+            app.tool.brush_color = colors[k % 4];
+            let pts = line(&mut r);
+            doc_actions::commit_raw_outline(
+                &mut app,
+                &generate_brush_outline(&pts, 4.0 + r.f() * 8.0),
+            );
+        }
+        let same = generate_brush_outline(&line(&mut r), 9.0);
+        let area = |s: &FillShape| {
+            s.exterior.signed_area().abs()
+                - s.holes.iter().map(|h| h.signed_area().abs()).sum::<f64>()
+        };
+        let tiny = |app: &Is2dApp| {
+            app.doc.root.layers[0].keyframes[0]
+                .cel
+                .shapes
+                .iter()
+                .filter(|s| area(s) < 0.01)
+                .count()
+        };
+        let mut after_first = None;
+        for k in 0..12 {
+            app.tool.brush_color = colors[k % 4];
+            let undo = app.history.undo_stack.len();
+            doc_actions::commit_raw_outline(&mut app, &same);
+            assert_eq!(
+                app.history.undo_stack.len(),
+                undo + 1,
+                "{k} 回目が何もしなかった"
+            );
+            assert!(layer_map_valid(&app, 0), "{k} 回目で地図が正しくない");
+            let n = tiny(&app);
+            assert!(
+                n <= *after_first.get_or_insert(n),
+                "{k} 回目で欠片が {n} 個に増えた"
+            );
+        }
+    }
+
     /// 同じ点列から作ったブラシを、色を替えて何度も重ねたときの欠片（レビュー 6cca852 の N-1001）を数える：20 本描いた
     /// セルに 30 回重ね、図形の数・面積 0.01px² 未満の図形の数・1回の時間・断った回数。ずらし（`PROBE_SHIFT`、px）を
     /// 交互に足すこともできる
@@ -24220,10 +24281,15 @@ mod map_overlay {
             let undo = app.history.undo_stack.len();
             let t = std::time::Instant::now();
             doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 9.0));
-            t_max = t_max.max(t.elapsed().as_secs_f64() * 1e3);
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            t_max = t_max.max(ms);
             if app.history.undo_stack.len() == undo {
                 refused += 1;
             }
+            eprintln!(
+                "PROBE {k} 回目：図形 {}・{ms:.1}ms",
+                app.doc.root.layers[0].keyframes[0].cel.shapes.len()
+            );
         }
         let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
         let tiny = shapes.iter().filter(|s| area(s) < 0.01).count();
@@ -24815,6 +24881,34 @@ mod map_overlay {
 
     /// 強さ・速さの試し（ふだんは流さない）：レビューと同じ条件で、矩形選択・動かして離す・`Alt` 複製・貼り付けの時間を測る。
     /// 結果の各レイヤーの地図が壊れていないかも見る
+    /// 図形の多い場面（`dense_scene_app`）での、ブラシ・消しゴム1本の時間（30 本ずつ、平均と最大）
+    #[test]
+    #[ignore]
+    fn probe_dense_brush_timing() {
+        let mut app = dense_scene_app(7);
+        let mut r = Rng(9);
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
+        for tool in [Tool::Brush, Tool::Eraser] {
+            app.tool.tool = tool;
+            let mut times = Vec::new();
+            for _ in 0..30 {
+                app.tool.brush_color = Color32::from_rgb((r.f() * 255.0) as u8, 80, 160);
+                let a = Point::new(-350.0 + r.f() * 700.0, -200.0 + r.f() * 400.0);
+                let pts: Vec<Point> = (0..=24)
+                    .map(|j| a + KVec2::new(j as f64 * 4.0, 30.0 * (j as f64 * 0.3).sin()))
+                    .collect();
+                let outline = generate_brush_outline(&pts, 3.0 + r.f() * 6.0);
+                let t = std::time::Instant::now();
+                doc_actions::commit_raw_outline(&mut app, &outline);
+                times.push(ms(t));
+            }
+            let avg = times.iter().sum::<f64>() / times.len() as f64;
+            let max = times.iter().copied().fold(0.0, f64::max);
+            eprintln!("PROBE {tool:?} 30 本：平均 {avg:.2}ms・最大 {max:.2}ms");
+        }
+        app.tool.tool = Tool::Brush;
+    }
+
     #[test]
     #[ignore]
     fn probe_dense_scene_selection_timing() {
