@@ -21,7 +21,7 @@ fn erase_from_canvas(
 ) {
     use crate::planar_map::{apply_shape_diff, map_edit_diff, MapEditOutcome, MapInput, MapRule};
     for e in erasers {
-        if let MapEditOutcome::Changed(removed, added) =
+        if let MapEditOutcome::Changed(crate::planar_map::MapChange { removed, added, .. }) =
             map_edit_diff(canvas, layer_id, scope, Affine::IDENTITY, |m| {
                 m.overlay(
                     MapInput::Shapes(std::slice::from_ref(e)),
@@ -1104,10 +1104,15 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
     assert_eq!(app.session.selected_indices().len(), 3);
 
     assert!(doc_actions::ungroup_selected_shapes(&mut app));
+    // 生に戻った赤は、選んだまま浮いた片になる（確定のときにルートの地図に重ねる）。目のグループは文書に残る
     let cel_shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
-    assert!(cel_shapes[0].group_path.is_empty());
-    assert_eq!(cel_shapes[1].group_path, vec![eye_gid]);
-    assert_eq!(cel_shapes[2].group_path, vec![eye_gid]);
+    assert_eq!(cel_shapes.len(), 2);
+    assert!(cel_shapes.iter().all(|s| s.group_path == vec![eye_gid]));
+    let fl = app.session.floating().expect("生に戻った図形は浮いた片");
+    assert!(fl
+        .pieces
+        .iter()
+        .any(|p| p.color == red && p.group_path.is_empty()));
     let s = scene_summary(&app);
     assert!(s
         .shapes
@@ -1132,6 +1137,12 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
             .group_path,
         vec![eye_gid]
     );
+    // 選択を外すと、赤はルートの地図に入る
+    canvas_tool::clear_selection(&mut app);
+    let cel_shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+    assert!(cel_shapes
+        .iter()
+        .any(|s| s.color == red && s.group_path.is_empty()));
 }
 
 #[test]
@@ -4321,7 +4332,7 @@ fn test_corrupt_and_truncated_json_returns_error_without_modifying_app() {
 fn test_malformed_json_sanitization_and_cycle_breaking() {
     // 破損・外部改変された異常系 `.is2d` JSON（シンボル循環参照 A⇄B・重複レイヤーID・孤児インスタンス・逆向きワインディング・範囲外パラメータ）のサニタイズ検証
     let malformed_json = r#"{
-          "version": 3,
+          "version": 4,
           "stage_size": [99999.0, 10.0],
           "next_symbol_id": 1,
           "next_group_id": 1,
@@ -4343,19 +4354,16 @@ fn test_malformed_json_sanitization_and_cycle_breaking() {
                     "start_frame": 0,
                     "tween": true,
                     "tween_rotate": "Auto",
-                    "shapes": [
+                    "maps": [
                       {
-                        "color": [255, 0, 0, 255],
-                        "exterior": {
-                          "segments": [
-                            100.0, 100.0, 100.0, 150.0,
-                            100.0, 200.0, 150.0, 200.0,
-                            200.0, 200.0, 150.0, 150.0
-                          ]
-                        },
-                        "holes": [],
-                        "layer_id": 999,
-                        "group_path": []
+                        "group_path": [],
+                        "colors": [[255, 0, 0, 255]],
+                        "nodes": [100.0, 100.0, 100.0, 200.0, 200.0, 200.0],
+                        "edges": [
+                          [0, 1, 100.0, 150.0, 0, 1],
+                          [1, 2, 150.0, 200.0, 0, 1],
+                          [2, 0, 150.0, 150.0, 0, 1]
+                        ]
                       }
                     ],
                     "instances": [
@@ -6552,7 +6560,7 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
     // u64::MAX の layer.id, symbol.id, instance_gid, group_path を含む細工ファイル (#13)
     let crafted_json = format!(
         r#"{{
-          "version": 3,
+          "version": 4,
           "stage_size": [800.0, 450.0],
           "next_symbol_id": {max},
           "next_group_id": {max},
@@ -6574,19 +6582,16 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
                     "start_frame": 0,
                     "tween": false,
                     "tween_rotate": "Auto",
-                    "shapes": [
+                    "maps": [
                       {{
-                        "color": [255, 0, 0, 255],
-                        "exterior": {{
-                          "segments": [
-                            100.0, 100.0, 150.0, 100.0,
-                            200.0, 100.0, 200.0, 150.0,
-                            200.0, 200.0, 150.0, 150.0
-                          ]
-                        }},
-                        "holes": [],
-                        "layer_id": {max},
-                        "group_path": [{max}]
+                        "group_path": [{max}],
+                        "colors": [[255, 0, 0, 255]],
+                        "nodes": [100.0, 100.0, 200.0, 100.0, 200.0, 200.0],
+                        "edges": [
+                          [0, 1, 150.0, 100.0, 1, 0],
+                          [1, 2, 200.0, 150.0, 1, 0],
+                          [2, 0, 150.0, 150.0, 1, 0]
+                        ]
                       }}
                     ],
                     "instances": [
@@ -6735,7 +6740,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
                         start_frame: 0,
                         tween: false,
                         tween_rotate: timeline::TweenRotate::Auto,
-                        shapes: Vec::new(),
+                        maps: Vec::new(),
                         instances,
                     }],
                 }],
@@ -10084,7 +10089,7 @@ fn test_stage7c_scene_base_cache_and_edit_layers() {
     // 2. edit_layers を直接呼んだ場合も指定したレイヤーのみ書き換わり、SceneBaseCache が即座に同期されること
     let changed = canvas_tool::edit_layers(&mut app.tabs[app.active], &[layer_bottom_id], |ed| {
         for s in &mut ed.shapes {
-            s.color = Color32::GREEN;
+            s.set_color(Color32::GREEN);
         }
     });
     assert!(changed);
@@ -11333,7 +11338,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
                             start_frame: 0,
                             tween: false,
                             tween_rotate: timeline::TweenRotate::Auto,
-                            shapes: Vec::new(),
+                            maps: Vec::new(),
                             instances,
                         }],
                     }],
@@ -14831,36 +14836,42 @@ fn test_m4_2_mid_tween_edit_restoring_classic_tween_rebuilds_base_cache_at_inter
     );
 }
 
+/// 地図は格子の内（±65,536px）の形しか持てないので、選んだ図形を格子の外へ動かす操作はしない（図形は元のまま残る）
 #[test]
-fn test_m4_3_saved_contour_arc_json_matches_legacy_and_load_shrinks_capacities() {
+fn test_move_selection_off_grid_is_refused() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(200.0, 100.0)],
+            radius: 10.0,
+            color: Color32::RED,
+        },
+    ));
+    let before = app.doc.root.layers[0].keyframes[0].cel.shapes.clone();
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(!apply(
+        &mut app,
+        Action::MoveSelected {
+            delta: KVec2::new(70_000.0, 0.0),
+        },
+    ));
+    canvas_tool::clear_selection(&mut app);
+    let after = &app.doc.root.layers[0].keyframes[0].cel.shapes;
+    assert_eq!(after.len(), before.len());
+    assert!(after
+        .iter()
+        .zip(before.iter())
+        .all(|(a, b)| a.bounding_box() == b.bounding_box()));
+}
+
+/// 版 4 は地図をそのまま書く：保存して読み込むと、地図の頂点と辺はビットまで同じで、図形はその面（図形の数も同じ）。
+/// 読み込んだセルの図形の Vec は余分な容量を持たない
+#[test]
+fn test_m4_3_saved_map_roundtrip_bit_exact_and_load_shrinks_capacities() {
     use crate::doc_actions::{apply, Action};
 
-    // 1. 輪郭1つを SavedContour にして JSON にした文字列が、版 2 の平らな配列形式になること
-    let segs = vec![
-        QuadBez::new(
-            Point::new(10.5, 20.25),
-            Point::new(30.125, 45.75),
-            Point::new(50.0, 20.25),
-        ),
-        QuadBez::new(
-            Point::new(50.0, 20.25),
-            Point::new(30.125, -5.5),
-            Point::new(10.5, 20.25),
-        ),
-    ];
-    let contour = vector_engine::Contour::new(segs);
-    let saved = project_io::SavedContour::from(&contour);
-    assert!(
-        std::sync::Arc::ptr_eq(&contour.segments, &saved.segments),
-        "SavedContour::from(&Contour) は座標配列を複製せず Arc を共有すること"
-    );
-    let json_new = serde_json::to_string(&saved).unwrap();
-    assert_eq!(
-        json_new, r#"{"segments":[10.5,20.25,30.125,45.75,50.0,20.25,30.125,-5.5]}"#,
-        "SavedContour の JSON 表現が版 2 の形式と完全一致すること"
-    );
-
-    // 2. 保存して読み込むと、図形の形が同じで、線分の Vec・穴の Vec・図形の Vec の capacity が len と一致すること
     let mut app = Is2dApp::default();
     for i in 0..5 {
         let x0 = 60.0 + i as f64 * 90.0;
@@ -14879,52 +14890,55 @@ fn test_m4_3_saved_contour_arc_json_matches_legacy_and_load_shrinks_capacities()
             },
         );
     }
+    // 1. 地図1枚を JSON にして読み戻すと、ビットまで同じ地図に戻る
+    let cel = &app.doc.root.layers[0].keyframes[0].cel;
+    let map = &cel.maps[0].base.map;
+    let saved = project_io::SavedScopeMap::new(&[], map);
+    let json = serde_json::to_string(&saved).unwrap();
+    let back: project_io::SavedScopeMap = serde_json::from_str(&json).unwrap();
+    let back = back.to_map().expect("正しい地図に戻る");
+    let bits = |m: &crate::planar_map::PlanarMap| {
+        (
+            m.nodes
+                .iter()
+                .map(|p| (p.x.to_bits(), p.y.to_bits()))
+                .collect::<Vec<_>>(),
+            m.edges
+                .iter()
+                .map(|e| {
+                    (
+                        e.a,
+                        e.b,
+                        e.ctrl.x.to_bits(),
+                        e.ctrl.y.to_bits(),
+                        e.left,
+                        e.right,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(bits(map), bits(&back));
+
+    // 2. 保存して読み込むと、地図はビットまで同じで、図形の数も同じ。図形の Vec の capacity は len と同じ
     let tmp_path = std::env::temp_dir().join(format!("m4_3_shrink_{}.is2d", std::process::id()));
     project_io::save_project_to_path(&mut app, &tmp_path).unwrap();
     let mut loaded = Is2dApp::default();
     project_io::open_project_in_tab(&mut loaded, &tmp_path, None).unwrap();
     let _ = std::fs::remove_file(&tmp_path);
-
-    let orig_shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes;
-    let loaded_shapes = &loaded.doc.root.layers[0].keyframes[0].cel.shapes;
-    assert_eq!(orig_shapes.len(), loaded_shapes.len());
+    let orig = &app.doc.root.layers[0].keyframes[0].cel;
+    let load = &loaded.doc.root.layers[0].keyframes[0].cel;
+    assert_eq!(orig.maps.len(), load.maps.len());
+    for (a, b) in orig.maps.iter().zip(load.maps.iter()) {
+        assert_eq!(a.group_path, b.group_path);
+        assert_eq!(bits(&a.base.map), bits(&b.base.map));
+    }
+    assert_eq!(orig.shapes.len(), load.shapes.len());
     assert_eq!(
-        loaded_shapes.capacity(),
-        loaded_shapes.len(),
+        load.shapes.capacity(),
+        load.shapes.len(),
         "読み込んだセルの shapes Vec の capacity が len と一致すること"
     );
-    let contours_match = |a: &vector_engine::Contour, b: &vector_engine::Contour| {
-        a.segments.len() == b.segments.len()
-            && a.segments.iter().zip(b.segments.iter()).all(|(sa, sb)| {
-                (sa.p0.x - sb.p0.x).abs() <= 5e-4 + 1e-9
-                    && (sa.p0.y - sb.p0.y).abs() <= 5e-4 + 1e-9
-                    && (sa.p1.x - sb.p1.x).abs() <= 5e-4 + 1e-9
-                    && (sa.p1.y - sb.p1.y).abs() <= 5e-4 + 1e-9
-                    && (sa.p2.x - sb.p2.x).abs() <= 5e-4 + 1e-9
-                    && (sa.p2.y - sb.p2.y).abs() <= 5e-4 + 1e-9
-            })
-    };
-    for (orig_s, load_s) in orig_shapes.iter().zip(loaded_shapes.iter()) {
-        assert!(contours_match(&orig_s.exterior, &load_s.exterior));
-        assert_eq!(
-            load_s.exterior.segments.capacity(),
-            load_s.exterior.segments.len(),
-            "読み込んだ外周 segments Vec の capacity が len と一致すること"
-        );
-        assert_eq!(
-            load_s.holes.capacity(),
-            load_s.holes.len(),
-            "読み込んだ holes Vec の capacity が len と一致すること"
-        );
-        for (oh, lh) in orig_s.holes.iter().zip(load_s.holes.iter()) {
-            assert!(contours_match(oh, lh));
-            assert_eq!(
-                lh.segments.capacity(),
-                lh.segments.len(),
-                "読み込んだ穴 segments Vec の capacity が len と一致すること"
-            );
-        }
-    }
 }
 
 /// M4-5 (N-1001): 穴の多い図形の一部の穴にだけ触れる線を1本描いたとき、
@@ -16880,8 +16894,10 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     nan_app.history.mark_unsaved();
 
     let nan_save_path = proj_dir.join("nan_saved.is2d");
+    // 座標が有限でない図形は、セル画に入れるときに外れている（地図にも絵にもならない）
+    assert_eq!(nan_app.doc.root.layers[0].keyframes[0].cel.shapes.len(), 1);
     let fixed_locs = crate::project_io::save_project_to_path(&mut nan_app, &nan_save_path).unwrap();
-    assert_eq!(fixed_locs, vec!["「Layer 1」の 1 コマ目".to_owned()]);
+    assert!(fixed_locs.is_empty());
     let nan_json = std::fs::read_to_string(&nan_save_path).unwrap();
     assert!(!nan_json.contains("NaN") && !nan_json.contains("null"));
     let reloaded = crate::project_io::read_project_document(&nan_save_path)
@@ -17596,7 +17612,7 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
             start_frame: 5,
             tween: false,
             tween_rotate: crate::symbol::TweenRotate::Auto,
-            shapes: Vec::new(),
+            maps: Vec::new(),
             instances: Vec::new(),
         });
     crate::project_io::write_project_file_atomically(&out_of_range_kf_path, &proj_kf).unwrap();
@@ -17629,37 +17645,29 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
     assert_eq!(app_layers.file.as_deref(), Some(over_layers_path.as_path()));
     assert_eq!(app_layers.doc.root.layers.len(), 1000);
 
-    // 4. 面積がほぼ 0 の図形だけを含むファイルを開いても Loaded が返る（警告は出ない）
-    let tiny_shape_path = base_dir.join("tiny_shape.is2d");
-    let mut proj_tiny = crate::project_io::read_project_document(&normal_path).unwrap();
-    proj_tiny.timeline.layers[0].keyframes[0].shapes = vec![crate::project_io::SavedFillShape {
-        color: [255, 0, 0, 255],
-        exterior: crate::project_io::SavedContour {
-            segments: std::sync::Arc::new(vec![
-                kurbo::QuadBez::new(
-                    Point::new(10.0, 10.0),
-                    Point::new(10.0, 10.0),
-                    Point::new(10.0, 10.0),
-                ),
-                kurbo::QuadBez::new(
-                    Point::new(10.0, 10.0),
-                    Point::new(10.0, 10.0),
-                    Point::new(10.0, 10.0),
-                ),
-            ]),
-        },
-        holes: Vec::new(),
-        layer_id: 1,
-        group_path: Vec::new(),
-    }];
-    crate::project_io::write_project_file_atomically(&tiny_shape_path, &proj_tiny).unwrap();
-
-    let mut app_tiny = Is2dApp::default();
-    assert_eq!(
-        open_project_in_tab(&mut app_tiny, &tiny_shape_path, None).unwrap(),
-        OpenProjectOutcome::Loaded
-    );
-    assert!(!app_tiny.history.is_dirty());
+    // 4. 地図が壊れたファイル（辺が範囲の外の頂点を指す・辺どうしが交わる）は開かない
+    let broken_path = base_dir.join("broken_map.is2d");
+    let mut proj_broken = crate::project_io::read_project_document(&normal_path).unwrap();
+    let m = &mut proj_broken.timeline.layers[0].keyframes[0].maps[0];
+    let n = m.nodes.len() / 2;
+    m.edges[0].1 = n + 5;
+    crate::project_io::write_project_file_atomically(&broken_path, &proj_broken).unwrap();
+    let err = crate::project_io::read_project_document(&broken_path).unwrap_err();
+    assert!(err.contains("地図が壊れています"), "{err}");
+    let mut proj_cross = crate::project_io::read_project_document(&normal_path).unwrap();
+    let m = &mut proj_cross.timeline.layers[0].keyframes[0].maps[0];
+    // 1本の辺の片側だけ色を変えて、面の輪郭の色がそろわないようにする
+    m.colors.push([1, 2, 3, 255]);
+    let (l, r) = (m.edges[0].4, m.edges[0].5);
+    let c = m.colors.len();
+    if l != 0 {
+        m.edges[0].4 = c;
+    } else {
+        m.edges[0].5 = c;
+    }
+    let _ = r;
+    crate::project_io::write_project_file_atomically(&broken_path, &proj_cross).unwrap();
+    assert!(crate::project_io::read_project_document(&broken_path).is_err());
 
     let _ = std::fs::remove_dir_all(&base_dir);
 }
@@ -19209,59 +19217,29 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
     project_io::save_project_to_path(&mut app, &path1).unwrap();
     let json1 = std::fs::read_to_string(&path1).unwrap();
 
-    // 3. 形式：保存したファイルの輪郭が、数の平らな配列で、数の個数が区間の数の4倍であること
+    // 3. 形式：保存したファイルのセル画は、階層ごとの地図（頂点の座標の平らな配列と、6つの数の辺の列）
     let parsed_val: serde_json::Value = serde_json::from_str(&json1).unwrap();
     assert_eq!(parsed_val["version"], project_io::PROJECT_FORMAT_VERSION);
-    let saved_shapes_json = parsed_val["timeline"]["layers"][0]["keyframes"][0]["shapes"]
-        .as_array()
-        .unwrap();
-    assert_eq!(saved_shapes_json.len(), orig_shapes.len());
-    for (s_json, orig_s) in saved_shapes_json.iter().zip(orig_shapes.iter()) {
-        let ext_arr = s_json["exterior"]["segments"].as_array().unwrap();
-        assert_eq!(ext_arr.len(), orig_s.exterior.segments.len() * 4);
-        assert!(ext_arr.iter().all(|v| v.is_number()));
-        let holes_arr = s_json["holes"].as_array().unwrap();
-        assert_eq!(holes_arr.len(), orig_s.holes.len());
-        for (h_json, orig_h) in holes_arr.iter().zip(orig_s.holes.iter()) {
-            let h_seg_arr = h_json["segments"].as_array().unwrap();
-            assert_eq!(h_seg_arr.len(), orig_h.segments.len() * 4);
-            assert!(h_seg_arr.iter().all(|v| v.is_number()));
-        }
+    let kf_json = &parsed_val["timeline"]["layers"][0]["keyframes"][0];
+    assert!(kf_json.get("shapes").is_none(), "図形は書かない");
+    let maps_json = kf_json["maps"].as_array().unwrap();
+    let cel = &app.doc.root.layers[0].keyframes[0].cel;
+    assert_eq!(maps_json.len(), cel.maps.len());
+    for (m_json, m) in maps_json.iter().zip(cel.maps.iter()) {
+        let nodes = m_json["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), m.base.map.nodes.len() * 2);
+        let edges = m_json["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), m.base.map.edges.len());
+        assert!(edges
+            .iter()
+            .all(|e| e.as_array().is_some_and(|a| a.len() == 6)));
     }
 
-    // 1. 丸めの幅：保存して開くと区間の数は同じで、どの点（p0・p1・p2）も元から 0.0005 px 以内。
-    //    開いた図形のどの輪郭も、区間の終わりの点が次の区間の始まりの点と同じであること
+    // 1. 開くと、図形の数は同じ（図形は地図の面）
     let mut app2 = Is2dApp::default();
     project_io::open_project_in_tab(&mut app2, &path1, None).unwrap();
     let loaded_shapes = &app2.doc.root.layers[0].keyframes[0].cel.shapes;
     assert_eq!(loaded_shapes.len(), orig_shapes.len());
-
-    let check_contour = |orig: &vector_engine::Contour, loaded: &vector_engine::Contour| {
-        assert_eq!(loaded.segments.len(), orig.segments.len());
-        let n = loaded.segments.len();
-        for i in 0..n {
-            let os = orig.segments[i];
-            let ls = loaded.segments[i];
-            assert!((ls.p0.x - os.p0.x).abs() <= 0.0005 + 1e-9);
-            assert!((ls.p0.y - os.p0.y).abs() <= 0.0005 + 1e-9);
-            assert!((ls.p1.x - os.p1.x).abs() <= 0.0005 + 1e-9);
-            assert!((ls.p1.y - os.p1.y).abs() <= 0.0005 + 1e-9);
-            assert!((ls.p2.x - os.p2.x).abs() <= 0.0005 + 1e-9);
-            assert!((ls.p2.y - os.p2.y).abs() <= 0.0005 + 1e-9);
-            assert_eq!(
-                ls.p2,
-                loaded.segments[(i + 1) % n].p0,
-                "区間の終わりの点 p2 が次の区間の始まりの点 p0 と完全に同じであること"
-            );
-        }
-    };
-    for (orig_s, load_s) in orig_shapes.iter().zip(loaded_shapes.iter()) {
-        check_contour(&orig_s.exterior, &load_s.exterior);
-        assert_eq!(load_s.holes.len(), orig_s.holes.len());
-        for (oh, lh) in orig_s.holes.iter().zip(load_s.holes.iter()) {
-            check_contour(oh, lh);
-        }
-    }
 
     // 2. 保存し直しても変わらない：開いて保存（2回目）し、もう一度開いて保存（3回目）すると、
     //    2回目と3回目のファイルの中身が1バイトも違わないこと
@@ -20937,17 +20915,26 @@ fn test_save_and_open_keeps_contours_bit_exact() {
         );
     }
     assert!(layer_map_is_valid(&app), "保存する前の地図が壊れている");
+    // 輪郭の曲線を全部（図形の並びと輪郭の始まりは、読むときに地図の面から作るので比べない）
     let bits = |app: &Is2dApp| {
-        app.scene()
+        let mut v: Vec<(Color32, [u64; 6])> = app
+            .scene()
             .iter()
-            .map(|s| {
+            .flat_map(|s| {
+                let color = s.color;
                 s.contours()
                     .flat_map(|c| c.segments.iter().copied().collect::<Vec<_>>())
-                    .flat_map(|q| [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y])
-                    .map(f64::to_bits)
-                    .collect::<Vec<u64>>()
+                    .map(move |q| {
+                        (
+                            color,
+                            [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y].map(f64::to_bits),
+                        )
+                    })
+                    .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>()
+            .collect();
+        v.sort_by_key(|x| (x.0.to_array(), x.1));
+        v
     };
     let before = bits(&app);
     let path = std::env::temp_dir().join(format!("is2d_bit_exact_{}.is2d", std::process::id()));
@@ -21133,10 +21120,15 @@ fn broken_face_contour_app() -> Is2dApp {
         FillShape::new(Color32::RED, red, Vec::new()).with_scope(lid, &[]),
         FillShape::new(Color32::GREEN, green, Vec::new()).with_scope(lid, &[]),
     ];
+    let map = crate::planar_map::PlanarMap::from_faces(shapes.iter());
+    assert!(
+        map.faces().1 > 0,
+        "前提：図形から作った地図に壊れた面の輪郭がある"
+    );
+    // セル画に入れると、図形を並びの順に塗り重ねて作り直した地図の面になる
     app.doc.root.layers[0].keyframe_mut(0).cel = timeline::Cel::new(shapes);
     app.refresh_scene_base();
-    let map = crate::planar_map::PlanarMap::from_faces(app.scene().iter());
-    assert!(map.faces().1 > 0, "前提：地図に壊れた面の輪郭がある");
+    assert!(layer_map_is_valid(&app), "セル画の図形は正しい地図になる");
     app
 }
 
@@ -21322,7 +21314,7 @@ fn test_bucket_recolor_keeps_neighbor_shapes() {
         .find(|s| s.color == Color32::BLUE)
         .expect("青の帯")
         .shape_id;
-    let MapEditOutcome::Changed(removed, added) =
+    let MapEditOutcome::Changed(crate::planar_map::MapChange { removed, added, .. }) =
         map_edit_diff(&shapes, lid, &[], Affine::IDENTITY, |m| {
             m.with_face_filled(Point::new(0.0, 40.0), Color32::BLACK)
         })
@@ -23539,11 +23531,14 @@ mod map_overlay {
                     stroke.into_iter().map(|s| s.with_scope(lid, &[])).collect(),
                 );
             }
-            put_cel_shapes(&mut app, 0, 0, misaligned(shapes));
+            let input = misaligned(shapes);
             assert!(
-                !layer_map_valid(&app, 0),
-                "境目がそろっていないセルは、地図として壊れている"
+                !PlanarMap::from_faces(input.iter()).is_valid(),
+                "境目がそろっていない図形は、地図として壊れている"
             );
+            // セル画に入れると、並びの順に塗り重ねて作り直した地図の面になる
+            put_cel_shapes(&mut app, 0, 0, input);
+            assert!(layer_map_valid(&app, 0));
             app
         };
         let cel = |app: &Is2dApp| {
@@ -23732,8 +23727,10 @@ mod map_overlay {
                     stroke.into_iter().map(|s| s.with_scope(lid, &[])).collect(),
                 );
             }
-            put_cel_shapes(&mut app, 0, 0, misaligned(shapes));
-            assert!(!layer_map_valid(&app, 0));
+            let input = misaligned(shapes);
+            assert!(!PlanarMap::from_faces(input.iter()).is_valid());
+            put_cel_shapes(&mut app, 0, 0, input);
+            assert!(layer_map_valid(&app, 0));
             let before = app.doc.root.layers[0].keyframes[0]
                 .cel
                 .shapes

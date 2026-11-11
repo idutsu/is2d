@@ -2297,6 +2297,28 @@ impl Session {
         });
     }
 
+    /// 文書に無い図形 `pieces`（ステージ座標）を、浮いた片に足す（動かした扱い。確定のときに、その階層の地図に重ねる）
+    pub(crate) fn add_floating_pieces(&mut self, pieces: Vec<FillShape>) {
+        if pieces.is_empty() {
+            return;
+        }
+        let order_ids = self.base_cache.layer_order_ids().to_vec();
+        self.update_floating(|fl_opt| {
+            let fl = fl_opt.get_or_insert_with(|| Floating {
+                pieces: Vec::new(),
+                remainder: Vec::new(),
+                hidden: HashSet::new(),
+                modified: true,
+            });
+            fl.modified = true;
+            fl.pieces.extend(pieces);
+            if order_ids.len() > 1 && fl.pieces.len() > 1 {
+                fl.pieces
+                    .sort_by_key(|s| layer_order_index(&order_ids, s.layer_id));
+            }
+        });
+    }
+
     /// `fl.remainder` 内の図形が選択に追加された場合、`fl.pieces` へ昇格させる
     pub(crate) fn promote_selected_remainder_to_pieces(&mut self) {
         if !self.floating.as_ref().is_some_and(|fl| {
@@ -3289,20 +3311,22 @@ fn writeback_edited_layer_shapes(
                 }
             } else if !s.exterior.segments.is_empty() {
                 // 文書の図形がある図形：変わらない図形（前の列と同じ `Arc` を使い、Undo の控えと共有する）と、シンボルの
-                // 中で地図が文書の座標で作った図形（`FillShape::in_doc`）。色・レイヤー・階層だけは今の図形に合わせる
+                // 中で地図が文書の座標で作った図形（`FillShape::in_doc`）。番号・色・レイヤー・階層は今の図形に合わせる
                 let doc = orig_shape_idx_map
                     .get(&s.shape_id)
                     .map(|&i| &orig_shapes[i])
                     .filter(|orig| orig.mesh_revision == s.mesh_revision)
                     .or_else(|| s.doc_original());
                 if let Some(doc) = doc {
-                    if doc.color == s.color
+                    if doc.shape_id == s.shape_id
+                        && doc.color == s.color
                         && doc.layer_id == s.layer_id
                         && doc.group_path == s.group_path
                     {
                         non_symbol_shapes.push(Arc::clone(doc));
                     } else {
                         let mut kept = (**doc).clone();
+                        kept.shape_id = s.shape_id;
                         kept.color = s.color;
                         kept.layer_id = s.layer_id;
                         kept.group_path = s.group_path.clone();
@@ -3659,7 +3683,7 @@ pub(crate) fn merge_pieces_layer_by_layer(
     xform: Affine,
 ) {
     use crate::planar_map::{
-        apply_shape_diff, per_layer_parallel, place_pieces_diff, MapEditOutcome,
+        apply_map_change, apply_shape_diff, per_layer_parallel, place_pieces_diff, MapEditOutcome,
     };
     let mut parts: Vec<(LayerId, Vec<u64>, Vec<FillShape>)> = Vec::new();
     for p in pieces {
@@ -3677,8 +3701,8 @@ pub(crate) fn merge_pieces_layer_by_layer(
     });
     for ((layer_id, group_path, layer_pieces), outcome) in parts.into_iter().zip(outcomes) {
         match outcome {
-            MapEditOutcome::Changed(removed, added) => {
-                apply_shape_diff(base_shapes, &removed, added, layer_id, &group_path)
+            MapEditOutcome::Changed(change) => {
+                apply_map_change(base_shapes, change, layer_id, &group_path, xform)
             }
             MapEditOutcome::Unchanged => {}
             // 格子に置けない所（±65,536px の外）では重ねられない。片を失わないよう、重ねずにそのまま足す

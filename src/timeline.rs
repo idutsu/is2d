@@ -1,3 +1,4 @@
+use crate::planar_map::{cel_scope_map, LayerBase, MapKey};
 use crate::vector_engine::{next_shape_id, FillShape, SymbolInstanceBinding, SymbolLoopMode};
 use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
@@ -193,12 +194,15 @@ fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64) {
 // 1. タイムラインのデータモデル（Cel / Keyframe / Selection / Layer / Timeline）
 // ============================================================================
 
-/// 1枚のセル画（非シンボル図形群 `Arc<Vec<Arc<FillShape>>>` ＋ 正規化シンボルインスタンス配列 `Arc<Vec<SymbolInstance>>`）
+/// 1枚のセル画：階層ごとの地図（境目の線を1本で持つ本当の形）と、その面の図形の並び ＋ 正規化シンボルインスタンス配列
 #[derive(Clone, Debug)]
 pub(crate) struct Cel {
+    /// 階層（グループの番号の列。ルートは空）ごとの生の図形の地図。図形 `shapes` のうちその階層のものは、いつもこの地図の
+    /// 面と1対1に対応する（面の辺の側に図形の番号を記してある。`set_shared_parts` が保つ）
+    pub(crate) maps: Arc<Vec<ScopeMap>>,
     /// このセル内の非シンボル図形群（`symbol_instance.is_none()` の生シェイプおよび通常グループ図形のみを正規化保持）。
-    /// 列も図形も `Arc` で共有する：書き換えでは変えた図形だけを新しくするので、Undo の控えはセルの図形の数でなく、
-    /// 変えた図形の分だけ大きくなる
+    /// 地図の面の写しで、重ね順を持つ。列も図形も `Arc` で共有する：書き換えでは変えた図形だけを新しくするので、Undo の
+    /// 控えはセルの図形の数でなく、変えた図形の分だけ大きくなる
     pub(crate) shapes: Arc<Vec<Arc<FillShape>>>,
     /// このセル内に配置されているシンボルインスタンスの正規化リスト（`instance_gid` 単位で重複なし、CoW `Arc` 共有）
     pub(crate) instances: Arc<Vec<SymbolInstance>>,
@@ -206,9 +210,19 @@ pub(crate) struct Cel {
     pub(crate) revision: u64,
 }
 
+/// セル画の1つの階層の地図
+#[derive(Clone, Debug)]
+pub(crate) struct ScopeMap {
+    pub(crate) group_path: Vec<u64>,
+    /// 地図の面の図形（番号, `mesh_revision`）の並び（`MapKey`。図形が同じなら、作り直さずに使う）
+    key: MapKey,
+    pub(crate) base: Arc<LayerBase>,
+}
+
 impl Default for Cel {
     fn default() -> Self {
         Self {
+            maps: Arc::new(Vec::new()),
             shapes: Arc::new(Vec::new()),
             instances: Arc::new(Vec::new()),
             revision: crate::vector_engine::next_mesh_revision(),
@@ -224,6 +238,36 @@ impl Cel {
         cel
     }
 
+    /// 階層ごとの地図 `maps`（正しい地図。図形の並びで階層が出てくる順）から作る（ファイルを読むとき）。図形は地図の面
+    pub(crate) fn from_maps(
+        maps: Vec<(Vec<u64>, crate::planar_map::PlanarMap)>,
+        instances: Vec<SymbolInstance>,
+    ) -> Self {
+        let mut shapes: Vec<Arc<FillShape>> = Vec::new();
+        let mut scope_maps = Vec::with_capacity(maps.len());
+        for (group_path, map) in maps {
+            let (base, faces) = crate::planar_map::map_with_faces(map, 1, &group_path);
+            if faces.is_empty() {
+                continue;
+            }
+            let refs: Vec<&FillShape> = faces.iter().collect();
+            let key = MapKey::new(&refs, Affine::IDENTITY);
+            shapes.extend(faces.into_iter().map(Arc::new));
+            scope_maps.push(ScopeMap {
+                group_path,
+                key,
+                base,
+            });
+        }
+        let mut cel = Self {
+            maps: Arc::new(scope_maps),
+            ..Self::default()
+        };
+        cel.set_shared_parts(shapes, instances);
+        cel
+    }
+
+    #[cfg(test)]
     pub(crate) fn new_with_instances(
         mut shapes: Vec<FillShape>,
         instances: Vec<SymbolInstance>,
@@ -234,13 +278,16 @@ impl Cel {
         cel
     }
 
-    /// 図形を1つずつ書き換える（書き換えた図形だけが新しくなる。ほかは Undo の控えと共有したまま）
+    /// 図形を1つずつ書き換える（書き換えた図形だけが新しくなる。ほかは Undo の控えと共有したまま）。形を変えるのには
+    /// 使わない（レイヤーの番号・グループの番号の付け替えだけ）。階層の地図は、図形が同じ階層は使い回して付け直す
     #[inline]
     pub(crate) fn for_each_shape_mut(&mut self, mut f: impl FnMut(&mut FillShape)) {
-        self.revision = crate::vector_engine::next_mesh_revision();
-        for s in Arc::make_mut(&mut self.shapes) {
+        let mut shapes = std::mem::take(Arc::make_mut(&mut self.shapes));
+        for s in &mut shapes {
             f(Arc::make_mut(s));
         }
+        let instances = std::mem::take(Arc::make_mut(&mut self.instances));
+        self.set_shared_parts(shapes, instances);
     }
 
     #[inline]
@@ -255,23 +302,115 @@ impl Cel {
         self.set_shared_parts(shapes.into_iter().map(Arc::new).collect(), instances);
     }
 
-    /// `set_parts` と同じ。図形は共有したまま入れる（変わらない図形は、前の列と同じ `Arc` を渡す）
-    #[inline]
+    /// `set_parts` と同じ。図形は共有したまま入れる（変わらない図形は、前の列と同じ `Arc` を渡す）。
+    /// 階層ごとの地図を、図形に合わせる：図形（番号, `mesh_revision` の並び）が前と同じ階層は前の地図を使い、ほかは
+    /// 地図のしまい場所から引く（地図で編集した結果は `apply_map_change` が入れてある）か、図形から作る（`cel_scope_map`。
+    /// 正しい地図にならない図形は、塗り重ねて作り直した地図の面に置き換える）
     pub(crate) fn set_shared_parts(
         &mut self,
         mut shapes: Vec<Arc<FillShape>>,
         mut instances: Vec<SymbolInstance>,
     ) {
+        let maps = scope_maps_of(&self.maps, &mut shapes, &mut instances);
         shapes.shrink_to_fit();
         instances.shrink_to_fit();
+        self.maps = Arc::new(maps);
         self.shapes = Arc::new(shapes);
         self.instances = Arc::new(instances);
         self.revision = crate::vector_engine::next_mesh_revision();
+        // テストでは、セル画に書くたびに、地図が図形と合っているかを確かめる
+        #[cfg(test)]
+        if let Some(m) = self.maps_mismatch() {
+            panic!("セル画の地図が図形と合っていない: {m}");
+        }
+    }
+
+    /// テスト用：階層ごとの地図が図形と合っているか（どの階層にも地図があり、地図が正しく、面と図形が1対1で、色と輪郭の
+    /// 曲線が同じ）。合っていなければ、その中身
+    #[cfg(test)]
+    pub(crate) fn maps_mismatch(&self) -> Option<String> {
+        use kurbo::QuadBez;
+        let quads = |cs: &mut dyn Iterator<Item = Vec<QuadBez>>| -> Vec<[u64; 6]> {
+            let mut v: Vec<[u64; 6]> = cs
+                .flatten()
+                .map(|q| [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y].map(f64::to_bits))
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        for m in self.maps.iter() {
+            if !self.shapes.iter().any(|s| s.group_path == m.group_path) {
+                return Some(format!("図形の無い階層 {:?} に地図がある", m.group_path));
+            }
+        }
+        let mut paths: Vec<&Vec<u64>> = Vec::new();
+        for s in self.shapes.iter() {
+            if !paths.contains(&&s.group_path) {
+                paths.push(&s.group_path);
+            }
+        }
+        for path in paths {
+            let Some(base) = self.map_of(path) else {
+                return Some(format!("階層 {path:?} に地図が無い"));
+            };
+            if !base.map.is_valid() {
+                return Some(format!(
+                    "階層 {path:?} の地図が正しくない: {}",
+                    base.map.validity_report()
+                ));
+            }
+            let own: Vec<&FillShape> = self
+                .shapes
+                .iter()
+                .filter(|s| &s.group_path == path)
+                .map(|s| &**s)
+                .collect();
+            let (faces, _) = base.map.faces();
+            if faces.len() != own.len() {
+                return Some(format!(
+                    "階層 {path:?}：面 {}・図形 {}",
+                    faces.len(),
+                    own.len()
+                ));
+            }
+            for f in &faces {
+                let [id] = f.srcs[..] else {
+                    return Some(format!("階層 {path:?}：面の番号が {:?}", f.srcs));
+                };
+                let Some(s) = own.iter().find(|s| s.shape_id == id) else {
+                    return Some(format!("階層 {path:?}：面の番号 {id} の図形が無い"));
+                };
+                if s.color != f.color {
+                    return Some(format!("階層 {path:?}：図形 {id} の色が面と違う"));
+                }
+                let face_q = quads(
+                    &mut f
+                        .cycles
+                        .iter()
+                        .map(|c| c.iter().map(|h| base.map.half_quad(*h)).collect()),
+                );
+                let shape_q = quads(&mut s.contours().map(|c| c.segments.to_vec()));
+                if face_q != shape_q {
+                    return Some(format!("階層 {path:?}：図形 {id} の輪郭が面と違う"));
+                }
+            }
+        }
+        None
+    }
+
+    /// 階層 `group_path` の地図
+    #[cfg(test)]
+    pub(crate) fn map_of(&self, group_path: &[u64]) -> Option<&Arc<LayerBase>> {
+        self.maps
+            .iter()
+            .find(|m| m.group_path == group_path)
+            .map(|m| &m.base)
     }
 
     #[inline]
     pub(crate) fn clear(&mut self) {
         if !self.shapes.is_empty() || !self.instances.is_empty() {
+            self.maps = Arc::new(Vec::new());
             self.shapes = Arc::new(Vec::new());
             self.instances = Arc::new(Vec::new());
             self.revision = crate::vector_engine::next_mesh_revision();
@@ -317,6 +456,102 @@ impl Cel {
             && self.instances[0].parent_scope.is_empty())
         .then(|| self.instances[0].binding)
     }
+}
+
+/// 図形の並び `shapes`（セル画の図形）の階層ごとの地図（`Cel::set_shared_parts`）。前の地図 `old` のうち、図形が同じ階層の
+/// ものは使い回す。正しい地図にならない階層は、図形を作り直した地図の面に置き換える（置き換えた図形は、その階層の最初の
+/// 図形の位置に入れ、後ろのインスタンスの位置 `shape_order_index` をずらす）。格子に置けない座標がある階層は地図を持たない
+fn scope_maps_of(
+    old: &[ScopeMap],
+    shapes: &mut Vec<Arc<FillShape>>,
+    instances: &mut [SymbolInstance],
+) -> Vec<ScopeMap> {
+    // 座標が有限でない図形は、地図にも絵にもならないので入れない（後ろのインスタンスの位置をずらす）
+    let finite = |s: &FillShape| {
+        s.contours().all(|c| {
+            c.segments
+                .iter()
+                .all(|q| [q.p0, q.p1, q.p2].iter().all(|p| p.is_finite()))
+        })
+    };
+    if !shapes.iter().all(|s| finite(s)) {
+        let n = shapes.len();
+        let mut index_after = vec![0; n + 1];
+        let mut kept = Vec::with_capacity(n);
+        for (i, s) in shapes.drain(..).enumerate() {
+            index_after[i] = kept.len();
+            if finite(&s) {
+                kept.push(s);
+            }
+        }
+        index_after[n] = kept.len();
+        for inst in instances.iter_mut() {
+            inst.shape_order_index = index_after[inst.shape_order_index.min(n)];
+        }
+        *shapes = kept;
+    }
+    let mut paths: Vec<Vec<u64>> = Vec::new();
+    for s in shapes.iter() {
+        if !paths.contains(&s.group_path) {
+            paths.push(s.group_path.clone());
+        }
+    }
+    let mut maps = Vec::with_capacity(paths.len());
+    for group_path in paths {
+        let own: Vec<&FillShape> = shapes
+            .iter()
+            .filter(|s| s.group_path == group_path)
+            .map(|s| &**s)
+            .collect();
+        let key = MapKey::new(&own, Affine::IDENTITY);
+        if let Some(m) = old.iter().find(|m| m.key == key) {
+            maps.push(ScopeMap {
+                group_path,
+                key,
+                base: m.base.clone(),
+            });
+            continue;
+        }
+        let own: Vec<Arc<FillShape>> = shapes
+            .iter()
+            .filter(|s| s.group_path == group_path)
+            .cloned()
+            .collect();
+        let Some((base, replaced)) = cel_scope_map(&own) else {
+            continue;
+        };
+        let key = match replaced {
+            None => key,
+            Some(new_shapes) => {
+                let at = shapes
+                    .iter()
+                    .position(|s| s.group_path == group_path)
+                    .unwrap_or(shapes.len());
+                let gone = shapes.iter().filter(|s| s.group_path == group_path).count();
+                let added = new_shapes.len();
+                shapes.retain(|s| s.group_path != group_path);
+                shapes.splice(at..at, new_shapes);
+                for inst in instances.iter_mut() {
+                    if inst.shape_order_index > at {
+                        inst.shape_order_index =
+                            (inst.shape_order_index + added).saturating_sub(gone);
+                    }
+                }
+                let own: Vec<&FillShape> = shapes
+                    .iter()
+                    .filter(|s| s.group_path == group_path)
+                    .map(|s| &**s)
+                    .collect();
+                MapKey::new(&own, Affine::IDENTITY)
+            }
+        };
+        maps.push(ScopeMap {
+            group_path,
+            key,
+            base,
+        });
+    }
+    maps
 }
 
 /// タイムライン上のキーフレーム（開始フレーム番号 0-indexed、セル画 `Cel`、クラシックトゥイーン有効フラグ `tween`、トゥイーン回転方向 `tween_rotate`）

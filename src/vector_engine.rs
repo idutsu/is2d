@@ -20,9 +20,6 @@ pub(crate) const REFERENCE_BRUSH_RADIUS: f64 = 8.0;
 pub(crate) const MIN_VIEW_ZOOM: f32 = 0.15;
 pub(crate) const MAX_VIEW_ZOOM: f32 = 16.0;
 
-/// 1輪郭（`Contour`）あたりの最大許容ベジェセグメント数
-pub(crate) const MAX_CONTOUR_SEGMENTS: usize = 100_000;
-
 /// シンボルインスタンスのフレーム再生モード（Adobe Animate のグラフィックシンボル相当）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub(crate) enum SymbolLoopMode {
@@ -446,11 +443,12 @@ impl FillShape {
         self.mesh_revision = orig_rev;
     }
 
-    /// 置いた写し（`place`）の、もとの文書の図形。形を変えたあと（番号か `mesh_revision` が違う）は `None`
+    /// 置いた写し（`place`）の、もとの文書の図形。形か色を変えたあと（`mesh_revision` が違う）は `None`。番号は、写しの
+    /// 方で付け替えることがある（浮いた残りの塊の印など）ので、もとの図形の番号とは限らない
     pub(crate) fn doc_original(&self) -> Option<&Arc<FillShape>> {
         self.doc_original
             .as_ref()
-            .filter(|d| d.shape_id == self.shape_id && d.mesh_revision == self.mesh_revision)
+            .filter(|d| d.mesh_revision == self.mesh_revision)
     }
 
     /// この図形（座標の変換 `xform` で置いた図形）の、文書の座標の形。置いた写しは、もとの文書の図形そのもの。ほかの
@@ -460,7 +458,12 @@ impl FillShape {
             return Cow::Borrowed(self);
         }
         if let Some(d) = self.doc_original() {
-            return Cow::Borrowed(d);
+            if d.shape_id == self.shape_id {
+                return Cow::Borrowed(d);
+            }
+            let mut d = (**d).clone();
+            d.shape_id = self.shape_id;
+            return Cow::Owned(d);
         }
         let mut d = self.clone();
         d.doc_original = None;

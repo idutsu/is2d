@@ -15,7 +15,8 @@ use crate::clipboard_ops::{
     instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
 };
 use crate::planar_map::{
-    apply_shape_diff, map_edit_diff, MapEdit, MapEditOutcome, MapInput, MapRule,
+    apply_map_change, apply_shape_diff, map_edit_diff, MapChange, MapEdit, MapEditOutcome,
+    MapInput, MapRule,
 };
 use crate::select_ops::{
     apply_marquee_selection, compute_hover_target, enter_group_at, exit_current_group,
@@ -783,9 +784,13 @@ fn apply_raw_outline(
         match map_edit_diff(&edit.shapes, target_lid, &scope, edit.world_xform, |m| {
             m.overlay(MapInput::Shapes(&strokes), rule)
         }) {
-            MapEditOutcome::Changed(removed, added) => {
-                apply_shape_diff(&mut edit.shapes, &removed, added, target_lid, &scope)
-            }
+            MapEditOutcome::Changed(change) => apply_map_change(
+                &mut edit.shapes,
+                change,
+                target_lid,
+                &scope,
+                edit.world_xform,
+            ),
             // 格子に置けない所（±65,536px の外）の線は描かない
             MapEditOutcome::Unchanged | MapEditOutcome::Refused => {}
         }
@@ -922,12 +927,18 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
         let scope = edit.editing_group_path.clone();
         // 地図は文書の座標なので、点も文書の座標へ写す
         let doc_pt = edit.world_xform.inverse() * pt;
-        if let MapEditOutcome::Changed(removed, added) =
+        if let MapEditOutcome::Changed(change) =
             map_edit_diff(&edit.shapes, target_lid, &scope, edit.world_xform, |m| {
                 m.with_face_filled(doc_pt, fill_color)
             })
         {
-            apply_shape_diff(&mut edit.shapes, &removed, added, target_lid, &scope);
+            apply_map_change(
+                &mut edit.shapes,
+                change,
+                target_lid,
+                &scope,
+                edit.world_xform,
+            );
         }
     })
 }
@@ -951,6 +962,21 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     tab.session.lift_selected_raw_shapes_to_floating();
     let mut any_transformed = false;
     let selection = tab.session.selection.clone();
+    // 地図は格子の内の形しか持てないので、片が格子の外（±65,536px の外）へ出る変形はしない
+    let xform = tab.session.edit_path.world_xform();
+    let fits = tab.session.floating().is_none_or(|fl| {
+        fl.pieces
+            .iter()
+            .filter(|p| selection.contains_shape(p))
+            .all(|p| {
+                let mut moved = p.clone();
+                moved.transform(affine);
+                crate::planar_map::fits_grid(&moved, xform)
+            })
+    });
+    if !fits {
+        return false;
+    }
     tab.session.update_floating(|fl_opt| {
         if let Some(fl) = fl_opt {
             for piece in &mut fl.pieces {
@@ -1068,12 +1094,18 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
     // 形が変わらないとき・編集できないとき（消せない頂点など）は、edit_layers が false を返し、apply が Undo の控えを捨てる
     push_undo(tab, None);
     let changed = edit_layers(tab, &[layer_id], |edit| {
-        if let MapEditOutcome::Changed(removed, added) =
+        if let MapEditOutcome::Changed(change) =
             map_edit_diff(&edit.shapes, layer_id, &group_path, edit.world_xform, |m| {
                 map_edit.apply(m)
             })
         {
-            apply_shape_diff(&mut edit.shapes, &removed, added, layer_id, &group_path);
+            apply_map_change(
+                &mut edit.shapes,
+                change,
+                layer_id,
+                &group_path,
+                edit.world_xform,
+            );
         }
     });
     if changed {
@@ -1191,7 +1223,7 @@ fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, edit: MapEdit) -> bool
         return false;
     };
     let scope = tab.session.editing_group_path.clone();
-    let MapEditOutcome::Changed(removed, added) = map_edit_diff(
+    let MapEditOutcome::Changed(MapChange { removed, added, .. }) = map_edit_diff(
         &fl.pieces,
         layer_id,
         &scope,

@@ -690,12 +690,15 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     }
 
     let mut any_became_raw = false;
+    // 生に戻った図形は、文書の階層の地図に入れずに浮いた片にする（選んだまま。確定のときに、その階層の地図に重ねる）
+    let mut became_raw: Vec<FillShape> = Vec::new();
     let mut selection = std::mem::take(&mut tab.session.selection);
     edit_layers(tab, &layer_ids, |edit| {
         let mut detached_inner_gid_map: Vec<((u64, u64), u64)> = Vec::new();
         let mut detached_instances: Vec<(u64, usize, u64, SymbolInstanceBinding)> = Vec::new();
         let editing_group_path = &edit.editing_group_path;
         let next_group_id = &mut edit.next_group_id;
+        let mut raw_ids: HashSet<ShapeId> = HashSet::new();
         let map_gid =
             |map: &mut Vec<((u64, u64), u64)>, next_id: &mut u64, key: (u64, u64)| -> u64 {
                 if let Some(&(_, m)) = map.iter().find(|&&(k, _)| k == key) {
@@ -747,6 +750,9 @@ pub(crate) fn prepare_ungroup_selected_shapes(
                 }
                 if shape.group_path.len() == depth && !shape.exterior.segments.is_empty() {
                     any_became_raw = true;
+                    if shape.symbol_instance.is_none() {
+                        raw_ids.insert(shape.shape_id);
+                    }
                 }
             }
         }
@@ -780,8 +786,15 @@ pub(crate) fn prepare_ungroup_selected_shapes(
             .retain(|gid| !detached_instances.iter().any(|(d, ..)| d == gid));
         edit.shapes
             .retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
+        let (raw, rest): (Vec<FillShape>, Vec<FillShape>) = edit
+            .shapes
+            .drain(..)
+            .partition(|s| raw_ids.contains(&s.shape_id));
+        edit.shapes = rest;
+        became_raw = raw;
     });
     tab.session.selection = selection;
+    tab.session.add_floating_pieces(became_raw);
     if any_became_raw {
         tab.session.lift_selected_raw_shapes_to_floating();
     }

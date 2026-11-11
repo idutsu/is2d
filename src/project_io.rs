@@ -3,23 +3,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use eframe::egui::{self, Color32, Vec2};
-use kurbo::{Affine, Point, QuadBez};
+use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{cancel_active_drag, SelectSubMode, Session, Tab, UndoHistory, View};
+use crate::planar_map::{MapEdge, PlanarMap};
 use crate::symbol::{
     ColorEffect, Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode,
     TweenRotate,
 };
 use crate::timeline::{Cel, Keyframe, Layer, Timeline, TimelineCellSelection};
 pub(crate) use crate::timeline::{MAX_LAYERS_PER_TIMELINE, MAX_TIMELINE_FRAMES};
-pub(crate) use crate::vector_engine::MAX_CONTOUR_SEGMENTS;
-use crate::vector_engine::{Contour, FillShape};
 
-/// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。版 3 のファイルでは、セルごとの生の図形がいつも地図の面
-/// （となり合う図形の境目がビットまで同じで、重ならない）になっている（アプリの操作は正しい地図しか書かない）。それより
-/// 前の版は開かない（境目のそろっていない図形が入っていると、触るたびに塗り重ねて直すことになるため）
-pub(crate) const PROJECT_FORMAT_VERSION: u32 = 3;
+/// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。版 4 は、セル画の階層ごとの地図（頂点と、境目の線を1本で
+/// 持つ辺）をそのまま書く（Adobe Animate と同じ持ち方）。図形は読むときに地図の面から作る。それより前の版（色ごとの図形を
+/// 書いた版）は開かない
+pub(crate) const PROJECT_FORMAT_VERSION: u32 = 4;
 
 /// プロジェクトファイルの標準拡張子
 pub(crate) const PROJECT_FILE_EXTENSION: &str = "is2d";
@@ -436,112 +435,102 @@ impl From<SavedSymbolInstance> for SymbolInstance {
     }
 }
 
-/// 輪郭は丸めずに書く。serde_json は f64 を、読み戻すと同じ値になる最短の10進で書き、読むときも
-/// （`float_roundtrip`）ビットまで同じ値に戻す。地図は、となり合う図形の境目がビットまで同じことを前提に
-/// 図形から作るので、保存と読み込みで座標が動くと地図が壊れる
-fn serialize_contour_segments<S: serde::Serializer>(
-    segments: &Arc<Vec<QuadBez>>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.collect_seq(
-        segments
-            .iter()
-            .flat_map(|s| [s.p0.x, s.p0.y, s.p1.x, s.p1.y]),
-    )
-}
-
-fn deserialize_contour_segments<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Arc<Vec<QuadBez>>, D::Error> {
-    // serde_json は有限でない数を読み込みのエラーにするので、ここには有限の数だけが来る
-    let nums = Vec::<f64>::deserialize(deserializer)?;
-    let n = (nums.len() / 4).min(MAX_CONTOUR_SEGMENTS);
-    let point = |i: usize| Point::new(nums[4 * (i % n)], nums[4 * (i % n) + 1]);
-    let segs = (0..n)
-        .map(|i| {
-            QuadBez::new(
-                point(i),
-                Point::new(nums[4 * i + 2], nums[4 * i + 3]),
-                point(i + 1),
-            )
-        })
-        .collect();
-    Ok(Arc::new(segs))
-}
-
+/// セル画の1つの階層の地図（境目の線を1本で持つ本当の形）。図形は読むときに地図の面から作る
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SavedContour {
-    #[serde(
-        serialize_with = "serialize_contour_segments",
-        deserialize_with = "deserialize_contour_segments"
-    )]
-    pub(crate) segments: Arc<Vec<QuadBez>>,
-}
-
-impl From<&Contour> for SavedContour {
-    fn from(c: &Contour) -> Self {
-        Self {
-            segments: Arc::clone(&c.segments),
-        }
-    }
-}
-
-impl From<SavedContour> for Contour {
-    fn from(s: SavedContour) -> Self {
-        Contour::new(Arc::unwrap_or_clone(s.segments))
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SavedFillShape {
-    pub(crate) color: [u8; 4],
-    pub(crate) exterior: SavedContour,
-    #[serde(default)]
-    pub(crate) holes: Vec<SavedContour>,
-    #[serde(default)]
-    pub(crate) layer_id: u64,
+pub(crate) struct SavedScopeMap {
     #[serde(default)]
     pub(crate) group_path: Vec<u64>,
+    /// 辺の左右の色の一覧（辺は色を 1 からの番号で指す。0 は何も無い）
+    pub(crate) colors: Vec<[u8; 4]>,
+    /// 頂点の座標（x, y の順に並べる。丸めない：読み戻すとビットまで同じ値になる）
+    pub(crate) nodes: Vec<f64>,
+    /// 辺：（始点, 終点, 制御点の x, 制御点の y, 左の色, 右の色）
+    pub(crate) edges: Vec<(usize, usize, f64, f64, usize, usize)>,
 }
 
-impl From<&FillShape> for SavedFillShape {
-    fn from(shape: &FillShape) -> Self {
-        Self {
-            color: shape.color.to_array(),
-            exterior: (&shape.exterior).into(),
-            holes: shape.holes.iter().map(SavedContour::from).collect(),
-            layer_id: shape.layer_id,
-            group_path: shape.group_path.clone(),
-        }
-    }
-}
-
-impl From<SavedFillShape> for FillShape {
-    fn from(s: SavedFillShape) -> Self {
-        let color =
-            Color32::from_rgba_premultiplied(s.color[0], s.color[1], s.color[2], s.color[3]);
-        let mut exterior: Contour = s.exterior.into();
-        if exterior.signed_area() < 0.0 {
-            exterior.reverse();
-        }
-        let mut holes: Vec<Contour> = s
-            .holes
-            .into_iter()
-            .map(Contour::from)
-            .filter(|h| h.segments.len() >= 2 && h.signed_area().abs() > 0.0)
-            .map(|mut h| {
-                if h.signed_area() > 0.0 {
-                    h.reverse();
-                }
-                h
+impl SavedScopeMap {
+    pub(crate) fn new(group_path: &[u64], map: &PlanarMap) -> Self {
+        let mut colors: Vec<[u8; 4]> = Vec::new();
+        let mut color_no = |c: Option<Color32>| -> usize {
+            let Some(c) = c else {
+                return 0;
+            };
+            let c = c.to_array();
+            1 + colors.iter().position(|x| *x == c).unwrap_or_else(|| {
+                colors.push(c);
+                colors.len() - 1
+            })
+        };
+        let edges = map
+            .edges
+            .iter()
+            .map(|e| {
+                (
+                    e.a,
+                    e.b,
+                    e.ctrl.x,
+                    e.ctrl.y,
+                    color_no(e.left),
+                    color_no(e.right),
+                )
             })
             .collect();
-        holes.shrink_to_fit();
-        FillShape::new(color, exterior, holes)
-            .with_layer_id(s.layer_id)
-            .with_group_path(s.group_path)
+        Self {
+            group_path: group_path.to_vec(),
+            colors,
+            nodes: map.nodes.iter().flat_map(|p| [p.x, p.y]).collect(),
+            edges,
+        }
+    }
+
+    /// 地図に戻す。番号が範囲の外か、正しい地図でなければ `Err`（アプリは正しい地図しか書かないので、ファイルが壊れたとき）
+    pub(crate) fn to_map(&self) -> Result<PlanarMap, String> {
+        let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
+        if !self.nodes.len().is_multiple_of(2) || self.edges.len() > MAX_MAP_EDGES {
+            return Err(broken());
+        }
+        let n = self.nodes.len() / 2;
+        let color = |i: usize| -> Result<Option<Color32>, String> {
+            match i {
+                0 => Ok(None),
+                _ => self
+                    .colors
+                    .get(i - 1)
+                    .map(|c| Some(Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3])))
+                    .ok_or_else(broken),
+            }
+        };
+        let mut edges = Vec::with_capacity(self.edges.len());
+        for &(a, b, cx, cy, l, r) in &self.edges {
+            if a >= n || b >= n {
+                return Err(broken());
+            }
+            edges.push(MapEdge {
+                a,
+                b,
+                ctrl: Point::new(cx, cy),
+                left: color(l)?,
+                right: color(r)?,
+                left_src: None,
+                right_src: None,
+            });
+        }
+        let map = PlanarMap {
+            nodes: (0..n)
+                .map(|i| Point::new(self.nodes[2 * i], self.nodes[2 * i + 1]))
+                .collect(),
+            edges,
+            node_src: vec![None; n],
+        };
+        if !map.is_valid() {
+            return Err(broken());
+        }
+        Ok(map)
     }
 }
+
+/// 1つの地図の辺の数の上限（読み込むときに、これより多い地図は壊れたファイルとして断る）
+pub(crate) const MAX_MAP_EDGES: usize = 4_000_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SavedKeyframe {
@@ -550,8 +539,9 @@ pub(crate) struct SavedKeyframe {
     pub(crate) tween: bool,
     #[serde(default)]
     pub(crate) tween_rotate: TweenRotate,
+    /// 階層ごとの地図（図形の並びで、その階層が最初に出てくる順）
     #[serde(default)]
-    pub(crate) shapes: Vec<SavedFillShape>,
+    pub(crate) maps: Vec<SavedScopeMap>,
     #[serde(default)]
     pub(crate) instances: Vec<SavedSymbolInstance>,
 }
@@ -562,11 +552,11 @@ impl From<&Keyframe> for SavedKeyframe {
             start_frame: kf.start_frame,
             tween: kf.tween,
             tween_rotate: kf.tween_rotate,
-            shapes: kf
+            maps: kf
                 .cel
-                .shapes
+                .maps
                 .iter()
-                .map(|s| SavedFillShape::from(&**s))
+                .map(|m| SavedScopeMap::new(&m.group_path, &m.base.map))
                 .collect(),
             instances: kf
                 .cel
@@ -580,14 +570,12 @@ impl From<&Keyframe> for SavedKeyframe {
 
 impl From<SavedKeyframe> for Keyframe {
     fn from(s: SavedKeyframe) -> Self {
-        // 保存したとおりに読む（結合でできたごく小さな図形も残す）。外周・穴とも、線分が2本未満か面積が 0 のものだけを除く
-        let mut shapes: Vec<FillShape> = s
-            .shapes
-            .into_iter()
-            .map(FillShape::from)
-            .filter(|sh| sh.exterior.segments.len() >= 2 && sh.exterior.signed_area().abs() > 0.0)
+        // 正しくない地図は、読み込みの確かめ（`ProjectDocument::check_maps`）で断ってある。ここでは飛ばすだけ
+        let maps: Vec<(Vec<u64>, PlanarMap)> = s
+            .maps
+            .iter()
+            .filter_map(|m| Some((m.group_path.clone(), m.to_map().ok()?)))
             .collect();
-        shapes.shrink_to_fit();
         let mut seen_gids = HashSet::with_capacity(s.instances.len());
         let instances: Vec<SymbolInstance> = s
             .instances
@@ -599,7 +587,7 @@ impl From<SavedKeyframe> for Keyframe {
                     && seen_gids.insert(inst.binding.instance_gid)
             })
             .collect();
-        let cel = Cel::new_with_instances(shapes, instances);
+        let cel = Cel::from_maps(maps, instances);
         Self {
             start_frame: s.start_frame,
             cel,
@@ -841,20 +829,11 @@ impl ProjectDocument {
             self.stage_size = [800.0, 450.0];
             fixed.push("ステージサイズ".to_owned());
         }
-        let contour_ok = |c: &SavedContour| {
-            c.segments.iter().all(|seg| {
-                [seg.p0.x, seg.p0.y, seg.p1.x, seg.p1.y, seg.p2.x, seg.p2.y]
-                    .into_iter()
-                    .all(f64::is_finite)
-            })
-        };
+        // 地図はいつも正しい地図なので、座標は有限（`Cel::set_shared_parts`）。インスタンスの変換だけを確かめる
         let mut clean_timeline = |tl: &mut SavedTimeline, sym_name: Option<&str>| {
             for layer in &mut tl.layers {
                 for kf in &mut layer.keyframes {
-                    let before = kf.shapes.len();
-                    kf.shapes
-                        .retain(|sh| contour_ok(&sh.exterior) && sh.holes.iter().all(contour_ok));
-                    let mut kf_fixed = kf.shapes.len() < before;
+                    let mut kf_fixed = false;
                     for inst in &mut kf.instances {
                         if !inst.binding.xform.iter().all(|v| v.is_finite()) {
                             inst.binding.xform = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -883,6 +862,20 @@ impl ProjectDocument {
             clean_timeline(&mut sym.timeline, Some(&sym.name));
         }
         fixed
+    }
+
+    /// 読み込んだ地図がどれも正しい地図か（`SavedScopeMap::to_map`）。正しくなければ壊れたファイルとして断る
+    pub(crate) fn check_maps(&self) -> Result<(), String> {
+        let timelines =
+            std::iter::once(&self.timeline).chain(self.library.iter().map(|s| &s.timeline));
+        for tl in timelines {
+            for kf in tl.layers.iter().flat_map(|l| &l.keyframes) {
+                for m in &kf.maps {
+                    m.to_map()?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 読み込んだ `ProjectDocument` から正規化済みの `Document` を構築する
@@ -1188,6 +1181,7 @@ pub(crate) fn read_project_document(path: &Path) -> Result<ProjectDocument, Stri
             doc.version
         ));
     }
+    doc.check_maps()?;
     Ok(doc)
 }
 
