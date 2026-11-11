@@ -1031,7 +1031,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
                 let at = edit
                     .shapes
                     .iter()
-                    .position(|s| in_scope(s))
+                    .position(&in_scope)
                     .unwrap_or(edit.shapes.len());
                 edit.shapes.retain(|s| !in_scope(s));
                 edit.shapes.splice(at..at, moved);
