@@ -2376,6 +2376,7 @@ impl Session {
             return;
         }
         let mut selection_shapes = std::mem::take(&mut self.selection.shapes);
+        let xform = self.edit_path.world_xform();
         self.update_floating(|fl_opt| {
             let Some(fl) = fl_opt else {
                 return;
@@ -2385,7 +2386,7 @@ impl Session {
                 selection_shapes.remove(&piece.shape_id);
             }
             // 片は同じ地図から作ったもので、境目がビットまで同じなので、地図でまとめる
-            let merged = crate::planar_map::merge_touching_faces(pieces);
+            let merged = crate::planar_map::merge_touching_faces(pieces, xform);
             selection_shapes.extend(merged.iter().map(|p| p.shape_id));
             fl.pieces = merged;
         });
@@ -3760,6 +3761,7 @@ pub(crate) fn floating_target_layer_ids(tab: &Tab, fl: &Floating) -> Vec<LayerId
 /// `tab.session.floating` のうち `keep_indices`（`Scene` インデックス）に含まれない選択図形を確定
 /// （未変形スライスなら `Floating` を破棄するだけで文書は変更せず、変更済みなら `hidden` を除き `remainder` を足して `pieces` を結合し文書へ書き込み）する
 pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> bool {
+    let xform = tab.session.edit_path.world_xform();
     let (is_sel, any_valid) = tab.session.selected_shape_mask();
     let mut is_keep = vec![false; is_sel.len()];
     let mut any_keep = false;
@@ -3836,6 +3838,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
                     |mine| {
                         crate::planar_map::merge_touching_faces(
                             list.into_iter().chain(mine).collect(),
+                            xform,
                         )
                     },
                     || {

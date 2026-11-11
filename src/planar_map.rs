@@ -1872,9 +1872,11 @@ pub(crate) fn place_pieces_diff(
     }
 }
 
-/// 境目がビットまで同じ図形どうし（同じ地図から作った片）の、同じ色でとなり合うものを1つにまとめる。
-/// 図形どうしは重ならないこと。レイヤー・階層ごとにまとめる
-pub(crate) fn merge_touching_faces(shapes: Vec<FillShape>) -> Vec<FillShape> {
+/// 座標の変換 `xform` で置いた、境目がビットまで同じ図形どうし（同じ地図から作った片）の、同じ色でとなり合うものを1つに
+/// まとめる。レイヤー・階層ごとに、図形を地図にして（`LayerBase::of`。地図の面は、同じ色でとなり合う所を1つにした形）、
+/// ほかの編集と同じく書き戻す（`LayerBase::diff`）：変わらない図形は番号もそのまま残り、まとめた面は新しい図形になる。
+/// 図形が重なって正しい地図にならないときは、塗り重ねて作り直した地図で全部書き直す
+pub(crate) fn merge_touching_faces(shapes: Vec<FillShape>, xform: Affine) -> Vec<FillShape> {
     let mut groups: Vec<(LayerId, Vec<u64>, Vec<FillShape>)> = Vec::new();
     for s in shapes {
         match groups
@@ -1886,34 +1888,15 @@ pub(crate) fn merge_touching_faces(shapes: Vec<FillShape>) -> Vec<FillShape> {
         }
     }
     let mut out = Vec::new();
-    for (layer_id, group_path, list) in groups {
-        if list.len() <= 1 {
-            out.extend(list);
-            continue;
+    for (layer_id, group_path, mut list) in groups {
+        let refs: Vec<&FillShape> = list.iter().collect();
+        // 格子に置けない座標（±65,536px の外）があるときは、まとめずにそのまま
+        let diff = LayerBase::of(&refs, xform)
+            .and_then(|base| base.diff(&base.map, &refs, layer_id, &group_path));
+        if let Some((removed, added)) = diff {
+            apply_shape_diff(&mut list, &removed, added, layer_id, &group_path);
         }
-        let map = PlanarMap::from_faces(list.iter());
-        if !map.is_valid() {
-            // 正しい地図にならない（境目がそろっていない・重なる）ときは、まとめずにそのまま
-            out.extend(list);
-            continue;
-        }
-        let faces: Vec<FillShape> = map
-            .faces()
-            .0
-            .iter()
-            .map(|f| map.face_shape(f, layer_id, &group_path))
-            .collect();
-        // 形の変わらない片は、元の図形（番号）をそのまま使う
-        for f in faces {
-            match list.iter().find(|s| {
-                s.color == f.color
-                    && s.exterior.segments == f.exterior.segments
-                    && s.holes.len() == f.holes.len()
-            }) {
-                Some(orig) => out.push(orig.clone()),
-                None => out.push(f),
-            }
-        }
+        out.extend(list);
     }
     out
 }

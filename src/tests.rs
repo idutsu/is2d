@@ -21597,6 +21597,55 @@ fn test_symbol_edit_after_moving_instance_keeps_untouched_shapes() {
     assert_eq!(after.len(), red_before.len() + 1, "{after:?}");
 }
 
+/// 同じ地図から切った残り（穴のあいた外側）と、残りの穴にはまる片（穴のあいた中央）をまとめても、何も消えない
+/// （まとめた面は元の図形が2つなので、新しい図形になる。レビュー 8b33f96 の N-1002）
+#[test]
+fn test_merge_touching_faces_keeps_piece_in_remainder_hole() {
+    use crate::planar_map::{marquee_split, merge_touching_faces, MapInput, MapRule, PlanarMap};
+    use crate::vector_engine::make_marquee_rect_shape;
+    use kurbo::Rect as KRect;
+    let area = |s: &FillShape| {
+        s.exterior.signed_area().abs() - s.holes.iter().map(|h| h.signed_area().abs()).sum::<f64>()
+    };
+    let mut square = make_marquee_rect_shape(KRect::new(0.0, 0.0, 200.0, 200.0));
+    square.color = Color32::RED;
+    let lid = square.layer_id;
+    let hole = make_marquee_rect_shape(KRect::new(80.0, 80.0, 120.0, 120.0));
+    let map = PlanarMap::from_faces(std::iter::once(&square))
+        .overlay(
+            MapInput::Shapes(std::slice::from_ref(&hole)),
+            MapRule::Paint(None),
+        )
+        .expect("穴をあける");
+    let ring: Vec<FillShape> = map
+        .faces()
+        .0
+        .iter()
+        .map(|f| map.face_shape(f, lid, &[]))
+        .collect();
+    assert_eq!(ring.len(), 1);
+    assert!((area(&ring[0]) - 38_400.0).abs() < 1e-6);
+    let own: Vec<&FillShape> = ring.iter().collect();
+    let center = make_marquee_rect_shape(KRect::new(50.0, 50.0, 150.0, 150.0));
+    let sp = marquee_split(
+        &own,
+        lid,
+        &[],
+        Affine::IDENTITY,
+        MapInput::Shapes(std::slice::from_ref(&center)),
+    )
+    .expect("切る");
+    let parts: Vec<FillShape> = sp.remainder.into_iter().chain(sp.pieces).collect();
+    assert_eq!(parts.len(), 2, "残りと片");
+    let merged = merge_touching_faces(parts, Affine::IDENTITY);
+    assert_eq!(merged.len(), 1);
+    let total: f64 = merged.iter().map(area).sum();
+    assert!(
+        (total - 38_400.0).abs() < 1e-6,
+        "まとめたら面積が {total} になった"
+    );
+}
+
 /// 両側に色がある地図の辺の真ん中（アンカーの追加でつかむ点）
 fn shared_edge_midpoint(app: &Is2dApp, color_a: Color32, color_b: Color32) -> Point {
     let maps = crate::planar_map::scope_maps(app.scene(), &app.session);
