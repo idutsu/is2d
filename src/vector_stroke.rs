@@ -1,5 +1,8 @@
 use eframe::egui::Color32;
-use i_overlay::{core::fill_rule::FillRule as OverlayFillRule, float::simplify::SimplifyShape};
+use i_overlay9::{
+    core::{fill_rule::FillRule as OverlayFillRule, overlay::ContourDirection},
+    float::{overlay::OverlayOptions, simplify::SimplifyShape},
+};
 use kurbo::{Affine, ParamCurve, ParamCurveDeriv, Point, QuadBez, Vec2 as KVec2};
 
 use crate::vector_engine::{
@@ -212,7 +215,12 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
     };
 
     let raw_f64: Vec<[f64; 2]> = raw_outline.iter().map(|&p| [p.x * z, p.y * z]).collect();
-    let simplified = raw_f64.simplify_shape(OverlayFillRule::NonZero, 0.05);
+    // 自己交差を解消し、面積 0.05 未満の輪郭を落とす（外周は時計回り・穴は反時計回り。向きは曲線に当てはめるときにそろえる）
+    let mut options = OverlayOptions::default();
+    options.output_direction = ContourDirection::Clockwise;
+    options.min_output_area = 0.05;
+    let simplified =
+        raw_f64.simplify_shape_custom(OverlayFillRule::NonZero, options, Default::default());
 
     let mut result = Vec::with_capacity(simplified.len());
     for shape_rings in simplified {
