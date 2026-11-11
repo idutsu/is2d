@@ -235,6 +235,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     let editable_lids = editable_layer_ids(tab);
     let base_shapes = tab.session.base_cache.shapes().to_vec();
     let scope = tab.session.editing_group_path.clone();
+    let xform = tab.session.edit_path.world_xform();
     let mut selection = std::mem::take(&mut tab.session.selection);
     tab.session.update_floating(|floating| {
         let hidden_now: HashSet<ShapeId> = floating
@@ -283,10 +284,10 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
                 .collect();
             let rect_only = MapInput::Shapes(std::slice::from_ref(&clip_rect_shape));
             if selected.is_empty() {
-                return crate::planar_map::marquee_split(&own, lid, &scope, rect_only);
+                return crate::planar_map::marquee_split(&own, lid, &scope, xform, rect_only);
             }
-            let region = crate::planar_map::selection_region(&selected, &clip_rect_shape)?;
-            crate::planar_map::marquee_split(&own, lid, &scope, MapInput::Map(&region))
+            let region = crate::planar_map::selection_region(&selected, xform, &clip_rect_shape)?;
+            crate::planar_map::marquee_split(&own, lid, &scope, xform, MapInput::Map(&region))
         });
         let mut lifted: Vec<FillShape> = Vec::new();
         let mut new_hidden: Vec<ShapeId> = Vec::new();
@@ -916,7 +917,12 @@ pub(crate) fn prepare_delete_selected_shapes(
     edit_layers(tab, &layer_ids, |edit| {
         if let Some(mut fl) = fl_opt {
             fl.pieces.clear();
-            merge_floating_into_base_shapes(&mut edit.shapes, fl, &edit.layer_order_ids);
+            merge_floating_into_base_shapes(
+                &mut edit.shapes,
+                fl,
+                &edit.layer_order_ids,
+                edit.world_xform,
+            );
         }
         edit.shapes.retain(|s| !selection.contains_shape(s));
     });

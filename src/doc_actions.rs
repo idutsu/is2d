@@ -776,7 +776,7 @@ fn apply_raw_outline(
     edit_layers(tab, &[target_lid], |edit| {
         let scope = edit.editing_group_path.clone();
         let rule = MapRule::Paint(is_brush.then_some(brush_color));
-        match map_edit_diff(&edit.shapes, target_lid, &scope, |m| {
+        match map_edit_diff(&edit.shapes, target_lid, &scope, edit.world_xform, |m| {
             m.overlay(MapInput::Shapes(&stroke_shapes), rule)
         }) {
             MapEditOutcome::Changed(removed, added) => {
@@ -912,9 +912,13 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
 /// グループの図形は壁にしない）
 fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) -> bool {
     let scope = tab.session.editing_group_path.clone();
-    let outcome = map_edit_diff(tab.session.base_cache.shapes(), target_lid, &scope, |m| {
-        m.with_face_filled(pt, fill_color)
-    });
+    let outcome = map_edit_diff(
+        tab.session.base_cache.shapes(),
+        target_lid,
+        &scope,
+        tab.session.edit_path.world_xform(),
+        |m| m.with_face_filled(pt, fill_color),
+    );
     match outcome {
         MapEditOutcome::Changed(removed, added) => {
             push_undo(tab, None);
@@ -1065,6 +1069,7 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
         tab.session.base_cache.shapes(),
         layer_id,
         &group_path,
+        tab.session.edit_path.world_xform(),
         |m| map_edit.apply(m),
     ) else {
         return false;
@@ -1196,9 +1201,13 @@ fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, edit: MapEdit) -> bool
         return false;
     };
     let scope = tab.session.editing_group_path.clone();
-    let MapEditOutcome::Changed(removed, added) =
-        map_edit_diff(&fl.pieces, layer_id, &scope, |m| edit.apply(m))
-    else {
+    let MapEditOutcome::Changed(removed, added) = map_edit_diff(
+        &fl.pieces,
+        layer_id,
+        &scope,
+        tab.session.edit_path.world_xform(),
+        |m| edit.apply(m),
+    ) else {
         return false;
     };
     push_undo(tab, None);

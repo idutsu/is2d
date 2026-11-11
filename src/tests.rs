@@ -1,6 +1,6 @@
 use super::*;
 use crate::canvas_tool::HoverTarget;
-use kurbo::{ParamCurve, ParamCurveDeriv, QuadBez, Vec2 as KVec2};
+use kurbo::{Affine, ParamCurve, ParamCurveDeriv, QuadBez, Vec2 as KVec2};
 use vector_engine::{left_normal, normalize_vec};
 use vector_stroke::{
     build_smoothed_stroke_shapes, build_smoothed_stroke_shapes_at_zoom, generate_brush_outline,
@@ -9,7 +9,7 @@ use vector_stroke::{
 
 /// 図形を、レイヤー・階層ごとに地図で上に重ねて足す（浮いている片を置くのと同じ）
 fn merge_shapes_into_canvas(canvas: &mut Vec<FillShape>, incoming: Vec<FillShape>) {
-    canvas_tool::merge_pieces_layer_by_layer(canvas, incoming);
+    canvas_tool::merge_pieces_layer_by_layer(canvas, incoming, Affine::IDENTITY);
 }
 
 /// レイヤー `layer_id`・階層 `scope` の生の図形から、`erasers` の形を消す（消しゴムと同じく地図で）
@@ -22,7 +22,7 @@ fn erase_from_canvas(
     use crate::planar_map::{apply_shape_diff, map_edit_diff, MapEditOutcome, MapInput, MapRule};
     for e in erasers {
         if let MapEditOutcome::Changed(removed, added) =
-            map_edit_diff(canvas, layer_id, scope, |m| {
+            map_edit_diff(canvas, layer_id, scope, Affine::IDENTITY, |m| {
                 m.overlay(
                     MapInput::Shapes(std::slice::from_ref(e)),
                     MapRule::Paint(None),
@@ -20027,7 +20027,12 @@ fn test_merging_floating_pieces_layer_by_layer_matches_merging_each_layer_in_tur
             .filter(|p| p.layer_id == lid)
             .cloned()
             .collect();
-        merge_floating_into_base_shapes(&mut in_turn, floating_of(layer_pieces), &[1, 2, 3]);
+        merge_floating_into_base_shapes(
+            &mut in_turn,
+            floating_of(layer_pieces),
+            &[1, 2, 3],
+            Affine::IDENTITY,
+        );
     }
 
     let mut layer_by_layer = base_shapes;
@@ -20040,6 +20045,7 @@ fn test_merging_floating_pieces_layer_by_layer_matches_merging_each_layer_in_tur
             modified: true,
         },
         &[1, 2, 3],
+        Affine::IDENTITY,
     );
 
     assert!(layer_by_layer.len() > orig_count);
@@ -21316,9 +21322,11 @@ fn test_bucket_recolor_keeps_neighbor_shapes() {
         .find(|s| s.color == Color32::BLUE)
         .expect("青の帯")
         .shape_id;
-    let MapEditOutcome::Changed(removed, added) = map_edit_diff(&shapes, lid, &[], |m| {
-        m.with_face_filled(Point::new(0.0, 40.0), Color32::BLACK)
-    }) else {
+    let MapEditOutcome::Changed(removed, added) =
+        map_edit_diff(&shapes, lid, &[], Affine::IDENTITY, |m| {
+            m.with_face_filled(Point::new(0.0, 40.0), Color32::BLACK)
+        })
+    else {
         panic!("塗り替えられない");
     };
     assert_eq!(removed, vec![blue], "となりの図形まで書き換えた");
@@ -21491,6 +21499,102 @@ fn test_scope_maps_rebuild_only_edited_layer() {
             "編集したレイヤーだけ作り直す"
         );
     }
+}
+
+/// レイヤーが多くても（しまう地図の数より多い 20 枚）、カーソル合わせの地図は編集したレイヤーの分だけ作り直す
+/// （レビュー 8b33f96 の N-2002）
+#[test]
+fn test_scope_maps_rebuild_only_edited_layer_with_many_layers() {
+    use crate::doc_actions::Action;
+    let mut app = Is2dApp::default();
+    let stroke = |y: f64| Action::PaintStroke {
+        points: vec![Point::new(100.0, y), Point::new(300.0, y + 10.0)],
+        radius: 8.0,
+        color: Color32::RED,
+    };
+    run(&mut app, &[stroke(0.0)]);
+    for i in 1..20 {
+        run(&mut app, &[Action::AddLayer, stroke(20.0 * i as f64)]);
+    }
+    let before = crate::planar_map::scope_maps(app.scene(), &app.session);
+    assert_eq!(before.maps.len(), 20);
+    let edited = app.active_timeline().active_layer_id();
+    run(&mut app, &[stroke(500.0)]);
+    let after = crate::planar_map::scope_maps(app.scene(), &app.session);
+    let rebuilt: Vec<crate::canvas_tool::LayerId> = after
+        .maps
+        .iter()
+        .filter(|m| {
+            let old = before
+                .maps
+                .iter()
+                .find(|o| o.layer_id == m.layer_id)
+                .unwrap();
+            !std::sync::Arc::ptr_eq(&old.base, &m.base)
+        })
+        .map(|m| m.layer_id)
+        .collect();
+    assert_eq!(rebuilt, vec![edited], "編集したレイヤーだけ作り直す");
+}
+
+/// シンボルの中で描いても、触っていない図形は動かない：インスタンスを動かしてからまた入って描いても、動かす前の座標の
+/// 地図を使わない（地図の鍵に、図形を置いた座標の変換が入っている。レビュー 8b33f96 の N-1001）
+#[test]
+fn test_symbol_edit_after_moving_instance_keeps_untouched_shapes() {
+    use crate::doc_actions::Action;
+    let mut app = Is2dApp::default();
+    let stroke = |y: f64, color: Color32| Action::PaintStroke {
+        points: vec![Point::new(-60.0, y), Point::new(60.0, y)],
+        radius: 20.0,
+        color,
+    };
+    run(&mut app, &[stroke(0.0, Color32::RED)]);
+    app.session.set_selected_indices(vec![0]);
+    assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
+    let enter = |app: &mut Is2dApp| {
+        let (binding, _, _) = symbol_ops::selected_single_symbol_info(app).unwrap();
+        assert!(symbol_ops::enter_symbol_timeline(app, binding));
+    };
+    let local_shapes = |app: &Is2dApp| -> Vec<(crate::canvas_tool::ShapeId, Color32, [f64; 4])> {
+        app.active_timeline().layers[0].keyframes[0]
+            .cel
+            .shapes
+            .iter()
+            .map(|s| {
+                let b = s.bounding_box();
+                (s.shape_id, s.color, [b.x0, b.y0, b.x1, b.y1])
+            })
+            .collect()
+    };
+    enter(&mut app);
+    // 何も変えないバケツ（囲まれていない所）で、その座標の地図を作らせる
+    doc_actions::apply(
+        &mut app,
+        Action::BucketFill {
+            pt: Point::new(400.0, 400.0),
+            color: Color32::GREEN,
+        },
+    );
+    let red_before = local_shapes(&app);
+    assert!(symbol_ops::exit_symbol_timeline(&mut app));
+    app.session.set_selected_indices(vec![0]);
+    assert!(doc_actions::apply(
+        &mut app,
+        Action::NudgeSelection {
+            delta: KVec2::new(0.0, 200.0),
+        }
+    ));
+    enter(&mut app);
+    // 赤の前の位置（今は何も無い所）に青を描く。赤はステージの y 200 へ動いているので、触らない
+    run(&mut app, &[stroke(0.0, Color32::BLUE)]);
+    let after = local_shapes(&app);
+    for red in &red_before {
+        assert!(
+            after.contains(red),
+            "触っていない赤が変わった: {red:?} → {after:?}"
+        );
+    }
+    assert_eq!(after.len(), red_before.len() + 1, "{after:?}");
 }
 
 /// 両側に色がある地図の辺の真ん中（アンカーの追加でつかむ点）
@@ -23081,6 +23185,7 @@ mod map_overlay {
                 modified: true,
             },
             &[lid],
+            Affine::IDENTITY,
         );
         eprintln!(
             "PROBE 重なり合う片の確定 {:.1}ms",
@@ -24155,7 +24260,13 @@ mod map_overlay {
             }
             for _ in 0..3 {
                 let t = std::time::Instant::now();
-                let out = crate::planar_map::place_pieces_diff(&base, lid0, &[], &pieces);
+                let out = crate::planar_map::place_pieces_diff(
+                    &base,
+                    lid0,
+                    &[],
+                    Affine::IDENTITY,
+                    &pieces,
+                );
                 let ms = t.elapsed().as_secs_f64() * 1000.0;
                 let ok = matches!(out, crate::planar_map::MapEditOutcome::Changed(..));
                 eprintln!(
@@ -24553,8 +24664,13 @@ mod map_overlay {
                     }
                     // 離したときの確定（レイヤーの図形から差分を出す）
                     let t = std::time::Instant::now();
-                    let out =
-                        crate::planar_map::map_edit_diff(&shapes, layer_id, &[], |m| edit.apply(m));
+                    let out = crate::planar_map::map_edit_diff(
+                        &shapes,
+                        layer_id,
+                        &[],
+                        Affine::IDENTITY,
+                        |m| edit.apply(m),
+                    );
                     std::hint::black_box(out);
                     commit.push(ms(t));
                 }

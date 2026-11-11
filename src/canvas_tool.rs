@@ -3165,6 +3165,8 @@ impl Tab {
 pub(crate) struct LayerEdit {
     pub(crate) shapes: Vec<FillShape>,
     pub(crate) editing_group_path: Vec<u64>,
+    /// 図形を置いた座標の変換（シンボルの中ではステージへの変換。`shapes` は変換したあとの座標）
+    pub(crate) world_xform: Affine,
     pub(crate) layer_order_ids: Vec<LayerId>,
     pub(crate) next_group_id: u64,
 }
@@ -3423,6 +3425,7 @@ pub(crate) fn edit_layers(
     let mut edit = LayerEdit {
         shapes: loaded_shapes,
         editing_group_path,
+        world_xform,
         layer_order_ids,
         next_group_id,
     };
@@ -3673,6 +3676,7 @@ pub(crate) fn draw_registration_cross(
 pub(crate) fn merge_pieces_layer_by_layer(
     base_shapes: &mut Vec<FillShape>,
     pieces: Vec<FillShape>,
+    xform: Affine,
 ) {
     use crate::planar_map::{
         apply_shape_diff, per_layer_parallel, place_pieces_diff, MapEditOutcome,
@@ -3689,7 +3693,7 @@ pub(crate) fn merge_pieces_layer_by_layer(
     }
     let shapes: &[FillShape] = base_shapes;
     let outcomes = per_layer_parallel(&parts, |(layer_id, group_path, layer_pieces)| {
-        place_pieces_diff(shapes, *layer_id, group_path, layer_pieces)
+        place_pieces_diff(shapes, *layer_id, group_path, xform, layer_pieces)
     });
     for ((layer_id, group_path, layer_pieces), outcome) in parts.into_iter().zip(outcomes) {
         match outcome {
@@ -3705,11 +3709,12 @@ pub(crate) fn merge_pieces_layer_by_layer(
     }
 }
 
-/// `Floating` の `hidden` 除去・`remainder` 追加・`pieces` 結合を `base_shapes` に対して実行する
+/// `Floating` の `hidden` 除去・`remainder` 追加・`pieces` 結合を `base_shapes`（座標の変換 `xform` で置いた図形）に対して実行する
 pub(crate) fn merge_floating_into_base_shapes(
     base_shapes: &mut Vec<FillShape>,
     mut fl: Floating,
     layer_order_ids: &[LayerId],
+    xform: Affine,
 ) {
     if !fl.hidden.is_empty() || !fl.remainder.is_empty() {
         let (rebuilt, _) =
@@ -3717,7 +3722,7 @@ pub(crate) fn merge_floating_into_base_shapes(
         *base_shapes = rebuilt;
     }
     if !fl.pieces.is_empty() {
-        merge_pieces_layer_by_layer(base_shapes, fl.pieces);
+        merge_pieces_layer_by_layer(base_shapes, fl.pieces, xform);
     }
     if layer_order_ids.len() > 1 && base_shapes.len() > 1 {
         base_shapes.sort_by_key(|s| layer_order_index(layer_order_ids, s.layer_id));
@@ -3774,7 +3779,12 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
         if fl.modified {
             let lids = floating_target_layer_ids(tab, &fl);
             edit_layers(tab, &lids, |edit| {
-                merge_floating_into_base_shapes(&mut edit.shapes, fl, &edit.layer_order_ids);
+                merge_floating_into_base_shapes(
+                    &mut edit.shapes,
+                    fl,
+                    &edit.layer_order_ids,
+                    edit.world_xform,
+                );
             });
         }
         tab.session.retain_existing_selection();
@@ -3862,7 +3872,12 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
     if let Some(to_commit) = to_commit {
         let lids = floating_target_layer_ids(tab, &to_commit);
         edit_layers(tab, &lids, |edit| {
-            merge_floating_into_base_shapes(&mut edit.shapes, to_commit, &edit.layer_order_ids);
+            merge_floating_into_base_shapes(
+                &mut edit.shapes,
+                to_commit,
+                &edit.layer_order_ids,
+                edit.world_xform,
+            );
         });
     }
     tab.session.retain_existing_selection();

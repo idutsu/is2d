@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use eframe::egui::Color32;
-use kurbo::{ParamCurve, Point, QuadBez, Rect as KRect, Shape as KurboShape, Vec2 as KVec2};
+use kurbo::{
+    Affine, ParamCurve, Point, QuadBez, Rect as KRect, Shape as KurboShape, Vec2 as KVec2,
+};
 
 use crate::canvas_tool::{HoverTarget, LayerId, MapOwner, Scene, Session, ShapeId};
 use crate::vector_engine::{rects_overlap, Contour, FillShape, SyncCache};
@@ -1133,11 +1135,16 @@ impl LayerBase {
         }
     }
 
-    /// 図形 `own`（下から上への並び）の地図。前に同じ図形から作った地図があれば、それを使い回す（`LAYER_BASES`）。
-    /// 図形から地図を作るのも、正しい地図でない図形（前の版で描いた、境目がそろっていない図形や重なった図形など）を
-    /// 並びの順に塗り重ねて作り直すのも（`painted_map`。絵は同じ）、ここだけ。`None`：格子に置けない座標がある
-    pub(crate) fn of(own: &[&FillShape]) -> Option<Arc<Self>> {
-        let key: ShapesKey = own.iter().map(|s| (s.shape_id, s.mesh_revision)).collect();
+    /// 座標の変換 `xform` で置いた図形 `own`（下から上への並び。変換したあとの座標）の地図。前に同じ図形・同じ変換から
+    /// 作った地図があれば、それを使い回す（`MapKey`・`LAYER_BASES`）。図形から地図を作るのも、正しい地図でない図形
+    /// （重なった片など）を並びの順に塗り重ねて作り直すのも（`painted_map`。絵は同じ）、ここだけ。`None`：格子に置けない
+    /// 座標がある
+    pub(crate) fn of(own: &[&FillShape], xform: Affine) -> Option<Arc<Self>> {
+        Self::keyed(own, MapKey::new(own, xform))
+    }
+
+    /// `of` の、鍵を作ったあと
+    fn keyed(own: &[&FillShape], key: MapKey) -> Option<Arc<Self>> {
         {
             let mut cache = LAYER_BASES.lock();
             if let Some(i) = cache.iter().position(|(k, _)| *k == key) {
@@ -1189,13 +1196,29 @@ impl LayerBase {
     }
 }
 
-/// 図形から作った地図のしまい場所（`LayerBase::of`）：（地図にした図形の（番号, `mesh_revision`）の並び, 地図）。
-/// `mesh_revision` は、図形の形か色を変えるたびにアプリ全体で新しい値になるので、並びが同じなら同じ図形で、地図も同じ
-/// （どの文書・どの操作から引いても同じ地図になる）。新しく使ったものを前に、`LAYER_BASES_LEN` 個まで
-static LAYER_BASES: SyncCache<Vec<(ShapesKey, Arc<LayerBase>)>> = SyncCache::new(Vec::new());
-/// 地図にした図形の（番号, `mesh_revision`）の並び
-type ShapesKey = Vec<(ShapeId, u64)>;
-/// しまっておく地図の数（レイヤーごとのカーソル合わせの地図と、触ったレイヤーの編集の前後の地図が入る数）
+/// 地図を決めるもの：図形を置いた座標の変換（係数6つのビット）と、図形の（番号, `mesh_revision`）の並び。
+/// `mesh_revision` は図形の形か色を変えるたびにアプリ全体で新しい値になるので、並びが同じなら文書の図形も同じ。
+/// シンボルの中では、文書の図形をステージへ変換して地図にするが、変換した図形は番号も `mesh_revision` も文書の図形の
+/// まま（書き戻しで、変わっていない図形を見分けるため）なので、変換も入れて、はじめて地図が1つに決まる
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MapKey {
+    xform: [u64; 6],
+    shapes: Vec<(ShapeId, u64)>,
+}
+
+impl MapKey {
+    pub(crate) fn new(own: &[&FillShape], xform: Affine) -> Self {
+        Self {
+            xform: xform.as_coeffs().map(f64::to_bits),
+            shapes: own.iter().map(|s| (s.shape_id, s.mesh_revision)).collect(),
+        }
+    }
+}
+
+/// 図形から作った地図のしまい場所（`LayerBase::of`）：（鍵, 地図）。鍵が同じなら地図も同じなので、どの文書・どの操作
+/// から引いても正しい。新しく使ったものを前に、`LAYER_BASES_LEN` 個まで（編集の前後の地図が入る数。カーソル合わせの
+/// 地図は、レイヤーごとに `ScopeMaps` が持つ）
+static LAYER_BASES: SyncCache<Vec<(MapKey, Arc<LayerBase>)>> = SyncCache::new(Vec::new());
 const LAYER_BASES_LEN: usize = 16;
 
 /// 図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の、地図にする生の図形（並びの順）
@@ -1217,6 +1240,8 @@ pub(crate) struct LayerMap {
     pub(crate) base: Arc<LayerBase>,
     /// 場面の並びで、このレイヤーの生の図形が最初に出てくる番号（これより後ろの、ほかの図形が前面）
     first_idx: usize,
+    /// 地図を決めるもの（次に作るとき、同じなら地図を使い回す）
+    key: MapKey,
 }
 
 /// カーソル合わせ用の地図（場面の生の図形が変わるまで使い回す）
@@ -1230,11 +1255,13 @@ fn is_map_shape(s: &FillShape, scope: &[u64]) -> bool {
     s.is_raw_at_scope(scope) && s.symbol_instance.is_none() && !s.exterior.segments.is_empty()
 }
 
-/// 編集中の階層の生の図形（選択中の図形を除く）の、レイヤーごとの地図（`LayerBase::of`。前に同じ図形から作った地図は
-/// 作り直さない）。場面の生の図形が前回と同じなら、前回の並びをそのまま返す
+/// 編集中の階層の生の図形（選択中の図形を除く）の、レイヤーごとの地図。場面の生の図形が前回と同じなら、前回の並びを
+/// そのまま返す。違えば、図形が前回と同じレイヤー（鍵 `MapKey` が同じ）は前回の地図を使い、ほかのレイヤーだけ作る
+/// （`LayerBase::of`。レイヤーがいくつあっても、作り直すのは図形が変わったレイヤーだけ）
 pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> {
     use std::hash::{Hash, Hasher};
     let scope = &session.editing_group_path;
+    let xform = session.edit_path.world_xform();
     // 選択中の図形（浮いている図形は、ほかの図形と重なることがある）は入れない
     let in_map = |s: &FillShape| is_map_shape(s, scope) && !session.selection.contains_shape(s);
     let mut by_layer: Vec<(LayerId, usize, Vec<&FillShape>)> = Vec::new();
@@ -1246,7 +1273,7 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     }
     let key = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        scope.hash(&mut h);
+        (scope, xform.as_coeffs().map(f64::to_bits)).hash(&mut h);
         for (layer_id, first_idx, shapes) in &by_layer {
             (layer_id, first_idx).hash(&mut h);
             for s in shapes {
@@ -1259,14 +1286,24 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     if let Some(c) = cache.as_ref().filter(|c| c.key == key) {
         return c.clone();
     }
+    let prev = cache.clone();
     // 地図にできないレイヤー（格子に置けない座標がある）は入れない（カーソル合わせも変形もしない）。作り直すレイヤーが
     // いくつあっても待つ時間が増えないよう、同時に作る
     let maps = per_layer_parallel(&by_layer, |(layer_id, first_idx, shapes)| {
+        let key = MapKey::new(shapes, xform);
+        let reused = prev
+            .as_ref()
+            .and_then(|p| p.maps.iter().find(|m| m.key == key))
+            .map(|m| m.base.clone());
         Some(LayerMap {
             layer_id: *layer_id,
             group_path: scope.clone(),
-            base: LayerBase::of(shapes)?,
+            base: match reused {
+                Some(base) => base,
+                None => LayerBase::keyed(shapes, key.clone())?,
+            },
             first_idx: *first_idx,
+            key,
         })
     })
     .into_iter()
@@ -1415,11 +1452,13 @@ fn floating_maps(scene: Scene<'_>, session: &Session) -> Vec<LayerMap> {
         .into_iter()
         .filter_map(|layer_id| {
             let own = layer_own(&fl.pieces, layer_id, scope);
+            let key = MapKey::new(&own, session.edit_path.world_xform());
             Some(LayerMap {
                 layer_id,
                 group_path: scope.clone(),
                 first_idx: scene.index_of_shape_id(own.first()?.shape_id)?,
-                base: LayerBase::of(&own)?,
+                base: LayerBase::keyed(&own, key.clone())?,
+                key,
             })
         })
         .collect()
@@ -1740,9 +1779,10 @@ pub(crate) fn marquee_split(
     own: &[&FillShape],
     layer_id: LayerId,
     group_path: &[u64],
+    xform: Affine,
     region: MapInput<'_>,
 ) -> Option<MarqueeSplit> {
-    let base = LayerBase::of(own)?;
+    let base = LayerBase::of(own, xform)?;
     let inside = base.map.overlay(region, MapRule::KeepInside)?;
     let rest = base.map.overlay(region, MapRule::Paint(None))?;
     let (removed_rest, remainder) = base.diff(&rest, own, layer_id, group_path)?;
@@ -1761,10 +1801,14 @@ pub(crate) fn marquee_split(
     })
 }
 
-/// 選び足すときの選ぶ所：前に選んだ図形 `selected` の地図に、矩形 `rect` を足した地図（`marquee_split` は中か外かだけを
-/// 使う）。`None`：格子に置けない座標がある
-pub(crate) fn selection_region(selected: &[&FillShape], rect: &FillShape) -> Option<PlanarMap> {
-    LayerBase::of(selected)?.map.overlay(
+/// 選び足すときの選ぶ所：座標の変換 `xform` で置いた、前に選んだ図形 `selected` の地図に、矩形 `rect` を足した地図
+/// （`marquee_split` は中か外かだけを使う）。`None`：格子に置けない座標がある
+pub(crate) fn selection_region(
+    selected: &[&FillShape],
+    xform: Affine,
+    rect: &FillShape,
+) -> Option<PlanarMap> {
+    LayerBase::of(selected, xform)?.map.overlay(
         MapInput::Shapes(std::slice::from_ref(rect)),
         MapRule::Paint(Some(rect.color)),
     )
@@ -1778,12 +1822,13 @@ pub(crate) fn place_pieces_diff(
     shapes: &[FillShape],
     layer_id: LayerId,
     group_path: &[u64],
+    xform: Affine,
     pieces: &[FillShape],
 ) -> MapEditOutcome {
     // 片の地図（`LayerBase::of`）：片どうしが重なれば（浮いている片の上に別の図形を足したときなど）塗り重ねて作り直した
     // 地図になるので、片はみな書き直す
     let piece_refs: Vec<&FillShape> = pieces.iter().collect();
-    let Some(piece_base) = LayerBase::of(&piece_refs) else {
+    let Some(piece_base) = LayerBase::of(&piece_refs, xform) else {
         return MapEditOutcome::Refused;
     };
     let piece_shapes = if piece_base.repainted {
@@ -1792,7 +1837,7 @@ pub(crate) fn place_pieces_diff(
         pieces
     };
     let own = layer_own(shapes, layer_id, group_path);
-    let Some(base) = LayerBase::of(&own) else {
+    let Some(base) = LayerBase::of(&own, xform) else {
         return MapEditOutcome::Refused;
     };
     let Some(next) = base
@@ -1922,16 +1967,18 @@ pub(crate) fn raw_scope_insert_index(
         .unwrap_or(canvas.len())
 }
 
-/// 図形の並び `shapes` のうち、レイヤー `layer_id`・階層 `group_path` の生の図形を地図にして（`LayerBase::of`）、`edit` で編集した差分。
-/// 地図を塗り重ねて作り直したとき（壊れた地図）は、レイヤーの生の図形を全部書き直す
+/// 図形の並び `shapes`（座標の変換 `xform` で置いた図形）のうち、レイヤー `layer_id`・階層 `group_path` の生の図形を地図に
+/// して（`LayerBase::of`）、`edit` で編集した差分。地図を塗り重ねて作り直したとき（壊れた地図）は、レイヤーの生の図形を
+/// 全部書き直す
 pub(crate) fn map_edit_diff(
     shapes: &[FillShape],
     layer_id: LayerId,
     group_path: &[u64],
+    xform: Affine,
     edit: impl FnOnce(&PlanarMap) -> Option<PlanarMap>,
 ) -> MapEditOutcome {
     let own = layer_own(shapes, layer_id, group_path);
-    let Some(base) = LayerBase::of(&own) else {
+    let Some(base) = LayerBase::of(&own, xform) else {
         return MapEditOutcome::Refused;
     };
     let Some((removed, added)) =
