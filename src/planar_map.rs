@@ -1362,9 +1362,8 @@ pub(crate) fn anchor_hover(
     }
 }
 
-/// 地図 `maps`（`owner` はその持ち主）で、マウスにいちばん近い辺・頂点を探す（`anchor_hover`）。追加は辺の上の位置を
-/// 0.08〜0.92 に収め、足せる所（`with_anchor_added` が形を返す所）だけ。削除は、消せる頂点（`with_anchor_deleted` が形を
-/// 返す頂点）だけ
+/// 地図 `maps`（`owner` はその持ち主）で、マウスにいちばん近い辺・頂点を探す（`anchor_hover`）。追加は、足せる所
+/// （`with_anchor_added` が形を返す所）だけ。削除は、消せる頂点（`with_anchor_deleted` が形を返す頂点）だけ
 fn anchor_hover_in(
     scene: Scene<'_>,
     session: &Session,
@@ -1386,7 +1385,7 @@ fn anchor_hover_in(
                 && !hidden_by_front(scene, session, lm, p)
                 && lm.base.map.with_anchor_added(e, t).is_some()
             {
-                best = Some((d, lm, e, t.clamp(0.08, 0.92)));
+                best = Some((d, lm, e, t));
             }
         }
         return best.map_or(HoverTarget::None, |(_, lm, e, t)| {
@@ -1598,9 +1597,9 @@ impl PlanarMap {
         })
     }
 
-    /// 辺 `e` を `t`（0.08〜0.92 に収める）の所で2本に切った形（形は変わらない）
+    /// 辺 `e` を `t` の所で2本に切った形（形は変わらない）。分けた2本の判定の形が別々の折れ線にならない（端に近すぎて、
+    /// 新しい頂点が端と同じ格子の点に丸まる）か、つながりが変わるときは `None`
     pub(crate) fn with_anchor_added(&self, e: usize, t: f64) -> Option<PlanarMap> {
-        let t = t.clamp(0.08, 0.92);
         let mut m = self.clone();
         let ed = m.edges[e];
         let q = m.quad(e);

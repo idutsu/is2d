@@ -21649,6 +21649,34 @@ fn test_merge_touching_faces_keeps_piece_in_remainder_hole() {
     );
 }
 
+/// アンカーは辺の端の近くでも、クリックした所にそのまま足す。足せないのは、新しい頂点が端と同じ格子の点に丸まる所だけ
+/// （レビュー 6cca852 の N-1002）
+#[test]
+fn test_anchor_added_near_edge_end_at_clicked_position() {
+    use crate::planar_map::PlanarMap;
+    use crate::vector_engine::make_marquee_rect_shape;
+    use kurbo::Rect as KRect;
+    let mut square = make_marquee_rect_shape(KRect::new(0.0, 0.0, 200.0, 200.0));
+    square.color = Color32::RED;
+    let map = PlanarMap::from_faces(std::iter::once(&square));
+    assert!(map.is_valid());
+    let e = 0;
+    let q = map.quad(e);
+    // 200px の辺の端から 6px（辺の長さの 3%）
+    let added = map.with_anchor_added(e, 0.03).expect("端の近くにも足せる");
+    assert!(added.is_valid());
+    assert!(
+        added
+            .nodes
+            .iter()
+            .any(|p| (*p - q.eval(0.03)).hypot() < 1e-12),
+        "クリックした所に角が入る"
+    );
+    // 端そのもの・格子の1目より近い所には足さない
+    assert!(map.with_anchor_added(e, 0.0).is_none());
+    assert!(map.with_anchor_added(e, 1e-7).is_none());
+}
+
 /// 両側に色がある地図の辺の真ん中（アンカーの追加でつかむ点）
 fn shared_edge_midpoint(app: &Is2dApp, color_a: Color32, color_b: Color32) -> Point {
     let maps = crate::planar_map::scope_maps(app.scene(), &app.session);
