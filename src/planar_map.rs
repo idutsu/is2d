@@ -2235,6 +2235,30 @@ pub(crate) fn faces_with_ids(
     (labeled(map.clone(), &faces, &ids), shapes)
 }
 
+/// 地図ごと動かす・変形する階層（選んだグループの中の階層）：図形 `own`（1つの階層の生の図形を全部。座標の変換 `world`
+/// で置いた写し）の地図に、文書の座標の変換 `doc` をかけて、その座標の格子で正しい地図にし（`realized`）、その面を新しい
+/// 図形にする（番号はそのまま。面の番号が1つに決まらない面は新しい番号：`faces_with_ids`）。新しい図形の地図として、
+/// 本当の地図の索引に入れる（セル画に書くとき、図形から作り直さない。書き終えるまで、返す地図を持っておくこと）。
+/// 戻り値は（新しい図形（`world` で置いた写し）, 地図）。`None`：格子に置けない座標がある
+pub(crate) fn transformed_scope(
+    own: &[&FillShape],
+    world: Affine,
+    doc: Affine,
+) -> Option<(Vec<FillShape>, StoredMap)> {
+    let base = LayerBase::of(own, world)?;
+    let (layer_id, group_path) = (own.first()?.layer_id, own[0].group_path.clone());
+    let (map, faces) = faces_with_ids(&realized(&base.map, doc)?, layer_id, &group_path);
+    let refs: Vec<&FillShape> = faces.iter().collect();
+    let stored = register_map(
+        &MapKey::new(&refs, Affine::IDENTITY),
+        StoredMap::from_dense(&map),
+    );
+    Some((
+        faces.into_iter().map(|f| placed(f, world)).collect(),
+        stored,
+    ))
+}
+
 /// 選ぶ所の地図：地図 `parts`（同じ地図から切り出した、重ならない面）を合わせた所に、形 `rect` を足した所（色のある所が
 /// 中）。`None`：格子に置けない座標がある
 pub(crate) fn region_map(parts: &[&PlanarMap], rect: Option<&FillShape>) -> Option<PlanarMap> {

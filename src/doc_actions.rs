@@ -992,14 +992,59 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         }
     }
     if !target_lids.is_empty() {
+        // 選んだグループの中の生の図形は、階層ごとに地図ごと変形する（`transformed_scope`。図形はその地図の面）。
+        // 新しい地図は、セル画に書き終えるまで持っておく
+        let mut new_maps = Vec::new();
         edit_layers(tab, &target_lids, |edit| {
+            let world = edit.world_xform;
+            let doc = world.inverse() * affine * world;
+            let picked =
+                |s: &FillShape| !hidden.contains(&s.shape_id) && selection.contains_shape(s);
+            let mut scopes: Vec<(LayerId, Vec<u64>)> = Vec::new();
+            let mut done: HashSet<crate::canvas_tool::ShapeId> = HashSet::new();
+            for s in edit.shapes.iter().filter(|s| picked(s)) {
+                if s.symbol_instance.is_none()
+                    && !scopes
+                        .iter()
+                        .any(|x| x.0 == s.layer_id && x.1 == s.group_path)
+                {
+                    scopes.push((s.layer_id, s.group_path.clone()));
+                }
+            }
+            for (layer_id, group_path) in scopes {
+                let in_scope = |s: &FillShape| {
+                    s.layer_id == layer_id
+                        && s.group_path == group_path
+                        && s.symbol_instance.is_none()
+                };
+                let own: Vec<&FillShape> = edit.shapes.iter().filter(|s| in_scope(s)).collect();
+                // 階層の一部だけを選んでいるとき（持ち上げられなかった生の図形）は、選んだ図形だけを動かす（下で）
+                if !own.iter().all(|s| picked(s)) {
+                    continue;
+                }
+                let Some((moved, stored)) = crate::planar_map::transformed_scope(&own, world, doc)
+                else {
+                    continue;
+                };
+                new_maps.push(stored);
+                done.extend(moved.iter().map(|s| s.shape_id));
+                let at = edit
+                    .shapes
+                    .iter()
+                    .position(|s| in_scope(s))
+                    .unwrap_or(edit.shapes.len());
+                edit.shapes.retain(|s| !in_scope(s));
+                edit.shapes.splice(at..at, moved);
+                any_transformed = true;
+            }
             for s in &mut edit.shapes {
-                if !hidden.contains(&s.shape_id) && selection.contains_shape(s) {
+                if picked(s) && !done.contains(&s.shape_id) {
                     s.transform(affine);
                     any_transformed = true;
                 }
             }
         });
+        drop(new_maps);
     }
     any_transformed
 }

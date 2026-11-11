@@ -25149,6 +25149,53 @@ mod map_overlay {
         assert!(map_of(&[gid]).same_content(&restricted(&[Color32::RED, Color32::BLUE])));
     }
 
+    /// 選んだグループを動かす・回す・裏返すと、グループの中の地図に変換をかけた地図になる（図形はその面。図形から地図を
+    /// 作り直さない）
+    #[test]
+    fn transforming_a_group_transforms_its_map() {
+        let mut app = Is2dApp::default();
+        for (i, x) in [-60.0, 0.0, 60.0].into_iter().enumerate() {
+            app.tool.brush_color = [Color32::RED, Color32::BLUE, Color32::GREEN][i];
+            let pts: Vec<Point> = (0..=8)
+                .map(|j| Point::new(x + j as f64 * 4.0, j as f64 * 3.0))
+                .collect();
+            doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 9.0));
+        }
+        assert!(doc_actions::apply(&mut app, doc_actions::Action::SelectAll));
+        let gid = doc_actions::group_selected_shapes(&mut app).expect("グループ化");
+        let built = crate::planar_map::from_shape_builds();
+        let group_map = |app: &Is2dApp| {
+            app.doc.root.layers[0].keyframes[0]
+                .cel
+                .maps
+                .iter()
+                .find(|m| m.group_path == [gid])
+                .unwrap()
+                .base()
+        };
+        let edges = group_map(&app).map.edges.len();
+        for action in [
+            doc_actions::Action::MoveSelected {
+                delta: KVec2::new(13.0, -7.0),
+            },
+            doc_actions::Action::RotateSelection { angle_rad: 0.7 },
+            doc_actions::Action::FlipSelection {
+                flip_x: true,
+                flip_y: false,
+            },
+        ] {
+            assert!(doc_actions::apply(&mut app, action));
+            let cel = &app.doc.root.layers[0].keyframes[0].cel;
+            assert!(cel.maps_mismatch().is_none());
+            assert_eq!(group_map(&app).map.edges.len(), edges, "つながりはそのまま");
+        }
+        assert_eq!(
+            crate::planar_map::from_shape_builds(),
+            built,
+            "図形から地図を作り直さない"
+        );
+    }
+
     /// 浮いた片は地図で持つ：矩形で選ぶ・選び足す・動かす・確定する・一部を外す、のどれでも図形から地図を作らない
     /// （片と残りは、セル画の地図を切った地図。確定は、残りの地図に片の地図を重ねる）
     #[test]
