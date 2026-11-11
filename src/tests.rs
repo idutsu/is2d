@@ -25034,12 +25034,19 @@ mod map_overlay {
         assert!(base.stored.same(before.stored()), "図形から作り直さない");
         assert_eq!(bits(&base.map), before_bits);
 
-        // ブラシ1本（小さな線）で新しくなるのは、線の近くの塊だけ
+        // ブラシ1本（小さな線）で新しくなるのは、線の近くの塊だけ。しまい場所が空でも、図形から作り直さない
+        crate::planar_map::clear_layer_bases();
+        let built = crate::planar_map::from_shape_builds();
         app.tool.brush_color = Color32::BLACK;
         let pts: Vec<Point> = (0..=8)
             .map(|j| Point::new(10.0 + j as f64 * 3.0, 5.0))
             .collect();
         doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 4.0));
+        assert_eq!(
+            crate::planar_map::from_shape_builds(),
+            built,
+            "図形から作り直さない"
+        );
         let after = scope(&app);
         let (n, shared) = (
             after.stored().tiles(),
@@ -25058,6 +25065,81 @@ mod map_overlay {
         assert!(undone.stored().same(before.stored()));
         crate::planar_map::clear_layer_bases();
         assert_eq!(bits(&undone.base().map), before_bits);
+    }
+
+    /// 面を外す操作（削除・グループ化）のあとの地図は、前の地図からその面を外した地図（図形から作り直さない）。外した面の
+    /// まわりのほかの塊は、前の地図と共有したまま
+    #[test]
+    fn delete_and_group_restrict_the_stored_map() {
+        let mut app = Is2dApp::default();
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN];
+        for (i, x) in [-200.0, 0.0, 200.0].into_iter().enumerate() {
+            app.tool.brush_color = colors[i];
+            let pts: Vec<Point> = (0..=8)
+                .map(|j| Point::new(x + j as f64 * 6.0, 0.0))
+                .collect();
+            doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 12.0));
+        }
+        let cel = |app: &Is2dApp| app.doc.root.layers[0].keyframes[0].cel.clone();
+        let index_of = |app: &Is2dApp, c: Color32| {
+            scene_summary(app)
+                .shapes
+                .iter()
+                .position(|s| s.color == c)
+                .unwrap()
+        };
+        let before = cel(&app);
+        assert_eq!(before.maps.len(), 1);
+        let restricted = |keep: &[Color32]| {
+            let ids: std::collections::HashSet<u64> = before
+                .shapes
+                .iter()
+                .filter(|s| keep.contains(&s.color))
+                .map(|s| s.shape_id)
+                .collect();
+            crate::stored_map::StoredMap::from_dense(&before.maps[0].base().map.restricted(&ids))
+        };
+
+        // 削除：残った面だけの地図
+        let built = crate::planar_map::from_shape_builds();
+        let green = index_of(&app, Color32::GREEN);
+        app.session.set_selected_indices(vec![green]);
+        assert!(doc_actions::delete_selected_shapes(&mut app));
+        assert_eq!(
+            crate::planar_map::from_shape_builds(),
+            built,
+            "図形から作り直さない"
+        );
+        let after = cel(&app);
+        assert!(after.maps[0]
+            .stored()
+            .same_content(&restricted(&[Color32::RED, Color32::BLUE])));
+        assert!(after.maps[0].stored().shared_tiles(before.maps[0].stored()) > 0);
+
+        // グループ化：ルートは残りの面、グループは選んだ面だけの地図
+        app.undo();
+        let red = index_of(&app, Color32::RED);
+        let blue = index_of(&app, Color32::BLUE);
+        app.session.set_selected_indices(vec![red, blue]);
+        let built = crate::planar_map::from_shape_builds();
+        let gid = doc_actions::group_selected_shapes(&mut app).expect("グループ化");
+        assert_eq!(
+            crate::planar_map::from_shape_builds(),
+            built,
+            "図形から作り直さない"
+        );
+        let after = cel(&app);
+        let map_of = |path: &[u64]| {
+            after
+                .maps
+                .iter()
+                .find(|m| m.group_path == path)
+                .unwrap()
+                .stored()
+                .clone()
+        };
+        assert!(map_of(&[]).same_content(&restricted(&[Color32::GREEN])));
+        assert!(map_of(&[gid]).same_content(&restricted(&[Color32::RED, Color32::BLUE])));
     }
 
     /// 図形の多い場面（`dense_scene_app`）での、ブラシ・消しゴム1本の時間（30 本ずつ、平均と最大）

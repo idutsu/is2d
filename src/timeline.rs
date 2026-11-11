@@ -325,8 +325,9 @@ impl Cel {
 
     /// `set_parts` と同じ。図形は共有したまま入れる（変わらない図形は、前の列と同じ `Arc` を渡す）。
     /// 階層ごとの地図を、図形に合わせる：図形（番号, `mesh_revision` の並び）が前と同じ階層は前の地図を使い、ほかは
-    /// 本当の地図の索引から引く（地図で編集した結果は `apply_map_change` が入れてある）か、図形から作る（`cel_scope_map`。
-    /// 地図で形を変えない操作のとき。正しい地図にならない図形は、塗り重ねて作り直した地図の面に置き換える）
+    /// 本当の地図の索引から引く（地図で編集した結果は `apply_map_change` が入れてある）。図形がみな前の地図の面なら
+    /// （面を外す操作）、その面だけを残した地図にする。どれでもないとき（変形したグループ・貼り付けた図形など）だけ、
+    /// 図形から作る（`cel_scope_map`。正しい地図にならない図形は、塗り重ねて作り直した地図の面に置き換える）
     pub(crate) fn set_shared_parts(
         &mut self,
         mut shapes: Vec<Arc<FillShape>>,
@@ -482,7 +483,7 @@ impl Cel {
 }
 
 /// 図形の並び `shapes`（セル画の図形）の階層ごとの地図（`Cel::set_shared_parts`）。前の地図 `old` のうち、図形が同じ階層の
-/// ものは使い回す。正しい地図にならない階層は、図形を作り直した地図の面に置き換える（置き換えた図形は、その階層の最初の
+/// ものは使い回し、図形が前の地図の面の一部なら、その面だけを残した地図にする。正しい地図にならない階層は、図形を作り直した地図の面に置き換える（置き換えた図形は、その階層の最初の
 /// 図形の位置に入れ、後ろのインスタンスの位置 `shape_order_index` をずらす）。格子に置けない座標がある階層は地図を持たない
 fn scope_maps_of(
     old: &[ScopeMap],
@@ -536,6 +537,13 @@ fn scope_maps_of(
             continue;
         }
         if let Some(stored) = stored_map(&key) {
+            maps.push(ScopeMap::new(group_path, key, stored));
+            continue;
+        }
+        // 図形がみな前の地図の面なら（面を外す操作：グループ化・削除・シンボル化など）、地図はその面だけを残した地図
+        if let Some(m) = old.iter().find(|m| m.key.contains_all(&key)) {
+            let map = m.base().map.restricted(&key.ids());
+            let stored = StoredMap::from_dense(&map);
             maps.push(ScopeMap::new(group_path, key, stored));
             continue;
         }

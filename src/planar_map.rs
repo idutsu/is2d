@@ -161,6 +161,39 @@ struct Seg {
 }
 
 impl PlanarMap {
+    /// 面の番号が `keep` にある面だけを残した地図（ほかの面の側は何も無いにし、両側とも何も無い辺と、辺の無い頂点を外す）。
+    /// 正しい地図の面の一部はそのまま正しい地図で、残した面の輪郭も変わらない（頂点で次の辺を選ぶとき、残した面の
+    /// 角の中に辺が増えることは無い）
+    pub(crate) fn restricted(&self, keep: &HashSet<ShapeId>) -> PlanarMap {
+        let mut index: Vec<usize> = vec![usize::MAX; self.nodes.len()];
+        let mut nodes: Vec<Point> = Vec::new();
+        let mut node = |v: usize| {
+            if index[v] == usize::MAX {
+                index[v] = nodes.len();
+                nodes.push(self.nodes[v]);
+            }
+            index[v]
+        };
+        let mut edges = Vec::new();
+        for e in &self.edges {
+            let left_src = e.left_src.filter(|id| keep.contains(id));
+            let right_src = e.right_src.filter(|id| keep.contains(id));
+            if left_src.is_none() && right_src.is_none() {
+                continue;
+            }
+            edges.push(MapEdge {
+                a: node(e.a),
+                b: node(e.b),
+                ctrl: e.ctrl,
+                left: e.left.filter(|_| left_src.is_some()),
+                right: e.right.filter(|_| right_src.is_some()),
+                left_src,
+                right_src,
+            });
+        }
+        PlanarMap { nodes, edges }
+    }
+
     pub(crate) fn quad(&self, e: usize) -> QuadBez {
         let ed = &self.edges[e];
         QuadBez::new(self.nodes[ed.a], ed.ctrl, self.nodes[ed.b])
@@ -1223,6 +1256,8 @@ impl LayerBase {
         if let Some(stored) = stored_map(&key) {
             return Some(Self::of_stored(&key, &stored));
         }
+        #[cfg(test)]
+        FROM_SHAPES.with(|n| n.set(n.get() + 1));
         let base = Arc::new(with_doc_shapes(own, xform, |own| {
             let map = PlanarMap::from_faces(own.iter().copied());
             Some(if map.is_valid() {
@@ -1293,6 +1328,17 @@ impl MapKey {
             shapes: own.iter().map(|s| (s.shape_id, s.mesh_revision)).collect(),
         }
     }
+
+    /// 鍵 `sub` の図形がみな、この鍵の図形か（同じ番号・同じ版。変換も同じ）
+    pub(crate) fn contains_all(&self, sub: &MapKey) -> bool {
+        let mine: HashSet<(ShapeId, u64)> = self.shapes.iter().copied().collect();
+        self.xform == sub.xform && sub.shapes.iter().all(|s| mine.contains(s))
+    }
+
+    /// 図形の番号
+    pub(crate) fn ids(&self) -> HashSet<ShapeId> {
+        self.shapes.iter().map(|s| s.0).collect()
+    }
 }
 
 /// 地図のしまい場所（計算に使う形の置き場。`LayerBase::of` が引く）：（鍵, 地図）。鍵が同じなら地図も同じなので、どの
@@ -1304,6 +1350,18 @@ const LAYER_BASES_LEN: usize = 64;
 /// 本当の地図の索引：セル画にしまってある地図と、地図で編集した結果（セル画に書く前）を、鍵（面の図形の並び）で引く。
 /// 地図の持ち主（セル画・Undo の控え）が生きているあいだは、いつも引ける
 static STORED_MAPS: SyncCache<StoredMaps> = SyncCache::new(StoredMaps::new());
+
+#[cfg(test)]
+thread_local! {
+    /// テスト用：このスレッドで、図形から地図を作った回数（`LayerBase::keyed`）
+    static FROM_SHAPES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、図形から地図を作った回数
+#[cfg(test)]
+pub(crate) fn from_shape_builds() -> usize {
+    FROM_SHAPES.with(|n| n.get())
+}
 
 /// テスト用：地図のしまい場所を空にする（外れた地図が、本当の地図の索引から作り直されることを確かめる）
 #[cfg(test)]
