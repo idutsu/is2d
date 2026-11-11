@@ -335,9 +335,6 @@ pub(crate) struct FillShape {
     pub(crate) symbol_instance: Option<SymbolInstanceBinding>,
     /// メッシュ内容が更新されるたびにインクリメントされるリビジョン番号（土台キャッシュや書き戻しでの差分検知用）
     pub(crate) mesh_revision: u64,
-    /// ステージに置いた写し（`place`）のとき、もとの文書の図形（`in_doc`）。文書・クリップボードの図形は持たない
-    /// （`strip_for_storage`）
-    doc_original: Option<Arc<FillShape>>,
     bbox: KRect,
     fill_mesh: OnceLock<Arc<Mesh>>,
     hit_bez_path: OnceLock<Arc<BezPath>>,
@@ -355,7 +352,6 @@ impl FillShape {
             group_path: Vec::new(),
             symbol_instance: None,
             mesh_revision: 0,
-            doc_original: None,
             bbox: KRect::ZERO,
             fill_mesh: OnceLock::new(),
             hit_bez_path: OnceLock::new(),
@@ -413,14 +409,8 @@ impl FillShape {
         *self.selection_mesh.lock() = None;
     }
 
-    /// 文書・クリップボードにしまう前に：描画キャッシュと、置いた写しのもとの図形（`doc_original`）を外す
-    pub(crate) fn strip_for_storage(&mut self) {
-        self.strip_transient_caches();
-        self.doc_original = None;
-    }
-
     /// 座標の変換 `xform` で置いた写しにする（シンボルの中の表示の図形）。番号と `mesh_revision` は文書の図形のまま
-    /// （書き戻しで、変わっていない図形を見分けるため）。生の図形は、もとの文書の図形を持つ（`in_doc`）
+    /// （書き戻しで、変わっていない図形を見分けるため。変えた図形は版が変わる）
     pub(crate) fn place(&mut self, xform: Affine) {
         if xform == Affine::IDENTITY {
             return;
@@ -435,38 +425,18 @@ impl FillShape {
                 }
             }
         } else {
-            let mut original = self.clone();
-            original.strip_for_storage();
             self.transform(xform);
-            self.doc_original = Some(Arc::new(original));
         }
         self.mesh_revision = orig_rev;
     }
 
-    /// 置いた写し（`place`）の、もとの文書の図形。形か色を変えたあと（`mesh_revision` が違う）は `None`。番号は、写しの
-    /// 方で付け替えることがある（浮いた残りの塊の印など）ので、もとの図形の番号とは限らない
-    pub(crate) fn doc_original(&self) -> Option<&Arc<FillShape>> {
-        self.doc_original
-            .as_ref()
-            .filter(|d| d.mesh_revision == self.mesh_revision)
-    }
-
-    /// この図形（座標の変換 `xform` で置いた図形）の、文書の座標の形。置いた写しは、もとの文書の図形そのもの。ほかの
-    /// 図形（ブラシの形・矩形・動かした片など）は `xform` の逆で写す（2次ベジェはアフィン変換で正確に写る）
-    pub(crate) fn in_doc(&self, xform: Affine) -> Cow<'_, FillShape> {
+    /// この図形（座標の変換 `xform` で置いた図形：ブラシの形・矩形・貼り付けた図形など）の、文書の座標の形（`xform` の
+    /// 逆で写す。2次ベジェはアフィン変換で正確に写る）
+    pub(crate) fn to_doc(&self, xform: Affine) -> Cow<'_, FillShape> {
         if xform == Affine::IDENTITY {
             return Cow::Borrowed(self);
         }
-        if let Some(d) = self.doc_original() {
-            if d.shape_id == self.shape_id {
-                return Cow::Borrowed(d);
-            }
-            let mut d = (**d).clone();
-            d.shape_id = self.shape_id;
-            return Cow::Owned(d);
-        }
         let mut d = self.clone();
-        d.doc_original = None;
         d.transform(xform.inverse());
         Cow::Owned(d)
     }

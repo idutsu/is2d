@@ -12,7 +12,7 @@ use kurbo::{
 };
 
 use crate::canvas_tool::{HoverTarget, LayerId, MapOwner, Scene, Session, ShapeId};
-use crate::stored_map::{StoredMap, StoredMaps};
+use crate::stored_map::StoredMap;
 use crate::vector_engine::{rects_overlap, Contour, FillShape, SyncCache};
 
 /// 図形から地図を作るとき（`from_faces`）に、同じ点・同じ線とみなす距離。生の図形はどれも地図から書き出したもので、
@@ -1249,11 +1249,11 @@ impl LayerBase {
         base
     }
 
-    /// 座標の変換 `xform` で置いた図形 `own`（下から上への並び。変換したあとの座標）の地図。地図は文書の座標で作る
-    /// （`with_doc_shapes`）。しまい場所（`LAYER_BASES`）にあればそれを、無ければ同じ図形の本当の地図（セル画にしまって
-    /// ある地図・地図で編集した結果：`STORED_MAPS`）から作る。どちらにも無いとき（浮いている片など、セル画に無い組み
-    /// 合わせ）だけ、図形から作る。正しい地図でない図形（重なった片など）は、並びの順に塗り重ねて作り直す（`painted_map`。
-    /// 絵は同じ）。`None`：格子に置けない座標がある
+    /// 図形から作る地図：座標の変換 `xform` で置いた図形 `own`（下から上への並び。変換したあとの座標）の地図。地図は
+    /// 文書の座標で作る（`with_doc_shapes`）。セル画にある地図はセル画から読むので（`Cel::scope_base`）、これを使うのは
+    /// 新しい中身を作るとき（貼り付け・シンボル化・地図で形を変えない操作のあとの階層）だけ。正しい地図でない図形（重なった
+    /// 図形など）は、並びの順に塗り重ねて作り直す（`painted_map`。絵は同じ）。同じ図形・同じ変換なら、しまい場所
+    /// （`LAYER_BASES`）の地図を使う。`None`：格子に置けない座標がある
     pub(crate) fn of(own: &[&FillShape], xform: Affine) -> Option<Arc<Self>> {
         Self::keyed(own, xform, MapKey::new(own, xform))
     }
@@ -1262,9 +1262,6 @@ impl LayerBase {
     fn keyed(own: &[&FillShape], xform: Affine, key: MapKey) -> Option<Arc<Self>> {
         if let Some(base) = cached_base(&key) {
             return Some(base);
-        }
-        if let Some(stored) = stored_map(&key) {
-            return Some(Self::of_stored(&key, &stored));
         }
         #[cfg(test)]
         FROM_SHAPES.with(|n| n.set(n.get() + 1));
@@ -1331,9 +1328,9 @@ impl LayerBase {
 }
 
 /// 地図を決めるもの：図形を置いた座標の変換（係数6つのビット）と、図形の（番号, `mesh_revision`）の並び。
-/// `mesh_revision` は図形の形か色を変えるたびにアプリ全体で新しい値になるので、並びが同じなら図形も同じ。置いた写しで
-/// ない図形（動かした片など）は変換の逆で文書の座標へ写すので（`FillShape::in_doc`）、変換も入れて、はじめて地図が1つに
-/// 決まる。図形がみな文書の図形か、その置いた写しなら、変換は恒等として入れる（セル画にしまう地図と同じ鍵になる）
+/// `mesh_revision` は図形の形か色を変えるたびにアプリ全体で新しい値になるので、並びが同じなら図形も同じ。図形は変換の逆で
+/// 文書の座標へ写すので（`FillShape::to_doc`）、変換も入れて、はじめて地図が1つに決まる。セル画の階層の鍵は、文書の図形
+/// （変換は恒等）
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct MapKey {
     xform: [u64; 6],
@@ -1342,9 +1339,6 @@ pub(crate) struct MapKey {
 
 impl MapKey {
     pub(crate) fn new(own: &[&FillShape], xform: Affine) -> Self {
-        // 図形がみな文書の図形か、その置いた写しなら、地図は変換によらない（文書の図形の地図と同じ鍵にする）
-        let doc = xform == Affine::IDENTITY || own.iter().all(|s| s.doc_original().is_some());
-        let xform = if doc { Affine::IDENTITY } else { xform };
         Self {
             xform: xform.as_coeffs().map(f64::to_bits),
             shapes: own.iter().map(|s| (s.shape_id, s.mesh_revision)).collect(),
@@ -1363,15 +1357,10 @@ impl MapKey {
     }
 }
 
-/// 地図のしまい場所（計算に使う形の置き場。`LayerBase::of` が引く）：（鍵, 地図）。鍵が同じなら地図も同じなので、どの
-/// 文書・どの操作から引いても正しい。新しく使ったものを前に、`LAYER_BASES_LEN` 個まで（外れた地図は、本当の地図の
-/// 索引 `STORED_MAPS` から作り直す）
+/// 地図のしまい場所（計算に使う形の置き場）：（鍵, 地図）。セル画の地図の計算に使う形（`ScopeMap::base`。外れたら、
+/// しまった塊から作り直す）と、図形から作った地図（`LayerBase::of`）。新しく使ったものを前に、`LAYER_BASES_LEN` 個まで
 static LAYER_BASES: SyncCache<Vec<(MapKey, Arc<LayerBase>)>> = SyncCache::new(Vec::new());
 const LAYER_BASES_LEN: usize = 64;
-
-/// 本当の地図の索引：セル画にしまってある地図と、地図で編集した結果（セル画に書く前）を、鍵（面の図形の並び）で引く。
-/// 地図の持ち主（セル画・Undo の控え）が生きているあいだは、いつも引ける
-static STORED_MAPS: SyncCache<StoredMaps> = SyncCache::new(StoredMaps::new());
 
 #[cfg(test)]
 thread_local! {
@@ -1385,7 +1374,7 @@ pub(crate) fn from_shape_builds() -> usize {
     FROM_SHAPES.with(|n| n.get())
 }
 
-/// テスト用：地図のしまい場所を空にする（外れた地図が、本当の地図の索引から作り直されることを確かめる）
+/// テスト用：地図のしまい場所を空にする（外れた地図が、しまった塊から作り直されることを確かめる）
 #[cfg(test)]
 pub(crate) fn clear_layer_bases() {
     LAYER_BASES.lock().clear();
@@ -1401,23 +1390,7 @@ fn cached_base(key: &MapKey) -> Option<Arc<LayerBase>> {
     Some(base)
 }
 
-/// 鍵 `key` の図形（面の図形そのもの）の本当の地図として、しまった地図 `stored` を索引に入れる。同じ鍵の生きている地図が
-/// あれば、それを返す（鍵が同じなら中身も同じ。テストでは確かめる）
-pub(crate) fn register_map(key: &MapKey, stored: StoredMap) -> StoredMap {
-    let live = STORED_MAPS.lock().intern(key, stored.clone());
-    #[cfg(test)]
-    if test_checks() && !live.same_content(&stored) {
-        panic!("同じ鍵に、中身の違う地図がある");
-    }
-    live
-}
-
-/// 鍵 `key` の図形の、本当の地図
-pub(crate) fn stored_map(key: &MapKey) -> Option<StoredMap> {
-    STORED_MAPS.lock().find(key)
-}
-
-/// 図形 `shapes`（座標の変換 `xform` で置いた図形）を文書の座標の形（`FillShape::in_doc`）にして `f` に渡す。地図は
+/// 図形 `shapes`（座標の変換 `xform` で置いた図形）を文書の座標の形（`FillShape::to_doc`）にして `f` に渡す。地図は
 /// いつも文書の座標で作る：文書の図形はその座標で正しい地図の面で、格子の上の判定はアフィン変換で保たれないので、置いた
 /// 座標の地図は正しい地図とは限らない。どのインスタンスから入っても同じ地図になる
 fn with_doc_shapes<R>(
@@ -1425,7 +1398,7 @@ fn with_doc_shapes<R>(
     xform: Affine,
     f: impl FnOnce(&[&FillShape]) -> R,
 ) -> R {
-    let docs: Vec<Cow<'_, FillShape>> = shapes.iter().map(|s| s.in_doc(xform)).collect();
+    let docs: Vec<Cow<'_, FillShape>> = shapes.iter().map(|s| s.to_doc(xform)).collect();
     let refs: Vec<&FillShape> = docs.iter().map(|d| d.as_ref()).collect();
     f(&refs)
 }
@@ -2012,9 +1985,10 @@ pub(crate) fn apply_map_change(
 ) {
     apply_shape_diff(shapes, &change.removed, change.added, layer_id, group_path);
     let own = layer_own(shapes, layer_id, group_path);
-    let key = MapKey::new(&own, xform);
-    let stored = register_map(&key, StoredMap::from_dense(&change.map));
-    LayerBase::of_stored(&key, &stored);
+    remember_map(
+        MapKey::new(&own, xform),
+        Arc::new(LayerBase::new(&change.map, false)),
+    );
 }
 
 /// セル画の1つの階層の地図と、図形を地図の面に置き換えたときの、その階層の新しい図形の並び（`cel_scope_map`）
@@ -5231,7 +5205,7 @@ fn half_mid2(polys: &[Vec<IPt>], h: (usize, bool)) -> IPt {
 /// 図形 `s`（座標の変換 `xform` で置いた図形）が、文書の座標で地図の格子に置けるか（±65,536px の内）。地図は格子の
 /// 内の形しか持てないので、動かす・変形する操作は、置けない所へは動かさない
 pub(crate) fn fits_grid(s: &FillShape, xform: Affine) -> bool {
-    let doc = s.in_doc(xform);
+    let doc = s.to_doc(xform);
     let fits = doc.contours().all(|c| {
         c.segments
             .iter()

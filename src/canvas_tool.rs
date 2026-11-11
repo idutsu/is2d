@@ -3153,13 +3153,12 @@ fn writeback_edited_layer_shapes(
                     });
                 }
             } else if !s.exterior.segments.is_empty() {
-                // 文書の図形がある図形：変わらない図形（前の列と同じ `Arc` を使い、Undo の控えと共有する）と、シンボルの
-                // 中で地図が文書の座標で作った図形（`FillShape::in_doc`）。番号・色・レイヤー・階層は今の図形に合わせる
+                // 変わらない図形（前の列と同じ `Arc` を使い、Undo の控えと共有する）。番号・色・レイヤー・階層は今の図形に
+                // 合わせる
                 let doc = orig_shape_idx_map
                     .get(&s.shape_id)
                     .map(|&i| &orig_shapes[i])
-                    .filter(|orig| orig.mesh_revision == s.mesh_revision)
-                    .or_else(|| s.doc_original());
+                    .filter(|orig| orig.mesh_revision == s.mesh_revision);
                 if let Some(doc) = doc {
                     if doc.shape_id == s.shape_id
                         && doc.color == s.color
@@ -3182,7 +3181,7 @@ fn writeback_edited_layer_shapes(
                     local_s.transform(inv_xform);
                     s.mesh_revision = local_s.mesh_revision;
                 }
-                local_s.strip_for_storage();
+                local_s.strip_transient_caches();
                 non_symbol_shapes.push(Arc::new(local_s));
             }
         }

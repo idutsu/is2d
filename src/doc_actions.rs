@@ -775,7 +775,7 @@ fn apply_raw_outline(
     let world = tab.session.edit_path.world_xform();
     let strokes: Vec<FillShape> = stroke_shapes
         .iter()
-        .map(|s| s.in_doc(world).into_owned())
+        .map(|s| s.to_doc(world).into_owned())
         .collect();
     edit_layer_map(tab, target_lid, |base| {
         base.map.overlay(MapInput::Shapes(&strokes), rule)

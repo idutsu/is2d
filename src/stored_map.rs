@@ -17,7 +17,7 @@ use eframe::egui::Color32;
 use kurbo::Point;
 
 use crate::canvas_tool::ShapeId;
-use crate::planar_map::{MapEdge, MapKey, PlanarMap};
+use crate::planar_map::{MapEdge, PlanarMap};
 use crate::vector_engine::SyncCache;
 
 /// 塊の升目の大きさ（文書の座標の px）。ブラシ1本・消しゴム1本で変わるのは、ふつう升目の数個分
@@ -235,10 +235,6 @@ impl StoredMap {
             .filter(|t| theirs.contains(&(Arc::as_ptr(t) as *const u8 as usize)))
             .count()
     }
-
-    fn downgrade(&self) -> Weak<[Tile]> {
-        Arc::downgrade(&self.0)
-    }
 }
 
 /// 塊の置き場：中身のハッシュごとの、生きている塊（弱い参照）。持ち主（セル画・Undo の控え・地図のしまい場所）がみな
@@ -279,40 +275,5 @@ impl TileTable {
             self.inserted = 0;
         }
         t
-    }
-}
-
-/// 本当の地図の索引：鍵（図形の並び。`MapKey`）ごとの、生きているしまった地図（弱い参照）。鍵が同じなら地図も同じ
-/// （鍵の図形は、その地図の面そのもの）なので、生きている地図は鍵ごとに1つにする（`StoredMaps::intern`）
-pub(crate) struct StoredMaps {
-    by_key: BTreeMap<MapKey, Weak<[Tile]>>,
-    inserted: usize,
-}
-
-impl StoredMaps {
-    pub(crate) const fn new() -> Self {
-        Self {
-            by_key: BTreeMap::new(),
-            inserted: 0,
-        }
-    }
-
-    /// 鍵 `key` の地図として `stored` を引けるようにする。同じ鍵の生きている地図があれば、それを返す
-    pub(crate) fn intern(&mut self, key: &MapKey, stored: StoredMap) -> StoredMap {
-        if let Some(live) = self.find(key) {
-            return live;
-        }
-        self.by_key.insert(key.clone(), stored.downgrade());
-        self.inserted += 1;
-        if self.inserted > self.by_key.len().max(256) {
-            self.by_key.retain(|_, w| w.strong_count() > 0);
-            self.inserted = 0;
-        }
-        stored
-    }
-
-    /// 鍵 `key` の、生きている地図
-    pub(crate) fn find(&self, key: &MapKey) -> Option<StoredMap> {
-        self.by_key.get(key)?.upgrade().map(StoredMap)
     }
 }

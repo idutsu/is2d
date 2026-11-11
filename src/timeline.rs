@@ -1,6 +1,5 @@
 use crate::planar_map::{
-    cel_scope_map, raw_scope_insert_index, register_map, stored_map, LayerBase, MapChange, MapKey,
-    PlanarMap,
+    cel_scope_map, raw_scope_insert_index, LayerBase, MapChange, MapKey, PlanarMap,
 };
 use crate::stored_map::StoredMap;
 use crate::vector_engine::{next_shape_id, FillShape, SymbolInstanceBinding, SymbolLoopMode};
@@ -225,9 +224,8 @@ pub(crate) struct ScopeMap {
 }
 
 impl ScopeMap {
-    /// 鍵 `key` の図形の地図 `stored`。本当の地図の索引に入れる（鍵で、いつも引けるように：`LayerBase::of`）
+    /// 鍵 `key` の図形の地図 `stored`
     fn new(group_path: Vec<u64>, key: MapKey, stored: StoredMap) -> Self {
-        let stored = register_map(&key, stored);
         Self {
             group_path,
             key,
@@ -385,7 +383,7 @@ impl Cel {
                 .added
                 .into_iter()
                 .map(|mut s| {
-                    s.strip_for_storage();
+                    s.strip_transient_caches();
                     Arc::new(s)
                 })
                 .collect(),
@@ -420,8 +418,8 @@ impl Cel {
     }
 
     /// `set_parts` と同じ。図形は共有したまま入れる（変わらない図形は、前の列と同じ `Arc` を渡す）。
-    /// 階層ごとの地図を、図形に合わせる：図形（番号, `mesh_revision` の並び）が前と同じ階層は前の地図を使い、ほかは
-    /// 本当の地図の索引から引く（地図で編集した結果は `apply_map_change` が入れてある）。図形がみな前の地図の面なら
+    /// 階層ごとの地図を、図形に合わせる：図形（番号, `mesh_revision` の並び）が前と同じ階層は前の地図を使う（地図の編集の
+    /// 結果は `Cel::put_map_change` が渡す）。図形がみな前の地図の面なら
     /// （面を外す操作）、その面だけを残した地図にする。どれでもないとき（変形したグループ・貼り付けた図形など）だけ、
     /// 図形から作る（`cel_scope_map`。正しい地図にならない図形は、塗り重ねて作り直した地図の面に置き換える）
     pub(crate) fn set_shared_parts(
@@ -645,10 +643,6 @@ fn scope_maps_of(
         }
         if let Some((_, stored)) = known.iter().find(|(k, _)| *k == key) {
             maps.push(ScopeMap::new(group_path, key, stored.clone()));
-            continue;
-        }
-        if let Some(stored) = stored_map(&key) {
-            maps.push(ScopeMap::new(group_path, key, stored));
             continue;
         }
         // 図形がみな前の地図の面なら（面を外す操作：グループ化・削除・シンボル化など）、地図はその面だけを残した地図

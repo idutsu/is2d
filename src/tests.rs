@@ -24987,17 +24987,20 @@ mod map_overlay {
         let before_bits = bits(&before.base().map);
         assert!(before.stored().tiles() > 50, "塊が十分ある場面");
 
-        // しまい場所が空でも、塊から作った地図はビットまで同じで、操作が引く地図はセル画の地図から作ったもの
+        // しまい場所が空でも、塊から作った地図はビットまで同じで、操作が読む地図（画面の土台のセル画）も同じ
         crate::planar_map::clear_layer_bases();
         assert_eq!(bits(&before.base().map), before_bits);
         crate::planar_map::clear_layer_bases();
-        let stage: Vec<&FillShape> = app
-            .scene()
-            .iter()
-            .filter(|s| s.layer_id == app.doc.root.layers[0].id && s.is_raw_at_scope(&[]))
-            .collect();
-        let base = crate::planar_map::LayerBase::of(&stage, Affine::IDENTITY).unwrap();
-        assert!(base.stored.same(before.stored()), "図形から作り直さない");
+        let base = app
+            .session
+            .base_cache
+            .cel(app.doc.root.layers[0].id)
+            .and_then(|c| c.scope_base(&[]))
+            .unwrap();
+        assert!(
+            base.stored.same(before.stored()),
+            "画面の土台のセル画の地図"
+        );
         assert_eq!(bits(&base.map), before_bits);
 
         // ブラシ1本（小さな線）で新しくなるのは、線の近くの塊だけ。しまい場所が空でも、図形から作り直さない
