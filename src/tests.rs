@@ -27360,3 +27360,64 @@ fn renewing_labels_keeps_equal_labels_equal_and_distinct_labels_distinct() {
     assert_eq!(distinct_old.len(), distinct_new.len());
     assert_eq!(distinct_old.len(), 2);
 }
+
+/// 直線の辺の両端を端に持つ曲線（D 字の形）を塗ると、その中が塗られる：曲線の両端が直線の辺の両端と同じでも、制御点が
+/// 離れていれば同じ線にしない（同じ曲線かは両側の制御点で決める：`same_curve`。レビュー 4f4e953 の N-1001 ②）
+#[test]
+fn a_curve_sharing_both_ends_with_a_straight_edge_is_not_the_same_line() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    use crate::vector_engine::Contour;
+    let mut red = vector_engine::make_marquee_rect_shape(kurbo::Rect::new(0.0, 0.0, 100.0, 100.0));
+    red.color = Color32::RED;
+    let map = PlanarMap::from_faces(std::iter::once(&red));
+    assert!(map.is_valid());
+    let (a, b) = (Point::new(0.0, 0.0), Point::new(100.0, 0.0));
+    let d = FillShape::new(
+        Color32::BLUE,
+        Contour::new(vec![
+            QuadBez::new(a, a.midpoint(b), b),
+            QuadBez::new(b, Point::new(50.0, 60.0), a),
+        ]),
+        Vec::new(),
+    );
+    let next = map
+        .overlay(
+            MapInput::Shapes(std::slice::from_ref(&d)),
+            MapRule::Paint(Some(Color32::BLUE)),
+        )
+        .expect("重ねられる");
+    assert!(next.is_valid());
+    assert_eq!(
+        next.color_at(Point::new(50.0, 15.0)),
+        Some(Color32::BLUE),
+        "D 字の中"
+    );
+    assert_eq!(
+        next.color_at(Point::new(50.0, 80.0)),
+        Some(Color32::RED),
+        "D 字の外"
+    );
+    // レンズ：直線の辺の両側へふくらむ2本の曲線だけで囲まれた形
+    let lens = FillShape::new(
+        Color32::BLUE,
+        Contour::new(vec![
+            QuadBez::new(a, Point::new(50.0, -40.0), b),
+            QuadBez::new(b, Point::new(50.0, 40.0), a),
+        ]),
+        Vec::new(),
+    );
+    let next = map
+        .overlay(
+            MapInput::Shapes(std::slice::from_ref(&lens)),
+            MapRule::Paint(Some(Color32::BLUE)),
+        )
+        .expect("重ねられる");
+    assert!(next.is_valid());
+    for (p, place) in [((50.0, 10.0), "四角の中"), ((50.0, -10.0), "四角の外")] {
+        assert_eq!(
+            next.color_at(Point::new(p.0, p.1)),
+            Some(Color32::BLUE),
+            "{place}のレンズ"
+        );
+    }
+}

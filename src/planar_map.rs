@@ -864,9 +864,8 @@ impl PlanarMap {
             );
             // 2本が、1本の2次ベジェ q を t で切ったものか（de Casteljau：q1.p1・v・q2.p1 が一直線に並び、v がその間を
             // t:(1−t) に分け、q の制御点 c は q1.p1 = (1−t)q1.p0 + t·c、q2.p1 = (1−t)c + t·q2.p2 を満たす）。頂点は
-            // 地図の精度（`FLAT_TOL`）でしか曲線に乗っていないので、q を t で切った2本の制御点と頂点が、q1・q2 のものから
-            // `FLAT_TOL` 以内のときだけまとめる。2次ベジェの点は制御点の重みつきの平均（重みの和は1）なので、まとめた曲線は
-            // どこでも2本から `FLAT_TOL` 以内にある（絵の形は地図の精度の中でしか変わらない）。直線も同じ決まりでまとまる
+            // 地図の精度（`FLAT_TOL`）でしか曲線に乗っていないので、q を t で切った2本が q1・q2 と同じ曲線（`same_curve`）の
+            // ときだけまとめる（絵の形は地図の精度の中でしか変わらない）。直線も同じ決まりでまとまる
             let (p0, a, w, b, p2) = (
                 q1.p0.to_vec2(),
                 q1.p1.to_vec2(),
@@ -883,8 +882,7 @@ impl PlanarMap {
             let c = (t * (a - (1.0 - t) * p0) + (1.0 - t) * (b - t * p2))
                 / (t * t + (1.0 - t) * (1.0 - t));
             let q = QuadBez::new(q1.p0, c.to_point(), q2.p2);
-            let near = |x: KVec2, y: KVec2| (x - y).hypot() <= FLAT_TOL;
-            if !(near(p0.lerp(c, t), a) && near(c.lerp(p2, t), b) && near(q.eval(t).to_vec2(), w)) {
+            if !(same_curve(&q.subsegment(0.0..t), &q1) && same_curve(&q.subsegment(t..1.0), &q2)) {
                 continue;
             }
             // 判定の形で、2本を1本に置き換えてよいか（設計 2-4 の3つの決まり。曲線が端を越えて折り返すときも、
@@ -3995,7 +3993,7 @@ impl PlanarMap {
     /// 重ねる線 `q` と前からある辺 `e` が同じ線になっている所（どちらがどちらに含まれても、端の一部どうしが重なっても
     /// よい。両端が `FLAT_TOL` より離れている所）：その所の点と、`q` の上の t、辺の上の t（`q` の上の t の順）。点は、辺の曲線のその所を切り出して折れ線に
     /// したもので、両端は重なりの端になっている方の線の端の点。辺の t と `q` の t は、同じ曲線の部分なら1次式で対応する
-    /// ので、切り出した所が `q` のその所からどこでも `FLAT_TOL` 以内のときだけ
+    /// ので、2本のその所を切り出した曲線が同じ曲線（`same_curve`：両側の制御点で決める）のときだけ
     fn overlap(&self, q: &QuadBez, e: usize) -> Option<OverlapPts> {
         let m = self.quad(e);
         let mut ends: Vec<(f64, f64, Point)> = Vec::new();
@@ -4018,6 +4016,15 @@ impl PlanarMap {
             return None;
         }
         let sub = m.subsegment(lo.1.min(hi.1)..lo.1.max(hi.1));
+        // 辺のその所を `q` の向きにしたもの
+        let along = if lo.1 < hi.1 {
+            sub
+        } else {
+            QuadBez::new(sub.p2, sub.p1, sub.p0)
+        };
+        if !same_curve(&q.subsegment(lo.0..hi.0), &along) {
+            return None;
+        }
         let mut pts = flatten_with_t(&sub, FLAT_TOL);
         if lo.1 > hi.1 {
             pts.reverse();
@@ -4026,12 +4033,6 @@ impl PlanarMap {
             }
         }
         let at = |t: f64| (lo.0 + (hi.0 - lo.0) * t, lo.1 + (hi.1 - lo.1) * t);
-        if !pts
-            .iter()
-            .all(|&(p, t)| (q.eval(at(t).0) - p).hypot() <= FLAT_TOL)
-        {
-            return None;
-        }
         let n = pts.len();
         Some(
             pts.into_iter()
@@ -4047,6 +4048,16 @@ impl PlanarMap {
                 .collect(),
         )
     }
+}
+
+/// 2本の2次ベジェ `a`・`b`（同じ向きで、t が同じ所どうしを比べる）が、地図の精度で同じ曲線か：3組の制御点がみな
+/// `FLAT_TOL` 以内。2本の差も2次ベジェで、曲線の点は制御点の重みつきの平均（重みの和は1）なので、どこでも2本の離れ具合は
+/// 制御点の離れ具合以下になる。両側に同じ決まりがかかり、折れ線の細かさによらない（レビュー 4f4e953 の N-1001）。
+/// 同じ曲線かの判定はこれ1つ（同じ線として扱う所・2本の辺のまとめ）
+fn same_curve(a: &QuadBez, b: &QuadBez) -> bool {
+    [(a.p0, b.p0), (a.p1, b.p1), (a.p2, b.p2)]
+        .iter()
+        .all(|&(x, y)| (x - y).hypot() <= FLAT_TOL)
 }
 
 /// 同じ線になっている所の点：（点, 重ねる線の上の t, 辺の上の t）。重ねる線の上の t の順

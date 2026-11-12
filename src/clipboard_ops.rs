@@ -362,16 +362,18 @@ pub(crate) fn can_paste_clipboard_symbol(
                 .into_iter()
                 .map(Node::Doc)
                 .collect(),
-            Node::Clip(id) => clipboard
-                .symbols
-                .iter()
-                .find(|s| s.id == id)
-                .map_or_else(Vec::new, |s| {
-                    s.timeline
-                        .instances()
-                        .map(|inst| node(inst.binding.symbol_id))
-                        .collect()
-                }),
+            Node::Clip(id) => {
+                clipboard
+                    .symbols
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map_or_else(Vec::new, |s| {
+                        s.timeline
+                            .instances()
+                            .map(|inst| node(inst.binding.symbol_id))
+                            .collect()
+                    })
+            }
         },
     )
 }
