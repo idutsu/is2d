@@ -22497,6 +22497,129 @@ mod map_overlay {
         assert_eq!(color_diff(&orig, &faces, 3.0), 0);
     }
 
+    /// 塗りの色だけを替えた写し（となり合う面は、替えたあとも違う色）
+    fn recolored(m: &PlanarMap) -> PlanarMap {
+        let shift = |c: Option<Color32>| {
+            c.map(|c| match c {
+                Color32::RED => Color32::BLUE,
+                Color32::BLUE => Color32::GREEN,
+                Color32::GREEN => Color32::BLACK,
+                Color32::BLACK => Color32::RED,
+                c => c,
+            })
+        };
+        let mut out = m.clone();
+        for e in &mut out.edges {
+            e.left = shift(e.left);
+            e.right = shift(e.right);
+        }
+        out
+    }
+
+    fn face_area(s: &FillShape) -> f64 {
+        s.exterior.signed_area().abs() - s.holes.iter().map(|h| h.signed_area().abs()).sum::<f64>()
+    }
+
+    /// 切り出した片を、切る前の（元の線が残っている）地図へその場で重ねても、境目に沿った見えない欠片の面ができず、辺も
+    /// 増えない：重なる線は同じ線として、2本とも同じ点の折れ線にする（`Span`。レビュー 7f63b04 の N-1003。直す前は、色を
+    /// 替えた片で面積 0.001px² 未満の面が百個以上、辺が 1.4〜2.3 倍になった）
+    #[test]
+    fn piece_pasted_onto_uncut_map_adds_no_slivers() {
+        for seed in [3, 7] {
+            let base = native_scene(seed, 30);
+            let rect = PlanarMap::from_faces(std::iter::once(&rect_shape(
+                170.0,
+                160.0,
+                390.0,
+                340.0,
+                Color32::WHITE,
+            )));
+            let piece = base
+                .overlay(MapInput::Map(&rect), MapRule::KeepInside)
+                .unwrap();
+            let rest = base
+                .overlay(MapInput::Map(&rect), MapRule::Paint(None))
+                .unwrap();
+            // 同じ色の片は元の地図のまま。色を替えた片は、切って空けた所へ置いたとき（重なる線が無い）と同じ地図
+            let into_hole =
+                |p: &PlanarMap| rest.overlay(MapInput::Map(p), MapRule::Overlay).unwrap();
+            let other = recolored(&piece);
+            for (name, p, expected) in [
+                ("同じ色", &piece, base.clone()),
+                ("色を替えた", &other, into_hole(&other)),
+            ] {
+                let m = base.overlay(MapInput::Map(p), MapRule::Overlay).unwrap();
+                assert!(valid(&m), "種 {seed} {name}: {}", m.validity_report());
+                let (faces, _) = m.to_faces_checked(1, &[]);
+                let tiny = faces.iter().filter(|s| face_area(s) < 0.001).count();
+                assert_eq!(tiny, 0, "種 {seed} {name}：欠片の面");
+                assert_eq!(
+                    m.edges.len(),
+                    expected.edges.len(),
+                    "種 {seed} {name}：辺の数"
+                );
+                let (want, _) = expected.to_faces_checked(1, &[]);
+                assert_eq!(color_diff(&want, &faces, 3.0), 0, "種 {seed} {name}");
+            }
+        }
+    }
+
+    /// 形の線が前からある辺の一部（De Casteljau で切り出した曲線）に乗るとき、辺は細かい直線に割れず、重なる所の端で
+    /// 切れるだけ（レビュー 7f63b04 の N-1003。直す前は、境目1本が 260〜330 本の直線に割れた）
+    #[test]
+    fn shape_on_part_of_an_edge_cuts_it_only_at_the_ends() {
+        use crate::vector_engine::Contour;
+        let line = |a: Point, b: Point| QuadBez::new(a, a.midpoint(b), b);
+        for (t0, t1) in [(0.2, 0.7), (0.0, 0.45), (0.31, 1.0)] {
+            let arc = QuadBez::new(
+                Point::new(100.0, 300.0),
+                Point::new(250.0, 100.0),
+                Point::new(400.0, 300.0),
+            );
+            let (a, b, c, d) = (
+                arc.p2,
+                Point::new(400.0, 450.0),
+                Point::new(100.0, 450.0),
+                arc.p0,
+            );
+            let face = FillShape::new(
+                Color32::RED,
+                Contour::new(vec![arc, line(a, b), line(b, c), line(c, d)]),
+                vec![],
+            );
+            let base = PlanarMap::from_faces(std::iter::once(&face));
+            let sub = arc.subsegment(t0..t1);
+            let (e, f) = (Point::new(sub.p2.x, 420.0), Point::new(sub.p0.x, 420.0));
+            for reversed in [false, true] {
+                let mut segs = vec![sub, line(sub.p2, e), line(e, f), line(f, sub.p0)];
+                if reversed {
+                    segs = segs
+                        .iter()
+                        .rev()
+                        .map(|q| QuadBez::new(q.p2, q.p1, q.p0))
+                        .collect();
+                }
+                let inner = FillShape::new(Color32::BLUE, Contour::new(segs), vec![]);
+                let m = base
+                    .overlay(
+                        MapInput::Shapes(std::slice::from_ref(&inner)),
+                        MapRule::Paint(Some(Color32::BLUE)),
+                    )
+                    .unwrap();
+                assert!(valid(&m), "{t0}..{t1}: {}", m.validity_report());
+                // 弧は重なる所の端で切れ（端が弧の端なら切れない）、青い形の残りの3本が足される
+                let cuts = [t0, t1].iter().filter(|&&t| t > 0.0 && t < 1.0).count();
+                assert_eq!(
+                    m.edges.len(),
+                    base.edges.len() + cuts + 3,
+                    "{t0}..{t1} 逆向き {reversed}"
+                );
+                let (faces, _) = m.to_faces_checked(1, &[]);
+                assert_eq!(faces.len(), 2, "{t0}..{t1} 逆向き {reversed}");
+            }
+        }
+    }
+
     /// 面をほんの少しずらして置く（ずらす量が地図の許容のあたり）。取り消されず、色も合う
     #[test]
     fn move_face_by_tiny_offsets() {
@@ -22544,13 +22667,15 @@ mod map_overlay {
     #[test]
     fn merge_degree2_folding_merge_keeps_map_valid() {
         use crate::planar_map::MapEdge;
-        // A→V はまっすぐ、V→B はごく短く少し戻る（V は両側が同じ色の、2本だけがつながる頂点）
-        let (a, v, b, c) = (
+        // A→B は、制御点が両端の外にある（端を越えて右へ出て、折り返して戻る）1本の曲線。それを V で切った2本（V は
+        // 両側が同じ色の、2本だけがつながる頂点）
+        let whole = QuadBez::new(
             Point::new(0.0, 0.0),
-            Point::new(10.0, 0.0),
-            Point::new(9.999, 0.002),
+            Point::new(20.0, 10.0),
             Point::new(0.0, 10.0),
         );
+        let (q1, q2) = (whole.subsegment(0.0..0.6), whole.subsegment(0.6..1.0));
+        let (a, v, b, c) = (whole.p0, q1.p2, whole.p2, Point::new(-10.0, 5.0));
         let edge = |x: usize, y: usize, ctrl: Point| MapEdge {
             a: x,
             b: y,
@@ -22563,8 +22688,8 @@ mod map_overlay {
         let mut m = PlanarMap {
             nodes: vec![a, v, b, c],
             edges: vec![
-                edge(0, 1, a.midpoint(v)),
-                edge(1, 2, Point::new(10.001, 0.001)),
+                edge(0, 1, q1.p1),
+                edge(1, 2, q2.p1),
                 edge(2, 3, b.midpoint(c)),
                 edge(3, 0, c.midpoint(a)),
             ],
@@ -22578,18 +22703,102 @@ mod map_overlay {
             "折り返しはほかの辺に触れないので、まとめる"
         );
         assert!(valid(&m));
-        // まとめた曲線は、元の2本から 0.01px 以内（それより離れた点の色は変わらない）
+        // まとめた曲線は元の曲線（塗りは変わらない）
         for (x, y) in [
-            (1.0, 1.0),
-            (5.0, 0.02),
-            (9.9, 0.05),
-            (3.0, 6.0),
-            (11.0, 0.0),
-            (-1.0, 1.0),
-            (5.0, -0.02),
+            (5.0, 5.0),
+            (-5.0, 5.0),
+            (9.0, 5.0),
+            (12.0, 5.0),
+            (-11.0, 5.0),
+            (5.0, -1.0),
+            (5.0, 11.0),
         ] {
             let p = Point::new(x, y);
             assert_eq!(m.color_at(p), before.color_at(p), "{p:?}");
+        }
+    }
+
+    /// 2本の辺を1本にまとめるのは、1本の2次ベジェを切ったものであることを式（de Casteljau）で確かめたときだけ：
+    /// 同じ直線の上の2本の直線もまとまり、まとめた曲線は元の2本から `FLAT_TOL` 以内。1本の曲線を切ったものから頂点が
+    /// `FLAT_TOL` より離れていれば、見た目が近くてもまとめない（レビュー 7f63b04 の N-1005。直す前は、直線どうしは
+    /// まとまらず、曲線は 0.01px 以内に見えればまとめていた）
+    #[test]
+    fn merge_degree2_merges_only_a_split_quadratic() {
+        use crate::planar_map::MapEdge;
+        let square = |q1: QuadBez, q2: QuadBez| {
+            let c = Point::new(0.0, 80.0);
+            let edge = |x: usize, y: usize, ctrl: Point| MapEdge {
+                a: x,
+                b: y,
+                ctrl,
+                left: Some(Color32::RED),
+                right: None,
+                left_src: None,
+                right_src: None,
+            };
+            PlanarMap {
+                nodes: vec![q1.p0, q1.p2, q2.p2, c],
+                edges: vec![
+                    edge(0, 1, q1.p1),
+                    edge(1, 2, q2.p1),
+                    edge(2, 3, q2.p2.midpoint(c)),
+                    edge(3, 0, c.midpoint(q1.p0)),
+                ],
+            }
+        };
+        let merged = |m: &PlanarMap| {
+            let mut m = m.clone();
+            m.merge_degree2(kurbo::Rect::new(-10.0, -100.0, 200.0, 200.0));
+            assert!(valid(&m), "{}", m.validity_report());
+            m
+        };
+        // 同じ直線の上の2本の直線（制御点は真ん中）は、1本の直線になる
+        let (p, v, r) = (
+            Point::new(0.0, 0.0),
+            Point::new(30.0, 0.0),
+            Point::new(100.0, 0.0),
+        );
+        let lines = merged(&square(
+            QuadBez::new(p, p.midpoint(v), v),
+            QuadBez::new(v, v.midpoint(r), r),
+        ));
+        assert_eq!(lines.edges.len(), 3, "直線どうしがまとまらない");
+        assert!(lines
+            .edges
+            .iter()
+            .any(|e| (e.ctrl - p.midpoint(r)).hypot() < 1e-9));
+        // 曲線を切った2本は元の曲線に戻る。頂点を曲線から離すと、`FLAT_TOL` 以内ならまとまって元の2本から
+        // `FLAT_TOL` 以内、それより離れればまとまらない
+        let whole = QuadBez::new(
+            Point::new(0.0, 0.0),
+            Point::new(60.0, -70.0),
+            Point::new(120.0, 0.0),
+        );
+        for (off, merges) in [(0.0, true), (0.0015, true), (0.003, false), (0.008, false)] {
+            let (mut q1, mut q2) = (whole.subsegment(0.0..0.4), whole.subsegment(0.4..1.0));
+            let n = (q2.p1 - q1.p1).normalize();
+            let w = q1.p2 + kurbo::Vec2::new(-n.y, n.x) * off;
+            q1.p2 = w;
+            q2.p0 = w;
+            let m = merged(&square(q1, q2));
+            assert_eq!(m.edges.len() == 3, merges, "ずらし {off}");
+            if !merges {
+                continue;
+            }
+            let arc = m.quad(
+                (0..m.edges.len())
+                    .find(|&e| [m.edges[e].a, m.edges[e].b] == [0, 2])
+                    .expect("まとめた曲線"),
+            );
+            for q in [q1, q2] {
+                for k in 0..=64 {
+                    let d = crate::planar_map::nearest_on_quad(&arc, q.eval(k as f64 / 64.0)).1;
+                    assert!(d <= 0.002 + 1e-9, "ずらし {off}：元の2本から {d} 離れた");
+                }
+            }
+            if off == 0.0 {
+                assert!((arc.p1 - whole.p1).hypot() < 1e-9, "元の曲線に戻らない");
+            }
         }
     }
 
@@ -24226,9 +24435,9 @@ mod map_overlay {
         eprintln!("PROBE ほぼ重なった線：正しくない地図 {invalid}/{total}・S の中が赤でない {lost}/{total}");
     }
 
-    /// 同じ点列から作ったブラシを色を替えて何度も重ねても、見えない欠片の図形が溜まらない（重ねる線に乗っている前からの辺は
-    /// 同じ折れ線にする：`Cover`。レビュー 6cca852 の N-1001。直す前は、12 回目に壊れた地図ができ、それまでに図形が
-    /// 24 個から 1,779 個に増えた）
+    /// 同じ点列から作ったブラシを色を替えて何度も重ねても、見えない欠片の図形が溜まらない（重ねる線と同じ線になっている
+    /// 前からの辺は、同じ点の折れ線にする：`Span`。レビュー 6cca852 の N-1001。直す前は、12 回目に壊れた地図ができ、それまでに
+    /// 図形が 24 個から 1,779 個に増えた）
     #[test]
     fn same_stroke_repeated_leaves_no_slivers() {
         let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
@@ -25356,8 +25565,14 @@ mod map_overlay {
                 .sum()
         };
         // 面積は折れ線で近づけて測るので、切り口で曲線が分かれる分だけ、ごくわずかに変わる
-        assert!((all(&app, Color32::RED) - red).abs() < red * 1e-3, "赤い線の面積");
-        assert!((all(&app, Color32::BLUE) - blue).abs() < blue * 1e-3, "青い線の面積");
+        assert!(
+            (all(&app, Color32::RED) - red).abs() < red * 1e-3,
+            "赤い線の面積"
+        );
+        assert!(
+            (all(&app, Color32::BLUE) - blue).abs() < blue * 1e-3,
+            "青い線の面積"
+        );
         assert!(
             app.doc.root.layers[0].keyframes[0]
                 .cel

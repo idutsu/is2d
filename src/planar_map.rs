@@ -885,23 +885,29 @@ impl PlanarMap {
                 QuadBez::new(self.nodes[e1.a], e1.ctrl, self.nodes[v]),
                 QuadBez::new(self.nodes[v], e2.ctrl, self.nodes[e2.b]),
             );
-            let (d1, d2) = (q1.p1 - q1.p0, q2.p1 - q2.p2);
-            let den = d1.cross(d2);
-            if den.abs() < 1e-12 {
+            // 2本が、1本の2次ベジェ q を t で切ったものか（de Casteljau：q1.p1・v・q2.p1 が一直線に並び、v がその間を
+            // t:(1−t) に分け、q の制御点 c は q1.p1 = (1−t)q1.p0 + t·c、q2.p1 = (1−t)c + t·q2.p2 を満たす）。頂点は
+            // 地図の精度（`FLAT_TOL`）でしか曲線に乗っていないので、q を t で切った2本の制御点と頂点が、q1・q2 のものから
+            // `FLAT_TOL` 以内のときだけまとめる。2次ベジェの点は制御点の重みつきの平均（重みの和は1）なので、まとめた曲線は
+            // どこでも2本から `FLAT_TOL` 以内にある（絵の形は地図の精度の中でしか変わらない）。直線も同じ決まりでまとまる
+            let (p0, a, w, b, p2) = (
+                q1.p0.to_vec2(),
+                q1.p1.to_vec2(),
+                q1.p2.to_vec2(),
+                q2.p1.to_vec2(),
+                q2.p2.to_vec2(),
+            );
+            let ab = b - a;
+            let t = (w - a).dot(ab) / ab.hypot2();
+            if !(t > 0.0 && t < 1.0) {
                 continue;
             }
-            let s = (q2.p2 - q1.p0).cross(d2) / den;
-            let q = QuadBez::new(q1.p0, q1.p0 + d1 * s, q2.p2);
-            // 2本が1本の曲線に近く、1本の曲線も2本に近いときだけ（絵の形が変わらないように）
-            let fits = [&q1, &q2]
-                .iter()
-                .all(|qq| (1..4).all(|k| nearest_on_quad(&q, qq.eval(k as f64 / 4.0)).1 < 0.01))
-                && nearest_on_quad(&q, self.nodes[v]).1 < 0.01
-                && (1..8).all(|k| {
-                    let p = q.eval(k as f64 / 8.0);
-                    nearest_on_quad(&q1, p).1 < 0.01 || nearest_on_quad(&q2, p).1 < 0.01
-                });
-            if !fits {
+            // 2つの式に最もよく合う制御点
+            let c = (t * (a - (1.0 - t) * p0) + (1.0 - t) * (b - t * p2))
+                / (t * t + (1.0 - t) * (1.0 - t));
+            let q = QuadBez::new(q1.p0, c.to_point(), q2.p2);
+            let near = |x: KVec2, y: KVec2| (x - y).hypot() <= FLAT_TOL;
+            if !(near(p0.lerp(c, t), a) && near(c.lerp(p2, t), b) && near(q.eval(t).to_vec2(), w)) {
                 continue;
             }
             // 判定の形で、2本を1本に置き換えてよいか（設計 2-4 の3つの決まり。曲線が端を越えて折り返すときも、
@@ -2751,8 +2757,8 @@ impl PlanarMap {
             _ => (self, &new_quads),
         };
         let check = self.edges.len()..cands.edges.len();
-        let mut fed =
-            cands.fed_edges(seeds, input.moved_flags(cands.edges.len()), check.clone())?;
+        let moved = input.moved_flags(cands.edges.len());
+        let mut fed = cands.fed_edges(seeds, &moved, moved.clone(), check.clone())?;
         loop {
             match cands.overlay_with(input, rule, &new_quads, &new_cols, &mut fed) {
                 Ok(m) => return Some(m),
@@ -2761,7 +2767,7 @@ impl PlanarMap {
                     for e in more {
                         set[e] = true;
                     }
-                    fed = cands.fed_edges(seeds, set, check.clone())?;
+                    fed = cands.fed_edges(seeds, &moved, set, check.clone())?;
                 }
                 Err(OverlayStop::Refused) => return None,
             }
@@ -2793,10 +2799,11 @@ impl PlanarMap {
     /// ただし、入れた辺と頂点を共有する辺は、その頂点でいつも触れているので、共有する頂点のほかで交わるかで見る。
     /// 入れた辺の端の頂点は格子に置き直すので、その頂点につながる入れない辺は、置き直した形で調べ直す
     /// （ほかの入れない辺と交わらないかも見る）。`check` の辺（重ねる地図の辺）も、はじめに同じく調べる：入れない辺と
-    /// 触れれば入れる。`None`：格子に置けない座標がある
+    /// 触れれば入れる。`moved` は輪郭の変形で動かした辺（前の形は同じ線の比べ先にしない）。`None`：格子に置けない座標がある
     fn fed_edges(
         &self,
         seeds: &[QuadBez],
+        moved: &[bool],
         mut fed: Vec<bool>,
         check: std::ops::Range<usize>,
     ) -> Option<FedEdges> {
@@ -2895,32 +2902,83 @@ impl PlanarMap {
         let mut lines: Vec<GridLine> = Vec::new();
         let mut edge_queue: Vec<usize> = check.clone().collect();
         let mut to_feed: Vec<usize> = (0..self.edges.len()).filter(|&e| fed[e]).collect();
-        // 重ねる線に乗っている前からある辺（`Cover`。輪郭の変形で動かした辺は除く）。その辺は入れ、重ねる線のその所は
-        // その辺と同じ折れ線にする
+        // 同じ線として扱う所（`Span`）：重ねる線（形の線・輪郭の変形の線と、重ねる地図の辺）と、前からある辺（輪郭の変形で
+        // 動かした辺は除く）が同じ線になっている所。その2本は入れ、その所は2本とも同じ点の折れ線にする。1本の線の上で
+        // 重なる所どうしは重ならないようにする（先に見つけたもの）
         let flat_pad = (FLAT_TOL * OVERLAY_GRID).ceil() as i64;
-        let mut covers: Vec<Vec<Cover>> = Vec::with_capacity(seeds.len());
-        for q in seeds {
+        let mut spans: HashMap<Line, Vec<Span>> = HashMap::new();
+        let new_lines: Vec<(Line, QuadBez)> = seeds
+            .iter()
+            .enumerate()
+            .map(|(i, q)| (Line::Seed(i), *q))
+            .chain(check.clone().map(|c| (Line::Edge(c), self.quad(c))))
+            .collect();
+        let free = |list: Option<&Vec<Span>>, lo: f64, hi: f64| {
+            list.is_none_or(|v| v.iter().all(|sp| hi <= sp.lo || lo >= sp.hi))
+        };
+        for &(line, q) in &new_lines {
             // 格子に置けない座標は、ここで断る
             to_grid(q.p0)?;
             to_grid(q.p2)?;
-            edge_grid.query(quad_cells(*q, flat_pad), &mut found);
-            let c = self.covers_of(
-                q,
-                found
-                    .iter()
-                    .copied()
-                    .filter(|&e| e < check.start && !fed[e]),
-            );
-            to_feed.extend(c.iter().map(|c| c.edge));
-            let mut line: Vec<IPt> = Vec::new();
-            for (p, _) in self.stitched_points(q, &c) {
-                let ip = gpt(p);
-                if line.last() != Some(&ip) {
-                    line.push(ip);
+            edge_grid.query(quad_cells(q, flat_pad), &mut found);
+            let mut pairs: Vec<(usize, OverlapPts)> = found
+                .iter()
+                .copied()
+                .filter(|&e| e < check.start && !moved[e])
+                .filter_map(|e| Some((e, self.overlap(&q, e)?)))
+                .collect();
+            pairs.sort_by(|a, b| a.1[0].1.total_cmp(&b.1[0].1));
+            for (e, pts) in pairs {
+                let (s_lo, s_hi) = (pts[0].1, pts[pts.len() - 1].1);
+                let (u_a, u_b) = (pts[0].2, pts[pts.len() - 1].2);
+                let (u_lo, u_hi) = (u_a.min(u_b), u_a.max(u_b));
+                if !free(spans.get(&line), s_lo, s_hi)
+                    || !free(spans.get(&Line::Edge(e)), u_lo, u_hi)
+                {
+                    continue;
+                }
+                let mut on_edge: Vec<(Point, f64)> = pts.iter().map(|&(p, _, u)| (p, u)).collect();
+                if u_a > u_b {
+                    on_edge.reverse();
+                }
+                for (key, span) in [
+                    (
+                        line,
+                        Span {
+                            lo: s_lo,
+                            hi: s_hi,
+                            pts: pts.iter().map(|&(p, s, _)| (p, s)).collect(),
+                        },
+                    ),
+                    (
+                        Line::Edge(e),
+                        Span {
+                            lo: u_lo,
+                            hi: u_hi,
+                            pts: on_edge,
+                        },
+                    ),
+                ] {
+                    let list = spans.entry(key).or_default();
+                    let at = list.partition_point(|sp| sp.lo < span.lo);
+                    list.insert(at, span);
+                }
+                to_feed.push(e);
+                if let Line::Edge(c) = line {
+                    to_feed.push(c);
                 }
             }
+        }
+        let fed_set = FedEdges {
+            fed: Vec::new(),
+            spans,
+            boxes: Vec::new(),
+            grid: CellGrid::new(),
+            adj: Vec::new(),
+        };
+        for (i, q) in seeds.iter().enumerate() {
+            let line = fed_set.grid_points(Line::Seed(i), q);
             add_polyline(&line, (None, None), &mut segs, &mut seg_grid, &mut lines);
-            covers.push(c);
         }
         for e in &to_feed {
             fed[*e] = false;
@@ -2947,7 +3005,7 @@ impl PlanarMap {
                 to_grid(q.p0)?;
                 to_grid(q.p2)?;
                 add_polyline(
-                    &grid_poly(&q),
+                    &fed_set.grid_points(Line::Edge(e), &q),
                     (Some(ed.a), Some(ed.b)),
                     &mut segs,
                     &mut seg_grid,
@@ -3002,10 +3060,10 @@ impl PlanarMap {
             } else {
                 return Some(FedEdges {
                     fed,
-                    covers,
                     boxes,
                     grid: edge_grid,
                     adj,
+                    ..fed_set
                 });
             }
         }
@@ -3088,13 +3146,13 @@ impl PlanarMap {
             } else {
                 ShapeType::Clip
             };
-            // 重ねる線のうち、前からある辺が乗っている所は、その辺と同じ折れ線にする（`Cover`）
-            let pts = match kind {
-                OverlaySrc::New(i) if !matches!(input, MapInput::Map(_)) => {
-                    self.stitched_points(q, &fed_set.covers[*i])
-                }
-                _ => flatten_with_t(q, FLAT_TOL),
+            // 同じ線として扱う所は、2本とも同じ点の折れ線にする（`Span`）
+            let line = match *kind {
+                OverlaySrc::Old(e) => Line::Edge(e),
+                OverlaySrc::New(i) if matches!(input, MapInput::Map(_)) => Line::Edge(n_old + i),
+                OverlaySrc::New(i) => Line::Seed(i),
             };
+            let pts = fed_set.points(line, q);
             let mut prev = (to_grid(pts[0].0).ok_or(OverlayStop::Refused)?, pts[0].1);
             for &(p, t) in &pts[1..] {
                 let ip = to_grid(p).ok_or(OverlayStop::Refused)?;
@@ -3897,100 +3955,159 @@ impl PlanarMap {
     }
 }
 
-/// 重ねる曲線の上に乗っている前からある辺：（辺, 重ねる曲線の上の、辺の始点の t, 終点の t）。辺が、重ねる曲線のその
-/// 部分から、どこでも `FLAT_TOL` 以内にある。地図は曲線を `FLAT_TOL` の精度でしか表さないので、この辺と重ねる曲線の
-/// その部分は同じ線として扱い、同じ折れ線にする（同じ線を重ねても、折れ線どうしが格子の数目の幅で交わって、見えない
-/// 欠片の面ができない。レビュー 6cca852 の N-1001）
-#[derive(Clone, Copy, Debug)]
-struct Cover {
-    edge: usize,
-    s0: f64,
-    s1: f64,
+/// 同じ線として扱う所（`Span`）にかかわる線：重ねる線（形・輪郭の変形の線。`fed_edges` の `seeds` の番号）か、辺（前から
+/// ある辺と、重ねる地図の辺。`fed_edges` の地図の辺の番号）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Line {
+    Seed(usize),
+    Edge(usize),
 }
 
-impl Cover {
-    /// 重ねる曲線の上の範囲（小さい方, 大きい方）
-    fn span(&self) -> (f64, f64) {
-        (self.s0.min(self.s1), self.s0.max(self.s1))
-    }
+/// 線の上の、ほかの線と同じ線として扱う所：自分の上の範囲（小さい方, 大きい方）と、その所の点（自分の上の t の順）。
+/// 地図は曲線を `FLAT_TOL` の精度でしか表さないので、前からある辺と重ねる線が、どこでも `FLAT_TOL` 以内に重なる所は
+/// 同じ線とし、2本とも同じ点の折れ線にする（同じ線を重ねても、折れ線どうしが格子の数目の幅で交わって、見えない欠片の
+/// 面ができたり、境目が細かい直線に割れたりしない。レビュー 6cca852 の N-1001、7f63b04 の N-1003）
+#[derive(Clone, Debug)]
+struct Span {
+    lo: f64,
+    hi: f64,
+    pts: Vec<(Point, f64)>,
 }
 
 impl PlanarMap {
-    /// 曲線 `q` に乗っている辺（`cands` のうち。`Cover`）を、`q` の上の位置の順に返す。範囲が重なる辺は、先の辺だけ
-    fn covers_of(&self, q: &QuadBez, cands: impl Iterator<Item = usize>) -> Vec<Cover> {
-        let near = q.bounding_box().inflate(FLAT_TOL, FLAT_TOL);
-        let mut out: Vec<Cover> = cands
-            .filter_map(|e| {
-                let m = self.quad(e);
-                if near.union(m.bounding_box()) != near {
-                    return None;
-                }
-                let (s0, d0) = nearest_on_quad(q, m.p0);
-                let (s1, d1) = nearest_on_quad(q, m.p2);
-                if d0 > FLAT_TOL || d1 > FLAT_TOL || s0 == s1 {
-                    return None;
-                }
-                // 辺の t と重ねる曲線の t は、同じ曲線の部分なら1次式で対応する
-                let on = flatten_with_t(&m, FLAT_TOL)
-                    .iter()
-                    .all(|&(p, t)| (q.eval(s0 + (s1 - s0) * t) - p).hypot() <= FLAT_TOL);
-                on.then_some(Cover { edge: e, s0, s1 })
-            })
-            .collect();
-        out.sort_by(|a, b| a.span().0.total_cmp(&b.span().0));
-        let mut end = f64::NEG_INFINITY;
-        out.retain(|c| {
-            let (lo, hi) = c.span();
-            let free = lo >= end;
-            if free {
-                end = hi;
+    /// 重ねる線 `q` と前からある辺 `e` が同じ線になっている所（どちらがどちらに含まれても、端の一部どうしが重なっても
+    /// よい。両端が `FLAT_TOL` より離れている所）：その所の点と、`q` の上の t、辺の上の t（`q` の上の t の順）。点は、辺の曲線のその所を切り出して折れ線に
+    /// したもので、両端は重なりの端になっている方の線の端の点。辺の t と `q` の t は、同じ曲線の部分なら1次式で対応する
+    /// ので、切り出した所が `q` のその所からどこでも `FLAT_TOL` 以内のときだけ
+    fn overlap(&self, q: &QuadBez, e: usize) -> Option<OverlapPts> {
+        let m = self.quad(e);
+        let mut ends: Vec<(f64, f64, Point)> = Vec::new();
+        for (u, p) in [(0.0, m.p0), (1.0, m.p2)] {
+            let (s, d) = nearest_on_quad(q, p);
+            if d <= FLAT_TOL {
+                ends.push((s, u, p));
             }
-            free
-        });
-        out
+        }
+        for (s, p) in [(0.0, q.p0), (1.0, q.p2)] {
+            let (u, d) = nearest_on_quad(&m, p);
+            if d <= FLAT_TOL {
+                ends.push((s, u, p));
+            }
+        }
+        let lo = *ends.iter().min_by(|a, b| a.0.total_cmp(&b.0))?;
+        let hi = *ends.iter().max_by(|a, b| a.0.total_cmp(&b.0))?;
+        // 両端が `FLAT_TOL` 以内なら、地図の精度では1つの点（端どうしが触れているだけ）
+        if lo.0 >= hi.0 || lo.1 == hi.1 || (hi.2 - lo.2).hypot() <= FLAT_TOL {
+            return None;
+        }
+        let sub = m.subsegment(lo.1.min(hi.1)..lo.1.max(hi.1));
+        let mut pts = flatten_with_t(&sub, FLAT_TOL);
+        if lo.1 > hi.1 {
+            pts.reverse();
+            for p in &mut pts {
+                p.1 = 1.0 - p.1;
+            }
+        }
+        let at = |t: f64| (lo.0 + (hi.0 - lo.0) * t, lo.1 + (hi.1 - lo.1) * t);
+        if !pts
+            .iter()
+            .all(|&(p, t)| (q.eval(at(t).0) - p).hypot() <= FLAT_TOL)
+        {
+            return None;
+        }
+        let n = pts.len();
+        Some(
+            pts.into_iter()
+                .enumerate()
+                .map(|(k, (p, t))| match k {
+                    0 => (lo.2, lo.0, lo.1),
+                    _ if k + 1 == n => (hi.2, hi.0, hi.1),
+                    _ => {
+                        let (s, u) = at(t);
+                        (p, s, u)
+                    }
+                })
+                .collect(),
+        )
     }
+}
 
-    /// 曲線 `q` を折れ線にした点と、その点の `q` の上の t。`q` に乗っている辺 `covers` の所は、その辺の折れ線の点を
-    /// 使う（同じ線が同じ折れ線になり、i_overlay が1本の区間にまとめる）。両端はいつも `q` の端
-    fn stitched_points(&self, q: &QuadBez, covers: &[Cover]) -> Vec<(Point, f64)> {
-        let own = flatten_with_t(q, FLAT_TOL);
-        if covers.is_empty() {
-            return own;
-        }
-        let n = own.len();
-        let mut out = vec![own[0]];
-        let mut k = 1;
-        for c in covers {
-            let (lo, hi) = c.span();
-            while k < n - 1 && own[k].1 < lo {
-                out.push(own[k]);
-                k += 1;
-            }
-            let mut pts = flatten_with_t(&self.quad(c.edge), FLAT_TOL);
-            if c.s0 > c.s1 {
-                pts.reverse();
-            }
-            out.extend(pts.into_iter().map(|(p, t)| (p, c.s0 + (c.s1 - c.s0) * t)));
-            while k < n - 1 && own[k].1 <= hi {
-                k += 1;
-            }
-        }
-        out.extend_from_slice(&own[k..n - 1]);
-        out.push(own[n - 1]);
-        out
+/// 同じ線になっている所の点：（点, 重ねる線の上の t, 辺の上の t）。重ねる線の上の t の順
+type OverlapPts = Vec<(Point, f64, f64)>;
+
+/// 曲線を折れ線にした点 `own`（点と t）の、同じ線として扱う所 `spans`（重ならない。範囲の順）を、その所の点に替えたもの。
+/// 両端はいつも自分の端の点で、続く点の t が同じなら後の点を落とす（区間の向きは t の大きさで決めるので、t の幅が 0 の
+/// 区間を作らない）
+fn stitched(own: Vec<(Point, f64)>, spans: &[Span]) -> Vec<(Point, f64)> {
+    if spans.is_empty() {
+        return own;
     }
+    let n = own.len();
+    let mut out = vec![own[0]];
+    let push = |out: &mut Vec<(Point, f64)>, p: (Point, f64)| {
+        if out.last().is_none_or(|l| l.1 != p.1) {
+            out.push(p);
+        }
+    };
+    let mut k = 1;
+    for sp in spans {
+        while k < n - 1 && own[k].1 < sp.lo {
+            push(&mut out, own[k]);
+            k += 1;
+        }
+        for &p in &sp.pts {
+            push(&mut out, p);
+        }
+        while k < n - 1 && own[k].1 <= sp.hi {
+            k += 1;
+        }
+    }
+    for &p in &own[k..n - 1] {
+        push(&mut out, p);
+    }
+    let end = own[n - 1];
+    match out.last_mut() {
+        Some(l) if l.1 == end.1 => *l = end,
+        _ => out.push(end),
+    }
+    out
 }
 
 /// i_overlay に入れる前からある辺（`fed`）と、そのときに作った辺の外接矩形・格子・頂点ごとの辺
 struct FedEdges {
     fed: Vec<bool>,
-    /// 重ねる線（`fed_edges` の `seeds`）ごとの、その線に乗っている前からある辺
-    covers: Vec<Vec<Cover>>,
+    /// 線ごとの、同じ線として扱う所（範囲の順）
+    spans: HashMap<Line, Vec<Span>>,
     /// 辺の外接矩形（格子に置き直す分と、近くとみなす距離の分を広げたもの）
     boxes: Vec<KRect>,
     /// 辺がかかるマス（同じだけ広げたもの）
     grid: CellGrid,
     adj: Vec<Vec<usize>>,
+}
+
+impl FedEdges {
+    /// 線 `line`（曲線 `q`）を折れ線にした点と t。同じ線として扱う所は、その所の点（`stitched`）
+    fn points(&self, line: Line, q: &QuadBez) -> Vec<(Point, f64)> {
+        stitched(
+            flatten_with_t(q, FLAT_TOL),
+            self.spans.get(&line).map_or(&[][..], |v| v.as_slice()),
+        )
+    }
+
+    /// 線 `line` の判定の形（格子に置いた折れ線）
+    fn grid_points(&self, line: Line, q: &QuadBez) -> Vec<IPt> {
+        if !self.spans.contains_key(&line) {
+            return grid_poly(q);
+        }
+        let mut out: Vec<IPt> = Vec::new();
+        for (p, _) in self.points(line, q) {
+            let ip = gpt(p);
+            if out.last() != Some(&ip) {
+                out.push(ip);
+            }
+        }
+        out
+    }
 }
 
 /// 区間の色をたどるときに、頂点で次に進む先
