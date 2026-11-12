@@ -721,6 +721,7 @@ mod scene_base_cache {
     use kurbo::Affine;
 
     use super::{Document, EditPath, LayerId, ShapeId};
+    use crate::planar_map::LayerBase;
     use crate::symbol::{
         compute_resolved_cel_signature, ResolvedCelSig, SymbolDef, SymbolEvalCtx, SymbolLoopMode,
     };
@@ -739,6 +740,9 @@ mod scene_base_cache {
         range: Range<usize>,
         /// 画面に出しているキーフレームのセル画（文書の形。地図の編集・カーソル合わせ・浮いた片が、地図をここから読む）
         cel: Option<crate::timeline::Cel>,
+        /// そのセル画（と、中のシンボルのセル画）の地図の、計算に使う写し。画面に出している間、写しの持ち主はここ
+        /// （`LayerBase::of_stored` は、ここが持っている写しを返す）
+        bases: Vec<Arc<LayerBase>>,
     }
 
     /// `Document`（編集中タイムライン＋シンボルライブラリ＋`world_xform`）から構築されるレイヤー別の読み取り専用土台キャッシュ
@@ -854,6 +858,14 @@ mod scene_base_cache {
                 .iter()
                 .find(|l| l.layer_id == layer_id)
                 .and_then(|l| l.cel.as_ref())
+        }
+
+        /// レイヤー `layer_id` の、書いたばかりの地図の計算に使う写し `base` を、次にそのレイヤーを作り直すまで持つ
+        /// （`Cel::edit_map` が返したもの。作り直すと、セル画の地図の写しとして持ち直す）
+        pub(crate) fn hold(&mut self, layer_id: LayerId, base: Arc<LayerBase>) {
+            if let Some(l) = self.layers.iter_mut().find(|l| l.layer_id == layer_id) {
+                l.bases.push(base);
+            }
         }
 
         /// レイヤー `layer_id` を、次の `rebuild` で作り直す（セル画を書き換えたあと）
@@ -977,6 +989,7 @@ mod scene_base_cache {
                         world_xform_bits: xform_bits,
                         range: start..start,
                         cel: None,
+                        bases: Vec::new(),
                     });
                     continue;
                 };
@@ -996,12 +1009,14 @@ mod scene_base_cache {
                             world_xform_bits: xform_bits,
                             range: start..end,
                             cel: Some(layer.keyframes[kf_idx].cel.clone()),
+                            bases: old_cl.bases,
                         });
                         continue;
                     }
                 }
                 let ctx = SymbolEvalCtx::new(library);
-                let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx);
+                let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx.clone());
+                let bases = ctx.into_state().take_held();
                 for s in &mut evaluated {
                     s.place(world_xform);
                 }
@@ -1023,6 +1038,7 @@ mod scene_base_cache {
                     world_xform_bits: xform_bits,
                     range: start..end,
                     cel: Some(layer.keyframes[kf_idx].cel.clone()),
+                    bases,
                 });
             }
 
@@ -3380,9 +3396,17 @@ pub(crate) fn write_scope_map(
     let Some(kf) = layer.keyframe_index_at(frame) else {
         return false;
     };
-    Arc::make_mut(&mut layer.keyframes[kf])
+    let Some(written) = Arc::make_mut(&mut layer.keyframes[kf])
         .cel
         .edit_map(scope, f)
+    else {
+        return false;
+    };
+    // 新しい地図の写し（面の図形は、変わらない面は前の図形）は、画面の土台が持つ
+    if let Some(base) = written.0 {
+        tab.session.base_cache.hold(layer_id, base);
+    }
+    true
 }
 
 /// 現在の編集スコープ（グループ内であればそのグループの所属レイヤー、そうでなければ現在のアクティブレイヤー）の `layer_id` を返す
@@ -3583,7 +3607,7 @@ pub(crate) fn merge_pieces_layer_by_layer(
             .overlay(MapInput::Map(&piece.map), MapRule::Overlay)
             .and_then(|next| base.diff_placed(&next, &own, layer_id, &scope, xform));
         if let Some(change) = change {
-            apply_map_change(base_shapes, change, layer_id, &scope, xform);
+            apply_map_change(base_shapes, change, layer_id, &scope);
         }
     }
 }
@@ -3606,7 +3630,7 @@ pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: Floating) -> bool {
             Some(m) => Some(m),
             None => {
                 left.keep_pieces_of(l);
-                l.origin.as_ref().map(|o| o.rest.map.clone())
+                l.origin.as_ref().map(|o| o.base().map.clone())
             }
         };
         if let Some(next) = next {

@@ -556,7 +556,7 @@ impl From<&Keyframe> for SavedKeyframe {
                 .cel
                 .maps
                 .iter()
-                .map(|m| SavedScopeMap::new(&m.group_path, &m.base().map))
+                .map(|m| SavedScopeMap::new(&m.group_path, &m.dense()))
                 .collect(),
             instances: kf
                 .cel

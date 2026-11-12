@@ -14,6 +14,7 @@ use crate::planar_map::{
     cut_out, faces_with_ids, per_layer_parallel, realized, region_map, LayerBase, MapChange,
     MapInput, MapRule, PlanarMap,
 };
+use crate::stored_map::StoredMap;
 use crate::vector_engine::FillShape;
 
 /// 浮いた片の操作に要る画面の土台：画面に出しているセル画（`SceneBaseCache`）と編集中の階層
@@ -31,11 +32,13 @@ impl Stage<'_> {
     }
 }
 
-/// 片の組：片の地図（文書の座標。面の辺の側に片の番号を記してある）と、それにかける変換（文書の座標で。動かす・回す・
-/// 拡大を重ねる。確定するまで地図にはかけない）
+/// 片の組：片の地図（しまう形。文書の座標。面の辺の側に片の番号を記してある）と、それにかける変換（文書の座標で。動かす・
+/// 回す・拡大を重ねる。確定するまで地図にはかけない）
 #[derive(Clone, Debug)]
 pub(crate) struct PieceGroup {
-    pub(crate) base: Arc<LayerBase>,
+    map: StoredMap,
+    /// 計算に使う写し（浮いている間だけ持つ。Undo の控えでは外す：`Floating::strip_transient_caches`）
+    held: Option<Arc<LayerBase>>,
     /// 片の図形（文書の座標、変換をかける前。番号は面の番号）
     faces: Arc<Vec<FillShape>>,
     pub(crate) xform: Affine,
@@ -45,11 +48,18 @@ impl PieceGroup {
     /// 地図 `map`（文書の座標）の片の組。面の番号が1つに決まらない面には、新しい番号を振る（`faces_with_ids`）
     fn new(map: &PlanarMap, layer_id: LayerId, scope: &[u64], xform: Affine) -> Self {
         let (map, faces) = faces_with_ids(map, layer_id, scope);
+        let base = LayerBase::of_stored(&StoredMap::from_dense(&map, None));
         Self {
-            base: Arc::new(LayerBase::new(&map)),
+            map: base.stored.clone(),
+            held: Some(base),
             faces: Arc::new(faces),
             xform,
         }
+    }
+
+    /// 片の地図の、計算に使う写し
+    pub(crate) fn base(&self) -> Arc<LayerBase> {
+        LayerBase::of_stored(&self.map)
     }
 
     fn ids(&self) -> impl Iterator<Item = ShapeId> + '_ {
@@ -75,7 +85,7 @@ impl PieceGroup {
             return None;
         }
         Some(Self::new(
-            &self.base.map.restricted(keep),
+            &self.base().map.restricted(keep),
             layer_id,
             scope,
             self.xform,
@@ -86,8 +96,10 @@ impl PieceGroup {
 /// 持ち上げたレイヤーの残り
 #[derive(Clone, Debug)]
 pub(crate) struct Origin {
-    /// 残りの地図（セル画の地図から、持ち上げた所を除いた地図。文書の座標）
-    pub(crate) rest: Arc<LayerBase>,
+    /// 残りの地図（しまう形。セル画の地図から、持ち上げた所を除いた地図。文書の座標。変わらない塊はセル画の地図と共有する）
+    rest: StoredMap,
+    /// 残りの地図の計算に使う写し（浮いている間だけ持つ。Undo の控えでは外す）
+    held: Option<Arc<LayerBase>>,
     /// 隠すセル画の図形（セル画の地図の面のうち、残りの地図で変わったもの）
     hidden: Vec<ShapeId>,
     /// 残りの図形（残りの地図の面のうち、セル画に無いもの。文書の座標）
@@ -95,16 +107,23 @@ pub(crate) struct Origin {
 }
 
 impl Origin {
-    /// セル画との差分 `change`（残りの地図。文書の座標）から。差分が無ければ（何も切れていない）`None`
-    fn of(change: MapChange) -> Option<Self> {
+    /// セル画の地図 `cel` との差分 `change`（残りの地図。文書の座標）から。差分が無ければ（何も切れていない）`None`
+    fn of(change: MapChange, cel: &StoredMap) -> Option<Self> {
         if change.removed.is_empty() && change.added.is_empty() {
             return None;
         }
+        let base = LayerBase::of_stored(&StoredMap::from_dense(&change.map, Some(cel)));
         Some(Self {
-            rest: Arc::new(LayerBase::new(&change.map)),
+            rest: base.stored.clone(),
+            held: Some(base),
             hidden: change.removed,
             remainder: change.added,
         })
+    }
+
+    /// 残りの地図の、計算に使う写し
+    pub(crate) fn base(&self) -> Arc<LayerBase> {
+        LayerBase::of_stored(&self.rest)
     }
 }
 
@@ -123,8 +142,10 @@ impl FloatLayer {
     }
 
     /// 中身の地図：残りの地図か、無ければセル画の地図 `cel`
-    fn content<'a>(&'a self, cel: &'a LayerBase) -> &'a PlanarMap {
-        self.origin.as_ref().map_or(&cel.map, |o| &o.rest.map)
+    fn content(&self, cel: &Arc<LayerBase>) -> Arc<LayerBase> {
+        self.origin
+            .as_ref()
+            .map_or_else(|| cel.clone(), Origin::base)
     }
 
     /// 片の組を下から順に重ねた地図（組ごとに変換をかけて、その座標の格子で正しい地図にする：`realized`）。片が無ければ
@@ -132,7 +153,7 @@ impl FloatLayer {
     pub(crate) fn pieces_map(&self) -> Option<PlanarMap> {
         let mut map = PlanarMap::default();
         for g in &self.groups {
-            let piece = realized(&g.base.map, g.xform)?;
+            let piece = realized(&g.base().map, g.xform)?;
             map = if map.edges.is_empty() {
                 piece
             } else {
@@ -144,15 +165,15 @@ impl FloatLayer {
 
     /// 画面の土台 `stage` のセル画の地図の上で確定した地図（`committed`）
     pub(crate) fn committed_on(&self, stage: Stage<'_>) -> Option<PlanarMap> {
-        self.committed(&*stage.cel(self.layer_id)?)
+        self.committed(&stage.cel(self.layer_id)?)
     }
 
     /// 確定した地図：中身の地図に、片の組を下から順に重ねる（組ごとに変換をかけて、その座標の格子で正しい地図にする：
     /// `realized`）。`None`：格子に置けない座標がある
-    pub(crate) fn committed(&self, cel: &LayerBase) -> Option<PlanarMap> {
-        let mut map = self.content(cel).clone();
+    pub(crate) fn committed(&self, cel: &Arc<LayerBase>) -> Option<PlanarMap> {
+        let mut map = self.content(cel).map.clone();
         for g in &self.groups {
-            let piece = realized(&g.base.map, g.xform)?;
+            let piece = realized(&g.base().map, g.xform)?;
             map = map.overlay(MapInput::Map(&piece), MapRule::Overlay)?;
         }
         Some(map)
@@ -257,8 +278,16 @@ impl Floating {
         }
     }
 
-    /// 一時描画キャッシュを除去して履歴保持を軽量化する
+    /// 一時描画キャッシュと計算に使う写しを除去して履歴保持を軽量化する（控えが持つ地図は、しまう形だけ）
     pub(crate) fn strip_transient_caches(&mut self) {
+        for l in &mut self.layers {
+            if let Some(o) = &mut l.origin {
+                o.held = None;
+            }
+            for g in &mut l.groups {
+                g.held = None;
+            }
+        }
         for s in &mut self.pieces {
             s.strip_transient_caches();
         }
@@ -275,15 +304,36 @@ impl Floating {
                 a.layer_id == b.layer_id
                     && match (&a.origin, &b.origin) {
                         (None, None) => true,
-                        (Some(x), Some(y)) => Arc::ptr_eq(&x.rest, &y.rest),
+                        (Some(x), Some(y)) => x.rest.id() == y.rest.id(),
                         _ => false,
                     }
                     && a.groups.len() == b.groups.len()
                     && a.groups
                         .iter()
                         .zip(&b.groups)
-                        .all(|(g, h)| Arc::ptr_eq(&g.base, &h.base) && g.xform == h.xform)
+                        .all(|(g, h)| g.map.id() == h.map.id() && g.xform == h.xform)
             })
+    }
+
+    /// テスト用：レイヤーごとの（レイヤー, 残りの地図と写しを持つか, 片の組の地図と写しを持つか）
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn stored_maps(
+        &self,
+    ) -> Vec<(LayerId, Option<(&StoredMap, bool)>, Vec<(&StoredMap, bool)>)> {
+        self.layers
+            .iter()
+            .map(|l| {
+                (
+                    l.layer_id,
+                    l.origin.as_ref().map(|o| (&o.rest, o.held.is_some())),
+                    l.groups
+                        .iter()
+                        .map(|g| (&g.map, g.held.is_some()))
+                        .collect(),
+                )
+            })
+            .collect()
     }
 
     fn layer_mut(&mut self, layer_id: LayerId) -> &mut FloatLayer {
@@ -355,7 +405,7 @@ impl Floating {
                     .any(|f| ids.contains(&f.shape_id) && f.color != color)
                 {
                     *g = PieceGroup::new(
-                        &g.base.map.recolored(ids, color),
+                        &g.base().map.recolored(ids, color),
                         layer_id,
                         scope,
                         g.xform,
@@ -387,7 +437,7 @@ impl Floating {
         else {
             return false;
         };
-        let Some(next) = edit(&g.base.map) else {
+        let Some(next) = edit(&g.base().map) else {
             return false;
         };
         *g = PieceGroup::new(&next, layer_id, scope, g.xform);
@@ -427,20 +477,19 @@ impl Floating {
             let Some(cel) = stage.cel(layer_id) else {
                 return false;
             };
-            let mut rest = l.content(&cel).clone();
+            let mut rest = l.content(&cel).map.clone();
             for g in &back {
-                let Some(m) = rest.overlay(MapInput::Map(&g.base.map), MapRule::Overlay) else {
+                let Some(m) = rest.overlay(MapInput::Map(&g.base().map), MapRule::Overlay) else {
                     return false;
                 };
                 rest = m;
             }
             let faces = cel.faces(stage.scope);
             let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
-            let Some(mut change) = cel.diff(&rest, &own, layer_id, stage.scope) else {
+            let Some(change) = cel.diff(&rest, &own, layer_id, stage.scope) else {
                 return false;
             };
-            change.renew_ids();
-            l.origin = Origin::of(change);
+            l.origin = Origin::of(change, &cel.stored);
             l.groups = kept;
         }
         true
@@ -549,7 +598,8 @@ fn cut_layer(
         groups: Vec::new(),
     };
     let cur = cur.unwrap_or(&empty);
-    let content = cur.content(&cel);
+    let content_base = cur.content(&cel);
+    let content = &content_base.map;
     let part = (!ids.is_empty())
         .then(|| content.restricted(ids))
         .filter(|m| !m.edges.is_empty());
@@ -578,7 +628,7 @@ fn cut_layer(
         match groups.first_mut() {
             Some(g) if !modified => {
                 let joined = g
-                    .base
+                    .base()
                     .map
                     .overlay(MapInput::Map(&inside), MapRule::Overlay)?;
                 *g = PieceGroup::new(&joined, layer_id, stage.scope, Affine::IDENTITY);
@@ -591,7 +641,7 @@ fn cut_layer(
     }
     Some(FloatLayer {
         layer_id,
-        origin: Origin::of(rest),
+        origin: Origin::of(rest, &cel.stored),
         groups,
     })
 }

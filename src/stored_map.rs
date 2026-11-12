@@ -7,17 +7,18 @@
 //! なので、どの地図も持たなくなった塊は、その場で返る。
 //!
 //! 計算に使うふつうの地図（`PlanarMap`）は、いつも塊から決まった順で作る（`StoredMap::to_dense`）。頂点と辺の番号が中身
-//! だけで決まるので、しまい場所から出した地図も、塊から作り直した地図も同じになる（編集の結果が、しまい場所の具合に
-//! よらない）。
+//! だけで決まるので、いつ作り直しても同じになる。計算に使う写し（`LayerBase`）は、それを使う所が持つ。しまう形は、いま
+//! 誰かが持っている写しへの弱い参照を1つだけ持ち（`StoredMap::dense_slot`）、写しを生かすのは持ち主だけ（Undo の控えは
+//! しまう形だけを持つ）。
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use eframe::egui::Color32;
 use kurbo::Point;
 
 use crate::canvas_tool::ShapeId;
-use crate::planar_map::{MapEdge, PlanarMap};
+use crate::planar_map::{LayerBase, MapEdge, PlanarMap};
 
 /// 塊の升目の大きさ（文書の座標の px）。ブラシ1本・消しゴム1本で変わるのは、ふつう升目の数個分
 const TILE: f64 = 32.0;
@@ -128,7 +129,14 @@ fn same_tile(prev: &[Tile], j: &mut usize, run: &[StoredEdge]) -> Option<Tile> {
 
 /// セル画にしまう地図：塊の並び（升目の順）。写しは `Arc` を1つ数えるだけ
 #[derive(Clone, Debug)]
-pub(crate) struct StoredMap(Arc<[Tile]>);
+pub(crate) struct StoredMap(Arc<Stored>);
+
+#[derive(Debug)]
+struct Stored {
+    tiles: Box<[Tile]>,
+    /// この地図の計算に使う写しのうち、いま誰かが持っているもの（弱い参照。生かすのは写しを使う所：`LayerBase::of_stored`）
+    dense: Mutex<Weak<LayerBase>>,
+}
 
 impl StoredMap {
     /// 地図 `map` のしまう形。辺を決まった向きにして升目ごとに分け、塊の中を決まった順に並べる。置き換える前の地図
@@ -144,7 +152,7 @@ impl StoredMap {
             .collect();
         all.sort_unstable_by(|x, y| x.0.cmp(&y.0).then_with(|| x.1.order(&y.1)));
         let (keys, edges): (Vec<(i32, i32)>, Vec<StoredEdge>) = all.into_iter().unzip();
-        let prev: &[Tile] = prev.map_or(&[], |p| &p.0);
+        let prev: &[Tile] = prev.map_or(&[], |p| &p.0.tiles);
         let (mut j, mut start) = (0, 0);
         let tiles: Vec<Tile> = keys
             .chunk_by(|a, b| a == b)
@@ -154,12 +162,20 @@ impl StoredMap {
                 same_tile(prev, &mut j, run).unwrap_or_else(|| run.into())
             })
             .collect();
-        Self(tiles.into())
+        Self(Arc::new(Stored {
+            tiles: tiles.into(),
+            dense: Mutex::new(Weak::new()),
+        }))
+    }
+
+    /// 計算に使う写しへの弱い参照（`LayerBase::of_stored` だけが使う）
+    pub(crate) fn dense_slot(&self) -> &Mutex<Weak<LayerBase>> {
+        &self.0.dense
     }
 
     /// 計算に使うふつうの地図：辺は塊の順・塊の中の順に並べ、頂点は最初に出てきた順に番号を振る（番号が中身だけで決まる）
     pub(crate) fn to_dense(&self) -> PlanarMap {
-        let n: usize = self.0.iter().map(|t| t.len()).sum();
+        let n: usize = self.0.tiles.iter().map(|t| t.len()).sum();
         let mut nodes: Vec<Point> = Vec::with_capacity(n);
         let mut index: std::collections::HashMap<[u64; 2], usize> =
             std::collections::HashMap::with_capacity(n);
@@ -173,6 +189,7 @@ impl StoredMap {
         };
         let edges: Vec<MapEdge> = self
             .0
+            .tiles
             .iter()
             .flat_map(|t| t.iter())
             .map(|e| MapEdge {
@@ -202,17 +219,18 @@ impl StoredMap {
 
     /// 辺の無い地図か
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.tiles.is_empty()
     }
 
     /// 中身が同じか（塊と辺が、ビットまで同じ）
     #[cfg(test)]
     pub(crate) fn same_content(&self, other: &Self) -> bool {
-        self.0.len() == other.0.len()
+        self.0.tiles.len() == other.0.tiles.len()
             && self
                 .0
+                .tiles
                 .iter()
-                .zip(other.0.iter())
+                .zip(other.0.tiles.iter())
                 .all(|(x, y)| x[..] == y[..])
     }
 
@@ -225,9 +243,9 @@ impl StoredMap {
     ) -> (usize, usize) {
         let mut bytes = (0, 0);
         if seen.insert(Arc::as_ptr(&self.0) as *const u8 as usize) {
-            bytes.0 += self.0.len() * std::mem::size_of::<Tile>();
+            bytes.0 += self.0.tiles.len() * std::mem::size_of::<Tile>();
         }
-        for t in self.0.iter() {
+        for t in self.0.tiles.iter() {
             if seen.insert(Arc::as_ptr(t) as *const u8 as usize) {
                 bytes.1 += t.len() * std::mem::size_of::<StoredEdge>();
             }
@@ -238,13 +256,13 @@ impl StoredMap {
     /// テスト用：塊の数
     #[cfg(test)]
     pub(crate) fn tiles(&self) -> usize {
-        self.0.len()
+        self.0.tiles.len()
     }
 
     /// テスト用：塊ごとの持ち主の数（この地図のほかに持っている地図の数＋1）
     #[cfg(test)]
     pub(crate) fn tile_owners(&self) -> Vec<usize> {
-        self.0.iter().map(Arc::strong_count).collect()
+        self.0.tiles.iter().map(Arc::strong_count).collect()
     }
 
     /// テスト用：`other` と共有している塊（同じ `Arc`）の数
@@ -252,10 +270,12 @@ impl StoredMap {
     pub(crate) fn shared_tiles(&self, other: &Self) -> usize {
         let theirs: std::collections::HashSet<usize> = other
             .0
+            .tiles
             .iter()
             .map(|t| Arc::as_ptr(t) as *const u8 as usize)
             .collect();
         self.0
+            .tiles
             .iter()
             .filter(|t| theirs.contains(&(Arc::as_ptr(t) as *const u8 as usize)))
             .count()

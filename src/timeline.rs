@@ -222,9 +222,14 @@ pub(crate) struct ScopeMap {
 }
 
 impl ScopeMap {
-    /// 計算に使う形の地図（地図のしまい場所から引くか、塊から作る）
+    /// 計算に使う写し（持ち主（画面の土台など）が持っていればそれ、無ければ塊から作る：`LayerBase::of_stored`）
     pub(crate) fn base(&self) -> Arc<LayerBase> {
         LayerBase::of_stored(&self.stored)
+    }
+
+    /// 計算に使うふつうの地図（その場で作って捨てる。保存など、面の図形を使わない所）
+    pub(crate) fn dense(&self) -> PlanarMap {
+        self.stored.to_dense()
     }
 
     /// 面の図形（写し。面の順）
@@ -238,6 +243,10 @@ impl ScopeMap {
         &self.stored
     }
 }
+
+/// 地図の編集（`Cel::edit_map`）の結果：書いた階層の新しい地図の、計算に使う写し（階層の面が無くなって外したときは
+/// `None`）。写しを持ち続けるのは呼んだ側（画面の土台：`SceneBaseCache::hold`）
+pub(crate) struct MapWritten(pub(crate) Option<Arc<LayerBase>>);
 
 /// セル画の中身の1つ（重なりの順に並べて `Cel::set_parts` に渡す）
 #[derive(Clone, Debug)]
@@ -543,7 +552,7 @@ impl Cel {
             return;
         }
         for m in Arc::make_mut(&mut self.maps) {
-            let mut map = m.base().map.clone();
+            let mut map = m.dense();
             let mut fresh: HashMap<ShapeId, ShapeId> = HashMap::new();
             for ed in &mut map.edges {
                 for src in [&mut ed.left_src, &mut ed.right_src].into_iter().flatten() {
@@ -597,37 +606,33 @@ impl Cel {
     }
 
     /// 地図の編集：階層 `group_path` の地図（文書の座標）を `f` で編集し、返った地図をしまう。面の図形は、変わらない面は
-    /// 前の図形のまま、形の変わった面は番号を引き継いだ新しい図形（`LayerBase::diff`）。`false`：変わらない・編集できない
+    /// 前の図形のまま、形の変わった面は番号を引き継いだ新しい図形（`LayerBase::diff`）。`None`：変わらない・編集できない
     pub(crate) fn edit_map(
         &mut self,
         group_path: &[u64],
         f: impl FnOnce(&LayerBase) -> Option<PlanarMap>,
-    ) -> bool {
+    ) -> Option<MapWritten> {
         let base = self.scope_base(group_path);
-        let Some(next) = f(&base) else {
-            return false;
-        };
+        let next = f(&base)?;
         let faces = base.faces(group_path);
         let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
-        let Some(change) = base.diff(&next, &own, 0, group_path) else {
-            return false;
-        };
+        let change = base.diff(&next, &own, 0, group_path)?;
         if change.removed.is_empty() && change.added.is_empty() {
-            return false;
+            return None;
         }
-        self.put_map_change(group_path, &faces, change);
-        true
+        Some(MapWritten(self.put_map_change(group_path, &faces, change)))
     }
 
-    /// 地図の差分 `change`（文書の座標。前の面の図形 `old_faces`）を入れる：階層の地図を差分の地図にし、その面の図形
-    /// （変わらない面は前の図形、新しい形は差分の図形）を地図のしまい場所に置く。面の無くなった階層は外し、新しい階層は
-    /// 決まりどおりの所（グループの中身があれば、そのいちばん下。無ければ親の階層のいちばん上）に入れる
+    /// 地図の差分 `change`（文書の座標。前の面の図形 `old_faces`）を入れる：階層の地図を差分の地図にする。面の無くなった
+    /// 階層は外し、新しい階層は決まりどおりの所（グループの中身があれば、そのいちばん下。無ければ親の階層のいちばん上）に
+    /// 入れる。戻り値は、新しい地図の計算に使う写し（面の図形は、変わらない面は前の図形、新しい形は差分の図形）。階層を
+    /// 外したときは `None`
     fn put_map_change(
         &mut self,
         group_path: &[u64],
         old_faces: &[Arc<FillShape>],
         change: MapChange,
-    ) {
+    ) -> Option<Arc<LayerBase>> {
         let stored = StoredMap::from_dense(&change.map, self.scope_stored(group_path));
         let removed: std::collections::HashSet<ShapeId> = change.removed.iter().copied().collect();
         let mut known: HashMap<ShapeId, Arc<FillShape>> = old_faces
@@ -644,9 +649,9 @@ impl Cel {
             let mut items = Self::items_of(&self.maps, &self.instances);
             items.retain(|it| !matches!(it, Item::Raw(p, _) if p == group_path));
             self.arrange(items);
-            return;
+            return None;
         }
-        LayerBase::remember_with_faces(stored.clone(), group_path, &known);
+        let base = LayerBase::with_faces(stored.clone(), group_path, known);
         let m = ScopeMap {
             group_path: group_path.to_vec(),
             stored,
@@ -664,6 +669,7 @@ impl Cel {
                 self.arrange(items);
             }
         }
+        Some(base)
     }
 
     /// テスト用：地図と重なりの順が決まりどおりか（どの地図も正しい地図で面があり、面に1つずつ別の番号が記してある。

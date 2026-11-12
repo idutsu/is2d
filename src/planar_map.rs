@@ -630,14 +630,31 @@ impl PlanarMap {
         (faces, broken)
     }
 
-    /// 面 `f` の今の形を、塗りの形にする
+    /// 面 `f` の今の形を、塗りの形にする。輪郭は座標のいちばん小さい点から始め、穴はその点の順に並べる（形は地図の面
+    /// だけで決まり、辺の並びや作り方（差分から作る・しまった地図から作り直す）によらない）
     pub(crate) fn face_shape(&self, f: &MapFace, layer_id: u64, group_path: &[u64]) -> FillShape {
-        let mut contours = f
-            .cycles
-            .iter()
-            .map(|c| Contour::new(c.iter().map(|h| self.half_quad(*h)).collect()));
+        self.face_shape_with(f, layer_id, group_path, |_| None)
+    }
+
+    /// `face_shape` の、形の同じ輪郭を `reuse` が返す輪郭（前の図形の輪郭。同じ決まりで作ったもの）にするもの
+    fn face_shape_with(
+        &self,
+        f: &MapFace,
+        layer_id: u64,
+        group_path: &[u64],
+        reuse: impl Fn(&[(usize, bool)]) -> Option<Contour>,
+    ) -> FillShape {
+        let mut contours = f.cycles.iter().map(|c| {
+            reuse(c).unwrap_or_else(|| {
+                Contour::new(from_lowest_point(
+                    c.iter().map(|h| self.half_quad(*h)).collect(),
+                ))
+            })
+        });
         let exterior = contours.next().unwrap_or_else(|| Contour::new(Vec::new()));
-        FillShape::new(f.color, exterior, contours.collect()).with_scope(layer_id, group_path)
+        let mut holes: Vec<Contour> = contours.collect();
+        holes.sort_by(|a, b| starts_order(&a.segments, &b.segments));
+        FillShape::new(f.color, exterior, holes).with_scope(layer_id, group_path)
     }
 
     /// 辺から塗りの形を作る。戻り値の2つ目は、壊れた輪郭の数（`faces` と同じ）
@@ -1121,13 +1138,7 @@ fn rewrite_shapes(
         .into_iter()
         .map(|i| {
             let f = &faces[i];
-            let mut contours = f.cycles.iter().map(|c| {
-                reuse(c)
-                    .unwrap_or_else(|| Contour::new(c.iter().map(|h| next.half_quad(*h)).collect()))
-            });
-            let exterior = contours.next().unwrap_or_else(|| Contour::new(Vec::new()));
-            let mut s = FillShape::new(f.color, exterior, contours.collect())
-                .with_scope(layer_id, group_path);
+            let mut s = next.face_shape_with(f, layer_id, group_path, reuse);
             if let [src] = f.srcs[..] {
                 if heir.get(&src).is_some_and(|h| h.1 == i) {
                     s.shape_id = src;
@@ -1192,23 +1203,24 @@ fn written_faces(next: &PlanarMap) -> Option<Vec<MapFace>> {
 // 選択ツールの輪郭の変形（頂点の移動・辺のつまみ）で使う
 // ============================================================================
 
-/// 1つのレイヤー・階層の地図（計算に使うふつうの形と、しまう形）と、図形に書き戻すときの下ごしらえ（辺の鍵。書き戻す
-/// ときに1回だけ作る）。ふつうの形は、いつもしまう形から決まった順で作ったもの（`StoredMap::to_dense`）。セル画の地図の
-/// 面の図形（写し）も、初めて要るときに作ってここに持つ（`LayerBase::faces`）
+/// 1つのレイヤー・階層の地図の、計算に使う写し：ふつうの形（いつもしまう形から決まった順で作ったもの：
+/// `StoredMap::to_dense`）と、図形に書き戻すときの下ごしらえ（辺の鍵。書き戻すときに1回だけ作る）と、面の図形（写し。
+/// 初めて要るときに作る：`LayerBase::faces`）。写しは、それを使う所が持つ（画面の土台・地図の編集の間・カーソル合わせ）。
+/// 文書と Undo の控えは、しまう形（`StoredMap`）だけを持つ
 #[derive(Debug)]
 pub(crate) struct LayerBase {
     pub(crate) map: PlanarMap,
     pub(crate) stored: StoredMap,
     keys: OnceLock<HashSet<[u64; 6]>>,
-    /// 面の図形：（階層, 面ごとの図形。番号は面の印）
+    /// 面の図形：（階層, 面ごとの図形。番号は面の印。番号の順）
     faces: SyncCache<Option<FaceShapes>>,
 }
 
-/// 地図の面の図形（写し）：（階層, 面の順の図形）
+/// 地図の面の図形（写し）：（階層, 面の番号の順の図形）
 type FaceShapes = (Vec<u64>, Arc<[Arc<FillShape>]>);
 
 impl LayerBase {
-    /// 地図 `map` を、しまう形にして決まった順に並べ直したもの
+    /// 地図 `map` を、しまう形にして決まった順に並べ直したもの（文書に入らない、その場で使う地図）
     pub(crate) fn new(map: &PlanarMap) -> Self {
         Self::from_stored(StoredMap::from_dense(map, None))
     }
@@ -1222,37 +1234,47 @@ impl LayerBase {
         }
     }
 
-    /// セル画にしまってある地図 `stored` の、計算に使う形。しまい場所に無ければ作って入れる
+    /// しまった地図 `stored` の計算に使う写し：いま誰かが持っていればそれ、無ければ作る（作ったものを生かすのは、
+    /// 受け取った所だけ）
     pub(crate) fn of_stored(stored: &StoredMap) -> Arc<Self> {
-        let key = BaseKey::Stored(stored.id());
-        if let Some(base) = cached_base(&key) {
+        let mut slot = stored
+            .dense_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(base) = slot.upgrade() {
             return base;
         }
         let base = Arc::new(Self::from_stored(stored.clone()));
-        remember(key, base.clone());
+        *slot = Arc::downgrade(&base);
         base
     }
 
-    /// セル画にしまう地図 `stored`（階層 `group_path`）の計算に使う形を、面の図形を前から持つ図形 `known`（番号ごと。変わら
-    /// ない面は前の図形、形の変わった面は番号を引き継いだ新しい図形）で作って、しまい場所に入れる（地図の編集のあと。画面の
-    /// 描画キャッシュは、番号と版が同じ図形から引き継がれる）
-    pub(crate) fn remember_with_faces(
+    /// しまう地図 `stored`（階層 `group_path`）の計算に使う写しを、面の図形 `known`（番号ごと。変わらない面は前の図形、
+    /// 形の変わった面は番号を引き継いだ新しい図形）で作る（地図の編集のあと。面を求め直さない。画面の描画キャッシュは、
+    /// 番号と版が同じ図形から引き継がれる）。地図の面と図形は1対1で、`known` はちょうど地図の面の図形
+    pub(crate) fn with_faces(
         stored: StoredMap,
         group_path: &[u64],
-        known: &HashMap<ShapeId, Arc<FillShape>>,
-    ) {
+        known: HashMap<ShapeId, Arc<FillShape>>,
+    ) -> Arc<Self> {
         let base = Self::from_stored(stored);
-        let (faces, _) = base.map.faces();
-        let shapes: Arc<[Arc<FillShape>]> = faces
-            .iter()
-            .map(|f| match f.srcs[..] {
-                [id] => known.get(&id).cloned(),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()
-            .map_or_else(|| base.face_shapes(group_path), Into::into);
-        *base.faces.lock() = Some((group_path.to_vec(), shapes));
-        remember(BaseKey::Stored(base.stored.id()), Arc::new(base));
+        let mut shapes: Vec<Arc<FillShape>> = known.into_values().collect();
+        shapes.sort_unstable_by_key(|s| s.shape_id);
+        #[cfg(test)]
+        if test_checks() {
+            let mut labels: Vec<ShapeId> = face_ids(&base.map).1;
+            labels.sort_unstable();
+            let ids: Vec<ShapeId> = shapes.iter().map(|s| s.shape_id).collect();
+            assert_eq!(ids, labels, "置いた面の図形が地図の面と食い違う");
+        }
+        *base.faces.lock() = Some((group_path.to_vec(), shapes.into()));
+        let base = Arc::new(base);
+        *base
+            .stored
+            .dense_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Arc::downgrade(&base);
+        base
     }
 
     /// 面の図形（写し。階層 `group_path`）。面の順で、図形の番号は面の印（セル画の地図の面には、いつも1つずつ別の番号が
@@ -1269,10 +1291,10 @@ impl LayerBase {
         shapes
     }
 
-    /// 面の図形を地図から作る（`faces`）
+    /// 面の図形を地図から作る（`faces`。番号の順）
     fn face_shapes(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
         let (faces, ids) = face_ids(&self.map);
-        faces
+        let mut shapes: Vec<Arc<FillShape>> = faces
             .iter()
             .zip(ids)
             .map(|(f, id)| {
@@ -1280,27 +1302,19 @@ impl LayerBase {
                 s.shape_id = id;
                 Arc::new(s)
             })
-            .collect()
+            .collect();
+        shapes.sort_unstable_by_key(|s| s.shape_id);
+        shapes.into()
     }
 
     /// 図形から作る地図：座標の変換 `xform` で置いた図形 `own`（下から上への並び。変換したあとの座標）の地図。地図は
     /// 文書の座標で作る（`with_doc_shapes`）。セル画にある地図はセル画から読むので（`Cel::scope_base`）、これを使うのは
     /// 新しい中身を作るとき（貼り付け・シンボル化・地図で形を変えない操作のあとの階層）だけ。正しい地図でない図形（重なった
-    /// 図形など）は、並びの順に塗り重ねて作り直す（`painted_map`。絵は同じ）。同じ図形・同じ変換なら、しまい場所
-    /// （`LAYER_BASES`）の地図を使う。`None`：格子に置けない座標がある
+    /// 図形など）は、並びの順に塗り重ねて作り直す（`painted_map`。絵は同じ）。`None`：格子に置けない座標がある
     pub(crate) fn of(own: &[&FillShape], xform: Affine) -> Option<Arc<Self>> {
-        Self::keyed(own, xform, MapKey::new(own, xform))
-    }
-
-    /// `of` の、鍵を作ったあと
-    fn keyed(own: &[&FillShape], xform: Affine, key: MapKey) -> Option<Arc<Self>> {
-        let key = BaseKey::Shapes(key);
-        if let Some(base) = cached_base(&key) {
-            return Some(base);
-        }
         #[cfg(test)]
         FROM_SHAPES.with(|n| n.set(n.get() + 1));
-        let base = Arc::new(with_doc_shapes(own, xform, |own| {
+        let base = with_doc_shapes(own, xform, |own| {
             if !own.iter().all(|s| shape_on_grid(s)) {
                 return None;
             }
@@ -1310,9 +1324,8 @@ impl LayerBase {
             } else {
                 Self::new(&painted_map(own)?)
             })
-        })?);
-        remember(key, base.clone());
-        Some(base)
+        })?;
+        Some(Arc::new(base))
     }
 
     /// この地図（文書の座標）の面の図形 `own` に、編集した地図 `next` を書き戻す差分（`MapChange`。新しい形も文書の座標。
@@ -1372,41 +1385,9 @@ impl LayerBase {
     }
 }
 
-/// 図形から作る地図（`LayerBase::of`）を決めるもの：図形を置いた座標の変換（係数6つのビット）と、図形の（番号,
-/// `mesh_revision`）の並び。`mesh_revision` は図形の形を変えるたびにアプリ全体で新しい値になるので、並びが同じなら図形も
-/// 同じ。図形は変換の逆で文書の座標へ写すので（`FillShape::to_doc`）、変換も入れて、はじめて地図が1つに決まる
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct MapKey {
-    xform: [u64; 6],
-    shapes: Vec<(ShapeId, u64)>,
-}
-
-impl MapKey {
-    pub(crate) fn new(own: &[&FillShape], xform: Affine) -> Self {
-        Self {
-            xform: xform.as_coeffs().map(f64::to_bits),
-            shapes: own.iter().map(|s| (s.shape_id, s.mesh_revision)).collect(),
-        }
-    }
-}
-
-/// 地図のしまい場所（計算に使う形の置き場）：（鍵, 地図）。セル画の地図の計算に使う形と面の図形（`ScopeMap::base`。
-/// 外れたら、しまった塊から作り直す）と、図形から作った地図（`LayerBase::of`）。新しく使ったものを前に、
-/// `LAYER_BASES_LEN` 個まで
-static LAYER_BASES: SyncCache<Vec<(BaseKey, Arc<LayerBase>)>> = SyncCache::new(Vec::new());
-
-/// しまい場所の鍵：セル画にしまった地図（`StoredMap::id`。しまい場所の地図がその地図を持つので、番地は使い回されない）
-/// か、図形から作った地図（`MapKey`）
-#[derive(Clone, Debug, PartialEq)]
-enum BaseKey {
-    Stored(usize),
-    Shapes(MapKey),
-}
-const LAYER_BASES_LEN: usize = 64;
-
 #[cfg(test)]
 thread_local! {
-    /// テスト用：このスレッドで、図形から地図を作った回数（`LayerBase::keyed`）
+    /// テスト用：このスレッドで、図形から地図を作った回数（`LayerBase::of`）
     static FROM_SHAPES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -1414,22 +1395,6 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn from_shape_builds() -> usize {
     FROM_SHAPES.with(|n| n.get())
-}
-
-/// テスト用：地図のしまい場所を空にする（外れた地図が、しまった塊から作り直されることを確かめる）
-#[cfg(test)]
-pub(crate) fn clear_layer_bases() {
-    LAYER_BASES.lock().clear();
-}
-
-/// しまい場所の、鍵 `key` の地図（新しく使ったものとして前に出す）
-fn cached_base(key: &BaseKey) -> Option<Arc<LayerBase>> {
-    let mut cache = LAYER_BASES.lock();
-    let i = cache.iter().position(|(k, _)| k == key)?;
-    let entry = cache.remove(i);
-    let base = entry.1.clone();
-    cache.insert(0, entry);
-    Some(base)
 }
 
 /// 図形 `shapes`（座標の変換 `xform` で置いた図形）を文書の座標の形（`FillShape::to_doc`）にして `f` に渡す。地図は
@@ -1539,7 +1504,7 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
         let rest = floating
             .and_then(|fl| fl.layers().iter().find(|l| l.layer_id == *layer_id))
             .and_then(|l| l.origin.as_ref())
-            .map(|o| o.rest.clone());
+            .map(|o| o.base());
         let base = match rest {
             Some(rest) => rest,
             None => session.base_cache.cel(*layer_id)?.scope_base(scope),
@@ -1695,7 +1660,7 @@ fn floating_maps(scene: Scene<'_>, session: &Session) -> Vec<LayerMap> {
             out.push(LayerMap {
                 layer_id: l.layer_id,
                 group_path: session.editing_group_path.clone(),
-                base: g.base.clone(),
+                base: g.base(),
                 xform: world * g.xform,
                 first_idx,
                 owner: MapOwner::Floating(l.layer_id, gi),
@@ -2058,23 +2023,16 @@ pub(crate) struct MapChange {
     pub(crate) map: PlanarMap,
 }
 
-/// 地図で編集した差分 `change` を、図形の並び `shapes`（座標の変換 `xform` で置いた図形）のレイヤー `layer_id`・階層
-/// `group_path` に入れ（`apply_shape_diff`）、入れたあとのその階層の生の図形の本当の地図として、結果の地図を索引と
-/// しまい場所に入れる（テスト用：文書の無い図形の並びで、地図の編集を試す）
+/// 地図で編集した差分 `change` を、図形の並び `shapes` のレイヤー `layer_id`・階層 `group_path` に入れる
+/// （`apply_shape_diff`。テスト用：文書の無い図形の並びで、地図の編集を試す）
 #[cfg(test)]
 pub(crate) fn apply_map_change(
     shapes: &mut Vec<FillShape>,
     change: MapChange,
     layer_id: LayerId,
     group_path: &[u64],
-    xform: Affine,
 ) {
     apply_shape_diff(shapes, &change.removed, change.added, layer_id, group_path);
-    let own = layer_own(shapes, layer_id, group_path);
-    remember(
-        BaseKey::Shapes(MapKey::new(&own, xform)),
-        Arc::new(LayerBase::new(&change.map)),
-    );
 }
 
 // ============================================================================
@@ -2226,8 +2184,10 @@ pub(crate) fn region_map(parts: &[&PlanarMap], rect: Option<&FillShape>) -> Opti
 /// 浮いた片を切り出す：セル画の地図 `cel`（文書の図形 `own` の地図）の、中身 `content`
 /// （`cel` の地図そのものか、前に切り出した残り）を、選ぶ所 `region` で1回切る。（残りの差分, 中の差分）：残りの差分の
 /// 消す図形が隠す図形、新しく入れる形が残りの図形、地図が残りの地図。中の差分の地図が片の地図（丸ごと中にあるセル画の
-/// 面は、その番号のまま）。新しく入れる形は、隠す元の図形とは別の新しい図形なので、番号を新しく振る（地図の印も）。
-/// 中と外は同じ地図から作るので、境目が両側でビットまで同じ。`None`：格子に置けない座標がある
+/// 面は、その番号のまま）。片の新しい形は、残りの形と同じ元の図形を引き継ぐことがあるので、番号を新しく振る（地図の
+/// 印も）。残りの形は、セル画の地図の書き換えと同じく、元の図形の番号を引き継ぐ（隠す元の図形と入れ替わる。残りの地図の
+/// 印が変わらないので、残りの地図は、切り口から離れた所の塊をセル画の地図と共有する）。中と外は同じ地図から作るので、
+/// 境目が両側でビットまで同じ。`None`：格子に置けない座標がある
 pub(crate) fn cut_out(
     cel: &LayerBase,
     own: &[&FillShape],
@@ -2238,9 +2198,8 @@ pub(crate) fn cut_out(
 ) -> Option<(MapChange, MapChange)> {
     let inside = content.overlay(region, MapRule::KeepInside)?;
     let rest = content.overlay(region, MapRule::Paint(None))?;
-    let mut rest_change = cel.diff(&rest, own, layer_id, group_path)?;
+    let rest_change = cel.diff(&rest, own, layer_id, group_path)?;
     let mut inside_change = cel.diff(&inside, own, layer_id, group_path)?;
-    rest_change.renew_ids();
     inside_change.renew_ids();
     Some((rest_change, inside_change))
 }
@@ -2264,14 +2223,6 @@ impl MapChange {
             rename(&mut e.right_src);
         }
     }
-}
-
-/// 地図 `base` を、鍵 `key` の地図としてしまい場所（`LAYER_BASES`）に入れる
-fn remember(key: BaseKey, base: Arc<LayerBase>) {
-    let mut cache = LAYER_BASES.lock();
-    cache.retain(|(k, _)| *k != key);
-    cache.insert(0, (key, base));
-    cache.truncate(LAYER_BASES_LEN);
 }
 
 /// 地図で編集した結果
@@ -5261,6 +5212,36 @@ fn area2_of(pts: &[IPt]) -> i128 {
             p.0 as i128 * q.1 as i128 - q.0 as i128 * p.1 as i128
         })
         .sum()
+}
+
+/// 輪の区間の並び `segs` を、始点の座標がいちばん小さい区間から始まるように回したもの（同じ点から始まる所が2つ以上
+/// あれば、そこからの始点の並びがいちばん小さいもの）
+fn from_lowest_point(mut segs: Vec<QuadBez>) -> Vec<QuadBez> {
+    let n = segs.len();
+    let start = (0..n)
+        .min_by(|&i, &j| {
+            (0..n)
+                .map(|k| point_order(segs[(i + k) % n].p0, segs[(j + k) % n].p0))
+                .find(|o| o.is_ne())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(0);
+    segs.rotate_left(start);
+    segs
+}
+
+/// 点の、座標の小さい順（x、同じなら y）
+fn point_order(p: Point, q: Point) -> std::cmp::Ordering {
+    p.x.total_cmp(&q.x).then_with(|| p.y.total_cmp(&q.y))
+}
+
+/// 輪の、始点の並びの小さい順
+fn starts_order(a: &[QuadBez], b: &[QuadBez]) -> std::cmp::Ordering {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| point_order(x.p0, y.p0))
+        .find(|o| o.is_ne())
+        .unwrap_or_else(|| a.len().cmp(&b.len()))
 }
 
 /// 向きのある辺 `h` の判定の形の最初の区間の真ん中の点（2倍の座標）

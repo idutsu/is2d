@@ -10599,12 +10599,31 @@ fn run_and_verify_scene_cache_consistency(
     run(app, &[action]);
     let before: Vec<FillShape> = app.scene().iter().cloned().collect();
 
-    // 1. clear_overlay() と、土台のキャッシュを空から作り直す処理を実行
+    // 1. 全部のレイヤーを作り直す（計算に使う写しの持ち主は画面の土台のまま）：図形は版まで同じ
+    let ids: Vec<u64> = app.tabs[app.active]
+        .active_timeline()
+        .layers
+        .iter()
+        .map(|l| l.id)
+        .collect();
+    for id in ids {
+        app.tabs[app.active].session.base_cache.invalidate_layer(id);
+    }
+    app.tabs[app.active].refresh_scene_base();
+    app.tabs[app.active].session.clear_overlay();
+    let after: Vec<FillShape> = app.scene().iter().cloned().collect();
+    assert_same_scene(&before, &after, label, true);
+
+    // 2. 土台を空から作り直す（写しの持ち主がいないので、面の図形は作り直す）：形・色・番号は同じ（版は新しくなってよい）
     app.tabs[app.active].session.base_cache = Default::default();
     app.tabs[app.active].refresh_scene_base();
     app.tabs[app.active].session.clear_overlay();
-
     let after: Vec<FillShape> = app.scene().iter().cloned().collect();
+    assert_same_scene(&before, &after, label, false);
+}
+
+/// 場面の図形 `before` と `after` が同じ（形はビットまで。`same_revision` なら生の図形の版も）
+fn assert_same_scene(before: &[FillShape], after: &[FillShape], label: &str, same_revision: bool) {
     assert_eq!(
         before.len(),
         after.len(),
@@ -10657,10 +10676,12 @@ fn run_and_verify_scene_cache_consistency(
         );
         if a.symbol_instance.is_none() {
             assert_eq!(a.shape_id, b.shape_id, "[{label} #{idx}] shape_id mismatch");
-            assert_eq!(
-                a.mesh_revision, b.mesh_revision,
-                "[{label} #{idx}] mesh_revision mismatch"
-            );
+            if same_revision {
+                assert_eq!(
+                    a.mesh_revision, b.mesh_revision,
+                    "[{label} #{idx}] mesh_revision mismatch"
+                );
+            }
         }
     }
 }
@@ -21983,6 +22004,99 @@ mod map_overlay {
         m
     }
 
+    /// ブラシ `strokes` 本で描いた地図を、倍率 `scale` で縮めた地図（その座標の格子で正しい地図にしたもの：`realized`）。
+    /// とても小さい形の試し（拡大したシンボルの中など。特徴の大きさが格子の目の数十個ほど）
+    fn tiny_brush_map(seed: u64, strokes: usize, scale: f64) -> PlanarMap {
+        let mut r = Rng(seed);
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+        let mut m = PlanarMap::default();
+        for _ in 0..strokes {
+            let cnt = 2 + (r.f() * 4.0) as usize;
+            let mut pts = Vec::new();
+            let mut p = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
+            for _ in 0..cnt {
+                let q = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
+                for j in 0..10 {
+                    pts.push(p.lerp(q, j as f64 / 10.0));
+                }
+                p = q;
+            }
+            pts.push(p);
+            let color = colors[(r.f() * 4.0) as usize % 4];
+            let stroke = build_smoothed_stroke_shapes_at_zoom(
+                &generate_brush_outline_at_zoom(&pts, 3.0 + r.f() * 10.0, 1.0),
+                color,
+                1.0,
+            );
+            if let Some(next) = m.overlay(MapInput::Shapes(&stroke), MapRule::Paint(Some(color))) {
+                m = next;
+            }
+        }
+        crate::planar_map::realized(&m, kurbo::Affine::scale(scale)).expect("縮めた地図")
+    }
+
+    /// 地図 `m` で、頂点の移動と辺のつまみ（ずらす量は `reach`）を交互に `n` 回確定し、（確定できた回, 正しくない地図の説明）
+    fn reshape_failures(m: &PlanarMap, seed: u64, n: usize, reach: f64) -> (usize, Vec<String>) {
+        let mut r = Rng(seed);
+        let (mut bad, mut done) = (Vec::new(), 0);
+        for k in 0..n {
+            let d = kurbo::Vec2::new(r.f() - 0.5, r.f() - 0.5) * reach;
+            let (next, what) = if k % 2 == 0 {
+                let v = (r.f() * m.nodes.len() as f64) as usize % m.nodes.len();
+                (m.commit_move_vertex(v, m.nodes[v] + d), format!("頂点 {v}"))
+            } else {
+                let e = (r.f() * m.edges.len() as f64) as usize % m.edges.len();
+                let target = m.quad(e).eval(0.5) + d;
+                (m.commit_pull_edge(e, 0.5, target), format!("辺 {e}"))
+            };
+            if let Some(next) = next {
+                done += 1;
+                if !next.is_valid() {
+                    bad.push(format!("{k}（{what}）：{}", next.validity_report()));
+                }
+            }
+        }
+        (done, bad)
+    }
+
+    /// とても小さい形でも、頂点の移動・辺のつまみの結果はいつも正しい地図（レビュー 7f63b04 の N-1002。直す前（N-1003 の
+    /// 前）は、倍率 1e-4 で 400 回中 113 回が、左右の色がまざった輪郭のある地図になり、確定が黙って断られた。重ねる線の端に
+    /// 入った t の幅 0 の区間で、区間の向きが決まらなかったため。同じ線の決まり（`Span`）で、t の幅 0 の区間を作らなくなった）
+    #[test]
+    fn tiny_scale_reshapes_keep_map_valid() {
+        let scale = 1e-4;
+        let m = tiny_brush_map(99, 40, scale);
+        assert!(valid(&m), "{}", m.validity_report());
+        let (done, bad) = reshape_failures(&m, 7, 200, 6.0 * scale);
+        assert!(done > 180, "確定できた回 {done}");
+        assert!(bad.is_empty(), "正しくない地図 {} 回：{:?}", bad.len(), bad);
+    }
+
+    /// とても小さい形の頂点の移動・辺のつまみを、種と倍率を変えて数える
+    #[test]
+    #[ignore]
+    fn probe_tiny_scale_reshapes() {
+        for seed in [99, 5, 17, 23] {
+            for scale in [1e-3, 3e-4, 1e-4, 5e-5] {
+                let m = tiny_brush_map(seed, 40, scale);
+                let (done, bad) = reshape_failures(&m, seed + 1, 400, 6.0 * scale);
+                eprintln!(
+                    "PROBE 種 {seed}・倍率 {scale:e}：辺 {}・確定 {done}・正しくない地図 {}",
+                    m.edges.len(),
+                    bad.len()
+                );
+                if std::env::var("PROBE_DETAIL").is_ok() {
+                    for b in &bad {
+                        eprintln!(
+                            "PROBE   {}",
+                            b.replace('\n', " | ").chars().take(900).collect::<String>()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// 地図だけで描く試し（`native_scene` と同じ作り方）を種 `seed` で `steps` 手行い、結果が正しい地図でなくなった最初の手
     /// （無ければ `None`）
     fn native_steps(seed: u64, steps: usize) -> Option<String> {
@@ -25206,9 +25320,50 @@ mod map_overlay {
         );
     }
 
-    /// 再生・スクラブで初めて出すセルの手間：図形の多い場面（3 レイヤー・線 180 本）で、地図のしまい場所を空にして
-    /// （初めて出すセルと同じ）画面の土台を作り直す時間と、再生の1コマ（レイヤーごとの結合メッシュ）の時間。あわせて、
-    /// キーフレームを 30 個に増やして保存した作品を開く時間
+    /// 計算に使う写しの持ち主（画面の土台・カーソル合わせの地図）を空にする（どのセル画の写しも誰も持たない：初めて出す
+    /// セルと同じ）。画面の土台は、次の `refresh_scene_base` で全部のレイヤーを作り直す
+    fn drop_map_copies(app: &mut Is2dApp) {
+        app.session.base_cache = Default::default();
+        *app.session.planar_maps.lock() = None;
+    }
+
+    /// Undo・Redo の時間：図形の多い場面（3 レイヤー・線 180 本）で、ブラシ1本のあとの Undo と Redo（画面の土台を
+    /// 作り直すまで）
+    #[test]
+    #[ignore]
+    fn probe_undo_redo_timing() {
+        let mut app = dense_scene_app(7);
+        let mut r = Rng(21);
+        let (mut undo, mut redo) = (Vec::new(), Vec::new());
+        for _ in 0..30 {
+            app.tool.brush_color = Color32::from_rgb((r.f() * 255.0) as u8, 80, 160);
+            let a = Point::new(-300.0 + r.f() * 600.0, -200.0 + r.f() * 400.0);
+            let pts: Vec<Point> = (0..=10)
+                .map(|j| a + KVec2::new(j as f64 * 5.0, 0.0))
+                .collect();
+            doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 6.0));
+            let t = std::time::Instant::now();
+            app.undo();
+            app.refresh_scene_base();
+            undo.push(t.elapsed().as_secs_f64() * 1e3);
+            let t = std::time::Instant::now();
+            app.redo();
+            app.refresh_scene_base();
+            redo.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        let stat = |v: &[f64]| {
+            (
+                v.iter().sum::<f64>() / v.len() as f64,
+                v.iter().cloned().fold(0.0, f64::max),
+            )
+        };
+        let ((ua, um), (ra, rm)) = (stat(&undo), stat(&redo));
+        eprintln!("PROBE Undo 平均 {ua:.2}ms・最大 {um:.2}ms｜Redo 平均 {ra:.2}ms・最大 {rm:.2}ms");
+    }
+
+    /// 再生・スクラブで初めて出すセルの手間：図形の多い場面（3 レイヤー・線 180 本）で、計算に使う写しの持ち主（画面の
+    /// 土台・カーソル合わせの地図）を空にして（初めて出すセルと同じ）画面の土台を作り直す時間と、再生の1コマ（レイヤーごとの
+    /// 結合メッシュ）の時間。あわせて、キーフレームを 30 個に増やして保存した作品を開く時間
     #[test]
     #[ignore]
     fn probe_unseen_cel_display() {
@@ -25217,14 +25372,11 @@ mod map_overlay {
         let ids: Vec<u64> = app.doc.root.layers.iter().map(|l| l.id).collect();
         let (mut rebuild, mut playback) = (Vec::new(), Vec::new());
         for _ in 0..20 {
-            crate::planar_map::clear_layer_bases();
-            for &id in &ids {
-                app.session.base_cache.invalidate_layer(id);
-            }
+            drop_map_copies(&mut app);
             let t = std::time::Instant::now();
             app.refresh_scene_base();
             rebuild.push(t.elapsed().as_secs_f64() * 1e3);
-            crate::planar_map::clear_layer_bases();
+            drop_map_copies(&mut app);
             let t = std::time::Instant::now();
             for i in 0..ids.len() {
                 let _ = app.doc.root.build_cel_world_batch_mesh(
@@ -25270,6 +25422,113 @@ mod map_overlay {
             size as f64 / 1e6
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 画面に出しているセル画の計算に使う写しの持ち主は画面の土台：ほかのセル画（保存・再生・書き出しのように、写しの
+    /// 持ち主のいない地図）をいくつ使っても、写しは同じもののままで、ブラシ1本のあとも変わらない面の図形は版が同じ
+    /// （描画キャッシュを引き継ぐ）。アプリ全体の置き場が無いので、ほかの処理に左右されない（レビュー 7f63b04 の N-1001。
+    /// 直す前は、ほかのセル画を 64 個通すと写しが置き場から押し出され、面の図形がみな新しい版になった）
+    #[test]
+    fn shown_cel_map_copy_does_not_depend_on_other_cels() {
+        let mut app = Is2dApp::default();
+        let mut r = Rng(3);
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN];
+        for i in 0..20 {
+            app.tool.brush_color = colors[i % 3];
+            let a = Point::new(-300.0 + r.f() * 600.0, -200.0 + r.f() * 400.0);
+            let b = Point::new(-300.0 + r.f() * 600.0, -200.0 + r.f() * 400.0);
+            let pts: Vec<Point> = (0..=12).map(|j| a.lerp(b, j as f64 / 12.0)).collect();
+            doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 5.0));
+        }
+        let lid = app.doc.root.layers[0].id;
+        let held = |app: &Is2dApp| app.session.base_cache.cel(lid).unwrap().scope_base(&[]);
+        let before = held(&app);
+        let versions: Vec<(u64, u64)> = app
+            .scene()
+            .iter()
+            .map(|s| (s.shape_id, s.mesh_revision))
+            .collect();
+        for seed in 0..100 {
+            let cel = crate::timeline::Cel::from_maps(
+                vec![(Vec::new(), native_scene(seed, 4))],
+                Vec::new(),
+                None,
+            );
+            assert!(!cel.shapes().is_empty());
+        }
+        assert!(
+            std::sync::Arc::ptr_eq(&before, &held(&app)),
+            "ほかのセル画を使っても、画面の土台の写しは同じ"
+        );
+        // 何も無い所にブラシ1本：前からの面の図形は、みな同じ版のまま
+        app.tool.brush_color = Color32::BLACK;
+        let pts: Vec<Point> = (0..=6)
+            .map(|j| Point::new(500.0 + j as f64 * 4.0, 300.0))
+            .collect();
+        doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 4.0));
+        let after: std::collections::HashSet<(u64, u64)> = app
+            .scene()
+            .iter()
+            .map(|s| (s.shape_id, s.mesh_revision))
+            .collect();
+        assert!(
+            versions.iter().all(|v| after.contains(v)),
+            "変わらない面の図形の版が変わった"
+        );
+        assert_eq!(after.len(), versions.len() + 1);
+    }
+
+    /// 矩形で選んで動かしても、Undo の控えの浮いた片は、しまう形だけを持ち（計算に使う写しは持たない）、残りの地図は
+    /// セル画の地図の、切り口で変わらなかった塊を共有する（レビュー 7f63b04 の N-2002。直す前は、控え1件が残りの地図を、
+    /// 計算に使う形と、塊を共有しないしまう形の2つで丸ごと持った）
+    #[test]
+    fn floating_undo_snapshots_hold_only_stored_maps() {
+        let mut app = dense_scene_app(7);
+        select_ops::apply_marquee_selection(
+            &mut app,
+            Point::new(-60.0, -40.0),
+            Point::new(60.0, 40.0),
+            false,
+        );
+        for _ in 0..3 {
+            doc_actions::finish_move_selection_drag(&mut app, KVec2::new(5.0, 3.0), false);
+        }
+        let cel_map = |lid: u64| {
+            let l = app.doc.root.layers.iter().find(|l| l.id == lid).unwrap();
+            l.keyframes[0].cel.maps[0].stored().clone()
+        };
+        let mut rests = 0;
+        for e in app.history.undo_stack.iter() {
+            let Some(fl) = e.floating.as_ref() else {
+                continue;
+            };
+            for (lid, rest, groups) in fl.stored_maps() {
+                assert!(groups.iter().all(|(_, held)| !held), "控えの片が写しを持つ");
+                let Some((rest, held)) = rest else {
+                    continue;
+                };
+                assert!(!held, "控えの残りが写しを持つ");
+                let cel = cel_map(lid);
+                let shared = rest.shared_tiles(&cel);
+                let mut seen = std::collections::HashSet::new();
+                let _ = cel.bytes_unseen(&mut seen);
+                let own = rest.bytes_unseen(&mut seen);
+                let whole = rest.bytes_unseen(&mut std::collections::HashSet::new());
+                eprintln!(
+                    "PROBE 残り 塊 {}・共有 {shared}｜控えが持つ分 {:.1}KB（丸ごとなら {:.1}KB）",
+                    rest.tiles(),
+                    (own.0 + own.1) as f64 / 1e3,
+                    (whole.0 + whole.1) as f64 / 1e3
+                );
+                assert!(
+                    shared * 4 >= rest.tiles() * 3,
+                    "残りの塊 {} 個のうち、セル画と共有するのが {shared} 個",
+                    rest.tiles()
+                );
+                rests += 1;
+            }
+        }
+        assert!(rests > 0, "控えに浮いた片の残りがある");
     }
 
     /// セル画の地図は場所ごとの塊でしまう：ブラシ1本で新しくなるのは、線の近くの塊だけ（ほかは前の地図・Undo の控えと
@@ -25318,10 +25577,8 @@ mod map_overlay {
         let before_bits = bits(&before.base().map);
         assert!(before.stored().tiles() > 50, "塊が十分ある場面");
 
-        // しまい場所が空でも、塊から作った地図はビットまで同じで、操作が読む地図（画面の土台のセル画）も同じ
-        crate::planar_map::clear_layer_bases();
-        assert_eq!(bits(&before.base().map), before_bits);
-        crate::planar_map::clear_layer_bases();
+        // 塊から作り直した地図はビットまで同じで、操作が読む地図（画面の土台が持つ写し）も同じ
+        assert_eq!(bits(&before.dense()), before_bits);
         let base = app
             .session
             .base_cache
@@ -25334,8 +25591,8 @@ mod map_overlay {
         );
         assert_eq!(bits(&base.map), before_bits);
 
-        // ブラシ1本（小さな線）で新しくなるのは、線の近くの塊だけ。しまい場所が空でも、図形から作り直さない
-        crate::planar_map::clear_layer_bases();
+        // ブラシ1本（小さな線）で新しくなるのは、線の近くの塊だけ。写しの持ち主がいなくても、図形から作り直さない
+        drop_map_copies(&mut app);
         let built = crate::planar_map::from_shape_builds();
         app.tool.brush_color = Color32::BLACK;
         let pts: Vec<Point> = (0..=8)
@@ -25363,8 +25620,7 @@ mod map_overlay {
         app.undo();
         let undone = scope(&app);
         assert!(undone.stored().same(before.stored()));
-        crate::planar_map::clear_layer_bases();
-        assert_eq!(bits(&undone.base().map), before_bits);
+        assert_eq!(bits(&undone.dense()), before_bits);
 
         // 塊を持つのは地図だけ：前の地図と共有した塊も、前の地図を捨てれば持ち主はその地図1つに戻る（アプリ全体の
         // 置き場は無い）
@@ -25694,9 +25950,8 @@ mod map_overlay {
             .map(|p| matches!(p, Part::Shape(_)))
             .collect();
         assert_eq!(kinds, vec![true, true, false, false]);
-        // 面の図形の番号は地図の面の印で、作り直しても同じ
+        // 面の図形の番号は地図の面の印で、作り直しても同じ（このセル画の写しは誰も持たないので、呼ぶたびに作り直す）
         let ids: Vec<u64> = cel.shapes().iter().map(|s| s.shape_id).collect();
-        crate::planar_map::clear_layer_bases();
         assert_eq!(
             cel.shapes().iter().map(|s| s.shape_id).collect::<Vec<_>>(),
             ids

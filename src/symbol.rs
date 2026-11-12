@@ -4,6 +4,7 @@ use std::sync::Arc;
 use eframe::egui::{self, Color32, Mesh, Vec2};
 use kurbo::{Affine, Point};
 
+use crate::planar_map::LayerBase;
 #[cfg(test)]
 pub(crate) use crate::timeline::interpolate_affine_with_pivot;
 use crate::timeline::{Cel, Layer, Timeline};
@@ -141,11 +142,14 @@ pub(crate) struct SymbolEvalState {
     /// 前の回の描画で使ったもの（この回でも使うと `memo` へ移す）
     prev: HashMap<SymbolEvalMemoKey, Arc<Vec<FillShape>>>,
     library_sig: Vec<(u64, u64)>,
+    /// この回に展開したセル画の地図の、計算に使う写し（写しを持ち続けるのは、受け取った所：画面の土台）
+    held: Vec<Arc<LayerBase>>,
 }
 
 impl SymbolEvalState {
     /// 1回の描画の始めに呼ぶ
     pub(crate) fn start_pass(&mut self, library: &[SymbolDef]) {
+        self.held.clear();
         let same_library = self.library_sig.len() == library.len()
             && self
                 .library_sig
@@ -159,6 +163,11 @@ impl SymbolEvalState {
             self.prev.clear();
             self.library_sig = library.iter().map(|s| (s.id, s.revision)).collect();
         }
+    }
+
+    /// この回に展開したセル画の地図の、計算に使う写し
+    pub(crate) fn take_held(&mut self) -> Vec<Arc<LayerBase>> {
+        std::mem::take(&mut self.held)
     }
 }
 
@@ -225,6 +234,11 @@ impl<'a> SymbolEvalCtx<'a> {
     fn insert_memo(&self, key: SymbolEvalMemoKey, shapes: Arc<Vec<FillShape>>) {
         self.state.borrow_mut().memo.insert(key, shapes);
     }
+
+    /// 展開したセル画の地図の、計算に使う写しを、この回の終わりまで持つ（`SymbolEvalState::take_held`）
+    fn hold(&self, base: Arc<LayerBase>) {
+        self.state.borrow_mut().held.push(base);
+    }
 }
 
 /// 入れ子シンボル対応でセル画（階層の地図の面の図形と、シンボルインスタンス）を、背面→前面の重なりの順
@@ -236,6 +250,9 @@ pub(crate) fn resolve_cel_with_library(
     ctx: SymbolEvalCtx<'_>,
 ) -> Vec<FillShape> {
     let mut out = Vec::new();
+    for m in cel.maps.iter() {
+        ctx.hold(m.base());
+    }
     for part in cel.parts() {
         match part {
             crate::timeline::Part::Shape(s) => out.push((*s).clone()),
