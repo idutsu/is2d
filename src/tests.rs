@@ -27421,3 +27421,35 @@ fn a_curve_sharing_both_ends_with_a_straight_edge_is_not_the_same_line() {
         );
     }
 }
+
+/// 変換した地図が正しい地図にならず、面を塗り重ねて作り直しても（`realized`）、面の番号が残る：塗り重ねは、いちばん上の形
+/// の番号を面の印として運ぶ（レビュー 4f4e953 の N-2001。前は作り直した面の番号がみな新しくなり、選択から外れた）
+#[test]
+fn painting_faces_back_keeps_their_ids() {
+    let mut tried = 0;
+    for seed in 0..40 {
+        let map = tests::map_overlay::native_scene(seed, 12)
+            .checked()
+            .expect("正しい地図")
+            .uniquely_labeled()
+            .into_map();
+        let ids: std::collections::HashSet<_> = map.labels().collect();
+        for scale in [0.05, 0.02, 0.01] {
+            let xform = Affine::scale(scale);
+            if map.transformed(xform).is_valid() {
+                continue;
+            }
+            tried += 1;
+            let back = crate::planar_map::realized(&map, xform).expect("塗り重ねて作れる");
+            let (faces, _) = back.map().faces();
+            for f in &faces {
+                assert!(
+                    f.srcs.iter().any(|id| ids.contains(id)),
+                    "種 {seed}・倍率 {scale}：作り直した面に元の番号が無い {:?}",
+                    f.srcs
+                );
+            }
+        }
+    }
+    assert!(tried > 0, "塗り重ねに回る変換が無かった");
+}

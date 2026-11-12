@@ -19,6 +19,9 @@ use crate::vector_engine::{
 /// 辺の（左の色, 右の色）
 type Sides = (Option<Color32>, Option<Color32>);
 
+/// 面の印：色と、その面の図形の番号（重ね合わせで、色と一緒に伝える）
+type Label = (Option<Color32>, Option<ShapeId>);
+
 /// 辺。a → b に進んだときの左（面積の式で正の側）の色と、右の色を持つ。`None` は何も無い所。
 /// `left_src`・`right_src` は、その側の面がどの図形から来たか（図形から作ったときだけ意味がある）
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2056,7 +2059,7 @@ impl PlanarMap {
 }
 
 /// 地図 `map`（文書の座標）に変換 `xform` をかけ、その座標の格子で正しい地図にしたもの。変換した地図が正しくなければ
-/// （縮小で頂点が近づくなど）、変換した面を塗り重ねて作る（面は重ならないので、絵は同じ。面の番号は消える）。
+/// （縮小で頂点が近づくなど）、変換した面を塗り重ねて作る（面は重ならないので、絵は同じ。面の番号は残る）。
 /// 「変形した形を、その座標の格子で地図にする」決まり。結果は確かめた地図（`checked`）。`None`：格子に置けない座標が
 /// あるか、正しい地図にならない
 pub(crate) fn realized(map: &PlanarMap, xform: Affine) -> Option<CheckedMap> {
@@ -2075,11 +2078,16 @@ pub(crate) fn realized(map: &PlanarMap, xform: Affine) -> Option<CheckedMap> {
     if let Some(checked) = t.checked() {
         return Some(checked);
     }
+    // 面の形には、面の番号（辺の側に記された番号が1つなら、その番号）を付けて塗る。塗り重ねは、いちばん上の形の番号を
+    // 面の印として運ぶので、面の番号が残る（レビュー 4f4e953 の N-2001）
     let (faces, _) = map.faces();
     let shapes: Vec<FillShape> = faces
         .iter()
         .map(|f| {
             let mut s = map.face_shape(f, 0, &[]);
+            if let [id] = f.srcs[..] {
+                s.shape_id = id;
+            }
             s.transform(xform);
             s
         })
@@ -2381,6 +2389,18 @@ enum Over {
 }
 
 impl MapRule {
+    /// `apply` の新しい色に、その側の図形の番号を付けたもの：重ねるものの色を上に置いたなら（重ねる地図・下から上へ並べた
+    /// 形）重ねるものの番号 `over_src`、前の色のままなら前の番号、ほかは無し（新しい図形）
+    fn apply_label(self, over: &Over, over_src: Option<ShapeId>, old: Label) -> Label {
+        let color = self.apply(over, old.0);
+        let src = match (self, over) {
+            (MapRule::Overlay, Over::Color(Some(_))) => over_src,
+            _ if color == old.0 => old.1,
+            _ => None,
+        };
+        (color, src)
+    }
+
     /// 重ねるものの値 `over` と前の色 `old` から、新しい色
     fn apply(self, over: &Over, old: Option<Color32>) -> Option<Color32> {
         match (self, over) {
@@ -3328,8 +3348,13 @@ impl PlanarMap {
         //    足し引きはまたぐ順によらないので、i_overlay が交点を丸めて区間がほかの辺の向こうへ移っても、面の色は食い違わない
         let dbl = |p: IPt| (2 * p.0, 2 * p.1);
         let piece_ends: Vec<(IPt, IPt)> = pieces.iter().map(|p| (p.ia, p.ib)).collect();
-        // 区間ごとの、その地図（`old`：前の地図か）の出どころの辺の左右の色（区間の向きにそろえる）
-        let deltas = |old: bool| -> Vec<Vec<Sides>> {
+        // 辺 `e`（前からある辺か、重ねる地図の辺）の左右の印
+        let edge_labels = |e: usize| -> (Label, Label) {
+            let ed = self.edges[e];
+            ((ed.left, ed.left_src), (ed.right, ed.right_src))
+        };
+        // 区間ごとの、その地図（`old`：前の地図か）の出どころの辺の左右の印（区間の向きにそろえる）
+        let deltas = |old: bool| -> Vec<Vec<(Label, Label)>> {
             pieces
                 .iter()
                 .map(|p| {
@@ -3337,10 +3362,8 @@ impl PlanarMap {
                         .iter()
                         .filter_map(|pv| {
                             let lr = match srcs[pv.src as usize].1 {
-                                OverlaySrc::Old(e) if old => {
-                                    (self.edges[e].left, self.edges[e].right)
-                                }
-                                OverlaySrc::New(i) if !old => new_cols[i],
+                                OverlaySrc::Old(e) if old => edge_labels(e),
+                                OverlaySrc::New(i) if !old => edge_labels(n_old + i),
                                 _ => return None,
                             };
                             Some(if pv.fwd { lr } else { (lr.1, lr.0) })
@@ -3377,13 +3400,14 @@ impl PlanarMap {
             (items, bands)
         };
         let rows = [std::cell::OnceCell::new(), std::cell::OnceCell::new()];
-        // 区間と、その出どころの辺の左右の色（足し引きの分）
-        let segs_of = |d: &[Vec<Sides>]| {
+        // 区間と、その出どころの辺の左右の色（足し引きの分）。巻き数は色だけで数える（図形の番号は、面の輪郭の辺ごとに
+        // 違うことがある（2つの面がまとまった面など）ので、足し引きには入れない）
+        let segs_of = |d: &[Vec<(Label, Label)>]| {
             LabeledSegs::new(
                 pieces
                     .iter()
                     .zip(d)
-                    .flat_map(|(p, ls)| ls.iter().map(move |&(l, r)| (p.ia, p.ib, l, r))),
+                    .flat_map(|(p, ls)| ls.iter().map(move |&(l, r)| (p.ia, p.ib, l.0, r.0))),
             )
         };
         let old_segs = segs_of(&old_deltas);
@@ -3405,31 +3429,52 @@ impl PlanarMap {
             }
             w
         };
-        // 区間 `k` を左の面から右の面へ（`from_left`。でなければ右から左へ）またいだ巻き数：出どころの辺ごとに、出る側の色を
-        // −1、入る側の色を +1
-        let crossed =
-            |d: &[Vec<Sides>], w: &mut Vec<(Option<Color32>, i32)>, k: usize, from_left: bool| {
-                for &(l, r) in &d[k] {
-                    let (from, to) = if from_left { (l, r) } else { (r, l) };
-                    add_winding(w, from, -1);
-                    add_winding(w, to, 1);
-                }
-            };
-        // その地図の、区間ごとの（左の色, 右の色）：伝えた巻き数で、巻き数が正の色（`top_label`）
+        // その地図の、区間ごとの（左の印, 右の印）。色は、伝えた巻き数で巻き数が正の色（`top_label`。無ければ何も無い所）。
+        // 番号は面ごとに1つ：面の輪郭の区間の出どころの辺のうち、面の側の色が面の色と同じものの番号で、いちばん多いもの
+        // （同じ数なら小さい番号。番号は図形と面を対応づけるだけで、地図の形と色には効かない）
         let map_sides = |segs: &LabeledSegs<Option<Color32>>,
-                         d: &[Vec<Sides>],
+                         d: &[Vec<(Label, Label)>],
                          old: bool,
                          next: &dyn Fn((usize, bool)) -> Turn| {
             let (face, states) = propagate(
                 &piece_ends,
                 next,
                 &|p2| winding_at(segs, old, p2),
-                &|w, k, from_left| crossed(d, w, k, from_left),
+                &|w, k, from_left| {
+                    let colors: Vec<Sides> = d[k].iter().map(|&(l, r)| (l.0, r.0)).collect();
+                    crossed(&colors, w, from_left)
+                },
             );
-            let color = |h: usize| top_label(&states[face[h] as usize]).flatten();
+            let colors: Vec<Option<Color32>> =
+                states.iter().map(|w| top_label(w).flatten()).collect();
+            let mut votes: Vec<Vec<(ShapeId, usize)>> = vec![Vec::new(); states.len()];
+            for (h, &f) in face.iter().enumerate() {
+                let f = f as usize;
+                for &(l, r) in &d[h / 2] {
+                    let side = if h % 2 == 1 { l } else { r };
+                    if let (true, Some(id)) = (side.0 == colors[f], side.1) {
+                        match votes[f].iter_mut().find(|v| v.0 == id) {
+                            Some(v) => v.1 += 1,
+                            None => votes[f].push((id, 1)),
+                        }
+                    }
+                }
+            }
+            let srcs: Vec<Option<ShapeId>> = votes
+                .iter()
+                .map(|v| {
+                    v.iter()
+                        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+                        .map(|v| v.0)
+                })
+                .collect();
+            let label = |h: usize| {
+                let f = face[h] as usize;
+                (colors[f], srcs[f])
+            };
             (0..pieces.len())
-                .map(|k| (color(2 * k + 1), color(2 * k)))
-                .collect::<Vec<Sides>>()
+                .map(|k| (label(2 * k + 1), label(2 * k)))
+                .collect::<Vec<(Label, Label)>>()
         };
         let old_sides = map_sides(&old_segs, &old_deltas, true, &next_old);
         let new_sides = match input {
@@ -3500,7 +3545,7 @@ impl PlanarMap {
                 &piece_ends,
                 &next_old,
                 &|p2| swept_winding(p2),
-                &|w, k, from_left| crossed(&swept_labels, w, k, from_left),
+                &|w, k, from_left| crossed(&swept_labels[k], w, from_left),
             )),
             _ => None,
         };
@@ -3538,41 +3583,44 @@ impl PlanarMap {
             _ => None,
         };
         // 面ごとの、巻き数が奇数の形の集まり：区間をまたぐと、その区間の出どころの形の偶奇だけが変わる（`propagate`）
-        let stack_sides: Vec<Sides> = stack.as_ref().map_or_else(Vec::new, |st| {
+        let stack_sides: Vec<(Label, Label)> = stack.as_ref().map_or_else(Vec::new, |st| {
             let (face, states) =
                 propagate(&piece_ends, &next_old, &|p2| st.odd_at(p2), &|set, k, _| {
                     st.cross(set, k)
                 });
-            let color = |h: usize| st.color(&states[face[h] as usize]);
+            let label = |h: usize| st.label(&states[face[h] as usize]);
             (0..pieces.len())
-                .map(|k| (color(2 * k + 1), color(2 * k)))
+                .map(|k| (label(2 * k + 1), label(2 * k)))
                 .collect()
         });
-        // 5. 区間の新しい色。左右が違う区間だけ残す：（始点, 終点, (左の色, 右の色), 区間の番号）
-        let mut kept: Vec<(usize, usize, Sides, usize)> = Vec::new();
+        // 5. 区間の新しい印（色と図形の番号）。左右の色が違う区間だけ残す：（始点, 終点, (左の印, 右の印), 区間の番号）
+        let mut kept: Vec<(usize, usize, (Label, Label), usize)> = Vec::new();
         // 区間ごとの新しい色（残さない区間も）
         let mut piece_cols: Vec<Sides> = Vec::with_capacity(pieces.len());
         for (k, piece) in pieces.iter().enumerate() {
             let side = |fwd: bool| {
-                let pick = |s: Sides| if fwd { s.0 } else { s.1 };
+                let pick = |s: (Label, Label)| if fwd { s.0 } else { s.1 };
                 let old = pick(old_sides[k]);
-                let over = match input {
-                    MapInput::Shapes(_) => {
-                        Over::Inside(piece.fill & if fwd { CLIP_LEFT } else { CLIP_RIGHT } != 0)
+                let (over, over_src) = match input {
+                    MapInput::Shapes(_) => (
+                        Over::Inside(piece.fill & if fwd { CLIP_LEFT } else { CLIP_RIGHT } != 0),
+                        None,
+                    ),
+                    MapInput::Map(_) => {
+                        let l = pick(new_sides[k]);
+                        (Over::Color(l.0), l.1)
                     }
-                    MapInput::Map(_) => Over::Color(pick(new_sides[k])),
-                    MapInput::Sweep(_) => Over::Swept(swept_side(k, fwd)),
-                    MapInput::Stack(_) => Over::Color(if fwd {
-                        stack_sides[k].0
-                    } else {
-                        stack_sides[k].1
-                    }),
+                    MapInput::Sweep(_) => (Over::Swept(swept_side(k, fwd)), None),
+                    MapInput::Stack(_) => {
+                        let l = pick(stack_sides[k]);
+                        (Over::Color(l.0), l.1)
+                    }
                 };
-                rule.apply(&over, old)
+                rule.apply_label(&over, over_src, old)
             };
             let (left, right) = (side(true), side(false));
-            piece_cols.push((left, right));
-            if left != right {
+            piece_cols.push((left.0, right.0));
+            if left.0 != right.0 {
                 kept.push((piece.a, piece.b, (left, right), k));
             }
         }
@@ -3614,7 +3662,7 @@ impl PlanarMap {
             MapInput::Map(_) => Over::Color(new_at(p2)),
             MapInput::Sweep(_) => Over::Swept(swept_winding(p2)),
             MapInput::Stack(_) => {
-                Over::Color(stack.as_ref().and_then(|st| st.color(&st.odd_at(p2))))
+                Over::Color(stack.as_ref().and_then(|st| st.label(&st.odd_at(p2)).0))
             }
         };
         let mut over_memo: IntMap<u32, Over> = IntMap::default();
@@ -3733,7 +3781,9 @@ impl PlanarMap {
             let mut chain: std::collections::VecDeque<(usize, bool)> =
                 std::collections::VecDeque::from([(start, true)]);
             used[start] = true;
-            let (_, _, (sl, sr), _) = kept[start];
+            // 鎖は左右の色が同じ区間をつなぐ。図形の番号は、鎖の左右それぞれで最初に見つかったもの（鎖の左右は、それぞれ
+            // 結果の1つの面。番号は面と図形を対応づけるだけなので、区間ごとの番号の違いでは鎖を分けない）
+            let (_, _, (mut sl, mut sr), _) = kept[start];
             let s_src = main_src(start).src;
             for forward in [true, false] {
                 loop {
@@ -3757,14 +3807,16 @@ impl PlanarMap {
                     }
                     let (na, nb, (nl, nr), _) = kept[nk];
                     let n_same = if forward { na == end } else { nb == end };
-                    let colors = if n_same { (nl, nr) } else { (nr, nl) };
+                    let (l, r) = if n_same { (nl, nr) } else { (nr, nl) };
                     let (_, _, nta, ntb) = piece_ends(&(nk, n_same));
                     let t_join = if forward { nta } else { ntb };
                     // 同じ出どころの続いた区間は、つなぎ目の t がビットまで同じ（入れるときは前の区間の終わりの t を
                     // 次の区間の始めにし、i_overlay が切るときは2つに同じ t を渡す：`ProvId::split`）
-                    if colors != (sl, sr) || t_join != t_end {
+                    if (l.0, r.0) != (sl.0, sr.0) || t_join != t_end {
                         break;
                     }
+                    sl.1 = sl.1.or(l.1);
+                    sr.1 = sr.1.or(r.1);
                     used[nk] = true;
                     if forward {
                         chain.push_back((nk, n_same));
@@ -3780,8 +3832,8 @@ impl PlanarMap {
                 steps[0].2,
                 steps[steps.len() - 1].3,
             );
-            // 入れた辺（前からある辺か重ねる地図の辺）が丸ごと残ったときは、元の曲線と元の図形の印（色が変わらない側だけ）を
-            // そのまま使う
+            // 入れた辺（前からある辺か重ねる地図の辺）が丸ごと残ったときは、元の曲線をそのまま使う（図形の番号は、ほかの
+            // 区間と同じく、面ごとに伝えた印のもの）
             let mut whole = None;
             let fed_edge = match srcs[s_src as usize].1 {
                 OverlaySrc::Old(e) => Some(e),
@@ -3795,16 +3847,7 @@ impl PlanarMap {
                 let (ea, eb) = (node_at(ed.a), node_at(ed.b));
                 let same_dir = (n0, n1) == (ea, eb);
                 if full && n0 != n1 && (same_dir || (n0, n1) == (eb, ea)) {
-                    let (ol, or, osl, osr) = if same_dir {
-                        (ed.left, ed.right, ed.left_src, ed.right_src)
-                    } else {
-                        (ed.right, ed.left, ed.right_src, ed.left_src)
-                    };
-                    whole = Some((
-                        ed.ctrl,
-                        if sl == ol { osl } else { None },
-                        if sr == or { osr } else { None },
-                    ));
+                    whole = Some(ed.ctrl);
                 }
             }
             chains.push(Chain {
@@ -3836,10 +3879,10 @@ impl PlanarMap {
                             a,
                             b,
                             ctrl: nodes[a].midpoint(nodes[b]),
-                            left: c.left,
-                            right: c.right,
-                            left_src: None,
-                            right_src: None,
+                            left: c.left.0,
+                            right: c.right.0,
+                            left_src: c.left.1,
+                            right_src: c.right.1,
                         });
                         edges.len() - 1
                     })
@@ -4052,12 +4095,13 @@ enum OverlayStop {
 struct Chain {
     /// 鎖の向きでの区間：（始点, 終点, 出どころの曲線の t の始め, t の終わり）
     steps: Vec<(usize, usize, f64, f64)>,
-    left: Option<Color32>,
-    right: Option<Color32>,
+    /// 左右の印（色と図形の番号）
+    left: Label,
+    right: Label,
     /// 出どころの曲線
     curve: QuadBez,
-    /// 前からある辺が丸ごと残ったとき：（元の制御点, 左の図形の印, 右の図形の印）
-    whole: Option<(Point, Option<ShapeId>, Option<ShapeId>)>,
+    /// 入れた辺が丸ごと残ったとき：元の制御点
+    whole: Option<Point>,
 }
 
 /// 直線の区間の鎖を、元の曲線の一部へ置き換える。置き換えてよいのは、今の地図で、曲線 C の判定の形が次の3つを
@@ -4107,7 +4151,7 @@ impl ChainRestorer {
         };
         let whole = (i == 0 && j == ids.len()).then_some(c.whole).flatten();
         let ctrl = match whole {
-            Some((ctrl, ..)) => ctrl,
+            Some(ctrl) => ctrl,
             None if ta < tb => c.curve.subsegment(ta..tb).p1,
             None => c.curve.subsegment(tb..ta).p1,
         };
@@ -4125,15 +4169,14 @@ impl ChainRestorer {
         for &f in part {
             index.kill(f);
         }
-        let (left_src, right_src) = whole.map_or((None, None), |w| (w.1, w.2));
         self.map.edges.push(MapEdge {
             a: na,
             b: nb,
             ctrl,
-            left: c.left,
-            right: c.right,
-            left_src,
-            right_src,
+            left: c.left.0,
+            right: c.right.0,
+            left_src: c.left.1,
+            right_src: c.right.1,
         });
         index.add_edge(na, nb, pc);
         true
@@ -4650,10 +4693,25 @@ impl<'a> StackColors<'a> {
         set
     }
 
-    /// 巻き数が奇数の形の集まり `set` の色（並びでいちばん上の形の色）
-    fn color(&self, set: &[u64]) -> Option<Color32> {
-        let (j, w) = set.iter().enumerate().rev().find(|(_, w)| **w != 0)?;
-        Some(self.shapes[64 * j + 63 - w.leading_zeros() as usize].color)
+    /// 巻き数が奇数の形の集まり `set` の印（並びでいちばん上の形の色と番号。無ければ何も無い所）
+    fn label(&self, set: &[u64]) -> Label {
+        match set.iter().enumerate().rev().find(|(_, w)| **w != 0) {
+            Some((j, w)) => {
+                let s = self.shapes[64 * j + 63 - w.leading_zeros() as usize];
+                (Some(s.color), Some(s.shape_id))
+            }
+            None => (None, None),
+        }
+    }
+}
+
+/// 区間を左の面から右の面へ（`from_left`。でなければ右から左へ）またいだ巻き数 `w`：区間の出どころの辺ごとの左右の印
+/// `sides`（区間の向きにそろえたもの）の、出る側の印を −1、入る側の印を +1（`propagate` の地図・輪郭の変形のまたぎ方）
+fn crossed<L: Copy + PartialEq>(sides: &[(L, L)], w: &mut Vec<(L, i32)>, from_left: bool) {
+    for &(l, r) in sides {
+        let (from, to) = if from_left { (l, r) } else { (r, l) };
+        add_winding(w, from, -1);
+        add_winding(w, to, 1);
     }
 }
 
