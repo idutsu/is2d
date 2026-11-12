@@ -849,7 +849,9 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 .filter(|l| l.visible && !l.locked)
                 .map(|l| l.id)
                 .collect();
-            tab.session.lift_selected_raw_shapes_to_floating();
+            if !tab.session.lift_selected_raw_shapes_to_floating() {
+                return false;
+            }
             let scope = tab.session.editing_group_path.clone();
             let ids = tab.session.selection.shapes.clone();
             tab.session.update_floating(|fl_opt| {
@@ -934,7 +936,10 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     if tab.session.selection.is_empty() {
         return false;
     }
-    tab.session.lift_selected_raw_shapes_to_floating();
+    // 選んだ生の図形は片に持ち上げて、片の変換で動かす（持ち上げられなければ断る）
+    if !tab.session.lift_selected_raw_shapes_to_floating() {
+        return false;
+    }
     let mut any_transformed = false;
     let selection = tab.session.selection.clone();
     // 地図は格子の内の形しか持てないので、生の図形（浮いた片と、選んだグループの中の生の図形）が格子の外（±65,536px の
@@ -1004,27 +1009,6 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
                 scopes.push((s.layer_id, s.group_path.clone()));
             }
         }
-        // 階層の一部だけを選んでいるとき（持ち上げられなかった生の図形）は、地図ごとは動かさない
-        scopes.retain(|(layer_id, group_path)| {
-            tab.session
-                .base_cache
-                .shapes()
-                .iter()
-                .filter(|s| s.layer_id == *layer_id && s.group_path == *group_path)
-                .all(&picked)
-        });
-        let moved: HashSet<crate::canvas_tool::ShapeId> = tab
-            .session
-            .base_cache
-            .shapes()
-            .iter()
-            .filter(|s| {
-                scopes
-                    .iter()
-                    .any(|x| x.0 == s.layer_id && x.1 == s.group_path)
-            })
-            .map(|s| s.shape_id)
-            .collect();
         let mut written: Vec<LayerId> = Vec::new();
         for (layer_id, group_path) in &scopes {
             if write_scope_map(tab, *layer_id, group_path, |base| {
@@ -1036,10 +1020,10 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         }
         any_transformed |= !written.is_empty();
         finish_cel_writes(tab, &written);
-        // インスタンスと、地図ごと動かさなかった図形は、図形を動かす
+        // インスタンスは、インスタンスの変換を動かす（生の図形は、片か、グループの階層の地図で動かした）
         edit_layers(tab, &target_lids, |edit| {
             for s in &mut edit.shapes {
-                if picked(s) && !moved.contains(&s.shape_id) {
+                if picked(s) && s.symbol_instance.is_some() {
                     s.transform(affine);
                     any_transformed = true;
                 }

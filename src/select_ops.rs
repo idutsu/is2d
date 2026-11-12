@@ -495,8 +495,14 @@ pub(crate) fn prepare_group_selected_shapes(
         return false;
     }
 
-    // 浮いた片は、レイヤーごとに片の組を重ねた地図（変換をかけて、その座標の格子で正しい地図にしたもの）にして、新しい
-    // グループの階層の地図にする。地図にできない片（格子に置けない座標がある）があれば、グループにしない
+    before_mutate(tab);
+    // 選んだ生の図形は先に片に持ち上げ（持ち上げられなければ断る）、レイヤーごとに片の組を重ねた地図（変換をかけて、
+    // その座標の格子で正しい地図にしたもの）にして、新しいグループの階層の地図にする。生の図形は、この片の地図だけで
+    // 書く（図形の並びでは書かない）。地図にできない片（格子に置けない座標がある）があれば、グループにしない
+    let before = tab.session.floating().cloned();
+    if !tab.session.lift_selected_raw_shapes_to_floating() {
+        return false;
+    }
     let pieces: Option<Vec<(LayerId, crate::planar_map::PlanarMap)>> =
         tab.session.floating().map_or(Some(Vec::new()), |fl| {
             fl.layers()
@@ -506,10 +512,10 @@ pub(crate) fn prepare_group_selected_shapes(
                 .collect()
         });
     let Some(pieces) = pieces else {
+        tab.session.set_floating(before);
+        tab.session.off_grid = true;
         return false;
     };
-
-    before_mutate(tab);
     let new_gid = tab.doc.alloc_group_id();
 
     // 浮いた片の残りは、そのままセル画の地図にする（片は重ねない。選択は、残りを書く前のもの：片も選んでいる）
@@ -541,7 +547,8 @@ pub(crate) fn prepare_group_selected_shapes(
         unselected.extend(trailing_outside);
         edit.shapes = unselected;
     });
-    // 浮いた片の地図を、新しいグループの階層の地図にする（図形はその面。番号は片の番号のまま）
+    // 浮いた片の地図を、新しいグループの階層の地図にする（図形はその面。番号は片の番号のまま。選んだ生の図形はみな片に
+    // なっているので、この階層に図形の並びで書いたものは無い）
     let mut group_path = tab.session.editing_group_path.clone();
     group_path.push(new_gid);
     let mut written = Vec::new();
@@ -796,8 +803,10 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     };
     tab.session.add_floating_maps(group_maps);
     tab.session.add_floating_maps(piece_maps);
+    // 生に戻った図形のほかに選んでいた生の図形も、片に持ち上げる（持ち上げられない図形は、文書の図形のまま選んでおく。
+    // 動かす・変形するときに、もう一度持ち上げて、できなければその操作を断る）
     if any_became_raw {
-        tab.session.lift_selected_raw_shapes_to_floating();
+        let _ = tab.session.lift_selected_raw_shapes_to_floating();
     }
     tab.session.retain_existing_selection();
     tab.session.transform_pivot = None;

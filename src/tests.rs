@@ -25305,6 +25305,69 @@ mod map_overlay {
         );
     }
 
+    /// 矩形で一部を切った片と、丸ごと選んだ別の生の図形を一緒にグループにしても、どちらも消えない（選んだ生の図形はみな
+    /// 片に持ち上げてから、グループの階層へ片の地図として1回で書く）
+    #[test]
+    fn grouping_a_marquee_piece_with_a_whole_shape_keeps_both() {
+        let mut app = Is2dApp::default();
+        for (i, y) in [100.0, 300.0].into_iter().enumerate() {
+            app.tool.brush_color = [Color32::RED, Color32::BLUE][i];
+            let pts: Vec<Point> = (0..=20)
+                .map(|j| Point::new(100.0 + j as f64 * 10.0, y))
+                .collect();
+            doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 10.0));
+        }
+        let area = |app: &Is2dApp, c: Color32| -> f64 {
+            app.doc.root.layers[0].keyframes[0]
+                .cel
+                .shapes()
+                .iter()
+                .filter(|s| s.color == c)
+                .map(|s| s.contours().map(|k| k.signed_area()).sum::<f64>().abs())
+                .sum()
+        };
+        let (red, blue) = (area(&app, Color32::RED), area(&app, Color32::BLUE));
+        // 赤い線の右半分を矩形で切り、青い線を Shift クリックで丸ごと足す
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::SelectMarquee {
+                p0: Point::new(200.0, 80.0),
+                p1: Point::new(330.0, 120.0),
+                additive: false,
+            },
+        ));
+        let blue_shape = app
+            .scene()
+            .iter()
+            .find(|s| s.color == Color32::BLUE)
+            .unwrap()
+            .clone();
+        app.session.selection.insert_shape(&blue_shape);
+        doc_actions::group_selected_shapes(&mut app).expect("グループ化");
+        doc_actions::apply(&mut app, doc_actions::Action::Deselect);
+        let all = |app: &Is2dApp, c: Color32| -> f64 {
+            app.doc.root.layers[0].keyframes[0]
+                .cel
+                .maps
+                .iter()
+                .flat_map(|m| m.faces().to_vec())
+                .filter(|s| s.color == c)
+                .map(|s| s.contours().map(|k| k.signed_area()).sum::<f64>().abs())
+                .sum()
+        };
+        // 面積は折れ線で近づけて測るので、切り口で曲線が分かれる分だけ、ごくわずかに変わる
+        assert!((all(&app, Color32::RED) - red).abs() < red * 1e-3, "赤い線の面積");
+        assert!((all(&app, Color32::BLUE) - blue).abs() < blue * 1e-3, "青い線の面積");
+        assert!(
+            app.doc.root.layers[0].keyframes[0]
+                .cel
+                .maps
+                .iter()
+                .any(|m| !m.group_path.is_empty()),
+            "グループの階層ができる"
+        );
+    }
+
     /// シンボルの中（インスタンスに平行移動・回転・拡大がかかっている）で矩形で選ぶと、囲んだ所（ステージ座標）が切られる：
     /// 切る形は文書の座標へ写して地図に渡す
     #[test]
@@ -25499,11 +25562,13 @@ mod map_overlay {
             6.0,
             Color32::BLACK,
         );
+        let lid = app.doc.root.layers[0].id;
         for s in &mut far {
             s.group_path = vec![999];
+            s.layer_id = lid;
         }
         let before = cel(&app);
-        assert!(!crate::canvas_tool::edit_layers(&mut app, &[], |edit| {
+        assert!(!crate::canvas_tool::edit_layers(&mut app, &[lid], |edit| {
             edit.shapes.extend(far);
         }));
         assert!(app.session.off_grid);
@@ -25773,7 +25838,7 @@ mod map_overlay {
                 .collect();
             let map = PlanarMap::from_faces(shapes.iter());
             assert!(map.is_valid(), "レイヤー {layer} の地図");
-            let base = LayerBase::new(&map, false);
+            let base = LayerBase::new(&map);
             let layer_id = shapes[0].layer_id;
             let mut r = Rng(layer as u64 + 1);
             for dist in [5.0, 20.0, 60.0] {

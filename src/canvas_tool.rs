@@ -2167,16 +2167,25 @@ impl Session {
     }
 
     /// 選択中の生の図形（隠していないセル画の図形と、浮いている残り）を片に持ち上げ、動かした扱いにする（動かす・変形・
-    /// 色を変える前）。レイヤーごとに、その面の所を選ぶ所にして切る（`Floating::cut`）
-    pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self) {
+    /// 色を変える・グループにする前）。レイヤーごとに、その面の所を選ぶ所にして切る（`Floating::cut`）。生の図形はいつも
+    /// 片の地図で書くので、切れないレイヤー（地図にできない）があれば、浮いた片を元に戻して `false`（呼ぶ側は操作を断る。
+    /// `off_grid` に記す）
+    pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self) -> bool {
         let by_layer = self.selected_raw_ids_by_layer(true);
         if by_layer.is_empty() && self.floating.is_none() {
-            return;
+            return true;
         }
+        let before = self.floating.clone();
+        let mut failed = false;
         self.with_floating(|fl, stage| {
-            fl.cut(stage, &by_layer, None);
+            failed = !fl.cut(stage, &by_layer, None).is_empty();
             fl.modified = true;
         });
+        if failed {
+            self.set_floating(before);
+            self.off_grid = true;
+        }
+        !failed
     }
 
     /// 選択中の生の図形の、レイヤーごとの番号。`base` なら隠していないセル画の図形も、そうでなければ浮いている残りだけ
@@ -3182,28 +3191,14 @@ pub(crate) fn edit_layers(
 ) -> bool {
     tab.refresh_scene_base();
 
+    // 書く先は、渡されたレイヤーのうち今のコマで編集できるものだけ
     let (target_layer_indices, target_lids) = {
         let tl = tab.active_timeline();
         let frame = tl.current_frame;
-        let fallback_lid = if tl.is_active_layer_editable() {
-            Some(tl.active_layer_id())
-        } else {
-            tl.layers
-                .iter()
-                .find(|l| l.is_editable_at(frame))
-                .map(|l| l.id)
-        };
-        let include_fallback =
-            layer_ids.is_empty() || layer_ids.iter().any(|&id| !tl.is_layer_editable_by_id(id));
-
         let mut indices = Vec::new();
         let mut lids = Vec::new();
         for (l_idx, layer) in tl.layers.iter().enumerate() {
-            if !layer.is_editable_at(frame) {
-                continue;
-            }
-            if layer_ids.contains(&layer.id) || (include_fallback && fallback_lid == Some(layer.id))
-            {
+            if layer.is_editable_at(frame) && layer_ids.contains(&layer.id) {
                 indices.push(l_idx);
                 lids.push(layer.id);
             }
@@ -3255,20 +3250,20 @@ pub(crate) fn edit_layers(
 
     let mut mutate_tl = |tl: &mut Timeline| {
         let frame = tl.current_frame;
-        tl.normalize_shape_layer_ids(&mut edit.shapes);
-
         edited_by_lid.reserve(target_lids.len());
         for &lid in &target_lids {
             edited_by_lid.insert(lid, Vec::new());
         }
-        let fallback_target_lid = target_lids[0];
+        // 図形は、その図形のレイヤーに書く（書き込む図形を足す呼び出し側は、書く先のレイヤーの番号を付けて、そのレイヤーを
+        // 渡す）
         for s in edit.shapes.drain(..) {
-            let dst_lid = if edited_by_lid.contains_key(&s.layer_id) {
+            #[cfg(test)]
+            assert!(
+                edited_by_lid.contains_key(&s.layer_id),
+                "書く先として渡していないレイヤー {} の図形",
                 s.layer_id
-            } else {
-                fallback_target_lid
-            };
-            if let Some(vec) = edited_by_lid.get_mut(&dst_lid) {
+            );
+            if let Some(vec) = edited_by_lid.get_mut(&s.layer_id) {
                 vec.push(s);
             }
         }
@@ -3723,12 +3718,14 @@ pub(crate) fn insert_and_select_shapes_in_scope(
         tab.session.selection.insert_shape(s);
     }
     let scope = tab.session.editing_group_path.clone();
-    let (mut raw_pieces, doc_shapes): (Vec<FillShape>, Vec<FillShape>) = new_shapes
+    // 元のレイヤーが編集できない図形は、作業中のレイヤーに入れる
+    let mut new_shapes = new_shapes;
+    tab.active_timeline()
+        .normalize_shape_layer_ids(&mut new_shapes);
+    let (raw_pieces, doc_shapes): (Vec<FillShape>, Vec<FillShape>) = new_shapes
         .into_iter()
         .partition(|s| as_floating && s.is_raw_at_scope(&scope));
     // 生の図形は浮いた片にする。片の地図は、文書を変える前に作る（地図にできなければ、何も足さずに断る）
-    tab.active_timeline()
-        .normalize_shape_layer_ids(&mut raw_pieces);
     let Some(maps) = crate::floating::piece_maps(&raw_pieces, tab.session.edit_path.world_xform())
     else {
         tab.session.selection.clear();

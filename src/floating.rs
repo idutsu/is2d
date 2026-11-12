@@ -46,7 +46,7 @@ impl PieceGroup {
     fn new(map: &PlanarMap, layer_id: LayerId, scope: &[u64], xform: Affine) -> Self {
         let (map, faces) = faces_with_ids(map, layer_id, scope);
         Self {
-            base: Arc::new(LayerBase::new(&map, false)),
+            base: Arc::new(LayerBase::new(&map)),
             faces: Arc::new(faces),
             xform,
         }
@@ -101,7 +101,7 @@ impl Origin {
             return None;
         }
         Some(Self {
-            rest: Arc::new(LayerBase::new(&change.map, false)),
+            rest: Arc::new(LayerBase::new(&change.map)),
             hidden: change.removed,
             remainder: change.added,
         })

@@ -1193,8 +1193,6 @@ fn written_faces(next: &PlanarMap) -> Option<Vec<MapFace>> {
 pub(crate) struct LayerBase {
     pub(crate) map: PlanarMap,
     pub(crate) stored: StoredMap,
-    /// 図形から作った地図が正しい地図でなく、塗り重ねて作り直したか（`LayerBase::of`。書き戻すときは図形を全部書き換える）
-    repainted: bool,
     keys: OnceLock<HashSet<[u64; 6]>>,
     /// 面の図形：（階層, 面ごとの図形。番号は面の印）
     faces: SyncCache<Option<FaceShapes>>,
@@ -1205,15 +1203,14 @@ type FaceShapes = (Vec<u64>, Arc<[Arc<FillShape>]>);
 
 impl LayerBase {
     /// 地図 `map` を、しまう形にして決まった順に並べ直したもの
-    pub(crate) fn new(map: &PlanarMap, repainted: bool) -> Self {
-        Self::from_stored(StoredMap::from_dense(map, None), repainted)
+    pub(crate) fn new(map: &PlanarMap) -> Self {
+        Self::from_stored(StoredMap::from_dense(map, None))
     }
 
-    fn from_stored(stored: StoredMap, repainted: bool) -> Self {
+    fn from_stored(stored: StoredMap) -> Self {
         Self {
             map: stored.to_dense(),
             stored,
-            repainted,
             keys: OnceLock::new(),
             faces: SyncCache::new(None),
         }
@@ -1225,7 +1222,7 @@ impl LayerBase {
         if let Some(base) = cached_base(&key) {
             return base;
         }
-        let base = Arc::new(Self::from_stored(stored.clone(), false));
+        let base = Arc::new(Self::from_stored(stored.clone()));
         remember(key, base.clone());
         base
     }
@@ -1238,7 +1235,7 @@ impl LayerBase {
         group_path: &[u64],
         known: &HashMap<ShapeId, Arc<FillShape>>,
     ) {
-        let base = Self::from_stored(stored, false);
+        let base = Self::from_stored(stored);
         let (faces, _) = base.map.faces();
         let shapes: Arc<[Arc<FillShape>]> = faces
             .iter()
@@ -1303,18 +1300,17 @@ impl LayerBase {
             }
             let map = PlanarMap::from_faces(own.iter().copied());
             Some(if map.is_valid() {
-                Self::new(&map, false)
+                Self::new(&map)
             } else {
-                Self::new(&painted_map(own)?, true)
+                Self::new(&painted_map(own)?)
             })
         })?);
         remember(key, base.clone());
         Some(base)
     }
 
-    /// この地図（文書の座標）を、文書の図形 `own`（この地図の面）から作ったとして、編集した地図 `next` を図形に書き戻す
-    /// 差分（`MapChange`。新しい形も文書の座標）。塗り重ねて作り直した地図なら、図形を全部書き換える。
-    /// `None`：`next` に壊れた輪郭がある（`written_faces`）
+    /// この地図（文書の座標）の面の図形 `own` に、編集した地図 `next` を書き戻す差分（`MapChange`。新しい形も文書の座標。
+    /// 変わらない面は前の図形のまま：`rewrite_shapes`）。`None`：`next` に壊れた輪郭がある（`written_faces`）
     pub(crate) fn diff(
         &self,
         next: &PlanarMap,
@@ -1323,21 +1319,13 @@ impl LayerBase {
         group_path: &[u64],
     ) -> Option<MapChange> {
         let faces = written_faces(next)?;
-        let (removed, added, ids) = if self.repainted {
-            let added: Vec<FillShape> = faces
-                .iter()
-                .map(|f| next.face_shape(f, layer_id, group_path))
-                .collect();
-            let ids = added.iter().map(|s| s.shape_id).collect();
-            (own.iter().map(|s| s.shape_id).collect(), added, ids)
-        } else {
-            let keys = self.keys.get_or_init(|| {
-                (0..self.map.edges.len())
-                    .map(|e| edge_key(&self.map, e))
-                    .collect()
-            });
-            rewrite_shapes(&self.map, keys, next, &faces, own, layer_id, group_path)
-        };
+        let keys = self.keys.get_or_init(|| {
+            (0..self.map.edges.len())
+                .map(|e| edge_key(&self.map, e))
+                .collect()
+        });
+        let (removed, added, ids) =
+            rewrite_shapes(&self.map, keys, next, &faces, own, layer_id, group_path);
         Some(MapChange {
             removed,
             added,
@@ -1345,7 +1333,9 @@ impl LayerBase {
         })
     }
 
-    /// テスト用：`diff` を、座標の変換 `xform` で置いた図形 `own` で受け取り、新しい形を `xform` で置いた写しで返すもの
+    /// テスト用：`diff` を、座標の変換 `xform` で置いた図形 `own`（文書の無い、ただの図形の並び。この地図は `LayerBase::of`
+    /// で作ったもの）で受け取り、新しい形を `xform` で置いた写しで返すもの。図形がそのまま正しい地図にならず、塗り重ねて
+    /// 作った地図なら、地図の面と図形は1対1でないので、図形を全部書き換える
     #[cfg(test)]
     pub(crate) fn diff_placed(
         &self,
@@ -1355,8 +1345,22 @@ impl LayerBase {
         group_path: &[u64],
         xform: Affine,
     ) -> Option<MapChange> {
-        let mut change =
-            with_doc_shapes(own, xform, |own| self.diff(next, own, layer_id, group_path))?;
+        let mut change = with_doc_shapes(own, xform, |own| {
+            if PlanarMap::from_faces(own.iter().copied()).is_valid() {
+                return self.diff(next, own, layer_id, group_path);
+            }
+            let faces = written_faces(next)?;
+            let added: Vec<FillShape> = faces
+                .iter()
+                .map(|f| next.face_shape(f, layer_id, group_path))
+                .collect();
+            let ids: Vec<ShapeId> = added.iter().map(|s| s.shape_id).collect();
+            Some(MapChange {
+                removed: own.iter().map(|s| s.shape_id).collect(),
+                map: labeled(next.clone(), &faces, &ids),
+                added,
+            })
+        })?;
         change.added = change.added.into_iter().map(|d| placed(d, xform)).collect();
         Some(change)
     }
@@ -2063,7 +2067,7 @@ pub(crate) fn apply_map_change(
     let own = layer_own(shapes, layer_id, group_path);
     remember(
         BaseKey::Shapes(MapKey::new(&own, xform)),
-        Arc::new(LayerBase::new(&change.map, false)),
+        Arc::new(LayerBase::new(&change.map)),
     );
 }
 

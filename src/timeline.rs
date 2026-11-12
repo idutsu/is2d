@@ -591,7 +591,7 @@ impl Cel {
             .iter()
             .find(|m| m.group_path == group_path)
             .map_or_else(
-                || Arc::new(LayerBase::new(&PlanarMap::default(), false)),
+                || Arc::new(LayerBase::new(&PlanarMap::default())),
                 ScopeMap::base,
             )
     }
