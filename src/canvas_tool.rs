@@ -413,10 +413,7 @@ impl View {
     /// ワールド座標 `p` を現在のズーム・パンに応じたスクリーン座標 `Pos2` へ変換する
     #[inline]
     pub(crate) fn world_to_screen(&self, p: Point) -> Pos2 {
-        Pos2::new(
-            (p.x as f32) * self.zoom + self.pan.x,
-            (p.y as f32) * self.zoom + self.pan.y,
-        )
+        crate::vector_engine::to_screen(p.x as f32, p.y as f32, self.zoom, self.pan)
     }
 
     /// スクリーン座標 `pos` を現在のズーム・パンに応じたワールド座標 `Point` へ逆変換する
@@ -432,6 +429,11 @@ impl View {
     pub(crate) fn press_origin_world(&self, ctx: &egui::Context) -> Option<Point> {
         ctx.input(|i| i.pointer.press_origin())
             .map(|p| self.screen_to_world(p))
+    }
+
+    /// ドラッグを始めたときに、ポインタが押した位置 `press`（ワールド座標）から `now` へもう動いているか（この判定はこれ1つ）
+    pub(crate) fn moved_since_press(press: Point, now: Point) -> bool {
+        (now - press).hypot() > 1e-6
     }
 
     /// スクリーン上の指定位置 `anchor_screen`（マウスカーソル位置）がズーム前後で動かないように倍率 `factor` を掛ける
@@ -1853,7 +1855,7 @@ impl<'a> Scene<'a> {
             return true;
         }
         self.selected_single_symbol_binding(selection)
-            .is_some_and(|b| (b.pivot - Point::ZERO).hypot() > 1e-6)
+            .is_some_and(|b| crate::vector_engine::is_custom_pivot(b.pivot))
     }
 }
 

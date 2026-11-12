@@ -121,6 +121,18 @@ impl SymbolInstanceBinding {
     }
 }
 
+/// インスタンスの中心点 `a` と `b`（シンボルのローカル座標）が同じ所か（中心点を比べる判定はこれ1つ）
+#[inline]
+pub(crate) fn same_pivot(a: Point, b: Point) -> bool {
+    (a - b).hypot() <= 1e-6
+}
+
+/// インスタンスの中心点 `pivot` を、初めの位置（原点）から動かしてあるか（`same_pivot`）
+#[inline]
+pub(crate) fn is_custom_pivot(pivot: Point) -> bool {
+    !same_pivot(pivot, Point::ZERO)
+}
+
 static NEXT_MESH_REVISION: AtomicU64 = AtomicU64::new(1);
 static NEXT_SHAPE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -240,22 +252,13 @@ impl Contour {
 
     /// ポリゴン近似した際の符号付き面積（Shoelace公式）
     pub(crate) fn signed_area(&self) -> f64 {
-        let Some(first_seg) = self.segments.first() else {
-            return 0.0;
-        };
         const SUBDIVS: usize = 8;
-        let first_pt = first_seg.eval(0.0);
-        let mut prev = first_pt;
-        let mut sum = 0.0;
-        for seg in self.segments.iter() {
-            for k in 0..SUBDIVS {
-                let curr = seg.eval(k as f64 / SUBDIVS as f64);
-                sum += prev.x * curr.y - curr.x * prev.y;
-                prev = curr;
-            }
-        }
-        sum += prev.x * first_pt.y - first_pt.x * prev.y;
-        0.5 * sum
+        signed_area_f64(self.segments.iter().flat_map(|seg| {
+            (0..SUBDIVS).map(move |k| {
+                let p = seg.eval(k as f64 / SUBDIVS as f64);
+                [p.x, p.y]
+            })
+        }))
     }
 
     /// 極端に短い退化セグメントや非有限座標セグメントを除去し、端点の連続性を保証する
@@ -815,6 +818,8 @@ pub(crate) fn dedup_closed_ring(pts: impl IntoIterator<Item = Point>, min_dist: 
     out
 }
 
+/// 閉じた折れ線 `pts`（最後の点から最初の点へ閉じる）の符号付き面積（面積の式。小数の面積の式はこれ1つ。格子の点は
+/// `planar_map` の `area2_of`）。点が3つより少なければ 0
 pub(crate) fn signed_area_f64(pts: impl IntoIterator<Item = [f64; 2]>) -> f64 {
     let mut it = pts.into_iter();
     let Some(first) = it.next() else {
@@ -1075,6 +1080,12 @@ pub(crate) fn onion_tint_color(c: Color32, tint_rgb: [u8; 3], alpha: u8) -> Colo
     )
 }
 
+/// 座標 (`x`, `y`) を、ズーム `zoom`・パン `pan` の画面の座標にする（画面に写す式はこれ1つ）
+#[inline]
+pub(crate) fn to_screen(x: f32, y: f32, zoom: f32, pan: Vec2) -> Pos2 {
+    Pos2::new(x * zoom + pan.x, y * zoom + pan.y)
+}
+
 /// ワールド座標で構築された `Mesh` を複製せずその場でスクリーン座標へ変換し、任意の頂点色変換 `map_color` を適用して返す
 pub(crate) fn transform_mesh_to_screen(
     mut mesh: Mesh,
@@ -1087,7 +1098,7 @@ pub(crate) fn transform_mesh_to_screen(
     }
     let mut last_color: Option<(Color32, Color32)> = None;
     for v in &mut mesh.vertices {
-        v.pos = Pos2::new(v.pos.x * zoom + pan.x, v.pos.y * zoom + pan.y);
+        v.pos = to_screen(v.pos.x, v.pos.y, zoom, pan);
         if let Some(f) = map_color {
             v.color = match last_color {
                 Some((src, dst)) if src == v.color => dst,

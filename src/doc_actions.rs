@@ -1249,7 +1249,7 @@ fn apply_set_selected_symbol_world_pivot(tab: &mut Tab, world_pivot: Option<Poin
         }
         None => Point::ZERO,
     };
-    if (new_local_pivot - binding.pivot).hypot() <= 1e-7 {
+    if crate::vector_engine::same_pivot(new_local_pivot, binding.pivot) {
         return true;
     }
     // 変形の確定（apply_affine_to_selected_inner）から呼ぶときは、もう控えがあるので何もしない

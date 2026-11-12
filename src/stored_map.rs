@@ -18,7 +18,7 @@ use eframe::egui::Color32;
 use kurbo::Point;
 
 use crate::canvas_tool::ShapeId;
-use crate::planar_map::{LayerBase, MapEdge, PlanarMap};
+use crate::planar_map::{point_order, LayerBase, MapEdge, PlanarMap};
 
 /// 塊の升目の大きさ（文書の座標の px）。ブラシ1本・消しゴム1本で変わるのは、ふつう升目の数個分
 const TILE: f64 = 32.0;
@@ -41,7 +41,7 @@ impl StoredEdge {
     fn of(map: &PlanarMap, e: &MapEdge) -> Self {
         let (a, b) = (map.nodes[e.a], map.nodes[e.b]);
         let src = |id: Option<ShapeId>| id.and_then(NonZeroU64::new);
-        if coord_order(a, b).is_le() {
+        if point_order(a, b).is_le() {
             Self {
                 a,
                 b,
@@ -72,9 +72,9 @@ impl StoredEdge {
 
     /// 塊の中の並びの順（形だけで決める。正しい地図に、形の同じ辺は2本無い）
     fn order(&self, other: &Self) -> std::cmp::Ordering {
-        coord_order(self.a, other.a)
-            .then_with(|| coord_order(self.b, other.b))
-            .then_with(|| coord_order(self.ctrl, other.ctrl))
+        point_order(self.a, other.a)
+            .then_with(|| point_order(self.b, other.b))
+            .then_with(|| point_order(self.ctrl, other.ctrl))
     }
 
     fn geom_bits(&self) -> [u64; 6] {
@@ -107,11 +107,6 @@ impl Eq for StoredEdge {}
 #[cfg(test)]
 pub(crate) fn edge_size() -> usize {
     std::mem::size_of::<StoredEdge>()
-}
-
-/// 点の、座標の小さい順（x、同じなら y）
-fn coord_order(p: Point, q: Point) -> std::cmp::Ordering {
-    p.x.total_cmp(&q.x).then_with(|| p.y.total_cmp(&q.y))
 }
 
 /// 塊：1つの升目に入る辺の並び（決まった順。空の塊は無い）

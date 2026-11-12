@@ -75,7 +75,7 @@ pub(crate) fn nearest_on_quad(q: &QuadBez, p: Point) -> (f64, f64) {
     let second = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()) * 2.0;
     for _ in 0..6 {
         let b = q.eval(t) - p;
-        let first = (q.p1 - q.p0) * (2.0 * (1.0 - t)) + (q.p2 - q.p1) * (2.0 * t);
+        let first = quad_deriv(q, t);
         let slope = first.dot(first) + b.dot(second);
         if slope.abs() < 1e-14 {
             break;
@@ -115,6 +115,7 @@ impl std::hash::Hasher for IntHasher {
 
 type IntMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IntHasher>>;
 
+/// 曲線 `q` の t での向き（微分）
 fn quad_deriv(q: &QuadBez, t: f64) -> KVec2 {
     (q.p1 - q.p0) * (2.0 * (1.0 - t)) + (q.p2 - q.p1) * (2.0 * t)
 }
@@ -572,55 +573,23 @@ impl PlanarMap {
         true
     }
 
-    /// 辺 `e` の区間 `k` と、辺 `f` の区間 `m`（`(e, k)` が前）が、許されない所で触れるか。
-    /// 許されるのは、端を1つだけ共有し、そこから同じ向きに重ならず、その端が「2つの辺が共有する頂点」か
-    /// 「1本の辺のとなり合う区間のつなぎ目」のときだけ
+    /// 辺 `e` の区間 `k` と、辺 `f` の区間 `m`（`(e, k)` が前）が、許されない所で触れるか（`seg_pair_clash`。1本の辺の
+    /// となり合う区間は、そのつなぎ目を共有してよい）
     fn segs_clash(
         &self,
         polys: &[Vec<IPt>],
         (e, k): (usize, usize),
         (f, m): (usize, usize),
     ) -> bool {
-        let (a, b) = (polys[e][k], polys[e][k + 1]);
-        let (c, d) = (polys[f][m], polys[f][m + 1]);
-        if !segs_touch(a, b, c, d) {
-            return false;
-        }
-        // 共有する端と、それぞれのもう一方の端
-        let common = if a == c {
-            (a, b, d)
-        } else if a == d {
-            (a, b, c)
-        } else if b == c {
-            (b, a, d)
-        } else if b == d {
-            (b, a, c)
-        } else {
-            return true;
-        };
-        let (v, p, q) = common;
-        if fan_overlap(v, p, q) {
-            return true;
-        }
-        // 区間が辺の端の頂点 `v` から出ているなら、その頂点の番号
-        let node_at = |e: usize, k: usize| -> Option<usize> {
-            let poly = &polys[e];
-            let ed = self.edges[e];
-            if k == 0 && v == poly[0] {
-                Some(ed.a)
-            } else if k + 2 == poly.len() && v == poly[poly.len() - 1] {
-                Some(ed.b)
-            } else {
-                None
-            }
-        };
-        let same_node = matches!((node_at(e, k), node_at(f, m)), (Some(x), Some(y)) if x == y);
-        let permitted = if e == f {
-            (m == k + 1 && v == b && v == c) || (m != k && same_node)
-        } else {
-            same_node
-        };
-        !permitted
+        let (pe, pf) = (&polys[e], &polys[f]);
+        let (ee, ef) = (self.edges[e], self.edges[f]);
+        seg_pair_clash(
+            (pe[k], pe[k + 1]),
+            seg_tags(pe, k, ee.a, ee.b),
+            (pf[m], pf[m + 1]),
+            seg_tags(pf, m, ef.a, ef.b),
+            (e == f && m == k + 1).then_some(pe[k + 1]),
+        )
     }
 
     /// 面を取り出す。外周（面積が正）に、それを含むいちばん小さい同じ色の外周の穴（面積が負）を入れる。
@@ -2540,20 +2509,31 @@ enum OverlaySrc {
 
 /// 曲線を折れ線にする（`t` つき）。曲線と折れ線の離れ具合が `tol` 以下になる等分
 fn flatten_with_t(q: &QuadBez, tol: f64) -> Vec<(Point, f64)> {
-    let n = flat_count(q, tol);
-    (0..=n)
-        .map(|i| {
-            let t = i as f64 / n as f64;
-            (q.eval(t), t)
-        })
-        .collect()
+    flat_points(*q, tol).collect()
 }
 
-/// 曲線を、折れ線とのずれが `tol` ほどになるように等分する数
+/// 曲線を、折れ線とのずれが `tol` ほどになるように等分した点と t（`flatten_with_t`。等分の点の式はこれ1つ）
+fn flat_points(q: QuadBez, tol: f64) -> impl Iterator<Item = (Point, f64)> {
+    let n = flat_count(&q, tol);
+    (0..=n).map(move |i| {
+        let t = i as f64 / n as f64;
+        (q.eval(t), t)
+    })
+}
+
+/// 2次ベジェを n 等分した折れ線と曲線のずれは、およそ（多くとも）`bend / (4 n²)`。その `bend`＝|p0 − 2·p1 + p2|
+fn bend(q: &QuadBez) -> f64 {
+    (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()).hypot()
+}
+
+/// 曲線を n 等分した折れ線と曲線のずれ（`bend`）
+fn flat_dev(q: &QuadBez, n: usize) -> f64 {
+    bend(q) / (4.0 * (n * n) as f64)
+}
+
+/// 曲線を、折れ線とのずれ（`flat_dev`）が `tol` ほどになるように等分する数
 fn flat_count(q: &QuadBez, tol: f64) -> usize {
-    let dd = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()).hypot();
-    // 2次ベジェを n 等分した折れ線の離れ具合は、およそ |p0 - 2p1 + p2| / (4 n²)
-    ((dd / (4.0 * tol)).sqrt().ceil() as usize).clamp(1, 512)
+    ((bend(q) / (4.0 * tol)).sqrt().ceil() as usize).clamp(1, 512)
 }
 
 /// 整数の向きを、角度の順（x 軸の正の向きから、面積の式で正の回り方）に比べる（向きは格子の点の差か、その積。
@@ -4145,14 +4125,7 @@ impl FedEdges {
         if !self.spans.contains_key(&line) {
             return grid_poly(q);
         }
-        let mut out: Vec<IPt> = Vec::new();
-        for (p, _) in self.points(line, q) {
-            let ip = gpt(p);
-            if out.last() != Some(&ip) {
-                out.push(ip);
-            }
-        }
-        out
+        grid_line(self.points(line, q).into_iter().map(|(p, _)| p))
     }
 }
 
@@ -4495,7 +4468,7 @@ impl ChainRestorer {
 /// 格子の点（1/4096px を 1 とする整数の座標）
 type IPt = (i64, i64);
 
-/// 点を格子の点に丸める（`to_grid` と同じ丸め。座標の範囲は見ない）
+/// 点を格子の点に丸める（丸めの式はこれ1つ。座標の範囲は見ない：範囲も見るのは `to_grid`）
 fn gpt(p: Point) -> IPt {
     (
         (p.x * OVERLAY_GRID).round() as i64,
@@ -4505,11 +4478,14 @@ fn gpt(p: Point) -> IPt {
 
 /// 曲線の判定の形：重ねるときと同じ数に等分した折れ線の点を、格子に丸めたもの（続けて同じ点は1つにする）
 fn grid_poly(q: &QuadBez) -> Vec<IPt> {
-    // 点は `flatten_with_t` と同じ（同じ t で同じ式）
-    let n = flat_count(q, FLAT_TOL);
-    let mut out: Vec<IPt> = Vec::with_capacity(n + 1);
-    for i in 0..=n {
-        let ip = gpt(q.eval(i as f64 / n as f64));
+    grid_line(flat_points(*q, FLAT_TOL).map(|(p, _)| p))
+}
+
+/// 折れ線の点 `pts` を格子の点に丸めたもの（続けて同じ点は1つにする）
+fn grid_line(pts: impl Iterator<Item = Point>) -> Vec<IPt> {
+    let mut out: Vec<IPt> = Vec::with_capacity(pts.size_hint().0);
+    for p in pts {
+        let ip = gpt(p);
         if out.last() != Some(&ip) {
             out.push(ip);
         }
@@ -5154,14 +5130,7 @@ impl GridPolygon {
             if on_seg(a, b, p) {
                 return None;
             }
-            // 下の端は含め、上の端は含めない（半開区間）
-            if a.1 <= p.1 {
-                if b.1 > p.1 && orient(a, b, p) > 0 {
-                    w += 1;
-                }
-            } else if b.1 <= p.1 && orient(a, b, p) < 0 {
-                w -= 1;
-            }
+            w += crossing(a, b, p).unwrap_or(0);
         }
         Some(w)
     }
@@ -5261,15 +5230,15 @@ fn seg_cells((a, b): (IPt, IPt), pad: i64) -> impl Iterator<Item = (i64, i64)> {
 /// 曲線 `q`（px）と、その判定の形を、`pad` 目だけ太らせたものがかかるマス。曲線を、弦とのずれが半マスほどになる数に
 /// 等分し（`flat_count`）、弦を、ずれの分と `pad` だけ太らせてたどる
 fn quad_cells(q: QuadBez, pad: i64) -> impl Iterator<Item = (i64, i64)> {
-    // n 等分した弦と曲線のずれは |p0 − 2·p1 + p2| / (4 n²) 以下
-    let dd = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()).hypot();
-    let dev = |n: usize| dd / (4.0 * (n * n) as f64);
-    let n = flat_count(&q, GRID_CELL as f64 / OVERLAY_GRID / 2.0);
+    let tol = GRID_CELL as f64 / OVERLAY_GRID / 2.0;
     // 太らせる分：弦と曲線のずれ、判定の形（同じ等分の、`FLAT_TOL` の数）と曲線のずれ、両方の点の丸め（それぞれ
     // 対角線の半分まで）
-    let pad = pad + ((dev(n) + dev(flat_count(&q, FLAT_TOL))) * OVERLAY_GRID).ceil() as i64 + 2;
-    let at = move |i: usize| gpt(q.eval(i as f64 / n as f64));
-    (0..n).flat_map(move |i| seg_cells((at(i), at(i + 1)), pad))
+    let dev = flat_dev(&q, flat_count(&q, tol)) + flat_dev(&q, flat_count(&q, FLAT_TOL));
+    let pad = pad + (dev * OVERLAY_GRID).ceil() as i64 + 2;
+    let mut pts = flat_points(q, tol).map(|(p, _)| gpt(p));
+    let first = pts.next();
+    pts.scan(first, |prev, b| prev.replace(b).map(|a| (a, b)))
+        .flat_map(move |ab| seg_cells(ab, pad))
 }
 
 /// 多角形（格子の点）の中と輪郭がかかるマス：輪郭の区間がかかるマスを列ごとに集め、列の中では一番下から一番上までの
@@ -5389,7 +5358,7 @@ fn from_lowest_point(mut segs: Vec<QuadBez>) -> Vec<QuadBez> {
 }
 
 /// 点の、座標の小さい順（x、同じなら y）
-fn point_order(p: Point, q: Point) -> std::cmp::Ordering {
+pub(crate) fn point_order(p: Point, q: Point) -> std::cmp::Ordering {
     p.x.total_cmp(&q.x).then_with(|| p.y.total_cmp(&q.y))
 }
 
@@ -5426,10 +5395,10 @@ fn on_grid(mut pts: impl Iterator<Item = Point>) -> bool {
 
 /// 点を、重ねるときの格子の点にする。格子に置けない（±65,536px の外）ときは `None`
 fn to_grid(p: Point) -> Option<i_overlay9::i_float::int::point::IntPoint<i32>> {
-    let limit = (1i64 << 28) as f64;
-    let x = (p.x * OVERLAY_GRID).round();
-    let y = (p.y * OVERLAY_GRID).round();
-    (x.abs() < limit && y.abs() < limit)
+    const LIMIT: u64 = 1 << 28;
+    let (x, y) = gpt(p);
+    // 有限でない座標は `gpt` で数にならない（NaN は 0 になる）ので、先に断る
+    (p.x.is_finite() && p.y.is_finite() && x.unsigned_abs() < LIMIT && y.unsigned_abs() < LIMIT)
         .then(|| i_overlay9::i_float::int::point::IntPoint::new(x as i32, y as i32))
 }
 

@@ -119,7 +119,7 @@ pub(crate) fn handle_select_tool_input(
                 if let Some(start_pt) = host.tab().view.press_origin_world(ui.ctx()).or(mouse_pt) {
                     start_reshape_drag(host, start_pt, shift_held, alt_held);
                     if let Some(curr_pt) = mouse_pt {
-                        if (curr_pt - start_pt).hypot() > 1e-6 {
+                        if crate::canvas_tool::View::moved_since_press(start_pt, curr_pt) {
                             update_reshape_drag(host.tab_mut(), curr_pt);
                         }
                     }

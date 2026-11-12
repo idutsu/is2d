@@ -93,8 +93,8 @@ pub(crate) fn interpolate_affine_with_pivot(
     rotate_mode: TweenRotate,
     t: f64,
 ) -> (Affine, Point) {
-    let start_custom = (start_pivot - Point::ZERO).hypot() > 1e-6;
-    let end_custom = (end_pivot - Point::ZERO).hypot() > 1e-6;
+    let start_custom = crate::vector_engine::is_custom_pivot(start_pivot);
+    let end_custom = crate::vector_engine::is_custom_pivot(end_pivot);
     let (p0, p1) = match (start_custom, end_custom) {
         (true, false) => (start_pivot, start_pivot),
         (false, true) => (end_pivot, end_pivot),
