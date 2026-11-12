@@ -3590,8 +3590,9 @@ pub(crate) fn merge_pieces_layer_by_layer(
 
 /// 浮いた片 `fl` を確定する：レイヤーごとに、残りの地図（無ければセル画の地図）に片の組を下から順に重ねた地図
 /// （`FloatLayer::committed`）を、そのセル画の地図にする（`write_scope_map`。図形はその地図の面）。重ねる計算は
-/// レイヤーをまたがないので、2つ以上あれば同時にする。片を重ねられない（格子に置けない座標がある）レイヤーは、残りだけを
-/// 書き、片は浮いた片のまま残す（失わない）。戻り値は、セル画を書き換えたか
+/// レイヤーをまたがないので、2つ以上あれば同時にする。片の組の変換は、かける前に確定と同じ式で確かめてある（変形は
+/// `Floating::fits_transform`、新しい中身は `prepare_placement`）ので、地図にできない確定は無い。それでも地図にできない
+/// レイヤーがあれば、ほかの断る所と同じく、そのレイヤーは書かない（セル画は切る前のまま）。戻り値は、セル画を書き換えたか
 pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: Floating) -> bool {
     tab.refresh_scene_base();
     let nexts: Vec<Option<crate::planar_map::PlanarMap>> = {
@@ -3600,28 +3601,17 @@ pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: Floating) -> bool {
     };
     let scope = tab.session.editing_group_path.clone();
     let mut written: Vec<LayerId> = Vec::new();
-    let mut left = Floating::new(true);
     for (l, next) in fl.layers().iter().zip(nexts) {
-        let next = match next {
-            Some(m) => Some(m),
-            None => {
-                left.keep_pieces_of(l);
-                l.origin.as_ref().map(|o| o.base().map.clone())
-            }
+        let Some(next) = next else {
+            tab.session.off_grid = true;
+            continue;
         };
-        if let Some(next) = next {
-            if write_scope_map(tab, l.layer_id, &scope, |_| Some(next)) {
-                written.push(l.layer_id);
-            }
+        if write_scope_map(tab, l.layer_id, &scope, |_| Some(next)) {
+            written.push(l.layer_id);
         }
     }
     finish_cel_writes(tab, &written);
-    let any = !written.is_empty();
-    if !left.is_empty() {
-        tab.session.set_floating(Some(left));
-        tab.session.select_floating_pieces();
-    }
-    any
+    !written.is_empty()
 }
 
 /// `tab.session.floating` のうち `keep_indices`（`Scene` インデックス）に含まれない選択図形を確定

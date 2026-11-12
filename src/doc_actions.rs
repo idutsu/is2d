@@ -943,34 +943,40 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     }
     let mut any_transformed = false;
     let selection = tab.session.selection.clone();
-    // 地図は格子の内の形しか持てないので、生の図形（浮いた片と、選んだグループの中の生の図形）が格子の外（±65,536px の
-    // 外）へ出る変形は、文書を変える前に断る（インスタンスは地図を持たないので、どこへでも動かせる）
-    let xform = tab.session.edit_path.world_xform();
+    let world = tab.session.edit_path.world_xform();
+    let doc = world.inverse() * affine * world;
     let hidden = tab
         .session
         .floating()
         .map(|fl| fl.hidden().clone())
         .unwrap_or_default();
-    let fits_moved = |s: &FillShape| {
-        let mut moved = s.clone();
-        moved.transform(affine);
-        crate::planar_map::fits_grid(&moved, xform)
-    };
+    let picked = |s: &FillShape| !hidden.contains(&s.shape_id) && selection.contains_shape(s);
+    // 選んだグループの中の生の図形の階層（レイヤー, 階層）
+    let mut scopes: Vec<(LayerId, Vec<u64>)> = Vec::new();
+    for s in tab.session.base_cache.shapes() {
+        if picked(s)
+            && s.symbol_instance.is_none()
+            && !scopes
+                .iter()
+                .any(|x| x.0 == s.layer_id && x.1 == s.group_path)
+        {
+            scopes.push((s.layer_id, s.group_path.clone()));
+        }
+    }
+    // 地図は格子の内の形しか持てないので、生の図形（浮いた片と、選んだグループの中の生の図形）が格子の外（±65,536px の
+    // 外）へ出る変形は、文書を変える前に断る。確かめるのは確定と同じ式（片の組の地図に重ねた変換、グループの階層の地図に
+    // 文書の座標の変換をかけた点：`PlanarMap::fits_grid`）なので、確かめを通れば確定で失敗しない（インスタンスは地図を
+    // 持たないので、どこへでも動かせる）
     let fits = tab
         .session
         .floating()
-        .is_none_or(|fl| fl.pieces().iter().all(fits_moved))
-        && tab
-            .session
-            .base_cache
-            .shapes()
-            .iter()
-            .filter(|s| {
-                s.symbol_instance.is_none()
-                    && !hidden.contains(&s.shape_id)
-                    && selection.contains_shape(s)
-            })
-            .all(fits_moved);
+        .is_none_or(|fl| fl.fits_transform(doc))
+        && scopes.iter().all(|(layer_id, path)| {
+            tab.session
+                .base_cache
+                .cel(*layer_id)
+                .is_none_or(|c| c.scope_base(path).map.fits_grid(doc))
+        });
     if !fits {
         tab.session.off_grid = true;
         return false;
@@ -979,7 +985,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     tab.session.update_floating(|fl_opt| {
         if let Some(fl) = fl_opt {
             if !fl.pieces().is_empty() {
-                fl.transform(xform.inverse() * affine * xform);
+                fl.transform(doc);
                 any_transformed = true;
             }
         }
@@ -996,20 +1002,6 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     if !target_lids.is_empty() {
         // 選んだグループの中の生の図形は、階層ごとに、セル画の地図に文書の座標の変換をかけて、その座標の格子で正しい地図に
         // する（`realized`。図形はその地図の面で、番号はそのまま）
-        let world = tab.session.edit_path.world_xform();
-        let doc = world.inverse() * affine * world;
-        let picked = |s: &FillShape| !hidden.contains(&s.shape_id) && selection.contains_shape(s);
-        let mut scopes: Vec<(LayerId, Vec<u64>)> = Vec::new();
-        for s in tab.session.base_cache.shapes() {
-            if picked(s)
-                && s.symbol_instance.is_none()
-                && !scopes
-                    .iter()
-                    .any(|x| x.0 == s.layer_id && x.1 == s.group_path)
-            {
-                scopes.push((s.layer_id, s.group_path.clone()));
-            }
-        }
         let mut written: Vec<LayerId> = Vec::new();
         for (layer_id, group_path) in &scopes {
             if write_scope_map(tab, *layer_id, group_path, |base| {

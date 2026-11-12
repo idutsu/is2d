@@ -300,7 +300,8 @@ impl Floating {
         }
     }
 
-    /// 一時描画キャッシュと計算に使う写しを除去して履歴保持を軽量化する（控えが持つ地図は、しまう形だけ）
+    /// Undo の控えにする形にする：控えが持つのは地図（しまう形）と変換だけ。計算に使う写しと、画面の写し（片・残り・
+    /// 隠す図形）は外す（戻すときは `Session::set_floating` が `refresh` で作り直す）
     pub(crate) fn strip_transient_caches(&mut self) {
         for l in &mut self.layers {
             if let Some(o) = &mut l.origin {
@@ -310,12 +311,9 @@ impl Floating {
                 g.held = None;
             }
         }
-        for s in &mut self.pieces {
-            s.strip_transient_caches();
-        }
-        for (_, s) in &mut self.remainder {
-            s.strip_transient_caches();
-        }
+        self.pieces = Vec::new();
+        self.remainder = Vec::new();
+        self.hidden = HashSet::new();
     }
 
     /// 直前の履歴スナップショットと同じ中身か（地図は同じ `Arc`、変換は同じ値）
@@ -398,7 +396,17 @@ impl Floating {
         failed
     }
 
-    /// 動かす・回す・拡大：すべての片の組に、文書の座標の変換 `doc` を重ねる
+    /// すべての片の組に文書の座標の変換 `doc` を重ねても、確定で地図にできるか（確定と同じ式：片の組の地図に、重ねた
+    /// 変換をかけた点がみな格子に置ける：`PlanarMap::fits_grid`）
+    pub(crate) fn fits_transform(&self, doc: Affine) -> bool {
+        self.layers
+            .iter()
+            .flat_map(|l| &l.groups)
+            .all(|g| g.base().map.fits_grid(doc * g.xform))
+    }
+
+    /// 動かす・回す・拡大：すべての片の組に、文書の座標の変換 `doc` を重ねる（重ねてよいかは先に `fits_transform` で
+    /// 確かめる）
     pub(crate) fn transform(&mut self, doc: Affine) {
         for g in self.layers.iter_mut().flat_map(|l| &mut l.groups) {
             g.xform = doc * g.xform;
@@ -547,17 +555,6 @@ impl Floating {
         self.layers.retain(|l| !l.is_empty());
         out.layers.retain(|l| !l.is_empty());
         out
-    }
-
-    /// レイヤー `l` の片の組を、残りなしで足す（確定できなかった片を浮いたまま残す）
-    pub(crate) fn keep_pieces_of(&mut self, l: &FloatLayer) {
-        if !l.groups.is_empty() {
-            self.layers.push(FloatLayer {
-                layer_id: l.layer_id,
-                origin: None,
-                groups: l.groups.clone(),
-            });
-        }
     }
 
     /// 地図 `map`（文書の座標。面の番号が片の番号）を、変換 `xform` をかける片の組として、レイヤー `layer_id` の一番上に

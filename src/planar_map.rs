@@ -323,14 +323,20 @@ impl PlanarMap {
     /// 面の輪郭が閉じて色がそろい、色のある穴に外周があり（`faces` の壊れた数が 0）、何も無い側の輪郭が色のある面の
     /// 中に入り込んでいない（重なった図形をそのまま地図にしたものでない）
     pub(crate) fn is_valid(&self) -> bool {
+        self.valid_faces().is_some()
+    }
+
+    /// 正しい地図なら（`is_valid`）、その面（`faces`）。正しい地図かの判定はどこでもこれ1つ（書き戻し・読み込み・変換
+    /// した地図・テスト）。`None`：正しい地図でない
+    pub(crate) fn valid_faces(&self) -> Option<Vec<MapFace>> {
         let polys = self.polys();
         if !self.polys_apart(&polys) {
-            return false;
+            return None;
         }
         let cycles = self.face_cycles_with(&polys);
         let (faces, broken) = self.faces_of(&polys, &cycles);
         if broken > 0 {
-            return false;
+            return None;
         }
         // 何も無い側の輪郭：その最初の区間の真ん中の点が、その辺を輪郭に持たない色のある面の中（外周の中で、どの穴の外）
         // にあれば、入り込んでいる
@@ -380,24 +386,24 @@ impl PlanarMap {
                 };
                 let inside = |w: Option<i32>| w.map(|w| w != 0);
                 match inside(wind(0)) {
-                    None => return false,
+                    None => return None,
                     Some(false) => continue,
                     Some(true) => {}
                 }
                 let mut in_hole = false;
                 for k in 1..f.cycles.len() {
                     match inside(wind(k)) {
-                        None => return false,
+                        None => return None,
                         Some(true) => in_hole = true,
                         Some(false) => {}
                     }
                 }
                 if !in_hole {
-                    return false;
+                    return None;
                 }
             }
         }
-        true
+        Some(faces)
     }
 
     /// テスト用：正しくないとき、どこがだめか
@@ -885,17 +891,6 @@ impl PlanarMap {
 }
 
 impl PlanarMap {
-    /// 面の輪郭 `cycles`（`face_cycles_with` の結果）のうち、（閉じない輪郭の数, 色がそろわない輪郭の数）
-    fn cycle_counts(&self, cycles: &[Vec<(usize, bool)>]) -> (usize, usize) {
-        let is_open = |c: &Vec<(usize, bool)>| c.iter().any(|h| h.0 == usize::MAX);
-        let open = cycles.iter().filter(|c| is_open(c)).count();
-        let mixed = cycles
-            .iter()
-            .filter(|c| !is_open(c) && self.is_broken_cycle(c))
-            .count();
-        (open, mixed)
-    }
-
     /// 面の輪郭 `c`（`face_cycles_with` の1つ）が壊れている：閉じない、または左の色がそろわない。
     /// 壊れた輪郭の面は図形に書き戻せない
     fn is_broken_cycle(&self, c: &[(usize, bool)]) -> bool {
@@ -1248,20 +1243,19 @@ pub(crate) fn test_checks() -> bool {
     *ON.get_or_init(|| std::env::var("IS2D_NO_CHECKS").is_err())
 }
 
-/// 図形に書き戻す地図 `next` の面。壊れた輪郭（閉じないか、左の色がそろわない輪郭。`faces` は飛ばす）が1つでもあれば `None`
-/// を返し、書き戻さずに断る：飛ばした面の元の図形は消すほうに入るので、書くと絵の一部が知らせなく消える。テストでは、書く
-/// 地図が正しい地図であることを確かめる（壊れた結果を作った操作が、そこで見つかる）
+/// 図形に書き戻す地図 `next` の面。正しい地図でなければ（`valid_faces`：読み込みと同じ1つの判定）`None` を返し、書き戻さずに
+/// 断る（書けた地図は、保存して開いても必ず読める）。テストでは、正しい地図でない結果を作った操作を、そこで見つける
 fn written_faces(next: &PlanarMap) -> Option<Vec<MapFace>> {
+    let faces = next.valid_faces();
     #[cfg(test)]
     if test_checks() {
         assert!(
-            next.is_valid(),
+            faces.is_some(),
             "書き戻す地図が正しい地図でない: {}",
             next.validity_report()
         );
     }
-    let (faces, broken) = next.faces();
-    (broken == 0).then_some(faces)
+    faces
 }
 
 // ============================================================================
@@ -2616,13 +2610,11 @@ impl PlanarMap {
         }
     }
 
-    /// バケツ：点 `p` を含む面（辺で囲まれた所。何も塗っていない所も）を `color` にする。
-    /// どの輪郭にも囲まれていない所・すでに `color` の面は、何も変えない（同じ地図を返す）。
-    /// 地図に壊れた輪郭があって、囲まれていない所かどうかを決められないときは `None`
+    /// バケツ：点 `p` を含む面（辺で囲まれた所。何も塗っていない所も）を `color` にした地図。`None`：変わらない（どの
+    /// 輪郭にも囲まれていない所・輪郭の上・すでに `color` の面）
     pub(crate) fn with_face_filled(&self, p: Point, color: Color32) -> Option<PlanarMap> {
         let polys = self.polys();
         let all = self.face_cycles_with(&polys);
-        let broken = self.cycle_counts(&all) != (0, 0);
         // 閉じない輪郭（壊れた所）は使わない。輪郭ごとに（判定の形の点, 面積の2倍, 外接矩形）。外周か穴か・点の内外は、
         // 判定の形で整数で決める
         let cycles: Vec<Vec<(usize, bool)>> = all
@@ -2652,16 +2644,14 @@ impl PlanarMap {
         let mut ext: Option<usize> = None;
         for k in (0..cycles.len()).filter(|&k| info[k].1 > 0) {
             match contains(k, p2) {
-                None => return Some(self.clone()),
+                None => return None,
                 Some(true) if ext.is_none_or(|e| info[k].1 < info[e].1) => ext = Some(k),
                 _ => {}
             }
         }
-        let Some(ext) = ext else {
-            return (!broken).then(|| self.clone());
-        };
+        let ext = ext?;
         if self.side_color(cycles[ext][0]) == Some(color) {
-            return Some(self.clone());
+            return None;
         }
         // その外周の中にある穴（面積が負）のうち、それを含むいちばん小さい外周がこの外周のもの。調べる点は、穴の最初の
         // 区間の真ん中（正しい地図では、ほかの輪郭の上に無い）
@@ -5420,13 +5410,8 @@ fn half_mid2(polys: &[Vec<IPt>], h: (usize, bool)) -> IPt {
     (a.0 + b.0, a.1 + b.1)
 }
 
-/// 図形 `s`（座標の変換 `xform` で置いた図形）が、文書の座標で地図の格子に置けるか（±65,536px の内）。地図は格子の
-/// 内の形しか持てないので、動かす・変形する操作は、置けない所へは動かさない
-pub(crate) fn fits_grid(s: &FillShape, xform: Affine) -> bool {
-    shape_on_grid(&s.to_doc(xform))
-}
-
-/// 図形 `s` の点（端と制御点）がみな格子に置けるか（`on_grid`）
+/// テスト用：図形 `s` の点（端と制御点）がみな格子に置けるか（`on_grid`。図形から地図を作る下ごしらえ）
+#[cfg(test)]
 fn shape_on_grid(s: &FillShape) -> bool {
     on_grid(
         s.contours()
