@@ -6,13 +6,14 @@ use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layer_map,
     edit_layers, editable_layer_ids, finish_cel_writes, focus_active_layer_by_id,
-    focus_active_layer_to_shape_by_id, insert_and_select_shapes_in_scope,
-    reset_session_after_timeline_change, select_shapes_for_timeline_selection, set_tool,
-    show_notice, toggle_select_sub_mode, write_scope_map, Clipboard, CoalesceKey, HoverTarget,
-    LayerId, MapOwner, NoticeKind, SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
+    focus_active_layer_to_shape_by_id, reset_session_after_timeline_change,
+    select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode,
+    write_scope_map, Clipboard, CoalesceKey, HoverTarget, LayerId, MapOwner, NoticeKind,
+    SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
-    instantiate_relative_shapes_in_scope, prepare_copy_selected_shapes, resolve_clipboard_for_paste,
+    content_xform, import_clipboard_symbols, pasteable_content, prepare_copy_selected_shapes,
+    prepare_placement, put_placements, selected_content,
 };
 use crate::planar_map::{MapEdit, MapInput, MapRule};
 use crate::select_ops::{
@@ -1033,15 +1034,24 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     any_transformed
 }
 
+/// `Alt` 複製：選んでいるものの中身（`selected_content`）を、同じ所にそのまま置く（変換は恒等なので、地図はそのまま写る。
+/// 面・グループ・インスタンスには新しい番号）。置いたものを選ぶ（このあと、それを動かす）
 fn duplicate_selected_in_working_copy(tab: &mut Tab) {
-    let extracted = tab.session.extract_selected_relative_to_scope();
-    if extracted.is_empty() {
+    let Some(content) = selected_content(tab) else {
         return;
-    }
+    };
+    let xform = content_xform(
+        content.world,
+        tab.session.edit_path.world_xform(),
+        KVec2::ZERO,
+    );
+    let Some(placement) = prepare_placement(tab, &content, xform, true, None) else {
+        tab.session.off_grid = true;
+        return;
+    };
     commit_floating(tab);
-    let (duplicated, any_raw) =
-        instantiate_relative_shapes_in_scope(tab, &extracted, KVec2::ZERO, true);
-    insert_and_select_shapes_in_scope(tab, duplicated, any_raw);
+    tab.session.selection.clear();
+    put_placements(tab, vec![placement], |sym| sym);
 }
 
 fn apply_finish_move_selection_drag(
@@ -1289,7 +1299,7 @@ fn apply_paste_clipboard(
     toast: &mut Option<StatusToast>,
     in_place: bool,
 ) -> bool {
-    if clipboard.shapes.is_empty() {
+    if clipboard.content.is_none() {
         return false;
     }
     let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
@@ -1302,10 +1312,7 @@ fn apply_paste_clipboard(
         return false;
     }
 
-    let (resolved, had_cycle) = resolve_clipboard_for_paste(tab, clipboard, |tab| {
-        clear_selection(tab);
-        push_undo(tab, None);
-    });
+    let (content, had_cycle) = pasteable_content(tab, clipboard);
     if had_cycle {
         show_notice(
             toast,
@@ -1313,9 +1320,9 @@ fn apply_paste_clipboard(
             "編集中のシンボル自身や親シンボルは循環参照になるため配置できません",
         );
     }
-    if resolved.is_empty() {
+    let Some(content) = content else {
         return false;
-    }
+    };
 
     let offset = if in_place {
         KVec2::ZERO
@@ -1329,17 +1336,27 @@ fn apply_paste_clipboard(
         clipboard.paste_offset
     };
 
+    // 同じタイムラインの、いくつかのレイヤーから写した中身は、元のレイヤーへ置く（編集できなければ作業中のレイヤー）
     let same_timeline_context = clipboard.source_doc_id == tab.id
         && clipboard.source_symbol_id == tab.session.edit_path.last().map(|s| s.symbol_id)
         && tab.session.editing_group_path.is_empty();
     let multi_layer_copy = same_timeline_context
-        && resolved
+        && content
+            .layers
             .first()
-            .is_some_and(|first| resolved.iter().any(|s| s.layer_id != first.layer_id));
-    let (pasted_shapes, any_raw) =
-        instantiate_relative_shapes_in_scope(tab, &resolved, offset, multi_layer_copy);
-
-    insert_and_select_shapes_in_scope(tab, pasted_shapes, any_raw);
+            .is_some_and(|first| content.layers.iter().any(|l| l.0 != first.0));
+    // 置く準備（格子の外へ出るなら、文書を変えずに断る）をしてから、選択を確定し、シンボルを移植して置く
+    let xform = content_xform(content.world, tab.session.edit_path.world_xform(), offset);
+    let Some(placement) = prepare_placement(tab, &content, xform, multi_layer_copy, None) else {
+        tab.session.off_grid = true;
+        return false;
+    };
+    clear_selection(tab);
+    push_undo(tab, None);
+    let sym_map = import_clipboard_symbols(tab, clipboard, &content);
+    put_placements(tab, vec![placement], |sym| {
+        sym_map.get(&sym).copied().unwrap_or(sym)
+    });
     if !matches!(tool.tool, Tool::Select | Tool::Transform) {
         set_tool(tab, tool, Tool::Select);
     }

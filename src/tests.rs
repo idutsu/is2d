@@ -93,12 +93,35 @@ fn put_cel_shapes(app: &mut Is2dApp, layer_idx: usize, frame: usize, mut shapes:
     else {
         return;
     };
+    // 下ごしらえなので、図形から地図を作ってセル画にする（本番の書き込みは、地図の面か浮いた片しか書かない）。ステージの
+    // 座標の図形を、今の階層の文書の座標へ戻す
+    let world = app.session.edit_path.world_xform();
     for s in &mut shapes {
         s.layer_id = lid;
+        if world != kurbo::Affine::IDENTITY {
+            s.transform(world.inverse());
+        }
+        s.strip_transient_caches();
     }
-    canvas_tool::edit_layers(app.tab_mut(), &[lid], |edit| {
-        edit.shapes = shapes;
+    let cel = crate::timeline::Cel::from_shapes(shapes);
+    let written = app.tab_mut().with_active_timeline_mut(|tl, _lib| {
+        let layer = tl.layers.get_mut(layer_idx)?;
+        if !layer.is_editable_at(frame) {
+            return None;
+        }
+        let kf = layer.keyframe_index_at(frame)?;
+        match cel {
+            Ok(cel) => {
+                layer.keyframe_mut(kf).cel = cel;
+                Some(true)
+            }
+            Err(_) => Some(false),
+        }
     });
+    if written == Some(false) {
+        app.session.off_grid = true;
+    }
+    canvas_tool::finish_cel_writes(app.tab_mut(), &[lid]);
     if prev_frame != frame || !prev_vis || prev_lock {
         app.tab_mut().with_active_timeline_mut(|tl, _lib| {
             tl.current_frame = prev_frame;
@@ -4051,7 +4074,7 @@ fn test_cross_tab_symbol_paste_remaps_inner_group_ids() {
     // 2つ目のタブを開き、Tab 1 側でもグループ（gid=1）を作成してから Tab 0 のシンボルをペースト＆グループ解除（デタッチ）
     crate::project_io::open_project_in_tab(&mut cross_gid_app, &tmp_cross_tab, None).unwrap();
     assert!(
-        !cross_gid_app.clipboard.shapes.is_empty(),
+        cross_gid_app.clipboard.content.is_some(),
         "タブ切り替え後もアプリ共通の clipboard が保持されていること"
     );
     put_cel_shapes(
@@ -10158,18 +10181,28 @@ fn test_stage7c_scene_base_cache_and_edit_layers() {
         "未変更レイヤーの SceneBaseCache は再評価されず同一の Arc<Mesh> を保持すること"
     );
 
-    // 2. edit_layers を直接呼んだ場合も指定したレイヤーのみ書き換わり、SceneBaseCache が即座に同期されること
+    // 2. edit_layers は地図の面を外す・並べ替えるだけ：色や形を変えた図形（地図の面でない図形）は書かずに断る
+    let before = app.doc.root.layers[0].keyframes[0].cel.revision;
     let changed = canvas_tool::edit_layers(&mut app.tabs[app.active], &[layer_bottom_id], |ed| {
         for s in &mut ed.shapes {
             s.set_color(Color32::GREEN);
         }
+    });
+    assert!(!changed);
+    assert!(std::mem::take(&mut app.session.off_grid));
+    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.revision, before);
+    assert_ne!(app.scene().get(0).unwrap().color, Color32::GREEN);
+
+    // 3. edit_layers を直接呼んだ場合も指定したレイヤーのみ書き換わり、SceneBaseCache が即座に同期されること
+    let changed = canvas_tool::edit_layers(&mut app.tabs[app.active], &[layer_bottom_id], |ed| {
+        ed.shapes.retain(|s| s.shape_id != bottom_shape_id);
     });
     assert!(changed);
     assert_ne!(
         app.doc.root.layers[0].keyframes[0].cel.revision,
         rev_bottom_before
     );
-    assert_eq!(app.scene().get(0).unwrap().color, Color32::GREEN);
+    assert!(app.scene().iter().all(|s| s.shape_id != bottom_shape_id));
     let _ = layer_top_id;
 }
 
@@ -12776,8 +12809,14 @@ fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
     shape.layer_id = app.doc.root.layers[0].id;
     assert_eq!(app.scene().len(), 0);
 
-    let maps = crate::floating::piece_maps(&[shape], kurbo::Affine::IDENTITY).unwrap();
-    app.tabs[0].session.add_floating_maps(maps);
+    let lid = shape.layer_id;
+    let map = crate::planar_map::LayerBase::of(&[&shape], kurbo::Affine::IDENTITY)
+        .unwrap()
+        .map
+        .clone();
+    app.tabs[0]
+        .session
+        .add_floating_maps(vec![(lid, map, kurbo::Affine::IDENTITY)]);
     assert_eq!(app.scene().len(), 1);
     assert_eq!(app.scene().get(0).unwrap().color, Color32::RED);
 
@@ -25362,6 +25401,423 @@ mod map_overlay {
         *app.session.planar_maps.lock() = None;
     }
 
+    /// 色ごとの塗りの面積（図形の並び）
+    fn areas_by_color<'a>(shapes: impl IntoIterator<Item = &'a FillShape>) -> Vec<(Color32, f64)> {
+        let mut out: Vec<(Color32, f64)> = Vec::new();
+        for s in shapes {
+            let a: f64 = s.contours().map(|k| k.signed_area()).sum::<f64>().abs();
+            match out.iter_mut().find(|x| x.0 == s.color) {
+                Some(x) => x.1 += a,
+                None => out.push((s.color, a)),
+            }
+        }
+        out.sort_by_key(|x| x.0.to_array());
+        out
+    }
+
+    fn same_areas(a: &[(Color32, f64)], b: &[(Color32, f64)], tol: f64) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(x, y)| x.0 == y.0 && (x.1 - y.1).abs() <= tol * x.1.max(1.0))
+    }
+
+    /// 新しい中身は地図だけで運ぶ：コピー・カット・貼り付け・Alt 複製・シンボル化・シンボルの分解・ライブラリからの配置の
+    /// どれでも、図形から地図を作らない（`LayerBase::of` はテストの下ごしらえだけ）。どのセル画の地図も決まりどおり
+    #[test]
+    fn new_content_never_builds_maps_from_shapes() {
+        let mut app = dense_scene_app(11);
+        let built = crate::planar_map::from_shape_builds();
+        let act = |app: &mut Is2dApp, a: doc_actions::Action| doc_actions::apply(app, a);
+        // 全部を選んでコピー → 貼り付け（ずらす）→ 確定
+        assert!(act(&mut app, doc_actions::Action::SelectAll));
+        assert!(doc_actions::copy_selected_shapes(&mut app));
+        assert!(doc_actions::paste_clipboard(&mut app, false));
+        assert!(app
+            .session
+            .floating()
+            .is_some_and(|fl| !fl.pieces().is_empty()));
+        act(&mut app, doc_actions::Action::Deselect);
+        // 矩形で切った片を Alt 複製で動かす → 確定
+        assert!(act(
+            &mut app,
+            doc_actions::Action::SelectMarquee {
+                p0: Point::new(-100.0, -80.0),
+                p1: Point::new(60.0, 50.0),
+                additive: false,
+            }
+        ));
+        assert!(act(
+            &mut app,
+            doc_actions::Action::FinishMoveSelectionDrag {
+                total_delta: KVec2::new(37.0, 21.0),
+                alt_duplicate: true,
+            }
+        ));
+        act(&mut app, doc_actions::Action::Deselect);
+        // 1枚目のレイヤーをグループ化 → 全部をシンボル化 → 分解（グループとして戻る）→ グループの解除 → 確定
+        let lid0 = app.doc.root.layers[0].id;
+        let first: Vec<usize> = (0..app.scene().len())
+            .filter(|&i| app.scene().get(i).unwrap().layer_id == lid0)
+            .collect();
+        app.session.set_selected_indices(first);
+        assert!(doc_actions::group_selected_shapes(&mut app).is_some());
+        assert!(act(&mut app, doc_actions::Action::SelectAll));
+        let sym = doc_actions::convert_selection_to_symbol(&mut app).expect("シンボル化");
+        assert!(
+            doc_actions::ungroup_selected_shapes(&mut app),
+            "シンボルの分解"
+        );
+        assert!(
+            doc_actions::ungroup_selected_shapes(&mut app),
+            "グループの解除"
+        );
+        act(&mut app, doc_actions::Action::Deselect);
+        // ライブラリから置く → カット → その場に貼り付け
+        assert!(doc_actions::place_symbol_instance_from_library(
+            &mut app, sym
+        ));
+        assert!(doc_actions::cut_selected_shapes(&mut app));
+        assert!(doc_actions::paste_clipboard(&mut app, true));
+        assert_eq!(
+            crate::planar_map::from_shape_builds(),
+            built,
+            "図形から地図を作らない"
+        );
+        for layer in &app.doc.root.layers {
+            for kf in &layer.keyframes {
+                assert!(kf.cel.maps_problem().is_none());
+            }
+        }
+    }
+
+    /// 貼り付けた中身は元と同じ形（色ごとの面積・面の数）。シンボルの中へ（今の階層の座標が違う）その場に貼っても、
+    /// シンボルの中からルートへ貼っても、ステージで同じ所・同じ大きさに置かれる
+    #[test]
+    fn pasted_content_keeps_its_shape_across_coordinate_spaces() {
+        let mut app = Is2dApp::default();
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN];
+        for (i, x) in [-120.0, 0.0, 120.0].into_iter().enumerate() {
+            app.tool.brush_color = colors[i];
+            let pts: Vec<Point> = (0..=10)
+                .map(|j| Point::new(x + j as f64 * 9.0, 20.0 + (j as f64 * 0.7).sin() * 30.0))
+                .collect();
+            doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 11.0));
+        }
+        // 元の形（ステージ）
+        let original: Vec<FillShape> = app.scene().iter().cloned().collect();
+        let areas = areas_by_color(&original);
+        let bbox = crate::vector_engine::union_bounding_boxes(&original);
+
+        // 同じ所へその場に貼る：片は元と同じ形
+        assert!(doc_actions::apply(&mut app, doc_actions::Action::SelectAll));
+        assert!(doc_actions::copy_selected_shapes(&mut app));
+        assert!(doc_actions::paste_clipboard(&mut app, true));
+        let pieces = app.session.floating().unwrap().pieces().to_vec();
+        assert_eq!(pieces.len(), original.len());
+        assert!(same_areas(&areas_by_color(&pieces), &areas, 1e-9));
+        doc_actions::apply(&mut app, doc_actions::Action::Undo);
+
+        // 回して縮めたシンボルの中へ、その場に貼る：ステージで同じ所・同じ形
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            [
+                original.clone(),
+                vec![rect_shape(300.0, 300.0, 340.0, 330.0, Color32::BLACK)],
+            ]
+            .concat(),
+        );
+        let black = app
+            .scene()
+            .iter()
+            .position(|s| s.color == Color32::BLACK)
+            .unwrap();
+        app.session.set_selected_indices(vec![black]);
+        assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
+        assert!(doc_actions::rotate_selected_shapes(&mut app, 0.6));
+        assert!(doc_actions::scale_selected_shapes(&mut app, 0.45, 0.8));
+        let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
+        assert!(symbol_ops::enter_symbol_timeline(&mut app, binding));
+        assert!(doc_actions::paste_clipboard(&mut app, true));
+        let pieces = app.session.floating().unwrap().pieces().to_vec();
+        let b2 = crate::vector_engine::union_bounding_boxes(&pieces);
+        assert!(
+            (b2.x0 - bbox.x0).abs() < 1e-6
+                && (b2.y0 - bbox.y0).abs() < 1e-6
+                && (b2.x1 - bbox.x1).abs() < 1e-6
+                && (b2.y1 - bbox.y1).abs() < 1e-6,
+            "ステージで同じ所：{bbox:?} と {b2:?}"
+        );
+        assert!(same_areas(&areas_by_color(&pieces), &areas, 1e-6));
+        // 確定すると、シンボルの中の地図（変換をかけて、その座標の格子で正しい地図にしたもの）
+        doc_actions::apply(&mut app, doc_actions::Action::Deselect);
+        let inside: Vec<FillShape> = app
+            .scene()
+            .iter()
+            .filter(|s| s.color != Color32::BLACK)
+            .cloned()
+            .collect();
+        assert!(same_areas(&areas_by_color(&inside), &areas, 1e-4));
+
+        // シンボルの中から写して、ルートへその場に貼る：ステージで同じ所
+        assert!(doc_actions::apply(&mut app, doc_actions::Action::SelectAll));
+        assert!(doc_actions::copy_selected_shapes(&mut app));
+        let inside_bbox = crate::vector_engine::union_bounding_boxes(
+            &app.scene()
+                .iter()
+                .filter(|s| app.session.selection.contains_shape(s))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        doc_actions::apply(
+            &mut app,
+            doc_actions::Action::ExitSymbolToDepth { depth: 0 },
+        );
+        let lid = app.doc.root.layers[0].id;
+        assert!(doc_actions::paste_clipboard(&mut app, true));
+        let pieces = app.session.floating().unwrap().pieces().to_vec();
+        assert!(pieces.iter().all(|p| p.layer_id == lid));
+        let b3 = crate::vector_engine::union_bounding_boxes(&pieces);
+        assert!(
+            (b3.x0 - inside_bbox.x0).abs() < 1e-6 && (b3.y1 - inside_bbox.y1).abs() < 1e-6,
+            "ステージで同じ所：{inside_bbox:?} と {b3:?}"
+        );
+    }
+
+    /// 地図にできない所（格子の外）へ置く貼り付け・シンボルの分解は、文書を変えずに断る
+    #[test]
+    fn placing_content_off_the_grid_is_refused_without_changes() {
+        // 貼り付け：ルートの x=60,000 にある形を、半分に縮めたシンボルの中へその場に貼ると、中の座標は 120,000 になる
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                rect_shape(60_000.0, 0.0, 60_040.0, 30.0, Color32::RED),
+                rect_shape(0.0, 0.0, 40.0, 30.0, Color32::BLUE),
+            ],
+        );
+        let red = app
+            .scene()
+            .iter()
+            .position(|s| s.color == Color32::RED)
+            .unwrap();
+        app.session.set_selected_indices(vec![red]);
+        assert!(doc_actions::copy_selected_shapes(&mut app));
+        let blue = app
+            .scene()
+            .iter()
+            .position(|s| s.color == Color32::BLUE)
+            .unwrap();
+        app.session.set_selected_indices(vec![blue]);
+        assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
+        let (mut binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
+        // インスタンスを原点のまわりで半分にする
+        let gid = binding.instance_gid;
+        app.doc.root.layers[0]
+            .keyframe_mut(0)
+            .cel
+            .instances_mut()
+            .iter_mut()
+            .find(|i| i.binding.instance_gid == gid)
+            .unwrap()
+            .binding
+            .xform = kurbo::Affine::scale(0.5);
+        app.refresh_scene_base();
+        binding.xform = kurbo::Affine::scale(0.5);
+        assert!(symbol_ops::enter_symbol_timeline(&mut app, binding));
+        let before = app.doc.library[0].timeline.layers[0].keyframes[0]
+            .cel
+            .clone();
+        let undo = app.history.undo_stack.len();
+        assert!(!doc_actions::paste_clipboard(&mut app, true));
+        let after = &app.doc.library[0].timeline.layers[0].keyframes[0].cel;
+        assert!(std::sync::Arc::ptr_eq(&before.maps, &after.maps));
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(app.history.undo_stack.len(), undo);
+        assert!(app.session.floating().is_none());
+
+        // シンボルの分解：中身が ±20,000px の横長の形を、3倍にしたインスタンスで分解すると 60,000px を超える
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![rect_shape(0.0, 0.0, 40_000.0, 10.0, Color32::RED)],
+        );
+        app.session.set_selected_indices(vec![0]);
+        assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
+        assert!(doc_actions::scale_selected_shapes(&mut app, 3.0, 3.0));
+        let before = app.doc.root.layers[0].keyframes[0].cel.clone();
+        let undo = app.history.undo_stack.len();
+        assert!(!doc_actions::ungroup_selected_shapes(&mut app));
+        let after = &app.doc.root.layers[0].keyframes[0].cel;
+        assert!(std::sync::Arc::ptr_eq(&before.instances, &after.instances));
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(app.history.undo_stack.len(), undo);
+        assert!(app.session.floating().is_none());
+    }
+
+    /// トゥイーンの途中のインスタンスを写すと、そのコマの結び付け（中割りの位置・再生位置）が中身になる。別のレイヤーへ
+    /// その場に貼ると、同じ所に置かれる
+    #[test]
+    fn copying_a_tweened_instance_takes_the_inbetween_binding() {
+        use crate::symbol::SymbolLoopMode;
+        let mut app = Is2dApp::default();
+        let s0 = make_stroke(
+            Point::new(-10.0, 0.0),
+            Point::new(10.0, 0.0),
+            6.0,
+            Color32::RED,
+        );
+        let sym_id = app.doc.register_new_symbol(s0);
+        app.doc.root.layers[0].insert_frame_at(7);
+        app.doc.root.sync_total_frames();
+        app.doc.next_group_id = 2;
+        let inst = |x: f64, first_frame: usize| timeline::SymbolInstance {
+            binding: symbol::SymbolInstanceBinding {
+                instance_gid: 1,
+                symbol_id: sym_id,
+                xform: kurbo::Affine::translate((x, 100.0)),
+                pivot: Point::ZERO,
+                loop_mode: SymbolLoopMode::Loop,
+                first_frame,
+                color_effect: vector_engine::ColorEffect::default(),
+            },
+            layer_id: 1,
+            parent_scope: Vec::new(),
+            order: 0,
+        };
+        app.doc.root.layers[0]
+            .keyframe_mut(0)
+            .cel
+            .set_shapes_and_instances(Vec::new(), vec![inst(100.0, 0)]);
+        let _ = doc_actions::apply(&mut app, doc_actions::Action::ToggleTween);
+        timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
+        timeline_ui::timeline_insert_keyframe(&mut app, true);
+        app.doc.root.layers[0]
+            .keyframe_mut(1)
+            .cel
+            .set_shapes_and_instances(Vec::new(), vec![inst(300.0, 0)]);
+        timeline_ui::timeline_add_layer(&mut app);
+        timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
+        let tweened = app.doc.root.layers[0]
+            .interpolated_tween_binding_at(2)
+            .expect("トゥイーンの途中");
+        let shape = app
+            .scene()
+            .iter()
+            .position(|s| s.symbol_instance.is_some())
+            .unwrap();
+        app.session.set_selected_indices(vec![shape]);
+        assert!(doc_actions::copy_selected_shapes(&mut app));
+        let copied = &app.clipboard.content.as_ref().unwrap().layers[0]
+            .1
+            .instances[0];
+        assert_eq!(copied.binding.xform, tweened.xform);
+        assert_eq!(copied.binding.first_frame, tweened.first_frame);
+        // 新しいレイヤー（編集できる）へ、その場に貼る
+        let new_lid = app.doc.root.layers[1].id;
+        timeline_ui::switch_to_layer_and_frame(&mut app, 1, 2);
+        assert!(doc_actions::paste_clipboard(&mut app, true));
+        let pasted = app.doc.root.layers[1]
+            .cel_at(2)
+            .unwrap()
+            .instances
+            .first()
+            .cloned()
+            .expect("貼ったインスタンス");
+        assert_eq!(pasted.layer_id, new_lid);
+        assert_eq!(pasted.binding.xform, tweened.xform);
+        assert_ne!(pasted.binding.instance_gid, tweened.instance_gid);
+    }
+
+    /// シンボルの分解は、そのコマのシンボルの中身を、インスタンスのあった重なりの位置に入れる（中のグループは、上にある別の
+    /// インスタンスより下のまま。生の図形は浮いた片）
+    #[test]
+    fn breaking_apart_keeps_the_instance_stacking_position() {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                rect_shape(0.0, 0.0, 40.0, 40.0, Color32::RED),
+                rect_shape(20.0, 20.0, 60.0, 60.0, Color32::BLUE),
+            ],
+        );
+        let at = |app: &Is2dApp, c: Color32| app.scene().iter().position(|s| s.color == c).unwrap();
+        // 赤をグループにしてからシンボルにする（中身はグループ）。青もシンボルにする（上に重なる）
+        let i = at(&app, Color32::RED);
+        app.session.set_selected_indices(vec![i]);
+        assert!(doc_actions::group_selected_shapes(&mut app).is_some());
+        assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
+        let i = at(&app, Color32::BLUE);
+        app.session.set_selected_indices(vec![i]);
+        assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
+        let cel = app.doc.root.layers[0].keyframes[0].cel.clone();
+        assert_eq!(cel.instances.len(), 2);
+        let blue_gid = cel.instances[1].binding.instance_gid;
+        // 下のインスタンス（赤）を分解する
+        let i = at(&app, Color32::RED);
+        app.session.set_selected_indices(vec![i]);
+        let built = crate::planar_map::from_shape_builds();
+        assert!(doc_actions::ungroup_selected_shapes(&mut app));
+        assert_eq!(crate::planar_map::from_shape_builds(), built);
+        let cel = &app.doc.root.layers[0].keyframes[0].cel;
+        assert!(cel.maps_problem().is_none());
+        assert_eq!(cel.instances.len(), 1);
+        assert_eq!(cel.instances[0].binding.instance_gid, blue_gid);
+        let group = cel
+            .maps
+            .iter()
+            .position(|m| m.group_path.len() == 1)
+            .expect("分解して出たグループ");
+        assert!(
+            cel.instances[0].order > group,
+            "青のインスタンスは、分解して出たグループより上のまま"
+        );
+        // 画面の重なり：赤（グループ）の上に青
+        let colors: Vec<Color32> = app.scene().iter().map(|s| s.color).collect();
+        assert_eq!(colors, vec![Color32::RED, Color32::BLUE]);
+    }
+
+    /// クリップボードの中身は、写した元の地図と塊を共有する（図形の写しを丸ごと持たない）
+    #[test]
+    fn clipboard_maps_share_tiles_with_the_source() {
+        let mut app = dense_scene_app(5);
+        assert!(doc_actions::apply(&mut app, doc_actions::Action::SelectAll));
+        assert!(doc_actions::copy_selected_shapes(&mut app));
+        let content = app.clipboard.content.as_ref().unwrap();
+        assert_eq!(content.layers.len(), 3);
+        for (lid, cel) in &content.layers {
+            let layer = app.doc.root.layers.iter().find(|l| l.id == *lid).unwrap();
+            let src = &layer.keyframes[0].cel.maps[0];
+            assert!(
+                cel.maps[0].stored().same(src.stored()),
+                "丸ごと選んだ地図は、元の地図そのもの"
+            );
+        }
+        // 矩形で切った片を写すと、片を重ねた地図（元の地図とは別の塊）
+        doc_actions::apply(&mut app, doc_actions::Action::Deselect);
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::SelectMarquee {
+                p0: Point::new(-100.0, -80.0),
+                p1: Point::new(60.0, 50.0),
+                additive: false,
+            }
+        ));
+        assert!(doc_actions::copy_selected_shapes(&mut app));
+        let content = app.clipboard.content.as_ref().unwrap();
+        for (_, cel) in &content.layers {
+            assert!(cel.maps_problem().is_none());
+        }
+    }
+
     /// Undo・Redo の時間：図形の多い場面（3 レイヤー・線 180 本）で、ブラシ1本のあとの Undo と Redo（画面の土台を
     /// 作り直すまで）
     #[test]
@@ -25968,7 +26424,7 @@ mod map_overlay {
                 .map(|s| Part::Shape(std::sync::Arc::new(s))),
         );
         let mut cel = Cel::default();
-        cel.set_parts(parts).unwrap();
+        cel.set_new_parts(parts).unwrap();
         assert!(cel.maps_problem().is_none());
         assert_eq!(cel.maps.len(), 1);
         assert_eq!(
@@ -26193,6 +26649,242 @@ mod map_overlay {
             let (a, m) = stat(v);
             eprintln!("PROBE {name}：平均 {a:.1}ms・最大 {m:.1}ms");
         }
+    }
+
+    /// 強さの試し（ふだんは流さない）：新しい中身の操作（矩形で選んでコピー → 貼り付け、Alt 複製、シンボル化、分解、
+    /// グループ化と解除、回して縮めたシンボルの中へその場に貼る）を、種ごとに乱数で続ける。セル画に書くたびに地図を確かめ
+    /// （テストの決まり）、図形から地図を作った回数が増えないことと、最後にどのセル画も決まりどおりかを見る
+    #[test]
+    #[ignore]
+    fn probe_random_content_ops() {
+        use crate::doc_actions::Action;
+        let seeds: Vec<u64> = std::env::var("PROBE_SEEDS")
+            .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
+            .unwrap_or((1..=6).collect());
+        let steps: usize = std::env::var("PROBE_STEPS")
+            .map(|v| v.parse().unwrap())
+            .unwrap_or(60);
+        for seed in seeds {
+            let mut app = Is2dApp::default();
+            let mut r = Rng(seed);
+            let colors = [Color32::RED, Color32::BLUE, Color32::GREEN, Color32::BLACK];
+            for _ in 0..25 {
+                app.tool.brush_color = colors[(r.f() * 4.0) as usize % 4];
+                let a = Point::new(-300.0 + r.f() * 600.0, -180.0 + r.f() * 360.0);
+                let pts: Vec<Point> = (0..=12)
+                    .map(|j| a + KVec2::new(j as f64 * 9.0, 25.0 * (j as f64 * 0.5 + r.f()).sin()))
+                    .collect();
+                doc_actions::commit_raw_outline(
+                    &mut app,
+                    &generate_brush_outline(&pts, 3.0 + r.f() * 9.0),
+                );
+            }
+            let built = crate::planar_map::from_shape_builds();
+            let mut done = [0usize; 6];
+            let mut t_max = [0f64; 6];
+            for _ in 0..steps {
+                let kind = (r.f() * 6.0) as usize % 6;
+                let c = Point::new(-300.0 + r.f() * 500.0, -180.0 + r.f() * 300.0);
+                // 重なったインスタンスをまとめて写すと、1回で倍に増える。絵が大きくなりすぎたら、増やす操作はしない
+                if app.scene().len() > 3000 && kind != 2 {
+                    continue;
+                }
+                let t = std::time::Instant::now();
+                let ok = match kind {
+                    0 => {
+                        select_ops::apply_marquee_selection(
+                            &mut app,
+                            c,
+                            c + KVec2::new(140.0, 110.0),
+                            false,
+                        );
+                        let ok = doc_actions::copy_selected_shapes(&mut app)
+                            && doc_actions::paste_clipboard(&mut app, r.f() < 0.5);
+                        canvas_tool::clear_selection(&mut app);
+                        ok
+                    }
+                    1 => {
+                        select_ops::apply_marquee_selection(
+                            &mut app,
+                            c,
+                            c + KVec2::new(120.0, 90.0),
+                            false,
+                        );
+                        let ok = doc_actions::apply(
+                            &mut app,
+                            Action::FinishMoveSelectionDrag {
+                                total_delta: KVec2::new(r.f() * 60.0 - 30.0, r.f() * 60.0 - 30.0),
+                                alt_duplicate: true,
+                            },
+                        );
+                        canvas_tool::clear_selection(&mut app);
+                        ok
+                    }
+                    2 => {
+                        select_ops::apply_marquee_selection(
+                            &mut app,
+                            c,
+                            c + KVec2::new(160.0, 120.0),
+                            false,
+                        );
+                        // インスタンスを含む所はシンボルにしない（入れ子が掛け算で増え、試しが絵の量で止まるため）
+                        let ok = app.session.selection.instances.is_empty()
+                            && doc_actions::convert_selection_to_symbol(&mut app).is_some();
+                        if ok && r.f() < 0.7 {
+                            let _ = doc_actions::rotate_selected_shapes(&mut app, r.f() - 0.5);
+                            let _ = doc_actions::scale_selected_shapes(
+                                &mut app,
+                                0.5 + r.f(),
+                                0.5 + r.f(),
+                            );
+                        }
+                        canvas_tool::clear_selection(&mut app);
+                        ok
+                    }
+                    3 => {
+                        let inst = app.scene().iter().position(|s| s.symbol_instance.is_some());
+                        let ok = inst.is_some_and(|i| {
+                            app.session.set_selected_indices(vec![i]);
+                            doc_actions::ungroup_selected_shapes(&mut app)
+                        });
+                        canvas_tool::clear_selection(&mut app);
+                        ok
+                    }
+                    4 => {
+                        select_ops::apply_marquee_selection(
+                            &mut app,
+                            c,
+                            c + KVec2::new(150.0, 120.0),
+                            false,
+                        );
+                        let ok = if r.f() < 0.5 {
+                            doc_actions::group_selected_shapes(&mut app).is_some()
+                        } else {
+                            doc_actions::ungroup_selected_shapes(&mut app)
+                        };
+                        canvas_tool::clear_selection(&mut app);
+                        ok
+                    }
+                    _ => {
+                        // 写して、シンボルの中へその場に貼る（インスタンスの変換が違う所）
+                        select_ops::apply_marquee_selection(
+                            &mut app,
+                            c,
+                            c + KVec2::new(100.0, 80.0),
+                            false,
+                        );
+                        let copied = doc_actions::copy_selected_shapes(&mut app);
+                        canvas_tool::clear_selection(&mut app);
+                        let binding = app.scene().iter().find_map(|s| s.symbol_instance);
+                        let ok = copied
+                            && binding.is_some_and(|b| {
+                                symbol_ops::enter_symbol_timeline(&mut app, b)
+                                    && doc_actions::paste_clipboard(&mut app, true)
+                            });
+                        canvas_tool::clear_selection(&mut app);
+                        while !app.session.edit_path.is_empty() {
+                            symbol_ops::exit_symbol_timeline(&mut app);
+                        }
+                        ok
+                    }
+                };
+                let el = t.elapsed().as_secs_f64() * 1e3;
+                if ok {
+                    done[kind] += 1;
+                }
+                t_max[kind] = t_max[kind].max(el);
+            }
+            let broken = std::iter::once(&app.doc.root)
+                .chain(app.doc.library.iter().map(|s| &s.timeline))
+                .flat_map(|tl| tl.layers.iter().flat_map(|l| l.keyframes.iter()))
+                .filter(|k| k.cel.maps_problem().is_some())
+                .count();
+            eprintln!(
+                "PROBE 種{seed}：できた回 {done:?}・最大 {:?}ms｜図形から作った地図 {}｜決まりどおりでないセル画 {broken}｜シンボル {}",
+                t_max.iter().map(|t| t.round() as i64).collect::<Vec<_>>(),
+                crate::planar_map::from_shape_builds() - built,
+                app.doc.library.len()
+            );
+        }
+    }
+
+    /// 計測の試し（ふだんは流さない）：新しい中身の時間（図形の多い場面：3 レイヤー・図形 1,060）。コピー、くり返しの
+    /// 貼り付け（同じ中身を5回。Undo で戻しながら）と確定、Alt 複製と確定、シンボル化、シンボルの分解と確定。クリップボード
+    /// の中身が元の地図と共有する塊も数える
+    #[test]
+    #[ignore]
+    fn probe_new_content_timing() {
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
+        let mut app = dense_scene_app(7);
+        let faces = app.scene().len();
+        let act = |app: &mut Is2dApp, a: doc_actions::Action| doc_actions::apply(app, a);
+        assert!(act(&mut app, doc_actions::Action::SelectAll));
+        let t = std::time::Instant::now();
+        assert!(doc_actions::copy_selected_shapes(&mut app));
+        let t_copy = ms(t);
+        let content = app.clipboard.content.clone().unwrap();
+        let (mut tiles, mut shared) = (0, 0);
+        for (lid, cel) in &content.layers {
+            let layer = app.doc.root.layers.iter().find(|l| l.id == *lid).unwrap();
+            let src = layer.keyframes[0].cel.maps[0].stored();
+            tiles += cel.maps[0].stored().tiles();
+            shared += cel.maps[0].stored().shared_tiles(src);
+        }
+        act(&mut app, doc_actions::Action::Deselect);
+        let mut pastes = Vec::new();
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            assert!(doc_actions::paste_clipboard(&mut app, false));
+            pastes.push(ms(t));
+            act(&mut app, doc_actions::Action::Undo);
+        }
+        assert!(doc_actions::paste_clipboard(&mut app, false));
+        let t = std::time::Instant::now();
+        act(&mut app, doc_actions::Action::Deselect);
+        let t_paste_commit = ms(t);
+        act(&mut app, doc_actions::Action::Undo);
+        // Alt 複製（全部を選び、Alt を押して 6px 動かす）と確定
+        let mut app = dense_scene_app(7);
+        assert!(act(&mut app, doc_actions::Action::SelectAll));
+        let t = std::time::Instant::now();
+        assert!(act(
+            &mut app,
+            doc_actions::Action::FinishMoveSelectionDrag {
+                total_delta: KVec2::new(6.0, 0.0),
+                alt_duplicate: true,
+            }
+        ));
+        let t_alt = ms(t);
+        let t = std::time::Instant::now();
+        act(&mut app, doc_actions::Action::Deselect);
+        let t_alt_commit = ms(t);
+        // シンボル化と分解（全部）、確定
+        let mut app = dense_scene_app(7);
+        assert!(act(&mut app, doc_actions::Action::SelectAll));
+        let t = std::time::Instant::now();
+        assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
+        let t_sym = ms(t);
+        let t = std::time::Instant::now();
+        assert!(doc_actions::ungroup_selected_shapes(&mut app));
+        let t_break = ms(t);
+        let t = std::time::Instant::now();
+        act(&mut app, doc_actions::Action::Deselect);
+        let t_break_commit = ms(t);
+        let valid = app
+            .doc
+            .root
+            .layers
+            .iter()
+            .all(|l| l.keyframes.iter().all(|k| k.cel.maps_problem().is_none()));
+        eprintln!(
+            "PROBE 図形 {faces}：コピー {t_copy:.1}ms（塊 {tiles} 個のうち元と共有 {shared} 個）｜貼り付け 5回 {}ms・確定 {t_paste_commit:.1}ms｜Alt 複製 {t_alt:.1}ms・確定 {t_alt_commit:.1}ms｜シンボル化 {t_sym:.1}ms｜分解 {t_break:.1}ms・確定 {t_break_commit:.1}ms｜地図 {}",
+            pastes
+                .iter()
+                .map(|p| format!("{p:.1}"))
+                .collect::<Vec<_>>()
+                .join("・"),
+            if valid { "正常" } else { "壊れた" }
+        );
     }
 
     /// 図形の多い場面（`dense_scene_app`）での、ブラシ・消しゴム1本の時間（30 本ずつ、平均と最大）

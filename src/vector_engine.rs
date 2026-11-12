@@ -483,11 +483,6 @@ impl FillShape {
         self
     }
 
-    pub(crate) fn with_group_path(mut self, group_path: Vec<u64>) -> Self {
-        self.group_path = group_path;
-        self
-    }
-
     pub(crate) fn with_scope(mut self, layer_id: u64, group_path: &[u64]) -> Self {
         self.layer_id = layer_id;
         self.group_path = group_path.to_vec();

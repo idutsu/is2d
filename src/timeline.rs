@@ -1,11 +1,16 @@
 use crate::canvas_tool::ShapeId;
-use crate::planar_map::{uniquely_labeled, LayerBase, MapChange, PlanarMap};
+use crate::planar_map::{
+    freshly_labeled, realized, uniquely_labeled, LayerBase, MapChange, MapInput, MapRule, PlanarMap,
+};
 use crate::stored_map::StoredMap;
 use crate::vector_engine::{next_shape_id, FillShape, SymbolInstanceBinding, SymbolLoopMode};
 use eframe::egui::Color32;
 use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 /// タイムラインおよびシンボル内タイムラインの最大許容フレーム数（破損JSONによる巨大ループ防止）
 pub(crate) const MAX_TIMELINE_FRAMES: usize = 100_000;
@@ -365,37 +370,46 @@ fn face_key(s: &FillShape) -> FaceKey {
     (s.shape_id, s.mesh_revision, s.color)
 }
 
-/// 階層 `path` の生の図形 `raw`（文書の図形、下から順）の地図（`Cel::set_parts`）。図形がみな前の地図 `old` のどれか1つの
-/// 面（`faces`：面の見分け方ごとの、その面がある前の地図の番号と、その地図の面の数）なら、その地図か（面が全部のとき）、
-/// その面だけを残した地図（グループ化・削除・シンボル化など、面を外す・別の階層へ移す操作）。どちらでもなければ図形から
-/// 作り（正しい地図にならない図形は塗り重ねて作る：`LayerBase::of`）、面に1つずつ別の番号を記す（`uniquely_labeled`。
-/// 図形の番号を使う）。地図の塊は、同じ階層の前の地図と共有する。`Ok(None)`：面が無い。`Err`：地図にできない形がある
+/// 階層 `path` の生の図形 `raw`（下から順）の地図（`Cel::set_parts`）。図形は、いつも前の地図 `old` のどれか1つの面
+/// （`faces`：面の見分け方ごとの、その面がある前の地図の番号と、その地図の面の数）：その地図か（面が全部のとき）、その面
+/// だけを残した地図（グループ化・削除・シンボル化など、面を外す・別の階層へ移す操作）。地図の塊は前の地図と共有する。
+/// `Err`：前の地図1つの面でない図形がある（図形から地図は作らないので、地図に書けない）
 fn scope_map_of(
     old: &[ScopeMap],
     faces: &HashMap<FaceKey, (usize, usize)>,
     path: &[u64],
     raw: Vec<Arc<FillShape>>,
 ) -> Result<Option<ScopeMap>, Unmappable> {
-    let same_path = old.iter().find(|m| m.group_path == path);
-    let source = faces.get(&face_key(&raw[0])).filter(|&&(i, _)| {
+    let Some(&(i, n)) = faces.get(&face_key(&raw[0])).filter(|&&(i, _)| {
         raw.iter()
             .all(|s| faces.get(&face_key(s)).is_some_and(|f| f.0 == i))
-    });
-    if let Some(&(i, n)) = source {
-        let m = &old[i];
-        let stored = if raw.len() == n {
-            m.stored.clone()
-        } else {
-            let ids = raw.iter().map(|s| s.shape_id).collect();
-            StoredMap::from_dense(&m.base().map.restricted(&ids), Some(&m.stored))
-        };
-        return Ok(Some(ScopeMap {
-            group_path: path.to_vec(),
-            stored,
-        }));
-    }
+    }) else {
+        return Err(Unmappable);
+    };
+    let m = &old[i];
+    let stored = if raw.len() == n {
+        m.stored.clone()
+    } else {
+        let ids = raw.iter().map(|s| s.shape_id).collect();
+        StoredMap::from_dense(&m.base().map.restricted(&ids), Some(&m.stored))
+    };
+    Ok(Some(ScopeMap {
+        group_path: path.to_vec(),
+        stored,
+    }))
+}
+
+/// テスト用：階層 `path` の生の図形 `raw`（下から順。新しい図形でよい）を図形から作った地図（`LayerBase::of`。正しい地図に
+/// ならない図形は塗り重ねて作る）。面に1つずつ別の番号を記す（図形の番号を使う）。塊は同じ階層の前の地図と共有する
+#[cfg(test)]
+fn test_scope_map_from_shapes(
+    old: &[ScopeMap],
+    path: &[u64],
+    raw: Vec<Arc<FillShape>>,
+) -> Result<Option<ScopeMap>, Unmappable> {
     let refs: Vec<&FillShape> = raw.iter().map(|s| &**s).collect();
     let base = LayerBase::of(&refs, Affine::IDENTITY).ok_or(Unmappable)?;
+    let same_path = old.iter().find(|m| m.group_path == path);
     let stored = StoredMap::from_dense(&uniquely_labeled(&base.map), same_path.map(|m| &m.stored));
     Ok((!stored.is_empty()).then(|| ScopeMap {
         group_path: path.to_vec(),
@@ -404,10 +418,12 @@ fn scope_map_of(
 }
 
 impl Cel {
-    /// 図形の並び `all_shapes`（下から順。インスタンスは図形の印）から作る。`Err`：地図にできない形がある
+    /// テスト用：図形の並び `all_shapes`（下から順。インスタンスは図形の印）から作る（図形から地図を作る）。`Err`：地図に
+    /// できない形がある
+    #[cfg(test)]
     pub(crate) fn from_shapes(all_shapes: Vec<FillShape>) -> Result<Self, Unmappable> {
         let mut cel = Self::default();
-        cel.set_parts(Self::parts_of(all_shapes))?;
+        cel.set_new_parts(Self::parts_of(all_shapes))?;
         Ok(cel)
     }
 
@@ -467,7 +483,7 @@ impl Cel {
             parts.push(Part::Shape(Arc::new(s)));
         }
         parts.extend(insts.map(Part::Instance));
-        self.set_parts(parts).expect("地図にできる図形");
+        self.set_new_parts(parts).expect("地図にできる図形");
     }
 
     /// 面の図形（写し）：階層の地図の順に、各地図の面の図形を並べたもの。インスタンスは入れない
@@ -564,9 +580,9 @@ impl Cel {
         self.revision = crate::vector_engine::next_mesh_revision();
     }
 
-    /// 重なりの順の中身 `parts` をセル画にする（`arranged`）。生の図形は階層ごとに地図にする（`scope_map_of`：前の地図と
-    /// 同じ面なら前の地図、面の一部なら面を外した地図、ほかは図形から作る）。図形は持たない（地図の面が図形になる）。
-    /// `Err`：地図にできない形がある（セル画は変えない）
+    /// 重なりの順の中身 `parts` をセル画にする（`arranged`）。生の図形は、いつもこのセル画の地図の面（グループ化・削除・
+    /// 重ね順など、面を外す・別の階層へ移す・並べ替える操作）で、階層ごとに、その面を持つ地図か面を残した地図にする
+    /// （`scope_map_of`。図形から地図は作らない）。`Err`：地図の面でない図形がある（セル画は変えない）
     pub(crate) fn set_parts(&mut self, parts: Vec<Part>) -> Result<(), Unmappable> {
         let old = self.maps.clone();
         let mut faces: HashMap<FaceKey, (usize, usize)> = HashMap::new();
@@ -574,6 +590,24 @@ impl Cel {
             let f = m.faces();
             faces.extend(f.iter().map(|s| (face_key(s), (i, f.len()))));
         }
+        self.put_parts(parts, |path, raw| scope_map_of(&old, &faces, path, raw))
+    }
+
+    /// テスト用：`set_parts` の、生の図形が新しい図形でもよいもの（図形から地図を作る：`test_scope_map_from_shapes`）
+    #[cfg(test)]
+    pub(crate) fn set_new_parts(&mut self, parts: Vec<Part>) -> Result<(), Unmappable> {
+        let old = self.maps.clone();
+        self.put_parts(parts, |path, raw| {
+            test_scope_map_from_shapes(&old, path, raw)
+        })
+    }
+
+    /// 重なりの順の中身 `parts` を並べ（`arranged`）、階層ごとの生の図形を `scope` で地図にして入れる
+    fn put_parts(
+        &mut self,
+        parts: Vec<Part>,
+        scope: impl FnMut(&[u64], Vec<Arc<FillShape>>) -> Result<Option<ScopeMap>, Unmappable>,
+    ) -> Result<(), Unmappable> {
         let items = parts
             .into_iter()
             .map(|p| match p {
@@ -581,9 +615,244 @@ impl Cel {
                 Part::Instance(i) => Item::Instance(i),
             })
             .collect();
-        let (maps, instances) = arranged(items, |path, raw| scope_map_of(&old, &faces, path, raw))?;
+        let (maps, instances) = arranged(items, scope)?;
         self.put(maps, instances);
         Ok(())
+    }
+
+    /// 階層 `scope`（とその中）のうち、選んだもの（面の番号 `faces`・インスタンス `instances`）だけのセル画（新しい中身の
+    /// 1枚：`clipboard_ops::Content`）。階層の番号の並びは `scope` からの相対。地図は、選んだ面だけを残した地図（塊は
+    /// このセル画の地図と共有する）。`raw` があれば、階層 `scope` の生の図形の地図はそれにする（浮いた片のあるレイヤー：
+    /// 残りの選んだ所に片を重ねた地図）。`tween`：トゥイーンの途中なら、そのコマのインスタンスの結び付け
+    pub(crate) fn picked(
+        &self,
+        scope: &[u64],
+        faces: &HashSet<ShapeId>,
+        instances: &HashSet<u64>,
+        raw: Option<&PlanarMap>,
+        tween: Option<SymbolInstanceBinding>,
+    ) -> Cel {
+        let mut items = Vec::new();
+        if let Some(raw) = raw.filter(|m| !m.edges.is_empty()) {
+            let stored = StoredMap::from_dense(&uniquely_labeled(raw), self.scope_stored(scope));
+            items.push(Item::Raw(
+                Vec::new(),
+                ScopeMap {
+                    group_path: Vec::new(),
+                    stored,
+                },
+            ));
+        }
+        for item in Self::items_of(&self.maps, &self.instances) {
+            match item {
+                Item::Raw(path, m) => {
+                    let Some(rel) = path.strip_prefix(scope) else {
+                        continue;
+                    };
+                    if rel.is_empty() && raw.is_some() {
+                        continue;
+                    }
+                    let base = m.base();
+                    let stored = if base.map.labels_within(faces) {
+                        m.stored.clone()
+                    } else {
+                        StoredMap::from_dense(&base.map.restricted(faces), Some(&m.stored))
+                    };
+                    if !stored.is_empty() {
+                        items.push(Item::Raw(
+                            rel.to_vec(),
+                            ScopeMap {
+                                group_path: rel.to_vec(),
+                                stored,
+                            },
+                        ));
+                    }
+                }
+                Item::Instance(mut inst) => {
+                    let Some(rel) = inst.parent_scope.strip_prefix(scope) else {
+                        continue;
+                    };
+                    if !instances.contains(&inst.binding.instance_gid) {
+                        continue;
+                    }
+                    inst.parent_scope = rel.to_vec();
+                    if let Some(b) = tween.filter(|b| b.instance_gid == inst.binding.instance_gid) {
+                        inst.binding = b;
+                    }
+                    items.push(Item::Instance(inst));
+                }
+            }
+        }
+        let mut cel = Cel::default();
+        cel.arrange(items);
+        cel
+    }
+
+    /// セル画 `cels`（下から順）を1枚に重ねたもの：中身を順に並べ、同じ階層の生の図形の地図は下から順に重ねる（上が下を
+    /// 隠す。面には1つずつ別の番号を記す）。`None`：格子に置けない座標がある
+    pub(crate) fn stacked(cels: &[Cel]) -> Option<Cel> {
+        if let [one] = cels {
+            return Some(one.clone());
+        }
+        let items: Vec<Item<ScopeMap>> = cels
+            .iter()
+            .flat_map(|c| Self::items_of(&c.maps, &c.instances))
+            .collect();
+        let (maps, instances) = arranged(items, |path, maps: Vec<ScopeMap>| {
+            if maps.len() == 1 {
+                return Ok::<_, Unmappable>(maps.into_iter().next());
+            }
+            let mut map = PlanarMap::default();
+            for m in &maps {
+                let d = m.dense();
+                map = if map.edges.is_empty() {
+                    d
+                } else {
+                    map.overlay(MapInput::Map(&d), MapRule::Overlay)
+                        .ok_or(Unmappable)?
+                };
+            }
+            let stored = StoredMap::from_dense(&uniquely_labeled(&map), None);
+            Ok((!stored.is_empty()).then(|| ScopeMap {
+                group_path: path.to_vec(),
+                stored,
+            }))
+        })
+        .ok()?;
+        let mut cel = Cel::default();
+        cel.put(maps, instances);
+        Some(cel)
+    }
+
+    /// （生の図形の地図（階層 `[]`）, それを除いたセル画）
+    pub(crate) fn split_raw(&self) -> (Option<PlanarMap>, Cel) {
+        let Some(raw) = self.scope_stored(&[]).map(StoredMap::to_dense) else {
+            return (None, self.clone());
+        };
+        let mut items = Self::items_of(&self.maps, &self.instances);
+        items.retain(|it| !matches!(it, Item::Raw(p, _) if p.is_empty()));
+        let mut rest = Cel::default();
+        rest.arrange(items);
+        (Some(raw), rest)
+    }
+
+    /// 座標の変換 `xform` をかけたセル画：地図は、その座標の格子で正しい地図にし（`realized`）、面にみな新しい番号を
+    /// 記す（元の面と番号が重ならない）。インスタンスの変換に `xform` を重ねる。`None`：格子に置けない座標がある
+    pub(crate) fn transformed(&self, xform: Affine) -> Option<Cel> {
+        let mut items = Vec::with_capacity(self.maps.len() + self.instances.len());
+        for item in Self::items_of(&self.maps, &self.instances) {
+            match item {
+                Item::Raw(path, m) => {
+                    let map = realized(&m.base().map, xform)?;
+                    let stored = StoredMap::from_dense(&freshly_labeled(&map), None);
+                    items.push(Item::Raw(
+                        path.clone(),
+                        ScopeMap {
+                            group_path: path,
+                            stored,
+                        },
+                    ));
+                }
+                Item::Instance(mut inst) => {
+                    inst.binding.xform = xform * inst.binding.xform;
+                    items.push(Item::Instance(inst));
+                }
+            }
+        }
+        let mut cel = Cel::default();
+        cel.arrange(items);
+        Some(cel)
+    }
+
+    /// グループ・インスタンスの番号を `gid` で、参照するシンボルの番号を `sym` で付け替え、インスタンスのレイヤーを
+    /// `layer_id` にする（新しい中身を置くとき・ほかの文書から写すとき）
+    pub(crate) fn remap_ids(
+        &mut self,
+        mut gid: impl FnMut(u64) -> u64,
+        sym: impl Fn(u64) -> u64,
+        layer_id: Option<u64>,
+    ) {
+        self.remap_group_ids(&mut gid);
+        if self.instances.is_empty() {
+            return;
+        }
+        for inst in self.instances_mut() {
+            inst.binding.symbol_id = sym(inst.binding.symbol_id);
+            inst.binding.instance_gid = gid(inst.binding.instance_gid);
+            for g in &mut inst.parent_scope {
+                *g = gid(*g);
+            }
+            if let Some(l) = layer_id {
+                inst.layer_id = l;
+            }
+        }
+    }
+
+    /// 中身 `content`（階層の番号の並びは `scope` からの相対。生の図形の地図は持たない：浮いた片にする）を、階層 `scope` に
+    /// 入れる：インスタンス `replacing` があればそれと入れ替え（その重なりの位置に）、無ければ階層 `scope` のいちばん上に。
+    /// グループとインスタンスは中身の順のまま（グループの生の図形は、その階層のいちばん下）。`false`：入れ替えるインスタンスが
+    /// 無い（セル画は変えない）
+    pub(crate) fn insert_content(
+        &mut self,
+        scope: &[u64],
+        content: &Cel,
+        replacing: Option<u64>,
+    ) -> bool {
+        #[cfg(test)]
+        assert!(
+            content.scope_stored(&[]).is_none(),
+            "中身の生の図形は浮いた片にする"
+        );
+        let mut items = Self::items_of(&self.maps, &self.instances);
+        let at = match replacing {
+            Some(gid) => {
+                let Some(i) = items.iter().position(
+                    |it| matches!(it, Item::Instance(inst) if inst.binding.instance_gid == gid),
+                ) else {
+                    return false;
+                };
+                items.remove(i);
+                i
+            }
+            None => items
+                .iter()
+                .rposition(|it| match it {
+                    Item::Raw(p, _) => p.starts_with(scope),
+                    Item::Instance(inst) => inst.parent_scope.starts_with(scope),
+                })
+                .map_or(items.len(), |i| i + 1),
+        };
+        let added = Self::items_of(&content.maps, &content.instances)
+            .into_iter()
+            .map(|it| match it {
+                Item::Raw(p, mut m) => {
+                    m.group_path = [scope, &p[..]].concat();
+                    Item::Raw(m.group_path.clone(), m)
+                }
+                Item::Instance(mut inst) => {
+                    inst.parent_scope = [scope, &inst.parent_scope[..]].concat();
+                    Item::Instance(inst)
+                }
+            });
+        items.splice(at..at, added);
+        self.arrange(items);
+        true
+    }
+
+    /// 地図の面の番号（みな）
+    pub(crate) fn face_ids(&self) -> HashSet<ShapeId> {
+        self.maps
+            .iter()
+            .flat_map(|m| m.dense().labels().collect::<Vec<_>>())
+            .collect()
+    }
+
+    /// 地図の外接矩形（辺の曲線の）。地図が無ければ `None`
+    pub(crate) fn map_bounds(&self) -> Option<kurbo::Rect> {
+        self.maps
+            .iter()
+            .filter_map(|m| m.dense().bounding_box())
+            .reduce(|a, b| a.union(b))
     }
 
     /// 階層 `group_path` のしまった地図
@@ -744,7 +1013,9 @@ impl Cel {
         }
     }
 
-    /// キャンバス展開図形列 `all_shapes`（下から順）を、重なりの順の中身にする（インスタンスは図形の印から1つずつ作る）
+    /// テスト用：キャンバス展開図形列 `all_shapes`（下から順）を、重なりの順の中身にする（インスタンスは図形の印から
+    /// 1つずつ作る）
+    #[cfg(test)]
     pub(crate) fn parts_of(all_shapes: Vec<FillShape>) -> Vec<Part> {
         let mut parts = Vec::with_capacity(all_shapes.len());
         let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -831,15 +1102,8 @@ fn remap_keyframes_group_and_instance_ids(
     };
     for kf in kfs {
         kf.cel.renew_shape_ids();
-        kf.cel.remap_group_ids(|gid| alloc_gid(gid, &mut gid_map));
-        if !kf.cel.instances.is_empty() {
-            for inst in kf.cel.instances_mut() {
-                for gid in &mut inst.parent_scope {
-                    *gid = alloc_gid(*gid, &mut gid_map);
-                }
-                inst.binding.instance_gid = alloc_gid(inst.binding.instance_gid, &mut gid_map);
-            }
-        }
+        kf.cel
+            .remap_ids(|gid| alloc_gid(gid, &mut gid_map), |sym| sym, None);
     }
 }
 
@@ -1602,17 +1866,6 @@ impl Timeline {
             .any(|l| l.is_editable_at(self.current_frame))
     }
 
-    pub(crate) fn keyframe_start_frame_at(&self, layer_id: u64, frame: usize) -> usize {
-        self.layer_index_by_id(layer_id)
-            .and_then(|l_idx| {
-                let layer = &self.layers[l_idx];
-                layer
-                    .keyframe_index_at(frame)
-                    .map(|ki| layer.keyframes[ki].start_frame)
-            })
-            .unwrap_or(frame)
-    }
-
     /// 全レイヤー・全キーフレーム内のシンボルインスタンスを列挙する
     pub(crate) fn instances(&self) -> impl Iterator<Item = &SymbolInstance> {
         self.layers
@@ -1646,22 +1899,19 @@ impl Timeline {
             .unwrap_or_default()
     }
 
-    /// 非編集可能レイヤーに紐付いているシェイプの `layer_id` を現在の編集可能レイヤーIDへ補正する
-    pub(crate) fn normalize_shape_layer_ids(&self, shapes: &mut [FillShape]) {
-        let fallback_lid = if self.is_active_layer_editable() {
-            self.active_layer_id()
-        } else {
-            self.layers
-                .iter()
-                .find(|l| l.is_editable_at(self.current_frame))
-                .map(|l| l.id)
-                .unwrap_or_else(|| self.active_layer_id())
-        };
-        for shape in shapes {
-            if !self.is_layer_editable_by_id(shape.layer_id) {
-                shape.layer_id = fallback_lid;
-            }
+    /// レイヤー `preferred` が編集できればそれ、できなければ作業中のレイヤー、それもできなければ編集できる最初のレイヤー
+    /// （新しい中身を置く先）
+    pub(crate) fn editable_layer_or(&self, preferred: u64) -> u64 {
+        if self.is_layer_editable_by_id(preferred) {
+            return preferred;
         }
+        if self.is_active_layer_editable() {
+            return self.active_layer_id();
+        }
+        self.layers
+            .iter()
+            .find(|l| l.is_editable_at(self.current_frame))
+            .map_or_else(|| self.active_layer_id(), |l| l.id)
     }
 
     /// 現在アクティブなレイヤーが現在フレームにおいて編集可能（表示中・非ロック・フレーム作成済み）であるかを返す

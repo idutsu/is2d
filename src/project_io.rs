@@ -827,7 +827,7 @@ impl ProjectDocument {
             self.stage_size = [800.0, 450.0];
             fixed.push("ステージサイズ".to_owned());
         }
-        // 地図はいつも正しい地図なので、座標は有限（地図にできない形はセル画に書かない：`Cel::set_parts`）。インスタンスの
+        // 地図はいつも正しい地図なので、座標は有限（地図にできない形はセル画に書かない：`on_grid`）。インスタンスの
         // 変換だけを確かめる
         let mut clean_timeline = |tl: &mut SavedTimeline, sym_name: Option<&str>| {
             for layer in &mut tl.layers {

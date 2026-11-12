@@ -648,8 +648,8 @@ impl View {
 /// アプリ全体で1つだけ保持される内部クリップボード状態
 #[derive(Clone, Default)]
 pub(crate) struct Clipboard {
-    /// コピー / カットされたシェイプ群（`group_path` はコピー時の編集スコープからの相対パス）
-    pub(crate) shapes: Vec<FillShape>,
+    /// コピー / カットした中身（地図とインスタンス。階層の番号の並びは、写した所からの相対）
+    pub(crate) content: Option<crate::clipboard_ops::Content>,
     /// クリップボードにコピーされた時点のコピー元ドキュメントID（別タブへのペースト判定用）
     pub(crate) source_doc_id: u64,
     /// クリップボードにコピーされた時点のインプレイス編集中のシンボルID（ルートシーン時は `None`）
@@ -2235,19 +2235,19 @@ impl Session {
         by_layer
     }
 
-    /// 地図 `maps`（レイヤーごと。文書の座標。面の番号が片の番号）を、浮いた片の組として足す（動かした扱い。確定のときに、
-    /// その階層の地図に重ねる）。グループの解除はグループの地図そのもの、貼り付け・シンボルの分解は片の図形の地図
-    /// （`floating::piece_maps`）
+    /// 地図 `maps`（レイヤーごと、下から順。文書の座標。面の番号が片の番号）を、それぞれ変換をかける浮いた片の組として
+    /// 足す（動かした扱い。確定のときに、変換をかけて、その階層の地図に重ねる）。グループの解除はグループの地図そのもの、
+    /// 新しい中身（貼り付け・Alt 複製・シンボルの分解）は中身の生の図形の地図（`clipboard_ops::put_placements`）
     pub(crate) fn add_floating_maps(
         &mut self,
-        maps: Vec<(LayerId, Arc<crate::planar_map::LayerBase>)>,
+        maps: Vec<(LayerId, crate::planar_map::PlanarMap, Affine)>,
     ) {
         if maps.is_empty() {
             return;
         }
         self.with_floating(|fl, stage| {
-            for (layer_id, base) in &maps {
-                fl.add_map(stage, *layer_id, &base.map);
+            for (layer_id, map, xform) in &maps {
+                fl.add_map(stage, *layer_id, map, *xform);
             }
         });
     }
@@ -2425,26 +2425,6 @@ impl Session {
         if self.selection.is_empty() {
             self.transform_pivot = None;
         }
-    }
-
-    /// 現在選択中のシェイプ群を現在の編集スコープ（`editing_group_path`）からの相対グループパス付きで抽出する
-    pub(crate) fn extract_selected_relative_to_scope(&self) -> Vec<FillShape> {
-        if self.selection.is_empty() {
-            return Vec::new();
-        }
-        let depth = self.editing_group_path.len();
-        let mut extracted = Vec::new();
-        for shape in self.scene().iter() {
-            if self.selection.contains_shape(shape) {
-                let rel_group_path = if shape.group_path.starts_with(&self.editing_group_path) {
-                    shape.group_path[depth..].to_vec()
-                } else {
-                    Vec::new()
-                };
-                extracted.push(shape.clone().with_group_path(rel_group_path));
-            }
-        }
-        extracted
     }
 
     /// 指定した `instance_gid` に属するキャンバス上の図形をすべて選択状態にする
@@ -3119,77 +3099,69 @@ fn writeback_edited_layer_shapes(
     let need_inv = inv_xform != Affine::IDENTITY;
     layer_stage_shapes.retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
 
-    let parts = {
-        let orig_cel = &tl.layers[l_idx].keyframes[kf_idx].cel;
-        let orig_shapes = orig_cel.shapes();
-        let orig_by_id: HashMap<ShapeId, &Arc<FillShape>> =
-            orig_shapes.iter().map(|s| (s.shape_id, s)).collect();
-        let orig_local_inst_map: HashMap<InstanceGid, &SymbolInstance> = orig_cel
-            .instances
-            .iter()
-            .map(|i| (i.binding.instance_gid, i))
-            .collect();
+    let parts =
+        {
+            let orig_cel = &tl.layers[l_idx].keyframes[kf_idx].cel;
+            let orig_shapes = orig_cel.shapes();
+            let orig_by_id: HashMap<ShapeId, &Arc<FillShape>> =
+                orig_shapes.iter().map(|s| (s.shape_id, s)).collect();
+            let orig_local_inst_map: HashMap<InstanceGid, &SymbolInstance> = orig_cel
+                .instances
+                .iter()
+                .map(|i| (i.binding.instance_gid, i))
+                .collect();
 
-        let mut parts: Vec<Part> = Vec::with_capacity(layer_stage_shapes.len());
-        let mut seen_instances: std::collections::HashSet<InstanceGid> =
-            std::collections::HashSet::new();
-        for s in layer_stage_shapes.iter_mut() {
-            if let Some(b) = s.symbol_instance {
-                if seen_instances.insert(b.instance_gid) {
-                    let key = (b.instance_gid, b.symbol_id);
-                    let stage_xform_unchanged = initial_stage_inst_xform
-                        .get(&key)
-                        .is_some_and(|&init_xf| init_xf == b.xform);
-                    let orig_inst = orig_local_inst_map.get(&b.instance_gid).copied();
-                    let mut local_b = b;
-                    if has_world_xform {
-                        if stage_xform_unchanged {
-                            if let Some(oi) = orig_inst {
-                                local_b.xform = oi.binding.xform;
+            let mut parts: Vec<Part> = Vec::with_capacity(layer_stage_shapes.len());
+            let mut seen_instances: std::collections::HashSet<InstanceGid> =
+                std::collections::HashSet::new();
+            for s in layer_stage_shapes.iter_mut() {
+                if let Some(b) = s.symbol_instance {
+                    if seen_instances.insert(b.instance_gid) {
+                        let key = (b.instance_gid, b.symbol_id);
+                        let stage_xform_unchanged = initial_stage_inst_xform
+                            .get(&key)
+                            .is_some_and(|&init_xf| init_xf == b.xform);
+                        let orig_inst = orig_local_inst_map.get(&b.instance_gid).copied();
+                        let mut local_b = b;
+                        if has_world_xform {
+                            if stage_xform_unchanged {
+                                if let Some(oi) = orig_inst {
+                                    local_b.xform = oi.binding.xform;
+                                } else if need_inv {
+                                    local_b.xform = inv_xform * b.xform;
+                                }
                             } else if need_inv {
                                 local_b.xform = inv_xform * b.xform;
                             }
-                        } else if need_inv {
-                            local_b.xform = inv_xform * b.xform;
                         }
+                        let parent_scope = b.parent_scope_from_path(&s.group_path).to_vec();
+                        parts.push(Part::Instance(SymbolInstance {
+                            binding: local_b,
+                            layer_id: s.layer_id,
+                            parent_scope,
+                            order: 0,
+                        }));
                     }
-                    let parent_scope = b.parent_scope_from_path(&s.group_path).to_vec();
-                    parts.push(Part::Instance(SymbolInstance {
-                        binding: local_b,
-                        layer_id: s.layer_id,
-                        parent_scope,
-                        order: 0,
-                    }));
-                }
-            } else if !s.exterior.segments.is_empty() {
-                // 変わらない図形（セル画の面の図形と番号・版が同じ）は、その図形を使う（同じ面として、前の地図が使える）。
-                // 色・階層は今の図形に合わせる
-                let doc = orig_by_id
-                    .get(&s.shape_id)
-                    .copied()
-                    .filter(|orig| orig.mesh_revision == s.mesh_revision);
-                if let Some(doc) = doc {
-                    if doc.color == s.color && doc.group_path == s.group_path {
+                } else if !s.exterior.segments.is_empty() {
+                    // 生の図形は、いつもセル画の地図の面（番号・版・色が同じ図形）で、その面を使う（階層は今の図形に合わせる）。
+                    // 図形から地図は作らないので、面でない図形（新しい形・形や色を変えた図形）は書けない（このレイヤーは書かずに
+                    // 断る。新しい形・色は、地図の編集か浮いた片で書く）
+                    let Some(doc) = orig_by_id.get(&s.shape_id).copied().filter(|orig| {
+                        orig.mesh_revision == s.mesh_revision && orig.color == s.color
+                    }) else {
+                        return Err(crate::timeline::Unmappable);
+                    };
+                    if doc.group_path == s.group_path {
                         parts.push(Part::Shape(Arc::clone(doc)));
                     } else {
                         let mut kept = (**doc).clone();
-                        kept.color = s.color;
                         kept.group_path = s.group_path.clone();
                         parts.push(Part::Shape(Arc::new(kept)));
                     }
-                    continue;
                 }
-                let mut local_s = s.clone();
-                if has_world_xform && need_inv {
-                    local_s.transform(inv_xform);
-                    s.mesh_revision = local_s.mesh_revision;
-                }
-                local_s.strip_transient_caches();
-                parts.push(Part::Shape(Arc::new(local_s)));
             }
-        }
-        parts
-    };
+            parts
+        };
 
     tl.layers[l_idx].keyframe_mut(kf_idx).cel.set_parts(parts)?;
     Ok(true)
@@ -3384,6 +3356,29 @@ pub(crate) fn write_scope_map(
     scope: &[u64],
     f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::PlanarMap>,
 ) -> bool {
+    let mut held = None;
+    let written = write_cel(tab, layer_id, |cel| match cel.edit_map(scope, f) {
+        Some(w) => {
+            held = w.0;
+            true
+        }
+        None => false,
+    });
+    // 新しい地図の写し（面の図形は、変わらない面は前の図形）は、画面の土台が持つ
+    if let Some(base) = held {
+        tab.session.base_cache.hold(layer_id, base);
+    }
+    written
+}
+
+/// 今のコマの、レイヤー `layer_id` のセル画を `f` で書き換える（`f` が `true` を返したら書いた）。後始末はしないので、
+/// 書いたあとに、書いたレイヤーで `finish_cel_writes` を1回呼ぶ。`false`：編集できない（ロック・非表示・キーフレームが
+/// 無い・トゥイーンの途中）か、`f` が書かなかった
+pub(crate) fn write_cel(
+    tab: &mut Tab,
+    layer_id: LayerId,
+    f: impl FnOnce(&mut crate::timeline::Cel) -> bool,
+) -> bool {
     let tl = tab.active_timeline_raw_mut();
     let frame = tl.current_frame;
     let Some(layer) = tl
@@ -3396,16 +3391,11 @@ pub(crate) fn write_scope_map(
     let Some(kf) = layer.keyframe_index_at(frame) else {
         return false;
     };
-    let Some(written) = Arc::make_mut(&mut layer.keyframes[kf])
-        .cel
-        .edit_map(scope, f)
-    else {
+    let mut cel = layer.keyframes[kf].cel.clone();
+    if !f(&mut cel) {
         return false;
-    };
-    // 新しい地図の写し（面の図形は、変わらない面は前の図形）は、画面の土台が持つ
-    if let Some(base) = written.0 {
-        tab.session.base_cache.hold(layer_id, base);
     }
+    Arc::make_mut(&mut layer.keyframes[kf]).cel = cel;
     true
 }
 
@@ -3421,20 +3411,6 @@ pub(crate) fn active_scope_layer_id(session: &Session, timeline: &Timeline) -> u
         }
     }
     timeline.active_layer_id()
-}
-
-/// 指定された `Scene` インデックス群が所属するレイヤーのうち最前面の `layer_id` を返す（該当なし時は `active_scope_layer_id`）
-pub(crate) fn topmost_layer_id_for_indices(
-    session: &Session,
-    timeline: &Timeline,
-    indices: &[usize],
-) -> u64 {
-    let scene = session.scene();
-    indices
-        .iter()
-        .filter_map(|&idx| scene.get(idx).map(|s| s.layer_id))
-        .max_by_key(|&lid| timeline.layer_index_by_id(lid).unwrap_or(0))
-        .unwrap_or_else(|| active_scope_layer_id(session, timeline))
 }
 
 /// 指定した `shape_id` が属するレイヤーへ編集中タイムラインの `active_layer` およびタイムライン選択状態を追従させる
@@ -3728,46 +3704,4 @@ pub(crate) fn clear_selection(tab: &mut Tab) {
     tab.session.selection.clear();
     tab.session.transform_pivot = None;
     tab.view.inspect_timeline_frame = false;
-}
-
-/// 現在の編集スコープの最前面へ `new_shapes` を配置し、それらを選択状態にする
-/// （`as_floating` が `true` の場合、生図形は文書へ書き込まず最初から `Floating` の `pieces` へ入れる）
-pub(crate) fn insert_and_select_shapes_in_scope(
-    tab: &mut Tab,
-    new_shapes: Vec<FillShape>,
-    as_floating: bool,
-) {
-    tab.session.selection.clear();
-    for s in &new_shapes {
-        tab.session.selection.insert_shape(s);
-    }
-    let scope = tab.session.editing_group_path.clone();
-    // 元のレイヤーが編集できない図形は、作業中のレイヤーに入れる
-    let mut new_shapes = new_shapes;
-    tab.active_timeline()
-        .normalize_shape_layer_ids(&mut new_shapes);
-    let (raw_pieces, doc_shapes): (Vec<FillShape>, Vec<FillShape>) = new_shapes
-        .into_iter()
-        .partition(|s| as_floating && s.is_raw_at_scope(&scope));
-    // 生の図形は浮いた片にする。片の地図は、文書を変える前に作る（地図にできなければ、何も足さずに断る）
-    let Some(maps) = crate::floating::piece_maps(&raw_pieces, tab.session.edit_path.world_xform())
-    else {
-        tab.session.selection.clear();
-        tab.session.off_grid = true;
-        return;
-    };
-    tab.session.set_floating(None);
-    if !doc_shapes.is_empty() {
-        let mut lids: Vec<LayerId> = doc_shapes.iter().map(|s| s.layer_id).collect();
-        lids.push(active_scope_layer_id(&tab.session, tab.active_timeline()));
-        edit_layers(tab, &lids, |edit| {
-            let insert_pos = edit.scope_insert_index();
-            edit.shapes.splice(insert_pos..insert_pos, doc_shapes);
-        });
-    }
-    // 片の番号は片の地図の面の番号（選択も片に合わせる）。グループの中身が地図にできずに断ったときは、片も足さない
-    if !tab.session.off_grid {
-        tab.session.add_floating_maps(maps);
-    }
-    tab.session.transform_pivot = None;
 }

@@ -4,11 +4,12 @@ use std::sync::Arc;
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, cancel_active_drag, Clipboard, MoveSelectionDrag, Tab,
+    active_scope_layer_id, cancel_active_drag, finish_cel_writes, write_cel, Clipboard, LayerId,
+    MoveSelectionDrag, Tab,
 };
-use crate::symbol::{Document, SymbolDef, SymbolEvalCtx};
-use crate::timeline::Timeline;
-use crate::vector_engine::{next_shape_id, FillShape};
+use crate::planar_map::{freshly_labeled, PlanarMap};
+use crate::symbol::{Document, SymbolDef};
+use crate::timeline::{Cel, Timeline};
 
 fn remap_gid(gid_map: &mut HashMap<u64, u64>, old_gid: u64, doc: &mut Document) -> u64 {
     *gid_map
@@ -16,82 +17,201 @@ fn remap_gid(gid_map: &mut HashMap<u64, u64>, old_gid: u64, doc: &mut Document) 
         .or_insert_with(|| doc.alloc_group_id())
 }
 
-/// 相対グループパスを持つシェイプ群に対し、新しいグループID・シンボルインスタンスIDを採番して現在の編集スコープ用に変換する
-pub(crate) fn instantiate_relative_shapes_in_scope(
-    tab: &mut Tab,
-    rel_shapes: &[FillShape],
-    offset: KVec2,
-    preserve_original_layer: bool,
-) -> (Vec<FillShape>, bool) {
-    let active_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
-    let mut gid_map: HashMap<u64, u64> = HashMap::new();
-    let mut seen_instance_gids: HashSet<u64> = HashSet::new();
-    let mut instantiated = Vec::with_capacity(rel_shapes.len());
-    let mut any_raw = false;
+// ============================================================================
+// 新しい中身（コピー・カット・貼り付け・Alt 複製・シンボル化・シンボルの分解）
+// 設計：claude/新しい中身も地図で運ぶ設計_クリップボード_4f4e953.md
+// ============================================================================
 
-    for item in rel_shapes {
-        let target_lid = if preserve_original_layer
-            && tab.active_timeline().is_layer_editable_by_id(item.layer_id)
-        {
-            item.layer_id
-        } else {
-            active_lid
-        };
+/// 新しい中身：写したレイヤーごとのセル画（下から順。地図とインスタンス。階層の番号の並びは写した所からの相対、座標は
+/// 写した所の文書の座標）と、写した所の文書の座標 → ステージの座標の変換。地図だけで作り（`selected_content`）、地図だけで
+/// 置く（`prepare_placement`・`put_placements`）。図形から地図は作らない
+#[derive(Clone, Debug)]
+pub(crate) struct Content {
+    pub(crate) layers: Vec<(LayerId, Cel)>,
+    pub(crate) world: Affine,
+}
 
-        if let Some(orig_binding) = item
-            .symbol_instance
-            .filter(|b| item.group_path.contains(&b.instance_gid))
-        {
-            if !seen_instance_gids.insert(orig_binding.instance_gid) {
-                continue;
-            }
-            let mut new_parent_scope = tab.session.editing_group_path.clone();
-            for &old_gid in orig_binding.parent_scope_from_path(&item.group_path) {
-                new_parent_scope.push(remap_gid(&mut gid_map, old_gid, &mut tab.doc));
-            }
-            let mapped_inst_gid = remap_gid(&mut gid_map, orig_binding.instance_gid, &mut tab.doc);
-
-            let mut new_binding = orig_binding;
-            new_binding.instance_gid = mapped_inst_gid;
-            if offset != KVec2::ZERO {
-                new_binding.xform = Affine::translate(offset) * new_binding.xform;
-            }
-
-            if tab.doc.find_symbol(new_binding.symbol_id).is_some() {
-                let tl = tab.active_timeline();
-                let curr_f = tl.current_frame;
-                let kf_start = tl.keyframe_start_frame_at(target_lid, curr_f);
-                instantiated.extend(new_binding.expand(
-                    (kf_start, curr_f),
-                    target_lid,
-                    &new_parent_scope,
-                    SymbolEvalCtx::new(&tab.doc.library),
-                ));
-                continue;
-            }
-        }
-
-        let mut new_path = tab.session.editing_group_path.clone();
-        if item.group_path.is_empty() {
-            any_raw = true;
-        } else {
-            for &old_gid in &item.group_path {
-                new_path.push(remap_gid(&mut gid_map, old_gid, &mut tab.doc));
-            }
-        }
-        let mut cloned = item
-            .clone()
-            .with_layer_id(target_lid)
-            .with_group_path(new_path);
-        cloned.shape_id = next_shape_id();
-        cloned.symbol_instance = None;
-        if offset != KVec2::ZERO {
-            cloned.translate(offset);
-        }
-        instantiated.push(cloned);
+impl Content {
+    /// 中身が参照するシンボルの番号（重なりの順。同じ番号も並ぶ）
+    fn symbol_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.layers
+            .iter()
+            .flat_map(|(_, c)| c.instances.iter().map(|i| i.binding.symbol_id))
     }
+}
 
-    (instantiated, any_raw)
+/// 選んでいるもの（今の階層の）の中身：レイヤーごとに、選んだ面だけを残した地図と、選んだグループ・インスタンス
+/// （`Cel::picked`）。浮いた片のあるレイヤーの生の図形は、残りの選んだ所に片を重ねた地図（確定と同じ重ね方：
+/// `FloatLayer::selected_map`）。トゥイーンの途中のインスタンスは、そのコマの結び付け。`None`：選んでいるものが無いか、
+/// 浮いた片を地図にできない
+pub(crate) fn selected_content(tab: &Tab) -> Option<Content> {
+    let session = &tab.session;
+    if session.selection.is_empty() {
+        return None;
+    }
+    let scope = &session.editing_group_path;
+    let tl = tab.active_timeline();
+    let mut layers = Vec::new();
+    for &layer_id in session.base_cache.layer_order_ids() {
+        let Some(cel) = session.base_cache.cel(layer_id) else {
+            continue;
+        };
+        let float = session
+            .floating()
+            .and_then(|fl| fl.layers().iter().find(|l| l.layer_id == layer_id));
+        let raw = match float {
+            Some(l) => Some(l.selected_map(session.stage(), &session.selection.shapes)?),
+            None => None,
+        };
+        let tween = tl
+            .layer_index_by_id(layer_id)
+            .and_then(|i| tl.layers[i].interpolated_tween_binding_at(tl.current_frame));
+        let picked = cel.picked(
+            scope,
+            &session.selection.shapes,
+            &session.selection.instances,
+            raw.as_ref(),
+            tween,
+        );
+        if !picked.is_empty() {
+            layers.push((layer_id, picked));
+        }
+    }
+    (!layers.is_empty()).then(|| Content {
+        layers,
+        world: session.edit_path.world_xform(),
+    })
+}
+
+/// 中身の座標（文書の座標 → ステージの変換が `from`）から、置く先の文書の座標（同じく `to`）への変換。ステージで
+/// `offset` ずらす。同じ所（`from == to`）なら、ずらす量を置く先の座標に写した平行移動（`to⁻¹·T(offset)·to` と同じ値を、
+/// 丸めを入れずに作る。ずらさなければ恒等の変換で、地図はそのまま写る）
+pub(crate) fn content_xform(from: Affine, to: Affine, offset: KVec2) -> Affine {
+    if from == to {
+        let [a, b, c, d, _, _] = to.as_coeffs();
+        let linear_inv = Affine::new([a, b, c, d, 0.0, 0.0]).inverse();
+        Affine::translate((linear_inv * offset.to_point()).to_vec2())
+    } else {
+        to.inverse() * Affine::translate(offset) * from
+    }
+}
+
+/// 置く準備のできた中身（文書を変えない）：置く先のレイヤーごとの、浮いた片にする地図（下から順。中身の座標。面の番号は
+/// 新しい）と、セル画に入れるグループとインスタンス（置く先の座標。面の番号は新しく、グループ・インスタンス・シンボルの
+/// 番号は中身のまま）。浮いた片には変換 `xform` をかける
+pub(crate) struct Placement {
+    layers: Vec<PlacedLayer>,
+    xform: Affine,
+}
+
+struct PlacedLayer {
+    layer_id: LayerId,
+    pieces: Vec<PlanarMap>,
+    nested: Cel,
+    /// 中身と入れ替えるインスタンス（シンボルの分解）
+    replacing: Option<u64>,
+}
+
+impl Placement {
+    /// 浮いた片にする地図があるか
+    pub(crate) fn has_pieces(&self) -> bool {
+        self.layers.iter().any(|l| !l.pieces.is_empty())
+    }
+}
+
+/// 中身 `content` を、変換 `xform`（中身の座標 → 今の階層の文書の座標）で置く準備をする（文書を変えない）。置く先は、
+/// `keep_layers` なら元のレイヤー（編集できなければ作業中のレイヤー）、そうでなければ作業中のレイヤー。生の図形の地図は
+/// 浮いた片にする（変換は確定のときにかける）。グループの地図は、その座標の格子で正しい地図にする（`Cel::transformed`）。
+/// `replacing`：（レイヤー, インスタンス）があれば、そのレイヤーでは中身をそのインスタンスと入れ替える。`None`：格子に
+/// 置けない座標がある（呼ぶ側は文書を変えずに断る）
+pub(crate) fn prepare_placement(
+    tab: &Tab,
+    content: &Content,
+    xform: Affine,
+    keep_layers: bool,
+    replacing: Option<(LayerId, u64)>,
+) -> Option<Placement> {
+    let tl = tab.active_timeline();
+    let active = active_scope_layer_id(&tab.session, tl);
+    // 入れ替えるインスタンスのレイヤーは、中身が空でも置く（インスタンスを外す）
+    let mut by_layer: Vec<(LayerId, Vec<PlanarMap>, Vec<Cel>)> = replacing
+        .map(|(layer_id, _)| (layer_id, Vec::new(), Vec::new()))
+        .into_iter()
+        .collect();
+    for (layer_id, cel) in &content.layers {
+        let target =
+            tl.editable_layer_or(if keep_layers && tl.is_layer_editable_by_id(*layer_id) {
+                *layer_id
+            } else {
+                active
+            });
+        let (raw, nested) = cel.split_raw();
+        let nested = nested.transformed(xform)?;
+        let raw = match raw {
+            Some(m) if !m.fits_grid(xform) => return None,
+            Some(m) => Some(freshly_labeled(&m)),
+            None => None,
+        };
+        let i = match by_layer.iter().position(|l| l.0 == target) {
+            Some(i) => i,
+            None => {
+                by_layer.push((target, Vec::new(), Vec::new()));
+                by_layer.len() - 1
+            }
+        };
+        by_layer[i].1.extend(raw);
+        by_layer[i].2.push(nested);
+    }
+    let layers = by_layer
+        .into_iter()
+        .map(|(layer_id, pieces, nested)| {
+            Some(PlacedLayer {
+                layer_id,
+                pieces,
+                nested: Cel::stacked(&nested)?,
+                replacing: replacing.filter(|r| r.0 == layer_id).map(|r| r.1),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(Placement { layers, xform })
+}
+
+/// 準備した中身 `placements` を、今の階層に置く（文書を変える）。グループとインスタンスには新しい番号を振り（中身ごとに。
+/// シンボルの番号は `sym` で付け替える）、セル画に入れる（`Cel::insert_content`）。生の図形の地図は、浮いた片の組にする。
+/// 置いたものを選択に足す（呼ぶ側は、要るなら先に選択を外す）
+pub(crate) fn put_placements(tab: &mut Tab, placements: Vec<Placement>, sym: impl Fn(u64) -> u64) {
+    let scope = tab.session.editing_group_path.clone();
+    let mut written: Vec<LayerId> = Vec::new();
+    let mut floats = Vec::new();
+    for p in placements {
+        let mut gid_map: HashMap<u64, u64> = HashMap::new();
+        for l in p.layers {
+            let mut nested = l.nested;
+            if !nested.is_empty() || l.replacing.is_some() {
+                nested.remap_ids(
+                    |gid| remap_gid(&mut gid_map, gid, &mut tab.doc),
+                    &sym,
+                    Some(l.layer_id),
+                );
+                if write_cel(tab, l.layer_id, |cel| {
+                    cel.insert_content(&scope, &nested, l.replacing)
+                }) {
+                    if !written.contains(&l.layer_id) {
+                        written.push(l.layer_id);
+                    }
+                    let sel = &mut tab.session.selection;
+                    sel.shapes.extend(nested.face_ids());
+                    sel.instances
+                        .extend(nested.instances.iter().map(|i| i.binding.instance_gid));
+                }
+            }
+            floats.extend(l.pieces.into_iter().map(|m| (l.layer_id, m, p.xform)));
+        }
+    }
+    finish_cel_writes(tab, &written);
+    tab.session.add_floating_maps(floats);
+    tab.session.retain_existing_selection();
+    tab.session.transform_pivot = None;
 }
 
 /// 選択オブジェクトの移動ドラッグ（`Alt` 複製移動を含む）の初期状態を構築する共通ヘルパー
@@ -130,29 +250,15 @@ fn remap_timeline_ids(tl: &mut Timeline, doc: &mut Document, sym_map: &HashMap<u
     let mut gid_map: HashMap<u64, u64> = HashMap::new();
     for layer in &mut tl.layers {
         for i in 0..layer.keyframes.len() {
-            if layer.keyframes[i]
-                .cel
-                .maps
-                .iter()
-                .any(|m| !m.group_path.is_empty())
-            {
-                layer
-                    .keyframe_mut(i)
-                    .cel
-                    .remap_group_ids(|gid| remap_gid(&mut gid_map, gid, doc));
+            let cel = &layer.keyframes[i].cel;
+            if cel.maps.iter().all(|m| m.group_path.is_empty()) && cel.instances.is_empty() {
+                continue;
             }
-            if !layer.keyframes[i].cel.instances.is_empty() {
-                for inst in layer.keyframe_mut(i).cel.instances_mut() {
-                    if let Some(&mapped_child_id) = sym_map.get(&inst.binding.symbol_id) {
-                        inst.binding.symbol_id = mapped_child_id;
-                    }
-                    inst.binding.instance_gid =
-                        remap_gid(&mut gid_map, inst.binding.instance_gid, doc);
-                    for gid in &mut inst.parent_scope {
-                        *gid = remap_gid(&mut gid_map, *gid, doc);
-                    }
-                }
-            }
+            layer.keyframe_mut(i).cel.remap_ids(
+                |gid| remap_gid(&mut gid_map, gid, doc),
+                |sym| sym_map.get(&sym).copied().unwrap_or(sym),
+                None,
+            );
         }
     }
 }
@@ -164,15 +270,13 @@ pub(crate) fn capture_clipboard_symbols(tab: &Tab, clipboard: &mut Clipboard) {
     clipboard.symbols.clear();
 
     let mut visited = Vec::new();
-    for shape in &clipboard.shapes {
-        if let Some(b) = shape.symbol_instance {
-            collect_symbol_and_descendants(
-                b.symbol_id,
-                &tab.doc.library,
-                &mut visited,
-                &mut clipboard.symbols,
-            );
-        }
+    let ids: Vec<u64> = clipboard
+        .content
+        .iter()
+        .flat_map(Content::symbol_ids)
+        .collect();
+    for id in ids {
+        collect_symbol_and_descendants(id, &tab.doc.library, &mut visited, &mut clipboard.symbols);
     }
 }
 
@@ -305,55 +409,57 @@ fn collect_needed_clipboard_imports(
     }
 }
 
-/// `paste_clipboard`（`Cmd+V`）実行時に、クリップボードの不変スナップショットを破壊せず、
-/// 現在のタブのライブラリに不足しているシンボル定義のみを自動移植してペースト用 `(Vec<FillShape>, had_cycle)` を返す。
-/// 循環参照で貼れる図形が1つも無いときは文書に触れずに空の列を返し、貼れる図形があるときは文書を変える前に `before_mutate` を呼ぶ
-pub(crate) fn resolve_clipboard_for_paste(
+/// クリップボードの中身のうち、今の編集の所に置けるもの（循環参照になるシンボルのインスタンスを除いたもの。文書は変えない）
+/// と、除いたものがあったか。置けるものが無ければ `None`
+pub(crate) fn pasteable_content(tab: &Tab, clipboard: &Clipboard) -> (Option<Content>, bool) {
+    let Some(content) = &clipboard.content else {
+        return (None, false);
+    };
+    let mut had_cycle = false;
+    let mut content = content.clone();
+    for (_, cel) in &mut content.layers {
+        if cel
+            .instances
+            .iter()
+            .all(|i| can_paste_clipboard_symbol(tab, clipboard, i.binding.symbol_id))
+        {
+            continue;
+        }
+        had_cycle = true;
+        cel.instances_mut()
+            .retain(|i| can_paste_clipboard_symbol(tab, clipboard, i.binding.symbol_id));
+    }
+    content.layers.retain(|(_, c)| !c.is_empty());
+    ((!content.layers.is_empty()).then_some(content), had_cycle)
+}
+
+/// 中身 `content` が参照するシンボルのうち、今のタブのライブラリに無いものを、クリップボードの写し（壊さない）から移植する。
+/// 戻り値は、クリップボードのシンボルの番号 → 今のタブのシンボルの番号（変わるものだけ）
+pub(crate) fn import_clipboard_symbols(
     tab: &mut Tab,
     clipboard: &mut Clipboard,
-    before_mutate: impl FnOnce(&mut Tab),
-) -> (Vec<FillShape>, bool) {
-    let mut had_cycle = false;
-    let mut resolved_shapes = Vec::with_capacity(clipboard.shapes.len());
-    for shape in &clipboard.shapes {
-        if let Some(b) = shape.symbol_instance {
-            if !can_paste_clipboard_symbol(tab, clipboard, b.symbol_id) {
-                had_cycle = true;
-                continue;
-            }
-        }
-        resolved_shapes.push(shape.clone());
-    }
-
-    if resolved_shapes.is_empty() {
-        return (resolved_shapes, had_cycle);
-    }
-    before_mutate(tab);
+    content: &Content,
+) -> HashMap<u64, u64> {
+    let mut local_sym_map: HashMap<u64, u64> = HashMap::new();
     if clipboard.symbols.is_empty() {
-        return (resolved_shapes, had_cycle);
+        return local_sym_map;
     }
-
     let target_doc_id = tab.id;
     let source_doc_id = clipboard.source_doc_id;
-    let mut local_sym_map: HashMap<u64, u64> = HashMap::new();
     let mut needed_imports: HashSet<u64> = HashSet::new();
     let mut visited: HashSet<u64> = HashSet::new();
-
-    for shape in &resolved_shapes {
-        if let Some(b) = shape.symbol_instance {
-            collect_needed_clipboard_imports(
-                tab,
-                clipboard,
-                b.symbol_id,
-                &mut local_sym_map,
-                &mut needed_imports,
-                &mut visited,
-            );
-        }
+    for id in content.symbol_ids() {
+        collect_needed_clipboard_imports(
+            tab,
+            clipboard,
+            id,
+            &mut local_sym_map,
+            &mut needed_imports,
+            &mut visited,
+        );
     }
 
     let mut any_imported = false;
-
     for idx in 0..clipboard.symbols.len() {
         let src_sym_id = clipboard.symbols[idx].id;
         if !needed_imports.contains(&src_sym_id) {
@@ -402,29 +508,16 @@ pub(crate) fn resolve_clipboard_for_paste(
     if any_imported {
         tab.doc.bump_revision();
     }
-
-    for shape in &mut resolved_shapes {
-        if let Some(mut b) = shape.symbol_instance {
-            if let Some(&mapped_id) = local_sym_map.get(&b.symbol_id) {
-                b.symbol_id = mapped_id;
-                shape.symbol_instance = Some(b);
-            }
-        }
-    }
-    (resolved_shapes, had_cycle)
+    local_sym_map
 }
 
 /// 選択中のオブジェクト（生シェイプ・部分スライス領域・グループ問わず）を内部クリップボードにコピーする（`Cmd+C`）
 pub(crate) fn prepare_copy_selected_shapes(tab: &mut Tab, clipboard: &mut Clipboard) -> bool {
     cancel_active_drag(tab);
-    let mut extracted = tab.session.extract_selected_relative_to_scope();
-    if extracted.is_empty() {
+    let Some(content) = selected_content(tab) else {
         return false;
-    }
-    for s in &mut extracted {
-        s.strip_transient_caches();
-    }
-    clipboard.shapes = extracted;
+    };
+    clipboard.content = Some(content);
     clipboard.paste_count = 0;
     clipboard.paste_offset = KVec2::ZERO;
     capture_clipboard_symbols(tab, clipboard);

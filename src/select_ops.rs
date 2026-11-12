@@ -1,18 +1,16 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 
-use kurbo::{ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
+use kurbo::{Affine, ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
     cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
     editable_layer_ids, sync_timeline_layer_from_canvas_selection, ActiveCanvasDrag, HoverTarget,
     LayerId, Scene, SelectSubMode, Session, ShapeId, Tab,
 };
+use crate::clipboard_ops::{prepare_placement, put_placements, Content, Placement};
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
-use crate::vector_engine::{
-    make_marquee_rect_shape, rects_overlap, ColorEffect, FillShape, SymbolInstanceBinding,
-};
+use crate::vector_engine::{make_marquee_rect_shape, rects_overlap, FillShape};
 
 /// 現在の選択図形のうち `keep_indices` のみを選択に残し、選択から外れた変更済み生シェイプのみをキャンバスへ結合・切り抜き確定する
 /// （選択に残った図形は結合せず `Floating` のまま維持する）
@@ -568,7 +566,10 @@ pub(crate) fn prepare_group_selected_shapes(
     true
 }
 
-/// 選択中のグループまたはシンボルインスタンスを1段階だけ解除（分離）する
+/// 選択中のグループまたはシンボルインスタンスを1段階だけ解除（分離）する。グループは、その階層の番号を外す（グループの
+/// 生の図形は、そのグループの地図を浮いた片にする）。インスタンスは、そのコマのシンボルの中身（`SymbolDef::detached_cels`）
+/// を、インスタンスの変換で今の階層に置き、インスタンスと入れ替える（`put_placements`。生の図形は浮いた片）。どれも地図で
+/// 運び、図形から地図は作らない。中身が格子の外にかかるなら、文書を変える前に断る
 pub(crate) fn prepare_ungroup_selected_shapes(
     tab: &mut Tab,
     before_mutate: impl FnOnce(&mut Tab),
@@ -581,91 +582,65 @@ pub(crate) fn prepare_ungroup_selected_shapes(
         return false;
     }
     let depth = tab.session.editing_group_path.len();
+    let scope = tab.session.editing_group_path.clone();
+    let layer_ids = editable_layer_ids(tab);
     let world = tab.session.edit_path.world_xform();
-    // 分解するシンボルの中身（選んだインスタンスの図形）が地図にできない（格子の外にかかる）なら、文書を変える前に断る
-    let fits = tab
-        .session
-        .base_cache
-        .shapes()
-        .iter()
-        .filter(|s| {
-            tab.session.selection.contains_shape(s)
-                && s.is_in_editing_scope(&tab.session.editing_group_path)
-                && s.group_path.len() > depth
-                && s.symbol_instance
-                    .is_some_and(|b| b.instance_gid == s.group_path[depth])
-        })
-        .all(|s| crate::planar_map::fits_grid(s, world));
-    if !fits {
-        tab.session.off_grid = true;
-        return false;
+
+    // 分解するインスタンス（今の階層の、選んだもの）の中身を置く準備をする
+    let mut placements: Vec<Placement> = Vec::new();
+    {
+        let tl = tab.active_timeline();
+        let frame = tl.current_frame;
+        for layer in tl.layers.iter().filter(|l| layer_ids.contains(&l.id)) {
+            let Some(kf_idx) = layer.keyframe_index_at(frame) else {
+                continue;
+            };
+            let kf = &layer.keyframes[kf_idx];
+            for inst in kf.cel.instances.iter() {
+                if inst.parent_scope != scope
+                    || !tab
+                        .session
+                        .selection
+                        .instances
+                        .contains(&inst.binding.instance_gid)
+                {
+                    continue;
+                }
+                let Some(sym) = tab.doc.find_symbol(inst.binding.symbol_id) else {
+                    continue;
+                };
+                let content = Content {
+                    layers: sym
+                        .detached_cels(inst.binding, kf.start_frame, frame, &tab.doc.library)
+                        .into_iter()
+                        .map(|c| (layer.id, c))
+                        .collect(),
+                    world: world * inst.binding.xform,
+                };
+                let Some(p) = prepare_placement(
+                    tab,
+                    &content,
+                    inst.binding.xform,
+                    true,
+                    Some((layer.id, inst.binding.instance_gid)),
+                ) else {
+                    tab.session.off_grid = true;
+                    return false;
+                };
+                placements.push(p);
+            }
+        }
     }
     before_mutate(tab);
 
-    let layer_ids = editable_layer_ids(tab);
-    let sel_snapshot = tab.session.selection.clone();
-    edit_layers(tab, &layer_ids, |edit| {
-        for shape in &mut edit.shapes {
-            if sel_snapshot.contains_shape(shape)
-                && shape.is_in_editing_scope(&edit.editing_group_path)
-                && shape.group_path.len() > depth
-            {
-                let gid = shape.group_path[depth];
-                if let Some(b) = shape
-                    .symbol_instance
-                    .as_mut()
-                    .filter(|b| b.instance_gid == gid)
-                {
-                    b.color_effect = ColorEffect::default();
-                }
-            }
-        }
-    });
-
-    let mut child_map: Vec<((u64, u64), Vec<u64>, SymbolInstanceBinding)> = Vec::new();
-    let tl = tab.active_timeline();
-    let current_frame = tl.current_frame;
-    for layer in &tl.layers {
-        let Some(kf_idx) = layer.keyframe_index_at(current_frame) else {
-            continue;
-        };
-        let kf = &layer.keyframes[kf_idx];
-        for inst in kf.cel.instances.iter() {
-            if inst.parent_scope == tab.session.editing_group_path
-                && tab
-                    .session
-                    .selection
-                    .instances
-                    .contains(&inst.binding.instance_gid)
-            {
-                if let Some(sym_a) = tab
-                    .doc
-                    .library
-                    .iter()
-                    .find(|s| s.id == inst.binding.symbol_id)
-                {
-                    for (scope, cb) in sym_a.detached_child_bindings(
-                        inst.binding,
-                        kf.start_frame,
-                        current_frame,
-                        &tab.doc.library,
-                    ) {
-                        child_map.push(((inst.binding.instance_gid, cb.instance_gid), scope, cb));
-                    }
-                }
-            }
-        }
-    }
-
-    let mut any_became_raw = false;
-    // 生に戻った図形は、文書の階層の地図に入れずに浮いた片にする（選んだまま。確定のときに、その階層の地図に重ねる）。
-    // グループの中の生の図形の片の地図は、そのグループの階層の地図そのもの（図形はその面）
-    let mut group_maps: Vec<(LayerId, Arc<crate::planar_map::LayerBase>)> = Vec::new();
+    // グループの生の図形の地図（浮いた片にする）
+    let mut group_maps: Vec<(LayerId, crate::planar_map::PlanarMap, Affine)> = Vec::new();
+    let mut from_groups: HashSet<ShapeId> = HashSet::new();
     let mut group_raw: Vec<(LayerId, Vec<u64>)> = Vec::new();
     for s in tab.session.base_cache.shapes() {
         if tab.session.selection.contains_shape(s)
             && s.symbol_instance.is_none()
-            && s.is_in_editing_scope(&tab.session.editing_group_path)
+            && s.is_in_editing_scope(&scope)
             && s.group_path.len() == depth + 1
             && !group_raw
                 .iter()
@@ -674,138 +649,40 @@ pub(crate) fn prepare_ungroup_selected_shapes(
             group_raw.push((s.layer_id, s.group_path.clone()));
         }
     }
-    let mut from_groups: HashSet<ShapeId> = HashSet::new();
     for (layer_id, path) in &group_raw {
         let Some(cel) = tab.session.base_cache.cel(*layer_id) else {
             continue;
         };
         let base = cel.scope_base(path);
         from_groups.extend(base.faces(path).iter().map(|s| s.shape_id));
-        group_maps.push((*layer_id, base));
+        group_maps.push((*layer_id, base.map.clone(), Affine::IDENTITY));
     }
-    let mut selection = std::mem::take(&mut tab.session.selection);
-    let mut piece_maps: Option<Vec<(LayerId, Arc<crate::planar_map::LayerBase>)>> = None;
+    // グループは、その番号を階層から外す（中のグループ・インスタンスは1段上の階層へ。生の図形は浮いた片にするので外す）
+    let selection = tab.session.selection.clone();
     edit_layers(tab, &layer_ids, |edit| {
-        let original = edit.shapes.clone();
-        let mut detached_inner_gid_map: Vec<((u64, u64), u64)> = Vec::new();
-        let mut detached_instances: Vec<(u64, usize, u64, SymbolInstanceBinding)> = Vec::new();
-        let editing_group_path = &edit.editing_group_path;
-        let next_group_id = &mut edit.next_group_id;
-        let mut raw_ids: HashSet<ShapeId> = HashSet::new();
-        let map_gid =
-            |map: &mut Vec<((u64, u64), u64)>, next_id: &mut u64, key: (u64, u64)| -> u64 {
-                if let Some(&(_, m)) = map.iter().find(|&&(k, _)| k == key) {
-                    m
-                } else {
-                    let id = (*next_id).max(1);
-                    *next_id = if id < u64::MAX { id + 1 } else { 1 };
-                    map.push((key, id));
-                    id
-                }
-            };
-        for (idx, shape) in edit.shapes.iter_mut().enumerate() {
-            if !selection.contains_shape(shape) {
+        for shape in &mut edit.shapes {
+            if !selection.contains_shape(shape)
+                || !shape.is_in_editing_scope(&edit.editing_group_path)
+                || shape.group_path.len() <= depth
+            {
                 continue;
             }
-            if shape.is_in_editing_scope(editing_group_path) && shape.group_path.len() > depth {
-                let removed_gid = shape.group_path.remove(depth);
-                if let Some(a_binding) = shape
-                    .symbol_instance
-                    .filter(|b| b.instance_gid == removed_gid)
-                {
-                    shape.symbol_instance = None;
-                    if let Some(entry) = detached_instances
-                        .iter_mut()
-                        .find(|(gid, ..)| *gid == removed_gid)
-                    {
-                        entry.1 = idx;
-                    } else {
-                        detached_instances.push((removed_gid, idx, shape.layer_id, a_binding));
-                    }
-                    for inner_gid in &mut shape.group_path[depth..] {
-                        let key = (removed_gid, *inner_gid);
-                        let mapped = map_gid(&mut detached_inner_gid_map, next_group_id, key);
-                        *inner_gid = mapped;
-                        if shape.symbol_instance.is_none() {
-                            if let Some(&(_, _, mut cb)) =
-                                child_map.iter().find(|&&(k, _, _)| k == key)
-                            {
-                                cb.instance_gid = mapped;
-                                cb.xform = a_binding.xform * cb.xform;
-                                shape.symbol_instance = Some(cb);
-                                selection.instances.insert(mapped);
-                            }
-                        }
-                    }
-                    if shape.symbol_instance.is_none() && !shape.exterior.segments.is_empty() {
-                        selection.shapes.insert(shape.shape_id);
-                    }
-                }
-                if shape.group_path.len() == depth && !shape.exterior.segments.is_empty() {
-                    any_became_raw = true;
-                    if shape.symbol_instance.is_none() {
-                        raw_ids.insert(shape.shape_id);
-                    }
-                }
+            let gid = shape.group_path[depth];
+            // インスタンスそのものは、下で分解する
+            if shape.symbol_instance.is_some_and(|b| b.instance_gid == gid) {
+                continue;
             }
+            shape.group_path.remove(depth);
         }
-        let mut offset = 0usize;
-        for &(a_gid, last_idx, layer_id, a_binding) in &detached_instances {
-            for &(key @ (p_gid, _), ref child_scope, mut cb) in &child_map {
-                if p_gid == a_gid && !detached_inner_gid_map.iter().any(|&(k, _)| k == key) {
-                    let mut scope = editing_group_path.clone();
-                    for &g in child_scope {
-                        scope.push(map_gid(
-                            &mut detached_inner_gid_map,
-                            next_group_id,
-                            (a_gid, g),
-                        ));
-                    }
-                    let id = map_gid(&mut detached_inner_gid_map, next_group_id, key);
-                    cb.instance_gid = id;
-                    cb.xform = a_binding.xform * cb.xform;
-                    let insert_at = (last_idx + 1 + offset).min(edit.shapes.len());
-                    edit.shapes.insert(
-                        insert_at,
-                        FillShape::new_empty_symbol_marker(cb, layer_id, &scope),
-                    );
-                    offset += 1;
-                    selection.instances.insert(id);
-                }
-            }
-        }
-        selection
-            .instances
-            .retain(|gid| !detached_instances.iter().any(|(d, ..)| d == gid));
-        edit.shapes
-            .retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
-        let (raw, rest): (Vec<FillShape>, Vec<FillShape>) = edit
-            .shapes
-            .drain(..)
-            .partition(|s| raw_ids.contains(&s.shape_id));
-        // グループから生に戻った図形は、そのグループの地図を片の地図にする。ほか（シンボルの分解）は、文書から外す前に
-        // 図形から片の地図を作る（地図にできなければ、このレイヤーは書かない）
-        let from_symbols: Vec<FillShape> = raw
-            .into_iter()
-            .filter(|s| !from_groups.contains(&s.shape_id))
-            .collect();
-        piece_maps = crate::floating::piece_maps(&from_symbols, world);
-        if piece_maps.is_some() {
-            edit.shapes = rest;
-        } else {
-            edit.shapes = original;
-        }
+        edit.shapes.retain(|s| !from_groups.contains(&s.shape_id));
     });
-    tab.session.selection = selection;
-    let Some(piece_maps) = piece_maps else {
-        tab.session.off_grid = true;
-        return false;
-    };
+    let any_raw = !group_maps.is_empty() || placements.iter().any(Placement::has_pieces);
     tab.session.add_floating_maps(group_maps);
-    tab.session.add_floating_maps(piece_maps);
+    // インスタンスは、そのコマの中身と入れ替える（置いたものを選ぶ。分解したインスタンスは選択から外れる）
+    put_placements(tab, placements, |sym| sym);
     // 生に戻った図形のほかに選んでいた生の図形も、片に持ち上げる（持ち上げられない図形は、文書の図形のまま選んでおく。
     // 動かす・変形するときに、もう一度持ち上げて、できなければその操作を断る）
-    if any_became_raw {
+    if any_raw {
         let _ = tab.session.lift_selected_raw_shapes_to_floating();
     }
     tab.session.retain_existing_selection();

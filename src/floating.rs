@@ -163,6 +163,28 @@ impl FloatLayer {
         Some(map)
     }
 
+    /// 選んだもの（番号が `ids` の、中身の地図の面と片）の地図：中身の地図の選んだ面に、選んだ片の組を下から順に重ねる
+    /// （確定と同じ重ね方。新しい中身）。`None`：画面に出していないレイヤーか、格子に置けない座標がある
+    pub(crate) fn selected_map(
+        &self,
+        stage: Stage<'_>,
+        ids: &HashSet<ShapeId>,
+    ) -> Option<PlanarMap> {
+        let mut map = self.content(&stage.cel(self.layer_id)?).map.restricted(ids);
+        for g in &self.groups {
+            let Some(g) = g.restricted(ids, self.layer_id, stage.scope) else {
+                continue;
+            };
+            let piece = realized(&g.base().map, g.xform)?;
+            map = if map.edges.is_empty() {
+                piece
+            } else {
+                map.overlay(MapInput::Map(&piece), MapRule::Overlay)?
+            };
+        }
+        Some(map)
+    }
+
     /// 画面の土台 `stage` のセル画の地図の上で確定した地図（`committed`）
     pub(crate) fn committed_on(&self, stage: Stage<'_>) -> Option<PlanarMap> {
         self.committed(&stage.cel(self.layer_id)?)
@@ -538,9 +560,16 @@ impl Floating {
         }
     }
 
-    /// 地図 `map`（文書の座標。面の番号が片の番号）を、レイヤー `layer_id` の片の組として一番上に足す
-    pub(crate) fn add_map(&mut self, stage: Stage<'_>, layer_id: LayerId, map: &PlanarMap) {
-        let group = PieceGroup::new(map, layer_id, stage.scope, Affine::IDENTITY);
+    /// 地図 `map`（文書の座標。面の番号が片の番号）を、変換 `xform` をかける片の組として、レイヤー `layer_id` の一番上に
+    /// 足す（変換は、動かした片と同じく確定のときに地図にかける）
+    pub(crate) fn add_map(
+        &mut self,
+        stage: Stage<'_>,
+        layer_id: LayerId,
+        map: &PlanarMap,
+        xform: Affine,
+    ) {
+        let group = PieceGroup::new(map, layer_id, stage.scope, xform);
         self.layer_mut(layer_id).groups.push(group);
         self.modified = true;
     }
@@ -551,28 +580,6 @@ impl Floating {
             l.groups.clear();
         }
     }
-}
-
-/// 文書に無い片 `pieces`（ステージの写し。座標の変換 `world` で置いたもの）の、レイヤーごとの片の地図（文書の座標。
-/// `LayerBase::of`：正しい地図にならない図形は塗り重ねて作る）。浮いた片に足す前に作る（貼り付け・シンボルの分解）。
-/// `None`：地図にできない形がある
-pub(crate) fn piece_maps(
-    pieces: &[FillShape],
-    world: Affine,
-) -> Option<Vec<(LayerId, Arc<LayerBase>)>> {
-    let mut layer_ids: Vec<LayerId> = Vec::new();
-    for p in pieces {
-        if !layer_ids.contains(&p.layer_id) {
-            layer_ids.push(p.layer_id);
-        }
-    }
-    layer_ids
-        .into_iter()
-        .map(|layer_id| {
-            let own: Vec<&FillShape> = pieces.iter().filter(|p| p.layer_id == layer_id).collect();
-            Some((layer_id, LayerBase::of(&own, world)?))
-        })
-        .collect()
 }
 
 /// 1つのレイヤーの切り出し：中身（残りの地図か、セル画の地図）を、選ぶ所（番号が `ids` の中身の面の所と、形 `rect` の

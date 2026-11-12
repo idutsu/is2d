@@ -274,7 +274,21 @@ pub(crate) fn resolve_cel_with_library(
 }
 
 impl SymbolDef {
-    /// 図形 `local_shapes`（シンボルの座標）を中身にしたシンボル。`Err`：地図にできない形がある
+    /// セル画 `cel`（シンボルの座標）を、1枚目のレイヤーの最初のキーフレームの中身にしたシンボル（シンボル化）
+    pub(crate) fn from_cel(id: u64, name: String, mut cel: Cel) -> Self {
+        if !cel.instances.is_empty() {
+            for inst in cel.instances_mut() {
+                inst.layer_id = 1;
+            }
+        }
+        let mut timeline = Timeline::default();
+        timeline.layers[0].keyframe_mut(0).cel = cel;
+        Self::with_timeline(id, name, timeline)
+    }
+
+    /// テスト用：図形 `local_shapes`（シンボルの座標）を中身にしたシンボル（図形から地図を作る）。`Err`：地図にできない
+    /// 形がある
+    #[cfg(test)]
     pub(crate) fn new(
         id: u64,
         name: String,
@@ -470,15 +484,17 @@ impl SymbolDef {
         (internal_frame % fc, child_eval_frame)
     }
 
-    /// シンボルインスタンス `parent_binding` を現在コマ `current_frame`（親キーフレーム開始コマ `parent_kf_start`）で分解したときに
-    /// 内部の可視レイヤーから現れる子シンボルインスタンスの `(親グループ経路, 新しい binding)` 一覧を返す
-    pub(crate) fn detached_child_bindings(
+    /// シンボルインスタンス `parent_binding` を現在コマ `current_frame`（親キーフレーム開始コマ `parent_kf_start`）で分解した
+    /// ときの中身：見えているレイヤーごと（下から順）の、そのコマのセル画（展開と同じ決まりでコマを選ぶ：
+    /// `resolve_internal_frame`）。トゥイーンの途中のレイヤーは、そのコマの結び付けのインスタンスだけ。中のインスタンスの
+    /// 再生位置は、分解したあとも同じ絵になるように、親のキーフレームの始めから数え直す
+    pub(crate) fn detached_cels(
         &self,
         parent_binding: SymbolInstanceBinding,
         parent_kf_start: usize,
         current_frame: usize,
         library: &[SymbolDef],
-    ) -> Vec<(Vec<u64>, SymbolInstanceBinding)> {
+    ) -> Vec<Cel> {
         let (frame_idx, child_eval_frame) =
             self.resolve_internal_frame(parent_binding, parent_kf_start, current_frame);
         let stage_elapsed = current_frame.saturating_sub(parent_kf_start);
@@ -489,27 +505,38 @@ impl SymbolDef {
             };
             let kf = &layer.keyframes[kf_idx];
             let child_elapsed = child_eval_frame.saturating_sub(kf.start_frame);
-            let mut push_child = |scope: Vec<u64>, mut b: SymbolInstanceBinding| {
-                let Some(child_sym) = library.iter().find(|s| s.id == b.symbol_id) else {
-                    return;
-                };
-                let child_fc = child_sym.timeline.total_frames.max(1);
-                let progress = b.first_frame.saturating_add(child_elapsed);
-                b.first_frame = match b.loop_mode {
-                    SymbolLoopMode::Loop => (progress as isize - stage_elapsed as isize)
-                        .rem_euclid(child_fc as isize)
-                        as usize,
-                    SymbolLoopMode::PlayOnce => progress.saturating_sub(stage_elapsed),
-                    SymbolLoopMode::SingleFrame => b.first_frame,
-                };
-                out.push((scope, b));
-            };
-            if let Some(interp_b) = layer.interpolated_tween_binding_at(frame_idx) {
-                push_child(Vec::new(), interp_b);
-            } else {
-                for inst in kf.cel.instances.iter() {
-                    push_child(inst.parent_scope.clone(), inst.binding);
+            let mut cel = match layer.interpolated_tween_binding_at(frame_idx) {
+                Some(b) => {
+                    let mut c = Cel::default();
+                    c.instances_mut().push(SymbolInstance {
+                        binding: b,
+                        layer_id: layer.id,
+                        parent_scope: Vec::new(),
+                        order: 0,
+                    });
+                    c
                 }
+                None => kf.cel.clone(),
+            };
+            if !cel.instances.is_empty() {
+                for inst in cel.instances_mut() {
+                    let b = &mut inst.binding;
+                    let Some(child_sym) = library.iter().find(|s| s.id == b.symbol_id) else {
+                        continue;
+                    };
+                    let child_fc = child_sym.timeline.total_frames.max(1);
+                    let progress = b.first_frame.saturating_add(child_elapsed);
+                    b.first_frame = match b.loop_mode {
+                        SymbolLoopMode::Loop => (progress as isize - stage_elapsed as isize)
+                            .rem_euclid(child_fc as isize)
+                            as usize,
+                        SymbolLoopMode::PlayOnce => progress.saturating_sub(stage_elapsed),
+                        SymbolLoopMode::SingleFrame => b.first_frame,
+                    };
+                }
+            }
+            if !cel.is_empty() {
+                out.push(cel);
             }
         }
         out
@@ -659,7 +686,7 @@ impl Document {
         id
     }
 
-    /// 新しいシンボル定義 `sym_def`（`SymbolDef::new`）をライブラリへ登録する。名前はここで付ける
+    /// 新しいシンボル定義 `sym_def`（`SymbolDef::from_cel`）をライブラリへ登録する。名前はここで付ける
     pub(crate) fn register_symbol(&mut self, mut sym_def: SymbolDef) {
         let sym_id = sym_def.id;
         let mut name_num = sym_id;

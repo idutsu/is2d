@@ -225,7 +225,7 @@ fn draw_edit_menu(
         let can_redo = !tab.history.redo_stack.is_empty();
         let has_selection = !tab.session.selection.is_empty();
         let tl = tab.active_timeline();
-        let can_paste = !clipboard.shapes.is_empty()
+        let can_paste = clipboard.content.is_some()
             && tl.is_layer_editable_by_id(active_scope_layer_id(&tab.session, tl));
 
         if menu_action_button(ui, can_undo, "元に戻す", &format!("{MOD_KEY}+Z")) {

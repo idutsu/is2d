@@ -2,7 +2,6 @@
 //! Adobe Animate のマージ描画と同じく、辺が「曲線・左の色・右の色」を持つ。境目は1本で、重ね順は無い。
 //! 塗りの形（`FillShape`）は、辺から作って描画・当たり判定に使う。
 
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
@@ -120,6 +119,7 @@ fn quad_deriv(q: &QuadBez, t: f64) -> KVec2 {
     (q.p1 - q.p0) * (2.0 * (1.0 - t)) + (q.p2 - q.p1) * (2.0 * t)
 }
 
+#[cfg(test)]
 struct Seg {
     a: usize,
     b: usize,
@@ -139,6 +139,42 @@ impl PlanarMap {
     /// 面の番号が `ids` にある面を外した地図（`restricted` の逆）
     pub(crate) fn without(&self, ids: &HashSet<ShapeId>) -> PlanarMap {
         self.restricted_by(|id| !ids.contains(&id))
+    }
+
+    /// 面の番号（辺の側に記したもの）がみな `ids` にあるか（`restricted` しても変わらないか）
+    pub(crate) fn labels_within(&self, ids: &HashSet<ShapeId>) -> bool {
+        self.edges.iter().all(|e| {
+            [e.left_src, e.right_src]
+                .into_iter()
+                .flatten()
+                .all(|id| ids.contains(&id))
+        })
+    }
+
+    /// 面の番号（辺の側に記したもの）
+    pub(crate) fn labels(&self) -> impl Iterator<Item = ShapeId> + '_ {
+        self.edges
+            .iter()
+            .flat_map(|e| [e.left_src, e.right_src])
+            .flatten()
+    }
+
+    /// 辺の曲線の外接矩形（面の図形の外接矩形を合わせたものと同じ）。辺が無ければ `None`
+    pub(crate) fn bounding_box(&self) -> Option<KRect> {
+        self.edges
+            .iter()
+            .map(|e| QuadBez::new(self.nodes[e.a], e.ctrl, self.nodes[e.b]).bounding_box())
+            .reduce(|acc, r| acc.union(r))
+    }
+
+    /// 座標の変換 `xform` をかけた地図が、地図の格子に置けるか（点がみな ±65,536px の内：`on_grid`）
+    pub(crate) fn fits_grid(&self, xform: Affine) -> bool {
+        on_grid(
+            self.nodes
+                .iter()
+                .chain(self.edges.iter().map(|e| &e.ctrl))
+                .map(|&p| xform * p),
+        )
     }
 
     /// 面の番号が `keep` に合う面だけを残した地図（`restricted`）
@@ -180,7 +216,9 @@ impl PlanarMap {
     /// 生の図形の並びから作る。境目の2本の線を1本の辺にする。地図の面から書き出した図形は、境目の線を両側の図形で
     /// ビットまで同じに持つ（頂点も制御点も同じ点。変換をかけても両側に同じ計算がかかる）ので、頂点は座標がビットまで
     /// 同じ点を1つにし、境目は「両端が逆で制御点がビットまで同じ」2本の線を1本にする。そろわない図形（ずれた図形・重なった
-    /// 図形）は、正しい地図にならないので見つかり（`is_valid`）、塗り重ねて作る（`LayerBase::of`）
+    /// 図形）は、正しい地図にならないので見つかり（`is_valid`）、塗り重ねて作る（`LayerBase::of`）。本番は図形から地図を
+    /// 作らないので、テストの下ごしらえだけで使う
+    #[cfg(test)]
     pub(crate) fn from_faces<'a>(faces: impl IntoIterator<Item = &'a FillShape>) -> Self {
         let mut nodes: Vec<Point> = Vec::new();
         let mut index: HashMap<[u64; 2], usize> = HashMap::new();
@@ -1334,12 +1372,12 @@ impl LayerBase {
         shapes.into()
     }
 
-    /// 図形から作る地図：座標の変換 `xform` で置いた図形 `own`（下から上への並び。変換したあとの座標）の地図。地図は
-    /// 文書の座標で作る（`with_doc_shapes`）。セル画にある地図はセル画から読むので（`Cel::scope_base`）、これを使うのは
-    /// 新しい中身を作るとき（貼り付け・シンボル化・地図で形を変えない操作のあとの階層）だけ。正しい地図でない図形（重なった
-    /// 図形など）は、並びの順に塗り重ねて作り直す（`painted_map`。絵は同じ）。`None`：格子に置けない座標がある
+    /// テスト用：図形から作る地図：座標の変換 `xform` で置いた図形 `own`（下から上への並び。変換したあとの座標）の地図。
+    /// 地図は文書の座標で作る（`with_doc_shapes`）。本番は図形から地図を作らない（新しい中身も地図で運ぶ）ので、テストの
+    /// 下ごしらえだけで使う。正しい地図でない図形（重なった図形など）は、並びの順に塗り重ねて作り直す（`painted_map`。絵は
+    /// 同じ）。`None`：格子に置けない座標がある
+    #[cfg(test)]
     pub(crate) fn of(own: &[&FillShape], xform: Affine) -> Option<Arc<Self>> {
-        #[cfg(test)]
         FROM_SHAPES.with(|n| n.set(n.get() + 1));
         let base = with_doc_shapes(own, xform, |own| {
             if !own.iter().all(|s| shape_on_grid(s)) {
@@ -1424,15 +1462,16 @@ pub(crate) fn from_shape_builds() -> usize {
     FROM_SHAPES.with(|n| n.get())
 }
 
-/// 図形 `shapes`（座標の変換 `xform` で置いた図形）を文書の座標の形（`FillShape::to_doc`）にして `f` に渡す。地図は
-/// いつも文書の座標で作る：文書の図形はその座標で正しい地図の面で、格子の上の判定はアフィン変換で保たれないので、置いた
-/// 座標の地図は正しい地図とは限らない。どのインスタンスから入っても同じ地図になる
+/// テスト用：図形 `shapes`（座標の変換 `xform` で置いた図形）を文書の座標の形（`FillShape::to_doc`）にして `f` に渡す。
+/// 地図はいつも文書の座標で作る：格子の上の判定はアフィン変換で保たれないので、置いた座標の地図は正しい地図とは限らない
+#[cfg(test)]
 fn with_doc_shapes<R>(
     shapes: &[&FillShape],
     xform: Affine,
     f: impl FnOnce(&[&FillShape]) -> R,
 ) -> R {
-    let docs: Vec<Cow<'_, FillShape>> = shapes.iter().map(|s| s.to_doc(xform)).collect();
+    let docs: Vec<std::borrow::Cow<'_, FillShape>> =
+        shapes.iter().map(|s| s.to_doc(xform)).collect();
     let refs: Vec<&FillShape> = docs.iter().map(|d| d.as_ref()).collect();
     f(&refs)
 }
@@ -2183,6 +2222,16 @@ fn face_ids(map: &PlanarMap) -> (Vec<MapFace>, Vec<ShapeId>) {
 /// 地図 `map` の面の辺の側に、面ごとに1つずつ別の番号（`face_ids`）を記した地図（セル画にしまう地図）
 pub(crate) fn uniquely_labeled(map: &PlanarMap) -> PlanarMap {
     let (faces, ids) = face_ids(map);
+    labeled(map.clone(), &faces, &ids)
+}
+
+/// 地図 `map` の面の辺の側に、面ごとにみな新しい番号を記した地図（新しい中身を置くとき。元の面と番号が重ならない）
+pub(crate) fn freshly_labeled(map: &PlanarMap) -> PlanarMap {
+    let (faces, _) = map.faces();
+    let ids: Vec<ShapeId> = faces
+        .iter()
+        .map(|_| crate::vector_engine::next_shape_id())
+        .collect();
     labeled(map.clone(), &faces, &ids)
 }
 
