@@ -1,6 +1,6 @@
 use crate::canvas_tool::ShapeId;
 use crate::planar_map::{
-    freshly_labeled, realized, uniquely_labeled, LayerBase, MapChange, MapInput, MapRule, PlanarMap,
+    freshly_labeled, realized, uniquely_labeled, LayerBase, MapInput, MapRule, PlanarMap,
 };
 use crate::stored_map::StoredMap;
 use crate::vector_engine::{FillShape, SymbolInstanceBinding};
@@ -786,18 +786,16 @@ impl Cel {
     /// 中身 `content`（階層の番号の並びは `scope` からの相対。生の図形の地図は持たない：浮いた片にする）を、階層 `scope` に
     /// 入れる：インスタンス `replacing` があればそれと入れ替え（その重なりの位置に）、無ければ階層 `scope` のいちばん上に。
     /// グループとインスタンスは中身の順のまま（グループの生の図形は、その階層のいちばん下）。`false`：入れ替えるインスタンスが
-    /// 無い（セル画は変えない）
+    /// 無いか、中身に階層 `scope` の生の図形の地図がある（同じ階層の地図が2つになる。セル画は変えない）
     pub(crate) fn insert_content(
         &mut self,
         scope: &[u64],
         content: &Cel,
         replacing: Option<u64>,
     ) -> bool {
-        #[cfg(test)]
-        assert!(
-            content.scope_stored(&[]).is_none(),
-            "中身の生の図形は浮いた片にする"
-        );
+        if content.scope_stored(&[]).is_some() {
+            return false;
+        }
         let mut items = Self::items_of(&self.maps, &self.instances);
         let at = match replacing {
             Some(gid) => {
@@ -884,30 +882,20 @@ impl Cel {
         if change.removed.is_empty() && change.added.is_empty() {
             return None;
         }
-        Some(MapWritten(self.put_map_change(group_path, &faces, change)))
+        let (map, shapes) = change.into_face_shapes(&faces)?;
+        Some(MapWritten(self.put_map(group_path, &map, shapes)))
     }
 
-    /// 地図の差分 `change`（文書の座標。前の面の図形 `old_faces`）を入れる：階層の地図を差分の地図にする。面の無くなった
-    /// 階層は外し、新しい階層は決まりどおりの所（グループの中身があれば、そのいちばん下。無ければ親の階層のいちばん上）に
-    /// 入れる。戻り値は、新しい地図の計算に使う写し（面の図形は、変わらない面は前の図形、新しい形は差分の図形）。階層を
-    /// 外したときは `None`
-    fn put_map_change(
+    /// 地図 `map`（文書の座標。面の図形 `shapes`：`MapChange::into_face_shapes`）を入れる：階層の地図をこの地図にする。
+    /// 面の無くなった階層は外し、新しい階層は決まりどおりの所（グループの中身があれば、そのいちばん下。無ければ親の階層の
+    /// いちばん上）に入れる。戻り値は、新しい地図の計算に使う写し。階層を外したときは `None`
+    fn put_map(
         &mut self,
         group_path: &[u64],
-        old_faces: &[Arc<FillShape>],
-        change: MapChange,
+        map: &PlanarMap,
+        shapes: Vec<Arc<FillShape>>,
     ) -> Option<Arc<LayerBase>> {
-        let stored = StoredMap::from_dense(&change.map, self.scope_stored(group_path));
-        let removed: std::collections::HashSet<ShapeId> = change.removed.iter().copied().collect();
-        let mut known: HashMap<ShapeId, Arc<FillShape>> = old_faces
-            .iter()
-            .filter(|s| !removed.contains(&s.shape_id))
-            .map(|s| (s.shape_id, s.clone()))
-            .collect();
-        for mut s in change.added {
-            s.strip_transient_caches();
-            known.insert(s.shape_id, Arc::new(s));
-        }
+        let stored = StoredMap::from_dense(map, self.scope_stored(group_path));
         let at = self.maps.iter().position(|m| m.group_path == group_path);
         if stored.is_empty() {
             let mut items = Self::items_of(&self.maps, &self.instances);
@@ -915,7 +903,7 @@ impl Cel {
             self.arrange(items);
             return None;
         }
-        let base = LayerBase::with_faces(stored.clone(), group_path, known);
+        let base = LayerBase::with_faces(stored.clone(), group_path, shapes);
         let m = ScopeMap {
             group_path: group_path.to_vec(),
             stored,

@@ -3233,24 +3233,26 @@ pub(crate) fn edit_layers(
     next_group_id = edit.next_group_id;
 
     let mut modified_lids: Vec<LayerId> = Vec::new();
-    let mut off_grid = false;
     let mut edited_by_lid: HashMap<LayerId, Vec<FillShape>> = HashMap::new();
+    // 図形は、その図形のレイヤーに書く（書き込む図形を足す呼び出し側は、書く先のレイヤーの番号を付けて、そのレイヤーを
+    // 渡す）。書く先でない（渡していないか、今のコマで編集できない）レイヤーの図形があれば、一部を捨てて書かずに、
+    // どのレイヤーにも書かない（画面の土台は文書から作り直す）
+    let stray = edit
+        .shapes
+        .iter()
+        .any(|s| !target_lids.contains(&s.layer_id));
+    let mut off_grid = false;
 
     let mut mutate_tl = |tl: &mut Timeline| {
+        if stray {
+            return;
+        }
         let frame = tl.current_frame;
         edited_by_lid.reserve(target_lids.len());
         for &lid in &target_lids {
             edited_by_lid.insert(lid, Vec::new());
         }
-        // 図形は、その図形のレイヤーに書く（書き込む図形を足す呼び出し側は、書く先のレイヤーの番号を付けて、そのレイヤーを
-        // 渡す）
         for s in edit.shapes.drain(..) {
-            #[cfg(test)]
-            assert!(
-                edited_by_lid.contains_key(&s.layer_id),
-                "書く先として渡していないレイヤー {} の図形",
-                s.layer_id
-            );
             if let Some(vec) = edited_by_lid.get_mut(&s.layer_id) {
                 vec.push(s);
             }
@@ -3294,9 +3296,10 @@ pub(crate) fn edit_layers(
     tab.session
         .base_cache
         .replace_edited_layers(edited_by_lid, untouched_layers);
-    // 書かなかったレイヤー（地図にできない形があった）も、画面の土台を文書から作り直す（編集した図形を見せない）
+    // 書かなかったレイヤー（地図にできない形か、書く先でないレイヤーの図形があった）も、画面の土台を文書から作り直す
+    // （編集した図形を見せない）
     let mut rebuilt = modified_lids.clone();
-    if off_grid {
+    if off_grid || stray {
         rebuilt.extend(target_lids.iter().copied());
     }
     tab.doc.next_group_id = next_group_id;

@@ -335,76 +335,42 @@ impl PlanarMap {
             return None;
         }
         let cycles = self.face_cycles_with(&polys);
-        let (faces, broken) = self.faces_of(&polys, &cycles);
-        if broken > 0 {
+        let regions = self.regions(&polys, &cycles, false);
+        if regions.broken > 0 {
             return None;
         }
-        // 何も無い側の輪郭：その最初の区間の真ん中の点が、その辺を輪郭に持たない色のある面の中（外周の中で、どの穴の外）
-        // にあれば、入り込んでいる
+        // 何も無い側の輪郭：その最初の区間の真ん中の点が、その辺を輪郭に持たない色のある面の中（外周の中で、どの穴の外：
+        // `Regions::contains`）にあるか、その面の輪郭の上にあれば、入り込んでいる
         let mut edge_faces: Vec<[usize; 2]> = vec![[usize::MAX; 2]; self.edges.len()];
-        let mut regions: Vec<Vec<(GridRect, Option<GridPolygon>)>> =
-            Vec::with_capacity(faces.len());
-        for (fi, f) in faces.iter().enumerate() {
-            for h in f.cycles.iter().flatten() {
+        for (g, (_, ids)) in regions.groups.iter().enumerate() {
+            for h in ids.iter().flat_map(|&k| &regions.cycles[k]) {
                 let slot = &mut edge_faces[h.0];
                 if slot[0] == usize::MAX {
-                    slot[0] = fi;
+                    slot[0] = g;
                 } else {
-                    slot[1] = fi;
+                    slot[1] = g;
                 }
             }
-            regions.push(
-                f.cycles
-                    .iter()
-                    .map(|c| (GridRect::of(&cycle_points(&polys, c)), None))
-                    .collect(),
-            );
         }
         // 面の外周の外接矩形を、高さの帯に分けた索引（2倍の座標。大きい面でも、入れる帯の数は帯の数まで）
-        let (fy0, fband_h, fbands) =
-            y_bands(regions.iter().map(|reg| (2 * reg[0].0.y0, 2 * reg[0].0.y1)));
+        let (fy0, fband_h, fbands) = y_bands(regions.groups.iter().map(|(_, ids)| {
+            let r = regions.rings[ids[0]].rect;
+            (2 * r.y0, 2 * r.y1)
+        }));
         for c in &cycles {
             if c.is_empty() || self.side_color(c[0]).is_some() {
                 continue;
             }
             let h = c[0];
             let probe = half_mid2(&polys, h);
-            for &fi in band_at(fy0, fband_h, &fbands, probe.1) {
-                let fi = fi as usize;
-                let f = &faces[fi];
-                if edge_faces[h.0].contains(&fi) || !regions[fi][0].0.contains2(probe) {
-                    continue;
-                }
-                let mut wind = |k: usize| {
-                    let (bbox, poly) = &mut regions[fi][k];
-                    if !bbox.contains2(probe) {
-                        return Some(0);
-                    }
-                    poly.get_or_insert_with(|| {
-                        GridPolygon::new(&cycle_points(&polys, &f.cycles[k]))
-                    })
-                    .winding(probe)
-                };
-                let inside = |w: Option<i32>| w.map(|w| w != 0);
-                match inside(wind(0)) {
-                    None => return None,
-                    Some(false) => continue,
-                    Some(true) => {}
-                }
-                let mut in_hole = false;
-                for k in 1..f.cycles.len() {
-                    match inside(wind(k)) {
-                        None => return None,
-                        Some(true) => in_hole = true,
-                        Some(false) => {}
-                    }
-                }
-                if !in_hole {
+            for &g in band_at(fy0, fband_h, &fbands, probe.1) {
+                let g = g as usize;
+                if !edge_faces[h.0].contains(&g) && regions.contains(g, probe) != Some(false) {
                     return None;
                 }
             }
         }
-        Some(faces)
+        Some(regions.into_faces(self))
     }
 
     /// テスト用：正しくないとき、どこがだめか
@@ -527,48 +493,19 @@ impl PlanarMap {
             .iter()
             .map(|&(e, k)| GridRect::of(&polys[e][k..k + 2]))
             .collect();
-        // （マス, 区間の左端の x, 区間）を並べ、マスごとに左端の順に見る。区間の右端より左端が右にある区間から先は、
-        // そのマスでは重ならない。並べる鍵は、マスの x・y と区間の左端の x を1つの数にしたもの（座標は ±2^28）
-        let key = |c: (i64, i64), x0: i64| -> u128 {
-            ((c.0 + (1 << 31)) as u128) << 96
-                | ((c.1 + (1 << 31)) as u128) << 64
-                | (x0 + (1 << 62)) as u128
-        };
-        // 区間は、通るマスだけに入れる（`seg_cells`）。触れる区間どうしは必ず同じマスを持つ。2つ以上のマスを共有する組は
-        // 2度以上調べる（調べる中身は同じ）
-        let mut ent: Vec<(u128, u32)> = Vec::with_capacity(segs.len() * 2);
+        // 区間は、通るマスだけに入れる（`seg_cells`。近さを調べる格子は `CellGrid` 1つ）。触れる区間どうしは必ず同じマスを
+        // 持つので、前に入れた区間のうち、同じマスにある区間とだけ比べる
+        let mut grid = CellGrid::new();
+        let mut near: Vec<usize> = Vec::new();
         for (i, &(e, k)) in segs.iter().enumerate() {
-            for c in seg_cells((polys[e][k], polys[e][k + 1]), 0) {
-                ent.push((key(c, rects[i].x0), i as u32));
-            }
-        }
-        ent.sort_unstable();
-        let mut start = 0;
-        while start < ent.len() {
-            let ck = ent[start].0 >> 64;
-            let mut end = start + 1;
-            while end < ent.len() && ent[end].0 >> 64 == ck {
-                end += 1;
-            }
-            for x in start..end {
-                let i = ent[x].1 as usize;
-                let ri = rects[i];
-                for &(_, j) in &ent[x + 1..end] {
-                    let j = j as usize;
-                    let rj = rects[j];
-                    if rj.x0 > ri.x1 {
-                        break;
-                    }
-                    if !ri.overlaps(&rj) {
-                        continue;
-                    }
-                    let (i, j) = (i.min(j), i.max(j));
-                    if self.segs_clash(polys, segs[i], segs[j]) {
-                        return false;
-                    }
+            let cells: Vec<(i64, i64)> = seg_cells((polys[e][k], polys[e][k + 1]), 0).collect();
+            grid.query(cells.iter().copied(), &mut near);
+            for &j in &near {
+                if rects[i].overlaps(&rects[j]) && self.segs_clash(polys, segs[j], segs[i]) {
+                    return false;
                 }
             }
-            start = end;
+            grid.insert(i, cells);
         }
         true
     }
@@ -599,75 +536,68 @@ impl PlanarMap {
         self.faces_of(&polys, &self.face_cycles_with(&polys))
     }
 
-    /// `faces` と同じ。判定の形 `polys` と面の輪郭 `cycles`（`face_cycles_with` の結果）を先に求めてあるときに使う。
-    /// 外周か穴かは判定の形の面積の符号、穴の入れ先は判定の形での点の内外で、どちらも整数で決める
+    /// `faces` と同じ。判定の形 `polys` と面の輪郭 `cycles`（`face_cycles_with` の結果）を先に求めてあるときに使う
+    /// （`regions` の色のある組）
     fn faces_of(&self, polys: &[Vec<IPt>], cycles: &[Vec<(usize, bool)>]) -> (Vec<MapFace>, usize) {
-        let mut broken = 0;
-        // （面, 面積の2倍, 内外を調べる多角形（要るときに作る）, 外接矩形）
-        let mut exteriors: Vec<(MapFace, i128, Option<GridPolygon>, GridRect)> = Vec::new();
-        let mut holes: Vec<(Color32, Vec<(usize, bool)>)> = Vec::new();
+        let regions = self.regions(polys, cycles, false);
+        let broken = regions.broken;
+        (regions.into_faces(self), broken)
+    }
+
+    /// 面の輪郭 `cycles`（`face_cycles_with`。判定の形 `polys`）を、外周（面積が正）と、その中の穴（面積が負）の組に分ける。
+    /// 穴は、それを含む同じ色（色の無い所も1つの色とみなす）の外周のうち、いちばん小さいものに入れる。外周か穴かは判定の
+    /// 形の面積の符号、穴の入れ先は判定の形での点の内外（`Ring::contains`）で、どちらも整数で決める。`unpainted`：色の無い
+    /// 所（何も塗っていない、囲まれた所）の組も作るか。面の取り出し・正しい地図かの判定・バケツの、面の分け方はこれ1つ
+    fn regions(
+        &self,
+        polys: &[Vec<IPt>],
+        cycles: &[Vec<(usize, bool)>],
+        unpainted: bool,
+    ) -> Regions {
+        let mut out = Regions {
+            cycles: Vec::new(),
+            rings: Vec::new(),
+            groups: Vec::new(),
+            broken: 0,
+        };
+        let mut holes: Vec<(Option<Color32>, usize)> = Vec::new();
         for cycle in cycles {
             if self.is_broken_cycle(cycle) {
-                broken += 1;
+                out.broken += 1;
                 continue;
             }
-            let Some(color) = self.side_color(cycle[0]) else {
+            let color = self.side_color(cycle[0]);
+            if color.is_none() && !unpainted {
                 continue;
-            };
-            let pts = cycle_points(polys, cycle);
-            let area2 = area2_of(&pts);
-            if area2 > 0 {
-                exteriors.push((
-                    MapFace {
-                        color,
-                        cycles: vec![cycle.clone()],
-                        srcs: Vec::new(),
-                    },
-                    area2,
-                    None,
-                    GridRect::of(&pts),
-                ));
+            }
+            let k = out.rings.len();
+            let ring = Ring::new(polys, cycle);
+            if ring.area2 > 0 {
+                out.groups.push((color, vec![k]));
             } else {
-                holes.push((color, cycle.clone()));
+                holes.push((color, k));
             }
+            out.rings.push(ring);
+            out.cycles.push(cycle.clone());
         }
-        // 穴の入れ先は、穴を含む同じ色の外周のうち、いちばん小さいもの。小さい外周から順に調べ、最初に含むものを選ぶ。
-        // 調べる点は、穴の最初の区間の真ん中（正しい地図では、ほかの輪郭の上に無い）
-        let mut by_area: Vec<usize> = (0..exteriors.len()).collect();
-        by_area.sort_by(|&a, &b| exteriors[a].1.cmp(&exteriors[b].1));
-        for (color, cycle) in holes {
-            let probe = half_mid2(polys, cycle[0]);
-            let owner = by_area.iter().copied().find(|&i| {
-                let e = &mut exteriors[i];
-                if e.0.color != color || !e.3.contains2(probe) {
-                    return false;
-                }
-                let poly = e
-                    .2
-                    .get_or_insert_with(|| GridPolygon::new(&cycle_points(polys, &e.0.cycles[0])));
-                poly.winding(probe).is_some_and(|w| w != 0)
+        // 小さい外周から順に調べ、最初に含むものを選ぶ。調べる点は、穴の最初の区間の真ん中（正しい地図では、ほかの輪郭の
+        // 上に無い）
+        let mut by_area: Vec<usize> = (0..out.groups.len()).collect();
+        by_area.sort_by_key(|&g| out.rings[out.groups[g].1[0]].area2);
+        for (color, k) in holes {
+            let probe = half_mid2(polys, out.cycles[k][0]);
+            let owner = by_area.iter().copied().find(|&g| {
+                out.groups[g].0 == color
+                    && out.rings[out.groups[g].1[0]].contains(probe) == Some(true)
             });
             match owner {
-                Some(i) => exteriors[i].0.cycles.push(cycle),
-                None => broken += 1,
+                Some(g) => out.groups[g].1.push(k),
+                // 色のある穴に外周が無ければ壊れている。色の無い穴に外周が無いのは、いちばん外（囲まれていない所）の穴
+                None if color.is_some() => out.broken += 1,
+                None => {}
             }
         }
-        let faces = exteriors
-            .into_iter()
-            .map(|(mut f, _, _, _)| {
-                let mut srcs: Vec<ShapeId> = f
-                    .cycles
-                    .iter()
-                    .flatten()
-                    .filter_map(|h| self.side_src(*h))
-                    .collect();
-                srcs.sort_unstable();
-                srcs.dedup();
-                f.srcs = srcs;
-                f
-            })
-            .collect();
-        (faces, broken)
+        out
     }
 
     /// 面 `f` の今の形を、塗りの形にする。輪郭は座標のいちばん小さい点から始め、穴はその点の順に並べる（形は地図の面
@@ -1277,24 +1207,16 @@ impl LayerBase {
         base
     }
 
-    /// しまう地図 `stored`（階層 `group_path`）の計算に使う写しを、面の図形 `known`（番号ごと。変わらない面は前の図形、
-    /// 形の変わった面は番号を引き継いだ新しい図形）で作る（地図の編集のあと。面を求め直さない。画面の描画キャッシュは、
-    /// 番号と版が同じ図形から引き継がれる）。地図の面と図形は1対1で、`known` はちょうど地図の面の図形
+    /// しまう地図 `stored`（階層 `group_path`）の計算に使う写しを、面の図形 `shapes`（地図の面ごとに1つ：
+    /// `MapChange::into_face_shapes`。変わらない面は前の図形、形の変わった面は番号を引き継いだ新しい図形）で作る（地図の
+    /// 編集のあと。面を求め直さない。画面の描画キャッシュは、番号と版が同じ図形から引き継がれる）
     pub(crate) fn with_faces(
         stored: StoredMap,
         group_path: &[u64],
-        known: HashMap<ShapeId, Arc<FillShape>>,
+        mut shapes: Vec<Arc<FillShape>>,
     ) -> Arc<Self> {
         let base = Self::from_stored(stored);
-        let mut shapes: Vec<Arc<FillShape>> = known.into_values().collect();
         shapes.sort_unstable_by_key(|s| s.shape_id);
-        #[cfg(test)]
-        if test_checks() {
-            let mut labels: Vec<ShapeId> = face_ids(&base.map).1;
-            labels.sort_unstable();
-            let ids: Vec<ShapeId> = shapes.iter().map(|s| s.shape_id).collect();
-            assert_eq!(ids, labels, "置いた面の図形が地図の面と食い違う");
-        }
         *base.faces.lock() = Some((group_path.to_vec(), shapes.into()));
         let base = Arc::new(base);
         *base
@@ -1373,10 +1295,16 @@ impl LayerBase {
         });
         let (removed, added, ids) =
             rewrite_shapes(&self.map, keys, next, &faces, own, layer_id, group_path);
+        // 面の番号はみな別（`rewrite_shapes` の決まり）。同じ番号が2つあれば、面と図形が1対1にならないので書かない
+        let mut seen: HashSet<ShapeId> = HashSet::with_capacity(ids.len());
+        if !ids.iter().all(|id| seen.insert(*id)) {
+            return None;
+        }
         Some(MapChange {
             removed,
             added,
             map: labeled(next.clone(), &faces, &ids),
+            ids,
         })
     }
 
@@ -1406,6 +1334,7 @@ impl LayerBase {
                 removed: own.iter().map(|s| s.shape_id).collect(),
                 map: labeled(next.clone(), &faces, &ids),
                 added,
+                ids,
             })
         })?;
         change.added = change.added.into_iter().map(|d| placed(d, xform)).collect();
@@ -2050,6 +1979,8 @@ pub(crate) struct MapChange {
     pub(crate) added: Vec<FillShape>,
     /// 結果の地図（文書の座標）。面の辺の側に、その面の図形の番号を記してある（`labeled`）
     pub(crate) map: PlanarMap,
+    /// 結果の地図の面ごとの図形の番号（面の順。みな別の番号）
+    pub(crate) ids: Vec<ShapeId>,
 }
 
 /// 地図で編集した差分 `change` を、図形の並び `shapes` のレイヤー `layer_id`・階層 `group_path` に入れる
@@ -2250,6 +2181,34 @@ impl MapChange {
             s.shape_id = id;
         }
         self.map.relabel(|id| renamed.get(&id).copied());
+        for id in &mut self.ids {
+            if let Some(n) = renamed.get(id) {
+                *id = *n;
+            }
+        }
+    }
+
+    /// 結果の地図と、その面ごとの図形（面の順）：新しく入れる形か、前の面の図形 `old` のうち番号が同じもの。どちらにも
+    /// 無い番号があるか、面にならない新しい形があれば `None`（面と図形が1対1にならない。書かない）
+    pub(crate) fn into_face_shapes(
+        self,
+        old: &[Arc<FillShape>],
+    ) -> Option<(PlanarMap, Vec<Arc<FillShape>>)> {
+        let old: HashMap<ShapeId, &Arc<FillShape>> = old.iter().map(|s| (s.shape_id, s)).collect();
+        let mut added: HashMap<ShapeId, FillShape> =
+            self.added.into_iter().map(|s| (s.shape_id, s)).collect();
+        let shapes = self
+            .ids
+            .iter()
+            .map(|id| match added.remove(id) {
+                Some(mut s) => {
+                    s.strip_transient_caches();
+                    Some(Arc::new(s))
+                }
+                None => old.get(id).map(|s| Arc::clone(s)),
+            })
+            .collect::<Option<Vec<_>>>()?;
+        added.is_empty().then_some((self.map, shapes))
     }
 }
 
@@ -2583,63 +2542,29 @@ impl PlanarMap {
     /// 輪郭にも囲まれていない所・輪郭の上・すでに `color` の面）
     pub(crate) fn with_face_filled(&self, p: Point, color: Color32) -> Option<PlanarMap> {
         let polys = self.polys();
-        let all = self.face_cycles_with(&polys);
-        // 閉じない輪郭（壊れた所）は使わない。輪郭ごとに（判定の形の点, 面積の2倍, 外接矩形）。外周か穴か・点の内外は、
-        // 判定の形で整数で決める
-        let cycles: Vec<Vec<(usize, bool)>> = all
-            .into_iter()
-            .filter(|c| c.iter().all(|h| h.0 != usize::MAX))
-            .collect();
-        let info: Vec<(Vec<IPt>, i128, GridRect)> = cycles
-            .iter()
-            .map(|c| {
-                let pts = cycle_points(&polys, c);
-                let (area2, rect) = (area2_of(&pts), GridRect::of(&pts));
-                (pts, area2, rect)
-            })
-            .collect();
-        let mut shapes: Vec<Option<GridPolygon>> = (0..cycles.len()).map(|_| None).collect();
-        // 輪郭 `k` が点 `q`（2倍の座標）を中に含むか（輪郭の上なら `None`）
-        let mut contains = |k: usize, q: IPt| -> Option<bool> {
-            if !info[k].2.contains2(q) {
-                return Some(false);
-            }
-            let poly = shapes[k].get_or_insert_with(|| GridPolygon::new(&info[k].0));
-            poly.winding(q).map(|w| w != 0)
-        };
-        // 点を含む、いちばん小さい外周（面積が正）。点が輪郭の上にあれば、どの面か決まらないので何も変えない
+        let regions = self.regions(&polys, &self.face_cycles_with(&polys), true);
+        // 点を含む組（正しい地図では、組どうしは重ならないので1つまで）。点が輪郭の上にあれば、どの面か決まらないので
+        // 何も変えない
         let g = gpt(p);
         let p2 = (2 * g.0, 2 * g.1);
-        let mut ext: Option<usize> = None;
-        for k in (0..cycles.len()).filter(|&k| info[k].1 > 0) {
-            match contains(k, p2) {
+        let mut found = None;
+        for gi in 0..regions.groups.len() {
+            match regions.contains(gi, p2) {
                 None => return None,
-                Some(true) if ext.is_none_or(|e| info[k].1 < info[e].1) => ext = Some(k),
-                _ => {}
+                Some(true) => {
+                    found = Some(gi);
+                    break;
+                }
+                Some(false) => {}
             }
         }
-        let ext = ext?;
-        if self.side_color(cycles[ext][0]) == Some(color) {
+        let (group_color, ids) = &regions.groups[found?];
+        if *group_color == Some(color) {
             return None;
         }
-        // その外周の中にある穴（面積が負）のうち、それを含むいちばん小さい外周がこの外周のもの。調べる点は、穴の最初の
-        // 区間の真ん中（正しい地図では、ほかの輪郭の上に無い）
-        let mut face: Vec<usize> = vec![ext];
-        for k in (0..cycles.len()).filter(|&k| info[k].1 < 0) {
-            let probe = half_mid2(&polys, cycles[k][0]);
-            if contains(ext, probe) != Some(true) {
-                continue;
-            }
-            let smaller_owner = (0..cycles.len()).any(|j| {
-                info[j].1 > 0 && info[j].1 < info[ext].1 && contains(j, probe) == Some(true)
-            });
-            if !smaller_owner {
-                face.push(k);
-            }
-        }
         let mut m = self.clone();
-        for &k in &face {
-            for &(i, forward) in &cycles[k] {
+        for &k in ids {
+            for &(i, forward) in &regions.cycles[k] {
                 if forward {
                     m.edges[i].left = Some(color);
                     m.edges[i].left_src = None;
@@ -2652,7 +2577,7 @@ impl PlanarMap {
         m.edges.retain(|e| e.left != e.right);
         // 2本だけがつながる頂点をまとめるのは、色を変えた輪郭の上（外周の外接矩形の中。頂点は判定の形の点から半目以内に
         // あるので、1目広げる）
-        let r = info[ext].2;
+        let r = regions.rings[ids[0]].rect;
         let g = |v: i64| v as f64 / OVERLAY_GRID;
         m.merge_degree2(KRect::new(
             g(r.x0 - 1),
@@ -5295,6 +5220,93 @@ impl CellGrid {
                 }
             }
         }
+    }
+}
+
+/// 面の輪郭1つ：判定の形の点・面積の2倍（外周は正、穴は負）・外接矩形
+struct Ring {
+    pts: Vec<IPt>,
+    area2: i128,
+    rect: GridRect,
+    /// 点の内外を調べる多角形（要るときに作る）
+    poly: std::cell::OnceCell<GridPolygon>,
+}
+
+impl Ring {
+    fn new(polys: &[Vec<IPt>], cycle: &[(usize, bool)]) -> Self {
+        let pts = cycle_points(polys, cycle);
+        Self {
+            area2: area2_of(&pts),
+            rect: GridRect::of(&pts),
+            pts,
+            poly: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// 点 `q`（2倍の座標）を中に含むか（巻き数が 0 でない）。輪郭の上なら `None`。面の輪郭の内外の判定はこれ1つ
+    fn contains(&self, q: IPt) -> Option<bool> {
+        if !self.rect.contains2(q) {
+            return Some(false);
+        }
+        self.poly
+            .get_or_init(|| GridPolygon::new(&self.pts))
+            .winding(q)
+            .map(|w| w != 0)
+    }
+}
+
+/// 面の輪郭を、外周と、その中の穴の組に分けたもの（`PlanarMap::regions`）
+struct Regions {
+    /// 使う輪郭（壊れた輪郭は入れない）
+    cycles: Vec<Vec<(usize, bool)>>,
+    /// 輪郭ごとの `Ring`
+    rings: Vec<Ring>,
+    /// 組ごとの（色, 輪郭の番号の並び（外周が先、穴はその後））。組の順は、外周の輪郭の順
+    groups: Vec<(Option<Color32>, Vec<usize>)>,
+    /// 閉じなかった輪郭・色がまざった輪郭・入れ先の無い色のある穴の数（壊れていれば 0 より大きい）
+    broken: usize,
+}
+
+impl Regions {
+    /// 組 `g` が点 `q`（2倍の座標）を中に含むか：外周の中で、どの穴の外か。組の輪郭の上なら `None`
+    fn contains(&self, g: usize, q: IPt) -> Option<bool> {
+        let ids = &self.groups[g].1;
+        if !self.rings[ids[0]].contains(q)? {
+            return Some(false);
+        }
+        let mut inside = true;
+        for &k in &ids[1..] {
+            if self.rings[k].contains(q)? {
+                inside = false;
+            }
+        }
+        Some(inside)
+    }
+
+    /// 色のある組を面にする（`srcs` は、面の辺の側に記された元の図形）
+    fn into_faces(self, map: &PlanarMap) -> Vec<MapFace> {
+        let mut cycles: Vec<Option<Vec<(usize, bool)>>> =
+            self.cycles.into_iter().map(Some).collect();
+        self.groups
+            .into_iter()
+            .filter_map(|(color, ids)| {
+                let color = color?;
+                let cycles: Vec<Vec<(usize, bool)>> =
+                    ids.iter().filter_map(|&k| cycles[k].take()).collect();
+                let mut srcs: Vec<ShapeId> = cycles
+                    .iter()
+                    .flatten()
+                    .filter_map(|h| map.side_src(*h))
+                    .collect();
+                srcs.sort_unstable();
+                srcs.dedup();
+                Some(MapFace {
+                    color,
+                    cycles,
+                    srcs,
+                })
+            })
+            .collect()
     }
 }
 

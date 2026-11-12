@@ -27098,21 +27098,32 @@ mod map_overlay {
         for seed in [7u64, 8] {
             let app = dense_scene_app(seed);
             for l in 0..3 {
-                let lid = app.doc.root.layers[l].id;
-                let shapes: Vec<FillShape> = app.doc.root.layers[l].keyframes[0]
-                    .cel
-                    .shapes()
-                    .iter()
-                    .map(|s| (**s).clone())
-                    .collect();
-                let map = PlanarMap::from_faces(shapes.iter().filter(|s| s.layer_id == lid));
-                let t = std::time::Instant::now();
-                let ok = map.is_valid();
-                println!(
-                    "PROBE 種{seed} レイヤー{l}：辺 {}・正しい {ok}・{:.2}ms",
-                    map.edges.len(),
-                    t.elapsed().as_secs_f64() * 1e3
-                );
+                // セル画の地図（しまった地図から作る写し）。面の図形は付けない
+                for m in app.doc.root.layers[l].keyframes[0].cel.maps.iter() {
+                    let map = m.dense();
+                    // 計る機械の揺れを除くため、15回のうちいちばん短い時間
+                    let least = |f: &dyn Fn()| {
+                        (0..15)
+                            .map(|_| {
+                                let t = std::time::Instant::now();
+                                f();
+                                t.elapsed().as_secs_f64() * 1e3
+                            })
+                            .fold(f64::INFINITY, f64::min)
+                    };
+                    let ok = map.is_valid();
+                    let n = map.faces().0.len();
+                    let valid_ms = least(&|| {
+                        std::hint::black_box(map.is_valid());
+                    });
+                    let faces_ms = least(&|| {
+                        std::hint::black_box(map.faces());
+                    });
+                    println!(
+                        "PROBE 種{seed} レイヤー{l}：辺 {}・面 {n}・正しい {ok}・判定 {valid_ms:.2}ms・面の取り出し {faces_ms:.2}ms",
+                        map.edges.len(),
+                    );
+                }
             }
         }
     }
