@@ -22037,15 +22037,29 @@ mod map_overlay {
 
     /// 地図 `m` で、頂点の移動と辺のつまみ（ずらす量は `reach`）を交互に `n` 回確定し、（確定できた回, 正しくない地図の説明）
     fn reshape_failures(m: &PlanarMap, seed: u64, n: usize, reach: f64) -> (usize, Vec<String>) {
+        reshapes_of(m, seed, 0..n, reach)
+    }
+
+    /// `reshape_failures` の、`k` 回目（`ks` の範囲）だけを確定するもの（乱数は 0 回目から同じ順に引く）
+    fn reshapes_of(
+        m: &PlanarMap,
+        seed: u64,
+        ks: std::ops::Range<usize>,
+        reach: f64,
+    ) -> (usize, Vec<String>) {
         let mut r = Rng(seed);
         let (mut bad, mut done) = (Vec::new(), 0);
-        for k in 0..n {
+        for k in 0..ks.end {
             let d = kurbo::Vec2::new(r.f() - 0.5, r.f() - 0.5) * reach;
+            let pick = r.f();
+            if k < ks.start {
+                continue;
+            }
             let (next, what) = if k % 2 == 0 {
-                let v = (r.f() * m.nodes.len() as f64) as usize % m.nodes.len();
+                let v = (pick * m.nodes.len() as f64) as usize % m.nodes.len();
                 (m.commit_move_vertex(v, m.nodes[v] + d), format!("頂点 {v}"))
             } else {
-                let e = (r.f() * m.edges.len() as f64) as usize % m.edges.len();
+                let e = (pick * m.edges.len() as f64) as usize % m.edges.len();
                 let target = m.quad(e).eval(0.5) + d;
                 (m.commit_pull_edge(e, 0.5, target), format!("辺 {e}"))
             };
@@ -22059,17 +22073,38 @@ mod map_overlay {
         (done, bad)
     }
 
-    /// とても小さい形でも、頂点の移動・辺のつまみの結果はいつも正しい地図（レビュー 7f63b04 の N-1002。直す前（N-1003 の
-    /// 前）は、倍率 1e-4 で 400 回中 113 回が、左右の色がまざった輪郭のある地図になり、確定が黙って断られた。重ねる線の端に
-    /// 入った t の幅 0 の区間で、区間の向きが決まらなかったため。同じ線の決まり（`Span`）で、t の幅 0 の区間を作らなくなった）
+    /// とても小さい形でも、頂点の移動・辺のつまみの結果は正しい地図（レビュー 7f63b04 の N-1002）。直す前（N-1003 の前）は、
+    /// 倍率 1e-4 で 200 回中 58 回が壊れた地図になり、確定が黙って断られた。原因は3つあった：
+    /// - 重ねる線の端に入った t の幅 0 の区間で、区間の向きが決まらなかった（N-1003 の `Span` で作らなくなった）
+    /// - i_overlay が交点を区間の端の外へ寄せると、切った区間の t の幅が 0 になり、同じく向きが決まらなかった（区間の向きを
+    ///   `Prov::fwd` で持つ。曲線の折り返しの打ち消し：種 99・倍率 1e-3 の 114 回目。左右の色の材料：種 17・倍率 5e-5 の
+    ///   218・296 回目）
+    /// - 穴だけで囲まれた所の色を、穴の輪の材料だけで決めていた（それを囲む所の色にする：`hole_only_groups`。種 17・
+    ///   倍率 1e-4 の 1 回目）
     #[test]
     fn tiny_scale_reshapes_keep_map_valid() {
-        let scale = 1e-4;
-        let m = tiny_brush_map(99, 40, scale);
-        assert!(valid(&m), "{}", m.validity_report());
-        let (done, bad) = reshape_failures(&m, 7, 200, 6.0 * scale);
+        let m = tiny_brush_map(99, 40, 1e-4);
+        let (done, bad) = reshape_failures(&m, 7, 200, 6e-4);
         assert!(done > 180, "確定できた回 {done}");
         assert!(bad.is_empty(), "正しくない地図 {} 回：{:?}", bad.len(), bad);
+        // 直す前に壊れた回（種, 倍率, 何回目）
+        for (seed, scale, k) in [
+            (99, 1e-3, 114),
+            (17, 1e-4, 1),
+            (17, 5e-5, 218),
+            (17, 5e-5, 296),
+        ] {
+            let m = tiny_brush_map(seed, 40, scale);
+            assert!(valid(&m), "{}", m.validity_report());
+            let (done, bad) = reshapes_of(&m, seed + 1, k..k + 1, 6.0 * scale);
+            assert_eq!(done, 1, "種 {seed}・倍率 {scale}・{k} 回目を確定できない");
+            assert!(
+                bad.is_empty(),
+                "種 {seed}・倍率 {scale}：正しくない地図 {} 回：{:?}",
+                bad.len(),
+                bad
+            );
+        }
     }
 
     /// とても小さい形の頂点の移動・辺のつまみを、種と倍率を変えて数える

@@ -393,8 +393,30 @@ impl PlanarMap {
             }
         }
         let cycles = self.face_cycles_with(&polys);
-        let (_, broken) = self.faces_of(&polys, &cycles);
+        let (faces, broken) = self.faces_of(&polys, &cycles);
         out += &format!("broken {broken}");
+        // 入れ先の無い穴（色のある穴で、同じ色の外周に入らなかったもの）
+        for c in &cycles {
+            if self.is_broken_cycle(c) || self.side_color(c[0]).is_none() {
+                continue;
+            }
+            let pts = cycle_points(&polys, c);
+            if area2_of(&pts) < 0 && !faces.iter().any(|f| f.cycles.contains(c)) {
+                out += &format!(
+                    "\n  hole without exterior: color {:?}, len {}, first e{}{} at {:?}",
+                    self.side_color(c[0]).map(|c| format!(
+                        "{:02x}{:02x}{:02x}",
+                        c.r(),
+                        c.g(),
+                        c.b()
+                    )),
+                    c.len(),
+                    c[0].0,
+                    if c[0].1 { "+" } else { "-" },
+                    pts.first()
+                );
+            }
+        }
         for c in &cycles {
             if self.is_broken_cycle(c) {
                 out += &format!("\n  broken cycle len {}: ", c.len());
@@ -412,7 +434,12 @@ impl PlanarMap {
                         if h.1 { "+" } else { "-" },
                         if h.1 { ed.a } else { ed.b },
                         if h.1 { ed.b } else { ed.a },
-                        self.side_color(*h).map(|c| c.r()),
+                        self.side_color(*h).map(|c| format!(
+                            "{:02x}{:02x}{:02x}",
+                            c.r(),
+                            c.g(),
+                            c.b()
+                        )),
                         if straight { "S" } else { "C" },
                         polys[h.0].len()
                     );
@@ -2378,12 +2405,15 @@ impl MapInput<'_> {
     }
 }
 
-/// 区間の出どころ：（出どころの曲線の番号, 区間の始点の t, 終点の t）
+/// 区間の出どころ：（出どころの曲線の番号, 区間の始点の t, 終点の t, 区間の向き（始点→終点）が出どころの曲線の t の増える
+/// 向きか）。向きは t の大小から求めない：i_overlay が交点を格子へ丸めて区間の端の外へ寄せると、切った区間の t の幅が 0 に
+/// なることがある（`split` は端で止める）。向きは区間を作るときに決め、切っても変わらず、区間を裏返すときだけ変わる
 #[derive(Clone, Copy, Debug)]
 struct Prov {
     src: u32,
     t0: f64,
     t1: f64,
+    fwd: bool,
 }
 
 /// 区間の出どころの一覧をしまう所（i_overlay が区間を切る・まとめる・向きを変えるたびに増える）
@@ -2417,6 +2447,7 @@ impl i_overlay9::core::edge_data::OverlayEdgeData for ProvId {
                 src: p.src,
                 t0: p.t1,
                 t1: p.t0,
+                fwd: !p.fwd,
             })
             .collect();
         store.push(v)
@@ -2437,22 +2468,8 @@ impl i_overlay9::core::edge_data::OverlayEdgeData for ProvId {
         };
         let src = store.0[self.0 as usize].clone();
         let mid = |p: &Prov| p.t0 + (p.t1 - p.t0) * f;
-        let first = src
-            .iter()
-            .map(|p| Prov {
-                src: p.src,
-                t0: p.t0,
-                t1: mid(p),
-            })
-            .collect();
-        let second = src
-            .iter()
-            .map(|p| Prov {
-                src: p.src,
-                t0: mid(p),
-                t1: p.t1,
-            })
-            .collect();
+        let first = src.iter().map(|p| Prov { t1: mid(p), ..*p }).collect();
+        let second = src.iter().map(|p| Prov { t0: mid(p), ..*p }).collect();
         (store.push(first), store.push(second))
     }
 
@@ -3110,10 +3127,12 @@ impl PlanarMap {
                 if ip == prev.0 {
                     continue;
                 }
+                // 点は t の順なので、区間（前の点→この点）は出どころの t の増える向き
                 let id = ov.data_store_mut().push(vec![Prov {
                     src: si as u32,
                     t0: prev.1,
                     t1: t,
+                    fwd: true,
                 }]);
                 ov.add_edge(
                     InputEdge {
@@ -3164,9 +3183,9 @@ impl PlanarMap {
             let mut prov = store.0[v.data.0 as usize].clone();
             let mut k = 0;
             while k < prov.len() {
-                let fwd = prov[k].t1 > prov[k].t0;
-                let twin = (k + 1..prov.len())
-                    .find(|&j| prov[j].src == prov[k].src && (prov[j].t1 > prov[j].t0) != fwd);
+                let fwd = prov[k].fwd;
+                let twin =
+                    (k + 1..prov.len()).find(|&j| prov[j].src == prov[k].src && prov[j].fwd != fwd);
                 if let Some(j) = twin {
                     prov.remove(j);
                     prov.remove(k);
@@ -3319,7 +3338,7 @@ impl PlanarMap {
                         OverlaySrc::New(i) if !want_old => new_cols[i],
                         _ => return None,
                     };
-                    let lr = if pv.t1 > pv.t0 { lr } else { (lr.1, lr.0) };
+                    let lr = if pv.fwd { lr } else { (lr.1, lr.0) };
                     Some((lr, srcs[pv.src as usize].0.eval((pv.t0 + pv.t1) * 0.5)))
                 })
                 .collect();
@@ -3398,7 +3417,7 @@ impl PlanarMap {
                 .and_then(|p2| truth_at(p2, &old_quad, n_old));
             old_faces.color[r as usize] = Some(c);
         }
-        let new_faces = match input {
+        let mut new_faces = match input {
             MapInput::Shapes(_) | MapInput::Sweep(_) | MapInput::Stack(_) => None,
             MapInput::Map(_) => {
                 let mut nf = face_colors(&new_of, &next_new, &stop_sides, &piece_ends);
@@ -3426,7 +3445,6 @@ impl PlanarMap {
         };
         let old_pieces: std::cell::OnceCell<LabeledSegs<Option<Color32>>> =
             std::cell::OnceCell::new();
-        let new_pieces = new_faces.as_ref().map(|nf| labeled(nf, &new_of));
         // その地図の入れなかった辺（端を置き直した曲線と、その格子の点の外接矩形）を、高さの帯に分けた索引。点のある所の色を
         // はじめて調べるときに作る
         let unfed_rows = |old: bool| {
@@ -3441,6 +3459,44 @@ impl PlanarMap {
             (items, bands)
         };
         let rows = [std::cell::OnceCell::new(), std::cell::OnceCell::new()];
+        // 穴だけで囲まれた所（その地図の色の組のうち、輪がみな閉じた穴で、外周を持たないもの）の色は、それを囲む所の色に
+        // する：組の外側の奥の点で、ほかの組の今の色と、その地図の入れなかった辺の判定の形の巻き数で決める（大きい穴から
+        // 順に決めるので、囲む所が先に決まる。`hole_only_groups`）。穴の輪の材料だけで決めると、交点の丸めで材料が
+        // 食い違ったとき、穴と、それを入れる面の外周で色が分かれる（レビュー 7f63b04 の N-1002）
+        let fine = |g: IPt| (FINE * g.0, FINE * g.1);
+        let around_color = |faces: &FaceColors, of: &[Option<Sides>], old: bool, p: IPt| {
+            let mut w = Vec::new();
+            for k in (0..pieces.len()).filter(|&k| of[k].is_some()) {
+                let (l, r) = resolved(faces, k);
+                wind_into(fine(pieces[k].ia), fine(pieces[k].ib), l, r, p, &mut w);
+            }
+            // 半直線の高さにかかる入れなかった辺（点の高さを切り下げた2倍の座標の帯に、かかる辺はみな入っている）
+            let (items, (y0, band_h, bands)) = rows[old as usize].get_or_init(|| unfed_rows(old));
+            for &i in band_at(*y0, *band_h, bands, (2 * p.1).div_euclid(FINE)) {
+                let (e, q, rr) = &items[i as usize];
+                if FINE * rr.y0 <= p.1 && p.1 <= FINE * rr.y1 && FINE * rr.x1 >= p.0 {
+                    let ed = self.edges[*e];
+                    for s in grid_poly(q).windows(2) {
+                        wind_into(fine(s[0]), fine(s[1]), ed.left, ed.right, p, &mut w);
+                    }
+                }
+            }
+            top_label(&w).flatten()
+        };
+        for (r, h) in hole_only_groups(&old_faces, &next_old, &piece_ends) {
+            let c = deep_point(h, &|j| old_of[j].is_some(), true)
+                .and_then(|p| around_color(&old_faces, &old_of, true, p));
+            old_faces.color[r as usize] = Some(c);
+        }
+        if let Some(nf) = new_faces.as_mut() {
+            for (r, h) in hole_only_groups(nf, &next_new, &piece_ends) {
+                let c = deep_point(h, &|j| new_of[j].is_some(), false)
+                    .and_then(|p| around_color(nf, &new_of, false, p));
+                nf.color[r as usize] = Some(c);
+            }
+        }
+        let new_pieces = new_faces.as_ref().map(|nf| labeled(nf, &new_of));
+
         // 点のある所の、その地図の色：その地図の色を持つ区間 `pieces` と、半直線の高さにかかるその地図の入れなかった辺で
         let color_at = |pieces: Option<&LabeledSegs<Option<Color32>>>, old: bool, p2: IPt| {
             let mut w = Vec::new();
@@ -3508,7 +3564,7 @@ impl PlanarMap {
                                 }
                                 OverlaySrc::Old(_) => return None,
                             };
-                            Some(if pv.t1 > pv.t0 { lr } else { (lr.1, lr.0) })
+                            Some(if pv.fwd { lr } else { (lr.1, lr.0) })
                         })
                         .collect()
                 })
@@ -4178,6 +4234,69 @@ fn face_colors(
     let mut mixed: Vec<(u32, usize)> = longest.into_iter().map(|(r, (_, h))| (r, h)).collect();
     mixed.sort_unstable();
     FaceColors { root, color, mixed }
+}
+
+/// 片方の地図の色の組（`FaceColors`）のうち、穴だけで囲まれたもの：組に入る向きのある区間の輪（`next` でたどる）がみな
+/// 閉じていて（入れなかった辺で止まらない）、どれも面積が負（穴）のもの。外周を持たないので、色はそれを囲む所で決まる。
+/// 戻り値は（組の代表, 組のいちばん長い向きのある区間（番号は 2 × 区間 + 向き））で、組のいちばん大きい穴の大きい順
+/// （囲む穴が、その中の穴より先）
+fn hole_only_groups(
+    faces: &FaceColors,
+    next: &dyn Fn((usize, bool)) -> Turn,
+    segs: &[(IPt, IPt)],
+) -> Vec<(u32, usize)> {
+    // 向きのある区間 `h` の始点と終点
+    let ends = |h: usize| {
+        let (a, b) = segs[h / 2];
+        if h % 2 == 1 {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    };
+    let len2 = |h: usize| {
+        let (a, b) = ends(h);
+        let (dx, dy) = ((b.0 - a.0) as i128, (b.1 - a.1) as i128);
+        dx * dx + dy * dy
+    };
+    let mut seen = vec![false; 2 * segs.len()];
+    // 組ごとの（穴でない輪があるか, いちばん大きい穴の面積の2倍, いちばん長い区間）
+    let mut info: IntMap<u32, (bool, i128, usize)> = IntMap::default();
+    for start in 0..2 * segs.len() {
+        if seen[start] {
+            continue;
+        }
+        let (mut ring, mut area, mut h) = (Vec::new(), 0i128, start);
+        let closed = loop {
+            seen[h] = true;
+            ring.push(h);
+            let (a, b) = ends(h);
+            area += a.0 as i128 * b.1 as i128 - b.0 as i128 * a.1 as i128;
+            match next((h / 2, h % 2 == 1)) {
+                Turn::Piece(k, fwd) if 2 * k + fwd as usize == start => break true,
+                Turn::Piece(k, fwd) if !seen[2 * k + fwd as usize] => h = 2 * k + fwd as usize,
+                _ => break false,
+            }
+        };
+        for &h in &ring {
+            let e = info.entry(faces.root[h]).or_insert((false, 0, h));
+            if !closed || area >= 0 {
+                e.0 = true;
+            } else {
+                e.1 = e.1.max(-area);
+            }
+            if len2(h) > len2(e.2) {
+                e.2 = h;
+            }
+        }
+    }
+    let mut out: Vec<(i128, u32, usize)> = info
+        .into_iter()
+        .filter(|(_, (other, ..))| !other)
+        .map(|(r, (_, a, h))| (a, r, h))
+        .collect();
+    out.sort_unstable_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)));
+    out.into_iter().map(|(_, r, h)| (r, h)).collect()
 }
 
 /// 点 `m` から向き `dir`（長さ1）へ伸ばした半直線が、区間 `a`〜`b` に最初に当たるまでの距離（当たらなければ `None`）
