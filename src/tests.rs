@@ -76,7 +76,7 @@ impl symbol::Document {
     }
 }
 
-/// 編集中のタイムラインの指定レイヤー・指定フレームのセル図形列を `edit_layers` 経由で配置するテスト補助関数
+/// 編集中のタイムラインの指定レイヤー・指定フレームに、セル図形列から作ったセル画を置くテスト補助関数
 fn put_cel_shapes(app: &mut Is2dApp, layer_idx: usize, frame: usize, mut shapes: Vec<FillShape>) {
     let Some((lid, prev_frame, prev_vis, prev_lock)) =
         app.tab_mut().with_active_timeline_mut(|tl, _lib| {
@@ -10120,7 +10120,7 @@ fn test_stage7b_floating_holds_pieces_without_mutating_cels_until_commit() {
 }
 
 #[test]
-fn test_stage7c_scene_base_cache_and_edit_layers() {
+fn test_stage7c_scene_base_cache_and_write_cels() {
     use crate::doc_actions::Action;
 
     let mut app = Is2dApp::default();
@@ -10150,7 +10150,7 @@ fn test_stage7c_scene_base_cache_and_edit_layers() {
     let rev_bottom_before = app.doc.root.layers[0].keyframes[0].cel.revision;
     let rev_top_before = app.doc.root.layers[1].keyframes[0].cel.revision;
 
-    // 1. 下のレイヤーのメッシュキャッシュを取得しておき、上のレイヤーだけを edit_layers（ブラシ描画）で更新しても
+    // 1. 下のレイヤーのメッシュキャッシュを取得しておき、上のレイヤーだけをブラシ描画で更新しても
     //    下のレイヤーは Cel::revision も SceneBaseCache の Arc<Mesh> も再評価されないこと
     let bottom_shape_id = app.scene().get(0).unwrap().shape_id;
     let bottom_mesh_arc_before = std::sync::Arc::clone(app.scene().get(0).unwrap().fill_mesh());
@@ -10181,22 +10181,15 @@ fn test_stage7c_scene_base_cache_and_edit_layers() {
         "未変更レイヤーの SceneBaseCache は再評価されず同一の Arc<Mesh> を保持すること"
     );
 
-    // 2. edit_layers は地図の面を外す・並べ替えるだけ：色や形を変えた図形（地図の面でない図形）は書かずに断る
-    let before = app.doc.root.layers[0].keyframes[0].cel.revision;
-    let changed = canvas_tool::edit_layers(&mut app.tabs[app.active], &[layer_bottom_id], |ed| {
-        for s in &mut ed.shapes {
-            s.set_color(Color32::GREEN);
-        }
-    });
-    assert!(!changed);
-    assert!(std::mem::take(&mut app.session.off_grid));
-    assert_eq!(app.doc.root.layers[0].keyframes[0].cel.revision, before);
-    assert_ne!(app.scene().get(0).unwrap().color, Color32::GREEN);
-
-    // 3. edit_layers を直接呼んだ場合も指定したレイヤーのみ書き換わり、SceneBaseCache が即座に同期されること
-    let changed = canvas_tool::edit_layers(&mut app.tabs[app.active], &[layer_bottom_id], |ed| {
-        ed.shapes.retain(|s| s.shape_id != bottom_shape_id);
-    });
+    // 2. セル画を直接書いた場合も指定したレイヤーのみ書き換わり、SceneBaseCache が即座に同期されること
+    let changed =
+        canvas_tool::write_cels(&mut app.tabs[app.active], &[layer_bottom_id], |_, cel| {
+            cel.remove(
+                &[],
+                &std::collections::HashSet::from([bottom_shape_id]),
+                &std::collections::HashSet::new(),
+            )
+        });
     assert!(changed);
     assert_ne!(
         app.doc.root.layers[0].keyframes[0].cel.revision,
@@ -10519,7 +10512,7 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
 }
 
 #[test]
-fn test_stage7_edit_layers_preserves_mesh_cache_without_rebuilding_from_doc() {
+fn test_stage7_cel_writes_preserve_mesh_cache_without_rebuilding_from_doc() {
     use crate::doc_actions::Action;
 
     let mut app = Is2dApp::default();
@@ -10565,7 +10558,7 @@ fn test_stage7_edit_layers_preserves_mesh_cache_without_rebuilding_from_doc() {
         .unwrap();
     assert!(
         std::sync::Arc::ptr_eq(untouched_after.fill_mesh(), &mesh_before),
-        "edit_layers 後に未変更図形の描画キャッシュ (Arc<Mesh>) が複製や再構築なしでそのまま引き継がれること"
+        "セル画を書いた後に未変更図形の描画キャッシュ (Arc<Mesh>) が複製や再構築なしでそのまま引き継がれること"
     );
 
     // 2. 回転したシンボル内部でも同様に描画キャッシュがそのまま引き継がれること
@@ -10604,7 +10597,7 @@ fn test_stage7_edit_layers_preserves_mesh_cache_without_rebuilding_from_doc() {
         .unwrap();
     assert!(
         std::sync::Arc::ptr_eq(sym_untouched_after.fill_mesh(), &sym_mesh_before),
-        "回転したシンボル内の edit_layers 後も未変更図形の Arc<Mesh> がそのまま引き継がれること"
+        "回転したシンボル内でセル画を書いた後も未変更図形の Arc<Mesh> がそのまま引き継がれること"
     );
 }
 
@@ -13134,7 +13127,7 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
         assert!(stage_s1.has_cached_selection_mesh());
     }
 
-    // 2. 離れた位置に図形2を描画して書き戻し（edit_layers）を発生させる
+    // 2. 離れた位置に図形2を描画してセル画の書き込みを発生させる
     //    未変更の図形1（kept パス）も含め、文書側の図形には fill_mesh も hit_bez_path も選択表示用メッシュも引き継がれないこと
     let _ = apply(
         &mut app,
@@ -26521,27 +26514,6 @@ mod map_overlay {
         assert!(std::sync::Arc::ptr_eq(&before.maps, &after.maps));
         assert!(std::sync::Arc::ptr_eq(&before.instances, &after.instances));
         assert!(app.session.floating().is_none());
-
-        // 図形の書き込み：格子の外の座標がある図形は、レイヤーごと書かない（地図の無い階層を作らない）
-        let mut far = make_stroke(
-            Point::new(70_000.0, 0.0),
-            Point::new(70_030.0, 0.0),
-            6.0,
-            Color32::BLACK,
-        );
-        let lid = app.doc.root.layers[0].id;
-        for s in &mut far {
-            s.group_path = vec![999];
-            s.layer_id = lid;
-        }
-        let before = cel(&app);
-        assert!(!crate::canvas_tool::edit_layers(&mut app, &[lid], |edit| {
-            edit.shapes.extend(far);
-        }));
-        assert!(app.session.off_grid);
-        let after = cel(&app);
-        assert!(std::sync::Arc::ptr_eq(&before.maps, &after.maps));
-        assert!(after.maps_problem().is_none());
     }
 
     /// 浮いた片は地図で持つ：矩形で選ぶ・選び足す・動かす・確定する・一部を外す、のどれでも図形から地図を作らない

@@ -8,8 +8,8 @@ use crate::canvas_tool::{
     editable_layer_ids, finish_cel_writes, focus_active_layer_by_id,
     focus_active_layer_to_shape_by_id, reset_session_after_timeline_change,
     select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode,
-    update_instances, write_scope_map, Clipboard, CoalesceKey, HoverTarget, LayerId, MapOwner, NoticeKind,
-    SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
+    update_instances, write_scope_map, Clipboard, CoalesceKey, HoverTarget, LayerId, MapOwner,
+    NoticeKind, SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
     content_xform, import_clipboard_symbols, pasteable_content, prepare_copy_selected_shapes,
@@ -776,7 +776,7 @@ fn apply_raw_outline(
         return false;
     }
     clear_selection(tab);
-    // 絵が変わらなければ（同じ色で塗られた所の中をなぞった・何も消えないなど）edit_layers が false を返し、
+    // 絵が変わらなければ（同じ色で塗られた所の中をなぞった・何も消えないなど）edit_layer_map が false を返し、
     // apply が Undo の控えを捨てる
     push_undo(tab, None);
     let rule = MapRule::Paint(is_brush.then_some(brush_color));
@@ -905,8 +905,8 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
 /// 同じレイヤー・同じ階層の線で囲まれた何も無い所）を `fill_color` にする（Animate と同じく、ほかのレイヤーや
 /// グループの図形は壁にしない）
 fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) -> bool {
-    // 塗っても絵が変わらないとき（同じ色・囲まれていない所）と、格子に置けない所（±65,536px の外）では、edit_layers が
-    // false を返し、apply が Undo の控えを捨てる
+    // 塗っても絵が変わらないとき（同じ色・囲まれていない所）と、格子に置けない所（±65,536px の外）では、edit_layer_map
+    // が false を返し、apply が Undo の控えを捨てる
     push_undo(tab, None);
     // 地図は文書の座標なので、点も文書の座標へ写す
     let doc_pt = tab.session.edit_path.world_xform().inverse() * pt;

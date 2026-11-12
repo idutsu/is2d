@@ -2,7 +2,6 @@ use crate::canvas_tool::ShapeId;
 use crate::planar_map::{realized, CheckedMap, LayerBase, MapInput, MapRule, PlanarMap};
 use crate::stored_map::StoredMap;
 use crate::vector_engine::{FillShape, SymbolInstanceBinding};
-use eframe::egui::Color32;
 use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -67,17 +66,6 @@ pub(crate) struct ResolvedCelSig {
     pub(crate) tween_rotate: TweenRotate,
     pub(crate) next_kf: Option<(usize, SymbolInstanceBinding)>,
     pub(crate) referenced_symbols: Vec<(u64, u64)>,
-}
-
-impl SymbolInstanceBinding {
-    /// 既存シェイプの `group_path` から、このインスタンス `self.instance_gid` より外側の親スコープパススライスを返す
-    pub(crate) fn parent_scope_from_path(self, group_path: &[u64]) -> &[u64] {
-        let pos = group_path
-            .iter()
-            .position(|&gid| gid == self.instance_gid)
-            .unwrap_or(group_path.len());
-        &group_path[..pos]
-    }
 }
 
 /// 2つの2Dアフィン変換行列 `start` と `end` を、それぞれのローカル基準点（ピボット）`start_pivot`, `end_pivot` を軸として
@@ -291,7 +279,7 @@ impl ScopeMap {
 /// `None`）。写しを持ち続けるのは呼んだ側（画面の土台：`SceneBaseCache::hold`）
 pub(crate) struct MapWritten(pub(crate) Option<Arc<LayerBase>>);
 
-/// セル画の中身の1つ（重なりの順に並べて `Cel::set_parts` に渡す）
+/// セル画の中身の1つ（`Cel::parts` が重なりの順に並べて返す）
 #[derive(Clone, Debug)]
 pub(crate) enum Part {
     /// 生の図形（文書の座標）
@@ -318,6 +306,16 @@ impl Default for Cel {
 enum Item<T> {
     Raw(Vec<u64>, T),
     Instance(SymbolInstance),
+}
+
+impl<T> Item<T> {
+    /// 中身のある階層（生の図形の階層か、インスタンスの親の階層）
+    fn scope(&self) -> &[u64] {
+        match self {
+            Item::Raw(path, _) => path,
+            Item::Instance(inst) => &inst.parent_scope,
+        }
+    }
 }
 
 /// 重なりの順の中身 `items` を、Adobe Animate の決まりに並べる：階層ごとに、その階層の生の図形をいちばん下に、その上に
@@ -399,35 +397,6 @@ fn arranged<T, E>(
         }
     }
     Ok((maps, instances))
-}
-
-/// 前の地図の面の図形の見分け方：（番号, 版, 色）。同じなら同じ面（形も色も同じ）
-type FaceKey = (ShapeId, u64, Color32);
-
-fn face_key(s: &FillShape) -> FaceKey {
-    (s.shape_id, s.mesh_revision, s.color)
-}
-
-/// 階層 `path` の生の図形 `raw`（下から順）の地図（`Cel::set_parts`）。図形は、いつも前の地図 `old` のどれか1つの面
-/// （`faces`：面の見分け方ごとの、その面がある前の地図の番号と、その地図の面の数）：その地図か（面が全部のとき）、その面
-/// だけを残した地図（グループ化・削除・シンボル化など、面を外す・別の階層へ移す操作）。地図の塊は前の地図と共有する。
-/// `Err`：前の地図1つの面でない図形がある（図形から地図は作らないので、地図に書けない）
-fn scope_map_of(
-    old: &[ScopeMap],
-    faces: &HashMap<FaceKey, (usize, usize)>,
-    path: &[u64],
-    raw: Vec<Arc<FillShape>>,
-) -> Result<Option<ScopeMap>, Unmappable> {
-    let Some(&(i, n)) = faces.get(&face_key(&raw[0])).filter(|&&(i, _)| {
-        raw.iter()
-            .all(|s| faces.get(&face_key(s)).is_some_and(|f| f.0 == i))
-    }) else {
-        return Err(Unmappable);
-    };
-    let ids: Option<HashSet<ShapeId>> =
-        (raw.len() != n).then(|| raw.iter().map(|s| s.shape_id).collect());
-    let keep = ids.map(|ids| move |id: ShapeId| ids.contains(&id));
-    Ok(old[i].restricted(path, keep.as_ref().map(|k| k as &dyn Fn(ShapeId) -> bool)))
 }
 
 /// テスト用：階層 `path` の生の図形 `raw`（下から順。新しい図形でよい）を図形から作った地図（`LayerBase::of`。正しい地図に
@@ -522,7 +491,7 @@ impl Cel {
         self.maps.iter().flat_map(|m| m.faces().to_vec()).collect()
     }
 
-    /// 重なりの順の中身（図形とインスタンス。`Cel::set_parts` に渡せる形）
+    /// 重なりの順の中身（図形とインスタンス）
     pub(crate) fn parts(&self) -> Vec<Part> {
         let mut parts = Vec::new();
         let mut insts = self.instances.iter().peekable();
@@ -608,16 +577,161 @@ impl Cel {
         changed
     }
 
+    /// グループ化：階層 `scope` の中の、選んだ面（番号 `faces`。`scope` より深い階層の地図の）とインスタンス（番号
+    /// `instances`）の階層の番号に、新しいグループ `gid` を入れ（`scope` のすぐ下）、`scope` の中身のいちばん上へ移す。
+    /// 階層 `scope` そのものの生の図形は、呼ぶ側が浮いた片の地図でグループの階層に書く。`false`：移すものが無い
+    pub(crate) fn group(
+        &mut self,
+        scope: &[u64],
+        faces: &HashSet<ShapeId>,
+        instances: &HashSet<u64>,
+        gid: u64,
+    ) -> bool {
+        let depth = scope.len();
+        let into = |p: &[u64]| {
+            let mut q = p.to_vec();
+            q.insert(depth, gid);
+            q
+        };
+        let mut rest: Vec<Item<ScopeMap>> = Vec::new();
+        let mut moved: Vec<Item<ScopeMap>> = Vec::new();
+        let mut first_at = None;
+        for item in Self::items_of(&self.maps, &self.instances) {
+            match item {
+                Item::Raw(path, m)
+                    if path.starts_with(scope)
+                        && path.len() > depth
+                        && m.base().map.labels().any(|id| faces.contains(&id)) =>
+                {
+                    first_at.get_or_insert(rest.len());
+                    if let Some(kept) = m.restricted(&path, Some(&|id| !faces.contains(&id))) {
+                        rest.push(Item::Raw(path.clone(), kept));
+                    }
+                    let to = into(&path);
+                    if let Some(picked) = m.restricted(&to, Some(&|id| faces.contains(&id))) {
+                        moved.push(Item::Raw(to, picked));
+                    }
+                }
+                Item::Instance(mut inst)
+                    if inst.parent_scope.starts_with(scope)
+                        && instances.contains(&inst.binding.instance_gid) =>
+                {
+                    first_at.get_or_insert(rest.len());
+                    inst.parent_scope = into(&inst.parent_scope);
+                    moved.push(Item::Instance(inst));
+                }
+                item => rest.push(item),
+            }
+        }
+        let Some(first_at) = first_at else {
+            return false;
+        };
+        // 階層 `scope` の中身（残ったもの）のすぐ後ろ
+        let at = rest
+            .iter()
+            .rposition(|it| it.scope().starts_with(scope))
+            .map_or(first_at, |i| i + 1);
+        rest.splice(at..at, moved);
+        self.arrange(rest);
+        true
+    }
+
+    /// グループの解除：階層 `scope` の中の、選んだ面（番号 `faces`。`scope` の孫より深い階層の地図の）とインスタンス
+    /// （番号 `instances`。`scope` の子のグループの中のもの）の階層の番号から、`scope` の子の番号を外す（1つ上の階層へ）。
+    /// 階層 `lifted`（解くグループの生の図形の階層。呼ぶ側が浮いた片にした）の地図は外す。`false`：変わるものが無い
+    pub(crate) fn ungroup(
+        &mut self,
+        scope: &[u64],
+        faces: &HashSet<ShapeId>,
+        instances: &HashSet<u64>,
+        lifted: &[Vec<u64>],
+    ) -> bool {
+        let depth = scope.len();
+        let up = |p: &[u64]| {
+            let mut q = p.to_vec();
+            q.remove(depth);
+            q
+        };
+        let mut changed = false;
+        let mut items: Vec<Item<ScopeMap>> = Vec::new();
+        for item in Self::items_of(&self.maps, &self.instances) {
+            match item {
+                Item::Raw(path, _) if lifted.contains(&path) => changed = true,
+                Item::Raw(path, m)
+                    if path.starts_with(scope)
+                        && path.len() > depth + 1
+                        && m.base().map.labels().any(|id| faces.contains(&id)) =>
+                {
+                    changed = true;
+                    if let Some(kept) = m.restricted(&path, Some(&|id| !faces.contains(&id))) {
+                        items.push(Item::Raw(path.clone(), kept));
+                    }
+                    let to = up(&path);
+                    if let Some(picked) = m.restricted(&to, Some(&|id| faces.contains(&id))) {
+                        items.push(Item::Raw(to, picked));
+                    }
+                }
+                Item::Instance(mut inst)
+                    if inst.parent_scope.starts_with(scope)
+                        && inst.parent_scope.len() > depth
+                        && instances.contains(&inst.binding.instance_gid) =>
+                {
+                    changed = true;
+                    inst.parent_scope = up(&inst.parent_scope);
+                    items.push(Item::Instance(inst));
+                }
+                item => items.push(item),
+            }
+        }
+        if changed {
+            self.arrange(items);
+        }
+        changed
+    }
+
+    /// 重ね順：階層 `scope` の子（グループ・インスタンス）の順を、番号の並び `order` にする（並びに無い子は動かさない）。
+    /// `false`：変わらない
+    pub(crate) fn rearrange(&mut self, scope: &[u64], order: &[u64]) -> bool {
+        let depth = scope.len();
+        // 中身が階層 `scope` のどの子に入るか（`scope` そのものの生の図形と、`scope` の外は `None`）
+        let child = |it: &Item<ScopeMap>| -> Option<u64> {
+            match it {
+                Item::Raw(p, _) if p.starts_with(scope) && p.len() > depth => Some(p[depth]),
+                Item::Instance(i) if i.parent_scope == scope => Some(i.binding.instance_gid),
+                Item::Instance(i) if i.parent_scope.starts_with(scope) => {
+                    Some(i.parent_scope[depth])
+                }
+                _ => None,
+            }
+        };
+        let mut items: Vec<Option<Item<ScopeMap>>> = Self::items_of(&self.maps, &self.instances)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let slots: Vec<usize> = (0..items.len())
+            .filter(|&i| items[i].as_ref().and_then(&child).is_some())
+            .collect();
+        let mut keyed: Vec<Item<ScopeMap>> =
+            slots.iter().filter_map(|&i| items[i].take()).collect();
+        let before: Vec<Option<u64>> = keyed.iter().map(&child).collect();
+        keyed.sort_by_key(|it| order.iter().position(|&g| Some(g) == child(it)));
+        if keyed.iter().map(&child).eq(before) {
+            return false;
+        }
+        for (slot, it) in slots.into_iter().zip(keyed) {
+            items[slot] = Some(it);
+        }
+        self.arrange(items.into_iter().flatten().collect());
+        true
+    }
+
     /// 階層 `scope` とその中の地図とインスタンスを、みな外す（今の階層を消す）。`false`：外すものが無い
     pub(crate) fn clear(&mut self, scope: &[u64]) -> bool {
         let items = Self::items_of(&self.maps, &self.instances);
         let n = items.len();
         let kept: Vec<Item<ScopeMap>> = items
             .into_iter()
-            .filter(|item| match item {
-                Item::Raw(path, _) => !path.starts_with(scope),
-                Item::Instance(inst) => !inst.parent_scope.starts_with(scope),
-            })
+            .filter(|item| !item.scope().starts_with(scope))
             .collect();
         if kept.len() == n {
             return false;
@@ -676,20 +790,8 @@ impl Cel {
         self.revision = crate::vector_engine::next_mesh_revision();
     }
 
-    /// 重なりの順の中身 `parts` をセル画にする（`arranged`）。生の図形は、いつもこのセル画の地図の面（グループ化・削除・
-    /// 重ね順など、面を外す・別の階層へ移す・並べ替える操作）で、階層ごとに、その面を持つ地図か面を残した地図にする
-    /// （`scope_map_of`。図形から地図は作らない）。`Err`：地図の面でない図形がある（セル画は変えない）
-    pub(crate) fn set_parts(&mut self, parts: Vec<Part>) -> Result<(), Unmappable> {
-        let old = self.maps.clone();
-        let mut faces: HashMap<FaceKey, (usize, usize)> = HashMap::new();
-        for (i, m) in old.iter().enumerate() {
-            let f = m.faces();
-            faces.extend(f.iter().map(|s| (face_key(s), (i, f.len()))));
-        }
-        self.put_parts(parts, |path, raw| scope_map_of(&old, &faces, path, raw))
-    }
-
-    /// テスト用：`set_parts` の、生の図形が新しい図形でもよいもの（図形から地図を作る：`test_scope_map_from_shapes`）
+    /// テスト用：重なりの順の中身 `parts`（生の図形は新しい図形でよい）をセル画にする（図形から地図を作る：
+    /// `test_scope_map_from_shapes`）
     #[cfg(test)]
     pub(crate) fn set_new_parts(&mut self, parts: Vec<Part>) -> Result<(), Unmappable> {
         let old = self.maps.clone();
@@ -698,7 +800,8 @@ impl Cel {
         })
     }
 
-    /// 重なりの順の中身 `parts` を並べ（`arranged`）、階層ごとの生の図形を `scope` で地図にして入れる
+    /// 重なりの順の中身 `parts` を並べ（`arranged`）、階層ごとの生の図形を `scope` で地図にして入れる（テスト用）
+    #[cfg(test)]
     fn put_parts(
         &mut self,
         parts: Vec<Part>,
@@ -889,10 +992,7 @@ impl Cel {
             }
             None => items
                 .iter()
-                .rposition(|it| match it {
-                    Item::Raw(p, _) => p.starts_with(scope),
-                    Item::Instance(inst) => inst.parent_scope.starts_with(scope),
-                })
+                .rposition(|it| it.scope().starts_with(scope))
                 .map_or(items.len(), |i| i + 1),
         };
         let added = Self::items_of(&content.maps, &content.instances)
@@ -1062,7 +1162,6 @@ impl Cel {
         None
     }
 
-
     /// テスト用：キャンバス展開図形列 `all_shapes`（下から順）を、重なりの順の中身にする（インスタンスは図形の印から
     /// 1つずつ作る）
     #[cfg(test)]
@@ -1075,7 +1174,12 @@ impl Cel {
                     parts.push(Part::Instance(SymbolInstance {
                         binding: b,
                         layer_id: s.layer_id,
-                        parent_scope: b.parent_scope_from_path(&s.group_path).to_vec(),
+                        parent_scope: s
+                            .group_path
+                            .iter()
+                            .take_while(|&&gid| gid != b.instance_gid)
+                            .copied()
+                            .collect(),
                         order: 0,
                     }));
                 }

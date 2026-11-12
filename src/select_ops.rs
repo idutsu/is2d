@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
-    cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers, write_cels,
-    editable_layer_ids, sync_timeline_layer_from_canvas_selection, ActiveCanvasDrag, HoverTarget,
-    LayerId, Scene, SelectSubMode, Session, ShapeId, Tab,
+    cancel_active_drag, clear_selection, commit_floating, commit_floating_except,
+    editable_layer_ids, sync_timeline_layer_from_canvas_selection, write_cels, ActiveCanvasDrag,
+    HoverTarget, LayerId, Scene, SelectSubMode, Session, ShapeId, Tab,
 };
 use crate::clipboard_ops::{prepare_placement, put_placements, Content, Placement};
 use crate::doc_actions::{apply, Action, ActionHost};
@@ -515,28 +515,11 @@ pub(crate) fn prepare_group_selected_shapes(
         rest.drop_pieces();
         crate::canvas_tool::commit_floating_layers(tab, rest);
     }
-    let depth = tab.session.editing_group_path.len();
+    // 選んだグループ・インスタンスは、セル画の並びで新しいグループに入れる（今の階層の中身のいちばん上）
+    let scope = tab.session.editing_group_path.clone();
     let layer_ids = editable_layer_ids(tab);
-    edit_layers(tab, &layer_ids, |edit| {
-        let insert_limit = edit.scope_insert_index();
-        let mut unselected = Vec::with_capacity(edit.shapes.len());
-        let mut grouped_shapes = Vec::new();
-        let mut trailing_outside = Vec::new();
-        for (idx, mut shape) in edit.shapes.drain(..).enumerate() {
-            if selection.contains_shape(&shape)
-                && shape.is_in_editing_scope(&edit.editing_group_path)
-            {
-                shape.group_path.insert(depth, new_gid);
-                grouped_shapes.push(shape);
-            } else if idx < insert_limit {
-                unselected.push(shape);
-            } else {
-                trailing_outside.push(shape);
-            }
-        }
-        unselected.extend(grouped_shapes);
-        unselected.extend(trailing_outside);
-        edit.shapes = unselected;
+    write_cels(tab, &layer_ids, |_, cel| {
+        cel.group(&scope, &selection.shapes, &selection.instances, new_gid)
     });
     // 浮いた片の地図を、新しいグループの階層の地図にする（図形はその面。番号は片の番号のまま。選んだ生の図形はみな片に
     // なっているので、この階層に図形の並びで書いたものは無い）
@@ -650,24 +633,16 @@ pub(crate) fn prepare_ungroup_selected_shapes(
         from_groups.extend(base.faces(path).iter().map(|s| s.shape_id));
         group_maps.push((*layer_id, base.map.clone(), Affine::IDENTITY));
     }
-    // グループは、その番号を階層から外す（中のグループ・インスタンスは1段上の階層へ。生の図形は浮いた片にするので外す）
+    // グループは、セル画の並びで、その番号を階層から外す（中のグループ・インスタンスは1段上の階層へ。グループの生の図形は
+    // 浮いた片にするので外す）。今の階層の子のインスタンスそのものは、下で分解する
     let selection = tab.session.selection.clone();
-    edit_layers(tab, &layer_ids, |edit| {
-        for shape in &mut edit.shapes {
-            if !selection.contains_shape(shape)
-                || !shape.is_in_editing_scope(&edit.editing_group_path)
-                || shape.group_path.len() <= depth
-            {
-                continue;
-            }
-            let gid = shape.group_path[depth];
-            // インスタンスそのものは、下で分解する
-            if shape.symbol_instance.is_some_and(|b| b.instance_gid == gid) {
-                continue;
-            }
-            shape.group_path.remove(depth);
-        }
-        edit.shapes.retain(|s| !from_groups.contains(&s.shape_id));
+    write_cels(tab, &layer_ids, |lid, cel| {
+        let lifted: Vec<Vec<u64>> = group_raw
+            .iter()
+            .filter(|g| g.0 == lid)
+            .map(|g| g.1.clone())
+            .collect();
+        cel.ungroup(&scope, &selection.shapes, &selection.instances, &lifted)
     });
     let any_raw = !group_maps.is_empty() || placements.iter().any(Placement::has_pieces);
     tab.session.add_floating_maps(group_maps);
@@ -702,7 +677,8 @@ pub(crate) fn prepare_arrange_selected(
     if tab.session.selection.is_empty() {
         return false;
     }
-    let scope = &tab.session.editing_group_path;
+    let scope = tab.session.editing_group_path.clone();
+    let scope = &scope;
     let selection = &tab.session.selection;
     let mut layer_orders: Vec<(u64, Vec<u64>)> = Vec::new();
     for lid in editable_layer_ids(tab) {
@@ -751,27 +727,12 @@ pub(crate) fn prepare_arrange_selected(
     }
 
     before_mutate(tab);
-    let target_lids: Vec<u64> = layer_orders.iter().map(|(lid, _)| *lid).collect();
-    edit_layers(tab, &target_lids, |edit| {
-        for (lid, order) in &layer_orders {
-            let slots: Vec<&mut FillShape> = edit
-                .shapes
-                .iter_mut()
-                .filter(|s| {
-                    s.layer_id == *lid
-                        && s.active_group_id_at_scope(&edit.editing_group_path)
-                            .is_some()
-                })
-                .collect();
-            let mut sorted: Vec<FillShape> = slots.iter().map(|s| (*s).clone()).collect();
-            sorted.sort_by_key(|s| {
-                let gid = s.active_group_id_at_scope(&edit.editing_group_path);
-                order.iter().position(|&id| Some(id) == gid)
-            });
-            for (slot, shape) in slots.into_iter().zip(sorted) {
-                *slot = shape;
-            }
-        }
+    let target_lids: Vec<LayerId> = layer_orders.iter().map(|(lid, _)| *lid).collect();
+    write_cels(tab, &target_lids, |lid, cel| {
+        layer_orders
+            .iter()
+            .find(|(l, _)| *l == lid)
+            .is_some_and(|(_, order)| cel.rearrange(scope, order))
     });
     true
 }
@@ -806,7 +767,7 @@ pub(crate) fn prepare_delete_selected_shapes(
     }
     let selection = std::mem::take(&mut tab.session.selection);
     let scope = tab.session.editing_group_path.clone();
-    write_cels(tab, &layer_ids, |cel| {
+    write_cels(tab, &layer_ids, |_, cel| {
         cel.remove(&scope, &selection.shapes, &selection.instances)
     });
     tab.session.transform_pivot = None;
@@ -828,6 +789,6 @@ pub(crate) fn prepare_clear_active_frame_shapes(
     clear_selection(tab);
     before_mutate(tab);
     let scope = tab.session.editing_group_path.clone();
-    write_cels(tab, &layer_ids, |cel| cel.clear(&scope));
+    write_cels(tab, &layer_ids, |_, cel| cel.clear(&scope));
     true
 }

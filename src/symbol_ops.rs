@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, write_cels,
-    editable_layer_ids, finish_cel_writes, reset_session_after_timeline_change, write_cel, Tab,
-    View,
+    active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating,
+    editable_layer_ids, finish_cel_writes, reset_session_after_timeline_change, write_cel,
+    write_cels, Tab, View,
 };
 use crate::clipboard_ops::{
     content_xform, prepare_placement, put_placements, selected_content, Content,
@@ -68,7 +68,7 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         crate::canvas_tool::commit_floating_layers(tab, rest);
     }
     // 選んだもの（今の階層の）を外し、インスタンスを、置くレイヤーの今の階層のいちばん上に入れる（中心に置く）
-    write_cels(tab, &layer_ids, |cel| {
+    write_cels(tab, &layer_ids, |_, cel| {
         cel.remove(&scope, &selection.shapes, &selection.instances)
     });
     let mut inst = Cel::default();

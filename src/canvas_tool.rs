@@ -9,7 +9,7 @@ use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 use crate::planar_map::{LayerBase, ScopeMaps};
 pub(crate) use crate::symbol::Document;
 use crate::symbol::{EditPath, SymbolDef, SymbolEvalCtx, SymbolEvalState};
-use crate::timeline::{SymbolInstance, Timeline, TimelineCellSelection};
+use crate::timeline::{Timeline, TimelineCellSelection};
 use crate::vector_engine::{FillShape, SyncCache};
 
 pub(crate) const MAX_UNDO_HISTORY: usize = 100;
@@ -875,61 +875,6 @@ mod scene_base_cache {
             if let Some(l) = self.layers.iter_mut().find(|l| l.layer_id == layer_id) {
                 l.cel_sig = None;
             }
-        }
-
-        /// `edit_layers` 用に、対象レイヤー群 `target_lids` のステージ座標図形を複製せずに取り出す
-        #[allow(clippy::type_complexity)]
-        pub(crate) fn take_layers_for_edit(
-            &mut self,
-            target_lids: &[LayerId],
-        ) -> (
-            Vec<FillShape>,
-            Vec<(LayerId, Range<usize>)>,
-            HashMap<LayerId, Vec<FillShape>>,
-        ) {
-            let old_flat = std::mem::take(&mut self.flat_shapes);
-            let mut old_flat_iter = old_flat.into_iter();
-            let mut cursor = 0usize;
-            let mut loaded_shapes = Vec::new();
-            let mut target_ranges = Vec::with_capacity(target_lids.len());
-            let mut untouched = HashMap::new();
-            for cl in &mut self.layers {
-                let r = std::mem::replace(&mut cl.range, 0..0);
-                if target_lids.contains(&cl.layer_id) {
-                    let start = loaded_shapes.len();
-                    drain_cached_layer_range(
-                        &mut old_flat_iter,
-                        &mut cursor,
-                        r,
-                        &mut loaded_shapes,
-                    );
-                    target_ranges.push((cl.layer_id, start..loaded_shapes.len()));
-                } else {
-                    let mut vec = Vec::with_capacity(r.len());
-                    drain_cached_layer_range(&mut old_flat_iter, &mut cursor, r, &mut vec);
-                    untouched.insert(cl.layer_id, vec);
-                }
-            }
-            (loaded_shapes, target_ranges, untouched)
-        }
-
-        /// `edit_layers` の書き戻し後、図形をレイヤー順の平らな列へ戻す（書いたレイヤーの作り直しは `finish_cel_writes`）
-        pub(crate) fn replace_edited_layers(
-            &mut self,
-            mut edited_by_lid: HashMap<LayerId, Vec<FillShape>>,
-            mut untouched: HashMap<LayerId, Vec<FillShape>>,
-        ) {
-            let mut new_flat = Vec::new();
-            for cl in &mut self.layers {
-                let start = new_flat.len();
-                if let Some(shapes) = edited_by_lid.remove(&cl.layer_id) {
-                    new_flat.extend(shapes);
-                } else if let Some(shapes) = untouched.remove(&cl.layer_id) {
-                    new_flat.extend(shapes);
-                }
-                cl.range = start..new_flat.len();
-            }
-            self.flat_shapes = new_flat;
         }
 
         /// キー `(layer_id, cel_revision, eval_frame, world_xform, 参照シンボルの revision)` が変わったレイヤーだけ作り直し、
@@ -3010,64 +2955,8 @@ impl Tab {
 }
 
 // ============================================================================
-// 6. レイヤー解決・ドラッグロールバック・文書の図形書き換え（edit_layers）
+// 6. レイヤー解決・ドラッグロールバック・セル画を書く入口（write_cel）
 // ============================================================================
-
-/// `edit_layers` のコールバックに渡される対象レイヤー図形編集コンテキスト（ステージ座標）
-pub(crate) struct LayerEdit {
-    pub(crate) shapes: Vec<FillShape>,
-    pub(crate) editing_group_path: Vec<u64>,
-    pub(crate) next_group_id: u64,
-}
-
-impl LayerEdit {
-    /// 現在の編集スコープ（`editing_group_path`）末尾に対応する挿入インデックスを返す
-    pub(crate) fn scope_insert_index(&self) -> usize {
-        if self.editing_group_path.is_empty() {
-            self.shapes.len()
-        } else {
-            self.shapes
-                .iter()
-                .rposition(|s| s.is_in_editing_scope(&self.editing_group_path))
-                .map(|pos| pos + 1)
-                .unwrap_or(self.shapes.len())
-        }
-    }
-}
-
-/// 図形が変更されていないかを判定するための状態（`edit_layers` の書き戻しと `Floating` の履歴比較で共通）
-struct InitialLayerShapeState {
-    shape_id: ShapeId,
-    layer_id: LayerId,
-    mesh_revision: u64,
-    color: Color32,
-    group_path: Vec<u64>,
-    symbol_instance: Option<crate::symbol::SymbolInstanceBinding>,
-}
-
-impl InitialLayerShapeState {
-    #[inline]
-    fn from_shape(s: &FillShape) -> Self {
-        Self {
-            shape_id: s.shape_id,
-            layer_id: s.layer_id,
-            mesh_revision: s.mesh_revision,
-            color: s.color,
-            group_path: s.group_path.clone(),
-            symbol_instance: s.symbol_instance,
-        }
-    }
-
-    #[inline]
-    fn matches(&self, s: &FillShape) -> bool {
-        self.shape_id == s.shape_id
-            && self.layer_id == s.layer_id
-            && self.mesh_revision == s.mesh_revision
-            && self.color == s.color
-            && self.group_path == s.group_path
-            && self.symbol_instance == s.symbol_instance
-    }
-}
 
 /// 現在フレームで編集可能（表示中・非ロック・フレーム範囲内・非トゥイーン途中）な全レイヤーID一覧を背面→前面順で返す
 pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
@@ -3080,234 +2969,7 @@ pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
         .collect()
 }
 
-/// `edit_layers` の対象レイヤー1枚分について、編集後ステージ図形列 `layer_stage_shapes` をローカル図形へ変換してセルに書き戻す
-/// （`Cel::set_parts`。生の図形は階層ごとに地図にする）。`edit_layers` は編集できる（トゥイーンの中割りでない）レイヤー
-/// だけを渡す。`Err`：地図にできない形がある（セル画は変えない）
-fn writeback_edited_layer_shapes(
-    tl: &mut Timeline,
-    l_idx: usize,
-    frame: usize,
-    has_world_xform: bool,
-    inv_xform: Affine,
-    initial_stage_inst_xform: &HashMap<(InstanceGid, u64), Affine>,
-    layer_stage_shapes: &mut Vec<FillShape>,
-) -> Result<bool, crate::timeline::Unmappable> {
-    use crate::timeline::Part;
-    let Some(kf_idx) = tl.layers[l_idx].keyframe_index_at(frame) else {
-        return Ok(false);
-    };
-    let need_inv = inv_xform != Affine::IDENTITY;
-    layer_stage_shapes.retain(|s| !s.exterior.segments.is_empty() || s.symbol_instance.is_some());
-
-    let parts =
-        {
-            let orig_cel = &tl.layers[l_idx].keyframes[kf_idx].cel;
-            let orig_shapes = orig_cel.shapes();
-            let orig_by_id: HashMap<ShapeId, &Arc<FillShape>> =
-                orig_shapes.iter().map(|s| (s.shape_id, s)).collect();
-            let orig_local_inst_map: HashMap<InstanceGid, &SymbolInstance> = orig_cel
-                .instances
-                .iter()
-                .map(|i| (i.binding.instance_gid, i))
-                .collect();
-
-            let mut parts: Vec<Part> = Vec::with_capacity(layer_stage_shapes.len());
-            let mut seen_instances: std::collections::HashSet<InstanceGid> =
-                std::collections::HashSet::new();
-            for s in layer_stage_shapes.iter_mut() {
-                if let Some(b) = s.symbol_instance {
-                    if seen_instances.insert(b.instance_gid) {
-                        let key = (b.instance_gid, b.symbol_id);
-                        let stage_xform_unchanged = initial_stage_inst_xform
-                            .get(&key)
-                            .is_some_and(|&init_xf| init_xf == b.xform);
-                        let orig_inst = orig_local_inst_map.get(&b.instance_gid).copied();
-                        let mut local_b = b;
-                        if has_world_xform {
-                            if stage_xform_unchanged {
-                                if let Some(oi) = orig_inst {
-                                    local_b.xform = oi.binding.xform;
-                                } else if need_inv {
-                                    local_b.xform = inv_xform * b.xform;
-                                }
-                            } else if need_inv {
-                                local_b.xform = inv_xform * b.xform;
-                            }
-                        }
-                        let parent_scope = b.parent_scope_from_path(&s.group_path).to_vec();
-                        parts.push(Part::Instance(SymbolInstance {
-                            binding: local_b,
-                            layer_id: s.layer_id,
-                            parent_scope,
-                            order: 0,
-                        }));
-                    }
-                } else if !s.exterior.segments.is_empty() {
-                    // 生の図形は、いつもセル画の地図の面（番号・版・色が同じ図形）で、その面を使う（階層は今の図形に合わせる）。
-                    // 図形から地図は作らないので、面でない図形（新しい形・形や色を変えた図形）は書けない（このレイヤーは書かずに
-                    // 断る。新しい形・色は、地図の編集か浮いた片で書く）
-                    let Some(doc) = orig_by_id.get(&s.shape_id).copied().filter(|orig| {
-                        orig.mesh_revision == s.mesh_revision && orig.color == s.color
-                    }) else {
-                        return Err(crate::timeline::Unmappable);
-                    };
-                    if doc.group_path == s.group_path {
-                        parts.push(Part::Shape(Arc::clone(doc)));
-                    } else {
-                        let mut kept = (**doc).clone();
-                        kept.group_path = s.group_path.clone();
-                        parts.push(Part::Shape(Arc::new(kept)));
-                    }
-                }
-            }
-            parts
-        };
-
-    tl.layers[l_idx].keyframe_mut(kf_idx).cel.set_parts(parts)?;
-    Ok(true)
-}
-
-/// 文書の図形を書き換える唯一の入口：
-/// - 土台キャッシュ（`tab.session.base_cache`）が保持している対象レイヤーのステージ座標図形を複製せずに `f` に渡す。
-/// - `f` のあと、変わった図形だけ逆変換して書き戻す。変わっていない図形（`shape_id` と `mesh_revision` が同じ）は
-///   `ShapeId -> セル内の番号` の `HashMap` で $O(N)$ 対応づけして元のローカル図形をそのまま使う。
-/// - 書き戻したレイヤーの土台キャッシュは文書から作り直す（描画キャッシュは `ShapeId` と `mesh_revision` が同じ図形から引き継ぐ）。
-pub(crate) fn edit_layers(
-    tab: &mut Tab,
-    layer_ids: &[LayerId],
-    f: impl FnOnce(&mut LayerEdit),
-) -> bool {
-    tab.refresh_scene_base();
-
-    // 書く先は、渡されたレイヤーのうち今のコマで編集できるものだけ
-    let (target_layer_indices, target_lids) = {
-        let tl = tab.active_timeline();
-        let frame = tl.current_frame;
-        let mut indices = Vec::new();
-        let mut lids = Vec::new();
-        for (l_idx, layer) in tl.layers.iter().enumerate() {
-            if layer.is_editable_at(frame) && layer_ids.contains(&layer.id) {
-                indices.push(l_idx);
-                lids.push(layer.id);
-            }
-        }
-        (indices, lids)
-    };
-    if target_layer_indices.is_empty() {
-        return false;
-    }
-
-    // 潰れた（行列式が 0 に近い）インスタンスには入れない（`enter_symbol_timeline`）ので、逆の変換はいつもある
-    let world_xform = tab.session.edit_path.world_xform();
-    let has_world_xform = world_xform != Affine::IDENTITY;
-    let inv_xform = world_xform.inverse();
-    let editing_group_path = tab.session.editing_group_path.clone();
-    let mut next_group_id = tab.doc.next_group_id.max(1);
-
-    let (loaded_shapes, target_ranges, untouched_layers) =
-        tab.session.base_cache.take_layers_for_edit(&target_lids);
-
-    let mut initial_layer_states: HashMap<LayerId, Vec<InitialLayerShapeState>> =
-        HashMap::with_capacity(target_ranges.len());
-    let mut initial_stage_inst_xform: HashMap<(InstanceGid, u64), Affine> = HashMap::new();
-    for (lid, range) in target_ranges {
-        let slice = &loaded_shapes[range];
-        for s in slice {
-            if let Some(b) = s.symbol_instance {
-                initial_stage_inst_xform.insert((b.instance_gid, b.symbol_id), b.xform);
-            }
-        }
-        let init_states = slice
-            .iter()
-            .map(InitialLayerShapeState::from_shape)
-            .collect();
-        initial_layer_states.insert(lid, init_states);
-    }
-
-    let mut edit = LayerEdit {
-        shapes: loaded_shapes,
-        editing_group_path,
-        next_group_id,
-    };
-    f(&mut edit);
-    next_group_id = edit.next_group_id;
-
-    let mut modified_lids: Vec<LayerId> = Vec::new();
-    let mut edited_by_lid: HashMap<LayerId, Vec<FillShape>> = HashMap::new();
-    // 図形は、その図形のレイヤーに書く（書き込む図形を足す呼び出し側は、書く先のレイヤーの番号を付けて、そのレイヤーを
-    // 渡す）。書く先でない（渡していないか、今のコマで編集できない）レイヤーの図形があれば、一部を捨てて書かずに、
-    // どのレイヤーにも書かない（画面の土台は文書から作り直す）
-    let stray = edit
-        .shapes
-        .iter()
-        .any(|s| !target_lids.contains(&s.layer_id));
-    let mut off_grid = false;
-
-    let mut mutate_tl = |tl: &mut Timeline| {
-        if stray {
-            return;
-        }
-        let frame = tl.current_frame;
-        edited_by_lid.reserve(target_lids.len());
-        for &lid in &target_lids {
-            edited_by_lid.insert(lid, Vec::new());
-        }
-        for s in edit.shapes.drain(..) {
-            if let Some(vec) = edited_by_lid.get_mut(&s.layer_id) {
-                vec.push(s);
-            }
-        }
-
-        for &l_idx in &target_layer_indices {
-            let lid = tl.layers[l_idx].id;
-            let Some(layer_shapes) = edited_by_lid.get_mut(&lid) else {
-                continue;
-            };
-            let init_slice = initial_layer_states
-                .get(&lid)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let is_unchanged = init_slice.len() == layer_shapes.len()
-                && init_slice
-                    .iter()
-                    .zip(layer_shapes.iter())
-                    .all(|(st, s)| st.matches(s));
-            if is_unchanged {
-                continue;
-            }
-            match writeback_edited_layer_shapes(
-                tl,
-                l_idx,
-                frame,
-                has_world_xform,
-                inv_xform,
-                &initial_stage_inst_xform,
-                layer_shapes,
-            ) {
-                Ok(true) => modified_lids.push(lid),
-                Ok(false) => {}
-                Err(crate::timeline::Unmappable) => off_grid = true,
-            }
-        }
-    };
-
-    mutate_tl(tab.active_timeline_raw_mut());
-    tab.session.off_grid |= off_grid;
-    tab.session
-        .base_cache
-        .replace_edited_layers(edited_by_lid, untouched_layers);
-    // 書かなかったレイヤー（地図にできない形か、書く先でないレイヤーの図形があった）も、画面の土台を文書から作り直す
-    // （編集した図形を見せない）
-    let mut rebuilt = modified_lids.clone();
-    if off_grid || stray {
-        rebuilt.extend(target_lids.iter().copied());
-    }
-    tab.doc.next_group_id = next_group_id;
-    finish_cel_writes(tab, &rebuilt);
-    !modified_lids.is_empty()
-}
-
-/// セル画を書いたあとの後始末。セル画を書く入口（`edit_layers`・`write_scope_map`）のあとに、書いたレイヤーの一覧
+/// セル画を書いたあとの後始末。セル画を書く入口（`write_cel`・`write_scope_map`）のあとに、書いたレイヤーの一覧
 /// `lids` で1回だけ呼ぶ：書いたレイヤーがあれば、編集中のシンボルの版と `Document::revision` を上げ、画面の土台のその
 /// レイヤーを作り直す。編集中の階層が無くなっていれば、ある所まで戻る
 pub(crate) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
@@ -3402,16 +3064,16 @@ pub(crate) fn write_cel(
     true
 }
 
-/// 今のコマの、レイヤー `layer_ids` のセル画をそれぞれ `f` で書き換え（`write_cel`）、書いたレイヤーで後始末をする
-/// （`finish_cel_writes`）。`false`：どのレイヤーも書かなかった
+/// 今のコマの、レイヤー `layer_ids` のセル画をそれぞれ `f(レイヤー, セル画)` で書き換え（`write_cel`）、書いたレイヤーで
+/// 後始末をする（`finish_cel_writes`）。`false`：どのレイヤーも書かなかった
 pub(crate) fn write_cels(
     tab: &mut Tab,
     layer_ids: &[LayerId],
-    f: impl Fn(&mut crate::timeline::Cel) -> bool,
+    f: impl Fn(LayerId, &mut crate::timeline::Cel) -> bool,
 ) -> bool {
     let mut written = Vec::new();
     for &lid in layer_ids {
-        if write_cel(tab, lid, &f) {
+        if write_cel(tab, lid, |cel| f(lid, cel)) {
             written.push(lid);
         }
     }
@@ -3427,7 +3089,7 @@ pub(crate) fn update_instances(
     pick: impl Fn(u64) -> bool,
     f: impl Fn(&mut crate::vector_engine::SymbolInstanceBinding),
 ) -> bool {
-    write_cels(tab, layer_ids, |cel| cel.update_instances(&pick, &f))
+    write_cels(tab, layer_ids, |_, cel| cel.update_instances(&pick, &f))
 }
 
 /// 現在の編集スコープ（グループ内であればそのグループの所属レイヤー、そうでなければ現在のアクティブレイヤー）の `layer_id` を返す
