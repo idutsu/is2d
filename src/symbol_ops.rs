@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layers,
+    active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, write_cels,
     editable_layer_ids, finish_cel_writes, reset_session_after_timeline_change, write_cel, Tab,
     View,
 };
@@ -68,10 +68,8 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         crate::canvas_tool::commit_floating_layers(tab, rest);
     }
     // 選んだもの（今の階層の）を外し、インスタンスを、置くレイヤーの今の階層のいちばん上に入れる（中心に置く）
-    edit_layers(tab, &layer_ids, |edit| {
-        edit.shapes.retain(|s| {
-            !(selection.contains_shape(s) && s.is_in_editing_scope(&edit.editing_group_path))
-        });
+    write_cels(tab, &layer_ids, |cel| {
+        cel.remove(&scope, &selection.shapes, &selection.instances)
     });
     let mut inst = Cel::default();
     inst.instances_mut().push(SymbolInstance {

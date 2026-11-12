@@ -3402,6 +3402,34 @@ pub(crate) fn write_cel(
     true
 }
 
+/// 今のコマの、レイヤー `layer_ids` のセル画をそれぞれ `f` で書き換え（`write_cel`）、書いたレイヤーで後始末をする
+/// （`finish_cel_writes`）。`false`：どのレイヤーも書かなかった
+pub(crate) fn write_cels(
+    tab: &mut Tab,
+    layer_ids: &[LayerId],
+    f: impl Fn(&mut crate::timeline::Cel) -> bool,
+) -> bool {
+    let mut written = Vec::new();
+    for &lid in layer_ids {
+        if write_cel(tab, lid, &f) {
+            written.push(lid);
+        }
+    }
+    finish_cel_writes(tab, &written);
+    !written.is_empty()
+}
+
+/// 今のコマの、レイヤー `layer_ids` のセル画の、番号が `pick` に合うインスタンスの結び付けを `f` で書き換え、後始末を
+/// する（`Cel::update_instances`・`finish_cel_writes`）。`false`：どのレイヤーも書かなかった
+pub(crate) fn update_instances(
+    tab: &mut Tab,
+    layer_ids: &[LayerId],
+    pick: impl Fn(u64) -> bool,
+    f: impl Fn(&mut crate::vector_engine::SymbolInstanceBinding),
+) -> bool {
+    write_cels(tab, layer_ids, |cel| cel.update_instances(&pick, &f))
+}
+
 /// 現在の編集スコープ（グループ内であればそのグループの所属レイヤー、そうでなければ現在のアクティブレイヤー）の `layer_id` を返す
 pub(crate) fn active_scope_layer_id(session: &Session, timeline: &Timeline) -> u64 {
     if !session.editing_group_path.is_empty() {

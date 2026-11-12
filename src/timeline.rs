@@ -233,18 +233,22 @@ impl ScopeMap {
         (!stored.is_empty()).then_some(ScopeMap { group_path, stored })
     }
 
-    /// 面の番号が `ids` にある面だけを残した、階層 `group_path` の地図（`ids` が `None` なら全部の面：同じ地図）。正しい
+    /// 面の番号が `keep` に合う面だけを残した、階層 `group_path` の地図（`keep` が `None` なら全部の面：同じ地図）。正しい
     /// 地図の面を外しても正しい地図のまま（外した面の所は何も無い所になり、辺は減るだけで、残る面の輪郭と番号は変わら
     /// ない）なので、確かめ直さない。塊はこの地図と共有する。面が無くなれば `None`
-    fn restricted(&self, group_path: &[u64], ids: Option<&HashSet<ShapeId>>) -> Option<ScopeMap> {
-        let stored = match ids {
+    fn restricted(
+        &self,
+        group_path: &[u64],
+        keep: Option<&dyn Fn(ShapeId) -> bool>,
+    ) -> Option<ScopeMap> {
+        let stored = match keep {
             None => self.stored.clone(),
-            Some(ids) => {
+            Some(keep) => {
                 let base = self.base();
-                if base.map.labels_within(ids) {
+                if base.map.labels_within(keep) {
                     self.stored.clone()
                 } else {
-                    StoredMap::from_dense(&base.map.restricted(ids), Some(&self.stored))
+                    StoredMap::from_dense(&base.map.restricted_by(keep), Some(&self.stored))
                 }
             }
         };
@@ -422,7 +426,8 @@ fn scope_map_of(
     };
     let ids: Option<HashSet<ShapeId>> =
         (raw.len() != n).then(|| raw.iter().map(|s| s.shape_id).collect());
-    Ok(old[i].restricted(path, ids.as_ref()))
+    let keep = ids.map(|ids| move |id: ShapeId| ids.contains(&id));
+    Ok(old[i].restricted(path, keep.as_ref().map(|k| k as &dyn Fn(ShapeId) -> bool)))
 }
 
 /// テスト用：階層 `path` の生の図形 `raw`（下から順。新しい図形でよい）を図形から作った地図（`LayerBase::of`。正しい地図に
@@ -566,6 +571,81 @@ impl Cel {
         self.revision = crate::vector_engine::next_mesh_revision();
     }
 
+    /// 階層 `scope`（とその中）の、番号が `faces` の面を地図から外し（外した所は何も無い所になる）、番号が `instances` の
+    /// インスタンスを外す（削除・シンボル化）。`false`：外すものが無い
+    pub(crate) fn remove(
+        &mut self,
+        scope: &[u64],
+        faces: &HashSet<ShapeId>,
+        instances: &HashSet<u64>,
+    ) -> bool {
+        let mut changed = false;
+        let mut items = Vec::new();
+        for item in Self::items_of(&self.maps, &self.instances) {
+            match item {
+                Item::Raw(path, m)
+                    if path.starts_with(scope)
+                        && m.base().map.labels().any(|id| faces.contains(&id)) =>
+                {
+                    changed = true;
+                    let keep = |id: ShapeId| !faces.contains(&id);
+                    if let Some(kept) = m.restricted(&path, Some(&keep)) {
+                        items.push(Item::Raw(path, kept));
+                    }
+                }
+                Item::Instance(inst)
+                    if inst.parent_scope.starts_with(scope)
+                        && instances.contains(&inst.binding.instance_gid) =>
+                {
+                    changed = true;
+                }
+                item => items.push(item),
+            }
+        }
+        if changed {
+            self.arrange(items);
+        }
+        changed
+    }
+
+    /// 階層 `scope` とその中の地図とインスタンスを、みな外す（今の階層を消す）。`false`：外すものが無い
+    pub(crate) fn clear(&mut self, scope: &[u64]) -> bool {
+        let items = Self::items_of(&self.maps, &self.instances);
+        let n = items.len();
+        let kept: Vec<Item<ScopeMap>> = items
+            .into_iter()
+            .filter(|item| match item {
+                Item::Raw(path, _) => !path.starts_with(scope),
+                Item::Instance(inst) => !inst.parent_scope.starts_with(scope),
+            })
+            .collect();
+        if kept.len() == n {
+            return false;
+        }
+        self.arrange(kept);
+        true
+    }
+
+    /// 番号が `pick` に合うインスタンスの結び付けを `f` で書き換える。`false`：当てはまるインスタンスが無いか、変わらない
+    pub(crate) fn update_instances(
+        &mut self,
+        pick: impl Fn(u64) -> bool,
+        f: impl Fn(&mut SymbolInstanceBinding),
+    ) -> bool {
+        if !self.instances.iter().any(|i| pick(i.binding.instance_gid)) {
+            return false;
+        }
+        let mut changed = false;
+        for inst in self.instances_mut() {
+            if pick(inst.binding.instance_gid) {
+                let before = inst.binding;
+                f(&mut inst.binding);
+                changed |= inst.binding != before;
+            }
+        }
+        changed
+    }
+
     #[inline]
     pub(crate) fn instances_mut(&mut self) -> &mut Vec<SymbolInstance> {
         self.revision = crate::vector_engine::next_mesh_revision();
@@ -664,7 +744,7 @@ impl Cel {
                     if rel.is_empty() && has_raw {
                         continue;
                     }
-                    if let Some(m) = m.restricted(rel, Some(faces)) {
+                    if let Some(m) = m.restricted(rel, Some(&|id| faces.contains(&id))) {
                         items.push(Item::Raw(rel.to_vec(), m));
                     }
                 }
@@ -982,14 +1062,6 @@ impl Cel {
         None
     }
 
-    #[inline]
-    pub(crate) fn clear(&mut self) {
-        if !self.is_empty() {
-            self.maps = Arc::new(Vec::new());
-            self.instances = Arc::new(Vec::new());
-            self.revision = crate::vector_engine::next_mesh_revision();
-        }
-    }
 
     /// テスト用：キャンバス展開図形列 `all_shapes`（下から順）を、重なりの順の中身にする（インスタンスは図形の印から
     /// 1つずつ作る）
@@ -1053,7 +1125,7 @@ impl Keyframe {
         if self.cel.is_empty() && !self.tween {
             false
         } else {
-            self.cel.clear();
+            self.cel.clear(&[]);
             self.tween = false;
             self.tween_rotate = TweenRotate::Auto;
             true

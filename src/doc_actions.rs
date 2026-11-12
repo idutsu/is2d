@@ -5,10 +5,10 @@ use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layer_map,
-    edit_layers, editable_layer_ids, finish_cel_writes, focus_active_layer_by_id,
+    editable_layer_ids, finish_cel_writes, focus_active_layer_by_id,
     focus_active_layer_to_shape_by_id, reset_session_after_timeline_change,
     select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode,
-    write_scope_map, Clipboard, CoalesceKey, HoverTarget, LayerId, MapOwner, NoticeKind,
+    update_instances, write_scope_map, Clipboard, CoalesceKey, HoverTarget, LayerId, MapOwner, NoticeKind,
     SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
@@ -1008,15 +1008,15 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         }
         any_transformed |= !written.is_empty();
         finish_cel_writes(tab, &written);
-        // インスタンスは、インスタンスの変換を動かす（生の図形は、片か、グループの階層の地図で動かした）
-        edit_layers(tab, &target_lids, |edit| {
-            for s in &mut edit.shapes {
-                if picked(s) && s.symbol_instance.is_some() {
-                    s.transform(affine);
-                    any_transformed = true;
-                }
-            }
-        });
+        // インスタンスは、結び付けの変換に文書の座標の変換を重ねる（生の図形は、片か、グループの階層の地図で動かした）
+        if crate::vector_engine::invertible(doc) {
+            any_transformed |= update_instances(
+                tab,
+                &target_lids,
+                |gid| selection.instances.contains(&gid),
+                |b| b.xform = doc * b.xform,
+            );
+        }
     }
     any_transformed
 }
@@ -1251,18 +1251,12 @@ fn apply_set_selected_symbol_world_pivot(tab: &mut Tab, world_pivot: Option<Poin
     push_undo(tab, None);
     let inst_gid = binding.instance_gid;
     let layer_ids = editable_layer_ids(tab);
-    let mut updated = false;
-    edit_layers(tab, &layer_ids, |edit| {
-        for s in &mut edit.shapes {
-            if let Some(b) = &mut s.symbol_instance {
-                if b.instance_gid == inst_gid {
-                    b.pivot = new_local_pivot;
-                    updated = true;
-                }
-            }
-        }
-    });
-    updated
+    update_instances(
+        tab,
+        &layer_ids,
+        |gid| gid == inst_gid,
+        |b| b.pivot = new_local_pivot,
+    )
 }
 
 fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
@@ -1485,17 +1479,7 @@ fn update_selected_symbol_binding(
     commit_floating(tab);
     push_undo(tab, coalesce);
 
-    let mut updated = false;
-    edit_layers(tab, &layer_ids, |edit| {
-        for s in &mut edit.shapes {
-            if let Some(b) = &mut s.symbol_instance {
-                if b.instance_gid == inst_gid {
-                    update(b);
-                    updated = true;
-                }
-            }
-        }
-    });
+    let updated = update_instances(tab, &layer_ids, |gid| gid == inst_gid, &update);
     if updated {
         reset_session_after_timeline_change(tab);
     }

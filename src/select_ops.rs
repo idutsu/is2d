@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
-    cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
+    cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers, write_cels,
     editable_layer_ids, sync_timeline_layer_from_canvas_selection, ActiveCanvasDrag, HoverTarget,
     LayerId, Scene, SelectSubMode, Session, ShapeId, Tab,
 };
@@ -805,8 +805,9 @@ pub(crate) fn prepare_delete_selected_shapes(
         crate::canvas_tool::commit_floating_layers(tab, fl);
     }
     let selection = std::mem::take(&mut tab.session.selection);
-    edit_layers(tab, &layer_ids, |edit| {
-        edit.shapes.retain(|s| !selection.contains_shape(s));
+    let scope = tab.session.editing_group_path.clone();
+    write_cels(tab, &layer_ids, |cel| {
+        cel.remove(&scope, &selection.shapes, &selection.instances)
     });
     tab.session.transform_pivot = None;
     true
@@ -826,9 +827,7 @@ pub(crate) fn prepare_clear_active_frame_shapes(
     }
     clear_selection(tab);
     before_mutate(tab);
-    edit_layers(tab, &layer_ids, |edit| {
-        edit.shapes
-            .retain(|s| !s.is_in_editing_scope(&edit.editing_group_path));
-    });
+    let scope = tab.session.editing_group_path.clone();
+    write_cels(tab, &layer_ids, |cel| cel.clear(&scope));
     true
 }

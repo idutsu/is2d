@@ -122,14 +122,9 @@ impl PlanarMap {
         self.restricted_by(|id| !ids.contains(&id))
     }
 
-    /// 面の番号（辺の側に記したもの）がみな `ids` にあるか（`restricted` しても変わらないか）
-    pub(crate) fn labels_within(&self, ids: &HashSet<ShapeId>) -> bool {
-        self.edges.iter().all(|e| {
-            [e.left_src, e.right_src]
-                .into_iter()
-                .flatten()
-                .all(|id| ids.contains(&id))
-        })
+    /// 面の番号（辺の側に記したもの）がみな `keep` に合うか（`restricted_by` しても変わらないか）
+    pub(crate) fn labels_within(&self, keep: impl Fn(ShapeId) -> bool) -> bool {
+        self.labels().all(keep)
     }
 
     /// 面の番号（辺の側に記したもの）
@@ -182,7 +177,7 @@ impl PlanarMap {
     }
 
     /// 面の番号が `keep` に合う面だけを残した地図（`restricted`）
-    fn restricted_by(&self, keep: impl Fn(ShapeId) -> bool) -> PlanarMap {
+    pub(crate) fn restricted_by(&self, keep: impl Fn(ShapeId) -> bool) -> PlanarMap {
         let mut index: Vec<usize> = vec![usize::MAX; self.nodes.len()];
         let mut nodes: Vec<Point> = Vec::new();
         let mut node = |v: usize| {
