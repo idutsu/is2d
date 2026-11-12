@@ -659,6 +659,29 @@ impl Default for Document {
     }
 }
 
+/// 入れ子をたどって、`start` から `is_target` に合うものに行き着くか（子は `children` が返す。同じものは1度だけ見る）。
+/// シンボルの入れ子が輪になるかの判定はこれ1つ（文書のシンボル：`Document::would_create_symbol_cycle`、貼り付ける
+/// クリップボードのシンボル：`clipboard_ops::can_paste_clipboard_symbol`）
+pub(crate) fn reaches<N: Copy + Eq + std::hash::Hash>(
+    start: N,
+    is_target: impl Fn(N) -> bool,
+    mut children: impl FnMut(N) -> Vec<N>,
+) -> bool {
+    let mut stack = vec![start];
+    let mut seen: std::collections::HashSet<N> = std::collections::HashSet::from([start]);
+    while let Some(n) = stack.pop() {
+        if is_target(n) {
+            return true;
+        }
+        for c in children(n) {
+            if seen.insert(c) {
+                stack.push(c);
+            }
+        }
+    }
+    false
+}
+
 impl Document {
     /// シンボルライブラリの世代番号 `revision` を一意な値へ更新する
     pub(crate) fn bump_revision(&mut self) {
@@ -760,27 +783,21 @@ impl Document {
         parent_symbol_id: u64,
         candidate_child_id: u64,
     ) -> bool {
-        if parent_symbol_id == candidate_child_id {
-            return true;
-        }
-        let mut stack = vec![candidate_child_id];
-        let mut visited = std::collections::HashSet::new();
-        visited.insert(candidate_child_id);
-        while let Some(cur_id) = stack.pop() {
-            let Some(sym) = self.find_symbol(cur_id) else {
-                continue;
-            };
-            for inst in sym.timeline.instances() {
-                let child_id = inst.binding.symbol_id;
-                if child_id == parent_symbol_id {
-                    return true;
-                }
-                if visited.insert(child_id) {
-                    stack.push(child_id);
-                }
-            }
-        }
-        false
+        reaches(
+            candidate_child_id,
+            |id| id == parent_symbol_id,
+            |id| self.child_symbol_ids(id),
+        )
+    }
+
+    /// シンボル `symbol_id` の中のインスタンスが参照するシンボルの番号（シンボルが無ければ空）
+    pub(crate) fn child_symbol_ids(&self, symbol_id: u64) -> Vec<u64> {
+        self.find_symbol(symbol_id).map_or_else(Vec::new, |sym| {
+            sym.timeline
+                .instances()
+                .map(|inst| inst.binding.symbol_id)
+                .collect()
+        })
     }
 
     /// 現在の編集コンテキスト（ルートシーンまたはシンボルインプレース編集経路 `edit_path`）に

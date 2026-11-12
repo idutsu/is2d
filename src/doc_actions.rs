@@ -1000,6 +1000,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         for (layer_id, group_path) in &scopes {
             if write_scope_map(tab, *layer_id, group_path, |base| {
                 crate::planar_map::realized(&base.map, doc)
+                    .map(crate::planar_map::CheckedMap::into_map)
             }) && !written.contains(layer_id)
             {
                 written.push(*layer_id);

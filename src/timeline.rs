@@ -1,7 +1,5 @@
 use crate::canvas_tool::ShapeId;
-use crate::planar_map::{
-    freshly_labeled, realized, uniquely_labeled, LayerBase, MapInput, MapRule, PlanarMap,
-};
+use crate::planar_map::{realized, CheckedMap, LayerBase, MapInput, MapRule, PlanarMap};
 use crate::stored_map::StoredMap;
 use crate::vector_engine::{FillShape, SymbolInstanceBinding};
 use eframe::egui::Color32;
@@ -227,6 +225,42 @@ pub(crate) struct ScopeMap {
 }
 
 impl ScopeMap {
+    /// 階層 `group_path` の、確かめた地図 `map` の地図（面に1つずつ別の番号を記してしまう：`CheckedMap::uniquely_labeled`）。
+    /// 塊は `prev` と共有する。面が無ければ `None`。セル画の地図を作るのは、これと `restricted` と `renew_labels` だけ
+    /// なので、セル画の地図はいつも正しい地図で、面に1つずつ別の番号が記してある
+    fn new(group_path: Vec<u64>, map: CheckedMap, prev: Option<&StoredMap>) -> Option<ScopeMap> {
+        let stored = StoredMap::from_dense(map.uniquely_labeled().map(), prev);
+        (!stored.is_empty()).then_some(ScopeMap { group_path, stored })
+    }
+
+    /// 面の番号が `ids` にある面だけを残した、階層 `group_path` の地図（`ids` が `None` なら全部の面：同じ地図）。正しい
+    /// 地図の面を外しても正しい地図のまま（外した面の所は何も無い所になり、辺は減るだけで、残る面の輪郭と番号は変わら
+    /// ない）なので、確かめ直さない。塊はこの地図と共有する。面が無くなれば `None`
+    fn restricted(&self, group_path: &[u64], ids: Option<&HashSet<ShapeId>>) -> Option<ScopeMap> {
+        let stored = match ids {
+            None => self.stored.clone(),
+            Some(ids) => {
+                let base = self.base();
+                if base.map.labels_within(ids) {
+                    self.stored.clone()
+                } else {
+                    StoredMap::from_dense(&base.map.restricted(ids), Some(&self.stored))
+                }
+            }
+        };
+        (!stored.is_empty()).then(|| ScopeMap {
+            group_path: group_path.to_vec(),
+            stored,
+        })
+    }
+
+    /// 面の番号を、みな新しい番号にする（`PlanarMap::renew_labels`。番号は面の形を変えないので、正しい地図のまま）
+    fn renew_labels(&mut self) {
+        let mut map = self.dense();
+        map.renew_labels();
+        self.stored = StoredMap::from_dense(&map, None);
+    }
+
     /// 計算に使う写し（持ち主（画面の土台など）が持っていればそれ、無ければ塊から作る：`LayerBase::of_stored`）
     pub(crate) fn base(&self) -> Arc<LayerBase> {
         LayerBase::of_stored(&self.stored)
@@ -386,17 +420,9 @@ fn scope_map_of(
     }) else {
         return Err(Unmappable);
     };
-    let m = &old[i];
-    let stored = if raw.len() == n {
-        m.stored.clone()
-    } else {
-        let ids = raw.iter().map(|s| s.shape_id).collect();
-        StoredMap::from_dense(&m.base().map.restricted(&ids), Some(&m.stored))
-    };
-    Ok(Some(ScopeMap {
-        group_path: path.to_vec(),
-        stored,
-    }))
+    let ids: Option<HashSet<ShapeId>> =
+        (raw.len() != n).then(|| raw.iter().map(|s| s.shape_id).collect());
+    Ok(old[i].restricted(path, ids.as_ref()))
 }
 
 /// テスト用：階層 `path` の生の図形 `raw`（下から順。新しい図形でよい）を図形から作った地図（`LayerBase::of`。正しい地図に
@@ -410,11 +436,12 @@ fn test_scope_map_from_shapes(
     let refs: Vec<&FillShape> = raw.iter().map(|s| &**s).collect();
     let base = LayerBase::of(&refs, Affine::IDENTITY).ok_or(Unmappable)?;
     let same_path = old.iter().find(|m| m.group_path == path);
-    let stored = StoredMap::from_dense(&uniquely_labeled(&base.map), same_path.map(|m| &m.stored));
-    Ok((!stored.is_empty()).then(|| ScopeMap {
-        group_path: path.to_vec(),
-        stored,
-    }))
+    let map = base.map.clone().checked().ok_or(Unmappable)?;
+    Ok(ScopeMap::new(
+        path.to_vec(),
+        map,
+        same_path.map(|m| &m.stored),
+    ))
 }
 
 impl Cel {
@@ -430,16 +457,15 @@ impl Cel {
     /// 階層ごとの地図 `maps`（正しい地図。下から順）とインスタンス（重なり位置 `order` つき）から作る（ファイルを読む
     /// とき）。面には新しい番号を記す。地図の塊は、同じレイヤーの直前のセル `prev` の同じ階層の地図と同じものを共有する
     pub(crate) fn from_maps(
-        maps: Vec<(Vec<u64>, PlanarMap)>,
+        maps: Vec<(Vec<u64>, CheckedMap)>,
         mut instances: Vec<SymbolInstance>,
         prev: Option<&Cel>,
     ) -> Self {
         let maps: Vec<ScopeMap> = maps
             .into_iter()
-            .map(|(group_path, map)| {
+            .filter_map(|(group_path, map)| {
                 let prev_map = prev.and_then(|c| c.scope_stored(&group_path));
-                let stored = StoredMap::from_dense(&uniquely_labeled(&map), prev_map);
-                ScopeMap { group_path, stored }
+                ScopeMap::new(group_path, map, prev_map)
             })
             .collect();
         instances.sort_by_key(|i| i.order);
@@ -519,7 +545,9 @@ impl Cel {
         items
     }
 
-    /// 並べる前の中身（階層の地図とインスタンス）を並べて入れる（`arranged`。同じ階層の地図は1つ）
+    /// 並べる前の中身（階層の地図とインスタンス）を並べて入れる（`arranged`）。同じ階層の地図が2つ以上来ることは無い
+    /// （中身の生の図形の地図は `insert_content` が断り、ファイルの同じ階層の地図は読み込みの確かめ（`check_maps`）が断る。
+    /// ほかの中身は、1枚のセル画の地図（階層ごとに1つ）から作る）
     fn arrange(&mut self, items: Vec<Item<ScopeMap>>) {
         let Ok((maps, instances)) = arranged(items, |_, mut maps: Vec<ScopeMap>| {
             Ok::<_, std::convert::Infallible>(maps.pop().filter(|m| !m.stored.is_empty()))
@@ -527,20 +555,15 @@ impl Cel {
         self.put(maps, instances);
     }
 
-    /// 地図とインスタンスを入れる
+    /// 地図とインスタンスを入れる。地図はいつも正しい地図で、面に1つずつ別の番号が記してある（`ScopeMap` を作れるのは
+    /// `ScopeMap::new`（確かめた地図から）・`restricted`・`renew_labels` だけ）。並びはいつも決まりどおり（`maps` と
+    /// `instances` は `arranged` の結果か、その地図1つを同じ階層の地図に置き換えたもの）なので、確かめ直さない
     fn put(&mut self, mut maps: Vec<ScopeMap>, mut instances: Vec<SymbolInstance>) {
         maps.shrink_to_fit();
         instances.shrink_to_fit();
         self.maps = Arc::new(maps);
         self.instances = Arc::new(instances);
         self.revision = crate::vector_engine::next_mesh_revision();
-        // テストでは、セル画に書くたびに、地図と重なりの順が決まりどおりかを確かめる
-        #[cfg(test)]
-        if crate::planar_map::test_checks() {
-            if let Some(m) = self.maps_problem() {
-                panic!("セル画の地図が決まりどおりでない: {m}");
-            }
-        }
     }
 
     #[inline]
@@ -568,9 +591,7 @@ impl Cel {
             return;
         }
         for m in Arc::make_mut(&mut self.maps) {
-            let mut map = m.dense();
-            map.renew_labels();
-            m.stored = StoredMap::from_dense(&map, None);
+            m.renew_labels();
         }
         self.revision = crate::vector_engine::next_mesh_revision();
     }
@@ -624,19 +645,15 @@ impl Cel {
         scope: &[u64],
         faces: &HashSet<ShapeId>,
         instances: &HashSet<u64>,
-        raw: Option<&PlanarMap>,
+        raw: Option<CheckedMap>,
         tween: Option<SymbolInstanceBinding>,
     ) -> Cel {
         let mut items = Vec::new();
-        if let Some(raw) = raw.filter(|m| !m.edges.is_empty()) {
-            let stored = StoredMap::from_dense(&uniquely_labeled(raw), self.scope_stored(scope));
-            items.push(Item::Raw(
-                Vec::new(),
-                ScopeMap {
-                    group_path: Vec::new(),
-                    stored,
-                },
-            ));
+        let has_raw = raw.is_some();
+        if let Some(m) =
+            raw.and_then(|raw| ScopeMap::new(Vec::new(), raw, self.scope_stored(scope)))
+        {
+            items.push(Item::Raw(Vec::new(), m));
         }
         for item in Self::items_of(&self.maps, &self.instances) {
             match item {
@@ -644,23 +661,11 @@ impl Cel {
                     let Some(rel) = path.strip_prefix(scope) else {
                         continue;
                     };
-                    if rel.is_empty() && raw.is_some() {
+                    if rel.is_empty() && has_raw {
                         continue;
                     }
-                    let base = m.base();
-                    let stored = if base.map.labels_within(faces) {
-                        m.stored.clone()
-                    } else {
-                        StoredMap::from_dense(&base.map.restricted(faces), Some(&m.stored))
-                    };
-                    if !stored.is_empty() {
-                        items.push(Item::Raw(
-                            rel.to_vec(),
-                            ScopeMap {
-                                group_path: rel.to_vec(),
-                                stored,
-                            },
-                        ));
+                    if let Some(m) = m.restricted(rel, Some(faces)) {
+                        items.push(Item::Raw(rel.to_vec(), m));
                     }
                 }
                 Item::Instance(mut inst) => {
@@ -707,11 +712,11 @@ impl Cel {
                         .ok_or(Unmappable)?
                 };
             }
-            let stored = StoredMap::from_dense(&uniquely_labeled(&map), None);
-            Ok((!stored.is_empty()).then(|| ScopeMap {
-                group_path: path.to_vec(),
-                stored,
-            }))
+            Ok(ScopeMap::new(
+                path.to_vec(),
+                map.checked().ok_or(Unmappable)?,
+                None,
+            ))
         })
         .ok()?;
         let mut cel = Cel::default();
@@ -738,15 +743,10 @@ impl Cel {
         for item in Self::items_of(&self.maps, &self.instances) {
             match item {
                 Item::Raw(path, m) => {
-                    let map = realized(&m.base().map, xform)?;
-                    let stored = StoredMap::from_dense(&freshly_labeled(&map), None);
-                    items.push(Item::Raw(
-                        path.clone(),
-                        ScopeMap {
-                            group_path: path,
-                            stored,
-                        },
-                    ));
+                    let map = realized(&m.base().map, xform)?.freshly_labeled();
+                    if let Some(m) = ScopeMap::new(path.clone(), map, None) {
+                        items.push(Item::Raw(path, m));
+                    }
                 }
                 Item::Instance(mut inst) => {
                     inst.binding.xform = xform * inst.binding.xform;
@@ -883,7 +883,7 @@ impl Cel {
             return None;
         }
         let (map, shapes) = change.into_face_shapes(&faces)?;
-        Some(MapWritten(self.put_map(group_path, &map, shapes)))
+        Some(MapWritten(self.put_map(group_path, map, shapes)))
     }
 
     /// 地図 `map`（文書の座標。面の図形 `shapes`：`MapChange::into_face_shapes`）を入れる：階層の地図をこの地図にする。
@@ -892,22 +892,17 @@ impl Cel {
     fn put_map(
         &mut self,
         group_path: &[u64],
-        map: &PlanarMap,
+        map: CheckedMap,
         shapes: Vec<Arc<FillShape>>,
     ) -> Option<Arc<LayerBase>> {
-        let stored = StoredMap::from_dense(map, self.scope_stored(group_path));
         let at = self.maps.iter().position(|m| m.group_path == group_path);
-        if stored.is_empty() {
+        let Some(m) = ScopeMap::new(group_path.to_vec(), map, self.scope_stored(group_path)) else {
             let mut items = Self::items_of(&self.maps, &self.instances);
             items.retain(|it| !matches!(it, Item::Raw(p, _) if p == group_path));
             self.arrange(items);
             return None;
-        }
-        let base = LayerBase::with_faces(stored.clone(), group_path, shapes);
-        let m = ScopeMap {
-            group_path: group_path.to_vec(),
-            stored,
         };
+        let base = LayerBase::with_faces(m.stored.clone(), group_path, shapes);
         match at {
             Some(i) => {
                 let mut maps = (*self.maps).clone();

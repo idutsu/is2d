@@ -11,8 +11,8 @@ use kurbo::Affine;
 
 use crate::canvas_tool::{LayerId, Placement, SceneBaseCache, ShapeId};
 use crate::planar_map::{
-    cut_out, faces_with_ids, per_layer_parallel, realized, region_map, LayerBase, MapChange,
-    MapInput, MapRule, PlanarMap,
+    cut_out, faces_with_ids, per_layer_parallel, realized, region_map, CheckedMap, LayerBase,
+    MapChange, MapInput, MapRule, PlanarMap,
 };
 use crate::stored_map::StoredMap;
 use crate::vector_engine::FillShape;
@@ -112,7 +112,7 @@ impl Origin {
         if change.removed.is_empty() && change.added.is_empty() {
             return None;
         }
-        let base = LayerBase::of_stored(&StoredMap::from_dense(&change.map, Some(cel)));
+        let base = LayerBase::of_stored(&StoredMap::from_dense(change.map.map(), Some(cel)));
         Some(Self {
             rest: base.stored.clone(),
             held: Some(base),
@@ -153,7 +153,7 @@ impl FloatLayer {
     pub(crate) fn pieces_map(&self) -> Option<PlanarMap> {
         let mut map = PlanarMap::default();
         for g in &self.groups {
-            let piece = realized(&g.base().map, g.xform)?;
+            let piece = realized(&g.base().map, g.xform)?.into_map();
             map = if map.edges.is_empty() {
                 piece
             } else {
@@ -164,25 +164,26 @@ impl FloatLayer {
     }
 
     /// 選んだもの（番号が `ids` の、中身の地図の面と片）の地図：中身の地図の選んだ面に、選んだ片の組を下から順に重ねる
-    /// （確定と同じ重ね方。新しい中身）。`None`：画面に出していないレイヤーか、格子に置けない座標がある
+    /// （確定と同じ重ね方。新しい中身。確かめた地図：`checked`）。`None`：画面に出していないレイヤーか、格子に置けない
+    /// 座標があるか、正しい地図にならない
     pub(crate) fn selected_map(
         &self,
         stage: Stage<'_>,
         ids: &HashSet<ShapeId>,
-    ) -> Option<PlanarMap> {
+    ) -> Option<CheckedMap> {
         let mut map = self.content(&stage.cel(self.layer_id)?).map.restricted(ids);
         for g in &self.groups {
             let Some(g) = g.restricted(ids, self.layer_id, stage.scope) else {
                 continue;
             };
-            let piece = realized(&g.base().map, g.xform)?;
+            let piece = realized(&g.base().map, g.xform)?.into_map();
             map = if map.edges.is_empty() {
                 piece
             } else {
                 map.overlay(MapInput::Map(&piece), MapRule::Overlay)?
             };
         }
-        Some(map)
+        map.checked()
     }
 
     /// 画面の土台 `stage` のセル画の地図の上で確定した地図（`committed`）
@@ -195,7 +196,7 @@ impl FloatLayer {
     pub(crate) fn committed(&self, cel: &Arc<LayerBase>) -> Option<PlanarMap> {
         let mut map = self.content(cel).map.clone();
         for g in &self.groups {
-            let piece = realized(&g.base().map, g.xform)?;
+            let piece = realized(&g.base().map, g.xform)?.into_map();
             map = map.overlay(MapInput::Map(&piece), MapRule::Overlay)?;
         }
         Some(map)
@@ -624,7 +625,7 @@ fn cut_layer(
                 }
             };
             let (rest, inside) = cut_out(&cel, &own, content, region, layer_id, stage.scope)?;
-            (rest, inside.map)
+            (rest, inside.map.into_map())
         }
     };
     let mut groups = cur.groups.clone();

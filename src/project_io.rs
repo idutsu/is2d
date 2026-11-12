@@ -7,7 +7,7 @@ use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{cancel_active_drag, SelectSubMode, Session, Tab, UndoHistory, View};
-use crate::planar_map::{MapEdge, PlanarMap};
+use crate::planar_map::{CheckedMap, MapEdge, PlanarMap};
 use crate::symbol::{
     ColorEffect, Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode,
     TweenRotate,
@@ -484,8 +484,9 @@ impl SavedScopeMap {
         }
     }
 
-    /// 地図に戻す。番号が範囲の外か、正しい地図でなければ `Err`（アプリは正しい地図しか書かないので、ファイルが壊れたとき）
-    pub(crate) fn to_map(&self) -> Result<PlanarMap, String> {
+    /// 地図に戻す（確かめた地図：`PlanarMap::checked`）。番号が範囲の外か、正しい地図でなければ `Err`（アプリは正しい地図
+    /// しか書かないので、ファイルが壊れたとき）
+    pub(crate) fn to_map(&self) -> Result<CheckedMap, String> {
         let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
         if !self.nodes.len().is_multiple_of(2) || self.edges.len() > MAX_MAP_EDGES {
             return Err(broken());
@@ -522,10 +523,7 @@ impl SavedScopeMap {
                 .collect(),
             edges,
         };
-        if !map.is_valid() {
-            return Err(broken());
-        }
-        Ok(map)
+        map.checked().ok_or_else(broken)
     }
 }
 
@@ -572,7 +570,7 @@ impl Keyframe {
     /// 読んだキーフレーム `s`。地図の塊は、同じレイヤーの直前のキーフレーム `prev` のセル画と同じものを共有する
     fn from_saved(s: SavedKeyframe, prev: Option<&Keyframe>) -> Self {
         // 正しくない地図は、読み込みの確かめ（`ProjectDocument::check_maps`）で断ってある。ここでは飛ばすだけ
-        let maps: Vec<(Vec<u64>, PlanarMap)> = s
+        let maps: Vec<(Vec<u64>, CheckedMap)> = s
             .maps
             .iter()
             .filter_map(|m| Some((m.group_path.clone(), m.to_map().ok()?)))
@@ -869,13 +867,18 @@ impl ProjectDocument {
         fixed
     }
 
-    /// 読み込んだ地図がどれも正しい地図か（`SavedScopeMap::to_map`）。正しくなければ壊れたファイルとして断る
+    /// 読み込んだ地図がどれも正しい地図か（`SavedScopeMap::to_map`）、1つのキーフレームに同じ階層の地図が2つ無いか。
+    /// そうでなければ壊れたファイルとして断る
     pub(crate) fn check_maps(&self) -> Result<(), String> {
         let timelines =
             std::iter::once(&self.timeline).chain(self.library.iter().map(|s| &s.timeline));
         for tl in timelines {
             for kf in tl.layers.iter().flat_map(|l| &l.keyframes) {
+                let mut paths = HashSet::with_capacity(kf.maps.len());
                 for m in &kf.maps {
+                    if !paths.insert(&m.group_path) {
+                        return Err("プロジェクトファイルの地図が壊れています".to_owned());
+                    }
                     m.to_map()?;
                 }
             }

@@ -322,7 +322,8 @@ impl PlanarMap {
     /// 正しい地図か（判定の形＝格子の上の折れ線で、整数で決める。設計 段階2 の 2-2）：
     /// 折れ線どうしが共有する頂点のほかで触れず、1本の折れ線が自分と触れず、別々の頂点が別々の格子の点に丸まり、
     /// 面の輪郭が閉じて色がそろい、色のある穴に外周があり（`faces` の壊れた数が 0）、何も無い側の輪郭が色のある面の
-    /// 中に入り込んでいない（重なった図形をそのまま地図にしたものでない）
+    /// 中に入り込んでいない（重なった図形をそのまま地図にしたものでない）。テスト用：本番は `checked`・`valid_faces`
+    #[cfg(test)]
     pub(crate) fn is_valid(&self) -> bool {
         self.valid_faces().is_some()
     }
@@ -1243,7 +1244,8 @@ impl LayerBase {
 
     /// 面の図形を地図から作る（`faces`。番号の順）
     fn face_shapes(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
-        let (faces, ids) = face_ids(&self.map);
+        let (faces, _) = self.map.faces();
+        let ids = face_ids(&faces, FaceIds::Keep);
         let mut shapes: Vec<Arc<FillShape>> = faces
             .iter()
             .zip(ids)
@@ -1303,7 +1305,11 @@ impl LayerBase {
         Some(MapChange {
             removed,
             added,
-            map: labeled(next.clone(), &faces, &ids),
+            map: CheckedMap {
+                map: next.clone(),
+                faces,
+            }
+            .with_ids(&ids),
             ids,
         })
     }
@@ -1332,7 +1338,11 @@ impl LayerBase {
             let ids: Vec<ShapeId> = added.iter().map(|s| s.shape_id).collect();
             Some(MapChange {
                 removed: own.iter().map(|s| s.shape_id).collect(),
-                map: labeled(next.clone(), &faces, &ids),
+                map: CheckedMap {
+                    map: next.clone(),
+                    faces,
+                }
+                .with_ids(&ids),
                 added,
                 ids,
             })
@@ -1977,8 +1987,8 @@ pub(crate) struct MapChange {
     pub(crate) removed: Vec<ShapeId>,
     /// 新しく入れる塗りの形（座標の変換で置いた写し）
     pub(crate) added: Vec<FillShape>,
-    /// 結果の地図（文書の座標）。面の辺の側に、その面の図形の番号を記してある（`labeled`）
-    pub(crate) map: PlanarMap,
+    /// 結果の地図（文書の座標。確かめた地図）。面の辺の側に、その面の図形の番号を記してある（`labeled`）
+    pub(crate) map: CheckedMap,
     /// 結果の地図の面ごとの図形の番号（面の順。みな別の番号）
     pub(crate) ids: Vec<ShapeId>,
 }
@@ -2049,10 +2059,11 @@ impl PlanarMap {
 
 /// 地図 `map`（文書の座標）に変換 `xform` をかけ、その座標の格子で正しい地図にしたもの。変換した地図が正しくなければ
 /// （縮小で頂点が近づくなど）、変換した面を塗り重ねて作る（面は重ならないので、絵は同じ。面の番号は消える）。
-/// 「変形した形を、その座標の格子で地図にする」決まり。`None`：格子に置けない座標がある
-pub(crate) fn realized(map: &PlanarMap, xform: Affine) -> Option<PlanarMap> {
+/// 「変形した形を、その座標の格子で地図にする」決まり。結果は確かめた地図（`checked`）。`None`：格子に置けない座標が
+/// あるか、正しい地図にならない
+pub(crate) fn realized(map: &PlanarMap, xform: Affine) -> Option<CheckedMap> {
     if xform == Affine::IDENTITY {
-        return Some(map.clone());
+        return map.clone().checked();
     }
     let t = map.transformed(xform);
     if !on_grid(
@@ -2063,8 +2074,8 @@ pub(crate) fn realized(map: &PlanarMap, xform: Affine) -> Option<PlanarMap> {
     ) {
         return None;
     }
-    if t.is_valid() {
-        return Some(t);
+    if let Some(checked) = t.checked() {
+        return Some(checked);
     }
     let (faces, _) = map.faces();
     let shapes: Vec<FillShape> = faces
@@ -2076,7 +2087,7 @@ pub(crate) fn realized(map: &PlanarMap, xform: Affine) -> Option<PlanarMap> {
         })
         .collect();
     let refs: Vec<&FillShape> = shapes.iter().collect();
-    painted_map(&refs)
+    painted_map(&refs)?.checked()
 }
 
 /// 地図 `map`（文書の座標）の面の図形と、面の辺の側にその番号を記した地図。面の番号は、辺の側に記された番号が1つの面は
@@ -2086,7 +2097,8 @@ pub(crate) fn faces_with_ids(
     layer_id: LayerId,
     group_path: &[u64],
 ) -> (PlanarMap, Vec<FillShape>) {
-    let (faces, ids) = face_ids(map);
+    let (faces, _) = map.faces();
+    let ids = face_ids(&faces, FaceIds::Keep);
     let shapes = faces
         .iter()
         .zip(&ids)
@@ -2099,31 +2111,96 @@ pub(crate) fn faces_with_ids(
     (labeled(map.clone(), &faces, &ids), shapes)
 }
 
-/// 地図 `map` の面の番号（`faces_with_ids` の決まり）：（面, 面ごとの番号）
-fn face_ids(map: &PlanarMap) -> (Vec<MapFace>, Vec<ShapeId>) {
-    let (faces, _) = map.faces();
+/// 面ごとの番号の決め方（`face_ids`）
+#[derive(Clone, Copy)]
+enum FaceIds {
+    /// 辺の側に記された番号が1つの面はその番号（同じ番号の面が2つ以上あれば、面の順で前の面だけ）、ほかは新しい番号
+    Keep,
+    /// みな新しい番号（新しい中身を置くとき。元の面と番号が重ならない）
+    Fresh,
+}
+
+/// 面 `faces` の番号（面ごとに1つずつ別の番号）。面の番号の決め方はこれ1つ
+fn face_ids(faces: &[MapFace], how: FaceIds) -> Vec<ShapeId> {
     let mut used: HashSet<ShapeId> = HashSet::new();
-    let ids: Vec<ShapeId> = faces
+    faces
         .iter()
-        .map(|f| match f.srcs[..] {
-            [id] if used.insert(id) => id,
+        .map(|f| match (how, &f.srcs[..]) {
+            (FaceIds::Keep, [id]) if used.insert(*id) => *id,
             _ => crate::vector_engine::next_shape_id(),
         })
-        .collect();
-    (faces, ids)
+        .collect()
 }
 
-/// 地図 `map` の面の辺の側に、面ごとに1つずつ別の番号（`face_ids`）を記した地図（セル画にしまう地図）
-pub(crate) fn uniquely_labeled(map: &PlanarMap) -> PlanarMap {
-    let (faces, ids) = face_ids(map);
-    labeled(map.clone(), &faces, &ids)
+/// 正しい地図（`valid_faces` で確かめたもの）と、その面。作れるのは `PlanarMap::checked` と、正しい地図を正しいまま
+/// 変える、このあとのメソッドだけなので、これを受け取る所（セル画にしまう地図：`ScopeMap::new`）は確かめ直さない
+#[derive(Clone, Debug)]
+pub(crate) struct CheckedMap {
+    map: PlanarMap,
+    faces: Vec<MapFace>,
 }
 
-/// 地図 `map` の面の辺の側に、面ごとにみな新しい番号を記した地図（新しい中身を置くとき。元の面と番号が重ならない）
-pub(crate) fn freshly_labeled(map: &PlanarMap) -> PlanarMap {
-    let mut m = uniquely_labeled(map);
-    m.renew_labels();
-    m
+impl PlanarMap {
+    /// 正しい地図なら（`valid_faces`。受け入れの判定はこれ1つ）、確かめた地図にする。`None`：正しい地図でない
+    pub(crate) fn checked(self) -> Option<CheckedMap> {
+        let faces = self.valid_faces()?;
+        Some(CheckedMap { map: self, faces })
+    }
+}
+
+impl CheckedMap {
+    pub(crate) fn map(&self) -> &PlanarMap {
+        &self.map
+    }
+
+    pub(crate) fn into_map(self) -> PlanarMap {
+        self.map
+    }
+
+    /// 面の辺の側に、面ごとに1つずつ別の番号（`face_ids` の `Keep`）を記したもの（セル画にしまう地図）。辺の側の番号は
+    /// 面の形を変えないので、正しい地図のまま
+    pub(crate) fn uniquely_labeled(self) -> CheckedMap {
+        self.labeled(FaceIds::Keep)
+    }
+
+    /// 面の辺の側に、面ごとにみな新しい番号（`face_ids` の `Fresh`）を記したもの
+    pub(crate) fn freshly_labeled(self) -> CheckedMap {
+        self.labeled(FaceIds::Fresh)
+    }
+
+    fn labeled(self, how: FaceIds) -> CheckedMap {
+        let ids = face_ids(&self.faces, how);
+        self.with_ids(&ids)
+    }
+
+    /// 面の辺の側に、面ごとの番号 `ids`（面の順）を記したもの
+    fn with_ids(self, ids: &[ShapeId]) -> CheckedMap {
+        let map = labeled(self.map, &self.faces, ids);
+        let faces = self
+            .faces
+            .into_iter()
+            .zip(ids)
+            .map(|(mut f, &id)| {
+                f.srcs = vec![id];
+                f
+            })
+            .collect();
+        CheckedMap { map, faces }
+    }
+
+    /// 辺の側に記した図形の番号を、`f` が返す番号に付け替える（`PlanarMap::relabel`。面の番号も）
+    fn relabel(&mut self, mut f: impl FnMut(ShapeId) -> Option<ShapeId>) {
+        self.map.relabel(&mut f);
+        for face in &mut self.faces {
+            for id in &mut face.srcs {
+                if let Some(n) = f(*id) {
+                    *id = n;
+                }
+            }
+            face.srcs.sort_unstable();
+            face.srcs.dedup();
+        }
+    }
 }
 
 /// 選ぶ所の地図：地図 `parts`（同じ地図から切り出した、重ならない面）を合わせた所に、形 `rect` を足した所（色のある所が
@@ -2193,7 +2270,7 @@ impl MapChange {
     pub(crate) fn into_face_shapes(
         self,
         old: &[Arc<FillShape>],
-    ) -> Option<(PlanarMap, Vec<Arc<FillShape>>)> {
+    ) -> Option<(CheckedMap, Vec<Arc<FillShape>>)> {
         let old: HashMap<ShapeId, &Arc<FillShape>> = old.iter().map(|s| (s.shape_id, s)).collect();
         let mut added: HashMap<ShapeId, FillShape> =
             self.added.into_iter().map(|s| (s.shape_id, s)).collect();

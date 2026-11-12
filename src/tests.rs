@@ -15071,7 +15071,7 @@ fn test_m4_3_saved_map_roundtrip_bit_exact_and_load_shrinks_capacities() {
                 .collect::<Vec<_>>(),
         )
     };
-    assert_eq!(bits(map), bits(&back));
+    assert_eq!(bits(map), bits(back.map()));
 
     // 2. 保存して読み込むと、地図はビットまで同じで、図形の数も同じ。図形の Vec の capacity は len と同じ
     let tmp_path = std::env::temp_dir().join(format!("m4_3_shrink_{}.is2d", std::process::id()));
@@ -22072,7 +22072,9 @@ mod map_overlay {
                 m = next;
             }
         }
-        crate::planar_map::realized(&m, kurbo::Affine::scale(scale)).expect("縮めた地図")
+        crate::planar_map::realized(&m, kurbo::Affine::scale(scale))
+            .expect("縮めた地図")
+            .into_map()
     }
 
     /// 地図 `m` で、頂点の移動と辺のつまみ（ずらす量は `reach`）を交互に `n` 回確定し、（確定できた回, 正しくない地図の説明）
@@ -25942,7 +25944,10 @@ mod map_overlay {
             .collect();
         for seed in 0..100 {
             let cel = crate::timeline::Cel::from_maps(
-                vec![(Vec::new(), native_scene(seed, 4))],
+                vec![(
+                    Vec::new(),
+                    native_scene(seed, 4).checked().expect("正しい地図"),
+                )],
                 Vec::new(),
                 None,
             );

@@ -7,7 +7,7 @@ use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, finish_cel_writes, write_cel, Clipboard, LayerId,
     MoveSelectionDrag, Tab,
 };
-use crate::planar_map::{freshly_labeled, PlanarMap};
+use crate::planar_map::PlanarMap;
 use crate::symbol::{Document, SymbolDef};
 use crate::timeline::{Cel, Timeline};
 
@@ -70,7 +70,7 @@ pub(crate) fn selected_content(tab: &Tab) -> Option<Content> {
             scope,
             &session.selection.shapes,
             &session.selection.instances,
-            raw.as_ref(),
+            raw,
             tween,
         );
         if !picked.is_empty() {
@@ -149,7 +149,7 @@ pub(crate) fn prepare_placement(
         let nested = nested.transformed(xform)?;
         let raw = match raw {
             Some(m) if !m.fits_grid(xform) => return None,
-            Some(m) => Some(freshly_labeled(&m)),
+            Some(m) => Some(m.checked()?.freshly_labeled().into_map()),
             None => None,
         };
         let i = match by_layer.iter().position(|l| l.0 == target) {
@@ -326,57 +326,54 @@ fn existing_reusable_target_symbol_id(
         .then_some(candidate)
 }
 
-fn can_paste_clipboard_symbol_inner(
-    tab: &Tab,
-    clipboard: &Clipboard,
-    src_sym_id: u64,
-    visited: &mut Vec<u64>,
-) -> bool {
-    if tab.session.edit_path.is_empty() {
-        return true;
-    }
-    if visited.contains(&src_sym_id) {
-        return true;
-    }
-    visited.push(src_sym_id);
-
-    if let Some(live_id) = existing_reusable_target_symbol_id(tab, clipboard, src_sym_id) {
-        return tab
-            .doc
-            .can_place_symbol_in_current_context(&tab.session.edit_path, live_id);
-    }
-
-    if tab.id == clipboard.source_doc_id
-        && tab
-            .session
-            .edit_path
-            .levels
-            .iter()
-            .any(|lvl| lvl.symbol_id == src_sym_id)
-    {
-        return false;
-    }
-
-    let Some(src_sym) = clipboard.symbols.iter().find(|s| s.id == src_sym_id) else {
-        return true;
-    };
-
-    for inst in src_sym.timeline.instances() {
-        if !can_paste_clipboard_symbol_inner(tab, clipboard, inst.binding.symbol_id, visited) {
-            return false;
-        }
-    }
-    true
-}
-
-/// クリップボード内のシンボル `src_sym_id` が現在の編集コンテキストに対して循環参照を起こさずに配置可能かを判定する
+/// クリップボード内のシンボル `src_sym_id` が現在の編集コンテキストに対して循環参照を起こさずに配置可能かを判定する：
+/// 中身を（貼り先のシンボルを使えるものは、そのシンボルの中身を）たどって、編集中のシンボルに行き着かないか
+/// （`symbol::reaches`。同じタブのクリップボードのシンボルは、同じ番号の文書のシンボルそのもの）
 pub(crate) fn can_paste_clipboard_symbol(
     tab: &Tab,
     clipboard: &Clipboard,
     src_sym_id: u64,
 ) -> bool {
-    let mut visited = Vec::new();
-    can_paste_clipboard_symbol_inner(tab, clipboard, src_sym_id, &mut visited)
+    /// たどる相手：クリップボードのシンボルか、貼り先の文書のシンボル
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum Node {
+        Clip(u64),
+        Doc(u64),
+    }
+    let levels = &tab.session.edit_path.levels;
+    if levels.is_empty() {
+        return true;
+    }
+    let same_doc = tab.id == clipboard.source_doc_id;
+    let node = |id: u64| {
+        existing_reusable_target_symbol_id(tab, clipboard, id).map_or(Node::Clip(id), Node::Doc)
+    };
+    let editing = |id: u64| levels.iter().any(|lvl| lvl.symbol_id == id);
+    !crate::symbol::reaches(
+        node(src_sym_id),
+        |n| match n {
+            Node::Doc(id) => editing(id),
+            Node::Clip(id) => same_doc && editing(id),
+        },
+        |n| match n {
+            Node::Doc(id) => tab
+                .doc
+                .child_symbol_ids(id)
+                .into_iter()
+                .map(Node::Doc)
+                .collect(),
+            Node::Clip(id) => clipboard
+                .symbols
+                .iter()
+                .find(|s| s.id == id)
+                .map_or_else(Vec::new, |s| {
+                    s.timeline
+                        .instances()
+                        .map(|inst| node(inst.binding.symbol_id))
+                        .collect()
+                }),
+        },
+    )
 }
 
 fn collect_needed_clipboard_imports(
