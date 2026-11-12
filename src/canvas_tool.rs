@@ -433,7 +433,7 @@ impl View {
 
     /// ドラッグを始めたときに、ポインタが押した位置 `press`（ワールド座標）から `now` へもう動いているか（この判定はこれ1つ）
     pub(crate) fn moved_since_press(press: Point, now: Point) -> bool {
-        (now - press).hypot() > 1e-6
+        (now - press).hypot() > crate::vector_engine::SAME_TOL
     }
 
     /// スクリーン上の指定位置 `anchor_screen`（マウスカーソル位置）がズーム前後で動かないように倍率 `factor` を掛ける

@@ -567,14 +567,18 @@ impl From<&Keyframe> for SavedKeyframe {
 }
 
 impl Keyframe {
-    /// 読んだキーフレーム `s`。地図の塊は、同じレイヤーの直前のキーフレーム `prev` のセル画と同じものを共有する
-    fn from_saved(s: SavedKeyframe, prev: Option<&Keyframe>) -> Self {
-        // 正しくない地図は、読み込みの確かめ（`ProjectDocument::check_maps`）で断ってある。ここでは飛ばすだけ
-        let maps: Vec<(Vec<u64>, CheckedMap)> = s
-            .maps
-            .iter()
-            .filter_map(|m| Some((m.group_path.clone(), m.to_map().ok()?)))
-            .collect();
+    /// 読んだキーフレーム `s`。地図の塊は、同じレイヤーの直前のキーフレーム `prev` のセル画と同じものを共有する。地図が
+    /// 正しい地図でないか（`SavedScopeMap::to_map`）、同じ階層の地図が2つあれば、壊れたファイルとして `Err`。読み込みで
+    /// 地図を確かめるのはここだけ
+    fn from_saved(s: SavedKeyframe, prev: Option<&Keyframe>) -> Result<Self, String> {
+        let mut paths = HashSet::with_capacity(s.maps.len());
+        let mut maps: Vec<(Vec<u64>, CheckedMap)> = Vec::with_capacity(s.maps.len());
+        for m in &s.maps {
+            if !paths.insert(&m.group_path) {
+                return Err("プロジェクトファイルの地図が壊れています".to_owned());
+            }
+            maps.push((m.group_path.clone(), m.to_map()?));
+        }
         let mut seen_gids = HashSet::with_capacity(s.instances.len());
         let instances: Vec<SymbolInstance> = s
             .instances
@@ -585,12 +589,12 @@ impl Keyframe {
             .filter(|inst| seen_gids.insert(inst.binding.instance_gid))
             .collect();
         let cel = Cel::from_maps(maps, instances, prev.map(|kf| &kf.cel));
-        Self {
+        Ok(Self {
             start_frame: s.start_frame,
             cel,
             tween: s.tween,
             tween_rotate: s.tween_rotate,
-        }
+        })
     }
 }
 
@@ -628,12 +632,14 @@ impl From<&Layer> for SavedLayer {
     }
 }
 
-impl From<SavedLayer> for Layer {
-    fn from(s: SavedLayer) -> Self {
+impl TryFrom<SavedLayer> for Layer {
+    type Error = String;
+
+    fn try_from(s: SavedLayer) -> Result<Self, String> {
         let frame_count = s.frame_count.clamp(1, MAX_TIMELINE_FRAMES);
         let mut keyframes: Vec<Arc<Keyframe>> = Vec::with_capacity(s.keyframes.len());
         for saved in s.keyframes {
-            let kf = Keyframe::from_saved(saved, keyframes.last().map(|kf| &**kf));
+            let kf = Keyframe::from_saved(saved, keyframes.last().map(|kf| &**kf))?;
             if kf.start_frame < frame_count {
                 keyframes.push(Arc::new(kf));
             }
@@ -643,7 +649,7 @@ impl From<SavedLayer> for Layer {
         if keyframes.first().is_none_or(|kf| kf.start_frame != 0) {
             keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
         }
-        Self {
+        Ok(Self {
             // 使えない番号（`is_safe_id`）は、タイムラインを作るときに新しい番号にする
             id: s.id,
             name: s.name,
@@ -651,7 +657,7 @@ impl From<SavedLayer> for Layer {
             locked: s.locked,
             frame_count,
             keyframes: keyframes.into(),
-        }
+        })
     }
 }
 
@@ -682,14 +688,16 @@ impl From<&Timeline> for SavedTimeline {
     }
 }
 
-impl From<SavedTimeline> for Timeline {
-    fn from(s: SavedTimeline) -> Self {
+impl TryFrom<SavedTimeline> for Timeline {
+    type Error = String;
+
+    fn try_from(s: SavedTimeline) -> Result<Self, String> {
         let mut layers: Vec<Layer> = s
             .layers
             .into_iter()
             .take(MAX_LAYERS_PER_TIMELINE)
-            .map(Layer::from)
-            .collect();
+            .map(Layer::try_from)
+            .collect::<Result<_, _>>()?;
         if layers.is_empty() {
             layers.push(Layer::new_with_id(1, "Layer 1"));
         }
@@ -746,7 +754,7 @@ impl From<SavedTimeline> for Timeline {
             cell_selection: Some(TimelineCellSelection::single(active_layer, current_frame)),
         };
         tl.sync_total_frames();
-        tl
+        Ok(tl)
     }
 }
 
@@ -767,9 +775,15 @@ impl From<&SymbolDef> for SavedSymbolDef {
     }
 }
 
-impl From<SavedSymbolDef> for SymbolDef {
-    fn from(s: SavedSymbolDef) -> Self {
-        SymbolDef::with_timeline(s.id, s.name, s.timeline.into())
+impl TryFrom<SavedSymbolDef> for SymbolDef {
+    type Error = String;
+
+    fn try_from(s: SavedSymbolDef) -> Result<Self, String> {
+        Ok(SymbolDef::with_timeline(
+            s.id,
+            s.name,
+            s.timeline.try_into()?,
+        ))
     }
 }
 
@@ -867,29 +881,10 @@ impl ProjectDocument {
         fixed
     }
 
-    /// 読み込んだ地図がどれも正しい地図か（`SavedScopeMap::to_map`）、1つのキーフレームに同じ階層の地図が2つ無いか。
-    /// そうでなければ壊れたファイルとして断る
-    pub(crate) fn check_maps(&self) -> Result<(), String> {
-        let timelines =
-            std::iter::once(&self.timeline).chain(self.library.iter().map(|s| &s.timeline));
-        for tl in timelines {
-            for kf in tl.layers.iter().flat_map(|l| &l.keyframes) {
-                let mut paths = HashSet::with_capacity(kf.maps.len());
-                for m in &kf.maps {
-                    if !paths.insert(&m.group_path) {
-                        return Err("プロジェクトファイルの地図が壊れています".to_owned());
-                    }
-                    m.to_map()?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// 読み込んだ `ProjectDocument` から正規化済みの `Document` を構築する
-    pub(crate) fn into_document(self) -> Document {
+    /// 読み込んだ `ProjectDocument` から正規化済みの `Document` を構築する。地図が壊れていれば `Err`
+    pub(crate) fn into_document(self) -> Result<Document, String> {
         let fps = self.timeline.fps.clamp(1, 60);
-        let mut timeline: Timeline = self.timeline.into();
+        let mut timeline: Timeline = self.timeline.try_into()?;
 
         // 重複または不正（id == 0 / id > MAX_SAFE_ENTITY_ID）な SymbolDef::id を一意な安全IDへ再採番してライブラリを構築
         let mut seen_sym_ids = HashSet::with_capacity(self.library.len());
@@ -905,7 +900,7 @@ impl ProjectDocument {
         let mut sym_id_remap: HashMap<u64, u64> = HashMap::new();
         let mut library: Vec<SymbolDef> = Vec::with_capacity(self.library.len());
         for saved_sym in self.library {
-            let mut sym = SymbolDef::from(saved_sym);
+            let mut sym = SymbolDef::try_from(saved_sym)?;
             let orig_id = sym.id;
             if !is_safe_id(sym.id) || !seen_sym_ids.insert(sym.id) {
                 while seen_sym_ids.contains(&next_fallback_sym_id) {
@@ -1006,7 +1001,7 @@ impl ProjectDocument {
         };
         let w = self.stage_size[0].clamp(100.0, 3840.0);
         let h = self.stage_size[1].clamp(100.0, 2160.0);
-        Document {
+        Ok(Document {
             root: timeline,
             library,
             stage_size: Vec2::new(w, h),
@@ -1014,13 +1009,13 @@ impl ProjectDocument {
             next_symbol_id: raw_next_sym_id.max(max_sym_id.saturating_add(1)).max(1),
             next_group_id: raw_next_gid.max(next_gid).max(1),
             revision: crate::vector_engine::next_mesh_revision(),
-        }
+        })
     }
 
     /// 読み込んだ `ProjectDocument` を現在のアクティブタブへ適用し、作業キャンバスや履歴を初期化する
     #[cfg(test)]
     pub(crate) fn apply_to_app(self, tab: &mut Tab) {
-        let doc = self.into_document();
+        let doc = self.into_document().expect("正しい地図の文書");
         reset_active_document_state(tab, doc);
     }
 }
@@ -1174,7 +1169,6 @@ pub(crate) fn read_project_document(path: &Path) -> Result<ProjectDocument, Stri
             doc.version
         ));
     }
-    doc.check_maps()?;
     Ok(doc)
 }
 
@@ -1270,7 +1264,7 @@ pub(crate) fn open_project_in_tab(
     // 2. ファイル内容を先に検証・パース（エラー時にタブを増やさない）
     let proj_doc = read_project_document(path)?;
     let before_counts = saved_element_counts(&proj_doc);
-    let doc = proj_doc.into_document();
+    let doc = proj_doc.into_document()?;
     let after_counts = document_element_counts(&doc);
     let trimmed = after_counts
         .into_iter()

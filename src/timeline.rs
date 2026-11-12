@@ -112,6 +112,9 @@ pub(crate) fn interpolate_affine_with_pivot(
     }
 
     let cw_delta = (rot1 - rot0).rem_euclid(std::f64::consts::TAU);
+    // 同じ向きとみなす角度の差（ラジアン）。向きが同じなら、回す向きを決めたトゥイーンは1回転する
+    const SAME_ANGLE: f64 = 1e-5;
+    let same_angle = cw_delta < SAME_ANGLE || std::f64::consts::TAU - cw_delta < SAME_ANGLE;
     let delta_rot = match rotate_mode {
         TweenRotate::Auto => {
             if cw_delta > std::f64::consts::PI {
@@ -121,14 +124,14 @@ pub(crate) fn interpolate_affine_with_pivot(
             }
         }
         TweenRotate::Clockwise => {
-            if cw_delta < 1e-5 || (std::f64::consts::TAU - cw_delta) < 1e-5 {
+            if same_angle {
                 std::f64::consts::TAU
             } else {
                 cw_delta
             }
         }
         TweenRotate::CounterClockwise => {
-            if cw_delta < 1e-5 || (std::f64::consts::TAU - cw_delta) < 1e-5 {
+            if same_angle {
                 -std::f64::consts::TAU
             } else {
                 cw_delta - std::f64::consts::TAU
@@ -174,7 +177,7 @@ pub(crate) fn interpolate_affine_with_pivot(
 fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64) {
     let [a, b, c, d, _, _] = affine.as_coeffs();
     let sx = a.hypot(b);
-    let (cos_r, sin_r, rot) = if sx > 1e-9 {
+    let (cos_r, sin_r, rot) = if sx > crate::vector_engine::TINY_LEN {
         (a / sx, b / sx, b.atan2(a))
     } else {
         (1.0, 0.0, 0.0)
@@ -520,7 +523,7 @@ impl Cel {
     }
 
     /// 並べる前の中身（階層の地図とインスタンス）を並べて入れる（`arranged`）。同じ階層の地図が2つ以上来ることは無い
-    /// （中身の生の図形の地図は `insert_content` が断り、ファイルの同じ階層の地図は読み込みの確かめ（`check_maps`）が断る。
+    /// （中身の生の図形の地図は `insert_content` が断り、ファイルの同じ階層の地図は読み込み（`Keyframe::from_saved`）が断る。
     /// ほかの中身は、1枚のセル画の地図（階層ごとに1つ）から作る）
     fn arrange(&mut self, items: Vec<Item<ScopeMap>>) {
         let Ok((maps, instances)) = arranged(items, |_, mut maps: Vec<ScopeMap>| {

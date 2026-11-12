@@ -140,7 +140,7 @@ impl Recovery {
                     .recovery_source
                     .take()
                     .ok_or_else(|| "復旧ファイルに元のファイル場所がありません".to_owned())?;
-                open_document_in_new_tab(ws, proj_doc.into_document())?;
+                open_document_in_new_tab(ws, proj_doc.into_document()?)?;
                 ws.tab_mut().file = Some(src);
                 ws.tab_mut().history.mark_unsaved();
                 Ok(())

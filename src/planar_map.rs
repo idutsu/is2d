@@ -436,8 +436,7 @@ impl PlanarMap {
                         continue;
                     }
                     let ed = self.edges[h.0];
-                    let straight =
-                        (ed.ctrl - self.nodes[ed.a].midpoint(self.nodes[ed.b])).hypot() < 1e-12;
+                    let straight = ed.ctrl == self.nodes[ed.a].midpoint(self.nodes[ed.b]);
                     out += &format!(
                         "e{}{}({}->{}, {:?}, {}, {}) ",
                         h.0,

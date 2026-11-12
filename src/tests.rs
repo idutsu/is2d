@@ -12445,7 +12445,7 @@ fn test_g3_1_symbol_enter_exit_preserves_symbol_def_and_load_normalizes() {
     pd.library[0].timeline.next_layer_number = 0;
     pd.library[0].timeline.next_layer_id = 0;
     pd.library[0].timeline.layers[0].frame_count = 0;
-    let loaded_doc = pd.into_document();
+    let loaded_doc = pd.into_document().unwrap();
     assert!(loaded_doc.library[0].timeline.total_frames >= 1);
     assert!(loaded_doc.library[0].timeline.next_layer_number >= 2);
     assert!(loaded_doc.library[0].timeline.next_layer_id >= 2);
@@ -17048,7 +17048,8 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     assert!(!nan_json.contains("NaN") && !nan_json.contains("null"));
     let reloaded = crate::project_io::read_project_document(&nan_save_path)
         .unwrap()
-        .into_document();
+        .into_document()
+        .unwrap();
     assert!(reloaded.root.layers[0].keyframes[0].cel.is_empty());
 
     nan_app.history.mark_unsaved();
@@ -17799,7 +17800,7 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
     let n = m.nodes.len() / 2;
     m.edges[0].1 = n + 5;
     crate::project_io::write_project_file_atomically(&broken_path, &proj_broken).unwrap();
-    let err = crate::project_io::read_project_document(&broken_path).unwrap_err();
+    let err = open_project_in_tab(&mut Is2dApp::default(), &broken_path, None).unwrap_err();
     assert!(err.contains("地図が壊れています"), "{err}");
     let mut proj_cross = crate::project_io::read_project_document(&normal_path).unwrap();
     let m = &mut proj_cross.timeline.layers[0].keyframes[0].maps[0];
@@ -17814,7 +17815,7 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
     }
     let _ = r;
     crate::project_io::write_project_file_atomically(&broken_path, &proj_cross).unwrap();
-    assert!(crate::project_io::read_project_document(&broken_path).is_err());
+    assert!(open_project_in_tab(&mut Is2dApp::default(), &broken_path, None).is_err());
 
     let _ = std::fs::remove_dir_all(&base_dir);
 }
@@ -25901,7 +25902,8 @@ mod map_overlay {
         let t = std::time::Instant::now();
         let doc = crate::project_io::read_project_document(&path)
             .unwrap()
-            .into_document();
+            .into_document()
+            .unwrap();
         let open_ms = t.elapsed().as_secs_f64() * 1e3;
         let cels: usize = doc.root.layers.iter().map(|l| l.keyframes.len()).sum();
         eprintln!(

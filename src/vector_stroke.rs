@@ -8,7 +8,7 @@ use kurbo::{Affine, Point, QuadBez, Vec2 as KVec2};
 use crate::vector_engine::{
     dedup_closed_ring, fill_cumulative_arc_lengths, left_normal, nearest_on_quad, normalize_vec,
     point_to_segment_dist, ring_area_and_perimeter_f64, ring_f64_to_points, signed_angle,
-    signed_area_f64, Contour, FillShape, REFERENCE_BRUSH_RADIUS,
+    signed_area_f64, Contour, FillShape, REFERENCE_BRUSH_RADIUS, TINY_LEN,
 };
 
 // ============================================================================
@@ -208,9 +208,7 @@ pub(crate) fn build_smoothed_stroke_shapes_at_zoom(
     );
     let to_world = Affine::scale(1.0 / z);
     let scale_to_world = |mut contour: Contour| -> Contour {
-        if (z - 1.0).abs() > 1e-9 {
-            contour.transform(to_world);
-        }
+        contour.transform(to_world);
         contour
     };
 
@@ -409,7 +407,7 @@ fn resample_closed_ring_uniform(
         while seg_idx + 1 < clean.len() && cum_arc[seg_idx + 1] < target_s {
             seg_idx += 1;
         }
-        let seg_len = (cum_arc[seg_idx + 1] - cum_arc[seg_idx]).max(1e-9);
+        let seg_len = (cum_arc[seg_idx + 1] - cum_arc[seg_idx]).max(TINY_LEN);
         let local_t = ((target_s - cum_arc[seg_idx]) / seg_len).clamp(0.0, 1.0);
         dense.push(clean[seg_idx].lerp(clean[(seg_idx + 1) % clean.len()], local_t));
     }
@@ -567,6 +565,8 @@ fn classify_and_align_ring_features(
 // 特徴点（シャープ角・丸端キャップ・高曲率コーナー）検出の幾何しきい値定数
 // ============================================================================
 
+/// 向き（弦・接線）を取るのに短すぎる長さ（px）。これより短い弦・接線からは向きを取らない
+const MIN_DIR_LEN: f64 = 1e-4;
 /// 丸端キャップ隣接スキャンで「凸円弧区間」とみなす最小短距離回転角（rad）
 const CAP_SCAN_MIN_CONVEX_TURN: f64 = 0.08;
 /// 丸端キャップ終端で反対側の凹ノッチに到達したと判定する短距離回転角しきい値（rad）
@@ -1117,7 +1117,7 @@ pub(crate) fn fit_quad_control_point_with_arc_lengths(
     }
 
     let total = cum[n - 1];
-    if total < 1e-6 {
+    if total < TINY_LEN {
         return p0.lerp(p2, 0.5);
     }
 
@@ -1126,7 +1126,7 @@ pub(crate) fn fit_quad_control_point_with_arc_lengths(
         .partition_point(|&s| s < half_s)
         .saturating_sub(1)
         .min(n - 2);
-    let seg_len = (cum[idx + 1] - cum[idx]).max(1e-9);
+    let seg_len = (cum[idx + 1] - cum[idx]).max(TINY_LEN);
     let local_t = ((half_s - cum[idx]) / seg_len).clamp(0.0, 1.0);
     let mid_pt = pts[idx].lerp(pts[idx + 1], local_t);
 
@@ -1178,7 +1178,7 @@ fn enforce_g1_tangent_continuity_on_segments(
         let anchor_pt = segments[j].p0;
         let v_in = anchor_pt - segments[prev].p1;
         let v_out = segments[j].p1 - anchor_pt;
-        if v_in.hypot() < 1e-5 || v_out.hypot() < 1e-5 {
+        if v_in.hypot() < MIN_DIR_LEN || v_out.hypot() < MIN_DIR_LEN {
             continue;
         }
 
@@ -1203,18 +1203,18 @@ fn enforce_g1_tangent_continuity_on_segments(
         let p2 = segments[j].p2;
         let chord = p2 - p0;
         let chord_len = chord.hypot();
-        if chord_len < 1e-4 {
+        if chord_len < MIN_DIR_LEN {
             continue;
         }
         let chord_normal = left_normal(chord / chord_len);
 
         let t0_opt = anchor_tangents[j].or_else(|| {
             let v0 = p1_init - p0;
-            (v0.hypot() > 1e-5).then(|| normalize_vec(v0))
+            (v0.hypot() > MIN_DIR_LEN).then(|| normalize_vec(v0))
         });
         let t2_opt = anchor_tangents[next].or_else(|| {
             let v2 = p2 - p1_init;
-            (v2.hypot() > 1e-5).then(|| normalize_vec(v2))
+            (v2.hypot() > MIN_DIR_LEN).then(|| normalize_vec(v2))
         });
         let has_any_smooth = anchor_tangents[j].is_some() || anchor_tangents[next].is_some();
         let candidate_p1 = if let (true, Some(t0), Some(t2)) = (has_any_smooth, t0_opt, t2_opt) {
@@ -1252,7 +1252,7 @@ fn enforce_g1_tangent_continuity_on_segments(
     }
 }
 
-/// 3点以上・全長 1e-6 以上の点列から最小二乗法で2次ベジェ曲線の制御点 `p1` を求める
+/// 3点以上・全長 `TINY_LEN` 以上の点列から最小二乗法で2次ベジェ曲線の制御点 `p1` を求める
 /// （`t` を `[0.05, 0.95]` に丸めるため `denom` は常に 0.009 以上になる）
 fn fit_quad_control_point_least_squares(pts: &[Point], cum: &[f64], p0: Point, p2: Point) -> Point {
     let n = pts.len();
@@ -1337,7 +1337,7 @@ fn reduce_outline_anchors_by_quad_fit(
         let p2 = span_pts[span_pts.len() - 1];
         let chord = p2 - p0;
         let chord_len = chord.hypot();
-        if chord_len > 1e-4 && span_pts.len() >= 10 {
+        if chord_len > MIN_DIR_LEN && span_pts.len() >= 10 {
             let n_chord = left_normal(chord / chord_len);
             let mid = span_pts.len() / 2;
             let mean_first: f64 = span_pts[1..mid]
@@ -1441,7 +1441,7 @@ fn span_turn_metrics(span_pts: &[Point]) -> (f64, f64) {
     while idx < n - 1 {
         let next_idx = (idx + step).min(n - 1);
         let d = span_pts[next_idx] - span_pts[idx];
-        if d.hypot() > 1e-4 {
+        if d.hypot() > MIN_DIR_LEN {
             let dir = normalize_vec(d);
             if let Some(pd) = prev_dir {
                 signed_turn += signed_angle(pd, dir);
@@ -1459,7 +1459,7 @@ fn span_turn_metrics(span_pts: &[Point]) -> (f64, f64) {
         let i1 = ((c + 1) * (n - 1)) / chunks;
         if i1 > i0 {
             let d = span_pts[i1] - span_pts[i0];
-            if d.hypot() > 1e-4 {
+            if d.hypot() > MIN_DIR_LEN {
                 let dir = normalize_vec(d);
                 if let Some(pd) = prev_macro_dir {
                     macro_abs_turn += signed_angle(pd, dir).abs();

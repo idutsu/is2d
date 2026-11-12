@@ -234,7 +234,7 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
                     .as_coeffs()
                     .iter()
                     .zip(binding.xform.as_coeffs())
-                    .all(|(a, b)| (a - b).abs() <= 1e-6)
+                    .all(|(a, b)| (a - b).abs() <= crate::vector_engine::SAME_TOL)
             }) {
                 local_xf
             } else if invertible(prev_world) {

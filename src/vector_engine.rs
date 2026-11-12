@@ -144,6 +144,12 @@ impl SymbolInstanceBinding {
 /// 座標の変換で、逆にできるとみなす行列式の大きさの下限
 const MIN_DET: f64 = 1e-12;
 
+/// 計算の丸めの差だけなら同じとみなす差の大きさ（文書の px・変換の係数）。位置・中心点・変換が同じかの判定はこれを使う
+pub(crate) const SAME_TOL: f64 = 1e-6;
+
+/// 割る前に、長さ 0 とみなす長さの上限（px）。向きを取る・長さで割る所はこれを使う
+pub(crate) const TINY_LEN: f64 = 1e-9;
+
 /// 座標の変換 `a` が使えるか：どの数も有限で、逆にできる（行列式の大きさが `MIN_DET` より大きい）。読み込み・図形の
 /// 変換・中心点の写し・インスタンスの置き直しのどこでも、変換が使えるかの判定はこれ1つ
 #[inline]
@@ -154,7 +160,7 @@ pub(crate) fn invertible(a: Affine) -> bool {
 /// インスタンスの中心点 `a` と `b`（シンボルのローカル座標）が同じ所か（中心点を比べる判定はこれ1つ）
 #[inline]
 pub(crate) fn same_pivot(a: Point, b: Point) -> bool {
-    (a - b).hypot() <= 1e-6
+    (a - b).hypot() <= SAME_TOL
 }
 
 /// インスタンスの中心点 `pivot` を、初めの位置（原点）から動かしてあるか（`same_pivot`）
@@ -800,7 +806,7 @@ pub(crate) fn ring_f64_to_points(ring: &[[f64; 2]]) -> Vec<Point> {
 #[inline]
 pub(crate) fn normalize_vec(v: KVec2) -> KVec2 {
     let len = v.hypot();
-    if len > 1e-9 {
+    if len > TINY_LEN {
         v / len
     } else {
         KVec2::new(1.0, 0.0)
@@ -902,7 +908,7 @@ pub(crate) fn ring_area_and_perimeter_f64(ring: &[[f64; 2]]) -> (f64, f64) {
 pub(crate) fn point_to_segment_dist(pt: Point, a: Point, b: Point) -> f64 {
     let ab = b - a;
     let len_sq = ab.hypot2();
-    if len_sq < 1e-9 {
+    if len_sq < TINY_LEN * TINY_LEN {
         return (pt - a).hypot();
     }
     let t = ((pt - a).dot(ab) / len_sq).clamp(0.0, 1.0);
@@ -1144,7 +1150,7 @@ pub(crate) fn transform_mesh_to_screen(
     pan: Vec2,
     map_color: Option<&dyn Fn(Color32) -> Color32>,
 ) -> Mesh {
-    if (zoom - 1.0).abs() < 1e-5 && pan == Vec2::ZERO && map_color.is_none() {
+    if zoom == 1.0 && pan == Vec2::ZERO && map_color.is_none() {
         return mesh;
     }
     let mut last_color: Option<(Color32, Color32)> = None;
