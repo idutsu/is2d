@@ -385,7 +385,7 @@ impl From<SymbolInstanceBinding> for SavedSymbolInstanceBinding {
 
 impl From<SavedSymbolInstanceBinding> for SymbolInstanceBinding {
     fn from(s: SavedSymbolInstanceBinding) -> Self {
-        let xform = if (s.xform[0] * s.xform[3] - s.xform[1] * s.xform[2]).abs() > 1e-12 {
+        let xform = if crate::vector_engine::invertible(Affine::new(s.xform)) {
             Affine::new(s.xform)
         } else {
             Affine::IDENTITY
@@ -582,11 +582,9 @@ impl Keyframe {
             .instances
             .into_iter()
             .map(SymbolInstance::from)
-            .filter(|inst| {
-                inst.binding.instance_gid > 0
-                    && inst.binding.symbol_id > 0
-                    && seen_gids.insert(inst.binding.instance_gid)
-            })
+            // 同じキーフレームに同じ番号のインスタンスは1つだけ。使えない番号（`is_safe_id`）は、文書を作るときに
+            // 新しい番号にし、無いシンボルを指すインスタンスはそこで外す
+            .filter(|inst| seen_gids.insert(inst.binding.instance_gid))
             .collect();
         let cel = Cel::from_maps(maps, instances, prev.map(|kf| &kf.cel));
         Self {
@@ -648,7 +646,8 @@ impl From<SavedLayer> for Layer {
             keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
         }
         Self {
-            id: s.id.max(1),
+            // 使えない番号（`is_safe_id`）は、タイムラインを作るときに新しい番号にする
+            id: s.id,
             name: s.name,
             visible: s.visible,
             locked: s.locked,
@@ -702,11 +701,11 @@ impl From<SavedTimeline> for Timeline {
         let mut max_layer_id = layers
             .iter()
             .map(|l| l.id)
-            .filter(|&id| id > 0 && id <= MAX_SAFE_ENTITY_ID)
+            .filter(|&id| is_safe_id(id))
             .max()
             .unwrap_or(0);
         for layer in &mut layers {
-            if layer.id > MAX_SAFE_ENTITY_ID || !seen_layer_ids.insert(layer.id) {
+            if !is_safe_id(layer.id) || !seen_layer_ids.insert(layer.id) {
                 loop {
                     max_layer_id = max_layer_id.saturating_add(1).max(1);
                     if seen_layer_ids.insert(max_layer_id) {
@@ -792,12 +791,19 @@ pub(crate) struct ProjectDocument {
     pub(crate) recovery_source: Option<PathBuf>,
 }
 
-fn remap_unsafe_gid(map: &mut HashMap<u64, u64>, next: &mut u64, gid: &mut u64) {
-    *gid = *map.entry(*gid).or_insert_with(|| {
+/// 番号 `id`（レイヤー・シンボル・グループ・インスタンス）が、ファイルから読んでそのまま使える番号か（0 でなく、安全な
+/// 上限 `MAX_SAFE_ENTITY_ID` 以下）。読み込みで番号を確かめる決まりはこれ1つ
+fn is_safe_id(id: u64) -> bool {
+    id > 0 && id <= MAX_SAFE_ENTITY_ID
+}
+
+/// 使えない番号 `gid` の、新しいグループの番号（同じ番号には同じ新しい番号。新しい番号は `next` から順に振る）
+fn renumbered_gid(map: &mut HashMap<u64, u64>, next: &mut u64, gid: u64) -> u64 {
+    *map.entry(gid).or_insert_with(|| {
         let id = *next;
         *next = next.saturating_add(1);
         id
-    });
+    })
 }
 
 impl ProjectDocument {
@@ -888,7 +894,7 @@ impl ProjectDocument {
             .library
             .iter()
             .map(|s| s.id)
-            .filter(|&id| id > 0 && id <= MAX_SAFE_ENTITY_ID)
+            .filter(|&id| is_safe_id(id))
             .max()
             .unwrap_or(0)
             .saturating_add(1)
@@ -898,7 +904,7 @@ impl ProjectDocument {
         for saved_sym in self.library {
             let mut sym = SymbolDef::from(saved_sym);
             let orig_id = sym.id;
-            if sym.id == 0 || sym.id > MAX_SAFE_ENTITY_ID || !seen_sym_ids.insert(sym.id) {
+            if !is_safe_id(sym.id) || !seen_sym_ids.insert(sym.id) {
                 while seen_sym_ids.contains(&next_fallback_sym_id) {
                     next_fallback_sym_id = next_fallback_sym_id.saturating_add(1);
                 }
@@ -919,20 +925,18 @@ impl ProjectDocument {
                 for kf in &layer.keyframes {
                     for m in kf.cel.maps.iter() {
                         for &gid in &m.group_path {
-                            if gid > 0 && gid <= MAX_SAFE_ENTITY_ID {
+                            if is_safe_id(gid) {
                                 max_valid_gid = max_valid_gid.max(gid);
                             }
                         }
                     }
                     for inst in kf.cel.instances.iter() {
                         for &gid in &inst.parent_scope {
-                            if gid > 0 && gid <= MAX_SAFE_ENTITY_ID {
+                            if is_safe_id(gid) {
                                 max_valid_gid = max_valid_gid.max(gid);
                             }
                         }
-                        if inst.binding.instance_gid > 0
-                            && inst.binding.instance_gid <= MAX_SAFE_ENTITY_ID
-                        {
+                        if is_safe_id(inst.binding.instance_gid) {
                             max_valid_gid = max_valid_gid.max(inst.binding.instance_gid);
                         }
                     }
@@ -949,50 +953,38 @@ impl ProjectDocument {
             for layer in &mut tl.layers {
                 for i in 0..layer.keyframes.len() {
                     let kf = layer.keyframe_mut(i);
-                    let has_unsafe_shape_gid = kf.cel.maps.iter().any(|m| {
-                        m.group_path
-                            .iter()
-                            .any(|&gid| gid == 0 || gid > MAX_SAFE_ENTITY_ID)
-                    });
-                    if has_unsafe_shape_gid {
-                        kf.cel.remap_group_ids(|mut gid| {
-                            if gid == 0 || gid > MAX_SAFE_ENTITY_ID {
-                                remap_unsafe_gid(&mut gid_map, &mut next_gid, &mut gid);
-                            }
-                            gid
+                    let needs_remap = kf
+                        .cel
+                        .maps
+                        .iter()
+                        .any(|m| m.group_path.iter().any(|&gid| !is_safe_id(gid)))
+                        || kf.cel.instances.iter().any(|inst| {
+                            sym_id_remap.contains_key(&inst.binding.symbol_id)
+                                || !is_safe_id(inst.binding.instance_gid)
+                                || inst.parent_scope.iter().any(|&gid| !is_safe_id(gid))
                         });
-                    }
-                    let needs_inst_update = kf.cel.instances.iter().any(|inst| {
-                        sym_id_remap.contains_key(&inst.binding.symbol_id)
-                            || !seen_sym_ids.contains(&inst.binding.symbol_id)
-                            || inst.binding.instance_gid > MAX_SAFE_ENTITY_ID
-                            || inst
-                                .parent_scope
-                                .iter()
-                                .any(|&gid| gid == 0 || gid > MAX_SAFE_ENTITY_ID)
-                    });
-                    if needs_inst_update {
-                        let mut updated_instances = Vec::with_capacity(kf.cel.instances.len());
-                        for mut inst in (*kf.cel.instances).clone() {
-                            if let Some(&mapped_sym_id) = sym_id_remap.get(&inst.binding.symbol_id)
-                            {
-                                inst.binding.symbol_id = mapped_sym_id;
-                            }
-                            if !seen_sym_ids.contains(&inst.binding.symbol_id) {
-                                continue;
-                            }
-                            for gid in &mut inst.parent_scope {
-                                if *gid == 0 || *gid > MAX_SAFE_ENTITY_ID {
-                                    remap_unsafe_gid(&mut gid_map, &mut next_gid, gid);
+                    if needs_remap {
+                        kf.cel.remap_ids(
+                            |gid| {
+                                if is_safe_id(gid) {
+                                    gid
+                                } else {
+                                    renumbered_gid(&mut gid_map, &mut next_gid, gid)
                                 }
-                            }
-                            let igid = &mut inst.binding.instance_gid;
-                            if *igid > MAX_SAFE_ENTITY_ID {
-                                remap_unsafe_gid(&mut gid_map, &mut next_gid, igid);
-                            }
-                            updated_instances.push(inst);
-                        }
-                        *kf.cel.instances_mut() = updated_instances;
+                            },
+                            |sym| sym_id_remap.get(&sym).copied().unwrap_or(sym),
+                            None,
+                        );
+                    }
+                    if kf
+                        .cel
+                        .instances
+                        .iter()
+                        .any(|inst| !seen_sym_ids.contains(&inst.binding.symbol_id))
+                    {
+                        kf.cel
+                            .instances_mut()
+                            .retain(|inst| seen_sym_ids.contains(&inst.binding.symbol_id));
                     }
                 }
             }

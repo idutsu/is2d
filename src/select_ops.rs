@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use kurbo::{Affine, ParamCurve, ParamCurveNearest, Point, QuadBez, Rect as KRect};
+use kurbo::{Affine, ParamCurve, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
     cancel_active_drag, clear_selection, commit_floating, commit_floating_except, edit_layers,
@@ -10,7 +10,7 @@ use crate::canvas_tool::{
 use crate::clipboard_ops::{prepare_placement, put_placements, Content, Placement};
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
-use crate::vector_engine::{make_marquee_rect_shape, rects_overlap, FillShape};
+use crate::vector_engine::{make_marquee_rect_shape, nearest_on_quad, rects_overlap, FillShape};
 
 /// 現在の選択図形のうち `keep_indices` のみを選択に残し、選択から外れた変更済み生シェイプのみをキャンバスへ結合・切り抜き確定する
 /// （選択に残った図形は結合せず `Floating` のまま維持する）
@@ -313,19 +313,12 @@ pub(crate) fn quad_control_bbox_contains(seg: &QuadBez, pt: Point, margin: f64) 
 }
 
 /// 指定座標 `pt` がシェイプの輪郭（外周・穴）から距離 `radius` 以内にあるかを判定する
-fn point_within_shape_contours(shape: &FillShape, pt: Point, radius: f64, inv_z: f64) -> bool {
-    let r_sq = radius * radius;
-    for contour in shape.contours() {
-        for seg in contour.segments.iter() {
-            if !quad_control_bbox_contains(seg, pt, radius) {
-                continue;
-            }
-            if seg.nearest(pt, 0.05 * inv_z).distance_sq <= r_sq {
-                return true;
-            }
-        }
-    }
-    false
+fn point_within_shape_contours(shape: &FillShape, pt: Point, radius: f64) -> bool {
+    shape.contours().any(|contour| {
+        contour.segments.iter().any(|seg| {
+            quad_control_bbox_contains(seg, pt, radius) && nearest_on_quad(seg, pt).1 <= radius
+        })
+    })
 }
 
 /// 図形 `shape` が矩形 `rect` に少しでもかかるか。輪郭が矩形の中を通る（端が中にあるか、矩形の辺と交わる）か、
@@ -434,7 +427,7 @@ pub(crate) fn compute_hover_target(
                     continue;
                 }
                 if shape.contains_point(mouse_pt)
-                    || point_within_shape_contours(shape, mouse_pt, selected_grab_radius, inv_z)
+                    || point_within_shape_contours(shape, mouse_pt, selected_grab_radius)
                 {
                     return HoverTarget::Fill {
                         shape_id: shape.shape_id,

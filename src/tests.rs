@@ -21939,7 +21939,8 @@ fn test_anchor_delete_refuses_junction_vertex() {
 
 mod map_overlay {
     use super::*;
-    use crate::planar_map::{nearest_on_quad, MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    use crate::vector_engine::nearest_on_quad;
 
     /// 小さな乱数（同じ種なら同じ並び）
     pub(super) struct Rng(pub(super) u64);
@@ -22980,7 +22981,7 @@ mod map_overlay {
             );
             for q in [q1, q2] {
                 for k in 0..=64 {
-                    let d = crate::planar_map::nearest_on_quad(&arc, q.eval(k as f64 / 64.0)).1;
+                    let d = crate::vector_engine::nearest_on_quad(&arc, q.eval(k as f64 / 64.0)).1;
                     assert!(d <= 0.002 + 1e-9, "ずらし {off}：元の2本から {d} 離れた");
                 }
             }
@@ -27220,4 +27221,126 @@ mod map_overlay {
             }
         }
     }
+}
+
+/// タイムラインの操作で変えてよいレイヤーは、選んでいるときも選んでいないときも同じ決まり（ロックしていない）。
+/// 非表示のレイヤーも変える（同じ目的の判定を1つにする：洗い出しの 22）
+#[test]
+fn frame_ops_take_the_same_layers_with_or_without_a_selection() {
+    use crate::timeline::{Layer, Timeline, TimelineCellSelection};
+    let mut tl = Timeline::default();
+    tl.layers.push(Layer::new_with_id(2, "hidden"));
+    tl.layers.push(Layer::new_with_id(3, "locked"));
+    tl.layers[1].visible = false;
+    tl.layers[2].locked = true;
+    tl.cell_selection = Some(TimelineCellSelection::from_corners(0, 0, 2, 0));
+    assert_eq!(tl.target_layers_for_frame_op(), vec![0, 1]);
+    tl.cell_selection = None;
+    assert_eq!(tl.target_layers_for_frame_op(), vec![0, 1]);
+}
+
+/// 再生位置をずらす式は `advance`・`rewind` だけ：ループは 0 より前になるときだけ回し、1回だけの再生は 0 で止め、
+/// 1コマだけの表示は変えない（洗い出しの 12）
+#[test]
+fn instance_playback_position_shifts_by_one_rule() {
+    use crate::vector_engine::{SymbolInstanceBinding, SymbolLoopMode};
+    let mut b = SymbolInstanceBinding::new(1, 1, Affine::IDENTITY);
+    b.first_frame = 3;
+    b.advance(4);
+    assert_eq!(b.first_frame, 7);
+    b.rewind(2, 5);
+    assert_eq!(b.first_frame, 5, "0 より前にならなければ回さない");
+    b.rewind(7, 5);
+    assert_eq!(
+        b.first_frame, 3,
+        "ループは 0 より前になると、コマ数で回す（5 − 7 ≡ 3）"
+    );
+    b.loop_mode = SymbolLoopMode::PlayOnce;
+    b.rewind(9, 5);
+    assert_eq!(b.first_frame, 0);
+    b.loop_mode = SymbolLoopMode::SingleFrame;
+    b.first_frame = 2;
+    b.advance(4);
+    b.rewind(9, 5);
+    assert_eq!(b.first_frame, 2);
+}
+
+/// 変換が使えるかの判定は `invertible` 1つ：読み込みで受け入れる変換（行列式の大きさが 1e-12 より大きい）は、中心点の
+/// 写しやインスタンスの置き直しでも使える。有限でない数を含む変換は使えない（洗い出しの 7）
+#[test]
+fn one_rule_decides_whether_a_transform_is_usable() {
+    use crate::vector_engine::invertible;
+    assert!(
+        invertible(Affine::scale(1e-5)),
+        "行列式 1e-10 は使える（前は中心点の写しだけ 1e-9 で断っていた）"
+    );
+    assert!(!invertible(Affine::scale(1e-7)));
+    assert!(!invertible(Affine::new([
+        f64::INFINITY,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0
+    ])));
+    assert!(!invertible(Affine::new([
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        f64::NAN,
+        0.0
+    ])));
+    let mut loaded = vector_engine::make_marquee_rect_shape(kurbo::Rect::new(0.0, 0.0, 10.0, 10.0));
+    loaded.symbol_instance = Some(vector_engine::SymbolInstanceBinding::new(
+        1,
+        1,
+        Affine::scale(1e-5),
+    ));
+    let before = loaded.clone();
+    loaded.transform(Affine::new([1.0, 0.0, 0.0, 1.0, f64::NAN, 0.0]));
+    assert_eq!(
+        loaded.symbol_instance, before.symbol_instance,
+        "使えない変換はかけない"
+    );
+}
+
+/// 図形の番号の付け替えは `PlanarMap::relabel` 1つ：みな新しくするときは、同じ番号は同じ新しい番号に、違う番号は
+/// 違う新しい番号になる（洗い出しの 11）
+#[test]
+fn renewing_labels_keeps_equal_labels_equal_and_distinct_labels_distinct() {
+    use crate::planar_map::PlanarMap;
+    let r = |x: f64, c: Color32| {
+        let mut s =
+            vector_engine::make_marquee_rect_shape(kurbo::Rect::new(x, 0.0, x + 10.0, 10.0));
+        s.color = c;
+        s
+    };
+    let shapes = [r(0.0, Color32::RED), r(20.0, Color32::BLUE)];
+    let map = PlanarMap::from_faces(shapes.iter());
+    let old: Vec<_> = map
+        .edges
+        .iter()
+        .flat_map(|e| [e.left_src, e.right_src])
+        .collect();
+    let mut renewed = map.clone();
+    renewed.renew_labels();
+    let new: Vec<_> = renewed
+        .edges
+        .iter()
+        .flat_map(|e| [e.left_src, e.right_src])
+        .collect();
+    assert_eq!(old.len(), new.len());
+    let mut pairs = std::collections::HashMap::new();
+    for (o, n) in old.iter().zip(&new) {
+        assert_eq!(o.is_some(), n.is_some());
+        if let (Some(o), Some(n)) = (o, n) {
+            assert_ne!(o, n);
+            assert_eq!(*pairs.entry(*o).or_insert(*n), *n);
+        }
+    }
+    let distinct_old: std::collections::HashSet<_> = pairs.keys().collect();
+    let distinct_new: std::collections::HashSet<_> = pairs.values().collect();
+    assert_eq!(distinct_old.len(), distinct_new.len());
+    assert_eq!(distinct_old.len(), 2);
 }

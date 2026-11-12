@@ -2114,11 +2114,9 @@ impl Session {
                 }
                 let mut cloned = shape.clone();
                 if let (Some(piv), Some(gid)) = (custom_piv, single_symbol_gid) {
-                    if let Some(b) = cloned
-                        .symbol_instance
-                        .as_mut()
-                        .filter(|b| b.instance_gid == gid && b.xform.determinant().abs() > 1e-9)
-                    {
+                    if let Some(b) = cloned.symbol_instance.as_mut().filter(|b| {
+                        b.instance_gid == gid && crate::vector_engine::invertible(b.xform)
+                    }) {
                         b.pivot = b.xform.inverse() * piv;
                     }
                 }

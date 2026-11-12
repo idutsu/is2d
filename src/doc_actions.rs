@@ -843,13 +843,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 return false;
             }
             push_undo(tab, None);
-            let editable_lids: HashSet<u64> = tab
-                .active_timeline()
-                .layers
-                .iter()
-                .filter(|l| l.visible && !l.locked)
-                .map(|l| l.id)
-                .collect();
+            let editable_lids: HashSet<u64> = editable_layer_ids(tab).into_iter().collect();
             if !tab.session.lift_selected_raw_shapes_to_floating() {
                 return false;
             }
@@ -1242,7 +1236,7 @@ fn apply_set_selected_symbol_world_pivot(tab: &mut Tab, world_pivot: Option<Poin
     };
     let new_local_pivot = match world_pivot {
         Some(pt) => {
-            if binding.xform.determinant().abs() <= 1e-9 {
+            if !crate::vector_engine::invertible(binding.xform) {
                 return false;
             }
             binding.xform.inverse() * pt
@@ -1433,7 +1427,7 @@ fn apply_set_tween_rotate(tab: &mut Tab, rotate_mode: TweenRotate) -> bool {
     let Some(layer) = tl.layers.get(tl.active_layer) else {
         return false;
     };
-    if layer.locked || !layer.visible {
+    if !layer.accepts_frame_ops() {
         return false;
     }
     let Some(kf_idx) = layer.keyframe_index_at(tl.current_frame) else {

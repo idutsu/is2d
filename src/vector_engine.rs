@@ -119,6 +119,36 @@ impl SymbolInstanceBinding {
             color_effect: ColorEffect::default(),
         }
     }
+
+    /// 再生位置を `d` コマ進める：キーフレームの始めを `d` コマ後ろへずらしても、同じコマに同じ絵を出す（1コマだけの
+    /// 表示は変えない）。再生位置をずらす式は、これと `rewind` だけ
+    pub(crate) fn advance(&mut self, d: usize) {
+        if self.loop_mode != SymbolLoopMode::SingleFrame {
+            self.first_frame = self.first_frame.saturating_add(d);
+        }
+    }
+
+    /// 再生位置を `d` コマ戻す（`advance` の逆：キーフレームの始めを `d` コマ前へずらす）。ループは、0 より前になるときだけ
+    /// シンボルのコマ数 `frames` で回す。1回だけの再生は 0 で止める（その前の絵は出せない）
+    pub(crate) fn rewind(&mut self, d: usize, frames: usize) {
+        self.first_frame = match self.loop_mode {
+            SymbolLoopMode::Loop if self.first_frame < d => {
+                (self.first_frame as i128 - d as i128).rem_euclid(frames.max(1) as i128) as usize
+            }
+            SymbolLoopMode::Loop | SymbolLoopMode::PlayOnce => self.first_frame.saturating_sub(d),
+            SymbolLoopMode::SingleFrame => self.first_frame,
+        };
+    }
+}
+
+/// 座標の変換で、逆にできるとみなす行列式の大きさの下限
+const MIN_DET: f64 = 1e-12;
+
+/// 座標の変換 `a` が使えるか：どの数も有限で、逆にできる（行列式の大きさが `MIN_DET` より大きい）。読み込み・図形の
+/// 変換・中心点の写し・インスタンスの置き直しのどこでも、変換が使えるかの判定はこれ1つ
+#[inline]
+pub(crate) fn invertible(a: Affine) -> bool {
+    a.as_coeffs().iter().all(|v| v.is_finite()) && a.determinant().abs() > MIN_DET
 }
 
 /// インスタンスの中心点 `a` と `b`（シンボルのローカル座標）が同じ所か（中心点を比べる判定はこれ1つ）
@@ -215,9 +245,7 @@ impl Contour {
     }
 
     pub(crate) fn transform(&mut self, affine: Affine) {
-        let c = affine.as_coeffs();
-        let det = c[0] * c[3] - c[1] * c[2];
-        if !c.iter().all(|v| v.is_finite()) || det.abs() < 1e-12 {
+        if !invertible(affine) {
             return;
         }
         for seg in self.segments_mut() {
@@ -225,7 +253,7 @@ impl Contour {
             seg.p1 = affine * seg.p1;
             seg.p2 = affine * seg.p2;
         }
-        if det < 0.0 {
+        if affine.determinant() < 0.0 {
             self.reverse();
         }
         self.enforce_continuity();
@@ -422,7 +450,7 @@ impl FillShape {
         if self.symbol_instance.is_some() {
             let _ = self.fill_mesh();
             self.transform_with_cached_mesh(xform);
-            if xform.determinant().abs() < 1e-12 {
+            if !invertible(xform) && xform.as_coeffs().iter().all(|v| v.is_finite()) {
                 if let Some(b) = &mut self.symbol_instance {
                     b.xform = xform * b.xform;
                 }
@@ -616,11 +644,10 @@ impl FillShape {
     }
 
     fn transform_with_max_scale_sq(&mut self, affine: Affine, max_scale_sq_limit: f64) {
-        let coeffs @ [a, b, c, d, _, _] = affine.as_coeffs();
-        let det = a * d - b * c;
-        if !coeffs.iter().all(|v| v.is_finite()) || det.abs() < 1e-12 {
+        if !invertible(affine) {
             return;
         }
+        let coeffs @ [a, b, c, d, _, _] = affine.as_coeffs();
         self.exterior.transform(affine);
         for hole in &mut self.holes {
             hole.transform(affine);
@@ -645,12 +672,11 @@ impl FillShape {
     /// 自由変形ドラッグ中、ドラッグ開始時の `orig` から既存の単一所有 `fill_mesh` 頂点バッファを再利用して `affine` を適用する
     /// （`clone_from` による `Arc` 参照カウント増加と毎フレームの頂点バッファ再確保を回避する）
     pub(crate) fn transform_from_origin(&mut self, orig: &FillShape, affine: Affine) {
-        let coeffs @ [a, b, c, d, _, _] = affine.as_coeffs();
-        let det = a * d - b * c;
-        if !coeffs.iter().all(|v| v.is_finite()) || det.abs() < 1e-12 {
+        if !invertible(affine) {
             self.clone_from(orig);
             return;
         }
+        let coeffs = affine.as_coeffs();
         self.exterior = orig.exterior.clone();
         self.exterior.transform(affine);
         self.holes.clone_from(&orig.holes);
@@ -816,6 +842,31 @@ pub(crate) fn dedup_closed_ring(pts: impl IntoIterator<Item = Point>, min_dist: 
         out.pop();
     }
     out
+}
+
+/// 曲線 `q` の上で点 `p` にいちばん近い所の（パラメータ, 距離）。曲線の上のいちばん近い点を求めるのはこれ1つ
+pub(crate) fn nearest_on_quad(q: &QuadBez, p: Point) -> (f64, f64) {
+    let dist_sq = |t: f64| (q.eval(t) - p).hypot2();
+    let mut t = (0..=16)
+        .map(|k| k as f64 / 16.0)
+        .min_by(|a, b| dist_sq(*a).total_cmp(&dist_sq(*b)))
+        .unwrap_or(0.0);
+    let second = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()) * 2.0;
+    for _ in 0..6 {
+        let b = q.eval(t) - p;
+        let first = quad_deriv(q, t);
+        let slope = first.dot(first) + b.dot(second);
+        if slope.abs() < 1e-14 {
+            break;
+        }
+        t = (t - b.dot(first) / slope).clamp(0.0, 1.0);
+    }
+    (t, dist_sq(t).sqrt())
+}
+
+/// 曲線 `q` の t での向き（微分）
+pub(crate) fn quad_deriv(q: &QuadBez, t: f64) -> KVec2 {
+    (q.p1 - q.p0) * (2.0 * (1.0 - t)) + (q.p2 - q.p1) * (2.0 * t)
 }
 
 /// 閉じた折れ線 `pts`（最後の点から最初の点へ閉じる）の符号付き面積（面積の式。小数の面積の式はこれ1つ。格子の点は

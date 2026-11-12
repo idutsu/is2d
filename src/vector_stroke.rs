@@ -3,10 +3,10 @@ use i_overlay9::{
     core::{fill_rule::FillRule as OverlayFillRule, overlay::ContourDirection},
     float::{overlay::OverlayOptions, simplify::SimplifyShape},
 };
-use kurbo::{Affine, ParamCurve, ParamCurveDeriv, Point, QuadBez, Vec2 as KVec2};
+use kurbo::{Affine, Point, QuadBez, Vec2 as KVec2};
 
 use crate::vector_engine::{
-    dedup_closed_ring, fill_cumulative_arc_lengths, left_normal, normalize_vec,
+    dedup_closed_ring, fill_cumulative_arc_lengths, left_normal, nearest_on_quad, normalize_vec,
     point_to_segment_dist, ring_area_and_perimeter_f64, ring_f64_to_points, signed_angle,
     signed_area_f64, Contour, FillShape, REFERENCE_BRUSH_RADIUS,
 };
@@ -1360,7 +1360,7 @@ fn reduce_outline_anchors_by_quad_fit(
 
         fill_cumulative_arc_lengths(&span_pts, &mut cum);
         let p1 = fit_quad_control_point_with_arc_lengths(&span_pts, &cum, p0, p2);
-        let err = max_quad_fit_error_with_arc_lengths(&span_pts, &cum, QuadBez::new(p0, p1, p2));
+        let err = max_quad_fit_error(&span_pts, QuadBez::new(p0, p1, p2));
 
         if err <= tol {
             err + 0.18 * net_turn * net_turn
@@ -1472,33 +1472,14 @@ fn span_turn_metrics(span_pts: &[Point]) -> (f64, f64) {
     (signed_turn.abs(), macro_abs_turn)
 }
 
-fn max_quad_fit_error_with_arc_lengths(span_pts: &[Point], cum: &[f64], quad: QuadBez) -> f64 {
-    let n = span_pts.len();
-    if n <= 2 {
-        return 0.0;
-    }
-
-    let total_len = cum[n - 1];
-    if total_len < 1e-6 {
-        return 0.0;
-    }
-
-    let mut max_err = 0.0_f64;
-    for i in 1..(n - 1) {
-        let pt = span_pts[i];
-        let t_init = (cum[i] / total_len).clamp(0.0, 1.0);
-        let q_pt = quad.eval(t_init);
-        let deriv = quad.deriv().eval(t_init).to_vec2();
-        let d_len_sq = deriv.hypot2();
-        let t_refined = if d_len_sq > 1e-6 {
-            (t_init + (pt - q_pt).dot(deriv) / d_len_sq).clamp(0.0, 1.0)
-        } else {
-            t_init
-        };
-        let dist = (pt - quad.eval(t_refined)).hypot().min((pt - q_pt).hypot());
-        max_err = max_err.max(dist);
-    }
-    max_err
+/// 点の列 `span_pts` の中の点（両端を除く）から、曲線 `quad` までの距離のいちばん大きいもの（`nearest_on_quad`）
+fn max_quad_fit_error(span_pts: &[Point], quad: QuadBez) -> f64 {
+    span_pts
+        .get(1..span_pts.len().saturating_sub(1))
+        .unwrap_or_default()
+        .iter()
+        .map(|&p| nearest_on_quad(&quad, p).1)
+        .fold(0.0, f64::max)
 }
 
 fn max_deviation_from_chord(pts: &[Point]) -> f64 {

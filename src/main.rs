@@ -36,6 +36,7 @@ use doc_actions::{apply, Action, ActionHost};
 use panels::{RightPanelTab, UiAction};
 use project_io::{PendingCloseConfirm, ProjectWorkspace};
 use select_ops::ArrangeMode;
+use timeline::EditBlock;
 use timeline_ui::{TimelineHost, TimelineUiState};
 #[cfg(test)]
 pub(crate) use vector_engine::FillShape;
@@ -823,31 +824,22 @@ impl Is2dApp {
             return None;
         }
         let tl = self.tab().active_timeline();
-        let active_layer = tl.layers.get(tl.active_layer);
-        let is_uncreated_frame = active_layer
-            .is_some_and(|l| l.visible && !l.locked && tl.current_frame >= l.frame_count);
-        let is_tween_mid = active_layer.is_some_and(|l| {
-            l.visible
-                && !l.locked
-                && tl.current_frame < l.frame_count
-                && l.interpolated_tween_binding_at(tl.current_frame).is_some()
-        });
-        if is_uncreated_frame {
-            Some((
-                NoticeKind::Warning,
-                "現在のフレームは未作成です（F5 / F6 / F7 でフレームを作成してください）",
-            ))
-        } else if is_tween_mid {
-            Some((
-                NoticeKind::Warning,
-                "トゥイーンの途中のコマは編集できません（F6 でキーフレームを挿入してください）",
-            ))
-        } else {
-            Some((
-                NoticeKind::Warning,
-                "\u{e897} 現在のレイヤーはロック中または非表示のため編集できません",
-            ))
-        }
+        let block = tl
+            .layers
+            .get(tl.active_layer)
+            .and_then(|l| l.edit_block_at(tl.current_frame));
+        let msg = match block {
+            Some(EditBlock::NoFrame) => {
+                "現在のフレームは未作成です（F5 / F6 / F7 でフレームを作成してください）"
+            }
+            Some(EditBlock::TweenMiddle) => {
+                "トゥイーンの途中のコマは編集できません（F6 でキーフレームを挿入してください）"
+            }
+            Some(EditBlock::HiddenOrLocked) | None => {
+                "\u{e897} 現在のレイヤーはロック中または非表示のため編集できません"
+            }
+        };
+        Some((NoticeKind::Warning, msg))
     }
 
     /// 状態連動の警告バッジおよび一時トースト通知をキャンバス左上へ統一フォーマットで縦積み描画する

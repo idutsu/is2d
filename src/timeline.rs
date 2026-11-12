@@ -3,7 +3,7 @@ use crate::planar_map::{
     freshly_labeled, realized, uniquely_labeled, LayerBase, MapChange, MapInput, MapRule, PlanarMap,
 };
 use crate::stored_map::StoredMap;
-use crate::vector_engine::{next_shape_id, FillShape, SymbolInstanceBinding, SymbolLoopMode};
+use crate::vector_engine::{FillShape, SymbolInstanceBinding};
 use eframe::egui::Color32;
 use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
@@ -569,12 +569,7 @@ impl Cel {
         }
         for m in Arc::make_mut(&mut self.maps) {
             let mut map = m.dense();
-            let mut fresh: HashMap<ShapeId, ShapeId> = HashMap::new();
-            for ed in &mut map.edges {
-                for src in [&mut ed.left_src, &mut ed.right_src].into_iter().flatten() {
-                    *src = *fresh.entry(*src).or_insert_with(next_shape_id);
-                }
-            }
+            map.renew_labels();
             m.stored = StoredMap::from_dense(&map, None);
         }
         self.revision = crate::vector_engine::next_mesh_revision();
@@ -1569,9 +1564,7 @@ impl Layer {
                         inst.binding = interp_b;
                     }
                 }
-                if inst.binding.loop_mode != SymbolLoopMode::SingleFrame {
-                    inst.binding.first_frame = inst.binding.first_frame.saturating_add(elapsed);
-                }
+                inst.binding.advance(elapsed);
             }
         }
         let (tween, tween_rotate) = valid_tween_settings(kf.tween, kf.tween_rotate, &cel);
@@ -1778,12 +1771,39 @@ impl Layer {
 
     /// 指定フレーム `frame` においてこのレイヤーが編集可能（表示中・非ロック・フレーム作成済み・キーフレームあり・トゥイーンの途中ではない）であるかを返す
     pub(crate) fn is_editable_at(&self, frame: usize) -> bool {
-        self.visible
-            && !self.locked
-            && frame < self.frame_count
-            && !self.keyframes.is_empty()
-            && self.interpolated_tween_binding_at(frame).is_none()
+        self.edit_block_at(frame).is_none()
     }
+
+    /// コマ `frame` でこのレイヤーの絵を編集できない理由（編集できれば `None`）。編集できるかの決まりはこれ1つ
+    /// （`is_editable_at`・画面の注意書き）
+    pub(crate) fn edit_block_at(&self, frame: usize) -> Option<EditBlock> {
+        if !self.visible || self.locked {
+            Some(EditBlock::HiddenOrLocked)
+        } else if frame >= self.frame_count || self.keyframes.is_empty() {
+            Some(EditBlock::NoFrame)
+        } else if self.interpolated_tween_binding_at(frame).is_some() {
+            Some(EditBlock::TweenMiddle)
+        } else {
+            None
+        }
+    }
+
+    /// タイムラインの操作（フレームの挿入・削除・移動、トゥイーンの設定）で、このレイヤーを変えてよいか（ロックして
+    /// いない）。絵は書き換えないので、非表示のレイヤーも変える。この決まりはこれ1つ
+    pub(crate) fn accepts_frame_ops(&self) -> bool {
+        !self.locked
+    }
+}
+
+/// レイヤーの絵を編集できない理由（`Layer::edit_block_at`）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EditBlock {
+    /// 非表示かロック中
+    HiddenOrLocked,
+    /// コマを作っていない（キーフレームが無い）
+    NoFrame,
+    /// トゥイーンの途中のコマ
+    TweenMiddle,
 }
 
 /// レイヤー配列・現在のフレーム・セル範囲選択を管理するタイムライン構造体（永続ドキュメント状態）
@@ -1880,11 +1900,11 @@ impl Timeline {
     pub(crate) fn target_layers_for_frame_op(&self) -> Vec<usize> {
         if let Some(sel) = self.cell_selection {
             (sel.min_layer..=sel.max_layer)
-                .filter(|&i| self.layers.get(i).is_some_and(|l| l.visible && !l.locked))
+                .filter(|&i| self.layers.get(i).is_some_and(|l| l.accepts_frame_ops()))
                 .collect()
         } else {
             (0..self.layers.len())
-                .filter(|&i| !self.layers[i].locked)
+                .filter(|&i| self.layers[i].accepts_frame_ops())
                 .collect()
         }
     }
@@ -2101,7 +2121,7 @@ impl Timeline {
             let dst_l = (src_l as isize + actual_dl) as usize;
             let src_layer = self.layers.get(src_l)?;
             let dst_layer = self.layers.get(dst_l)?;
-            if src_layer.locked || dst_layer.locked {
+            if !src_layer.accepts_frame_ops() || !dst_layer.accepts_frame_ops() {
                 return None;
             }
         }

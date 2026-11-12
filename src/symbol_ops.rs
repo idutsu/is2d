@@ -12,7 +12,7 @@ use crate::clipboard_ops::{
 };
 use crate::symbol::{EditLevel, SymbolDef, SymbolInstance, SymbolInstanceBinding};
 use crate::timeline::{Cel, TimelineCellSelection};
-use crate::vector_engine::union_bounding_boxes;
+use crate::vector_engine::{invertible, union_bounding_boxes};
 
 /// 選択中のオブジェクトを新しい「シンボル」に変換するためのローカル図形抽出・インスタンスバインディング付与・ライブラリ登録を行い、
 /// `(sym_id, target_lid)` を返す
@@ -239,7 +239,7 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
                     .all(|(a, b)| (a - b).abs() <= 1e-6)
             }) {
                 local_xf
-            } else if prev_world.determinant().abs() > 1e-9 {
+            } else if invertible(prev_world) {
                 prev_world.inverse() * binding.xform
             } else {
                 binding.xform
@@ -249,11 +249,7 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
     };
 
     let next_world = tab.session.edit_path.world_xform() * xform_in_parent;
-    if !xform_in_parent.as_coeffs().iter().all(|v| v.is_finite())
-        || xform_in_parent.determinant().abs() <= 1e-9
-        || !next_world.as_coeffs().iter().all(|v| v.is_finite())
-        || next_world.determinant().abs() <= 1e-9
-    {
+    if !invertible(xform_in_parent) || !invertible(next_world) {
         return false;
     }
 

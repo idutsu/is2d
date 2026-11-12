@@ -524,15 +524,8 @@ impl SymbolDef {
                     let Some(child_sym) = library.iter().find(|s| s.id == b.symbol_id) else {
                         continue;
                     };
-                    let child_fc = child_sym.timeline.total_frames.max(1);
-                    let progress = b.first_frame.saturating_add(child_elapsed);
-                    b.first_frame = match b.loop_mode {
-                        SymbolLoopMode::Loop => (progress as isize - stage_elapsed as isize)
-                            .rem_euclid(child_fc as isize)
-                            as usize,
-                        SymbolLoopMode::PlayOnce => progress.saturating_sub(stage_elapsed),
-                        SymbolLoopMode::SingleFrame => b.first_frame,
-                    };
+                    b.advance(child_elapsed);
+                    b.rewind(stage_elapsed, child_sym.timeline.total_frames);
                 }
             }
             if !cel.is_empty() {

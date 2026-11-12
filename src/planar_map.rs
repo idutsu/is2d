@@ -12,7 +12,9 @@ use kurbo::{
 
 use crate::canvas_tool::{HoverTarget, LayerId, MapOwner, Scene, Session, ShapeId};
 use crate::stored_map::StoredMap;
-use crate::vector_engine::{rects_overlap, Contour, FillShape, SyncCache};
+use crate::vector_engine::{
+    nearest_on_quad, quad_deriv, rects_overlap, Contour, FillShape, SyncCache,
+};
 
 /// 辺の（左の色, 右の色）
 type Sides = (Option<Color32>, Option<Color32>);
@@ -65,26 +67,6 @@ pub(crate) struct MapFace {
     pub(crate) srcs: Vec<ShapeId>,
 }
 
-/// 曲線 `q` の上で点 `p` にいちばん近い所の（パラメータ, 距離）
-pub(crate) fn nearest_on_quad(q: &QuadBez, p: Point) -> (f64, f64) {
-    let dist_sq = |t: f64| (q.eval(t) - p).hypot2();
-    let mut t = (0..=16)
-        .map(|k| k as f64 / 16.0)
-        .min_by(|a, b| dist_sq(*a).total_cmp(&dist_sq(*b)))
-        .unwrap_or(0.0);
-    let second = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()) * 2.0;
-    for _ in 0..6 {
-        let b = q.eval(t) - p;
-        let first = quad_deriv(q, t);
-        let slope = first.dot(first) + b.dot(second);
-        if slope.abs() < 1e-14 {
-            break;
-        }
-        t = (t - b.dot(first) / slope).clamp(0.0, 1.0);
-    }
-    (t, dist_sq(t).sqrt())
-}
-
 /// 整数（頂点・辺・格子の番号）を鍵にする表のハッシュ。標準の SipHash は、頂点の格子のように何十万回も引くと重いので、
 /// 掛け算1回で混ぜる軽いものを使う（鍵は外から来ない値なので、偏りを狙われる心配は無い）
 #[derive(Default, Clone, Copy)]
@@ -114,11 +96,6 @@ impl std::hash::Hasher for IntHasher {
 }
 
 type IntMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IntHasher>>;
-
-/// 曲線 `q` の t での向き（微分）
-fn quad_deriv(q: &QuadBez, t: f64) -> KVec2 {
-    (q.p1 - q.p0) * (2.0 * (1.0 - t)) + (q.p2 - q.p1) * (2.0 * t)
-}
 
 #[cfg(test)]
 struct Seg {
@@ -158,6 +135,29 @@ impl PlanarMap {
             .iter()
             .flat_map(|e| [e.left_src, e.right_src])
             .flatten()
+    }
+
+    /// 辺の側に記した図形の番号を、`f` が返す番号に付け替える（`None` を返す番号はそのまま。番号の付け替えはこれ1つ）
+    pub(crate) fn relabel(&mut self, mut f: impl FnMut(ShapeId) -> Option<ShapeId>) {
+        for e in &mut self.edges {
+            for src in [&mut e.left_src, &mut e.right_src].into_iter().flatten() {
+                if let Some(n) = f(*src) {
+                    *src = n;
+                }
+            }
+        }
+    }
+
+    /// 辺の側に記した図形の番号を、番号ごとにみな新しい番号にする（`relabel`。同じ番号は同じ新しい番号になる）
+    pub(crate) fn renew_labels(&mut self) {
+        let mut fresh: HashMap<ShapeId, ShapeId> = HashMap::new();
+        self.relabel(|id| {
+            Some(
+                *fresh
+                    .entry(id)
+                    .or_insert_with(crate::vector_engine::next_shape_id),
+            )
+        });
     }
 
     /// 辺の曲線の外接矩形（面の図形の外接矩形を合わせたものと同じ）。辺が無ければ `None`
@@ -2190,12 +2190,9 @@ pub(crate) fn uniquely_labeled(map: &PlanarMap) -> PlanarMap {
 
 /// 地図 `map` の面の辺の側に、面ごとにみな新しい番号を記した地図（新しい中身を置くとき。元の面と番号が重ならない）
 pub(crate) fn freshly_labeled(map: &PlanarMap) -> PlanarMap {
-    let (faces, _) = map.faces();
-    let ids: Vec<ShapeId> = faces
-        .iter()
-        .map(|_| crate::vector_engine::next_shape_id())
-        .collect();
-    labeled(map.clone(), &faces, &ids)
+    let mut m = uniquely_labeled(map);
+    m.renew_labels();
+    m
 }
 
 /// 選ぶ所の地図：地図 `parts`（同じ地図から切り出した、重ならない面）を合わせた所に、形 `rect` を足した所（色のある所が
@@ -2252,15 +2249,7 @@ impl MapChange {
             renamed.insert(s.shape_id, id);
             s.shape_id = id;
         }
-        let rename = |id: &mut Option<ShapeId>| {
-            if let Some(n) = id.and_then(|i| renamed.get(&i)) {
-                *id = Some(*n);
-            }
-        };
-        for e in &mut self.map.edges {
-            rename(&mut e.left_src);
-            rename(&mut e.right_src);
-        }
+        self.map.relabel(|id| renamed.get(&id).copied());
     }
 }
 
