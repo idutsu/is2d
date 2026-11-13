@@ -914,9 +914,6 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
         if occluded_above || !hit_shape.is_raw_at_scope(&tab.session.editing_group_path) {
             return false;
         }
-        if hit_shape.color == fill_color {
-            return false;
-        }
         focus_active_layer_to_shape_by_id(tab, hit_shape.shape_id);
     }
     fill_face_at(tab, target_lid, fill_color, pt)
