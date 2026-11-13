@@ -865,6 +865,17 @@ impl PlanarMap {
     /// 頂点は番号の小さい順に調べ、まとめたら、つながりの変わった両端の頂点だけを調べ直す（まとめた結果は、
     /// まとめるたびに最初から調べ直すのと同じ）。辺の並びは、まとめた辺を消すたびに最後の辺をそこへ移すのと同じ順にする
     pub(crate) fn merge_degree2(&mut self, candidates: impl IntoIterator<Item = usize>) {
+        self.merge_degree2_indexed(candidates, None);
+    }
+
+    /// `merge_degree2` の本体。`built`：この地図の辺の判定の形の索引と、辺の番号 → 索引の番号（曲線に戻したあとの
+    /// 索引：`ChainRestorer::finish`）。無ければ初めて要るときに作る。どちらでも、まとめが索引の範囲に収まらなければ、
+    /// 範囲を広げて作り直す（索引は範囲にかかる区間と頂点をみな持つので、範囲に収まる調べの答えは、索引の範囲によらない）
+    fn merge_degree2_indexed(
+        &mut self,
+        candidates: impl IntoIterator<Item = usize>,
+        built: Option<(PolyIndex, Vec<usize>)>,
+    ) {
         let mut is_cand = vec![false; self.nodes.len()];
         for v in candidates {
             is_cand[v] = true;
@@ -887,10 +898,13 @@ impl PlanarMap {
         let mut pending: std::collections::BTreeSet<usize> = (0..self.nodes.len())
             .filter(|&v| candidate(v, &at))
             .collect();
-        // 判定の形の索引（初めて要るときに作る）と、辺の番号 → 索引の番号。索引に入れる範囲は、まとめる候補の頂点に
-        // つながる辺の外接矩形（まとめた辺が範囲から出るときは、広げて作り直す）
-        let mut index: Option<PolyIndex> = None;
-        let mut ix_id: Vec<usize> = (0..n).collect();
+        // 判定の形の索引（受け取らなければ、初めて要るときに作る）と、辺の番号 → 索引の番号。作るときの範囲は、まとめる
+        // 候補の頂点につながる辺の外接矩形（まとめた辺が範囲から出るときは、広げて作り直す）
+        let (mut index, mut ix_id): (Option<PolyIndex>, Vec<usize>) = match built {
+            Some((ix, ids)) => (Some(ix), ids),
+            None => (None, (0..n).collect()),
+        };
+        debug_assert_eq!(ix_id.len(), n, "辺ごとの索引の番号");
         let mut ix_area = pending
             .iter()
             .flat_map(|&v| at[v].iter())
@@ -1455,6 +1469,14 @@ thread_local! {
     static DENSE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// テスト用：このスレッドで、重ね合わせの入れる辺を決めた回数（`fed_edges`）
     static FED_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// テスト用：このスレッドで、判定の形の索引を作った回数（`PolyIndex::build`）
+    static INDEX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、判定の形の索引を作った回数
+#[cfg(test)]
+pub(crate) fn index_builds() -> usize {
+    INDEX_BUILDS.with(|n| n.get())
 }
 
 /// テスト用：このスレッドで、重ね合わせの入れる辺を決めた回数

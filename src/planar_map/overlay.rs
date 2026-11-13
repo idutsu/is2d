@@ -1725,8 +1725,8 @@ impl PlanarMap {
             for (c, ids) in chains.iter().zip(&chain_edges) {
                 restorer.restore(c, ids);
             }
-            let mut m = restorer.finish();
-            m.merge_degree2(dropped_ends);
+            let (mut m, index) = restorer.finish();
+            m.merge_degree2_indexed(dropped_ends, index);
             m.compact_nodes();
             maps.push(m);
         }
@@ -2025,17 +2025,21 @@ impl ChainRestorer {
         true
     }
 
-    /// 置き換え終わった地図（使わなくなった辺を除く）
-    pub(super) fn finish(self) -> PlanarMap {
+    /// 置き換え終わった地図（使わなくなった辺を除く）と、その辺の判定の形の索引・辺の番号 → 索引の番号（鎖が無ければ
+    /// `None`。続く `merge_degree2_indexed` が使う）
+    pub(super) fn finish(self) -> (PlanarMap, Option<(PolyIndex, Vec<usize>)>) {
         let mut map = self.map;
-        if let Some(index) = self.index {
-            let mut k = 0;
-            map.edges.retain(|_| {
-                k += 1;
-                index.alive[k - 1]
-            });
-        }
-        map
+        let Some(index) = self.index else {
+            return (map, None);
+        };
+        // 地図の辺と索引の辺は、同じ番号で1つずつ足してきた
+        let mut k = 0;
+        map.edges.retain(|_| {
+            k += 1;
+            index.alive[k - 1]
+        });
+        let ids = (0..index.alive.len()).filter(|&f| index.alive[f]).collect();
+        (map, Some((index, ids)))
     }
 }
 

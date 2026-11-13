@@ -191,6 +191,8 @@ impl PolyIndex {
         alive: impl Fn(usize) -> bool,
         area: Option<KRect>,
     ) -> Self {
+        #[cfg(test)]
+        super::INDEX_BUILDS.with(|n| n.set(n.get() + 1));
         // 格子の点に直すとき、外へ1目広げる（丸めで内側へ寄らないように）
         let area = area.map(|r| GridRect {
             x0: (r.x0 * OVERLAY_GRID).floor() as i64 - 1,

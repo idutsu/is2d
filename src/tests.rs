@@ -29505,3 +29505,24 @@ fn marquee_cut_overlays_once_for_inside_and_rest() {
     assert_eq!(fl.pieces().len(), 1);
     assert_eq!(fl.remainder().count(), 1);
 }
+
+/// 重ね合わせの1回で、判定の形の索引を作るのは1回：曲線に戻す所（`ChainRestorer`）が作った索引を、続く
+/// `merge_degree2` もそのまま使う（設計：claude/N-2002の残り・R5・★4・★5の設計_80fe785.md。直す前は2回）
+#[test]
+fn overlay_builds_the_shape_index_once() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    let red = Color32::from_rgb(235, 75, 75);
+    let left = vec![map_overlay::rect_shape(0.0, 0.0, 100.0, 100.0, red)];
+    let right = vec![map_overlay::rect_shape(50.0, 0.0, 150.0, 100.0, red)];
+    let m = PlanarMap::default()
+        .overlay(MapInput::Shapes(&left), MapRule::Paint(Some(red)))
+        .unwrap();
+    let before = crate::planar_map::index_builds();
+    let m = m
+        .overlay(MapInput::Shapes(&right), MapRule::Paint(Some(red)))
+        .unwrap();
+    assert_eq!(crate::planar_map::index_builds() - before, 1);
+    // 重なった所の境目は消え、その端の切れ目もまとまって、1つの四角になる
+    assert!(m.is_valid());
+    assert_eq!((m.nodes.len(), m.edges.len()), (4, 4));
+}
