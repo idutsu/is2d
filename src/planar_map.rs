@@ -357,6 +357,10 @@ impl PlanarMap {
         &self,
         prev: Option<&HashSet<[u64; 6]>>,
     ) -> Option<Vec<MapFace>> {
+        #[cfg(test)]
+        if prev.is_none() {
+            FULL_CHECKS.with(|n| n.set(n.get() + 1));
+        }
         // 頂点と制御点が格子に置ける（±65,536px の内で有限：`fits_grid`）こと、両側が同じ色の辺が無いことを先に確かめる
         // （格子の外の座標で、判定の形を作らない）
         if !self.fits_grid(Affine::IDENTITY) || self.edges.iter().any(|e| e.left == e.right) {
@@ -1331,7 +1335,8 @@ impl LayerBase {
 
     /// 面の図形を地図から作る（`faces`。番号の順）
     fn face_shapes(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
-        let (faces, ids) = numbered_faces(&self.map);
+        let (faces, _) = self.map.faces();
+        let ids = face_ids(&faces, FaceIds::Keep);
         let mut shapes: Vec<Arc<FillShape>> = faces
             .iter()
             .zip(&ids)
@@ -1430,6 +1435,14 @@ impl LayerBase {
 thread_local! {
     /// テスト用：このスレッドで、図形から地図を作った回数（`LayerBase::of`）
     static FROM_SHAPES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// テスト用：このスレッドで、地図を全部確かめた回数（`valid_faces_since` の前の地図が無いとき）
+    static FULL_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、地図を全部確かめた回数
+#[cfg(test)]
+pub(crate) fn full_checks() -> usize {
+    FULL_CHECKS.with(|n| n.get())
 }
 
 /// テスト用：このスレッドで、図形から地図を作った回数
@@ -1903,9 +1916,6 @@ pub(crate) fn pulled_quad(q: QuadBez, t: f64, target: Point) -> QuadBez {
 /// 「変形した形を、その座標の格子で地図にする」決まり。結果は確かめた地図（`checked`）。`None`：格子に置けない座標が
 /// あるか、正しい地図にならない
 pub(crate) fn realized(map: &PlanarMap, xform: Affine) -> Option<CheckedMap> {
-    if xform == Affine::IDENTITY {
-        return map.clone().checked();
-    }
     if !map.fits_grid(xform) {
         return None;
     }
@@ -1929,21 +1939,6 @@ pub(crate) fn realized(map: &PlanarMap, xform: Affine) -> Option<CheckedMap> {
         .collect();
     let refs: Vec<&FillShape> = shapes.iter().collect();
     painted_map(&refs)?.checked()
-}
-
-/// 地図 `map`（文書の座標）の面の辺の側に、面の番号を記した地図。面の番号は、辺の側に記された番号が1つの面はその番号
-/// （同じ番号の面が2つ以上あれば、面の順で前の面だけ）、ほかは新しい番号（`face_ids` の `Keep`）
-pub(crate) fn with_face_ids(map: &PlanarMap) -> PlanarMap {
-    let (faces, ids) = numbered_faces(map);
-    labeled(map.clone(), &faces, &ids)
-}
-
-/// 地図 `map` の面と、面ごとの番号（`face_ids` の `Keep`。面の順）。面に番号を付けるのはこれ1つ（計算に使う写しの面の
-/// 図形 `LayerBase::face_shapes`、片の地図の番号 `with_face_ids`）
-fn numbered_faces(map: &PlanarMap) -> (Vec<MapFace>, Vec<ShapeId>) {
-    let (faces, _) = map.faces();
-    let ids = face_ids(&faces, FaceIds::Keep);
-    (faces, ids)
 }
 
 /// 地図 `start` に、地図 `maps` を下から順に重ねた地図（`MapRule::Overlay`。重ねる地図の色が上）。`start` が空なら、

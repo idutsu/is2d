@@ -11,8 +11,8 @@ use kurbo::Affine;
 
 use crate::canvas_tool::{Placement, SceneBaseCache};
 use crate::planar_map::{
-    cut_out, per_layer_parallel, realized, region_map, stacked, with_face_ids, CheckedMap,
-    LayerBase, MapChange, MapInput, MapRule, PlanarMap,
+    cut_out, per_layer_parallel, realized, region_map, stacked, CheckedMap, LayerBase, MapChange,
+    MapInput, MapRule, PlanarMap,
 };
 use crate::stored_map::StoredMap;
 use crate::vector_engine::FillShape;
@@ -45,14 +45,20 @@ pub(crate) struct PieceGroup {
 }
 
 impl PieceGroup {
-    /// 変換をかけて置いた地図（その座標の格子で正しい地図にしたもの：`realized`）。`None`：格子に置けない
+    /// 変換をかけて置いた地図（その座標の格子で正しい地図にしたもの：`realized`）。片の地図は作ったときに確かめてある
+    /// （`new` は確かめた地図だけを受け取る）ので、変換が無ければ、そのまま使う。`None`：格子に置けない
     fn placed(&self) -> Option<PlanarMap> {
-        Some(realized(&self.base().map, self.xform)?.into_map())
+        let base = self.base();
+        if self.xform == Affine::IDENTITY {
+            return Some(base.map.clone());
+        }
+        Some(realized(&base.map, self.xform)?.into_map())
     }
 
-    /// 地図 `map`（文書の座標）の片の組。面の番号が1つに決まらない面には、新しい番号を振る（`with_face_ids`）
-    fn new(map: &PlanarMap, xform: Affine) -> Self {
-        let base = LayerBase::of_stored(&StoredMap::from_dense(&with_face_ids(map), None));
+    /// 確かめた地図 `map`（文書の座標）の片の組。面ごとに1つずつ別の番号を記す（番号が1つに決まらない面には、新しい
+    /// 番号：`uniquely_labeled`）。片の地図を確かめるのは、それを作った所の1回だけ（レビュー 6ee325a の N-2004）
+    fn new(map: CheckedMap, xform: Affine) -> Self {
+        let base = LayerBase::of_stored(&StoredMap::from_dense(map.uniquely_labeled().map(), None));
         Self {
             map: base.stored.clone(),
             held: Some(base),
@@ -82,17 +88,39 @@ impl PieceGroup {
         self.base().map.labels().next()
     }
 
-    /// 番号が `keep` にある片だけの組（1つも無ければ `None`）
-    fn restricted(&self, keep: &HashSet<ShapeId>) -> Option<Self> {
+    /// 番号が `keep` にある片だけの組（`Ok(None)`：1つも無い。`Err`：正しい地図にならない）
+    fn restricted(&self, keep: &HashSet<ShapeId>) -> Result<Option<Self>, Unplaceable> {
         let ids = self.ids();
         if ids.iter().all(|id| keep.contains(id)) {
-            return Some(self.clone());
+            return Ok(Some(self.clone()));
         }
         if !ids.iter().any(|id| keep.contains(id)) {
-            return None;
+            return Ok(None);
         }
-        Some(Self::new(&self.base().map.restricted(keep), self.xform))
+        let map = self
+            .base()
+            .map
+            .restricted(keep)
+            .checked()
+            .ok_or(Unplaceable)?;
+        Ok(Some(Self::new(map, self.xform)))
     }
+}
+
+/// 片の地図が、格子の上で正しい地図にならない（片の操作を断る）
+#[derive(Debug)]
+pub(crate) struct Unplaceable;
+
+/// 片の組 `groups` のうち、番号が `keep` にある片だけの組（片の無くなった組は外す。`Err`：どれかが正しい地図にならない）
+fn restricted_groups(
+    groups: &[PieceGroup],
+    keep: &HashSet<ShapeId>,
+) -> Result<Vec<PieceGroup>, Unplaceable> {
+    let mut out = Vec::new();
+    for g in groups {
+        out.extend(g.restricted(keep)?);
+    }
+    Ok(out)
 }
 
 /// 持ち上げたレイヤーの残り
@@ -175,8 +203,8 @@ impl FloatLayer {
         ids: &HashSet<ShapeId>,
     ) -> Option<CheckedMap> {
         let start = self.content(&stage.cel(self.layer_id)?).map.restricted(ids);
-        let groups = self.groups.iter().filter_map(|g| g.restricted(ids));
-        stacked(start, groups.map(|g| g.placed()))?.checked()
+        let groups = restricted_groups(&self.groups, ids).ok()?;
+        stacked(start, groups.iter().map(PieceGroup::placed))?.checked()
     }
 
     /// 確定した地図：中身の地図に、片の組を下から順に重ねる（組ごとに変換をかけて、その座標の格子で正しい地図にする：
@@ -408,30 +436,34 @@ impl Floating {
         self.modified = true;
     }
 
-    /// レイヤー `layers` の片のうち、番号が `ids` の片の色を `color` にする（同じ色でとなり合う片は1つになる）
+    /// レイヤー `layers` の片のうち、番号が `ids` の片の色を `color` にする（同じ色でとなり合う片は1つになる）。全部か
+    /// 無しか：`Err`：色を変えた片の地図が正しい地図にならない（何も変えない）。`Ok`：変えたか
     pub(crate) fn recolor(
         &mut self,
         ids: &HashSet<ShapeId>,
         color: Color32,
         layers: &HashSet<LayerId>,
-    ) -> bool {
-        let mut any = false;
-        for l in self
-            .layers
-            .iter_mut()
-            .filter(|l| layers.contains(&l.layer_id))
-        {
-            for g in &mut l.groups {
+    ) -> Result<bool, Unplaceable> {
+        let mut next: Vec<(usize, usize, PieceGroup)> = Vec::new();
+        for (li, l) in self.layers.iter().enumerate() {
+            if !layers.contains(&l.layer_id) {
+                continue;
+            }
+            for (gi, g) in l.groups.iter().enumerate() {
                 if let Some(m) = g.base().map.recolored(ids, color) {
-                    *g = PieceGroup::new(&m, g.xform);
-                    any = true;
+                    let m = m.checked().ok_or(Unplaceable)?;
+                    next.push((li, gi, PieceGroup::new(m, g.xform)));
                 }
             }
+        }
+        let any = !next.is_empty();
+        for (li, gi, g) in next {
+            self.layers[li].groups[gi] = g;
         }
         if any {
             self.modified = true;
         }
-        any
+        Ok(any)
     }
 
     /// レイヤー `layer_id` の組 `group` の片の地図（文書の座標、変換をかける前）を `edit` で編集する。`false`：その組が
@@ -450,10 +482,10 @@ impl Floating {
         else {
             return false;
         };
-        let Some(next) = edit(&g.base().map) else {
+        let Some(next) = edit(&g.base().map).and_then(PlanarMap::checked) else {
             return false;
         };
-        *g = PieceGroup::new(&next, g.xform);
+        *g = PieceGroup::new(next, g.xform);
         true
     }
 
@@ -469,18 +501,17 @@ impl Floating {
             .collect();
         for l in &mut self.layers {
             let layer_id = l.layer_id;
-            let kept: Vec<PieceGroup> =
-                l.groups.iter().filter_map(|g| g.restricted(keep)).collect();
+            let Ok(kept) = restricted_groups(&l.groups, keep) else {
+                return false;
+            };
             if kept.is_empty() {
                 l.origin = None;
                 l.groups.clear();
                 continue;
             }
-            let back: Vec<PieceGroup> = l
-                .groups
-                .iter()
-                .filter_map(|g| g.restricted(&drop))
-                .collect();
+            let Ok(back) = restricted_groups(&l.groups, &drop) else {
+                return false;
+            };
             if back.is_empty() {
                 continue;
             }
@@ -507,36 +538,41 @@ impl Floating {
     }
 
     /// 番号が `keep` に無い片と、残りを取り出す（確定する分）。この浮いた片には、残す片だけが残る（残りは確定するので
-    /// 持たない）
-    pub(crate) fn split_off(&mut self, keep: &HashSet<ShapeId>) -> Floating {
+    /// 持たない）。全部か無しか：`Err`：片の地図が正しい地図にならない（何も変えない）
+    pub(crate) fn split_off(&mut self, keep: &HashSet<ShapeId>) -> Result<Floating, Unplaceable> {
         let drop: HashSet<ShapeId> = self
             .layers
             .iter()
             .flat_map(|l| l.groups.iter().flat_map(|g| g.ids()))
             .filter(|id| !keep.contains(id))
             .collect();
+        let parts = self
+            .layers
+            .iter()
+            .map(|l| {
+                Ok((
+                    restricted_groups(&l.groups, &drop)?,
+                    restricted_groups(&l.groups, keep)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, Unplaceable>>()?;
         let mut out = Floating::new(true);
-        for l in &mut self.layers {
-            let layer_id = l.layer_id;
+        for (l, (dropped, kept)) in self.layers.iter_mut().zip(parts) {
             out.layers.push(FloatLayer {
-                layer_id,
+                layer_id: l.layer_id,
                 origin: l.origin.take(),
-                groups: l
-                    .groups
-                    .iter()
-                    .filter_map(|g| g.restricted(&drop))
-                    .collect(),
+                groups: dropped,
             });
-            l.groups = l.groups.iter().filter_map(|g| g.restricted(keep)).collect();
+            l.groups = kept;
         }
         self.layers.retain(|l| !l.is_empty());
         out.layers.retain(|l| !l.is_empty());
-        out
+        Ok(out)
     }
 
-    /// 地図 `map`（文書の座標。面の番号が片の番号）を、変換 `xform` をかける片の組として、レイヤー `layer_id` の一番上に
-    /// 足す（変換は、動かした片と同じく確定のときに地図にかける）
-    pub(crate) fn add_map(&mut self, layer_id: LayerId, map: &PlanarMap, xform: Affine) {
+    /// 確かめた地図 `map`（文書の座標。面の番号が片の番号）を、変換 `xform` をかける片の組として、レイヤー `layer_id` の
+    /// 一番上に足す（変換は、動かした片と同じく確定のときに地図にかける）
+    pub(crate) fn add_map(&mut self, layer_id: LayerId, map: CheckedMap, xform: Affine) {
         let group = PieceGroup::new(map, xform);
         self.layer_mut(layer_id).groups.push(group);
         self.modified = true;
@@ -578,7 +614,7 @@ fn cut_layer(
     let part = (!ids.is_empty())
         .then(|| content.restricted(ids))
         .filter(|m| !m.edges.is_empty());
-    let (rest, inside) = match (part, rect) {
+    let (rest, inside): (MapChange, CheckedMap) = match (part, rect) {
         (None, None) => return Some(cur.clone()),
         // 面を丸ごと持ち上げる：中身から、その面を外す（面の番号はそのまま。片は前と同じ番号の図形）
         (Some(part), None) => (
@@ -588,7 +624,7 @@ fn cut_layer(
                 layer_id,
                 stage.scope,
             ),
-            part,
+            part.checked()?,
         ),
         (part, Some(r)) => {
             let region_owned;
@@ -600,20 +636,21 @@ fn cut_layer(
                 }
             };
             let (rest, inside) = cut_out(&cel, &own, content, region, layer_id, stage.scope)?;
-            (rest, inside.map.into_map())
+            (rest, inside.map)
         }
     };
     let mut groups = cur.groups.clone();
-    if !inside.edges.is_empty() {
+    if !inside.map().edges.is_empty() {
         match groups.first_mut() {
             Some(g) if !modified => {
                 let joined = g
                     .base()
                     .map
-                    .overlay(MapInput::Map(&inside), MapRule::Overlay)?;
-                *g = PieceGroup::new(&joined, Affine::IDENTITY);
+                    .overlay(MapInput::Map(inside.map()), MapRule::Overlay)?
+                    .checked()?;
+                *g = PieceGroup::new(joined, Affine::IDENTITY);
             }
-            _ => groups.insert(0, PieceGroup::new(&inside, Affine::IDENTITY)),
+            _ => groups.insert(0, PieceGroup::new(inside, Affine::IDENTITY)),
         }
     }
     Some(FloatLayer {

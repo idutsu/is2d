@@ -1510,14 +1510,14 @@ impl Session {
     /// 新しい中身（貼り付け・Alt 複製・シンボルの分解）は中身の生の図形の地図（`clipboard_ops::put_placements`）
     pub(crate) fn add_floating_maps(
         &mut self,
-        maps: Vec<(LayerId, crate::planar_map::PlanarMap, Affine)>,
+        maps: Vec<(LayerId, crate::planar_map::CheckedMap, Affine)>,
     ) {
         if maps.is_empty() {
             return;
         }
         self.with_floating(|fl, _| {
-            for (layer_id, map, xform) in &maps {
-                fl.add_map(*layer_id, map, *xform);
+            for (layer_id, map, xform) in maps {
+                fl.add_map(layer_id, map, xform);
             }
         });
     }

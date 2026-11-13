@@ -70,7 +70,11 @@ pub(crate) fn prepare_convert_selection_to_symbol(
                 .filter(|p| selection.contains_shape(p))
                 .map(|p| p.shape_id)
                 .collect();
-            let rest = fl.clone().split_off(&keep);
+            let Ok(rest) = fl.clone().split_off(&keep) else {
+                tab.session.set_floating(Some(fl));
+                tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
+                return None;
+            };
             let Some(plan) = crate::canvas_tool::plan_commit(tab, &rest) else {
                 tab.session.set_floating(Some(fl));
                 return None;

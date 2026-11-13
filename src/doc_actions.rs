@@ -865,12 +865,17 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 return false;
             }
             let ids = tab.session.selection.shapes.clone();
+            let mut recolored = Ok(false);
             tab.session.update_floating(|fl_opt| {
                 if let Some(fl) = fl_opt {
-                    fl.recolor(&ids, fill_color, &editable_lids);
+                    recolored = fl.recolor(&ids, fill_color, &editable_lids);
                     fl.modified = true;
                 }
             });
+            if recolored.is_err() {
+                tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
+                return false;
+            }
             // 同じ色でとなり合う片は1つになる（新しい番号）
             tab.session.select_floating_pieces();
             return true;

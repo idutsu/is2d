@@ -12802,9 +12802,11 @@ fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
         .unwrap()
         .map
         .clone();
-    app.tabs[0]
-        .session
-        .add_floating_maps(vec![(lid, map, kurbo::Affine::IDENTITY)]);
+    app.tabs[0].session.add_floating_maps(vec![(
+        lid,
+        map.checked().unwrap(),
+        kurbo::Affine::IDENTITY,
+    )]);
     assert_eq!(app.scene().len(), 1);
     assert_eq!(app.scene().get(0).unwrap().color, Color32::RED);
 
@@ -12812,7 +12814,7 @@ fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
     app.tabs[0].session.update_floating(|fl_opt| {
         if let Some(fl) = fl_opt {
             let ids = fl.piece_ids();
-            fl.recolor(&ids, Color32::BLUE, &layers);
+            assert!(fl.recolor(&ids, Color32::BLUE, &layers).unwrap());
         }
     });
     assert_eq!(app.scene().get(0).unwrap().color, Color32::BLUE);
@@ -29338,4 +29340,31 @@ fn drawing_inside_a_symbol_copies_only_that_symbol() {
         })
         .count();
     assert_eq!(shared, n - 1);
+}
+
+/// N-2004：貼り付けた片を動かさずに確定するとき、片の地図を全部確かめ直さない（片の地図は、貼り付けの準備で確かめた
+/// 地図をそのまま持つ。確かめるのは片を作った所の1回だけ）
+#[test]
+fn committing_an_unmoved_pasted_piece_does_not_recheck_it() {
+    use crate::doc_actions::{apply, Action};
+    let red = Color32::from_rgb(235, 75, 75);
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(200.0, 140.0),
+            10.0,
+            red,
+        ),
+    );
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::Copy));
+    assert!(canvas_tool::clear_selection(&mut app));
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    let before = crate::planar_map::full_checks();
+    assert!(canvas_tool::clear_selection(&mut app));
+    assert_eq!(crate::planar_map::full_checks(), before);
 }

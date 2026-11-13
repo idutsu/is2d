@@ -7,7 +7,7 @@ use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, finish_cel_writes, write_cel, Clipboard,
     MoveSelectionDrag, Tab,
 };
-use crate::planar_map::PlanarMap;
+use crate::planar_map::CheckedMap;
 use crate::symbol::{Document, Library, SymbolDef};
 use crate::timeline::{Cel, Timeline};
 use crate::vector_engine::LayerId;
@@ -107,7 +107,7 @@ pub(crate) struct Placement {
 
 struct PlacedLayer {
     layer_id: LayerId,
-    pieces: Vec<PlanarMap>,
+    pieces: Vec<CheckedMap>,
     nested: Cel,
     /// 中身と入れ替えるインスタンス（シンボルの分解）
     replacing: Option<u64>,
@@ -135,7 +135,7 @@ pub(crate) fn prepare_placement(
     let tl = tab.active_timeline();
     let active = active_scope_layer_id(&tab.session, tl);
     // 入れ替えるインスタンスのレイヤーは、中身が空でも置く（インスタンスを外す）
-    let mut by_layer: Vec<(LayerId, Vec<PlanarMap>, Vec<Cel>)> = replacing
+    let mut by_layer: Vec<(LayerId, Vec<CheckedMap>, Vec<Cel>)> = replacing
         .map(|(layer_id, _)| (layer_id, Vec::new(), Vec::new()))
         .into_iter()
         .collect();
@@ -150,7 +150,7 @@ pub(crate) fn prepare_placement(
         let nested = nested.transformed(xform)?;
         let raw = match raw {
             Some(m) if !m.fits_grid(xform) => return None,
-            Some(m) => Some(m.checked()?.freshly_labeled().into_map()),
+            Some(m) => Some(m.checked()?.freshly_labeled()),
             None => None,
         };
         let i = match by_layer.iter().position(|l| l.0 == target) {

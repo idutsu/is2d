@@ -632,10 +632,9 @@ pub(crate) fn prepare_ungroup_selected_shapes(
             }
         }
     }
-    before_mutate(tab);
-
     // グループの生の図形の地図（浮いた片にする）
-    let mut group_maps: Vec<(LayerId, crate::planar_map::PlanarMap, Affine)> = Vec::new();
+    // （確かめた地図にする。正しい地図にならなければ、文書を変える前に断る）
+    let mut group_maps: Vec<(LayerId, crate::planar_map::CheckedMap, Affine)> = Vec::new();
     let mut group_raw: Vec<(LayerId, Vec<u64>)> = Vec::new();
     for s in tab.session.base_cache.shapes() {
         if tab.session.selection.contains_shape(s)
@@ -653,12 +652,13 @@ pub(crate) fn prepare_ungroup_selected_shapes(
         let Some(cel) = tab.session.base_cache.cel(*layer_id) else {
             continue;
         };
-        group_maps.push((
-            *layer_id,
-            cel.scope_base(path).map.clone(),
-            Affine::IDENTITY,
-        ));
+        let Some(map) = cel.scope_base(path).map.clone().checked() else {
+            tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
+            return false;
+        };
+        group_maps.push((*layer_id, map, Affine::IDENTITY));
     }
+    before_mutate(tab);
     // グループは、セル画の並びで、その番号を階層から外す（中のグループ・インスタンスは1段上の階層へ。グループの生の図形は
     // 浮いた片にするので外す）。今の階層の子のインスタンスそのものは、下で分解する
     let selection = tab.session.selection.clone();
