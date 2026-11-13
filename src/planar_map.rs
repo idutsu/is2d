@@ -1453,6 +1453,14 @@ thread_local! {
     static FULL_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// テスト用：このスレッドで、しまう地図から計算に使う写しを作った回数（`LayerBase::from_stored`）
     static DENSE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// テスト用：このスレッドで、重ね合わせの入れる辺を決めた回数（`fed_edges`）
+    static FED_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、重ね合わせの入れる辺を決めた回数
+#[cfg(test)]
+pub(crate) fn fed_runs() -> usize {
+    FED_RUNS.with(|n| n.get())
 }
 
 /// テスト用：このスレッドで、しまう地図から計算に使う写しを作った回数
@@ -2105,10 +2113,10 @@ pub(crate) fn region_map(part: &PlanarMap, rect: Option<&FillShape>) -> Option<P
 /// 消す図形が隠す図形、新しく入れる形が残りの図形、地図が残りの地図。中の差分の地図が片の地図（丸ごと中にあるセル画の
 /// 面は、その番号のまま）。片の新しい形は、残りの形と同じ元の図形を引き継ぐことがあるので、番号を新しく振る（地図の
 /// 印も）。残りの形は、セル画の地図の書き換えと同じく、元の図形の番号を引き継ぐ（隠す元の図形と入れ替わる。残りの地図の
-/// 印が変わらないので、残りの地図は、切り口から離れた所の塊をセル画の地図と共有する）。中と外は同じ地図を同じ所で
-/// 切るので、切り口は両側で同じ線になる（地図の精度 `FLAT_TOL` の中で。中と外は別々に重ね合わせるので、切り口の折れ線を
-/// 曲線に戻すかどうかが両側で違い、点の並びがビットまでは同じにならないことがある。重ね直すと同じ線として1本になる：
-/// `same_curve`）。`None`：格子に置けない座標がある
+/// 印が変わらないので、残りの地図は、切り口から離れた所の塊をセル画の地図と共有する）。中と外は1回の重ね合わせで
+/// 同じ区間・同じ頂点から作る（`overlay_rules`）ので、切り口の頂点は両側で同じ。切り口の区間を曲線に戻すかどうかは
+/// 地図ごとに決める（調べる相手の辺が両側で違う）ので、点の並びはビットまでは同じにならないことがある（地図の精度
+/// `FLAT_TOL` の中で同じ線。重ね直すと同じ線として1本になる：`same_curve`）。`None`：格子に置けない座標がある
 pub(crate) fn cut_out(
     cel: &LayerBase,
     own: &[&FillShape],
@@ -2117,10 +2125,10 @@ pub(crate) fn cut_out(
     layer_id: LayerId,
     group_path: &[u64],
 ) -> Option<(MapChange, MapChange)> {
-    let inside = content.overlay(region, MapRule::KeepInside)?.written(cel)?;
-    let rest = content
-        .overlay(region, MapRule::Paint(None))?
-        .written(cel)?;
+    let [inside, rest] =
+        content.overlay_rules(region, [MapRule::KeepInside, MapRule::Paint(None)])?;
+    let inside = inside.written(cel)?;
+    let rest = rest.written(cel)?;
     let rest_change = cel.diff(rest, own, layer_id, group_path);
     let mut inside_change = cel.diff(inside, own, layer_id, group_path);
     inside_change.renew_ids();

@@ -29476,3 +29476,32 @@ fn redrawing_a_locked_layer_does_not_rebuild_its_map() {
     }
     assert_eq!(crate::planar_map::dense_builds(), before);
 }
+
+/// 矩形で一部を選ぶとき、中（片）と外（残り）を1回の重ね合わせで作る：入れる辺を決める・切る・面の色を伝えるのは1回
+/// （`overlay_rules`。設計：claude/N-2002の残り・R5・★4・★5の設計_80fe785.md。直す前は中と外で別々に重ね合わせた）
+#[test]
+fn marquee_cut_overlays_once_for_inside_and_rest() {
+    let mut app = Is2dApp::default();
+    let lid = app.doc.root.layers[0].id;
+    let mut stroke = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(300.0, 100.0),
+        20.0,
+        Color32::RED,
+    );
+    stroke[0].layer_id = lid;
+    put_cel_shapes(&mut app, 0, 0, stroke);
+    let before = crate::planar_map::fed_runs();
+    run(
+        &mut app,
+        &[Action::SelectMarquee {
+            p0: Point::new(80.0, 70.0),
+            p1: Point::new(200.0, 130.0),
+            additive: false,
+        }],
+    );
+    assert_eq!(crate::planar_map::fed_runs() - before, 1);
+    let fl = app.session.floating().expect("片が浮く");
+    assert_eq!(fl.pieces().len(), 1);
+    assert_eq!(fl.remainder().count(), 1);
+}
