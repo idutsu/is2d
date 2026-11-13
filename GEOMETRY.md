@@ -142,9 +142,10 @@ $$\theta_w(i) = \operatorname{atan2}\!\left(\hat{d}_{\text{in}}(i, w) \times \ha
 
 - **回転量および変曲点（S字カーブ）による棄却ガード**：
   区間の正味回転角 $\Theta_{\text{net}}$ と4分割マクロ絶対回転角の和 $\Theta_{\text{macro}}$ について、$\Theta_{\text{macro}} > 0.35\text{ rad}$ かつ $\Theta_{\text{macro}} - \Theta_{\text{net}} > 0.24\text{ rad}$ となる折り返し区間、および回転角上限 $\theta_{\max}$（高曲率点で $1.68\text{ rad}$、それ以外で $0.82 + 0.40 f_{\text{small}}\text{ rad}$）に対して $\Theta_{\text{net}} > \theta_{\max}$ または $\Theta_{\text{macro}} > \theta_{\max} + 0.25\text{ rad}$ を超える区間は統合を棄却します。また、2次ベジェ曲線は単一セグメント内に変曲点を持てないため、弦 $P_0 P_2$ の法線方向符号付き距離の前半平均 $\bar{d}_1$ と後半平均 $\bar{d}_2$ が異符号（$\bar{d}_1 \cdot \bar{d}_2 < 0$）かつ共に $0.72 \cdot \text{tol}$ を超えるS字区間も統合を棄却します。
-- **曲線までの最大距離誤差（[`max_quad_fit_error`](./src/vector_stroke.rs)）**：
+- **曲線までの最大距離誤差（[`quad_fit_error_within`](./src/vector_stroke.rs)）**：
   両端を除く各点 $Q_i$ から曲線までのいちばん近い距離（[`nearest_on_quad`](./src/vector_engine.rs)：17点から選び、ニュートン法で詰める。曲線の上のいちばん近い点を求めるのはこの1つ）の最大を誤差とします。
   $$\varepsilon_{\max} = \max_{1 \le i \le n-2} \min_{t \in [0,1]} \|Q_i - B(t)\|$$
+  点は曲線に沿って並ぶので、まず点ごとに、前の点の所から点の間の長さだけ進めた曲線の上の点（ニュートン法を1回）までの距離を測ります。この距離は曲線までの距離より小さくないので、それまでのいちばん大きい誤差を超えない点は答えを変えず、超える点だけを `nearest_on_quad` で測ります（全部の点を測るのと同じ答え）。許容を超えたらそこで止めます（レビュー 4cb53aa の N-2002）。
 - **差分更新による $O(K \cdot M)$ 優先度削減**：
   許容誤差 $\varepsilon_{\max} \le \text{tol}$（側面で $0.50 \cdot r_{\text{scale}} \cdot f_{\text{small}}$ px、丸キャップ・高曲率部で $\max(0.36 \cdot r_{\text{scale}} \cdot f_{\text{small}},\; 0.06)$ px）を満たす候補のうち、スコア $\varepsilon_{\max} + 0.18 \, \Theta_{\text{net}}^2$ が最小のアンカーから順に削除します。アンカー $j$ を削除した際、区間が変化するのは前後の隣接2アンカー（$j-1$ と $j+1$）のみであるため、この2箇所のスコアのみを再計算することで $O(K \cdot M)$ の高速性を実現しています。
 
