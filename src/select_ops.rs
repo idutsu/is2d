@@ -519,6 +519,30 @@ pub(crate) fn prepare_group_selected_shapes(
         return false;
     };
     let new_gid = tab.doc.alloc_group_id();
+    // 片の地図を、新しいグループの階層に何を書くか（`Cel::outcome`）も先に決める（書けなければ、何も書かずに断る）
+    let mut group_path = tab.session.editing_group_path.clone();
+    group_path.push(new_gid);
+    let piece_plan: Option<crate::canvas_tool::CommitPlan> = {
+        let cache = &tab.session.base_cache;
+        pieces
+            .into_iter()
+            .map(|(layer_id, map)| {
+                let cel = cache.cel(layer_id)?;
+                let base = cel.scope_base(&group_path);
+                match cel.outcome(&group_path, map.written(&base)?) {
+                    crate::timeline::MapOutcome::Changed(map, shapes) => {
+                        Some((layer_id, map, shapes))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    };
+    let Some(piece_plan) = piece_plan else {
+        tab.session.set_floating(before);
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
+        return false;
+    };
 
     // 浮いた片の残りは、そのままセル画の地図にする（片は重ねない。選択は、残りを書く前のもの：片も選んでいる）。書くもの
     // を先に決め（書けなければ断る）、新しいグループを置いてから書く（今の階層の中身をみな選んでいても、今の階層の
@@ -544,16 +568,7 @@ pub(crate) fn prepare_group_selected_shapes(
     });
     // 浮いた片の地図を、新しいグループの階層の地図にする（図形はその面。番号は片の番号のまま。選んだ生の図形はみな片に
     // なっているので、この階層に図形の並びで書いたものは無い）
-    let mut group_path = tab.session.editing_group_path.clone();
-    group_path.push(new_gid);
-    let mut written = Vec::new();
-    for (layer_id, map) in pieces {
-        if crate::canvas_tool::write_scope_map(tab, layer_id, &group_path, |base| map.written(base))
-        {
-            written.push(layer_id);
-        }
-    }
-    crate::canvas_tool::finish_cel_writes(tab, &written);
+    crate::canvas_tool::write_maps(tab, &group_path, piece_plan);
     if let Some(plan) = rest_plan {
         crate::canvas_tool::write_commit(tab, plan);
     }

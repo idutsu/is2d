@@ -9,7 +9,7 @@ use crate::canvas_tool::{
     focus_active_layer_to_shape_by_id, reset_session_after_timeline_change,
     select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode,
     update_instances, write_scope_map, Clipboard, CoalesceKey, HoverTarget, MapOwner, NoticeKind,
-    SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
+    Refusal, SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
     content_xform, import_clipboard_symbols, pasteable_content, prepare_copy_selected_shapes,
@@ -783,26 +783,35 @@ fn apply_raw_outline(
         .iter()
         .map(|s| s.to_doc(world).into_owned())
         .collect();
-    write_overlay_edit(tab, target_lid, |base| {
+    write_map_edit(tab, target_lid, Some(Refusal::OffGrid), |base| {
         base.map.overlay(MapInput::Shapes(&strokes), rule)
     })
 }
 
-/// 重ね合わせで作る編集（ブラシ・消しゴム・輪郭の変形の確定）を、レイヤー `layer_id` の編集中の階層に書く
-/// （`edit_layer_map`）。重ね合わせが `None`（格子に置けない座標がある：`PlanarMap::overlay`）なら、書かずに断る
-fn write_overlay_edit(
+/// 地図の編集（ブラシ・消しゴム・バケツ・輪郭の変形・アンカー）を、レイヤー `layer_id` の編集中の階層に書く
+/// （`edit_layer_map`。作った地図は `written` で確かめる）。`edit` が `None` を返したら `on_none` を知らせる（`None` なら
+/// 変わらない・編集できないとして黙る：重ね合わせの `None` は格子に置けない座標がある `OffGrid`、バケツ・アンカーの
+/// `None` は変わらないこと）。作った地図が正しい地図でなければ、書かずに知らせる（`Refusal::Unwritable`。黙って捨てない）
+fn write_map_edit(
     tab: &mut Tab,
     layer_id: LayerId,
-    overlay: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::PlanarMap>,
+    on_none: Option<Refusal>,
+    edit: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::PlanarMap>,
 ) -> bool {
-    let mut off_grid = false;
+    let mut refusal = None;
     let written = edit_layer_map(tab, layer_id, |base| {
-        let next = overlay(base);
-        off_grid = next.is_none();
-        next.and_then(|m| m.written(base))
+        let Some(next) = edit(base) else {
+            refusal = on_none;
+            return None;
+        };
+        let written = next.written(base);
+        if written.is_none() {
+            refusal = Some(Refusal::Unwritable);
+        }
+        written
     });
-    if off_grid {
-        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
+    if refusal.is_some() {
+        tab.session.refusal = refusal;
     }
     written
 }
@@ -928,10 +937,8 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
     push_undo(tab, None);
     // 地図は文書の座標なので、点も文書の座標へ写す
     let doc_pt = tab.session.edit_path.world_xform().inverse() * pt;
-    edit_layer_map(tab, target_lid, |base| {
-        base.map
-            .with_face_filled(doc_pt, fill_color)
-            .and_then(|m| m.written(base))
+    write_map_edit(tab, target_lid, None, |base| {
+        base.map.with_face_filled(doc_pt, fill_color)
     })
 }
 
@@ -1125,12 +1132,12 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
     // 頂点・辺を動かす確定は重ね合わせで作る（`None` は格子の外）。アンカーの追加・削除の `None` は、編集できないこと
     let changed = match map_edit {
         MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => {
-            write_overlay_edit(tab, layer_id, |base| map_edit.apply(&base.map))
+            write_map_edit(tab, layer_id, Some(Refusal::OffGrid), |base| {
+                map_edit.apply(&base.map)
+            })
         }
         MapEdit::AddAnchor { .. } | MapEdit::DeleteAnchor { .. } => {
-            edit_layer_map(tab, layer_id, |base| {
-                map_edit.apply(&base.map).and_then(|m| m.written(base))
-            })
+            write_map_edit(tab, layer_id, None, |base| map_edit.apply(&base.map))
         }
     };
     if changed {

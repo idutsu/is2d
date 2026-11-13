@@ -10,6 +10,8 @@ pub(crate) enum Refusal {
     OffGrid,
     /// 浮いた片を置けない（置いた結果を地図に書けない・置くレイヤーを編集できない）。浮いた片は残す
     Unplaceable,
+    /// 地図の編集の結果が正しい地図にならない（書かない。文書は前のまま）
+    Unwritable,
 }
 
 impl Refusal {
@@ -18,6 +20,7 @@ impl Refusal {
         match self {
             Refusal::OffGrid => "地図の範囲（±65,536px）の外や、潰れるほど小さくには置けません",
             Refusal::Unplaceable => "選んだ図形をここに置けません（動かすか、取り消してください）",
+            Refusal::Unwritable => "この編集の結果を地図にできないので、何も変えていません",
         }
     }
 }
@@ -390,14 +393,19 @@ pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
     Some(plan)
 }
 
-/// `plan_commit` で決めたものを、今の階層の地図に書く。戻り値は、セル画を書き換えたか
+/// `plan_commit` で決めたものを、今の階層の地図に書く（`write_maps`）。戻り値は、セル画を書き換えたか
 pub(crate) fn write_commit(tab: &mut Tab, plan: CommitPlan) -> bool {
     let scope = tab.session.editing_group_path.clone();
+    write_maps(tab, &scope, plan)
+}
+
+/// 先に決めた地図と面の図形 `plan`（レイヤーごと）を、階層 `scope` の地図に書く。戻り値は、セル画を書き換えたか
+pub(crate) fn write_maps(tab: &mut Tab, scope: &[u64], plan: CommitPlan) -> bool {
     let mut written: Vec<LayerId> = Vec::new();
     for (layer_id, map, shapes) in plan {
         let mut held = None;
         if write_cel(tab, layer_id, |cel| {
-            held = cel.put_map(&scope, map, shapes);
+            held = cel.put_map(scope, map, shapes);
             true
         }) {
             written.push(layer_id);
