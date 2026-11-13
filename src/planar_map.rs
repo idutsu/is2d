@@ -706,11 +706,7 @@ impl PlanarMap {
 
     /// 地図を座標の変換 `xform` で置いたとき、`p` から `r` 以内でいちばん近い頂点（距離は置いた座標で測る）
     pub(crate) fn hit_node(&self, p: Point, r: f64, xform: Affine) -> Option<usize> {
-        (0..self.nodes.len())
-            .map(|v| (v, (xform * self.nodes[v] - p).hypot()))
-            .filter(|(_, d)| *d <= r)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(v, _)| v)
+        self.node_finder(r, xform, KRect::from_points(p, p))(p, None)
     }
 
     /// 地図を座標の変換 `xform` で置いたとき、`p` から `r` 以内でいちばん近い辺と、その上のパラメータ（距離は置いた座標で
@@ -1586,8 +1582,9 @@ impl PlanarMap {
     }
 
     /// 近い頂点を引く関数：点（置いた座標）から `radius`（正）以内でいちばん近い頂点の番号（2つ目の引数の頂点は除く）。
-    /// 頂点は座標の変換 `xform` で置いて測り、見るのは `area`（置いた座標）から `radius` 以内のものだけ。頂点への吸い付き
-    /// （`snap_target`）と、重ねる形の線の端を前からある頂点に寄せる所（`overlay`）が使う
+    /// 頂点は座標の変換 `xform` で置いて測り、見るのは `area`（置いた座標）から `radius` 以内のものだけ。近い頂点を引くのは
+    /// みなこれ（カーソル合わせ `hit_node`・頂点への吸い付き `snap_target`・重ねる形の線の端を前からある頂点に寄せる
+    /// `overlay`）
     pub(crate) fn node_finder(
         &self,
         radius: f64,
