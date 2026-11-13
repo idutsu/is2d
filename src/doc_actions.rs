@@ -640,9 +640,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         }
         Action::PlaceSymbol { sym_id } => {
             if prepare_place_symbol_instance(tab, sym_id, |tab| push_undo(tab, None)) {
-                if !matches!(tool.tool, Tool::Select | Tool::Transform) {
-                    set_tool(tab, tool, Tool::Select);
-                }
+                tool_for_placed(tab, tool);
                 true
             } else {
                 false
@@ -785,9 +783,28 @@ fn apply_raw_outline(
         .iter()
         .map(|s| s.to_doc(world).into_owned())
         .collect();
-    edit_layer_map(tab, target_lid, |base| {
+    write_overlay_edit(tab, target_lid, |base| {
         base.map.overlay(MapInput::Shapes(&strokes), rule)
     })
+}
+
+/// 重ね合わせで作る編集（ブラシ・消しゴム・輪郭の変形の確定）を、レイヤー `layer_id` の編集中の階層に書く
+/// （`edit_layer_map`）。重ね合わせが `None`（格子に置けない座標がある：`PlanarMap::overlay`）なら、書かずに断る
+fn write_overlay_edit(
+    tab: &mut Tab,
+    layer_id: LayerId,
+    overlay: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::PlanarMap>,
+) -> bool {
+    let mut off_grid = false;
+    let written = edit_layer_map(tab, layer_id, |base| {
+        let next = overlay(base);
+        off_grid = next.is_none();
+        next
+    });
+    if off_grid {
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
+    }
+    written
 }
 
 /// 表示中の全レイヤーの図形を、下のレイヤーから順に、ステージ座標で集める（バケツとスポイト用）
@@ -844,6 +861,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
             push_undo(tab, None);
             let editable_lids: HashSet<u64> = editable_layer_ids(tab).into_iter().collect();
             if !tab.session.lift_selected_raw_shapes_to_floating() {
+                tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
                 return false;
             }
             let scope = tab.session.editing_group_path.clone();
@@ -932,6 +950,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     }
     // 選んだ生の図形は片に持ち上げて、片の変換で動かす（持ち上げられなければ断る）
     if !tab.session.lift_selected_raw_shapes_to_floating() {
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     }
     let mut any_transformed = false;
@@ -1101,7 +1120,15 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
     }
     // 形が変わらないとき・編集できないとき（消せない頂点など）は、edit_layer_map が false を返し、apply が Undo の控えを捨てる
     push_undo(tab, None);
-    let changed = edit_layer_map(tab, layer_id, |base| map_edit.apply(&base.map));
+    // 頂点・辺を動かす確定は重ね合わせで作る（`None` は格子の外）。アンカーの追加・削除の `None` は、編集できないこと
+    let changed = match map_edit {
+        MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => {
+            write_overlay_edit(tab, layer_id, |base| map_edit.apply(&base.map))
+        }
+        MapEdit::AddAnchor { .. } | MapEdit::DeleteAnchor { .. } => {
+            edit_layer_map(tab, layer_id, |base| map_edit.apply(&base.map))
+        }
+    };
     if changed {
         focus_active_layer_by_id(tab, layer_id);
     }
@@ -1344,10 +1371,19 @@ fn apply_paste_clipboard(
     put_placements(tab, vec![placement], |sym| {
         sym_map.get(&sym).copied().unwrap_or(sym)
     });
-    if !matches!(tool.tool, Tool::Select | Tool::Transform) {
-        set_tool(tab, tool, Tool::Select);
-    }
+    tool_for_placed(tab, tool);
     true
+}
+
+/// 置いたもの（貼り付け・ライブラリからの配置）を選んだあと、それを動かせる道具にする：自由変形ツールならそのまま、
+/// ほかは選択ツールの形の変形（アンカーの追加・削除の副モードは選択を持たないので戻す：`set_tool`）
+fn tool_for_placed(tab: &mut Tab, tool: &mut ToolSettings) {
+    let next = if tool.tool == Tool::Transform {
+        Tool::Transform
+    } else {
+        Tool::Select
+    };
+    set_tool(tab, tool, next);
 }
 
 fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {

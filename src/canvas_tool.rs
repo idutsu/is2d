@@ -2127,7 +2127,7 @@ impl Session {
 
     /// 選択中の生の図形（隠していないセル画の図形と、浮いている残り）を片に持ち上げ、動かした扱いにする（動かす・変形・
     /// 色を変える・グループにする前）。レイヤーごとに、その面の所を選ぶ所にして切る（`Floating::cut`）。生の図形はいつも
-    /// 片の地図で書くので、切れないレイヤー（地図にできない）があれば、浮いた片を元に戻して `false`（呼ぶ側は操作を断る。
+    /// 片の地図で書くので、切れないレイヤー（地図にできない）があれば、浮いた片を元に戻して `false`（操作を断る呼ぶ側が
     /// `refusal` に記す）
     pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self) -> bool {
         let by_layer = self.selected_raw_ids_by_layer(true);
@@ -2142,7 +2142,6 @@ impl Session {
         });
         if failed {
             self.set_floating(before);
-            self.refusal = Some(Refusal::OffGrid);
         }
         !failed
     }
@@ -3380,9 +3379,16 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             tab.session.retain_existing_selection();
             return true;
         }
-        // 外した片は残りに戻す（残す片の所だけで、セル画の地図を切り直す。同じ色でつながる所は1つになる）
+        // 外した片は残りに戻す（残す片の所だけで、セル画の地図を切り直す。同じ色でつながる所は1つになる）。戻せなければ、
+        // 浮いた片と選択を前のままにして断る（浮いた片はいつもみな選ばれている）
         if !all_kept {
-            fl.return_pieces(tab.session.stage(), &keep);
+            let whole = fl.clone();
+            if !fl.return_pieces(tab.session.stage(), &keep) {
+                tab.session.set_floating(Some(whole));
+                tab.session.selection = before;
+                tab.session.refusal = Some(Refusal::Unplaceable);
+                return false;
+            }
         }
         tab.session.set_floating(Some(fl));
         tab.session.retain_existing_selection();

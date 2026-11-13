@@ -5291,7 +5291,7 @@ fn shape_on_grid(s: &FillShape) -> bool {
 }
 
 /// 点 `pts` がみな地図の格子に置けるか（±65,536px の内で、有限：`to_grid`）。地図にできる形かは、どこでもこれで決める
-fn on_grid(mut pts: impl Iterator<Item = Point>) -> bool {
+pub(crate) fn on_grid(mut pts: impl Iterator<Item = Point>) -> bool {
     pts.all(|p| to_grid(p).is_some())
 }
 

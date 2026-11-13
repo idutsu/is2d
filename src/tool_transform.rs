@@ -102,14 +102,10 @@ pub(crate) fn start_transform_drag(
             if let Some((orig_bbox, orig_pivot)) = tab.session.selection_bbox_and_pivot(zoom) {
                 let had_custom_pivot = tab.session.transform_pivot.is_some();
                 let orig_shapes = tab.session.begin_transform_overlay();
-                let anchor = if alt_held {
-                    orig_pivot
-                } else {
-                    handle.opposite_position(orig_bbox)
-                };
+                // `Alt` の間は基準点を中心に拡大する（ドラッグの途中で押す・離すのに合わせて、毎回選ぶ）
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Scale {
                     handle,
-                    anchor,
+                    anchor: handle.opposite_position(orig_bbox),
                     handle_start: handle.position(orig_bbox),
                     orig_pivot,
                     had_custom_pivot,
@@ -220,7 +216,8 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                 orig_shapes,
                 ..
             } => {
-                if (pt - *pivot).hypot() > 2.0 {
+                // 基準点のまわりの不感帯（画面で 2px。ほかのつかむ距離と同じく倍率で割る）
+                if (pt - *pivot).hypot() > 2.0 / (tab.view.zoom as f64) {
                     let raw = (pt.y - pivot.y).atan2(pt.x - pivot.x) - *start_angle;
                     let mut delta_angle = raw.sin().atan2(raw.cos());
                     if shift_held {

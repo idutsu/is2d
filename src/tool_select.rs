@@ -413,9 +413,13 @@ pub(crate) fn draw_select_tool_cursor(
             ..
         }) => {
             if tab.view.show_wireframe {
-                // 引っぱっている辺の今の形（`PlanarMap::commit_pull_edge` と同じ式）を、ステージに置いて見せる
+                // 引っぱっている辺の今の形（`PlanarMap::commit_pull_edge` と同じ式）を、ステージに置いて見せる。格子の外へ
+                // 出る形は、塗りの仮表示と同じく元の形のまま（確定は断る）
                 let mut seg = *orig_seg;
                 seg.p1 += (*target - orig_seg.eval(*grab_t)) / (2.0 * grab_t * (1.0 - grab_t));
+                if !crate::planar_map::on_grid([seg.p0, seg.p1, seg.p2].into_iter()) {
+                    seg = *orig_seg;
+                }
                 draw_highlighted_quad_segment(
                     tab,
                     painter,

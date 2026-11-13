@@ -501,6 +501,7 @@ pub(crate) fn prepare_group_selected_shapes(
     // 書く（図形の並びでは書かない）。地図にできない片（格子に置けない座標がある）があれば、グループにしない
     let before = tab.session.floating().cloned();
     if !tab.session.lift_selected_raw_shapes_to_floating() {
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     }
     let pieces: Option<Vec<(LayerId, crate::planar_map::PlanarMap)>> =

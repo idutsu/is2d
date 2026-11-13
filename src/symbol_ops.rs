@@ -178,6 +178,7 @@ pub(crate) fn prepare_place_symbol_instance(
         KVec2::ZERO,
     );
     let Some(placement) = prepare_placement(tab, &content, xform, false, None) else {
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     };
     if !clear_selection(tab) {

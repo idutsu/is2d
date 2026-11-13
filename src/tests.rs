@@ -28142,3 +28142,234 @@ fn measure_undo_and_paste_with_a_large_library() {
         );
     }
 }
+
+/// S-6：動かしていない片の一部を選択から外すとき、外した片を残りに戻せなければ、浮いた片と選択を前のままにして断る
+/// （浮いた片はいつもみな選ばれている）
+#[test]
+fn failing_to_return_unselected_pieces_keeps_the_selection() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let mut app = Is2dApp::default();
+    let mut shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(300.0, 100.0),
+        10.0,
+        red,
+    );
+    shapes.extend(make_stroke(
+        Point::new(100.0, 300.0),
+        Point::new(300.0, 300.0),
+        10.0,
+        red,
+    ));
+    put_cel_shapes(&mut app, 0, 0, shapes);
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(200.0, 50.0),
+        Point::new(400.0, 350.0),
+        false,
+    );
+    let picked = app.session.selected_indices();
+    assert_eq!(picked.len(), 2);
+    let floating_before = app.session.floating().unwrap().pieces().len();
+    // 戻す先のセル画が引けない（ロックしたレイヤーは画面の土台に地図を持たない）
+    app.doc.root.layers[0].locked = true;
+    app.refresh_scene_base();
+    assert!(!canvas_tool::commit_floating_except(&mut app, &picked[..1]));
+    let fl = app.session.floating().unwrap();
+    assert_eq!(fl.pieces().len(), floating_before);
+    assert!(fl
+        .pieces()
+        .iter()
+        .all(|p| app.session.selection.contains_shape(p)));
+}
+
+/// A-7：選択ツールの「アンカーの追加・削除」の副モードで貼り付けると、貼った図形を動かせる形の変形に戻る
+#[test]
+fn pasting_returns_the_select_tool_to_reshape() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(200.0, 100.0),
+            10.0,
+            red,
+        ),
+    );
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 50.0),
+        Point::new(250.0, 150.0),
+        false,
+    );
+    assert!(doc_actions::copy_selected_shapes(&mut app));
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::ToggleSelectSubMode {
+            mode: SelectSubMode::AddAnchor,
+        },
+    );
+    assert_eq!(app.tool.select_sub_mode, SelectSubMode::AddAnchor);
+    assert!(doc_actions::paste_clipboard(&mut app, false));
+    assert!(!app.session.selection.is_empty());
+    assert_eq!(app.tool.select_sub_mode, SelectSubMode::Reshape);
+}
+
+/// A-7：自由変形の回転の不感帯は画面で測る（拡大していても、基準点から画面で 2px より離れれば回る）
+#[test]
+fn rotation_dead_zone_is_measured_on_screen() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(200.0, 100.0),
+            10.0,
+            red,
+        ),
+    );
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool {
+            tool: Tool::Transform,
+        },
+    );
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 50.0),
+        Point::new(250.0, 150.0),
+        false,
+    );
+    app.view.zoom = 16.0;
+    let (bbox, pivot) = app.session.selection_bbox_and_pivot(app.view.zoom).unwrap();
+    let corner = Point::new(bbox.x1, bbox.y1);
+    tool_transform::start_transform_drag(&mut app, corner + KVec2::new(0.5, 0.5), false, false);
+    // 基準点から 1px（画面で 16px）の真上
+    tool_transform::update_transform_drag(&mut app, pivot + KVec2::new(0.0, 1.0), false, false);
+    let canvas_tool::ActiveCanvasDrag::Transform(canvas_tool::TransformDragState::Rotate {
+        current_angle,
+        ..
+    }) = &app.session.drag
+    else {
+        panic!("回転のドラッグになっていない");
+    };
+    assert!(current_angle.abs() > 0.1);
+}
+
+/// A-7：`Alt` で始めた拡大も、途中で `Alt` を離せば反対側のハンドルを基準にする
+#[test]
+fn releasing_alt_while_scaling_returns_to_the_opposite_handle() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(200.0, 100.0),
+            10.0,
+            red,
+        ),
+    );
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool {
+            tool: Tool::Transform,
+        },
+    );
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 50.0),
+        Point::new(250.0, 150.0),
+        false,
+    );
+    let (bbox, _) = app.session.selection_bbox_and_pivot(app.view.zoom).unwrap();
+    let right = Point::new(bbox.x1, bbox.center().y);
+    tool_transform::start_transform_drag(&mut app, right, false, true);
+    tool_transform::update_transform_drag(&mut app, right + KVec2::new(50.0, 0.0), false, false);
+    tool_transform::finish_transform_drag(&mut app, Some(right + KVec2::new(50.0, 0.0)));
+    let (after, _) = app.session.selection_bbox_and_pivot(app.view.zoom).unwrap();
+    assert!(
+        (after.x0 - bbox.x0).abs() < 0.5,
+        "{} → {}",
+        bbox.x0,
+        after.x0
+    );
+    assert!((after.x1 - (bbox.x1 + 50.0)).abs() < 0.5);
+}
+
+/// S-5：格子の外（±65,536px）にかかるブラシ・輪郭の変形は、断って画面の下に知らせる
+#[test]
+fn off_grid_strokes_and_reshapes_are_refused_with_a_notice() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let off_grid = canvas_tool::Refusal::OffGrid.message();
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(200.0, 100.0),
+            10.0,
+            red,
+        ),
+    );
+    // ブラシ
+    app.toast = None;
+    assert!(!doc_actions::apply(
+        &mut app,
+        doc_actions::Action::PaintStroke {
+            points: vec![Point::new(65_000.0, 100.0), Point::new(66_000.0, 100.0)],
+            radius: 5.0,
+            color: red,
+        },
+    ));
+    assert_eq!(
+        app.toast.as_ref().map(|t| t.message.as_str()),
+        Some(off_grid)
+    );
+    // 輪郭の変形（辺を格子の外へ引っぱる）
+    app.toast = None;
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
+    assert!(!doc_actions::apply(
+        &mut app,
+        doc_actions::Action::PullEdgeFromTo {
+            from: Point::new(150.0, 110.0),
+            to: Point::new(150.0, 200_000.0),
+        },
+    ));
+    assert_eq!(
+        app.toast.as_ref().map(|t| t.message.as_str()),
+        Some(off_grid)
+    );
+    // 格子の中のブラシは知らせない
+    app.toast = None;
+    assert!(doc_actions::apply(
+        &mut app,
+        doc_actions::Action::PaintStroke {
+            points: vec![Point::new(300.0, 300.0), Point::new(400.0, 300.0)],
+            radius: 5.0,
+            color: red,
+        },
+    ));
+    assert!(app.toast.is_none());
+}
