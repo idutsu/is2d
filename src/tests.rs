@@ -21589,7 +21589,8 @@ fn test_merge_degree2_does_not_fold_nearly_straight_pair() {
             edge(1, 2, Point::new(304.9726635572615, 274.7654969283734)),
         ],
     };
-    map.merge_degree2(kurbo::Rect::new(0.0, 0.0, 1000.0, 1000.0));
+    let n = map.nodes.len();
+    map.merge_degree2(0..n);
     let hull = kurbo::Rect::from_points(a, b)
         .union_pt(v)
         .inflate(0.05, 0.05);
@@ -22891,7 +22892,8 @@ mod map_overlay {
         };
         assert!(valid(&m));
         let before = m.clone();
-        m.merge_degree2(kurbo::Rect::new(-1.0, -1.0, 20.0, 20.0));
+        let n = m.nodes.len();
+        m.merge_degree2(0..n);
         assert_eq!(
             m.edges.len(),
             3,
@@ -22943,7 +22945,8 @@ mod map_overlay {
         };
         let merged = |m: &PlanarMap| {
             let mut m = m.clone();
-            m.merge_degree2(kurbo::Rect::new(-10.0, -100.0, 200.0, 200.0));
+            let n = m.nodes.len();
+            m.merge_degree2(0..n);
             assert!(valid(&m), "{}", m.validity_report());
             m
         };
@@ -27906,4 +27909,104 @@ fn collapsing_transforms_are_refused() {
     assert!(area(&app) < before * 1e-3, "縮めた片が元の大きさに戻らない");
     assert!(canvas_tool::clear_selection(&mut app));
     assert!(area(&app) < before * 1e-3);
+}
+
+/// R-1（地図のレビュー da27aa3 の N-1001・N-2001）：2本だけがつながる頂点をまとめるのは、その操作で消えた線の端だけ。
+/// 足した角はバケツで塗っても消えず、切って戻した切り口の点は重ね合わせで消える
+#[test]
+fn only_cuts_made_by_the_operation_are_merged() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    let red = Color32::from_rgb(235, 75, 75);
+    let green = Color32::from_rgb(40, 180, 90);
+    let stroke = make_stroke(
+        Point::new(100.0, 200.0),
+        Point::new(300.0, 200.0),
+        25.0,
+        red,
+    );
+    let m = PlanarMap::default()
+        .overlay(MapInput::Shapes(&stroke), MapRule::Paint(Some(red)))
+        .unwrap();
+    assert!(m.is_valid());
+
+    // 1. 足した角は、その辺に接する面をバケツで塗り替えても残る
+    let e = (0..m.edges.len())
+        .max_by(|&i, &j| {
+            let len = |k: usize| (m.quad(k).p2 - m.quad(k).p0).hypot();
+            len(i).total_cmp(&len(j))
+        })
+        .unwrap();
+    let anchored = m.with_anchor_added(e, 0.5).unwrap();
+    let corner = anchored.quad(e).eval(1.0);
+    let filled = anchored
+        .with_face_filled(Point::new(200.0, 200.0), green)
+        .unwrap();
+    assert_eq!(filled.nodes.len(), anchored.nodes.len());
+    assert!(filled.nodes.iter().any(|p| (*p - corner).hypot() < 1e-9));
+
+    // 2. 矩形で切って、中をそのまま重ね直すと、切り口の点は残らない（辺の数が元に戻る）
+    let rect = vec![map_overlay::rect_shape(150.0, 150.0, 250.0, 250.0, red)];
+    let inside = m
+        .overlay(MapInput::Shapes(&rect), MapRule::KeepInside)
+        .unwrap();
+    let rest = m
+        .overlay(MapInput::Shapes(&rect), MapRule::Paint(None))
+        .unwrap();
+    let back = rest
+        .overlay(MapInput::Map(&inside), MapRule::Overlay)
+        .unwrap();
+    assert!(back.is_valid());
+    assert_eq!(back.edges.len(), m.edges.len());
+}
+
+/// N-2001：切っただけで動かしていない片がある所で、グループを解除して選択を外しても、生の図形に切り口が残らない
+#[test]
+fn ungrouping_beside_an_unmoved_slice_leaves_no_cut() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    let mut app = Is2dApp::default();
+    let mut shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(500.0, 100.0),
+        25.0,
+        red,
+    );
+    shapes.extend(make_stroke(
+        Point::new(400.0, 200.0),
+        Point::new(500.0, 200.0),
+        15.0,
+        blue,
+    ));
+    put_cel_shapes(&mut app, 0, 0, shapes);
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
+    // 青い線をグループにする
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(380.0, 170.0),
+        Point::new(520.0, 230.0),
+        false,
+    );
+    doc_actions::group_selected_shapes(&mut app).unwrap();
+    assert!(canvas_tool::clear_selection(&mut app));
+    let segs = |app: &Is2dApp| -> usize {
+        app.scene()
+            .iter()
+            .filter(|s| s.color == red)
+            .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+            .sum()
+    };
+    let before = segs(&app);
+    // 赤い線の右半分とグループを矩形で選び（動かさない）、解除して選択を外す
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(250.0, 60.0),
+        Point::new(600.0, 260.0),
+        false,
+    );
+    assert!(doc_actions::ungroup_selected_shapes(&mut app));
+    assert!(canvas_tool::clear_selection(&mut app));
+    assert_eq!(segs(&app), before);
 }

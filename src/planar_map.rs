@@ -819,11 +819,17 @@ impl PlanarMap {
 }
 
 impl PlanarMap {
-    /// 範囲 `area` の中で、2本の辺だけがつながる頂点のうち、両側の色が同じで、2本を1本の曲線で表せるものを消す
-    /// （交わりで切った点が、相手の辺が消えた後に残らないように）。
+    /// 候補の頂点 `candidates` のうち、2本の辺だけがつながり、両側の色が同じで、2本を1本の曲線で表せるものを消す。
+    /// 候補は、その操作で消えた線（左右が同じ色になって捨てた区間・辺）の端の頂点（`overlay`・`with_face_filled`）：
+    /// 操作が作った切れ目（交わりで切った点・消えた境目の端）だけを消し、操作の前から2本だけだった頂点（足した角）は
+    /// どの操作でも候補にならないので残る。切れ目の後始末の決まりはこれ1つ。
     /// 頂点は番号の小さい順に調べ、まとめたら、つながりの変わった両端の頂点だけを調べ直す（まとめた結果は、
     /// まとめるたびに最初から調べ直すのと同じ）。辺の並びは、まとめた辺を消すたびに最後の辺をそこへ移すのと同じ順にする
-    pub(crate) fn merge_degree2(&mut self, area: KRect) {
+    pub(crate) fn merge_degree2(&mut self, candidates: impl IntoIterator<Item = usize>) {
+        let mut is_cand = vec![false; self.nodes.len()];
+        for v in candidates {
+            is_cand[v] = true;
+        }
         let n = self.edges.len();
         // 辺は元の番号のまま持ち、消した辺は印だけ付ける。`order` は今の並び（消すたびに最後の辺をそこへ移す）、
         // `pos` はその中の位置
@@ -838,8 +844,7 @@ impl PlanarMap {
                 at[e.b].push(i);
             }
         }
-        let candidate =
-            |v: usize, at: &[Vec<usize>]| at[v].len() == 2 && area.contains(self.nodes[v]);
+        let candidate = |v: usize, at: &[Vec<usize>]| at[v].len() == 2 && is_cand[v];
         let mut pending: std::collections::BTreeSet<usize> = (0..self.nodes.len())
             .filter(|&v| candidate(v, &at))
             .collect();
@@ -2695,17 +2700,15 @@ impl PlanarMap {
                 }
             }
         }
+        // 色を変えて消えた境目の端が、2本だけがつながる頂点をまとめる候補（`merge_degree2`）
+        let dropped_ends: Vec<usize> = m
+            .edges
+            .iter()
+            .filter(|e| e.left == e.right)
+            .flat_map(|e| [e.a, e.b])
+            .collect();
         m.edges.retain(|e| e.left != e.right);
-        // 2本だけがつながる頂点をまとめるのは、色を変えた輪郭の上（外周の外接矩形の中。頂点は判定の形の点から半目以内に
-        // あるので、1目広げる）
-        let r = regions.rings[ids[0]].rect;
-        let g = |v: i64| v as f64 / OVERLAY_GRID;
-        m.merge_degree2(KRect::new(
-            g(r.x0 - 1),
-            g(r.y0 - 1),
-            g(r.x1 + 1),
-            g(r.y1 + 1),
-        ));
+        m.merge_degree2(dropped_ends);
         m.compact_nodes();
         Some(m)
     }
@@ -3937,12 +3940,27 @@ impl PlanarMap {
             })
             .reduce(|x, y| x.union(y))
             .map(|r| r.inflate(GRID_REACH, GRID_REACH));
+        // この重ね合わせで消えた線（左右が同じ色になって捨てた区間と中の辺）の端の頂点が、2本だけがつながる頂点を
+        // まとめる候補（`merge_degree2`。切り口の点が、相手の線が消えた後に角として残らない）
+        let dropped_ends: Vec<usize> = pieces
+            .iter()
+            .zip(&piece_cols)
+            .filter(|(_, c)| c.0 == c.1)
+            .flat_map(|(p, _)| [p.a, p.b])
+            .chain(
+                inner
+                    .iter()
+                    .filter(|e| inner_cols.get(e).is_some_and(|c| c.0 == c.1))
+                    .flat_map(|&e| [node_at(self.edges[e].a), node_at(self.edges[e].b)]),
+            )
+            .collect();
         let map = PlanarMap { nodes, edges };
         let mut restorer = ChainRestorer::new(map, active);
         for (c, ids) in chains.iter().zip(&chain_edges) {
             restorer.restore(c, ids);
         }
         let mut m = restorer.finish();
+        m.merge_degree2(dropped_ends);
         m.compact_nodes();
         Ok(m)
     }
