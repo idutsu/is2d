@@ -28373,3 +28373,136 @@ fn off_grid_strokes_and_reshapes_are_refused_with_a_notice() {
     ));
     assert!(app.toast.is_none());
 }
+
+/// A-3：矩形で切っただけで動かしていない片の上でも、アンカーの追加のカーソル合わせが出る（クリックすると、片を戻して
+/// から同じ辺に足す）
+#[test]
+fn anchor_hover_works_on_unmoved_slices() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(300.0, 100.0),
+            10.0,
+            red,
+        ),
+    );
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
+    let before: usize = app
+        .scene()
+        .iter()
+        .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+        .sum();
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(200.0, 50.0),
+        Point::new(400.0, 150.0),
+        false,
+    );
+    assert!(app.session.floating().is_some_and(|fl| !fl.modified));
+    app.tool.select_sub_mode = SelectSubMode::AddAnchor;
+    // 切り出した片の中の辺（線の下の縁）
+    let pt = Point::new(260.0, 110.0);
+    let hover = select_ops::compute_hover_target(
+        app.scene(),
+        &app.session,
+        pt,
+        app.view.zoom,
+        SelectSubMode::AddAnchor,
+    );
+    assert!(
+        matches!(
+            hover,
+            HoverTarget::Edge {
+                map_edge: Some(_),
+                ..
+            }
+        ),
+        "{hover:?}"
+    );
+    let segs = |app: &Is2dApp| -> usize {
+        app.scene()
+            .iter()
+            .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+            .sum()
+    };
+    assert!(doc_actions::apply(
+        &mut app,
+        doc_actions::Action::AddAnchor { pt },
+    ));
+    assert!(app.session.floating().is_none());
+    assert_eq!(segs(&app), before + 1);
+}
+
+/// A-5：読み込みで、深すぎる階層・同じグループが2つの所にある階層は壊れたファイルとして断る。上限より長いレイヤーを
+/// 切り詰めたとき・ただ1つのキーフレームを捨てて空のキーフレームに替えたときも、捨てたと知らせる
+#[test]
+fn loading_checks_scopes_and_reports_every_trim() {
+    use crate::doc_actions::{apply, Action};
+    use crate::project_io::{
+        open_project_in_tab, read_project_document, save_project_to_path,
+        write_project_file_atomically, OpenProjectOutcome,
+    };
+    let dir = std::env::temp_dir().join(format!("is2d_load_scopes_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let normal = dir.join("normal.is2d");
+    let mut src = Is2dApp::default();
+    assert!(apply(
+        &mut src,
+        Action::PaintStroke {
+            points: vec![Point::new(40.0, 40.0), Point::new(120.0, 40.0)],
+            radius: 6.0,
+            color: Color32::from_rgb(220, 50, 50),
+        },
+    ));
+    save_project_to_path(&mut src, &normal).unwrap();
+    let open = |name: &str, edit: &dyn Fn(&mut crate::project_io::ProjectDocument)| {
+        let mut proj = read_project_document(&normal).unwrap();
+        edit(&mut proj);
+        let path = dir.join(name);
+        write_project_file_atomically(&path, &proj).unwrap();
+        let mut app = Is2dApp::default();
+        open_project_in_tab(&mut app, &path, None)
+    };
+    // 深すぎる階層
+    assert!(open("deep.is2d", &|p| {
+        p.timeline.layers[0].keyframes[0].maps[0].group_path = (1..=1_001).collect();
+    })
+    .is_err());
+    // 同じグループ 5 が、グループ 1 と 2 の中にある
+    assert!(open("twice.is2d", &|p| {
+        let kf = &mut p.timeline.layers[0].keyframes[0];
+        let mut m = kf.maps[0].clone();
+        kf.maps[0].group_path = vec![1, 5];
+        m.group_path = vec![2, 5];
+        kf.maps.push(m);
+    })
+    .is_err());
+    // 上限より長いレイヤー
+    assert_eq!(
+        open("long.is2d", &|p| {
+            p.timeline.layers[0].frame_count = 200_000;
+        })
+        .unwrap(),
+        OpenProjectOutcome::LoadedWithTrimmedData
+    );
+    // ただ1つのキーフレームが範囲の外（空のキーフレームに替わる）
+    assert_eq!(
+        open("replaced.is2d", &|p| {
+            let l = &mut p.timeline.layers[0];
+            l.frame_count = 1;
+            l.keyframes[0].start_frame = 5;
+        })
+        .unwrap(),
+        OpenProjectOutcome::LoadedWithTrimmedData
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

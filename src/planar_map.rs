@@ -1003,7 +1003,7 @@ impl PlanarMap {
 fn edge_key(m: &PlanarMap, e: usize) -> [u64; 6] {
     let ed = &m.edges[e];
     let (p0, p2) = (m.nodes[ed.a], m.nodes[ed.b]);
-    let (p0, p2) = if (p0.x, p0.y) <= (p2.x, p2.y) {
+    let (p0, p2) = if point_order(p0, p2).is_le() {
         (p0, p2)
     } else {
         (p2, p0)
@@ -1456,7 +1456,9 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     use std::hash::{Hash, Hasher};
     let scope = &session.editing_group_path;
     let xform = session.edit_path.world_xform();
-    let floating = session.floating();
+    // 動かしていない浮いた片は、どの操作でも先に戻してから地図を編集する（`apply_anchor_edit_at`）ので、カーソル合わせも
+    // 戻した後の地図（セル画の地図）で行う。動かした浮いた片は、残りの地図と片の地図（`floating_maps`）で行う
+    let floating = session.floating().filter(|fl| fl.modified);
     let pieces: HashSet<ShapeId> = floating.map(|fl| fl.piece_ids()).unwrap_or_default();
     // 浮いた片（ほかの図形と重なることがある）は入れない
     let in_map = |s: &FillShape| is_map_shape(s, scope) && !pieces.contains(&s.shape_id);
@@ -1469,7 +1471,12 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     }
     let key = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (scope, xform.as_coeffs().map(f64::to_bits)).hash(&mut h);
+        (
+            scope,
+            xform.as_coeffs().map(f64::to_bits),
+            floating.is_some(),
+        )
+            .hash(&mut h);
         for (layer_id, first_idx, shapes) in &by_layer {
             (layer_id, first_idx).hash(&mut h);
             for s in shapes {
@@ -2658,7 +2665,7 @@ impl PlanarMap {
         }));
         move |p| {
             let g = gpt(p);
-            segs.at((2 * g.0, 2 * g.1)).flatten()
+            segs.at((2 * g.0, 2 * g.1))
         }
     }
 
@@ -3479,8 +3486,7 @@ impl PlanarMap {
                     crossed(&colors, w, from_left)
                 },
             );
-            let colors: Vec<Option<Color32>> =
-                states.iter().map(|w| top_label(w).flatten()).collect();
+            let colors: Vec<Option<Color32>> = states.iter().map(|w| top_label(w)).collect();
             let mut votes: Vec<Vec<(ShapeId, usize)>> = vec![Vec::new(); states.len()];
             for (h, &f) in face.iter().enumerate() {
                 let f = f as usize;
@@ -3515,16 +3521,16 @@ impl PlanarMap {
             MapInput::Map(_) => map_sides(&new_segs, &new_deltas, false, &next_new),
             _ => Vec::new(),
         };
-        let old_at = |p2: IPt| top_label(&winding_at(&old_segs, true, p2)).flatten();
-        let new_at = |p2: IPt| top_label(&winding_at(&new_segs, false, p2)).flatten();
+        let old_at = |p2: IPt| top_label(&winding_at(&old_segs, true, p2));
+        let new_at = |p2: IPt| top_label(&winding_at(&new_segs, false, p2));
         // 重ねる形の中か：区間ごとに i_overlay が数えた、左右が重ねる形の中か（中の辺を調べる相手）
         let fill_at = match input {
             MapInput::Shapes(_) => Some(LabeledSegs::new(pieces.iter().map(|p| {
                 (
                     p.ia,
                     p.ib,
-                    p.fill & CLIP_LEFT != 0,
-                    p.fill & CLIP_RIGHT != 0,
+                    (p.fill & CLIP_LEFT != 0).then_some(()),
+                    (p.fill & CLIP_RIGHT != 0).then_some(()),
                 )
             }))),
             _ => None,
@@ -3690,9 +3696,7 @@ impl PlanarMap {
             (a.0 + b.0, a.1 + b.1)
         };
         let over_at = |p2: IPt| match input {
-            MapInput::Shapes(_) => {
-                Over::Inside(fill_at.as_ref().and_then(|f| f.at(p2)).unwrap_or(false))
-            }
+            MapInput::Shapes(_) => Over::Inside(fill_at.as_ref().and_then(|f| f.at(p2)).is_some()),
             MapInput::Map(_) => Over::Color(new_at(p2)),
             MapInput::Sweep(_) => Over::Swept(swept_winding(p2)),
             MapInput::Stack(_) => {
@@ -4677,9 +4681,13 @@ fn add_winding<L: PartialEq>(w: &mut Vec<(L, i32)>, lab: L, v: i32) {
     }
 }
 
-/// 巻き数が正の印（印が閉じた境目を作っていれば、点のある所の印。無ければ `None`＝いちばん外）
-fn top_label<L: Copy>(w: &[(L, i32)]) -> Option<L> {
-    w.iter().find(|x| x.1 > 0).map(|x| x.0)
+/// 巻き数が正の印（印が閉じた境目を作っていれば、点のある所の印。無ければ `None`＝いちばん外）。印の無い側（`None`：
+/// 何も無い所・重ねる形の外）は数えない：格子に丸めてできた細い所で、印の無い側と印のある側の両方の巻き数が正になっても、
+/// 足した順によらず印のある側になる
+fn top_label<C: Copy>(w: &[(Option<C>, i32)]) -> Option<C> {
+    w.iter()
+        .find(|x| x.0.is_some() && x.1 > 0)
+        .and_then(|x| x.0)
 }
 
 /// 曲線の判定の形が入る、格子の点の矩形（制御点の外接矩形を、切り下げ〜切り上げ）
@@ -4911,10 +4919,12 @@ impl<L: Copy + PartialEq> LabeledSegs<L> {
             add_winding(w, r, -d);
         });
     }
+}
 
-    /// 点 `p`（2倍の座標）のある所の印。区間の印が閉じた境目を作っていれば（正しい地図の色、i_overlay が数えた塗り）、
-    /// どの点でも1つに決まる。点が区間の上にあれば、点を右上へごくわずかずらした所の印になる
-    fn at(&self, p: IPt) -> Option<L> {
+impl<C: Copy + PartialEq> LabeledSegs<Option<C>> {
+    /// 点 `p`（2倍の座標）のある所の印（`top_label`）。区間の印が閉じた境目を作っていれば（正しい地図の色、i_overlay が
+    /// 数えた塗り）、どの点でも1つに決まる。点が区間の上にあれば、点を右上へごくわずかずらした所の印になる
+    fn at(&self, p: IPt) -> Option<C> {
         let mut w = Vec::new();
         self.winding_into(p, &mut w);
         top_label(&w)

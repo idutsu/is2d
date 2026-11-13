@@ -530,6 +530,10 @@ impl SavedScopeMap {
 /// 1つの地図の辺の数の上限（読み込むときに、これより多い地図は壊れたファイルとして断る）
 pub(crate) const MAX_MAP_EDGES: usize = 4_000_000;
 
+/// グループの入れ子の深さの上限（読み込むときに、これより深い階層は壊れたファイルとして断る。手で作る入れ子はこれに
+/// 届かない。階層を並べ直す所（`arranged`）は深さの2乗の手間とメモリを使うので、細工したファイルで使い果たさないため）
+pub(crate) const MAX_GROUP_DEPTH: usize = 1_000;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SavedKeyframe {
     pub(crate) start_frame: usize,
@@ -571,11 +575,31 @@ impl Keyframe {
     /// 正しい地図でないか（`SavedScopeMap::to_map`）、同じ階層の地図が2つあれば、壊れたファイルとして `Err`。読み込みで
     /// 地図を確かめるのはここだけ
     fn from_saved(s: SavedKeyframe, prev: Option<&Keyframe>) -> Result<Self, String> {
+        let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
+        // 階層（地図の階層とインスタンスの親の階層）の深さは `MAX_GROUP_DEPTH` まで。グループの番号ごとに、すぐ上の
+        // グループは1つ（同じグループが2つの所に無い。すぐ上が1つなら、上の並び全体も1つに決まる）
+        let mut parent_of: HashMap<u64, Option<u64>> = HashMap::new();
+        let scopes = s
+            .maps
+            .iter()
+            .map(|m| &m.group_path)
+            .chain(s.instances.iter().map(|i| &i.parent_scope));
+        for path in scopes {
+            if path.len() > MAX_GROUP_DEPTH {
+                return Err(broken());
+            }
+            for (k, &id) in path.iter().enumerate() {
+                let parent = k.checked_sub(1).map(|j| path[j]);
+                if *parent_of.entry(id).or_insert(parent) != parent {
+                    return Err(broken());
+                }
+            }
+        }
         let mut paths = HashSet::with_capacity(s.maps.len());
         let mut maps: Vec<(Vec<u64>, CheckedMap)> = Vec::with_capacity(s.maps.len());
         for m in &s.maps {
             if !paths.insert(&m.group_path) {
-                return Err("プロジェクトファイルの地図が壊れています".to_owned());
+                return Err(broken());
             }
             maps.push((m.group_path.clone(), m.to_map()?));
         }
@@ -1222,11 +1246,15 @@ fn saved_element_counts(proj: &ProjectDocument) -> [usize; 4] {
     for tl in std::iter::once(&proj.timeline).chain(proj.library.iter().map(|s| &s.timeline)) {
         counts[0] += tl.layers.len();
         for layer in &tl.layers {
-            counts[1] += layer.keyframes.len();
+            // 0 コマ目にキーフレームが無ければ、読み込みで空のキーフレームを足す（それとは別に捨てたキーフレームがあれば、
+            // 数が減る）
+            counts[1] += layer.keyframes.len()
+                + usize::from(!layer.keyframes.iter().any(|k| k.start_frame == 0));
             for kf in &layer.keyframes {
                 counts[2] += kf.instances.len();
             }
-            counts[3] += layer.frame_count.min(MAX_TIMELINE_FRAMES);
+            // コマ数は丸める前の数（上限より長いファイルを切り詰めたら、減ったと分かる）
+            counts[3] = counts[3].saturating_add(layer.frame_count);
         }
     }
     counts
