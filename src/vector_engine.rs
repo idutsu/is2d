@@ -860,10 +860,14 @@ pub(crate) fn dedup_closed_ring(pts: impl IntoIterator<Item = Point>, min_dist: 
 /// 曲線 `q` の上で点 `p` にいちばん近い所の（パラメータ, 距離）。曲線の上のいちばん近い点を求めるのはこれ1つ
 pub(crate) fn nearest_on_quad(q: &QuadBez, p: Point) -> (f64, f64) {
     let dist_sq = |t: f64| (q.eval(t) - p).hypot2();
+    // 距離は点ごとに1回だけ求める
     let mut t = (0..=16)
-        .map(|k| k as f64 / 16.0)
-        .min_by(|a, b| dist_sq(*a).total_cmp(&dist_sq(*b)))
-        .unwrap_or(0.0);
+        .map(|k| {
+            let t = k as f64 / 16.0;
+            (t, dist_sq(t))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map_or(0.0, |(t, _)| t);
     let second = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()) * 2.0;
     for _ in 0..6 {
         let b = q.eval(t) - p;

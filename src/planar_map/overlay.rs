@@ -512,6 +512,7 @@ impl PlanarMap {
         let reach_pad = (3.0 * GRID_REACH * OVERLAY_GRID).ceil() as i64;
         // 辺 `e` がかかるマスは `all_cells[cell_range[e]]`
         let mut all_cells: Vec<(i64, i64)> = Vec::new();
+        let mut cells: Vec<(i64, i64)> = Vec::new();
         let mut cell_range: Vec<std::ops::Range<usize>> = Vec::with_capacity(self.edges.len());
         let mut edge_grid = CellGrid::new();
         for (e, ed) in self.edges.iter().enumerate() {
@@ -519,8 +520,14 @@ impl PlanarMap {
             if ed.b != ed.a {
                 adj[ed.b].push(e);
             }
+            // 同じマスは1度だけ入れる（となり合う弦は同じマスにかかる。辺のマスで探すのは「どれかに触れるか」だけなので、
+            // マスの順は効かない）
+            cells.clear();
+            cells.extend(quad_cells(self.quad(e), reach_pad));
+            cells.sort_unstable();
+            cells.dedup();
             let start = all_cells.len();
-            all_cells.extend(quad_cells(self.quad(e), reach_pad));
+            all_cells.extend_from_slice(&cells);
             cell_range.push(start..all_cells.len());
             edge_grid.insert(e, all_cells[start..].iter().copied());
         }
@@ -543,9 +550,13 @@ impl PlanarMap {
         type GridSeg = (IPt, IPt, Option<usize>, Option<usize>);
         // 折れ線：（外接矩形, 区間の範囲）
         type GridLine = (KRect, std::ops::Range<usize>);
-        // 折れ線の区間がかかるマス
+        // 折れ線の区間がかかるマス（続く区間はたいてい同じマスにかかるので、続けて同じマスは1つにする。探す順は
+        // 変わらない）
         let line_cells = |segs: &[GridSeg]| -> Vec<(i64, i64)> {
-            segs.iter().flat_map(|s| seg_cells((s.0, s.1), 0)).collect()
+            let mut cells: Vec<(i64, i64)> =
+                segs.iter().flat_map(|s| seg_cells((s.0, s.1), 0)).collect();
+            cells.dedup();
+            cells
         };
         let seg_rect =
             |a: IPt, b: IPt| KRect::from_points(from_grid(a.0, a.1), from_grid(b.0, b.1));
@@ -598,7 +609,7 @@ impl PlanarMap {
         // 動かした辺は除く）が同じ線になっている所。その2本は入れ、その所は2本とも同じ点の折れ線にする。1本の線の上で
         // 重なる所どうしは重ならないようにする（先に見つけたもの）
         let flat_pad = (FLAT_TOL * OVERLAY_GRID).ceil() as i64;
-        let mut spans: HashMap<Line, Vec<Span>> = HashMap::new();
+        let mut spans: IntMap<Line, Vec<Span>> = IntMap::default();
         let new_lines: Vec<(Line, QuadBez)> = seeds
             .iter()
             .enumerate()
@@ -1388,7 +1399,7 @@ impl PlanarMap {
         // 値は辺のどこでも同じで、区間の頂点でない頂点でつながる同じ地図の中の辺（組）でも同じ（組ごとに1回だけ調べる）
         let inner: Vec<usize> = (0..self.edges.len()).filter(|&e| interior[e]).collect();
         let mut group: Vec<u32> = (0..inner.len() as u32).collect();
-        let mut first_at: HashMap<(bool, usize), usize> = HashMap::new();
+        let mut first_at: IntMap<(bool, usize), usize> = IntMap::default();
         for (i, &e) in inner.iter().enumerate() {
             let ed = self.edges[e];
             for v in [node_at(ed.a), node_at(ed.b)] {
@@ -1706,14 +1717,29 @@ impl PlanarMap {
     /// ので、2本のその所を切り出した曲線が同じ曲線（`same_curve`：両側の制御点で決める）のときだけ
     pub(super) fn overlap(&self, q: &QuadBez, e: usize) -> Option<OverlapPts> {
         let m = self.quad(e);
+        // 曲線は外接矩形の中にあるので、矩形から `FLAT_TOL` より遠い点は曲線からも遠い（いちばん近い点を探さない。
+        // `nearest_on_quad` の距離は本当の距離以上なので、探しても同じく外れる）
+        let (qr, mr) = (q.bounding_box(), m.bounding_box());
+        let near = |r: KRect, p: Point| {
+            p.x >= r.x0 - FLAT_TOL
+                && p.x <= r.x1 + FLAT_TOL
+                && p.y >= r.y0 - FLAT_TOL
+                && p.y <= r.y1 + FLAT_TOL
+        };
         let mut ends: Vec<(f64, f64, Point)> = Vec::new();
         for (u, p) in [(0.0, m.p0), (1.0, m.p2)] {
+            if !near(qr, p) {
+                continue;
+            }
             let (s, d) = nearest_on_quad(q, p);
             if d <= FLAT_TOL {
                 ends.push((s, u, p));
             }
         }
         for (s, p) in [(0.0, q.p0), (1.0, q.p2)] {
+            if !near(mr, p) {
+                continue;
+            }
             let (u, d) = nearest_on_quad(&m, p);
             if d <= FLAT_TOL {
                 ends.push((s, u, p));
@@ -1815,7 +1841,7 @@ pub(super) fn stitched(own: Vec<(Point, f64)>, spans: &[Span]) -> Vec<(Point, f6
 pub(super) struct FedEdges {
     fed: Vec<bool>,
     /// 線ごとの、同じ線として扱う所（範囲の順）
-    spans: HashMap<Line, Vec<Span>>,
+    spans: IntMap<Line, Vec<Span>>,
     /// 辺の外接矩形（格子に置き直す分と、近くとみなす距離の分を広げたもの）
     boxes: Vec<KRect>,
     /// 辺がかかるマス（同じだけ広げたもの）

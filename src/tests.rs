@@ -28565,7 +28565,9 @@ fn measure_commit_on_dense_cels() {
         }
         out
     };
-    let run = |cel_n: usize, piece_n: usize| -> (f64, usize, usize) {
+    // 片は (本数, 種, 左端, 幅)。セル画と同じ種・範囲なら、コマ全体を同じ位置へ貼り付けたのと同じ
+    type Piece = (usize, u64, f64, f64);
+    let run = |cel_n: usize, (piece_n, seed, x0, w): Piece| -> (f64, usize, usize) {
         let mut app = Is2dApp::default();
         put_cel_shapes(&mut app, 0, 0, strokes(cel_n, 7, 100.0, 600.0));
         let cel_edges: usize = app
@@ -28574,7 +28576,7 @@ fn measure_commit_on_dense_cels() {
             .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
             .sum();
         crate::project_io::new_project(&mut app, &ctx);
-        put_cel_shapes(&mut app, 0, 0, strokes(piece_n, 11, 300.0, 200.0));
+        put_cel_shapes(&mut app, 0, 0, strokes(piece_n, seed, x0, w));
         let piece_edges: usize = app
             .scene()
             .iter()
@@ -28594,9 +28596,25 @@ fn measure_commit_on_dense_cels() {
         times.sort_by(f64::total_cmp);
         (times[times.len() / 2], cel_edges, piece_edges)
     };
-    for (cel_n, piece_n) in [(200, 40), (400, 40), (200, 80), (800, 40), (200, 160)] {
-        let (ms, ce, pe) = run(cel_n, piece_n);
-        eprintln!("cel {cel_n} strokes ({ce} segs), piece {piece_n} strokes ({pe} segs): commit {ms:.2}ms");
+    let only = std::env::var("IS2D_MEASURE_CASE").ok();
+    let cases: [(&str, usize, Piece); 8] = [
+        ("small-200-40", 200, (40, 11, 300.0, 200.0)),
+        ("small-400-40", 400, (40, 11, 300.0, 200.0)),
+        ("small-200-80", 200, (80, 11, 300.0, 200.0)),
+        ("small-800-40", 800, (40, 11, 300.0, 200.0)),
+        ("small-200-160", 200, (160, 11, 300.0, 200.0)),
+        // コマ全体を、絵のある別のコマへ
+        ("whole-other-200", 200, (200, 11, 100.0, 600.0)),
+        ("whole-other-400", 400, (400, 11, 100.0, 600.0)),
+        // コマ全体を、同じ絵の同じ位置へ
+        ("whole-same-400", 400, (400, 7, 100.0, 600.0)),
+    ];
+    for (name, cel_n, piece) in cases {
+        if only.as_deref().is_some_and(|o| o != name) {
+            continue;
+        }
+        let (ms, ce, pe) = run(cel_n, piece);
+        eprintln!("{name}: cel {ce} segs, piece {pe} segs: commit {ms:.2}ms");
     }
 }
 

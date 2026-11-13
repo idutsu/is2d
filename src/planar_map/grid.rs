@@ -306,7 +306,7 @@ impl PolyIndex {
             let sg = (pc[k], pc[k + 1]);
             let tags = seg_tags(pc, k, na, nb);
             for c in seg_cells(sg, 0) {
-                for &id in self.grid.at(c) {
+                for id in self.grid.at(c) {
                     let (f, m) = self.segs[id as usize];
                     let (f, m) = (f as usize, m as usize);
                     if !self.alive[f] || part.contains(&f) {
@@ -335,7 +335,7 @@ impl PolyIndex {
         let inside = |p2: IPt| poly.winding(p2).is_none_or(|w| w != 0);
         // 2. 帯の中の頂点（帯の中と輪郭がかかるマスにある）
         for c in polygon_cells(&band) {
-            for &v in self.node_grid.at(c) {
+            for v in self.node_grid.at(c) {
                 let v = v as usize;
                 if self.deg[v] == 0 || v == na || v == nb || inner.contains(&v) {
                     continue;
@@ -799,19 +799,26 @@ pub(super) fn cell_of(p: IPt) -> (i64, i64) {
 /// （`pad` 以内に近づく区間どうし）は、必ず同じマスを持つ
 pub(super) fn seg_cells((a, b): (IPt, IPt), pad: i64) -> impl Iterator<Item = (i64, i64)> {
     let (a, b) = if a.0 <= b.0 { (a, b) } else { (b, a) };
-    let (dx, dy) = ((b.0 - a.0) as i128, (b.1 - a.1) as i128);
-    // x（a.0 ≤ x ≤ b.0）での区間の y の切り捨て（`up` なら切り上げ）
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    // x（a.0 ≤ x ≤ b.0）での区間の y の切り捨て（`up` なら切り上げ）。格子の範囲（±65,536px）の点なら積は i64 に収まる
+    // （i128 の割り算は遅い）。収まらないときだけ i128 で
     let y_at = move |x: i64, up: bool| -> i64 {
         if dx == 0 {
             return if up { a.1.max(b.1) } else { a.1.min(b.1) };
         }
-        let n = (x - a.0) as i128 * dy;
-        let q = if up {
-            -(-n).div_euclid(dx)
-        } else {
-            n.div_euclid(dx)
+        // dx > 0 なので、div_euclid は切り捨て
+        let q = match (x - a.0).checked_mul(dy) {
+            Some(n) => n.div_euclid(dx) + (up && n.rem_euclid(dx) != 0) as i64,
+            None => {
+                let (n, d) = ((x - a.0) as i128 * dy as i128, dx as i128);
+                (if up {
+                    -(-n).div_euclid(d)
+                } else {
+                    n.div_euclid(d)
+                }) as i64
+            }
         };
-        a.1 + q as i64
+        a.1 + q
     };
     let c = GRID_CELL;
     ((a.0 - pad).div_euclid(c)..=(b.0 + pad).div_euclid(c)).flat_map(move |cx| {
@@ -851,18 +858,26 @@ pub(super) fn polygon_cells(pts: &[IPt]) -> Vec<(i64, i64)> {
         .collect()
 }
 
-/// 近さを調べる格子：マスごとの番号の一覧
+/// 近さを調べる格子：マスごとの番号の一覧。番号はみな1つの並び（`items`）に入れ、マスごとに入れた順につなぐ（マスごとに
+/// 並びを持つと、入れるたびに小さな確保と伸ばし直しが起き、それが重ね合わせの手間の大きな部分になる）
 pub(super) struct CellGrid {
-    cells: IntMap<(i64, i64), Vec<u32>>,
+    /// マスごとの、最初と最後に入れた番号の位置（`items` の）
+    cells: IntMap<(i64, i64), (u32, u32)>,
+    /// 入れた番号と、同じマスで次に入れた番号の位置（無ければ `CELL_END`）
+    items: Vec<(u32, u32)>,
     /// 番号ごとに、最後に返した `query` の回（同じ番号を2度返さないため）
     seen: Vec<u32>,
     stamp: u32,
 }
 
+/// `CellGrid::items` の、マスの終わりの印
+const CELL_END: u32 = u32::MAX;
+
 impl CellGrid {
     pub(super) fn new() -> Self {
         Self {
             cells: IntMap::default(),
+            items: Vec::new(),
             seen: Vec::new(),
             stamp: 0,
         }
@@ -871,16 +886,33 @@ impl CellGrid {
     /// 番号 `id` を、マス `cells` に入れる
     pub(super) fn insert(&mut self, id: usize, cells: impl IntoIterator<Item = (i64, i64)>) {
         for c in cells {
-            self.cells.entry(c).or_default().push(id as u32);
+            let at = self.items.len() as u32;
+            self.items.push((id as u32, CELL_END));
+            match self.cells.entry(c) {
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    let last = std::mem::replace(&mut o.get_mut().1, at);
+                    self.items[last as usize].1 = at;
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert((at, at));
+                }
+            }
         }
         if self.seen.len() <= id {
             self.seen.resize(id + 1, 0);
         }
     }
 
-    /// マス `c` の番号
-    pub(super) fn at(&self, c: (i64, i64)) -> &[u32] {
-        self.cells.get(&c).map_or(&[], |v| v.as_slice())
+    /// マス `c` の番号（入れた順）
+    pub(super) fn at(&self, c: (i64, i64)) -> impl Iterator<Item = u32> + '_ {
+        let mut k = self.cells.get(&c).map_or(CELL_END, |&(first, _)| first);
+        std::iter::from_fn(move || {
+            (k != CELL_END).then(|| {
+                let (id, next) = self.items[k as usize];
+                k = next;
+                id
+            })
+        })
     }
 
     /// マス `cells` のどれかに入っている番号（1つずつ）
@@ -896,13 +928,14 @@ impl CellGrid {
             self.stamp = 1;
         }
         for c in cells {
-            if let Some(list) = self.cells.get(&c) {
-                for &id in list {
-                    if self.seen[id as usize] != self.stamp {
-                        self.seen[id as usize] = self.stamp;
-                        out.push(id as usize);
-                    }
+            let mut k = self.cells.get(&c).map_or(CELL_END, |&(first, _)| first);
+            while k != CELL_END {
+                let (id, next) = self.items[k as usize];
+                if self.seen[id as usize] != self.stamp {
+                    self.seen[id as usize] = self.stamp;
+                    out.push(id as usize);
                 }
+                k = next;
             }
         }
     }
