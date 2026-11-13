@@ -1954,13 +1954,64 @@ impl PlanarMap {
 }
 
 /// 曲線 `q` の `t` の所を `target` へ引っぱった曲線（両端は動かさず、制御点を動かす。輪郭のつまみの決まり。確定
-/// `commit_pull_edge` とドラッグ中の表示が同じこれを使う）
+/// `commit_pull_edge` とドラッグ中の表示が同じこれを使う）。どの `t` でも `target` を通る。`t` は `pull_t` で選ぶ
 pub(crate) fn pulled_quad(q: QuadBez, t: f64, target: Point) -> QuadBez {
     QuadBez::new(
         q.p0,
         q.p1 + (target - q.eval(t)) / (2.0 * t * (1.0 - t)),
         q.p2,
     )
+}
+
+/// 輪郭のつまみで選ぶ t の下限（上限は 1 − これ）。端では `pulled_quad` の割り算が 0 で割ることになるので、つまんだ所も
+/// これより内に寄せる（曲線の長さの 1/256 より端に近い所をつまむことはまず無く、寄せても見た目は変わらない）
+pub(crate) const PULL_T_MIN: f64 = 1.0 / 256.0;
+
+/// 輪郭のつまみ（レビュー 6ee325a の R7）：曲線 `q` を `target` へ引っぱるとき、`target` を通す所（曲線の上の t）。
+/// 曲線はどの t でも `target` を通るので、制御点の動き（`pulled_quad`）がいちばん小さい t を選ぶ（曲がり方がいちばん小さい）。
+/// 前の t `from` から、動きが小さくなる方へたどった谷の底にする：強く曲がった辺を内側へ引くと谷が2つになることがあり、
+/// いちばん小さい谷を毎回選ぶと、ドラッグ中に形が急に変わる（前の t からたどれば、その谷が無くならない限り続く）。
+/// t は `PULL_T_MIN..=1 − PULL_T_MIN` の中
+pub(crate) fn pull_t(q: QuadBez, from: f64, target: Point) -> f64 {
+    let (lo, hi) = (PULL_T_MIN, 1.0 - PULL_T_MIN);
+    // 制御点の動きの大きさ
+    let cost = |t: f64| (target - q.eval(t)).hypot() / (2.0 * t * (1.0 - t));
+    let t = from.clamp(lo, hi);
+    let c = cost(t);
+    // 下る向きへ、歩幅を倍にしながら進み、上りに変わった所までで谷を挟む。最初の歩幅は谷の幅より十分小さければよい
+    let step0 = PULL_T_MIN;
+    let (up, down) = ((t + step0).min(hi), (t - step0).max(lo));
+    let (mut a, mut b) = if cost(up) >= c && cost(down) >= c {
+        (down, up)
+    } else {
+        let dir = if cost(up) < cost(down) { 1.0 } else { -1.0 };
+        let (mut prev, mut cur, mut cc, mut step) = (t, t, c, step0);
+        loop {
+            let next = (cur + dir * step).clamp(lo, hi);
+            let nc = cost(next);
+            if nc >= cc || next == cur {
+                break (prev.min(next), prev.max(next));
+            }
+            (prev, cur, cc) = (cur, next, nc);
+            step *= 2.0;
+        }
+    };
+    // 挟んだ所を黄金分割で詰める。t の精度は、いちばん小さいかの精度にだけ関わる（どの t でも `target` を通る）
+    let g = (5f64.sqrt() - 1.0) / 2.0;
+    let (mut x1, mut x2) = (b - g * (b - a), a + g * (b - a));
+    let (mut f1, mut f2) = (cost(x1), cost(x2));
+    while b - a > 1e-9 {
+        if f1 < f2 {
+            (b, x2, f2) = (x2, x1, f1);
+            x1 = b - g * (b - a);
+            f1 = cost(x1);
+        } else {
+            (a, x1, f1) = (x1, x2, f2);
+            x2 = a + g * (b - a);
+            f2 = cost(x2);
+        }
+    }
+    (a + b) / 2.0
 }
 
 /// 地図 `map`（文書の座標）に変換 `xform` をかけ、その座標の格子で正しい地図にしたもの。変換した地図が正しくなければ

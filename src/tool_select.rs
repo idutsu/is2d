@@ -9,7 +9,7 @@ use crate::canvas_tool::{
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::map_hover::scope_maps;
-use crate::planar_map::{reshape_result, LayerBase, MapEdit};
+use crate::planar_map::{pull_t, reshape_result, LayerBase, MapEdit, PULL_T_MIN};
 use crate::select_ops::{apply_click_selection, finish_selection_drag, update_selection_drag};
 pub(crate) use crate::select_ops::{compute_hover_target, handle_canvas_double_click};
 use crate::vector_engine::{FillShape, LayerId};
@@ -257,8 +257,8 @@ pub(crate) fn start_reshape_drag(
             let Some((base, group_path)) = begin_map_drag(tab, layer_id) else {
                 return;
             };
-            let grab_t = t.clamp(0.18, 0.82);
-            // マウス pt から、つかむ所（丸めた grab_t の所）までのずれ（ステージの座標）
+            let grab_t = t.clamp(PULL_T_MIN, 1.0 - PULL_T_MIN);
+            // マウス pt から、つかんだ曲線の上の所までのずれ（ステージの座標）
             let grab_offset = seg.eval(grab_t) - pt;
             tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
                 layer_id,
@@ -327,6 +327,8 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
         }) => {
             *target = xform.inverse() * (pt + *grab_offset);
             let target = *target;
+            // 曲線が `target` を通る所を、前の所から選び直す（曲がり方がいちばん小さい所）
+            *grab_t = pull_t(*orig_seg, *grab_t, target);
             Some((
                 base.clone(),
                 MapEdit::PullEdge {

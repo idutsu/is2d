@@ -6082,6 +6082,8 @@ fn test_time_based_playback_advance_and_onion_skin_rendering() {
     );
 }
 
+/// 辺の端の近くを、曲線から少し外れた所でつかんでも、つかんだ瞬間に曲線が跳ばない。少し動かすと、曲線はつかんだ所が
+/// 動いた先を通る（R7：前は端から 18% の所を動かしたので、つかんだ所から離れた所を通った）
 #[test]
 fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
     use kurbo::ParamCurve;
@@ -6120,7 +6122,7 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
     .collect();
     put_cel_shapes(&mut app, 0, 0, shapes);
 
-    // 最も長いセグメントを選び、端点付近 (t = 0.05 < 0.18) かつ曲線から少し外れた座標でドラッグ開始 (#5)
+    // 最も長いセグメントを選び、端点付近 (t = 0.10) かつ曲線から少し外れた座標でドラッグ開始 (#5)
     let seg_idx = scene_summary(&app).shapes[0]
         .exterior
         .segments
@@ -6149,14 +6151,14 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
     let after_zero_move = app.scene().get(0).unwrap().exterior.segments[seg_idx];
     assert!(
         (after_zero_move.p1 - orig_seg.p1).hypot() < 1e-6,
-        "端点付近 (t=0.10 < 0.18) や曲線から少し離れた位置を掴んだ瞬間 (移動量0) に曲線が跳ばないこと (#5): orig={:?}, after={:?}",
+        "端点付近 (t=0.10) や曲線から少し離れた位置を掴んだ瞬間 (移動量0) に曲線が跳ばないこと (#5): orig={:?}, after={:?}",
         orig_seg.p1,
         after_zero_move.p1
     );
 
-    // 微小移動 (dy = +2.0) でも跳びなく滑らかに移動すること（ドラッグ中は Scene の Overlay に反映され、セルは不変）
-    let grab_t = 0.18_f64;
-    let grab_before = orig_seg.eval(grab_t);
+    // 微小移動 (dy = +2.0)：曲線は、つかんだ所（t = 0.10 の曲線の上）が動いた先を通る（ドラッグ中は Scene の Overlay に
+    // 反映され、セルは不変）
+    let grab_after_move = orig_seg.eval(0.10) + kurbo::Vec2::new(0.0, 2.0);
     tool_select::update_reshape_drag(&mut app, pt_near_end + kurbo::Vec2::new(0.0, 2.0));
     assert_eq!(
         app.doc.root.layers[0].keyframes[0].cel.shapes()[0]
@@ -6184,10 +6186,10 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
             }
         })
         .expect("引っぱった辺が輪郭にあること");
-    let grab_after = pulled.eval(grab_t);
+    let miss = crate::vector_engine::nearest_on_quad(&pulled, grab_after_move).1;
     assert!(
-        ((grab_after - grab_before) - kurbo::Vec2::new(0.0, 2.0)).hypot() < 1e-5,
-        "微小ドラッグ時の曲線変化量がカーソル移動量と正確に一致すること (#5)"
+        miss < 1e-3,
+        "曲線が、つかんだ所の動いた先を通ること：{miss}px 離れている"
     );
 }
 
@@ -29525,4 +29527,60 @@ fn overlay_builds_the_shape_index_once() {
     // 重なった所の境目は消え、その端の切れ目もまとまって、1つの四角になる
     assert!(m.is_valid());
     assert_eq!((m.nodes.len(), m.edges.len()), (4, 4));
+}
+
+/// 輪郭のつまみ（R7）：曲線はどの所でも引っぱった先を通るので、曲がり方（制御点の動き）がいちばん小さい所を選ぶ。強く
+/// 曲がった辺を内側へ引いて、いちばん小さい所が2つになっても、前の所から続けて選ぶので、ドラッグ中に形が飛ばない
+#[test]
+fn pull_t_picks_the_smallest_bend_and_does_not_jump() {
+    use crate::planar_map::{pull_t, pulled_quad};
+    let moved = |q: QuadBez, t: f64, target: Point| (pulled_quad(q, t, target).p1 - q.p1).hypot();
+    let smallest = |q: QuadBez, target: Point| {
+        (1..4000)
+            .map(|i| i as f64 / 4000.0)
+            .min_by(|&a, &b| moved(q, a, target).total_cmp(&moved(q, b, target)))
+            .unwrap()
+    };
+    // 200px のまっすぐな辺の端から 30% をつかみ、30px 横へ：つかんだ所のままより曲がり方が小さく、細かく調べたいちばん
+    // 小さいものと同じ。曲線は引っぱった先を通る
+    let line = QuadBez::new(
+        Point::new(0.0, 0.0),
+        Point::new(100.0, 0.0),
+        Point::new(200.0, 0.0),
+    );
+    let target = Point::new(60.0, -30.0);
+    let t = pull_t(line, 0.3, target);
+    let pulled = pulled_quad(line, t, target);
+    assert!(crate::vector_engine::nearest_on_quad(&pulled, target).1 < 1e-9);
+    assert!(moved(line, t, target) <= moved(line, smallest(line, target), target) + 1e-6);
+    assert!(moved(line, t, target) < moved(line, 0.3, target) - 1.0);
+    // 強く曲がった辺の頂をつかみ、内側へ下ろしてから横へ動かす。いちばん小さい所を毎回選び直すと、左右の2つの間で
+    // 入れかわって制御点が 100px より大きく飛ぶ道。前の所から続けて選べば、1回に 20px より動かない
+    let bent = QuadBez::new(
+        Point::new(0.0, 0.0),
+        Point::new(50.0, 300.0),
+        Point::new(100.0, 0.0),
+    );
+    let path: Vec<Point> = (0..28)
+        .map(|k| Point::new(50.0, 150.0 - 4.0 * k as f64))
+        .chain((1..15).map(|k| Point::new(50.0 - k as f64, 42.0)))
+        .chain((1..31).map(|k| Point::new(36.0 + k as f64, 42.0)))
+        .collect();
+    let (mut t, mut prev, mut prev_best) = (0.5, None::<Point>, None::<Point>);
+    let (mut jump, mut jump_best) = (0.0f64, 0.0f64);
+    for &target in &path {
+        t = pull_t(bent, t, target);
+        let c = pulled_quad(bent, t, target).p1;
+        let c_best = pulled_quad(bent, smallest(bent, target), target).p1;
+        if let (Some(p), Some(pb)) = (prev, prev_best) {
+            jump = jump.max((c - p).hypot());
+            jump_best = jump_best.max((c_best - pb).hypot());
+        }
+        (prev, prev_best) = (Some(c), Some(c_best));
+    }
+    assert!(
+        jump_best > 100.0,
+        "いちばん小さい所が2つになる道：{jump_best}"
+    );
+    assert!(jump < 20.0, "前の所から続けて選ぶと飛ばない：{jump}");
 }
