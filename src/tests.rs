@@ -3393,7 +3393,7 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
         empty_marker,
     ));
     sort_app.refresh_scene_base();
-    let maps = crate::planar_map::scope_maps(sort_app.scene(), &sort_app.session);
+    let maps = crate::map_hover::scope_maps(sort_app.scene(), &sort_app.session);
     assert!(
         maps.maps
             .iter()
@@ -21631,11 +21631,11 @@ fn test_scope_maps_rebuild_only_edited_layer() {
             stroke(200.0, Color32::BLUE),
         ],
     );
-    let before = crate::planar_map::scope_maps(app.scene(), &app.session);
+    let before = crate::map_hover::scope_maps(app.scene(), &app.session);
     assert_eq!(before.maps.len(), 2);
     let edited = app.active_timeline().active_layer_id();
     run(&mut app, &[stroke(220.0, Color32::GREEN)]);
-    let after = crate::planar_map::scope_maps(app.scene(), &app.session);
+    let after = crate::map_hover::scope_maps(app.scene(), &app.session);
     assert_eq!(after.maps.len(), 2);
     for m in &after.maps {
         let old = before
@@ -21666,12 +21666,12 @@ fn test_scope_maps_rebuild_only_edited_layer_with_many_layers() {
     for i in 1..20 {
         run(&mut app, &[Action::AddLayer, stroke(20.0 * i as f64)]);
     }
-    let before = crate::planar_map::scope_maps(app.scene(), &app.session);
+    let before = crate::map_hover::scope_maps(app.scene(), &app.session);
     assert_eq!(before.maps.len(), 20);
     let edited = app.active_timeline().active_layer_id();
     run(&mut app, &[stroke(500.0)]);
-    let after = crate::planar_map::scope_maps(app.scene(), &app.session);
-    let rebuilt: Vec<crate::canvas_tool::LayerId> = after
+    let after = crate::map_hover::scope_maps(app.scene(), &app.session);
+    let rebuilt: Vec<crate::vector_engine::LayerId> = after
         .maps
         .iter()
         .filter(|m| {
@@ -21705,7 +21705,7 @@ fn test_symbol_edit_after_moving_instance_keeps_untouched_shapes() {
         let (binding, _, _) = symbol_ops::selected_single_symbol_info(app).unwrap();
         assert!(symbol_ops::enter_symbol_timeline(app, binding));
     };
-    let local_shapes = |app: &Is2dApp| -> Vec<(crate::canvas_tool::ShapeId, Color32, [f64; 4])> {
+    let local_shapes = |app: &Is2dApp| -> Vec<(crate::vector_engine::ShapeId, Color32, [f64; 4])> {
         app.active_timeline().layers[0].keyframes[0]
             .cel
             .shapes()
@@ -21817,7 +21817,7 @@ fn test_anchor_added_near_edge_end_at_clicked_position() {
 
 /// 両側に色がある地図の辺の真ん中（アンカーの追加でつかむ点）
 fn shared_edge_midpoint(app: &Is2dApp, color_a: Color32, color_b: Color32) -> Point {
-    let maps = crate::planar_map::scope_maps(app.scene(), &app.session);
+    let maps = crate::map_hover::scope_maps(app.scene(), &app.session);
     let m = &maps.maps[0].base.map;
     let e = (0..m.edges.len())
         .find(|&e| {

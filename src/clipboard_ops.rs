@@ -4,12 +4,13 @@ use std::sync::Arc;
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, cancel_active_drag, finish_cel_writes, write_cel, Clipboard, LayerId,
+    active_scope_layer_id, cancel_active_drag, finish_cel_writes, write_cel, Clipboard,
     MoveSelectionDrag, Tab,
 };
 use crate::planar_map::PlanarMap;
 use crate::symbol::{Document, SymbolDef};
 use crate::timeline::{Cel, Timeline};
+use crate::vector_engine::LayerId;
 
 fn remap_gid(gid_map: &mut HashMap<u64, u64>, old_gid: u64, doc: &mut Document) -> u64 {
     *gid_map

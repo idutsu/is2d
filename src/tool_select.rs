@@ -4,15 +4,15 @@ use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2}
 use kurbo::{ParamCurve, Point, QuadBez};
 
 use crate::canvas_tool::{
-    ActiveCanvasDrag, HoverTarget, LayerId, MapOwner, MarqueeDrag, SelectDragState, SelectSubMode,
-    Tab,
+    ActiveCanvasDrag, HoverTarget, MapOwner, MarqueeDrag, SelectDragState, SelectSubMode, Tab,
 };
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
-use crate::planar_map::{reshape_result, scope_maps, LayerBase, MapEdit};
+use crate::map_hover::scope_maps;
+use crate::planar_map::{reshape_result, LayerBase, MapEdit};
 use crate::select_ops::{apply_click_selection, finish_selection_drag, update_selection_drag};
 pub(crate) use crate::select_ops::{compute_hover_target, handle_canvas_double_click};
-use crate::vector_engine::FillShape;
+use crate::vector_engine::{FillShape, LayerId};
 
 // ============================================================================
 // 選択ツール（Tool::Select / V キー）・輪郭変形・アンカー編集・グループ・クリップボード

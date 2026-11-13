@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex, Weak};
 use eframe::egui::Color32;
 use kurbo::Point;
 
-use crate::canvas_tool::ShapeId;
 use crate::planar_map::{point_order, LayerBase, MapEdge, PlanarMap};
+use crate::vector_engine::ShapeId;
 
 /// 塊の升目の大きさ（文書の座標の px）。ブラシ1本・消しゴム1本で変わるのは、ふつう升目の数個分
 const TILE: f64 = 32.0;

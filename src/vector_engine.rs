@@ -358,16 +358,21 @@ impl Contour {
     }
 }
 
+/// 図形の番号（`FillShape::shape_id`。地図では面の印）
+pub(crate) type ShapeId = u64;
+/// レイヤーの番号（`FillShape::layer_id`）
+pub(crate) type LayerId = u64;
+
 /// キャンバス上の1つの塗りシェイプ（色 + 外周2次ベジェ輪郭 + 穴の2次ベジェ輪郭リスト + 所属レイヤーID + グループ階層 + シンボル紐付け + 描画・判定キャッシュ）
 #[derive(Clone, Debug)]
 pub(crate) struct FillShape {
     /// 各シェイプインスタンスを順序変更・ソート後も安定して識別する固有ID
-    pub(crate) shape_id: u64,
+    pub(crate) shape_id: ShapeId,
     pub(crate) color: Color32,
     pub(crate) exterior: Contour,
     pub(crate) holes: Vec<Contour>,
     /// このシェイプが所属するタイムラインレイヤーの固有ID（デフォルト `1`）
-    pub(crate) layer_id: u64,
+    pub(crate) layer_id: LayerId,
     /// 外側のグループIDから内側のグループIDへの階層パス（空 `[]` ならルート階層の生シェイプ）
     pub(crate) group_path: Vec<u64>,
     /// このシェイプがシンボルインスタンスに属する場合の紐付け情報

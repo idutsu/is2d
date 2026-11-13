@@ -9,13 +9,14 @@ use std::sync::Arc;
 use eframe::egui::Color32;
 use kurbo::Affine;
 
-use crate::canvas_tool::{LayerId, Placement, SceneBaseCache, ShapeId};
+use crate::canvas_tool::{Placement, SceneBaseCache};
 use crate::planar_map::{
     cut_out, faces_with_ids, per_layer_parallel, realized, region_map, stacked, CheckedMap,
     LayerBase, MapChange, MapInput, MapRule, PlanarMap,
 };
 use crate::stored_map::StoredMap;
 use crate::vector_engine::FillShape;
+use crate::vector_engine::{LayerId, ShapeId};
 
 /// 浮いた片の操作に要る画面の土台：画面に出しているセル画（`SceneBaseCache`）と編集中の階層
 #[derive(Clone, Copy)]

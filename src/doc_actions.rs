@@ -8,8 +8,8 @@ use crate::canvas_tool::{
     editable_layer_ids, finish_cel_writes, focus_active_layer_by_id,
     focus_active_layer_to_shape_by_id, reset_session_after_timeline_change,
     select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode,
-    update_instances, write_scope_map, Clipboard, CoalesceKey, HoverTarget, LayerId, MapOwner,
-    NoticeKind, SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
+    update_instances, write_scope_map, Clipboard, CoalesceKey, HoverTarget, MapOwner, NoticeKind,
+    SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
     content_xform, import_clipboard_symbols, pasteable_content, prepare_copy_selected_shapes,
@@ -31,7 +31,7 @@ use crate::symbol_ops::{
 };
 use crate::timeline::{Layer, Timeline, TimelineCellSelection, MAX_LAYERS_PER_TIMELINE};
 use crate::vector_engine::{
-    affine_rotate_around, affine_scale_around, rects_overlap, FillShape, MAX_VIEW_ZOOM,
+    affine_rotate_around, affine_scale_around, rects_overlap, FillShape, LayerId, MAX_VIEW_ZOOM,
     MIN_VIEW_ZOOM,
 };
 use crate::vector_stroke::{build_smoothed_stroke_shapes_at_zoom, generate_brush_outline_at_zoom};

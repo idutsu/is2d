@@ -5,12 +5,13 @@ use kurbo::{Affine, ParamCurve, Point, QuadBez, Rect as KRect};
 use crate::canvas_tool::{
     cancel_active_drag, clear_selection, commit_floating, commit_floating_except,
     editable_layer_ids, sync_timeline_layer_from_canvas_selection, write_cels, ActiveCanvasDrag,
-    HoverTarget, LayerId, Scene, SelectSubMode, Session, ShapeId, Tab,
+    HoverTarget, Scene, SelectSubMode, Session, Tab,
 };
 use crate::clipboard_ops::{prepare_placement, put_placements, Content, Placement};
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
 use crate::vector_engine::{make_marquee_rect_shape, nearest_on_quad, rects_overlap, FillShape};
+use crate::vector_engine::{LayerId, ShapeId};
 
 /// 現在の選択図形のうち `keep_indices` のみを選択に残し、選択から外れた変更済み生シェイプのみをキャンバスへ結合・切り抜き確定する
 /// （選択に残った図形は結合せず `Floating` のまま維持する）
@@ -445,7 +446,7 @@ pub(crate) fn compute_hover_target(
             }
         }
         // 輪郭の変形は、境目の線で持つ地図で頂点・辺を探す（同じレイヤーの生の図形どうしに前後は無い）
-        let target = crate::planar_map::reshape_hover(scene, session, mouse_pt, zoom);
+        let target = crate::map_hover::reshape_hover(scene, session, mouse_pt, zoom);
         if !matches!(target, HoverTarget::None) {
             return target;
         }
@@ -458,7 +459,7 @@ pub(crate) fn compute_hover_target(
     }
 
     // アンカーの追加・削除は地図で探す（同じ地図の図形どうしに前後は無い。動かして浮いている片は、片だけの地図で先に探す）
-    crate::planar_map::anchor_hover(
+    crate::map_hover::anchor_hover(
         scene,
         session,
         mouse_pt,

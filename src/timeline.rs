@@ -1,6 +1,6 @@
-use crate::canvas_tool::ShapeId;
 use crate::planar_map::{realized, CheckedMap, LayerBase, PlanarMap};
 use crate::stored_map::StoredMap;
+use crate::vector_engine::ShapeId;
 use crate::vector_engine::{FillShape, SymbolInstanceBinding};
 use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};

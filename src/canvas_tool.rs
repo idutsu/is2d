@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, Key, Pos2, Stroke, Vec2};
 use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 
-use crate::planar_map::{LayerBase, ScopeMaps};
+use crate::map_hover::ScopeMaps;
+use crate::planar_map::LayerBase;
 pub(crate) use crate::symbol::Document;
 use crate::symbol::{EditPath, SymbolDef, SymbolEvalCtx, SymbolEvalState};
 use crate::timeline::{Timeline, TimelineCellSelection};
-use crate::vector_engine::{FillShape, SyncCache};
+use crate::vector_engine::{FillShape, LayerId, ShapeId, SyncCache};
 
 pub(crate) const MAX_UNDO_HISTORY: usize = 100;
 const DEFAULT_TOAST_DURATION: Duration = Duration::from_millis(2800);
@@ -668,7 +669,6 @@ pub(crate) struct Clipboard {
     pub(crate) paste_offset: KVec2,
 }
 
-pub(crate) type ShapeId = u64;
 pub(crate) type InstanceGid = u64;
 
 /// キャンバス上の選択状態（図形ID集合とシンボルインスタンスGID集合）
@@ -709,7 +709,6 @@ impl Selection {
     }
 }
 
-pub(crate) type LayerId = u64;
 pub(crate) type Scope = Vec<u64>;
 
 mod scene_base_cache {
@@ -720,7 +719,7 @@ mod scene_base_cache {
     use eframe::egui::{self, Vec2};
     use kurbo::Affine;
 
-    use super::{Document, EditPath, LayerId, ShapeId};
+    use super::{Document, EditPath};
     use crate::planar_map::LayerBase;
     use crate::symbol::{
         compute_resolved_cel_signature, ResolvedCelSig, SymbolDef, SymbolEvalCtx, SymbolLoopMode,
@@ -729,6 +728,7 @@ mod scene_base_cache {
     use crate::vector_engine::{
         append_mesh, dim_backdrop_color, onion_tint_color, transform_mesh_to_screen, FillShape,
     };
+    use crate::vector_engine::{LayerId, ShapeId};
 
     struct CachedLayer {
         layer_id: LayerId,
