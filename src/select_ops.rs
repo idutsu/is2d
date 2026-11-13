@@ -548,7 +548,8 @@ pub(crate) fn prepare_group_selected_shapes(
     group_path.push(new_gid);
     let mut written = Vec::new();
     for (layer_id, map) in pieces {
-        if crate::canvas_tool::write_scope_map(tab, layer_id, &group_path, |_| map.written()) {
+        if crate::canvas_tool::write_scope_map(tab, layer_id, &group_path, |base| map.written(base))
+        {
             written.push(layer_id);
         }
     }

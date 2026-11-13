@@ -28090,7 +28090,7 @@ fn map_only_writes_share_the_instances() {
     assert!(canvas_tool::edit_layer_map(app.tab_mut(), lid, |base| {
         base.map
             .overlay(MapInput::Shapes(&stroke), MapRule::Paint(Some(blue)))
-            .and_then(crate::planar_map::PlanarMap::written)
+            .and_then(|m| m.written(base))
     }));
     let after = &app.doc.root.layers[0].keyframes[0].cel;
     assert!(!after.maps.is_empty());
@@ -28957,5 +28957,216 @@ fn nearly_coincident_lines_leave_no_slivers() {
                 .unwrap();
             assert_eq!((m.valid_faces().unwrap().len(), m.edges.len()), (1, n));
         }
+    }
+}
+
+/// 計測（N-2001）：地図の辺の数を増やしたときの、ブラシ1本の重ね合わせ・地図の確かめ（valid_faces）・しまう形にする
+/// （StoredMap::from_dense）の時間
+#[test]
+#[ignore]
+fn measure_write_back_scaling() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    use crate::stored_map::StoredMap;
+    use std::time::Instant;
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    let mut rng = map_overlay::Rng(3);
+    let mut m = PlanarMap::default();
+    let mut k = 0;
+    for target in [60usize, 200, 600, 1500] {
+        while k < target {
+            let (r, c) = (2.0 + rng.f() * 8.0, colors[k % 4]);
+            let s = wiggly_stroke(&mut rng, (100.0, 100.0, 600.0, 300.0), r, c);
+            m = m
+                .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+                .unwrap();
+            k += 1;
+        }
+        let strokes: Vec<_> = (0..10)
+            .map(|j| {
+                let (r, c) = (3.0 + rng.f() * 5.0, colors[j % 4]);
+                (
+                    wiggly_stroke(&mut rng, (100.0, 100.0, 600.0, 300.0), r, c),
+                    c,
+                )
+            })
+            .collect();
+        let base = crate::planar_map::LayerBase::new(&m);
+        let (mut ov, mut vf, mut st, mut wr) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (s, c) in &strokes {
+            let t = Instant::now();
+            let next = m
+                .overlay(MapInput::Shapes(s), MapRule::Paint(Some(*c)))
+                .unwrap();
+            ov.push(t.elapsed().as_secs_f64() * 1e3);
+            let t = Instant::now();
+            let faces = next.valid_faces();
+            vf.push(t.elapsed().as_secs_f64() * 1e3);
+            assert!(faces.is_some());
+            let t = Instant::now();
+            let checked = next.clone().written(&base);
+            wr.push(t.elapsed().as_secs_f64() * 1e3);
+            assert!(checked.is_some());
+            let t = Instant::now();
+            let stored = StoredMap::from_dense(&next, None);
+            st.push(t.elapsed().as_secs_f64() * 1e3);
+            drop(stored);
+        }
+        let med = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        eprintln!(
+            "edges {:6}: overlay {:.2}ms, valid_faces {:.2}ms, written {:.2}ms, from_dense {:.2}ms",
+            m.edges.len(),
+            med(&mut ov),
+            med(&mut vf),
+            med(&mut wr),
+            med(&mut st)
+        );
+    }
+}
+
+/// N-2001：書き戻す地図の確かめで、前の地図にある辺どうしを省いても（`valid_faces_since`）、判定は全部を確かめる
+/// `valid_faces` と同じ。重ね合わせの結果と、その頂点をずらして正しくないこともあるようにしたものの両方で比べる
+#[test]
+fn checking_against_the_previous_map_matches_the_full_check() {
+    use crate::planar_map::{LayerBase, MapInput, MapRule, PlanarMap};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    let area = (100.0, 100.0, 300.0, 200.0);
+    let mut rng = map_overlay::Rng(5);
+    let mut m = PlanarMap::default();
+    for k in 0..25 {
+        let (r, c) = (2.0 + rng.f() * 8.0, colors[k % 3]);
+        let s = wiggly_stroke(&mut rng, area, r, c);
+        m = m
+            .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+            .unwrap();
+    }
+    let mut invalid = 0;
+    for step in 0..45 {
+        let base = LayerBase::new(&m);
+        let (r, c) = (2.0 + rng.f() * 8.0, colors[step % 3]);
+        let s = wiggly_stroke(&mut rng, area, r, c);
+        let next = match step % 3 {
+            0 => m.overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c))),
+            1 => m.overlay(MapInput::Shapes(&s), MapRule::Paint(None)),
+            _ => {
+                let (x, y) = (100.0 + rng.f() * 150.0, 100.0 + rng.f() * 100.0);
+                let rect = vec![map_overlay::rect_shape(x, y, x + 60.0, y + 40.0, c)];
+                m.overlay(MapInput::Shapes(&rect), MapRule::KeepInside)
+            }
+        }
+        .unwrap();
+        // 頂点を1つずらしたもの（つながる辺は前の地図に無い形になる）
+        let mut moved = next.clone();
+        let v = (rng.f() * moved.nodes.len() as f64) as usize % moved.nodes.len();
+        let a = rng.f() * std::f64::consts::TAU;
+        moved.nodes[v] += kurbo::Vec2::new(a.cos(), a.sin()) * (0.01 + rng.f() * 3.0);
+        for cand in [&next, &moved] {
+            let full = cand.valid_faces();
+            assert_eq!(cand.valid_faces_since(Some(base.keys())), full);
+            invalid += usize::from(full.is_none());
+        }
+        if step % 3 != 2 {
+            m = next;
+        }
+    }
+    assert!(invalid > 0, "正しくない地図も比べる");
+}
+
+/// N-2001：前の地図にある辺と交わる新しい辺は、前の地図の辺どうしの確かめを省いても見つかる（赤の矩形の角に重なる
+/// 青の矩形。輪郭はどちらも閉じて色もそろい、交わりは区間どうしの確かめでしか見つからない）
+#[test]
+fn checking_against_the_previous_map_finds_new_crossings() {
+    use crate::planar_map::{LayerBase, PlanarMap};
+    let red = map_overlay::rect_shape(100.0, 100.0, 200.0, 200.0, Color32::RED);
+    let blue = map_overlay::rect_shape(160.0, 160.0, 260.0, 260.0, Color32::BLUE);
+    let base_map = PlanarMap::from_faces([&red]);
+    let base = LayerBase::new(&base_map);
+    assert!(base_map.valid_faces_since(Some(base.keys())).is_some());
+    let next = PlanarMap::from_faces([&red, &blue]);
+    assert_eq!(next.valid_faces(), None);
+    assert_eq!(next.valid_faces_since(Some(base.keys())), None);
+}
+
+/// 計測（N-2001）：線の多いセル画（今の地図から描いて作る）に、ブラシを1本描く1回（入口から文書への書き戻しまで）
+#[test]
+#[ignore]
+fn measure_brush_on_dense_cel() {
+    use std::time::Instant;
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    let mut app = Is2dApp::default();
+    let mut rng = map_overlay::Rng(21);
+    let stroke = |rng: &mut map_overlay::Rng| -> Vec<Point> {
+        let mut p = Point::new(-300.0 + rng.f() * 600.0, -150.0 + rng.f() * 300.0);
+        let mut a = rng.f() * std::f64::consts::TAU;
+        (0..40)
+            .map(|_| {
+                a += (rng.f() - 0.5) * 0.8;
+                p += kurbo::Vec2::new(a.cos(), a.sin()) * 3.0;
+                p
+            })
+            .collect()
+    };
+    for target in [300usize, 900] {
+        while app
+            .scene()
+            .iter()
+            .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+            .sum::<usize>()
+            < target * 12
+        {
+            let points = stroke(&mut rng);
+            let radius = (2.0 + rng.f() * 8.0) as f32;
+            let color = colors[(rng.f() * 4.0) as usize % 4];
+            assert!(doc_actions::apply(
+                &mut app,
+                doc_actions::Action::PaintStroke {
+                    points,
+                    radius,
+                    color
+                },
+            ));
+        }
+        let segs: usize = app
+            .scene()
+            .iter()
+            .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+            .sum();
+        let mut times = Vec::new();
+        for _ in 0..15 {
+            let points = stroke(&mut rng);
+            let t = Instant::now();
+            assert!(doc_actions::apply(
+                &mut app,
+                doc_actions::Action::PaintStroke {
+                    points,
+                    radius: 5.0,
+                    color: colors[0]
+                },
+            ));
+            times.push(t.elapsed().as_secs_f64() * 1e3);
+            assert!(doc_actions::apply(&mut app, doc_actions::Action::Undo));
+        }
+        times.sort_by(f64::total_cmp);
+        eprintln!(
+            "cel segments {segs}: brush median {:.2}ms, max {:.2}ms",
+            times[times.len() / 2],
+            times[times.len() - 1]
+        );
     }
 }

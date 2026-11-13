@@ -343,7 +343,7 @@ pub(crate) fn merge_pieces_layer_by_layer(
         let change = base
             .map
             .overlay(MapInput::Map(&piece.map), MapRule::Overlay)
-            .and_then(crate::planar_map::PlanarMap::written)
+            .and_then(|m| m.written(&base))
             .and_then(|next| base.diff_placed(next, &own, layer_id, &scope, xform));
         if let Some(change) = change {
             apply_map_change(base_shapes, change, layer_id, &scope);
@@ -369,7 +369,8 @@ pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
         let cache = &tab.session.base_cache;
         crate::planar_map::per_layer_parallel(fl.layers(), |l| {
             let cel = cache.cel(l.layer_id)?;
-            let next = l.committed(&cel.scope_base(&scope))?.written()?;
+            let base = cel.scope_base(&scope);
+            let next = l.committed(&base)?.written(&base)?;
             Some(cel.outcome(&scope, next))
         })
     };

@@ -799,7 +799,7 @@ fn write_overlay_edit(
     let written = edit_layer_map(tab, layer_id, |base| {
         let next = overlay(base);
         off_grid = next.is_none();
-        next.and_then(crate::planar_map::PlanarMap::written)
+        next.and_then(|m| m.written(base))
     });
     if off_grid {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
@@ -930,7 +930,7 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
     edit_layer_map(tab, target_lid, |base| {
         base.map
             .with_face_filled(doc_pt, fill_color)
-            .and_then(crate::planar_map::PlanarMap::written)
+            .and_then(|m| m.written(base))
     })
 }
 
@@ -1128,9 +1128,7 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
         }
         MapEdit::AddAnchor { .. } | MapEdit::DeleteAnchor { .. } => {
             edit_layer_map(tab, layer_id, |base| {
-                map_edit
-                    .apply(&base.map)
-                    .and_then(crate::planar_map::PlanarMap::written)
+                map_edit.apply(&base.map).and_then(|m| m.written(base))
             })
         }
     };

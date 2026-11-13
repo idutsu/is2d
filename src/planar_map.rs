@@ -66,7 +66,7 @@ pub(crate) struct PlanarMap {
 }
 
 /// 面。外周の輪郭と穴の輪郭（向きのある辺の輪）を持つ。`srcs` は、この面の辺の側に記された元の図形
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MapFace {
     pub(crate) color: Color32,
     pub(crate) cycles: Vec<Vec<(usize, bool)>>,
@@ -346,13 +346,30 @@ impl PlanarMap {
     /// 正しい地図なら（`is_valid`）、その面（`faces`）。正しい地図かの判定はどこでもこれ1つ（書き戻し・読み込み・変換
     /// した地図・テスト）。`None`：正しい地図でない
     pub(crate) fn valid_faces(&self) -> Option<Vec<MapFace>> {
+        self.valid_faces_since(None)
+    }
+
+    /// `valid_faces` と同じ判定。ただし、正しい地図 `prev` にある辺（形がビットまで同じ：`edge_key`）どうしは、判定の形が
+    /// 離れていることを確かめ直さない（`prev` が正しいので、その2本はもともと離れている）。セル画の地図に書き戻すとき
+    /// （`written`）に、前の地図の辺の鍵（`LayerBase::keys`）を渡す：判定の手間のうちいちばん重い、区間どうしの確かめが、
+    /// 変えた辺の近くだけになる（レビュー 4cb53aa の N-2001）
+    pub(crate) fn valid_faces_since(
+        &self,
+        prev: Option<&HashSet<[u64; 6]>>,
+    ) -> Option<Vec<MapFace>> {
         // 頂点と制御点が格子に置ける（±65,536px の内で有限：`fits_grid`）こと、両側が同じ色の辺が無いことを先に確かめる
         // （格子の外の座標で、判定の形を作らない）
         if !self.fits_grid(Affine::IDENTITY) || self.edges.iter().any(|e| e.left == e.right) {
             return None;
         }
         let polys = self.polys();
-        if !self.polys_apart(&polys) {
+        let fresh: Vec<bool> = match prev {
+            Some(keys) => (0..self.edges.len())
+                .map(|e| !keys.contains(&edge_key(self, e)))
+                .collect(),
+            None => vec![true; self.edges.len()],
+        };
+        if !self.polys_apart(&polys, &fresh) {
             return None;
         }
         let cycles = self.face_cycles_with(&polys);
@@ -488,8 +505,9 @@ impl PlanarMap {
     }
 
     /// 判定の形の 1〜3（設計 2-2）：折れ線どうしが共有する頂点のほかで触れない・1本の折れ線が自分と触れない・
-    /// 別々の頂点が別々の格子の点に丸まる
-    fn polys_apart(&self, polys: &[Vec<IPt>]) -> bool {
+    /// 別々の頂点が別々の格子の点に丸まる。区間どうしは、どちらかが `fresh` の辺のものだけを確かめる（ほかの辺どうしは
+    /// 正しい地図にそのままあった：`valid_faces_since`）。見るのは、`fresh` の辺の折れ線の外接矩形にかかる区間だけ
+    fn polys_apart(&self, polys: &[Vec<IPt>], fresh: &[bool]) -> bool {
         let mut deg = vec![0usize; self.nodes.len()];
         for (e, ed) in self.edges.iter().enumerate() {
             if polys[e].len() < 2 {
@@ -504,10 +522,19 @@ impl PlanarMap {
                 return false;
             }
         }
+        // 確かめる範囲：`fresh` の辺の折れ線の外接矩形（触れる区間は、この矩形にかかる）
+        let Some(reach) = (0..polys.len())
+            .filter(|&e| fresh[e])
+            .map(|e| GridRect::of(&polys[e]))
+            .reduce(|a, b| a.union(&b))
+        else {
+            return true;
+        };
         let segs: Vec<(usize, usize)> = polys
             .iter()
             .enumerate()
             .flat_map(|(e, p)| (0..p.len() - 1).map(move |k| (e, k)))
+            .filter(|&(e, k)| GridRect::of(&polys[e][k..k + 2]).overlaps(&reach))
             .collect();
         let rects: Vec<GridRect> = segs
             .iter()
@@ -521,7 +548,10 @@ impl PlanarMap {
             let cells: Vec<(i64, i64)> = seg_cells((polys[e][k], polys[e][k + 1]), 0).collect();
             grid.query(cells.iter().copied(), &mut near);
             for &j in &near {
-                if rects[i].overlaps(&rects[j]) && self.segs_clash(polys, segs[j], segs[i]) {
+                if (fresh[e] || fresh[segs[j].0])
+                    && rects[i].overlaps(&rects[j])
+                    && self.segs_clash(polys, segs[j], segs[i])
+                {
                     return false;
                 }
             }
@@ -1167,11 +1197,12 @@ pub(crate) fn test_checks() -> bool {
 }
 
 impl PlanarMap {
-    /// 編集で作った、セル画に書き戻す地図を確かめたもの（`valid_faces`：読み込みと同じ1つの判定）。確かめは地図を作った所
-    /// でこの1回だけで、書き戻し（`LayerBase::diff`）は確かめた地図を受け取る。`None`：正しい地図でない（書き戻さずに断る。
-    /// 書けた地図は、保存して開いても必ず読める）。テストでは、正しい地図でない結果を作った操作を、そこで見つける
-    pub(crate) fn written(self) -> Option<CheckedMap> {
-        let faces = self.valid_faces();
+    /// 編集で作った、セル画に書き戻す地図を確かめたもの（`valid_faces_since`：読み込みと同じ判定で、書き戻す先の今の
+    /// 地図 `prev` にある辺どうしは確かめ直さない）。確かめは地図を作った所でこの1回だけで、書き戻し（`LayerBase::diff`）は
+    /// 確かめた地図を受け取る。`None`：正しい地図でない（書き戻さずに断る。書けた地図は、保存して開いても必ず読める）。
+    /// テストでは、正しい地図でない結果を作った操作を、そこで見つける
+    pub(crate) fn written(self, prev: &LayerBase) -> Option<CheckedMap> {
+        let faces = self.valid_faces_since(Some(prev.keys()));
         #[cfg(test)]
         if test_checks() {
             assert!(
@@ -1257,6 +1288,16 @@ impl LayerBase {
         base
     }
 
+    /// 辺の鍵（`edge_key`）の集まり（初めて要るときに作る）。書き戻す地図の確かめ（`PlanarMap::written`）と、書き戻しの
+    /// 差分（`diff`）が使う
+    pub(crate) fn keys(&self) -> &HashSet<[u64; 6]> {
+        self.keys.get_or_init(|| {
+            (0..self.map.edges.len())
+                .map(|e| edge_key(&self.map, e))
+                .collect()
+        })
+    }
+
     /// 面の図形（写し。階層 `group_path`）。面の順で、図形の番号は面の印（セル画の地図の面には、いつも1つずつ別の番号が
     /// 記してある）。`layer_id` は付けない（使う側が付ける）
     pub(crate) fn faces(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
@@ -1309,14 +1350,9 @@ impl LayerBase {
         layer_id: LayerId,
         group_path: &[u64],
     ) -> MapChange {
-        let keys = self.keys.get_or_init(|| {
-            (0..self.map.edges.len())
-                .map(|e| edge_key(&self.map, e))
-                .collect()
-        });
         let (removed, added, ids) = rewrite_shapes(
             &self.map,
-            keys,
+            self.keys(),
             &next.map,
             &next.faces,
             own,
@@ -1628,7 +1664,7 @@ pub(crate) fn reshape_result(
     group_path: &[u64],
     xform: Affine,
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
-    let next = edit.apply(&base.map)?.written()?;
+    let next = edit.apply(&base.map)?.written(base)?;
     let change = base.diff(next, own, layer_id, group_path);
     Some((
         change.removed,
@@ -2047,8 +2083,10 @@ pub(crate) fn cut_out(
     layer_id: LayerId,
     group_path: &[u64],
 ) -> Option<(MapChange, MapChange)> {
-    let inside = content.overlay(region, MapRule::KeepInside)?.written()?;
-    let rest = content.overlay(region, MapRule::Paint(None))?.written()?;
+    let inside = content.overlay(region, MapRule::KeepInside)?.written(cel)?;
+    let rest = content
+        .overlay(region, MapRule::Paint(None))?
+        .written(cel)?;
     let rest_change = cel.diff(rest, own, layer_id, group_path);
     let mut inside_change = cel.diff(inside, own, layer_id, group_path);
     inside_change.renew_ids();
@@ -2124,7 +2162,7 @@ pub(crate) fn map_edit_diff(
         return MapEditOutcome::Refused;
     };
     let Some(change) = edit(&base.map)
-        .and_then(PlanarMap::written)
+        .and_then(|m| m.written(&base))
         .and_then(|next| base.diff_placed(next, &own, layer_id, group_path, xform))
     else {
         return MapEditOutcome::Refused;
