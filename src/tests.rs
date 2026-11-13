@@ -29368,3 +29368,33 @@ fn committing_an_unmoved_pasted_piece_does_not_recheck_it() {
     assert!(canvas_tool::clear_selection(&mut app));
     assert_eq!(crate::planar_map::full_checks(), before);
 }
+
+/// N-2006：バケツで、当たった面と同じ色を塗っても何も変わらない（変わるかは地図の側で決める：`with_face_filled`）。
+/// 文書も Undo の履歴も変わらない
+#[test]
+fn bucket_with_the_same_color_changes_nothing() {
+    use crate::doc_actions::{apply, Action};
+    let red = Color32::from_rgb(235, 75, 75);
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, red)],
+    );
+    let stored = |app: &Is2dApp| {
+        app.doc.root.layers[0].keyframes[0].cel.maps[0]
+            .stored()
+            .clone()
+    };
+    let (before, undo_len) = (stored(&app), app.history.undo_stack.len());
+    assert!(!apply(
+        &mut app,
+        Action::BucketFill {
+            pt: Point::new(200.0, 200.0),
+            color: red,
+        },
+    ));
+    assert!(stored(&app).same(&before));
+    assert_eq!(app.history.undo_stack.len(), undo_len);
+}
