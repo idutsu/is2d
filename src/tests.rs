@@ -29554,3 +29554,83 @@ fn pulling_near_the_end_of_a_long_edge_keeps_the_bulge_small() {
     let bulge = (top.p1.y - 200.0).abs() / 2.0;
     assert!(bulge > 30.0 && bulge < 40.0, "いちばん高い所 {bulge}px");
 }
+
+/// グループの中を編集するとき、グループの外の図形は、上に重なっていても中身より先（下）に薄く描く。薄い色は不透明なので、
+/// 重なり順のまま描くと、上のグループが中身を隠していた
+#[test]
+fn group_edit_draws_shapes_outside_the_group_below_its_contents() {
+    use doc_actions::Action;
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 100, 220);
+    let green = Color32::from_rgb(40, 170, 90);
+    // 3つの図形をそれぞれグループにして、少しずつずらして重ねる（赤がいちばん下）
+    for (k, color) in [red, blue, green].into_iter().enumerate() {
+        let y = 300.0 + 20.0 * k as f64;
+        let x = 300.0 + 40.0 * k as f64;
+        run(
+            &mut app,
+            &[
+                Action::PaintStroke {
+                    points: vec![Point::new(x, y), Point::new(x + 200.0, y)],
+                    radius: 20.0,
+                    color,
+                },
+                Action::SelectSingleAt {
+                    pt: Point::new(x + 190.0, y),
+                },
+                Action::Group,
+                Action::Deselect,
+            ],
+        );
+    }
+    let groups = cel_summary(&app.doc, app.doc.root.layers[0].id, 0).group_paths;
+    assert_eq!(groups.len(), 3, "3つのグループ");
+    // いちばん下（赤）のグループに入る
+    run(
+        &mut app,
+        &[Action::EnterGroupAt {
+            pt: Point::new(305.0, 300.0),
+        }],
+    );
+    assert!(!app.session.editing_group_path.is_empty(), "グループの中");
+    let ctx = egui::Context::default();
+    let raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 820.0),
+        )),
+        ..Default::default()
+    };
+    let out = ctx.run(raw_input, |ctx| app.update_ui(ctx));
+    // 描いたメッシュの色の並び：中身（赤のまま）と、グループの外（青・緑を薄くした色）
+    let dim = [blue, green].map(crate::vector_engine::dim_backdrop_color);
+    let order: Vec<(usize, bool)> = out
+        .shapes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| match &c.shape {
+            egui::Shape::Mesh(m) => m.vertices.first().and_then(|v| {
+                if v.color == red {
+                    Some((i, true))
+                } else if dim.contains(&v.color) {
+                    Some((i, false))
+                } else {
+                    None
+                }
+            }),
+            _ => None,
+        })
+        .collect();
+    let first_inside = order.iter().find(|o| o.1).map(|o| o.0).expect("中身を描く");
+    let last_outside = order
+        .iter()
+        .rev()
+        .find(|o| !o.1)
+        .map(|o| o.0)
+        .expect("外を描く");
+    assert!(
+        last_outside < first_inside,
+        "グループの外を、中身より先に描く：{order:?}"
+    );
+}

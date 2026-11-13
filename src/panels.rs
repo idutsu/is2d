@@ -1828,6 +1828,12 @@ pub(crate) fn draw_canvas_contents(
     let scene = tab.scene();
     let scene_len = scene.len();
     let mut shape_cursor = 0usize;
+    // グループの中を編集しているときは、グループの外（ロック中のレイヤーと、グループの外の図形）を先に薄く描き、その上に
+    // グループの中身を描く（シンボルの編集で、親の絵を先に描くのと同じ決まり）。薄い色は不透明なので、重なり順のまま描くと、
+    // 上に重なったグループの外の図形が中身を隠す。編集できる図形の当たり判定も、グループの外の図形を数えない
+    let backdrop_first = in_group_edit && !timeline_ui.is_playing;
+    // 後で中身を描く、編集できるレイヤーの図形の範囲（グループの中を編集しているとき）
+    let mut deferred: Vec<std::ops::Range<usize>> = Vec::new();
 
     for layer_idx in 0..num_layers {
         let Some((lid, is_visible, is_locked)) = tl
@@ -1841,7 +1847,7 @@ pub(crate) fn draw_canvas_contents(
             continue;
         }
         if timeline_ui.is_playing || is_locked {
-            let tint = if in_group_edit && !timeline_ui.is_playing {
+            let tint = if backdrop_first {
                 CelTint::Dim
             } else {
                 CelTint::Plain
@@ -1870,11 +1876,32 @@ pub(crate) fn draw_canvas_contents(
         {
             shape_cursor += 1;
         }
+        if backdrop_first {
+            draw_shapes_outside_group(
+                tab,
+                &artwork_painter,
+                start_idx..shape_cursor,
+                view_world_rect,
+            );
+            deferred.push(start_idx..shape_cursor);
+        } else {
+            draw_editable_layer_shapes(
+                tab,
+                tool,
+                (&artwork_painter, painter),
+                start_idx..shape_cursor,
+                view_world_rect,
+                (&is_sel, has_sel),
+                &mut selected_group_boxes,
+            );
+        }
+    }
+    for range in deferred {
         draw_editable_layer_shapes(
             tab,
             tool,
             (&artwork_painter, painter),
-            start_idx..shape_cursor,
+            range,
             view_world_rect,
             (&is_sel, has_sel),
             &mut selected_group_boxes,
@@ -1892,7 +1919,33 @@ pub(crate) fn draw_canvas_contents(
     crate::tool_paint::draw_active_stroke_preview(tab, &artwork_painter);
 }
 
-/// 編集可能レイヤー1枚分の図形スライス範囲 `range` を描画し、選択中のグループ／シンボル外枠情報を集計する
+/// グループの中を編集しているときの、編集可能レイヤー1枚分の図形スライス範囲 `range` のうち、グループの外の図形を薄く描く
+/// （中身より先に描く背景。中身は `draw_editable_layer_shapes`）
+fn draw_shapes_outside_group(
+    tab: &Tab,
+    artwork_painter: &egui::Painter,
+    range: std::ops::Range<usize>,
+    view_world_rect: KRect,
+) {
+    let (zoom, pan) = (tab.view.zoom, tab.view.pan);
+    for idx in range {
+        let Some(shape) = tab.scene().get(idx) else {
+            continue;
+        };
+        if shape.is_in_editing_scope(&tab.session.editing_group_path) {
+            continue;
+        }
+        if shape
+            .geometry_bounding_box()
+            .is_some_and(|b| crate::vector_engine::rects_overlap(b, view_world_rect))
+        {
+            artwork_painter.add(egui::Shape::Mesh(shape.screen_mesh(zoom, pan, true)));
+        }
+    }
+}
+
+/// 編集可能レイヤー1枚分の図形スライス範囲 `range` のうち、編集しているグループの中の図形を描画し、選択中のグループ／
+/// シンボル外枠情報を集計する（グループの外の図形は、グループの中を編集しているとき先に描く：`draw_shapes_outside_group`）
 fn draw_editable_layer_shapes(
     tab: &Tab,
     tool: &ToolSettings,
@@ -1910,7 +1963,6 @@ fn draw_editable_layer_shapes(
             TransformDragState::Scale { .. } | TransformDragState::Rotate { .. }
         )
     );
-    let in_group_edit = !tab.session.editing_group_path.is_empty();
     let zoom = tab.view.zoom;
     let pan = tab.view.pan;
 
@@ -1918,9 +1970,10 @@ fn draw_editable_layer_shapes(
         let Some(shape) = tab.scene().get(idx) else {
             continue;
         };
-        let in_scope = shape.is_in_editing_scope(&tab.session.editing_group_path);
-        let shape_sel =
-            in_scope && has_sel && !active_affine_drag && is_sel.get(idx).copied().unwrap_or(false);
+        if !shape.is_in_editing_scope(&tab.session.editing_group_path) {
+            continue;
+        }
+        let shape_sel = has_sel && !active_affine_drag && is_sel.get(idx).copied().unwrap_or(false);
         let sel_gid = if shape_sel {
             let gid = shape.active_group_id_at_scope(&tab.session.editing_group_path);
             if let Some(gid) = gid {
@@ -1954,11 +2007,7 @@ fn draw_editable_layer_shapes(
             continue;
         }
 
-        let dim = in_group_edit && !in_scope;
-        artwork_painter.add(egui::Shape::Mesh(shape.screen_mesh(zoom, pan, dim)));
-        if !in_scope {
-            continue;
-        }
+        artwork_painter.add(egui::Shape::Mesh(shape.screen_mesh(zoom, pan, false)));
         if show_wf && shape.is_raw_at_scope(&tab.session.editing_group_path) {
             crate::tool_select::draw_shape_contour_lines(
                 tab,
