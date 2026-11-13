@@ -12812,7 +12812,7 @@ fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
     app.tabs[0].session.update_floating(|fl_opt| {
         if let Some(fl) = fl_opt {
             let ids = fl.piece_ids();
-            fl.recolor(&ids, Color32::BLUE, &layers, &[]);
+            fl.recolor(&ids, Color32::BLUE, &layers);
         }
     });
     assert_eq!(app.scene().get(0).unwrap().color, Color32::BLUE);
@@ -28641,7 +28641,7 @@ fn recoloring_faces_merges_the_ends_of_vanished_borders() {
         .filter(|(c, _)| *c == Some(blue))
         .filter_map(|(_, s)| s)
         .collect();
-    let recolored = m.recolored(&blue_ids, red);
+    let recolored = m.recolored(&blue_ids, red).unwrap();
     assert!(recolored.is_valid());
     // 境目が消え、その両端（上の辺・下の辺の途中）もまとまって、1つの四角になる
     assert_eq!((recolored.nodes.len(), recolored.edges.len()), (4, 4));

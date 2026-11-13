@@ -1515,9 +1515,9 @@ impl Session {
         if maps.is_empty() {
             return;
         }
-        self.with_floating(|fl, stage| {
+        self.with_floating(|fl, _| {
             for (layer_id, map, xform) in &maps {
-                fl.add_map(stage, *layer_id, map, *xform);
+                fl.add_map(*layer_id, map, *xform);
             }
         });
     }

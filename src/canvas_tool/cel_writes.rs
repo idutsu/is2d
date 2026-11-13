@@ -486,7 +486,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
     let merged_any = !all_kept || (keep.is_empty() && had_rest);
     // 確定を断ったら、分ける前の浮いた片と選択に戻す
     let whole = merged_any.then(|| fl.clone());
-    let to_commit = merged_any.then(|| fl.split_off(&keep, &tab.session.editing_group_path));
+    let to_commit = merged_any.then(|| fl.split_off(&keep));
     if !keep.is_empty() {
         tab.session.set_floating(Some(fl));
     }

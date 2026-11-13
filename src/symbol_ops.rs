@@ -70,7 +70,7 @@ pub(crate) fn prepare_convert_selection_to_symbol(
                 .filter(|p| selection.contains_shape(p))
                 .map(|p| p.shape_id)
                 .collect();
-            let rest = fl.clone().split_off(&keep, &scope);
+            let rest = fl.clone().split_off(&keep);
             let Some(plan) = crate::canvas_tool::plan_commit(tab, &rest) else {
                 tab.session.set_floating(Some(fl));
                 return None;

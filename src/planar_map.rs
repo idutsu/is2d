@@ -1331,8 +1331,16 @@ impl LayerBase {
 
     /// 面の図形を地図から作る（`faces`。番号の順）
     fn face_shapes(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
-        let (_, _, shapes) = numbered_faces(&self.map, 0, group_path);
-        let mut shapes: Vec<Arc<FillShape>> = shapes.into_iter().map(Arc::new).collect();
+        let (faces, ids) = numbered_faces(&self.map);
+        let mut shapes: Vec<Arc<FillShape>> = faces
+            .iter()
+            .zip(&ids)
+            .map(|(f, &id)| {
+                let mut s = self.map.face_shape(f, 0, group_path);
+                s.shape_id = id;
+                Arc::new(s)
+            })
+            .collect();
         shapes.sort_unstable_by_key(|s| s.shape_id);
         shapes.into()
     }
@@ -1831,15 +1839,24 @@ impl PlanarMap {
         }
     }
 
-    /// 面の番号が `ids` にある面の色を `color` にした地図（同じ色でとなり合う面の間の辺は消え、面は1つになる）
-    pub(crate) fn recolored(&self, ids: &HashSet<ShapeId>, color: Color32) -> PlanarMap {
-        let sides = self.edges.iter().enumerate().flat_map(|(i, e)| {
-            [(i, true, e.left_src), (i, false, e.right_src)]
-                .into_iter()
-                .filter(|(_, _, src)| src.is_some_and(|id| ids.contains(&id)))
-                .map(|(i, left, _)| (i, left))
-        });
-        self.with_sides_colored(sides, color)
+    /// 面の番号が `ids` にある面の色を `color` にした地図（同じ色でとなり合う面の間の辺は消え、面は1つになる）。
+    /// `None`：変わらない（そういう面が無いか、みなすでに `color`）
+    pub(crate) fn recolored(&self, ids: &HashSet<ShapeId>, color: Color32) -> Option<PlanarMap> {
+        let sides: Vec<(usize, bool)> = self
+            .edges
+            .iter()
+            .enumerate()
+            .flat_map(|(i, e)| {
+                [(i, true, e.left_src), (i, false, e.right_src)]
+                    .into_iter()
+                    .filter(|(_, _, src)| src.is_some_and(|id| ids.contains(&id)))
+                    .map(|(i, left, _)| (i, left))
+            })
+            .collect();
+        sides
+            .iter()
+            .any(|&(i, left)| self.side_color((i, left)) != Some(color))
+            .then(|| self.with_sides_colored(sides, color))
     }
 
     /// 辺の側 `sides`（辺の番号と、左の側なら `true`）の色を `color` にした地図。面の色を変えるのはみなこれ（選んだ面の
@@ -1914,36 +1931,19 @@ pub(crate) fn realized(map: &PlanarMap, xform: Affine) -> Option<CheckedMap> {
     painted_map(&refs)?.checked()
 }
 
-/// 地図 `map`（文書の座標）の面の図形と、面の辺の側にその番号を記した地図。面の番号は、辺の側に記された番号が1つの面は
-/// その番号（同じ番号の面が2つ以上あれば、面の順で前の面だけ）、ほかは新しい番号
-pub(crate) fn faces_with_ids(
-    map: &PlanarMap,
-    layer_id: LayerId,
-    group_path: &[u64],
-) -> (PlanarMap, Vec<FillShape>) {
-    let (faces, ids, shapes) = numbered_faces(map, layer_id, group_path);
-    (labeled(map.clone(), &faces, &ids), shapes)
+/// 地図 `map`（文書の座標）の面の辺の側に、面の番号を記した地図。面の番号は、辺の側に記された番号が1つの面はその番号
+/// （同じ番号の面が2つ以上あれば、面の順で前の面だけ）、ほかは新しい番号（`face_ids` の `Keep`）
+pub(crate) fn with_face_ids(map: &PlanarMap) -> PlanarMap {
+    let (faces, ids) = numbered_faces(map);
+    labeled(map.clone(), &faces, &ids)
 }
 
-/// 地図 `map` の面と、面ごとの番号（`face_ids` の `Keep`）と、その番号を付けた面の図形（どれも面の順）。面から番号つきの
-/// 図形を作るのはこれ1つ（画面の土台の面の図形 `LayerBase::face_shapes`、片の面の図形 `faces_with_ids`）
-fn numbered_faces(
-    map: &PlanarMap,
-    layer_id: LayerId,
-    group_path: &[u64],
-) -> (Vec<MapFace>, Vec<ShapeId>, Vec<FillShape>) {
+/// 地図 `map` の面と、面ごとの番号（`face_ids` の `Keep`。面の順）。面に番号を付けるのはこれ1つ（計算に使う写しの面の
+/// 図形 `LayerBase::face_shapes`、片の地図の番号 `with_face_ids`）
+fn numbered_faces(map: &PlanarMap) -> (Vec<MapFace>, Vec<ShapeId>) {
     let (faces, _) = map.faces();
     let ids = face_ids(&faces, FaceIds::Keep);
-    let shapes = faces
-        .iter()
-        .zip(&ids)
-        .map(|(f, &id)| {
-            let mut s = map.face_shape(f, layer_id, group_path);
-            s.shape_id = id;
-            s
-        })
-        .collect();
-    (faces, ids, shapes)
+    (faces, ids)
 }
 
 /// 地図 `start` に、地図 `maps` を下から順に重ねた地図（`MapRule::Overlay`。重ねる地図の色が上）。`start` が空なら、

@@ -11,7 +11,7 @@ use kurbo::Affine;
 
 use crate::canvas_tool::{Placement, SceneBaseCache};
 use crate::planar_map::{
-    cut_out, faces_with_ids, per_layer_parallel, realized, region_map, stacked, CheckedMap,
+    cut_out, per_layer_parallel, realized, region_map, stacked, with_face_ids, CheckedMap,
     LayerBase, MapChange, MapInput, MapRule, PlanarMap,
 };
 use crate::stored_map::StoredMap;
@@ -34,14 +34,13 @@ impl Stage<'_> {
 }
 
 /// 片の組：片の地図（しまう形。文書の座標。面の辺の側に片の番号を記してある）と、それにかける変換（文書の座標で。動かす・
-/// 回す・拡大を重ねる。確定するまで地図にはかけない）
+/// 回す・拡大を重ねる。確定するまで地図にはかけない）。片の図形（画面の写し）は持たず、計算に使う写しの面から作る
+/// （`Floating::refresh`。Undo の控えに入るのは地図と変換だけ：レビュー 6ee325a の N-2005）
 #[derive(Clone, Debug)]
 pub(crate) struct PieceGroup {
     map: StoredMap,
     /// 計算に使う写し（浮いている間だけ持つ。Undo の控えでは外す：`Floating::strip_transient_caches`）
     held: Option<Arc<LayerBase>>,
-    /// 片の図形（文書の座標、変換をかける前。番号は面の番号）
-    faces: Arc<Vec<FillShape>>,
     pub(crate) xform: Affine,
 }
 
@@ -51,14 +50,12 @@ impl PieceGroup {
         Some(realized(&self.base().map, self.xform)?.into_map())
     }
 
-    /// 地図 `map`（文書の座標）の片の組。面の番号が1つに決まらない面には、新しい番号を振る（`faces_with_ids`）
-    fn new(map: &PlanarMap, layer_id: LayerId, scope: &[u64], xform: Affine) -> Self {
-        let (map, faces) = faces_with_ids(map, layer_id, scope);
-        let base = LayerBase::of_stored(&StoredMap::from_dense(&map, None));
+    /// 地図 `map`（文書の座標）の片の組。面の番号が1つに決まらない面には、新しい番号を振る（`with_face_ids`）
+    fn new(map: &PlanarMap, xform: Affine) -> Self {
+        let base = LayerBase::of_stored(&StoredMap::from_dense(&with_face_ids(map), None));
         Self {
             map: base.stored.clone(),
             held: Some(base),
-            faces: Arc::new(faces),
             xform,
         }
     }
@@ -68,34 +65,33 @@ impl PieceGroup {
         LayerBase::of_stored(&self.map)
     }
 
-    fn ids(&self) -> impl Iterator<Item = ShapeId> + '_ {
-        self.faces.iter().map(|f| f.shape_id)
+    /// 計算に使う写しを持って返す（Undo の控えから戻したときは持っていないので、作って持つ）
+    fn hold(&mut self) -> Arc<LayerBase> {
+        self.held
+            .get_or_insert_with(|| LayerBase::of_stored(&self.map))
+            .clone()
     }
 
-    /// 最初の片の番号
+    /// 片の番号（面の辺の側に記した番号。同じ番号をくり返す）
+    fn ids(&self) -> Vec<ShapeId> {
+        self.base().map.labels().collect()
+    }
+
+    /// 片の番号のどれか1つ（画面の図形の並びで、この組の片を探す手がかり）
     pub(crate) fn first_id(&self) -> Option<ShapeId> {
-        self.faces.first().map(|f| f.shape_id)
+        self.base().map.labels().next()
     }
 
     /// 番号が `keep` にある片だけの組（1つも無ければ `None`）
-    fn restricted(
-        &self,
-        keep: &HashSet<ShapeId>,
-        layer_id: LayerId,
-        scope: &[u64],
-    ) -> Option<Self> {
-        if self.ids().all(|id| keep.contains(&id)) {
+    fn restricted(&self, keep: &HashSet<ShapeId>) -> Option<Self> {
+        let ids = self.ids();
+        if ids.iter().all(|id| keep.contains(id)) {
             return Some(self.clone());
         }
-        if !self.ids().any(|id| keep.contains(&id)) {
+        if !ids.iter().any(|id| keep.contains(id)) {
             return None;
         }
-        Some(Self::new(
-            &self.base().map.restricted(keep),
-            layer_id,
-            scope,
-            self.xform,
-        ))
+        Some(Self::new(&self.base().map.restricted(keep), self.xform))
     }
 }
 
@@ -108,8 +104,8 @@ pub(crate) struct Origin {
     held: Option<Arc<LayerBase>>,
     /// 隠すセル画の図形（セル画の地図の面のうち、残りの地図で変わったもの）
     hidden: Vec<ShapeId>,
-    /// 残りの図形（残りの地図の面のうち、セル画に無いもの。文書の座標）
-    remainder: Vec<FillShape>,
+    /// 残りの図形の番号（残りの地図の面のうち、セル画に無いもの。図形は計算に使う写しの面から作る：`Floating::refresh`）
+    remainder: Vec<ShapeId>,
 }
 
 impl Origin {
@@ -123,13 +119,20 @@ impl Origin {
             rest: base.stored.clone(),
             held: Some(base),
             hidden: change.removed,
-            remainder: change.added,
+            remainder: change.added.iter().map(|s| s.shape_id).collect(),
         })
     }
 
     /// 残りの地図の、計算に使う写し
     pub(crate) fn base(&self) -> Arc<LayerBase> {
         LayerBase::of_stored(&self.rest)
+    }
+
+    /// 計算に使う写しを持って返す（Undo の控えから戻したときは持っていないので、作って持つ）
+    fn hold(&mut self) -> Arc<LayerBase> {
+        self.held
+            .get_or_insert_with(|| LayerBase::of_stored(&self.rest))
+            .clone()
     }
 }
 
@@ -172,10 +175,7 @@ impl FloatLayer {
         ids: &HashSet<ShapeId>,
     ) -> Option<CheckedMap> {
         let start = self.content(&stage.cel(self.layer_id)?).map.restricted(ids);
-        let groups = self
-            .groups
-            .iter()
-            .filter_map(|g| g.restricted(ids, self.layer_id, stage.scope));
+        let groups = self.groups.iter().filter_map(|g| g.restricted(ids));
         stacked(start, groups.map(|g| g.placed()))?.checked()
     }
 
@@ -248,8 +248,9 @@ impl Floating {
         self.layers.is_empty()
     }
 
-    /// 写しを作り直す：隠す図形、残りの図形（そのレイヤーの最初の隠す図形の所に置く）、片の図形（片の地図の面を
-    /// 「ステージへの変換 `world` ∘ 片の変換」で置いた写し）。レイヤーは重ね順 `order` に並べ、空のレイヤーは外す
+    /// 写しを作り直す：隠す図形、残りの図形（残りの地図の面のうちセル画に無いもの。そのレイヤーの最初の隠す図形の所に
+    /// 置く）、片の図形（片の地図の面を「ステージへの変換 `world` ∘ 片の変換」で置いた写し）。面の図形は、地図の計算に
+    /// 使う写しの面（`LayerBase::faces`）から作る。レイヤーは重ね順 `order` に並べ、空のレイヤーは外す
     pub(crate) fn refresh(&mut self, world: Affine, scope: &[u64], order: &[LayerId]) {
         self.layers.retain(|l| !l.is_empty());
         self.layers.sort_by_key(|l| {
@@ -261,22 +262,28 @@ impl Floating {
         self.hidden.clear();
         self.remainder.clear();
         self.pieces.clear();
-        for l in &self.layers {
-            if let Some(o) = &l.origin {
+        for l in &mut self.layers {
+            let layer_id = l.layer_id;
+            if let Some(o) = &mut l.origin {
                 self.hidden.extend(o.hidden.iter().copied());
                 let at = o.hidden.first().map_or_else(
-                    || Placement::TopOfLayer(l.layer_id, scope.to_vec()),
+                    || Placement::TopOfLayer(layer_id, scope.to_vec()),
                     |&id| Placement::ReplaceAt(id),
                 );
-                for r in &o.remainder {
-                    let mut s = r.clone();
-                    s.place(world);
-                    self.remainder.push((at.clone(), s));
+                let added: HashSet<ShapeId> = o.remainder.iter().copied().collect();
+                for f in o.hold().faces(scope).iter() {
+                    if added.contains(&f.shape_id) {
+                        let mut s = (**f).clone();
+                        s.layer_id = layer_id;
+                        s.place(world);
+                        self.remainder.push((at.clone(), s));
+                    }
                 }
             }
-            for g in &l.groups {
-                for f in g.faces.iter() {
-                    let mut s = f.clone();
+            for g in &mut l.groups {
+                for f in g.hold().faces(scope).iter() {
+                    let mut s = (**f).clone();
+                    s.layer_id = layer_id;
                     if g.xform != Affine::IDENTITY {
                         s.transform(g.xform);
                     }
@@ -407,7 +414,6 @@ impl Floating {
         ids: &HashSet<ShapeId>,
         color: Color32,
         layers: &HashSet<LayerId>,
-        scope: &[u64],
     ) -> bool {
         let mut any = false;
         for l in self
@@ -415,18 +421,9 @@ impl Floating {
             .iter_mut()
             .filter(|l| layers.contains(&l.layer_id))
         {
-            let layer_id = l.layer_id;
             for g in &mut l.groups {
-                if g.faces
-                    .iter()
-                    .any(|f| ids.contains(&f.shape_id) && f.color != color)
-                {
-                    *g = PieceGroup::new(
-                        &g.base().map.recolored(ids, color),
-                        layer_id,
-                        scope,
-                        g.xform,
-                    );
+                if let Some(m) = g.base().map.recolored(ids, color) {
+                    *g = PieceGroup::new(&m, g.xform);
                     any = true;
                 }
             }
@@ -443,7 +440,6 @@ impl Floating {
         &mut self,
         layer_id: LayerId,
         group: usize,
-        scope: &[u64],
         edit: impl FnOnce(&PlanarMap) -> Option<PlanarMap>,
     ) -> bool {
         let Some(g) = self
@@ -457,7 +453,7 @@ impl Floating {
         let Some(next) = edit(&g.base().map) else {
             return false;
         };
-        *g = PieceGroup::new(&next, layer_id, scope, g.xform);
+        *g = PieceGroup::new(&next, g.xform);
         true
     }
 
@@ -473,11 +469,8 @@ impl Floating {
             .collect();
         for l in &mut self.layers {
             let layer_id = l.layer_id;
-            let kept: Vec<PieceGroup> = l
-                .groups
-                .iter()
-                .filter_map(|g| g.restricted(keep, layer_id, stage.scope))
-                .collect();
+            let kept: Vec<PieceGroup> =
+                l.groups.iter().filter_map(|g| g.restricted(keep)).collect();
             if kept.is_empty() {
                 l.origin = None;
                 l.groups.clear();
@@ -486,7 +479,7 @@ impl Floating {
             let back: Vec<PieceGroup> = l
                 .groups
                 .iter()
-                .filter_map(|g| g.restricted(&drop, layer_id, stage.scope))
+                .filter_map(|g| g.restricted(&drop))
                 .collect();
             if back.is_empty() {
                 continue;
@@ -515,7 +508,7 @@ impl Floating {
 
     /// 番号が `keep` に無い片と、残りを取り出す（確定する分）。この浮いた片には、残す片だけが残る（残りは確定するので
     /// 持たない）
-    pub(crate) fn split_off(&mut self, keep: &HashSet<ShapeId>, scope: &[u64]) -> Floating {
+    pub(crate) fn split_off(&mut self, keep: &HashSet<ShapeId>) -> Floating {
         let drop: HashSet<ShapeId> = self
             .layers
             .iter()
@@ -531,14 +524,10 @@ impl Floating {
                 groups: l
                     .groups
                     .iter()
-                    .filter_map(|g| g.restricted(&drop, layer_id, scope))
+                    .filter_map(|g| g.restricted(&drop))
                     .collect(),
             });
-            l.groups = l
-                .groups
-                .iter()
-                .filter_map(|g| g.restricted(keep, layer_id, scope))
-                .collect();
+            l.groups = l.groups.iter().filter_map(|g| g.restricted(keep)).collect();
         }
         self.layers.retain(|l| !l.is_empty());
         out.layers.retain(|l| !l.is_empty());
@@ -547,14 +536,8 @@ impl Floating {
 
     /// 地図 `map`（文書の座標。面の番号が片の番号）を、変換 `xform` をかける片の組として、レイヤー `layer_id` の一番上に
     /// 足す（変換は、動かした片と同じく確定のときに地図にかける）
-    pub(crate) fn add_map(
-        &mut self,
-        stage: Stage<'_>,
-        layer_id: LayerId,
-        map: &PlanarMap,
-        xform: Affine,
-    ) {
-        let group = PieceGroup::new(map, layer_id, stage.scope, xform);
+    pub(crate) fn add_map(&mut self, layer_id: LayerId, map: &PlanarMap, xform: Affine) {
+        let group = PieceGroup::new(map, xform);
         self.layer_mut(layer_id).groups.push(group);
         self.modified = true;
     }
@@ -628,12 +611,9 @@ fn cut_layer(
                     .base()
                     .map
                     .overlay(MapInput::Map(&inside), MapRule::Overlay)?;
-                *g = PieceGroup::new(&joined, layer_id, stage.scope, Affine::IDENTITY);
+                *g = PieceGroup::new(&joined, Affine::IDENTITY);
             }
-            _ => groups.insert(
-                0,
-                PieceGroup::new(&inside, layer_id, stage.scope, Affine::IDENTITY),
-            ),
+            _ => groups.insert(0, PieceGroup::new(&inside, Affine::IDENTITY)),
         }
     }
     Some(FloatLayer {

@@ -864,11 +864,10 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
                 return false;
             }
-            let scope = tab.session.editing_group_path.clone();
             let ids = tab.session.selection.shapes.clone();
             tab.session.update_floating(|fl_opt| {
                 if let Some(fl) = fl_opt {
-                    fl.recolor(&ids, fill_color, &editable_lids, &scope);
+                    fl.recolor(&ids, fill_color, &editable_lids);
                     fl.modified = true;
                 }
             });
@@ -1249,11 +1248,10 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
 /// 動かして浮いている片のうち、レイヤー `layer_id` の組 `group` の片の地図（アンカーのカーソル合わせと同じ地図）を `edit` で
 /// 編集する（境目なら両側の片が変わる。選択も入れ替える）
 fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, group: usize, edit: MapEdit) -> bool {
-    let scope = tab.session.editing_group_path.clone();
     let Some(mut fl) = tab.session.floating().filter(|fl| fl.modified).cloned() else {
         return false;
     };
-    if !fl.edit_group(layer_id, group, &scope, |m| edit.apply(m)) {
+    if !fl.edit_group(layer_id, group, |m| edit.apply(m)) {
         return false;
     }
     push_undo(tab, None);
