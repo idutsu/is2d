@@ -25,7 +25,10 @@ pub(crate) fn draw_flash_selection_overlay(tab: &Tab, painter: &egui::Painter, s
     let Some(shape) = tab.scene().get(scene_idx) else {
         return;
     };
-    painter.add(egui::Shape::Mesh(shape.selection_screen_mesh(zoom, pan)));
+    let dots = crate::vector_engine::selection_dots_texture(painter.ctx());
+    painter.add(egui::Shape::Mesh(
+        shape.selection_screen_mesh(zoom, pan, dots),
+    ));
 }
 
 pub(crate) fn draw_shape_contour_lines(

@@ -2801,9 +2801,16 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     sym_app.redo();
     assert_eq!(sym_app.doc.stage_size, Vec2::new(1920.0, 1080.0));
 
-    let sel_m1 = sym_app.scene().get(0).unwrap().selection_overlay_mesh(1.25);
-    let sel_m2 = sym_app.scene().get(0).unwrap().selection_overlay_mesh(1.25);
-    assert!(std::sync::Arc::ptr_eq(&sel_m1, &sel_m2));
+    // 選択表示は塗りのメッシュに水玉のテクスチャを貼ったもの：頂点は塗りのメッシュと同じ数で、ズームを変えても増えない
+    let fill_n = sym_app.scene().get(0).unwrap().fill_mesh().vertices.len();
+    for zoom in [0.15f32, 1.25, 16.0] {
+        let sel = sym_app.scene().get(0).unwrap().selection_screen_mesh(
+            zoom,
+            Vec2::ZERO,
+            egui::TextureId::default(),
+        );
+        assert_eq!(sel.vertices.len(), fill_n);
+    }
     // プレビューは、2回目は写しから引く（作り直さない）。同じシンボル・世代なら同じ外接矩形とメッシュ
     let preview = |app: &Is2dApp| {
         app.view
@@ -13111,20 +13118,20 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     assert_eq!(app.scene().len(), 1);
     let shape1_id = app.scene().get(0).unwrap().shape_id;
 
-    // ステージ側（SceneBaseCache）の図形1に fill_mesh, hit_bez_path, selection_mesh をすべて生成させる
+    // ステージ側（SceneBaseCache）の図形1に fill_mesh, hit_bez_path を生成させる（選択表示は塗りのメッシュにテクスチャを
+    // 貼るだけで、図形に写しを持たない）
     {
         let stage_s1 = app.scene().get(0).unwrap();
         let _ = stage_s1.fill_mesh();
         assert!(stage_s1.contains_point(Point::new(140.0, 100.0)));
         let _ = stage_s1.screen_mesh(1.0, Vec2::ZERO, false);
-        let _ = stage_s1.selection_screen_mesh(1.0, Vec2::ZERO);
+        let _ = stage_s1.selection_screen_mesh(1.0, Vec2::ZERO, egui::TextureId::default());
         assert!(stage_s1.has_cached_fill_mesh());
         assert!(stage_s1.has_cached_hit_bez_path());
-        assert!(stage_s1.has_cached_selection_mesh());
     }
 
     // 2. 離れた位置に図形2を描画してセル画の書き込みを発生させる
-    //    未変更の図形1（kept パス）も含め、文書側の図形には fill_mesh も hit_bez_path も選択表示用メッシュも引き継がれないこと
+    //    未変更の図形1（kept パス）も含め、文書側の図形には fill_mesh も hit_bez_path も引き継がれないこと
     let _ = apply(
         &mut app,
         Action::PaintStroke {
@@ -13153,19 +13160,12 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
         stage_s1_after.has_cached_fill_mesh() && stage_s1_after.has_cached_hit_bez_path(),
         "土台キャッシュ側の未変更図形には donor_map 経由で fill_mesh と hit_bez_path が引き継がれること"
     );
-    for s in doc_shapes.iter() {
-        assert!(
-            !s.has_cached_selection_mesh(),
-            "書き戻し後、文書側の図形は選択表示用メッシュを持たないこと"
-        );
-    }
 
-    // 3. 図形をグループ化して選択表示・移動（変更図形の local_s 書き戻しパス）を行ったあとも、文書側の図形が選択表示用メッシュを持たないこと
+    // 3. 図形をグループ化して選択表示・移動（変更図形の local_s 書き戻しパス）を行ったあとも、文書側の図形が描画用メッシュを持たないこと
     app.refresh_scene_base();
     for s in app.scene().iter() {
         let _ = s.screen_mesh(1.25, Vec2::new(10.0, 20.0), false);
-        let _ = s.selection_screen_mesh(1.25, Vec2::new(10.0, 20.0));
-        assert!(s.has_cached_selection_mesh());
+        let _ = s.selection_screen_mesh(1.25, Vec2::new(10.0, 20.0), egui::TextureId::default());
     }
     let all_ids: Vec<_> = app.scene().iter().cloned().collect();
     for s in &all_ids {
@@ -13174,7 +13174,7 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     let _ = apply(&mut app, Action::Group);
     for s in app.scene().iter() {
         let _ = s.screen_mesh(1.25, Vec2::new(10.0, 20.0), false);
-        let _ = s.selection_screen_mesh(1.25, Vec2::new(10.0, 20.0));
+        let _ = s.selection_screen_mesh(1.25, Vec2::new(10.0, 20.0), egui::TextureId::default());
     }
     let _ = apply(
         &mut app,
@@ -13184,15 +13184,15 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     );
     for s in app.doc.root.layers[0].keyframes[0].cel.shapes().iter() {
         assert!(
-            !s.has_cached_selection_mesh(),
-            "グループ移動後の書き戻しでも、文書側の図形が選択表示用メッシュを持たないこと"
+            !s.has_cached_fill_mesh(),
+            "グループ移動後の書き戻しでも、文書側の図形が描画用メッシュを持たないこと"
         );
     }
 
-    // 4. シンボル変換後も、シンボル定義内の文書図形が選択表示用メッシュを持たないこと
+    // 4. シンボル変換後も、シンボル定義内の文書図形が描画用メッシュを持たないこと
     for s in app.scene().iter() {
         let _ = s.screen_mesh(1.0, Vec2::ZERO, false);
-        let _ = s.selection_screen_mesh(1.0, Vec2::ZERO);
+        let _ = s.selection_screen_mesh(1.0, Vec2::ZERO, egui::TextureId::default());
     }
     let _ = apply(&mut app, Action::ConvertToSymbol);
     assert_eq!(app.doc.library.len(), 1);
@@ -13202,8 +13202,8 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
         .iter()
     {
         assert!(
-            !s.has_cached_selection_mesh(),
-            "シンボル定義内の文書図形も選択表示用メッシュを持たないこと"
+            !s.has_cached_fill_mesh(),
+            "シンボル定義内の文書図形も描画用メッシュを持たないこと"
         );
     }
 }

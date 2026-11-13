@@ -368,10 +368,7 @@ impl PlanarMap {
     /// 離れていることを確かめ直さない（`prev` が正しいので、その2本はもともと離れている）。セル画の地図に書き戻すとき
     /// （`written`）に、前の地図の辺の鍵（`LayerBase::keys`）を渡す：判定の手間のうちいちばん重い、区間どうしの確かめが、
     /// 変えた辺の近くだけになる（レビュー 4cb53aa の N-2001）
-    pub(crate) fn valid_faces_since(
-        &self,
-        prev: Option<&EdgeKeys>,
-    ) -> Option<Vec<MapFace>> {
+    pub(crate) fn valid_faces_since(&self, prev: Option<&EdgeKeys>) -> Option<Vec<MapFace>> {
         #[cfg(test)]
         if prev.is_none() {
             FULL_CHECKS.with(|n| n.set(n.get() + 1));

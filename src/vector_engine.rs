@@ -382,7 +382,6 @@ pub(crate) struct FillShape {
     bbox: KRect,
     fill_mesh: OnceLock<Arc<Mesh>>,
     hit_bez_path: OnceLock<Arc<BezPath>>,
-    selection_mesh: SyncCache<Option<(u32, Arc<Mesh>)>>,
 }
 
 impl FillShape {
@@ -399,7 +398,6 @@ impl FillShape {
             bbox: KRect::ZERO,
             fill_mesh: OnceLock::new(),
             hit_bez_path: OnceLock::new(),
-            selection_mesh: SyncCache::new(None),
         };
         shape.rebuild_cache();
         shape
@@ -450,7 +448,6 @@ impl FillShape {
     pub(crate) fn strip_transient_caches(&mut self) {
         self.hit_bez_path = OnceLock::new();
         self.fill_mesh = OnceLock::new();
-        *self.selection_mesh.lock() = None;
     }
 
     /// 座標の変換 `xform` で置いた写しにする（シンボルの中の表示の図形）。番号と `mesh_revision` は文書の図形のまま
@@ -500,11 +497,6 @@ impl FillShape {
                 let _ = self.fill_mesh.set(Arc::clone(m));
             }
         }
-        if self.selection_mesh.lock().is_none() {
-            if let Some(sm) = &*donor.selection_mesh.lock() {
-                *self.selection_mesh.lock() = Some(sm.clone());
-            }
-        }
     }
 
     #[cfg(test)]
@@ -515,11 +507,6 @@ impl FillShape {
     #[cfg(test)]
     pub(crate) fn has_cached_hit_bez_path(&self) -> bool {
         self.hit_bez_path.get().is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn has_cached_selection_mesh(&self) -> bool {
-        self.selection_mesh.lock().is_some()
     }
 
     pub(crate) fn with_layer_id(mut self, layer_id: u64) -> Self {
@@ -638,11 +625,6 @@ impl FillShape {
                 v.pos += d;
             }
         }
-        if let Some((_, sel)) = &mut *self.selection_mesh.lock() {
-            for v in &mut Arc::make_mut(sel).vertices {
-                v.pos += d;
-            }
-        }
         self.mesh_revision = next_mesh_revision();
     }
 
@@ -677,7 +659,6 @@ impl FillShape {
             if let Some(arc_mesh) = self.fill_mesh.get_mut() {
                 transform_mesh_vertices_in_place(&mut Arc::make_mut(arc_mesh).vertices, coeffs);
             }
-            *self.selection_mesh.lock() = None;
             self.mesh_revision = next_mesh_revision();
         }
     }
@@ -725,30 +706,28 @@ impl FillShape {
         } else {
             self.fill_mesh = OnceLock::new();
         }
-        *self.selection_mesh.lock() = None;
         self.mesh_revision = next_mesh_revision();
     }
 
-    pub(crate) fn selection_overlay_mesh(&self, zoom: f32) -> Arc<Mesh> {
-        let key = zoom.to_bits();
-        if let Some((k, mesh)) = &*self.selection_mesh.lock() {
-            if *k == key {
-                return Arc::clone(mesh);
-            }
+    /// 選択表示：図形の塗りのメッシュを画面座標に写し、水玉の繰り返しテクスチャ `dots`（`selection_dots_texture`）を
+    /// 貼ったもの。模様は絵の座標に固定し（パンしても図形の上を滑らない）、画面で `SELECTION_DOT_TILE` px の大きさで繰り返す
+    /// （前は、ズームが変わるたびに点ごとの四角形のメッシュを CPU で作り直していた：レビュー「軽量化・高速化」の★2）
+    pub(crate) fn selection_screen_mesh(
+        &self,
+        zoom: f32,
+        pan: Vec2,
+        dots: egui::TextureId,
+    ) -> Mesh {
+        let mut mesh = (**self.fill_mesh()).clone();
+        mesh.texture_id = dots;
+        let uv_scale = zoom / SELECTION_DOT_TILE as f32;
+        for v in &mut mesh.vertices {
+            let (x, y) = (v.pos.x, v.pos.y);
+            v.uv = Pos2::new(x * uv_scale, y * uv_scale);
+            v.pos = to_screen(x, y, zoom, pan);
+            v.color = Color32::WHITE;
         }
-        let mesh = Arc::new(build_polka_dot_selection_mesh(self.fill_mesh(), zoom));
-        *self.selection_mesh.lock() = Some((key, Arc::clone(&mesh)));
         mesh
-    }
-
-    /// 指定された `(zoom, pan)` に対応するスクリーン座標変換済みのドット柄選択オーバーレイ `Mesh` を返す
-    pub(crate) fn selection_screen_mesh(&self, zoom: f32, pan: Vec2) -> Mesh {
-        transform_mesh_to_screen(
-            (*self.selection_overlay_mesh(zoom)).clone(),
-            zoom,
-            pan,
-            None,
-        )
     }
 
     pub(crate) fn get_contour(&self, idx: usize) -> Option<&Contour> {
@@ -964,114 +943,36 @@ fn tessellate_contours_to_mesh(exterior: &Contour, holes: &[Contour], color: Col
     TESSELLATOR.with(|t| tessellate_lyon_path(&mut t.borrow_mut(), &path, color, FillRule::EvenOdd))
 }
 
-fn build_polka_dot_selection_mesh(fill_mesh: &Mesh, zoom: f32) -> Mesh {
-    const MAX_POLKA_DOT_GRID_CELLS: f32 = 25_000.0;
-    const MAX_POLKA_DOT_VERTICES: usize = (MAX_POLKA_DOT_GRID_CELLS as usize) * 4;
+/// 選択表示の水玉の模様の一辺（画面の px）。千鳥に並んだ点が 6px おき
+pub(crate) const SELECTION_DOT_TILE: usize = 12;
 
-    let mut sel_mesh = Mesh::default();
-    if fill_mesh.vertices.is_empty() || fill_mesh.indices.len() < 3 {
-        return sel_mesh;
+/// 選択表示の水玉の繰り返しテクスチャ（`SELECTION_DOT_TILE` px 四方。6px おきの千鳥の 2×2px の白い点。egui の `Context`
+/// ごとに1枚作り、その `Context` の記憶に持つ）
+pub(crate) fn selection_dots_texture(ctx: &egui::Context) -> egui::TextureId {
+    let key = egui::Id::new("is2d_selection_dots");
+    if let Some(handle) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(key)) {
+        return handle.id();
     }
-
-    let mut mesh_min_x = f32::INFINITY;
-    let mut mesh_max_x = f32::NEG_INFINITY;
-    let mut mesh_min_y = f32::INFINITY;
-    let mut mesh_max_y = f32::NEG_INFINITY;
-    for v in &fill_mesh.vertices {
-        mesh_min_x = mesh_min_x.min(v.pos.x);
-        mesh_max_x = mesh_max_x.max(v.pos.x);
-        mesh_min_y = mesh_min_y.min(v.pos.y);
-        mesh_max_y = mesh_max_y.max(v.pos.y);
-    }
-    let bbox_area = (mesh_max_x - mesh_min_x).max(0.0) * (mesh_max_y - mesh_min_y).max(0.0);
-    if !bbox_area.is_finite() {
-        return sel_mesh;
-    }
-
-    let base_inv_z = 1.0 / zoom.clamp(MIN_VIEW_ZOOM, MAX_VIEW_ZOOM);
-    let min_step_for_budget = (bbox_area / MAX_POLKA_DOT_GRID_CELLS).sqrt();
-    let step: f32 = (6.0 * base_inv_z).max(min_step_for_budget).max(1e-3);
-    let scale = step / 6.0;
-    let r_dot = 1.0 * scale;
-    let dot_color = Color32::from_rgba_unmultiplied(255, 255, 255, 220);
-
-    let push_dot_quad = |mesh: &mut Mesh, center: Pos2, r: f32, color: Color32| {
-        let base = mesh.vertices.len() as u32;
-        mesh.vertices.extend_from_slice(&[
-            Vertex {
-                pos: Pos2::new(center.x - r, center.y - r),
-                uv: egui::epaint::WHITE_UV,
-                color,
-            },
-            Vertex {
-                pos: Pos2::new(center.x + r, center.y - r),
-                uv: egui::epaint::WHITE_UV,
-                color,
-            },
-            Vertex {
-                pos: Pos2::new(center.x + r, center.y + r),
-                uv: egui::epaint::WHITE_UV,
-                color,
-            },
-            Vertex {
-                pos: Pos2::new(center.x - r, center.y + r),
-                uv: egui::epaint::WHITE_UV,
-                color,
-            },
-        ]);
-        mesh.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    };
-
-    'tri_loop: for tri in fill_mesh.indices.chunks_exact(3) {
-        let a = fill_mesh.vertices[tri[0] as usize].pos;
-        let b = fill_mesh.vertices[tri[1] as usize].pos;
-        let c = fill_mesh.vertices[tri[2] as usize].pos;
-
-        let min_x = a.x.min(b.x).min(c.x);
-        let max_x = a.x.max(b.x).max(c.x);
-        let min_y = a.y.min(b.y).min(c.y);
-        let max_y = a.y.max(b.y).max(c.y);
-
-        let row_start = (min_y / step).floor() as i32;
-        let row_end = (max_y / step).ceil() as i32;
-
-        let ab = b - a;
-        let bc = c - b;
-        let ca = a - c;
-
-        for row in row_start..=row_end {
-            let y = row as f32 * step;
-            if y < min_y || y > max_y {
-                continue;
-            }
-            let x_shift = if row.rem_euclid(2) == 0 {
-                0.0
-            } else {
-                step * 0.5
-            };
-            let col_start = ((min_x - x_shift) / step).floor() as i32;
-            let col_end = ((max_x - x_shift) / step).ceil() as i32;
-
-            for col in col_start..=col_end {
-                let x = col as f32 * step + x_shift;
-                if x < min_x || x > max_x {
-                    continue;
-                }
-                let c0 = ab.x * (y - a.y) - ab.y * (x - a.x);
-                let c1 = bc.x * (y - b.y) - bc.y * (x - b.x);
-                let c2 = ca.x * (y - c.y) - ca.y * (x - c.x);
-                if (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0) || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0) {
-                    if sel_mesh.vertices.len() + 4 > MAX_POLKA_DOT_VERTICES {
-                        break 'tri_loop;
-                    }
-                    push_dot_quad(&mut sel_mesh, Pos2::new(x, y), r_dot, dot_color);
-                }
-            }
+    let n = SELECTION_DOT_TILE;
+    let dot = Color32::from_rgba_unmultiplied(255, 255, 255, 220);
+    let mut pixels = vec![Color32::TRANSPARENT; n * n];
+    for (cx, cy) in [(0, 0), (6, 0), (3, 6), (9, 6)] {
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            pixels[(cy + dy) * n + (cx + dx)] = dot;
         }
     }
-
-    sel_mesh
+    let image = egui::ColorImage {
+        size: [n, n],
+        pixels,
+    };
+    let handle = ctx.load_texture(
+        "selection_dots",
+        image,
+        egui::TextureOptions::NEAREST_REPEAT,
+    );
+    let id = handle.id();
+    ctx.data_mut(|d| d.insert_temp(key, handle));
+    id
 }
 
 pub(crate) fn tessellate_raw_polygon(pts: &[Point], color: Color32) -> Mesh {
