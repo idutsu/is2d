@@ -7228,7 +7228,7 @@ fn test_nested_symbol_expansion_memoization_and_step_cap() {
 
     // 1. 中身が空の葉シンボル (id=8) を起点に、各段が子シンボルを20個ずつ持つ8段入れ子階層 (20^8 = 256億経路)
     let leaf = symbol::SymbolDef::new(8, "EmptyLeaf".to_string(), Vec::new()).unwrap();
-    app.doc.library.push(leaf);
+    std::sync::Arc::make_mut(&mut app.doc.library).push(leaf);
 
     let mut next_gid = 1u64;
     for level in (1..=7u64).rev() {
@@ -7252,7 +7252,7 @@ fn test_nested_symbol_expansion_memoization_and_step_cap() {
             .collect();
         sym.timeline.layers[0].keyframe_mut(0).cel =
             timeline::Cel::new_with_instances(Vec::new(), instances);
-        app.doc.library.push(sym);
+        std::sync::Arc::make_mut(&mut app.doc.library).push(sym);
     }
 
     let root_instances: Vec<timeline::SymbolInstance> = (0..20)
@@ -7916,7 +7916,7 @@ fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
             "case {case_idx}: current_frame が total_frames 未満に収まること"
         );
         let mut has_cycle = false;
-        for sym in &app.doc.library {
+        for sym in app.doc.library.iter() {
             assert!(
                 sym.id >= 1,
                 "case {case_idx}: シンボルIDが 1 以上に正規化されること"
@@ -16393,7 +16393,7 @@ fn test_m5_2_n1001_contour_segments_capacity_equals_len_after_merge_insert_and_r
                 }
             }
         }
-        for sym in &doc.library {
+        for sym in doc.library.iter() {
             for layer in &sym.timeline.layers {
                 for kf in &layer.keyframes {
                     for sh in kf.cel.shapes().iter() {
@@ -17111,12 +17111,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
             ));
             assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: false },));
             let s = make_stroke(Point::new(0.0, 0.0), Point::new(50.0, 0.0), 8.0, col);
-            let sym_b = app
-                .doc
-                .library
-                .iter_mut()
-                .find(|s| s.id == sym_b_id)
-                .unwrap();
+            let sym_b = app.doc.find_symbol_mut(sym_b_id).unwrap();
             sym_b.timeline.layers[0].keyframe_mut(f).cel = timeline::Cel::from_shapes_unwrap(s);
         }
         assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
@@ -17135,12 +17130,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         let sym_a_id = app.doc.library[1].id;
 
         if a_total_frames > 1 {
-            let sym_a = app
-                .doc
-                .library
-                .iter_mut()
-                .find(|s| s.id == sym_a_id)
-                .unwrap();
+            let sym_a = app.doc.find_symbol_mut(sym_a_id).unwrap();
             sym_a.timeline.total_frames = a_total_frames;
             sym_a.timeline.layers[0].frame_count = a_total_frames;
         }
@@ -17205,7 +17195,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
     // 4. 表示コマが合う: (a) A が1コマで F=5、(b) A が4コマループで F=10
     for (a_frames, target_f) in [(1usize, 5usize), (4usize, 10usize)] {
         let (mut app, _, sym_b_id) = build_nested_app(a_frames);
-        let sym_a = &mut app.doc.library[1];
+        let sym_a = &mut std::sync::Arc::make_mut(&mut app.doc.library)[1];
         sym_a.timeline.layers[0].keyframe_mut(0).cel.instances_mut()[0]
             .binding
             .first_frame = 1;
@@ -17309,13 +17299,17 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
     // 6 & 7. 1回再生の B（合わせられる場合と負になって 0 になる場合）および任意のフレームの B
     {
         let (mut app, _, _) = build_nested_app(4);
-        app.doc.library[1].timeline.layers[0]
+        std::sync::Arc::make_mut(&mut app.doc.library)[1]
+            .timeline
+            .layers[0]
             .keyframe_mut(0)
             .cel
             .instances_mut()[0]
             .binding
             .loop_mode = SymbolLoopMode::PlayOnce;
-        app.doc.library[1].timeline.layers[0]
+        std::sync::Arc::make_mut(&mut app.doc.library)[1]
+            .timeline
+            .layers[0]
             .keyframe_mut(0)
             .cel
             .instances_mut()[0]
@@ -17340,13 +17334,17 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
 
         // B の進み(1) - (F - S)(5) < 0 のとき 1回再生は first_frame が 0 になる
         let (mut app_neg, _, _) = build_nested_app(4);
-        app_neg.doc.library[1].timeline.layers[0]
+        std::sync::Arc::make_mut(&mut app_neg.doc.library)[1]
+            .timeline
+            .layers[0]
             .keyframe_mut(0)
             .cel
             .instances_mut()[0]
             .binding
             .loop_mode = SymbolLoopMode::PlayOnce;
-        app_neg.doc.library[1].timeline.layers[0]
+        std::sync::Arc::make_mut(&mut app_neg.doc.library)[1]
+            .timeline
+            .layers[0]
             .keyframe_mut(0)
             .cel
             .instances_mut()[0]
@@ -17371,13 +17369,17 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
 
         // 7. 任意のフレームの B は first_frame が変わらない
         let (mut app_sf, _, _) = build_nested_app(4);
-        app_sf.doc.library[1].timeline.layers[0]
+        std::sync::Arc::make_mut(&mut app_sf.doc.library)[1]
+            .timeline
+            .layers[0]
             .keyframe_mut(0)
             .cel
             .instances_mut()[0]
             .binding
             .loop_mode = SymbolLoopMode::SingleFrame;
-        app_sf.doc.library[1].timeline.layers[0]
+        std::sync::Arc::make_mut(&mut app_sf.doc.library)[1]
+            .timeline
+            .layers[0]
             .keyframe_mut(0)
             .cel
             .instances_mut()[0]
@@ -17405,12 +17407,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
     {
         let (mut app, sym_a_id, sym_b_id) = build_nested_app(5);
         {
-            let sym_a = app
-                .doc
-                .library
-                .iter_mut()
-                .find(|s| s.id == sym_a_id)
-                .unwrap();
+            let sym_a = app.doc.find_symbol_mut(sym_a_id).unwrap();
             sym_a.timeline.layers[0].keyframe_mut(0).cel = timeline::Cel::new_with_instances(
                 Vec::new(),
                 vec![sym_a.timeline.layers[0].keyframes[0].cel.instances[0].clone()],
@@ -17447,13 +17444,16 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
     // 9. 色効果のリセット: A にアルファ 50%・明度 +30%、B にアルファ 30% をかけて分解
     {
         let (mut app, _, sym_b_id) = build_nested_app(1);
-        app.doc.library[1].timeline.layers[0]
+        std::sync::Arc::make_mut(&mut app.doc.library)[1]
+            .timeline
+            .layers[0]
             .keyframe_mut(0)
             .cel
             .instances_mut()[0]
             .binding
             .color_effect = ColorEffect::new(0.3, 0.0);
-        app.doc.library[1].revision = crate::vector_engine::next_mesh_revision();
+        std::sync::Arc::make_mut(&mut app.doc.library)[1].revision =
+            crate::vector_engine::next_mesh_revision();
         app.doc.revision = crate::vector_engine::next_mesh_revision();
         app.refresh_scene_base();
 
@@ -17519,8 +17519,13 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         let a_gid = instances_before[0].binding.instance_gid;
 
         // 0 コマ目の B を空っぽにしてから A だけを分解する
-        app.doc.library[0].timeline.layers[0].keyframe_mut(0).cel = timeline::Cel::default();
-        app.doc.library[0].revision = crate::vector_engine::next_mesh_revision();
+        std::sync::Arc::make_mut(&mut app.doc.library)[0]
+            .timeline
+            .layers[0]
+            .keyframe_mut(0)
+            .cel = timeline::Cel::default();
+        std::sync::Arc::make_mut(&mut app.doc.library)[0].revision =
+            crate::vector_engine::next_mesh_revision();
         app.doc.revision = crate::vector_engine::next_mesh_revision();
         app.refresh_scene_base();
 
@@ -17606,8 +17611,13 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
 
         if b_empty_on_ungroup_frame {
-            app.doc.library[0].timeline.layers[0].keyframe_mut(0).cel = timeline::Cel::default();
-            app.doc.library[0].revision = crate::vector_engine::next_mesh_revision();
+            std::sync::Arc::make_mut(&mut app.doc.library)[0]
+                .timeline
+                .layers[0]
+                .keyframe_mut(0)
+                .cel = timeline::Cel::default();
+            std::sync::Arc::make_mut(&mut app.doc.library)[0].revision =
+                crate::vector_engine::next_mesh_revision();
             app.doc.revision = crate::vector_engine::next_mesh_revision();
             app.refresh_scene_base();
         }
@@ -19634,7 +19644,7 @@ fn test_video_export_parallel_render_frames_and_without_mesh() {
     }
 
     // 4. 文書の図形はメッシュを持たず、書き出し用の展開はメッシュを持たず、画面用の展開はメッシュを持つ
-    for sym in &doc.library {
+    for sym in doc.library.iter() {
         for layer in &sym.timeline.layers {
             for kf in &layer.keyframes {
                 for s in kf.cel.shapes().iter() {
@@ -28009,4 +28019,126 @@ fn ungrouping_beside_an_unmoved_slice_leaves_no_cut() {
     assert!(doc_actions::ungroup_selected_shapes(&mut app));
     assert!(canvas_tool::clear_selection(&mut app));
     assert_eq!(segs(&app), before);
+}
+
+/// N-2003：地図だけを書く編集（ブラシ・消しゴム・バケツ・輪郭の変形・確定）は、セル画のインスタンスの並びを写さず、
+/// Undo の控えと共有したままにする
+#[test]
+fn map_only_writes_share_the_instances() {
+    use crate::planar_map::{MapInput, MapRule};
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    let mut app = Is2dApp::default();
+    let mut shapes = make_stroke(
+        Point::new(100.0, 100.0),
+        Point::new(200.0, 100.0),
+        10.0,
+        red,
+    );
+    // 生の図形の地図を残す
+    shapes.extend(make_stroke(
+        Point::new(100.0, 400.0),
+        Point::new(200.0, 400.0),
+        10.0,
+        red,
+    ));
+    put_cel_shapes(&mut app, 0, 0, shapes);
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 50.0),
+        Point::new(250.0, 150.0),
+        false,
+    );
+    doc_actions::convert_selection_to_symbol(&mut app).unwrap();
+    assert!(canvas_tool::clear_selection(&mut app));
+    let before = std::sync::Arc::clone(&app.doc.root.layers[0].keyframes[0].cel.instances);
+    assert_eq!(before.len(), 1);
+    let stroke = make_stroke(
+        Point::new(300.0, 300.0),
+        Point::new(400.0, 300.0),
+        10.0,
+        blue,
+    );
+    let lid = app.doc.root.layers[0].id;
+    assert!(canvas_tool::edit_layer_map(app.tab_mut(), lid, |base| {
+        base.map
+            .overlay(MapInput::Shapes(&stroke), MapRule::Paint(Some(blue)))
+    }));
+    let after = &app.doc.root.layers[0].keyframes[0].cel;
+    assert!(!after.maps.is_empty());
+    assert!(std::sync::Arc::ptr_eq(&before, &after.instances));
+}
+
+/// 計測（N-2002）：ライブラリのシンボルの数（0・4,000）で、Undo / Redo とペーストの1回の重さが変わるか
+#[test]
+#[ignore]
+fn measure_undo_and_paste_with_a_large_library() {
+    use std::time::Instant;
+    let red = Color32::from_rgb(235, 75, 75);
+    for n in [0usize, 4000] {
+        let mut app = Is2dApp::default();
+        let mut shapes = make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(200.0, 100.0),
+            10.0,
+            red,
+        );
+        shapes.extend(make_stroke(
+            Point::new(100.0, 300.0),
+            Point::new(200.0, 300.0),
+            10.0,
+            red,
+        ));
+        put_cel_shapes(&mut app, 0, 0, shapes);
+        doc_actions::apply(
+            &mut app,
+            doc_actions::Action::SetTool { tool: Tool::Select },
+        );
+        select_ops::apply_marquee_selection(
+            &mut app,
+            Point::new(50.0, 50.0),
+            Point::new(250.0, 150.0),
+            false,
+        );
+        doc_actions::convert_selection_to_symbol(&mut app).unwrap();
+        assert!(canvas_tool::clear_selection(&mut app));
+        let proto = app.doc.library[0].clone();
+        for k in 0..n {
+            let mut s = proto.clone();
+            s.id = app.doc.next_symbol_id;
+            app.doc.next_symbol_id += 1;
+            s.name = format!("bench {k}");
+            std::sync::Arc::make_mut(&mut app.doc.library).push(s);
+        }
+        select_ops::apply_marquee_selection(
+            &mut app,
+            Point::new(50.0, 250.0),
+            Point::new(250.0, 350.0),
+            false,
+        );
+        assert!(doc_actions::copy_selected_shapes(&mut app));
+        let mut undo = Vec::new();
+        let mut paste = Vec::new();
+        for _ in 0..30 {
+            let t = Instant::now();
+            assert!(doc_actions::paste_clipboard(&mut app, false));
+            paste.push(t.elapsed().as_secs_f64() * 1e3);
+            let t = Instant::now();
+            assert!(doc_actions::apply(&mut app, doc_actions::Action::Undo));
+            undo.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        let med = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        eprintln!(
+            "symbols {n}: paste {:.3}ms, undo {:.3}ms",
+            med(&mut paste),
+            med(&mut undo)
+        );
+    }
 }

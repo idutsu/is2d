@@ -1011,7 +1011,7 @@ impl ProjectDocument {
         let h = self.stage_size[1].clamp(100.0, 2160.0);
         Ok(Document {
             root: timeline,
-            library,
+            library: Arc::new(library),
             stage_size: Vec2::new(w, h),
             fps,
             next_symbol_id: raw_next_sym_id.max(max_sym_id.saturating_add(1)).max(1),

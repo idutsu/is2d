@@ -550,7 +550,7 @@ impl Cel {
 
     /// 地図とインスタンスを入れる。地図はいつも正しい地図で、面に1つずつ別の番号が記してある（`ScopeMap` を作れるのは
     /// `ScopeMap::new`（確かめた地図から）・`restricted`・`renew_labels` だけ）。並びはいつも決まりどおり（`maps` と
-    /// `instances` は `arranged` の結果か、その地図1つを同じ階層の地図に置き換えたもの）なので、確かめ直さない
+    /// `instances` は `arranged` の結果）なので、確かめ直さない
     fn put(&mut self, mut maps: Vec<ScopeMap>, mut instances: Vec<SymbolInstance>) {
         maps.shrink_to_fit();
         instances.shrink_to_fit();
@@ -1113,11 +1113,10 @@ impl Cel {
         };
         let base = LayerBase::with_faces(m.stored.clone(), group_path, shapes);
         match at {
+            // 地図だけを置き換える（インスタンスの並びは Undo の控えと共有したまま）
             Some(i) => {
-                let mut maps = (*self.maps).clone();
-                maps[i] = m;
-                let instances = (*self.instances).clone();
-                self.put(maps, instances);
+                Arc::make_mut(&mut self.maps)[i] = m;
+                self.revision = crate::vector_engine::next_mesh_revision();
             }
             None => {
                 let mut items = Self::items_of(&self.maps, &self.instances);

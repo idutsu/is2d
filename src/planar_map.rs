@@ -1029,7 +1029,8 @@ fn edge_key(m: &PlanarMap, e: usize) -> [u64; 6] {
 /// - 残した面の元の図形のほかは、みな消す（どの面にも残らない元の図形が、新しい形と重なって残ることは無い。番号を
 ///   引き継いだ形は、消した元の図形と入れ替わる）
 ///
-/// 戻り値の3つ目は、面ごとの図形の番号（残した面は元の図形、ほかは新しい形の番号。`faces` の順）
+/// 戻り値の3つ目は、面ごとの図形の番号（残した面は元の図形、ほかは新しい形の番号。`faces` の順）。番号はみな別
+/// （同じ元の図形を残す・引き継ぐ面はそれぞれ1つだけ、新しい形には新しい番号）なので、面と図形が1対1になる
 fn rewrite_shapes(
     orig: &PlanarMap,
     orig_keys: &HashSet<[u64; 6]>,
@@ -1071,8 +1072,8 @@ fn rewrite_shapes(
                     .flatten()
                     .all(|h| next.side_src(*h) == Some(f.srcs[0]))
             };
-        if keep {
-            kept.insert(f.srcs[0]);
+        // 同じ元の図形を残せるのは1つの面だけ（面の番号がみな別になる）
+        if keep && kept.insert(f.srcs[0]) {
             ids[i] = f.srcs[0];
         } else {
             changed.push(i);
@@ -1317,11 +1318,6 @@ impl LayerBase {
         });
         let (removed, added, ids) =
             rewrite_shapes(&self.map, keys, next, &faces, own, layer_id, group_path);
-        // 面の番号はみな別（`rewrite_shapes` の決まり）。同じ番号が2つあれば、面と図形が1対1にならないので書かない
-        let mut seen: HashSet<ShapeId> = HashSet::with_capacity(ids.len());
-        if !ids.iter().all(|id| seen.insert(*id)) {
-            return None;
-        }
         Some(MapChange {
             removed,
             added,

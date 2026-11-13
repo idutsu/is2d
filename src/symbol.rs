@@ -636,12 +636,13 @@ impl EditPath {
 #[derive(Clone, Debug)]
 pub(crate) struct Document {
     pub(crate) root: Timeline,
-    pub(crate) library: Vec<SymbolDef>,
+    /// Undo の控えと共有する（書く所だけ `Arc::make_mut` で写す。控えを取る・戻すは `Arc` の入れ替えだけ）
+    pub(crate) library: Arc<Vec<SymbolDef>>,
     pub(crate) stage_size: Vec2,
     pub(crate) fps: u32,
     pub(crate) next_symbol_id: u64,
     pub(crate) next_group_id: u64,
-    /// `library` の内容変更世代番号（Undo履歴の `Arc` CoW 構造共有用）
+    /// `library` の内容変更世代番号（シンボルのプレビューの一時キャッシュの鍵）
     pub(crate) revision: u64,
 }
 
@@ -649,7 +650,7 @@ impl Default for Document {
     fn default() -> Self {
         Self {
             root: Timeline::default(),
-            library: Vec::new(),
+            library: Arc::default(),
             stage_size: Vec2::new(800.0, 450.0),
             fps: 24,
             next_symbol_id: 1,
@@ -714,7 +715,7 @@ impl Document {
             name_num = if name_num < u64::MAX { name_num + 1 } else { 1 };
         }
         sym_def.name = format!("Symbol {name_num}");
-        self.library.push(sym_def);
+        Arc::make_mut(&mut self.library).push(sym_def);
         self.bump_revision();
     }
 
@@ -725,7 +726,9 @@ impl Document {
 
     /// 指定した `symbol_id` のシンボル定義を可変参照する
     pub(crate) fn find_symbol_mut(&mut self, symbol_id: u64) -> Option<&mut SymbolDef> {
-        self.library.iter_mut().find(|s| s.id == symbol_id)
+        Arc::make_mut(&mut self.library)
+            .iter_mut()
+            .find(|s| s.id == symbol_id)
     }
 
     #[cfg(test)]
@@ -854,8 +857,9 @@ impl Document {
             removed
         };
         remove_from_tl(&mut self.root);
-        self.library.retain(|s| s.id != symbol_id);
-        for sym_def in &mut self.library {
+        let library = Arc::make_mut(&mut self.library);
+        library.retain(|s| s.id != symbol_id);
+        for sym_def in library {
             if remove_from_tl(&mut sym_def.timeline) {
                 sym_def.revision = crate::vector_engine::next_mesh_revision();
             }

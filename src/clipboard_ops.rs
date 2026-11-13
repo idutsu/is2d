@@ -497,7 +497,7 @@ pub(crate) fn import_clipboard_symbols(
         }
         remap_timeline_ids(&mut imported.timeline, &mut tab.doc, &local_sym_map);
 
-        tab.doc.library.push(imported);
+        Arc::make_mut(&mut tab.doc.library).push(imported);
         if tab.view.selected_library_symbol.is_none() {
             tab.view.selected_library_symbol = Some(new_id);
         }

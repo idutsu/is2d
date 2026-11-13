@@ -2504,45 +2504,6 @@ impl UndoHistory {
         self.saved_commit_id = None;
     }
 
-    /// シンボルライブラリが直近の履歴エントリから未変更（同一 `revision` かつカーソル状態一致）であれば
-    /// `Arc` ポインタを $O(1)$ で共有し、一部シンボルのみ変更されている場合は未変更シンボルの `Arc` を引き継ぎながら
-    /// 差分シンボルのみキャッシュ除去して新しい `Arc` を返す
-    pub(crate) fn snapshot_symbols(&self, doc: &Document) -> (Arc<Vec<SymbolDef>>, u64) {
-        let prev_entry = self.undo_stack.back().or_else(|| self.redo_stack.last());
-        if let Some(reused) = prev_entry.filter(|e| {
-            e.symbols_revision == doc.revision
-                && e.library.len() == doc.library.len()
-                && e.library.iter().zip(&doc.library).all(|(a, b)| {
-                    a.id == b.id
-                        && a.revision == b.revision
-                        && a.timeline.current_frame == b.timeline.current_frame
-                        && a.timeline.active_layer == b.timeline.active_layer
-                        && a.timeline.cell_selection == b.timeline.cell_selection
-                })
-        }) {
-            return (Arc::clone(&reused.library), doc.revision);
-        }
-        let mut lib = Vec::with_capacity(doc.library.len());
-        for sym in &doc.library {
-            if let Some(prev_sym) = prev_entry.and_then(|pe| {
-                pe.library.iter().find(|s| {
-                    s.id == sym.id
-                        && s.revision == sym.revision
-                        && s.timeline.current_frame == sym.timeline.current_frame
-                        && s.timeline.active_layer == sym.timeline.active_layer
-                        && s.timeline.cell_selection == sym.timeline.cell_selection
-                })
-            }) {
-                lib.push(prev_sym.clone());
-            } else {
-                let mut cloned = sym.clone();
-                cloned.clear_preview_cache();
-                lib.push(cloned);
-            }
-        }
-        (Arc::new(lib), doc.revision)
-    }
-
     /// `Floating` が直近の履歴エントリから未変更であれば `Arc` を $O(1)$ で共有し、
     /// 変更されている場合は一時キャッシュを除去した新しい `Arc<Floating>` を返す
     pub(crate) fn snapshot_floating(&self, floating: Option<&Floating>) -> Option<Arc<Floating>> {
@@ -2713,7 +2674,7 @@ impl Tab {
     #[inline]
     fn active_timeline_raw_mut(&mut self) -> &mut Timeline {
         match self.active_symbol_index() {
-            Some(idx) => &mut self.doc.library[idx].timeline,
+            Some(idx) => &mut Arc::make_mut(&mut self.doc.library)[idx].timeline,
             None => &mut self.doc.root,
         }
     }
@@ -2748,10 +2709,12 @@ impl Tab {
         f: impl FnOnce(&mut Timeline, &mut Document) -> R,
     ) -> R {
         if let Some(idx) = self.active_symbol_index() {
-            let mut taken_tl = std::mem::take(&mut self.doc.library[idx].timeline);
+            let mut taken_tl =
+                std::mem::take(&mut Arc::make_mut(&mut self.doc.library)[idx].timeline);
             let res = f(&mut taken_tl, &mut self.doc);
-            self.doc.library[idx].timeline = taken_tl;
-            self.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
+            let sym = &mut Arc::make_mut(&mut self.doc.library)[idx];
+            sym.timeline = taken_tl;
+            sym.revision = crate::vector_engine::next_mesh_revision();
             self.doc.bump_revision();
             self.refresh_scene_base();
             return res;
@@ -2891,11 +2854,10 @@ impl Tab {
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
         self.history.last_coalesce_key = None;
         let prev_selection = self.session.selection.clone();
-        let (prev_lib, prev_rev) = self.history.snapshot_symbols(&self.doc);
         let prev_floating = self.history.snapshot_floating(self.session.floating());
         let prev_entry = UndoEntry {
             timeline: std::mem::replace(&mut self.doc.root, entry.timeline),
-            library: prev_lib,
+            library: Arc::clone(&self.doc.library),
             floating: prev_floating,
             edit_path: std::mem::replace(&mut self.session.edit_path, entry.edit_path),
             editing_group_path: std::mem::replace(
@@ -2904,10 +2866,10 @@ impl Tab {
             ),
             stage_size: std::mem::replace(&mut self.doc.stage_size, entry.stage_size),
             fps: std::mem::replace(&mut self.doc.fps, entry.fps),
-            symbols_revision: prev_rev,
+            symbols_revision: self.doc.revision,
             commit_id: std::mem::replace(&mut self.history.current_commit_id, entry.commit_id),
         };
-        self.doc.library = Arc::unwrap_or_clone(entry.library);
+        self.doc.library = entry.library;
         self.doc.revision = entry.symbols_revision;
         self.doc.validate_edit_path(
             &mut self.session.edit_path,
@@ -2993,7 +2955,8 @@ pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
 pub(crate) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
     if !lids.is_empty() {
         if let Some(idx) = tab.active_symbol_index() {
-            tab.doc.library[idx].revision = crate::vector_engine::next_mesh_revision();
+            Arc::make_mut(&mut tab.doc.library)[idx].revision =
+                crate::vector_engine::next_mesh_revision();
             tab.doc.bump_revision();
         }
         for &lid in lids {

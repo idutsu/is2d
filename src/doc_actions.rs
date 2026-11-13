@@ -337,17 +337,17 @@ fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
         return;
     }
     let tl_snap = tab.doc.root.clone();
-    let (library, symbols_revision) = tab.history.snapshot_symbols(&tab.doc);
     let floating = tab.history.snapshot_floating(tab.session.floating());
     let entry = UndoEntry {
         timeline: tl_snap,
-        library,
+        // ライブラリは文書と共有する（書く所だけ `Arc::make_mut` で写す）
+        library: std::sync::Arc::clone(&tab.doc.library),
         floating,
         edit_path: tab.session.edit_path.clone(),
         editing_group_path: tab.session.editing_group_path.clone(),
         stage_size: tab.doc.stage_size,
         fps: tab.doc.fps,
-        symbols_revision,
+        symbols_revision: tab.doc.revision,
         commit_id: tab.history.current_commit_id,
     };
     tab.history.pending = Some((entry, coalesce));
