@@ -28658,3 +28658,172 @@ fn measure_brush_smoothing() {
         }
     }
 }
+
+/// 計測：線の多い地図にブラシの線を重ねる1回（重ね合わせだけ）の時間
+#[test]
+#[ignore]
+fn measure_overlay_on_dense_map() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    use std::time::Instant;
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    let area = (100.0, 100.0, 600.0, 300.0);
+    let mut rng = map_overlay::Rng(7);
+    let mut m = PlanarMap::default();
+    for k in 0..120 {
+        let (r, c) = (2.0 + rng.f() * 8.0, colors[k % colors.len()]);
+        let s = wiggly_stroke(&mut rng, area, r, c);
+        m = m
+            .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+            .unwrap();
+    }
+    let strokes: Vec<_> = (0..40)
+        .map(|k| {
+            let (r, c) = (2.0 + rng.f() * 8.0, colors[k % colors.len()]);
+            (wiggly_stroke(&mut rng, area, r, c), c)
+        })
+        .collect();
+    let mut times = Vec::new();
+    for _ in 0..3 {
+        for (s, c) in &strokes {
+            let t = Instant::now();
+            let r = m
+                .overlay(MapInput::Shapes(s), MapRule::Paint(Some(*c)))
+                .unwrap();
+            times.push(t.elapsed().as_secs_f64() * 1e3);
+            assert!(r.is_valid());
+        }
+    }
+    times.sort_by(f64::total_cmp);
+    eprintln!(
+        "map {} edges: overlay median {:.3}ms, p90 {:.3}ms",
+        m.edges.len(),
+        times[times.len() / 2],
+        times[times.len() * 9 / 10]
+    );
+}
+
+/// 試し（N-1002）：ほぼ重なった線を重ねると、見えない細い欠片の面ができるか
+#[test]
+#[ignore]
+fn probe_same_line_slivers() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    for seed in [1u64, 2, 3] {
+        let s = wiggly_stroke(
+            &mut map_overlay::Rng(seed),
+            (300.0, 200.0, 0.0, 0.0),
+            6.0,
+            red,
+        );
+        let mut m = PlanarMap::default();
+        let mut first = (0, 0);
+        for k in 0..200 {
+            let c = if k % 2 == 0 { red } else { blue };
+            m = m
+                .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+                .unwrap();
+            if k == 0 {
+                first = (m.valid_faces().unwrap().len(), m.edges.len());
+            }
+        }
+        eprintln!(
+            "seed {seed}: same line 200 times: faces {} -> {}, edges {} -> {}",
+            first.0,
+            m.valid_faces().unwrap().len(),
+            first.1,
+            m.edges.len()
+        );
+        let base = PlanarMap::default()
+            .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(red)))
+            .unwrap();
+        for d in [1e-5, 1e-4, 1e-3, 3e-3] {
+            let moved: Vec<FillShape> = s
+                .iter()
+                .map(|x| {
+                    let mut y = x.clone();
+                    y.transform(kurbo::Affine::translate((d, d * 0.5)));
+                    y
+                })
+                .collect();
+            let m2 = base
+                .overlay(MapInput::Shapes(&moved), MapRule::Paint(Some(blue)))
+                .unwrap();
+            eprintln!(
+                "seed {seed}: offset {d:e}: faces {}, edges {} (base edges {})",
+                m2.valid_faces().unwrap().len(),
+                m2.edges.len(),
+                base.edges.len()
+            );
+        }
+    }
+}
+
+/// くねったブラシの線（40 点、点の間隔 3px）。始点は `x0..x0+w`・`y0..y0+h` の中
+fn wiggly_stroke(
+    rng: &mut map_overlay::Rng,
+    (x0, y0, w, h): (f64, f64, f64, f64),
+    radius: f64,
+    color: Color32,
+) -> Vec<FillShape> {
+    let mut p = Point::new(x0 + rng.f() * w, y0 + rng.f() * h);
+    let mut a = rng.f() * std::f64::consts::TAU;
+    let mut pts = vec![p];
+    for _ in 0..40 {
+        a += (rng.f() - 0.5) * 0.8;
+        p += kurbo::Vec2::new(a.cos(), a.sin()) * 3.0;
+        pts.push(p);
+    }
+    let raw = crate::vector_stroke::generate_brush_outline_at_zoom(&pts, radius, 1.0);
+    crate::vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, color, 1.0)
+}
+
+/// N-1001（地図のレビュー 4cb53aa）：線の重なった地図を、矩形で切ってその場に戻すのを繰り返しても、切れ目の頂点が
+/// 残らない（辺の数が変わらない）。切れ目の頂点が折れ線どうしの交点（曲線から `FLAT_TOL` ほど離れる）のままだと、
+/// 切った2本が1本にまとまらず、5回に1回ほど残って溜まっていた
+#[test]
+fn cut_and_return_leaves_no_cut_vertices() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    let mut rng = map_overlay::Rng(1);
+    let mut m = PlanarMap::default();
+    for k in 0..30 {
+        let c = colors[k % colors.len()];
+        let r = 2.0 + rng.f() * 8.0;
+        let s = wiggly_stroke(&mut rng, (100.0, 100.0, 300.0, 200.0), r, c);
+        m = m
+            .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+            .unwrap();
+    }
+    let start = m.edges.len();
+    for _ in 0..40 {
+        let (x, y) = (100.0 + rng.f() * 250.0, 100.0 + rng.f() * 150.0);
+        let rect = vec![map_overlay::rect_shape(
+            x,
+            y,
+            x + 30.0 + rng.f() * 100.0,
+            y + 30.0 + rng.f() * 80.0,
+            colors[0],
+        )];
+        let inside = m
+            .overlay(MapInput::Shapes(&rect), MapRule::KeepInside)
+            .unwrap();
+        let rest = m
+            .overlay(MapInput::Shapes(&rect), MapRule::Paint(None))
+            .unwrap();
+        m = rest
+            .overlay(MapInput::Map(&inside), MapRule::Overlay)
+            .unwrap();
+        assert!(m.is_valid());
+        assert_eq!(m.edges.len(), start);
+    }
+}

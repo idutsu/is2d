@@ -2,6 +2,7 @@
 //! （i_overlay で格子の上で切り、同じ曲線から来た区間を元の曲線に戻す）
 
 use super::*;
+use crate::vector_engine::quad_deriv;
 
 // ============================================================================
 // 形・地図を地図に重ねる（ブラシ・消しゴム・矩形で選んだ片の取り出し・持ち上げた片を置く・貼り付け）
@@ -195,6 +196,57 @@ impl i_overlay9::core::edge_data::OverlayEdgeData for ProvId {
         v.extend(store.0[ctx.rhs_data.0 as usize].iter().copied());
         store.push(v)
     }
+}
+
+/// 曲線 `qa`（`ta` の近く）と曲線 `qb`（`tb` の近く）の本当の交点と、そこでの2本の t（ニュートン法）。折れ線は
+/// どちらも曲線から `FLAT_TOL + GRID_REACH` 以内なので、折れ線どうしの交点 `found` と本当の交点の差は、交わる角を θ と
+/// して `2·(FLAT_TOL + GRID_REACH) / sin θ` 以内。それより遠い（別の交点へ行った）か、交わらない・ほとんど同じ向き
+/// （sin θ が 1/1000 未満）なら `None`
+pub(super) fn crossing_point(
+    qa: &QuadBez,
+    ta: f64,
+    qb: &QuadBez,
+    tb: f64,
+    found: Point,
+) -> Option<(Point, f64, f64)> {
+    let (mut u, mut w) = (ta, tb);
+    for _ in 0..8 {
+        let f = qa.eval(u) - qb.eval(w);
+        let (da, db) = (quad_deriv(qa, u), quad_deriv(qb, w));
+        // da·Δu − db·Δw = −f を解く（クラメルの公式）
+        let det = db.cross(da);
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        u += f.cross(db) / det;
+        w -= da.cross(f) / det;
+    }
+    let x = qa.eval(u);
+    let (da, db) = (quad_deriv(qa, u), quad_deriv(qb, w));
+    let sin = (da.cross(db) / (da.hypot() * db.hypot())).abs();
+    (u > 0.0
+        && u < 1.0
+        && w > 0.0
+        && w < 1.0
+        && sin >= 1e-3
+        && (x - qb.eval(w)).hypot() < 1e-9
+        && (x - found).hypot() <= 2.0 * (FLAT_TOL + GRID_REACH) / sin)
+        .then_some((x, u, w))
+}
+
+/// 折れ線の点 `pts`（t の順）に、点 `more`（曲線の上の点と t）を t の順に足したもの（同じ t の点は足さない）
+pub(super) fn with_points(mut pts: Vec<(Point, f64)>, more: &[(Point, f64)]) -> Vec<(Point, f64)> {
+    if more.is_empty() {
+        return pts;
+    }
+    for &(p, t) in more {
+        let k = pts.partition_point(|q| q.1 < t);
+        if pts.get(k).is_some_and(|q| q.1 == t) || k == 0 || k == pts.len() {
+            continue;
+        }
+        pts.insert(k, (p, t));
+    }
+    pts
 }
 
 /// 重ねるときの曲線の出どころ
@@ -756,48 +808,95 @@ impl PlanarMap {
             }
         }
 
-        // 1. 折れ線にして格子に置き、i_overlay で切る。格子は原点から（何回重ねても、格子の上の点は動かない）
-        let mut ov: EdgeOverlay<i32, ProvId> = EdgeOverlay::new(srcs.len() * 8);
-        for (si, (q, kind)) in srcs.iter().enumerate() {
-            let st = if matches!(kind, OverlaySrc::Old(_)) {
-                ShapeType::Subject
-            } else {
-                ShapeType::Clip
-            };
-            // 同じ線として扱う所は、2本とも同じ点の折れ線にする（`Span`）
-            let line = match *kind {
+        // 1. 折れ線にして格子に置き、i_overlay で切る。格子は原点から（何回重ねても、格子の上の点は動かない）。
+        //    折れ線どうしの交点は、曲線から折れ線のずれ（`FLAT_TOL`）ほど離れている。2本の曲線が交わる所は、本当の交点
+        //    （`crossing_point`）を両方の折れ線の点に足してもう1回だけ切る。切れ目の頂点が両方の曲線の上（格子の丸めの
+        //    分のずれ）に乗るので、切って戻した2本は、のちに1本にまとまる（`merge_degree2`）
+        let lines: Vec<Line> = srcs
+            .iter()
+            .map(|(_, kind)| match *kind {
                 OverlaySrc::Old(e) => Line::Edge(e),
                 OverlaySrc::New(i) if matches!(input, MapInput::Map(_)) => Line::Edge(n_old + i),
                 OverlaySrc::New(i) => Line::Seed(i),
-            };
-            let pts = fed_set.points(line, q);
-            let mut prev = (to_grid(pts[0].0).ok_or(OverlayStop::Refused)?, pts[0].1);
-            for &(p, t) in &pts[1..] {
-                let ip = to_grid(p).ok_or(OverlayStop::Refused)?;
-                if ip == prev.0 {
-                    continue;
+            })
+            .collect();
+        // 出どころの折れ線に、出どころごとの点 `added`（曲線の上の点と t）を足して、i_overlay で切る
+        let cut = |added: &[Vec<(Point, f64)>]| -> Result<_, OverlayStop> {
+            let mut ov: EdgeOverlay<i32, ProvId> = EdgeOverlay::new(srcs.len() * 8);
+            for (si, (q, kind)) in srcs.iter().enumerate() {
+                let st = if matches!(kind, OverlaySrc::Old(_)) {
+                    ShapeType::Subject
+                } else {
+                    ShapeType::Clip
+                };
+                // 同じ線として扱う所は、2本とも同じ点の折れ線にする（`Span`）
+                let pts = with_points(fed_set.points(lines[si], q), &added[si]);
+                let mut prev = (to_grid(pts[0].0).ok_or(OverlayStop::Refused)?, pts[0].1);
+                for &(p, t) in &pts[1..] {
+                    let ip = to_grid(p).ok_or(OverlayStop::Refused)?;
+                    if ip == prev.0 {
+                        continue;
+                    }
+                    // 点は t の順なので、区間（前の点→この点）は出どころの t の増える向き
+                    let id = ov.data_store_mut().push(vec![Prov {
+                        src: si as u32,
+                        t0: prev.1,
+                        t1: t,
+                        fwd: true,
+                    }]);
+                    ov.add_edge(
+                        InputEdge {
+                            a: prev.0,
+                            b: ip,
+                            data: id,
+                        },
+                        st,
+                    );
+                    prev = (ip, t);
                 }
-                // 点は t の順なので、区間（前の点→この点）は出どころの t の増える向き
-                let id = ov.data_store_mut().push(vec![Prov {
-                    src: si as u32,
-                    t0: prev.1,
-                    t1: t,
-                    fwd: true,
-                }]);
-                ov.add_edge(
-                    InputEdge {
-                        a: prev.0,
-                        b: ip,
-                        data: id,
-                    },
-                    st,
-                );
-                prev = (ip, t);
+            }
+            // 切ったあとのすべての区間（塗りの規則でふるい落とさない。vendor/i_overlay/PATCH.md）
+            let out = ov.build_all_vectors(IFill::EvenOdd);
+            Ok((out, ov.into_data_store()))
+        };
+        let mut added: Vec<Vec<(Point, f64)>> = vec![Vec::new(); srcs.len()];
+        let (mut out, mut store) = cut(&added)?;
+        // 2本の出どころの曲線だけが、どちらも曲線の途中で会う頂点（交わった所）
+        let mut at: IntMap<(i32, i32), Vec<(u32, f64)>> = IntMap::default();
+        for v in &out {
+            for p in &store.0[v.data.0 as usize] {
+                for (k, t) in [((v.a.x, v.a.y), p.t0), ((v.b.x, v.b.y), p.t1)] {
+                    let here = at.entry(k).or_default();
+                    if !here.iter().any(|h| h.0 == p.src) {
+                        here.push((p.src, t));
+                    }
+                }
             }
         }
-        // 切ったあとのすべての区間（塗りの規則でふるい落とさない。vendor/i_overlay/PATCH.md）
-        let out = ov.build_all_vectors(IFill::EvenOdd);
-        let store = ov.into_data_store();
+        let mut any = false;
+        for (k, here) in &at {
+            let &[(sa, ta), (sb, tb)] = here.as_slice() else {
+                continue;
+            };
+            if !(ta > 0.0 && ta < 1.0 && tb > 0.0 && tb < 1.0) {
+                continue;
+            }
+            let (qa, qb) = (srcs[sa as usize].0, srcs[sb as usize].0);
+            let found = from_grid(k.0 as i64, k.1 as i64);
+            let Some((x, ua, ub)) = crossing_point(&qa, ta, &qb, tb, found) else {
+                continue;
+            };
+            // 同じ線として扱う所（2本が同じ点の折れ線）には足さない
+            for (si, u) in [(sa as usize, ua), (sb as usize, ub)] {
+                if !fed_set.in_span(lines[si], u) {
+                    added[si].push((x, u));
+                    any = true;
+                }
+            }
+        }
+        if any {
+            (out, store) = cut(&added)?;
+        }
 
         // 2. 頂点：入れた辺の端の頂点は、その番号のまま格子の上に置く。格子の同じ点にある頂点は1つにする（前の地図の頂点を
         //    先に見るので、重ねる地図の頂点が前の地図の頂点に重なれば、前の地図の頂点になる）。新しい頂点は後ろに足す
@@ -1711,6 +1810,13 @@ impl FedEdges {
             flatten_with_t(q, FLAT_TOL),
             self.spans.get(&line).map_or(&[][..], |v| v.as_slice()),
         )
+    }
+
+    /// 線 `line` の t が、同じ線として扱う所（`Span`）の中か
+    pub(super) fn in_span(&self, line: Line, t: f64) -> bool {
+        self.spans
+            .get(&line)
+            .is_some_and(|v| v.iter().any(|s| s.lo <= t && t <= s.hi))
     }
 
     /// 線 `line` の判定の形（格子に置いた折れ線）
