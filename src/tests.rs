@@ -29713,3 +29713,278 @@ fn double_click_needs_both_clicks_at_the_same_place() {
         }
     }
 }
+
+/// 計測：作品のファイルで、重さが気になる操作の時間を測る（Mac で作品 A・A-x2 を測るため）
+///
+/// 実行：`IS2D_WORK=作品のパス cargo test --release measure_work -- --ignored --nocapture`
+/// - 測るコマは `IS2D_FRAME`（タイムラインに出る番号）。無ければ、線のいちばん多いコマ（地図の 32px のマスの数で比べる）
+/// - 貼り付ける先のコマは `IS2D_PASTE_FRAME`。無ければ、測るコマのあとで、別の絵があるいちばん近いコマ
+/// - どの操作も 7 回行い、中央値と最大を出す。どの回も Undo で元に戻してから次を行う
+#[test]
+#[ignore]
+fn measure_work() {
+    use crate::doc_actions::{apply, Action};
+    use std::time::Instant;
+    let Ok(path) = std::env::var("IS2D_WORK") else {
+        eprintln!("IS2D_WORK に作品のパスを入れて実行してください");
+        return;
+    };
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+    let ctx = eframe::egui::Context::default();
+    let mut app = Is2dApp::default();
+    let t = Instant::now();
+    crate::project_io::open_project_in_tab(&mut app, std::path::Path::new(&path), Some(&ctx))
+        .expect("作品を開けること");
+    let open_ms = ms(t);
+    // コマごとの線の量（地図のマスの数の、レイヤーの合計）と、コマに出るセル画
+    let (frame, paste_frame) = {
+        let tl = &app.doc.root;
+        let cels = |f: usize| -> Vec<Option<*const crate::timeline::Cel>> {
+            tl.layers
+                .iter()
+                .map(|l| l.cel_at(f).map(|c| c as *const _))
+                .collect()
+        };
+        let weight = |f: usize| -> usize {
+            tl.layers
+                .iter()
+                .filter_map(|l| l.cel_at(f))
+                .map(|c| c.maps.iter().map(|m| m.stored().tiles()).sum::<usize>())
+                .sum()
+        };
+        let env_frame = |key: &str| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .map(|f| f.saturating_sub(1))
+        };
+        // 同じ量なら前のコマ
+        let frame = env_frame("IS2D_FRAME").unwrap_or_else(|| {
+            (0..tl.total_frames)
+                .max_by_key(|&f| (weight(f), std::cmp::Reverse(f)))
+                .unwrap_or(0)
+        });
+        let paste_frame = env_frame("IS2D_PASTE_FRAME").or_else(|| {
+            (frame + 1..tl.total_frames)
+                .chain(0..frame)
+                .find(|&g| weight(g) > 0 && cels(g) != cels(frame))
+        });
+        (frame, paste_frame)
+    };
+    let goto = |app: &mut Is2dApp, f: usize| {
+        assert!(canvas_tool::clear_selection(app));
+        apply(app, Action::ScrubRulerToFrame { frame: f });
+    };
+    // 元に戻す：Undo の控えが `n` 個になるまで Undo する
+    let undo_to = |app: &mut Is2dApp, n: usize| {
+        while app.history.undo_stack.len() > n {
+            assert!(apply(app, Action::Undo));
+        }
+    };
+    goto(&mut app, frame);
+    let shapes = app.scene().len();
+    let segments: usize = app
+        .scene()
+        .iter()
+        .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+        .sum();
+    let bounds = app
+        .scene()
+        .iter()
+        .filter_map(|s| s.geometry_bounding_box())
+        .reduce(|a, b| a.union(b))
+        .expect("測るコマに絵がある");
+    let mut rows: Vec<(String, Vec<f64>)> = vec![("作品を開く".into(), vec![open_ms])];
+    let runs = 7;
+
+    // 矩形で選ぶ（全部・左半分）
+    for (label, rect) in [
+        ("矩形で全部を選ぶ", bounds.inflate(10.0, 10.0)),
+        (
+            "矩形で左半分を選ぶ",
+            kurbo::Rect::new(
+                bounds.x0 - 10.0,
+                bounds.y0 - 10.0,
+                bounds.center().x,
+                bounds.y1 + 10.0,
+            ),
+        ),
+    ] {
+        let mut times = Vec::new();
+        for _ in 0..runs {
+            let n = app.history.undo_stack.len();
+            let t = Instant::now();
+            apply(
+                &mut app,
+                Action::SelectMarquee {
+                    p0: Point::new(rect.x0, rect.y0),
+                    p1: Point::new(rect.x1, rect.y1),
+                    additive: false,
+                },
+            );
+            times.push(ms(t));
+            assert!(canvas_tool::clear_selection(&mut app));
+            undo_to(&mut app, n);
+        }
+        rows.push((label.into(), times));
+    }
+
+    // 全部を選んで動かして確定（確定＝選択を外す）
+    {
+        let mut times = Vec::new();
+        for _ in 0..runs {
+            let n = app.history.undo_stack.len();
+            if !(apply(&mut app, Action::SelectAll)
+                && apply(
+                    &mut app,
+                    Action::MoveSelected {
+                        delta: kurbo::Vec2::new(25.0, 0.0),
+                    },
+                ))
+            {
+                break;
+            }
+            let t = Instant::now();
+            assert!(canvas_tool::clear_selection(&mut app));
+            times.push(ms(t));
+            undo_to(&mut app, n);
+        }
+        rows.push(("全部を動かして確定".into(), times));
+    }
+
+    // コマ全体を同じ位置へ貼り付けて確定
+    let copied = apply(&mut app, Action::SelectAll) && apply(&mut app, Action::Copy);
+    assert!(canvas_tool::clear_selection(&mut app));
+    {
+        let mut times = Vec::new();
+        for _ in 0..runs {
+            let n = app.history.undo_stack.len();
+            if !(copied && apply(&mut app, Action::Paste { in_place: true })) {
+                break;
+            }
+            let t = Instant::now();
+            assert!(canvas_tool::clear_selection(&mut app));
+            times.push(ms(t));
+            undo_to(&mut app, n);
+        }
+        rows.push(("コマ全体を同じ位置へ貼り付けて確定".into(), times));
+    }
+
+    // コマ全体を別のコマへ貼り付けて確定
+    if let Some(g) = paste_frame {
+        goto(&mut app, g);
+        let mut times = Vec::new();
+        for _ in 0..runs {
+            let n = app.history.undo_stack.len();
+            if !(copied && apply(&mut app, Action::Paste { in_place: true })) {
+                break;
+            }
+            let t = Instant::now();
+            assert!(canvas_tool::clear_selection(&mut app));
+            times.push(ms(t));
+            undo_to(&mut app, n);
+        }
+        rows.push((format!("コマ全体をコマ {} へ貼り付けて確定", g + 1), times));
+        goto(&mut app, frame);
+    }
+
+    // 辺のつまみ・角のドラッグの確定（グループやシンボルの外の図形の、いちばん長い区間の真ん中と端）
+    let candidates: Vec<(Point, Point)> = app
+        .scene()
+        .iter()
+        .filter(|s| s.group_path.is_empty() && s.symbol_instance.is_none())
+        .filter_map(|s| {
+            s.exterior
+                .segments
+                .iter()
+                .max_by(|a, b| (a.p2 - a.p0).hypot().total_cmp(&(b.p2 - b.p0).hypot()))
+                .map(|q| (q.eval(0.5), q.p0))
+        })
+        .take(50)
+        .collect();
+    for (label, edge) in [
+        ("辺をつまんで動かして確定", true),
+        ("角を動かして確定", false),
+    ] {
+        let mut times = Vec::new();
+        for &(mid, corner) in &candidates {
+            let from = if edge { mid } else { corner };
+            let to = from + kurbo::Vec2::new(0.0, 15.0);
+            let action = |from, to| {
+                if edge {
+                    Action::PullEdgeFromTo { from, to }
+                } else {
+                    Action::MoveVertexFromTo { from, to }
+                }
+            };
+            let n = app.history.undo_stack.len();
+            let t = Instant::now();
+            if !apply(&mut app, action(from, to)) {
+                continue;
+            }
+            times.push(ms(t));
+            undo_to(&mut app, n);
+            for _ in 1..runs {
+                let t = Instant::now();
+                if !apply(&mut app, action(from, to)) {
+                    break;
+                }
+                times.push(ms(t));
+                undo_to(&mut app, n);
+            }
+            break;
+        }
+        rows.push((label.into(), times));
+    }
+
+    // ブラシ（コマの真ん中を横切る1本）
+    {
+        let c = bounds.center();
+        let w = bounds.width() * 0.4;
+        let points: Vec<Point> = (0..=100)
+            .map(|i| {
+                Point::new(
+                    c.x - w + 2.0 * w * i as f64 / 100.0,
+                    c.y + 30.0 * (i as f64 * 0.1).sin(),
+                )
+            })
+            .collect();
+        let mut times = Vec::new();
+        for _ in 0..runs {
+            let n = app.history.undo_stack.len();
+            let t = Instant::now();
+            if !apply(
+                &mut app,
+                Action::PaintStroke {
+                    points: points.clone(),
+                    radius: 8.0,
+                    color: Color32::from_rgb(200, 40, 40),
+                },
+            ) {
+                break;
+            }
+            times.push(ms(t));
+            undo_to(&mut app, n);
+        }
+        rows.push(("ブラシ 1 本".into(), times));
+    }
+
+    eprintln!();
+    eprintln!("作品：{path}");
+    eprintln!("コマ {}（図形 {shapes} 個・区間 {segments} 個）", frame + 1);
+    eprintln!("| 操作 | 中央値 | 最大 | 回数 |");
+    eprintln!("|---|---:|---:|---:|");
+    for (label, mut times) in rows {
+        if times.is_empty() {
+            eprintln!("| {label} | できなかった | | 0 |");
+            continue;
+        }
+        times.sort_by(f64::total_cmp);
+        eprintln!(
+            "| {label} | {:.1}ms | {:.1}ms | {} |",
+            times[times.len() / 2],
+            times[times.len() - 1],
+            times.len()
+        );
+    }
+}
