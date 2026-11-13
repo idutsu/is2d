@@ -341,7 +341,7 @@ impl PlanarMap {
         let g = gpt(p);
         let p2 = (2 * g.0, 2 * g.1);
         let mut found = None;
-        for gi in 0..regions.groups.len() {
+        for gi in regions.groups_at(p2) {
             match regions.contains(gi, p2) {
                 None => return None,
                 Some(true) => {

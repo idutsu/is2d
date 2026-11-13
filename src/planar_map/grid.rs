@@ -983,9 +983,21 @@ pub(super) struct Regions {
     pub(super) groups: Vec<(Option<Color32>, Vec<usize>)>,
     /// 閉じなかった輪郭・色がまざった輪郭・入れ先の無い色のある穴の数（壊れていれば 0 より大きい）
     pub(super) broken: usize,
+    /// 組の外周の外接矩形（2倍の座標）を、高さの帯に分けた索引（`y_bands`。`groups_at` が引く）
+    pub(super) bands: (i64, i64, Vec<Vec<u32>>),
 }
 
 impl Regions {
+    /// 点 `q`（2倍の座標）を含みうる組：外周の外接矩形の高さが `q` にかかる組（組の番号の順）。点を含む組を探すのは
+    /// これ1つ（穴の入れ先 `regions`、バケツの点の面 `with_face_filled`、何も無い側の輪郭の確かめ `valid_faces_since`）。
+    /// どの配置でも、点の帯にかかる組だけを調べるので、組の数の2乗では増えない（レビュー 6ee325a の N-1001）
+    pub(super) fn groups_at(&self, q: IPt) -> impl Iterator<Item = usize> + '_ {
+        let (y0, band_h, bands) = &self.bands;
+        band_at(*y0, *band_h, bands, q.1)
+            .iter()
+            .map(|&g| g as usize)
+    }
+
     /// 組 `g` が点 `q`（2倍の座標）を中に含むか：外周の中で、どの穴の外か。組の輪郭の上なら `None`
     pub(super) fn contains(&self, g: usize, q: IPt) -> Option<bool> {
         let ids = &self.groups[g].1;

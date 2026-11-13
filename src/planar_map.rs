@@ -394,19 +394,13 @@ impl PlanarMap {
                 }
             }
         }
-        // 面の外周の外接矩形を、高さの帯に分けた索引（2倍の座標。大きい面でも、入れる帯の数は帯の数まで）
-        let (fy0, fband_h, fbands) = y_bands(regions.groups.iter().map(|(_, ids)| {
-            let r = regions.rings[ids[0]].rect;
-            (2 * r.y0, 2 * r.y1)
-        }));
         for c in &cycles {
             if c.is_empty() || self.side_color(c[0]).is_some() {
                 continue;
             }
             let h = c[0];
             let probe = half_mid2(&polys, h);
-            for &g in band_at(fy0, fband_h, &fbands, probe.1) {
-                let g = g as usize;
+            for g in regions.groups_at(probe) {
                 if !edge_faces[h.0].contains(&g) && regions.contains(g, probe) != Some(false) {
                     return None;
                 }
@@ -613,6 +607,7 @@ impl PlanarMap {
             rings: Vec::new(),
             groups: Vec::new(),
             broken: 0,
+            bands: (0, 1, Vec::new()),
         };
         let mut holes: Vec<(Option<Color32>, usize)> = Vec::new();
         for cycle in cycles {
@@ -634,16 +629,21 @@ impl PlanarMap {
             out.rings.push(ring);
             out.cycles.push(cycle.clone());
         }
-        // 小さい外周から順に調べ、最初に含むものを選ぶ。調べる点は、穴の最初の区間の真ん中（正しい地図では、ほかの輪郭の
-        // 上に無い）
-        let mut by_area: Vec<usize> = (0..out.groups.len()).collect();
-        by_area.sort_by_key(|&g| out.rings[out.groups[g].1[0]].area2);
+        out.bands = y_bands(out.groups.iter().map(|(_, ids)| {
+            let r = out.rings[ids[0]].rect;
+            (2 * r.y0, 2 * r.y1)
+        }));
+        // 穴を含む同じ色の外周のうち、いちばん小さいもの（同じなら組の順で前）。調べる点は、穴の最初の区間の真ん中（正しい
+        // 地図では、ほかの輪郭の上に無い）
         for (color, k) in holes {
             let probe = half_mid2(polys, out.cycles[k][0]);
-            let owner = by_area.iter().copied().find(|&g| {
-                out.groups[g].0 == color
-                    && out.rings[out.groups[g].1[0]].contains(probe) == Some(true)
-            });
+            let owner = out
+                .groups_at(probe)
+                .filter(|&g| {
+                    out.groups[g].0 == color
+                        && out.rings[out.groups[g].1[0]].contains(probe) == Some(true)
+                })
+                .min_by_key(|&g| out.rings[out.groups[g].1[0]].area2);
             match owner {
                 Some(g) => out.groups[g].1.push(k),
                 // 色のある穴に外周が無ければ壊れている。色の無い穴に外周が無いのは、いちばん外（囲まれていない所）の穴

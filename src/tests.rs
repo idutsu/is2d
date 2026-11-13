@@ -29398,3 +29398,49 @@ fn bucket_with_the_same_color_changes_nothing() {
     assert!(stored(&app).same(&before));
     assert_eq!(app.history.undo_stack.len(), undo_len);
 }
+
+/// 計測（N-1001）：同じ色のドーナツ形（穴のある面）が n 個の地図で、全部の確かめ（`valid_faces`）とバケツ
+/// （`with_face_filled`）の時間。点を含む外周を探すのが面の数の2乗で増えないか
+#[test]
+#[ignore]
+fn measure_many_holes() {
+    use crate::planar_map::PlanarMap;
+    use std::time::Instant;
+    let red = Color32::from_rgb(235, 75, 75);
+    for n in [500usize, 1000, 2000, 4000] {
+        let side = (n as f64).sqrt().ceil() as usize;
+        let shapes: Vec<FillShape> = (0..n)
+            .map(|i| {
+                let (x, y) = ((i % side) as f64 * 30.0, (i / side) as f64 * 30.0);
+                let outer = map_overlay::rect_shape(x, y, x + 20.0, y + 20.0, red);
+                let inner = map_overlay::rect_shape(x + 5.0, y + 5.0, x + 15.0, y + 15.0, red);
+                let ext = outer.contours().next().unwrap().clone();
+                // 穴は外周と逆の向き
+                let hole = crate::vector_engine::Contour::new(
+                    inner
+                        .contours()
+                        .next()
+                        .unwrap()
+                        .segments
+                        .iter()
+                        .rev()
+                        .map(|q| QuadBez::new(q.p2, q.p1, q.p0))
+                        .collect(),
+                );
+                FillShape::new(red, ext, vec![hole])
+            })
+            .collect();
+        let m = PlanarMap::from_faces(shapes.iter());
+        let t = Instant::now();
+        let faces = m.valid_faces().expect("正しい地図");
+        let check = t.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(faces.len(), n);
+        let t = Instant::now();
+        // 真ん中のドーナツの穴の中（色の無い所）を青で塗る
+        let c = side / 2;
+        let p = Point::new(c as f64 * 30.0 + 10.0, c as f64 * 30.0 + 10.0);
+        let filled = m.with_face_filled(p, Color32::BLUE).is_some();
+        let bucket = t.elapsed().as_secs_f64() * 1e3;
+        eprintln!("n {n}: valid_faces {check:.1}ms, bucket {bucket:.1}ms (filled {filled})");
+    }
+}
