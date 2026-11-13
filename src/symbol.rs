@@ -9,10 +9,7 @@ use crate::planar_map::LayerBase;
 pub(crate) use crate::timeline::interpolate_affine_with_pivot;
 use crate::timeline::{Cel, Layer, Timeline};
 pub(crate) use crate::timeline::{ResolvedCelSig, SymbolInstance, TweenRotate, TweenState};
-use crate::vector_engine::{
-    dim_backdrop_color, next_shape_id, transform_mesh_to_screen, union_bounding_boxes, Contour,
-    FillShape, SyncCache,
-};
+use crate::vector_engine::{next_shape_id, union_bounding_boxes, Contour, FillShape, SyncCache};
 pub(crate) use crate::vector_engine::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode};
 
 // ============================================================================
@@ -1115,7 +1112,9 @@ impl Timeline {
         (!batch.is_empty()).then_some(batch)
     }
 
-    /// 指定レイヤー・フレームの描画用スクリーン `Arc<Mesh>` をその場で構築して返す
+    /// テスト用：指定レイヤー・フレームの描画用スクリーン `Arc<Mesh>` を、写しを使わずにその場で構築して返す（本番は
+    /// 写しから：`CelMeshCache::screen_mesh`。同じ `build_cel_world_batch_mesh` と `tinted_screen_mesh`）
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolved_cel_screen_mesh(
         &self,
@@ -1128,15 +1127,16 @@ impl Timeline {
         ctx: SymbolEvalCtx<'_>,
     ) -> Option<Arc<Mesh>> {
         let world_batch = self.build_cel_world_batch_mesh(layer_idx, frame, world_xform, ctx)?;
-        Some(Arc::new(transform_mesh_to_screen(
-            world_batch,
+        let tint = if dim_backdrop {
+            crate::vector_engine::CelTint::Dim
+        } else {
+            crate::vector_engine::CelTint::Plain
+        };
+        Some(Arc::new(crate::vector_engine::tinted_screen_mesh(
+            &world_batch,
             zoom,
             pan,
-            if dim_backdrop {
-                Some(&dim_backdrop_color)
-            } else {
-                None
-            },
+            tint,
         )))
     }
 }

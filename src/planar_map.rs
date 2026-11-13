@@ -1266,6 +1266,8 @@ impl LayerBase {
     }
 
     fn from_stored(stored: StoredMap) -> Self {
+        #[cfg(test)]
+        DENSE_BUILDS.with(|n| n.set(n.get() + 1));
         Self {
             map: stored.to_dense(),
             stored,
@@ -1437,6 +1439,14 @@ thread_local! {
     static FROM_SHAPES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// テスト用：このスレッドで、地図を全部確かめた回数（`valid_faces_since` の前の地図が無いとき）
     static FULL_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// テスト用：このスレッドで、しまう地図から計算に使う写しを作った回数（`LayerBase::from_stored`）
+    static DENSE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、しまう地図から計算に使う写しを作った回数
+#[cfg(test)]
+pub(crate) fn dense_builds() -> usize {
+    DENSE_BUILDS.with(|n| n.get())
 }
 
 /// テスト用：このスレッドで、地図を全部確かめた回数

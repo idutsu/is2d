@@ -2,8 +2,8 @@ use eframe::egui::{self, Color32, CursorIcon, Pos2, Stroke, Vec2};
 use kurbo::{Point, Rect as KRect};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, Clipboard, CoalesceKey,
-    NoticeKind, SelectSubMode, Tab, Tool, ToolSettings, TransformDragState,
+    active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, CelTint, Clipboard,
+    CoalesceKey, NoticeKind, SelectSubMode, Tab, Tool, ToolSettings, TransformDragState,
 };
 use crate::doc_actions::Action;
 use crate::project_io::PendingCloseConfirm;
@@ -1796,14 +1796,13 @@ pub(crate) fn draw_canvas_contents(
 ) {
     let in_group_edit = !tab.session.editing_group_path.is_empty();
     let in_symbol_edit = !tab.session.edit_path.is_empty();
-    let world_xform = tab.session.edit_path.world_xform();
     let zoom = tab.view.zoom;
     let pan = tab.view.pan;
     let stage_size = tab.doc.stage_size;
     let artwork_painter =
         tab.view
             .artwork_painter(painter, painter.clip_rect(), stage_size, in_symbol_edit);
-    tab.start_symbol_eval_pass();
+    tab.start_draw_pass();
 
     // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画（ルートでは何も返さず、キャッシュが空になる）
     if let Some(mesh) = tab.cached_backdrop_screen_mesh(zoom, pan) {
@@ -1842,17 +1841,12 @@ pub(crate) fn draw_canvas_contents(
             continue;
         }
         if timeline_ui.is_playing || is_locked {
-            if let Some(mesh) = tab.with_symbol_eval(|ctx| {
-                tl.resolved_cel_screen_mesh(
-                    layer_idx,
-                    curr_f,
-                    zoom,
-                    pan,
-                    in_group_edit && !timeline_ui.is_playing,
-                    world_xform,
-                    ctx,
-                )
-            }) {
+            let tint = if in_group_edit && !timeline_ui.is_playing {
+                CelTint::Dim
+            } else {
+                CelTint::Plain
+            };
+            if let Some(mesh) = tab.cached_cel_screen_mesh(layer_idx, curr_f, zoom, pan, tint) {
                 artwork_painter.add(arc_mesh_to_shape(mesh));
             }
             continue;
@@ -2006,7 +2000,6 @@ fn draw_selected_group_and_symbol_boxes(
 }
 
 fn draw_onion_skins(tab: &Tab, painter: &egui::Painter) {
-    tab.retain_active_onion_frames();
     let tl = tab.active_timeline();
     let curr_f = tl.current_frame;
     for step in (1..=tab.view.onion_prev_frames).rev() {

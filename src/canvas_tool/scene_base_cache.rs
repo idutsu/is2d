@@ -14,7 +14,8 @@ use crate::symbol::{
 };
 use crate::timeline::{Layer, Timeline};
 use crate::vector_engine::{
-    append_mesh, dim_backdrop_color, onion_tint_color, transform_mesh_to_screen, FillShape,
+    append_mesh, dim_backdrop_color, tinted_screen_mesh, transform_mesh_to_screen, CelTint,
+    FillShape,
 };
 use crate::vector_engine::{LayerId, ShapeId};
 
@@ -557,53 +558,45 @@ impl BackdropCache {
     }
 }
 
-struct CachedOnionCel {
+/// 画面の写しの鍵：ズーム・パン（ビット）と色の変え方
+type CelScreenKey = (u32, u32, u32, CelTint);
+
+struct CachedCel {
     layer_id: LayerId,
     eval_frame: usize,
     world_xform_bits: [u64; 6],
     cel_sig: ResolvedCelSig,
     world_mesh: Option<egui::Mesh>,
+    /// 画面座標に写したもの（止まっている間は写し直さない）と、直前の描画で使ったか
+    screens: Vec<(CelScreenKey, Arc<egui::Mesh>, bool)>,
+    /// 直前の描画で使ったか
+    used: bool,
 }
 
-/// 表示中の前後オニオンスキンフレームのワールド座標結合メッシュキャッシュ
+/// セル画を1枚の結合メッシュで描くときの写し（レイヤー・評価するコマ・変換・セル画の署名ごと）。ワールド座標の結合メッシュと、
+/// 画面座標に写したものを持つ。持つのは、直前の1回の描画で使ったものだけ（`start_pass`）。オニオンスキンと、ロック中・
+/// 再生中のレイヤーが、それぞれ1つずつ持つ（持ち主が無いと、描くたびに地図の組み立て・面・メッシュを作り直す：
+/// レビュー「軽量化・高速化」の★1）
 #[derive(Default)]
-pub(crate) struct OnionSkinCache {
-    entries: Vec<CachedOnionCel>,
+pub(crate) struct CelMeshCache {
+    entries: Vec<CachedCel>,
 }
 
-impl OnionSkinCache {
+impl CelMeshCache {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
     }
 
-    pub(crate) fn retain_active_frames(
-        &mut self,
-        tl: &Timeline,
-        library: &Library,
-        world_xform: Affine,
-        prev_frames: usize,
-        next_frames: usize,
-    ) {
-        if tl.total_frames == 0 || (prev_frames == 0 && next_frames == 0) {
-            self.entries.clear();
-            return;
+    /// 1回の描画の始めに呼ぶ：直前の描画で使わなかった写しを捨てる
+    pub(crate) fn start_pass(&mut self) {
+        self.entries.retain(|e| e.used);
+        for e in &mut self.entries {
+            e.used = false;
+            e.screens.retain(|s| s.2);
+            for s in &mut e.screens {
+                s.2 = false;
+            }
         }
-        let xform_bits = world_xform.as_coeffs().map(f64::to_bits);
-        let curr_f = tl.current_frame;
-        let min_f = curr_f.saturating_sub(prev_frames);
-        let max_f = (curr_f + next_frames).min(tl.total_frames.saturating_sub(1));
-        self.entries.retain(|e| {
-            e.world_xform_bits == xform_bits
-                && tl.layers.iter().any(|layer| {
-                    layer.visible
-                        && layer.id == e.layer_id
-                        && (min_f..=max_f).any(|f| {
-                            layer.keyframe_index_at(f).is_some_and(|kf_idx| {
-                                layer_eval_frame(layer, kf_idx, f, library, None) == e.eval_frame
-                            })
-                        })
-                })
-        });
     }
 
     #[cfg(test)]
@@ -611,8 +604,11 @@ impl OnionSkinCache {
         self.entries.len()
     }
 
+    /// レイヤー `layer_idx` のコマ `frame` のセル画を、変換 `world_xform`・ズーム `zoom`・パン `pan`・色の変え方 `tint` で
+    /// 描く画面座標の結合メッシュ（`Timeline::build_cel_world_batch_mesh` を画面に写したもの）。セル画が変わらなければ
+    /// 作り直さず、ズーム・パン・色の変え方も同じなら写し直さない
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn cached_screen_mesh(
+    pub(crate) fn screen_mesh(
         &mut self,
         tl: &Timeline,
         ctx: SymbolEvalCtx<'_>,
@@ -621,7 +617,7 @@ impl OnionSkinCache {
         world_xform: Affine,
         zoom: f32,
         pan: Vec2,
-        (tint_rgb, alpha): ([u8; 3], u8),
+        tint: CelTint,
     ) -> Option<Arc<egui::Mesh>> {
         let layer = tl.layers.get(layer_idx)?;
         let kf_idx = layer.keyframe_index_at(frame)?;
@@ -644,21 +640,29 @@ impl OnionSkinCache {
                 .retain(|e| !(e.layer_id == layer.id && e.eval_frame == ef));
             let cel_sig = compute_resolved_cel_signature(layer, kf_idx, None, library);
             let world_mesh = tl.build_cel_world_batch_mesh(layer_idx, frame, world_xform, ctx);
-            self.entries.push(CachedOnionCel {
+            self.entries.push(CachedCel {
                 layer_id: layer.id,
                 eval_frame: ef,
                 world_xform_bits: xform_bits,
                 cel_sig,
                 world_mesh,
+                screens: Vec::new(),
+                used: false,
             });
             self.entries.len() - 1
         };
-        let world_batch = self.entries[idx].world_mesh.as_ref()?;
-        Some(Arc::new(transform_mesh_to_screen(
-            world_batch.clone(),
-            zoom,
-            pan,
-            Some(&|c| onion_tint_color(c, tint_rgb, alpha)),
-        )))
+        let entry = &mut self.entries[idx];
+        entry.used = true;
+        let world_batch = entry.world_mesh.as_ref()?;
+        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits(), tint);
+        if let Some(s) = entry.screens.iter_mut().find(|s| s.0 == key) {
+            s.2 = true;
+            return Some(Arc::clone(&s.1));
+        }
+        let mesh = Arc::new(tinted_screen_mesh(world_batch, zoom, pan, tint));
+        // ズーム・パンが変わった古い写しは、同じ色の変え方なら置き換える（パン・ズームの間に写しを溜めない）
+        entry.screens.retain(|s| s.0 .3 != tint);
+        entry.screens.push((key, Arc::clone(&mesh), true));
+        Some(mesh)
     }
 }

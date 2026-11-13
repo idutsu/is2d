@@ -718,8 +718,9 @@ mod cel_writes;
 mod scene_base_cache;
 pub(crate) use self::cel_writes::*;
 
+pub(crate) use crate::vector_engine::CelTint;
 pub(crate) use scene_base_cache::SceneBaseCache;
-use scene_base_cache::{BackdropCache, OnionSkinCache};
+use scene_base_cache::{BackdropCache, CelMeshCache};
 
 /// `Overlay` で追加する図形の重なり順指定
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1140,8 +1141,10 @@ pub(crate) struct Session {
     pub(crate) edit_path: EditPath,
     /// シンボル編集中の親シーン背景薄表示のレイヤー単位キャッシュ
     pub(crate) backdrop_cache: SyncCache<BackdropCache>,
-    /// 表示中の前後オニオンスキンフレームのレイヤー単位結合メッシュキャッシュ
-    pub(crate) onion_cache: SyncCache<OnionSkinCache>,
+    /// オニオンスキンで描くセル画の結合メッシュの写し
+    pub(crate) onion_cache: SyncCache<CelMeshCache>,
+    /// ロック中・再生中のレイヤーのセル画の結合メッシュの写し
+    pub(crate) cel_cache: SyncCache<CelMeshCache>,
     /// 描くたびのシンボルの評価（オニオンスキン・再生・ロック中のレイヤー）で使い回す、シンボルの中身のメモ
     pub(crate) symbol_memo: SyncCache<SymbolEvalState>,
     /// `Document` から構築されるレイヤー別の読み取り専用土台キャッシュ
@@ -2072,50 +2075,62 @@ impl Tab {
         self.session.onion_cache.lock().clear();
     }
 
-    /// 現在表示中の前後オニオンスキン範囲外の結合メッシュキャッシュを破棄する
-    pub(crate) fn retain_active_onion_frames(&self) {
-        let tl = self.active_timeline();
-        let world_xform = self.session.edit_path.world_xform();
-        self.session.onion_cache.lock().retain_active_frames(
-            tl,
-            &self.doc.library,
-            world_xform,
-            self.view.onion_prev_frames,
-            self.view.onion_next_frames,
-        );
-    }
-
-    /// 指定レイヤー・フレームのオニオンスキン描画用スクリーン `Arc<Mesh>` をセッションキャッシュ経由で返す
+    /// オニオンスキンで描くセル画（レイヤー `layer_idx`・コマ `frame`）の画面座標の結合メッシュ（写しから：`CelMeshCache`）
     pub(crate) fn cached_onion_cel_screen_mesh(
         &self,
         layer_idx: usize,
         frame: usize,
         zoom: f32,
         pan: Vec2,
-        tint_alpha: ([u8; 3], u8),
+        (tint_rgb, alpha): ([u8; 3], u8),
+    ) -> Option<Arc<egui::Mesh>> {
+        self.cel_screen_mesh(
+            &self.session.onion_cache,
+            layer_idx,
+            frame,
+            (zoom, pan),
+            CelTint::Onion(tint_rgb, alpha),
+        )
+    }
+
+    /// ロック中・再生中のレイヤー `layer_idx` のコマ `frame` のセル画の画面座標の結合メッシュ（写しから：`CelMeshCache`）
+    pub(crate) fn cached_cel_screen_mesh(
+        &self,
+        layer_idx: usize,
+        frame: usize,
+        zoom: f32,
+        pan: Vec2,
+        tint: CelTint,
+    ) -> Option<Arc<egui::Mesh>> {
+        self.cel_screen_mesh(&self.session.cel_cache, layer_idx, frame, (zoom, pan), tint)
+    }
+
+    fn cel_screen_mesh(
+        &self,
+        cache: &SyncCache<CelMeshCache>,
+        layer_idx: usize,
+        frame: usize,
+        (zoom, pan): (f32, Vec2),
+        tint: CelTint,
     ) -> Option<Arc<egui::Mesh>> {
         let tl = self.active_timeline();
         let world_xform = self.session.edit_path.world_xform();
         self.with_symbol_eval(|ctx| {
-            self.session.onion_cache.lock().cached_screen_mesh(
-                tl,
-                ctx,
-                layer_idx,
-                frame,
-                world_xform,
-                zoom,
-                pan,
-                tint_alpha,
-            )
+            cache
+                .lock()
+                .screen_mesh(tl, ctx, layer_idx, frame, world_xform, zoom, pan, tint)
         })
     }
 
-    /// 1回の描画の始めに呼ぶ（`SymbolEvalState::start_pass`）
-    pub(crate) fn start_symbol_eval_pass(&self) {
+    /// 1回の描画の始めに呼ぶ：シンボルの中身のメモ（`SymbolEvalState::start_pass`）と、セル画の結合メッシュの写し
+    /// （`CelMeshCache::start_pass`）の、直前の描画で使わなかったものを捨てる
+    pub(crate) fn start_draw_pass(&self) {
         self.session
             .symbol_memo
             .lock()
             .start_pass(&self.doc.library);
+        self.session.onion_cache.lock().start_pass();
+        self.session.cel_cache.lock().start_pass();
     }
 
     /// 描くたびのシンボルの評価を、セッションのメモ（`Session::symbol_memo`）を使って行う

@@ -3242,9 +3242,8 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
     let m_onion_2 = grp_sym_app
         .cached_onion_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, ([35, 175, 105], 90))
         .unwrap();
-    assert!(
-        !std::sync::Arc::ptr_eq(&m_onion_1, &m_onion_2) && m_onion_1.vertices == m_onion_2.vertices
-    );
+    // ズーム・パン・色の変え方が同じなら、画面に写したものも写しから返す（写し直さない）
+    assert!(std::sync::Arc::ptr_eq(&m_onion_1, &m_onion_2));
 
     let second_sym_shapes = make_stroke(
         Point::new(10.0, 10.0),
@@ -27222,8 +27221,7 @@ mod map_overlay {
                         *app.session.symbol_memo.lock() = Default::default();
                     }
                     let t = std::time::Instant::now();
-                    app.start_symbol_eval_pass();
-                    app.retain_active_onion_frames();
+                    app.start_draw_pass();
                     let tl = app.active_timeline();
                     let (lo, hi) = (f.saturating_sub(span), (f + span).min(tl.total_frames - 1));
                     let n_layers = tl.layers.len();
@@ -29443,4 +29441,38 @@ fn measure_many_holes() {
         let bucket = t.elapsed().as_secs_f64() * 1e3;
         eprintln!("n {n}: valid_faces {check:.1}ms, bucket {bucket:.1}ms (filled {filled})");
     }
+}
+
+/// ★1（レビュー「軽量化・高速化」）：ロック中のレイヤーを描き直すとき、セル画が変わらなければ、しまう地図から計算に
+/// 使う写しを作り直さない（セル画の結合メッシュの写しを持つ：`CelMeshCache`）。再生中も同じ
+#[test]
+fn redrawing_a_locked_layer_does_not_rebuild_its_map() {
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(300.0, 160.0),
+            10.0,
+            Color32::from_rgb(220, 60, 60),
+        ),
+    );
+    app.tab_mut().doc.root.layers[0].locked = true;
+    app.tab_mut().refresh_scene_base();
+    let ctx = egui::Context::default();
+    let raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 820.0),
+        )),
+        ..Default::default()
+    };
+    let _ = ctx.run(raw_input.clone(), |ctx| app.update_ui(ctx));
+    let before = crate::planar_map::dense_builds();
+    for _ in 0..3 {
+        let _ = ctx.run(raw_input.clone(), |ctx| app.update_ui(ctx));
+    }
+    assert_eq!(crate::planar_map::dense_builds(), before);
 }

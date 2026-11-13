@@ -5,6 +5,7 @@ use std::sync::Arc;
 use eframe::egui::Vec2;
 
 use crate::canvas_tool::View;
+use crate::planar_map::LayerBase;
 use crate::symbol::Document;
 
 /// OS ごとの H.264 MP4 動画エンコーダの共通インターフェース
@@ -47,7 +48,31 @@ pub(crate) fn export_dimensions(stage_size: Vec2) -> (u32, u32) {
 }
 
 /// ルートのタイムラインの指定コマ `frame` を RGBA 画像（`width * height * 4` バイト、白背景、アルファ 255）に塗る
+#[cfg(test)]
 pub(crate) fn render_frame(doc: &Document, frame: usize, width: u32, height: u32) -> Vec<u8> {
+    render_frame_holding(doc, frame, width, height).0
+}
+
+/// `render_frame` と、塗るときに展開したセル画の地図の計算に使う写し。写しを次のコマを塗る間まで持てば、同じキーフレームの
+/// 地図を作り直さない（写しは、それを使う所が持つ：レビュー「軽量化・高速化」の★1）
+fn render_frame_holding(
+    doc: &Document,
+    frame: usize,
+    width: u32,
+    height: u32,
+) -> (Vec<u8>, Vec<Arc<LayerBase>>) {
+    let ctx = crate::symbol::SymbolEvalCtx::new(&doc.library).without_mesh();
+    let rgba = paint_frame(doc, frame, width, height, &ctx);
+    (rgba, ctx.into_state().take_held())
+}
+
+fn paint_frame(
+    doc: &Document,
+    frame: usize,
+    width: u32,
+    height: u32,
+    ctx: &crate::symbol::SymbolEvalCtx<'_>,
+) -> Vec<u8> {
     let Some(mut pixmap) = tiny_skia::Pixmap::new(width, height) else {
         return vec![255; (width as usize) * (height as usize) * 4];
     };
@@ -62,11 +87,7 @@ pub(crate) fn render_frame(doc: &Document, frame: usize, width: u32, height: u32
         if !layer.visible {
             continue;
         }
-        let shapes = layer.evaluate_shapes_at(
-            (frame, frame),
-            layer.id,
-            crate::symbol::SymbolEvalCtx::new(&doc.library).without_mesh(),
-        );
+        let shapes = layer.evaluate_shapes_at((frame, frame), layer.id, ctx.clone());
         for shape in &shapes {
             if shape.is_empty_symbol_marker() {
                 continue;
@@ -246,16 +267,25 @@ pub(crate) fn render_frames_in_order(
     mut push: impl FnMut(usize, &[u8]) -> Result<(), String>,
 ) -> VideoExportOutcome {
     let total_frames = doc.root.total_frames.max(1);
+    // 前の組のコマで展開した地図の写し（次の組を塗る間持つので、続くコマの同じキーフレームの地図を作り直さない）
+    let mut held: Vec<Arc<LayerBase>> = Vec::new();
     for first in (0..total_frames).step_by(threads) {
         if cancel_flag.load(Ordering::Acquire) {
             return VideoExportOutcome::Cancelled;
         }
-        let frames: Vec<Vec<u8>> = std::thread::scope(|scope| {
+        let rendered: Vec<(Vec<u8>, Vec<Arc<LayerBase>>)> = std::thread::scope(|scope| {
             let handles: Vec<_> = (first..(first + threads).min(total_frames))
-                .map(|frame| scope.spawn(move || render_frame(doc, frame, width, height)))
+                .map(|frame| scope.spawn(move || render_frame_holding(doc, frame, width, height)))
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
+        let (frames, bases): (Vec<Vec<u8>>, Vec<Vec<Arc<LayerBase>>>) =
+            rendered.into_iter().unzip();
+        // 前の組の写しは、この組を塗り終えてから手放す
+        drop(std::mem::replace(
+            &mut held,
+            bases.into_iter().flatten().collect(),
+        ));
         if cancel_flag.load(Ordering::Acquire) {
             return VideoExportOutcome::Cancelled;
         }

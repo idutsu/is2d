@@ -1148,6 +1148,29 @@ pub(crate) fn onion_tint_color(c: Color32, tint_rgb: [u8; 3], alpha: u8) -> Colo
     )
 }
 
+/// セル画を1枚の結合メッシュで描くときの、色の変え方
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CelTint {
+    /// そのまま
+    Plain,
+    /// グループ・シンボルの編集中の、ほかの所の薄い表示（`dim_backdrop_color`）
+    Dim,
+    /// オニオンスキン（色と不透明度：`onion_tint_color`）
+    Onion([u8; 3], u8),
+}
+
+/// ワールド座標の結合メッシュ `world` を、ズーム `zoom`・パン `pan` の画面座標に写し、色を `tint` で変えたもの
+pub(crate) fn tinted_screen_mesh(world: &Mesh, zoom: f32, pan: Vec2, tint: CelTint) -> Mesh {
+    let mesh = world.clone();
+    match tint {
+        CelTint::Plain => transform_mesh_to_screen(mesh, zoom, pan, None),
+        CelTint::Dim => transform_mesh_to_screen(mesh, zoom, pan, Some(&dim_backdrop_color)),
+        CelTint::Onion(rgb, alpha) => {
+            transform_mesh_to_screen(mesh, zoom, pan, Some(&|c| onion_tint_color(c, rgb, alpha)))
+        }
+    }
+}
+
 /// 座標 (`x`, `y`) を、ズーム `zoom`・パン `pan` の画面の座標にする（画面に写す式はこれ1つ）
 #[inline]
 pub(crate) fn to_screen(x: f32, y: f32, zoom: f32, pan: Vec2) -> Pos2 {
