@@ -28506,3 +28506,72 @@ fn loading_checks_scopes_and_reports_every_trim() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 計測：線の多いセル画へ貼り付けた片の確定（選択を外す）の重さ。片の線とセル画の線を別々に2倍にして比べる
+#[test]
+#[ignore]
+fn measure_commit_on_dense_cels() {
+    use crate::doc_actions::{apply, Action};
+    use std::time::Instant;
+    let ctx = eframe::egui::Context::default();
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    let strokes = |n: usize, seed: u64, x0: f64, w: f64| -> Vec<FillShape> {
+        let mut s = seed;
+        let mut rnd = move || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 33) as f64) / ((1u64 << 31) as f64)
+        };
+        let mut out = Vec::new();
+        for k in 0..n {
+            let p0 = Point::new(x0 + rnd() * w, 100.0 + rnd() * 600.0);
+            let p1 = Point::new(x0 + rnd() * w, 100.0 + rnd() * 600.0);
+            out.extend(make_stroke(
+                p0,
+                p1,
+                (4.0 + rnd() * 6.0) as f32,
+                colors[k % colors.len()],
+            ));
+        }
+        out
+    };
+    let run = |cel_n: usize, piece_n: usize| -> (f64, usize, usize) {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(&mut app, 0, 0, strokes(cel_n, 7, 100.0, 600.0));
+        let cel_edges: usize = app
+            .scene()
+            .iter()
+            .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+            .sum();
+        crate::project_io::new_project(&mut app, &ctx);
+        put_cel_shapes(&mut app, 0, 0, strokes(piece_n, 11, 300.0, 200.0));
+        let piece_edges: usize = app
+            .scene()
+            .iter()
+            .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+            .sum();
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::Copy));
+        crate::project_io::switch_to_tab(&mut app, 0, Some(&ctx));
+        let mut times = Vec::new();
+        for _ in 0..7 {
+            assert!(apply(&mut app, Action::Paste { in_place: true }));
+            let t = Instant::now();
+            assert!(canvas_tool::clear_selection(&mut app));
+            times.push(t.elapsed().as_secs_f64() * 1e3);
+            assert!(apply(&mut app, Action::Undo));
+        }
+        times.sort_by(f64::total_cmp);
+        (times[times.len() / 2], cel_edges, piece_edges)
+    };
+    for (cel_n, piece_n) in [(200, 40), (400, 40), (200, 80), (800, 40), (200, 160)] {
+        let (ms, ce, pe) = run(cel_n, piece_n);
+        eprintln!("cel {cel_n} strokes ({ce} segs), piece {piece_n} strokes ({pe} segs): commit {ms:.2}ms");
+    }
+}
