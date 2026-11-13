@@ -799,7 +799,7 @@ fn write_overlay_edit(
     let written = edit_layer_map(tab, layer_id, |base| {
         let next = overlay(base);
         off_grid = next.is_none();
-        next
+        next.and_then(crate::planar_map::PlanarMap::written)
     });
     if off_grid {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
@@ -928,7 +928,9 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
     // 地図は文書の座標なので、点も文書の座標へ写す
     let doc_pt = tab.session.edit_path.world_xform().inverse() * pt;
     edit_layer_map(tab, target_lid, |base| {
-        base.map.with_face_filled(doc_pt, fill_color)
+        base.map
+            .with_face_filled(doc_pt, fill_color)
+            .and_then(crate::planar_map::PlanarMap::written)
     })
 }
 
@@ -1018,7 +1020,6 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         for (layer_id, group_path) in &scopes {
             if write_scope_map(tab, *layer_id, group_path, |base| {
                 crate::planar_map::realized(&base.map, doc)
-                    .map(crate::planar_map::CheckedMap::into_map)
             }) && !written.contains(layer_id)
             {
                 written.push(*layer_id);
@@ -1126,7 +1127,11 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
             write_overlay_edit(tab, layer_id, |base| map_edit.apply(&base.map))
         }
         MapEdit::AddAnchor { .. } | MapEdit::DeleteAnchor { .. } => {
-            edit_layer_map(tab, layer_id, |base| map_edit.apply(&base.map))
+            edit_layer_map(tab, layer_id, |base| {
+                map_edit
+                    .apply(&base.map)
+                    .and_then(crate::planar_map::PlanarMap::written)
+            })
         }
     };
     if changed {

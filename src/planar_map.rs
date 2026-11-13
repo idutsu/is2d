@@ -700,12 +700,8 @@ impl PlanarMap {
         grab_t: f64,
         target: Point,
     ) -> Option<PlanarMap> {
-        let q = self.quad(e);
-        let ctrl = q.p1 + (target - q.eval(grab_t)) / (2.0 * grab_t * (1.0 - grab_t));
-        self.overlay(
-            MapInput::Sweep(&[(e, QuadBez::new(q.p0, ctrl, q.p2))]),
-            MapRule::Sweep,
-        )
+        let pulled = pulled_quad(self.quad(e), grab_t, target);
+        self.overlay(MapInput::Sweep(&[(e, pulled)]), MapRule::Sweep)
     }
 
     /// 地図を座標の変換 `xform` で置いたとき、`p` から `r` 以内でいちばん近い頂点（距離は置いた座標で測る）
@@ -1174,19 +1170,25 @@ pub(crate) fn test_checks() -> bool {
     *ON.get_or_init(|| std::env::var("IS2D_NO_CHECKS").is_err())
 }
 
-/// 図形に書き戻す地図 `next` の面。正しい地図でなければ（`valid_faces`：読み込みと同じ1つの判定）`None` を返し、書き戻さずに
-/// 断る（書けた地図は、保存して開いても必ず読める）。テストでは、正しい地図でない結果を作った操作を、そこで見つける
-fn written_faces(next: &PlanarMap) -> Option<Vec<MapFace>> {
-    let faces = next.valid_faces();
-    #[cfg(test)]
-    if test_checks() {
-        assert!(
-            faces.is_some(),
-            "書き戻す地図が正しい地図でない: {}",
-            next.validity_report()
-        );
+impl PlanarMap {
+    /// 編集で作った、セル画に書き戻す地図を確かめたもの（`valid_faces`：読み込みと同じ1つの判定）。確かめは地図を作った所
+    /// でこの1回だけで、書き戻し（`LayerBase::diff`）は確かめた地図を受け取る。`None`：正しい地図でない（書き戻さずに断る。
+    /// 書けた地図は、保存して開いても必ず読める）。テストでは、正しい地図でない結果を作った操作を、そこで見つける
+    pub(crate) fn written(self) -> Option<CheckedMap> {
+        let faces = self.valid_faces();
+        #[cfg(test)]
+        if test_checks() {
+            assert!(
+                faces.is_some(),
+                "書き戻す地図が正しい地図でない: {}",
+                self.validity_report()
+            );
+        }
+        Some(CheckedMap {
+            map: self,
+            faces: faces?,
+        })
     }
-    faces
 }
 
 // ============================================================================
@@ -1302,33 +1304,35 @@ impl LayerBase {
         Some(Arc::new(base))
     }
 
-    /// この地図（文書の座標）の面の図形 `own` に、編集した地図 `next` を書き戻す差分（`MapChange`。新しい形も文書の座標。
-    /// 変わらない面は前の図形のまま：`rewrite_shapes`）。`None`：`next` に壊れた輪郭がある（`written_faces`）
+    /// この地図（文書の座標）の面の図形 `own` に、編集して確かめた地図 `next`（`PlanarMap::written` か `realized`）を
+    /// 書き戻す差分（`MapChange`。新しい形も文書の座標。変わらない面は前の図形のまま：`rewrite_shapes`）
     pub(crate) fn diff(
         &self,
-        next: &PlanarMap,
+        next: CheckedMap,
         own: &[&FillShape],
         layer_id: LayerId,
         group_path: &[u64],
-    ) -> Option<MapChange> {
-        let faces = written_faces(next)?;
+    ) -> MapChange {
         let keys = self.keys.get_or_init(|| {
             (0..self.map.edges.len())
                 .map(|e| edge_key(&self.map, e))
                 .collect()
         });
-        let (removed, added, ids) =
-            rewrite_shapes(&self.map, keys, next, &faces, own, layer_id, group_path);
-        Some(MapChange {
+        let (removed, added, ids) = rewrite_shapes(
+            &self.map,
+            keys,
+            &next.map,
+            &next.faces,
+            own,
+            layer_id,
+            group_path,
+        );
+        MapChange {
             removed,
             added,
-            map: CheckedMap {
-                map: next.clone(),
-                faces,
-            }
-            .with_ids(&ids),
+            map: next.with_ids(&ids),
             ids,
-        })
+        }
     }
 
     /// テスト用：`diff` を、座標の変換 `xform` で置いた図形 `own`（文書の無い、ただの図形の並び。この地図は `LayerBase::of`
@@ -1337,7 +1341,7 @@ impl LayerBase {
     #[cfg(test)]
     pub(crate) fn diff_placed(
         &self,
-        next: &PlanarMap,
+        next: CheckedMap,
         own: &[&FillShape],
         layer_id: LayerId,
         group_path: &[u64],
@@ -1345,21 +1349,17 @@ impl LayerBase {
     ) -> Option<MapChange> {
         let mut change = with_doc_shapes(own, xform, |own| {
             if PlanarMap::from_faces(own.iter().copied()).is_valid() {
-                return self.diff(next, own, layer_id, group_path);
+                return Some(self.diff(next, own, layer_id, group_path));
             }
-            let faces = written_faces(next)?;
-            let added: Vec<FillShape> = faces
+            let added: Vec<FillShape> = next
+                .faces
                 .iter()
-                .map(|f| next.face_shape(f, layer_id, group_path))
+                .map(|f| next.map.face_shape(f, layer_id, group_path))
                 .collect();
             let ids: Vec<ShapeId> = added.iter().map(|s| s.shape_id).collect();
             Some(MapChange {
                 removed: own.iter().map(|s| s.shape_id).collect(),
-                map: CheckedMap {
-                    map: next.clone(),
-                    faces,
-                }
-                .with_ids(&ids),
+                map: next.with_ids(&ids),
                 added,
                 ids,
             })
@@ -1600,8 +1600,8 @@ pub(crate) fn reshape_result(
     group_path: &[u64],
     xform: Affine,
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
-    let next = edit.apply(&base.map)?;
-    let change = base.diff(&next, own, layer_id, group_path)?;
+    let next = edit.apply(&base.map)?.written()?;
+    let change = base.diff(next, own, layer_id, group_path);
     Some((
         change.removed,
         change.added.into_iter().map(|d| placed(d, xform)).collect(),
@@ -1752,19 +1752,52 @@ impl PlanarMap {
 
     /// 面の番号が `ids` にある面の色を `color` にした地図（同じ色でとなり合う面の間の辺は消え、面は1つになる）
     pub(crate) fn recolored(&self, ids: &HashSet<ShapeId>, color: Color32) -> PlanarMap {
+        let sides = self.edges.iter().enumerate().flat_map(|(i, e)| {
+            [(i, true, e.left_src), (i, false, e.right_src)]
+                .into_iter()
+                .filter(|(_, _, src)| src.is_some_and(|id| ids.contains(&id)))
+                .map(|(i, left, _)| (i, left))
+        });
+        self.with_sides_colored(sides, color)
+    }
+
+    /// 辺の側 `sides`（辺の番号と、左の側なら `true`）の色を `color` にした地図。面の色を変えるのはみなこれ（選んだ面の
+    /// 塗り替え `recolored`・バケツ `with_face_filled`）。両側が同じ色になった辺は外し、外した辺の端を、2本だけが
+    /// つながる頂点をまとめる候補にする（`merge_degree2`）
+    fn with_sides_colored(
+        &self,
+        sides: impl IntoIterator<Item = (usize, bool)>,
+        color: Color32,
+    ) -> PlanarMap {
         let mut m = self.clone();
-        for e in &mut m.edges {
-            if e.left_src.is_some_and(|id| ids.contains(&id)) {
-                e.left = Some(color);
-            }
-            if e.right_src.is_some_and(|id| ids.contains(&id)) {
-                e.right = Some(color);
+        for (i, left) in sides {
+            if left {
+                m.edges[i].left = Some(color);
+            } else {
+                m.edges[i].right = Some(color);
             }
         }
+        let dropped_ends: Vec<usize> = m
+            .edges
+            .iter()
+            .filter(|e| e.left == e.right)
+            .flat_map(|e| [e.a, e.b])
+            .collect();
         m.edges.retain(|e| e.left != e.right);
+        m.merge_degree2(dropped_ends);
         m.compact_nodes();
         m
     }
+}
+
+/// 曲線 `q` の `t` の所を `target` へ引っぱった曲線（両端は動かさず、制御点を動かす。輪郭のつまみの決まり。確定
+/// `commit_pull_edge` とドラッグ中の表示が同じこれを使う）
+pub(crate) fn pulled_quad(q: QuadBez, t: f64, target: Point) -> QuadBez {
+    QuadBez::new(
+        q.p0,
+        q.p1 + (target - q.eval(t)) / (2.0 * t * (1.0 - t)),
+        q.p2,
+    )
 }
 
 /// 地図 `map`（文書の座標）に変換 `xform` をかけ、その座標の格子で正しい地図にしたもの。変換した地図が正しくなければ
@@ -1986,10 +2019,10 @@ pub(crate) fn cut_out(
     layer_id: LayerId,
     group_path: &[u64],
 ) -> Option<(MapChange, MapChange)> {
-    let inside = content.overlay(region, MapRule::KeepInside)?;
-    let rest = content.overlay(region, MapRule::Paint(None))?;
-    let rest_change = cel.diff(&rest, own, layer_id, group_path)?;
-    let mut inside_change = cel.diff(&inside, own, layer_id, group_path)?;
+    let inside = content.overlay(region, MapRule::KeepInside)?.written()?;
+    let rest = content.overlay(region, MapRule::Paint(None))?.written()?;
+    let rest_change = cel.diff(rest, own, layer_id, group_path);
+    let mut inside_change = cel.diff(inside, own, layer_id, group_path);
     inside_change.renew_ids();
     Some((rest_change, inside_change))
 }
@@ -2043,7 +2076,7 @@ pub(crate) enum MapEditOutcome {
     Changed(MapChange),
     /// 形が変わらない
     Unchanged,
-    /// 地図にできない（格子に置けない座標がある：±65,536px の外）か、結果に壊れた輪郭がある（`written_faces`）
+    /// 地図にできない（格子に置けない座標がある：±65,536px の外）か、結果に壊れた輪郭がある（`PlanarMap::written`）
     Refused,
 }
 
@@ -2062,8 +2095,9 @@ pub(crate) fn map_edit_diff(
     let Some(base) = LayerBase::of(&own, xform) else {
         return MapEditOutcome::Refused;
     };
-    let Some(change) =
-        edit(&base.map).and_then(|next| base.diff_placed(&next, &own, layer_id, group_path, xform))
+    let Some(change) = edit(&base.map)
+        .and_then(PlanarMap::written)
+        .and_then(|next| base.diff_placed(next, &own, layer_id, group_path, xform))
     else {
         return MapEditOutcome::Refused;
     };

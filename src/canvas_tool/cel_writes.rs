@@ -56,7 +56,7 @@ pub(crate) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
 pub(crate) fn edit_layer_map(
     tab: &mut Tab,
     layer_id: LayerId,
-    f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::PlanarMap>,
+    f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::CheckedMap>,
 ) -> bool {
     let scope = tab.session.editing_group_path.clone();
     edit_scope_map(tab, layer_id, &scope, f)
@@ -67,7 +67,7 @@ pub(crate) fn edit_scope_map(
     tab: &mut Tab,
     layer_id: LayerId,
     scope: &[u64],
-    f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::PlanarMap>,
+    f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::CheckedMap>,
 ) -> bool {
     let written: Vec<LayerId> = write_scope_map(tab, layer_id, scope, f)
         .then_some(layer_id)
@@ -84,7 +84,7 @@ pub(crate) fn write_scope_map(
     tab: &mut Tab,
     layer_id: LayerId,
     scope: &[u64],
-    f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::PlanarMap>,
+    f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::CheckedMap>,
 ) -> bool {
     let mut held = None;
     let written = write_cel(tab, layer_id, |cel| match cel.edit_map(scope, f) {
@@ -343,7 +343,8 @@ pub(crate) fn merge_pieces_layer_by_layer(
         let change = base
             .map
             .overlay(MapInput::Map(&piece.map), MapRule::Overlay)
-            .and_then(|next| base.diff_placed(&next, &own, layer_id, &scope, xform));
+            .and_then(crate::planar_map::PlanarMap::written)
+            .and_then(|next| base.diff_placed(next, &own, layer_id, &scope, xform));
         if let Some(change) = change {
             apply_map_change(base_shapes, change, layer_id, &scope);
         }
@@ -368,8 +369,8 @@ pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
         let cache = &tab.session.base_cache;
         crate::planar_map::per_layer_parallel(fl.layers(), |l| {
             let cel = cache.cel(l.layer_id)?;
-            let next = l.committed(&cel.scope_base(&scope))?;
-            Some(cel.outcome(&scope, &next))
+            let next = l.committed(&cel.scope_base(&scope))?.written()?;
+            Some(cel.outcome(&scope, next))
         })
     };
     let mut plan = CommitPlan::new();

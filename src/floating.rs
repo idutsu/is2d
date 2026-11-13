@@ -503,9 +503,10 @@ impl Floating {
             }
             let faces = cel.faces(stage.scope);
             let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
-            let Some(change) = cel.diff(&rest, &own, layer_id, stage.scope) else {
+            let Some(rest) = rest.written() else {
                 return false;
             };
+            let change = cel.diff(rest, &own, layer_id, stage.scope);
             l.origin = Origin::of(change, &cel.stored);
             l.groups = kept;
         }
@@ -598,7 +599,7 @@ fn cut_layer(
         (None, None) => return Some(cur.clone()),
         // 面を丸ごと持ち上げる：中身から、その面を外す（面の番号はそのまま。片は前と同じ番号の図形）
         (Some(part), None) => (
-            cel.diff(&content.without(ids), &own, layer_id, stage.scope)?,
+            cel.diff(content.without(ids).written()?, &own, layer_id, stage.scope),
             part,
         ),
         (part, Some(r)) => {

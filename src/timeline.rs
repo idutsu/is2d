@@ -282,7 +282,7 @@ impl ScopeMap {
 pub(crate) enum MapOutcome {
     /// 変わらない
     Same,
-    /// 書けない（結果が正しい地図でない・面と図形が1対1にならない）
+    /// 書けない（面と図形が1対1にならない。結果が正しい地図かは、地図を作った所で確かめてある：`PlanarMap::written`）
     Refused,
     /// 書く地図と、その面の図形（`Cel::put_map` に渡す）
     Changed(CheckedMap, Vec<Arc<FillShape>>),
@@ -1063,13 +1063,11 @@ impl Cel {
 
     /// 階層 `group_path` の地図を `next`（文書の座標）にするとき、何を書くか（文書を変えない）。面の図形は、変わらない面は
     /// 前の図形のまま、形の変わった面は番号を引き継いだ新しい図形（`LayerBase::diff`）
-    pub(crate) fn outcome(&self, group_path: &[u64], next: &PlanarMap) -> MapOutcome {
+    pub(crate) fn outcome(&self, group_path: &[u64], next: CheckedMap) -> MapOutcome {
         let base = self.scope_base(group_path);
         let faces = base.faces(group_path);
         let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
-        let Some(change) = base.diff(next, &own, 0, group_path) else {
-            return MapOutcome::Refused;
-        };
+        let change = base.diff(next, &own, 0, group_path);
         if change.removed.is_empty() && change.added.is_empty() {
             return MapOutcome::Same;
         }
@@ -1079,15 +1077,15 @@ impl Cel {
         }
     }
 
-    /// 地図の編集：階層 `group_path` の地図（文書の座標）を `f` で編集し、返った地図をしまう（`outcome`・`put_map`）。
-    /// `None`：変わらない・編集できない
+    /// 地図の編集：階層 `group_path` の地図（文書の座標）を `f` で編集し、返った確かめた地図（`PlanarMap::written` か
+    /// `realized`）をしまう（`outcome`・`put_map`）。`None`：変わらない・編集できない
     pub(crate) fn edit_map(
         &mut self,
         group_path: &[u64],
-        f: impl FnOnce(&LayerBase) -> Option<PlanarMap>,
+        f: impl FnOnce(&LayerBase) -> Option<CheckedMap>,
     ) -> Option<MapWritten> {
         let next = f(&self.scope_base(group_path))?;
-        match self.outcome(group_path, &next) {
+        match self.outcome(group_path, next) {
             MapOutcome::Changed(map, shapes) => {
                 Some(MapWritten(self.put_map(group_path, map, shapes)))
             }

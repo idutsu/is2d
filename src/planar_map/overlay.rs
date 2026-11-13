@@ -275,7 +275,7 @@ impl PlanarMap {
         }));
         move |p| {
             let g = gpt(p);
-            segs.at((2 * g.0, 2 * g.1))
+            segs.at((2 * g.0, 2 * g.1)).flatten()
         }
     }
 
@@ -303,27 +303,9 @@ impl PlanarMap {
         if *group_color == Some(color) {
             return None;
         }
-        let mut m = self.clone();
-        for &k in ids {
-            for &(i, forward) in &regions.cycles[k] {
-                if forward {
-                    m.edges[i].left = Some(color);
-                } else {
-                    m.edges[i].right = Some(color);
-                }
-            }
-        }
-        // 色を変えて消えた境目の端が、2本だけがつながる頂点をまとめる候補（`merge_degree2`）
-        let dropped_ends: Vec<usize> = m
-            .edges
-            .iter()
-            .filter(|e| e.left == e.right)
-            .flat_map(|e| [e.a, e.b])
-            .collect();
-        m.edges.retain(|e| e.left != e.right);
-        m.merge_degree2(dropped_ends);
-        m.compact_nodes();
-        Some(m)
+        // 組の面の輪郭の、面の側（向きどおりなら左）
+        let sides = ids.iter().flat_map(|&k| regions.cycles[k].iter().copied());
+        Some(self.with_sides_colored(sides, color))
     }
 
     /// 形か地図か輪郭の変形で動かした辺 `input` を、`rule` の決め方で重ねた地図
@@ -1096,7 +1078,8 @@ impl PlanarMap {
                     crossed(&colors, w, from_left)
                 },
             );
-            let colors: Vec<Option<Color32>> = states.iter().map(|w| top_label(w)).collect();
+            let colors: Vec<Option<Color32>> =
+                states.iter().map(|w| top_label(w).flatten()).collect();
             let mut votes: Vec<Vec<(ShapeId, usize)>> = vec![Vec::new(); states.len()];
             for (h, &f) in face.iter().enumerate() {
                 let f = f as usize;
@@ -1131,16 +1114,16 @@ impl PlanarMap {
             MapInput::Map(_) => map_sides(&new_segs, &new_deltas, false, &next_new),
             _ => Vec::new(),
         };
-        let old_at = |p2: IPt| top_label(&winding_at(&old_segs, true, p2));
-        let new_at = |p2: IPt| top_label(&winding_at(&new_segs, false, p2));
+        let old_at = |p2: IPt| top_label(&winding_at(&old_segs, true, p2)).flatten();
+        let new_at = |p2: IPt| top_label(&winding_at(&new_segs, false, p2)).flatten();
         // 重ねる形の中か：区間ごとに i_overlay が数えた、左右が重ねる形の中か（中の辺を調べる相手）
         let fill_at = match input {
             MapInput::Shapes(_) => Some(LabeledSegs::new(pieces.iter().map(|p| {
                 (
                     p.ia,
                     p.ib,
-                    (p.fill & CLIP_LEFT != 0).then_some(()),
-                    (p.fill & CLIP_RIGHT != 0).then_some(()),
+                    p.fill & CLIP_LEFT != 0,
+                    p.fill & CLIP_RIGHT != 0,
                 )
             }))),
             _ => None,
@@ -1306,7 +1289,9 @@ impl PlanarMap {
             (a.0 + b.0, a.1 + b.1)
         };
         let over_at = |p2: IPt| match input {
-            MapInput::Shapes(_) => Over::Inside(fill_at.as_ref().and_then(|f| f.at(p2)).is_some()),
+            MapInput::Shapes(_) => {
+                Over::Inside(fill_at.as_ref().and_then(|f| f.at(p2)).unwrap_or(false))
+            }
             MapInput::Map(_) => Over::Color(new_at(p2)),
             MapInput::Sweep(_) => Over::Swept(swept_winding(p2)),
             MapInput::Stack(_) => {

@@ -28067,6 +28067,7 @@ fn map_only_writes_share_the_instances() {
     assert!(canvas_tool::edit_layer_map(app.tab_mut(), lid, |base| {
         base.map
             .overlay(MapInput::Shapes(&stroke), MapRule::Paint(Some(blue)))
+            .and_then(crate::planar_map::PlanarMap::written)
     }));
     let after = &app.doc.root.layers[0].keyframes[0].cel;
     assert!(!after.maps.is_empty());
@@ -28574,4 +28575,43 @@ fn measure_commit_on_dense_cels() {
         let (ms, ce, pe) = run(cel_n, piece_n);
         eprintln!("cel {cel_n} strokes ({ce} segs), piece {piece_n} strokes ({pe} segs): commit {ms:.2}ms");
     }
+}
+
+/// N-1003：面の色を変えると、消えた境目の端の2本だけがつながる頂点は、選んだ面の塗り替え（選択中のバケツ）でも
+/// バケツでも同じくまとまる（面の色を変えるのは1つの関数）
+#[test]
+fn recoloring_faces_merges_the_ends_of_vanished_borders() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    use crate::vector_engine::ShapeId;
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    let left = vec![map_overlay::rect_shape(0.0, 0.0, 100.0, 100.0, red)];
+    let right = vec![map_overlay::rect_shape(100.0, 0.0, 200.0, 100.0, blue)];
+    let m = PlanarMap::default()
+        .overlay(MapInput::Shapes(&left), MapRule::Paint(Some(red)))
+        .unwrap()
+        .overlay(MapInput::Shapes(&right), MapRule::Paint(Some(blue)))
+        .unwrap()
+        .checked()
+        .unwrap()
+        .freshly_labeled()
+        .into_map();
+    // 赤い四角と青い四角が1本の境目で接する：頂点 6・辺 7
+    assert_eq!((m.nodes.len(), m.edges.len()), (6, 7));
+    let blue_ids: std::collections::HashSet<ShapeId> = m
+        .edges
+        .iter()
+        .flat_map(|e| [(e.left, e.left_src), (e.right, e.right_src)])
+        .filter(|(c, _)| *c == Some(blue))
+        .filter_map(|(_, s)| s)
+        .collect();
+    let recolored = m.recolored(&blue_ids, red);
+    assert!(recolored.is_valid());
+    // 境目が消え、その両端（上の辺・下の辺の途中）もまとまって、1つの四角になる
+    assert_eq!((recolored.nodes.len(), recolored.edges.len()), (4, 4));
+    let filled = m.with_face_filled(Point::new(150.0, 50.0), red).unwrap();
+    assert_eq!(
+        (filled.nodes.len(), filled.edges.len()),
+        (recolored.nodes.len(), recolored.edges.len())
+    );
 }

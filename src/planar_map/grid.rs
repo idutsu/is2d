@@ -443,13 +443,9 @@ pub(super) fn add_winding<L: PartialEq>(w: &mut Vec<(L, i32)>, lab: L, v: i32) {
     }
 }
 
-/// 巻き数が正の印（印が閉じた境目を作っていれば、点のある所の印。無ければ `None`＝いちばん外）。印の無い側（`None`：
-/// 何も無い所・重ねる形の外）は数えない：格子に丸めてできた細い所で、印の無い側と印のある側の両方の巻き数が正になっても、
-/// 足した順によらず印のある側になる
-pub(super) fn top_label<C: Copy>(w: &[(Option<C>, i32)]) -> Option<C> {
-    w.iter()
-        .find(|x| x.0.is_some() && x.1 > 0)
-        .and_then(|x| x.0)
+/// 巻き数が正の印（印が閉じた境目を作っていれば、点のある所の印。無ければ `None`＝いちばん外）
+pub(super) fn top_label<L: Copy>(w: &[(L, i32)]) -> Option<L> {
+    w.iter().find(|x| x.1 > 0).map(|x| x.0)
 }
 
 /// 曲線の判定の形が入る、格子の点の矩形（制御点の外接矩形を、切り下げ〜切り上げ）
@@ -689,12 +685,10 @@ impl<L: Copy + PartialEq> LabeledSegs<L> {
             add_winding(w, r, -d);
         });
     }
-}
 
-impl<C: Copy + PartialEq> LabeledSegs<Option<C>> {
     /// 点 `p`（2倍の座標）のある所の印（`top_label`）。区間の印が閉じた境目を作っていれば（正しい地図の色、i_overlay が
     /// 数えた塗り）、どの点でも1つに決まる。点が区間の上にあれば、点を右上へごくわずかずらした所の印になる
-    pub(super) fn at(&self, p: IPt) -> Option<C> {
+    pub(super) fn at(&self, p: IPt) -> Option<L> {
         let mut w = Vec::new();
         self.winding_into(p, &mut w);
         top_label(&w)
