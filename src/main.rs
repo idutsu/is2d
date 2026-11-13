@@ -1,6 +1,7 @@
 #[cfg(target_os = "macos")]
 mod app_menu_macos;
 mod canvas_tool;
+mod chunked_list;
 mod clipboard_ops;
 mod doc_actions;
 mod floating;

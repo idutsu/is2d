@@ -10,7 +10,7 @@ use kurbo::Affine;
 use super::{Document, EditPath};
 use crate::planar_map::LayerBase;
 use crate::symbol::{
-    compute_resolved_cel_signature, ResolvedCelSig, SymbolDef, SymbolEvalCtx, SymbolLoopMode,
+    compute_resolved_cel_signature, Library, ResolvedCelSig, SymbolEvalCtx, SymbolLoopMode,
 };
 use crate::timeline::{Layer, Timeline};
 use crate::vector_engine::{
@@ -46,7 +46,7 @@ fn layer_eval_frame(
     layer: &Layer,
     kf_idx: usize,
     frame: usize,
-    library: &[SymbolDef],
+    library: &Library,
     excluded: Option<u64>,
 ) -> usize {
     let kf = &layer.keyframes[kf_idx];
@@ -78,7 +78,7 @@ fn layer_eval_frame(
 fn shown_keyframe_and_eval_frame(
     layer: &Layer,
     frame: usize,
-    library: &[SymbolDef],
+    library: &Library,
 ) -> Option<(usize, usize)> {
     let kf_idx = (layer.visible && !layer.locked)
         .then(|| layer.keyframe_index_at(frame))
@@ -96,7 +96,7 @@ impl CachedLayer {
         &self,
         layer: &Layer,
         shown: Option<(usize, usize)>,
-        library: &[SymbolDef],
+        library: &Library,
         xform_bits: [u64; 6],
     ) -> bool {
         self.layer_id == layer.id
@@ -168,7 +168,7 @@ impl SceneBaseCache {
     pub(crate) fn rebuild(
         &mut self,
         tl: &Timeline,
-        library: &[SymbolDef],
+        library: &Library,
         world_xform: Affine,
     ) -> bool {
         let frame = tl.current_frame;
@@ -579,7 +579,7 @@ impl OnionSkinCache {
     pub(crate) fn retain_active_frames(
         &mut self,
         tl: &Timeline,
-        library: &[SymbolDef],
+        library: &Library,
         world_xform: Affine,
         prev_frames: usize,
         next_frames: usize,

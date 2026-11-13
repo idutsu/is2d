@@ -39,7 +39,7 @@ pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
 pub(crate) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
     if !lids.is_empty() {
         if let Some(idx) = tab.active_symbol_index() {
-            Arc::make_mut(&mut tab.doc.library)[idx].revision =
+            Arc::make_mut(&mut tab.doc.library[idx]).revision =
                 crate::vector_engine::next_mesh_revision();
             tab.doc.bump_revision();
         }

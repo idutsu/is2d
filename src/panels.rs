@@ -12,7 +12,7 @@ use crate::symbol::{ColorEffect, SymbolDef, SymbolInstanceBinding, SymbolLoopMod
 use crate::symbol_ops::selected_single_symbol_info;
 pub(crate) use crate::timeline_ui::icons;
 use crate::timeline_ui::{editing_idle, TimelineUiState};
-use crate::vector_engine::arc_mesh_to_shape;
+use crate::vector_engine::{arc_mesh_to_shape, transform_mesh_to_screen};
 
 /// OS標準の修飾キー表記（macOS では `"Cmd"`、Windows / Linux では `"Ctrl"`）
 pub(crate) const MOD_KEY: &str = if cfg!(target_os = "macos") {
@@ -1701,22 +1701,27 @@ fn draw_symbol_mini_preview(tab: &Tab, ui: &mut egui::Ui, sym: &SymbolDef) {
         Stroke::new(1.0_f32, Color32::from_rgb(206, 212, 222)),
     );
 
-    let Some(bbox) = sym.preview_local_bounds(tab.doc.revision, &tab.doc.library) else {
-        return;
-    };
-    let w = (bbox.x1 - bbox.x0).max(1.0) as f32;
-    let h = (bbox.y1 - bbox.y0).max(1.0) as f32;
-    let pad = 14.0;
-    let avail_w = (rect.width() - pad * 2.0).max(10.0);
-    let avail_h = (rect.height() - pad * 2.0).max(10.0);
-    let scale = (avail_w / w).min(avail_h / h).clamp(0.05, 4.0);
-    let cx = ((bbox.x0 + bbox.x1) * 0.5) as f32;
-    let cy = ((bbox.y0 + bbox.y1) * 0.5) as f32;
-    let pan = rect.center().to_vec2() - Vec2::new(cx * scale, cy * scale);
-    let origin_scr = Pos2::new(pan.x, pan.y);
-
-    if let Some(mesh) = sym.preview_screen_mesh(scale, pan, tab.doc.revision, &tab.doc.library) {
+    let drawn =
+        tab.view
+            .symbol_previews
+            .with(sym, tab.doc.revision, &tab.doc.library, |bbox, mesh| {
+                let w = (bbox.x1 - bbox.x0).max(1.0) as f32;
+                let h = (bbox.y1 - bbox.y0).max(1.0) as f32;
+                let pad = 14.0;
+                let avail_w = (rect.width() - pad * 2.0).max(10.0);
+                let avail_h = (rect.height() - pad * 2.0).max(10.0);
+                let scale = (avail_w / w).min(avail_h / h).clamp(0.05, 4.0);
+                let cx = ((bbox.x0 + bbox.x1) * 0.5) as f32;
+                let cy = ((bbox.y0 + bbox.y1) * 0.5) as f32;
+                let pan = rect.center().to_vec2() - Vec2::new(cx * scale, cy * scale);
+                (
+                    transform_mesh_to_screen(mesh.clone(), scale, pan, None),
+                    pan,
+                )
+            });
+    if let Some((mesh, pan)) = drawn {
         painter.add(egui::Shape::Mesh(mesh));
+        let origin_scr = Pos2::new(pan.x, pan.y);
         if rect.contains(origin_scr) {
             draw_registration_cross(&painter, origin_scr, 4.0, false);
         }

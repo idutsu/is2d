@@ -2804,29 +2804,20 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     let sel_m1 = sym_app.scene().get(0).unwrap().selection_overlay_mesh(1.25);
     let sel_m2 = sym_app.scene().get(0).unwrap().selection_overlay_mesh(1.25);
     assert!(std::sync::Arc::ptr_eq(&sel_m1, &sel_m2));
-    let orig1 = sym_app.doc.library[0]
-        .preview_local_bounds(sym_app.doc.revision, &sym_app.doc.library)
-        .unwrap();
-    let prev_m1 = sym_app.doc.library[0]
-        .preview_screen_mesh(
-            1.0,
-            Vec2::new(100.0, 55.0),
-            sym_app.doc.revision,
-            &sym_app.doc.library,
-        )
-        .unwrap();
-    let orig2 = sym_app.doc.library[0]
-        .preview_local_bounds(sym_app.doc.revision, &sym_app.doc.library)
-        .unwrap();
-    let prev_m2 = sym_app.doc.library[0]
-        .preview_screen_mesh(
-            1.0,
-            Vec2::new(100.0, 55.0),
-            sym_app.doc.revision,
-            &sym_app.doc.library,
-        )
-        .unwrap();
-    // 画面座標への変換は描くたびに行う（ワールド座標のメッシュはキャッシュから）。同じ倍率・位置なら同じメッシュになる
+    // プレビューは、2回目は写しから引く（作り直さない）。同じシンボル・世代なら同じ外接矩形とメッシュ
+    let preview = |app: &Is2dApp| {
+        app.view
+            .symbol_previews
+            .with(
+                &app.doc.library[0],
+                app.doc.revision,
+                &app.doc.library,
+                |b, m| (b, m.clone()),
+            )
+            .unwrap()
+    };
+    let (orig1, prev_m1) = preview(&sym_app);
+    let (orig2, prev_m2) = preview(&sym_app);
     assert!(prev_m1 == prev_m2 && orig1 == orig2);
 }
 
@@ -3070,7 +3061,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
     let e_prev = &grp_sym_app.history.undo_stack[len_stack - 2];
     let e_last = &grp_sym_app.history.undo_stack[len_stack - 1];
     assert!(
-        std::sync::Arc::ptr_eq(&e_prev.library, &e_last.library),
+        e_prev.library.ptr_eq(&e_last.library),
         "シンボル未変更時の UndoEntry 間では library がディープクローンされず Arc 共有されること"
     );
     assert!(
@@ -5006,7 +4997,11 @@ fn test_nested_static_child_symbol_is_not_treated_as_dynamic_blank_frame() {
             order: 0,
         }],
     );
-    let lib = vec![sym_parent, sym_child];
+    let lib: crate::symbol::Library = vec![
+        std::sync::Arc::new(sym_parent),
+        std::sync::Arc::new(sym_child),
+    ]
+    .into();
     assert!(
         !lib[0].has_dynamic_animation(&lib),
         "Frame 0 に shapes が無くても単一フレームの子シンボルインスタンスが存在する場合は空白フレームと誤判定されないこと"
@@ -7228,7 +7223,7 @@ fn test_nested_symbol_expansion_memoization_and_step_cap() {
 
     // 1. 中身が空の葉シンボル (id=8) を起点に、各段が子シンボルを20個ずつ持つ8段入れ子階層 (20^8 = 256億経路)
     let leaf = symbol::SymbolDef::new(8, "EmptyLeaf".to_string(), Vec::new()).unwrap();
-    std::sync::Arc::make_mut(&mut app.doc.library).push(leaf);
+    app.doc.library.push(std::sync::Arc::new(leaf));
 
     let mut next_gid = 1u64;
     for level in (1..=7u64).rev() {
@@ -7252,7 +7247,7 @@ fn test_nested_symbol_expansion_memoization_and_step_cap() {
             .collect();
         sym.timeline.layers[0].keyframe_mut(0).cel =
             timeline::Cel::new_with_instances(Vec::new(), instances);
-        std::sync::Arc::make_mut(&mut app.doc.library).push(sym);
+        app.doc.library.push(std::sync::Arc::new(sym));
     }
 
     let root_instances: Vec<timeline::SymbolInstance> = (0..20)
@@ -17195,7 +17190,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
     // 4. 表示コマが合う: (a) A が1コマで F=5、(b) A が4コマループで F=10
     for (a_frames, target_f) in [(1usize, 5usize), (4usize, 10usize)] {
         let (mut app, _, sym_b_id) = build_nested_app(a_frames);
-        let sym_a = &mut std::sync::Arc::make_mut(&mut app.doc.library)[1];
+        let sym_a = &mut std::sync::Arc::make_mut(&mut app.doc.library[1]);
         sym_a.timeline.layers[0].keyframe_mut(0).cel.instances_mut()[0]
             .binding
             .first_frame = 1;
@@ -17299,7 +17294,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
     // 6 & 7. 1回再生の B（合わせられる場合と負になって 0 になる場合）および任意のフレームの B
     {
         let (mut app, _, _) = build_nested_app(4);
-        std::sync::Arc::make_mut(&mut app.doc.library)[1]
+        std::sync::Arc::make_mut(&mut app.doc.library[1])
             .timeline
             .layers[0]
             .keyframe_mut(0)
@@ -17307,7 +17302,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
             .instances_mut()[0]
             .binding
             .loop_mode = SymbolLoopMode::PlayOnce;
-        std::sync::Arc::make_mut(&mut app.doc.library)[1]
+        std::sync::Arc::make_mut(&mut app.doc.library[1])
             .timeline
             .layers[0]
             .keyframe_mut(0)
@@ -17334,7 +17329,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
 
         // B の進み(1) - (F - S)(5) < 0 のとき 1回再生は first_frame が 0 になる
         let (mut app_neg, _, _) = build_nested_app(4);
-        std::sync::Arc::make_mut(&mut app_neg.doc.library)[1]
+        std::sync::Arc::make_mut(&mut app_neg.doc.library[1])
             .timeline
             .layers[0]
             .keyframe_mut(0)
@@ -17342,7 +17337,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
             .instances_mut()[0]
             .binding
             .loop_mode = SymbolLoopMode::PlayOnce;
-        std::sync::Arc::make_mut(&mut app_neg.doc.library)[1]
+        std::sync::Arc::make_mut(&mut app_neg.doc.library[1])
             .timeline
             .layers[0]
             .keyframe_mut(0)
@@ -17369,7 +17364,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
 
         // 7. 任意のフレームの B は first_frame が変わらない
         let (mut app_sf, _, _) = build_nested_app(4);
-        std::sync::Arc::make_mut(&mut app_sf.doc.library)[1]
+        std::sync::Arc::make_mut(&mut app_sf.doc.library[1])
             .timeline
             .layers[0]
             .keyframe_mut(0)
@@ -17377,7 +17372,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
             .instances_mut()[0]
             .binding
             .loop_mode = SymbolLoopMode::SingleFrame;
-        std::sync::Arc::make_mut(&mut app_sf.doc.library)[1]
+        std::sync::Arc::make_mut(&mut app_sf.doc.library[1])
             .timeline
             .layers[0]
             .keyframe_mut(0)
@@ -17444,7 +17439,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
     // 9. 色効果のリセット: A にアルファ 50%・明度 +30%、B にアルファ 30% をかけて分解
     {
         let (mut app, _, sym_b_id) = build_nested_app(1);
-        std::sync::Arc::make_mut(&mut app.doc.library)[1]
+        std::sync::Arc::make_mut(&mut app.doc.library[1])
             .timeline
             .layers[0]
             .keyframe_mut(0)
@@ -17452,7 +17447,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
             .instances_mut()[0]
             .binding
             .color_effect = ColorEffect::new(0.3, 0.0);
-        std::sync::Arc::make_mut(&mut app.doc.library)[1].revision =
+        std::sync::Arc::make_mut(&mut app.doc.library[1]).revision =
             crate::vector_engine::next_mesh_revision();
         app.doc.revision = crate::vector_engine::next_mesh_revision();
         app.refresh_scene_base();
@@ -17519,12 +17514,12 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         let a_gid = instances_before[0].binding.instance_gid;
 
         // 0 コマ目の B を空っぽにしてから A だけを分解する
-        std::sync::Arc::make_mut(&mut app.doc.library)[0]
+        std::sync::Arc::make_mut(&mut app.doc.library[0])
             .timeline
             .layers[0]
             .keyframe_mut(0)
             .cel = timeline::Cel::default();
-        std::sync::Arc::make_mut(&mut app.doc.library)[0].revision =
+        std::sync::Arc::make_mut(&mut app.doc.library[0]).revision =
             crate::vector_engine::next_mesh_revision();
         app.doc.revision = crate::vector_engine::next_mesh_revision();
         app.refresh_scene_base();
@@ -17611,12 +17606,12 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
 
         if b_empty_on_ungroup_frame {
-            std::sync::Arc::make_mut(&mut app.doc.library)[0]
+            std::sync::Arc::make_mut(&mut app.doc.library[0])
                 .timeline
                 .layers[0]
                 .keyframe_mut(0)
                 .cel = timeline::Cel::default();
-            std::sync::Arc::make_mut(&mut app.doc.library)[0].revision =
+            std::sync::Arc::make_mut(&mut app.doc.library[0]).revision =
                 crate::vector_engine::next_mesh_revision();
             app.doc.revision = crate::vector_engine::next_mesh_revision();
             app.refresh_scene_base();
@@ -28132,11 +28127,11 @@ fn measure_undo_and_paste_with_a_large_library() {
         assert!(canvas_tool::clear_selection(&mut app));
         let proto = app.doc.library[0].clone();
         for k in 0..n {
-            let mut s = proto.clone();
+            let mut s = (*proto).clone();
             s.id = app.doc.next_symbol_id;
             app.doc.next_symbol_id += 1;
             s.name = format!("bench {k}");
-            std::sync::Arc::make_mut(&mut app.doc.library).push(s);
+            app.doc.library.push(std::sync::Arc::new(s));
         }
         select_ops::apply_marquee_selection(
             &mut app,
@@ -29293,4 +29288,54 @@ fn measure_new_edges_after_moving_a_small_part() {
         "new edge bytes per move: {counts:?} (total {})",
         counts.iter().sum::<usize>()
     );
+}
+
+/// N-2003：シンボルの中で描いても、Undo の控えと今のライブラリは、描いたシンボルのほかのシンボルそのものを共有する
+/// （ライブラリ全部を写さない。履歴1件の大きさはシンボルの数に依らない）
+#[test]
+fn drawing_inside_a_symbol_copies_only_that_symbol() {
+    use crate::doc_actions::{apply, Action};
+    let red = Color32::from_rgb(235, 75, 75);
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(200.0, 100.0),
+            10.0,
+            red,
+        ),
+    );
+    assert!(apply(&mut app, Action::SelectAll));
+    let sym_id = doc_actions::convert_selection_to_symbol(&mut app).unwrap();
+    assert!(canvas_tool::clear_selection(&mut app));
+    let proto: crate::symbol::SymbolDef = (*app.doc.library[0]).clone();
+    for k in 0..200 {
+        let mut s = proto.clone();
+        s.id = app.doc.next_symbol_id;
+        app.doc.next_symbol_id += 1;
+        s.name = format!("copy {k}");
+        app.doc.library.push(std::sync::Arc::new(s));
+    }
+    assert!(apply(&mut app, Action::EnterSymbolFromLibrary { sym_id }));
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(-20.0, 40.0), Point::new(20.0, 40.0)],
+            radius: 4.0,
+            color: red,
+        },
+    ));
+    let entry = app.history.undo_stack.back().unwrap();
+    let n = app.doc.library.len();
+    let shared = (0..n)
+        .filter(|&i| {
+            let (a, b): (&crate::symbol::SymbolDef, &crate::symbol::SymbolDef) =
+                (&entry.library[i], &app.doc.library[i]);
+            std::ptr::eq(a, b)
+        })
+        .count();
+    assert_eq!(shared, n - 1);
 }

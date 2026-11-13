@@ -341,7 +341,7 @@ fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
     let entry = UndoEntry {
         timeline: tl_snap,
         // ライブラリは文書と共有する（書く所だけ `Arc::make_mut` で写す）
-        library: std::sync::Arc::clone(&tab.doc.library),
+        library: tab.doc.library.clone(),
         floating,
         edit_path: tab.session.edit_path.clone(),
         editing_group_path: tab.session.editing_group_path.clone(),

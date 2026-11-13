@@ -863,7 +863,11 @@ impl ProjectDocument {
             version: PROJECT_FORMAT_VERSION,
             stage_size: [doc.stage_size.x, doc.stage_size.y],
             timeline: saved_timeline,
-            library: doc.library.iter().map(SavedSymbolDef::from).collect(),
+            library: doc
+                .library
+                .iter()
+                .map(|s| SavedSymbolDef::from(&**s))
+                .collect(),
             next_symbol_id: doc.next_symbol_id,
             next_group_id: doc.next_group_id,
             recovery_source: None,
@@ -1035,7 +1039,7 @@ impl ProjectDocument {
         let h = self.stage_size[1].clamp(100.0, 2160.0);
         Ok(Document {
             root: timeline,
-            library: Arc::new(library),
+            library: library.into_iter().map(Arc::new).collect(),
             stage_size: Vec2::new(w, h),
             fps,
             next_symbol_id: raw_next_sym_id.max(max_sym_id.saturating_add(1)).max(1),

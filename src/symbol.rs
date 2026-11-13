@@ -106,13 +106,59 @@ impl FillShape {
     }
 }
 
-/// シンボル定義のプレビュー用ローカルキャッシュ（評価済み外接矩形・ワールド座標結合メッシュ）。
-/// 画面座標への変換は描くたびに行う（`egui::Shape::Mesh` がメッシュを値で受け取るので、変換済みを持っても複製は減らない）
-#[derive(Clone, Debug, Default)]
-pub(crate) struct SymbolPreviewCache {
+/// シンボル1つのプレビューの写し：鍵（シンボルの世代・ライブラリの世代・今のコマ）と、評価済みの外接矩形とシンボルの
+/// 座標の結合メッシュ（中身が空なら無し）
+#[derive(Clone, Debug)]
+struct SymbolPreview {
     key: (u64, u64, usize),
-    local_bounds_and_mesh: Option<(kurbo::Rect, egui::Mesh)>,
+    bounds_and_mesh: Option<(kurbo::Rect, egui::Mesh)>,
 }
+
+/// ライブラリのシンボルのミニプレビューの写し（シンボルの番号ごと）。画面の写しなので、文書の外（タブの表示状態）に持つ
+/// （文書の型に置くと、Undo の控えとライブラリを書くときに写される：レビュー 6ee325a の N-2003）。画面座標への変換は
+/// 描くたびに行う（`egui::Shape::Mesh` がメッシュを値で受け取るので、変換済みを持っても複製は減らない）
+#[derive(Clone, Default)]
+pub(crate) struct SymbolPreviews(SyncCache<HashMap<u64, SymbolPreview>>);
+
+impl SymbolPreviews {
+    /// シンボル `sym` のプレビューの外接矩形とメッシュ（シンボルの座標）を `f` に渡す。鍵が変わっていれば作り直す。
+    /// `None`：中身が空
+    pub(crate) fn with<R>(
+        &self,
+        sym: &SymbolDef,
+        library_revision: u64,
+        library: &Library,
+        f: impl FnOnce(kurbo::Rect, &egui::Mesh) -> R,
+    ) -> Option<R> {
+        let key = (sym.revision, library_revision, sym.timeline.current_frame);
+        let mut all = self.0.lock();
+        if all.get(&sym.id).is_none_or(|p| p.key != key) {
+            let mut shapes = sym.evaluated_local_shapes_at(sym.timeline.current_frame, library);
+            if shapes.is_empty() {
+                shapes = sym.first_non_empty_local_shapes(library);
+            }
+            let bounds_and_mesh = (!shapes.is_empty()).then(|| {
+                let mut batch = egui::Mesh::default();
+                for s in &shapes {
+                    s.append_fill_mesh_to(&mut batch);
+                }
+                (union_bounding_boxes(&shapes), batch)
+            });
+            all.insert(
+                sym.id,
+                SymbolPreview {
+                    key,
+                    bounds_and_mesh,
+                },
+            );
+        }
+        let (bounds, mesh) = all.get(&sym.id)?.bounds_and_mesh.as_ref()?;
+        Some(f(*bounds, mesh))
+    }
+}
+
+/// シンボルのライブラリ。塊ごとに Undo の控えと共有する列（`ChunkedList`。書くのは触った塊と、そのシンボルだけ）
+pub(crate) type Library = crate::chunked_list::ChunkedList<SymbolDef>;
 
 /// ライブラリに登録されたシンボル定義（独自の `Timeline` とローカル基準点 `(0, 0)` を持つ）
 #[derive(Clone, Debug)]
@@ -123,7 +169,6 @@ pub(crate) struct SymbolDef {
     pub(crate) timeline: Timeline,
     /// シンボル定義の変更世代番号（解決済みセルメッシュキャッシュの署名計算用）
     pub(crate) revision: u64,
-    mini_preview_cache: SyncCache<Option<SymbolPreviewCache>>,
 }
 
 pub(crate) const MAX_SYMBOL_NEST_DEPTH: usize = 8;
@@ -148,7 +193,7 @@ pub(crate) struct SymbolEvalState {
 
 impl SymbolEvalState {
     /// 1回の描画の始めに呼ぶ
-    pub(crate) fn start_pass(&mut self, library: &[SymbolDef]) {
+    pub(crate) fn start_pass(&mut self, library: &Library) {
         self.held.clear();
         let same_library = self.library_sig.len() == library.len()
             && self
@@ -174,7 +219,7 @@ impl SymbolEvalState {
 /// シンボル再帰評価時の設定・メモ化コンテキスト
 #[derive(Clone)]
 pub(crate) struct SymbolEvalCtx<'a> {
-    pub(crate) library: &'a [SymbolDef],
+    pub(crate) library: &'a Library,
     pub(crate) depth: usize,
     /// 展開した図形に画面表示用のメッシュを作るか（動画の書き出しでは作らない）
     with_mesh: bool,
@@ -182,12 +227,12 @@ pub(crate) struct SymbolEvalCtx<'a> {
 }
 
 impl<'a> SymbolEvalCtx<'a> {
-    pub(crate) fn new(library: &'a [SymbolDef]) -> Self {
+    pub(crate) fn new(library: &'a Library) -> Self {
         Self::with_state(library, SymbolEvalState::default())
     }
 
     /// 前の評価のメモ `state` を引き継いで評価する（`SymbolEvalState::start_pass` を呼んでから渡す）
-    pub(crate) fn with_state(library: &'a [SymbolDef], state: SymbolEvalState) -> Self {
+    pub(crate) fn with_state(library: &'a Library, state: SymbolEvalState) -> Self {
         Self {
             library,
             depth: 0,
@@ -310,79 +355,11 @@ impl SymbolDef {
             name,
             timeline,
             revision: crate::vector_engine::next_mesh_revision(),
-            mini_preview_cache: SyncCache::new(None),
         }
-    }
-
-    /// シンボル定義のミニプレビューの一時キャッシュを破棄する
-    pub(crate) fn clear_preview_cache(&mut self) {
-        *self.mini_preview_cache.lock() = None;
-    }
-
-    fn ensure_preview_local_cache(&self, library_revision: u64, library: &[SymbolDef]) {
-        let key = (self.revision, library_revision, self.timeline.current_frame);
-        if self
-            .mini_preview_cache
-            .lock()
-            .as_ref()
-            .is_some_and(|c| c.key == key)
-        {
-            return;
-        }
-        let mut shapes = self.evaluated_local_shapes_at(self.timeline.current_frame, library);
-        if shapes.is_empty() {
-            shapes = self.first_non_empty_local_shapes(library);
-        }
-        let local_bounds_and_mesh = if shapes.is_empty() {
-            None
-        } else {
-            let bbox = union_bounding_boxes(&shapes);
-            let mut batch = egui::Mesh::default();
-            for s in &shapes {
-                s.append_fill_mesh_to(&mut batch);
-            }
-            Some((bbox, batch))
-        };
-        *self.mini_preview_cache.lock() = Some(SymbolPreviewCache {
-            key,
-            local_bounds_and_mesh,
-        });
-    }
-
-    /// シンボルプレビュー用のローカル座標外接矩形をキャッシュ経由で返す
-    pub(crate) fn preview_local_bounds(
-        &self,
-        library_revision: u64,
-        library: &[SymbolDef],
-    ) -> Option<kurbo::Rect> {
-        self.ensure_preview_local_cache(library_revision, library);
-        self.mini_preview_cache
-            .lock()
-            .as_ref()
-            .and_then(|c| c.local_bounds_and_mesh.as_ref().map(|(bbox, _)| *bbox))
-    }
-
-    /// 指定された `(scale, pan)` でスクリーン座標へ変換したシンボルプレビュー用結合 `Mesh` を返す（ワールド座標のメッシュはキャッシュから）
-    pub(crate) fn preview_screen_mesh(
-        &self,
-        scale: f32,
-        pan: Vec2,
-        library_revision: u64,
-        library: &[SymbolDef],
-    ) -> Option<egui::Mesh> {
-        self.ensure_preview_local_cache(library_revision, library);
-        let guard = self.mini_preview_cache.lock();
-        let (_, world_mesh) = guard.as_ref()?.local_bounds_and_mesh.as_ref()?;
-        Some(transform_mesh_to_screen(
-            world_mesh.clone(),
-            scale,
-            pan,
-            None,
-        ))
     }
 
     /// このシンボル自身、または内部の入れ子シンボルが複数フレーム（または先頭フレーム空白）を持つかを再帰判定する
-    pub(crate) fn has_dynamic_animation(&self, library: &[SymbolDef]) -> bool {
+    pub(crate) fn has_dynamic_animation(&self, library: &Library) -> bool {
         let mut known = Vec::new();
         self.has_dynamic_animation_inner(library, 0, &mut known)
     }
@@ -390,7 +367,7 @@ impl SymbolDef {
     /// 1回の判定の中で調べ終えた子のシンボル ID と結果 `known` を覚え、入れ子のインスタンスの数だけ同じ子を調べ直さないようにする
     fn has_dynamic_animation_inner(
         &self,
-        library: &[SymbolDef],
+        library: &Library,
         depth: usize,
         known: &mut Vec<(u64, bool)>,
     ) -> bool {
@@ -420,7 +397,7 @@ impl SymbolDef {
     }
 
     /// シンボルの全フレーム（`0..total_frames`）を先頭から走査し、最初に図形が存在するフレームのローカル図形列を返す
-    pub(crate) fn first_non_empty_local_shapes(&self, library: &[SymbolDef]) -> Vec<FillShape> {
+    pub(crate) fn first_non_empty_local_shapes(&self, library: &Library) -> Vec<FillShape> {
         let has_any_content = self
             .timeline
             .layers
@@ -493,7 +470,7 @@ impl SymbolDef {
         parent_binding: SymbolInstanceBinding,
         parent_kf_start: usize,
         current_frame: usize,
-        library: &[SymbolDef],
+        library: &Library,
     ) -> Vec<Cel> {
         let (frame_idx, child_eval_frame) =
             self.resolve_internal_frame(parent_binding, parent_kf_start, current_frame);
@@ -577,7 +554,7 @@ impl SymbolDef {
     pub(crate) fn evaluated_local_shapes_at(
         &self,
         offset_frame: usize,
-        library: &[SymbolDef],
+        library: &Library,
     ) -> Vec<FillShape> {
         let binding = SymbolInstanceBinding::new(0, self.id, Affine::IDENTITY);
         Arc::unwrap_or_clone(self.evaluated_local_shapes_for_instance(
@@ -637,7 +614,7 @@ impl EditPath {
 pub(crate) struct Document {
     pub(crate) root: Timeline,
     /// Undo の控えと共有する（書く所だけ `Arc::make_mut` で写す。控えを取る・戻すは `Arc` の入れ替えだけ）
-    pub(crate) library: Arc<Vec<SymbolDef>>,
+    pub(crate) library: Library,
     pub(crate) stage_size: Vec2,
     pub(crate) fps: u32,
     pub(crate) next_symbol_id: u64,
@@ -650,7 +627,7 @@ impl Default for Document {
     fn default() -> Self {
         Self {
             root: Timeline::default(),
-            library: Arc::default(),
+            library: Library::default(),
             stage_size: Vec2::new(800.0, 450.0),
             fps: 24,
             next_symbol_id: 1,
@@ -715,20 +692,23 @@ impl Document {
             name_num = if name_num < u64::MAX { name_num + 1 } else { 1 };
         }
         sym_def.name = format!("Symbol {name_num}");
-        Arc::make_mut(&mut self.library).push(sym_def);
+        self.library.push(Arc::new(sym_def));
         self.bump_revision();
     }
 
     /// 指定した `symbol_id` のシンボル定義を参照する
     pub(crate) fn find_symbol(&self, symbol_id: u64) -> Option<&SymbolDef> {
-        self.library.iter().find(|s| s.id == symbol_id)
+        self.library
+            .iter()
+            .find(|s| s.id == symbol_id)
+            .map(|s| &**s)
     }
 
-    /// 指定した `symbol_id` のシンボル定義を可変参照する
+    /// 指定した `symbol_id` のシンボル定義を可変参照する（Undo の控えと共有していれば、そのシンボルと、それが入っている
+    /// ライブラリの塊だけを写す）
     pub(crate) fn find_symbol_mut(&mut self, symbol_id: u64) -> Option<&mut SymbolDef> {
-        Arc::make_mut(&mut self.library)
-            .iter_mut()
-            .find(|s| s.id == symbol_id)
+        let i = self.library.iter().position(|s| s.id == symbol_id)?;
+        Some(Arc::make_mut(&mut self.library[i]))
     }
 
     #[cfg(test)]
@@ -772,7 +752,7 @@ impl Document {
             memo.insert(sym_id, h);
             h
         }
-        let by_id: HashMap<u64, &SymbolDef> = self.library.iter().map(|s| (s.id, s)).collect();
+        let by_id: HashMap<u64, &SymbolDef> = self.library.iter().map(|s| (s.id, &**s)).collect();
         let mut memo = HashMap::with_capacity(self.library.len());
         self.library
             .iter()
@@ -836,8 +816,7 @@ impl Document {
         if !self.library.iter().any(|s| s.id == symbol_id) {
             return false;
         }
-        let remove_from_tl = |tl: &mut Timeline| -> bool {
-            let mut removed = false;
+        let remove_from_tl = |tl: &mut Timeline| {
             for layer in &mut tl.layers {
                 for i in 0..layer.keyframes.len() {
                     if layer.keyframes[i]
@@ -850,17 +829,21 @@ impl Document {
                         kf.cel
                             .instances_mut()
                             .retain(|inst| inst.binding.symbol_id != symbol_id);
-                        removed = true;
                     }
                 }
             }
-            removed
         };
         remove_from_tl(&mut self.root);
-        let library = Arc::make_mut(&mut self.library);
-        library.retain(|s| s.id != symbol_id);
-        for sym_def in library {
-            if remove_from_tl(&mut sym_def.timeline) {
+        self.library.retain(|s| s.id != symbol_id);
+        // インスタンスを含むシンボルだけを書く（ほかのシンボルと塊は、Undo の控えと共有したまま）
+        for i in 0..self.library.len() {
+            if self.library[i]
+                .timeline
+                .instances()
+                .any(|inst| inst.binding.symbol_id == symbol_id)
+            {
+                let sym_def = Arc::make_mut(&mut self.library[i]);
+                remove_from_tl(&mut sym_def.timeline);
                 sym_def.revision = crate::vector_engine::next_mesh_revision();
             }
         }
@@ -931,7 +914,7 @@ impl Document {
 
 impl ResolvedCelSig {
     #[inline]
-    fn are_referenced_symbols_current(&self, library: &[SymbolDef]) -> bool {
+    fn are_referenced_symbols_current(&self, library: &Library) -> bool {
         self.referenced_symbols.iter().all(|&(sym_id, rev)| {
             if rev == u64::MAX {
                 !library.iter().any(|s| s.id == sym_id)
@@ -946,7 +929,7 @@ impl ResolvedCelSig {
         &self,
         layer: &Layer,
         kf_idx: usize,
-        library: &[SymbolDef],
+        library: &Library,
     ) -> bool {
         let kf = &layer.keyframes[kf_idx];
         let next_kf = if kf.tween {
@@ -970,7 +953,7 @@ impl ResolvedCelSig {
 /// 指定された `sym_id` およびその内部で入れ子参照されている全子シンボルの `(id, revision)` を再帰的に収集する
 fn collect_referenced_symbol_revisions(
     sym_id: u64,
-    library: &[SymbolDef],
+    library: &Library,
     visited: &mut Vec<u64>,
     depth: usize,
     out: &mut Vec<(u64, u64)>,
@@ -999,7 +982,7 @@ pub(crate) fn compute_resolved_cel_signature(
     layer: &Layer,
     kf_idx: usize,
     excluded_instance_gid: Option<u64>,
-    library: &[SymbolDef],
+    library: &Library,
 ) -> ResolvedCelSig {
     let kf = &layer.keyframes[kf_idx];
     let mut visited_syms: Vec<u64> = Vec::new();
@@ -1080,7 +1063,7 @@ impl Timeline {
         &self,
         layer_idx: usize,
         frame: usize,
-        library: &[SymbolDef],
+        library: &Library,
     ) -> Vec<FillShape> {
         self.evaluate_layer_shapes_with(layer_idx, frame, SymbolEvalCtx::new(library))
     }

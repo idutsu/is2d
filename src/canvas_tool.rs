@@ -9,7 +9,7 @@ use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 use crate::map_hover::ScopeMaps;
 use crate::planar_map::LayerBase;
 pub(crate) use crate::symbol::Document;
-use crate::symbol::{EditPath, SymbolDef, SymbolEvalCtx, SymbolEvalState};
+use crate::symbol::{EditPath, Library, SymbolDef, SymbolEvalCtx, SymbolEvalState};
 use crate::timeline::{Timeline, TimelineCellSelection};
 use crate::vector_engine::{FillShape, LayerId, ShapeId, SyncCache};
 
@@ -379,6 +379,8 @@ pub(crate) struct View {
     pub(crate) inspect_timeline_frame: bool,
     /// ライブラリパネルで現在選択中のシンボルID
     pub(crate) selected_library_symbol: Option<u64>,
+    /// ライブラリのシンボルのミニプレビューの写し
+    pub(crate) symbol_previews: crate::symbol::SymbolPreviews,
 }
 
 impl Default for View {
@@ -394,13 +396,14 @@ impl Default for View {
             onion_next_frames: 2,
             inspect_timeline_frame: false,
             selected_library_symbol: None,
+            symbol_previews: Default::default(),
         }
     }
 }
 
 impl View {
     /// ライブラリで選択中のシンボルIDが有効か検証し、未選択または削除済みの場合は先頭シンボルを選択する
-    pub(crate) fn ensure_valid_library_selection(&mut self, library: &[SymbolDef]) {
+    pub(crate) fn ensure_valid_library_selection(&mut self, library: &Library) {
         if self
             .selected_library_symbol
             .is_none_or(|id| !library.iter().any(|s| s.id == id))
@@ -1751,7 +1754,7 @@ impl Session {
 #[derive(Clone, Debug)]
 pub(crate) struct UndoEntry {
     pub(crate) timeline: Timeline,
-    pub(crate) library: Arc<Vec<SymbolDef>>,
+    pub(crate) library: Library,
     pub(crate) floating: Option<Arc<Floating>>,
     pub(crate) edit_path: EditPath,
     pub(crate) editing_group_path: Vec<u64>,
@@ -1998,7 +2001,7 @@ impl Tab {
     #[inline]
     fn active_timeline_raw_mut(&mut self) -> &mut Timeline {
         match self.active_symbol_index() {
-            Some(idx) => &mut Arc::make_mut(&mut self.doc.library)[idx].timeline,
+            Some(idx) => &mut Arc::make_mut(&mut self.doc.library[idx]).timeline,
             None => &mut self.doc.root,
         }
     }
@@ -2034,9 +2037,9 @@ impl Tab {
     ) -> R {
         if let Some(idx) = self.active_symbol_index() {
             let mut taken_tl =
-                std::mem::take(&mut Arc::make_mut(&mut self.doc.library)[idx].timeline);
+                std::mem::take(&mut Arc::make_mut(&mut self.doc.library[idx]).timeline);
             let res = f(&mut taken_tl, &mut self.doc);
-            let sym = &mut Arc::make_mut(&mut self.doc.library)[idx];
+            let sym = Arc::make_mut(&mut self.doc.library[idx]);
             sym.timeline = taken_tl;
             sym.revision = crate::vector_engine::next_mesh_revision();
             self.doc.bump_revision();
@@ -2181,7 +2184,7 @@ impl Tab {
         let prev_floating = self.history.snapshot_floating(self.session.floating());
         let prev_entry = UndoEntry {
             timeline: std::mem::replace(&mut self.doc.root, entry.timeline),
-            library: Arc::clone(&self.doc.library),
+            library: self.doc.library.clone(),
             floating: prev_floating,
             edit_path: std::mem::replace(&mut self.session.edit_path, entry.edit_path),
             editing_group_path: std::mem::replace(

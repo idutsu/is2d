@@ -8,7 +8,7 @@ use crate::canvas_tool::{
     MoveSelectionDrag, Tab,
 };
 use crate::planar_map::PlanarMap;
-use crate::symbol::{Document, SymbolDef};
+use crate::symbol::{Document, Library, SymbolDef};
 use crate::timeline::{Cel, Timeline};
 use crate::vector_engine::LayerId;
 
@@ -227,7 +227,7 @@ pub(crate) fn begin_move_selection_drag(
 
 fn collect_symbol_and_descendants(
     sym_id: u64,
-    library: &[SymbolDef],
+    library: &Library,
     visited: &mut Vec<u64>,
     out: &mut Vec<Arc<SymbolDef>>,
 ) {
@@ -241,9 +241,7 @@ fn collect_symbol_and_descendants(
     for inst in sym.timeline.instances() {
         collect_symbol_and_descendants(inst.binding.symbol_id, library, visited, out);
     }
-    let mut cloned = sym.clone();
-    cloned.clear_preview_cache();
-    out.push(Arc::new(cloned));
+    out.push(Arc::clone(sym));
 }
 
 /// 別タブから移植されるシンボルの内部タイムライン内の子シンボル参照ID（`sym_map` にあるもの）と全グループIDを、貼り付け先タブの `Document` のIDへ一括リマップする
@@ -498,7 +496,7 @@ pub(crate) fn import_clipboard_symbols(
         }
         remap_timeline_ids(&mut imported.timeline, &mut tab.doc, &local_sym_map);
 
-        Arc::make_mut(&mut tab.doc.library).push(imported);
+        tab.doc.library.push(Arc::new(imported));
         if tab.view.selected_library_symbol.is_none() {
             tab.view.selected_library_symbol = Some(new_id);
         }
