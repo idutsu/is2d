@@ -112,7 +112,7 @@ pub(crate) fn handle_select_tool_input(
         SelectSubMode::Reshape => {
             let shift_held = ui.input(|i| i.modifiers.shift);
             let alt_held = ui.input(|i| i.modifiers.alt);
-            if response.double_clicked_by(PointerButton::Primary) {
+            if host.tab_mut().view.double_clicked(ui.ctx(), response) {
                 if let Some(pt) = mouse_pt {
                     handle_canvas_double_click(host, pt);
                 }

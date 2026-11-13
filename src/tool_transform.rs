@@ -25,7 +25,7 @@ pub(crate) fn handle_transform_tool_input(
     let alt_held = ui.input(|i| i.modifiers.alt);
     let zoom = host.tab().view.zoom;
 
-    if response.double_clicked_by(PointerButton::Primary) {
+    if host.tab_mut().view.double_clicked(ui.ctx(), response) {
         if let Some(pt) = mouse_pt {
             if compute_transform_hover(host.tab().scene(), &host.tab().session, pt, zoom)
                 == TransformHoverTarget::Pivot

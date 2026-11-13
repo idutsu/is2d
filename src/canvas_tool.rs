@@ -381,6 +381,8 @@ pub(crate) struct View {
     pub(crate) selected_library_symbol: Option<u64>,
     /// ライブラリのシンボルのミニプレビューの写し
     pub(crate) symbol_previews: crate::symbol::SymbolPreviews,
+    /// キャンバスでの前の主ボタンのクリック（画面の位置と時刻）。ダブルクリックを位置も比べて決めるため（`double_clicked`）
+    pub(crate) last_click: Option<(Pos2, f64)>,
 }
 
 impl Default for View {
@@ -397,6 +399,7 @@ impl Default for View {
             inspect_timeline_frame: false,
             selected_library_symbol: None,
             symbol_previews: Default::default(),
+            last_click: None,
         }
     }
 }
@@ -431,6 +434,37 @@ impl View {
     pub(crate) fn press_origin_world(&self, ctx: &egui::Context) -> Option<Point> {
         ctx.input(|i| i.pointer.press_origin())
             .map(|p| self.screen_to_world(p))
+    }
+
+    /// キャンバスでの主ボタンのダブルクリックか（ダブルクリックの判定はこれ1つ）：前のクリックから egui の
+    /// `max_double_click_delay` 以内に、画面で egui の `max_click_dist`（クリックとみなす動きの上限）以内の所を、もう1回
+    /// クリックしたとき。egui の `double_clicked` は時間だけで決めるので、A をクリックしてすぐ B をクリックすると、B の
+    /// ダブルクリックになっていた。ダブルクリックのあとの3回目は、新しい1回目として数える。クリックのあるフレームでは
+    /// 必ず呼ぶこと（1回目のクリックを覚える）
+    pub(crate) fn double_clicked(
+        &mut self,
+        ctx: &egui::Context,
+        response: &egui::Response,
+    ) -> bool {
+        if !response.clicked_by(egui::PointerButton::Primary) {
+            return false;
+        }
+        let (pos, time) = ctx.input(|i| (i.pointer.interact_pos(), i.time));
+        let (delay, dist) = ctx.options(|o| {
+            (
+                o.input_options.max_double_click_delay,
+                o.input_options.max_click_dist,
+            )
+        });
+        let Some(pos) = pos else {
+            self.last_click = None;
+            return false;
+        };
+        let double = self
+            .last_click
+            .is_some_and(|(p, t)| time - t < delay && p.distance(pos) <= dist);
+        self.last_click = (!double).then_some((pos, time));
+        double
     }
 
     /// ドラッグを始めたときに、ポインタが押した位置 `press`（ワールド座標）から `now` へもう動いているか（この判定はこれ1つ）

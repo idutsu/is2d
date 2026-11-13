@@ -29634,3 +29634,82 @@ fn group_edit_draws_shapes_outside_the_group_below_its_contents() {
         "グループの外を、中身より先に描く：{order:?}"
     );
 }
+
+/// キャンバスのダブルクリックは、2回のクリックが近い所のときだけ：A をクリックしてすぐ B をクリックしても、B のグループに
+/// 入らず B を選ぶ（egui の判定は時間だけで決めるので、直す前は B に入った）。同じ所の2回はグループに入る。A・B のあとすぐ
+/// B をもう1回クリックすると、B の2回でダブルクリックになる。選択ツールと自由変形ツールの両方
+#[test]
+fn double_click_needs_both_clicks_at_the_same_place() {
+    use doc_actions::Action;
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 100, 220);
+    for tool in [Tool::Select, Tool::Transform] {
+        // クリックの列（ワールド座標の x, 前のクリックからの秒）ごとに、終わったあとに入っているグループの数と、選んでいるか。
+        // 図形の真ん中（自由変形の基準点。ダブルクリックで基準点を戻す）は避ける
+        for (clicks, want_depth, want_selected) in [
+            (vec![(330.0, 0.0), (520.0, 0.2)], 0, true),
+            (vec![(330.0, 0.0), (330.0, 0.2)], 1, false),
+            (vec![(330.0, 0.0), (520.0, 0.2), (520.0, 0.1)], 1, false),
+        ] {
+            let mut app = Is2dApp::default();
+            for (k, color) in [red, blue].into_iter().enumerate() {
+                let x = 300.0 + 150.0 * k as f64;
+                run(
+                    &mut app,
+                    &[
+                        Action::PaintStroke {
+                            points: vec![Point::new(x, 300.0), Point::new(x + 100.0, 300.0)],
+                            radius: 20.0,
+                            color,
+                        },
+                        Action::SelectSingleAt {
+                            pt: Point::new(x + 50.0, 300.0),
+                        },
+                        Action::Group,
+                        Action::Deselect,
+                    ],
+                );
+            }
+            run(&mut app, &[Action::SetTool { tool }]);
+            let ctx = egui::Context::default();
+            let screen_rect = Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(1280.0, 820.0),
+            ));
+            let frame = |app: &mut Is2dApp, events: Vec<egui::Event>, t: f64| {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect,
+                        time: Some(t),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| app.update_ui(ctx),
+                );
+            };
+            let button = |p: Pos2, pressed: bool| egui::Event::PointerButton {
+                pos: p,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let mut t = 1.0;
+            frame(&mut app, vec![], t);
+            for &(x, dt) in &clicks {
+                t += dt;
+                let p = app.view.world_to_screen(Point::new(x, 300.0));
+                frame(&mut app, vec![egui::Event::PointerMoved(p)], t);
+                frame(&mut app, vec![button(p, true)], t + 0.01);
+                frame(&mut app, vec![button(p, false)], t + 0.05);
+            }
+            assert_eq!(
+                (
+                    app.session.editing_group_path.len(),
+                    !app.session.selection.is_empty()
+                ),
+                (want_depth, want_selected),
+                "{tool:?} {clicks:?}"
+            );
+        }
+    }
+}
