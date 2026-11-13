@@ -17,18 +17,20 @@ use crate::vector_engine::{make_marquee_rect_shape, nearest_on_quad, rects_overl
 pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices: &[usize]) {
     let (is_sel, any_valid) = tab.session.selected_shape_mask();
     if !any_valid {
-        clear_selection(tab);
+        let _ = clear_selection(tab);
         return;
     }
     let any_keep = keep_indices
         .iter()
         .any(|&idx| idx < is_sel.len() && is_sel[idx]);
     if !any_keep {
-        clear_selection(tab);
+        let _ = clear_selection(tab);
         return;
     }
 
-    commit_floating_except(tab, keep_indices);
+    if !commit_floating_except(tab, keep_indices) {
+        return;
+    }
     tab.session.transform_pivot = None;
     sync_timeline_layer_from_canvas_selection(tab);
 }
@@ -49,7 +51,9 @@ pub(crate) fn enter_group_at(tab: &mut Tab, pt: Point) -> bool {
     if let Some(binding) = binding_opt {
         return enter_symbol_timeline(tab, binding);
     }
-    clear_selection(tab);
+    if !clear_selection(tab) {
+        return false;
+    }
     tab.session.editing_group_path.push(gid);
     true
 }
@@ -57,7 +61,9 @@ pub(crate) fn enter_group_at(tab: &mut Tab, pt: Point) -> bool {
 /// 現在入っているグループまたはシンボルタイムライン編集階層から1段階上の親階層へ戻る
 pub(crate) fn exit_current_group(tab: &mut Tab) -> bool {
     if !tab.session.editing_group_path.is_empty() {
-        clear_selection(tab);
+        if !clear_selection(tab) {
+            return false;
+        }
         let Some(exited_gid) = tab.session.editing_group_path.pop() else {
             return false;
         };
@@ -150,7 +156,9 @@ pub(crate) fn toggle_shape_selection(tab: &mut Tab, scene_idx: usize) {
 
 /// 既存の選択を確定解除した上で、指定座標 `pt` にある最前面シェイプ（塗り・境界線・頂点、またはグループ塊全体）を選択する
 pub(crate) fn select_single_shape_at(tab: &mut Tab, sub_mode: SelectSubMode, pt: Point) -> bool {
-    clear_selection(tab);
+    if !clear_selection(tab) {
+        return false;
+    }
     let zoom = tab.view.zoom;
     let scene = tab.scene();
     if let Some(hit_idx) = scene
@@ -216,13 +224,13 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     let min_marquee = 2.0 / (tab.view.zoom as f64);
     if (max_x - min_x) < min_marquee || (max_y - min_y) < min_marquee {
         if !additive {
-            clear_selection(tab);
+            let _ = clear_selection(tab);
         }
         return;
     }
 
-    if !additive {
-        clear_selection(tab);
+    if !additive && !clear_selection(tab) {
+        return;
     }
 
     let rect = KRect::new(min_x, min_y, max_x, max_y);
@@ -504,16 +512,20 @@ pub(crate) fn prepare_group_selected_shapes(
         });
     let Some(pieces) = pieces else {
         tab.session.set_floating(before);
-        tab.session.off_grid = true;
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     };
     let new_gid = tab.doc.alloc_group_id();
 
     // 浮いた片の残りは、そのままセル画の地図にする（片は重ねない。選択は、残りを書く前のもの：片も選んでいる）
     let selection = tab.session.selection.clone();
-    if let Some(mut rest) = tab.session.take_floating() {
+    if let Some(fl) = tab.session.take_floating() {
+        let mut rest = fl.clone();
         rest.drop_pieces();
-        crate::canvas_tool::commit_floating_layers(tab, rest);
+        if crate::canvas_tool::commit_floating_layers(tab, &rest).is_none() {
+            tab.session.set_floating(Some(fl));
+            return false;
+        }
     }
     // 選んだグループ・インスタンスは、セル画の並びで新しいグループに入れる（今の階層の中身のいちばん上）
     let scope = tab.session.editing_group_path.clone();
@@ -600,7 +612,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
                     true,
                     Some((layer.id, inst.binding.instance_gid)),
                 ) else {
-                    tab.session.off_grid = true;
+                    tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
                     return false;
                 };
                 placements.push(p);
@@ -673,7 +685,9 @@ pub(crate) fn prepare_arrange_selected(
     mode: ArrangeMode,
     before_mutate: impl FnOnce(&mut Tab),
 ) -> bool {
-    commit_floating(tab);
+    if !commit_floating(tab) {
+        return false;
+    }
     if tab.session.selection.is_empty() {
         return false;
     }
@@ -761,9 +775,13 @@ pub(crate) fn prepare_delete_selected_shapes(
     before_mutate(tab);
 
     // 浮いた片は捨て、残りだけを確定する
-    if let Some(mut fl) = tab.session.take_floating() {
-        fl.drop_pieces();
-        crate::canvas_tool::commit_floating_layers(tab, fl);
+    if let Some(fl) = tab.session.take_floating() {
+        let mut rest = fl.clone();
+        rest.drop_pieces();
+        if crate::canvas_tool::commit_floating_layers(tab, &rest).is_none() {
+            tab.session.set_floating(Some(fl));
+            return false;
+        }
     }
     let selection = std::mem::take(&mut tab.session.selection);
     let scope = tab.session.editing_group_path.clone();
@@ -786,7 +804,9 @@ pub(crate) fn prepare_clear_active_frame_shapes(
     if !has_any_in_scope {
         return false;
     }
-    clear_selection(tab);
+    if !clear_selection(tab) {
+        return false;
+    }
     before_mutate(tab);
     let scope = tab.session.editing_group_path.clone();
     write_cels(tab, &layer_ids, |_, cel| cel.clear(&scope));

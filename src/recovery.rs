@@ -66,7 +66,11 @@ impl Recovery {
             else {
                 continue;
             };
-            let mut proj_doc = ProjectDocument::from_app(tab);
+            // 浮いた片を置けなければ、片を持ち上げる前の文書を書く（復旧は、何も書かないより前の絵を残す）
+            let doc = tab
+                .committed_document_copy()
+                .unwrap_or_else(|| tab.doc.clone());
+            let mut proj_doc = ProjectDocument::of(&doc);
             proj_doc.recovery_source = tab.file.clone();
             proj_doc.remove_non_finite();
 

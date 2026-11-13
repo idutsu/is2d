@@ -119,7 +119,7 @@ fn put_cel_shapes(app: &mut Is2dApp, layer_idx: usize, frame: usize, mut shapes:
         }
     });
     if written == Some(false) {
-        app.session.off_grid = true;
+        app.session.refusal = Some(canvas_tool::Refusal::OffGrid);
     }
     canvas_tool::finish_cel_writes(app.tab_mut(), &[lid]);
     if prev_frame != frame || !prev_vis || prev_lock {
@@ -748,7 +748,7 @@ fn test_marquee_select_partial_slice_and_shift_multi_select() {
     );
 
     // 2. 移動も削除もせずに選択解除（clear_selection）すると、無劣化で元の1つのシェイプに戻ること
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     assert_eq!(
         app.scene().len(),
         1,
@@ -913,7 +913,7 @@ fn test_free_transform_rotate_scale_and_flip() {
     assert!(s0.contains_point(Point::new(200.0, 155.0)));
 
     // 3. カスタムピボット点 (200, 200) に対して、左側の点 (150, 200) にあるシェイプを左右反転 -> (250, 200) に移り、ワインディングも正常に保たれること
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     let left_piece = make_stroke(
         Point::new(130.0, 200.0),
         Point::new(170.0, 200.0),
@@ -1051,7 +1051,7 @@ fn test_group_selection_bucket_protection_and_non_destructive_overlap() {
     assert!(!in_group.contains(&red));
 
     // 1つクリックするだけでグループ全体の2シェイプが同時選択されること
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     assert!(doc_actions::apply(
         &mut app,
         doc_actions::Action::SelectSingleAt {
@@ -1076,7 +1076,7 @@ fn test_group_selection_bucket_protection_and_non_destructive_overlap() {
             delta: KVec2::new(0.0, 100.0),
         },
     );
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     let s = scene_summary(&app);
     assert_eq!(s.shapes.len(), 3);
     assert!(s.shapes[0].contains_point(Point::new(100.0, 200.0)));
@@ -1178,7 +1178,7 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
         vec![eye_gid]
     );
     // 選択を外すと、赤はルートの地図に入る
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     let cel_shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes();
     assert!(cel_shapes
         .iter()
@@ -1293,7 +1293,7 @@ fn test_cut_and_paste_in_place_seamlessly_remerges_raw_shape() {
         .get(app.session.selected_indices()[0])
         .unwrap()
         .contains_point(Point::new(120.0, 200.0)));
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     let s = scene_summary(&app);
     assert_eq!(s.shapes.len(), 1);
     assert!(s.shapes[0].contains_point(Point::new(120.0, 200.0)));
@@ -1481,7 +1481,7 @@ fn test_multilayer_isolation_cross_layer_marquee_and_lock_protection() {
             delta: KVec2::new(30.0, 0.0),
         },
     );
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     assert!(app.doc.root.layers[0].cel_at(0).unwrap().shapes()[0]
         .contains_point(Point::new(155.0, 100.0)));
     assert!(app.doc.root.layers[1].cel_at(0).unwrap().shapes()[0]
@@ -1495,7 +1495,7 @@ fn test_multilayer_isolation_cross_layer_marquee_and_lock_protection() {
         false,
     );
     assert_eq!(app.session.selected_indices().len(), 1);
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     timeline_ui::set_layer_locked(&mut app, 0, false);
     assert_eq!(scene_summary(&app).shapes.len(), 2);
 }
@@ -1600,7 +1600,7 @@ fn test_timeline_cell_selection_sync_with_canvas_selection() {
         app.doc.root.layers[0].id
     );
 
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     timeline_ui::scrub_ruler_to_frame(&mut app, 0);
     assert!(doc_actions::apply(
         &mut app,
@@ -2184,7 +2184,7 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
         &mut app,
         Some(joint_world),
     ));
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     app.session.set_selected_indices(vec![0]);
     let bbox_f4 = app
         .scene()
@@ -2406,7 +2406,7 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
         .scene()
         .selected_single_symbol_binding(&app.session.selection)
         .is_some());
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     assert!(app
         .doc
         .root
@@ -2591,7 +2591,7 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
     let move_drag = clipboard_ops::begin_move_selection_drag(&mut app, Point::ZERO, false);
     app.session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(move_drag);
     app.session.translate_move_overlay(KVec2::new(500.0, 500.0));
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     assert_eq!(app.scene().get(0).unwrap().bounding_box(), clean_bbox);
 
     let stroke = vec![Point::new(10.0, 10.0), Point::new(40.0, 10.0)];
@@ -2603,7 +2603,7 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
         tail_mesh,
         tail_start_idx: 0,
     };
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     assert!(matches!(
         app.session.drag,
         crate::canvas_tool::ActiveCanvasDrag::PaintStroke { .. }
@@ -4153,7 +4153,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     let mut loaded_merge = Is2dApp::default();
     crate::project_io::open_project_in_tab(&mut loaded_merge, &tmp_merge_path, None).unwrap();
     assert_eq!(loaded_merge.scene().len(), 2);
-    canvas_tool::clear_selection(&mut merge_app);
+    assert!(canvas_tool::clear_selection(&mut merge_app));
     assert!(!merge_app.session.has_modified_floating());
     assert!(
         !merge_app.history.is_dirty(),
@@ -4192,7 +4192,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
         1,
         "保存されたドキュメントでは同色シェイプが1つにUnion結合されていること"
     );
-    canvas_tool::clear_selection(&mut union_save_app);
+    assert!(canvas_tool::clear_selection(&mut union_save_app));
     assert_eq!(union_save_app.scene().len(), 1);
     assert!(union_save_app.session.selection.is_empty());
 
@@ -4260,7 +4260,7 @@ fn test_save_io_failure_rollback_and_marquee_slice_push_undo() {
     );
     timeline_ui::set_layer_locked(&mut self_union_app, 0, false);
 
-    canvas_tool::clear_selection(&mut self_union_app);
+    assert!(canvas_tool::clear_selection(&mut self_union_app));
     select_ops::apply_marquee_selection(
         &mut self_union_app,
         Point::new(90.0, 60.0),
@@ -4286,7 +4286,7 @@ fn test_save_io_failure_rollback_and_marquee_slice_push_undo() {
         1,
         "マーキースライス未編集状態で push_undo が呼ばれてもタイムライン側の分割前1シェイプが維持されること"
     );
-    canvas_tool::clear_selection(&mut self_union_app);
+    assert!(canvas_tool::clear_selection(&mut self_union_app));
     assert_eq!(scene_summary(&self_union_app).len, 1);
 
     // 存在しないディレクトリへの保存（I/O失敗）時のロールバックと、Floating 保持状態からの Undo -> Redo マージ確定
@@ -4329,7 +4329,7 @@ fn test_save_io_failure_rollback_and_marquee_slice_push_undo() {
     assert_eq!(undo_redo_merge_app.scene().len(), 2);
     undo_redo_merge_app.redo();
     assert!(undo_redo_merge_app.session.has_modified_floating());
-    canvas_tool::clear_selection(&mut undo_redo_merge_app);
+    assert!(canvas_tool::clear_selection(&mut undo_redo_merge_app));
     assert_eq!(
         undo_redo_merge_app.scene().len(),
         1,
@@ -6250,7 +6250,7 @@ fn test_shift_partial_deselect_only_merges_deselected_raw_shape() {
         &mut app,
         kurbo::Vec2::new(100.0, 0.0)
     ));
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
 
     // 結果：先に選択解除された上側の赤い図形は上側の青い図形を切り抜いているが、
     // 選択に残して後から退かした下側の赤い図形は下側の青い図形を切り抜いていないこと！
@@ -6335,7 +6335,7 @@ fn test_pivot_commit_restores_marquee_slice_and_persists() {
 
     // 2. シンボルインスタンスをマーキー選択（生シェイプも同時にスライス）した状態でピボットを変更した場合、
     // 生シェイプのスライス控えを復元しつつシンボルの新しいピボットがタイムラインへ永続化され失われないこと (#8)
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     let sym_shapes = make_stroke(
         Point::new(100.0, 220.0),
         Point::new(180.0, 220.0),
@@ -6372,7 +6372,7 @@ fn test_pivot_commit_restores_marquee_slice_and_persists() {
         Some(new_world_pivot),
     ));
     assert!(app.session.floating().is_none());
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
 
     let saved_inst = &app.doc.root.layers[0].keyframes[0].cel.instances[0];
     assert!(
@@ -7363,7 +7363,7 @@ fn test_onion_skin_per_tab_isolation_and_shift_marquee_no_premature_merge() {
     assert_eq!(sel_app.session.selected_indices().len(), 2);
 
     // その後選択解除 (clear_selection) した瞬間に同色結合が確定し、赤1個＋青1個の計2図形になること
-    canvas_tool::clear_selection(&mut sel_app);
+    assert!(canvas_tool::clear_selection(&mut sel_app));
     assert_eq!(scene_summary(&sel_app).len, 2);
 }
 
@@ -12440,7 +12440,7 @@ fn test_g3_1_symbol_enter_exit_preserves_symbol_def_and_load_normalizes() {
     assert_eq!(app.doc.library[0].timeline.next_layer_id, next_id_before);
 
     // 不正な total_frames=0, next_layer_number=0, next_layer_id=0 を持つファイルを読み込んだ時点で正規化されていること
-    let mut pd = project_io::ProjectDocument::from_app(&app);
+    let mut pd = project_io::ProjectDocument::from_app(&app).unwrap();
     pd.library[0].timeline.total_frames = 0;
     pd.library[0].timeline.next_layer_number = 0;
     pd.library[0].timeline.next_layer_id = 0;
@@ -13300,7 +13300,7 @@ fn test_m2_1_ungroup_multi_shape_and_nested_symbol_detaches_all_shapes() {
     );
 
     // 選択解除で Floating を確定した後も、生の図形が10個で形・色が分解前と一致すること
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     let cel = &app.doc.root.layers[0].keyframes[0].cel;
     assert!(cel.instances.is_empty());
     assert_eq!(cel.shapes().len(), 10, "生の図形が10個になること");
@@ -13356,7 +13356,7 @@ fn test_m2_1_ungroup_multi_shape_and_nested_symbol_detaches_all_shapes() {
     );
 
     let _ = apply(&mut app2, Action::Ungroup);
-    canvas_tool::clear_selection(&mut app2);
+    assert!(canvas_tool::clear_selection(&mut app2));
     let cel2 = &app2.doc.root.layers[0].keyframes[0].cel;
     assert_eq!(cel2.instances.len(), 1);
     assert_eq!(cel2.instances[0].binding.symbol_id, sym_b_id);
@@ -14401,7 +14401,7 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
 #[test]
 fn test_m3_1_write_project_json_reports_flush_error() {
     let tab = crate::canvas_tool::Tab::new_empty(1, 1);
-    let doc = crate::project_io::ProjectDocument::from_app(&tab);
+    let doc = crate::project_io::ProjectDocument::from_app(&tab).unwrap();
 
     let tmp = std::env::temp_dir().join(format!("is2d_m3_1_ro_{}.tmp", std::process::id()));
     std::fs::write(&tmp, b"orig").unwrap();
@@ -15002,7 +15002,7 @@ fn test_move_selection_off_grid_is_refused() {
             delta: KVec2::new(70_000.0, 0.0),
         },
     ));
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     let after = &app.doc.root.layers[0].keyframes[0].cel.shapes();
     assert_eq!(after.len(), before.len());
     assert!(after
@@ -15720,7 +15720,10 @@ fn test_video_export_macos_mp4_cancel_and_error() {
 
         let out_path = tmp_dir.join("ten_frames.mp4");
         let tmp_file = tmp_export_path(&out_path);
-        let mut job = VideoExportJob::start(app.tab().committed_document_copy(), out_path.clone());
+        let mut job = VideoExportJob::start(
+            app.tab().committed_document_copy().unwrap(),
+            out_path.clone(),
+        );
         let outcome = job.wait();
         assert_eq!(outcome, VideoExportOutcome::Completed);
         assert!(out_path.exists());
@@ -15740,8 +15743,10 @@ fn test_video_export_macos_mp4_cancel_and_error() {
 
         let cancel_path = tmp_dir.join("cancelled.mp4");
         let cancel_tmp = tmp_export_path(&cancel_path);
-        let mut job =
-            VideoExportJob::start(app.tab().committed_document_copy(), cancel_path.clone());
+        let mut job = VideoExportJob::start(
+            app.tab().committed_document_copy().unwrap(),
+            cancel_path.clone(),
+        );
         while job.progress().0 < 3 {
             std::hint::spin_loop();
         }
@@ -15757,7 +15762,10 @@ fn test_video_export_macos_mp4_cancel_and_error() {
         let bad_dir = tmp_dir.join("nonexistent_subdir");
         let bad_path = bad_dir.join("out.mp4");
         let bad_tmp = tmp_export_path(&bad_path);
-        let mut job = VideoExportJob::start(app.tab().committed_document_copy(), bad_path.clone());
+        let mut job = VideoExportJob::start(
+            app.tab().committed_document_copy().unwrap(),
+            bad_path.clone(),
+        );
         let outcome = job.wait();
         assert!(matches!(outcome, VideoExportOutcome::Failed(_)));
         assert!(!bad_path.exists());
@@ -15998,10 +16006,10 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
     }
 
     let doc_json = |app: &Is2dApp| -> String {
-        serde_json::to_string(&ProjectDocument::from_app(app.tab())).unwrap()
+        serde_json::to_string(&ProjectDocument::from_app(app.tab()).unwrap()).unwrap()
     };
     let doc_json_ignoring_active_layer = |app: &Is2dApp| -> String {
-        let mut pd = ProjectDocument::from_app(app.tab());
+        let mut pd = ProjectDocument::from_app(app.tab()).unwrap();
         pd.timeline.active_layer = 0;
         pd.timeline.current_frame = 0;
         for sym in &mut pd.library {
@@ -16447,7 +16455,8 @@ fn test_m5_2_n1001_contour_segments_capacity_equals_len_after_merge_insert_and_r
     ));
     assert_all_contours_shrunk(&app.tab().doc, "after AddAnchor");
 
-    let saved_json = serde_json::to_vec(&project_io::ProjectDocument::from_app(&app)).unwrap();
+    let saved_json =
+        serde_json::to_vec(&project_io::ProjectDocument::from_app(&app).unwrap()).unwrap();
     let loaded_doc: project_io::ProjectDocument = serde_json::from_slice(&saved_json).unwrap();
     let mut reopened = Is2dApp::default();
     loaded_doc.apply_to_app(&mut reopened);
@@ -16675,7 +16684,8 @@ fn test_symbol_color_effect_alpha_brightness_tween_export_nested_io_undo_ungroup
             effect: ColorEffect::new(0.35, -0.25),
         },
     ));
-    let saved_str = serde_json::to_string(&ProjectDocument::from_app(&export_app)).unwrap();
+    let saved_str =
+        serde_json::to_string(&ProjectDocument::from_app(&export_app).unwrap()).unwrap();
     let loaded_doc: ProjectDocument = serde_json::from_str(&saved_str).unwrap();
     let mut reopened = Is2dApp::default();
     loaded_doc.apply_to_app(&mut reopened);
@@ -17181,7 +17191,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
             .contains(&b_inst.binding.instance_gid));
         assert!(!app.session.selection.shapes.is_empty());
 
-        canvas_tool::clear_selection(&mut app);
+        assert!(canvas_tool::clear_selection(&mut app));
         let cel_after = &app.doc.root.layers[0].keyframes[0].cel;
         assert_eq!(cel_after.shapes().len(), 1);
         assert_eq!(cel_after.shapes()[0].color, raw_col);
@@ -19561,7 +19571,7 @@ fn test_video_export_parallel_render_frames_and_without_mesh() {
     ));
     assert_eq!(app.tab().doc.root.total_frames, 10);
 
-    let doc = app.tab().committed_document_copy();
+    let doc = app.tab().committed_document_copy().unwrap();
     let (w, h) = export_dimensions(doc.stage_size);
     let expected_frames: Vec<Vec<u8>> = (0..10).map(|f| render_frame(&doc, f, w, h)).collect();
     for f in 1..10 {
@@ -23158,7 +23168,7 @@ mod map_overlay {
         );
         app.session.set_selected_indices(vec![0]);
         let gid = doc_actions::group_selected_shapes(&mut app).unwrap();
-        canvas_tool::clear_selection(&mut app);
+        assert!(canvas_tool::clear_selection(&mut app));
         app.tool.brush_color = Color32::BLUE;
         doc_actions::commit_raw_outline(
             &mut app,
@@ -23289,7 +23299,7 @@ mod map_overlay {
             );
             assert!(!app.session.selection.is_empty(), "{k}");
             assert!(doc_actions::apply(&mut app, action));
-            canvas_tool::clear_selection(&mut app);
+            assert!(canvas_tool::clear_selection(&mut app));
             assert!(layer_map_valid(&app, 0), "{k}");
             if k < 2 {
                 // ごくわずかに動かしただけなので、色はそのまま
@@ -23324,7 +23334,7 @@ mod map_overlay {
             Point::new(200.0, 250.0),
             false,
         );
-        canvas_tool::clear_selection(&mut app);
+        assert!(canvas_tool::clear_selection(&mut app));
         let after: Vec<(u64, Color32)> = app.doc.root.layers[0].keyframes[0]
             .cel
             .shapes()
@@ -23345,7 +23355,7 @@ mod map_overlay {
             false,
         );
         assert!(doc_actions::copy_selected_shapes(&mut app));
-        canvas_tool::clear_selection(&mut app);
+        assert!(canvas_tool::clear_selection(&mut app));
         assert!(doc_actions::paste_clipboard(&mut app, true));
         assert!(doc_actions::apply(
             &mut app,
@@ -23353,7 +23363,7 @@ mod map_overlay {
                 delta: KVec2::new(37.0, 9.0)
             }
         ));
-        canvas_tool::clear_selection(&mut app);
+        assert!(canvas_tool::clear_selection(&mut app));
         assert!(layer_map_valid(&app, 0));
         // 貼り付けた片の上の色（元の 160,201 の青が 197,210 に来る）
         assert_eq!(
@@ -23524,7 +23534,7 @@ mod map_overlay {
                         };
                         let _ = doc_actions::apply(&mut app, action);
                     }
-                    canvas_tool::clear_selection(&mut app);
+                    assert!(canvas_tool::clear_selection(&mut app));
                 }
                 6 | 7 => {
                     let from = rp(&mut r);
@@ -23655,7 +23665,7 @@ mod map_overlay {
                             };
                             let _ = doc_actions::apply(&mut app, action);
                         }
-                        canvas_tool::clear_selection(&mut app);
+                        assert!(canvas_tool::clear_selection(&mut app));
                     }
                     5 => {
                         let a = rp(&mut r);
@@ -23666,7 +23676,7 @@ mod map_overlay {
                             false,
                         );
                         if doc_actions::copy_selected_shapes(&mut app) {
-                            canvas_tool::clear_selection(&mut app);
+                            assert!(canvas_tool::clear_selection(&mut app));
                             if doc_actions::paste_clipboard(&mut app, true) {
                                 let _ = doc_actions::apply(
                                     &mut app,
@@ -23676,7 +23686,7 @@ mod map_overlay {
                                 );
                             }
                         }
-                        canvas_tool::clear_selection(&mut app);
+                        assert!(canvas_tool::clear_selection(&mut app));
                     }
                     _ => {
                         let a = rp(&mut r);
@@ -24073,7 +24083,7 @@ mod map_overlay {
                 delta: KVec2::new(10.0, 0.0)
             }
         ));
-        canvas_tool::clear_selection(&mut app);
+        assert!(canvas_tool::clear_selection(&mut app));
         let after = cel(&app);
         same_elsewhere(
             &before,
@@ -24210,7 +24220,7 @@ mod map_overlay {
                     delta: KVec2::new(-10.0, 0.0)
                 }
             ));
-            canvas_tool::clear_selection(&mut app);
+            assert!(canvas_tool::clear_selection(&mut app));
             let after = app.doc.root.layers[0].keyframes[0]
                 .cel
                 .shapes()
@@ -24409,7 +24419,7 @@ mod map_overlay {
                     delta: KVec2::new(7.0, 3.0),
                 },
             );
-            canvas_tool::clear_selection(&mut app);
+            assert!(canvas_tool::clear_selection(&mut app));
             assert!(layer_map_valid(&app, 0), "{} 回目で地図が壊れた", step + 1);
         }
     }
@@ -24434,7 +24444,7 @@ mod map_overlay {
                         delta: KVec2::new(7.0, 3.0),
                     },
                 );
-                canvas_tool::clear_selection(&mut app);
+                assert!(canvas_tool::clear_selection(&mut app));
                 worst = worst.max(t.elapsed().as_secs_f64() * 1e3);
                 if !layer_map_valid(&app, 0) {
                     eprintln!("PROBE 種 {seed}：{} 回目で地図が壊れた", step + 1);
@@ -24868,7 +24878,7 @@ mod map_overlay {
                 delta: KVec2::new(0.0, 200.0)
             }
         ));
-        canvas_tool::clear_selection(&mut app);
+        assert!(canvas_tool::clear_selection(&mut app));
         assert!(layer_map_valid(&app, 0));
     }
 
@@ -25212,7 +25222,7 @@ mod map_overlay {
                 }
             ));
             let t = std::time::Instant::now();
-            canvas_tool::clear_selection(&mut app);
+            assert!(canvas_tool::clear_selection(&mut app));
             let t_commit = ms(t);
             // 全部を選んで、同じ位置に貼り付けて確定
             select_ops::apply_marquee_selection(
@@ -25222,13 +25232,13 @@ mod map_overlay {
                 false,
             );
             assert!(doc_actions::apply(&mut app, doc_actions::Action::Copy));
-            canvas_tool::clear_selection(&mut app);
+            assert!(canvas_tool::clear_selection(&mut app));
             assert!(doc_actions::apply(
                 &mut app,
                 doc_actions::Action::Paste { in_place: true }
             ));
             let t = std::time::Instant::now();
-            canvas_tool::clear_selection(&mut app);
+            assert!(canvas_tool::clear_selection(&mut app));
             let t_paste = ms(t);
             // ブラシ 2 本
             app.tool.brush_color = Color32::from_rgb(10, 200, 200);
@@ -25304,7 +25314,7 @@ mod map_overlay {
                 }
             ));
             let t = std::time::Instant::now();
-            canvas_tool::clear_selection(&mut app);
+            assert!(canvas_tool::clear_selection(&mut app));
             eprintln!(
                 "Alt 複製 {} 回目の確定 {:.1}ms",
                 k + 1,
@@ -26559,7 +26569,7 @@ mod map_overlay {
                 delta: KVec2::new(37.0, -21.0),
             },
         ));
-        canvas_tool::clear_selection(&mut app);
+        assert!(canvas_tool::clear_selection(&mut app));
         assert!(app.session.floating().is_none());
         // 矩形で選んで、動かさずに一部だけ外す（外した片は残りに戻る）
         select_ops::apply_marquee_selection(
@@ -26569,8 +26579,11 @@ mod map_overlay {
             false,
         );
         let keep: Vec<usize> = app.session.selected_indices().into_iter().take(1).collect();
-        crate::canvas_tool::commit_floating_except(app.tab_mut(), &keep);
-        canvas_tool::clear_selection(&mut app);
+        assert!(crate::canvas_tool::commit_floating_except(
+            app.tab_mut(),
+            &keep
+        ));
+        assert!(canvas_tool::clear_selection(&mut app));
         assert_eq!(
             crate::planar_map::from_shape_builds(),
             built,
@@ -26611,7 +26624,7 @@ mod map_overlay {
             );
             mv.push(ms(t));
             let t = std::time::Instant::now();
-            canvas_tool::clear_selection(&mut app);
+            assert!(canvas_tool::clear_selection(&mut app));
             commit.push(ms(t));
         }
         let stat = |v: &[f64]| {
@@ -26680,7 +26693,7 @@ mod map_overlay {
                         );
                         let ok = doc_actions::copy_selected_shapes(&mut app)
                             && doc_actions::paste_clipboard(&mut app, r.f() < 0.5);
-                        canvas_tool::clear_selection(&mut app);
+                        assert!(canvas_tool::clear_selection(&mut app));
                         ok
                     }
                     1 => {
@@ -26697,7 +26710,7 @@ mod map_overlay {
                                 alt_duplicate: true,
                             },
                         );
-                        canvas_tool::clear_selection(&mut app);
+                        assert!(canvas_tool::clear_selection(&mut app));
                         ok
                     }
                     2 => {
@@ -26718,7 +26731,7 @@ mod map_overlay {
                                 0.5 + r.f(),
                             );
                         }
-                        canvas_tool::clear_selection(&mut app);
+                        assert!(canvas_tool::clear_selection(&mut app));
                         ok
                     }
                     3 => {
@@ -26727,7 +26740,7 @@ mod map_overlay {
                             app.session.set_selected_indices(vec![i]);
                             doc_actions::ungroup_selected_shapes(&mut app)
                         });
-                        canvas_tool::clear_selection(&mut app);
+                        assert!(canvas_tool::clear_selection(&mut app));
                         ok
                     }
                     4 => {
@@ -26742,7 +26755,7 @@ mod map_overlay {
                         } else {
                             doc_actions::ungroup_selected_shapes(&mut app)
                         };
-                        canvas_tool::clear_selection(&mut app);
+                        assert!(canvas_tool::clear_selection(&mut app));
                         ok
                     }
                     _ => {
@@ -26754,14 +26767,14 @@ mod map_overlay {
                             false,
                         );
                         let copied = doc_actions::copy_selected_shapes(&mut app);
-                        canvas_tool::clear_selection(&mut app);
+                        assert!(canvas_tool::clear_selection(&mut app));
                         let binding = app.scene().iter().find_map(|s| s.symbol_instance);
                         let ok = copied
                             && binding.is_some_and(|b| {
                                 symbol_ops::enter_symbol_timeline(&mut app, b)
                                     && doc_actions::paste_clipboard(&mut app, true)
                             });
-                        canvas_tool::clear_selection(&mut app);
+                        assert!(canvas_tool::clear_selection(&mut app));
                         while !app.session.edit_path.is_empty() {
                             symbol_ops::exit_symbol_timeline(&mut app);
                         }
@@ -26933,7 +26946,7 @@ mod map_overlay {
                     }
                 ));
                 let t = std::time::Instant::now();
-                canvas_tool::clear_selection(&mut app);
+                assert!(canvas_tool::clear_selection(&mut app));
                 t_commit = t_commit.min(ms(t));
                 valid &= all_valid(&app);
             }
@@ -26953,7 +26966,7 @@ mod map_overlay {
             }
         ));
         let t = std::time::Instant::now();
-        canvas_tool::clear_selection(&mut app);
+        assert!(canvas_tool::clear_selection(&mut app));
         eprintln!(
             "PROBE 全部を Alt 複製して確定 {:.1}ms｜地図 {}",
             ms(t),
@@ -26967,7 +26980,7 @@ mod map_overlay {
         let mut app = dense_scene_app(7);
         select_ops::apply_marquee_selection(&mut app, rects[0].1, rects[0].2, false);
         assert!(doc_actions::copy_selected_shapes(&mut app));
-        canvas_tool::clear_selection(&mut app);
+        assert!(canvas_tool::clear_selection(&mut app));
         assert!(doc_actions::paste_clipboard(&mut app, true));
         assert!(doc_actions::apply(
             &mut app,
@@ -26976,7 +26989,7 @@ mod map_overlay {
             }
         ));
         let t = std::time::Instant::now();
-        canvas_tool::clear_selection(&mut app);
+        assert!(canvas_tool::clear_selection(&mut app));
         eprintln!(
             "PROBE 全部をコピーして貼り付け、確定 {:.1}ms｜地図 {}",
             ms(t),
@@ -27159,7 +27172,7 @@ mod map_overlay {
                     &mut app,
                     KVec2::new(rng.f64() * 60.0 - 30.0, rng.f64() * 60.0 - 30.0),
                 );
-                canvas_tool::clear_selection(&mut app);
+                assert!(canvas_tool::clear_selection(&mut app));
             }
         }
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
@@ -27475,7 +27488,7 @@ fn committing_recolored_or_coinciding_pieces_writes_them() {
         &mut app,
         Point::new(200.0, 200.0)
     ));
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     assert_eq!(at(&app, Point::new(200.0, 200.0)), vec![green]);
 
     // 2. 全部をコピーし、青い線を消してから、同じ所に貼る（赤い線は元とまったく同じ形で重なる）
@@ -27504,7 +27517,7 @@ fn committing_recolored_or_coinciding_pieces_writes_them() {
         false,
     );
     assert!(doc_actions::copy_selected_shapes(&mut app));
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     select_ops::apply_marquee_selection(
         &mut app,
         Point::new(50.0, 260.0),
@@ -27514,7 +27527,7 @@ fn committing_recolored_or_coinciding_pieces_writes_them() {
     assert!(doc_actions::delete_selected_shapes(&mut app));
     assert!(at(&app, Point::new(200.0, 300.0)).is_empty());
     assert!(doc_actions::paste_clipboard(&mut app, true));
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     assert_eq!(at(&app, Point::new(200.0, 300.0)), vec![blue]);
     assert_eq!(at(&app, Point::new(200.0, 200.0)), vec![red]);
 }
@@ -27556,7 +27569,88 @@ fn alt_duplicate_places_once_or_changes_nothing() {
 
     doc_actions::finish_move_selection_drag(&mut app, KVec2::new(0.0, 100.0), true);
     assert_eq!(app.history.undo_stack.len(), undo_len + 1);
-    canvas_tool::clear_selection(&mut app);
+    assert!(canvas_tool::clear_selection(&mut app));
     assert_eq!(count(&app, Point::new(200.0, 200.0)), 1);
     assert_eq!(count(&app, Point::new(200.0, 300.0)), 1);
+}
+
+/// N-2002：浮いた片の確定は全部か無しか。書けないレイヤーがあれば何も書かず、浮いた片と選択を残して知らせる（片は
+/// いつも文書か浮いた片のどちらかにある）。置けない片があるあいだは保存もしない
+#[test]
+fn refused_commit_keeps_the_floating_pieces() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 200.0),
+            Point::new(300.0, 200.0),
+            25.0,
+            red,
+        ),
+    );
+    doc_actions::apply(&mut app, doc_actions::Action::AddLayer);
+    put_cel_shapes(
+        &mut app,
+        1,
+        0,
+        make_stroke(
+            Point::new(100.0, 300.0),
+            Point::new(300.0, 300.0),
+            25.0,
+            blue,
+        ),
+    );
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 150.0),
+        Point::new(350.0, 350.0),
+        false,
+    );
+    doc_actions::finish_move_selection_drag(&mut app, KVec2::new(0.0, 100.0), false);
+    assert!(app.session.floating().is_some());
+    // 置く先のレイヤーの1つを編集できなくする（書けない場面の代わり）
+    let locked_id = app.tab().active_timeline().layers[1].id;
+    app.tab_mut().with_active_timeline_mut(|tl, _| {
+        tl.layers[1].locked = true;
+        true
+    });
+    let doc_before = app.tab().doc.root.clone();
+    assert!(!canvas_tool::clear_selection(&mut app));
+    assert_eq!(
+        app.session.refusal.take(),
+        Some(canvas_tool::Refusal::Unplaceable)
+    );
+    assert!(app.session.floating().is_some());
+    assert!(!app.session.selection.is_empty());
+    for (a, b) in doc_before.layers.iter().zip(&app.tab().doc.root.layers) {
+        assert!(std::sync::Arc::ptr_eq(&a.keyframes[0], &b.keyframes[0]));
+    }
+    assert!(project_io::ProjectDocument::from_app(app.tab()).is_err());
+
+    app.tab_mut().with_active_timeline_mut(|tl, _| {
+        tl.layers
+            .iter_mut()
+            .find(|l| l.id == locked_id)
+            .unwrap()
+            .locked = false;
+        true
+    });
+    assert!(canvas_tool::clear_selection(&mut app));
+    let at = |p: Point| {
+        app.scene()
+            .iter()
+            .filter(|s| s.contains_point(p))
+            .map(|s| s.color)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(at(Point::new(200.0, 300.0)), vec![red]);
+    assert_eq!(at(Point::new(200.0, 400.0)), vec![blue]);
 }

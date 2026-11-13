@@ -186,11 +186,6 @@ impl FloatLayer {
         map.checked()
     }
 
-    /// 画面の土台 `stage` のセル画の地図の上で確定した地図（`committed`）
-    pub(crate) fn committed_on(&self, stage: Stage<'_>) -> Option<PlanarMap> {
-        self.committed(&stage.cel(self.layer_id)?)
-    }
-
     /// 確定した地図：中身の地図に、片の組を下から順に重ねる（組ごとに変換をかけて、その座標の格子で正しい地図にする：
     /// `realized`）。`None`：格子に置けない座標がある
     pub(crate) fn committed(&self, cel: &Arc<LayerBase>) -> Option<PlanarMap> {

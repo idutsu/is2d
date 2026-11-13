@@ -334,7 +334,15 @@ impl Is2dApp {
             return;
         };
 
-        let doc = self.tab().committed_document_copy();
+        // 浮いた片を置けなければ、画面に見えている片が入らない動画は書き出さない
+        let Some(doc) = self.tab().committed_document_copy() else {
+            canvas_tool::show_notice(
+                &mut self.toast,
+                canvas_tool::NoticeKind::Warning,
+                "選んだ図形を置けないため書き出せません（動かすか、取り消してから書き出してください）",
+            );
+            return;
+        };
         self.video_export = Some(video_export::VideoExportJob::start(doc, path));
     }
 

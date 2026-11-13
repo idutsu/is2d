@@ -366,7 +366,9 @@ fn mutate_timeline_with_undo(
     tab: &mut Tab,
     mutate: impl FnOnce(&mut Timeline, &mut Document) -> bool,
 ) -> bool {
-    commit_floating(tab);
+    if !commit_floating(tab) {
+        return false;
+    }
     push_undo(tab, None);
     let changed = tab.with_active_timeline_mut(mutate);
     if changed {
@@ -396,12 +398,8 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     let mut res = dispatch(host, action);
     let (tab, _, clipboard, toast) = host.parts_mut();
     // 地図にできない形を作る編集は、文書を変える前に断ってある（どの入口も同じ決まり）。ここで知らせる
-    if std::mem::take(&mut tab.session.off_grid) {
-        show_notice(
-            toast,
-            NoticeKind::Warning,
-            "地図の範囲（±65,536px）の外には置けません",
-        );
+    if let Some(refusal) = tab.session.refusal.take() {
+        show_notice(toast, NoticeKind::Warning, refusal.message());
     }
     if check_symbol_nest && res && tab.doc.symbol_nest_exceeded() {
         if let Some((prev, _)) = tab.history.pending.take() {
@@ -472,16 +470,15 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         }
         #[cfg(test)]
         Action::SelectAll => {
-            clear_selection(tab);
+            if !clear_selection(tab) {
+                return false;
+            }
             let editable_lids: std::collections::HashSet<u64> =
                 editable_layer_ids(tab).into_iter().collect();
             tab.session.select_shapes_in_layers(&editable_lids);
             !tab.session.selection.is_empty()
         }
-        Action::Deselect => {
-            clear_selection(tab);
-            true
-        }
+        Action::Deselect => clear_selection(tab),
         #[cfg(test)]
         Action::CommitFloating => commit_floating(tab),
         #[cfg(test)]
@@ -775,7 +772,9 @@ fn apply_raw_outline(
     {
         return false;
     }
-    clear_selection(tab);
+    if !clear_selection(tab) {
+        return false;
+    }
     // 絵が変わらなければ（同じ色で塗られた所の中をなぞった・何も消えないなど）edit_layer_map が false を返し、
     // apply が Undo の控えを捨てる
     push_undo(tab, None);
@@ -972,7 +971,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
                 .is_none_or(|c| c.scope_base(path).map.fits_grid(doc))
         });
     if !fits {
-        tab.session.off_grid = true;
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     }
     // 浮いた片（いつもみな選ばれている）は、片の組の変換に、文書の座標の変換を重ねる（確定のときに地図にかける）
@@ -1029,10 +1028,12 @@ fn duplicate_selected_in_working_copy(tab: &mut Tab, offset: KVec2) -> bool {
     };
     let xform = content_xform(content.world, tab.session.edit_path.world_xform(), offset);
     let Some(placement) = prepare_placement(tab, &content, xform, true, None) else {
-        tab.session.off_grid = true;
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     };
-    commit_floating(tab);
+    if !commit_floating(tab) {
+        return false;
+    }
     tab.session.selection.clear();
     put_placements(tab, vec![placement], |sym| sym);
     true
@@ -1109,7 +1110,9 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
 
 #[cfg(test)]
 fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
-    clear_selection(tab);
+    if !clear_selection(tab) {
+        return false;
+    }
     let target = compute_hover_target(
         tab.scene(),
         &tab.session,
@@ -1141,7 +1144,9 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
 
 #[cfg(test)]
 fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
-    clear_selection(tab);
+    if !clear_selection(tab) {
+        return false;
+    }
     let target = compute_hover_target(
         tab.scene(),
         &tab.session,
@@ -1200,7 +1205,9 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
     }
     // ほかはレイヤーの地図で編集する（境目なら両側の図形が変わる）。選択・浮いている図形があれば、先に確定して探し直す
     if !tab.session.selection.is_empty() || tab.session.floating().is_some() {
-        clear_selection(tab);
+        if !clear_selection(tab) {
+            return false;
+        }
         target = compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode);
     }
     match edit_of(target) {
@@ -1326,10 +1333,12 @@ fn apply_paste_clipboard(
     // 置く準備（格子の外へ出るなら、文書を変えずに断る）をしてから、選択を確定し、シンボルを移植して置く
     let xform = content_xform(content.world, tab.session.edit_path.world_xform(), offset);
     let Some(placement) = prepare_placement(tab, &content, xform, multi_layer_copy, None) else {
-        tab.session.off_grid = true;
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     };
-    clear_selection(tab);
+    if !clear_selection(tab) {
+        return false;
+    }
     push_undo(tab, None);
     let sym_map = import_clipboard_symbols(tab, clipboard, &content);
     put_placements(tab, vec![placement], |sym| {
@@ -1354,7 +1363,9 @@ fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     {
         exit_symbol_timeline(tab);
     }
-    clear_selection(tab);
+    if !clear_selection(tab) {
+        return false;
+    }
     push_undo(tab, None);
 
     tab.doc.remove_symbol_and_instances(sym_id);
@@ -1372,7 +1383,9 @@ fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -
     if targets.is_empty() {
         return false;
     }
-    commit_floating(tab);
+    if !commit_floating(tab) {
+        return false;
+    }
 
     let (can_toggle, is_currently_tweened) =
         tab.active_timeline().can_toggle_tween_at_current_frame();
@@ -1473,7 +1486,9 @@ fn update_selected_symbol_binding(
         return false;
     }
 
-    commit_floating(tab);
+    if !commit_floating(tab) {
+        return false;
+    }
     push_undo(tab, coalesce);
 
     let updated = update_instances(tab, &layer_ids, |gid| gid == inst_gid, &update);
@@ -1527,7 +1542,9 @@ fn apply_switch_to_layer_and_frame(tab: &mut Tab, layer_idx: usize, frame_idx: u
         return;
     }
     let prev_frame = tab.active_timeline().current_frame;
-    commit_floating(tab);
+    if !commit_floating(tab) {
+        return;
+    }
     let clamped_layer = layer_idx.min(tab.active_timeline().layers.len().saturating_sub(1));
     tab.set_active_layer(clamped_layer);
     tab.set_active_frame(frame_idx);
@@ -1548,7 +1565,9 @@ fn apply_scrub_ruler_to_frame(tab: &mut Tab, frame_idx: usize) {
         return;
     }
     let prev_frame = tl.current_frame;
-    commit_floating(tab);
+    if !commit_floating(tab) {
+        return;
+    }
     tab.set_active_frame(clamped_frame);
     tab.set_active_cell_selection(None);
     retain_selection_on_same_keyframe(tab, prev_frame, clamped_frame);
@@ -1594,7 +1613,9 @@ fn apply_timeline_delete_keyframe(tab: &mut Tab) -> bool {
     if targets.is_empty() {
         return false;
     }
-    commit_floating(tab);
+    if !commit_floating(tab) {
+        return false;
+    }
     if !tab
         .active_timeline()
         .can_delete_keyframe_on_targets(&targets)
@@ -1623,7 +1644,9 @@ fn apply_timeline_remove_frame(tab: &mut Tab) -> bool {
     if targets.is_empty() {
         return false;
     }
-    commit_floating(tab);
+    if !commit_floating(tab) {
+        return false;
+    }
     if !tab.active_timeline().can_remove_frame_on_targets(&targets) {
         return false;
     }

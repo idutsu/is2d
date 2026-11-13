@@ -1839,8 +1839,8 @@ pub(crate) struct Session {
     pub(crate) transform_hover: TransformHoverTarget,
     /// 輪郭の変形のカーソル合わせに使う、境目の線で持つ地図（生の図形が変わるまで使い回す）
     pub(crate) planar_maps: SyncCache<Option<Arc<ScopeMaps>>>,
-    /// この操作で、地図にできない形（格子の外 ±65,536px・有限でない座標）を作る編集を断ったか（`apply` が知らせて戻す）
-    pub(crate) off_grid: bool,
+    /// この操作で編集を断った理由（`apply` が知らせて戻す）
+    pub(crate) refusal: Option<Refusal>,
 }
 
 impl Session {
@@ -2130,7 +2130,7 @@ impl Session {
     /// 選択中の生の図形（隠していないセル画の図形と、浮いている残り）を片に持ち上げ、動かした扱いにする（動かす・変形・
     /// 色を変える・グループにする前）。レイヤーごとに、その面の所を選ぶ所にして切る（`Floating::cut`）。生の図形はいつも
     /// 片の地図で書くので、切れないレイヤー（地図にできない）があれば、浮いた片を元に戻して `false`（呼ぶ側は操作を断る。
-    /// `off_grid` に記す）
+    /// `refusal` に記す）
     pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self) -> bool {
         let by_layer = self.selected_raw_ids_by_layer(true);
         if by_layer.is_empty() && self.floating.is_none() {
@@ -2144,7 +2144,7 @@ impl Session {
         });
         if failed {
             self.set_floating(before);
-            self.off_grid = true;
+            self.refusal = Some(Refusal::OffGrid);
         }
         !failed
     }
@@ -2874,8 +2874,9 @@ impl Tab {
         self.view.ensure_valid_library_selection(&self.doc.library);
     }
 
-    /// 浮いている片（`Floating`）がある場合は一時タブ上で確定した `Document` の写しを返し、元のタブや文書には触れない
-    pub(crate) fn committed_document_copy(&self) -> Document {
+    /// 浮いている片（`Floating`）がある場合は一時タブ上で確定した `Document` の写しを返し、元のタブや文書には触れない。
+    /// `None`：浮いた片を置けない（`commit_floating_layers` が断る。文書は、片を持ち上げる前のまま）
+    pub(crate) fn committed_document_copy(&self) -> Option<Document> {
         if let Some(fl) = self.session.floating().filter(|fl| fl.modified) {
             let mut temp_tab = Self::new_empty(self.id, self.untitled_number);
             temp_tab.doc = self.doc.clone();
@@ -2883,10 +2884,9 @@ impl Tab {
             temp_tab.session.editing_group_path = self.session.editing_group_path.clone();
             temp_tab.session.set_floating(Some(fl.clone()));
             temp_tab.refresh_scene_base();
-            commit_floating(&mut temp_tab);
-            temp_tab.doc
+            commit_floating(&mut temp_tab).then_some(temp_tab.doc)
         } else {
-            self.doc.clone()
+            Some(self.doc.clone())
         }
     }
 
@@ -2924,8 +2924,9 @@ impl Tab {
         self.session.selection = prev_selection;
         self.session.retain_existing_selection();
         if self.session.floating().is_some() {
+            // 確定を断ったら、浮いた片と選択はそのまま（知らせは `apply`）
             let keep = self.session.selected_indices();
-            commit_floating_except(self, &keep);
+            let _ = commit_floating_except(self, &keep);
         }
         self.session.sanitize_editing_scope();
         prev_entry
@@ -2957,6 +2958,25 @@ impl Tab {
 // ============================================================================
 // 6. レイヤー解決・ドラッグロールバック・セル画を書く入口（write_cel）
 // ============================================================================
+
+/// 編集を断った理由（`Session::refusal`。`apply` が知らせる）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// 地図にできない形（格子の外 ±65,536px・有限でない座標）を作る
+    OffGrid,
+    /// 浮いた片を置けない（置いた結果を地図に書けない・置くレイヤーを編集できない）。浮いた片は残す
+    Unplaceable,
+}
+
+impl Refusal {
+    /// 画面の下に出す知らせ
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Refusal::OffGrid => "地図の範囲（±65,536px）の外には置けません",
+            Refusal::Unplaceable => "選んだ図形をここに置けません（動かすか、取り消してください）",
+        }
+    }
+}
 
 /// 現在フレームで編集可能（表示中・非ロック・フレーム範囲内・非トゥイーン途中）な全レイヤーID一覧を背面→前面順で返す
 pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
@@ -3178,17 +3198,21 @@ pub(crate) fn toggle_select_sub_mode(
     tool_settings: &mut ToolSettings,
     target_mode: SelectSubMode,
 ) {
+    if !clear_selection(tab) {
+        return;
+    }
     tool_settings.select_sub_mode = if tool_settings.select_sub_mode == target_mode {
         SelectSubMode::Reshape
     } else {
         target_mode
     };
-    clear_selection(tab);
 }
 
 /// タイムライン上で選択されたセル範囲（単一キーフレームまたは複数レイヤー範囲）に属するすべての図形をキャンバス上で選択状態にする
 pub(crate) fn select_shapes_for_timeline_selection(tab: &mut Tab) {
-    clear_selection(tab);
+    if !clear_selection(tab) {
+        return;
+    }
     let tl = tab.active_timeline();
     let Some(sel) = tl.cell_selection else {
         return;
@@ -3282,33 +3306,57 @@ pub(crate) fn merge_pieces_layer_by_layer(
 }
 
 /// 浮いた片 `fl` を確定する：レイヤーごとに、残りの地図（無ければセル画の地図）に片の組を下から順に重ねた地図
-/// （`FloatLayer::committed`）を、そのセル画の地図にする（`write_scope_map`。図形はその地図の面）。重ねる計算は
-/// レイヤーをまたがないので、2つ以上あれば同時にする。片の組の変換は、かける前に確定と同じ式で確かめてある（変形は
-/// `Floating::fits_transform`、新しい中身は `prepare_placement`）ので、地図にできない確定は無い。それでも地図にできない
-/// レイヤーがあれば、ほかの断る所と同じく、そのレイヤーは書かない（セル画は切る前のまま）。戻り値は、セル画を書き換えたか
-pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: Floating) -> bool {
+/// （`FloatLayer::committed`）を、そのセル画の地図にする（図形はその地図の面）。全部か無しか：レイヤーごとに、重ねる計算
+/// から何を書くか（`Cel::outcome`）までを、文書を変える前に同時に作り（レイヤーをまたがないので、待ち時間はいちばん重い
+/// レイヤー1つ分）、1つでも書けなければ何も書かずに `None` を返して知らせる（浮いた片を残すのは呼ぶ側。片はいつも
+/// 文書か浮いた片のどちらかにあり、黙って消えない）。片の組の変換はかける前に確定と同じ式で確かめてある（変形は
+/// `Floating::fits_transform`、新しい中身は `prepare_placement`）。`Some`：セル画を書き換えたか
+pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: &Floating) -> Option<bool> {
+    use crate::timeline::MapOutcome;
     tab.refresh_scene_base();
-    let nexts: Vec<Option<crate::planar_map::PlanarMap>> = {
-        let stage = tab.session.stage();
-        crate::planar_map::per_layer_parallel(fl.layers(), |l| l.committed_on(stage))
-    };
     let scope = tab.session.editing_group_path.clone();
+    let editable = editable_layer_ids(tab);
+    let outcomes: Vec<Option<MapOutcome>> = {
+        let cache = &tab.session.base_cache;
+        crate::planar_map::per_layer_parallel(fl.layers(), |l| {
+            let cel = cache.cel(l.layer_id)?;
+            let next = l.committed(&cel.scope_base(&scope))?;
+            Some(cel.outcome(&scope, &next))
+        })
+    };
+    let refused = fl.layers().iter().zip(&outcomes).any(|(l, o)| {
+        !editable.contains(&l.layer_id)
+            || !matches!(o, Some(MapOutcome::Same | MapOutcome::Changed(..)))
+    });
+    if refused {
+        tab.session.refusal = Some(Refusal::Unplaceable);
+        return None;
+    }
     let mut written: Vec<LayerId> = Vec::new();
-    for (l, next) in fl.layers().iter().zip(nexts) {
-        let Some(next) = next else {
-            tab.session.off_grid = true;
+    for (l, outcome) in fl.layers().iter().zip(outcomes) {
+        let Some(MapOutcome::Changed(map, shapes)) = outcome else {
             continue;
         };
-        if write_scope_map(tab, l.layer_id, &scope, |_| Some(next)) {
+        let mut held = None;
+        if write_cel(tab, l.layer_id, |cel| {
+            held = cel.put_map(&scope, map, shapes);
+            true
+        }) {
             written.push(l.layer_id);
+        }
+        // 新しい地図の写し（面の図形は、変わらない面は前の図形）は、画面の土台が持つ
+        if let Some(base) = held {
+            tab.session.base_cache.hold(l.layer_id, base);
         }
     }
     finish_cel_writes(tab, &written);
-    !written.is_empty()
+    Some(!written.is_empty())
 }
 
 /// `tab.session.floating` のうち `keep_indices`（`Scene` インデックス）に含まれない選択図形を確定
-/// （未変形スライスなら外した片を残りに戻すだけで文書は変更せず、変更済みなら外した片と残りを確定して文書へ書き込む）
+/// （未変形スライスなら外した片を残りに戻すだけで文書は変更せず、変更済みなら外した片と残りを確定して文書へ書き込む）。
+/// `false`：確定を断った（`commit_floating_layers`。浮いた片と選択は前のまま。知らせは `Session::refusal`）
+#[must_use]
 pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> bool {
     let (is_sel, any_valid) = tab.session.selected_shape_mask();
     let mut is_keep = vec![false; is_sel.len()];
@@ -3324,19 +3372,21 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
 
     if !any_keep {
         let Some(fl) = tab.session.take_floating() else {
-            return false;
+            return true;
         };
-        if fl.modified {
-            commit_floating_layers(tab, fl);
+        if fl.modified && commit_floating_layers(tab, &fl).is_none() {
+            tab.session.set_floating(Some(fl));
+            return false;
         }
         tab.session.retain_existing_selection();
         return true;
     }
 
+    let before = tab.session.selection.clone();
     tab.session
         .set_selected_indices((0..is_keep.len()).filter(|&i| is_keep[i]));
     let Some(mut fl) = tab.session.take_floating() else {
-        return false;
+        return true;
     };
     let keep: HashSet<ShapeId> = fl
         .pieces()
@@ -3357,34 +3407,46 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
         }
         tab.session.set_floating(Some(fl));
         tab.session.retain_existing_selection();
-        return false;
+        return true;
     }
 
     let had_rest = fl.layers().iter().any(|l| l.origin.is_some());
     let merged_any = !all_kept || (keep.is_empty() && had_rest);
+    // 確定を断ったら、分ける前の浮いた片と選択に戻す
+    let whole = merged_any.then(|| fl.clone());
     let to_commit = merged_any.then(|| fl.split_off(&keep, &tab.session.editing_group_path));
     if !keep.is_empty() {
         tab.session.set_floating(Some(fl));
     }
     if let Some(to_commit) = to_commit {
-        commit_floating_layers(tab, to_commit);
+        if commit_floating_layers(tab, &to_commit).is_none() {
+            tab.session.set_floating(whole);
+            tab.session.selection = before;
+            return false;
+        }
     }
     tab.session.retain_existing_selection();
-    merged_any
+    true
 }
 
-/// 進行中のドラッグを中断し、`tab.session.floating` をすべて確定する
-#[inline]
+/// 進行中のドラッグを中断し、`tab.session.floating` をすべて確定する。`false`：確定を断った（浮いた片と選択は前のまま。
+/// 呼ぶ側は、浮いた片が無いことを前提にする操作をせずに断る）
+#[must_use]
 pub(crate) fn commit_floating(tab: &mut Tab) -> bool {
     cancel_active_drag(tab);
     commit_floating_except(tab, &[])
 }
 
-pub(crate) fn clear_selection(tab: &mut Tab) {
+/// 選択を外す（浮いた片は確定する）。`false`：確定を断った（浮いた片と選択は前のまま。呼ぶ側は断る）
+#[must_use]
+pub(crate) fn clear_selection(tab: &mut Tab) -> bool {
     tab.history.end_coalesce();
     tab.session.rollback_shape_drag();
-    commit_floating_except(tab, &[]);
+    if !commit_floating_except(tab, &[]) {
+        return false;
+    }
     tab.session.selection.clear();
     tab.session.transform_pivot = None;
     tab.view.inspect_timeline_frame = false;
+    true
 }

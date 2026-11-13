@@ -278,6 +278,16 @@ impl ScopeMap {
     }
 }
 
+/// 地図を書くとき何を書くか（`Cel::outcome`）
+pub(crate) enum MapOutcome {
+    /// 変わらない
+    Same,
+    /// 書けない（結果が正しい地図でない・面と図形が1対1にならない）
+    Refused,
+    /// 書く地図と、その面の図形（`Cel::put_map` に渡す）
+    Changed(CheckedMap, Vec<Arc<FillShape>>),
+}
+
 /// 地図の編集（`Cel::edit_map`）の結果：書いた階層の新しい地図の、計算に使う写し（階層の面が無くなって外したときは
 /// `None`）。写しを持ち続けるのは呼んだ側（画面の土台：`SceneBaseCache::hold`）
 pub(crate) struct MapWritten(pub(crate) Option<Arc<LayerBase>>);
@@ -1050,29 +1060,44 @@ impl Cel {
             )
     }
 
-    /// 地図の編集：階層 `group_path` の地図（文書の座標）を `f` で編集し、返った地図をしまう。面の図形は、変わらない面は
-    /// 前の図形のまま、形の変わった面は番号を引き継いだ新しい図形（`LayerBase::diff`）。`None`：変わらない・編集できない
+    /// 階層 `group_path` の地図を `next`（文書の座標）にするとき、何を書くか（文書を変えない）。面の図形は、変わらない面は
+    /// 前の図形のまま、形の変わった面は番号を引き継いだ新しい図形（`LayerBase::diff`）
+    pub(crate) fn outcome(&self, group_path: &[u64], next: &PlanarMap) -> MapOutcome {
+        let base = self.scope_base(group_path);
+        let faces = base.faces(group_path);
+        let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
+        let Some(change) = base.diff(next, &own, 0, group_path) else {
+            return MapOutcome::Refused;
+        };
+        if change.removed.is_empty() && change.added.is_empty() {
+            return MapOutcome::Same;
+        }
+        match change.into_face_shapes(&faces) {
+            Some((map, shapes)) => MapOutcome::Changed(map, shapes),
+            None => MapOutcome::Refused,
+        }
+    }
+
+    /// 地図の編集：階層 `group_path` の地図（文書の座標）を `f` で編集し、返った地図をしまう（`outcome`・`put_map`）。
+    /// `None`：変わらない・編集できない
     pub(crate) fn edit_map(
         &mut self,
         group_path: &[u64],
         f: impl FnOnce(&LayerBase) -> Option<PlanarMap>,
     ) -> Option<MapWritten> {
-        let base = self.scope_base(group_path);
-        let next = f(&base)?;
-        let faces = base.faces(group_path);
-        let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
-        let change = base.diff(&next, &own, 0, group_path)?;
-        if change.removed.is_empty() && change.added.is_empty() {
-            return None;
+        let next = f(&self.scope_base(group_path))?;
+        match self.outcome(group_path, &next) {
+            MapOutcome::Changed(map, shapes) => {
+                Some(MapWritten(self.put_map(group_path, map, shapes)))
+            }
+            MapOutcome::Same | MapOutcome::Refused => None,
         }
-        let (map, shapes) = change.into_face_shapes(&faces)?;
-        Some(MapWritten(self.put_map(group_path, map, shapes)))
     }
 
     /// 地図 `map`（文書の座標。面の図形 `shapes`：`MapChange::into_face_shapes`）を入れる：階層の地図をこの地図にする。
     /// 面の無くなった階層は外し、新しい階層は決まりどおりの所（グループの中身があれば、そのいちばん下。無ければ親の階層の
     /// いちばん上）に入れる。戻り値は、新しい地図の計算に使う写し。階層を外したときは `None`
-    fn put_map(
+    pub(crate) fn put_map(
         &mut self,
         group_path: &[u64],
         map: CheckedMap,

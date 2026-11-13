@@ -47,7 +47,7 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     let Some(cel) =
         Cel::stacked(&cels).and_then(|c| c.transformed(Affine::translate(-center.to_vec2())))
     else {
-        tab.session.off_grid = true;
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return None;
     };
     let mut sym_def = SymbolDef::from_cel(0, String::new(), cel);
@@ -57,15 +57,18 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     let sym_id = tab.doc.alloc_symbol_id();
     let inst_gid = tab.doc.alloc_group_id();
     // 浮いた片：選んだ片はシンボルの中身に入れたので捨て、残りと選んでいない片を確定する
-    if let Some(mut fl) = tab.session.take_floating() {
+    if let Some(fl) = tab.session.take_floating() {
         let keep: HashSet<u64> = fl
             .pieces()
             .iter()
             .filter(|p| selection.contains_shape(p))
             .map(|p| p.shape_id)
             .collect();
-        let rest = fl.split_off(&keep, &scope);
-        crate::canvas_tool::commit_floating_layers(tab, rest);
+        let rest = fl.clone().split_off(&keep, &scope);
+        if crate::canvas_tool::commit_floating_layers(tab, &rest).is_none() {
+            tab.session.set_floating(Some(fl));
+            return None;
+        }
     }
     // 選んだもの（今の階層の）を外し、インスタンスを、置くレイヤーの今の階層のいちばん上に入れる（中心に置く）
     write_cels(tab, &layer_ids, |_, cel| {
@@ -167,7 +170,9 @@ pub(crate) fn prepare_place_symbol_instance(
     let Some(placement) = prepare_placement(tab, &content, xform, false, None) else {
         return false;
     };
-    clear_selection(tab);
+    if !clear_selection(tab) {
+        return false;
+    }
     before_mutate(tab);
     put_placements(tab, vec![placement], |sym| sym);
     true
@@ -251,7 +256,9 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
         return false;
     }
 
-    commit_floating(tab);
+    if !commit_floating(tab) {
+        return false;
+    }
     tab.session.selection.clear();
 
     tab.view.selected_library_symbol = Some(binding.symbol_id);
@@ -343,7 +350,9 @@ pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
     if tab.session.edit_path.is_empty() {
         return false;
     }
-    commit_floating(tab);
+    if !commit_floating(tab) {
+        return false;
+    }
     tab.session.selection.clear();
 
     let Some(lvl) = tab.session.edit_path.levels.pop() else {

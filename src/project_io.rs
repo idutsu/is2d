@@ -820,10 +820,18 @@ fn renumbered_gid(map: &mut HashMap<u64, u64>, next: &mut u64, gid: u64) -> u64 
 
 impl ProjectDocument {
     /// 現在の `Tab` から保存用の `ProjectDocument` を生成する
-    /// （`Floating` がある場合は `Document` のコピーに対して確定した内容を書き出し、`Session` も `Document` も書き換えない）
-    pub(crate) fn from_app(tab: &Tab) -> Self {
-        let doc = tab.committed_document_copy();
+    /// （`Floating` がある場合は `Document` のコピーに対して確定した内容を書き出し、`Session` も `Document` も書き換えない）。
+    /// 浮いた片を置けなければ `Err`（画面に見えている片が入らないファイルは書かない）
+    pub(crate) fn from_app(tab: &Tab) -> Result<Self, String> {
+        let doc = tab.committed_document_copy().ok_or_else(|| {
+            "選んだ図形を置けないため保存できません（動かすか、取り消してから保存してください）"
+                .to_owned()
+        })?;
+        Ok(Self::of(&doc))
+    }
 
+    /// 文書 `doc` の保存用の写し
+    pub(crate) fn of(doc: &Document) -> Self {
         let mut saved_timeline: SavedTimeline = (&doc.root).into();
         saved_timeline.fps = doc.fps.clamp(1, 60);
 
@@ -1117,7 +1125,7 @@ pub(crate) fn save_project_to_path(
 ) -> Result<Vec<String>, String> {
     prepare_active_tab_for_switch_or_save(ws);
 
-    let mut proj_doc = ProjectDocument::from_app(ws.tab());
+    let mut proj_doc = ProjectDocument::from_app(ws.tab())?;
     let fixed = proj_doc.remove_non_finite();
 
     let target_path = resolve_target_path(path);
