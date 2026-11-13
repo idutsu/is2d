@@ -1045,9 +1045,10 @@ fn edge_key(m: &PlanarMap, e: usize) -> [u64; 6] {
 /// 鍵）に書き戻すときの差分。戻り値は（消す元の図形, 新しく入れる塗りの形）。
 /// - 面のすべての辺の形が残り、面のすべての辺の側の印が同じ1つの元の図形で、その図形と色も同じで、その図形のどの辺も
 ///   消えていないなら、その面は元の図形のまま残す
-/// - それ以外の面は、新しい塗りの形にして入れる。新しい形のうち、辺の側の印がみな同じ1つの元の図形（印の無い側は、
-///   新しくできた辺）の面は、その元の図形を引き継ぐ形として元の番号を使う（同じ元の図形を引き継ぐ面が2つ以上あれば、
-///   その印の付いた側がいちばん多い面。同じなら面の順で前）。形の変わった図形は番号を変えないので、地図の、その面の
+/// - それ以外の面は、新しい塗りの形にして入れる。新しい形は、辺の側の印のうち、残した面の図形でないものでいちばん多い
+///   元の図形（同じ数なら小さい番号：`top_vote`。重ね合わせで面に伝える番号と同じ決まり）を引き継ぐ形として元の番号を
+///   使う（同じ元の図形を引き継ぐ面が2つ以上あれば、その印の付いた側がいちばん多い面。同じなら面の順で前）。面が
+///   分かれても、まとまっても（動かした片が残りとつながるなど）、長い輪郭の側が番号を保つので、地図の、その面の
 ///   ほかの辺の印も変わらない（しまう地図で、変わった場所の塊だけが新しくなる）
 /// - 残した面の元の図形のほかは、みな消す（どの面にも残らない元の図形が、新しい形と重なって残ることは無い。番号を
 ///   引き継いだ形は、消した元の図形と入れ替わる）
@@ -1126,22 +1127,23 @@ fn rewrite_shapes(
             })
             .cloned()
     };
-    // 元の図形を引き継ぐ面：（元の図形 → (その印の付いた側の数, 面)）
+    // 元の図形を引き継ぐ面：面ごとに、面の側の印のうち、残す面の図形でないものでいちばん多い元の図形（`top_vote`。
+    // 重ね合わせで面に伝える番号と同じ決まり。面が分かれても、まとまっても、長い輪郭の側が番号を保つ）。同じ元の図形が
+    // いちばん多い面が2つ以上あれば、その印の付いた側がいちばん多い面（同じなら面の順で前）が引き継ぐ：
+    // （元の図形 → (その印の付いた側の数, 面)）
     let mut heir: HashMap<ShapeId, (usize, usize)> = HashMap::new();
+    let mut choice: Vec<Option<ShapeId>> = vec![None; faces.len()];
     for &i in &changed {
-        let f = &faces[i];
-        let [src] = f.srcs[..] else {
+        let mut votes: Vec<(ShapeId, usize)> = Vec::new();
+        for h in faces[i].cycles.iter().flatten() {
+            if let Some(src) = next.side_src(*h).filter(|s| !kept.contains(s)) {
+                add_vote(&mut votes, src);
+            }
+        }
+        let Some((src, sides)) = top_vote(&votes) else {
             continue;
         };
-        if kept.contains(&src) {
-            continue;
-        }
-        let sides = f
-            .cycles
-            .iter()
-            .flatten()
-            .filter(|h| next.side_src(**h) == Some(src))
-            .count();
+        choice[i] = Some(src);
         let best = heir.entry(src).or_insert((sides, i));
         if sides > best.0 {
             *best = (sides, i);
@@ -1152,10 +1154,8 @@ fn rewrite_shapes(
         .map(|i| {
             let f = &faces[i];
             let mut s = next.face_shape_with(f, layer_id, group_path, reuse);
-            if let [src] = f.srcs[..] {
-                if heir.get(&src).is_some_and(|h| h.1 == i) {
-                    s.shape_id = src;
-                }
+            if let Some(src) = choice[i].filter(|src| heir.get(src).is_some_and(|h| h.1 == i)) {
+                s.shape_id = src;
             }
             ids[i] = s.shape_id;
             s
@@ -1167,6 +1167,23 @@ fn rewrite_shapes(
         .filter(|id| !kept.contains(id))
         .collect();
     (removed, added, ids)
+}
+
+/// 番号の票（番号, 数）に、番号 `id` の1票を足す
+fn add_vote(votes: &mut Vec<(ShapeId, usize)>, id: ShapeId) {
+    match votes.iter_mut().find(|v| v.0 == id) {
+        Some(v) => v.1 += 1,
+        None => votes.push((id, 1)),
+    }
+}
+
+/// 票のうち、いちばん多い番号とその数（同じ数なら小さい番号）。面の番号を票で決める決まりはこれ1つ（重ね合わせで面に
+/// 伝える番号、書き戻しで面が引き継ぐ番号：`rewrite_shapes`）
+fn top_vote(votes: &[(ShapeId, usize)]) -> Option<(ShapeId, usize)> {
+    votes
+        .iter()
+        .copied()
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
 }
 
 /// 地図 `map` の辺の側に、面 `faces` の図形の番号 `ids` を記した地図（面の無い側は無し）。文書にしまう地図は、面の辺の側に

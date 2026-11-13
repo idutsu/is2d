@@ -1216,21 +1216,12 @@ impl PlanarMap {
                 for &(l, r) in &d[h / 2] {
                     let side = if h % 2 == 1 { l } else { r };
                     if let (true, Some(id)) = (side.0 == colors[f], side.1) {
-                        match votes[f].iter_mut().find(|v| v.0 == id) {
-                            Some(v) => v.1 += 1,
-                            None => votes[f].push((id, 1)),
-                        }
+                        add_vote(&mut votes[f], id);
                     }
                 }
             }
-            let srcs: Vec<Option<ShapeId>> = votes
-                .iter()
-                .map(|v| {
-                    v.iter()
-                        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
-                        .map(|v| v.0)
-                })
-                .collect();
+            let srcs: Vec<Option<ShapeId>> =
+                votes.iter().map(|v| top_vote(v).map(|t| t.0)).collect();
             let label = |h: usize| {
                 let f = face[h] as usize;
                 (colors[f], srcs[f])

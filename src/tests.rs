@@ -29188,3 +29188,109 @@ fn measure_brush_on_dense_cel() {
         );
     }
 }
+
+/// N-2001：大きな面の一部を矩形で選んで動かして確定しても、大きな面は元の番号を引き継ぐ（面の側の印のうち、いちばん
+/// 多いもの：重ね合わせで面に伝える番号と同じ決まり）。番号が変わると、面の輪郭全体の辺の印が変わり、しまう地図の
+/// 変わらない所の塊まで新しくなって、Undo の履歴が触った面の輪郭の長さで膨らむ
+#[test]
+fn moving_part_of_a_large_face_keeps_its_number() {
+    use crate::doc_actions::{apply, Action};
+    let red = Color32::from_rgb(235, 75, 75);
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        vec![map_overlay::rect_shape(0.0, 0.0, 400.0, 400.0, red)],
+    );
+    let cel_ids = |app: &Is2dApp| -> Vec<(u64, bool)> {
+        app.doc.root.layers[0].keyframes[0]
+            .cel
+            .shapes()
+            .iter()
+            .map(|s| (s.shape_id, s.contains_point(Point::new(350.0, 350.0))))
+            .collect()
+    };
+    let [(big, true)] = cel_ids(&app)[..] else {
+        panic!("{:?}", cel_ids(&app));
+    };
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(100.0, 100.0),
+        Point::new(140.0, 140.0),
+        false,
+    );
+    assert!(apply(
+        &mut app,
+        Action::MoveSelected {
+            delta: KVec2::new(5.0, 5.0)
+        }
+    ));
+    assert!(canvas_tool::clear_selection(&mut app));
+    // 動かした片は残りとつながって1つの面になる（L 字の穴が空く）。その面は元の大きな面の番号のまま
+    assert_eq!(cel_ids(&app), vec![(big, true)]);
+}
+
+/// 計測（N-2001）：線の多いセル画の大きな面の上で、40×40 を矩形で選んで少し動かして確定したとき、しまう地図で新しく
+/// なった辺のバイト数（前の地図と共有しない塊の辺。Undo の履歴1件の大きさにあたる）
+#[test]
+#[ignore]
+fn measure_new_edges_after_moving_a_small_part() {
+    use crate::doc_actions::{apply, Action};
+    let colors = [
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    let mut rng = map_overlay::Rng(5);
+    let mut shapes = vec![map_overlay::rect_shape(
+        0.0,
+        0.0,
+        800.0,
+        800.0,
+        Color32::from_rgb(235, 75, 75),
+    )];
+    for k in 0..120 {
+        let p0 = Point::new(rng.f() * 800.0, rng.f() * 800.0);
+        let p1 = Point::new(rng.f() * 800.0, rng.f() * 800.0);
+        shapes.extend(make_stroke(p0, p1, 3.0, colors[k % colors.len()]));
+    }
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, shapes);
+    let stored = |app: &Is2dApp| {
+        app.doc.root.layers[0].keyframes[0].cel.maps[0]
+            .stored()
+            .clone()
+    };
+    let mut counts = Vec::new();
+    for k in 0..12 {
+        let (x, y) = (60.0 + (k % 4) as f64 * 180.0, 80.0 + (k / 4) as f64 * 250.0);
+        let before = stored(&app);
+        select_ops::apply_marquee_selection(
+            &mut app,
+            Point::new(x, y),
+            Point::new(x + 40.0, y + 40.0),
+            false,
+        );
+        if app.session.selection.is_empty() {
+            continue;
+        }
+        assert!(apply(
+            &mut app,
+            Action::MoveSelected {
+                delta: KVec2::new(3.0, 2.0)
+            }
+        ));
+        assert!(canvas_tool::clear_selection(&mut app));
+        let mut seen = std::collections::HashSet::new();
+        let _ = before.bytes_unseen(&mut seen);
+        let (_, e) = stored(&app).bytes_unseen(&mut seen);
+        counts.push(e);
+        assert!(apply(&mut app, Action::Undo));
+    }
+    counts.sort_unstable();
+    eprintln!(
+        "new edge bytes per move: {counts:?} (total {})",
+        counts.iter().sum::<usize>()
+    );
+}
