@@ -73,17 +73,25 @@ pub(crate) struct MapFace {
     pub(crate) srcs: Vec<ShapeId>,
 }
 
-/// 整数（頂点・辺・格子の番号）を鍵にする表のハッシュ。標準の SipHash は、頂点の格子のように何十万回も引くと重いので、
-/// 掛け算1回で混ぜる軽いものを使う（鍵は外から来ない値なので、偏りを狙われる心配は無い）
+/// 整数（頂点・辺・格子の番号、座標のビット）を鍵にする表のハッシュ。標準の SipHash は、頂点の格子のように何十万回も
+/// 引くと重いので、掛け算1回で混ぜる軽いものを使う（鍵は外から来ない値なので、偏りを狙われる心配は無い）
 #[derive(Default, Clone, Copy)]
-struct IntHasher(u64);
+pub(crate) struct IntHasher(u64);
 
 impl std::hash::Hasher for IntHasher {
     fn finish(&self) -> u64 {
         self.0
     }
+    /// 整数の配列の鍵（辺の鍵 `[u64; 6]`、頂点の座標のビット `[u64; 2]` など）は、まとめてバイトで来るので、8 バイトずつ
+    /// 混ぜる
     fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            let mut word = [0u8; 8];
+            word.copy_from_slice(c);
+            self.write_u64(u64::from_le_bytes(word));
+        }
+        for &b in chunks.remainder() {
             self.write_u64(b as u64);
         }
     }
@@ -101,7 +109,14 @@ impl std::hash::Hasher for IntHasher {
     }
 }
 
-type IntMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IntHasher>>;
+/// 整数を鍵にする表（`IntHasher`）
+pub(crate) type IntMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IntHasher>>;
+
+/// 整数を鍵にする集まり（`IntHasher`）
+pub(crate) type IntSet<K> = HashSet<K, std::hash::BuildHasherDefault<IntHasher>>;
+
+/// 辺の鍵（`edge_key`）の集まり
+pub(crate) type EdgeKeys = IntSet<[u64; 6]>;
 
 #[cfg(test)]
 struct Seg {
@@ -355,7 +370,7 @@ impl PlanarMap {
     /// 変えた辺の近くだけになる（レビュー 4cb53aa の N-2001）
     pub(crate) fn valid_faces_since(
         &self,
-        prev: Option<&HashSet<[u64; 6]>>,
+        prev: Option<&EdgeKeys>,
     ) -> Option<Vec<MapFace>> {
         #[cfg(test)]
         if prev.is_none() {
@@ -1061,14 +1076,14 @@ fn edge_key(m: &PlanarMap, e: usize) -> [u64; 6] {
 /// （同じ元の図形を残す・引き継ぐ面はそれぞれ1つだけ、新しい形には新しい番号）なので、面と図形が1対1になる
 fn rewrite_shapes(
     orig: &PlanarMap,
-    orig_keys: &HashSet<[u64; 6]>,
+    orig_keys: &EdgeKeys,
     next: &PlanarMap,
     faces: &[MapFace],
     orig_shapes: &[&FillShape],
     layer_id: u64,
     group_path: &[u64],
 ) -> (Vec<ShapeId>, Vec<FillShape>, Vec<ShapeId>) {
-    let next_keys: HashSet<[u64; 6]> = (0..next.edges.len()).map(|e| edge_key(next, e)).collect();
+    let next_keys: EdgeKeys = (0..next.edges.len()).map(|e| edge_key(next, e)).collect();
     // 辺が消えた元の図形
     let mut cut: HashSet<ShapeId> = HashSet::new();
     for e in 0..orig.edges.len() {
@@ -1251,7 +1266,7 @@ impl PlanarMap {
 pub(crate) struct LayerBase {
     pub(crate) map: PlanarMap,
     pub(crate) stored: StoredMap,
-    keys: OnceLock<HashSet<[u64; 6]>>,
+    keys: OnceLock<EdgeKeys>,
     /// 面の図形：（階層, 面ごとの図形。番号は面の印。番号の順）
     faces: SyncCache<Option<FaceShapes>>,
 }
@@ -1313,7 +1328,7 @@ impl LayerBase {
 
     /// 辺の鍵（`edge_key`）の集まり（初めて要るときに作る）。書き戻す地図の確かめ（`PlanarMap::written`）と、書き戻しの
     /// 差分（`diff`）が使う
-    pub(crate) fn keys(&self) -> &HashSet<[u64; 6]> {
+    pub(crate) fn keys(&self) -> &EdgeKeys {
         self.keys.get_or_init(|| {
             (0..self.map.edges.len())
                 .map(|e| edge_key(&self.map, e))

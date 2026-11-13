@@ -201,8 +201,8 @@ impl StoredMap {
     pub(crate) fn to_dense(&self) -> PlanarMap {
         let n: usize = self.0.tiles.iter().map(|t| t.len()).sum();
         let mut nodes: Vec<Point> = Vec::with_capacity(n);
-        let mut index: std::collections::HashMap<[u64; 2], usize> =
-            std::collections::HashMap::with_capacity(n);
+        let mut index: crate::planar_map::IntMap<[u64; 2], usize> =
+            crate::planar_map::IntMap::with_capacity_and_hasher(n, Default::default());
         let mut node = |p: Point| {
             *index
                 .entry([p.x.to_bits(), p.y.to_bits()])
