@@ -1021,24 +1021,21 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     any_transformed
 }
 
-/// `Alt` 複製：選んでいるものの中身（`selected_content`）を、同じ所にそのまま置く（変換は恒等なので、地図はそのまま写る。
-/// 面・グループ・インスタンスには新しい番号）。置いたものを選ぶ（このあと、それを動かす）
-fn duplicate_selected_in_working_copy(tab: &mut Tab) {
+/// `Alt` 複製：選んでいるものの中身（`selected_content`）を、ステージで `offset` ずらした所に置く（面・グループ・
+/// インスタンスには新しい番号）。置いたものを選ぶ。置けなければ（格子の外）文書を変えずに `false`
+fn duplicate_selected_in_working_copy(tab: &mut Tab, offset: KVec2) -> bool {
     let Some(content) = selected_content(tab) else {
-        return;
+        return false;
     };
-    let xform = content_xform(
-        content.world,
-        tab.session.edit_path.world_xform(),
-        KVec2::ZERO,
-    );
+    let xform = content_xform(content.world, tab.session.edit_path.world_xform(), offset);
     let Some(placement) = prepare_placement(tab, &content, xform, true, None) else {
         tab.session.off_grid = true;
-        return;
+        return false;
     };
     commit_floating(tab);
     tab.session.selection.clear();
     put_placements(tab, vec![placement], |sym| sym);
+    true
 }
 
 fn apply_finish_move_selection_drag(
@@ -1056,7 +1053,7 @@ fn apply_finish_move_selection_drag(
     }
     push_undo(tab, None);
     if alt_duplicate {
-        duplicate_selected_in_working_copy(tab);
+        return duplicate_selected_in_working_copy(tab, total_delta);
     }
     transform_selected_shapes(tab, Affine::translate(total_delta))
 }

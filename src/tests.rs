@@ -27427,3 +27427,136 @@ fn painting_faces_back_keeps_their_ids() {
     }
     assert!(tried > 0, "塗り重ねに回る変換が無かった");
 }
+
+/// N-1001：浮いた片の確定は、片の面が元の面とまったく同じ形でも書かれる（まるごと選んで色だけ変えた片、元と同じ所に
+/// 貼った片）。元の図形と番号・色まで同じ面だけが「変わらない面」
+#[test]
+fn committing_recolored_or_coinciding_pieces_writes_them() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    let green = Color32::from_rgb(40, 180, 90);
+    let at = |app: &Is2dApp, p: Point| -> Vec<Color32> {
+        app.scene()
+            .iter()
+            .filter(|s| s.contains_point(p))
+            .map(|s| s.color)
+            .collect()
+    };
+
+    // 1. まるごと選んで、バケツで色だけ変える
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 200.0),
+            Point::new(300.0, 200.0),
+            25.0,
+            red,
+        ),
+    );
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 150.0),
+        Point::new(350.0, 250.0),
+        false,
+    );
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Bucket },
+    );
+    app.tool.brush_color = green;
+    assert!(doc_actions::bucket_fill_at(
+        &mut app,
+        Point::new(200.0, 200.0)
+    ));
+    canvas_tool::clear_selection(&mut app);
+    assert_eq!(at(&app, Point::new(200.0, 200.0)), vec![green]);
+
+    // 2. 全部をコピーし、青い線を消してから、同じ所に貼る（赤い線は元とまったく同じ形で重なる）
+    let mut app = Is2dApp::default();
+    let mut shapes = make_stroke(
+        Point::new(100.0, 200.0),
+        Point::new(300.0, 200.0),
+        25.0,
+        red,
+    );
+    shapes.extend(make_stroke(
+        Point::new(100.0, 300.0),
+        Point::new(300.0, 300.0),
+        25.0,
+        blue,
+    ));
+    put_cel_shapes(&mut app, 0, 0, shapes);
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 150.0),
+        Point::new(350.0, 350.0),
+        false,
+    );
+    assert!(doc_actions::copy_selected_shapes(&mut app));
+    canvas_tool::clear_selection(&mut app);
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 260.0),
+        Point::new(350.0, 350.0),
+        false,
+    );
+    assert!(doc_actions::delete_selected_shapes(&mut app));
+    assert!(at(&app, Point::new(200.0, 300.0)).is_empty());
+    assert!(doc_actions::paste_clipboard(&mut app, true));
+    canvas_tool::clear_selection(&mut app);
+    assert_eq!(at(&app, Point::new(200.0, 300.0)), vec![blue]);
+    assert_eq!(at(&app, Point::new(200.0, 200.0)), vec![red]);
+}
+
+/// S-3：`Alt` 複製は、移動先が格子の外なら何もしない（元の所に複製を残さず、元も動かさず、Undo も積まない）。置けるなら
+/// 複製だけが移動先にあり、元はそのまま（グループで確かめる）
+#[test]
+fn alt_duplicate_places_once_or_changes_nothing() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 200.0),
+            Point::new(300.0, 200.0),
+            25.0,
+            red,
+        ),
+    );
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 150.0),
+        Point::new(350.0, 250.0),
+        false,
+    );
+    let count =
+        |app: &Is2dApp, p: Point| app.scene().iter().filter(|s| s.contains_point(p)).count();
+    let undo_len = app.history.undo_stack.len();
+    doc_actions::finish_move_selection_drag(&mut app, KVec2::new(70_000.0, 0.0), true);
+    assert_eq!(app.history.undo_stack.len(), undo_len);
+    assert_eq!(app.scene().len(), 1);
+    assert_eq!(count(&app, Point::new(200.0, 200.0)), 1);
+
+    doc_actions::finish_move_selection_drag(&mut app, KVec2::new(0.0, 100.0), true);
+    assert_eq!(app.history.undo_stack.len(), undo_len + 1);
+    canvas_tool::clear_selection(&mut app);
+    assert_eq!(count(&app, Point::new(200.0, 200.0)), 1);
+    assert_eq!(count(&app, Point::new(200.0, 300.0)), 1);
+}

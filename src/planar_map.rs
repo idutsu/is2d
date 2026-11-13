@@ -994,8 +994,8 @@ fn edge_key(m: &PlanarMap, e: usize) -> [u64; 6] {
 
 /// 確定した地図 `next`（面は `faces`）を、元の図形 `orig_shapes`（地図 `orig` を作った図形。`orig_keys` は `orig` の辺の
 /// 鍵）に書き戻すときの差分。戻り値は（消す元の図形, 新しく入れる塗りの形）。
-/// - 面のすべての辺の形が残り、面のすべての辺の側の印が同じ1つの元の図形で、その図形のどの辺も消えていないなら、その面は
-///   元の図形のまま残す
+/// - 面のすべての辺の形が残り、面のすべての辺の側の印が同じ1つの元の図形で、その図形と色も同じで、その図形のどの辺も
+///   消えていないなら、その面は元の図形のまま残す
 /// - それ以外の面は、新しい塗りの形にして入れる。新しい形のうち、辺の側の印がみな同じ1つの元の図形（印の無い側は、
 ///   新しくできた辺）の面は、その元の図形を引き継ぐ形として元の番号を使う（同じ元の図形を引き継ぐ面が2つ以上あれば、
 ///   その印の付いた側がいちばん多い面。同じなら面の順で前）。形の変わった図形は番号を変えないので、地図の、その面の
@@ -1022,6 +1022,10 @@ fn rewrite_shapes(
             cut.extend(orig.edges[e].right_src);
         }
     }
+    // 元の図形の色（番号ごと）。残す面は、元の図形と番号・色まで同じ面だけ（印が重ねた片や色を変えた片から来ても、元の
+    // 図形でなければ新しい図形にする。残す面はいつも元の図形にあるので、`MapChange::into_face_shapes` が図形を引ける）
+    let orig_color: HashMap<ShapeId, Color32> =
+        orig_shapes.iter().map(|s| (s.shape_id, s.color)).collect();
     let mut changed: Vec<usize> = Vec::new();
     let mut kept: HashSet<ShapeId> = HashSet::new();
     let mut ids: Vec<ShapeId> = vec![0; faces.len()];
@@ -1031,12 +1035,16 @@ fn rewrite_shapes(
             .iter()
             .flatten()
             .all(|h| orig_keys.contains(&edge_key(next, h.0)));
-        let keep = all_same && f.srcs.len() == 1 && !cut.contains(&f.srcs[0]) && {
-            f.cycles
-                .iter()
-                .flatten()
-                .all(|h| next.side_src(*h) == Some(f.srcs[0]))
-        };
+        let keep = all_same
+            && f.srcs.len() == 1
+            && orig_color.get(&f.srcs[0]) == Some(&f.color)
+            && !cut.contains(&f.srcs[0])
+            && {
+                f.cycles
+                    .iter()
+                    .flatten()
+                    .all(|h| next.side_src(*h) == Some(f.srcs[0]))
+            };
         if keep {
             kept.insert(f.srcs[0]);
             ids[i] = f.srcs[0];
@@ -2645,10 +2653,8 @@ impl PlanarMap {
             for &(i, forward) in &regions.cycles[k] {
                 if forward {
                     m.edges[i].left = Some(color);
-                    m.edges[i].left_src = None;
                 } else {
                     m.edges[i].right = Some(color);
-                    m.edges[i].right_src = None;
                 }
             }
         }
