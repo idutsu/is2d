@@ -1166,15 +1166,8 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     else {
         return false;
     };
+    let grab_t = crate::planar_map::grab_t(t);
     let target = tab.session.edit_path.world_xform().inverse() * to;
-    let grab_t = crate::planar_map::pull_t(
-        orig_seg,
-        t.clamp(
-            crate::planar_map::PULL_T_MIN,
-            1.0 - crate::planar_map::PULL_T_MIN,
-        ),
-        target,
-    );
     apply_map_reshape(
         tab,
         layer_id,

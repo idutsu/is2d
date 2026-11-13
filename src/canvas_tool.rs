@@ -200,7 +200,6 @@ pub(crate) enum SelectDragState {
         layer_id: LayerId,
         group_path: Vec<u64>,
         base: Arc<LayerBase>,
-        /// 曲線が `target` を通る所。はじめはつかんだ所で、動かすたびに前の所から選び直す（`pull_t`）
         grab_t: f64,
         /// マウスから、つかんだ所までのずれ（ステージの座標）
         grab_offset: KVec2,
