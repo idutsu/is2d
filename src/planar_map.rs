@@ -1581,12 +1581,43 @@ impl PlanarMap {
         radius: f64,
         xform: Affine,
     ) -> Option<Point> {
-        (0..self.nodes.len())
-            .filter(|&w| w != v)
-            .map(|w| (self.nodes[w], (xform * self.nodes[w] - p).hypot()))
-            .filter(|(_, d)| *d <= radius)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(q, _)| q)
+        let near = self.node_finder(radius, xform, KRect::from_points(p, p));
+        near(p, Some(v)).map(|w| self.nodes[w])
+    }
+
+    /// 近い頂点を引く関数：点（置いた座標）から `radius`（正）以内でいちばん近い頂点の番号（2つ目の引数の頂点は除く）。
+    /// 頂点は座標の変換 `xform` で置いて測り、見るのは `area`（置いた座標）から `radius` 以内のものだけ。頂点への吸い付き
+    /// （`snap_target`）と、重ねる形の線の端を前からある頂点に寄せる所（`overlay`）が使う
+    pub(crate) fn node_finder(
+        &self,
+        radius: f64,
+        xform: Affine,
+        area: KRect,
+    ) -> impl Fn(Point, Option<usize>) -> Option<usize> + '_ {
+        let cell = move |p: Point| ((p.x / radius).floor() as i64, (p.y / radius).floor() as i64);
+        let area = area.inflate(radius, radius);
+        let mut near: IntMap<(i64, i64), Vec<(usize, Point)>> = IntMap::default();
+        for (v, &p) in self.nodes.iter().enumerate() {
+            let q = xform * p;
+            if area.contains(q) {
+                near.entry(cell(q)).or_default().push((v, q));
+            }
+        }
+        move |p: Point, skip: Option<usize>| {
+            let (cx, cy) = cell(p);
+            // 格子に置けない座標（重ね合わせがあとで断る）でも溢れないように
+            let around = |c: i64| c.saturating_sub(1)..=c.saturating_add(1);
+            let mut best: Option<(f64, usize)> = None;
+            for k in around(cx).flat_map(|x| around(cy).map(move |y| (x, y))) {
+                for &(v, q) in near.get(&k).into_iter().flatten() {
+                    let d = (q - p).hypot();
+                    if Some(v) != skip && d <= radius && best.is_none_or(|b| d < b.0) {
+                        best = Some((d, v));
+                    }
+                }
+            }
+            best.map(|b| b.1)
+        }
     }
 }
 

@@ -388,6 +388,26 @@ impl PlanarMap {
                         .flat_map(|s| s.contours())
                         .flat_map(|c| c.segments.iter().copied()),
                 );
+                // 形の線の端を、前からある頂点から `FLAT_TOL` 以内なら、その頂点（いちばん近いもの）に寄せる。地図の精度
+                // では同じ点なので、寄せないと2つの頂点が格子の別々の点に残り、同じ線として扱う所（`Span`）の端で2本の
+                // 折れ線が分かれて、見えない欠片の面ができる（`stitched` は線の端にいつも自分の端の点を置く。レビュー
+                // 4cb53aa の N-1002）。続く線の端は同じ点なので、輪郭は閉じたまま。形は偶奇の規則で数えるので、寄せて
+                // 輪郭が自分に触れても重ね合わせは成り立つ。重ねる地図の頂点は寄せない：重ねる地図は正しい地図であることを
+                // 前提に、辺どうしを調べずに入れるので（`fed_edges`）、地図の中の 0.002px 以内の2つの頂点が1つに寄って
+                // 重なると、結果が正しい地図でなくなる
+                if let Some(area) = new_quads
+                    .iter()
+                    .flat_map(|q| [q.p0, q.p2])
+                    .map(|p| KRect::from_points(p, p))
+                    .reduce(|a, b| a.union(b))
+                {
+                    let near = self.node_finder(FLAT_TOL, Affine::IDENTITY, area);
+                    let snap = |p: Point| near(p, None).map_or(p, |v| self.nodes[v]);
+                    for q in &mut new_quads {
+                        q.p0 = snap(q.p0);
+                        q.p2 = snap(q.p2);
+                    }
+                }
             }
             MapInput::Stack(shapes) => {
                 new_quads.extend(

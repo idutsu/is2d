@@ -23040,6 +23040,29 @@ mod map_overlay {
         assert_eq!(next.color_at(Point::new(300.0, 150.0)), Some(Color32::BLUE));
     }
 
+    /// 頂点を動かすときの吸い付き先（`snap_target`）：動かす頂点を除いて、置いた座標で `radius` 以内のいちばん近い頂点
+    #[test]
+    fn snap_target_finds_the_nearest_other_vertex() {
+        let red = rect_shape(100.0, 100.0, 200.0, 200.0, Color32::RED);
+        let m = PlanarMap::from_faces([&red]);
+        let at = |p: Point| (0..m.nodes.len()).find(|&v| m.nodes[v] == p).unwrap();
+        let (tl, tr) = (at(Point::new(100.0, 100.0)), at(Point::new(200.0, 100.0)));
+        let id = Affine::IDENTITY;
+        assert_eq!(
+            m.snap_target(tl, Point::new(201.0, 101.0), 3.0, id),
+            Some(Point::new(200.0, 100.0))
+        );
+        assert_eq!(m.snap_target(tr, Point::new(201.0, 101.0), 3.0, id), None);
+        assert_eq!(m.snap_target(tl, Point::new(205.0, 100.0), 3.0, id), None);
+        // 2倍で置くと、距離は置いた座標で測る
+        let x2 = Affine::scale(2.0);
+        assert_eq!(
+            m.snap_target(tl, Point::new(402.0, 202.0), 3.0, x2),
+            Some(Point::new(200.0, 100.0))
+        );
+        assert_eq!(m.snap_target(tl, Point::new(201.0, 101.0), 3.0, x2), None);
+    }
+
     /// ほぼ重なった2本の辺（間がごく細い面）の上に重ねても壊れない。間が格子の目（1/4096px）より細いと、2本の
     /// 判定の形が重なるので、正しい地図ではない（重ね合わせの結果には、そういう面はできない）
     #[test]
@@ -28707,6 +28730,39 @@ fn measure_overlay_on_dense_map() {
     );
 }
 
+/// 地図の面ごとの面積（面の輪郭の曲線を8等分した折れ線で）
+fn face_areas(m: &crate::planar_map::PlanarMap) -> Vec<f64> {
+    m.valid_faces()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            f.cycles
+                .iter()
+                .map(|cyc| {
+                    let pts: Vec<Point> = cyc
+                        .iter()
+                        .flat_map(|&(e, fwd)| {
+                            let q = m.quad(e);
+                            (0..8).map(move |k| {
+                                let t = k as f64 / 8.0;
+                                q.eval(if fwd { t } else { 1.0 - t })
+                            })
+                        })
+                        .collect();
+                    (0..pts.len())
+                        .map(|i| {
+                            let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                            a.x * b.y - b.x * a.y
+                        })
+                        .sum::<f64>()
+                        / 2.0
+                })
+                .sum::<f64>()
+                .abs()
+        })
+        .collect()
+}
+
 /// 試し（N-1002）：ほぼ重なった線を重ねると、見えない細い欠片の面ができるか
 #[test]
 #[ignore]
@@ -28714,6 +28770,35 @@ fn probe_same_line_slivers() {
     use crate::planar_map::{MapInput, MapRule, PlanarMap};
     let red = Color32::from_rgb(235, 75, 75);
     let blue = Color32::from_rgb(55, 135, 245);
+    // 線の重なった地図に、同じ線を色を交互に 200 回
+    for seed in [11u64, 12, 13] {
+        let mut rng = map_overlay::Rng(seed);
+        let colors = [red, blue, Color32::from_rgb(40, 180, 90)];
+        let mut m = PlanarMap::default();
+        for k in 0..60 {
+            let (r, c) = (2.0 + rng.f() * 8.0, colors[k % 3]);
+            let s = wiggly_stroke(&mut rng, (100.0, 100.0, 300.0, 200.0), r, c);
+            m = m
+                .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+                .unwrap();
+        }
+        let s = wiggly_stroke(&mut rng, (200.0, 150.0, 100.0, 100.0), 6.0, red);
+        let tiny = |m: &PlanarMap| face_areas(m).iter().filter(|&&a| a < 0.01).count();
+        let mut first = 0;
+        for k in 0..200 {
+            let c = if k % 2 == 0 { red } else { blue };
+            m = m
+                .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+                .unwrap();
+            if k == 0 {
+                first = tiny(&m);
+            }
+        }
+        eprintln!(
+            "dense seed {seed}: tiny faces after 1 paint {first}, after 200 {}",
+            tiny(&m)
+        );
+    }
     for seed in [1u64, 2, 3] {
         let s = wiggly_stroke(
             &mut map_overlay::Rng(seed),
@@ -28825,5 +28910,52 @@ fn cut_and_return_leaves_no_cut_vertices() {
             .unwrap();
         assert!(m.is_valid());
         assert_eq!(m.edges.len(), start);
+    }
+}
+
+/// N-1002（地図のレビュー 4cb53aa）：地図の精度（0.002px）より近い2本は同じ線になる。同じ形をわずかにずらして重ねても、
+/// 同じ線を色を変えて何度も重ねても、見えない細い欠片の面ができない。重ねる形の頂点が前の頂点から 0.002px 以内なのに
+/// 格子の別の点に残ると、そこで2本の折れ線が分かれて欠片の面ができていた
+#[test]
+fn nearly_coincident_lines_leave_no_slivers() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    for seed in [1u64, 2] {
+        let s = wiggly_stroke(
+            &mut map_overlay::Rng(seed),
+            (300.0, 200.0, 0.0, 0.0),
+            6.0,
+            red,
+        );
+        let base = PlanarMap::default()
+            .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(red)))
+            .unwrap();
+        let n = base.edges.len();
+        for d in [1e-5, 1e-4, 1e-3] {
+            let shift = kurbo::Affine::translate((d, d * 0.5));
+            // 形をずらして重ねる
+            let moved: Vec<FillShape> = s
+                .iter()
+                .map(|x| {
+                    let mut y = x.clone();
+                    y.transform(shift);
+                    y
+                })
+                .collect();
+            let m = base
+                .overlay(MapInput::Shapes(&moved), MapRule::Paint(Some(blue)))
+                .unwrap();
+            assert_eq!((m.valid_faces().unwrap().len(), m.edges.len()), (1, n));
+        }
+        // 同じ線を、色を交互に 40 回
+        let mut m = base.clone();
+        for k in 0..40 {
+            let c = if k % 2 == 0 { blue } else { red };
+            m = m
+                .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+                .unwrap();
+            assert_eq!((m.valid_faces().unwrap().len(), m.edges.len()), (1, n));
+        }
     }
 }
