@@ -29969,8 +29969,70 @@ fn measure_work() {
         rows.push(("ブラシ 1 本".into(), times));
     }
 
+    // 開く処理の内訳：ファイルを読んで JSON を解く・地図を直して確かめる（to_map）・しまう（Cel::from_maps）を、開くときと
+    // 同じ順に1つずつ測る。前のキーフレーム（同じレイヤー・同じ階層）と同じ辺の割合と、その辺どうしの確かめを省いたとき
+    // （valid_faces_since）の時間も測る
+    let t = Instant::now();
+    let saved = crate::project_io::read_project_document(std::path::Path::new(&path))
+        .expect("作品を読めること");
+    let parse_ms = ms(t);
+    let (mut layers, mut keyframes, mut maps) = (0usize, 0usize, 0usize);
+    let (mut edges, mut shared) = (0usize, 0usize);
+    let (mut check_ms, mut since_ms, mut store_ms) = (0.0, 0.0, 0.0);
+    for tl in std::iter::once(&saved.timeline).chain(saved.library.iter().map(|s| &s.timeline)) {
+        for layer in &tl.layers {
+            layers += 1;
+            let mut prev: std::collections::HashMap<Vec<u64>, crate::planar_map::LayerBase> =
+                Default::default();
+            let mut prev_cel: Option<crate::timeline::Cel> = None;
+            for kf in &layer.keyframes {
+                keyframes += 1;
+                let mut checked_maps = Vec::with_capacity(kf.maps.len());
+                for m in &kf.maps {
+                    maps += 1;
+                    let t = Instant::now();
+                    let checked = m.to_map().expect("壊れていない地図");
+                    let full = ms(t);
+                    check_ms += full;
+                    let map = checked.map();
+                    edges += map.edges.len();
+                    let base = crate::planar_map::LayerBase::new(map);
+                    match prev.get(&m.group_path) {
+                        Some(p) => {
+                            shared += base.keys().iter().filter(|k| p.keys().contains(*k)).count();
+                            let t = Instant::now();
+                            assert!(map.valid_faces_since(Some(p.keys())).is_some());
+                            since_ms += ms(t);
+                        }
+                        None => since_ms += full,
+                    }
+                    prev.insert(m.group_path.clone(), base);
+                    checked_maps.push((m.group_path.clone(), checked));
+                }
+                let t = Instant::now();
+                let cel =
+                    crate::timeline::Cel::from_maps(checked_maps, Vec::new(), prev_cel.as_ref());
+                store_ms += ms(t);
+                prev_cel = Some(cel);
+            }
+        }
+    }
+
     eprintln!();
     eprintln!("作品：{path}");
+    eprintln!(
+        "作品の中身：レイヤー {layers} 枚（シンボルの中を含む）・キーフレーム {keyframes} 個・地図 {maps} 枚・辺 {edges} 本"
+    );
+    eprintln!(
+        "前のキーフレームと同じ辺：{shared} 本（{:.0}%）",
+        shared as f64 * 100.0 / edges.max(1) as f64
+    );
+    eprintln!(
+        "開く処理の内訳（2回目に読んだとき）：ファイルを読んで JSON を解く {parse_ms:.0}ms／地図を直して確かめる {check_ms:.0}ms／しまう {store_ms:.0}ms"
+    );
+    eprintln!(
+        "前のキーフレームと同じ辺どうしの確かめを省くと：地図を直して確かめる {check_ms:.0}ms → {since_ms:.0}ms"
+    );
     eprintln!("コマ {}（図形 {shapes} 個・区間 {segments} 個）", frame + 1);
     eprintln!("| 操作 | 中央値 | 最大 | 回数 |");
     eprintln!("|---|---:|---:|---:|");
