@@ -28615,3 +28615,46 @@ fn recoloring_faces_merges_the_ends_of_vanished_borders() {
         (recolored.nodes.len(), recolored.edges.len())
     );
 }
+
+/// 計測（N-2002）：ブラシの曲線化の1回の重さを、半径・長さ・入力の点の間隔ごとに測る
+#[test]
+#[ignore]
+fn measure_brush_smoothing() {
+    use crate::vector_stroke::{
+        build_smoothed_stroke_shapes_at_zoom, generate_brush_outline_at_zoom,
+    };
+    use std::time::Instant;
+    for radius in [0.5f64, 2.0, 6.0, 25.0] {
+        for (len, gap) in [
+            (300.0f64, 1.5f64),
+            (300.0, 12.0),
+            (800.0, 1.5),
+            (800.0, 12.0),
+        ] {
+            let n = (len / gap).round() as usize;
+            let pts: Vec<Point> = (0..=n)
+                .map(|i| {
+                    let x = 100.0 + i as f64 * gap;
+                    Point::new(x, 300.0 + 40.0 * (x / 60.0).sin())
+                })
+                .collect();
+            let mut times = Vec::new();
+            let mut segs = 0;
+            for _ in 0..9 {
+                let t = Instant::now();
+                let raw = generate_brush_outline_at_zoom(&pts, radius, 1.0);
+                let shapes = build_smoothed_stroke_shapes_at_zoom(&raw, Color32::RED, 1.0);
+                times.push(t.elapsed().as_secs_f64() * 1e3);
+                segs = shapes
+                    .iter()
+                    .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
+                    .sum();
+            }
+            times.sort_by(f64::total_cmp);
+            eprintln!(
+                "r {radius} len {len} gap {gap}: {:.2}ms ({segs} segs)",
+                times[times.len() / 2]
+            );
+        }
+    }
+}

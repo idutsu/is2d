@@ -3,12 +3,12 @@ use i_overlay9::{
     core::{fill_rule::FillRule as OverlayFillRule, overlay::ContourDirection},
     float::{overlay::OverlayOptions, simplify::SimplifyShape},
 };
-use kurbo::{Affine, Point, QuadBez, Vec2 as KVec2};
+use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 use crate::vector_engine::{
     dedup_closed_ring, fill_cumulative_arc_lengths, left_normal, nearest_on_quad, normalize_vec,
-    point_to_segment_dist, ring_area_and_perimeter_f64, ring_f64_to_points, signed_angle,
-    signed_area_f64, Contour, FillShape, REFERENCE_BRUSH_RADIUS, TINY_LEN,
+    point_to_segment_dist, quad_deriv, ring_area_and_perimeter_f64, ring_f64_to_points,
+    signed_angle, signed_area_f64, Contour, FillShape, REFERENCE_BRUSH_RADIUS, TINY_LEN,
 };
 
 // ============================================================================
@@ -1360,12 +1360,9 @@ fn reduce_outline_anchors_by_quad_fit(
 
         fill_cumulative_arc_lengths(&span_pts, &mut cum);
         let p1 = fit_quad_control_point_with_arc_lengths(&span_pts, &cum, p0, p2);
-        let err = max_quad_fit_error(&span_pts, QuadBez::new(p0, p1, p2));
-
-        if err <= tol {
-            err + 0.18 * net_turn * net_turn
-        } else {
-            f64::INFINITY
+        match quad_fit_error_within(&span_pts, QuadBez::new(p0, p1, p2), tol) {
+            Some(err) => err + 0.18 * net_turn * net_turn,
+            None => f64::INFINITY,
         }
     };
 
@@ -1472,14 +1469,49 @@ fn span_turn_metrics(span_pts: &[Point]) -> (f64, f64) {
     (signed_turn.abs(), macro_abs_turn)
 }
 
-/// 点の列 `span_pts` の中の点（両端を除く）から、曲線 `quad` までの距離のいちばん大きいもの（`nearest_on_quad`）
-fn max_quad_fit_error(span_pts: &[Point], quad: QuadBez) -> f64 {
-    span_pts
+/// 点の列 `span_pts` の中の点（両端を除く）から曲線 `quad` までの距離（`nearest_on_quad`）のいちばん大きいもの。それが
+/// `tol` を超えれば `None`。
+/// 点は曲線に沿って並ぶので、まず点ごとに、前の点の所から点の間の長さだけ進めてニュートン法を1回かけた曲線の上の点
+/// までの距離（曲線までの距離より小さくない）を測る。それがいちばん大きい点を `nearest_on_quad` で測り、ほかの点は、
+/// 先に測った距離がそれまでのいちばん大きい距離を超えるときだけ測る（超えない点は答えを変えないので、`nearest_on_quad`
+/// がいちばん近い所を見つけるかぎり、全部の点を測るのと同じ答え。点の数は半径が小さいほど多い：
+/// `resample_closed_ring_uniform`）
+fn quad_fit_error_within(span_pts: &[Point], quad: QuadBez, tol: f64) -> Option<f64> {
+    let inner = span_pts
         .get(1..span_pts.len().saturating_sub(1))
-        .unwrap_or_default()
-        .iter()
-        .map(|&p| nearest_on_quad(&quad, p).1)
-        .fold(0.0, f64::max)
+        .unwrap_or_default();
+    let second = (quad.p0.to_vec2() - quad.p1.to_vec2() * 2.0 + quad.p2.to_vec2()) * 2.0;
+    let mut bounds: Vec<f64> = Vec::with_capacity(inner.len());
+    let (mut prev, mut t) = (span_pts.first().copied().unwrap_or(quad.p0), 0.0f64);
+    for &p in inner {
+        let speed = quad_deriv(&quad, t).hypot();
+        if speed > TINY_LEN {
+            t = (t + (p - prev).hypot() / speed).clamp(0.0, 1.0);
+        }
+        let first = quad_deriv(&quad, t);
+        let b = quad.eval(t) - p;
+        let slope = first.dot(first) + b.dot(second);
+        if slope.abs() > 1e-14 {
+            t = (t - b.dot(first) / slope).clamp(0.0, 1.0);
+        }
+        bounds.push((quad.eval(t) - p).hypot());
+        prev = p;
+    }
+    let Some(top) = (0..inner.len()).max_by(|&i, &j| bounds[i].total_cmp(&bounds[j])) else {
+        return Some(0.0);
+    };
+    let mut max = 0.0f64;
+    for i in std::iter::once(top).chain(0..inner.len()) {
+        if bounds[i] <= max {
+            continue;
+        }
+        let d = nearest_on_quad(&quad, inner[i]).1;
+        if d > tol {
+            return None;
+        }
+        max = max.max(d);
+    }
+    Some(max)
 }
 
 fn max_deviation_from_chord(pts: &[Point]) -> f64 {
