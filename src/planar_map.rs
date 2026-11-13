@@ -1,4 +1,5 @@
-//! 同じレイヤー・同じ階層の生の図形を、境目の線（辺）で持つ地図。選択ツールの輪郭の変形とカーソル合わせで使う。
+//! 同じレイヤー・同じ階層の生の図形を、境目の線（辺）で持つ地図。セル画の中身そのもので、描く・消す・塗る・選ぶ・
+//! 動かす・貼る・輪郭の変形など、生の図形を変える編集はみな、この地図を受け取って地図を返す。
 //! Adobe Animate のマージ描画と同じく、辺が「曲線・左の色・右の色」を持つ。境目は1本で、重ね順は無い。
 //! 塗りの形（`FillShape`）は、辺から作って描画・当たり判定に使う。
 
@@ -23,7 +24,8 @@ type Sides = (Option<Color32>, Option<Color32>);
 type Label = (Option<Color32>, Option<ShapeId>);
 
 /// 辺。a → b に進んだときの左（面積の式で正の側）の色と、右の色を持つ。`None` は何も無い所。
-/// `left_src`・`right_src` は、その側の面がどの図形から来たか（図形から作ったときだけ意味がある）
+/// `left_src`・`right_src` は、その側の面の図形の番号（セル画の地図は面ごとに1つずつ別の番号を記してしまう：
+/// `CheckedMap::uniquely_labeled`。重ね合わせでは、どの図形から来たかを運ぶ）
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MapEdge {
     pub(crate) a: usize,
@@ -166,14 +168,28 @@ impl PlanarMap {
             .reduce(|acc, r| acc.union(r))
     }
 
-    /// 座標の変換 `xform` をかけた地図が、地図の格子に置けるか（点がみな ±65,536px の内：`on_grid`）
+    /// 輪郭 `cycles` の辺の側に記された元の図形（小さい順、重なりなし）
+    fn face_srcs(&self, cycles: &[Vec<(usize, bool)>]) -> Vec<ShapeId> {
+        let mut srcs: Vec<ShapeId> = cycles
+            .iter()
+            .flatten()
+            .filter_map(|h| self.side_src(*h))
+            .collect();
+        srcs.sort_unstable();
+        srcs.dedup();
+        srcs
+    }
+
+    /// 座標の変換 `xform` をかけた地図が、地図の格子に置けるか：変換が潰れず（`invertible`）、頂点と制御点がみな
+    /// ±65,536px の内（`on_grid`）。地図を変換して置けるかの判定はこれ1つ（変形・貼り付けの事前の確かめ、`realized`）
     pub(crate) fn fits_grid(&self, xform: Affine) -> bool {
-        on_grid(
-            self.nodes
-                .iter()
-                .chain(self.edges.iter().map(|e| &e.ctrl))
-                .map(|&p| xform * p),
-        )
+        crate::vector_engine::invertible(xform)
+            && on_grid(
+                self.nodes
+                    .iter()
+                    .chain(self.edges.iter().map(|e| &e.ctrl))
+                    .map(|&p| xform * p),
+            )
     }
 
     /// 面の番号が `keep` に合う面だけを残した地図（`restricted`）
@@ -329,6 +345,11 @@ impl PlanarMap {
     /// 正しい地図なら（`is_valid`）、その面（`faces`）。正しい地図かの判定はどこでもこれ1つ（書き戻し・読み込み・変換
     /// した地図・テスト）。`None`：正しい地図でない
     pub(crate) fn valid_faces(&self) -> Option<Vec<MapFace>> {
+        // 頂点と制御点が格子に置ける（±65,536px の内で有限：`fits_grid`）こと、両側が同じ色の辺が無いことを先に確かめる
+        // （格子の外の座標で、判定の形を作らない）
+        if !self.fits_grid(Affine::IDENTITY) || self.edges.iter().any(|e| e.left == e.right) {
+            return None;
+        }
         let polys = self.polys();
         if !self.polys_apart(&polys) {
             return None;
@@ -1162,7 +1183,7 @@ fn written_faces(next: &PlanarMap) -> Option<Vec<MapFace>> {
 }
 
 // ============================================================================
-// 選択ツールの輪郭の変形（頂点の移動・辺のつまみ）で使う
+// 計算に使う写しと、地図を書き戻すときの差分（どの編集も使う）
 // ============================================================================
 
 /// 1つのレイヤー・階層の地図の、計算に使う写し：ふつうの形（いつもしまう形から決まった順で作ったもの：
@@ -1247,17 +1268,8 @@ impl LayerBase {
 
     /// 面の図形を地図から作る（`faces`。番号の順）
     fn face_shapes(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
-        let (faces, _) = self.map.faces();
-        let ids = face_ids(&faces, FaceIds::Keep);
-        let mut shapes: Vec<Arc<FillShape>> = faces
-            .iter()
-            .zip(ids)
-            .map(|(f, id)| {
-                let mut s = self.map.face_shape(f, 0, group_path);
-                s.shape_id = id;
-                Arc::new(s)
-            })
-            .collect();
+        let (_, _, shapes) = numbered_faces(&self.map, 0, group_path);
+        let mut shapes: Vec<Arc<FillShape>> = shapes.into_iter().map(Arc::new).collect();
         shapes.sort_unstable_by_key(|s| s.shape_id);
         shapes.into()
     }
@@ -1497,9 +1509,9 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     built
 }
 
-/// 地図 `lm` の頂点 `v` を通る面の図形と、その図形の輪郭のうち `v` から始まる区間（輪郭の番号, 区間の番号）。カーソルを
-/// 合わせた頂点の輪郭を見せるのに使う。面が無ければ番号 0
-fn node_on_shape(scene: Scene<'_>, lm: &LayerMap, v: usize) -> (ShapeId, usize, usize) {
+/// 地図 `lm` の頂点 `v` を通る面の図形と、その図形の輪郭のうち `v` を通るものの番号。カーソルを合わせた頂点の輪郭を
+/// 見せるのに使う。面が無ければ番号 0
+fn node_on_shape(scene: Scene<'_>, lm: &LayerMap, v: usize) -> (ShapeId, usize) {
     let map = &lm.base.map;
     let Some(id) = map
         .edges
@@ -1507,16 +1519,14 @@ fn node_on_shape(scene: Scene<'_>, lm: &LayerMap, v: usize) -> (ShapeId, usize, 
         .filter(|e| e.a == v || e.b == v)
         .find_map(|e| e.left_src.or(e.right_src))
     else {
-        return (0, 0, 0);
+        return (0, 0);
     };
     let p = lm.placed_node(v);
     let at = scene.shape_by_id(id).and_then(|s| {
         s.contours()
-            .enumerate()
-            .find_map(|(ci, c)| c.segments.iter().position(|q| q.p0 == p).map(|si| (ci, si)))
+            .position(|c| c.segments.iter().any(|q| q.p0 == p))
     });
-    let (ci, si) = at.unwrap_or((0, 0));
-    (id, ci, si)
+    (id, at.unwrap_or(0))
 }
 
 /// 点 `p` が、地図 `lm` のレイヤーの生の図形より前面にある、ほかの図形（前面のレイヤー・同じレイヤーのグループ）に覆われているか
@@ -1581,8 +1591,6 @@ fn anchor_hover_in(
             let ed = &lm.base.map.edges[e];
             HoverTarget::Edge {
                 shape_id: ed.left_src.or(ed.right_src).unwrap_or(0),
-                contour_idx: 0,
-                seg_idx: 0,
                 t,
                 closest_pos: q.eval(t),
                 seg: q,
@@ -1605,11 +1613,10 @@ fn anchor_hover_in(
         }
     }
     best.map_or(HoverTarget::None, |(_, lm, v)| {
-        let (shape_id, contour_idx, seg_idx) = node_on_shape(scene, lm, v);
+        let (shape_id, contour_idx) = node_on_shape(scene, lm, v);
         HoverTarget::Vertex {
             shape_id,
             contour_idx,
-            seg_idx,
             pos: lm.placed_node(v),
             map_node: Some((lm.owner, v, lm.base.map.nodes[v])),
         }
@@ -1664,11 +1671,10 @@ pub(crate) fn reshape_hover(
         }
     }
     if let Some((_, lm, v)) = best_v {
-        let (shape_id, contour_idx, seg_idx) = node_on_shape(scene, lm, v);
+        let (shape_id, contour_idx) = node_on_shape(scene, lm, v);
         return HoverTarget::Vertex {
             shape_id,
             contour_idx,
-            seg_idx,
             pos: lm.placed_node(v),
             map_node: Some((lm.owner, v, lm.base.map.nodes[v])),
         };
@@ -1701,8 +1707,6 @@ pub(crate) fn reshape_hover(
         let q = lm.placed_quad(e);
         return HoverTarget::Edge {
             shape_id,
-            contour_idx: 0,
-            seg_idx: 0,
             t,
             closest_pos: q.eval(t),
             seg: q,
@@ -2068,15 +2072,10 @@ pub(crate) fn realized(map: &PlanarMap, xform: Affine) -> Option<CheckedMap> {
     if xform == Affine::IDENTITY {
         return map.clone().checked();
     }
-    let t = map.transformed(xform);
-    if !on_grid(
-        t.nodes
-            .iter()
-            .copied()
-            .chain(t.edges.iter().map(|e| e.ctrl)),
-    ) {
+    if !map.fits_grid(xform) {
         return None;
     }
+    let t = map.transformed(xform);
     if let Some(checked) = t.checked() {
         return Some(checked);
     }
@@ -2105,6 +2104,17 @@ pub(crate) fn faces_with_ids(
     layer_id: LayerId,
     group_path: &[u64],
 ) -> (PlanarMap, Vec<FillShape>) {
+    let (faces, ids, shapes) = numbered_faces(map, layer_id, group_path);
+    (labeled(map.clone(), &faces, &ids), shapes)
+}
+
+/// 地図 `map` の面と、面ごとの番号（`face_ids` の `Keep`）と、その番号を付けた面の図形（どれも面の順）。面から番号つきの
+/// 図形を作るのはこれ1つ（画面の土台の面の図形 `LayerBase::face_shapes`、片の面の図形 `faces_with_ids`）
+fn numbered_faces(
+    map: &PlanarMap,
+    layer_id: LayerId,
+    group_path: &[u64],
+) -> (Vec<MapFace>, Vec<ShapeId>, Vec<FillShape>) {
     let (faces, _) = map.faces();
     let ids = face_ids(&faces, FaceIds::Keep);
     let shapes = faces
@@ -2116,7 +2126,24 @@ pub(crate) fn faces_with_ids(
             s
         })
         .collect();
-    (labeled(map.clone(), &faces, &ids), shapes)
+    (faces, ids, shapes)
+}
+
+/// 地図 `start` に、地図 `maps` を下から順に重ねた地図（`MapRule::Overlay`。重ねる地図の色が上）。`start` が空なら、
+/// 最初の地図をそのまま使う（空の地図に重ねても同じ地図。重ねる計算を省く）。地図を下から順に重ねるのはこれ1つ（浮いた
+/// 片の組・選んだものの地図・確定・セル画を1枚に重ねる）。`None`：地図が作れない（格子に置けない座標がある）
+pub(crate) fn stacked(
+    start: PlanarMap,
+    maps: impl IntoIterator<Item = Option<PlanarMap>>,
+) -> Option<PlanarMap> {
+    maps.into_iter().try_fold(start, |map, m| {
+        let m = m?;
+        if map.edges.is_empty() {
+            Some(m)
+        } else {
+            map.overlay(MapInput::Map(&m), MapRule::Overlay)
+        }
+    })
 }
 
 /// 面ごとの番号の決め方（`face_ids`）
@@ -2196,6 +2223,21 @@ impl CheckedMap {
         CheckedMap { map, faces }
     }
 
+    /// 面に番号の無い地図（読み込んだ地図）の辺のうち、前の地図 `prev` に形と色が同じ辺があるものに、その辺の側の番号を
+    /// 記したもの（`StoredMap::labels_of`。面の番号も）。変わらない面は前の面の番号を持つので、`uniquely_labeled` のあとも
+    /// 前の地図と塊を共有する
+    pub(crate) fn inheriting(mut self, prev: &StoredMap) -> CheckedMap {
+        let labels = prev.labels_of(&self.map);
+        for (e, (left, right)) in self.map.edges.iter_mut().zip(labels) {
+            e.left_src = left;
+            e.right_src = right;
+        }
+        for f in &mut self.faces {
+            f.srcs = self.map.face_srcs(&f.cycles);
+        }
+        self
+    }
+
     /// 辺の側に記した図形の番号を、`f` が返す番号に付け替える（`PlanarMap::relabel`。面の番号も）
     fn relabel(&mut self, mut f: impl FnMut(ShapeId) -> Option<ShapeId>) {
         self.map.relabel(&mut f);
@@ -2211,19 +2253,10 @@ impl CheckedMap {
     }
 }
 
-/// 選ぶ所の地図：地図 `parts`（同じ地図から切り出した、重ならない面）を合わせた所に、形 `rect` を足した所（色のある所が
-/// 中）。`None`：格子に置けない座標がある
-pub(crate) fn region_map(parts: &[&PlanarMap], rect: Option<&FillShape>) -> Option<PlanarMap> {
-    let mut m = match parts {
-        [one] => (*one).clone(),
-        _ => {
-            let mut m = PlanarMap::default();
-            for p in parts {
-                m = m.overlay(MapInput::Map(p), MapRule::Overlay)?;
-            }
-            m
-        }
-    };
+/// 選ぶ所の地図：地図 `part`（中身の地図から選んだ面だけを残したもの）に、形 `rect` を足した所（色のある所が中）。
+/// `None`：格子に置けない座標がある
+pub(crate) fn region_map(part: &PlanarMap, rect: Option<&FillShape>) -> Option<PlanarMap> {
+    let mut m = part.clone();
     if let Some(r) = rect {
         m = m.overlay(
             MapInput::Shapes(std::slice::from_ref(r)),
@@ -2238,8 +2271,10 @@ pub(crate) fn region_map(parts: &[&PlanarMap], rect: Option<&FillShape>) -> Opti
 /// 消す図形が隠す図形、新しく入れる形が残りの図形、地図が残りの地図。中の差分の地図が片の地図（丸ごと中にあるセル画の
 /// 面は、その番号のまま）。片の新しい形は、残りの形と同じ元の図形を引き継ぐことがあるので、番号を新しく振る（地図の
 /// 印も）。残りの形は、セル画の地図の書き換えと同じく、元の図形の番号を引き継ぐ（隠す元の図形と入れ替わる。残りの地図の
-/// 印が変わらないので、残りの地図は、切り口から離れた所の塊をセル画の地図と共有する）。中と外は同じ地図から作るので、
-/// 境目が両側でビットまで同じ。`None`：格子に置けない座標がある
+/// 印が変わらないので、残りの地図は、切り口から離れた所の塊をセル画の地図と共有する）。中と外は同じ地図を同じ所で
+/// 切るので、切り口は両側で同じ線になる（地図の精度 `FLAT_TOL` の中で。中と外は別々に重ね合わせるので、切り口の折れ線を
+/// 曲線に戻すかどうかが両側で違い、点の並びがビットまでは同じにならないことがある。重ね直すと同じ線として1本になる：
+/// `same_curve`）。`None`：格子に置けない座標がある
 pub(crate) fn cut_out(
     cel: &LayerBase,
     own: &[&FillShape],
@@ -2356,7 +2391,8 @@ pub(crate) fn painted_map_pub(shapes: &[FillShape]) -> Option<PlanarMap> {
 // 重ねる線と前からある辺を細かい折れ線にして、i_overlay（vendor/i_overlay）の `EdgeOverlay` で交わる所で切る。
 // 交わりは整数の格子（1/4096px）で計算するので、ほぼ重なった線でも食い違わない。切った区間ごとに、
 // 左右が重ねる形の中か（i_overlay が数える）と、出どころ（どの曲線の t のどこからどこまでか）が分かる。
-// 区間の左右の色は、切った区間でできる面ごとに決める（`face_colors`）。境目の曲線は、出どころの曲線から当て直す。
+// 区間の左右の色は、区間をまたぐたびに出どころの辺の左右の色で隣の面へ伝えて決める（`propagate`）。境目の曲線は、
+// 出どころの曲線から当て直す。
 // ============================================================================
 
 /// 重ねるときの格子（1px をいくつに分けるか）。地図の頂点のうち重ねる所にかかるものは、この格子の上に置き直す
@@ -2576,9 +2612,10 @@ fn flat_dev(q: &QuadBez, n: usize) -> f64 {
     bend(q) / (4.0 * (n * n) as f64)
 }
 
-/// 曲線を、折れ線とのずれ（`flat_dev`）が `tol` ほどになるように等分する数
+/// 曲線を、折れ線とのずれ（`flat_dev`）が `tol` ほどになるように等分する数（上限は置かない：座標は格子の範囲
+/// ±65,536px に収まるので、地図の精度 `FLAT_TOL` で約 8,100 以下。どの大きさの曲線でも同じ精度になる）
 fn flat_count(q: &QuadBez, tol: f64) -> usize {
-    ((bend(q) / (4.0 * tol)).sqrt().ceil() as usize).clamp(1, 512)
+    ((bend(q) / (4.0 * tol)).sqrt().ceil() as usize).max(1)
 }
 
 /// 整数の向きを、角度の順（x 軸の正の向きから、面積の式で正の回り方）に比べる（向きは格子の点の差か、その積。
@@ -2902,9 +2939,8 @@ impl PlanarMap {
             list.is_none_or(|v| v.iter().all(|sp| hi <= sp.lo || lo >= sp.hi))
         };
         for &(line, q) in &new_lines {
-            // 格子に置けない座標は、ここで断る
-            to_grid(q.p0)?;
-            to_grid(q.p2)?;
+            // 格子に置けない座標（頂点と制御点：`fits_grid` と同じ）は、ここで断る
+            on_grid([q.p0, q.p1, q.p2].into_iter()).then_some(())?;
             edge_grid.query(quad_cells(q, flat_pad), &mut found);
             let mut pairs: Vec<(usize, OverlapPts)> = found
                 .iter()
@@ -2986,9 +3022,8 @@ impl PlanarMap {
                     }
                 }
                 let q = self.quad(e);
-                // 格子に置けない座標は、ここで断る
-                to_grid(q.p0)?;
-                to_grid(q.p2)?;
+                // 格子に置けない座標（頂点と制御点：`fits_grid` と同じ）は、ここで断る
+                on_grid([q.p0, q.p1, q.p2].into_iter()).then_some(())?;
                 add_polyline(
                     &fed_set.grid_points(Line::Edge(e), &q),
                     (Some(ed.a), Some(ed.b)),
@@ -5151,13 +5186,7 @@ impl Regions {
                 let color = color?;
                 let cycles: Vec<Vec<(usize, bool)>> =
                     ids.iter().filter_map(|&k| cycles[k].take()).collect();
-                let mut srcs: Vec<ShapeId> = cycles
-                    .iter()
-                    .flatten()
-                    .filter_map(|h| map.side_src(*h))
-                    .collect();
-                srcs.sort_unstable();
-                srcs.dedup();
+                let srcs = map.face_srcs(&cycles);
                 Some(MapFace {
                     color,
                     cycles,

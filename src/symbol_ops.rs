@@ -56,24 +56,30 @@ pub(crate) fn prepare_convert_selection_to_symbol(
 
     let sym_id = tab.doc.alloc_symbol_id();
     let inst_gid = tab.doc.alloc_group_id();
-    // 浮いた片：選んだ片はシンボルの中身に入れたので捨て、残りと選んでいない片を確定する
-    if let Some(fl) = tab.session.take_floating() {
-        let keep: HashSet<u64> = fl
-            .pieces()
-            .iter()
-            .filter(|p| selection.contains_shape(p))
-            .map(|p| p.shape_id)
-            .collect();
-        let rest = fl.clone().split_off(&keep, &scope);
-        if crate::canvas_tool::commit_floating_layers(tab, &rest).is_none() {
-            tab.session.set_floating(Some(fl));
-            return None;
+    // シンボルは、インスタンスを置く前に登録する（置いたインスタンスの図形が、今の階層の中身として画面に出る）
+    sym_def.id = sym_id;
+    tab.doc.register_symbol(sym_def);
+    // 浮いた片：選んだ片はシンボルの中身に入れたので捨て、残りと選んでいない片を確定する。書くものを先に決め（書けなければ
+    // 断る）、インスタンスを置いてから書く（今の階層の中身をみな選んでいても、今の階層の地図がまだあるうちにインスタンス
+    // を入れるので、今の階層の重なりの位置が変わらない）
+    let rest_plan = match tab.session.take_floating() {
+        Some(fl) => {
+            let keep: HashSet<u64> = fl
+                .pieces()
+                .iter()
+                .filter(|p| selection.contains_shape(p))
+                .map(|p| p.shape_id)
+                .collect();
+            let rest = fl.clone().split_off(&keep, &scope);
+            let Some(plan) = crate::canvas_tool::plan_commit(tab, &rest) else {
+                tab.session.set_floating(Some(fl));
+                return None;
+            };
+            Some(plan)
         }
-    }
-    // 選んだもの（今の階層の）を外し、インスタンスを、置くレイヤーの今の階層のいちばん上に入れる（中心に置く）
-    write_cels(tab, &layer_ids, |_, cel| {
-        cel.remove(&scope, &selection.shapes, &selection.instances)
-    });
+        None => None,
+    };
+    // インスタンスを、置くレイヤーの今の階層のいちばん上に入れ（中心に置く）、選んだもの（今の階層の）を外す
     let mut inst = Cel::default();
     inst.instances_mut().push(SymbolInstance {
         binding: SymbolInstanceBinding::new(inst_gid, sym_id, Affine::translate(center.to_vec2())),
@@ -88,9 +94,13 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     .into_iter()
     .collect();
     finish_cel_writes(tab, &written);
+    write_cels(tab, &layer_ids, |_, cel| {
+        cel.remove(&scope, &selection.shapes, &selection.instances)
+    });
+    if let Some(plan) = rest_plan {
+        crate::canvas_tool::write_commit(tab, plan);
+    }
 
-    sym_def.id = sym_id;
-    tab.doc.register_symbol(sym_def);
     tab.session.selection.clear();
     tab.session.selection.instances.insert(inst_gid);
 

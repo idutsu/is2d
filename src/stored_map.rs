@@ -163,6 +163,35 @@ impl StoredMap {
         }))
     }
 
+    /// 地図 `map` の辺ごとの（左, 右）の側の図形の番号：この地図に形と色が同じ辺があれば、その辺の側の番号（向きは `map`
+    /// の辺の向き）。無ければ番号なし
+    pub(crate) fn labels_of(&self, map: &PlanarMap) -> Vec<(Option<ShapeId>, Option<ShapeId>)> {
+        type Key = ([u64; 6], Option<Color32>, Option<Color32>);
+        let mine: std::collections::HashMap<Key, (Option<NonZeroU64>, Option<NonZeroU64>)> = self
+            .0
+            .tiles
+            .iter()
+            .flat_map(|t| t.iter())
+            .map(|e| ((e.geom_bits(), e.left, e.right), (e.left_src, e.right_src)))
+            .collect();
+        map.edges
+            .iter()
+            .map(|e| {
+                let se = StoredEdge::of(map, e);
+                let Some(&(l, r)) = mine.get(&(se.geom_bits(), se.left, se.right)) else {
+                    return (None, None);
+                };
+                let (l, r) = (l.map(NonZeroU64::get), r.map(NonZeroU64::get));
+                // しまう辺は決まった向き。`map` の辺が逆向きなら左右を入れ替える
+                if point_order(map.nodes[e.a], map.nodes[e.b]).is_le() {
+                    (l, r)
+                } else {
+                    (r, l)
+                }
+            })
+            .collect()
+    }
+
     /// 計算に使う写しへの弱い参照（`LayerBase::of_stored` だけが使う）
     pub(crate) fn dense_slot(&self) -> &Mutex<Weak<LayerBase>> {
         &self.0.dense

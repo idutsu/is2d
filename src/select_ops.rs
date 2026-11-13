@@ -248,8 +248,9 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     let pieces: HashSet<ShapeId> = floating.map(|fl| fl.piece_ids()).unwrap_or_default();
     let raw = |s: &FillShape| editable_lids.contains(&s.layer_id) && s.is_raw_at_scope(&scope);
     // 切るレイヤー：中身（隠していない生の図形・浮いている残り・動かしていない片）が矩形にかかるレイヤー。レイヤーごとに、
-    // 中身を、選ぶ所（そのレイヤーで選んでいる面・動かしていない片・矩形）で1回だけ切る（`Floating::cut`）。片と残りが
-    // いつも同じ地図から出るので、何回選び足しても境目がそろい、選ぶ所の中でつながった同じ色の部分は1つの片になる
+    // 中身を、選ぶ所（そのレイヤーで選んでいる面・動かしていない片・矩形）で切る（`Floating::cut`）。片と残りが
+    // いつも同じ地図を同じ所で切って出るので、何回選び足しても境目がそろい、選ぶ所の中でつながった同じ色の部分は1つの片
+    // になる
     let mut split: Vec<(LayerId, HashSet<ShapeId>)> = Vec::new();
     for s in tab.scene().iter() {
         let content = raw(s) && (!modified || !pieces.contains(&s.shape_id));
@@ -517,16 +518,22 @@ pub(crate) fn prepare_group_selected_shapes(
     };
     let new_gid = tab.doc.alloc_group_id();
 
-    // 浮いた片の残りは、そのままセル画の地図にする（片は重ねない。選択は、残りを書く前のもの：片も選んでいる）
+    // 浮いた片の残りは、そのままセル画の地図にする（片は重ねない。選択は、残りを書く前のもの：片も選んでいる）。書くもの
+    // を先に決め（書けなければ断る）、新しいグループを置いてから書く（今の階層の中身をみな選んでいても、今の階層の
+    // 地図がまだあるうちに新しいグループを入れるので、今の階層の重なりの位置が変わらない）
     let selection = tab.session.selection.clone();
-    if let Some(fl) = tab.session.take_floating() {
-        let mut rest = fl.clone();
-        rest.drop_pieces();
-        if crate::canvas_tool::commit_floating_layers(tab, &rest).is_none() {
-            tab.session.set_floating(Some(fl));
-            return false;
+    let rest_plan = match tab.session.take_floating() {
+        Some(fl) => {
+            let mut rest = fl.clone();
+            rest.drop_pieces();
+            let Some(plan) = crate::canvas_tool::plan_commit(tab, &rest) else {
+                tab.session.set_floating(Some(fl));
+                return false;
+            };
+            Some(plan)
         }
-    }
+        None => None,
+    };
     // 選んだグループ・インスタンスは、セル画の並びで新しいグループに入れる（今の階層の中身のいちばん上）
     let scope = tab.session.editing_group_path.clone();
     let layer_ids = editable_layer_ids(tab);
@@ -544,6 +551,9 @@ pub(crate) fn prepare_group_selected_shapes(
         }
     }
     crate::canvas_tool::finish_cel_writes(tab, &written);
+    if let Some(plan) = rest_plan {
+        crate::canvas_tool::write_commit(tab, plan);
+    }
     tab.session.selection = selection;
     tab.session.retain_existing_selection();
 
@@ -623,7 +633,6 @@ pub(crate) fn prepare_ungroup_selected_shapes(
 
     // グループの生の図形の地図（浮いた片にする）
     let mut group_maps: Vec<(LayerId, crate::planar_map::PlanarMap, Affine)> = Vec::new();
-    let mut from_groups: HashSet<ShapeId> = HashSet::new();
     let mut group_raw: Vec<(LayerId, Vec<u64>)> = Vec::new();
     for s in tab.session.base_cache.shapes() {
         if tab.session.selection.contains_shape(s)
@@ -641,9 +650,11 @@ pub(crate) fn prepare_ungroup_selected_shapes(
         let Some(cel) = tab.session.base_cache.cel(*layer_id) else {
             continue;
         };
-        let base = cel.scope_base(path);
-        from_groups.extend(base.faces(path).iter().map(|s| s.shape_id));
-        group_maps.push((*layer_id, base.map.clone(), Affine::IDENTITY));
+        group_maps.push((
+            *layer_id,
+            cel.scope_base(path).map.clone(),
+            Affine::IDENTITY,
+        ));
     }
     // グループは、セル画の並びで、その番号を階層から外す（中のグループ・インスタンスは1段上の階層へ。グループの生の図形は
     // 浮いた片にするので外す）。今の階層の子のインスタンスそのものは、下で分解する

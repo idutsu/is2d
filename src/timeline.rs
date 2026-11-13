@@ -1,5 +1,5 @@
 use crate::canvas_tool::ShapeId;
-use crate::planar_map::{realized, CheckedMap, LayerBase, MapInput, MapRule, PlanarMap};
+use crate::planar_map::{realized, CheckedMap, LayerBase, PlanarMap};
 use crate::stored_map::StoredMap;
 use crate::vector_engine::{FillShape, SymbolInstanceBinding};
 use kurbo::{Affine, Point};
@@ -442,7 +442,8 @@ impl Cel {
     }
 
     /// 階層ごとの地図 `maps`（正しい地図。下から順）とインスタンス（重なり位置 `order` つき）から作る（ファイルを読む
-    /// とき）。面には新しい番号を記す。地図の塊は、同じレイヤーの直前のセル `prev` の同じ階層の地図と同じものを共有する
+    /// とき）。面には番号を記す（同じレイヤーの直前のセル `prev` の同じ階層の地図に、形と色が同じ辺があれば、その番号を
+    /// 引き継ぐ：`CheckedMap::inheriting`）。地図の塊は、その地図と中身が同じものを共有する
     pub(crate) fn from_maps(
         maps: Vec<(Vec<u64>, CheckedMap)>,
         mut instances: Vec<SymbolInstance>,
@@ -451,7 +452,12 @@ impl Cel {
         let maps: Vec<ScopeMap> = maps
             .into_iter()
             .filter_map(|(group_path, map)| {
+                // 前のキーフレームの同じ階層の地図と同じ辺には、その番号を記してから番号を振る（変わらない面と塊を共有する）
                 let prev_map = prev.and_then(|c| c.scope_stored(&group_path));
+                let map = match prev_map {
+                    Some(p) => map.inheriting(p),
+                    None => map,
+                };
                 ScopeMap::new(group_path, map, prev_map)
             })
             .collect();
@@ -898,16 +904,11 @@ impl Cel {
             if maps.len() == 1 {
                 return Ok::<_, Unmappable>(maps.into_iter().next());
             }
-            let mut map = PlanarMap::default();
-            for m in &maps {
-                let d = m.dense();
-                map = if map.edges.is_empty() {
-                    d
-                } else {
-                    map.overlay(MapInput::Map(&d), MapRule::Overlay)
-                        .ok_or(Unmappable)?
-                };
-            }
+            let map = crate::planar_map::stacked(
+                PlanarMap::default(),
+                maps.iter().map(|m| Some(m.dense())),
+            )
+            .ok_or(Unmappable)?;
             Ok(ScopeMap::new(
                 path.to_vec(),
                 map.checked().ok_or(Unmappable)?,

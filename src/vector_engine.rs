@@ -150,11 +150,13 @@ pub(crate) const SAME_TOL: f64 = 1e-6;
 /// 割る前に、長さ 0 とみなす長さの上限（px）。向きを取る・長さで割る所はこれを使う
 pub(crate) const TINY_LEN: f64 = 1e-9;
 
-/// 座標の変換 `a` が使えるか：どの数も有限で、逆にできる（行列式の大きさが `MIN_DET` より大きい）。読み込み・図形の
-/// 変換・中心点の写し・インスタンスの置き直しのどこでも、変換が使えるかの判定はこれ1つ
+/// 座標の変換 `a` が使えるか：どの数も有限で、逆にできる（行列式が有限で、その大きさが `MIN_DET` より大きい。係数が
+/// 有限でも行列式があふれれば使えない）。読み込み・図形の変換・中心点の写し・インスタンスの置き直し・地図を変換して
+/// 置けるか（`PlanarMap::fits_grid`）のどこでも、変換が使えるかの判定はこれ1つ
 #[inline]
 pub(crate) fn invertible(a: Affine) -> bool {
-    a.as_coeffs().iter().all(|v| v.is_finite()) && a.determinant().abs() > MIN_DET
+    let det = a.determinant();
+    a.as_coeffs().iter().all(|v| v.is_finite()) && det.is_finite() && det.abs() > MIN_DET
 }
 
 /// インスタンスの中心点 `a` と `b`（シンボルのローカル座標）が同じ所か（中心点を比べる判定はこれ1つ）

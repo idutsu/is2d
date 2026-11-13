@@ -11,8 +11,8 @@ use kurbo::Affine;
 
 use crate::canvas_tool::{LayerId, Placement, SceneBaseCache, ShapeId};
 use crate::planar_map::{
-    cut_out, faces_with_ids, per_layer_parallel, realized, region_map, CheckedMap, LayerBase,
-    MapChange, MapInput, MapRule, PlanarMap,
+    cut_out, faces_with_ids, per_layer_parallel, realized, region_map, stacked, CheckedMap,
+    LayerBase, MapChange, MapInput, MapRule, PlanarMap,
 };
 use crate::stored_map::StoredMap;
 use crate::vector_engine::FillShape;
@@ -45,6 +45,11 @@ pub(crate) struct PieceGroup {
 }
 
 impl PieceGroup {
+    /// 変換をかけて置いた地図（その座標の格子で正しい地図にしたもの：`realized`）。`None`：格子に置けない
+    fn placed(&self) -> Option<PlanarMap> {
+        Some(realized(&self.base().map, self.xform)?.into_map())
+    }
+
     /// 地図 `map`（文書の座標）の片の組。面の番号が1つに決まらない面には、新しい番号を振る（`faces_with_ids`）
     fn new(map: &PlanarMap, layer_id: LayerId, scope: &[u64], xform: Affine) -> Self {
         let (map, faces) = faces_with_ids(map, layer_id, scope);
@@ -151,16 +156,10 @@ impl FloatLayer {
     /// 片の組を下から順に重ねた地図（組ごとに変換をかけて、その座標の格子で正しい地図にする：`realized`）。片が無ければ
     /// 空の地図。`None`：格子に置けない座標がある
     pub(crate) fn pieces_map(&self) -> Option<PlanarMap> {
-        let mut map = PlanarMap::default();
-        for g in &self.groups {
-            let piece = realized(&g.base().map, g.xform)?.into_map();
-            map = if map.edges.is_empty() {
-                piece
-            } else {
-                map.overlay(MapInput::Map(&piece), MapRule::Overlay)?
-            };
-        }
-        Some(map)
+        stacked(
+            PlanarMap::default(),
+            self.groups.iter().map(PieceGroup::placed),
+        )
     }
 
     /// 選んだもの（番号が `ids` の、中身の地図の面と片）の地図：中身の地図の選んだ面に、選んだ片の組を下から順に重ねる
@@ -171,30 +170,21 @@ impl FloatLayer {
         stage: Stage<'_>,
         ids: &HashSet<ShapeId>,
     ) -> Option<CheckedMap> {
-        let mut map = self.content(&stage.cel(self.layer_id)?).map.restricted(ids);
-        for g in &self.groups {
-            let Some(g) = g.restricted(ids, self.layer_id, stage.scope) else {
-                continue;
-            };
-            let piece = realized(&g.base().map, g.xform)?.into_map();
-            map = if map.edges.is_empty() {
-                piece
-            } else {
-                map.overlay(MapInput::Map(&piece), MapRule::Overlay)?
-            };
-        }
-        map.checked()
+        let start = self.content(&stage.cel(self.layer_id)?).map.restricted(ids);
+        let groups = self
+            .groups
+            .iter()
+            .filter_map(|g| g.restricted(ids, self.layer_id, stage.scope));
+        stacked(start, groups.map(|g| g.placed()))?.checked()
     }
 
     /// 確定した地図：中身の地図に、片の組を下から順に重ねる（組ごとに変換をかけて、その座標の格子で正しい地図にする：
     /// `realized`）。`None`：格子に置けない座標がある
     pub(crate) fn committed(&self, cel: &Arc<LayerBase>) -> Option<PlanarMap> {
-        let mut map = self.content(cel).map.clone();
-        for g in &self.groups {
-            let piece = realized(&g.base().map, g.xform)?.into_map();
-            map = map.overlay(MapInput::Map(&piece), MapRule::Overlay)?;
-        }
-        Some(map)
+        stacked(
+            self.content(cel).map.clone(),
+            self.groups.iter().map(PieceGroup::placed),
+        )
     }
 }
 
@@ -470,8 +460,8 @@ impl Floating {
         true
     }
 
-    /// 動かしていない片のうち、番号が `keep` に無い片を残りに戻す：外した片を残りの地図に重ねる（境目がビットまで同じ
-    /// なので、同じ色でつながる所は1つになる）。片が無くなったレイヤーは外す（何も変わらない）。`false`：地図にできない
+    /// 動かしていない片のうち、番号が `keep` に無い片を残りに戻す：外した片を残りの地図に重ねる（切り口は両側で同じ線
+    /// なので、同じ色でつながる所は1つになる：`cut_out`）。片が無くなったレイヤーは外す（何も変わらない）。`false`：地図にできない
     pub(crate) fn return_pieces(&mut self, stage: Stage<'_>, keep: &HashSet<ShapeId>) -> bool {
         debug_assert!(!self.modified);
         let drop: HashSet<ShapeId> = self
@@ -576,9 +566,9 @@ impl Floating {
 }
 
 /// 1つのレイヤーの切り出し：中身（残りの地図か、セル画の地図）を、選ぶ所（番号が `ids` の中身の面の所と、形 `rect` の
-/// 所）で1回切り、中を片の組にする（`cut_out`。中と外は同じ地図から切るので、境目が両側でビットまで同じ）。矩形が無い
+/// 所）で1回切り、中を片の組にする（`cut_out`。中と外は同じ地図を同じ所で切るので、切り口は両側で同じ線）。矩形が無い
 /// とき（選んだ面を丸ごと持ち上げる）は切らずに、中身からその面を外す（番号はそのまま）。動かして
-/// いない片（`modified` でないとき）は元の所にあるので、新しい片を前からの片に重ねて1つの組にする（境目がビットまで同じ
+/// いない片（`modified` でないとき）は元の所にあるので、新しい片を前からの片に重ねて1つの組にする（切り口は同じ線
 /// なので、同じ色でつながる片は1つになる）。動かした片があれば、新しい片は別の組として一番下に足す。`None`：地図に
 /// できない
 fn cut_layer(
@@ -615,7 +605,7 @@ fn cut_layer(
             let region = match part {
                 None => MapInput::Shapes(std::slice::from_ref(r)),
                 Some(p) => {
-                    region_owned = region_map(&[&p], rect)?;
+                    region_owned = region_map(&p, rect)?;
                     MapInput::Map(&region_owned)
                 }
             };

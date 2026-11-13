@@ -160,8 +160,8 @@ pub(crate) enum HoverTarget {
     None,
     Vertex {
         shape_id: ShapeId,
+        /// 頂点のある輪郭（`shape_id` の図形の何番目の輪郭か。ワイヤーフレームで、その輪郭の頂点を出す）
         contour_idx: usize,
-        seg_idx: usize,
         pos: Point,
         /// 地図の頂点（どの地図か, 頂点の番号, 文書の座標の位置）。`pos` はステージの座標の位置（表示と距離）、編集
         /// （`MapEdit`）は文書の座標の位置で頂点を探す
@@ -169,8 +169,6 @@ pub(crate) enum HoverTarget {
     },
     Edge {
         shape_id: ShapeId,
-        contour_idx: usize,
-        seg_idx: usize,
         t: f64,
         closest_pos: Point,
         /// 強調表示する曲線（地図の辺のステージの座標の形）
@@ -2962,7 +2960,7 @@ impl Tab {
 /// 編集を断った理由（`Session::refusal`。`apply` が知らせる）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
-    /// 地図にできない形（格子の外 ±65,536px・有限でない座標）を作る
+    /// 地図にできない形（格子の外 ±65,536px・有限でない座標・潰れるほど縮める変換：`PlanarMap::fits_grid`）を作る
     OffGrid,
     /// 浮いた片を置けない（置いた結果を地図に書けない・置くレイヤーを編集できない）。浮いた片は残す
     Unplaceable,
@@ -2972,7 +2970,7 @@ impl Refusal {
     /// 画面の下に出す知らせ
     pub(crate) fn message(self) -> &'static str {
         match self {
-            Refusal::OffGrid => "地図の範囲（±65,536px）の外には置けません",
+            Refusal::OffGrid => "地図の範囲（±65,536px）の外や、潰れるほど小さくには置けません",
             Refusal::Unplaceable => "選んだ図形をここに置けません（動かすか、取り消してください）",
         }
     }
@@ -3305,13 +3303,16 @@ pub(crate) fn merge_pieces_layer_by_layer(
     }
 }
 
-/// 浮いた片 `fl` を確定する：レイヤーごとに、残りの地図（無ければセル画の地図）に片の組を下から順に重ねた地図
-/// （`FloatLayer::committed`）を、そのセル画の地図にする（図形はその地図の面）。全部か無しか：レイヤーごとに、重ねる計算
-/// から何を書くか（`Cel::outcome`）までを、文書を変える前に同時に作り（レイヤーをまたがないので、待ち時間はいちばん重い
-/// レイヤー1つ分）、1つでも書けなければ何も書かずに `None` を返して知らせる（浮いた片を残すのは呼ぶ側。片はいつも
-/// 文書か浮いた片のどちらかにあり、黙って消えない）。片の組の変換はかける前に確定と同じ式で確かめてある（変形は
-/// `Floating::fits_transform`、新しい中身は `prepare_placement`）。`Some`：セル画を書き換えたか
-pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: &Floating) -> Option<bool> {
+/// 浮いた片の確定で書くもの（`plan_commit`）：レイヤーごとの、書く地図と面の図形（変わるレイヤーだけ）
+pub(crate) type CommitPlan = Vec<(LayerId, crate::planar_map::CheckedMap, Vec<Arc<FillShape>>)>;
+
+/// 浮いた片 `fl` を確定するときに書くもの（文書を変えない）：レイヤーごとに、残りの地図（無ければセル画の地図）に片の組
+/// を下から順に重ねた地図（`FloatLayer::committed`）を、今の階層の地図にするとき何を書くか（`Cel::outcome`）。重ねる
+/// 計算から何を書くかまでをレイヤーごとに同時に作る（レイヤーをまたがないので、待ち時間はいちばん重いレイヤー1つ分）。
+/// 全部か無しか：1つでも書けない（編集できないレイヤーを含む）なら `None` を返して知らせる（浮いた片を残すのは呼ぶ側。
+/// 片はいつも文書か浮いた片のどちらかにあり、黙って消えない）。片の組の変換はかける前に確定と同じ式で確かめてある（変形
+/// は `Floating::fits_transform`、新しい中身は `prepare_placement`）
+pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
     use crate::timeline::MapOutcome;
     tab.refresh_scene_base();
     let scope = tab.session.editing_group_path.clone();
@@ -3324,33 +3325,48 @@ pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: &Floating) -> Option<boo
             Some(cel.outcome(&scope, &next))
         })
     };
-    let refused = fl.layers().iter().zip(&outcomes).any(|(l, o)| {
-        !editable.contains(&l.layer_id)
-            || !matches!(o, Some(MapOutcome::Same | MapOutcome::Changed(..)))
-    });
-    if refused {
-        tab.session.refusal = Some(Refusal::Unplaceable);
-        return None;
-    }
-    let mut written: Vec<LayerId> = Vec::new();
+    let mut plan = CommitPlan::new();
     for (l, outcome) in fl.layers().iter().zip(outcomes) {
-        let Some(MapOutcome::Changed(map, shapes)) = outcome else {
-            continue;
-        };
+        match outcome {
+            Some(MapOutcome::Same) if editable.contains(&l.layer_id) => {}
+            Some(MapOutcome::Changed(map, shapes)) if editable.contains(&l.layer_id) => {
+                plan.push((l.layer_id, map, shapes));
+            }
+            _ => {
+                tab.session.refusal = Some(Refusal::Unplaceable);
+                return None;
+            }
+        }
+    }
+    Some(plan)
+}
+
+/// `plan_commit` で決めたものを、今の階層の地図に書く。戻り値は、セル画を書き換えたか
+pub(crate) fn write_commit(tab: &mut Tab, plan: CommitPlan) -> bool {
+    let scope = tab.session.editing_group_path.clone();
+    let mut written: Vec<LayerId> = Vec::new();
+    for (layer_id, map, shapes) in plan {
         let mut held = None;
-        if write_cel(tab, l.layer_id, |cel| {
+        if write_cel(tab, layer_id, |cel| {
             held = cel.put_map(&scope, map, shapes);
             true
         }) {
-            written.push(l.layer_id);
+            written.push(layer_id);
         }
         // 新しい地図の写し（面の図形は、変わらない面は前の図形）は、画面の土台が持つ
         if let Some(base) = held {
-            tab.session.base_cache.hold(l.layer_id, base);
+            tab.session.base_cache.hold(layer_id, base);
         }
     }
     finish_cel_writes(tab, &written);
-    Some(!written.is_empty())
+    !written.is_empty()
+}
+
+/// 浮いた片 `fl` を確定する（`plan_commit`・`write_commit`）。`None`：書けない（何も書かず、知らせを記す）。`Some`：
+/// セル画を書き換えたか
+pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: &Floating) -> Option<bool> {
+    let plan = plan_commit(tab, fl)?;
+    Some(write_commit(tab, plan))
 }
 
 /// `tab.session.floating` のうち `keep_indices`（`Scene` インデックス）に含まれない選択図形を確定

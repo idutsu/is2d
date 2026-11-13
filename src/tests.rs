@@ -27654,3 +27654,256 @@ fn refused_commit_keeps_the_floating_pieces() {
     assert_eq!(at(Point::new(200.0, 300.0)), vec![red]);
     assert_eq!(at(Point::new(200.0, 400.0)), vec![blue]);
 }
+
+/// S-2：正しい地図の判定（`valid_faces`。書き戻しも読み込みも同じ）は、頂点と制御点が格子に置けることと、両側が同じ色の
+/// 辺が無いことも確かめる。巨大な座標の地図も、判定の形を作らずにすぐ断る。辺を引っぱって制御点だけ格子の外へ出る
+/// 確定は断る
+#[test]
+fn valid_maps_are_on_the_grid_with_two_colors_per_edge() {
+    use crate::planar_map::{MapEdge, MapInput, MapRule, PlanarMap};
+    let red = Color32::RED;
+    let square = |x0: f64, y0: f64, x1: f64, y1: f64, ctrl_of: &dyn Fn(Point, Point) -> Point| {
+        let nodes = vec![
+            Point::new(x0, y0),
+            Point::new(x1, y0),
+            Point::new(x1, y1),
+            Point::new(x0, y1),
+        ];
+        let edges = (0..4)
+            .map(|i| MapEdge {
+                a: i,
+                b: (i + 1) % 4,
+                ctrl: ctrl_of(nodes[i], nodes[(i + 1) % 4]),
+                left: None,
+                right: Some(red),
+                left_src: None,
+                right_src: None,
+            })
+            .collect();
+        PlanarMap { nodes, edges }
+    };
+    let mid = |a: Point, b: Point| a.midpoint(b);
+    // ふつうの正方形（向きを確かめる）
+    let ok = square(0.0, 0.0, 10.0, 10.0, &mid);
+    let ok = if ok.is_valid() {
+        ok
+    } else {
+        let mut m = ok;
+        for e in &mut m.edges {
+            std::mem::swap(&mut e.left, &mut e.right);
+        }
+        m
+    };
+    assert!(ok.is_valid());
+    // 格子の外の頂点・巨大な頂点
+    let mut far = ok.clone();
+    far.nodes[1].x = 70_000.0;
+    far.nodes[2].x = 70_000.0;
+    for (i, e) in ok.edges.iter().enumerate() {
+        far.edges[i].ctrl = far.nodes[e.a].midpoint(far.nodes[e.b]);
+    }
+    assert!(!far.is_valid());
+    let mut huge = far.clone();
+    huge.nodes[1].x = 1e12;
+    huge.nodes[2].x = 1e12;
+    for (i, e) in ok.edges.iter().enumerate() {
+        huge.edges[i].ctrl = huge.nodes[e.a].midpoint(huge.nodes[e.b]);
+    }
+    assert!(!huge.is_valid());
+    // 制御点だけ格子の外
+    let mut ctrl_far = ok.clone();
+    ctrl_far.edges[0].ctrl.y = -70_000.0;
+    assert!(!ctrl_far.is_valid());
+    // 両側が同じ色の辺（何も無い所に浮いた線）
+    let mut ghost = ok.clone();
+    let a = ghost.nodes.len();
+    ghost.nodes.push(Point::new(20.0, 0.0));
+    ghost.nodes.push(Point::new(30.0, 0.0));
+    ghost.edges.push(MapEdge {
+        a,
+        b: a + 1,
+        ctrl: Point::new(25.0, 0.0),
+        left: None,
+        right: None,
+        left_src: None,
+        right_src: None,
+    });
+    assert!(!ghost.is_valid());
+    // 端の近くの正方形の辺を引っぱり、曲線は格子の内でも制御点が外へ出る確定は断る
+    let edge_map = ok
+        .overlay(MapInput::Map(&PlanarMap::default()), MapRule::Overlay)
+        .unwrap();
+    let near = crate::planar_map::realized(&edge_map, kurbo::Affine::translate((65_000.0, 0.0)))
+        .unwrap()
+        .into_map();
+    assert!(near.is_valid());
+    let e = (0..near.edges.len())
+        .max_by(|&i, &j| {
+            let x = |k: usize| near.quad(k).eval(0.5).x;
+            x(i).total_cmp(&x(j))
+        })
+        .unwrap();
+    let q = near.quad(e);
+    let target = q.eval(0.18) + kurbo::Vec2::new(300.0, 0.0);
+    let ctrl = q.p1 + (target - q.eval(0.18)) / (2.0 * 0.18 * 0.82);
+    assert!(ctrl.x > 65_536.0 && q.eval(0.5).x < 65_536.0);
+    assert!(near.commit_pull_edge(e, 0.18, target).is_none());
+}
+
+/// S-1：ファイルを読み込むと、同じレイヤーの前後のキーフレームで、形と色が同じ辺は同じ番号を持ち、地図の塊を共有する
+#[test]
+fn loaded_keyframes_share_map_tiles() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    let mut app = Is2dApp::default();
+    let mut shapes = make_stroke(
+        Point::new(100.0, 200.0),
+        Point::new(300.0, 200.0),
+        25.0,
+        red,
+    );
+    shapes.extend(make_stroke(
+        Point::new(100.0, 300.0),
+        Point::new(300.0, 300.0),
+        25.0,
+        blue,
+    ));
+    put_cel_shapes(&mut app, 0, 0, shapes);
+    // 次のコマに、前のキーフレームを写したキーフレームを作り、遠い所に線を1本足す
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SwitchLayerAndFrame {
+            layer_idx: 0,
+            frame: 1,
+        },
+    );
+    doc_actions::timeline_insert_keyframe(&mut app, true);
+    app.tool.brush_color = red;
+    let pts: Vec<Point> = (0..=8)
+        .map(|j| Point::new(600.0 + j as f64 * 4.0, 500.0))
+        .collect();
+    doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 4.0));
+    let json =
+        serde_json::to_string(&project_io::ProjectDocument::from_app(app.tab()).unwrap()).unwrap();
+    let loaded: project_io::ProjectDocument = serde_json::from_str(&json).unwrap();
+    let doc = loaded.into_document().unwrap();
+    let kfs = &doc.root.layers[0].keyframes;
+    assert_eq!(kfs.len(), 2);
+    let (first, second) = (kfs[0].cel.maps[0].stored(), kfs[1].cel.maps[0].stored());
+    assert!(first.tiles() > 10);
+    // 足した線の所のほかは、みな同じ塊（同じ `Arc`）
+    let shared = second.shared_tiles(first);
+    assert!(shared + 3 >= first.tiles(), "{shared} / {}", first.tiles());
+}
+
+/// A-1：グループの中で、中身をみな選んでグループ化・シンボル化しても、そのグループの重なりの位置は変わらない
+#[test]
+fn grouping_everything_inside_a_group_keeps_its_place() {
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    for symbolize in [false, true] {
+        let mut app = Is2dApp::default();
+        let mut shapes = Vec::new();
+        for (i, &c) in colors.iter().enumerate() {
+            let y = 200.0 + 100.0 * i as f64;
+            shapes.extend(make_stroke(
+                Point::new(100.0, y),
+                Point::new(300.0, y),
+                25.0,
+                c,
+            ));
+        }
+        put_cel_shapes(&mut app, 0, 0, shapes);
+        doc_actions::apply(
+            &mut app,
+            doc_actions::Action::SetTool { tool: Tool::Select },
+        );
+        // 下から G1・G_outer・G2 の3つのグループにする
+        for i in 0..3 {
+            let y = 200.0 + 100.0 * i as f64;
+            select_ops::apply_marquee_selection(
+                &mut app,
+                Point::new(50.0, y - 40.0),
+                Point::new(350.0, y + 40.0),
+                false,
+            );
+            doc_actions::group_selected_shapes(&mut app).unwrap();
+            assert!(canvas_tool::clear_selection(&mut app));
+        }
+        let order =
+            |app: &Is2dApp| -> Vec<Color32> { app.scene().iter().map(|s| s.color).collect() };
+        assert_eq!(order(&app), colors.to_vec());
+        // 真ん中のグループに入り、中身をみな選んでグループ化（シンボル化）して出る
+        assert!(select_ops::enter_group_at(
+            app.tab_mut(),
+            Point::new(200.0, 300.0)
+        ));
+        select_ops::apply_marquee_selection(
+            &mut app,
+            Point::new(50.0, 250.0),
+            Point::new(350.0, 350.0),
+            false,
+        );
+        if symbolize {
+            doc_actions::convert_selection_to_symbol(&mut app).unwrap();
+        } else {
+            doc_actions::group_selected_shapes(&mut app).unwrap();
+        }
+        assert!(canvas_tool::clear_selection(&mut app));
+        assert!(select_ops::exit_current_group(app.tab_mut()));
+        assert_eq!(order(&app), colors.to_vec(), "シンボル化 {symbolize}");
+    }
+}
+
+/// S-4：潰れるほど縮める変換（行列式の大きさが限りより小さい・あふれる）は、地図を置けるかの判定（`fits_grid`）で断る。
+/// 浮いた片を縮め続けても、元の大きさに戻って確定されない
+#[test]
+fn collapsing_transforms_are_refused() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let tiny = kurbo::Affine::scale(1e-7);
+    assert!(!crate::vector_engine::invertible(tiny));
+    assert!(!crate::vector_engine::invertible(kurbo::Affine::scale(
+        1e200
+    )));
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 200.0),
+            Point::new(300.0, 200.0),
+            25.0,
+            red,
+        ),
+    );
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(50.0, 150.0),
+        Point::new(350.0, 250.0),
+        false,
+    );
+    let area = |app: &Is2dApp| -> f64 { app.scene().iter().map(|s| s.bounding_box().area()).sum() };
+    let before = area(&app);
+    // 0.01 倍を4回：合わせて 1e-8 倍（行列式 1e-16）は潰れるので、どこかで断る
+    let mut done = 0;
+    for _ in 0..4 {
+        if doc_actions::apply(
+            &mut app,
+            doc_actions::Action::ScaleSelection { sx: 0.01, sy: 0.01 },
+        ) {
+            done += 1;
+        }
+    }
+    assert!(done < 4, "潰れる変換は断る");
+    assert!(area(&app) < before * 1e-3, "縮めた片が元の大きさに戻らない");
+    assert!(canvas_tool::clear_selection(&mut app));
+    assert!(area(&app) < before * 1e-3);
+}
