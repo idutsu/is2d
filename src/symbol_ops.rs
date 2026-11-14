@@ -54,14 +54,10 @@ pub(crate) fn prepare_convert_selection_to_symbol(
 
     before_mutate(tab);
 
-    let sym_id = tab.doc.alloc_symbol_id();
-    let inst_gid = tab.doc.alloc_group_id();
-    // シンボルは、インスタンスを置く前に登録する（置いたインスタンスの図形が、今の階層の中身として画面に出る）
-    sym_def.id = sym_id;
-    tab.doc.register_symbol(sym_def);
     // 浮いた片：選んだ片はシンボルの中身に入れたので捨て、残りと選んでいない片を確定する。書くものを先に決め（書けなければ
     // 断る）、インスタンスを置いてから書く（今の階層の中身をみな選んでいても、今の階層の地図がまだあるうちにインスタンス
-    // を入れるので、今の階層の重なりの位置が変わらない）
+    // を入れるので、今の階層の重なりの位置が変わらない）。断るのは文書を変える前（採番・登録より前）：`apply` は `false`
+    // なら文書は変わっていないものとして控えを捨て、採番を戻す
     let rest_plan = match tab.session.take_floating() {
         Some(fl) => {
             let keep: HashSet<u64> = fl
@@ -83,6 +79,11 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         }
         None => None,
     };
+    let sym_id = tab.doc.alloc_symbol_id();
+    let inst_gid = tab.doc.alloc_group_id();
+    // シンボルは、インスタンスを置く前に登録する（置いたインスタンスの図形が、今の階層の中身として画面に出る）
+    sym_def.id = sym_id;
+    tab.doc.register_symbol(sym_def);
     // インスタンスを、置くレイヤーの今の階層のいちばん上に入れ（中心に置く）、選んだもの（今の階層の）を外す
     let mut inst = Cel::default();
     inst.instances_mut().push(SymbolInstance {

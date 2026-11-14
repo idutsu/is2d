@@ -27874,6 +27874,120 @@ fn refused_commit_keeps_the_floating_pieces() {
     assert_eq!(at(Point::new(200.0, 400.0)), vec![blue]);
 }
 
+/// シンボルの中で浮いた片の確定が断られる状態のとき、そのシンボルを削除しても固まらず、文書を変えずに断る。直す前は、
+/// 段を出られないまま出ようとし続けて固まった（レビュー f01d518 の N-4001）。固まったら分かるように、別のスレッドで
+/// 動かして待つ
+#[test]
+fn deleting_a_symbol_whose_level_cannot_be_left_refuses_without_hanging() {
+    use doc_actions::{apply, Action};
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            make_stroke(
+                Point::new(100.0, 200.0),
+                Point::new(300.0, 200.0),
+                25.0,
+                Color32::from_rgb(235, 75, 75),
+            ),
+        );
+        run(&mut app, &[Action::SelectAll, Action::ConvertToSymbol]);
+        let sym_id = app.tab().doc.library.first().unwrap().id;
+        run(
+            &mut app,
+            &[Action::EnterSymbolFromLibrary { sym_id }, Action::SelectAll],
+        );
+        doc_actions::finish_move_selection_drag(&mut app, KVec2::new(0.0, 100.0), false);
+        assert!(app.session.floating().is_some());
+        // 片のレイヤーを、確定を通さずに編集できなくする（確定が断られる場面の代わり）
+        app.tab_mut().with_active_timeline_mut(|tl, _| {
+            tl.layers[0].locked = true;
+            true
+        });
+        let undo_len = app.history.undo_stack.len();
+        let deleted = apply(&mut app, Action::DeleteSymbol { sym_id });
+        let _ = tx.send((
+            deleted,
+            app.tab().doc.find_symbol(sym_id).is_some(),
+            app.history.undo_stack.len() == undo_len,
+        ));
+    });
+    let (deleted, kept, same_undo) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("削除で固まらない");
+    assert!(!deleted, "断る");
+    assert!(kept, "シンボルは残る");
+    assert!(same_undo, "Undo の控えも増えない");
+}
+
+/// 浮いた片の残りを確定できないとき、F8 は断り、ライブラリにも採番にも何も残さない。直す前は、どこにも置かれない
+/// シンボルが Undo できない形でライブラリに残り、採番が戻されて次のシンボルと番号が重なった（レビュー f01d518 の N-4002）
+#[test]
+fn refused_convert_to_symbol_leaves_no_symbol_in_the_library() {
+    use doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 200.0),
+            Point::new(300.0, 200.0),
+            25.0,
+            Color32::from_rgb(235, 75, 75),
+        ),
+    );
+    apply(&mut app, Action::AddLayer);
+    put_cel_shapes(
+        &mut app,
+        1,
+        0,
+        make_stroke(
+            Point::new(100.0, 300.0),
+            Point::new(300.0, 300.0),
+            25.0,
+            Color32::from_rgb(55, 135, 245),
+        ),
+    );
+    run(&mut app, &[Action::SelectAll]);
+    doc_actions::finish_move_selection_drag(&mut app, KVec2::new(0.0, 100.0), false);
+    assert!(app.session.floating().is_some());
+    // 残りを書くレイヤーの1つを、確定を通さずに編集できなくする（確定が断られる場面の代わり）
+    app.tab_mut().with_active_timeline_mut(|tl, _| {
+        tl.layers[1].locked = true;
+        true
+    });
+    let undo_len = app.history.undo_stack.len();
+    assert!(!apply(&mut app, Action::ConvertToSymbol));
+    assert_eq!(
+        app.tab().doc.library.len(),
+        0,
+        "置かれないシンボルを残さない"
+    );
+    assert_eq!(app.history.undo_stack.len(), undo_len);
+    // 確定できるようにして F8：シンボルは1つだけで、置いたインスタンスはそのシンボルを指す
+    app.tab_mut().with_active_timeline_mut(|tl, _| {
+        tl.layers[1].locked = false;
+        true
+    });
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    let lib = &app.tab().doc.library;
+    assert_eq!(lib.len(), 1);
+    let sym_id = lib.first().unwrap().id;
+    let insts: Vec<u64> = app
+        .tab()
+        .active_timeline()
+        .layers
+        .iter()
+        .flat_map(|l| l.keyframes[0].cel.instances.iter())
+        .map(|i| i.binding.symbol_id)
+        .collect();
+    assert_eq!(insts, vec![sym_id]);
+}
+
 /// S-2：正しい地図の判定（`valid_faces`。書き戻しも読み込みも同じ）は、頂点と制御点が格子に置けることと、両側が同じ色の
 /// 辺が無いことも確かめる。巨大な座標の地図も、判定の形を作らずにすぐ断る。辺を引っぱって制御点だけ格子の外へ出る
 /// 確定は断る

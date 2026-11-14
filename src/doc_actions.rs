@@ -1406,6 +1406,7 @@ fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     if tab.doc.find_symbol(sym_id).is_none() {
         return false;
     }
+    // 消すシンボルの段から出る。出られなければ（浮いた片の確定が断られた）、文書を変えずに断る
     while tab
         .session
         .edit_path
@@ -1413,7 +1414,9 @@ fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
         .iter()
         .any(|lvl| lvl.symbol_id == sym_id)
     {
-        exit_symbol_timeline(tab);
+        if !exit_symbol_timeline(tab) {
+            return false;
+        }
     }
     if !clear_selection(tab) {
         return false;
