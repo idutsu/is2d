@@ -1819,8 +1819,8 @@ pub(crate) fn draw_canvas_contents(
             .artwork_painter(painter, painter.clip_rect(), stage_size, shows_stage);
     tab.start_draw_pass();
 
-    // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画（ルートでは何も返さず、キャッシュが空になる）
-    if let Some(mesh) = tab.cached_backdrop_screen_mesh(zoom, pan) {
+    // 0. シンボルの中を編集しているときは、親の背景をレイヤーごとの結合メッシュで薄く描く（ルートでは何も無い）
+    for mesh in tab.cached_backdrop_screen_meshes(zoom, pan) {
         artwork_painter.add(egui::Shape::Mesh(mesh));
     }
 

@@ -3451,13 +3451,20 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
         &mut grp_sym_app,
         inst_b.instance_gid
     ));
-    let bd_m1 = grp_sym_app
-        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
-        .expect("背景シェイプが存在するため backdrop メッシュが生成されること");
-    let bd_m2 = grp_sym_app
-        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
-        .expect("キャッシュ済みの backdrop メッシュが返ること");
-    assert!(std::sync::Arc::ptr_eq(&bd_m1, &bd_m2));
+    let bd_m1 = grp_sym_app.cached_backdrop_screen_meshes(1.0, Vec2::ZERO);
+    assert!(
+        !bd_m1.is_empty(),
+        "背景シェイプが存在するため backdrop メッシュが生成されること"
+    );
+    let bd_m2 = grp_sym_app.cached_backdrop_screen_meshes(1.0, Vec2::ZERO);
+    assert!(
+        bd_m1.len() == bd_m2.len()
+            && bd_m1
+                .iter()
+                .zip(&bd_m2)
+                .all(|(a, b)| std::sync::Arc::ptr_eq(a, b)),
+        "キャッシュ済みの backdrop メッシュが返ること"
+    );
     timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
     doc_actions::apply(
         &mut grp_sym_app,
@@ -11725,21 +11732,37 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
     );
 
     // 2. 親シーン背景キャッシュを初回構築したあと、シンボル内で再生フレーム送りしても背景メッシュが再構築されずそのまま返ること
-    let bd_initial = app.tabs[app.active]
-        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
-        .expect("親シーン背景が存在すること");
+    let same = |a: &[std::sync::Arc<eframe::egui::Mesh>],
+                b: &[std::sync::Arc<eframe::egui::Mesh>]| {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| std::sync::Arc::ptr_eq(x, y))
+    };
+    let vertices = |m: &[std::sync::Arc<eframe::egui::Mesh>]| -> usize {
+        m.iter().map(|m| m.vertices.len()).sum()
+    };
+    let bd_initial = {
+        // アプリと同じく、描く前に写しとシンボルのメモの古いものを捨ててから（`draw_canvas_contents`）
+        app.tabs[app.active].start_draw_pass();
+        app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO)
+    };
+    assert_eq!(
+        bd_initial.len(),
+        2,
+        "親シーン背景（2000図形のレイヤーと、兄弟インスタンスのレイヤー）が存在すること"
+    );
     let t_play = std::time::Instant::now();
     app.tabs[app.active].set_active_frame(1);
     app.tabs[app.active].refresh_scene_base();
-    let bd_after_step = app.tabs[app.active]
-        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
-        .unwrap();
+    let bd_after_step = {
+        // アプリと同じく、描く前に写しとシンボルのメモの古いものを捨ててから（`draw_canvas_contents`）
+        app.tabs[app.active].start_draw_pass();
+        app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO)
+    };
     for s in app.scene().iter() {
         let _ = s.screen_mesh(1.0, Vec2::ZERO, false);
     }
     let play_step_elapsed = t_play.elapsed();
     assert!(
-        std::sync::Arc::ptr_eq(&bd_initial, &bd_after_step),
+        same(&bd_initial, &bd_after_step),
         "シンボル内での再生フレーム送りでは親シーン背景メッシュが再計算されないこと"
     );
 
@@ -11748,7 +11771,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
     //    兄弟インスタンスを含むレイヤーのみ更新されて背景メッシュに反映されること
     app.tabs[app.active].set_active_frame(0);
     app.tabs[app.active].refresh_scene_base();
-    let initial_vert_count = bd_initial.vertices.len();
+    let initial_vert_count = vertices(&bd_initial);
     let t_draw = std::time::Instant::now();
     run(
         &mut app,
@@ -11758,22 +11781,30 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
             color: Color32::YELLOW,
         }],
     );
-    let bd_after_draw = app.tabs[app.active]
-        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
-        .unwrap();
+    let bd_after_draw = {
+        // アプリと同じく、描く前に写しとシンボルのメモの古いものを捨ててから（`draw_canvas_contents`）
+        app.tabs[app.active].start_draw_pass();
+        app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO)
+    };
     for s in app.scene().iter() {
         let _ = s.screen_mesh(1.0, Vec2::ZERO, false);
     }
     let draw_and_render_elapsed = t_draw.elapsed();
     assert!(
-        bd_after_draw.vertices.len() > initial_vert_count,
+        vertices(&bd_after_draw) > initial_vert_count,
         "兄弟インスタンスを含む親レイヤーの背景のみ更新され頂点数が増えること"
     );
-    // 2回目以降の同フレーム描画では combined_screen_cache もそのまま再利用されること
-    let bd_after_draw_2 = app.tabs[app.active]
-        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
-        .unwrap();
-    assert!(std::sync::Arc::ptr_eq(&bd_after_draw, &bd_after_draw_2));
+    assert!(
+        std::sync::Arc::ptr_eq(&bd_initial[0], &bd_after_draw[0]),
+        "2000図形の親レイヤーは作り直さないこと"
+    );
+    // 2回目以降の同フレーム描画では、写しをそのまま再利用すること
+    let bd_after_draw_2 = {
+        // アプリと同じく、描く前に写しとシンボルのメモの古いものを捨ててから（`draw_canvas_contents`）
+        app.tabs[app.active].start_draw_pass();
+        app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO)
+    };
+    assert!(same(&bd_after_draw, &bd_after_draw_2));
     println!(
         "[symbol backdrop] play_step = {:.4} ms, draw_and_render = {:.4} ms",
         play_step_elapsed.as_secs_f64() * 1000.0,
@@ -21283,11 +21314,14 @@ fn test_leaving_symbol_releases_backdrop_cache() {
         ..Default::default()
     };
     let _ = ctx.run(raw_input.clone(), |ctx| app.update_ui(ctx));
-    assert!(app.tab().session.backdrop_cache.lock().layer_count() > 0);
+    assert!(app.tab().session.backdrop_cache.lock().entry_count() > 0);
 
+    // 写しは、直前の描画で使わなかったものを、次の描画の始めに捨てる（出たあとの1回目の描画では使わない）
     assert!(apply(&mut app, Action::ExitSymbolTimeline));
-    let _ = ctx.run(raw_input, |ctx| app.update_ui(ctx));
-    assert_eq!(app.tab().session.backdrop_cache.lock().layer_count(), 0);
+    for _ in 0..2 {
+        let _ = ctx.run(raw_input.clone(), |ctx| app.update_ui(ctx));
+    }
+    assert_eq!(app.tab().session.backdrop_cache.lock().entry_count(), 0);
 }
 
 #[test]
@@ -26811,6 +26845,7 @@ mod map_overlay {
                     i,
                     0,
                     kurbo::Affine::IDENTITY,
+                    None,
                     symbol::SymbolEvalCtx::new(&app.doc.library),
                 );
             }
@@ -31046,8 +31081,8 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
     assert!(!path.shows_stage());
     assert!(
         app.tabs[app.active]
-            .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
-            .is_none(),
+            .cached_backdrop_screen_meshes(1.0, Vec2::ZERO)
+            .is_empty(),
         "シーンの絵（ほかのインスタンス・青い線）を見せない"
     );
     assert_eq!(stage_rects(&mut app), 0, "ステージ枠・枠線を描かない");
@@ -31081,11 +31116,12 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
         !path.shows_stage(),
         "ライブラリから入った中なので、ステージは見せない"
     );
-    let backdrop = app.tabs[app.active]
-        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
-        .expect("親のシンボルの絵");
-    let colors: std::collections::HashSet<Color32> =
-        backdrop.vertices.iter().map(|v| v.color).collect();
+    let backdrop = app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO);
+    assert!(!backdrop.is_empty(), "親のシンボルの絵");
+    let colors: std::collections::HashSet<Color32> = backdrop
+        .iter()
+        .flat_map(|m| m.vertices.iter().map(|v| v.color))
+        .collect();
     let dim = crate::vector_engine::dim_backdrop_color;
     assert!(colors.contains(&dim(red)), "親（A）の赤を薄く見せる");
     assert!(!colors.contains(&dim(blue)), "シーンの青は見せない");

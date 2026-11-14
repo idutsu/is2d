@@ -794,7 +794,7 @@ pub(crate) use self::cel_writes::*;
 
 pub(crate) use crate::vector_engine::CelTint;
 pub(crate) use scene_base_cache::SceneBaseCache;
-use scene_base_cache::{BackdropCache, CelMeshCache};
+use scene_base_cache::{CelMeshCache, CelScope};
 
 /// `Overlay` で追加する図形の重なり順指定
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1213,8 +1213,8 @@ use crate::floating::Stage;
 pub(crate) struct Session {
     /// シンボルインプレイス編集の経路（空ならルート）
     pub(crate) edit_path: EditPath,
-    /// シンボル編集中の親シーン背景薄表示のレイヤー単位キャッシュ
-    pub(crate) backdrop_cache: SyncCache<BackdropCache>,
+    /// シンボル編集中の親の背景（薄く描く）のセル画の結合メッシュの写し
+    pub(crate) backdrop_cache: SyncCache<CelMeshCache>,
     /// オニオンスキンで描くセル画の結合メッシュの写し
     pub(crate) onion_cache: SyncCache<CelMeshCache>,
     /// ロック中・再生中のレイヤーのセル画の結合メッシュの写し
@@ -2118,18 +2118,57 @@ impl Tab {
         res
     }
 
-    /// シンボルインプレイス編集中の親シーン背景薄表示メッシュをレイヤー単位キャッシュ経由で返す
-    pub(crate) fn cached_backdrop_screen_mesh(
+    /// シンボルの中を編集しているときの、親の背景（親の段ごと、下のレイヤーから順に、薄く描く画面座標の結合メッシュ。
+    /// 編集しているインスタンスは除く）。写し（`CelMeshCache`）から。ルートでは空
+    pub(crate) fn cached_backdrop_screen_meshes(
         &self,
         zoom: f32,
         pan: Vec2,
-    ) -> Option<Arc<egui::Mesh>> {
-        self.session.backdrop_cache.lock().cached_screen_mesh(
-            &self.doc,
-            &self.session.edit_path,
-            zoom,
-            pan,
-        )
+    ) -> Vec<Arc<egui::Mesh>> {
+        let edit_path = &self.session.edit_path;
+        let mut meshes = Vec::new();
+        let mut cache = self.session.backdrop_cache.lock();
+        self.with_symbol_eval(|ctx| {
+            for lvl_idx in edit_path.first_level_showing_parent()..edit_path.levels.len() {
+                let lvl = &edit_path.levels[lvl_idx];
+                let (timeline, parent_tl) = if lvl_idx == 0 {
+                    (None, &self.doc.root)
+                } else {
+                    let sym_id = edit_path.levels[lvl_idx - 1].symbol_id;
+                    let Some(sym) = self.doc.find_symbol(sym_id) else {
+                        continue;
+                    };
+                    (Some(sym_id), &sym.timeline)
+                };
+                let scope = CelScope {
+                    timeline,
+                    excluded_instance: Some(lvl.instance_gid),
+                };
+                let world_xform = edit_path.levels[..lvl_idx]
+                    .iter()
+                    .fold(Affine::IDENTITY, |acc, l| acc * l.xform_in_parent);
+                let frame = lvl
+                    .parent_frame
+                    .min(parent_tl.total_frames.saturating_sub(1));
+                for (layer_idx, layer) in parent_tl.layers.iter().enumerate() {
+                    if !layer.visible {
+                        continue;
+                    }
+                    meshes.extend(cache.screen_mesh(
+                        parent_tl,
+                        scope,
+                        ctx.clone(),
+                        layer_idx,
+                        frame,
+                        world_xform,
+                        zoom,
+                        pan,
+                        CelTint::Dim,
+                    ));
+                }
+            }
+        });
+        meshes
     }
 
     /// オニオンスキンの結合メッシュキャッシュを破棄する
@@ -2177,15 +2216,27 @@ impl Tab {
     ) -> Option<Arc<egui::Mesh>> {
         let tl = self.active_timeline();
         let world_xform = self.session.edit_path.world_xform();
+        let scope = CelScope {
+            timeline: self.session.edit_path.last().map(|l| l.symbol_id),
+            excluded_instance: None,
+        };
         self.with_symbol_eval(|ctx| {
-            cache
-                .lock()
-                .screen_mesh(tl, ctx, layer_idx, frame, world_xform, zoom, pan, tint)
+            cache.lock().screen_mesh(
+                tl,
+                scope,
+                ctx,
+                layer_idx,
+                frame,
+                world_xform,
+                zoom,
+                pan,
+                tint,
+            )
         })
     }
 
     /// 1回の描画の始めに呼ぶ：シンボルの中身のメモ（`SymbolEvalState::start_pass`）と、セル画の結合メッシュの写し
-    /// （`CelMeshCache::start_pass`）の、直前の描画で使わなかったものを捨てる
+    /// （オニオンスキン・ロック中や再生中のレイヤー・親の背景の `CelMeshCache::start_pass`）の、直前の描画で使わなかったものを捨てる
     pub(crate) fn start_draw_pass(&self) {
         self.session
             .symbol_memo
@@ -2193,6 +2244,7 @@ impl Tab {
             .start_pass(&self.doc.library);
         self.session.onion_cache.lock().start_pass();
         self.session.cel_cache.lock().start_pass();
+        self.session.backdrop_cache.lock().start_pass();
     }
 
     /// 描くたびのシンボルの評価を、セッションのメモ（`Session::symbol_memo`）を使って行う

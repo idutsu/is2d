@@ -1144,11 +1144,14 @@ impl Timeline {
         layer.evaluate_shapes_at((frame, frame), layer.id, ctx)
     }
 
+    /// レイヤー `layer_idx` のコマ `frame` のセル画を、変換 `world_xform` で描くワールド座標の結合メッシュ（インスタンス
+    /// `excluded_instance` の絵は除く）。絵が無ければ `None`
     pub(crate) fn build_cel_world_batch_mesh(
         &self,
         layer_idx: usize,
         frame: usize,
         world_xform: Affine,
+        excluded_instance: Option<u64>,
         ctx: SymbolEvalCtx<'_>,
     ) -> Option<Mesh> {
         let layer = self.layers.get(layer_idx)?;
@@ -1166,6 +1169,9 @@ impl Timeline {
             return (!batch.is_empty()).then_some(batch);
         }
         let mut resolved = self.evaluate_layer_shapes_with(layer_idx, frame, ctx);
+        if let Some(gid) = excluded_instance {
+            resolved.retain(|s| s.symbol_instance.is_none_or(|b| b.instance_gid != gid));
+        }
         if world_xform != Affine::IDENTITY {
             for s in &mut resolved {
                 s.transform_with_cached_mesh(world_xform);
@@ -1192,7 +1198,8 @@ impl Timeline {
         world_xform: Affine,
         ctx: SymbolEvalCtx<'_>,
     ) -> Option<Arc<Mesh>> {
-        let world_batch = self.build_cel_world_batch_mesh(layer_idx, frame, world_xform, ctx)?;
+        let world_batch =
+            self.build_cel_world_batch_mesh(layer_idx, frame, world_xform, None, ctx)?;
         let tint = if dim_backdrop {
             crate::vector_engine::CelTint::Dim
         } else {
