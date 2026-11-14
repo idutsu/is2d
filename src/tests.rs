@@ -2268,7 +2268,10 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
     assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
 
     let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
-    assert!(symbol_ops::enter_symbol_timeline(&mut app, binding));
+    assert!(symbol_ops::enter_symbol_timeline(
+        &mut app,
+        binding.instance_gid
+    ));
 
     assert!(timeline_ui::timeline_extend_frame(&mut app));
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
@@ -2369,7 +2372,10 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
     app.session.set_selected_indices(vec![0]);
     let child_sym_id = doc_actions::convert_selection_to_symbol(&mut app).unwrap();
     let (child_binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
-    assert!(symbol_ops::enter_symbol_timeline(&mut app, child_binding));
+    assert!(symbol_ops::enter_symbol_timeline(
+        &mut app,
+        child_binding.instance_gid
+    ));
     assert!(timeline_ui::timeline_extend_frame(&mut app));
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
@@ -2579,7 +2585,7 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
     );
     assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
     let (b, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
-    assert!(symbol_ops::enter_symbol_timeline(&mut app, b));
+    assert!(symbol_ops::enter_symbol_timeline(&mut app, b.instance_gid));
     assert!(symbol_ops::exit_symbol_timeline(&mut app));
     assert!(!symbol_ops::exit_symbol_timeline(&mut app));
     assert!(!select_ops::exit_current_group(&mut app));
@@ -2635,7 +2641,7 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
         .clone();
     let orig_rev = orig_local_shape.mesh_revision;
     for _ in 0..10 {
-        assert!(symbol_ops::enter_symbol_timeline(&mut app, b));
+        assert!(symbol_ops::enter_symbol_timeline(&mut app, b.instance_gid));
         assert!(symbol_ops::exit_symbol_timeline(&mut app));
     }
     let after_local_shape = &app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
@@ -2771,7 +2777,10 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
         .cel
         .single_symbol_instance()
         .unwrap();
-    assert!(symbol_ops::enter_symbol_timeline(&mut sym_app, inst));
+    assert!(symbol_ops::enter_symbol_timeline(
+        &mut sym_app,
+        inst.instance_gid
+    ));
     put_cel_shapes(
         &mut sym_app,
         0,
@@ -2837,6 +2846,48 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     let (orig1, prev_m1) = preview(&sym_app);
     let (orig2, prev_m2) = preview(&sym_app);
     assert!(prev_m1 == prev_m2 && orig1 == orig2);
+}
+
+/// シンボルには、今のコマにあるインスタンスの番号で入り、変換はタイムラインの結び付けをそのまま使う（画面の座標から
+/// 取り戻さない）。今のコマに無いインスタンスには入らない。直す前は、画面の座標の結び付けを受け取り、同じ番号のインス
+/// タンスの変換と許容値で照らし合わせ、合わなければ逆行列で戻した変換で入っていた（無いインスタンスの番号でも入った：
+/// レビュー f01d518 の N-4006）
+#[test]
+fn entering_a_symbol_uses_the_instance_binding_of_the_current_frame() {
+    use doc_actions::Action;
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(200.0, 140.0),
+            10.0,
+            Color32::RED,
+        ),
+    );
+    run(&mut app, &[Action::SelectAll, Action::ConvertToSymbol]);
+    let gid = app.doc.root.layers[0].keyframes[0].cel.instances[0]
+        .binding
+        .instance_gid;
+    let xform = kurbo::Affine::translate((150.0, 120.0))
+        * kurbo::Affine::rotate(0.3)
+        * kurbo::Affine::scale_non_uniform(0.7, 1.3);
+    app.doc.root.layers[0].keyframe_mut(0).cel.instances_mut()[0]
+        .binding
+        .xform = xform;
+    app.refresh_scene_base();
+    assert!(
+        !symbol_ops::enter_symbol_timeline(&mut app, gid + 1000),
+        "今のコマに無いインスタンスには入らない"
+    );
+    assert!(app.session.edit_path.is_empty());
+    assert!(symbol_ops::enter_symbol_timeline(&mut app, gid));
+    assert_eq!(
+        app.session.edit_path.levels[0].xform_in_parent, xform,
+        "結び付けの変換そのまま"
+    );
 }
 
 /// ライブラリのプレビューの写しは、いま描いている1つだけを持つ（別のシンボルを描くと置き換わり、消したシンボルの写しが
@@ -3037,7 +3088,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
         .unwrap();
     assert!(symbol_ops::enter_symbol_timeline(
         &mut grp_sym_app,
-        blink_binding
+        blink_binding.instance_gid
     ));
     assert!(timeline_ui::timeline_insert_keyframe(
         &mut grp_sym_app,
@@ -3194,7 +3245,7 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
         .unwrap();
     assert!(symbol_ops::enter_symbol_timeline(
         &mut grp_sym_app,
-        blink_binding
+        blink_binding.instance_gid
     ));
     assert!(timeline_ui::timeline_insert_keyframe(
         &mut grp_sym_app,
@@ -3338,7 +3389,10 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
         Color32::GRAY,
     ));
     put_cel_shapes(&mut grp_sym_app, 0, 0, shapes);
-    assert!(symbol_ops::enter_symbol_timeline(&mut grp_sym_app, inst_b));
+    assert!(symbol_ops::enter_symbol_timeline(
+        &mut grp_sym_app,
+        inst_b.instance_gid
+    ));
     let bd_m1 = grp_sym_app
         .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
         .expect("背景シェイプが存在するため backdrop メッシュが生成されること");
@@ -8934,7 +8988,9 @@ fn test_stage01_symbol_inplace_edit_and_classic_tween_on_cel() {
     run(
         &mut app,
         &[
-            Action::EnterSymbolTimeline { binding },
+            Action::EnterSymbolTimeline {
+                instance_gid: binding.instance_gid,
+            },
             Action::PaintStroke {
                 points: vec![Point::new(100.0, 140.0), Point::new(160.0, 140.0)],
                 radius: 12.0,
@@ -9810,7 +9866,12 @@ fn test_stage6b_non_uniform_scale_rotated_symbol_edit_preserves_untouched_shape_
     let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
 
     // インスタンスに入り、別の場所に50回ストロークを描いて出る
-    run(&mut app, &[Action::EnterSymbolTimeline { binding }]);
+    run(
+        &mut app,
+        &[Action::EnterSymbolTimeline {
+            instance_gid: binding.instance_gid,
+        }],
+    );
     assert_eq!(app.session.edit_path.len(), 1);
     for i in 0..50 {
         let y = 260.0 + (i as f64) * 2.5;
@@ -9892,7 +9953,7 @@ fn test_stage6b_save_inside_two_level_nested_symbol_matches_save_after_exit_to_r
     run(
         &mut app,
         &[Action::EnterSymbolTimeline {
-            binding: outer_binding,
+            instance_gid: outer_binding.instance_gid,
         }],
     );
     assert_eq!(app.session.edit_path.len(), 1);
@@ -9962,7 +10023,12 @@ fn test_stage6b_timeline_ops_f6_f7_add_layer_inside_symbol_modify_library_symbol
     let sym_id = app.doc.library[0].id;
     let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
 
-    run(&mut app, &[Action::EnterSymbolTimeline { binding }]);
+    run(
+        &mut app,
+        &[Action::EnterSymbolTimeline {
+            instance_gid: binding.instance_gid,
+        }],
+    );
     assert_eq!(app.session.edit_path.len(), 1);
     assert_eq!(app.doc.root.total_frames, 1);
     assert_eq!(app.doc.root.layers.len(), 1);
@@ -10023,7 +10089,9 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
     run(
         &mut app,
         &[
-            Action::EnterSymbolTimeline { binding },
+            Action::EnterSymbolTimeline {
+                instance_gid: binding.instance_gid,
+            },
             Action::PaintStroke {
                 points: vec![Point::new(100.0, 160.0), Point::new(180.0, 160.0)],
                 radius: 12.0,
@@ -10846,7 +10914,7 @@ fn test_stage7_cel_writes_preserve_mesh_cache_without_rebuilding_from_doc() {
     let binding = app.scene().get(0).unwrap().symbol_instance.unwrap();
     assert!(symbol_ops::enter_symbol_timeline(
         &mut app.tabs[app.active],
-        binding
+        binding.instance_gid
     ));
     let sym_untouched_id = app.scene().get(0).unwrap().shape_id;
     let sym_mesh_before = std::sync::Arc::clone(app.scene().get(0).unwrap().fill_mesh());
@@ -11121,7 +11189,7 @@ fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_act
     run_and_verify_scene_cache_consistency(
         &mut app,
         Action::EnterSymbolTimeline {
-            binding: transformed_binding,
+            instance_gid: transformed_binding.instance_gid,
         },
         "EnterSymbolTimeline rotated+non-uniform-scaled",
     );
@@ -11234,7 +11302,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
     );
     assert!(symbol_ops::enter_symbol_timeline(
         &mut app.tabs[app.active],
-        sym_binding
+        sym_binding.instance_gid
     ));
 
     // シンボル内で3フレームに伸ばす
@@ -11343,18 +11411,24 @@ fn test_collapsed_symbol_instance_blocks_enter_and_timeline_mut_bumps_revision()
     let normal_binding = app.scene().get(0).unwrap().symbol_instance.unwrap();
 
     // 1. 行列式がほぼ0（潰れたインスタンス）には入れないこと
-    let mut collapsed_binding = normal_binding;
-    collapsed_binding.xform = kurbo::Affine::scale_non_uniform(1.0, 0.0);
+    let set_xform = |app: &mut Is2dApp, xform: kurbo::Affine| {
+        app.doc.root.layers[0].keyframe_mut(0).cel.instances_mut()[0]
+            .binding
+            .xform = xform;
+        app.refresh_scene_base();
+    };
+    set_xform(&mut app, kurbo::Affine::scale_non_uniform(1.0, 0.0));
     assert!(
-        !symbol_ops::enter_symbol_timeline(&mut app.tabs[app.active], collapsed_binding),
+        !symbol_ops::enter_symbol_timeline(&mut app.tabs[app.active], normal_binding.instance_gid),
         "行列式が0の潰れたインスタンスには入れないこと"
     );
     assert!(app.session.edit_path.is_empty());
+    set_xform(&mut app, normal_binding.xform);
 
     // 2. 通常のインスタンスに入り、with_active_timeline_mut を呼ぶと必ずリビジョンが上がること
     assert!(symbol_ops::enter_symbol_timeline(
         &mut app.tabs[app.active],
-        normal_binding
+        normal_binding.instance_gid
     ));
     assert_eq!(app.session.edit_path.levels.len(), 1);
     let sym_rev_before = app.doc.library[0].revision;
@@ -11413,7 +11487,7 @@ fn convert_to_symbol_inside_rotated_instance_keeps_local_coordinates() {
     assert_eq!(binding.xform, xform);
     assert!(symbol_ops::enter_symbol_timeline(
         &mut app.tabs[app.active],
-        binding
+        binding.instance_gid
     ));
     let stage_box_before = app.scene().get(0).unwrap().bounding_box();
 
@@ -20746,7 +20820,12 @@ fn test_leaving_symbol_releases_backdrop_cache() {
         .iter()
         .find_map(|s| s.symbol_instance)
         .expect("シンボルインスタンスが存在すること");
-    assert!(apply(&mut app, Action::EnterSymbolTimeline { binding }));
+    assert!(apply(
+        &mut app,
+        Action::EnterSymbolTimeline {
+            instance_gid: binding.instance_gid,
+        }
+    ));
 
     let ctx = egui::Context::default();
     let raw_input = egui::RawInput {
@@ -22061,7 +22140,7 @@ fn test_symbol_edit_after_moving_instance_keeps_untouched_shapes() {
     assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
     let enter = |app: &mut Is2dApp| {
         let (binding, _, _) = symbol_ops::selected_single_symbol_info(app).unwrap();
-        assert!(symbol_ops::enter_symbol_timeline(app, binding));
+        assert!(symbol_ops::enter_symbol_timeline(app, binding.instance_gid));
     };
     let local_shapes = |app: &Is2dApp| -> Vec<(crate::vector_engine::ShapeId, Color32, [f64; 4])> {
         app.active_timeline().layers[0].keyframes[0]
@@ -23882,7 +23961,7 @@ mod map_overlay {
         let enter = |app: &mut Is2dApp| {
             app.session.set_selected_indices(vec![0]);
             let (binding, _, _) = symbol_ops::selected_single_symbol_info(app).unwrap();
-            assert!(symbol_ops::enter_symbol_timeline(app, binding));
+            assert!(symbol_ops::enter_symbol_timeline(app, binding.instance_gid));
         };
         let local = |app: &Is2dApp| -> Vec<FillShape> {
             app.active_timeline().layers[0].keyframes[0]
@@ -24982,7 +25061,12 @@ mod map_overlay {
             ],
         );
         let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
-        run(&mut app, &[Action::EnterSymbolTimeline { binding }]);
+        run(
+            &mut app,
+            &[Action::EnterSymbolTimeline {
+                instance_gid: binding.instance_gid,
+            }],
+        );
         // 編集中の階層の生の図形（ステージの座標）から作った地図
         let map_of = |app: &Is2dApp| {
             let scope = app.session.editing_group_path.clone();
@@ -25940,7 +26024,10 @@ mod map_overlay {
         assert!(doc_actions::rotate_selected_shapes(&mut app, 0.6));
         assert!(doc_actions::scale_selected_shapes(&mut app, 0.45, 0.8));
         let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
-        assert!(symbol_ops::enter_symbol_timeline(&mut app, binding));
+        assert!(symbol_ops::enter_symbol_timeline(
+            &mut app,
+            binding.instance_gid
+        ));
         assert!(doc_actions::paste_clipboard(&mut app, true));
         let pieces = app.session.floating().unwrap().pieces().to_vec();
         let b2 = crate::vector_engine::union_bounding_boxes(&pieces);
@@ -26015,7 +26102,7 @@ mod map_overlay {
             .unwrap();
         app.session.set_selected_indices(vec![blue]);
         assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
-        let (mut binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
+        let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
         // インスタンスを原点のまわりで半分にする
         let gid = binding.instance_gid;
         app.doc.root.layers[0]
@@ -26028,8 +26115,10 @@ mod map_overlay {
             .binding
             .xform = kurbo::Affine::scale(0.5);
         app.refresh_scene_base();
-        binding.xform = kurbo::Affine::scale(0.5);
-        assert!(symbol_ops::enter_symbol_timeline(&mut app, binding));
+        assert!(symbol_ops::enter_symbol_timeline(
+            &mut app,
+            binding.instance_gid
+        ));
         let before = app.doc.library[0].timeline.layers[0].keyframes[0]
             .cel
             .clone();
@@ -26758,7 +26847,9 @@ mod map_overlay {
         let binding = app.scene().iter().find_map(|s| s.symbol_instance).unwrap();
         assert!(doc_actions::apply(
             &mut app,
-            doc_actions::Action::EnterSymbolTimeline { binding },
+            doc_actions::Action::EnterSymbolTimeline {
+                instance_gid: binding.instance_gid,
+            },
         ));
         let line = app
             .scene()
@@ -27165,7 +27256,7 @@ mod map_overlay {
                         let binding = app.scene().iter().find_map(|s| s.symbol_instance);
                         let ok = copied
                             && binding.is_some_and(|b| {
-                                symbol_ops::enter_symbol_timeline(&mut app, b)
+                                symbol_ops::enter_symbol_timeline(&mut app, b.instance_gid)
                                     && doc_actions::paste_clipboard(&mut app, true)
                             });
                         assert!(canvas_tool::clear_selection(&mut app));
@@ -30330,7 +30421,12 @@ fn symbol_edit_draws_the_stage_like_the_scene() {
         !scene_clips.is_empty() && scene_clips.iter().all(|c| stage.contains_rect(*c)),
         "ふだんは「枠外を隠す」でステージの外を隠す：{scene_clips:?}"
     );
-    run(&mut app, &[Action::EnterSymbolTimeline { binding }]);
+    run(
+        &mut app,
+        &[Action::EnterSymbolTimeline {
+            instance_gid: binding.instance_gid,
+        }],
+    );
     assert!(!app.session.edit_path.is_empty(), "シンボルの中");
     let (sym_stage, sym_rects, sym_clips) = draw(&mut app);
     assert_eq!(sym_stage, stage, "入っても表示の位置は変わらない");

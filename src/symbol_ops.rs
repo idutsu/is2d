@@ -266,56 +266,51 @@ pub(crate) fn selected_single_symbol_info(
     Some((binding, sym.name.clone(), sym.timeline.total_frames.max(1)))
 }
 
-/// シンボルインスタンスをダブルクリックして、そのシンボル専用の内部タイムライン編集モードへ入る
-pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBinding) -> bool {
-    if tab.doc.find_symbol(binding.symbol_id).is_none() {
+/// 今のコマの、編集中の階層のインスタンス `instance_gid` の結び付け（親の座標。トゥイーンの途中は補間したもの）。見えて
+/// いるレイヤーから探す
+fn instance_binding_now(tab: &Tab, instance_gid: u64) -> Option<SymbolInstanceBinding> {
+    let tl = tab.active_timeline();
+    let f = tl.current_frame;
+    tl.layers.iter().filter(|l| l.visible).find_map(|layer| {
+        if let Some(b) = layer
+            .interpolated_tween_binding_at(f)
+            .filter(|b| b.instance_gid == instance_gid)
+        {
+            return Some(b);
+        }
+        layer
+            .cel_at(f)?
+            .instances
+            .iter()
+            .find(|i| i.binding.instance_gid == instance_gid)
+            .map(|i| i.binding)
+    })
+}
+
+/// シンボルインスタンス `instance_gid` をダブルクリックして、そのシンボル専用の内部タイムライン編集モードへ入る。変換は
+/// タイムラインの結び付け（親の座標）をそのまま使う（画面の座標から取り戻さない：レビュー f01d518 の N-4006）。今のコマに
+/// 無ければ断る
+pub(crate) fn enter_symbol_timeline(tab: &mut Tab, instance_gid: u64) -> bool {
+    match instance_binding_now(tab, instance_gid) {
+        Some(b) => enter_symbol_level(tab, instance_gid, b.symbol_id, b.xform),
+        None => false,
+    }
+}
+
+/// シンボル `symbol_id` の段に入る（インスタンス `instance_gid`。ライブラリから入るときは 0）。`xform_in_parent` は親の
+/// 座標での変換。逆にできない変換・浮いた片の確定が断られたときは断る
+fn enter_symbol_level(
+    tab: &mut Tab,
+    instance_gid: u64,
+    symbol_id: u64,
+    xform_in_parent: Affine,
+) -> bool {
+    if tab.doc.find_symbol(symbol_id).is_none() {
         return false;
     }
-
-    let (parent_frame, parent_active_layer, xform_in_parent) = {
+    let (parent_frame, parent_active_layer) = {
         let tl = tab.active_timeline();
-        let curr_f = tl.current_frame;
-        let act_l = tl.active_layer;
-        let prev_world = tab.session.edit_path.world_xform();
-        let xform = if tab.session.edit_path.is_empty() {
-            binding.xform
-        } else {
-            let local_inst_xform = (binding.instance_gid != 0)
-                .then(|| {
-                    tl.layers.iter().find_map(|layer| {
-                        if !layer.visible {
-                            return None;
-                        }
-                        if let Some(interp_b) = layer.interpolated_tween_binding_at(curr_f) {
-                            if interp_b.instance_gid == binding.instance_gid
-                                && interp_b.symbol_id == binding.symbol_id
-                            {
-                                return Some(interp_b.xform);
-                            }
-                        }
-                        layer.cel_at(curr_f)?.instances.iter().find_map(|inst| {
-                            (inst.binding.instance_gid == binding.instance_gid
-                                && inst.binding.symbol_id == binding.symbol_id)
-                                .then_some(inst.binding.xform)
-                        })
-                    })
-                })
-                .flatten();
-            if let Some(local_xf) = local_inst_xform.filter(|&local_xf| {
-                (prev_world * local_xf)
-                    .as_coeffs()
-                    .iter()
-                    .zip(binding.xform.as_coeffs())
-                    .all(|(a, b)| (a - b).abs() <= crate::vector_engine::SAME_TOL)
-            }) {
-                local_xf
-            } else if invertible(prev_world) {
-                prev_world.inverse() * binding.xform
-            } else {
-                binding.xform
-            }
-        };
-        (curr_f, act_l, xform)
+        (tl.current_frame, tl.active_layer)
     };
 
     let next_world = tab.session.edit_path.world_xform() * xform_in_parent;
@@ -328,11 +323,11 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
     }
     tab.session.selection.clear();
 
-    tab.view.selected_library_symbol = Some(binding.symbol_id);
+    tab.view.selected_library_symbol = Some(symbol_id);
     let parent_group_path = std::mem::take(&mut tab.session.editing_group_path);
     tab.session.edit_path.levels.push(EditLevel {
-        instance_gid: binding.instance_gid,
-        symbol_id: binding.symbol_id,
+        instance_gid,
+        symbol_id,
         xform_in_parent,
         parent_frame,
         parent_active_layer,
@@ -367,13 +362,11 @@ pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
         }
     }
     let center = View::DEFAULT_STAGE_CENTER;
-    enter_symbol_timeline(
+    enter_symbol_level(
         tab,
-        SymbolInstanceBinding::new(
-            0,
-            symbol_id,
-            Affine::translate(KVec2::new(center.x, center.y)),
-        ),
+        0,
+        symbol_id,
+        Affine::translate(KVec2::new(center.x, center.y)),
     )
 }
 

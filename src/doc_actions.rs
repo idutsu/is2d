@@ -210,8 +210,9 @@ pub(crate) enum Action {
     PlaceSymbol {
         sym_id: u64,
     },
+    /// 今のコマの、編集中の階層のインスタンス `instance_gid` のシンボルに入る
     EnterSymbolTimeline {
-        binding: SymbolInstanceBinding,
+        instance_gid: u64,
     },
     EnterSymbolFromLibrary {
         sym_id: u64,
@@ -655,7 +656,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
                 false
             }
         }
-        Action::EnterSymbolTimeline { binding } => enter_symbol_timeline(tab, binding),
+        Action::EnterSymbolTimeline { instance_gid } => enter_symbol_timeline(tab, instance_gid),
         Action::EnterSymbolFromLibrary { sym_id } => enter_symbol_from_library(tab, sym_id),
         #[cfg(test)]
         Action::ExitSymbolTimeline => exit_symbol_timeline(tab),

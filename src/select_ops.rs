@@ -48,9 +48,11 @@ pub(crate) fn enter_group_at(tab: &mut Tab, pt: Point) -> bool {
     let Some(gid) = hit_shape.active_group_id_at_scope(&tab.session.editing_group_path) else {
         return false;
     };
-    let binding_opt = hit_shape.symbol_instance.filter(|b| b.instance_gid == gid);
-    if let Some(binding) = binding_opt {
-        return enter_symbol_timeline(tab, binding);
+    if hit_shape
+        .symbol_instance
+        .is_some_and(|b| b.instance_gid == gid)
+    {
+        return enter_symbol_timeline(tab, gid);
     }
     if !clear_selection(tab) {
         return false;

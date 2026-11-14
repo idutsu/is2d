@@ -1437,7 +1437,9 @@ pub(crate) fn draw_selected_symbol_properties(
         .on_hover_text("ダブルクリックと同様にシンボル内部のタイムライン編集モードへ入ります")
         .clicked()
     {
-        actions.push(UiAction::Doc(Action::EnterSymbolTimeline { binding }));
+        actions.push(UiAction::Doc(Action::EnterSymbolTimeline {
+            instance_gid: binding.instance_gid,
+        }));
     }
 }
 
