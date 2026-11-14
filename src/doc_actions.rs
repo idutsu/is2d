@@ -1358,18 +1358,11 @@ fn apply_paste_clipboard(
         clipboard.paste_offset
     };
 
-    // 同じタイムラインの、いくつかのレイヤーから写した中身は、元のレイヤーへ置く（編集できなければ作業中のレイヤー）
-    let same_timeline_context = clipboard.source_doc_id == tab.id
-        && clipboard.source_symbol_id == tab.session.edit_path.last().map(|s| s.symbol_id)
-        && tab.session.editing_group_path.is_empty();
-    let multi_layer_copy = same_timeline_context
-        && content
-            .layers
-            .first()
-            .is_some_and(|first| content.layers.iter().any(|l| l.0 != first.0));
-    // 置く準備（格子の外へ出るなら、文書を変えずに断る）をしてから、選択を確定し、シンボルを移植して置く
+    // 貼り付けるのは絵なので、いくつかのレイヤーから写した中身も、作業中のレイヤーへまとめて置く（下のレイヤーの絵から
+    // 順に重ねるので、重なる所は上のレイヤーの絵が残る）。置く準備（格子の外へ出るなら、文書を変えずに断る）をしてから、
+    // 選択を確定し、シンボルを移植して置く
     let xform = content_xform(content.world, tab.session.edit_path.world_xform(), offset);
-    let Some(placement) = prepare_placement(tab, &content, xform, multi_layer_copy, None) else {
+    let Some(placement) = prepare_placement(tab, &content, xform, false, None) else {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     };

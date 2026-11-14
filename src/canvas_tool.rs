@@ -690,8 +690,6 @@ pub(crate) struct Clipboard {
     pub(crate) content: Option<crate::clipboard_ops::Content>,
     /// クリップボードにコピーされた時点のコピー元ドキュメントID（別タブへのペースト判定用）
     pub(crate) source_doc_id: u64,
-    /// クリップボードにコピーされた時点のインプレイス編集中のシンボルID（ルートシーン時は `None`）
-    pub(crate) source_symbol_id: Option<u64>,
     /// クリップボード内のシェイプが参照しているシンボル定義のスナップショット群（依存順）
     pub(crate) symbols: Vec<Arc<SymbolDef>>,
     /// 各コピー元タブから貼り付け先タブへ既にインポート済みのシンボルID対応表 `(source_doc_id, source_sym_id, target_doc_id) -> target_sym_id`

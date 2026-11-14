@@ -265,7 +265,6 @@ fn remap_timeline_ids(tl: &mut Timeline, doc: &mut Document, sym_map: &HashMap<u
 /// `copy_selected_shapes`（`Cmd+C`）実行時に、クリップボード内の図形が参照しているシンボル定義（入れ子含む）を `Arc` 共有スナップショットとして退避する
 pub(crate) fn capture_clipboard_symbols(tab: &Tab, clipboard: &mut Clipboard) {
     clipboard.source_doc_id = tab.id;
-    clipboard.source_symbol_id = tab.session.edit_path.last().map(|s| s.symbol_id);
     clipboard.symbols.clear();
 
     let mut visited = Vec::new();

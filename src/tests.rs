@@ -18436,6 +18436,95 @@ fn test_alt_duplicate_and_paste_raw_shape_with_group_keeps_both_selected() {
     }
 }
 
+/// いくつかのレイヤーから写した絵を貼り付けると、作業中のレイヤー1つにまとめて入る（元のレイヤーへは分けない）。
+/// 重なる所は上のレイヤーの絵が残る
+#[test]
+fn pasting_drawing_copied_from_several_layers_goes_into_the_working_layer() {
+    use crate::doc_actions::{apply, Action};
+
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(230, 50, 50);
+    let green = Color32::from_rgb(40, 180, 60);
+    // 下のレイヤーに赤の横線、その上のレイヤーに緑の縦線（交わる）、いちばん上に空のレイヤー
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(200.0, 100.0)],
+            radius: 10.0,
+            color: red,
+        },
+    ));
+    assert!(apply(&mut app, Action::AddLayer));
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(150.0, 50.0), Point::new(150.0, 150.0)],
+            radius: 10.0,
+            color: green,
+        },
+    ));
+    assert!(apply(&mut app, Action::AddLayer));
+    // 色からレイヤーを決める（いちばん新しいレイヤーが作業中で、空）
+    let layer_of = |app: &Is2dApp, c: Color32| {
+        app.scene()
+            .iter()
+            .find(|s| s.color == c)
+            .map(|s| s.layer_id)
+            .expect("その色の絵がある")
+    };
+    let (red_layer, green_layer) = (layer_of(&app, red), layer_of(&app, green));
+    let target = app.doc.root.active_layer_id();
+    assert!(target != red_layer && target != green_layer);
+    let target_idx = app
+        .doc
+        .root
+        .layers
+        .iter()
+        .position(|l| l.id == target)
+        .unwrap();
+    // 重なりの上のレイヤーの色（ステージのレイヤーの順は下から）
+    let order = app.session.base_cache.layer_order_ids().to_vec();
+    let pos = |lid: u64| order.iter().position(|&l| l == lid).unwrap();
+    let upper = if pos(green_layer) > pos(red_layer) {
+        green
+    } else {
+        red
+    };
+    let count = |app: &Is2dApp, lid: u64| app.scene().iter().filter(|s| s.layer_id == lid).count();
+    assert_eq!((count(&app, red_layer), count(&app, green_layer)), (1, 1));
+
+    // 赤と緑を写し、空のレイヤーだけを選んで、同じ位置に貼り付けて確定する
+    assert!(apply(&mut app, Action::SelectAll));
+    assert_eq!(app.session.selected_indices().len(), 2);
+    assert!(apply(&mut app, Action::Copy));
+    assert!(apply(&mut app, Action::Deselect));
+    assert!(apply(
+        &mut app,
+        Action::SelectTimelineCells {
+            l0: target_idx,
+            f0: 0,
+            l1: target_idx,
+            f1: 0
+        }
+    ));
+    assert_eq!(app.doc.root.active_layer_id(), target);
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    assert!(crate::canvas_tool::clear_selection(&mut app));
+
+    // 写した元のレイヤーは変わらず、貼り付けた絵は全部、選んだレイヤーに入る
+    assert_eq!((count(&app, red_layer), count(&app, green_layer)), (1, 1));
+    let color_in_target = |p: Point| {
+        app.scene()
+            .iter()
+            .find(|s| s.layer_id == target && s.contains_point(p))
+            .map(|s| s.color)
+    };
+    assert_eq!(color_in_target(Point::new(110.0, 100.0)), Some(red));
+    assert_eq!(color_in_target(Point::new(150.0, 60.0)), Some(green));
+    // 交わる所は、上のレイヤーの絵
+    assert_eq!(color_in_target(Point::new(150.0, 100.0)), Some(upper));
+}
+
 #[test]
 fn test_group_rejects_cross_layer_selection_and_allows_single_layer() {
     use crate::doc_actions::{apply, Action};
