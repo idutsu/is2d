@@ -27988,6 +27988,101 @@ fn refused_convert_to_symbol_leaves_no_symbol_in_the_library() {
     assert_eq!(insts, vec![sym_id]);
 }
 
+/// 動かした片 A を絵 B に重ね、B を選び足してから A だけを外しても、見えている重なり（A が上）のまま確定する。直す前は、
+/// 外した瞬間に B が A の上に出て、確定すると重なった所の A が消えた（レビュー f01d518 の N-3002）
+#[test]
+fn deselecting_a_moved_piece_keeps_it_above_a_piece_selected_later() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    let mut app = Is2dApp::default();
+    let mut shapes = make_stroke(
+        Point::new(100.0, 150.0),
+        Point::new(200.0, 150.0),
+        40.0,
+        red,
+    );
+    shapes.extend(make_stroke(
+        Point::new(260.0, 150.0),
+        Point::new(360.0, 150.0),
+        40.0,
+        blue,
+    ));
+    put_cel_shapes(&mut app, 0, 0, shapes);
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool { tool: Tool::Select },
+    );
+    let top = |app: &Is2dApp| {
+        let scene = app.scene();
+        let i = scene
+            .topmost_shape_at(Point::new(290.0, 150.0), &[])
+            .unwrap();
+        scene.get(i).unwrap().color
+    };
+    // 赤を選んで右へ動かし（青に重なる）、青を選び足す
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(60.0, 100.0),
+        Point::new(225.0, 200.0),
+        false,
+    );
+    doc_actions::finish_move_selection_drag(&mut app, KVec2::new(110.0, 0.0), false);
+    select_ops::apply_marquee_selection(
+        &mut app,
+        Point::new(230.0, 100.0),
+        Point::new(400.0, 200.0),
+        true,
+    );
+    assert_eq!(top(&app), red, "動かした赤が上");
+    // 赤だけを外す（青を残す）
+    let keep: Vec<usize> = {
+        let scene = app.scene();
+        app.session
+            .selected_indices()
+            .into_iter()
+            .filter(|&i| scene.get(i).is_some_and(|s| s.color == blue))
+            .collect()
+    };
+    assert!(!keep.is_empty());
+    assert!(canvas_tool::commit_floating_except(app.tab_mut(), &keep));
+    assert_eq!(top(&app), red, "外しても赤が上のまま");
+    let fl = app.session.floating().unwrap();
+    assert!(!fl.pieces().is_empty());
+    assert!(
+        fl.pieces().iter().all(|p| p.color == blue),
+        "青は浮いたまま"
+    );
+    assert!(
+        app.session.selected_indices().len() >= fl.pieces().len(),
+        "浮いた片はみな選ばれている"
+    );
+    // 残した青を下へ動かしても、赤はそのまま（青は確定していないので、その下の中身を削っていない）
+    assert!(doc_actions::apply(
+        &mut app,
+        doc_actions::Action::MoveSelected {
+            delta: KVec2::new(0.0, 100.0),
+        },
+    ));
+    assert!(canvas_tool::clear_selection(&mut app));
+    assert_eq!(top(&app), red, "確定しても重なった所は赤");
+    let colors_at = |p: Point| -> Vec<Color32> {
+        app.scene()
+            .iter()
+            .filter(|s| s.contains_point(p))
+            .map(|s| s.color)
+            .collect()
+    };
+    assert_eq!(
+        colors_at(Point::new(350.0, 250.0)),
+        vec![blue],
+        "動かした青"
+    );
+    assert!(
+        colors_at(Point::new(350.0, 150.0)).is_empty(),
+        "青の元の所は空く"
+    );
+}
+
 /// S-2：正しい地図の判定（`valid_faces`。書き戻しも読み込みも同じ）は、頂点と制御点が格子に置けることと、両側が同じ色の
 /// 辺が無いことも確かめる。巨大な座標の地図も、判定の形を作らずにすぐ断る。辺を引っぱって制御点だけ格子の外へ出る
 /// 確定は断る

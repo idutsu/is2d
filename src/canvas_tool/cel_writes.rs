@@ -513,7 +513,9 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             return false;
         }
     }
-    tab.session.retain_existing_selection();
+    // 残す片から覆われた所を消すと、分かれた片に新しい番号が付くことがある（`Floating::split_off`）。浮いた片はいつも
+    // みな選ばれている
+    tab.session.select_floating_pieces();
     true
 }
 

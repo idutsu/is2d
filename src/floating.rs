@@ -88,6 +88,32 @@ impl PieceGroup {
         self.base().map.labels().next()
     }
 
+    /// 置いた地図（変換をかけたもの）から、地図の並び `cover`（文書の座標）の色のある所を消した組（変換は恒等）。重なら
+    /// なければ、この組のまま。`Ok(None)`：片が残らない。`Err`：格子に置けない・正しい地図にならない
+    fn erased(&self, cover: &[PlanarMap]) -> Result<Option<Self>, Unplaceable> {
+        let overlaps = |r: kurbo::Rect| {
+            cover.iter().filter_map(PlanarMap::bounding_box).any(|c| {
+                let i = r.intersect(c);
+                i.width() > 0.0 && i.height() > 0.0
+            })
+        };
+        match self.base().map.bounding_box() {
+            Some(r) if overlaps(self.xform.transform_rect_bbox(r)) => {}
+            _ => return Ok(Some(self.clone())),
+        }
+        let mut map = self.placed().ok_or(Unplaceable)?;
+        for c in cover {
+            map = map
+                .overlay(MapInput::Map(c), MapRule::Paint(None))
+                .ok_or(Unplaceable)?;
+        }
+        if map.edges.is_empty() {
+            return Ok(None);
+        }
+        let map = map.checked().ok_or(Unplaceable)?;
+        Ok(Some(Self::new(map, Affine::IDENTITY)))
+    }
+
     /// 番号が `keep` にある片だけの組（`Ok(None)`：1つも無い。`Err`：正しい地図にならない）
     fn restricted(&self, keep: &HashSet<ShapeId>) -> Result<Option<Self>, Unplaceable> {
         let ids = self.ids();
@@ -538,7 +564,10 @@ impl Floating {
     }
 
     /// 番号が `keep` に無い片と、残りを取り出す（確定する分）。この浮いた片には、残す片だけが残る（残りは確定するので
-    /// 持たない）。全部か無しか：`Err`：片の地図が正しい地図にならない（何も変えない）
+    /// 持たない）。見えている重なりを変えないように、残す片の組からは、それより上の組の取り出す片が覆う所を消す（取り
+    /// 出す片は確定してレイヤーの中身になり、浮いた片はいつもレイヤーのいちばん上に描かれるので、消さないと、確定した
+    /// 片の上へ繰り上がる。上の片を確定すれば下の片が削られるのと同じ。レビュー f01d518 の N-3002）。残す片は確定しない
+    /// ので、その下のレイヤーの中身は変えない。全部か無しか：`Err`：片の地図が正しい地図にならない（何も変えない）
     pub(crate) fn split_off(&mut self, keep: &HashSet<ShapeId>) -> Result<Floating, Unplaceable> {
         let drop: HashSet<ShapeId> = self
             .layers
@@ -550,10 +579,20 @@ impl Floating {
             .layers
             .iter()
             .map(|l| {
-                Ok((
-                    restricted_groups(&l.groups, &drop)?,
-                    restricted_groups(&l.groups, keep)?,
-                ))
+                // 上の組から順に見て、それまでに取り出す片の置いた地図（覆う所）を集める
+                let (mut dropped, mut kept, mut cover) = (Vec::new(), Vec::new(), Vec::new());
+                for g in l.groups.iter().rev() {
+                    if let Some(k) = g.restricted(keep)? {
+                        kept.extend(k.erased(&cover)?);
+                    }
+                    if let Some(d) = g.restricted(&drop)? {
+                        cover.push(d.placed().ok_or(Unplaceable)?);
+                        dropped.push(d);
+                    }
+                }
+                dropped.reverse();
+                kept.reverse();
+                Ok((dropped, kept))
             })
             .collect::<Result<Vec<_>, Unplaceable>>()?;
         let mut out = Floating::new(true);
