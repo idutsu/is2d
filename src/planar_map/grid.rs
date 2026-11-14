@@ -23,34 +23,23 @@ pub(super) fn grid_poly_into(q: &QuadBez, out: &mut Vec<IPt>) {
     grid_line_into(flat_points(*q, FLAT_TOL).map(|(p, _)| p), out);
 }
 
-/// 曲線の判定の形（`grid_poly`）の点を1つずつ（並びを作らない）
-pub(super) fn grid_poly_points(q: &QuadBez) -> impl Iterator<Item = IPt> {
-    grid_points_of(flat_points(*q, FLAT_TOL).map(|(p, _)| p))
-}
-
 /// 折れ線の点 `pts` を格子の点に丸めたもの（続けて同じ点は1つにする）
 pub(super) fn grid_line(pts: impl Iterator<Item = Point>) -> Vec<IPt> {
     let mut out: Vec<IPt> = Vec::with_capacity(pts.size_hint().0);
-    out.extend(grid_points_of(pts));
+    grid_line_into(pts, &mut out);
     out
 }
 
-/// 折れ線の点 `pts` を格子の点に丸めたもの（`grid_line`）を `out` に入れる（前の中身は消す）
+/// 折れ線の点 `pts` を格子の点に丸めたもの（`grid_line`）を `out` に入れる（前の中身は消す。折れ線を格子に丸めるのは
+/// これ1つ）
 pub(super) fn grid_line_into(pts: impl Iterator<Item = Point>, out: &mut Vec<IPt>) {
     out.clear();
-    out.extend(grid_points_of(pts));
-}
-
-/// 折れ線の点 `pts` を格子の点に丸めたものを1つずつ（続けて同じ点は1つにする。折れ線を格子に丸めるのはこれ1つ）
-pub(super) fn grid_points_of(pts: impl Iterator<Item = Point>) -> impl Iterator<Item = IPt> {
-    let mut last: Option<IPt> = None;
-    pts.filter_map(move |p| {
+    for p in pts {
         let ip = gpt(p);
-        (last != Some(ip)).then(|| {
-            last = Some(ip);
-            ip
-        })
-    })
+        if out.last() != Some(&ip) {
+            out.push(ip);
+        }
+    }
 }
 
 /// `c` が、`a` から `b` へ向かう線の左（正）・右（負）・上（0）のどちらにあるか（外積）
@@ -256,14 +245,15 @@ impl PolyIndex {
             deg: vec![0; nodes.len()],
             area,
         };
+        let mut poly: Vec<IPt> = Vec::new();
         for (e, ed) in edges.iter().enumerate() {
             let q = QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]);
-            let reached = area.is_none_or(|a| a.overlaps(&reach_of(&q)));
-            ix.add_edge(
-                ed.a,
-                ed.b,
-                reached.then(|| grid_poly_points(&q)).into_iter().flatten(),
-            );
+            if area.is_none_or(|a| a.overlaps(&reach_of(&q))) {
+                grid_poly_into(&q, &mut poly);
+            } else {
+                poly.clear();
+            }
+            ix.add_edge(ed.a, ed.b, poly.iter().copied());
             if !alive(e) {
                 ix.kill(e);
             }
@@ -524,11 +514,17 @@ impl YBands {
             });
         let n = ((spans.len() as f64).sqrt().ceil() as usize).clamp(1, 256);
         let band_h = ((y1 - y0) / n as i64 + 1).max(1);
-        // 区間がかかる帯ごとに（帯, 区間の番号）
-        let pairs = spans.enumerate().flat_map(move |(i, (lo, hi))| {
-            let (k0, k1) = (((lo - y0) / band_h) as usize, ((hi - y0) / band_h) as usize);
-            (k0.min(n - 1)..k1.min(n - 1) + 1).map(move |k| (k, i as u32))
-        });
+        // 区間がかかる帯の範囲（割り算は区間ごとに1回）と、帯ごとに（帯, 区間の番号）
+        let ranges: Vec<(u32, u32)> = spans
+            .map(|(lo, hi)| {
+                let (k0, k1) = (((lo - y0) / band_h) as usize, ((hi - y0) / band_h) as usize);
+                (k0.min(n - 1) as u32, k1.min(n - 1) as u32)
+            })
+            .collect();
+        let pairs = ranges
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &(k0, k1))| (k0..=k1).map(move |k| (k as usize, i as u32)));
         Self {
             y0,
             band_h,

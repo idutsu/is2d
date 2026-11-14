@@ -79,11 +79,13 @@ pub(crate) struct MapFace {
 pub(crate) struct IntHasher(u64);
 
 impl std::hash::Hasher for IntHasher {
+    #[inline]
     fn finish(&self) -> u64 {
         self.0
     }
     /// 整数の配列の鍵（辺の鍵 `[u64; 6]`、頂点の座標のビット `[u64; 2]` など）は、まとめてバイトで来るので、8 バイトずつ
     /// 混ぜる
+    #[inline]
     fn write(&mut self, bytes: &[u8]) {
         let mut chunks = bytes.chunks_exact(8);
         for c in &mut chunks {
@@ -95,15 +97,19 @@ impl std::hash::Hasher for IntHasher {
             self.write_u64(b as u64);
         }
     }
+    #[inline]
     fn write_u64(&mut self, i: u64) {
         self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
     }
+    #[inline]
     fn write_i64(&mut self, i: i64) {
         self.write_u64(i as u64);
     }
+    #[inline]
     fn write_i32(&mut self, i: i32) {
         self.write_u64(i as u32 as u64);
     }
+    #[inline]
     fn write_usize(&mut self, i: usize) {
         self.write_u64(i as u64);
     }

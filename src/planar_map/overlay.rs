@@ -1248,20 +1248,20 @@ impl PlanarMap {
         let new_segs = segs_of(&new_deltas);
         // その地図の、点 `p2`（2倍の座標）での色ごとの巻き数：区間の出どころの辺の色と、半直線の高さにかかるその地図の
         // 入れなかった辺の判定の形で、整数で数える（点の状態を数えるのはこれ1つ：面の種と、中の辺のもう片方の地図の色）
+        // 判定の形の入れ物（使い回す）
+        let pe_buf: std::cell::RefCell<Vec<IPt>> = Default::default();
         let winding_at = |segs: &LabeledSegs<Option<Color32>>, old: bool, p2: IPt| {
             let mut w: Vec<(Option<Color32>, i32)> = Vec::new();
             segs.winding_into(p2, &mut w);
             let (items, bands) = rows[old as usize].get_or_init(|| unfed_rows(old));
+            let mut pe = pe_buf.borrow_mut();
             for &i in bands.at(p2.1) {
                 let (e, q, r) = &items[i as usize];
                 if ray_meets_row(*r, p2) {
                     let ed = self.edges[*e];
-                    let mut prev: Option<IPt> = None;
-                    for b in grid_poly_points(q) {
-                        if let Some(a) = prev {
-                            wind_into(dbl(a), dbl(b), ed.left, ed.right, p2, &mut w);
-                        }
-                        prev = Some(b);
+                    grid_poly_into(q, &mut pe);
+                    for s in pe.windows(2) {
+                        wind_into(dbl(s[0]), dbl(s[1]), ed.left, ed.right, p2, &mut w);
                     }
                 }
             }
