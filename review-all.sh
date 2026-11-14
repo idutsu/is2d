@@ -3,7 +3,8 @@
 # 2つの報告書を1つの課題リストと感想にまとめる。コードは直さない（直すのは、まとめを読んで返事をしてから）。
 #
 # 使い方：リポジトリの中で `sh review-all.sh`
-#   - 対象は、今いるブランチが追いかけている GitHub のブランチの最新（review-prompt.md と同じ決め方）
+#   - 始めに手元を GitHub の最新に追いつかせ（git pull --ff-only）、そのコミットをレビューする。レビューもまとめも、
+#     このリポジトリのフォルダで行う。保存していない変更があるときは、何もせずに止まる（消さないため）
 #   - 2つのレビューは同時に動かさない（同じ Mac で計測がぶつかり、時間が当てにならないため）
 #   - 進み具合は claude/review-logs/<コミット>/progress.log と、Mac の通知に出る
 #
@@ -17,13 +18,17 @@
 # 同じコミットで、もう終わっているレビュー（issues.md がある）があれば、やり直さずに使い回す
 #
 # 注意：人のいない所で最後まで進めるため、どちらの AI もコマンドとファイルの書き込みを自動で承認して動かす
-#   （--dangerously-skip-permissions）。レビューとまとめは、それぞれ別の作業場所（git worktree）で行う決まり。
+#   （--dangerously-skip-permissions）。
 set -eu
 
 cd "$(git rev-parse --show-toplevel)"
 ROOT=$(pwd)
-git fetch origin
-C=$(git rev-parse --short=7 '@{upstream}')
+if [ -n "$(git status --porcelain)" ]; then
+    echo "このフォルダに保存していない変更があるので、始めません（消さないため）。" >&2
+    exit 1
+fi
+git pull -q --ff-only
+C=$(git rev-parse --short=7 HEAD)
 LOG="$ROOT/claude/review-logs/$C"
 mkdir -p "$LOG"
 
