@@ -35,10 +35,10 @@ pub(crate) fn create_video_encoder(
     }
 }
 
+/// ステージの画素の大きさ。書き出す画素の大きさと原点は、みなこれから決める（ステージの大きさは、読み込み・画面で
+/// 100〜3840 × 100〜2160 にそろえてある：レビュー f01d518 の N-4007）
 fn stage_pixel_size(stage_size: Vec2) -> (u32, u32) {
-    let w = stage_size.x.round().max(100.0) as u32;
-    let h = stage_size.y.round().max(100.0) as u32;
-    (w, h)
+    (stage_size.x.round() as u32, stage_size.y.round() as u32)
 }
 
 /// ステージの大きさから書き出し動画の偶数サイズ `(width, height)` を求める
@@ -50,20 +50,20 @@ pub(crate) fn export_dimensions(stage_size: Vec2) -> (u32, u32) {
 /// ルートのタイムラインの指定コマ `frame` を RGBA 画像（`width * height * 4` バイト、白背景、アルファ 255）に塗る
 #[cfg(test)]
 pub(crate) fn render_frame(doc: &Document, frame: usize, width: u32, height: u32) -> Vec<u8> {
-    render_frame_holding(doc, frame, width, height).0
+    render_frame_holding(doc, frame, width, height)
+        .expect("画像を作れる大きさ")
+        .0
 }
 
+/// 塗った1コマ（RGBA）と、塗るときに展開したセル画の地図の計算に使う写し（`render_frame_holding`）
+type Rendered = (Vec<u8>, Vec<Arc<LayerBase>>);
+
 /// `render_frame` と、塗るときに展開したセル画の地図の計算に使う写し。写しを次のコマを塗る間まで持てば、同じキーフレームの
-/// 地図を作り直さない（写しは、それを使う所が持つ：レビュー「軽量化・高速化」の★1）
-fn render_frame_holding(
-    doc: &Document,
-    frame: usize,
-    width: u32,
-    height: u32,
-) -> (Vec<u8>, Vec<Arc<LayerBase>>) {
+/// 地図を作り直さない（写しは、それを使う所が持つ：レビュー「軽量化・高速化」の★1）。`None`：その大きさの画像を作れない
+fn render_frame_holding(doc: &Document, frame: usize, width: u32, height: u32) -> Option<Rendered> {
     let ctx = crate::symbol::SymbolEvalCtx::new(&doc.library).without_mesh();
-    let rgba = paint_frame(doc, frame, width, height, &ctx);
-    (rgba, ctx.into_state().take_held())
+    let rgba = paint_frame(doc, frame, width, height, &ctx)?;
+    Some((rgba, ctx.into_state().take_held()))
 }
 
 fn paint_frame(
@@ -72,16 +72,13 @@ fn paint_frame(
     width: u32,
     height: u32,
     ctx: &crate::symbol::SymbolEvalCtx<'_>,
-) -> Vec<u8> {
-    let Some(mut pixmap) = tiny_skia::Pixmap::new(width, height) else {
-        return vec![255; (width as usize) * (height as usize) * 4];
-    };
+) -> Option<Vec<u8>> {
+    let mut pixmap = tiny_skia::Pixmap::new(width, height)?;
     pixmap.fill(tiny_skia::Color::WHITE);
 
-    let stage_w_f = doc.stage_size.x.max(100.0) as f64;
-    let stage_h_f = doc.stage_size.y.max(100.0) as f64;
-    let origin_x = (View::DEFAULT_STAGE_CENTER.x - stage_w_f * 0.5) as f32;
-    let origin_y = (View::DEFAULT_STAGE_CENTER.y - stage_h_f * 0.5) as f32;
+    let (stage_w, stage_h) = stage_pixel_size(doc.stage_size);
+    let origin_x = (View::DEFAULT_STAGE_CENTER.x - stage_w as f64 * 0.5) as f32;
+    let origin_y = (View::DEFAULT_STAGE_CENTER.y - stage_h as f64 * 0.5) as f32;
 
     for layer in &doc.root.layers {
         if !layer.visible {
@@ -125,7 +122,6 @@ fn paint_frame(
         }
     }
 
-    let (stage_w, stage_h) = stage_pixel_size(doc.stage_size);
     let mut data = pixmap.take();
     let w_usize = width as usize;
     let h_usize = height as usize;
@@ -141,7 +137,7 @@ fn paint_frame(
     if stage_h_usize < h_usize {
         data[stage_h_usize * w_usize * 4..].fill(255);
     }
-    data
+    Some(data)
 }
 
 /// 書き出し先 `target_path` と同じフォルダに置く一時ファイルパス（`.<名前>.<プロセスID>.mp4.tmp`）を返す
@@ -273,12 +269,17 @@ pub(crate) fn render_frames_in_order(
         if cancel_flag.load(Ordering::Acquire) {
             return VideoExportOutcome::Cancelled;
         }
-        let rendered: Vec<(Vec<u8>, Vec<Arc<LayerBase>>)> = std::thread::scope(|scope| {
+        let rendered: Option<Vec<Rendered>> = std::thread::scope(|scope| {
             let handles: Vec<_> = (first..(first + threads).min(total_frames))
                 .map(|frame| scope.spawn(move || render_frame_holding(doc, frame, width, height)))
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
+        let Some(rendered) = rendered else {
+            return VideoExportOutcome::Failed(format!(
+                "{width}×{height} の画像を作れませんでした"
+            ));
+        };
         let (frames, bases): (Vec<Vec<u8>>, Vec<Vec<Arc<LayerBase>>>) =
             rendered.into_iter().unzip();
         // 前の組の写しは、この組を塗り終えてから手放す

@@ -20107,6 +20107,23 @@ fn test_video_export_parallel_render_frames_and_without_mesh() {
     );
 }
 
+/// 書き出す画像を作れない大きさなら、白いコマを黙って渡さず、書き出しの失敗として返す（画素の大きさと原点は
+/// `stage_pixel_size` の1か所で決める）。直す前は、画像を作れないと白いコマ（大きさ 0 なら空のコマ）を返して書き出しを
+/// 続けた（レビュー f01d518 の N-4007）
+#[test]
+fn video_export_fails_instead_of_pushing_blank_frames() {
+    use crate::video_export::{render_frames_in_order, VideoExportOutcome};
+    use std::sync::atomic::AtomicBool;
+    let app = Is2dApp::default();
+    let mut pushed = 0;
+    let outcome = render_frames_in_order(&app.doc, (0, 0), 1, &AtomicBool::new(false), |_, _| {
+        pushed += 1;
+        Ok(())
+    });
+    assert!(matches!(outcome, VideoExportOutcome::Failed(_)));
+    assert_eq!(pushed, 0, "コマを渡さない");
+}
+
 #[test]
 fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
     use crate::doc_actions::{apply, Action};
