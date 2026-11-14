@@ -4346,18 +4346,22 @@ fn test_save_io_failure_rollback_and_marquee_slice_push_undo() {
 }
 
 #[test]
-fn test_corrupt_and_truncated_json_returns_error_without_modifying_app() {
+fn test_corrupt_and_truncated_file_returns_error_without_modifying_app() {
     let tmp_corrupt =
         std::env::temp_dir().join(format!("is2d_corrupt_test_{}.is2d", std::process::id()));
     let mut app = Is2dApp::default();
     app.doc.stage_size = Vec2::new(960.0, 540.0);
+    let good = project_io::project_file_bytes(
+        &project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(9, 9)).unwrap(),
+    )
+    .unwrap();
 
-    // 1. 途中で切れた不正な JSON 構文
-    std::fs::write(&tmp_corrupt, r#"{"version": 1, "stage_size": [800.0,"#).unwrap();
+    // 1. 途中で切れたファイル
+    std::fs::write(&tmp_corrupt, &good[..good.len() / 2]).unwrap();
     let res1 = crate::project_io::open_project_in_tab(&mut app, &tmp_corrupt, None);
     assert!(
         res1.is_err(),
-        "途中で切断された壊れた JSON はパニックせず Err を返すこと"
+        "途中で切れたファイルはパニックせず Err を返すこと"
     );
     assert_eq!(
         app.doc.stage_size,
@@ -4370,11 +4374,9 @@ fn test_corrupt_and_truncated_json_returns_error_without_modifying_app() {
     assert!(crate::project_io::open_project_in_tab(&mut app, &tmp_corrupt, None).is_err());
 
     // 3. 未来の未対応バージョン番号
-    std::fs::write(
-        &tmp_corrupt,
-        r#"{"version": 999, "stage_size": [800.0, 450.0], "timeline": {"fps": 24, "total_frames": 1, "active_layer": 0, "current_frame": 0, "next_layer_id": 2, "layers": []}}"#,
-    )
-    .unwrap();
+    let mut future = good.clone();
+    future[4..8].copy_from_slice(&999u32.to_le_bytes());
+    std::fs::write(&tmp_corrupt, &future).unwrap();
     assert!(
         crate::project_io::open_project_in_tab(&mut app, &tmp_corrupt, None).is_err(),
         "未対応の未来バージョン番号は Err を返すこと"
@@ -4553,7 +4555,7 @@ fn test_malformed_json_sanitization_and_cycle_breaking() {
         }"#;
     let tmp_malformed =
         std::env::temp_dir().join(format!("is2d_malformed_test_{}.is2d", std::process::id()));
-    std::fs::write(&tmp_malformed, malformed_json).unwrap();
+    write_project_json_as_file(&tmp_malformed, malformed_json);
     let mut sanitized_app = Is2dApp::default();
     assert_eq!(
         crate::project_io::open_project_in_tab(&mut sanitized_app, &tmp_malformed, None),
@@ -4568,7 +4570,7 @@ fn test_malformed_json_sanitization_and_cycle_breaking() {
         r#""instance_gid": 21,
                               "symbol_id": 9998,"#,
     );
-    std::fs::write(&tmp_malformed, malformed_no_cycle).unwrap();
+    write_project_json_as_file(&tmp_malformed, &malformed_no_cycle);
     crate::project_io::open_project_in_tab(&mut sanitized_app, &tmp_malformed, None)
         .expect("異常系JSONでもサニタイズされてクラッシュせず読み込めること");
     assert_eq!(sanitized_app.doc.stage_size, Vec2::new(3840.0, 100.0));
@@ -5338,7 +5340,7 @@ fn test_noop_eraser_does_not_push_undo_and_active_layer_lock_blocks_paint_tools(
 }
 
 #[test]
-fn test_compact_json_serialization_nan_rejection_and_undo_history_cap() {
+fn test_saved_file_reads_back_nan_is_fixed_and_undo_history_cap() {
     let red = Color32::from_rgb(220, 40, 40);
     let tmp_compact =
         std::env::temp_dir().join(format!("is2d_compact_test_{}.is2d", std::process::id()));
@@ -5350,20 +5352,17 @@ fn test_compact_json_serialization_nan_rejection_and_undo_history_cap() {
         make_stroke(Point::new(50.0, 50.0), Point::new(100.0, 50.0), 8.0, red),
     );
     crate::project_io::save_project_to_path(&mut save_app, &tmp_compact).unwrap();
-    let saved_str = std::fs::read_to_string(&tmp_compact).unwrap();
     assert!(
-        !saved_str.contains('\n'),
-        "保存される .is2d ファイルは膨張を防ぐコンパクト JSON（改行なし）であること"
+        crate::project_io::read_project_document(&tmp_compact).is_ok(),
+        "保存したファイルを読み戻せること"
     );
     save_app.doc.stage_size = Vec2::new(f32::NAN, 450.0);
     let fixed = crate::project_io::save_project_to_path(&mut save_app, &tmp_compact)
         .expect("NaN が含まれる状態でも壊れた数値を補正して保存が成功すること");
     assert_eq!(fixed, vec!["ステージサイズ".to_owned()]);
-    let nan_fixed_str = std::fs::read_to_string(&tmp_compact).unwrap();
-    assert!(
-        !nan_fixed_str.contains("NaN") && !nan_fixed_str.contains("null"),
-        "補正後の JSON に NaN や null が混入しないこと"
-    );
+    let nan_fixed = crate::project_io::read_project_document(&tmp_compact)
+        .expect("補正したファイルは、数がみな有限なので読める");
+    assert_eq!(nan_fixed.stage_size, [800.0, 450.0], "補正した値で書く");
     save_app.doc.stage_size = Vec2::new(800.0, 450.0);
     let _ = std::fs::remove_file(&tmp_compact);
 
@@ -6848,7 +6847,6 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
     }
 
     let doc = project_io::ProjectDocument {
-        version: project_io::PROJECT_FORMAT_VERSION,
         stage_size: [800.0, 450.0],
         timeline: (&timeline::Timeline::default()).into(),
         library,
@@ -6858,7 +6856,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
     };
 
     let path = std::env::temp_dir().join(format!("is2d_dense_cycle_{}.is2d", std::process::id()));
-    std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+    write_project_file(&path, &doc);
     let mut app = Is2dApp::default();
     let res = crate::project_io::open_project_in_tab(&mut app, &path, None);
     let _ = std::fs::remove_file(&path);
@@ -8113,12 +8111,10 @@ fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape
             link_meta.file_type().is_symlink(),
             "シンボリックリンク経由で保存してもシンボリックリンク自体が通常ファイルに置換されないこと (#13)"
         );
-        let target_content = std::fs::read_to_string(&target_path).unwrap();
+        let target_content = std::fs::read(&target_path).unwrap();
         assert!(
-            target_content.contains(&format!(
-                "\"version\":{}",
-                project_io::PROJECT_FORMAT_VERSION
-            )),
+            target_content.starts_with(b"IS2D")
+                && target_content[4..8] == project_io::PROJECT_FORMAT_VERSION.to_le_bytes(),
             "シンボリックリンクの実体ファイル側が最新の内容に更新されること (#13)"
         );
         let _ = std::fs::remove_file(&link_path);
@@ -8270,6 +8266,22 @@ fn cel_summary(doc: &symbol::Document, layer_id: u64, frame: usize) -> CelSummar
 }
 
 /// `Action` の列を順番に `doc_actions::apply` へ流すテストヘルパー
+/// 保存用の型 `doc` を、今の版の `.is2d` ファイルとして `path` に書く（`project_file_bytes`）
+fn write_project_file(path: &std::path::Path, doc: &project_io::ProjectDocument) {
+    std::fs::write(path, project_io::project_file_bytes(doc).unwrap()).unwrap();
+}
+
+/// JSON で書いた保存用の型 `json` を、今の版の `.is2d` ファイルとして `path` に書く（テストで細工したファイルを作る）
+fn write_project_json_as_file(path: &std::path::Path, json: &str) {
+    let doc: project_io::ProjectDocument = serde_json::from_str(json).unwrap();
+    write_project_file(path, &doc);
+}
+
+/// 保存用の型 `doc` を今の版の `.is2d` の中身に書いて、読み戻す（保存して開くのと同じ形を通る）
+fn saved_and_read_back(doc: &project_io::ProjectDocument) -> project_io::ProjectDocument {
+    project_io::project_from_bytes(&project_io::project_file_bytes(doc).unwrap()).unwrap()
+}
+
 fn run(host: &mut impl doc_actions::ActionHost, actions: &[doc_actions::Action]) {
     for action in actions {
         doc_actions::apply(host, action.clone());
@@ -9741,13 +9753,13 @@ fn test_stage6b_save_inside_two_level_nested_symbol_matches_save_after_exit_to_r
     assert!(app.session.edit_path.is_empty());
     project_io::save_project_to_path(&mut app, &path_root).unwrap();
 
-    let json_nested = std::fs::read_to_string(&path_nested).unwrap();
-    let json_root = std::fs::read_to_string(&path_root).unwrap();
+    let file_nested = std::fs::read(&path_nested).unwrap();
+    let file_root = std::fs::read(&path_root).unwrap();
     let _ = std::fs::remove_file(&path_nested);
     let _ = std::fs::remove_file(&path_root);
 
     assert_eq!(
-        json_nested, json_root,
+        file_nested, file_root,
         "2段ネストのシンボルに入った状態で保存したファイルと、ルートに出てから保存したファイルが完全一致すること"
     );
 }
@@ -11280,7 +11292,7 @@ fn convert_to_symbol_inside_rotated_instance_keeps_local_coordinates() {
 }
 
 #[test]
-fn test_g5_1_save_and_reopen_60_brush_strokes_f6_480_frames_over_100mb() {
+fn test_g5_1_save_and_reopen_60_brush_strokes_f6_560_frames_over_100mb() {
     use crate::doc_actions::Action;
 
     let mut app = Is2dApp::default();
@@ -11319,17 +11331,17 @@ fn test_g5_1_save_and_reopen_60_brush_strokes_f6_480_frames_over_100mb() {
         })
         .sum();
 
-    for _ in 1..480 {
+    for _ in 1..560 {
         assert!(doc_actions::apply(
             &mut app,
             Action::InsertKeyframe { copy_prev: true }
         ));
     }
-    assert_eq!(app.doc.root.total_frames, 480);
-    assert_eq!(app.doc.root.layers[0].keyframes.len(), 480);
+    assert_eq!(app.doc.root.total_frames, 560);
+    assert_eq!(app.doc.root.layers[0].keyframes.len(), 560);
 
     let tmp_path = std::env::temp_dir().join(format!(
-        "is2d_g5_1_480kf_over_100mb_{}.is2d",
+        "is2d_g5_1_560kf_over_100mb_{}.is2d",
         std::process::id()
     ));
 
@@ -11340,7 +11352,7 @@ fn test_g5_1_save_and_reopen_60_brush_strokes_f6_480_frames_over_100mb() {
 
     let file_bytes = std::fs::metadata(&tmp_path).unwrap().len();
     println!(
-        "[G5-1] 60 strokes ({first_cel_shapes} shapes, {first_cel_segs} segs/cel) x 480 KF: size = {:.2} MB ({file_bytes} bytes), save = {save_elapsed:?}",
+        "[G5-1] 60 strokes ({first_cel_shapes} shapes, {first_cel_segs} segs/cel) x 560 KF: size = {:.2} MB ({file_bytes} bytes), save = {save_elapsed:?}",
         file_bytes as f64 / (1024.0 * 1024.0)
     );
     assert!(
@@ -11356,8 +11368,8 @@ fn test_g5_1_save_and_reopen_60_brush_strokes_f6_480_frames_over_100mb() {
     let _ = std::fs::remove_file(&tmp_path);
 
     println!("[G5-1] reopen = {open_elapsed:?}");
-    assert_eq!(reopened.doc.root.total_frames, 480);
-    assert_eq!(reopened.doc.root.layers[0].keyframes.len(), 480);
+    assert_eq!(reopened.doc.root.total_frames, 560);
+    assert_eq!(reopened.doc.root.layers[0].keyframes.len(), 560);
     assert_eq!(
         reopened.doc.root.layers[0].keyframes[479]
             .cel
@@ -11553,7 +11565,6 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
             });
         }
         project_io::ProjectDocument {
-            version: project_io::PROJECT_FORMAT_VERSION,
             stage_size: [800.0, 450.0],
             timeline: (&timeline::Timeline::default()).into(),
             library,
@@ -11569,8 +11580,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
             "is2d_g5_2_chain_{depth}_{}.is2d",
             std::process::id()
         ));
-        let json = serde_json::to_string(&make_chain_project(depth)).unwrap();
-        std::fs::write(&path, json.as_bytes()).unwrap();
+        write_project_file(&path, &make_chain_project(depth));
         let res = crate::project_io::open_project_in_tab(&mut app, &path, None);
         let _ = std::fs::remove_file(&path);
         assert_eq!(
@@ -14479,19 +14489,17 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
 }
 
 #[test]
-fn test_m3_1_write_project_json_reports_flush_error() {
+fn test_m3_1_write_project_bytes_reports_write_error() {
     let tab = crate::canvas_tool::Tab::new_empty(1, 1);
     let doc = crate::project_io::ProjectDocument::from_app(&tab).unwrap();
+    let bytes = crate::project_io::project_file_bytes(&doc).unwrap();
 
     let tmp = std::env::temp_dir().join(format!("is2d_m3_1_ro_{}.tmp", std::process::id()));
     std::fs::write(&tmp, b"orig").unwrap();
     let ro_file = std::fs::File::open(&tmp).unwrap();
-    let res = crate::project_io::write_project_json(ro_file, &doc);
+    let res = crate::project_io::write_project_bytes(ro_file, &bytes);
     let _ = std::fs::remove_file(&tmp);
-    assert!(
-        res.is_err(),
-        "BufWriter::into_inner の flush 失敗が Err として返ること"
-    );
+    assert!(res.is_err(), "書き込みの失敗が Err として返ること");
 
     #[cfg(target_os = "linux")]
     {
@@ -14499,7 +14507,7 @@ fn test_m3_1_write_project_json_reports_flush_error() {
             .write(true)
             .open("/dev/full")
             .unwrap();
-        let err = crate::project_io::write_project_json(dev_full, &doc)
+        let err = crate::project_io::write_project_bytes(dev_full, &bytes)
             .expect_err("/dev/full への書き込みは Err が返ること");
         assert_eq!(err.kind(), std::io::ErrorKind::StorageFull);
     }
@@ -15115,13 +15123,13 @@ fn test_m4_3_saved_map_roundtrip_bit_exact_and_load_shrinks_capacities() {
             },
         );
     }
-    // 1. 地図1枚を JSON にして読み戻すと、ビットまで同じ地図に戻る
+    // 1. 地図1枚を保存の形（postcard）にして読み戻すと、ビットまで同じ地図に戻る
     let cel = &app.doc.root.layers[0].keyframes[0].cel;
     let base0 = cel.maps[0].base();
     let map = &base0.map;
     let saved = project_io::SavedScopeMap::new(&[], map);
-    let json = serde_json::to_string(&saved).unwrap();
-    let back: project_io::SavedScopeMap = serde_json::from_str(&json).unwrap();
+    let bytes = postcard::to_allocvec(&saved).unwrap();
+    let back: project_io::SavedScopeMap = postcard::from_bytes(&bytes).unwrap();
     let back = back.to_map().expect("正しい地図に戻る");
     let bits = |m: &crate::planar_map::PlanarMap| {
         (
@@ -16535,9 +16543,7 @@ fn test_m5_2_n1001_contour_segments_capacity_equals_len_after_merge_insert_and_r
     ));
     assert_all_contours_shrunk(&app.tab().doc, "after AddAnchor");
 
-    let saved_json =
-        serde_json::to_vec(&project_io::ProjectDocument::from_app(&app).unwrap()).unwrap();
-    let loaded_doc: project_io::ProjectDocument = serde_json::from_slice(&saved_json).unwrap();
+    let loaded_doc = saved_and_read_back(&project_io::ProjectDocument::from_app(&app).unwrap());
     let mut reopened = Is2dApp::default();
     loaded_doc.apply_to_app(&mut reopened);
     assert_all_contours_shrunk(&reopened.tab().doc, "after save and reopen");
@@ -16764,9 +16770,7 @@ fn test_symbol_color_effect_alpha_brightness_tween_export_nested_io_undo_ungroup
             effect: ColorEffect::new(0.35, -0.25),
         },
     ));
-    let saved_str =
-        serde_json::to_string(&ProjectDocument::from_app(&export_app).unwrap()).unwrap();
-    let loaded_doc: ProjectDocument = serde_json::from_str(&saved_str).unwrap();
+    let loaded_doc = saved_and_read_back(&ProjectDocument::from_app(&export_app).unwrap());
     let mut reopened = Is2dApp::default();
     loaded_doc.apply_to_app(&mut reopened);
     let reopened_eff = reopened.doc.root.layers[0].keyframes[0].cel.instances[0]
@@ -16921,9 +16925,11 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
         },
     ));
     crate::project_io::save_project_to_path(&mut app, &saved_proj_path).unwrap();
-    let normal_json = std::fs::read_to_string(&saved_proj_path).unwrap();
-    assert!(
-        !normal_json.contains("recovery_source"),
+    assert_eq!(
+        crate::project_io::read_project_document(&saved_proj_path)
+            .unwrap()
+            .recovery_source,
+        None,
         "普通に保存したファイルには recovery_source が入らないこと"
     );
     assert!(apply(
@@ -17074,7 +17080,7 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     );
     assert!(!fallback_rec.exists());
 
-    // 8. 壊れた復旧ファイル（中身が JSON でない）や recovery_source が無い復旧ファイルは .broken に名前が変わり、エラーが出て、ほかのファイルは開く
+    // 8. 壊れた復旧ファイル（中身が .is2d の形でない）や recovery_source が無い復旧ファイルは .broken に名前が変わり、エラーが出て、ほかのファイルは開く
     next_app.tabs[0].file = Some(saved_proj_path.clone());
     next_app.recovery.write_unsaved_tabs(&next_app.tabs);
     let bad_rec = rec_dir.join("RECOVER_corrupted.is2d");
@@ -17134,8 +17140,7 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     assert!(nan_app.doc.root.layers[0].keyframes[0].cel.is_empty());
     let fixed_locs = crate::project_io::save_project_to_path(&mut nan_app, &nan_save_path).unwrap();
     assert!(fixed_locs.is_empty());
-    let nan_json = std::fs::read_to_string(&nan_save_path).unwrap();
-    assert!(!nan_json.contains("NaN") && !nan_json.contains("null"));
+    // 読むときに数がみな有限か確かめる（`only_finite_numbers`）ので、読めれば有限でない数は入っていない
     let reloaded = crate::project_io::read_project_document(&nan_save_path)
         .unwrap()
         .into_document()
@@ -19555,11 +19560,16 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
     let path3 = std::env::temp_dir().join(format!("is2d_fmt_v2_3_{}.is2d", std::process::id()));
 
     project_io::save_project_to_path(&mut app, &path1).unwrap();
-    let json1 = std::fs::read_to_string(&path1).unwrap();
+    let file1 = std::fs::read(&path1).unwrap();
 
-    // 3. 形式：保存したファイルのセル画は、階層ごとの地図（頂点の座標の平らな配列と、6つの数の辺の列）
-    let parsed_val: serde_json::Value = serde_json::from_str(&json1).unwrap();
-    assert_eq!(parsed_val["version"], project_io::PROJECT_FORMAT_VERSION);
+    // 3. 形式：保存したファイルは、頭（印・版）のあとの中身に、セル画の階層ごとの地図（頂点の座標の平らな配列と、
+    //    6つの数の辺の列）を持つ。中身は読み戻して JSON の値にして調べる
+    assert!(file1.starts_with(b"IS2D"));
+    assert_eq!(
+        file1[4..8],
+        project_io::PROJECT_FORMAT_VERSION.to_le_bytes()
+    );
+    let parsed_val = serde_json::to_value(project_io::project_from_bytes(&file1).unwrap()).unwrap();
     let kf_json = &parsed_val["timeline"]["layers"][0]["keyframes"][0];
     assert!(kf_json.get("shapes").is_none(), "図形は書かない");
     let maps_json = kf_json["maps"].as_array().unwrap();
@@ -19597,7 +19607,7 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
         "2回目の保存と3回目の保存でファイルの中身が1バイトも違わないこと"
     );
 
-    // 4. 版 1 のファイル：版 1 の形の輪郭を持つ JSON を開くとエラーが返り、タブは増えず、落ちないこと
+    // 4. 版 1 のファイル：版 1 の形の輪郭を持つ JSON を開くと「前の形式（JSON）」のエラーが返り、タブは増えず、落ちないこと
     let v1_json = r#"{
         "version": 1,
         "stage_size": [800.0, 450.0],
@@ -19643,8 +19653,9 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
     let tabs_before = app3.tabs.len();
     let v1_res = project_io::open_project_in_tab(&mut app3, &v1_path, None);
     let _ = std::fs::remove_file(&v1_path);
-    assert!(
-        v1_res.is_err(),
+    assert_eq!(
+        v1_res,
+        Err("前の形式（JSON）のファイルは開けません".to_owned()),
         "版 1 の輪郭形式を持つファイルを開くとエラーが返ること"
     );
     assert_eq!(
@@ -19898,8 +19909,7 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
     assert_eq!(after_shape.exterior.segments.len(), orig_seg_count);
 
     // 2. 前の版（版 2）のファイルは、図形がなくても開くと「未対応のプロジェクトバージョン」エラーが返り、タブが増えない
-    let empty_v2_doc = project_io::ProjectDocument {
-        version: 2,
+    let empty_doc = project_io::ProjectDocument {
         stage_size: [800.0, 450.0],
         timeline: (&timeline::Timeline::default()).into(),
         library: Vec::new(),
@@ -19907,8 +19917,10 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
         next_group_id: 1,
         recovery_source: None,
     };
+    let mut v2_bytes = project_io::project_file_bytes(&empty_doc).unwrap();
+    v2_bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
     let v2_path = std::env::temp_dir().join(format!("is2d_empty_v2_{}.is2d", std::process::id()));
-    std::fs::write(&v2_path, serde_json::to_string(&empty_v2_doc).unwrap()).unwrap();
+    std::fs::write(&v2_path, &v2_bytes).unwrap();
     let tabs_before = app.tabs.len();
     let err = project_io::open_project_in_tab(&mut app, &v2_path, None)
         .expect_err("図形のない版 2 のファイルも開けないこと");
@@ -27990,9 +28002,7 @@ fn loaded_keyframes_share_map_tiles() {
         .map(|j| Point::new(600.0 + j as f64 * 4.0, 500.0))
         .collect();
     doc_actions::commit_raw_outline(&mut app, &generate_brush_outline(&pts, 4.0));
-    let json =
-        serde_json::to_string(&project_io::ProjectDocument::from_app(app.tab()).unwrap()).unwrap();
-    let loaded: project_io::ProjectDocument = serde_json::from_str(&json).unwrap();
+    let loaded = saved_and_read_back(&project_io::ProjectDocument::from_app(app.tab()).unwrap());
     let doc = loaded.into_document().unwrap();
     let kfs = &doc.root.layers[0].keyframes;
     assert_eq!(kfs.len(), 2);
@@ -30133,6 +30143,31 @@ fn double_click_needs_both_clicks_at_the_same_place() {
     }
 }
 
+/// 計測の作品のファイル `path`。前の形式（版 5 の JSON）なら、今の版に直したファイルを一時フォルダに作って、そのパスを
+/// 返す（計測用の作品を作り直さずに、同じコマンドで測るため。アプリは前の形式を開かない）
+fn work_file_in_current_format(path: &std::path::Path) -> std::path::PathBuf {
+    let bytes = std::fs::read(path).expect("作品を読めること");
+    if bytes.first() != Some(&b'{') {
+        return path.to_path_buf();
+    }
+    assert!(
+        bytes.starts_with(br#"{"version":5,"#),
+        "今の版に直せるのは、版 5 の JSON のファイルだけ"
+    );
+    // 版の番号は今の保存用の型に無いので、JSON を読むときは知らない項目として読み飛ばす
+    let doc: project_io::ProjectDocument =
+        serde_json::from_slice(&bytes).expect("版 5 の JSON として読めること");
+    let out = std::env::temp_dir().join("is2d_measure_work_current_format.is2d");
+    write_project_file(&out, &doc);
+    eprintln!(
+        "前の形式（版 5 の JSON）なので、今の版に直したファイルで測る：{:.1}MB → {:.1}MB（{}）",
+        bytes.len() as f64 / 1e6,
+        std::fs::metadata(&out).unwrap().len() as f64 / 1e6,
+        out.display()
+    );
+    out
+}
+
 /// 計測：作品のファイルで、重さが気になる操作の時間を測る（Mac で作品 A・A-x2 を測るため）
 ///
 /// 実行：`IS2D_WORK=作品のパス cargo test --release measure_work -- --ignored --nocapture`
@@ -30148,6 +30183,7 @@ fn measure_work() {
         eprintln!("IS2D_WORK に作品のパスを入れて実行してください");
         return;
     };
+    let path = work_file_in_current_format(std::path::Path::new(&path));
     let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
     // 作品の中身と、コマごとの線の量（ファイルから読んだまま数える。地図を確かめさせない）
     let saved = crate::project_io::read_project_document(std::path::Path::new(&path))
@@ -30471,7 +30507,7 @@ fn measure_work() {
     // claude/review-prompts/is2d-review-claude-code.md の「目標の数字」。Mac 以外は ×1）
     let chip = measured_chip();
     let factor = m1_factor(&chip);
-    eprintln!("作品：{path}");
+    eprintln!("作品：{}", path.display());
     eprintln!("測ったマシン：{chip}（M1 の見込み＝測った時間×{factor}）");
     eprintln!(
         "作品の中身：レイヤー {layers} 枚（シンボルの中を含む）・キーフレーム {keyframes} 個・地図 {maps} 枚・辺 {edges} 本"
@@ -31032,4 +31068,165 @@ fn swapping_replaces_the_symbol_of_selected_instances_and_keeps_their_settings()
         &mut app,
         Action::SwapSymbol { sym_id: sym_b }
     ));
+}
+
+/// 保存の形（版 6）：頭（印・版・長さ・CRC32）と postcard の中身。書いて読み戻すと、中身はビットまで同じ（座標・番号・
+/// 名前・インスタンスの変換と色効果・復旧元のパス）
+#[test]
+fn project_file_round_trip_keeps_every_bit() {
+    use doc_actions::Action;
+    let mut app = Is2dApp::default();
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![
+                    Point::new(100.123456789, 200.987654321),
+                    Point::new(180.5, 260.25),
+                    Point::new(260.0001, 190.3),
+                ],
+                radius: 13.7,
+                color: Color32::from_rgb(220, 60, 60),
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(180.5, 260.25),
+            },
+            Action::ConvertToSymbol,
+            Action::SetSymbolColorEffect {
+                effect: crate::symbol::ColorEffect::new(0.37, -0.21),
+            },
+            Action::RenameSymbol {
+                sym_id: 1,
+                new_name: "顔のパーツ（目）".to_owned(),
+            },
+            Action::Deselect,
+            Action::PaintStroke {
+                points: vec![Point::new(400.0, 300.0), Point::new(520.75, 333.3333)],
+                radius: 9.0,
+                color: Color32::from_rgba_premultiplied(30, 120, 200, 200),
+            },
+        ],
+    );
+    let mut pd = project_io::ProjectDocument::from_app(app.tab()).unwrap();
+    pd.recovery_source = Some(std::path::PathBuf::from("/tmp/作品/場面1.is2d"));
+    let bytes = project_io::project_file_bytes(&pd).unwrap();
+    assert_eq!(&bytes[..4], b"IS2D");
+    assert_eq!(
+        bytes[4..8],
+        project_io::PROJECT_FORMAT_VERSION.to_le_bytes()
+    );
+    assert_eq!(
+        u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+        (bytes.len() - 20) as u64
+    );
+    assert_eq!(
+        u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+        crc32fast::hash(&bytes[20..])
+    );
+    let back = project_io::project_from_bytes(&bytes).unwrap();
+    // 中身を JSON にして比べる（f64 は読み戻すと同じ値になる最短の10進で書くので、文字が同じなら数もビットまで同じ）
+    assert_eq!(
+        serde_json::to_string(&back).unwrap(),
+        serde_json::to_string(&pd).unwrap()
+    );
+    let nodes = |d: &project_io::ProjectDocument| -> Vec<u64> {
+        d.timeline
+            .layers
+            .iter()
+            .flat_map(|l| &l.keyframes)
+            .flat_map(|k| &k.maps)
+            .flat_map(|m| m.nodes.iter().map(|v| v.to_bits()))
+            .collect()
+    };
+    assert!(!nodes(&pd).is_empty());
+    assert_eq!(nodes(&back), nodes(&pd), "頂点の座標はビットまで同じ");
+    assert_eq!(back.library[0].name, "顔のパーツ（目）");
+    assert_eq!(back.recovery_source, pd.recovery_source);
+    // 読み戻した文書を保存し直すと、同じバイト列になる
+    assert_eq!(project_io::project_file_bytes(&back).unwrap(), bytes);
+}
+
+/// 保存の形（版 6）を読むときは、頭から順に確かめ、違うものをそれぞれの知らせで断る：前の形式（JSON）・is2d でない・
+/// 版が違う・長さが合わない（途中で切れた・後ろに余り）・CRC が合わない・postcard で読めない・中身の後ろに余り・
+/// 有限でない数
+#[test]
+fn project_file_refuses_wrong_or_broken_files() {
+    let pd =
+        project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(1, 1)).unwrap();
+    let good = project_io::project_file_bytes(&pd).unwrap();
+    assert!(project_io::project_from_bytes(&good).is_ok());
+    // 中身 `body` に正しい頭を付けたファイル
+    let with_header = |version: u32, body: &[u8]| -> Vec<u8> {
+        let mut b = b"IS2D".to_vec();
+        b.extend_from_slice(&version.to_le_bytes());
+        b.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        b.extend_from_slice(&crc32fast::hash(body).to_le_bytes());
+        b.extend_from_slice(body);
+        b
+    };
+    let err = |bytes: &[u8]| project_io::project_from_bytes(bytes).expect_err("断る");
+    let body = &good[20..];
+
+    let json = serde_json::to_vec(&pd).unwrap();
+    assert_eq!(err(&json), "前の形式（JSON）のファイルは開けません");
+    assert_eq!(
+        err(b"PK\x03\x04 zip file ........"),
+        "is2d のファイルではありません"
+    );
+    assert_eq!(err(b"IS2D"), "is2d のファイルではありません", "頭より短い");
+    assert_eq!(err(b""), "is2d のファイルではありません", "空のファイル");
+    assert_eq!(
+        err(&with_header(7, body)),
+        "未対応のプロジェクトバージョンです (version: 7)"
+    );
+    assert_eq!(
+        err(&good[..good.len() - 1]),
+        "ファイルが壊れています（長さが合いません）",
+        "途中で切れた"
+    );
+    let mut longer = good.clone();
+    longer.push(0);
+    assert_eq!(
+        err(&longer),
+        "ファイルが壊れています（長さが合いません）",
+        "後ろに余り"
+    );
+    let mut flipped = good.clone();
+    let mid = 20 + body.len() / 2;
+    flipped[mid] ^= 0x10;
+    assert_eq!(
+        err(&flipped),
+        "ファイルが壊れています（中身が変わっています）"
+    );
+    let mut extra = body.to_vec();
+    extra.push(0);
+    assert_eq!(
+        err(&with_header(project_io::PROJECT_FORMAT_VERSION, &extra)),
+        "プロジェクトファイルの形式が正しくありません（余りがあります）"
+    );
+    assert!(
+        err(&with_header(project_io::PROJECT_FORMAT_VERSION, &[0xff; 3]))
+            .starts_with("プロジェクトファイルの形式が正しくありません: ")
+    );
+    // 有限でない数（JSON では書けなかった）：頂点の座標・ステージの大きさ
+    let mut app = Is2dApp::default();
+    run(
+        &mut app,
+        &[doc_actions::Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(200.0, 120.0)],
+            radius: 10.0,
+            color: Color32::RED,
+        }],
+    );
+    let drawn = project_io::ProjectDocument::from_app(app.tab()).unwrap();
+    let mut nan_node = drawn.clone();
+    nan_node.timeline.layers[0].keyframes[0].maps[0].nodes[0] = f64::NAN;
+    let mut inf_stage = drawn.clone();
+    inf_stage.stage_size[1] = f32::INFINITY;
+    for broken in [nan_node, inf_stage] {
+        assert_eq!(
+            err(&project_io::project_file_bytes(&broken).unwrap()),
+            "ファイルが壊れています（有限でない数があります）"
+        );
+    }
 }

@@ -10,7 +10,9 @@ lyon_tessellation = "1.0"
 # 地図の重ね合わせと、ブラシの輪郭の自己交差の解消（vendor/i_overlay。9.1.0 に足した所がある写し。vendor/i_overlay/PATCH.md）
 i_overlay9 = { package = "i_overlay", path = "vendor/i_overlay" }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["float_roundtrip"] }
+# .is2d の中身（保存用の型を postcard で書く。書き方の仕様は 1.0 から変わらない）と、中身の CRC32（eframe も PNG のために使う）
+postcard = { version = "1.1", default-features = false, features = ["use-std"] }
+crc32fast = "1.5"
 rfd = "0.15"
 tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }
 
@@ -26,3 +28,5 @@ block2 = "=0.6.2"
 
 [dev-dependencies]
 fastrand = "2"
+# テストで、保存用の型を文字から作ったり、中を見たりする
+serde_json = { version = "1.0", features = ["float_roundtrip"] }

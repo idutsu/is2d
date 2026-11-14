@@ -15,10 +15,18 @@ use crate::symbol::{
 use crate::timeline::{Cel, Keyframe, Layer, ScopeMap, Timeline, TimelineCellSelection};
 pub(crate) use crate::timeline::{MAX_LAYERS_PER_TIMELINE, MAX_TIMELINE_FRAMES};
 
-/// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。版 5 は、セル画の階層ごとの地図（頂点と、境目の線を1本で
-/// 持つ辺）をそのまま書き（Adobe Animate と同じ持ち方）、インスタンスの重なり位置を階層の地図の並びで書く（`order`）。
-/// 面の図形は文書に持たず、使うときに地図から作る。それより前の版は開かない
-pub(crate) const PROJECT_FORMAT_VERSION: u32 = 5;
+/// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。版 6 は、頭（印・版・中身の長さ・中身の CRC32）のあとに、
+/// 保存用の型（`ProjectDocument`）を postcard で書いた中身を置く（`project_file_bytes`）。中身の持ち方は版 5 と同じで、
+/// セル画の階層ごとの地図（頂点と、境目の線を1本で持つ辺）をそのまま書き（Adobe Animate と同じ持ち方）、インスタンスの
+/// 重なり位置を階層の地図の並びで書く（`order`）。面の図形は文書に持たず、使うときに地図から作る。それより前の版
+/// （版 5 までの JSON のファイル）は開かない。設計：claude/保存の形をバイナリにする設計_版6_7b5f6c4.md
+pub(crate) const PROJECT_FORMAT_VERSION: u32 = 6;
+
+/// `.is2d` ファイルの先頭の印
+const PROJECT_FILE_MAGIC: [u8; 4] = *b"IS2D";
+
+/// `.is2d` ファイルの頭の大きさ：印（4）・版（u32）・中身の長さ（u64）・中身の CRC32（u32）。数はリトルエンディアン
+const PROJECT_FILE_HEADER_LEN: usize = 20;
 
 /// プロジェクトファイルの標準拡張子
 pub(crate) const PROJECT_FILE_EXTENSION: &str = "is2d";
@@ -815,10 +823,10 @@ impl TryFrom<SavedSymbolDef> for SymbolDef {
     }
 }
 
-/// `.is2d` ファイルのルート構造体
+/// `.is2d` ファイルの中身のルート構造体（版の番号はファイルの頭にだけ持つ：`project_file_bytes`）。postcard は項目を
+/// 並びの位置で読むので、書かない項目（`skip_serializing_if`）は作らない
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ProjectDocument {
-    pub(crate) version: u32,
     pub(crate) stage_size: [f32; 2],
     pub(crate) timeline: SavedTimeline,
     #[serde(default)]
@@ -827,7 +835,7 @@ pub(crate) struct ProjectDocument {
     pub(crate) next_symbol_id: u64,
     #[serde(default)]
     pub(crate) next_group_id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub(crate) recovery_source: Option<PathBuf>,
 }
 
@@ -864,7 +872,6 @@ impl ProjectDocument {
         saved_timeline.fps = doc.fps.clamp(1, 60);
 
         Self {
-            version: PROJECT_FORMAT_VERSION,
             stage_size: [doc.stage_size.x, doc.stage_size.y],
             timeline: saved_timeline,
             library: doc
@@ -885,8 +892,8 @@ impl ProjectDocument {
             self.stage_size = [800.0, 450.0];
             fixed.push("ステージサイズ".to_owned());
         }
-        // 地図は正しい地図（地図にできない形はセル画に書かない：`on_grid`）か、ファイルから読んだままの地図（JSON の数は
-        // 有限）なので、座標は有限。インスタンスの変換だけを確かめる
+        // 地図は正しい地図（地図にできない形はセル画に書かない：`on_grid`）か、ファイルから読んだままの地図（読むときに
+        // 数が有限か確かめてある：`only_finite_numbers`）なので、座標は有限。インスタンスの変換だけを確かめる
         let mut clean_timeline = |tl: &mut SavedTimeline, sym_name: Option<&str>| {
             for layer in &mut tl.layers {
                 for kf in &mut layer.keyframes {
@@ -919,6 +926,30 @@ impl ProjectDocument {
             clean_timeline(&mut sym.timeline, Some(&sym.name));
         }
         fixed
+    }
+
+    /// 書いてある小数（ステージの大きさ、地図の頂点と制御点、インスタンスの変換・中心点・色効果）がみな有限か。アプリは
+    /// 有限な数しか書かない（`remove_non_finite`）ので、そうでなければ壊れたファイル（読むときに断る：`project_from_bytes`）
+    pub(crate) fn only_finite_numbers(&self) -> bool {
+        let timeline_ok = |tl: &SavedTimeline| {
+            tl.layers.iter().flat_map(|l| &l.keyframes).all(|kf| {
+                kf.maps.iter().all(|m| {
+                    m.nodes.iter().all(|v| v.is_finite())
+                        && m.edges
+                            .iter()
+                            .all(|&(_, _, cx, cy, _, _)| cx.is_finite() && cy.is_finite())
+                }) && kf.instances.iter().all(|inst| {
+                    let b = &inst.binding;
+                    b.xform.iter().chain(&b.pivot).all(|v| v.is_finite())
+                        && b.color_effect.alpha.is_finite()
+                        && b.color_effect.brightness.is_finite()
+                })
+            })
+        };
+        self.stage_size.iter().all(|v| v.is_finite())
+            && std::iter::once(&self.timeline)
+                .chain(self.library.iter().map(|s| &s.timeline))
+                .all(timeline_ok)
     }
 
     /// 読み込んだ `ProjectDocument` から正規化済みの `Document` を構築する。地図が壊れていれば `Err`
@@ -1097,13 +1128,63 @@ pub(crate) fn update_window_title(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
     }
 }
 
-pub(crate) fn write_project_json(
-    file: std::fs::File,
-    doc: &ProjectDocument,
-) -> std::io::Result<()> {
-    let mut writer = std::io::BufWriter::new(file);
-    serde_json::to_writer(&mut writer, doc)?;
-    let file = writer.into_inner().map_err(|e| e.into_error())?;
+/// 保存用の写し `doc` の `.is2d` ファイルの中身（頭と、postcard で書いた中身）。頭を作るのはここだけ（確かめるのは
+/// `project_from_bytes` だけ）
+pub(crate) fn project_file_bytes(doc: &ProjectDocument) -> Result<Vec<u8>, String> {
+    let body =
+        postcard::to_allocvec(doc).map_err(|e| format!("保存する形にできませんでした: {e}"))?;
+    let mut bytes = Vec::with_capacity(PROJECT_FILE_HEADER_LEN + body.len());
+    bytes.extend_from_slice(&PROJECT_FILE_MAGIC);
+    bytes.extend_from_slice(&PROJECT_FORMAT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
+    bytes.extend_from_slice(&body);
+    Ok(bytes)
+}
+
+/// `.is2d` ファイルの中身 `bytes` を読む。頭（印・版・中身の長さ・CRC32）を順に確かめてから中身を読み、数がみな有限か
+/// 確かめる（`only_finite_numbers`）。どれかが合わなければ、何が違うかを書いた `Err`
+pub(crate) fn project_from_bytes(bytes: &[u8]) -> Result<ProjectDocument, String> {
+    if bytes.len() < PROJECT_FILE_HEADER_LEN || bytes[..4] != PROJECT_FILE_MAGIC {
+        return Err(if bytes.first() == Some(&b'{') {
+            "前の形式（JSON）のファイルは開けません".to_owned()
+        } else {
+            "is2d のファイルではありません".to_owned()
+        });
+    }
+    let u32_at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().expect("4 バイト"));
+    let version = u32_at(4);
+    if version != PROJECT_FORMAT_VERSION {
+        return Err(format!(
+            "未対応のプロジェクトバージョンです (version: {version})"
+        ));
+    }
+    let body_len = u64::from_le_bytes(bytes[8..16].try_into().expect("8 バイト"));
+    let body = &bytes[PROJECT_FILE_HEADER_LEN..];
+    if body.len() as u64 != body_len {
+        return Err("ファイルが壊れています（長さが合いません）".to_owned());
+    }
+    if crc32fast::hash(body) != u32_at(16) {
+        return Err("ファイルが壊れています（中身が変わっています）".to_owned());
+    }
+    let doc = match postcard::take_from_bytes::<ProjectDocument>(body) {
+        Ok((doc, [])) => doc,
+        Ok(_) => {
+            return Err("プロジェクトファイルの形式が正しくありません（余りがあります）".to_owned())
+        }
+        Err(e) => return Err(format!("プロジェクトファイルの形式が正しくありません: {e}")),
+    };
+    if !doc.only_finite_numbers() {
+        return Err("ファイルが壊れています（有限でない数があります）".to_owned());
+    }
+    Ok(doc)
+}
+
+/// `.is2d` ファイルの中身（`project_file_bytes`）をファイル `file` に書いて、ディスクまで書き込む
+pub(crate) fn write_project_bytes(file: std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = file;
+    file.write_all(bytes)?;
     file.sync_all()
 }
 
@@ -1134,8 +1215,9 @@ pub(crate) fn write_project_file_atomically(
         std::process::id()
     );
     let tmp_path = target_path.with_file_name(tmp_name);
+    let bytes = project_file_bytes(proj_doc)?;
     let write_res =
-        std::fs::File::create(&tmp_path).and_then(|file| write_project_json(file, proj_doc));
+        std::fs::File::create(&tmp_path).and_then(|file| write_project_bytes(file, &bytes));
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("一時ファイルの書き込みに失敗しました: {e}"));
@@ -1199,20 +1281,11 @@ pub(crate) fn save_project_to_path(
     Ok(fixed)
 }
 
-/// 指定されたファイルパス `path` から `ProjectDocument` を読み込み・バージョン検証して返す
+/// 指定されたファイルパス `path` から `ProjectDocument` を読み込み・確かめて返す（`project_from_bytes`）
 pub(crate) fn read_project_document(path: &Path) -> Result<ProjectDocument, String> {
-    let file =
-        std::fs::File::open(path).map_err(|e| format!("ファイルの読み込みに失敗しました: {e}"))?;
-    let doc: ProjectDocument = serde_json::from_reader(std::io::BufReader::new(file))
-        .map_err(|e| format!("プロジェクトファイルの形式が正しくありません: {e}"))?;
-
-    if doc.version != PROJECT_FORMAT_VERSION {
-        return Err(format!(
-            "未対応のプロジェクトバージョンです (version: {})",
-            doc.version
-        ));
-    }
-    Ok(doc)
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("ファイルの読み込みに失敗しました: {e}"))?;
+    project_from_bytes(&bytes)
 }
 
 /// 検証済みの `Document` を新しいタブ（または未編集の白紙無題タブ）へ読み込んでアクティブ化する
