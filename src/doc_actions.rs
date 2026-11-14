@@ -27,7 +27,7 @@ use crate::symbol::{ColorEffect, Document, SymbolInstanceBinding, SymbolLoopMode
 use crate::symbol_ops::{
     enter_symbol_from_library, enter_symbol_timeline, exit_symbol_timeline,
     prepare_convert_selection_to_symbol, prepare_place_symbol_instance,
-    selected_single_symbol_info,
+    prepare_swap_selected_instances, selected_single_symbol_info,
 };
 use crate::timeline::{Layer, Timeline, TimelineCellSelection, MAX_LAYERS_PER_TIMELINE};
 use crate::vector_engine::{
@@ -232,6 +232,9 @@ pub(crate) enum Action {
     DuplicateSymbol {
         sym_id: u64,
     },
+    SwapSymbol {
+        sym_id: u64,
+    },
     SetSymbolPlayback {
         loop_mode: Option<SymbolLoopMode>,
         first_frame: Option<usize>,
@@ -393,7 +396,10 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     }
     let check_symbol_nest = matches!(
         action,
-        Action::ConvertToSymbol | Action::Paste { .. } | Action::PlaceSymbol { .. }
+        Action::ConvertToSymbol
+            | Action::Paste { .. }
+            | Action::PlaceSymbol { .. }
+            | Action::SwapSymbol { .. }
     );
     let prev_ids = (host.tab().doc.next_symbol_id, host.tab().doc.next_group_id);
     let prev_imported_map =
@@ -670,6 +676,9 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         }
         Action::DeleteSymbol { sym_id } => apply_delete_symbol(tab, sym_id),
         Action::DuplicateSymbol { sym_id } => apply_duplicate_symbol(tab, sym_id),
+        Action::SwapSymbol { sym_id } => {
+            prepare_swap_selected_instances(tab, sym_id, |tab| push_undo(tab, None))
+        }
         Action::SetSymbolPlayback {
             loop_mode,
             first_frame,

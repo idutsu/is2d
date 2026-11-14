@@ -1550,55 +1550,60 @@ fn draw_selected_library_symbol_controls(
     let tl = tab.active_timeline();
     let can_place = tab.can_place_symbol_in_current_context(sel_id)
         && tl.is_layer_editable_by_id(active_scope_layer_id(&tab.session, tl));
-    if ui
-        .add_enabled(
+    let can_swap = !crate::symbol_ops::swap_targets(tab, sel_id).is_empty();
+    // 配置・編集・複製・削除・入替を、同じ幅で1行に並べる（ボタン、押せるか、説明、押せないときの説明、操作）
+    let buttons = [
+        (
+            format!("{} 配置", icons::ADD),
             can_place,
-            egui::Button::new(format!("{} ステージに配置", icons::ADD))
-                .min_size(Vec2::new(ui.available_width(), 28.0)),
-        )
-        .on_hover_text("選択中のシンボルを現在のフレーム・レイヤーに配置します")
-        .clicked()
-    {
-        actions.push(UiAction::Doc(Action::PlaceSymbol { sym_id: sel_id }));
-    }
-    ui.add_space(4.0);
+            "選択中のシンボルを現在のフレーム・レイヤーのステージ中央に配置します",
+            "このレイヤー・この階層には配置できません",
+            Action::PlaceSymbol { sym_id: sel_id },
+        ),
+        (
+            format!("{} 編集", icons::SYMBOL),
+            true,
+            "選択中のシンボルだけを、周りの絵とステージを出さずに編集します",
+            "",
+            Action::EnterSymbolFromLibrary { sym_id: sel_id },
+        ),
+        (
+            format!("{} 複製", icons::COPY),
+            true,
+            "選択中のシンボルを複製して、「のコピー」を付けた名前でライブラリに足します",
+            "",
+            Action::DuplicateSymbol { sym_id: sel_id },
+        ),
+        (
+            format!("{} 削除", icons::DELETE),
+            true,
+            "選択中のシンボルをライブラリから削除します",
+            "",
+            Action::DeleteSymbol { sym_id: sel_id },
+        ),
+        (
+            format!("{} 入替", icons::SWAP),
+            can_swap,
+            "キャンバスで選んでいるインスタンスを、選択中のシンボルに入れ替えます（位置・大きさ・回転・色効果・再生設定はそのまま）",
+            "キャンバスで別のシンボルのインスタンスを選ぶと、選択中のシンボルに入れ替えられます",
+            Action::SwapSymbol { sym_id: sel_id },
+        ),
+    ];
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        // 編集・複製・削除を同じ幅で並べる
-        let button_w = ((ui.available_width() - 8.0) / 3.0).floor();
-        if ui
-            .add_sized(
-                Vec2::new(button_w, 28.0),
-                egui::Button::new(format!("{} 編集", icons::SYMBOL)),
-            )
-            .on_hover_text("選択中のシンボルだけを、周りの絵とステージを出さずに編集します")
-            .clicked()
-        {
-            actions.push(UiAction::Doc(Action::EnterSymbolFromLibrary {
-                sym_id: sel_id,
-            }));
-        }
-        if ui
-            .add_sized(
-                Vec2::new(button_w, 28.0),
-                egui::Button::new(format!("{} 複製", icons::COPY)),
-            )
-            .on_hover_text(
-                "選択中のシンボルを複製して、「のコピー」を付けた名前でライブラリに足します",
-            )
-            .clicked()
-        {
-            actions.push(UiAction::Doc(Action::DuplicateSymbol { sym_id: sel_id }));
-        }
-        if ui
-            .add_sized(
-                Vec2::new(button_w, 28.0),
-                egui::Button::new(format!("{} 削除", icons::DELETE)),
-            )
-            .on_hover_text("選択中のシンボルをライブラリから削除します")
-            .clicked()
-        {
-            actions.push(UiAction::Doc(Action::DeleteSymbol { sym_id: sel_id }));
+        let n = buttons.len() as f32;
+        let button_w = ((ui.available_width() - 4.0 * (n - 1.0)) / n).floor();
+        for (text, enabled, hover, disabled_hover, action) in buttons {
+            let resp = ui
+                .add_enabled_ui(enabled, |ui| {
+                    ui.add_sized(Vec2::new(button_w, 28.0), egui::Button::new(text))
+                })
+                .inner
+                .on_hover_text(hover)
+                .on_disabled_hover_text(disabled_hover);
+            if resp.clicked() {
+                actions.push(UiAction::Doc(action));
+            }
         }
     });
     ui.add_space(6.0);

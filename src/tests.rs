@@ -30804,7 +30804,10 @@ fn duplicating_a_symbol_adds_a_copy_below_it() {
             .shapes()
             .iter()
             .map(|s| {
-                let segs = s.contours().flat_map(|c| c.segments.iter().copied()).collect();
+                let segs = s
+                    .contours()
+                    .flat_map(|c| c.segments.iter().copied())
+                    .collect();
                 (s.color, segs)
             })
             .collect();
@@ -30838,7 +30841,10 @@ fn duplicating_a_symbol_adds_a_copy_below_it() {
     assert_eq!(insts_a.len(), 1);
     assert_eq!(insts_c.len(), 1);
     assert_eq!(insts_c[0].0, sym_b, "中の子のシンボルは元と同じもの");
-    assert_ne!(insts_c[0].1, insts_a[0].1, "中のインスタンスの番号は振り直す");
+    assert_ne!(
+        insts_c[0].1, insts_a[0].1,
+        "中のインスタンスの番号は振り直す"
+    );
     assert_eq!(stage_inst(&app), sym_a, "置いてあるインスタンスは元のまま");
 
     // 2. もう一度複製すると「のコピー 2」
@@ -30869,4 +30875,161 @@ fn duplicating_a_symbol_adds_a_copy_below_it() {
     assert_eq!(ids(&app), vec![sym_a, copy1, sym_b]);
     app.undo();
     assert_eq!(ids(&app), vec![sym_a, sym_b]);
+}
+
+/// ライブラリの「入替」：キャンバスで選んでいるインスタンスを、一覧で選んだシンボルに入れ替える。位置・大きさ・回転・
+/// 中心点・色効果・再生設定はそのまま。複数選んでいれば全部。一緒に選んだ生の図形と、選んでいないインスタンスは変わらない。
+/// 選んだものが全部もうそのシンボルのとき・何も選んでいないとき・入れ子が回るときは断る。Undo 1回で戻る
+#[test]
+fn swapping_replaces_the_symbol_of_selected_instances_and_keeps_their_settings() {
+    use doc_actions::Action;
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+    let green = Color32::from_rgb(40, 170, 90);
+    let blue = Color32::from_rgb(60, 100, 220);
+    let make_symbol = |app: &mut Is2dApp, y: f64, color: Color32| {
+        run(
+            app,
+            &[
+                Action::PaintStroke {
+                    points: vec![Point::new(300.0, y), Point::new(400.0, y)],
+                    radius: 20.0,
+                    color,
+                },
+                Action::SelectSingleAt {
+                    pt: Point::new(390.0, y),
+                },
+                Action::ConvertToSymbol,
+                Action::Deselect,
+            ],
+        );
+        app.doc.library.last().unwrap().id
+    };
+    let sym_a = make_symbol(&mut app, 300.0, red);
+    let sym_b = make_symbol(&mut app, 450.0, green);
+    run(
+        &mut app,
+        &[
+            Action::PlaceSymbol { sym_id: sym_a },
+            Action::Deselect,
+            Action::PaintStroke {
+                points: vec![Point::new(300.0, 600.0), Point::new(400.0, 600.0)],
+                radius: 20.0,
+                color: blue,
+            },
+            // 1つ目の A に色効果を付けておく
+            Action::SelectSingleAt {
+                pt: Point::new(390.0, 300.0),
+            },
+            Action::SetSymbolColorEffect {
+                effect: crate::symbol::ColorEffect::new(0.5, 0.2),
+            },
+        ],
+    );
+    let bindings = |app: &Is2dApp| {
+        app.doc.root.layers[0].keyframes[0]
+            .cel
+            .instances
+            .iter()
+            .map(|i| (i.binding.instance_gid, i.binding))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = bindings(&app);
+    let gid_of = |sym: u64| -> Vec<u64> {
+        before
+            .values()
+            .filter(|b| b.symbol_id == sym)
+            .map(|b| b.instance_gid)
+            .collect()
+    };
+    let (a_gids, b_gids) = (gid_of(sym_a), gid_of(sym_b));
+    assert_eq!((a_gids.len(), b_gids.len()), (2, 1));
+    // 2つの A と生の青い線を選ぶ（B のインスタンスは選ばない）
+    app.session.selection.clear();
+    let picked: Vec<FillShape> = app
+        .scene()
+        .iter()
+        .filter(|s| s.color == blue || s.symbol_instance.is_some_and(|b| b.symbol_id == sym_a))
+        .cloned()
+        .collect();
+    for s in &picked {
+        app.session.selection.insert_shape(s);
+    }
+    let raw_before = app.scene().iter().filter(|s| s.color == blue).count();
+    assert_eq!(
+        symbol_ops::swap_targets(&app.tabs[app.active], sym_b),
+        a_gids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>(),
+        "入れ替えるのは選んだ2つの A だけ"
+    );
+
+    // 1. B に入れ替える
+    assert!(doc_actions::apply(
+        &mut app,
+        Action::SwapSymbol { sym_id: sym_b }
+    ));
+    let after = bindings(&app);
+    for gid in &a_gids {
+        let mut expected = before[gid];
+        expected.symbol_id = sym_b;
+        assert_eq!(after[gid], expected, "シンボルだけ変わり、ほかはそのまま");
+    }
+    assert_ne!(
+        before[&a_gids[0]].color_effect,
+        crate::symbol::ColorEffect::default(),
+        "色効果を付けた A も確かめている"
+    );
+    assert_eq!(
+        after[&b_gids[0]], before[&b_gids[0]],
+        "選んでいない B は変わらない"
+    );
+    assert_eq!(
+        app.scene().iter().filter(|s| s.color == blue).count(),
+        raw_before,
+        "一緒に選んだ生の図形は変わらない"
+    );
+    assert!(
+        a_gids
+            .iter()
+            .all(|g| app.session.selection.instances.contains(g)),
+        "選択はそのまま"
+    );
+
+    // 2. 全部もう B なので断る。Undo 1回で A に戻る
+    assert!(!doc_actions::apply(
+        &mut app,
+        Action::SwapSymbol { sym_id: sym_b }
+    ));
+    app.undo();
+    assert_eq!(bindings(&app), before);
+
+    // 3. 何も選んでいなければ断る
+    app.session.selection.clear();
+    assert!(symbol_ops::swap_targets(&app.tabs[app.active], sym_b).is_empty());
+    assert!(!doc_actions::apply(
+        &mut app,
+        Action::SwapSymbol { sym_id: sym_b }
+    ));
+    assert_eq!(bindings(&app), before);
+
+    // 4. B の中に置いた A を B に入れ替えると、B が自分を含むので断る
+    run(
+        &mut app,
+        &[
+            Action::EnterSymbolFromLibrary { sym_id: sym_b },
+            Action::PlaceSymbol { sym_id: sym_a },
+        ],
+    );
+    assert_eq!(
+        app.session.selection.instances.len(),
+        1,
+        "置いた A を選んでいる"
+    );
+    assert!(symbol_ops::swap_targets(&app.tabs[app.active], sym_b).is_empty());
+    assert!(!doc_actions::apply(
+        &mut app,
+        Action::SwapSymbol { sym_id: sym_b }
+    ));
 }

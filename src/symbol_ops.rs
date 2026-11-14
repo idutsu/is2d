@@ -4,8 +4,8 @@ use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating,
-    editable_layer_ids, finish_cel_writes, reset_session_after_timeline_change, write_cel,
-    write_cels, Tab, View,
+    editable_layer_ids, finish_cel_writes, reset_session_after_timeline_change, update_instances,
+    write_cel, write_cels, Tab, View,
 };
 use crate::clipboard_ops::{
     content_xform, prepare_placement, put_placements, selected_content, Content,
@@ -134,6 +134,57 @@ fn content_center(tab: &Tab, content: &Content) -> Point {
     maps.chain(insts)
         .reduce(|a, b| a.union(b))
         .map_or(Point::ZERO, |r| r.center())
+}
+
+/// ライブラリの「入替」で、シンボル `symbol_id` に入れ替えるインスタンスの番号：キャンバスで選んでいるインスタンスの
+/// うち、編集できるレイヤーにあって、まだ別のシンボルのもの（一緒に選んだ図形・グループは入れない。何も選んでいなければ
+/// 空）。今の階層に `symbol_id` を置くと入れ子が回るとき（「配置」と同じ決まり）も空
+pub(crate) fn swap_targets(tab: &Tab, symbol_id: u64) -> HashSet<u64> {
+    let selected = &tab.session.selection.instances;
+    if selected.is_empty()
+        || !tab
+            .doc
+            .can_place_symbol_in_current_context(&tab.session.edit_path, symbol_id)
+    {
+        return HashSet::new();
+    }
+    let layer_ids = editable_layer_ids(tab);
+    tab.scene()
+        .iter()
+        .filter(|s| layer_ids.contains(&s.layer_id))
+        .filter_map(|s| s.symbol_instance)
+        .filter(|b| b.symbol_id != symbol_id && selected.contains(&b.instance_gid))
+        .map(|b| b.instance_gid)
+        .collect()
+}
+
+/// キャンバスで選んでいるインスタンス（`swap_targets`）を、シンボル `symbol_id` に入れ替える（Adobe Animate の「入れ替え」）。
+/// 位置・大きさ・回転・中心点・色効果・再生設定はそのままで、シンボルだけを変える。選択はそのまま
+pub(crate) fn prepare_swap_selected_instances(
+    tab: &mut Tab,
+    symbol_id: u64,
+    before_mutate: impl FnOnce(&mut Tab),
+) -> bool {
+    if swap_targets(tab, symbol_id).is_empty() || !commit_floating(tab) {
+        return false;
+    }
+    // 浮いた片を確定したあとで決め直す（インスタンスの番号は確定しても変わらない）
+    let targets = swap_targets(tab, symbol_id);
+    if targets.is_empty() {
+        return false;
+    }
+    before_mutate(tab);
+    let layer_ids = editable_layer_ids(tab);
+    let updated = update_instances(
+        tab,
+        &layer_ids,
+        |gid| targets.contains(&gid),
+        |b| b.symbol_id = symbol_id,
+    );
+    if updated {
+        reset_session_after_timeline_change(tab);
+    }
+    updated
 }
 
 /// ライブラリ内の指定シンボル `symbol_id` の新しいインスタンスを現在のステージ中央へ配置する
