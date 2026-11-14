@@ -137,23 +137,10 @@ pub(crate) fn interpolate_affine_with_pivot(
         }
     };
     let rot = rot0 + delta_rot * t;
-    const MIN_TWEEN_SCALE: f64 = 1e-3;
-    let mut sx = sx0 + (sx1 - sx0) * t;
-    let mut sy = sy0 + (sy1 - sy0) * t;
-    if sx.abs() < MIN_TWEEN_SCALE {
-        sx = if sx0 >= 0.0 {
-            MIN_TWEEN_SCALE
-        } else {
-            -MIN_TWEEN_SCALE
-        };
-    }
-    if sy.abs() < MIN_TWEEN_SCALE {
-        sy = if sy0 >= 0.0 {
-            MIN_TWEEN_SCALE
-        } else {
-            -MIN_TWEEN_SCALE
-        };
-    }
+    // 反転のトゥイーンでは、途中で拡大率が 0 を通る（そのコマの変換は潰れていて、インスタンスは描かない：
+    // `SymbolInstanceBinding::instantiate_shapes`）
+    let sx = sx0 + (sx1 - sx0) * t;
+    let sy = sy0 + (sy1 - sy0) * t;
     let sh = sh0 + (sh1 - sh0) * t;
 
     let (sin_r, cos_r) = rot.sin_cos();

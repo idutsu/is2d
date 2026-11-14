@@ -258,8 +258,11 @@ impl Contour {
         }
     }
 
+    /// 座標の変換 `affine` で写す。潰れた変換（逆にできない）でも、数が有限なら写す（面積 0 の輪郭になり、見えない。
+    /// 潰れた変換で置いたインスタンスを描かないのは `SymbolInstanceBinding::instantiate_shapes` の1か所）。数が有限でない
+    /// 変換は写せないのでかけない（図形の変換はどれも同じ）
     pub(crate) fn transform(&mut self, affine: Affine) {
-        if !invertible(affine) {
+        if !affine.is_finite() {
             return;
         }
         for seg in self.segments_mut() {
@@ -466,11 +469,6 @@ impl FillShape {
         if self.symbol_instance.is_some() {
             let _ = self.fill_mesh();
             self.transform_with_cached_mesh(xform);
-            if !invertible(xform) && xform.as_coeffs().iter().all(|v| v.is_finite()) {
-                if let Some(b) = &mut self.symbol_instance {
-                    b.xform = xform * b.xform;
-                }
-            }
         } else {
             self.transform(xform);
         }
@@ -645,7 +643,8 @@ impl FillShape {
     }
 
     fn transform_with_max_scale_sq(&mut self, affine: Affine, max_scale_sq_limit: f64) {
-        if !invertible(affine) {
+        // 数が有限でない変換はかけない（潰れた変換はかける：`Contour::transform`）
+        if !affine.is_finite() {
             return;
         }
         let coeffs @ [a, b, c, d, _, _] = affine.as_coeffs();
@@ -672,7 +671,8 @@ impl FillShape {
     /// 自由変形ドラッグ中、ドラッグ開始時の `orig` から既存の単一所有 `fill_mesh` 頂点バッファを再利用して `affine` を適用する
     /// （`clone_from` による `Arc` 参照カウント増加と毎フレームの頂点バッファ再確保を回避する）
     pub(crate) fn transform_from_origin(&mut self, orig: &FillShape, affine: Affine) {
-        if !invertible(affine) {
+        // 数が有限でない変換はかけない（潰れた変換はかける：`Contour::transform`）
+        if !affine.is_finite() {
             self.clone_from(orig);
             return;
         }

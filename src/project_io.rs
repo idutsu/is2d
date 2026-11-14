@@ -381,11 +381,9 @@ impl From<SymbolInstanceBinding> for SavedSymbolInstanceBinding {
 
 impl From<SavedSymbolInstanceBinding> for SymbolInstanceBinding {
     fn from(s: SavedSymbolInstanceBinding) -> Self {
-        let xform = if crate::vector_engine::invertible(Affine::new(s.xform)) {
-            Affine::new(s.xform)
-        } else {
-            Affine::IDENTITY
-        };
+        // 潰れた変換もそのまま読む（そのインスタンスは描かない：`instantiate_shapes`）。数が有限かは読み込みの初めに確かめる
+        // （`only_finite_numbers`）
+        let xform = Affine::new(s.xform);
         Self {
             instance_gid: s.instance_gid,
             symbol_id: s.symbol_id,

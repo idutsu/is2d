@@ -24,7 +24,9 @@ impl SymbolInstanceBinding {
     }
 
     /// ローカル座標系のシェイプ列 `local_shapes` を、このインスタンスの変換行列 `self.xform`・`layer_id`・
-    /// スコープパス `scope_prefix`（末尾に `self.instance_gid` を自動付与）でステージ座標へ展開する
+    /// スコープパス `scope_prefix`（末尾に `self.instance_gid` を自動付与）でステージ座標へ展開する。変換が潰れている
+    /// （逆にできない：`invertible`。反転のトゥイーンの真ん中、縮めすぎたインスタンスなど）ときは何も描かない（面積 0 の
+    /// 絵は見えない。潰れた変換で置いた絵を描かないのはこの1か所）
     pub(crate) fn instantiate_shapes(
         self,
         local_shapes: &[FillShape],
@@ -32,6 +34,9 @@ impl SymbolInstanceBinding {
         scope_prefix: &[u64],
         with_mesh: bool,
     ) -> Vec<FillShape> {
+        if !crate::vector_engine::invertible(self.xform) {
+            return Vec::new();
+        }
         let mut out = Vec::with_capacity(local_shapes.len());
         for s in local_shapes {
             if with_mesh {

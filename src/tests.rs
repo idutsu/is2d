@@ -2561,9 +2561,15 @@ fn test_degenerate_nan_infinite_stroke_and_affine_inputs_do_not_panic() {
     let mut shape = dot_shapes[0].clone();
     let orig_bbox = shape.bounding_box();
     shape.translate(KVec2::new(f64::NAN, f64::INFINITY));
-    shape.transform(Affine::scale(0.0));
     shape.transform(Affine::new([f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]));
-    assert_eq!(shape.bounding_box(), orig_bbox);
+    assert_eq!(
+        shape.bounding_box(),
+        orig_bbox,
+        "数が有限でない移動・変換はかけない"
+    );
+    // 潰れた変換は（有限なら）かける：面積 0 の図形になる（R7）
+    shape.transform(Affine::scale(0.0));
+    assert_eq!(shape.bounding_box(), KRect::ZERO);
     assert!(!shape.contains_point(Point::new(f64::NAN, f64::NAN)));
 }
 
@@ -2888,6 +2894,59 @@ fn entering_a_symbol_uses_the_instance_binding_of_the_current_frame() {
         app.session.edit_path.levels[0].xform_in_parent, xform,
         "結び付けの変換そのまま"
     );
+}
+
+/// 潰れた変換（逆にできない）で置いたインスタンスは描かない（面積 0 の絵は見えない）。保存して開き直しても変換は
+/// そのまま（単位行列に戻さない）。直す前は、潰れた変換では図形を変えずに出したので、インスタンスがシンボルの座標・
+/// 元の大きさで描かれ、開き直すと変換が単位行列に戻って元の大きさで出た（レビュー f01d518 の R7・N-6001）
+#[test]
+fn instances_with_a_collapsed_transform_are_not_drawn() {
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(200.0, 140.0),
+            10.0,
+            Color32::RED,
+        ),
+    );
+    run(&mut app, &[Action::SelectAll, Action::ConvertToSymbol]);
+    assert!(canvas_tool::clear_selection(&mut app));
+    let set = |app: &mut Is2dApp, xform: kurbo::Affine| {
+        app.doc.root.layers[0].keyframe_mut(0).cel.instances_mut()[0]
+            .binding
+            .xform = xform;
+        app.refresh_scene_base();
+    };
+    set(&mut app, kurbo::Affine::translate((300.0, 300.0)));
+    assert!(app.scene().len() > 0, "ふつうの変換なら描く");
+    for collapsed in [
+        // 横の拡大率が 0
+        kurbo::Affine::new([0.0, 0.0, 0.0, 1.0, 300.0, 300.0]),
+        // 縮めすぎ（行列式が `MIN_DET` より小さい）
+        kurbo::Affine::translate((300.0, 300.0)) * kurbo::Affine::scale(1e-7),
+    ] {
+        set(&mut app, collapsed);
+        assert_eq!(app.scene().len(), 0, "{collapsed:?} では何も描かない");
+    }
+    let dir = std::env::temp_dir().join(format!("is2d_collapsed_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("collapsed.is2d");
+    crate::project_io::save_project_to_path(&mut app, &path).unwrap();
+    let mut reopened = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut reopened, &path, None).unwrap();
+    assert_eq!(
+        reopened.doc.root.layers[0].keyframes[0].cel.instances[0]
+            .binding
+            .xform,
+        kurbo::Affine::translate((300.0, 300.0)) * kurbo::Affine::scale(1e-7),
+        "開き直しても変換はそのまま"
+    );
+    assert_eq!(reopened.scene().len(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// ライブラリのプレビューの写しは、いま描いている1つだけを持つ（別のシンボルを描くと置き換わり、消したシンボルの写しが
@@ -5308,14 +5367,15 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
 fn test_flip_tween_midpoint_and_horizontal_flip_without_spurious_rotation() {
     use crate::symbol::{interpolate_affine_with_pivot, TweenRotate};
 
-    // 1. 垂直反転 (scale_non_uniform(1.0, -1.0)) を含むトゥイーンの中間フレーム (t = 0.5) でも特異行列にならずピボット位置へ変換されること (H5)
+    // 1. 垂直反転 (scale_non_uniform(1.0, -1.0)) を含むトゥイーンの中間フレーム (t = 0.5) では、拡大率が 0 を通る（変換は
+    //    潰れ、インスタンスは描かない：`instantiate_shapes`）。ピボットの位置は補間した所
     let a0 = kurbo::Affine::translate((100.0, 100.0));
     let a1 = kurbo::Affine::translate((300.0, 100.0)) * kurbo::Affine::scale_non_uniform(1.0, -1.0);
     let (mid, _) =
         interpolate_affine_with_pivot(a0, Point::ZERO, a1, Point::ZERO, TweenRotate::Auto, 0.5);
     assert!(
-        mid.determinant().abs() > 1e-9,
-        "反転トゥイーンの中間 (t=0.5) でも行列式が非ゼロに保たれること"
+        !crate::vector_engine::invertible(mid),
+        "反転トゥイーンの中間 (t=0.5) は潰れた変換（下限で太さを残さない）"
     );
     let mid_origin = mid * Point::ZERO;
     assert!(
