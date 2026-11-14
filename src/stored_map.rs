@@ -320,6 +320,8 @@ impl StoredMap {
 pub(crate) struct TileWriter {
     index: IntMap<usize, u32>,
     colors: std::collections::HashMap<[u8; 4], u32>,
+    /// 図形の番号から、書く印（1 からの通し番号。初めて出てきた順）
+    labels: IntMap<ShapeId, u64>,
     out: SavedTiles,
 }
 
@@ -369,14 +371,23 @@ impl TileWriter {
             }
             no
         };
+        let left = color(e.left);
+        let right = color(e.right);
+        let mut label = |id: Option<NonZeroU64>| -> u64 {
+            let Some(id) = id else {
+                return 0;
+            };
+            let next = self.labels.len() as u64 + 1;
+            *self.labels.entry(id.get()).or_insert(next)
+        };
         SavedEdge {
             a,
             b,
             ctrl: [e.ctrl.x, e.ctrl.y],
-            left: color(e.left),
-            right: color(e.right),
-            left_src: e.left_src.map_or(0, NonZeroU64::get),
-            right_src: e.right_src.map_or(0, NonZeroU64::get),
+            left,
+            right,
+            left_src: label(e.left_src),
+            right_src: label(e.right_src),
         }
     }
 
@@ -390,12 +401,27 @@ impl TileWriter {
 /// していた塊は、読んでも共有したまま。見る順によらない）
 pub(crate) struct TileReader {
     tiles: Vec<Tile>,
-    max_label: u64,
 }
 
 impl TileReader {
-    /// 塊の表 `saved` を読む。色の番号・点の番号が表の外か、辺の無い塊があれば `None`（壊れたファイル）
+    /// 塊の表 `saved` を読む。色の番号・点の番号が表の外か、辺の無い塊があれば `None`（壊れたファイル）。辺の側の図形の
+    /// 印（1 からの通し番号：`TileWriter`）は、続けて取った新しい図形の番号に替える（同じ印は同じ番号。ファイルに書いた
+    /// 数がそのまま番号になることは無いので、細工したファイルでも、これから振る番号が今ある番号と重ならない）。印が辺の
+    /// 側の数より大きければ（アプリは書かない）`None`
     pub(crate) fn new(saved: &SavedTiles) -> Option<Self> {
+        let sides: u64 = saved.tiles.iter().map(|t| 2 * t.edges.len() as u64).sum();
+        let labels = saved
+            .tiles
+            .iter()
+            .flat_map(|t| &t.edges)
+            .map(|e| e.left_src.max(e.right_src))
+            .max()
+            .unwrap_or(0);
+        if labels > sides {
+            return None;
+        }
+        let first = crate::vector_engine::new_shape_ids(labels);
+        let label = |n: u64| NonZeroU64::new(n).and_then(|n| NonZeroU64::new(first + n.get() - 1));
         let color = |i: u32| -> Option<Option<Color32>> {
             match i {
                 0 => Some(None),
@@ -405,7 +431,6 @@ impl TileReader {
                     .map(|c| Some(Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3]))),
             }
         };
-        let mut max_label = 0;
         let mut tiles = Vec::with_capacity(saved.tiles.len());
         for t in &saved.tiles {
             let node = |i: u32| t.nodes.get(i as usize).map(|p| Point::new(p[0], p[1]));
@@ -413,15 +438,14 @@ impl TileReader {
                 .edges
                 .iter()
                 .map(|e| {
-                    max_label = max_label.max(e.left_src).max(e.right_src);
                     Some(StoredEdge {
                         a: node(e.a)?,
                         b: node(e.b)?,
                         ctrl: Point::new(e.ctrl[0], e.ctrl[1]),
                         left: color(e.left)?,
                         right: color(e.right)?,
-                        left_src: NonZeroU64::new(e.left_src),
-                        right_src: NonZeroU64::new(e.right_src),
+                        left_src: label(e.left_src),
+                        right_src: label(e.right_src),
                     })
                 })
                 .collect();
@@ -431,7 +455,7 @@ impl TileReader {
             }
             tiles.push(edges.into());
         }
-        Some(Self { tiles, max_label })
+        Some(Self { tiles })
     }
 
     /// 塊の番号の並び `indices` の地図。番号が表の外なら `None`（壊れたファイル）
@@ -441,10 +465,5 @@ impl TileReader {
             .map(|&i| self.tiles.get(i as usize).cloned())
             .collect();
         Some(StoredMap::of_tiles(tiles?))
-    }
-
-    /// 塊に記された図形の番号のうち、いちばん大きいもの（読んだあとに振る番号がこれと重ならないようにする）
-    pub(crate) fn max_label(&self) -> u64 {
-        self.max_label
     }
 }

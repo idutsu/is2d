@@ -179,12 +179,13 @@ pub(crate) fn next_mesh_revision() -> u64 {
 }
 
 pub(crate) fn next_shape_id() -> u64 {
-    NEXT_SHAPE_ID.fetch_add(1, Ordering::Relaxed)
+    new_shape_ids(1)
 }
 
-/// これから振る図形の番号を `id` より後ろにする（ファイルから読んだ地図に記された番号と重ならないように）
-pub(crate) fn reserve_shape_ids_through(id: u64) {
-    NEXT_SHAPE_ID.fetch_max(id.saturating_add(1), Ordering::Relaxed);
+/// 続けて使える新しい図形の番号を `n` 個取り、その最初の番号を返す（図形の番号を振るのはこれ1つ。ファイルから読んだ
+/// 地図の印も、これで取った番号に替える：`TileReader::new`）
+pub(crate) fn new_shape_ids(n: u64) -> u64 {
+    NEXT_SHAPE_ID.fetch_add(n, Ordering::Relaxed)
 }
 
 /// `Arc` と共存可能なスレッドセーフ（`Send + Sync`）かつ `Clone` 対応の内部可変キャッシュラッパー

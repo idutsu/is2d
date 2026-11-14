@@ -31973,6 +31973,61 @@ fn maps_are_checked_in_the_background_after_opening() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
+/// ファイルに書いた図形の印は、そのまま番号にしない（読むたびに新しい番号を続けて取り、同じ印は同じ番号にする）。辺の
+/// 側の数より大きい印は、壊れたファイルとして断る。直す前（fa2e16a）は、印をそのまま番号にして、これから振る番号を
+/// その後ろにしたので、u64 の終わり近くの印を書いたファイルを開くと、振る番号が 0 に戻り、どのタブでも今ある番号と
+/// 重なった
+#[test]
+fn shape_labels_in_a_file_never_become_shape_numbers() {
+    let path = save_many_keyframes("crafted_labels", 2);
+    let read = || {
+        crate::project_io::read_project_document(&path)
+            .unwrap()
+            .into_document()
+            .unwrap()
+    };
+    let labels = |d: &symbol::Document| -> Vec<Vec<u64>> {
+        d.root.layers[0]
+            .keyframes
+            .iter()
+            .map(|k| {
+                let mut v: Vec<u64> = k.cel.maps[0].stored().to_dense().labels().collect();
+                v.sort_unstable();
+                v.dedup();
+                v
+            })
+            .collect()
+    };
+    let (first, second) = (labels(&read()), labels(&read()));
+    assert_eq!(
+        first.iter().map(Vec::len).collect::<Vec<_>>(),
+        second.iter().map(Vec::len).collect::<Vec<_>>()
+    );
+    assert!(first.iter().all(|v| !v.is_empty()));
+    let seen: std::collections::HashSet<u64> = first.iter().flatten().copied().collect();
+    assert!(
+        second.iter().flatten().all(|id| !seen.contains(id)),
+        "読むたびに新しい番号"
+    );
+
+    let mut proj = crate::project_io::read_project_document(&path).unwrap();
+    proj.map_tiles.tiles[0].edges[0].left_src = u64::MAX - 1;
+    crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
+    let mut app = Is2dApp::default();
+    let before = crate::vector_engine::next_shape_id();
+    let opened = crate::project_io::open_project_in_tab(&mut app, &path, None);
+    let after = crate::vector_engine::next_shape_id();
+    assert!(
+        before < after && after < before + 1_000_000,
+        "振る番号は先へ少し進むだけ：{before} → {after}"
+    );
+    assert_eq!(
+        opened.unwrap_err(),
+        "プロジェクトファイルの地図が壊れています"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
 /// 計測の M1 の見込みの倍率は、レビューのきまりの表どおり（Pro・Max も同じ世代。Mac 以外は 1）
 #[test]
 fn m1_factor_follows_the_review_table() {

@@ -453,7 +453,8 @@ pub(crate) struct SavedTile {
 }
 
 /// しまう辺の保存の形：両端（塊の点の番号）、制御点の座標、左右の色（文書の色の表の 1 からの番号。0 は何も無い）、左右の
-/// 側の図形の番号（0 は無い）
+/// 側の図形の印（文書の中の 1 からの通し番号で、同じ印は同じ図形。0 は無い。読むときに新しい図形の番号に替える：
+/// `TileWriter`・`TileReader`）
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub(crate) struct SavedEdge {
     pub(crate) a: u32,
@@ -908,11 +909,10 @@ impl ProjectDocument {
 
     /// 読み込んだ `ProjectDocument` から正規化済みの `Document` を構築する。地図が壊れていれば `Err`
     pub(crate) fn into_document(mut self) -> Result<Document, String> {
-        // 地図：塊の表から、塊を共有したしまう形を作る（番号が表の外なら壊れたファイル）。塊に記された図形の番号より後ろから
-        // 新しい番号を振る
+        // 地図：塊の表から、塊を共有したしまう形を作る（番号が表の外なら壊れたファイル。塊に記した図形の印は新しい番号に
+        // 替える：`TileReader::new`）
         let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
         let reader = TileReader::new(&self.map_tiles).ok_or_else(broken)?;
-        crate::vector_engine::reserve_shape_ids_through(reader.max_label());
         let mut all_read = true;
         self.for_each_map(|m| {
             m.stored = reader.map(&m.tiles);
