@@ -17809,7 +17809,8 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
     assert_eq!(app_layers.file.as_deref(), Some(over_layers_path.as_path()));
     assert_eq!(app_layers.doc.root.layers.len(), 1000);
 
-    // 4. 地図が壊れたファイル（辺が範囲の外の頂点を指す・辺どうしが交わる）は開かない
+    // 4. 地図に直せないファイル（辺が範囲の外の頂点を指す）は開かない。正しい地図でないだけ（面の輪郭の色がそろわない）の
+    //    ファイルは開き、その地図は使うときに確かめて、何も無い地図にする（`broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is`）
     let broken_path = base_dir.join("broken_map.is2d");
     let mut proj_broken = crate::project_io::read_project_document(&normal_path).unwrap();
     let m = &mut proj_broken.timeline.layers[0].keyframes[0].maps[0];
@@ -17831,7 +17832,9 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
     }
     let _ = r;
     crate::project_io::write_project_file_atomically(&broken_path, &proj_cross).unwrap();
-    assert!(open_project_in_tab(&mut Is2dApp::default(), &broken_path, None).is_err());
+    let mut app_cross = Is2dApp::default();
+    assert!(open_project_in_tab(&mut app_cross, &broken_path, None).is_ok());
+    assert!(app_cross.scene().len() == 0, "壊れた地図は何も無い地図");
 
     let _ = std::fs::remove_dir_all(&base_dir);
 }
@@ -25980,10 +25983,10 @@ mod map_overlay {
             .map(|s| (s.shape_id, s.mesh_revision))
             .collect();
         for seed in 0..100 {
-            let cel = crate::timeline::Cel::from_maps(
-                vec![(
-                    Vec::new(),
-                    native_scene(seed, 4).checked().expect("正しい地図"),
+            let cel = crate::timeline::Cel::from_saved(
+                vec![crate::project_io::SavedScopeMap::new(
+                    &[],
+                    &native_scene(seed, 4),
                 )],
                 Vec::new(),
                 None,
@@ -29730,47 +29733,74 @@ fn measure_work() {
         return;
     };
     let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+    // 作品の中身と、コマごとの線の量（ファイルから読んだまま数える。地図を確かめさせない）
+    let saved = crate::project_io::read_project_document(std::path::Path::new(&path))
+        .expect("作品を読めること");
+    let (mut layers, mut keyframes, mut maps, mut edges) = (0usize, 0usize, 0usize, 0usize);
+    for tl in std::iter::once(&saved.timeline).chain(saved.library.iter().map(|s| &s.timeline)) {
+        for layer in &tl.layers {
+            layers += 1;
+            for kf in &layer.keyframes {
+                keyframes += 1;
+                maps += kf.maps.len();
+                edges += kf.maps.iter().map(|m| m.edges.len()).sum::<usize>();
+            }
+        }
+    }
+    // コマ f の辺の数（レイヤーごとに、f に出るキーフレームの地図の辺）
+    let weight = |f: usize| -> usize {
+        saved
+            .timeline
+            .layers
+            .iter()
+            .filter_map(|l| {
+                l.keyframes
+                    .iter()
+                    .filter(|kf| kf.start_frame <= f)
+                    .max_by_key(|kf| kf.start_frame)
+            })
+            .map(|kf| kf.maps.iter().map(|m| m.edges.len()).sum::<usize>())
+            .sum()
+    };
+    let shown = |f: usize| -> Vec<Option<usize>> {
+        saved
+            .timeline
+            .layers
+            .iter()
+            .map(|l| {
+                l.keyframes
+                    .iter()
+                    .filter(|kf| kf.start_frame <= f)
+                    .map(|kf| kf.start_frame)
+                    .max()
+            })
+            .collect()
+    };
+    let total_frames = saved.timeline.total_frames.max(1);
+    let env_frame = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|f| f.saturating_sub(1))
+    };
+    // 同じ量なら前のコマ
+    let frame = env_frame("IS2D_FRAME").unwrap_or_else(|| {
+        (0..total_frames)
+            .max_by_key(|&f| (weight(f), std::cmp::Reverse(f)))
+            .unwrap_or(0)
+    });
+    let paste_frame = env_frame("IS2D_PASTE_FRAME").or_else(|| {
+        (frame + 1..total_frames)
+            .chain(0..frame)
+            .find(|&g| weight(g) > 0 && shown(g) != shown(frame))
+    });
+    drop(saved);
     let ctx = eframe::egui::Context::default();
     let mut app = Is2dApp::default();
     let t = Instant::now();
     crate::project_io::open_project_in_tab(&mut app, std::path::Path::new(&path), Some(&ctx))
         .expect("作品を開けること");
     let open_ms = ms(t);
-    // コマごとの線の量（地図のマスの数の、レイヤーの合計）と、コマに出るセル画
-    let (frame, paste_frame) = {
-        let tl = &app.doc.root;
-        let cels = |f: usize| -> Vec<Option<*const crate::timeline::Cel>> {
-            tl.layers
-                .iter()
-                .map(|l| l.cel_at(f).map(|c| c as *const _))
-                .collect()
-        };
-        let weight = |f: usize| -> usize {
-            tl.layers
-                .iter()
-                .filter_map(|l| l.cel_at(f))
-                .map(|c| c.maps.iter().map(|m| m.stored().tiles()).sum::<usize>())
-                .sum()
-        };
-        let env_frame = |key: &str| {
-            std::env::var(key)
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .map(|f| f.saturating_sub(1))
-        };
-        // 同じ量なら前のコマ
-        let frame = env_frame("IS2D_FRAME").unwrap_or_else(|| {
-            (0..tl.total_frames)
-                .max_by_key(|&f| (weight(f), std::cmp::Reverse(f)))
-                .unwrap_or(0)
-        });
-        let paste_frame = env_frame("IS2D_PASTE_FRAME").or_else(|| {
-            (frame + 1..tl.total_frames)
-                .chain(0..frame)
-                .find(|&g| weight(g) > 0 && cels(g) != cels(frame))
-        });
-        (frame, paste_frame)
-    };
     let goto = |app: &mut Is2dApp, f: usize| {
         assert!(canvas_tool::clear_selection(app));
         apply(app, Action::ScrubRulerToFrame { frame: f });
@@ -29969,54 +29999,16 @@ fn measure_work() {
         rows.push(("ブラシ 1 本".into(), times));
     }
 
-    // 開く処理の内訳：ファイルを読んで JSON を解く・地図を直して確かめる（to_map）・しまう（Cel::from_maps）を、開くときと
-    // 同じ順に1つずつ測る。前のキーフレーム（同じレイヤー・同じ階層）と同じ辺の割合と、その辺どうしの確かめを省いたとき
-    // （valid_faces_since）の時間も測る
-    let t = Instant::now();
-    let saved = crate::project_io::read_project_document(std::path::Path::new(&path))
-        .expect("作品を読めること");
-    let parse_ms = ms(t);
-    let (mut layers, mut keyframes, mut maps) = (0usize, 0usize, 0usize);
-    let (mut edges, mut shared) = (0usize, 0usize);
-    let (mut check_ms, mut since_ms, mut store_ms) = (0.0, 0.0, 0.0);
-    for tl in std::iter::once(&saved.timeline).chain(saved.library.iter().map(|s| &s.timeline)) {
-        for layer in &tl.layers {
-            layers += 1;
-            let mut prev: std::collections::HashMap<Vec<u64>, crate::planar_map::LayerBase> =
-                Default::default();
-            let mut prev_cel: Option<crate::timeline::Cel> = None;
-            for kf in &layer.keyframes {
-                keyframes += 1;
-                let mut checked_maps = Vec::with_capacity(kf.maps.len());
-                for m in &kf.maps {
-                    maps += 1;
-                    let t = Instant::now();
-                    let checked = m.to_map().expect("壊れていない地図");
-                    let full = ms(t);
-                    check_ms += full;
-                    let map = checked.map();
-                    edges += map.edges.len();
-                    let base = crate::planar_map::LayerBase::new(map);
-                    match prev.get(&m.group_path) {
-                        Some(p) => {
-                            shared += base.keys().iter().filter(|k| p.keys().contains(*k)).count();
-                            let t = Instant::now();
-                            assert!(map.valid_faces_since(Some(p.keys())).is_some());
-                            since_ms += ms(t);
-                        }
-                        None => since_ms += full,
-                    }
-                    prev.insert(m.group_path.clone(), base);
-                    checked_maps.push((m.group_path.clone(), checked));
-                }
-                let t = Instant::now();
-                let cel =
-                    crate::timeline::Cel::from_maps(checked_maps, Vec::new(), prev_cel.as_ref());
-                store_ms += ms(t);
-                prev_cel = Some(cel);
-            }
-        }
+    // 開いたあと、全部のコマを1回ずつ表示する（初めて見るコマで地図を確かめる重さ）
+    let mut sweep = Vec::with_capacity(total_frames);
+    for f in 0..total_frames {
+        let t = Instant::now();
+        goto(&mut app, f);
+        let _ = app.scene().len();
+        sweep.push(ms(t));
     }
+    let sweep_total: f64 = sweep.iter().sum();
+    sweep.sort_by(f64::total_cmp);
 
     eprintln!();
     eprintln!("作品：{path}");
@@ -30024,14 +30016,9 @@ fn measure_work() {
         "作品の中身：レイヤー {layers} 枚（シンボルの中を含む）・キーフレーム {keyframes} 個・地図 {maps} 枚・辺 {edges} 本"
     );
     eprintln!(
-        "前のキーフレームと同じ辺：{shared} 本（{:.0}%）",
-        shared as f64 * 100.0 / edges.max(1) as f64
-    );
-    eprintln!(
-        "開く処理の内訳（2回目に読んだとき）：ファイルを読んで JSON を解く {parse_ms:.0}ms／地図を直して確かめる {check_ms:.0}ms／しまう {store_ms:.0}ms"
-    );
-    eprintln!(
-        "前のキーフレームと同じ辺どうしの確かめを省くと：地図を直して確かめる {check_ms:.0}ms → {since_ms:.0}ms"
+        "全部のコマ（{total_frames} コマ）を1回ずつ表示：合計 {sweep_total:.0}ms・1 コマの中央値 {:.1}ms・最大 {:.1}ms",
+        sweep.get(sweep.len() / 2).copied().unwrap_or(0.0),
+        sweep.last().copied().unwrap_or(0.0)
     );
     eprintln!("コマ {}（図形 {shapes} 個・区間 {segments} 個）", frame + 1);
     eprintln!("| 操作 | 中央値 | 最大 | 回数 |");
@@ -30049,4 +30036,182 @@ fn measure_work() {
             times.len()
         );
     }
+}
+
+/// 地図の確かめを使うときに行う（設計：claude/地図の確かめを使うときに行う設計_開く時間_0fe3fcb.md）ためのテスト用の作品：
+/// 1 枚のレイヤーに、それぞれ違う絵のキーフレームを `n` 個（コマ 1, 3, 5, …）。保存したファイルのパス
+fn save_many_keyframes(name: &str, n: usize) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("is2d_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("many.is2d");
+    let mut app = Is2dApp::default();
+    for k in 0..n {
+        if k > 0 {
+            app.tab_mut().with_active_timeline_mut(|tl, _| {
+                assert!(tl.layers[0].insert_keyframe(2 * k, false));
+                tl.sync_total_frames();
+            });
+        }
+        let y = 100.0 + 30.0 * k as f64;
+        put_cel_shapes(
+            &mut app,
+            0,
+            2 * k,
+            make_stroke(
+                Point::new(100.0, y),
+                Point::new(300.0, y + 40.0),
+                8.0,
+                Color32::from_rgb(200, 40, 40),
+            ),
+        );
+    }
+    crate::project_io::save_project_to_path(&mut app, &path).unwrap();
+    path
+}
+
+/// 作品を開くと、表示するコマの地図だけを確かめ、ほかのキーフレームは初めて使うときに確かめる。見ていないキーフレームは
+/// 確かめないまま。直す前は、開くときに全部のキーフレームの地図を確かめた
+#[test]
+fn opening_checks_only_the_maps_of_the_shown_frame() {
+    use crate::doc_actions::{apply, Action};
+    let path = save_many_keyframes("lazy_open", 6);
+    let mut app = Is2dApp::default();
+    let before = crate::planar_map::full_checks();
+    crate::project_io::open_project_in_tab(&mut app, &path, None).unwrap();
+    // 開くと、開いた直後に表示するコマ 1 の地図だけを確かめる（画面の土台を作るとき）
+    assert_eq!(
+        crate::planar_map::full_checks() - before,
+        1,
+        "コマ 1 の地図だけ"
+    );
+    assert!(!app.doc.root.layers[0].keyframes[0].cel.maps[0].is_unchecked());
+    assert!(app.scene().len() > 0);
+    assert_eq!(crate::planar_map::full_checks() - before, 1, "描いても同じ");
+    assert!(apply(&mut app, Action::ScrubRulerToFrame { frame: 4 }));
+    assert!(app.scene().len() > 0);
+    assert_eq!(
+        crate::planar_map::full_checks() - before,
+        2,
+        "コマ 5 の地図を足して"
+    );
+    let unchecked = app.doc.root.layers[0]
+        .keyframes
+        .iter()
+        .filter(|kf| kf.cel.maps.iter().all(|m| m.is_unchecked()))
+        .count();
+    assert_eq!(unchecked, 4, "見ていないキーフレームは確かめないまま");
+    // 画面を描いても（タイムラインのキーフレームの印など）、見ていないキーフレームは確かめない
+    let ctx = egui::Context::default();
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(1280.0, 820.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| app.update_ui(ctx),
+    );
+    assert_eq!(
+        crate::planar_map::full_checks() - before,
+        2,
+        "画面を描いても増えない"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// まだ確かめていない地図を含む作品を保存すると、読んだままの地図をそのまま書く（確かめない）。直す前は、開くときに
+/// 全部確かめた（地図も、しまった形から書き直した）
+#[test]
+fn saving_an_unviewed_file_writes_the_same_maps_without_checking() {
+    let path = save_many_keyframes("lazy_save", 4);
+    let out = path.with_file_name("saved_again.is2d");
+    let mut app = Is2dApp::default();
+    let before = crate::planar_map::full_checks();
+    crate::project_io::open_project_in_tab(&mut app, &path, None).unwrap();
+    let opened = crate::planar_map::full_checks() - before;
+    assert_eq!(opened, 1, "開くと、表示するコマ 1 の地図だけを確かめる");
+    crate::project_io::save_project_to_path(&mut app, &out).unwrap();
+    assert_eq!(
+        crate::planar_map::full_checks() - before,
+        opened,
+        "保存では確かめない"
+    );
+    let unchecked = app.doc.root.layers[0]
+        .keyframes
+        .iter()
+        .filter(|kf| kf.cel.maps.iter().all(|m| m.is_unchecked()))
+        .count();
+    assert_eq!(
+        unchecked, 3,
+        "保存しても、見ていないキーフレームは確かめないまま"
+    );
+    // 地図を、ビットまで比べられる形にする（座標は to_bits）
+    let maps = |p: &std::path::Path| -> Vec<String> {
+        let d = crate::project_io::read_project_document(p).unwrap();
+        d.timeline.layers[0]
+            .keyframes
+            .iter()
+            .flat_map(|kf| kf.maps.iter())
+            .map(|m| {
+                let bits: Vec<u64> = m.nodes.iter().map(|v| v.to_bits()).collect();
+                let edges: Vec<_> = m
+                    .edges
+                    .iter()
+                    .map(|&(a, b, x, y, l, r)| (a, b, x.to_bits(), y.to_bits(), l, r))
+                    .collect();
+                format!("{:?} {:?} {bits:?} {edges:?}", m.group_path, m.colors)
+            })
+            .collect()
+    };
+    let (a, b) = (maps(&path), maps(&out));
+    assert_eq!(a.len(), 4);
+    assert_eq!(a, b, "地図がビットまで同じ");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// 開いたあとで壊れた地図（正しい地図でない）が見つかったら、その階層は何も無いものとして描き、場所を知らせる。保存すると
+/// 読んだままの地図を書く（利用者と決めた案 1）。直す前は、ファイル全体を開かなかった
+#[test]
+fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
+    use crate::doc_actions::{apply, Action};
+    let path = save_many_keyframes("lazy_broken", 3);
+    // コマ 3 のキーフレームの地図で、1本の辺の片側だけ色を変える（面の輪郭の色がそろわない）
+    let mut proj = crate::project_io::read_project_document(&path).unwrap();
+    let m = &mut proj.timeline.layers[0].keyframes[1].maps[0];
+    m.colors.push([1, 2, 3, 255]);
+    let c = m.colors.len();
+    if m.edges[0].4 != 0 {
+        m.edges[0].4 = c;
+    } else {
+        m.edges[0].5 = c;
+    }
+    let broken = m.clone();
+    crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
+
+    let mut app = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut app, &path, None).expect("開ける");
+    assert!(app.scene().len() > 0);
+    assert!(app.doc.broken_maps.take().is_empty());
+    assert!(apply(&mut app, Action::ScrubRulerToFrame { frame: 2 }));
+    assert!(app.scene().len() == 0, "壊れた地図は何も無いものとして描く");
+    assert!(app.doc.root.layers[0].keyframes[1].cel.maps[0].is_broken());
+    assert_eq!(
+        app.doc.broken_maps.take(),
+        vec!["レイヤー「Layer 1」のコマ 3".to_owned()]
+    );
+    assert!(app.doc.broken_maps.take().is_empty(), "知らせるのは1回");
+    // 保存すると、壊れた地図は読んだままに書く
+    let out = path.with_file_name("saved_again.is2d");
+    crate::project_io::save_project_to_path(&mut app, &out).unwrap();
+    let back = crate::project_io::read_project_document(&out).unwrap();
+    let m = &back.timeline.layers[0].keyframes[1].maps[0];
+    assert_eq!((&m.colors, &m.edges), (&broken.colors, &broken.edges));
+    assert!(m
+        .nodes
+        .iter()
+        .map(|v| v.to_bits())
+        .eq(broken.nodes.iter().map(|v| v.to_bits())));
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

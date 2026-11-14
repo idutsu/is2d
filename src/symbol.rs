@@ -618,6 +618,8 @@ pub(crate) struct Document {
     pub(crate) next_group_id: u64,
     /// `library` の内容変更世代番号（シンボルのプレビューの一時キャッシュの鍵）
     pub(crate) revision: u64,
+    /// ファイルから読んだ地図のうち、使うときに確かめて壊れていたものの場所（画面が取り出して知らせる）
+    pub(crate) broken_maps: crate::timeline::BrokenMaps,
 }
 
 impl Default for Document {
@@ -630,6 +632,7 @@ impl Default for Document {
             next_symbol_id: 1,
             next_group_id: 1,
             revision: 0,
+            broken_maps: Default::default(),
         }
     }
 }
@@ -658,6 +661,16 @@ pub(crate) fn reaches<N: Copy + Eq + std::hash::Hash>(
 }
 
 impl Document {
+    /// まだ確かめていない地図（ファイルから読んだもの）に、壊れていたときの知らせ先（`broken_maps`）と場所を付ける
+    /// （読み込みのあと）
+    pub(crate) fn watch_broken_maps(&self) {
+        self.root.watch_broken_maps(&self.broken_maps, "");
+        for sym in self.library.iter() {
+            sym.timeline
+                .watch_broken_maps(&self.broken_maps, &format!("シンボル「{}」の", sym.name));
+        }
+    }
+
     /// シンボルライブラリの世代番号 `revision` を一意な値へ更新する
     pub(crate) fn bump_revision(&mut self) {
         self.revision = crate::vector_engine::next_mesh_revision();

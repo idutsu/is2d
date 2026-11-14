@@ -12,7 +12,7 @@ use crate::symbol::{
     ColorEffect, Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode,
     TweenRotate,
 };
-use crate::timeline::{Cel, Keyframe, Layer, Timeline, TimelineCellSelection};
+use crate::timeline::{Cel, Keyframe, Layer, ScopeMap, Timeline, TimelineCellSelection};
 pub(crate) use crate::timeline::{MAX_LAYERS_PER_TIMELINE, MAX_TIMELINE_FRAMES};
 
 /// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。版 5 は、セル画の階層ごとの地図（頂点と、境目の線を1本で
@@ -484,11 +484,22 @@ impl SavedScopeMap {
         }
     }
 
+    /// 頂点・色の番号が範囲の中で、辺の数が上限の中か（地図に直せるか。軽いので、ファイルを読むときに全部の地図で
+    /// 確かめる：`Keyframe::from_saved`）
+    pub(crate) fn fits(&self) -> bool {
+        let n = self.nodes.len() / 2;
+        self.nodes.len().is_multiple_of(2)
+            && self.edges.len() <= MAX_MAP_EDGES
+            && self.edges.iter().all(|&(a, b, _, _, l, r)| {
+                a < n && b < n && l <= self.colors.len() && r <= self.colors.len()
+            })
+    }
+
     /// 地図に戻す（確かめた地図：`PlanarMap::checked`）。番号が範囲の外か、正しい地図でなければ `Err`（アプリは正しい地図
     /// しか書かないので、ファイルが壊れたとき）
     pub(crate) fn to_map(&self) -> Result<CheckedMap, String> {
         let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
-        if !self.nodes.len().is_multiple_of(2) || self.edges.len() > MAX_MAP_EDGES {
+        if !self.fits() {
             return Err(broken());
         }
         let n = self.nodes.len() / 2;
@@ -554,12 +565,7 @@ impl From<&Keyframe> for SavedKeyframe {
             start_frame: kf.start_frame,
             tween: kf.tween,
             tween_rotate: kf.tween_rotate,
-            maps: kf
-                .cel
-                .maps
-                .iter()
-                .map(|m| SavedScopeMap::new(&m.group_path, &m.dense()))
-                .collect(),
+            maps: kf.cel.maps.iter().map(ScopeMap::saved_form).collect(),
             instances: kf
                 .cel
                 .instances
@@ -571,9 +577,9 @@ impl From<&Keyframe> for SavedKeyframe {
 }
 
 impl Keyframe {
-    /// 読んだキーフレーム `s`。地図の塊は、同じレイヤーの直前のキーフレーム `prev` のセル画と同じものを共有する。地図が
-    /// 正しい地図でないか（`SavedScopeMap::to_map`）、同じ階層の地図が2つあれば、壊れたファイルとして `Err`。読み込みで
-    /// 地図を確かめるのはここだけ
+    /// 読んだキーフレーム `s`。地図は確かめず、初めて使うときに確かめる（`Cel::from_saved`。そのとき、同じレイヤーの直前の
+    /// キーフレーム `prev` のセル画が確かめてあれば、番号と塊を引き継ぐ）。地図に直せないか（`SavedScopeMap::fits`）、
+    /// 同じ階層の地図が2つあれば、壊れたファイルとして `Err`
     fn from_saved(s: SavedKeyframe, prev: Option<&Keyframe>) -> Result<Self, String> {
         let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
         // 階層（地図の階層とインスタンスの親の階層）の深さは `MAX_GROUP_DEPTH` まで。グループの番号ごとに、すぐ上の
@@ -596,12 +602,10 @@ impl Keyframe {
             }
         }
         let mut paths = HashSet::with_capacity(s.maps.len());
-        let mut maps: Vec<(Vec<u64>, CheckedMap)> = Vec::with_capacity(s.maps.len());
         for m in &s.maps {
-            if !paths.insert(&m.group_path) {
+            if !paths.insert(&m.group_path) || !m.fits() {
                 return Err(broken());
             }
-            maps.push((m.group_path.clone(), m.to_map()?));
         }
         let mut seen_gids = HashSet::with_capacity(s.instances.len());
         let instances: Vec<SymbolInstance> = s
@@ -612,7 +616,7 @@ impl Keyframe {
             // 新しい番号にし、無いシンボルを指すインスタンスはそこで外す
             .filter(|inst| seen_gids.insert(inst.binding.instance_gid))
             .collect();
-        let cel = Cel::from_maps(maps, instances, prev.map(|kf| &kf.cel));
+        let cel = Cel::from_saved(s.maps, instances, prev.map(|kf| &kf.cel));
         Ok(Self {
             start_frame: s.start_frame,
             cel,
@@ -881,8 +885,8 @@ impl ProjectDocument {
             self.stage_size = [800.0, 450.0];
             fixed.push("ステージサイズ".to_owned());
         }
-        // 地図はいつも正しい地図なので、座標は有限（地図にできない形はセル画に書かない：`on_grid`）。インスタンスの
-        // 変換だけを確かめる
+        // 地図は正しい地図（地図にできない形はセル画に書かない：`on_grid`）か、ファイルから読んだままの地図（JSON の数は
+        // 有限）なので、座標は有限。インスタンスの変換だけを確かめる
         let mut clean_timeline = |tl: &mut SavedTimeline, sym_name: Option<&str>| {
             for layer in &mut tl.layers {
                 for kf in &mut layer.keyframes {
@@ -1037,7 +1041,7 @@ impl ProjectDocument {
         };
         let w = self.stage_size[0].clamp(100.0, 3840.0);
         let h = self.stage_size[1].clamp(100.0, 2160.0);
-        Ok(Document {
+        let doc = Document {
             root: timeline,
             library: library.into_iter().map(Arc::new).collect(),
             stage_size: Vec2::new(w, h),
@@ -1045,7 +1049,10 @@ impl ProjectDocument {
             next_symbol_id: raw_next_sym_id.max(max_sym_id.saturating_add(1)).max(1),
             next_group_id: raw_next_gid.max(next_gid).max(1),
             revision: crate::vector_engine::next_mesh_revision(),
-        })
+            broken_maps: Default::default(),
+        };
+        doc.watch_broken_maps();
+        Ok(doc)
     }
 
     /// 読み込んだ `ProjectDocument` を現在のアクティブタブへ適用し、作業キャンバスや履歴を初期化する

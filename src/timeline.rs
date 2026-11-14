@@ -1,4 +1,5 @@
 use crate::planar_map::{realized, CheckedMap, LayerBase, PlanarMap};
+use crate::project_io::SavedScopeMap;
 use crate::stored_map::StoredMap;
 use crate::vector_engine::ShapeId;
 use crate::vector_engine::{FillShape, SymbolInstanceBinding};
@@ -6,7 +7,7 @@ use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock, PoisonError, Weak},
 };
 
 /// タイムラインおよびシンボル内タイムラインの最大許容フレーム数（破損JSONによる巨大ループ防止）
@@ -211,17 +212,160 @@ pub(crate) struct Cel {
 pub(crate) struct ScopeMap {
     pub(crate) group_path: Vec<u64>,
     /// 地図（場所ごとの塊。変わらない塊は Undo の控えと共有する）。面の辺の側に、面ごとに1つずつ別の図形の番号を記して
-    /// ある（面の図形の番号になる）
-    stored: StoredMap,
+    /// ある（面の図形の番号になる）。ファイルから読んだ地図は、初めて使うときに確かめてしまう（`ScopeMap::stored`）。写し
+    /// （Undo の控え・コピー）どうしで共有するので、確かめるのは1回
+    map: Arc<LazyStored>,
+}
+
+/// セル画の1つの階層の地図の中身：しまった地図を入れる1回だけ書ける箱と、まだ確かめていない、ファイルから読んだままの
+/// 地図（設計：claude/地図の確かめを使うときに行う設計_開く時間_0fe3fcb.md）
+#[derive(Debug, Default)]
+struct LazyStored {
+    /// しまった地図（確かめて、面に番号を記したもの。読んだ地図が壊れていれば何も無い地図）
+    stored: OnceLock<StoredMap>,
+    /// まだ確かめていない、ファイルから読んだままの地図。確かめて正しければ外し、壊れていれば保存のために残す
+    saved: Mutex<Option<SavedScopeMap>>,
+    /// 同じレイヤーの直前のキーフレームの、同じ階層の地図。確かめてあれば、その番号と塊を引き継ぐ（今の読み込みと同じ。
+    /// 確かめてなければ使わない：直前のものを確かめさせない）
+    prev: Weak<LazyStored>,
+    /// 壊れていたときの知らせ先と、その場所（読み込みのあとに付ける：`Document::watch_broken_maps`）
+    notice: OnceLock<(BrokenMaps, String)>,
+}
+
+impl LazyStored {
+    /// 確かめてしまった地図 `stored`
+    fn checked(stored: StoredMap) -> Arc<Self> {
+        Arc::new(Self {
+            stored: OnceLock::from(stored),
+            ..Self::default()
+        })
+    }
+
+    /// しまった地図（確かめる入口はこれ1つ）。まだなら、読んだままの地図を確かめてしまう（`SavedScopeMap::to_map` と、
+    /// 今までの読み込みの `ScopeMap::new` と同じ）。壊れていれば何も無い地図にして、知らせる
+    fn get(&self) -> &StoredMap {
+        self.stored.get_or_init(|| {
+            let mut saved = self.saved.lock().unwrap_or_else(PoisonError::into_inner);
+            let checked = saved.as_ref().map(SavedScopeMap::to_map);
+            match checked {
+                Some(Ok(map)) => {
+                    *saved = None;
+                    let prev = self.prev.upgrade().and_then(|p| p.stored.get().cloned());
+                    let map = match &prev {
+                        Some(p) => map.inheriting(p),
+                        None => map,
+                    };
+                    StoredMap::from_dense(map.uniquely_labeled().map(), prev.as_ref())
+                }
+                _ => {
+                    if let Some((sink, at)) = self.notice.get() {
+                        sink.push(at.clone());
+                    }
+                    StoredMap::from_dense(&PlanarMap::default(), None)
+                }
+            }
+        })
+    }
+
+    /// 確かめたら壊れていた（読んだままの地図を残している）
+    fn broken(&self) -> bool {
+        self.stored.get().is_some()
+            && self
+                .saved
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_some()
+    }
+}
+
+/// ファイルから読んだ地図のうち、使うときに確かめて壊れていたものの場所の知らせ。文書ごとに1つ（`Document::broken_maps`）
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BrokenMaps(Arc<Mutex<Vec<String>>>);
+
+impl BrokenMaps {
+    fn push(&self, at: String) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(at);
+    }
+
+    /// まだ知らせていない場所（取り出すと空になる）
+    pub(crate) fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
 }
 
 impl ScopeMap {
     /// 階層 `group_path` の、確かめた地図 `map` の地図（面に1つずつ別の番号を記してしまう：`CheckedMap::uniquely_labeled`）。
-    /// 塊は `prev` と共有する。面が無ければ `None`。セル画の地図を作るのは、これと `restricted` と `renew_labels` だけ
-    /// なので、セル画の地図はいつも正しい地図で、面に1つずつ別の番号が記してある
+    /// 塊は `prev` と共有する。面が無ければ `None`。セル画の地図を作るのは、これと `unchecked`・`restricted`・
+    /// `renew_labels` だけなので、セル画の地図は、使うときにはいつも正しい地図で、面に1つずつ別の番号が記してある
+    /// （`unchecked` の地図は使うときに確かめ、壊れていれば何も無い地図）
     fn new(group_path: Vec<u64>, map: CheckedMap, prev: Option<&StoredMap>) -> Option<ScopeMap> {
         let stored = StoredMap::from_dense(map.uniquely_labeled().map(), prev);
-        (!stored.is_empty()).then_some(ScopeMap { group_path, stored })
+        (!stored.is_empty()).then(|| ScopeMap {
+            group_path,
+            map: LazyStored::checked(stored),
+        })
+    }
+
+    /// ファイルから読んだ、まだ確かめていない地図 `saved`（使うときに確かめる：`stored`）。`prev` は同じレイヤーの直前の
+    /// キーフレームの同じ階層の地図（確かめてあれば番号と塊を引き継ぐ）。辺が無ければ `None`（面が無い）
+    fn unchecked(saved: SavedScopeMap, prev: Option<&ScopeMap>) -> Option<ScopeMap> {
+        if saved.edges.is_empty() {
+            return None;
+        }
+        Some(ScopeMap {
+            group_path: saved.group_path.clone(),
+            map: Arc::new(LazyStored {
+                saved: Mutex::new(Some(saved)),
+                prev: prev.map_or_else(Weak::new, |p| Arc::downgrade(&p.map)),
+                ..LazyStored::default()
+            }),
+        })
+    }
+
+    /// 地図が無い（面が無い）。まだ確かめていない地図と、確かめたら壊れていた地図（保存のために残す）は、空でない。確かめ
+    /// させない
+    fn is_empty(&self) -> bool {
+        self.map.stored.get().is_some_and(StoredMap::is_empty) && !self.map.broken()
+    }
+
+    /// 保存する形（`SavedScopeMap`）。まだ確かめていない地図と、壊れていた地図は、読んだままの地図をそのまま書く（確かめ
+    /// させない）。番号の列は、いまの `group_path`（読み込みで振り直していることがある）
+    pub(crate) fn saved_form(&self) -> SavedScopeMap {
+        let raw = self
+            .map
+            .saved
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        match raw {
+            Some(raw) => SavedScopeMap {
+                group_path: self.group_path.clone(),
+                ..raw
+            },
+            None => SavedScopeMap::new(&self.group_path, &self.dense()),
+        }
+    }
+
+    /// 確かめたら壊れていた（何も無い地図として使っている。保存では読んだままの地図を書く）
+    #[cfg(test)]
+    pub(crate) fn is_broken(&self) -> bool {
+        self.map.broken()
+    }
+
+    /// まだ確かめていない
+    #[cfg(test)]
+    pub(crate) fn is_unchecked(&self) -> bool {
+        self.map.stored.get().is_none()
+    }
+
+    /// 壊れていたときの知らせ先 `sink` と場所 `at` を付ける（まだ確かめていない地図だけ。読み込みのあと）
+    fn watch(&self, sink: &BrokenMaps, at: impl FnOnce() -> String) {
+        if self.map.stored.get().is_none() {
+            let _ = self.map.notice.set((sink.clone(), at()));
+        }
     }
 
     /// 面の番号が `keep` に合う面だけを残した、階層 `group_path` の地図（`keep` が `None` なら全部の面：同じ地図）。正しい
@@ -232,49 +376,53 @@ impl ScopeMap {
         group_path: &[u64],
         keep: Option<&dyn Fn(ShapeId) -> bool>,
     ) -> Option<ScopeMap> {
-        let stored = match keep {
-            None => self.stored.clone(),
+        let map = match keep {
+            // 全部の面：同じ地図（まだ確かめていなければ、確かめないまま共有する）
+            None => self.map.clone(),
             Some(keep) => {
                 let base = self.base();
                 if base.map.labels_within(keep) {
-                    self.stored.clone()
+                    self.map.clone()
                 } else {
-                    StoredMap::from_dense(&base.map.restricted_by(keep), Some(&self.stored))
+                    LazyStored::checked(StoredMap::from_dense(
+                        &base.map.restricted_by(keep),
+                        Some(self.stored()),
+                    ))
                 }
             }
         };
-        (!stored.is_empty()).then(|| ScopeMap {
+        let m = ScopeMap {
             group_path: group_path.to_vec(),
-            stored,
-        })
+            map,
+        };
+        (!m.is_empty()).then_some(m)
     }
 
     /// 面の番号を、みな新しい番号にする（`PlanarMap::renew_labels`。番号は面の形を変えないので、正しい地図のまま）
     fn renew_labels(&mut self) {
         let mut map = self.dense();
         map.renew_labels();
-        self.stored = StoredMap::from_dense(&map, None);
+        self.map = LazyStored::checked(StoredMap::from_dense(&map, None));
+    }
+
+    /// しまった地図（地図を取り出す入口はこれ1つ。まだ確かめていなければ、ここで確かめる：`LazyStored::get`）
+    pub(crate) fn stored(&self) -> &StoredMap {
+        self.map.get()
     }
 
     /// 計算に使う写し（持ち主（画面の土台など）が持っていればそれ、無ければ塊から作る：`LayerBase::of_stored`）
     pub(crate) fn base(&self) -> Arc<LayerBase> {
-        LayerBase::of_stored(&self.stored)
+        LayerBase::of_stored(self.stored())
     }
 
-    /// 計算に使うふつうの地図（その場で作って捨てる。保存など、面の図形を使わない所）
+    /// 計算に使うふつうの地図（その場で作って捨てる。面の図形を使わない所）
     pub(crate) fn dense(&self) -> PlanarMap {
-        self.stored.to_dense()
+        self.stored().to_dense()
     }
 
     /// 面の図形（写し。面の順）
     pub(crate) fn faces(&self) -> Arc<[Arc<FillShape>]> {
         self.base().faces(&self.group_path)
-    }
-
-    /// しまった地図
-    #[cfg(test)]
-    pub(crate) fn stored(&self) -> &StoredMap {
-        &self.stored
     }
 }
 
@@ -427,7 +575,7 @@ fn test_scope_map_from_shapes(
     Ok(ScopeMap::new(
         path.to_vec(),
         map,
-        same_path.map(|m| &m.stored),
+        same_path.map(ScopeMap::stored),
     ))
 }
 
@@ -441,24 +589,21 @@ impl Cel {
         Ok(cel)
     }
 
-    /// 階層ごとの地図 `maps`（正しい地図。下から順）とインスタンス（重なり位置 `order` つき）から作る（ファイルを読む
-    /// とき）。面には番号を記す（同じレイヤーの直前のセル `prev` の同じ階層の地図に、形と色が同じ辺があれば、その番号を
-    /// 引き継ぐ：`CheckedMap::inheriting`）。地図の塊は、その地図と中身が同じものを共有する
-    pub(crate) fn from_maps(
-        maps: Vec<(Vec<u64>, CheckedMap)>,
+    /// ファイルから読んだ、階層ごとの地図 `maps`（下から順。同じ階層は2つ無い）とインスタンス（重なり位置 `order` つき）
+    /// から作る（ファイルを読むとき）。地図は確かめず、初めて使うときに確かめる（`ScopeMap::stored`）。そのとき、同じ
+    /// レイヤーの直前のセル `prev` の同じ階層の地図が確かめてあれば、形と色が同じ辺の番号を引き継ぎ
+    /// （`CheckedMap::inheriting`）、中身が同じ塊を共有する
+    pub(crate) fn from_saved(
+        maps: Vec<SavedScopeMap>,
         mut instances: Vec<SymbolInstance>,
         prev: Option<&Cel>,
     ) -> Self {
         let maps: Vec<ScopeMap> = maps
             .into_iter()
-            .filter_map(|(group_path, map)| {
-                // 前のキーフレームの同じ階層の地図と同じ辺には、その番号を記してから番号を振る（変わらない面と塊を共有する）
-                let prev_map = prev.and_then(|c| c.scope_stored(&group_path));
-                let map = match prev_map {
-                    Some(p) => map.inheriting(p),
-                    None => map,
-                };
-                ScopeMap::new(group_path, map, prev_map)
+            .filter_map(|m| {
+                let prev_map =
+                    prev.and_then(|c| c.maps.iter().find(|o| o.group_path == m.group_path));
+                ScopeMap::unchecked(m, prev_map)
             })
             .collect();
         instances.sort_by_key(|i| i.order);
@@ -543,14 +688,14 @@ impl Cel {
     /// ほかの中身は、1枚のセル画の地図（階層ごとに1つ）から作る）
     fn arrange(&mut self, items: Vec<Item<ScopeMap>>) {
         let Ok((maps, instances)) = arranged(items, |_, mut maps: Vec<ScopeMap>| {
-            Ok::<_, std::convert::Infallible>(maps.pop().filter(|m| !m.stored.is_empty()))
+            Ok::<_, std::convert::Infallible>(maps.pop().filter(|m| !m.is_empty()))
         });
         self.put(maps, instances);
     }
 
-    /// 地図とインスタンスを入れる。地図はいつも正しい地図で、面に1つずつ別の番号が記してある（`ScopeMap` を作れるのは
-    /// `ScopeMap::new`（確かめた地図から）・`restricted`・`renew_labels` だけ）。並びはいつも決まりどおり（`maps` と
-    /// `instances` は `arranged` の結果）なので、確かめ直さない
+    /// 地図とインスタンスを入れる。地図は、使うときにはいつも正しい地図で、面に1つずつ別の番号が記してある（`ScopeMap` を
+    /// 作れるのは `ScopeMap::new`（確かめた地図から）・`unchecked`（使うときに確かめる）・`restricted`・`renew_labels`
+    /// だけ）。並びはいつも決まりどおり（`maps` と `instances` は `arranged` の結果）なので、確かめ直さない
     fn put(&mut self, mut maps: Vec<ScopeMap>, mut instances: Vec<SymbolInstance>) {
         maps.shrink_to_fit();
         instances.shrink_to_fit();
@@ -990,7 +1135,8 @@ impl Cel {
         content: &Cel,
         replacing: Option<u64>,
     ) -> bool {
-        if content.scope_stored(&[]).is_some() {
+        // 階層があるかだけを見る（地図を確かめさせない）
+        if content.maps.iter().any(|m| m.group_path.is_empty()) {
             return false;
         }
         let mut items = Self::items_of(&self.maps, &self.instances);
@@ -1047,7 +1193,7 @@ impl Cel {
         self.maps
             .iter()
             .find(|m| m.group_path == group_path)
-            .map(|m| &m.stored)
+            .map(ScopeMap::stored)
     }
 
     /// 階層 `group_path` の地図（計算に使う形）。生の図形の無い階層は空の地図
@@ -1109,7 +1255,7 @@ impl Cel {
             self.arrange(items);
             return None;
         };
-        let base = LayerBase::with_faces(m.stored.clone(), group_path, shapes);
+        let base = LayerBase::with_faces(m.stored().clone(), group_path, shapes);
         match at {
             // 地図だけを置き換える（インスタンスの並びは Undo の控えと共有したまま）
             Some(i) => {
@@ -1790,6 +1936,24 @@ impl Default for Timeline {
 }
 
 impl Timeline {
+    /// まだ確かめていない地図に、壊れていたときの知らせ先 `sink` と場所（`place` に続けて、レイヤーの名前とキーフレームの
+    /// コマの番号）を付ける（`Document::watch_broken_maps`）
+    pub(crate) fn watch_broken_maps(&self, sink: &BrokenMaps, place: &str) {
+        for layer in &self.layers {
+            for kf in layer.keyframes.iter() {
+                for m in kf.cel.maps.iter() {
+                    m.watch(sink, || {
+                        format!(
+                            "{place}レイヤー「{}」のコマ {}",
+                            layer.name,
+                            kf.start_frame + 1
+                        )
+                    });
+                }
+            }
+        }
+    }
+
     /// 全レイヤーの `frame_count` の最大値からタイムライン全体の `total_frames` を再計算し、レイヤー選択インデックスを範囲内へ補正する
     pub(crate) fn sync_total_frames(&mut self) {
         self.total_frames = self

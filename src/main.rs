@@ -1058,6 +1058,22 @@ impl Is2dApp {
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
         }
+        // ファイルから読んだ地図が、使うときに確かめて壊れていたら知らせる（何も無いものとして描いている）
+        let broken = self.tab().doc.broken_maps.take();
+        if let Some(first) = broken.first() {
+            let at = match broken.len() {
+                1 => first.clone(),
+                n => format!("{first} ほか {} か所", n - 1),
+            };
+            canvas_tool::show_notice(
+                &mut self.toast,
+                canvas_tool::NoticeKind::Warning,
+                format!(
+                    "{at}の絵が壊れていたので、何も無いものとして表示しています（保存すると元のまま書きます）"
+                ),
+            );
+            ctx.request_repaint();
+        }
         // そのフレームの操作をすべて適用した後の状態からウィンドウタイトルを更新する
         project_io::update_window_title(self, ctx);
     }
