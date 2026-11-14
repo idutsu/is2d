@@ -458,10 +458,12 @@ impl Is2dApp {
     // ------------------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let input = ctx.input(|i| i.clone());
+        // V の押す・離すの合図は、ほかの判定で抜ける前に毎コマ見る（`Clipboard::swallowed_paste`）
+        let swallowed_paste = self.clipboard.swallowed_paste(&input.events);
         if self.pending_close_confirm.is_some() || !self.recovery.found.is_empty() {
             return;
         }
-        let input = ctx.input(|i| i.clone());
         let cmd = input.modifiers.command || input.modifiers.ctrl;
         if self.is_exporting_video() {
             if cmd && key_pressed_no_repeat(&input, Key::W) {
@@ -501,7 +503,14 @@ impl Is2dApp {
             .iter()
             .any(|ev| matches!(ev, egui::Event::Paste(_)));
 
-        self.handle_command_shortcuts(ctx, &input, cmd, copy_event, cut_event, paste_event);
+        self.handle_command_shortcuts(
+            ctx,
+            &input,
+            cmd,
+            copy_event,
+            cut_event,
+            paste_event || swallowed_paste,
+        );
 
         if !cmd && !copy_event && !cut_event && !paste_event {
             self.handle_single_key_shortcuts(&input, input.modifiers.shift);
@@ -511,13 +520,6 @@ impl Is2dApp {
             || key_pressed_no_repeat(&input, Key::Backspace)
         {
             apply(self, Action::DeleteSelection);
-        }
-
-        if cmd {
-            self.clipboard.cmd_held_grace_frames = 4;
-        } else {
-            self.clipboard.cmd_held_grace_frames =
-                self.clipboard.cmd_held_grace_frames.saturating_sub(1);
         }
     }
 
@@ -662,40 +664,13 @@ impl Is2dApp {
         cut_event: bool,
         paste_event: bool,
     ) {
-        let v_pressed_no_repeat = cmd && key_pressed_no_repeat(i, Key::V);
-        let v_release_event = i.events.iter().any(|ev| {
-            matches!(
-                ev,
-                egui::Event::Key {
-                    key: Key::V,
-                    pressed: false,
-                    ..
-                }
-            )
-        });
-        let v_released_fallback = (cmd || self.clipboard.cmd_held_grace_frames > 0)
-            && v_release_event
-            && !self.clipboard.paste_triggered_on_press;
-        if v_release_event {
-            self.clipboard.paste_triggered_on_press = false;
-            self.clipboard.cmd_held_grace_frames = 0;
-        }
-
         if cmd && key_pressed_no_repeat(i, Key::Q) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if copy_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::C)) {
             apply(self, Action::Copy);
         } else if cut_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::X)) {
             apply(self, Action::Cut);
-        } else if paste_event || v_pressed_no_repeat {
-            self.clipboard.paste_triggered_on_press = true;
-            apply(
-                self,
-                Action::Paste {
-                    in_place: i.modifiers.shift,
-                },
-            );
-        } else if v_released_fallback {
+        } else if paste_event {
             apply(
                 self,
                 Action::Paste {

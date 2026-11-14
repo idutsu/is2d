@@ -5567,14 +5567,33 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
     );
     assert_eq!(app.scene().len(), 2);
 
-    // OS クリップボードが空で egui-winit が押下時の Event::Paste / Key(V, pressed:true) を抑止した場合でも、
-    // Cmd+V のキーリリース (pressed: false) フォールバックで確実にペーストされること (#15)
-    app.clipboard.paste_triggered_on_press = false;
+    // その Cmd+V の V を離しても、もう一度は貼らないこと（押下は Event::Paste として来ている）
     let cmd_mods_v = egui::Modifiers {
         command: true,
         ctrl: true,
         ..Default::default()
     };
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect,
+            modifiers: cmd_mods_v,
+            events: vec![egui::Event::Key {
+                key: egui::Key::V,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: cmd_mods_v,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.update_ui(ctx);
+        },
+    );
+    assert_eq!(app.scene().len(), 2, "V を離しても二重に貼らない");
+
+    // OS クリップボードが空で egui-winit が押下時の Event::Paste / Key(V, pressed:true) を捨てた場合でも、
+    // 押下の合図が来ないまま V を離したら（捨てられた Cmd+V）ペーストされること (#15)
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
@@ -5609,7 +5628,7 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
         "2回目のペースト図形が +32px オフセット位置に実際に配置されていること (#15)"
     );
 
-    // V より先に Cmd を離した場合でも直前フレームの Cmd 猶予により V リリース時にペーストされること (#15)
+    // V より先に Cmd を離した場合でも、押下の合図が来ないまま V を離したらペーストされること (#15)
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
@@ -5782,6 +5801,66 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
         Tool::Transform,
         "Esc で選択解除しても現在のツール (Tool::Transform) が勝手に Tool::Select へ切り替わらないこと"
     );
+}
+
+/// `Cmd` のショートカット（コピーなど）のすぐ後に、ふつうに `V`（選択ツール）を押して離しても貼り付けない。直す前は、
+/// `Cmd` を離してから4コマの猶予のうちに `V` を離すと貼り付けた（レビュー f01d518 の N-5003）
+#[test]
+fn pressing_v_right_after_a_command_shortcut_does_not_paste() {
+    use eframe::egui;
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(180.0, 100.0),
+            12.0,
+            Color32::RED,
+        ),
+    );
+    app.session.set_selected_indices(vec![0]);
+    let cmd = egui::Modifiers {
+        command: true,
+        ctrl: true,
+        ..Default::default()
+    };
+    let key = |key: egui::Key, pressed: bool, modifiers: egui::Modifiers| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers,
+    };
+    let frame = |app: &mut Is2dApp, modifiers: egui::Modifiers, events: Vec<egui::Event>| {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    Vec2::new(1280.0, 820.0),
+                )),
+                modifiers,
+                events,
+                ..Default::default()
+            },
+            |ctx| app.update_ui(ctx),
+        );
+    };
+    // Cmd+C（コピー）→ C を離す → Cmd を離す → V を押す → V を離す
+    frame(&mut app, cmd, vec![egui::Event::Copy]);
+    assert!(app.clipboard.content.is_some());
+    let undo_len = app.history.undo_stack.len();
+    frame(&mut app, cmd, vec![key(egui::Key::C, false, cmd)]);
+    let none = egui::Modifiers::NONE;
+    frame(&mut app, none, vec![]);
+    frame(&mut app, none, vec![key(egui::Key::V, true, none)]);
+    assert_eq!(app.tool.tool, Tool::Select, "V で選択ツール");
+    frame(&mut app, none, vec![key(egui::Key::V, false, none)]);
+    assert_eq!(app.clipboard.paste_count, 0, "貼り付けない");
+    assert_eq!(app.history.undo_stack.len(), undo_len);
+    assert_eq!(app.scene().len(), 1);
 }
 
 #[test]

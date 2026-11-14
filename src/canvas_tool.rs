@@ -696,14 +696,43 @@ pub(crate) struct Clipboard {
     pub(crate) symbols: Vec<Arc<SymbolDef>>,
     /// 各コピー元タブから貼り付け先タブへ既にインポート済みのシンボルID対応表 `(source_doc_id, source_sym_id, target_doc_id) -> target_sym_id`
     pub(crate) imported_map: HashMap<(u64, u64, u64), u64>,
-    /// `Cmd+V` 押下時に `Event::Paste` または `Key::V` (pressed) で既にペーストを実行済みかのフラグ（OSクリップボード空時のキーリリースフォールバック二重発火防止用）
-    pub(crate) paste_triggered_on_press: bool,
-    /// 直近フレームで `Cmd`/`Ctrl` 修飾キーが押されていた猶予フレーム数（`V` より先に `Cmd` を離した場合のフォールバック用）
-    pub(crate) cmd_held_grace_frames: u8,
+    /// 最後に V を離してから、V を押した合図（`Key`）か貼り付けの合図（`Paste`）が来たか（`swallowed_paste`）
+    pub(crate) v_press_seen: bool,
     /// `Cmd+V` による通常ペーストの連続回数（少しずつずらして配置するためのカウンタ）
     pub(crate) paste_count: usize,
     /// `Cmd+V` による通常ペーストの累積ワールド座標オフセット（途中でズーム変更しても階段状にずらす用）
     pub(crate) paste_offset: KVec2,
+}
+
+impl Clipboard {
+    /// 入力の合図 `events` に、捨てられた `Cmd+V` があったか。egui-winit は `Cmd+V` の押下を、OS のクリップボードに文字が
+    /// あれば貼り付けの合図（`Paste`）にし、無ければ捨てる（どちらでも、押した合図の `Key` は送らない。離した合図は送る）。
+    /// なので、V を押した合図も貼り付けの合図も来ないまま V を離したら、それは捨てられた `Cmd+V`。修飾キーや時間を見ないので、
+    /// ほかのキーのすぐ後にふつうに V（選択ツール）を押して離しても貼らない（レビュー f01d518 の N-5003）。OS のクリップ
+    /// ボードには文字を置かない（#15）。毎コマ、ほかの判定より先に呼ぶ（文字の入力中も）
+    pub(crate) fn swallowed_paste(&mut self, events: &[egui::Event]) -> bool {
+        let mut swallowed = false;
+        for ev in events {
+            match ev {
+                egui::Event::Paste(_)
+                | egui::Event::Key {
+                    key: Key::V,
+                    pressed: true,
+                    ..
+                } => self.v_press_seen = true,
+                egui::Event::Key {
+                    key: Key::V,
+                    pressed: false,
+                    ..
+                } => {
+                    swallowed |= !self.v_press_seen;
+                    self.v_press_seen = false;
+                }
+                _ => {}
+            }
+        }
+        swallowed
+    }
 }
 
 pub(crate) type InstanceGid = u64;
