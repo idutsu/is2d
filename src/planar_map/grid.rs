@@ -172,6 +172,19 @@ pub(super) fn polys_clash(pa: &[IPt], ea: (usize, usize), pb: &[IPt], eb: (usize
     })
 }
 
+/// 折れ線 `pts`（続けて同じ点は無い）の点が、ある向き（横・縦・斜め2つのどれか）に、一方へだけ進むか。そうなら、
+/// 折れ線は自分と触れない：となり合わない2つの区間は、その向きに測った範囲が重ならず、となり合う2つの区間は、
+/// つなぎ目から反対の側へ出るので、同じ向きに重ならない（`can_replace` の自分との確かめを省く。省いても答えは同じ）
+pub(super) fn monotone(pts: &[IPt]) -> bool {
+    [(1, 0), (0, 1), (1, 1), (1, -1)]
+        .iter()
+        .any(|&(ux, uy): &(i64, i64)| {
+            let at = |p: IPt| ux as i128 * p.0 as i128 + uy as i128 * p.1 as i128;
+            let up = pts.windows(2).all(|w| at(w[0]) < at(w[1]));
+            up || pts.windows(2).all(|w| at(w[0]) > at(w[1]))
+        })
+}
+
 /// 折れ線 `poly` の区間 `k` の両端の頂点の番号（折れ線の端で、頂点 `na`・`nb` にあたるときだけ）
 pub(super) fn seg_tags(
     poly: &[IPt],
@@ -346,18 +359,20 @@ impl PolyIndex {
             return false;
         }
         let last = pc.len() - 2;
-        // 1. 自分と
-        for k in 0..=last {
-            for m in k + 1..=last {
-                let joint = (m == k + 1).then_some(pc[m]);
-                if seg_pair_clash(
-                    (pc[k], pc[k + 1]),
-                    (None, None),
-                    (pc[m], pc[m + 1]),
-                    (None, None),
-                    joint,
-                ) {
-                    return false;
+        // 1. 自分と（ある向きに点が一方へだけ進む折れ線は、自分と触れない：`monotone`）
+        if !monotone(pc) {
+            for k in 0..=last {
+                for m in k + 1..=last {
+                    let joint = (m == k + 1).then_some(pc[m]);
+                    if seg_pair_clash(
+                        (pc[k], pc[k + 1]),
+                        (None, None),
+                        (pc[m], pc[m + 1]),
+                        (None, None),
+                        joint,
+                    ) {
+                        return false;
+                    }
                 }
             }
         }
@@ -386,13 +401,17 @@ impl PolyIndex {
                 }
             }
         }
-        // 帯：path をたどり、pc を逆にたどって閉じる
+        // 帯：path をたどり、pc を逆にたどって閉じる。帯の多角形は、外接矩形に入る点を調べるときに初めて作る
         let mut band: Vec<IPt> = path.to_vec();
         band.extend(pc.iter().rev().skip(1).take(pc.len().saturating_sub(2)));
-        let poly = GridPolygon::new(&band);
+        let poly = std::cell::OnceCell::new();
         let rect = GridRect::of(&band);
         debug_assert!(self.covers(&rect), "索引の範囲の外の帯");
-        let inside = |p2: IPt| poly.winding(p2).is_none_or(|w| w != 0);
+        let inside = |p2: IPt| {
+            poly.get_or_init(|| GridPolygon::new(&band))
+                .winding(p2)
+                .is_none_or(|w| w != 0)
+        };
         // 2. 帯の中の頂点（帯の中と輪郭がかかるマスにある）
         for c in polygon_cells(&band) {
             for v in self.node_grid.at(c) {
@@ -944,17 +963,25 @@ pub(super) fn quad_cells(q: QuadBez, pad: i64) -> impl Iterator<Item = (i64, i64
 
 /// 多角形（格子の点）の中と輪郭がかかるマス：輪郭の区間がかかるマスを列ごとに集め、列の中では一番下から一番上までの
 /// マス（細い帯なら、輪郭のマスとほとんど同じ）
-pub(super) fn polygon_cells(pts: &[IPt]) -> Vec<(i64, i64)> {
-    let mut span: IntMap<i64, (i64, i64)> = IntMap::default();
+pub(super) fn polygon_cells(pts: &[IPt]) -> impl Iterator<Item = (i64, i64)> {
+    // 列は、点の x の範囲の列（区間がかかるマスの列は、その中にある）。列ごとの（一番下, 一番上）
+    let r = GridRect::of(pts);
+    let cx0 = r.x0.div_euclid(GRID_CELL);
+    let cols = if pts.is_empty() {
+        0
+    } else {
+        (r.x1.div_euclid(GRID_CELL) - cx0 + 1) as usize
+    };
+    let mut span: Vec<(i64, i64)> = vec![(i64::MAX, i64::MIN); cols];
     for k in 0..pts.len() {
         for (cx, cy) in seg_cells((pts[k], pts[(k + 1) % pts.len()]), 0) {
-            let e = span.entry(cx).or_insert((cy, cy));
+            let e = &mut span[(cx - cx0) as usize];
             *e = (e.0.min(cy), e.1.max(cy));
         }
     }
     span.into_iter()
-        .flat_map(|(cx, (y0, y1))| (y0..=y1).map(move |cy| (cx, cy)))
-        .collect()
+        .enumerate()
+        .flat_map(move |(i, (y0, y1))| (y0..=y1).map(move |cy| (cx0 + i as i64, cy)))
 }
 
 /// 近さを調べる格子：マスごとの番号の一覧。番号はみな1つの並び（`items`）に入れ、マスごとに入れた順につなぐ（マスごとに
