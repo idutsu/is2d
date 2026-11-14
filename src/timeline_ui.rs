@@ -14,6 +14,18 @@ pub(crate) use crate::doc_actions::{
 use crate::symbol::TweenState;
 use crate::timeline::TimelineCellSelection;
 
+#[cfg(test)]
+thread_local! {
+    /// テスト用：このスレッドで、タイムラインを描くときに調べたキーフレームの数
+    static KEYFRAMES_EXAMINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、タイムラインを描くときに調べたキーフレームの数
+#[cfg(test)]
+pub(crate) fn keyframes_examined() -> usize {
+    KEYFRAMES_EXAMINED.with(|n| n.get())
+}
+
 /// タイムライングリッドの1フレームあたりのセル幅（px）
 pub(crate) const CELL_W: f32 = 16.0;
 
@@ -1220,15 +1232,20 @@ fn draw_timeline_layer_row(
         );
     }
 
-    if layer.frame_count > 0 {
-        for (kf_idx, kf) in layer.keyframes.iter().enumerate() {
-            if kf.start_frame < layer.frame_count
-                && layer.span_end_for_keyframe(kf_idx) >= layout.first_vis_frame
-                && kf.start_frame <= layout.last_vis_frame
-            {
-                draw_keyframe_span(host, grid_painter, layout, layer_idx, kf_idx, (y0, y1));
-            }
+    // 見えている範囲の始めにかかるキーフレームから回し始め、範囲の終わりで止める（キーフレームは開始コマの順。1コマの
+    // 仕事が、見えている範囲のキーフレームの数だけで決まる：レビュー f01d518 の N-5005）
+    let first = layer
+        .keyframes
+        .partition_point(|kf| kf.start_frame <= layout.first_vis_frame)
+        .saturating_sub(1);
+    for kf_idx in first..layer.keyframes.len() {
+        let kf = &layer.keyframes[kf_idx];
+        #[cfg(test)]
+        KEYFRAMES_EXAMINED.with(|n| n.set(n.get() + 1));
+        if kf.start_frame >= layer.frame_count || kf.start_frame > layout.last_vis_frame {
+            break;
         }
+        draw_keyframe_span(host, grid_painter, layout, layer_idx, kf_idx, (y0, y1));
     }
 
     if let Some(sel) = tl.cell_selection.filter(|s| s.contains_layer(layer_idx)) {

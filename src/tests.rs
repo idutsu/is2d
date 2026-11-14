@@ -31120,6 +31120,34 @@ fn save_many_keyframes(name: &str, n: usize) -> std::path::PathBuf {
     path
 }
 
+/// タイムラインを描くとき、見えている範囲のキーフレームだけを調べる（作品の長さによらない）。直す前は、描くたびに
+/// 全部のキーフレームを調べた（レビュー f01d518 の N-5005）
+#[test]
+fn drawing_the_timeline_examines_only_visible_keyframes() {
+    let mut app = Is2dApp::default();
+    app.tab_mut().with_active_timeline_mut(|tl, _| {
+        for k in 1..2000 {
+            assert!(tl.layers[0].insert_keyframe(2 * k, false));
+        }
+        tl.sync_total_frames();
+    });
+    let before = crate::timeline_ui::keyframes_examined();
+    let ctx = egui::Context::default();
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(1280.0, 820.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| app.update_ui(ctx),
+    );
+    let examined = crate::timeline_ui::keyframes_examined() - before;
+    assert!(examined > 0);
+    assert!(examined < 200, "見えている範囲だけ（{examined} 個）");
+}
+
 /// 作品を開くと、表示するコマの地図だけを確かめ、ほかのキーフレームは初めて使うときに確かめる。見ていないキーフレームは
 /// 確かめないまま。直す前は、開くときに全部のキーフレームの地図を確かめた
 #[test]
