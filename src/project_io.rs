@@ -510,7 +510,8 @@ impl From<&Keyframe> for SavedKeyframe {
 impl Keyframe {
     /// 読んだキーフレーム `s`。地図は塊の表から作ったしまう形（`into_document`）で、正しいかは確かめずに、初めて使うときに
     /// 確かめる（`Cel::from_saved`）。しまう形が無いか、同じ階層の地図が2つあれば、壊れたファイルとして `Err`
-    fn from_saved(s: SavedKeyframe) -> Result<Self, String> {
+    /// 同じ番号のインスタンスを外したら `trimmed` に記す（読み込みで中身を除いたかは、除いた所で記す）
+    fn from_saved(s: SavedKeyframe, trimmed: &mut bool) -> Result<Self, String> {
         let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
         // 階層（地図の階層とインスタンスの親の階層）の深さは `MAX_GROUP_DEPTH` まで。グループの番号ごとに、すぐ上の
         // グループは1つ（同じグループが2つの所に無い。すぐ上が1つなら、上の並び全体も1つに決まる）
@@ -538,6 +539,7 @@ impl Keyframe {
             }
         }
         let mut seen_gids = HashSet::with_capacity(s.instances.len());
+        let saved_instances = s.instances.len();
         let instances: Vec<SymbolInstance> = s
             .instances
             .into_iter()
@@ -546,6 +548,7 @@ impl Keyframe {
             // 新しい番号にし、無いシンボルを指すインスタンスはそこで外す
             .filter(|inst| seen_gids.insert(inst.binding.instance_gid))
             .collect();
+        *trimmed |= instances.len() < saved_instances;
         let cel = Cel::from_saved(s.maps, instances);
         Ok(Self {
             start_frame: s.start_frame,
@@ -590,22 +593,24 @@ impl From<&Layer> for SavedLayer {
     }
 }
 
-impl TryFrom<SavedLayer> for Layer {
-    type Error = String;
-
-    fn try_from(s: SavedLayer) -> Result<Self, String> {
+impl Layer {
+    /// 読んだレイヤー `s`。レイヤーの長さの外のキーフレームと、同じコマの2つ目からのキーフレームは外し、外したら
+    /// `trimmed` に記す（0 コマ目にキーフレームが無ければ空のキーフレームを足す。これは何も除かない）
+    fn from_saved(s: SavedLayer, trimmed: &mut bool) -> Result<Self, String> {
         // コマ数に上限は設けない（編集で作れる長さはみな読み戻す。読み込みはキーフレームの数だけ回る：レビュー f01d518
         // の N-2004）
         let frame_count = s.frame_count.max(1);
+        let saved_keyframes = s.keyframes.len();
         let mut keyframes: Vec<Arc<Keyframe>> = Vec::with_capacity(s.keyframes.len());
         for saved in s.keyframes {
-            let kf = Keyframe::from_saved(saved)?;
+            let kf = Keyframe::from_saved(saved, trimmed)?;
             if kf.start_frame < frame_count {
                 keyframes.push(Arc::new(kf));
             }
         }
         keyframes.sort_by_key(|kf| kf.start_frame);
         keyframes.dedup_by_key(|kf| kf.start_frame);
+        *trimmed |= keyframes.len() < saved_keyframes;
         if keyframes.first().is_none_or(|kf| kf.start_frame != 0) {
             keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
         }
@@ -648,15 +653,16 @@ impl From<&Timeline> for SavedTimeline {
     }
 }
 
-impl TryFrom<SavedTimeline> for Timeline {
-    type Error = String;
-
-    fn try_from(s: SavedTimeline) -> Result<Self, String> {
+impl Timeline {
+    /// 読んだタイムライン `s`。レイヤーが上限（`MAX_LAYERS_PER_TIMELINE`）より多ければ後ろを外し、外したら `trimmed` に
+    /// 記す（レイヤー・キーフレーム・インスタンスで外したものも、そこで記す）
+    fn from_saved(s: SavedTimeline, trimmed: &mut bool) -> Result<Self, String> {
+        *trimmed |= s.layers.len() > MAX_LAYERS_PER_TIMELINE;
         let mut layers: Vec<Layer> = s
             .layers
             .into_iter()
             .take(MAX_LAYERS_PER_TIMELINE)
-            .map(Layer::try_from)
+            .map(|l| Layer::from_saved(l, trimmed))
             .collect::<Result<_, _>>()?;
         if layers.is_empty() {
             layers.push(Layer::new_with_id(1, "Layer 1"));
@@ -735,14 +741,13 @@ impl From<&SymbolDef> for SavedSymbolDef {
     }
 }
 
-impl TryFrom<SavedSymbolDef> for SymbolDef {
-    type Error = String;
-
-    fn try_from(s: SavedSymbolDef) -> Result<Self, String> {
+impl SymbolDef {
+    /// 読んだシンボル `s`（タイムラインで外したものは `trimmed` に記す）
+    fn from_saved(s: SavedSymbolDef, trimmed: &mut bool) -> Result<Self, String> {
         Ok(SymbolDef::with_timeline(
             s.id,
             s.name,
-            s.timeline.try_into()?,
+            Timeline::from_saved(s.timeline, trimmed)?,
         ))
     }
 }
@@ -906,7 +911,15 @@ impl ProjectDocument {
     }
 
     /// 読み込んだ `ProjectDocument` から正規化済みの `Document` を構築する。地図が壊れていれば `Err`
-    pub(crate) fn into_document(mut self) -> Result<Document, String> {
+    /// 読んだ中身から文書を作る（中身の一部を除いたかは要らないとき：`into_document_noting`）
+    pub(crate) fn into_document(self) -> Result<Document, String> {
+        self.into_document_noting(&mut false)
+    }
+
+    /// 読んだ中身から文書を作る。壊れた・使えない所を除いたら `trimmed` に記す（除いた所でその場で記す：レイヤー・
+    /// キーフレーム・インスタンスの `from_saved` と、無いシンボルを指すインスタンス。番号の振り直しや、空のキーフレーム・
+    /// レイヤーを足すことは何も除かないので記さない）
+    pub(crate) fn into_document_noting(mut self, trimmed: &mut bool) -> Result<Document, String> {
         // 地図：塊の表から、塊を共有したしまう形を作る（番号が表の外なら壊れたファイル。塊に記した図形の印は新しい番号に
         // 替える：`TileReader::new`）
         let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
@@ -921,7 +934,7 @@ impl ProjectDocument {
         }
         self.map_tiles = SavedTiles::default();
         let fps = self.timeline.fps.clamp(1, 60);
-        let mut timeline: Timeline = self.timeline.try_into()?;
+        let mut timeline = Timeline::from_saved(self.timeline, trimmed)?;
 
         // 重複または不正（id == 0 / id > MAX_SAFE_ENTITY_ID）な SymbolDef::id を一意な安全IDへ再採番してライブラリを構築
         let mut seen_sym_ids = HashSet::with_capacity(self.library.len());
@@ -937,7 +950,7 @@ impl ProjectDocument {
         let mut sym_id_remap: HashMap<u64, u64> = HashMap::new();
         let mut library: Vec<SymbolDef> = Vec::with_capacity(self.library.len());
         for saved_sym in self.library {
-            let mut sym = SymbolDef::try_from(saved_sym)?;
+            let mut sym = SymbolDef::from_saved(saved_sym, trimmed)?;
             let orig_id = sym.id;
             if !is_safe_id(sym.id) || !seen_sym_ids.insert(sym.id) {
                 while seen_sym_ids.contains(&next_fallback_sym_id) {
@@ -1020,6 +1033,7 @@ impl ProjectDocument {
                         kf.cel
                             .instances_mut()
                             .retain(|inst| seen_sym_ids.contains(&inst.binding.symbol_id));
+                        *trimmed = true;
                     }
                 }
             }
@@ -1308,44 +1322,6 @@ pub(crate) fn open_document_in_new_tab(
     Ok(())
 }
 
-/// 保存用データ（`ProjectDocument`）のルートと全シンボルのタイムラインを合わせた
-/// `[レイヤー数, キーフレーム数, インスタンス数, レイヤー長合計]` を返す
-fn saved_element_counts(proj: &ProjectDocument) -> [usize; 4] {
-    let mut counts = [0usize; 4];
-    for tl in std::iter::once(&proj.timeline).chain(proj.library.iter().map(|s| &s.timeline)) {
-        counts[0] += tl.layers.len();
-        for layer in &tl.layers {
-            // 0 コマ目にキーフレームが無ければ、読み込みで空のキーフレームを足す（それとは別に捨てたキーフレームがあれば、
-            // 数が減る）
-            counts[1] += layer.keyframes.len()
-                + usize::from(!layer.keyframes.iter().any(|k| k.start_frame == 0));
-            for kf in &layer.keyframes {
-                counts[2] += kf.instances.len();
-            }
-            // コマ数は丸める前の数（上限より長いファイルを切り詰めたら、減ったと分かる）
-            counts[3] = counts[3].saturating_add(layer.frame_count);
-        }
-    }
-    counts
-}
-
-/// 変換後の文書（`Document`）のルートと全シンボルのタイムラインを合わせた
-/// `[レイヤー数, キーフレーム数, インスタンス数, レイヤー長合計]` を返す
-fn document_element_counts(doc: &Document) -> [usize; 4] {
-    let mut counts = [0usize; 4];
-    for tl in std::iter::once(&doc.root).chain(doc.library.iter().map(|s| &s.timeline)) {
-        counts[0] += tl.layers.len();
-        for layer in &tl.layers {
-            counts[1] += layer.keyframes.len();
-            for kf in &layer.keyframes {
-                counts[2] += kf.cel.instances.len();
-            }
-            counts[3] += layer.frame_count;
-        }
-    }
-    counts
-}
-
 /// 指定パスのプロジェクトを「新しいタブ」（または既存の同一ファイルタブ／空の無題タブ）として開く
 pub(crate) fn open_project_in_tab(
     ws: &mut impl ProjectWorkspace,
@@ -1367,14 +1343,8 @@ pub(crate) fn open_project_in_tab(
     }
 
     // 2. ファイル内容を先に検証・パース（エラー時にタブを増やさない）
-    let proj_doc = read_project_document(path)?;
-    let before_counts = saved_element_counts(&proj_doc);
-    let doc = proj_doc.into_document()?;
-    let after_counts = document_element_counts(&doc);
-    let trimmed = after_counts
-        .into_iter()
-        .zip(before_counts)
-        .any(|(after, before)| after < before);
+    let mut trimmed = false;
+    let doc = read_project_document(path)?.into_document_noting(&mut trimmed)?;
     open_document_in_new_tab(ws, doc)?;
 
     ws.tab_mut().file = Some(path.to_path_buf());

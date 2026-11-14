@@ -18325,6 +18325,27 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
     assert!(app_kf.history.is_dirty());
     assert_eq!(app_kf.file.as_deref(), Some(out_of_range_kf_path.as_path()));
 
+    // 1b. 除いた分を、ほかの所で足した分が打ち消しても見逃さない（除いた所で記す：N-5009）。ここでは、外すキーフレーム
+    //     1つと、レイヤーの無いシンボルに足すレイヤー1つ（空のキーフレームを1つ持つ）。直す前は、読む前と後の数を比べたので、
+    //     キーフレームの数が同じになって見逃した
+    let hidden_trim_path = base_dir.join("hidden_trim.is2d");
+    let mut proj_hidden = proj_kf.clone();
+    proj_hidden.library.push(crate::project_io::SavedSymbolDef {
+        id: 77,
+        name: "空".to_owned(),
+        timeline: crate::project_io::SavedTimeline {
+            layers: Vec::new(),
+            ..proj_hidden.timeline.clone()
+        },
+    });
+    crate::project_io::write_project_file_atomically(&hidden_trim_path, &proj_hidden).unwrap();
+    let mut app_hidden = Is2dApp::default();
+    assert_eq!(
+        open_project_in_tab(&mut app_hidden, &hidden_trim_path, None).unwrap(),
+        OpenProjectOutcome::LoadedWithTrimmedData
+    );
+    assert!(app_hidden.history.is_dirty());
+
     // 2. レイヤーが 1001 個あるファイルを開いても LoadedWithTrimmedData が返り、未保存になる
     let over_layers_path = base_dir.join("over_1001_layers.is2d");
     let mut proj_layers = crate::project_io::read_project_document(&normal_path).unwrap();
