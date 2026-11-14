@@ -1656,23 +1656,32 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
     assert_eq!(app.doc.root.layers[1].keyframe_index_at(3), Some(1));
     assert!(!app.doc.root.layers[1].cel_at(3).unwrap().is_empty());
 
+    // コマ 4 のキーフレームをコマ 6 へ動かす：空いたコマ 4 は前のキーフレーム（コマ 1）の絵が続く（Adobe Animate と同じ。
+    // 空白キーフレームや写しのキーフレームはできない）
     let sel_l1_f3 = timeline::TimelineCellSelection::single(1, 3);
     assert!(timeline_ui::timeline_move_or_copy_frames(
         &mut app, sel_l1_f3, 0, 2, false
     ));
-    assert!(app.doc.root.layers[1].cel_at(3).unwrap().is_empty());
-    assert_eq!(
-        app.doc.root.layers[1].keyframes.last().unwrap().start_frame,
-        5
-    );
+    let starts = |app: &Is2dApp, l: usize| -> Vec<usize> {
+        app.doc.root.layers[l]
+            .keyframes
+            .iter()
+            .map(|k| k.start_frame)
+            .collect()
+    };
+    assert_eq!(starts(&app, 1), vec![0, 5]);
+    assert_eq!(app.doc.root.layers[1].keyframe_index_at(3), Some(0));
+    assert!(!app.doc.root.layers[1].cel_at(3).unwrap().is_empty());
     assert!(!app.doc.root.layers[1].cel_at(5).unwrap().is_empty());
 
+    // コマ 1 のキーフレームをコマ 3 へ動かす：コマ 1 だけは空白キーフレームになり、コマ 2 も空（その続き）
     let sel_l0_f0 = timeline::TimelineCellSelection::single(0, 0);
     assert!(timeline_ui::timeline_move_or_copy_frames(
         &mut app, sel_l0_f0, 0, 2, false
     ));
+    assert_eq!(starts(&app, 0), vec![0, 2]);
     assert!(app.doc.root.layers[0].cel_at(0).unwrap().is_empty());
-    assert!(!app.doc.root.layers[0].cel_at(1).unwrap().is_empty());
+    assert!(app.doc.root.layers[0].cel_at(1).unwrap().is_empty());
     assert!(!app.doc.root.layers[0].cel_at(2).unwrap().is_empty());
 
     app.doc.root.layers[1].insert_keyframe(3, false);
@@ -6427,13 +6436,14 @@ fn test_copy_frames_within_layer_shares_cels_and_keeps_ids() {
 }
 
 #[test]
-fn test_move_or_copy_frames_preserves_following_frames_tween_pose_and_remaps_ids() {
+fn test_copy_frames_onto_a_keyframe_replaces_it_keeps_tween_pose_and_remaps_ids() {
     let mut app = Is2dApp::default();
     let red = Color32::from_rgb(220, 50, 50);
     let blue = Color32::from_rgb(50, 120, 220);
 
-    // 1. 6フレームのレイヤー (Frame 0..=1: 赤, Frame 2..=5: 青) で Frame 0..=1 を Frame 2..=3 へ複製したとき、
-    // 移動先範囲直後の Frame 4..=5 の青い絵が上書きされず保持されること (#9-1)
+    // 1. 6フレームのレイヤー (Frame 0..=1: 赤, Frame 2..=5: 青) で Frame 0..=1 を Frame 2..=3 へ複製すると、
+    // Frame 2 の青のキーフレームは赤に置き換わり、その後ろの Frame 4..=5 にも赤が続く（Adobe Animate と同じく、
+    // 移動先の後ろに写しのキーフレームは作らない）
     app.doc.root.layers[0].insert_frame_at(5);
     app.doc.root.sync_total_frames();
     put_cel_shapes(
@@ -6464,10 +6474,20 @@ fn test_move_or_copy_frames_preserves_following_frames_tween_pose_and_remaps_ids
         red
     );
     assert_eq!(
-        app.doc.root.layers[0].cel_at(4).unwrap().shapes()[0].color,
-        blue,
-        "移動先範囲 [2..=3] の直後 Frame 4..=5 の既存セルが上書きされず保持されること (#9-1)"
+        app.doc.root.layers[0]
+            .keyframes
+            .iter()
+            .map(|k| k.start_frame)
+            .collect::<Vec<_>>(),
+        vec![0, 2]
     );
+    for f in 4..=5 {
+        assert_eq!(
+            app.doc.root.layers[0].cel_at(f).unwrap().shapes()[0].color,
+            red,
+            "移動先の後ろの Frame {f} にも、置いたキーフレームの絵が続くこと"
+        );
+    }
 
     // 2. トゥイーン中間フレームから開始する範囲を移動/複製した際、開始フレームの中割り補間姿勢を引き継ぐこと (#9-2)
     let mut tween_app = Is2dApp::default();
@@ -7113,12 +7133,104 @@ fn test_transform_rotate_zone_only_near_four_corners_and_paste_staircase_across_
     );
 }
 
+/// キーフレームをドラッグで動かすと、キーフレームそのものが動く（Adobe Animate と同じ）。空いたコマには前のキーフレーム
+/// の絵が続き（コマ 1 が空いたときだけ空白キーフレーム）、動かしたキーフレームは次のキーフレームの手前まで続く。空白や
+/// 写しのキーフレームはできない
 #[test]
-fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source() {
+fn moving_a_keyframe_moves_it_without_blank_or_copied_keyframes() {
+    use crate::doc_actions::{apply, Action};
     let red = Color32::from_rgb(220, 50, 50);
+    let green = Color32::from_rgb(40, 180, 60);
+    let paint = |app: &mut Is2dApp, c: Color32| {
+        assert!(apply(
+            app,
+            Action::PaintStroke {
+                points: vec![Point::new(100.0, 100.0), Point::new(200.0, 100.0)],
+                radius: 10.0,
+                color: c,
+            },
+        ));
+    };
+    let go = |app: &mut Is2dApp, f: usize| {
+        assert!(canvas_tool::clear_selection(app));
+        timeline_ui::select_timeline_cells(app, 0, f, 0, f);
+    };
+    let starts = |app: &Is2dApp| -> Vec<usize> {
+        app.doc.root.layers[0]
+            .keyframes
+            .iter()
+            .map(|k| k.start_frame)
+            .collect()
+    };
+    let color_at = |app: &Is2dApp, f: usize| {
+        let cel = app.doc.root.layers[0].cel_at(f).unwrap();
+        cel.shapes().first().map(|s| s.color)
+    };
+    // コマ 1 に赤、コマ 5 に緑のキーフレーム（10 コマ）
+    let two_keys = || {
+        let mut app = Is2dApp::default();
+        paint(&mut app, red);
+        go(&mut app, 4);
+        assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: false }));
+        paint(&mut app, green);
+        go(&mut app, 9);
+        assert!(apply(&mut app, Action::ExtendFrame));
+        app
+    };
+    let move_frame = |app: &mut Is2dApp, from: usize, to: usize| {
+        go(app, from);
+        let sel = app.doc.root.cell_selection.unwrap();
+        assert!(apply(
+            app,
+            Action::MoveOrCopyFrames {
+                sel,
+                layer_delta: 0,
+                frame_delta: to as isize - from as isize,
+                copy_mode: false,
+            },
+        ));
+    };
 
-    // 1. 0〜5フレーム (6コマ) のキーフレームスパンのうち先頭 0〜2 のみを Frame 8〜10 へ通常移動 (Altなし)
-    // → 移動元の 0〜2 は空白になり、選択していない残りの 3〜5 は消えずに元の赤い絵を保持すること
+    // 緑のキーフレームを後ろ（コマ 5 → 8）へ：赤がコマ 7 まで続き、緑はコマ 8〜10
+    let mut app = two_keys();
+    move_frame(&mut app, 4, 7);
+    assert_eq!(starts(&app), vec![0, 7]);
+    assert!((0..=6).all(|f| color_at(&app, f) == Some(red)));
+    assert!((7..=9).all(|f| color_at(&app, f) == Some(green)));
+
+    // 緑のキーフレームを前（コマ 5 → 3）へ：赤はコマ 2 まで、緑がコマ 3〜10
+    let mut app = two_keys();
+    move_frame(&mut app, 4, 2);
+    assert_eq!(starts(&app), vec![0, 2]);
+    assert!((0..=1).all(|f| color_at(&app, f) == Some(red)));
+    assert!((2..=9).all(|f| color_at(&app, f) == Some(green)));
+
+    // コマ 1 だけのキーフレーム（1〜10）をコマ 5 へ：コマ 1〜4 は空白キーフレームの続き、赤はコマ 5〜10
+    let mut app = Is2dApp::default();
+    paint(&mut app, red);
+    go(&mut app, 9);
+    assert!(apply(&mut app, Action::ExtendFrame));
+    move_frame(&mut app, 0, 4);
+    assert_eq!(starts(&app), vec![0, 4]);
+    assert!((0..=3).all(|f| color_at(&app, f).is_none()));
+    assert!((4..=9).all(|f| color_at(&app, f) == Some(red)));
+    assert_eq!(app.doc.root.layers[0].frame_count, 10);
+}
+
+#[test]
+fn test_partial_span_frame_move_moves_keyframes_and_leaves_hold_frames() {
+    let red = Color32::from_rgb(220, 50, 50);
+    let starts = |app: &Is2dApp| -> Vec<usize> {
+        app.doc.root.layers[0]
+            .keyframes
+            .iter()
+            .map(|k| k.start_frame)
+            .collect()
+    };
+
+    // 1. 0〜5フレーム (6コマ) のキーフレームスパンのうち先頭 0〜2 を Frame 8〜10 へ通常移動 (Altなし)
+    // → キーフレームが動くので、移動元はコマ 1 の空白キーフレームだけになり（3〜5 も空。Adobe Animate と同じく
+    // 写しのキーフレームは作らない）、移動先の 8〜10 は赤
     let mut app = Is2dApp::default();
     app.doc.root.layers[0].insert_frame_at(5);
     app.doc.root.sync_total_frames();
@@ -7138,20 +7250,12 @@ fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source
     assert!(doc_actions::timeline_move_or_copy_frames(
         &mut app, sel_prefix, 0, 8, false
     ));
-    for f in 0..=2 {
+    assert_eq!(starts(&app), vec![0, 8]);
+    for f in 0..=7 {
         assert!(
             app.doc.root.layers[0].cel_at(f).unwrap().is_empty(),
-            "移動元の先頭範囲 Frame {f} は空白化されること"
+            "移動元の Frame {f} は空（コマ 1 の空白キーフレームの続き）"
         );
-    }
-    for f in 3..=5 {
-        let cel = app.doc.root.layers[0].cel_at(f).unwrap();
-        assert_eq!(
-            cel.shapes().len(),
-            1,
-            "選択していない後半スパン Frame {f} の絵が消失せず保持されること"
-        );
-        assert_eq!(cel.shapes()[0].color, red);
     }
     for f in 8..=10 {
         let cel = app.doc.root.layers[0].cel_at(f).unwrap();
@@ -7160,7 +7264,7 @@ fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source
     }
 
     // 2. 0〜5フレームのキーフレームスパンのうち保持フレームのみ (2〜3) を選んで Frame 8〜9 へ通常移動
-    // → 0〜1 は保持、移動元の保持フレーム 2〜3 は空白化（コピーにならない）、後ろの 4〜5 も保持されること
+    // → 動くキーフレームが無いので移動元はそのまま赤が続き、移動先のコマ 9 にその絵のキーフレームができる
     let mut hold_app = Is2dApp::default();
     hold_app.doc.root.layers[0].insert_frame_at(5);
     hold_app.doc.root.sync_total_frames();
@@ -7184,23 +7288,8 @@ fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source
         6,
         false
     ));
-    for f in 0..=1 {
-        assert_eq!(
-            hold_app.doc.root.layers[0]
-                .cel_at(f)
-                .unwrap()
-                .shapes()
-                .len(),
-            1
-        );
-    }
-    for f in 2..=3 {
-        assert!(
-            hold_app.doc.root.layers[0].cel_at(f).unwrap().is_empty(),
-            "保持フレームのみを選んで通常移動した際、移動元の Frame {f} が空白化されること"
-        );
-    }
-    for f in 4..=5 {
+    assert_eq!(starts(&hold_app), vec![0, 8]);
+    for f in 0..=9 {
         assert_eq!(
             hold_app.doc.root.layers[0]
                 .cel_at(f)
@@ -7208,17 +7297,7 @@ fn test_partial_span_frame_move_preserves_unselected_tail_and_blanks_hold_source
                 .shapes()
                 .len(),
             1,
-            "保持フレーム移動範囲直後の Frame {f} の絵も消失せず保持されること"
-        );
-    }
-    for f in 8..=9 {
-        assert_eq!(
-            hold_app.doc.root.layers[0]
-                .cel_at(f)
-                .unwrap()
-                .shapes()
-                .len(),
-            1
+            "Frame {f} は赤"
         );
     }
 }

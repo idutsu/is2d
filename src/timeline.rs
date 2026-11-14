@@ -1704,66 +1704,27 @@ impl Layer {
         kfs
     }
 
-    fn snapshot_post_range_keyframe(&self, max_frame: usize) -> Option<Keyframe> {
-        let after = max_frame + 1;
-        (after < self.frame_count && !self.keyframes.iter().any(|kf| kf.start_frame == after))
-            .then(|| self.snapshot_keyframe_at(after, after))
-    }
-
-    /// 指定フレーム区間 `[min_frame..=max_frame]` を移動元から切り取って空白化し、
-    /// 移動範囲直後（`max_frame + 1`）のフレーム姿勢を保持する境界キーフレームを自動挿入する
+    /// 指定フレーム区間 `[min_frame..=max_frame]` のキーフレームを外す（コマの移動の移動元）。Adobe Animate と同じく、
+    /// 空いたコマには前のキーフレームの絵が続く（コマ 1 のキーフレームが抜けたときだけ、コマ 1 に空白キーフレームを置く）
     pub(crate) fn remove_keyframes_in_range(&mut self, min_frame: usize, max_frame: usize) {
-        let post_range_kf = self.snapshot_post_range_keyframe(max_frame);
-
         self.keyframes
             .retain(|kf| kf.start_frame < min_frame || kf.start_frame > max_frame);
-
         self.ensure_head_keyframe();
-        if min_frame < self.frame_count {
-            let prev_idx = self
-                .keyframes
-                .partition_point(|kf| kf.start_frame <= min_frame)
-                .saturating_sub(1);
-            if !self.keyframes[prev_idx].cel.is_empty() || self.keyframes[prev_idx].tween {
-                let insert_pos = self
-                    .keyframes
-                    .partition_point(|kf| kf.start_frame < min_frame);
-                self.keyframes
-                    .insert(insert_pos, Arc::new(Keyframe::new_blank(min_frame)));
-            }
-        }
-
-        if let Some(after_kf) = post_range_kf {
-            if !after_kf.cel.is_empty() || after_kf.tween {
-                let pos = self
-                    .keyframes
-                    .partition_point(|existing_kf| existing_kf.start_frame < after_kf.start_frame);
-                self.keyframes.insert(pos, Arc::new(after_kf));
-            }
-        }
     }
 
-    /// 抽出された相対キーフレーム群 `kfs` を `[dst_min_frame..=dst_max_frame]` に配置する
-    /// （移動先範囲直後のフレーム姿勢を保持する境界キーフレームを自動挿入する）
+    /// 抽出された相対キーフレーム群 `kfs` を `[dst_min_frame..=dst_max_frame]` に配置する（区間にあったキーフレームは
+    /// 置き換える）。Adobe Animate と同じく、区間の後ろのコマには、置いた最後のキーフレームの絵が次のキーフレームまで続く
     pub(crate) fn place_keyframes_at(
         &mut self,
         dst_min_frame: usize,
         dst_max_frame: usize,
         kfs: Vec<Keyframe>,
     ) {
-        let post_range_kf = self.snapshot_post_range_keyframe(dst_max_frame);
-
         if dst_max_frame >= self.frame_count {
             self.frame_count = dst_max_frame + 1;
         }
         self.keyframes
             .retain(|kf| kf.start_frame < dst_min_frame || kf.start_frame > dst_max_frame);
-        if let Some(after_kf) = post_range_kf {
-            let pos = self
-                .keyframes
-                .partition_point(|existing_kf| existing_kf.start_frame < after_kf.start_frame);
-            self.keyframes.insert(pos, Arc::new(after_kf));
-        }
         let dst_lid = self.id;
         for mut kf in kfs {
             if kf.cel.instances.iter().any(|i| i.layer_id != dst_lid) {
