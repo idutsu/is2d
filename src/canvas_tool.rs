@@ -316,6 +316,7 @@ pub(crate) enum TransformDragState {
         handle: ScaleHandle,
         anchor: Point,
         handle_start: Point,
+        orig_bbox: KRect,
         orig_pivot: Point,
         had_custom_pivot: bool,
         orig_shapes: Vec<FillShape>,
@@ -404,7 +405,16 @@ impl Default for View {
     }
 }
 
+/// 画面で動いたとみなす最小の量（px）。ドラッグで「変わったか」はみなこれで決める（`View::moves_on_screen`）
+pub(crate) const MIN_DRAG_SCREEN_PX: f64 = 0.5;
+
 impl View {
+    /// ステージの座標で長さ `len` の動きが、画面で動いたとみなす量（`MIN_DRAG_SCREEN_PX`）を超えるか。ドラッグで
+    /// 「変わったか」はみなこれで決める（ピボットの移動・輪郭の変形・拡大・回転。選択の大きさとズームによらない）
+    pub(crate) fn moves_on_screen(&self, len: f64) -> bool {
+        len * self.zoom as f64 > MIN_DRAG_SCREEN_PX
+    }
+
     /// ライブラリで選択中のシンボルIDが有効か検証し、未選択または削除済みの場合は先頭シンボルを選択する
     pub(crate) fn ensure_valid_library_selection(&mut self, library: &Library) {
         if self

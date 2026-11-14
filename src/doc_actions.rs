@@ -1123,8 +1123,10 @@ fn apply_map_reshape(
 ) -> bool {
     tab.session.clear_overlay();
     let xform = tab.session.edit_path.world_xform();
-    let min_deform = 0.5 / (tab.view.zoom as f64);
-    if (xform * to - xform * from).hypot() <= min_deform {
+    if !tab
+        .view
+        .moves_on_screen((xform * to - xform * from).hypot())
+    {
         return false;
     }
     apply_map_edit(tab, layer_id, map_edit)

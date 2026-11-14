@@ -5863,6 +5863,62 @@ fn pressing_v_right_after_a_command_shortcut_does_not_paste() {
     assert_eq!(app.scene().len(), 1);
 }
 
+/// 拡大表示で大きい絵を少しだけ拡大・回転しても、画面で動いた分は確定する（「変わったか」を、外接矩形の4隅が画面で
+/// 動く量で測る）。直す前は、倍率の差 0.005・角度 0.002rad の決め打ちで測っていたので、ズーム 400% で画面 16px の
+/// 拡大のドラッグが捨てられた（レビュー f01d518 の N-3003）
+#[test]
+fn small_scale_and_rotate_drags_at_high_zoom_are_committed() {
+    use doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(0.0, 200.0),
+            Point::new(1000.0, 200.0),
+            20.0,
+            Color32::RED,
+        ),
+    );
+    apply(
+        &mut app,
+        Action::SetTool {
+            tool: Tool::Transform,
+        },
+    );
+    apply(&mut app, Action::SelectAll);
+    let zoom = 4.0;
+    app.tab_mut().view.zoom = zoom;
+    let bounds = |app: &Is2dApp| {
+        app.scene()
+            .iter()
+            .map(|s| s.bounding_box())
+            .reduce(|a, b| a.union(b))
+            .unwrap()
+    };
+    let before = bounds(&app);
+    // 右の辺のつまみを、文書で 4px（画面で 16px）右へ
+    let (bbox, _) = app.session.selection_bbox_and_pivot(zoom).unwrap();
+    let undo_len = app.history.undo_stack.len();
+    let start = Point::new(bbox.x1, bbox.center().y);
+    let end = start + KVec2::new(4.0, 0.0);
+    tool_transform::start_transform_drag(&mut app, start, false, false);
+    tool_transform::update_transform_drag(app.tab_mut(), end, false, false);
+    tool_transform::finish_transform_drag(&mut app, Some(end));
+    assert_eq!(app.history.undo_stack.len(), undo_len + 1, "拡大を確定する");
+    assert!((bounds(&app).width() - before.width() - 4.0).abs() < 0.5);
+    // 角の外側の回転のつまみを、基準点のまわりに 0.001rad（角は画面で約 2px 動く）
+    let undo_len = app.history.undo_stack.len();
+    let (bbox, pivot) = app.session.selection_bbox_and_pivot(zoom).unwrap();
+    let start = Point::new(bbox.x1 + 15.0 / zoom as f64, bbox.y0 - 15.0 / zoom as f64);
+    let end = kurbo::Affine::rotate_about(0.001, pivot) * start;
+    tool_transform::start_transform_drag(&mut app, start, false, false);
+    tool_transform::update_transform_drag(app.tab_mut(), end, false, false);
+    tool_transform::finish_transform_drag(&mut app, Some(end));
+    assert_eq!(app.history.undo_stack.len(), undo_len + 1, "回転を確定する");
+}
+
 #[test]
 fn test_egui_select_and_transform_tool_raw_input_interactions() {
     use eframe::egui;

@@ -1,5 +1,5 @@
 use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2};
-use kurbo::{Affine, Point};
+use kurbo::{Affine, Point, Rect as KRect};
 
 use crate::canvas_tool::{ActiveCanvasDrag, MarqueeDrag, Scene, Session, Tab, View};
 pub(crate) use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
@@ -107,6 +107,7 @@ pub(crate) fn start_transform_drag(
                     handle,
                     anchor: handle.opposite_position(orig_bbox),
                     handle_start: handle.position(orig_bbox),
+                    orig_bbox,
                     orig_pivot,
                     had_custom_pivot,
                     orig_shapes,
@@ -166,7 +167,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                 changed,
                 ..
             } => {
-                if (pt - *orig_pivot).hypot() > 0.5 / (tab.view.zoom as f64) {
+                if tab.view.moves_on_screen((pt - *orig_pivot).hypot()) {
                     *changed = true;
                 }
                 *last_pivot = pt;
@@ -176,6 +177,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                 handle,
                 anchor,
                 handle_start,
+                orig_bbox,
                 orig_pivot,
                 orig_shapes,
                 last_affine,
@@ -203,7 +205,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
 
                 let affine = affine_scale_around(eff_anchor, sx, sy);
                 *last_affine = affine;
-                *changed = (sx - 1.0).abs() > 0.005 || (sy - 1.0).abs() > 0.005;
+                *changed = transform_moves(&tab.view, affine, *orig_bbox);
                 tab.session.update_transform_overlay(orig_shapes, affine);
                 if tab.session.transform_pivot.is_some() {
                     tab.session.transform_pivot = Some(affine * *orig_pivot);
@@ -234,6 +236,20 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
     tab.session.drag = drag_state;
 }
 
+/// 変形 `affine` で、選択の外接矩形 `bbox` の4隅のどれかが、画面で動いたとみなす量だけ動くか（拡大・回転のドラッグで
+/// 「変わったか」。`View::moves_on_screen`。倍率や角度で測ると、選択の大きさとズームで画面の量が変わる：レビュー
+/// f01d518 の N-3003）
+fn transform_moves(view: &View, affine: Affine, bbox: KRect) -> bool {
+    [
+        Point::new(bbox.x0, bbox.y0),
+        Point::new(bbox.x1, bbox.y0),
+        Point::new(bbox.x0, bbox.y1),
+        Point::new(bbox.x1, bbox.y1),
+    ]
+    .into_iter()
+    .any(|p| view.moves_on_screen((affine * p - p).hypot()))
+}
+
 pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option<Point>) {
     if finish_selection_drag(host, mouse_pt) {
         return;
@@ -262,13 +278,14 @@ pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option
             );
         }
         TransformDragState::Rotate {
+            orig_bbox,
             pivot,
             had_custom_pivot,
             current_angle,
             ..
         } => {
-            let changed = current_angle.abs() > 0.002;
             let affine = affine_rotate_around(pivot, current_angle);
+            let changed = transform_moves(&host.tab().view, affine, orig_bbox);
             apply(
                 host,
                 Action::CommitTransformDrag {
