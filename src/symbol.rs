@@ -604,6 +604,22 @@ impl EditPath {
             .iter()
             .fold(Affine::IDENTITY, |acc, lvl| acc * lvl.xform_in_parent)
     }
+
+    /// 親の絵を薄く見せる最初の段。ライブラリから入った段（どのインスタンスにも結び付かない `instance_gid == 0` の段。
+    /// Adobe Animate の「シンボル編集」）があれば、いちばん奥のその段より奥の段だけ親の絵を見せ、それより手前（その段の
+    /// 親から上）は見せない。無ければ 0（全部の段の親を見せる）
+    pub(crate) fn first_level_showing_parent(&self) -> usize {
+        self.levels
+            .iter()
+            .rposition(|lvl| lvl.instance_gid == 0)
+            .map_or(0, |k| k + 1)
+    }
+
+    /// ステージ（白いステージ枠・ペーストボード・「枠外を隠す」）を見せるか。ライブラリから入った段が無いとき（シーンの上で
+    /// その場で編集しているとき）だけ見せる
+    pub(crate) fn shows_stage(&self) -> bool {
+        self.levels.iter().all(|lvl| lvl.instance_gid != 0)
+    }
 }
 
 /// 保存対象の文書状態（唯一の正解データ：ルートタイムライン・シンボルライブラリ・ステージサイズ・ID採番・リビジョン）

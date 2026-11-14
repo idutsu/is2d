@@ -1547,12 +1547,6 @@ fn draw_selected_library_symbol_controls(
         ui.add_space(6.0);
     }
 
-    let is_editing_self = tab
-        .session
-        .edit_path
-        .levels
-        .iter()
-        .any(|lvl| lvl.symbol_id == sel_id);
     let tl = tab.active_timeline();
     let can_place = tab.can_place_symbol_in_current_context(sel_id)
         && tl.is_layer_editable_by_id(active_scope_layer_id(&tab.session, tl));
@@ -1571,12 +1565,11 @@ fn draw_selected_library_symbol_controls(
             actions.push(UiAction::Doc(Action::PlaceSymbol { sym_id: sel_id }));
         }
         if ui
-            .add_enabled(
-                !is_editing_self,
-                egui::Button::new(format!("{} 編集", icons::SYMBOL))
-                    .min_size(Vec2::new(54.0, 28.0)),
+            .add_sized(
+                Vec2::new(54.0, 28.0),
+                egui::Button::new(format!("{} 編集", icons::SYMBOL)),
             )
-            .on_hover_text("選択中のシンボルの内部タイムライン編集へ入ります")
+            .on_hover_text("選択中のシンボルだけを、周りの絵とステージを出さずに編集します")
             .clicked()
         {
             actions.push(UiAction::Doc(Action::EnterSymbolFromLibrary {
@@ -1798,9 +1791,10 @@ pub(crate) fn draw_canvas_contents(
     let zoom = tab.view.zoom;
     let pan = tab.view.pan;
     let stage_size = tab.doc.stage_size;
-    let artwork_painter = tab
-        .view
-        .artwork_painter(painter, painter.clip_rect(), stage_size);
+    let shows_stage = tab.session.edit_path.shows_stage();
+    let artwork_painter =
+        tab.view
+            .artwork_painter(painter, painter.clip_rect(), stage_size, shows_stage);
     tab.start_draw_pass();
 
     // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画（ルートでは何も返さず、キャッシュが空になる）
@@ -1821,7 +1815,9 @@ pub(crate) fn draw_canvas_contents(
     let mut selected_group_boxes: Vec<(u64, Option<KRect>, KRect, Option<Point>)> = Vec::new();
     let (is_sel, has_sel) = tab.scene().selected_shape_mask(&tab.session.selection);
     let curr_f = tl.current_frame;
-    let view_world_rect = tab.view.visible_world_rect(&artwork_painter, stage_size);
+    let view_world_rect = tab
+        .view
+        .visible_world_rect(&artwork_painter, stage_size, shows_stage);
     let scene = tab.scene();
     let scene_len = scene.len();
     let mut shape_cursor = 0usize;
@@ -1905,7 +1901,8 @@ pub(crate) fn draw_canvas_contents(
         );
     }
 
-    tab.view.draw_stage_foreground_overlay(painter, stage_size);
+    tab.view
+        .draw_stage_foreground_overlay(painter, stage_size, shows_stage);
     draw_selected_group_and_symbol_boxes(tab, painter, &selected_group_boxes);
 
     if tool.tool == Tool::Transform {

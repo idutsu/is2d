@@ -1013,11 +1013,15 @@ impl Is2dApp {
                 }
 
                 let stage_size = self.tab().doc.stage_size;
+                let shows_stage = self.tab().session.edit_path.shows_stage();
 
-                // 2. ステージ背景（ペーストボード＋白いステージ矩形）の描画
-                self.tab()
-                    .view
-                    .draw_stage_background(&painter, canvas_rect, stage_size);
+                // 2. ステージ背景（ペーストボード＋白いステージ矩形。ライブラリから入ったシンボルの編集では全面を白）の描画
+                self.tab().view.draw_stage_background(
+                    &painter,
+                    canvas_rect,
+                    stage_size,
+                    shows_stage,
+                );
 
                 // 3. キャンバス上のシェイプ・オニオンスキン・ステージ枠線・選択枠・プレビューの描画
                 panels::draw_canvas_contents(self.tab(), &self.tool, &self.timeline_ui, &painter);

@@ -344,7 +344,7 @@ impl BackdropCache {
     ) -> Option<Arc<egui::Mesh>> {
         let view_key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits());
         let mut active_specs = Vec::new();
-        for lvl_idx in 0..edit_path.levels.len() {
+        for lvl_idx in edit_path.first_level_showing_parent()..edit_path.levels.len() {
             let lvl = &edit_path.levels[lvl_idx];
             let (parent_sym_id, parent_tl) = if lvl_idx == 0 {
                 (None, &doc.root)

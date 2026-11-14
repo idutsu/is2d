@@ -302,62 +302,27 @@ pub(crate) fn enter_symbol_timeline(tab: &mut Tab, binding: SymbolInstanceBindin
     true
 }
 
-/// ライブラリ内の指定シンボル `symbol_id` の内部タイムライン編集モードへ入る
+/// ライブラリのシンボル `symbol_id` を、どのインスタンスにも結び付けずに編集する（Adobe Animate の「シンボル編集」）。
+/// いったんシーンまで出てから入り、周りの絵もステージも見せない（`EditPath::shows_stage`・`first_level_showing_parent`）。
+/// 基準点はステージの真ん中に置く。いくつ置いてあっても、どれか1つを選んでその場で開くことはしない
 pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
-    if tab.doc.find_symbol(symbol_id).is_none()
-        || tab
-            .session
-            .edit_path
-            .levels
-            .iter()
-            .any(|lvl| lvl.symbol_id == symbol_id)
-    {
+    if tab.doc.find_symbol(symbol_id).is_none() {
         return false;
     }
-    let has_instance_in_current_timeline = tab
-        .scene()
-        .iter()
-        .any(|s| s.symbol_instance.is_some_and(|b| b.symbol_id == symbol_id))
-        || tab.active_timeline().layers.iter().any(|l| {
-            l.keyframes.iter().any(|kf| {
-                kf.cel
-                    .instances
-                    .iter()
-                    .any(|inst| inst.binding.symbol_id == symbol_id)
-            })
-        });
-    if !tab.session.edit_path.is_empty() && !has_instance_in_current_timeline {
-        while !tab.session.edit_path.is_empty() {
-            exit_symbol_timeline(tab);
+    while !tab.session.edit_path.is_empty() {
+        if !exit_symbol_timeline(tab) {
+            return false;
         }
     }
-    let tl = tab.active_timeline();
-    let curr_f = tl.current_frame;
-    let world_xform = tab.session.edit_path.world_xform();
-    let binding = tab
-        .scene()
-        .iter()
-        .find_map(|s| s.symbol_instance.filter(|b| b.symbol_id == symbol_id))
-        .or_else(|| {
-            tl.layers.iter().find_map(|l| {
-                l.cel_at(curr_f)?.instances.iter().find_map(|inst| {
-                    (inst.binding.symbol_id == symbol_id).then(|| {
-                        let mut b = inst.binding;
-                        b.xform = world_xform * b.xform;
-                        b
-                    })
-                })
-            })
-        })
-        .unwrap_or_else(|| {
-            let stage_center = View::DEFAULT_STAGE_CENTER;
-            SymbolInstanceBinding::new(
-                0,
-                symbol_id,
-                Affine::translate(KVec2::new(stage_center.x, stage_center.y)),
-            )
-        });
-    enter_symbol_timeline(tab, binding)
+    let center = View::DEFAULT_STAGE_CENTER;
+    enter_symbol_timeline(
+        tab,
+        SymbolInstanceBinding::new(
+            0,
+            symbol_id,
+            Affine::translate(KVec2::new(center.x, center.y)),
+        ),
+    )
 }
 
 /// 現在入っているシンボル内部タイムライン編集モードから1段階上の親シーン（または親シンボル）タイムラインへ戻る

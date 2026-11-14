@@ -2766,10 +2766,12 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     sym_app.undo();
     assert_eq!(scene_summary(&sym_app).len, 1);
 
-    assert!(symbol_ops::enter_symbol_from_library(
-        &mut sym_app,
-        empty_test_sym_id
-    ));
+    // 置いてあるインスタンスの所で（その場で）入って、ステージの座標で描く
+    let inst = sym_app.doc.root.layers[0].keyframes[0]
+        .cel
+        .single_symbol_instance()
+        .unwrap();
+    assert!(symbol_ops::enter_symbol_timeline(&mut sym_app, inst));
     put_cel_shapes(
         &mut sym_app,
         0,
@@ -8737,13 +8739,16 @@ fn test_stage01_symbol_inplace_edit_and_classic_tween_on_cel() {
     );
     let s0 = cel_summary(&app.doc, lid, 0);
     assert_eq!(s0.instances.len(), 1);
-    let sym_id = s0.instances[0].symbol_id;
+    let binding = app.doc.root.layers[0].keyframes[0]
+        .cel
+        .single_symbol_instance()
+        .unwrap();
     let area_before_inplace = s0.evaluated_total_area;
 
     run(
         &mut app,
         &[
-            Action::EnterSymbolFromLibrary { sym_id },
+            Action::EnterSymbolTimeline { binding },
             Action::PaintStroke {
                 points: vec![Point::new(100.0, 140.0), Point::new(160.0, 140.0)],
                 radius: 12.0,
@@ -29895,6 +29900,146 @@ fn symbol_edit_draws_the_stage_like_the_scene() {
         !sym_clips.is_empty() && sym_clips.iter().all(|c| *c == scene_clips[0]),
         "シンボルの中でも、「枠外を隠す」でステージの外を隠す：{sym_clips:?}"
     );
+}
+
+/// ライブラリの「編集」は、どのインスタンスにも結び付けずにシンボルだけを編集する（Adobe Animate の「シンボル編集」）：
+/// いくつ置いてあっても、どれか1つの所で開かない。基準点はステージの真ん中。周りの絵もステージも見せない。その中で
+/// 子のシンボルにその場で入ると、親のシンボルの絵だけを薄く見せる（シーンの絵は見せない）。別の所からライブラリで入ると、
+/// いったんシーンまで出てから入る（前は、今のコマで最初に見つかったインスタンスの所で、その場で開いていた）
+#[test]
+fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
+    use doc_actions::Action;
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 100, 220);
+    let green = Color32::from_rgb(40, 170, 90);
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(300.0, 300.0), Point::new(400.0, 300.0)],
+                radius: 20.0,
+                color: red,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(390.0, 300.0),
+            },
+            Action::ConvertToSymbol,
+            Action::Deselect,
+        ],
+    );
+    let sym_a = app.doc.library[0].id;
+    // 同じシンボルを、上のレイヤーにもう2つ置く。シーンには生の青い線もある
+    run(
+        &mut app,
+        &[
+            Action::AddLayer,
+            Action::PlaceSymbol { sym_id: sym_a },
+            Action::Deselect,
+            Action::PlaceSymbol { sym_id: sym_a },
+            Action::Deselect,
+            Action::PaintStroke {
+                points: vec![Point::new(300.0, 420.0), Point::new(400.0, 420.0)],
+                radius: 20.0,
+                color: blue,
+            },
+        ],
+    );
+    let placed = app
+        .scene()
+        .iter()
+        .filter_map(|s| s.symbol_instance)
+        .map(|b| b.instance_gid)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(placed.len(), 3, "3つ置いてある");
+    let center = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
+    let ctx = egui::Context::default();
+    let raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 820.0),
+        )),
+        ..Default::default()
+    };
+    // 1コマ描いて、ステージの矩形に描いたものの数を返す
+    let stage_rects = |app: &mut Is2dApp| {
+        let out = ctx.run(raw_input.clone(), |ctx| app.update_ui(ctx));
+        let stage = app.view.stage_screen_rect(app.doc.stage_size);
+        out.shapes
+            .iter()
+            .filter(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.rect == stage))
+            .count()
+    };
+    assert!(stage_rects(&mut app) > 0, "シーンではステージを描く");
+
+    // 1. ライブラリから入る：インスタンスに結び付かず、基準点はステージの真ん中、周りの絵もステージも無い
+    run(&mut app, &[Action::EnterSymbolFromLibrary { sym_id: sym_a }]);
+    let path = &app.session.edit_path;
+    assert_eq!(path.len(), 1);
+    assert_eq!(path.levels[0].instance_gid, 0, "どのインスタンスにも結び付かない");
+    assert_eq!(
+        path.world_xform(),
+        kurbo::Affine::translate(center.to_vec2()),
+        "基準点はステージの真ん中"
+    );
+    assert!(!path.shows_stage());
+    assert!(
+        app.tabs[app.active]
+            .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
+            .is_none(),
+        "シーンの絵（ほかのインスタンス・青い線）を見せない"
+    );
+    assert_eq!(stage_rects(&mut app), 0, "ステージ枠・枠線を描かない");
+
+    // 2. その中で緑の線を子のシンボルにし、ダブルクリックでその場で入る：親（A）の絵だけを薄く見せる
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(500.0, 360.0), Point::new(560.0, 360.0)],
+                radius: 14.0,
+                color: green,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(555.0, 360.0),
+            },
+            Action::ConvertToSymbol,
+            Action::Deselect,
+            Action::EnterGroupAt {
+                pt: Point::new(530.0, 360.0),
+            },
+        ],
+    );
+    let sym_b = app.doc.library.iter().map(|s| s.id).max().unwrap();
+    assert_ne!(sym_b, sym_a);
+    let path = &app.session.edit_path;
+    assert_eq!(path.len(), 2, "子のシンボルの中");
+    assert_eq!(path.levels[1].symbol_id, sym_b);
+    assert_ne!(path.levels[1].instance_gid, 0, "子にはその場で入る");
+    assert!(!path.shows_stage(), "ライブラリから入った中なので、ステージは見せない");
+    let backdrop = app.tabs[app.active]
+        .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
+        .expect("親のシンボルの絵");
+    let colors: std::collections::HashSet<Color32> =
+        backdrop.vertices.iter().map(|v| v.color).collect();
+    let dim = crate::vector_engine::dim_backdrop_color;
+    assert!(colors.contains(&dim(red)), "親（A）の赤を薄く見せる");
+    assert!(!colors.contains(&dim(blue)), "シーンの青は見せない");
+    assert_eq!(stage_rects(&mut app), 0);
+
+    // 3. 子の中からライブラリで A に入り直す：シーンまで出てから、A だけの編集に入る
+    run(&mut app, &[Action::EnterSymbolFromLibrary { sym_id: sym_a }]);
+    let path = &app.session.edit_path;
+    assert_eq!(path.len(), 1);
+    assert_eq!(
+        (path.levels[0].symbol_id, path.levels[0].instance_gid),
+        (sym_a, 0)
+    );
+
+    // 4. 出るとシーンに戻り、ステージをまた描く
+    run(&mut app, &[Action::ExitSymbolTimeline]);
+    assert!(app.session.edit_path.is_empty());
+    assert!(stage_rects(&mut app) > 0);
 }
 
 /// キャンバスのダブルクリックは、2回のクリックが近い所のときだけ：A をクリックしてすぐ B をクリックしても、B のグループに
