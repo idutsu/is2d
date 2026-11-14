@@ -73,7 +73,9 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// `fonts/` フォルダ内の日本語フォント（NotoSansJP）とアイコンフォント（MaterialIcons）を読み込む
+/// `fonts/` フォルダ内の日本語フォント（NotoSansJP）とアイコンフォント（MaterialIcons）を読み込む。太字のフォントは
+/// 持たない（egui は同じ字を持つフォントを探し順の後ろから選ばず、`.strong()` も色を変えるだけなので、使われない：
+/// レビュー f01d518 の N-5006）
 fn configure_japanese_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
@@ -82,18 +84,13 @@ fn configure_japanese_fonts(ctx: &egui::Context) {
         egui::FontData::from_static(include_bytes!("../fonts/NotoSansJP-Regular.ttf")),
     );
     fonts.font_data.insert(
-        "noto_sans_jp_bold".to_owned(),
-        egui::FontData::from_static(include_bytes!("../fonts/NotoSansJP-Bold.ttf")),
-    );
-    fonts.font_data.insert(
         "material_icons".to_owned(),
         egui::FontData::from_static(include_bytes!("../fonts/MaterialIcons-Regular.ttf")),
     );
 
     if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
         proportional.insert(0, "noto_sans_jp_regular".to_owned());
-        proportional.insert(1, "noto_sans_jp_bold".to_owned());
-        proportional.insert(2, "material_icons".to_owned());
+        proportional.insert(1, "material_icons".to_owned());
     }
     if let Some(monospace) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
         monospace.push("noto_sans_jp_regular".to_owned());
