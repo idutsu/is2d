@@ -103,19 +103,21 @@ impl FillShape {
     }
 }
 
-/// シンボル1つのプレビューの写し：鍵（シンボルの世代・ライブラリの世代・今のコマ）と、評価済みの外接矩形とシンボルの
-/// 座標の結合メッシュ（中身が空なら無し）
+/// シンボル1つのプレビューの写し：鍵（シンボルの番号・シンボルの世代・ライブラリの世代・今のコマ）と、評価済みの外接矩形と
+/// シンボルの座標の結合メッシュ（中身が空なら無し）
 #[derive(Clone, Debug)]
 struct SymbolPreview {
-    key: (u64, u64, usize),
+    key: (u64, u64, u64, usize),
     bounds_and_mesh: Option<(kurbo::Rect, egui::Mesh)>,
 }
 
-/// ライブラリのシンボルのミニプレビューの写し（シンボルの番号ごと）。画面の写しなので、文書の外（タブの表示状態）に持つ
-/// （文書の型に置くと、Undo の控えとライブラリを書くときに写される：レビュー 6ee325a の N-2003）。画面座標への変換は
-/// 描くたびに行う（`egui::Shape::Mesh` がメッシュを値で受け取るので、変換済みを持っても複製は減らない）
+/// ライブラリのシンボルのミニプレビューの写し。画面が描くのは選んでいる1つだけなので、いま描いている1つだけを持つ（違う
+/// シンボルか鍵が変われば作り直す。消したシンボルの写しが溜まらない：レビュー f01d518 の N-4003）。画面の写しなので、
+/// 文書の外（タブの表示状態）に持つ（文書の型に置くと、Undo の控えとライブラリを書くときに写される：レビュー 6ee325a の
+/// N-2003）。画面座標への変換は描くたびに行う（`egui::Shape::Mesh` がメッシュを値で受け取るので、変換済みを持っても複製
+/// は減らない）
 #[derive(Clone, Default)]
-pub(crate) struct SymbolPreviews(SyncCache<HashMap<u64, SymbolPreview>>);
+pub(crate) struct SymbolPreviews(SyncCache<Option<SymbolPreview>>);
 
 impl SymbolPreviews {
     /// シンボル `sym` のプレビューの外接矩形とメッシュ（シンボルの座標）を `f` に渡す。鍵が変わっていれば作り直す。
@@ -127,9 +129,14 @@ impl SymbolPreviews {
         library: &Library,
         f: impl FnOnce(kurbo::Rect, &egui::Mesh) -> R,
     ) -> Option<R> {
-        let key = (sym.revision, library_revision, sym.timeline.current_frame);
-        let mut all = self.0.lock();
-        if all.get(&sym.id).is_none_or(|p| p.key != key) {
+        let key = (
+            sym.id,
+            sym.revision,
+            library_revision,
+            sym.timeline.current_frame,
+        );
+        let mut held = self.0.lock();
+        if held.as_ref().is_none_or(|p| p.key != key) {
             let mut shapes = sym.evaluated_local_shapes_at(sym.timeline.current_frame, library);
             if shapes.is_empty() {
                 shapes = sym.first_non_empty_local_shapes(library);
@@ -141,16 +148,19 @@ impl SymbolPreviews {
                 }
                 (union_bounding_boxes(&shapes), batch)
             });
-            all.insert(
-                sym.id,
-                SymbolPreview {
-                    key,
-                    bounds_and_mesh,
-                },
-            );
+            *held = Some(SymbolPreview {
+                key,
+                bounds_and_mesh,
+            });
         }
-        let (bounds, mesh) = all.get(&sym.id)?.bounds_and_mesh.as_ref()?;
+        let (bounds, mesh) = held.as_ref()?.bounds_and_mesh.as_ref()?;
         Some(f(*bounds, mesh))
+    }
+
+    /// テスト用：持っているプレビューの数
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> usize {
+        usize::from(self.0.lock().is_some())
     }
 }
 

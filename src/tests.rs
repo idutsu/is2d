@@ -2839,6 +2839,45 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     assert!(prev_m1 == prev_m2 && orig1 == orig2);
 }
 
+/// ライブラリのプレビューの写しは、いま描いている1つだけを持つ（別のシンボルを描くと置き換わり、消したシンボルの写しが
+/// 溜まらない）。直す前は、シンボルの番号ごとに持ち続けた（レビュー f01d518 の N-4003）
+#[test]
+fn library_preview_holds_only_the_symbol_being_drawn() {
+    use doc_actions::Action;
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(200.0, 140.0),
+            10.0,
+            Color32::RED,
+        ),
+    );
+    run(&mut app, &[Action::SelectAll, Action::ConvertToSymbol]);
+    let sym_id = app.doc.library[0].id;
+    run(&mut app, &[Action::DuplicateSymbol { sym_id }]);
+    assert_eq!(app.doc.library.len(), 2);
+    let preview = |app: &Is2dApp, i: usize| {
+        app.view
+            .symbol_previews
+            .with(
+                &app.doc.library[i],
+                app.doc.revision,
+                &app.doc.library,
+                |b, _| b,
+            )
+            .unwrap()
+    };
+    let first = preview(&app, 0);
+    let _ = preview(&app, 1);
+    assert_eq!(app.view.symbol_previews.held(), 1, "いま描いている1つだけ");
+    assert_eq!(preview(&app, 0), first, "描き直すと同じ");
+    assert_eq!(app.view.symbol_previews.held(), 1);
+}
+
 #[test]
 fn test_reverse_order_nested_symbol_topological_propagation_and_cycle_guard() {
     let mut nest_app = Is2dApp::default();
