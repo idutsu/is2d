@@ -182,6 +182,11 @@ pub(crate) fn next_shape_id() -> u64 {
     NEXT_SHAPE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// これから振る図形の番号を `id` より後ろにする（ファイルから読んだ地図に記された番号と重ならないように）
+pub(crate) fn reserve_shape_ids_through(id: u64) {
+    NEXT_SHAPE_ID.fetch_max(id.saturating_add(1), Ordering::Relaxed);
+}
+
 /// `Arc` と共存可能なスレッドセーフ（`Send + Sync`）かつ `Clone` 対応の内部可変キャッシュラッパー
 #[derive(Debug, Default)]
 pub(crate) struct SyncCache<T>(Mutex<T>);

@@ -7,7 +7,7 @@ use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, OnceLock, PoisonError, Weak},
+    sync::{Arc, Mutex, OnceLock, PoisonError},
 };
 
 /// 1タイムラインあたりの最大許容レイヤー数
@@ -209,69 +209,72 @@ pub(crate) struct Cel {
 pub(crate) struct ScopeMap {
     pub(crate) group_path: Vec<u64>,
     /// 地図（場所ごとの塊。変わらない塊は Undo の控えと共有する）。面の辺の側に、面ごとに1つずつ別の図形の番号を記して
-    /// ある（面の図形の番号になる）。ファイルから読んだ地図は、初めて使うときに確かめてしまう（`ScopeMap::stored`）。写し
-    /// （Undo の控え・コピー）どうしで共有するので、確かめるのは1回
+    /// ある（面の図形の番号になる）。ファイルから読んだ地図は、正しいかを、初めて使うときに確かめる
+    /// （`ScopeMap::stored`）。写し（Undo の控え・コピー）どうしで共有するので、確かめるのは1回
     map: Arc<LazyStored>,
 }
 
-/// セル画の1つの階層の地図の中身：しまった地図を入れる1回だけ書ける箱と、まだ確かめていない、ファイルから読んだままの
-/// 地図（設計：claude/地図の確かめを使うときに行う設計_開く時間_0fe3fcb.md）
-#[derive(Debug, Default)]
+/// セル画の1つの階層の地図の中身：しまった地図と、確かめた地図を入れる1回だけ書ける箱（設計：
+/// claude/地図の確かめを使うときに行う設計_開く時間_0fe3fcb.md。版 7 からは、ファイルから読んだ地図もはじめからしまう形
+/// で持つ）
+#[derive(Debug)]
 struct LazyStored {
-    /// しまった地図（確かめて、面に番号を記したもの。読んだ地図が壊れていれば何も無い地図）
-    stored: OnceLock<StoredMap>,
-    /// まだ確かめていない、ファイルから読んだままの地図。確かめて正しければ外し、壊れていれば保存のために残す
-    saved: Mutex<Option<SavedScopeMap>>,
-    /// 同じレイヤーの直前のキーフレームの、同じ階層の地図。確かめてあれば、その番号と塊を引き継ぐ（今の読み込みと同じ。
-    /// 確かめてなければ使わない：直前のものを確かめさせない）
-    prev: Weak<LazyStored>,
+    /// しまった地図（ファイルから読んだ地図は、読んだまま。壊れていても保存のために残す）
+    stored: StoredMap,
+    /// 確かめた地図（まだ確かめていなければ空。正しい地図なら、面に1つずつ別の番号を記した地図：アプリが書いた地図は
+    /// みなそうなので、ふつうは `stored` と同じ地図。壊れていれば `None`。編集で作った地図は、はじめから確かめてある）
+    checked: OnceLock<Option<StoredMap>>,
     /// 壊れていたときの知らせ先と、その場所（読み込みのあとに付ける：`Document::watch_broken_maps`）
     notice: OnceLock<(BrokenMaps, String)>,
+}
+
+/// 壊れていた地図の代わりに使う、何も無い地図
+fn empty_stored() -> &'static StoredMap {
+    static EMPTY: OnceLock<StoredMap> = OnceLock::new();
+    EMPTY.get_or_init(|| StoredMap::from_dense(&PlanarMap::default(), None))
 }
 
 impl LazyStored {
     /// 確かめてしまった地図 `stored`
     fn checked(stored: StoredMap) -> Arc<Self> {
         Arc::new(Self {
-            stored: OnceLock::from(stored),
-            ..Self::default()
+            stored: stored.clone(),
+            checked: OnceLock::from(Some(stored)),
+            notice: OnceLock::new(),
         })
     }
 
-    /// しまった地図（確かめる入口はこれ1つ）。まだなら、読んだままの地図を確かめてしまう（`SavedScopeMap::to_map` と、
-    /// 今までの読み込みの `ScopeMap::new` と同じ）。壊れていれば何も無い地図にして、知らせる
+    /// 使う地図（確かめる入口はこれ1つ）。まだなら確かめ、壊れていれば何も無い地図にして、知らせる
     fn get(&self) -> &StoredMap {
-        self.stored.get_or_init(|| {
-            let mut saved = self.saved.lock().unwrap_or_else(PoisonError::into_inner);
-            let checked = saved.as_ref().map(SavedScopeMap::to_map);
-            match checked {
-                Some(Ok(map)) => {
-                    *saved = None;
-                    let prev = self.prev.upgrade().and_then(|p| p.stored.get().cloned());
-                    let map = match &prev {
-                        Some(p) => map.inheriting(p),
-                        None => map,
-                    };
-                    StoredMap::from_dense(map.uniquely_labeled().map(), prev.as_ref())
-                }
-                _ => {
-                    if let Some((sink, at)) = self.notice.get() {
-                        sink.push(at.clone());
-                    }
-                    StoredMap::from_dense(&PlanarMap::default(), None)
-                }
-            }
-        })
+        self.checked
+            .get_or_init(|| self.check())
+            .as_ref()
+            .unwrap_or_else(|| empty_stored())
     }
 
-    /// 確かめたら壊れていた（読んだままの地図を残している）
-    fn broken(&self) -> bool {
-        self.stored.get().is_some()
-            && self
-                .saved
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .is_some()
+    /// 確かめた地図（`PlanarMap::checked`。受け入れの判定はこれ1つ）：正しければ、面に1つずつ別の番号を記した地図
+    /// （`CheckedMap::uniquely_labeled`。番号が変わらなければ、しまった地図そのもの。変われば、その塊を共有して作る）。
+    /// 壊れていれば `None` にして知らせる
+    fn check(&self) -> Option<StoredMap> {
+        let dense = self.stored.to_dense();
+        let Some(checked) = dense.clone().checked() else {
+            if let Some((sink, at)) = self.notice.get() {
+                sink.push(at.clone());
+            }
+            return None;
+        };
+        let labeled = checked.uniquely_labeled();
+        let same = labeled
+            .map()
+            .edges
+            .iter()
+            .zip(&dense.edges)
+            .all(|(a, b)| (a.left_src, a.right_src) == (b.left_src, b.right_src));
+        Some(if same {
+            self.stored.clone()
+        } else {
+            StoredMap::from_dense(labeled.map(), Some(&self.stored))
+        })
     }
 }
 
@@ -306,18 +309,15 @@ impl ScopeMap {
         })
     }
 
-    /// ファイルから読んだ、まだ確かめていない地図 `saved`（使うときに確かめる：`stored`）。`prev` は同じレイヤーの直前の
-    /// キーフレームの同じ階層の地図（確かめてあれば番号と塊を引き継ぐ）。辺が無ければ `None`（面が無い）
-    fn unchecked(saved: SavedScopeMap, prev: Option<&ScopeMap>) -> Option<ScopeMap> {
-        if saved.edges.is_empty() {
-            return None;
-        }
-        Some(ScopeMap {
-            group_path: saved.group_path.clone(),
+    /// ファイルから読んだ、まだ確かめていない地図 `stored`（階層 `group_path`。使うときに確かめる：`stored`）。
+    /// 辺が無ければ `None`（面が無い）
+    fn unchecked(group_path: Vec<u64>, stored: StoredMap) -> Option<ScopeMap> {
+        (!stored.is_empty()).then(|| ScopeMap {
+            group_path,
             map: Arc::new(LazyStored {
-                saved: Mutex::new(Some(saved)),
-                prev: prev.map_or_else(Weak::new, |p| Arc::downgrade(&p.map)),
-                ..LazyStored::default()
+                stored,
+                checked: OnceLock::new(),
+                notice: OnceLock::new(),
             }),
         })
     }
@@ -325,42 +325,39 @@ impl ScopeMap {
     /// 地図が無い（面が無い）。まだ確かめていない地図と、確かめたら壊れていた地図（保存のために残す）は、空でない。確かめ
     /// させない
     fn is_empty(&self) -> bool {
-        self.map.stored.get().is_some_and(StoredMap::is_empty) && !self.map.broken()
+        self.map.stored.is_empty()
     }
 
-    /// 保存する形（`SavedScopeMap`）。まだ確かめていない地図と、壊れていた地図は、読んだままの地図をそのまま書く（確かめ
-    /// させない）。番号の列は、いまの `group_path`（読み込みで振り直していることがある）
+    /// 保存する形（`SavedScopeMap`。塊の番号の並びは `ProjectDocument::of` が作る）。まだ確かめていない地図と、壊れて
+    /// いた地図も、しまった地図をそのまま書く（確かめさせない）。番号の列は、いまの `group_path`（読み込みで振り直して
+    /// いることがある）
     pub(crate) fn saved_form(&self) -> SavedScopeMap {
-        let raw = self
-            .map
-            .saved
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        match raw {
-            Some(raw) => SavedScopeMap {
-                group_path: self.group_path.clone(),
-                ..raw
-            },
-            None => SavedScopeMap::new(&self.group_path, &self.dense()),
+        let stored = match self.map.checked.get() {
+            Some(Some(checked)) => checked,
+            _ => &self.map.stored,
+        };
+        SavedScopeMap {
+            group_path: self.group_path.clone(),
+            tiles: Vec::new(),
+            stored: Some(stored.clone()),
         }
     }
 
     /// 確かめたら壊れていた（何も無い地図として使っている。保存では読んだままの地図を書く）
     #[cfg(test)]
     pub(crate) fn is_broken(&self) -> bool {
-        self.map.broken()
+        matches!(self.map.checked.get(), Some(None))
     }
 
     /// まだ確かめていない
     #[cfg(test)]
     pub(crate) fn is_unchecked(&self) -> bool {
-        self.map.stored.get().is_none()
+        self.map.checked.get().is_none()
     }
 
     /// 壊れていたときの知らせ先 `sink` と場所 `at` を付ける（まだ確かめていない地図だけ。読み込みのあと）
     fn watch(&self, sink: &BrokenMaps, at: impl FnOnce() -> String) {
-        if self.map.stored.get().is_none() {
+        if self.map.checked.get().is_none() {
             let _ = self.map.notice.set((sink.clone(), at()));
         }
     }
@@ -395,41 +392,37 @@ impl ScopeMap {
         (!m.is_empty()).then_some(m)
     }
 
-    /// 面の番号を、みな新しい番号にする（`PlanarMap::renew_labels`。番号は面の形を変えないので、正しい地図のまま）。
-    /// まだ確かめていない地図は確かめない：読んだ地図には番号が無く、番号は確かめるときに新しく振る（`face_ids`）ので、
-    /// 直前のキーフレームからの引き継ぎ（`prev`）だけを外した新しい箱にすれば、確かめてから振り直すのと同じになる。
-    /// 壊れていたときの知らせ先と場所は元のまま（壊れた地図を読んだ所）
+    /// 面の番号を、番号ごとにみな新しい番号にする（同じ番号は同じ新しい番号。番号は面の形を変えないので、正しい地図の
+    /// まま）。しまった地図の辺の番号を直接替えるので、計算に使う地図を作らず、まだ確かめていない地図も確かめない
+    /// （レビュー f01d518 の N-2001）。壊れていたときの知らせ先と場所は元のまま（壊れた地図を読んだ所）
     fn renew_labels(&mut self) {
-        let unchecked = {
-            let saved = self
-                .map
-                .saved
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            // 錠を持ったまま見るので、確かめの途中（読んだままの地図を外した後）とは食い違わない
-            self.map
-                .stored
-                .get()
-                .is_none()
-                .then(|| saved.clone())
-                .flatten()
+        let mut fresh: HashMap<ShapeId, ShapeId> = HashMap::new();
+        let mut renew = |m: &StoredMap| {
+            m.relabeled(|id| {
+                *fresh
+                    .entry(id)
+                    .or_insert_with(crate::vector_engine::next_shape_id)
+            })
         };
-        if let Some(saved) = unchecked {
-            self.map = Arc::new(LazyStored {
-                saved: Mutex::new(Some(saved)),
-                notice: self
-                    .map
-                    .notice
-                    .get()
-                    .cloned()
-                    .map_or_else(OnceLock::new, OnceLock::from),
-                ..LazyStored::default()
-            });
-            return;
-        }
-        let mut map = self.dense();
-        map.renew_labels();
-        self.map = LazyStored::checked(StoredMap::from_dense(&map, None));
+        // 正しいかは番号で変わらないので、確かめた結果も知らせ先も引き継ぐ（まだ確かめていなければ確かめない）
+        let (stored, checked) = match self.map.checked.get() {
+            Some(Some(checked)) => {
+                let m = renew(checked);
+                (m.clone(), OnceLock::from(Some(m)))
+            }
+            Some(None) => (renew(&self.map.stored), OnceLock::from(None)),
+            None => (renew(&self.map.stored), OnceLock::new()),
+        };
+        self.map = Arc::new(LazyStored {
+            stored,
+            checked,
+            notice: self
+                .map
+                .notice
+                .get()
+                .cloned()
+                .map_or_else(OnceLock::new, OnceLock::from),
+        });
     }
 
     /// しまった地図（地図を取り出す入口はこれ1つ。まだ確かめていなければ、ここで確かめる：`LazyStored::get`）
@@ -616,22 +609,13 @@ impl Cel {
         Ok(cel)
     }
 
-    /// ファイルから読んだ、階層ごとの地図 `maps`（下から順。同じ階層は2つ無い）とインスタンス（重なり位置 `order` つき）
-    /// から作る（ファイルを読むとき）。地図は確かめず、初めて使うときに確かめる（`ScopeMap::stored`）。そのとき、同じ
-    /// レイヤーの直前のセル `prev` の同じ階層の地図が確かめてあれば、形と色が同じ辺の番号を引き継ぎ
-    /// （`CheckedMap::inheriting`）、中身が同じ塊を共有する
-    pub(crate) fn from_saved(
-        maps: Vec<SavedScopeMap>,
-        mut instances: Vec<SymbolInstance>,
-        prev: Option<&Cel>,
-    ) -> Self {
+    /// ファイルから読んだ、階層ごとの地図 `maps`（下から順。同じ階層は2つ無い。しまう形は塊の表から作ったもの）とインスタンス
+    /// （重なり位置 `order` つき）から作る（ファイルを読むとき）。地図は確かめず、初めて使うときに確かめる
+    /// （`ScopeMap::stored`）
+    pub(crate) fn from_saved(maps: Vec<SavedScopeMap>, mut instances: Vec<SymbolInstance>) -> Self {
         let maps: Vec<ScopeMap> = maps
             .into_iter()
-            .filter_map(|m| {
-                let prev_map =
-                    prev.and_then(|c| c.maps.iter().find(|o| o.group_path == m.group_path));
-                ScopeMap::unchecked(m, prev_map)
-            })
+            .filter_map(|m| ScopeMap::unchecked(m.group_path, m.stored?))
             .collect();
         instances.sort_by_key(|i| i.order);
         let mut cel = Self::default();

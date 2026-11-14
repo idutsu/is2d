@@ -4486,6 +4486,17 @@ fn test_malformed_json_sanitization_and_cycle_breaking() {
           "stage_size": [99999.0, 10.0],
           "next_symbol_id": 1,
           "next_group_id": 1,
+          "map_tiles": {
+            "colors": [[255, 0, 0, 255]],
+            "tiles": [{
+              "nodes": [[100.0, 100.0], [100.0, 200.0], [200.0, 200.0]],
+              "edges": [
+                {"a": 0, "b": 1, "ctrl": [100.0, 150.0], "left": 0, "right": 1, "left_src": 0, "right_src": 0},
+                {"a": 1, "b": 2, "ctrl": [150.0, 200.0], "left": 0, "right": 1, "left_src": 0, "right_src": 0},
+                {"a": 2, "b": 0, "ctrl": [150.0, 150.0], "left": 0, "right": 1, "left_src": 0, "right_src": 0}
+              ]
+            }]
+          },
           "timeline": {
             "fps": 999,
             "total_frames": 2,
@@ -4507,13 +4518,7 @@ fn test_malformed_json_sanitization_and_cycle_breaking() {
                     "maps": [
                       {
                         "group_path": [],
-                        "colors": [[255, 0, 0, 255]],
-                        "nodes": [100.0, 100.0, 100.0, 200.0, 200.0, 200.0],
-                        "edges": [
-                          [0, 1, 100.0, 150.0, 0, 1],
-                          [1, 2, 150.0, 200.0, 0, 1],
-                          [2, 0, 150.0, 150.0, 0, 1]
-                        ]
+                        "tiles": [0]
                       }
                     ],
                     "instances": [
@@ -6890,6 +6895,17 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
           "stage_size": [800.0, 450.0],
           "next_symbol_id": {max},
           "next_group_id": {max},
+          "map_tiles": {{
+            "colors": [[255, 0, 0, 255]],
+            "tiles": [{{
+              "nodes": [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0]],
+              "edges": [
+                {{"a": 0, "b": 1, "ctrl": [150.0, 100.0], "left": 1, "right": 0, "left_src": 0, "right_src": 0}},
+                {{"a": 1, "b": 2, "ctrl": [200.0, 150.0], "left": 1, "right": 0, "left_src": 0, "right_src": 0}},
+                {{"a": 2, "b": 0, "ctrl": [150.0, 150.0], "left": 1, "right": 0, "left_src": 0, "right_src": 0}}
+              ]
+            }}]
+          }},
           "timeline": {{
             "fps": 24,
             "total_frames": 1,
@@ -6911,13 +6927,7 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
                     "maps": [
                       {{
                         "group_path": [{max}],
-                        "colors": [[255, 0, 0, 255]],
-                        "nodes": [100.0, 100.0, 200.0, 100.0, 200.0, 200.0],
-                        "edges": [
-                          [0, 1, 150.0, 100.0, 1, 0],
-                          [1, 2, 200.0, 150.0, 1, 0],
-                          [2, 0, 150.0, 150.0, 1, 0]
-                        ]
+                        "tiles": [0]
                       }}
                     ],
                     "instances": [
@@ -7081,6 +7091,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
         next_symbol_id: (n + 1) as u64,
         next_group_id: 100_000,
         recovery_source: None,
+        map_tiles: Default::default(),
     };
 
     let path = std::env::temp_dir().join(format!("is2d_dense_cycle_{}.is2d", std::process::id()));
@@ -8494,6 +8505,122 @@ fn cel_summary(doc: &symbol::Document, layer_id: u64, frame: usize) -> CelSummar
 }
 
 /// `Action` の列を順番に `doc_actions::apply` へ流すテストヘルパー
+/// テスト用：保存用の写し `pd` の中身の JSON。地図は塊の番号の並びの代わりに、塊の辺を並べたもの（色は色の表から引いた値）
+/// にし、面の図形の番号は書かない（浮いた片を写しの上で確定する保存は、呼ぶたびに片に新しい番号を振り、塊の共有の仕方も
+/// 変わるので、同じ中身でも塊の表が同じとは限らない）
+fn content_json(pd: &project_io::ProjectDocument) -> String {
+    let mut v = serde_json::to_value(pd).unwrap();
+    let tiles = v["map_tiles"]["tiles"].take();
+    let colors = v["map_tiles"]["colors"].take();
+    let expand = |m: &mut serde_json::Value| {
+        let edges: Vec<serde_json::Value> = m["tiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|t| {
+                let tile = &tiles[t.as_u64().unwrap() as usize];
+                let nodes = tile["nodes"].clone();
+                tile["edges"]
+                    .as_array()
+                    .unwrap()
+                    .clone()
+                    .into_iter()
+                    .map(move |mut e| {
+                        for end in ["a", "b"] {
+                            e[end] = nodes[e[end].as_u64().unwrap() as usize].clone();
+                        }
+                        e
+                    })
+            })
+            .map(|mut e| {
+                for side in ["left", "right"] {
+                    let i = e[side].as_u64().unwrap() as usize;
+                    e[side] = if i == 0 {
+                        serde_json::Value::Null
+                    } else {
+                        colors[i - 1].clone()
+                    };
+                    e[format!("{side}_src")].take();
+                }
+                e
+            })
+            .collect();
+        m["tiles"] = serde_json::Value::Array(edges);
+    };
+    let timelines = std::iter::once(v["timeline"].clone())
+        .chain(
+            v["library"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["timeline"].clone()),
+        )
+        .collect::<Vec<_>>();
+    let mut out_timelines = Vec::new();
+    for mut tl in timelines {
+        for layer in tl["layers"].as_array_mut().unwrap() {
+            for kf in layer["keyframes"].as_array_mut().unwrap() {
+                for m in kf["maps"].as_array_mut().unwrap() {
+                    expand(m);
+                }
+            }
+        }
+        out_timelines.push(tl);
+    }
+    v["timeline"] = out_timelines[0].clone();
+    for (s, tl) in v["library"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(&out_timelines[1..])
+    {
+        s["timeline"] = tl.clone();
+    }
+    v.to_string()
+}
+
+/// テスト用：保存用の写し `proj` の地図 `m` の中身を、ビットまで比べられる形にしたもの（階層の番号と、塊の順の辺。色は
+/// 色の表から引いた値、座標は小数の表し方（読み戻すとビットまで同じ値））
+fn saved_map_content(proj: &project_io::ProjectDocument, m: &project_io::SavedScopeMap) -> String {
+    let color = |i: u32| (i > 0).then(|| proj.map_tiles.colors[i as usize - 1]);
+    let edges: Vec<_> = m
+        .tiles
+        .iter()
+        .map(|&t| &proj.map_tiles.tiles[t as usize])
+        .flat_map(|t| t.edges.iter().map(move |e| (t, e)))
+        .map(|(t, e)| {
+            (
+                t.nodes[e.a as usize],
+                t.nodes[e.b as usize],
+                e.ctrl,
+                color(e.left),
+                color(e.right),
+                e.left_src,
+                e.right_src,
+            )
+        })
+        .collect();
+    format!("{:?} {edges:?}", m.group_path)
+}
+
+/// テスト用：保存用の写し `proj` の、ルートの最初のレイヤーのキーフレーム `kf` の最初の地図の、最初の塊の辺1本の片側の色を
+/// 新しい色にする（面の輪郭の色がそろわない、正しくない地図になる）。塊はほかの地図と共有していることがあるので、写して
+/// から変え、その地図だけが写しを指すようにする
+fn break_map_colors(proj: &mut project_io::ProjectDocument, kf: usize) {
+    let m = &mut proj.timeline.layers[0].keyframes[kf].maps[0];
+    let mut tile = proj.map_tiles.tiles[m.tiles[0] as usize].clone();
+    proj.map_tiles.colors.push([1, 2, 3, 255]);
+    let c = proj.map_tiles.colors.len() as u32;
+    let e = &mut tile.edges[0];
+    if e.left != 0 {
+        e.left = c;
+    } else {
+        e.right = c;
+    }
+    m.tiles[0] = proj.map_tiles.tiles.len() as u32;
+    proj.map_tiles.tiles.push(tile);
+}
+
 /// 保存用の型 `doc` を、今の版の `.is2d` ファイルとして `path` に書く（`project_file_bytes`）
 fn write_project_file(path: &std::path::Path, doc: &project_io::ProjectDocument) {
     std::fs::write(path, project_io::project_file_bytes(doc).unwrap()).unwrap();
@@ -11539,8 +11666,12 @@ fn convert_to_symbol_inside_rotated_instance_keeps_local_coordinates() {
     }
 }
 
+/// G5-1・N-5001：F6 で写したキーフレームは、ファイルでも開いたあとも塊を共有する。ブラシ 60 本の絵を F6 で 560 キー
+/// フレームに写して保存すると、ファイルは1枚分とほとんど同じ大きさで、開き直すとどのキーフレームも1枚目と塊を共有する。
+/// 直す前（版 6）は、キーフレームごとに地図を全部書いたので、ファイルが 100MB を超えた（レビュー f01d518 の N-5001：
+/// 480 キーフレームで1枚分の 482 倍）
 #[test]
-fn test_g5_1_save_and_reopen_60_brush_strokes_f6_560_frames_over_100mb() {
+fn test_g5_1_f6_copies_share_tiles_in_the_file_and_after_reopening() {
     use crate::doc_actions::Action;
 
     let mut app = Is2dApp::default();
@@ -11579,6 +11710,11 @@ fn test_g5_1_save_and_reopen_60_brush_strokes_f6_560_frames_over_100mb() {
         })
         .sum();
 
+    let one_path = std::env::temp_dir().join(format!("is2d_g5_1_one_{}.is2d", std::process::id()));
+    crate::project_io::save_project_to_path(&mut app, &one_path).unwrap();
+    let one_bytes = std::fs::metadata(&one_path).unwrap().len();
+    let _ = std::fs::remove_file(&one_path);
+
     for _ in 1..560 {
         assert!(doc_actions::apply(
             &mut app,
@@ -11588,34 +11724,31 @@ fn test_g5_1_save_and_reopen_60_brush_strokes_f6_560_frames_over_100mb() {
     assert_eq!(app.doc.root.total_frames, 560);
     assert_eq!(app.doc.root.layers[0].keyframes.len(), 560);
 
-    let tmp_path = std::env::temp_dir().join(format!(
-        "is2d_g5_1_560kf_over_100mb_{}.is2d",
-        std::process::id()
-    ));
-
-    let t_save = std::time::Instant::now();
-    crate::project_io::save_project_to_path(&mut app, &tmp_path)
-        .expect("100MB を超える文書でも保存に成功すること (G5-1)");
-    let save_elapsed = t_save.elapsed();
-
+    let tmp_path =
+        std::env::temp_dir().join(format!("is2d_g5_1_560kf_{}.is2d", std::process::id()));
+    crate::project_io::save_project_to_path(&mut app, &tmp_path).expect("保存できること");
     let file_bytes = std::fs::metadata(&tmp_path).unwrap().len();
     println!(
-        "[G5-1] 60 strokes ({first_cel_shapes} shapes, {first_cel_segs} segs/cel) x 560 KF: size = {:.2} MB ({file_bytes} bytes), save = {save_elapsed:?}",
-        file_bytes as f64 / (1024.0 * 1024.0)
+        "[G5-1] 60 strokes ({first_cel_shapes} shapes, {first_cel_segs} segs/cel): 1 KF {one_bytes} bytes, 560 KF {file_bytes} bytes"
     );
+    // 塊は1回だけ書き、キーフレームごとに増えるのは塊の番号の並びだけ
     assert!(
-        file_bytes > 100 * 1024 * 1024,
-        "テスト文書が旧上限 100MB を超えていること: {file_bytes} bytes"
+        file_bytes < one_bytes * 3,
+        "1枚分 {one_bytes} bytes に対して {file_bytes} bytes"
     );
 
     let mut reopened = Is2dApp::default();
-    let t_open = std::time::Instant::now();
-    crate::project_io::open_project_in_tab(&mut reopened, &tmp_path, None)
-        .expect("100MB を超える保存済みファイルを開き直せること (G5-1)");
-    let open_elapsed = t_open.elapsed();
+    crate::project_io::open_project_in_tab(&mut reopened, &tmp_path, None).expect("開き直せること");
     let _ = std::fs::remove_file(&tmp_path);
-
-    println!("[G5-1] reopen = {open_elapsed:?}");
+    let kfs = &reopened.doc.root.layers[0].keyframes;
+    let first = kfs[0].cel.maps[0].stored();
+    for k in [1, 100, 559] {
+        assert_eq!(
+            kfs[k].cel.maps[0].stored().shared_tiles(first),
+            first.tiles(),
+            "キーフレーム {k} は1枚目と塊を共有する"
+        );
+    }
     assert_eq!(reopened.doc.root.total_frames, 560);
     assert_eq!(reopened.doc.root.layers[0].keyframes.len(), 560);
     assert_eq!(
@@ -11819,6 +11952,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
             next_symbol_id: (depth + 1) as u64,
             next_group_id: (depth + 1) as u64,
             recovery_source: None,
+            map_tiles: Default::default(),
         }
     };
 
@@ -15371,14 +15505,20 @@ fn test_m4_3_saved_map_roundtrip_bit_exact_and_load_shrinks_capacities() {
             },
         );
     }
-    // 1. 地図1枚を保存の形（postcard）にして読み戻すと、ビットまで同じ地図に戻る
+    // 1. 地図1枚を保存の形（塊の表と塊の番号の並び。postcard）にして読み戻すと、ビットまで同じ地図に戻る
     let cel = &app.doc.root.layers[0].keyframes[0].cel;
     let base0 = cel.maps[0].base();
     let map = &base0.map;
-    let saved = project_io::SavedScopeMap::new(&[], map);
-    let bytes = postcard::to_allocvec(&saved).unwrap();
-    let back: project_io::SavedScopeMap = postcard::from_bytes(&bytes).unwrap();
-    let back = back.to_map().expect("正しい地図に戻る");
+    let mut writer = crate::stored_map::TileWriter::default();
+    let indices = writer.tiles_of(cel.maps[0].stored());
+    let bytes = postcard::to_allocvec(&writer.finish()).unwrap();
+    let table: project_io::SavedTiles = postcard::from_bytes(&bytes).unwrap();
+    let back = crate::stored_map::TileReader::new(&table)
+        .and_then(|r| r.map(&indices))
+        .expect("地図に戻る")
+        .to_dense()
+        .checked()
+        .expect("正しい地図に戻る");
     let bits = |m: &crate::planar_map::PlanarMap| {
         (
             m.nodes
@@ -16341,9 +16481,8 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
         }
     }
 
-    let doc_json = |app: &Is2dApp| -> String {
-        serde_json::to_string(&ProjectDocument::from_app(app.tab()).unwrap()).unwrap()
-    };
+    let doc_json =
+        |app: &Is2dApp| -> String { content_json(&ProjectDocument::from_app(app.tab()).unwrap()) };
     let doc_json_ignoring_active_layer = |app: &Is2dApp| -> String {
         let mut pd = ProjectDocument::from_app(app.tab()).unwrap();
         pd.timeline.active_layer = 0;
@@ -16352,7 +16491,7 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
             sym.timeline.active_layer = 0;
             sym.timeline.current_frame = 0;
         }
-        serde_json::to_string(&pd).unwrap()
+        content_json(&pd)
     };
 
     let mut true_without_json_change: BTreeMap<&'static str, usize> = BTreeMap::new();
@@ -18146,28 +18285,17 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
     assert_eq!(app_layers.file.as_deref(), Some(over_layers_path.as_path()));
     assert_eq!(app_layers.doc.root.layers.len(), 1000);
 
-    // 4. 地図に直せないファイル（辺が範囲の外の頂点を指す）は開かない。正しい地図でないだけ（面の輪郭の色がそろわない）の
+    // 4. 地図に直せないファイル（塊の番号が表の外）は開かない。正しい地図でないだけ（面の輪郭の色がそろわない）の
     //    ファイルは開き、その地図は使うときに確かめて、何も無い地図にする（`broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is`）
     let broken_path = base_dir.join("broken_map.is2d");
     let mut proj_broken = crate::project_io::read_project_document(&normal_path).unwrap();
-    let m = &mut proj_broken.timeline.layers[0].keyframes[0].maps[0];
-    let n = m.nodes.len() / 2;
-    m.edges[0].1 = n + 5;
+    let n = proj_broken.map_tiles.tiles.len() as u32;
+    proj_broken.timeline.layers[0].keyframes[0].maps[0].tiles[0] = n + 5;
     crate::project_io::write_project_file_atomically(&broken_path, &proj_broken).unwrap();
     let err = open_project_in_tab(&mut Is2dApp::default(), &broken_path, None).unwrap_err();
     assert!(err.contains("地図が壊れています"), "{err}");
     let mut proj_cross = crate::project_io::read_project_document(&normal_path).unwrap();
-    let m = &mut proj_cross.timeline.layers[0].keyframes[0].maps[0];
-    // 1本の辺の片側だけ色を変えて、面の輪郭の色がそろわないようにする
-    m.colors.push([1, 2, 3, 255]);
-    let (l, r) = (m.edges[0].4, m.edges[0].5);
-    let c = m.colors.len();
-    if l != 0 {
-        m.edges[0].4 = c;
-    } else {
-        m.edges[0].5 = c;
-    }
-    let _ = r;
+    break_map_colors(&mut proj_cross, 0);
     crate::project_io::write_project_file_atomically(&broken_path, &proj_cross).unwrap();
     let mut app_cross = Is2dApp::default();
     assert!(open_project_in_tab(&mut app_cross, &broken_path, None).is_ok());
@@ -19810,8 +19938,8 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
     project_io::save_project_to_path(&mut app, &path1).unwrap();
     let file1 = std::fs::read(&path1).unwrap();
 
-    // 3. 形式：保存したファイルは、頭（印・版）のあとの中身に、セル画の階層ごとの地図（頂点の座標の平らな配列と、
-    //    6つの数の辺の列）を持つ。中身は読み戻して JSON の値にして調べる
+    // 3. 形式：保存したファイルは、頭（印・版）のあとの中身に、文書の塊の表（色の表と、しまう辺の並びの塊）と、セル画の
+    //    階層ごとの地図（塊の番号の並び）を持つ。中身は読み戻して JSON の値にして調べる
     assert!(file1.starts_with(b"IS2D"));
     assert_eq!(
         file1[4..8],
@@ -19823,14 +19951,25 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
     let maps_json = kf_json["maps"].as_array().unwrap();
     let cel = &app.doc.root.layers[0].keyframes[0].cel;
     assert_eq!(maps_json.len(), cel.maps.len());
+    let tiles_json = parsed_val["map_tiles"]["tiles"].as_array().unwrap();
     for (m_json, m) in maps_json.iter().zip(cel.maps.iter()) {
-        let nodes = m_json["nodes"].as_array().unwrap();
-        assert_eq!(nodes.len(), m.base().map.nodes.len() * 2);
-        let edges = m_json["edges"].as_array().unwrap();
-        assert_eq!(edges.len(), m.base().map.edges.len());
-        assert!(edges
+        let edges: usize = m_json["tiles"]
+            .as_array()
+            .unwrap()
             .iter()
-            .all(|e| e.as_array().is_some_and(|a| a.len() == 6)));
+            .map(|t| {
+                tiles_json[t.as_u64().unwrap() as usize]["edges"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+            .sum();
+        assert_eq!(
+            edges,
+            m.base().map.edges.len(),
+            "塊の辺を合わせると地図の辺"
+        );
+        assert!(m_json.get("nodes").is_none(), "頂点の番号の並びは書かない");
     }
 
     // 1. 開くと、図形の数は同じ（図形は地図の面）
@@ -20181,6 +20320,7 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
         next_symbol_id: 1,
         next_group_id: 1,
         recovery_source: None,
+        map_tiles: Default::default(),
     };
     let mut v2_bytes = project_io::project_file_bytes(&empty_doc).unwrap();
     v2_bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
@@ -26449,12 +26589,15 @@ mod map_overlay {
             .collect();
         for seed in 0..100 {
             let cel = crate::timeline::Cel::from_saved(
-                vec![crate::project_io::SavedScopeMap::new(
-                    &[],
-                    &native_scene(seed, 4),
-                )],
+                vec![crate::project_io::SavedScopeMap {
+                    group_path: Vec::new(),
+                    tiles: Vec::new(),
+                    stored: Some(crate::stored_map::StoredMap::from_dense(
+                        &native_scene(seed, 4),
+                        None,
+                    )),
+                }],
                 Vec::new(),
-                None,
             );
             assert!(!cel.shapes().is_empty());
         }
@@ -27809,26 +27952,28 @@ fn one_rule_decides_whether_a_transform_is_usable() {
     );
 }
 
-/// 図形の番号の付け替えは `PlanarMap::relabel` 1つ：みな新しくするときは、同じ番号は同じ新しい番号に、違う番号は
-/// 違う新しい番号になる（洗い出しの 11）
+/// 図形の番号をみな新しくするとき（キーフレームを写したとき：`Cel::renew_shape_ids`）は、同じ番号は同じ新しい番号に、
+/// 違う番号は違う新しい番号になる（洗い出しの 11。しまった地図の辺の番号を直接替える：`StoredMap::relabeled`）
 #[test]
 fn renewing_labels_keeps_equal_labels_equal_and_distinct_labels_distinct() {
-    use crate::planar_map::PlanarMap;
     let r = |x: f64, c: Color32| {
         let mut s =
             vector_engine::make_marquee_rect_shape(kurbo::Rect::new(x, 0.0, x + 10.0, 10.0));
         s.color = c;
         s
     };
-    let shapes = [r(0.0, Color32::RED), r(20.0, Color32::BLUE)];
-    let map = PlanarMap::from_faces(shapes.iter());
-    let old: Vec<_> = map
+    let mut cel = crate::timeline::Cel::from_shapes_unwrap(vec![
+        r(0.0, Color32::RED),
+        r(20.0, Color32::BLUE),
+    ]);
+    let old: Vec<_> = cel.maps[0]
+        .dense()
         .edges
         .iter()
         .flat_map(|e| [e.left_src, e.right_src])
         .collect();
-    let mut renewed = map.clone();
-    renewed.renew_labels();
+    cel.renew_shape_ids();
+    let renewed = cel.maps[0].dense();
     let new: Vec<_> = renewed
         .edges
         .iter()
@@ -29237,19 +29382,6 @@ fn keyframes_after_frame_100000_survive_saving_and_opening() {
     assert_eq!(starts, vec![0, 100_005], "後ろのキーフレームが残る");
     assert!(!layer.keyframes[1].cel.shapes().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// 辺の多い地図も、読み込みで断らない（アプリが書いた地図はみな読み戻す）。直す前は、読み込みだけが1つの地図の辺を
-/// 4,000,000 本までにし、超えるとファイル全体を開けなかった（レビュー f01d518 の N-5010）
-#[test]
-fn a_map_with_many_edges_is_not_refused_on_loading() {
-    let map = crate::project_io::SavedScopeMap {
-        group_path: Vec::new(),
-        colors: vec![[255, 0, 0, 255]],
-        nodes: vec![0.0, 0.0, 1.0, 0.0],
-        edges: vec![(0, 1, 0.5, 0.0, 1, 0); 4_000_001],
-    };
-    assert!(map.fits());
 }
 
 /// 計測：線の多いセル画へ貼り付けた片の確定（選択を外す）の重さ。片の線とセル画の線を別々に2倍にして比べる
@@ -30766,31 +30898,220 @@ fn double_click_needs_both_clicks_at_the_same_place() {
     }
 }
 
-/// 計測の作品のファイルの中身 `bytes` が前の形式（版 5 の JSON）なら、その保存用の型（計測用の作品を作り直さずに使うため。
-/// アプリは前の形式を開かない）。今の版のファイルなら `None`
-fn v5_json_document(bytes: &[u8]) -> Option<project_io::ProjectDocument> {
-    if bytes.first() != Some(&b'{') {
-        return None;
+/// 前の版（版 5 の JSON・版 6）の保存用の型。計測用の作品を今の版に直すためだけに使う（アプリは前の版を開かない）。地図は
+/// 頂点と辺で書き、面の図形の番号は書かない
+mod old_format {
+    use crate::project_io::SavedSymbolInstance;
+    use crate::timeline::TweenRotate;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    pub(super) struct Map {
+        #[serde(default)]
+        pub(super) group_path: Vec<u64>,
+        pub(super) colors: Vec<[u8; 4]>,
+        pub(super) nodes: Vec<f64>,
+        pub(super) edges: Vec<(usize, usize, f64, f64, usize, usize)>,
     }
-    assert!(
-        bytes.starts_with(br#"{"version":5,"#),
-        "今の版に直せるのは、版 5 の JSON のファイルだけ"
-    );
-    // 版の番号は今の保存用の型に無いので、JSON を読むときは知らない項目として読み飛ばす
-    Some(serde_json::from_slice(bytes).expect("版 5 の JSON として読めること"))
+
+    #[derive(Deserialize)]
+    pub(super) struct Keyframe {
+        pub(super) start_frame: usize,
+        #[serde(default)]
+        pub(super) tween: bool,
+        #[serde(default)]
+        pub(super) tween_rotate: TweenRotate,
+        #[serde(default)]
+        pub(super) maps: Vec<Map>,
+        #[serde(default)]
+        pub(super) instances: Vec<SavedSymbolInstance>,
+    }
+
+    fn visible() -> bool {
+        true
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct Layer {
+        pub(super) id: u64,
+        pub(super) name: String,
+        #[serde(default = "visible")]
+        pub(super) visible: bool,
+        #[serde(default)]
+        pub(super) locked: bool,
+        pub(super) frame_count: usize,
+        #[serde(default)]
+        pub(super) keyframes: Vec<Keyframe>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct Timeline {
+        pub(super) fps: u32,
+        pub(super) total_frames: usize,
+        pub(super) current_frame: usize,
+        pub(super) active_layer: usize,
+        #[serde(default)]
+        pub(super) next_layer_number: usize,
+        #[serde(default)]
+        pub(super) next_layer_id: u64,
+        pub(super) layers: Vec<Layer>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct Symbol {
+        pub(super) id: u64,
+        pub(super) name: String,
+        pub(super) timeline: Timeline,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct Document {
+        pub(super) stage_size: [f32; 2],
+        pub(super) timeline: Timeline,
+        #[serde(default)]
+        pub(super) library: Vec<Symbol>,
+        #[serde(default)]
+        pub(super) next_symbol_id: u64,
+        #[serde(default)]
+        pub(super) next_group_id: u64,
+        #[serde(default)]
+        pub(super) recovery_source: Option<std::path::PathBuf>,
+    }
 }
 
-/// 計測の作品のファイル `path`。前の形式（版 5 の JSON）なら、今の版に直したファイルを一時フォルダに作って、そのパスを
-/// 返す（同じコマンドで測るため）
+/// 計測の作品のファイルの中身 `bytes` が前の版（版 5 の JSON・版 6）なら、今の版の保存用の型に直したものと、前の版の番号
+/// （計測用の作品を作り直さずに使うため）。今の版のファイルなら `None`
+fn old_format_document(bytes: &[u8]) -> Option<(project_io::ProjectDocument, u32)> {
+    let (old, version): (old_format::Document, u32) = if bytes.first() == Some(&b'{') {
+        assert!(
+            bytes.starts_with(br#"{"version":5,"#),
+            "直せるのは、版 5 の JSON と版 6 のファイルだけ"
+        );
+        (
+            serde_json::from_slice(bytes).expect("版 5 の JSON として読めること"),
+            5,
+        )
+    } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 6u32.to_le_bytes() {
+        (
+            postcard::from_bytes(&bytes[20..]).expect("版 6 の中身として読めること"),
+            6,
+        )
+    } else {
+        return None;
+    };
+    Some((current_document_of(old), version))
+}
+
+/// 前の版の保存用の型 `old` を、今の版の保存用の型にする。地図は確かめて面に1つずつ別の番号を記し（`uniquely_labeled`）、
+/// 同じレイヤーの直前のキーフレームの同じ階層の地図と塊を共有させる（アプリで写したのと同じ）。壊れた地図は読んだまま
+fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument {
+    use crate::stored_map::StoredMap;
+    let stored_of = |m: &old_format::Map, prev: Option<&StoredMap>| -> StoredMap {
+        let color = |i: usize| {
+            (i > 0).then(|| {
+                let c = m.colors[i - 1];
+                Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3])
+            })
+        };
+        let map = crate::planar_map::PlanarMap {
+            nodes: m.nodes.chunks(2).map(|p| Point::new(p[0], p[1])).collect(),
+            edges: m
+                .edges
+                .iter()
+                .map(|&(a, b, cx, cy, l, r)| crate::planar_map::MapEdge {
+                    a,
+                    b,
+                    ctrl: Point::new(cx, cy),
+                    left: color(l),
+                    right: color(r),
+                    left_src: None,
+                    right_src: None,
+                })
+                .collect(),
+        };
+        match map.clone().checked() {
+            Some(c) => StoredMap::from_dense(c.uniquely_labeled().map(), prev),
+            None => StoredMap::from_dense(&map, None),
+        }
+    };
+    let timeline = |tl: old_format::Timeline| project_io::SavedTimeline {
+        fps: tl.fps,
+        total_frames: tl.total_frames,
+        current_frame: tl.current_frame,
+        active_layer: tl.active_layer,
+        next_layer_number: tl.next_layer_number,
+        next_layer_id: tl.next_layer_id,
+        layers: tl
+            .layers
+            .into_iter()
+            .map(|l| {
+                let mut prev: std::collections::HashMap<Vec<u64>, StoredMap> =
+                    std::collections::HashMap::new();
+                project_io::SavedLayer {
+                    id: l.id,
+                    name: l.name,
+                    visible: l.visible,
+                    locked: l.locked,
+                    frame_count: l.frame_count,
+                    keyframes: l
+                        .keyframes
+                        .into_iter()
+                        .map(|k| project_io::SavedKeyframe {
+                            start_frame: k.start_frame,
+                            tween: k.tween,
+                            tween_rotate: k.tween_rotate,
+                            maps: k
+                                .maps
+                                .iter()
+                                .map(|m| {
+                                    let stored = stored_of(m, prev.get(&m.group_path));
+                                    prev.insert(m.group_path.clone(), stored.clone());
+                                    project_io::SavedScopeMap {
+                                        group_path: m.group_path.clone(),
+                                        tiles: Vec::new(),
+                                        stored: Some(stored),
+                                    }
+                                })
+                                .collect(),
+                            instances: k.instances,
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+    };
+    let mut pd = project_io::ProjectDocument {
+        stage_size: old.stage_size,
+        timeline: timeline(old.timeline),
+        library: old
+            .library
+            .into_iter()
+            .map(|s| project_io::SavedSymbolDef {
+                id: s.id,
+                name: s.name,
+                timeline: timeline(s.timeline),
+            })
+            .collect(),
+        next_symbol_id: old.next_symbol_id,
+        next_group_id: old.next_group_id,
+        recovery_source: old.recovery_source,
+        map_tiles: Default::default(),
+    };
+    pd.write_map_tiles();
+    pd
+}
+
+/// 計測の作品のファイル `path`。前の版なら、今の版に直したファイルを一時フォルダに作って、そのパスを返す（同じコマンドで
+/// 測るため）
 fn work_file_in_current_format(path: &std::path::Path) -> std::path::PathBuf {
     let bytes = std::fs::read(path).expect("作品を読めること");
-    let Some(doc) = v5_json_document(&bytes) else {
+    let Some((doc, version)) = old_format_document(&bytes) else {
         return path.to_path_buf();
     };
     let out = std::env::temp_dir().join("is2d_measure_work_current_format.is2d");
     write_project_file(&out, &doc);
     eprintln!(
-        "前の形式（版 5 の JSON）なので、今の版に直したファイルで測る：{:.1}MB → {:.1}MB（{}）",
+        "前の版（版 {version}）なので、今の版に直したファイルで測る：{:.1}MB → {:.1}MB（{}）",
         bytes.len() as f64 / 1e6,
         std::fs::metadata(&out).unwrap().len() as f64 / 1e6,
         out.display()
@@ -30799,8 +31120,8 @@ fn work_file_in_current_format(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// 計測用の作品のファイルを、その場で今の版に直す（ゼロベースレビューの前に `claude/review-bench/A.is2d`・`B.is2d` を
-/// 直すため）。直すのは版 5 の JSON のファイルだけで、元のファイルは同じフォルダに `<名前>.v5.json` として残す。今の版の
-/// ファイルは、開けることを確かめるだけで変えない（何度流してもよい）
+/// 直すため）。直すのは前の版（版 5 の JSON・版 6）のファイルだけで、元のファイルは同じフォルダに `<名前>.v<版>.is2d`
+/// として残す。今の版のファイルは、開けることを確かめるだけで変えない（何度流してもよい）
 ///
 /// 実行：`IS2D_CONVERT=作品のパス,作品のパス cargo test --release convert_work_files_to_current_format -- --ignored --nocapture`
 #[test]
@@ -30823,12 +31144,12 @@ fn convert_work_files_to_current_format() {
         .map(std::path::Path::new)
     {
         let bytes = std::fs::read(path).expect("作品を読めること");
-        let Some(doc) = v5_json_document(&bytes) else {
+        let Some((doc, version)) = old_format_document(&bytes) else {
             assert!(opens(path), "今の版として開けること：{}", path.display());
             eprintln!("今の版なので、そのまま：{}", path.display());
             continue;
         };
-        let backup = path.with_extension("v5.json");
+        let backup = path.with_extension(format!("v{version}.is2d"));
         assert!(
             !backup.exists(),
             "元のファイルを残す所に、もうファイルがある：{}",
@@ -30842,7 +31163,7 @@ fn convert_work_files_to_current_format() {
         std::fs::rename(path, &backup).expect("元のファイルを残せること");
         std::fs::rename(&converted, path).expect("直したファイルの名前を替えられること");
         eprintln!(
-            "直した：{}（{:.1}MB → {:.1}MB）。元のファイル：{}",
+            "直した（版 {version} → 今の版）：{}（{:.1}MB → {:.1}MB）。元のファイル：{}",
             path.display(),
             bytes.len() as f64 / 1e6,
             std::fs::metadata(path).unwrap().len() as f64 / 1e6,
@@ -30872,13 +31193,20 @@ fn measure_work() {
     let saved = crate::project_io::read_project_document(std::path::Path::new(&path))
         .expect("作品を読めること");
     let (mut layers, mut keyframes, mut maps, mut edges) = (0usize, 0usize, 0usize, 0usize);
+    // 地図の辺の数（塊の辺の数の和）
+    let map_edges = |m: &crate::project_io::SavedScopeMap| -> usize {
+        m.tiles
+            .iter()
+            .map(|&t| saved.map_tiles.tiles[t as usize].edges.len())
+            .sum()
+    };
     for tl in std::iter::once(&saved.timeline).chain(saved.library.iter().map(|s| &s.timeline)) {
         for layer in &tl.layers {
             layers += 1;
             for kf in &layer.keyframes {
                 keyframes += 1;
                 maps += kf.maps.len();
-                edges += kf.maps.iter().map(|m| m.edges.len()).sum::<usize>();
+                edges += kf.maps.iter().map(map_edges).sum::<usize>();
             }
         }
     }
@@ -30894,7 +31222,7 @@ fn measure_work() {
                     .filter(|kf| kf.start_frame <= f)
                     .max_by_key(|kf| kf.start_frame)
             })
-            .map(|kf| kf.maps.iter().map(|m| m.edges.len()).sum::<usize>())
+            .map(|kf| kf.maps.iter().map(map_edges).sum::<usize>())
             .sum()
     };
     let shown = |f: usize| -> Vec<Option<usize>> {
@@ -31448,22 +31776,14 @@ fn saving_an_unviewed_file_writes_the_same_maps_without_checking() {
         unchecked, 3,
         "保存しても、見ていないキーフレームは確かめないまま"
     );
-    // 地図を、ビットまで比べられる形にする（座標は to_bits）
+    // 地図を、ビットまで比べられる形にする
     let maps = |p: &std::path::Path| -> Vec<String> {
         let d = crate::project_io::read_project_document(p).unwrap();
         d.timeline.layers[0]
             .keyframes
             .iter()
             .flat_map(|kf| kf.maps.iter())
-            .map(|m| {
-                let bits: Vec<u64> = m.nodes.iter().map(|v| v.to_bits()).collect();
-                let edges: Vec<_> = m
-                    .edges
-                    .iter()
-                    .map(|&(a, b, x, y, l, r)| (a, b, x.to_bits(), y.to_bits(), l, r))
-                    .collect();
-                format!("{:?} {:?} {bits:?} {edges:?}", m.group_path, m.colors)
-            })
+            .map(|m| saved_map_content(&d, m))
             .collect()
     };
     let (a, b) = (maps(&path), maps(&out));
@@ -31543,15 +31863,8 @@ fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
     let path = save_many_keyframes("lazy_broken", 3);
     // コマ 3 のキーフレームの地図で、1本の辺の片側だけ色を変える（面の輪郭の色がそろわない）
     let mut proj = crate::project_io::read_project_document(&path).unwrap();
-    let m = &mut proj.timeline.layers[0].keyframes[1].maps[0];
-    m.colors.push([1, 2, 3, 255]);
-    let c = m.colors.len();
-    if m.edges[0].4 != 0 {
-        m.edges[0].4 = c;
-    } else {
-        m.edges[0].5 = c;
-    }
-    let broken = m.clone();
+    break_map_colors(&mut proj, 1);
+    let broken = saved_map_content(&proj, &proj.timeline.layers[0].keyframes[1].maps[0]);
     crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
 
     let mut app = Is2dApp::default();
@@ -31570,13 +31883,10 @@ fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
     let out = path.with_file_name("saved_again.is2d");
     crate::project_io::save_project_to_path(&mut app, &out).unwrap();
     let back = crate::project_io::read_project_document(&out).unwrap();
-    let m = &back.timeline.layers[0].keyframes[1].maps[0];
-    assert_eq!((&m.colors, &m.edges), (&broken.colors, &broken.edges));
-    assert!(m
-        .nodes
-        .iter()
-        .map(|v| v.to_bits())
-        .eq(broken.nodes.iter().map(|v| v.to_bits())));
+    assert_eq!(
+        saved_map_content(&back, &back.timeline.layers[0].keyframes[1].maps[0]),
+        broken
+    );
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
@@ -31936,12 +32246,16 @@ fn project_file_round_trip_keeps_every_bit() {
         serde_json::to_string(&pd).unwrap()
     );
     let nodes = |d: &project_io::ProjectDocument| -> Vec<u64> {
-        d.timeline
-            .layers
+        d.map_tiles
+            .tiles
             .iter()
-            .flat_map(|l| &l.keyframes)
-            .flat_map(|k| &k.maps)
-            .flat_map(|m| m.nodes.iter().map(|v| v.to_bits()))
+            .flat_map(|t| {
+                t.nodes
+                    .iter()
+                    .flatten()
+                    .chain(t.edges.iter().flat_map(|e| e.ctrl.iter()))
+                    .map(|v| v.to_bits())
+            })
             .collect()
     };
     assert!(!nodes(&pd).is_empty());
@@ -31952,7 +32266,7 @@ fn project_file_round_trip_keeps_every_bit() {
     assert_eq!(project_io::project_file_bytes(&back).unwrap(), bytes);
 }
 
-/// 保存の形（版 6）を読むときは、頭から順に確かめ、違うものをそれぞれの知らせで断る：前の形式（JSON）・is2d でない・
+/// 保存の形（版 6 から）を読むときは、頭から順に確かめ、違うものをそれぞれの知らせで断る：前の形式（JSON）・is2d でない・
 /// 版が違う・長さが合わない（途中で切れた・後ろに余り）・CRC が合わない・postcard で読めない・中身の後ろに余り・
 /// 有限でない数
 #[test]
@@ -31981,9 +32295,15 @@ fn project_file_refuses_wrong_or_broken_files() {
     );
     assert_eq!(err(b"IS2D"), "is2d のファイルではありません", "頭より短い");
     assert_eq!(err(b""), "is2d のファイルではありません", "空のファイル");
+    let next = project_io::PROJECT_FORMAT_VERSION + 1;
     assert_eq!(
-        err(&with_header(7, body)),
-        "未対応のプロジェクトバージョンです (version: 7)"
+        err(&with_header(next, body)),
+        format!("未対応のプロジェクトバージョンです (version: {next})")
+    );
+    assert_eq!(
+        err(&with_header(6, body)),
+        "未対応のプロジェクトバージョンです (version: 6)",
+        "前の版（地図を頂点と辺で書いた版 6）は開かない"
     );
     assert_eq!(
         err(&good[..good.len() - 1]),
@@ -32026,7 +32346,7 @@ fn project_file_refuses_wrong_or_broken_files() {
     );
     let drawn = project_io::ProjectDocument::from_app(app.tab()).unwrap();
     let mut nan_node = drawn.clone();
-    nan_node.timeline.layers[0].keyframes[0].maps[0].nodes[0] = f64::NAN;
+    nan_node.map_tiles.tiles[0].nodes[0][0] = f64::NAN;
     let mut inf_stage = drawn.clone();
     inf_stage.stage_size[1] = f32::INFINITY;
     for broken in [nan_node, inf_stage] {

@@ -159,7 +159,8 @@ impl PlanarMap {
             .flatten()
     }
 
-    /// 辺の側に記した図形の番号を、`f` が返す番号に付け替える（`None` を返す番号はそのまま。番号の付け替えはこれ1つ）
+    /// 辺の側に記した図形の番号を、`f` が返す番号に付け替える（`None` を返す番号はそのまま。計算に使う地図の番号の
+    /// 付け替えはこれ1つ。しまった地図は、計算に使う地図を作らずに塊の辺を直接替える：`StoredMap::relabeled`）
     pub(crate) fn relabel(&mut self, mut f: impl FnMut(ShapeId) -> Option<ShapeId>) {
         for e in &mut self.edges {
             for src in [&mut e.left_src, &mut e.right_src].into_iter().flatten() {
@@ -168,18 +169,6 @@ impl PlanarMap {
                 }
             }
         }
-    }
-
-    /// 辺の側に記した図形の番号を、番号ごとにみな新しい番号にする（`relabel`。同じ番号は同じ新しい番号になる）
-    pub(crate) fn renew_labels(&mut self) {
-        let mut fresh: HashMap<ShapeId, ShapeId> = HashMap::new();
-        self.relabel(|id| {
-            Some(
-                *fresh
-                    .entry(id)
-                    .or_insert_with(crate::vector_engine::next_shape_id),
-            )
-        });
     }
 
     /// 辺の曲線の外接矩形（面の図形の外接矩形を合わせたものと同じ）。辺が無ければ `None`
@@ -2099,21 +2088,6 @@ impl CheckedMap {
             })
             .collect();
         CheckedMap { map, faces }
-    }
-
-    /// 面に番号の無い地図（読み込んだ地図）の辺のうち、前の地図 `prev` に形と色が同じ辺があるものに、その辺の側の番号を
-    /// 記したもの（`StoredMap::labels_of`。面の番号も）。変わらない面は前の面の番号を持つので、`uniquely_labeled` のあとも
-    /// 前の地図と塊を共有する
-    pub(crate) fn inheriting(mut self, prev: &StoredMap) -> CheckedMap {
-        let labels = prev.labels_of(&self.map);
-        for (e, (left, right)) in self.map.edges.iter_mut().zip(labels) {
-            e.left_src = left;
-            e.right_src = right;
-        }
-        for f in &mut self.faces {
-            f.srcs = self.map.face_srcs(&f.cycles);
-        }
-        self
     }
 
     /// 辺の側に記した図形の番号を、`f` が返す番号に付け替える（`PlanarMap::relabel`。面の番号も）

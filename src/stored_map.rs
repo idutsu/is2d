@@ -17,7 +17,8 @@ use std::sync::{Arc, Mutex, Weak};
 use eframe::egui::Color32;
 use kurbo::Point;
 
-use crate::planar_map::{point_order, LayerBase, MapEdge, PlanarMap};
+use crate::planar_map::{point_order, IntMap, LayerBase, MapEdge, PlanarMap};
+use crate::project_io::{SavedEdge, SavedTile, SavedTiles};
 use crate::vector_engine::ShapeId;
 
 /// 塊の升目の大きさ（文書の座標の px）。ブラシ1本・消しゴム1本で変わるのは、ふつう升目の数個分
@@ -163,35 +164,6 @@ impl StoredMap {
         }))
     }
 
-    /// 地図 `map` の辺ごとの（左, 右）の側の図形の番号：この地図に形と色が同じ辺があれば、その辺の側の番号（向きは `map`
-    /// の辺の向き）。無ければ番号なし
-    pub(crate) fn labels_of(&self, map: &PlanarMap) -> Vec<(Option<ShapeId>, Option<ShapeId>)> {
-        type Key = ([u64; 6], Option<Color32>, Option<Color32>);
-        let mine: std::collections::HashMap<Key, (Option<NonZeroU64>, Option<NonZeroU64>)> = self
-            .0
-            .tiles
-            .iter()
-            .flat_map(|t| t.iter())
-            .map(|e| ((e.geom_bits(), e.left, e.right), (e.left_src, e.right_src)))
-            .collect();
-        map.edges
-            .iter()
-            .map(|e| {
-                let se = StoredEdge::of(map, e);
-                let Some(&(l, r)) = mine.get(&(se.geom_bits(), se.left, se.right)) else {
-                    return (None, None);
-                };
-                let (l, r) = (l.map(NonZeroU64::get), r.map(NonZeroU64::get));
-                // しまう辺は決まった向き。`map` の辺が逆向きなら左右を入れ替える
-                if point_order(map.nodes[e.a], map.nodes[e.b]).is_le() {
-                    (l, r)
-                } else {
-                    (r, l)
-                }
-            })
-            .collect()
-    }
-
     /// 計算に使う写しへの弱い参照（`LayerBase::of_stored` だけが使う）
     pub(crate) fn dense_slot(&self) -> &Mutex<Weak<LayerBase>> {
         &self.0.dense
@@ -244,6 +216,41 @@ impl StoredMap {
     /// 辺の無い地図か
     pub(crate) fn is_empty(&self) -> bool {
         self.0.tiles.is_empty()
+    }
+
+    /// 塊の並び `tiles`（升目の順）の地図
+    fn of_tiles(tiles: Box<[Tile]>) -> Self {
+        Self(Arc::new(Stored {
+            tiles,
+            dense: Mutex::new(Weak::new()),
+        }))
+    }
+
+    /// 側の図形の番号を `renew` で替えた地図（番号の無い側は無いまま）。形と色は変えず、辺の並びも同じなので、正しい地図は
+    /// 正しいまま（確かめ直さない）。番号の無い塊は、この地図と共有する
+    pub(crate) fn relabeled(&self, mut renew: impl FnMut(ShapeId) -> ShapeId) -> Self {
+        let mut new_src =
+            |src: Option<NonZeroU64>| src.and_then(|s| NonZeroU64::new(renew(s.get())));
+        let tiles = self
+            .0
+            .tiles
+            .iter()
+            .map(|t| {
+                if t.iter()
+                    .all(|e| e.left_src.is_none() && e.right_src.is_none())
+                {
+                    return t.clone();
+                }
+                t.iter()
+                    .map(|e| StoredEdge {
+                        left_src: new_src(e.left_src),
+                        right_src: new_src(e.right_src),
+                        ..*e
+                    })
+                    .collect()
+            })
+            .collect();
+        Self::of_tiles(tiles)
     }
 
     /// 中身が同じか（塊と辺が、ビットまで同じ）
@@ -303,5 +310,141 @@ impl StoredMap {
             .iter()
             .filter(|t| theirs.contains(&(Arc::as_ptr(t) as *const u8 as usize)))
             .count()
+    }
+}
+
+/// 地図を保存の形（塊の表と、地図ごとの塊の番号の並び：`SavedTiles`）にする。同じ塊（同じ `Arc`）は1回だけ書くので、
+/// キーフレームや Undo の控えで共有している塊は、ファイルでも共有したまま（ファイルの大きさが変わった塊の量に見合う：
+/// レビュー f01d518 の N-5001）
+#[derive(Default)]
+pub(crate) struct TileWriter {
+    index: IntMap<usize, u32>,
+    colors: std::collections::HashMap<[u8; 4], u32>,
+    out: SavedTiles,
+}
+
+impl TileWriter {
+    /// 地図 `map` の塊の番号の並び（まだ書いていない塊は表に足す）
+    pub(crate) fn tiles_of(&mut self, map: &StoredMap) -> Vec<u32> {
+        map.0
+            .tiles
+            .iter()
+            .map(|t| {
+                let key = Arc::as_ptr(t) as *const u8 as usize;
+                if let Some(&i) = self.index.get(&key) {
+                    return i;
+                }
+                let mut tile = SavedTile::default();
+                let mut node_of: IntMap<[u64; 2], u32> = IntMap::default();
+                for e in t.iter() {
+                    let mut node = |p: Point| -> u32 {
+                        *node_of
+                            .entry([p.x.to_bits(), p.y.to_bits()])
+                            .or_insert_with(|| {
+                                tile.nodes.push([p.x, p.y]);
+                                tile.nodes.len() as u32 - 1
+                            })
+                    };
+                    let (a, b) = (node(e.a), node(e.b));
+                    let edge = self.saved_edge(e, a, b);
+                    tile.edges.push(edge);
+                }
+                let i = self.out.tiles.len() as u32;
+                self.out.tiles.push(tile);
+                self.index.insert(key, i);
+                i
+            })
+            .collect()
+    }
+
+    fn saved_edge(&mut self, e: &StoredEdge, a: u32, b: u32) -> SavedEdge {
+        let mut color = |c: Option<Color32>| -> u32 {
+            let Some(c) = c else {
+                return 0;
+            };
+            let next = self.colors.len() as u32 + 1;
+            let no = *self.colors.entry(c.to_array()).or_insert(next);
+            if no == next {
+                self.out.colors.push(c.to_array());
+            }
+            no
+        };
+        SavedEdge {
+            a,
+            b,
+            ctrl: [e.ctrl.x, e.ctrl.y],
+            left: color(e.left),
+            right: color(e.right),
+            left_src: e.left_src.map_or(0, NonZeroU64::get),
+            right_src: e.right_src.map_or(0, NonZeroU64::get),
+        }
+    }
+
+    /// 書いた塊の表
+    pub(crate) fn finish(self) -> SavedTiles {
+        self.out
+    }
+}
+
+/// 保存の形の塊の表（`SavedTiles`）から読んだ塊。地図は塊の番号の並びから作り、同じ番号の塊は共有する（ファイルで共有
+/// していた塊は、読んでも共有したまま。見る順によらない）
+pub(crate) struct TileReader {
+    tiles: Vec<Tile>,
+    max_label: u64,
+}
+
+impl TileReader {
+    /// 塊の表 `saved` を読む。色の番号・点の番号が表の外か、辺の無い塊があれば `None`（壊れたファイル）
+    pub(crate) fn new(saved: &SavedTiles) -> Option<Self> {
+        let color = |i: u32| -> Option<Option<Color32>> {
+            match i {
+                0 => Some(None),
+                _ => saved
+                    .colors
+                    .get(i as usize - 1)
+                    .map(|c| Some(Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3]))),
+            }
+        };
+        let mut max_label = 0;
+        let mut tiles = Vec::with_capacity(saved.tiles.len());
+        for t in &saved.tiles {
+            let node = |i: u32| t.nodes.get(i as usize).map(|p| Point::new(p[0], p[1]));
+            let edges: Option<Vec<StoredEdge>> = t
+                .edges
+                .iter()
+                .map(|e| {
+                    max_label = max_label.max(e.left_src).max(e.right_src);
+                    Some(StoredEdge {
+                        a: node(e.a)?,
+                        b: node(e.b)?,
+                        ctrl: Point::new(e.ctrl[0], e.ctrl[1]),
+                        left: color(e.left)?,
+                        right: color(e.right)?,
+                        left_src: NonZeroU64::new(e.left_src),
+                        right_src: NonZeroU64::new(e.right_src),
+                    })
+                })
+                .collect();
+            let edges = edges?;
+            if edges.is_empty() {
+                return None;
+            }
+            tiles.push(edges.into());
+        }
+        Some(Self { tiles, max_label })
+    }
+
+    /// 塊の番号の並び `indices` の地図。番号が表の外なら `None`（壊れたファイル）
+    pub(crate) fn map(&self, indices: &[u32]) -> Option<StoredMap> {
+        let tiles: Option<Box<[Tile]>> = indices
+            .iter()
+            .map(|&i| self.tiles.get(i as usize).cloned())
+            .collect();
+        Some(StoredMap::of_tiles(tiles?))
+    }
+
+    /// 塊に記された図形の番号のうち、いちばん大きいもの（読んだあとに振る番号がこれと重ならないようにする）
+    pub(crate) fn max_label(&self) -> u64 {
+        self.max_label
     }
 }

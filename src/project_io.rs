@@ -2,12 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use eframe::egui::{self, Color32, Vec2};
+use eframe::egui::{self, Vec2};
 use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{cancel_active_drag, SelectSubMode, Session, Tab, UndoHistory, View};
-use crate::planar_map::{CheckedMap, MapEdge, PlanarMap};
+use crate::stored_map::{StoredMap, TileReader, TileWriter};
 use crate::symbol::{
     ColorEffect, Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode,
     TweenRotate,
@@ -15,12 +15,14 @@ use crate::symbol::{
 pub(crate) use crate::timeline::MAX_LAYERS_PER_TIMELINE;
 use crate::timeline::{Cel, Keyframe, Layer, ScopeMap, Timeline, TimelineCellSelection};
 
-/// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。版 6 は、頭（印・版・中身の長さ・中身の CRC32）のあとに、
-/// 保存用の型（`ProjectDocument`）を postcard で書いた中身を置く（`project_file_parts`）。中身の持ち方は版 5 と同じで、
-/// セル画の階層ごとの地図（頂点と、境目の線を1本で持つ辺）をそのまま書き（Adobe Animate と同じ持ち方）、インスタンスの
-/// 重なり位置を階層の地図の並びで書く（`order`）。面の図形は文書に持たず、使うときに地図から作る。それより前の版
-/// （版 5 までの JSON のファイル）は開かない。設計：claude/保存の形をバイナリにする設計_版6_7b5f6c4.md
-pub(crate) const PROJECT_FORMAT_VERSION: u32 = 6;
+/// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。頭（印・版・中身の長さ・中身の CRC32）のあとに、保存用の型
+/// （`ProjectDocument`）を postcard で書いた中身を置く（`project_file_parts`。版 6 から）。版 7 は、地図をセル画にしまう
+/// 形のまま書く：文書に1つの塊の表（升目ごとの、境目の線を1本で持つ辺の並び。辺は側の図形の番号も持つ）と、階層ごとの
+/// 地図の塊の番号の並び。キーフレームどうしで共有する塊は1回だけ書き、読むときも共有したまま作る（ファイルの大きさが
+/// 変わった塊の量に見合い、開いた後のメモリが見る順に左右されない：レビュー f01d518 の R4 の (a)）。インスタンスの重なり
+/// 位置は階層の地図の並びで書く（`order`）。面の図形は文書に持たず、使うときに地図から作る。それより前の版は開かない。
+/// 設計：claude/保存の形をバイナリにする設計_版6_7b5f6c4.md、claude/ゼロベースレビューf01d518の直し_まとまり3の説明.md
+pub(crate) const PROJECT_FORMAT_VERSION: u32 = 7;
 
 /// `.is2d` ファイルの先頭の印
 const PROJECT_FILE_MAGIC: [u8; 4] = *b"IS2D";
@@ -430,106 +432,45 @@ impl From<SavedSymbolInstance> for SymbolInstance {
     }
 }
 
-/// セル画の1つの階層の地図（境目の線を1本で持つ本当の形）。図形は読むときに地図の面から作る
+/// セル画の1つの階層の地図：塊の番号の並び（文書の塊の表 `ProjectDocument::map_tiles` の番号。升目の順）。塊はしまう形
+/// （`StoredMap`）の塊そのもので、側の図形の番号も持つ
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SavedScopeMap {
-    #[serde(default)]
     pub(crate) group_path: Vec<u64>,
-    /// 辺の左右の色の一覧（辺は色を 1 からの番号で指す。0 は何も無い）
-    pub(crate) colors: Vec<[u8; 4]>,
-    /// 頂点の座標（x, y の順に並べる。丸めない：読み戻すとビットまで同じ値になる）
-    pub(crate) nodes: Vec<f64>,
-    /// 辺：（始点, 終点, 制御点の x, 制御点の y, 左の色, 右の色）
-    pub(crate) edges: Vec<(usize, usize, f64, f64, usize, usize)>,
+    pub(crate) tiles: Vec<u32>,
+    /// しまう形（書かない。書くときは塊の番号の並びを作るもと、読むときは塊の番号の並びから作ったもの：
+    /// `ProjectDocument::of`・`into_document`）
+    #[serde(skip)]
+    pub(crate) stored: Option<StoredMap>,
 }
 
-impl SavedScopeMap {
-    pub(crate) fn new(group_path: &[u64], map: &PlanarMap) -> Self {
-        let mut colors: Vec<[u8; 4]> = Vec::new();
-        let mut color_no = |c: Option<Color32>| -> usize {
-            let Some(c) = c else {
-                return 0;
-            };
-            let c = c.to_array();
-            1 + colors.iter().position(|x| *x == c).unwrap_or_else(|| {
-                colors.push(c);
-                colors.len() - 1
-            })
-        };
-        let edges = map
-            .edges
-            .iter()
-            .map(|e| {
-                (
-                    e.a,
-                    e.b,
-                    e.ctrl.x,
-                    e.ctrl.y,
-                    color_no(e.left),
-                    color_no(e.right),
-                )
-            })
-            .collect();
-        Self {
-            group_path: group_path.to_vec(),
-            colors,
-            nodes: map.nodes.iter().flat_map(|p| [p.x, p.y]).collect(),
-            edges,
-        }
-    }
+/// 塊の保存の形：塊の辺の端の点の座標（丸めない：読み戻すとビットまで同じ値になる。辺どうしで共有する端は1回だけ書く）
+/// と、辺の並び
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct SavedTile {
+    pub(crate) nodes: Vec<[f64; 2]>,
+    pub(crate) edges: Vec<SavedEdge>,
+}
 
-    /// 頂点・色の番号が範囲の中か（地図に直せるか。軽いので、ファイルを読むときに全部の地図で確かめる：
-    /// `Keyframe::from_saved`）。辺の数には上限を設けない（読み込みの量はファイルの大きさで決まり、アプリが書いた地図は
-    /// みな読み戻せる：レビュー f01d518 の N-5010）
-    pub(crate) fn fits(&self) -> bool {
-        let n = self.nodes.len() / 2;
-        self.nodes.len().is_multiple_of(2)
-            && self.edges.iter().all(|&(a, b, _, _, l, r)| {
-                a < n && b < n && l <= self.colors.len() && r <= self.colors.len()
-            })
-    }
+/// しまう辺の保存の形：両端（塊の点の番号）、制御点の座標、左右の色（文書の色の表の 1 からの番号。0 は何も無い）、左右の
+/// 側の図形の番号（0 は無い）
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) struct SavedEdge {
+    pub(crate) a: u32,
+    pub(crate) b: u32,
+    pub(crate) ctrl: [f64; 2],
+    pub(crate) left: u32,
+    pub(crate) right: u32,
+    pub(crate) left_src: u64,
+    pub(crate) right_src: u64,
+}
 
-    /// 地図に戻す（確かめた地図：`PlanarMap::checked`）。番号が範囲の外か、正しい地図でなければ `Err`（アプリは正しい地図
-    /// しか書かないので、ファイルが壊れたとき）
-    pub(crate) fn to_map(&self) -> Result<CheckedMap, String> {
-        let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
-        if !self.fits() {
-            return Err(broken());
-        }
-        let n = self.nodes.len() / 2;
-        let color = |i: usize| -> Result<Option<Color32>, String> {
-            match i {
-                0 => Ok(None),
-                _ => self
-                    .colors
-                    .get(i - 1)
-                    .map(|c| Some(Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3])))
-                    .ok_or_else(broken),
-            }
-        };
-        let mut edges = Vec::with_capacity(self.edges.len());
-        for &(a, b, cx, cy, l, r) in &self.edges {
-            if a >= n || b >= n {
-                return Err(broken());
-            }
-            edges.push(MapEdge {
-                a,
-                b,
-                ctrl: Point::new(cx, cy),
-                left: color(l)?,
-                right: color(r)?,
-                left_src: None,
-                right_src: None,
-            });
-        }
-        let map = PlanarMap {
-            nodes: (0..n)
-                .map(|i| Point::new(self.nodes[2 * i], self.nodes[2 * i + 1]))
-                .collect(),
-            edges,
-        };
-        map.checked().ok_or_else(broken)
-    }
+/// 文書の地図の塊の表：色の表と、塊の表。地図は塊の番号の並びで指すので、キーフレームどうしで共有する塊は1回だけ書く
+/// （`TileWriter`・`TileReader`）
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct SavedTiles {
+    pub(crate) colors: Vec<[u8; 4]>,
+    pub(crate) tiles: Vec<SavedTile>,
 }
 
 /// グループの入れ子の深さの上限（読み込むときに、これより深い階層は壊れたファイルとして断る。手で作る入れ子はこれに
@@ -568,10 +509,9 @@ impl From<&Keyframe> for SavedKeyframe {
 }
 
 impl Keyframe {
-    /// 読んだキーフレーム `s`。地図は確かめず、初めて使うときに確かめる（`Cel::from_saved`。そのとき、同じレイヤーの直前の
-    /// キーフレーム `prev` のセル画が確かめてあれば、番号と塊を引き継ぐ）。地図に直せないか（`SavedScopeMap::fits`）、
-    /// 同じ階層の地図が2つあれば、壊れたファイルとして `Err`
-    fn from_saved(s: SavedKeyframe, prev: Option<&Keyframe>) -> Result<Self, String> {
+    /// 読んだキーフレーム `s`。地図は塊の表から作ったしまう形（`into_document`）で、正しいかは確かめずに、初めて使うときに
+    /// 確かめる（`Cel::from_saved`）。しまう形が無いか、同じ階層の地図が2つあれば、壊れたファイルとして `Err`
+    fn from_saved(s: SavedKeyframe) -> Result<Self, String> {
         let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
         // 階層（地図の階層とインスタンスの親の階層）の深さは `MAX_GROUP_DEPTH` まで。グループの番号ごとに、すぐ上の
         // グループは1つ（同じグループが2つの所に無い。すぐ上が1つなら、上の並び全体も1つに決まる）
@@ -594,7 +534,7 @@ impl Keyframe {
         }
         let mut paths = HashSet::with_capacity(s.maps.len());
         for m in &s.maps {
-            if !paths.insert(&m.group_path) || !m.fits() {
+            if !paths.insert(&m.group_path) || m.stored.is_none() {
                 return Err(broken());
             }
         }
@@ -607,7 +547,7 @@ impl Keyframe {
             // 新しい番号にし、無いシンボルを指すインスタンスはそこで外す
             .filter(|inst| seen_gids.insert(inst.binding.instance_gid))
             .collect();
-        let cel = Cel::from_saved(s.maps, instances, prev.map(|kf| &kf.cel));
+        let cel = Cel::from_saved(s.maps, instances);
         Ok(Self {
             start_frame: s.start_frame,
             cel,
@@ -660,7 +600,7 @@ impl TryFrom<SavedLayer> for Layer {
         let frame_count = s.frame_count.max(1);
         let mut keyframes: Vec<Arc<Keyframe>> = Vec::with_capacity(s.keyframes.len());
         for saved in s.keyframes {
-            let kf = Keyframe::from_saved(saved, keyframes.last().map(|kf| &**kf))?;
+            let kf = Keyframe::from_saved(saved)?;
             if kf.start_frame < frame_count {
                 keyframes.push(Arc::new(kf));
             }
@@ -822,6 +762,9 @@ pub(crate) struct ProjectDocument {
     pub(crate) next_group_id: u64,
     #[serde(default)]
     pub(crate) recovery_source: Option<PathBuf>,
+    /// 地図の塊の表（キーフレームの地図は、この表の塊の番号の並び）
+    #[serde(default)]
+    pub(crate) map_tiles: SavedTiles,
 }
 
 /// 番号 `id`（レイヤー・シンボル・グループ・インスタンス）が、ファイルから読んでそのまま使える番号か（0 でなく、安全な
@@ -856,7 +799,7 @@ impl ProjectDocument {
         let mut saved_timeline: SavedTimeline = (&doc.root).into();
         saved_timeline.fps = doc.fps.clamp(1, 60);
 
-        Self {
+        let mut out = Self {
             stage_size: [doc.stage_size.x, doc.stage_size.y],
             timeline: saved_timeline,
             library: doc
@@ -867,6 +810,32 @@ impl ProjectDocument {
             next_symbol_id: doc.next_symbol_id,
             next_group_id: doc.next_group_id,
             recovery_source: None,
+            map_tiles: SavedTiles::default(),
+        };
+        out.write_map_tiles();
+        out
+    }
+
+    /// 地図のしまう形（`SavedScopeMap::stored`）を、塊の表（`map_tiles`）と塊の番号の並びにする。共有している塊は1回だけ
+    /// 書く
+    pub(crate) fn write_map_tiles(&mut self) {
+        let mut writer = TileWriter::default();
+        self.for_each_map(|m| {
+            if let Some(stored) = m.stored.take() {
+                m.tiles = writer.tiles_of(&stored);
+            }
+        });
+        self.map_tiles = writer.finish();
+    }
+
+    /// 書いてある地図（ルートとシンボルのタイムラインの、キーフレームの順）みなに `f`
+    pub(crate) fn for_each_map(&mut self, mut f: impl FnMut(&mut SavedScopeMap)) {
+        let timelines = std::iter::once(&mut self.timeline)
+            .chain(self.library.iter_mut().map(|s| &mut s.timeline));
+        for tl in timelines {
+            for kf in tl.layers.iter_mut().flat_map(|l| l.keyframes.iter_mut()) {
+                kf.maps.iter_mut().for_each(&mut f);
+            }
         }
     }
 
@@ -916,14 +885,13 @@ impl ProjectDocument {
     /// 書いてある小数（ステージの大きさ、地図の頂点と制御点、インスタンスの変換・中心点・色効果）がみな有限か。アプリは
     /// 有限な数しか書かない（`remove_non_finite`）ので、そうでなければ壊れたファイル（読むときに断る：`project_from_bytes`）
     pub(crate) fn only_finite_numbers(&self) -> bool {
+        let tiles_ok = self.map_tiles.tiles.iter().all(|t| {
+            t.nodes.iter().flatten().all(|v| v.is_finite())
+                && t.edges.iter().all(|e| e.ctrl.iter().all(|v| v.is_finite()))
+        });
         let timeline_ok = |tl: &SavedTimeline| {
             tl.layers.iter().flat_map(|l| &l.keyframes).all(|kf| {
-                kf.maps.iter().all(|m| {
-                    m.nodes.iter().all(|v| v.is_finite())
-                        && m.edges
-                            .iter()
-                            .all(|&(_, _, cx, cy, _, _)| cx.is_finite() && cy.is_finite())
-                }) && kf.instances.iter().all(|inst| {
+                kf.instances.iter().all(|inst| {
                     let b = &inst.binding;
                     b.xform.iter().chain(&b.pivot).all(|v| v.is_finite())
                         && b.color_effect.alpha.is_finite()
@@ -932,13 +900,28 @@ impl ProjectDocument {
             })
         };
         self.stage_size.iter().all(|v| v.is_finite())
+            && tiles_ok
             && std::iter::once(&self.timeline)
                 .chain(self.library.iter().map(|s| &s.timeline))
                 .all(timeline_ok)
     }
 
     /// 読み込んだ `ProjectDocument` から正規化済みの `Document` を構築する。地図が壊れていれば `Err`
-    pub(crate) fn into_document(self) -> Result<Document, String> {
+    pub(crate) fn into_document(mut self) -> Result<Document, String> {
+        // 地図：塊の表から、塊を共有したしまう形を作る（番号が表の外なら壊れたファイル）。塊に記された図形の番号より後ろから
+        // 新しい番号を振る
+        let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
+        let reader = TileReader::new(&self.map_tiles).ok_or_else(broken)?;
+        crate::vector_engine::reserve_shape_ids_through(reader.max_label());
+        let mut all_read = true;
+        self.for_each_map(|m| {
+            m.stored = reader.map(&m.tiles);
+            all_read &= m.stored.is_some();
+        });
+        if !all_read {
+            return Err(broken());
+        }
+        self.map_tiles = SavedTiles::default();
         let fps = self.timeline.fps.clamp(1, 60);
         let mut timeline: Timeline = self.timeline.try_into()?;
 
