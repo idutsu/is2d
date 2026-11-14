@@ -629,7 +629,12 @@ pub(crate) fn prepare_ungroup_selected_shapes(
                 };
                 let content = Content {
                     layers: sym
-                        .detached_cels(inst.binding, kf.start_frame, frame, &tab.doc.library)
+                        .detached_cels(
+                            inst.binding,
+                            layer.start_of(kf_idx),
+                            frame,
+                            &tab.doc.library,
+                        )
                         .into_iter()
                         .map(|c| (layer.id, c))
                         .collect(),

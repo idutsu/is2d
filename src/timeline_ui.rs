@@ -1236,13 +1236,13 @@ fn draw_timeline_layer_row(
     // 仕事が、見えている範囲のキーフレームの数だけで決まる：レビュー f01d518 の N-5005）
     let first = layer
         .keyframes
-        .partition_point(|kf| kf.start_frame <= layout.first_vis_frame)
+        .partition_point_key(|s| s <= layout.first_vis_frame)
         .saturating_sub(1);
     for kf_idx in first..layer.keyframes.len() {
-        let kf = &layer.keyframes[kf_idx];
+        let start = layer.start_of(kf_idx);
         #[cfg(test)]
         KEYFRAMES_EXAMINED.with(|n| n.set(n.get() + 1));
-        if kf.start_frame >= layer.frame_count || kf.start_frame > layout.last_vis_frame {
+        if start >= layer.frame_count || start > layout.last_vis_frame {
             break;
         }
         draw_keyframe_span(host, grid_painter, layout, layer_idx, kf_idx, (y0, y1));
@@ -1364,7 +1364,7 @@ fn draw_keyframe_span(
     let tl = host.tab().active_timeline();
     let layer = &tl.layers[layer_idx];
     let kf = &layer.keyframes[kf_idx];
-    let span_start = kf.start_frame;
+    let span_start = layer.start_of(kf_idx);
     let span_end = layer.span_end_for_keyframe(kf_idx);
     let has_art = !kf.cel.is_empty();
     let is_layer_selected = tl

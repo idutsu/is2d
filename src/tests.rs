@@ -1664,9 +1664,8 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
     ));
     let starts = |app: &Is2dApp, l: usize| -> Vec<usize> {
         app.doc.root.layers[l]
-            .keyframes
-            .iter()
-            .map(|k| k.start_frame)
+            .keyframes_with_start()
+            .map(|(s, _)| s)
             .collect()
     };
     assert_eq!(starts(&app, 1), vec![0, 5]);
@@ -3779,7 +3778,8 @@ fn test_tween_lru_cache_no_thrashing() {
     }
 }
 
-/// キーフレームの列（塊で共有する列）は、足す・消す・書き換える・ふるいにかける、を続けても、ふつうの配列と同じ中身になる
+/// キーフレームの列（塊で共有する列）は、足す・消す・始まりのコマを書き換える・後ろをずらす・ふるいにかける、を続けても、
+/// ふつうの配列と同じ中身になる（始まりのコマは、塊の基準と要素の差で持つ：レビュー f01d518 の R5）
 #[test]
 fn test_keyframe_list_matches_plain_vec() {
     use crate::timeline::{Keyframe, KeyframeList};
@@ -3788,46 +3788,56 @@ fn test_keyframe_list_matches_plain_vec() {
     let mut plain: Vec<usize> = Vec::new();
     let mut next = 0usize;
     for step in 0..4000 {
-        let op = (r.f() * 10.0) as usize;
+        let op = (r.f() * 11.0) as usize;
         if op < 6 || plain.is_empty() {
             let i = (r.f() * (plain.len() + 1) as f64) as usize % (plain.len() + 1);
-            list.insert(i, std::sync::Arc::new(Keyframe::new_blank(next)));
+            list.insert_keyed(i, next, std::sync::Arc::new(Keyframe::new_blank()));
             plain.insert(i, next);
             next += 1;
         } else if op < 8 {
             let i = (r.f() * plain.len() as f64) as usize % plain.len();
-            assert_eq!(list.remove(i).start_frame, plain.remove(i));
+            assert_eq!(list.key(i), plain[i]);
+            list.remove(i);
+            plain.remove(i);
         } else if op < 9 {
             let i = (r.f() * plain.len() as f64) as usize % plain.len();
-            std::sync::Arc::make_mut(&mut list[i]).start_frame += 1_000_000;
+            list.set_key(i, plain[i] + 1_000_000);
             plain[i] += 1_000_000;
+        } else if op < 10 {
+            // 後ろをずらす（減らすときは、0 を下回らない量だけ）
+            let i = (r.f() * plain.len() as f64) as usize % plain.len();
+            let min_after = plain[i..].iter().copied().min().unwrap_or(0) as i64;
+            let delta = (r.f() * 200.0) as i64 - 100;
+            let delta = delta.max(-min_after);
+            list.shift_keys_from(i, delta);
+            for f in &mut plain[i..] {
+                *f = (*f as i64 + delta) as usize;
+            }
         } else {
             let m = 2 + (r.f() * 5.0) as usize;
-            list.retain(|kf| kf.start_frame % m != 0);
+            list.retain_keyed(|f, _| f % m != 0);
             plain.retain(|f| f % m != 0);
         }
         assert_eq!(list.len(), plain.len(), "step {step}");
         if step % 97 == 0 {
-            let got: Vec<usize> = list.iter().map(|kf| kf.start_frame).collect();
+            let got: Vec<usize> = list.iter_keyed().map(|(f, _)| f).collect();
             assert_eq!(got, plain, "step {step}");
             for (i, f) in plain.iter().enumerate() {
-                assert_eq!(list[i].start_frame, *f);
+                assert_eq!(list.key(i), *f);
             }
         }
     }
-    let got: Vec<usize> = list.iter().map(|kf| kf.start_frame).collect();
+    let got: Vec<usize> = list.iter_keyed().map(|(f, _)| f).collect();
     assert_eq!(got, plain);
 }
 
 /// Undo の控え（文書の複製）と、そのあと1つのキーフレームを書き換えた列は、触った塊のほかを共有する（N-2004）
 #[test]
 fn test_keyframe_list_copy_shares_untouched_chunks() {
-    use crate::timeline::{Keyframe, Layer};
+    use crate::timeline::Layer;
     let mut layer = Layer::new_with_id_and_frames(1, "L", 3000);
     for f in 1..3000 {
-        layer
-            .keyframes
-            .insert(f, std::sync::Arc::new(Keyframe::new_blank(f)));
+        layer.insert_keyframe(f, false);
     }
     let snapshot = layer.clone();
     layer.keyframe_mut(1500).tween = true;
@@ -3836,6 +3846,162 @@ fn test_keyframe_list_copy_shares_untouched_chunks() {
     assert_eq!(shared, total - 1, "触った塊だけが写される");
     assert!(!snapshot.keyframes[1500].tween, "控えは変わらない");
     assert!(layer.keyframes[1500].tween);
+}
+
+/// F5（コマを足す）と Shift+F5（コマを消す。範囲もまとめて）は、後ろのキーフレームをみな写さない。Undo の控えと共有
+/// しない塊は、列の長さによらず数個だけ（後ろの塊は基準だけを変える：レビュー f01d518 の R5）
+#[test]
+fn test_frame_insert_and_remove_keep_later_keyframe_chunks_shared() {
+    use crate::timeline::{Layer, Timeline, TimelineCellSelection};
+    let mut layer = Layer::new_with_id_and_frames(1, "L", 6000);
+    for f in (2..6000).step_by(2) {
+        layer.insert_keyframe(f, false);
+    }
+    let keyframes = layer.keyframes.len();
+    // キーフレームの始まりのコマ（保持の終わりから求める）
+    let starts = |l: &Layer| -> Vec<usize> {
+        (0..l.keyframes.len())
+            .map(|i| {
+                if i == 0 {
+                    0
+                } else {
+                    l.span_end_for_keyframe(i - 1) + 1
+                }
+            })
+            .collect()
+    };
+
+    // F5：コマ 11 を伸ばす。後ろのキーフレームは 1 コマ後ろへ
+    let snapshot = layer.clone();
+    layer.insert_frame_at(10);
+    let (shared, total) = layer.keyframes.shared_chunks_with(&snapshot.keyframes);
+    assert!(total > 40, "塊の数 {total}");
+    assert!(
+        shared + 1 >= total,
+        "F5 で写した塊 {} / {total}",
+        total - shared
+    );
+    let s = starts(&layer);
+    assert_eq!((s[5], s[6], s[keyframes - 1]), (10, 13, 5999));
+    assert_eq!(layer.frame_count, 6001);
+
+    // Shift+F5：コマ 11 を消す。元に戻る
+    let snapshot = layer.clone();
+    assert!(layer.remove_frame_at(10));
+    let (shared, total) = layer.keyframes.shared_chunks_with(&snapshot.keyframes);
+    assert!(
+        shared + 1 >= total,
+        "Shift+F5 で写した塊 {} / {total}",
+        total - shared
+    );
+    assert_eq!(starts(&layer), (0..6000).step_by(2).collect::<Vec<_>>());
+    assert_eq!(layer.frame_count, 6000);
+
+    // 範囲の Shift+F5：コマ 11〜1010 を消す。消すコマに始まるキーフレームは外れ、コマ 1011 のキーフレームがコマ 11 に来る
+    let mut tl = Timeline::default();
+    tl.layers[0] = layer;
+    tl.cell_selection = Some(TimelineCellSelection::from_corners(0, 10, 0, 1009));
+    let snapshot = tl.layers[0].clone();
+    assert!(tl.remove_frame_on_targets(&[0]));
+    let layer = &tl.layers[0];
+    let (shared, total) = layer.keyframes.shared_chunks_with(&snapshot.keyframes);
+    assert!(
+        shared + 3 >= total,
+        "範囲の Shift+F5 で写した塊 {} / {total}",
+        total - shared
+    );
+    let expected: Vec<usize> = (0..10)
+        .step_by(2)
+        .chain((1010..6000).step_by(2).map(|f| f - 1000))
+        .collect();
+    assert_eq!(starts(layer), expected);
+    assert_eq!(layer.frame_count, 5000);
+}
+
+/// コマ `first` から `count` コマを一度に消す（`remove_frames`）と、1コマずつ消す元の決まり（Adobe Animate の Shift+F5）を
+/// `count` 回くり返したのと同じになる（レビュー f01d518 の R5）
+#[test]
+fn test_remove_frames_matches_repeated_single_frame_removal() {
+    use crate::timeline::{Cel, Keyframe, KeyframeList, Layer, SymbolInstance, TweenRotate};
+    // 元の1コマの削除（直す前の `remove_frame_at`）。キーフレームは（始まりのコマ、印。空の絵は 0）
+    fn reference_remove(kfs: &mut Vec<(usize, u64)>, n: &mut usize, f: usize) -> bool {
+        if f >= *n {
+            return false;
+        }
+        let idx = kfs.partition_point(|&(s, _)| s <= f) - 1;
+        let s = kfs[idx].0;
+        let e = kfs.get(idx + 1).map_or(*n - 1, |k| (k.0 - 1).min(*n - 1));
+        if e - s + 1 >= 2 {
+            kfs[idx + 1..].iter_mut().for_each(|k| k.0 -= 1);
+            *n -= 1;
+            true
+        } else if *n <= 1 {
+            let changed = kfs[0].1 != 0;
+            kfs[0].1 = 0;
+            changed
+        } else {
+            kfs.remove(idx);
+            kfs[idx..].iter_mut().for_each(|k| k.0 -= 1);
+            *n -= 1;
+            if kfs.first().is_none_or(|k| k.0 > 0) {
+                kfs.insert(0, (0, 0));
+            }
+            true
+        }
+    }
+    let marked = |tag: u64| {
+        let inst = SymbolInstance {
+            binding: crate::symbol::SymbolInstanceBinding::new(tag, 1, kurbo::Affine::IDENTITY),
+            layer_id: 1,
+            parent_scope: Vec::new(),
+            order: 0,
+        };
+        Keyframe::with_cel(
+            Cel::new_with_instances(Vec::new(), vec![inst]),
+            false,
+            TweenRotate::Auto,
+        )
+    };
+    let read = |l: &Layer| -> Vec<(usize, u64)> {
+        l.keyframes_with_start()
+            .map(|(s, kf)| {
+                (
+                    s,
+                    kf.cel
+                        .instances
+                        .first()
+                        .map_or(0, |i| i.binding.instance_gid),
+                )
+            })
+            .collect()
+    };
+    let mut r = map_overlay::Rng(11);
+    for case in 0..3000 {
+        let n = 1 + (r.f() * 300.0) as usize;
+        let mut kfs = vec![(0usize, 1u64)];
+        for f in 1..n {
+            if r.f() < 0.3 {
+                kfs.push((f, f as u64 + 1));
+            }
+        }
+        let first = (r.f() * (n + 2) as f64) as usize;
+        let count = 1 + (r.f() * (n + 3) as f64) as usize;
+        let mut layer = Layer::new_with_id_and_frames(1, "L", n);
+        layer.keyframes = KeyframeList::from_keyed(
+            kfs.iter()
+                .map(|&(s, tag)| (s, std::sync::Arc::new(marked(tag)))),
+        );
+        let (mut want, mut want_n, mut want_changed) = (kfs.clone(), n, false);
+        for _ in 0..count {
+            want_changed |= reference_remove(&mut want, &mut want_n, first);
+        }
+        let changed = layer.remove_frames(first, count);
+        assert_eq!(
+            (read(&layer), layer.frame_count, changed),
+            (want, want_n, want_changed),
+            "case {case}: n {n}, first {first}, count {count}"
+        );
+    }
 }
 
 #[test]
@@ -4907,16 +5073,15 @@ fn test_move_frames_overwrites_destination_and_cross_layer_offset() {
         false
     ));
     let kfs_in_dst: Vec<_> = move_app.doc.root.layers[0]
-        .keyframes
-        .iter()
-        .filter(|kf| (3..=5).contains(&kf.start_frame))
+        .keyframes_with_start()
+        .filter(|(s, _)| (3..=5).contains(s))
         .collect();
     assert_eq!(
         kfs_in_dst.len(),
         1,
         "移動先範囲 [3..=5] 内の古いキーフレーム (frame 4) が残存せず、移動したキーフレーム (frame 3) のスパンが [3..=5] を保持すること"
     );
-    assert_eq!(kfs_in_dst[0].start_frame, 3);
+    assert_eq!(kfs_in_dst[0].0, 3);
     assert_eq!(
         move_app.doc.root.layers[0].cel_at(4).unwrap().shapes()[0].color,
         red
@@ -5339,9 +5504,8 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
     );
     assert!(
         sym_f6_app.doc.root.layers[0]
-            .keyframes
-            .iter()
-            .all(|kf| kf.start_frame != 3),
+            .keyframe_index_starting_at(3)
+            .is_none(),
         "トゥイーン途中のコマでの移動操作で自動キーフレームが生成されないこと"
     );
     assert!(timeline_ui::timeline_insert_keyframe(&mut sym_f6_app, true));
@@ -5350,11 +5514,9 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
         &mut sym_f6_app,
         kurbo::Vec2::new(20.0, 0.0)
     ));
-    let kf_at_3 = sym_f6_app.doc.root.layers[0]
-        .keyframes
-        .iter()
-        .find(|kf| kf.start_frame == 3)
-        .expect("F6 挿入により Frame 3 に新キーフレームが生成されていること");
+    let kf_at_3 = &sym_f6_app.doc.root.layers[0].keyframes[sym_f6_app.doc.root.layers[0]
+        .keyframe_index_starting_at(3)
+        .expect("F6 挿入により Frame 3 に新キーフレームが生成されていること")];
     assert!(kf_at_3.tween);
     assert_eq!(
         kf_at_3.tween_rotate,
@@ -6769,9 +6931,8 @@ fn test_copy_frames_onto_a_keyframe_replaces_it_keeps_tween_pose_and_remaps_ids(
     );
     assert_eq!(
         app.doc.root.layers[0]
-            .keyframes
-            .iter()
-            .map(|k| k.start_frame)
+            .keyframes_with_start()
+            .map(|(s, _)| s)
             .collect::<Vec<_>>(),
         vec![0, 2]
     );
@@ -7456,9 +7617,8 @@ fn moving_a_keyframe_moves_it_without_blank_or_copied_keyframes() {
     };
     let starts = |app: &Is2dApp| -> Vec<usize> {
         app.doc.root.layers[0]
-            .keyframes
-            .iter()
-            .map(|k| k.start_frame)
+            .keyframes_with_start()
+            .map(|(s, _)| s)
             .collect()
     };
     let color_at = |app: &Is2dApp, f: usize| {
@@ -7521,9 +7681,8 @@ fn test_partial_span_frame_move_moves_keyframes_and_leaves_hold_frames() {
     let red = Color32::from_rgb(220, 50, 50);
     let starts = |app: &Is2dApp| -> Vec<usize> {
         app.doc.root.layers[0]
-            .keyframes
-            .iter()
-            .map(|k| k.start_frame)
+            .keyframes_with_start()
+            .map(|(s, _)| s)
             .collect()
     };
 
@@ -8547,7 +8706,7 @@ fn cel_summary(doc: &symbol::Document, layer_id: u64, frame: usize) -> CelSummar
 
     CelSummary {
         exists: true,
-        is_keyframe_start: kf.start_frame == frame,
+        is_keyframe_start: layer.start_of(kf_idx) == frame,
         tween: kf.tween,
         tween_rotate: kf.tween_rotate,
         shape_count: shapes.len(),
@@ -12248,12 +12407,14 @@ fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
             for f in 0..3_000 {
                 let mut shapes = sample_shape.clone();
                 shapes[0].layer_id = lid;
-                kfs.push(Arc::new(timeline::Keyframe {
-                    start_frame: f,
-                    cel: timeline::Cel::from_shapes_unwrap(shapes),
-                    tween: false,
-                    tween_rotate: timeline::TweenRotate::Auto,
-                }));
+                kfs.push((
+                    f,
+                    Arc::new(timeline::Keyframe::with_cel(
+                        timeline::Cel::from_shapes_unwrap(shapes),
+                        false,
+                        timeline::TweenRotate::Auto,
+                    )),
+                ));
             }
             app.doc.root.layers.push(timeline::Layer {
                 id: lid,
@@ -12261,7 +12422,7 @@ fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
                 visible: true,
                 locked: false,
                 frame_count: 3_000,
-                keyframes: kfs.into(),
+                keyframes: timeline::KeyframeList::from_keyed(kfs),
             });
         }
         app.doc.root.next_layer_id = 11;
@@ -12310,12 +12471,14 @@ fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
             for f in 0..600 {
                 let mut shapes = sample_shape.clone();
                 shapes[0].layer_id = lid;
-                kfs.push(Arc::new(timeline::Keyframe {
-                    start_frame: f,
-                    cel: timeline::Cel::from_shapes_unwrap(shapes),
-                    tween: false,
-                    tween_rotate: timeline::TweenRotate::Auto,
-                }));
+                kfs.push((
+                    f,
+                    Arc::new(timeline::Keyframe::with_cel(
+                        timeline::Cel::from_shapes_unwrap(shapes),
+                        false,
+                        timeline::TweenRotate::Auto,
+                    )),
+                ));
             }
             app.doc.root.layers.push(timeline::Layer {
                 id: lid,
@@ -12323,7 +12486,7 @@ fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
                 visible: true,
                 locked: false,
                 frame_count: 600,
-                keyframes: kfs.into(),
+                keyframes: timeline::KeyframeList::from_keyed(kfs),
             });
         }
         app.doc.root.next_layer_id = 21;
@@ -12780,7 +12943,7 @@ fn test_insert_keyframe_on_held_frame_shares_shapes() {
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
     let kfs = &app.doc.root.layers[0].keyframes;
     assert_eq!(kfs.len(), 2);
-    assert_eq!(kfs[1].start_frame, 3);
+    assert_eq!(app.doc.root.layers[0].start_of(1), 3);
     assert!(Arc::ptr_eq(&kfs[0].cel.maps, &kfs[1].cel.maps));
 }
 
@@ -12860,7 +13023,7 @@ fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
     timeline_ui::timeline_insert_keyframe(&mut app, true);
     let kf_mid = &app.doc.root.layers[0].keyframes[1];
-    assert_eq!(kf_mid.start_frame, 2);
+    assert_eq!(app.doc.root.layers[0].start_of(1), 2);
     assert!(kf_mid.tween);
     assert_eq!(kf_mid.tween_rotate, TweenRotate::Clockwise);
     let b_mid = kf_mid.cel.instances[0].binding;
@@ -12871,7 +13034,7 @@ fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 6);
     timeline_ui::timeline_insert_keyframe(&mut app, true);
     let kf_hold = &app.doc.root.layers[0].keyframes[3];
-    assert_eq!(kf_hold.start_frame, 6);
+    assert_eq!(app.doc.root.layers[0].start_of(3), 6);
     assert_eq!(kf_hold.cel.instances[0].binding.first_frame, 3);
 
     // 3. フレーム範囲の複製がこれまでどおり動くこと
@@ -12886,9 +13049,8 @@ fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
         },
     );
     assert!(app.doc.root.layers[0]
-        .keyframes
-        .iter()
-        .any(|kf| kf.start_frame == 5));
+        .keyframe_index_starting_at(5)
+        .is_some());
 }
 
 #[test]
@@ -14100,7 +14262,7 @@ fn test_m2_2_tween_midframe_blocks_edit_shows_warning_and_f6_enables_edit() {
     let _ = apply(&mut app, Action::InsertKeyframe { copy_prev: true });
     assert_eq!(app.doc.root.layers[0].keyframes.len(), 3);
     let kf_mid = &app.doc.root.layers[0].keyframes[1];
-    assert_eq!(kf_mid.start_frame, 2);
+    assert_eq!(app.doc.root.layers[0].start_of(1), 2);
     assert_eq!(
         kf_mid.cel.instances[0].binding.first_frame, 3,
         "F6 挿入時は元の開始フレーム (1) + 経過コマ数 (2) = 3 になること"
@@ -14183,14 +14345,15 @@ fn test_m2_4_delete_symbol_2880_keyframes_fast_and_no_memory_growth() {
             parent_scope: Vec::new(),
             order: 0,
         };
-        app.doc.root.layers[0]
-            .keyframes
-            .push(std::sync::Arc::new(timeline::Keyframe {
-                start_frame: f,
-                tween: true,
-                tween_rotate: timeline::TweenRotate::Auto,
-                cel: timeline::Cel::new_with_instances(Vec::new(), vec![inst]),
-            }));
+        app.doc.root.layers[0].keyframes.insert_keyed(
+            f,
+            f,
+            std::sync::Arc::new(timeline::Keyframe::with_cel(
+                timeline::Cel::new_with_instances(Vec::new(), vec![inst]),
+                true,
+                timeline::TweenRotate::Auto,
+            )),
+        );
     }
     app.refresh_scene_base();
     let rss_before = current_process_rss_bytes();
@@ -18684,8 +18847,8 @@ fn test_timeline_move_or_copy_frames_clips_range_per_source_layer_frame_count() 
         assert_eq!(layer_a.frame_count, 110);
         assert_eq!(layer_b.frame_count, 15);
         assert_eq!(layer_b.keyframes.len(), 2);
-        assert_eq!(layer_b.keyframes[0].start_frame, 0);
-        assert_eq!(layer_b.keyframes[1].start_frame, 10);
+        assert_eq!(layer_b.start_of(0), 0);
+        assert_eq!(layer_b.start_of(1), 10);
         assert_eq!(layer_b.span_end_for_keyframe(1), 14);
         for f in 10..=14 {
             assert!(layer_b.cel_at(f).is_some_and(|c| !c.shapes().is_empty()));
@@ -29459,7 +29622,7 @@ fn keyframes_after_frame_100000_survive_saving_and_opening() {
     crate::project_io::open_project_in_tab(&mut opened, &path, None).unwrap();
     let layer = &opened.doc.root.layers[0];
     assert_eq!(layer.frame_count, 100_006);
-    let starts: Vec<usize> = layer.keyframes.iter().map(|kf| kf.start_frame).collect();
+    let starts: Vec<usize> = layer.keyframes_with_start().map(|(s, _)| s).collect();
     assert_eq!(starts, vec![0, 100_005], "後ろのキーフレームが残る");
     assert!(!layer.keyframes[1].cel.shapes().is_empty());
     let _ = std::fs::remove_dir_all(&dir);

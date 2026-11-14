@@ -71,7 +71,7 @@ fn layer_eval_frame(
     if !all_single_frame && (has_tween || has_dyn) {
         frame
     } else {
-        kf.start_frame
+        layer.start_of(kf_idx)
     }
 }
 

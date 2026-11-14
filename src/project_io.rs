@@ -13,7 +13,9 @@ use crate::symbol::{
     TweenRotate,
 };
 pub(crate) use crate::timeline::MAX_LAYERS_PER_TIMELINE;
-use crate::timeline::{Cel, Keyframe, Layer, ScopeMap, Timeline, TimelineCellSelection};
+use crate::timeline::{
+    Cel, Keyframe, KeyframeList, Layer, ScopeMap, Timeline, TimelineCellSelection,
+};
 
 /// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。頭（印・版・中身の長さ・中身の CRC32）のあとに、保存用の型
 /// （`ProjectDocument`）を postcard で書いた中身を置く（`project_file_parts`。版 6 から）。版 7 は、地図をセル画にしまう
@@ -490,10 +492,11 @@ pub(crate) struct SavedKeyframe {
     pub(crate) instances: Vec<SavedSymbolInstance>,
 }
 
-impl From<&Keyframe> for SavedKeyframe {
-    fn from(kf: &Keyframe) -> Self {
+impl SavedKeyframe {
+    /// 始まりのコマが `start_frame` のキーフレーム `kf` の保存用の写し
+    fn new(start_frame: usize, kf: &Keyframe) -> Self {
         Self {
-            start_frame: kf.start_frame,
+            start_frame,
             tween: kf.tween,
             tween_rotate: kf.tween_rotate,
             maps: kf.cel.maps.iter().map(ScopeMap::saved_form).collect(),
@@ -510,8 +513,9 @@ impl From<&Keyframe> for SavedKeyframe {
 impl Keyframe {
     /// 読んだキーフレーム `s`。地図は塊の表から作ったしまう形（`into_document`）で、正しいかは確かめずに、初めて使うときに
     /// 確かめる（`Cel::from_saved`）。しまう形が無いか、同じ階層の地図が2つあれば、壊れたファイルとして `Err`
-    /// 同じ番号のインスタンスを外したら `trimmed` に記す（読み込みで中身を除いたかは、除いた所で記す）
-    fn from_saved(s: SavedKeyframe, trimmed: &mut bool) -> Result<Self, String> {
+    /// 同じ番号のインスタンスを外したら `trimmed` に記す（読み込みで中身を除いたかは、除いた所で記す）。
+    /// 書いてある始まりのコマと組にして返す
+    fn from_saved(s: SavedKeyframe, trimmed: &mut bool) -> Result<(usize, Self), String> {
         let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
         // 階層（地図の階層とインスタンスの親の階層）の深さは `MAX_GROUP_DEPTH` まで。グループの番号ごとに、すぐ上の
         // グループは1つ（同じグループが2つの所に無い。すぐ上が1つなら、上の並び全体も1つに決まる）
@@ -550,12 +554,7 @@ impl Keyframe {
             .collect();
         *trimmed |= instances.len() < saved_instances;
         let cel = Cel::from_saved(s.maps, instances);
-        Ok(Self {
-            start_frame: s.start_frame,
-            cel,
-            tween: s.tween,
-            tween_rotate: s.tween_rotate,
-        })
+        Ok((s.start_frame, Self::with_cel(cel, s.tween, s.tween_rotate)))
     }
 }
 
@@ -585,9 +584,8 @@ impl From<&Layer> for SavedLayer {
             locked: layer.locked,
             frame_count: layer.frame_count,
             keyframes: layer
-                .keyframes
-                .iter()
-                .map(|kf| SavedKeyframe::from(kf.as_ref()))
+                .keyframes_with_start()
+                .map(|(start, kf)| SavedKeyframe::new(start, kf))
                 .collect(),
         }
     }
@@ -601,18 +599,18 @@ impl Layer {
         // の N-2004）
         let frame_count = s.frame_count.max(1);
         let saved_keyframes = s.keyframes.len();
-        let mut keyframes: Vec<Arc<Keyframe>> = Vec::with_capacity(s.keyframes.len());
+        let mut keyframes: Vec<(usize, Arc<Keyframe>)> = Vec::with_capacity(s.keyframes.len());
         for saved in s.keyframes {
-            let kf = Keyframe::from_saved(saved, trimmed)?;
-            if kf.start_frame < frame_count {
-                keyframes.push(Arc::new(kf));
+            let (start, kf) = Keyframe::from_saved(saved, trimmed)?;
+            if start < frame_count {
+                keyframes.push((start, Arc::new(kf)));
             }
         }
-        keyframes.sort_by_key(|kf| kf.start_frame);
-        keyframes.dedup_by_key(|kf| kf.start_frame);
+        keyframes.sort_by_key(|&(start, _)| start);
+        keyframes.dedup_by_key(|&mut (start, _)| start);
         *trimmed |= keyframes.len() < saved_keyframes;
-        if keyframes.first().is_none_or(|kf| kf.start_frame != 0) {
-            keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
+        if keyframes.first().is_none_or(|&(start, _)| start != 0) {
+            keyframes.insert(0, (0, Arc::new(Keyframe::new_blank())));
         }
         Ok(Self {
             // 使えない番号（`is_safe_id`）は、タイムラインを作るときに新しい番号にする
@@ -621,7 +619,7 @@ impl Layer {
             visible: s.visible,
             locked: s.locked,
             frame_count,
-            keyframes: keyframes.into(),
+            keyframes: KeyframeList::from_keyed(keyframes),
         })
     }
 }

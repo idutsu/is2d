@@ -493,7 +493,7 @@ impl SymbolDef {
                 continue;
             };
             let kf = &layer.keyframes[kf_idx];
-            let child_elapsed = child_eval_frame.saturating_sub(kf.start_frame);
+            let child_elapsed = child_eval_frame.saturating_sub(layer.start_of(kf_idx));
             let mut cel = match layer.interpolated_tween_binding_at(frame_idx) {
                 Some(b) => {
                     let mut c = Cel::default();
@@ -994,13 +994,13 @@ impl ResolvedCelSig {
             layer.keyframes.get(kf_idx + 1).and_then(|nkf| {
                 nkf.cel
                     .single_symbol_instance()
-                    .map(|nb| (nkf.start_frame, nb))
+                    .map(|nb| (layer.start_of(kf_idx + 1), nb))
             })
         } else {
             None
         };
         self.cel_revision == kf.cel.revision
-            && self.start_frame == kf.start_frame
+            && self.start_frame == layer.start_of(kf_idx)
             && self.tween == kf.tween
             && self.tween_rotate == kf.tween_rotate
             && self.next_kf == next_kf
@@ -1061,7 +1061,7 @@ pub(crate) fn compute_resolved_cel_signature(
     if kf.tween {
         if let Some(nkf) = layer.keyframes.get(kf_idx + 1) {
             if let Some(nb) = nkf.cel.single_symbol_instance() {
-                next_kf = Some((nkf.start_frame, nb));
+                next_kf = Some((layer.start_of(kf_idx + 1), nb));
                 if kf
                     .cel
                     .single_symbol_instance()
@@ -1080,7 +1080,7 @@ pub(crate) fn compute_resolved_cel_signature(
     }
     ResolvedCelSig {
         cel_revision: kf.cel.revision,
-        start_frame: kf.start_frame,
+        start_frame: layer.start_of(kf_idx),
         tween: kf.tween,
         tween_rotate: kf.tween_rotate,
         next_kf,
@@ -1105,10 +1105,15 @@ impl Layer {
         };
         let kf = &self.keyframes[kf_idx];
         if let Some(interp_b) = self.interpolated_tween_binding_at(frame) {
-            return interp_b.expand((kf.start_frame, child_eval_frame), out_layer_id, &[], ctx);
+            return interp_b.expand(
+                (self.start_of(kf_idx), child_eval_frame),
+                out_layer_id,
+                &[],
+                ctx,
+            );
         }
 
-        resolve_cel_with_library(&kf.cel, kf.start_frame, child_eval_frame, ctx)
+        resolve_cel_with_library(&kf.cel, self.start_of(kf_idx), child_eval_frame, ctx)
             .into_iter()
             .map(|s| s.with_layer_id(out_layer_id))
             .collect()

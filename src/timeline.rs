@@ -278,13 +278,13 @@ impl UncheckedMaps {
             let mut at: Vec<(usize, Weak<LazyStored>)> = t
                 .layers
                 .iter()
-                .flat_map(|l| l.keyframes.iter())
-                .flat_map(|kf| {
+                .flat_map(|l| l.keyframes_with_start())
+                .flat_map(|(start, kf)| {
                     kf.cel
                         .maps
                         .iter()
                         .filter(|m| m.map.checked.get().is_none())
-                        .map(|m| (kf.start_frame, Arc::downgrade(&m.map)))
+                        .map(move |m| (start, Arc::downgrade(&m.map)))
                 })
                 .collect();
             at.sort_by_key(|(frame, _)| *frame);
@@ -1415,22 +1415,38 @@ impl Cel {
     }
 }
 
-/// タイムライン上のキーフレーム（開始フレーム番号 0-indexed、セル画 `Cel`、クラシックトゥイーン有効フラグ `tween`、トゥイーン回転方向 `tween_rotate`）
+/// タイムライン上のキーフレーム（セル画 `Cel`、クラシックトゥイーン有効フラグ `tween`、トゥイーン回転方向 `tween_rotate`）。
+/// 始まりのコマ（0 から）はキーフレームの列が持つ（`Layer::start_of`。キーフレームには列の塊の基準からの差だけを持つ：
+/// `ChunkedList::key`）
 #[derive(Clone, Debug)]
 pub(crate) struct Keyframe {
-    pub(crate) start_frame: usize,
+    rel_start: i64,
     pub(crate) cel: Cel,
     pub(crate) tween: bool,
     pub(crate) tween_rotate: TweenRotate,
 }
 
+impl crate::chunked_list::Keyed for Keyframe {
+    fn rel(&self) -> i64 {
+        self.rel_start
+    }
+    fn set_rel(&mut self, rel: i64) {
+        self.rel_start = rel;
+    }
+}
+
 impl Keyframe {
-    pub(crate) fn new_blank(start_frame: usize) -> Self {
+    pub(crate) fn new_blank() -> Self {
+        Self::with_cel(Cel::default(), false, TweenRotate::Auto)
+    }
+
+    /// セル画 `cel` とトゥイーンの設定のキーフレーム（始まりのコマは、列に入れるときに決める）
+    pub(crate) fn with_cel(cel: Cel, tween: bool, tween_rotate: TweenRotate) -> Self {
         Self {
-            start_frame,
-            cel: Cel::default(),
-            tween: false,
-            tween_rotate: TweenRotate::Auto,
+            rel_start: 0,
+            cel,
+            tween,
+            tween_rotate,
         }
     }
 
@@ -1457,14 +1473,14 @@ fn valid_tween_settings(tween: bool, rotate: TweenRotate, cel: &Cel) -> (bool, T
 }
 
 fn remap_keyframes_group_and_instance_ids(
-    kfs: &mut [Keyframe],
+    kfs: &mut [(usize, Keyframe)],
     mut alloc_group_id: impl FnMut() -> u64,
 ) {
     let mut gid_map: HashMap<u64, u64> = HashMap::new();
     let mut alloc_gid = |old_id: u64, map: &mut HashMap<u64, u64>| -> u64 {
         *map.entry(old_id).or_insert_with(&mut alloc_group_id)
     };
-    for kf in kfs {
+    for (_, kf) in kfs {
         kf.cel.renew_shape_ids();
         kf.cel
             .remap_ids(|gid| alloc_gid(gid, &mut gid_map), |sym| sym, None);
@@ -1514,6 +1530,9 @@ impl TimelineCellSelection {
 /// レイヤーのキーフレームの列（開始フレームの順）。塊ごとに Undo の控えと共有する列（`ChunkedList`）
 pub(crate) type KeyframeList = crate::chunked_list::ChunkedList<Keyframe>;
 
+/// 区間の先頭からの始まりのコマと組にしたキーフレームの並び（コマの移動・複製で運ぶもの：`Layer::extract_keyframes_in_range`）
+pub(crate) type RelativeKeyframes = Vec<(usize, Keyframe)>;
+
 /// タイムラインの1レイヤー（固有ID、名前、表示/非表示、ロック状態、レイヤー固有フレーム長、開始フレーム順にソートされたキーフレーム配列）
 #[derive(Clone, Debug)]
 pub(crate) struct Layer {
@@ -1537,7 +1556,7 @@ impl Layer {
             visible: true,
             locked: false,
             frame_count: frame_count.max(1),
-            keyframes: vec![Arc::new(Keyframe::new_blank(0))].into(),
+            keyframes: KeyframeList::from_keyed([(0, Arc::new(Keyframe::new_blank()))]),
         }
     }
 
@@ -1550,29 +1569,59 @@ impl Layer {
         Arc::make_mut(&mut self.keyframes[i])
     }
 
+    /// `i` 番目のキーフレームの始まりのコマ（0 から）
+    pub(crate) fn start_of(&self, i: usize) -> usize {
+        self.keyframes.key(i)
+    }
+
+    /// 始まりのコマとキーフレームを、前から順に
+    pub(crate) fn keyframes_with_start(
+        &self,
+    ) -> impl Iterator<Item = (usize, &Arc<Keyframe>)> + '_ {
+        self.keyframes.iter_keyed()
+    }
+
+    /// 始まりのコマが `frame` より前のキーフレームの数（`frame` に入れるキーフレームの番号）
+    fn keyframes_before(&self, frame: usize) -> usize {
+        self.keyframes.partition_point_key(|s| s < frame)
+    }
+
+    /// 始まりのコマが `frame` のキーフレームの番号
+    pub(crate) fn keyframe_index_starting_at(&self, frame: usize) -> Option<usize> {
+        let i = self.keyframes_before(frame);
+        (i < self.keyframes.len() && self.start_of(i) == frame).then_some(i)
+    }
+
     /// 指定フレーム番号 `frame` において有効な（保持されている）キーフレームのインデックスを返す
     /// （そのレイヤーの `frame_count` を超えるフレームでは `None` を返す）
     pub(crate) fn keyframe_index_at(&self, frame: usize) -> Option<usize> {
         if frame >= self.frame_count {
             return None;
         }
-        let idx = self.keyframes.partition_point(|kf| kf.start_frame <= frame);
+        let idx = self.keyframes.partition_point_key(|s| s <= frame);
         idx.checked_sub(1)
     }
 
     /// `kf_idx` 番目のキーフレームが保持される終端フレーム番号（inclusive）を返す
     pub(crate) fn span_end_for_keyframe(&self, kf_idx: usize) -> usize {
         let max_f = self.frame_count.saturating_sub(1);
-        self.keyframes
-            .get(kf_idx + 1)
-            .map(|next| next.start_frame.saturating_sub(1).min(max_f))
-            .unwrap_or(max_f)
+        if kf_idx + 1 < self.keyframes.len() {
+            self.start_of(kf_idx + 1).saturating_sub(1).min(max_f)
+        } else {
+            max_f
+        }
     }
 
     /// 指定フレーム番号 `frame` で表示される `Cel` への不変参照を返す
     pub(crate) fn cel_at(&self, frame: usize) -> Option<&Cel> {
         let idx = self.keyframe_index_at(frame)?;
         Some(&self.keyframes[idx].cel)
+    }
+
+    /// キーフレーム `kf` を、始まりのコマ `frame` で入れる（`frame` にキーフレームが無いこと）
+    fn insert_keyframe_starting_at(&mut self, frame: usize, kf: Keyframe) {
+        let i = self.keyframes_before(frame);
+        self.keyframes.insert_keyed(i, frame, Arc::new(kf));
     }
 
     /// 指定フレーム `frame` にキーフレームを挿入する（`clone_prev == true`: `F6` 複製 / `false`: `F7` 空白）
@@ -1582,7 +1631,7 @@ impl Layer {
             self.frame_count = frame + 1;
             changed = true;
         }
-        if let Some(existing_idx) = self.keyframes.iter().position(|kf| kf.start_frame == frame) {
+        if let Some(existing_idx) = self.keyframe_index_starting_at(frame) {
             if !clone_prev
                 && (!self.keyframes[existing_idx].cel.is_empty()
                     || self.keyframes[existing_idx].tween)
@@ -1593,12 +1642,11 @@ impl Layer {
         }
 
         let new_kf = if clone_prev {
-            self.snapshot_keyframe_at(frame, frame)
+            self.snapshot_keyframe_at(frame)
         } else {
-            Keyframe::new_blank(frame)
+            Keyframe::new_blank()
         };
-        let insert_idx = self.keyframes.partition_point(|kf| kf.start_frame < frame);
-        self.keyframes.insert(insert_idx, Arc::new(new_kf));
+        self.insert_keyframe_starting_at(frame, new_kf);
         true
     }
 
@@ -1607,7 +1655,7 @@ impl Layer {
         let Some(idx) = self.keyframe_index_at(frame) else {
             return false;
         };
-        if self.keyframes[idx].start_frame != frame {
+        if self.start_of(idx) != frame {
             return false;
         }
         if idx == 0 {
@@ -1618,86 +1666,94 @@ impl Layer {
         }
     }
 
-    /// 指定フレーム `frame` の保持尺を1フレーム延長し、後続のキーフレームを +1 フレーム後ろへずらす（`F5`）
+    /// 指定フレーム `frame` の保持尺を1フレーム延長し、後続のキーフレームを +1 フレーム後ろへずらす（`F5`）。
+    /// ずらすのは、後ろのキーフレームの塊の基準だけ（列の長さによらない：`ChunkedList::shift_keys_from`）
     pub(crate) fn insert_frame_at(&mut self, frame: usize) {
         if frame >= self.frame_count {
             self.frame_count = frame + 1;
         } else {
-            for i in 0..self.keyframes.len() {
-                if self.keyframes[i].start_frame > frame {
-                    self.keyframe_mut(i).start_frame += 1;
-                }
-            }
+            let first_after = self.keyframes.partition_point_key(|s| s <= frame);
+            self.keyframes.shift_keys_from(first_after, 1);
             self.frame_count += 1;
         }
     }
 
-    /// Adobe Animate 仕様のフレーム削除（`Shift+F5`）：
-    /// - 対象キーフレーム区間に保持フレーム（2コマ以上の長さ）がある場合は、キーフレームを残したまま保持尺を1フレーム縮め、後続キーフレームを左へ1フレーム詰める。
-    /// - 対象キーフレーム区間が1フレーム幅（保持フレームなし）の場合は、そのキーフレーム自体を削除し、後続キーフレームを左へ1フレーム詰めて繰り上げる。
+    /// Adobe Animate 仕様のフレーム削除（`Shift+F5`）を1コマ分：`remove_frames(frame, 1)`
     pub(crate) fn remove_frame_at(&mut self, frame: usize) -> bool {
-        if self.frame_count == 0 || frame >= self.frame_count {
-            return false;
-        }
-        let Some(kf_idx) = self.keyframe_index_at(frame) else {
-            return false;
-        };
-        let span_start = self.keyframes[kf_idx].start_frame;
-        let span_end = self.span_end_for_keyframe(kf_idx);
-        let span_len = span_end.saturating_sub(span_start) + 1;
+        self.remove_frames(frame, 1)
+    }
 
-        if span_len >= 2 {
-            for i in (kf_idx + 1)..self.keyframes.len() {
-                let kf = self.keyframe_mut(i);
-                kf.start_frame = kf.start_frame.saturating_sub(1);
-            }
-            self.frame_count = (self.frame_count - 1).max(1);
-            true
-        } else if self.frame_count <= 1 {
-            self.keyframe_mut(0).clear_cel()
-        } else {
-            self.keyframes.remove(kf_idx);
-            for i in kf_idx..self.keyframes.len() {
-                let kf = self.keyframe_mut(i);
-                kf.start_frame = kf.start_frame.saturating_sub(1);
-            }
-            self.frame_count = (self.frame_count - 1).max(1);
-            self.ensure_head_keyframe();
-            true
+    /// Adobe Animate 仕様のフレーム削除（`Shift+F5`）を、コマ `first` から `count` コマ分、一度に行う（`first` で
+    /// 1コマずつ `count` 回消すのと同じ結果）：
+    /// - 消すコマ `[first, first + count)` に始まるキーフレームは外す。ただし、消すコマのすぐ後ろのコマを保持する
+    ///   キーフレームは残し、`first` に詰める（消したコマのあとの絵が、`first` から続く）。
+    /// - 後ろのキーフレームは `count` コマ左へ詰める。
+    /// - コマを全部消すときは、1コマだけ残し、最後のキーフレームを空白にしてコマ 1 に置く。
+    pub(crate) fn remove_frames(&mut self, first: usize, count: usize) -> bool {
+        let n = self.frame_count;
+        if first >= n || count == 0 {
+            return false;
         }
+        let removed = count.min(n - first);
+        if removed == n {
+            let last_start = self.start_of(self.keyframes.len() - 1);
+            if self.keyframes.len() > 1 {
+                self.keyframes.retain_keyed(|s, _| s == last_start);
+            }
+            if last_start != 0 {
+                self.keyframes.set_key(0, 0);
+            }
+            let cleared = self.keyframe_mut(0).clear_cel();
+            self.frame_count = 1;
+            return n > 1 || cleared;
+        }
+        let end = first + removed;
+        // 消すコマのすぐ後ろのコマ `end` を保持するキーフレームの始まり（始まりのコマは重ならないので、これで1つに決まる）
+        let kept_start =
+            (end < n).then(|| self.start_of(self.keyframes.partition_point_key(|s| s <= end) - 1));
+        self.keyframes
+            .retain_keyed(|s, _| !(first..end).contains(&s) || Some(s) == kept_start);
+        let from = self.keyframes_before(first);
+        if from < self.keyframes.len() && self.start_of(from) < end {
+            if self.start_of(from) != first {
+                self.keyframes.set_key(from, first);
+            }
+            self.keyframes.shift_keys_from(from + 1, -(removed as i64));
+        } else {
+            self.keyframes.shift_keys_from(from, -(removed as i64));
+        }
+        self.frame_count = n - removed;
+        self.ensure_head_keyframe();
+        true
     }
 
     /// 先頭（0 フレーム目）のキーフレームが無ければ、空白のキーフレームを入れる
     fn ensure_head_keyframe(&mut self) {
-        if self.keyframes.first().is_none_or(|kf| kf.start_frame > 0) {
-            self.keyframes.insert(0, Arc::new(Keyframe::new_blank(0)));
+        if self.keyframes.is_empty() || self.start_of(0) > 0 {
+            self.insert_keyframe_starting_at(0, Keyframe::new_blank());
         }
     }
 
     /// 指定フレーム `frame` における評価済みセル姿勢（クラシックトゥイーン中割り姿勢および経過フレーム分の内部 `first_frame` 進行を含む）を、
-    /// 指定された `start_frame` を持つ新しい `Keyframe` として構築して返す
-    pub(crate) fn snapshot_keyframe_at(&self, frame: usize, start_frame: usize) -> Keyframe {
+    /// 新しい `Keyframe` として構築して返す（始まりのコマは、列に入れるときに決める）
+    pub(crate) fn snapshot_keyframe_at(&self, frame: usize) -> Keyframe {
         if frame >= self.frame_count {
-            return Keyframe::new_blank(start_frame);
+            return Keyframe::new_blank();
         }
         let Some(kf_idx) = self.keyframe_index_at(frame) else {
-            return Keyframe::new_blank(start_frame);
+            return Keyframe::new_blank();
         };
         let kf = &self.keyframes[kf_idx];
-        if kf.start_frame == frame {
-            return Keyframe {
-                start_frame,
-                cel: kf.cel.clone(),
-                tween: kf.tween,
-                tween_rotate: kf.tween_rotate,
-            };
+        let kf_start = self.start_of(kf_idx);
+        if kf_start == frame {
+            return Keyframe::with_cel(kf.cel.clone(), kf.tween, kf.tween_rotate);
         }
 
         // 図形の列は元のキーフレームと共有する（このレイヤーのセルの図形は、もともと layer_id がこのレイヤー）。
         // 変えるのは、インスタンスの再生位置と、トゥイーンの中割りの姿勢だけ
         let mut cel = kf.cel.clone();
         if !cel.instances.is_empty() {
-            let elapsed = frame.saturating_sub(kf.start_frame);
+            let elapsed = frame.saturating_sub(kf_start);
             let split_tween_binding = self.interpolated_tween_binding_at(frame);
             for inst in cel.instances_mut() {
                 if let Some(interp_b) = split_tween_binding {
@@ -1709,35 +1765,24 @@ impl Layer {
             }
         }
         let (tween, tween_rotate) = valid_tween_settings(kf.tween, kf.tween_rotate, &cel);
-        Keyframe {
-            start_frame,
-            cel,
-            tween,
-            tween_rotate,
-        }
+        Keyframe::with_cel(cel, tween, tween_rotate)
     }
 
-    /// 指定フレーム区間 `[min_frame..=max_frame]` 内のキーフレーム群を相対フレーム位置（`0..=max_frame - min_frame`）で抽出する
+    /// 指定フレーム区間 `[min_frame..=max_frame]` 内のキーフレーム群を、相対フレーム位置（`0..=max_frame - min_frame`）と組にして抽出する
     /// （`min_frame` がキーフレーム途中やトゥイーン中割りフレームにある場合は、そのフレームの評価済み中割り姿勢を引き継ぐ）
     pub(crate) fn extract_keyframes_in_range(
         &self,
         min_frame: usize,
         max_frame: usize,
-    ) -> Vec<Keyframe> {
-        let mut kfs: Vec<Keyframe> = self
-            .keyframes
-            .iter()
-            .filter(|kf| kf.start_frame >= min_frame && kf.start_frame <= max_frame)
-            .map(|kf| Keyframe {
-                start_frame: kf.start_frame - min_frame,
-                cel: kf.cel.clone(),
-                tween: kf.tween,
-                tween_rotate: kf.tween_rotate,
-            })
+    ) -> RelativeKeyframes {
+        let mut kfs: RelativeKeyframes = self
+            .keyframes_with_start()
+            .filter(|&(s, _)| s >= min_frame && s <= max_frame)
+            .map(|(s, kf)| (s - min_frame, Keyframe::clone(kf)))
             .collect();
 
-        if !kfs.iter().any(|kf| kf.start_frame == 0) {
-            kfs.insert(0, self.snapshot_keyframe_at(min_frame, 0));
+        if kfs.first().is_none_or(|&(rel, _)| rel != 0) {
+            kfs.insert(0, (0, self.snapshot_keyframe_at(min_frame)));
         }
         kfs
     }
@@ -1746,25 +1791,25 @@ impl Layer {
     /// 空いたコマには前のキーフレームの絵が続く（コマ 1 のキーフレームが抜けたときだけ、コマ 1 に空白キーフレームを置く）
     pub(crate) fn remove_keyframes_in_range(&mut self, min_frame: usize, max_frame: usize) {
         self.keyframes
-            .retain(|kf| kf.start_frame < min_frame || kf.start_frame > max_frame);
+            .retain_keyed(|s, _| s < min_frame || s > max_frame);
         self.ensure_head_keyframe();
     }
 
-    /// 抽出された相対キーフレーム群 `kfs` を `[dst_min_frame..=dst_max_frame]` に配置する（区間にあったキーフレームは
+    /// 抽出された相対キーフレーム群 `kfs`（相対の始まりのコマと組）を `[dst_min_frame..=dst_max_frame]` に配置する（区間にあったキーフレームは
     /// 置き換える）。Adobe Animate と同じく、区間の後ろのコマには、置いた最後のキーフレームの絵が次のキーフレームまで続く
     pub(crate) fn place_keyframes_at(
         &mut self,
         dst_min_frame: usize,
         dst_max_frame: usize,
-        kfs: Vec<Keyframe>,
+        kfs: RelativeKeyframes,
     ) {
         if dst_max_frame >= self.frame_count {
             self.frame_count = dst_max_frame + 1;
         }
         self.keyframes
-            .retain(|kf| kf.start_frame < dst_min_frame || kf.start_frame > dst_max_frame);
+            .retain_keyed(|s, _| s < dst_min_frame || s > dst_max_frame);
         let dst_lid = self.id;
-        for mut kf in kfs {
+        for (rel, mut kf) in kfs {
             if kf.cel.instances.iter().any(|i| i.layer_id != dst_lid) {
                 for inst in kf.cel.instances_mut() {
                     inst.layer_id = dst_lid;
@@ -1772,28 +1817,16 @@ impl Layer {
             }
             let (valid_tween, rotate_mode) =
                 valid_tween_settings(kf.tween, kf.tween_rotate, &kf.cel);
-            let target_f = dst_min_frame + kf.start_frame;
-            if let Some(existing_idx) = self
-                .keyframes
-                .iter()
-                .position(|existing_kf| existing_kf.start_frame == target_f)
-            {
+            let target_f = dst_min_frame + rel;
+            if let Some(existing_idx) = self.keyframe_index_starting_at(target_f) {
                 let existing = self.keyframe_mut(existing_idx);
                 existing.cel = kf.cel;
                 existing.tween = valid_tween;
                 existing.tween_rotate = rotate_mode;
             } else {
-                let pos = self
-                    .keyframes
-                    .partition_point(|existing_kf| existing_kf.start_frame < target_f);
-                self.keyframes.insert(
-                    pos,
-                    Arc::new(Keyframe {
-                        start_frame: target_f,
-                        cel: kf.cel,
-                        tween: valid_tween,
-                        tween_rotate: rotate_mode,
-                    }),
+                self.insert_keyframe_starting_at(
+                    target_f,
+                    Keyframe::with_cel(kf.cel, valid_tween, rotate_mode),
                 );
             }
         }
@@ -1811,10 +1844,11 @@ impl Layer {
         let Some(start_binding) = kf.cel.single_symbol_instance() else {
             return TweenState::Incomplete;
         };
-        if let Some(next_kf) = self
-            .keyframes
-            .get(kf_idx + 1)
-            .filter(|next| next.start_frame < self.frame_count && next.start_frame > kf.start_frame)
+        let start_frame = self.start_of(kf_idx);
+        let next = (kf_idx + 1 < self.keyframes.len())
+            .then(|| (self.start_of(kf_idx + 1), &self.keyframes[kf_idx + 1]));
+        if let Some((end_frame, next_kf)) =
+            next.filter(|&(end, _)| end < self.frame_count && end > start_frame)
         {
             if let Some(end_binding) = next_kf
                 .cel
@@ -1822,8 +1856,8 @@ impl Layer {
                 .filter(|b| b.symbol_id == start_binding.symbol_id)
             {
                 return TweenState::Complete {
-                    start_frame: kf.start_frame,
-                    end_frame: next_kf.start_frame,
+                    start_frame,
+                    end_frame,
                     start_binding,
                     end_binding,
                     rotate_mode: kf.tween_rotate,
@@ -1939,14 +1973,10 @@ impl Timeline {
     /// コマの番号）を付ける（`Document::watch_broken_maps`）
     pub(crate) fn watch_broken_maps(&self, sink: &BrokenMaps, place: &str) {
         for layer in &self.layers {
-            for kf in layer.keyframes.iter() {
+            for (start, kf) in layer.keyframes_with_start() {
                 for m in kf.cel.maps.iter() {
                     m.watch(sink, || {
-                        format!(
-                            "{place}レイヤー「{}」のコマ {}",
-                            layer.name,
-                            kf.start_frame + 1
-                        )
+                        format!("{place}レイヤー「{}」のコマ {}", layer.name, start + 1)
                     });
                 }
             }
@@ -2072,14 +2102,13 @@ impl Timeline {
             targets.iter().all(|&l_idx| {
                 self.layers
                     .get(l_idx)
-                    .is_some_and(|l| l.keyframes.iter().any(|kf| kf.start_frame == curr_f))
+                    .is_some_and(|l| l.keyframe_index_starting_at(curr_f).is_some())
             })
         } else {
             targets.iter().any(|&l_idx| {
                 self.layers.get(l_idx).is_some_and(|l| {
-                    l.keyframes
-                        .iter()
-                        .any(|kf| kf.start_frame == curr_f && !kf.cel.is_empty())
+                    l.keyframe_index_starting_at(curr_f)
+                        .is_some_and(|i| !l.keyframes[i].cel.is_empty())
                 })
             })
         };
@@ -2089,9 +2118,8 @@ impl Timeline {
             && should_advance
             && targets.iter().any(|&l_idx| {
                 self.layers.get(l_idx).is_some_and(|l| {
-                    l.keyframes
-                        .iter()
-                        .any(|kf| kf.start_frame == target_frame && !kf.cel.is_empty())
+                    l.keyframe_index_starting_at(target_frame)
+                        .is_some_and(|i| !l.keyframes[i].cel.is_empty())
                 })
             });
 
@@ -2120,7 +2148,7 @@ impl Timeline {
             self.layers.get(l_idx).is_some_and(|layer| {
                 layer.keyframe_index_at(curr_f).is_some_and(|idx| {
                     let kf = &layer.keyframes[idx];
-                    kf.start_frame == curr_f && (idx > 0 || !kf.cel.is_empty() || kf.tween)
+                    layer.start_of(idx) == curr_f && (idx > 0 || !kf.cel.is_empty() || kf.tween)
                 })
             })
         })
@@ -2174,13 +2202,8 @@ impl Timeline {
         if let Some(sel) = range_sel {
             for &l_idx in targets {
                 if let Some(layer) = self.layers.get_mut(l_idx) {
-                    if sel.min_frame < layer.frame_count {
-                        let count = sel.max_frame.min(layer.frame_count - 1) - sel.min_frame + 1;
-                        for _ in 0..count {
-                            if layer.remove_frame_at(sel.min_frame) {
-                                any_changed = true;
-                            }
-                        }
+                    if layer.remove_frames(sel.min_frame, sel.max_frame - sel.min_frame + 1) {
+                        any_changed = true;
                     }
                 }
             }
@@ -2265,7 +2288,7 @@ impl Timeline {
         copy_mode: bool,
         mut alloc_group_id: impl FnMut() -> u64,
     ) {
-        let extracted: Vec<(usize, usize, usize, usize, Vec<Keyframe>)> = (sel.min_layer
+        let extracted: Vec<(usize, usize, usize, usize, RelativeKeyframes)> = (sel.min_layer
             ..=sel.max_layer)
             .filter_map(|src_l| {
                 let dst_l = (src_l as isize + actual_dl) as usize;
@@ -2381,6 +2404,6 @@ impl Timeline {
             layer.tween_state_at_keyframe(kf_idx),
             TweenState::Complete { .. }
         );
-        Some((kf.start_frame, kf.tween_rotate, is_complete))
+        Some((layer.start_of(kf_idx), kf.tween_rotate, is_complete))
     }
 }
