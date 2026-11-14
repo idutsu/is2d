@@ -12,8 +12,8 @@ use crate::symbol::{
     ColorEffect, Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode,
     TweenRotate,
 };
+pub(crate) use crate::timeline::MAX_LAYERS_PER_TIMELINE;
 use crate::timeline::{Cel, Keyframe, Layer, ScopeMap, Timeline, TimelineCellSelection};
-pub(crate) use crate::timeline::{MAX_LAYERS_PER_TIMELINE, MAX_TIMELINE_FRAMES};
 
 /// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。版 6 は、頭（印・版・中身の長さ・中身の CRC32）のあとに、
 /// 保存用の型（`ProjectDocument`）を postcard で書いた中身を置く（`project_file_bytes`）。中身の持ち方は版 5 と同じで、
@@ -404,7 +404,7 @@ impl From<SavedSymbolInstanceBinding> for SymbolInstanceBinding {
             xform,
             pivot: Point::new(s.pivot[0], s.pivot[1]),
             loop_mode: s.loop_mode,
-            first_frame: s.first_frame.min(MAX_TIMELINE_FRAMES.saturating_sub(1)),
+            first_frame: s.first_frame,
             color_effect: ColorEffect::new(s.color_effect.alpha, s.color_effect.brightness),
         }
     }
@@ -492,12 +492,12 @@ impl SavedScopeMap {
         }
     }
 
-    /// 頂点・色の番号が範囲の中で、辺の数が上限の中か（地図に直せるか。軽いので、ファイルを読むときに全部の地図で
-    /// 確かめる：`Keyframe::from_saved`）
+    /// 頂点・色の番号が範囲の中か（地図に直せるか。軽いので、ファイルを読むときに全部の地図で確かめる：
+    /// `Keyframe::from_saved`）。辺の数には上限を設けない（読み込みの量はファイルの大きさで決まり、アプリが書いた地図は
+    /// みな読み戻せる：レビュー f01d518 の N-5010）
     pub(crate) fn fits(&self) -> bool {
         let n = self.nodes.len() / 2;
         self.nodes.len().is_multiple_of(2)
-            && self.edges.len() <= MAX_MAP_EDGES
             && self.edges.iter().all(|&(a, b, _, _, l, r)| {
                 a < n && b < n && l <= self.colors.len() && r <= self.colors.len()
             })
@@ -545,9 +545,6 @@ impl SavedScopeMap {
         map.checked().ok_or_else(broken)
     }
 }
-
-/// 1つの地図の辺の数の上限（読み込むときに、これより多い地図は壊れたファイルとして断る）
-pub(crate) const MAX_MAP_EDGES: usize = 4_000_000;
 
 /// グループの入れ子の深さの上限（読み込むときに、これより深い階層は壊れたファイルとして断る。手で作る入れ子はこれに
 /// 届かない。階層を並べ直す所（`arranged`）は深さの2乗の手間とメモリを使うので、細工したファイルで使い果たさないため）
@@ -672,7 +669,9 @@ impl TryFrom<SavedLayer> for Layer {
     type Error = String;
 
     fn try_from(s: SavedLayer) -> Result<Self, String> {
-        let frame_count = s.frame_count.clamp(1, MAX_TIMELINE_FRAMES);
+        // コマ数に上限は設けない（編集で作れる長さはみな読み戻す。読み込みはキーフレームの数だけ回る：レビュー f01d518
+        // の N-2004）
+        let frame_count = s.frame_count.max(1);
         let mut keyframes: Vec<Arc<Keyframe>> = Vec::with_capacity(s.keyframes.len());
         for saved in s.keyframes {
             let kf = Keyframe::from_saved(saved, keyframes.last().map(|kf| &**kf))?;
@@ -772,7 +771,7 @@ impl TryFrom<SavedTimeline> for Timeline {
             .map(|l| l.frame_count)
             .max()
             .unwrap_or(1)
-            .clamp(1, MAX_TIMELINE_FRAMES);
+            .max(1);
         let active_layer = s.active_layer.min(layers.len().saturating_sub(1));
         let current_frame = s.current_frame.min(total_frames.saturating_sub(1));
         let raw_next_layer_id = if s.next_layer_id <= MAX_SAFE_ENTITY_ID {

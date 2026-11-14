@@ -10,9 +10,6 @@ use std::{
     sync::{Arc, Mutex, OnceLock, PoisonError, Weak},
 };
 
-/// タイムラインおよびシンボル内タイムラインの最大許容フレーム数（破損JSONによる巨大ループ防止）
-pub(crate) const MAX_TIMELINE_FRAMES: usize = 100_000;
-
 /// 1タイムラインあたりの最大許容レイヤー数
 pub(crate) const MAX_LAYERS_PER_TIMELINE: usize = 1_000;
 

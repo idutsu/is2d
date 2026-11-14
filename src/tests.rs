@@ -28990,8 +28990,9 @@ fn anchor_hover_works_on_unmoved_slices() {
     assert_eq!(segs(&app), before + 1);
 }
 
-/// A-5：読み込みで、深すぎる階層・同じグループが2つの所にある階層は壊れたファイルとして断る。上限より長いレイヤーを
-/// 切り詰めたとき・ただ1つのキーフレームを捨てて空のキーフレームに替えたときも、捨てたと知らせる
+/// A-5：読み込みで、深すぎる階層・同じグループが2つの所にある階層は壊れたファイルとして断る。ただ1つのキーフレームを
+/// 捨てて空のキーフレームに替えたときも、捨てたと知らせる。長いレイヤーは切り詰めない（コマ数に上限は無い：レビュー
+/// f01d518 の N-2004）
 #[test]
 fn loading_checks_scopes_and_reports_every_trim() {
     use crate::doc_actions::{apply, Action};
@@ -29035,13 +29036,13 @@ fn loading_checks_scopes_and_reports_every_trim() {
         kf.maps.push(m);
     })
     .is_err());
-    // 上限より長いレイヤー
+    // 長いレイヤー（切り詰めない）
     assert_eq!(
         open("long.is2d", &|p| {
             p.timeline.layers[0].frame_count = 200_000;
         })
         .unwrap(),
-        OpenProjectOutcome::LoadedWithTrimmedData
+        OpenProjectOutcome::Loaded
     );
     // ただ1つのキーフレームが範囲の外（空のキーフレームに替わる）
     assert_eq!(
@@ -29054,6 +29055,54 @@ fn loading_checks_scopes_and_reports_every_trim() {
         OpenProjectOutcome::LoadedWithTrimmedData
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 10万コマより後ろのキーフレームも、保存して開き直すと残る（編集で作れる長さはみな読み戻す）。直す前は、読み込みだけが
+/// コマ数を 100,000 に丸め、その後ろのキーフレームを黙って捨てた（レビュー f01d518 の N-2004）
+#[test]
+fn keyframes_after_frame_100000_survive_saving_and_opening() {
+    let dir = std::env::temp_dir().join(format!("is2d_long_frames_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("long.is2d");
+    let mut app = Is2dApp::default();
+    app.tab_mut().with_active_timeline_mut(|tl, _| {
+        assert!(tl.layers[0].insert_keyframe(100_005, false));
+        tl.sync_total_frames();
+    });
+    put_cel_shapes(
+        &mut app,
+        0,
+        100_005,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(300.0, 140.0),
+            8.0,
+            Color32::from_rgb(200, 40, 40),
+        ),
+    );
+    crate::project_io::save_project_to_path(&mut app, &path).unwrap();
+    let mut opened = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut opened, &path, None).unwrap();
+    let layer = &opened.doc.root.layers[0];
+    assert_eq!(layer.frame_count, 100_006);
+    let starts: Vec<usize> = layer.keyframes.iter().map(|kf| kf.start_frame).collect();
+    assert_eq!(starts, vec![0, 100_005], "後ろのキーフレームが残る");
+    assert!(!layer.keyframes[1].cel.shapes().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 辺の多い地図も、読み込みで断らない（アプリが書いた地図はみな読み戻す）。直す前は、読み込みだけが1つの地図の辺を
+/// 4,000,000 本までにし、超えるとファイル全体を開けなかった（レビュー f01d518 の N-5010）
+#[test]
+fn a_map_with_many_edges_is_not_refused_on_loading() {
+    let map = crate::project_io::SavedScopeMap {
+        group_path: Vec::new(),
+        colors: vec![[255, 0, 0, 255]],
+        nodes: vec![0.0, 0.0, 1.0, 0.0],
+        edges: vec![(0, 1, 0.5, 0.0, 1, 0); 4_000_001],
+    };
+    assert!(map.fits());
 }
 
 /// 計測：線の多いセル画へ貼り付けた片の確定（選択を外す）の重さ。片の線とセル画の線を別々に2倍にして比べる
