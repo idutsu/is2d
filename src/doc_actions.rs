@@ -891,8 +891,8 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
             let mut recolored = Ok(false);
             tab.session.update_floating(|fl_opt| {
                 if let Some(fl) = fl_opt {
+                    // 動かした扱いにするのは、持ち上げた所と、色を変えたときの `recolor` だけ
                     recolored = fl.recolor(&ids, fill_color, &editable_lids);
-                    fl.modified = true;
                 }
             });
             if recolored.is_err() {

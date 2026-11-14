@@ -1424,11 +1424,6 @@ impl Session {
             return Vec::new();
         }
         let scope = self.editing_group_path.clone();
-        let single_symbol_gid = (for_transform
-            && self.selection.shapes.is_empty()
-            && self.selection.instances.len() == 1)
-            .then(|| *self.selection.instances.iter().next().unwrap());
-        let custom_piv = self.transform_pivot;
 
         if let Some(fl) = &self.floating {
             self.overlay.hide = fl.hidden().clone();
@@ -1459,14 +1454,7 @@ impl Session {
                 if for_transform {
                     let _ = shape.fill_mesh();
                 }
-                let mut cloned = shape.clone();
-                if let (Some(piv), Some(gid)) = (custom_piv, single_symbol_gid) {
-                    if let Some(b) = cloned.symbol_instance.as_mut().filter(|b| {
-                        b.instance_gid == gid && crate::vector_engine::invertible(b.xform)
-                    }) {
-                        b.pivot = b.xform.inverse() * piv;
-                    }
-                }
+                let cloned = shape.clone();
                 if !alt_duplicate {
                     self.overlay.hide.insert(shape.shape_id);
                 }
