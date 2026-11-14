@@ -29973,10 +29973,16 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
     assert!(stage_rects(&mut app) > 0, "シーンではステージを描く");
 
     // 1. ライブラリから入る：インスタンスに結び付かず、基準点はステージの真ん中、周りの絵もステージも無い
-    run(&mut app, &[Action::EnterSymbolFromLibrary { sym_id: sym_a }]);
+    run(
+        &mut app,
+        &[Action::EnterSymbolFromLibrary { sym_id: sym_a }],
+    );
     let path = &app.session.edit_path;
     assert_eq!(path.len(), 1);
-    assert_eq!(path.levels[0].instance_gid, 0, "どのインスタンスにも結び付かない");
+    assert_eq!(
+        path.levels[0].instance_gid, 0,
+        "どのインスタンスにも結び付かない"
+    );
     assert_eq!(
         path.world_xform(),
         kurbo::Affine::translate(center.to_vec2()),
@@ -30016,7 +30022,10 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
     assert_eq!(path.len(), 2, "子のシンボルの中");
     assert_eq!(path.levels[1].symbol_id, sym_b);
     assert_ne!(path.levels[1].instance_gid, 0, "子にはその場で入る");
-    assert!(!path.shows_stage(), "ライブラリから入った中なので、ステージは見せない");
+    assert!(
+        !path.shows_stage(),
+        "ライブラリから入った中なので、ステージは見せない"
+    );
     let backdrop = app.tabs[app.active]
         .cached_backdrop_screen_mesh(1.0, Vec2::ZERO)
         .expect("親のシンボルの絵");
@@ -30028,7 +30037,10 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
     assert_eq!(stage_rects(&mut app), 0);
 
     // 3. 子の中からライブラリで A に入り直す：シーンまで出てから、A だけの編集に入る
-    run(&mut app, &[Action::EnterSymbolFromLibrary { sym_id: sym_a }]);
+    run(
+        &mut app,
+        &[Action::EnterSymbolFromLibrary { sym_id: sym_a }],
+    );
     let path = &app.session.edit_path;
     assert_eq!(path.len(), 1);
     assert_eq!(
@@ -30735,4 +30747,126 @@ fn m1_factor_follows_the_review_table() {
     assert_eq!(m1_factor("Apple M2"), 1.2);
     assert_eq!(m1_factor("Apple M1"), 1.0);
     assert_eq!(m1_factor("Intel(R) Xeon(R) Processor @ 2.10GHz"), 1.0);
+}
+
+/// ライブラリの「複製」：元のすぐ下に「（元の名前）のコピー」ができて選ばれる（もうあれば「のコピー 2」）。中身は同じ形の
+/// 別のシンボルで、片方を編集してももう片方は変わらない。中の子のシンボルは元と同じものを使い、中のインスタンスの番号は
+/// 振り直す。置いてあるインスタンスは元のシンボルのまま。Undo で消える
+#[test]
+fn duplicating_a_symbol_adds_a_copy_below_it() {
+    use doc_actions::Action;
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+    let green = Color32::from_rgb(40, 170, 90);
+    let blue = Color32::from_rgb(60, 100, 220);
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(300.0, 300.0), Point::new(400.0, 300.0)],
+                radius: 20.0,
+                color: red,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(390.0, 300.0),
+            },
+            Action::ConvertToSymbol,
+            Action::Deselect,
+        ],
+    );
+    let sym_a = app.doc.library[0].id;
+    // A の中に、子のシンボル B（緑）を作る
+    run(
+        &mut app,
+        &[
+            Action::EnterSymbolFromLibrary { sym_id: sym_a },
+            Action::PaintStroke {
+                points: vec![Point::new(500.0, 360.0), Point::new(560.0, 360.0)],
+                radius: 14.0,
+                color: green,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(555.0, 360.0),
+            },
+            Action::ConvertToSymbol,
+            Action::Deselect,
+            Action::ExitSymbolTimeline,
+        ],
+    );
+    let sym_b = app.doc.library[1].id;
+    let name_a = app.doc.library[0].name.clone();
+    let ids = |app: &Is2dApp| app.doc.library.iter().map(|s| s.id).collect::<Vec<_>>();
+    assert_eq!(ids(&app), vec![sym_a, sym_b]);
+    // シンボルの一つ目のコマの形（色と輪郭）と、中のインスタンス（シンボル・番号）
+    let cel_of = |app: &Is2dApp, id: u64| {
+        let cel = &app.doc.find_symbol(id).unwrap().timeline.layers[0].keyframes[0].cel;
+        let mut shapes: Vec<(Color32, Vec<kurbo::QuadBez>)> = cel
+            .shapes()
+            .iter()
+            .map(|s| {
+                let segs = s.contours().flat_map(|c| c.segments.iter().copied()).collect();
+                (s.color, segs)
+            })
+            .collect();
+        shapes.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        let insts: Vec<(u64, u64)> = cel
+            .instances
+            .iter()
+            .map(|i| (i.binding.symbol_id, i.binding.instance_gid))
+            .collect();
+        (shapes, insts)
+    };
+    let stage_inst = |app: &Is2dApp| {
+        app.doc.root.layers[0].keyframes[0]
+            .cel
+            .single_symbol_instance()
+            .unwrap()
+            .symbol_id
+    };
+
+    // 1. 複製する
+    run(&mut app, &[Action::DuplicateSymbol { sym_id: sym_a }]);
+    let copy1 = app.doc.library[1].id;
+    assert_eq!(ids(&app), vec![sym_a, copy1, sym_b], "元のすぐ下に入る");
+    assert!(copy1 != sym_a && copy1 != sym_b);
+    assert_eq!(app.doc.library[1].name, format!("{name_a}のコピー"));
+    assert_eq!(app.view.selected_library_symbol, Some(copy1), "複製を選ぶ");
+    let (shapes_a, insts_a) = cel_of(&app, sym_a);
+    let (shapes_c, insts_c) = cel_of(&app, copy1);
+    assert!(!shapes_a.is_empty());
+    assert_eq!(shapes_c, shapes_a, "同じ形");
+    assert_eq!(insts_a.len(), 1);
+    assert_eq!(insts_c.len(), 1);
+    assert_eq!(insts_c[0].0, sym_b, "中の子のシンボルは元と同じもの");
+    assert_ne!(insts_c[0].1, insts_a[0].1, "中のインスタンスの番号は振り直す");
+    assert_eq!(stage_inst(&app), sym_a, "置いてあるインスタンスは元のまま");
+
+    // 2. もう一度複製すると「のコピー 2」
+    run(&mut app, &[Action::DuplicateSymbol { sym_id: sym_a }]);
+    let copy2 = app.doc.library[1].id;
+    assert_eq!(ids(&app), vec![sym_a, copy2, copy1, sym_b]);
+    assert_eq!(app.doc.library[1].name, format!("{name_a}のコピー 2"));
+
+    // 3. 複製の中を編集しても、元は変わらない
+    run(
+        &mut app,
+        &[
+            Action::EnterSymbolFromLibrary { sym_id: copy1 },
+            Action::PaintStroke {
+                points: vec![Point::new(500.0, 250.0), Point::new(560.0, 250.0)],
+                radius: 14.0,
+                color: blue,
+            },
+            Action::ExitSymbolTimeline,
+        ],
+    );
+    assert_ne!(cel_of(&app, copy1).0, shapes_a, "複製は変わる");
+    assert_eq!(cel_of(&app, sym_a).0, shapes_a, "元は変わらない");
+
+    // 4. Undo で、編集・2つ目・1つ目の複製の順に戻る
+    app.undo();
+    app.undo();
+    assert_eq!(ids(&app), vec![sym_a, copy1, sym_b]);
+    app.undo();
+    assert_eq!(ids(&app), vec![sym_a, sym_b]);
 }

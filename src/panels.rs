@@ -1550,23 +1550,25 @@ fn draw_selected_library_symbol_controls(
     let tl = tab.active_timeline();
     let can_place = tab.can_place_symbol_in_current_context(sel_id)
         && tl.is_layer_editable_by_id(active_scope_layer_id(&tab.session, tl));
+    if ui
+        .add_enabled(
+            can_place,
+            egui::Button::new(format!("{} ステージに配置", icons::ADD))
+                .min_size(Vec2::new(ui.available_width(), 28.0)),
+        )
+        .on_hover_text("選択中のシンボルを現在のフレーム・レイヤーに配置します")
+        .clicked()
+    {
+        actions.push(UiAction::Doc(Action::PlaceSymbol { sym_id: sel_id }));
+    }
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        let place_w = (ui.available_width() - 116.0).max(70.0);
-        if ui
-            .add_enabled(
-                can_place,
-                egui::Button::new(format!("{} ステージに配置", icons::ADD))
-                    .min_size(Vec2::new(place_w, 28.0)),
-            )
-            .on_hover_text("選択中のシンボルを現在のフレーム・レイヤーに配置します")
-            .clicked()
-        {
-            actions.push(UiAction::Doc(Action::PlaceSymbol { sym_id: sel_id }));
-        }
+        // 編集・複製・削除を同じ幅で並べる
+        let button_w = ((ui.available_width() - 8.0) / 3.0).floor();
         if ui
             .add_sized(
-                Vec2::new(54.0, 28.0),
+                Vec2::new(button_w, 28.0),
                 egui::Button::new(format!("{} 編集", icons::SYMBOL)),
             )
             .on_hover_text("選択中のシンボルだけを、周りの絵とステージを出さずに編集します")
@@ -1578,7 +1580,19 @@ fn draw_selected_library_symbol_controls(
         }
         if ui
             .add_sized(
-                Vec2::new(54.0, 28.0),
+                Vec2::new(button_w, 28.0),
+                egui::Button::new(format!("{} 複製", icons::COPY)),
+            )
+            .on_hover_text(
+                "選択中のシンボルを複製して、「のコピー」を付けた名前でライブラリに足します",
+            )
+            .clicked()
+        {
+            actions.push(UiAction::Doc(Action::DuplicateSymbol { sym_id: sel_id }));
+        }
+        if ui
+            .add_sized(
+                Vec2::new(button_w, 28.0),
                 egui::Button::new(format!("{} 削除", icons::DELETE)),
             )
             .on_hover_text("選択中のシンボルをライブラリから削除します")

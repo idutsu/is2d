@@ -709,17 +709,21 @@ impl Document {
     /// 新しいシンボル定義 `sym_def`（`SymbolDef::from_cel`）をライブラリへ登録する。名前はここで付ける
     pub(crate) fn register_symbol(&mut self, mut sym_def: SymbolDef) {
         let sym_id = sym_def.id;
-        let mut name_num = sym_id;
-        while self
-            .library
-            .iter()
-            .any(|s| s.name == format!("Symbol {name_num}"))
-        {
-            name_num = if name_num < u64::MAX { name_num + 1 } else { 1 };
-        }
-        sym_def.name = format!("Symbol {name_num}");
+        sym_def.name = self.unused_symbol_name(
+            (sym_id..=u64::MAX)
+                .chain(1..)
+                .map(|n| format!("Symbol {n}")),
+        );
         self.library.push(Arc::new(sym_def));
         self.bump_revision();
+    }
+
+    /// 名前の候補 `names` のうち、ライブラリのどのシンボルも使っていない最初の名前。シンボルに名前を付ける所（作る・別の
+    /// タブから移す・複製する）は、みなこれで決める。候補は尽きないこと（ライブラリは有限なので、いつか見つかる）
+    pub(crate) fn unused_symbol_name(&self, mut names: impl Iterator<Item = String>) -> String {
+        names
+            .find(|n| !self.library.iter().any(|s| s.name == *n))
+            .expect("名前の候補は尽きない")
     }
 
     /// 指定した `symbol_id` のシンボル定義を参照する

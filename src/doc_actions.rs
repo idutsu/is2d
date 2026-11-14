@@ -13,7 +13,7 @@ use crate::canvas_tool::{
 };
 use crate::clipboard_ops::{
     content_xform, import_clipboard_symbols, pasteable_content, prepare_copy_selected_shapes,
-    prepare_placement, put_placements, selected_content,
+    prepare_placement, put_placements, remap_timeline_ids, selected_content,
 };
 use crate::planar_map::{MapEdit, MapInput, MapRule};
 use crate::select_ops::{
@@ -227,6 +227,9 @@ pub(crate) enum Action {
         new_name: String,
     },
     DeleteSymbol {
+        sym_id: u64,
+    },
+    DuplicateSymbol {
         sym_id: u64,
     },
     SetSymbolPlayback {
@@ -666,6 +669,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             tab.doc.rename_symbol(sym_id, new_name)
         }
         Action::DeleteSymbol { sym_id } => apply_delete_symbol(tab, sym_id),
+        Action::DuplicateSymbol { sym_id } => apply_duplicate_symbol(tab, sym_id),
         Action::SetSymbolPlayback {
             loop_mode,
             first_frame,
@@ -1414,6 +1418,35 @@ fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
 
     tab.refresh_scene_base();
     reset_session_after_timeline_change(tab);
+    true
+}
+
+/// ライブラリのシンボル `sym_id` を複製して、すぐ下に入れて選ぶ（Adobe Animate の「複製」と同じ）。名前は「（元の名前）の
+/// コピー」（もうあれば「のコピー 2」「のコピー 3」…）。中身は同じ形の別のシンボルで、中のグループとインスタンスの番号は
+/// 振り直す（別のタブから移すときと同じ `remap_timeline_ids`）。中の子のシンボルは写さず元と同じものを使い、置いてある
+/// インスタンスは元のシンボルのまま。浮いた片は先に確定する（見えている片も写すため。そのシンボルの中で編集していたとき）
+fn apply_duplicate_symbol(tab: &mut Tab, sym_id: u64) -> bool {
+    if tab.doc.find_symbol(sym_id).is_none() || !commit_floating(tab) {
+        return false;
+    }
+    let Some(i) = tab.doc.library.iter().position(|s| s.id == sym_id) else {
+        return false;
+    };
+    push_undo(tab, None);
+
+    let mut copy = (**tab.doc.library.get(i).expect("見つけた所")).clone();
+    let base = std::mem::take(&mut copy.name);
+    copy.name = tab.doc.unused_symbol_name(
+        std::iter::once(format!("{base}のコピー"))
+            .chain((2u64..).map(|n| format!("{base}のコピー {n}"))),
+    );
+    copy.id = tab.doc.alloc_symbol_id();
+    copy.revision = crate::vector_engine::next_mesh_revision();
+    remap_timeline_ids(&mut copy.timeline, &mut tab.doc, &Default::default());
+    let new_id = copy.id;
+    tab.doc.library.insert(i + 1, std::sync::Arc::new(copy));
+    tab.doc.bump_revision();
+    tab.view.selected_library_symbol = Some(new_id);
     true
 }
 

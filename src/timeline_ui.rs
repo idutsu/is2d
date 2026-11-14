@@ -42,6 +42,7 @@ pub(crate) mod icons {
     pub(crate) const SYMBOL: &str = "\u{e87b}"; // extension (シンボル表示)
     pub(crate) const WIREFRAME: &str = "\u{e922}"; // timeline (アンカー・パス表示)
     pub(crate) const DELETE: &str = "\u{e872}"; // delete (削除)
+    pub(crate) const COPY: &str = "\u{e14d}"; // content_copy (複製)
     pub(crate) const SCENE_MOVIE: &str = "\u{e02c}"; // movie (シーンアイコン)
     pub(crate) const ARROW_BACK: &str = "\u{e5c4}"; // arrow_back (1階層出る)
     pub(crate) const VISIBILITY: &str = "\u{e8f4}"; // visibility (レイヤー表示)

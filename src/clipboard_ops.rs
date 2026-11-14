@@ -245,7 +245,11 @@ fn collect_symbol_and_descendants(
 }
 
 /// 別タブから移植されるシンボルの内部タイムライン内の子シンボル参照ID（`sym_map` にあるもの）と全グループIDを、貼り付け先タブの `Document` のIDへ一括リマップする
-fn remap_timeline_ids(tl: &mut Timeline, doc: &mut Document, sym_map: &HashMap<u64, u64>) {
+pub(crate) fn remap_timeline_ids(
+    tl: &mut Timeline,
+    doc: &mut Document,
+    sym_map: &HashMap<u64, u64>,
+) {
     let mut gid_map: HashMap<u64, u64> = HashMap::new();
     for layer in &mut tl.layers {
         for i in 0..layer.keyframes.len() {
@@ -481,18 +485,10 @@ pub(crate) fn import_clipboard_symbols(
             .insert((target_doc_id, new_id, source_doc_id), src_sym_id);
 
         imported.id = new_id;
-        if tab.doc.library.iter().any(|s| s.name == imported.name) {
-            let base_name = imported.name.clone();
-            let mut suffix = 2usize;
-            loop {
-                let candidate = format!("{base_name} ({suffix})");
-                if !tab.doc.library.iter().any(|s| s.name == candidate) {
-                    imported.name = candidate;
-                    break;
-                }
-                suffix = suffix.saturating_add(1);
-            }
-        }
+        let base = std::mem::take(&mut imported.name);
+        imported.name = tab.doc.unused_symbol_name(
+            std::iter::once(base.clone()).chain((2u64..).map(|n| format!("{base} ({n})"))),
+        );
         remap_timeline_ids(&mut imported.timeline, &mut tab.doc, &local_sym_map);
 
         tab.doc.library.push(Arc::new(imported));
