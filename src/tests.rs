@@ -29286,9 +29286,11 @@ fn measure_commit_on_dense_cels() {
         }
         out
     };
-    // 片は (本数, 種, 左端, 幅)。セル画と同じ種・範囲なら、コマ全体を同じ位置へ貼り付けたのと同じ
-    type Piece = (usize, u64, f64, f64);
-    let run = |cel_n: usize, (piece_n, seed, x0, w): Piece| -> (f64, usize, usize) {
+    // 片は (本数, 種, 左端, 幅, レイヤーの数)。セル画と同じ種・範囲なら、コマ全体を同じ位置へ貼り付けたのと同じ。
+    // レイヤーが2つ以上なら、本数をレイヤーに分けて描き、全部を写して作業中の1レイヤーへ貼る（片の組がレイヤーの数だけ
+    // できる）
+    type Piece = (usize, u64, f64, f64, usize);
+    let run = |cel_n: usize, (piece_n, seed, x0, w, piece_layers): Piece| -> (f64, usize, usize) {
         let mut app = Is2dApp::default();
         put_cel_shapes(&mut app, 0, 0, strokes(cel_n, 7, 100.0, 600.0));
         let cel_edges: usize = app
@@ -29297,7 +29299,13 @@ fn measure_commit_on_dense_cels() {
             .map(|s| s.contours().map(|c| c.segments.len()).sum::<usize>())
             .sum();
         crate::project_io::new_project(&mut app, &ctx);
-        put_cel_shapes(&mut app, 0, 0, strokes(piece_n, seed, x0, w));
+        for l in 0..piece_layers {
+            if l > 0 {
+                assert!(apply(&mut app, Action::AddLayer));
+            }
+            let n = piece_n / piece_layers;
+            put_cel_shapes(&mut app, l, 0, strokes(n, seed + l as u64, x0, w));
+        }
         let piece_edges: usize = app
             .scene()
             .iter()
@@ -29318,17 +29326,20 @@ fn measure_commit_on_dense_cels() {
         (times[times.len() / 2], cel_edges, piece_edges)
     };
     let only = std::env::var("IS2D_MEASURE_CASE").ok();
-    let cases: [(&str, usize, Piece); 8] = [
-        ("small-200-40", 200, (40, 11, 300.0, 200.0)),
-        ("small-400-40", 400, (40, 11, 300.0, 200.0)),
-        ("small-200-80", 200, (80, 11, 300.0, 200.0)),
-        ("small-800-40", 800, (40, 11, 300.0, 200.0)),
-        ("small-200-160", 200, (160, 11, 300.0, 200.0)),
+    let cases: [(&str, usize, Piece); 10] = [
+        ("small-200-40", 200, (40, 11, 300.0, 200.0, 1)),
+        ("small-400-40", 400, (40, 11, 300.0, 200.0, 1)),
+        ("small-200-80", 200, (80, 11, 300.0, 200.0, 1)),
+        ("small-800-40", 800, (40, 11, 300.0, 200.0, 1)),
+        ("small-200-160", 200, (160, 11, 300.0, 200.0, 1)),
         // コマ全体を、絵のある別のコマへ
-        ("whole-other-200", 200, (200, 11, 100.0, 600.0)),
-        ("whole-other-400", 400, (400, 11, 100.0, 600.0)),
+        ("whole-other-200", 200, (200, 11, 100.0, 600.0, 1)),
+        ("whole-other-400", 400, (400, 11, 100.0, 600.0, 1)),
         // コマ全体を、同じ絵の同じ位置へ
-        ("whole-same-400", 400, (400, 7, 100.0, 600.0)),
+        ("whole-same-400", 400, (400, 7, 100.0, 600.0, 1)),
+        // 3 レイヤーのコマ全体を、絵のある別のコマの作業中の1レイヤーへ（片の組が3つ）
+        ("whole3-other-200", 200, (210, 11, 100.0, 600.0, 3)),
+        ("whole3-other-400", 400, (405, 11, 100.0, 600.0, 3)),
     ];
     for (name, cel_n, piece) in cases {
         if only.as_deref().is_some_and(|o| o != name) {
@@ -29649,6 +29660,73 @@ fn cut_and_return_leaves_no_cut_vertices() {
             .unwrap();
         assert!(m.is_valid());
         assert_eq!(m.edges.len(), start);
+    }
+}
+
+/// 同じ絵を少し傾けた矩形で切って戻すのをくり返しても、線の形がずれず、辺が溜まらない（地図の精度 `FLAT_TOL` の根拠）。
+/// ずれ＝くり返したあとの辺の上の点から、元の地図のいちばん近い辺までの距離の最大。今の精度 0.002px では 300 回で
+/// 0.0004px 以下・辺 +1 以下。0.02px にすると、10 回で 5.8px ずれて辺が 3 本溜まり、300 回で 3〜7.6px・辺 +10〜15 に
+/// なった（レビュー f01d518 の N-1001 の①を採らない理由）
+#[test]
+fn repeated_cut_and_return_keeps_the_curves() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    for seed in [1u64, 3] {
+        let mut rng = map_overlay::Rng(seed);
+        let mut m = PlanarMap::default();
+        for k in 0..30 {
+            let c = colors[k % colors.len()];
+            let r = 2.0 + rng.f() * 8.0;
+            let s = wiggly_stroke(&mut rng, (100.0, 100.0, 300.0, 200.0), r, c);
+            m = m
+                .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+                .unwrap();
+        }
+        let orig = m.clone();
+        for _ in 0..20 {
+            let (x, y) = (100.0 + rng.f() * 250.0, 100.0 + rng.f() * 150.0);
+            let mut rect = map_overlay::rect_shape(
+                x,
+                y,
+                x + 30.0 + rng.f() * 100.0,
+                y + 30.0 + rng.f() * 80.0,
+                colors[0],
+            );
+            let c = rect.bounding_box().center();
+            rect.transform(kurbo::Affine::rotate_about((rng.f() - 0.5) * 0.02, c));
+            let rect = vec![rect];
+            let inside = m
+                .overlay(MapInput::Shapes(&rect), MapRule::KeepInside)
+                .unwrap();
+            let rest = m
+                .overlay(MapInput::Shapes(&rect), MapRule::Paint(None))
+                .unwrap();
+            m = rest
+                .overlay(MapInput::Map(&inside), MapRule::Overlay)
+                .unwrap();
+            assert!(m.is_valid());
+        }
+        let mut drift = 0.0f64;
+        for e in 0..m.edges.len() {
+            let q = m.quad(e);
+            for i in 0..=8 {
+                let p = kurbo::ParamCurve::eval(&q, i as f64 / 8.0);
+                let d = (0..orig.edges.len())
+                    .map(|f| crate::vector_engine::nearest_on_quad(&orig.quad(f), p).1)
+                    .fold(f64::INFINITY, f64::min);
+                drift = drift.max(d);
+            }
+        }
+        assert!(drift < 0.01, "seed {seed}: ずれ {drift}px");
+        assert_eq!(
+            m.edges.len(),
+            orig.edges.len(),
+            "seed {seed}: 辺が溜まらない"
+        );
     }
 }
 
