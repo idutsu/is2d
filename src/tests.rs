@@ -29899,6 +29899,46 @@ fn measure_work() {
         }
         rows.push(("コマ全体を同じ位置へ貼り付けて確定".into(), times));
     }
+    // その確定の内訳：レイヤーごとの計算（重ね合わせ・書き戻しの確かめ・何を書くか）を1つずつ測り、確定と同じく並列に
+    // した計算（plan_commit）と、セル画へ書く所（write_commit）も測る
+    let mut stages: Vec<(Vec<f64>, f64, f64)> = Vec::new();
+    for _ in 0..runs {
+        let n = app.history.undo_stack.len();
+        if !(copied && apply(&mut app, Action::Paste { in_place: true })) {
+            break;
+        }
+        let tab = app.tab_mut();
+        tab.refresh_scene_base();
+        let Some(fl) = tab.session.take_floating() else {
+            break;
+        };
+        let scope = tab.session.editing_group_path.clone();
+        let mut per_layer = Vec::new();
+        for l in fl.layers() {
+            let Some(cel) = tab.session.base_cache.cel(l.layer_id) else {
+                continue;
+            };
+            let base = cel.scope_base(&scope);
+            let t = Instant::now();
+            let next = l.committed(&base).and_then(|m| m.written(&base));
+            if let Some(next) = next {
+                let _ = cel.outcome(&scope, next);
+            }
+            per_layer.push(ms(t));
+        }
+        let t = Instant::now();
+        let plan = canvas_tool::plan_commit(tab, &fl);
+        let plan_ms = ms(t);
+        let t = Instant::now();
+        if let Some(plan) = plan {
+            let _ = canvas_tool::write_commit(tab, plan);
+        }
+        let write_ms = ms(t);
+        drop(fl);
+        tab.session.retain_existing_selection();
+        stages.push((per_layer, plan_ms, write_ms));
+        undo_to(&mut app, n);
+    }
 
     // コマ全体を別のコマへ貼り付けて確定
     if let Some(g) = paste_frame {
@@ -30030,6 +30070,27 @@ fn measure_work() {
         sweep_mid * factor,
         sweep_max * factor
     );
+    if !stages.is_empty() {
+        let mid = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let layers_n = stages[0].0.len();
+        let per_layer: Vec<String> = (0..layers_n)
+            .map(|k| {
+                let t = mid(stages.iter().filter_map(|s| s.0.get(k).copied()).collect());
+                format!("{t:.1}ms（M1 {:.1}ms）", t * factor)
+            })
+            .collect();
+        let plan = mid(stages.iter().map(|s| s.1).collect());
+        let write = mid(stages.iter().map(|s| s.2).collect());
+        eprintln!(
+            "コマ全体を同じ位置へ貼り付けて確定の内訳（中央値）：レイヤーごとの計算を1つずつ [{}]・並列にした計算 {plan:.1}ms（M1 {:.1}ms）・セル画へ書く {write:.1}ms（M1 {:.1}ms）",
+            per_layer.join("・"),
+            plan * factor,
+            write * factor
+        );
+    }
     eprintln!("コマ {}（図形 {shapes} 個・区間 {segments} 個）", frame + 1);
     eprintln!("| 操作 | 中央値 | 最大 | M1 の見込み（中央値／最大） | 回数 |");
     eprintln!("|---|---:|---:|---:|---:|");
