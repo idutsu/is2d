@@ -30789,6 +30789,69 @@ fn saving_an_unviewed_file_writes_the_same_maps_without_checking() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
+/// 開いた直後に、まだ見ていないキーフレームを別のレイヤーへ写しても、地図を確かめない（面の番号は確かめるときに新しく
+/// 振るので、写した先と元で番号が重ならない）。直す前は、番号を振り直すために写すキーフレームの地図を全部確かめた
+/// （レビュー f01d518 の N-2001：レイヤー1枚分で M1 約 6.5 秒）
+#[test]
+fn copying_unviewed_frames_to_another_layer_does_not_check_their_maps() {
+    use crate::doc_actions::{apply, Action};
+    let path = save_many_keyframes("lazy_copy", 6);
+    let mut app = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut app, &path, None).unwrap();
+    assert!(apply(&mut app, Action::AddLayer));
+    let before = crate::planar_map::full_checks();
+    let sel = timeline::TimelineCellSelection {
+        min_layer: 0,
+        max_layer: 0,
+        min_frame: 0,
+        max_frame: 10,
+    };
+    assert!(apply(
+        &mut app,
+        Action::MoveOrCopyFrames {
+            sel,
+            layer_delta: 1,
+            frame_delta: 0,
+            copy_mode: true,
+        },
+    ));
+    assert!(app.scene().len() > 0);
+    assert_eq!(
+        crate::planar_map::full_checks() - before,
+        0,
+        "写しても確かめない"
+    );
+    let layers = &app.doc.root.layers;
+    let unchecked = |l: usize| {
+        layers[l]
+            .keyframes
+            .iter()
+            .filter(|kf| kf.cel.maps.iter().all(|m| m.is_unchecked()))
+            .count()
+    };
+    assert_eq!(
+        unchecked(0),
+        5,
+        "元の見ていないキーフレームは確かめないまま"
+    );
+    assert_eq!(unchecked(1), 5, "写した先も確かめないまま");
+    // 使うと確かめる。写した先と元は同じ絵で、面の番号は重ならない
+    for (src, copy) in layers[0].keyframes.iter().zip(layers[1].keyframes.iter()) {
+        let (a, b) = (src.cel.shapes(), copy.cel.shapes());
+        assert_eq!(a.len(), b.len());
+        assert!(!a.is_empty());
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.bounding_box(), y.bounding_box(), "同じ絵");
+        }
+        let ids: std::collections::HashSet<_> = a.iter().map(|s| s.shape_id).collect();
+        assert!(
+            b.iter().all(|s| !ids.contains(&s.shape_id)),
+            "番号が重ならない"
+        );
+    }
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
 /// 開いたあとで壊れた地図（正しい地図でない）が見つかったら、その階層は何も無いものとして描き、場所を知らせる。保存すると
 /// 読んだままの地図を書く（利用者と決めた案 1）。直す前は、ファイル全体を開かなかった
 #[test]

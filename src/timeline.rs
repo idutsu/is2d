@@ -398,8 +398,38 @@ impl ScopeMap {
         (!m.is_empty()).then_some(m)
     }
 
-    /// 面の番号を、みな新しい番号にする（`PlanarMap::renew_labels`。番号は面の形を変えないので、正しい地図のまま）
+    /// 面の番号を、みな新しい番号にする（`PlanarMap::renew_labels`。番号は面の形を変えないので、正しい地図のまま）。
+    /// まだ確かめていない地図は確かめない：読んだ地図には番号が無く、番号は確かめるときに新しく振る（`face_ids`）ので、
+    /// 直前のキーフレームからの引き継ぎ（`prev`）だけを外した新しい箱にすれば、確かめてから振り直すのと同じになる。
+    /// 壊れていたときの知らせ先と場所は元のまま（壊れた地図を読んだ所）
     fn renew_labels(&mut self) {
+        let unchecked = {
+            let saved = self
+                .map
+                .saved
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            // 錠を持ったまま見るので、確かめの途中（読んだままの地図を外した後）とは食い違わない
+            self.map
+                .stored
+                .get()
+                .is_none()
+                .then(|| saved.clone())
+                .flatten()
+        };
+        if let Some(saved) = unchecked {
+            self.map = Arc::new(LazyStored {
+                saved: Mutex::new(Some(saved)),
+                notice: self
+                    .map
+                    .notice
+                    .get()
+                    .cloned()
+                    .map_or_else(OnceLock::new, OnceLock::from),
+                ..LazyStored::default()
+            });
+            return;
+        }
         let mut map = self.dense();
         map.renew_labels();
         self.map = LazyStored::checked(StoredMap::from_dense(&map, None));
