@@ -10,6 +10,11 @@
 # 環境変数（どれも無くてよい）
 #   AGY_MODEL    Antigravity で使うモデル（`agy models` で名前を確かめて入れる。空なら Antigravity の既定のモデル）
 #   AGY_TIMEOUT  Antigravity の待ち時間（既定 1440m）
+#   IS2D_LETTER  利用者への手紙を書くファイル（review-loop/loop.sh が渡す。あれば、まとめのあとに手紙も書かせる）
+#   IS2D_REPLY   利用者が返事を書くファイル（手紙に書かせるため。IS2D_LETTER と一緒に渡す）
+#
+# 終わると、claude/review-logs/<コミット>/summary-path に、まとめ（summary.md）のパスを書く
+# 同じコミットで、もう終わっているレビュー（issues.md がある）があれば、やり直さずに使い回す
 #
 # 注意：人のいない所で最後まで進めるため、どちらの AI もコマンドとファイルの書き込みを自動で承認して動かす
 #   （--dangerously-skip-permissions）。レビューとまとめは、それぞれ別の作業場所（git worktree）で行う決まり。
@@ -40,6 +45,17 @@ free_name() {
     printf '%s' "$name"
 }
 
+# 同じコミットで、もう終わっているレビューの印（issues.md がある置き場のうち、いちばん新しいもの）。あれば使い回す
+# （どこかの段で止まってやり直すときに、何時間もかかる終わったレビューを繰り返さないため）
+finished() {
+    for d in $(ls -dt "$ROOT/claude/review-$C-$1" "$ROOT/claude/review-$C-$1"-[0-9]* 2>/dev/null); do
+        if [ -f "$d/issues.md" ]; then
+            basename "$d" | sed "s/^review-$C-//"
+            return
+        fi
+    done
+}
+
 review_request() {
     printf '%s' "$ROOT/review-prompt.md を読み、そのとおりにレビューを進めてください。準備の「自分の印を決める」では、印を $1 にしてください（番号を付けない）。人のいない所で動いているので、利用者に質問せず、止まるときはその理由を最後の報告に書いて終わってください。"
 }
@@ -51,23 +67,41 @@ need() {
     fi
 }
 
-CL=$(free_name claude)
-GE=$(free_name gemini)
 MG=$(free_name merged)
-note "対象コミット $C。Claude のレビューを始めます（claude/review-$C-$CL/）"
-claude -p "$(review_request "$CL")" --model opus --dangerously-skip-permissions \
-    >"$LOG/claude.log" 2>&1 || true
-need "$ROOT/claude/review-$C-$CL/issues.md" "$LOG/claude.log"
+CL=$(finished claude)
+if [ -n "$CL" ]; then
+    note "対象コミット $C。Claude のレビューは終わっているので使い回します（claude/review-$C-$CL/）"
+else
+    CL=$(free_name claude)
+    note "対象コミット $C。Claude のレビューを始めます（claude/review-$C-$CL/）"
+    claude -p "$(review_request "$CL")" --model opus --dangerously-skip-permissions \
+        >"$LOG/claude.log" 2>&1 || true
+    need "$ROOT/claude/review-$C-$CL/issues.md" "$LOG/claude.log"
+fi
 
-note "Gemini のレビューを始めます（claude/review-$C-$GE/）"
-# shellcheck disable=SC2086
-agy -p "$(review_request "$GE")" ${AGY_MODEL:+--model "$AGY_MODEL"} --dangerously-skip-permissions \
-    --print-timeout "${AGY_TIMEOUT:-1440m}" >"$LOG/gemini.log" 2>&1 || true
-need "$ROOT/claude/review-$C-$GE/issues.md" "$LOG/gemini.log"
+GE=$(finished gemini)
+if [ -n "$GE" ]; then
+    note "Gemini のレビューは終わっているので使い回します（claude/review-$C-$GE/）"
+else
+    GE=$(free_name gemini)
+    note "Gemini のレビューを始めます（claude/review-$C-$GE/）"
+    # shellcheck disable=SC2086
+    agy -p "$(review_request "$GE")" ${AGY_MODEL:+--model "$AGY_MODEL"} --dangerously-skip-permissions \
+        --print-timeout "${AGY_TIMEOUT:-1440m}" >"$LOG/gemini.log" 2>&1 || true
+    need "$ROOT/claude/review-$C-$GE/issues.md" "$LOG/gemini.log"
+fi
 
+LETTER_REQ=""
+if [ -n "${IS2D_LETTER:-}" ]; then
+    LETTER_REQ="手紙の置き場は ${IS2D_LETTER}、返事の置き場は ${IS2D_REPLY:-（手紙と同じフォルダの、手紙の名前の「手紙」を「返事」にしたもの）} です。"
+fi
 note "2つの報告書をまとめます（claude/review-$C-$MG/）"
-claude -p "$ROOT/review-merge-prompt.md を読み、そのとおりにまとめてください。対象コミットは $C、報告の置き場は $ROOT/claude/review-$C-$CL/（Claude）と $ROOT/claude/review-$C-$GE/（Gemini）、まとめの置き場は $ROOT/claude/review-$C-$MG/ です（まだ無ければ作ってください）。人のいない所で動いているので、利用者に質問せず、止まるときはその理由を最後の報告に書いて終わってください。" \
+claude -p "$ROOT/review-merge-prompt.md を読み、そのとおりにまとめてください。対象コミットは $C、報告の置き場は $ROOT/claude/review-$C-$CL/（Claude）と $ROOT/claude/review-$C-$GE/（Gemini）、まとめの置き場は $ROOT/claude/review-$C-$MG/ です（まだ無ければ作ってください）。$LETTER_REQ人のいない所で動いているので、利用者に質問せず、止まるときはその理由を最後の報告に書いて終わってください。" \
     --model opus --dangerously-skip-permissions >"$LOG/merge.log" 2>&1 || true
 need "$ROOT/claude/review-$C-$MG/summary.md" "$LOG/merge.log"
+printf '%s\n' "$ROOT/claude/review-$C-$MG/summary.md" >"$LOG/summary-path"
+if [ -n "${IS2D_LETTER:-}" ]; then
+    need "$IS2D_LETTER" "$LOG/merge.log"
+fi
 
 note "終わりました。まとめ：claude/review-$C-$MG/summary.md"
