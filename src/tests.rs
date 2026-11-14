@@ -14740,12 +14740,12 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
 fn test_m3_1_write_project_bytes_reports_write_error() {
     let tab = crate::canvas_tool::Tab::new_empty(1, 1);
     let doc = crate::project_io::ProjectDocument::from_app(&tab).unwrap();
-    let bytes = crate::project_io::project_file_bytes(&doc).unwrap();
+    let (head, body) = crate::project_io::project_file_parts(&doc).unwrap();
 
     let tmp = std::env::temp_dir().join(format!("is2d_m3_1_ro_{}.tmp", std::process::id()));
     std::fs::write(&tmp, b"orig").unwrap();
     let ro_file = std::fs::File::open(&tmp).unwrap();
-    let res = crate::project_io::write_project_bytes(ro_file, &bytes);
+    let res = crate::project_io::write_project_bytes(ro_file, &head, &body);
     let _ = std::fs::remove_file(&tmp);
     assert!(res.is_err(), "書き込みの失敗が Err として返ること");
 
@@ -14755,7 +14755,7 @@ fn test_m3_1_write_project_bytes_reports_write_error() {
             .write(true)
             .open("/dev/full")
             .unwrap();
-        let err = crate::project_io::write_project_bytes(dev_full, &bytes)
+        let err = crate::project_io::write_project_bytes(dev_full, &head, &body)
             .expect_err("/dev/full への書き込みは Err が返ること");
         assert_eq!(err.kind(), std::io::ErrorKind::StorageFull);
     }

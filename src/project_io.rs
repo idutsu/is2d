@@ -16,7 +16,7 @@ pub(crate) use crate::timeline::MAX_LAYERS_PER_TIMELINE;
 use crate::timeline::{Cel, Keyframe, Layer, ScopeMap, Timeline, TimelineCellSelection};
 
 /// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。版 6 は、頭（印・版・中身の長さ・中身の CRC32）のあとに、
-/// 保存用の型（`ProjectDocument`）を postcard で書いた中身を置く（`project_file_bytes`）。中身の持ち方は版 5 と同じで、
+/// 保存用の型（`ProjectDocument`）を postcard で書いた中身を置く（`project_file_parts`）。中身の持ち方は版 5 と同じで、
 /// セル画の階層ごとの地図（頂点と、境目の線を1本で持つ辺）をそのまま書き（Adobe Animate と同じ持ち方）、インスタンスの
 /// 重なり位置を階層の地図の並びで書く（`order`）。面の図形は文書に持たず、使うときに地図から作る。それより前の版
 /// （版 5 までの JSON のファイル）は開かない。設計：claude/保存の形をバイナリにする設計_版6_7b5f6c4.md
@@ -808,7 +808,7 @@ impl TryFrom<SavedSymbolDef> for SymbolDef {
     }
 }
 
-/// `.is2d` ファイルの中身のルート構造体（版の番号はファイルの頭にだけ持つ：`project_file_bytes`）。postcard は項目を
+/// `.is2d` ファイルの中身のルート構造体（版の番号はファイルの頭にだけ持つ：`project_file_parts`）。postcard は項目を
 /// 並びの位置で読むので、書かない項目（`skip_serializing_if`）は作らない
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ProjectDocument {
@@ -1113,18 +1113,27 @@ pub(crate) fn update_window_title(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
     }
 }
 
-/// 保存用の写し `doc` の `.is2d` ファイルの中身（頭と、postcard で書いた中身）。頭を作るのはここだけ（確かめるのは
-/// `project_from_bytes` だけ）
-pub(crate) fn project_file_bytes(doc: &ProjectDocument) -> Result<Vec<u8>, String> {
+/// 保存用の写し `doc` の `.is2d` ファイルの中身を、頭（印・版・中身の長さ・中身の CRC32）と、postcard で書いた中身に
+/// 分けて作る。頭を作るのはここだけ（確かめるのは `project_from_bytes` だけ）。ファイルにはこの順に続けて書く
+/// （`write_project_bytes`。中身を頭と1つの並びに写し直さない：レビュー f01d518 の N-5007）
+pub(crate) fn project_file_parts(
+    doc: &ProjectDocument,
+) -> Result<([u8; PROJECT_FILE_HEADER_LEN], Vec<u8>), String> {
     let body =
         postcard::to_allocvec(doc).map_err(|e| format!("保存する形にできませんでした: {e}"))?;
-    let mut bytes = Vec::with_capacity(PROJECT_FILE_HEADER_LEN + body.len());
-    bytes.extend_from_slice(&PROJECT_FILE_MAGIC);
-    bytes.extend_from_slice(&PROJECT_FORMAT_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
-    bytes.extend_from_slice(&body);
-    Ok(bytes)
+    let mut head = [0u8; PROJECT_FILE_HEADER_LEN];
+    head[..4].copy_from_slice(&PROJECT_FILE_MAGIC);
+    head[4..8].copy_from_slice(&PROJECT_FORMAT_VERSION.to_le_bytes());
+    head[8..16].copy_from_slice(&(body.len() as u64).to_le_bytes());
+    head[16..].copy_from_slice(&crc32fast::hash(&body).to_le_bytes());
+    Ok((head, body))
+}
+
+/// テスト用：`.is2d` ファイルの中身を1つの並びにしたもの（頭と中身：`project_file_parts`）
+#[cfg(test)]
+pub(crate) fn project_file_bytes(doc: &ProjectDocument) -> Result<Vec<u8>, String> {
+    let (head, body) = project_file_parts(doc)?;
+    Ok([&head[..], &body].concat())
 }
 
 /// `.is2d` ファイルの中身 `bytes` を読む。頭（印・版・中身の長さ・CRC32）を順に確かめてから中身を読み、数がみな有限か
@@ -1165,11 +1174,17 @@ pub(crate) fn project_from_bytes(bytes: &[u8]) -> Result<ProjectDocument, String
     Ok(doc)
 }
 
-/// `.is2d` ファイルの中身（`project_file_bytes`）をファイル `file` に書いて、ディスクまで書き込む
-pub(crate) fn write_project_bytes(file: std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+/// `.is2d` ファイルの頭 `head` と中身 `body`（`project_file_parts`）を、この順にファイル `file` に書いて、ディスクまで書き
+/// 込む
+pub(crate) fn write_project_bytes(
+    file: std::fs::File,
+    head: &[u8],
+    body: &[u8],
+) -> std::io::Result<()> {
     use std::io::Write;
     let mut file = file;
-    file.write_all(bytes)?;
+    file.write_all(head)?;
+    file.write_all(body)?;
     file.sync_all()
 }
 
@@ -1200,9 +1215,9 @@ pub(crate) fn write_project_file_atomically(
         std::process::id()
     );
     let tmp_path = target_path.with_file_name(tmp_name);
-    let bytes = project_file_bytes(proj_doc)?;
+    let (head, body) = project_file_parts(proj_doc)?;
     let write_res =
-        std::fs::File::create(&tmp_path).and_then(|file| write_project_bytes(file, &bytes));
+        std::fs::File::create(&tmp_path).and_then(|file| write_project_bytes(file, &head, &body));
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("一時ファイルの書き込みに失敗しました: {e}"));
