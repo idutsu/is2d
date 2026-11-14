@@ -31120,6 +31120,38 @@ fn save_many_keyframes(name: &str, n: usize) -> std::path::PathBuf {
     path
 }
 
+/// 「まだ何も編集していない空の無題タブ」は、編集の入口が進める世代 ID で決める（表示の切り替えは編集ではない）。直す
+/// 前は、文書とタブの既定値を写した 18 の条件で推していたので、ステージの外を隠す表示を切り替えただけのタブを、編集した
+/// タブとみなした（レビュー f01d518 の N-5008）
+#[test]
+fn a_pristine_tab_is_one_that_was_never_edited() {
+    use crate::doc_actions::{apply, Action};
+    use crate::project_io::is_active_tab_pristine_empty;
+    let mut app = Is2dApp::default();
+    assert!(is_active_tab_pristine_empty(app.tab()));
+    app.tab_mut().view.clip_outside_stage = true;
+    assert!(
+        is_active_tab_pristine_empty(app.tab()),
+        "表示の切り替えは編集ではない"
+    );
+    // 編集すれば、取り消しても編集したタブ
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(40.0, 40.0), Point::new(120.0, 40.0)],
+            radius: 6.0,
+            color: Color32::from_rgb(220, 50, 50),
+        },
+    ));
+    assert!(!is_active_tab_pristine_empty(app.tab()));
+    assert!(apply(&mut app, Action::Undo));
+    assert!(!is_active_tab_pristine_empty(app.tab()));
+    // 未保存の印が付いたタブ（別のタブの上書きでファイルから外したタブなど）は、空のタブとみなさない
+    let mut detached = Is2dApp::default();
+    detached.tab_mut().history.mark_unsaved();
+    assert!(!is_active_tab_pristine_empty(detached.tab()));
+}
+
 /// タイムラインを描くとき、見えている範囲のキーフレームだけを調べる（作品の長さによらない）。直す前は、描くたびに
 /// 全部のキーフレームを調べた（レビュー f01d518 の N-5005）
 #[test]

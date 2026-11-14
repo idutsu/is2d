@@ -126,26 +126,12 @@ fn reset_active_document_state(tab: &mut Tab, doc: Document) {
     tab.refresh_scene_base();
 }
 
-/// 現在アクティブなタブが「起動直後・新規作成直後で一度も編集されていない白紙の無題タブ」であるかを判定する
+/// 現在アクティブなタブが「起動直後・新規作成直後で一度も編集されていない白紙の無題タブ」であるかを判定する。文書を
+/// 変えるのはみな `apply` で、そのたびに世代 ID を進める（`UndoHistory::push`）ので、編集の有無はその1つの印で決める
+/// （既定値を写して推さない：レビュー f01d518 の N-5008）。ファイルが無いこと（保存も読み込みもしていない）と、未保存の
+/// 印が無いこと（別のタブの上書きでファイルから外したタブは、中身があっても編集していないので、この印で見分ける）も見る
 pub(crate) fn is_active_tab_pristine_empty(tab: &Tab) -> bool {
-    tab.file.is_none()
-        && !tab.history.is_dirty()
-        && tab.history.undo_stack.is_empty()
-        && tab.history.redo_stack.is_empty()
-        && tab.doc.library.is_empty()
-        && tab.session.edit_path.is_empty()
-        && tab.doc.stage_size == Vec2::new(800.0, 450.0)
-        && !tab.view.clip_outside_stage
-        && tab.doc.fps == 24
-        && tab.doc.root.total_frames == 1
-        && tab.doc.root.layers.len() == 1
-        && tab.doc.root.layers[0].name == "Layer 1"
-        && tab.doc.root.layers[0].visible
-        && !tab.doc.root.layers[0].locked
-        && tab.doc.root.layers[0].frame_count == 1
-        && tab.doc.root.layers[0].keyframes.len() == 1
-        && tab.doc.root.layers[0].keyframes[0].cel.is_empty()
-        && tab.session.floating().is_none()
+    tab.file.is_none() && !tab.history.is_dirty() && tab.history.next_commit_id == 1
 }
 
 /// 指定したインデックス `index` のタブに未保存変更（`is_dirty() == true`）があるかを返す
