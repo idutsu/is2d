@@ -30011,30 +30011,75 @@ fn measure_work() {
     sweep.sort_by(f64::total_cmp);
 
     eprintln!();
+    // 測ったマシンのチップと、M1 の見込みの倍率（時間の目標は Apple M1 で守る数字。倍率はレビューのきまりと同じ：
+    // claude/review-prompts/is2d-review-claude-code.md の「目標の数字」。Mac 以外は ×1）
+    let chip = measured_chip();
+    let factor = m1_factor(&chip);
     eprintln!("作品：{path}");
+    eprintln!("測ったマシン：{chip}（M1 の見込み＝測った時間×{factor}）");
     eprintln!(
         "作品の中身：レイヤー {layers} 枚（シンボルの中を含む）・キーフレーム {keyframes} 個・地図 {maps} 枚・辺 {edges} 本"
     );
-    eprintln!(
-        "全部のコマ（{total_frames} コマ）を1回ずつ表示：合計 {sweep_total:.0}ms・1 コマの中央値 {:.1}ms・最大 {:.1}ms",
+    let (sweep_mid, sweep_max) = (
         sweep.get(sweep.len() / 2).copied().unwrap_or(0.0),
-        sweep.last().copied().unwrap_or(0.0)
+        sweep.last().copied().unwrap_or(0.0),
+    );
+    eprintln!(
+        "全部のコマ（{total_frames} コマ）を1回ずつ表示：合計 {sweep_total:.0}ms（M1 {:.0}ms）・1 コマの中央値 {sweep_mid:.1}ms（M1 {:.1}ms）・最大 {sweep_max:.1}ms（M1 {:.1}ms）",
+        sweep_total * factor,
+        sweep_mid * factor,
+        sweep_max * factor
     );
     eprintln!("コマ {}（図形 {shapes} 個・区間 {segments} 個）", frame + 1);
-    eprintln!("| 操作 | 中央値 | 最大 | 回数 |");
-    eprintln!("|---|---:|---:|---:|");
+    eprintln!("| 操作 | 中央値 | 最大 | M1 の見込み（中央値／最大） | 回数 |");
+    eprintln!("|---|---:|---:|---:|---:|");
     for (label, mut times) in rows {
         if times.is_empty() {
-            eprintln!("| {label} | できなかった | | 0 |");
+            eprintln!("| {label} | できなかった | | | 0 |");
             continue;
         }
         times.sort_by(f64::total_cmp);
+        let (mid, max) = (times[times.len() / 2], times[times.len() - 1]);
         eprintln!(
-            "| {label} | {:.1}ms | {:.1}ms | {} |",
-            times[times.len() / 2],
-            times[times.len() - 1],
+            "| {label} | {mid:.1}ms | {max:.1}ms | {:.1}／{:.1}ms | {} |",
+            mid * factor,
+            max * factor,
             times.len()
         );
+    }
+}
+
+/// 計測：測ったマシンのチップ（Mac は `sysctl -n machdep.cpu.brand_string`、Linux は /proc/cpuinfo の model name）
+fn measured_chip() -> String {
+    let mac = std::process::Command::new("sysctl")
+        .args(["-n", "machdep.cpu.brand_string"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .filter(|s| !s.is_empty());
+    mac.or_else(|| {
+        std::fs::read_to_string("/proc/cpuinfo").ok().and_then(|c| {
+            c.lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|s| s.trim().to_owned())
+        })
+    })
+    .unwrap_or_else(|| "不明".to_owned())
+}
+
+/// 計測：チップ `chip` の、M1 の見込みの倍率（レビューのきまりの表。Pro・Max・Ultra も同じ世代の倍率。Mac 以外は 1）
+fn m1_factor(chip: &str) -> f64 {
+    let gen = ["M5", "M4", "M3", "M2", "M1"]
+        .into_iter()
+        .find(|g| chip.starts_with("Apple") && chip.split_whitespace().any(|w| w == *g));
+    match gen {
+        Some("M5") => 2.0,
+        Some("M4") => 1.7,
+        Some("M3") => 1.4,
+        Some("M2") => 1.2,
+        _ => 1.0,
     }
 }
 
@@ -30214,4 +30259,15 @@ fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
         .map(|v| v.to_bits())
         .eq(broken.nodes.iter().map(|v| v.to_bits())));
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// 計測の M1 の見込みの倍率は、レビューのきまりの表どおり（Pro・Max も同じ世代。Mac 以外は 1）
+#[test]
+fn m1_factor_follows_the_review_table() {
+    assert_eq!(m1_factor("Apple M5"), 2.0);
+    assert_eq!(m1_factor("Apple M4 Pro"), 1.7);
+    assert_eq!(m1_factor("Apple M3 Max"), 1.4);
+    assert_eq!(m1_factor("Apple M2"), 1.2);
+    assert_eq!(m1_factor("Apple M1"), 1.0);
+    assert_eq!(m1_factor("Intel(R) Xeon(R) Processor @ 2.10GHz"), 1.0);
 }
