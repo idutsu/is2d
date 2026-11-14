@@ -30143,20 +30143,27 @@ fn double_click_needs_both_clicks_at_the_same_place() {
     }
 }
 
-/// 計測の作品のファイル `path`。前の形式（版 5 の JSON）なら、今の版に直したファイルを一時フォルダに作って、そのパスを
-/// 返す（計測用の作品を作り直さずに、同じコマンドで測るため。アプリは前の形式を開かない）
-fn work_file_in_current_format(path: &std::path::Path) -> std::path::PathBuf {
-    let bytes = std::fs::read(path).expect("作品を読めること");
+/// 計測の作品のファイルの中身 `bytes` が前の形式（版 5 の JSON）なら、その保存用の型（計測用の作品を作り直さずに使うため。
+/// アプリは前の形式を開かない）。今の版のファイルなら `None`
+fn v5_json_document(bytes: &[u8]) -> Option<project_io::ProjectDocument> {
     if bytes.first() != Some(&b'{') {
-        return path.to_path_buf();
+        return None;
     }
     assert!(
         bytes.starts_with(br#"{"version":5,"#),
         "今の版に直せるのは、版 5 の JSON のファイルだけ"
     );
     // 版の番号は今の保存用の型に無いので、JSON を読むときは知らない項目として読み飛ばす
-    let doc: project_io::ProjectDocument =
-        serde_json::from_slice(&bytes).expect("版 5 の JSON として読めること");
+    Some(serde_json::from_slice(bytes).expect("版 5 の JSON として読めること"))
+}
+
+/// 計測の作品のファイル `path`。前の形式（版 5 の JSON）なら、今の版に直したファイルを一時フォルダに作って、そのパスを
+/// 返す（同じコマンドで測るため）
+fn work_file_in_current_format(path: &std::path::Path) -> std::path::PathBuf {
+    let bytes = std::fs::read(path).expect("作品を読めること");
+    let Some(doc) = v5_json_document(&bytes) else {
+        return path.to_path_buf();
+    };
     let out = std::env::temp_dir().join("is2d_measure_work_current_format.is2d");
     write_project_file(&out, &doc);
     eprintln!(
@@ -30166,6 +30173,59 @@ fn work_file_in_current_format(path: &std::path::Path) -> std::path::PathBuf {
         out.display()
     );
     out
+}
+
+/// 計測用の作品のファイルを、その場で今の版に直す（ゼロベースレビューの前に `claude/review-bench/A.is2d`・`B.is2d` を
+/// 直すため）。直すのは版 5 の JSON のファイルだけで、元のファイルは同じフォルダに `<名前>.v5.json` として残す。今の版の
+/// ファイルは、開けることを確かめるだけで変えない（何度流してもよい）
+///
+/// 実行：`IS2D_CONVERT=作品のパス,作品のパス cargo test --release convert_work_files_to_current_format -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn convert_work_files_to_current_format() {
+    let Ok(list) = std::env::var("IS2D_CONVERT") else {
+        eprintln!(
+            "IS2D_CONVERT に作品のパスを（いくつもあればカンマで区切って）入れて実行してください"
+        );
+        return;
+    };
+    let opens = |path: &std::path::Path| {
+        project_io::read_project_document(path)
+            .and_then(project_io::ProjectDocument::into_document)
+            .is_ok()
+    };
+    for path in list
+        .split(',')
+        .filter(|p| !p.is_empty())
+        .map(std::path::Path::new)
+    {
+        let bytes = std::fs::read(path).expect("作品を読めること");
+        let Some(doc) = v5_json_document(&bytes) else {
+            assert!(opens(path), "今の版として開けること：{}", path.display());
+            eprintln!("今の版なので、そのまま：{}", path.display());
+            continue;
+        };
+        let backup = path.with_extension("v5.json");
+        assert!(
+            !backup.exists(),
+            "元のファイルを残す所に、もうファイルがある：{}",
+            backup.display()
+        );
+        // 直したファイルを隣に書いて開けることを確かめてから、元のファイルを残し、直したファイルに名前を替える
+        // （途中で失敗しても、元のファイルは消えない）
+        let converted = path.with_extension("converting.is2d");
+        write_project_file(&converted, &doc);
+        assert!(opens(&converted), "直したファイルを開けること");
+        std::fs::rename(path, &backup).expect("元のファイルを残せること");
+        std::fs::rename(&converted, path).expect("直したファイルの名前を替えられること");
+        eprintln!(
+            "直した：{}（{:.1}MB → {:.1}MB）。元のファイル：{}",
+            path.display(),
+            bytes.len() as f64 / 1e6,
+            std::fs::metadata(path).unwrap().len() as f64 / 1e6,
+            backup.display()
+        );
+    }
 }
 
 /// 計測：作品のファイルで、重さが気になる操作の時間を測る（Mac で作品 A・A-x2 を測るため）

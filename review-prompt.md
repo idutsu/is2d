@@ -20,7 +20,14 @@ https://github.com/idutsu/is2d を、予備知識なしでレビューしてく�
    - `<報告の置き場>`：今のリポジトリの `claude/review-<C>/`（`claude/` は `.gitignore` に入っている）
    - `<計測の置き場>`：今のリポジトリの `claude/review-bench/`（計測用の2分アニメ A・B の .is2d ファイルを置く。中身は作品のデータだけで、レビューの結果は置かない。コミットが変わっても使い回す）
      - `claude/review-bench/` が無く、前のレビューの `claude/review-<別のID>/bench/` に `A.is2d`・`B.is2d` があれば、その2つだけを `claude/review-bench/` にコピーする（作品のデータだけなので、前のレビューで作ったものでよい）
-     - 今のアプリで開けない（保存形式が変わったなど）ときは、サブエージェントが作り直してよい
+4. **計測用の作品を今の保存形式にそろえる**：`<計測の置き場>` に `A.is2d`・`B.is2d` があれば、`<作業場所>` で次を実行する。前の形式（版 5 の JSON）のファイルだけをその場で今の形式に直し、元のファイルは同じフォルダに `A.v5.json`・`B.v5.json` として残す。今の形式のファイルは変えない（何度実行してもよい）
+   ```
+   IS2D_CONVERT=<計測の置き場>/A.is2d,<計測の置き場>/B.is2d cargo test --release convert_work_files_to_current_format -- --ignored --nocapture
+   ```
+   - `<計測の置き場>` は絶対パスで書く（`<作業場所>` で実行するため）
+   - 対象のコミットにこのテストが無いとき（`running 0 tests` と出たとき）は飛ばす
+   - 失敗したとき（`test result: FAILED`）は、始めずにその表示を利用者に報告する
+   - それでも今のアプリで開けない（保存形式がさらに変わったなど）ときは、サブエージェントが作り直してよい
 
 ## 3. 進め方（進行役）
 
@@ -141,15 +148,15 @@ https://github.com/idutsu/is2d を、予備知識なしでレビューしてく�
 ### 各回の範囲（全体の分担）
 | 回 | 内容 | 最後まで全部読むファイル |
 |---|---|---|
-| 第1回 | 地図の仕組み | `src/planar_map.rs`、`src/stored_map.rs`、`vendor/i_overlay/PATCH.md` と、そこに書かれた i_overlay の足した所 |
-| 第2回 | 幾何計算とタイムライン | `src/vector_engine.rs`、`src/vector_stroke.rs`、`src/timeline.rs` |
-| 第3回 | キャンバスとツール | `src/canvas_tool.rs`、`src/floating.rs`、`src/select_ops.rs`、`src/tool_select.rs`、`src/tool_transform.rs`、`src/tool_paint.rs` |
+| 第1回 | 地図の仕組み | `src/planar_map.rs`、`src/planar_map/` の下の全部（`overlay.rs`・`grid.rs` など）、`src/stored_map.rs`、`vendor/i_overlay/PATCH.md` と、そこに書かれた i_overlay の足した所 |
+| 第2回 | 幾何計算とタイムライン | `src/vector_engine.rs`、`src/vector_stroke.rs`、`src/timeline.rs`、`src/chunked_list.rs` |
+| 第3回 | キャンバスとツール | `src/canvas_tool.rs`、`src/canvas_tool/` の下の全部（`cel_writes.rs`・`scene_base_cache.rs` など）、`src/map_hover.rs`、`src/floating.rs`、`src/select_ops.rs`、`src/tool_select.rs`、`src/tool_transform.rs`、`src/tool_paint.rs` |
 | 第4回 | Action・シンボル・クリップボード・動画の書き出し | `src/doc_actions.rs`、`src/symbol.rs`、`src/symbol_ops.rs`、`src/clipboard_ops.rs`、`src/video_export.rs`、`src/video_export_macos.rs` |
 | 第5回 | 保存と読み込み・復旧・パネル・タイムラインの画面・main・Mac のメニュー | `src/project_io.rs`、`src/recovery.rs`、`src/panels.rs`、`src/timeline_ui.rs`、`src/main.rs`、`src/app_menu_macos.rs` |
 | 第6回 | まとめ | （コードは確認に必要な所だけ読む） |
 
 - `src/tests.rs` はどの回でも全部は読まない
-- `src/` の `*.rs`（`tests.rs` を除く）のうち、上のどの回にも入っていないファイル（新しく増えたもの・名前が変わったもの）は、第5回で読む
+- `src/` の下の `*.rs`（サブフォルダの中も含む。`tests.rs` を除く）のうち、上のどの回にも入っていないファイル（新しく増えたもの・名前が変わったもの）は、第5回で読む
 
 ## 第1回（地図の仕組み）
 
@@ -158,6 +165,7 @@ https://github.com/idutsu/is2d を、予備知識なしでレビューしてく�
 ### 範囲
 - 最後まで全部読むファイル
   - `src/planar_map.rs`
+  - `src/planar_map/` の下の `*.rs` 全部（重ね合わせの `overlay.rs`、判定の形の整数の幾何の `grid.rs` など）
   - `src/stored_map.rs`
   - `vendor/i_overlay/PATCH.md` と、そこに書かれた i_overlay の足した所（足した所の関数と、それを見る所）
 - 読む前に、各ファイルの行数を `wc -l` で数えて記録する。一覧にあるファイルが無いときは「無い」と記録し、残りのファイルで進める
@@ -206,6 +214,7 @@ https://github.com/idutsu/is2d を、予備知識なしでレビューしてく�
   - `src/vector_engine.rs`
   - `src/vector_stroke.rs`
   - `src/timeline.rs`
+  - `src/chunked_list.rs`（キーフレームの列とシンボルのライブラリの持ち方）
 - 読む前に、各ファイルの行数を `wc -l` で数えて記録する。一覧にあるファイルが無いときは「無い」と記録し、残りのファイルで進める
 - 照らし合わせるドキュメント（章の番号ではなく、見出しの言葉で探す）
   - ARCHITECTURE.md：全章
@@ -250,6 +259,8 @@ https://github.com/idutsu/is2d を、予備知識なしでレビューしてく�
 ### 範囲
 - 最後まで全部読むファイル
   - `src/canvas_tool.rs`
+  - `src/canvas_tool/` の下の `*.rs` 全部（セル画を書く入口の `cel_writes.rs`、画面の土台などのキャッシュの `scene_base_cache.rs` など）
+  - `src/map_hover.rs`（地図のカーソル合わせ）
   - `src/floating.rs`
   - `src/select_ops.rs`
   - `src/tool_select.rs`
@@ -353,7 +364,7 @@ https://github.com/idutsu/is2d を、予備知識なしでレビューしてく�
   - `src/timeline_ui.rs`
   - `src/main.rs`
   - `src/app_menu_macos.rs`（Mac だけでビルドされる。`#[cfg(target_os = "macos")]`）
-  - 「各回の範囲」のどの回にも入っていない `src/*.rs`（`tests.rs` を除く）があれば、それも最後まで読む
+  - 「各回の範囲」のどの回にも入っていない `src/` の下の `*.rs`（サブフォルダの中も含む。`tests.rs` を除く）があれば、それも最後まで読む
 - 読む前に、各ファイルの行数を `wc -l` で数えて記録する。一覧にあるファイルが無いときは「無い」と記録し、残りのファイルで進める
 - 照らし合わせるドキュメント（章の番号ではなく、見出しの言葉で探す）
   - ARCHITECTURE.md：全章
