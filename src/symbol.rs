@@ -697,6 +697,19 @@ impl Document {
         }
     }
 
+    /// まだ確かめていない地図（ファイルから読んだもの）を、裏のスレッドで、コマの順に確かめる（開いたあと、初めて見る
+    /// コマで待たないように：`UncheckedMaps`）。ルートのタイムライン、ライブラリのシンボルの順。スレッドを作れなければ
+    /// `None`（使うときに確かめる）。スレッドは確かめた地図の数を返す
+    pub(crate) fn check_maps_in_background(&self) -> Option<std::thread::JoinHandle<usize>> {
+        let maps = crate::timeline::UncheckedMaps::of(
+            std::iter::once(&self.root).chain(self.library.iter().map(|s| &s.timeline)),
+        );
+        std::thread::Builder::new()
+            .name("is2d-map-check".to_owned())
+            .spawn(move || maps.check())
+            .ok()
+    }
+
     /// シンボルライブラリの世代番号 `revision` を一意な値へ更新する
     pub(crate) fn bump_revision(&mut self) {
         self.revision = crate::vector_engine::next_mesh_revision();

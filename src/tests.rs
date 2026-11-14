@@ -31510,6 +31510,20 @@ fn measure_work() {
         let _ = app.scene().len();
         sweep.push(ms(t));
     }
+    // 開き直して、裏で全部の地図を確かめ終わるまで（そのあいだ画面は待たない。アプリでは開いたときに始める）
+    drop(app);
+    let background_ms = {
+        let mut fresh = Is2dApp::default();
+        crate::project_io::open_project_in_tab(&mut fresh, std::path::Path::new(&path), Some(&ctx))
+            .expect("作品を開けること");
+        let t = Instant::now();
+        let checker = fresh.doc.check_maps_in_background();
+        checker
+            .expect("スレッドを作れること")
+            .join()
+            .expect("確かめ終わること");
+        ms(t)
+    };
     let sweep_total: f64 = sweep.iter().sum();
     sweep.sort_by(f64::total_cmp);
 
@@ -31532,6 +31546,10 @@ fn measure_work() {
         sweep_total * factor,
         sweep_mid * factor,
         sweep_max * factor
+    );
+    eprintln!(
+        "開いたあと、裏で全部の地図を確かめ終わるまで：{background_ms:.0}ms（M1 {:.0}ms。そのあいだ画面は待たない）",
+        background_ms * factor
     );
     if !stages.is_empty() {
         let mid = |mut v: Vec<f64>| {
@@ -31887,6 +31905,71 @@ fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
         saved_map_content(&back, &back.timeline.layers[0].keyframes[1].maps[0]),
         broken
     );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// 開いたあと、まだ確かめていない地図を裏のスレッドで全部確かめる（初めて見るコマで待たない）。壊れた地図は、使うときに
+/// 見つけたときと同じく、何も無いものとして描き、場所を1回知らせる。閉じた文書の地図は確かめない（弱い参照で持つ）。
+/// 直す前は、見るまで確かめなかった（レビュー f01d518 の R4）
+#[test]
+fn maps_are_checked_in_the_background_after_opening() {
+    use crate::doc_actions::{apply, Action};
+    let path = save_many_keyframes("background_check", 4);
+    let mut proj = crate::project_io::read_project_document(&path).unwrap();
+    break_map_colors(&mut proj, 1);
+    crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
+
+    let mut app = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut app, &path, None).expect("開ける");
+    let maps = |app: &Is2dApp| -> Vec<(bool, bool)> {
+        app.doc.root.layers[0]
+            .keyframes
+            .iter()
+            .flat_map(|k| k.cel.maps.iter())
+            .map(|m| (m.is_unchecked(), m.is_broken()))
+            .collect()
+    };
+    assert_eq!(
+        maps(&app),
+        vec![(false, false), (true, false), (true, false), (true, false)],
+        "開いただけでは、表示するコマ 1 のほかは確かめない"
+    );
+    let checker = app
+        .doc
+        .check_maps_in_background()
+        .expect("スレッドを作れる");
+    assert_eq!(
+        checker.join().unwrap(),
+        3,
+        "まだ確かめていない地図だけを確かめる"
+    );
+    assert_eq!(
+        maps(&app),
+        vec![
+            (false, false),
+            (false, true),
+            (false, false),
+            (false, false)
+        ]
+    );
+    assert_eq!(
+        app.doc.broken_maps.take(),
+        vec!["レイヤー「Layer 1」のコマ 3".to_owned()]
+    );
+    assert!(apply(&mut app, Action::ScrubRulerToFrame { frame: 2 }));
+    assert!(app.scene().len() == 0, "壊れた地図は何も無いものとして描く");
+    assert!(app.doc.broken_maps.take().is_empty(), "知らせるのは1回");
+    assert!(apply(&mut app, Action::ScrubRulerToFrame { frame: 4 }));
+    assert!(app.scene().len() > 0);
+
+    // 閉じた文書の地図は確かめない
+    let doc = crate::project_io::read_project_document(&path)
+        .unwrap()
+        .into_document()
+        .unwrap();
+    let pending = crate::timeline::UncheckedMaps::of([&doc.root]);
+    drop(doc);
+    assert_eq!(pending.check(), 0);
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 

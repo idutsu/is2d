@@ -1303,6 +1303,10 @@ pub(crate) fn open_document_in_new_tab(
 
     reset_active_document_state(ws.tab_mut(), doc);
     ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
+    // テストでは裏で確かめない（まだ確かめていない地図を調べるテストが、裏のスレッドと競わないように。裏で確かめる
+    // テストは `check_maps_in_background` を直接呼ぶ）
+    #[cfg(not(test))]
+    let _ = ws.tab().doc.check_maps_in_background();
     Ok(())
 }
 

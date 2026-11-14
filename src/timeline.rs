@@ -7,7 +7,7 @@ use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, OnceLock, PoisonError},
+    sync::{Arc, Mutex, OnceLock, PoisonError, Weak},
 };
 
 /// 1タイムラインあたりの最大許容レイヤー数
@@ -275,6 +275,46 @@ impl LazyStored {
         } else {
             StoredMap::from_dense(labeled.map(), Some(&self.stored))
         })
+    }
+}
+
+/// まだ確かめていない地図を、コマの順に確かめる仕事（開いたあと、裏のスレッドで行う：`Document::check_maps_in_background`）。
+/// 地図は弱い参照で持つので、閉じた文書の地図や、編集で置き換わって Undo の控えにも無い地図は確かめない
+pub(crate) struct UncheckedMaps(Vec<Weak<LazyStored>>);
+
+impl UncheckedMaps {
+    /// タイムライン `timelines` の、まだ確かめていない地図（タイムラインの順。タイムラインの中は、キーフレームの始まりの
+    /// コマの順で、同じコマならレイヤーの順）
+    pub(crate) fn of<'a>(timelines: impl IntoIterator<Item = &'a Timeline>) -> Self {
+        let mut maps = Vec::new();
+        for t in timelines {
+            let mut at: Vec<(usize, Weak<LazyStored>)> = t
+                .layers
+                .iter()
+                .flat_map(|l| l.keyframes.iter())
+                .flat_map(|kf| {
+                    kf.cel
+                        .maps
+                        .iter()
+                        .filter(|m| m.map.checked.get().is_none())
+                        .map(|m| (kf.start_frame, Arc::downgrade(&m.map)))
+                })
+                .collect();
+            at.sort_by_key(|(frame, _)| *frame);
+            maps.extend(at.into_iter().map(|(_, m)| m));
+        }
+        Self(maps)
+    }
+
+    /// 確かめる（使うときと同じ入口 `LazyStored::get` を通るので、同じ地図を同時に使えば、片方が待つだけ。壊れていれば
+    /// 知らせる）。まだ残っていて確かめた地図の数
+    pub(crate) fn check(self) -> usize {
+        let mut checked = 0;
+        for m in self.0.iter().filter_map(Weak::upgrade) {
+            m.get();
+            checked += 1;
+        }
+        checked
     }
 }
 
