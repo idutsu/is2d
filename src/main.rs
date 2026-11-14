@@ -81,11 +81,15 @@ fn configure_japanese_fonts(ctx: &egui::Context) {
 
     fonts.font_data.insert(
         "noto_sans_jp_regular".to_owned(),
-        egui::FontData::from_static(include_bytes!("../fonts/NotoSansJP-Regular.ttf")),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../fonts/NotoSansJP-Regular.ttf"
+        ))),
     );
     fonts.font_data.insert(
         "material_icons".to_owned(),
-        egui::FontData::from_static(include_bytes!("../fonts/MaterialIcons-Regular.ttf")),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../fonts/MaterialIcons-Regular.ttf"
+        ))),
     );
 
     if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
@@ -104,13 +108,13 @@ fn configure_japanese_fonts(ctx: &egui::Context) {
 fn configure_sharp_light_theme(ctx: &egui::Context) {
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
     let mut visuals = egui::Visuals::light();
-    visuals.window_rounding = egui::Rounding::ZERO;
-    visuals.menu_rounding = egui::Rounding::ZERO;
-    visuals.widgets.noninteractive.rounding = egui::Rounding::ZERO;
-    visuals.widgets.inactive.rounding = egui::Rounding::ZERO;
-    visuals.widgets.hovered.rounding = egui::Rounding::ZERO;
-    visuals.widgets.active.rounding = egui::Rounding::ZERO;
-    visuals.widgets.open.rounding = egui::Rounding::ZERO;
+    visuals.window_corner_radius = egui::CornerRadius::ZERO;
+    visuals.menu_corner_radius = egui::CornerRadius::ZERO;
+    visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::ZERO;
+    visuals.widgets.inactive.corner_radius = egui::CornerRadius::ZERO;
+    visuals.widgets.hovered.corner_radius = egui::CornerRadius::ZERO;
+    visuals.widgets.active.corner_radius = egui::CornerRadius::ZERO;
+    visuals.widgets.open.corner_radius = egui::CornerRadius::ZERO;
     ctx.set_visuals(visuals);
 }
 
@@ -860,7 +864,12 @@ impl Is2dApp {
                 Vec2::new(badge_w, badge_h),
             );
             painter.rect_filled(badge_rect, 0.0, bg_col);
-            painter.rect_stroke(badge_rect, 0.0, Stroke::new(1.0_f32, border_col));
+            painter.rect_stroke(
+                badge_rect,
+                0.0,
+                Stroke::new(1.0_f32, border_col),
+                egui::StrokeKind::Middle,
+            );
             let text_pos = Pos2::new(
                 badge_rect.left() + 12.0,
                 badge_rect.center().y - galley.size().y * 0.5,
@@ -948,7 +957,7 @@ impl Is2dApp {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(Color32::from_rgb(244, 245, 248)))
+            .frame(egui::Frame::NONE.fill(Color32::from_rgb(244, 245, 248)))
             .show(ctx, |ui| {
                 let (canvas_rect, response) =
                     ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());

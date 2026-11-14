@@ -1132,9 +1132,3 @@ pub(crate) fn append_mesh(dst: &mut Mesh, src: &Mesh) {
     dst.indices
         .extend(src.indices.iter().map(|&idx| base + idx));
 }
-
-/// `Arc<egui::Mesh>` を単一所有時はムーブ、共有時はクローンで `egui::Shape::Mesh` に変換する
-#[inline]
-pub(crate) fn arc_mesh_to_shape(mesh: Arc<Mesh>) -> egui::Shape {
-    egui::Shape::Mesh(Arc::unwrap_or_clone(mesh))
-}

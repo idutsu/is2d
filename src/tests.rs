@@ -5705,6 +5705,48 @@ fn test_saved_file_reads_back_nan_is_fixed_and_undo_history_cap() {
     );
 }
 
+/// オニオンスキンは、写し（`CelMeshCache`）の結合メッシュを、描くたびに複製せずに egui に渡す（egui 0.31 の
+/// `Shape::Mesh` は `Arc<Mesh>` を持つ：レビュー f01d518 の N-5004）
+#[test]
+fn test_onion_skin_passes_cached_mesh_to_egui_without_copying() {
+    use crate::doc_actions::{apply, Action};
+    use eframe::egui;
+    let mut app = Is2dApp::default();
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(300.0, 160.0)],
+            radius: 12.0,
+            color: Color32::RED,
+        }
+    ));
+    assert!(app.doc.root.layers[0].insert_keyframe(1, true));
+    app.doc.root.sync_total_frames();
+    crate::doc_actions::switch_to_layer_and_frame(&mut app, 0, 1);
+    app.view.onion_skin_enabled = true;
+    app.view.onion_prev_frames = 1;
+    app.view.onion_next_frames = 0;
+    let ctx = egui::Context::default();
+    let out = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(1280.0, 820.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| app.update_ui(ctx),
+    );
+    // コマ 1 のオニオンスキン（1つ前・色 [45, 115, 245]・濃さ 84）の写し
+    let cached = app
+        .cached_onion_cel_screen_mesh(0, 0, app.view.zoom, app.view.pan, ([45, 115, 245], 84))
+        .expect("コマ 1 に絵がある");
+    // 写し・描いた形・ここで受け取ったもの、の3つが同じメッシュを指す（描いた形が複製なら 2）
+    assert_eq!(std::sync::Arc::strong_count(&cached), 3);
+    drop(out);
+    assert_eq!(std::sync::Arc::strong_count(&cached), 2);
+}
+
 #[test]
 fn test_egui_brush_drag_press_origin_and_right_click_ignored() {
     use eframe::egui;
@@ -5870,7 +5912,11 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
         },
     );
     assert!(
-        out_copy.platform_output.copied_text.is_empty(),
+        !out_copy
+            .platform_output
+            .commands
+            .iter()
+            .any(|c| matches!(c, egui::OutputCommand::CopyText(_))),
         "図形コピー時に OS クリップボードをダミー文字列で上書きしないこと (#15)"
     );
 
@@ -31754,6 +31800,31 @@ fn measure_work() {
         let _ = app.scene().len();
         sweep.push(ms(t));
     }
+    // オニオンスキン前後 10 コマで、全部のコマを1コマずつスクラブする（1回の描画 `update_ui` と、egui が描いた形を
+    // 三角形に分けるまで。地図は上で確かめ終わっている：レビュー f01d518 の N-5004）
+    app.view.onion_skin_enabled = true;
+    app.view.onion_prev_frames = 10;
+    app.view.onion_next_frames = 10;
+    let screen_rect = Some(eframe::egui::Rect::from_min_size(
+        eframe::egui::Pos2::ZERO,
+        eframe::egui::Vec2::new(1440.0, 900.0),
+    ));
+    let mut onion = Vec::with_capacity(total_frames);
+    for f in 0..total_frames {
+        goto(&mut app, f);
+        let t = Instant::now();
+        let out = ctx.run(
+            eframe::egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ctx| app.update_ui(ctx),
+        );
+        let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
+        onion.push(ms(t));
+    }
+    app.view.onion_skin_enabled = false;
+    onion.sort_by(f64::total_cmp);
     // 開き直して、裏で全部の地図を確かめ終わるまで（そのあいだ画面は待たない。アプリでは開いたときに始める）
     drop(app);
     let background_ms = {
@@ -31794,6 +31865,16 @@ fn measure_work() {
     eprintln!(
         "開いたあと、裏で全部の地図を確かめ終わるまで：{background_ms:.0}ms（M1 {:.0}ms。そのあいだ画面は待たない）",
         background_ms * factor
+    );
+    let pick = |v: &[f64], q: usize| v[(v.len() - 1) * q / 100];
+    eprintln!(
+        "オニオンスキン前後 10 コマで全部のコマをスクラブ（1コマの描画と三角形に分けるまで）：中央値 {:.1}ms（M1 {:.1}ms）・p99 {:.1}ms（M1 {:.1}ms）・最大 {:.1}ms（M1 {:.1}ms）",
+        pick(&onion, 50),
+        pick(&onion, 50) * factor,
+        pick(&onion, 99),
+        pick(&onion, 99) * factor,
+        pick(&onion, 100),
+        pick(&onion, 100) * factor
     );
     if !stages.is_empty() {
         let mid = |mut v: Vec<f64>| {

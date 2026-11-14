@@ -26,7 +26,7 @@ pub(crate) fn draw_flash_selection_overlay(tab: &Tab, painter: &egui::Painter, s
         return;
     };
     let dots = crate::vector_engine::selection_dots_texture(painter.ctx());
-    painter.add(egui::Shape::Mesh(
+    painter.add(egui::Shape::mesh(
         shape.selection_screen_mesh(zoom, pan, dots),
     ));
 }

@@ -142,7 +142,7 @@ pub(crate) fn draw_active_stroke_preview(tab: &Tab, artwork_painter: &egui::Pain
         return;
     };
     if !committed_world_mesh.is_empty() {
-        artwork_painter.add(egui::Shape::Mesh(transform_mesh_to_screen(
+        artwork_painter.add(egui::Shape::mesh(transform_mesh_to_screen(
             committed_world_mesh.clone(),
             tab.view.zoom,
             tab.view.pan,
@@ -150,7 +150,7 @@ pub(crate) fn draw_active_stroke_preview(tab: &Tab, artwork_painter: &egui::Pain
         )));
     }
     if !tail_mesh.is_empty() {
-        artwork_painter.add(egui::Shape::Mesh(transform_mesh_to_screen(
+        artwork_painter.add(egui::Shape::mesh(transform_mesh_to_screen(
             tail_mesh.clone(),
             tab.view.zoom,
             tab.view.pan,

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eframe = "0.29"
+eframe = "0.31"
 kurbo = "0.13"
 lyon_tessellation = "1.0"
 # 地図の重ね合わせと、ブラシの輪郭の自己交差の解消（vendor/i_overlay。9.1.0 に足した所がある写し。vendor/i_overlay/PATCH.md）

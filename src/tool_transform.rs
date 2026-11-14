@@ -441,7 +441,12 @@ pub(crate) fn draw_free_transform_box(session: &Session, painter: &egui::Painter
             Color32::from_rgb(25, 30, 40)
         };
         painter.rect_filled(rect, 0.0, fill_col);
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.5_f32, Color32::WHITE));
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.5_f32, Color32::WHITE),
+            egui::StrokeKind::Middle,
+        );
     }
 
     // 基準点（ピボット点：白い丸＋中心ドット）を描画

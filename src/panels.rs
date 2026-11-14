@@ -12,7 +12,7 @@ use crate::symbol::{ColorEffect, SymbolDef, SymbolInstanceBinding, SymbolLoopMod
 use crate::symbol_ops::selected_single_symbol_info;
 pub(crate) use crate::timeline_ui::icons;
 use crate::timeline_ui::{editing_idle, TimelineUiState};
-use crate::vector_engine::{arc_mesh_to_shape, transform_mesh_to_screen};
+use crate::vector_engine::transform_mesh_to_screen;
 
 /// OS標準の修飾キー表記（macOS では `"Cmd"`、Windows / Linux では `"Ctrl"`）
 pub(crate) const MOD_KEY: &str = if cfg!(target_os = "macos") {
@@ -312,9 +312,9 @@ pub(crate) fn draw_left_toolbar(
         .resizable(false)
         .exact_width(44.0)
         .frame(
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(Color32::from_rgb(245, 246, 248))
-                .inner_margin(egui::Margin::symmetric(4.0, 6.0))
+                .inner_margin(egui::Margin::symmetric(4, 6))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(210, 214, 222))),
         )
         .show(ctx, |ui| {
@@ -385,7 +385,7 @@ pub(crate) fn draw_document_tab_bar(
         .exact_height(TAB_BAR_HEIGHT)
         .show_separator_line(false)
         .frame(
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(TAB_INACTIVE_BG)
                 .inner_margin(egui::Margin::ZERO),
         )
@@ -410,9 +410,9 @@ pub(crate) fn draw_document_tab_bar(
                                 (TAB_INACTIVE_BG, TAB_INACTIVE_FG, TAB_INACTIVE_FG)
                             };
 
-                            let inner = egui::Frame::none()
+                            let inner = egui::Frame::NONE
                                 .fill(bg_fill)
-                                .inner_margin(egui::Margin::symmetric(12.0, 0.0))
+                                .inner_margin(egui::Margin::symmetric(12, 0))
                                 .show(ui, |ui| {
                                     ui.set_height(TAB_BAR_HEIGHT);
                                     ui.horizontal_centered(|ui| {
@@ -502,9 +502,9 @@ pub(crate) fn draw_stage_header_bar(tab: &Tab, actions: &mut Vec<UiAction>, ctx:
         .exact_height(30.0)
         .show_separator_line(false)
         .frame(
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(Color32::from_rgb(245, 246, 248))
-                .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                .inner_margin(egui::Margin::symmetric(10, 0)),
         )
         .show(ctx, |ui| {
             let rect = ui.max_rect();
@@ -605,7 +605,7 @@ pub(crate) fn draw_right_properties_panel(
         .exact_width(280.0)
         .resizable(false)
         .frame(
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(TAB_ACTIVE_BG)
                 .inner_margin(egui::Margin::ZERO)
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(214, 218, 226))),
@@ -615,8 +615,8 @@ pub(crate) fn draw_right_properties_panel(
             draw_right_panel_tab_bar(right_panel_tab, ui);
 
             // アクティブなタブに応じた中身を描画
-            egui::Frame::none()
-                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(10, 8))
                 .show(ui, |ui| match *right_panel_tab {
                     RightPanelTab::Properties => draw_properties_tab(tab, tool, actions, ui),
                     RightPanelTab::Color => draw_color_palette_section(tool, ui),
@@ -644,7 +644,7 @@ fn draw_right_panel_tab_bar(right_panel_tab: &mut RightPanelTab, ui: &mut egui::
                 .size(11.5)
                 .strong()
                 .color(text_color);
-            let inner = egui::Frame::none().fill(bg_fill).show(ui, |ui| {
+            let inner = egui::Frame::NONE.fill(bg_fill).show(ui, |ui| {
                 ui.add_sized(
                     [tab_w, TAB_BAR_HEIGHT],
                     egui::Button::new(text).frame(false),
@@ -1642,10 +1642,10 @@ fn draw_library_symbol_list(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut
                     } else {
                         Color32::from_rgb(218, 222, 230)
                     };
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(row_fill)
                         .stroke(Stroke::new(1.0_f32, stroke_col))
-                        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                        .inner_margin(egui::Margin::symmetric(6, 4))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 if ui
@@ -1713,6 +1713,7 @@ fn draw_symbol_mini_preview(tab: &Tab, ui: &mut egui::Ui, sym: &SymbolDef) {
         rect,
         0.0,
         Stroke::new(1.0_f32, Color32::from_rgb(206, 212, 222)),
+        egui::StrokeKind::Middle,
     );
 
     let drawn =
@@ -1734,7 +1735,7 @@ fn draw_symbol_mini_preview(tab: &Tab, ui: &mut egui::Ui, sym: &SymbolDef) {
                 )
             });
     if let Some((mesh, pan)) = drawn {
-        painter.add(egui::Shape::Mesh(mesh));
+        painter.add(egui::Shape::mesh(mesh));
         let origin_scr = Pos2::new(pan.x, pan.y);
         if rect.contains(origin_scr) {
             draw_registration_cross(&painter, origin_scr, 4.0, false);
@@ -1820,7 +1821,7 @@ pub(crate) fn draw_canvas_contents(
 
     // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画（ルートでは何も返さず、キャッシュが空になる）
     if let Some(mesh) = tab.cached_backdrop_screen_mesh(zoom, pan) {
-        artwork_painter.add(arc_mesh_to_shape(mesh));
+        artwork_painter.add(egui::Shape::Mesh(mesh));
     }
 
     // 0.5 オニオンスキン描画（前のフレーム＝青系半透明、次のフレーム＝緑系半透明）
@@ -1867,7 +1868,7 @@ pub(crate) fn draw_canvas_contents(
                 CelTint::Plain
             };
             if let Some(mesh) = tab.cached_cel_screen_mesh(layer_idx, curr_f, zoom, pan, tint) {
-                artwork_painter.add(arc_mesh_to_shape(mesh));
+                artwork_painter.add(egui::Shape::Mesh(mesh));
             }
             continue;
         }
@@ -1953,7 +1954,7 @@ fn draw_shapes_outside_group(
             .geometry_bounding_box()
             .is_some_and(|b| crate::vector_engine::rects_overlap(b, view_world_rect))
         {
-            artwork_painter.add(egui::Shape::Mesh(shape.screen_mesh(zoom, pan, true)));
+            artwork_painter.add(egui::Shape::mesh(shape.screen_mesh(zoom, pan, true)));
         }
     }
 }
@@ -2021,7 +2022,7 @@ fn draw_editable_layer_shapes(
             continue;
         }
 
-        artwork_painter.add(egui::Shape::Mesh(shape.screen_mesh(zoom, pan, false)));
+        artwork_painter.add(egui::Shape::mesh(shape.screen_mesh(zoom, pan, false)));
         if show_wf && shape.is_raw_at_scope(&tab.session.editing_group_path) {
             crate::tool_select::draw_shape_contour_lines(
                 tab,
@@ -2050,6 +2051,7 @@ fn draw_selected_group_and_symbol_boxes(
             rect,
             0.0,
             Stroke::new(1.0_f32, Color32::from_rgb(0, 165, 255)),
+            egui::StrokeKind::Middle,
         );
         if let Some(origin) = sym_reg {
             draw_registration_cross(painter, tab.view.world_to_screen(origin), 3.2, true);
@@ -2097,7 +2099,7 @@ fn draw_onion_skin_frame(
         if let Some(mesh) =
             tab.cached_onion_cel_screen_mesh(layer_idx, frame, zoom, pan, (tint_rgb, alpha))
         {
-            painter.add(arc_mesh_to_shape(mesh));
+            painter.add(egui::Shape::Mesh(mesh));
         }
     }
 }
@@ -2116,6 +2118,7 @@ fn draw_active_marquee_box(tab: &Tab, painter: &egui::Painter) {
             marquee_rect,
             0.0,
             Stroke::new(1.0_f32, Color32::from_rgb(0, 145, 255)),
+            egui::StrokeKind::Middle,
         );
     }
 }

@@ -388,7 +388,12 @@ fn draw_floating_drag_badge(
         0.0,
         Color32::from_rgba_unmultiplied(255, 255, 255, 242),
     );
-    painter.rect_stroke(badge_rect, 0.0, Stroke::new(1.2_f32, border_col));
+    painter.rect_stroke(
+        badge_rect,
+        0.0,
+        Stroke::new(1.2_f32, border_col),
+        egui::StrokeKind::Middle,
+    );
     painter.text(
         badge_rect.center(),
         Align2::CENTER_CENTER,
@@ -413,7 +418,7 @@ pub(crate) fn draw_timeline_panel(host: &mut impl TimelineHost, ctx: &egui::Cont
         .default_height(186.0)
         .height_range(124.0..=360.0)
         .frame(
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(Color32::from_rgb(236, 238, 242))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(190, 196, 206))),
         )
@@ -470,10 +475,10 @@ pub(crate) fn draw_timeline_panel(host: &mut impl TimelineHost, ctx: &egui::Cont
 
 /// 1. 上部タイムライン操作バーの描画とボタンイベント処理
 fn draw_timeline_control_bar(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(Color32::from_rgb(242, 244, 248))
         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(202, 208, 218)))
-        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+        .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -1264,6 +1269,7 @@ fn draw_timeline_layer_row(
             sel_rect,
             0.0,
             Stroke::new(1.6_f32, Color32::from_rgb(0, 115, 230)),
+            egui::StrokeKind::Middle,
         );
     }
 
@@ -1329,7 +1335,12 @@ fn draw_move_frames_ghost(
         )
     };
     grid_painter.rect_filled(ghost_rect, 0.0, fill);
-    grid_painter.rect_stroke(ghost_rect, 0.0, Stroke::new(2.0_f32, accent));
+    grid_painter.rect_stroke(
+        ghost_rect,
+        0.0,
+        Stroke::new(2.0_f32, accent),
+        egui::StrokeKind::Middle,
+    );
 
     if let Some(pos) = pointer_pos {
         let badge_label = if is_copy {
@@ -1412,7 +1423,12 @@ fn draw_keyframe_span(
     } else {
         Color32::from_rgb(155, 162, 175)
     };
-    grid_painter.rect_stroke(span_rect, 0.0, Stroke::new(1.0_f32, border_col));
+    grid_painter.rect_stroke(
+        span_rect,
+        0.0,
+        Stroke::new(1.0_f32, border_col),
+        egui::StrokeKind::Middle,
+    );
 
     let kf_center = Pos2::new(sx0 + CELL_W * 0.5, (y0 + y1) * 0.5 + 1.0);
     if has_art {
@@ -1458,6 +1474,7 @@ fn draw_keyframe_tween_or_end_marker(
                     end_box,
                     0.0,
                     Stroke::new(1.2_f32, Color32::from_rgb(90, 98, 112)),
+                    egui::StrokeKind::Middle,
                 );
             }
         }
@@ -1588,6 +1605,7 @@ fn draw_timeline_ruler(
             head_box,
             0.0,
             Stroke::new(1.0_f32, Color32::from_rgb(175, 25, 25)),
+            egui::StrokeKind::Middle,
         );
         ruler_painter.text(
             head_box.center(),
@@ -1881,6 +1899,7 @@ fn draw_header_mini_button(
         rect,
         0.0,
         Stroke::new(1.0_f32, Color32::from_rgb(175, 182, 194)),
+        egui::StrokeKind::Middle,
     );
     let text_col = if hovered {
         Color32::WHITE

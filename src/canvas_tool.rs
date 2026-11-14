@@ -631,6 +631,7 @@ impl View {
             stage_rect,
             0.0,
             Stroke::new(1.2_f32, Color32::from_rgb(148, 155, 168)),
+            egui::StrokeKind::Middle,
         );
     }
 
