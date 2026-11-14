@@ -619,7 +619,7 @@ impl PlanarMap {
             rings: Vec::new(),
             groups: Vec::new(),
             broken: 0,
-            bands: (0, 1, Vec::new()),
+            bands: YBands::new(std::iter::empty()),
         };
         let mut holes: Vec<(Option<Color32>, usize)> = Vec::new();
         for cycle in cycles {
@@ -641,7 +641,7 @@ impl PlanarMap {
             out.rings.push(ring);
             out.cycles.push(cycle.clone());
         }
-        out.bands = y_bands(out.groups.iter().map(|(_, ids)| {
+        out.bands = YBands::new(out.groups.iter().map(|(_, ids)| {
             let r = out.rings[ids[0]].rect;
             (2 * r.y0, 2 * r.y1)
         }));
@@ -968,9 +968,9 @@ impl PlanarMap {
                 PolyIndex::build(&self.nodes, &edges, |f| alive[f], Some(ix_area))
             });
             let path_of = |ix: &PolyIndex, ix_id: &[usize]| -> Vec<IPt> {
-                let (p1, p2) = (&ix.polys[ix_id[i]], &ix.polys[ix_id[j]]);
+                let (p1, p2) = (ix.poly(ix_id[i]), ix.poly(ix_id[j]));
                 let mut path: Vec<IPt> = if edges[i].b == v {
-                    p1.clone()
+                    p1.to_vec()
                 } else {
                     p1.iter().rev().copied().collect()
                 };

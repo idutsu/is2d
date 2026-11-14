@@ -18,16 +18,39 @@ pub(super) fn grid_poly(q: &QuadBez) -> Vec<IPt> {
     grid_line(flat_points(*q, FLAT_TOL).map(|(p, _)| p))
 }
 
+/// 曲線の判定の形（`grid_poly`）を `out` に入れる（前の中身は消す。入れ物を使い回して、確保を減らす）
+pub(super) fn grid_poly_into(q: &QuadBez, out: &mut Vec<IPt>) {
+    grid_line_into(flat_points(*q, FLAT_TOL).map(|(p, _)| p), out);
+}
+
+/// 曲線の判定の形（`grid_poly`）の点を1つずつ（並びを作らない）
+pub(super) fn grid_poly_points(q: &QuadBez) -> impl Iterator<Item = IPt> {
+    grid_points_of(flat_points(*q, FLAT_TOL).map(|(p, _)| p))
+}
+
 /// 折れ線の点 `pts` を格子の点に丸めたもの（続けて同じ点は1つにする）
 pub(super) fn grid_line(pts: impl Iterator<Item = Point>) -> Vec<IPt> {
     let mut out: Vec<IPt> = Vec::with_capacity(pts.size_hint().0);
-    for p in pts {
-        let ip = gpt(p);
-        if out.last() != Some(&ip) {
-            out.push(ip);
-        }
-    }
+    out.extend(grid_points_of(pts));
     out
+}
+
+/// 折れ線の点 `pts` を格子の点に丸めたもの（`grid_line`）を `out` に入れる（前の中身は消す）
+pub(super) fn grid_line_into(pts: impl Iterator<Item = Point>, out: &mut Vec<IPt>) {
+    out.clear();
+    out.extend(grid_points_of(pts));
+}
+
+/// 折れ線の点 `pts` を格子の点に丸めたものを1つずつ（続けて同じ点は1つにする。折れ線を格子に丸めるのはこれ1つ）
+pub(super) fn grid_points_of(pts: impl Iterator<Item = Point>) -> impl Iterator<Item = IPt> {
+    let mut last: Option<IPt> = None;
+    pts.filter_map(move |p| {
+        let ip = gpt(p);
+        (last != Some(ip)).then(|| {
+            last = Some(ip);
+            ip
+        })
+    })
 }
 
 /// `c` が、`a` から `b` へ向かう線の左（正）・右（負）・上（0）のどちらにあるか（外積）
@@ -162,7 +185,10 @@ pub(super) fn seg_tags(
 /// 判定の形（格子の上の折れ線）の索引。地図の一部の辺を1本の曲線に置き換えてよいかを、整数で調べる
 /// （設計 段階2 の 2-4。曲線への置き換え・2本の辺のまとめ・アンカーの追加と削除で使う）
 pub(super) struct PolyIndex {
-    pub(super) polys: Vec<Vec<IPt>>,
+    /// 辺ごとの判定の形の点。みな1つの並びに入れ、辺ごとの範囲を持つ（辺ごとに並びを持つと、辺ごとに小さな確保が
+    /// 起きる。`CellGrid` と同じ理由）。辺 `f` は `pts[poly_at[f]]`（`poly`）
+    pts: Vec<IPt>,
+    poly_at: Vec<(u32, u32)>,
     pub(super) ends: Vec<(usize, usize)>,
     pub(super) alive: Vec<bool>,
     /// 区間の番号 → （辺, 区間の位置）
@@ -170,7 +196,10 @@ pub(super) struct PolyIndex {
     pub(super) grid: CellGrid,
     pub(super) node_pos: Vec<IPt>,
     pub(super) node_grid: CellGrid,
-    pub(super) adj: Vec<Vec<usize>>,
+    /// 頂点ごとの、つながる辺（消した辺も）。頂点 `v` の最初の印は `first_link[v]`、印は（辺, 同じ頂点の次の印）で、
+    /// 終わりは `CELL_END`（足した順の逆にたどる）
+    first_link: Vec<u32>,
+    links: Vec<(u32, u32)>,
     pub(super) deg: Vec<usize>,
     /// 索引に入れる範囲（格子の点。`None` なら全部）
     pub(super) area: Option<GridRect>,
@@ -201,25 +230,27 @@ impl PolyIndex {
             y1: (r.y1 * OVERLAY_GRID).ceil() as i64 + 1,
         });
         let mut ix = PolyIndex {
-            polys: Vec::with_capacity(edges.len()),
+            pts: Vec::new(),
+            poly_at: Vec::with_capacity(edges.len()),
             ends: Vec::with_capacity(edges.len()),
             alive: Vec::with_capacity(edges.len()),
             segs: Vec::new(),
             grid: CellGrid::new(),
             node_pos: nodes.iter().map(|p| gpt(*p)).collect(),
             node_grid: CellGrid::new(),
-            adj: vec![Vec::new(); nodes.len()],
+            first_link: vec![CELL_END; nodes.len()],
+            links: Vec::with_capacity(2 * edges.len()),
             deg: vec![0; nodes.len()],
             area,
         };
         for (e, ed) in edges.iter().enumerate() {
             let q = QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]);
-            let poly = if area.is_none_or(|a| a.overlaps(&reach_of(&q))) {
-                grid_poly(&q)
-            } else {
-                Vec::new()
-            };
-            ix.add_edge(ed.a, ed.b, poly);
+            let reached = area.is_none_or(|a| a.overlaps(&reach_of(&q)));
+            ix.add_edge(
+                ed.a,
+                ed.b,
+                reached.then(|| grid_poly_points(&q)).into_iter().flatten(),
+            );
             if !alive(e) {
                 ix.kill(e);
             }
@@ -233,11 +264,18 @@ impl PolyIndex {
         ix
     }
 
-    /// 辺を足す（番号を返す）
-    pub(super) fn add_edge(&mut self, a: usize, b: usize, poly: Vec<IPt>) -> usize {
-        let e = self.polys.len();
-        for k in 0..poly.len().saturating_sub(1) {
-            let sg = (poly[k], poly[k + 1]);
+    /// 判定の形 `poly` の辺を足す（番号を返す）
+    pub(super) fn add_edge(
+        &mut self,
+        a: usize,
+        b: usize,
+        poly: impl IntoIterator<Item = IPt>,
+    ) -> usize {
+        let e = self.poly_at.len();
+        let start = self.pts.len();
+        self.pts.extend(poly);
+        for k in 0..(self.pts.len() - start).saturating_sub(1) {
+            let sg = (self.pts[start + k], self.pts[start + k + 1]);
             let r = GridRect::of(&[sg.0, sg.1]);
             if self.area.is_some_and(|x| !x.overlaps(&r)) {
                 continue;
@@ -245,14 +283,34 @@ impl PolyIndex {
             self.grid.insert(self.segs.len(), seg_cells(sg, 0));
             self.segs.push((e as u32, k as u32));
         }
-        self.polys.push(poly);
+        self.poly_at.push((start as u32, self.pts.len() as u32));
         self.ends.push((a, b));
         self.alive.push(true);
-        self.adj[a].push(e);
-        self.adj[b].push(e);
+        for v in [a, b] {
+            self.links.push((e as u32, self.first_link[v]));
+            self.first_link[v] = self.links.len() as u32 - 1;
+        }
         self.deg[a] += 1;
         self.deg[b] += 1;
         e
+    }
+
+    /// 辺 `f` の判定の形
+    pub(super) fn poly(&self, f: usize) -> &[IPt] {
+        let (a, b) = self.poly_at[f];
+        &self.pts[a as usize..b as usize]
+    }
+
+    /// 頂点 `v` につながる辺（消した辺も。足した順の逆）
+    fn edges_at(&self, v: usize) -> impl Iterator<Item = usize> + '_ {
+        let mut k = self.first_link[v];
+        std::iter::from_fn(move || {
+            (k != CELL_END).then(|| {
+                let (f, next) = self.links[k as usize];
+                k = next;
+                f as usize
+            })
+        })
     }
 
     /// 矩形 `r`（格子の点）が、索引に入れた範囲に収まるか（その中の区間と頂点は、みな索引にある）
@@ -314,7 +372,7 @@ impl PolyIndex {
                     if !self.alive[f] || part.contains(&f) {
                         continue;
                     }
-                    let poly = &self.polys[f];
+                    let poly = self.poly(f);
                     let (fa, fb) = self.ends[f];
                     if seg_pair_clash(
                         sg,
@@ -350,11 +408,11 @@ impl PolyIndex {
         }
         // 3. 両端につながるほかの辺
         for v in [na, nb] {
-            for &f in &self.adj[v] {
+            for f in self.edges_at(v) {
                 if !self.alive[f] || part.contains(&f) {
                     continue;
                 }
-                let poly_f = &self.polys[f];
+                let poly_f = self.poly(f);
                 if poly_f.len() < 2 {
                     return false;
                 }
@@ -374,38 +432,99 @@ impl PolyIndex {
     }
 }
 
-/// 区間（2倍の座標の y の範囲 `spans`）を、横の帯に分けた索引：（いちばん下の y, 帯の高さ, 帯ごとの区間の番号）。
-/// 帯の数は区間の数の平方根（上限 256。速さだけに関わる）
-pub(super) fn y_bands(
-    spans: impl ExactSizeIterator<Item = (i64, i64)> + Clone,
-) -> (i64, i64, Vec<Vec<u32>>) {
-    if spans.len() == 0 {
-        return (0, 1, vec![Vec::new()]);
-    }
-    let (y0, y1) = spans
-        .clone()
-        .fold((i64::MAX, i64::MIN), |(lo, hi), (a, b)| {
-            (lo.min(a), hi.max(b))
-        });
-    let n = ((spans.len() as f64).sqrt().ceil() as usize).clamp(1, 256);
-    let band_h = ((y1 - y0) / n as i64 + 1).max(1);
-    let mut bands = vec![Vec::new(); n];
-    for (i, (lo, hi)) in spans.enumerate() {
-        let (k0, k1) = (((lo - y0) / band_h) as usize, ((hi - y0) / band_h) as usize);
-        for band in bands.iter_mut().take(k1.min(n - 1) + 1).skip(k0.min(n - 1)) {
-            band.push(i as u32);
-        }
-    }
-    (y0, band_h, bands)
+/// 番号 `0..n` ごとの値の並び。値はみな1つの並びに入れ、番号ごとの範囲を持つ（番号ごとに並びを持つと、作るたびに番号の
+/// 数だけ小さな確保が起きる。`CellGrid` と同じ理由）
+pub(super) struct Grouped<T> {
+    /// 番号 `k` の値は `items[start[k]..start[k + 1]]`
+    start: Vec<u32>,
+    items: Vec<T>,
 }
 
-/// 帯の索引で、点の y（2倍の座標）の帯にかかる区間の番号
-pub(super) fn band_at(y0: i64, band_h: i64, bands: &[Vec<u32>], y: i64) -> &[u32] {
-    let k = (y - y0).div_euclid(band_h);
-    if k < 0 || k as usize >= bands.len() {
-        &[]
-    } else {
-        &bands[k as usize]
+impl<T: Copy + Default> Grouped<T> {
+    /// （番号, 値）の組 `pairs` を番号ごとに分けたもの（同じ番号の値は `pairs` の順）
+    pub(super) fn new(n: usize, pairs: impl Iterator<Item = (usize, T)> + Clone) -> Self {
+        // 番号ごとの数を `start[k + 1]` に数え、足し上げて範囲の始めにする。値を入れるときは `start[k]` を進めるので、入れ
+        // 終わると `start[k]` は番号 `k` の終わり（＝ `k + 1` の始め）になる。それを1つずらして戻す
+        let mut start = vec![0u32; n + 1];
+        for (k, _) in pairs.clone() {
+            start[k + 1] += 1;
+        }
+        for k in 0..n {
+            start[k + 1] += start[k];
+        }
+        let mut items = vec![T::default(); start[n] as usize];
+        for (k, v) in pairs {
+            items[start[k] as usize] = v;
+            start[k] += 1;
+        }
+        start.copy_within(0..n, 1);
+        start[0] = 0;
+        Self { start, items }
+    }
+
+    /// 番号 `k` の値（`k` が範囲の外なら空）
+    pub(super) fn get(&self, k: usize) -> &[T] {
+        match (self.start.get(k), self.start.get(k + 1)) {
+            (Some(&a), Some(&b)) => &self.items[a as usize..b as usize],
+            _ => &[],
+        }
+    }
+
+    /// 番号の数
+    pub(super) fn len(&self) -> usize {
+        self.start.len().saturating_sub(1)
+    }
+}
+
+/// 区間（2倍の座標の y の範囲）を、横の帯に分けた索引。帯の数は区間の数の平方根（上限 256。速さだけに関わる）。帯ごとの
+/// 区間の番号はみな1つの並びに入れ、帯ごとの範囲を持つ（帯ごとに並びを持つと、作るたびに帯の数だけ小さな確保が起きる。
+/// `CellGrid` と同じ理由）
+pub(super) struct YBands {
+    /// いちばん下の y
+    y0: i64,
+    /// 帯の高さ
+    band_h: i64,
+    /// 帯ごとの区間の番号（区間の順）
+    bands: Grouped<u32>,
+}
+
+impl YBands {
+    /// 区間の y の範囲 `spans`（小さい方, 大きい方）の索引（区間の番号は `spans` の順）
+    pub(super) fn new(spans: impl ExactSizeIterator<Item = (i64, i64)> + Clone) -> Self {
+        if spans.len() == 0 {
+            return Self {
+                y0: 0,
+                band_h: 1,
+                bands: Grouped::new(1, std::iter::empty()),
+            };
+        }
+        let (y0, y1) = spans
+            .clone()
+            .fold((i64::MAX, i64::MIN), |(lo, hi), (a, b)| {
+                (lo.min(a), hi.max(b))
+            });
+        let n = ((spans.len() as f64).sqrt().ceil() as usize).clamp(1, 256);
+        let band_h = ((y1 - y0) / n as i64 + 1).max(1);
+        // 区間がかかる帯ごとに（帯, 区間の番号）
+        let pairs = spans.enumerate().flat_map(move |(i, (lo, hi))| {
+            let (k0, k1) = (((lo - y0) / band_h) as usize, ((hi - y0) / band_h) as usize);
+            (k0.min(n - 1)..k1.min(n - 1) + 1).map(move |k| (k, i as u32))
+        });
+        Self {
+            y0,
+            band_h,
+            bands: Grouped::new(n, pairs),
+        }
+    }
+
+    /// 点の y（2倍の座標）の帯にかかる区間の番号
+    pub(super) fn at(&self, y: i64) -> &[u32] {
+        let k = (y - self.y0).div_euclid(self.band_h);
+        if k < 0 {
+            &[]
+        } else {
+            self.bands.get(k as usize)
+        }
     }
 }
 
@@ -529,11 +648,11 @@ impl<'a> StackColors<'a> {
 /// 区間を左の面から右の面へ（`from_left`。でなければ右から左へ）またいだ巻き数 `w`：区間の出どころの辺ごとの左右の印
 /// `sides`（区間の向きにそろえたもの）の、出る側の印を −1、入る側の印を +1（`propagate` の地図・輪郭の変形のまたぎ方）
 pub(super) fn crossed<L: Copy + PartialEq>(
-    sides: &[(L, L)],
+    sides: impl IntoIterator<Item = (L, L)>,
     w: &mut Vec<(L, i32)>,
     from_left: bool,
 ) {
-    for &(l, r) in sides {
+    for (l, r) in sides {
         let (from, to) = if from_left { (l, r) } else { (r, l) };
         add_winding(w, from, -1);
         add_winding(w, to, 1);
@@ -593,19 +712,12 @@ pub(super) fn propagate<S: Clone>(
             face_of[r]
         })
         .collect();
-    let mut start = vec![0usize; faces as usize + 1];
-    for &f in &face {
-        start[f as usize + 1] += 1;
-    }
-    for f in 0..faces as usize {
-        start[f + 1] += start[f];
-    }
-    let mut members = vec![0u32; 2 * n];
-    let mut fill = start.clone();
-    for (h, &f) in face.iter().enumerate() {
-        members[fill[f as usize]] = h as u32;
-        fill[f as usize] += 1;
-    }
+    let members = Grouped::new(
+        faces as usize,
+        face.iter()
+            .enumerate()
+            .map(|(h, &f)| (f as usize, h as u32)),
+    );
     let mut states: Vec<Option<S>> = vec![None; faces as usize];
     let mut queue: Vec<u32> = Vec::new();
     for h0 in 0..2 * n {
@@ -624,7 +736,7 @@ pub(super) fn propagate<S: Clone>(
         queue.push(f0 as u32);
         while let Some(f) = queue.pop() {
             let f = f as usize;
-            for &h in &members[start[f]..start[f + 1]] {
+            for &h in members.get(f) {
                 let g = face[h as usize ^ 1] as usize;
                 if states[g].is_none() {
                     let mut s = states[f].clone().expect("決まった面");
@@ -648,9 +760,7 @@ pub(super) fn propagate<S: Clone>(
 pub(super) struct LabeledSegs<L> {
     /// （始点, 終点, 左の印, 右の印）。座標は格子の点の2倍
     segs: Vec<(IPt, IPt, L, L)>,
-    y0: i64,
-    band_h: i64,
-    bands: Vec<Vec<u32>>,
+    bands: YBands,
 }
 
 impl<L: Copy + PartialEq> LabeledSegs<L> {
@@ -660,19 +770,13 @@ impl<L: Copy + PartialEq> LabeledSegs<L> {
             .filter(|(a, b, ..)| a != b)
             .map(|(a, b, l, r)| ((2 * a.0, 2 * a.1), (2 * b.0, 2 * b.1), l, r))
             .collect();
-        let (y0, band_h, bands) =
-            y_bands(segs.iter().map(|(a, b, ..)| (a.1.min(b.1), a.1.max(b.1))));
-        Self {
-            segs,
-            y0,
-            band_h,
-            bands,
-        }
+        let bands = YBands::new(segs.iter().map(|(a, b, ..)| (a.1.min(b.1), a.1.max(b.1))));
+        Self { segs, bands }
     }
 
     /// 点 `p`（2倍の座標）から右へ伸ばした半直線が横切る区間ごとに、`f(左の印, 右の印, 横切る向き)` を呼ぶ（`crossing`）
     pub(super) fn crossings(&self, p: IPt, mut f: impl FnMut(L, L, i32)) {
-        for &i in band_at(self.y0, self.band_h, &self.bands, p.1) {
+        for &i in self.bands.at(p.1) {
             let (a, b, l, r) = self.segs[i as usize];
             if let Some(d) = crossing(a, b, p) {
                 f(l, r, d);
@@ -701,9 +805,7 @@ impl<L: Copy + PartialEq> LabeledSegs<L> {
 pub(super) struct GridPolygon {
     /// （区間の始点, 終点）。座標は格子の点の2倍
     segs: Vec<(IPt, IPt)>,
-    y0: i64,
-    band_h: i64,
-    bands: Vec<Vec<u32>>,
+    bands: YBands,
 }
 
 impl GridPolygon {
@@ -714,19 +816,14 @@ impl GridPolygon {
             .map(|i| (dbl(pts[i]), dbl(pts[(i + 1) % pts.len()])))
             .filter(|(a, b)| a != b)
             .collect();
-        let (y0, band_h, bands) = y_bands(segs.iter().map(|(a, b)| (a.1.min(b.1), a.1.max(b.1))));
-        Self {
-            segs,
-            y0,
-            band_h,
-            bands,
-        }
+        let bands = YBands::new(segs.iter().map(|(a, b)| (a.1.min(b.1), a.1.max(b.1))));
+        Self { segs, bands }
     }
 
     /// 点 `p`（2倍の座標）の巻き数。`p` が輪郭の上にあれば `None`
     pub(super) fn winding(&self, p: IPt) -> Option<i32> {
         let mut w = 0;
-        for &i in band_at(self.y0, self.band_h, &self.bands, p.1) {
+        for &i in self.bands.at(p.1) {
             let (a, b) = self.segs[i as usize];
             if on_seg(a, b, p) {
                 return None;
@@ -985,8 +1082,8 @@ pub(super) struct Regions {
     pub(super) groups: Vec<(Option<Color32>, Vec<usize>)>,
     /// 閉じなかった輪郭・色がまざった輪郭・入れ先の無い色のある穴の数（壊れていれば 0 より大きい）
     pub(super) broken: usize,
-    /// 組の外周の外接矩形（2倍の座標）を、高さの帯に分けた索引（`y_bands`。`groups_at` が引く）
-    pub(super) bands: (i64, i64, Vec<Vec<u32>>),
+    /// 組の外周の外接矩形（2倍の座標）を、高さの帯に分けた索引（`groups_at` が引く）
+    pub(super) bands: YBands,
 }
 
 impl Regions {
@@ -994,10 +1091,7 @@ impl Regions {
     /// これ1つ（穴の入れ先 `regions`、バケツの点の面 `with_face_filled`、何も無い側の輪郭の確かめ `valid_faces_since`）。
     /// どの配置でも、点の帯にかかる組だけを調べるので、組の数の2乗では増えない（レビュー 6ee325a の N-1001）
     pub(super) fn groups_at(&self, q: IPt) -> impl Iterator<Item = usize> + '_ {
-        let (y0, band_h, bands) = &self.bands;
-        band_at(*y0, *band_h, bands, q.1)
-            .iter()
-            .map(|&g| g as usize)
+        self.bands.at(q.1).iter().map(|&g| g as usize)
     }
 
     /// 組 `g` が点 `q`（2倍の座標）を中に含むか：外周の中で、どの穴の外か。組の輪郭の上なら `None`

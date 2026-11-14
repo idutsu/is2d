@@ -128,14 +128,42 @@ pub(super) struct Prov {
     fwd: bool,
 }
 
-/// 区間の出どころの一覧をしまう所（i_overlay が区間を切る・まとめる・向きを変えるたびに増える）
+/// 区間の出どころの一覧をしまう所（i_overlay が区間を切る・まとめる・向きを変えるたびに増える）。一覧はみな1つの並びに
+/// 入れ、一覧ごとの範囲を持つ（一覧ごとに並びを持つと、区間ごとに小さな確保が起きる。`CellGrid` と同じ理由）
 #[derive(Default)]
-pub(super) struct ProvStore(Vec<Vec<Prov>>);
+pub(super) struct ProvStore {
+    provs: Vec<Prov>,
+    /// 一覧ごとの、`provs` の範囲
+    lists: Vec<(u32, u32)>,
+}
 
 impl ProvStore {
-    pub(super) fn push(&mut self, v: Vec<Prov>) -> ProvId {
-        self.0.push(v);
-        ProvId(self.0.len() as u32 - 1)
+    /// 出どころ `items` の一覧を足す（番号を返す）
+    pub(super) fn push(&mut self, items: impl IntoIterator<Item = Prov>) -> ProvId {
+        let start = self.provs.len() as u32;
+        self.provs.extend(items);
+        self.lists.push((start, self.provs.len() as u32));
+        ProvId(self.lists.len() as u32 - 1)
+    }
+
+    /// 一覧 `ids` をこの順につなぎ、出どころごとに `f` をかけた一覧を足す（番号を返す）
+    fn push_mapped(&mut self, ids: &[ProvId], f: impl Fn(Prov) -> Prov) -> ProvId {
+        let start = self.provs.len() as u32;
+        for id in ids {
+            let (a, b) = self.lists[id.0 as usize];
+            for i in a..b {
+                let p = f(self.provs[i as usize]);
+                self.provs.push(p);
+            }
+        }
+        self.lists.push((start, self.provs.len() as u32));
+        ProvId(self.lists.len() as u32 - 1)
+    }
+
+    /// 一覧 `id`
+    pub(super) fn get(&self, id: ProvId) -> &[Prov] {
+        let (a, b) = self.lists[id.0 as usize];
+        &self.provs[a as usize..b as usize]
     }
 }
 
@@ -153,16 +181,12 @@ impl i_overlay9::core::edge_data::OverlayEdgeData for ProvId {
     }
 
     fn reversed(self, store: &mut ProvStore) -> Self {
-        let v = store.0[self.0 as usize]
-            .iter()
-            .map(|p| Prov {
-                src: p.src,
-                t0: p.t1,
-                t1: p.t0,
-                fwd: !p.fwd,
-            })
-            .collect();
-        store.push(v)
+        store.push_mapped(&[self], |p| Prov {
+            src: p.src,
+            t0: p.t1,
+            t1: p.t0,
+            fwd: !p.fwd,
+        })
     }
 
     fn split<I: i_overlay9::i_float::int::number::int::IntNumber>(
@@ -178,11 +202,10 @@ impl i_overlay9::core::edge_data::OverlayEdgeData for ProvId {
         } else {
             0.5
         };
-        let src = store.0[self.0 as usize].clone();
-        let mid = |p: &Prov| p.t0 + (p.t1 - p.t0) * f;
-        let first = src.iter().map(|p| Prov { t1: mid(p), ..*p }).collect();
-        let second = src.iter().map(|p| Prov { t0: mid(p), ..*p }).collect();
-        (store.push(first), store.push(second))
+        let mid = move |p: &Prov| p.t0 + (p.t1 - p.t0) * f;
+        let first = store.push_mapped(&[self], |p| Prov { t1: mid(&p), ..p });
+        let second = store.push_mapped(&[self], |p| Prov { t0: mid(&p), ..p });
+        (first, second)
     }
 
     fn merge(
@@ -192,9 +215,7 @@ impl i_overlay9::core::edge_data::OverlayEdgeData for ProvId {
         >,
         store: &mut ProvStore,
     ) -> Self {
-        let mut v = store.0[ctx.lhs_data.0 as usize].clone();
-        v.extend(store.0[ctx.rhs_data.0 as usize].iter().copied());
-        store.push(v)
+        store.push_mapped(&[ctx.lhs_data, ctx.rhs_data], |p| p)
     }
 }
 
@@ -234,11 +255,8 @@ pub(super) fn crossing_point(
         .then_some((x, u, w))
 }
 
-/// 折れ線の点 `pts`（t の順）に、点 `more`（曲線の上の点と t）を t の順に足したもの（同じ t の点は足さない）
-pub(super) fn with_points(mut pts: Vec<(Point, f64)>, more: &[(Point, f64)]) -> Vec<(Point, f64)> {
-    if more.is_empty() {
-        return pts;
-    }
+/// 折れ線の点 `pts`（t の順）に、点 `more`（曲線の上の点と t）を t の順に足す（同じ t の点は足さない）
+pub(super) fn add_points(pts: &mut Vec<(Point, f64)>, more: &[(Point, f64)]) {
     for &(p, t) in more {
         let k = pts.partition_point(|q| q.1 < t);
         if pts.get(k).is_some_and(|q| q.1 == t) || k == 0 || k == pts.len() {
@@ -246,7 +264,6 @@ pub(super) fn with_points(mut pts: Vec<(Point, f64)>, more: &[(Point, f64)]) -> 
         }
         pts.insert(k, (p, t));
     }
-    pts
 }
 
 /// 重ねるときの曲線の出どころ
@@ -258,12 +275,7 @@ pub(super) enum OverlaySrc {
     New(usize),
 }
 
-/// 曲線を折れ線にする（`t` つき）。曲線と折れ線の離れ具合が `tol` 以下になる等分
-pub(super) fn flatten_with_t(q: &QuadBez, tol: f64) -> Vec<(Point, f64)> {
-    flat_points(*q, tol).collect()
-}
-
-/// 曲線を、折れ線とのずれが `tol` ほどになるように等分した点と t（`flatten_with_t`。等分の点の式はこれ1つ）
+/// 曲線を、折れ線とのずれが `tol` ほどになるように等分した点と t（等分の点の式はこれ1つ）
 pub(super) fn flat_points(q: QuadBez, tol: f64) -> impl Iterator<Item = (Point, f64)> {
     let n = flat_count(&q, tol);
     (0..=n).map(move |i| {
@@ -515,7 +527,13 @@ impl PlanarMap {
         #[cfg(test)]
         super::FED_RUNS.with(|n| n.set(n.get() + 1));
         let mut snapped = vec![false; self.nodes.len()];
-        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
+        // 頂点ごとの辺（辺の順）
+        let adj: Grouped<usize> = Grouped::new(
+            self.nodes.len(),
+            self.edges.iter().enumerate().flat_map(|(e, ed)| {
+                std::iter::once((ed.a, e)).chain((ed.b != ed.a).then_some((ed.b, e)))
+            }),
+        );
         // 辺の外接矩形と、辺がかかるマス。端を格子に置き直すと曲線は最大で `GRID_REACH` 動き、判定の形の点は丸めでさらに
         // `GRID_REACH` 動くので、その分と、近くとみなす距離（`GRID_REACH`）の分を広げておく
         let boxes: Vec<KRect> = (0..self.edges.len())
@@ -530,11 +548,7 @@ impl PlanarMap {
         let mut cells: Vec<(i64, i64)> = Vec::new();
         let mut cell_range: Vec<std::ops::Range<usize>> = Vec::with_capacity(self.edges.len());
         let mut edge_grid = CellGrid::new();
-        for (e, ed) in self.edges.iter().enumerate() {
-            adj[ed.a].push(e);
-            if ed.b != ed.a {
-                adj[ed.b].push(e);
-            }
+        for e in 0..self.edges.len() {
             // 同じマスは1度だけ入れる（となり合う弦は同じマスにかかる。辺のマスで探すのは「どれかに触れるか」だけなので、
             // マスの順は効かない）
             cells.clear();
@@ -549,8 +563,8 @@ impl PlanarMap {
         let edge_cells = |e: usize| all_cells[cell_range[e].clone()].iter().copied();
         // 頂点 `v` を格子に置き直すと動くか
         let moves = |v: usize| grid_round(self.nodes[v]) != self.nodes[v];
-        // 入れない辺 `e` の判定の形。端の頂点が格子に置き直されていれば、置き直した形で
-        let poly_of = |e: usize, snapped: &[bool]| -> Vec<IPt> {
+        // 入れない辺 `e` の判定の形（`out` に入れる）。端の頂点が格子に置き直されていれば、置き直した形で
+        let poly_of = |e: usize, snapped: &[bool], out: &mut Vec<IPt>| {
             let ed = self.edges[e];
             let pos = |v: usize| {
                 if snapped[v] {
@@ -559,19 +573,20 @@ impl PlanarMap {
                     self.nodes[v]
                 }
             };
-            grid_poly(&QuadBez::new(pos(ed.a), ed.ctrl, pos(ed.b)))
+            grid_poly_into(&QuadBez::new(pos(ed.a), ed.ctrl, pos(ed.b)), out);
         };
+        // 判定の形の入れ物（使い回す）
+        let (mut pe, mut pf): (Vec<IPt>, Vec<IPt>) = (Vec::new(), Vec::new());
         // 折れ線の区間：（始点, 終点, 始点の頂点, 終点の頂点）。頂点は、前からある辺の折れ線の両端だけ
         type GridSeg = (IPt, IPt, Option<usize>, Option<usize>);
         // 折れ線：（外接矩形, 区間の範囲）
         type GridLine = (KRect, std::ops::Range<usize>);
         // 折れ線の区間がかかるマス（続く区間はたいてい同じマスにかかるので、続けて同じマスは1つにする。探す順は
         // 変わらない）
-        let line_cells = |segs: &[GridSeg]| -> Vec<(i64, i64)> {
-            let mut cells: Vec<(i64, i64)> =
-                segs.iter().flat_map(|s| seg_cells((s.0, s.1), 0)).collect();
+        let line_cells = |segs: &[GridSeg], cells: &mut Vec<(i64, i64)>| {
+            cells.clear();
+            cells.extend(segs.iter().flat_map(|s| seg_cells((s.0, s.1), 0)));
             cells.dedup();
-            cells
         };
         let seg_rect =
             |a: IPt, b: IPt| KRect::from_points(from_grid(a.0, a.1), from_grid(b.0, b.1));
@@ -691,11 +706,13 @@ impl PlanarMap {
             spans,
             boxes: Vec::new(),
             grid: CellGrid::new(),
-            adj: Vec::new(),
+            adj: Grouped::new(0, std::iter::empty()),
         };
+        let mut pbuf = PointsBuf::default();
+        let mut gline: Vec<IPt> = Vec::new();
         for (i, q) in seeds.iter().enumerate() {
-            let line = fed_set.grid_points(Line::Seed(i), q);
-            add_polyline(&line, (None, None), &mut segs, &mut seg_grid, &mut lines);
+            fed_set.grid_points(Line::Seed(i), q, &mut pbuf, &mut gline);
+            add_polyline(&gline, (None, None), &mut segs, &mut seg_grid, &mut lines);
         }
         for e in &to_feed {
             fed[*e] = false;
@@ -713,15 +730,16 @@ impl PlanarMap {
                         snapped[v] = true;
                         // 置き直して頂点が動いたときだけ、つながる入れない辺の形が変わる
                         if moves(v) {
-                            edge_queue.extend(adj[v].iter().copied().filter(|&f| !fed[f]));
+                            edge_queue.extend(adj.get(v).iter().copied().filter(|&f| !fed[f]));
                         }
                     }
                 }
                 let q = self.quad(e);
                 // 格子に置けない座標（頂点と制御点：`fits_grid` と同じ）は、ここで断る
                 on_grid([q.p0, q.p1, q.p2].into_iter()).then_some(())?;
+                fed_set.grid_points(Line::Edge(e), &q, &mut pbuf, &mut gline);
                 add_polyline(
-                    &fed_set.grid_points(Line::Edge(e), &q),
+                    &gline,
                     (Some(ed.a), Some(ed.b)),
                     &mut segs,
                     &mut seg_grid,
@@ -730,12 +748,13 @@ impl PlanarMap {
             }
             if let Some((r, range)) = lines.pop() {
                 // 折れ線の区間のマスにかかる辺だけを、折れ線の区間のうち辺の外接矩形にかかるものと比べる
-                edge_grid.query(line_cells(&segs[range.clone()]), &mut found);
+                line_cells(&segs[range.clone()], &mut cells);
+                edge_grid.query(cells.iter().copied(), &mut found);
                 for &e in &found {
                     if fed[e] || !rects_overlap(boxes[e], r) {
                         continue;
                     }
-                    let pe = poly_of(e, &snapped);
+                    poly_of(e, &snapped, &mut pe);
                     if segs[range.clone()].iter().any(|s| near_seg(e, &pe, s)) {
                         to_feed.push(e);
                     }
@@ -751,24 +770,39 @@ impl PlanarMap {
                     check.contains(&f) && !moved(fd.a) && !moved(fd.b)
                 };
                 let ed = self.edges[e];
-                let mut pe: Option<Vec<IPt>> = None;
+                // `e` の判定の形は、要るときに1度だけ作る
+                let mut pe_made = false;
                 seg_grid.query(edge_cells(e), &mut found);
-                let mut hit = found.iter().any(|&i| {
-                    near_seg(e, pe.get_or_insert_with(|| poly_of(e, &snapped)), &segs[i])
-                });
+                let mut hit = false;
+                for &i in &found {
+                    if !pe_made {
+                        poly_of(e, &snapped, &mut pe);
+                        pe_made = true;
+                    }
+                    if near_seg(e, &pe, &segs[i]) {
+                        hit = true;
+                        break;
+                    }
+                }
                 if !hit {
                     // 端を置き直した形が、ほかの入れない辺と触れないか（共有する頂点は除く）
                     edge_grid.query(edge_cells(e), &mut found);
                     let given = as_given(e);
-                    hit = found.iter().any(|&f| {
+                    for &f in &found {
                         if f == e || fed[f] || (given && as_given(f)) {
-                            return false;
+                            continue;
                         }
                         let fd = self.edges[f];
-                        let pf = poly_of(f, &snapped);
-                        let pe = pe.get_or_insert_with(|| poly_of(e, &snapped));
-                        polys_clash(pe, (ed.a, ed.b), &pf, (fd.a, fd.b))
-                    });
+                        poly_of(f, &snapped, &mut pf);
+                        if !pe_made {
+                            poly_of(e, &snapped, &mut pe);
+                            pe_made = true;
+                        }
+                        if polys_clash(&pe, (ed.a, ed.b), &pf, (fd.a, fd.b)) {
+                            hit = true;
+                            break;
+                        }
+                    }
                 }
                 if hit {
                     to_feed.push(e);
@@ -870,6 +904,7 @@ impl PlanarMap {
         // 出どころの折れ線に、出どころごとの点 `added`（曲線の上の点と t）を足して、i_overlay で切る
         let cut = |added: &[Vec<(Point, f64)>]| -> Result<_, OverlayStop> {
             let mut ov: EdgeOverlay<i32, ProvId> = EdgeOverlay::new(srcs.len() * 8);
+            let mut buf = PointsBuf::default();
             for (si, (q, kind)) in srcs.iter().enumerate() {
                 let st = if matches!(kind, OverlaySrc::Old(_)) {
                     ShapeType::Subject
@@ -877,7 +912,8 @@ impl PlanarMap {
                     ShapeType::Clip
                 };
                 // 同じ線として扱う所は、2本とも同じ点の折れ線にする（`Span`）
-                let pts = with_points(fed_set.points(lines[si], q), &added[si]);
+                let pts = fed_set.points(lines[si], q, &mut buf);
+                add_points(pts, &added[si]);
                 let mut prev = (to_grid(pts[0].0).ok_or(OverlayStop::Refused)?, pts[0].1);
                 for &(p, t) in &pts[1..] {
                     let ip = to_grid(p).ok_or(OverlayStop::Refused)?;
@@ -885,7 +921,7 @@ impl PlanarMap {
                         continue;
                     }
                     // 点は t の順なので、区間（前の点→この点）は出どころの t の増える向き
-                    let id = ov.data_store_mut().push(vec![Prov {
+                    let id = ov.data_store_mut().push([Prov {
                         src: si as u32,
                         t0: prev.1,
                         t1: t,
@@ -908,21 +944,28 @@ impl PlanarMap {
         };
         let mut added: Vec<Vec<(Point, f64)>> = vec![Vec::new(); srcs.len()];
         let (mut out, mut store) = cut(&added)?;
-        // 2本の出どころの曲線だけが、どちらも曲線の途中で会う頂点（交わった所）
-        let mut at: IntMap<(i32, i32), Vec<(u32, f64)>> = IntMap::default();
+        // 2本の出どころの曲線だけが、どちらも曲線の途中で会う頂点（交わった所）。頂点ごとに、そこで会う出どころの曲線の
+        // はじめの2本（出どころ, t。同じ出どころは1度だけ：はじめの t）と、3本目があるか
+        type MetSrcs = ([Option<(u32, f64)>; 2], bool);
+        let mut at: IntMap<(i32, i32), MetSrcs> = IntMap::default();
         for v in &out {
-            for p in &store.0[v.data.0 as usize] {
+            for p in store.get(v.data) {
                 for (k, t) in [((v.a.x, v.a.y), p.t0), ((v.b.x, v.b.y), p.t1)] {
-                    let here = at.entry(k).or_default();
-                    if !here.iter().any(|h| h.0 == p.src) {
-                        here.push((p.src, t));
+                    let (two, more) = at.entry(k).or_insert(([None, None], false));
+                    if two.iter().flatten().any(|h| h.0 == p.src) {
+                        continue;
+                    }
+                    match two {
+                        [None, _] => two[0] = Some((p.src, t)),
+                        [Some(_), None] => two[1] = Some((p.src, t)),
+                        _ => *more = true,
                     }
                 }
             }
         }
         let mut any = false;
         for (k, here) in &at {
-            let &[(sa, ta), (sb, tb)] = here.as_slice() else {
+            let &([Some((sa, ta)), Some((sb, tb))], false) = here else {
                 continue;
             };
             if !(ta > 0.0 && ta < 1.0 && tb > 0.0 && tb < 1.0) {
@@ -970,13 +1013,18 @@ impl PlanarMap {
             ia: (i64, i64),
             ib: (i64, i64),
             fill: u8,
-            prov: Vec<Prov>,
+            /// 出どころの一覧（`piece_provs` の範囲）
+            prov: std::ops::Range<usize>,
         }
         let mut pieces: Vec<Piece> = Vec::with_capacity(out.len());
+        // 区間ごとの出どころの一覧を、みな1つの並びに入れる（区間ごとに並びを持たない）
+        let mut piece_provs: Vec<Prov> = Vec::with_capacity(out.len());
+        let mut prov: Vec<Prov> = Vec::new();
         for v in &out {
             let (ka, kb) = ((v.a.x, v.a.y), (v.b.x, v.b.y));
             // 同じ曲線が自分の上で折り返した所（同じ出どころで向きが逆の組）は打ち消す。何も残らなければ区間ごと捨てる
-            let mut prov = store.0[v.data.0 as usize].clone();
+            prov.clear();
+            prov.extend_from_slice(store.get(v.data));
             let mut k = 0;
             while k < prov.len() {
                 let fwd = prov[k].fwd;
@@ -1000,13 +1048,15 @@ impl PlanarMap {
             };
             let a = id(ka, &mut nodes);
             let b = id(kb, &mut nodes);
+            let start = piece_provs.len();
+            piece_provs.extend_from_slice(&prov);
             pieces.push(Piece {
                 a,
                 b,
                 ia: (ka.0 as i64, ka.1 as i64),
                 ib: (kb.0 as i64, kb.1 as i64),
                 fill: v.fill,
-                prov,
+                prov: start..piece_provs.len(),
             });
         }
         // 入れなかった辺のうち結果に残るもの（中の辺と、外が前のままの決まりがあるときの離れた辺）が、切った区間と交わって
@@ -1016,6 +1066,7 @@ impl PlanarMap {
             let mut found = Vec::new();
             let mut unfed: Vec<usize> = Vec::new();
             let mut flagged = vec![false; self.edges.len()];
+            let mut pe: Vec<IPt> = Vec::new();
             for p in &pieces {
                 let (a, b) = (nodes[p.a], nodes[p.b]);
                 let r = KRect::from_points(a, b);
@@ -1028,7 +1079,7 @@ impl PlanarMap {
                         continue;
                     }
                     let ed = self.edges[e];
-                    let pe = grid_poly(&QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]));
+                    grid_poly_into(&QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]), &mut pe);
                     let ends = (node_at(ed.a), node_at(ed.b));
                     if polys_clash(&[p.ia, p.ib], (p.a, p.b), &pe, ends) {
                         flagged[e] = true;
@@ -1040,12 +1091,14 @@ impl PlanarMap {
                 return Err(OverlayStop::Unfed(unfed));
             }
         }
-        // 3. 頂点ごとの、出ていく区間：（区間, 区間の向きに出ていくか）
-        let mut around: IntMap<usize, Vec<(usize, bool)>> = IntMap::default();
-        for (k, p) in pieces.iter().enumerate() {
-            around.entry(p.a).or_default().push((k, true));
-            around.entry(p.b).or_default().push((k, false));
-        }
+        // 3. 頂点ごとの、出ていく区間：（区間, 区間の向きに出ていくか）。区間の頂点でない頂点は空
+        let around: Grouped<(usize, bool)> = Grouped::new(
+            nodes.len(),
+            pieces
+                .iter()
+                .enumerate()
+                .flat_map(|(k, p)| [(p.a, (k, true)), (p.b, (k, false))]),
+        );
         let dir_of = |&(k, fwd): &(usize, bool)| -> (i64, i64) {
             let p = &pieces[k];
             if fwd {
@@ -1056,55 +1109,58 @@ impl PlanarMap {
         };
         // 色をたどるときは、その地図の入れなかった辺のうち、区間の頂点につながるものも並べる（その辺で色が変わるので、たどる
         // のはそこで止める）。入れなかった辺の向きは、その判定の形の、頂点から出る最初の区間の向き（区間と同じく整数）
-        let mut at_node: IntMap<usize, Vec<usize>> = IntMap::default();
-        for (&v, &r) in &merged {
-            at_node.entry(r).or_default().push(v);
-        }
-        let mut stops: IntMap<usize, Vec<(Turn, IPt)>> = IntMap::default();
-        for &v in around.keys() {
+        let at_node: Grouped<usize> =
+            Grouped::new(nodes.len(), merged.iter().map(|(&v, &r)| (r, v)));
+        // 区間の頂点ごとの、そこで止める入れなかった辺：（辺, 頂点がその辺の始点か, 向き）
+        let mut stop_list: Vec<(usize, (usize, bool, IPt))> = Vec::new();
+        let mut pe: Vec<IPt> = Vec::new();
+        for v in (0..around.len()).filter(|&v| !around.get(v).is_empty()) {
             // 区間の頂点 `v` にある、元の頂点（`v` そのものと、`v` に1つにした頂点）
             let own = (v < self.nodes.len()).then_some(v);
-            for u in own
-                .into_iter()
-                .chain(at_node.get(&v).into_iter().flatten().copied())
-            {
-                for &e in &fed_set.adj[u] {
+            for u in own.into_iter().chain(at_node.get(v).iter().copied()) {
+                for &e in fed_set.adj.get(u) {
                     if fed[e] {
                         continue;
                     }
                     let ed = self.edges[e];
-                    let pe = grid_poly(&QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]));
+                    grid_poly_into(&QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]), &mut pe);
                     for (end, at_start) in [(ed.a, true), (ed.b, false)] {
                         if end != u {
                             continue;
                         }
-                        let mut it = half_points(std::slice::from_ref(&pe), (0, at_start));
-                        let p0 = it.next().unwrap_or((0, 0));
-                        let p1 = it.next().unwrap_or(p0);
-                        stops
-                            .entry(v)
-                            .or_default()
-                            .push((Turn::Stop(e, at_start), (p1.0 - p0.0, p1.1 - p0.1)));
+                        // 頂点から出る最初の区間（判定の形は少なくとも1点）
+                        let n = pe.len();
+                        let (p0, p1) = if at_start {
+                            (pe[0], pe[1.min(n - 1)])
+                        } else {
+                            (pe[n - 1], pe[n.saturating_sub(2)])
+                        };
+                        stop_list.push((v, (e, at_start, (p1.0 - p0.0, p1.1 - p0.1))));
                     }
                 }
             }
         }
+        let stops: Grouped<(usize, bool, IPt)> = Grouped::new(nodes.len(), stop_list.into_iter());
         // 向きのある区間の左の面を、次にたどる先（角度の順で、来た向きの逆のすぐ前）。番号は 2 × 区間 + 向き。
         // `old`：前の地図の色をたどるか（重ねる地図の色なら、重ねる地図の入れなかった辺で止める）
         let next_turns = |old: bool| {
             let mut next = vec![Turn::Piece(0, false); 2 * pieces.len()];
-            for (&v, list) in &around {
-                let mut turns: Vec<(Turn, IPt)> = list
-                    .iter()
-                    .map(|&(k, fwd)| (Turn::Piece(k, fwd), dir_of(&(k, fwd))))
-                    .collect();
-                if let Some(extra) = stops.get(&v) {
-                    turns.extend(
-                        extra
-                            .iter()
-                            .filter(|t| matches!(t.0, Turn::Stop(e, _) if (e < n_old) == old)),
-                    );
-                }
+            let mut turns: Vec<(Turn, IPt)> = Vec::new();
+            for v in 0..around.len() {
+                turns.clear();
+                turns.extend(
+                    around
+                        .get(v)
+                        .iter()
+                        .map(|&(k, fwd)| (Turn::Piece(k, fwd), dir_of(&(k, fwd)))),
+                );
+                turns.extend(
+                    stops
+                        .get(v)
+                        .iter()
+                        .filter(|s| (s.0 < n_old) == old)
+                        .map(|&(_, _, d)| (Turn::Stop, d)),
+                );
                 turns.sort_by(|x, y| cmp_dir(wide(x.1), wide(y.1)));
                 for (i, &(t, _)) in turns.iter().enumerate() {
                     if let Turn::Piece(k, fwd) = t {
@@ -1133,22 +1189,18 @@ impl PlanarMap {
             let ed = self.edges[e];
             ((ed.left, ed.left_src), (ed.right, ed.right_src))
         };
-        // 区間ごとの、その地図（`old`：前の地図か）の出どころの辺の左右の印（区間の向きにそろえる）
-        let deltas = |old: bool| -> Vec<Vec<(Label, Label)>> {
-            pieces
+        // 区間の出どころごとの（`piece_provs` と同じ並び）、その地図（`old`：前の地図か）の出どころの辺の左右の印（区間の向きに
+        // そろえる。その地図の辺でない出どころは `None`）。区間 `k` の分は `pieces[k].prov` の範囲
+        let deltas = |old: bool| -> Vec<Option<(Label, Label)>> {
+            piece_provs
                 .iter()
-                .map(|p| {
-                    p.prov
-                        .iter()
-                        .filter_map(|pv| {
-                            let lr = match srcs[pv.src as usize].1 {
-                                OverlaySrc::Old(e) if old => edge_labels(e),
-                                OverlaySrc::New(i) if !old => edge_labels(n_old + i),
-                                _ => return None,
-                            };
-                            Some(if pv.fwd { lr } else { (lr.1, lr.0) })
-                        })
-                        .collect()
+                .map(|pv| {
+                    let lr = match srcs[pv.src as usize].1 {
+                        OverlaySrc::Old(e) if old => edge_labels(e),
+                        OverlaySrc::New(i) if !old => edge_labels(n_old + i),
+                        _ => return None,
+                    };
+                    Some(if pv.fwd { lr } else { (lr.1, lr.0) })
                 })
                 .collect()
         };
@@ -1176,19 +1228,21 @@ impl PlanarMap {
                     (e, q, reach_of(&q))
                 })
                 .collect();
-            let bands = y_bands(items.iter().map(|it| (2 * it.2.y0, 2 * it.2.y1)));
+            let bands = YBands::new(items.iter().map(|it| (2 * it.2.y0, 2 * it.2.y1)));
             (items, bands)
         };
         let rows = [std::cell::OnceCell::new(), std::cell::OnceCell::new()];
         // 区間と、その出どころの辺の左右の色（足し引きの分）。巻き数は色だけで数える（図形の番号は、面の輪郭の辺ごとに
         // 違うことがある（2つの面がまとまった面など）ので、足し引きには入れない）
-        let segs_of = |d: &[Vec<(Label, Label)>]| {
-            LabeledSegs::new(
-                pieces
+        // （重ねる地図でないときの重ねる地図の分 `new_deltas` は空で、区間は無い）
+        let segs_of = |d: &[Option<(Label, Label)>]| {
+            LabeledSegs::new(pieces.iter().flat_map(|p| {
+                d.get(p.prov.clone())
+                    .unwrap_or(&[])
                     .iter()
-                    .zip(d)
-                    .flat_map(|(p, ls)| ls.iter().map(move |&(l, r)| (p.ia, p.ib, l.0, r.0))),
-            )
+                    .flatten()
+                    .map(move |&(l, r)| (p.ia, p.ib, l.0, r.0))
+            }))
         };
         let old_segs = segs_of(&old_deltas);
         let new_segs = segs_of(&new_deltas);
@@ -1197,13 +1251,17 @@ impl PlanarMap {
         let winding_at = |segs: &LabeledSegs<Option<Color32>>, old: bool, p2: IPt| {
             let mut w: Vec<(Option<Color32>, i32)> = Vec::new();
             segs.winding_into(p2, &mut w);
-            let (items, (y0, band_h, bands)) = rows[old as usize].get_or_init(|| unfed_rows(old));
-            for &i in band_at(*y0, *band_h, bands, p2.1) {
+            let (items, bands) = rows[old as usize].get_or_init(|| unfed_rows(old));
+            for &i in bands.at(p2.1) {
                 let (e, q, r) = &items[i as usize];
                 if ray_meets_row(*r, p2) {
                     let ed = self.edges[*e];
-                    for s in grid_poly(q).windows(2) {
-                        wind_into(dbl(s[0]), dbl(s[1]), ed.left, ed.right, p2, &mut w);
+                    let mut prev: Option<IPt> = None;
+                    for b in grid_poly_points(q) {
+                        if let Some(a) = prev {
+                            wind_into(dbl(a), dbl(b), ed.left, ed.right, p2, &mut w);
+                        }
+                        prev = Some(b);
                     }
                 }
             }
@@ -1213,7 +1271,7 @@ impl PlanarMap {
         // 番号は面ごとに1つ：面の輪郭の区間の出どころの辺のうち、面の側の色が面の色と同じものの番号で、いちばん多いもの
         // （同じ数なら小さい番号。番号は図形と面を対応づけるだけで、地図の形と色には効かない）
         let map_sides = |segs: &LabeledSegs<Option<Color32>>,
-                         d: &[Vec<(Label, Label)>],
+                         d: &[Option<(Label, Label)>],
                          old: bool,
                          next: &dyn Fn((usize, bool)) -> Turn| {
             let (face, states) = propagate(
@@ -1221,8 +1279,11 @@ impl PlanarMap {
                 next,
                 &|p2| winding_at(segs, old, p2),
                 &|w, k, from_left| {
-                    let colors: Vec<Sides> = d[k].iter().map(|&(l, r)| (l.0, r.0)).collect();
-                    crossed(&colors, w, from_left)
+                    let colors = d[pieces[k].prov.clone()]
+                        .iter()
+                        .flatten()
+                        .map(|&(l, r)| (l.0, r.0));
+                    crossed(colors, w, from_left)
                 },
             );
             let colors: Vec<Option<Color32>> =
@@ -1230,7 +1291,7 @@ impl PlanarMap {
             let mut votes: Vec<Vec<(ShapeId, usize)>> = vec![Vec::new(); states.len()];
             for (h, &f) in face.iter().enumerate() {
                 let f = f as usize;
-                for &(l, r) in &d[h / 2] {
+                for &(l, r) in d[pieces[h / 2].prov.clone()].iter().flatten() {
                     let side = if h % 2 == 1 { l } else { r };
                     if let (true, Some(id)) = (side.0 == colors[f], side.1) {
                         add_vote(&mut votes[f], id);
@@ -1269,33 +1330,30 @@ impl PlanarMap {
         // 輪郭の変形：区間ごとの、巻き数の変わり方を数える印（区間の向きにそろえる）。後の曲線は元の辺の左右の色で、前の
         // 曲線（元の地図の動かした辺）は左右を入れかえて（引く分）。区間を切ったあとの形で数えるので、i_overlay が交点を
         // 丸めた結果と食い違わない
-        let swept_labels: Vec<Vec<Sides>> = match input {
-            MapInput::Sweep(_) => pieces
+        // 出どころごと（`piece_provs` と同じ並び。数えない出どころは `None`）
+        let swept_labels: Vec<Option<Sides>> = match input {
+            MapInput::Sweep(_) => piece_provs
                 .iter()
-                .map(|p| {
-                    p.prov
-                        .iter()
-                        .filter_map(|pv| {
-                            let lr = match srcs[pv.src as usize].1 {
-                                OverlaySrc::New(i) => new_cols[i],
-                                OverlaySrc::Old(e) if moved[e] => {
-                                    (self.edges[e].right, self.edges[e].left)
-                                }
-                                OverlaySrc::Old(_) => return None,
-                            };
-                            Some(if pv.fwd { lr } else { (lr.1, lr.0) })
-                        })
-                        .collect()
+                .map(|pv| {
+                    let lr = match srcs[pv.src as usize].1 {
+                        OverlaySrc::New(i) => new_cols[i],
+                        OverlaySrc::Old(e) if moved[e] => (self.edges[e].right, self.edges[e].left),
+                        OverlaySrc::Old(_) => return None,
+                    };
+                    Some(if pv.fwd { lr } else { (lr.1, lr.0) })
                 })
                 .collect(),
             _ => Vec::new(),
         };
-        let swept_segs = LabeledSegs::new(
-            pieces
+        let swept_of = |k: usize| -> &[Option<Sides>] {
+            swept_labels.get(pieces[k].prov.clone()).unwrap_or(&[])
+        };
+        let swept_segs = LabeledSegs::new(pieces.iter().enumerate().flat_map(|(k, p)| {
+            swept_of(k)
                 .iter()
-                .zip(&swept_labels)
-                .flat_map(|(p, ls)| ls.iter().map(move |&(l, r)| (p.ia, p.ib, l, r))),
-        );
+                .flatten()
+                .map(move |&(l, r)| (p.ia, p.ib, l, r))
+        }));
         // 巻き数の並び：動かした辺の並びで、左・右の順（広がってきた色が2つ以上のときは、先の色にする）
         let mut swept_order: Vec<(Option<Color32>, i32)> = Vec::new();
         if let MapInput::Sweep(moved_edges) = input {
@@ -1316,7 +1374,7 @@ impl PlanarMap {
                 &piece_ends,
                 &next_old,
                 &|p2| swept_winding(p2),
-                &|w, k, from_left| crossed(&swept_labels[k], w, from_left),
+                &|w, k, from_left| crossed(swept_of(k).iter().flatten().copied(), w, from_left),
             )),
             _ => None,
         };
@@ -1340,7 +1398,7 @@ impl PlanarMap {
                 let labels: Vec<Vec<u32>> = pieces
                     .iter()
                     .map(|p| {
-                        p.prov
+                        piece_provs[p.prov.clone()]
                             .iter()
                             .filter_map(|pv| match srcs[pv.src as usize].1 {
                                 OverlaySrc::New(i) => Some(shape_of[i]),
@@ -1374,7 +1432,7 @@ impl PlanarMap {
         for (i, &e) in inner.iter().enumerate() {
             let ed = self.edges[e];
             for v in [node_at(ed.a), node_at(ed.b)] {
-                if !around.contains_key(&v) {
+                if around.get(v).is_empty() {
                     let j = *first_at.entry((e < n_old, v)).or_insert(i);
                     dsu_union(&mut group, i, j);
                 }
@@ -1410,6 +1468,7 @@ impl PlanarMap {
         }
         let mut ruled: Vec<Ruled> = Vec::with_capacity(rules.len());
         let mut refeed: Vec<usize> = Vec::new();
+        let mut turns: Vec<(IPt, Sides, Option<usize>)> = Vec::new();
         for &rule in rules {
             let copy_untouched = copies_untouched(rule);
             // 5. 区間の新しい印（色と図形の番号）。左右の色が違う区間だけ残す：（始点, 終点, (左の印, 右の印), 区間の番号）
@@ -1484,20 +1543,16 @@ impl PlanarMap {
                 None if copy_untouched => (self.edges[e].left, self.edges[e].right),
                 None => (None, None),
             };
-            for (&v, extra) in &stops {
+            for v in (0..stops.len()).filter(|&v| !stops.get(v).is_empty()) {
                 // 頂点から出ていく向きと、その左右の色（と、入れなかった辺ならその番号）
-                let mut turns: Vec<(IPt, Sides, Option<usize>)> = around[&v]
-                    .iter()
-                    .map(|&(k, fwd)| {
-                        let (l, r) = piece_cols[k];
-                        (dir_of(&(k, fwd)), if fwd { (l, r) } else { (r, l) }, None)
-                    })
-                    .collect();
-                for &(t, d) in extra {
-                    if let Turn::Stop(e, at_start) = t {
-                        let (l, r) = unfed_cols(e);
-                        turns.push((d, if at_start { (l, r) } else { (r, l) }, Some(e)));
-                    }
+                turns.clear();
+                turns.extend(around.get(v).iter().map(|&(k, fwd)| {
+                    let (l, r) = piece_cols[k];
+                    (dir_of(&(k, fwd)), if fwd { (l, r) } else { (r, l) }, None)
+                }));
+                for &(e, at_start, d) in stops.get(v) {
+                    let (l, r) = unfed_cols(e);
+                    turns.push((d, if at_start { (l, r) } else { (r, l) }, Some(e)));
                 }
                 turns.sort_by(|x, y| cmp_dir(wide(x.0), wide(y.0)));
                 // 角度の順でとなり合う2つの間の面は、前の左で、次の右
@@ -1531,21 +1586,22 @@ impl PlanarMap {
                 inner_cols,
             } = r;
             // 6. 区間をつないで鎖にする。頂点の次数が 2 で、出どころと左右の色が同じで、t が続いていれば、つなげる
-            let mut at: IntMap<usize, Vec<usize>> = IntMap::default();
-            for (ki, &(a, b, ..)) in kept.iter().enumerate() {
-                at.entry(a).or_default().push(ki);
-                at.entry(b).or_default().push(ki);
-            }
-            let mut untouched_deg: IntMap<usize, usize> = IntMap::default();
+            let at: Grouped<usize> = Grouped::new(
+                nodes.len(),
+                kept.iter()
+                    .enumerate()
+                    .flat_map(|(ki, &(a, b, ..))| [(a, ki), (b, ki)]),
+            );
+            let mut untouched_deg: Vec<usize> = vec![0; nodes.len()];
             for (e, ed) in self.edges.iter().enumerate() {
                 if !fed[e] && !interior[e] && copy_untouched {
-                    *untouched_deg.entry(ed.a).or_insert(0) += 1;
-                    *untouched_deg.entry(ed.b).or_insert(0) += 1;
+                    untouched_deg[ed.a] += 1;
+                    untouched_deg[ed.b] += 1;
                 }
             }
             for ed in &interior_kept {
-                *untouched_deg.entry(ed.a).or_insert(0) += 1;
-                *untouched_deg.entry(ed.b).or_insert(0) += 1;
+                untouched_deg[ed.a] += 1;
+                untouched_deg[ed.b] += 1;
             }
             // 区間の主な出どころ：前からある辺、重ねる線、輪郭の変形で動かした辺（後の曲線に置き換わる）の順。区間の向き
             // （a→b）での t
@@ -1555,8 +1611,7 @@ impl PlanarMap {
                     OverlaySrc::New(_) => 1,
                     OverlaySrc::Old(_) => 2,
                 };
-                *pieces[kept[ki].3]
-                    .prov
+                *piece_provs[pieces[kept[ki].3].prov.clone()]
                     .iter()
                     .min_by_key(rank)
                     .expect("区間には出どころがある")
@@ -1573,12 +1628,14 @@ impl PlanarMap {
             };
             let mut used = vec![false; kept.len()];
             let mut chains: Vec<Chain> = Vec::new();
+            let mut chain: std::collections::VecDeque<(usize, bool)> =
+                std::collections::VecDeque::new();
             for start in 0..kept.len() {
                 if used[start] {
                     continue;
                 }
-                let mut chain: std::collections::VecDeque<(usize, bool)> =
-                    std::collections::VecDeque::from([(start, true)]);
+                chain.clear();
+                chain.push_back((start, true));
                 used[start] = true;
                 // 鎖は左右の色が同じ区間をつなぐ。図形の番号は、鎖の左右それぞれで最初に見つかったもの（鎖の左右は、それぞれ
                 // 結果の1つの面。番号は面と図形を対応づけるだけなので、区間ごとの番号の違いでは鎖を分けない）
@@ -1593,12 +1650,11 @@ impl PlanarMap {
                         };
                         let (pa, pb, ta, tb) = piece_ends(&cur);
                         let (end, t_end) = if forward { (pb, tb) } else { (pa, ta) };
-                        let deg = at.get(&end).map_or(0, |v| v.len())
-                            + untouched_deg.get(&end).copied().unwrap_or(0);
+                        let deg = at.get(end).len() + untouched_deg[end];
                         if deg != 2 {
                             break;
                         }
-                        let Some(&nk) = at[&end].iter().find(|&&x| x != cur.0) else {
+                        let Some(&nk) = at.get(end).iter().find(|&&x| x != cur.0) else {
                             break;
                         };
                         if used[nk] || main_src(nk).src != s_src {
@@ -1769,14 +1825,17 @@ impl PlanarMap {
                 && p.y >= r.y0 - FLAT_TOL
                 && p.y <= r.y1 + FLAT_TOL
         };
-        let mut ends: Vec<(f64, f64, Point)> = Vec::new();
+        // 両方の線の端のうち、もう一方の線の上にあるもの（多くて4つ）
+        let mut ends = [(0.0, 0.0, Point::ZERO); 4];
+        let mut n_ends = 0;
         for (u, p) in [(0.0, m.p0), (1.0, m.p2)] {
             if !near(qr, p) {
                 continue;
             }
             let (s, d) = nearest_on_quad(q, p);
             if d <= FLAT_TOL {
-                ends.push((s, u, p));
+                ends[n_ends] = (s, u, p);
+                n_ends += 1;
             }
         }
         for (s, p) in [(0.0, q.p0), (1.0, q.p2)] {
@@ -1785,9 +1844,11 @@ impl PlanarMap {
             }
             let (u, d) = nearest_on_quad(&m, p);
             if d <= FLAT_TOL {
-                ends.push((s, u, p));
+                ends[n_ends] = (s, u, p);
+                n_ends += 1;
             }
         }
+        let ends = &ends[..n_ends];
         let lo = *ends.iter().min_by(|a, b| a.0.total_cmp(&b.0))?;
         let hi = *ends.iter().max_by(|a, b| a.0.total_cmp(&b.0))?;
         // 両端が `FLAT_TOL` 以内なら、地図の精度では1つの点（端どうしが触れているだけ）
@@ -1804,7 +1865,10 @@ impl PlanarMap {
         if !same_curve(&q.subsegment(lo.0..hi.0), &along) {
             return None;
         }
-        let mut pts = flatten_with_t(&sub, FLAT_TOL);
+        // 辺のその所を折れ線にした点と、`q` の向きでの t（はじめは 3 つ目に入れておく）
+        let mut pts: OverlapPts = flat_points(sub, FLAT_TOL)
+            .map(|(p, t)| (p, t, 0.0))
+            .collect();
         if lo.1 > hi.1 {
             pts.reverse();
             for p in &mut pts {
@@ -1813,19 +1877,17 @@ impl PlanarMap {
         }
         let at = |t: f64| (lo.0 + (hi.0 - lo.0) * t, lo.1 + (hi.1 - lo.1) * t);
         let n = pts.len();
-        Some(
-            pts.into_iter()
-                .enumerate()
-                .map(|(k, (p, t))| match k {
-                    0 => (lo.2, lo.0, lo.1),
-                    _ if k + 1 == n => (hi.2, hi.0, hi.1),
-                    _ => {
-                        let (s, u) = at(t);
-                        (p, s, u)
-                    }
-                })
-                .collect(),
-        )
+        for (k, pt) in pts.iter_mut().enumerate() {
+            *pt = match k {
+                0 => (lo.2, lo.0, lo.1),
+                _ if k + 1 == n => (hi.2, hi.0, hi.1),
+                _ => {
+                    let (s, u) = at(pt.1);
+                    (pt.0, s, u)
+                }
+            };
+        }
+        Some(pts)
     }
 }
 
@@ -1842,15 +1904,17 @@ pub(super) fn same_curve(a: &QuadBez, b: &QuadBez) -> bool {
 /// 同じ線になっている所の点：（点, 重ねる線の上の t, 辺の上の t）。重ねる線の上の t の順
 pub(super) type OverlapPts = Vec<(Point, f64, f64)>;
 
-/// 曲線を折れ線にした点 `own`（点と t）の、同じ線として扱う所 `spans`（重ならない。範囲の順）を、その所の点に替えたもの。
-/// 両端はいつも自分の端の点で、続く点の t が同じなら後の点を落とす（区間の向きは t の大きさで決めるので、t の幅が 0 の
-/// 区間を作らない）
-pub(super) fn stitched(own: Vec<(Point, f64)>, spans: &[Span]) -> Vec<(Point, f64)> {
+/// 曲線を折れ線にした点 `own`（点と t）の、同じ線として扱う所 `spans`（重ならない。範囲の順）を、その所の点に替えたもの
+/// （`out` に入れる。前の中身は消す）。両端はいつも自分の端の点で、続く点の t が同じなら後の点を落とす（区間の向きは t の
+/// 大きさで決めるので、t の幅が 0 の区間を作らない）
+pub(super) fn stitched(own: &[(Point, f64)], spans: &[Span], out: &mut Vec<(Point, f64)>) {
+    out.clear();
     if spans.is_empty() {
-        return own;
+        out.extend_from_slice(own);
+        return;
     }
     let n = own.len();
-    let mut out = vec![own[0]];
+    out.push(own[0]);
     let push = |out: &mut Vec<(Point, f64)>, p: (Point, f64)| {
         if out.last().is_none_or(|l| l.1 != p.1) {
             out.push(p);
@@ -1859,25 +1923,31 @@ pub(super) fn stitched(own: Vec<(Point, f64)>, spans: &[Span]) -> Vec<(Point, f6
     let mut k = 1;
     for sp in spans {
         while k < n - 1 && own[k].1 < sp.lo {
-            push(&mut out, own[k]);
+            push(out, own[k]);
             k += 1;
         }
         for &p in &sp.pts {
-            push(&mut out, p);
+            push(out, p);
         }
         while k < n - 1 && own[k].1 <= sp.hi {
             k += 1;
         }
     }
     for &p in &own[k..n - 1] {
-        push(&mut out, p);
+        push(out, p);
     }
     let end = own[n - 1];
     match out.last_mut() {
         Some(l) if l.1 == end.1 => *l = end,
         _ => out.push(end),
     }
-    out
+}
+
+/// 折れ線の点を作る入れ物（使い回して、確保を減らす：`FedEdges::points`）
+#[derive(Default)]
+pub(super) struct PointsBuf {
+    own: Vec<(Point, f64)>,
+    out: Vec<(Point, f64)>,
 }
 
 /// i_overlay に入れる前からある辺（`fed`）と、そのときに作った辺の外接矩形・格子・頂点ごとの辺
@@ -1889,16 +1959,30 @@ pub(super) struct FedEdges {
     boxes: Vec<KRect>,
     /// 辺がかかるマス（同じだけ広げたもの）
     grid: CellGrid,
-    adj: Vec<Vec<usize>>,
+    /// 頂点ごとの辺
+    adj: Grouped<usize>,
 }
 
 impl FedEdges {
-    /// 線 `line`（曲線 `q`）を折れ線にした点と t。同じ線として扱う所は、その所の点（`stitched`）
-    pub(super) fn points(&self, line: Line, q: &QuadBez) -> Vec<(Point, f64)> {
-        stitched(
-            flatten_with_t(q, FLAT_TOL),
-            self.spans.get(&line).map_or(&[][..], |v| v.as_slice()),
-        )
+    /// 線 `line`（曲線 `q`）を折れ線にした点と t（入れ物 `buf` の中）。同じ線として扱う所は、その所の点（`stitched`）
+    pub(super) fn points<'a>(
+        &self,
+        line: Line,
+        q: &QuadBez,
+        buf: &'a mut PointsBuf,
+    ) -> &'a mut Vec<(Point, f64)> {
+        match self.spans.get(&line) {
+            Some(spans) => {
+                buf.own.clear();
+                buf.own.extend(flat_points(*q, FLAT_TOL));
+                stitched(&buf.own, spans, &mut buf.out);
+            }
+            None => {
+                buf.out.clear();
+                buf.out.extend(flat_points(*q, FLAT_TOL));
+            }
+        }
+        &mut buf.out
     }
 
     /// 線 `line` の t が、同じ線として扱う所（`Span`）の中か
@@ -1908,12 +1992,20 @@ impl FedEdges {
             .is_some_and(|v| v.iter().any(|s| s.lo <= t && t <= s.hi))
     }
 
-    /// 線 `line` の判定の形（格子に置いた折れ線）
-    pub(super) fn grid_points(&self, line: Line, q: &QuadBez) -> Vec<IPt> {
+    /// 線 `line` の判定の形（格子に置いた折れ線）を `out` に入れる（前の中身は消す。`buf` は折れ線の点の入れ物）
+    pub(super) fn grid_points(
+        &self,
+        line: Line,
+        q: &QuadBez,
+        buf: &mut PointsBuf,
+        out: &mut Vec<IPt>,
+    ) {
         if !self.spans.contains_key(&line) {
-            return grid_poly(q);
+            grid_poly_into(q, out);
+            return;
         }
-        grid_line(self.points(line, q).into_iter().map(|(p, _)| p))
+        let pts = self.points(line, q, buf);
+        grid_line_into(pts.iter().map(|&(p, _)| p), out);
     }
 }
 
@@ -1922,8 +2014,8 @@ impl FedEdges {
 pub(super) enum Turn {
     /// 区間（番号, 区間の向きに出ていくか）
     Piece(usize, bool),
-    /// 入れなかった前からある辺（番号, 頂点がその辺の始点か）。たどるのはここで止める
-    Stop(usize, bool),
+    /// 入れなかった辺。たどるのはここで止める
+    Stop,
 }
 
 /// `overlay_with` が止まった理由
@@ -1959,6 +2051,11 @@ pub(super) struct ChainRestorer {
     map: PlanarMap,
     /// 判定の形の索引（置き換える鎖が無ければ `None`）
     index: Option<PolyIndex>,
+    /// 使い回す入れ物（調べる鎖の範囲・途中の頂点・道の点・曲線の判定の形）
+    spans: Vec<(usize, usize)>,
+    inner: Vec<usize>,
+    path: Vec<IPt>,
+    pc: Vec<IPt>,
 }
 
 impl ChainRestorer {
@@ -1966,12 +2063,21 @@ impl ChainRestorer {
     /// これにかかるものだけでよい
     pub(super) fn new(map: PlanarMap, active: Option<KRect>) -> Self {
         let index = active.map(|area| PolyIndex::new(&map, Some(area)));
-        Self { map, index }
+        Self {
+            map,
+            index,
+            spans: Vec::new(),
+            inner: Vec::new(),
+            path: Vec::new(),
+            pc: Vec::new(),
+        }
     }
 
     /// 鎖 `c`（区間の辺の番号 `ids`）を、決まりを満たす所だけ曲線にする
     pub(super) fn restore(&mut self, c: &Chain, ids: &[usize]) {
-        let mut spans = vec![(0, ids.len())];
+        let mut spans = std::mem::take(&mut self.spans);
+        spans.clear();
+        spans.push((0, ids.len()));
         while let Some((i, j)) = spans.pop() {
             if self.try_replace(c, ids, i, j) || j - i == 1 {
                 continue;
@@ -1980,6 +2086,7 @@ impl ChainRestorer {
             spans.push((mid, j));
             spans.push((i, mid));
         }
+        self.spans = spans;
     }
 
     /// 鎖 `c` の区間 `i..j` を1本の曲線に置き換えられれば置き換える（判定の形で、設計 2-4 の3つの決まりを調べる）
@@ -2001,12 +2108,14 @@ impl ChainRestorer {
         let nodes = &self.map.nodes;
         let q = QuadBez::new(nodes[na], ctrl, nodes[nb]);
         let part = &ids[i..j];
-        let inner: Vec<usize> = c.steps[i + 1..j].iter().map(|s| s.0).collect();
-        let path: Vec<IPt> = std::iter::once(gpt(nodes[na]))
-            .chain(c.steps[i..j].iter().map(|s| gpt(nodes[s.1])))
-            .collect();
-        let pc = grid_poly(&q);
-        if !index.can_replace(part, &path, &inner, &pc, na, nb) {
+        self.inner.clear();
+        self.inner.extend(c.steps[i + 1..j].iter().map(|s| s.0));
+        self.path.clear();
+        self.path.push(gpt(nodes[na]));
+        self.path
+            .extend(c.steps[i..j].iter().map(|s| gpt(nodes[s.1])));
+        grid_poly_into(&q, &mut self.pc);
+        if !index.can_replace(part, &self.path, &self.inner, &self.pc, na, nb) {
             return false;
         }
         for &f in part {
@@ -2021,7 +2130,7 @@ impl ChainRestorer {
             left_src: c.left.1,
             right_src: c.right.1,
         });
-        index.add_edge(na, nb, pc);
+        index.add_edge(na, nb, self.pc.iter().copied());
         true
     }
 
