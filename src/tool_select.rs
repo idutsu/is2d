@@ -42,11 +42,7 @@ pub(crate) fn draw_shape_contour_lines(
     let pad = 4.0 / z;
     let view_rect = tab
         .view
-        .visible_world_rect(
-            painter,
-            tab.doc.stage_size,
-            !tab.session.edit_path.is_empty(),
-        )
+        .visible_world_rect(painter, tab.doc.stage_size)
         .inflate(pad, pad);
     for contour in shape.contours() {
         for seg in contour.segments.iter() {

@@ -544,36 +544,27 @@ impl View {
 
     /// 現在スクリーン上に表示されるワールド座標範囲 `KRect` を返す（画面外・ステージ枠外カリング用）
     #[inline]
-    pub(crate) fn visible_world_rect(
-        &self,
-        painter: &egui::Painter,
-        stage_size: Vec2,
-        in_symbol_edit: bool,
-    ) -> KRect {
+    pub(crate) fn visible_world_rect(&self, painter: &egui::Painter, stage_size: Vec2) -> KRect {
         let clip_scr = painter.clip_rect();
         let view_rect = KRect::from_points(
             self.screen_to_world(clip_scr.min),
             self.screen_to_world(clip_scr.max),
         );
-        if self.clip_outside_stage && !in_symbol_edit {
+        if self.clip_outside_stage {
             view_rect.intersect(self.stage_world_rect(stage_size))
         } else {
             view_rect
         }
     }
 
-    /// 図形描画の前に、ペーストボード（枠外のグレー背景）とステージ矩形（白いキャンバス枠）を描画する
+    /// 図形描画の前に、ペーストボード（枠外のグレー背景）とステージ矩形（白いキャンバス枠）を描画する。グループ・シンボルの
+    /// 中を編集しているときも同じ（中身は置いてある所のまま描くので、ステージはいつもワールド座標の同じ所にある）
     pub(crate) fn draw_stage_background(
         &self,
         painter: &egui::Painter,
         canvas_rect: egui::Rect,
         stage_size: Vec2,
-        in_symbol_edit: bool,
     ) {
-        if in_symbol_edit {
-            painter.rect_filled(canvas_rect, 0.0, Color32::from_rgb(250, 250, 252));
-            return;
-        }
         let pasteboard_col = Color32::from_rgb(218, 222, 228);
         painter.rect_filled(canvas_rect, 0.0, pasteboard_col);
 
@@ -595,9 +586,8 @@ impl View {
         painter: &egui::Painter,
         canvas_rect: egui::Rect,
         stage_size: Vec2,
-        in_symbol_edit: bool,
     ) -> egui::Painter {
-        if !in_symbol_edit && self.clip_outside_stage {
+        if self.clip_outside_stage {
             painter.with_clip_rect(canvas_rect.intersect(self.stage_screen_rect(stage_size)))
         } else {
             painter.clone()
@@ -605,15 +595,7 @@ impl View {
     }
 
     /// 図形描画の後に、上からステージの境界枠線を描画する
-    pub(crate) fn draw_stage_foreground_overlay(
-        &self,
-        painter: &egui::Painter,
-        stage_size: Vec2,
-        in_symbol_edit: bool,
-    ) {
-        if in_symbol_edit {
-            return;
-        }
+    pub(crate) fn draw_stage_foreground_overlay(&self, painter: &egui::Painter, stage_size: Vec2) {
         let stage_rect = self.stage_screen_rect(stage_size);
         painter.rect_stroke(
             stage_rect,

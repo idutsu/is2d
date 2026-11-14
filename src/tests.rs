@@ -29806,6 +29806,97 @@ fn group_edit_draws_shapes_outside_the_group_below_its_contents() {
     );
 }
 
+/// シンボルの中を編集するときも、ふだん・グループの中と同じく、白いステージ枠・枠線を描き、「枠外を隠す」も効く（前は、
+/// シンボルの中だけステージの代わりに薄い灰色一色で全面を塗り、枠線も「枠外を隠す」も無かったので、薄く描いた周りの絵が
+/// 背景に溶けて、別の場所で編集しているように見えた）
+#[test]
+fn symbol_edit_draws_the_stage_like_the_scene() {
+    use doc_actions::Action;
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 100, 220);
+    run(
+        &mut app,
+        &[
+            Action::PaintStroke {
+                points: vec![Point::new(300.0, 300.0), Point::new(500.0, 300.0)],
+                radius: 20.0,
+                color: red,
+            },
+            Action::SelectSingleAt {
+                pt: Point::new(490.0, 300.0),
+            },
+            Action::ConvertToSymbol,
+            Action::Deselect,
+            Action::PaintStroke {
+                points: vec![Point::new(300.0, 400.0), Point::new(500.0, 400.0)],
+                radius: 20.0,
+                color: blue,
+            },
+        ],
+    );
+    let binding = app
+        .scene()
+        .iter()
+        .find_map(|s| s.symbol_instance)
+        .expect("シンボルのインスタンス");
+    app.view.clip_outside_stage = true;
+    let ctx = egui::Context::default();
+    let raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 820.0),
+        )),
+        ..Default::default()
+    };
+    // 1コマ描いて、ステージの矩形に描いたもの（塗り・線）と、赤（シンボルの中身）を描いた所の切り抜きを返す
+    let draw = |app: &mut Is2dApp| {
+        let out = ctx.run(raw_input.clone(), |ctx| app.update_ui(ctx));
+        let stage = app.view.stage_screen_rect(app.doc.stage_size);
+        let stage_rects: Vec<(Color32, egui::Stroke)> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if r.rect == stage => Some((r.fill, r.stroke)),
+                _ => None,
+            })
+            .collect();
+        let red_clips: Vec<egui::Rect> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Mesh(m) if m.vertices.first().is_some_and(|v| v.color == red) => {
+                    Some(c.clip_rect)
+                }
+                _ => None,
+            })
+            .collect();
+        (stage, stage_rects, red_clips)
+    };
+    let (stage, scene_rects, scene_clips) = draw(&mut app);
+    assert!(
+        scene_rects.iter().any(|r| r.0 == Color32::WHITE)
+            && scene_rects.iter().any(|r| r.1.width > 0.0),
+        "ふだんは白いステージと枠線を描く：{scene_rects:?}"
+    );
+    assert!(
+        !scene_clips.is_empty() && scene_clips.iter().all(|c| stage.contains_rect(*c)),
+        "ふだんは「枠外を隠す」でステージの外を隠す：{scene_clips:?}"
+    );
+    run(&mut app, &[Action::EnterSymbolTimeline { binding }]);
+    assert!(!app.session.edit_path.is_empty(), "シンボルの中");
+    let (sym_stage, sym_rects, sym_clips) = draw(&mut app);
+    assert_eq!(sym_stage, stage, "入っても表示の位置は変わらない");
+    assert_eq!(
+        sym_rects, scene_rects,
+        "シンボルの中でも、ふだんと同じステージを描く"
+    );
+    assert!(
+        !sym_clips.is_empty() && sym_clips.iter().all(|c| *c == scene_clips[0]),
+        "シンボルの中でも、「枠外を隠す」でステージの外を隠す：{sym_clips:?}"
+    );
+}
+
 /// キャンバスのダブルクリックは、2回のクリックが近い所のときだけ：A をクリックしてすぐ B をクリックしても、B のグループに
 /// 入らず B を選ぶ（egui の判定は時間だけで決めるので、直す前は B に入った）。同じ所の2回はグループに入る。A・B のあとすぐ
 /// B をもう1回クリックすると、B の2回でダブルクリックになる。選択ツールと自由変形ツールの両方

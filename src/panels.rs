@@ -1795,13 +1795,12 @@ pub(crate) fn draw_canvas_contents(
     painter: &egui::Painter,
 ) {
     let in_group_edit = !tab.session.editing_group_path.is_empty();
-    let in_symbol_edit = !tab.session.edit_path.is_empty();
     let zoom = tab.view.zoom;
     let pan = tab.view.pan;
     let stage_size = tab.doc.stage_size;
-    let artwork_painter =
-        tab.view
-            .artwork_painter(painter, painter.clip_rect(), stage_size, in_symbol_edit);
+    let artwork_painter = tab
+        .view
+        .artwork_painter(painter, painter.clip_rect(), stage_size);
     tab.start_draw_pass();
 
     // 0. シンボル内部タイムライン編集中の場合、親シーンの背景図形を1つの結合メッシュで薄暗く（インプレース背景）描画（ルートでは何も返さず、キャッシュが空になる）
@@ -1822,9 +1821,7 @@ pub(crate) fn draw_canvas_contents(
     let mut selected_group_boxes: Vec<(u64, Option<KRect>, KRect, Option<Point>)> = Vec::new();
     let (is_sel, has_sel) = tab.scene().selected_shape_mask(&tab.session.selection);
     let curr_f = tl.current_frame;
-    let view_world_rect = tab
-        .view
-        .visible_world_rect(&artwork_painter, stage_size, in_symbol_edit);
+    let view_world_rect = tab.view.visible_world_rect(&artwork_painter, stage_size);
     let scene = tab.scene();
     let scene_len = scene.len();
     let mut shape_cursor = 0usize;
@@ -1908,8 +1905,7 @@ pub(crate) fn draw_canvas_contents(
         );
     }
 
-    tab.view
-        .draw_stage_foreground_overlay(painter, stage_size, in_symbol_edit);
+    tab.view.draw_stage_foreground_overlay(painter, stage_size);
     draw_selected_group_and_symbol_boxes(tab, painter, &selected_group_boxes);
 
     if tool.tool == Tool::Transform {
