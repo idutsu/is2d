@@ -1815,21 +1815,31 @@ impl PlanarMap {
     /// したもので、両端は重なりの端になっている方の線の端の点。辺の t と `q` の t は、同じ曲線の部分なら1次式で対応する
     /// ので、2本のその所を切り出した曲線が同じ曲線（`same_curve`：両側の制御点で決める）のときだけ
     pub(super) fn overlap(&self, q: &QuadBez, e: usize) -> Option<OverlapPts> {
+        use kurbo::ParamCurveNearest;
         let m = self.quad(e);
-        // 曲線は外接矩形の中にあるので、矩形から `FLAT_TOL` より遠い点は曲線からも遠い（いちばん近い点を探さない。
-        // `nearest_on_quad` の距離は本当の距離以上なので、探しても同じく外れる）
+        // 曲線から確かに `FLAT_TOL` より遠い点は、いちばん近い点を探さない（`nearest_on_quad` の距離は本当の距離以上
+        // なので、探しても同じく外れる）。曲線は外接矩形の中にあり、弦から `bend / 4` 以内にある（2次ベジェと弦の差は
+        // 2t(1−t)(p1 − (p0 + p2)/2) で、2t(1−t) ≤ 1/2）ので、矩形から遠い点と、弦までの距離から `bend / 4` を引いても
+        // 遠い点（丸めの分の余裕をとる）は遠い
         let (qr, mr) = (q.bounding_box(), m.bounding_box());
-        let near = |r: KRect, p: Point| {
+        let (q_bend, m_bend) = (bend(q) / 4.0, bend(&m) / 4.0);
+        let near = |c: &QuadBez, r: KRect, c_bend: f64, p: Point| {
             p.x >= r.x0 - FLAT_TOL
                 && p.x <= r.x1 + FLAT_TOL
                 && p.y >= r.y0 - FLAT_TOL
                 && p.y <= r.y1 + FLAT_TOL
+                && kurbo::Line::new(c.p0, c.p2)
+                    .nearest(p, 0.0)
+                    .distance_sq
+                    .sqrt()
+                    - c_bend
+                    <= FLAT_TOL * 1.001
         };
         // 両方の線の端のうち、もう一方の線の上にあるもの（多くて4つ）
         let mut ends = [(0.0, 0.0, Point::ZERO); 4];
         let mut n_ends = 0;
         for (u, p) in [(0.0, m.p0), (1.0, m.p2)] {
-            if !near(qr, p) {
+            if !near(q, qr, q_bend, p) {
                 continue;
             }
             let (s, d) = nearest_on_quad(q, p);
@@ -1839,7 +1849,7 @@ impl PlanarMap {
             }
         }
         for (s, p) in [(0.0, q.p0), (1.0, q.p2)] {
-            if !near(mr, p) {
+            if !near(&m, mr, m_bend, p) {
                 continue;
             }
             let (u, d) = nearest_on_quad(&m, p);

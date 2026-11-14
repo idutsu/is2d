@@ -839,14 +839,25 @@ pub(crate) fn dedup_closed_ring(pts: impl IntoIterator<Item = Point>, min_dist: 
 /// 曲線 `q` の上で点 `p` にいちばん近い所の（パラメータ, 距離）。曲線の上のいちばん近い点を求めるのはこれ1つ
 pub(crate) fn nearest_on_quad(q: &QuadBez, p: Point) -> (f64, f64) {
     let dist_sq = |t: f64| (q.eval(t) - p).hypot2();
-    // 距離は点ごとに1回だけ求める
-    let mut t = (0..=16)
-        .map(|k| {
-            let t = k as f64 / 16.0;
-            (t, dist_sq(t))
-        })
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map_or(0.0, |(t, _)| t);
+    // 等分の点のうち、いちばん近いもの（同じ距離なら前の点）。距離は点ごとに1回だけ求める。初めていちばん近くなった点が
+    // `p` そのものなら、ほかの点はそれより近くならず、ニュートン法でも動かない（ずれが 0）ので、そこで決まる（共有する
+    // 頂点を調べることが多い：`overlap`）。距離が NaN になりうる大きすぎる座標（計算があふれる）では、決めずに続ける
+    let finite = [q.p0, q.p1, q.p2, p]
+        .iter()
+        .all(|v| v.x.abs() < 1e150 && v.y.abs() < 1e150);
+    let mut best = (0.0, 0.0);
+    for k in 0..=16 {
+        let t = k as f64 / 16.0;
+        let at = q.eval(t);
+        let d = (at - p).hypot2();
+        if k == 0 || d.total_cmp(&best.1) == std::cmp::Ordering::Less {
+            if finite && at == p {
+                return (t, 0.0);
+            }
+            best = (t, d);
+        }
+    }
+    let mut t = best.0;
     let second = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()) * 2.0;
     for _ in 0..6 {
         let b = q.eval(t) - p;
