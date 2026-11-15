@@ -1283,9 +1283,11 @@ impl PlanarMap {
                 QuadBez::new(self.nodes[v], e2.ctrl, self.nodes[e2.b]),
             );
             // 2本が、1本の2次ベジェ q を t で切ったものか（de Casteljau：q1.p1・v・q2.p1 が一直線に並び、v がその間を
-            // t:(1−t) に分け、q の制御点 c は q1.p1 = (1−t)q1.p0 + t·c、q2.p1 = (1−t)c + t·q2.p2 を満たす）。頂点は
-            // 地図の精度（`FLAT_TOL`）でしか曲線に乗っていないので、q を t で切った2本が q1・q2 と同じ曲線（`same_curve`）の
-            // ときだけまとめる（絵の形は地図の精度の中でしか変わらない）。直線も同じ決まりでまとまる
+            // t:(1−t) に分け、q の制御点 c は q1.p1 = (1−t)q1.p0 + t·c、q2.p1 = (1−t)c + t·q2.p2 を満たす）。切れ目の
+            // 頂点は、切った曲線から `FLAT_TOL + SPLIT_REACH` 以内にしか乗っていない（折れ線は曲線から `FLAT_TOL` 以内、
+            // i_overlay は切れ目の点を折れ線どうしの交点から `SPLIT_REACH` 以内に置く）ので、q を t で切った2本が q1・q2 と
+            // その許容で同じ曲線（`same_curve`）のときだけまとめる（絵の形はその許容の中でしか変わらない）。直線も同じ
+            // 決まりでまとまる
             let (p0, a, w, b, p2) = (
                 q1.p0.to_vec2(),
                 q1.p1.to_vec2(),
@@ -1302,7 +1304,10 @@ impl PlanarMap {
             let c = (t * (a - (1.0 - t) * p0) + (1.0 - t) * (b - t * p2))
                 / (t * t + (1.0 - t) * (1.0 - t));
             let q = QuadBez::new(q1.p0, c.to_point(), q2.p2);
-            if !(same_curve(&q.subsegment(0.0..t), &q1) && same_curve(&q.subsegment(t..1.0), &q2)) {
+            let tol = FLAT_TOL + SPLIT_REACH;
+            if !(same_curve(&q.subsegment(0.0..t), &q1, tol)
+                && same_curve(&q.subsegment(t..1.0), &q2, tol))
+            {
                 continue;
             }
             // 判定の形で、2本を1本に置き換えてよいか（設計 2-4 の3つの決まり。曲線が端を越えて折り返すときも、
@@ -1948,6 +1953,14 @@ thread_local! {
     pub(super) static RINGS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// テスト用：このスレッドで、辺の鍵（`edge_key`）を求めた数
     static KEYS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// テスト用：このスレッドで、重ね合わせで i_overlay に切らせた回数（`overlay_fed`）
+    pub(super) static CUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、重ね合わせで i_overlay に切らせた回数
+#[cfg(test)]
+pub(crate) fn cuts() -> usize {
+    CUTS.with(|n| n.get())
 }
 
 /// テスト用：このスレッドで、辺の鍵を求めた数

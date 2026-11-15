@@ -30171,6 +30171,32 @@ fn wiggly_stroke(
     crate::vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, color, 1.0)
 }
 
+/// R2（レビュー f01d518）：重ね合わせでは、i_overlay に1回だけ切らせる。切れ目の頂点は、切った曲線から
+/// `FLAT_TOL + SPLIT_REACH` 以内にあり、戻すときはその許容で2本を1本にまとめる（`merge_degree2`）ので、曲線の本当の交点を
+/// 折れ線に足して切り直す2回目の切りは要らない（前は、2本の曲線が交わる所があると、交点をニュートン法で求めて足し、
+/// もう1回切っていた）
+#[test]
+fn overlay_cuts_once_where_curves_cross() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 90, 220);
+    let a = vec![map_overlay::rect_shape(0.0, 0.0, 100.0, 60.0, red)];
+    let m = PlanarMap::default()
+        .overlay(MapInput::Shapes(&a), MapRule::Paint(Some(red)))
+        .unwrap();
+    let b = vec![map_overlay::rect_shape(50.0, 30.0, 150.0, 90.0, blue)];
+    let before = crate::planar_map::cuts();
+    let next = m
+        .overlay(MapInput::Shapes(&b), MapRule::Paint(Some(blue)))
+        .unwrap();
+    assert!(next.is_valid());
+    assert_eq!(
+        crate::planar_map::cuts() - before,
+        1,
+        "i_overlay に切らせた回数"
+    );
+}
+
 /// N-1001（地図のレビュー 4cb53aa）：線の重なった地図を、矩形で切ってその場に戻すのを繰り返しても、切れ目の頂点が
 /// 残らない（辺の数が変わらない）。切れ目の頂点が折れ線どうしの交点（曲線から `FLAT_TOL` ほど離れる）のままだと、
 /// 切った2本が1本にまとまらず、5回に1回ほど残って溜まっていた
