@@ -30399,7 +30399,8 @@ fn recoloring_faces_merges_the_ends_of_vanished_borders() {
     );
 }
 
-/// 計測（N-2002）：ブラシの曲線化の1回の重さを、半径・長さ・入力の点の間隔ごとに測る
+/// 計測（N-2002）：ブラシの曲線化の1回の重さを、半径・長さ・入力の点の間隔ごとに測る。手描きのような乱数の線
+/// 2,000 本の時間も測る（R6）
 #[test]
 #[ignore]
 fn measure_brush_smoothing() {
@@ -30436,6 +30437,32 @@ fn measure_brush_smoothing() {
                 times[times.len() / 2]
             );
         }
+    }
+    // 手描きのような乱数の線 2,000 本（`random_hand_strokes_follow_their_centerlines` と同じ線）：点の数ごとの平均と最大
+    let mut rng = fastrand::Rng::with_seed(0x0052_6000_2026);
+    let zooms = [0.25, 0.5, 1.0, 2.0, 4.0];
+    let mut rows: Vec<(usize, f64)> = Vec::new();
+    for _ in 0..2000 {
+        let zoom = zooms[rng.usize(0..zooms.len())];
+        let pts = random_hand_stroke(&mut rng, zoom);
+        let radius = ((0.5 + 40.0 * rng.f64().powi(2)) / zoom).clamp(0.5, 70.0);
+        let t = Instant::now();
+        let raw = brush_line_at_zoom(&pts, radius, zoom);
+        let shapes = brush_line_shapes_at_zoom(&raw, Color32::RED, zoom);
+        rows.push((pts.len(), t.elapsed().as_secs_f64() * 1e3));
+        std::hint::black_box(shapes);
+    }
+    let total: f64 = rows.iter().map(|r| r.1).sum();
+    eprintln!("乱数の線 2,000 本：合計 {total:.0}ms");
+    rows.sort_by_key(|r| r.0);
+    for c in rows.chunks(400) {
+        eprintln!(
+            "  点 {}〜{}：平均 {:.1}ms・最大 {:.1}ms",
+            c[0].0,
+            c[c.len() - 1].0,
+            c.iter().map(|r| r.1).sum::<f64>() / c.len() as f64,
+            c.iter().map(|r| r.1).fold(0.0, f64::max)
+        );
     }
 }
 
