@@ -133,6 +133,14 @@ pub(super) fn fan_overlap(v: IPt, p: IPt, q: IPt) -> bool {
 
 /// 区間 `a`–`b` と `c`–`d` の距離が、格子の目の対角線の半分（`GRID_REACH`）以下か（2乗で 1/2 以下か）
 pub(super) fn segs_within_reach(a: IPt, b: IPt, c: IPt, d: IPt) -> bool {
+    // 外接矩形が 1 目以上離れていれば、距離は 1 目以上（`GRID_REACH` より遠い）
+    if a.0.max(b.0) + 1 <= c.0.min(d.0)
+        || c.0.max(d.0) + 1 <= a.0.min(b.0)
+        || a.1.max(b.1) + 1 <= c.1.min(d.1)
+        || c.1.max(d.1) + 1 <= a.1.min(b.1)
+    {
+        return false;
+    }
     if segs_touch(a, b, c, d) {
         return true;
     }
