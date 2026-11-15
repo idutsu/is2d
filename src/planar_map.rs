@@ -3,6 +3,7 @@
 //! Adobe Animate のマージ描画と同じく、辺が「曲線・左の色・右の色」を持つ。境目は1本で、重ね順は無い。
 //! 塗りの形（`FillShape`）は、辺から作って描画・当たり判定に使う。
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
@@ -117,9 +118,6 @@ impl std::hash::Hasher for IntHasher {
 
 /// 整数を鍵にする表（`IntHasher`）
 pub(crate) type IntMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IntHasher>>;
-
-/// 整数を鍵にする集まり（`IntHasher`）
-pub(crate) type IntSet<K> = HashSet<K, std::hash::BuildHasherDefault<IntHasher>>;
 
 /// 辺の鍵（`edge_key`）から、その地図の辺の番号へ
 pub(crate) type EdgeKeys = IntMap<[u64; 6], usize>;
@@ -441,6 +439,7 @@ impl PlanarMap {
             polys,
             cycles,
             cycle_regions,
+            origin,
         })
     }
 
@@ -544,20 +543,35 @@ impl PlanarMap {
         let Some(prev) = prev else {
             return (self.polys(), vec![EdgeOrigin::New; self.edges.len()]);
         };
-        let (keys, prev_polys) = (prev.keys(), prev.polys());
+        let origin = self.edge_origins(prev);
+        let prev_polys = prev.polys();
+        let polys = origin
+            .iter()
+            .enumerate()
+            .map(|(e, o)| match *o {
+                EdgeOrigin::Same(i) => Arc::clone(&prev_polys[i]),
+                _ => EdgeGeom::of(&self.quad(e)),
+            })
+            .collect();
+        (polys, origin)
+    }
+
+    /// 辺ごとの、前の地図 `prev` の同じ辺（`EdgeOrigin`。形がビットまで同じ辺：`edge_key`）。前の地図の辺との対応を
+    /// 求めるのはこれ1つ（確かめるときの判定の形の引き継ぎ `polys_since` と、書き戻すときの残す面の決め方
+    /// `rewrite_shapes`。確かめた地図が持って、書き戻しに渡す：`CheckedMap::since`）
+    fn edge_origins(&self, prev: &LayerBase) -> Vec<EdgeOrigin> {
+        let keys = prev.keys();
         let start = |m: &PlanarMap, e: usize| {
             let p = m.nodes[m.edges[e].a];
             [p.x.to_bits(), p.y.to_bits()]
         };
         (0..self.edges.len())
             .map(|e| match keys.get(&edge_key(self, e)) {
-                Some(&i) if start(self, e) == start(&prev.map, i) => {
-                    (Arc::clone(&prev_polys[i]), EdgeOrigin::Same(i))
-                }
-                Some(_) => (EdgeGeom::of(&self.quad(e)), EdgeOrigin::Reversed),
-                None => (EdgeGeom::of(&self.quad(e)), EdgeOrigin::New),
+                Some(&i) if start(self, e) == start(&prev.map, i) => EdgeOrigin::Same(i),
+                Some(&i) => EdgeOrigin::Reversed(i),
+                None => EdgeOrigin::New,
             })
-            .unzip()
+            .collect()
     }
 
     /// 判定の形の 1〜3（設計 2-2）：折れ線どうしが共有する頂点のほかで触れない・1本の折れ線が自分と触れない・
@@ -1160,8 +1174,8 @@ pub(super) struct CycleRegion {
 pub(super) enum EdgeOrigin {
     /// 前の地図の辺 `i` と、形も向きも同じ
     Same(usize),
-    /// 前の地図に形の同じ辺があるが、向きが逆
-    Reversed,
+    /// 前の地図の辺 `i` と形が同じだが、向きが逆
+    Reversed(usize),
     /// 前の地図に無い
     New,
 }
@@ -1173,6 +1187,8 @@ struct Checked {
     polys: Vec<Poly>,
     cycles: Vec<Cycle>,
     cycle_regions: Vec<CycleRegion>,
+    /// 辺ごとの、前の地図の同じ辺（`edge_origins`。前の地図が無ければ、みな `New`）
+    origin: Vec<EdgeOrigin>,
 }
 
 impl PlanarMap {
@@ -1382,6 +1398,8 @@ impl PlanarMap {
 /// 辺の形が同じかを比べるための鍵（向きはそろえる）。色は入れない：辺のその側が変わっていないかは、側の元の図形の印で
 /// 分かる（重ね合わせ・バケツは、色を変えた側の印を消す）
 fn edge_key(m: &PlanarMap, e: usize) -> [u64; 6] {
+    #[cfg(test)]
+    KEYS_BUILT.with(|n| n.set(n.get() + 1));
     let ed = &m.edges[e];
     let (p0, p2) = (m.nodes[ed.a], m.nodes[ed.b]);
     let (p0, p2) = if point_order(p0, p2).is_le() {
@@ -1399,8 +1417,8 @@ fn edge_key(m: &PlanarMap, e: usize) -> [u64; 6] {
     ]
 }
 
-/// 確定した地図 `next`（面は `faces`）を、元の図形 `orig_shapes`（地図 `orig` を作った図形。`orig_keys` は `orig` の辺の
-/// 鍵）に書き戻すときの差分。戻り値は（消す元の図形, 新しく入れる塗りの形）。
+/// 確定した地図 `next`（面は `faces`）を、元の図形 `orig_shapes`（地図 `orig` を作った図形。`origin` は `next` の辺ごとの
+/// `orig` の同じ辺：`edge_origins`）に書き戻すときの差分。戻り値は（消す元の図形, 新しく入れる塗りの形）。
 /// - 面のすべての辺の形が残り、面のすべての辺の側の印が同じ1つの元の図形で、その図形と色も同じで、その図形のどの辺も
 ///   消えていないなら、その面は元の図形のまま残す
 /// - それ以外の面は、新しい塗りの形にして入れる。新しい形は、辺の側の印のうち、残した面の図形でないものでいちばん多い
@@ -1415,21 +1433,26 @@ fn edge_key(m: &PlanarMap, e: usize) -> [u64; 6] {
 /// （同じ元の図形を残す・引き継ぐ面はそれぞれ1つだけ、新しい形には新しい番号）なので、面と図形が1対1になる
 fn rewrite_shapes(
     orig: &PlanarMap,
-    orig_keys: &EdgeKeys,
+    origin: &[EdgeOrigin],
     next: &PlanarMap,
     faces: &[MapFace],
     orig_shapes: &[&FillShape],
     layer_id: u64,
     group_path: &[u64],
 ) -> (Vec<ShapeId>, Vec<FillShape>, Vec<ShapeId>) {
-    let next_keys: IntSet<[u64; 6]> = (0..next.edges.len()).map(|e| edge_key(next, e)).collect();
+    // `next` の辺 `e` の形が `orig` にあるか
+    let same = |e: usize| !matches!(origin[e], EdgeOrigin::New);
     // 辺が消えた元の図形
-    let mut cut: HashSet<ShapeId> = HashSet::new();
-    for e in 0..orig.edges.len() {
-        if !next_keys.contains(&edge_key(orig, e)) {
-            cut.extend(orig.edges[e].left_src);
-            cut.extend(orig.edges[e].right_src);
+    let mut remains = vec![false; orig.edges.len()];
+    for o in origin {
+        if let EdgeOrigin::Same(i) | EdgeOrigin::Reversed(i) = *o {
+            remains[i] = true;
         }
+    }
+    let mut cut: HashSet<ShapeId> = HashSet::new();
+    for (ed, _) in orig.edges.iter().zip(&remains).filter(|(_, r)| !**r) {
+        cut.extend(ed.left_src);
+        cut.extend(ed.right_src);
     }
     // 元の図形の色（番号ごと）。残す面は、元の図形と番号・色まで同じ面だけ（印が重ねた片や色を変えた片から来ても、元の
     // 図形でなければ新しい図形にする。残す面はいつも元の図形にあるので、`MapChange::into_face_shapes` が図形を引ける）
@@ -1439,11 +1462,7 @@ fn rewrite_shapes(
     let mut kept: HashSet<ShapeId> = HashSet::new();
     let mut ids: Vec<ShapeId> = vec![0; faces.len()];
     for (i, f) in faces.iter().enumerate() {
-        let all_same = f
-            .cycles
-            .iter()
-            .flatten()
-            .all(|h| orig_keys.contains_key(&edge_key(next, h.0)));
+        let all_same = f.cycles.iter().flatten().all(|h| same(h.0));
         let keep = all_same
             && f.srcs.len() == 1
             && orig_color.get(&f.srcs[0]) == Some(&f.color)
@@ -1463,10 +1482,7 @@ fn rewrite_shapes(
     }
     // 形の変わらない輪郭（触っていない穴など）は、元の図形の輪郭をそのまま使い回す
     let reuse = |cycle: &[(usize, bool)]| -> Option<Contour> {
-        if !cycle
-            .iter()
-            .all(|h| orig_keys.contains_key(&edge_key(next, h.0)))
-        {
+        if !cycle.iter().all(|h| same(h.0)) {
             return None;
         }
         let quads: Vec<QuadBez> = cycle.iter().map(|h| next.half_quad(*h)).collect();
@@ -1591,6 +1607,7 @@ impl PlanarMap {
             polys,
             cycles,
             cycle_regions,
+            origin,
         } = checked?;
         Some(CheckedMap {
             map: self,
@@ -1598,6 +1615,7 @@ impl PlanarMap {
             polys,
             cycles,
             cycle_regions,
+            since: Some((prev.stored.clone(), origin)),
         })
     }
 }
@@ -1844,9 +1862,14 @@ impl LayerBase {
         layer_id: LayerId,
         group_path: &[u64],
     ) -> MapChange {
+        // 確かめたときの辺の対応を使う（同じしまった地図から作った写しなら、辺の番号も同じ：`StoredMap::to_dense`）
+        let origin = match &next.since {
+            Some((stored, origin)) if stored.same(&self.stored) => Cow::Borrowed(&origin[..]),
+            _ => Cow::Owned(next.map.edge_origins(self)),
+        };
         let (removed, added, ids) = rewrite_shapes(
             &self.map,
-            self.keys(),
+            &origin,
             &next.map,
             &next.faces,
             own,
@@ -1916,6 +1939,14 @@ thread_local! {
     static VERTICES_SORTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// テスト用：このスレッドで、面の輪郭の点と面積（`Ring::new`）を作った数
     pub(super) static RINGS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// テスト用：このスレッドで、辺の鍵（`edge_key`）を求めた数
+    static KEYS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、辺の鍵を求めた数
+#[cfg(test)]
+pub(crate) fn keys_built() -> usize {
+    KEYS_BUILT.with(|n| n.get())
 }
 
 /// テスト用：このスレッドで、面の輪郭の点と面積を作った数
@@ -2545,6 +2576,9 @@ pub(crate) struct CheckedMap {
     cycles: Vec<Cycle>,
     /// 輪郭ごとの組み立ての結果（`cycles` の順）
     cycle_regions: Vec<CycleRegion>,
+    /// 書き戻す先の地図（しまった地図）と、辺ごとの、その地図の同じ辺（`PlanarMap::written` で確かめたときのもの。
+    /// 書き戻しの差分 `LayerBase::diff` が、同じ地図に書き戻すときに使う）
+    since: Option<(StoredMap, Vec<EdgeOrigin>)>,
 }
 
 impl PlanarMap {
@@ -2555,6 +2589,7 @@ impl PlanarMap {
             polys,
             cycles,
             cycle_regions,
+            ..
         } = self.checked_since(None)?;
         Some(CheckedMap {
             map: self,
@@ -2562,6 +2597,7 @@ impl PlanarMap {
             polys,
             cycles,
             cycle_regions,
+            since: None,
         })
     }
 }
@@ -2677,6 +2713,7 @@ impl CheckedMap {
             polys: self.polys,
             cycles: self.cycles,
             cycle_regions: self.cycle_regions,
+            since: self.since,
         }
     }
 

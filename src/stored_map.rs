@@ -220,7 +220,6 @@ impl StoredMap {
     }
 
     /// 同じ `Arc` か（同じしまった地図）
-    #[cfg(test)]
     pub(crate) fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }

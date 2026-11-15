@@ -30456,11 +30456,12 @@ fn test_short_brush_builds_polylines_only_near_the_stroke() {
         .iter()
         .map(|m| m.base().cycles().len())
         .sum();
-    let (before, reaches_before, sorted_before, rings_before) = (
+    let (before, reaches_before, sorted_before, rings_before, keys_before) = (
         crate::planar_map::polys_built(),
         crate::planar_map::reaches_built(),
         crate::planar_map::vertices_sorted(),
         crate::planar_map::rings_built(),
+        crate::planar_map::keys_built(),
     );
     let points = stroke(&mut rng, 6);
     assert!(doc_actions::apply(
@@ -30496,6 +30497,11 @@ fn test_short_brush_builds_polylines_only_near_the_stroke() {
         rings * 4 < cycles,
         "作った輪郭の点と面積 {rings}（輪郭 {cycles}）"
     );
+    // 辺の鍵（`edge_key`）は、前の地図の写しの辺の分（写しごとに1回）と、新しい地図の辺の分（`edge_origins`）だけ
+    // 求める。書き戻しの差分（`rewrite_shapes`）は、確かめたときの辺の対応（`CheckedMap::since`）を使う（前は書き戻しで
+    // 新しい地図と前の地図の辺の鍵と、面の辺ごとの鍵を、もう一度求めた）
+    let keys = crate::planar_map::keys_built() - keys_before;
+    assert!(keys < 3 * edges, "求めた辺の鍵 {keys}（辺 {edges} 本）");
 }
 
 /// N-2001：書き戻す地図の確かめで、前の地図にある辺どうしを省いても（`valid_faces_since`）、判定は全部を確かめる
