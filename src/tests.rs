@@ -30403,8 +30403,8 @@ fn measure_write_back_scaling() {
 
 /// 書き戻す地図を確かめるとき（`written`）と、新しい地図の写しを作るとき（`LayerBase::with_faces`）は、前の地図にある
 /// 辺の判定の形（`grid_poly`）を作り直さない。重ね合わせで近くの辺を探す外接矩形とマスも同じ：線の多いセル画に短い線を
-/// 1本描いても、作るのは線のまわりの分だけ。面の輪郭も、変わらない輪郭は引き継ぐ（レビュー f01d518 の R3。前はどれも、
-/// 毎回全部の分を作った）
+/// 1本描いても、作るのは線のまわりの分だけ。面の輪郭とその輪も、変わらない輪郭は引き継ぎ、しまうときも変わった所の塊
+/// だけを並べ直す（レビュー f01d518 の R3。前はどれも、毎回全部の分を作った）
 #[test]
 fn test_short_brush_builds_polylines_only_near_the_stroke() {
     let colors = [
@@ -30463,6 +30463,10 @@ fn test_short_brush_builds_polylines_only_near_the_stroke() {
         crate::planar_map::rings_built(),
         crate::planar_map::keys_built(),
     );
+    let (placed_before, dense_before) = (
+        crate::stored_map::edges_sorted(),
+        crate::planar_map::dense_builds(),
+    );
     let points = stroke(&mut rng, 6);
     assert!(doc_actions::apply(
         &mut app,
@@ -30502,6 +30506,15 @@ fn test_short_brush_builds_polylines_only_near_the_stroke() {
     // 新しい地図と前の地図の辺の鍵と、面の辺ごとの鍵を、もう一度求めた）
     let keys = crate::planar_map::keys_built() - keys_before;
     assert!(keys < 3 * edges, "求めた辺の鍵 {keys}（辺 {edges} 本）");
+    // しまうときも、変わった所の塊の辺だけを並べ直し（`StoredMap::from_dense_since`）、計算に使う地図は、しまう形から
+    // 作り直さずに、確かめた地図を並べ直して作る（`StoredMap::dense_in_order`。前はどちらも、全部の辺の分を行った）
+    let placed = crate::stored_map::edges_sorted() - placed_before;
+    assert!(placed * 4 < edges, "並べ直した辺 {placed}（辺 {edges} 本）");
+    assert_eq!(
+        crate::planar_map::dense_builds(),
+        dense_before,
+        "しまう形から計算に使う地図を作り直した"
+    );
 }
 
 /// N-2001：書き戻す地図の確かめで、前の地図にある辺どうしを省いても（`valid_faces_since`）、判定は全部を確かめる

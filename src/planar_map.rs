@@ -1171,7 +1171,7 @@ pub(super) struct CycleRegion {
 
 /// 辺の、正しい地図（前の地図の計算に使う写し）での形（`PlanarMap::polys_since`）
 #[derive(Clone, Copy, Debug)]
-pub(super) enum EdgeOrigin {
+pub(crate) enum EdgeOrigin {
     /// 前の地図の辺 `i` と、形も向きも同じ
     Same(usize),
     /// 前の地図の辺 `i` と形が同じだが、向きが逆
@@ -1647,6 +1647,8 @@ pub(crate) struct LayerBase {
 /// しまう形の辺の順（`StoredMap::to_dense` の辺の順）に並べた、辺ごとの判定の形と面の輪郭
 /// （`CheckedMap::into_stored_with_polys`。確かめた地図のものを、しまう形から作った写しに引き継ぐ）
 pub(crate) struct StoredGeom {
+    /// しまう形から作る地図（`StoredMap::to_dense` と同じもの：`StoredMap::dense_in_order`）
+    map: PlanarMap,
     polys: Vec<Poly>,
     cycles: Vec<Cycle>,
     regions: Vec<CycleRegion>,
@@ -1664,8 +1666,13 @@ impl LayerBase {
     fn from_stored(stored: StoredMap) -> Self {
         #[cfg(test)]
         DENSE_BUILDS.with(|n| n.set(n.get() + 1));
+        Self::of_dense(stored.to_dense(), stored)
+    }
+
+    /// しまった地図 `stored` と、その計算に使う地図 `map`（`stored.to_dense()` と同じもの）の写し
+    fn of_dense(map: PlanarMap, stored: StoredMap) -> Self {
         Self {
-            map: stored.to_dense(),
+            map,
             stored,
             keys: OnceLock::new(),
             polys: OnceLock::new(),
@@ -1700,7 +1707,7 @@ impl LayerBase {
         mut shapes: Vec<Arc<FillShape>>,
         polys: StoredGeom,
     ) -> Arc<Self> {
-        let base = Self::from_stored(stored);
+        let base = Self::of_dense(polys.map, stored);
         debug_assert_eq!(polys.polys.len(), base.map.edges.len());
         let _ = base.polys.set(polys.polys);
         let _ = base.cycles.set(polys.cycles);
@@ -2624,7 +2631,35 @@ impl CheckedMap {
         prev: Option<&StoredMap>,
     ) -> (StoredMap, StoredGeom) {
         let checked = self.uniquely_labeled();
-        let (stored, order) = StoredMap::from_dense_ordered(&checked.map, prev);
+        // 確かめたときの辺の対応が、しまう前の地図 `prev` に対してのものなら、変わった所の塊だけを作り直す
+        let origin = checked
+            .since
+            .as_ref()
+            .filter(|(s, _)| prev.is_some_and(|p| s.same(p)))
+            .map(|(_, o)| &o[..]);
+        let (stored, order) = StoredMap::from_dense_ordered(&checked.map, prev, origin);
+        let map = StoredMap::dense_in_order(&checked.map, &order);
+        #[cfg(test)]
+        if test_checks() {
+            let (full, full_order) = StoredMap::from_dense_ordered(&checked.map, prev, None);
+            // 比べるために並べた分は数えない（`stored_map::edges_sorted` は、しまうときに並べた辺の数）
+            crate::stored_map::EDGES_SORTED.with(|n| n.set(n.get() - checked.map.edges.len()));
+            assert!(stored.same_content(&full) && order == full_order);
+            if let Some(prev) = prev {
+                assert_eq!(stored.shared_tiles(prev), full.shared_tiles(prev));
+            }
+            let dense = stored.to_dense();
+            assert!(
+                map.edges == dense.edges
+                    && map.nodes.len() == dense.nodes.len()
+                    && map
+                        .nodes
+                        .iter()
+                        .zip(&dense.nodes)
+                        .all(|(a, b)| a.x.to_bits() == b.x.to_bits()
+                            && a.y.to_bits() == b.y.to_bits())
+            );
+        }
         let polys = order
             .iter()
             .map(|&(e, flipped)| {
@@ -2672,6 +2707,7 @@ impl CheckedMap {
         (
             stored,
             StoredGeom {
+                map,
                 polys,
                 cycles,
                 regions,
