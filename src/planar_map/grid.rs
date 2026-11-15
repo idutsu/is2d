@@ -1002,12 +1002,18 @@ pub(super) fn seg_cells((a, b): (IPt, IPt), pad: i64) -> impl Iterator<Item = (i
         a.1 + q
     };
     let c = GRID_CELL;
-    ((a.0 - pad).div_euclid(c)..=(b.0 + pad).div_euclid(c)).flat_map(move |cx| {
-        let (lo, hi) = ((cx * c - pad).max(a.0), ((cx + 1) * c + pad).min(b.0));
-        let ylo = y_at(lo, false).min(y_at(hi, false));
-        let yhi = y_at(lo, true).max(y_at(hi, true));
-        ((ylo - pad).div_euclid(c)..=(yhi + pad).div_euclid(c)).map(move |cy| (cx, cy))
-    })
+    // 太らせないとき、両端が同じマスにあれば、区間はそのマスの中にある（下のたどり方でも、そのマスだけになる）
+    let one = (pad == 0 && cell_of(a) == cell_of(b)).then(|| cell_of(a));
+    let columns = one
+        .is_none()
+        .then(|| (a.0 - pad).div_euclid(c)..=(b.0 + pad).div_euclid(c));
+    one.into_iter()
+        .chain(columns.into_iter().flatten().flat_map(move |cx| {
+            let (lo, hi) = ((cx * c - pad).max(a.0), ((cx + 1) * c + pad).min(b.0));
+            let ylo = y_at(lo, false).min(y_at(hi, false));
+            let yhi = y_at(lo, true).max(y_at(hi, true));
+            ((ylo - pad).div_euclid(c)..=(yhi + pad).div_euclid(c)).map(move |cy| (cx, cy))
+        }))
 }
 
 /// 曲線 `q`（px）と、その判定の形を、`pad` 目だけ太らせたものがかかるマス。曲線を、弦とのずれが半マスほどになる数に
