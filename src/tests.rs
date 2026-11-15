@@ -30719,6 +30719,70 @@ fn pasting_reuses_the_polylines_of_unmoved_edges() {
     assert!(built < 3 * edges, "作った判定の形 {built}（辺 {edges} 本）");
 }
 
+/// N-1001（レビュー f01d518）：同じ線は切らない。前からある辺と形がビットまで同じ重ねる地図の辺（同じ線の組）は、
+/// どちらの地図のどの辺とも交わらない（2つの地図はそれぞれ正しい地図）ので、i_overlay に入れずに1本で残し、両側の色だけを
+/// 決まりで決める（`PlanarMap::same_edges`）。同じ地図を同じ位置に重ねると、判定の形を1本も作らない（前は、重ねる地図の
+/// 辺をみな折れ線にして切っていた）。違う色の同じ形を重ねると、色は重ねる地図の色になり、両側が同じ色になった辺は消える
+#[test]
+fn pasting_onto_the_same_lines_cuts_nothing() {
+    use crate::planar_map::{LayerBase, MapInput, MapRule, PlanarMap};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    let mut rng = map_overlay::Rng(3);
+    let mut m = PlanarMap::default();
+    for k in 0..20 {
+        let c = colors[k % 3];
+        let r = 2.0 + rng.f() * 6.0;
+        let s = wiggly_stroke(&mut rng, (0.0, 0.0, 300.0, 200.0), r, c);
+        m = m
+            .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+            .unwrap();
+    }
+    let base = LayerBase::new(&m);
+    // 計算に使う写しの判定の形を先に作っておく（何も重ねない重ね合わせ）
+    let _ = base.overlay(MapInput::Shapes(&[]), MapRule::Overlay);
+    let before = crate::planar_map::polys_built();
+    let pasted = base
+        .overlay(MapInput::Map(&base.map), MapRule::Overlay)
+        .unwrap();
+    assert_eq!(
+        crate::planar_map::polys_built() - before,
+        0,
+        "同じ地図を同じ位置に重ねて作った判定の形"
+    );
+    assert!(pasted.is_valid());
+    assert_eq!(pasted.edges.len(), m.edges.len());
+    // 同じ形を青1色にして重ねる：色のある所はみな青になり、青どうしの境目は消える
+    let blue = Color32::from_rgb(20, 40, 200);
+    let mut recolored = m.clone();
+    for e in &mut recolored.edges {
+        e.left = e.left.map(|_| blue);
+        e.right = e.right.map(|_| blue);
+    }
+    let painted = base
+        .overlay(MapInput::Map(&recolored), MapRule::Overlay)
+        .unwrap();
+    assert!(painted.is_valid());
+    assert!(painted.edges.iter().all(|e| e.left != e.right
+        && [e.left, e.right]
+            .iter()
+            .all(|c| c.is_none_or(|c| c == blue))));
+    for p in [
+        Point::new(50.0, 50.0),
+        Point::new(150.0, 100.0),
+        Point::new(250.0, 150.0),
+    ] {
+        assert_eq!(
+            painted.color_at(p),
+            m.color_at(p).map(|_| blue),
+            "{p:?} の色"
+        );
+    }
+}
+
 /// R2（レビュー f01d518）：重ね合わせでは、i_overlay に1回だけ切らせる。切れ目の頂点は、切った曲線から
 /// `FLAT_TOL + SPLIT_REACH` 以内にあり、戻すときはその許容で2本を1本にまとめる（`merge_degree2`）ので、曲線の本当の交点を
 /// 折れ線に足して切り直す2回目の切りは要らない（前は、2本の曲線が交わる所があると、交点をニュートン法で求めて足し、

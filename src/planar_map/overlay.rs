@@ -461,16 +461,25 @@ impl PlanarMap {
         // 重ねる地図の辺も、前からある辺と同じ決まりで入れるかを決める（入れない辺はそのまま写し、色だけ決める）。そのために
         // 2つの地図の辺を1つに並べる（前からある辺が 0..n_old、重ねる地図の辺がその後ろ）。形と輪郭の変形の線はみな入れる
         let joined;
+        let mut partner: Vec<Option<(usize, bool)>> = Vec::new();
         let (cands, seeds): (&PlanarMap, &[QuadBez]) = match input {
             MapInput::Map(p) => {
-                joined = self.joined(p);
+                let (pairs, alias) = self.same_edges(p);
+                joined = self.joined(p, &alias);
+                partner = vec![None; joined.edges.len()];
+                for &(e, f, same_dir) in &pairs {
+                    let f = self.edges.len() + f;
+                    partner[e] = Some((f, same_dir));
+                    partner[f] = Some((e, same_dir));
+                }
                 (&joined, &[])
             }
             _ => (self, &new_quads),
         };
         let check = self.edges.len()..cands.edges.len();
         let moved = input.moved_flags(cands.edges.len());
-        let mut fed = cands.fed_edges(known, seeds, &moved, moved.clone(), check.clone())?;
+        let mut fed =
+            cands.fed_edges(known, seeds, &moved, moved.clone(), check.clone(), &partner)?;
         loop {
             match cands.overlay_with(input, &rules, &new_quads, &new_cols, &mut fed) {
                 Ok(maps) => return Some(maps.try_into().expect("決まりごとに1つの地図")),
@@ -479,29 +488,69 @@ impl PlanarMap {
                     for e in more {
                         set[e] = true;
                     }
-                    fed = cands.fed_edges(known, seeds, &moved, set, check.clone())?;
+                    fed = cands.fed_edges(known, seeds, &moved, set, check.clone(), &partner)?;
                 }
                 Err(OverlayStop::Refused) => return None,
             }
         }
     }
 
-    /// 2つの地図の辺と頂点を1つに並べたもの（`other` の頂点の番号は後ろへずらす）。正しい地図とは限らない（重ね合わせで
-    /// 入れる辺を決めるときと、片を置く前の形を表すときの入れ物）
-    pub(super) fn joined(&self, other: &PlanarMap) -> PlanarMap {
+    /// 2つの地図の辺と頂点を1つに並べたもの（`other` の頂点の番号は後ろへずらす。ただし `alias` にある頂点は、その前から
+    /// ある頂点にする：同じ線の組の端（`same_edges`））。正しい地図とは限らない（重ね合わせで入れる辺を決めるときと、片を
+    /// 置く前の形を表すときの入れ物）
+    pub(super) fn joined(&self, other: &PlanarMap, alias: &IntMap<usize, usize>) -> PlanarMap {
         let n = self.nodes.len();
+        let at = |v: usize| alias.get(&v).copied().unwrap_or(v + n);
         let nodes: Vec<Point> = self.nodes.iter().chain(&other.nodes).copied().collect();
         let edges = self
             .edges
             .iter()
             .copied()
             .chain(other.edges.iter().map(|e| MapEdge {
-                a: e.a + n,
-                b: e.b + n,
+                a: at(e.a),
+                b: at(e.b),
                 ..*e
             }))
             .collect();
         PlanarMap { nodes, edges }
+    }
+
+    /// 同じ線の組：前からある辺 e と、重ねる地図 `other` の辺 f で、形がビットまで同じもの（`edge_key`。向きは問わない）。
+    /// （e, f, 同じ向きか）の並びと、組の端の `other` の頂点 → 前からある頂点。
+    /// 前の地図も重ねる地図も正しい地図なので、e（＝f）は、どちらの地図のどの辺とも、共有する頂点のほかで交わらない
+    /// （前からある辺とは e が、重ねる地図の辺とは f が、同じ地図の中にあるので）。だから組は切らずに1本で残し、両側の
+    /// 色だけを決まりで決めればよい（`overlay_fed`）
+    pub(super) fn same_edges(&self, other: &PlanarMap) -> SameEdges {
+        let mut pairs = Vec::new();
+        let mut alias: IntMap<usize, usize> = IntMap::default();
+        let Some(area) = other
+            .nodes
+            .iter()
+            .map(|&p| KRect::from_points(p, p))
+            .reduce(|a, b| a.union(b))
+        else {
+            return (pairs, alias);
+        };
+        let inside =
+            |p: Point| p.x >= area.x0 && p.x <= area.x1 && p.y >= area.y0 && p.y <= area.y1;
+        let mut by_key: std::collections::HashMap<[u64; 6], usize> = Default::default();
+        for f in 0..other.edges.len() {
+            by_key.insert(super::edge_key(other, f), f);
+        }
+        for (e, ed) in self.edges.iter().enumerate() {
+            if !inside(self.nodes[ed.a]) || !inside(self.nodes[ed.b]) {
+                continue;
+            }
+            if let Some(&f) = by_key.get(&super::edge_key(self, e)) {
+                let fd = other.edges[f];
+                let same_dir = other.nodes[fd.a] == self.nodes[ed.a];
+                let (fa, fb) = if same_dir { (fd.a, fd.b) } else { (fd.b, fd.a) };
+                alias.insert(fa, ed.a);
+                alias.insert(fb, ed.b);
+                pairs.push((e, f, same_dir));
+            }
+        }
+        (pairs, alias)
     }
 
     /// i_overlay に入れる辺（設計 2-1）。`fed` の辺と重ねる線 `seeds` の折れ線の近くを通る辺を足し、
@@ -520,6 +569,7 @@ impl PlanarMap {
         moved: &[bool],
         mut fed: Vec<bool>,
         check: std::ops::Range<usize>,
+        partner: &[Option<(usize, bool)>],
     ) -> Option<FedEdges> {
         #[cfg(test)]
         super::FED_RUNS.with(|n| n.set(n.get() + 1));
@@ -622,7 +672,12 @@ impl PlanarMap {
         let mut seg_grid = CellGrid::new();
         let mut found = Vec::new();
         let mut lines: Vec<GridLine> = Vec::new();
-        let mut edge_queue: Vec<usize> = check.clone().collect();
+        // 重ねる地図の辺は、はじめに入れない辺と触れないかを調べる。同じ線の組の辺は調べない：相手のほかの前からある辺と
+        // 触れれば、前の地図で相手がその辺と触れている
+        let mut edge_queue: Vec<usize> = check
+            .clone()
+            .filter(|&c| partner.get(c).copied().flatten().is_none())
+            .collect();
         let mut to_feed: Vec<usize> = (0..self.edges.len()).filter(|&e| fed[e]).collect();
         // 同じ線として扱う所（`Span`）：重ねる線（形の線・輪郭の変形の線と、重ねる地図の辺）と、前からある辺（輪郭の変形で
         // 動かした辺は除く）が同じ線になっている所。その2本は入れ、その所は2本とも同じ点の折れ線にする。1本の線の上で
@@ -635,12 +690,13 @@ impl PlanarMap {
             .map(|(i, q)| (Line::Seed(i), *q))
             .chain(check.clone().map(|c| (Line::Edge(c), self.quad(c))))
             .collect();
-        let free = |list: Option<&Vec<Span>>, lo: f64, hi: f64| {
-            list.is_none_or(|v| v.iter().all(|sp| hi <= sp.lo || lo >= sp.hi))
-        };
         for &(line, q) in &new_lines {
             // 格子に置けない座標（頂点と制御点：`fits_grid` と同じ）は、ここで断る
             on_grid([q.p0, q.p1, q.p2].into_iter()).then_some(())?;
+            // 同じ線の組（`same_edges`）は入れない（あとで片方を入れるときに、重なる所を記す）
+            if matches!(line, Line::Edge(c) if partner.get(c).copied().flatten().is_some()) {
+                continue;
+            }
             edge_grid.query(quad_cells(q, flat_pad), &mut found);
             let mut pairs: Vec<(usize, OverlapPts)> = found
                 .iter()
@@ -650,53 +706,22 @@ impl PlanarMap {
                 .collect();
             pairs.sort_by(|a, b| a.1[0].1.total_cmp(&b.1[0].1));
             for (e, pts) in pairs {
-                let (s_lo, s_hi) = (pts[0].1, pts[pts.len() - 1].1);
-                let (u_a, u_b) = (pts[0].2, pts[pts.len() - 1].2);
-                let (u_lo, u_hi) = (u_a.min(u_b), u_a.max(u_b));
-                if !free(spans.get(&line), s_lo, s_hi)
-                    || !free(spans.get(&Line::Edge(e)), u_lo, u_hi)
-                {
-                    continue;
-                }
-                let mut on_edge: Vec<(Point, f64)> = pts.iter().map(|&(p, _, u)| (p, u)).collect();
-                if u_a > u_b {
-                    on_edge.reverse();
-                }
-                for (key, span) in [
-                    (
-                        line,
-                        Span {
-                            lo: s_lo,
-                            hi: s_hi,
-                            pts: pts.iter().map(|&(p, s, _)| (p, s)).collect(),
-                        },
-                    ),
-                    (
-                        Line::Edge(e),
-                        Span {
-                            lo: u_lo,
-                            hi: u_hi,
-                            pts: on_edge,
-                        },
-                    ),
-                ] {
-                    let list = spans.entry(key).or_default();
-                    let at = list.partition_point(|sp| sp.lo < span.lo);
-                    list.insert(at, span);
-                }
-                to_feed.push(e);
-                if let Line::Edge(c) = line {
-                    to_feed.push(c);
+                if add_span(&mut spans, line, e, &pts) {
+                    to_feed.push(e);
+                    if let Line::Edge(c) = line {
+                        to_feed.push(c);
+                    }
                 }
             }
         }
-        let fed_set = FedEdges {
+        let mut fed_set = FedEdges {
             fed: Vec::new(),
             known: known.to_vec(),
             spans,
             boxes: Vec::new(),
             grid: CellGrid::new(),
             adj: Grouped::new(0, std::iter::empty()),
+            partner: Vec::new(),
         };
         let mut pbuf = PointsBuf::default();
         let mut gline: Vec<IPt> = Vec::new();
@@ -714,6 +739,16 @@ impl PlanarMap {
                     continue;
                 }
                 fed[e] = true;
+                // 同じ線の組は、片方を入れたら、もう片方も入れる。2本が同じ点の折れ線になるよう、重なる所を記す
+                if let Some((f, _)) = partner.get(e).copied().flatten() {
+                    if !fed[f] {
+                        let (c, o) = if e >= check.start { (e, f) } else { (f, e) };
+                        if let Some(pts) = self.overlap(&self.quad(c), o) {
+                            add_span(&mut fed_set.spans, Line::Edge(c), o, &pts);
+                        }
+                        to_feed.push(f);
+                    }
+                }
                 let ed = self.edges[e];
                 for v in [ed.a, ed.b] {
                     if !snapped[v] {
@@ -778,8 +813,9 @@ impl PlanarMap {
                     // 端を置き直した形が、ほかの入れない辺と触れないか（共有する頂点は除く）
                     edge_grid.query(edge_cells(e), &mut found);
                     let given = as_given(e);
+                    let mate = partner.get(e).copied().flatten().map(|(m, _)| m);
                     for &f in &found {
-                        if f == e || fed[f] || (given && as_given(f)) {
+                        if f == e || fed[f] || (given && as_given(f)) || Some(f) == mate {
                             continue;
                         }
                         let fd = self.edges[f];
@@ -803,6 +839,7 @@ impl PlanarMap {
                     boxes,
                     grid: edge_grid,
                     adj,
+                    partner: partner.to_vec(),
                     ..fed_set
                 });
             }
@@ -861,6 +898,10 @@ impl PlanarMap {
         //    重ねるものの外接矩形にかかる前からある辺は「中の辺」（色を決め直す）
         let mut srcs: Vec<(QuadBez, OverlaySrc)> = Vec::new();
         let mut interior = vec![false; self.edges.len()];
+        // 同じ線の組（`same_edges`）のうち入れなかったもの：前からある辺を1本で残し、重ねる地図の辺は出さない（`dropped`）
+        let partner = fed_set.partner.clone();
+        let mate = |e: usize| partner.get(e).copied().flatten().filter(|_| !fed[e]);
+        let dropped = |e: usize| e >= n_old && mate(e).is_some();
         for e in 0..self.edges.len() {
             if fed[e] {
                 let src = if e < n_old {
@@ -1373,10 +1414,19 @@ impl PlanarMap {
         let inner: Vec<usize> = (0..self.edges.len()).filter(|&e| interior[e]).collect();
         let mut group: Vec<u32> = (0..inner.len() as u32).collect();
         let mut first_at: IntMap<(bool, usize), usize> = IntMap::default();
+        // 同じ線の組の端の頂点：組の両側でもう片方の地図の値が違うので、そこでは組にしない
+        let mut pair_node = vec![false; nodes.len()];
+        for &e in &inner {
+            if mate(e).is_some() {
+                let ed = self.edges[e];
+                pair_node[node_at(ed.a)] = true;
+                pair_node[node_at(ed.b)] = true;
+            }
+        }
         for (i, &e) in inner.iter().enumerate() {
             let ed = self.edges[e];
             for v in [node_at(ed.a), node_at(ed.b)] {
-                if around.get(v).is_empty() {
+                if around.get(v).is_empty() && !pair_node[v] {
                     let j = *first_at.entry((e < n_old, v)).or_insert(i);
                     dsu_union(&mut group, i, j);
                 }
@@ -1453,6 +1503,33 @@ impl PlanarMap {
             let mut inner_cols: IntMap<usize, Sides> = IntMap::default();
             for (i, &e) in inner.iter().enumerate() {
                 let ed = self.edges[e];
+                if dropped(e) {
+                    continue;
+                }
+                // 同じ線の組：両側の値は、相手（重ねる地図の辺）のその側の印
+                if let Some((f, same_dir)) = mate(e) {
+                    let fd = self.edges[f];
+                    let (fl, fr) = if same_dir {
+                        ((fd.left, fd.left_src), (fd.right, fd.right_src))
+                    } else {
+                        ((fd.right, fd.right_src), (fd.left, fd.left_src))
+                    };
+                    let l = rule.apply_label(&Over::Color(fl.0), fl.1, (ed.left, ed.left_src));
+                    let r = rule.apply_label(&Over::Color(fr.0), fr.1, (ed.right, ed.right_src));
+                    inner_cols.insert(e, (l.0, r.0));
+                    if l.0 != r.0 {
+                        interior_kept.push(MapEdge {
+                            a: node_at(ed.a),
+                            b: node_at(ed.b),
+                            left: l.0,
+                            right: r.0,
+                            left_src: l.1,
+                            right_src: r.1,
+                            ..ed
+                        });
+                    }
+                    continue;
+                }
                 let g = dsu_find(&mut group, i as u32);
                 let (l, r) = if e < n_old {
                     let over = over_memo.entry(g).or_insert_with(|| over_at(probe(e)));
@@ -1494,7 +1571,7 @@ impl PlanarMap {
                     let (l, r) = piece_cols[k];
                     (dir_of(&(k, fwd)), if fwd { (l, r) } else { (r, l) }, None)
                 }));
-                for &(e, at_start, d) in stops.get(v) {
+                for &(e, at_start, d) in stops.get(v).iter().filter(|s| !dropped(s.0)) {
                     let (l, r) = unfed_cols(e);
                     turns.push((d, if at_start { (l, r) } else { (r, l) }, Some(e)));
                 }
@@ -1741,6 +1818,51 @@ impl PlanarMap {
     }
 }
 
+/// 同じ線の組（前からある辺, 重ねる地図の辺, 同じ向きか）の並びと、組の端の重ねる地図の頂点 → 前からある頂点
+/// （`PlanarMap::same_edges`）
+type SameEdges = (Vec<(usize, usize, bool)>, IntMap<usize, usize>);
+
+/// 線 `line` と前からある辺 `e` が重なる所 `pts`（`PlanarMap::overlap`）を、2本の同じ線として扱う所（`Span`）として記す。
+/// 1本の線の上で、前に記した所と重なるなら記さない（`false`）
+fn add_span(spans: &mut IntMap<Line, Vec<Span>>, line: Line, e: usize, pts: &OverlapPts) -> bool {
+    let free = |list: Option<&Vec<Span>>, lo: f64, hi: f64| {
+        list.is_none_or(|v| v.iter().all(|sp| hi <= sp.lo || lo >= sp.hi))
+    };
+    let (s_lo, s_hi) = (pts[0].1, pts[pts.len() - 1].1);
+    let (u_a, u_b) = (pts[0].2, pts[pts.len() - 1].2);
+    let (u_lo, u_hi) = (u_a.min(u_b), u_a.max(u_b));
+    if !free(spans.get(&line), s_lo, s_hi) || !free(spans.get(&Line::Edge(e)), u_lo, u_hi) {
+        return false;
+    }
+    let mut on_edge: Vec<(Point, f64)> = pts.iter().map(|&(p, _, u)| (p, u)).collect();
+    if u_a > u_b {
+        on_edge.reverse();
+    }
+    for (key, span) in [
+        (
+            line,
+            Span {
+                lo: s_lo,
+                hi: s_hi,
+                pts: pts.iter().map(|&(p, s, _)| (p, s)).collect(),
+            },
+        ),
+        (
+            Line::Edge(e),
+            Span {
+                lo: u_lo,
+                hi: u_hi,
+                pts: on_edge,
+            },
+        ),
+    ] {
+        let list = spans.entry(key).or_default();
+        let at = list.partition_point(|sp| sp.lo < span.lo);
+        list.insert(at, span);
+    }
+    true
+}
+
 /// 同じ線として扱う所（`Span`）にかかわる線：重ねる線（形・輪郭の変形の線。`fed_edges` の `seeds` の番号）か、辺（前から
 /// ある辺と、重ねる地図の辺。`fed_edges` の地図の辺の番号）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1925,6 +2047,8 @@ pub(super) struct FedEdges {
     grid: CellGrid,
     /// 頂点ごとの辺
     adj: Grouped<usize>,
+    /// 辺ごとの、同じ線の組の相手と、同じ向きか（`same_edges`。重ねる地図でなければ空）
+    partner: Vec<Option<(usize, bool)>>,
 }
 
 /// 地図 `m` の辺 `e` を、端の頂点を `ends` に置いた曲線の判定の形（`out` に入れる。前の中身は消す）。端が動いて
