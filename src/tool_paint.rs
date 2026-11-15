@@ -6,11 +6,7 @@ use crate::doc_actions::{apply, collect_all_visible_shapes, Action, ActionHost};
 use crate::vector_engine::{
     append_mesh, tessellate_raw_polygon, transform_mesh_to_screen, MAX_VIEW_ZOOM, MIN_VIEW_ZOOM,
 };
-use crate::vector_stroke::generate_brush_outline_at_zoom;
-
-/// ブラシ・消しゴムドラッグ中のリアルタイムプレビューにおいて、
-/// 1フレームあたりに再テッセレーションする末尾ストローク点数の上限（これを超えた前半区間は `committed_mesh` に確定させて O(1) 更新を保証する）
-const STROKE_TAIL_CHUNK_LEN: usize = 24;
+use crate::vector_stroke::{input_step, stroke_preview_outline, CenterlineBuilder};
 
 // ============================================================================
 // ブラシ（B）・消しゴム（E）・バケツ塗り（K）・スポイト（I）の操作ロジック
@@ -36,27 +32,34 @@ pub(crate) fn handle_brush_or_eraser_input(
     } else {
         Color32::from_rgba_unmultiplied(255, 255, 255, 220)
     };
+    // 描いている間の形は、離したあとの形と同じ中心線（`CenterlineBuilder`）を太らせたもの。確定した所は確定するたびに
+    // 足し、確定していない所は点が来るたびに作り直す
     let z = (host.tab().view.zoom as f64).clamp(MIN_VIEW_ZOOM as f64, MAX_VIEW_ZOOM as f64);
-    let screen_r = base_r * z;
-    let min_sample_dist = (0.25 * screen_r).clamp(0.4, 1.5) / z;
+    let ppp = response.ctx.pixels_per_point();
+    host.tab_mut().view.pixels_per_point = ppp;
+    let tail_of = |b: &CenterlineBuilder| {
+        let cl = b.current();
+        let from = b.fixed().saturating_sub(1);
+        tessellate_raw_polygon(
+            &stroke_preview_outline(&cl, from, cl.len().saturating_sub(1), base_r, z),
+            preview_color,
+        )
+    };
 
     if response.drag_started_by(PointerButton::Primary) {
         let press_pt = host.tab().view.press_origin_world(&response.ctx);
         if let Some(start_pt) = press_pt.or(mouse_pt) {
-            let mut stroke = vec![start_pt];
+            let mut stroke = CenterlineBuilder::new(input_step(z, ppp as f64));
+            stroke.push(start_pt);
             if let Some(curr_pt) = mouse_pt {
-                if (curr_pt - start_pt).hypot() >= min_sample_dist {
-                    stroke.push(curr_pt);
-                }
+                stroke.push(curr_pt);
             }
-            let tail_outline = generate_brush_outline_at_zoom(&stroke, base_r, z);
-            let tail_mesh = tessellate_raw_polygon(&tail_outline, preview_color);
+            let tail_mesh = tail_of(&stroke);
             let tab = host.tab_mut();
             tab.session.drag = ActiveCanvasDrag::PaintStroke {
                 stroke,
                 committed_world_mesh: egui::Mesh::default(),
                 tail_mesh,
-                tail_start_idx: 0,
             };
         }
     } else if response.dragged_by(PointerButton::Primary) {
@@ -67,22 +70,27 @@ pub(crate) fn handle_brush_or_eraser_input(
                 stroke,
                 committed_world_mesh,
                 tail_mesh,
-                tail_start_idx,
             },
         ) = (mouse_pt, &mut tab.session.drag)
         {
-            if stroke
-                .last()
-                .is_none_or(|&last| (pt - last).hypot() >= min_sample_dist)
-            {
-                if stroke.len().saturating_sub(*tail_start_idx) >= STROKE_TAIL_CHUNK_LEN {
-                    append_mesh(committed_world_mesh, tail_mesh);
-                    *tail_start_idx = stroke.len().saturating_sub(2);
+            let before = stroke.points().len();
+            let fixed_before = stroke.push(pt);
+            if stroke.points().len() != before {
+                if let Some(f0) = fixed_before {
+                    let cl = stroke.current();
+                    let piece = stroke_preview_outline(
+                        &cl,
+                        f0.saturating_sub(1),
+                        stroke.fixed() - 1,
+                        base_r,
+                        z,
+                    );
+                    append_mesh(
+                        committed_world_mesh,
+                        &tessellate_raw_polygon(&piece, preview_color),
+                    );
                 }
-                stroke.push(pt);
-                let tail_outline =
-                    generate_brush_outline_at_zoom(&stroke[*tail_start_idx..], base_r, z);
-                *tail_mesh = tessellate_raw_polygon(&tail_outline, preview_color);
+                *tail_mesh = tail_of(stroke);
             }
         }
     }
@@ -104,8 +112,8 @@ pub(crate) fn handle_brush_or_eraser_input(
     if response.drag_stopped_by(PointerButton::Primary) {
         let drag = std::mem::take(&mut host.tab_mut().session.drag);
         if let ActiveCanvasDrag::PaintStroke { stroke, .. } = drag {
-            if !stroke.is_empty() {
-                apply(host, stroke_action(stroke));
+            if !stroke.points().is_empty() {
+                apply(host, stroke_action(stroke.points().to_vec()));
             }
         }
     } else if response.clicked_by(PointerButton::Primary) {

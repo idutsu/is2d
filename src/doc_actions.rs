@@ -31,10 +31,9 @@ use crate::symbol_ops::{
 };
 use crate::timeline::{Layer, Timeline, TimelineCellSelection, MAX_LAYERS_PER_TIMELINE};
 use crate::vector_engine::{
-    affine_rotate_around, affine_scale_around, rects_overlap, FillShape, LayerId, MAX_VIEW_ZOOM,
-    MIN_VIEW_ZOOM,
+    affine_rotate_around, affine_scale_around, rects_overlap, FillShape, LayerId,
 };
-use crate::vector_stroke::{build_smoothed_stroke_shapes_at_zoom, generate_brush_outline_at_zoom};
+use crate::vector_stroke::{input_step, stroke_shapes};
 
 // ============================================================================
 // 1. ActionHost / Action の定義
@@ -80,6 +79,7 @@ pub(crate) enum Action {
         points: Vec<Point>,
         radius: f32,
     },
+    /// テスト用：閉じた折れ線 `raw`（NonZero で塗る）を、そのまま直線の輪郭の形にして、今のツールで塗る・消す
     #[cfg(test)]
     CommitRawOutline {
         raw: Vec<Point>,
@@ -447,21 +447,20 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             if points.is_empty() {
                 return false;
             }
-            let z = (tab.view.zoom as f64).clamp(MIN_VIEW_ZOOM as f64, MAX_VIEW_ZOOM as f64);
-            let raw = generate_brush_outline_at_zoom(&points, radius as f64, z);
-            apply_raw_outline(tab, Tool::Brush, color, &raw)
+            let shapes = stroke_shapes_in_view(tab, &points, radius, color);
+            apply_stroke_shapes(tab, Tool::Brush, shapes)
         }
         Action::EraseStroke { points, radius } => {
             if points.is_empty() {
                 return false;
             }
-            let z = (tab.view.zoom as f64).clamp(MIN_VIEW_ZOOM as f64, MAX_VIEW_ZOOM as f64);
-            let raw = generate_brush_outline_at_zoom(&points, radius as f64, z);
-            apply_raw_outline(tab, Tool::Eraser, tool.brush_color, &raw)
+            let shapes = stroke_shapes_in_view(tab, &points, radius, tool.brush_color);
+            apply_stroke_shapes(tab, Tool::Eraser, shapes)
         }
         #[cfg(test)]
         Action::CommitRawOutline { raw } => {
-            apply_raw_outline(tab, tool.tool, tool.brush_color, &raw)
+            let shapes = crate::vector_stroke::polygon_shapes(&raw, tool.brush_color);
+            apply_stroke_shapes(tab, tool.tool, shapes)
         }
         Action::BucketFill { pt, color } => apply_bucket_fill(tab, color, pt),
 
@@ -753,21 +752,30 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
 // 4. 各アクションの内部実装
 // ============================================================================
 
-fn apply_raw_outline(
-    tab: &mut Tab,
-    active_tool: Tool,
-    brush_color: Color32,
-    raw: &[Point],
-) -> bool {
+/// ブラシ・消しゴムの点 `points`（ステージの座標）と半径から、線の形を作る。丸めの刻みと当てはめの許容は、今の表示の
+/// 倍率と画面の倍率で決める（描いている間の形と同じ：`tool_paint::handle_brush_or_eraser_input`）
+fn stroke_shapes_in_view(
+    tab: &Tab,
+    points: &[Point],
+    radius: f32,
+    color: Color32,
+) -> Vec<FillShape> {
+    let zoom = tab.view.zoom as f64;
+    let step = input_step(zoom, tab.view.pixels_per_point as f64);
+    stroke_shapes(points, radius as f64, step, zoom, color)
+}
+
+/// ブラシ・消しゴムの線の形 `shapes` を、今のレイヤー・階層の地図に塗る・消す
+fn apply_stroke_shapes(tab: &mut Tab, active_tool: Tool, shapes: Vec<FillShape>) -> bool {
     let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
     if !tab.active_timeline().is_layer_editable_by_id(target_lid) {
         return false;
     }
-    let stroke_shapes: Vec<FillShape> =
-        build_smoothed_stroke_shapes_at_zoom(raw, brush_color, tab.view.zoom as f64)
-            .into_iter()
-            .map(|s| s.with_scope(target_lid, &tab.session.editing_group_path))
-            .collect();
+    let brush_color = shapes.first().map_or(Color32::BLACK, |s| s.color);
+    let stroke_shapes: Vec<FillShape> = shapes
+        .into_iter()
+        .map(|s| s.with_scope(target_lid, &tab.session.editing_group_path))
+        .collect();
     if stroke_shapes.is_empty() {
         return false;
     }

@@ -339,11 +339,12 @@ pub(crate) enum TransformDragState {
 pub(crate) enum ActiveCanvasDrag {
     #[default]
     None,
+    /// ブラシ・消しゴムのストローク。`stroke` は受け取った点と中心線、`committed_world_mesh` は確定した中心線を
+    /// 太らせた形（文書の座標。確定するたびに足す）、`tail_mesh` は確定していない所を太らせた形（点が来るたびに作り直す）
     PaintStroke {
-        stroke: Vec<Point>,
+        stroke: crate::vector_stroke::CenterlineBuilder,
         committed_world_mesh: egui::Mesh,
         tail_mesh: egui::Mesh,
-        tail_start_idx: usize,
     },
     /// 選択した図形の移動（選択ツール・自由変形ツール共通）
     MoveSelection(MoveSelectionDrag),
@@ -362,6 +363,9 @@ pub(crate) enum ActiveCanvasDrag {
 pub(crate) struct View {
     /// キャンバスのズーム倍率（1.0 = 100%, 範囲 0.15..=16.0）
     pub(crate) zoom: f32,
+    /// 画面の倍率（論理の1点あたりの画素の数。Retina なら 2）。ブラシ・消しゴムで、マウスの点の丸めの刻みを決める
+    /// （`vector_stroke::input_step`）。ブラシ・消しゴムを使うたびに画面から取る
+    pub(crate) pixels_per_point: f32,
     /// キャンバスのパンオフセット（スクリーンピクセル単位）
     pub(crate) pan: Vec2,
     /// スペースドラッグ / 中ボタンドラッグによるパン操作中の直前スクリーン座標
@@ -390,6 +394,7 @@ impl Default for View {
     fn default() -> Self {
         Self {
             zoom: 1.0,
+            pixels_per_point: 1.0,
             pan: Vec2::ZERO,
             pan_last_screen_pos: None,
             clip_outside_stage: false,

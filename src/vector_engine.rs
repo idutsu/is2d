@@ -16,7 +16,6 @@ use std::{
     },
 };
 
-pub(crate) const REFERENCE_BRUSH_RADIUS: f64 = 8.0;
 pub(crate) const MIN_VIEW_ZOOM: f32 = 0.15;
 pub(crate) const MAX_VIEW_ZOOM: f32 = 16.0;
 
@@ -225,16 +224,6 @@ pub(crate) struct Contour {
     pub(crate) segments: Arc<Vec<QuadBez>>,
 }
 
-#[inline]
-pub(crate) fn is_quad_finite(s: &QuadBez) -> bool {
-    s.p0.x.is_finite()
-        && s.p0.y.is_finite()
-        && s.p1.x.is_finite()
-        && s.p1.y.is_finite()
-        && s.p2.x.is_finite()
-        && s.p2.y.is_finite()
-}
-
 impl Contour {
     pub(crate) fn new(mut segments: Vec<QuadBez>) -> Self {
         segments.shrink_to_fit();
@@ -304,44 +293,6 @@ impl Contour {
                 [p.x, p.y]
             })
         }))
-    }
-
-    /// 極端に短い退化セグメントや非有限座標セグメントを除去し、端点の連続性を保証する
-    fn cleanup_degenerate(&mut self, min_len: f64) {
-        let has_non_finite = !self.segments.iter().all(is_quad_finite);
-        if has_non_finite || self.segments.len() > 3 {
-            let mut kept: Vec<QuadBez> = self
-                .segments
-                .iter()
-                .copied()
-                .filter(|s| is_quad_finite(s) && (s.p2 - s.p0).hypot() >= min_len)
-                .collect();
-            if has_non_finite || (kept.len() >= 3 && kept.len() != self.segments.len()) {
-                kept.shrink_to_fit();
-                self.segments = Arc::new(kept);
-            }
-        }
-        self.enforce_continuity();
-    }
-
-    /// セグメント列から退化除去・最小面積判定・ワインディング向き統一・端点連続性保証を行った `Contour` を構築する
-    pub(crate) fn from_segments_oriented(
-        segments: Vec<QuadBez>,
-        min_seg_len: f64,
-        min_area: f64,
-        expect_positive_area: bool,
-    ) -> Option<Self> {
-        let mut contour = Self::new(segments);
-        contour.cleanup_degenerate(min_seg_len);
-        let area = contour.signed_area();
-        if area.abs() < min_area {
-            return None;
-        }
-        if (expect_positive_area && area < 0.0) || (!expect_positive_area && area > 0.0) {
-            contour.reverse();
-        }
-        contour.enforce_continuity();
-        Some(contour)
     }
 
     pub(crate) fn reverse(&mut self) {
@@ -791,11 +742,6 @@ pub(crate) fn make_marquee_rect_shape(rect: KRect) -> FillShape {
 }
 
 #[inline]
-pub(crate) fn ring_f64_to_points(ring: &[[f64; 2]]) -> Vec<Point> {
-    ring.iter().map(|&[x, y]| Point::new(x, y)).collect()
-}
-
-#[inline]
 pub(crate) fn normalize_vec(v: KVec2) -> KVec2 {
     let len = v.hypot();
     if len > TINY_LEN {
@@ -808,38 +754,6 @@ pub(crate) fn normalize_vec(v: KVec2) -> KVec2 {
 #[inline]
 pub(crate) fn left_normal(v: KVec2) -> KVec2 {
     KVec2::new(-v.y, v.x)
-}
-
-#[inline]
-pub(crate) fn signed_angle(a: KVec2, b: KVec2) -> f64 {
-    (a.x * b.y - a.y * b.x).atan2((a.x * b.x + a.y * b.y).clamp(-1.0, 1.0))
-}
-
-pub(crate) fn fill_cumulative_arc_lengths(pts: &[Point], cum: &mut Vec<f64>) {
-    cum.clear();
-    cum.reserve(pts.len());
-    if pts.is_empty() {
-        return;
-    }
-    let mut acc = 0.0;
-    cum.push(0.0);
-    for i in 1..pts.len() {
-        acc += (pts[i] - pts[i - 1]).hypot();
-        cum.push(acc);
-    }
-}
-
-pub(crate) fn dedup_closed_ring(pts: impl IntoIterator<Item = Point>, min_dist: f64) -> Vec<Point> {
-    let mut out: Vec<Point> = Vec::new();
-    for p in pts {
-        if out.last().is_none_or(|&last| (p - last).hypot() > min_dist) {
-            out.push(p);
-        }
-    }
-    if out.len() >= 2 && (out[0] - out[out.len() - 1]).hypot() <= min_dist {
-        out.pop();
-    }
-    out
 }
 
 /// 曲線 `q` の上で点 `p` にいちばん近い所の（パラメータ, 距離）。曲線の上のいちばん近い点を求めるのはこれ1つ
@@ -900,16 +814,6 @@ pub(crate) fn signed_area_f64(pts: impl IntoIterator<Item = [f64; 2]>) -> f64 {
     } else {
         0.5 * (sum + prev[0] * first[1] - first[0] * prev[1])
     }
-}
-
-pub(crate) fn ring_area_and_perimeter_f64(ring: &[[f64; 2]]) -> (f64, f64) {
-    let area = signed_area_f64(ring.iter().copied()).abs();
-    let mut perim = 0.0;
-    for i in 0..ring.len() {
-        let next = (i + 1) % ring.len();
-        perim += (ring[next][0] - ring[i][0]).hypot(ring[next][1] - ring[i][1]);
-    }
-    (area, perim)
 }
 
 pub(crate) fn point_to_segment_dist(pt: Point, a: Point, b: Point) -> f64 {
