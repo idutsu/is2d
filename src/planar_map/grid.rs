@@ -9,6 +9,9 @@ pub(super) type IPt = (i64, i64);
 /// 同じ辺は引き継ぐ（`PlanarMap::polys_since`）
 pub(super) type Poly = Arc<EdgeGeom>;
 
+/// 面の輪郭：向きのある辺（辺の番号, 辺の向きにたどるか）を、たどる順に並べたもの（`PlanarMap::face_cycles_with`）
+pub(super) type Cycle = Vec<(usize, bool)>;
+
 /// 辺（曲線）の、計算に使う形：判定の形（`grid_poly`。`Deref` で折れ線の点）と、重ね合わせで近くの辺を探すときの
 /// 外接矩形とマス（`edge_reach`。初めて要るときに作る：`fed_edges`）。どちらも曲線だけで決まる
 #[derive(Debug)]
@@ -1126,21 +1129,34 @@ impl CellGrid {
 
 /// 面の輪郭1つ：判定の形の点・面積の2倍（外周は正、穴は負）・外接矩形
 pub(super) struct Ring {
+    /// 輪郭の点（`cycle_points`）。始まりの点に意味は無い：使い道（面積の2倍・外接矩形・巻き数）は、どの点から
+    /// 始めても同じ。前の地図から引き継いだ輪郭は、作り直したものと、点を回した並びだけ違うことがある（`regions_since`）
     pub(super) pts: Vec<IPt>,
     pub(super) area2: i128,
     pub(super) rect: GridRect,
     /// 点の内外を調べる多角形（要るときに作る）
-    pub(super) poly: std::cell::OnceCell<GridPolygon>,
+    pub(super) poly: OnceLock<GridPolygon>,
+}
+
+impl std::fmt::Debug for Ring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ring")
+            .field("points", &self.pts.len())
+            .field("area2", &self.area2)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Ring {
     pub(super) fn new(polys: &[Poly], cycle: &[(usize, bool)]) -> Self {
+        #[cfg(test)]
+        super::RINGS_BUILT.with(|n| n.set(n.get() + 1));
         let pts = cycle_points(polys, cycle);
         Self {
             area2: area2_of(&pts),
             rect: GridRect::of(&pts),
             pts,
-            poly: std::cell::OnceCell::new(),
+            poly: OnceLock::new(),
         }
     }
 
@@ -1159,9 +1175,9 @@ impl Ring {
 /// 面の輪郭を、外周と、その中の穴の組に分けたもの（`PlanarMap::regions`）
 pub(super) struct Regions {
     /// 使う輪郭（壊れた輪郭は入れない）
-    pub(super) cycles: Vec<Vec<(usize, bool)>>,
-    /// 輪郭ごとの `Ring`
-    pub(super) rings: Vec<Ring>,
+    pub(super) cycles: Vec<Cycle>,
+    /// 輪郭ごとの `Ring`（前の地図と同じ輪郭は、前の地図のものを共有する：`regions_since`）
+    pub(super) rings: Vec<Arc<Ring>>,
     /// 組ごとの（色, 輪郭の番号の並び（外周が先、穴はその後））。組の順は、外周の輪郭の順
     pub(super) groups: Vec<(Option<Color32>, Vec<usize>)>,
     /// 閉じなかった輪郭・色がまざった輪郭・入れ先の無い色のある穴の数（壊れていれば 0 より大きい）
@@ -1201,8 +1217,7 @@ impl Regions {
             .into_iter()
             .filter_map(|(color, ids)| {
                 let color = color?;
-                let cycles: Vec<Vec<(usize, bool)>> =
-                    ids.iter().filter_map(|&k| cycles[k].take()).collect();
+                let cycles: Vec<Cycle> = ids.iter().filter_map(|&k| cycles[k].take()).collect();
                 let srcs = map.face_srcs(&cycles);
                 Some(MapFace {
                     color,

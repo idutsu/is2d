@@ -21,7 +21,7 @@ fn erase_from_canvas(
 ) {
     use crate::planar_map::{apply_shape_diff, map_edit_diff, MapEditOutcome, MapInput, MapRule};
     for e in erasers {
-        if let MapEditOutcome::Changed(crate::planar_map::MapChange { removed, added, .. }) =
+        if let MapEditOutcome::Changed(change) =
             map_edit_diff(canvas, layer_id, scope, Affine::IDENTITY, |m| {
                 m.overlay(
                     MapInput::Shapes(std::slice::from_ref(e)),
@@ -29,6 +29,7 @@ fn erase_from_canvas(
                 )
             })
         {
+            let crate::planar_map::MapChange { removed, added, .. } = *change;
             apply_shape_diff(canvas, &removed, added, layer_id, scope);
         }
     }
@@ -22487,13 +22488,12 @@ fn test_bucket_recolor_keeps_neighbor_shapes() {
         .find(|s| s.color == Color32::BLUE)
         .expect("青の帯")
         .shape_id;
-    let MapEditOutcome::Changed(crate::planar_map::MapChange { removed, added, .. }) =
-        map_edit_diff(&shapes, lid, &[], Affine::IDENTITY, |m| {
-            m.with_face_filled(Point::new(0.0, 40.0), Color32::BLACK)
-        })
-    else {
+    let MapEditOutcome::Changed(change) = map_edit_diff(&shapes, lid, &[], Affine::IDENTITY, |m| {
+        m.with_face_filled(Point::new(0.0, 40.0), Color32::BLACK)
+    }) else {
         panic!("塗り替えられない");
     };
+    let crate::planar_map::MapChange { removed, added, .. } = *change;
     assert_eq!(removed, vec![blue], "となりの図形まで書き換えた");
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].color, Color32::BLACK);
@@ -30450,10 +30450,17 @@ fn test_short_brush_builds_polylines_only_near_the_stroke() {
         .iter()
         .map(|m| m.base().map.nodes.len())
         .sum();
-    let (before, reaches_before, sorted_before) = (
+    let cycles: usize = app.doc.root.layers[0].keyframes[0]
+        .cel
+        .maps
+        .iter()
+        .map(|m| m.base().cycles().len())
+        .sum();
+    let (before, reaches_before, sorted_before, rings_before) = (
         crate::planar_map::polys_built(),
         crate::planar_map::reaches_built(),
         crate::planar_map::vertices_sorted(),
+        crate::planar_map::rings_built(),
     );
     let points = stroke(&mut rng, 6);
     assert!(doc_actions::apply(
@@ -30482,6 +30489,12 @@ fn test_short_brush_builds_polylines_only_near_the_stroke() {
     assert!(
         sorted < nodes,
         "まわりの辺を並べた頂点 {sorted}（頂点 {nodes}）"
+    );
+    // 面の輪郭の点と面積も、引き継いだ輪郭の分は作り直さない（`regions_since`。前は確かめのたびに全部の輪郭の分を作った）
+    let rings = crate::planar_map::rings_built() - rings_before;
+    assert!(
+        rings * 4 < cycles,
+        "作った輪郭の点と面積 {rings}（輪郭 {cycles}）"
     );
 }
 
@@ -30588,6 +30601,121 @@ fn derived_geometry_carried_across_edits_matches_a_fresh_build() {
         }
     }
     assert!(checked > 80, "確かめた写し {checked}");
+}
+
+/// 前の地図から引き継いで確かめる（`valid_faces_since`）と、全部を確かめる（`valid_faces`）が、穴の入れ先が変わる場面でも
+/// 同じ：赤の面の中の青い島（赤の面の穴）のまわりに、島に触れない緑の輪を描くと、穴の入れ先が、変わらない赤の外周から
+/// 新しい輪の内側に替わる。消しゴムの穴（色の無い穴）のまわりも同じ（レビュー f01d518 の R3 段3）
+#[test]
+fn checking_against_the_previous_map_follows_holes_moving_to_new_exteriors() {
+    use crate::planar_map::{LayerBase, MapInput, MapRule, PlanarMap};
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 90, 220);
+    let green = Color32::from_rgb(40, 170, 80);
+    let paint = |m: &PlanarMap, s: &FillShape, c: Option<Color32>| {
+        m.overlay(MapInput::Shapes(std::slice::from_ref(s)), MapRule::Paint(c))
+            .unwrap()
+    };
+    let ring = |cx: f64, cy: f64, r0: f64, r1: f64, c: Color32| {
+        let outer = map_overlay::rect_shape(cx - r1, cy - r1, cx + r1, cy + r1, c);
+        let inner = map_overlay::rect_shape(cx - r0, cy - r0, cx + r0, cy + r0, c);
+        let hole = crate::vector_engine::Contour::new(
+            inner
+                .exterior
+                .segments
+                .iter()
+                .rev()
+                .map(|q| kurbo::QuadBez::new(q.p2, q.p1, q.p0))
+                .collect(),
+        );
+        FillShape::new(c, outer.exterior.clone(), vec![hole])
+    };
+    for hole_color in [Some(blue), None] {
+        let mut m = paint(
+            &PlanarMap::default(),
+            &map_overlay::rect_shape(0.0, 0.0, 400.0, 400.0, red),
+            Some(red),
+        );
+        m = paint(
+            &m,
+            &map_overlay::rect_shape(180.0, 180.0, 220.0, 220.0, blue),
+            hole_color,
+        );
+        let base = LayerBase::new(&m);
+        assert!(m.valid_faces_since(Some(&base)).is_some());
+        let next = paint(&m, &ring(200.0, 200.0, 60.0, 90.0, green), Some(green));
+        let full = next.valid_faces();
+        assert!(full.is_some());
+        assert_eq!(next.valid_faces_since(Some(&base)), full);
+        // 輪を消すと、穴はまた赤の外周に戻る
+        let base2 = LayerBase::new(&next);
+        let back = paint(&next, &ring(200.0, 200.0, 50.0, 100.0, red), Some(red));
+        assert_eq!(back.valid_faces_since(Some(&base2)), back.valid_faces());
+    }
+}
+
+/// 前の地図から引き継いで確かめるのと全部を確かめるのが、ブラシ・消しゴム・バケツ・矩形の中だけ残す・頂点を動かす、を
+/// くり返しても同じ（正しくない地図も含める。レビュー f01d518 の R3 段2・段3）
+#[test]
+fn checking_against_the_previous_map_matches_the_full_check_over_many_edits() {
+    use crate::planar_map::{LayerBase, MapInput, MapRule, PlanarMap};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    let area = (100.0, 100.0, 300.0, 200.0);
+    let mut rng = map_overlay::Rng(17);
+    let mut m = PlanarMap::default();
+    let (mut compared, mut invalid) = (0, 0);
+    for step in 0..240 {
+        let base = LayerBase::new(&m);
+        let c = colors[step % 4];
+        let next = match step % 6 {
+            0 | 1 => {
+                let r = 2.0 + rng.f() * 9.0;
+                let s = wiggly_stroke(&mut rng, area, r, c);
+                m.overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+            }
+            2 => {
+                let r = 2.0 + rng.f() * 6.0;
+                let s = wiggly_stroke(&mut rng, area, r, c);
+                m.overlay(MapInput::Shapes(&s), MapRule::Paint(None))
+            }
+            3 => m.with_face_filled(
+                Point::new(100.0 + rng.f() * 300.0, 100.0 + rng.f() * 200.0),
+                c,
+            ),
+            4 if !m.nodes.is_empty() => {
+                let v = (rng.f() * m.nodes.len() as f64) as usize % m.nodes.len();
+                let a = rng.f() * std::f64::consts::TAU;
+                let to = m.nodes[v] + kurbo::Vec2::new(a.cos(), a.sin()) * (0.5 + rng.f() * 6.0);
+                m.commit_move_vertex(v, to)
+            }
+            _ => {
+                let (x, y) = (100.0 + rng.f() * 150.0, 100.0 + rng.f() * 100.0);
+                let rect = vec![map_overlay::rect_shape(x, y, x + 80.0, y + 60.0, c)];
+                m.overlay(MapInput::Shapes(&rect), MapRule::Paint(Some(c)))
+            }
+        };
+        let Some(next) = next else {
+            continue;
+        };
+        let full = next.valid_faces();
+        assert_eq!(next.valid_faces_since(Some(&base)), full, "step {step}");
+        assert!(next.cycles_since_match_full(&base), "step {step}");
+        compared += 1;
+        if full.is_some() {
+            m = next;
+        } else {
+            invalid += 1;
+        }
+    }
+    assert!(
+        compared > 150,
+        "比べた数 {compared}（正しくない地図 {invalid}）"
+    );
 }
 
 /// N-2001：前の地図にある辺と交わる新しい辺は、前の地図の辺どうしの確かめを省いても見つかる（赤の矩形の角に重なる
