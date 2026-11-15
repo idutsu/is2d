@@ -361,41 +361,14 @@ impl CelMeshCache {
         pan: Vec2,
         tint: CelTint,
     ) -> Option<Arc<egui::Mesh>> {
-        let layer = tl.layers.get(layer_idx)?;
-        let kf_idx = layer.keyframe_index_at(frame)?;
-        if layer.keyframes[kf_idx].cel.is_empty() {
-            return None;
-        }
         let library = ctx.library;
-        let excluded = scope.excluded_instance;
-        let ef = layer_eval_frame(layer, kf_idx, frame, library, excluded);
-        let xform_bits = world_xform.as_coeffs().map(f64::to_bits);
-        let hit_idx = self.entries.iter().position(|e| {
-            e.scope == scope
-                && e.layer_id == layer.id
-                && e.eval_frame == ef
-                && e.world_xform_bits == xform_bits
-                && e.cel_sig.matches_layer_keyframe(layer, kf_idx, library)
-        });
-        let idx = if let Some(i) = hit_idx {
-            i
-        } else {
-            self.entries
-                .retain(|e| !(e.scope == scope && e.layer_id == layer.id && e.eval_frame == ef));
-            let cel_sig = compute_resolved_cel_signature(layer, kf_idx, excluded, library);
-            let world_mesh =
-                tl.build_cel_world_batch_mesh(layer_idx, frame, world_xform, excluded, ctx);
-            self.entries.push(CachedCel {
-                scope,
-                layer_id: layer.id,
-                eval_frame: ef,
-                world_xform_bits: xform_bits,
-                cel_sig,
-                world_mesh,
-                screens: Vec::new(),
-                used: false,
-            });
-            self.entries.len() - 1
+        let key = CelKey::of(tl, scope, library, layer_idx, frame, world_xform)?;
+        let idx = match self.find(tl, scope, library, &key) {
+            Some(i) => i,
+            None => {
+                let world_mesh = key.build(tl, scope, world_xform, ctx);
+                self.insert(tl, scope, library, &key, world_mesh)
+            }
         };
         let entry = &mut self.entries[idx];
         entry.used = true;
@@ -410,5 +383,138 @@ impl CelMeshCache {
         entry.screens.retain(|s| s.0 .3 != tint);
         entry.screens.push((key, Arc::clone(&mesh), true));
         Some(mesh)
+    }
+
+    /// 所 `scope` のタイムライン `tl` の、セル画 `cels`（レイヤーの番号、コマ）のうち写しの無いものの、変換 `world_xform` の
+    /// ワールド座標の結合メッシュを、同時に作って写しに入れる（`parallel_map`）。スクラブで窓に入るコマや、遠くのコマへ
+    /// 飛んだときの窓の全部を、いちばん重いもの1つ分ほどの待ち時間で作る（レビュー f01d518 の N-5004）
+    pub(crate) fn prepare(
+        &mut self,
+        tl: &Timeline,
+        scope: CelScope,
+        ctx: SymbolEvalCtx<'_>,
+        cels: &[(usize, usize)],
+        world_xform: Affine,
+    ) {
+        let library = ctx.library;
+        let mut missing: Vec<CelKey> = Vec::new();
+        for &(layer_idx, frame) in cels {
+            let Some(key) = CelKey::of(tl, scope, library, layer_idx, frame, world_xform) else {
+                continue;
+            };
+            let listed = missing
+                .iter()
+                .any(|k| k.layer_idx == key.layer_idx && k.eval_frame == key.eval_frame);
+            if !listed && self.find(tl, scope, library, &key).is_none() {
+                missing.push(key);
+            }
+        }
+        let built = crate::planar_map::parallel_map(&missing, |key| {
+            key.build(tl, scope, world_xform, ctx.clone())
+        });
+        for (key, world_mesh) in missing.iter().zip(built) {
+            self.insert(tl, scope, library, key, world_mesh);
+        }
+    }
+
+    /// 鍵 `key` の写しの番号（セル画が変わっていれば無い）
+    fn find(
+        &self,
+        tl: &Timeline,
+        scope: CelScope,
+        library: &Library,
+        key: &CelKey,
+    ) -> Option<usize> {
+        let layer = &tl.layers[key.layer_idx];
+        self.entries.iter().position(|e| {
+            e.scope == scope
+                && e.layer_id == layer.id
+                && e.eval_frame == key.eval_frame
+                && e.world_xform_bits == key.world_xform_bits
+                && e.cel_sig.matches_layer_keyframe(layer, key.kf_idx, library)
+        })
+    }
+
+    /// 鍵 `key` の写しを、ワールド座標の結合メッシュ `world_mesh` で入れて、その番号を返す（同じ所・レイヤー・評価する
+    /// コマの古い写しは捨てる）
+    fn insert(
+        &mut self,
+        tl: &Timeline,
+        scope: CelScope,
+        library: &Library,
+        key: &CelKey,
+        world_mesh: Option<egui::Mesh>,
+    ) -> usize {
+        let layer = &tl.layers[key.layer_idx];
+        self.entries.retain(|e| {
+            !(e.scope == scope && e.layer_id == layer.id && e.eval_frame == key.eval_frame)
+        });
+        self.entries.push(CachedCel {
+            scope,
+            layer_id: layer.id,
+            eval_frame: key.eval_frame,
+            world_xform_bits: key.world_xform_bits,
+            cel_sig: compute_resolved_cel_signature(
+                layer,
+                key.kf_idx,
+                scope.excluded_instance,
+                library,
+            ),
+            world_mesh,
+            screens: Vec::new(),
+            used: false,
+        });
+        self.entries.len() - 1
+    }
+}
+
+/// 写しを引くための、セル画の場所（レイヤーの番号・コマ・キーフレームの番号・評価するコマ・変換のビット）
+struct CelKey {
+    layer_idx: usize,
+    frame: usize,
+    kf_idx: usize,
+    eval_frame: usize,
+    world_xform_bits: [u64; 6],
+}
+
+impl CelKey {
+    /// タイムライン `tl` のレイヤー `layer_idx` のコマ `frame` に絵があれば、その場所
+    fn of(
+        tl: &Timeline,
+        scope: CelScope,
+        library: &Library,
+        layer_idx: usize,
+        frame: usize,
+        world_xform: Affine,
+    ) -> Option<Self> {
+        let layer = tl.layers.get(layer_idx)?;
+        let kf_idx = layer.keyframe_index_at(frame)?;
+        if layer.keyframes[kf_idx].cel.is_empty() {
+            return None;
+        }
+        Some(Self {
+            layer_idx,
+            frame,
+            kf_idx,
+            eval_frame: layer_eval_frame(layer, kf_idx, frame, library, scope.excluded_instance),
+            world_xform_bits: world_xform.as_coeffs().map(f64::to_bits),
+        })
+    }
+
+    /// ワールド座標の結合メッシュを作る
+    fn build(
+        &self,
+        tl: &Timeline,
+        scope: CelScope,
+        world_xform: Affine,
+        ctx: SymbolEvalCtx<'_>,
+    ) -> Option<egui::Mesh> {
+        tl.build_cel_world_batch_mesh(
+            self.layer_idx,
+            self.frame,
+            world_xform,
+            scope.excluded_instance,
+            ctx,
+        )
     }
 }

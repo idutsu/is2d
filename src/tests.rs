@@ -5712,6 +5712,103 @@ fn test_saved_file_reads_back_nan_is_fixed_and_undo_history_cap() {
     );
 }
 
+/// 同時に計算する `parallel_map` は、`items` の順に結果を返し、CPU が2つ以上なら2つ以上のスレッドで計算する
+#[test]
+fn test_parallel_map_keeps_order_and_uses_threads() {
+    let items: Vec<usize> = (0..64).collect();
+    let out = crate::planar_map::parallel_map(&items, |&i| {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        (i * 2, std::thread::current().id())
+    });
+    assert_eq!(
+        out.iter().map(|o| o.0).collect::<Vec<_>>(),
+        (0..128).step_by(2).collect::<Vec<_>>()
+    );
+    let threads: std::collections::HashSet<_> = out.iter().map(|o| o.1).collect();
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+    assert_eq!(
+        threads.len() > 1,
+        cpus > 1,
+        "スレッド {} 本・CPU {cpus} 個",
+        threads.len()
+    );
+    assert!(threads.len() <= cpus);
+}
+
+/// オニオンスキンの写しの無いコマを先に同時に作っても（`prepare_onion_cels`）、1つずつ作るのと同じ絵になる。シンボルの
+/// トゥイーン（シンボルの中身のメモをスレッドの間で共有する）と、ふつうの絵のレイヤーで確かめる（レビュー f01d518 の N-5004）
+#[test]
+fn test_onion_prepare_in_parallel_matches_one_by_one() {
+    use crate::doc_actions::{apply, Action};
+    let make = || {
+        let mut app = Is2dApp::default();
+        // レイヤー 1：シンボルのトゥイーン（コマ 1〜8、9 から止まる）
+        let stroke = |y: f64, color| Action::PaintStroke {
+            points: vec![Point::new(100.0, y), Point::new(260.0, y + 30.0)],
+            radius: 10.0,
+            color,
+        };
+        assert!(apply(&mut app, stroke(120.0, Color32::RED)));
+        app.session.set_selected_indices(vec![0]);
+        assert!(crate::doc_actions::convert_selection_to_symbol(&mut app).is_some());
+        assert!(crate::doc_actions::timeline_toggle_tween(&mut app));
+        while app.doc.root.total_frames < 12 {
+            assert!(crate::doc_actions::timeline_extend_frame(&mut app));
+        }
+        crate::doc_actions::switch_to_layer_and_frame(&mut app, 0, 8);
+        assert!(crate::doc_actions::timeline_insert_keyframe(&mut app, true));
+        app.session.set_selected_indices(vec![0]);
+        crate::doc_actions::nudge_selected_shapes(&mut app, KVec2::new(80.0, 40.0));
+        assert!(canvas_tool::clear_selection(&mut app));
+        // レイヤー 2：ふつうの絵（コマごとに少しずらしたキーフレーム）
+        assert!(apply(&mut app, Action::AddLayer));
+        let layer = app.doc.root.active_layer;
+        crate::doc_actions::switch_to_layer_and_frame(&mut app, layer, 0);
+        assert!(apply(&mut app, stroke(220.0, Color32::BLUE)));
+        for f in 1..12 {
+            assert!(app.doc.root.layers[layer].insert_keyframe(f, true));
+            crate::doc_actions::switch_to_layer_and_frame(&mut app, layer, f);
+            let lid = app.doc.root.layers[layer].id;
+            let idx: Vec<usize> = (0..app.scene().len())
+                .filter(|&i| app.scene().get(i).unwrap().layer_id == lid)
+                .collect();
+            app.session.set_selected_indices(idx);
+            crate::doc_actions::nudge_selected_shapes(&mut app, KVec2::new(3.0, 0.0));
+            assert!(canvas_tool::clear_selection(&mut app));
+        }
+        app
+    };
+    let cels: Vec<(usize, usize)> = (0..12).flat_map(|f| [(0, f), (1, f)]).collect();
+    let tint = ([45, 115, 245], 84);
+    let (one_by_one, prepared) = (make(), make());
+    one_by_one.start_draw_pass();
+    prepared.start_draw_pass();
+    prepared.prepare_onion_cels(&cels);
+    let entries = prepared.session.onion_cache.lock().entry_count();
+    assert!(entries >= 20, "先に作った写し {entries} 個");
+    for &(l, f) in &cels {
+        let a = one_by_one.cached_onion_cel_screen_mesh(l, f, 1.0, Vec2::ZERO, tint);
+        let b = prepared.cached_onion_cel_screen_mesh(l, f, 1.0, Vec2::ZERO, tint);
+        let key = |m: Option<std::sync::Arc<eframe::egui::Mesh>>| {
+            m.map(|m| {
+                (
+                    m.indices.clone(),
+                    m.vertices
+                        .iter()
+                        .map(|v| (v.pos.x.to_bits(), v.pos.y.to_bits(), v.color))
+                        .collect::<Vec<_>>(),
+                )
+            })
+        };
+        assert_eq!(key(a), key(b), "コマ {f}");
+    }
+    assert_eq!(
+        prepared.session.onion_cache.lock().entry_count(),
+        entries,
+        "描くときは、先に作った写しを使う"
+    );
+}
+
 /// オニオンスキンは、写し（`CelMeshCache`）の結合メッシュを、描くたびに複製せずに egui に渡す（egui 0.31 の
 /// `Shape::Mesh` は `Arc<Mesh>` を持つ：レビュー f01d518 の N-5004）
 #[test]
@@ -23280,10 +23377,9 @@ mod map_overlay {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(60);
-        let results =
-            crate::planar_map::per_layer_parallel(&(0..seeds).collect::<Vec<_>>(), |&s| {
-                near_vertex_run(s, steps)
-            });
+        let results = crate::planar_map::parallel_map(&(0..seeds).collect::<Vec<_>>(), |&s| {
+            near_vertex_run(s, steps)
+        });
         let (n, bad) = results.iter().fold((0, 0), |a, x| (a.0 + x.0, a.1 + x.1));
         for x in &results {
             for note in &x.2 {

@@ -370,7 +370,7 @@ pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
     let editable = editable_layer_ids(tab);
     let outcomes: Vec<Option<MapOutcome>> = {
         let cache = &tab.session.base_cache;
-        crate::planar_map::per_layer_parallel(fl.layers(), |l| {
+        crate::planar_map::parallel_map(fl.layers(), |l| {
             let cel = cache.cel(l.layer_id)?;
             let base = cel.scope_base(&scope);
             let next = l.committed(&base)?.written(&base)?;

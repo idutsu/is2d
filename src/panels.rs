@@ -2067,6 +2067,20 @@ fn draw_selected_group_and_symbol_boxes(
 fn draw_onion_skins(tab: &Tab, painter: &egui::Painter) {
     let tl = tab.active_timeline();
     let curr_f = tl.current_frame;
+    // 写しの無いコマ（スクラブで窓に入るコマ、飛んだときの窓の全部）を、描く前に同時に作る（レビュー f01d518 の N-5004）
+    let first = curr_f.saturating_sub(tab.view.onion_prev_frames);
+    let last = (curr_f + tab.view.onion_next_frames).min(tl.total_frames.saturating_sub(1));
+    let cels: Vec<(usize, usize)> = (first..=last)
+        .filter(|&f| f != curr_f)
+        .flat_map(|f| {
+            tl.layers
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.visible)
+                .map(move |(layer_idx, _)| (layer_idx, f))
+        })
+        .collect();
+    tab.prepare_onion_cels(&cels);
     for step in (1..=tab.view.onion_prev_frames).rev() {
         if curr_f >= step {
             let alpha = (84 / step as u8).clamp(24, 84);

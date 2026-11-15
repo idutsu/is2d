@@ -11,7 +11,7 @@ use kurbo::Affine;
 
 use crate::canvas_tool::{Placement, SceneBaseCache};
 use crate::planar_map::{
-    cut_out, per_layer_parallel, realized, region_map, stacked, CheckedMap, LayerBase, MapChange,
+    cut_out, parallel_map, realized, region_map, stacked, CheckedMap, LayerBase, MapChange,
     MapInput, MapRule, PlanarMap,
 };
 use crate::stored_map::StoredMap;
@@ -430,7 +430,7 @@ impl Floating {
     ) -> Vec<LayerId> {
         let modified = self.modified;
         let current = &self.layers;
-        let results: Vec<Option<FloatLayer>> = per_layer_parallel(layers, |(layer_id, ids)| {
+        let results: Vec<Option<FloatLayer>> = parallel_map(layers, |(layer_id, ids)| {
             let cur = current.iter().find(|l| l.layer_id == *layer_id);
             cut_layer(cur, modified, stage, *layer_id, ids, rect)
         });

@@ -1757,23 +1757,43 @@ pub(crate) fn reshape_result(
     ))
 }
 
-/// `items` のそれぞれに `f` をかけた結果（`items` の順）。2つ以上あれば、別々のスレッドで同時に計算する
-/// （レイヤーごとの地図の計算は、ほかのレイヤーを見ないので、同時に計算しても結果は同じ）
-pub(crate) fn per_layer_parallel<T: Sync, R: Send>(
-    items: &[T],
-    f: impl Fn(&T) -> R + Sync,
-) -> Vec<R> {
-    if items.len() < 2 {
+/// `items` のそれぞれに `f` をかけた結果（`items` の順）。2つ以上あれば、CPU の数までのスレッドで同時に計算する
+/// （各スレッドは、まだ誰も取っていないものを順に取る）。レイヤーごとの地図の計算や、オニオンスキンのコマごとのセル画は、
+/// ほかを見ないので、同時に計算しても結果は同じ
+pub(crate) fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(items.len());
+    if threads < 2 {
         return items.iter().map(&f).collect();
     }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut out: Vec<Option<R>> = std::iter::repeat_with(|| None).take(items.len()).collect();
     std::thread::scope(|scope| {
-        let f = &f;
-        let handles: Vec<_> = items.iter().map(|it| scope.spawn(move || f(it))).collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect()
-    })
+        let (f, next) = (&f, &next);
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(move || {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(i) else {
+                            return done;
+                        };
+                        done.push((i, f(item)));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            for (i, r) in h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)) {
+                out[i] = Some(r);
+            }
+        }
+    });
+    out.into_iter()
+        .map(|r| r.expect("どれも、どれかのスレッドが計算した"))
+        .collect()
 }
 
 /// 差分を図形の並びに入れる。新しい形は、消した図形のうち最初のものの位置に入れる。

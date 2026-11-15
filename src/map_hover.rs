@@ -7,7 +7,7 @@ use std::sync::Arc;
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{HoverTarget, MapOwner, Scene, Session};
-use crate::planar_map::{is_map_shape, per_layer_parallel, LayerBase};
+use crate::planar_map::{is_map_shape, parallel_map, LayerBase};
 use crate::vector_engine::{quad_deriv, FillShape, LayerId, ShapeId};
 
 /// 1つのレイヤーの、編集中の階層の生の図形から作った地図
@@ -84,7 +84,7 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     }
     // 地図にできないレイヤー（格子に置けない座標がある）は入れない（カーソル合わせも変形もしない）。作り直すレイヤーが
     // いくつあっても待つ時間が増えないよう、同時に作る
-    let maps = per_layer_parallel(&by_layer, |(layer_id, first_idx, _)| {
+    let maps = parallel_map(&by_layer, |(layer_id, first_idx, _)| {
         let rest = floating
             .and_then(|fl| fl.layers().iter().find(|l| l.layer_id == *layer_id))
             .and_then(|l| l.origin.as_ref())

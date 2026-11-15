@@ -2194,6 +2194,29 @@ impl Tab {
         )
     }
 
+    /// オニオンスキンで描くセル画 `cels`（レイヤーの番号、コマ）のうち写しの無いものを、描く前に同時に作る
+    /// （`CelMeshCache::prepare`）
+    pub(crate) fn prepare_onion_cels(&self, cels: &[(usize, usize)]) {
+        let world_xform = self.session.edit_path.world_xform();
+        self.with_symbol_eval(|ctx| {
+            self.session.onion_cache.lock().prepare(
+                self.active_timeline(),
+                self.active_cel_scope(),
+                ctx,
+                cels,
+                world_xform,
+            );
+        });
+    }
+
+    /// 編集しているタイムラインのセル画の所（ルートか、編集しているシンボル。除くインスタンスは無い）
+    fn active_cel_scope(&self) -> CelScope {
+        CelScope {
+            timeline: self.session.edit_path.last().map(|l| l.symbol_id),
+            excluded_instance: None,
+        }
+    }
+
     /// ロック中・再生中のレイヤー `layer_idx` のコマ `frame` のセル画の画面座標の結合メッシュ（写しから：`CelMeshCache`）
     pub(crate) fn cached_cel_screen_mesh(
         &self,
@@ -2216,10 +2239,7 @@ impl Tab {
     ) -> Option<Arc<egui::Mesh>> {
         let tl = self.active_timeline();
         let world_xform = self.session.edit_path.world_xform();
-        let scope = CelScope {
-            timeline: self.session.edit_path.last().map(|l| l.symbol_id),
-            excluded_instance: None,
-        };
+        let scope = self.active_cel_scope();
         self.with_symbol_eval(|ctx| {
             cache.lock().screen_mesh(
                 tl,

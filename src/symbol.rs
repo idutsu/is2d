@@ -228,14 +228,15 @@ impl SymbolEvalState {
     }
 }
 
-/// シンボル再帰評価時の設定・メモ化コンテキスト
+/// シンボル再帰評価時の設定・メモ化コンテキスト。写し（`clone`）は別のスレッドへ渡せ、メモを共有する（オニオンスキンの
+/// セル画を同時に作る：`CelMeshCache::prepare`）
 #[derive(Clone)]
 pub(crate) struct SymbolEvalCtx<'a> {
     pub(crate) library: &'a Library,
     pub(crate) depth: usize,
     /// 展開した図形に画面表示用のメッシュを作るか（動画の書き出しでは作らない）
     with_mesh: bool,
-    state: std::rc::Rc<std::cell::RefCell<SymbolEvalState>>,
+    state: Arc<std::sync::Mutex<SymbolEvalState>>,
 }
 
 impl<'a> SymbolEvalCtx<'a> {
@@ -249,16 +250,17 @@ impl<'a> SymbolEvalCtx<'a> {
             library,
             depth: 0,
             with_mesh: true,
-            state: std::rc::Rc::new(std::cell::RefCell::new(state)),
+            state: Arc::new(std::sync::Mutex::new(state)),
         }
     }
 
     /// 評価を終えて、メモを返す。写し（`clone`・`nested`）はすべて評価の中で作って捨てるので、ここでは自分だけが持っている
     pub(crate) fn into_state(self) -> SymbolEvalState {
-        std::rc::Rc::try_unwrap(self.state)
+        Arc::try_unwrap(self.state)
             .ok()
             .expect("評価の写しが残っている")
             .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// 画面表示用のメッシュを作らない（動画の書き出し用）
@@ -272,13 +274,20 @@ impl<'a> SymbolEvalCtx<'a> {
             library: self.library,
             depth: self.depth + 1,
             with_mesh: self.with_mesh,
-            state: std::rc::Rc::clone(&self.state),
+            state: Arc::clone(&self.state),
         }
+    }
+
+    /// メモ（ほかのスレッドの評価が途中で止まっても、メモは使える：どの書き換えも1つの挿入か取り出しだけ）
+    fn state(&self) -> std::sync::MutexGuard<'_, SymbolEvalState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[inline]
     fn get_memo(&self, key: &SymbolEvalMemoKey) -> Option<Arc<Vec<FillShape>>> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state();
         if let Some(hit) = state.memo.get(key) {
             return Some(Arc::clone(hit));
         }
@@ -289,12 +298,12 @@ impl<'a> SymbolEvalCtx<'a> {
 
     #[inline]
     fn insert_memo(&self, key: SymbolEvalMemoKey, shapes: Arc<Vec<FillShape>>) {
-        self.state.borrow_mut().memo.insert(key, shapes);
+        self.state().memo.insert(key, shapes);
     }
 
     /// 展開したセル画の地図の、計算に使う写しを、この回の終わりまで持つ（`SymbolEvalState::take_held`）
     fn hold(&self, base: Arc<LayerBase>) {
-        self.state.borrow_mut().held.push(base);
+        self.state().held.push(base);
     }
 }
 
