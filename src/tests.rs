@@ -330,6 +330,444 @@ fn test_smoothing_100_preserves_width_round_caps_and_minimal_anchors() {
     assert!(shape.contains_point(Point::new(300.0 + diag, 200.0 + diag)));
 }
 
+/// テスト用：図形 `shapes` の輪郭（外周と穴）を、ずれ `tol` 以内の閉じた折れ線にしたもの
+fn shape_outline_polylines(shapes: &[FillShape], tol: f64) -> Vec<Vec<Point>> {
+    shapes
+        .iter()
+        .flat_map(|s| s.contours())
+        .map(|c| {
+            let mut pts = Vec::new();
+            for q in c.segments.iter() {
+                // 2次ベジェを n 等分した弦のずれは |p0 − 2p1 + p2| / (4n²) 以下
+                let dd = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()).hypot();
+                let n = ((dd / (4.0 * tol)).sqrt().ceil() as usize).max(1);
+                pts.extend((0..n).map(|i| q.eval(i as f64 / n as f64)));
+            }
+            pts
+        })
+        .collect()
+}
+
+/// テスト用：線分を格子に入れて、点からの近さを速く調べる
+struct SegGrid {
+    cell: f64,
+    cells: std::collections::HashMap<(i64, i64), Vec<(Point, Point)>>,
+}
+
+impl SegGrid {
+    /// 折れ線 `lines`（`closed` なら閉じたもの）の線分を、幅 `cell` の格子に入れる
+    fn new(lines: &[Vec<Point>], closed: bool, cell: f64) -> Self {
+        let mut cells: std::collections::HashMap<(i64, i64), Vec<(Point, Point)>> =
+            Default::default();
+        for l in lines {
+            let n = l.len();
+            let segs: Vec<(Point, Point)> = match n {
+                0 => Vec::new(),
+                1 => vec![(l[0], l[0])],
+                _ if closed => (0..n).map(|i| (l[i], l[(i + 1) % n])).collect(),
+                _ => (0..n - 1).map(|i| (l[i], l[i + 1])).collect(),
+            };
+            for (a, b) in segs {
+                let k = |v: f64| (v / cell).floor() as i64;
+                for x in k(a.x.min(b.x))..=k(a.x.max(b.x)) {
+                    for y in k(a.y.min(b.y))..=k(a.y.max(b.y)) {
+                        cells.entry((x, y)).or_default().push((a, b));
+                    }
+                }
+            }
+        }
+        Self { cell, cells }
+    }
+
+    /// 点 `p` から `reach` 以内にある線分までの、いちばん近い距離（`reach` 以内に無ければ無限大）
+    fn dist(&self, p: Point, reach: f64) -> f64 {
+        let k = |v: f64| (v / self.cell).floor() as i64;
+        let mut best = f64::INFINITY;
+        for x in k(p.x - reach)..=k(p.x + reach) {
+            for y in k(p.y - reach)..=k(p.y + reach) {
+                for &(a, b) in self.cells.get(&(x, y)).into_iter().flatten() {
+                    best = best.min(vector_engine::point_to_segment_dist(p, a, b));
+                }
+            }
+        }
+        if best <= reach {
+            best
+        } else {
+            f64::INFINITY
+        }
+    }
+}
+
+/// テスト用：メッシュの三角形を格子に入れて、点が三角形のどれかに入るか（その形が塗られて見えるか）を速く調べる
+struct TriGrid {
+    cell: f64,
+    cells: std::collections::HashMap<(i64, i64), Vec<[Point; 3]>>,
+    verts: Vec<Point>,
+}
+
+impl TriGrid {
+    fn new(meshes: &[&egui::Mesh], cell: f64) -> Self {
+        let mut cells: std::collections::HashMap<(i64, i64), Vec<[Point; 3]>> = Default::default();
+        let mut verts = Vec::new();
+        for m in meshes {
+            let at = |i: u32| {
+                let v = m.vertices[i as usize].pos;
+                Point::new(v.x as f64, v.y as f64)
+            };
+            verts.extend(
+                m.vertices
+                    .iter()
+                    .map(|v| Point::new(v.pos.x as f64, v.pos.y as f64)),
+            );
+            for t in m.indices.chunks_exact(3) {
+                let tri = [at(t[0]), at(t[1]), at(t[2])];
+                let k = |v: f64| (v / cell).floor() as i64;
+                let (x0, x1) = (
+                    tri.iter().map(|p| p.x).fold(f64::MAX, f64::min),
+                    tri.iter().map(|p| p.x).fold(f64::MIN, f64::max),
+                );
+                let (y0, y1) = (
+                    tri.iter().map(|p| p.y).fold(f64::MAX, f64::min),
+                    tri.iter().map(|p| p.y).fold(f64::MIN, f64::max),
+                );
+                for x in k(x0)..=k(x1) {
+                    for y in k(y0)..=k(y1) {
+                        cells.entry((x, y)).or_default().push(tri);
+                    }
+                }
+            }
+        }
+        Self { cell, cells, verts }
+    }
+
+    fn contains(&self, p: Point) -> bool {
+        let key = (
+            (p.x / self.cell).floor() as i64,
+            (p.y / self.cell).floor() as i64,
+        );
+        self.cells.get(&key).into_iter().flatten().any(|t| {
+            let d: Vec<f64> = (0..3)
+                .map(|i| (t[(i + 1) % 3] - t[i]).cross(p - t[i]))
+                .collect();
+            d.iter().all(|&v| v >= 0.0) || d.iter().all(|&v| v <= 0.0)
+        })
+    }
+}
+
+/// 当てはめの許容（画面の px）から決まる、離したあとの形と「中心線を太らせた形」のずれの上限：当てはめの許容 0.25
+/// （`vector_stroke::FIT_TOL_PX`）＋ 太らせた輪郭を折れ線にした弦のずれ 0.025 ＋ 当てはめを確かめるときに曲線を折れ線に
+/// したずれ 0.025 ＋ このテストで輪郭と中心線を折れ線にするずれ 0.005×2
+const STROKE_DEV_PX: f64 = 0.31;
+
+/// テスト用：点 `points` を半径 `radius`・表示の倍率 `zoom`（画面の倍率 1）で描いて離したあとの形を、中心線と比べた結果
+#[derive(Debug, Default)]
+struct StrokeCheck {
+    /// 輪郭の点の、中心線からの距離と半径の差のいちばん大きいもの（画面の px）
+    worst_px: f64,
+    /// 丸めの範囲に入っていない中心線の節の数
+    outside_box: usize,
+    /// 塗られていない（形の中にも、輪郭から「丸めの範囲＋ずれの上限」以内にもない）マウスの点の数
+    uncovered: usize,
+    /// 塗られていない（形の中にも、輪郭からずれの上限以内にもない）中心線の点の数
+    missing: usize,
+}
+
+fn check_stroke_follows_centerline(points: &[Point], radius: f64, zoom: f64) -> StrokeCheck {
+    let step = vector_stroke::input_step(zoom, 1.0);
+    let tol = STROKE_DEV_PX / zoom;
+    let mut b = vector_stroke::CenterlineBuilder::new(step);
+    for &p in points {
+        b.push(p);
+    }
+    let cl = b.current();
+    let half = 0.5 * step * (1.0 + 1e-5) + 1e-9;
+    let outside_box = cl
+        .knots()
+        .iter()
+        .zip(b.points())
+        .filter(|(k, p)| (k.x - p.x).abs() > half || (k.y - p.y).abs() > half)
+        .count();
+    let shapes = vector_stroke::stroke_shapes(points, radius, step, zoom, Color32::BLACK);
+    let center = cl.sample_points(0.005 / zoom);
+    let cell = radius + 1.0 / zoom;
+    let near_center = SegGrid::new(std::slice::from_ref(&center), false, cell);
+    let outline = shape_outline_polylines(&shapes, 0.005 / zoom);
+    let near_outline = SegGrid::new(&outline, true, cell);
+    let inside = |p: Point| shapes.iter().any(|s| s.contains_point(p));
+    let worst = outline
+        .iter()
+        .flatten()
+        .map(|&q| (near_center.dist(q, radius + 10.0 / zoom) - radius).abs())
+        .fold(0.0f64, f64::max);
+    let painted = |p: Point, slack: f64| inside(p) || near_outline.dist(p, slack).is_finite();
+    let corner = std::f64::consts::FRAC_1_SQRT_2 * step;
+    StrokeCheck {
+        worst_px: worst * zoom,
+        outside_box,
+        uncovered: b
+            .points()
+            .iter()
+            .filter(|&&p| !painted(p, corner + tol))
+            .count(),
+        // 中心線の点は、10 点に 1 点（どれも隣と弦のずれ 0.005px の細かさ）と終わりの点を見る
+        missing: center
+            .iter()
+            .step_by(10)
+            .chain(center.last())
+            .filter(|&&p| !painted(p, tol))
+            .count(),
+    }
+}
+
+/// テスト用：手で描いたような乱数の線。画面の整数の点を、表示の倍率 `zoom` で文書の座標に直したもの。向きと速さが
+/// ゆっくり変わり、ときどき折り返し（向きを大きく変える）、止まる（同じ点が続く）こともある
+fn random_hand_stroke(rng: &mut fastrand::Rng, zoom: f64) -> Vec<Point> {
+    use std::f64::consts::{PI, TAU};
+    let n = match rng.u32(0..10) {
+        0 => rng.usize(1..4),
+        1..=6 => rng.usize(4..120),
+        _ => rng.usize(120..600),
+    };
+    let (mut x, mut y) = (100.0 + 600.0 * rng.f64(), 100.0 + 400.0 * rng.f64());
+    let (mut dir, mut turn) = (TAU * rng.f64(), 0.0);
+    let mut speed = 0.5 + 8.0 * rng.f64();
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(Point::new(x.round() / zoom, y.round() / zoom));
+        turn = 0.9 * turn + 0.4 * (rng.f64() - 0.5);
+        if rng.u32(0..40) == 0 {
+            let side = if rng.bool() { 1.0 } else { -1.0 };
+            dir += side * PI * (0.6 + 0.4 * rng.f64());
+        }
+        dir += turn;
+        speed = (speed + 2.0 * (rng.f64() - 0.5)).clamp(0.0, 15.0);
+        x += speed * dir.cos();
+        y += speed * dir.sin();
+    }
+    out
+}
+
+/// R6（N-2005）：描いている間に見えていた形と、離したあとの形が、当てはめの許容の中で同じ。長い線（渦巻き・
+/// ハッチング）を画面の操作で描き、離す直前の表示（確定した所と、確定していない所のメッシュ）と、離したあとの図形を
+/// 比べる。ずれの上限は `STROKE_DEV_PX`（画面の px）：
+/// - 表示の頂点は、どれも離したあとの形の中か、その輪郭から上限以内にある（表示が形からはみ出さない）
+/// - 離したあとの輪郭の各点で、法線に沿って上限だけ内側の点は表示の中、外側の点は表示の外（形が表示からはみ出さない。
+///   その2点が形の内と外に分かれるときだけ見る：狭いすき間で向こう側の線に入る点は見ない）
+#[test]
+fn brush_preview_matches_the_committed_shape() {
+    use eframe::egui;
+    use std::f64::consts::TAU;
+    // 画面の点（整数に丸める）を 3px ほどおきに
+    let spiral: Vec<Pos2> = {
+        let mut out = Vec::new();
+        let mut t = 0.0f64;
+        while t < 4.0 * TAU {
+            let r = 8.0 + 172.0 * t / (4.0 * TAU);
+            out.push(Pos2::new(
+                (500.0 + r * t.cos()).round() as f32,
+                (330.0 + r * t.sin()).round() as f32,
+            ));
+            t += 3.0 / r;
+        }
+        out
+    };
+    let hatch: Vec<Pos2> = (0..24)
+        .flat_map(|k| {
+            let y = 200.0 + 11.0 * k as f64;
+            (0..120).map(move |i| {
+                let x = if k % 2 == 0 {
+                    320.0 + 3.0 * i as f64
+                } else {
+                    680.0 - 3.0 * i as f64
+                };
+                Pos2::new(x as f32, (y + 1.5 * (0.31 * i as f64).sin()).round() as f32)
+            })
+        })
+        .collect();
+    let screen_rect = Some(egui::Rect::from_min_size(
+        Pos2::ZERO,
+        Vec2::new(1280.0, 820.0),
+    ));
+    for (name, path) in [("渦巻き", spiral), ("ハッチング", hatch)] {
+        let ctx = egui::Context::default();
+        let mut app = Is2dApp::default();
+        app.tool.tool = Tool::Brush;
+        app.tool.brush_radius = 6.0;
+        let frame = |app: &mut Is2dApp, events: Vec<egui::Event>| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect,
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.update_ui(ctx),
+            );
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(path[0])]);
+        frame(
+            &mut app,
+            vec![egui::Event::PointerMoved(path[0]), press(path[0], true)],
+        );
+        for &p in &path[1..] {
+            frame(&mut app, vec![egui::Event::PointerMoved(p)]);
+        }
+        let (committed, tail) = match &app.tab().session.drag {
+            canvas_tool::ActiveCanvasDrag::PaintStroke {
+                committed_world_mesh,
+                tail_mesh,
+                ..
+            } => (committed_world_mesh.clone(), tail_mesh.clone()),
+            _ => panic!("{name}：ブラシで描いている途中になっていない"),
+        };
+        frame(&mut app, vec![press(*path.last().unwrap(), false)]);
+        let shapes = scene_summary(&app).shapes;
+        assert!(!shapes.is_empty(), "{name}：離したあとの形が無い");
+        let zoom = app.tab().view.zoom as f64;
+        let tol = STROKE_DEV_PX / zoom;
+        let outline = shape_outline_polylines(&shapes, 0.005 / zoom);
+        let near_outline = SegGrid::new(&outline, true, 4.0);
+        let inside = |p: Point| shapes.iter().any(|s| s.contains_point(p));
+        let preview = TriGrid::new(&[&committed, &tail], 4.0);
+        // 線の全体を描けている（マウスの点がどれも塗られている）
+        let unpainted = path
+            .iter()
+            .filter(|&&p| !inside(app.view.screen_to_world(p)))
+            .count();
+        assert_eq!(unpainted, 0, "{name}：塗られていないマウスの点がある");
+        // 表示が形からはみ出さない
+        let sticking_out: Vec<Point> = preview
+            .verts
+            .iter()
+            .copied()
+            .filter(|&v| !inside(v) && !near_outline.dist(v, tol).is_finite())
+            .collect();
+        // 形が表示からはみ出さない
+        let mut beyond: Vec<Point> = Vec::new();
+        let mut looked = 0usize;
+        for line in &outline {
+            for i in 0..line.len() {
+                let (a, b) = (line[i], line[(i + 1) % line.len()]);
+                if (b - a).hypot() < 1e-9 {
+                    continue;
+                }
+                let m = a.midpoint(b);
+                let nrm = normalize_vec(left_normal(b - a)) * tol;
+                let (p, q) = (m + nrm, m - nrm);
+                let (pin, pout) = match (inside(p), inside(q)) {
+                    (true, false) => (p, q),
+                    (false, true) => (q, p),
+                    _ => continue,
+                };
+                looked += 1;
+                if !preview.contains(pin) || preview.contains(pout) {
+                    beyond.push(m);
+                }
+            }
+        }
+        assert!(
+            looked > 1000,
+            "{name}：調べた輪郭の点が少なすぎる（{looked}）"
+        );
+        assert!(
+            sticking_out.is_empty() && beyond.is_empty(),
+            "{name}：描いている間の表示と離したあとの形が {STROKE_DEV_PX}px より離れた所がある（表示がはみ出す頂点 {}・最初 {:?}、形がはみ出す輪郭の点 {}/{looked}・最初 {:?}）",
+            sticking_out.len(),
+            sticking_out.first(),
+            beyond.len(),
+            beyond.first()
+        );
+    }
+}
+
+/// R6：点の数に上限が無い。2万点の長い線（交わりながら進むリサージュ曲線）でも、離したあとの形が、中心線（丸めの
+/// 範囲に入る）を半径で太らせた形と、ずれの上限（`STROKE_DEV_PX`）の中で一致する（前は、輪郭を 7200 点に
+/// 間引き直していた）
+#[test]
+fn long_brush_stroke_keeps_its_shape() {
+    use std::f64::consts::TAU;
+    let pts: Vec<Point> = (0..20_000)
+        .map(|i| {
+            let t = TAU * i as f64 / 20_000.0;
+            Point::new(
+                (400.0 + 300.0 * (7.0 * t).sin() + 40.0 * (61.0 * t).sin()).round(),
+                (300.0 + 200.0 * (5.0 * t).sin() + 40.0 * (67.0 * t).cos()).round(),
+            )
+        })
+        .collect();
+    let c = check_stroke_follows_centerline(&pts, 5.0, 1.0);
+    assert!(
+        c.worst_px <= STROKE_DEV_PX && c.outside_box == 0 && c.uncovered == 0 && c.missing == 0,
+        "2万点の線の形がくずれた：{c:?}"
+    );
+}
+
+/// R6：手で描いたような乱数の線（揺れ・折り返し・止まる・自分との交わり）を、いろいろな太さと表示の倍率で 2,000 本
+/// 描き、どの線でも次が成り立つ：
+/// - 中心線の節が、マウスの点の丸めの範囲に入る
+/// - 離したあとの形が、中心線を半径で太らせた形と、ずれの上限（`STROKE_DEV_PX`）の中で一致する（輪郭のどの点も、
+///   中心線からの距離が半径±上限。中心線の近くに余計な穴が無く、外に余計な塗りも無い）
+/// - どのマウスの点も、どの中心線の点も塗られる（丸めの範囲と上限の中で）
+///
+/// また、そのうち 200 本を 20 本ずつ同じ所に重ねて描き（ブラシ 3 色と消しゴム）、地図が正しいままであること
+#[test]
+fn random_hand_strokes_follow_their_centerlines() {
+    let mut rng = fastrand::Rng::with_seed(0x0052_6000_2026);
+    let zooms = [0.25, 0.5, 1.0, 2.0, 4.0];
+    let mut worst = (0.0f64, 0usize);
+    let mut bad: Vec<String> = Vec::new();
+    for k in 0..2000 {
+        let zoom = zooms[rng.usize(0..zooms.len())];
+        let pts = random_hand_stroke(&mut rng, zoom);
+        let r_screen = 0.5 + 40.0 * rng.f64().powi(2);
+        let radius = (r_screen / zoom).clamp(0.5, 70.0);
+        let c = check_stroke_follows_centerline(&pts, radius, zoom);
+        if c.worst_px > worst.0 {
+            worst = (c.worst_px, k);
+        }
+        if c.worst_px > STROKE_DEV_PX || c.outside_box + c.uncovered + c.missing > 0 {
+            bad.push(format!(
+                "線 {k}（{} 点・半径 {radius:.2}・倍率 {zoom}）：{c:?}",
+                pts.len()
+            ));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} 本で形が中心線からずれた（いちばん大きいずれ {:.3}px・線 {}）：{:?}",
+        bad.len(),
+        worst.0,
+        worst.1,
+        &bad[..bad.len().min(5)]
+    );
+    let colors = [Color32::RED, Color32::BLUE, Color32::from_rgb(20, 160, 60)];
+    for group in 0..10 {
+        let mut app = Is2dApp::default();
+        for k in 0..20 {
+            let zoom = zooms[rng.usize(0..zooms.len())];
+            let pts = random_hand_stroke(&mut rng, zoom);
+            let radius = ((0.5 + 30.0 * rng.f64().powi(2)) / zoom).clamp(0.5, 70.0);
+            if rng.u32(0..4) == 0 {
+                app.tool.tool = Tool::Eraser;
+            } else {
+                app.tool.tool = Tool::Brush;
+                app.tool.brush_color = colors[rng.usize(0..colors.len())];
+            }
+            commit_brush_line(&mut app, &brush_line_at_zoom(&pts, radius, zoom));
+            assert!(
+                layer_map_is_valid(&app),
+                "組 {group} の {k} 本目（{} 点・半径 {radius:.2}・倍率 {zoom}）で正しい地図でなくなった",
+                pts.len()
+            );
+        }
+    }
+}
+
 /// 手でジグザグを描くと、角を少し行き過ぎて戻ったり、手ぶれで向きが細かく変わったりする。そのような線でも、角の内側・外側に切れ込み（ひげ）ができず、丸いブラシでなぞった形になること
 #[test]
 fn test_hand_drawn_zigzag_corners_have_no_notch() {

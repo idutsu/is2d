@@ -1,7 +1,12 @@
 use eframe::egui::Color32;
 use i_overlay9::{
-    core::{fill_rule::FillRule as OverlayFillRule, overlay::ContourDirection},
-    float::{overlay::OverlayOptions, simplify::SimplifyShape},
+    core::{
+        fill_rule::FillRule as OverlayFillRule,
+        overlay::{ContourDirection, ShapeType},
+        overlay_rule::OverlayRule,
+    },
+    float::overlay::{FloatOverlay, OverlayOptions},
+    i_float::adapter::FloatPointAdapter,
 };
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
@@ -28,6 +33,12 @@ const CHUNK: usize = 16;
 /// 窓を解くとき、確定した所から戻って値を決めておく点の数。3次スプラインの影響は節1つごとに 2−√3（約 0.27）倍に
 /// 減るので、6 点戻れば、確定した所と窓の所の向きと曲がり方の食い違いは 0.27⁶（約 4×10⁻⁴）倍になる
 const BACK: usize = 6;
+/// 離したあとの輪郭を整理するとき、中心線の点をいくつずつの区切りに分けるか（`stroke_shapes`）。区切りが大きいほど、
+/// きつく曲がる所の内側の帯どうしの交わり（区切りの中の点の数の2乗ほど）が増え、小さいほど合わせる回数が増える。
+/// 乱数の手描きの線 2,000 本（`random_hand_strokes_follow_their_centerlines` と同じ線）を Linux で整理した合計の時間：
+/// 分けない 47.4秒、32 で 20.0秒、16 で 14.7秒、8 で 13.0秒、4 で 13.2秒（つなぎ目を滑らかな所に選ぶ前の測り）。
+/// 縮めても速くならなくなる 8 にする
+const PIECE: usize = 8;
 
 /// 中心線（3次の自然スプライン）。節の媒介変数（弦の長さ）`s`、値 `a`、2階微分 `c`
 #[derive(Clone, Debug, Default)]
@@ -63,11 +74,7 @@ impl Centerline {
                 t: KVec2::new(1.0, 0.0),
             }];
         }
-        let phi = if eps < r {
-            2.0 * (1.0 - eps / r).acos()
-        } else {
-            std::f64::consts::FRAC_PI_2
-        };
+        let phi = arc_step(r, eps);
         let mut out = Vec::new();
         for j in from..to {
             let h = self.s[j + 1] - self.s[j];
@@ -106,6 +113,34 @@ impl Centerline {
             t: normalize_vec(d_end),
         });
         out
+    }
+}
+
+#[cfg(test)]
+impl Centerline {
+    /// テスト用：節の値
+    pub(crate) fn knots(&self) -> &[Point] {
+        &self.a
+    }
+
+    /// テスト用：中心線全体を、弦のずれが `eps` 以内になる細かさで点にしたもの
+    pub(crate) fn sample_points(&self, eps: f64) -> Vec<Point> {
+        if self.a.is_empty() {
+            return Vec::new();
+        }
+        self.samples(0, self.a.len() - 1, 1.0, eps)
+            .into_iter()
+            .map(|c| c.p)
+            .collect()
+    }
+}
+
+/// 半径 `r` の円弧を、弦のずれが `eps` 以内の折れ線にするときの1歩の角度 φ（`eps` が半径以上なら直角）
+fn arc_step(r: f64, eps: f64) -> f64 {
+    if eps < r {
+        2.0 * (1.0 - eps / r).acos()
+    } else {
+        std::f64::consts::FRAC_PI_2
     }
 }
 
@@ -492,13 +527,10 @@ fn box_spline(s: &[f64], v: &[f64], hw: &[f64]) -> (Vec<f64>, Vec<f64>) {
 /// 帯の点は、各点の法線の向き（`p ± r·n`）に置く。曲がる内側で、隣の点の法線と半径より内で交わる所（曲率半径が
 /// `r` より小さい所）は、区間の法線の帯と、中心の点を通る折り返しにする（塗った形が、各区間を太らせた形を合わせた
 /// ものになる）。その所の点は、中心の点の並びを弦のずれ `eps` で間引いてから使う。両端は半円のキャップで、
-/// 刻みは弦のずれ `eps` から決める。1点だけなら円
-fn brush_outline(cs: &[Sample], r: f64, eps: f64) -> (Vec<Point>, Vec<KVec2>) {
-    let phi = if eps < r {
-        2.0 * (1.0 - eps / r).acos()
-    } else {
-        std::f64::consts::FRAC_PI_2
-    };
+/// 刻みは弦のずれ `eps` から決める。`caps`（始め・終わり）が `false` の端は、キャップの代わりに、その点の法線に沿った
+/// 直径で平らに閉じる（区切りに分けて整理するとき：`stroke_shapes`）。1点だけなら円
+fn brush_outline(cs: &[Sample], r: f64, eps: f64, caps: [bool; 2]) -> (Vec<Point>, Vec<KVec2>) {
+    let phi = arc_step(r, eps);
     let cap_n = ((std::f64::consts::PI / phi).ceil() as usize).max(2);
     let (mut pts, mut tans) = (Vec::new(), Vec::new());
     if cs.len() == 1 {
@@ -602,7 +634,7 @@ fn brush_outline(cs: &[Sample], r: f64, eps: f64) -> (Vec<Point>, Vec<KVec2>) {
     // 右側（始点 → 終点）、終点の半円、左側（終点 → 始点）、始点の半円
     side_pts(-1.0).into_iter().for_each(&mut push);
     let (pe, te, ne) = (cs[n - 1].p, cs[n - 1].t, nrm[n - 1]);
-    for k in 1..cap_n {
+    for k in (1..cap_n).filter(|_| caps[1]) {
         let a = k as f64 / cap_n as f64 * std::f64::consts::PI;
         push((
             pe + (-ne * a.cos() + te * a.sin()) * r,
@@ -611,7 +643,7 @@ fn brush_outline(cs: &[Sample], r: f64, eps: f64) -> (Vec<Point>, Vec<KVec2>) {
     }
     side_pts(1.0).into_iter().rev().for_each(&mut push);
     let (ps, ts, ns) = (cs[0].p, cs[0].t, nrm[0]);
-    for k in 1..cap_n {
+    for k in (1..cap_n).filter(|_| caps[0]) {
         let a = k as f64 / cap_n as f64 * std::f64::consts::PI;
         push((
             ps + (ns * a.cos() - ts * a.sin()) * r,
@@ -787,7 +819,7 @@ pub(crate) fn stroke_preview_outline(
     }
     let eps = FIT_TOL_PX * FLAT_RATIO / clamp_zoom(zoom);
     let cs = cl.samples(from, to.min(cl.len() - 1), radius, eps);
-    brush_outline(&cs, radius, eps).0
+    brush_outline(&cs, radius, eps, [true, true]).0
 }
 
 /// マウスの点 `points`（文書の座標）と半径 `radius` から、離したあとの図形を作る。丸めの刻みは `step`
@@ -817,7 +849,49 @@ pub(crate) fn stroke_shapes(
             t: c.t,
         })
         .collect();
-    let (outline, tans) = brush_outline(&cs, radius * z, eps_flat);
+    // 輪郭を自分との交わりで整理する手間（i_overlay）は、交わりの数だけ増える。きつく曲がる所の内側の帯は、曲がりの
+    // 中心の近くで互いに交わる（点 K 個で K² 個ほど）。そこで、中心線の点を `PIECE` 個ほどずつの区切りに分け、区切り
+    // ごとの輪郭を整理してから合わせる（`union_rings`）。隣の区切りとは1区間（点 j..j+1）重ね、つなぎ目の端は平らに
+    // 閉じる：前の区切りは j+1 の直径で、後の区切りは j の直径で閉じ、どちらの直径も隣の区切りの中に入る（端の点は
+    // 隣の帯の点と同じ）。つなぎ目 j は、前後の区間（j−1..j+2）で接線の回りが刻み φ（`arc_step`）以下の所にする。
+    // 速さが 0 に近い折り返しでは、隣どうしの点の法線がほぼ逆向きで、2本の直径がほぼ重なり、区切りごとに整理した
+    // 輪郭の間に細いすき間が残る。キャップで閉じないのは、キャップの円が隣の帯に接してわずかにはみ出し、つなぎ目に
+    // 角ができるため
+    let last = cs.len() - 1;
+    let phi = arc_step(radius * z, eps_flat);
+    let turn = |i: usize| {
+        cs[i]
+            .t
+            .cross(cs[i + 1].t)
+            .atan2(cs[i].t.dot(cs[i + 1].t))
+            .abs()
+    };
+    let joint = |j: usize| j + 2 <= last && (j - 1..=j + 1).all(|i| turn(i) <= phi);
+    let mut parts = Vec::new();
+    let mut a = 0;
+    loop {
+        let b = ((a + PIECE).max(1)..last)
+            .find(|&j| joint(j))
+            .map_or(last, |j| j + 1);
+        parts.push(brush_outline(
+            &cs[a..=b],
+            radius * z,
+            eps_flat,
+            [a == 0, b == last],
+        ));
+        if b == last {
+            break;
+        }
+        a = b - 1;
+    }
+    let rings: Vec<Vec<[f64; 2]>> = parts
+        .iter()
+        .map(|(o, _)| o.iter().map(|p| [p.x, p.y]).collect())
+        .collect();
+    let (outline, tans): (Vec<Point>, Vec<KVec2>) = parts
+        .into_iter()
+        .flat_map(|(o, t)| o.into_iter().zip(t))
+        .unzip();
     // 輪郭の点 → 接線。i_overlay は交わりで新しい点を作るが、もとの点は動かさない（整数の格子に置いて戻すときの
     // ずれは 10⁻⁶ px ほど）ので、ごく近い点を探せばもとの点が分かる。見つからない点は交わりでできた角
     let cell = 1e-3;
@@ -839,13 +913,12 @@ pub(crate) fn stroke_shapes(
         }
         None
     };
-    let raw: Vec<[f64; 2]> = outline.iter().map(|p| [p.x, p.y]).collect();
     let mut options = OverlayOptions::default();
     options.output_direction = ContourDirection::Clockwise;
     options.min_output_area = DUST_AREA_PX;
     let to_world = Affine::scale(1.0 / z);
     let mut result = Vec::new();
-    for shape in raw.simplify_shape_custom(OverlayFillRule::NonZero, options, Default::default()) {
+    for shape in union_rings(&rings, options) {
         let mut contours: Vec<Contour> = Vec::new();
         for (ri, ring) in shape.iter().enumerate() {
             if ring.len() < 3 {
@@ -866,6 +939,72 @@ pub(crate) fn stroke_shapes(
         }
     }
     result
+}
+
+/// 閉じた折れ線 `rings`（どれも NonZero で塗る）を合わせた形（i_overlay の図形：外周と穴の並び）。1つずつ自分との
+/// 交わりを整理してから、隣どうしを2つずつ合わせていく（分割統治）。どの段も、全部の点の外接矩形から決めた同じ
+/// 整数の格子で計算するので、前の段で格子に置いた点は動かない。`options` の塵の面積は最後の段だけで使う（途中で
+/// 落とすと、ほかと合わさるはずの小さい所も消える）
+fn union_rings(rings: &[Vec<[f64; 2]>], options: OverlayOptions<f64>) -> Vec<Vec<Vec<[f64; 2]>>> {
+    let adapter =
+        FloatPointAdapter::<[f64; 2], i32>::with_iter_conservative(rings.iter().flatten());
+    let mut inner = options;
+    inner.min_output_area = 0.0;
+    let run = |opts: OverlayOptions<f64>,
+               subj: &dyn Fn(FloatOverlay<[f64; 2]>) -> FloatOverlay<[f64; 2]>,
+               cap: usize,
+               rule: OverlayRule| {
+        subj(FloatOverlay::new_custom(
+            adapter.clone(),
+            opts,
+            Default::default(),
+            cap,
+        ))
+        .overlay(rule, OverlayFillRule::NonZero)
+    };
+    if let [ring] = rings {
+        return run(
+            options,
+            &|o| o.unsafe_add_source(ring, ShapeType::Subject),
+            ring.len(),
+            OverlayRule::Subject,
+        );
+    }
+    let mut level: Vec<Vec<Vec<Vec<[f64; 2]>>>> = rings
+        .iter()
+        .map(|r| {
+            run(
+                inner,
+                &|o| o.unsafe_add_source(r, ShapeType::Subject),
+                r.len(),
+                OverlayRule::Subject,
+            )
+        })
+        .collect();
+    while level.len() > 1 {
+        let opts = if level.len() == 2 { options } else { inner };
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut it = level.into_iter();
+        while let Some(a) = it.next() {
+            next.push(match it.next() {
+                Some(b) => {
+                    let cap = a.iter().chain(&b).flatten().map(|c| c.len()).sum();
+                    run(
+                        opts,
+                        &|o| {
+                            o.unsafe_add_source(&a, ShapeType::Subject)
+                                .unsafe_add_source(&b, ShapeType::Clip)
+                        },
+                        cap,
+                        OverlayRule::Union,
+                    )
+                }
+                None => a,
+            });
+        }
+        level = next;
+    }
+    level.pop().unwrap_or_default()
 }
 
 /// 点の列 `all_pts[start..=end]` を、両端を結ぶ線から `epsilon` 以内のずれで間引き（Ramer–Douglas–Peucker）、
@@ -892,6 +1031,7 @@ fn rdp_keep(all_pts: &[Point], start: usize, end: usize, epsilon: f64, keep: &mu
 /// テスト用：閉じた折れ線 `raw`（NonZero で塗る）の形を、自分との交わりを整理して、直線の輪郭のまま図形にする
 #[cfg(test)]
 pub(crate) fn polygon_shapes(raw: &[Point], color: Color32) -> Vec<FillShape> {
+    use i_overlay9::float::simplify::SimplifyShape;
     let pts: Vec<[f64; 2]> = raw.iter().map(|p| [p.x, p.y]).collect();
     let mut options = OverlayOptions::default();
     options.output_direction = ContourDirection::Clockwise;
