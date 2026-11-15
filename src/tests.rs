@@ -30171,6 +30171,38 @@ fn wiggly_stroke(
     crate::vector_stroke::build_smoothed_stroke_shapes_at_zoom(&raw, color, 1.0)
 }
 
+/// R1（レビュー f01d518）：切った区間を曲線に戻すとき、曲線の判定の形が区間の並びとまったく同じなら、判定の形は変わらない
+/// ので、置き換えてよいかを調べず、そのための索引も作らない（`ChainRestorer`）。同じ絵を同じ位置に貼ると、どの鎖もそう
+/// なる（前は、鎖があればいつも地図全体の索引を作り、鎖ごとに調べていた）
+#[test]
+fn restoring_unchanged_chains_builds_no_index() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    let mut rng = map_overlay::Rng(3);
+    let mut m = PlanarMap::default();
+    for k in 0..20 {
+        let c = colors[k % 3];
+        let r = 2.0 + rng.f() * 6.0;
+        let s = wiggly_stroke(&mut rng, (0.0, 0.0, 300.0, 200.0), r, c);
+        m = m
+            .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+            .unwrap();
+    }
+    let before = crate::planar_map::index_builds();
+    let pasted = m.overlay(MapInput::Map(&m), MapRule::Overlay).unwrap();
+    assert!(pasted.is_valid());
+    assert_eq!(pasted.edges.len(), m.edges.len());
+    assert_eq!(
+        crate::planar_map::index_builds() - before,
+        0,
+        "判定の形の索引を作った回数"
+    );
+}
+
 /// R2（レビュー f01d518）：重ね合わせでは、i_overlay に1回だけ切らせる。切れ目の頂点は、切った曲線から
 /// `FLAT_TOL + SPLIT_REACH` 以内にあり、戻すときはその許容で2本を1本にまとめる（`merge_degree2`）ので、曲線の本当の交点を
 /// 折れ線に足して切り直す2回目の切りは要らない（前は、2本の曲線が交わる所があると、交点をニュートン法で求めて足し、

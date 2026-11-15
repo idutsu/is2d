@@ -1996,8 +1996,12 @@ pub(super) struct Chain {
 /// 満たさなければ鎖を真ん中で2つに分け、区間1つでも満たさなければ直線のまま残す
 pub(super) struct ChainRestorer {
     map: PlanarMap,
-    /// 判定の形の索引（置き換える鎖が無ければ `None`）
+    /// 置き換える曲線と帯がすべて入る矩形（`None` なら鎖が無い）。索引に入れる区間・頂点は、これにかかるものだけでよい
+    active: Option<KRect>,
+    /// 判定の形の索引。初めて要るとき（判定の形が変わる置き換えを調べるとき）に、その時の地図から作る
     index: Option<PolyIndex>,
+    /// 辺ごとの、使っているか（`map.edges` の順。索引を作る前の置き換えの分も持つ）
+    alive: Vec<bool>,
     /// 使い回す入れ物（調べる鎖の範囲・途中の頂点・道の点・曲線の判定の形）
     spans: Vec<(usize, usize)>,
     inner: Vec<usize>,
@@ -2009,10 +2013,11 @@ impl ChainRestorer {
     /// `active`：置き換える曲線と帯がすべて入る矩形（`None` なら鎖が無い）。調べる相手（索引に入れる区間・頂点）は、
     /// これにかかるものだけでよい
     pub(super) fn new(map: PlanarMap, active: Option<KRect>) -> Self {
-        let index = active.map(|area| PolyIndex::new(&map, Some(area)));
         Self {
+            alive: vec![true; map.edges.len()],
             map,
-            index,
+            active,
+            index: None,
             spans: Vec::new(),
             inner: Vec::new(),
             path: Vec::new(),
@@ -2043,7 +2048,7 @@ impl ChainRestorer {
         if na == nb || ta == tb {
             return false;
         }
-        let Some(index) = self.index.as_mut() else {
+        let Some(area) = self.active else {
             return false;
         };
         let whole = (i == 0 && j == ids.len()).then_some(c.whole).flatten();
@@ -2062,11 +2067,23 @@ impl ChainRestorer {
         self.path
             .extend(c.steps[i..j].iter().map(|s| gpt(nodes[s.1])));
         grid_poly_into(&q, &mut self.pc);
-        if !index.can_replace(part, &self.path, &self.inner, &self.pc, na, nb) {
-            return false;
+        // 曲線の判定の形が鎖の道（区間の頂点の並び）とまったく同じなら、置き換えても判定の形は何も変わらない。鎖の区間は
+        // i_overlay が切った区間で、共有する端のほかで触れ合わず、途中の頂点はほかの辺につながらない（次数 2 でつなげた）
+        // ので、3つの決まりはもう満たされている。調べるのは、判定の形が変わる置き換えだけ（索引もそのときに作る）
+        if self.pc != self.path {
+            let (nodes, edges, alive) = (&self.map.nodes, &self.map.edges, &self.alive);
+            let index = self
+                .index
+                .get_or_insert_with(|| PolyIndex::build(nodes, edges, |f| alive[f], Some(area)));
+            if !index.can_replace(part, &self.path, &self.inner, &self.pc, na, nb) {
+                return false;
+            }
         }
         for &f in part {
-            index.kill(f);
+            self.alive[f] = false;
+            if let Some(index) = self.index.as_mut() {
+                index.kill(f);
+            }
         }
         self.map.edges.push(MapEdge {
             a: na,
@@ -2077,25 +2094,28 @@ impl ChainRestorer {
             left_src: c.left.1,
             right_src: c.right.1,
         });
-        index.add_edge(na, nb, self.pc.iter().copied());
+        self.alive.push(true);
+        if let Some(index) = self.index.as_mut() {
+            index.add_edge(na, nb, self.pc.iter().copied());
+        }
         true
     }
 
-    /// 置き換え終わった地図（使わなくなった辺を除く）と、その辺の判定の形の索引・辺の番号 → 索引の番号（鎖が無ければ
-    /// `None`。続く `merge_degree2_indexed` が使う）
+    /// 置き換え終わった地図（使わなくなった辺を除く）と、その辺の判定の形の索引・辺の番号 → 索引の番号（索引を作らな
+    /// かったら `None`。続く `merge_degree2_indexed` が使い、無ければ要るときに作る：答えは索引の範囲によらない）
     pub(super) fn finish(self) -> (PlanarMap, Option<(PolyIndex, Vec<usize>)>) {
         let mut map = self.map;
-        let Some(index) = self.index else {
-            return (map, None);
-        };
-        // 地図の辺と索引の辺は、同じ番号で1つずつ足してきた
+        // 地図の辺と、`alive`・索引の辺は、同じ番号で1つずつ足してきた
         let mut k = 0;
         map.edges.retain(|_| {
             k += 1;
-            index.alive[k - 1]
+            self.alive[k - 1]
         });
-        let ids = (0..index.alive.len()).filter(|&f| index.alive[f]).collect();
-        (map, Some((index, ids)))
+        let index = self.index.map(|index| {
+            let ids = (0..self.alive.len()).filter(|&f| self.alive[f]).collect();
+            (index, ids)
+        });
+        (map, index)
     }
 }
 
