@@ -347,10 +347,21 @@ impl PlanarMap {
     }
 
     /// バケツ：点 `p` を含む面（辺で囲まれた所。何も塗っていない所も）を `color` にした地図。`None`：変わらない（どの
-    /// 輪郭にも囲まれていない所・輪郭の上・すでに `color` の面）
+    /// 輪郭にも囲まれていない所・輪郭の上・すでに `color` の面）。テスト用（本番は計算に使う写しの判定の形で：
+    /// `LayerBase::with_face_filled`）
+    #[cfg(test)]
     pub(crate) fn with_face_filled(&self, p: Point, color: Color32) -> Option<PlanarMap> {
-        let polys = self.polys();
-        let regions = self.regions(&polys, &self.face_cycles_with(&polys), true);
+        self.face_filled_with(&self.polys(), p, color)
+    }
+
+    /// `with_face_filled` を、辺ごとの判定の形 `polys` で（計算に使う写しが持つもの：`LayerBase::with_face_filled`）
+    pub(super) fn face_filled_with(
+        &self,
+        polys: &[Poly],
+        p: Point,
+        color: Color32,
+    ) -> Option<PlanarMap> {
+        let regions = self.regions(polys, &self.face_cycles_with(polys), true);
         // 点を含む組（正しい地図では、組どうしは重ならないので1つまで）。点が輪郭の上にあれば、どの面か決まらないので
         // 何も変えない
         let g = gpt(p);

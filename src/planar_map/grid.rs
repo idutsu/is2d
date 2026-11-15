@@ -5,6 +5,10 @@ use super::*;
 /// 格子の点（1/4096px を 1 とする整数の座標）
 pub(super) type IPt = (i64, i64);
 
+/// 辺の判定の形（`grid_poly`）。地図ごとの計算に使う写し（`LayerBase::polys`）が1回だけ作って持ち、前の地図と同じ辺は
+/// 引き継ぐ（`PlanarMap::polys_since`）
+pub(super) type Poly = Arc<[IPt]>;
+
 /// 点を格子の点に丸める（丸めの式はこれ1つ。座標の範囲は見ない：範囲も見るのは `to_grid`）
 pub(super) fn gpt(p: Point) -> IPt {
     (
@@ -15,6 +19,8 @@ pub(super) fn gpt(p: Point) -> IPt {
 
 /// 曲線の判定の形：重ねるときと同じ数に等分した折れ線の点を、格子に丸めたもの（続けて同じ点は1つにする）
 pub(super) fn grid_poly(q: &QuadBez) -> Vec<IPt> {
+    #[cfg(test)]
+    super::POLYS_BUILT.with(|n| n.set(n.get() + 1));
     grid_line(flat_points(*q, FLAT_TOL).map(|(p, _)| p))
 }
 
@@ -1073,7 +1079,7 @@ pub(super) struct Ring {
 }
 
 impl Ring {
-    pub(super) fn new(polys: &[Vec<IPt>], cycle: &[(usize, bool)]) -> Self {
+    pub(super) fn new(polys: &[Poly], cycle: &[(usize, bool)]) -> Self {
         let pts = cycle_points(polys, cycle);
         Self {
             area2: area2_of(&pts),
@@ -1155,7 +1161,7 @@ impl Regions {
 
 /// 向きのある辺 `h` の判定の形の点（向きどおりの順）
 pub(super) fn half_points(
-    polys: &[Vec<IPt>],
+    polys: &[Poly],
     (i, forward): (usize, bool),
 ) -> impl Iterator<Item = IPt> + '_ {
     let p = &polys[i];
@@ -1164,7 +1170,7 @@ pub(super) fn half_points(
 }
 
 /// 面の輪郭 `cycle` の判定の形の点（閉じた折れ線。最後の点から最初の点へ閉じる）
-pub(super) fn cycle_points(polys: &[Vec<IPt>], cycle: &[(usize, bool)]) -> Vec<IPt> {
+pub(super) fn cycle_points(polys: &[Poly], cycle: &[(usize, bool)]) -> Vec<IPt> {
     let mut out = Vec::new();
     for &h in cycle {
         let mut it = half_points(polys, h).peekable();
@@ -1219,7 +1225,7 @@ pub(super) fn starts_order(a: &[QuadBez], b: &[QuadBez]) -> std::cmp::Ordering {
 }
 
 /// 向きのある辺 `h` の判定の形の最初の区間の真ん中の点（2倍の座標）
-pub(super) fn half_mid2(polys: &[Vec<IPt>], h: (usize, bool)) -> IPt {
+pub(super) fn half_mid2(polys: &[Poly], h: (usize, bool)) -> IPt {
     let mut it = half_points(polys, h);
     let a = it.next().unwrap_or((0, 0));
     let b = it.next().unwrap_or(a);

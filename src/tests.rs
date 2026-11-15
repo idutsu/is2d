@@ -30401,6 +30401,65 @@ fn measure_write_back_scaling() {
     }
 }
 
+/// 書き戻す地図を確かめるとき（`written`）と、新しい地図の写しを作るとき（`LayerBase::with_faces`）は、前の地図にある
+/// 辺の判定の形（`grid_poly`）を作り直さない：線の多いセル画に短い線を1本描いても、作る判定の形は線のまわりの分だけ
+/// （レビュー f01d518 の R3。前は確かめるたびに全部の辺の分を作った）
+#[test]
+fn test_short_brush_builds_polylines_only_near_the_stroke() {
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    let mut app = Is2dApp::default();
+    let mut rng = map_overlay::Rng(5);
+    let stroke = |rng: &mut map_overlay::Rng, n: usize| -> Vec<Point> {
+        let mut p = Point::new(-200.0 + rng.f() * 400.0, -120.0 + rng.f() * 240.0);
+        let mut a = rng.f() * std::f64::consts::TAU;
+        (0..n)
+            .map(|_| {
+                a += (rng.f() - 0.5) * 0.8;
+                p += kurbo::Vec2::new(a.cos(), a.sin()) * 3.0;
+                p
+            })
+            .collect()
+    };
+    for k in 0..60 {
+        let points = stroke(&mut rng, 30);
+        let color = colors[k % 3];
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::PaintStroke {
+                points,
+                radius: 4.0,
+                color
+            }
+        ));
+    }
+    let edges: usize = app.doc.root.layers[0].keyframes[0]
+        .cel
+        .maps
+        .iter()
+        .map(|m| m.base().map.edges.len())
+        .sum();
+    assert!(edges > 800, "辺 {edges} 本");
+    let before = crate::planar_map::polys_built();
+    let points = stroke(&mut rng, 6);
+    assert!(doc_actions::apply(
+        &mut app,
+        doc_actions::Action::PaintStroke {
+            points,
+            radius: 3.0,
+            color: colors[0]
+        }
+    ));
+    let built = crate::planar_map::polys_built() - before;
+    assert!(
+        built * 4 < edges,
+        "作った判定の形 {built} 本（辺 {edges} 本）"
+    );
+}
+
 /// N-2001：書き戻す地図の確かめで、前の地図にある辺どうしを省いても（`valid_faces_since`）、判定は全部を確かめる
 /// `valid_faces` と同じ。重ね合わせの結果と、その頂点をずらして正しくないこともあるようにしたものの両方で比べる
 #[test]
@@ -30443,7 +30502,7 @@ fn checking_against_the_previous_map_matches_the_full_check() {
         moved.nodes[v] += kurbo::Vec2::new(a.cos(), a.sin()) * (0.01 + rng.f() * 3.0);
         for cand in [&next, &moved] {
             let full = cand.valid_faces();
-            assert_eq!(cand.valid_faces_since(Some(base.keys())), full);
+            assert_eq!(cand.valid_faces_since(Some(&base)), full);
             invalid += usize::from(full.is_none());
         }
         if step % 3 != 2 {
@@ -30462,10 +30521,10 @@ fn checking_against_the_previous_map_finds_new_crossings() {
     let blue = map_overlay::rect_shape(160.0, 160.0, 260.0, 260.0, Color32::BLUE);
     let base_map = PlanarMap::from_faces([&red]);
     let base = LayerBase::new(&base_map);
-    assert!(base_map.valid_faces_since(Some(base.keys())).is_some());
+    assert!(base_map.valid_faces_since(Some(&base)).is_some());
     let next = PlanarMap::from_faces([&red, &blue]);
     assert_eq!(next.valid_faces(), None);
-    assert_eq!(next.valid_faces_since(Some(base.keys())), None);
+    assert_eq!(next.valid_faces_since(Some(&base)), None);
 }
 
 /// 計測（N-2001）：線の多いセル画（今の地図から描いて作る）に、ブラシを1本描く1回（入口から文書への書き戻しまで）

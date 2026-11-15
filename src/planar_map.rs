@@ -121,8 +121,8 @@ pub(crate) type IntMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IntHa
 /// 整数を鍵にする集まり（`IntHasher`）
 pub(crate) type IntSet<K> = HashSet<K, std::hash::BuildHasherDefault<IntHasher>>;
 
-/// 辺の鍵（`edge_key`）の集まり
-pub(crate) type EdgeKeys = IntSet<[u64; 6]>;
+/// 辺の鍵（`edge_key`）から、その地図の辺の番号へ
+pub(crate) type EdgeKeys = IntMap<[u64; 6], usize>;
 
 #[cfg(test)]
 struct Seg {
@@ -353,17 +353,25 @@ impl PlanarMap {
         self.valid_faces().is_some()
     }
 
-    /// 正しい地図なら（`is_valid`）、その面（`faces`）。正しい地図かの判定はどこでもこれ1つ（書き戻し・読み込み・変換
-    /// した地図・テスト）。`None`：正しい地図でない
+    /// テスト用：正しい地図なら（`is_valid`）、その面（`faces`）。判定は本番と同じ `checked_since`（書き戻し・読み込み・
+    /// 変換した地図の判定はどこでもこれ1つ）。`None`：正しい地図でない
+    #[cfg(test)]
     pub(crate) fn valid_faces(&self) -> Option<Vec<MapFace>> {
         self.valid_faces_since(None)
     }
 
-    /// `valid_faces` と同じ判定。ただし、正しい地図 `prev` にある辺（形がビットまで同じ：`edge_key`）どうしは、判定の形が
-    /// 離れていることを確かめ直さない（`prev` が正しいので、その2本はもともと離れている）。セル画の地図に書き戻すとき
-    /// （`written`）に、前の地図の辺の鍵（`LayerBase::keys`）を渡す：判定の手間のうちいちばん重い、区間どうしの確かめが、
-    /// 変えた辺の近くだけになる（レビュー 4cb53aa の N-2001）
-    pub(crate) fn valid_faces_since(&self, prev: Option<&EdgeKeys>) -> Option<Vec<MapFace>> {
+    /// `valid_faces` と同じ判定。ただし、正しい地図 `prev`（計算に使う写し）にある辺（形がビットまで同じ：`edge_key`）
+    /// どうしは、判定の形が離れていることを確かめ直さない（`prev` が正しいので、その2本はもともと離れている）。セル画の
+    /// 地図に書き戻すとき（`written`）に、前の地図の写しを渡す：判定の手間のうちいちばん重い、区間どうしの確かめが、
+    /// 変えた辺の近くだけになる（レビュー 4cb53aa の N-2001）。判定の形も、`prev` にある辺は使い回す（`polys_since`）。
+    /// テスト用（本番は `written`・`checked` が本体の `checked_since` を呼ぶ）
+    #[cfg(test)]
+    pub(crate) fn valid_faces_since(&self, prev: Option<&LayerBase>) -> Option<Vec<MapFace>> {
+        self.checked_since(prev).map(|(faces, _)| faces)
+    }
+
+    /// `valid_faces_since` の本体。正しい地図なら、その面と、辺ごとの判定の形
+    fn checked_since(&self, prev: Option<&LayerBase>) -> Option<(Vec<MapFace>, Vec<Poly>)> {
         #[cfg(test)]
         if prev.is_none() {
             FULL_CHECKS.with(|n| n.set(n.get() + 1));
@@ -373,13 +381,7 @@ impl PlanarMap {
         if !self.fits_grid(Affine::IDENTITY) || self.edges.iter().any(|e| e.left == e.right) {
             return None;
         }
-        let polys = self.polys();
-        let fresh: Vec<bool> = match prev {
-            Some(keys) => (0..self.edges.len())
-                .map(|e| !keys.contains(&edge_key(self, e)))
-                .collect(),
-            None => vec![true; self.edges.len()],
-        };
+        let (polys, fresh) = self.polys_since(prev);
         if !self.polys_apart(&polys, &fresh) {
             return None;
         }
@@ -413,7 +415,7 @@ impl PlanarMap {
                 }
             }
         }
-        Some(regions.into_faces(self))
+        Some((regions.into_faces(self), polys))
     }
 
     /// テスト用：正しくないとき、どこがだめか
@@ -503,16 +505,39 @@ impl PlanarMap {
     }
 
     /// 全部の辺の判定の形（格子の上の折れ線）
-    fn polys(&self) -> Vec<Vec<IPt>> {
+    fn polys(&self) -> Vec<Poly> {
         (0..self.edges.len())
-            .map(|e| grid_poly(&self.quad(e)))
+            .map(|e| grid_poly(&self.quad(e)).into())
             .collect()
+    }
+
+    /// 全部の辺の判定の形と、正しい地図 `prev`（計算に使う写し）に無い辺の印。`prev` にある辺（形がビットまで同じ：
+    /// `edge_key`）は、向きも同じなら `prev` の判定の形をそのまま使う（同じ曲線から同じ式で作るので、ビットまで同じ）。
+    /// 作るのは、`prev` に無い辺と、向きの逆な辺の分だけ
+    fn polys_since(&self, prev: Option<&LayerBase>) -> (Vec<Poly>, Vec<bool>) {
+        let Some(prev) = prev else {
+            return (self.polys(), vec![true; self.edges.len()]);
+        };
+        let (keys, prev_polys) = (prev.keys(), prev.polys());
+        let start = |m: &PlanarMap, e: usize| {
+            let p = m.nodes[m.edges[e].a];
+            [p.x.to_bits(), p.y.to_bits()]
+        };
+        (0..self.edges.len())
+            .map(|e| match keys.get(&edge_key(self, e)) {
+                Some(&i) if start(self, e) == start(&prev.map, i) => {
+                    (Arc::clone(&prev_polys[i]), false)
+                }
+                Some(_) => (grid_poly(&self.quad(e)).into(), false),
+                None => (grid_poly(&self.quad(e)).into(), true),
+            })
+            .unzip()
     }
 
     /// 判定の形の 1〜3（設計 2-2）：折れ線どうしが共有する頂点のほかで触れない・1本の折れ線が自分と触れない・
     /// 別々の頂点が別々の格子の点に丸まる。区間どうしは、どちらかが `fresh` の辺のものだけを確かめる（ほかの辺どうしは
     /// 正しい地図にそのままあった：`valid_faces_since`）。見るのは、`fresh` の辺の折れ線の外接矩形にかかる区間だけ
-    fn polys_apart(&self, polys: &[Vec<IPt>], fresh: &[bool]) -> bool {
+    fn polys_apart(&self, polys: &[Poly], fresh: &[bool]) -> bool {
         let mut deg = vec![0usize; self.nodes.len()];
         for (e, ed) in self.edges.iter().enumerate() {
             if polys[e].len() < 2 {
@@ -567,12 +592,7 @@ impl PlanarMap {
 
     /// 辺 `e` の区間 `k` と、辺 `f` の区間 `m`（`(e, k)` が前）が、許されない所で触れるか（`seg_pair_clash`。1本の辺の
     /// となり合う区間は、そのつなぎ目を共有してよい）
-    fn segs_clash(
-        &self,
-        polys: &[Vec<IPt>],
-        (e, k): (usize, usize),
-        (f, m): (usize, usize),
-    ) -> bool {
+    fn segs_clash(&self, polys: &[Poly], (e, k): (usize, usize), (f, m): (usize, usize)) -> bool {
         let (pe, pf) = (&polys[e], &polys[f]);
         let (ee, ef) = (self.edges[e], self.edges[f]);
         seg_pair_clash(
@@ -593,7 +613,7 @@ impl PlanarMap {
 
     /// `faces` と同じ。判定の形 `polys` と面の輪郭 `cycles`（`face_cycles_with` の結果）を先に求めてあるときに使う
     /// （`regions` の色のある組）
-    fn faces_of(&self, polys: &[Vec<IPt>], cycles: &[Vec<(usize, bool)>]) -> (Vec<MapFace>, usize) {
+    fn faces_of(&self, polys: &[Poly], cycles: &[Vec<(usize, bool)>]) -> (Vec<MapFace>, usize) {
         let regions = self.regions(polys, cycles, false);
         let broken = regions.broken;
         (regions.into_faces(self), broken)
@@ -603,12 +623,7 @@ impl PlanarMap {
     /// 穴は、それを含む同じ色（色の無い所も1つの色とみなす）の外周のうち、いちばん小さいものに入れる。外周か穴かは判定の
     /// 形の面積の符号、穴の入れ先は判定の形での点の内外（`Ring::contains`）で、どちらも整数で決める。`unpainted`：色の無い
     /// 所（何も塗っていない、囲まれた所）の組も作るか。面の取り出し・正しい地図かの判定・バケツの、面の分け方はこれ1つ
-    fn regions(
-        &self,
-        polys: &[Vec<IPt>],
-        cycles: &[Vec<(usize, bool)>],
-        unpainted: bool,
-    ) -> Regions {
+    fn regions(&self, polys: &[Poly], cycles: &[Vec<(usize, bool)>], unpainted: bool) -> Regions {
         let mut out = Regions {
             cycles: Vec::new(),
             rings: Vec::new(),
@@ -781,7 +796,7 @@ impl PlanarMap {
     /// 面の輪郭（左側が同じ面になる、向きのある辺の輪）をすべて取り出す。どの向きのある辺も、ちょうど1つの輪に入る。
     /// `polys` は辺の判定の形。頂点のまわりの辺の順番は、判定の形の、頂点から出る最初の区間の整数の向きで決める
     /// （正しい地図では、同じ向きの2本は無い）
-    fn face_cycles_with(&self, polys: &[Vec<IPt>]) -> Vec<Vec<(usize, bool)>> {
+    fn face_cycles_with(&self, polys: &[Poly]) -> Vec<Vec<(usize, bool)>> {
         let idx = |h: (usize, bool)| 2 * h.0 + h.1 as usize;
         let dir = |h: (usize, bool)| -> IPt {
             let mut it = half_points(polys, h);
@@ -1089,7 +1104,7 @@ fn rewrite_shapes(
     layer_id: u64,
     group_path: &[u64],
 ) -> (Vec<ShapeId>, Vec<FillShape>, Vec<ShapeId>) {
-    let next_keys: EdgeKeys = (0..next.edges.len()).map(|e| edge_key(next, e)).collect();
+    let next_keys: IntSet<[u64; 6]> = (0..next.edges.len()).map(|e| edge_key(next, e)).collect();
     // 辺が消えた元の図形
     let mut cut: HashSet<ShapeId> = HashSet::new();
     for e in 0..orig.edges.len() {
@@ -1110,7 +1125,7 @@ fn rewrite_shapes(
             .cycles
             .iter()
             .flatten()
-            .all(|h| orig_keys.contains(&edge_key(next, h.0)));
+            .all(|h| orig_keys.contains_key(&edge_key(next, h.0)));
         let keep = all_same
             && f.srcs.len() == 1
             && orig_color.get(&f.srcs[0]) == Some(&f.color)
@@ -1132,7 +1147,7 @@ fn rewrite_shapes(
     let reuse = |cycle: &[(usize, bool)]| -> Option<Contour> {
         if !cycle
             .iter()
-            .all(|h| orig_keys.contains(&edge_key(next, h.0)))
+            .all(|h| orig_keys.contains_key(&edge_key(next, h.0)))
         {
             return None;
         }
@@ -1244,18 +1259,20 @@ impl PlanarMap {
     /// 確かめた地図を受け取る。`None`：正しい地図でない（書き戻さずに断る。書けた地図は、保存して開いても必ず読める）。
     /// テストでは、正しい地図でない結果を作った操作を、そこで見つける
     pub(crate) fn written(self, prev: &LayerBase) -> Option<CheckedMap> {
-        let faces = self.valid_faces_since(Some(prev.keys()));
+        let checked = self.checked_since(Some(prev));
         #[cfg(test)]
         if test_checks() {
             assert!(
-                faces.is_some(),
+                checked.is_some(),
                 "書き戻す地図が正しい地図でない: {}",
                 self.validity_report()
             );
         }
+        let (faces, polys) = checked?;
         Some(CheckedMap {
             map: self,
-            faces: faces?,
+            faces,
+            polys,
         })
     }
 }
@@ -1265,7 +1282,8 @@ impl PlanarMap {
 // ============================================================================
 
 /// 1つのレイヤー・階層の地図の、計算に使う写し：ふつうの形（いつもしまう形から決まった順で作ったもの：
-/// `StoredMap::to_dense`）と、図形に書き戻すときの下ごしらえ（辺の鍵。書き戻すときに1回だけ作る）と、面の図形（写し。
+/// `StoredMap::to_dense`）と、図形に書き戻すときの下ごしらえ（辺の鍵。書き戻すときに1回だけ作る）と、辺ごとの判定の形
+/// （地図ごとに1回だけ作る。編集で作った地図は、確かめるときに作った判定の形を引き継ぐ：`StoredPolys`）と、面の図形（写し。
 /// 初めて要るときに作る：`LayerBase::faces`）。写しは、それを使う所が持つ（画面の土台・地図の編集の間・カーソル合わせ）。
 /// 文書と Undo の控えは、しまう形（`StoredMap`）だけを持つ
 #[derive(Debug)]
@@ -1273,9 +1291,15 @@ pub(crate) struct LayerBase {
     pub(crate) map: PlanarMap,
     pub(crate) stored: StoredMap,
     keys: OnceLock<EdgeKeys>,
+    /// 辺ごとの判定の形（`map` の辺の順）
+    polys: OnceLock<Vec<Poly>>,
     /// 面の図形：（階層, 面ごとの図形。番号は面の印。番号の順）
     faces: SyncCache<Option<FaceShapes>>,
 }
+
+/// しまう形の辺の順（`StoredMap::to_dense` の辺の順）に並べた、辺ごとの判定の形（`CheckedMap::into_stored_with_polys`。
+/// 確かめた地図の判定の形を、しまう形から作った写しに引き継ぐ）
+pub(crate) struct StoredPolys(Vec<Poly>);
 
 /// 地図の面の図形（写し）：（階層, 面の番号の順の図形）
 type FaceShapes = (Vec<u64>, Arc<[Arc<FillShape>]>);
@@ -1293,6 +1317,7 @@ impl LayerBase {
             map: stored.to_dense(),
             stored,
             keys: OnceLock::new(),
+            polys: OnceLock::new(),
             faces: SyncCache::new(None),
         }
     }
@@ -1313,14 +1338,18 @@ impl LayerBase {
     }
 
     /// しまう地図 `stored`（階層 `group_path`）の計算に使う写しを、面の図形 `shapes`（地図の面ごとに1つ：
-    /// `MapChange::into_face_shapes`。変わらない面は前の図形、形の変わった面は番号を引き継いだ新しい図形）で作る（地図の
-    /// 編集のあと。面を求め直さない。画面の描画キャッシュは、番号と版が同じ図形から引き継がれる）
+    /// `MapChange::into_face_shapes`。変わらない面は前の図形、形の変わった面は番号を引き継いだ新しい図形）と、辺ごとの判定の
+    /// 形 `polys`（`CheckedMap::into_stored_with_polys`）で作る（地図の編集のあと。面も判定の形も求め直さない。画面の描画
+    /// キャッシュは、番号と版が同じ図形から引き継がれる）
     pub(crate) fn with_faces(
         stored: StoredMap,
         group_path: &[u64],
         mut shapes: Vec<Arc<FillShape>>,
+        polys: StoredPolys,
     ) -> Arc<Self> {
         let base = Self::from_stored(stored);
+        debug_assert_eq!(polys.0.len(), base.map.edges.len());
+        let _ = base.polys.set(polys.0);
         shapes.sort_unstable_by_key(|s| s.shape_id);
         *base.faces.lock() = Some((group_path.to_vec(), shapes.into()));
         let base = Arc::new(base);
@@ -1337,9 +1366,19 @@ impl LayerBase {
     pub(crate) fn keys(&self) -> &EdgeKeys {
         self.keys.get_or_init(|| {
             (0..self.map.edges.len())
-                .map(|e| edge_key(&self.map, e))
+                .map(|e| (edge_key(&self.map, e), e))
                 .collect()
         })
+    }
+
+    /// 辺ごとの判定の形（`map` の辺の順。初めて要るときに作る。編集で作った写しは、確かめたときのものを引き継いでいる）
+    fn polys(&self) -> &[Poly] {
+        self.polys.get_or_init(|| self.map.polys())
+    }
+
+    /// バケツ（`PlanarMap::with_face_filled`）を、この写しの判定の形で
+    pub(crate) fn with_face_filled(&self, p: Point, color: Color32) -> Option<PlanarMap> {
+        self.map.face_filled_with(self.polys(), p, color)
     }
 
     /// 面の図形（写し。階層 `group_path`）。面の順で、図形の番号は面の印（セル画の地図の面には、いつも1つずつ別の番号が
@@ -1358,7 +1397,8 @@ impl LayerBase {
 
     /// 面の図形を地図から作る（`faces`。番号の順）
     fn face_shapes(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
-        let (faces, _) = self.map.faces();
+        let polys = self.polys();
+        let (faces, _) = self.map.faces_of(polys, &self.map.face_cycles_with(polys));
         let ids = face_ids(&faces, FaceIds::Keep);
         let mut shapes: Vec<Arc<FillShape>> = faces
             .iter()
@@ -1466,6 +1506,14 @@ thread_local! {
     static FED_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// テスト用：このスレッドで、判定の形の索引を作った回数（`PolyIndex::build`）
     static INDEX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// テスト用：このスレッドで、辺の判定の形を作った数（`grid_poly`）
+    pub(super) static POLYS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、辺の判定の形を作った数
+#[cfg(test)]
+pub(crate) fn polys_built() -> usize {
+    POLYS_BUILT.with(|n| n.get())
 }
 
 /// テスト用：このスレッドで、判定の形の索引を作った回数
@@ -2060,13 +2108,19 @@ fn face_ids(faces: &[MapFace], how: FaceIds) -> Vec<ShapeId> {
 pub(crate) struct CheckedMap {
     map: PlanarMap,
     faces: Vec<MapFace>,
+    /// 辺ごとの判定の形（`map` の辺の順。確かめるときに作ったもの）
+    polys: Vec<Poly>,
 }
 
 impl PlanarMap {
     /// 正しい地図なら（`valid_faces`。受け入れの判定はこれ1つ）、確かめた地図にする。`None`：正しい地図でない
     pub(crate) fn checked(self) -> Option<CheckedMap> {
-        let faces = self.valid_faces()?;
-        Some(CheckedMap { map: self, faces })
+        let (faces, polys) = self.checked_since(None)?;
+        Some(CheckedMap {
+            map: self,
+            faces,
+            polys,
+        })
     }
 }
 
@@ -2077,6 +2131,33 @@ impl CheckedMap {
 
     pub(crate) fn into_map(self) -> PlanarMap {
         self.map
+    }
+
+    /// しまう形（面に1つずつ別の番号を記す：`uniquely_labeled`。塊は `prev` と共有する：`StoredMap::from_dense`）
+    pub(crate) fn into_stored(self, prev: Option<&StoredMap>) -> StoredMap {
+        StoredMap::from_dense(self.uniquely_labeled().map(), prev)
+    }
+
+    /// `into_stored` と、しまう形の辺の順に並べた辺ごとの判定の形（確かめたときに作ったものを引き継ぐ。しまう形で向きを
+    /// 逆にした辺だけ作り直す：判定の形は辺の向きの順に作るので）
+    pub(crate) fn into_stored_with_polys(
+        self,
+        prev: Option<&StoredMap>,
+    ) -> (StoredMap, StoredPolys) {
+        let checked = self.uniquely_labeled();
+        let (stored, order) = StoredMap::from_dense_ordered(&checked.map, prev);
+        let polys = order
+            .into_iter()
+            .map(|(e, flipped)| {
+                if flipped {
+                    let q = checked.map.quad(e);
+                    grid_poly(&QuadBez::new(q.p2, q.p1, q.p0)).into()
+                } else {
+                    Arc::clone(&checked.polys[e])
+                }
+            })
+            .collect();
+        (stored, StoredPolys(polys))
     }
 
     /// 面の辺の側に、面ごとに1つずつ別の番号（`face_ids` の `Keep`）を記したもの（セル画にしまう地図）。辺の側の番号は
@@ -2107,7 +2188,11 @@ impl CheckedMap {
                 f
             })
             .collect();
-        CheckedMap { map, faces }
+        CheckedMap {
+            map,
+            faces,
+            polys: self.polys,
+        }
     }
 
     /// 辺の側に記した図形の番号を、`f` が返す番号に付け替える（`PlanarMap::relabel`。面の番号も）

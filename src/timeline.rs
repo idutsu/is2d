@@ -329,7 +329,11 @@ impl ScopeMap {
     /// `renew_labels` だけなので、セル画の地図は、使うときにはいつも正しい地図で、面に1つずつ別の番号が記してある
     /// （`unchecked` の地図は使うときに確かめ、壊れていれば何も無い地図）
     fn new(group_path: Vec<u64>, map: CheckedMap, prev: Option<&StoredMap>) -> Option<ScopeMap> {
-        let stored = StoredMap::from_dense(map.uniquely_labeled().map(), prev);
+        Self::of_checked_stored(group_path, map.into_stored(prev))
+    }
+
+    /// 階層 `group_path` の、確かめた地図のしまう形 `stored`（`CheckedMap::into_stored`）の地図。面が無ければ `None`
+    fn of_checked_stored(group_path: Vec<u64>, stored: StoredMap) -> Option<ScopeMap> {
         (!stored.is_empty()).then(|| ScopeMap {
             group_path,
             map: LazyStored::checked(stored),
@@ -1287,13 +1291,14 @@ impl Cel {
         shapes: Vec<Arc<FillShape>>,
     ) -> Option<Arc<LayerBase>> {
         let at = self.maps.iter().position(|m| m.group_path == group_path);
-        let Some(m) = ScopeMap::new(group_path.to_vec(), map, self.scope_stored(group_path)) else {
+        let (stored, polys) = map.into_stored_with_polys(self.scope_stored(group_path));
+        let Some(m) = ScopeMap::of_checked_stored(group_path.to_vec(), stored) else {
             let mut items = Self::items_of(&self.maps, &self.instances);
             items.retain(|it| !matches!(it, Item::Raw(p, _) if p == group_path));
             self.arrange(items);
             return None;
         };
-        let base = LayerBase::with_faces(m.stored().clone(), group_path, shapes);
+        let base = LayerBase::with_faces(m.stored().clone(), group_path, shapes, polys);
         match at {
             // 地図だけを置き換える（インスタンスの並びは Undo の控えと共有したまま）
             Some(i) => {

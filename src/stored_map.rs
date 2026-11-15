@@ -138,16 +138,32 @@ impl StoredMap {
     /// 地図 `map` のしまう形。辺を決まった向きにして升目ごとに分け、塊の中を決まった順に並べる。置き換える前の地図
     /// `prev` の同じ升目の塊と中身が同じ塊は、その塊を共有する（塊はどちらも升目の順なので、並べて1回なめるだけ）
     pub(crate) fn from_dense(map: &PlanarMap, prev: Option<&StoredMap>) -> Self {
-        let mut all: Vec<((i32, i32), StoredEdge)> = map
+        Self::from_dense_ordered(map, prev).0
+    }
+
+    /// `from_dense` と、しまった辺の順（`to_dense` の辺の順）ごとの、`map` の辺の番号と、向きを逆にしたか（`map` の辺の
+    /// 順に作ったもの、たとえば判定の形を、しまう形から作った地図に引き継ぐため）
+    pub(crate) fn from_dense_ordered(
+        map: &PlanarMap,
+        prev: Option<&StoredMap>,
+    ) -> (Self, Vec<(usize, bool)>) {
+        // （升目, しまう辺, (`map` の辺の番号, 向きを逆にしたか)）
+        type Placed = ((i32, i32), StoredEdge, (usize, bool));
+        let mut all: Vec<Placed> = map
             .edges
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(i, e)| {
                 let se = StoredEdge::of(map, e);
-                (se.tile(), se)
+                // `StoredEdge::of` と同じ決め方
+                let flipped = point_order(map.nodes[e.a], map.nodes[e.b]).is_gt();
+                (se.tile(), se, (i, flipped))
             })
             .collect();
         all.sort_unstable_by(|x, y| x.0.cmp(&y.0).then_with(|| x.1.order(&y.1)));
-        let (keys, edges): (Vec<(i32, i32)>, Vec<StoredEdge>) = all.into_iter().unzip();
+        let order: Vec<(usize, bool)> = all.iter().map(|x| x.2).collect();
+        let (keys, edges): (Vec<(i32, i32)>, Vec<StoredEdge>) =
+            all.into_iter().map(|(k, e, _)| (k, e)).unzip();
         let prev: &[Tile] = prev.map_or(&[], |p| &p.0.tiles);
         let (mut j, mut start) = (0, 0);
         let tiles: Vec<Tile> = keys
@@ -158,10 +174,11 @@ impl StoredMap {
                 same_tile(prev, &mut j, run).unwrap_or_else(|| run.into())
             })
             .collect();
-        Self(Arc::new(Stored {
+        let stored = Self(Arc::new(Stored {
             tiles: tiles.into(),
             dense: Mutex::new(Weak::new()),
-        }))
+        }));
+        (stored, order)
     }
 
     /// 計算に使う写しへの弱い参照（`LayerBase::of_stored` だけが使う）
