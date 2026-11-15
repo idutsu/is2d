@@ -30203,6 +30203,41 @@ fn restoring_unchanged_chains_builds_no_index() {
     );
 }
 
+/// R1（レビュー f01d518）：重ね合わせで、端が動かない前の地図の辺の判定の形は、計算に使う写しが持つもの（`LayerBase` の
+/// `polys`）を使い、作り直さない（入れる辺を決めるときの入れない辺の形、入れなかった辺の確かめ、丸ごと残った辺を曲線に
+/// 戻すとき）。同じ地図を同じ位置に重ねると、作るのはほとんど無い（前は、丸ごと残った辺ごとに作り直していた）
+#[test]
+fn pasting_reuses_the_polylines_of_unmoved_edges() {
+    use crate::planar_map::{LayerBase, MapInput, MapRule, PlanarMap};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    let mut rng = map_overlay::Rng(3);
+    let mut m = PlanarMap::default();
+    for k in 0..20 {
+        let c = colors[k % 3];
+        let r = 2.0 + rng.f() * 6.0;
+        let s = wiggly_stroke(&mut rng, (0.0, 0.0, 300.0, 200.0), r, c);
+        m = m
+            .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+            .unwrap();
+    }
+    let base = LayerBase::new(&m);
+    let piece = base.map.clone();
+    let edges = piece.edges.len();
+    let before = crate::planar_map::polys_built();
+    let pasted = base
+        .overlay(MapInput::Map(&piece), MapRule::Overlay)
+        .unwrap();
+    assert!(pasted.is_valid());
+    // 前は辺の数の3倍（辺 557 本で 1,671）作っていた。今は約2倍（1,126。重ねる地図から来た鎖を曲線に戻すときと、2本の
+    // まとめの索引の分）
+    let built = crate::planar_map::polys_built() - before;
+    assert!(built < 3 * edges, "作った判定の形 {built}（辺 {edges} 本）");
+}
+
 /// R2（レビュー f01d518）：重ね合わせでは、i_overlay に1回だけ切らせる。切れ目の頂点は、切った曲線から
 /// `FLAT_TOL + SPLIT_REACH` 以内にあり、戻すときはその許容で2本を1本にまとめる（`merge_degree2`）ので、曲線の本当の交点を
 /// 折れ線に足して切り直す2回目の切りは要らない（前は、2本の曲線が交わる所があると、交点をニュートン法で求めて足し、

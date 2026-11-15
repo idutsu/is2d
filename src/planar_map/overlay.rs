@@ -562,7 +562,7 @@ impl PlanarMap {
                     self.nodes[v]
                 }
             };
-            grid_poly_into(&QuadBez::new(pos(ed.a), ed.ctrl, pos(ed.b)), out);
+            known_or_made(known, self, e, (pos(ed.a), pos(ed.b)), out);
         };
         // 判定の形の入れ物（使い回す）
         let (mut pe, mut pf): (Vec<IPt>, Vec<IPt>) = (Vec::new(), Vec::new());
@@ -692,6 +692,7 @@ impl PlanarMap {
         }
         let fed_set = FedEdges {
             fed: Vec::new(),
+            known: known.to_vec(),
             spans,
             boxes: Vec::new(),
             grid: CellGrid::new(),
@@ -1022,7 +1023,7 @@ impl PlanarMap {
                         continue;
                     }
                     let ed = self.edges[e];
-                    grid_poly_into(&QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]), &mut pe);
+                    known_or_made(&fed_set.known, self, e, (nodes[ed.a], nodes[ed.b]), &mut pe);
                     let ends = (node_at(ed.a), node_at(ed.b));
                     if polys_clash(&[p.ia, p.ib], (p.a, p.b), &pe, ends) {
                         flagged[e] = true;
@@ -1066,7 +1067,7 @@ impl PlanarMap {
                         continue;
                     }
                     let ed = self.edges[e];
-                    grid_poly_into(&QuadBez::new(nodes[ed.a], ed.ctrl, nodes[ed.b]), &mut pe);
+                    known_or_made(&fed_set.known, self, e, (nodes[ed.a], nodes[ed.b]), &mut pe);
                     for (end, at_start) in [(ed.a, true), (ed.b, false)] {
                         if end != u {
                             continue;
@@ -1202,7 +1203,7 @@ impl PlanarMap {
                 let (e, q, r) = &items[i as usize];
                 if ray_meets_row(*r, p2) {
                     let ed = self.edges[*e];
-                    grid_poly_into(q, &mut pe);
+                    known_or_made(&fed_set.known, self, *e, (q.p0, q.p2), &mut pe);
                     for s in pe.windows(2) {
                         wind_into(dbl(s[0]), dbl(s[1]), ed.left, ed.right, p2, &mut w);
                     }
@@ -1633,6 +1634,7 @@ impl PlanarMap {
                 // 入れた辺（前からある辺か重ねる地図の辺）が丸ごと残ったときは、元の曲線をそのまま使う（図形の番号は、ほかの
                 // 区間と同じく、面ごとに伝えた印のもの）
                 let mut whole = None;
+                let mut whole_poly = None;
                 let fed_edge = match srcs[s_src as usize].1 {
                     OverlaySrc::Old(e) => Some(e),
                     OverlaySrc::New(i) if matches!(input, MapInput::Map(_)) => Some(n_old + i),
@@ -1646,6 +1648,11 @@ impl PlanarMap {
                     let same_dir = (n0, n1) == (ea, eb);
                     if full && n0 != n1 && (same_dir || (n0, n1) == (eb, ea)) {
                         whole = Some(ed.ctrl);
+                        let same_ends =
+                            (nodes[n0], nodes[n1]) == (self.nodes[ed.a], self.nodes[ed.b]);
+                        if same_dir && same_ends {
+                            whole_poly = fed_set.known.get(e).cloned();
+                        }
                     }
                 }
                 chains.push(Chain {
@@ -1654,6 +1661,7 @@ impl PlanarMap {
                     right: sr,
                     curve: srcs[s_src as usize].0,
                     whole,
+                    whole_poly,
                 });
             }
             // 7. 区間をすべて直線の辺にした地図（いつも正しい）から始めて、鎖ごとに曲線へ置き換える
@@ -1907,6 +1915,8 @@ pub(super) struct PointsBuf {
 /// i_overlay に入れる前からある辺（`fed`）と、そのときに作った辺の外接矩形・格子・頂点ごとの辺
 pub(super) struct FedEdges {
     fed: Vec<bool>,
+    /// 前から `known.len()` 本の辺の判定の形（計算に使う写しが持つもの：`fed_edges` の `known`）
+    known: Vec<Poly>,
     /// 線ごとの、同じ線として扱う所（範囲の順）
     spans: IntMap<Line, Vec<Span>>,
     /// 辺の外接矩形（格子に置き直す分と、近くとみなす距離の分を広げたもの）
@@ -1915,6 +1925,26 @@ pub(super) struct FedEdges {
     grid: CellGrid,
     /// 頂点ごとの辺
     adj: Grouped<usize>,
+}
+
+/// 地図 `m` の辺 `e` を、端の頂点を `ends` に置いた曲線の判定の形（`out` に入れる。前の中身は消す）。端が動いて
+/// いなければ（`m` の頂点と同じ点）、判定の形は辺の曲線だけで決まるので、前から `known.len()` 本の辺は、計算に使う写しが
+/// 持つもの（`grid_poly` で作ったもの）を写す
+fn known_or_made(
+    known: &[Poly],
+    m: &PlanarMap,
+    e: usize,
+    ends: (Point, Point),
+    out: &mut Vec<IPt>,
+) {
+    let ed = m.edges[e];
+    match known.get(e) {
+        Some(g) if ends == (m.nodes[ed.a], m.nodes[ed.b]) => {
+            out.clear();
+            out.extend_from_slice(g);
+        }
+        _ => grid_poly_into(&QuadBez::new(ends.0, ed.ctrl, ends.1), out),
+    }
 }
 
 impl FedEdges {
@@ -1984,6 +2014,8 @@ pub(super) struct Chain {
     curve: QuadBez,
     /// 入れた辺が丸ごと残ったとき：元の制御点
     whole: Option<Point>,
+    /// 丸ごと残った辺が、同じ向き・同じ端のまま（曲線がビットまで同じ）で、計算に使う写しがその判定の形を持つとき：その形
+    whole_poly: Option<Poly>,
 }
 
 /// 直線の区間の鎖を、元の曲線の一部へ置き換える。置き換えてよいのは、今の地図で、曲線 C の判定の形が次の3つを
@@ -2066,7 +2098,14 @@ impl ChainRestorer {
         self.path.push(gpt(nodes[na]));
         self.path
             .extend(c.steps[i..j].iter().map(|s| gpt(nodes[s.1])));
-        grid_poly_into(&q, &mut self.pc);
+        // 丸ごと残った辺がビットまで同じ曲線なら、その判定の形（計算に使う写しが持つもの）を使う
+        match (whole, &c.whole_poly) {
+            (Some(_), Some(g)) => {
+                self.pc.clear();
+                self.pc.extend_from_slice(g);
+            }
+            _ => grid_poly_into(&q, &mut self.pc),
+        }
         // 曲線の判定の形が鎖の道（区間の頂点の並び）とまったく同じなら、置き換えても判定の形は何も変わらない。鎖の区間は
         // i_overlay が切った区間で、共有する端のほかで触れ合わず、途中の頂点はほかの辺につながらない（次数 2 でつなげた）
         // ので、3つの決まりはもう満たされている。調べるのは、判定の形が変わる置き換えだけ（索引もそのときに作る）

@@ -69,25 +69,20 @@ pub(super) fn gpt(p: Point) -> IPt {
 
 /// 曲線の判定の形：重ねるときと同じ数に等分した折れ線の点を、格子に丸めたもの（続けて同じ点は1つにする）
 pub(super) fn grid_poly(q: &QuadBez) -> Vec<IPt> {
-    #[cfg(test)]
-    super::POLYS_BUILT.with(|n| n.set(n.get() + 1));
-    grid_line(flat_points(*q, FLAT_TOL).map(|(p, _)| p))
+    let mut out = Vec::with_capacity(flat_count(q, FLAT_TOL) + 1);
+    grid_poly_into(q, &mut out);
+    out
 }
 
 /// 曲線の判定の形（`grid_poly`）を `out` に入れる（前の中身は消す。入れ物を使い回して、確保を減らす）
 pub(super) fn grid_poly_into(q: &QuadBez, out: &mut Vec<IPt>) {
+    #[cfg(test)]
+    super::POLYS_BUILT.with(|n| n.set(n.get() + 1));
     grid_line_into(flat_points(*q, FLAT_TOL).map(|(p, _)| p), out);
 }
 
-/// 折れ線の点 `pts` を格子の点に丸めたもの（続けて同じ点は1つにする）
-pub(super) fn grid_line(pts: impl Iterator<Item = Point>) -> Vec<IPt> {
-    let mut out: Vec<IPt> = Vec::with_capacity(pts.size_hint().0);
-    grid_line_into(pts, &mut out);
-    out
-}
-
-/// 折れ線の点 `pts` を格子の点に丸めたもの（`grid_line`）を `out` に入れる（前の中身は消す。折れ線を格子に丸めるのは
-/// これ1つ）
+/// 折れ線の点 `pts` を格子の点に丸めたもの（続けて同じ点は1つにする）を `out` に入れる（前の中身は消す。折れ線を格子に
+/// 丸めるのはこれ1つ）
 pub(super) fn grid_line_into(pts: impl Iterator<Item = Point>, out: &mut Vec<IPt>) {
     out.clear();
     for p in pts {
