@@ -5,9 +5,56 @@ use super::*;
 /// 格子の点（1/4096px を 1 とする整数の座標）
 pub(super) type IPt = (i64, i64);
 
-/// 辺の判定の形（`grid_poly`）。地図ごとの計算に使う写し（`LayerBase::polys`）が1回だけ作って持ち、前の地図と同じ辺は
-/// 引き継ぐ（`PlanarMap::polys_since`）
-pub(super) type Poly = Arc<[IPt]>;
+/// 辺の、計算に使う形（`EdgeGeom`）。地図ごとの計算に使う写し（`LayerBase::polys`）が1回だけ作って持ち、前の地図と
+/// 同じ辺は引き継ぐ（`PlanarMap::polys_since`）
+pub(super) type Poly = Arc<EdgeGeom>;
+
+/// 辺（曲線）の、計算に使う形：判定の形（`grid_poly`。`Deref` で折れ線の点）と、重ね合わせで近くの辺を探すときの
+/// 外接矩形とマス（`edge_reach`。初めて要るときに作る：`fed_edges`）。どちらも曲線だけで決まる
+#[derive(Debug)]
+pub(super) struct EdgeGeom {
+    poly: Box<[IPt]>,
+    reach: OnceLock<EdgeReach>,
+}
+
+/// 重ね合わせで近くの辺を探すときの、辺の外接矩形とマス（`edge_reach`）
+pub(super) type EdgeReach = (KRect, Box<[(i64, i64)]>);
+
+impl std::ops::Deref for EdgeGeom {
+    type Target = [IPt];
+    fn deref(&self) -> &[IPt] {
+        &self.poly
+    }
+}
+
+impl EdgeGeom {
+    /// 曲線 `q` の、計算に使う形（判定の形を作る。外接矩形とマスは、初めて要るときに作る）
+    pub(super) fn of(q: &QuadBez) -> Poly {
+        Arc::new(Self {
+            poly: grid_poly(q).into(),
+            reach: OnceLock::new(),
+        })
+    }
+
+    /// 外接矩形とマス（`q` はこの形を作った曲線。初めて要るときに作る）
+    pub(super) fn reach(&self, q: QuadBez) -> &EdgeReach {
+        self.reach.get_or_init(|| edge_reach(q))
+    }
+}
+
+/// 重ね合わせで近くの辺を探すときの、辺（曲線 `q`）の外接矩形と、辺がかかるマス（`quad_cells`。並べて同じマスは1つ）。
+/// 端を格子に置き直すと曲線は最大で `GRID_REACH` 動き、判定の形の点は丸めでさらに `GRID_REACH` 動くので、その分と、
+/// 近くとみなす距離（`GRID_REACH`）の分を広げておく（`fed_edges`）
+pub(super) fn edge_reach(q: QuadBez) -> EdgeReach {
+    #[cfg(test)]
+    super::REACHES_BUILT.with(|n| n.set(n.get() + 1));
+    let r = 3.0 * GRID_REACH;
+    let pad = (3.0 * GRID_REACH * OVERLAY_GRID).ceil() as i64;
+    let mut cells: Vec<(i64, i64)> = quad_cells(q, pad).collect();
+    cells.sort_unstable();
+    cells.dedup();
+    (q.bounding_box().inflate(r, r), cells.into())
+}
 
 /// 点を格子の点に丸める（丸めの式はこれ1つ。座標の範囲は見ない：範囲も見るのは `to_grid`）
 pub(super) fn gpt(p: Point) -> IPt {

@@ -507,7 +507,7 @@ impl PlanarMap {
     /// 全部の辺の判定の形（格子の上の折れ線）
     fn polys(&self) -> Vec<Poly> {
         (0..self.edges.len())
-            .map(|e| grid_poly(&self.quad(e)).into())
+            .map(|e| EdgeGeom::of(&self.quad(e)))
             .collect()
     }
 
@@ -528,8 +528,8 @@ impl PlanarMap {
                 Some(&i) if start(self, e) == start(&prev.map, i) => {
                     (Arc::clone(&prev_polys[i]), false)
                 }
-                Some(_) => (grid_poly(&self.quad(e)).into(), false),
-                None => (grid_poly(&self.quad(e)).into(), true),
+                Some(_) => (EdgeGeom::of(&self.quad(e)), false),
+                None => (EdgeGeom::of(&self.quad(e)), true),
             })
             .unzip()
     }
@@ -729,8 +729,15 @@ impl PlanarMap {
 
     /// 頂点 `v` を `target` へ動かして確定した地図（重ね合わせ `MapRule::Sweep` で。`None`：格子に置けない座標がある）。
     /// つながる辺の制御点は、動いた量の半分だけ動かす（今の頂点の移動と同じ決まり）。`target` がほかの頂点と同じ座標なら
-    /// （吸着）、重ね合わせが格子の同じ点を1つの頂点にするので、2つの頂点は1つになる
+    /// （吸着）、重ね合わせが格子の同じ点を1つの頂点にするので、2つの頂点は1つになる。テスト用（本番は `MapEdit` を
+    /// 計算に使う写しで：`LayerBase::apply_edit`）
+    #[cfg(test)]
     pub(crate) fn commit_move_vertex(&self, v: usize, target: Point) -> Option<PlanarMap> {
+        self.moved_vertex(&[], v, target)
+    }
+
+    /// `commit_move_vertex` を、この地図の辺の計算に使う形 `known` で（`overlay_known`）
+    fn moved_vertex(&self, known: &[Poly], v: usize, target: Point) -> Option<PlanarMap> {
         let d = target - self.nodes[v];
         let pos = |w: usize| if w == v { target } else { self.nodes[w] };
         let moved: Vec<MovedEdge> = self
@@ -745,19 +752,32 @@ impl PlanarMap {
                 )
             })
             .collect();
-        self.overlay(MapInput::Sweep(&moved), MapRule::Sweep)
+        self.overlay_known(known, MapInput::Sweep(&moved), MapRule::Sweep)
     }
 
     /// 辺 `e` の `grab_t` の所を `target` へ引っぱって確定した地図（重ね合わせ `MapRule::Sweep` で。`None`：格子に置けない
-    /// 座標がある）。引っぱった曲線は、今の辺のつまみと同じ決まり（両端は動かない）
+    /// 座標がある）。引っぱった曲線は、今の辺のつまみと同じ決まり（両端は動かない）。テスト用（本番は `MapEdit` を計算に
+    /// 使う写しで：`LayerBase::apply_edit`）
+    #[cfg(test)]
     pub(crate) fn commit_pull_edge(
         &self,
         e: usize,
         grab_t: f64,
         target: Point,
     ) -> Option<PlanarMap> {
+        self.pulled_edge(&[], e, grab_t, target)
+    }
+
+    /// `commit_pull_edge` を、この地図の辺の計算に使う形 `known` で（`overlay_known`）
+    fn pulled_edge(
+        &self,
+        known: &[Poly],
+        e: usize,
+        grab_t: f64,
+        target: Point,
+    ) -> Option<PlanarMap> {
         let pulled = pulled_quad(self.quad(e), grab_t, target);
-        self.overlay(MapInput::Sweep(&[(e, pulled)]), MapRule::Sweep)
+        self.overlay_known(known, MapInput::Sweep(&[(e, pulled)]), MapRule::Sweep)
     }
 
     /// 地図を座標の変換 `xform` で置いたとき、`p` から `r` 以内でいちばん近い頂点（距離は置いた座標で測る）
@@ -1381,6 +1401,16 @@ impl LayerBase {
         self.map.face_filled_with(self.polys(), p, color)
     }
 
+    /// 重ね合わせ（`PlanarMap::overlay`）を、この写しの辺の計算に使う形で（近くの辺を探す外接矩形とマスを作り直さない）
+    pub(crate) fn overlay(&self, input: MapInput<'_>, rule: MapRule) -> Option<PlanarMap> {
+        self.map.overlay_known(self.polys(), input, rule)
+    }
+
+    /// 地図の編集（`MapEdit::apply`）を、この写しの辺の計算に使う形で
+    pub(crate) fn apply_edit(&self, edit: MapEdit) -> Option<PlanarMap> {
+        edit.apply_known(&self.map, self.polys())
+    }
+
     /// 面の図形（写し。階層 `group_path`）。面の順で、図形の番号は面の印（セル画の地図の面には、いつも1つずつ別の番号が
     /// 記してある）。`layer_id` は付けない（使う側が付ける）
     pub(crate) fn faces(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
@@ -1508,6 +1538,14 @@ thread_local! {
     static INDEX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// テスト用：このスレッドで、辺の判定の形を作った数（`grid_poly`）
     pub(super) static POLYS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// テスト用：このスレッドで、重ね合わせで近くの辺を探す外接矩形とマスを作った数（`edge_reach`）
+    pub(super) static REACHES_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、重ね合わせで近くの辺を探す外接矩形とマスを作った数
+#[cfg(test)]
+pub(crate) fn reaches_built() -> usize {
+    REACHES_BUILT.with(|n| n.get())
 }
 
 /// テスト用：このスレッドで、辺の判定の形を作った数
@@ -1604,6 +1642,11 @@ pub(crate) enum MapEdit {
 impl MapEdit {
     /// 地図 `map` にこの編集をかけて確定した地図。`None`：その辺・頂点が無いか、編集できない
     pub(crate) fn apply(self, map: &PlanarMap) -> Option<PlanarMap> {
+        self.apply_known(map, &[])
+    }
+
+    /// `apply` を、地図 `map` の辺の計算に使う形 `known` で（計算に使う写しが持つもの：`LayerBase::apply_edit`）
+    fn apply_known(self, map: &PlanarMap, known: &[Poly]) -> Option<PlanarMap> {
         let vertex = |p: Point| (0..map.nodes.len()).find(|&v| map.nodes[v] == p);
         match self {
             MapEdit::AddAnchor { orig_seg, t } => {
@@ -1618,12 +1661,12 @@ impl MapEdit {
             } => {
                 let (e, forward) = map.find_edge(&orig_seg)?;
                 let t = if forward { grab_t } else { 1.0 - grab_t };
-                map.commit_pull_edge(e, t, target)
+                map.pulled_edge(known, e, t, target)
             }
             MapEdit::MoveVertex {
                 orig_vertex,
                 target,
-            } => map.commit_move_vertex(vertex(orig_vertex)?, target),
+            } => map.moved_vertex(known, vertex(orig_vertex)?, target),
         }
     }
 }
@@ -1797,7 +1840,7 @@ pub(crate) fn reshape_result(
     group_path: &[u64],
     xform: Affine,
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
-    let next = edit.apply(&base.map)?.written(base)?;
+    let next = base.apply_edit(edit)?.written(base)?;
     let change = base.diff(next, own, layer_id, group_path);
     Some((
         change.removed,
@@ -2151,7 +2194,7 @@ impl CheckedMap {
             .map(|(e, flipped)| {
                 if flipped {
                     let q = checked.map.quad(e);
-                    grid_poly(&QuadBez::new(q.p2, q.p1, q.p0)).into()
+                    EdgeGeom::of(&QuadBez::new(q.p2, q.p1, q.p0))
                 } else {
                     Arc::clone(&checked.polys[e])
                 }

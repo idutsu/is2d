@@ -408,12 +408,34 @@ impl PlanarMap {
         Some(m)
     }
 
+    /// `overlay` を、この地図の辺の計算に使う形 `known`（辺の順。計算に使う写しが持つもの：`LayerBase::overlay`）で
+    pub(super) fn overlay_known(
+        &self,
+        known: &[Poly],
+        input: MapInput<'_>,
+        rule: MapRule,
+    ) -> Option<PlanarMap> {
+        let [m] = self.overlay_rules_known(known, input, [rule])?;
+        Some(m)
+    }
+
     /// 同じ重ねるもの `input` を、決まりごとに重ねた地図（`rules` の順。手順は `overlay`）。決まりによらない所（1・2 と、
     /// 3 の区間の左右の色と重ねるものの値）は1回だけ行うので、どの地図も同じ区間・同じ頂点から作る（矩形で一部を選ぶときの
     /// 中と外：`cut_out`。設計：claude/N-2002の残り・R5・★4・★5の設計_80fe785.md）。3 の頂点のまわりの確かめは決まりごとに
     /// 行い、どれかで食い違えば、その辺を入れてみな切り直す
     pub(crate) fn overlay_rules<const N: usize>(
         &self,
+        input: MapInput<'_>,
+        rules: [MapRule; N],
+    ) -> Option<[PlanarMap; N]> {
+        self.overlay_rules_known(&[], input, rules)
+    }
+
+    /// `overlay_rules` を、この地図の前から `known.len()` 本の辺の計算に使う形 `known` で（近くの辺を探す外接矩形と
+    /// マスを作り直さない：`fed_edges`）
+    pub(super) fn overlay_rules_known<const N: usize>(
+        &self,
+        known: &[Poly],
         input: MapInput<'_>,
         rules: [MapRule; N],
     ) -> Option<[PlanarMap; N]> {
@@ -489,7 +511,7 @@ impl PlanarMap {
         };
         let check = self.edges.len()..cands.edges.len();
         let moved = input.moved_flags(cands.edges.len());
-        let mut fed = cands.fed_edges(seeds, &moved, moved.clone(), check.clone())?;
+        let mut fed = cands.fed_edges(known, seeds, &moved, moved.clone(), check.clone())?;
         loop {
             match cands.overlay_with(input, &rules, &new_quads, &new_cols, &mut fed) {
                 Ok(maps) => return Some(maps.try_into().expect("決まりごとに1つの地図")),
@@ -498,7 +520,7 @@ impl PlanarMap {
                     for e in more {
                         set[e] = true;
                     }
-                    fed = cands.fed_edges(seeds, &moved, set, check.clone())?;
+                    fed = cands.fed_edges(known, seeds, &moved, set, check.clone())?;
                 }
                 Err(OverlayStop::Refused) => return None,
             }
@@ -530,9 +552,11 @@ impl PlanarMap {
     /// ただし、入れた辺と頂点を共有する辺は、その頂点でいつも触れているので、共有する頂点のほかで交わるかで見る。
     /// 入れた辺の端の頂点は格子に置き直すので、その頂点につながる入れない辺は、置き直した形で調べ直す
     /// （ほかの入れない辺と交わらないかも見る）。`check` の辺（重ねる地図の辺）も、はじめに同じく調べる：入れない辺と
-    /// 触れれば入れる。`moved` は輪郭の変形で動かした辺（前の形は同じ線の比べ先にしない）。`None`：格子に置けない座標がある
+    /// 触れれば入れる。`moved` は輪郭の変形で動かした辺（前の形は同じ線の比べ先にしない）。`known`：前から `known.len()`
+    /// 本の辺の計算に使う形（外接矩形とマスを使い回す：`EdgeGeom::reach`）。`None`：格子に置けない座標がある
     pub(super) fn fed_edges(
         &self,
+        known: &[Poly],
         seeds: &[QuadBez],
         moved: &[bool],
         mut fed: Vec<bool>,
@@ -548,33 +572,25 @@ impl PlanarMap {
                 std::iter::once((ed.a, e)).chain((ed.b != ed.a).then_some((ed.b, e)))
             }),
         );
-        // 辺の外接矩形と、辺がかかるマス。端を格子に置き直すと曲線は最大で `GRID_REACH` 動き、判定の形の点は丸めでさらに
-        // `GRID_REACH` 動くので、その分と、近くとみなす距離（`GRID_REACH`）の分を広げておく
-        let boxes: Vec<KRect> = (0..self.edges.len())
-            .map(|e| {
-                let r = 3.0 * GRID_REACH;
-                self.quad(e).bounding_box().inflate(r, r)
+        // 辺の外接矩形と、辺がかかるマス（`edge_reach`。前から `known.len()` 本は、計算に使う形が持つものを使う）。
+        // 同じマスは1度だけ入れる（となり合う弦は同じマスにかかる。辺のマスで探すのは「どれかに触れるか」だけなので、
+        // マスの順は効かない）
+        let made: Vec<EdgeReach> = (known.len().min(self.edges.len())..self.edges.len())
+            .map(|e| edge_reach(self.quad(e)))
+            .collect();
+        let reaches: Vec<&EdgeReach> = (0..self.edges.len())
+            .map(|e| match known.get(e) {
+                Some(g) => g.reach(self.quad(e)),
+                None => &made[e - known.len()],
             })
             .collect();
-        let reach_pad = (3.0 * GRID_REACH * OVERLAY_GRID).ceil() as i64;
-        // 辺 `e` がかかるマスは `all_cells[cell_range[e]]`
-        let mut all_cells: Vec<(i64, i64)> = Vec::new();
+        let boxes: Vec<KRect> = reaches.iter().map(|r| r.0).collect();
         let mut cells: Vec<(i64, i64)> = Vec::new();
-        let mut cell_range: Vec<std::ops::Range<usize>> = Vec::with_capacity(self.edges.len());
         let mut edge_grid = CellGrid::new();
-        for e in 0..self.edges.len() {
-            // 同じマスは1度だけ入れる（となり合う弦は同じマスにかかる。辺のマスで探すのは「どれかに触れるか」だけなので、
-            // マスの順は効かない）
-            cells.clear();
-            cells.extend(quad_cells(self.quad(e), reach_pad));
-            cells.sort_unstable();
-            cells.dedup();
-            let start = all_cells.len();
-            all_cells.extend_from_slice(&cells);
-            cell_range.push(start..all_cells.len());
-            edge_grid.insert(e, all_cells[start..].iter().copied());
+        for (e, r) in reaches.iter().enumerate() {
+            edge_grid.insert(e, r.1.iter().copied());
         }
-        let edge_cells = |e: usize| all_cells[cell_range[e].clone()].iter().copied();
+        let edge_cells = |e: usize| reaches[e].1.iter().copied();
         // 頂点 `v` を格子に置き直すと動くか
         let moves = |v: usize| grid_round(self.nodes[v]) != self.nodes[v];
         // 入れない辺 `e` の判定の形（`out` に入れる）。端の頂点が格子に置き直されていれば、置き直した形で

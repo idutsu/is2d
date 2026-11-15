@@ -30402,8 +30402,8 @@ fn measure_write_back_scaling() {
 }
 
 /// 書き戻す地図を確かめるとき（`written`）と、新しい地図の写しを作るとき（`LayerBase::with_faces`）は、前の地図にある
-/// 辺の判定の形（`grid_poly`）を作り直さない：線の多いセル画に短い線を1本描いても、作る判定の形は線のまわりの分だけ
-/// （レビュー f01d518 の R3。前は確かめるたびに全部の辺の分を作った）
+/// 辺の判定の形（`grid_poly`）を作り直さない。重ね合わせで近くの辺を探す外接矩形とマスも同じ：線の多いセル画に短い線を
+/// 1本描いても、作るのは線のまわりの分だけ（レビュー f01d518 の R3。前はどちらも、毎回全部の辺の分を作った）
 #[test]
 fn test_short_brush_builds_polylines_only_near_the_stroke() {
     let colors = [
@@ -30443,7 +30443,10 @@ fn test_short_brush_builds_polylines_only_near_the_stroke() {
         .map(|m| m.base().map.edges.len())
         .sum();
     assert!(edges > 800, "辺 {edges} 本");
-    let before = crate::planar_map::polys_built();
+    let (before, reaches_before) = (
+        crate::planar_map::polys_built(),
+        crate::planar_map::reaches_built(),
+    );
     let points = stroke(&mut rng, 6);
     assert!(doc_actions::apply(
         &mut app,
@@ -30457,6 +30460,12 @@ fn test_short_brush_builds_polylines_only_near_the_stroke() {
     assert!(
         built * 4 < edges,
         "作った判定の形 {built} 本（辺 {edges} 本）"
+    );
+    // 重ね合わせで近くの辺を探す外接矩形とマスも、前の地図の写しにある辺の分は作り直さない（`EdgeGeom::reach`）
+    let reaches = crate::planar_map::reaches_built() - reaches_before;
+    assert!(
+        reaches * 4 < edges,
+        "作った外接矩形とマス {reaches} 本（辺 {edges} 本）"
     );
 }
 

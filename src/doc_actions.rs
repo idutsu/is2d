@@ -798,7 +798,7 @@ fn apply_raw_outline(
         .map(|s| s.to_doc(world).into_owned())
         .collect();
     write_map_edit(tab, target_lid, Some(Refusal::OffGrid), |base| {
-        base.map.overlay(MapInput::Shapes(&strokes), rule)
+        base.overlay(MapInput::Shapes(&strokes), rule)
     })
 }
 
@@ -1149,11 +1149,11 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
     let changed = match map_edit {
         MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => {
             write_map_edit(tab, layer_id, Some(Refusal::OffGrid), |base| {
-                map_edit.apply(&base.map)
+                base.apply_edit(map_edit)
             })
         }
         MapEdit::AddAnchor { .. } | MapEdit::DeleteAnchor { .. } => {
-            write_map_edit(tab, layer_id, None, |base| map_edit.apply(&base.map))
+            write_map_edit(tab, layer_id, None, |base| base.apply_edit(map_edit))
         }
     };
     if changed {
