@@ -30403,7 +30403,8 @@ fn measure_write_back_scaling() {
 
 /// 書き戻す地図を確かめるとき（`written`）と、新しい地図の写しを作るとき（`LayerBase::with_faces`）は、前の地図にある
 /// 辺の判定の形（`grid_poly`）を作り直さない。重ね合わせで近くの辺を探す外接矩形とマスも同じ：線の多いセル画に短い線を
-/// 1本描いても、作るのは線のまわりの分だけ（レビュー f01d518 の R3。前はどちらも、毎回全部の辺の分を作った）
+/// 1本描いても、作るのは線のまわりの分だけ。面の輪郭も、変わらない輪郭は引き継ぐ（レビュー f01d518 の R3。前はどれも、
+/// 毎回全部の分を作った）
 #[test]
 fn test_short_brush_builds_polylines_only_near_the_stroke() {
     let colors = [
@@ -30443,9 +30444,16 @@ fn test_short_brush_builds_polylines_only_near_the_stroke() {
         .map(|m| m.base().map.edges.len())
         .sum();
     assert!(edges > 800, "辺 {edges} 本");
-    let (before, reaches_before) = (
+    let nodes: usize = app.doc.root.layers[0].keyframes[0]
+        .cel
+        .maps
+        .iter()
+        .map(|m| m.base().map.nodes.len())
+        .sum();
+    let (before, reaches_before, sorted_before) = (
         crate::planar_map::polys_built(),
         crate::planar_map::reaches_built(),
+        crate::planar_map::vertices_sorted(),
     );
     let points = stroke(&mut rng, 6);
     assert!(doc_actions::apply(
@@ -30466,6 +30474,14 @@ fn test_short_brush_builds_polylines_only_near_the_stroke() {
     assert!(
         reaches * 4 < edges,
         "作った外接矩形とマス {reaches} 本（辺 {edges} 本）"
+    );
+    // 面の輪郭も、前の地図の輪郭のうち変わらないものを引き継ぎ、たどり直す輪郭の頂点だけ、まわりの辺を並べる
+    // （`face_cycles_since`。たどり直すのは線が触れた面の輪郭なので、大きな面に触れれば、その輪郭の長さの分は並べる。
+    // 前は毎回全部の頂点を並べた）
+    let sorted = crate::planar_map::vertices_sorted() - sorted_before;
+    assert!(
+        sorted < nodes,
+        "まわりの辺を並べた頂点 {sorted}（頂点 {nodes}）"
     );
 }
 
@@ -30512,6 +30528,8 @@ fn checking_against_the_previous_map_matches_the_full_check() {
         for cand in [&next, &moved] {
             let full = cand.valid_faces();
             assert_eq!(cand.valid_faces_since(Some(&base)), full);
+            // 面の輪郭も、前の地図の輪郭から求めたものと全部たどったものが同じ（正しくない地図でも：R3 段2）
+            assert!(cand.cycles_since_match_full(&base), "step {step}");
             invalid += usize::from(full.is_none());
         }
         if step % 3 != 2 {
@@ -30519,6 +30537,57 @@ fn checking_against_the_previous_map_matches_the_full_check() {
         }
     }
     assert!(invalid > 0, "正しくない地図も比べる");
+}
+
+/// 編集のあとの地図の計算に使う写し（画面の土台が持つもの）は、判定の形と面の輪郭を、確かめたときのものから引き継ぐ。
+/// ブラシ・消しゴム・バケツをくり返しても、引き継いだものは地図から作り直したものと同じ（レビュー f01d518 の R3 段1・段2）
+#[test]
+fn derived_geometry_carried_across_edits_matches_a_fresh_build() {
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    let mut app = Is2dApp::default();
+    let mut rng = map_overlay::Rng(9);
+    let stroke = |rng: &mut map_overlay::Rng, n: usize| -> Vec<Point> {
+        let mut p = Point::new(-150.0 + rng.f() * 300.0, -90.0 + rng.f() * 180.0);
+        let mut a = rng.f() * std::f64::consts::TAU;
+        (0..n)
+            .map(|_| {
+                a += (rng.f() - 0.5) * 1.2;
+                p += kurbo::Vec2::new(a.cos(), a.sin()) * 4.0;
+                p
+            })
+            .collect()
+    };
+    let mut checked = 0;
+    for step in 0..120 {
+        let color = colors[step % 3];
+        let action = match step % 5 {
+            0..=2 => doc_actions::Action::PaintStroke {
+                points: stroke(&mut rng, 4 + step % 20),
+                radius: 2.0 + (step % 7) as f32,
+                color,
+            },
+            3 => doc_actions::Action::EraseStroke {
+                points: stroke(&mut rng, 6),
+                radius: 3.0,
+            },
+            _ => doc_actions::Action::BucketFill {
+                pt: Point::new(-150.0 + rng.f() * 300.0, -90.0 + rng.f() * 180.0),
+                color,
+            },
+        };
+        if !doc_actions::apply(&mut app, action) {
+            continue;
+        }
+        for m in app.doc.root.layers[0].keyframes[0].cel.maps.iter() {
+            assert_eq!(m.base().derived_match_full(), Some(true), "step {step}");
+            checked += 1;
+        }
+    }
+    assert!(checked > 80, "確かめた写し {checked}");
 }
 
 /// N-2001：前の地図にある辺と交わる新しい辺は、前の地図の辺どうしの確かめを省いても見つかる（赤の矩形の角に重なる

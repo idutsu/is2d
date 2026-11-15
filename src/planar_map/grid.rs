@@ -532,6 +532,14 @@ impl<T: Copy + Default> Grouped<T> {
         }
     }
 
+    /// 番号 `k` の値（書き換えられる。`k` が範囲の外なら空）
+    pub(super) fn get_mut(&mut self, k: usize) -> &mut [T] {
+        match (self.start.get(k), self.start.get(k + 1)) {
+            (Some(&a), Some(&b)) => &mut self.items[a as usize..b as usize],
+            _ => &mut [],
+        }
+    }
+
     /// 番号の数
     pub(super) fn len(&self) -> usize {
         self.start.len().saturating_sub(1)
