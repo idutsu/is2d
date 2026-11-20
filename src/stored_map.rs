@@ -130,9 +130,7 @@ impl std::hash::Hash for StoredEdge {
     }
 }
 
-/// 塊から引いた辺（`StoredMap::edge_at`）：両端の座標・制御点・左右の色・左右の側の図形の番号（本番で使い始める
-/// 2b-7c までは、テストのときだけ組み込む）
-#[cfg(test)]
+/// 塊から引いた辺（`StoredMap::edge_at`）：両端の座標・制御点・左右の色・左右の側の図形の番号
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TileEdge {
     pub(crate) a: Point,
@@ -144,7 +142,6 @@ pub(crate) struct TileEdge {
     pub(crate) right_src: Option<ShapeId>,
 }
 
-#[cfg(test)]
 impl TileEdge {
     pub(crate) fn quad(&self) -> QuadBez {
         QuadBez::new(self.a, self.ctrl, self.b)
@@ -495,7 +492,6 @@ impl StoredMap {
 
     /// 計算に使う地図（`to_dense`）の辺 `e` を、塊から引く（両端は座標で。向きはしまう辺の向きで、`to_dense` の辺と同じ。
     /// 写しの通し番号の一覧を作らずに辺を引く：設計 段2b の 7. の 2b-7a）
-    #[cfg(test)]
     pub(crate) fn edge_at(&self, e: usize) -> TileEdge {
         let starts = self.starts();
         let k = starts.partition_point(|&s| s as usize <= e) - 1;
