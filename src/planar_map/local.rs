@@ -275,6 +275,7 @@ impl<'a> LocalMap<'a> {
     }
 
     /// 点 `p`（文書の座標）を含むマスの升目にかかる辺（消えた辺を除いた前の地図の辺と、増えた辺。番号の順・1つずつ）
+    #[cfg(test)]
     fn edges_near_point(&self, p: Point) -> Vec<usize> {
         self.edges_over(KRect::from_points(p, p))
     }
@@ -299,8 +300,149 @@ impl<'a> LocalMap<'a> {
     /// 2b-5a：増えた辺の決まり（`checked_since` の、格子に置ける・両側の色が違う・判定の形が2点以上・区間どうしが触れない・
     /// 別々の頂点が別々の格子の点）。前の地図の辺どうしは、前の地図が正しいので調べない。区間どうしは、どちらかが、形が
     /// 前の地図に無い増えた辺のものだけを調べる（消えた辺と形が同じ増えた辺は、判定の形も同じ：`valid_faces_since` と同じ
-    /// 考え）
+    /// 考え）。区間どうしは、地図全体の確かめ（`PlanarMap::polys_apart`）と同じく、区間を通るマスの格子（`CellGrid`）に
+    /// 入れ、同じマスにある区間とだけ比べる（触れる区間どうしは必ず同じマスを持つ：`seg_cells`）。手間は触る区間の数に
+    /// 比例し、近くの辺どうしの区間の組をみな比べることはしない
     pub(crate) fn added_edges_ok(&self) -> bool {
+        let ok = self.added_edges_ok_grid();
+        #[cfg(test)]
+        if test_checks() {
+            assert_eq!(
+                ok,
+                uncounted(|| self.added_edges_ok_pairs()),
+                "増えた辺の確かめが、前のやり方（お手本）と違う"
+            );
+        }
+        ok
+    }
+
+    fn added_edges_ok_grid(&self) -> bool {
+        let base_keys: std::collections::HashSet<[u64; 6]> = self
+            .removed
+            .iter()
+            .map(|&e| quad_key(&self.base_edge(e).quad()))
+            .collect();
+        let mut fresh: std::collections::HashSet<usize> = Default::default();
+        // 確かめる所：増えた辺の判定の形の外接矩形（1目広げる）にかかる升目
+        let mut tiles: Vec<(i64, i64)> = Vec::new();
+        for e in self.added_edges() {
+            let q = self.quad(e);
+            let ed = self.edge(e);
+            if !on_grid([q.p0, q.p1, q.p2].into_iter()) || ed.left == ed.right {
+                return false;
+            }
+            let pe = self.poly(e);
+            if pe.len() < 2 {
+                return false;
+            }
+            if !base_keys.contains(&quad_key(&q)) {
+                fresh.insert(e);
+            }
+            let reach = GridRect::of(pe);
+            let rect = KRect::new(
+                reach.x0 as f64 / OVERLAY_GRID,
+                reach.y0 as f64 / OVERLAY_GRID,
+                reach.x1 as f64 / OVERLAY_GRID,
+                reach.y1 as f64 / OVERLAY_GRID,
+            )
+            .inflate(1.0 / OVERLAY_GRID, 1.0 / OVERLAY_GRID);
+            tiles.extend(index_tiles_over(rect));
+        }
+        tiles.sort_unstable();
+        tiles.dedup();
+        // その升目にかかる辺（消えた辺を除いた前の地図の辺と、増えた辺）
+        let mut cands: Vec<usize> = Vec::new();
+        for &t in &tiles {
+            self.index.index.edges_in(self.index.stored, t, &mut cands);
+        }
+        cands.retain(|e| !self.removed.contains(e));
+        for t in &tiles {
+            if let Some(list) = self.added_tiles.get(t) {
+                cands.extend(list.iter().copied());
+            }
+        }
+        cands.sort_unstable();
+        cands.dedup();
+        // 増えた辺の端の頂点が、ほかの頂点と同じ格子の点に丸まらないか（前の地図の頂点どうしは別々の格子の点。座標が
+        // 同じなら同じ頂点）。増えた辺の端と同じ格子の点に丸まる頂点は、その点のマスの升目にかかる辺の端なので、
+        // 確かめる所の辺の端を見ればよい
+        let new_nodes: std::collections::HashSet<usize> =
+            self.added.iter().flat_map(|ed| [ed.a, ed.b]).collect();
+        let mut node_at: HashMap<IPt, usize> = HashMap::new();
+        for &f in &cands {
+            let fd = self.edge(f);
+            for u in [fd.a, fd.b] {
+                match node_at.entry(gpt(self.node(u))) {
+                    std::collections::hash_map::Entry::Occupied(o) => {
+                        let w = *o.get();
+                        if w != u && (new_nodes.contains(&u) || new_nodes.contains(&w)) {
+                            return false;
+                        }
+                    }
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(u);
+                    }
+                }
+            }
+        }
+        // 区間どうし：形が前の地図に無い増えた辺の区間を格子に入れながら、前に入れた区間と比べ、そのあと確かめる所の
+        // ほかの辺の区間を、格子の区間とだけ比べる
+        let mut fresh_list: Vec<usize> = fresh.into_iter().collect();
+        fresh_list.sort_unstable();
+        let mut segs: Vec<(usize, usize, GridRect)> = Vec::new();
+        let mut grid = CellGrid::new();
+        let mut near: Vec<usize> = Vec::new();
+        let clash = |(e, k): (usize, usize), (f, m): (usize, usize)| -> bool {
+            let (pe, pf) = (self.poly(e), self.poly(f));
+            let (ed, fd) = (self.edge(e), self.edge(f));
+            seg_pair_clash(
+                (pe[k], pe[k + 1]),
+                seg_tags(pe, k, ed.a, ed.b),
+                (pf[m], pf[m + 1]),
+                seg_tags(pf, m, fd.a, fd.b),
+                (e == f && m == k + 1).then_some(pe[k + 1]),
+            )
+        };
+        for &e in &fresh_list {
+            let pe = self.poly(e);
+            for k in 0..pe.len() - 1 {
+                let rk = GridRect::of(&pe[k..k + 2]);
+                let cells: Vec<(i64, i64)> = seg_cells((pe[k], pe[k + 1]), 0).collect();
+                grid.query(cells.iter().copied(), &mut near);
+                for &j in &near {
+                    let (f, m, rf) = segs[j];
+                    // 前に入れた区間が前（同じ辺なら、区間の順が前）
+                    if rk.overlaps(&rf) && clash((f, m), (e, k)) {
+                        return false;
+                    }
+                }
+                grid.insert(segs.len(), cells);
+                segs.push((e, k, rk));
+            }
+        }
+        let fresh_set: std::collections::HashSet<usize> = fresh_list.iter().copied().collect();
+        for &f in cands.iter().filter(|f| !fresh_set.contains(f)) {
+            let pf = self.poly(f);
+            for m in 0..pf.len().saturating_sub(1) {
+                let rm = GridRect::of(&pf[m..m + 2]);
+                grid.query(seg_cells((pf[m], pf[m + 1]), 0), &mut near);
+                for &j in &near {
+                    let (e, k, re) = segs[j];
+                    if re.overlaps(&rm) && clash((e, k), (f, m)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// テスト用のお手本：`added_edges_ok` の前のやり方（近くの辺ごとに、区間の組をみな比べる）。2b-5a：増えた辺の決まり（`checked_since` の、格子に置ける・両側の色が違う・判定の形が2点以上・区間どうしが触れない・
+    /// 別々の頂点が別々の格子の点）。前の地図の辺どうしは、前の地図が正しいので調べない。区間どうしは、どちらかが、形が
+    /// 前の地図に無い増えた辺のものだけを調べる（消えた辺と形が同じ増えた辺は、判定の形も同じ：`valid_faces_since` と同じ
+    /// 考え）
+    #[cfg(test)]
+    fn added_edges_ok_pairs(&self) -> bool {
         let base_keys: std::collections::HashSet<[u64; 6]> = self
             .removed
             .iter()
