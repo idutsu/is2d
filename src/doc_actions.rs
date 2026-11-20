@@ -805,25 +805,26 @@ fn apply_stroke_shapes(tab: &mut Tab, active_tool: Tool, shapes: Vec<FillShape>)
         .iter()
         .map(|s| s.to_doc(world).into_owned())
         .collect();
-    write_local_paint(tab, target_lid, &strokes, rule)
+    write_local(tab, target_lid, |base, scope| {
+        base.edit_local(&base.paint_change(&strokes, rule), scope)
+    })
 }
 
-/// ブラシ・消しゴムの線 `strokes`（文書の座標）を、レイヤー `layer_id` の編集中の階層に、触った所だけで書く
-/// （`LayerBase::paint_local`・`Cel::edit_local`。設計：claude/触った所だけを計算する地図の設計_22fbbbe.md の段2b）。
-/// 格子に置けない線は書かずに `Refusal::OffGrid`、正しい地図にならなければ書かずに `Refusal::Unwritable` を知らせる
-/// （`write_map_edit` と同じ）
-fn write_local_paint(
+/// 地図の編集を、レイヤー `layer_id` の編集中の階層に、触った所だけで書く（1本の道：`LayerBase::edit_local`・
+/// `Cel::edit_local`。設計：claude/触った所だけを計算する地図の設計_22fbbbe.md の段2b の 8.）。`f` は、計算に使う写しと
+/// 階層から、道具が作った重ね合わせに渡すもので編集した答えを返す。格子に置けないときは書かずに `Refusal::OffGrid`、正しい
+/// 地図にならなければ書かずに `Refusal::Unwritable` を知らせる（`write_map_edit` の重ね合わせと同じ）
+fn write_local(
     tab: &mut Tab,
     layer_id: LayerId,
-    strokes: &[FillShape],
-    rule: MapRule,
+    f: impl FnOnce(&crate::planar_map::LayerBase, &[u64]) -> crate::planar_map::LocalEdit,
 ) -> bool {
     use crate::planar_map::LocalRefusal;
     let scope = tab.session.editing_group_path.clone();
     let mut refusal = None;
     let mut held = None;
     let written = crate::canvas_tool::write_cel(tab, layer_id, |cel| {
-        match cel.edit_local(&scope, |base| base.paint_local(strokes, rule, &scope)) {
+        match cel.edit_local(&scope, |base| f(base, &scope)) {
             Ok(Some(w)) => {
                 held = w.0;
                 true
@@ -1195,8 +1196,14 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
     // 頂点・辺を動かす確定は重ね合わせで作る（`None` は格子の外）。アンカーの追加・削除の `None` は、編集できないこと
     let changed = match map_edit {
         MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => {
-            write_map_edit(tab, layer_id, Some(Refusal::OffGrid), |base| {
-                base.apply_edit(map_edit)
+            write_local(tab, layer_id, |base, scope| {
+                match base.reshape_change(map_edit) {
+                    Some(Some(change)) => base.edit_local(&change, scope),
+                    // 辺・頂点が無い（前の道の `apply_edit` が `None` を返すときと同じく、格子の外として知らせる）
+                    _ => crate::planar_map::LocalEdit::Refused(
+                        crate::planar_map::LocalRefusal::OffGrid,
+                    ),
+                }
             })
         }
         MapEdit::AddAnchor { .. } | MapEdit::DeleteAnchor { .. } => {

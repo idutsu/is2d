@@ -1640,7 +1640,31 @@ fn labeled(mut map: PlanarMap, faces: &[MapFace], ids: &[ShapeId]) -> PlanarMap 
     map
 }
 
-/// 触った所だけで行う編集（`LayerBase::paint_local`）の答え
+/// 道具が作る、重ね合わせに渡すもの（`LayerBase::paint_change`・`reshape_change`）：重ねるもの・その曲線・その左右の色
+/// （輪郭の変形）・決まり。1本の道（`LayerBase::edit_local`）は、これだけを受け取る
+pub(crate) struct LocalChange<'a> {
+    input: ChangeInput<'a>,
+    quads: Vec<QuadBez>,
+    cols: Vec<(Option<Color32>, Option<Color32>)>,
+    rule: MapRule,
+}
+
+/// 重ねるもの（`MapInput` の、持ち物にしたもの）
+enum ChangeInput<'a> {
+    Shapes(&'a [FillShape]),
+    Sweep(Vec<(usize, QuadBez)>),
+}
+
+impl LocalChange<'_> {
+    fn input(&self) -> MapInput<'_> {
+        match &self.input {
+            ChangeInput::Shapes(s) => MapInput::Shapes(s),
+            ChangeInput::Sweep(m) => MapInput::Sweep(m),
+        }
+    }
+}
+
+/// 触った所だけで行う編集（`LayerBase::edit_local`）の答え
 pub(crate) enum LocalEdit {
     /// 変わらない
     Same,
@@ -2084,21 +2108,101 @@ impl LayerBase {
         cycle
     }
 
-    /// 形 `shapes`（文書の座標）を決まり `rule` で重ねる編集（ブラシ・消しゴム）を、触った所だけで行う（設計 段2b の 7. の
-    /// 2b-7c）：窓で重ね（`window_overlay`）、差分を前の地図＋差分として確かめ（`LocalMap`）、触った面の書き戻しの差分を
-    /// 決め（`rewrite`）、前のしまう形に差分を当てた新しいしまう形と、新しい面の図形の表を作る。地図全体の一覧（`map`）を
-    /// 作らない。答えは、前の地図全体で重ねて確かめ、書き戻すとき（`overlay`・`written`・`Cel::outcome`・`put_map`）と同じ
-    /// （テストでは毎回お手本と比べる）。`group_path`：この地図の階層
-    pub(crate) fn paint_local(
+    /// 道具の側（ブラシ・消しゴム）：形 `shapes`（文書の座標）を決まり `rule` で重ねるときに、重ね合わせに渡すもの。形の線の
+    /// 端は、前からある頂点から `FLAT_TOL` 以内なら、その頂点に寄せる（`overlay` の形と同じ）
+    pub(crate) fn paint_change<'a>(
         &self,
-        shapes: &[FillShape],
+        shapes: &'a [FillShape],
         rule: MapRule,
-        group_path: &[u64],
-    ) -> LocalEdit {
-        let got = self.paint_local_inner(shapes, rule, group_path);
+    ) -> LocalChange<'a> {
+        let mut quads: Vec<QuadBez> = shapes
+            .iter()
+            .flat_map(|s| s.contours())
+            .flat_map(|c| c.segments.iter().copied())
+            .collect();
+        self.snap_ends(&mut quads);
+        LocalChange {
+            input: ChangeInput::Shapes(shapes),
+            quads,
+            cols: Vec::new(),
+            rule,
+        }
+    }
+
+    /// 道具の側（輪郭の変形）：辺の引っぱり・頂点の移動 `edit` で、重ね合わせに渡すもの（動かした辺と、動かした後の曲線。
+    /// `MapEdit::apply_known` と同じ決まり。辺・頂点は塊から引く）。アンカーの追加・削除は重ね合わせでないので `None`。
+    /// 辺・頂点が無ければ `Some(None)`
+    pub(crate) fn reshape_change(&self, edit: MapEdit) -> Option<Option<LocalChange<'static>>> {
+        let moved: Vec<(usize, QuadBez)> = match edit {
+            MapEdit::PullEdge {
+                orig_seg,
+                grab_t,
+                target,
+            } => {
+                let Some((e, forward)) = self.stored.find_edge(&orig_seg) else {
+                    return Some(None);
+                };
+                let t = if forward { grab_t } else { 1.0 - grab_t };
+                vec![(e, pulled_quad(self.stored.edge_at(e).quad(), t, target))]
+            }
+            MapEdit::MoveVertex {
+                orig_vertex,
+                target,
+            } => {
+                let ix = self.map_index();
+                let mut at: Vec<usize> = Vec::new();
+                ix.ends
+                    .edges_in(&self.stored, end_key(orig_vertex), &mut at);
+                at.sort_unstable();
+                at.dedup();
+                at.retain(|&e| {
+                    let te = self.stored.edge_at(e);
+                    te.a == orig_vertex || te.b == orig_vertex
+                });
+                if at.is_empty() {
+                    return Some(None);
+                }
+                let d = target - orig_vertex;
+                let pos = |p: Point| if p == orig_vertex { target } else { p };
+                at.iter()
+                    .map(|&e| {
+                        let te = self.stored.edge_at(e);
+                        let k = (te.a == orig_vertex) as u8 + (te.b == orig_vertex) as u8;
+                        (
+                            e,
+                            QuadBez::new(pos(te.a), te.ctrl + d * (0.5 * k as f64), pos(te.b)),
+                        )
+                    })
+                    .collect()
+            }
+            MapEdit::AddAnchor { .. } | MapEdit::DeleteAnchor { .. } => return None,
+        };
+        let quads = moved.iter().map(|&(_, q)| q).collect();
+        let cols = moved
+            .iter()
+            .map(|&(e, _)| {
+                let te = self.stored.edge_at(e);
+                (te.left, te.right)
+            })
+            .collect();
+        Some(Some(LocalChange {
+            input: ChangeInput::Sweep(moved),
+            quads,
+            cols,
+            rule: MapRule::Sweep,
+        }))
+    }
+
+    /// 1本の道：道具が作った重ね合わせに渡すもの `change` で、地図を触った所だけで編集する（設計 段2b の 7. の 2b-7c と
+    /// 8.）：窓で重ね（`window_overlay`）、差分を前の地図＋差分として確かめ（`LocalMap`）、触った面の書き戻しの差分を決め
+    /// （`rewrite`）、前のしまう形に差分を当てた新しいしまう形と、新しい面の図形の表を作る。道具の種類では分かれない。地図
+    /// 全体の一覧（`map`）を作らない。答えは、同じものを前の地図全体で重ねて確かめ、書き戻すとき（`overlay_rules_known`・
+    /// `written`・`Cel::outcome`・`put_map`）と同じ（テストでは毎回お手本と比べる）。`group_path`：この地図の階層
+    pub(crate) fn edit_local(&self, change: &LocalChange<'_>, group_path: &[u64]) -> LocalEdit {
+        let got = self.edit_local_inner(change, group_path);
         #[cfg(test)]
         if test_checks() {
-            let ok = uncounted(|| self.paint_matches_full(shapes, rule, group_path, &got));
+            let ok = uncounted(|| self.edit_matches_full(change, group_path, &got));
             assert!(
                 ok,
                 "触った所だけで行った編集が、前の地図全体で行った編集（お手本）と違う"
@@ -2107,24 +2211,15 @@ impl LayerBase {
         got
     }
 
-    fn paint_local_inner(
-        &self,
-        shapes: &[FillShape],
-        rule: MapRule,
-        group_path: &[u64],
-    ) -> LocalEdit {
-        let mut new_quads: Vec<QuadBez> = shapes
-            .iter()
-            .flat_map(|s| s.contours())
-            .flat_map(|c| c.segments.iter().copied())
-            .collect();
-        if new_quads.is_empty() {
+    fn edit_local_inner(&self, change: &LocalChange<'_>, group_path: &[u64]) -> LocalEdit {
+        if change.quads.is_empty() {
             return LocalEdit::Same;
         }
-        self.snap_ends(&mut new_quads);
+        let rule = change.rule;
+        let (input, new_quads) = (change.input(), &change.quads);
         let ix = self.map_index();
         let Some((maps, wedges)) =
-            PlanarMap::window_overlay(ix, MapInput::Shapes(shapes), &[rule], &new_quads, &[])
+            PlanarMap::window_overlay(ix, input, &[rule], new_quads, &change.cols)
         else {
             return LocalEdit::Refused(LocalRefusal::OffGrid);
         };
@@ -2238,17 +2333,22 @@ impl LayerBase {
         }
     }
 
-    /// テスト用（お手本との比べ）：`paint_local` の答え `got` が、前の地図全体で重ねて確かめ、書き戻すときの答えと同じか
+    /// テスト用（お手本との比べ）：`edit_local` の答え `got` が、同じ渡すものを前の地図全体で重ねて確かめ、書き戻すときの
+    /// 答えと同じか
     /// （しまう形・消す図形・入れる図形。新しく振る番号は、入れる図形の形で対応づけて比べる）
     #[cfg(test)]
-    fn paint_matches_full(
+    fn edit_matches_full(
         &self,
-        shapes: &[FillShape],
-        rule: MapRule,
+        change: &LocalChange<'_>,
         group_path: &[u64],
         got: &LocalEdit,
     ) -> bool {
-        let Some(next) = self.overlay(MapInput::Shapes(shapes), rule) else {
+        // 同じ渡すものを、前の地図全体で重ねる（升目の索引を渡さない道。形の線の端の寄せも、その道が行う）
+        let polys = self.polys().to_vec();
+        let Some([next]) =
+            self.map()
+                .overlay_rules_known(&polys, None, change.input(), [change.rule])
+        else {
             return matches!(got, LocalEdit::Refused(LocalRefusal::OffGrid));
         };
         if !self.written_ok(&next) {

@@ -35047,7 +35047,7 @@ fn local_paint_matches_full_pipeline() {
             } else {
                 MapRule::Paint(Some(c))
             };
-            match base.paint_local(&st, rule, &[]) {
+            match base.edit_local(&base.paint_change(&st, rule), &[]) {
                 LocalEdit::Changed(w) => {
                     changed += 1;
                     base = LayerBase::of_stored(&w.stored);
@@ -35095,7 +35095,9 @@ fn local_paint_writes_through_the_cel() {
         } else {
             MapRule::Paint(Some(c))
         };
-        if let Ok(Some(_)) = cel.edit_local(&[], |base| base.paint_local(&st, rule, &[])) {
+        if let Ok(Some(_)) = cel.edit_local(&[], |base| {
+            base.edit_local(&base.paint_change(&st, rule), &[])
+        }) {
             written += 1;
             assert_eq!(cel.maps_problem(), None, "step {step}");
             if let Some(m) = cel.maps.iter().find(|m| m.group_path.is_empty()) {
