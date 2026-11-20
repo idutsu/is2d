@@ -1757,7 +1757,7 @@ pub(crate) enum LocalRefusal {
 /// 入れた図形は新しい表にだけある）
 pub(crate) struct LocalWrite {
     pub(crate) stored: StoredMap,
-    pub(crate) faces: Arc<[Arc<FillShape>]>,
+    pub(crate) faces: FaceTable,
     /// 前の表から消した図形の番号と、新しい表に入れた図形の番号（浮いた片の残りが、隠す図形と出す図形を決めるため）
     pub(crate) removed: Vec<ShapeId>,
     pub(crate) added: Vec<ShapeId>,
@@ -1889,7 +1889,18 @@ pub(crate) struct StoredGeom {
 }
 
 /// 地図の面の図形（写し）：（階層, 面の番号の順の図形）
-type FaceShapes = (Vec<u64>, Arc<[Arc<FillShape>]>);
+type FaceShapes = (Vec<u64>, FaceTable);
+
+/// 面の表：面の図形を番号の順に並べたもの（塊に分けて持つ。編集のあとの表は、変わった面のかかる塊だけを作り直し、
+/// ほかの塊は前の表と共有する：`ChunkedList::replace_sorted`。設計 段2b の 15.）
+pub(crate) type FaceTable = crate::chunked_list::ChunkedList<FillShape>;
+
+impl FaceTable {
+    /// 番号が `id` の面の図形
+    pub(crate) fn by_id(&self, id: ShapeId) -> Option<&Arc<FillShape>> {
+        self.find_sorted(id, |s| s.shape_id)
+    }
+}
 
 impl LayerBase {
     /// 地図 `map` を、しまう形にして決まった順に並べ直したもの（文書に入らない、その場で使う地図）
@@ -2006,7 +2017,7 @@ impl LayerBase {
     pub(crate) fn of_local(
         stored: StoredMap,
         group_path: &[u64],
-        faces: Arc<[Arc<FillShape>]>,
+        faces: FaceTable,
         prev: &LayerBase,
     ) -> Arc<Self> {
         let base = Self {
@@ -2764,14 +2775,14 @@ impl LayerBase {
     /// 前の地図の面の表（`BaseFaces`）：写しの面の図形 `faces_list` から、面の輪郭の最初の辺を形で引く
     fn faces_lookup<'f>(
         &'f self,
-        faces_list: &'f [Arc<FillShape>],
+        faces_list: &'f FaceTable,
     ) -> impl Fn(ShapeId) -> Vec<(usize, bool)> + 'f {
-        move |id: ShapeId| match faces_list.binary_search_by_key(&id, |s| s.shape_id) {
-            Ok(i) => faces_list[i]
+        move |id: ShapeId| match faces_list.by_id(id) {
+            Some(f) => f
                 .contours()
                 .filter_map(|c| c.segments.first().and_then(|q| self.stored.find_edge(q)))
                 .collect(),
-            Err(_) => Vec::new(),
+            None => Vec::new(),
         }
     }
 
@@ -2822,24 +2833,11 @@ impl LayerBase {
             return LocalEdit::Refused(LocalRefusal::Unwritable);
         };
         let faces_list = self.faces(group_path);
-        let lookup = |id: ShapeId| -> Vec<(usize, bool)> {
-            match faces_list.binary_search_by_key(&id, |s| s.shape_id) {
-                Ok(i) => faces_list[i]
-                    .contours()
-                    .filter_map(|c| c.segments.first().and_then(|q| self.stored.find_edge(q)))
-                    .collect(),
-                Err(_) => Vec::new(),
-            }
-        };
+        let lookup = self.faces_lookup(&faces_list);
         let Some(Some(faces)) = local.regions_faces(&touched, &lookup, &mut memo) else {
             return LocalEdit::Refused(LocalRefusal::Unwritable);
         };
-        let orig_shape = |id: ShapeId| -> Option<Arc<FillShape>> {
-            faces_list
-                .binary_search_by_key(&id, |s| s.shape_id)
-                .ok()
-                .map(|i| Arc::clone(&faces_list[i]))
-        };
+        let orig_shape = |id: ShapeId| -> Option<Arc<FillShape>> { faces_list.by_id(id).cloned() };
         let change = local.rewrite(&faces, &lookup, &orig_shape, &memo, 0, group_path);
         if change.removed.is_empty() && change.added.is_empty() {
             return LocalEdit::Same;
@@ -2858,17 +2856,16 @@ impl LayerBase {
                 Arc::new(s)
             })
             .collect();
-        let gone: HashSet<ShapeId> = change.removed.iter().copied().collect();
-        let mut faces_new: Vec<Arc<FillShape>> = faces_list
-            .iter()
-            .filter(|s| !gone.contains(&s.shape_id))
-            .cloned()
-            .chain(added.iter().cloned())
-            .collect();
-        faces_new.sort_unstable_by_key(|s| s.shape_id);
+        // 新しい面の表：消した面と入れた面のかかる塊だけを作り直し、ほかの塊は前の表と共有する
+        let mut gone = change.removed.clone();
+        gone.sort_unstable();
+        let mut sorted_added = added.clone();
+        sorted_added.sort_unstable_by_key(|s| s.shape_id);
+        let mut faces_new = faces_list.clone();
+        faces_new.replace_sorted(&gone, sorted_added, |s| s.shape_id);
         LocalEdit::Changed(LocalWrite {
             stored,
-            faces: faces_new.into(),
+            faces: faces_new,
             removed: change.removed,
             added: added.iter().map(|s| s.shape_id).collect(),
         })
@@ -2994,8 +2991,7 @@ impl LayerBase {
             return false;
         };
         // 消した図形は前の表にだけ、入れた図形は新しい表にだけある（変わらない面は同じ図形を共有する）
-        let in_list =
-            |list: &[Arc<FillShape>], s: &Arc<FillShape>| list.iter().any(|x| Arc::ptr_eq(x, s));
+        let in_list = |list: &FaceTable, s: &Arc<FillShape>| list.iter().any(|x| Arc::ptr_eq(x, s));
         let got_removed: HashSet<ShapeId> = own_faces
             .iter()
             .filter(|s| !in_list(&w.faces, s))
@@ -3206,8 +3202,7 @@ impl LayerBase {
     /// 面（階層 `group_path`）のうち、番号が `ids` にあるものがあるか（面の表で引く）
     pub(crate) fn has_any_face(&self, ids: &HashSet<ShapeId>, group_path: &[u64]) -> bool {
         let faces = self.faces(group_path);
-        ids.iter()
-            .any(|id| faces.binary_search_by_key(id, |s| s.shape_id).is_ok())
+        ids.iter().any(|&id| faces.by_id(id).is_some())
     }
 
     /// 番号が `ids` の面の輪郭の辺（計算に使う地図での番号の順）：面の表の図形の輪郭の曲線を、塊から引く（手間は、その
@@ -3216,10 +3211,10 @@ impl LayerBase {
         let faces = self.faces(group_path);
         let mut out: Vec<usize> = Vec::new();
         for id in ids {
-            let Ok(i) = faces.binary_search_by_key(id, |s| s.shape_id) else {
+            let Some(f) = faces.by_id(*id) else {
                 continue;
             };
-            for q in faces[i].contours().flat_map(|c| c.segments.iter()) {
+            for q in f.contours().flat_map(|c| c.segments.iter()) {
                 if let Some((e, _)) = self.stored.find_edge(q) {
                     out.push(e);
                 }
@@ -3482,7 +3477,7 @@ impl LayerBase {
 
     /// 面の図形（写し。階層 `group_path`）。面の順で、図形の番号は面の印（セル画の地図の面には、いつも1つずつ別の番号が
     /// 記してある）。`layer_id` は付けない（使う側が付ける）
-    pub(crate) fn faces(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
+    pub(crate) fn faces(&self, group_path: &[u64]) -> FaceTable {
         let mut cached = self.faces.lock();
         if let Some((gp, shapes)) = &*cached {
             if gp == group_path {
@@ -3495,7 +3490,7 @@ impl LayerBase {
     }
 
     /// 面の図形を地図から作る（`faces`。番号の順）
-    fn face_shapes(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
+    fn face_shapes(&self, group_path: &[u64]) -> FaceTable {
         let (faces, _) = self.map().faces_of(self.polys(), self.cycles());
         let ids = face_ids(self.map(), &faces, FaceIds::Keep);
         let mut shapes: Vec<Arc<FillShape>> = faces
@@ -4030,8 +4025,7 @@ pub(crate) fn reshape_result(
                 .added
                 .iter()
                 .filter_map(|id| {
-                    let i = w.faces.binary_search_by_key(id, |s| s.shape_id).ok()?;
-                    let mut s = (*w.faces[i]).clone();
+                    let mut s = (**w.faces.by_id(*id)?).clone();
                     s.layer_id = layer_id;
                     Some(placed(s, xform))
                 })
@@ -4660,12 +4654,7 @@ impl LayerBase {
             .faces
             .iter()
             .map(|f| {
-                let shape = |s: ShapeId| {
-                    faces_list
-                        .binary_search_by_key(&s, |x| x.shape_id)
-                        .ok()
-                        .map(|i| &faces_list[i])
-                };
+                let shape = |s: ShapeId| faces_list.by_id(s);
                 let keep = kept_src(
                     f.cycles.iter().flatten().copied(),
                     |h| m.side_src(h),
@@ -4741,7 +4730,7 @@ impl MapChange {
     /// 無い番号があるか、面にならない新しい形があれば `None`（面と図形が1対1にならない。書かない）
     pub(crate) fn into_face_shapes(
         self,
-        old: &[Arc<FillShape>],
+        old: &FaceTable,
     ) -> Option<(CheckedMap, Vec<Arc<FillShape>>)> {
         let old: HashMap<ShapeId, &Arc<FillShape>> = old.iter().map(|s| (s.shape_id, s)).collect();
         let mut added: HashMap<ShapeId, FillShape> =

@@ -4351,6 +4351,91 @@ fn test_keyframe_list_matches_plain_vec() {
 }
 
 /// Undo の控え（文書の複製）と、そのあと1つのキーフレームを書き換えた列は、触った塊のほかを共有する（N-2004）
+/// 鍵の順の列のまとめての差し替え（`ChunkedList::replace_sorted`）と鍵で引く所（`find_sorted`）が、ランダムな書き換えを
+/// 重ねても、ふつうの並び（`BTreeMap`）と同じ中身・同じ引き方になり、かからない塊は共有し、塊の大きさがそろう
+#[test]
+fn chunked_list_sorted_replace_matches_a_plain_sorted_list() {
+    use crate::chunked_list::ChunkedList;
+    use std::sync::Arc;
+    let mut seed = 0x2026_1120_u64;
+    let mut rnd = |m: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % m
+    };
+    let key = |x: &(u32, u64)| x.0;
+    for start in [0usize, 1, 30, 64, 65, 500, 3000] {
+        let mut model: std::collections::BTreeMap<u32, u64> =
+            (0..start as u32).map(|k| (k * 3, k as u64)).collect();
+        let mut list: ChunkedList<(u32, u64)> =
+            model.iter().map(|(&k, &v)| Arc::new((k, v))).collect();
+        for step in 0..400u64 {
+            let span = (model.len() as u64 * 3 + 30).max(30);
+            let mut gone: Vec<u32> = (0..rnd(6)).map(|_| rnd(span) as u32).collect();
+            if rnd(10) == 0 {
+                let a = rnd(span) as u32;
+                gone.extend(a..a + rnd(200) as u32);
+            }
+            gone.sort_unstable();
+            gone.dedup();
+            for g in &gone {
+                model.remove(g);
+            }
+            let mut added: Vec<u32> = (0..rnd(6))
+                .map(|_| rnd(span) as u32)
+                .filter(|k| !model.contains_key(k))
+                .collect();
+            if rnd(10) == 0 {
+                let a = rnd(span) as u32;
+                added.extend((a..a + rnd(200) as u32).filter(|k| !model.contains_key(k)));
+            }
+            added.sort_unstable();
+            added.dedup();
+            for &a in &added {
+                model.insert(a, step);
+            }
+            let before = list.clone();
+            let touches = gone.len() + added.len();
+            list.replace_sorted(
+                &gone,
+                added.iter().map(|&k| Arc::new((k, step))).collect(),
+                key,
+            );
+            let got: Vec<(u32, u64)> = list.iter().map(|x| **x).collect();
+            let want: Vec<(u32, u64)> = model.iter().map(|(&k, &v)| (k, v)).collect();
+            assert_eq!(got, want, "start {start} step {step}");
+            assert_eq!(list.len(), want.len());
+            for _ in 0..5 {
+                let k = rnd(span) as u32;
+                assert_eq!(
+                    list.find_sorted(k, key).map(|x| x.1),
+                    model.get(&k).copied()
+                );
+            }
+            let (shared, total) = list.shared_chunks_with(&before);
+            let (_, before_total) = before.shared_chunks_with(&before);
+            if before_total > touches + 2 {
+                assert!(
+                    shared > 0,
+                    "start {start} step {step}: 塊を共有していない（{shared}/{total}）"
+                );
+            }
+            // 塊の大きさ：差し替えで作った塊は 64 個以下で、塊が細かく割れていかない（列を作るときと、1つずつ入れて
+            // 分けるときの決まりの塊は、そのまま共有する）
+            let sizes = list.chunk_sizes();
+            assert!(
+                total <= list.len() / 16 + 2,
+                "start {start} step {step}: 塊が細かく割れた {sizes:?}"
+            );
+            assert!(
+                sizes.iter().all(|&n| n > 0 && n <= 128),
+                "start {start} step {step}: 塊の大きさ {sizes:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn test_keyframe_list_copy_shares_untouched_chunks() {
     use crate::timeline::Layer;
@@ -27852,7 +27937,7 @@ mod map_overlay {
                 .cel
                 .maps
                 .iter()
-                .flat_map(|m| m.faces().to_vec())
+                .flat_map(|m| m.faces().iter().cloned().collect::<Vec<_>>())
                 .filter(|s| s.color == c)
                 .map(|s| s.contours().map(|k| k.signed_area()).sum::<f64>().abs())
                 .sum()
@@ -35320,7 +35405,7 @@ fn local_paint_writes_through_the_cel() {
             if let Some(m) = cel.maps.iter().find(|m| m.group_path.is_empty()) {
                 let base = m.base();
                 let fresh = crate::planar_map::LayerBase::new(base.map());
-                let ids = |l: &[std::sync::Arc<FillShape>]| -> Vec<u64> {
+                let ids = |l: &crate::planar_map::FaceTable| -> Vec<u64> {
                     l.iter().map(|s| s.shape_id).collect()
                 };
                 assert_eq!(ids(&base.faces(&[])), ids(&fresh.faces(&[])), "step {step}");

@@ -605,10 +605,7 @@ impl PlanarMap {
                                         .expect("正しい地図なら面が作れる");
                                     let prev_faces = prev.faces(&[]);
                                     let orig_shape = |id: ShapeId| {
-                                        prev_faces
-                                            .binary_search_by_key(&id, |s| s.shape_id)
-                                            .ok()
-                                            .map(|i| Arc::clone(&prev_faces[i]))
+                                        prev_faces.by_id(id).cloned()
                                     };
                                     let change =
                                         local.rewrite(&faces, &lookup, &orig_shape, &memo, 0, &[]);

@@ -495,7 +495,7 @@ impl ScopeMap {
     }
 
     /// 面の図形（写し。面の順）
-    pub(crate) fn faces(&self) -> Arc<[Arc<FillShape>]> {
+    pub(crate) fn faces(&self) -> crate::planar_map::FaceTable {
         self.base().faces(&self.group_path)
     }
 }
@@ -717,7 +717,10 @@ impl Cel {
 
     /// 面の図形（写し）：階層の地図の順に、各地図の面の図形を並べたもの。インスタンスは入れない
     pub(crate) fn shapes(&self) -> Vec<Arc<FillShape>> {
-        self.maps.iter().flat_map(|m| m.faces().to_vec()).collect()
+        self.maps
+            .iter()
+            .flat_map(|m| m.faces().iter().cloned().collect::<Vec<_>>())
+            .collect()
     }
 
     /// 重なりの順の中身（図形とインスタンス）

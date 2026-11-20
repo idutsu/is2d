@@ -187,6 +187,12 @@ impl<T> ChunkedList<T> {
         Arc::ptr_eq(&self.chunks, &other.chunks)
     }
 
+    /// テスト用：塊ごとの要素の数
+    #[cfg(test)]
+    pub(crate) fn chunk_sizes(&self) -> Vec<usize> {
+        self.chunks.chunks.iter().map(|c| c.len()).collect()
+    }
+
     /// テスト用：`other` と共有している塊の数と、塊の数
     #[cfg(test)]
     pub(crate) fn shared_chunks_with(&self, other: &Self) -> (usize, usize) {
@@ -199,6 +205,88 @@ impl<T> ChunkedList<T> {
         (shared, self.chunks.chunks.len())
     }
 
+    /// 鍵 `key`（列は鍵の順で、鍵は1つずつ別）が `k` の要素。まず塊を探し（塊のいちばん後ろの鍵で）、塊の中を引く
+    pub(crate) fn find_sorted<K: Ord>(&self, k: K, key: impl Fn(&T) -> K) -> Option<&Arc<T>> {
+        let chunks = &self.chunks.chunks;
+        let c = chunks.partition_point(|c| key(&c[c.len() - 1]) < k);
+        let chunk = chunks.get(c)?;
+        chunk
+            .binary_search_by(|x| key(x).cmp(&k))
+            .ok()
+            .map(|i| &chunk[i])
+    }
+
+    /// 鍵の順の列（鍵 `key` は1つずつ別。塊の基準を使わない列：`Keyed` の列には使わない）から、鍵が `gone`（鍵の順）の
+    /// 要素を消し、`added`（鍵の順。消したあとの列に無い鍵）を足す。消す鍵か足す要素がかかる塊だけを作り直し、ほかの塊は
+    /// 写さずにそのまま共有する。作り直す塊は、続けて作り直す塊を1つにまとめてから、`CHUNK` 個ほどずつにそろえて分ける
+    /// （`CHUNK / 2` より小さくなれば、続く塊（無ければ前の塊）と合わせる）。手間は、塊の数と、作り直す塊の中身の分
+    pub(crate) fn replace_sorted<K: Ord + Copy>(
+        &mut self,
+        gone: &[K],
+        added: Vec<Arc<T>>,
+        key: impl Fn(&T) -> K,
+    ) {
+        debug_assert!(gone.windows(2).all(|w| w[0] < w[1]));
+        debug_assert!(added.windows(2).all(|w| key(&w[0]) < key(&w[1])));
+        debug_assert!(self.chunks.bases.iter().all(|&b| b == 0));
+        if gone.is_empty() && added.is_empty() {
+            return;
+        }
+        let old = &self.chunks.chunks;
+        let n = old.len();
+        let mut out: Vec<Chunk<T>> = Vec::with_capacity(n + 1);
+        // 作り直す塊の中身（続けて作り直す塊はまとめる）
+        let mut run: Vec<Arc<T>> = Vec::new();
+        let mut added = added.into_iter().peekable();
+        let mut gi = 0;
+        for (i, chunk) in old.iter().enumerate() {
+            let last = i + 1 == n;
+            let upper = key(&chunk[chunk.len() - 1]);
+            // この塊にかかる消す鍵と足す要素（いちばん後ろの塊は、残りを全部受け取る）
+            let g0 = gi;
+            while gi < gone.len() && (last || gone[gi] <= upper) {
+                gi += 1;
+            }
+            let mut mine: Vec<Arc<T>> = Vec::new();
+            while let Some(a) = added.next_if(|a| last || key(a) <= upper) {
+                mine.push(a);
+            }
+            let touched = gi > g0 || !mine.is_empty();
+            if touched {
+                merge_sorted(&mut run, chunk, &gone[g0..gi], mine, &key);
+                if run.len() >= CHUNK {
+                    split_even(std::mem::take(&mut run), &mut out);
+                }
+            } else if run.is_empty() {
+                out.push(Arc::clone(chunk));
+            } else if run.len() < CHUNK / 2 {
+                // 作り直した中身が小さすぎれば、この塊と合わせる
+                run.extend(chunk.iter().cloned());
+                split_even(std::mem::take(&mut run), &mut out);
+            } else {
+                split_even(std::mem::take(&mut run), &mut out);
+                out.push(Arc::clone(chunk));
+            }
+        }
+        // 列が空だったとき（塊が無い）は、足す要素だけ
+        run.extend(added);
+        if !run.is_empty() {
+            if run.len() < CHUNK / 2 {
+                if let Some(prev) = out.pop() {
+                    let mut joined: Vec<Arc<T>> = prev.iter().cloned().collect();
+                    joined.append(&mut run);
+                    run = joined;
+                }
+            }
+            split_even(run, &mut out);
+        }
+        let all = Arc::make_mut(&mut self.chunks);
+        all.bases = vec![0; out.len()];
+        all.chunks = out;
+        Self::restart(all);
+        self.len = all.chunks.iter().map(|c| c.len()).sum();
+    }
+
     /// 各塊の先頭の番号を数え直す
     fn restart(all: &mut Chunks<T>) {
         all.starts.clear();
@@ -207,6 +295,43 @@ impl<T> ChunkedList<T> {
             all.starts.push(n);
             n += c.len();
         }
+    }
+}
+
+/// 塊 `chunk` から鍵が `gone` の要素を除き、`mine` を鍵の順に混ぜて、`run` の後ろに足す（`replace_sorted`）
+fn merge_sorted<T, K: Ord + Copy>(
+    run: &mut Vec<Arc<T>>,
+    chunk: &[Arc<T>],
+    gone: &[K],
+    mine: Vec<Arc<T>>,
+    key: &impl Fn(&T) -> K,
+) {
+    let mut gone = gone.iter().peekable();
+    let mut mine = mine.into_iter().peekable();
+    for x in chunk {
+        let k = key(x);
+        while gone.next_if(|g| **g < k).is_some() {}
+        while let Some(a) = mine.next_if(|a| key(a) < k) {
+            run.push(a);
+        }
+        if gone.next_if(|g| **g == k).is_none() {
+            run.push(Arc::clone(x));
+        }
+    }
+    run.extend(mine);
+}
+
+/// `items` を、大きさのそろった塊（`CHUNK` 個以下）に分けて `out` に足す（`replace_sorted`）
+fn split_even<T>(items: Vec<Arc<T>>, out: &mut Vec<Chunk<T>>) {
+    if items.is_empty() {
+        return;
+    }
+    let n = items.len().div_ceil(CHUNK);
+    let (base, extra) = (items.len() / n, items.len() % n);
+    let mut it = items.into_iter();
+    for p in 0..n {
+        let size = base + usize::from(p < extra);
+        out.push(Arc::new(it.by_ref().take(size).collect()));
     }
 }
 
@@ -347,21 +472,40 @@ impl<T> std::ops::IndexMut<usize> for ChunkedList<T> {
     }
 }
 
-/// 塊1つの要素をたどる
-type ChunkIterFn<'a, T> = fn(&'a Chunk<T>) -> std::slice::Iter<'a, Arc<T>>;
+/// 列を前から順にたどる（残りの数がいつも分かる：受け取る側が入れ物を1回で用意できる）
+pub(crate) struct ChunkedIter<'a, T> {
+    chunks: std::slice::Iter<'a, Chunk<T>>,
+    cur: std::slice::Iter<'a, Arc<T>>,
+    remaining: usize,
+}
 
-/// 列を前から順にたどる
-pub(crate) type ChunkedIter<'a, T> = std::iter::FlatMap<
-    std::slice::Iter<'a, Chunk<T>>,
-    std::slice::Iter<'a, Arc<T>>,
-    ChunkIterFn<'a, T>,
->;
+impl<'a, T> Iterator for ChunkedIter<'a, T> {
+    type Item = &'a Arc<T>;
+    fn next(&mut self) -> Option<&'a Arc<T>> {
+        loop {
+            if let Some(x) = self.cur.next() {
+                self.remaining -= 1;
+                return Some(x);
+            }
+            self.cur = self.chunks.next()?.iter();
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<T> ExactSizeIterator for ChunkedIter<'_, T> {}
 
 impl<'a, T> IntoIterator for &'a ChunkedList<T> {
     type Item = &'a Arc<T>;
     type IntoIter = ChunkedIter<'a, T>;
     fn into_iter(self) -> ChunkedIter<'a, T> {
-        let chunk_iter: ChunkIterFn<'a, T> = |c| c.iter();
-        self.chunks.chunks.iter().flat_map(chunk_iter)
+        ChunkedIter {
+            chunks: self.chunks.chunks.iter(),
+            cur: [].iter(),
+            remaining: self.len,
+        }
     }
 }
