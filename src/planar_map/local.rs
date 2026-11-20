@@ -423,6 +423,8 @@ pub(crate) struct CycleMemo {
     pub(crate) cycles: Vec<LocalCycle>,
     of: HashMap<(usize, bool), usize>,
     around: HashMap<usize, Vec<(usize, bool)>>,
+    /// 何も無い側の輪郭の輪（バケツは、色の無い囲まれた所も面にする：`ring_any`）
+    unpainted_rings: HashMap<usize, Ring>,
 }
 
 /// 点から右へ伸ばした半直線が横切る辺を、列の順に少しずつ引く道具（`LocalMap::ray_cols`・`next_ray_col`）
@@ -819,6 +821,140 @@ impl LocalMap<'_> {
         Some(true)
     }
 }
+
+impl LocalMap<'_> {
+    /// 輪郭 `ci` の輪（何も無い側の輪郭も。今の `regions` の `unpainted` と同じ）
+    fn ring_any<'m>(&self, ci: usize, memo: &'m mut CycleMemo) -> &'m Ring {
+        if memo.cycles[ci].ring.is_some() {
+            return memo.cycles[ci].ring.as_ref().expect("色のある輪郭");
+        }
+        if !memo.unpainted_rings.contains_key(&ci) {
+            let r = self.ring_of(&memo.cycles[ci].cycle);
+            memo.unpainted_rings.insert(ci, r);
+        }
+        &memo.unpainted_rings[&ci]
+    }
+
+    /// 点 `p2`（2倍の座標）が辺の判定の形の上にあるか（輪郭の上の点は、どの面か決まらない）。点の上を通る辺は、点を含む
+    /// マスの升目にある
+    fn on_some_edge(&self, p2: IPt) -> bool {
+        let g = (p2.0.div_euclid(2), p2.1.div_euclid(2));
+        let mut cands: Vec<usize> = Vec::new();
+        self.index
+            .index
+            .edges_in(self.index.stored, index_tile(cell_of(g)), &mut cands);
+        cands.retain(|e| !self.removed.contains(e));
+        cands.extend(self.added_edges());
+        cands.iter().any(|&e| {
+            self.poly(e)
+                .windows(2)
+                .any(|s| on_seg((2 * s[0].0, 2 * s[0].1), (2 * s[1].0, 2 * s[1].1), p2))
+        })
+    }
+
+    /// 色 `color`（何も無い色も）の、点 `probe` を含むいちばん小さい外周（何も無い側の輪郭も数える。`owner_of` と同じ
+    /// 決め方）。`None`：輪郭が閉じない
+    fn owner_any(
+        &self,
+        color: Option<Option<Color32>>,
+        probe: IPt,
+        memo: &mut CycleMemo,
+    ) -> Option<Option<usize>> {
+        let mut best: Option<(i128, usize)> = None;
+        let mut found_col: Option<i64> = None;
+        let mut rc = self.ray_cols(probe);
+        while let Some((col, edges)) = self.next_ray_col(&mut rc) {
+            if found_col.is_some_and(|fc| col > fc + 1) {
+                break;
+            }
+            for e in edges {
+                for side in [true, false] {
+                    let ci = self.cycle_of((e, side), memo)?;
+                    if color.is_some_and(|c| memo.cycles[ci].color != c) {
+                        continue;
+                    }
+                    let r = self.ring_any(ci, memo);
+                    if r.area2 > 0
+                        && r.contains(probe) == Some(true)
+                        && best.is_none_or(|b| r.area2 < b.0)
+                    {
+                        best = Some((r.area2, ci));
+                        found_col.get_or_insert(col);
+                    }
+                }
+            }
+        }
+        Some(best.map(|b| b.1))
+    }
+
+    /// バケツの面（今の `face_filled_with` の、点を含む組。何も無い側の囲まれた所も組）：点 `p2`（2倍の座標）を含む
+    /// いちばん小さい外周と、その穴（同じ色で、入れ先がその外周の輪郭）の、向きのある辺。色のある面の穴は、前の地図の面の
+    /// 表 `base_faces` で引く。何も無い所の穴は、外周の外接矩形にかかる何も無い側の輪郭から探す。点が輪郭の上にあるか、
+    /// どの外周にも入らなければ `None`。（面の色, 面の輪郭の向きのある辺）
+    pub(crate) fn face_at(
+        &self,
+        p2: IPt,
+        base_faces: BaseFaces<'_>,
+        memo: &mut CycleMemo,
+    ) -> Option<FaceAt> {
+        if self.on_some_edge(p2) {
+            return None;
+        }
+        let ext = self.owner_any(None, p2, memo)??;
+        let color = memo.cycles[ext].color;
+        let mut cycles = vec![ext];
+        match color {
+            Some(_) => {
+                let h0 = memo.cycles[ext].cycle[0];
+                let id = self.side_src(h0)?;
+                for h in base_faces(id) {
+                    let ci = self.cycle_of(h, memo)?;
+                    if !cycles.contains(&ci) {
+                        cycles.push(ci);
+                    }
+                }
+            }
+            None => {
+                let r = self.ring_any(ext, memo).rect;
+                let rect = KRect::new(
+                    r.x0 as f64 / OVERLAY_GRID,
+                    r.y0 as f64 / OVERLAY_GRID,
+                    r.x1 as f64 / OVERLAY_GRID,
+                    r.y1 as f64 / OVERLAY_GRID,
+                );
+                for e in self.edges_over(rect) {
+                    for side in [true, false] {
+                        if self.side_color((e, side)).is_some() {
+                            continue;
+                        }
+                        let ci = self.cycle_of((e, side), memo)?;
+                        if cycles.contains(&ci) || self.ring_any(ci, memo).area2 >= 0 {
+                            continue;
+                        }
+                        let hp = self.probe(&memo.cycles[ci].cycle);
+                        if self.owner_any(Some(None), hp, memo)? == Some(ext) {
+                            cycles.push(ci);
+                        }
+                    }
+                }
+            }
+        }
+        // 点が穴の中なら、その面ではない（正しい地図では、穴の中の所は、より内側の外周に入る）
+        for &h in &cycles[1..] {
+            if self.ring_any(h, memo).contains(p2) != Some(false) {
+                return None;
+            }
+        }
+        let halves = cycles
+            .iter()
+            .flat_map(|&ci| memo.cycles[ci].cycle.iter().copied())
+            .collect();
+        Some((color, halves))
+    }
+}
+
+/// バケツの面（`LocalMap::face_at`）：面の色と、面の輪郭の向きのある辺
+pub(crate) type FaceAt = (Option<Color32>, Vec<(usize, bool)>);
 
 /// 触った面（`LocalMap::touched_faces`）：色と、輪郭（控えの番号。最初が外周、残りが穴）
 pub(crate) struct LocalFace {

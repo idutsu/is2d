@@ -999,8 +999,8 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
     push_undo(tab, None);
     // 地図は文書の座標なので、点も文書の座標へ写す
     let doc_pt = tab.session.edit_path.world_xform().inverse() * pt;
-    write_map_edit(tab, target_lid, None, |base| {
-        base.with_face_filled(doc_pt, fill_color)
+    write_local(tab, target_lid, |base, scope| {
+        base.fill_local(doc_pt, fill_color, scope)
     })
 }
 

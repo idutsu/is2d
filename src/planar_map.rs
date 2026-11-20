@@ -1640,6 +1640,26 @@ fn labeled(mut map: PlanarMap, faces: &[MapFace], ids: &[ShapeId]) -> PlanarMap 
     map
 }
 
+/// テスト用：地図 `m` の辺 `edges` を、塊の辺の形にする（差分を当てる `StoredMap::with_diff_tiles` に渡して、お手本と比べる）
+#[cfg(test)]
+fn tile_edges_of(m: &PlanarMap, edges: &[usize]) -> Vec<crate::stored_map::TileEdge> {
+    edges
+        .iter()
+        .map(|&e| {
+            let ed = m.edges[e];
+            crate::stored_map::TileEdge {
+                a: m.nodes[ed.a],
+                b: m.nodes[ed.b],
+                ctrl: ed.ctrl,
+                left: ed.left,
+                right: ed.right,
+                left_src: ed.left_src,
+                right_src: ed.right_src,
+            }
+        })
+        .collect()
+}
+
 /// 道具が作る、重ね合わせに渡すもの（`LayerBase::paint_change`・`reshape_change`）：重ねるもの・その曲線・その左右の色
 /// （輪郭の変形）・決まり。1本の道（`LayerBase::edit_local`）は、これだけを受け取る
 pub(crate) struct LocalChange<'a> {
@@ -2228,6 +2248,164 @@ impl LayerBase {
         self.apply_diff(m, &removed, &added, group_path)
     }
 
+    /// 道具の側（バケツ）：点 `p`（文書の座標）を含む面（色のある面、または同じ階層の線で囲まれた何も無い所）を `color` に
+    /// する差分を作り、1本の道の差分から先（`apply_diff`）に渡す（設計 段2b の 9.）。答えは今のバケツ（`with_face_filled`
+    /// で地図全体から面を探して塗り、書き戻す道）と同じ（テストでは毎回お手本と比べる）
+    pub(crate) fn fill_local(&self, p: Point, color: Color32, group_path: &[u64]) -> LocalEdit {
+        let diff = self.fill_diff(p, color, group_path);
+        #[cfg(test)]
+        if test_checks() {
+            let ok = uncounted(|| {
+                let full = self.with_face_filled(p, color);
+                match (&diff, full) {
+                    (None, None) => true,
+                    (Some((m, removed, added)), Some(fm)) => self
+                        .stored
+                        .with_diff_tiles(removed, &tile_edges_of(m, added))
+                        .same_content(&StoredMap::from_dense(&fm, None)),
+                    _ => false,
+                }
+            });
+            assert!(
+                ok,
+                "バケツの差分が、地図全体から面を探して塗った地図（お手本）と違う"
+            );
+        }
+        match diff {
+            None => LocalEdit::Same,
+            Some((m, removed, added)) => self.apply_diff(&m, &removed, &added, group_path),
+        }
+    }
+
+    /// バケツの差分（`fill_local`）：点を含む面（`LocalMap::face_at`）の輪郭の向きのある辺の側を `color` にし、両側が同じ色に
+    /// なった辺を消して、2本だけがつながる頂点をまとめる（`with_sides_colored` と同じ）。計算は、面の輪郭の辺と、その端の頂点に
+    /// つながる辺と、消える辺のまわりの辺を並べた窓で行う。2本をまとめる所がほかの辺を調べた範囲が窓の範囲から出たら、範囲を
+    /// 広げてやり直す（重ね合わせの窓と同じ決まり）。（窓の結果, 消えた辺, 増えた辺）。変わらなければ `None`
+    fn fill_diff(
+        &self,
+        p: Point,
+        color: Color32,
+        group_path: &[u64],
+    ) -> Option<(PlanarMap, Vec<usize>, Vec<usize>)> {
+        const WINDOW_PAD: f64 = 2.0;
+        let ix = self.map_index();
+        let empty = PlanarMap::default();
+        let local = LocalMap::new(ix, &empty, &[], &[]);
+        let faces_list = self.faces(group_path);
+        let lookup = self.faces_lookup(&faces_list);
+        let g = gpt(p);
+        let mut memo = CycleMemo::default();
+        let (face_color, halves) = local.face_at((2 * g.0, 2 * g.1), &lookup, &mut memo)?;
+        if face_color == Some(color) {
+            return None;
+        }
+        let stored = &self.stored;
+        let hull = |e: usize| {
+            let q = stored.edge_at(e).quad();
+            KRect::from_points(q.p0, q.p2).union_pt(q.p1)
+        };
+        let edges_at = |p: Point| -> Vec<usize> {
+            let mut at: Vec<usize> = Vec::new();
+            ix.ends.edges_in(stored, end_key(p), &mut at);
+            at.retain(|&e| {
+                let te = stored.edge_at(e);
+                te.a == p || te.b == p
+            });
+            at
+        };
+        let side_edges: std::collections::BTreeSet<usize> = halves.iter().map(|h| h.0).collect();
+        // 消える辺（塗ったあとに両側が同じ色になる辺）と、その端につながる辺の外形
+        let mut region: Option<KRect> = None;
+        for &(e, forward) in &halves {
+            let te = stored.edge_at(e);
+            let other = if forward { te.right } else { te.left };
+            if other == Some(color) {
+                for f in std::iter::once(e)
+                    .chain(edges_at(te.a))
+                    .chain(edges_at(te.b))
+                {
+                    let h = hull(f);
+                    region = Some(region.map_or(h, |r| r.union(h)));
+                }
+            }
+        }
+        let mut region = region.map(|r| r.inflate(WINDOW_PAD, WINDOW_PAD));
+        loop {
+            let mut in_window: std::collections::BTreeSet<usize> = side_edges.clone();
+            for &e in &side_edges {
+                let te = stored.edge_at(e);
+                in_window.extend(edges_at(te.a));
+                in_window.extend(edges_at(te.b));
+            }
+            if let Some(r) = region {
+                let mut found: Vec<usize> = Vec::new();
+                for t in index_tiles_over(r) {
+                    ix.index.edges_in(stored, t, &mut found);
+                }
+                in_window.extend(
+                    found
+                        .into_iter()
+                        .filter(|&e| rects_overlap(reach_box(stored.edge_at(e).quad()), r)),
+                );
+            }
+            let wedges: Vec<usize> = in_window.into_iter().collect();
+            let (wmap, _) = tile_window(stored, &wedges);
+            let to_window: HashMap<usize, usize> =
+                wedges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
+            let mut m = wmap;
+            for &(e, forward) in &halves {
+                let w = to_window[&e];
+                if forward {
+                    m.edges[w].left = Some(color);
+                } else {
+                    m.edges[w].right = Some(color);
+                }
+            }
+            let dropped_ends: Vec<usize> = m
+                .edges
+                .iter()
+                .filter(|e| e.left == e.right)
+                .flat_map(|e| [e.a, e.b])
+                .collect();
+            m.edges.retain(|e| e.left != e.right);
+            let used = m.merge_degree2_indexed(dropped_ends, None);
+            m.compact_nodes();
+            if let Some(u) = used {
+                let u = KRect::new(
+                    u.x0 as f64 / OVERLAY_GRID,
+                    u.y0 as f64 / OVERLAY_GRID,
+                    u.x1 as f64 / OVERLAY_GRID,
+                    u.y1 as f64 / OVERLAY_GRID,
+                );
+                let inside = region
+                    .is_some_and(|r| u.x0 >= r.x0 && u.y0 >= r.y0 && u.x1 <= r.x1 && u.y1 <= r.y1);
+                if !inside {
+                    let grown = region
+                        .map_or(u, |r| r.union(u))
+                        .inflate(WINDOW_PAD, WINDOW_PAD);
+                    region = Some(grown);
+                    continue;
+                }
+            }
+            let (removed, added) = stored.window_diff_tiles(&wedges, &m);
+            return Some((m, removed, added));
+        }
+    }
+
+    /// 前の地図の面の表（`BaseFaces`）：写しの面の図形 `faces_list` から、面の輪郭の最初の辺を形で引く
+    fn faces_lookup<'f>(
+        &'f self,
+        faces_list: &'f [Arc<FillShape>],
+    ) -> impl Fn(ShapeId) -> Vec<(usize, bool)> + 'f {
+        move |id: ShapeId| match faces_list.binary_search_by_key(&id, |s| s.shape_id) {
+            Ok(i) => faces_list[i]
+                .contours()
+                .filter_map(|c| c.segments.first().and_then(|q| self.stored.find_edge(q)))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// 1本の道の、差分から先（設計 段2b の 9.）：差分（`removed`：消えた前の地図の辺、`added`：地図 `result` の増えた辺の
     /// 番号。`result` の頂点は、座標が同じなら前の地図の頂点）を前の地図に当てて確かめ（`LocalMap`）、触った面の書き戻しの
     /// 差分を決め、前のしまう形に差分を当てた新しいしまう形と、新しい面の図形の表を作る。差分の作り方（重ね合わせ・バケツ・
@@ -2699,7 +2877,9 @@ impl LayerBase {
         )
     }
 
-    /// バケツ（`PlanarMap::with_face_filled`）を、この写しの判定の形で
+    #[cfg(test)]
+    /// バケツ（`PlanarMap::with_face_filled`）を、この写しの判定の形で（地図全体から面を探す前の道。本番のバケツは 1本の道
+    /// `fill_local` で、これはテストのお手本）
     pub(crate) fn with_face_filled(&self, p: Point, color: Color32) -> Option<PlanarMap> {
         self.map()
             .face_filled_with(self.polys(), self.cycles(), p, color)

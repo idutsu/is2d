@@ -311,6 +311,7 @@ impl PlanarMap {
         self.face_filled_with(&polys, &self.face_cycles_with(&polys), p, color)
     }
 
+    #[cfg(test)]
     /// `with_face_filled` を、辺ごとの判定の形 `polys` と面の輪郭 `cycles` で（計算に使う写しが持つもの：
     /// `LayerBase::with_face_filled`）
     pub(super) fn face_filled_with(
@@ -2369,7 +2370,7 @@ fn window_cycles_match(
 /// 前の地図の辺 `edges`（計算に使う地図の番号の順）を並べた小さな地図と、辺ごとの計算に使う形。辺は塊から引き
 /// （`StoredMap::edge_at`。向きはしまう辺の向きで、計算に使う地図の辺と同じ）、頂点は座標ごとに初めて出てきた順に番号を
 /// 振る（設計 段2b の 7. の 2b-7a。写しの通し番号の一覧を使わない）
-fn tile_window(stored: &StoredMap, edges: &[usize]) -> (PlanarMap, Vec<Poly>) {
+pub(super) fn tile_window(stored: &StoredMap, edges: &[usize]) -> (PlanarMap, Vec<Poly>) {
     let mut node_of: IntMap<[u64; 2], usize> = IntMap::default();
     let mut nodes: Vec<Point> = Vec::new();
     let mut id = |p: Point, nodes: &mut Vec<Point>| -> usize {
