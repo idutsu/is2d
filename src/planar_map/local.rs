@@ -14,7 +14,7 @@ use super::*;
 /// 頂点の番号の控え：座標ごとに番号を振る
 #[derive(Default)]
 struct Nodes {
-    of: HashMap<[u64; 2], usize>,
+    of: IntMap<[u64; 2], usize>,
     at: Vec<Point>,
 }
 
@@ -37,18 +37,18 @@ pub(crate) struct LocalMap<'a> {
     /// 前の地図の辺の数
     n_base: usize,
     /// 消えた前の地図の辺
-    removed: std::collections::HashSet<usize>,
+    removed: IntSet<usize>,
     /// 増えた辺（頂点はこの地図の番号）と、その判定の形
     added: Vec<MapEdge>,
     added_polys: Vec<Poly>,
     /// 頂点ごとの、増えた辺（辺の番号の順）
-    added_at: HashMap<usize, Vec<usize>>,
+    added_at: IntMap<usize, Vec<usize>>,
     /// 升目の索引の升目ごとの、増えた辺（辺の番号の順）。前の地図の辺の升目の索引と同じ升目に、外接矩形（`reach_box`）が
     /// かかる升目で入れる。矩形にかかる辺を探す所（`edges_over`）が、増えた辺も、矩形にかかる升目の分だけ引く
-    added_tiles: HashMap<(i64, i64), Vec<usize>>,
+    added_tiles: IntMap<(i64, i64), Vec<usize>>,
     /// 升目の行ごとの、増えた辺（辺の番号の順・1つずつ。`added_tiles` を行でまとめたもの）。右へ伸ばした半直線を横切る
     /// 辺を探す所（`ray_cols`）が、半直線の通る行の分だけ引く
-    added_rows: HashMap<i64, Vec<usize>>,
+    added_rows: IntMap<i64, Vec<usize>>,
     nodes: std::cell::RefCell<Nodes>,
 }
 
@@ -66,8 +66,8 @@ impl<'a> LocalMap<'a> {
         let mut nodes = Nodes::default();
         let mut list: Vec<MapEdge> = Vec::with_capacity(added.len());
         let mut polys: Vec<Poly> = Vec::with_capacity(added.len());
-        let mut added_at: HashMap<usize, Vec<usize>> = HashMap::new();
-        let mut added_tiles: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        let mut added_at: IntMap<usize, Vec<usize>> = IntMap::default();
+        let mut added_tiles: IntMap<(i64, i64), Vec<usize>> = IntMap::default();
         for (i, &r) in added.iter().enumerate() {
             let ed = result.edges[r];
             let (a, b) = (nodes.id(result.nodes[ed.a]), nodes.id(result.nodes[ed.b]));
@@ -82,7 +82,7 @@ impl<'a> LocalMap<'a> {
                 added_tiles.entry(t).or_default().push(n_base + i);
             }
         }
-        let mut added_rows: HashMap<i64, Vec<usize>> = HashMap::new();
+        let mut added_rows: IntMap<i64, Vec<usize>> = IntMap::default();
         for (t, list) in &added_tiles {
             added_rows.entry(t.1).or_default().extend(list);
         }
@@ -235,7 +235,7 @@ impl<'a> LocalMap<'a> {
     /// 決まりは `face_cycles_with` と同じ）。ほかの輪郭は、前の地図の輪郭と同じ（通る頂点のまわりの辺の順が変わらず、
     /// 辺も同じ）。閉じない輪郭は `None`（壊れている）
     pub(crate) fn touched_cycles(&self) -> Option<Vec<Vec<(usize, bool)>>> {
-        let mut around: HashMap<usize, Vec<(usize, bool)>> = HashMap::new();
+        let mut around: IntMap<usize, Vec<(usize, bool)>> = IntMap::default();
         let mut starts: Vec<(usize, bool)> = self
             .added_edges()
             .flat_map(|e| [(e, true), (e, false)])
@@ -244,7 +244,7 @@ impl<'a> LocalMap<'a> {
             let list = around.entry(v).or_insert_with(|| self.out_sorted(v));
             starts.extend(list.iter().copied());
         }
-        let mut used: std::collections::HashSet<(usize, bool)> = Default::default();
+        let mut used: IntSet<(usize, bool)> = Default::default();
         let mut cycles = Vec::new();
         for start in starts {
             if used.contains(&start) {
@@ -317,12 +317,12 @@ impl<'a> LocalMap<'a> {
     }
 
     fn added_edges_ok_grid(&self) -> bool {
-        let base_keys: std::collections::HashSet<[u64; 6]> = self
+        let base_keys: IntSet<[u64; 6]> = self
             .removed
             .iter()
             .map(|&e| quad_key(&self.base_edge(e).quad()))
             .collect();
-        let mut fresh: std::collections::HashSet<usize> = Default::default();
+        let mut fresh: IntSet<usize> = Default::default();
         // 確かめる所：増えた辺の判定の形の外接矩形（1目広げる）にかかる升目
         let mut tiles: Vec<(i64, i64)> = Vec::new();
         for e in self.added_edges() {
@@ -366,9 +366,8 @@ impl<'a> LocalMap<'a> {
         // 増えた辺の端の頂点が、ほかの頂点と同じ格子の点に丸まらないか（前の地図の頂点どうしは別々の格子の点。座標が
         // 同じなら同じ頂点）。増えた辺の端と同じ格子の点に丸まる頂点は、その点のマスの升目にかかる辺の端なので、
         // 確かめる所の辺の端を見ればよい
-        let new_nodes: std::collections::HashSet<usize> =
-            self.added.iter().flat_map(|ed| [ed.a, ed.b]).collect();
-        let mut node_at: HashMap<IPt, usize> = HashMap::new();
+        let new_nodes: IntSet<usize> = self.added.iter().flat_map(|ed| [ed.a, ed.b]).collect();
+        let mut node_at: IntMap<IPt, usize> = IntMap::default();
         for &f in &cands {
             let fd = self.edge(f);
             for u in [fd.a, fd.b] {
@@ -420,7 +419,7 @@ impl<'a> LocalMap<'a> {
                 segs.push((e, k, rk));
             }
         }
-        let fresh_set: std::collections::HashSet<usize> = fresh_list.iter().copied().collect();
+        let fresh_set: IntSet<usize> = fresh_list.iter().copied().collect();
         for &f in cands.iter().filter(|f| !fresh_set.contains(f)) {
             let pf = self.poly(f);
             for m in 0..pf.len().saturating_sub(1) {
@@ -443,12 +442,12 @@ impl<'a> LocalMap<'a> {
     /// 考え）
     #[cfg(test)]
     fn added_edges_ok_pairs(&self) -> bool {
-        let base_keys: std::collections::HashSet<[u64; 6]> = self
+        let base_keys: IntSet<[u64; 6]> = self
             .removed
             .iter()
             .map(|&e| quad_key(&self.base_edge(e).quad()))
             .collect();
-        let mut fresh: std::collections::HashSet<usize> = Default::default();
+        let mut fresh: IntSet<usize> = Default::default();
         for e in self.added_edges() {
             let q = self.quad(e);
             let ed = self.edge(e);
@@ -588,10 +587,10 @@ pub(crate) struct LocalCycle {
 #[derive(Default)]
 pub(crate) struct CycleMemo {
     pub(crate) cycles: Vec<LocalCycle>,
-    of: HashMap<(usize, bool), usize>,
-    around: HashMap<usize, Vec<(usize, bool)>>,
+    of: IntMap<(usize, bool), usize>,
+    around: IntMap<usize, Vec<(usize, bool)>>,
     /// 何も無い側の輪郭の輪（バケツは、色の無い囲まれた所も面にする：`ring_any`）
-    unpainted_rings: HashMap<usize, Ring>,
+    unpainted_rings: IntMap<usize, Ring>,
 }
 
 /// 点から右へ伸ばした半直線が横切る辺を、列の順に少しずつ引く道具（`LocalMap::ray_cols`・`next_ray_col`）
@@ -808,7 +807,7 @@ impl LocalMap<'_> {
         &self,
         h: (usize, bool),
         faces: &[LocalFace],
-        in_touched: &std::collections::HashSet<usize>,
+        in_touched: &IntSet<usize>,
         memo: &mut CycleMemo,
     ) -> Option<bool> {
         let q = self.probe(&[h]);
@@ -970,7 +969,7 @@ impl LocalMap<'_> {
         }
         let faces = self.touched_faces(touched, base_faces, memo)?;
         // 触った面に入る輪郭と、触った輪郭（そのままの面でない輪郭）
-        let in_touched: std::collections::HashSet<usize> = faces
+        let in_touched: IntSet<usize> = faces
             .iter()
             .flat_map(|f| f.cycles.iter().copied())
             .chain(touched_ids.iter().copied())
@@ -1228,8 +1227,8 @@ impl LocalMap<'_> {
         holes.sort_unstable();
         holes.dedup();
         // 穴の入れ先
-        let mut placed: HashMap<usize, Vec<usize>> = HashMap::new();
-        let mut placed_holes: std::collections::HashSet<usize> = Default::default();
+        let mut placed: IntMap<usize, Vec<usize>> = IntMap::default();
+        let mut placed_holes: IntSet<usize> = Default::default();
         for h in holes {
             let (color, p) = (memo.cycles[h].color, self.probe(&memo.cycles[h].cycle));
             let owner = self.owner_of(color, p, memo)??;
@@ -1295,7 +1294,7 @@ impl LocalMap<'_> {
         ids: &[ShapeId],
         memo: &CycleMemo,
     ) -> (Vec<usize>, Vec<crate::stored_map::TileEdge>) {
-        let mut sides: HashMap<usize, (Option<ShapeId>, Option<ShapeId>)> = HashMap::new();
+        let mut sides: IntMap<usize, (Option<ShapeId>, Option<ShapeId>)> = IntMap::default();
         for e in self.added_edges() {
             sides.insert(e, (None, None));
         }
@@ -1410,12 +1409,12 @@ impl LocalMap<'_> {
         // 触っていない面が残す元の図形：前の地図の面で、形が変わりえないもの
         let kept_untouched = |id: ShapeId| !old_faces.contains(&id) && orig_color(id).is_some();
         // 形が前の地図にある辺（増えた辺は、消えた辺と形が同じときだけ）
-        let removed_keys: HashMap<[u64; 6], usize> = self
+        let removed_keys: IntMap<[u64; 6], usize> = self
             .removed
             .iter()
             .map(|&e| (quad_key(&self.base_edge(e).quad()), e))
             .collect();
-        let added_keys: std::collections::HashSet<[u64; 6]> = self
+        let added_keys: IntSet<[u64; 6]> = self
             .added_edges()
             .map(|e| quad_key(&self.quad(e)))
             .collect();
@@ -1437,7 +1436,7 @@ impl LocalMap<'_> {
             }
         };
         // 辺が消えた元の図形
-        let mut cut: std::collections::HashSet<ShapeId> = Default::default();
+        let mut cut: IntSet<ShapeId> = Default::default();
         for (k, &e) in &removed_keys {
             if !added_keys.contains(k) {
                 let ed = self.base_edge(e);
@@ -1452,7 +1451,7 @@ impl LocalMap<'_> {
                 .collect()
         };
         let mut ids: Vec<ShapeId> = vec![0; faces.len()];
-        let mut kept: std::collections::HashSet<ShapeId> = Default::default();
+        let mut kept: IntSet<ShapeId> = Default::default();
         let mut changed: Vec<usize> = Vec::new();
         for (i, f) in faces.iter().enumerate() {
             // 残す面の決まり（`kept_src`）。触っていない面が残す元の図形は、触った面は残さない
@@ -1472,7 +1471,7 @@ impl LocalMap<'_> {
         let is_kept = |s: ShapeId| kept.contains(&s) || kept_untouched(s);
         // 引き継ぐ元の図形
         let face_key = |f: &LocalFace| hs_key(&halves(f), self);
-        let mut heir: HashMap<ShapeId, (usize, usize)> = HashMap::new();
+        let mut heir: IntMap<ShapeId, (usize, usize)> = IntMap::default();
         let mut choice: Vec<Option<ShapeId>> = vec![None; faces.len()];
         for &i in &changed {
             let mut votes: Vec<(ShapeId, usize)> = Vec::new();

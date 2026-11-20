@@ -182,11 +182,11 @@ pub(crate) fn window_diff(
     window: &[usize],
     result: &PlanarMap,
 ) -> (Vec<usize>, Vec<usize>) {
-    let olds: std::collections::HashSet<StoredEdge> = window
+    let olds: crate::planar_map::IntSet<StoredEdge> = window
         .iter()
         .map(|&e| StoredEdge::of(base, &base.edges[e]))
         .collect();
-    let news: std::collections::HashSet<StoredEdge> = result
+    let news: crate::planar_map::IntSet<StoredEdge> = result
         .edges
         .iter()
         .map(|ed| StoredEdge::of(result, ed))
@@ -680,9 +680,9 @@ impl StoredMap {
         window: &[usize],
         result: &PlanarMap,
     ) -> (Vec<usize>, Vec<usize>) {
-        let olds: std::collections::HashSet<StoredEdge> =
+        let olds: crate::planar_map::IntSet<StoredEdge> =
             window.iter().map(|&e| *self.stored_edge(e)).collect();
-        let news: std::collections::HashSet<StoredEdge> = result
+        let news: crate::planar_map::IntSet<StoredEdge> = result
             .edges
             .iter()
             .map(|ed| StoredEdge::of(result, ed))
@@ -752,8 +752,8 @@ impl StoredMap {
             match (ka, kb) {
                 (Some(x), Some(y)) if x == y => {
                     if !Arc::ptr_eq(&a[i], &b[j]) {
-                        let olds: std::collections::HashSet<&StoredEdge> = a[i].iter().collect();
-                        let news: std::collections::HashSet<&StoredEdge> = b[j].iter().collect();
+                        let olds: crate::planar_map::IntSet<&StoredEdge> = a[i].iter().collect();
+                        let news: crate::planar_map::IntSet<&StoredEdge> = b[j].iter().collect();
                         for (k, se) in a[i].iter().enumerate() {
                             if !news.contains(se) {
                                 removed.push(starts[i] as usize + k);
@@ -1036,7 +1036,7 @@ impl StoredMap {
     /// テスト用：`other` と共有している塊（同じ `Arc`）の数
     #[cfg(test)]
     pub(crate) fn shared_tiles(&self, other: &Self) -> usize {
-        let theirs: std::collections::HashSet<usize> = other
+        let theirs: crate::planar_map::IntSet<usize> = other
             .0
             .tiles
             .iter()
@@ -1138,7 +1138,7 @@ impl TileIndex {
             };
         }
         // 消える辺の住む塊の升目（新しい塊の升目と同じことがある：作り直した塊。どちらにしても、前の指し方は消す）
-        let gone_homes: std::collections::HashSet<(i32, i32)> =
+        let gone_homes: crate::planar_map::IntSet<(i32, i32)> =
             gone.iter().map(|&i| pt[i][0].tile()).collect();
         // 作り直す升目と、足す辺
         let mut touched: Vec<(i64, i64)> = Vec::new();

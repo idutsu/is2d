@@ -945,7 +945,7 @@ impl PlanarMap {
                 MapInput::Sweep(_) => MapInput::Sweep(&wmoved),
                 other => other,
             };
-            let fed_set: std::collections::HashSet<usize> = fed_dense.iter().copied().collect();
+            let fed_set: IntSet<usize> = fed_dense.iter().copied().collect();
             let mut wset = FedEdges {
                 fed: wedges
                     .iter()
@@ -1081,7 +1081,7 @@ impl PlanarMap {
         };
         let inside =
             |p: Point| p.x >= area.x0 && p.x <= area.x1 && p.y >= area.y0 && p.y <= area.y1;
-        let mut by_key: std::collections::HashMap<[u64; 6], usize> = Default::default();
+        let mut by_key: IntMap<[u64; 6], usize> = Default::default();
         for f in 0..other.edges.len() {
             by_key.insert(super::edge_key(other, f), f);
         }
@@ -2849,11 +2849,11 @@ pub(super) struct NearEdges<'a> {
     local: CellGrid,
     local_adj: IntMap<usize, Vec<usize>>,
     /// 索引から読んだ升目と、読んだ辺、マスごとの読んだ辺（辺の番号の順）
-    loaded_tiles: std::collections::HashSet<(i64, i64)>,
-    loaded_edges: std::collections::HashSet<usize>,
+    loaded_tiles: IntSet<(i64, i64)>,
+    loaded_edges: IntSet<usize>,
     cell_edges: IntMap<(i64, i64), Vec<usize>>,
     /// 探すときに同じ辺を2度返さないための印
-    seen: std::collections::HashSet<usize>,
+    seen: IntSet<usize>,
     buf: Vec<usize>,
 }
 

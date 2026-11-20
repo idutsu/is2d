@@ -122,6 +122,9 @@ impl std::hash::Hasher for IntHasher {
 /// 整数を鍵にする表（`IntHasher`）
 pub(crate) type IntMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IntHasher>>;
 
+/// 整数を鍵にする集まり（`IntHasher`）
+pub(crate) type IntSet<K> = HashSet<K, std::hash::BuildHasherDefault<IntHasher>>;
+
 /// 辺の鍵（`edge_key`）から、その地図の辺の番号へ
 pub(crate) type EdgeKeys = IntMap<[u64; 6], usize>;
 
@@ -2546,7 +2549,7 @@ impl LayerBase {
     pub(crate) fn replace_local(&self, next: &StoredMap, group_path: &[u64]) -> LocalEdit {
         let (removed, added) = self.stored.diff_tiles(next);
         let mut m = PlanarMap::default();
-        let mut at: HashMap<[u64; 2], usize> = HashMap::new();
+        let mut at: IntMap<[u64; 2], usize> = IntMap::default();
         let mut node = |p: Point, m: &mut PlanarMap| -> usize {
             *at.entry([p.x.to_bits(), p.y.to_bits()]).or_insert_with(|| {
                 m.nodes.push(p);
@@ -2663,7 +2666,7 @@ impl LayerBase {
             }
             let wedges: Vec<usize> = in_window.into_iter().collect();
             let (wmap, _) = tile_window(ix, &wedges);
-            let to_window: HashMap<usize, usize> =
+            let to_window: IntMap<usize, usize> =
                 wedges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
             let mut m = wmap;
             for &(e, forward) in &halves {
