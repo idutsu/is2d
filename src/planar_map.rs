@@ -160,6 +160,7 @@ impl PlanarMap {
             .flatten()
     }
 
+    #[cfg(test)]
     /// 辺の側に記した図形の番号を、`f` が返す番号に付け替える（`None` を返す番号はそのまま。計算に使う地図の番号の
     /// 付け替えはこれ1つ。しまった地図は、計算に使う地図を作らずに塊の辺を直接替える：`StoredMap::relabeled`）
     pub(crate) fn relabel(&mut self, mut f: impl FnMut(ShapeId) -> Option<ShapeId>) {
@@ -4277,6 +4278,7 @@ impl CheckedMap {
     }
 
     /// 辺の側に記した図形の番号を、`f` が返す番号に付け替える（`PlanarMap::relabel`。面の番号も）
+    #[cfg(test)]
     fn relabel(&mut self, mut f: impl FnMut(ShapeId) -> Option<ShapeId>) {
         self.map.relabel(&mut f);
         for face in &mut self.faces {
@@ -4304,11 +4306,11 @@ pub(crate) fn region_map(part: &PlanarMap, rect: Option<&FillShape>) -> Option<P
     Some(m)
 }
 
-/// 浮いた片を切り出す：セル画の地図 `cel`（文書の図形 `own` の地図）の、中身 `content`
-/// （`cel` の地図そのものか、前に切り出した残り）を、選ぶ所 `region` で1回切る（`LayerBase::cut_local`）。（残りの書く
-/// もの, 中の差分）：残りは、中身に対する1本の道の答え（消した図形・入れた図形は中身の面に対するもの。セル画に対する
-/// 隠す図形・残りの図形にするのは使う側：`Origin::of_local`）。中の差分の地図が片の地図中の差分の地図が片の地図（丸ごと中にあるセル画の
-/// 面は、その番号のまま）。片の新しい形は、残りの形と同じ元の図形を引き継ぐことがあるので、番号を新しく振る（地図の
+/// 浮いた片を切り出す：セル画の地図 `cel` の、中身 `content`（`cel` の地図そのものか、前に切り出した残り）を、選ぶ所
+/// `region` で1回切る（`LayerBase::cut_local`）。（残りの書くもの, 片の地図）：残りは、中身に対する1本の道の答え（消した
+/// 図形・入れた図形は中身の面に対するもの。セル画に対する隠す図形・残りの図形にするのは使う側：`Origin::of_local`）。
+/// 片は小さいので片だけで確かめ、丸ごと中にあるセル画の面はその番号のまま、ほかの面には新しい番号を振る
+/// （`LayerBase::piece_ids`。片の新しい形は、残りの形と同じ元の図形を引き継ぐことがあるので、番号を新しくする。地図の
 /// 印も）。残りの形は、セル画の地図の書き換えと同じく、元の図形の番号を引き継ぐ（隠す元の図形と入れ替わる。残りの地図の
 /// 印が変わらないので、残りの地図は、切り口から離れた所の塊をセル画の地図と共有する）。中と外は1回の重ね合わせで
 /// 同じ区間・同じ頂点から作る（`overlay_rules`）ので、切り口の頂点は両側で同じ。切り口の区間を曲線に戻すかどうかは
@@ -4316,20 +4318,87 @@ pub(crate) fn region_map(part: &PlanarMap, rect: Option<&FillShape>) -> Option<P
 /// `FLAT_TOL` の中で同じ線。重ね直すと同じ線として1本になる：`same_curve`）。`None`：格子に置けない座標がある
 pub(crate) fn cut_out(
     cel: &LayerBase,
-    own: &[&FillShape],
     content: &LayerBase,
     region: MapInput<'_>,
-    layer_id: LayerId,
     group_path: &[u64],
-) -> Option<(LocalEdit, MapChange)> {
+) -> Option<(LocalEdit, CheckedMap)> {
     let (inside, rest) = content.cut_local(region, group_path)?;
     if matches!(rest, LocalEdit::Refused(_)) {
         return None;
     }
-    let inside = inside.written(cel)?;
-    let mut inside_change = cel.diff(inside, own, layer_id, group_path);
-    inside_change.renew_ids();
-    Some((rest, inside_change))
+    // 片は小さいので、片だけで確かめる。番号は、セル画の面と丸ごと同じ面はその番号のまま、ほかは新しい番号
+    #[cfg(test)]
+    let inside_orig = inside.clone();
+    let piece = inside.checked()?;
+    let ids = cel.piece_ids(&piece, group_path);
+    let piece = piece.with_ids(&ids);
+    // お手本：前の道（セル画の地図に対して確かめ、書き戻して番号を新しくする）と、同じ地図で、セル画の番号のまま残る面が
+    // 同じ
+    #[cfg(test)]
+    if test_checks() {
+        let ok = uncounted(|| {
+            let Some(full) = inside_orig.written(cel) else {
+                return false;
+            };
+            let own_faces = cel.faces(group_path);
+            let own: Vec<&FillShape> = own_faces.iter().map(|s| &**s).collect();
+            let mut change = cel.diff(full, &own, 0, group_path);
+            change.renew_ids();
+            let cel_ids: HashSet<ShapeId> = own.iter().map(|s| s.shape_id).collect();
+            let kept = |ids: &[ShapeId]| -> std::collections::BTreeSet<ShapeId> {
+                ids.iter()
+                    .copied()
+                    .filter(|id| cel_ids.contains(id))
+                    .collect()
+            };
+            kept(&change.ids) == kept(&ids) && change.ids.len() == ids.len()
+        });
+        assert!(
+            ok,
+            "片だけで決めた番号が、セル画の地図に対して決めた番号（お手本）と違う"
+        );
+    }
+    Some((rest, piece))
+}
+
+impl LayerBase {
+    /// 切り出した片（確かめた地図 `piece`）の面ごとの番号（`rewrite_shapes` の、残す面の決まりと同じ）：この写しの面
+    /// （階層 `group_path`）と丸ごと同じ面（面の辺がみなこの地図にあり、辺の側の番号が1つでその面の番号、色も同じで、
+    /// その面の輪郭の辺がみな片にある）はその番号（同じ番号は1つの面だけ）。ほかは新しい番号。手間は片の大きさと、
+    /// 番号を引いた面の大きさの分
+    fn piece_ids(&self, piece: &CheckedMap, group_path: &[u64]) -> Vec<ShapeId> {
+        let faces_list = self.faces(group_path);
+        let m = &piece.map;
+        let keys: HashSet<[u64; 6]> = (0..m.edges.len()).map(|e| edge_key(m, e)).collect();
+        let mut kept: HashSet<ShapeId> = HashSet::new();
+        piece
+            .faces
+            .iter()
+            .map(|f| {
+                let src = f.srcs.first().copied();
+                let keep = f.srcs.len() == 1
+                    && src.is_some_and(|src| {
+                        let Ok(i) = faces_list.binary_search_by_key(&src, |s| s.shape_id) else {
+                            return false;
+                        };
+                        let shape = &faces_list[i];
+                        shape.color == f.color
+                            && f.cycles.iter().flatten().all(|&h| {
+                                m.side_src(h) == Some(src)
+                                    && self.stored.find_edge(&m.quad(h.0)).is_some()
+                            })
+                            && shape
+                                .contours()
+                                .flat_map(|c| c.segments.iter())
+                                .all(|q| keys.contains(&local::quad_key(q)))
+                    });
+                match src {
+                    Some(src) if keep && kept.insert(src) => src,
+                    _ => crate::vector_engine::next_shape_id(),
+                }
+            })
+            .collect()
+    }
 }
 
 /// テスト用（お手本）：`cut_out` を、地図全体で行う前の道（残りもセル画の地図に対して確かめ、書き戻す）
@@ -4353,6 +4422,7 @@ pub(crate) fn cut_out_full(
 }
 
 impl MapChange {
+    #[cfg(test)]
     /// 新しく入れる形に新しい番号を振る（地図の、その面の辺の側の印も付け替える）。元の図形の番号を引き継いだ形も新しくする
     pub(crate) fn renew_ids(&mut self) {
         let mut renamed: HashMap<ShapeId, ShapeId> = HashMap::new();

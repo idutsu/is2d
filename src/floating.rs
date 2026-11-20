@@ -765,7 +765,7 @@ fn cut_layer(
                     MapInput::Map(&region_owned)
                 }
             };
-            let (rest, inside) = cut_out(&cel, &own, &content_base, region, layer_id, stage.scope)?;
+            let (rest, inside) = cut_out(&cel, &content_base, region, stage.scope)?;
             let origin = match rest {
                 LocalEdit::Changed(w) => {
                     Origin::of_local(w, &content_base, stage.scope, cur.origin.as_ref())
@@ -796,7 +796,7 @@ fn cut_layer(
                 });
                 assert!(ok, "矩形で切った残りが、前の道で切った残り（お手本）と違う");
             }
-            (origin, inside.map)
+            (origin, inside)
         }
     };
     let mut groups = cur.groups.clone();
