@@ -712,12 +712,27 @@ impl PlanarMap {
                                 let prev = LayerBase::new(self);
                                 let table = prev.faces_table();
                                 let lookup = |id: ShapeId| table.get(&id).cloned().unwrap_or_default();
+                                let mut memo = CycleMemo::default();
                                 let local_ok = edges_ok
-                                    && touched_ok.is_some_and(|t| {
-                                        local.regions_ok(&t, &lookup, &mut CycleMemo::default())
-                                            == Some(true)
+                                    && touched_ok.as_ref().is_some_and(|t| {
+                                        local.regions_ok(t, &lookup, &mut memo) == Some(true)
                                     });
-                                (ix.stored.with_diff(self, &removed, &m, &added), (edges_ok, cycles_ok, local_ok), touched.map(|t| {
+                                // 触った面（設計 段2b の 6. の 5.）：番号によらない形にして、前の地図に無いものの集まり
+                                let local_faces = local_ok.then(|| {
+                                    let faces = local
+                                        .touched_faces(touched_ok.as_ref().expect("閉じた"), &lookup, &mut memo)
+                                        .expect("正しい地図なら面が作れる");
+                                    let base_keys: std::collections::HashSet<FaceShape> =
+                                        faces_shape_keys(self).into_iter().collect();
+                                    let mut keys: Vec<FaceShape> = faces
+                                        .iter()
+                                        .map(|f| local.face_shape_key(f, &memo))
+                                        .filter(|k| !base_keys.contains(k))
+                                        .collect();
+                                    keys.sort();
+                                    (keys, base_keys)
+                                });
+                                (ix.stored.with_diff(self, &removed, &m, &added), (edges_ok, cycles_ok, local_ok, local_faces), touched.map(|t| {
                                     let mut shapes: Vec<_> = t
                                         .iter()
                                         .map(|c| cycle_shape(c.iter().map(|&h| local.half_key(h))))
@@ -729,7 +744,23 @@ impl PlanarMap {
                         });
                         let joined = self.with_window_result(m, &wnodes, &to_window, copy);
                         #[cfg(test)]
-                        if let Some((d, (edges_ok, cycles_ok, local_ok), touched)) = diffed {
+                        if let Some((d, (edges_ok, cycles_ok, local_ok, local_faces), touched)) = diffed {
+                            // お手本：触った面のうち前の地図に無いものの集まりが、新しい地図全体の面のうち前の地図に
+                            // 無いものの集まりと同じ
+                            if let Some((keys, base_keys)) = local_faces {
+                                let full: Vec<FaceShape> = super::uncounted(|| {
+                                    faces_shape_keys(&joined)
+                                        .into_iter()
+                                        .filter(|k| !base_keys.contains(k))
+                                        .collect()
+                                });
+                                assert!(
+                                    keys == full,
+                                    "触った所だけで作った面が、新しい地図全体の面（お手本）と違う：触った所 {} 面、全体 {} 面",
+                                    keys.len(),
+                                    full.len()
+                                );
+                            }
                             // お手本：確かめ全体の答えが、新しい地図全体を確かめた答え（`written` と同じ判定）と同じ
                             let full_ok =
                                 super::uncounted(|| LayerBase::new(self).written_ok(&joined));

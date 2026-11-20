@@ -688,6 +688,156 @@ impl LocalMap<'_> {
     }
 }
 
+/// 触った面（`LocalMap::touched_faces`）：色と、輪郭（控えの番号。最初が外周、残りが穴）
+pub(crate) struct LocalFace {
+    pub(crate) color: Color32,
+    pub(crate) cycles: Vec<usize>,
+}
+
+impl LocalMap<'_> {
+    /// 触った輪郭（`touched_cycles_ok`）にかかわる、形の変わりうる面（設計 段2b の 6. の 5.）：
+    /// - 触った外周の面
+    /// - 入れ先が決まり直る穴（触った穴・入れ先の外周が触られた前の地図の穴・触った外周の中に入った前の地図の穴）の
+    ///   入れ先の面
+    /// - 前の地図の面で、外周がそのままで穴が触られたもの
+    ///
+    /// 面の穴は、決まり直った穴と、外周がそのままの面なら前の地図の面の表 `base_faces` の、そのままの穴。正しい地図
+    /// （`regions_ok` が正しいと答えたもの）にだけ使う。`None`：輪郭が閉じないか、穴の入れ先が無い
+    pub(crate) fn touched_faces(
+        &self,
+        touched: &[Vec<(usize, bool)>],
+        base_faces: BaseFaces<'_>,
+        memo: &mut CycleMemo,
+    ) -> Option<Vec<LocalFace>> {
+        let mut touched_ids: Vec<usize> = Vec::new();
+        for c in touched {
+            touched_ids.push(self.cycle_of(c[0], memo)?);
+        }
+        let painted = |ci: usize, memo: &CycleMemo| memo.cycles[ci].ring.as_ref().map(|r| r.area2);
+        // 面に入る外周（触った外周と、穴が変わる外周）
+        let mut exteriors: std::collections::BTreeSet<usize> = touched_ids
+            .iter()
+            .copied()
+            .filter(|&ci| painted(ci, memo).is_some_and(|a| a > 0))
+            .collect();
+        // 入れ先を決め直す穴
+        let mut holes: Vec<usize> = touched_ids
+            .iter()
+            .copied()
+            .filter(|&ci| painted(ci, memo).is_some_and(|a| a < 0))
+            .collect();
+        // 触った前の地図の面：外周がそのままなら穴が変わる面。そのままの穴は入れ先を決め直す
+        let mut old_faces: Vec<ShapeId> = Vec::new();
+        for &e in &self.removed {
+            let ed = self.base.edges[e];
+            old_faces.extend(ed.left_src);
+            old_faces.extend(ed.right_src);
+        }
+        for v in self.dirty_nodes() {
+            if v < self.base.nodes.len() {
+                for e in self.base.edges_at_in(v, Some(self.index)) {
+                    let ed = self.base.edges[e];
+                    old_faces.extend(ed.left_src);
+                    old_faces.extend(ed.right_src);
+                }
+            }
+        }
+        old_faces.sort_unstable();
+        old_faces.dedup();
+        for id in old_faces {
+            for h in base_faces(id) {
+                if self.removed.contains(&h.0) {
+                    continue;
+                }
+                let ci = self.cycle_of(h, memo)?;
+                if touched_ids.contains(&ci) {
+                    continue;
+                }
+                match painted(ci, memo) {
+                    Some(a) if a > 0 => {
+                        exteriors.insert(ci);
+                    }
+                    Some(_) => holes.push(ci),
+                    None => {}
+                }
+            }
+        }
+        // 触った外周の中に入った前の地図の穴（今の `regions_since` は、新しく作った同じ色の外周の外接矩形が調べる点を含む
+        // 穴の入れ先を決め直す）
+        let new_exteriors: Vec<usize> = touched_ids
+            .iter()
+            .copied()
+            .filter(|&ci| painted(ci, memo).is_some_and(|a| a > 0))
+            .collect();
+        for ext in new_exteriors {
+            let (color, r) = {
+                let c = &memo.cycles[ext];
+                (c.color, c.ring.as_ref().expect("色のある輪郭").rect)
+            };
+            let rect = KRect::new(
+                r.x0 as f64 / OVERLAY_GRID,
+                r.y0 as f64 / OVERLAY_GRID,
+                r.x1 as f64 / OVERLAY_GRID,
+                r.y1 as f64 / OVERLAY_GRID,
+            );
+            for e in self.edges_over(rect) {
+                for side in [true, false] {
+                    if self.side_color((e, side)) != color {
+                        continue;
+                    }
+                    let ci = self.cycle_of((e, side), memo)?;
+                    if touched_ids.contains(&ci) || painted(ci, memo).is_none_or(|a| a >= 0) {
+                        continue;
+                    }
+                    if r.contains2(self.probe(&memo.cycles[ci].cycle)) {
+                        holes.push(ci);
+                    }
+                }
+            }
+        }
+        holes.sort_unstable();
+        holes.dedup();
+        // 穴の入れ先
+        let mut placed: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut placed_holes: std::collections::HashSet<usize> = Default::default();
+        for h in holes {
+            let (color, p) = (memo.cycles[h].color, self.probe(&memo.cycles[h].cycle));
+            let owner = self.owner_of(color, p, memo)??;
+            exteriors.insert(owner);
+            placed.entry(owner).or_default().push(h);
+            placed_holes.insert(h);
+        }
+        // 面にする：外周がそのままの面は、前の地図の面の表のそのままの穴（入れ先を決め直した穴は除く）も入れる
+        let mut faces = Vec::new();
+        for ext in exteriors {
+            let mut cycles = vec![ext];
+            cycles.extend(placed.get(&ext).into_iter().flatten().copied());
+            if !touched_ids.contains(&ext) {
+                let h0 = memo.cycles[ext].cycle[0];
+                let id = if h0.1 {
+                    self.edge(h0.0).left_src
+                } else {
+                    self.edge(h0.0).right_src
+                };
+                if let Some(id) = id {
+                    for h in base_faces(id) {
+                        if self.removed.contains(&h.0) {
+                            continue;
+                        }
+                        let ci = self.cycle_of(h, memo)?;
+                        if ci != ext && !placed_holes.contains(&ci) && !touched_ids.contains(&ci) {
+                            cycles.push(ci);
+                        }
+                    }
+                }
+            }
+            let color = memo.cycles[ext].color.expect("色のある外周");
+            faces.push(LocalFace { color, cycles });
+        }
+        Some(faces)
+    }
+}
+
 /// 曲線の形の鍵（`edge_key` と同じ：両端を決まった順にし、制御点と合わせたビット）
 pub(super) fn quad_key(q: &QuadBez) -> [u64; 6] {
     let (p0, p2) = if point_order(q.p0, q.p2).is_le() {
@@ -703,6 +853,46 @@ pub(super) fn quad_key(q: &QuadBez) -> [u64; 6] {
         p2.x.to_bits(),
         p2.y.to_bits(),
     ]
+}
+
+/// 面の、番号によらない形（色と、輪郭の形の並び。並べたもの）。お手本と比べるため
+pub(crate) type FaceShape = ([u8; 4], Vec<Vec<([u64; 6], bool)>>);
+
+impl LocalMap<'_> {
+    /// 触った面の、番号によらない形
+    pub(crate) fn face_shape_key(&self, f: &LocalFace, memo: &CycleMemo) -> FaceShape {
+        let mut cycles: Vec<_> = f
+            .cycles
+            .iter()
+            .map(|&ci| cycle_shape(memo.cycles[ci].cycle.iter().map(|&h| self.half_key(h))))
+            .collect();
+        cycles.sort();
+        (f.color.to_array(), cycles)
+    }
+}
+
+/// 地図 `m` の全部の面の、番号によらない形（`faces` の面。並べたもの）
+pub(crate) fn faces_shape_keys(m: &PlanarMap) -> Vec<FaceShape> {
+    let (faces, _) = m.faces();
+    let mut out: Vec<FaceShape> = faces
+        .iter()
+        .map(|f| {
+            let mut cycles: Vec<_> = f
+                .cycles
+                .iter()
+                .map(|c| {
+                    cycle_shape(c.iter().map(|&(e, forward)| {
+                        let q = m.quad(e);
+                        (quad_key(&q), forward == point_order(q.p0, q.p2).is_le())
+                    }))
+                })
+                .collect();
+            cycles.sort();
+            (f.color.to_array(), cycles)
+        })
+        .collect();
+    out.sort();
+    out
 }
 
 /// 輪郭を、番号によらない形にしたもの（向きのある辺の鍵の並び。いちばん小さい鍵から始める）。お手本と比べるため
