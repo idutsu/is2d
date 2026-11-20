@@ -35091,6 +35091,346 @@ fn undo_and_redo_do_not_rebuild_whole_maps() {
     );
 }
 
+/// ランダムな操作の長いテストの、1回ごとの確かめ：どのレイヤー・キーフレームのセル画の地図も正しく（保存して開いても
+/// 読める）、面の表の図形の輪郭の辺がみなしまう形にあってその面の側にその面の番号が記してあり、面の表が地図全体から
+/// 作った面の表と同じ（番号・色・輪郭がビットまで）
+fn check_maps_after_step(app: &Is2dApp, tag: &str) {
+    use crate::planar_map::LayerBase;
+    let key = |s: &FillShape| {
+        let bits: Vec<u64> = s
+            .contours()
+            .flat_map(|c| c.segments.iter())
+            .flat_map(|q| [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y].map(f64::to_bits))
+            .collect();
+        (s.shape_id, s.color.to_array(), bits)
+    };
+    for layer in &app.tab().active_timeline().layers {
+        for kf in &layer.keyframes {
+            let cel = &kf.cel;
+            assert_eq!(cel.maps_problem(), None, "{tag}: 地図が正しくない");
+            for m in cel.maps.iter() {
+                let base = m.base();
+                let faces = base.faces(&m.group_path);
+                for f in faces.iter() {
+                    for q in f.contours().flat_map(|c| c.segments.iter()) {
+                        let (e, fwd) = base.stored.find_edge(q).unwrap_or_else(|| {
+                            panic!("{tag}: 面 {} の輪郭の辺が地図に無い", f.shape_id)
+                        });
+                        let te = base.stored.edge_at(e);
+                        let side = if fwd { te.left_src } else { te.right_src };
+                        assert_eq!(side, Some(f.shape_id), "{tag}: 面の表と辺の番号が食い違う");
+                    }
+                }
+                let fresh = LayerBase::new(&m.stored().to_dense());
+                let a: Vec<_> = faces.iter().map(|s| key(s)).collect();
+                let b: Vec<_> = fresh.faces(&m.group_path).iter().map(|s| key(s)).collect();
+                assert!(
+                    a == b,
+                    "{tag}: 面の表が、地図全体から作った面の表と違う（階層 {:?}）",
+                    m.group_path
+                );
+            }
+        }
+    }
+}
+
+/// 画面の図形の一覧（差し替えで作り直してきたもの）が、全部作り直した一覧と同じか（番号・レイヤー・色・輪郭）
+fn check_scene_matches_full_rebuild(app: &mut Is2dApp, tag: &str) {
+    let snap = |app: &Is2dApp| -> Vec<(u64, u64, [u8; 4], Vec<u64>)> {
+        app.scene()
+            .iter()
+            .map(|s| {
+                let bits: Vec<u64> = s
+                    .contours()
+                    .flat_map(|c| c.segments.iter())
+                    .flat_map(|q| {
+                        [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y].map(f64::to_bits)
+                    })
+                    .collect();
+                (s.shape_id, s.layer_id, s.color.to_array(), bits)
+            })
+            .collect()
+    };
+    let before = snap(app);
+    let lids: Vec<u64> = app
+        .tab()
+        .active_timeline()
+        .layers
+        .iter()
+        .map(|l| l.id)
+        .collect();
+    for lid in lids {
+        app.tab_mut().session.base_cache.invalidate_layer(lid);
+    }
+    app.tab_mut().refresh_scene_base();
+    assert!(
+        before == snap(app),
+        "{tag}: 画面の図形の一覧が、全部作り直した一覧と違う"
+    );
+}
+
+/// ランダムな操作を `steps` 回続け、1回ごとに地図の決まり（`check_maps_after_step`）を、10回に1回画面の図形の一覧
+/// （`check_scene_matches_full_rebuild`）を確かめる。操作の答えは、テストのときは毎回お手本（前の道）と比べられている。
+/// 途中で止まったら、それまでの操作の並び（終わりの 30 個）を出す
+fn random_operation_marathon(seed: u64, steps: usize) {
+    use crate::doc_actions::{apply, Action};
+    let mut app = map_overlay::dense_scene_app(seed);
+    app.tab_mut().refresh_scene_base();
+    let mut rng = map_overlay::Rng(seed ^ 0x5eed);
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    let mut log: Vec<String> = Vec::new();
+    // 操作の種類ごとの（試した数, 効いた数）
+    let mut tally: std::collections::BTreeMap<&'static str, (usize, usize)> = Default::default();
+    for step in 0..steps {
+        let pt = |rng: &mut map_overlay::Rng| {
+            Point::new(-390.0 + rng.f() * 780.0, -215.0 + rng.f() * 430.0)
+        };
+        // 今の画面の図形の、輪郭の上の点（アンカー・頂点・辺の操作の場所）。`min_len`：辺の操作は、頂点に吸い付かない
+        // 長さ（弦の長さ）の辺を選ぶ
+        // `top_only`：いちばん上のレイヤーの図形だけ（下のレイヤーの所は上の図形に隠れて、カーソルが合わないことが多い）
+        let on_outline = |app: &Is2dApp,
+                          rng: &mut map_overlay::Rng,
+                          vertex: bool,
+                          min_len: f64,
+                          top_only: bool|
+         -> Option<Point> {
+            let top = app.tab().active_timeline().layers.last().map(|l| l.id);
+            let shapes: Vec<&FillShape> = app
+                .scene()
+                .iter()
+                .filter(|s| !top_only || Some(s.layer_id) == top)
+                .collect();
+            if shapes.is_empty() {
+                return None;
+            }
+            let s = shapes[(rng.f() * shapes.len() as f64) as usize % shapes.len()];
+            let segs: Vec<kurbo::QuadBez> = s
+                .contours()
+                .flat_map(|c| c.segments.iter().copied())
+                .filter(|q| (q.p2 - q.p0).hypot() >= min_len)
+                .collect();
+            let q = *segs.get((rng.f() * segs.len() as f64) as usize % segs.len().max(1))?;
+            Some(if vertex { q.p0 } else { q.eval(0.5) })
+        };
+        let kind = (rng.f() * 22.0) as usize;
+        let action = match kind {
+            0..=2 => {
+                let p0 = pt(&mut rng);
+                let n = 2 + (rng.f() * 4.0) as usize;
+                let points = (0..n)
+                    .map(|_| p0 + kurbo::Vec2::new(rng.f() * 120.0 - 60.0, rng.f() * 80.0 - 40.0))
+                    .collect();
+                Action::PaintStroke {
+                    points,
+                    radius: 2.0 + rng.f() as f32 * 9.0,
+                    color: colors[(rng.f() * 4.0) as usize % 4],
+                }
+            }
+            3 => {
+                let p0 = pt(&mut rng);
+                Action::EraseStroke {
+                    points: vec![
+                        p0,
+                        p0 + kurbo::Vec2::new(rng.f() * 80.0 - 40.0, rng.f() * 50.0 - 25.0),
+                    ],
+                    radius: 2.0 + rng.f() as f32 * 8.0,
+                }
+            }
+            4 => Action::BucketFill {
+                pt: pt(&mut rng),
+                color: colors[(rng.f() * 4.0) as usize % 4],
+            },
+            5 => match on_outline(&app, &mut rng, false, 0.0, false) {
+                Some(p) => Action::AddAnchor { pt: p },
+                None => Action::Deselect,
+            },
+            6 => match on_outline(&app, &mut rng, true, 0.0, false) {
+                Some(p) => Action::DeleteAnchor { pt: p },
+                None => Action::Deselect,
+            },
+            7 => match on_outline(&app, &mut rng, true, 0.0, false) {
+                Some(p) => Action::MoveVertexFromTo {
+                    from: p,
+                    to: p + kurbo::Vec2::new(rng.f() * 30.0 - 15.0, rng.f() * 30.0 - 15.0),
+                },
+                None => Action::Deselect,
+            },
+            8 => match on_outline(&app, &mut rng, false, 20.0, true) {
+                Some(p) => Action::PullEdgeFromTo {
+                    from: p,
+                    to: p + kurbo::Vec2::new(rng.f() * 30.0 - 15.0, rng.f() * 30.0 - 15.0),
+                },
+                None => Action::Deselect,
+            },
+            9 | 10 => {
+                let p0 = pt(&mut rng);
+                Action::SelectMarquee {
+                    p0,
+                    p1: p0 + kurbo::Vec2::new(10.0 + rng.f() * 200.0, 10.0 + rng.f() * 120.0),
+                    additive: rng.f() < 0.25,
+                }
+            }
+            11 => Action::SelectSingleAt { pt: pt(&mut rng) },
+            12 => Action::MoveSelected {
+                delta: kurbo::Vec2::new(rng.f() * 60.0 - 30.0, rng.f() * 60.0 - 30.0),
+            },
+            13 => match (rng.f() * 3.0) as usize {
+                0 => Action::ScaleSelection {
+                    sx: 0.6 + rng.f() * 0.9,
+                    sy: 0.6 + rng.f() * 0.9,
+                },
+                1 => Action::RotateSelection {
+                    angle_rad: rng.f() * 1.5 - 0.75,
+                },
+                _ => Action::FlipSelection {
+                    flip_x: rng.f() < 0.5,
+                    flip_y: rng.f() < 0.5,
+                },
+            },
+            14 => Action::DeleteSelection,
+            15 => {
+                // 先にクリックで1つ選んでから（グループ化は、選んだものが1つのレイヤーだけのときに効く。解除は、選んだ
+                // 図形がグループの中なら効く）
+                let pre = Action::SelectSingleAt { pt: pt(&mut rng) };
+                let pre_is_marquee = rng.f() < 0.5;
+                log.push(format!("{step}（前）: {pre:?}"));
+                let _ =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| apply(&mut app, pre)))
+                        .map_err(|e| {
+                            let from = log.len().saturating_sub(30);
+                            eprintln!(
+                                "--- seed {seed} step {step}（前）で止まった。それまでの操作:"
+                            );
+                            for l in &log[from..] {
+                                eprintln!("{l}");
+                            }
+                            std::panic::resume_unwind(e)
+                        });
+                if pre_is_marquee {
+                    Action::Group
+                } else {
+                    Action::Ungroup
+                }
+            }
+            16 => {
+                if rng.f() < 0.5 {
+                    Action::Copy
+                } else {
+                    Action::Paste {
+                        in_place: rng.f() < 0.5,
+                    }
+                }
+            }
+            17 | 18 => Action::Undo,
+            19 => Action::Redo,
+            20 => Action::SwitchLayerAndFrame {
+                layer_idx: (rng.f() * 3.0) as usize % 3,
+                frame: 0,
+            },
+            _ => {
+                if rng.f() < 0.5 {
+                    Action::Deselect
+                } else {
+                    Action::CommitFloating
+                }
+            }
+        };
+        log.push(format!("{step}: {action:?}"));
+        let name: &'static str = match &action {
+            Action::PaintStroke { .. } => "ブラシ",
+            Action::EraseStroke { .. } => "消しゴム",
+            Action::BucketFill { .. } => "バケツ",
+            Action::AddAnchor { .. } => "アンカー+",
+            Action::DeleteAnchor { .. } => "アンカー-",
+            Action::MoveVertexFromTo { .. } => "頂点",
+            Action::PullEdgeFromTo { .. } => "引っぱり",
+            Action::SelectMarquee { .. } => "矩形",
+            Action::SelectSingleAt { .. } => "クリック選択",
+            Action::MoveSelected { .. } => "動かす",
+            Action::ScaleSelection { .. }
+            | Action::RotateSelection { .. }
+            | Action::FlipSelection { .. } => "変形",
+            Action::DeleteSelection => "削除",
+            Action::Group => "グループ化",
+            Action::Ungroup => "解除",
+            Action::Copy => "コピー",
+            Action::Paste { .. } => "貼り付け",
+            Action::Undo => "取り消し",
+            Action::Redo => "やり直し",
+            Action::SwitchLayerAndFrame { .. } => "レイヤー",
+            _ => "確定・選択解除",
+        };
+        let tag = format!("seed {seed} step {step}");
+        let mut applied = false;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            applied = apply(&mut app, action);
+            check_maps_after_step(&app, &tag);
+            if step % 10 == 9 {
+                check_scene_matches_full_rebuild(&mut app, &tag);
+            }
+        }));
+        if let Err(e) = result {
+            let from = log.len().saturating_sub(30);
+            eprintln!("--- {tag} で止まった。それまでの操作（終わりの 30 個）:");
+            for l in &log[from..] {
+                eprintln!("{l}");
+            }
+            std::panic::resume_unwind(e);
+        }
+        let t = tally.entry(name).or_default();
+        t.0 += 1;
+        t.1 += usize::from(applied);
+    }
+    eprintln!("seed {seed}：操作ごとの（試した数, 効いた数） {tally:?}");
+    // 絵を変える操作が、ちゃんと効いている（何もしない操作ばかりの確かめにしない）
+    let edits: usize = [
+        "ブラシ",
+        "消しゴム",
+        "バケツ",
+        "アンカー+",
+        "アンカー-",
+        "頂点",
+        "引っぱり",
+    ]
+    .iter()
+    .filter_map(|k| tally.get(k))
+    .map(|t| t.1)
+    .sum();
+    assert!(
+        edits * 5 >= steps,
+        "seed {seed}：絵を変える操作が効いたのは {edits} 回だけ"
+    );
+}
+
+/// ランダムな操作を続けても、地図の決まりと画面の図形の一覧が崩れない（短い版。長い版は
+/// `random_operation_marathon_long`）
+#[test]
+fn random_operations_keep_maps_and_scene_consistent() {
+    random_operation_marathon(1, 150);
+}
+
+/// ランダムな操作の長い版（必要なときに走らせる：`IS2D_MARATHON_STEPS`・`IS2D_MARATHON_SEEDS` で回数と種の数を変えられる）
+#[test]
+#[ignore]
+fn random_operation_marathon_long() {
+    let steps: usize = std::env::var("IS2D_MARATHON_STEPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let seeds: u64 = std::env::var("IS2D_MARATHON_SEEDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    for seed in 1..=seeds {
+        random_operation_marathon(seed * 7919, steps);
+    }
+}
+
 #[test]
 fn local_check_catches_unpainted_inside_painted() {
     use crate::planar_map::{CycleMemo, LayerBase, MapInput, MapRule, PlanarMap};
