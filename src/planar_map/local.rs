@@ -43,6 +43,12 @@ pub(crate) struct LocalMap<'a> {
     added_polys: Vec<Poly>,
     /// 頂点ごとの、増えた辺（辺の番号の順）
     added_at: HashMap<usize, Vec<usize>>,
+    /// 升目の索引の升目ごとの、増えた辺（辺の番号の順）。前の地図の辺の升目の索引と同じ升目に、外接矩形（`reach_box`）が
+    /// かかる升目で入れる。矩形にかかる辺を探す所（`edges_over`）が、増えた辺も、矩形にかかる升目の分だけ引く
+    added_tiles: HashMap<(i64, i64), Vec<usize>>,
+    /// 升目の行ごとの、増えた辺（辺の番号の順・1つずつ。`added_tiles` を行でまとめたもの）。右へ伸ばした半直線を横切る
+    /// 辺を探す所（`ray_cols`）が、半直線の通る行の分だけ引く
+    added_rows: HashMap<i64, Vec<usize>>,
     nodes: std::cell::RefCell<Nodes>,
 }
 
@@ -61,15 +67,28 @@ impl<'a> LocalMap<'a> {
         let mut list: Vec<MapEdge> = Vec::with_capacity(added.len());
         let mut polys: Vec<Poly> = Vec::with_capacity(added.len());
         let mut added_at: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut added_tiles: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
         for (i, &r) in added.iter().enumerate() {
             let ed = result.edges[r];
             let (a, b) = (nodes.id(result.nodes[ed.a]), nodes.id(result.nodes[ed.b]));
             list.push(MapEdge { a, b, ..ed });
-            polys.push(EdgeGeom::of(&result.quad(r)));
+            let q = result.quad(r);
+            polys.push(EdgeGeom::of(&q));
             added_at.entry(a).or_default().push(n_base + i);
             if b != a {
                 added_at.entry(b).or_default().push(n_base + i);
             }
+            for t in index_tiles_over(reach_box(q)) {
+                added_tiles.entry(t).or_default().push(n_base + i);
+            }
+        }
+        let mut added_rows: HashMap<i64, Vec<usize>> = HashMap::new();
+        for (t, list) in &added_tiles {
+            added_rows.entry(t.1).or_default().extend(list);
+        }
+        for list in added_rows.values_mut() {
+            list.sort_unstable();
+            list.dedup();
         }
         Self {
             index,
@@ -78,6 +97,8 @@ impl<'a> LocalMap<'a> {
             added: list,
             added_polys: polys,
             added_at,
+            added_tiles,
+            added_rows,
             nodes: std::cell::RefCell::new(nodes),
         }
     }
@@ -265,7 +286,11 @@ impl<'a> LocalMap<'a> {
             self.index.index.edges_in(self.index.stored, t, &mut out);
         }
         out.retain(|e| !self.removed.contains(e));
-        out.extend(self.added_edges());
+        for t in index_tiles_over(r) {
+            if let Some(list) = self.added_tiles.get(&t) {
+                out.extend(list.iter().copied());
+            }
+        }
         out.sort_unstable();
         out.dedup();
         out
@@ -512,9 +537,16 @@ impl LocalMap<'_> {
         let (x, y) = (p2.0.div_euclid(2), p2.1.div_euclid(2));
         let (t0, ty0) = index_tile(cell_of((x - 1, y - 1)));
         let ty1 = index_tile(cell_of((x - 1, y + 2))).1;
-        // 増えた辺は少ないので、横切る列をはじめに求めておく
+        // 増えた辺は、半直線の通る行にかかるものだけ、横切る列をはじめに求めておく
+        let mut near: Vec<usize> = (ty0..=ty1)
+            .filter_map(|row| self.added_rows.get(&row))
+            .flatten()
+            .copied()
+            .collect();
+        near.sort_unstable();
+        near.dedup();
         let mut added: std::collections::BTreeMap<i64, Vec<usize>> = Default::default();
-        for e in self.added_edges() {
+        for e in near {
             for c in self.crossing_cols(e, p2, col_of) {
                 let list = added.entry(c).or_default();
                 if !list.contains(&e) {
@@ -832,7 +864,9 @@ impl LocalMap<'_> {
             .index
             .edges_in(self.index.stored, index_tile(cell_of(g)), &mut cands);
         cands.retain(|e| !self.removed.contains(e));
-        cands.extend(self.added_edges());
+        if let Some(list) = self.added_tiles.get(&index_tile(cell_of(g))) {
+            cands.extend(list.iter().copied());
+        }
         cands.iter().any(|&e| {
             self.poly(e)
                 .windows(2)
