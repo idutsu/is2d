@@ -2336,13 +2336,9 @@ impl LayerBase {
     }
 
     /// 道具の側（矩形で切る）：選ぶ所 `region`（形か地図）で、この写しの地図を、中だけ残した地図（片。確かめる前の、窓の
-    /// 結果）と、中を消した地図（残り）に分ける。残りは、窓の差分を1本の道の差分から先（`apply_diff`）に渡した答え。窓で
-    /// 重ねるのは1回（2つの決まりを一度に）。`None`：格子に置けない
-    pub(crate) fn cut_local(
-        &self,
-        region: MapInput<'_>,
-        group_path: &[u64],
-    ) -> Option<(PlanarMap, LocalEdit)> {
+    /// 結果）と、中を消した地図（残り。前のしまう形に窓の差分を当てたしまう形。確かめと書き戻しは、使う側がセル画の地図に
+    /// 対して1本の道で行う：`cut_out`）に分ける。窓で重ねるのは1回（2つの決まりを一度に）。`None`：格子に置けない
+    pub(crate) fn cut_local(&self, region: MapInput<'_>) -> Option<(PlanarMap, StoredMap)> {
         let (quads, cols): (Vec<QuadBez>, Vec<Sides>) = match region {
             MapInput::Shapes(shapes) => {
                 let mut q: Vec<QuadBez> = shapes
@@ -2360,13 +2356,16 @@ impl LayerBase {
             MapInput::Sweep(_) | MapInput::Stack(_) => return None,
         };
         if quads.is_empty() {
-            return Some((PlanarMap::default(), LocalEdit::Same));
+            return Some((PlanarMap::default(), self.stored.clone()));
         }
         let rules = [MapRule::KeepInside, MapRule::Paint(None)];
         let (maps, wedges) =
             PlanarMap::window_overlay(self.map_index(), region, &rules, &quads, &cols)?;
         let [inside, rest]: [PlanarMap; 2] = maps.try_into().expect("決まりごとに1つの地図");
         let (removed, added) = self.stored.window_diff_tiles(&wedges, &rest);
+        let rest = self
+            .stored
+            .with_diff_tiles(&removed, &tile_edges_of(&rest, &added));
         // お手本：中だけ残した地図と、前のしまう形に残りの差分を当てた形が、前の地図全体で重ねた結果と同じ
         #[cfg(test)]
         if test_checks() {
@@ -2378,10 +2377,7 @@ impl LayerBase {
                     Some([fi, fr]) => {
                         StoredMap::from_dense(&inside, None)
                             .same_content(&StoredMap::from_dense(&fi, None))
-                            && self
-                                .stored
-                                .with_diff_tiles(&removed, &tile_edges_of(&rest, &added))
-                                .same_content(&StoredMap::from_dense(&fr, None))
+                            && rest.same_content(&StoredMap::from_dense(&fr, None))
                     }
                     None => false,
                 }
@@ -2391,7 +2387,6 @@ impl LayerBase {
                 "矩形で切る窓の答えが、前の地図全体で重ねた結果（お手本）と違う"
             );
         }
-        let rest = self.apply_diff(&rest, &removed, &added, group_path);
         Some((inside, rest))
     }
 
@@ -4566,8 +4561,8 @@ pub(crate) fn region_map(part: &PlanarMap, rect: Option<&FillShape>) -> Option<P
 }
 
 /// 浮いた片を切り出す：セル画の地図 `cel` の、中身 `content`（`cel` の地図そのものか、前に切り出した残り）を、選ぶ所
-/// `region` で1回切る（`LayerBase::cut_local`）。（残りの書くもの, 片の地図）：残りは、中身に対する1本の道の答え（消した
-/// 図形・入れた図形は中身の面に対するもの。セル画に対する隠す図形・残りの図形にするのは使う側：`Origin::of_local`）。
+/// `region` で1回切る（`LayerBase::cut_local`）。（残りの書くもの, 片の地図）：残りは、セル画の地図を残りの地図にする
+/// 1本の道の答え（`LayerBase::replace_local`。消した図形が隠す図形、入れた図形が残りの図形：`Origin::of_local`）。
 /// 片は小さいので片だけで確かめ、丸ごと中にあるセル画の面はその番号のまま、ほかの面には新しい番号を振る
 /// （`LayerBase::piece_ids`。片の新しい形は、残りの形と同じ元の図形を引き継ぐことがあるので、番号を新しくする。地図の
 /// 印も）。残りの形は、セル画の地図の書き換えと同じく、元の図形の番号を引き継ぐ（隠す元の図形と入れ替わる。残りの地図の
@@ -4581,7 +4576,9 @@ pub(crate) fn cut_out(
     region: MapInput<'_>,
     group_path: &[u64],
 ) -> Option<(LocalEdit, CheckedMap)> {
-    let (inside, rest) = content.cut_local(region, group_path)?;
+    let (inside, rest) = content.cut_local(region)?;
+    // 残りは、セル画の地図を残りのしまう形にする差分として1本の道に渡す（中身が前の残りでも、セル画に対する答え）
+    let rest = cel.replace_local(&rest, group_path);
     if matches!(rest, LocalEdit::Refused(_)) {
         return None;
     }

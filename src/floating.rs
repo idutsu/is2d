@@ -188,47 +188,17 @@ impl Origin {
         })
     }
 
-    /// 中身 `content`（セル画の地図か、前の残り `prev` の地図）を1本の道で切った答え `w`（消した図形・入れた図形は中身の
-    /// 面に対するもの）から。セル画に対する隠す図形・残りの図形にする：前の残りがあれば、隠す図形は前の隠す図形と、消した
-    /// 図形のうち前の残りの図形でないもの（セル画の図形）。残りの図形は、前の残りの図形のうち消さなかったものと、入れた
-    /// 図形。どちらも無ければ（セル画の地図のまま）`None`。升目の索引は、中身の写しから変わった所だけ作る
-    fn of_local(
-        w: LocalWrite,
-        content: &LayerBase,
-        scope: &[u64],
-        prev: Option<&Origin>,
-    ) -> Option<Self> {
-        let (hidden, remainder) = match prev {
-            None => (w.removed, w.added),
-            Some(o) => {
-                let rem: HashSet<ShapeId> = o.remainder.iter().copied().collect();
-                let gone: HashSet<ShapeId> = w.removed.iter().copied().collect();
-                let mut hidden = o.hidden.clone();
-                hidden.extend(w.removed.iter().copied().filter(|id| !rem.contains(id)));
-                hidden.sort_unstable();
-                hidden.dedup();
-                let mut remainder: Vec<ShapeId> = o
-                    .remainder
-                    .iter()
-                    .copied()
-                    .filter(|id| !gone.contains(id))
-                    .collect();
-                remainder.extend(w.added.iter().copied());
-                remainder.sort_unstable();
-                remainder.dedup();
-                (hidden, remainder)
-            }
-        };
-        if hidden.is_empty() && remainder.is_empty() {
-            return None;
-        }
-        let base = LayerBase::of_local(w.stored, scope, w.faces, content);
-        Some(Self {
+    /// セル画の地図 `cel` を残りの地図にする1本の道の答え `w`（`LayerBase::replace_local`）から：消した図形が隠す図形、
+    /// 入れた図形が残りの図形。升目の索引は、セル画の写しから変わった所だけ作る。答えが変わらない（セル画の地図のまま）
+    /// ときは、使う側が残りを持たない
+    fn of_local(w: LocalWrite, cel: &LayerBase, scope: &[u64]) -> Self {
+        let base = LayerBase::of_local(w.stored, scope, w.faces, cel);
+        Self {
             rest: base.stored.clone(),
             held: Some(base),
-            hidden,
-            remainder,
-        })
+            hidden: w.removed,
+            remainder: w.added,
+        }
     }
 
     /// テスト用（お手本との比べ）：隠す図形と、残りの図形の形・残りの地図の面の形（新しく振る番号によらない形）
@@ -644,7 +614,7 @@ impl Floating {
             };
             let origin = match cel.replace_local(&next, stage.scope) {
                 LocalEdit::Same => None,
-                LocalEdit::Changed(w) => Origin::of_local(w, &cel, stage.scope, None),
+                LocalEdit::Changed(w) => Some(Origin::of_local(w, &cel, stage.scope)),
                 LocalEdit::Refused(_) => return false,
             };
             // お手本：前の道（中身の地図全体に片を重ね、セル画に対して確かめて書き戻す）の残りと同じ
@@ -774,30 +744,19 @@ fn cut_layer(
     let (origin, inside): (Option<Origin>, CheckedMap) = match (part, rect) {
         (None, None) => return Some(cur.clone()),
         // 面を丸ごと持ち上げる：中身から、その面を外す（面の番号はそのまま。片は前と同じ番号の図形）。外す面の輪郭の辺だけ
-        // を替える（`restricted_local`。正しい地図の面を外しても正しい地図のまま）。消した図形は外した面で、入れた図形は無い
+        // を替えたしまう形（`restricted_local`）を、セル画の地図に対する差分として1本の道に渡す（`replace_local`）
         (Some(part), None) => {
-            let faces = content_base.faces(stage.scope);
-            let (stored, rest_faces) = content_base
+            let rest = content_base
                 .restricted_local(FaceKeep::Without(ids), stage.scope)
-                .map(|(st, f)| (st, f.expect("外したときは面の表がある")))
-                .unwrap_or_else(|| {
-                    (
-                        StoredMap::from_dense(&PlanarMap::default(), None),
-                        Arc::from(Vec::new()),
-                    )
-                });
-            let removed: Vec<ShapeId> = faces
-                .iter()
-                .map(|s| s.shape_id)
-                .filter(|id| ids.contains(id))
-                .collect();
-            let w = LocalWrite {
-                stored,
-                faces: rest_faces,
-                removed,
-                added: Vec::new(),
+                .map_or_else(
+                    || StoredMap::from_dense(&PlanarMap::default(), None),
+                    |(st, _)| st,
+                );
+            let origin = match cel.replace_local(&rest, stage.scope) {
+                LocalEdit::Same => None,
+                LocalEdit::Changed(w) => Some(Origin::of_local(w, &cel, stage.scope)),
+                LocalEdit::Refused(_) => return None,
             };
-            let origin = Origin::of_local(w, &content_base, stage.scope, cur.origin.as_ref());
             // お手本：前の道（中身の地図全体から面を外し、セル画に対して確かめて書き戻す）の残りと同じ
             #[cfg(test)]
             if crate::planar_map::test_checks() {
@@ -832,10 +791,8 @@ fn cut_layer(
             };
             let (rest, inside) = cut_out(&cel, &content_base, region, stage.scope)?;
             let origin = match rest {
-                LocalEdit::Changed(w) => {
-                    Origin::of_local(w, &content_base, stage.scope, cur.origin.as_ref())
-                }
-                _ => cur.origin.clone(),
+                LocalEdit::Changed(w) => Some(Origin::of_local(w, &cel, stage.scope)),
+                _ => None,
             };
             // お手本：前の道（残りもセル画の地図に対して確かめ、書き戻す）の残りと同じ（隠す図形・残りの図形の形・残りの
             // 地図の面の形）
