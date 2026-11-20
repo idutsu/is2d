@@ -35121,7 +35121,7 @@ fn local_check_matches_full_check_when_edges_are_removed() {
     assert!(good > 5 && bad > 5, "正しい {good}・正しくない {bad}");
 }
 
-/// 段2b-7c-2：ブラシ・消しゴムを触った所だけで行う編集（`LayerBase::paint_local`）を、ランダムな線で何十回も重ねる。
+/// 段2b-7c-2：ブラシ・消しゴムを触った所だけで行う編集（1本の道：`LayerBase::edit_local`）を、ランダムな線で何十回も重ねる。
 /// 毎回、関数の中でお手本（前の地図全体で重ねて確かめ、書き戻した答え：しまう形・消す図形・入れる図形）と比べ、次の
 /// 編集は新しいしまう形から続ける。線の多いセル画（区画を 4×4 並べたもの）でも行う
 #[test]
@@ -35194,7 +35194,7 @@ fn local_paint_matches_full_pipeline() {
 }
 
 /// 段2b-7c-2：触った所だけで行う編集をセル画に書く道（`Cel::edit_local`・`put_local`・`LayerBase::of_local`）。書くたびに
-/// 編集の答えはお手本と比べられ（`paint_local` の中）、書いたあとのセル画は決まりどおり（正しい地図で、面に1つずつ別の
+/// 編集の答えはお手本と比べられ（`edit_local`・`apply_diff` の中）、書いたあとのセル画は決まりどおり（正しい地図で、面に1つずつ別の
 /// 番号：`maps_problem`）で、写しの面の図形の表は、地図から作り直したものと同じ
 #[test]
 fn local_paint_writes_through_the_cel() {

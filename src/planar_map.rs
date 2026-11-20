@@ -1978,7 +1978,7 @@ impl LayerBase {
         base
     }
 
-    /// 触った所だけで行った編集（`paint_local`）の新しいしまう形 `stored`（階層 `group_path`、面の図形の表 `faces`）の写し。
+    /// 1本の道で行った編集（`apply_diff`）の新しいしまう形 `stored`（階層 `group_path`、面の図形の表 `faces`）の写し。
     /// 地図全体の一覧（`map`）・判定の形・輪郭の一覧は作らず、要る所が初めて使うときに作る。升目の索引は、前の写し `prev`
     /// の索引から、変わった塊の分だけ作る（設計 段2b の 7. の 2b-7c）
     pub(crate) fn of_local(

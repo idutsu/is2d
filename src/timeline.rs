@@ -1299,7 +1299,7 @@ impl Cel {
         }
     }
 
-    /// 触った所だけで行う地図の編集（ブラシ・消しゴム：`LayerBase::paint_local`）：階層 `group_path` の地図を `f` で編集し、
+    /// 1本の道の地図の編集（`LayerBase::edit_local`・`fill_local`・`anchor_local` など）：階層 `group_path` の地図を `f` で編集し、
     /// 書くものがあれば入れる（`put_local`）。`Ok(None)`：変わらない、`Err`：書けない
     pub(crate) fn edit_local(
         &mut self,
