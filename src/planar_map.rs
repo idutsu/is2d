@@ -2225,10 +2225,48 @@ impl LayerBase {
         };
         let m = &maps[0];
         let (removed, added) = self.stored.window_diff_tiles(&wedges, m);
+        self.apply_diff(m, &removed, &added, group_path)
+    }
+
+    /// 1本の道の、差分から先（設計 段2b の 9.）：差分（`removed`：消えた前の地図の辺、`added`：地図 `result` の増えた辺の
+    /// 番号。`result` の頂点は、座標が同じなら前の地図の頂点）を前の地図に当てて確かめ（`LocalMap`）、触った面の書き戻しの
+    /// 差分を決め、前のしまう形に差分を当てた新しいしまう形と、新しい面の図形の表を作る。差分の作り方（重ね合わせ・バケツ・
+    /// アンカー）や道具の種類では分かれない。答えは、差分を当てた新しい地図を前の道で確かめ、書き戻すときと同じ（テストでは
+    /// 毎回お手本と比べる）
+    pub(crate) fn apply_diff(
+        &self,
+        result: &PlanarMap,
+        removed: &[usize],
+        added: &[usize],
+        group_path: &[u64],
+    ) -> LocalEdit {
+        let got = self.apply_diff_inner(result, removed, added, group_path);
+        #[cfg(test)]
+        if test_checks() {
+            let ok = uncounted(|| {
+                let next = self.materialized(result, removed, added);
+                self.matches_next(&next, group_path, &got)
+            });
+            assert!(
+                ok,
+                "差分から先を触った所だけで行った答えが、差分を当てた地図を前の道で書き戻した答え（お手本）と違う"
+            );
+        }
+        got
+    }
+
+    fn apply_diff_inner(
+        &self,
+        result: &PlanarMap,
+        removed: &[usize],
+        added: &[usize],
+        group_path: &[u64],
+    ) -> LocalEdit {
         if removed.is_empty() && added.is_empty() {
             return LocalEdit::Same;
         }
-        let local = LocalMap::new(ix, m, &removed, &added);
+        let ix = self.map_index();
+        let local = LocalMap::new(ix, result, removed, added);
         if !local.added_edges_ok() {
             return LocalEdit::Refused(LocalRefusal::Unwritable);
         }
@@ -2263,7 +2301,7 @@ impl LayerBase {
             return LocalEdit::Same;
         }
         let (relabel, add_edges) = local.relabeled_edges(&faces, &change.ids, &memo);
-        let mut all_removed = removed;
+        let mut all_removed = removed.to_vec();
         all_removed.extend(relabel);
         all_removed.sort_unstable();
         all_removed.dedup();
@@ -2351,6 +2389,51 @@ impl LayerBase {
         else {
             return matches!(got, LocalEdit::Refused(LocalRefusal::OffGrid));
         };
+        self.matches_next(&next, group_path, got)
+    }
+
+    /// テスト用：前の地図に差分（`apply_diff` と同じ受け取り方）を当てた、計算に使うふつうの地図（お手本と比べるため）
+    #[cfg(test)]
+    fn materialized(&self, result: &PlanarMap, removed: &[usize], added: &[usize]) -> PlanarMap {
+        let base = self.map();
+        let gone: HashSet<usize> = removed.iter().copied().collect();
+        let mut out = PlanarMap {
+            nodes: base.nodes.clone(),
+            edges: (0..base.edges.len())
+                .filter(|e| !gone.contains(e))
+                .map(|e| base.edges[e])
+                .collect(),
+        };
+        let mut at: HashMap<[u64; 2], usize> = base
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(v, p)| ([p.x.to_bits(), p.y.to_bits()], v))
+            .collect();
+        let mut node = |p: Point, out: &mut PlanarMap| -> usize {
+            *at.entry([p.x.to_bits(), p.y.to_bits()]).or_insert_with(|| {
+                out.nodes.push(p);
+                out.nodes.len() - 1
+            })
+        };
+        for &r in added {
+            let ed = result.edges[r];
+            let (a, b) = (
+                node(result.nodes[ed.a], &mut out),
+                node(result.nodes[ed.b], &mut out),
+            );
+            out.edges.push(MapEdge { a, b, ..ed });
+        }
+        out.compact_nodes();
+        out
+    }
+
+    /// テスト用（お手本との比べ）：新しい地図 `next` を前の道で確かめ、書き戻すとき（`written`・`diff`・
+    /// `into_stored_with_polys`）の答えと、触った所だけの答え `got` が同じか（しまう形・消す図形・入れる図形。新しく振る
+    /// 番号は、入れる図形の形で対応づけて比べる）
+    #[cfg(test)]
+    fn matches_next(&self, next: &PlanarMap, group_path: &[u64], got: &LocalEdit) -> bool {
+        let next = next.clone();
         if !self.written_ok(&next) {
             return matches!(got, LocalEdit::Refused(LocalRefusal::Unwritable));
         }
