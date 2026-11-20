@@ -34689,7 +34689,7 @@ fn windowed_overlay_matches_full_on_large_map() {
     assert!(compared >= 70, "比べた数 {compared}");
     assert!(
         crate::planar_map::outside_winds() > winds_before,
-        "窓の外の辺を点の色の数えに入れる道を通っていない"
+        "点の色の数えに窓の外の辺の分を入れる道を通っていない"
     );
     assert!(
         differed.is_empty(),

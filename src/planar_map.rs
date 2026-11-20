@@ -3596,11 +3596,12 @@ thread_local! {
     static KEYS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// テスト用：このスレッドで、重ね合わせで i_overlay に切らせた回数（`overlay_fed`）
     pub(super) static CUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// テスト用：このスレッドで、窓で重ね合わせるとき、窓の外の辺を点の色の数えに入れた回数（`Outside`）
+    /// テスト用：このスレッドで、窓で重ね合わせるとき、点の色の数えに窓の外の辺の分（前の地図の面の色：`first_crossing`）を
+    /// 入れた回数（`Outside`）
     pub(super) static OUTSIDE_WINDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// テスト用：このスレッドで、窓の外の辺を点の色の数えに入れた回数
+/// テスト用：このスレッドで、点の色の数えに窓の外の辺の分を入れた回数
 #[cfg(test)]
 pub(crate) fn outside_winds() -> usize {
     OUTSIDE_WINDS.with(|n| n.get())
