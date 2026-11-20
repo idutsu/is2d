@@ -1876,6 +1876,15 @@ pub(crate) struct LayerBase {
     index: OnceLock<crate::stored_map::TileIndex>,
     /// 端の升目の索引（升目ごとの、端がその升目にある辺。頂点の辺を引く所が使う：`end_tiles`。作り方は `index` と同じ）
     ends: OnceLock<crate::stored_map::TileIndex>,
+    /// しまう形の判定の形を生かしておく所（この写しが引いた塊の分。塊そのものは判定の形を生かさない：`StoredMap::poly`）
+    hold: crate::stored_map::PolyHold,
+}
+
+impl Drop for LayerBase {
+    /// 判定の形を生かしておく所を手放す（ほかに使う写しの無い塊の判定の形は返り、塊の弱い参照も消える）
+    fn drop(&mut self) {
+        self.stored.release_polys(&mut self.hold);
+    }
 }
 
 /// しまう形の辺の順（`StoredMap::to_dense` の辺の順）に並べた、辺ごとの判定の形と面の輪郭
@@ -1930,7 +1939,13 @@ impl LayerBase {
             faces: SyncCache::new(None),
             index: OnceLock::new(),
             ends: OnceLock::new(),
+            hold: Default::default(),
         }
+    }
+
+    /// しまう形の辺 `e` の判定の形（この写しが生かす：`StoredMap::poly`）
+    pub(crate) fn stored_poly(&self, e: usize) -> &Poly {
+        self.stored.poly(e, &self.hold)
     }
 
     /// 計算に使うふつうの地図（初めて要るときに、しまう形から作る：`StoredMap::to_dense`）
@@ -1974,11 +1989,12 @@ impl LayerBase {
         if test_checks() {
             for (e, p) in polys.polys.iter().enumerate() {
                 assert!(
-                    p[..] == base.stored.poly(e)[..],
+                    p[..] == base.stored_poly(e)[..],
                     "塊の判定の形が、写しの一覧の判定の形と違う（辺 {e}）"
                 );
             }
         }
+        base.stored.seed_polys(&polys.polys, &base.hold);
         let _ = base.polys.set(polys.polys);
         let _ = base.cycles.set(polys.cycles);
         let _ = base.cycle_regions.set(polys.regions);
@@ -2030,6 +2046,7 @@ impl LayerBase {
             faces: SyncCache::new(Some((group_path.to_vec(), faces))),
             index: OnceLock::new(),
             ends: OnceLock::new(),
+            hold: Default::default(),
         };
         base.inherit_index(Some(prev));
         // テストでは毎回：面の表の図形の輪郭の辺が、みなしまう形にあり、その面の側にその面の番号が記してある（面の表と
@@ -2193,7 +2210,7 @@ impl LayerBase {
     /// 必ず見つかる
     fn edge_tiles(&self, e: usize) -> Vec<(i64, i64)> {
         // 写しの一覧を作らずに、塊の判定の形と辺から（差分から作った写しでも、一覧を作らない）
-        let (bbox, cells) = self.stored.poly(e).reach(self.stored.edge_at(e).quad());
+        let (bbox, cells) = self.stored_poly(e).reach(self.stored.edge_at(e).quad());
         let mut t = index_tiles(cells);
         t.extend(index_tiles_over(*bbox));
         t.sort_unstable();
@@ -2208,7 +2225,7 @@ impl LayerBase {
     fn out_sorted(&self, v: usize) -> Vec<(usize, bool)> {
         let idx = |h: (usize, bool)| 2 * h.0 + h.1 as usize;
         let dir = |h: (usize, bool)| -> IPt {
-            let p = self.stored.poly(h.0);
+            let p = self.stored_poly(h.0);
             let n = p.len();
             let at = |k: usize| if h.1 { p[k] } else { p[n - 1 - k] };
             let a = if n > 0 { at(0) } else { (0, 0) };
@@ -2645,7 +2662,7 @@ impl LayerBase {
                 );
             }
             let wedges: Vec<usize> = in_window.into_iter().collect();
-            let (wmap, _) = tile_window(stored, &wedges);
+            let (wmap, _) = tile_window(ix, &wedges);
             let to_window: HashMap<usize, usize> =
                 wedges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
             let mut m = wmap;
@@ -2755,7 +2772,7 @@ impl LayerBase {
             in_window.extend(edges_at(te.b));
         }
         let wedges: Vec<usize> = in_window.into_iter().collect();
-        let (wmap, _) = tile_window(stored, &wedges);
+        let (wmap, _) = tile_window(ix, &wedges);
         let m = match edit {
             MapEdit::AddAnchor { orig_seg, t } => {
                 let (e, forward) = stored.find_edge(&orig_seg)?;
@@ -3123,6 +3140,7 @@ impl LayerBase {
             index: self.index(),
             ends: self.ends_index(),
             stored: &self.stored,
+            hold: &self.hold,
         }
     }
 
@@ -3360,7 +3378,7 @@ impl LayerBase {
     fn polys(&self) -> &[Poly] {
         self.polys.get_or_init(|| {
             (0..self.map().edges.len())
-                .map(|e| Arc::clone(self.stored.poly(e)))
+                .map(|e| Arc::clone(self.stored_poly(e)))
                 .collect()
         })
     }
@@ -4472,7 +4490,6 @@ impl CheckedMap {
                 }
             })
             .collect();
-        stored.seed_polys(&polys);
         // この地図の辺ごとの、しまう形の辺の番号と、向きを逆にしたか
         let mut at = vec![(0, false); order.len()];
         for (s, &(e, flipped)) in order.iter().enumerate() {

@@ -836,7 +836,7 @@ impl PlanarMap {
                 sub_edges.extend(fed_init.iter().copied());
                 sub_edges.sort_unstable();
                 sub_edges.dedup();
-                let (sub, sub_known) = tile_window(stored, &sub_edges);
+                let (sub, sub_known) = tile_window(ix, &sub_edges);
                 let n0 = sub.edges.len();
                 let (sub, sub_partner) = with_piece(sub);
                 let mut moved0: Vec<bool> =
@@ -921,7 +921,7 @@ impl PlanarMap {
                 }
             }
             let wedges: Vec<usize> = in_window.into_iter().collect();
-            let (wmap, wknown) = tile_window(stored, &wedges);
+            let (wmap, wknown) = tile_window(ix, &wedges);
             let nw = wmap.edges.len();
             let (wmap, wpartner) = with_piece(wmap);
             let to_window: IntMap<usize, usize> =
@@ -1809,7 +1809,7 @@ impl PlanarMap {
                     let (e, be, r) = items[i as usize];
                     if ray_meets_row(r, p2) {
                         let ed = self.edges[e];
-                        for s in out.index.stored.poly(be).windows(2) {
+                        for s in out.index.poly(be).windows(2) {
                             // 引く：左右の印を入れ替えて足す
                             wind_into(dbl(s[0]), dbl(s[1]), ed.right, ed.left, p2, &mut w);
                         }
@@ -2453,7 +2453,8 @@ fn window_cycles_match(
 /// 前の地図の辺 `edges`（計算に使う地図の番号の順）を並べた小さな地図と、辺ごとの計算に使う形。辺は塊から引き
 /// （`StoredMap::edge_at`。向きはしまう辺の向きで、計算に使う地図の辺と同じ）、頂点は座標ごとに初めて出てきた順に番号を
 /// 振る（設計 段2b の 7. の 2b-7a。写しの通し番号の一覧を使わない）
-pub(super) fn tile_window(stored: &StoredMap, edges: &[usize]) -> (PlanarMap, Vec<Poly>) {
+pub(super) fn tile_window(ix: MapIndex<'_>, edges: &[usize]) -> (PlanarMap, Vec<Poly>) {
+    let stored = ix.stored;
     let mut node_of: IntMap<[u64; 2], usize> = IntMap::default();
     let mut nodes: Vec<Point> = Vec::new();
     let mut id = |p: Point, nodes: &mut Vec<Point>| -> usize {
@@ -2478,7 +2479,7 @@ pub(super) fn tile_window(stored: &StoredMap, edges: &[usize]) -> (PlanarMap, Ve
             left_src: te.left_src,
             right_src: te.right_src,
         });
-        polys.push(Arc::clone(stored.poly(e)));
+        polys.push(Arc::clone(ix.poly(e)));
     }
     (PlanarMap { nodes, edges: list }, polys)
 }
@@ -2562,7 +2563,7 @@ pub(super) fn first_crossing(ix: MapIndex<'_>, q: IPt) -> Option<(usize, bool)> 
         cands.dedup();
         let mut best: Option<Crossing> = None;
         for &e in &cands {
-            for s in stored.poly(e).windows(2) {
+            for s in ix.poly(e).windows(2) {
                 let (a, b) = (dbl(s[0]), dbl(s[1]));
                 let Some(d) = crossing(a, b, q) else {
                     continue;
@@ -2821,6 +2822,15 @@ pub(crate) struct MapIndex<'a> {
     /// 端の升目の索引（`LayerBase::ends_index`）
     pub(crate) ends: &'a crate::stored_map::TileIndex,
     pub(crate) stored: &'a StoredMap,
+    /// `stored` の判定の形を生かしておく所（写しのもの：`LayerBase::stored_poly`）
+    pub(crate) hold: &'a crate::stored_map::PolyHold,
+}
+
+impl<'a> MapIndex<'a> {
+    /// しまう形の辺 `e` の判定の形（`StoredMap::poly`）
+    pub(crate) fn poly(&self, e: usize) -> &'a Poly {
+        self.stored.poly(e, self.hold)
+    }
 }
 
 /// 重ね合わせで、近くの辺と、頂点ごとの辺を探す道具。地図 `map` の辺のうち、前から `n_index` 本（計算に使う写しの

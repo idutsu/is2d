@@ -208,16 +208,22 @@ pub(crate) fn edge_size() -> usize {
     std::mem::size_of::<StoredEdge>()
 }
 
-/// 塊：1つの升目に入る辺の並び（決まった順。空の塊は無い）と、その辺の判定の形（初めて要るときに作る。塊を共有する
-/// 地図どうしで共有する：設計 段2b の 1.）
+/// 塊：1つの升目に入る辺の並び（決まった順。空の塊は無い）と、その辺の判定の形への弱い参照（塊を共有する地図どうしで
+/// 共有する：設計 段2b の 1.）
 type Tile = Arc<TileData>;
+
+/// 塊の辺ごとの判定の形（`edges` の順）。並びは `Box` に入れる：塊が持つ弱い参照が残す領域を、生かす所が無くなったあと
+/// 小さくするため（`Arc<[Poly]>` だと、並びそのものが弱い参照の残す領域に入り、辺1本ごとに残る）
+type TilePolys = Arc<Box<[Poly]>>;
 
 /// 塊の中身
 #[derive(Debug)]
 struct TileData {
     edges: Box<[StoredEdge]>,
-    /// 辺ごとの判定の形（`edges` の順。しまう辺の向きの曲線から作る：`EdgeGeom::of`）
-    polys: OnceLock<Box<[Poly]>>,
+    /// 辺ごとの判定の形（しまう辺の向きの曲線から作る：`EdgeGeom::of`）への弱い参照。判定の形を生かすのは、それを使う
+    /// 計算に使う写しの `PolyHold` だけ（塊は文書と Undo の控えが持つので、塊が判定の形を生かすと、一度見たコマの判定の
+    /// 形がタブを閉じるまで残る）。誰かが生かしている間は、塊を共有する地図の写しどうしで同じものを使う
+    polys: Mutex<Weak<Box<[Poly]>>>,
 }
 
 impl std::ops::Deref for TileData {
@@ -231,20 +237,42 @@ impl TileData {
     fn new(edges: Box<[StoredEdge]>) -> Tile {
         Arc::new(Self {
             edges,
-            polys: OnceLock::new(),
+            polys: Mutex::new(Weak::new()),
         })
     }
 
-    /// 辺ごとの判定の形（初めて要るときに作る）
-    fn polys(&self) -> &[Poly] {
-        self.polys.get_or_init(|| {
+    /// 辺ごとの判定の形：誰かが生かしていればそれ、無ければ作る（作ったものを生かすのは、受け取った所だけ）
+    fn polys(&self) -> TilePolys {
+        let mut slot = self.polys.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = slot.upgrade() {
+            return p;
+        }
+        let p: TilePolys = Arc::new(
             self.edges
                 .iter()
                 .map(|e| EdgeGeom::of(&QuadBez::new(e.a, e.ctrl, e.b)))
-                .collect()
-        })
+                .collect(),
+        );
+        *slot = Arc::downgrade(&p);
+        p
+    }
+
+    /// 辺ごとの判定の形：誰かが生かしていればそれ、無ければ `polys`（この塊の辺の順の判定の形）を使う
+    fn polys_or(&self, polys: &[Poly]) -> TilePolys {
+        let mut slot = self.polys.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = slot.upgrade() {
+            return p;
+        }
+        let p: TilePolys = Arc::new(polys.into());
+        *slot = Arc::downgrade(&p);
+        p
     }
 }
+
+/// 判定の形を生かしておく所：塊ごとの判定の形（塊の並びの位置で引く。初めて要るときに作る）。計算に使う写し
+/// （`LayerBase`）が、自分の地図のものを1つ持つ。写しを手放せば、ほかに使う写しの無い判定の形は返る
+#[derive(Default, Debug)]
+pub(crate) struct PolyHold(OnceLock<Box<[OnceLock<TilePolys>]>>);
 
 /// 塊に入れる辺：（升目, しまう辺, (地図の辺の番号, 向きを逆にしたか)）
 type Placed = ((i32, i32), StoredEdge, (usize, bool));
@@ -546,22 +574,67 @@ impl StoredMap {
         self.0.tiles.iter().map(|t| t.len()).sum()
     }
 
-    /// 計算に使う地図（`to_dense`）の辺 `e` の判定の形（辺の住む塊が持つ。塊を共有する地図どうしで共有する）
-    pub(crate) fn poly(&self, e: usize) -> &Poly {
-        let starts = self.starts();
-        let k = starts.partition_point(|&s| s as usize <= e) - 1;
-        &self.0.tiles[k].polys()[e - starts[k] as usize]
+    /// `hold`（この地図の判定の形を生かしておく所）の、塊ごとの置き場
+    fn hold_slots<'h>(&self, hold: &'h PolyHold) -> &'h [OnceLock<TilePolys>] {
+        let slots = hold
+            .0
+            .get_or_init(|| (0..self.0.tiles.len()).map(|_| OnceLock::new()).collect());
+        debug_assert_eq!(slots.len(), self.0.tiles.len(), "別の地図の置き場");
+        slots
     }
 
-    /// 計算に使う地図（`to_dense`）の辺の順の判定の形 `polys` を、まだ判定の形を持っていない塊に持たせる（確かめた地図を
-    /// しまうとき：`CheckedMap::into_stored_with_polys`。作り直さずに、確かめるときに作ったものを使う）
-    pub(crate) fn seed_polys(&self, polys: &[Poly]) {
+    /// 計算に使う地図（`to_dense`）の辺 `e` の判定の形。辺の住む塊の判定の形を、誰かが生かしていればそれを、無ければ
+    /// 作って、`hold`（この地図の判定の形を生かしておく所）に入れる
+    pub(crate) fn poly<'h>(&self, e: usize, hold: &'h PolyHold) -> &'h Poly {
         let starts = self.starts();
-        for (k, t) in self.0.tiles.iter().enumerate() {
-            if t.polys.get().is_none() {
-                let s = starts[k] as usize;
-                let _ = t.polys.set(polys[s..s + t.len()].into());
+        let k = starts.partition_point(|&s| s as usize <= e) - 1;
+        let tile = self.hold_slots(hold)[k].get_or_init(|| self.0.tiles[k].polys());
+        &tile[e - starts[k] as usize]
+    }
+
+    /// テスト用：判定の形を誰かが生かしている塊の数
+    #[cfg(test)]
+    pub(crate) fn tiles_with_live_polys(&self) -> usize {
+        self.0
+            .tiles
+            .iter()
+            .filter(|t| t.polys.lock().unwrap().strong_count() > 0)
+            .count()
+    }
+
+    /// テスト用：塊の数
+    #[cfg(test)]
+    pub(crate) fn tile_count(&self) -> usize {
+        self.0.tiles.len()
+    }
+
+    /// `hold`（この地図の判定の形を生かしておく所）を手放す。塊の判定の形を生かしているのが `hold` だけなら、塊の弱い参照も
+    /// 消す（弱い参照は、生かす所が無くなったあとも小さな領域を残すので、一度引いた塊ごとに残り続けないように）。生かす
+    /// 所が増えるのは塊の鍵をかけて引くときだけなので、鍵をかけて数えれば、ほかの所が使っている判定の形は消さない
+    pub(crate) fn release_polys(&self, hold: &mut PolyHold) {
+        let Some(slots) = hold.0.take() else {
+            return;
+        };
+        for (t, slot) in self.0.tiles.iter().zip(slots.into_vec()) {
+            let Some(p) = slot.into_inner() else {
+                continue;
+            };
+            let mut weak = t.polys.lock().unwrap_or_else(|e| e.into_inner());
+            if Arc::strong_count(&p) == 1 && Weak::ptr_eq(&weak, &Arc::downgrade(&p)) {
+                *weak = Weak::new();
             }
+        }
+    }
+
+    /// 計算に使う地図（`to_dense`）の辺の順の判定の形 `polys` を、`hold`（この地図の判定の形を生かしておく所）に入れる。
+    /// 塊の判定の形を誰かが生かしていれば、それを入れる（確かめた地図をしまうとき：`CheckedMap::into_stored_with_polys`。
+    /// 作り直さずに、確かめるときに作ったものを使う）
+    pub(crate) fn seed_polys(&self, polys: &[Poly], hold: &PolyHold) {
+        let starts = self.starts();
+        let slots = self.hold_slots(hold);
+        for (k, t) in self.0.tiles.iter().enumerate() {
+            let s = starts[k] as usize;
+            slots[k].get_or_init(|| t.polys_or(&polys[s..s + t.len()]));
         }
     }
 
@@ -910,11 +983,7 @@ impl StoredMap {
                             ..*e
                         })
                         .collect(),
-                    polys: t
-                        .polys
-                        .get()
-                        .cloned()
-                        .map_or_else(OnceLock::new, OnceLock::from),
+                    polys: Mutex::new(t.polys.lock().unwrap_or_else(|e| e.into_inner()).clone()),
                 })
             })
             .collect();

@@ -35754,3 +35754,73 @@ fn local_paint_writes_through_the_cel() {
     }
     assert!(written > 20, "書いた {written}");
 }
+
+/// N-1002（レビュー 5b822a3）：再生・スクラブで一度通ったコマの判定の形が、文書（と Undo の控え）が持つ塊に残り続けない。
+/// 判定の形を生かすのは計算に使う写し（`LayerBase`）だけなので、全部のコマを1回ずつ表示して最初のコマに戻ったあと、判定の
+/// 形が生きている塊は、いま見ているコマのものだけ（前は、通った全部のコマの塊が判定の形を持ち続け、作品 A では開いた直後の
+/// 約3倍のメモリが、タブを閉じるまで返らなかった）
+#[test]
+fn passing_frames_does_not_keep_their_edge_shapes() {
+    use crate::doc_actions::{apply, Action};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    let mut rng = map_overlay::Rng(5);
+    let mut app = Is2dApp::default();
+    let go = |app: &mut Is2dApp, f: usize| {
+        assert!(canvas_tool::clear_selection(app));
+        apply(app, Action::ScrubRulerToFrame { frame: f });
+    };
+    // 8 コマ、どのコマも別の絵のキーフレーム
+    let frames = 8;
+    for f in 0..frames {
+        if f > 0 {
+            go(&mut app, f);
+            assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: false }));
+        }
+        let mut shapes = Vec::new();
+        for k in 0..12 {
+            let p0 = Point::new(rng.f() * 400.0, rng.f() * 300.0);
+            let p1 = Point::new(rng.f() * 400.0, rng.f() * 300.0);
+            shapes.extend(make_stroke(
+                p0,
+                p1,
+                3.0 + rng.f() as f32 * 4.0,
+                colors[k % 3],
+            ));
+        }
+        put_cel_shapes(&mut app, 0, f, shapes);
+    }
+    // 判定の形が生きている塊の数（全部のキーフレーム）と、塊の数
+    let live = |app: &Is2dApp| -> Vec<(usize, usize)> {
+        app.doc.root.layers[0]
+            .keyframes
+            .iter()
+            .map(|kf| {
+                kf.cel.maps.iter().fold((0, 0), |(l, t), m| {
+                    (
+                        l + m.stored().tiles_with_live_polys(),
+                        t + m.stored().tile_count(),
+                    )
+                })
+            })
+            .collect()
+    };
+    for f in 0..frames {
+        go(&mut app, f);
+        let _ = app.scene().len();
+    }
+    go(&mut app, 0);
+    let _ = app.scene().len();
+    let counts = live(&app);
+    assert_eq!(counts.len(), frames);
+    assert!(counts.iter().all(|&(_, t)| t > 0), "どのコマにも絵がある");
+    // いま見ていないコマの塊は、判定の形を持たない
+    let others: usize = counts[1..].iter().map(|&(l, _)| l).sum();
+    assert_eq!(
+        others, 0,
+        "通ったコマの塊が判定の形を持ち続ける：{counts:?}"
+    );
+}

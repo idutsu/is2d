@@ -145,7 +145,7 @@ impl<'a> LocalMap<'a> {
     pub(crate) fn poly(&self, e: usize) -> &Poly {
         match e.checked_sub(self.n_base()) {
             Some(i) => &self.added_polys[i],
-            None => self.index.stored.poly(e),
+            None => self.index.poly(e),
         }
     }
 
