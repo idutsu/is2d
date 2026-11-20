@@ -1256,17 +1256,19 @@ impl PlanarMap {
     /// 頂点は番号の小さい順に調べ、まとめたら、つながりの変わった両端の頂点だけを調べ直す（まとめた結果は、
     /// まとめるたびに最初から調べ直すのと同じ）。辺の並びは、まとめた辺を消すたびに最後の辺をそこへ移すのと同じ順にする
     pub(crate) fn merge_degree2(&mut self, candidates: impl IntoIterator<Item = usize>) {
-        self.merge_degree2_indexed(candidates, None);
+        let _ = self.merge_degree2_indexed(candidates, None);
     }
 
     /// `merge_degree2` の本体。`built`：この地図の辺の判定の形の索引と、辺の番号 → 索引の番号（曲線に戻したあとの
     /// 索引：`ChainRestorer::finish`）。無ければ初めて要るときに作る。どちらでも、まとめが索引の範囲に収まらなければ、
     /// 範囲を広げて作り直す（索引は範囲にかかる区間と頂点をみな持つので、範囲に収まる調べの答えは、索引の範囲によらない）
+    /// 戻り値は、最後に使った判定の形の索引の範囲（索引を使わなければ `None`。ほかの辺を調べたのはこの中だけ：重ね合わせを
+    /// 窓で行うとき、窓がこの範囲を覆うかを確かめる）
     fn merge_degree2_indexed(
         &mut self,
         candidates: impl IntoIterator<Item = usize>,
         built: Option<(PolyIndex, Vec<usize>)>,
-    ) {
+    ) -> Option<GridRect> {
         let mut is_cand = vec![false; self.nodes.len()];
         for v in candidates {
             is_cand[v] = true;
@@ -1422,6 +1424,7 @@ impl PlanarMap {
             }
         }
         self.edges = order.iter().map(|&i| edges[i]).collect();
+        index.and_then(|ix| ix.area)
     }
 
     /// どの辺にもつながらない頂点を消して、番号を詰める
@@ -1857,9 +1860,16 @@ impl LayerBase {
         }
     }
 
-    /// 辺 `e` がかかる、升目の索引の升目（辺の近くを探すマス `EdgeGeom::reach` の升目）
+    /// 辺 `e` がかかる、升目の索引の升目：辺の近くを探すマス（`EdgeGeom::reach`）の升目と、外接矩形（`reach_box`）にかかる
+    /// 升目。マスで探す所（`NearEdges`）も、外接矩形が重なるかで探す所（重ね合わせを窓で行うときの窓）も、その升目を引けば
+    /// 必ず見つかる
     fn edge_tiles(&self, e: usize) -> Vec<(i64, i64)> {
-        index_tiles(&self.polys()[e].reach(self.map.quad(e)).1)
+        let (bbox, cells) = self.polys()[e].reach(self.map.quad(e));
+        let mut t = index_tiles(cells);
+        t.extend(index_tiles_over(*bbox));
+        t.sort_unstable();
+        t.dedup();
+        t
     }
 
     /// 升目の索引（初めて要るときに全部作る）
@@ -2178,6 +2188,14 @@ thread_local! {
     static KEYS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// テスト用：このスレッドで、重ね合わせで i_overlay に切らせた回数（`overlay_fed`）
     pub(super) static CUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// テスト用：このスレッドで、窓で重ね合わせるとき、窓の外の辺を点の色の数えに入れた回数（`Outside`）
+    pub(super) static OUTSIDE_WINDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、窓の外の辺を点の色の数えに入れた回数
+#[cfg(test)]
+pub(crate) fn outside_winds() -> usize {
+    OUTSIDE_WINDS.with(|n| n.get())
 }
 
 /// テスト用：このスレッドで、重ね合わせで i_overlay に切らせた回数

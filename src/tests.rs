@@ -34396,20 +34396,18 @@ fn measure_edit_scaling_by_cel_size() {
     }
 }
 
-/// 段1（claude/触った所だけを計算する地図の設計_22fbbbe.md）：升目の索引を引く道（計算に使う写し `LayerBase` の
-/// 重ね合わせ・地図の編集・矩形で切る・カーソル合わせ・吸い付き）と、全部の辺・頂点を見る今までの道（索引の無い
-/// `PlanarMap`）で、結果がビットまで同じ（地図は頂点と辺の並びまで同じ）。編集のあとの写しの索引が、前の写しの索引から
+/// 段1・段2（claude/触った所だけを計算する地図の設計_22fbbbe.md）：升目の索引を引く道（計算に使う写し `LayerBase` の
+/// 重ね合わせ・地図の編集・矩形で切る・カーソル合わせ・吸い付き。形・輪郭の変形の重ね合わせは窓で行う）と、全部の辺・
+/// 頂点を見る今までの道（索引の無い `PlanarMap`）で、結果がビットまで同じ（地図はしまう形で比べる）。編集のあとの写しの索引が、前の写しの索引から
 /// 作ったもので全部作ったものと同じことは、`LayerBase::inherit_index` がテストのたびに確かめる
 #[test]
 fn index_paths_match_full_scans() {
     use crate::planar_map::{LayerBase, MapEdit, MapInput, MapRule, PlanarMap};
+    // 地図は、しまう形（頂点と辺の番号によらない形：座標・制御点・色・図形の番号がビットまで同じ）で比べる。形・輪郭の
+    // 変形の重ね合わせは窓で行うので、辺の並びは前の地図全体で行ったときと違う
     let same = |a: &PlanarMap, b: &PlanarMap| {
-        a.edges == b.edges
-            && a.nodes.len() == b.nodes.len()
-            && a.nodes
-                .iter()
-                .zip(&b.nodes)
-                .all(|(p, q)| p.x.to_bits() == q.x.to_bits() && p.y.to_bits() == q.y.to_bits())
+        crate::stored_map::StoredMap::from_dense(a, None)
+            .same_content(&crate::stored_map::StoredMap::from_dense(b, None))
     };
     let same_opt = |a: &Option<PlanarMap>, b: &Option<PlanarMap>| match (a, b) {
         (Some(a), Some(b)) => same(a, b),
@@ -34535,6 +34533,140 @@ fn index_paths_match_full_scans() {
     assert!(
         differed.is_empty(),
         "索引を引く道と全部を見る道で結果が違う（{} / {compared} 件）:\n{}",
+        differed.len(),
+        differed.join("\n")
+    );
+}
+
+/// 段2：線の多いセル画（同じ区画を 4×4 個並べた、辺 約 2.4 万本）で、形・輪郭の変形の重ね合わせを窓で行った結果が、
+/// 前の地図全体で行った結果と、しまう形でビットまで同じ。区画の中・区画をまたぐ所・大きな矩形で、ブラシ・消しゴム・
+/// 矩形で切る中と外・辺の引っぱり・頂点の移動をする。窓の外の辺を点の色の数えに入れる道も通る
+#[test]
+fn windowed_overlay_matches_full_on_large_map() {
+    use crate::planar_map::{LayerBase, MapEdit, MapInput, MapRule, PlanarMap};
+    use crate::stored_map::StoredMap;
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    let area = (-150.0, -75.0, 300.0, 150.0);
+    let mut rng = map_overlay::Rng(9);
+    let mut block = PlanarMap::default();
+    let mut k = 0;
+    while block.edges.len() < 1_500 {
+        let (r, c) = (2.0 + rng.f() * 8.0, colors[k % 4]);
+        let s = wiggly_stroke(&mut rng, area, r, c);
+        block = block
+            .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+            .unwrap();
+        k += 1;
+    }
+    let block = LayerBase::new(&block).map.clone();
+    let bb = block.bounding_box().unwrap();
+    let (dx, dy) = (bb.width() + 20.0, bb.height() + 20.0);
+    let mut m = PlanarMap::default();
+    for i in 0..4 {
+        for j in 0..4 {
+            let off = KVec2::new(i as f64 * dx, j as f64 * dy);
+            let n = m.nodes.len();
+            m.nodes.extend(block.nodes.iter().map(|&p| p + off));
+            m.edges
+                .extend(block.edges.iter().map(|e| crate::planar_map::MapEdge {
+                    a: e.a + n,
+                    b: e.b + n,
+                    ctrl: e.ctrl + off,
+                    ..*e
+                }));
+        }
+    }
+    let mut m = m.checked().unwrap().freshly_labeled().into_map();
+    let same = |a: &Option<PlanarMap>, b: &Option<PlanarMap>| match (a, b) {
+        (Some(a), Some(b)) => {
+            StoredMap::from_dense(a, None).same_content(&StoredMap::from_dense(b, None))
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    let winds_before = crate::planar_map::outside_winds();
+    let (mut compared, mut differed) = (0usize, Vec::<String>::new());
+    let total = (4.0 * dx, 4.0 * dy);
+    for step in 0..60 {
+        let base = LayerBase::new(&m);
+        let full = base.map.clone();
+        let c = colors[step % 4];
+        // 場所：区画の中か、区画の境目のあたり
+        let at = Point::new(bb.x0 + rng.f() * total.0, bb.y0 + rng.f() * total.1);
+        let kind = step % 5;
+        let (a, b): (Vec<Option<PlanarMap>>, Vec<Option<PlanarMap>>) = match kind {
+            0 | 1 => {
+                let r = 2.0 + rng.f() * 9.0;
+                let st = wiggly_stroke(&mut rng, (at.x, at.y, 60.0, 40.0), r, c);
+                let rule = if kind == 0 {
+                    MapRule::Paint(Some(c))
+                } else {
+                    MapRule::Paint(None)
+                };
+                (
+                    vec![base.overlay(MapInput::Shapes(&st), rule)],
+                    vec![full.overlay(MapInput::Shapes(&st), rule)],
+                )
+            }
+            2 => {
+                let (w, h) = (20.0 + rng.f() * 200.0, 20.0 + rng.f() * 120.0);
+                let rect = vec![map_overlay::rect_shape(at.x, at.y, at.x + w, at.y + h, c)];
+                let rules = [MapRule::KeepInside, MapRule::Paint(None)];
+                let to_vec = |r: Option<[PlanarMap; 2]>| match r {
+                    Some([i, o]) => vec![Some(i), Some(o)],
+                    None => vec![None, None],
+                };
+                (
+                    to_vec(base.overlay_rules(MapInput::Shapes(&rect), rules)),
+                    to_vec(full.overlay_rules(MapInput::Shapes(&rect), rules)),
+                )
+            }
+            _ => {
+                let e = (rng.f() * full.edges.len() as f64) as usize % full.edges.len();
+                let q = full.quad(e);
+                let ang = rng.f() * std::f64::consts::TAU;
+                let d = KVec2::new(ang.cos(), ang.sin()) * (0.5 + rng.f() * 10.0);
+                let edit = if kind == 3 {
+                    MapEdit::PullEdge {
+                        orig_seg: q,
+                        grab_t: 0.5,
+                        target: q.eval(0.5) + d,
+                    }
+                } else {
+                    MapEdit::MoveVertex {
+                        orig_vertex: q.p0,
+                        target: q.p0 + d,
+                    }
+                };
+                (vec![base.apply_edit(edit)], vec![edit.apply(&full)])
+            }
+        };
+        for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+            compared += 1;
+            if !same(x, y) {
+                differed.push(format!("step {step} kind {kind} [{i}]: 地図が違う"));
+            }
+        }
+        // 次の地図：外の結果（矩形なら外）のうち正しいもの
+        if let Some(n) = a.into_iter().flatten().last() {
+            if let Some(c) = n.checked() {
+                m = c.uniquely_labeled().into_map();
+            }
+        }
+    }
+    assert!(compared >= 60, "比べた数 {compared}");
+    assert!(
+        crate::planar_map::outside_winds() > winds_before,
+        "窓の外の辺を点の色の数えに入れる道を通っていない"
+    );
+    assert!(
+        differed.is_empty(),
+        "窓で行った結果と前の地図全体で行った結果が違う（{} / {compared} 件）:\n{}",
         differed.len(),
         differed.join("\n")
     );
