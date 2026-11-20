@@ -164,9 +164,9 @@ pub(crate) enum HoverTarget {
         /// 頂点のある輪郭（`shape_id` の図形の何番目の輪郭か。ワイヤーフレームで、その輪郭の頂点を出す）
         contour_idx: usize,
         pos: Point,
-        /// 地図の頂点（どの地図か, 頂点の番号, 文書の座標の位置）。`pos` はステージの座標の位置（表示と距離）、編集
-        /// （`MapEdit`）は文書の座標の位置で頂点を探す
-        map_node: Option<(MapOwner, usize, Point)>,
+        /// 地図の頂点（どの地図か, 文書の座標の位置）。`pos` はステージの座標の位置（表示と距離）、編集（`MapEdit`）は
+        /// 文書の座標の位置で頂点を探す
+        map_node: Option<(MapOwner, Point)>,
     },
     Edge {
         shape_id: ShapeId,
@@ -206,12 +206,11 @@ pub(crate) enum SelectDragState {
         target: Point,
         orig_seg: QuadBez,
     },
-    /// 地図の頂点 `node`（`orig_vertex` にある）を `target` へ動かす（位置は地図の文書の座標）
+    /// 地図の `orig_vertex` にある頂点を `target` へ動かす（位置は地図の文書の座標）
     MoveVertex {
         layer_id: LayerId,
         group_path: Vec<u64>,
         base: Arc<LayerBase>,
-        node: usize,
         orig_vertex: Point,
         target: Point,
         /// 吸い付いた頂点の、ステージの座標の位置（表示）

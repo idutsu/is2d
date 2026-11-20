@@ -230,7 +230,7 @@ pub(crate) fn start_reshape_drag(
     }
     match target {
         HoverTarget::Vertex {
-            map_node: Some((MapOwner::Layer(layer_id), node, orig_vertex)),
+            map_node: Some((MapOwner::Layer(layer_id), orig_vertex)),
             ..
         } => {
             let tab = host.tab_mut();
@@ -241,7 +241,6 @@ pub(crate) fn start_reshape_drag(
                 layer_id,
                 group_path,
                 base,
-                node,
                 orig_vertex,
                 target: orig_vertex,
                 snapped_to: None,
@@ -298,12 +297,11 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
             layer_id,
             group_path,
             base,
-            node,
             orig_vertex,
             target,
             snapped_to,
         }) => {
-            let snap = base.snap_target(*node, pt, snap_radius, xform);
+            let snap = base.snap_target(*orig_vertex, pt, snap_radius, xform);
             *target = snap.unwrap_or_else(|| xform.inverse() * pt);
             *snapped_to = snap.map(|p| xform * p);
             Some((

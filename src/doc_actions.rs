@@ -1237,7 +1237,7 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         SelectSubMode::Reshape,
     );
     let HoverTarget::Vertex {
-        map_node: Some((MapOwner::Layer(layer_id), _, orig_vertex)),
+        map_node: Some((MapOwner::Layer(layer_id), orig_vertex)),
         ..
     } = target
     else {
@@ -1275,7 +1275,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         (
             false,
             HoverTarget::Vertex {
-                map_node: Some((owner, _, orig_vertex)),
+                map_node: Some((owner, orig_vertex)),
                 ..
             },
         ) => Some((owner, MapEdit::DeleteAnchor { orig_vertex })),

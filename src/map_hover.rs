@@ -7,7 +7,7 @@ use std::sync::Arc;
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{HoverTarget, MapOwner, Scene, Session};
-use crate::planar_map::{is_map_shape, parallel_map, LayerBase};
+use crate::planar_map::{is_map_shape, parallel_map, LayerBase, MapEdit};
 use crate::vector_engine::{quad_deriv, FillShape, LayerId, ShapeId};
 
 /// 1つのレイヤーの、編集中の階層の生の図形から作った地図
@@ -25,14 +25,19 @@ pub(crate) struct LayerMap {
 }
 
 impl LayerMap {
-    /// 辺 `e` の、置いた座標の形
-    fn placed_quad(&self, e: usize) -> QuadBez {
-        self.xform * self.base.map().quad(e)
+    /// 辺 `e`（計算に使う地図での番号）の、文書の座標の形（塊から引く。地図全体の写しを作らない）
+    fn quad(&self, e: usize) -> QuadBez {
+        self.base.stored.edge_at(e).quad()
     }
 
-    /// 頂点 `v` の、置いた座標の位置
-    fn placed_node(&self, v: usize) -> Point {
-        self.xform * self.base.map().nodes[v]
+    /// 辺 `e` の、置いた座標の形
+    fn placed_quad(&self, e: usize) -> QuadBez {
+        self.xform * self.quad(e)
+    }
+
+    /// 頂点（文書の座標の位置 `v`）の、置いた座標の位置
+    fn placed_node(&self, v: Point) -> Point {
+        self.xform * v
     }
 }
 
@@ -110,16 +115,13 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     built
 }
 
-/// 地図 `lm` の頂点 `v` を通る面の図形と、その図形の輪郭のうち `v` を通るものの番号。カーソルを合わせた頂点の輪郭を
-/// 見せるのに使う。面が無ければ番号 0
-fn node_on_shape(scene: Scene<'_>, lm: &LayerMap, v: usize) -> (ShapeId, usize) {
-    let map = lm.base.map();
-    let Some(id) = map
-        .edges
-        .iter()
-        .filter(|e| e.a == v || e.b == v)
-        .find_map(|e| e.left_src.or(e.right_src))
-    else {
+/// 地図 `lm` の頂点（文書の座標の位置 `v`）を通る面の図形と、その図形の輪郭のうち `v` を通るものの番号。カーソルを
+/// 合わせた頂点の輪郭を見せるのに使う。面が無ければ番号 0
+fn node_on_shape(scene: Scene<'_>, lm: &LayerMap, v: Point) -> (ShapeId, usize) {
+    let Some(id) = lm.base.edges_at_node(v).into_iter().find_map(|e| {
+        let te = lm.base.stored.edge_at(e);
+        te.left_src.or(te.right_src)
+    }) else {
         return (0, 0);
     };
     let p = lm.placed_node(v);
@@ -182,24 +184,27 @@ fn anchor_hover_in(
             let d = (p - mouse_pt).hypot();
             if best.as_ref().is_none_or(|b| d < b.0)
                 && !hidden_by_front(scene, session, lm, p)
-                && lm.base.map().with_anchor_added(e, t).is_some()
+                && lm.base.anchor_possible(MapEdit::AddAnchor {
+                    orig_seg: lm.quad(e),
+                    t,
+                })
             {
                 best = Some((d, lm, e, t));
             }
         }
         return best.map_or(HoverTarget::None, |(_, lm, e, t)| {
             let q = lm.placed_quad(e);
-            let ed = lm.base.map().edges[e];
+            let ed = lm.base.stored.edge_at(e);
             HoverTarget::Edge {
                 shape_id: ed.left_src.or(ed.right_src).unwrap_or(0),
                 t,
                 closest_pos: q.eval(t),
                 seg: q,
-                map_edge: Some((lm.owner, lm.base.map().quad(e))),
+                map_edge: Some((lm.owner, lm.quad(e))),
             }
         });
     }
-    let mut best: Option<(f64, &LayerMap, usize)> = None;
+    let mut best: Option<(f64, &LayerMap, Point)> = None;
     for lm in maps {
         let Some(v) = lm.base.hit_node(mouse_pt, r, lm.xform) else {
             continue;
@@ -208,7 +213,9 @@ fn anchor_hover_in(
         let d = (p - mouse_pt).hypot();
         if best.as_ref().is_none_or(|b| d < b.0)
             && !hidden_by_front(scene, session, lm, p)
-            && lm.base.map().with_anchor_deleted(v).is_some()
+            && lm
+                .base
+                .anchor_possible(MapEdit::DeleteAnchor { orig_vertex: v })
         {
             best = Some((d, lm, v));
         }
@@ -219,7 +226,7 @@ fn anchor_hover_in(
             shape_id,
             contour_idx,
             pos: lm.placed_node(v),
-            map_node: Some((lm.owner, v, lm.base.map().nodes[v])),
+            map_node: Some((lm.owner, v)),
         }
     })
 }
@@ -261,7 +268,7 @@ pub(crate) fn reshape_hover(
     let (vertex_r, inner_r, outer_r) = (9.0 * inv_z, 5.5 * inv_z, 9.5 * inv_z);
     let maps = scope_maps(scene, session);
     let hidden = |lm: &LayerMap, p: Point| hidden_by_front(scene, session, lm, p);
-    let mut best_v: Option<(f64, &LayerMap, usize)> = None;
+    let mut best_v: Option<(f64, &LayerMap, Point)> = None;
     for lm in &maps.maps {
         if let Some(v) = lm.base.hit_node(mouse_pt, vertex_r, lm.xform) {
             let p = lm.placed_node(v);
@@ -277,7 +284,7 @@ pub(crate) fn reshape_hover(
             shape_id,
             contour_idx,
             pos: lm.placed_node(v),
-            map_node: Some((lm.owner, v, lm.base.map().nodes[v])),
+            map_node: Some((lm.owner, v)),
         };
     }
     let mut best_e: Option<(f64, &LayerMap, usize, f64, ShapeId)> = None;
@@ -292,7 +299,7 @@ pub(crate) fn reshape_hover(
         // 辺の左右は地図の座標で決まる（裏返して置いた地図では、置いた座標の左右と逆になる）
         let on_left = ((mouse_pt - p).dot(KVec2::new(-tan.y, tan.x)) >= 0.0)
             == (lm.xform.determinant() >= 0.0);
-        let ed = lm.base.map().edges[e];
+        let ed = lm.base.stored.edge_at(e);
         let (side, side_src) = if on_left {
             (ed.left, ed.left_src)
         } else {
@@ -311,7 +318,7 @@ pub(crate) fn reshape_hover(
             t,
             closest_pos: q.eval(t),
             seg: q,
-            map_edge: Some((lm.owner, lm.base.map().quad(e))),
+            map_edge: Some((lm.owner, lm.quad(e))),
         };
     }
     HoverTarget::None

@@ -2488,15 +2488,7 @@ impl LayerBase {
             let q = stored.edge_at(e).quad();
             KRect::from_points(q.p0, q.p2).union_pt(q.p1)
         };
-        let edges_at = |p: Point| -> Vec<usize> {
-            let mut at: Vec<usize> = Vec::new();
-            ix.ends.edges_in(stored, end_key(p), &mut at);
-            at.retain(|&e| {
-                let te = stored.edge_at(e);
-                te.a == p || te.b == p
-            });
-            at
-        };
+        let edges_at = |p: Point| self.edges_at_node(p);
         let side_edges: std::collections::BTreeSet<usize> = halves.iter().map(|h| h.0).collect();
         // 消える辺（塗ったあとに両側が同じ色になる辺）と、その端につながる辺の外形
         let mut region: Option<KRect> = None;
@@ -2609,17 +2601,7 @@ impl LayerBase {
         const WINDOW_PAD: f64 = 2.0;
         let ix = self.map_index();
         let stored = &self.stored;
-        let edges_at = |p: Point| -> Vec<usize> {
-            let mut at: Vec<usize> = Vec::new();
-            ix.ends.edges_in(stored, end_key(p), &mut at);
-            at.sort_unstable();
-            at.dedup();
-            at.retain(|&e| {
-                let te = stored.edge_at(e);
-                te.a == p || te.b == p
-            });
-            at
-        };
+        let edges_at = |p: Point| self.edges_at_node(p);
         // 関わる辺
         let involved: Vec<usize> = match edit {
             MapEdit::AddAnchor { orig_seg, .. } => vec![stored.find_edge(&orig_seg)?.0],
@@ -3040,28 +3022,84 @@ impl LayerBase {
     }
 
     /// `PlanarMap::hit_node` を、升目の索引で（見る頂点を、点のまわりの升目にかかる辺の端だけにする。答えは同じ）
-    pub(crate) fn hit_node(&self, p: Point, r: f64, xform: Affine) -> Option<usize> {
-        self.map()
-            .node_finder_in(r, xform, KRect::from_points(p, p), Some(self.map_index()))(
-            p, None
-        )
+    pub(crate) fn hit_node(&self, p: Point, r: f64, xform: Affine) -> Option<Point> {
+        self.nearest_node(p, r, xform, None)
     }
 
-    /// `PlanarMap::snap_target` を、升目の索引で（答えは同じ）
+    /// `PlanarMap::snap_target` を、升目の索引で（動かす頂点は位置 `skip` で渡す）
     pub(crate) fn snap_target(
         &self,
-        v: usize,
+        skip: Point,
         p: Point,
         radius: f64,
         xform: Affine,
     ) -> Option<Point> {
-        let near = self.map().node_finder_in(
-            radius,
-            xform,
-            KRect::from_points(p, p),
-            Some(self.map_index()),
-        );
-        near(p, Some(v)).map(|w| self.map().nodes[w])
+        self.nearest_node(p, radius, xform, Some(skip))
+    }
+
+    /// 地図を座標の変換 `xform` で置いたとき、点 `p`（置いた座標）から `radius` 以内でいちばん近い頂点の位置（文書の
+    /// 座標。位置が `skip` の頂点は除く）。頂点は、点のまわりの端の升目の索引にある辺の端から引く（地図全体の写しを
+    /// 作らない：設計 段2b の 7. の 2b-7d）。同じ距離の頂点は、座標の順で先のもの
+    fn nearest_node(
+        &self,
+        p: Point,
+        radius: f64,
+        xform: Affine,
+        skip: Option<Point>,
+    ) -> Option<Point> {
+        if xform.determinant().abs() <= 0.0 {
+            let m = self.map();
+            let skip_v = skip.and_then(|s| m.nodes.iter().position(|&q| q == s));
+            return m.node_finder_in(radius, xform, KRect::from_points(p, p), None)(p, skip_v)
+                .map(|v| m.nodes[v]);
+        }
+        let area = KRect::from_points(p, p).inflate(radius, radius);
+        let doc_area = xform.inverse().transform_rect_bbox(area);
+        let ix = self.map_index();
+        let mut edges: Vec<usize> = Vec::new();
+        for t in end_keys_over(doc_area) {
+            ix.ends.edges_in(ix.stored, t, &mut edges);
+        }
+        let mut pts: Vec<Point> = edges
+            .iter()
+            .flat_map(|&e| {
+                let te = self.stored.edge_at(e);
+                [te.a, te.b]
+            })
+            .collect();
+        pts.sort_by(|a, b| point_order(*a, *b));
+        pts.dedup();
+        let mut best: Option<(f64, Point)> = None;
+        for v in pts {
+            if Some(v) == skip {
+                continue;
+            }
+            let d = (xform * v - p).hypot();
+            if d <= radius && best.is_none_or(|b| d < b.0) {
+                best = Some((d, v));
+            }
+        }
+        best.map(|b| b.1)
+    }
+
+    /// 頂点 `p`（文書の座標）を端に持つ辺（計算に使う地図での番号の順）。端の升目の索引で引く
+    pub(crate) fn edges_at_node(&self, p: Point) -> Vec<usize> {
+        let ix = self.map_index();
+        let mut at: Vec<usize> = Vec::new();
+        ix.ends.edges_in(&self.stored, end_key(p), &mut at);
+        at.sort_unstable();
+        at.dedup();
+        at.retain(|&e| {
+            let te = self.stored.edge_at(e);
+            te.a == p || te.b == p
+        });
+        at
+    }
+
+    /// アンカーの追加・削除 `edit` ができるか（`anchor_diff` が差分を作れるか：今の `with_anchor_added`・
+    /// `with_anchor_deleted` が形を返すか）
+    pub(crate) fn anchor_possible(&self, edit: MapEdit) -> bool {
+        self.anchor_diff(edit).is_some()
     }
 
     /// `PlanarMap::hit_edge` を、升目の索引で（見る辺を、点のまわりの升目にかかる辺だけにする。`p` から `r` 以内を通る
@@ -3078,7 +3116,18 @@ impl LayerBase {
         }
         cands.sort_unstable();
         cands.dedup();
-        self.map().hit_edge_among(p, r, xform, cands.into_iter())
+        // `PlanarMap::hit_edge_among` と同じ（辺は塊から引く）
+        cands
+            .into_iter()
+            .map(|e| (e, xform * self.stored.edge_at(e).quad()))
+            .filter(|(_, q)| rects_overlap(q.bounding_box(), near))
+            .map(|(e, q)| {
+                let (t, d) = nearest_on_quad(&q, p);
+                (e, t, d)
+            })
+            .filter(|x| x.2 <= r)
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|(e, t, _)| (e, t))
     }
 
     /// 辺の鍵（`edge_key`）の集まり（初めて要るときに作る）。書き戻す地図の確かめ（`PlanarMap::written`）と、書き戻しの

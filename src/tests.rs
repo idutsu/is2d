@@ -34506,14 +34506,17 @@ fn index_paths_match_full_scans() {
                     let p = xf * Point::new(100.0 + rng.f() * 300.0, 100.0 + rng.f() * 200.0);
                     let r = 1.0 + rng.f() * 12.0;
                     compared += 1;
-                    if base.hit_node(p, r, xf) != full.hit_node(p, r, xf)
+                    // 頂点は位置で比べる（写しの道は、地図全体の頂点の番号を使わない）
+                    if base.hit_node(p, r, xf) != full.hit_node(p, r, xf).map(|v| full.nodes[v])
                         || base.hit_edge(p, r, xf) != full.hit_edge(p, r, xf)
                     {
                         differed.push(format!("seed {seed} step {step}: カーソル合わせが違う"));
                     }
                     if !full.nodes.is_empty() {
                         let v = (rng.f() * full.nodes.len() as f64) as usize % full.nodes.len();
-                        if base.snap_target(v, p, r, xf) != full.snap_target(v, p, r, xf) {
+                        if base.snap_target(full.nodes[v], p, r, xf)
+                            != full.snap_target(v, p, r, xf)
+                        {
                             differed.push(format!("seed {seed} step {step}: 吸い付きが違う"));
                         }
                     }
