@@ -462,7 +462,17 @@ impl PlanarMap {
         }
         // 計算に使う写しの升目の索引があれば、形・輪郭の変形は窓で行う（結果は前の地図全体で行ったときと同じ）
         if let (Some(ix), MapInput::Shapes(_) | MapInput::Sweep(_)) = (index, input) {
-            return self.overlay_windowed(known, ix, input, rules, &new_quads, &new_cols);
+            let got = self.overlay_windowed(known, ix, input, rules, &new_quads, &new_cols);
+            // お手本（設計 段2b の 0.）：テストでは毎回、前の地図全体で重ねた結果と比べる
+            #[cfg(test)]
+            if super::test_checks() {
+                let same = super::uncounted(|| {
+                    let full = self.overlay_rules_known(known, None, input, rules);
+                    super::same_results(got.as_ref().map(|m| &m[..]), full.as_ref().map(|m| &m[..]))
+                });
+                assert!(same, "窓で重ねた結果が、前の地図全体で重ねた結果（お手本）と違う");
+            }
+            return got;
         }
         // 重ねる地図の辺も、前からある辺と同じ決まりで入れるかを決める（入れない辺はそのまま写し、色だけ決める）。そのために
         // 2つの地図の辺を1つに並べる（前からある辺が 0..n_old、重ねる地図の辺がその後ろ）。形と輪郭の変形の線はみな入れる

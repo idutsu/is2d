@@ -1638,6 +1638,49 @@ fn labeled(mut map: PlanarMap, faces: &[MapFace], ids: &[ShapeId]) -> PlanarMap 
     map
 }
 
+/// お手本との比べ（設計 段2b の 0.）：2つの結果の地図の並びが、しまう形（頂点と辺の番号によらない形：座標・制御点・
+/// 色・図形の番号がビットまで同じ）で同じか。どちらも無い（重ねられない）のも同じ
+#[cfg(test)]
+pub(crate) fn same_results(a: Option<&[PlanarMap]>, b: Option<&[PlanarMap]>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            a.len() == b.len()
+                && a.iter().zip(b).all(|(x, y)| {
+                    StoredMap::from_dense(x, None).same_content(&StoredMap::from_dense(y, None))
+                })
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// お手本の計算 `f` を、手間を数える試しの数に入れずに行う（このスレッドの数を、行う前の値に戻す）
+#[cfg(test)]
+pub(crate) fn uncounted<R>(f: impl FnOnce() -> R) -> R {
+    type Counter = std::thread::LocalKey<std::cell::Cell<usize>>;
+    let counters: [&'static Counter; 13] = [
+        &FROM_SHAPES,
+        &FULL_CHECKS,
+        &DENSE_BUILDS,
+        &FED_RUNS,
+        &INDEX_BUILDS,
+        &POLYS_BUILT,
+        &REACHES_BUILT,
+        &VERTICES_SORTED,
+        &RINGS_BUILT,
+        &KEYS_BUILT,
+        &CUTS,
+        &OUTSIDE_WINDS,
+        &crate::stored_map::EDGES_SORTED,
+    ];
+    let saved: Vec<usize> = counters.iter().map(|c| c.with(|n| n.get())).collect();
+    let out = f();
+    for (c, v) in counters.iter().zip(saved) {
+        c.with(|n| n.set(v));
+    }
+    out
+}
+
 /// テストで、書くたびに地図を確かめるか（速さを測る試しでは、環境変数 `IS2D_NO_CHECKS` で外す）
 #[cfg(test)]
 pub(crate) fn test_checks() -> bool {
