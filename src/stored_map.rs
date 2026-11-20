@@ -647,6 +647,63 @@ impl StoredMap {
 
     /// この地図に差分を当てた地図：計算に使う地図の辺 `removed` を消し、辺 `added` を足す（`with_diff` と同じ。足す辺を
     /// 塊の辺の形で受け取る）
+    /// この地図から地図 `other` への差分：消えた辺（この地図の、計算に使う地図での番号）と増えた辺。2つの地図が共有する
+    /// 塊（同じ升目で同じ塊）は比べない（手間は、共有しない塊の分。`other` がこの地図に差分を当てて作ったものなら、変わった
+    /// 塊の分）。共有しない塊どうしは、中身が同じ辺を除く
+    pub(crate) fn diff_tiles(&self, other: &StoredMap) -> (Vec<usize>, Vec<TileEdge>) {
+        let (a, b) = (&self.0.tiles, &other.0.tiles);
+        let starts = self.starts();
+        let mut removed: Vec<usize> = Vec::new();
+        let mut added: Vec<TileEdge> = Vec::new();
+        let to_tile_edge = |se: &StoredEdge| TileEdge {
+            a: se.a,
+            b: se.b,
+            ctrl: se.ctrl,
+            left: se.left,
+            right: se.right,
+            left_src: se.left_src.map(NonZeroU64::get),
+            right_src: se.right_src.map(NonZeroU64::get),
+        };
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < a.len() || j < b.len() {
+            let ka = a.get(i).map(|t| t[0].tile());
+            let kb = b.get(j).map(|t| t[0].tile());
+            match (ka, kb) {
+                (Some(x), Some(y)) if x == y => {
+                    if !Arc::ptr_eq(&a[i], &b[j]) {
+                        let olds: std::collections::HashSet<&StoredEdge> = a[i].iter().collect();
+                        let news: std::collections::HashSet<&StoredEdge> = b[j].iter().collect();
+                        for (k, se) in a[i].iter().enumerate() {
+                            if !news.contains(se) {
+                                removed.push(starts[i] as usize + k);
+                            }
+                        }
+                        added.extend(
+                            b[j].iter()
+                                .filter(|se| !olds.contains(se))
+                                .map(to_tile_edge),
+                        );
+                    }
+                    i += 1;
+                    j += 1;
+                }
+                (Some(x), Some(y)) if x < y => {
+                    removed.extend((0..a[i].len()).map(|k| starts[i] as usize + k));
+                    i += 1;
+                }
+                (Some(_), None) => {
+                    removed.extend((0..a[i].len()).map(|k| starts[i] as usize + k));
+                    i += 1;
+                }
+                _ => {
+                    added.extend(b[j].iter().map(to_tile_edge));
+                    j += 1;
+                }
+            }
+        }
+        (removed, added)
+    }
+
     pub(crate) fn with_diff_tiles(&self, removed: &[usize], added: &[TileEdge]) -> Self {
         let starts = self.starts();
         let tiles = &self.0.tiles;

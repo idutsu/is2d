@@ -241,11 +241,22 @@ impl FloatLayer {
         stacked(start, groups.iter().map(PieceGroup::placed))?.checked()
     }
 
+    #[cfg(test)]
     /// 確定した地図：中身の地図に、片の組を下から順に重ねる（組ごとに変換をかけて、その座標の格子で正しい地図にする：
     /// `realized`）。`None`：格子に置けない座標がある
     pub(crate) fn committed(&self, cel: &Arc<LayerBase>) -> Option<PlanarMap> {
         self.content(cel)
             .stacked(self.groups.iter().map(PieceGroup::placed))
+    }
+
+    /// 確定した地図のしまう形（`committed` と同じ答え。片の組を1枚ずつ窓で重ねる：`LayerBase::stacked_local`。中身の
+    /// 地図と塊を共有する）。`None`：格子に置けない座標がある
+    pub(crate) fn committed_local(
+        &self,
+        cel: &Arc<LayerBase>,
+    ) -> Option<crate::stored_map::StoredMap> {
+        self.content(cel)
+            .stacked_local(self.groups.iter().map(PieceGroup::placed))
     }
 }
 

@@ -529,12 +529,12 @@ pub(crate) fn prepare_group_selected_shapes(
         pieces
             .into_iter()
             .map(|(layer_id, map)| {
+                // 新しい階層の地図を片の地図にする差分を、1本の道の差分から先に渡す（`LayerBase::replace_local`）
                 let cel = cache.cel(layer_id)?;
                 let base = cel.scope_base(&group_path);
-                match cel.outcome(&group_path, map.written(&base)?) {
-                    crate::timeline::MapOutcome::Changed(map, shapes) => {
-                        Some((layer_id, map, shapes))
-                    }
+                let next = crate::stored_map::StoredMap::from_dense(&map, Some(&base.stored));
+                match base.replace_local(&next, &group_path) {
+                    crate::planar_map::LocalEdit::Changed(w) => Some((layer_id, w, base)),
                     _ => None,
                 }
             })

@@ -328,8 +328,13 @@ pub(crate) fn merge_pieces_layer_by_layer(
     }
 }
 
-/// 浮いた片の確定で書くもの（`plan_commit`）：レイヤーごとの、書く地図と面の図形（変わるレイヤーだけ）
-pub(crate) type CommitPlan = Vec<(LayerId, crate::planar_map::CheckedMap, Vec<Arc<FillShape>>)>;
+/// 浮いた片の確定で書くもの（`plan_commit`）：レイヤーごとの、1本の道の書くもの（`LocalWrite`）と、それを作った前の
+/// 地図の写し（升目の索引を、変わった所だけ作り直すため：`Cel::put_local`）。変わるレイヤーだけ
+pub(crate) type CommitPlan = Vec<(
+    LayerId,
+    crate::planar_map::LocalWrite,
+    Arc<crate::planar_map::LayerBase>,
+)>;
 
 /// 浮いた片 `fl` を確定するときに書くもの（文書を変えない）：レイヤーごとに、残りの地図（無ければセル画の地図）に片の組
 /// を下から順に重ねた地図（`FloatLayer::committed`）を、今の階層の地図にするとき何を書くか（`Cel::outcome`）。重ねる
@@ -338,25 +343,28 @@ pub(crate) type CommitPlan = Vec<(LayerId, crate::planar_map::CheckedMap, Vec<Ar
 /// 片はいつも文書か浮いた片のどちらかにあり、黙って消えない）。片の組の変換はかける前に確定と同じ式で確かめてある（変形
 /// は `Floating::fits_transform`、新しい中身は `prepare_placement`）
 pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
-    use crate::timeline::MapOutcome;
+    use crate::planar_map::LocalEdit;
     tab.refresh_scene_base();
     let scope = tab.session.editing_group_path.clone();
     let editable = editable_layer_ids(tab);
-    let outcomes: Vec<Option<MapOutcome>> = {
+    // 1本の道（設計 段2b の 11. の F2）：片を窓で重ねたしまう形（`committed_local`）とセル画のしまう形の違いを差分にして、
+    // 差分から先（`apply_diff`）に渡す
+    let outcomes: Vec<Option<(LocalEdit, Arc<crate::planar_map::LayerBase>)>> = {
         let cache = &tab.session.base_cache;
         crate::planar_map::parallel_map(fl.layers(), |l| {
             let cel = cache.cel(l.layer_id)?;
             let base = cel.scope_base(&scope);
-            let next = l.committed(&base)?.written(&base)?;
-            Some(cel.outcome(&scope, next))
+            let next = l.committed_local(&base)?;
+            let r = base.replace_local(&next, &scope);
+            Some((r, base))
         })
     };
     let mut plan = CommitPlan::new();
     for (l, outcome) in fl.layers().iter().zip(outcomes) {
         match outcome {
-            Some(MapOutcome::Same) if editable.contains(&l.layer_id) => {}
-            Some(MapOutcome::Changed(map, shapes)) if editable.contains(&l.layer_id) => {
-                plan.push((l.layer_id, map, shapes));
+            Some((LocalEdit::Same, _)) if editable.contains(&l.layer_id) => {}
+            Some((LocalEdit::Changed(w), base)) if editable.contains(&l.layer_id) => {
+                plan.push((l.layer_id, w, base));
             }
             _ => {
                 tab.session.refusal = Some(Refusal::Unplaceable);
@@ -376,10 +384,10 @@ pub(crate) fn write_commit(tab: &mut Tab, plan: CommitPlan) -> bool {
 /// 先に決めた地図と面の図形 `plan`（レイヤーごと）を、階層 `scope` の地図に書く。戻り値は、セル画を書き換えたか
 pub(crate) fn write_maps(tab: &mut Tab, scope: &[u64], plan: CommitPlan) -> bool {
     let mut written: Vec<LayerId> = Vec::new();
-    for (layer_id, map, shapes) in plan {
+    for (layer_id, w, prev) in plan {
         let mut held = None;
         if write_cel(tab, layer_id, |cel| {
-            held = cel.put_map(scope, map, shapes);
+            held = cel.put_local(scope, w, &prev);
             true
         }) {
             written.push(layer_id);

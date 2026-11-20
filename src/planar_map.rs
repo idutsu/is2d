@@ -1640,8 +1640,10 @@ fn labeled(mut map: PlanarMap, faces: &[MapFace], ids: &[ShapeId]) -> PlanarMap 
     map
 }
 
-/// テスト用：地図 `m` の辺 `edges` を、塊の辺の形にする（差分を当てる `StoredMap::with_diff_tiles` に渡して、お手本と比べる）
-#[cfg(test)]
+/// 差分（窓の結果, 消えた辺, 増えた辺）：`LayerBase::apply_diff` に渡すもの
+type LocalDiff = (PlanarMap, Vec<usize>, Vec<usize>);
+
+/// 地図 `m` の辺 `edges` を、塊の辺の形にする（差分を当てる `StoredMap::with_diff_tiles` に渡すため）
 fn tile_edges_of(m: &PlanarMap, edges: &[usize]) -> Vec<crate::stored_map::TileEdge> {
     edges
         .iter()
@@ -1673,6 +1675,7 @@ pub(crate) struct LocalChange<'a> {
 enum ChangeInput<'a> {
     Shapes(&'a [FillShape]),
     Sweep(Vec<(usize, QuadBez)>),
+    Map(&'a PlanarMap),
 }
 
 impl LocalChange<'_> {
@@ -1680,6 +1683,7 @@ impl LocalChange<'_> {
         match &self.input {
             ChangeInput::Shapes(s) => MapInput::Shapes(s),
             ChangeInput::Sweep(m) => MapInput::Sweep(m),
+            ChangeInput::Map(p) => MapInput::Map(p),
         }
     }
 }
@@ -2232,20 +2236,132 @@ impl LayerBase {
     }
 
     fn edit_local_inner(&self, change: &LocalChange<'_>, group_path: &[u64]) -> LocalEdit {
-        if change.quads.is_empty() {
-            return LocalEdit::Same;
+        match self.overlay_diff(change) {
+            Ok(None) => LocalEdit::Same,
+            Ok(Some((m, removed, added))) => self.apply_diff(&m, &removed, &added, group_path),
+            Err(r) => LocalEdit::Refused(r),
         }
-        let rule = change.rule;
-        let (input, new_quads) = (change.input(), &change.quads);
+    }
+
+    /// 重ね合わせの差分（`edit_local` が差分から先に渡すもの）：窓で重ね（`window_overlay`）、窓の結果と窓の辺の違いを
+    /// 差分にする。（窓の結果, 消えた辺, 増えた辺）。重ねるものが無ければ `None`。`Err`：格子に置けない
+    fn overlay_diff(&self, change: &LocalChange<'_>) -> Result<Option<LocalDiff>, LocalRefusal> {
+        if change.quads.is_empty() {
+            return Ok(None);
+        }
         let ix = self.map_index();
-        let Some((maps, wedges)) =
-            PlanarMap::window_overlay(ix, input, &[rule], new_quads, &change.cols)
-        else {
-            return LocalEdit::Refused(LocalRefusal::OffGrid);
+        let (maps, wedges) = PlanarMap::window_overlay(
+            ix,
+            change.input(),
+            &[change.rule],
+            &change.quads,
+            &change.cols,
+        )
+        .ok_or(LocalRefusal::OffGrid)?;
+        let [m]: [PlanarMap; 1] = maps.try_into().expect("決まりごとに1つの地図");
+        let (removed, added) = self.stored.window_diff_tiles(&wedges, &m);
+        Ok(Some((m, removed, added)))
+    }
+
+    /// 道具の側（片を置く・貼り付け）：地図 `p` を重ねる（`MapRule::Overlay`）とき、重ね合わせに渡すもの
+    pub(crate) fn map_change<'a>(&self, p: &'a PlanarMap) -> LocalChange<'a> {
+        LocalChange {
+            input: ChangeInput::Map(p),
+            quads: (0..p.edges.len()).map(|e| p.quad(e)).collect(),
+            cols: p.edges.iter().map(|e| (e.left, e.right)).collect(),
+            rule: MapRule::Overlay,
+        }
+    }
+
+    /// この写しの地図に、地図 `maps` を下から順に重ねた地図のしまう形（`stacked` と同じ答え。1枚ずつ窓で重ね、差分を
+    /// しまう形に当て、升目の索引も変わった所だけ作り直して次を重ねる）。地図が空なら、重ねる地図をそのまま使う
+    /// （`stacked` と同じ）。`None`：格子に置けない・重ねる地図が無い（`maps` の中の `None`）
+    pub(crate) fn stacked_local(
+        self: &Arc<Self>,
+        maps: impl IntoIterator<Item = Option<PlanarMap>>,
+    ) -> Option<StoredMap> {
+        let maps: Vec<Option<PlanarMap>> = maps.into_iter().collect();
+        let got = self.stacked_local_inner(&maps);
+        #[cfg(test)]
+        if test_checks() {
+            // お手本：地図全体で1枚ずつ重ねる（`stacked`）。ただし、重ねた途中の地図は、しまう形の辺の向きにしてから次を
+            // 重ねる（重ね合わせの答えは、辺と頂点の番号にはよらないが、辺の向きにはよることがある：段0 のテスト
+            // edits_do_not_depend_on_edge_and_node_numbering の前提。セル画の地図はいつもしまう形の向きなので、1枚目は
+            // これまでの道と同じ。2枚目からは、途中の地図の向きが重ね合わせの出した向きのままだった前の道と違いうる）
+            let ok = uncounted(|| {
+                let mut full = Some(self.map().clone());
+                for m in &maps {
+                    full = full.and_then(|c| {
+                        let m = m.as_ref()?;
+                        let n = if c.edges.is_empty() {
+                            m.clone()
+                        } else {
+                            c.overlay(MapInput::Map(m), MapRule::Overlay)?
+                        };
+                        Some(StoredMap::from_dense(&n, None).to_dense())
+                    });
+                }
+                match (&got, full) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a.same_content(&StoredMap::from_dense(&b, None)),
+                    _ => false,
+                }
+            });
+            assert!(
+                ok,
+                "片を1枚ずつ窓で重ねたしまう形が、地図全体で重ねた地図（お手本）と違う"
+            );
+        }
+        got
+    }
+
+    fn stacked_local_inner(self: &Arc<Self>, maps: &[Option<PlanarMap>]) -> Option<StoredMap> {
+        let mut cur: Arc<LayerBase> = Arc::clone(self);
+        for m in maps {
+            let m = m.as_ref()?;
+            let stored = if cur.stored.edge_count() == 0 {
+                StoredMap::from_dense(m, Some(&cur.stored))
+            } else {
+                match cur.overlay_diff(&cur.map_change(m)) {
+                    Ok(None) => continue,
+                    Ok(Some((w, removed, added))) => cur
+                        .stored
+                        .with_diff_tiles(&removed, &tile_edges_of(&w, &added)),
+                    Err(_) => return None,
+                }
+            };
+            cur = LayerBase::of_stored_after(&stored, &cur);
+        }
+        Some(cur.stored.clone())
+    }
+
+    /// 道具の側（片を置く確定）：この写し（セル画の地図）の地図を、しまう形 `next`（セル画の地図と塊を共有するもの：
+    /// `stacked_local`）にする差分を作り、1本の道の差分から先（`apply_diff`）に渡す。差分は、共有しない塊の分だけ比べて
+    /// 作る（`StoredMap::diff_tiles`）
+    pub(crate) fn replace_local(&self, next: &StoredMap, group_path: &[u64]) -> LocalEdit {
+        let (removed, added) = self.stored.diff_tiles(next);
+        let mut m = PlanarMap::default();
+        let mut at: HashMap<[u64; 2], usize> = HashMap::new();
+        let mut node = |p: Point, m: &mut PlanarMap| -> usize {
+            *at.entry([p.x.to_bits(), p.y.to_bits()]).or_insert_with(|| {
+                m.nodes.push(p);
+                m.nodes.len() - 1
+            })
         };
-        let m = &maps[0];
-        let (removed, added) = self.stored.window_diff_tiles(&wedges, m);
-        self.apply_diff(m, &removed, &added, group_path)
+        for te in &added {
+            let (a, b) = (node(te.a, &mut m), node(te.b, &mut m));
+            m.edges.push(MapEdge {
+                a,
+                b,
+                ctrl: te.ctrl,
+                left: te.left,
+                right: te.right,
+                left_src: te.left_src,
+                right_src: te.right_src,
+            });
+        }
+        let added: Vec<usize> = (0..m.edges.len()).collect();
+        self.apply_diff(&m, &removed, &added, group_path)
     }
 
     /// 道具の側（バケツ）：点 `p`（文書の座標）を含む面（色のある面、または同じ階層の線で囲まれた何も無い所）を `color` に
@@ -2979,6 +3095,7 @@ impl LayerBase {
             .face_filled_with(self.polys(), self.cycles(), p, color)
     }
 
+    #[cfg(test)]
     /// 重ね合わせ（`PlanarMap::overlay`）を、この写しの辺の計算に使う形で（近くの辺を探す外接矩形とマスを作り直さない）
     pub(crate) fn overlay(&self, input: MapInput<'_>, rule: MapRule) -> Option<PlanarMap> {
         self.map()
@@ -2996,6 +3113,7 @@ impl LayerBase {
             .overlay_rules_known(self.polys(), Some(self.map_index()), input, rules)
     }
 
+    #[cfg(test)]
     /// この地図に、地図 `maps` を下から順に重ねた地図（`stacked` と同じ。最初の1枚は、この写しの辺の計算に使う形と
     /// 升目の索引で重ねる）
     pub(crate) fn stacked(
