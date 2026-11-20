@@ -1924,6 +1924,63 @@ impl LayerBase {
         t
     }
 
+    /// 頂点 `v` から出ていく向きのある辺（辺の番号, 辺の向きに出ていくか）を、角度の順に並べたもの（`face_cycles_with` と
+    /// 同じ並べ方：判定の形の最初の区間の向き、同じなら番号の順）。頂点の辺は升目の索引で引き、判定の形は塊から引く
+    /// （写しの一覧を作らない。設計 段2b の 4. の 2b-3）
+    #[cfg(test)]
+    fn out_sorted(&self, v: usize) -> Vec<(usize, bool)> {
+        let idx = |h: (usize, bool)| 2 * h.0 + h.1 as usize;
+        let dir = |h: (usize, bool)| -> IPt {
+            let p = self.stored.poly(h.0);
+            let n = p.len();
+            let at = |k: usize| if h.1 { p[k] } else { p[n - 1 - k] };
+            let a = if n > 0 { at(0) } else { (0, 0) };
+            let b = if n > 1 { at(1) } else { a };
+            (b.0 - a.0, b.1 - a.1)
+        };
+        let mut list: Vec<(usize, bool)> = Vec::new();
+        for e in self.map.edges_at_in(v, Some(self.map_index())) {
+            let ed = self.map.edges[e];
+            if ed.a == v {
+                list.push((e, true));
+            }
+            if ed.b == v {
+                list.push((e, false));
+            }
+        }
+        list.sort_by(|&x, &y| cmp_dir(wide(dir(x)), wide(dir(y))).then(idx(x).cmp(&idx(y))));
+        list
+    }
+
+    /// 向きのある辺 `start` の左の面の輪郭を、その場でたどる（`face_cycles_with` と同じ決まり：次は、入ってきた辺を
+    /// 引き返す向きの、角度の順で1つ前）。輪郭は、いちばん小さい向きのある辺（番号, 逆向きが後）から始める（`sort_cycles`
+    /// と同じ回し方）。手間は輪郭の長さの分で、写しの輪郭の一覧を作らない（設計 段2b の 4. の 2b-3）
+    #[cfg(test)]
+    pub(crate) fn trace_cycle(&self, start: (usize, bool)) -> Vec<(usize, bool)> {
+        let mut around: HashMap<usize, Vec<(usize, bool)>> = HashMap::new();
+        let mut cycle = Vec::new();
+        let mut cur = start;
+        loop {
+            cycle.push(cur);
+            let ed = self.map.edges[cur.0];
+            let head = if cur.1 { ed.b } else { ed.a };
+            let list = around.entry(head).or_insert_with(|| self.out_sorted(head));
+            let back = (cur.0, !cur.1);
+            let k = list.iter().position(|&h| h == back).expect("頂点から出ていく辺に入っている");
+            let next = list[(k + list.len() - 1) % list.len()];
+            if next == start {
+                break;
+            }
+            assert!(cycle.len() <= 2 * self.map.edges.len(), "輪郭が閉じない");
+            cur = next;
+        }
+        let key = |h: &(usize, bool)| (h.0, !h.1);
+        if let Some(k) = (0..cycle.len()).min_by_key(|&k| key(&cycle[k])) {
+            cycle.rotate_left(k);
+        }
+        cycle
+    }
+
     /// 升目の索引（初めて要るときに全部作る）
     pub(crate) fn index(&self) -> &crate::stored_map::TileIndex {
         self.index.get_or_init(|| {

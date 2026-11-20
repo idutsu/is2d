@@ -34671,3 +34671,61 @@ fn windowed_overlay_matches_full_on_large_map() {
         differed.join("\n")
     );
 }
+
+/// 段2b-3：前の地図の輪郭を、写しの輪郭の一覧を使わずにその場でたどった輪郭（`LayerBase::trace_cycle`）が、一覧の中の
+/// 同じ向きのある辺を含む輪郭と同じ（同じ回し方）。ランダムな編集を重ねた地図と、線の多いセル画で、ランダムな向きのある
+/// 辺から確かめる
+#[test]
+fn traced_cycles_match_the_cycle_list() {
+    use crate::planar_map::{LayerBase, MapInput, MapRule, PlanarMap};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    let mut rng = map_overlay::Rng(13);
+    let mut m = PlanarMap::default();
+    let mut checked = 0;
+    for step in 0..120 {
+        let c = colors[step % 4];
+        let r = 2.0 + rng.f() * 9.0;
+        let st = wiggly_stroke(&mut rng, (100.0, 100.0, 300.0, 200.0), r, c);
+        let rule = if step % 3 == 2 {
+            MapRule::Paint(None)
+        } else {
+            MapRule::Paint(Some(c))
+        };
+        if let Some(n) = m.overlay(MapInput::Shapes(&st), rule).and_then(|n| n.checked()) {
+            m = n.uniquely_labeled().into_map();
+        }
+        if step % 10 != 9 || m.edges.is_empty() {
+            continue;
+        }
+        let base = LayerBase::new(&m);
+        let list = base.cycles();
+        // 向きのある辺 → 一覧の輪郭（回し方をそろえる）
+        let key = |h: &(usize, bool)| (h.0, !h.1);
+        let canon = |c: &[(usize, bool)]| {
+            let mut c = c.to_vec();
+            if let Some(k) = (0..c.len()).min_by_key(|&k| key(&c[k])) {
+                c.rotate_left(k);
+            }
+            c
+        };
+        let mut owner: std::collections::HashMap<(usize, bool), usize> = Default::default();
+        for (ci, c) in list.iter().enumerate() {
+            for &h in c {
+                owner.insert(h, ci);
+            }
+        }
+        for _ in 0..40 {
+            let e = (rng.f() * m.edges.len() as f64) as usize % m.edges.len();
+            let h = (e, rng.f() < 0.5);
+            let traced = base.trace_cycle(h);
+            assert_eq!(traced, canon(&list[owner[&h]]), "step {step} の向きのある辺 {h:?}");
+            checked += 1;
+        }
+    }
+    assert!(checked >= 400, "確かめた数 {checked}");
+}
