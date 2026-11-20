@@ -34395,3 +34395,147 @@ fn measure_edit_scaling_by_cel_size() {
         );
     }
 }
+
+/// 段1（claude/触った所だけを計算する地図の設計_22fbbbe.md）：升目の索引を引く道（計算に使う写し `LayerBase` の
+/// 重ね合わせ・地図の編集・矩形で切る・カーソル合わせ・吸い付き）と、全部の辺・頂点を見る今までの道（索引の無い
+/// `PlanarMap`）で、結果がビットまで同じ（地図は頂点と辺の並びまで同じ）。編集のあとの写しの索引が、前の写しの索引から
+/// 作ったもので全部作ったものと同じことは、`LayerBase::inherit_index` がテストのたびに確かめる
+#[test]
+fn index_paths_match_full_scans() {
+    use crate::planar_map::{LayerBase, MapEdit, MapInput, MapRule, PlanarMap};
+    let same = |a: &PlanarMap, b: &PlanarMap| {
+        a.edges == b.edges
+            && a.nodes.len() == b.nodes.len()
+            && a.nodes
+                .iter()
+                .zip(&b.nodes)
+                .all(|(p, q)| p.x.to_bits() == q.x.to_bits() && p.y.to_bits() == q.y.to_bits())
+    };
+    let same_opt = |a: &Option<PlanarMap>, b: &Option<PlanarMap>| match (a, b) {
+        (Some(a), Some(b)) => same(a, b),
+        (None, None) => true,
+        _ => false,
+    };
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    let area = (100.0, 100.0, 300.0, 200.0);
+    let xforms = [
+        Affine::IDENTITY,
+        Affine::scale(2.5) * Affine::translate((-40.0, 15.0)),
+        Affine::rotate(0.3) * Affine::scale_non_uniform(1.5, 0.75),
+    ];
+    let (mut compared, mut differed) = (0usize, Vec::<String>::new());
+    for seed in [31u64, 47] {
+        let mut rng = map_overlay::Rng(seed);
+        let mut m = PlanarMap::default();
+        for step in 0..160 {
+            let base = LayerBase::new(&m);
+            let full = base.map.clone();
+            let c = colors[step % 4];
+            let kind = step % 6;
+            let (a, b) = match kind {
+                0 | 1 => {
+                    let r = 2.0 + rng.f() * 9.0;
+                    let st = wiggly_stroke(&mut rng, area, r, c);
+                    let rule = if kind == 0 {
+                        MapRule::Paint(Some(c))
+                    } else {
+                        MapRule::Paint(None)
+                    };
+                    (
+                        vec![base.overlay(MapInput::Shapes(&st), rule)],
+                        vec![full.overlay(MapInput::Shapes(&st), rule)],
+                    )
+                }
+                2 | 3 if !full.edges.is_empty() => {
+                    let e = (rng.f() * full.edges.len() as f64) as usize % full.edges.len();
+                    let q = full.quad(e);
+                    let ang = rng.f() * std::f64::consts::TAU;
+                    let d = KVec2::new(ang.cos(), ang.sin()) * (0.5 + rng.f() * 8.0);
+                    let edit = if kind == 2 {
+                        MapEdit::PullEdge {
+                            orig_seg: q,
+                            grab_t: 0.5,
+                            target: q.eval(0.5) + d,
+                        }
+                    } else {
+                        MapEdit::MoveVertex {
+                            orig_vertex: q.p0,
+                            target: q.p0 + d,
+                        }
+                    };
+                    (vec![base.apply_edit(edit)], vec![edit.apply(&full)])
+                }
+                4 => {
+                    let (x0, y0) = (100.0 + rng.f() * 150.0, 100.0 + rng.f() * 100.0);
+                    let rect = vec![map_overlay::rect_shape(x0, y0, x0 + 80.0, y0 + 60.0, c)];
+                    let rules = [MapRule::KeepInside, MapRule::Paint(None)];
+                    let to_vec = |r: Option<[PlanarMap; 2]>| match r {
+                        Some([i, o]) => vec![Some(i), Some(o)],
+                        None => vec![None, None],
+                    };
+                    (
+                        to_vec(base.overlay_rules(MapInput::Shapes(&rect), rules)),
+                        to_vec(full.overlay_rules(MapInput::Shapes(&rect), rules)),
+                    )
+                }
+                _ => {
+                    // 片を置く：地図を少しずらして重ねる
+                    let piece = full.transformed(Affine::translate((3.0 + rng.f() * 6.0, 2.0)));
+                    let piece = piece.checked().map(|c| c.into_map());
+                    match piece {
+                        Some(p) if !p.edges.is_empty() => (
+                            vec![base.overlay(MapInput::Map(&p), MapRule::Overlay)],
+                            vec![full.overlay(MapInput::Map(&p), MapRule::Overlay)],
+                        ),
+                        _ => continue,
+                    }
+                }
+            };
+            for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+                compared += 1;
+                if !same_opt(x, y) {
+                    differed.push(format!(
+                        "seed {seed} step {step} kind {kind} [{i}]: 地図が違う"
+                    ));
+                }
+            }
+            // カーソル合わせ・吸い付き
+            for xf in xforms {
+                for _ in 0..6 {
+                    let p = xf * Point::new(100.0 + rng.f() * 300.0, 100.0 + rng.f() * 200.0);
+                    let r = 1.0 + rng.f() * 12.0;
+                    compared += 1;
+                    if base.hit_node(p, r, xf) != full.hit_node(p, r, xf)
+                        || base.hit_edge(p, r, xf) != full.hit_edge(p, r, xf)
+                    {
+                        differed.push(format!("seed {seed} step {step}: カーソル合わせが違う"));
+                    }
+                    if !full.nodes.is_empty() {
+                        let v = (rng.f() * full.nodes.len() as f64) as usize % full.nodes.len();
+                        if base.snap_target(v, p, r, xf) != full.snap_target(v, p, r, xf) {
+                            differed.push(format!("seed {seed} step {step}: 吸い付きが違う"));
+                        }
+                    }
+                }
+            }
+            // 次の地図：最後の結果のうち正しいもの
+            if let Some(n) = a.into_iter().flatten().last() {
+                if let Some(c) = n.checked() {
+                    m = c.uniquely_labeled().into_map();
+                }
+            }
+        }
+    }
+    assert!(compared > 1000, "比べた数 {compared}");
+    assert!(
+        differed.is_empty(),
+        "索引を引く道と全部を見る道で結果が違う（{} / {compared} 件）:\n{}",
+        differed.len(),
+        differed.join("\n")
+    );
+}

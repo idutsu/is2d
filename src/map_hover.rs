@@ -175,7 +175,7 @@ fn anchor_hover_in(
     if add {
         let mut best: Option<(f64, &LayerMap, usize, f64)> = None;
         for lm in maps {
-            let Some((e, t)) = lm.base.map.hit_edge(mouse_pt, r, lm.xform) else {
+            let Some((e, t)) = lm.base.hit_edge(mouse_pt, r, lm.xform) else {
                 continue;
             };
             let p = lm.placed_quad(e).eval(t);
@@ -201,7 +201,7 @@ fn anchor_hover_in(
     }
     let mut best: Option<(f64, &LayerMap, usize)> = None;
     for lm in maps {
-        let Some(v) = lm.base.map.hit_node(mouse_pt, r, lm.xform) else {
+        let Some(v) = lm.base.hit_node(mouse_pt, r, lm.xform) else {
             continue;
         };
         let p = lm.placed_node(v);
@@ -263,7 +263,7 @@ pub(crate) fn reshape_hover(
     let hidden = |lm: &LayerMap, p: Point| hidden_by_front(scene, session, lm, p);
     let mut best_v: Option<(f64, &LayerMap, usize)> = None;
     for lm in &maps.maps {
-        if let Some(v) = lm.base.map.hit_node(mouse_pt, vertex_r, lm.xform) {
+        if let Some(v) = lm.base.hit_node(mouse_pt, vertex_r, lm.xform) {
             let p = lm.placed_node(v);
             let d = (p - mouse_pt).hypot();
             if best_v.as_ref().is_none_or(|b| d < b.0) && !hidden(lm, p) {
@@ -282,7 +282,7 @@ pub(crate) fn reshape_hover(
     }
     let mut best_e: Option<(f64, &LayerMap, usize, f64, ShapeId)> = None;
     for lm in &maps.maps {
-        let Some((e, t)) = lm.base.map.hit_edge(mouse_pt, outer_r, lm.xform) else {
+        let Some((e, t)) = lm.base.hit_edge(mouse_pt, outer_r, lm.xform) else {
             continue;
         };
         let q = lm.placed_quad(e);

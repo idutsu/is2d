@@ -371,10 +371,11 @@ impl PlanarMap {
     pub(super) fn overlay_known(
         &self,
         known: &[Poly],
+        index: Option<MapIndex<'_>>,
         input: MapInput<'_>,
         rule: MapRule,
     ) -> Option<PlanarMap> {
-        let [m] = self.overlay_rules_known(known, input, [rule])?;
+        let [m] = self.overlay_rules_known(known, index, input, [rule])?;
         Some(m)
     }
 
@@ -387,7 +388,7 @@ impl PlanarMap {
         input: MapInput<'_>,
         rules: [MapRule; N],
     ) -> Option<[PlanarMap; N]> {
-        self.overlay_rules_known(&[], input, rules)
+        self.overlay_rules_known(&[], None, input, rules)
     }
 
     /// `overlay_rules` を、この地図の前から `known.len()` 本の辺の計算に使う形 `known` で（近くの辺を探す外接矩形と
@@ -395,6 +396,7 @@ impl PlanarMap {
     pub(super) fn overlay_rules_known<const N: usize>(
         &self,
         known: &[Poly],
+        index: Option<MapIndex<'_>>,
         input: MapInput<'_>,
         rules: [MapRule; N],
     ) -> Option<[PlanarMap; N]> {
@@ -421,7 +423,7 @@ impl PlanarMap {
                     .map(|p| KRect::from_points(p, p))
                     .reduce(|a, b| a.union(b))
                 {
-                    let near = self.node_finder(FLAT_TOL, Affine::IDENTITY, area);
+                    let near = self.node_finder_in(FLAT_TOL, Affine::IDENTITY, area, index);
                     let snap = |p: Point| near(p, None).map_or(p, |v| self.nodes[v]);
                     for q in &mut new_quads {
                         q.p0 = snap(q.p0);
@@ -478,8 +480,15 @@ impl PlanarMap {
         };
         let check = self.edges.len()..cands.edges.len();
         let moved = input.moved_flags(cands.edges.len());
-        let mut fed =
-            cands.fed_edges(known, seeds, &moved, moved.clone(), check.clone(), &partner)?;
+        let mut fed = cands.fed_edges(
+            known,
+            index,
+            seeds,
+            &moved,
+            moved.clone(),
+            check.clone(),
+            &partner,
+        )?;
         loop {
             match cands.overlay_with(input, &rules, &new_quads, &new_cols, &mut fed) {
                 Ok(maps) => return Some(maps.try_into().expect("決まりごとに1つの地図")),
@@ -488,7 +497,15 @@ impl PlanarMap {
                     for e in more {
                         set[e] = true;
                     }
-                    fed = cands.fed_edges(known, seeds, &moved, set, check.clone(), &partner)?;
+                    fed = cands.fed_edges(
+                        known,
+                        index,
+                        seeds,
+                        &moved,
+                        set,
+                        check.clone(),
+                        &partner,
+                    )?;
                 }
                 Err(OverlayStop::Refused) => return None,
             }
@@ -562,44 +579,24 @@ impl PlanarMap {
     /// （ほかの入れない辺と交わらないかも見る）。`check` の辺（重ねる地図の辺）も、はじめに同じく調べる：入れない辺と
     /// 触れれば入れる。`moved` は輪郭の変形で動かした辺（前の形は同じ線の比べ先にしない）。`known`：前から `known.len()`
     /// 本の辺の計算に使う形（外接矩形とマスを使い回す：`EdgeGeom::reach`）。`None`：格子に置けない座標がある
-    pub(super) fn fed_edges(
-        &self,
-        known: &[Poly],
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn fed_edges<'a>(
+        &'a self,
+        known: &'a [Poly],
+        index: Option<MapIndex<'a>>,
         seeds: &[QuadBez],
         moved: &[bool],
         mut fed: Vec<bool>,
         check: std::ops::Range<usize>,
         partner: &[Option<(usize, bool)>],
-    ) -> Option<FedEdges> {
+    ) -> Option<FedEdges<'a>> {
         #[cfg(test)]
         super::FED_RUNS.with(|n| n.set(n.get() + 1));
         let mut snapped = vec![false; self.nodes.len()];
-        // 頂点ごとの辺（辺の順）
-        let adj: Grouped<usize> = Grouped::new(
-            self.nodes.len(),
-            self.edges.iter().enumerate().flat_map(|(e, ed)| {
-                std::iter::once((ed.a, e)).chain((ed.b != ed.a).then_some((ed.b, e)))
-            }),
-        );
-        // 辺の外接矩形と、辺がかかるマス（`edge_reach`。前から `known.len()` 本は、計算に使う形が持つものを使う）。
-        // 同じマスは1度だけ入れる（となり合う弦は同じマスにかかる。辺のマスで探すのは「どれかに触れるか」だけなので、
-        // マスの順は効かない）
-        let made: Vec<EdgeReach> = (known.len().min(self.edges.len())..self.edges.len())
-            .map(|e| edge_reach(self.quad(e)))
-            .collect();
-        let reaches: Vec<&EdgeReach> = (0..self.edges.len())
-            .map(|e| match known.get(e) {
-                Some(g) => g.reach(self.quad(e)),
-                None => &made[e - known.len()],
-            })
-            .collect();
-        let boxes: Vec<KRect> = reaches.iter().map(|r| r.0).collect();
+        // 近くの辺と、頂点ごとの辺を探す道具（前からある辺は、計算に使う写しの升目の索引を引く）
+        let mut near = NearEdges::new(self, known, index);
         let mut cells: Vec<(i64, i64)> = Vec::new();
-        let mut edge_grid = CellGrid::new();
-        for (e, r) in reaches.iter().enumerate() {
-            edge_grid.insert(e, r.1.iter().copied());
-        }
-        let edge_cells = |e: usize| reaches[e].1.iter().copied();
+        let mut adj_buf: Vec<usize> = Vec::new();
         // 頂点 `v` を格子に置き直すと動くか
         let moves = |v: usize| grid_round(self.nodes[v]) != self.nodes[v];
         // 入れない辺 `e` の判定の形（`out` に入れる）。端の頂点が格子に置き直されていれば、置き直した形で
@@ -650,8 +647,8 @@ impl PlanarMap {
         };
         // 入れない辺 `e`（判定の形 `pe`）が、区間 `s` の近くを通るか：共有する頂点から出る区間どうしは、そこのほかで
         // 触れるか。ほかは、`GRID_REACH` 以内に来るか
-        let near_seg = |e: usize, pe: &[IPt], s: &GridSeg| -> bool {
-            if !rects_overlap(boxes[e], seg_rect(s.0, s.1)) {
+        let near_seg = |near: &NearEdges, e: usize, pe: &[IPt], s: &GridSeg| -> bool {
+            if !rects_overlap(near.bbox(e), seg_rect(s.0, s.1)) {
                 return false;
             }
             let ed = self.edges[e];
@@ -697,7 +694,7 @@ impl PlanarMap {
             if matches!(line, Line::Edge(c) if partner.get(c).copied().flatten().is_some()) {
                 continue;
             }
-            edge_grid.query(quad_cells(q, flat_pad), &mut found);
+            near.query(quad_cells(q, flat_pad), &mut found);
             let mut pairs: Vec<(usize, OverlapPts)> = found
                 .iter()
                 .copied()
@@ -716,11 +713,9 @@ impl PlanarMap {
         }
         let mut fed_set = FedEdges {
             fed: Vec::new(),
-            known: known.to_vec(),
+            known,
             spans,
-            boxes: Vec::new(),
-            grid: CellGrid::new(),
-            adj: Grouped::new(0, std::iter::empty()),
+            near: None,
             partner: Vec::new(),
         };
         let mut pbuf = PointsBuf::default();
@@ -755,7 +750,8 @@ impl PlanarMap {
                         snapped[v] = true;
                         // 置き直して頂点が動いたときだけ、つながる入れない辺の形が変わる
                         if moves(v) {
-                            edge_queue.extend(adj.get(v).iter().copied().filter(|&f| !fed[f]));
+                            near.edges_at(v, &mut adj_buf);
+                            edge_queue.extend(adj_buf.iter().copied().filter(|&f| !fed[f]));
                         }
                     }
                 }
@@ -774,13 +770,16 @@ impl PlanarMap {
             if let Some((r, range)) = lines.pop() {
                 // 折れ線の区間のマスにかかる辺だけを、折れ線の区間のうち辺の外接矩形にかかるものと比べる
                 line_cells(&segs[range.clone()], &mut cells);
-                edge_grid.query(cells.iter().copied(), &mut found);
+                near.query(cells.iter().copied(), &mut found);
                 for &e in &found {
-                    if fed[e] || !rects_overlap(boxes[e], r) {
+                    if fed[e] || !rects_overlap(near.bbox(e), r) {
                         continue;
                     }
                     poly_of(e, &snapped, &mut pe);
-                    if segs[range.clone()].iter().any(|s| near_seg(e, &pe, s)) {
+                    if segs[range.clone()]
+                        .iter()
+                        .any(|s| near_seg(&near, e, &pe, s))
+                    {
                         to_feed.push(e);
                     }
                 }
@@ -797,21 +796,22 @@ impl PlanarMap {
                 let ed = self.edges[e];
                 // `e` の判定の形は、要るときに1度だけ作る
                 let mut pe_made = false;
-                seg_grid.query(edge_cells(e), &mut found);
+                seg_grid.query(near.cells(e).iter().copied(), &mut found);
                 let mut hit = false;
                 for &i in &found {
                     if !pe_made {
                         poly_of(e, &snapped, &mut pe);
                         pe_made = true;
                     }
-                    if near_seg(e, &pe, &segs[i]) {
+                    if near_seg(&near, e, &pe, &segs[i]) {
                         hit = true;
                         break;
                     }
                 }
                 if !hit {
                     // 端を置き直した形が、ほかの入れない辺と触れないか（共有する頂点は除く）
-                    edge_grid.query(edge_cells(e), &mut found);
+                    let own_cells = near.cells(e).to_vec();
+                    near.query(own_cells, &mut found);
                     let given = as_given(e);
                     let mate = partner.get(e).copied().flatten().map(|(m, _)| m);
                     for &f in &found {
@@ -836,9 +836,7 @@ impl PlanarMap {
             } else {
                 return Some(FedEdges {
                     fed,
-                    boxes,
-                    grid: edge_grid,
-                    adj,
+                    near: Some(near),
                     partner: partner.to_vec(),
                     ..fed_set
                 });
@@ -854,7 +852,7 @@ impl PlanarMap {
         rules: &[MapRule],
         new_quads: &[QuadBez],
         new_cols: &[(Option<Color32>, Option<Color32>)],
-        fed_set: &mut FedEdges,
+        fed_set: &mut FedEdges<'_>,
     ) -> Result<Vec<PlanarMap>, OverlayStop> {
         let fed = std::mem::take(&mut fed_set.fed);
         let out = self.overlay_fed(input, rules, new_quads, new_cols, &fed, fed_set);
@@ -869,7 +867,7 @@ impl PlanarMap {
         new_quads: &[QuadBez],
         new_cols: &[(Option<Color32>, Option<Color32>)],
         fed: &[bool],
-        fed_set: &mut FedEdges,
+        fed_set: &mut FedEdges<'_>,
     ) -> Result<Vec<PlanarMap>, OverlayStop> {
         use i_overlay9::core::edge_overlay::{EdgeOverlay, InputEdge};
         use i_overlay9::core::fill_rule::FillRule as IFill;
@@ -911,7 +909,7 @@ impl PlanarMap {
                 };
                 srcs.push((self.quad(e), src));
             } else {
-                interior[e] = e >= n_old || rects_overlap(fed_set.boxes[e], area);
+                interior[e] = e >= n_old || rects_overlap(fed_set.near().bbox(e), area);
             }
         }
         if !matches!(input, MapInput::Map(_)) {
@@ -1055,16 +1053,18 @@ impl PlanarMap {
             for p in &pieces {
                 let (a, b) = (nodes[p.a], nodes[p.b]);
                 let r = KRect::from_points(a, b);
-                fed_set.grid.query(seg_cells((p.ia, p.ib), 0), &mut found);
+                fed_set
+                    .near_mut()
+                    .query(seg_cells((p.ia, p.ib), 0), &mut found);
                 for &e in &found {
                     if fed[e] || flagged[e] || !(interior[e] || copy_any) {
                         continue;
                     }
-                    if !rects_overlap(fed_set.boxes[e], r) {
+                    if !rects_overlap(fed_set.near().bbox(e), r) {
                         continue;
                     }
                     let ed = self.edges[e];
-                    known_or_made(&fed_set.known, self, e, (nodes[ed.a], nodes[ed.b]), &mut pe);
+                    known_or_made(fed_set.known, self, e, (nodes[ed.a], nodes[ed.b]), &mut pe);
                     let ends = (node_at(ed.a), node_at(ed.b));
                     if polys_clash(&[p.ia, p.ib], (p.a, p.b), &pe, ends) {
                         flagged[e] = true;
@@ -1099,16 +1099,18 @@ impl PlanarMap {
         // 区間の頂点ごとの、そこで止める入れなかった辺：（辺, 頂点がその辺の始点か, 向き）
         let mut stop_list: Vec<(usize, (usize, bool, IPt))> = Vec::new();
         let mut pe: Vec<IPt> = Vec::new();
+        let mut adj_buf: Vec<usize> = Vec::new();
         for v in (0..around.len()).filter(|&v| !around.get(v).is_empty()) {
             // 区間の頂点 `v` にある、元の頂点（`v` そのものと、`v` に1つにした頂点）
             let own = (v < self.nodes.len()).then_some(v);
             for u in own.into_iter().chain(at_node.get(v).iter().copied()) {
-                for &e in fed_set.adj.get(u) {
+                fed_set.near().edges_at(u, &mut adj_buf);
+                for &e in &adj_buf {
                     if fed[e] {
                         continue;
                     }
                     let ed = self.edges[e];
-                    known_or_made(&fed_set.known, self, e, (nodes[ed.a], nodes[ed.b]), &mut pe);
+                    known_or_made(fed_set.known, self, e, (nodes[ed.a], nodes[ed.b]), &mut pe);
                     for (end, at_start) in [(ed.a, true), (ed.b, false)] {
                         if end != u {
                             continue;
@@ -1244,7 +1246,7 @@ impl PlanarMap {
                 let (e, q, r) = &items[i as usize];
                 if ray_meets_row(*r, p2) {
                     let ed = self.edges[*e];
-                    known_or_made(&fed_set.known, self, *e, (q.p0, q.p2), &mut pe);
+                    known_or_made(fed_set.known, self, *e, (q.p0, q.p2), &mut pe);
                     for s in pe.windows(2) {
                         wind_into(dbl(s[0]), dbl(s[1]), ed.left, ed.right, p2, &mut w);
                     }
@@ -2035,20 +2037,199 @@ pub(super) struct PointsBuf {
 }
 
 /// i_overlay に入れる前からある辺（`fed`）と、そのときに作った辺の外接矩形・格子・頂点ごとの辺
-pub(super) struct FedEdges {
+pub(super) struct FedEdges<'a> {
     fed: Vec<bool>,
     /// 前から `known.len()` 本の辺の判定の形（計算に使う写しが持つもの：`fed_edges` の `known`）
-    known: Vec<Poly>,
+    known: &'a [Poly],
     /// 線ごとの、同じ線として扱う所（範囲の順）
     spans: IntMap<Line, Vec<Span>>,
-    /// 辺の外接矩形（格子に置き直す分と、近くとみなす距離の分を広げたもの）
-    boxes: Vec<KRect>,
-    /// 辺がかかるマス（同じだけ広げたもの）
-    grid: CellGrid,
-    /// 頂点ごとの辺
-    adj: Grouped<usize>,
+    /// 近くの辺と、頂点ごとの辺を探す道具（`fed_edges` が作って渡す）
+    near: Option<NearEdges<'a>>,
     /// 辺ごとの、同じ線の組の相手と、同じ向きか（`same_edges`。重ねる地図でなければ空）
     partner: Vec<Option<(usize, bool)>>,
+}
+
+impl<'a> FedEdges<'a> {
+    fn near(&self) -> &NearEdges<'a> {
+        self.near.as_ref().expect("fed_edges が作る")
+    }
+
+    fn near_mut(&mut self) -> &mut NearEdges<'a> {
+        self.near.as_mut().expect("fed_edges が作る")
+    }
+}
+
+/// 計算に使う写しの升目の索引（`LayerBase::index`）と、その地図のしまう形。重ね合わせ（`overlay_rules_known`）が、
+/// 前からある辺の近くを、毎回全部の辺を格子に入れ直さずに探すのに使う
+#[derive(Clone, Copy)]
+pub(crate) struct MapIndex<'a> {
+    pub(crate) index: &'a crate::stored_map::TileIndex,
+    pub(crate) stored: &'a StoredMap,
+    /// その地図の頂点の数（前からある頂点の番号は `0..nodes`）
+    pub(crate) nodes: usize,
+}
+
+/// 重ね合わせで、近くの辺と、頂点ごとの辺を探す道具。地図 `map` の辺のうち、前から `n_index` 本（計算に使う写しの
+/// 地図の辺。升目の索引がある）は索引を引いて、要る升目の辺だけを近さを調べる格子に入れ、残りの辺（重ねる地図の辺）は
+/// はじめに格子に入れる。索引が無ければ、全部の辺をはじめに格子に入れる（前と同じ）。どちらでも、マスで探した辺の並び
+/// （マスの順、マスの中は辺の番号の順）と、頂点ごとの辺の並び（辺の番号の順）は、全部の辺を格子に入れたときと同じ
+pub(super) struct NearEdges<'a> {
+    map: &'a PlanarMap,
+    known: &'a [Poly],
+    index: Option<MapIndex<'a>>,
+    /// 索引を引く辺の数（`0..n_index`）
+    n_index: usize,
+    /// 索引を引かない辺（`n_index..`）の外接矩形とマス（`known` に無い辺の分）
+    made: Vec<EdgeReach>,
+    /// 索引を引かない辺の格子（番号は `n_index` を引いたもの）と、頂点ごとの辺（辺の番号の順）
+    local: CellGrid,
+    local_adj: IntMap<usize, Vec<usize>>,
+    /// 索引から読んだ升目と、読んだ辺、マスごとの読んだ辺（辺の番号の順）
+    loaded_tiles: std::collections::HashSet<(i64, i64)>,
+    loaded_edges: std::collections::HashSet<usize>,
+    cell_edges: IntMap<(i64, i64), Vec<usize>>,
+    /// 探すときに同じ辺を2度返さないための印
+    seen: std::collections::HashSet<usize>,
+    buf: Vec<usize>,
+}
+
+impl<'a> NearEdges<'a> {
+    pub(super) fn new(map: &'a PlanarMap, known: &'a [Poly], index: Option<MapIndex<'a>>) -> Self {
+        let n_index = match index {
+            Some(_) => known.len().min(map.edges.len()),
+            None => 0,
+        };
+        let from = known.len().min(map.edges.len());
+        let made: Vec<EdgeReach> = (from..map.edges.len())
+            .map(|e| edge_reach(map.quad(e)))
+            .collect();
+        let mut near = Self {
+            map,
+            known,
+            index,
+            n_index,
+            made,
+            local: CellGrid::new(),
+            local_adj: IntMap::default(),
+            loaded_tiles: Default::default(),
+            loaded_edges: Default::default(),
+            cell_edges: IntMap::default(),
+            seen: Default::default(),
+            buf: Vec::new(),
+        };
+        for e in n_index..map.edges.len() {
+            let cells: Vec<(i64, i64)> = near.reach(e).1.to_vec();
+            near.local.insert(e - n_index, cells);
+            let ed = map.edges[e];
+            near.local_adj.entry(ed.a).or_default().push(e);
+            if ed.b != ed.a {
+                near.local_adj.entry(ed.b).or_default().push(e);
+            }
+        }
+        near
+    }
+
+    /// 辺 `e` の外接矩形とマス（`edge_reach`。前から `known.len()` 本は、計算に使う形が持つもの）
+    fn reach(&self, e: usize) -> &EdgeReach {
+        match self.known.get(e) {
+            Some(g) => g.reach(self.map.quad(e)),
+            None => &self.made[e - self.known.len()],
+        }
+    }
+
+    /// 辺 `e` の外接矩形（格子に置き直す分と、近くとみなす距離の分を広げたもの：`reach_box`。マスは作らない）
+    pub(super) fn bbox(&self, e: usize) -> KRect {
+        reach_box(self.map.quad(e))
+    }
+
+    /// 辺 `e` がかかるマス（同じだけ広げたもの）
+    pub(super) fn cells(&self, e: usize) -> &[(i64, i64)] {
+        &self.reach(e).1
+    }
+
+    /// 索引の升目 `tile` の辺を読み、その辺のマスに入れる（マスの中は辺の番号の順にそろえる）
+    fn load(&mut self, tile: (i64, i64)) {
+        let Some(ix) = self.index else {
+            return;
+        };
+        if !self.loaded_tiles.insert(tile) {
+            return;
+        }
+        let mut found = std::mem::take(&mut self.buf);
+        found.clear();
+        ix.index.edges_in(ix.stored, tile, &mut found);
+        let mut touched: Vec<(i64, i64)> = Vec::new();
+        for &e in &found {
+            if e >= self.n_index || !self.loaded_edges.insert(e) {
+                continue;
+            }
+            // 索引を引く辺は、計算に使う形を持つ（`n_index` は `known.len()` 以下）
+            let (known, map) = (self.known, self.map);
+            for &c in known[e].reach(map.quad(e)).1.iter() {
+                self.cell_edges.entry(c).or_default().push(e);
+                touched.push(c);
+            }
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        for c in touched {
+            if let Some(v) = self.cell_edges.get_mut(&c) {
+                v.sort_unstable();
+            }
+        }
+        self.buf = found;
+    }
+
+    /// マス `cells` のどれかにかかる辺（1つずつ。マスの順、マスの中は辺の番号の順：`CellGrid::query` と同じ）
+    pub(super) fn query(
+        &mut self,
+        cells: impl IntoIterator<Item = (i64, i64)>,
+        out: &mut Vec<usize>,
+    ) {
+        out.clear();
+        self.seen.clear();
+        let mut local_found: Vec<usize> = Vec::new();
+        for c in cells {
+            if self.index.is_some() {
+                self.load(index_tile(c));
+                if let Some(list) = self.cell_edges.get(&c) {
+                    for &e in list {
+                        if self.seen.insert(e) {
+                            out.push(e);
+                        }
+                    }
+                }
+            }
+            local_found.clear();
+            local_found.extend(self.local.at(c).map(|i| i as usize + self.n_index));
+            for &e in &local_found {
+                if self.seen.insert(e) {
+                    out.push(e);
+                }
+            }
+        }
+    }
+
+    /// 頂点 `v` につながる辺（辺の番号の順）を `out` に入れる（前の中身は消す）
+    pub(super) fn edges_at(&self, v: usize, out: &mut Vec<usize>) {
+        out.clear();
+        if let Some(ix) = self.index.filter(|ix| v < ix.nodes) {
+            let p = self.map.nodes[v];
+            let tile = index_tile(cell_of(gpt(p)));
+            ix.index.edges_in(ix.stored, tile, out);
+            out.retain(|&e| {
+                e < self.n_index && {
+                    let ed = self.map.edges[e];
+                    ed.a == v || ed.b == v
+                }
+            });
+            out.sort_unstable();
+            out.dedup();
+        }
+        if let Some(list) = self.local_adj.get(&v) {
+            out.extend(list.iter().copied());
+        }
+    }
 }
 
 /// 地図 `m` の辺 `e` を、端の頂点を `ends` に置いた曲線の判定の形（`out` に入れる。前の中身は消す）。端が動いて
@@ -2071,7 +2252,7 @@ fn known_or_made(
     }
 }
 
-impl FedEdges {
+impl FedEdges<'_> {
     /// 線 `line`（曲線 `q`）を折れ線にした点と t（入れ物 `buf` の中）。同じ線として扱う所は、その所の点（`stitched`）
     pub(super) fn points<'a>(
         &self,

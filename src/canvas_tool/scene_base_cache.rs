@@ -242,6 +242,13 @@ impl SceneBaseCache {
             let ctx = SymbolEvalCtx::new(library);
             let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx.clone());
             let bases = ctx.into_state().take_held();
+            // 新しく作った写しの升目の索引は、直前まで画面に出していた写し（Undo・やり直しの前の地図など、塊を共有する
+            // 地図の写し）の索引から、変わった塊の分だけ作る
+            if let Some((old_cl, _)) = &prev {
+                for b in &bases {
+                    b.adopt_index(&old_cl.bases);
+                }
+            }
             for s in &mut evaluated {
                 s.place(world_xform);
             }

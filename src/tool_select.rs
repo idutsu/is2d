@@ -303,7 +303,7 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
             target,
             snapped_to,
         }) => {
-            let snap = base.map.snap_target(*node, pt, snap_radius, xform);
+            let snap = base.snap_target(*node, pt, snap_radius, xform);
             *target = snap.unwrap_or_else(|| xform.inverse() * pt);
             *snapped_to = snap.map(|p| xform * p);
             Some((

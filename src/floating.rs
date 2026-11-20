@@ -168,7 +168,12 @@ impl Origin {
         if change.removed.is_empty() && change.added.is_empty() {
             return None;
         }
-        let base = LayerBase::of_stored(&StoredMap::from_dense(change.map.map(), Some(cel)));
+        // 残りの地図はセル画の地図と塊を共有するので、升目の索引も、セル画の写しの索引から変わった所だけ作る
+        let stored = StoredMap::from_dense(change.map.map(), Some(cel));
+        let base = match LayerBase::live(cel) {
+            Some(prev) => LayerBase::of_stored_after(&stored, &prev),
+            None => LayerBase::of_stored(&stored),
+        };
         Some(Self {
             rest: base.stored.clone(),
             held: Some(base),
@@ -236,10 +241,8 @@ impl FloatLayer {
     /// 確定した地図：中身の地図に、片の組を下から順に重ねる（組ごとに変換をかけて、その座標の格子で正しい地図にする：
     /// `realized`）。`None`：格子に置けない座標がある
     pub(crate) fn committed(&self, cel: &Arc<LayerBase>) -> Option<PlanarMap> {
-        stacked(
-            self.content(cel).map.clone(),
-            self.groups.iter().map(PieceGroup::placed),
-        )
+        self.content(cel)
+            .stacked(self.groups.iter().map(PieceGroup::placed))
     }
 }
 
@@ -674,7 +677,7 @@ fn cut_layer(
                     MapInput::Map(&region_owned)
                 }
             };
-            let (rest, inside) = cut_out(&cel, &own, content, region, layer_id, stage.scope)?;
+            let (rest, inside) = cut_out(&cel, &own, &content_base, region, layer_id, stage.scope)?;
             (rest, inside.map)
         }
     };

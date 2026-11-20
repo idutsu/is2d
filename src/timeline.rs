@@ -1302,6 +1302,8 @@ impl Cel {
         shapes: Vec<Arc<FillShape>>,
     ) -> Option<Arc<LayerBase>> {
         let at = self.maps.iter().position(|m| m.group_path == group_path);
+        // 前の地図の、いま誰かが持っている写し（あれば、新しい写しの升目の索引を、そこから変わった所だけ作る）
+        let prev = self.scope_stored(group_path).and_then(LayerBase::live);
         let (stored, polys) = map.into_stored_with_polys(self.scope_stored(group_path));
         let Some(m) = ScopeMap::of_checked_stored(group_path.to_vec(), stored) else {
             let mut items = Self::items_of(&self.maps, &self.instances);
@@ -1309,7 +1311,13 @@ impl Cel {
             self.arrange(items);
             return None;
         };
-        let base = LayerBase::with_faces(m.stored().clone(), group_path, shapes, polys);
+        let base = LayerBase::with_faces(
+            m.stored().clone(),
+            group_path,
+            shapes,
+            polys,
+            prev.as_deref(),
+        );
         match at {
             // 地図だけを置き換える（インスタンスの並びは Undo の控えと共有したまま）
             Some(i) => {

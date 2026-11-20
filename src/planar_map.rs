@@ -829,9 +829,31 @@ impl PlanarMap {
 
     /// 頂点 `v` につながる辺
     pub(crate) fn edges_at(&self, v: usize) -> Vec<usize> {
-        (0..self.edges.len())
-            .filter(|&e| self.edges[e].a == v || self.edges[e].b == v)
-            .collect()
+        self.edges_at_in(v, None)
+    }
+
+    /// `edges_at` と同じ（辺の番号の順）。`index`（この地図の升目の索引）があれば、頂点のある升目の辺だけを見る
+    fn edges_at_in(&self, v: usize, index: Option<MapIndex<'_>>) -> Vec<usize> {
+        let touches = |e: usize| self.edges[e].a == v || self.edges[e].b == v;
+        match self.edges_around(self.nodes[v], index) {
+            Some(mut near) => {
+                near.retain(|&e| touches(e));
+                near
+            }
+            None => (0..self.edges.len()).filter(|&e| touches(e)).collect(),
+        }
+    }
+
+    /// 点 `p`（文書の座標）を含むマスの升目にかかる辺（辺の番号の順・1つずつ）。`index`（この地図の升目の索引）が
+    /// 無ければ `None`。`p` を端に持つ辺は、みなこの中にある（辺の近くを探すマスは、辺の端の点を含むマスを含む）
+    fn edges_around(&self, p: Point, index: Option<MapIndex<'_>>) -> Option<Vec<usize>> {
+        let ix = index?;
+        let mut out = Vec::new();
+        ix.index
+            .edges_in(ix.stored, index_tile(cell_of(gpt(p))), &mut out);
+        out.sort_unstable();
+        out.dedup();
+        Some(out)
     }
 
     /// 頂点 `v` を `target` へ動かして確定した地図（重ね合わせ `MapRule::Sweep` で。`None`：格子に置けない座標がある）。
@@ -840,15 +862,21 @@ impl PlanarMap {
     /// 計算に使う写しで：`LayerBase::apply_edit`）
     #[cfg(test)]
     pub(crate) fn commit_move_vertex(&self, v: usize, target: Point) -> Option<PlanarMap> {
-        self.moved_vertex(&[], v, target)
+        self.moved_vertex(&[], None, v, target)
     }
 
-    /// `commit_move_vertex` を、この地図の辺の計算に使う形 `known` で（`overlay_known`）
-    fn moved_vertex(&self, known: &[Poly], v: usize, target: Point) -> Option<PlanarMap> {
+    /// `commit_move_vertex` を、この地図の辺の計算に使う形 `known` と升目の索引 `index` で（`overlay_known`）
+    fn moved_vertex(
+        &self,
+        known: &[Poly],
+        index: Option<MapIndex<'_>>,
+        v: usize,
+        target: Point,
+    ) -> Option<PlanarMap> {
         let d = target - self.nodes[v];
         let pos = |w: usize| if w == v { target } else { self.nodes[w] };
         let moved: Vec<MovedEdge> = self
-            .edges_at(v)
+            .edges_at_in(v, index)
             .into_iter()
             .map(|e| {
                 let ed = self.edges[e];
@@ -859,7 +887,7 @@ impl PlanarMap {
                 )
             })
             .collect();
-        self.overlay_known(known, MapInput::Sweep(&moved), MapRule::Sweep)
+        self.overlay_known(known, index, MapInput::Sweep(&moved), MapRule::Sweep)
     }
 
     /// 辺 `e` の `grab_t` の所を `target` へ引っぱって確定した地図（重ね合わせ `MapRule::Sweep` で。`None`：格子に置けない
@@ -872,22 +900,30 @@ impl PlanarMap {
         grab_t: f64,
         target: Point,
     ) -> Option<PlanarMap> {
-        self.pulled_edge(&[], e, grab_t, target)
+        self.pulled_edge(&[], None, e, grab_t, target)
     }
 
-    /// `commit_pull_edge` を、この地図の辺の計算に使う形 `known` で（`overlay_known`）
+    /// `commit_pull_edge` を、この地図の辺の計算に使う形 `known` と升目の索引 `index` で（`overlay_known`）
     fn pulled_edge(
         &self,
         known: &[Poly],
+        index: Option<MapIndex<'_>>,
         e: usize,
         grab_t: f64,
         target: Point,
     ) -> Option<PlanarMap> {
         let pulled = pulled_quad(self.quad(e), grab_t, target);
-        self.overlay_known(known, MapInput::Sweep(&[(e, pulled)]), MapRule::Sweep)
+        self.overlay_known(
+            known,
+            index,
+            MapInput::Sweep(&[(e, pulled)]),
+            MapRule::Sweep,
+        )
     }
 
-    /// 地図を座標の変換 `xform` で置いたとき、`p` から `r` 以内でいちばん近い頂点（距離は置いた座標で測る）
+    /// 地図を座標の変換 `xform` で置いたとき、`p` から `r` 以内でいちばん近い頂点（距離は置いた座標で測る）。テスト用
+    /// （本番は升目の索引で：`LayerBase::hit_node`）
+    #[cfg(test)]
     pub(crate) fn hit_node(&self, p: Point, r: f64, xform: Affine) -> Option<usize> {
         self.node_finder(r, xform, KRect::from_points(p, p))(p, None)
     }
@@ -895,8 +931,19 @@ impl PlanarMap {
     /// 地図を座標の変換 `xform` で置いたとき、`p` から `r` 以内でいちばん近い辺と、その上のパラメータ（距離は置いた座標で
     /// 測る。パラメータはアフィン変換で変わらない）
     pub(crate) fn hit_edge(&self, p: Point, r: f64, xform: Affine) -> Option<(usize, f64)> {
+        self.hit_edge_among(p, r, xform, 0..self.edges.len())
+    }
+
+    /// `hit_edge` を、辺 `among`（番号の順）の中で
+    fn hit_edge_among(
+        &self,
+        p: Point,
+        r: f64,
+        xform: Affine,
+        among: impl Iterator<Item = usize>,
+    ) -> Option<(usize, f64)> {
         let near = KRect::from_center_size(p, (2.0 * r, 2.0 * r));
-        (0..self.edges.len())
+        among
             .map(|e| (e, xform * self.quad(e)))
             .filter(|(_, q)| rects_overlap(q.bounding_box(), near))
             .map(|(e, q)| {
@@ -1650,6 +1697,9 @@ pub(crate) struct LayerBase {
     cycle_regions: OnceLock<Vec<CycleRegion>>,
     /// 面の図形：（階層, 面ごとの図形。番号は面の印。番号の順）
     faces: SyncCache<Option<FaceShapes>>,
+    /// 升目の索引（初めて要るときに作る。地図を書き換えたあとの写しは、前の写しの索引から変わった所だけ作り直したもの
+    /// を持つ：`with_faces`・`of_stored_after`）
+    index: OnceLock<crate::stored_map::TileIndex>,
 }
 
 /// しまう形の辺の順（`StoredMap::to_dense` の辺の順）に並べた、辺ごとの判定の形と面の輪郭
@@ -1687,6 +1737,7 @@ impl LayerBase {
             cycles: OnceLock::new(),
             cycle_regions: OnceLock::new(),
             faces: SyncCache::new(None),
+            index: OnceLock::new(),
         }
     }
 
@@ -1714,6 +1765,7 @@ impl LayerBase {
         group_path: &[u64],
         mut shapes: Vec<Arc<FillShape>>,
         polys: StoredGeom,
+        prev: Option<&LayerBase>,
     ) -> Arc<Self> {
         let base = Self::of_dense(polys.map, stored);
         debug_assert_eq!(polys.polys.len(), base.map.edges.len());
@@ -1722,6 +1774,7 @@ impl LayerBase {
         let _ = base.cycle_regions.set(polys.regions);
         shapes.sort_unstable_by_key(|s| s.shape_id);
         *base.faces.lock() = Some((group_path.to_vec(), shapes.into()));
+        base.inherit_index(prev);
         let base = Arc::new(base);
         *base
             .stored
@@ -1729,6 +1782,142 @@ impl LayerBase {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Arc::downgrade(&base);
         base
+    }
+
+    /// しまった地図 `stored` の計算に使う写し（`of_stored` と同じ）。新しく作るときは、写し `prev`（`stored` と塊を共有
+    /// する地図の写し）の升目の索引から、変わった塊の分だけ作り直した索引を持たせる
+    pub(crate) fn of_stored_after(stored: &StoredMap, prev: &LayerBase) -> Arc<Self> {
+        let mut slot = stored
+            .dense_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(base) = slot.upgrade() {
+            return base;
+        }
+        let base = Self::from_stored(stored.clone());
+        base.inherit_index(Some(prev));
+        let base = Arc::new(base);
+        *slot = Arc::downgrade(&base);
+        base
+    }
+
+    /// しまった地図 `stored` の、いま誰かが持っている計算に使う写し（無ければ作らずに `None`）
+    pub(crate) fn live(stored: &StoredMap) -> Option<Arc<Self>> {
+        stored
+            .dense_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .upgrade()
+    }
+
+    /// 写し `prev` が升目の索引を持っていれば、そこから、この写しの索引を作る（変わった塊の辺がかかる升目だけを作り
+    /// 直す：`TileIndex::derive`）。持っていなければ何もしない（初めて要るときに全部作る）
+    fn inherit_index(&self, prev: Option<&LayerBase>) {
+        let Some(prev) = prev else {
+            return;
+        };
+        if self.index.get().is_some() {
+            return;
+        }
+        let Some(old) = prev.index.get() else {
+            return;
+        };
+        let derived = old.derive(
+            &prev.stored,
+            &self.stored,
+            |e| prev.edge_tiles(e),
+            |e| self.edge_tiles(e),
+        );
+        #[cfg(test)]
+        if test_checks() {
+            let full = crate::stored_map::TileIndex::build(&self.stored, |e| self.edge_tiles(e));
+            assert!(
+                derived.same_content(&full),
+                "前の写しから作った升目の索引が、全部作ったものと違う"
+            );
+        }
+        let _ = self.index.set(derived);
+    }
+
+    /// まだ升目の索引を持っていなければ、写し `donors` のうち索引を持ち、この地図といちばん多く塊を共有するものから作る
+    /// （Undo・やり直しで画面の土台が写しを作り直すとき、直前まで画面に出していた写しから。共有する塊が無ければ何も
+    /// しない：初めて要るときに全部作る）
+    pub(crate) fn adopt_index(&self, donors: &[Arc<LayerBase>]) {
+        if self.index.get().is_some() {
+            return;
+        }
+        let best = donors
+            .iter()
+            .filter(|d| d.index.get().is_some() && !d.stored.same(&self.stored))
+            .map(|d| (self.stored.shared_tile_count(&d.stored), d))
+            .filter(|(n, _)| *n > 0)
+            .max_by_key(|(n, _)| *n);
+        if let Some((_, d)) = best {
+            self.inherit_index(Some(d));
+        }
+    }
+
+    /// 辺 `e` がかかる、升目の索引の升目（辺の近くを探すマス `EdgeGeom::reach` の升目）
+    fn edge_tiles(&self, e: usize) -> Vec<(i64, i64)> {
+        index_tiles(&self.polys()[e].reach(self.map.quad(e)).1)
+    }
+
+    /// 升目の索引（初めて要るときに全部作る）
+    pub(crate) fn index(&self) -> &crate::stored_map::TileIndex {
+        self.index.get_or_init(|| {
+            crate::stored_map::TileIndex::build(&self.stored, |e| self.edge_tiles(e))
+        })
+    }
+
+    /// 重ね合わせに渡す、この写しの升目の索引
+    fn map_index(&self) -> MapIndex<'_> {
+        MapIndex {
+            index: self.index(),
+            stored: &self.stored,
+            nodes: self.map.nodes.len(),
+        }
+    }
+
+    /// `PlanarMap::hit_node` を、升目の索引で（見る頂点を、点のまわりの升目にかかる辺の端だけにする。答えは同じ）
+    pub(crate) fn hit_node(&self, p: Point, r: f64, xform: Affine) -> Option<usize> {
+        self.map
+            .node_finder_in(r, xform, KRect::from_points(p, p), Some(self.map_index()))(
+            p, None
+        )
+    }
+
+    /// `PlanarMap::snap_target` を、升目の索引で（答えは同じ）
+    pub(crate) fn snap_target(
+        &self,
+        v: usize,
+        p: Point,
+        radius: f64,
+        xform: Affine,
+    ) -> Option<Point> {
+        let near = self.map.node_finder_in(
+            radius,
+            xform,
+            KRect::from_points(p, p),
+            Some(self.map_index()),
+        );
+        near(p, Some(v)).map(|w| self.map.nodes[w])
+    }
+
+    /// `PlanarMap::hit_edge` を、升目の索引で（見る辺を、点のまわりの升目にかかる辺だけにする。`p` から `r` 以内を通る
+    /// 辺は、その所を含むマスの升目にあるので、答えは同じ）
+    pub(crate) fn hit_edge(&self, p: Point, r: f64, xform: Affine) -> Option<(usize, f64)> {
+        if xform.determinant().abs() <= 0.0 {
+            return self.map.hit_edge(p, r, xform);
+        }
+        let near = KRect::from_center_size(p, (2.0 * r, 2.0 * r));
+        let ix = self.map_index();
+        let mut cands: Vec<usize> = Vec::new();
+        for t in index_tiles_over(xform.inverse().transform_rect_bbox(near)) {
+            ix.index.edges_in(ix.stored, t, &mut cands);
+        }
+        cands.sort_unstable();
+        cands.dedup();
+        self.map.hit_edge_among(p, r, xform, cands.into_iter())
     }
 
     /// 辺の鍵（`edge_key`）の集まり（初めて要るときに作る）。書き戻す地図の確かめ（`PlanarMap::written`）と、書き戻しの
@@ -1808,12 +1997,43 @@ impl LayerBase {
 
     /// 重ね合わせ（`PlanarMap::overlay`）を、この写しの辺の計算に使う形で（近くの辺を探す外接矩形とマスを作り直さない）
     pub(crate) fn overlay(&self, input: MapInput<'_>, rule: MapRule) -> Option<PlanarMap> {
-        self.map.overlay_known(self.polys(), input, rule)
+        self.map
+            .overlay_known(self.polys(), Some(self.map_index()), input, rule)
     }
 
-    /// 地図の編集（`MapEdit::apply`）を、この写しの辺の計算に使う形で
+    /// 同じ重ねるもの `input` を決まりごとに重ねた地図（`PlanarMap::overlay_rules`）を、この写しの辺の計算に使う形と
+    /// 升目の索引で
+    pub(crate) fn overlay_rules<const N: usize>(
+        &self,
+        input: MapInput<'_>,
+        rules: [MapRule; N],
+    ) -> Option<[PlanarMap; N]> {
+        self.map
+            .overlay_rules_known(self.polys(), Some(self.map_index()), input, rules)
+    }
+
+    /// この地図に、地図 `maps` を下から順に重ねた地図（`stacked` と同じ。最初の1枚は、この写しの辺の計算に使う形と
+    /// 升目の索引で重ねる）
+    pub(crate) fn stacked(
+        &self,
+        maps: impl IntoIterator<Item = Option<PlanarMap>>,
+    ) -> Option<PlanarMap> {
+        let mut maps = maps.into_iter();
+        let Some(first) = maps.next() else {
+            return Some(self.map.clone());
+        };
+        let first = first?;
+        let start = if self.map.edges.is_empty() {
+            first
+        } else {
+            self.overlay(MapInput::Map(&first), MapRule::Overlay)?
+        };
+        stacked(start, maps)
+    }
+
+    /// 地図の編集（`MapEdit::apply`）を、この写しの辺の計算に使う形と升目の索引で
     pub(crate) fn apply_edit(&self, edit: MapEdit) -> Option<PlanarMap> {
-        edit.apply_known(&self.map, self.polys())
+        edit.apply_known(&self.map, self.polys(), Some(self.map_index()))
     }
 
     /// 面の図形（写し。階層 `group_path`）。面の順で、図形の番号は面の印（セル画の地図の面には、いつも1つずつ別の番号が
@@ -2084,15 +2304,33 @@ pub(crate) enum MapEdit {
 impl MapEdit {
     /// 地図 `map` にこの編集をかけて確定した地図。`None`：その辺・頂点が無いか、編集できない
     pub(crate) fn apply(self, map: &PlanarMap) -> Option<PlanarMap> {
-        self.apply_known(map, &[])
+        self.apply_known(map, &[], None)
     }
 
-    /// `apply` を、地図 `map` の辺の計算に使う形 `known` で（計算に使う写しが持つもの：`LayerBase::apply_edit`）
-    fn apply_known(self, map: &PlanarMap, known: &[Poly]) -> Option<PlanarMap> {
-        let vertex = |p: Point| (0..map.nodes.len()).find(|&v| map.nodes[v] == p);
+    /// `apply` を、地図 `map` の辺の計算に使う形 `known` と升目の索引 `index` で（計算に使う写しが持つもの：
+    /// `LayerBase::apply_edit`）。索引があれば、頂点と辺は、その位置の升目の辺から探す（正しい地図では、同じ位置の頂点・
+    /// 同じ形の辺は1つなので、答えは全部を探したときと同じ）
+    fn apply_known(
+        self,
+        map: &PlanarMap,
+        known: &[Poly],
+        index: Option<MapIndex<'_>>,
+    ) -> Option<PlanarMap> {
+        let vertex = |p: Point| match map.edges_around(p, index) {
+            Some(near) => near
+                .iter()
+                .flat_map(|&e| [map.edges[e].a, map.edges[e].b])
+                .filter(|&v| map.nodes[v] == p)
+                .min(),
+            None => (0..map.nodes.len()).find(|&v| map.nodes[v] == p),
+        };
+        let find_edge = |q: &QuadBez| match map.edges_around(q.p0, index) {
+            Some(near) => map.find_edge_in(q, near.into_iter()),
+            None => map.find_edge(q),
+        };
         match self {
             MapEdit::AddAnchor { orig_seg, t } => {
-                let (e, forward) = map.find_edge(&orig_seg)?;
+                let (e, forward) = find_edge(&orig_seg)?;
                 map.with_anchor_added(e, if forward { t } else { 1.0 - t })
             }
             MapEdit::DeleteAnchor { orig_vertex } => map.with_anchor_deleted(vertex(orig_vertex)?),
@@ -2101,14 +2339,14 @@ impl MapEdit {
                 grab_t,
                 target,
             } => {
-                let (e, forward) = map.find_edge(&orig_seg)?;
+                let (e, forward) = find_edge(&orig_seg)?;
                 let t = if forward { grab_t } else { 1.0 - grab_t };
-                map.pulled_edge(known, e, t, target)
+                map.pulled_edge(known, index, e, t, target)
             }
             MapEdit::MoveVertex {
                 orig_vertex,
                 target,
-            } => map.moved_vertex(known, vertex(orig_vertex)?, target),
+            } => map.moved_vertex(known, index, vertex(orig_vertex)?, target),
         }
     }
 }
@@ -2116,7 +2354,16 @@ impl MapEdit {
 impl PlanarMap {
     /// 形が `q` の辺（向きが逆でもよい）と、`q` と同じ向きか
     fn find_edge(&self, q: &QuadBez) -> Option<(usize, bool)> {
-        (0..self.edges.len()).find_map(|e| {
+        self.find_edge_in(q, 0..self.edges.len())
+    }
+
+    /// `find_edge` を、辺 `among`（番号の順）の中で
+    fn find_edge_in(
+        &self,
+        q: &QuadBez,
+        mut among: impl Iterator<Item = usize>,
+    ) -> Option<(usize, bool)> {
+        among.find_map(|e| {
             let m = self.quad(e);
             if m == *q {
                 Some((e, true))
@@ -2224,6 +2471,7 @@ impl PlanarMap {
 
     /// 地図を座標の変換 `xform` で置いたとき、頂点 `v` を `p` へ動かすときに吸い付く、ほかの頂点（`radius` 以内でいちばん
     /// 近いもの。距離は置いた座標で測る）の位置（地図の座標）
+    #[cfg(test)]
     pub(crate) fn snap_target(
         &self,
         v: usize,
@@ -2239,19 +2487,57 @@ impl PlanarMap {
     /// 頂点は座標の変換 `xform` で置いて測り、見るのは `area`（置いた座標）から `radius` 以内のものだけ。近い頂点を引くのは
     /// みなこれ（カーソル合わせ `hit_node`・頂点への吸い付き `snap_target`・重ねる形の線の端を前からある頂点に寄せる
     /// `overlay`）
+    #[cfg(test)]
     pub(crate) fn node_finder(
         &self,
         radius: f64,
         xform: Affine,
         area: KRect,
     ) -> impl Fn(Point, Option<usize>) -> Option<usize> + '_ {
+        self.node_finder_in(radius, xform, area, None)
+    }
+
+    /// `node_finder` と同じ。`index`（この地図の升目の索引）があれば、見る頂点を、`area` の
+    /// まわりの升目にかかる辺の端だけにする（頂点の番号の順に見るので、答えは全部の頂点を見たときと同じ）
+    pub(crate) fn node_finder_in(
+        &self,
+        radius: f64,
+        xform: Affine,
+        area: KRect,
+        index: Option<MapIndex<'_>>,
+    ) -> impl Fn(Point, Option<usize>) -> Option<usize> + '_ {
         let cell = move |p: Point| ((p.x / radius).floor() as i64, (p.y / radius).floor() as i64);
         let area = area.inflate(radius, radius);
         let mut near: IntMap<(i64, i64), Vec<(usize, Point)>> = IntMap::default();
-        for (v, &p) in self.nodes.iter().enumerate() {
-            let q = xform * p;
+        let mut put = |v: usize| {
+            let q = xform * self.nodes[v];
             if area.contains(q) {
                 near.entry(cell(q)).or_default().push((v, q));
+            }
+        };
+        match index.filter(|_| xform.determinant().abs() > 0.0) {
+            Some(ix) => {
+                // `area` の中の頂点は、文書の座標では、逆の変換で写した `area` の外接矩形の中にあり、その点を含むマスの
+                // 升目に、その頂点を端に持つ辺が入っている
+                let doc_area = xform.inverse().transform_rect_bbox(area);
+                let mut edges: Vec<usize> = Vec::new();
+                for t in index_tiles_over(doc_area) {
+                    ix.index.edges_in(ix.stored, t, &mut edges);
+                }
+                let mut vs: Vec<usize> = edges
+                    .iter()
+                    .flat_map(|&e| [self.edges[e].a, self.edges[e].b])
+                    .collect();
+                vs.sort_unstable();
+                vs.dedup();
+                for v in vs {
+                    put(v);
+                }
+            }
+            None => {
+                for v in 0..self.nodes.len() {
+                    put(v);
+                }
             }
         }
         move |p: Point, skip: Option<usize>| {
@@ -2849,7 +3135,7 @@ pub(crate) fn region_map(part: &PlanarMap, rect: Option<&FillShape>) -> Option<P
 pub(crate) fn cut_out(
     cel: &LayerBase,
     own: &[&FillShape],
-    content: &PlanarMap,
+    content: &LayerBase,
     region: MapInput<'_>,
     layer_id: LayerId,
     group_path: &[u64],

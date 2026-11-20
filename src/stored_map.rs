@@ -13,7 +13,7 @@
 //! しまう形だけを持つ）。
 
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use eframe::egui::Color32;
 use kurbo::Point;
@@ -170,6 +170,8 @@ struct Stored {
     tiles: Box<[Tile]>,
     /// この地図の計算に使う写しのうち、いま誰かが持っているもの（弱い参照。生かすのは写しを使う所：`LayerBase::of_stored`）
     dense: Mutex<Weak<LayerBase>>,
+    /// 塊ごとの、最初の辺の、計算に使う地図（`to_dense`）での番号（初めて要るときに作る：`dense_edge`）
+    starts: OnceLock<Box<[u32]>>,
 }
 
 impl StoredMap {
@@ -211,6 +213,7 @@ impl StoredMap {
         let stored = Self(Arc::new(Stored {
             tiles: tiles.into(),
             dense: Mutex::new(Weak::new()),
+            starts: OnceLock::new(),
         }));
         (stored, order)
     }
@@ -314,6 +317,7 @@ impl StoredMap {
         let stored = Self(Arc::new(Stored {
             tiles: tiles.into(),
             dense: Mutex::new(Weak::new()),
+            starts: OnceLock::new(),
         }));
         (stored, order)
     }
@@ -377,6 +381,50 @@ impl StoredMap {
         PlanarMap { nodes, edges }
     }
 
+    /// 塊ごとの、最初の辺の番号（計算に使う地図 `to_dense` の辺の番号は、塊の順・塊の中の順なので、塊の大きさの和）
+    fn starts(&self) -> &[u32] {
+        self.0.starts.get_or_init(|| {
+            let mut at = 0u32;
+            self.0
+                .tiles
+                .iter()
+                .map(|t| {
+                    let s = at;
+                    at += t.len() as u32;
+                    s
+                })
+                .collect()
+        })
+    }
+
+    /// 升目 `home` の塊の `j` 番目の辺の、計算に使う地図（`to_dense`）での番号。その塊が無ければ `None`
+    fn dense_edge(&self, home: (i32, i32), j: u32) -> Option<usize> {
+        let k = self
+            .0
+            .tiles
+            .binary_search_by_key(&home, |t| t[0].tile())
+            .ok()?;
+        Some((self.starts()[k] + j) as usize)
+    }
+
+    /// `other` と、同じ升目に同じ塊（同じ `Arc`）を持つ数（塊の数に比例する手間。辺の数にはよらない）
+    pub(crate) fn shared_tile_count(&self, other: &Self) -> usize {
+        let (a, b) = (&self.0.tiles, &other.0.tiles);
+        let (mut i, mut k, mut n) = (0, 0, 0);
+        while i < a.len() && k < b.len() {
+            match a[i][0].tile().cmp(&b[k][0].tile()) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => k += 1,
+                std::cmp::Ordering::Equal => {
+                    n += Arc::ptr_eq(&a[i], &b[k]) as usize;
+                    i += 1;
+                    k += 1;
+                }
+            }
+        }
+        n
+    }
+
     /// 同じ `Arc` か（同じしまった地図）
     pub(crate) fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -397,6 +445,7 @@ impl StoredMap {
         Self(Arc::new(Stored {
             tiles,
             dense: Mutex::new(Weak::new()),
+            starts: OnceLock::new(),
         }))
     }
 
@@ -484,6 +533,191 @@ impl StoredMap {
             .iter()
             .filter(|t| theirs.contains(&(Arc::as_ptr(t) as *const u8 as usize)))
             .count()
+    }
+}
+
+/// 升目の索引の、辺の指し方：（辺の住む塊の升目, 塊の中の番号）。塊が変わらなければ、地図の版が変わっても同じ辺を指す
+type EdgeRef = ((i32, i32), u32);
+
+/// 升目の索引の1升目：（升目, その升目にかかる辺。辺の指し方の順）
+type IndexCell = ((i64, i64), Arc<[EdgeRef]>);
+
+/// 升目の索引：索引の升目（近さを調べる格子のマス 4×4。`planar_map::reach_tiles`）ごとの、その升目にかかる辺（判定の形の
+/// 近くを探すマス `EdgeGeom::reach` のどれかが、その升目にある辺）。近くの辺を探す所（重ね合わせの入れる辺を決める所・
+/// カーソル合わせ）が、毎回全部の辺を格子に入れ直さずに引く。持つのは計算に使う写し（`LayerBase::index`）で、地図を
+/// 書き換えたときは、前の写しの索引から、変わった塊の辺がかかる升目だけを作り直す（`derive`）。設計：
+/// claude/触った所だけを計算する地図の設計_22fbbbe.md の 3.3
+#[derive(Debug, Default)]
+pub(crate) struct TileIndex {
+    /// 索引の升目の順の（升目, その升目にかかる辺。辺の指し方の順）
+    cells: Box<[IndexCell]>,
+}
+
+impl TileIndex {
+    /// 地図 `map` の索引を全部作る。`tiles_of(e)` は、計算に使う地図の辺 `e` がかかる索引の升目
+    pub(crate) fn build(map: &StoredMap, tiles_of: impl Fn(usize) -> Vec<(i64, i64)>) -> Self {
+        let mut all: Vec<((i64, i64), EdgeRef)> = Vec::new();
+        let mut e = 0usize;
+        for t in map.0.tiles.iter() {
+            let home = t[0].tile();
+            for j in 0..t.len() {
+                all.extend(tiles_of(e).into_iter().map(|c| (c, (home, j as u32))));
+                e += 1;
+            }
+        }
+        Self::from_sorted(all)
+    }
+
+    /// （升目, 辺）の並びから作る（並べ替えて升目ごとにまとめる）
+    fn from_sorted(mut all: Vec<((i64, i64), EdgeRef)>) -> Self {
+        all.sort_unstable();
+        all.dedup();
+        let cells = all
+            .chunk_by(|a, b| a.0 == b.0)
+            .map(|run| (run[0].0, run.iter().map(|x| x.1).collect()))
+            .collect();
+        Self { cells }
+    }
+
+    /// 地図 `prev` の索引（`self`）から、地図 `next` の索引を作る。`prev` と `next` で、同じ升目に同じ塊（同じ `Arc`）が
+    /// ある塊の辺は、どちらでも同じ辺の指し方なので、そのまま残す。ほかの塊（消えた塊・新しい塊）の辺がかかる升目だけを
+    /// 作り直す。`prev_tiles(e)`・`next_tiles(e)` は、それぞれの計算に使う地図の辺 `e` がかかる索引の升目。手間は、変わった
+    /// 塊の辺の数と、塊・升目の数で決まり、辺の総数にはよらない
+    pub(crate) fn derive(
+        &self,
+        prev: &StoredMap,
+        next: &StoredMap,
+        prev_tiles: impl Fn(usize) -> Vec<(i64, i64)>,
+        next_tiles: impl Fn(usize) -> Vec<(i64, i64)>,
+    ) -> Self {
+        let (pt, nt) = (&prev.0.tiles, &next.0.tiles);
+        let (ps, ns) = (prev.starts(), next.starts());
+        // 消えた塊（`prev` の番号）と、新しい塊（`next` の番号）
+        let (mut gone, mut fresh): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+        let (mut i, mut k) = (0, 0);
+        while i < pt.len() || k < nt.len() {
+            let a = pt.get(i).map(|t| t[0].tile());
+            let b = nt.get(k).map(|t| t[0].tile());
+            match (a, b) {
+                (Some(x), Some(y)) if x == y => {
+                    if !Arc::ptr_eq(&pt[i], &nt[k]) {
+                        gone.push(i);
+                        fresh.push(k);
+                    }
+                    i += 1;
+                    k += 1;
+                }
+                (Some(x), y) if y.is_none_or(|y| x < y) => {
+                    gone.push(i);
+                    i += 1;
+                }
+                _ => {
+                    fresh.push(k);
+                    k += 1;
+                }
+            }
+        }
+        if gone.is_empty() && fresh.is_empty() {
+            return Self {
+                cells: self.cells.clone(),
+            };
+        }
+        // 消える辺の住む塊の升目（新しい塊の升目と同じことがある：作り直した塊。どちらにしても、前の指し方は消す）
+        let gone_homes: std::collections::HashSet<(i32, i32)> =
+            gone.iter().map(|&i| pt[i][0].tile()).collect();
+        // 作り直す升目と、足す辺
+        let mut touched: Vec<(i64, i64)> = Vec::new();
+        for &i in &gone {
+            for e in ps[i] as usize..ps[i] as usize + pt[i].len() {
+                touched.extend(prev_tiles(e));
+            }
+        }
+        let mut added: Vec<((i64, i64), EdgeRef)> = Vec::new();
+        for &k in &fresh {
+            let home = nt[k][0].tile();
+            for j in 0..nt[k].len() {
+                for c in next_tiles(ns[k] as usize + j) {
+                    touched.push(c);
+                    added.push((c, (home, j as u32)));
+                }
+            }
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        added.sort_unstable();
+        // 作り直す升目の中身：前の中身から消える塊の辺を除き、足す辺を入れる
+        let mut rebuilt: Vec<IndexCell> = Vec::with_capacity(touched.len());
+        let mut a = 0;
+        for &c in &touched {
+            let mut list: Vec<EdgeRef> = match self.cells.binary_search_by_key(&c, |x| x.0) {
+                Ok(at) => self.cells[at]
+                    .1
+                    .iter()
+                    .copied()
+                    .filter(|r| !gone_homes.contains(&r.0))
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            while a < added.len() && added[a].0 < c {
+                a += 1;
+            }
+            while a < added.len() && added[a].0 == c {
+                list.push(added[a].1);
+                a += 1;
+            }
+            if !list.is_empty() {
+                list.sort_unstable();
+                list.dedup();
+                rebuilt.push((c, list.into()));
+            }
+        }
+        // 升目の順に、変わらない升目と作り直した升目を並べる
+        let mut cells: Vec<IndexCell> = Vec::with_capacity(self.cells.len() + rebuilt.len());
+        let (mut x, mut y) = (0, 0);
+        while x < self.cells.len() || y < touched.len() {
+            let old = self.cells.get(x).map(|c| c.0);
+            let t = touched.get(y).copied();
+            match (old, t) {
+                (Some(o), Some(t)) if o == t => {
+                    x += 1;
+                    y += 1;
+                }
+                (Some(o), t) if t.is_none_or(|t| o < t) => {
+                    cells.push(self.cells[x].clone());
+                    x += 1;
+                }
+                _ => y += 1,
+            }
+        }
+        // 作り直した升目を入れる（升目の順に並べ直す）
+        cells.extend(rebuilt);
+        cells.sort_unstable_by_key(|c| c.0);
+        Self {
+            cells: cells.into(),
+        }
+    }
+
+    /// 索引の升目 `tile` にかかる辺の、地図 `map`（この索引の地図）の計算に使う地図での番号を `out` に足す
+    pub(crate) fn edges_in(&self, map: &StoredMap, tile: (i64, i64), out: &mut Vec<usize>) {
+        if let Ok(at) = self.cells.binary_search_by_key(&tile, |x| x.0) {
+            out.extend(
+                self.cells[at]
+                    .1
+                    .iter()
+                    .filter_map(|&(home, j)| map.dense_edge(home, j)),
+            );
+        }
+    }
+
+    /// テスト用：索引の中身（升目ごとの、辺の指し方の並び）が同じか
+    #[cfg(test)]
+    pub(crate) fn same_content(&self, other: &Self) -> bool {
+        self.cells.len() == other.cells.len()
+            && self
+                .cells
+                .iter()
+                .zip(other.cells.iter())
+                .all(|(a, b)| a.0 == b.0 && a.1[..] == b.1[..])
     }
 }
 

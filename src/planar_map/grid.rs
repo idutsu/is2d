@@ -51,12 +51,17 @@ impl EdgeGeom {
 pub(super) fn edge_reach(q: QuadBez) -> EdgeReach {
     #[cfg(test)]
     super::REACHES_BUILT.with(|n| n.set(n.get() + 1));
-    let r = 3.0 * GRID_REACH;
     let pad = (3.0 * GRID_REACH * OVERLAY_GRID).ceil() as i64;
     let mut cells: Vec<(i64, i64)> = quad_cells(q, pad).collect();
     cells.sort_unstable();
     cells.dedup();
-    (q.bounding_box().inflate(r, r), cells.into())
+    (reach_box(q), cells.into())
+}
+
+/// 重ね合わせで近くの辺を探すときの、辺（曲線 `q`）の外接矩形（`edge_reach` の矩形。マスを作らずに求める）
+pub(super) fn reach_box(q: QuadBez) -> KRect {
+    let r = 3.0 * GRID_REACH;
+    q.bounding_box().inflate(r, r)
 }
 
 /// 点を格子の点に丸める（丸めの式はこれ1つ。座標の範囲は見ない：範囲も見るのは `to_grid`）
@@ -973,6 +978,34 @@ pub(super) const GRID_CELL: i64 = 8 * OVERLAY_GRID as i64;
 /// 点（格子の点）を含むマス
 pub(super) fn cell_of(p: IPt) -> (i64, i64) {
     (p.0.div_euclid(GRID_CELL), p.1.div_euclid(GRID_CELL))
+}
+
+/// 升目の索引（`stored_map::TileIndex`）の1升目の、近さを調べる格子のマスの数（1辺。4マス＝32px）
+const INDEX_TILE_CELLS: i64 = 4;
+
+/// マス `c` を含む、升目の索引の升目
+pub(super) fn index_tile(c: (i64, i64)) -> (i64, i64) {
+    (
+        c.0.div_euclid(INDEX_TILE_CELLS),
+        c.1.div_euclid(INDEX_TILE_CELLS),
+    )
+}
+
+/// マスの並び `cells` がかかる、升目の索引の升目（並べて同じ升目は1つ）。辺を索引に入れる升目は、辺の近くを探すマス
+/// （`EdgeGeom::reach`）の升目なので、マスでその辺を見つける所（`CellGrid` と同じ探し方）は、そのマスの升目を引けば
+/// 必ず見つかる
+pub(super) fn index_tiles(cells: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    let mut t: Vec<(i64, i64)> = cells.iter().map(|&c| index_tile(c)).collect();
+    t.sort_unstable();
+    t.dedup();
+    t
+}
+
+/// 矩形 `r`（文書の座標）にかかる、升目の索引の升目。矩形の中の点は、その点を含むマスの升目にある
+pub(super) fn index_tiles_over(r: KRect) -> impl Iterator<Item = (i64, i64)> {
+    let a = index_tile(cell_of(gpt(Point::new(r.x0, r.y0))));
+    let b = index_tile(cell_of(gpt(Point::new(r.x1, r.y1))));
+    (a.0..=b.0).flat_map(move |x| (a.1..=b.1).map(move |y| (x, y)))
 }
 
 /// 区間 `a`–`b`（格子の点）を、どの向きにも `pad` 目だけ太らせたものがかかるマス。列ごとに、その列にかかる区間の y の
