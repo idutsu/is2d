@@ -68,6 +68,33 @@ impl StoredEdge {
         }
     }
 
+    #[cfg(test)]
+    /// 塊から引いた辺の形の辺（決まった向きにする）
+    fn of_tile(te: &TileEdge) -> Self {
+        let src = |id: Option<ShapeId>| id.and_then(NonZeroU64::new);
+        if point_order(te.a, te.b).is_le() {
+            Self {
+                a: te.a,
+                b: te.b,
+                ctrl: te.ctrl,
+                left: te.left,
+                right: te.right,
+                left_src: src(te.left_src),
+                right_src: src(te.right_src),
+            }
+        } else {
+            Self {
+                a: te.b,
+                b: te.a,
+                ctrl: te.ctrl,
+                left: te.right,
+                right: te.left,
+                left_src: src(te.right_src),
+                right_src: src(te.left_src),
+            }
+        }
+    }
+
     /// 計算に使う地図の辺（頂点の番号 `a`・`b`。向きはこのしまう辺の向き）
     fn dense(&self, a: usize, b: usize) -> MapEdge {
         MapEdge {
@@ -507,8 +534,8 @@ impl StoredMap {
         }
     }
 
-    /// 計算に使う地図（`to_dense`）の辺の数
     #[cfg(test)]
+    /// 計算に使う地図（`to_dense`）の辺の数
     pub(crate) fn edge_count(&self) -> usize {
         self.0.tiles.iter().map(|t| t.len()).sum()
     }
@@ -558,6 +585,136 @@ impl StoredMap {
             }
         }
         n
+    }
+
+    #[cfg(test)]
+    /// 計算に使う地図の辺 `e` のしまう辺
+    fn stored_edge(&self, e: usize) -> &StoredEdge {
+        let starts = self.starts();
+        let k = starts.partition_point(|&s| s as usize <= e) - 1;
+        &self.0.tiles[k][e - starts[k] as usize]
+    }
+
+    #[cfg(test)]
+    /// 窓で重ねた結果の差分（`window_diff` と同じ）を、前の地図の一覧を使わずに塊から：窓の辺 `window`（計算に使う地図の
+    /// 番号）と結果 `result` を、しまう辺で比べて（消えた辺, 増えた結果の辺）
+    pub(crate) fn window_diff_tiles(
+        &self,
+        window: &[usize],
+        result: &PlanarMap,
+    ) -> (Vec<usize>, Vec<usize>) {
+        let olds: std::collections::HashSet<StoredEdge> =
+            window.iter().map(|&e| *self.stored_edge(e)).collect();
+        let news: std::collections::HashSet<StoredEdge> = result
+            .edges
+            .iter()
+            .map(|ed| StoredEdge::of(result, ed))
+            .collect();
+        let removed = window
+            .iter()
+            .copied()
+            .filter(|&e| !news.contains(self.stored_edge(e)))
+            .collect();
+        let added = (0..result.edges.len())
+            .filter(|&e| !olds.contains(&StoredEdge::of(result, &result.edges[e])))
+            .collect();
+        (removed, added)
+    }
+
+    #[cfg(test)]
+    /// 形が `q` の辺（向きが逆でもよい）の、計算に使う地図での番号と、`q` と同じ向きか。辺は弦の中点の升目の塊にあるので、
+    /// その塊の中だけを探す
+    pub(crate) fn find_edge(&self, q: &QuadBez) -> Option<(usize, bool)> {
+        let (a, b) = if point_order(q.p0, q.p2).is_le() {
+            (q.p0, q.p2)
+        } else {
+            (q.p2, q.p0)
+        };
+        let probe = StoredEdge {
+            a,
+            b,
+            ctrl: q.p1,
+            left: None,
+            right: None,
+            left_src: None,
+            right_src: None,
+        };
+        let k = self
+            .0
+            .tiles
+            .binary_search_by_key(&probe.tile(), |t| t[0].tile())
+            .ok()?;
+        let j = self.0.tiles[k]
+            .iter()
+            .position(|se| se.a == a && se.b == b && se.ctrl == q.p1)?;
+        Some((self.starts()[k] as usize + j, q.p0 == a))
+    }
+
+    #[cfg(test)]
+    /// この地図に差分を当てた地図：計算に使う地図の辺 `removed` を消し、辺 `added` を足す（`with_diff` と同じ。足す辺を
+    /// 塊の辺の形で受け取る）
+    pub(crate) fn with_diff_tiles(&self, removed: &[usize], added: &[TileEdge]) -> Self {
+        let starts = self.starts();
+        let tiles = &self.0.tiles;
+        let mut gone: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
+        for &e in removed {
+            let k = starts.partition_point(|&s| s as usize <= e) - 1;
+            gone.entry(k).or_default().push(e - starts[k] as usize);
+        }
+        let mut redo: std::collections::BTreeMap<(i32, i32), Vec<StoredEdge>> = Default::default();
+        for (&k, js) in &gone {
+            redo.entry(tiles[k][0].tile()).or_default().extend(
+                tiles[k]
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| !js.contains(j))
+                    .map(|(_, e)| *e),
+            );
+        }
+        for te in added {
+            let se = StoredEdge::of_tile(te);
+            let at = se.tile();
+            redo.entry(at)
+                .or_insert_with(|| match tiles.binary_search_by_key(&at, |t| t[0].tile()) {
+                    Ok(k) => tiles[k].to_vec(),
+                    Err(_) => Vec::new(),
+                })
+                .push(se);
+        }
+        let mut out: Vec<Tile> = Vec::with_capacity(tiles.len() + redo.len());
+        let push = |mut list: Vec<StoredEdge>, out: &mut Vec<Tile>| {
+            if !list.is_empty() {
+                list.sort_unstable_by(|x, y| x.order(y));
+                out.push(TileData::new(list.into()));
+            }
+        };
+        let mut fresh = redo.into_iter().peekable();
+        let mut i = 0;
+        loop {
+            match (tiles.get(i), fresh.peek()) {
+                (Some(t), Some((c, _))) if t[0].tile() < *c => {
+                    out.push(t.clone());
+                    i += 1;
+                }
+                (Some(t), Some(_)) => {
+                    let (c, list) = fresh.next().expect("見た");
+                    if t[0].tile() == c {
+                        i += 1;
+                    }
+                    push(list, &mut out);
+                }
+                (Some(t), None) => {
+                    out.push(t.clone());
+                    i += 1;
+                }
+                (None, Some(_)) => {
+                    let (_, list) = fresh.next().expect("見た");
+                    push(list, &mut out);
+                }
+                (None, None) => break,
+            }
+        }
+        Self::of_tiles(out.into())
     }
 
     #[cfg(test)]

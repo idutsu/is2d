@@ -1292,6 +1292,54 @@ impl Cel {
         }
     }
 
+    #[cfg(test)]
+    /// 触った所だけで行う地図の編集（ブラシ・消しゴム：`LayerBase::paint_local`）：階層 `group_path` の地図を `f` で編集し、
+    /// 書くものがあれば入れる（`put_local`）。`Ok(None)`：変わらない、`Err`：書けない
+    pub(crate) fn edit_local(
+        &mut self,
+        group_path: &[u64],
+        f: impl FnOnce(&LayerBase) -> crate::planar_map::LocalEdit,
+    ) -> Result<Option<MapWritten>, crate::planar_map::LocalRefusal> {
+        use crate::planar_map::LocalEdit;
+        let base = self.scope_base(group_path);
+        match f(&base) {
+            LocalEdit::Same => Ok(None),
+            LocalEdit::Refused(r) => Err(r),
+            LocalEdit::Changed(w) => Ok(Some(MapWritten(self.put_local(group_path, w, &base)))),
+        }
+    }
+
+    #[cfg(test)]
+    /// 触った所だけで行った編集の書くもの `w` を入れる（`put_map` と同じく、階層の地図を新しいしまう形にする。面の無く
+    /// なった階層は外す）。戻り値は新しい地図の写し（`LayerBase::of_local`。前の写し `prev` から升目の索引を作る）
+    pub(crate) fn put_local(
+        &mut self,
+        group_path: &[u64],
+        w: crate::planar_map::LocalWrite,
+        prev: &LayerBase,
+    ) -> Option<Arc<LayerBase>> {
+        let at = self.maps.iter().position(|m| m.group_path == group_path);
+        let Some(m) = ScopeMap::of_checked_stored(group_path.to_vec(), w.stored) else {
+            let mut items = Self::items_of(&self.maps, &self.instances);
+            items.retain(|it| !matches!(it, Item::Raw(p, _) if p == group_path));
+            self.arrange(items);
+            return None;
+        };
+        let base = LayerBase::of_local(m.stored().clone(), group_path, w.faces, prev);
+        match at {
+            Some(i) => {
+                Arc::make_mut(&mut self.maps)[i] = m;
+                self.revision = crate::vector_engine::next_mesh_revision();
+            }
+            None => {
+                let mut items = Self::items_of(&self.maps, &self.instances);
+                items.push(Item::Raw(group_path.to_vec(), m));
+                self.arrange(items);
+            }
+        }
+        Some(base)
+    }
+
     /// 地図 `map`（文書の座標。面の図形 `shapes`：`MapChange::into_face_shapes`）を入れる：階層の地図をこの地図にする。
     /// 面の無くなった階層は外し、新しい階層は決まりどおりの所（グループの中身があれば、そのいちばん下。無ければ親の階層の
     /// いちばん上）に入れる。戻り値は、新しい地図の計算に使う写し。階層を外したときは `None`

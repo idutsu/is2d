@@ -885,6 +885,61 @@ pub(super) fn quad_key(q: &QuadBez) -> [u64; 6] {
     ]
 }
 
+impl LocalMap<'_> {
+    /// 触った面 `faces` の辺の側に、面ごとの図形の番号 `ids` を記した辺（今の `labeled` と同じ：面の辺の側にはその面の
+    /// 番号、面の無い側には無し）。（番号が変わる前の地図の辺, 足す辺）：前の地図の辺で側の番号が変わるものは、消して、
+    /// 番号を付け替えた辺を足す。増えた辺は、みな番号を付け替えて足す
+    pub(crate) fn relabeled_edges(
+        &self,
+        faces: &[LocalFace],
+        ids: &[ShapeId],
+        memo: &CycleMemo,
+    ) -> (Vec<usize>, Vec<crate::stored_map::TileEdge>) {
+        let mut sides: HashMap<usize, (Option<ShapeId>, Option<ShapeId>)> = HashMap::new();
+        for e in self.added_edges() {
+            sides.insert(e, (None, None));
+        }
+        for (f, &id) in faces.iter().zip(ids) {
+            for &ci in &f.cycles {
+                for &(e, forward) in &memo.cycles[ci].cycle {
+                    let ed = self.edge(e);
+                    let s = sides.entry(e).or_insert((ed.left_src, ed.right_src));
+                    if forward {
+                        s.0 = Some(id);
+                    } else {
+                        s.1 = Some(id);
+                    }
+                }
+            }
+        }
+        let mut changed_base: Vec<usize> = Vec::new();
+        let mut add: Vec<crate::stored_map::TileEdge> = Vec::new();
+        let mut keys: Vec<usize> = sides.keys().copied().collect();
+        keys.sort_unstable();
+        for e in keys {
+            let (l, r) = sides[&e];
+            let ed = self.edge(e);
+            if e < self.n_base() {
+                if (ed.left_src, ed.right_src) == (l, r) {
+                    continue;
+                }
+                changed_base.push(e);
+            }
+            let q = self.quad(e);
+            add.push(crate::stored_map::TileEdge {
+                a: q.p0,
+                b: q.p2,
+                ctrl: q.p1,
+                left: ed.left,
+                right: ed.right,
+                left_src: l,
+                right_src: r,
+            });
+        }
+        (changed_base, add)
+    }
+}
+
 /// 触った面の書き戻しの差分（`LocalMap::rewrite`）：消す元の図形、新しく入れる図形、触った面ごとの図形の番号
 pub(crate) struct LocalChange {
     pub(crate) removed: Vec<ShapeId>,
@@ -916,6 +971,7 @@ impl LocalMap<'_> {
         &self,
         faces: &[LocalFace],
         base_faces: BaseFaces<'_>,
+        orig_shape: &dyn Fn(ShapeId) -> Option<Arc<FillShape>>,
         memo: &CycleMemo,
         layer_id: u64,
         group_path: &[u64],
@@ -1023,13 +1079,35 @@ impl LocalMap<'_> {
                 *best = (sides, i);
             }
         }
+        // 形の変わらない輪郭（触っていない穴など）は、元の図形の輪郭をそのまま使い回す（`rewrite_shapes` と同じ：輪郭の
+        // 点の並びを共有する）
+        let reuse = |cycle: &[(usize, bool)], quads: &[QuadBez]| -> Option<Contour> {
+            if !cycle.iter().all(|h| same(h.0)) {
+                return None;
+            }
+            let shape = orig_shape(self.side_src(cycle[0])?)?;
+            let found = shape
+                .contours()
+                .find(|c| {
+                    c.segments.len() == quads.len()
+                        && c.segments
+                            .iter()
+                            .position(|q| *q == quads[0])
+                            .is_some_and(|k| {
+                                (0..quads.len())
+                                    .all(|i| c.segments[(k + i) % quads.len()] == quads[i])
+                            })
+                })
+                .cloned();
+            found
+        };
         let added: Vec<FillShape> = changed
             .into_iter()
             .map(|i| {
                 let f = &faces[i];
                 let mut contours = f.cycles.iter().map(|&ci| {
-                    let quads: Vec<QuadBez> = memo.cycles[ci]
-                        .cycle
+                    let cycle = &memo.cycles[ci].cycle;
+                    let quads: Vec<QuadBez> = cycle
                         .iter()
                         .map(|&(e, forward)| {
                             let q = self.quad(e);
@@ -1040,7 +1118,7 @@ impl LocalMap<'_> {
                             }
                         })
                         .collect();
-                    Contour::new(from_lowest_point(quads))
+                    reuse(cycle, &quads).unwrap_or_else(|| Contour::new(from_lowest_point(quads)))
                 });
                 let exterior = contours.next().unwrap_or_else(|| Contour::new(Vec::new()));
                 let mut holes: Vec<Contour> = contours.collect();
@@ -1076,8 +1154,10 @@ fn hs_key(hs: &[(usize, bool)], m: &LocalMap<'_>) -> ([u64; 6], bool) {
 }
 
 /// 面の、番号によらない形（色と、輪郭の形の並び。並べたもの）。お手本と比べるため
+#[cfg(test)]
 pub(crate) type FaceShape = ([u8; 4], Vec<Vec<([u64; 6], bool)>>);
 
+#[cfg(test)]
 impl LocalMap<'_> {
     /// 触った面の、番号によらない形
     pub(crate) fn face_shape_key(&self, f: &LocalFace, memo: &CycleMemo) -> FaceShape {
@@ -1092,6 +1172,7 @@ impl LocalMap<'_> {
 }
 
 /// 地図 `m` の全部の面の、番号によらない形（`faces` の面。並べたもの）
+#[cfg(test)]
 pub(crate) fn faces_shape_keys(m: &PlanarMap) -> Vec<FaceShape> {
     let (faces, _) = m.faces();
     let mut out: Vec<FaceShape> = faces

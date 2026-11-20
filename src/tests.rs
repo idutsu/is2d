@@ -31262,8 +31262,10 @@ fn derived_geometry_carried_across_edits_matches_a_fresh_build() {
         if !doc_actions::apply(&mut app, action) {
             continue;
         }
+        // 写しが持っている判定の形・輪郭・輪は、作り直したものと同じ（触った所だけで書いた写しは、まだ持っていない
+        // ことがある：要るときに作る）
         for m in app.doc.root.layers[0].keyframes[0].cel.maps.iter() {
-            assert_eq!(m.base().derived_match_full(), Some(true), "step {step}");
+            assert_ne!(m.base().derived_match_full(), Some(false), "step {step}");
             checked += 1;
         }
     }
@@ -34981,4 +34983,127 @@ fn local_check_matches_full_check_when_edges_are_removed() {
         }
     }
     assert!(good > 5 && bad > 5, "正しい {good}・正しくない {bad}");
+}
+
+/// 段2b-7c-2：ブラシ・消しゴムを触った所だけで行う編集（`LayerBase::paint_local`）を、ランダムな線で何十回も重ねる。
+/// 毎回、関数の中でお手本（前の地図全体で重ねて確かめ、書き戻した答え：しまう形・消す図形・入れる図形）と比べ、次の
+/// 編集は新しいしまう形から続ける。線の多いセル画（区画を 4×4 並べたもの）でも行う
+#[test]
+fn local_paint_matches_full_pipeline() {
+    use crate::planar_map::{LayerBase, LocalEdit, MapInput, MapRule, PlanarMap};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    let mut rng = map_overlay::Rng(37);
+    // 下ごしらえ：区画の地図と、それを 4×4 並べた地図
+    let mut block = PlanarMap::default();
+    let mut k = 0;
+    while block.edges.len() < 800 {
+        let (r, c) = (2.0 + rng.f() * 8.0, colors[k % 4]);
+        let s = wiggly_stroke(&mut rng, (-150.0, -75.0, 300.0, 150.0), r, c);
+        block = block
+            .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+            .unwrap();
+        k += 1;
+    }
+    let block = LayerBase::new(&block).map().clone();
+    let bb = block.bounding_box().unwrap();
+    let (dx, dy) = (bb.width() + 20.0, bb.height() + 20.0);
+    let mut big = PlanarMap::default();
+    for i in 0..4 {
+        for j in 0..4 {
+            let off = KVec2::new(i as f64 * dx, j as f64 * dy);
+            let n = big.nodes.len();
+            big.nodes.extend(block.nodes.iter().map(|&p| p + off));
+            big.edges
+                .extend(block.edges.iter().map(|e| crate::planar_map::MapEdge {
+                    a: e.a + n,
+                    b: e.b + n,
+                    ctrl: e.ctrl + off,
+                    ..*e
+                }));
+        }
+    }
+    let (mut changed, mut same) = (0, 0);
+    for (m, steps, span) in [
+        (block.clone(), 60, (bb.x0, bb.y0, bb.width(), bb.height())),
+        (big, 40, (bb.x0, bb.y0, 4.0 * dx, 4.0 * dy)),
+    ] {
+        let m = m.checked().unwrap().uniquely_labeled().into_map();
+        let mut base = std::sync::Arc::new(LayerBase::new(&m));
+        for step in 0..steps {
+            let c = colors[step % 4];
+            let at = (span.0 + rng.f() * span.2, span.1 + rng.f() * span.3);
+            let r = 2.0 + rng.f() * 9.0;
+            let st = wiggly_stroke(&mut rng, (at.0, at.1, 60.0, 40.0), r, c);
+            let rule = if step % 3 == 2 {
+                MapRule::Paint(None)
+            } else {
+                MapRule::Paint(Some(c))
+            };
+            match base.paint_local(&st, rule, &[]) {
+                LocalEdit::Changed(w) => {
+                    changed += 1;
+                    base = LayerBase::of_stored(&w.stored);
+                }
+                LocalEdit::Same => same += 1,
+                LocalEdit::Refused(_) => {}
+            }
+        }
+    }
+    assert!(changed > 50, "変わった {changed}・変わらない {same}");
+}
+
+/// 段2b-7c-2：触った所だけで行う編集をセル画に書く道（`Cel::edit_local`・`put_local`・`LayerBase::of_local`）。書くたびに
+/// 編集の答えはお手本と比べられ（`paint_local` の中）、書いたあとのセル画は決まりどおり（正しい地図で、面に1つずつ別の
+/// 番号：`maps_problem`）で、写しの面の図形の表は、地図から作り直したものと同じ
+#[test]
+fn local_paint_writes_through_the_cel() {
+    use crate::planar_map::MapRule;
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    let mut rng = map_overlay::Rng(43);
+    let mut shapes = Vec::new();
+    for k in 0..12 {
+        let r = 3.0 + rng.f() * 6.0;
+        shapes.extend(wiggly_stroke(
+            &mut rng,
+            (100.0, 100.0, 200.0, 120.0),
+            r,
+            colors[k % 3],
+        ));
+    }
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, shapes);
+    let mut cel = app.doc.root.layers[0].keyframes[0].cel.clone();
+    let mut written = 0;
+    for step in 0..40 {
+        let c = colors[step % 3];
+        let r = 2.0 + rng.f() * 7.0;
+        let st = wiggly_stroke(&mut rng, (100.0, 100.0, 200.0, 120.0), r, c);
+        let rule = if step % 4 == 3 {
+            MapRule::Paint(None)
+        } else {
+            MapRule::Paint(Some(c))
+        };
+        if let Ok(Some(_)) = cel.edit_local(&[], |base| base.paint_local(&st, rule, &[])) {
+            written += 1;
+            assert_eq!(cel.maps_problem(), None, "step {step}");
+            if let Some(m) = cel.maps.iter().find(|m| m.group_path.is_empty()) {
+                let base = m.base();
+                let fresh = crate::planar_map::LayerBase::new(base.map());
+                let ids = |l: &[std::sync::Arc<FillShape>]| -> Vec<u64> {
+                    l.iter().map(|s| s.shape_id).collect()
+                };
+                assert_eq!(ids(&base.faces(&[])), ids(&fresh.faces(&[])), "step {step}");
+            }
+        }
+    }
+    assert!(written > 20, "書いた {written}");
 }

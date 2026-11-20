@@ -15,7 +15,7 @@ use crate::vector_engine::{nearest_on_quad, rects_overlap, Contour, FillShape, S
 use crate::vector_engine::{LayerId, ShapeId};
 
 mod grid;
-// 前の地図＋差分として触った所だけを計算する道具（段2b。本番で使い始める 2b-7 までは、テストのお手本との比べだけで使う）
+// 前の地図＋差分として触った所だけを計算する道具（段2b）
 #[cfg(test)]
 mod local;
 mod overlay;
@@ -1643,6 +1643,34 @@ fn labeled(mut map: PlanarMap, faces: &[MapFace], ids: &[ShapeId]) -> PlanarMap 
     map
 }
 
+#[cfg(test)]
+/// 触った所だけで行う編集（`LayerBase::paint_local`）の答え
+pub(crate) enum LocalEdit {
+    /// 変わらない
+    Same,
+    /// 書けない（`OffGrid`：格子に置けない座標がある、`Unwritable`：正しい地図にならない）
+    Refused(LocalRefusal),
+    /// 書く
+    Changed(LocalWrite),
+}
+
+#[cfg(test)]
+/// 触った所だけで行う編集を書けない理由
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalRefusal {
+    OffGrid,
+    Unwritable,
+}
+
+#[cfg(test)]
+/// 触った所だけで行った編集の書くもの：前のしまう形に差分を当てた新しいしまう形（正しい地図で、面に1つずつ別の番号が
+/// 記してある）と、新しい面の図形の表（番号の順。変わらない面は前の表と同じ図形を共有する：消した図形は前の表にだけ、
+/// 入れた図形は新しい表にだけある）
+pub(crate) struct LocalWrite {
+    pub(crate) stored: StoredMap,
+    pub(crate) faces: Arc<[Arc<FillShape>]>,
+}
+
 /// お手本との比べ（設計 段2b の 0.）：2つの結果の地図の並びが、しまう形（頂点と辺の番号によらない形：座標・制御点・
 /// 色・図形の番号がビットまで同じ）で同じか。どちらも無い（重ねられない）のも同じ
 #[cfg(test)]
@@ -1872,6 +1900,36 @@ impl LayerBase {
         base
     }
 
+    #[cfg(test)]
+    /// 触った所だけで行った編集（`paint_local`）の新しいしまう形 `stored`（階層 `group_path`、面の図形の表 `faces`）の写し。
+    /// 地図全体の一覧（`map`）・判定の形・輪郭の一覧は作らず、要る所が初めて使うときに作る。升目の索引は、前の写し `prev`
+    /// の索引から、変わった塊の分だけ作る（設計 段2b の 7. の 2b-7c）
+    pub(crate) fn of_local(
+        stored: StoredMap,
+        group_path: &[u64],
+        faces: Arc<[Arc<FillShape>]>,
+        prev: &LayerBase,
+    ) -> Arc<Self> {
+        let base = Self {
+            dense: OnceLock::new(),
+            stored,
+            keys: OnceLock::new(),
+            polys: OnceLock::new(),
+            cycles: OnceLock::new(),
+            cycle_regions: OnceLock::new(),
+            faces: SyncCache::new(Some((group_path.to_vec(), faces))),
+            index: OnceLock::new(),
+        };
+        base.inherit_index(Some(prev));
+        let base = Arc::new(base);
+        *base
+            .stored
+            .dense_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Arc::downgrade(&base);
+        base
+    }
+
     /// しまった地図 `stored` の、いま誰かが持っている計算に使う写し（無ければ作らずに `None`）
     pub(crate) fn live(stored: &StoredMap) -> Option<Arc<Self>> {
         stored
@@ -1932,7 +1990,8 @@ impl LayerBase {
     /// 升目。マスで探す所（`NearEdges`）も、外接矩形が重なるかで探す所（重ね合わせを窓で行うときの窓）も、その升目を引けば
     /// 必ず見つかる
     fn edge_tiles(&self, e: usize) -> Vec<(i64, i64)> {
-        let (bbox, cells) = self.polys()[e].reach(self.map().quad(e));
+        // 写しの一覧を作らずに、塊の判定の形と辺から（差分から作った写しでも、一覧を作らない）
+        let (bbox, cells) = self.stored.poly(e).reach(self.stored.edge_at(e).quad());
         let mut t = index_tiles(cells);
         t.extend(index_tiles_over(*bbox));
         t.sort_unstable();
@@ -1998,6 +2057,251 @@ impl LayerBase {
             cycle.rotate_left(k);
         }
         cycle
+    }
+
+    #[cfg(test)]
+    /// 形 `shapes`（文書の座標）を決まり `rule` で重ねる編集（ブラシ・消しゴム）を、触った所だけで行う（設計 段2b の 7. の
+    /// 2b-7c）：窓で重ね（`window_overlay`）、差分を前の地図＋差分として確かめ（`LocalMap`）、触った面の書き戻しの差分を
+    /// 決め（`rewrite`）、前のしまう形に差分を当てた新しいしまう形と、新しい面の図形の表を作る。地図全体の一覧（`map`）を
+    /// 作らない。答えは、前の地図全体で重ねて確かめ、書き戻すとき（`overlay`・`written`・`Cel::outcome`・`put_map`）と同じ
+    /// （テストでは毎回お手本と比べる）。`group_path`：この地図の階層
+    pub(crate) fn paint_local(
+        &self,
+        shapes: &[FillShape],
+        rule: MapRule,
+        group_path: &[u64],
+    ) -> LocalEdit {
+        let got = self.paint_local_inner(shapes, rule, group_path);
+        #[cfg(test)]
+        if test_checks() {
+            let ok = uncounted(|| self.paint_matches_full(shapes, rule, group_path, &got));
+            assert!(
+                ok,
+                "触った所だけで行った編集が、前の地図全体で行った編集（お手本）と違う"
+            );
+        }
+        got
+    }
+
+    #[cfg(test)]
+    fn paint_local_inner(
+        &self,
+        shapes: &[FillShape],
+        rule: MapRule,
+        group_path: &[u64],
+    ) -> LocalEdit {
+        let mut new_quads: Vec<QuadBez> = shapes
+            .iter()
+            .flat_map(|s| s.contours())
+            .flat_map(|c| c.segments.iter().copied())
+            .collect();
+        if new_quads.is_empty() {
+            return LocalEdit::Same;
+        }
+        self.snap_ends(&mut new_quads);
+        let ix = self.map_index();
+        let Some((maps, wedges)) =
+            PlanarMap::window_overlay(ix, MapInput::Shapes(shapes), &[rule], &new_quads, &[])
+        else {
+            return LocalEdit::Refused(LocalRefusal::OffGrid);
+        };
+        let m = &maps[0];
+        let (removed, added) = self.stored.window_diff_tiles(&wedges, m);
+        if removed.is_empty() && added.is_empty() {
+            return LocalEdit::Same;
+        }
+        let local = LocalMap::new(ix, m, &removed, &added);
+        if !local.added_edges_ok() {
+            return LocalEdit::Refused(LocalRefusal::Unwritable);
+        }
+        let Some(touched) = local.touched_cycles_ok() else {
+            return LocalEdit::Refused(LocalRefusal::Unwritable);
+        };
+        let faces_list = self.faces(group_path);
+        let lookup = |id: ShapeId| -> Vec<(usize, bool)> {
+            match faces_list.binary_search_by_key(&id, |s| s.shape_id) {
+                Ok(i) => faces_list[i]
+                    .contours()
+                    .filter_map(|c| c.segments.first().and_then(|q| self.stored.find_edge(q)))
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        };
+        let mut memo = CycleMemo::default();
+        if local.regions_ok(&touched, &lookup, &mut memo) != Some(true) {
+            return LocalEdit::Refused(LocalRefusal::Unwritable);
+        }
+        let Some(faces) = local.touched_faces(&touched, &lookup, &mut memo) else {
+            return LocalEdit::Refused(LocalRefusal::Unwritable);
+        };
+        let orig_shape = |id: ShapeId| -> Option<Arc<FillShape>> {
+            faces_list
+                .binary_search_by_key(&id, |s| s.shape_id)
+                .ok()
+                .map(|i| Arc::clone(&faces_list[i]))
+        };
+        let change = local.rewrite(&faces, &lookup, &orig_shape, &memo, 0, group_path);
+        if change.removed.is_empty() && change.added.is_empty() {
+            return LocalEdit::Same;
+        }
+        let (relabel, add_edges) = local.relabeled_edges(&faces, &change.ids, &memo);
+        let mut all_removed = removed;
+        all_removed.extend(relabel);
+        all_removed.sort_unstable();
+        all_removed.dedup();
+        let stored = self.stored.with_diff_tiles(&all_removed, &add_edges);
+        let added: Vec<Arc<FillShape>> = change
+            .added
+            .into_iter()
+            .map(|mut s| {
+                s.strip_transient_caches();
+                Arc::new(s)
+            })
+            .collect();
+        let gone: HashSet<ShapeId> = change.removed.iter().copied().collect();
+        let mut faces_new: Vec<Arc<FillShape>> = faces_list
+            .iter()
+            .filter(|s| !gone.contains(&s.shape_id))
+            .cloned()
+            .chain(added.iter().cloned())
+            .collect();
+        faces_new.sort_unstable_by_key(|s| s.shape_id);
+        LocalEdit::Changed(LocalWrite {
+            stored,
+            faces: faces_new.into(),
+        })
+    }
+
+    #[cfg(test)]
+    /// 重ねる形の線の端を、前からある頂点から `FLAT_TOL` 以内なら、その頂点（いちばん近いもの）に寄せる（`overlay` の形の
+    /// 線の端を寄せる所と同じ。頂点は塊から引き、升目の索引で端の近くの辺の端だけを見る）
+    fn snap_ends(&self, quads: &mut [QuadBez]) {
+        let Some(area) = quads
+            .iter()
+            .flat_map(|q| [q.p0, q.p2])
+            .map(|p| KRect::from_points(p, p))
+            .reduce(|a, b| a.union(b))
+        else {
+            return;
+        };
+        let ix = self.map_index();
+        let mut edges: Vec<usize> = Vec::new();
+        for t in index_tiles_over(area.inflate(FLAT_TOL, FLAT_TOL)) {
+            ix.index.edges_in(&self.stored, t, &mut edges);
+        }
+        edges.sort_unstable();
+        edges.dedup();
+        let mut pts: Vec<Point> = edges
+            .iter()
+            .flat_map(|&e| {
+                let te = self.stored.edge_at(e);
+                [te.a, te.b]
+            })
+            .collect();
+        pts.sort_by(|a, b| point_order(*a, *b));
+        pts.dedup();
+        let snap = |p: Point| -> Point {
+            let mut best: Option<(f64, Point)> = None;
+            for &q in &pts {
+                let d = (q - p).hypot();
+                if d <= FLAT_TOL && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, q));
+                }
+            }
+            best.map_or(p, |b| b.1)
+        };
+        for q in quads.iter_mut() {
+            q.p0 = snap(q.p0);
+            q.p2 = snap(q.p2);
+        }
+    }
+
+    /// テスト用（お手本との比べ）：`paint_local` の答え `got` が、前の地図全体で重ねて確かめ、書き戻すときの答えと同じか
+    /// （しまう形・消す図形・入れる図形。新しく振る番号は、入れる図形の形で対応づけて比べる）
+    #[cfg(test)]
+    fn paint_matches_full(
+        &self,
+        shapes: &[FillShape],
+        rule: MapRule,
+        group_path: &[u64],
+        got: &LocalEdit,
+    ) -> bool {
+        let Some(next) = self.overlay(MapInput::Shapes(shapes), rule) else {
+            return matches!(got, LocalEdit::Refused(LocalRefusal::OffGrid));
+        };
+        if !self.written_ok(&next) {
+            return matches!(got, LocalEdit::Refused(LocalRefusal::Unwritable));
+        }
+        let checked = next.written(self).expect("正しい地図");
+        let own_faces = self.faces(group_path);
+        let own: Vec<&FillShape> = own_faces.iter().map(|s| &**s).collect();
+        let change = self.diff(checked, &own, 0, group_path);
+        if change.removed.is_empty() && change.added.is_empty() {
+            return matches!(got, LocalEdit::Same);
+        }
+        let LocalEdit::Changed(w) = got else {
+            return false;
+        };
+        // 消した図形は前の表にだけ、入れた図形は新しい表にだけある（変わらない面は同じ図形を共有する）
+        let in_list =
+            |list: &[Arc<FillShape>], s: &Arc<FillShape>| list.iter().any(|x| Arc::ptr_eq(x, s));
+        let got_removed: HashSet<ShapeId> = own_faces
+            .iter()
+            .filter(|s| !in_list(&w.faces, s))
+            .map(|s| s.shape_id)
+            .collect();
+        let got_added: Vec<Arc<FillShape>> = w
+            .faces
+            .iter()
+            .filter(|s| !in_list(&own_faces, s))
+            .cloned()
+            .collect();
+        let full_removed: HashSet<ShapeId> = change.removed.iter().copied().collect();
+        if full_removed != got_removed {
+            return false;
+        }
+        let orig: HashSet<ShapeId> = own.iter().map(|s| s.shape_id).collect();
+        let shape_key = |s: &FillShape| {
+            let bits = |c: &Contour| -> Vec<[u64; 6]> {
+                c.segments
+                    .iter()
+                    .map(|q| [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y].map(f64::to_bits))
+                    .collect()
+            };
+            (
+                s.color.to_array(),
+                s.contours().map(bits).collect::<Vec<_>>(),
+            )
+        };
+        // 入れる図形を形で対応づける（元の図形の番号を引き継いだかも同じこと）
+        let mut rename: HashMap<ShapeId, ShapeId> = HashMap::new();
+        let full_by_key: HashMap<_, ShapeId> = change
+            .added
+            .iter()
+            .map(|s| (shape_key(s), s.shape_id))
+            .collect();
+        if full_by_key.len() != got_added.len() {
+            return false;
+        }
+        for s in &got_added {
+            let Some(&fid) = full_by_key.get(&shape_key(s)) else {
+                return false;
+            };
+            if orig.contains(&fid) || orig.contains(&s.shape_id) {
+                if fid != s.shape_id {
+                    return false;
+                }
+            } else {
+                rename.insert(s.shape_id, fid);
+            }
+        }
+        let Some((map, _)) = change.into_face_shapes(&own_faces) else {
+            return false;
+        };
+        let (full_stored, _) = map.into_stored_with_polys(Some(&self.stored));
+        w.stored
+            .relabeled(|id| rename.get(&id).copied().unwrap_or(id))
+            .same_content(&full_stored)
     }
 
     /// テスト用：この地図に差分を当てた地図（`LocalMap::new`）

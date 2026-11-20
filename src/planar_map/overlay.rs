@@ -556,185 +556,21 @@ impl PlanarMap {
         new_quads: &[QuadBez],
         new_cols: &[(Option<Color32>, Option<Color32>)],
     ) -> Option<[PlanarMap; N]> {
-        // 窓の範囲を、入れる辺と重ねるものの外接矩形から広げる幅（px）。広いほどやり直しが減り、窓は大きくなる
-        const WINDOW_PAD: f64 = 2.0;
-        let stored = ix.stored;
-        let hull = |q: QuadBez| KRect::from_points(q.p0, q.p2).union_pt(q.p1);
-        let quad_of = |e: usize| stored.edge_at(e).quad();
-        // 範囲に外接矩形（`reach_box`）がかかる前の地図の辺（升目の索引で引く。番号の順）
-        let region_edges = |r: KRect| -> Vec<usize> {
-            let mut found: Vec<usize> = Vec::new();
-            for t in index_tiles_over(r) {
-                ix.index.edges_in(stored, t, &mut found);
-            }
-            found.sort_unstable();
-            found.dedup();
-            found.retain(|&e| rects_overlap(reach_box(quad_of(e)), r));
-            found
-        };
-        let inside =
-            |u: KRect, r: KRect| u.x0 >= r.x0 && u.y0 >= r.y0 && u.x1 <= r.x1 && u.y1 <= r.y1;
-        let moved_list: Vec<usize> = match input {
-            MapInput::Sweep(m) => m.iter().map(|&(e, _)| e).collect(),
-            _ => Vec::new(),
-        };
-        // 重ねるもの（輪郭の変形なら前の曲線も）の範囲。`overlay_fed` は、これが無ければ重ねない
-        let area = new_quads
-            .iter()
-            .copied()
-            .chain(moved_list.iter().map(|&e| quad_of(e)))
-            .map(hull)
-            .reduce(|a, b| a.union(b))?;
-        // 入れる辺（前の地図の番号）。輪郭の変形で動かした辺は、はじめから入れる
-        let mut fed_init: std::collections::BTreeSet<usize> = moved_list.iter().copied().collect();
-        let mut extra: Option<KRect> = None;
-        loop {
-            // 1. 入れる辺を、重ねるもののまわりの下窓で決める（設計 段2b の 7. の 2b-7b）。入れる辺の近くの辺（外接矩形を
-            //    広げた所）は、みな下窓にある。入れる辺の外接矩形を広げた所が下窓の範囲から出たら、範囲を広げてやり直す
-            // 下窓のはじめの範囲は、重ねるものと、それに外接矩形がかかる辺（入れる辺になりやすい）の外形まで。たいていは
-            //  やり直さずに済む
-            let mut r0 = fed_init
+        let (maps, wedges) = Self::window_overlay(ix, input, &rules, new_quads, new_cols)?;
+        // 窓の頂点の、前の地図での番号（窓の結果を前の地図全体の結果に合わせるため：`with_window_result`）
+        let wnodes: Vec<usize> = {
+            let mut v: Vec<usize> = wedges
                 .iter()
-                .copied()
-                .chain(region_edges(area))
-                .map(|e| hull(quad_of(e)))
-                .fold(area, |a, b| a.union(b))
-                .inflate(WINDOW_PAD, WINDOW_PAD);
-            let (fed_dense, spans_dense) = loop {
-                let mut sub_edges = region_edges(r0);
-                sub_edges.extend(fed_init.iter().copied());
-                sub_edges.sort_unstable();
-                sub_edges.dedup();
-                let (sub, sub_known) = tile_window(stored, &sub_edges);
-                let n0 = sub.edges.len();
-                let moved0: Vec<bool> = sub_edges.iter().map(|e| moved_list.contains(e)).collect();
-                let init0: Vec<bool> = sub_edges.iter().map(|e| fed_init.contains(e)).collect();
-                let f = sub.fed_edges(&sub_known, None, new_quads, &moved0, init0, n0..n0, &[])?;
-                let fed_now: Vec<usize> = (0..n0).filter(|&e| f.fed[e]).collect();
-                let reach = fed_now
-                    .iter()
-                    .map(|&e| reach_box(sub.quad(e)).inflate(4.0 * GRID_REACH, 4.0 * GRID_REACH))
-                    .fold(area, |a, b| a.union(b));
-                if !inside(reach, r0) {
-                    r0 = r0.union(reach.inflate(WINDOW_PAD, WINDOW_PAD));
-                    continue;
-                }
-                let spans: Vec<(Line, Vec<Span>)> = f
-                    .spans
-                    .iter()
-                    .map(|(l, v)| {
-                        let l = match *l {
-                            Line::Edge(e) => Line::Edge(sub_edges[e]),
-                            seed => seed,
-                        };
-                        (l, v.clone())
-                    })
-                    .collect();
-                break (
-                    fed_now
-                        .into_iter()
-                        .map(|e| sub_edges[e])
-                        .collect::<Vec<usize>>(),
-                    spans,
-                );
-            };
-            // 2. 窓：入れる辺と重ねるものの外接矩形を広げた範囲に外接矩形がかかる辺と、入れる辺と、それらの端の頂点に
-            //    つながる辺。辺は塊から引き、頂点は座標で見分ける
-            let mut region = fed_dense
-                .iter()
-                .map(|&e| hull(quad_of(e)))
-                .fold(area, |a, b| a.union(b));
-            if let Some(x) = extra {
-                region = region.union(x);
-            }
-            let region = region.inflate(WINDOW_PAD, WINDOW_PAD);
-            let mut in_window: std::collections::BTreeSet<usize> =
-                region_edges(region).into_iter().collect();
-            in_window.extend(fed_dense.iter().copied());
-            let mut ends: Vec<Point> = Vec::new();
-            for &e in &in_window {
-                let te = stored.edge_at(e);
-                ends.push(te.a);
-                ends.push(te.b);
-            }
-            ends.sort_by(|a, b| point_order(*a, *b));
-            ends.dedup();
-            for p in ends {
-                let mut at: Vec<usize> = Vec::new();
-                ix.index
-                    .edges_in(stored, index_tile(cell_of(gpt(p))), &mut at);
-                for e in at {
-                    let te = stored.edge_at(e);
-                    if te.a == p || te.b == p {
-                        in_window.insert(e);
-                    }
-                }
-            }
-            let wedges: Vec<usize> = in_window.into_iter().collect();
-            let (wmap, wknown) = tile_window(stored, &wedges);
-            let to_window: IntMap<usize, usize> =
-                wedges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
-            // 窓の頂点の、前の地図での番号（窓の結果を前の地図全体の結果に合わせるため：`with_window_result`）
-            let wnodes: Vec<usize> = {
-                let mut v: Vec<usize> = wedges
-                    .iter()
-                    .flat_map(|&e| [self.edges[e].a, self.edges[e].b])
-                    .collect();
-                v.sort_unstable();
-                v.dedup();
-                v
-            };
-            let spans: IntMap<Line, Vec<Span>> = spans_dense
-                .iter()
-                .map(|(l, v)| {
-                    let l = match *l {
-                        Line::Edge(e) => Line::Edge(to_window[&e]),
-                        seed => seed,
-                    };
-                    (l, v.clone())
-                })
+                .flat_map(|&e| [self.edges[e].a, self.edges[e].b])
                 .collect();
-            let wmoved: Vec<(usize, QuadBez)> = match input {
-                MapInput::Sweep(m) => m.iter().map(|&(e, q)| (to_window[&e], q)).collect(),
-                _ => Vec::new(),
-            };
-            let winput = match input {
-                MapInput::Sweep(_) => MapInput::Sweep(&wmoved),
-                other => other,
-            };
-            let fed_set: std::collections::HashSet<usize> = fed_dense.iter().copied().collect();
-            let mut wset = FedEdges {
-                fed: wedges.iter().map(|e| fed_set.contains(e)).collect(),
-                known: &wknown,
-                spans,
-                near: Some(NearEdges::new(&wmap, &wknown, None)),
-                partner: Vec::new(),
-                outside: Some(Outside {
-                    index: ix,
-                    to_window: to_window.clone(),
-                }),
-                used: None,
-            };
-            match wmap.overlay_with(winput, &rules, new_quads, new_cols, &mut wset) {
-                Ok(maps) => {
-                    if let Some(u) = wset.used {
-                        let u = KRect::new(
-                            u.x0 as f64 / OVERLAY_GRID,
-                            u.y0 as f64 / OVERLAY_GRID,
-                            u.x1 as f64 / OVERLAY_GRID,
-                            u.y1 as f64 / OVERLAY_GRID,
-                        );
-                        if !(u.x0 >= region.x0
-                            && u.y0 >= region.y0
-                            && u.x1 <= region.x1
-                            && u.y1 <= region.y1)
-                        {
-                            extra = Some(extra.map_or(u, |x| x.union(u)));
-                            continue;
-                        }
-                    }
-                    let mut out = maps.into_iter();
-                    return Some(rules.map(|rule| {
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let to_window: IntMap<usize, usize> =
+            wedges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
+        let mut out = maps.into_iter();
+        Some(rules.map(|rule| {
                         let m = out.next().expect("決まりごとに1つの地図");
                         let copy = rule != MapRule::KeepInside;
                         // お手本（設計 段2b の 4. の 2b-2）：前のしまう形に窓の差分を当てた形が、窓の結果を合わせた地図の
@@ -764,7 +600,15 @@ impl PlanarMap {
                                     let faces = local
                                         .touched_faces(touched_ok.as_ref().expect("閉じた"), &lookup, &mut memo)
                                         .expect("正しい地図なら面が作れる");
-                                    let change = local.rewrite(&faces, &lookup, &memo, 0, &[]);
+                                    let prev_faces = prev.faces(&[]);
+                                    let orig_shape = |id: ShapeId| {
+                                        prev_faces
+                                            .binary_search_by_key(&id, |s| s.shape_id)
+                                            .ok()
+                                            .map(|i| Arc::clone(&prev_faces[i]))
+                                    };
+                                    let change =
+                                        local.rewrite(&faces, &lookup, &orig_shape, &memo, 0, &[]);
                                     // 触った面ごとに1つずつ別の番号
                                     let mut ids = change.ids.clone();
                                     ids.sort_unstable();
@@ -900,7 +744,184 @@ impl PlanarMap {
                             }
                         }
                         joined
-                    }));
+                    }))
+    }
+
+    pub(super) fn window_overlay(
+        ix: MapIndex<'_>,
+        input: MapInput<'_>,
+        rules: &[MapRule],
+        new_quads: &[QuadBez],
+        new_cols: &[(Option<Color32>, Option<Color32>)],
+    ) -> Option<(Vec<PlanarMap>, Vec<usize>)> {
+        // 窓の範囲を、入れる辺と重ねるものの外接矩形から広げる幅（px）。広いほどやり直しが減り、窓は大きくなる
+        const WINDOW_PAD: f64 = 2.0;
+        let stored = ix.stored;
+        let hull = |q: QuadBez| KRect::from_points(q.p0, q.p2).union_pt(q.p1);
+        let quad_of = |e: usize| stored.edge_at(e).quad();
+        // 範囲に外接矩形（`reach_box`）がかかる前の地図の辺（升目の索引で引く。番号の順）
+        let region_edges = |r: KRect| -> Vec<usize> {
+            let mut found: Vec<usize> = Vec::new();
+            for t in index_tiles_over(r) {
+                ix.index.edges_in(stored, t, &mut found);
+            }
+            found.sort_unstable();
+            found.dedup();
+            found.retain(|&e| rects_overlap(reach_box(quad_of(e)), r));
+            found
+        };
+        let inside =
+            |u: KRect, r: KRect| u.x0 >= r.x0 && u.y0 >= r.y0 && u.x1 <= r.x1 && u.y1 <= r.y1;
+        let moved_list: Vec<usize> = match input {
+            MapInput::Sweep(m) => m.iter().map(|&(e, _)| e).collect(),
+            _ => Vec::new(),
+        };
+        // 重ねるもの（輪郭の変形なら前の曲線も）の範囲。`overlay_fed` は、これが無ければ重ねない
+        let area = new_quads
+            .iter()
+            .copied()
+            .chain(moved_list.iter().map(|&e| quad_of(e)))
+            .map(hull)
+            .reduce(|a, b| a.union(b))?;
+        // 入れる辺（前の地図の番号）。輪郭の変形で動かした辺は、はじめから入れる
+        let mut fed_init: std::collections::BTreeSet<usize> = moved_list.iter().copied().collect();
+        let mut extra: Option<KRect> = None;
+        loop {
+            // 1. 入れる辺を、重ねるもののまわりの下窓で決める（設計 段2b の 7. の 2b-7b）。入れる辺の近くの辺（外接矩形を
+            //    広げた所）は、みな下窓にある。入れる辺の外接矩形を広げた所が下窓の範囲から出たら、範囲を広げてやり直す
+            // 下窓のはじめの範囲は、重ねるものと、それに外接矩形がかかる辺（入れる辺になりやすい）の外形まで。たいていは
+            //  やり直さずに済む
+            let mut r0 = fed_init
+                .iter()
+                .copied()
+                .chain(region_edges(area))
+                .map(|e| hull(quad_of(e)))
+                .fold(area, |a, b| a.union(b))
+                .inflate(WINDOW_PAD, WINDOW_PAD);
+            let (fed_dense, spans_dense) = loop {
+                let mut sub_edges = region_edges(r0);
+                sub_edges.extend(fed_init.iter().copied());
+                sub_edges.sort_unstable();
+                sub_edges.dedup();
+                let (sub, sub_known) = tile_window(stored, &sub_edges);
+                let n0 = sub.edges.len();
+                let moved0: Vec<bool> = sub_edges.iter().map(|e| moved_list.contains(e)).collect();
+                let init0: Vec<bool> = sub_edges.iter().map(|e| fed_init.contains(e)).collect();
+                let f = sub.fed_edges(&sub_known, None, new_quads, &moved0, init0, n0..n0, &[])?;
+                let fed_now: Vec<usize> = (0..n0).filter(|&e| f.fed[e]).collect();
+                let reach = fed_now
+                    .iter()
+                    .map(|&e| reach_box(sub.quad(e)).inflate(4.0 * GRID_REACH, 4.0 * GRID_REACH))
+                    .fold(area, |a, b| a.union(b));
+                if !inside(reach, r0) {
+                    r0 = r0.union(reach.inflate(WINDOW_PAD, WINDOW_PAD));
+                    continue;
+                }
+                let spans: Vec<(Line, Vec<Span>)> = f
+                    .spans
+                    .iter()
+                    .map(|(l, v)| {
+                        let l = match *l {
+                            Line::Edge(e) => Line::Edge(sub_edges[e]),
+                            seed => seed,
+                        };
+                        (l, v.clone())
+                    })
+                    .collect();
+                break (
+                    fed_now
+                        .into_iter()
+                        .map(|e| sub_edges[e])
+                        .collect::<Vec<usize>>(),
+                    spans,
+                );
+            };
+            // 2. 窓：入れる辺と重ねるものの外接矩形を広げた範囲に外接矩形がかかる辺と、入れる辺と、それらの端の頂点に
+            //    つながる辺。辺は塊から引き、頂点は座標で見分ける
+            let mut region = fed_dense
+                .iter()
+                .map(|&e| hull(quad_of(e)))
+                .fold(area, |a, b| a.union(b));
+            if let Some(x) = extra {
+                region = region.union(x);
+            }
+            let region = region.inflate(WINDOW_PAD, WINDOW_PAD);
+            let mut in_window: std::collections::BTreeSet<usize> =
+                region_edges(region).into_iter().collect();
+            in_window.extend(fed_dense.iter().copied());
+            let mut ends: Vec<Point> = Vec::new();
+            for &e in &in_window {
+                let te = stored.edge_at(e);
+                ends.push(te.a);
+                ends.push(te.b);
+            }
+            ends.sort_by(|a, b| point_order(*a, *b));
+            ends.dedup();
+            for p in ends {
+                let mut at: Vec<usize> = Vec::new();
+                ix.index
+                    .edges_in(stored, index_tile(cell_of(gpt(p))), &mut at);
+                for e in at {
+                    let te = stored.edge_at(e);
+                    if te.a == p || te.b == p {
+                        in_window.insert(e);
+                    }
+                }
+            }
+            let wedges: Vec<usize> = in_window.into_iter().collect();
+            let (wmap, wknown) = tile_window(stored, &wedges);
+            let to_window: IntMap<usize, usize> =
+                wedges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
+            let spans: IntMap<Line, Vec<Span>> = spans_dense
+                .iter()
+                .map(|(l, v)| {
+                    let l = match *l {
+                        Line::Edge(e) => Line::Edge(to_window[&e]),
+                        seed => seed,
+                    };
+                    (l, v.clone())
+                })
+                .collect();
+            let wmoved: Vec<(usize, QuadBez)> = match input {
+                MapInput::Sweep(m) => m.iter().map(|&(e, q)| (to_window[&e], q)).collect(),
+                _ => Vec::new(),
+            };
+            let winput = match input {
+                MapInput::Sweep(_) => MapInput::Sweep(&wmoved),
+                other => other,
+            };
+            let fed_set: std::collections::HashSet<usize> = fed_dense.iter().copied().collect();
+            let mut wset = FedEdges {
+                fed: wedges.iter().map(|e| fed_set.contains(e)).collect(),
+                known: &wknown,
+                spans,
+                near: Some(NearEdges::new(&wmap, &wknown, None)),
+                partner: Vec::new(),
+                outside: Some(Outside {
+                    index: ix,
+                    to_window: to_window.clone(),
+                }),
+                used: None,
+            };
+            match wmap.overlay_with(winput, rules, new_quads, new_cols, &mut wset) {
+                Ok(maps) => {
+                    if let Some(u) = wset.used {
+                        let u = KRect::new(
+                            u.x0 as f64 / OVERLAY_GRID,
+                            u.y0 as f64 / OVERLAY_GRID,
+                            u.x1 as f64 / OVERLAY_GRID,
+                            u.y1 as f64 / OVERLAY_GRID,
+                        );
+                        if !(u.x0 >= region.x0
+                            && u.y0 >= region.y0
+                            && u.x1 <= region.x1
+                            && u.y1 <= region.y1)
+                        {
+                            extra = Some(extra.map_or(u, |x| x.union(u)));
+                            continue;
+                        }
+                    }
+                    return Some((maps, wedges));
                 }
                 Err(OverlayStop::Unfed(more)) => {
                     // 入れなかった辺が区間と交わった：その辺も入れて、1. からやり直す（前の地図全体で行うときと同じ）
