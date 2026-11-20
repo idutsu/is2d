@@ -439,9 +439,6 @@ struct RayCols {
     added: std::collections::BTreeMap<i64, Vec<usize>>,
 }
 
-/// 半直線が横切る辺（`LocalMap::base_facing`）：横切る所, 上へ向けた区間の向き, 点の側の向きのある辺
-type Facing = (f64, (i64, i64), (usize, bool));
-
 /// 前の地図の面の表：面の番号（図形の番号）ごとの、その面の輪郭（外周と穴）の向きのある辺のどれか1つ（前の地図の番号）
 pub(crate) type BaseFaces<'a> = &'a dyn Fn(ShapeId) -> Vec<(usize, bool)>;
 
@@ -681,58 +678,7 @@ impl LocalMap<'_> {
     /// 入らない）。q が前の地図の辺の上にあれば `Err(())`。横切る所の列の順に、列ごとに升目の索引を引く（手間は、最初に
     /// 横切る辺までの分）
     fn base_facing(&self, q: IPt) -> Result<Option<(usize, bool)>, ()> {
-        let col_of = |x2: f64| ((x2 / 2.0) / (GRID_CELL * 4) as f64).floor() as i64;
-        let (x, y) = (q.0.div_euclid(2), q.1.div_euclid(2));
-        let (t0, ty0) = index_tile(cell_of((x - 1, y - 1)));
-        let ty1 = index_tile(cell_of((x - 1, y + 2))).1;
-        let last = self.index.index.max_tile_x().unwrap_or(t0 - 1);
-        let stored = self.index.stored;
-        let mut cands: Vec<usize> = Vec::new();
-        for tx in t0..=last {
-            cands.clear();
-            for ty in ty0..=ty1 {
-                self.index.index.edges_in(stored, (tx, ty), &mut cands);
-            }
-            cands.sort_unstable();
-            cands.dedup();
-            let mut best: Option<Facing> = None;
-            for &e in &cands {
-                for s in stored.poly(e).windows(2) {
-                    let (a, b) = ((2 * s[0].0, 2 * s[0].1), (2 * s[1].0, 2 * s[1].1));
-                    if on_seg(a, b, q) {
-                        return Err(());
-                    }
-                    let Some(d) = crossing(a, b, q) else {
-                        continue;
-                    };
-                    let t = (q.1 - a.1) as f64 / (b.1 - a.1) as f64;
-                    let xx = a.0 as f64 + t * (b.0 - a.0) as f64;
-                    if col_of(xx) != tx {
-                        continue;
-                    }
-                    let up = if b.1 > a.1 {
-                        (b.0 - a.0, b.1 - a.1)
-                    } else {
-                        (a.0 - b.0, a.1 - b.1)
-                    };
-                    // 上へ横切る区間は左が、下へ横切る区間は右が q の側
-                    let side = (e, d > 0);
-                    let better = best.is_none_or(|(bx, bu, _)| {
-                        xx < bx
-                            || (xx == bx
-                                && (up.0 as i128) * (bu.1 as i128)
-                                    < (bu.0 as i128) * (up.1 as i128))
-                    });
-                    if better {
-                        best = Some((xx, up, side));
-                    }
-                }
-            }
-            if let Some((_, _, side)) = best {
-                return Ok(Some(side));
-            }
-        }
-        Ok(None)
+        super::overlay::first_crossing(self.index, q)
     }
 
     /// 2b-5c：触った輪郭の、穴の入れ先と何も無い側の決まり（今の `regions_since` と、何も無い側の輪郭の確かめ）。

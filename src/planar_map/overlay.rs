@@ -962,6 +962,8 @@ impl PlanarMap {
                 outside: Some(Outside {
                     index: ix,
                     to_window: to_window.clone(),
+                    from_window: wedges.clone(),
+                    right2: 2 * (region.x1 * OVERLAY_GRID).floor() as i64,
                 }),
                 used: None,
             };
@@ -1781,7 +1783,42 @@ impl PlanarMap {
             // 窓で行うときは、前の地図の辺のうち半直線が通る升目にかかるもの（窓の外の辺も）を、前の地図の辺の番号の順に
             // 数える（窓の辺は窓の中と同じ形で。窓の外の辺は端を置き直さないので、前の地図の形のまま）。窓の辺の番号の順は
             // 前の地図の番号の順と同じなので、数える辺と順番は、前の地図全体で行ったときと同じ
+            // 窓で行うとき（速い道）：窓の右の端のあたりの点 X から先の前の地図の辺の交わりは、前の地図が正しいので、X を
+            // 含む前の地図の面の色で決まる（X から右へ最初に横切る辺の X の側の色 c：c に +1、何も無い所に −1。何も無い所なら
+            // 0）。窓の辺は、窓の形の交わりを全部足し、元の形の X より右の交わりを引く（X の所の色に入っているので）。窓の外の
+            // 辺は X より右でしか交わらない（X より左で交われば窓にある）ので、前の地図全体の番号の順に数えるのと同じ答え。
+            // 手間は窓の分と、X から最初に横切る辺までの分（地図の右の端まで数えない）
             if let (true, Some(out)) = (old, fed_set.outside.as_ref()) {
+                if let Some(xq) = out.boundary_point(p2) {
+                    if let Ok(facing) = first_crossing(out.index, xq) {
+                        let (items, bands) = rows[old as usize].get_or_init(|| unfed_rows(old));
+                        for &i in bands.at(p2.1) {
+                            let (e, q, r) = &items[i as usize];
+                            if !ray_meets_row(*r, p2) {
+                                continue;
+                            }
+                            let ed = self.edges[*e];
+                            known_or_made(fed_set.known, self, *e, (q.p0, q.p2), &mut pe);
+                            for s in pe.windows(2) {
+                                wind_into(dbl(s[0]), dbl(s[1]), ed.left, ed.right, p2, &mut w);
+                            }
+                            let be = out.from_window[*e];
+                            for s in out.index.stored.poly(be).windows(2) {
+                                // 引く：左右の印を入れ替えて足す
+                                wind_into(dbl(s[0]), dbl(s[1]), ed.right, ed.left, xq, &mut w);
+                            }
+                        }
+                        if let Some((be, left)) = facing {
+                            let te = out.index.stored.edge_at(be);
+                            let c = if left { te.left } else { te.right };
+                            if c.is_some() {
+                                add_winding(&mut w, c, 1);
+                                add_winding(&mut w, None, -1);
+                            }
+                        }
+                        return w;
+                    }
+                }
                 let mut cands = row_buf.borrow_mut();
                 out.row_edges(p2, &mut cands);
                 for &be in cands.iter() {
@@ -2514,6 +2551,72 @@ fn add_span(spans: &mut IntMap<Line, Vec<Span>>, line: Line, e: usize, pts: &Ove
     true
 }
 
+/// 半直線が横切る辺（`first_crossing`）：横切る所, 上へ向けた区間の向き, 点の側の向きのある辺
+type Crossing = (f64, (i64, i64), (usize, bool));
+
+/// 格子の点を2倍の座標にする
+fn dbl(p: IPt) -> IPt {
+    (2 * p.0, 2 * p.1)
+}
+
+/// 前の地図（升目の索引 `ix` の地図）で、点 `q`（2倍の座標）から右へ伸ばした半直線が最初に横切る辺の、q の側の向きの
+/// ある辺（点を右上へごくわずかずらした所として数える：`crossing` と同じ。同じ頂点で横切る辺は、ずらした高さで先に横切る
+/// もの）。前の地図が正しければ、q を含む面は、この向きのある辺の左の面。横切る辺が無ければ `Ok(None)`（どの面にも
+/// 入らない）。q が辺の上にあれば `Err(())`。横切る所の列の順に、列ごとに升目の索引を引く（手間は、最初に横切る辺までの分）
+pub(super) fn first_crossing(ix: MapIndex<'_>, q: IPt) -> Result<Option<(usize, bool)>, ()> {
+    let col_of = |x2: f64| ((x2 / 2.0) / (GRID_CELL * 4) as f64).floor() as i64;
+    let (x, y) = (q.0.div_euclid(2), q.1.div_euclid(2));
+    let (t0, ty0) = index_tile(cell_of((x - 1, y - 1)));
+    let ty1 = index_tile(cell_of((x - 1, y + 2))).1;
+    let last = ix.index.max_tile_x().unwrap_or(t0 - 1);
+    let stored = ix.stored;
+    let mut cands: Vec<usize> = Vec::new();
+    for tx in t0..=last {
+        cands.clear();
+        for ty in ty0..=ty1 {
+            ix.index.edges_in(stored, (tx, ty), &mut cands);
+        }
+        cands.sort_unstable();
+        cands.dedup();
+        let mut best: Option<Crossing> = None;
+        for &e in &cands {
+            for s in stored.poly(e).windows(2) {
+                let (a, b) = (dbl(s[0]), dbl(s[1]));
+                if on_seg(a, b, q) {
+                    return Err(());
+                }
+                let Some(d) = crossing(a, b, q) else {
+                    continue;
+                };
+                let t = (q.1 - a.1) as f64 / (b.1 - a.1) as f64;
+                let xx = a.0 as f64 + t * (b.0 - a.0) as f64;
+                if col_of(xx) != tx {
+                    continue;
+                }
+                let up = if b.1 > a.1 {
+                    (b.0 - a.0, b.1 - a.1)
+                } else {
+                    (a.0 - b.0, a.1 - b.1)
+                };
+                // 上へ横切る区間は左が、下へ横切る区間は右が q の側
+                let side = (e, d > 0);
+                let better = best.is_none_or(|(bx, bu, _)| {
+                    xx < bx
+                        || (xx == bx
+                            && (up.0 as i128) * (bu.1 as i128) < (bu.0 as i128) * (up.1 as i128))
+                });
+                if better {
+                    best = Some((xx, up, side));
+                }
+            }
+        }
+        if let Some((_, _, side)) = best {
+            return Ok(Some(side));
+        }
+    }
+    Ok(None)
+}
+
 /// 窓で重ね合わせるときの、下窓から窓へ渡す線の番号（窓によらない形）：前からある辺（前の地図の番号）・重ねる地図の辺
 /// （その番号）・重ねる線（`Line::Seed`）
 #[derive(Clone, Copy)]
@@ -2718,9 +2821,44 @@ pub(super) struct FedEdges<'a> {
 pub(super) struct Outside<'a> {
     index: MapIndex<'a>,
     to_window: IntMap<usize, usize>,
+    /// 窓の辺の、前の地図での番号（`to_window` の逆）
+    from_window: Vec<usize>,
+    /// 窓の範囲の右の端（2倍の座標）。半直線のこれより左の所で交わる前の地図の辺は、みな窓にある
+    right2: i64,
 }
 
 impl Outside<'_> {
+    /// 点 `p2` の半直線の上の、窓の右の端のあたりの点 X（2倍の座標。前の地図のどの辺の上にもない、`p2` より右の点）。
+    /// 見つからなければ `None`
+    fn boundary_point(&self, p2: IPt) -> Option<IPt> {
+        let stored = self.index.stored;
+        let mut x = self.right2;
+        let mut cands: Vec<usize> = Vec::new();
+        for _ in 0..8 {
+            if x <= p2.0 {
+                return None;
+            }
+            let q = (x, p2.1);
+            cands.clear();
+            self.index.index.edges_in(
+                stored,
+                index_tile(cell_of((q.0.div_euclid(2), q.1.div_euclid(2)))),
+                &mut cands,
+            );
+            let on = cands.iter().any(|&e| {
+                stored
+                    .poly(e)
+                    .windows(2)
+                    .any(|s| on_seg(dbl(s[0]), dbl(s[1]), q))
+            });
+            if !on {
+                return Some(q);
+            }
+            x -= 1;
+        }
+        None
+    }
+
     /// 点 `p2`（2倍の座標）から右へ伸ばした半直線が通る升目にかかる、前の地図の辺（番号の順・1つずつ）を `out` に入れる。
     /// 半直線と交わる辺は、交わる所を含むマスの升目にあるので、みなこの中にある
     fn row_edges(&self, p2: IPt, out: &mut Vec<usize>) {

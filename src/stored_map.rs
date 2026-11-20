@@ -1108,27 +1108,32 @@ impl TileIndex {
                 rebuilt.push((c, list.into()));
             }
         }
-        // 升目の順に、変わらない升目と作り直した升目を並べる
+        // 升目の順に、変わらない升目と作り直した升目を並べる（どちらも升目の順なので、順に混ぜるだけ。作り直して空に
+        // なった升目は入れない）
         let mut cells: Vec<IndexCell> = Vec::with_capacity(self.cells.len() + rebuilt.len());
-        let (mut x, mut y) = (0, 0);
+        let (mut x, mut y, mut r) = (0, 0, 0);
         while x < self.cells.len() || y < touched.len() {
             let old = self.cells.get(x).map(|c| c.0);
             let t = touched.get(y).copied();
             match (old, t) {
-                (Some(o), Some(t)) if o == t => {
-                    x += 1;
-                    y += 1;
-                }
                 (Some(o), t) if t.is_none_or(|t| o < t) => {
                     cells.push(self.cells[x].clone());
                     x += 1;
                 }
-                _ => y += 1,
+                (o, Some(t)) => {
+                    if o == Some(t) {
+                        x += 1;
+                    }
+                    if rebuilt.get(r).is_some_and(|c| c.0 == t) {
+                        cells.push(rebuilt[r].clone());
+                        r += 1;
+                    }
+                    y += 1;
+                }
+                (_, None) => unreachable!("升目の並びの終わり"),
             }
         }
-        // 作り直した升目を入れる（升目の順に並べ直す）
-        cells.extend(rebuilt);
-        cells.sort_unstable_by_key(|c| c.0);
+        debug_assert!(cells.windows(2).all(|w| w[0].0 < w[1].0));
         Self {
             cells: cells.into(),
         }
