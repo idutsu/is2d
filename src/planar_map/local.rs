@@ -855,6 +855,198 @@ pub(super) fn quad_key(q: &QuadBez) -> [u64; 6] {
     ]
 }
 
+/// 触った面の書き戻しの差分（`LocalMap::rewrite`）：消す元の図形、新しく入れる図形、触った面ごとの図形の番号
+pub(crate) struct LocalChange {
+    pub(crate) removed: Vec<ShapeId>,
+    pub(crate) added: Vec<FillShape>,
+    pub(crate) ids: Vec<ShapeId>,
+}
+
+impl LocalMap<'_> {
+    /// 向きのある辺の左側の元の図形
+    fn side_src(&self, (e, forward): (usize, bool)) -> Option<ShapeId> {
+        let ed = self.edge(e);
+        if forward {
+            ed.left_src
+        } else {
+            ed.right_src
+        }
+    }
+
+    /// 2b-6：触った面 `faces`（`touched_faces`）の書き戻しの差分。決まりは今の `rewrite_shapes` と同じ：
+    /// - 面の辺がみな前の地図にあり（形がビットまで同じ）、辺の側の印が同じ1つの元の図形で、その図形と色も同じで、その
+    ///   図形のどの辺も消えていない面は、元の図形のまま残す
+    /// - ほかの面は新しい図形。辺の側の印のうち、残した面の図形でないものでいちばん多い元の図形を引き継ぐ（同じ元の図形を
+    ///   引き継ぐ面が2つ以上あれば、その印の付いた側がいちばん多い面、同じなら形の鍵の小さい面）
+    /// - 残した面の元の図形のほかは、みな消す
+    ///
+    /// 触っていない面は、前の地図の面のまま残る（その元の図形は、触った面では残す図形として数える）。前の地図の面のうち
+    /// 形が変わりうるもの（`old_faces`）の元の図形だけが、消す候補になる
+    pub(crate) fn rewrite(
+        &self,
+        faces: &[LocalFace],
+        base_faces: BaseFaces<'_>,
+        memo: &CycleMemo,
+        layer_id: u64,
+        group_path: &[u64],
+    ) -> LocalChange {
+        // 形が変わりうる前の地図の面：消えた辺と、まわりの辺が変わった頂点の、前の地図の辺の側の面と、触った面のうち外周が
+        // 前の地図にそのままある面
+        let mut old_faces: std::collections::BTreeSet<ShapeId> = Default::default();
+        for &e in &self.removed {
+            let ed = self.base.edges[e];
+            old_faces.extend(ed.left_src);
+            old_faces.extend(ed.right_src);
+        }
+        for v in self.dirty_nodes() {
+            if v < self.base.nodes.len() {
+                for e in self.base.edges_at_in(v, Some(self.index)) {
+                    let ed = self.base.edges[e];
+                    old_faces.extend(ed.left_src);
+                    old_faces.extend(ed.right_src);
+                }
+            }
+        }
+        for f in faces {
+            let h0 = memo.cycles[f.cycles[0]].cycle[0];
+            if h0.0 < self.n_base() {
+                old_faces.extend(self.side_src(h0));
+            }
+        }
+        // 前の地図の図形の色
+        let orig_color = |id: ShapeId| -> Option<Color32> {
+            let h = *base_faces(id).first()?;
+            let ed = self.base.edges[h.0];
+            if h.1 {
+                ed.left
+            } else {
+                ed.right
+            }
+        };
+        // 触っていない面が残す元の図形：前の地図の面で、形が変わりえないもの
+        let kept_untouched = |id: ShapeId| !old_faces.contains(&id) && orig_color(id).is_some();
+        // 形が前の地図にある辺（増えた辺は、消えた辺と形が同じときだけ）
+        let removed_keys: HashMap<[u64; 6], usize> = self
+            .removed
+            .iter()
+            .map(|&e| (quad_key(&self.base.quad(e)), e))
+            .collect();
+        let added_keys: std::collections::HashSet<[u64; 6]> = self
+            .added_edges()
+            .map(|e| quad_key(&self.quad(e)))
+            .collect();
+        let same =
+            |e: usize| e < self.n_base() || removed_keys.contains_key(&quad_key(&self.quad(e)));
+        // 辺が消えた元の図形
+        let mut cut: std::collections::HashSet<ShapeId> = Default::default();
+        for (k, &e) in &removed_keys {
+            if !added_keys.contains(k) {
+                let ed = self.base.edges[e];
+                cut.extend(ed.left_src);
+                cut.extend(ed.right_src);
+            }
+        }
+        let halves = |f: &LocalFace| -> Vec<(usize, bool)> {
+            f.cycles
+                .iter()
+                .flat_map(|&ci| memo.cycles[ci].cycle.iter().copied())
+                .collect()
+        };
+        let mut ids: Vec<ShapeId> = vec![0; faces.len()];
+        let mut kept: std::collections::HashSet<ShapeId> = Default::default();
+        let mut changed: Vec<usize> = Vec::new();
+        for (i, f) in faces.iter().enumerate() {
+            let hs = halves(f);
+            let mut srcs: Vec<ShapeId> = hs.iter().filter_map(|&h| self.side_src(h)).collect();
+            srcs.sort_unstable();
+            srcs.dedup();
+            let keep = hs.iter().all(|&(e, _)| same(e))
+                && srcs.len() == 1
+                && orig_color(srcs[0]) == Some(f.color)
+                && !cut.contains(&srcs[0])
+                && hs.iter().all(|&h| self.side_src(h) == Some(srcs[0]));
+            if keep && !kept_untouched(srcs[0]) && kept.insert(srcs[0]) {
+                ids[i] = srcs[0];
+            } else {
+                changed.push(i);
+            }
+        }
+        let is_kept = |s: ShapeId| kept.contains(&s) || kept_untouched(s);
+        // 引き継ぐ元の図形
+        let face_key = |f: &LocalFace| hs_key(&halves(f), self);
+        let mut heir: HashMap<ShapeId, (usize, usize)> = HashMap::new();
+        let mut choice: Vec<Option<ShapeId>> = vec![None; faces.len()];
+        for &i in &changed {
+            let mut votes: Vec<(ShapeId, usize)> = Vec::new();
+            for h in halves(&faces[i]) {
+                if let Some(src) = self.side_src(h).filter(|&s| !is_kept(s)) {
+                    add_vote(&mut votes, src);
+                }
+            }
+            let Some((src, sides)) = top_vote(&votes) else {
+                continue;
+            };
+            choice[i] = Some(src);
+            let best = heir.entry(src).or_insert((sides, i));
+            if best.1 != i
+                && (sides > best.0
+                    || (sides == best.0 && face_key(&faces[i]) < face_key(&faces[best.1])))
+            {
+                *best = (sides, i);
+            }
+        }
+        let added: Vec<FillShape> = changed
+            .into_iter()
+            .map(|i| {
+                let f = &faces[i];
+                let mut contours = f.cycles.iter().map(|&ci| {
+                    let quads: Vec<QuadBez> = memo.cycles[ci]
+                        .cycle
+                        .iter()
+                        .map(|&(e, forward)| {
+                            let q = self.quad(e);
+                            if forward {
+                                q
+                            } else {
+                                QuadBez::new(q.p2, q.p1, q.p0)
+                            }
+                        })
+                        .collect();
+                    Contour::new(from_lowest_point(quads))
+                });
+                let exterior = contours.next().unwrap_or_else(|| Contour::new(Vec::new()));
+                let mut holes: Vec<Contour> = contours.collect();
+                holes.sort_by(|a, b| starts_order(&a.segments, &b.segments));
+                let mut s =
+                    FillShape::new(f.color, exterior, holes).with_scope(layer_id, group_path);
+                if let Some(src) = choice[i].filter(|src| heir.get(src).is_some_and(|h| h.1 == i)) {
+                    s.shape_id = src;
+                }
+                ids[i] = s.shape_id;
+                s
+            })
+            .collect();
+        let removed: Vec<ShapeId> = old_faces
+            .iter()
+            .copied()
+            .filter(|&id| orig_color(id).is_some() && !kept.contains(&id))
+            .collect();
+        LocalChange {
+            removed,
+            added,
+            ids,
+        }
+    }
+}
+
+/// 面の向きのある辺の並び `hs` の、番号によらない鍵（`face_key` と同じ：向きのある辺の鍵のうちいちばん小さいもの）
+fn hs_key(hs: &[(usize, bool)], m: &LocalMap<'_>) -> ([u64; 6], bool) {
+    hs.iter()
+        .map(|&h| m.half_key(h))
+        .min()
+        .expect("面の輪郭には辺がある")
+}
+
 /// 面の、番号によらない形（色と、輪郭の形の並び。並べたもの）。お手本と比べるため
 pub(crate) type FaceShape = ([u8; 4], Vec<Vec<([u64; 6], bool)>>);
 

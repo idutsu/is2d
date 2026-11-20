@@ -722,6 +722,12 @@ impl PlanarMap {
                                     let faces = local
                                         .touched_faces(touched_ok.as_ref().expect("閉じた"), &lookup, &mut memo)
                                         .expect("正しい地図なら面が作れる");
+                                    let change = local.rewrite(&faces, &lookup, &memo, 0, &[]);
+                                    // 触った面ごとに1つずつ別の番号
+                                    let mut ids = change.ids.clone();
+                                    ids.sort_unstable();
+                                    ids.dedup();
+                                    assert_eq!(ids.len(), faces.len(), "触った面の番号がみな別");
                                     let base_keys: std::collections::HashSet<FaceShape> =
                                         faces_shape_keys(self).into_iter().collect();
                                     let mut keys: Vec<FaceShape> = faces
@@ -730,7 +736,7 @@ impl PlanarMap {
                                         .filter(|k| !base_keys.contains(k))
                                         .collect();
                                     keys.sort();
-                                    (keys, base_keys)
+                                    (keys, base_keys, change)
                                 });
                                 (ix.stored.with_diff(self, &removed, &m, &added), (edges_ok, cycles_ok, local_ok, local_faces), touched.map(|t| {
                                     let mut shapes: Vec<_> = t
@@ -747,7 +753,50 @@ impl PlanarMap {
                         if let Some((d, (edges_ok, cycles_ok, local_ok, local_faces), touched)) = diffed {
                             // お手本：触った面のうち前の地図に無いものの集まりが、新しい地図全体の面のうち前の地図に
                             // 無いものの集まりと同じ
-                            if let Some((keys, base_keys)) = local_faces {
+                            if let Some((keys, base_keys, change)) = local_faces {
+                                // お手本（設計 段2b の 4. の 2b-6）：書き戻しの差分が、新しい地図全体から出した差分と同じ
+                                // （新しく振る番号は回ごとに違うので、元の図形の番号を引き継いだかだけを比べる）
+                                let same = super::uncounted(|| {
+                                    let prev = LayerBase::new(self);
+                                    let next = joined.clone().written(&prev).expect("正しい地図");
+                                    let own_faces = prev.faces(&[]);
+                                    let own: Vec<&FillShape> = own_faces.iter().map(|s| &**s).collect();
+                                    let full = prev.diff(next, &own, 0, &[]);
+                                    let orig: std::collections::HashSet<ShapeId> =
+                                        own.iter().map(|s| s.shape_id).collect();
+                                    let norm = |shapes: &[FillShape]| {
+                                        let mut v: Vec<_> = shapes
+                                            .iter()
+                                            .map(|s| {
+                                                let bits = |c: &Contour| -> Vec<[u64; 6]> {
+                                                    c.segments
+                                                        .iter()
+                                                        .map(|q| {
+                                                            [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y]
+                                                                .map(f64::to_bits)
+                                                        })
+                                                        .collect()
+                                                };
+                                                (
+                                                    orig.contains(&s.shape_id).then_some(s.shape_id),
+                                                    s.color.to_array(),
+                                                    s.contours().map(bits).collect::<Vec<_>>(),
+                                                )
+                                            })
+                                            .collect();
+                                        v.sort();
+                                        v
+                                    };
+                                    let mut a = change.removed.clone();
+                                    a.sort_unstable();
+                                    let mut b = full.removed.clone();
+                                    b.sort_unstable();
+                                    a == b && norm(&change.added) == norm(&full.added)
+                                });
+                                assert!(
+                                    same,
+                                    "触った面だけで決めた書き戻しの差分が、新しい地図全体から出した差分（お手本）と違う"
+                                );
                                 let full: Vec<FaceShape> = super::uncounted(|| {
                                     faces_shape_keys(&joined)
                                         .into_iter()
