@@ -2759,8 +2759,6 @@ pub(crate) struct MapIndex<'a> {
     /// 端の升目の索引（`LayerBase::ends_index`）
     pub(crate) ends: &'a crate::stored_map::TileIndex,
     pub(crate) stored: &'a StoredMap,
-    /// その地図の頂点の数（前からある頂点の番号は `0..nodes`）
-    pub(crate) nodes: usize,
 }
 
 /// 重ね合わせで、近くの辺と、頂点ごとの辺を探す道具。地図 `map` の辺のうち、前から `n_index` 本（計算に使う写しの
@@ -2904,10 +2902,11 @@ impl<'a> NearEdges<'a> {
         }
     }
 
-    /// 頂点 `v` につながる辺（辺の番号の順）を `out` に入れる（前の中身は消す）
+    /// 頂点 `v` につながる辺（辺の番号の順）を `out` に入れる（前の中身は消す）。前からある辺は、端の升目の索引で頂点の
+    /// 座標の所の辺を引き、端が `v` のものだけ残す（重ねる地図の頂点なら、前からある辺の端ではないので残らない）
     pub(super) fn edges_at(&self, v: usize, out: &mut Vec<usize>) {
         out.clear();
-        if let Some(ix) = self.index.filter(|ix| v < ix.nodes) {
+        if let Some(ix) = self.index {
             let p = self.map.nodes[v];
             ix.ends.edges_in(ix.stored, end_key(p), out);
             out.retain(|&e| {

@@ -11,8 +11,8 @@ use kurbo::Affine;
 
 use crate::canvas_tool::{Placement, SceneBaseCache};
 use crate::planar_map::{
-    cut_out, parallel_map, realized, region_map, stacked, CheckedMap, LayerBase, MapChange,
-    MapInput, MapRule, PlanarMap,
+    cut_out, parallel_map, realized, region_map, stacked, CheckedMap, LayerBase, LocalEdit,
+    LocalWrite, MapChange, MapInput, MapRule, PlanarMap,
 };
 use crate::stored_map::StoredMap;
 use crate::vector_engine::FillShape;
@@ -149,6 +149,10 @@ fn restricted_groups(
     Ok(out)
 }
 
+/// テスト用：図形の形の鍵（曲線の座標のビットと色。番号によらない）
+#[cfg(test)]
+type ShapeKey = (Vec<u64>, [u8; 4]);
+
 /// 持ち上げたレイヤーの残り
 #[derive(Clone, Debug)]
 pub(crate) struct Origin {
@@ -180,6 +184,73 @@ impl Origin {
             hidden: change.removed,
             remainder: change.added.iter().map(|s| s.shape_id).collect(),
         })
+    }
+
+    /// 中身 `content`（セル画の地図か、前の残り `prev` の地図）を1本の道で切った答え `w`（消した図形・入れた図形は中身の
+    /// 面に対するもの）から。セル画に対する隠す図形・残りの図形にする：前の残りがあれば、隠す図形は前の隠す図形と、消した
+    /// 図形のうち前の残りの図形でないもの（セル画の図形）。残りの図形は、前の残りの図形のうち消さなかったものと、入れた
+    /// 図形。どちらも無ければ（セル画の地図のまま）`None`。升目の索引は、中身の写しから変わった所だけ作る
+    fn of_local(
+        w: LocalWrite,
+        content: &LayerBase,
+        scope: &[u64],
+        prev: Option<&Origin>,
+    ) -> Option<Self> {
+        let (hidden, remainder) = match prev {
+            None => (w.removed, w.added),
+            Some(o) => {
+                let rem: HashSet<ShapeId> = o.remainder.iter().copied().collect();
+                let gone: HashSet<ShapeId> = w.removed.iter().copied().collect();
+                let mut hidden = o.hidden.clone();
+                hidden.extend(w.removed.iter().copied().filter(|id| !rem.contains(id)));
+                hidden.sort_unstable();
+                hidden.dedup();
+                let mut remainder: Vec<ShapeId> = o
+                    .remainder
+                    .iter()
+                    .copied()
+                    .filter(|id| !gone.contains(id))
+                    .collect();
+                remainder.extend(w.added.iter().copied());
+                remainder.sort_unstable();
+                remainder.dedup();
+                (hidden, remainder)
+            }
+        };
+        if hidden.is_empty() && remainder.is_empty() {
+            return None;
+        }
+        let base = LayerBase::of_local(w.stored, scope, w.faces, content);
+        Some(Self {
+            rest: base.stored.clone(),
+            held: Some(base),
+            hidden,
+            remainder,
+        })
+    }
+
+    /// テスト用（お手本との比べ）：隠す図形と、残りの図形の形・残りの地図の面の形（新しく振る番号によらない形）
+    #[cfg(test)]
+    fn compare_key(&self, scope: &[u64]) -> (Vec<ShapeId>, Vec<ShapeKey>, Vec<ShapeKey>) {
+        let key = |s: &FillShape| {
+            let bits: Vec<u64> = s
+                .contours()
+                .flat_map(|c| c.segments.iter())
+                .flat_map(|q| [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y].map(f64::to_bits))
+                .collect();
+            (bits, s.color.to_array())
+        };
+        let faces = self.base().faces(scope);
+        let rem: HashSet<ShapeId> = self.remainder.iter().copied().collect();
+        let mut remainder: Vec<_> = faces
+            .iter()
+            .filter(|f| rem.contains(&f.shape_id))
+            .map(|f| key(f))
+            .collect();
+        remainder.sort();
+        let mut all: Vec<_> = faces.iter().map(|f| key(f)).collect();
+        all.sort();
+        (self.hidden.clone(), remainder, all)
     }
 
     /// 残りの地図の、計算に使う写し
@@ -666,22 +737,25 @@ fn cut_layer(
     };
     let cur = cur.unwrap_or(&empty);
     let content_base = cur.content(&cel);
-    let content = content_base.map();
     let part = (!ids.is_empty())
-        .then(|| content.restricted(ids))
+        .then(|| content_base.map().restricted(ids))
         .filter(|m| !m.edges.is_empty());
-    let (rest, inside): (MapChange, CheckedMap) = match (part, rect) {
+    let (origin, inside): (Option<Origin>, CheckedMap) = match (part, rect) {
         (None, None) => return Some(cur.clone()),
         // 面を丸ごと持ち上げる：中身から、その面を外す（面の番号はそのまま。片は前と同じ番号の図形）
         (Some(part), None) => (
-            cel.diff(
-                content.without(ids).written(&cel)?,
-                &own,
-                layer_id,
-                stage.scope,
+            Origin::of(
+                cel.diff(
+                    content_base.map().without(ids).written(&cel)?,
+                    &own,
+                    layer_id,
+                    stage.scope,
+                ),
+                &cel.stored,
             ),
             part.checked()?,
         ),
+        // 選ぶ所で切る（1本の道：`cut_out`）。残りは中身に対する答えなので、セル画に対する残りにする
         (part, Some(r)) => {
             let region_owned;
             let region = match part {
@@ -692,7 +766,37 @@ fn cut_layer(
                 }
             };
             let (rest, inside) = cut_out(&cel, &own, &content_base, region, layer_id, stage.scope)?;
-            (rest, inside.map)
+            let origin = match rest {
+                LocalEdit::Changed(w) => {
+                    Origin::of_local(w, &content_base, stage.scope, cur.origin.as_ref())
+                }
+                _ => cur.origin.clone(),
+            };
+            // お手本：前の道（残りもセル画の地図に対して確かめ、書き戻す）の残りと同じ（隠す図形・残りの図形の形・残りの
+            // 地図の面の形）
+            #[cfg(test)]
+            if crate::planar_map::test_checks() {
+                let ok = crate::planar_map::uncounted(|| {
+                    let full = crate::planar_map::cut_out_full(
+                        &cel,
+                        &own,
+                        &content_base,
+                        region,
+                        layer_id,
+                        stage.scope,
+                    )
+                    .and_then(|(rest, _)| Origin::of(rest, &cel.stored));
+                    match (&origin, &full) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => {
+                            a.compare_key(stage.scope) == b.compare_key(stage.scope)
+                        }
+                        _ => false,
+                    }
+                });
+                assert!(ok, "矩形で切った残りが、前の道で切った残り（お手本）と違う");
+            }
+            (origin, inside.map)
         }
     };
     let mut groups = cur.groups.clone();
@@ -711,7 +815,7 @@ fn cut_layer(
     }
     Some(FloatLayer {
         layer_id,
-        origin: Origin::of(rest, &cel.stored),
+        origin,
         groups,
     })
 }
