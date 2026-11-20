@@ -1717,9 +1717,6 @@ impl LocalChange<'_> {
     }
 }
 
-/// 面の図形の表（番号の順。写しが持つもの：`LayerBase::faces`）
-pub(crate) type FaceTable = Arc<[Arc<FillShape>]>;
-
 /// 面を丸ごと外す・残す（`LayerBase::restricted_local`。`PlanarMap::restricted_by` と同じ決まり）：番号が並びにある面を
 /// 外すか、並びにある面だけを残す
 #[derive(Clone, Copy)]
@@ -3216,66 +3213,50 @@ impl LayerBase {
         m
     }
 
-    /// 面を丸ごと外す・残す（`PlanarMap::restricted_by` と同じ答え：外す面の側の色と番号を消し、両側とも消えた辺を除く。
-    /// 確かめ直さない：正しい地図の面を外しても、正しい地図のまま）を、触った所だけで：（新しいしまう形, 外したときは新しい
-    /// 面の表（残る面の図形は前の表と共有する。輪郭と番号は変わらない））。外すときは、外す面の輪郭の辺だけを替える
-    /// （しまう形に差分を当てる）。残すときは、残す面の輪郭の辺だけで新しい地図を作る（塊は前のしまう形と共有する）。面が
-    /// 残らなければ `None`
+    /// 面を丸ごと外した・残した地図のしまう形（`PlanarMap::restricted_by` と同じ地図：外す面の側の色と番号を消し、両側とも
+    /// 消えた辺を除く。正しい地図の面を外しても、正しい地図のまま）を、触った所だけで作る。外すときは、外す面の輪郭の辺
+    /// だけを替える（前のしまう形に差分を当てる。書くのは、この地図に対する差分として1本の道に渡す：`ScopeMap::restricted`）。
+    /// 残すときは、残す面の輪郭の辺だけで新しい地図を作る（取り出し。塊は前のしまう形と共有する）。面が残らなければ `None`
     pub(crate) fn restricted_local(
         &self,
         keep: FaceKeep<'_>,
         group_path: &[u64],
-    ) -> Option<(StoredMap, Option<FaceTable>)> {
-        let restrict = |te: crate::stored_map::TileEdge| {
-            let left_src = te.left_src.filter(|&id| keep.keeps(id));
-            let right_src = te.right_src.filter(|&id| keep.keeps(id));
-            (left_src.is_some() || right_src.is_some()).then_some(crate::stored_map::TileEdge {
-                left: te.left.filter(|_| left_src.is_some()),
-                right: te.right.filter(|_| right_src.is_some()),
-                left_src,
-                right_src,
-                ..te
-            })
-        };
-        let got = match keep {
+    ) -> Option<StoredMap> {
+        let stored = match keep {
             FaceKeep::Without(ids) => {
                 let touched = self.faces_edges(ids, group_path);
                 let added: Vec<crate::stored_map::TileEdge> = touched
                     .iter()
-                    .filter_map(|&e| restrict(self.stored.edge_at(e)))
+                    .filter_map(|&e| {
+                        let te = self.stored.edge_at(e);
+                        let left_src = te.left_src.filter(|&id| keep.keeps(id));
+                        let right_src = te.right_src.filter(|&id| keep.keeps(id));
+                        (left_src.is_some() || right_src.is_some()).then_some(
+                            crate::stored_map::TileEdge {
+                                left: te.left.filter(|_| left_src.is_some()),
+                                right: te.right.filter(|_| right_src.is_some()),
+                                left_src,
+                                right_src,
+                                ..te
+                            },
+                        )
+                    })
                     .collect();
-                let stored = self.stored.with_diff_tiles(&touched, &added);
-                let faces: Vec<Arc<FillShape>> = self
-                    .faces(group_path)
-                    .iter()
-                    .filter(|s| !ids.contains(&s.shape_id))
-                    .cloned()
-                    .collect();
-                (!stored.is_empty()).then(|| (stored, Some(faces.into())))
+                self.stored.with_diff_tiles(&touched, &added)
             }
             FaceKeep::Only(ids) => {
-                let m = self.only_faces_map(ids, group_path);
-                (!m.edges.is_empty()).then(|| (StoredMap::from_dense(&m, Some(&self.stored)), None))
+                StoredMap::from_dense(&self.only_faces_map(ids, group_path), Some(&self.stored))
             }
         };
-        // お手本：地図全体で面を外した・残した地図（`restricted_by`）と同じ。外したときの面の表は、その地図の面と同じ
+        let got = (!stored.is_empty()).then_some(stored);
+        // お手本：地図全体で面を外した・残した地図（`restricted_by`）と同じ
         #[cfg(test)]
         if test_checks() {
             let ok = uncounted(|| {
                 let full = self.map().restricted_by(|id| keep.keeps(id));
                 match &got {
                     None => full.edges.is_empty(),
-                    Some((stored, faces)) => {
-                        stored.same_content(&StoredMap::from_dense(&full, None))
-                            && faces.as_ref().is_none_or(|f: &FaceTable| {
-                                let mut a: Vec<ShapeId> = f.iter().map(|s| s.shape_id).collect();
-                                let b = LayerBase::new(&full).faces(group_path);
-                                let mut bi: Vec<ShapeId> = b.iter().map(|s| s.shape_id).collect();
-                                a.sort_unstable();
-                                bi.sort_unstable();
-                                a == bi
-                            })
-                    }
+                    Some(stored) => stored.same_content(&StoredMap::from_dense(&full, None)),
                 }
             });
             assert!(

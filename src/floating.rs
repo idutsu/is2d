@@ -748,10 +748,7 @@ fn cut_layer(
         (Some(part), None) => {
             let rest = content_base
                 .restricted_local(FaceKeep::Without(ids), stage.scope)
-                .map_or_else(
-                    || StoredMap::from_dense(&PlanarMap::default(), None),
-                    |(st, _)| st,
-                );
+                .unwrap_or_else(|| StoredMap::from_dense(&PlanarMap::default(), None));
             let origin = match cel.replace_local(&rest, stage.scope) {
                 LocalEdit::Same => None,
                 LocalEdit::Changed(w) => Some(Origin::of_local(w, &cel, stage.scope)),

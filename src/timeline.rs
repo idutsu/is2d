@@ -212,6 +212,9 @@ pub(crate) struct ScopeMap {
     map: Arc<LazyStored>,
 }
 
+/// 面を外した・残した地図と、外したときの新しい写し（`ScopeMap::restricted`）
+type Restricted = (ScopeMap, Option<Arc<LayerBase>>);
+
 /// セル画の1つの階層の地図の中身：しまった地図と、確かめた地図を入れる1回だけ書ける箱（設計：
 /// claude/地図の確かめを使うときに行う設計_開く時間_0fe3fcb.md。版 7 からは、ファイルから読んだ地図もはじめからしまう形
 /// で持つ）
@@ -404,34 +407,43 @@ impl ScopeMap {
         }
     }
 
-    /// 面を丸ごと外した・残した（`keep`）、階層 `group_path` の地図と、外したときは新しい地図の計算に使う写し（面の表と
-    /// 升目の索引を前の写しから引き継いだもの。画面の土台が持つ：`Cel::remove` など）。正しい地図の面を外しても正しい
-    /// 地図のまま（外した面の所は何も無い所になり、辺は減るだけで、残る面の輪郭と番号は変わらない）なので、確かめ直さ
-    /// ない。触った所だけで作る（`LayerBase::restricted_local`）。変わらなければ同じ地図を共有する。面が無くなれば `None`
+    /// 面を丸ごと外した・残した（`keep`）、階層 `group_path` の地図（面が無くなれば `None`）と、外したときは新しい地図の
+    /// 計算に使う写し（面の表と升目の索引を前の写しから引き継いだもの。画面の土台が持つ：`Cel::remove` など）。外すのは
+    /// この地図の書き換えなので、外したしまう形（`LayerBase::restricted_local`）を、この地図に対する差分として1本の道に
+    /// 渡す（`replace_local`）。残すのは取り出し（コピーと同じく、正しい地図の一部を新しく置く。塊はこの地図と共有する）。
+    /// `Err`：1本の道が書けないと答えた（正しい地図の面を外しても正しいので、起きないはず。使う側は何も変えずに断る）
     fn restricted(
         &self,
         group_path: &[u64],
         keep: FaceKeep<'_>,
-    ) -> Option<(ScopeMap, Option<Arc<LayerBase>>)> {
+    ) -> Result<Option<Restricted>, crate::planar_map::LocalRefusal> {
+        use crate::planar_map::LocalEdit;
         let base = self.base();
-        let unchanged = match keep {
-            FaceKeep::Without(ids) => !base.has_any_face(ids, &self.group_path),
-            FaceKeep::Only(ids) => {
-                let faces = base.faces(&self.group_path);
-                faces.len() <= ids.len() && faces.iter().all(|s| ids.contains(&s.shape_id))
-            }
+        let Some(next) = base.restricted_local(keep, &self.group_path) else {
+            return Ok(None);
         };
-        if unchanged {
-            let m = ScopeMap {
-                group_path: group_path.to_vec(),
-                map: self.map.clone(),
-            };
-            return (!m.is_empty()).then_some((m, None));
+        match keep {
+            FaceKeep::Without(_) => match base.replace_local(&next, &self.group_path) {
+                LocalEdit::Same => Ok(Some((
+                    ScopeMap {
+                        group_path: group_path.to_vec(),
+                        map: self.map.clone(),
+                    },
+                    None,
+                ))),
+                LocalEdit::Changed(w) => {
+                    let Some(m) = ScopeMap::of_checked_stored(group_path.to_vec(), w.stored) else {
+                        return Ok(None);
+                    };
+                    let held = LayerBase::of_local(m.stored().clone(), group_path, w.faces, &base);
+                    Ok(Some((m, Some(held))))
+                }
+                LocalEdit::Refused(r) => Err(r),
+            },
+            FaceKeep::Only(_) => {
+                Ok(ScopeMap::of_checked_stored(group_path.to_vec(), next).map(|m| (m, None)))
+            }
         }
-        let (stored, faces) = base.restricted_local(keep, &self.group_path)?;
-        let m = ScopeMap::of_checked_stored(group_path.to_vec(), stored)?;
-        let held = faces.map(|f| LayerBase::of_local(m.stored().clone(), group_path, f, &base));
-        Some((m, held))
     }
 
     /// 面の番号を、番号ごとにみな新しい番号にする（同じ番号は同じ新しい番号。番号は面の形を変えないので、正しい地図の
@@ -775,7 +787,11 @@ impl Cel {
                     if path.starts_with(scope) && m.base().has_any_face(faces, &path) =>
                 {
                     changed = true;
-                    if let Some((kept, base)) = m.restricted(&path, FaceKeep::Without(faces)) {
+                    // 書けなければ何も変えずに断る（全部か無しか）
+                    let Ok(kept) = m.restricted(&path, FaceKeep::Without(faces)) else {
+                        return false;
+                    };
+                    if let Some((kept, base)) = kept {
                         held.extend(base);
                         items.push(Item::Raw(path, kept));
                     }
@@ -824,13 +840,18 @@ impl Cel {
                         && m.base().has_any_face(faces, &path) =>
                 {
                     first_at.get_or_insert(rest.len());
-                    if let Some((kept, base)) = m.restricted(&path, FaceKeep::Without(faces)) {
+                    let (Ok(kept), Ok(picked)) = (
+                        m.restricted(&path, FaceKeep::Without(faces)),
+                        m.restricted(&into(&path), FaceKeep::Only(faces)),
+                    ) else {
+                        return false;
+                    };
+                    if let Some((kept, base)) = kept {
                         held.extend(base);
                         rest.push(Item::Raw(path.clone(), kept));
                     }
-                    let to = into(&path);
-                    if let Some((picked, _)) = m.restricted(&to, FaceKeep::Only(faces)) {
-                        moved.push(Item::Raw(to, picked));
+                    if let Some((picked, _)) = picked {
+                        moved.push(Item::Raw(into(&path), picked));
                     }
                 }
                 Item::Instance(mut inst)
@@ -886,13 +907,18 @@ impl Cel {
                         && m.base().has_any_face(faces, &path) =>
                 {
                     changed = true;
-                    if let Some((kept, base)) = m.restricted(&path, FaceKeep::Without(faces)) {
+                    let (Ok(kept), Ok(picked)) = (
+                        m.restricted(&path, FaceKeep::Without(faces)),
+                        m.restricted(&up(&path), FaceKeep::Only(faces)),
+                    ) else {
+                        return false;
+                    };
+                    if let Some((kept, base)) = kept {
                         held.extend(base);
                         items.push(Item::Raw(path.clone(), kept));
                     }
-                    let to = up(&path);
-                    if let Some((picked, _)) = m.restricted(&to, FaceKeep::Only(faces)) {
-                        items.push(Item::Raw(to, picked));
+                    if let Some((picked, _)) = picked {
+                        items.push(Item::Raw(up(&path), picked));
                     }
                 }
                 Item::Instance(mut inst)
@@ -1071,7 +1097,7 @@ impl Cel {
                     if rel.is_empty() && has_raw {
                         continue;
                     }
-                    if let Some((m, _)) = m.restricted(rel, FaceKeep::Only(faces)) {
+                    if let Ok(Some((m, _))) = m.restricted(rel, FaceKeep::Only(faces)) {
                         items.push(Item::Raw(rel.to_vec(), m));
                     }
                 }

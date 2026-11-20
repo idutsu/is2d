@@ -319,16 +319,24 @@ impl StoredMap {
         let order: Vec<(usize, bool)> = all.iter().map(|x| x.2).collect();
         let (keys, edges): (Vec<(i32, i32)>, Vec<StoredEdge>) =
             all.into_iter().map(|(k, e, _)| (k, e)).unzip();
-        let prev: &[Tile] = prev.map_or(&[], |p| &p.0.tiles);
+        let prev_tiles: &[Tile] = prev.map_or(&[], |p| &p.0.tiles);
         let (mut j, mut start) = (0, 0);
         let tiles: Vec<Tile> = keys
             .chunk_by(|a, b| a == b)
             .map(|k| {
                 let run = &edges[start..start + k.len()];
                 start += k.len();
-                same_tile(prev, &mut j, run).unwrap_or_else(|| TileData::new(run.into()))
+                same_tile(prev_tiles, &mut j, run).unwrap_or_else(|| TileData::new(run.into()))
             })
             .collect();
+        // 塊がみな前の地図の塊そのものなら、前の地図そのもの（同じ地図を、写しも含めて共有する）
+        if let Some(p) = prev {
+            if tiles.len() == prev_tiles.len()
+                && tiles.iter().zip(prev_tiles).all(|(a, b)| Arc::ptr_eq(a, b))
+            {
+                return (p.clone(), order);
+            }
+        }
         let stored = Self(Arc::new(Stored {
             tiles: tiles.into(),
             dense: Mutex::new(Weak::new()),
