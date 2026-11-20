@@ -1286,22 +1286,18 @@ impl LocalMap<'_> {
         let mut kept: std::collections::HashSet<ShapeId> = Default::default();
         let mut changed: Vec<usize> = Vec::new();
         for (i, f) in faces.iter().enumerate() {
-            let hs = halves(f);
-            let mut srcs: Vec<ShapeId> = hs.iter().filter_map(|&h| self.side_src(h)).collect();
-            srcs.sort_unstable();
-            srcs.dedup();
-            // 残す面：辺の形がみな前の地図にあり、側の番号が1つで、その面の側の前の地図の番号も同じ（同じ形の面が入れ
-            // 替わっても、前のその面の所にある面だけが、その面の図形を残す）
-            let keep = hs.iter().all(|&(e, _)| same(e))
-                && srcs.len() == 1
-                && orig_color(srcs[0]) == Some(f.color)
-                && !cut.contains(&srcs[0])
-                && hs.iter().all(|&h| self.side_src(h) == Some(srcs[0]))
-                && hs.iter().all(|&h| old_src(h) == Some(srcs[0]));
-            if keep && !kept_untouched(srcs[0]) && kept.insert(srcs[0]) {
-                ids[i] = srcs[0];
-            } else {
-                changed.push(i);
+            // 残す面の決まり（`kept_src`）。触っていない面が残す元の図形は、触った面は残さない
+            let keep = super::kept_src(
+                halves(f),
+                |h| self.side_src(h),
+                old_src,
+                f.color,
+                orig_color,
+                |s| cut.contains(&s),
+            );
+            match keep {
+                Some(s) if !kept_untouched(s) && kept.insert(s) => ids[i] = s,
+                _ => changed.push(i),
             }
         }
         let is_kept = |s: ShapeId| kept.contains(&s) || kept_untouched(s);

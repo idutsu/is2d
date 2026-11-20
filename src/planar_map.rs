@@ -1488,6 +1488,31 @@ fn edge_key(m: &PlanarMap, e: usize) -> [u64; 6] {
 ///
 /// 戻り値の3つ目は、面ごとの図形の番号（残した面は元の図形、ほかは新しい形の番号。`faces` の順）。番号はみな別
 /// （同じ元の図形を残す・引き継ぐ面はそれぞれ1つだけ、新しい形には新しい番号）なので、面と図形が1対1になる
+/// 書き戻しで、面が元の図形と番号をそのまま残すか（残す面の決まりはこれ1つ：全体の道 `rewrite_shapes`・1本の道
+/// `LocalMap::rewrite`・切り出した片の番号 `LayerBase::piece_ids`。引き方だけが違う）。面の輪郭の向きのある辺 `halves` の
+/// 側の番号 `new_src` がみな1つの番号 s で、その面の側の元の地図の番号 `old_src`（形が同じ元の辺の同じ側。そういう辺が
+/// 無ければ `None`）もみな s で、面の色 `color` が元の図形 s の色 `orig_color(s)` と同じで、元の図形 s の辺がみな残っている
+/// （`cut(s)` でない）とき、s（同じ形の面が入れ替わっても、元のその面の所にある面だけが、その面の図形を残す）。同じ s を
+/// 残せるのは1つの面だけ（使う側が決める）
+pub(super) fn kept_src(
+    halves: impl IntoIterator<Item = (usize, bool)>,
+    new_src: impl Fn((usize, bool)) -> Option<ShapeId>,
+    old_src: impl Fn((usize, bool)) -> Option<ShapeId>,
+    color: Color32,
+    orig_color: impl Fn(ShapeId) -> Option<Color32>,
+    cut: impl Fn(ShapeId) -> bool,
+) -> Option<ShapeId> {
+    let mut src = None;
+    for h in halves {
+        let s = new_src(h)?;
+        if *src.get_or_insert(s) != s || old_src(h) != Some(s) {
+            return None;
+        }
+    }
+    let s = src?;
+    (orig_color(s) == Some(color) && !cut(s)).then_some(s)
+}
+
 fn rewrite_shapes(
     orig: &PlanarMap,
     origin: &[EdgeOrigin],
@@ -1518,31 +1543,25 @@ fn rewrite_shapes(
     let mut changed: Vec<usize> = Vec::new();
     let mut kept: HashSet<ShapeId> = HashSet::new();
     let mut ids: Vec<ShapeId> = vec![0; faces.len()];
+    // 向きのある辺 `h` の側の、`orig` の同じ形の辺の同じ側の番号
+    let old_src = |h: (usize, bool)| match origin[h.0] {
+        EdgeOrigin::Same(i) => orig.side_src((i, h.1)),
+        EdgeOrigin::Reversed(i) => orig.side_src((i, !h.1)),
+        EdgeOrigin::New => None,
+    };
     for (i, f) in faces.iter().enumerate() {
-        let all_same = f.cycles.iter().flatten().all(|h| same(h.0));
-        // 向きのある辺 `h` の側の、`orig` の同じ形の辺の同じ側の番号
-        let old_src = |h: (usize, bool)| match origin[h.0] {
-            EdgeOrigin::Same(i) => orig.side_src((i, h.1)),
-            EdgeOrigin::Reversed(i) => orig.side_src((i, !h.1)),
-            EdgeOrigin::New => None,
-        };
-        // 残す面：辺の形がみな元の地図にあり、側の番号が1つで、その面の側の元の地図の番号も同じ（同じ形の面が入れ
-        // 替わっても、元のその面の所にある面だけが、その面の図形を残す）
-        let keep = all_same
-            && f.srcs.len() == 1
-            && orig_color.get(&f.srcs[0]) == Some(&f.color)
-            && !cut.contains(&f.srcs[0])
-            && {
-                f.cycles
-                    .iter()
-                    .flatten()
-                    .all(|h| next.side_src(*h) == Some(f.srcs[0]) && old_src(*h) == Some(f.srcs[0]))
-            };
+        let keep = kept_src(
+            f.cycles.iter().flatten().copied(),
+            |h| next.side_src(h),
+            old_src,
+            f.color,
+            |s| orig_color.get(&s).copied(),
+            |s| cut.contains(&s),
+        );
         // 同じ元の図形を残せるのは1つの面だけ（面の番号がみな別になる）
-        if keep && kept.insert(f.srcs[0]) {
-            ids[i] = f.srcs[0];
-        } else {
-            changed.push(i);
+        match keep {
+            Some(s) if kept.insert(s) => ids[i] = s,
+            _ => changed.push(i),
         }
     }
     // 形の変わらない輪郭（触っていない穴など）は、元の図形の輪郭をそのまま使い回す
@@ -4600,10 +4619,9 @@ pub(crate) fn cut_out(
 }
 
 impl LayerBase {
-    /// 切り出した片（確かめた地図 `piece`）の面ごとの番号（`rewrite_shapes` の、残す面の決まりと同じ）：この写しの面
-    /// （階層 `group_path`）と丸ごと同じ面（面の辺がみなこの地図にあり、辺の側の番号が1つでその面の番号、色も同じで、
-    /// その面の輪郭の辺がみな片にある）はその番号（同じ番号は1つの面だけ）。ほかは新しい番号。手間は片の大きさと、
-    /// 番号を引いた面の大きさの分
+    /// 切り出した片（確かめた地図 `piece`）の面ごとの番号：この写しの面（階層 `group_path`）を残す面（残す面の決まり
+    /// `kept_src`。元の図形の辺がみな残っているかは、その図形の輪郭の辺がみな片にあるか）はその番号（同じ番号は1つの面
+    /// だけ）。ほかは新しい番号。手間は片の大きさと、番号を引いた面の大きさの分
     fn piece_ids(&self, piece: &CheckedMap, group_path: &[u64]) -> Vec<ShapeId> {
         let faces_list = self.faces(group_path);
         let m = &piece.map;
@@ -4613,36 +4631,38 @@ impl LayerBase {
             .faces
             .iter()
             .map(|f| {
-                let src = f.srcs.first().copied();
-                let keep = f.srcs.len() == 1
-                    && src.is_some_and(|src| {
-                        let Ok(i) = faces_list.binary_search_by_key(&src, |s| s.shape_id) else {
-                            return false;
-                        };
-                        let shape = &faces_list[i];
-                        shape.color == f.color
-                            && f.cycles.iter().flatten().all(|&h| {
-                                // 辺がこの地図にあり、その面の側のこの地図の番号も同じ（`rewrite_shapes` と同じ決まり）
-                                m.side_src(h) == Some(src)
-                                    && self.stored.find_edge(&m.quad(h.0)).is_some_and(
-                                        |(e, fwd)| {
-                                            let te = self.stored.edge_at(e);
-                                            let old = if fwd == h.1 {
-                                                te.left_src
-                                            } else {
-                                                te.right_src
-                                            };
-                                            old == Some(src)
-                                        },
-                                    )
-                            })
-                            && shape
-                                .contours()
+                let shape = |s: ShapeId| {
+                    faces_list
+                        .binary_search_by_key(&s, |x| x.shape_id)
+                        .ok()
+                        .map(|i| &faces_list[i])
+                };
+                let keep = kept_src(
+                    f.cycles.iter().flatten().copied(),
+                    |h| m.side_src(h),
+                    // 形が同じこの地図の辺の、同じ側の番号
+                    |h| {
+                        let (e, fwd) = self.stored.find_edge(&m.quad(h.0))?;
+                        let te = self.stored.edge_at(e);
+                        if fwd == h.1 {
+                            te.left_src
+                        } else {
+                            te.right_src
+                        }
+                    },
+                    f.color,
+                    |s| shape(s).map(|x| x.color),
+                    // 元の図形の辺がみな片にあるか
+                    |s| {
+                        !shape(s).is_some_and(|x| {
+                            x.contours()
                                 .flat_map(|c| c.segments.iter())
                                 .all(|q| keys.contains(&local::quad_key(q)))
-                    });
-                match src {
-                    Some(src) if keep && kept.insert(src) => src,
+                        })
+                    },
+                );
+                match keep {
+                    Some(src) if kept.insert(src) => src,
                     _ => crate::vector_engine::next_shape_id(),
                 }
             })
