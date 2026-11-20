@@ -130,6 +130,24 @@ impl std::hash::Hash for StoredEdge {
     }
 }
 
+/// 塊から引いた辺（`StoredMap::edge_at`）：両端の座標・制御点・左右の色・左右の側の図形の番号
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TileEdge {
+    pub(crate) a: Point,
+    pub(crate) b: Point,
+    pub(crate) ctrl: Point,
+    pub(crate) left: Option<Color32>,
+    pub(crate) right: Option<Color32>,
+    pub(crate) left_src: Option<ShapeId>,
+    pub(crate) right_src: Option<ShapeId>,
+}
+
+impl TileEdge {
+    pub(crate) fn quad(&self) -> QuadBez {
+        QuadBez::new(self.a, self.ctrl, self.b)
+    }
+}
+
 /// 窓で重ねた結果の差分（設計 段2b の 4. の 2b-2）：前の地図 `base` の窓の辺 `window`（前の地図の番号）と、窓で重ねた結果
 /// `result` を、しまう辺（決まった向き・中身まで）で比べて、（消えた前の地図の辺, 増えた結果の辺）。窓の外の辺は変わらない
 #[cfg(test)]
@@ -470,6 +488,28 @@ impl StoredMap {
                 })
                 .collect()
         })
+    }
+
+    /// 計算に使う地図（`to_dense`）の辺 `e` を、塊から引く（両端は座標で。向きはしまう辺の向きで、`to_dense` の辺と同じ。
+    /// 写しの通し番号の一覧を作らずに辺を引く：設計 段2b の 7. の 2b-7a）
+    pub(crate) fn edge_at(&self, e: usize) -> TileEdge {
+        let starts = self.starts();
+        let k = starts.partition_point(|&s| s as usize <= e) - 1;
+        let se = &self.0.tiles[k][e - starts[k] as usize];
+        TileEdge {
+            a: se.a,
+            b: se.b,
+            ctrl: se.ctrl,
+            left: se.left,
+            right: se.right,
+            left_src: se.left_src.map(NonZeroU64::get),
+            right_src: se.right_src.map(NonZeroU64::get),
+        }
+    }
+
+    /// 計算に使う地図（`to_dense`）の辺の数
+    pub(crate) fn edge_count(&self) -> usize {
+        self.0.tiles.iter().map(|t| t.len()).sum()
     }
 
     /// 計算に使う地図（`to_dense`）の辺 `e` の判定の形（辺の住む塊が持つ。塊を共有する地図どうしで共有する）

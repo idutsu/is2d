@@ -34764,7 +34764,6 @@ fn local_edge_rules_match_full_check() {
     }
     let base = LayerBase::new(&m);
     let full_map = base.map.clone();
-    let all_nodes: Vec<usize> = (0..full_map.nodes.len()).collect();
     let color = |rng: &mut map_overlay::Rng| Some(colors[(rng.f() * 3.0) as usize % 3]);
     let (mut oks, mut bads, mut cycles_good, mut cycles_bad, mut all_good) = (0, 0, 0, 0, 0);
     for _ in 0..400 {
@@ -34839,7 +34838,7 @@ fn local_edge_rules_match_full_check() {
             let (ja, jb) = (at(a, &mut joined), at(b, &mut joined));
             joined.edges.push(edge(ja, jb));
         }
-        let local = base.local_map(&all_nodes, &result, &[], &added);
+        let local = base.local_map(&result, &[], &added);
         let got = local.added_edges_ok();
         assert_eq!(got, base.edges_ok_full(&joined), "足した辺 {adds:?}");
         if !got {
@@ -34917,7 +34916,6 @@ fn local_check_matches_full_check_when_edges_are_removed() {
         }
         let base = LayerBase::new(&m);
         let full_map = base.map.clone();
-        let all_nodes: Vec<usize> = (0..full_map.nodes.len()).collect();
         let table = base.faces_table();
         let lookup =
             |id: crate::vector_engine::ShapeId| table.get(&id).cloned().unwrap_or_default();
@@ -34961,7 +34959,7 @@ fn local_check_matches_full_check_when_edges_are_removed() {
                 k += 1;
                 !removed.contains(&(k - 1))
             });
-            let local = base.local_map(&all_nodes, &full_map, &removed, &[]);
+            let local = base.local_map(&full_map, &removed, &[]);
             let got = local.added_edges_ok()
                 && local.touched_cycles_ok().is_some_and(|t| {
                     local.regions_ok(&t, &lookup, &mut CycleMemo::default()) == Some(true)

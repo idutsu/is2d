@@ -1,67 +1,69 @@
 //! 新しい地図を「前の地図＋差分」として見て、触った所だけを計算する道具（設計：
-//! claude/触った所だけを計算する地図の設計_22fbbbe.md の「段2b の設計」4.）。
+//! claude/触った所だけを計算する地図の設計_22fbbbe.md の「段2b の設計」4.・7.）。
 //!
 //! 窓で重ねた結果（`overlay_windowed`）の差分（消えた前の地図の辺・増えた結果の辺）を、前の地図に当てた地図
-//! （`LocalMap`）。前の地図全体の写しを作らずに、頂点のまわりの辺の順と輪郭を引く：まわりの辺が変わった頂点では差分を
-//! 当てた辺の順、ほかの頂点では前の地図の辺の順（升目の索引で頂点の辺を引き、判定の形は塊から引く）。
+//! （`LocalMap`）。前の地図全体の写し（通し番号の一覧）を作らずに、辺は塊から引き（`StoredMap::edge_at`）、頂点は座標で
+//! 見分ける。頂点のまわりの辺の順と輪郭は、まわりの辺が変わった頂点では差分を当てた辺の順、ほかの頂点では前の地図の辺の順
+//! （升目の索引で頂点の辺を引き、判定の形は塊から引く）。
 //!
-//! 辺の番号：前の地図の辺は前の地図の番号（`0..n_base`）、増えた辺は `n_base + i`。頂点の番号：前の地図の頂点は前の
-//! 地図の番号、増えた頂点は `n_base_nodes + j`。
+//! 辺の番号：前の地図の辺は前の地図の計算に使う地図での番号（`0..n_base`）、増えた辺は `n_base + i`。頂点の番号：座標ごとに
+//! 初めて見たときに振る（この地図の中だけの番号。座標が同じなら同じ頂点）。
 
 use super::*;
 
+/// 頂点の番号の控え：座標ごとに番号を振る
+#[derive(Default)]
+struct Nodes {
+    of: HashMap<[u64; 2], usize>,
+    at: Vec<Point>,
+}
+
+impl Nodes {
+    fn id(&mut self, p: Point) -> usize {
+        let at = &mut self.at;
+        *self
+            .of
+            .entry([p.x.to_bits(), p.y.to_bits()])
+            .or_insert_with(|| {
+                at.push(p);
+                at.len() - 1
+            })
+    }
+}
+
 /// 前の地図に差分を当てた地図
 pub(crate) struct LocalMap<'a> {
-    base: &'a PlanarMap,
     index: MapIndex<'a>,
+    /// 前の地図の辺の数
+    n_base: usize,
     /// 消えた前の地図の辺
     removed: std::collections::HashSet<usize>,
     /// 増えた辺（頂点はこの地図の番号）と、その判定の形
     added: Vec<MapEdge>,
     added_polys: Vec<Poly>,
-    /// 増えた頂点の位置（番号は `base.nodes.len() + j`）
-    new_nodes: Vec<Point>,
     /// 頂点ごとの、増えた辺（辺の番号の順）
     added_at: HashMap<usize, Vec<usize>>,
+    nodes: std::cell::RefCell<Nodes>,
 }
 
 impl<'a> LocalMap<'a> {
-    /// 前の地図 `base`（升目の索引 `index`）の窓の頂点 `wnodes`（前の地図の番号）で重ねた結果 `result` の差分
-    /// （`removed`：消えた前の地図の辺、`added`：増えた結果の辺の番号）を当てた地図。結果の頂点は、窓の頂点と同じ座標なら
-    /// その頂点（`with_window_result` と同じ決まり）
+    /// 前の地図（しまう形と升目の索引 `index`）に、窓で重ねた結果 `result` の差分（`removed`：消えた前の地図の辺、
+    /// `added`：増えた結果の辺の番号）を当てた地図。結果の頂点は、座標が同じなら前の地図の頂点（`with_window_result` と
+    /// 同じ決まり）
     pub(crate) fn new(
-        base: &'a PlanarMap,
         index: MapIndex<'a>,
-        wnodes: &[usize],
         result: &PlanarMap,
         removed: &[usize],
         added: &[usize],
     ) -> Self {
-        let at: IntMap<[u64; 2], usize> = wnodes
-            .iter()
-            .map(|&v| ([base.nodes[v].x.to_bits(), base.nodes[v].y.to_bits()], v))
-            .collect();
-        let mut new_nodes: Vec<Point> = Vec::new();
-        let mut node_of: HashMap<usize, usize> = HashMap::new();
-        let mut node = |r: usize, new_nodes: &mut Vec<Point>| -> usize {
-            *node_of.entry(r).or_insert_with(|| {
-                let p = result.nodes[r];
-                match at.get(&[p.x.to_bits(), p.y.to_bits()]) {
-                    Some(&v) => v,
-                    None => {
-                        new_nodes.push(p);
-                        base.nodes.len() + new_nodes.len() - 1
-                    }
-                }
-            })
-        };
-        let n_base = base.edges.len();
+        let n_base = index.stored.edge_count();
+        let mut nodes = Nodes::default();
         let mut list: Vec<MapEdge> = Vec::with_capacity(added.len());
         let mut polys: Vec<Poly> = Vec::with_capacity(added.len());
         let mut added_at: HashMap<usize, Vec<usize>> = HashMap::new();
         for (i, &r) in added.iter().enumerate() {
             let ed = result.edges[r];
-            let (a, b) = (node(ed.a, &mut new_nodes), node(ed.b, &mut new_nodes));
+            let (a, b) = (nodes.id(result.nodes[ed.a]), nodes.id(result.nodes[ed.b]));
             list.push(MapEdge { a, b, ..ed });
             polys.push(EdgeGeom::of(&result.quad(r)));
             added_at.entry(a).or_default().push(n_base + i);
@@ -70,34 +72,52 @@ impl<'a> LocalMap<'a> {
             }
         }
         Self {
-            base,
             index,
+            n_base,
             removed: removed.iter().copied().collect(),
             added: list,
             added_polys: polys,
-            new_nodes,
             added_at,
+            nodes: std::cell::RefCell::new(nodes),
         }
     }
 
     fn n_base(&self) -> usize {
-        self.base.edges.len()
+        self.n_base
+    }
+
+    /// 前の地図の辺 `e`（塊から引く）
+    fn base_edge(&self, e: usize) -> crate::stored_map::TileEdge {
+        self.index.stored.edge_at(e)
+    }
+
+    /// 点 `p` の頂点の番号
+    fn node_id(&self, p: Point) -> usize {
+        self.nodes.borrow_mut().id(p)
     }
 
     /// 辺 `e`
     pub(crate) fn edge(&self, e: usize) -> MapEdge {
         match e.checked_sub(self.n_base()) {
             Some(i) => self.added[i],
-            None => self.base.edges[e],
+            None => {
+                let te = self.base_edge(e);
+                MapEdge {
+                    a: self.node_id(te.a),
+                    b: self.node_id(te.b),
+                    ctrl: te.ctrl,
+                    left: te.left,
+                    right: te.right,
+                    left_src: te.left_src,
+                    right_src: te.right_src,
+                }
+            }
         }
     }
 
     /// 頂点 `v` の位置
     pub(crate) fn node(&self, v: usize) -> Point {
-        match v.checked_sub(self.base.nodes.len()) {
-            Some(j) => self.new_nodes[j],
-            None => self.base.nodes[v],
-        }
+        self.nodes.borrow().at[v]
     }
 
     /// 辺 `e` の判定の形
@@ -110,8 +130,13 @@ impl<'a> LocalMap<'a> {
 
     /// 辺 `e` の曲線
     pub(crate) fn quad(&self, e: usize) -> QuadBez {
-        let ed = self.edge(e);
-        QuadBez::new(self.node(ed.a), ed.ctrl, self.node(ed.b))
+        match e.checked_sub(self.n_base()) {
+            Some(_) => {
+                let ed = self.edge(e);
+                QuadBez::new(self.node(ed.a), ed.ctrl, self.node(ed.b))
+            }
+            None => self.base_edge(e).quad(),
+        }
     }
 
     /// 増えた辺の番号（`n_base + i`）
@@ -121,12 +146,29 @@ impl<'a> LocalMap<'a> {
 
     /// まわりの辺が変わった頂点：消えた辺と増えた辺の端
     pub(crate) fn dirty_nodes(&self) -> Vec<usize> {
-        let mut out: Vec<usize> = self
-            .removed
-            .iter()
-            .flat_map(|&e| [self.base.edges[e].a, self.base.edges[e].b])
-            .chain(self.added.iter().flat_map(|ed| [ed.a, ed.b]))
-            .collect();
+        let mut out: Vec<usize> = Vec::new();
+        for &e in &self.removed {
+            let te = self.base_edge(e);
+            out.push(self.node_id(te.a));
+            out.push(self.node_id(te.b));
+        }
+        out.extend(self.added.iter().flat_map(|ed| [ed.a, ed.b]));
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// 頂点 `v` を端に持つ前の地図の辺（消えた辺も。番号の順）
+    fn base_edges_at(&self, v: usize) -> Vec<usize> {
+        let p = self.node(v);
+        let mut out: Vec<usize> = Vec::new();
+        self.index
+            .index
+            .edges_in(self.index.stored, index_tile(cell_of(gpt(p))), &mut out);
+        out.retain(|&e| {
+            let te = self.base_edge(e);
+            te.a == p || te.b == p
+        });
         out.sort_unstable();
         out.dedup();
         out
@@ -134,11 +176,8 @@ impl<'a> LocalMap<'a> {
 
     /// 頂点 `v` につながる辺（番号の順）
     pub(crate) fn edges_at(&self, v: usize) -> Vec<usize> {
-        let mut out: Vec<usize> = Vec::new();
-        if v < self.base.nodes.len() {
-            out = self.base.edges_at_in(v, Some(self.index));
-            out.retain(|e| !self.removed.contains(e));
-        }
+        let mut out = self.base_edges_at(v);
+        out.retain(|e| !self.removed.contains(e));
         if let Some(list) = self.added_at.get(&v) {
             out.extend(list.iter().copied());
         }
@@ -239,7 +278,7 @@ impl<'a> LocalMap<'a> {
         let base_keys: std::collections::HashSet<[u64; 6]> = self
             .removed
             .iter()
-            .map(|&e| quad_key(&self.base.quad(e)))
+            .map(|&e| quad_key(&self.base_edge(e).quad()))
             .collect();
         let mut fresh: std::collections::HashSet<usize> = Default::default();
         for e in self.added_edges() {
@@ -255,14 +294,9 @@ impl<'a> LocalMap<'a> {
                 fresh.insert(e);
             }
         }
-        // 増えた頂点が、ほかの頂点と同じ格子の点に丸まらないか（前の地図の頂点どうしは別々の格子の点）
-        let n_nodes = self.base.nodes.len();
-        let mut new_nodes: Vec<usize> = self
-            .added
-            .iter()
-            .flat_map(|ed| [ed.a, ed.b])
-            .filter(|&v| v >= n_nodes)
-            .collect();
+        // 増えた辺の端の頂点が、ほかの頂点と同じ格子の点に丸まらないか（前の地図の頂点どうしは別々の格子の点。座標が
+        // 同じなら同じ頂点）
+        let mut new_nodes: Vec<usize> = self.added.iter().flat_map(|ed| [ed.a, ed.b]).collect();
         new_nodes.sort_unstable();
         new_nodes.dedup();
         for &v in &new_nodes {
@@ -615,17 +649,15 @@ impl LocalMap<'_> {
         // 頂点の、前の地図の向きのある辺の左の面）の面の、前の地図の輪郭のうち、新しい地図にそのままあるもの
         let mut old_faces: Vec<ShapeId> = Vec::new();
         for &e in &self.removed {
-            let ed = self.base.edges[e];
+            let ed = self.base_edge(e);
             old_faces.extend(ed.left_src);
             old_faces.extend(ed.right_src);
         }
         for v in self.dirty_nodes() {
-            if v < self.base.nodes.len() {
-                for e in self.base.edges_at_in(v, Some(self.index)) {
-                    let ed = self.base.edges[e];
-                    old_faces.extend(ed.left_src);
-                    old_faces.extend(ed.right_src);
-                }
+            for e in self.base_edges_at(v) {
+                let ed = self.base_edge(e);
+                old_faces.extend(ed.left_src);
+                old_faces.extend(ed.right_src);
             }
         }
         old_faces.sort_unstable();
@@ -729,17 +761,15 @@ impl LocalMap<'_> {
         // 触った前の地図の面：外周がそのままなら穴が変わる面。そのままの穴は入れ先を決め直す
         let mut old_faces: Vec<ShapeId> = Vec::new();
         for &e in &self.removed {
-            let ed = self.base.edges[e];
+            let ed = self.base_edge(e);
             old_faces.extend(ed.left_src);
             old_faces.extend(ed.right_src);
         }
         for v in self.dirty_nodes() {
-            if v < self.base.nodes.len() {
-                for e in self.base.edges_at_in(v, Some(self.index)) {
-                    let ed = self.base.edges[e];
-                    old_faces.extend(ed.left_src);
-                    old_faces.extend(ed.right_src);
-                }
+            for e in self.base_edges_at(v) {
+                let ed = self.base_edge(e);
+                old_faces.extend(ed.left_src);
+                old_faces.extend(ed.right_src);
             }
         }
         old_faces.sort_unstable();
@@ -894,17 +924,15 @@ impl LocalMap<'_> {
         // 前の地図にそのままある面
         let mut old_faces: std::collections::BTreeSet<ShapeId> = Default::default();
         for &e in &self.removed {
-            let ed = self.base.edges[e];
+            let ed = self.base_edge(e);
             old_faces.extend(ed.left_src);
             old_faces.extend(ed.right_src);
         }
         for v in self.dirty_nodes() {
-            if v < self.base.nodes.len() {
-                for e in self.base.edges_at_in(v, Some(self.index)) {
-                    let ed = self.base.edges[e];
-                    old_faces.extend(ed.left_src);
-                    old_faces.extend(ed.right_src);
-                }
+            for e in self.base_edges_at(v) {
+                let ed = self.base_edge(e);
+                old_faces.extend(ed.left_src);
+                old_faces.extend(ed.right_src);
             }
         }
         for f in faces {
@@ -916,7 +944,7 @@ impl LocalMap<'_> {
         // 前の地図の図形の色
         let orig_color = |id: ShapeId| -> Option<Color32> {
             let h = *base_faces(id).first()?;
-            let ed = self.base.edges[h.0];
+            let ed = self.base_edge(h.0);
             if h.1 {
                 ed.left
             } else {
@@ -929,7 +957,7 @@ impl LocalMap<'_> {
         let removed_keys: HashMap<[u64; 6], usize> = self
             .removed
             .iter()
-            .map(|&e| (quad_key(&self.base.quad(e)), e))
+            .map(|&e| (quad_key(&self.base_edge(e).quad()), e))
             .collect();
         let added_keys: std::collections::HashSet<[u64; 6]> = self
             .added_edges()
@@ -941,7 +969,7 @@ impl LocalMap<'_> {
         let mut cut: std::collections::HashSet<ShapeId> = Default::default();
         for (k, &e) in &removed_keys {
             if !added_keys.contains(k) {
-                let ed = self.base.edges[e];
+                let ed = self.base_edge(e);
                 cut.extend(ed.left_src);
                 cut.extend(ed.right_src);
             }

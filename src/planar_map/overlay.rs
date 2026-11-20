@@ -703,7 +703,7 @@ impl PlanarMap {
                                 let (removed, added) =
                                     crate::stored_map::window_diff(self, &wedges, &m);
                                 let local =
-                                    LocalMap::new(self, ix, &wnodes, &m, &removed, &added);
+                                    LocalMap::new(ix, &m, &removed, &added);
                                 let touched = local.touched_cycles();
                                 let edges_ok = local.added_edges_ok();
                                 let touched_ok = local.touched_cycles_ok();

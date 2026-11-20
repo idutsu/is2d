@@ -1989,16 +1989,15 @@ impl LayerBase {
         cycle
     }
 
-    /// テスト用：この地図に差分を当てた地図（`LocalMap::new`。窓の頂点 `wnodes` は、この地図の全部の頂点でもよい）
+    /// テスト用：この地図に差分を当てた地図（`LocalMap::new`）
     #[cfg(test)]
     pub(crate) fn local_map<'a>(
         &'a self,
-        wnodes: &[usize],
         result: &PlanarMap,
         removed: &[usize],
         added: &[usize],
     ) -> LocalMap<'a> {
-        LocalMap::new(&self.map, self.map_index(), wnodes, result, removed, added)
+        LocalMap::new(self.map_index(), result, removed, added)
     }
 
     /// テスト用：新しい地図 `next` の、辺の決まり（格子に置ける・両側の色が違う・判定の形が2点以上・区間どうしが触れない・
