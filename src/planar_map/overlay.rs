@@ -2852,8 +2852,10 @@ pub(super) struct NearEdges<'a> {
     loaded_tiles: IntSet<(i64, i64)>,
     loaded_edges: IntSet<usize>,
     cell_edges: IntMap<(i64, i64), Vec<usize>>,
-    /// 探すときに同じ辺を2度返さないための印
-    seen: IntSet<usize>,
+    /// 探すときに同じ辺を2度返さないための印：辺ごとに、最後に返した `query` の回（`CellGrid` と同じ。表を毎回空に
+    /// すると、表の大きさの分の手間が探すたびにかかる）
+    seen: Vec<u32>,
+    stamp: u32,
     buf: Vec<usize>,
 }
 
@@ -2878,7 +2880,8 @@ impl<'a> NearEdges<'a> {
             loaded_tiles: Default::default(),
             loaded_edges: Default::default(),
             cell_edges: IntMap::default(),
-            seen: Default::default(),
+            seen: vec![0; map.edges.len()],
+            stamp: 0,
             buf: Vec::new(),
         };
         for e in n_index..map.edges.len() {
@@ -2951,23 +2954,26 @@ impl<'a> NearEdges<'a> {
         out: &mut Vec<usize>,
     ) {
         out.clear();
-        self.seen.clear();
-        let mut local_found: Vec<usize> = Vec::new();
+        self.stamp = self.stamp.wrapping_add(1);
+        if self.stamp == 0 {
+            self.seen.fill(0);
+            self.stamp = 1;
+        }
+        let stamp = self.stamp;
         for c in cells {
             if self.index.is_some() {
                 self.load(index_tile(c));
                 if let Some(list) = self.cell_edges.get(&c) {
                     for &e in list {
-                        if self.seen.insert(e) {
+                        if std::mem::replace(&mut self.seen[e], stamp) != stamp {
                             out.push(e);
                         }
                     }
                 }
             }
-            local_found.clear();
-            local_found.extend(self.local.at(c).map(|i| i as usize + self.n_index));
-            for &e in &local_found {
-                if self.seen.insert(e) {
+            for i in self.local.at(c) {
+                let e = i as usize + self.n_index;
+                if std::mem::replace(&mut self.seen[e], stamp) != stamp {
                     out.push(e);
                 }
             }
