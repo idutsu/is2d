@@ -691,7 +691,29 @@ impl PlanarMap {
                     let mut out = maps.into_iter();
                     return Some(rules.map(|rule| {
                         let m = out.next().expect("決まりごとに1つの地図");
-                        self.with_window_result(m, &wnodes, &to_window, rule != MapRule::KeepInside)
+                        let copy = rule != MapRule::KeepInside;
+                        // お手本（設計 段2b の 4. の 2b-2）：前のしまう形に窓の差分を当てた形が、窓の結果を合わせた地図の
+                        // しまう形と同じ
+                        #[cfg(test)]
+                        let diffed = (copy && super::test_checks()).then(|| {
+                            super::uncounted(|| {
+                                let (removed, added) =
+                                    crate::stored_map::window_diff(self, &wedges, &m);
+                                ix.stored.with_diff(self, &removed, &m, &added)
+                            })
+                        });
+                        let joined = self.with_window_result(m, &wnodes, &to_window, copy);
+                        #[cfg(test)]
+                        if let Some(d) = diffed {
+                            let same = super::uncounted(|| {
+                                d.same_content(&StoredMap::from_dense(&joined, None))
+                            });
+                            assert!(
+                                same,
+                                "前のしまう形に窓の差分を当てた形が、窓の結果を合わせた地図のしまう形（お手本）と違う"
+                            );
+                        }
+                        joined
                     }));
                 }
                 Err(OverlayStop::Unfed(more)) => {
