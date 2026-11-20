@@ -1181,7 +1181,7 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
             write_local(tab, layer_id, |base, scope| {
                 match base.reshape_change(map_edit) {
                     Some(Some(change)) => base.edit_local(&change, scope),
-                    // 辺・頂点が無い（前の道の `apply_edit` が `None` を返すときと同じく、格子の外として知らせる）
+                    // 辺・頂点が無いときも、格子の外として知らせる（浮いた片の地図の編集 `MapEdit::apply` が `None` を返すときと同じ）
                     _ => crate::planar_map::LocalEdit::Refused(
                         crate::planar_map::LocalRefusal::OffGrid,
                     ),

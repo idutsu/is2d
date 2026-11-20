@@ -56,8 +56,7 @@ pub(crate) struct LocalMap<'a> {
 
 impl<'a> LocalMap<'a> {
     /// 前の地図（しまう形と升目の索引 `index`）に、窓で重ねた結果 `result` の差分（`removed`：消えた前の地図の辺、
-    /// `added`：増えた結果の辺の番号）を当てた地図。結果の頂点は、座標が同じなら前の地図の頂点（`with_window_result` と
-    /// 同じ決まり）
+    /// `added`：増えた結果の辺の番号）を当てた地図。結果の頂点は、座標が同じなら前の地図の頂点
     pub(crate) fn new(
         index: MapIndex<'a>,
         result: &PlanarMap,
@@ -233,56 +232,6 @@ impl<'a> LocalMap<'a> {
         list
     }
 
-    #[cfg(test)]
-    /// 触った輪郭：増えた辺の向きのある辺と、まわりの辺が変わった頂点から出ていく向きのある辺の、左の面の輪郭（たどる
-    /// 決まりは `face_cycles_with` と同じ）。ほかの輪郭は、前の地図の輪郭と同じ（通る頂点のまわりの辺の順が変わらず、
-    /// 辺も同じ）。閉じない輪郭は `None`（壊れている）
-    pub(crate) fn touched_cycles(&self) -> Option<Vec<Vec<(usize, bool)>>> {
-        let mut around: IntMap<usize, Vec<(usize, bool)>> = IntMap::default();
-        let mut starts: Vec<(usize, bool)> = self
-            .added_edges()
-            .flat_map(|e| [(e, true), (e, false)])
-            .collect();
-        for v in self.dirty_nodes() {
-            let list = around.entry(v).or_insert_with(|| self.out_sorted(v));
-            starts.extend(list.iter().copied());
-        }
-        let mut used: IntSet<(usize, bool)> = Default::default();
-        let mut cycles = Vec::new();
-        for start in starts {
-            if used.contains(&start) {
-                continue;
-            }
-            let mut cycle = Vec::new();
-            let mut cur = start;
-            loop {
-                used.insert(cur);
-                cycle.push(cur);
-                let ed = self.edge(cur.0);
-                let head = if cur.1 { ed.b } else { ed.a };
-                let list = around.entry(head).or_insert_with(|| self.out_sorted(head));
-                let back = (cur.0, !cur.1);
-                let k = list.iter().position(|&h| h == back)?;
-                let next = list[(k + list.len() - 1) % list.len()];
-                if next == start {
-                    break;
-                }
-                if used.contains(&next) {
-                    return None;
-                }
-                cur = next;
-            }
-            cycles.push(cycle);
-        }
-        Some(cycles)
-    }
-
-    /// 点 `p`（文書の座標）を含むマスの升目にかかる辺（消えた辺を除いた前の地図の辺と、増えた辺。番号の順・1つずつ）
-    #[cfg(test)]
-    fn edges_near_point(&self, p: Point) -> Vec<usize> {
-        self.edges_over(KRect::from_points(p, p))
-    }
-
     /// 矩形 `r`（文書の座標）にかかる升目の辺（消えた辺を除いた前の地図の辺と、増えた辺。番号の順・1つずつ）
     fn edges_over(&self, r: KRect) -> Vec<usize> {
         let mut out: Vec<usize> = Vec::new();
@@ -306,19 +255,6 @@ impl<'a> LocalMap<'a> {
     /// 入れ、同じマスにある区間とだけ比べる（触れる区間どうしは必ず同じマスを持つ：`seg_cells`）。手間は触る区間の数に
     /// 比例し、近くの辺どうしの区間の組をみな比べることはしない
     pub(crate) fn added_edges_ok(&self) -> bool {
-        let ok = self.added_edges_ok_grid();
-        #[cfg(test)]
-        if test_checks() {
-            assert_eq!(
-                ok,
-                uncounted(|| self.added_edges_ok_pairs()),
-                "増えた辺の確かめが、前のやり方（お手本）と違う"
-            );
-        }
-        ok
-    }
-
-    fn added_edges_ok_grid(&self) -> bool {
         let base_keys: IntSet<[u64; 6]> = self
             .removed
             .iter()
@@ -438,90 +374,6 @@ impl<'a> LocalMap<'a> {
         true
     }
 
-    /// テスト用のお手本：`added_edges_ok` の前のやり方（近くの辺ごとに、区間の組をみな比べる）。2b-5a：増えた辺の決まり（地図全体の判定 `check` の、格子に置ける・両側の色が違う・判定の形が2点以上・区間どうしが
-    /// 触れない・別々の頂点が別々の格子の点）。前の地図の辺どうしは、前の地図が正しいので調べない。区間どうしは、どちらかが、
-    /// 形が前の地図に無い増えた辺のものだけを調べる（消えた辺と形が同じ増えた辺は、判定の形も同じ）
-    #[cfg(test)]
-    fn added_edges_ok_pairs(&self) -> bool {
-        let base_keys: IntSet<[u64; 6]> = self
-            .removed
-            .iter()
-            .map(|&e| quad_key(&self.base_edge(e).quad()))
-            .collect();
-        let mut fresh: IntSet<usize> = Default::default();
-        for e in self.added_edges() {
-            let q = self.quad(e);
-            let ed = self.edge(e);
-            if !on_grid([q.p0, q.p1, q.p2].into_iter()) || ed.left == ed.right {
-                return false;
-            }
-            if self.poly(e).len() < 2 {
-                return false;
-            }
-            if !base_keys.contains(&quad_key(&q)) {
-                fresh.insert(e);
-            }
-        }
-        // 増えた辺の端の頂点が、ほかの頂点と同じ格子の点に丸まらないか（前の地図の頂点どうしは別々の格子の点。座標が
-        // 同じなら同じ頂点）
-        let mut new_nodes: Vec<usize> = self.added.iter().flat_map(|ed| [ed.a, ed.b]).collect();
-        new_nodes.sort_unstable();
-        new_nodes.dedup();
-        for &v in &new_nodes {
-            let p = self.node(v);
-            let gp = gpt(p);
-            for f in self.edges_near_point(p) {
-                let fd = self.edge(f);
-                for u in [fd.a, fd.b] {
-                    if u != v && gpt(self.node(u)) == gp {
-                        return false;
-                    }
-                }
-            }
-        }
-        // 区間どうし
-        let mut fresh_list: Vec<usize> = fresh.into_iter().collect();
-        fresh_list.sort_unstable();
-        for &e in &fresh_list {
-            let pe = self.poly(e).clone();
-            let ed = self.edge(e);
-            let reach = GridRect::of(&pe);
-            let rect = KRect::new(
-                reach.x0 as f64 / OVERLAY_GRID,
-                reach.y0 as f64 / OVERLAY_GRID,
-                reach.x1 as f64 / OVERLAY_GRID,
-                reach.y1 as f64 / OVERLAY_GRID,
-            )
-            .inflate(1.0 / OVERLAY_GRID, 1.0 / OVERLAY_GRID);
-            for f in self.edges_over(rect) {
-                let pf = self.poly(f).clone();
-                let fd = self.edge(f);
-                for k in 0..pe.len() - 1 {
-                    let rk = GridRect::of(&pe[k..k + 2]);
-                    for m in 0..pf.len().saturating_sub(1) {
-                        if e == f && m <= k {
-                            continue;
-                        }
-                        if !rk.overlaps(&GridRect::of(&pf[m..m + 2])) {
-                            continue;
-                        }
-                        let joint = (e == f && m == k + 1).then_some(pe[k + 1]);
-                        if seg_pair_clash(
-                            (pe[k], pe[k + 1]),
-                            seg_tags(&pe, k, ed.a, ed.b),
-                            (pf[m], pf[m + 1]),
-                            seg_tags(&pf, m, fd.a, fd.b),
-                            joint,
-                        ) {
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
-        true
-    }
-
     /// 向きのある辺の左側の色
     pub(crate) fn side_color(&self, (e, forward): (usize, bool)) -> Option<Color32> {
         let ed = self.edge(e);
@@ -539,7 +391,7 @@ impl<'a> LocalMap<'a> {
         memo: &mut CycleMemo,
     ) -> Option<Vec<Vec<(usize, bool)>>> {
         // 触った輪郭：増えた辺の向きのある辺と、まわりの辺が変わった頂点から出ていく向きのある辺の、左の面の輪郭（控え
-        // `memo` に入れ、確かめ・面作りで使い回す。たどる決まりは `touched_cycles` と同じ）
+        // `memo` に入れ、確かめ・面作りで使い回す。たどる決まりは `face_cycles_with` と同じ）
         let mut starts: Vec<(usize, bool)> = self
             .added_edges()
             .flat_map(|e| [(e, true), (e, false)])
@@ -870,26 +722,15 @@ impl LocalMap<'_> {
             .collect()
     }
 
-    /// 2b-5c：触った輪郭の、穴の入れ先と何も無い側の決まり（地図全体の判定 `check` の穴の入れ先 `regions` と、何も無い側の輪郭の確かめ）。
+    /// 2b-5c：触った輪郭（`touched_cycles_ok`）の、穴の入れ先と何も無い側の決まり（地図全体の判定 `check` の穴の入れ先
+    /// `regions` と、何も無い側の輪郭の確かめ）。正しければ触った面（`touched_faces`）。
     /// - 触った色のある穴：入れ先が無ければ正しくない
     /// - 前の地図の穴で、入れ先の外周が触られたもの（前の地図の面の表 `base_faces` で、触った前の地図の外周の面の穴を
     ///   引く）：入れ先が無ければ正しくない
     /// - 触った何も無い側の輪郭と、新しい輪の外接矩形に辺がかかる前の地図の何も無い側の輪郭：色のある面に入り込めば
     ///   正しくない（調べる輪郭は今の決まりより多いが、どれも正しい地図で成り立つ決まりなので、答えは同じ）
     ///
-    /// `touched`：触った輪郭（`touched_cycles_ok`）。`None`：輪郭が閉じない（テスト用。本番は面も受け取る `regions_faces`）
-    #[cfg(test)]
-    pub(crate) fn regions_ok(
-        &self,
-        touched: &[Vec<(usize, bool)>],
-        base_faces: BaseFaces<'_>,
-        memo: &mut CycleMemo,
-    ) -> Option<bool> {
-        Some(self.regions_faces(touched, base_faces, memo)?.is_some())
-    }
-
-    /// `regions_ok` と、正しければ触った面（`touched_faces`）。`Some(None)`：正しくない。`None`：輪郭が閉じないか、穴の
-    /// 入れ先が無い
+    /// `Some(None)`：正しくない。`None`：輪郭が閉じないか、穴の入れ先が無い
     pub(crate) fn regions_faces(
         &self,
         touched: &[Vec<(usize, bool)>],
@@ -1004,7 +845,7 @@ impl LocalMap<'_> {
 }
 
 impl LocalMap<'_> {
-    /// 輪郭 `ci` の輪（何も無い側の輪郭も。今の `regions` の `unpainted` と同じ）
+    /// 輪郭 `ci` の輪（何も無い側の輪郭も。バケツは、色の無い囲まれた所も面にする）
     fn ring_any<'m>(&self, ci: usize, memo: &'m mut CycleMemo) -> &'m Ring {
         if memo.cycles[ci].ring.is_some() {
             return memo.cycles[ci].ring.as_ref().expect("色のある輪郭");
@@ -1070,7 +911,7 @@ impl LocalMap<'_> {
         Some(best.map(|b| b.1))
     }
 
-    /// バケツの面（今の `face_filled_with` の、点を含む組。何も無い側の囲まれた所も組）：点 `p2`（2倍の座標）を含む
+    /// バケツの面（点を含む面。何も無い側の囲まれた所も面）：点 `p2`（2倍の座標）を含む
     /// いちばん小さい外周と、その穴（同じ色で、入れ先がその外周の輪郭）の、向きのある辺。色のある面の穴は、前の地図の面の
     /// 表 `base_faces` で引く。何も無い所の穴は、外周の外接矩形にかかる何も無い側の輪郭から探す。点が輪郭の上にあるか、
     /// どの外周にも入らなければ `None`。（面の色, 面の輪郭の向きのある辺）
@@ -1155,7 +996,7 @@ impl LocalMap<'_> {
     /// - 前の地図の面で、外周がそのままで穴が触られたもの
     ///
     /// 面の穴は、決まり直った穴と、外周がそのままの面なら前の地図の面の表 `base_faces` の、そのままの穴。正しい地図
-    /// （`regions_ok` が正しいと答えたもの）にだけ使う。`None`：輪郭が閉じないか、穴の入れ先が無い
+    /// （`regions_faces` が正しいと答えたもの）にだけ使う。`None`：輪郭が閉じないか、穴の入れ先が無い
     pub(crate) fn touched_faces(
         &self,
         touched: &[Vec<(usize, bool)>],
@@ -1382,12 +1223,16 @@ impl LocalMap<'_> {
         }
     }
 
-    /// 2b-6：触った面 `faces`（`touched_faces`）の書き戻しの差分。決まりは今の `rewrite_shapes` と同じ：
+    /// 2b-6：触った面 `faces`（`touched_faces`）の書き戻しの差分（書き戻しの決まりはこれ1つ）：
     /// - 面の辺がみな前の地図にあり（形がビットまで同じ）、辺の側の印が同じ1つの元の図形で、その図形と色も同じで、その
-    ///   図形のどの辺も消えていない面は、元の図形のまま残す
-    /// - ほかの面は新しい図形。辺の側の印のうち、残した面の図形でないものでいちばん多い元の図形を引き継ぐ（同じ元の図形を
-    ///   引き継ぐ面が2つ以上あれば、その印の付いた側がいちばん多い面、同じなら形の鍵の小さい面）
-    /// - 残した面の元の図形のほかは、みな消す
+    ///   図形のどの辺も消えていない面は、元の図形のまま残す（`kept_src`）
+    /// - ほかの面は新しい図形。辺の側の印のうち、残した面の図形でないものでいちばん多い元の図形（同じ数なら小さい番号：
+    ///   `top_vote`。重ね合わせで面に伝える番号と同じ決まり）を引き継ぐ（同じ元の図形を引き継ぐ面が2つ以上あれば、その印の
+    ///   付いた側がいちばん多い面、同じなら形の鍵の小さい面。地図の番号の順で決めない）。面が分かれても、まとまっても
+    ///   （動かした片が残りとつながるなど）、長い輪郭の側が番号を保つので、地図の、その面のほかの辺の印も変わらない（しまう
+    ///   地図で、変わった場所の塊だけが新しくなる）
+    /// - 残した面の元の図形のほかは、みな消す（どの面にも残らない元の図形が、新しい形と重なって残ることは無い。番号を
+    ///   引き継いだ形は、消した元の図形と入れ替わる）
     ///
     /// 触っていない面は、前の地図の面のまま残る（その元の図形は、触った面では残す図形として数える）。前の地図の面のうち
     /// 形が変わりうるもの（`old_faces`）の元の図形だけが、消す候補になる
@@ -1517,7 +1362,7 @@ impl LocalMap<'_> {
                 *best = (sides, i);
             }
         }
-        // 形の変わらない輪郭（触っていない穴など）は、元の図形の輪郭をそのまま使い回す（`rewrite_shapes` と同じ：輪郭の
+        // 形の変わらない輪郭（触っていない穴など）は、元の図形の輪郭をそのまま使い回す（輪郭の
         // 点の並びを共有する）。元の図形ごとに、輪郭の区間の形（ビット）から（輪郭, 区間の位置）を引く表を1回だけ作る
         // 表の鍵は区間の点のビット（-0.0 は 0.0 にそろえる：区間は `==` で比べるので）。輪郭は、外周なら `None`、穴なら
         // その番号
@@ -1605,57 +1450,4 @@ fn hs_key(hs: &[(usize, bool)], m: &LocalMap<'_>) -> ([u64; 6], bool) {
         .map(|&h| m.half_key(h))
         .min()
         .expect("面の輪郭には辺がある")
-}
-
-/// 面の、番号によらない形（色と、輪郭の形の並び。並べたもの）。お手本と比べるため
-#[cfg(test)]
-pub(crate) type FaceShape = ([u8; 4], Vec<Vec<([u64; 6], bool)>>);
-
-#[cfg(test)]
-impl LocalMap<'_> {
-    /// 触った面の、番号によらない形
-    pub(crate) fn face_shape_key(&self, f: &LocalFace, memo: &CycleMemo) -> FaceShape {
-        let mut cycles: Vec<_> = f
-            .cycles
-            .iter()
-            .map(|&ci| cycle_shape(memo.cycles[ci].cycle.iter().map(|&h| self.half_key(h))))
-            .collect();
-        cycles.sort();
-        (f.color.to_array(), cycles)
-    }
-}
-
-/// 地図 `m` の全部の面の、番号によらない形（`faces` の面。並べたもの）
-#[cfg(test)]
-pub(crate) fn faces_shape_keys(m: &PlanarMap) -> Vec<FaceShape> {
-    let (faces, _) = m.faces();
-    let mut out: Vec<FaceShape> = faces
-        .iter()
-        .map(|f| {
-            let mut cycles: Vec<_> = f
-                .cycles
-                .iter()
-                .map(|c| {
-                    cycle_shape(c.iter().map(|&(e, forward)| {
-                        let q = m.quad(e);
-                        (quad_key(&q), forward == point_order(q.p0, q.p2).is_le())
-                    }))
-                })
-                .collect();
-            cycles.sort();
-            (f.color.to_array(), cycles)
-        })
-        .collect();
-    out.sort();
-    out
-}
-
-/// 輪郭を、番号によらない形にしたもの（向きのある辺の鍵の並び。いちばん小さい鍵から始める）。お手本と比べるため
-#[cfg(test)]
-pub(crate) fn cycle_shape(keys: impl Iterator<Item = ([u64; 6], bool)>) -> Vec<([u64; 6], bool)> {
-    let mut c: Vec<([u64; 6], bool)> = keys.collect();
-    if let Some(k) = (0..c.len()).min_by_key(|&k| c[k]) {
-        c.rotate_left(k);
-    }
-    c
 }

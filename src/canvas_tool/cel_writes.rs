@@ -270,45 +270,6 @@ pub(crate) fn draw_registration_cross(
     );
 }
 
-/// テスト用：片 `pieces`（座標の変換 `xform` で置いた図形）を、図形の並び `base_shapes`（文書の無い、ただの並び）の
-/// レイヤー・階層ごとに、地図にして上に重ねる（浮いている片を置くのと同じ重ね方）
-#[cfg(test)]
-pub(crate) fn merge_pieces_layer_by_layer(
-    base_shapes: &mut Vec<FillShape>,
-    pieces: Vec<FillShape>,
-    xform: Affine,
-) {
-    use crate::planar_map::{apply_map_change, layer_own, LayerBase, MapInput, MapRule};
-    let mut scopes: Vec<(LayerId, Vec<u64>)> = Vec::new();
-    for p in &pieces {
-        if !scopes
-            .iter()
-            .any(|x| x.0 == p.layer_id && x.1 == p.group_path)
-        {
-            scopes.push((p.layer_id, p.group_path.clone()));
-        }
-    }
-    for (layer_id, scope) in scopes {
-        let mine: Vec<&FillShape> = pieces
-            .iter()
-            .filter(|p| p.layer_id == layer_id && p.group_path == scope)
-            .collect();
-        let own = layer_own(base_shapes, layer_id, &scope);
-        let (Some(base), Some(piece)) = (LayerBase::of(&own, xform), LayerBase::of(&mine, xform))
-        else {
-            continue;
-        };
-        let change = base
-            .map()
-            .overlay(MapInput::Map(piece.map()), MapRule::Overlay)
-            .and_then(|m| m.written())
-            .and_then(|next| base.diff_placed(next, &own, layer_id, &scope, xform));
-        if let Some(change) = change {
-            apply_map_change(base_shapes, change, layer_id, &scope);
-        }
-    }
-}
-
 /// 浮いた片の確定で書くもの（`plan_commit`）：レイヤーごとの、1本の道の書くもの（`LocalWrite`）と、それを作った前の
 /// 地図の写し（升目の索引を、変わった所だけ作り直すため：`Cel::put_local`）。変わるレイヤーだけ
 pub(crate) type CommitPlan = Vec<(
@@ -318,7 +279,7 @@ pub(crate) type CommitPlan = Vec<(
 )>;
 
 /// 浮いた片 `fl` を確定するときに書くもの（文書を変えない）：レイヤーごとに、残りの地図（無ければセル画の地図）に片の組
-/// を下から順に重ねた地図（`FloatLayer::committed`）を、今の階層の地図にするとき何を書くか（1本の道の答え：`LayerBase::replace_local`）。重ねる
+/// を下から順に重ねた地図（`FloatLayer::committed_local`）を、今の階層の地図にするとき何を書くか（1本の道の答え：`LayerBase::replace_local`）。重ねる
 /// 計算から何を書くかまでをレイヤーごとに同時に作る（レイヤーをまたがないので、待ち時間はいちばん重いレイヤー1つ分）。
 /// 全部か無しか：1つでも書けない（編集できないレイヤーを含む）なら `None` を返して知らせる（浮いた片を残すのは呼ぶ側。
 /// 片はいつも文書か浮いた片のどちらかにあり、黙って消えない）。片の組の変換はかける前に確定と同じ式で確かめてある（変形

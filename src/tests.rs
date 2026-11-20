@@ -81,31 +81,156 @@ fn positive_contour(segs: Vec<QuadBez>) -> vector_engine::Contour {
     c
 }
 
-/// 図形を、レイヤー・階層ごとに地図で上に重ねて足す（浮いている片を置くのと同じ）
-fn merge_shapes_into_canvas(canvas: &mut Vec<FillShape>, incoming: Vec<FillShape>) {
-    canvas_tool::merge_pieces_layer_by_layer(canvas, incoming, Affine::IDENTITY);
+/// 図形の並び `canvas`（文書の無い、ただの並び）のレイヤー `layer_id`・階層 `scope` の生の図形を地図にし（図形がそのまま
+/// 正しい地図にならなければ、並びの順に塗り重ねて作る）、1本の道の編集 `edit`（`edit_local` など）の答えを並びに書き戻す。
+/// 塗り重ねて作った地図なら、地図の面と図形は1対1でないので、その階層の生の図形を全部書き換える
+fn edit_canvas(
+    canvas: &mut Vec<FillShape>,
+    layer_id: u64,
+    scope: &[u64],
+    edit: impl FnOnce(&crate::planar_map::LayerBase) -> crate::planar_map::LocalEdit,
+) {
+    use crate::planar_map::{is_map_shape, painted_map_pub, LayerBase, LocalEdit, PlanarMap};
+    let own: Vec<FillShape> = canvas
+        .iter()
+        .filter(|s| s.layer_id == layer_id && is_map_shape(s, scope))
+        .cloned()
+        .collect();
+    let map = PlanarMap::from_faces(own.iter());
+    let one_to_one = map.is_valid();
+    let Some(map) = (if one_to_one {
+        Some(map)
+    } else {
+        painted_map_pub(&own)
+    }) else {
+        return;
+    };
+    let Some(map) = map.checked() else {
+        return;
+    };
+    let base = LayerBase::new(&map.uniquely_labeled().into_map());
+    let LocalEdit::Changed(w) = edit(&base) else {
+        return;
+    };
+    let (removed, added) = if one_to_one {
+        (w.removed, w.added)
+    } else {
+        let all = w.faces.iter().map(|s| s.shape_id).collect();
+        (own.iter().map(|s| s.shape_id).collect(), all)
+    };
+    let added: Vec<FillShape> = added
+        .iter()
+        .filter_map(|id| w.faces.by_id(*id))
+        .map(|s| {
+            let mut s = (**s).clone();
+            s.layer_id = layer_id;
+            s
+        })
+        .collect();
+    apply_shape_diff(canvas, &removed, added, layer_id, scope);
 }
 
-/// レイヤー `layer_id`・階層 `scope` の生の図形から、`erasers` の形を消す（消しゴムと同じく地図で）
+/// 差分を図形の並びに入れる。新しい形は、消した図形のうち最初のものの位置に入れる。
+/// 何も消さないとき（何も無い所へのブラシなど）は、レイヤー `layer_id`・階層 `group_path` の生の図形の置き場
+/// （グループ・シンボルより下）に入れる
+fn apply_shape_diff(
+    shapes: &mut Vec<FillShape>,
+    removed: &[crate::vector_engine::ShapeId],
+    added: Vec<FillShape>,
+    layer_id: u64,
+    group_path: &[u64],
+) {
+    let at = shapes.iter().position(|s| removed.contains(&s.shape_id));
+    shapes.retain(|s| !removed.contains(&s.shape_id));
+    let at = at
+        .unwrap_or_else(|| raw_scope_insert_index(shapes, layer_id, group_path))
+        .min(shapes.len());
+    shapes.splice(at..at, added);
+}
+
+/// レイヤー `target_layer_id`・階層 `target_group_path` の生の図形の置き場（その階層の生の図形の後ろ。グループ・シンボルより下）
+fn raw_scope_insert_index(
+    canvas: &[FillShape],
+    target_layer_id: u64,
+    target_group_path: &[u64],
+) -> usize {
+    let at = |i: usize| &canvas[i];
+    let n = canvas.len();
+    (0..n)
+        .rev()
+        .find(|&i| {
+            let s = at(i);
+            s.layer_id == target_layer_id
+                && s.group_path == target_group_path
+                && s.symbol_instance.is_none()
+        })
+        .map(|pos| pos + 1)
+        .or_else(|| {
+            (0..n).find(|&i| {
+                let s = at(i);
+                s.layer_id == target_layer_id
+                    && s.is_in_editing_scope(target_group_path)
+                    && !s.is_raw_at_scope(target_group_path)
+            })
+        })
+        .or_else(|| {
+            (0..n)
+                .rev()
+                .find(|&i| {
+                    let s = at(i);
+                    s.layer_id == target_layer_id && s.is_in_editing_scope(target_group_path)
+                })
+                .map(|pos| pos + 1)
+        })
+        .or_else(|| {
+            (0..n)
+                .rev()
+                .find(|&i| at(i).layer_id == target_layer_id)
+                .map(|pos| pos + 1)
+        })
+        .unwrap_or(n)
+}
+
+/// 図形を、レイヤー・階層ごとに地図で上に重ねて足す（浮いている片を置くのと同じ：1本の道 `edit_local`）
+fn merge_shapes_into_canvas(canvas: &mut Vec<FillShape>, incoming: Vec<FillShape>) {
+    let mut scopes: Vec<(u64, Vec<u64>)> = Vec::new();
+    for p in &incoming {
+        if !scopes
+            .iter()
+            .any(|x| x.0 == p.layer_id && x.1 == p.group_path)
+        {
+            scopes.push((p.layer_id, p.group_path.clone()));
+        }
+    }
+    for (layer_id, scope) in scopes {
+        let mine: Vec<&FillShape> = incoming
+            .iter()
+            .filter(|p| p.layer_id == layer_id && p.group_path == scope)
+            .collect();
+        let Some(piece) = crate::planar_map::LayerBase::of(&mine) else {
+            continue;
+        };
+        edit_canvas(canvas, layer_id, &scope, |b| {
+            b.edit_local(&b.map_change(piece.map()), &scope)
+        });
+    }
+}
+
+/// レイヤー `layer_id`・階層 `scope` の生の図形から、`erasers` の形を消す（消しゴムと同じく地図で：1本の道 `edit_local`）
 fn erase_from_canvas(
     canvas: &mut Vec<FillShape>,
     erasers: &[FillShape],
     layer_id: u64,
     scope: &[u64],
 ) {
-    use crate::planar_map::{apply_shape_diff, map_edit_diff, MapEditOutcome, MapInput, MapRule};
+    use crate::planar_map::MapRule;
     for e in erasers {
-        if let MapEditOutcome::Changed(change) =
-            map_edit_diff(canvas, layer_id, scope, Affine::IDENTITY, |m| {
-                m.overlay(
-                    MapInput::Shapes(std::slice::from_ref(e)),
-                    MapRule::Paint(None),
-                )
-            })
-        {
-            let crate::planar_map::MapChange { removed, added, .. } = *change;
-            apply_shape_diff(canvas, &removed, added, layer_id, scope);
-        }
+        edit_canvas(canvas, layer_id, scope, |b| {
+            b.edit_local(
+                &b.paint_change(std::slice::from_ref(e), MapRule::Paint(None)),
+                scope,
+            )
+        });
     }
 }
 
@@ -113,7 +238,7 @@ fn erase_from_canvas(
 /// 囲まれていない所なら `None`
 fn find_enclosed_region_at(shapes: &[FillShape], pt: Point, color: Color32) -> Option<FillShape> {
     let map = crate::planar_map::painted_map_pub(shapes)?;
-    let filled = map.with_face_filled(pt, color)?;
+    let filled = map_overlay::bucket(&map, pt, color)?;
     let (faces, _) = filled.faces();
     faces
         .iter()
@@ -14275,7 +14400,7 @@ fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
     assert_eq!(app.scene().len(), 0);
 
     let lid = shape.layer_id;
-    let map = crate::planar_map::LayerBase::of(&[&shape], kurbo::Affine::IDENTITY)
+    let map = crate::planar_map::LayerBase::of(&[&shape])
         .unwrap()
         .map()
         .clone();
@@ -23050,7 +23175,7 @@ fn test_anchor_delete_on_unmoved_selection_keeps_shared_border() {
 /// レビュー 4a9ea60 の N-1003）
 #[test]
 fn test_bucket_recolor_keeps_neighbor_shapes() {
-    use crate::planar_map::{map_edit_diff, MapEditOutcome};
+    use crate::planar_map::LocalEdit;
     let mut app = Is2dApp::default();
     let lid = app.doc.root.layers[0].id;
     // 横に並べた3本の帯（となりどうしが触れる）
@@ -23072,15 +23197,13 @@ fn test_bucket_recolor_keeps_neighbor_shapes() {
         .find(|s| s.color == Color32::BLUE)
         .expect("青の帯")
         .shape_id;
-    let MapEditOutcome::Changed(change) = map_edit_diff(&shapes, lid, &[], Affine::IDENTITY, |m| {
-        m.with_face_filled(Point::new(0.0, 40.0), Color32::BLACK)
-    }) else {
+    let base = app.session.base_cache.cel(lid).unwrap().scope_base(&[]);
+    let LocalEdit::Changed(w) = base.fill_local(Point::new(0.0, 40.0), Color32::BLACK, &[]) else {
         panic!("塗り替えられない");
     };
-    let crate::planar_map::MapChange { removed, added, .. } = *change;
-    assert_eq!(removed, vec![blue], "となりの図形まで書き換えた");
-    assert_eq!(added.len(), 1);
-    assert_eq!(added[0].color, Color32::BLACK);
+    assert_eq!(w.removed, vec![blue], "となりの図形まで書き換えた");
+    assert_eq!(w.added.len(), 1);
+    assert_eq!(w.faces.by_id(w.added[0]).unwrap().color, Color32::BLACK);
 }
 
 /// 動かして浮いている片の、色の違う片どうしの境目の角を消すと、両側の片が一緒に変わる（片側だけ変えて、隙間や重なりを
@@ -23199,7 +23322,7 @@ fn test_merge_degree2_does_not_fold_nearly_straight_pair() {
         ],
     };
     let n = map.nodes.len();
-    map.merge_degree2(0..n);
+    map.merge_degree2(0..n, None);
     let hull = kurbo::Rect::from_points(a, b)
         .union_pt(v)
         .inflate(0.05, 0.05);
@@ -23553,8 +23676,18 @@ fn test_anchor_delete_refuses_junction_vertex() {
 
 mod map_overlay {
     use super::*;
-    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{LayerBase, LocalEdit, MapInput, MapRule, PlanarMap};
     use crate::vector_engine::nearest_on_quad;
+
+    /// バケツ（1本の道 `fill_local`）：地図 `m`（正しい地図）の、点 `p` を含む面を `color` にした地図（面に1つずつ別の番号を
+    /// 記した、書き戻した地図）。変わらない・書けないときは `None`
+    pub(super) fn bucket(m: &PlanarMap, p: Point, color: Color32) -> Option<PlanarMap> {
+        let base = LayerBase::new(&m.clone().checked()?.uniquely_labeled().into_map());
+        match base.fill_local(p, color, &[]) {
+            LocalEdit::Changed(w) => Some(w.stored.to_dense()),
+            _ => None,
+        }
+    }
 
     /// 小さな乱数（同じ種なら同じ並び）
     pub(super) struct Rng(pub(super) u64);
@@ -23628,7 +23761,7 @@ mod map_overlay {
         for k in 0..n {
             let next = if k % 4 == 3 {
                 let p = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
-                m.with_face_filled(p, colors[(r.f() * 4.0) as usize % 4])
+                bucket(&m, p, colors[(r.f() * 4.0) as usize % 4])
             } else {
                 let cnt = 2 + (r.f() * 4.0) as usize;
                 let mut pts = Vec::new();
@@ -23710,11 +23843,11 @@ mod map_overlay {
             }
             let (next, what) = if k % 2 == 0 {
                 let v = (pick * m.nodes.len() as f64) as usize % m.nodes.len();
-                (m.commit_move_vertex(v, m.nodes[v] + d), format!("頂点 {v}"))
+                (m.moved_vertex(v, m.nodes[v] + d), format!("頂点 {v}"))
             } else {
                 let e = (pick * m.edges.len() as f64) as usize % m.edges.len();
                 let target = m.quad(e).eval(0.5) + d;
-                (m.commit_pull_edge(e, 0.5, target), format!("辺 {e}"))
+                (m.pulled_edge(e, 0.5, target), format!("辺 {e}"))
             };
             if let Some(next) = next {
                 done += 1;
@@ -23802,7 +23935,7 @@ mod map_overlay {
         for k in 0..steps {
             let next = if k % 4 == 3 {
                 let p = Point::new(100.0 + r.f() * 400.0, 100.0 + r.f() * 400.0);
-                m.with_face_filled(p, colors[(r.f() * 4.0) as usize % 4])
+                bucket(&m, p, colors[(r.f() * 4.0) as usize % 4])
             } else {
                 let cnt = 2 + (r.f() * 4.0) as usize;
                 let mut pts = Vec::new();
@@ -24009,7 +24142,7 @@ mod map_overlay {
                 let (next, moved): (Option<PlanarMap>, Vec<usize>) = if i % 2 == 0 {
                     let v = (r.f() * m.nodes.len() as f64) as usize % m.nodes.len();
                     let target = m.nodes[v] + d;
-                    (m.commit_move_vertex(v, target), m.edges_at(v))
+                    (m.moved_vertex(v, target), m.edges_at(v))
                 } else {
                     let e = (r.f() * m.edges.len() as f64) as usize % m.edges.len();
                     let t = 0.18 + r.f() * 0.64;
@@ -24018,7 +24151,7 @@ mod map_overlay {
                     if (p - q.p0).hypot() <= 9.0 || (p - q.p2).hypot() <= 9.0 {
                         continue;
                     }
-                    (m.commit_pull_edge(e, t, p + d), vec![e])
+                    (m.pulled_edge(e, t, p + d), vec![e])
                 };
                 n += 1;
                 let Some(next) = next else {
@@ -24495,7 +24628,7 @@ mod map_overlay {
         assert!(valid(&m));
         let before = m.clone();
         let n = m.nodes.len();
-        m.merge_degree2(0..n);
+        m.merge_degree2(0..n, None);
         assert_eq!(
             m.edges.len(),
             3,
@@ -24548,7 +24681,7 @@ mod map_overlay {
         let merged = |m: &PlanarMap| {
             let mut m = m.clone();
             let n = m.nodes.len();
-            m.merge_degree2(0..n);
+            m.merge_degree2(0..n, None);
             assert!(valid(&m), "{}", m.validity_report());
             m
         };
@@ -24614,7 +24747,7 @@ mod map_overlay {
             .find(|&v| m.nodes[v] == Point::new(200.0, 100.0))
             .expect("赤の右上の頂点");
         let w = Point::new(250.0, 100.0);
-        let next = m.commit_move_vertex(v, w).expect("確定できる");
+        let next = m.moved_vertex(v, w).expect("確定できる");
         assert!(valid(&next));
         assert_eq!(
             next.nodes.iter().filter(|&&p| p == w).count(),
@@ -24636,9 +24769,8 @@ mod map_overlay {
     #[test]
     fn snap_target_finds_the_nearest_other_vertex() {
         let red = rect_shape(100.0, 100.0, 200.0, 200.0, Color32::RED);
-        let m = PlanarMap::from_faces([&red]);
-        let at = |p: Point| (0..m.nodes.len()).find(|&v| m.nodes[v] == p).unwrap();
-        let (tl, tr) = (at(Point::new(100.0, 100.0)), at(Point::new(200.0, 100.0)));
+        let m = crate::planar_map::LayerBase::new(&PlanarMap::from_faces([&red]));
+        let (tl, tr) = (Point::new(100.0, 100.0), Point::new(200.0, 100.0));
         let id = Affine::IDENTITY;
         assert_eq!(
             m.snap_target(tl, Point::new(201.0, 101.0), 3.0, id),
@@ -28702,15 +28834,12 @@ mod map_overlay {
                     } else {
                         moved.push(ms(t));
                     }
-                    // 離したときの確定（レイヤーの図形から差分を出す）
+                    // 離したときの確定（1本の道：`reshape_change` → `edit_local`）
                     let t = std::time::Instant::now();
-                    let out = crate::planar_map::map_edit_diff(
-                        &shapes,
-                        layer_id,
-                        &[],
-                        Affine::IDENTITY,
-                        |m| edit.apply(m),
-                    );
+                    let out = base
+                        .reshape_change(edit)
+                        .flatten()
+                        .map(|c| base.edit_local(&c, &[]));
                     std::hint::black_box(out);
                     commit.push(ms(t));
                 }
@@ -29599,7 +29728,7 @@ fn valid_maps_are_on_the_grid_with_two_colors_per_edge() {
     let target = q.eval(0.18) + kurbo::Vec2::new(300.0, 0.0);
     let ctrl = q.p1 + (target - q.eval(0.18)) / (2.0 * 0.18 * 0.82);
     assert!(ctrl.x > 65_536.0 && q.eval(0.5).x < 65_536.0);
-    assert!(near.commit_pull_edge(e, 0.18, target).is_none());
+    assert!(near.pulled_edge(e, 0.18, target).is_none());
 }
 
 /// S-1：ファイルを読み込むと、同じレイヤーの前後のキーフレームで、形と色が同じ辺は同じ番号を持ち、地図の塊を共有する
@@ -29785,9 +29914,7 @@ fn only_cuts_made_by_the_operation_are_merged() {
         .unwrap();
     let anchored = m.with_anchor_added(e, 0.5).unwrap();
     let corner = anchored.quad(e).eval(1.0);
-    let filled = anchored
-        .with_face_filled(Point::new(200.0, 200.0), green)
-        .unwrap();
+    let filled = map_overlay::bucket(&anchored, Point::new(200.0, 200.0), green).unwrap();
     assert_eq!(filled.nodes.len(), anchored.nodes.len());
     assert!(filled.nodes.iter().any(|p| (*p - corner).hypot() < 1e-9));
 
@@ -30479,7 +30606,7 @@ fn measure_commit_on_dense_cels() {
 /// バケツでも同じくまとまる（面の色を変えるのは1つの関数）
 #[test]
 fn recoloring_faces_merges_the_ends_of_vanished_borders() {
-    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{LayerBase, LocalEdit, MapInput, MapRule, PlanarMap};
     use crate::vector_engine::ShapeId;
     let red = Color32::from_rgb(235, 75, 75);
     let blue = Color32::from_rgb(55, 135, 245);
@@ -30507,7 +30634,11 @@ fn recoloring_faces_merges_the_ends_of_vanished_borders() {
     assert!(recolored.is_valid());
     // 境目が消え、その両端（上の辺・下の辺の途中）もまとまって、1つの四角になる
     assert_eq!((recolored.nodes.len(), recolored.edges.len()), (4, 4));
-    let filled = m.with_face_filled(Point::new(150.0, 50.0), red).unwrap();
+    let LocalEdit::Changed(w) = LayerBase::new(&m).fill_local(Point::new(150.0, 50.0), red, &[])
+    else {
+        panic!("塗れない");
+    };
+    let filled = w.stored.to_dense();
     assert_eq!(
         (filled.nodes.len(), filled.edges.len()),
         (recolored.nodes.len(), recolored.edges.len())
@@ -30804,7 +30935,7 @@ fn restoring_unchanged_chains_builds_no_index() {
 /// 戻すとき）。同じ地図を同じ位置に重ねると、作るのはほとんど無い（前は、丸ごと残った辺ごとに作り直していた）
 #[test]
 fn pasting_reuses_the_polylines_of_unmoved_edges() {
-    use crate::planar_map::{LayerBase, MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{LayerBase, LocalEdit, MapInput, MapRule, PlanarMap};
     let colors = [
         Color32::from_rgb(235, 75, 75),
         Color32::from_rgb(55, 135, 245),
@@ -30820,13 +30951,16 @@ fn pasting_reuses_the_polylines_of_unmoved_edges() {
             .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
             .unwrap();
     }
-    let base = LayerBase::new(&m);
+    let base = LayerBase::new(&m.checked().unwrap().uniquely_labeled().into_map());
     let piece = base.map().clone();
     let edges = piece.edges.len();
     let before = crate::planar_map::polys_built();
-    let pasted = base
-        .overlay(MapInput::Map(&piece), MapRule::Overlay)
-        .unwrap();
+    // 片を置く（1本の道：`edit_local`）
+    let pasted = match base.edit_local(&base.map_change(&piece), &[]) {
+        LocalEdit::Changed(w) => w.stored.to_dense(),
+        LocalEdit::Same => base.map().clone(),
+        LocalEdit::Refused(r) => panic!("重ねられない {r:?}"),
+    };
     assert!(pasted.is_valid());
     // 前は辺の数の3倍（辺 557 本で 1,671）作っていた。今は約2倍（1,126。重ねる地図から来た鎖を曲線に戻すときと、2本の
     // まとめの索引の分）
@@ -30840,7 +30974,7 @@ fn pasting_reuses_the_polylines_of_unmoved_edges() {
 /// 辺をみな折れ線にして切っていた）。違う色の同じ形を重ねると、色は重ねる地図の色になり、両側が同じ色になった辺は消える
 #[test]
 fn pasting_onto_the_same_lines_cuts_nothing() {
-    use crate::planar_map::{LayerBase, MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{LayerBase, LocalEdit, MapInput, MapRule, PlanarMap};
     let colors = [
         Color32::from_rgb(235, 75, 75),
         Color32::from_rgb(55, 135, 245),
@@ -30856,13 +30990,18 @@ fn pasting_onto_the_same_lines_cuts_nothing() {
             .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
             .unwrap();
     }
+    let m = m.checked().unwrap().uniquely_labeled().into_map();
     let base = LayerBase::new(&m);
-    // 計算に使う写しの判定の形を先に作っておく（何も重ねない重ね合わせ）
-    let _ = base.overlay(MapInput::Shapes(&[]), MapRule::Overlay);
+    // 片を置く（1本の道：`edit_local`）
+    let paste = |p: &PlanarMap| match base.edit_local(&base.map_change(p), &[]) {
+        LocalEdit::Changed(w) => w.stored.to_dense(),
+        LocalEdit::Same => base.map().clone(),
+        LocalEdit::Refused(r) => panic!("重ねられない {r:?}"),
+    };
+    // 計算に使う写しの判定の形を先に作っておく（升目の索引を作ると、どの辺の判定の形もできる）
+    let _ = base.index();
     let before = crate::planar_map::polys_built();
-    let pasted = base
-        .overlay(MapInput::Map(base.map()), MapRule::Overlay)
-        .unwrap();
+    let pasted = paste(base.map());
     assert_eq!(
         crate::planar_map::polys_built() - before,
         0,
@@ -30877,9 +31016,7 @@ fn pasting_onto_the_same_lines_cuts_nothing() {
         e.left = e.left.map(|_| blue);
         e.right = e.right.map(|_| blue);
     }
-    let painted = base
-        .overlay(MapInput::Map(&recolored), MapRule::Overlay)
-        .unwrap();
+    let painted = paste(&recolored);
     assert!(painted.is_valid());
     assert!(painted.edges.iter().all(|e| e.left != e.right
         && [e.left, e.right]
@@ -31089,8 +31226,8 @@ fn nearly_coincident_lines_leave_no_slivers() {
     }
 }
 
-/// 計測（N-2001）：地図の辺の数を増やしたときの、ブラシ1本の重ね合わせ・地図の確かめ（valid_faces）・しまう形にする
-/// （StoredMap::from_dense）の時間
+/// 計測（N-2001）：地図の辺の数を増やしたときの、ブラシ1本の重ね合わせ・地図の確かめ（valid_faces・checked）・しまう形に
+/// する（StoredMap::from_dense）の時間
 #[test]
 #[ignore]
 fn measure_write_back_scaling() {
@@ -31136,7 +31273,7 @@ fn measure_write_back_scaling() {
             vf.push(t.elapsed().as_secs_f64() * 1e3);
             assert!(faces.is_some());
             let t = Instant::now();
-            let checked = next.clone().written();
+            let checked = next.clone().checked();
             wr.push(t.elapsed().as_secs_f64() * 1e3);
             assert!(checked.is_some());
             let t = Instant::now();
@@ -31149,7 +31286,7 @@ fn measure_write_back_scaling() {
             v[v.len() / 2]
         };
         eprintln!(
-            "edges {:6}: overlay {:.2}ms, valid_faces {:.2}ms, written {:.2}ms, from_dense {:.2}ms",
+            "edges {:6}: overlay {:.2}ms, valid_faces {:.2}ms, checked {:.2}ms, from_dense {:.2}ms",
             m.edges.len(),
             med(&mut ov),
             med(&mut vf),
@@ -31326,8 +31463,8 @@ fn derived_geometry_carried_across_edits_matches_a_fresh_build() {
 
 /// 穴の入れ先を引き継ぐ決まり（`LocalMap::hole_owner`）：赤の面の中の青い島（赤の面の穴）のまわりに、島に触れない緑の輪を
 /// 描くと、穴の入れ先が、変わらない赤の外周から新しい輪の内側に替わる。輪をそれより大きい赤の輪で塗りつぶすと、また赤の
-/// 外周に戻る。消しゴムの穴（色の無い穴）のまわりも同じ。触った所だけの道の答えは、テストでは毎回お手本（地図全体で確かめて
-/// 書き戻す道）と比べる（レビュー 96fdc26 の N-1001）
+/// 外周に戻る。消しゴムの穴（色の無い穴）のまわりも同じ。触った所だけの道の答えは、テストでは毎回お手本（同じ道を地図全体を
+/// 触った所として行った答え：`whole_touched`）と比べる（レビュー 96fdc26 の N-1001）
 #[test]
 fn holes_follow_new_exteriors_on_the_touched_only_path() {
     use crate::planar_map::{LayerBase, LocalEdit, MapInput, MapRule, PlanarMap};
@@ -31644,7 +31781,7 @@ fn committing_an_unmoved_pasted_piece_does_not_recheck_it() {
     assert_eq!(crate::planar_map::full_checks(), before);
 }
 
-/// N-2006：バケツで、当たった面と同じ色を塗っても何も変わらない（変わるかは地図の側で決める：`with_face_filled`）。
+/// N-2006：バケツで、当たった面と同じ色を塗っても何も変わらない（変わるかは地図の側で決める：`fill_local`）。
 /// 文書も Undo の履歴も変わらない
 #[test]
 fn bucket_with_the_same_color_changes_nothing() {
@@ -31675,11 +31812,11 @@ fn bucket_with_the_same_color_changes_nothing() {
 }
 
 /// 計測（N-1001）：同じ色のドーナツ形（穴のある面）が n 個の地図で、全部の確かめ（`valid_faces`）とバケツ
-/// （`with_face_filled`）の時間。点を含む外周を探すのが面の数の2乗で増えないか
+/// （`fill_local`）の時間。点を含む外周を探すのが面の数の2乗で増えないか
 #[test]
 #[ignore]
 fn measure_many_holes() {
-    use crate::planar_map::PlanarMap;
+    use crate::planar_map::{LayerBase, LocalEdit, PlanarMap};
     use std::time::Instant;
     let red = Color32::from_rgb(235, 75, 75);
     for n in [500usize, 1000, 2000, 4000] {
@@ -31710,11 +31847,15 @@ fn measure_many_holes() {
         let faces = m.valid_faces().expect("正しい地図");
         let check = t.elapsed().as_secs_f64() * 1e3;
         assert_eq!(faces.len(), n);
+        let base = LayerBase::new(&m);
         let t = Instant::now();
         // 真ん中のドーナツの穴の中（色の無い所）を青で塗る
         let c = side / 2;
         let p = Point::new(c as f64 * 30.0 + 10.0, c as f64 * 30.0 + 10.0);
-        let filled = m.with_face_filled(p, Color32::BLUE).is_some();
+        let filled = matches!(
+            base.fill_local(p, Color32::BLUE, &[]),
+            LocalEdit::Changed(_)
+        );
         let bucket = t.elapsed().as_secs_f64() * 1e3;
         eprintln!("n {n}: valid_faces {check:.1}ms, bucket {bucket:.1}ms (filled {filled})");
     }
@@ -32725,11 +32866,8 @@ fn measure_work() {
             };
             let base = cel.scope_base(&scope);
             let t = Instant::now();
-            let next = l.committed(&base).and_then(|m| m.written());
-            if let Some(next) = next {
-                let faces = base.faces(&scope);
-                let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
-                let _ = base.diff(next, &own, 0, &scope);
+            if let Some(next) = l.committed_local(&base) {
+                let _ = base.replace_local(&next, &scope);
             }
             per_layer.push(ms(t));
         }
@@ -33880,7 +34018,7 @@ fn project_file_refuses_wrong_or_broken_files() {
 /// 窓ごとに番号の違う小さな地図で計算するので、結果が番号によらないことが前提になる
 #[test]
 fn edits_do_not_depend_on_edge_and_node_numbering() {
-    use crate::planar_map::{LayerBase, MapEdge, MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{LayerBase, LocalEdit, MapEdge, MapInput, MapRule, PlanarMap};
     use crate::stored_map::StoredMap;
     use std::collections::HashSet;
 
@@ -34007,8 +34145,14 @@ fn edits_do_not_depend_on_edge_and_node_numbering() {
                     Box::new(move |x, _| vec![x.overlay(MapInput::Shapes(&st), rule)])
                 }
                 2 => {
+                    // バケツ（1本の道 `fill_local`。地図はしまう形にしてから塗る）
                     let p = Point::new(100.0 + rng.f() * 300.0, 100.0 + rng.f() * 200.0);
-                    Box::new(move |x, _| vec![x.with_face_filled(p, c)])
+                    Box::new(move |x, _| {
+                        vec![match LayerBase::new(x).fill_local(p, c, &[]) {
+                            LocalEdit::Changed(w) => Some(w.stored.to_dense()),
+                            _ => None,
+                        }]
+                    })
                 }
                 3..=6 if !m.edges.is_empty() => {
                     let v = (rng.f() * m.nodes.len() as f64) as usize % m.nodes.len();
@@ -34022,8 +34166,8 @@ fn edits_do_not_depend_on_edge_and_node_numbering() {
                     Box::new(move |x, shuf| {
                         let (v, e) = if shuf { (vs, es) } else { (v, e) };
                         vec![match kind {
-                            3 => x.commit_move_vertex(v, mv),
-                            4 => x.commit_pull_edge(e, t, pull),
+                            3 => x.moved_vertex(v, mv),
+                            4 => x.pulled_edge(e, t, pull),
                             5 => x.with_anchor_added(e, t),
                             _ => x.with_anchor_deleted(v),
                         }]
@@ -34047,8 +34191,17 @@ fn edits_do_not_depend_on_edge_and_node_numbering() {
             // 元の地図の面の番号（編集のあとも残りうる番号）
             let keep: HashSet<u64> = m.labels().collect();
             let base = LayerBase::new(&m);
-            let own_faces = base.faces(&[]);
-            let own: Vec<&FillShape> = own_faces.iter().map(|f| &**f).collect();
+            // セル画に書き戻す差分（1本の道 `replace_local`）：（消す図形, 書き戻した地図）
+            let write = |x: &PlanarMap| match base
+                .replace_local(&StoredMap::from_dense(x, Some(&base.stored)), &[])
+            {
+                LocalEdit::Changed(w) => {
+                    let mut removed = w.removed.clone();
+                    removed.sort_unstable();
+                    Some((removed, w.stored.to_dense()))
+                }
+                _ => None,
+            };
             let mut next_m = None;
             for (i, (a, b)) in rs.into_iter().zip(rt).enumerate() {
                 let (a, b) = match (a, b) {
@@ -34084,18 +34237,14 @@ fn edits_do_not_depend_on_edge_and_node_numbering() {
                     ));
                 }
                 // 3. セル画に書き戻す差分（変わらない面・番号を引き継ぐ面の決め方）
-                let (ca, cb) = (
-                    base.diff(a.clone().written().unwrap(), &own, 0, &[]),
-                    base.diff(b.written().unwrap(), &own, 0, &[]),
-                );
-                let removed = |c: &crate::planar_map::MapChange| {
-                    let mut r = c.removed.clone();
-                    r.sort_unstable();
-                    r
+                let same_write = match (write(&a), write(&b)) {
+                    (Some((ra, ma)), Some((rb, mb))) => {
+                        ra == rb && canonical(&ma, &keep).same_content(&canonical(&mb, &keep))
+                    }
+                    (None, None) => true,
+                    _ => false,
                 };
-                if removed(&ca) != removed(&cb)
-                    || !canonical(ca.map.map(), &keep).same_content(&canonical(cb.map.map(), &keep))
-                {
+                if !same_write {
                     differed.push(format!(
                         "seed {seed} step {step} kind {kind} [{i}]: 書き戻しの差分が違う"
                     ));
@@ -34410,158 +34559,13 @@ fn measure_edit_scaling_by_cel_size() {
     }
 }
 
-/// 段1・段2（claude/触った所だけを計算する地図の設計_22fbbbe.md）：升目の索引を引く道（計算に使う写し `LayerBase` の
-/// 重ね合わせ・地図の編集・矩形で切る・カーソル合わせ・吸い付き。形・輪郭の変形の重ね合わせは窓で行う）と、全部の辺・
-/// 頂点を見る今までの道（索引の無い `PlanarMap`）で、結果がビットまで同じ（地図はしまう形で比べる）。編集のあとの写しの索引が、前の写しの索引から
-/// 作ったもので全部作ったものと同じことは、`LayerBase::inherit_index` がテストのたびに確かめる
-#[test]
-fn index_paths_match_full_scans() {
-    use crate::planar_map::{LayerBase, MapEdit, MapInput, MapRule, PlanarMap};
-    // 地図は、しまう形（頂点と辺の番号によらない形：座標・制御点・色・図形の番号がビットまで同じ）で比べる。形・輪郭の
-    // 変形の重ね合わせは窓で行うので、辺の並びは前の地図全体で行ったときと違う
-    let same = |a: &PlanarMap, b: &PlanarMap| {
-        crate::stored_map::StoredMap::from_dense(a, None)
-            .same_content(&crate::stored_map::StoredMap::from_dense(b, None))
-    };
-    let same_opt = |a: &Option<PlanarMap>, b: &Option<PlanarMap>| match (a, b) {
-        (Some(a), Some(b)) => same(a, b),
-        (None, None) => true,
-        _ => false,
-    };
-    let colors = [
-        Color32::from_rgb(235, 75, 75),
-        Color32::from_rgb(55, 135, 245),
-        Color32::from_rgb(40, 180, 90),
-        Color32::from_rgb(240, 200, 40),
-    ];
-    let area = (100.0, 100.0, 300.0, 200.0);
-    let xforms = [
-        Affine::IDENTITY,
-        Affine::scale(2.5) * Affine::translate((-40.0, 15.0)),
-        Affine::rotate(0.3) * Affine::scale_non_uniform(1.5, 0.75),
-    ];
-    let (mut compared, mut differed) = (0usize, Vec::<String>::new());
-    for seed in [31u64, 47] {
-        let mut rng = map_overlay::Rng(seed);
-        let mut m = PlanarMap::default();
-        for step in 0..160 {
-            let base = LayerBase::new(&m);
-            let full = base.map().clone();
-            let c = colors[step % 4];
-            let kind = step % 6;
-            let (a, b) = match kind {
-                0 | 1 => {
-                    let r = 2.0 + rng.f() * 9.0;
-                    let st = wiggly_stroke(&mut rng, area, r, c);
-                    let rule = if kind == 0 {
-                        MapRule::Paint(Some(c))
-                    } else {
-                        MapRule::Paint(None)
-                    };
-                    (
-                        vec![base.overlay(MapInput::Shapes(&st), rule)],
-                        vec![full.overlay(MapInput::Shapes(&st), rule)],
-                    )
-                }
-                2 | 3 if !full.edges.is_empty() => {
-                    let e = (rng.f() * full.edges.len() as f64) as usize % full.edges.len();
-                    let q = full.quad(e);
-                    let ang = rng.f() * std::f64::consts::TAU;
-                    let d = KVec2::new(ang.cos(), ang.sin()) * (0.5 + rng.f() * 8.0);
-                    let edit = if kind == 2 {
-                        MapEdit::PullEdge {
-                            orig_seg: q,
-                            grab_t: 0.5,
-                            target: q.eval(0.5) + d,
-                        }
-                    } else {
-                        MapEdit::MoveVertex {
-                            orig_vertex: q.p0,
-                            target: q.p0 + d,
-                        }
-                    };
-                    (vec![base.apply_edit(edit)], vec![edit.apply(&full)])
-                }
-                4 => {
-                    let (x0, y0) = (100.0 + rng.f() * 150.0, 100.0 + rng.f() * 100.0);
-                    let rect = vec![map_overlay::rect_shape(x0, y0, x0 + 80.0, y0 + 60.0, c)];
-                    let rules = [MapRule::KeepInside, MapRule::Paint(None)];
-                    let to_vec = |r: Option<[PlanarMap; 2]>| match r {
-                        Some([i, o]) => vec![Some(i), Some(o)],
-                        None => vec![None, None],
-                    };
-                    (
-                        to_vec(base.overlay_rules(MapInput::Shapes(&rect), rules)),
-                        to_vec(full.overlay_rules(MapInput::Shapes(&rect), rules)),
-                    )
-                }
-                _ => {
-                    // 片を置く：地図を少しずらして重ねる
-                    let piece = full.transformed(Affine::translate((3.0 + rng.f() * 6.0, 2.0)));
-                    let piece = piece.checked().map(|c| c.into_map());
-                    match piece {
-                        Some(p) if !p.edges.is_empty() => (
-                            vec![base.overlay(MapInput::Map(&p), MapRule::Overlay)],
-                            vec![full.overlay(MapInput::Map(&p), MapRule::Overlay)],
-                        ),
-                        _ => continue,
-                    }
-                }
-            };
-            for (i, (x, y)) in a.iter().zip(&b).enumerate() {
-                compared += 1;
-                if !same_opt(x, y) {
-                    differed.push(format!(
-                        "seed {seed} step {step} kind {kind} [{i}]: 地図が違う"
-                    ));
-                }
-            }
-            // カーソル合わせ・吸い付き
-            for xf in xforms {
-                for _ in 0..6 {
-                    let p = xf * Point::new(100.0 + rng.f() * 300.0, 100.0 + rng.f() * 200.0);
-                    let r = 1.0 + rng.f() * 12.0;
-                    compared += 1;
-                    // 頂点は位置で比べる（写しの道は、地図全体の頂点の番号を使わない）
-                    if base.hit_node(p, r, xf) != full.hit_node(p, r, xf).map(|v| full.nodes[v])
-                        || base.hit_edge(p, r, xf) != full.hit_edge(p, r, xf)
-                    {
-                        differed.push(format!("seed {seed} step {step}: カーソル合わせが違う"));
-                    }
-                    if !full.nodes.is_empty() {
-                        let v = (rng.f() * full.nodes.len() as f64) as usize % full.nodes.len();
-                        if base.snap_target(full.nodes[v], p, r, xf)
-                            != full.snap_target(v, p, r, xf)
-                        {
-                            differed.push(format!("seed {seed} step {step}: 吸い付きが違う"));
-                        }
-                    }
-                }
-            }
-            // 次の地図：最後の結果のうち正しいもの
-            if let Some(n) = a.into_iter().flatten().last() {
-                if let Some(c) = n.checked() {
-                    m = c.uniquely_labeled().into_map();
-                }
-            }
-        }
-    }
-    assert!(compared > 1000, "比べた数 {compared}");
-    assert!(
-        differed.is_empty(),
-        "索引を引く道と全部を見る道で結果が違う（{} / {compared} 件）:\n{}",
-        differed.len(),
-        differed.join("\n")
-    );
-}
-
-/// 段2：線の多いセル画（同じ区画を 4×4 個並べた、辺 約 2.4 万本）で、形・輪郭の変形の重ね合わせを窓で行った結果が、
-/// 前の地図全体で行った結果と、しまう形でビットまで同じ。区画の中・区画をまたぐ所・大きな矩形で、ブラシ・消しゴム・
-/// 矩形で切る中と外・辺の引っぱり・頂点の移動をする。窓の外の辺を点の色の数えに入れる道も通る
+/// 段2：線の多いセル画（同じ区画を 4×4 個並べた、辺 約 2.4 万本）で、ブラシ・消しゴム・矩形で切る中と外・片を置く・
+/// 辺の引っぱり・頂点の移動を、本番の道（窓で重ねる `edit_local`・`cut_local`）で行う。区画の中・区画をまたぐ所・大きな
+/// 矩形で行う。窓の答えが地図全体で重ねた答えと、しまう形でビットまで同じことは、道の中のお手本との比べ（`overlay_diff`・
+/// `cut_local`）が毎回確かめる。窓の外の辺を点の色の数えに入れる道も通る
 #[test]
 fn windowed_overlay_matches_full_on_large_map() {
-    use crate::planar_map::{LayerBase, MapEdit, MapInput, MapRule, PlanarMap};
-    use crate::stored_map::StoredMap;
+    use crate::planar_map::{LayerBase, LocalEdit, MapEdit, MapInput, MapRule, PlanarMap};
     let colors = [
         Color32::from_rgb(235, 75, 75),
         Color32::from_rgb(55, 135, 245),
@@ -34599,15 +34603,8 @@ fn windowed_overlay_matches_full_on_large_map() {
         }
     }
     let mut m = m.checked().unwrap().freshly_labeled().into_map();
-    let same = |a: &Option<PlanarMap>, b: &Option<PlanarMap>| match (a, b) {
-        (Some(a), Some(b)) => {
-            StoredMap::from_dense(a, None).same_content(&StoredMap::from_dense(b, None))
-        }
-        (None, None) => true,
-        _ => false,
-    };
     let winds_before = crate::planar_map::outside_winds();
-    let (mut compared, mut differed) = (0usize, Vec::<String>::new());
+    let mut done = 0usize;
     let total = (4.0 * dx, 4.0 * dy);
     for step in 0..84 {
         let base = LayerBase::new(&m);
@@ -34616,173 +34613,95 @@ fn windowed_overlay_matches_full_on_large_map() {
         // 場所：区画の中か、区画の境目のあたり
         let at = Point::new(bb.x0 + rng.f() * total.0, bb.y0 + rng.f() * total.1);
         let kind = step % 7;
-        let (a, b): (Vec<Option<PlanarMap>>, Vec<Option<PlanarMap>>) = match kind {
-            0 | 1 => {
-                let r = 2.0 + rng.f() * 9.0;
-                let st = wiggly_stroke(&mut rng, (at.x, at.y, 60.0, 40.0), r, c);
-                let rule = if kind == 0 {
-                    MapRule::Paint(Some(c))
-                } else {
-                    MapRule::Paint(None)
-                };
-                (
-                    vec![base.overlay(MapInput::Shapes(&st), rule)],
-                    vec![full.overlay(MapInput::Shapes(&st), rule)],
-                )
-            }
+        // 次の地図（書き戻した地図。面に1つずつ別の番号）
+        let next: Option<PlanarMap> = match kind {
             2 => {
                 let (w, h) = (20.0 + rng.f() * 200.0, 20.0 + rng.f() * 120.0);
                 let rect = vec![map_overlay::rect_shape(at.x, at.y, at.x + w, at.y + h, c)];
-                let rules = [MapRule::KeepInside, MapRule::Paint(None)];
-                let to_vec = |r: Option<[PlanarMap; 2]>| match r {
-                    Some([i, o]) => vec![Some(i), Some(o)],
-                    None => vec![None, None],
-                };
-                (
-                    to_vec(base.overlay_rules(MapInput::Shapes(&rect), rules)),
-                    to_vec(full.overlay_rules(MapInput::Shapes(&rect), rules)),
-                )
-            }
-            // 地図に地図を重ねる（片を置く・貼り付け）：矩形で切った片を、そのままの位置（同じ線の組ができる）か、少し
-            // ずらして、または遠くへ動かして重ねる
-            5 | 6 => {
-                let (w, h) = (20.0 + rng.f() * 150.0, 20.0 + rng.f() * 100.0);
-                let rect = vec![map_overlay::rect_shape(at.x, at.y, at.x + w, at.y + h, c)];
-                let Some(piece) = full.overlay(MapInput::Shapes(&rect), MapRule::KeepInside) else {
-                    continue;
-                };
-                let off = match (kind, step % 3) {
-                    (5, _) => KVec2::ZERO,
-                    (_, 0) => KVec2::new(rng.f() * 2.0, rng.f() * 2.0),
-                    _ => KVec2::new(
-                        (rng.f() - 0.5) * total.0 * 0.5,
-                        (rng.f() - 0.5) * total.1 * 0.5,
-                    ),
-                };
-                let moved = piece.transformed(kurbo::Affine::translate(off));
-                (
-                    vec![base.overlay(MapInput::Map(&moved), MapRule::Overlay)],
-                    vec![full.overlay(MapInput::Map(&moved), MapRule::Overlay)],
-                )
+                base.cut_local(MapInput::Shapes(&rect))
+                    .and_then(|(_, rest)| {
+                        Some(rest.to_dense().checked()?.uniquely_labeled().into_map())
+                    })
             }
             _ => {
-                let e = (rng.f() * full.edges.len() as f64) as usize % full.edges.len();
-                let q = full.quad(e);
-                let ang = rng.f() * std::f64::consts::TAU;
-                let d = KVec2::new(ang.cos(), ang.sin()) * (0.5 + rng.f() * 10.0);
-                let edit = if kind == 3 {
-                    MapEdit::PullEdge {
-                        orig_seg: q,
-                        grab_t: 0.5,
-                        target: q.eval(0.5) + d,
+                let change = match kind {
+                    0 | 1 => {
+                        let r = 2.0 + rng.f() * 9.0;
+                        let st = wiggly_stroke(&mut rng, (at.x, at.y, 60.0, 40.0), r, c);
+                        let rule = if kind == 0 {
+                            MapRule::Paint(Some(c))
+                        } else {
+                            MapRule::Paint(None)
+                        };
+                        base.edit_local(&base.paint_change(&st, rule), &[])
                     }
-                } else {
-                    MapEdit::MoveVertex {
-                        orig_vertex: q.p0,
-                        target: q.p0 + d,
+                    // 地図に地図を重ねる（片を置く・貼り付け）：矩形で切った片を、そのままの位置（同じ線の組ができる）か、少し
+                    // ずらして、または遠くへ動かして重ねる
+                    5 | 6 => {
+                        let (w, h) = (20.0 + rng.f() * 150.0, 20.0 + rng.f() * 100.0);
+                        let rect = vec![map_overlay::rect_shape(at.x, at.y, at.x + w, at.y + h, c)];
+                        let Some(piece) =
+                            full.overlay(MapInput::Shapes(&rect), MapRule::KeepInside)
+                        else {
+                            continue;
+                        };
+                        let off = match (kind, step % 3) {
+                            (5, _) => KVec2::ZERO,
+                            (_, 0) => KVec2::new(rng.f() * 2.0, rng.f() * 2.0),
+                            _ => KVec2::new(
+                                (rng.f() - 0.5) * total.0 * 0.5,
+                                (rng.f() - 0.5) * total.1 * 0.5,
+                            ),
+                        };
+                        let moved = piece.transformed(kurbo::Affine::translate(off));
+                        base.edit_local(&base.map_change(&moved), &[])
+                    }
+                    _ => {
+                        let e = (rng.f() * full.edges.len() as f64) as usize % full.edges.len();
+                        let q = full.quad(e);
+                        let ang = rng.f() * std::f64::consts::TAU;
+                        let d = KVec2::new(ang.cos(), ang.sin()) * (0.5 + rng.f() * 10.0);
+                        let edit = if kind == 3 {
+                            MapEdit::PullEdge {
+                                orig_seg: q,
+                                grab_t: 0.5,
+                                target: q.eval(0.5) + d,
+                            }
+                        } else {
+                            MapEdit::MoveVertex {
+                                orig_vertex: q.p0,
+                                target: q.p0 + d,
+                            }
+                        };
+                        let change = base.reshape_change(edit).flatten().expect("辺と頂点がある");
+                        base.edit_local(&change, &[])
                     }
                 };
-                (vec![base.apply_edit(edit)], vec![edit.apply(&full)])
+                match change {
+                    LocalEdit::Changed(w) => Some(w.stored.to_dense()),
+                    _ => None,
+                }
             }
         };
-        for (i, (x, y)) in a.iter().zip(&b).enumerate() {
-            compared += 1;
-            if !same(x, y) {
-                differed.push(format!("step {step} kind {kind} [{i}]: 地図が違う"));
-            }
-        }
-        // 次の地図：外の結果（矩形なら外）のうち正しいもの
-        if let Some(n) = a.into_iter().flatten().last() {
-            if let Some(c) = n.checked() {
-                m = c.uniquely_labeled().into_map();
-            }
+        done += 1;
+        if let Some(n) = next {
+            m = n;
         }
     }
-    assert!(compared >= 70, "比べた数 {compared}");
+    assert!(done >= 70, "行った数 {done}");
     assert!(
         crate::planar_map::outside_winds() > winds_before,
         "点の色の数えに窓の外の辺の分を入れる道を通っていない"
     );
-    assert!(
-        differed.is_empty(),
-        "窓で行った結果と前の地図全体で行った結果が違う（{} / {compared} 件）:\n{}",
-        differed.len(),
-        differed.join("\n")
-    );
 }
 
-/// 段2b-3：前の地図の輪郭を、写しの輪郭の一覧を使わずにその場でたどった輪郭（`LayerBase::trace_cycle`）が、一覧の中の
-/// 同じ向きのある辺を含む輪郭と同じ（同じ回し方）。ランダムな編集を重ねた地図と、線の多いセル画で、ランダムな向きのある
-/// 辺から確かめる
-#[test]
-fn traced_cycles_match_the_cycle_list() {
-    use crate::planar_map::{LayerBase, MapInput, MapRule, PlanarMap};
-    let colors = [
-        Color32::from_rgb(235, 75, 75),
-        Color32::from_rgb(55, 135, 245),
-        Color32::from_rgb(40, 180, 90),
-        Color32::from_rgb(240, 200, 40),
-    ];
-    let mut rng = map_overlay::Rng(13);
-    let mut m = PlanarMap::default();
-    let mut checked = 0;
-    for step in 0..120 {
-        let c = colors[step % 4];
-        let r = 2.0 + rng.f() * 9.0;
-        let st = wiggly_stroke(&mut rng, (100.0, 100.0, 300.0, 200.0), r, c);
-        let rule = if step % 3 == 2 {
-            MapRule::Paint(None)
-        } else {
-            MapRule::Paint(Some(c))
-        };
-        if let Some(n) = m
-            .overlay(MapInput::Shapes(&st), rule)
-            .and_then(|n| n.checked())
-        {
-            m = n.uniquely_labeled().into_map();
-        }
-        if step % 10 != 9 || m.edges.is_empty() {
-            continue;
-        }
-        let base = LayerBase::new(&m);
-        let list = base.cycles();
-        // 向きのある辺 → 一覧の輪郭（回し方をそろえる）
-        let key = |h: &(usize, bool)| (h.0, !h.1);
-        let canon = |c: &[(usize, bool)]| {
-            let mut c = c.to_vec();
-            if let Some(k) = (0..c.len()).min_by_key(|&k| key(&c[k])) {
-                c.rotate_left(k);
-            }
-            c
-        };
-        let mut owner: std::collections::HashMap<(usize, bool), usize> = Default::default();
-        for (ci, c) in list.iter().enumerate() {
-            for &h in c {
-                owner.insert(h, ci);
-            }
-        }
-        for _ in 0..40 {
-            let e = (rng.f() * m.edges.len() as f64) as usize % m.edges.len();
-            let h = (e, rng.f() < 0.5);
-            let traced = base.trace_cycle(h);
-            assert_eq!(
-                traced,
-                canon(&list[owner[&h]]),
-                "step {step} の向きのある辺 {h:?}"
-            );
-            checked += 1;
-        }
-    }
-    assert!(checked >= 400, "確かめた数 {checked}");
-}
-
-/// 段2b-5a・2b-5b：前の地図に、わざと決まりを破りうる辺（ランダムな直線・曲線。ほかの辺と交わる・両側が同じ色・ほかの
-/// 頂点と同じ格子の点に端がある、など）や、絵の無い所に向きをそろえた三角形を足した地図で、増えた辺の決まり
-/// （`added_edges_ok`）と触った輪郭の決まり（`touched_cycles_ok`）を差分の近くだけで調べた答えが、新しい地図全体で調べた
-/// 答え（`edges_ok_full`・`cycles_ok_full`）と同じ。どちらの決まりも、正しい答えと正しくない答えの両方が出ることを確かめる
+/// 段2b-5：前の地図に、わざと決まりを破りうる辺（ランダムな直線・曲線。ほかの辺と交わる・両側が同じ色・ほかの
+/// 頂点と同じ格子の点に端がある、など）や、絵の無い所に向きをそろえた三角形を足した地図で、触った所だけで確かめた答え
+/// （1本の道の差分から先 `apply_diff` が書けるか）が、新しい地図全体を確かめた答え（本番の判定 `check`：`is_valid`）と
+/// 同じ。正しい答えと正しくない答えの両方が出ることを確かめる
 #[test]
 fn local_edge_rules_match_full_check() {
-    use crate::planar_map::{LayerBase, MapEdge, MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{LayerBase, LocalEdit, MapEdge, MapInput, MapRule, PlanarMap};
     let colors = [
         Color32::from_rgb(235, 75, 75),
         Color32::from_rgb(55, 135, 245),
@@ -34804,7 +34723,7 @@ fn local_edge_rules_match_full_check() {
     let base = LayerBase::new(&m);
     let full_map = base.map().clone();
     let color = |rng: &mut map_overlay::Rng| Some(colors[(rng.f() * 3.0) as usize % 3]);
-    let (mut oks, mut bads, mut cycles_good, mut cycles_bad, mut all_good) = (0, 0, 0, 0, 0);
+    let (mut good, mut bad) = (0, 0);
     for _ in 0..400 {
         // 足す辺：（始点, 終点, 制御点, 左の色, 右の色）
         type Added = (Point, Point, Point, Option<Color32>, Option<Color32>);
@@ -34877,63 +34796,20 @@ fn local_edge_rules_match_full_check() {
             let (ja, jb) = (at(a, &mut joined), at(b, &mut joined));
             joined.edges.push(edge(ja, jb));
         }
-        let local = base.local_map(&result, &[], &added);
-        let got = local.added_edges_ok();
-        assert_eq!(got, base.edges_ok_full(&joined), "足した辺 {adds:?}");
-        if !got {
-            bads += 1;
-            continue;
-        }
-        oks += 1;
-        // 触った輪郭の決まり（辺の決まりが成り立つときだけ比べる：交わる辺では輪郭の形が決まらない）
-        let cycles_ok = local
-            .touched_cycles_ok(&mut crate::planar_map::CycleMemo::default())
-            .is_some();
-        assert_eq!(
-            cycles_ok,
-            LayerBase::cycles_ok_full(&joined),
-            "輪郭：足した辺 {adds:?}"
+        let got = !matches!(
+            base.apply_diff(&result, &[], &added, &[]),
+            LocalEdit::Refused(_)
         );
-        if cycles_ok {
-            cycles_good += 1;
+        assert_eq!(got, joined.is_valid(), "足した辺 {adds:?}");
+        if got {
+            good += 1;
         } else {
-            cycles_bad += 1;
-        }
-        // 2b-5c：確かめ全体の答え（穴の入れ先と、何も無い側の決まりまで）
-        let table = base.faces_table();
-        let lookup =
-            |id: crate::vector_engine::ShapeId| table.get(&id).cloned().unwrap_or_default();
-        let mut memo = crate::planar_map::CycleMemo::default();
-        let local_ok = local
-            .touched_cycles_ok(&mut memo)
-            .is_some_and(|t| local.regions_ok(&t, &lookup, &mut memo) == Some(true));
-        assert_eq!(
-            local_ok,
-            joined.is_valid(),
-            "確かめ全体：足した辺 {adds:?}"
-        );
-        if local_ok {
-            all_good += 1;
+            bad += 1;
         }
     }
-    assert!(oks > 10 && bads > 10, "正しい {oks}・正しくない {bads}");
-    assert!(
-        cycles_good > 5 && cycles_bad > 5,
-        "輪郭が正しい {cycles_good}・正しくない {cycles_bad}"
-    );
-    assert!(all_good > 0, "確かめ全体で正しい {all_good}");
+    assert!(good > 0 && bad > 10, "正しい {good}・正しくない {bad}");
 }
 
-/// 段2b-5c：前の地図から辺をランダムに 1〜3 本消した地図（面の外周が開く・穴の入れ先が無くなる・何も無い側の輪郭が
-/// 色のある面に入り込む、などが起きる）で、触った所だけで確かめた答え（`added_edges_ok`・`touched_cycles_ok`・
-/// `regions_ok`）が、新しい地図全体を確かめた答え（`is_valid`）と同じ。正しい答えと正しくない答えの両方が出る
-/// 段2b-7g：何も無い側の決まり（何も無い所が色のある面に入り込まない）を触った所だけで確かめた答えが、新しい地図全体を
-/// 確かめた答えと同じ。入り込む地図を、わざと作って比べる：
-/// - そのままの面の中に、外が何も無い島を足す（前の地図の、点を含む面を、半直線が最初に横切る辺で決める所）
-/// - 前からある、外が何も無い島のまわりに、穴を開けずに色のある四角を足す（触った面の中に前の地図の辺が入る所）
-/// - 面の輪郭を作り直し（触った面にし）、その中に、外が何も無い島を足す（触った面の中に増えた辺が入る所）
-///
-/// どれも、島や四角を面の外に置けば正しい（入り込まない）地図になるので、それも比べる
 /// 潰れた変換（逆にできない）で置いた地図は描かない（面積 0 の絵は見えない）ので、カーソル合わせと吸い付きは何にも
 /// 合わない（地図全体の写しを作る予備の道を置かない）
 #[test]
@@ -35074,7 +34950,7 @@ fn check_scene_matches_full_rebuild(app: &mut Is2dApp, tag: &str) {
 }
 
 /// ランダムな操作を `steps` 回続け、1回ごとに地図の決まり（`check_maps_after_step`）を、10回に1回画面の図形の一覧
-/// （`check_scene_matches_full_rebuild`）を確かめる。操作の答えは、テストのときは毎回お手本（前の道）と比べられている。
+/// （`check_scene_matches_full_rebuild`）を確かめる。操作の答えは、テストのときは毎回お手本（同じ道に地図全体を渡した答え）と比べられている。
 /// 途中で止まったら、それまでの操作の並び（終わりの 30 個）を出す
 fn random_operation_marathon(seed: u64, steps: usize) {
     use crate::doc_actions::{apply, Action};
@@ -35335,9 +35211,16 @@ fn random_operation_marathon_long() {
     }
 }
 
+/// 段2b-7g：何も無い側の決まり（何も無い所が色のある面に入り込まない）を触った所だけで確かめた答えが、新しい地図全体を
+/// 確かめた答えと同じ。入り込む地図を、わざと作って比べる：
+/// - そのままの面の中に、外が何も無い島を足す（前の地図の、点を含む面を、半直線が最初に横切る辺で決める所）
+/// - 前からある、外が何も無い島のまわりに、穴を開けずに色のある四角を足す（触った面の中に前の地図の辺が入る所）
+/// - 面の輪郭を作り直し（触った面にし）、その中に、外が何も無い島を足す（触った面の中に増えた辺が入る所）
+///
+/// どれも、島や四角を面の外に置けば正しい（入り込まない）地図になるので、それも比べる
 #[test]
 fn local_check_catches_unpainted_inside_painted() {
-    use crate::planar_map::{CycleMemo, LayerBase, MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{LayerBase, LocalEdit, MapInput, MapRule, PlanarMap};
     let red = Color32::from_rgb(235, 75, 75);
     let blue = Color32::from_rgb(55, 135, 245);
     let rect = |x0: f64, y0: f64, x1: f64, y1: f64, c: Color32| -> PlanarMap {
@@ -35377,16 +35260,11 @@ fn local_check_catches_unpainted_inside_painted() {
         let n0 = result.edges.len();
         result = join(&result, extra);
         let added: Vec<usize> = (n0..result.edges.len()).collect();
-        // 前の地図の辺の番号で消す辺を渡す（`local_map` は、増えた辺を `result` の番号で受け取る）
-        let table = base.faces_table();
-        let lookup =
-            |id: crate::vector_engine::ShapeId| table.get(&id).cloned().unwrap_or_default();
-        let local = base.local_map(&result, removed, &added);
-        let mut memo = CycleMemo::default();
-        let got = local.added_edges_ok()
-            && local
-                .touched_cycles_ok(&mut memo)
-                .is_some_and(|t| local.regions_ok(&t, &lookup, &mut memo) == Some(true));
+        // 前の地図の辺の番号で消す辺を渡す（`apply_diff` は、増えた辺を `result` の番号で受け取る）
+        let got = !matches!(
+            base.apply_diff(&result, removed, &added, &[]),
+            LocalEdit::Refused(_)
+        );
         (got, result.is_valid())
     };
     let red_sq = rect(0.0, 0.0, 100.0, 100.0, red);
@@ -35440,9 +35318,12 @@ fn local_check_catches_unpainted_inside_painted() {
     assert_eq!(got, full, "触った面の外に足した島");
 }
 
+/// 段2b-5c：前の地図から辺をランダムに 1〜3 本消した地図（面の外周が開く・穴の入れ先が無くなる・何も無い側の輪郭が
+/// 色のある面に入り込む、などが起きる）で、触った所だけで確かめた答え（1本の道の差分から先 `apply_diff` が書けるか）が、
+/// 新しい地図全体を確かめた答え（`is_valid`）と同じ。正しい答えと正しくない答えの両方が出る
 #[test]
 fn local_check_matches_full_check_when_edges_are_removed() {
-    use crate::planar_map::{CycleMemo, LayerBase, MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{LayerBase, LocalEdit, MapInput, MapRule, PlanarMap};
     let colors = [
         Color32::from_rgb(235, 75, 75),
         Color32::from_rgb(55, 135, 245),
@@ -35470,9 +35351,6 @@ fn local_check_matches_full_check_when_edges_are_removed() {
         }
         let base = LayerBase::new(&m);
         let full_map = base.map().clone();
-        let table = base.faces_table();
-        let lookup =
-            |id: crate::vector_engine::ShapeId| table.get(&id).cloned().unwrap_or_default();
         let (faces, _) = full_map.faces();
         // 輪郭の辺の反対側がみな何も無い面（輪郭ごと消しても、ほかの面の色はそろったまま）と、穴を持つ面
         let none_other = |c: &Vec<(usize, bool)>| {
@@ -35513,17 +35391,11 @@ fn local_check_matches_full_check_when_edges_are_removed() {
                 k += 1;
                 !removed.contains(&(k - 1))
             });
-            let local = base.local_map(&full_map, &removed, &[]);
-            let mut memo = CycleMemo::default();
-            let got = local.added_edges_ok()
-                && local
-                    .touched_cycles_ok(&mut memo)
-                    .is_some_and(|t| local.regions_ok(&t, &lookup, &mut memo) == Some(true));
-            assert_eq!(
-                got,
-                joined.is_valid(),
-                "seed {seed} 消した辺 {removed:?}"
+            let got = !matches!(
+                base.apply_diff(&full_map, &removed, &[], &[]),
+                LocalEdit::Refused(_)
             );
+            assert_eq!(got, joined.is_valid(), "seed {seed} 消した辺 {removed:?}");
             if got {
                 good += 1;
             } else {
@@ -35535,8 +35407,8 @@ fn local_check_matches_full_check_when_edges_are_removed() {
 }
 
 /// 段2b-7c-2：ブラシ・消しゴムを触った所だけで行う編集（1本の道：`LayerBase::edit_local`）を、ランダムな線で何十回も重ねる。
-/// 毎回、関数の中でお手本（前の地図全体で重ねて確かめ、書き戻した答え：しまう形・消す図形・入れる図形）と比べ、次の
-/// 編集は新しいしまう形から続ける。線の多いセル画（区画を 4×4 並べたもの）でも行う
+/// 毎回、関数の中でお手本（地図全体で重ねた答え、同じ道を地図全体を触った所として行った答え：しまう形・消す図形・入れる
+/// 図形）と比べ、次の編集は新しいしまう形から続ける。線の多いセル画（区画を 4×4 並べたもの）でも行う
 #[test]
 fn local_paint_matches_full_pipeline() {
     use crate::planar_map::{LayerBase, LocalEdit, MapInput, MapRule, PlanarMap};

@@ -174,34 +174,6 @@ impl TileEdge {
     }
 }
 
-/// 窓で重ねた結果の差分（設計 段2b の 4. の 2b-2）：前の地図 `base` の窓の辺 `window`（前の地図の番号）と、窓で重ねた結果
-/// `result` を、しまう辺（決まった向き・中身まで）で比べて、（消えた前の地図の辺, 増えた結果の辺）。窓の外の辺は変わらない
-#[cfg(test)]
-pub(crate) fn window_diff(
-    base: &PlanarMap,
-    window: &[usize],
-    result: &PlanarMap,
-) -> (Vec<usize>, Vec<usize>) {
-    let olds: crate::planar_map::IntSet<StoredEdge> = window
-        .iter()
-        .map(|&e| StoredEdge::of(base, &base.edges[e]))
-        .collect();
-    let news: crate::planar_map::IntSet<StoredEdge> = result
-        .edges
-        .iter()
-        .map(|ed| StoredEdge::of(result, ed))
-        .collect();
-    let removed = window
-        .iter()
-        .copied()
-        .filter(|&e| !news.contains(&StoredEdge::of(base, &base.edges[e])))
-        .collect();
-    let added = (0..result.edges.len())
-        .filter(|&e| !olds.contains(&StoredEdge::of(result, &result.edges[e])))
-        .collect();
-    (removed, added)
-}
-
 /// テスト用：しまう辺1本の大きさ（バイト）
 #[cfg(test)]
 pub(crate) fn edge_size() -> usize {
@@ -527,8 +499,8 @@ impl StoredMap {
         &self.0.tiles[k][e - starts[k] as usize]
     }
 
-    /// 窓で重ねた結果の差分（`window_diff` と同じ）を、前の地図の一覧を使わずに塊から：窓の辺 `window`（計算に使う地図の
-    /// 番号）と結果 `result` を、しまう辺で比べて（消えた辺, 増えた結果の辺）
+    /// 窓で重ねた結果の差分（設計 段2b の 4. の 2b-2）を、前の地図の一覧を使わずに塊から：窓の辺 `window`（計算に使う地図の
+    /// 番号）と結果 `result` を、しまう辺（決まった向き・中身まで）で比べて（消えた辺, 増えた結果の辺）。窓の外の辺は変わらない
     pub(crate) fn window_diff_tiles(
         &self,
         window: &[usize],
@@ -580,8 +552,6 @@ impl StoredMap {
         Some((self.starts()[k] as usize + j, q.p0 == a))
     }
 
-    /// この地図に差分を当てた地図：計算に使う地図の辺 `removed` を消し、辺 `added` を足す（`with_diff` と同じ。足す辺を
-    /// 塊の辺の形で受け取る）
     /// この地図から地図 `other` への差分：消えた辺（この地図の、計算に使う地図での番号）と増えた辺。2つの地図が共有する
     /// 塊（同じ升目で同じ塊）は比べない（手間は、共有しない塊の分。`other` がこの地図に差分を当てて作ったものなら、変わった
     /// 塊の分）。共有しない塊どうしは、中身が同じ辺を除く
@@ -639,6 +609,8 @@ impl StoredMap {
         (removed, added)
     }
 
+    /// この地図に差分を当てた地図：計算に使う地図の辺 `removed` を消し、塊の辺の形の辺 `added` を足す。作り直すのは、消す辺か
+    /// 足す辺のある塊だけで、ほかの塊はこの地図と共有する（塊の順・塊の中の順は `from_dense` と同じ）
     pub(crate) fn with_diff_tiles(&self, removed: &[usize], added: &[TileEdge]) -> Self {
         let starts = self.starts();
         let tiles = &self.0.tiles;
@@ -667,91 +639,6 @@ impl StoredMap {
                 })
                 .push(se);
         }
-        let mut out: Vec<Tile> = Vec::with_capacity(tiles.len() + redo.len());
-        let push = |mut list: Vec<StoredEdge>, out: &mut Vec<Tile>| {
-            if !list.is_empty() {
-                list.sort_unstable_by(|x, y| x.order(y));
-                out.push(TileData::new(list.into()));
-            }
-        };
-        let mut fresh = redo.into_iter().peekable();
-        let mut i = 0;
-        loop {
-            match (tiles.get(i), fresh.peek()) {
-                (Some(t), Some((c, _))) if t[0].tile() < *c => {
-                    out.push(t.clone());
-                    i += 1;
-                }
-                (Some(t), Some(_)) => {
-                    let (c, list) = fresh.next().expect("見た");
-                    if t[0].tile() == c {
-                        i += 1;
-                    }
-                    push(list, &mut out);
-                }
-                (Some(t), None) => {
-                    out.push(t.clone());
-                    i += 1;
-                }
-                (None, Some(_)) => {
-                    let (_, list) = fresh.next().expect("見た");
-                    push(list, &mut out);
-                }
-                (None, None) => break,
-            }
-        }
-        Self::of_tiles(out.into())
-    }
-
-    #[cfg(test)]
-    /// この地図（計算に使う地図が `base`）に差分を当てた地図：`base` の辺 `removed` を消し、地図 `result` の辺 `added` を
-    /// 足す（`window_diff`）。作り直すのは、消す辺か足す辺のある塊だけで、ほかの塊はこの地図と共有する（塊の順・塊の中の
-    /// 順は `from_dense` と同じ）
-    pub(crate) fn with_diff(
-        &self,
-        base: &PlanarMap,
-        removed: &[usize],
-        result: &PlanarMap,
-        added: &[usize],
-    ) -> Self {
-        let starts = self.starts();
-        let tiles = &self.0.tiles;
-        // 塊ごとの、消す辺（塊の中の番号）
-        let mut gone: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
-        for &e in removed {
-            let k = starts.partition_point(|&s| s as usize <= e) - 1;
-            gone.entry(k).or_default().push(e - starts[k] as usize);
-        }
-        debug_assert!(removed
-            .iter()
-            .all(|&e| StoredEdge::of(base, &base.edges[e]) == {
-                let k = starts.partition_point(|&s| s as usize <= e) - 1;
-                tiles[k][e - starts[k] as usize]
-            }));
-        // 升目ごとの、作り直した塊の辺
-        let mut redo: std::collections::BTreeMap<(i32, i32), Vec<StoredEdge>> = Default::default();
-        for (&k, js) in &gone {
-            let list = redo.entry(tiles[k][0].tile()).or_default();
-            list.extend(
-                tiles[k]
-                    .iter()
-                    .enumerate()
-                    .filter(|(j, _)| !js.contains(j))
-                    .map(|(_, e)| *e),
-            );
-        }
-        for &e in added {
-            let se = StoredEdge::of(result, &result.edges[e]);
-            let at = se.tile();
-            // 足す辺の升目に、消す辺の無い前の塊があれば、その辺も入れて作り直す
-            redo.entry(at)
-                .or_insert_with(|| match tiles.binary_search_by_key(&at, |t| t[0].tile()) {
-                    Ok(k) => tiles[k].to_vec(),
-                    Err(_) => Vec::new(),
-                })
-                .push(se);
-        }
-        // 升目の順に、変わらない塊と作り直した塊を並べる（作り直した塊が空なら、その升目の塊は無くなる）
         let mut out: Vec<Tile> = Vec::with_capacity(tiles.len() + redo.len());
         let push = |mut list: Vec<StoredEdge>, out: &mut Vec<Tile>| {
             if !list.is_empty() {

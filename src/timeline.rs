@@ -633,7 +633,7 @@ fn test_scope_map_from_shapes(
     raw: Vec<Arc<FillShape>>,
 ) -> Result<Option<ScopeMap>, Unmappable> {
     let refs: Vec<&FillShape> = raw.iter().map(|s| &**s).collect();
-    let base = LayerBase::of(&refs, Affine::IDENTITY).ok_or(Unmappable)?;
+    let base = LayerBase::of(&refs).ok_or(Unmappable)?;
     let same_path = old.iter().find(|m| m.group_path == path);
     let map = base.map().clone().checked().ok_or(Unmappable)?;
     Ok(ScopeMap::new(

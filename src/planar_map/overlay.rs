@@ -302,50 +302,6 @@ impl PlanarMap {
         }
     }
 
-    /// バケツ：点 `p` を含む面（辺で囲まれた所。何も塗っていない所も）を `color` にした地図。`None`：変わらない（どの
-    /// 輪郭にも囲まれていない所・輪郭の上・すでに `color` の面）。テスト用（本番は計算に使う写しの判定の形で：
-    /// `LayerBase::with_face_filled`）
-    #[cfg(test)]
-    pub(crate) fn with_face_filled(&self, p: Point, color: Color32) -> Option<PlanarMap> {
-        let polys = self.polys();
-        self.face_filled_with(&polys, &self.face_cycles_with(&polys), p, color)
-    }
-
-    #[cfg(test)]
-    /// `with_face_filled` を、辺ごとの判定の形 `polys` と面の輪郭 `cycles` で（計算に使う写しが持つもの：
-    /// `LayerBase::with_face_filled`）
-    pub(super) fn face_filled_with(
-        &self,
-        polys: &[Poly],
-        cycles: &[Vec<(usize, bool)>],
-        p: Point,
-        color: Color32,
-    ) -> Option<PlanarMap> {
-        let regions = self.regions(polys, cycles, true);
-        // 点を含む組（正しい地図では、組どうしは重ならないので1つまで）。点が輪郭の上にあれば、どの面か決まらないので
-        // 何も変えない
-        let g = gpt(p);
-        let p2 = (2 * g.0, 2 * g.1);
-        let mut found = None;
-        for gi in regions.groups_at(p2) {
-            match regions.contains(gi, p2) {
-                None => return None,
-                Some(true) => {
-                    found = Some(gi);
-                    break;
-                }
-                Some(false) => {}
-            }
-        }
-        let (group_color, ids) = &regions.groups[found?];
-        if *group_color == Some(color) {
-            return None;
-        }
-        // 組の面の輪郭の、面の側（向きどおりなら左）
-        let sides = ids.iter().flat_map(|&k| regions.cycles[k].iter().copied());
-        Some(self.with_sides_colored(sides, color))
-    }
-
     /// 形か地図か輪郭の変形で動かした辺 `input` を、`rule` の決め方で重ねた地図
     /// （設計：claude/曲線の当て直しを決まりで行う設計_7215b88.md、claude/格子の折れ線で判定する設計_段階2_d90cabe.md、
     /// claude/輪郭の変形を重ね合わせで確定する設計_08c15dd段階3_cf66a87.md）。
@@ -368,36 +324,12 @@ impl PlanarMap {
         Some(m)
     }
 
-    /// `overlay` を、この地図の辺の計算に使う形 `known`（辺の順。計算に使う写しが持つもの：`LayerBase::overlay`）で
-    pub(super) fn overlay_known(
-        &self,
-        known: &[Poly],
-        index: Option<MapIndex<'_>>,
-        input: MapInput<'_>,
-        rule: MapRule,
-    ) -> Option<PlanarMap> {
-        let [m] = self.overlay_rules_known(known, index, input, [rule])?;
-        Some(m)
-    }
-
     /// 同じ重ねるもの `input` を、決まりごとに重ねた地図（`rules` の順。手順は `overlay`）。決まりによらない所（1・2 と、
     /// 3 の区間の左右の色と重ねるものの値）は1回だけ行うので、どの地図も同じ区間・同じ頂点から作る（矩形で一部を選ぶときの
     /// 中と外：`cut_out`。設計：claude/N-2002の残り・R5・★4・★5の設計_80fe785.md）。3 の頂点のまわりの確かめは決まりごとに
     /// 行い、どれかで食い違えば、その辺を入れてみな切り直す
     pub(crate) fn overlay_rules<const N: usize>(
         &self,
-        input: MapInput<'_>,
-        rules: [MapRule; N],
-    ) -> Option<[PlanarMap; N]> {
-        self.overlay_rules_known(&[], None, input, rules)
-    }
-
-    /// `overlay_rules` を、この地図の前から `known.len()` 本の辺の計算に使う形 `known` で（近くの辺を探す外接矩形と
-    /// マスを作り直さない：`fed_edges`）
-    pub(super) fn overlay_rules_known<const N: usize>(
-        &self,
-        known: &[Poly],
-        index: Option<MapIndex<'_>>,
         input: MapInput<'_>,
         rules: [MapRule; N],
     ) -> Option<[PlanarMap; N]> {
@@ -424,8 +356,12 @@ impl PlanarMap {
                     .map(|p| KRect::from_points(p, p))
                     .reduce(|a, b| a.union(b))
                 {
-                    let near = self.node_finder_in(FLAT_TOL, Affine::IDENTITY, area, index);
-                    let snap = |p: Point| near(p, None).map_or(p, |v| self.nodes[v]);
+                    let area = area.inflate(FLAT_TOL, FLAT_TOL);
+                    let near = NearPoints::new(
+                        self.nodes.iter().copied().filter(|&q| area.contains(q)),
+                        FLAT_TOL,
+                    );
+                    let snap = |p: Point| near.nearest(p).unwrap_or(p);
                     for q in &mut new_quads {
                         q.p0 = snap(q.p0);
                         q.p2 = snap(q.p2);
@@ -461,25 +397,6 @@ impl PlanarMap {
                 _ => self.clone(),
             }));
         }
-        // 計算に使う写しの升目の索引があれば、形・輪郭の変形は窓で行う（結果は前の地図全体で行ったときと同じ）
-        if let (Some(ix), MapInput::Shapes(_) | MapInput::Sweep(_) | MapInput::Map(_)) =
-            (index, input)
-        {
-            let got = self.overlay_windowed(known, ix, input, rules, &new_quads, &new_cols);
-            // お手本（設計 段2b の 0.）：テストでは毎回、前の地図全体で重ねた結果と比べる
-            #[cfg(test)]
-            if super::test_checks() {
-                let same = super::uncounted(|| {
-                    let full = self.overlay_rules_known(known, None, input, rules);
-                    super::same_results(got.as_ref().map(|m| &m[..]), full.as_ref().map(|m| &m[..]))
-                });
-                assert!(
-                    same,
-                    "窓で重ねた結果が、前の地図全体で重ねた結果（お手本）と違う"
-                );
-            }
-            return got;
-        }
         // 重ねる地図の辺も、前からある辺と同じ決まりで入れるかを決める（入れない辺はそのまま写し、色だけ決める）。そのために
         // 2つの地図の辺を1つに並べる（前からある辺が 0..n_old、重ねる地図の辺がその後ろ）。形と輪郭の変形の線はみな入れる
         let joined;
@@ -500,15 +417,8 @@ impl PlanarMap {
         };
         let check = self.edges.len()..cands.edges.len();
         let moved = input.moved_flags(cands.edges.len());
-        let mut fed = cands.fed_edges(
-            known,
-            index,
-            seeds,
-            &moved,
-            moved.clone(),
-            check.clone(),
-            &partner,
-        )?;
+        let mut fed =
+            cands.fed_edges(&[], seeds, &moved, moved.clone(), check.clone(), &partner)?;
         loop {
             match cands.overlay_with(input, &rules, &new_quads, &new_cols, &mut fed) {
                 Ok(maps) => return Some(maps.try_into().expect("決まりごとに1つの地図")),
@@ -517,28 +427,19 @@ impl PlanarMap {
                     for e in more {
                         set[e] = true;
                     }
-                    fed = cands.fed_edges(
-                        known,
-                        index,
-                        seeds,
-                        &moved,
-                        set,
-                        check.clone(),
-                        &partner,
-                    )?;
+                    fed = cands.fed_edges(&[], seeds, &moved, set, check.clone(), &partner)?;
                 }
                 Err(OverlayStop::Refused) => return None,
             }
         }
     }
 
-    /// `overlay_rules_known` を、窓で行う（形・輪郭の変形のとき。設計：claude/触った所だけを計算する地図の設計_22fbbbe.md
-    /// の 3.4）。
+    /// 重ね合わせ（`overlay_rules`）を、前の地図の窓で行う（形・地図・輪郭の変形のとき。設計：
+    /// claude/触った所だけを計算する地図の設計_22fbbbe.md の 3.4）。前の地図は升目の索引 `ix` で引き、全体の写しを作らない。
     ///
-    /// 1. 入れる辺を、前の地図全体で決める（`fed_edges`。升目の索引を引くので、手間は重ねるものの近くの分）
+    /// 1. 入れる辺を、重ねるもののまわりの下窓で決める（`fed_edges`）
     /// 2. 窓：入れる辺と重ねるものの外接矩形（制御点まで）を広げた範囲 `region` に外接矩形がかかる辺と、それらの端の頂点に
-    ///    つながる辺。前の地図の辺の番号の順に並べ、頂点も前の地図の番号の順にする（窓の中の番号の順は、前の地図の番号の
-    ///    順と同じ）
+    ///    つながる辺。前の地図の辺の番号の順に並べる（窓の中の番号の順は、前の地図の番号の順と同じ）
     /// 3. 窓で重ね合わせる（`overlay_with`）。前の地図全体で行ったときと比べて違いうるのは、窓に無い辺を見る所だけで、
     ///    それは次の3つ。どれも結果を同じにする：
     ///    - 点のある所の前の地図の色を数える所は、窓の外の辺も前の地図の番号の順に数える（`Outside`）
@@ -546,206 +447,11 @@ impl PlanarMap {
     ///      つながる辺は、みな窓にある
     ///    - 曲線に戻す所と2本をまとめる所がほかの辺を調べた範囲（`FedEdges::used`）が `region` に入っていなければ、
     ///      `region` を広げてやり直す（`region` に外接矩形がかかる辺はみな窓にあるので、入っていれば調べた相手は同じ）
-    /// 4. 窓の外の辺（外が前のままの決まりなら）と、窓の結果を合わせて、決まりごとの地図にする
     ///
-    /// 入れなかった辺が切った区間と交わったとき（`Unfed`）は、前の地図全体の入れる辺を足して 1. からやり直す（前の地図
-    /// 全体で行うときと同じ）
-    fn overlay_windowed<const N: usize>(
-        &self,
-        _known: &[Poly],
-        ix: MapIndex<'_>,
-        input: MapInput<'_>,
-        rules: [MapRule; N],
-        new_quads: &[QuadBez],
-        new_cols: &[(Option<Color32>, Option<Color32>)],
-    ) -> Option<[PlanarMap; N]> {
-        let (maps, wedges) = Self::window_overlay(ix, input, &rules, new_quads, new_cols)?;
-        // 窓の頂点の、前の地図での番号（窓の結果を前の地図全体の結果に合わせるため：`with_window_result`）
-        let wnodes: Vec<usize> = {
-            let mut v: Vec<usize> = wedges
-                .iter()
-                .flat_map(|&e| [self.edges[e].a, self.edges[e].b])
-                .collect();
-            v.sort_unstable();
-            v.dedup();
-            v
-        };
-        let to_window: IntMap<usize, usize> =
-            wedges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
-        let mut out = maps.into_iter();
-        Some(rules.map(|rule| {
-                        let m = out.next().expect("決まりごとに1つの地図");
-                        let copy = rule != MapRule::KeepInside;
-                        // お手本（設計 段2b の 4. の 2b-2）：前のしまう形に窓の差分を当てた形が、窓の結果を合わせた地図の
-                        // しまう形と同じ
-                        #[cfg(test)]
-                        let diffed = (copy && super::test_checks()).then(|| {
-                            super::uncounted(|| {
-                                let (removed, added) =
-                                    crate::stored_map::window_diff(self, &wedges, &m);
-                                let local =
-                                    LocalMap::new(ix, &m, &removed, &added);
-                                let touched = local.touched_cycles();
-                                let edges_ok = local.added_edges_ok();
-                                let mut memo = CycleMemo::default();
-                                let touched_ok = local.touched_cycles_ok(&mut memo);
-                                let cycles_ok = touched_ok.is_some();
-                                // 確かめ全体の答え（設計 段2b の 6. の 5.）
-                                let prev = LayerBase::new(self);
-                                let table = prev.faces_table();
-                                let lookup = |id: ShapeId| table.get(&id).cloned().unwrap_or_default();
-                                let local_ok = edges_ok
-                                    && touched_ok.as_ref().is_some_and(|t| {
-                                        local.regions_ok(t, &lookup, &mut memo) == Some(true)
-                                    });
-                                // 触った面（設計 段2b の 6. の 5.）：番号によらない形にして、前の地図に無いものの集まり
-                                let local_faces = local_ok.then(|| {
-                                    let faces = local
-                                        .touched_faces(touched_ok.as_ref().expect("閉じた"), &lookup, &mut memo)
-                                        .expect("正しい地図なら面が作れる");
-                                    let prev_faces = prev.faces(&[]);
-                                    let orig_shape = |id: ShapeId| {
-                                        prev_faces.by_id(id).cloned()
-                                    };
-                                    let change =
-                                        local.rewrite(&faces, &lookup, &orig_shape, &memo, 0, &[]);
-                                    // 触った面ごとに1つずつ別の番号
-                                    let mut ids = change.ids.clone();
-                                    ids.sort_unstable();
-                                    ids.dedup();
-                                    assert_eq!(ids.len(), faces.len(), "触った面の番号がみな別");
-                                    let base_keys: std::collections::HashSet<FaceShape> =
-                                        faces_shape_keys(self).into_iter().collect();
-                                    let mut keys: Vec<FaceShape> = faces
-                                        .iter()
-                                        .map(|f| local.face_shape_key(f, &memo))
-                                        .filter(|k| !base_keys.contains(k))
-                                        .collect();
-                                    keys.sort();
-                                    (keys, base_keys, change)
-                                });
-                                (ix.stored.with_diff(self, &removed, &m, &added), (edges_ok, cycles_ok, local_ok, local_faces), touched.map(|t| {
-                                    let mut shapes: Vec<_> = t
-                                        .iter()
-                                        .map(|c| cycle_shape(c.iter().map(|&h| local.half_key(h))))
-                                        .collect();
-                                    shapes.sort();
-                                    shapes
-                                }))
-                            })
-                        });
-                        let joined = self.with_window_result(m, &wnodes, &to_window, copy);
-                        #[cfg(test)]
-                        if let Some((d, (edges_ok, cycles_ok, local_ok, local_faces), touched)) = diffed {
-                            // お手本：触った面のうち前の地図に無いものの集まりが、新しい地図全体の面のうち前の地図に
-                            // 無いものの集まりと同じ
-                            if let Some((keys, base_keys, change)) = local_faces {
-                                // お手本（設計 段2b の 4. の 2b-6）：書き戻しの差分が、新しい地図全体から出した差分と同じ
-                                // （新しく振る番号は回ごとに違うので、元の図形の番号を引き継いだかだけを比べる）
-                                let same = super::uncounted(|| {
-                                    let prev = LayerBase::new(self);
-                                    let next = joined.clone().written().expect("正しい地図");
-                                    let own_faces = prev.faces(&[]);
-                                    let own: Vec<&FillShape> = own_faces.iter().map(|s| &**s).collect();
-                                    let full = prev.diff(next, &own, 0, &[]);
-                                    let orig: std::collections::HashSet<ShapeId> =
-                                        own.iter().map(|s| s.shape_id).collect();
-                                    let norm = |shapes: &[FillShape]| {
-                                        let mut v: Vec<_> = shapes
-                                            .iter()
-                                            .map(|s| {
-                                                let bits = |c: &Contour| -> Vec<[u64; 6]> {
-                                                    c.segments
-                                                        .iter()
-                                                        .map(|q| {
-                                                            [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y]
-                                                                .map(f64::to_bits)
-                                                        })
-                                                        .collect()
-                                                };
-                                                (
-                                                    orig.contains(&s.shape_id).then_some(s.shape_id),
-                                                    s.color.to_array(),
-                                                    s.contours().map(bits).collect::<Vec<_>>(),
-                                                )
-                                            })
-                                            .collect();
-                                        v.sort();
-                                        v
-                                    };
-                                    // 前の地図がセル画の地図（書き戻したもの：書き戻しても面が変わらない）のときだけ比べる（面に
-                                    // 番号の無い地図は、書き戻すと触らない面にも番号を振るので、触った所だけの答えとは違う）
-                                    let settled = self
-                                        .clone()
-                                        .written()
-                                        .is_some_and(|n| prev.diff(n, &own, 0, &[]).removed.is_empty());
-                                    let mut a = change.removed.clone();
-                                    a.sort_unstable();
-                                    let mut b = full.removed.clone();
-                                    b.sort_unstable();
-                                    !settled || (a == b && norm(&change.added) == norm(&full.added))
-                                });
-                                assert!(
-                                    same,
-                                    "触った面だけで決めた書き戻しの差分が、新しい地図全体から出した差分（お手本）と違う"
-                                );
-                                let full: Vec<FaceShape> = super::uncounted(|| {
-                                    faces_shape_keys(&joined)
-                                        .into_iter()
-                                        .filter(|k| !base_keys.contains(k))
-                                        .collect()
-                                });
-                                assert!(
-                                    keys == full,
-                                    "触った所だけで作った面が、新しい地図全体の面（お手本）と違う：触った所 {} 面、全体 {} 面",
-                                    keys.len(),
-                                    full.len()
-                                );
-                            }
-                            // お手本：確かめ全体の答えが、新しい地図全体を確かめた答え（`written` と同じ判定）と同じ
-                            let full_ok =
-                                super::uncounted(|| joined.is_valid());
-                            assert_eq!(
-                                local_ok, full_ok,
-                                "触った所だけで確かめた答えが、新しい地図全体を確かめた答え（お手本）と違う"
-                            );
-                            // お手本（設計 段2b の 6. の 2.）：触った輪郭の決まりの答えが、新しい地図全体の輪郭で調べた答えと同じ
-                            let full_cycles_ok =
-                                super::uncounted(|| LayerBase::cycles_ok_full(&joined));
-                            assert_eq!(
-                                cycles_ok, full_cycles_ok,
-                                "触った輪郭の決まりの答えが、新しい地図全体の輪郭で調べた答え（お手本）と違う"
-                            );
-                            // お手本（設計 段2b の 6. の 1.）：増えた辺の決まりの答えが、新しい地図全体で調べた答えと同じ
-                            let full_ok =
-                                super::uncounted(|| LayerBase::new(self).edges_ok_full(&joined));
-                            assert_eq!(
-                                edges_ok, full_ok,
-                                "増えた辺の決まりの答えが、新しい地図全体で調べた答え（お手本）と違う"
-                            );
-                            let same = super::uncounted(|| {
-                                d.same_content(&StoredMap::from_dense(&joined, None))
-                            });
-                            assert!(
-                                same,
-                                "前のしまう形に窓の差分を当てた形が、窓の結果を合わせた地図のしまう形（お手本）と違う"
-                            );
-                            // お手本（設計 段2b の 4. の 2b-4）：触った輪郭の集まりが、新しい地図全体の輪郭のうち触った
-                            // 向きのある辺を含むものと同じ。ほかの輪郭は、どれも前の地図にそのままある
-                            if let Some(touched) = touched {
-                                let ok = super::uncounted(|| {
-                                    window_cycles_match(self, &joined, &touched)
-                                });
-                                assert!(
-                                    ok,
-                                    "前の地図＋差分でたどった触った輪郭が、新しい地図全体の輪郭（お手本）と違う"
-                                );
-                            }
-                        }
-                        joined
-                    }))
-    }
-
+    /// 入れなかった辺が切った区間と交わったとき（`Unfed`）は、入れる辺を足して 1. からやり直す（前の地図全体で行うときと
+    /// 同じ）。（決まりごとの窓の結果, 窓の辺）。外が前のままの決まりの答えは、前のしまう形に窓の結果の差分を当てたもの
+    /// （`StoredMap::window_diff_tiles`。テストでは毎回、地図全体で重ねた答えと比べる：`LayerBase::overlay_diff`・
+    /// `cut_local`）。`None`：格子に置けない
     pub(super) fn window_overlay(
         ix: MapIndex<'_>,
         input: MapInput<'_>,
@@ -823,15 +529,8 @@ impl PlanarMap {
                 moved0.resize(n0 + np, false);
                 let mut init0: Vec<bool> = sub_edges.iter().map(|e| fed_init.contains(e)).collect();
                 init0.extend((0..np).map(|i| fed_init_new.contains(&i)));
-                let f = sub.fed_edges(
-                    &sub_known,
-                    None,
-                    seeds,
-                    &moved0,
-                    init0,
-                    n0..n0 + np,
-                    &sub_partner,
-                )?;
+                let f =
+                    sub.fed_edges(&sub_known, seeds, &moved0, init0, n0..n0 + np, &sub_partner)?;
                 let fed_now: Vec<usize> = (0..n0).filter(|&e| f.fed[e]).collect();
                 // 重ねる地図の辺は、みな調べる（入れるかを決める）ので、どれも近くの辺が下窓にあるかを見る
                 let reach = fed_now
@@ -912,7 +611,7 @@ impl PlanarMap {
                     .collect(),
                 known: &wknown,
                 spans,
-                near: Some(NearEdges::new(&wmap, &wknown, None)),
+                near: Some(NearEdges::new(&wmap, &wknown)),
                 partner: wpartner,
                 outside: Some(Outside {
                     index: ix,
@@ -945,50 +644,6 @@ impl PlanarMap {
                 Err(OverlayStop::Refused) => return None,
             }
         }
-    }
-
-    /// 窓で重ね合わせた結果 `result`（窓の頂点 `wnodes`・窓の辺 `to_window` から作った地図の結果）を、前の地図全体の結果に
-    /// する：外が前のままの決まり（`copy`）なら、窓に無い前の地図の辺をそのまま足す。窓の結果の頂点は、前の地図の窓の
-    /// 頂点と同じ座標ならその頂点にする（窓の外の辺が、端を共有している）
-    fn with_window_result(
-        &self,
-        result: PlanarMap,
-        wnodes: &[usize],
-        to_window: &IntMap<usize, usize>,
-        copy: bool,
-    ) -> PlanarMap {
-        if !copy {
-            return result;
-        }
-        let at: IntMap<[u64; 2], usize> = wnodes
-            .iter()
-            .map(|&v| ([self.nodes[v].x.to_bits(), self.nodes[v].y.to_bits()], v))
-            .collect();
-        let mut out = PlanarMap {
-            nodes: self.nodes.clone(),
-            edges: (0..self.edges.len())
-                .filter(|e| !to_window.contains_key(e))
-                .map(|e| self.edges[e])
-                .collect(),
-        };
-        let node: Vec<usize> = result
-            .nodes
-            .iter()
-            .map(|p| match at.get(&[p.x.to_bits(), p.y.to_bits()]) {
-                Some(&v) => v,
-                None => {
-                    out.nodes.push(*p);
-                    out.nodes.len() - 1
-                }
-            })
-            .collect();
-        out.edges.extend(result.edges.iter().map(|ed| MapEdge {
-            a: node[ed.a],
-            b: node[ed.b],
-            ..*ed
-        }));
-        out.compact_nodes();
-        out
     }
 
     /// 2つの地図の辺と頂点を1つに並べたもの（`other` の頂点の番号は後ろへずらす。ただし `alias` にある頂点は、その前から
@@ -1062,7 +717,6 @@ impl PlanarMap {
     pub(super) fn fed_edges<'a>(
         &'a self,
         known: &'a [Poly],
-        index: Option<MapIndex<'a>>,
         seeds: &[QuadBez],
         moved: &[bool],
         mut fed: Vec<bool>,
@@ -1072,8 +726,8 @@ impl PlanarMap {
         #[cfg(test)]
         super::FED_RUNS.with(|n| n.set(n.get() + 1));
         let mut snapped = vec![false; self.nodes.len()];
-        // 近くの辺と、頂点ごとの辺を探す道具（前からある辺は、計算に使う写しの升目の索引を引く）
-        let mut near = NearEdges::new(self, known, index);
+        // 近くの辺と、頂点ごとの辺を探す道具
+        let mut near = NearEdges::new(self, known);
         let mut cells: Vec<(i64, i64)> = Vec::new();
         let mut adj_buf: Vec<usize> = Vec::new();
         // 頂点 `v` を格子に置き直すと動くか
@@ -2346,7 +2000,7 @@ impl PlanarMap {
                 restorer.restore(c, ids);
             }
             let (mut m, index) = restorer.finish();
-            let used = m.merge_degree2_indexed(dropped_ends, index);
+            let used = m.merge_degree2(dropped_ends, index);
             fed_set.used = match (fed_set.used, used) {
                 (Some(a), Some(b)) => Some(a.union(&b)),
                 (a, b) => a.or(b),
@@ -2356,46 +2010,6 @@ impl PlanarMap {
         }
         Ok(maps)
     }
-}
-
-/// お手本との比べ（設計 段2b の 4. の 2b-4）：前の地図 `base` と新しい地図 `next` の輪郭を、番号によらない形
-/// （`cycle_shape`）にして、`touched`（前の地図＋差分でたどった触った輪郭の形。並べたもの）が、`next` の輪郭のうち
-/// `touched` の向きのある辺を含むものの集まりと同じで、`next` のほかの輪郭がどれも `base` にあるか。`next` が正しい地図で
-/// なければ比べない（`true`）
-#[cfg(test)]
-fn window_cycles_match(
-    base: &PlanarMap,
-    next: &PlanarMap,
-    touched: &[Vec<([u64; 6], bool)>],
-) -> bool {
-    if !next.is_valid() {
-        return true;
-    }
-    let shapes = |m: &PlanarMap| -> Vec<Vec<([u64; 6], bool)>> {
-        let polys = m.polys();
-        m.face_cycles_with(&polys)
-            .iter()
-            .map(|c| {
-                cycle_shape(c.iter().map(|&(e, forward)| {
-                    let q = m.quad(e);
-                    (quad_key(&q), forward == point_order(q.p0, q.p2).is_le())
-                }))
-            })
-            .collect()
-    };
-    let touched_halves: std::collections::HashSet<([u64; 6], bool)> =
-        touched.iter().flatten().copied().collect();
-    let (mut hit, mut rest): (Vec<_>, Vec<_>) = shapes(next)
-        .into_iter()
-        .partition(|c| c.iter().any(|h| touched_halves.contains(h)));
-    hit.sort();
-    if hit != touched {
-        return false;
-    }
-    let base_shapes: std::collections::HashSet<Vec<([u64; 6], bool)>> =
-        shapes(base).into_iter().collect();
-    rest.retain(|c| !base_shapes.contains(c));
-    rest.is_empty()
 }
 
 /// 窓の範囲を、関わる辺と重ねるものの外接矩形から広げる幅（px）。広いほどやり直しが減り、窓は大きくなる（窓を作る所は
@@ -2972,7 +2586,7 @@ pub(super) struct FedEdges<'a> {
     partner: Vec<Option<(usize, bool)>>,
     /// 重ね合わせを窓で行うときの、窓の外（`overlay_rules_windowed`。窓で行わなければ `None`）
     outside: Option<Outside<'a>>,
-    /// ほかの辺を判定の形で調べた範囲（2本をまとめる所の索引の範囲：`merge_degree2_indexed`。窓で行うとき、窓がこれを
+    /// ほかの辺を判定の形で調べた範囲（2本をまとめる所の索引の範囲：`merge_degree2`。窓で行うとき、窓がこれを
     /// 覆うかを確かめる）
     used: Option<GridRect>,
 }
@@ -2996,8 +2610,8 @@ impl<'a> FedEdges<'a> {
     }
 }
 
-/// 計算に使う写しの升目の索引（`LayerBase::index`）と、その地図のしまう形。重ね合わせ（`overlay_rules_known`）が、
-/// 前からある辺の近くを、毎回全部の辺を格子に入れ直さずに探すのに使う
+/// 計算に使う写しの升目の索引（`LayerBase::index`）と、その地図のしまう形。窓で行う計算（重ね合わせ `window_overlay`・
+/// バケツ・アンカー・前の地図＋差分 `LocalMap`）が、前の地図の全体の写しを作らずに、要る所の辺だけを引くのに使う
 #[derive(Clone, Copy)]
 pub(crate) struct MapIndex<'a> {
     pub(crate) index: &'a crate::stored_map::TileIndex,
@@ -3015,38 +2629,24 @@ impl<'a> MapIndex<'a> {
     }
 }
 
-/// 重ね合わせで、近くの辺と、頂点ごとの辺を探す道具。地図 `map` の辺のうち、前から `n_index` 本（計算に使う写しの
-/// 地図の辺。升目の索引がある）は索引を引いて、要る升目の辺だけを近さを調べる格子に入れ、残りの辺（重ねる地図の辺）は
-/// はじめに格子に入れる。索引が無ければ、全部の辺をはじめに格子に入れる（前と同じ）。どちらでも、マスで探した辺の並び
-/// （マスの順、マスの中は辺の番号の順）と、頂点ごとの辺の並び（辺の番号の順）は、全部の辺を格子に入れたときと同じ
+/// 重ね合わせで、近くの辺と、頂点ごとの辺を探す道具。地図 `map` の全部の辺を、はじめに近さを調べる格子に入れる。マスで
+/// 探した辺の並びは、マスの順、マスの中は辺の番号の順。頂点ごとの辺の並びは、辺の番号の順
 pub(super) struct NearEdges<'a> {
     map: &'a PlanarMap,
     known: &'a [Poly],
-    index: Option<MapIndex<'a>>,
-    /// 索引を引く辺の数（`0..n_index`）
-    n_index: usize,
-    /// 索引を引かない辺（`n_index..`）の外接矩形とマス（`known` に無い辺の分）
+    /// `known` に無い辺の外接矩形とマス
     made: Vec<EdgeReach>,
-    /// 索引を引かない辺の格子（番号は `n_index` を引いたもの）と、頂点ごとの辺（辺の番号の順）
+    /// 辺の格子と、頂点ごとの辺（辺の番号の順）
     local: CellGrid,
     local_adj: IntMap<usize, Vec<usize>>,
-    /// 索引から読んだ升目と、読んだ辺、マスごとの読んだ辺（辺の番号の順）
-    loaded_tiles: IntSet<(i64, i64)>,
-    loaded_edges: IntSet<usize>,
-    cell_edges: IntMap<(i64, i64), Vec<usize>>,
     /// 探すときに同じ辺を2度返さないための印：辺ごとに、最後に返した `query` の回（`CellGrid` と同じ。表を毎回空に
     /// すると、表の大きさの分の手間が探すたびにかかる）
     seen: Vec<u32>,
     stamp: u32,
-    buf: Vec<usize>,
 }
 
 impl<'a> NearEdges<'a> {
-    pub(super) fn new(map: &'a PlanarMap, known: &'a [Poly], index: Option<MapIndex<'a>>) -> Self {
-        let n_index = match index {
-            Some(_) => known.len().min(map.edges.len()),
-            None => 0,
-        };
+    pub(super) fn new(map: &'a PlanarMap, known: &'a [Poly]) -> Self {
         let from = known.len().min(map.edges.len());
         let made: Vec<EdgeReach> = (from..map.edges.len())
             .map(|e| edge_reach(map.quad(e)))
@@ -3054,21 +2654,15 @@ impl<'a> NearEdges<'a> {
         let mut near = Self {
             map,
             known,
-            index,
-            n_index,
             made,
             local: CellGrid::new(),
             local_adj: IntMap::default(),
-            loaded_tiles: Default::default(),
-            loaded_edges: Default::default(),
-            cell_edges: IntMap::default(),
             seen: vec![0; map.edges.len()],
             stamp: 0,
-            buf: Vec::new(),
         };
-        for e in n_index..map.edges.len() {
+        for e in 0..map.edges.len() {
             let cells: Vec<(i64, i64)> = near.reach(e).1.to_vec();
-            near.local.insert(e - n_index, cells);
+            near.local.insert(e, cells);
             let ed = map.edges[e];
             near.local_adj.entry(ed.a).or_default().push(e);
             if ed.b != ed.a {
@@ -3096,39 +2690,6 @@ impl<'a> NearEdges<'a> {
         &self.reach(e).1
     }
 
-    /// 索引の升目 `tile` の辺を読み、その辺のマスに入れる（マスの中は辺の番号の順にそろえる）
-    fn load(&mut self, tile: (i64, i64)) {
-        let Some(ix) = self.index else {
-            return;
-        };
-        if !self.loaded_tiles.insert(tile) {
-            return;
-        }
-        let mut found = std::mem::take(&mut self.buf);
-        found.clear();
-        ix.index.edges_in(ix.stored, tile, &mut found);
-        let mut touched: Vec<(i64, i64)> = Vec::new();
-        for &e in &found {
-            if e >= self.n_index || !self.loaded_edges.insert(e) {
-                continue;
-            }
-            // 索引を引く辺は、計算に使う形を持つ（`n_index` は `known.len()` 以下）
-            let (known, map) = (self.known, self.map);
-            for &c in known[e].reach(map.quad(e)).1.iter() {
-                self.cell_edges.entry(c).or_default().push(e);
-                touched.push(c);
-            }
-        }
-        touched.sort_unstable();
-        touched.dedup();
-        for c in touched {
-            if let Some(v) = self.cell_edges.get_mut(&c) {
-                v.sort_unstable();
-            }
-        }
-        self.buf = found;
-    }
-
     /// マス `cells` のどれかにかかる辺（1つずつ。マスの順、マスの中は辺の番号の順：`CellGrid::query` と同じ）
     pub(super) fn query(
         &mut self,
@@ -3143,18 +2704,8 @@ impl<'a> NearEdges<'a> {
         }
         let stamp = self.stamp;
         for c in cells {
-            if self.index.is_some() {
-                self.load(index_tile(c));
-                if let Some(list) = self.cell_edges.get(&c) {
-                    for &e in list {
-                        if std::mem::replace(&mut self.seen[e], stamp) != stamp {
-                            out.push(e);
-                        }
-                    }
-                }
-            }
             for i in self.local.at(c) {
-                let e = i as usize + self.n_index;
+                let e = i as usize;
                 if std::mem::replace(&mut self.seen[e], stamp) != stamp {
                     out.push(e);
                 }
@@ -3162,22 +2713,9 @@ impl<'a> NearEdges<'a> {
         }
     }
 
-    /// 頂点 `v` につながる辺（辺の番号の順）を `out` に入れる（前の中身は消す）。前からある辺は、端の升目の索引で頂点の
-    /// 座標の所の辺を引き、端が `v` のものだけ残す（重ねる地図の頂点なら、前からある辺の端ではないので残らない）
+    /// 頂点 `v` につながる辺（辺の番号の順）を `out` に入れる（前の中身は消す）
     pub(super) fn edges_at(&self, v: usize, out: &mut Vec<usize>) {
         out.clear();
-        if let Some(ix) = self.index {
-            let p = self.map.nodes[v];
-            ix.ends.edges_in(ix.stored, end_key(p), out);
-            out.retain(|&e| {
-                e < self.n_index && {
-                    let ed = self.map.edges[e];
-                    ed.a == v || ed.b == v
-                }
-            });
-            out.sort_unstable();
-            out.dedup();
-        }
         if let Some(list) = self.local_adj.get(&v) {
             out.extend(list.iter().copied());
         }
@@ -3398,7 +2936,7 @@ impl ChainRestorer {
     }
 
     /// 置き換え終わった地図（使わなくなった辺を除く）と、その辺の判定の形の索引・辺の番号 → 索引の番号（索引を作らな
-    /// かったら `None`。続く `merge_degree2_indexed` が使い、無ければ要るときに作る：答えは索引の範囲によらない）
+    /// かったら `None`。続く `merge_degree2` が使い、無ければ要るときに作る：答えは索引の範囲によらない）
     pub(super) fn finish(self) -> (PlanarMap, Option<(PolyIndex, Vec<usize>)>) {
         let mut map = self.map;
         // 地図の辺と、`alive`・索引の辺は、同じ番号で1つずつ足してきた

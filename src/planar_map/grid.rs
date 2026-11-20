@@ -250,7 +250,7 @@ pub(super) fn seg_tags(
 
 /// 判定の形（格子の上の折れ線）の索引。地図の一部の辺を1本の曲線に置き換えてよいかを、整数で調べる
 /// （設計 段階2 の 2-4。曲線への置き換え・2本の辺のまとめ・アンカーの追加と削除で使う）
-pub(super) struct PolyIndex {
+pub(crate) struct PolyIndex {
     /// 辺ごとの判定の形の点。みな1つの並びに入れ、辺ごとの範囲を持つ（辺ごとに並びを持つと、辺ごとに小さな確保が
     /// 起きる。`CellGrid` と同じ理由）。辺 `f` は `pts[poly_at[f]]`（`poly`）
     pts: Vec<IPt>,
@@ -915,7 +915,7 @@ impl GridPolygon {
 
 /// 格子の点の外接矩形
 #[derive(Clone, Copy)]
-pub(super) struct GridRect {
+pub(crate) struct GridRect {
     pub(super) x0: i64,
     pub(super) y0: i64,
     pub(super) x1: i64,
@@ -1235,7 +1235,7 @@ pub(super) struct Regions {
 
 impl Regions {
     /// 点 `q`（2倍の座標）を含みうる組：外周の外接矩形の高さが `q` にかかる組（組の番号の順）。点を含む組を探すのは
-    /// これ1つ（穴の入れ先 `regions`、バケツの点の面 `with_face_filled`、何も無い側の輪郭の確かめ `check`）。
+    /// これ1つ（穴の入れ先 `regions`、何も無い側の輪郭の確かめ `check`）。
     /// どの配置でも、点の帯にかかる組だけを調べるので、組の数の2乗では増えない（レビュー 6ee325a の N-1001）
     pub(super) fn groups_at(&self, q: IPt) -> impl Iterator<Item = usize> + '_ {
         self.bands.at(q.1).iter().map(|&g| g as usize)
