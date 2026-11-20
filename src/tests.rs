@@ -34922,6 +34922,32 @@ fn local_edge_rules_match_full_check() {
 /// - 面の輪郭を作り直し（触った面にし）、その中に、外が何も無い島を足す（触った面の中に増えた辺が入る所）
 ///
 /// どれも、島や四角を面の外に置けば正しい（入り込まない）地図になるので、それも比べる
+/// 潰れた変換（逆にできない）で置いた地図は描かない（面積 0 の絵は見えない）ので、カーソル合わせと吸い付きは何にも
+/// 合わない（地図全体の写しを作る予備の道を置かない）
+#[test]
+fn collapsed_placement_hits_nothing() {
+    use crate::planar_map::{LayerBase, MapInput, MapRule, PlanarMap};
+    let red = Color32::from_rgb(235, 75, 75);
+    let m = PlanarMap::default()
+        .overlay(
+            MapInput::Shapes(&[map_overlay::rect_shape(0.0, 0.0, 100.0, 100.0, red)]),
+            MapRule::Paint(Some(red)),
+        )
+        .unwrap();
+    let base = LayerBase::new(&m.checked().unwrap().uniquely_labeled().into_map());
+    let p = Point::new(0.0, 0.0);
+    for xf in [Affine::scale(0.0), Affine::scale_non_uniform(1.0, 0.0)] {
+        assert_eq!(base.hit_node(p, 1000.0, xf), None);
+        assert_eq!(base.hit_edge(p, 1000.0, xf), None);
+        assert_eq!(
+            base.snap_target(Point::new(100.0, 100.0), p, 1000.0, xf),
+            None
+        );
+    }
+    // ふつうの変換なら合う
+    assert_eq!(base.hit_node(p, 1.0, Affine::IDENTITY), Some(p));
+}
+
 #[test]
 fn local_check_catches_unpainted_inside_painted() {
     use crate::planar_map::{CycleMemo, LayerBase, MapInput, MapRule, PlanarMap};

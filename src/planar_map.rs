@@ -928,12 +928,14 @@ impl PlanarMap {
         self.node_finder(r, xform, KRect::from_points(p, p))(p, None)
     }
 
+    #[cfg(test)]
     /// 地図を座標の変換 `xform` で置いたとき、`p` から `r` 以内でいちばん近い辺と、その上のパラメータ（距離は置いた座標で
     /// 測る。パラメータはアフィン変換で変わらない）
     pub(crate) fn hit_edge(&self, p: Point, r: f64, xform: Affine) -> Option<(usize, f64)> {
         self.hit_edge_among(p, r, xform, 0..self.edges.len())
     }
 
+    #[cfg(test)]
     /// `hit_edge` を、辺 `among`（番号の順）の中で
     fn hit_edge_among(
         &self,
@@ -3113,11 +3115,9 @@ impl LayerBase {
         xform: Affine,
         skip: Option<Point>,
     ) -> Option<Point> {
+        // 潰れた変換（逆にできない）で置いた地図は描かない（面積 0 の絵は見えない）ので、何にも合わない
         if xform.determinant().abs() <= 0.0 {
-            let m = self.map();
-            let skip_v = skip.and_then(|s| m.nodes.iter().position(|&q| q == s));
-            return m.node_finder_in(radius, xform, KRect::from_points(p, p), None)(p, skip_v)
-                .map(|v| m.nodes[v]);
+            return None;
         }
         let area = KRect::from_points(p, p).inflate(radius, radius);
         let doc_area = xform.inverse().transform_rect_bbox(area);
@@ -3300,8 +3300,9 @@ impl LayerBase {
     /// `PlanarMap::hit_edge` を、升目の索引で（見る辺を、点のまわりの升目にかかる辺だけにする。`p` から `r` 以内を通る
     /// 辺は、その所を含むマスの升目にあるので、答えは同じ）
     pub(crate) fn hit_edge(&self, p: Point, r: f64, xform: Affine) -> Option<(usize, f64)> {
+        // 潰れた変換で置いた地図は描かないので、何にも合わない（`nearest_node` と同じ）
         if xform.determinant().abs() <= 0.0 {
-            return self.map().hit_edge(p, r, xform);
+            return None;
         }
         let near = KRect::from_center_size(p, (2.0 * r, 2.0 * r));
         let ix = self.map_index();
