@@ -558,18 +558,16 @@ impl StoredMap {
             let se = StoredEdge::of(result, &result.edges[e]);
             let at = se.tile();
             // 足す辺の升目に、消す辺の無い前の塊があれば、その辺も入れて作り直す
-            if !redo.contains_key(&at) {
-                let mut list = Vec::new();
-                if let Ok(k) = tiles.binary_search_by_key(&at, |t| t[0].tile()) {
-                    list.extend(tiles[k].iter().copied());
-                }
-                redo.insert(at, list);
-            }
-            redo.get_mut(&at).expect("入れた").push(se);
+            redo.entry(at)
+                .or_insert_with(|| match tiles.binary_search_by_key(&at, |t| t[0].tile()) {
+                    Ok(k) => tiles[k].to_vec(),
+                    Err(_) => Vec::new(),
+                })
+                .push(se);
         }
         // 升目の順に、変わらない塊と作り直した塊を並べる（作り直した塊が空なら、その升目の塊は無くなる）
         let mut out: Vec<Tile> = Vec::with_capacity(tiles.len() + redo.len());
-        let mut push = |mut list: Vec<StoredEdge>, out: &mut Vec<Tile>| {
+        let push = |mut list: Vec<StoredEdge>, out: &mut Vec<Tile>| {
             if !list.is_empty() {
                 list.sort_unstable_by(|x, y| x.order(y));
                 out.push(TileData::new(list.into()));
