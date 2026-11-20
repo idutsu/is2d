@@ -4076,7 +4076,7 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
     assert!(
         maps.maps
             .iter()
-            .all(|m| m.base.map.nodes.iter().all(|p| (*p - Point::new(50.0, 50.0)).hypot() > 1.0)),
+            .all(|m| m.base.map().nodes.iter().all(|p| (*p - Point::new(50.0, 50.0)).hypot() > 1.0)),
         "空白フレームのシンボルマーカーの基準点が、輪郭の変形の頂点（磁気スナップの吸い付き先）にならないこと"
     );
 }
@@ -14188,7 +14188,7 @@ fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
     let lid = shape.layer_id;
     let map = crate::planar_map::LayerBase::of(&[&shape], kurbo::Affine::IDENTITY)
         .unwrap()
-        .map
+        .map()
         .clone();
     app.tabs[0].session.add_floating_maps(vec![(
         lid,
@@ -16412,7 +16412,7 @@ fn test_m4_3_saved_map_roundtrip_bit_exact_and_load_shrinks_capacities() {
     // 1. 地図1枚を保存の形（塊の表と塊の番号の並び。postcard）にして読み戻すと、ビットまで同じ地図に戻る
     let cel = &app.doc.root.layers[0].keyframes[0].cel;
     let base0 = cel.maps[0].base();
-    let map = &base0.map;
+    let map = &base0.map();
     let mut writer = crate::stored_map::TileWriter::default();
     let indices = writer.tiles_of(cel.maps[0].stored());
     let bytes = postcard::to_allocvec(&writer.finish()).unwrap();
@@ -16457,7 +16457,7 @@ fn test_m4_3_saved_map_roundtrip_bit_exact_and_load_shrinks_capacities() {
     assert_eq!(orig.maps.len(), load.maps.len());
     for (a, b) in orig.maps.iter().zip(load.maps.iter()) {
         assert_eq!(a.group_path, b.group_path);
-        assert_eq!(bits(&a.base().map), bits(&b.base().map));
+        assert_eq!(bits(a.base().map()), bits(b.base().map()));
     }
     assert_eq!(orig.shapes().len(), load.shapes().len());
     assert_eq!(
@@ -20881,7 +20881,7 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
             .sum();
         assert_eq!(
             edges,
-            m.base().map.edges.len(),
+            m.base().map().edges.len(),
             "塊の辺を合わせると地図の辺"
         );
         assert!(m_json.get("nodes").is_none(), "頂点の番号の並びは書かない");
@@ -23328,7 +23328,7 @@ fn test_anchor_added_near_edge_end_at_clicked_position() {
 /// 両側に色がある地図の辺の真ん中（アンカーの追加でつかむ点）
 fn shared_edge_midpoint(app: &Is2dApp, color_a: Color32, color_b: Color32) -> Point {
     let maps = crate::map_hover::scope_maps(app.scene(), &app.session);
-    let m = &maps.maps[0].base.map;
+    let m = &maps.maps[0].base.map();
     let e = (0..m.edges.len())
         .find(|&e| {
             let ed = &m.edges[e];
@@ -26909,7 +26909,7 @@ mod map_overlay {
         count(&app.doc.root);
         for kf in app.doc.root.layers.iter().flat_map(|l| &l.keyframes) {
             for m in kf.cel.maps.iter() {
-                edges += m.base().map.edges.len();
+                edges += m.base().map().edges.len();
                 tiles += m.stored().tiles();
             }
         }
@@ -27603,7 +27603,7 @@ mod map_overlay {
             )
         };
         let before = scope(&app);
-        let before_bits = bits(&before.base().map);
+        let before_bits = bits(before.base().map());
         assert!(before.stored().tiles() > 50, "塊が十分ある場面");
 
         // 塊から作り直した地図はビットまで同じで、操作が読む地図（画面の土台が持つ写し）も同じ
@@ -27618,7 +27618,7 @@ mod map_overlay {
             base.stored.same(before.stored()),
             "画面の土台のセル画の地図"
         );
-        assert_eq!(bits(&base.map), before_bits);
+        assert_eq!(bits(base.map()), before_bits);
 
         // ブラシ1本（小さな線）で新しくなるのは、線の近くの塊だけ。写しの持ち主がいなくても、図形から作り直さない
         drop_map_copies(&mut app);
@@ -27654,7 +27654,7 @@ mod map_overlay {
         // 塊を持つのは地図だけ：前の地図と共有した塊も、前の地図を捨てれば持ち主はその地図1つに戻る（アプリ全体の
         // 置き場は無い）
         use crate::stored_map::StoredMap;
-        let map = before.base().map.clone();
+        let map = before.base().map().clone();
         let first = StoredMap::from_dense(&map, None);
         assert!(first.tile_owners().iter().all(|&n| n == 1));
         let same = StoredMap::from_dense(&map, Some(&first));
@@ -27662,7 +27662,7 @@ mod map_overlay {
         assert_eq!(same.shared_tiles(&first), first.tiles());
         let ids: std::collections::HashSet<u64> = before
             .base()
-            .map
+            .map()
             .edges
             .iter()
             .filter_map(|e| e.left_src)
@@ -27705,7 +27705,7 @@ mod map_overlay {
                 .map(|s| s.shape_id)
                 .collect();
             crate::stored_map::StoredMap::from_dense(
-                &before.maps[0].base().map.restricted(&ids),
+                &before.maps[0].base().map().restricted(&ids),
                 None,
             )
         };
@@ -27776,7 +27776,7 @@ mod map_overlay {
                 .unwrap()
                 .base()
         };
-        let edges = group_map(&app).map.edges.len();
+        let edges = group_map(&app).map().edges.len();
         for action in [
             doc_actions::Action::MoveSelected {
                 delta: KVec2::new(13.0, -7.0),
@@ -27790,7 +27790,11 @@ mod map_overlay {
             assert!(doc_actions::apply(&mut app, action));
             let cel = &app.doc.root.layers[0].keyframes[0].cel;
             assert!(cel.maps_problem().is_none());
-            assert_eq!(group_map(&app).map.edges.len(), edges, "つながりはそのまま");
+            assert_eq!(
+                group_map(&app).map().edges.len(),
+                edges,
+                "つながりはそのまま"
+            );
         }
         assert_eq!(
             crate::planar_map::from_shape_builds(),
@@ -29783,7 +29787,7 @@ fn map_only_writes_share_the_instances() {
     );
     let lid = app.doc.root.layers[0].id;
     assert!(canvas_tool::edit_layer_map(app.tab_mut(), lid, |base| {
-        base.map
+        base.map()
             .overlay(MapInput::Shapes(&stroke), MapRule::Paint(Some(blue)))
             .and_then(|m| m.written(base))
     }));
@@ -30706,7 +30710,7 @@ fn pasting_reuses_the_polylines_of_unmoved_edges() {
             .unwrap();
     }
     let base = LayerBase::new(&m);
-    let piece = base.map.clone();
+    let piece = base.map().clone();
     let edges = piece.edges.len();
     let before = crate::planar_map::polys_built();
     let pasted = base
@@ -30746,7 +30750,7 @@ fn pasting_onto_the_same_lines_cuts_nothing() {
     let _ = base.overlay(MapInput::Shapes(&[]), MapRule::Overlay);
     let before = crate::planar_map::polys_built();
     let pasted = base
-        .overlay(MapInput::Map(&base.map), MapRule::Overlay)
+        .overlay(MapInput::Map(base.map()), MapRule::Overlay)
         .unwrap();
     assert_eq!(
         crate::planar_map::polys_built() - before,
@@ -31085,14 +31089,14 @@ fn test_short_brush_builds_polylines_only_near_the_stroke() {
         .cel
         .maps
         .iter()
-        .map(|m| m.base().map.edges.len())
+        .map(|m| m.base().map().edges.len())
         .sum();
     assert!(edges > 800, "辺 {edges} 本");
     let nodes: usize = app.doc.root.layers[0].keyframes[0]
         .cel
         .maps
         .iter()
-        .map(|m| m.base().map.nodes.len())
+        .map(|m| m.base().map().nodes.len())
         .sum();
     let cycles: usize = app.doc.root.layers[0].keyframes[0]
         .cel
@@ -33995,7 +33999,7 @@ fn edits_do_not_depend_on_edge_and_node_numbering() {
             // 計算に渡す地図の辺は、いつもしまう形の決まった向き（今の本番の写し `StoredMap::to_dense` と同じ。新しい作りの
             // 窓も塊から作るので同じ）。辺の向きを裏返すと、曲線を切り出す・まとめる所の丸めで、制御点が最小の刻み1つ分
             // ずれることがある（形は地図の精度の中で同じ）ので、向きはそろえたまま番号だけを並べ替える
-            m = LayerBase::new(&m).map.clone();
+            m = LayerBase::new(&m).map().clone();
             let (s, node_to, edge_to) = shuffled(&m, &mut rng);
             let c = colors[step % 4];
             // 同じ編集を、元の地図 `m` と並べ替えた地図 `s` に
@@ -34160,7 +34164,7 @@ fn measure_edit_scaling_by_cel_size() {
             .unwrap();
         k += 1;
     }
-    let block = LayerBase::new(&block).map.clone();
+    let block = LayerBase::new(&block).map().clone();
     let bb = block.bounding_box().unwrap();
     let (dx, dy) = (bb.width() + 20.0, bb.height() + 20.0);
     eprintln!(
@@ -34202,7 +34206,7 @@ fn measure_edit_scaling_by_cel_size() {
         let edges = app.doc.root.layers[0].keyframes[0]
             .cel
             .scope_base(&[])
-            .map
+            .map()
             .edges
             .len();
         // どの大きさでも同じ乱数（左上の区画の中で、同じ編集）
@@ -34432,7 +34436,7 @@ fn index_paths_match_full_scans() {
         let mut m = PlanarMap::default();
         for step in 0..160 {
             let base = LayerBase::new(&m);
-            let full = base.map.clone();
+            let full = base.map().clone();
             let c = colors[step % 4];
             let kind = step % 6;
             let (a, b) = match kind {
@@ -34563,7 +34567,7 @@ fn windowed_overlay_matches_full_on_large_map() {
             .unwrap();
         k += 1;
     }
-    let block = LayerBase::new(&block).map.clone();
+    let block = LayerBase::new(&block).map().clone();
     let bb = block.bounding_box().unwrap();
     let (dx, dy) = (bb.width() + 20.0, bb.height() + 20.0);
     let mut m = PlanarMap::default();
@@ -34594,7 +34598,7 @@ fn windowed_overlay_matches_full_on_large_map() {
     let total = (4.0 * dx, 4.0 * dy);
     for step in 0..60 {
         let base = LayerBase::new(&m);
-        let full = base.map.clone();
+        let full = base.map().clone();
         let c = colors[step % 4];
         // 場所：区画の中か、区画の境目のあたり
         let at = Point::new(bb.x0 + rng.f() * total.0, bb.y0 + rng.f() * total.1);
@@ -34763,7 +34767,7 @@ fn local_edge_rules_match_full_check() {
         }
     }
     let base = LayerBase::new(&m);
-    let full_map = base.map.clone();
+    let full_map = base.map().clone();
     let color = |rng: &mut map_overlay::Rng| Some(colors[(rng.f() * 3.0) as usize % 3]);
     let (mut oks, mut bads, mut cycles_good, mut cycles_bad, mut all_good) = (0, 0, 0, 0, 0);
     for _ in 0..400 {
@@ -34915,7 +34919,7 @@ fn local_check_matches_full_check_when_edges_are_removed() {
             }
         }
         let base = LayerBase::new(&m);
-        let full_map = base.map.clone();
+        let full_map = base.map().clone();
         let table = base.faces_table();
         let lookup =
             |id: crate::vector_engine::ShapeId| table.get(&id).cloned().unwrap_or_default();

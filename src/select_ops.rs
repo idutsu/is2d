@@ -674,7 +674,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
         let Some(cel) = tab.session.base_cache.cel(*layer_id) else {
             continue;
         };
-        let Some(map) = cel.scope_base(path).map.clone().checked() else {
+        let Some(map) = cel.scope_base(path).map().clone().checked() else {
             tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
             return false;
         };

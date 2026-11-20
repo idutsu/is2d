@@ -417,11 +417,11 @@ impl ScopeMap {
             None => self.map.clone(),
             Some(keep) => {
                 let base = self.base();
-                if base.map.labels_within(keep) {
+                if base.map().labels_within(keep) {
                     self.map.clone()
                 } else {
                     LazyStored::checked(StoredMap::from_dense(
-                        &base.map.restricted_by(keep),
+                        &base.map().restricted_by(keep),
                         Some(self.stored()),
                     ))
                 }
@@ -633,7 +633,7 @@ fn test_scope_map_from_shapes(
     let refs: Vec<&FillShape> = raw.iter().map(|s| &**s).collect();
     let base = LayerBase::of(&refs, Affine::IDENTITY).ok_or(Unmappable)?;
     let same_path = old.iter().find(|m| m.group_path == path);
-    let map = base.map.clone().checked().ok_or(Unmappable)?;
+    let map = base.map().clone().checked().ok_or(Unmappable)?;
     Ok(ScopeMap::new(
         path.to_vec(),
         map,
@@ -771,7 +771,7 @@ impl Cel {
             match item {
                 Item::Raw(path, m)
                     if path.starts_with(scope)
-                        && m.base().map.labels().any(|id| faces.contains(&id)) =>
+                        && m.base().map().labels().any(|id| faces.contains(&id)) =>
                 {
                     changed = true;
                     let keep = |id: ShapeId| !faces.contains(&id);
@@ -818,7 +818,7 @@ impl Cel {
                 Item::Raw(path, m)
                     if path.starts_with(scope)
                         && path.len() > depth
-                        && m.base().map.labels().any(|id| faces.contains(&id)) =>
+                        && m.base().map().labels().any(|id| faces.contains(&id)) =>
                 {
                     first_at.get_or_insert(rest.len());
                     if let Some(kept) = m.restricted(&path, Some(&|id| !faces.contains(&id))) {
@@ -877,7 +877,7 @@ impl Cel {
                 Item::Raw(path, m)
                     if path.starts_with(scope)
                         && path.len() > depth + 1
-                        && m.base().map.labels().any(|id| faces.contains(&id)) =>
+                        && m.base().map().labels().any(|id| faces.contains(&id)) =>
                 {
                     changed = true;
                     if let Some(kept) = m.restricted(&path, Some(&|id| !faces.contains(&id))) {
@@ -1138,7 +1138,7 @@ impl Cel {
         for item in Self::items_of(&self.maps, &self.instances) {
             match item {
                 Item::Raw(path, m) => {
-                    let map = realized(&m.base().map, xform)?.freshly_labeled();
+                    let map = realized(m.base().map(), xform)?.freshly_labeled();
                     if let Some(m) = ScopeMap::new(path.clone(), map, None) {
                         items.push(Item::Raw(path, m));
                     }
@@ -1340,14 +1340,14 @@ impl Cel {
     pub(crate) fn maps_problem(&self) -> Option<String> {
         for (k, m) in self.maps.iter().enumerate() {
             let base = m.base();
-            if !base.map.is_valid() {
+            if !base.map().is_valid() {
                 return Some(format!(
                     "階層 {:?} の地図が正しくない: {}",
                     m.group_path,
-                    base.map.validity_report()
+                    base.map().validity_report()
                 ));
             }
-            let (faces, _) = base.map.faces();
+            let (faces, _) = base.map().faces();
             if faces.is_empty() {
                 return Some(format!("階層 {:?} の地図に面が無い", m.group_path));
             }

@@ -572,7 +572,7 @@ impl PlanarMap {
         };
         (0..self.edges.len())
             .map(|e| match keys.get(&edge_key(self, e)) {
-                Some(&i) if start(self, e) == start(&prev.map, i) => EdgeOrigin::Same(i),
+                Some(&i) if start(self, e) == start(prev.map(), i) => EdgeOrigin::Same(i),
                 Some(&i) => EdgeOrigin::Reversed(i),
                 None => EdgeOrigin::New,
             })
@@ -1048,7 +1048,7 @@ impl PlanarMap {
         prev: &LayerBase,
         origin: &[EdgeOrigin],
     ) -> (Vec<Cycle>, Vec<Option<usize>>) {
-        let pm = &prev.map;
+        let pm = &prev.map();
         let idx = |h: (usize, bool)| 2 * h.0 + h.1 as usize;
         // 前の地図の辺ごとの、この地図の同じ向きの辺
         let mut back: Vec<Option<usize>> = vec![None; pm.edges.len()];
@@ -1737,7 +1737,9 @@ impl PlanarMap {
 /// 文書と Undo の控えは、しまう形（`StoredMap`）だけを持つ
 #[derive(Debug)]
 pub(crate) struct LayerBase {
-    pub(crate) map: PlanarMap,
+    /// 計算に使うふつうの地図（しまう形から決まった順で作ったもの：`StoredMap::to_dense`）。要る所が初めて使うときに作る
+    /// （`map`。差分から作った写しは、これを作らずに使える：設計 段2b の 7. の 2b-7c）
+    dense: OnceLock<PlanarMap>,
     pub(crate) stored: StoredMap,
     keys: OnceLock<EdgeKeys>,
     /// 辺ごとの判定の形（`map` の辺の順）
@@ -1781,7 +1783,7 @@ impl LayerBase {
     /// しまった地図 `stored` と、その計算に使う地図 `map`（`stored.to_dense()` と同じもの）の写し
     fn of_dense(map: PlanarMap, stored: StoredMap) -> Self {
         Self {
-            map,
+            dense: OnceLock::from(map),
             stored,
             keys: OnceLock::new(),
             polys: OnceLock::new(),
@@ -1790,6 +1792,15 @@ impl LayerBase {
             faces: SyncCache::new(None),
             index: OnceLock::new(),
         }
+    }
+
+    /// 計算に使うふつうの地図（初めて要るときに、しまう形から作る：`StoredMap::to_dense`）
+    pub(crate) fn map(&self) -> &PlanarMap {
+        self.dense.get_or_init(|| {
+            #[cfg(test)]
+            DENSE_BUILDS.with(|n| n.set(n.get() + 1));
+            self.stored.to_dense()
+        })
     }
 
     /// しまった地図 `stored` の計算に使う写し：いま誰かが持っていればそれ、無ければ作る（作ったものを生かすのは、
@@ -1819,7 +1830,7 @@ impl LayerBase {
         prev: Option<&LayerBase>,
     ) -> Arc<Self> {
         let base = Self::of_dense(polys.map, stored);
-        debug_assert_eq!(polys.polys.len(), base.map.edges.len());
+        debug_assert_eq!(polys.polys.len(), base.map().edges.len());
         #[cfg(test)]
         if test_checks() {
             for (e, p) in polys.polys.iter().enumerate() {
@@ -1921,7 +1932,7 @@ impl LayerBase {
     /// 升目。マスで探す所（`NearEdges`）も、外接矩形が重なるかで探す所（重ね合わせを窓で行うときの窓）も、その升目を引けば
     /// 必ず見つかる
     fn edge_tiles(&self, e: usize) -> Vec<(i64, i64)> {
-        let (bbox, cells) = self.polys()[e].reach(self.map.quad(e));
+        let (bbox, cells) = self.polys()[e].reach(self.map().quad(e));
         let mut t = index_tiles(cells);
         t.extend(index_tiles_over(*bbox));
         t.sort_unstable();
@@ -1944,8 +1955,8 @@ impl LayerBase {
             (b.0 - a.0, b.1 - a.1)
         };
         let mut list: Vec<(usize, bool)> = Vec::new();
-        for e in self.map.edges_at_in(v, Some(self.map_index())) {
-            let ed = self.map.edges[e];
+        for e in self.map().edges_at_in(v, Some(self.map_index())) {
+            let ed = self.map().edges[e];
             if ed.a == v {
                 list.push((e, true));
             }
@@ -1967,7 +1978,7 @@ impl LayerBase {
         let mut cur = start;
         loop {
             cycle.push(cur);
-            let ed = self.map.edges[cur.0];
+            let ed = self.map().edges[cur.0];
             let head = if cur.1 { ed.b } else { ed.a };
             let list = around.entry(head).or_insert_with(|| self.out_sorted(head));
             let back = (cur.0, !cur.1);
@@ -1979,7 +1990,7 @@ impl LayerBase {
             if next == start {
                 break;
             }
-            assert!(cycle.len() <= 2 * self.map.edges.len(), "輪郭が閉じない");
+            assert!(cycle.len() <= 2 * self.map().edges.len(), "輪郭が閉じない");
             cur = next;
         }
         let key = |h: &(usize, bool)| (h.0, !h.1);
@@ -2034,7 +2045,7 @@ impl LayerBase {
     /// 引く）
     #[cfg(test)]
     pub(crate) fn faces_table(&self) -> HashMap<ShapeId, Vec<(usize, bool)>> {
-        let (faces, _) = self.map.faces();
+        let (faces, _) = self.map().faces();
         faces
             .iter()
             .filter_map(|f| match f.srcs[..] {
@@ -2056,13 +2067,13 @@ impl LayerBase {
         MapIndex {
             index: self.index(),
             stored: &self.stored,
-            nodes: self.map.nodes.len(),
+            nodes: self.map().nodes.len(),
         }
     }
 
     /// `PlanarMap::hit_node` を、升目の索引で（見る頂点を、点のまわりの升目にかかる辺の端だけにする。答えは同じ）
     pub(crate) fn hit_node(&self, p: Point, r: f64, xform: Affine) -> Option<usize> {
-        self.map
+        self.map()
             .node_finder_in(r, xform, KRect::from_points(p, p), Some(self.map_index()))(
             p, None
         )
@@ -2076,20 +2087,20 @@ impl LayerBase {
         radius: f64,
         xform: Affine,
     ) -> Option<Point> {
-        let near = self.map.node_finder_in(
+        let near = self.map().node_finder_in(
             radius,
             xform,
             KRect::from_points(p, p),
             Some(self.map_index()),
         );
-        near(p, Some(v)).map(|w| self.map.nodes[w])
+        near(p, Some(v)).map(|w| self.map().nodes[w])
     }
 
     /// `PlanarMap::hit_edge` を、升目の索引で（見る辺を、点のまわりの升目にかかる辺だけにする。`p` から `r` 以内を通る
     /// 辺は、その所を含むマスの升目にあるので、答えは同じ）
     pub(crate) fn hit_edge(&self, p: Point, r: f64, xform: Affine) -> Option<(usize, f64)> {
         if xform.determinant().abs() <= 0.0 {
-            return self.map.hit_edge(p, r, xform);
+            return self.map().hit_edge(p, r, xform);
         }
         let near = KRect::from_center_size(p, (2.0 * r, 2.0 * r));
         let ix = self.map_index();
@@ -2099,15 +2110,15 @@ impl LayerBase {
         }
         cands.sort_unstable();
         cands.dedup();
-        self.map.hit_edge_among(p, r, xform, cands.into_iter())
+        self.map().hit_edge_among(p, r, xform, cands.into_iter())
     }
 
     /// 辺の鍵（`edge_key`）の集まり（初めて要るときに作る）。書き戻す地図の確かめ（`PlanarMap::written`）と、書き戻しの
     /// 差分（`diff`）が使う
     pub(crate) fn keys(&self) -> &EdgeKeys {
         self.keys.get_or_init(|| {
-            (0..self.map.edges.len())
-                .map(|e| (edge_key(&self.map, e), e))
+            (0..self.map().edges.len())
+                .map(|e| (edge_key(self.map(), e), e))
                 .collect()
         })
     }
@@ -2115,7 +2126,7 @@ impl LayerBase {
     /// 辺ごとの判定の形（`map` の辺の順。初めて要るときに作る。編集で作った写しは、確かめたときのものを引き継いでいる）
     fn polys(&self) -> &[Poly] {
         self.polys.get_or_init(|| {
-            (0..self.map.edges.len())
+            (0..self.map().edges.len())
                 .map(|e| Arc::clone(self.stored.poly(e)))
                 .collect()
         })
@@ -2124,14 +2135,14 @@ impl LayerBase {
     /// 面の輪郭（`face_cycles_with`。初めて要るときに作る。編集で作った写しは、確かめたときのものを引き継いでいる）
     pub(crate) fn cycles(&self) -> &[Vec<(usize, bool)>] {
         self.cycles
-            .get_or_init(|| self.map.face_cycles_with(self.polys()))
+            .get_or_init(|| self.map().face_cycles_with(self.polys()))
     }
 
     /// 輪郭ごとの組み立ての結果（`regions_since`。初めて要るときに作る。編集で作った写しは、確かめたときのものを引き継いで
     /// いる）
     fn cycle_regions(&self) -> &[CycleRegion] {
         self.cycle_regions.get_or_init(|| {
-            self.map
+            self.map()
                 .regions_since(self.polys(), self.cycles(), false, None)
                 .1
         })
@@ -2146,9 +2157,12 @@ impl LayerBase {
             self.cycles.get()?,
             self.cycle_regions.get()?,
         );
-        let fresh = self.map.polys();
-        let fresh_cycles = self.map.face_cycles_with(&fresh);
-        let fresh_regions = self.map.regions_since(&fresh, &fresh_cycles, false, None).1;
+        let fresh = self.map().polys();
+        let fresh_cycles = self.map().face_cycles_with(&fresh);
+        let fresh_regions = self
+            .map()
+            .regions_since(&fresh, &fresh_cycles, false, None)
+            .1;
         // 輪郭の点の始まりは、輪郭の始まりの区間で決まる。前の地図から引き継いだ輪郭は、番号の付け直しで始まりの区間が
         // 変わることがあるので、点を回した並びとして比べる（`Ring` の使い道は、どこから始めても同じ：`Ring` の説明）
         let same_points = |x: &[IPt], y: &[IPt]| {
@@ -2177,13 +2191,13 @@ impl LayerBase {
 
     /// バケツ（`PlanarMap::with_face_filled`）を、この写しの判定の形で
     pub(crate) fn with_face_filled(&self, p: Point, color: Color32) -> Option<PlanarMap> {
-        self.map
+        self.map()
             .face_filled_with(self.polys(), self.cycles(), p, color)
     }
 
     /// 重ね合わせ（`PlanarMap::overlay`）を、この写しの辺の計算に使う形で（近くの辺を探す外接矩形とマスを作り直さない）
     pub(crate) fn overlay(&self, input: MapInput<'_>, rule: MapRule) -> Option<PlanarMap> {
-        self.map
+        self.map()
             .overlay_known(self.polys(), Some(self.map_index()), input, rule)
     }
 
@@ -2194,7 +2208,7 @@ impl LayerBase {
         input: MapInput<'_>,
         rules: [MapRule; N],
     ) -> Option<[PlanarMap; N]> {
-        self.map
+        self.map()
             .overlay_rules_known(self.polys(), Some(self.map_index()), input, rules)
     }
 
@@ -2206,10 +2220,10 @@ impl LayerBase {
     ) -> Option<PlanarMap> {
         let mut maps = maps.into_iter();
         let Some(first) = maps.next() else {
-            return Some(self.map.clone());
+            return Some(self.map().clone());
         };
         let first = first?;
-        let start = if self.map.edges.is_empty() {
+        let start = if self.map().edges.is_empty() {
             first
         } else {
             self.overlay(MapInput::Map(&first), MapRule::Overlay)?
@@ -2219,7 +2233,7 @@ impl LayerBase {
 
     /// 地図の編集（`MapEdit::apply`）を、この写しの辺の計算に使う形と升目の索引で
     pub(crate) fn apply_edit(&self, edit: MapEdit) -> Option<PlanarMap> {
-        edit.apply_known(&self.map, self.polys(), Some(self.map_index()))
+        edit.apply_known(self.map(), self.polys(), Some(self.map_index()))
     }
 
     /// 面の図形（写し。階層 `group_path`）。面の順で、図形の番号は面の印（セル画の地図の面には、いつも1つずつ別の番号が
@@ -2238,13 +2252,13 @@ impl LayerBase {
 
     /// 面の図形を地図から作る（`faces`。番号の順）
     fn face_shapes(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
-        let (faces, _) = self.map.faces_of(self.polys(), self.cycles());
-        let ids = face_ids(&self.map, &faces, FaceIds::Keep);
+        let (faces, _) = self.map().faces_of(self.polys(), self.cycles());
+        let ids = face_ids(self.map(), &faces, FaceIds::Keep);
         let mut shapes: Vec<Arc<FillShape>> = faces
             .iter()
             .zip(&ids)
             .map(|(f, &id)| {
-                let mut s = self.map.face_shape(f, 0, group_path);
+                let mut s = self.map().face_shape(f, 0, group_path);
                 s.shape_id = id;
                 Arc::new(s)
             })
@@ -2289,7 +2303,7 @@ impl LayerBase {
             _ => Cow::Owned(next.map.edge_origins(self)),
         };
         let (removed, added, ids) = rewrite_shapes(
-            &self.map,
+            self.map(),
             &origin,
             &next.map,
             &next.faces,
@@ -3413,7 +3427,7 @@ pub(crate) fn map_edit_diff(
     let Some(base) = LayerBase::of(&own, xform) else {
         return MapEditOutcome::Refused;
     };
-    let Some(change) = edit(&base.map)
+    let Some(change) = edit(base.map())
         .and_then(|m| m.written(&base))
         .and_then(|next| base.diff_placed(next, &own, layer_id, group_path, xform))
     else {

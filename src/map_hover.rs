@@ -27,12 +27,12 @@ pub(crate) struct LayerMap {
 impl LayerMap {
     /// 辺 `e` の、置いた座標の形
     fn placed_quad(&self, e: usize) -> QuadBez {
-        self.xform * self.base.map.quad(e)
+        self.xform * self.base.map().quad(e)
     }
 
     /// 頂点 `v` の、置いた座標の位置
     fn placed_node(&self, v: usize) -> Point {
-        self.xform * self.base.map.nodes[v]
+        self.xform * self.base.map().nodes[v]
     }
 }
 
@@ -113,7 +113,7 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
 /// 地図 `lm` の頂点 `v` を通る面の図形と、その図形の輪郭のうち `v` を通るものの番号。カーソルを合わせた頂点の輪郭を
 /// 見せるのに使う。面が無ければ番号 0
 fn node_on_shape(scene: Scene<'_>, lm: &LayerMap, v: usize) -> (ShapeId, usize) {
-    let map = &lm.base.map;
+    let map = lm.base.map();
     let Some(id) = map
         .edges
         .iter()
@@ -182,20 +182,20 @@ fn anchor_hover_in(
             let d = (p - mouse_pt).hypot();
             if best.as_ref().is_none_or(|b| d < b.0)
                 && !hidden_by_front(scene, session, lm, p)
-                && lm.base.map.with_anchor_added(e, t).is_some()
+                && lm.base.map().with_anchor_added(e, t).is_some()
             {
                 best = Some((d, lm, e, t));
             }
         }
         return best.map_or(HoverTarget::None, |(_, lm, e, t)| {
             let q = lm.placed_quad(e);
-            let ed = &lm.base.map.edges[e];
+            let ed = lm.base.map().edges[e];
             HoverTarget::Edge {
                 shape_id: ed.left_src.or(ed.right_src).unwrap_or(0),
                 t,
                 closest_pos: q.eval(t),
                 seg: q,
-                map_edge: Some((lm.owner, lm.base.map.quad(e))),
+                map_edge: Some((lm.owner, lm.base.map().quad(e))),
             }
         });
     }
@@ -208,7 +208,7 @@ fn anchor_hover_in(
         let d = (p - mouse_pt).hypot();
         if best.as_ref().is_none_or(|b| d < b.0)
             && !hidden_by_front(scene, session, lm, p)
-            && lm.base.map.with_anchor_deleted(v).is_some()
+            && lm.base.map().with_anchor_deleted(v).is_some()
         {
             best = Some((d, lm, v));
         }
@@ -219,7 +219,7 @@ fn anchor_hover_in(
             shape_id,
             contour_idx,
             pos: lm.placed_node(v),
-            map_node: Some((lm.owner, v, lm.base.map.nodes[v])),
+            map_node: Some((lm.owner, v, lm.base.map().nodes[v])),
         }
     })
 }
@@ -277,7 +277,7 @@ pub(crate) fn reshape_hover(
             shape_id,
             contour_idx,
             pos: lm.placed_node(v),
-            map_node: Some((lm.owner, v, lm.base.map.nodes[v])),
+            map_node: Some((lm.owner, v, lm.base.map().nodes[v])),
         };
     }
     let mut best_e: Option<(f64, &LayerMap, usize, f64, ShapeId)> = None;
@@ -292,7 +292,7 @@ pub(crate) fn reshape_hover(
         // 辺の左右は地図の座標で決まる（裏返して置いた地図では、置いた座標の左右と逆になる）
         let on_left = ((mouse_pt - p).dot(KVec2::new(-tan.y, tan.x)) >= 0.0)
             == (lm.xform.determinant() >= 0.0);
-        let ed = &lm.base.map.edges[e];
+        let ed = lm.base.map().edges[e];
         let (side, side_src) = if on_left {
             (ed.left, ed.left_src)
         } else {
@@ -311,7 +311,7 @@ pub(crate) fn reshape_hover(
             t,
             closest_pos: q.eval(t),
             seg: q,
-            map_edge: Some((lm.owner, lm.base.map.quad(e))),
+            map_edge: Some((lm.owner, lm.base.map().quad(e))),
         };
     }
     HoverTarget::None

@@ -344,8 +344,8 @@ pub(crate) fn merge_pieces_layer_by_layer(
             continue;
         };
         let change = base
-            .map
-            .overlay(MapInput::Map(&piece.map), MapRule::Overlay)
+            .map()
+            .overlay(MapInput::Map(piece.map()), MapRule::Overlay)
             .and_then(|m| m.written(&base))
             .and_then(|next| base.diff_placed(next, &own, layer_id, &scope, xform));
         if let Some(change) = change {

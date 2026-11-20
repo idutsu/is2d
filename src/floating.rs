@@ -50,9 +50,9 @@ impl PieceGroup {
     fn placed(&self) -> Option<PlanarMap> {
         let base = self.base();
         if self.xform == Affine::IDENTITY {
-            return Some(base.map.clone());
+            return Some(base.map().clone());
         }
-        Some(realized(&base.map, self.xform)?.into_map())
+        Some(realized(base.map(), self.xform)?.into_map())
     }
 
     /// 確かめた地図 `map`（文書の座標）の片の組。面ごとに1つずつ別の番号を記す（番号が1つに決まらない面には、新しい
@@ -80,12 +80,12 @@ impl PieceGroup {
 
     /// 片の番号（面の辺の側に記した番号。同じ番号をくり返す）
     fn ids(&self) -> Vec<ShapeId> {
-        self.base().map.labels().collect()
+        self.base().map().labels().collect()
     }
 
     /// 片の番号のどれか1つ（画面の図形の並びで、この組の片を探す手がかり）
     pub(crate) fn first_id(&self) -> Option<ShapeId> {
-        self.base().map.labels().next()
+        self.base().map().labels().next()
     }
 
     /// 置いた地図（変換をかけたもの）から、地図の並び `cover`（文書の座標）の色のある所を消した組（変換は恒等）。重なら
@@ -97,7 +97,7 @@ impl PieceGroup {
                 i.width() > 0.0 && i.height() > 0.0
             })
         };
-        match self.base().map.bounding_box() {
+        match self.base().map().bounding_box() {
             Some(r) if overlaps(self.xform.transform_rect_bbox(r)) => {}
             _ => return Ok(Some(self.clone())),
         }
@@ -125,7 +125,7 @@ impl PieceGroup {
         }
         let map = self
             .base()
-            .map
+            .map()
             .restricted(keep)
             .checked()
             .ok_or(Unplaceable)?;
@@ -233,7 +233,10 @@ impl FloatLayer {
         stage: Stage<'_>,
         ids: &HashSet<ShapeId>,
     ) -> Option<CheckedMap> {
-        let start = self.content(&stage.cel(self.layer_id)?).map.restricted(ids);
+        let start = self
+            .content(&stage.cel(self.layer_id)?)
+            .map()
+            .restricted(ids);
         let groups = restricted_groups(&self.groups, ids).ok()?;
         stacked(start, groups.iter().map(PieceGroup::placed))?.checked()
     }
@@ -453,7 +456,7 @@ impl Floating {
         self.layers
             .iter()
             .flat_map(|l| &l.groups)
-            .all(|g| g.base().map.fits_grid(doc * g.xform))
+            .all(|g| g.base().map().fits_grid(doc * g.xform))
     }
 
     /// 動かす・回す・拡大：すべての片の組に、文書の座標の変換 `doc` を重ねる（重ねてよいかは先に `fits_transform` で
@@ -479,7 +482,7 @@ impl Floating {
                 continue;
             }
             for (gi, g) in l.groups.iter().enumerate() {
-                if let Some(m) = g.base().map.recolored(ids, color) {
+                if let Some(m) = g.base().map().recolored(ids, color) {
                     let m = m.checked().ok_or(Unplaceable)?;
                     next.push((li, gi, PieceGroup::new(m, g.xform)));
                 }
@@ -511,7 +514,7 @@ impl Floating {
         else {
             return false;
         };
-        let Some(next) = edit(&g.base().map).and_then(PlanarMap::checked) else {
+        let Some(next) = edit(g.base().map()).and_then(PlanarMap::checked) else {
             return false;
         };
         *g = PieceGroup::new(next, g.xform);
@@ -547,9 +550,9 @@ impl Floating {
             let Some(cel) = stage.cel(layer_id) else {
                 return false;
             };
-            let mut rest = l.content(&cel).map.clone();
+            let mut rest = l.content(&cel).map().clone();
             for g in &back {
-                let Some(m) = rest.overlay(MapInput::Map(&g.base().map), MapRule::Overlay) else {
+                let Some(m) = rest.overlay(MapInput::Map(g.base().map()), MapRule::Overlay) else {
                     return false;
                 };
                 rest = m;
@@ -652,7 +655,7 @@ fn cut_layer(
     };
     let cur = cur.unwrap_or(&empty);
     let content_base = cur.content(&cel);
-    let content = &content_base.map;
+    let content = content_base.map();
     let part = (!ids.is_empty())
         .then(|| content.restricted(ids))
         .filter(|m| !m.edges.is_empty());
@@ -687,7 +690,7 @@ fn cut_layer(
             Some(g) if !modified => {
                 let joined = g
                     .base()
-                    .map
+                    .map()
                     .overlay(MapInput::Map(inside.map()), MapRule::Overlay)?
                     .checked()?;
                 *g = PieceGroup::new(joined, Affine::IDENTITY);

@@ -1019,7 +1019,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
             tab.session
                 .base_cache
                 .cel(*layer_id)
-                .is_none_or(|c| c.scope_base(path).map.fits_grid(doc))
+                .is_none_or(|c| c.scope_base(path).map().fits_grid(doc))
         });
     if !fits {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
@@ -1049,7 +1049,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         let mut written: Vec<LayerId> = Vec::new();
         for (layer_id, group_path) in &scopes {
             if write_scope_map(tab, *layer_id, group_path, |base| {
-                crate::planar_map::realized(&base.map, doc)
+                crate::planar_map::realized(base.map(), doc)
             }) && !written.contains(layer_id)
             {
                 written.push(*layer_id);
