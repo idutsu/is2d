@@ -584,13 +584,13 @@ impl PlanarMap {
                                     LocalMap::new(ix, &m, &removed, &added);
                                 let touched = local.touched_cycles();
                                 let edges_ok = local.added_edges_ok();
-                                let touched_ok = local.touched_cycles_ok();
+                                let mut memo = CycleMemo::default();
+                                let touched_ok = local.touched_cycles_ok(&mut memo);
                                 let cycles_ok = touched_ok.is_some();
                                 // 確かめ全体の答え（設計 段2b の 6. の 5.）
                                 let prev = LayerBase::new(self);
                                 let table = prev.faces_table();
                                 let lookup = |id: ShapeId| table.get(&id).cloned().unwrap_or_default();
-                                let mut memo = CycleMemo::default();
                                 let local_ok = edges_ok
                                     && touched_ok.as_ref().is_some_and(|t| {
                                         local.regions_ok(t, &lookup, &mut memo) == Some(true)
@@ -859,8 +859,7 @@ impl PlanarMap {
             ends.dedup();
             for p in ends {
                 let mut at: Vec<usize> = Vec::new();
-                ix.index
-                    .edges_in(stored, index_tile(cell_of(gpt(p))), &mut at);
+                ix.ends.edges_in(stored, end_key(p), &mut at);
                 for e in at {
                     let te = stored.edge_at(e);
                     if te.a == p || te.b == p {
@@ -2678,6 +2677,8 @@ impl<'a> FedEdges<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct MapIndex<'a> {
     pub(crate) index: &'a crate::stored_map::TileIndex,
+    /// 端の升目の索引（`LayerBase::ends_index`）
+    pub(crate) ends: &'a crate::stored_map::TileIndex,
     pub(crate) stored: &'a StoredMap,
     /// その地図の頂点の数（前からある頂点の番号は `0..nodes`）
     pub(crate) nodes: usize,
@@ -2829,8 +2830,7 @@ impl<'a> NearEdges<'a> {
         out.clear();
         if let Some(ix) = self.index.filter(|ix| v < ix.nodes) {
             let p = self.map.nodes[v];
-            let tile = index_tile(cell_of(gpt(p)));
-            ix.index.edges_in(ix.stored, tile, out);
+            ix.ends.edges_in(ix.stored, end_key(p), out);
             out.retain(|&e| {
                 e < self.n_index && {
                     let ed = self.map.edges[e];

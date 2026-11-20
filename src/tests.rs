@@ -34853,7 +34853,9 @@ fn local_edge_rules_match_full_check() {
         }
         oks += 1;
         // 触った輪郭の決まり（辺の決まりが成り立つときだけ比べる：交わる辺では輪郭の形が決まらない）
-        let cycles_ok = local.touched_cycles_ok().is_some();
+        let cycles_ok = local
+            .touched_cycles_ok(&mut crate::planar_map::CycleMemo::default())
+            .is_some();
         assert_eq!(
             cycles_ok,
             LayerBase::cycles_ok_full(&joined),
@@ -34868,10 +34870,10 @@ fn local_edge_rules_match_full_check() {
         let table = base.faces_table();
         let lookup =
             |id: crate::vector_engine::ShapeId| table.get(&id).cloned().unwrap_or_default();
-        let local_ok = local.touched_cycles_ok().is_some_and(|t| {
-            local.regions_ok(&t, &lookup, &mut crate::planar_map::CycleMemo::default())
-                == Some(true)
-        });
+        let mut memo = crate::planar_map::CycleMemo::default();
+        let local_ok = local
+            .touched_cycles_ok(&mut memo)
+            .is_some_and(|t| local.regions_ok(&t, &lookup, &mut memo) == Some(true));
         assert_eq!(
             local_ok,
             base.written_ok(&joined),
@@ -34966,10 +34968,11 @@ fn local_check_matches_full_check_when_edges_are_removed() {
                 !removed.contains(&(k - 1))
             });
             let local = base.local_map(&full_map, &removed, &[]);
+            let mut memo = CycleMemo::default();
             let got = local.added_edges_ok()
-                && local.touched_cycles_ok().is_some_and(|t| {
-                    local.regions_ok(&t, &lookup, &mut CycleMemo::default()) == Some(true)
-                });
+                && local
+                    .touched_cycles_ok(&mut memo)
+                    .is_some_and(|t| local.regions_ok(&t, &lookup, &mut memo) == Some(true));
             assert_eq!(
                 got,
                 base.written_ok(&joined),

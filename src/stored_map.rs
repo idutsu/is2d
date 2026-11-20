@@ -68,7 +68,6 @@ impl StoredEdge {
         }
     }
 
-    #[cfg(test)]
     /// 塊から引いた辺の形の辺（決まった向きにする）
     fn of_tile(te: &TileEdge) -> Self {
         let src = |id: Option<ShapeId>| id.and_then(NonZeroU64::new);
@@ -534,7 +533,6 @@ impl StoredMap {
         }
     }
 
-    #[cfg(test)]
     /// 計算に使う地図（`to_dense`）の辺の数
     pub(crate) fn edge_count(&self) -> usize {
         self.0.tiles.iter().map(|t| t.len()).sum()
@@ -587,7 +585,6 @@ impl StoredMap {
         n
     }
 
-    #[cfg(test)]
     /// 計算に使う地図の辺 `e` のしまう辺
     fn stored_edge(&self, e: usize) -> &StoredEdge {
         let starts = self.starts();
@@ -595,7 +592,6 @@ impl StoredMap {
         &self.0.tiles[k][e - starts[k] as usize]
     }
 
-    #[cfg(test)]
     /// 窓で重ねた結果の差分（`window_diff` と同じ）を、前の地図の一覧を使わずに塊から：窓の辺 `window`（計算に使う地図の
     /// 番号）と結果 `result` を、しまう辺で比べて（消えた辺, 増えた結果の辺）
     pub(crate) fn window_diff_tiles(
@@ -621,7 +617,6 @@ impl StoredMap {
         (removed, added)
     }
 
-    #[cfg(test)]
     /// 形が `q` の辺（向きが逆でもよい）の、計算に使う地図での番号と、`q` と同じ向きか。辺は弦の中点の升目の塊にあるので、
     /// その塊の中だけを探す
     pub(crate) fn find_edge(&self, q: &QuadBez) -> Option<(usize, bool)> {
@@ -650,7 +645,6 @@ impl StoredMap {
         Some((self.starts()[k] as usize + j, q.p0 == a))
     }
 
-    #[cfg(test)]
     /// この地図に差分を当てた地図：計算に使う地図の辺 `removed` を消し、辺 `added` を足す（`with_diff` と同じ。足す辺を
     /// 塊の辺の形で受け取る）
     pub(crate) fn with_diff_tiles(&self, removed: &[usize], added: &[TileEdge]) -> Self {

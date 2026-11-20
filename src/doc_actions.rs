@@ -15,7 +15,7 @@ use crate::clipboard_ops::{
     content_xform, import_clipboard_symbols, pasteable_content, prepare_copy_selected_shapes,
     prepare_placement, put_placements, remap_timeline_ids, selected_content,
 };
-use crate::planar_map::{MapEdit, MapInput, MapRule};
+use crate::planar_map::{MapEdit, MapRule};
 use crate::select_ops::{
     apply_marquee_selection, compute_hover_target, enter_group_at, exit_current_group,
     prepare_arrange_selected, prepare_clear_active_frame_shapes, prepare_delete_selected_shapes,
@@ -805,9 +805,48 @@ fn apply_stroke_shapes(tab: &mut Tab, active_tool: Tool, shapes: Vec<FillShape>)
         .iter()
         .map(|s| s.to_doc(world).into_owned())
         .collect();
-    write_map_edit(tab, target_lid, Some(Refusal::OffGrid), |base| {
-        base.overlay(MapInput::Shapes(&strokes), rule)
-    })
+    write_local_paint(tab, target_lid, &strokes, rule)
+}
+
+/// ブラシ・消しゴムの線 `strokes`（文書の座標）を、レイヤー `layer_id` の編集中の階層に、触った所だけで書く
+/// （`LayerBase::paint_local`・`Cel::edit_local`。設計：claude/触った所だけを計算する地図の設計_22fbbbe.md の段2b）。
+/// 格子に置けない線は書かずに `Refusal::OffGrid`、正しい地図にならなければ書かずに `Refusal::Unwritable` を知らせる
+/// （`write_map_edit` と同じ）
+fn write_local_paint(
+    tab: &mut Tab,
+    layer_id: LayerId,
+    strokes: &[FillShape],
+    rule: MapRule,
+) -> bool {
+    use crate::planar_map::LocalRefusal;
+    let scope = tab.session.editing_group_path.clone();
+    let mut refusal = None;
+    let mut held = None;
+    let written = crate::canvas_tool::write_cel(tab, layer_id, |cel| {
+        match cel.edit_local(&scope, |base| base.paint_local(strokes, rule, &scope)) {
+            Ok(Some(w)) => {
+                held = w.0;
+                true
+            }
+            Ok(None) => false,
+            Err(r) => {
+                refusal = Some(match r {
+                    LocalRefusal::OffGrid => Refusal::OffGrid,
+                    LocalRefusal::Unwritable => Refusal::Unwritable,
+                });
+                false
+            }
+        }
+    });
+    if let Some(base) = held {
+        tab.session.base_cache.hold(layer_id, base);
+    }
+    let lids: Vec<LayerId> = written.then_some(layer_id).into_iter().collect();
+    crate::canvas_tool::finish_cel_writes(tab, &lids);
+    if refusal.is_some() {
+        tab.session.refusal = refusal;
+    }
+    written
 }
 
 /// 地図の編集（ブラシ・消しゴム・バケツ・輪郭の変形・アンカー）を、レイヤー `layer_id` の編集中の階層に書く

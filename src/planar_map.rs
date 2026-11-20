@@ -16,11 +16,9 @@ use crate::vector_engine::{LayerId, ShapeId};
 
 mod grid;
 // 前の地図＋差分として触った所だけを計算する道具（段2b）
-#[cfg(test)]
 mod local;
 mod overlay;
 pub(crate) use self::grid::*;
-#[cfg(test)]
 pub(crate) use self::local::*;
 pub(crate) use self::overlay::*;
 
@@ -854,8 +852,7 @@ impl PlanarMap {
     fn edges_around(&self, p: Point, index: Option<MapIndex<'_>>) -> Option<Vec<usize>> {
         let ix = index?;
         let mut out = Vec::new();
-        ix.index
-            .edges_in(ix.stored, index_tile(cell_of(gpt(p))), &mut out);
+        ix.ends.edges_in(ix.stored, end_key(p), &mut out);
         out.sort_unstable();
         out.dedup();
         Some(out)
@@ -1643,7 +1640,6 @@ fn labeled(mut map: PlanarMap, faces: &[MapFace], ids: &[ShapeId]) -> PlanarMap 
     map
 }
 
-#[cfg(test)]
 /// 触った所だけで行う編集（`LayerBase::paint_local`）の答え
 pub(crate) enum LocalEdit {
     /// 変わらない
@@ -1654,7 +1650,6 @@ pub(crate) enum LocalEdit {
     Changed(LocalWrite),
 }
 
-#[cfg(test)]
 /// 触った所だけで行う編集を書けない理由
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LocalRefusal {
@@ -1662,7 +1657,6 @@ pub(crate) enum LocalRefusal {
     Unwritable,
 }
 
-#[cfg(test)]
 /// 触った所だけで行った編集の書くもの：前のしまう形に差分を当てた新しいしまう形（正しい地図で、面に1つずつ別の番号が
 /// 記してある）と、新しい面の図形の表（番号の順。変わらない面は前の表と同じ図形を共有する：消した図形は前の表にだけ、
 /// 入れた図形は新しい表にだけある）
@@ -1781,6 +1775,8 @@ pub(crate) struct LayerBase {
     /// 升目の索引（初めて要るときに作る。地図を書き換えたあとの写しは、前の写しの索引から変わった所だけ作り直したもの
     /// を持つ：`with_faces`・`of_stored_after`）
     index: OnceLock<crate::stored_map::TileIndex>,
+    /// 端の升目の索引（升目ごとの、端がその升目にある辺。頂点の辺を引く所が使う：`end_tiles`。作り方は `index` と同じ）
+    ends: OnceLock<crate::stored_map::TileIndex>,
 }
 
 /// しまう形の辺の順（`StoredMap::to_dense` の辺の順）に並べた、辺ごとの判定の形と面の輪郭
@@ -1819,6 +1815,7 @@ impl LayerBase {
             cycle_regions: OnceLock::new(),
             faces: SyncCache::new(None),
             index: OnceLock::new(),
+            ends: OnceLock::new(),
         }
     }
 
@@ -1900,7 +1897,6 @@ impl LayerBase {
         base
     }
 
-    #[cfg(test)]
     /// 触った所だけで行った編集（`paint_local`）の新しいしまう形 `stored`（階層 `group_path`、面の図形の表 `faces`）の写し。
     /// 地図全体の一覧（`map`）・判定の形・輪郭の一覧は作らず、要る所が初めて使うときに作る。升目の索引は、前の写し `prev`
     /// の索引から、変わった塊の分だけ作る（設計 段2b の 7. の 2b-7c）
@@ -1919,6 +1915,7 @@ impl LayerBase {
             cycle_regions: OnceLock::new(),
             faces: SyncCache::new(Some((group_path.to_vec(), faces))),
             index: OnceLock::new(),
+            ends: OnceLock::new(),
         };
         base.inherit_index(Some(prev));
         let base = Arc::new(base);
@@ -1945,27 +1942,55 @@ impl LayerBase {
         let Some(prev) = prev else {
             return;
         };
-        if self.index.get().is_some() {
+        self.derive_index(prev, |b| &b.index, LayerBase::edge_tiles);
+        self.derive_index(prev, |b| &b.ends, LayerBase::end_tiles);
+    }
+
+    /// 写し `prev` の索引（`slot` で選ぶ：升目の索引か端の升目の索引）から、この写しの同じ索引を作る（変わった塊の分だけ
+    /// 作り直す）。`tiles`：辺がかかる升目の決め方
+    fn derive_index(
+        &self,
+        prev: &LayerBase,
+        slot: impl Fn(&LayerBase) -> &OnceLock<crate::stored_map::TileIndex>,
+        tiles: fn(&LayerBase, usize) -> Vec<(i64, i64)>,
+    ) {
+        if slot(self).get().is_some() {
             return;
         }
-        let Some(old) = prev.index.get() else {
+        let Some(old) = slot(prev).get() else {
             return;
         };
         let derived = old.derive(
             &prev.stored,
             &self.stored,
-            |e| prev.edge_tiles(e),
-            |e| self.edge_tiles(e),
+            |e| tiles(prev, e),
+            |e| tiles(self, e),
         );
         #[cfg(test)]
         if test_checks() {
-            let full = crate::stored_map::TileIndex::build(&self.stored, |e| self.edge_tiles(e));
+            let full = crate::stored_map::TileIndex::build(&self.stored, |e| tiles(self, e));
             assert!(
                 derived.same_content(&full),
-                "前の写しから作った升目の索引が、全部作ったものと違う"
+                "前の写しから作った索引が、全部作ったものと違う"
             );
         }
-        let _ = self.index.set(derived);
+        let _ = slot(self).set(derived);
+    }
+
+    /// 辺 `e` の端がある、端の升目の索引の升目（`end_key`）
+    fn end_tiles(&self, e: usize) -> Vec<(i64, i64)> {
+        let te = self.stored.edge_at(e);
+        let mut t = vec![end_key(te.a), end_key(te.b)];
+        t.sort_unstable();
+        t.dedup();
+        t
+    }
+
+    /// 端の升目の索引（初めて要るときに全部作る）
+    pub(crate) fn ends_index(&self) -> &crate::stored_map::TileIndex {
+        self.ends.get_or_init(|| {
+            crate::stored_map::TileIndex::build(&self.stored, |e| self.end_tiles(e))
+        })
     }
 
     /// まだ升目の索引を持っていなければ、写し `donors` のうち索引を持ち、この地図といちばん多く塊を共有するものから作る
@@ -2059,7 +2084,6 @@ impl LayerBase {
         cycle
     }
 
-    #[cfg(test)]
     /// 形 `shapes`（文書の座標）を決まり `rule` で重ねる編集（ブラシ・消しゴム）を、触った所だけで行う（設計 段2b の 7. の
     /// 2b-7c）：窓で重ね（`window_overlay`）、差分を前の地図＋差分として確かめ（`LocalMap`）、触った面の書き戻しの差分を
     /// 決め（`rewrite`）、前のしまう形に差分を当てた新しいしまう形と、新しい面の図形の表を作る。地図全体の一覧（`map`）を
@@ -2083,7 +2107,6 @@ impl LayerBase {
         got
     }
 
-    #[cfg(test)]
     fn paint_local_inner(
         &self,
         shapes: &[FillShape],
@@ -2114,7 +2137,8 @@ impl LayerBase {
         if !local.added_edges_ok() {
             return LocalEdit::Refused(LocalRefusal::Unwritable);
         }
-        let Some(touched) = local.touched_cycles_ok() else {
+        let mut memo = CycleMemo::default();
+        let Some(touched) = local.touched_cycles_ok(&mut memo) else {
             return LocalEdit::Refused(LocalRefusal::Unwritable);
         };
         let faces_list = self.faces(group_path);
@@ -2127,7 +2151,6 @@ impl LayerBase {
                 Err(_) => Vec::new(),
             }
         };
-        let mut memo = CycleMemo::default();
         if local.regions_ok(&touched, &lookup, &mut memo) != Some(true) {
             return LocalEdit::Refused(LocalRefusal::Unwritable);
         }
@@ -2172,7 +2195,6 @@ impl LayerBase {
         })
     }
 
-    #[cfg(test)]
     /// 重ねる形の線の端を、前からある頂点から `FLAT_TOL` 以内なら、その頂点（いちばん近いもの）に寄せる（`overlay` の形の
     /// 線の端を寄せる所と同じ。頂点は塊から引き、升目の索引で端の近くの辺の端だけを見る）
     fn snap_ends(&self, quads: &mut [QuadBez]) {
@@ -2186,8 +2208,8 @@ impl LayerBase {
         };
         let ix = self.map_index();
         let mut edges: Vec<usize> = Vec::new();
-        for t in index_tiles_over(area.inflate(FLAT_TOL, FLAT_TOL)) {
-            ix.index.edges_in(&self.stored, t, &mut edges);
+        for t in end_keys_over(area.inflate(FLAT_TOL, FLAT_TOL)) {
+            ix.ends.edges_in(&self.stored, t, &mut edges);
         }
         edges.sort_unstable();
         edges.dedup();
@@ -2370,6 +2392,7 @@ impl LayerBase {
     fn map_index(&self) -> MapIndex<'_> {
         MapIndex {
             index: self.index(),
+            ends: self.ends_index(),
             stored: &self.stored,
             nodes: self.map().nodes.len(),
         }
@@ -3033,8 +3056,8 @@ impl PlanarMap {
                 // 升目に、その頂点を端に持つ辺が入っている
                 let doc_area = xform.inverse().transform_rect_bbox(area);
                 let mut edges: Vec<usize> = Vec::new();
-                for t in index_tiles_over(doc_area) {
-                    ix.index.edges_in(ix.stored, t, &mut edges);
+                for t in end_keys_over(doc_area) {
+                    ix.ends.edges_in(ix.stored, t, &mut edges);
                 }
                 let mut vs: Vec<usize> = edges
                     .iter()

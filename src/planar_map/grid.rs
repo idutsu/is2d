@@ -1001,6 +1001,19 @@ pub(super) fn index_tiles(cells: &[(i64, i64)]) -> Vec<(i64, i64)> {
     t
 }
 
+/// 端の升目の索引（`LayerBase::ends_index`）の升目：点を含む、近さを調べる格子のマス（8px。頂点の辺を引くとき、候補が
+/// 少なくて済むように、升目の索引より細かい）
+pub(super) fn end_key(p: Point) -> (i64, i64) {
+    cell_of(gpt(p))
+}
+
+/// 矩形 `r`（文書の座標）にかかる、端の升目の索引の升目
+pub(super) fn end_keys_over(r: KRect) -> impl Iterator<Item = (i64, i64)> {
+    let a = end_key(Point::new(r.x0, r.y0));
+    let b = end_key(Point::new(r.x1, r.y1));
+    (a.0..=b.0).flat_map(move |x| (a.1..=b.1).map(move |y| (x, y)))
+}
+
 /// 矩形 `r`（文書の座標）にかかる、升目の索引の升目。矩形の中の点は、その点を含むマスの升目にある
 pub(super) fn index_tiles_over(r: KRect) -> impl Iterator<Item = (i64, i64)> {
     let a = index_tile(cell_of(gpt(Point::new(r.x0, r.y0))));

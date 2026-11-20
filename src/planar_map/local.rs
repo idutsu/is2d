@@ -163,8 +163,8 @@ impl<'a> LocalMap<'a> {
         let p = self.node(v);
         let mut out: Vec<usize> = Vec::new();
         self.index
-            .index
-            .edges_in(self.index.stored, index_tile(cell_of(gpt(p))), &mut out);
+            .ends
+            .edges_in(self.index.stored, end_key(p), &mut out);
         out.retain(|&e| {
             let te = self.base_edge(e);
             te.a == p || te.b == p
@@ -209,6 +209,7 @@ impl<'a> LocalMap<'a> {
         list
     }
 
+    #[cfg(test)]
     /// 触った輪郭：増えた辺の向きのある辺と、まわりの辺が変わった頂点から出ていく向きのある辺の、左の面の輪郭（たどる
     /// 決まりは `face_cycles_with` と同じ）。ほかの輪郭は、前の地図の輪郭と同じ（通る頂点のまわりの辺の順が変わらず、
     /// 辺も同じ）。閉じない輪郭は `None`（壊れている）
@@ -366,8 +367,31 @@ impl<'a> LocalMap<'a> {
 
     /// 2b-5b：触った輪郭が閉じていて、輪郭に沿って左側の色がそろうか（`is_broken_cycle` と同じ決まり）。そろえば触った
     /// 輪郭。ほかの輪郭は前の地図にそのままあり、前の地図は正しいので、閉じて色がそろう
-    pub(crate) fn touched_cycles_ok(&self) -> Option<Vec<Vec<(usize, bool)>>> {
-        let cycles = self.touched_cycles()?;
+    pub(crate) fn touched_cycles_ok(
+        &self,
+        memo: &mut CycleMemo,
+    ) -> Option<Vec<Vec<(usize, bool)>>> {
+        // 触った輪郭：増えた辺の向きのある辺と、まわりの辺が変わった頂点から出ていく向きのある辺の、左の面の輪郭（控え
+        // `memo` に入れ、確かめ・面作りで使い回す。たどる決まりは `touched_cycles` と同じ）
+        let mut starts: Vec<(usize, bool)> = self
+            .added_edges()
+            .flat_map(|e| [(e, true), (e, false)])
+            .collect();
+        for v in self.dirty_nodes() {
+            let list = memo.around.entry(v).or_insert_with(|| self.out_sorted(v));
+            starts.extend(list.iter().copied());
+        }
+        let mut ids: Vec<usize> = Vec::new();
+        for h in starts {
+            let ci = self.cycle_of(h, memo)?;
+            if !ids.contains(&ci) {
+                ids.push(ci);
+            }
+        }
+        let cycles: Vec<Vec<(usize, bool)>> = ids
+            .iter()
+            .map(|&ci| memo.cycles[ci].cycle.clone())
+            .collect();
         cycles
             .iter()
             .all(|c| {
@@ -399,6 +423,18 @@ pub(crate) struct CycleMemo {
     pub(crate) cycles: Vec<LocalCycle>,
     of: HashMap<(usize, bool), usize>,
     around: HashMap<usize, Vec<(usize, bool)>>,
+}
+
+/// 点から右へ伸ばした半直線が横切る辺を、列の順に少しずつ引く道具（`LocalMap::ray_cols`・`next_ray_col`）
+struct RayCols {
+    p2: IPt,
+    /// 次に調べる列と、最後の列
+    next: i64,
+    last: i64,
+    /// 調べる升目の行（下, 上）
+    rows: (i64, i64),
+    /// 増えた辺の、横切る列ごとの並び
+    added: std::collections::BTreeMap<i64, Vec<usize>>,
 }
 
 /// 前の地図の面の表：面の番号（図形の番号）ごとの、その面の輪郭（外周と穴）の向きのある辺のどれか1つ（前の地図の番号）
@@ -467,42 +503,79 @@ impl LocalMap<'_> {
     }
 
     /// 点 `p2`（2倍の座標）から右へ伸ばした半直線が横切る辺（`crossing` で数える区間がある辺）を、横切る所の升目の列の順に
-    /// （列, その列で横切る辺）。半直線を横切る区間は、横切る所を含むマスの升目にあるので、升目の索引の行で引ける
-    fn ray_columns(&self, p2: IPt) -> Vec<(i64, Vec<usize>)> {
+    /// 少しずつ引く道具（`RayCols`）。半直線を横切る区間は、横切る所を含むマスの升目にあるので、列ごとに升目の索引の行を
+    /// 引けばよい
+    fn ray_cols(&self, p2: IPt) -> RayCols {
         let col_of = |x2: f64| ((x2 / 2.0) / (GRID_CELL * 4) as f64).floor() as i64;
         let (x, y) = (p2.0.div_euclid(2), p2.1.div_euclid(2));
         let (t0, ty0) = index_tile(cell_of((x - 1, y - 1)));
         let ty1 = index_tile(cell_of((x - 1, y + 2))).1;
-        let mut cands: Vec<usize> = Vec::new();
-        if let Some(max_x) = self.index.index.max_tile_x() {
-            for tx in t0..=max_x {
-                for ty in ty0..=ty1 {
-                    self.index
-                        .index
-                        .edges_in(self.index.stored, (tx, ty), &mut cands);
+        // 増えた辺は少ないので、横切る列をはじめに求めておく
+        let mut added: std::collections::BTreeMap<i64, Vec<usize>> = Default::default();
+        for e in self.added_edges() {
+            for c in self.crossing_cols(e, p2, col_of) {
+                let list = added.entry(c).or_default();
+                if !list.contains(&e) {
+                    list.push(e);
                 }
             }
         }
-        cands.retain(|e| !self.removed.contains(e));
-        cands.extend(self.added_edges());
-        cands.sort_unstable();
-        cands.dedup();
-        let mut cols: std::collections::BTreeMap<i64, Vec<usize>> = Default::default();
-        for e in cands {
-            let p = self.poly(e);
-            for s in p.windows(2) {
-                let (a, b) = ((2 * s[0].0, 2 * s[0].1), (2 * s[1].0, 2 * s[1].1));
-                if crossing(a, b, p2).is_some() {
-                    let t = (p2.1 - a.1) as f64 / (b.1 - a.1) as f64;
-                    let x2 = a.0 as f64 + t * (b.0 - a.0) as f64;
-                    let list = cols.entry(col_of(x2)).or_default();
-                    if list.last() != Some(&e) {
-                        list.push(e);
-                    }
-                }
+        let last = self
+            .index
+            .index
+            .max_tile_x()
+            .into_iter()
+            .chain(added.keys().last().copied())
+            .max()
+            .unwrap_or(t0 - 1);
+        RayCols {
+            p2,
+            next: t0,
+            last,
+            rows: (ty0, ty1),
+            added,
+        }
+    }
+
+    /// 辺 `e` の区間が、点 `p2` から右へ伸ばした半直線を横切る所の列
+    fn crossing_cols(&self, e: usize, p2: IPt, col_of: impl Fn(f64) -> i64) -> Vec<i64> {
+        let p = self.poly(e);
+        let mut out = Vec::new();
+        for s in p.windows(2) {
+            let (a, b) = ((2 * s[0].0, 2 * s[0].1), (2 * s[1].0, 2 * s[1].1));
+            if crossing(a, b, p2).is_some() {
+                let t = (p2.1 - a.1) as f64 / (b.1 - a.1) as f64;
+                out.push(col_of(a.0 as f64 + t * (b.0 - a.0) as f64));
             }
         }
-        cols.into_iter().collect()
+        out
+    }
+
+    /// `RayCols` の次の列（列, その列で半直線を横切る辺）。列が尽きたら `None`
+    fn next_ray_col(&self, rc: &mut RayCols) -> Option<(i64, Vec<usize>)> {
+        let col_of = |x2: f64| ((x2 / 2.0) / (GRID_CELL * 4) as f64).floor() as i64;
+        while rc.next <= rc.last {
+            let tx = rc.next;
+            rc.next += 1;
+            let mut cands: Vec<usize> = Vec::new();
+            for ty in rc.rows.0..=rc.rows.1 {
+                self.index
+                    .index
+                    .edges_in(self.index.stored, (tx, ty), &mut cands);
+            }
+            cands.retain(|e| !self.removed.contains(e));
+            cands.sort_unstable();
+            cands.dedup();
+            let mut list: Vec<usize> = cands
+                .into_iter()
+                .filter(|&e| self.crossing_cols(e, rc.p2, col_of).contains(&tx))
+                .collect();
+            list.extend(rc.added.remove(&tx).unwrap_or_default());
+            if !list.is_empty() {
+                return Some((tx, list));
+            }
+        }
+        None
     }
 
     /// 色 `color` の穴（調べる点 `probe`）の入れ先：点を含む同じ色の外周のうち、いちばん小さいもの（今の `regions` と同じ
@@ -517,7 +590,8 @@ impl LocalMap<'_> {
     ) -> Option<Option<usize>> {
         let mut best: Option<(i128, usize)> = None;
         let mut found_col: Option<i64> = None;
-        for (col, edges) in self.ray_columns(probe) {
+        let mut rc = self.ray_cols(probe);
+        while let Some((col, edges)) = self.next_ray_col(&mut rc) {
             if found_col.is_some_and(|fc| col > fc + 1) {
                 break;
             }
@@ -542,12 +616,14 @@ impl LocalMap<'_> {
         Some(best.map(|b| b.1))
     }
 
-    /// 何も無い側の輪郭 `ci` が、色のある面に入り込んでいないか（今の確かめの決まり：最初の区間の真ん中の点が、その辺を
-    /// 輪郭に持たない色のある面の中か、その面の輪郭の上にあれば、入り込んでいる）。点を含みうる面の外周と穴は、点から
-    /// 右へ伸ばした半直線と交わるので、横切る輪郭を全部たどって調べる。`None`：輪郭が閉じない
-    fn unpainted_ok(&self, ci: usize, memo: &mut CycleMemo) -> Option<bool> {
-        let h = memo.cycles[ci].cycle[0];
-        let q = self.probe(&memo.cycles[ci].cycle);
+    /// 何も無い側の向きのある辺 `h` の左の何も無い所が、色のある面に入り込んでいないか（今の確かめの決まり：最初の区間の
+    /// 真ん中の点が、その辺を輪郭に持たない色のある面の中か、その面の輪郭の上にあれば、入り込んでいる。今の確かめは輪郭の
+    /// 最初の辺の点で調べるが、何も無い所はどこでも同じ所なので、どの辺の点で調べても同じ答え）。点を含みうる面の外周と
+    /// 穴は、点から右へ伸ばした半直線と交わる。正しい地図（辺が交わらず、輪郭が閉じて色がそろい、穴に入れ先がある）では、
+    /// 面は入れ子か離れているので、点を含む色のある外周のうち、その辺を輪郭に持たないいちばん内側のもの（半直線と最初に
+    /// 交わる）と、それより内側で交わる穴を調べればよい。`None`：輪郭が閉じない
+    fn unpainted_ok_at(&self, h: (usize, bool), memo: &mut CycleMemo) -> Option<bool> {
+        let q = self.probe(&[h]);
         // その辺を輪郭に持つ色のある面（反対側の面）の外周
         let other = self.cycle_of((h.0, !h.1), memo)?;
         let excluded = match &memo.cycles[other].ring {
@@ -561,14 +637,29 @@ impl LocalMap<'_> {
             }
             None => None,
         };
-        // 半直線が横切る輪郭
+        // 半直線が横切る輪郭を、列の順に（点を含む、反対側の面でない色のある外周が見つかった列の次の列まで）
         let mut crossed: Vec<usize> = Vec::new();
-        for (_, edges) in self.ray_columns(q) {
+        let mut found_col: Option<i64> = None;
+        let mut rc = self.ray_cols(q);
+        while let Some((col, edges)) = self.next_ray_col(&mut rc) {
+            if found_col.is_some_and(|fc| col > fc + 1) {
+                break;
+            }
             for e in edges {
                 for side in [true, false] {
                     let c = self.cycle_of((e, side), memo)?;
-                    if !crossed.contains(&c) {
-                        crossed.push(c);
+                    if crossed.contains(&c) {
+                        continue;
+                    }
+                    crossed.push(c);
+                    if found_col.is_none()
+                        && Some(c) != excluded
+                        && memo.cycles[c]
+                            .ring
+                            .as_ref()
+                            .is_some_and(|r| r.area2 > 0 && r.contains(q) != Some(false))
+                    {
+                        found_col = Some(col);
                     }
                 }
             }
@@ -580,10 +671,9 @@ impl LocalMap<'_> {
             if er.area2 <= 0 || Some(ext) == excluded {
                 continue;
             }
-            let inside_ext = er.contains(q);
             let ext_color = memo.cycles[ext].color;
             // `Regions::contains` と同じ：外周の上なら入り込み、外周の中で、どの穴の中でもなければ入り込み
-            let mut inside = match inside_ext {
+            let mut inside = match er.contains(q) {
                 None => return Some(false),
                 Some(false) => continue,
                 Some(true) => true,
@@ -683,17 +773,20 @@ impl LocalMap<'_> {
                 }
             }
         }
-        // 何も無い側の輪郭：触ったものと、新しい輪の外接矩形に辺がかかる前の地図のもの
-        let mut to_check: Vec<usize> = touched_ids
+        // 何も無い側の決まり：触った何も無い側の輪郭（最初の辺の所で）と、新しい色のある輪の中に点がある、前の地図の何も
+        // 無い側の向きのある辺（何も無い所が新しい色のある面の中に入ったなら、その所の辺は新しい輪の中にある）
+        let mut to_check: Vec<(usize, bool)> = touched_ids
+            .iter()
+            .filter(|&&ci| memo.cycles[ci].color.is_none())
+            .map(|&ci| memo.cycles[ci].cycle[0])
+            .collect();
+        let made: Vec<usize> = touched_ids
             .iter()
             .copied()
-            .filter(|&ci| memo.cycles[ci].color.is_none())
+            .filter(|&ci| memo.cycles[ci].ring.is_some())
             .collect();
-        let made: Vec<GridRect> = touched_ids
-            .iter()
-            .filter_map(|&ci| memo.cycles[ci].ring.as_ref().map(|r| r.rect))
-            .collect();
-        for r in made {
+        for ci in made {
+            let r = memo.cycles[ci].ring.as_ref().expect("色のある輪郭").rect;
             let rect = KRect::new(
                 r.x0 as f64 / OVERLAY_GRID,
                 r.y0 as f64 / OVERLAY_GRID,
@@ -702,17 +795,24 @@ impl LocalMap<'_> {
             );
             for e in self.edges_over(rect) {
                 for side in [true, false] {
-                    if self.side_color((e, side)).is_none() {
-                        let ci = self.cycle_of((e, side), memo)?;
-                        if !to_check.contains(&ci) {
-                            to_check.push(ci);
-                        }
+                    let h = (e, side);
+                    if self.side_color(h).is_some()
+                        || memo.of.get(&h).is_some_and(|c| touched_ids.contains(c))
+                    {
+                        continue;
+                    }
+                    let inside = memo.cycles[ci]
+                        .ring
+                        .as_ref()
+                        .is_some_and(|r| r.contains(self.probe(&[h])) == Some(true));
+                    if inside && !to_check.contains(&h) {
+                        to_check.push(h);
                     }
                 }
             }
         }
-        for ci in to_check {
-            if !self.unpainted_ok(ci, memo)? {
+        for h in to_check {
+            if !self.unpainted_ok_at(h, memo)? {
                 return Some(false);
             }
         }

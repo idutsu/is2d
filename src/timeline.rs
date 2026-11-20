@@ -1292,7 +1292,6 @@ impl Cel {
         }
     }
 
-    #[cfg(test)]
     /// 触った所だけで行う地図の編集（ブラシ・消しゴム：`LayerBase::paint_local`）：階層 `group_path` の地図を `f` で編集し、
     /// 書くものがあれば入れる（`put_local`）。`Ok(None)`：変わらない、`Err`：書けない
     pub(crate) fn edit_local(
@@ -1309,7 +1308,6 @@ impl Cel {
         }
     }
 
-    #[cfg(test)]
     /// 触った所だけで行った編集の書くもの `w` を入れる（`put_map` と同じく、階層の地図を新しいしまう形にする。面の無く
     /// なった階層は外す）。戻り値は新しい地図の写し（`LayerBase::of_local`。前の写し `prev` から升目の索引を作る）
     pub(crate) fn put_local(
