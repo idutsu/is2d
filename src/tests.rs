@@ -34766,7 +34766,7 @@ fn local_edge_rules_match_full_check() {
     let full_map = base.map.clone();
     let all_nodes: Vec<usize> = (0..full_map.nodes.len()).collect();
     let color = |rng: &mut map_overlay::Rng| Some(colors[(rng.f() * 3.0) as usize % 3]);
-    let (mut oks, mut bads, mut cycles_good, mut cycles_bad) = (0, 0, 0, 0);
+    let (mut oks, mut bads, mut cycles_good, mut cycles_bad, mut all_good) = (0, 0, 0, 0, 0);
     for _ in 0..400 {
         // 足す辺：（始点, 終点, 制御点, 左の色, 右の色）
         type Added = (Point, Point, Point, Option<Color32>, Option<Color32>);
@@ -34859,10 +34859,124 @@ fn local_edge_rules_match_full_check() {
         } else {
             cycles_bad += 1;
         }
+        // 2b-5c：確かめ全体の答え（穴の入れ先と、何も無い側の決まりまで）
+        let table = base.faces_table();
+        let lookup =
+            |id: crate::vector_engine::ShapeId| table.get(&id).cloned().unwrap_or_default();
+        let local_ok = local.touched_cycles_ok().is_some_and(|t| {
+            local.regions_ok(&t, &lookup, &mut crate::planar_map::CycleMemo::default())
+                == Some(true)
+        });
+        assert_eq!(
+            local_ok,
+            base.written_ok(&joined),
+            "確かめ全体：足した辺 {adds:?}"
+        );
+        if local_ok {
+            all_good += 1;
+        }
     }
     assert!(oks > 10 && bads > 10, "正しい {oks}・正しくない {bads}");
     assert!(
         cycles_good > 5 && cycles_bad > 5,
         "輪郭が正しい {cycles_good}・正しくない {cycles_bad}"
     );
+    assert!(all_good > 0, "確かめ全体で正しい {all_good}");
+}
+
+/// 段2b-5c：前の地図から辺をランダムに 1〜3 本消した地図（面の外周が開く・穴の入れ先が無くなる・何も無い側の輪郭が
+/// 色のある面に入り込む、などが起きる）で、触った所だけで確かめた答え（`added_edges_ok`・`touched_cycles_ok`・
+/// `regions_ok`）が、新しい地図全体を確かめた答え（`written_ok`）と同じ。正しい答えと正しくない答えの両方が出る
+#[test]
+fn local_check_matches_full_check_when_edges_are_removed() {
+    use crate::planar_map::{CycleMemo, LayerBase, MapInput, MapRule, PlanarMap};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    let (mut good, mut bad) = (0, 0);
+    for seed in [3u64, 17, 31] {
+        let mut rng = map_overlay::Rng(seed);
+        let mut m = PlanarMap::default();
+        for k in 0..30 {
+            let c = colors[k % 3];
+            let r = 2.0 + rng.f() * 8.0;
+            let st = wiggly_stroke(&mut rng, (100.0, 100.0, 300.0, 200.0), r, c);
+            let rule = if k % 4 == 3 {
+                MapRule::Paint(None)
+            } else {
+                MapRule::Paint(Some(c))
+            };
+            if let Some(n) = m
+                .overlay(MapInput::Shapes(&st), rule)
+                .and_then(|n| n.checked())
+            {
+                m = n.uniquely_labeled().into_map();
+            }
+        }
+        let base = LayerBase::new(&m);
+        let full_map = base.map.clone();
+        let all_nodes: Vec<usize> = (0..full_map.nodes.len()).collect();
+        let table = base.faces_table();
+        let lookup =
+            |id: crate::vector_engine::ShapeId| table.get(&id).cloned().unwrap_or_default();
+        let (faces, _) = full_map.faces();
+        // 輪郭の辺の反対側がみな何も無い面（輪郭ごと消しても、ほかの面の色はそろったまま）と、穴を持つ面
+        let none_other = |c: &Vec<(usize, bool)>| {
+            c.iter().all(|&(e, f)| {
+                let ed = full_map.edges[e];
+                (if f { ed.right } else { ed.left }).is_none()
+            })
+        };
+        let lonely: Vec<usize> = (0..faces.len())
+            .filter(|&i| faces[i].cycles.iter().all(none_other))
+            .collect();
+        let holed: Vec<usize> = (0..faces.len())
+            .filter(|&i| faces[i].cycles.len() > 1 && none_other(&faces[i].cycles[0]))
+            .collect();
+        for _ in 0..100 {
+            let mode = rng.f();
+            let mut removed: Vec<usize> = if mode < 0.35 && !lonely.is_empty() {
+                // 周りが何も無い面を、輪郭ごと全部消す
+                let f = &faces[lonely[(rng.f() * lonely.len() as f64) as usize % lonely.len()]];
+                f.cycles.iter().flatten().map(|h| h.0).collect()
+            } else if mode < 0.6 && !holed.is_empty() {
+                // 穴を持つ面の外周だけを消す（穴の入れ先が無くなる）
+                let f = &faces[holed[(rng.f() * holed.len() as f64) as usize % holed.len()]];
+                f.cycles[0].iter().map(|h| h.0).collect()
+            } else {
+                let n = 1 + (rng.f() * 3.0) as usize;
+                (0..n)
+                    .map(|_| {
+                        (rng.f() * full_map.edges.len() as f64) as usize % full_map.edges.len()
+                    })
+                    .collect()
+            };
+            removed.sort_unstable();
+            removed.dedup();
+            let mut joined = full_map.clone();
+            let mut k = 0;
+            joined.edges.retain(|_| {
+                k += 1;
+                !removed.contains(&(k - 1))
+            });
+            let local = base.local_map(&all_nodes, &full_map, &removed, &[]);
+            let got = local.added_edges_ok()
+                && local.touched_cycles_ok().is_some_and(|t| {
+                    local.regions_ok(&t, &lookup, &mut CycleMemo::default()) == Some(true)
+                });
+            assert_eq!(
+                got,
+                base.written_ok(&joined),
+                "seed {seed} 消した辺 {removed:?}"
+            );
+            if got {
+                good += 1;
+            } else {
+                bad += 1;
+            }
+        }
+    }
+    assert!(good > 5 && bad > 5, "正しい {good}・正しくない {bad}");
 }

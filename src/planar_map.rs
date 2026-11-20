@@ -2025,6 +2025,26 @@ impl LayerBase {
             .all(|c| !next.is_broken_cycle(c))
     }
 
+    /// テスト用：地図 `next` が、この地図を前の地図として確かめて正しいか（`written` と同じ判定。正しくなくても止めない）
+    #[cfg(test)]
+    pub(crate) fn written_ok(&self, next: &PlanarMap) -> bool {
+        next.checked_since(Some(self)).is_some()
+    }
+
+    /// テスト用：前の地図の面の表（`BaseFaces`）を、この地図の全部の面から作る（本番では 2b-7 で、写しが持つ面の表から
+    /// 引く）
+    #[cfg(test)]
+    pub(crate) fn faces_table(&self) -> HashMap<ShapeId, Vec<(usize, bool)>> {
+        let (faces, _) = self.map.faces();
+        faces
+            .iter()
+            .filter_map(|f| match f.srcs[..] {
+                [id] => Some((id, f.cycles.iter().map(|c| c[0]).collect())),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// 升目の索引（初めて要るときに全部作る）
     pub(crate) fn index(&self) -> &crate::stored_map::TileIndex {
         self.index.get_or_init(|| {

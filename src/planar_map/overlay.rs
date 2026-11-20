@@ -706,8 +706,18 @@ impl PlanarMap {
                                     LocalMap::new(self, ix, &wnodes, &m, &removed, &added);
                                 let touched = local.touched_cycles();
                                 let edges_ok = local.added_edges_ok();
-                                let cycles_ok = local.touched_cycles_ok().is_some();
-                                (ix.stored.with_diff(self, &removed, &m, &added), (edges_ok, cycles_ok), touched.map(|t| {
+                                let touched_ok = local.touched_cycles_ok();
+                                let cycles_ok = touched_ok.is_some();
+                                // 確かめ全体の答え（設計 段2b の 6. の 5.）
+                                let prev = LayerBase::new(self);
+                                let table = prev.faces_table();
+                                let lookup = |id: ShapeId| table.get(&id).cloned().unwrap_or_default();
+                                let local_ok = edges_ok
+                                    && touched_ok.is_some_and(|t| {
+                                        local.regions_ok(&t, &lookup, &mut CycleMemo::default())
+                                            == Some(true)
+                                    });
+                                (ix.stored.with_diff(self, &removed, &m, &added), (edges_ok, cycles_ok, local_ok), touched.map(|t| {
                                     let mut shapes: Vec<_> = t
                                         .iter()
                                         .map(|c| cycle_shape(c.iter().map(|&h| local.half_key(h))))
@@ -719,7 +729,14 @@ impl PlanarMap {
                         });
                         let joined = self.with_window_result(m, &wnodes, &to_window, copy);
                         #[cfg(test)]
-                        if let Some((d, (edges_ok, cycles_ok), touched)) = diffed {
+                        if let Some((d, (edges_ok, cycles_ok, local_ok), touched)) = diffed {
+                            // お手本：確かめ全体の答えが、新しい地図全体を確かめた答え（`written` と同じ判定）と同じ
+                            let full_ok =
+                                super::uncounted(|| LayerBase::new(self).written_ok(&joined));
+                            assert_eq!(
+                                local_ok, full_ok,
+                                "触った所だけで確かめた答えが、新しい地図全体を確かめた答え（お手本）と違う"
+                            );
                             // お手本（設計 段2b の 6. の 2.）：触った輪郭の決まりの答えが、新しい地図全体の輪郭で調べた答えと同じ
                             let full_cycles_ok =
                                 super::uncounted(|| LayerBase::cycles_ok_full(&joined));
