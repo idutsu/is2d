@@ -34173,7 +34173,7 @@ fn measure_edit_scaling_by_cel_size() {
         block.nodes.len()
     );
     eprintln!(
-        "{:>7} | {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8} {:>7} {:>7} {:>7}",
+        "{:>7} | {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8} {:>7} {:>7} {:>7} {:>7}",
         "辺",
         "ブラシ",
         "消しゴム",
@@ -34187,7 +34187,8 @@ fn measure_edit_scaling_by_cel_size() {
         "ドラッグ中",
         "取り消し",
         "取消最大",
-        "土台"
+        "土台",
+        "描いた後1コマ"
     );
     for side in [1usize, 2, 4, 8] {
         // 区画を side × side 個並べた地図
@@ -34215,6 +34216,26 @@ fn measure_edit_scaling_by_cel_size() {
         let mut app = Is2dApp::default();
         put_cel_shapes(&mut app, 0, 0, shapes);
         let lid = app.doc.root.layers[0].id;
+        // 画面の1コマ（描画の準備まで：図形の塗りの三角形分割・描く命令を作る。GPU に送る所は含まない）
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 820.0),
+            )),
+            ..Default::default()
+        };
+        // 地図全体が画面に入る倍率（いちばん重い：毎コマ全部の図形を描く）
+        {
+            let (w, h) = (side as f64 * dx, side as f64 * dy);
+            let zoom = (1100.0 / w).min(700.0 / h).min(1.0) as f32;
+            let view = &mut app.tab_mut().view;
+            view.zoom = zoom;
+            view.pan = egui::vec2(-(bb.x0 as f32) * zoom + 40.0, -(bb.y0 as f32) * zoom + 60.0);
+        }
+        for _ in 0..2 {
+            let _ = ctx.run(raw_input.clone(), |ctx| app.update_ui(ctx));
+        }
         let edges = app.doc.root.layers[0].keyframes[0]
             .cel
             .scope_base(&[])
@@ -34243,7 +34264,7 @@ fn measure_edit_scaling_by_cel_size() {
         let pick_edge = |r: &mut map_overlay::Rng| {
             block.quad((r.f() * block.edges.len() as f64) as usize % block.edges.len())
         };
-        let mut t: [Vec<f64>; 12] = Default::default();
+        let mut t: [Vec<f64>; 13] = Default::default();
         for _ in 0..9 {
             // 1. ブラシ
             let p0 = pt(&mut r);
@@ -34258,6 +34279,11 @@ fn measure_edit_scaling_by_cel_size() {
                 }
             ));
             t[0].push(ms(s));
+            // ブラシのあとの1コマ（画面を組み立て、egui が描く三角形にまとめるまで）
+            let s = Instant::now();
+            let out = ctx.run(raw_input.clone(), |ctx| app.update_ui(ctx));
+            let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
+            t[12].push(ms(s));
             // 取り消し（画面の土台を作り直すまで）
             let s = Instant::now();
             assert!(apply(&mut app, Action::Undo));
@@ -34389,8 +34415,8 @@ fn measure_edit_scaling_by_cel_size() {
             .map(|v| if v.is_empty() { f64::NAN } else { med(v) })
             .collect();
         eprintln!(
-            "{edges:>7} | {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>8.2} {:>7.2} {:>7.2} {:>7.2}",
-            m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[11], undo_max, m[10]
+            "{edges:>7} | {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>8.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2}",
+            m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[11], undo_max, m[10], m[12]
         );
     }
 }
