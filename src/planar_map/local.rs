@@ -320,6 +320,29 @@ impl<'a> LocalMap<'a> {
         true
     }
 
+    /// 向きのある辺の左側の色
+    pub(crate) fn side_color(&self, (e, forward): (usize, bool)) -> Option<Color32> {
+        let ed = self.edge(e);
+        if forward {
+            ed.left
+        } else {
+            ed.right
+        }
+    }
+
+    /// 2b-5b：触った輪郭が閉じていて、輪郭に沿って左側の色がそろうか（`is_broken_cycle` と同じ決まり）。そろえば触った
+    /// 輪郭。ほかの輪郭は前の地図にそのままあり、前の地図は正しいので、閉じて色がそろう
+    pub(crate) fn touched_cycles_ok(&self) -> Option<Vec<Vec<(usize, bool)>>> {
+        let cycles = self.touched_cycles()?;
+        cycles
+            .iter()
+            .all(|c| {
+                c.windows(2)
+                    .all(|w| self.side_color(w[0]) == self.side_color(w[1]))
+            })
+            .then_some(cycles)
+    }
+
     /// 向きのある辺の、番号によらない鍵（形の鍵 `edge_key` と、辺の決まった向きに進むか）
     pub(crate) fn half_key(&self, (e, forward): (usize, bool)) -> ([u64; 6], bool) {
         let q = self.quad(e);

@@ -706,7 +706,8 @@ impl PlanarMap {
                                     LocalMap::new(self, ix, &wnodes, &m, &removed, &added);
                                 let touched = local.touched_cycles();
                                 let edges_ok = local.added_edges_ok();
-                                (ix.stored.with_diff(self, &removed, &m, &added), edges_ok, touched.map(|t| {
+                                let cycles_ok = local.touched_cycles_ok().is_some();
+                                (ix.stored.with_diff(self, &removed, &m, &added), (edges_ok, cycles_ok), touched.map(|t| {
                                     let mut shapes: Vec<_> = t
                                         .iter()
                                         .map(|c| cycle_shape(c.iter().map(|&h| local.half_key(h))))
@@ -718,7 +719,14 @@ impl PlanarMap {
                         });
                         let joined = self.with_window_result(m, &wnodes, &to_window, copy);
                         #[cfg(test)]
-                        if let Some((d, edges_ok, touched)) = diffed {
+                        if let Some((d, (edges_ok, cycles_ok), touched)) = diffed {
+                            // お手本（設計 段2b の 6. の 2.）：触った輪郭の決まりの答えが、新しい地図全体の輪郭で調べた答えと同じ
+                            let full_cycles_ok =
+                                super::uncounted(|| LayerBase::cycles_ok_full(&joined));
+                            assert_eq!(
+                                cycles_ok, full_cycles_ok,
+                                "触った輪郭の決まりの答えが、新しい地図全体の輪郭で調べた答え（お手本）と違う"
+                            );
                             // お手本（設計 段2b の 6. の 1.）：増えた辺の決まりの答えが、新しい地図全体で調べた答えと同じ
                             let full_ok = super::uncounted(|| {
                                 let prev = LayerBase::new(self);

@@ -2015,6 +2015,16 @@ impl LayerBase {
             && next.polys_apart(&polys, &fresh)
     }
 
+    /// テスト用：地図 `next` の全部の輪郭が閉じて、輪郭に沿って左側の色がそろうか（`face_cycles_with` と
+    /// `is_broken_cycle`。`checked_since` の輪郭の決まり）
+    #[cfg(test)]
+    pub(crate) fn cycles_ok_full(next: &PlanarMap) -> bool {
+        let polys = next.polys();
+        next.face_cycles_with(&polys)
+            .iter()
+            .all(|c| !next.is_broken_cycle(c))
+    }
+
     /// 升目の索引（初めて要るときに全部作る）
     pub(crate) fn index(&self) -> &crate::stored_map::TileIndex {
         self.index.get_or_init(|| {
