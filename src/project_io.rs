@@ -7,14 +7,14 @@ use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{cancel_active_drag, SelectSubMode, Session, Tab, UndoHistory, View};
-use crate::stored_map::{StoredMap, TileReader, TileWriter};
+use crate::stored_map::{SavedTiles, TileReader, TileWriter};
 use crate::symbol::{
     ColorEffect, Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode,
     TweenRotate,
 };
 pub(crate) use crate::timeline::MAX_LAYERS_PER_TIMELINE;
 use crate::timeline::{
-    Cel, Keyframe, KeyframeList, Layer, ScopeMap, Timeline, TimelineCellSelection,
+    Cel, Keyframe, KeyframeList, Layer, SavedScopeMap, ScopeMap, Timeline, TimelineCellSelection,
 };
 
 /// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。頭（印・版・中身の長さ・中身の CRC32）のあとに、保存用の型
@@ -430,48 +430,6 @@ impl From<SavedSymbolInstance> for SymbolInstance {
             order: s.order,
         }
     }
-}
-
-/// セル画の1つの階層の地図：塊の番号の並び（文書の塊の表 `ProjectDocument::map_tiles` の番号。升目の順）。塊はしまう形
-/// （`StoredMap`）の塊そのもので、側の図形の番号も持つ
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SavedScopeMap {
-    pub(crate) group_path: Vec<u64>,
-    pub(crate) tiles: Vec<u32>,
-    /// しまう形（書かない。書くときは塊の番号の並びを作るもと、読むときは塊の番号の並びから作ったもの：
-    /// `ProjectDocument::of`・`into_document`）
-    #[serde(skip)]
-    pub(crate) stored: Option<StoredMap>,
-}
-
-/// 塊の保存の形：塊の辺の端の点の座標（丸めない：読み戻すとビットまで同じ値になる。辺どうしで共有する端は1回だけ書く）
-/// と、辺の並び
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) struct SavedTile {
-    pub(crate) nodes: Vec<[f64; 2]>,
-    pub(crate) edges: Vec<SavedEdge>,
-}
-
-/// しまう辺の保存の形：両端（塊の点の番号）、制御点の座標、左右の色（文書の色の表の 1 からの番号。0 は何も無い）、左右の
-/// 側の図形の印（文書の中の 1 からの通し番号で、同じ印は同じ図形。0 は無い。読むときに新しい図形の番号に替える：
-/// `TileWriter`・`TileReader`）
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub(crate) struct SavedEdge {
-    pub(crate) a: u32,
-    pub(crate) b: u32,
-    pub(crate) ctrl: [f64; 2],
-    pub(crate) left: u32,
-    pub(crate) right: u32,
-    pub(crate) left_src: u64,
-    pub(crate) right_src: u64,
-}
-
-/// 文書の地図の塊の表：色の表と、塊の表。地図は塊の番号の並びで指すので、キーフレームどうしで共有する塊は1回だけ書く
-/// （`TileWriter`・`TileReader`）
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) struct SavedTiles {
-    pub(crate) colors: Vec<[u8; 4]>,
-    pub(crate) tiles: Vec<SavedTile>,
 }
 
 /// グループの入れ子の深さの上限（読み込むときに、これより深い階層は壊れたファイルとして断る。手で作る入れ子はこれに

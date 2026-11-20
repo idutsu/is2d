@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex, Weak};
 
 use eframe::egui::Color32;
 use kurbo::Point;
+use serde::{Deserialize, Serialize};
 
 use crate::planar_map::{point_order, EdgeOrigin, IntMap, LayerBase, MapEdge, PlanarMap};
-use crate::project_io::{SavedEdge, SavedTile, SavedTiles};
 use crate::vector_engine::ShapeId;
 
 /// 塊の升目の大きさ（文書の座標の px）。ブラシ1本・消しゴム1本で変わるのは、ふつう升目の数個分
@@ -485,6 +485,36 @@ impl StoredMap {
             .filter(|t| theirs.contains(&(Arc::as_ptr(t) as *const u8 as usize)))
             .count()
     }
+}
+
+/// 塊の保存の形：塊の辺の端の点の座標（丸めない：読み戻すとビットまで同じ値になる。辺どうしで共有する端は1回だけ書く）
+/// と、辺の並び
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct SavedTile {
+    pub(crate) nodes: Vec<[f64; 2]>,
+    pub(crate) edges: Vec<SavedEdge>,
+}
+
+/// しまう辺の保存の形：両端（塊の点の番号）、制御点の座標、左右の色（文書の色の表の 1 からの番号。0 は何も無い）、左右の
+/// 側の図形の印（文書の中の 1 からの通し番号で、同じ印は同じ図形。0 は無い。読むときに新しい図形の番号に替える：
+/// `TileWriter`・`TileReader`）
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) struct SavedEdge {
+    pub(crate) a: u32,
+    pub(crate) b: u32,
+    pub(crate) ctrl: [f64; 2],
+    pub(crate) left: u32,
+    pub(crate) right: u32,
+    pub(crate) left_src: u64,
+    pub(crate) right_src: u64,
+}
+
+/// 文書の地図の塊の表：色の表と、塊の表。地図は塊の番号の並びで指すので、キーフレームどうしで共有する塊は1回だけ書く
+/// （`TileWriter`・`TileReader`）
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct SavedTiles {
+    pub(crate) colors: Vec<[u8; 4]>,
+    pub(crate) tiles: Vec<SavedTile>,
 }
 
 /// 地図を保存の形（塊の表と、地図ごとの塊の番号の並び：`SavedTiles`）にする。同じ塊（同じ `Arc`）は1回だけ書くので、

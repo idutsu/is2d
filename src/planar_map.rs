@@ -1428,9 +1428,9 @@ fn edge_key(m: &PlanarMap, e: usize) -> [u64; 6] {
 ///   消えていないなら、その面は元の図形のまま残す
 /// - それ以外の面は、新しい塗りの形にして入れる。新しい形は、辺の側の印のうち、残した面の図形でないものでいちばん多い
 ///   元の図形（同じ数なら小さい番号：`top_vote`。重ね合わせで面に伝える番号と同じ決まり）を引き継ぐ形として元の番号を
-///   使う（同じ元の図形を引き継ぐ面が2つ以上あれば、その印の付いた側がいちばん多い面。同じなら面の順で前）。面が
-///   分かれても、まとまっても（動かした片が残りとつながるなど）、長い輪郭の側が番号を保つので、地図の、その面の
-///   ほかの辺の印も変わらない（しまう地図で、変わった場所の塊だけが新しくなる）
+///   使う（同じ元の図形を引き継ぐ面が2つ以上あれば、その印の付いた側がいちばん多い面。同じなら、`keeps_label_over` と
+///   同じく形の鍵 `face_key` の小さい面）。面が分かれても、まとまっても（動かした片が残りとつながるなど）、長い輪郭の
+///   側が番号を保つので、地図の、その面のほかの辺の印も変わらない（しまう地図で、変わった場所の塊だけが新しくなる）
 /// - 残した面の元の図形のほかは、みな消す（どの面にも残らない元の図形が、新しい形と重なって残ることは無い。番号を
 ///   引き継いだ形は、消した元の図形と入れ替わる）
 ///
@@ -1508,8 +1508,8 @@ fn rewrite_shapes(
     };
     // 元の図形を引き継ぐ面：面ごとに、面の側の印のうち、残す面の図形でないものでいちばん多い元の図形（`top_vote`。
     // 重ね合わせで面に伝える番号と同じ決まり。面が分かれても、まとまっても、長い輪郭の側が番号を保つ）。同じ元の図形が
-    // いちばん多い面が2つ以上あれば、その印の付いた側がいちばん多い面（同じなら面の順で前）が引き継ぐ：
-    // （元の図形 → (その印の付いた側の数, 面)）
+    // いちばん多い面が2つ以上あれば、その印の付いた側がいちばん多い面（同じ数なら形の鍵 `face_key` の小さい面。
+    // `keeps_label_over` と同じく、地図の番号の順で決めない）が引き継ぐ：（元の図形 → (その印の付いた側の数, 面)）
     let mut heir: HashMap<ShapeId, (usize, usize)> = HashMap::new();
     let mut choice: Vec<Option<ShapeId>> = vec![None; faces.len()];
     for &i in &changed {
@@ -1524,7 +1524,10 @@ fn rewrite_shapes(
         };
         choice[i] = Some(src);
         let best = heir.entry(src).or_insert((sides, i));
-        if sides > best.0 {
+        if best.1 != i
+            && (sides > best.0
+                || (sides == best.0 && face_key(next, &faces[i]) < face_key(next, &faces[best.1])))
+        {
             *best = (sides, i);
         }
     }
@@ -1830,7 +1833,7 @@ impl LayerBase {
     /// 面の図形を地図から作る（`faces`。番号の順）
     fn face_shapes(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
         let (faces, _) = self.map.faces_of(self.polys(), self.cycles());
-        let ids = face_ids(&faces, FaceIds::Keep);
+        let ids = face_ids(&self.map, &faces, FaceIds::Keep);
         let mut shapes: Vec<Arc<FillShape>> = faces
             .iter()
             .zip(&ids)
@@ -2566,22 +2569,62 @@ pub(crate) fn stacked(
 /// 面ごとの番号の決め方（`face_ids`）
 #[derive(Clone, Copy)]
 enum FaceIds {
-    /// 辺の側に記された番号が1つの面はその番号（同じ番号の面が2つ以上あれば、面の順で前の面だけ）、ほかは新しい番号
+    /// 辺の側に記された番号が1つの面はその番号（同じ番号の面が2つ以上あれば、そのうち `keeps_label_over` で勝つ面だけ）、
+    /// ほかは新しい番号
     Keep,
     /// みな新しい番号（新しい中身を置くとき。元の面と番号が重ならない）
     Fresh,
 }
 
-/// 面 `faces` の番号（面ごとに1つずつ別の番号）。面の番号の決め方はこれ1つ
-fn face_ids(faces: &[MapFace], how: FaceIds) -> Vec<ShapeId> {
-    let mut used: HashSet<ShapeId> = HashSet::new();
+/// 地図 `map` の面 `faces` の番号（面ごとに1つずつ別の番号）。面の番号の決め方はこれ1つ。どの面が番号を保つかは、
+/// 地図の頂点と辺の番号によらない（`keeps_label_over`）
+fn face_ids(map: &PlanarMap, faces: &[MapFace], how: FaceIds) -> Vec<ShapeId> {
+    // 番号ごとの、その番号を保つ面
+    let mut holder: HashMap<ShapeId, usize> = HashMap::new();
+    if let FaceIds::Keep = how {
+        for (i, f) in faces.iter().enumerate() {
+            let [id] = f.srcs[..] else {
+                continue;
+            };
+            let h = holder.entry(id).or_insert(i);
+            if *h != i && keeps_label_over(map, f, &faces[*h]) {
+                *h = i;
+            }
+        }
+    }
     faces
         .iter()
-        .map(|f| match (how, &f.srcs[..]) {
-            (FaceIds::Keep, [id]) if used.insert(*id) => *id,
+        .enumerate()
+        .map(|(i, f)| match f.srcs[..] {
+            [id] if holder.get(&id) == Some(&i) => id,
             _ => crate::vector_engine::next_shape_id(),
         })
         .collect()
+}
+
+/// 同じ元の図形の番号を保てる面が2つ以上あるとき、面 `a` が面 `b` より先に保つか：輪郭の辺（向きのある辺）が多い面、
+/// 同じ数なら形の鍵（`face_key`）の小さい面。面の番号の同点の決め方はこれ1つ（`face_ids`・`rewrite_shapes`）。
+/// 地図の番号の順で決めない（同じ地図を番号の振り方を変えて作っても、同じ面が保つ：段0の
+/// `edits_do_not_depend_on_edge_and_node_numbering`）
+fn keeps_label_over(map: &PlanarMap, a: &MapFace, b: &MapFace) -> bool {
+    let sides = |f: &MapFace| f.cycles.iter().map(Vec::len).sum::<usize>();
+    let (sa, sb) = (sides(a), sides(b));
+    sa > sb || (sa == sb && face_key(map, a) < face_key(map, b))
+}
+
+/// 面の、番号によらない鍵：面の輪郭の向きのある辺の（形の鍵 `edge_key`, その辺の決まった向き（`point_order`）の左の
+/// 側か）のうち、いちばん小さいもの。向きのある辺は1つの面にしか無いので、面ごとに別の鍵になる
+fn face_key(map: &PlanarMap, f: &MapFace) -> ([u64; 6], bool) {
+    f.cycles
+        .iter()
+        .flatten()
+        .map(|&(e, forward)| {
+            let ed = &map.edges[e];
+            let canonical = point_order(map.nodes[ed.a], map.nodes[ed.b]).is_le();
+            (edge_key(map, e), forward == canonical)
+        })
+        .min()
+        .expect("面の輪郭には辺がある")
 }
 
 /// 正しい地図（`valid_faces` で確かめたもの）と、その面。作れるのは `PlanarMap::checked` と、正しい地図を正しいまま
@@ -2740,7 +2783,7 @@ impl CheckedMap {
     }
 
     fn labeled(self, how: FaceIds) -> CheckedMap {
-        let ids = face_ids(&self.faces, how);
+        let ids = face_ids(&self.map, &self.faces, how);
         self.with_ids(&ids)
     }
 

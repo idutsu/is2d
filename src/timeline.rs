@@ -1,5 +1,4 @@
 use crate::planar_map::{realized, CheckedMap, LayerBase, PlanarMap};
-use crate::project_io::SavedScopeMap;
 use crate::stored_map::StoredMap;
 use crate::vector_engine::ShapeId;
 use crate::vector_engine::{FillShape, SymbolInstanceBinding};
@@ -189,6 +188,18 @@ pub(crate) struct Cel {
     pub(crate) instances: Arc<Vec<SymbolInstance>>,
     /// セル内容が更新されるたびにインクリメントされるリビジョン番号（Undo履歴の $O(1)$ CoW 共有用）
     pub(crate) revision: u64,
+}
+
+/// セル画の1つの階層の地図：塊の番号の並び（文書の塊の表 `ProjectDocument::map_tiles` の番号。升目の順）。塊はしまう形
+/// （`StoredMap`）の塊そのもので、側の図形の番号も持つ
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct SavedScopeMap {
+    pub(crate) group_path: Vec<u64>,
+    pub(crate) tiles: Vec<u32>,
+    /// しまう形（書かない。書くときは塊の番号の並びを作るもと、読むときは塊の番号の並びから作ったもの：
+    /// `ProjectDocument::of`・`into_document`）
+    #[serde(skip)]
+    pub(crate) stored: Option<StoredMap>,
 }
 
 /// セル画の1つの階層の地図

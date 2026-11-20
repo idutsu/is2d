@@ -9458,7 +9458,7 @@ fn content_json(pd: &project_io::ProjectDocument) -> String {
 
 /// テスト用：保存用の写し `proj` の地図 `m` の中身を、ビットまで比べられる形にしたもの（階層の番号と、塊の順の辺。色は
 /// 色の表から引いた値、座標は小数の表し方（読み戻すとビットまで同じ値））
-fn saved_map_content(proj: &project_io::ProjectDocument, m: &project_io::SavedScopeMap) -> String {
+fn saved_map_content(proj: &project_io::ProjectDocument, m: &timeline::SavedScopeMap) -> String {
     let color = |i: u32| (i > 0).then(|| proj.map_tiles.colors[i as usize - 1]);
     let edges: Vec<_> = m
         .tiles
@@ -16416,7 +16416,7 @@ fn test_m4_3_saved_map_roundtrip_bit_exact_and_load_shrinks_capacities() {
     let mut writer = crate::stored_map::TileWriter::default();
     let indices = writer.tiles_of(cel.maps[0].stored());
     let bytes = postcard::to_allocvec(&writer.finish()).unwrap();
-    let table: project_io::SavedTiles = postcard::from_bytes(&bytes).unwrap();
+    let table: stored_map::SavedTiles = postcard::from_bytes(&bytes).unwrap();
     let back = crate::stored_map::TileReader::new(&table)
         .and_then(|r| r.map(&indices))
         .expect("地図に戻る")
@@ -27476,7 +27476,7 @@ mod map_overlay {
             .collect();
         for seed in 0..100 {
             let cel = crate::timeline::Cel::from_saved(
-                vec![crate::project_io::SavedScopeMap {
+                vec![crate::timeline::SavedScopeMap {
                     group_path: Vec::new(),
                     tiles: Vec::new(),
                     stored: Some(crate::stored_map::StoredMap::from_dense(
@@ -32416,7 +32416,7 @@ fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument
                                 .map(|m| {
                                     let stored = stored_of(m, prev.get(&m.group_path));
                                     prev.insert(m.group_path.clone(), stored.clone());
-                                    project_io::SavedScopeMap {
+                                    timeline::SavedScopeMap {
                                         group_path: m.group_path.clone(),
                                         tiles: Vec::new(),
                                         stored: Some(stored),
@@ -32544,7 +32544,7 @@ fn measure_work() {
         .expect("作品を読めること");
     let (mut layers, mut keyframes, mut maps, mut edges) = (0usize, 0usize, 0usize, 0usize);
     // 地図の辺の数（塊の辺の数の和）
-    let map_edges = |m: &crate::project_io::SavedScopeMap| -> usize {
+    let map_edges = |m: &crate::timeline::SavedScopeMap| -> usize {
         m.tiles
             .iter()
             .map(|&t| saved.map_tiles.tiles[t as usize].edges.len())
@@ -33876,6 +33876,522 @@ fn project_file_refuses_wrong_or_broken_files() {
         assert_eq!(
             err(&project_io::project_file_bytes(&broken).unwrap()),
             "ファイルが壊れています（有限でない数があります）"
+        );
+    }
+}
+
+/// 段0（claude/触った所だけを計算する地図の設計_22fbbbe.md）：地図の頂点と辺の番号をでたらめに並べ替え、辺の向きも
+/// でたらめに裏返した地図に、同じ編集（ブラシ・消しゴム・バケツ・頂点の移動・辺の引っぱり・アンカーの追加と削除・
+/// 矩形で切る中と外）をしても、結果の地図（しまう形）と、面に記す番号と、書き戻しの差分が同じになる。新しい作りでは、
+/// 窓ごとに番号の違う小さな地図で計算するので、結果が番号によらないことが前提になる
+#[test]
+fn edits_do_not_depend_on_edge_and_node_numbering() {
+    use crate::planar_map::{LayerBase, MapEdge, MapInput, MapRule, PlanarMap};
+    use crate::stored_map::StoredMap;
+    use std::collections::HashSet;
+
+    /// 頂点と辺の番号を並べ替えた地図と、元の頂点 → 新しい頂点、元の辺 → 新しい辺（辺の向きは変えない）
+    fn shuffled(m: &PlanarMap, rng: &mut map_overlay::Rng) -> (PlanarMap, Vec<usize>, Vec<usize>) {
+        let perm = |n: usize, rng: &mut map_overlay::Rng| {
+            let mut p: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                let j = (rng.f() * (i + 1) as f64) as usize % (i + 1);
+                p.swap(i, j);
+            }
+            p
+        };
+        let node_to = perm(m.nodes.len(), rng);
+        let mut nodes = vec![Point::ZERO; m.nodes.len()];
+        for (v, &w) in node_to.iter().enumerate() {
+            nodes[w] = m.nodes[v];
+        }
+        let edge_to = perm(m.edges.len(), rng);
+        let mut edges = m.edges.clone();
+        for (e, &f) in edge_to.iter().enumerate() {
+            let ed = m.edges[e];
+            edges[f] = MapEdge {
+                a: node_to[ed.a],
+                b: node_to[ed.b],
+                ..ed
+            };
+        }
+        (PlanarMap { nodes, edges }, node_to, edge_to)
+    }
+
+    /// 地図のしまう形（番号によらない形）。`fresh` でない番号はそのまま、`fresh` な番号（編集で新しく振った番号）は
+    /// 無いことにする（新しく振る番号は回ごとに違うので、どの面が元の番号を引き継いだかだけを比べる）
+    fn canonical(m: &PlanarMap, keep: &HashSet<u64>) -> StoredMap {
+        StoredMap::from_dense(m, None).relabeled(|id| if keep.contains(&id) { id } else { 0 })
+    }
+
+    // 診断：形の違う辺の数、色・番号だけ違う辺の数、形の違いの大きさ
+    fn diag(a: &PlanarMap, b: &PlanarMap) -> String {
+        let key = |m: &PlanarMap, e: usize| {
+            let ed = &m.edges[e];
+            let (p, q) = (m.nodes[ed.a], m.nodes[ed.b]);
+            let (p, q, l, r, ls, rs) = if (p.x, p.y) <= (q.x, q.y) {
+                (p, q, ed.left, ed.right, ed.left_src, ed.right_src)
+            } else {
+                (q, p, ed.right, ed.left, ed.right_src, ed.left_src)
+            };
+            (
+                [p.x, p.y, ed.ctrl.x, ed.ctrl.y, q.x, q.y].map(f64::to_bits),
+                (l, r),
+                (ls, rs),
+            )
+        };
+        let ka: Vec<_> = (0..a.edges.len()).map(|e| key(a, e)).collect();
+        let kb: Vec<_> = (0..b.edges.len()).map(|e| key(b, e)).collect();
+        let ga: HashSet<_> = ka.iter().map(|k| k.0).collect();
+        let gb: HashSet<_> = kb.iter().map(|k| k.0).collect();
+        let only_a: Vec<_> = ga.difference(&gb).copied().collect();
+        let only_b: Vec<_> = gb.difference(&ga).copied().collect();
+        let col_a: HashSet<_> = ka.iter().map(|k| (k.0, k.1)).collect();
+        let col_b: HashSet<_> = kb.iter().map(|k| (k.0, k.1)).collect();
+        let col_diff = col_a
+            .difference(&col_b)
+            .filter(|k| gb.contains(&k.0))
+            .count();
+        let src_a: HashSet<_> = ka.iter().copied().collect();
+        let src_diff = kb
+            .iter()
+            .filter(|k| !src_a.contains(k) && ga.contains(&k.0) && col_a.contains(&(k.0, k.1)))
+            .count();
+        // 形の違う辺どうしの、いちばん近い相手との差（端と制御点の最大）
+        let f = |k: [u64; 6]| k.map(f64::from_bits);
+        let mut worst = 0.0f64;
+        for x in &only_a {
+            let x = f(*x);
+            let best = only_b
+                .iter()
+                .map(|y| {
+                    let y = f(*y);
+                    (0..6).map(|i| (x[i] - y[i]).abs()).fold(0.0, f64::max)
+                })
+                .fold(f64::INFINITY, f64::min);
+            worst = worst.max(best);
+        }
+        let ends_a: HashSet<_> = only_a.iter().map(|k| [k[0], k[1], k[4], k[5]]).collect();
+        let ends_same = only_b
+            .iter()
+            .filter(|k| ends_a.contains(&[k[0], k[1], k[4], k[5]]))
+            .count();
+        format!("辺 {}/{} 形だけ違う {}/{}（うち端が同じで制御点だけ違う {}） 色だけ {} 番号だけ {} 形の差の最大 {:.3e}",
+            a.edges.len(), b.edges.len(), only_a.len(), only_b.len(), ends_same, col_diff, src_diff, worst)
+    }
+
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    let area = (100.0, 100.0, 300.0, 200.0);
+    let (mut compared, mut differed) = (0usize, Vec::<String>::new());
+    for seed in [23, 41, 59] {
+        let mut rng = map_overlay::Rng(seed);
+        let mut m = PlanarMap::default();
+        for step in 0..300 {
+            // 計算に渡す地図の辺は、いつもしまう形の決まった向き（今の本番の写し `StoredMap::to_dense` と同じ。新しい作りの
+            // 窓も塊から作るので同じ）。辺の向きを裏返すと、曲線を切り出す・まとめる所の丸めで、制御点が最小の刻み1つ分
+            // ずれることがある（形は地図の精度の中で同じ）ので、向きはそろえたまま番号だけを並べ替える
+            m = LayerBase::new(&m).map.clone();
+            let (s, node_to, edge_to) = shuffled(&m, &mut rng);
+            let c = colors[step % 4];
+            // 同じ編集を、元の地図 `m` と並べ替えた地図 `s` に
+            type Edit<'a> = Box<dyn Fn(&PlanarMap, bool) -> Vec<Option<PlanarMap>> + 'a>;
+            let kind = step % 8;
+            let edit: Edit = match kind {
+                0 | 1 => {
+                    let r = 2.0 + rng.f() * 9.0;
+                    let st = wiggly_stroke(&mut rng, area, r, c);
+                    let rule = if kind == 0 {
+                        MapRule::Paint(Some(c))
+                    } else {
+                        MapRule::Paint(None)
+                    };
+                    Box::new(move |x, _| vec![x.overlay(MapInput::Shapes(&st), rule)])
+                }
+                2 => {
+                    let p = Point::new(100.0 + rng.f() * 300.0, 100.0 + rng.f() * 200.0);
+                    Box::new(move |x, _| vec![x.with_face_filled(p, c)])
+                }
+                3..=6 if !m.edges.is_empty() => {
+                    let v = (rng.f() * m.nodes.len() as f64) as usize % m.nodes.len();
+                    let e = (rng.f() * m.edges.len() as f64) as usize % m.edges.len();
+                    let a = rng.f() * std::f64::consts::TAU;
+                    let d = kurbo::Vec2::new(a.cos(), a.sin()) * (0.5 + rng.f() * 6.0);
+                    let t = 0.2 + rng.f() * 0.6;
+                    let (vs, es) = (node_to[v], edge_to[e]);
+                    let mv = m.nodes[v] + d;
+                    let pull = m.quad(e).eval(t) + d;
+                    Box::new(move |x, shuf| {
+                        let (v, e) = if shuf { (vs, es) } else { (v, e) };
+                        vec![match kind {
+                            3 => x.commit_move_vertex(v, mv),
+                            4 => x.commit_pull_edge(e, t, pull),
+                            5 => x.with_anchor_added(e, t),
+                            _ => x.with_anchor_deleted(v),
+                        }]
+                    })
+                }
+                _ => {
+                    let (x0, y0) = (100.0 + rng.f() * 150.0, 100.0 + rng.f() * 100.0);
+                    let rect = vec![map_overlay::rect_shape(x0, y0, x0 + 80.0, y0 + 60.0, c)];
+                    Box::new(move |x, _| {
+                        match x.overlay_rules(
+                            MapInput::Shapes(&rect),
+                            [MapRule::KeepInside, MapRule::Paint(None)],
+                        ) {
+                            Some([inside, rest]) => vec![Some(inside), Some(rest)],
+                            None => vec![None, None],
+                        }
+                    })
+                }
+            };
+            let (rs, rt) = (edit(&m, false), edit(&s, true));
+            // 元の地図の面の番号（編集のあとも残りうる番号）
+            let keep: HashSet<u64> = m.labels().collect();
+            let base = LayerBase::new(&m);
+            let own_faces = base.faces(&[]);
+            let own: Vec<&FillShape> = own_faces.iter().map(|f| &**f).collect();
+            let mut next_m = None;
+            for (i, (a, b)) in rs.into_iter().zip(rt).enumerate() {
+                let (a, b) = match (a, b) {
+                    (Some(a), Some(b)) => (a, b),
+                    (None, None) => continue,
+                    _ => {
+                        differed.push(format!(
+                            "seed {seed} step {step} kind {kind}: 片方だけ重ねられなかった"
+                        ));
+                        continue;
+                    }
+                };
+                compared += 1;
+                // 1. 重ね合わせの結果の地図
+                if !canonical(&a, &keep).same_content(&canonical(&b, &keep)) {
+                    differed.push(format!(
+                        "seed {seed} step {step} kind {kind} [{i}]: 結果の地図が違う {}",
+                        diag(&a, &b)
+                    ));
+                    continue;
+                }
+                if !a.is_valid() || !b.is_valid() {
+                    continue;
+                }
+                // 2. 面に1つずつ別の番号を記した地図（セル画にしまう地図）
+                let (la, lb) = (
+                    a.clone().checked().unwrap().uniquely_labeled(),
+                    b.clone().checked().unwrap().uniquely_labeled(),
+                );
+                if !canonical(la.map(), &keep).same_content(&canonical(lb.map(), &keep)) {
+                    differed.push(format!(
+                        "seed {seed} step {step} kind {kind} [{i}]: 面の番号の記し方が違う"
+                    ));
+                }
+                // 3. セル画に書き戻す差分（変わらない面・番号を引き継ぐ面の決め方）
+                let (ca, cb) = (
+                    base.diff(a.clone().written(&base).unwrap(), &own, 0, &[]),
+                    base.diff(b.written(&base).unwrap(), &own, 0, &[]),
+                );
+                let removed = |c: &crate::planar_map::MapChange| {
+                    let mut r = c.removed.clone();
+                    r.sort_unstable();
+                    r
+                };
+                if removed(&ca) != removed(&cb)
+                    || !canonical(ca.map.map(), &keep).same_content(&canonical(cb.map.map(), &keep))
+                {
+                    differed.push(format!(
+                        "seed {seed} step {step} kind {kind} [{i}]: 書き戻しの差分が違う"
+                    ));
+                }
+                // 次の地図は最後の結果（矩形で切るときは外）
+                next_m = Some(la.into_map());
+            }
+            if let Some(n) = next_m {
+                m = n;
+            }
+        }
+    }
+    assert!(compared > 600, "比べた数 {compared}");
+    assert!(
+        differed.is_empty(),
+        "番号の並べ方で結果が変わった（{} / {compared} 件）:\n{}",
+        differed.len(),
+        differed.join("\n")
+    );
+}
+
+/// 段0の計測（claude/触った所だけを計算する地図の設計_22fbbbe.md）：セル画の辺の数を変えて、同じ場所での同じ編集の
+/// 時間を測る。同じ中身の区画（辺 約 1,500 本）を、触れ合わないように 1・4・16・64 個並べたセル画を作り、どの大きさでも
+/// 左上の区画の中で、同じ乱数で同じ編集をする（触る所は同じで、セル画全体の大きさだけが違う）。編集は入口
+/// （`doc_actions::apply`）から文書への書き戻しまで。ブラシは手順ごとの内訳も測る。
+/// `cargo test --release measure_edit_scaling_by_cel_size -- --ignored --nocapture`（速さだけを見るなら
+/// `IS2D_NO_CHECKS=1` を付ける：テストだけの確かめを外す）
+#[test]
+#[ignore]
+fn measure_edit_scaling_by_cel_size() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::{reshape_result, LayerBase, MapEdit, MapInput, MapRule, PlanarMap};
+    use crate::timeline::MapOutcome;
+    use std::time::Instant;
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+    let med = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+        Color32::from_rgb(240, 200, 40),
+    ];
+    // 1つの区画：(-150, -75) から 300×150 の所に、辺が 1,500 本を超えるまで線を描く
+    let area = (-150.0, -75.0, 300.0, 150.0);
+    let mut rng = map_overlay::Rng(5);
+    let mut block = PlanarMap::default();
+    let mut k = 0;
+    while block.edges.len() < 1_500 {
+        let (r, c) = (2.0 + rng.f() * 8.0, colors[k % 4]);
+        let s = wiggly_stroke(&mut rng, area, r, c);
+        block = block
+            .overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c)))
+            .unwrap();
+        k += 1;
+    }
+    let block = LayerBase::new(&block).map.clone();
+    let bb = block.bounding_box().unwrap();
+    let (dx, dy) = (bb.width() + 20.0, bb.height() + 20.0);
+    eprintln!(
+        "区画：辺 {} 本・頂点 {} 個（線 {k} 本）",
+        block.edges.len(),
+        block.nodes.len()
+    );
+    eprintln!(
+        "{:>7} | {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8} | ブラシの内訳: {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "辺", "ブラシ", "消しゴム", "バケツ", "アンカー+", "アンカー-", "引っぱり", "頂点", "矩形", "片を置く", "ドラッグ中",
+        "重ねる", "確かめ", "差分", "しまう", "土台"
+    );
+    for side in [1usize, 2, 4, 8] {
+        // 区画を side × side 個並べた地図
+        let mut big = PlanarMap::default();
+        for i in 0..side {
+            for j in 0..side {
+                let off = kurbo::Vec2::new(i as f64 * dx, j as f64 * dy);
+                let n = big.nodes.len();
+                big.nodes.extend(block.nodes.iter().map(|&p| p + off));
+                big.edges
+                    .extend(block.edges.iter().map(|e| crate::planar_map::MapEdge {
+                        a: e.a + n,
+                        b: e.b + n,
+                        ctrl: e.ctrl + off,
+                        ..*e
+                    }));
+            }
+        }
+        let big = big.checked().unwrap().freshly_labeled().into_map();
+        let shapes: Vec<FillShape> = LayerBase::new(&big)
+            .faces(&[])
+            .iter()
+            .map(|s| (**s).clone())
+            .collect();
+        let mut app = Is2dApp::default();
+        put_cel_shapes(&mut app, 0, 0, shapes);
+        let lid = app.doc.root.layers[0].id;
+        let edges = app.doc.root.layers[0].keyframes[0]
+            .cel
+            .scope_base(&[])
+            .map
+            .edges
+            .len();
+        // どの大きさでも同じ乱数（左上の区画の中で、同じ編集）
+        let mut r = map_overlay::Rng(11);
+        let pt = |r: &mut map_overlay::Rng| {
+            Point::new(
+                area.0 + 30.0 + r.f() * (area.2 - 60.0),
+                area.1 + 20.0 + r.f() * (area.3 - 40.0),
+            )
+        };
+        let stroke = |r: &mut map_overlay::Rng, p: Point| -> Vec<Point> {
+            let mut p = p;
+            let mut a = r.f() * std::f64::consts::TAU;
+            (0..20)
+                .map(|_| {
+                    a += (r.f() - 0.5) * 0.8;
+                    p += kurbo::Vec2::new(a.cos(), a.sin()) * 3.0;
+                    p
+                })
+                .collect()
+        };
+        let pick_edge = |r: &mut map_overlay::Rng| {
+            block.quad((r.f() * block.edges.len() as f64) as usize % block.edges.len())
+        };
+        let mut t: [Vec<f64>; 15] = Default::default();
+        for _ in 0..9 {
+            // 1. ブラシ
+            let p0 = pt(&mut r);
+            let points = stroke(&mut r, p0);
+            let s = Instant::now();
+            assert!(apply(
+                &mut app,
+                Action::PaintStroke {
+                    points: points.clone(),
+                    radius: 4.0,
+                    color: colors[0]
+                }
+            ));
+            t[0].push(ms(s));
+            assert!(apply(&mut app, Action::Undo));
+            // 2. 消しゴム
+            let p0 = pt(&mut r);
+            let ep = stroke(&mut r, p0);
+            let s = Instant::now();
+            let erased = apply(
+                &mut app,
+                Action::EraseStroke {
+                    points: ep,
+                    radius: 4.0,
+                },
+            );
+            t[1].push(ms(s));
+            if erased {
+                assert!(apply(&mut app, Action::Undo));
+            }
+            // 3. バケツ
+            let bp = pt(&mut r);
+            let s = Instant::now();
+            let filled = apply(
+                &mut app,
+                Action::BucketFill {
+                    pt: bp,
+                    color: colors[3],
+                },
+            );
+            t[2].push(ms(s));
+            if filled {
+                assert!(apply(&mut app, Action::Undo));
+            }
+            // 4・5. アンカーを足して、同じ所を消す
+            let q = pick_edge(&mut r);
+            let ap = q.eval(0.5);
+            let s = Instant::now();
+            let added = apply(&mut app, Action::AddAnchor { pt: ap });
+            t[3].push(ms(s));
+            if added {
+                let s = Instant::now();
+                let deleted = apply(&mut app, Action::DeleteAnchor { pt: ap });
+                t[4].push(ms(s));
+                if deleted {
+                    assert!(apply(&mut app, Action::Undo));
+                }
+                assert!(apply(&mut app, Action::Undo));
+            }
+            // 6. 辺の引っぱり
+            let q = pick_edge(&mut r);
+            let from = q.eval(0.5);
+            let s = Instant::now();
+            let pulled = apply(
+                &mut app,
+                Action::PullEdgeFromTo {
+                    from,
+                    to: from + kurbo::Vec2::new(3.0, 2.0),
+                },
+            );
+            t[5].push(ms(s));
+            if pulled {
+                assert!(apply(&mut app, Action::Undo));
+            }
+            // 7. 頂点の移動
+            let q = pick_edge(&mut r);
+            let s = Instant::now();
+            let moved = apply(
+                &mut app,
+                Action::MoveVertexFromTo {
+                    from: q.p0,
+                    to: q.p0 + kurbo::Vec2::new(2.0, 1.0),
+                },
+            );
+            t[6].push(ms(s));
+            if moved {
+                assert!(apply(&mut app, Action::Undo));
+            }
+            // 8・9. 矩形で切って、少し動かして置く
+            let m0 = pt(&mut r);
+            let s = Instant::now();
+            apply(
+                &mut app,
+                Action::SelectMarquee {
+                    p0: m0,
+                    p1: m0 + kurbo::Vec2::new(40.0, 30.0),
+                    additive: false,
+                },
+            );
+            t[7].push(ms(s));
+            let moved = apply(
+                &mut app,
+                Action::MoveSelected {
+                    delta: KVec2::new(5.0, 4.0),
+                },
+            );
+            let s = Instant::now();
+            assert!(canvas_tool::clear_selection(&mut app));
+            t[8].push(ms(s));
+            if moved {
+                assert!(apply(&mut app, Action::Undo));
+                assert!(canvas_tool::clear_selection(&mut app));
+            }
+            // 10. 輪郭の変形のドラッグ中の1コマ（離したときと同じ計算：`reshape_result`）
+            let cel = app.doc.root.layers[0].keyframes[0].cel.clone();
+            let base = cel.scope_base(&[]);
+            let faces = base.faces(&[]);
+            let own: Vec<&FillShape> = faces.iter().map(|f| &**f).collect();
+            let q = pick_edge(&mut r);
+            let s = Instant::now();
+            std::hint::black_box(reshape_result(
+                &base,
+                MapEdit::PullEdge {
+                    orig_seg: q,
+                    grab_t: 0.5,
+                    target: q.eval(0.5) + kurbo::Vec2::new(4.0, 3.0),
+                },
+                &own,
+                lid,
+                &[],
+                Affine::IDENTITY,
+            ));
+            t[9].push(ms(s));
+            // ブラシの内訳（同じ線を、セル画の写しで手順ごとに）
+            let sh = brush_line_shapes(&brush_line(&points, 4.0), colors[0]);
+            let s = Instant::now();
+            let next = base
+                .overlay(MapInput::Shapes(&sh), MapRule::Paint(Some(colors[0])))
+                .unwrap();
+            t[10].push(ms(s));
+            let s = Instant::now();
+            let checked = next.written(&base).unwrap();
+            t[11].push(ms(s));
+            let s = Instant::now();
+            let out = cel.outcome(&[], checked);
+            t[12].push(ms(s));
+            if let MapOutcome::Changed(map, shapes) = out {
+                let mut c2 = cel.clone();
+                let s = Instant::now();
+                std::hint::black_box(c2.put_map(&[], map, shapes));
+                t[13].push(ms(s));
+            }
+            let s = Instant::now();
+            app.session.base_cache.invalidate_layer(lid);
+            app.refresh_scene_base();
+            t[14].push(ms(s));
+        }
+        let m: Vec<f64> = t
+            .into_iter()
+            .map(|v| if v.is_empty() { f64::NAN } else { med(v) })
+            .collect();
+        eprintln!(
+            "{edges:>7} | {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>8.2} | {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2}",
+            m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14]
         );
     }
 }
