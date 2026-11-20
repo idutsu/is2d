@@ -15,8 +15,13 @@ use crate::vector_engine::{nearest_on_quad, rects_overlap, Contour, FillShape, S
 use crate::vector_engine::{LayerId, ShapeId};
 
 mod grid;
+// 前の地図＋差分として触った所だけを計算する道具（段2b。本番で使い始める 2b-7 までは、テストのお手本との比べだけで使う）
+#[cfg(test)]
+mod local;
 mod overlay;
 pub(crate) use self::grid::*;
+#[cfg(test)]
+pub(crate) use self::local::*;
 pub(crate) use self::overlay::*;
 
 /// 辺の（左の色, 右の色）

@@ -699,12 +699,22 @@ impl PlanarMap {
                             super::uncounted(|| {
                                 let (removed, added) =
                                     crate::stored_map::window_diff(self, &wedges, &m);
-                                ix.stored.with_diff(self, &removed, &m, &added)
+                                let local =
+                                    LocalMap::new(self, ix, &wnodes, &m, &removed, &added);
+                                let touched = local.touched_cycles();
+                                (ix.stored.with_diff(self, &removed, &m, &added), touched.map(|t| {
+                                    let mut shapes: Vec<_> = t
+                                        .iter()
+                                        .map(|c| cycle_shape(c.iter().map(|&h| local.half_key(h))))
+                                        .collect();
+                                    shapes.sort();
+                                    shapes
+                                }))
                             })
                         });
                         let joined = self.with_window_result(m, &wnodes, &to_window, copy);
                         #[cfg(test)]
-                        if let Some(d) = diffed {
+                        if let Some((d, touched)) = diffed {
                             let same = super::uncounted(|| {
                                 d.same_content(&StoredMap::from_dense(&joined, None))
                             });
@@ -712,6 +722,17 @@ impl PlanarMap {
                                 same,
                                 "前のしまう形に窓の差分を当てた形が、窓の結果を合わせた地図のしまう形（お手本）と違う"
                             );
+                            // お手本（設計 段2b の 4. の 2b-4）：触った輪郭の集まりが、新しい地図全体の輪郭のうち触った
+                            // 向きのある辺を含むものと同じ。ほかの輪郭は、どれも前の地図にそのままある
+                            if let Some(touched) = touched {
+                                let ok = super::uncounted(|| {
+                                    window_cycles_match(self, &joined, &touched)
+                                });
+                                assert!(
+                                    ok,
+                                    "前の地図＋差分でたどった触った輪郭が、新しい地図全体の輪郭（お手本）と違う"
+                                );
+                            }
                         }
                         joined
                     }));
@@ -2121,6 +2142,46 @@ impl PlanarMap {
         }
         Ok(maps)
     }
+}
+
+/// お手本との比べ（設計 段2b の 4. の 2b-4）：前の地図 `base` と新しい地図 `next` の輪郭を、番号によらない形
+/// （`cycle_shape`）にして、`touched`（前の地図＋差分でたどった触った輪郭の形。並べたもの）が、`next` の輪郭のうち
+/// `touched` の向きのある辺を含むものの集まりと同じで、`next` のほかの輪郭がどれも `base` にあるか。`next` が正しい地図で
+/// なければ比べない（`true`）
+#[cfg(test)]
+fn window_cycles_match(
+    base: &PlanarMap,
+    next: &PlanarMap,
+    touched: &[Vec<([u64; 6], bool)>],
+) -> bool {
+    if !next.is_valid() {
+        return true;
+    }
+    let shapes = |m: &PlanarMap| -> Vec<Vec<([u64; 6], bool)>> {
+        let polys = m.polys();
+        m.face_cycles_with(&polys)
+            .iter()
+            .map(|c| {
+                cycle_shape(c.iter().map(|&(e, forward)| {
+                    let q = m.quad(e);
+                    (quad_key(&q), forward == point_order(q.p0, q.p2).is_le())
+                }))
+            })
+            .collect()
+    };
+    let touched_halves: std::collections::HashSet<([u64; 6], bool)> =
+        touched.iter().flatten().copied().collect();
+    let (mut hit, mut rest): (Vec<_>, Vec<_>) = shapes(next)
+        .into_iter()
+        .partition(|c| c.iter().any(|h| touched_halves.contains(h)));
+    hit.sort();
+    if hit != touched {
+        return false;
+    }
+    let base_shapes: std::collections::HashSet<Vec<([u64; 6], bool)>> =
+        shapes(base).into_iter().collect();
+    rest.retain(|c| !base_shapes.contains(c));
+    rest.is_empty()
 }
 
 /// 同じ線の組（前からある辺, 重ねる地図の辺, 同じ向きか）の並びと、組の端の重ねる地図の頂点 → 前からある頂点
