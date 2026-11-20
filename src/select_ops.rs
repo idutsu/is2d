@@ -521,7 +521,7 @@ pub(crate) fn prepare_group_selected_shapes(
         return false;
     };
     let new_gid = tab.doc.alloc_group_id();
-    // 片の地図を、新しいグループの階層に何を書くか（`Cel::outcome`）も先に決める（書けなければ、何も書かずに断る）
+    // 片の地図を、新しいグループの階層に何を書くか（1本の道の答え：`LayerBase::replace_local`）も先に決める（書けなければ、何も書かずに断る）
     let mut group_path = tab.session.editing_group_path.clone();
     group_path.push(new_gid);
     let piece_plan: Option<crate::canvas_tool::CommitPlan> = {

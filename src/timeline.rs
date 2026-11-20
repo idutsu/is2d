@@ -500,17 +500,7 @@ impl ScopeMap {
     }
 }
 
-/// 地図を書くとき何を書くか（`Cel::outcome`）
-pub(crate) enum MapOutcome {
-    /// 変わらない
-    Same,
-    /// 書けない（面と図形が1対1にならない。結果が正しい地図かは、地図を作った所で確かめてある：`PlanarMap::written`）
-    Refused,
-    /// 書く地図と、その面の図形（`Cel::put_map` に渡す）
-    Changed(CheckedMap, Vec<Arc<FillShape>>),
-}
-
-/// 地図の編集（`Cel::edit_map`）の結果：書いた階層の新しい地図の、計算に使う写し（階層の面が無くなって外したときは
+/// 地図の編集（`Cel::edit_local`）の結果：書いた階層の新しい地図の、計算に使う写し（階層の面が無くなって外したときは
 /// `None`）。写しを持ち続けるのは呼んだ側（画面の土台：`SceneBaseCache::hold`）
 pub(crate) struct MapWritten(pub(crate) Option<Arc<LayerBase>>);
 
@@ -1296,38 +1286,6 @@ impl Cel {
             )
     }
 
-    /// 階層 `group_path` の地図を `next`（文書の座標）にするとき、何を書くか（文書を変えない）。面の図形は、変わらない面は
-    /// 前の図形のまま、形の変わった面は番号を引き継いだ新しい図形（`LayerBase::diff`）
-    pub(crate) fn outcome(&self, group_path: &[u64], next: CheckedMap) -> MapOutcome {
-        let base = self.scope_base(group_path);
-        let faces = base.faces(group_path);
-        let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
-        let change = base.diff(next, &own, 0, group_path);
-        if change.removed.is_empty() && change.added.is_empty() {
-            return MapOutcome::Same;
-        }
-        match change.into_face_shapes(&faces) {
-            Some((map, shapes)) => MapOutcome::Changed(map, shapes),
-            None => MapOutcome::Refused,
-        }
-    }
-
-    /// 地図の編集：階層 `group_path` の地図（文書の座標）を `f` で編集し、返った確かめた地図（`PlanarMap::written` か
-    /// `realized`）をしまう（`outcome`・`put_map`）。`None`：変わらない・編集できない
-    pub(crate) fn edit_map(
-        &mut self,
-        group_path: &[u64],
-        f: impl FnOnce(&LayerBase) -> Option<CheckedMap>,
-    ) -> Option<MapWritten> {
-        let next = f(&self.scope_base(group_path))?;
-        match self.outcome(group_path, next) {
-            MapOutcome::Changed(map, shapes) => {
-                Some(MapWritten(self.put_map(group_path, map, shapes)))
-            }
-            MapOutcome::Same | MapOutcome::Refused => None,
-        }
-    }
-
     /// 1本の道の地図の編集（`LayerBase::edit_local`・`fill_local`・`anchor_local` など）：階層 `group_path` の地図を `f` で編集し、
     /// 書くものがあれば入れる（`put_local`）。`Ok(None)`：変わらない、`Err`：書けない
     pub(crate) fn edit_local(
@@ -1344,8 +1302,8 @@ impl Cel {
         }
     }
 
-    /// 触った所だけで行った編集の書くもの `w` を入れる（`put_map` と同じく、階層の地図を新しいしまう形にする。面の無く
-    /// なった階層は外す）。戻り値は新しい地図の写し（`LayerBase::of_local`。前の写し `prev` から升目の索引を作る）
+    /// 触った所だけで行った編集の書くもの `w` を入れる（階層の地図を新しいしまう形にする。面の無くなった階層は外し、
+    /// 新しい階層は決まりどおりの所に入れる）。戻り値は新しい地図の写し（`LayerBase::of_local`。前の写し `prev` から升目の索引を作る）
     pub(crate) fn put_local(
         &mut self,
         group_path: &[u64],
@@ -1361,47 +1319,6 @@ impl Cel {
         };
         let base = LayerBase::of_local(m.stored().clone(), group_path, w.faces, prev);
         match at {
-            Some(i) => {
-                Arc::make_mut(&mut self.maps)[i] = m;
-                self.revision = crate::vector_engine::next_mesh_revision();
-            }
-            None => {
-                let mut items = Self::items_of(&self.maps, &self.instances);
-                items.push(Item::Raw(group_path.to_vec(), m));
-                self.arrange(items);
-            }
-        }
-        Some(base)
-    }
-
-    /// 地図 `map`（文書の座標。面の図形 `shapes`：`MapChange::into_face_shapes`）を入れる：階層の地図をこの地図にする。
-    /// 面の無くなった階層は外し、新しい階層は決まりどおりの所（グループの中身があれば、そのいちばん下。無ければ親の階層の
-    /// いちばん上）に入れる。戻り値は、新しい地図の計算に使う写し。階層を外したときは `None`
-    pub(crate) fn put_map(
-        &mut self,
-        group_path: &[u64],
-        map: CheckedMap,
-        shapes: Vec<Arc<FillShape>>,
-    ) -> Option<Arc<LayerBase>> {
-        let at = self.maps.iter().position(|m| m.group_path == group_path);
-        // 前の地図の、いま誰かが持っている写し（あれば、新しい写しの升目の索引を、そこから変わった所だけ作る）
-        let prev = self.scope_stored(group_path).and_then(LayerBase::live);
-        let (stored, polys) = map.into_stored_with_polys(self.scope_stored(group_path));
-        let Some(m) = ScopeMap::of_checked_stored(group_path.to_vec(), stored) else {
-            let mut items = Self::items_of(&self.maps, &self.instances);
-            items.retain(|it| !matches!(it, Item::Raw(p, _) if p == group_path));
-            self.arrange(items);
-            return None;
-        };
-        let base = LayerBase::with_faces(
-            m.stored().clone(),
-            group_path,
-            shapes,
-            polys,
-            prev.as_deref(),
-        );
-        match at {
-            // 地図だけを置き換える（インスタンスの並びは Undo の控えと共有したまま）
             Some(i) => {
                 Arc::make_mut(&mut self.maps)[i] = m;
                 self.revision = crate::vector_engine::next_mesh_revision();

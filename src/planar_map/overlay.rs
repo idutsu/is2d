@@ -644,7 +644,7 @@ impl PlanarMap {
                                 // （新しく振る番号は回ごとに違うので、元の図形の番号を引き継いだかだけを比べる）
                                 let same = super::uncounted(|| {
                                     let prev = LayerBase::new(self);
-                                    let next = joined.clone().written(&prev).expect("正しい地図");
+                                    let next = joined.clone().written().expect("正しい地図");
                                     let own_faces = prev.faces(&[]);
                                     let own: Vec<&FillShape> = own_faces.iter().map(|s| &**s).collect();
                                     let full = prev.diff(next, &own, 0, &[]);
@@ -677,7 +677,7 @@ impl PlanarMap {
                                     // 番号の無い地図は、書き戻すと触らない面にも番号を振るので、触った所だけの答えとは違う）
                                     let settled = self
                                         .clone()
-                                        .written(&prev)
+                                        .written()
                                         .is_some_and(|n| prev.diff(n, &own, 0, &[]).removed.is_empty());
                                     let mut a = change.removed.clone();
                                     a.sort_unstable();
@@ -704,7 +704,7 @@ impl PlanarMap {
                             }
                             // お手本：確かめ全体の答えが、新しい地図全体を確かめた答え（`written` と同じ判定）と同じ
                             let full_ok =
-                                super::uncounted(|| LayerBase::new(self).written_ok(&joined));
+                                super::uncounted(|| joined.is_valid());
                             assert_eq!(
                                 local_ok, full_ok,
                                 "触った所だけで確かめた答えが、新しい地図全体を確かめた答え（お手本）と違う"
@@ -717,15 +717,8 @@ impl PlanarMap {
                                 "触った輪郭の決まりの答えが、新しい地図全体の輪郭で調べた答え（お手本）と違う"
                             );
                             // お手本（設計 段2b の 6. の 1.）：増えた辺の決まりの答えが、新しい地図全体で調べた答えと同じ
-                            let full_ok = super::uncounted(|| {
-                                let prev = LayerBase::new(self);
-                                let (polys, origin) = joined.polys_since(Some(&prev));
-                                let fresh: Vec<bool> =
-                                    origin.iter().map(|o| matches!(o, EdgeOrigin::New)).collect();
-                                joined.fits_grid(Affine::IDENTITY)
-                                    && joined.edges.iter().all(|e| e.left != e.right)
-                                    && joined.polys_apart(&polys, &fresh)
-                            });
+                            let full_ok =
+                                super::uncounted(|| LayerBase::new(self).edges_ok_full(&joined));
                             assert_eq!(
                                 edges_ok, full_ok,
                                 "増えた辺の決まりの答えが、新しい地図全体で調べた答え（お手本）と違う"
@@ -760,24 +753,10 @@ impl PlanarMap {
         new_quads: &[QuadBez],
         new_cols: &[(Option<Color32>, Option<Color32>)],
     ) -> Option<(Vec<PlanarMap>, Vec<usize>)> {
-        // 窓の範囲を、入れる辺と重ねるものの外接矩形から広げる幅（px）。広いほどやり直しが減り、窓は大きくなる
-        const WINDOW_PAD: f64 = 2.0;
         let stored = ix.stored;
         let hull = |q: QuadBez| KRect::from_points(q.p0, q.p2).union_pt(q.p1);
         let quad_of = |e: usize| stored.edge_at(e).quad();
-        // 範囲に外接矩形（`reach_box`）がかかる前の地図の辺（升目の索引で引く。番号の順）
-        let region_edges = |r: KRect| -> Vec<usize> {
-            let mut found: Vec<usize> = Vec::new();
-            for t in index_tiles_over(r) {
-                ix.index.edges_in(stored, t, &mut found);
-            }
-            found.sort_unstable();
-            found.dedup();
-            found.retain(|&e| rects_overlap(reach_box(quad_of(e)), r));
-            found
-        };
-        let inside =
-            |u: KRect, r: KRect| u.x0 >= r.x0 && u.y0 >= r.y0 && u.x1 <= r.x1 && u.y1 <= r.y1;
+        let region_edges = |r: KRect| region_edges(ix, r);
         let moved_list: Vec<usize> = match input {
             MapInput::Sweep(m) => m.iter().map(|&(e, _)| e).collect(),
             _ => Vec::new(),
@@ -861,7 +840,7 @@ impl PlanarMap {
                     .chain(n0..n0 + np)
                     .map(|e| reach_box(sub.quad(e)).inflate(4.0 * GRID_REACH, 4.0 * GRID_REACH))
                     .fold(area, |a, b| a.union(b));
-                if !inside(reach, r0) {
+                if !rect_inside(reach, r0) {
                     r0 = r0.union(reach.inflate(WINDOW_PAD, WINDOW_PAD));
                     continue;
                 }
@@ -899,28 +878,7 @@ impl PlanarMap {
                 region = region.union(x);
             }
             let region = region.inflate(WINDOW_PAD, WINDOW_PAD);
-            let mut in_window: std::collections::BTreeSet<usize> =
-                region_edges(region).into_iter().collect();
-            in_window.extend(fed_dense.iter().copied());
-            let mut ends: Vec<Point> = Vec::new();
-            for &e in &in_window {
-                let te = stored.edge_at(e);
-                ends.push(te.a);
-                ends.push(te.b);
-            }
-            ends.sort_by(|a, b| point_order(*a, *b));
-            ends.dedup();
-            for p in ends {
-                let mut at: Vec<usize> = Vec::new();
-                ix.ends.edges_in(stored, end_key(p), &mut at);
-                for e in at {
-                    let te = stored.edge_at(e);
-                    if te.a == p || te.b == p {
-                        in_window.insert(e);
-                    }
-                }
-            }
-            let wedges: Vec<usize> = in_window.into_iter().collect();
+            let wedges = window_edges(ix, fed_dense.iter().copied(), Some(region));
             let (wmap, wknown) = tile_window(ix, &wedges);
             let nw = wmap.edges.len();
             let (wmap, wpartner) = with_piece(wmap);
@@ -964,18 +922,8 @@ impl PlanarMap {
             };
             match wmap.overlay_with(winput, rules, new_quads, new_cols, &mut wset) {
                 Ok(maps) => {
-                    if let Some(u) = wset.used {
-                        let u = KRect::new(
-                            u.x0 as f64 / OVERLAY_GRID,
-                            u.y0 as f64 / OVERLAY_GRID,
-                            u.x1 as f64 / OVERLAY_GRID,
-                            u.y1 as f64 / OVERLAY_GRID,
-                        );
-                        if !(u.x0 >= region.x0
-                            && u.y0 >= region.y0
-                            && u.x1 <= region.x1
-                            && u.y1 <= region.y1)
-                        {
+                    if let Some(u) = wset.used.map(px_rect) {
+                        if !rect_inside(u, region) {
                             extra = Some(extra.map_or(u, |x| x.union(u)));
                             continue;
                         }
@@ -2450,6 +2398,72 @@ fn window_cycles_match(
     rest.is_empty()
 }
 
+/// 窓の範囲を、関わる辺と重ねるものの外接矩形から広げる幅（px）。広いほどやり直しが減り、窓は大きくなる（窓を作る所は
+/// みなこれ：重ね合わせ `window_overlay`・バケツ `fill_diff`・アンカー `anchor_diff`）
+pub(super) const WINDOW_PAD: f64 = 2.0;
+
+/// 範囲 `r` に外接矩形（`reach_box`）がかかる前の地図の辺（升目の索引で引く。番号の順）
+pub(super) fn region_edges(ix: MapIndex<'_>, r: KRect) -> Vec<usize> {
+    let stored = ix.stored;
+    let mut found: Vec<usize> = Vec::new();
+    for t in index_tiles_over(r) {
+        ix.index.edges_in(stored, t, &mut found);
+    }
+    found.sort_unstable();
+    found.dedup();
+    found.retain(|&e| rects_overlap(reach_box(stored.edge_at(e).quad()), r));
+    found
+}
+
+/// 窓の辺（前の地図の番号の順）：関わる辺 `seeds` と、範囲 `region` に外接矩形がかかる辺と、それらの端の頂点につながる
+/// 辺（窓の頂点のまわりの辺は、みな窓にある）。窓を作るのはこれ1つ
+pub(super) fn window_edges(
+    ix: MapIndex<'_>,
+    seeds: impl IntoIterator<Item = usize>,
+    region: Option<KRect>,
+) -> Vec<usize> {
+    let stored = ix.stored;
+    let mut in_window: std::collections::BTreeSet<usize> = seeds.into_iter().collect();
+    if let Some(r) = region {
+        in_window.extend(region_edges(ix, r));
+    }
+    let mut ends: Vec<Point> = Vec::new();
+    for &e in &in_window {
+        let te = stored.edge_at(e);
+        ends.push(te.a);
+        ends.push(te.b);
+    }
+    ends.sort_by(|a, b| point_order(*a, *b));
+    ends.dedup();
+    let mut at: Vec<usize> = Vec::new();
+    for p in ends {
+        at.clear();
+        ix.ends.edges_in(stored, end_key(p), &mut at);
+        for &e in &at {
+            let te = stored.edge_at(e);
+            if te.a == p || te.b == p {
+                in_window.insert(e);
+            }
+        }
+    }
+    in_window.into_iter().collect()
+}
+
+/// 格子の座標の矩形 `u` を、px の矩形にする
+pub(super) fn px_rect(u: GridRect) -> KRect {
+    KRect::new(
+        u.x0 as f64 / OVERLAY_GRID,
+        u.y0 as f64 / OVERLAY_GRID,
+        u.x1 as f64 / OVERLAY_GRID,
+        u.y1 as f64 / OVERLAY_GRID,
+    )
+}
+
+/// 矩形 `u` が矩形 `r` の中にある（境目を含む）
+pub(super) fn rect_inside(u: KRect, r: KRect) -> bool {
+    u.x0 >= r.x0 && u.y0 >= r.y0 && u.x1 <= r.x1 && u.y1 <= r.y1
+}
+
 /// 前の地図の辺 `edges`（計算に使う地図の番号の順）を並べた小さな地図と、辺ごとの計算に使う形。辺は塊から引き
 /// （`StoredMap::edge_at`。向きはしまう辺の向きで、計算に使う地図の辺と同じ）、頂点は座標ごとに初めて出てきた順に番号を
 /// 振る（設計 段2b の 7. の 2b-7a。写しの通し番号の一覧を使わない）
@@ -2533,8 +2547,188 @@ fn add_span(spans: &mut IntMap<Line, Vec<Span>>, line: Line, e: usize, pts: &Ove
 /// `winding_at`）
 type OrigRows = (Vec<(usize, usize, GridRect)>, YBands);
 
-/// 半直線が横切る辺（`first_crossing`）：横切る所, 上へ向けた区間の向き, 点の側の向きのある辺
-type Crossing = (f64, (i64, i64), (usize, bool));
+/// 半直線が横切る辺（`first_crossing`）：横切る所（`crossing_x`）, 上へ向けた区間の向き, 点の側の向きのある辺
+type Crossing = ((i128, i128), (i64, i64), (usize, bool));
+
+/// 点 `p2` から右へ伸ばした半直線を区間 `a`〜`b`（どれも2倍の座標。`crossing` で横切るもの）が横切る所の x（2倍の座標）。
+/// 有理数（分子, 分母。分母は正）で、丸めずに比べる
+pub(super) fn crossing_x(a: IPt, b: IPt, p2: IPt) -> (i128, i128) {
+    let den = (b.1 - a.1) as i128;
+    let num = a.0 as i128 * den + (p2.1 - a.1) as i128 * (b.0 - a.0) as i128;
+    if den < 0 {
+        (-num, -den)
+    } else {
+        (num, den)
+    }
+}
+
+/// 横切る所の x（`crossing_x`）の升目の列（`index_tile` の列。境目の上なら右の列：その点を含むマスの升目）
+fn crossing_col((num, den): (i128, i128)) -> i64 {
+    num.div_euclid(den * (2 * GRID_CELL * INDEX_TILE_CELLS) as i128) as i64
+}
+
+/// 辺の判定の形 `poly`（格子の点）の区間が、点 `p2`（2倍の座標）から右へ伸ばした半直線を横切る所の、升目の列
+pub(super) fn crossing_cols(poly: &[IPt], p2: IPt) -> impl Iterator<Item = i64> + '_ {
+    poly.windows(2).filter_map(move |s| {
+        let (a, b) = (dbl(s[0]), dbl(s[1]));
+        crossing(a, b, p2).map(|_| crossing_col(crossing_x(a, b, p2)))
+    })
+}
+
+/// 行の帯（升目の行の範囲）ごとの、辺のある升目の列とその列の辺の控え（`RayCols::next_col_cached`）。帯ごとに、引いた
+/// 列の範囲だけを持ち、要る所まで少しずつ広げる（なめる点が少なければ、引くのは点の近くの列だけ）
+#[derive(Default)]
+pub(super) struct RayBands(std::cell::RefCell<IntMap<(i64, i64), RayBand>>);
+
+/// 1つの帯の控え：引いた列の範囲（`lo..=hi`。`hi < lo` なら無い）と、その中の辺のある列（列の順。辺は番号の順）
+struct RayBand {
+    lo: i64,
+    hi: i64,
+    cols: Vec<(i64, Box<[usize]>)>,
+}
+
+impl RayBands {
+    /// 行の帯 `rows` の、列 `from` から `upto` までのうち、辺のある最初の列とその辺。無ければ `None`
+    fn next_in(
+        &self,
+        ix: MapIndex<'_>,
+        rows: (i64, i64),
+        from: i64,
+        upto: i64,
+    ) -> Option<(i64, Vec<usize>)> {
+        let scan = |a: i64, b: i64| -> Vec<(i64, Box<[usize]>)> {
+            let mut out = Vec::new();
+            let mut cands: Vec<usize> = Vec::new();
+            for tx in a..=b {
+                cands.clear();
+                for ty in rows.0..=rows.1 {
+                    ix.index.edges_in(ix.stored, (tx, ty), &mut cands);
+                }
+                if !cands.is_empty() {
+                    cands.sort_unstable();
+                    cands.dedup();
+                    out.push((tx, cands.as_slice().into()));
+                }
+            }
+            out
+        };
+        let mut bands = self.0.borrow_mut();
+        let band = bands.entry(rows).or_insert(RayBand {
+            lo: from,
+            hi: from - 1,
+            cols: Vec::new(),
+        });
+        if from < band.lo {
+            let mut head = scan(from, band.lo - 1);
+            head.append(&mut band.cols);
+            band.cols = head;
+            band.lo = from;
+        }
+        let mut grow = 16;
+        loop {
+            let k = band.cols.partition_point(|(c, _)| *c < from);
+            if let Some((c, es)) = band.cols.get(k) {
+                if *c <= upto {
+                    return Some((*c, es.to_vec()));
+                }
+                return None;
+            }
+            if band.hi >= upto {
+                return None;
+            }
+            let b = upto.min(band.hi.saturating_add(grow));
+            let mut tail = scan(band.hi + 1, b);
+            band.cols.append(&mut tail);
+            band.hi = b;
+            grow *= 2;
+        }
+    }
+}
+
+/// 点から右へ伸ばした半直線が横切る前の地図の辺を、横切る所の升目の列の順に1列ずつ引く道具（半直線をなめる所はみなこれ：
+/// `first_crossing` と、前の地図＋差分の `LocalMap::ray_cols`）。半直線を横切る区間は、横切る所を含むマスの升目にあるので、
+/// 列ごとに、半直線の通る行の升目の索引を引けばよい
+pub(super) struct RayCols {
+    p2: IPt,
+    /// 次に調べる列と、最後の列
+    next: i64,
+    last: i64,
+    /// 調べる升目の行（下, 上）
+    rows: (i64, i64),
+}
+
+impl RayCols {
+    /// 点 `p2`（2倍の座標）から。最後の列は、索引のいちばん右の列と `last_at_least` の大きい方
+    pub(super) fn new(ix: MapIndex<'_>, p2: IPt, last_at_least: Option<i64>) -> Self {
+        let (x, y) = (p2.0.div_euclid(2), p2.1.div_euclid(2));
+        let (t0, ty0) = index_tile(cell_of((x - 1, y - 1)));
+        let ty1 = index_tile(cell_of((x - 1, y + 2))).1;
+        let last = ix
+            .index
+            .max_tile_x()
+            .into_iter()
+            .chain(last_at_least)
+            .max()
+            .unwrap_or(t0 - 1);
+        Self {
+            p2,
+            next: t0,
+            last,
+            rows: (ty0, ty1),
+        }
+    }
+
+    /// 半直線の通る行の升目の索引の行の、点 `p2` の行（`LocalMap` の増えた辺を、同じ行で引くため）
+    pub(super) fn rows(&self) -> (i64, i64) {
+        self.rows
+    }
+
+    /// `next_col` と同じだが、升目の列の辺を、行の帯ごとの控え `bands` から引き（同じ帯の点を何度もなめるとき、索引を
+    /// 1回だけ引く）、辺の無い列は飛ばす。ただし列 `stop`（ほかの辺がある列）より先へは飛ばさない（その列は空で返す）
+    pub(super) fn next_col_cached(
+        &mut self,
+        ix: MapIndex<'_>,
+        bands: &RayBands,
+        keep: impl Fn(usize) -> bool,
+        stop: Option<i64>,
+    ) -> Option<(i64, Vec<usize>)> {
+        if self.next > self.last {
+            return None;
+        }
+        let upto = stop.map_or(self.last, |s| s.clamp(self.next, self.last));
+        let found = bands.next_in(ix, self.rows, self.next, upto);
+        let tx = found.as_ref().map_or(upto, |(c, _)| *c);
+        if found.is_none() && stop.is_none() {
+            self.next = self.last + 1;
+            return None;
+        }
+        self.next = tx + 1;
+        let mut list = found.map(|(_, es)| es).unwrap_or_default();
+        list.retain(|&e| keep(e) && crossing_cols(ix.poly(e), self.p2).any(|c| c == tx));
+        Some((tx, list))
+    }
+
+    /// 次の列（列, その列で半直線を横切る前の地図の辺のうち `keep` が通すもの。番号の順。無い列は空）。列が尽きたら `None`
+    pub(super) fn next_col(
+        &mut self,
+        ix: MapIndex<'_>,
+        keep: impl Fn(usize) -> bool,
+    ) -> Option<(i64, Vec<usize>)> {
+        if self.next > self.last {
+            return None;
+        }
+        let tx = self.next;
+        self.next += 1;
+        let mut cands: Vec<usize> = Vec::new();
+        for ty in self.rows.0..=self.rows.1 {
+            ix.index.edges_in(ix.stored, (tx, ty), &mut cands);
+        }
+        cands.sort_unstable();
+        cands.dedup();
+        cands.retain(|&e| keep(e) && crossing_cols(ix.poly(e), self.p2).any(|c| c == tx));
+        Some((tx, cands))
+    }
+}
 
 /// 格子の点を2倍の座標にする
 fn dbl(p: IPt) -> IPt {
@@ -2547,30 +2741,17 @@ fn dbl(p: IPt) -> IPt {
 /// 辺の `crossing` の和は、その面の色で決まる。横切る辺が無ければ `None`（どの面にも入らない）。横切る所の列の順に、列ごとに
 /// 升目の索引を引く（手間は、最初に横切る辺までの分）
 pub(super) fn first_crossing(ix: MapIndex<'_>, q: IPt) -> Option<(usize, bool)> {
-    let col_of = |x2: f64| ((x2 / 2.0) / (GRID_CELL * 4) as f64).floor() as i64;
-    let (x, y) = (q.0.div_euclid(2), q.1.div_euclid(2));
-    let (t0, ty0) = index_tile(cell_of((x - 1, y - 1)));
-    let ty1 = index_tile(cell_of((x - 1, y + 2))).1;
-    let last = ix.index.max_tile_x().unwrap_or(t0 - 1);
-    let stored = ix.stored;
-    let mut cands: Vec<usize> = Vec::new();
-    for tx in t0..=last {
-        cands.clear();
-        for ty in ty0..=ty1 {
-            ix.index.edges_in(stored, (tx, ty), &mut cands);
-        }
-        cands.sort_unstable();
-        cands.dedup();
+    let mut rc = RayCols::new(ix, q, None);
+    while let Some((tx, edges)) = rc.next_col(ix, |_| true) {
         let mut best: Option<Crossing> = None;
-        for &e in &cands {
+        for e in edges {
             for s in ix.poly(e).windows(2) {
                 let (a, b) = (dbl(s[0]), dbl(s[1]));
                 let Some(d) = crossing(a, b, q) else {
                     continue;
                 };
-                let t = (q.1 - a.1) as f64 / (b.1 - a.1) as f64;
-                let xx = a.0 as f64 + t * (b.0 - a.0) as f64;
-                if col_of(xx) != tx {
+                let xx = crossing_x(a, b, q);
+                if crossing_col(xx) != tx {
                     continue;
                 }
                 let up = if b.1 > a.1 {
@@ -2581,8 +2762,9 @@ pub(super) fn first_crossing(ix: MapIndex<'_>, q: IPt) -> Option<(usize, bool)> 
                 // 上へ横切る区間は左が、下へ横切る区間は右が q の側
                 let side = (e, d > 0);
                 let better = best.is_none_or(|(bx, bu, _)| {
-                    xx < bx
-                        || (xx == bx
+                    let (l, r) = (xx.0 * bx.1, bx.0 * xx.1);
+                    l < r
+                        || (l == r
                             && (up.0 as i128) * (bu.1 as i128) < (bu.0 as i128) * (up.1 as i128))
                 });
                 if better {

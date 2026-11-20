@@ -50,6 +50,8 @@ pub(crate) struct LocalMap<'a> {
     /// 辺を探す所（`ray_cols`）が、半直線の通る行の分だけ引く
     added_rows: IntMap<i64, Vec<usize>>,
     nodes: std::cell::RefCell<Nodes>,
+    /// 半直線をなめる所（`ray_cols`）の、行の帯ごとの前の地図の辺の控え（穴の入れ先を探す点は多いので、索引を1回だけ引く）
+    ray_bands: RayBands,
 }
 
 impl<'a> LocalMap<'a> {
@@ -99,6 +101,7 @@ impl<'a> LocalMap<'a> {
             added_at,
             added_tiles,
             added_rows,
+            ray_bands: RayBands::default(),
             nodes: std::cell::RefCell::new(nodes),
         }
     }
@@ -297,10 +300,9 @@ impl<'a> LocalMap<'a> {
         out
     }
 
-    /// 2b-5a：増えた辺の決まり（`checked_since` の、格子に置ける・両側の色が違う・判定の形が2点以上・区間どうしが触れない・
-    /// 別々の頂点が別々の格子の点）。前の地図の辺どうしは、前の地図が正しいので調べない。区間どうしは、どちらかが、形が
-    /// 前の地図に無い増えた辺のものだけを調べる（消えた辺と形が同じ増えた辺は、判定の形も同じ：`valid_faces_since` と同じ
-    /// 考え）。区間どうしは、地図全体の確かめ（`PlanarMap::polys_apart`）と同じく、区間を通るマスの格子（`CellGrid`）に
+    /// 2b-5a：増えた辺の決まり（地図全体の判定 `check` の、格子に置ける・両側の色が違う・判定の形が2点以上・区間どうしが
+    /// 触れない・別々の頂点が別々の格子の点）。前の地図の辺どうしは、前の地図が正しいので調べない。区間どうしは、どちらかが、
+    /// 形が前の地図に無い増えた辺のものだけを調べる（消えた辺と形が同じ増えた辺は、判定の形も同じ）。区間どうしは、地図全体の確かめ（`PlanarMap::polys_apart`）と同じく、区間を通るマスの格子（`CellGrid`）に
     /// 入れ、同じマスにある区間とだけ比べる（触れる区間どうしは必ず同じマスを持つ：`seg_cells`）。手間は触る区間の数に
     /// 比例し、近くの辺どうしの区間の組をみな比べることはしない
     pub(crate) fn added_edges_ok(&self) -> bool {
@@ -436,10 +438,9 @@ impl<'a> LocalMap<'a> {
         true
     }
 
-    /// テスト用のお手本：`added_edges_ok` の前のやり方（近くの辺ごとに、区間の組をみな比べる）。2b-5a：増えた辺の決まり（`checked_since` の、格子に置ける・両側の色が違う・判定の形が2点以上・区間どうしが触れない・
-    /// 別々の頂点が別々の格子の点）。前の地図の辺どうしは、前の地図が正しいので調べない。区間どうしは、どちらかが、形が
-    /// 前の地図に無い増えた辺のものだけを調べる（消えた辺と形が同じ増えた辺は、判定の形も同じ：`valid_faces_since` と同じ
-    /// 考え）
+    /// テスト用のお手本：`added_edges_ok` の前のやり方（近くの辺ごとに、区間の組をみな比べる）。2b-5a：増えた辺の決まり（地図全体の判定 `check` の、格子に置ける・両側の色が違う・判定の形が2点以上・区間どうしが
+    /// 触れない・別々の頂点が別々の格子の点）。前の地図の辺どうしは、前の地図が正しいので調べない。区間どうしは、どちらかが、
+    /// 形が前の地図に無い増えた辺のものだけを調べる（消えた辺と形が同じ増えた辺は、判定の形も同じ）
     #[cfg(test)]
     fn added_edges_ok_pairs(&self) -> bool {
         let base_keys: IntSet<[u64; 6]> = self
@@ -548,9 +549,10 @@ impl<'a> LocalMap<'a> {
             starts.extend(list.iter().copied());
         }
         let mut ids: Vec<usize> = Vec::new();
+        let mut seen: IntSet<usize> = Default::default();
         for h in starts {
             let ci = self.cycle_of(h, memo)?;
-            if !ids.contains(&ci) {
+            if seen.insert(ci) {
                 ids.push(ci);
             }
         }
@@ -591,16 +593,14 @@ pub(crate) struct CycleMemo {
     around: IntMap<usize, Vec<(usize, bool)>>,
     /// 何も無い側の輪郭の輪（バケツは、色の無い囲まれた所も面にする：`ring_any`）
     unpainted_rings: IntMap<usize, Ring>,
+    /// 決めた穴の入れ先（穴の輪郭の番号ごとの、外周の輪郭の番号。無ければ `None`：`hole_owner`）
+    owners: IntMap<usize, Option<usize>>,
 }
 
-/// 点から右へ伸ばした半直線が横切る辺を、列の順に少しずつ引く道具（`LocalMap::ray_cols`・`next_ray_col`）
-struct RayCols {
-    p2: IPt,
-    /// 次に調べる列と、最後の列
-    next: i64,
-    last: i64,
-    /// 調べる升目の行（下, 上）
-    rows: (i64, i64),
+/// 点から右へ伸ばした半直線が横切る辺を、前の地図＋差分で、列の順に少しずつ引く道具（`LocalMap::ray_cols`・
+/// `next_ray_col`）：前の地図の辺は `RayCols` で引き、増えた辺は横切る列ごとに並べておく
+struct LocalRayCols {
+    base: RayCols,
     /// 増えた辺の、横切る列ごとの並び
     added: std::collections::BTreeMap<i64, Vec<usize>>,
 }
@@ -671,14 +671,11 @@ impl LocalMap<'_> {
     }
 
     /// 点 `p2`（2倍の座標）から右へ伸ばした半直線が横切る辺（`crossing` で数える区間がある辺）を、横切る所の升目の列の順に
-    /// 少しずつ引く道具（`RayCols`）。半直線を横切る区間は、横切る所を含むマスの升目にあるので、列ごとに升目の索引の行を
-    /// 引けばよい
-    fn ray_cols(&self, p2: IPt) -> RayCols {
-        let col_of = |x2: f64| ((x2 / 2.0) / (GRID_CELL * 4) as f64).floor() as i64;
-        let (x, y) = (p2.0.div_euclid(2), p2.1.div_euclid(2));
-        let (t0, ty0) = index_tile(cell_of((x - 1, y - 1)));
-        let ty1 = index_tile(cell_of((x - 1, y + 2))).1;
-        // 増えた辺は、半直線の通る行にかかるものだけ、横切る列をはじめに求めておく
+    /// 少しずつ引く道具（`LocalRayCols`）。前の地図の辺は `RayCols` で引き、増えた辺は、半直線の通る行にかかるものだけ、
+    /// 横切る列をはじめに求めておく
+    fn ray_cols(&self, p2: IPt) -> LocalRayCols {
+        let probe = RayCols::new(self.index, p2, None);
+        let (ty0, ty1) = probe.rows();
         let mut near: Vec<usize> = (ty0..=ty1)
             .filter_map(|row| self.added_rows.get(&row))
             .flatten()
@@ -688,75 +685,40 @@ impl LocalMap<'_> {
         near.dedup();
         let mut added: std::collections::BTreeMap<i64, Vec<usize>> = Default::default();
         for e in near {
-            for c in self.crossing_cols(e, p2, col_of) {
+            for c in crossing_cols(self.poly(e), p2) {
                 let list = added.entry(c).or_default();
                 if !list.contains(&e) {
                     list.push(e);
                 }
             }
         }
-        let last = self
-            .index
-            .index
-            .max_tile_x()
-            .into_iter()
-            .chain(added.keys().last().copied())
-            .max()
-            .unwrap_or(t0 - 1);
-        RayCols {
-            p2,
-            next: t0,
-            last,
-            rows: (ty0, ty1),
+        LocalRayCols {
+            base: RayCols::new(self.index, p2, added.keys().last().copied()),
             added,
         }
     }
 
-    /// 辺 `e` の区間が、点 `p2` から右へ伸ばした半直線を横切る所の列
-    fn crossing_cols(&self, e: usize, p2: IPt, col_of: impl Fn(f64) -> i64) -> Vec<i64> {
-        let p = self.poly(e);
-        let mut out = Vec::new();
-        for s in p.windows(2) {
-            let (a, b) = ((2 * s[0].0, 2 * s[0].1), (2 * s[1].0, 2 * s[1].1));
-            if crossing(a, b, p2).is_some() {
-                let t = (p2.1 - a.1) as f64 / (b.1 - a.1) as f64;
-                out.push(col_of(a.0 as f64 + t * (b.0 - a.0) as f64));
-            }
-        }
-        out
-    }
-
-    /// `RayCols` の次の列（列, その列で半直線を横切る辺）。列が尽きたら `None`
-    fn next_ray_col(&self, rc: &mut RayCols) -> Option<(i64, Vec<usize>)> {
-        let col_of = |x2: f64| ((x2 / 2.0) / (GRID_CELL * 4) as f64).floor() as i64;
-        while rc.next <= rc.last {
-            let tx = rc.next;
-            rc.next += 1;
-            let mut cands: Vec<usize> = Vec::new();
-            for ty in rc.rows.0..=rc.rows.1 {
-                self.index
-                    .index
-                    .edges_in(self.index.stored, (tx, ty), &mut cands);
-            }
-            cands.retain(|e| !self.removed.contains(e));
-            cands.sort_unstable();
-            cands.dedup();
-            let mut list: Vec<usize> = cands
-                .into_iter()
-                .filter(|&e| self.crossing_cols(e, rc.p2, col_of).contains(&tx))
-                .collect();
+    /// `LocalRayCols` の次の列（列, その列で半直線を横切る辺）。列が尽きたら `None`
+    fn next_ray_col(&self, rc: &mut LocalRayCols) -> Option<(i64, Vec<usize>)> {
+        loop {
+            let stop = rc.added.keys().next().copied();
+            let (tx, mut list) = rc.base.next_col_cached(
+                self.index,
+                &self.ray_bands,
+                |e| !self.removed.contains(&e),
+                stop,
+            )?;
             list.extend(rc.added.remove(&tx).unwrap_or_default());
             if !list.is_empty() {
                 return Some((tx, list));
             }
         }
-        None
     }
 
     /// 色 `color` の穴（調べる点 `probe`）の入れ先：点を含む同じ色の外周のうち、いちばん小さいもの（今の `regions` と同じ
     /// 決まり）。外周は点を含めば、点から右へ伸ばした半直線と交わる。正しい地図では外周どうしは入れ子か離れているので、
-    /// 点を含む外周のうちいちばん内側のものが、半直線と最初に交わる。そこで、横切る所の列の順に輪郭を調べ、見つかった列の
-    /// 次の列まで調べていちばん小さいものにする（列の境目での丸めの分）。`None`：輪郭が閉じない。`Some(None)`：入れ先が無い
+    /// 点を含む外周のうちいちばん内側のものが、半直線と最初に交わる。そこで、横切る所の列（丸めずに決める：`crossing_cols`）
+    /// の順に輪郭を調べ、見つかった列の中でいちばん小さいものにする。`None`：輪郭が閉じない。`Some(None)`：入れ先が無い
     fn owner_of(
         &self,
         color: Option<Color32>,
@@ -767,7 +729,7 @@ impl LocalMap<'_> {
         let mut found_col: Option<i64> = None;
         let mut rc = self.ray_cols(probe);
         while let Some((col, edges)) = self.next_ray_col(&mut rc) {
-            if found_col.is_some_and(|fc| col > fc + 1) {
+            if found_col.is_some_and(|fc| col > fc) {
                 break;
             }
             for e in edges {
@@ -808,12 +770,14 @@ impl LocalMap<'_> {
         h: (usize, bool),
         faces: &[LocalFace],
         in_touched: &IntSet<usize>,
+        face_of: &IntMap<usize, usize>,
         memo: &mut CycleMemo,
     ) -> Option<bool> {
         let q = self.probe(&[h]);
         let other = self.cycle_of((h.0, !h.1), memo)?;
-        for f in faces {
-            if f.cycles.contains(&other) {
+        let other_face = face_of.get(&other).copied();
+        for (fi, f) in faces.iter().enumerate() {
+            if other_face == Some(fi) {
                 continue;
             }
             let outer = memo.cycles[f.cycles[0]].ring.as_ref()?;
@@ -847,7 +811,66 @@ impl LocalMap<'_> {
         Some(true)
     }
 
-    /// 2b-5c：触った輪郭の、穴の入れ先と何も無い側の決まり（今の `regions_since` と、何も無い側の輪郭の確かめ）。
+    /// 色のある穴 `ci` の入れ先（`owner_of`。決めたものは控え `memo` に入れ、2回探さない）。前の地図の穴で、前の入れ先の
+    /// 外周 `kept`（`kept_exterior`）が新しい地図にそのまま残り、同じ色の新しい外周（触った外周 `made`：（色, 外接矩形））の
+    /// 外接矩形が穴の調べる点を含まなければ、前の入れ先のまま（入れ先は、穴を含む同じ色の外周のうちいちばん小さいもの。
+    /// 残った外周の中では前と同じものがいちばん小さく、新しい外周はその点を含まない）。`None`：輪郭が閉じない
+    fn hole_owner(
+        &self,
+        ci: usize,
+        kept: Option<usize>,
+        made: &[(Option<Color32>, GridRect)],
+        memo: &mut CycleMemo,
+    ) -> Option<Option<usize>> {
+        if let Some(&o) = memo.owners.get(&ci) {
+            return Some(o);
+        }
+        let color = memo.cycles[ci].color;
+        let p = self.probe(&memo.cycles[ci].cycle);
+        let o = match kept.filter(|_| !made.iter().any(|&(c, r)| c == color && r.contains2(p))) {
+            Some(k) => Some(k),
+            None => self.owner_of(color, p, memo)?,
+        };
+        memo.owners.insert(ci, o);
+        Some(o)
+    }
+
+    /// 前の地図の面 `id`（前の地図の面の表 `base_faces`）の外周が、新しい地図にそのまま残っていれば（消えた辺が無く、触った
+    /// 輪郭 `touched` でない）、その輪郭の番号。`None`：輪郭が閉じない
+    fn kept_exterior(
+        &self,
+        id: ShapeId,
+        base_faces: BaseFaces<'_>,
+        touched: &IntSet<usize>,
+        memo: &mut CycleMemo,
+    ) -> Option<Option<usize>> {
+        for h in base_faces(id) {
+            if self.removed.contains(&h.0) {
+                continue;
+            }
+            let ci = self.cycle_of(h, memo)?;
+            if memo.cycles[ci].ring.as_ref().is_some_and(|r| r.area2 > 0) {
+                return Some((!touched.contains(&ci)).then_some(ci));
+            }
+        }
+        Some(None)
+    }
+
+    /// 触った外周（色, 外接矩形）：前の地図の穴の入れ先を決め直すかを決める（`hole_owner`）
+    fn made_exteriors(touched_ids: &[usize], memo: &CycleMemo) -> Vec<(Option<Color32>, GridRect)> {
+        touched_ids
+            .iter()
+            .filter_map(|&ci| {
+                let c = &memo.cycles[ci];
+                c.ring
+                    .as_ref()
+                    .filter(|r| r.area2 > 0)
+                    .map(|r| (c.color, r.rect))
+            })
+            .collect()
+    }
+
+    /// 2b-5c：触った輪郭の、穴の入れ先と何も無い側の決まり（地図全体の判定 `check` の穴の入れ先 `regions` と、何も無い側の輪郭の確かめ）。
     /// - 触った色のある穴：入れ先が無ければ正しくない
     /// - 前の地図の穴で、入れ先の外周が触られたもの（前の地図の面の表 `base_faces` で、触った前の地図の外周の面の穴を
     ///   引く）：入れ先が無ければ正しくない
@@ -877,18 +900,13 @@ impl LocalMap<'_> {
         for c in touched {
             touched_ids.push(self.cycle_of(c[0], memo)?);
         }
-        let is_touched = |ci: usize, ids: &[usize]| ids.contains(&ci);
+        let touched_set: IntSet<usize> = touched_ids.iter().copied().collect();
+        let made = Self::made_exteriors(&touched_ids, memo);
         // 触った色のある穴
         for &ci in &touched_ids {
-            let (color, hole) = match &memo.cycles[ci].ring {
-                Some(r) => (memo.cycles[ci].color, r.area2 < 0),
-                None => continue,
-            };
-            if hole {
-                let p = self.probe(&memo.cycles[ci].cycle);
-                if self.owner_of(color, p, memo)?.is_none() {
-                    return Some(None);
-                }
+            let hole = memo.cycles[ci].ring.as_ref().is_some_and(|r| r.area2 < 0);
+            if hole && self.hole_owner(ci, None, &made, memo)?.is_none() {
+                return Some(None);
             }
         }
         // 前の地図の穴で、入れ先の外周が触られたもの：触った前の地図の外周（消えた辺と、まわりの辺が変わった前の地図の
@@ -909,23 +927,18 @@ impl LocalMap<'_> {
         old_faces.sort_unstable();
         old_faces.dedup();
         for id in old_faces {
+            let kept = self.kept_exterior(id, base_faces, &touched_set, memo)?;
             for h in base_faces(id) {
                 if self.removed.contains(&h.0) {
                     continue;
                 }
                 let ci = self.cycle_of(h, memo)?;
-                if is_touched(ci, &touched_ids) {
+                if touched_set.contains(&ci) {
                     continue;
                 }
-                let (color, hole) = match &memo.cycles[ci].ring {
-                    Some(r) => (memo.cycles[ci].color, r.area2 < 0),
-                    None => continue,
-                };
-                if hole {
-                    let p = self.probe(&memo.cycles[ci].cycle);
-                    if self.owner_of(color, p, memo)?.is_none() {
-                        return Some(None);
-                    }
+                let hole = memo.cycles[ci].ring.as_ref().is_some_and(|r| r.area2 < 0);
+                if hole && self.hole_owner(ci, kept, &made, memo)?.is_none() {
+                    return Some(None);
                 }
             }
         }
@@ -936,12 +949,13 @@ impl LocalMap<'_> {
             .filter(|&&ci| memo.cycles[ci].color.is_none())
             .map(|&ci| memo.cycles[ci].cycle[0])
             .collect();
-        let made: Vec<usize> = touched_ids
+        let mut checking: IntSet<(usize, bool)> = to_check.iter().copied().collect();
+        let made_rings: Vec<usize> = touched_ids
             .iter()
             .copied()
             .filter(|&ci| memo.cycles[ci].ring.is_some())
             .collect();
-        for ci in made {
+        for ci in made_rings {
             let r = memo.cycles[ci].ring.as_ref().expect("色のある輪郭").rect;
             let rect = KRect::new(
                 r.x0 as f64 / OVERLAY_GRID,
@@ -953,7 +967,7 @@ impl LocalMap<'_> {
                 for side in [true, false] {
                     let h = (e, side);
                     if self.side_color(h).is_some()
-                        || memo.of.get(&h).is_some_and(|c| touched_ids.contains(c))
+                        || memo.of.get(&h).is_some_and(|c| touched_set.contains(c))
                     {
                         continue;
                     }
@@ -961,7 +975,7 @@ impl LocalMap<'_> {
                         .ring
                         .as_ref()
                         .is_some_and(|r| r.contains(self.probe(&[h])) == Some(true));
-                    if inside && !to_check.contains(&h) {
+                    if inside && checking.insert(h) {
                         to_check.push(h);
                     }
                 }
@@ -974,8 +988,14 @@ impl LocalMap<'_> {
             .flat_map(|f| f.cycles.iter().copied())
             .chain(touched_ids.iter().copied())
             .collect();
+        // 輪郭ごとの、それを持つ触った面
+        let face_of: IntMap<usize, usize> = faces
+            .iter()
+            .enumerate()
+            .flat_map(|(fi, f)| f.cycles.iter().map(move |&ci| (ci, fi)))
+            .collect();
         for h in to_check {
-            if !self.unpainted_ok_in(h, &faces, &in_touched, memo)? {
+            if !self.unpainted_ok_in(h, &faces, &in_touched, &face_of, memo)? {
                 return Some(None);
             }
         }
@@ -1027,7 +1047,7 @@ impl LocalMap<'_> {
         let mut found_col: Option<i64> = None;
         let mut rc = self.ray_cols(probe);
         while let Some((col, edges)) = self.next_ray_col(&mut rc) {
-            if found_col.is_some_and(|fc| col > fc + 1) {
+            if found_col.is_some_and(|fc| col > fc) {
                 break;
             }
             for e in edges {
@@ -1066,13 +1086,14 @@ impl LocalMap<'_> {
         let ext = self.owner_any(None, p2, memo)??;
         let color = memo.cycles[ext].color;
         let mut cycles = vec![ext];
+        let mut in_face: IntSet<usize> = [ext].into_iter().collect();
         match color {
             Some(_) => {
                 let h0 = memo.cycles[ext].cycle[0];
                 let id = self.side_src(h0)?;
                 for h in base_faces(id) {
                     let ci = self.cycle_of(h, memo)?;
-                    if !cycles.contains(&ci) {
+                    if in_face.insert(ci) {
                         cycles.push(ci);
                     }
                 }
@@ -1091,11 +1112,12 @@ impl LocalMap<'_> {
                             continue;
                         }
                         let ci = self.cycle_of((e, side), memo)?;
-                        if cycles.contains(&ci) || self.ring_any(ci, memo).area2 >= 0 {
+                        if in_face.contains(&ci) || self.ring_any(ci, memo).area2 >= 0 {
                             continue;
                         }
                         let hp = self.probe(&memo.cycles[ci].cycle);
                         if self.owner_any(Some(None), hp, memo)? == Some(ext) {
+                            in_face.insert(ci);
                             cycles.push(ci);
                         }
                     }
@@ -1144,6 +1166,8 @@ impl LocalMap<'_> {
         for c in touched {
             touched_ids.push(self.cycle_of(c[0], memo)?);
         }
+        let touched_set: IntSet<usize> = touched_ids.iter().copied().collect();
+        let made = Self::made_exteriors(&touched_ids, memo);
         let painted = |ci: usize, memo: &CycleMemo| memo.cycles[ci].ring.as_ref().map(|r| r.area2);
         // 面に入る外周（触った外周と、穴が変わる外周）
         let mut exteriors: std::collections::BTreeSet<usize> = touched_ids
@@ -1151,11 +1175,12 @@ impl LocalMap<'_> {
             .copied()
             .filter(|&ci| painted(ci, memo).is_some_and(|a| a > 0))
             .collect();
-        // 入れ先を決め直す穴
-        let mut holes: Vec<usize> = touched_ids
+        // 入れ先を決め直す穴（と、前の地図の穴なら前の入れ先の外周がそのまま残っているか：`hole_owner`）
+        let mut holes: Vec<(usize, Option<usize>)> = touched_ids
             .iter()
             .copied()
             .filter(|&ci| painted(ci, memo).is_some_and(|a| a < 0))
+            .map(|ci| (ci, None))
             .collect();
         // 触った前の地図の面：外周がそのままなら穴が変わる面。そのままの穴は入れ先を決め直す
         let mut old_faces: Vec<ShapeId> = Vec::new();
@@ -1174,25 +1199,25 @@ impl LocalMap<'_> {
         old_faces.sort_unstable();
         old_faces.dedup();
         for id in old_faces {
+            let kept = self.kept_exterior(id, base_faces, &touched_set, memo)?;
             for h in base_faces(id) {
                 if self.removed.contains(&h.0) {
                     continue;
                 }
                 let ci = self.cycle_of(h, memo)?;
-                if touched_ids.contains(&ci) {
+                if touched_set.contains(&ci) {
                     continue;
                 }
                 match painted(ci, memo) {
                     Some(a) if a > 0 => {
                         exteriors.insert(ci);
                     }
-                    Some(_) => holes.push(ci),
+                    Some(_) => holes.push((ci, kept)),
                     None => {}
                 }
             }
         }
-        // 触った外周の中に入った前の地図の穴（今の `regions_since` は、新しく作った同じ色の外周の外接矩形が調べる点を含む
-        // 穴の入れ先を決め直す）
+        // 触った外周の中に入った前の地図の穴（新しく作った同じ色の外周の外接矩形が調べる点を含む穴は、入れ先を決め直す）
         let new_exteriors: Vec<usize> = touched_ids
             .iter()
             .copied()
@@ -1215,23 +1240,23 @@ impl LocalMap<'_> {
                         continue;
                     }
                     let ci = self.cycle_of((e, side), memo)?;
-                    if touched_ids.contains(&ci) || painted(ci, memo).is_none_or(|a| a >= 0) {
+                    if touched_set.contains(&ci) || painted(ci, memo).is_none_or(|a| a >= 0) {
                         continue;
                     }
                     if r.contains2(self.probe(&memo.cycles[ci].cycle)) {
-                        holes.push(ci);
+                        holes.push((ci, None));
                     }
                 }
             }
         }
-        holes.sort_unstable();
-        holes.dedup();
+        // 同じ穴は1回（前の入れ先の外周が分かっているものを先に）
+        holes.sort_unstable_by_key(|&(ci, kept)| (ci, kept.is_none()));
+        holes.dedup_by_key(|h| h.0);
         // 穴の入れ先
         let mut placed: IntMap<usize, Vec<usize>> = IntMap::default();
         let mut placed_holes: IntSet<usize> = Default::default();
-        for h in holes {
-            let (color, p) = (memo.cycles[h].color, self.probe(&memo.cycles[h].cycle));
-            let owner = self.owner_of(color, p, memo)??;
+        for (h, kept) in holes {
+            let owner = self.hole_owner(h, kept, &made, memo)??;
             exteriors.insert(owner);
             placed.entry(owner).or_default().push(h);
             placed_holes.insert(h);
@@ -1241,7 +1266,7 @@ impl LocalMap<'_> {
         for ext in exteriors {
             let mut cycles = vec![ext];
             cycles.extend(placed.get(&ext).into_iter().flatten().copied());
-            if !touched_ids.contains(&ext) {
+            if !touched_set.contains(&ext) {
                 let h0 = memo.cycles[ext].cycle[0];
                 let id = if h0.1 {
                     self.edge(h0.0).left_src
@@ -1254,7 +1279,7 @@ impl LocalMap<'_> {
                             continue;
                         }
                         let ci = self.cycle_of(h, memo)?;
-                        if ci != ext && !placed_holes.contains(&ci) && !touched_ids.contains(&ci) {
+                        if ci != ext && !placed_holes.contains(&ci) && !touched_set.contains(&ci) {
                             cycles.push(ci);
                         }
                     }
@@ -1493,26 +1518,42 @@ impl LocalMap<'_> {
             }
         }
         // 形の変わらない輪郭（触っていない穴など）は、元の図形の輪郭をそのまま使い回す（`rewrite_shapes` と同じ：輪郭の
-        // 点の並びを共有する）
+        // 点の並びを共有する）。元の図形ごとに、輪郭の区間の形（ビット）から（輪郭, 区間の位置）を引く表を1回だけ作る
+        // 表の鍵は区間の点のビット（-0.0 は 0.0 にそろえる：区間は `==` で比べるので）。輪郭は、外周なら `None`、穴なら
+        // その番号
+        type SegAt = IntMap<[u64; 6], (Option<usize>, usize)>;
+        let seg_bits =
+            |q: &QuadBez| [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y].map(|v| (v + 0.0).to_bits());
+        let tables: std::cell::RefCell<IntMap<ShapeId, (Arc<FillShape>, SegAt)>> = Default::default();
         let reuse = |cycle: &[(usize, bool)], quads: &[QuadBez]| -> Option<Contour> {
             if !cycle.iter().all(|h| same(h.0)) {
                 return None;
             }
-            let shape = orig_shape(self.side_src(cycle[0])?)?;
-            let found = shape
-                .contours()
-                .find(|c| {
-                    c.segments.len() == quads.len()
-                        && c.segments
-                            .iter()
-                            .position(|q| *q == quads[0])
-                            .is_some_and(|k| {
-                                (0..quads.len())
-                                    .all(|i| c.segments[(k + i) % quads.len()] == quads[i])
-                            })
-                })
-                .cloned();
-            found
+            let src = self.side_src(cycle[0])?;
+            let mut tables = tables.borrow_mut();
+            let (shape, at) = match tables.entry(src) {
+                std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    let shape = orig_shape(src)?;
+                    let mut at: SegAt = IntMap::default();
+                    let all = std::iter::once((None, &shape.exterior))
+                        .chain(shape.holes.iter().enumerate().map(|(i, c)| (Some(i), c)));
+                    for (ci, c) in all {
+                        for (k, q) in c.segments.iter().enumerate() {
+                            at.entry(seg_bits(q)).or_insert((ci, k));
+                        }
+                    }
+                    v.insert((shape, at))
+                }
+            };
+            let &(ci, k) = at.get(&seg_bits(&quads[0]))?;
+            let c = match ci {
+                None => &shape.exterior,
+                Some(i) => &shape.holes[i],
+            };
+            (c.segments.len() == quads.len()
+                && (0..quads.len()).all(|i| c.segments[(k + i) % quads.len()] == quads[i]))
+            .then(|| c.clone())
         };
         let added: Vec<FillShape> = changed
             .into_iter()

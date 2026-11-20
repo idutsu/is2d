@@ -1,4 +1,4 @@
-//! レイヤーの解決・ドラッグの取り消し・セル画を書く入口（`write_cel`・`write_scope_map`）と、浮いた片の確定（`plan_commit`・
+//! レイヤーの解決・ドラッグの取り消し・セル画を書く入口（`write_cel`）と、浮いた片の確定（`plan_commit`・
 //! `write_commit`・`commit_floating_except`・`clear_selection`）
 
 use super::*;
@@ -36,7 +36,7 @@ pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
         .collect()
 }
 
-/// セル画を書いたあとの後始末。セル画を書く入口（`write_cel`・`write_scope_map`）のあとに、書いたレイヤーの一覧
+/// セル画を書いたあとの後始末。セル画を書く入口（`write_cel`）のあとに、書いたレイヤーの一覧
 /// `lids` で1回だけ呼ぶ：書いたレイヤーがあれば、編集中のシンボルの版と `Document::revision` を上げ、画面の土台のその
 /// レイヤーを作り直す。編集中の階層が無くなっていれば、ある所まで戻る
 pub(crate) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
@@ -52,30 +52,6 @@ pub(crate) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
     }
     tab.refresh_scene_base();
     tab.session.sanitize_editing_scope();
-}
-
-/// 今のコマの、レイヤー `layer_id` の階層 `scope` のセル画の地図を `f` で編集する（`Cel::edit_map`）。後始末はしない
-/// ので、いくつかのレイヤー・階層を書いたあとに、書いたレイヤーで `finish_cel_writes` を1回呼ぶ。`false`：編集できない
-/// （ロック・非表示・キーフレームが無い・地図にできない）か、変わらない
-pub(crate) fn write_scope_map(
-    tab: &mut Tab,
-    layer_id: LayerId,
-    scope: &[u64],
-    f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::CheckedMap>,
-) -> bool {
-    let mut held = None;
-    let written = write_cel(tab, layer_id, |cel| match cel.edit_map(scope, f) {
-        Some(w) => {
-            held = w.0;
-            true
-        }
-        None => false,
-    });
-    // 新しい地図の写し（面の図形は、変わらない面は前の図形）は、画面の土台が持つ
-    if let Some(base) = held {
-        tab.session.base_cache.hold(layer_id, base);
-    }
-    written
 }
 
 /// 今のコマの、レイヤー `layer_id` のセル画を `f` で書き換える（`f` が `true` を返したら書いた）。後始末はしないので、
@@ -325,7 +301,7 @@ pub(crate) fn merge_pieces_layer_by_layer(
         let change = base
             .map()
             .overlay(MapInput::Map(piece.map()), MapRule::Overlay)
-            .and_then(|m| m.written(&base))
+            .and_then(|m| m.written())
             .and_then(|next| base.diff_placed(next, &own, layer_id, &scope, xform));
         if let Some(change) = change {
             apply_map_change(base_shapes, change, layer_id, &scope);
@@ -342,7 +318,7 @@ pub(crate) type CommitPlan = Vec<(
 )>;
 
 /// 浮いた片 `fl` を確定するときに書くもの（文書を変えない）：レイヤーごとに、残りの地図（無ければセル画の地図）に片の組
-/// を下から順に重ねた地図（`FloatLayer::committed`）を、今の階層の地図にするとき何を書くか（`Cel::outcome`）。重ねる
+/// を下から順に重ねた地図（`FloatLayer::committed`）を、今の階層の地図にするとき何を書くか（1本の道の答え：`LayerBase::replace_local`）。重ねる
 /// 計算から何を書くかまでをレイヤーごとに同時に作る（レイヤーをまたがないので、待ち時間はいちばん重いレイヤー1つ分）。
 /// 全部か無しか：1つでも書けない（編集できないレイヤーを含む）なら `None` を返して知らせる（浮いた片を残すのは呼ぶ側。
 /// 片はいつも文書か浮いた片のどちらかにあり、黙って消えない）。片の組の変換はかける前に確定と同じ式で確かめてある（変形

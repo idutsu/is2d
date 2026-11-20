@@ -8,7 +8,7 @@ use crate::canvas_tool::{
     editable_layer_ids, finish_cel_writes, focus_active_layer_by_id,
     focus_active_layer_to_shape_by_id, reset_session_after_timeline_change,
     select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode,
-    update_instances, write_scope_map, Clipboard, CoalesceKey, HoverTarget, MapOwner, NoticeKind,
+    update_instances, Clipboard, CoalesceKey, HoverTarget, MapOwner, NoticeKind,
     Refusal, SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
@@ -1057,13 +1057,23 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
     }
     if !target_lids.is_empty() {
         // 選んだグループの中の生の図形は、階層ごとに、セル画の地図に文書の座標の変換をかけて、その座標の格子で正しい地図に
-        // する（`realized`。図形はその地図の面で、番号はそのまま）
+        // し、その地図にする差分を1本の道に渡す（`LayerBase::transformed_local`。図形はその地図の面で、番号は引き継ぐ）
         let mut written: Vec<LayerId> = Vec::new();
         for (layer_id, group_path) in &scopes {
-            if write_scope_map(tab, *layer_id, group_path, |base| {
-                crate::planar_map::realized(base.map(), doc)
-            }) && !written.contains(layer_id)
-            {
+            let mut held = None;
+            let ok = crate::canvas_tool::write_cel(tab, *layer_id, |cel| {
+                match cel.edit_local(group_path, |base| base.transformed_local(doc, group_path)) {
+                    Ok(Some(w)) => {
+                        held = w.0;
+                        true
+                    }
+                    Ok(None) | Err(_) => false,
+                }
+            });
+            if let Some(base) = held {
+                tab.session.base_cache.hold(*layer_id, base);
+            }
+            if ok && !written.contains(layer_id) {
                 written.push(*layer_id);
             }
         }

@@ -7,20 +7,20 @@
 //! なので、どの地図も持たなくなった塊は、その場で返る。
 //!
 //! 計算に使うふつうの地図（`PlanarMap`）は、いつも塊から決まった順で作る（`StoredMap::to_dense`）。頂点と辺の番号が中身
-//! だけで決まるので、いつ作り直しても同じになる（編集のあとは、確かめた地図を同じ順に並べ直して作る：
-//! `StoredMap::dense_in_order`）。計算に使う写し（`LayerBase`）は、それを使う所が持つ。しまう形は、いま
+//! だけで決まるので、いつ作り直しても同じになる。計算に使う写し（`LayerBase`）は、それを使う所が持つ。しまう形は、いま
 //! 誰かが持っている写しへの弱い参照を1つだけ持ち（`StoredMap::dense_slot`）、写しを生かすのは持ち主だけ（Undo の控えは
 //! しまう形だけを持つ）。
 
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use eframe::egui::mutex::Mutex;
+use std::sync::{Arc, OnceLock, Weak};
 
 use eframe::egui::Color32;
 use kurbo::{Point, QuadBez};
 use serde::{Deserialize, Serialize};
 
 use crate::planar_map::{
-    point_order, EdgeGeom, EdgeOrigin, IntMap, LayerBase, MapEdge, PlanarMap, Poly,
+    point_order, EdgeGeom, IntMap, LayerBase, MapEdge, PlanarMap, Poly,
 };
 use crate::vector_engine::ShapeId;
 
@@ -217,13 +217,20 @@ type Tile = Arc<TileData>;
 type TilePolys = Arc<Box<[Poly]>>;
 
 /// 塊の中身
-#[derive(Debug)]
 struct TileData {
     edges: Box<[StoredEdge]>,
     /// 辺ごとの判定の形（しまう辺の向きの曲線から作る：`EdgeGeom::of`）への弱い参照。判定の形を生かすのは、それを使う
     /// 計算に使う写しの `PolyHold` だけ（塊は文書と Undo の控えが持つので、塊が判定の形を生かすと、一度見たコマの判定の
-    /// 形がタブを閉じるまで残る）。誰かが生かしている間は、塊を共有する地図の写しどうしで同じものを使う
+    /// 形がタブを閉じるまで残る）。誰かが生かしている間は、塊を共有する地図の写しどうしで同じものを使う。鍵は確保しない
+    /// 鍵（`egui::mutex::Mutex`）：塊は作品の大きさに比例してあり、macOS の `std::sync::Mutex` は初めてかけたときに確保
+    /// した領域を塊がなくなるまで持つので、一度引いた塊ごとに残る
     polys: Mutex<Weak<Box<[Poly]>>>,
+}
+
+impl std::fmt::Debug for TileData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TileData").field("edges", &self.edges).finish_non_exhaustive()
+    }
 }
 
 impl std::ops::Deref for TileData {
@@ -243,7 +250,7 @@ impl TileData {
 
     /// 辺ごとの判定の形：誰かが生かしていればそれ、無ければ作る（作ったものを生かすのは、受け取った所だけ）
     fn polys(&self) -> TilePolys {
-        let mut slot = self.polys.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = self.polys.lock();
         if let Some(p) = slot.upgrade() {
             return p;
         }
@@ -257,16 +264,6 @@ impl TileData {
         p
     }
 
-    /// 辺ごとの判定の形：誰かが生かしていればそれ、無ければ `polys`（この塊の辺の順の判定の形）を使う
-    fn polys_or(&self, polys: &[Poly]) -> TilePolys {
-        let mut slot = self.polys.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(p) = slot.upgrade() {
-            return p;
-        }
-        let p: TilePolys = Arc::new(polys.into());
-        *slot = Arc::downgrade(&p);
-        p
-    }
 }
 
 /// 判定の形を生かしておく所：塊ごとの判定の形（塊の並びの位置で引く。初めて要るときに作る）。計算に使う写し
@@ -288,7 +285,7 @@ fn placed(map: &PlanarMap, e: usize) -> Placed {
 
 #[cfg(test)]
 thread_local! {
-    /// テスト用：このスレッドで、塊を作るために並べた辺の数（`from_dense_ordered`・`from_dense_since`）
+    /// テスト用：このスレッドで、塊を作るために並べた辺の数（`from_dense_ordered`）
     pub(crate) static EDGES_SORTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -312,34 +309,33 @@ fn same_tile(prev: &[Tile], j: &mut usize, run: &[StoredEdge]) -> Option<Tile> {
 #[derive(Clone, Debug)]
 pub(crate) struct StoredMap(Arc<Stored>);
 
-#[derive(Debug)]
 struct Stored {
     tiles: Box<[Tile]>,
     /// この地図の計算に使う写しのうち、いま誰かが持っているもの（弱い参照。生かすのは写しを使う所：`LayerBase::of_stored`）
-    dense: Mutex<Weak<LayerBase>>,
+    dense: std::sync::Mutex<Weak<LayerBase>>,
     /// 塊ごとの、最初の辺の、計算に使う地図（`to_dense`）での番号（初めて要るときに作る：`dense_edge`）
     starts: OnceLock<Box<[u32]>>,
+}
+
+impl std::fmt::Debug for Stored {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stored").field("tiles", &self.tiles).finish_non_exhaustive()
+    }
 }
 
 impl StoredMap {
     /// 地図 `map` のしまう形。辺を決まった向きにして升目ごとに分け、塊の中を決まった順に並べる。置き換える前の地図
     /// `prev` の同じ升目の塊と中身が同じ塊は、その塊を共有する（塊はどちらも升目の順なので、並べて1回なめるだけ）
     pub(crate) fn from_dense(map: &PlanarMap, prev: Option<&StoredMap>) -> Self {
-        Self::from_dense_ordered(map, prev, None).0
+        Self::from_dense_ordered(map, prev).0
     }
 
     /// `from_dense` と、しまった辺の順（`to_dense` の辺の順）ごとの、`map` の辺の番号と、向きを逆にしたか（`map` の辺の
-    /// 順に作ったもの、たとえば判定の形を、しまう形から作った地図に引き継ぐため）。`origin` は、`map` の辺ごとの、`prev`
-    /// の辺（`prev.to_dense()` の辺の番号）のうち形が同じもの（`PlanarMap::edge_origins`）。あれば、`prev` の塊のうち、
-    /// 辺がみな中身まで同じ辺として残り、ほかの辺が入らない塊は、並べ直さずにそのまま使う（`from_dense_since`）
+    /// 順に作ったもの、たとえば判定の形を、しまう形から作った地図に引き継ぐため）
     pub(crate) fn from_dense_ordered(
         map: &PlanarMap,
         prev: Option<&StoredMap>,
-        origin: Option<&[EdgeOrigin]>,
     ) -> (Self, Vec<(usize, bool)>) {
-        if let (Some(prev), Some(origin)) = (prev, origin) {
-            return Self::from_dense_since(map, prev, origin);
-        }
         let mut all: Vec<Placed> = (0..map.edges.len()).map(|e| placed(map, e)).collect();
         #[cfg(test)]
         EDGES_SORTED.with(|n| n.set(n.get() + all.len()));
@@ -367,144 +363,14 @@ impl StoredMap {
         }
         let stored = Self(Arc::new(Stored {
             tiles: tiles.into(),
-            dense: Mutex::new(Weak::new()),
+            dense: std::sync::Mutex::new(Weak::new()),
             starts: OnceLock::new(),
         }));
         (stored, order)
-    }
-
-    /// `from_dense_ordered` を、前の地図 `prev` と辺の対応 `origin` から求める。`prev` の塊は升目の順で、`prev.to_dense()`
-    /// の辺の番号は塊の順・塊の中の順なので、`origin` の辺の番号から塊が分かる。
-    /// - `map` の辺のうち、`prev` の形が同じ辺と中身（色・側の図形の番号）も同じものは、その辺のまま残る（升目も同じ）
-    /// - 残らなかった `prev` の辺の塊と、残る辺でない `map` の辺の升目の塊は、作り直す（その升目の辺を並べ直す）
-    /// - ほかの塊は、中身が同じ（辺がみな同じ辺として残り、ほかの辺は入らない。並びの順は形だけで決まる）ので、そのまま使う
-    ///
-    /// 作り直す塊は、どれも `prev` の同じ升目の塊と中身が違う（残らなかった辺があるか、`prev` に無い中身の辺が入る）ので、
-    /// 全部を並べ直す `from_dense_ordered` と同じ塊・同じ共有・同じ辺の順になる
-    fn from_dense_since(
-        map: &PlanarMap,
-        prev: &StoredMap,
-        origin: &[EdgeOrigin],
-    ) -> (Self, Vec<(usize, bool)>) {
-        let ptiles = &prev.0.tiles;
-        // 塊ごとの、最初の辺の番号（`prev.to_dense()` の）と、辺ごとの塊の番号
-        let mut starts: Vec<usize> = Vec::with_capacity(ptiles.len());
-        let mut tile_of: Vec<u32> = Vec::new();
-        for (k, t) in ptiles.iter().enumerate() {
-            starts.push(tile_of.len());
-            tile_of.extend(std::iter::repeat_n(k as u32, t.len()));
-        }
-        let prev_edge = |i: usize| {
-            let k = tile_of[i] as usize;
-            &ptiles[k][i - starts[k]]
-        };
-        let flipped = |e: usize| {
-            let ed = &map.edges[e];
-            point_order(map.nodes[ed.a], map.nodes[ed.b]).is_gt()
-        };
-        // `prev` の辺ごとの、同じ辺として残る `map` の辺（無ければ `usize::MAX`）
-        let mut kept = vec![usize::MAX; tile_of.len()];
-        let mut fresh: Vec<Placed> = Vec::new();
-        for (e, o) in origin.iter().enumerate() {
-            if let EdgeOrigin::Same(i) | EdgeOrigin::Reversed(i) = *o {
-                if *prev_edge(i) == StoredEdge::of(map, &map.edges[e]) {
-                    kept[i] = e;
-                    continue;
-                }
-            }
-            fresh.push(placed(map, e));
-        }
-        let mut redo = vec![false; ptiles.len()];
-        for (i, &e) in kept.iter().enumerate() {
-            if e == usize::MAX {
-                redo[tile_of[i] as usize] = true;
-            }
-        }
-        for p in &fresh {
-            if let Ok(k) = ptiles.binary_search_by_key(&p.0, |t| t[0].tile()) {
-                redo[k] = true;
-            }
-        }
-        // 作り直す塊の、残る辺も並べ直す辺に入れる（中身は `map` の辺と同じ）
-        for (k, t) in ptiles.iter().enumerate().filter(|(k, _)| redo[*k]) {
-            for (j, se) in t.iter().enumerate() {
-                let e = kept[starts[k] + j];
-                if e != usize::MAX {
-                    fresh.push((se.tile(), *se, (e, flipped(e))));
-                }
-            }
-        }
-        #[cfg(test)]
-        EDGES_SORTED.with(|c| c.set(c.get() + fresh.len()));
-        fresh.sort_unstable_by(|x, y| x.0.cmp(&y.0).then_with(|| x.1.order(&y.1)));
-        // 升目の順に、そのまま使う塊と作り直した塊を並べる
-        let mut tiles: Vec<Tile> = Vec::new();
-        let mut order: Vec<(usize, bool)> = Vec::with_capacity(map.edges.len());
-        let (mut k, mut f) = (0, 0);
-        while k < ptiles.len() || f < fresh.len() {
-            let pk = ptiles.get(k).map(|t| t[0].tile());
-            let fk = fresh.get(f).map(|x| x.0);
-            match (pk, fk) {
-                (Some(a), b) if b.is_none_or(|b| a < b) => {
-                    if !redo[k] {
-                        tiles.push(ptiles[k].clone());
-                        order.extend((starts[k]..starts[k] + ptiles[k].len()).map(|i| {
-                            let e = kept[i];
-                            (e, flipped(e))
-                        }));
-                    }
-                    k += 1;
-                }
-                (a, Some(b)) => {
-                    // 同じ升目の `prev` の塊は作り直す塊（その升目に並べ直す辺がある）
-                    if a == Some(b) {
-                        k += 1;
-                    }
-                    let run = fresh[f..].iter().take_while(|x| x.0 == b).count();
-                    let group = &fresh[f..f + run];
-                    tiles.push(TileData::new(group.iter().map(|x| x.1).collect()));
-                    order.extend(group.iter().map(|x| x.2));
-                    f += run;
-                }
-                _ => unreachable!(),
-            }
-        }
-        let stored = Self(Arc::new(Stored {
-            tiles: tiles.into(),
-            dense: Mutex::new(Weak::new()),
-            starts: OnceLock::new(),
-        }));
-        (stored, order)
-    }
-
-    /// 地図 `map` を、しまった辺の順 `order`（`from_dense_ordered`）に並べ直した、計算に使う地図。`to_dense` と同じ地図
-    /// （辺はしまう辺の向きにし、頂点は最初に出てきた順に番号を振る）を、座標を引かずに `map` の頂点の番号で作る（正しい
-    /// 地図では、別々の頂点は別々の座標なので、同じ頂点の番号は同じ座標と同じ）
-    pub(crate) fn dense_in_order(map: &PlanarMap, order: &[(usize, bool)]) -> PlanarMap {
-        let mut number = vec![usize::MAX; map.nodes.len()];
-        let mut nodes: Vec<Point> = Vec::new();
-        let mut node = |v: usize| {
-            if number[v] == usize::MAX {
-                number[v] = nodes.len();
-                nodes.push(map.nodes[v]);
-            }
-            number[v]
-        };
-        let edges = order
-            .iter()
-            .map(|&(e, flipped)| {
-                let ed = &map.edges[e];
-                let (a, b) = if flipped { (ed.b, ed.a) } else { (ed.a, ed.b) };
-                let se = StoredEdge::of(map, ed);
-                let a = node(a);
-                se.dense(a, node(b))
-            })
-            .collect();
-        PlanarMap { nodes, edges }
     }
 
     /// 計算に使う写しへの弱い参照（`LayerBase::of_stored` だけが使う）
-    pub(crate) fn dense_slot(&self) -> &Mutex<Weak<LayerBase>> {
+    pub(crate) fn dense_slot(&self) -> &std::sync::Mutex<Weak<LayerBase>> {
         &self.0.dense
     }
 
@@ -598,7 +464,7 @@ impl StoredMap {
         self.0
             .tiles
             .iter()
-            .filter(|t| t.polys.lock().unwrap().strong_count() > 0)
+            .filter(|t| t.polys.lock().strong_count() > 0)
             .count()
     }
 
@@ -619,22 +485,10 @@ impl StoredMap {
             let Some(p) = slot.into_inner() else {
                 continue;
             };
-            let mut weak = t.polys.lock().unwrap_or_else(|e| e.into_inner());
+            let mut weak = t.polys.lock();
             if Arc::strong_count(&p) == 1 && Weak::ptr_eq(&weak, &Arc::downgrade(&p)) {
                 *weak = Weak::new();
             }
-        }
-    }
-
-    /// 計算に使う地図（`to_dense`）の辺の順の判定の形 `polys` を、`hold`（この地図の判定の形を生かしておく所）に入れる。
-    /// 塊の判定の形を誰かが生かしていれば、それを入れる（確かめた地図をしまうとき：`CheckedMap::into_stored_with_polys`。
-    /// 作り直さずに、確かめるときに作ったものを使う）
-    pub(crate) fn seed_polys(&self, polys: &[Poly], hold: &PolyHold) {
-        let starts = self.starts();
-        let slots = self.hold_slots(hold);
-        for (k, t) in self.0.tiles.iter().enumerate() {
-            let s = starts[k] as usize;
-            slots[k].get_or_init(|| t.polys_or(&polys[s..s + t.len()]));
         }
     }
 
@@ -953,7 +807,7 @@ impl StoredMap {
     fn of_tiles(tiles: Box<[Tile]>) -> Self {
         Self(Arc::new(Stored {
             tiles,
-            dense: Mutex::new(Weak::new()),
+            dense: std::sync::Mutex::new(Weak::new()),
             starts: OnceLock::new(),
         }))
     }
@@ -983,7 +837,7 @@ impl StoredMap {
                             ..*e
                         })
                         .collect(),
-                    polys: Mutex::new(t.polys.lock().unwrap_or_else(|e| e.into_inner()).clone()),
+                    polys: Mutex::new(t.polys.lock().clone()),
                 })
             })
             .collect();

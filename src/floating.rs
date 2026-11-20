@@ -630,7 +630,7 @@ impl Floating {
                     }
                     let faces = cel.faces(stage.scope);
                     let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
-                    let full = rest.written(&cel).and_then(|r| {
+                    let full = rest.written().and_then(|r| {
                         Origin::of(cel.diff(r, &own, layer_id, stage.scope), &cel.stored)
                     });
                     match (&origin, &full) {
@@ -758,7 +758,7 @@ fn cut_layer(
             #[cfg(test)]
             if crate::planar_map::test_checks() {
                 let ok = crate::planar_map::uncounted(|| {
-                    let full = content_base.map().without(ids).written(&cel).and_then(|r| {
+                    let full = content_base.map().without(ids).written().and_then(|r| {
                         Origin::of(cel.diff(r, &own, layer_id, stage.scope), &cel.stored)
                     });
                     match (&origin, &full) {

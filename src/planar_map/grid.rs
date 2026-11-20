@@ -5,8 +5,8 @@ use super::*;
 /// 格子の点（1/4096px を 1 とする整数の座標）
 pub(super) type IPt = (i64, i64);
 
-/// 辺の、計算に使う形（`EdgeGeom`）。地図ごとの計算に使う写し（`LayerBase::polys`）が1回だけ作って持ち、前の地図と
-/// 同じ辺は引き継ぐ（`PlanarMap::polys_since`）
+/// 辺の、計算に使う形（`EdgeGeom`）。しまう形の塊の辺ごとに、それを使う計算に使う写しが1回だけ作って持つ
+/// （`StoredMap::poly`）
 pub(crate) type Poly = Arc<EdgeGeom>;
 
 /// 面の輪郭：向きのある辺（辺の番号, 辺の向きにたどるか）を、たどる順に並べたもの（`PlanarMap::face_cycles_with`）
@@ -543,14 +543,6 @@ impl<T: Copy + Default> Grouped<T> {
         }
     }
 
-    /// 番号 `k` の値（書き換えられる。`k` が範囲の外なら空）
-    pub(super) fn get_mut(&mut self, k: usize) -> &mut [T] {
-        match (self.start.get(k), self.start.get(k + 1)) {
-            (Some(&a), Some(&b)) => &mut self.items[a as usize..b as usize],
-            _ => &mut [],
-        }
-    }
-
     /// 番号の数
     pub(super) fn len(&self) -> usize {
         self.start.len().saturating_sub(1)
@@ -981,7 +973,7 @@ pub(super) fn cell_of(p: IPt) -> (i64, i64) {
 }
 
 /// 升目の索引（`stored_map::TileIndex`）の1升目の、近さを調べる格子のマスの数（1辺。4マス＝32px）
-const INDEX_TILE_CELLS: i64 = 4;
+pub(super) const INDEX_TILE_CELLS: i64 = 4;
 
 /// マス `c` を含む、升目の索引の升目
 pub(super) fn index_tile(c: (i64, i64)) -> (i64, i64) {
@@ -1185,7 +1177,7 @@ impl CellGrid {
 /// 面の輪郭1つ：判定の形の点・面積の2倍（外周は正、穴は負）・外接矩形
 pub(super) struct Ring {
     /// 輪郭の点（`cycle_points`）。始まりの点に意味は無い：使い道（面積の2倍・外接矩形・巻き数）は、どの点から
-    /// 始めても同じ。前の地図から引き継いだ輪郭は、作り直したものと、点を回した並びだけ違うことがある（`regions_since`）
+    /// 始めても同じ
     pub(super) pts: Vec<IPt>,
     pub(super) area2: i128,
     pub(super) rect: GridRect,
@@ -1231,7 +1223,7 @@ impl Ring {
 pub(super) struct Regions {
     /// 使う輪郭（壊れた輪郭は入れない）
     pub(super) cycles: Vec<Cycle>,
-    /// 輪郭ごとの `Ring`（前の地図と同じ輪郭は、前の地図のものを共有する：`regions_since`）
+    /// 輪郭ごとの `Ring`
     pub(super) rings: Vec<Arc<Ring>>,
     /// 組ごとの（色, 輪郭の番号の並び（外周が先、穴はその後））。組の順は、外周の輪郭の順
     pub(super) groups: Vec<(Option<Color32>, Vec<usize>)>,
@@ -1243,7 +1235,7 @@ pub(super) struct Regions {
 
 impl Regions {
     /// 点 `q`（2倍の座標）を含みうる組：外周の外接矩形の高さが `q` にかかる組（組の番号の順）。点を含む組を探すのは
-    /// これ1つ（穴の入れ先 `regions`、バケツの点の面 `with_face_filled`、何も無い側の輪郭の確かめ `valid_faces_since`）。
+    /// これ1つ（穴の入れ先 `regions`、バケツの点の面 `with_face_filled`、何も無い側の輪郭の確かめ `check`）。
     /// どの配置でも、点の帯にかかる組だけを調べるので、組の数の2乗では増えない（レビュー 6ee325a の N-1001）
     pub(super) fn groups_at(&self, q: IPt) -> impl Iterator<Item = usize> + '_ {
         self.bands.at(q.1).iter().map(|&g| g as usize)

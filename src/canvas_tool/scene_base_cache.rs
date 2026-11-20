@@ -147,7 +147,7 @@ impl SceneBaseCache {
     }
 
     /// レイヤー `layer_id` の、書いたばかりの地図の計算に使う写し `base` を、次にそのレイヤーを作り直すまで持つ
-    /// （`Cel::edit_map` が返したもの。作り直すと、セル画の地図の写しとして持ち直す）
+    /// （`Cel::edit_local`・`Cel::put_local` が返したもの。作り直すと、セル画の地図の写しとして持ち直す）
     pub(crate) fn hold(&mut self, layer_id: LayerId, base: Arc<LayerBase>) {
         if let Some(l) = self.layers.iter_mut().find(|l| l.layer_id == layer_id) {
             l.bases.push(base);
