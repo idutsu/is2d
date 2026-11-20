@@ -106,17 +106,22 @@ pub(crate) fn write_cel(
     true
 }
 
-/// 今のコマの、レイヤー `layer_ids` のセル画をそれぞれ `f(レイヤー, セル画)` で書き換え（`write_cel`）、書いたレイヤーで
-/// 後始末をする（`finish_cel_writes`）。`false`：どのレイヤーも書かなかった
+/// 今のコマの、レイヤー `layer_ids` のセル画をそれぞれ `f(レイヤー, セル画, 写しの入れ物)` で書き換え（`write_cel`）、
+/// 書いたレイヤーで後始末をする（`finish_cel_writes`）。`f` が入れ物に入れた新しい地図の計算に使う写しは、画面の土台が
+/// 持つ（作り直すときに引き継ぐ。後始末の前に渡す）。`false`：どのレイヤーも書かなかった
 pub(crate) fn write_cels(
     tab: &mut Tab,
     layer_ids: &[LayerId],
-    f: impl Fn(LayerId, &mut crate::timeline::Cel) -> bool,
+    f: impl Fn(LayerId, &mut crate::timeline::Cel, &mut Vec<Arc<crate::planar_map::LayerBase>>) -> bool,
 ) -> bool {
     let mut written = Vec::new();
     for &lid in layer_ids {
-        if write_cel(tab, lid, |cel| f(lid, cel)) {
+        let mut held = Vec::new();
+        if write_cel(tab, lid, |cel| f(lid, cel, &mut held)) {
             written.push(lid);
+        }
+        for base in held {
+            tab.session.base_cache.hold(lid, base);
         }
     }
     finish_cel_writes(tab, &written);
@@ -131,7 +136,7 @@ pub(crate) fn update_instances(
     pick: impl Fn(u64) -> bool,
     f: impl Fn(&mut crate::vector_engine::SymbolInstanceBinding),
 ) -> bool {
-    write_cels(tab, layer_ids, |_, cel| cel.update_instances(&pick, &f))
+    write_cels(tab, layer_ids, |_, cel, _| cel.update_instances(&pick, &f))
 }
 
 /// 現在の編集スコープ（グループ内であればそのグループの所属レイヤー、そうでなければ現在のアクティブレイヤー）の `layer_id` を返す

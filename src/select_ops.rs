@@ -565,8 +565,14 @@ pub(crate) fn prepare_group_selected_shapes(
     // 選んだグループ・インスタンスは、セル画の並びで新しいグループに入れる（今の階層の中身のいちばん上）
     let scope = tab.session.editing_group_path.clone();
     let layer_ids = editable_layer_ids(tab);
-    write_cels(tab, &layer_ids, |_, cel| {
-        cel.group(&scope, &selection.shapes, &selection.instances, new_gid)
+    write_cels(tab, &layer_ids, |_, cel, held| {
+        cel.group(
+            &scope,
+            &selection.shapes,
+            &selection.instances,
+            new_gid,
+            held,
+        )
     });
     // 浮いた片の地図を、新しいグループの階層の地図にする（図形はその面。番号は片の番号のまま。選んだ生の図形はみな片に
     // なっているので、この階層に図形の並びで書いたものは無い）
@@ -684,13 +690,19 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     // グループは、セル画の並びで、その番号を階層から外す（中のグループ・インスタンスは1段上の階層へ。グループの生の図形は
     // 浮いた片にするので外す）。今の階層の子のインスタンスそのものは、下で分解する
     let selection = tab.session.selection.clone();
-    write_cels(tab, &layer_ids, |lid, cel| {
+    write_cels(tab, &layer_ids, |lid, cel, held| {
         let lifted: Vec<Vec<u64>> = group_raw
             .iter()
             .filter(|g| g.0 == lid)
             .map(|g| g.1.clone())
             .collect();
-        cel.ungroup(&scope, &selection.shapes, &selection.instances, &lifted)
+        cel.ungroup(
+            &scope,
+            &selection.shapes,
+            &selection.instances,
+            &lifted,
+            held,
+        )
     });
     let any_raw = !group_maps.is_empty() || placements.iter().any(Placement::has_pieces);
     tab.session.add_floating_maps(group_maps);
@@ -778,7 +790,7 @@ pub(crate) fn prepare_arrange_selected(
 
     before_mutate(tab);
     let target_lids: Vec<LayerId> = layer_orders.iter().map(|(lid, _)| *lid).collect();
-    write_cels(tab, &target_lids, |lid, cel| {
+    write_cels(tab, &target_lids, |lid, cel, _| {
         layer_orders
             .iter()
             .find(|(l, _)| *l == lid)
@@ -821,8 +833,8 @@ pub(crate) fn prepare_delete_selected_shapes(
     }
     let selection = std::mem::take(&mut tab.session.selection);
     let scope = tab.session.editing_group_path.clone();
-    write_cels(tab, &layer_ids, |_, cel| {
-        cel.remove(&scope, &selection.shapes, &selection.instances)
+    write_cels(tab, &layer_ids, |_, cel, held| {
+        cel.remove(&scope, &selection.shapes, &selection.instances, held)
     });
     tab.session.transform_pivot = None;
     true
@@ -845,6 +857,6 @@ pub(crate) fn prepare_clear_active_frame_shapes(
     }
     before_mutate(tab);
     let scope = tab.session.editing_group_path.clone();
-    write_cels(tab, &layer_ids, |_, cel| cel.clear(&scope));
+    write_cels(tab, &layer_ids, |_, cel, _| cel.clear(&scope));
     true
 }

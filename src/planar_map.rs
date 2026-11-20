@@ -147,11 +147,6 @@ impl PlanarMap {
         self.restricted_by(|id| !ids.contains(&id))
     }
 
-    /// 面の番号（辺の側に記したもの）がみな `keep` に合うか（`restricted_by` しても変わらないか）
-    pub(crate) fn labels_within(&self, keep: impl Fn(ShapeId) -> bool) -> bool {
-        self.labels().all(keep)
-    }
-
     /// 面の番号（辺の側に記したもの）
     pub(crate) fn labels(&self) -> impl Iterator<Item = ShapeId> + '_ {
         self.edges
@@ -1521,6 +1516,14 @@ fn rewrite_shapes(
     let mut ids: Vec<ShapeId> = vec![0; faces.len()];
     for (i, f) in faces.iter().enumerate() {
         let all_same = f.cycles.iter().flatten().all(|h| same(h.0));
+        // 向きのある辺 `h` の側の、`orig` の同じ形の辺の同じ側の番号
+        let old_src = |h: (usize, bool)| match origin[h.0] {
+            EdgeOrigin::Same(i) => orig.side_src((i, h.1)),
+            EdgeOrigin::Reversed(i) => orig.side_src((i, !h.1)),
+            EdgeOrigin::New => None,
+        };
+        // 残す面：辺の形がみな元の地図にあり、側の番号が1つで、その面の側の元の地図の番号も同じ（同じ形の面が入れ
+        // 替わっても、元のその面の所にある面だけが、その面の図形を残す）
         let keep = all_same
             && f.srcs.len() == 1
             && orig_color.get(&f.srcs[0]) == Some(&f.color)
@@ -1529,7 +1532,7 @@ fn rewrite_shapes(
                 f.cycles
                     .iter()
                     .flatten()
-                    .all(|h| next.side_src(*h) == Some(f.srcs[0]))
+                    .all(|h| next.side_src(*h) == Some(f.srcs[0]) && old_src(*h) == Some(f.srcs[0]))
             };
         // 同じ元の図形を残せるのは1つの面だけ（面の番号がみな別になる）
         if keep && kept.insert(f.srcs[0]) {
@@ -1685,6 +1688,27 @@ impl LocalChange<'_> {
             ChangeInput::Shapes(s) => MapInput::Shapes(s),
             ChangeInput::Sweep(m) => MapInput::Sweep(m),
             ChangeInput::Map(p) => MapInput::Map(p),
+        }
+    }
+}
+
+/// 面の図形の表（番号の順。写しが持つもの：`LayerBase::faces`）
+pub(crate) type FaceTable = Arc<[Arc<FillShape>]>;
+
+/// 面を丸ごと外す・残す（`LayerBase::restricted_local`。`PlanarMap::restricted_by` と同じ決まり）：番号が並びにある面を
+/// 外すか、並びにある面だけを残す
+#[derive(Clone, Copy)]
+pub(crate) enum FaceKeep<'a> {
+    Without(&'a HashSet<ShapeId>),
+    Only(&'a HashSet<ShapeId>),
+}
+
+impl FaceKeep<'_> {
+    /// 番号 `id` の面を残すか
+    fn keeps(&self, id: ShapeId) -> bool {
+        match self {
+            FaceKeep::Without(ids) => !ids.contains(&id),
+            FaceKeep::Only(ids) => ids.contains(&id),
         }
     }
 }
@@ -1970,6 +1994,24 @@ impl LayerBase {
             ends: OnceLock::new(),
         };
         base.inherit_index(Some(prev));
+        // テストでは毎回：面の表の図形の輪郭の辺が、みなしまう形にあり、その面の側にその面の番号が記してある（面の表と
+        // 地図の番号が食い違わない）
+        #[cfg(test)]
+        if test_checks() {
+            let ok = uncounted(|| {
+                base.faces(group_path).iter().all(|f| {
+                    f.contours().flat_map(|c| c.segments.iter()).all(|q| {
+                        base.stored.find_edge(q).is_some_and(|(e, fwd)| {
+                            let te = base.stored.edge_at(e);
+                            // 輪郭は面を左に見る向き
+                            let side = if fwd { te.left_src } else { te.right_src };
+                            side == Some(f.shape_id)
+                        })
+                    })
+                })
+            });
+            assert!(ok, "面の表の図形と、地図の辺の側の番号が食い違う");
+        }
         let base = Arc::new(base);
         *base
             .stored
@@ -3094,6 +3136,125 @@ impl LayerBase {
             te.a == p || te.b == p
         });
         at
+    }
+
+    /// 面（階層 `group_path`）のうち、番号が `ids` にあるものがあるか（面の表で引く）
+    pub(crate) fn has_any_face(&self, ids: &HashSet<ShapeId>, group_path: &[u64]) -> bool {
+        let faces = self.faces(group_path);
+        ids.iter()
+            .any(|id| faces.binary_search_by_key(id, |s| s.shape_id).is_ok())
+    }
+
+    /// 番号が `ids` の面の輪郭の辺（計算に使う地図での番号の順）：面の表の図形の輪郭の曲線を、塊から引く（手間は、その
+    /// 面の大きさの分）
+    fn faces_edges(&self, ids: &HashSet<ShapeId>, group_path: &[u64]) -> Vec<usize> {
+        let faces = self.faces(group_path);
+        let mut out: Vec<usize> = Vec::new();
+        for id in ids {
+            let Ok(i) = faces.binary_search_by_key(id, |s| s.shape_id) else {
+                continue;
+            };
+            for q in faces[i].contours().flat_map(|c| c.segments.iter()) {
+                if let Some((e, _)) = self.stored.find_edge(q) {
+                    out.push(e);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// 面を丸ごと外す・残す（`PlanarMap::restricted_by` と同じ答え：外す面の側の色と番号を消し、両側とも消えた辺を除く。
+    /// 確かめ直さない：正しい地図の面を外しても、正しい地図のまま）を、触った所だけで：（新しいしまう形, 外したときは新しい
+    /// 面の表（残る面の図形は前の表と共有する。輪郭と番号は変わらない））。外すときは、外す面の輪郭の辺だけを替える
+    /// （しまう形に差分を当てる）。残すときは、残す面の輪郭の辺だけで新しい地図を作る（塊は前のしまう形と共有する）。面が
+    /// 残らなければ `None`
+    pub(crate) fn restricted_local(
+        &self,
+        keep: FaceKeep<'_>,
+        group_path: &[u64],
+    ) -> Option<(StoredMap, Option<FaceTable>)> {
+        let restrict = |te: crate::stored_map::TileEdge| {
+            let left_src = te.left_src.filter(|&id| keep.keeps(id));
+            let right_src = te.right_src.filter(|&id| keep.keeps(id));
+            (left_src.is_some() || right_src.is_some()).then_some(crate::stored_map::TileEdge {
+                left: te.left.filter(|_| left_src.is_some()),
+                right: te.right.filter(|_| right_src.is_some()),
+                left_src,
+                right_src,
+                ..te
+            })
+        };
+        let got = match keep {
+            FaceKeep::Without(ids) => {
+                let touched = self.faces_edges(ids, group_path);
+                let added: Vec<crate::stored_map::TileEdge> = touched
+                    .iter()
+                    .filter_map(|&e| restrict(self.stored.edge_at(e)))
+                    .collect();
+                let stored = self.stored.with_diff_tiles(&touched, &added);
+                let faces: Vec<Arc<FillShape>> = self
+                    .faces(group_path)
+                    .iter()
+                    .filter(|s| !ids.contains(&s.shape_id))
+                    .cloned()
+                    .collect();
+                (!stored.is_empty()).then(|| (stored, Some(faces.into())))
+            }
+            FaceKeep::Only(ids) => {
+                let mut m = PlanarMap::default();
+                let mut at: HashMap<[u64; 2], usize> = HashMap::new();
+                let mut node = |p: Point, m: &mut PlanarMap| -> usize {
+                    *at.entry([p.x.to_bits(), p.y.to_bits()]).or_insert_with(|| {
+                        m.nodes.push(p);
+                        m.nodes.len() - 1
+                    })
+                };
+                for e in self.faces_edges(ids, group_path) {
+                    let Some(te) = restrict(self.stored.edge_at(e)) else {
+                        continue;
+                    };
+                    let (a, b) = (node(te.a, &mut m), node(te.b, &mut m));
+                    m.edges.push(MapEdge {
+                        a,
+                        b,
+                        ctrl: te.ctrl,
+                        left: te.left,
+                        right: te.right,
+                        left_src: te.left_src,
+                        right_src: te.right_src,
+                    });
+                }
+                (!m.edges.is_empty()).then(|| (StoredMap::from_dense(&m, Some(&self.stored)), None))
+            }
+        };
+        // お手本：地図全体で面を外した・残した地図（`restricted_by`）と同じ。外したときの面の表は、その地図の面と同じ
+        #[cfg(test)]
+        if test_checks() {
+            let ok = uncounted(|| {
+                let full = self.map().restricted_by(|id| keep.keeps(id));
+                match &got {
+                    None => full.edges.is_empty(),
+                    Some((stored, faces)) => {
+                        stored.same_content(&StoredMap::from_dense(&full, None))
+                            && faces.as_ref().is_none_or(|f: &FaceTable| {
+                                let mut a: Vec<ShapeId> = f.iter().map(|s| s.shape_id).collect();
+                                let b = LayerBase::new(&full).faces(group_path);
+                                let mut bi: Vec<ShapeId> = b.iter().map(|s| s.shape_id).collect();
+                                a.sort_unstable();
+                                bi.sort_unstable();
+                                a == bi
+                            })
+                    }
+                }
+            });
+            assert!(
+                ok,
+                "面を外した・残した地図が、地図全体で外した・残した地図（お手本）と違う"
+            );
+        }
+        got
     }
 
     /// アンカーの追加・削除 `edit` ができるか（`anchor_diff` が差分を作れるか：今の `with_anchor_added`・
@@ -4446,8 +4607,19 @@ impl LayerBase {
                         let shape = &faces_list[i];
                         shape.color == f.color
                             && f.cycles.iter().flatten().all(|&h| {
+                                // 辺がこの地図にあり、その面の側のこの地図の番号も同じ（`rewrite_shapes` と同じ決まり）
                                 m.side_src(h) == Some(src)
-                                    && self.stored.find_edge(&m.quad(h.0)).is_some()
+                                    && self.stored.find_edge(&m.quad(h.0)).is_some_and(
+                                        |(e, fwd)| {
+                                            let te = self.stored.edge_at(e);
+                                            let old = if fwd == h.1 {
+                                                te.left_src
+                                            } else {
+                                                te.right_src
+                                            };
+                                            old == Some(src)
+                                        },
+                                    )
                             })
                             && shape
                                 .contours()

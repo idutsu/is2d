@@ -99,8 +99,8 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     .into_iter()
     .collect();
     finish_cel_writes(tab, &written);
-    write_cels(tab, &layer_ids, |_, cel| {
-        cel.remove(&scope, &selection.shapes, &selection.instances)
+    write_cels(tab, &layer_ids, |_, cel, held| {
+        cel.remove(&scope, &selection.shapes, &selection.instances, held)
     });
     if let Some(plan) = rest_plan {
         crate::canvas_tool::write_commit(tab, plan);

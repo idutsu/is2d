@@ -1306,6 +1306,21 @@ impl LocalMap<'_> {
             .collect();
         let same =
             |e: usize| e < self.n_base() || removed_keys.contains_key(&quad_key(&self.quad(e)));
+        // 向きのある辺 `h` の側の、前の地図の番号（形が同じ前の地図の辺の、同じ側。前からある辺はその辺の側）
+        let old_src = |h: (usize, bool)| -> Option<ShapeId> {
+            if h.0 < self.n_base() {
+                return self.side_src(h);
+            }
+            let r = *removed_keys.get(&quad_key(&self.quad(h.0)))?;
+            let te = self.base_edge(r);
+            let ed = self.edge(h.0);
+            let from = self.node(if h.1 { ed.a } else { ed.b });
+            if te.a == from {
+                te.left_src
+            } else {
+                te.right_src
+            }
+        };
         // 辺が消えた元の図形
         let mut cut: std::collections::HashSet<ShapeId> = Default::default();
         for (k, &e) in &removed_keys {
@@ -1329,11 +1344,14 @@ impl LocalMap<'_> {
             let mut srcs: Vec<ShapeId> = hs.iter().filter_map(|&h| self.side_src(h)).collect();
             srcs.sort_unstable();
             srcs.dedup();
+            // 残す面：辺の形がみな前の地図にあり、側の番号が1つで、その面の側の前の地図の番号も同じ（同じ形の面が入れ
+            // 替わっても、前のその面の所にある面だけが、その面の図形を残す）
             let keep = hs.iter().all(|&(e, _)| same(e))
                 && srcs.len() == 1
                 && orig_color(srcs[0]) == Some(f.color)
                 && !cut.contains(&srcs[0])
-                && hs.iter().all(|&h| self.side_src(h) == Some(srcs[0]));
+                && hs.iter().all(|&h| self.side_src(h) == Some(srcs[0]))
+                && hs.iter().all(|&h| old_src(h) == Some(srcs[0]));
             if keep && !kept_untouched(srcs[0]) && kept.insert(srcs[0]) {
                 ids[i] = srcs[0];
             } else {

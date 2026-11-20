@@ -11525,14 +11525,18 @@ fn test_stage7c_scene_base_cache_and_write_cels() {
     );
 
     // 2. セル画を直接書いた場合も指定したレイヤーのみ書き換わり、SceneBaseCache が即座に同期されること
-    let changed =
-        canvas_tool::write_cels(&mut app.tabs[app.active], &[layer_bottom_id], |_, cel| {
+    let changed = canvas_tool::write_cels(
+        &mut app.tabs[app.active],
+        &[layer_bottom_id],
+        |_, cel, held| {
             cel.remove(
                 &[],
                 &std::collections::HashSet::from([bottom_shape_id]),
                 &std::collections::HashSet::new(),
+                held,
             )
-        });
+        },
+    );
     assert!(changed);
     assert_ne!(
         app.doc.root.layers[0].keyframes[0].cel.revision,

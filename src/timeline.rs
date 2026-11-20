@@ -1,4 +1,4 @@
-use crate::planar_map::{realized, CheckedMap, LayerBase, PlanarMap};
+use crate::planar_map::{realized, CheckedMap, FaceKeep, LayerBase, PlanarMap};
 use crate::stored_map::StoredMap;
 use crate::vector_engine::ShapeId;
 use crate::vector_engine::{FillShape, SymbolInstanceBinding};
@@ -404,34 +404,34 @@ impl ScopeMap {
         }
     }
 
-    /// 面の番号が `keep` に合う面だけを残した、階層 `group_path` の地図（`keep` が `None` なら全部の面：同じ地図）。正しい
-    /// 地図の面を外しても正しい地図のまま（外した面の所は何も無い所になり、辺は減るだけで、残る面の輪郭と番号は変わら
-    /// ない）なので、確かめ直さない。塊はこの地図と共有する。面が無くなれば `None`
+    /// 面を丸ごと外した・残した（`keep`）、階層 `group_path` の地図と、外したときは新しい地図の計算に使う写し（面の表と
+    /// 升目の索引を前の写しから引き継いだもの。画面の土台が持つ：`Cel::remove` など）。正しい地図の面を外しても正しい
+    /// 地図のまま（外した面の所は何も無い所になり、辺は減るだけで、残る面の輪郭と番号は変わらない）なので、確かめ直さ
+    /// ない。触った所だけで作る（`LayerBase::restricted_local`）。変わらなければ同じ地図を共有する。面が無くなれば `None`
     fn restricted(
         &self,
         group_path: &[u64],
-        keep: Option<&dyn Fn(ShapeId) -> bool>,
-    ) -> Option<ScopeMap> {
-        let map = match keep {
-            // 全部の面：同じ地図（まだ確かめていなければ、確かめないまま共有する）
-            None => self.map.clone(),
-            Some(keep) => {
-                let base = self.base();
-                if base.map().labels_within(keep) {
-                    self.map.clone()
-                } else {
-                    LazyStored::checked(StoredMap::from_dense(
-                        &base.map().restricted_by(keep),
-                        Some(self.stored()),
-                    ))
-                }
+        keep: FaceKeep<'_>,
+    ) -> Option<(ScopeMap, Option<Arc<LayerBase>>)> {
+        let base = self.base();
+        let unchanged = match keep {
+            FaceKeep::Without(ids) => !base.has_any_face(ids, &self.group_path),
+            FaceKeep::Only(ids) => {
+                let faces = base.faces(&self.group_path);
+                faces.len() <= ids.len() && faces.iter().all(|s| ids.contains(&s.shape_id))
             }
         };
-        let m = ScopeMap {
-            group_path: group_path.to_vec(),
-            map,
-        };
-        (!m.is_empty()).then_some(m)
+        if unchanged {
+            let m = ScopeMap {
+                group_path: group_path.to_vec(),
+                map: self.map.clone(),
+            };
+            return (!m.is_empty()).then_some((m, None));
+        }
+        let (stored, faces) = base.restricted_local(keep, &self.group_path)?;
+        let m = ScopeMap::of_checked_stored(group_path.to_vec(), stored)?;
+        let held = faces.map(|f| LayerBase::of_local(m.stored().clone(), group_path, f, &base));
+        Some((m, held))
     }
 
     /// 面の番号を、番号ごとにみな新しい番号にする（同じ番号は同じ新しい番号。番号は面の形を変えないので、正しい地図の
@@ -758,24 +758,25 @@ impl Cel {
     }
 
     /// 階層 `scope`（とその中）の、番号が `faces` の面を地図から外し（外した所は何も無い所になる）、番号が `instances` の
-    /// インスタンスを外す（削除・シンボル化）。`false`：外すものが無い
+    /// インスタンスを外す（削除・シンボル化）。面を外した地図の新しい写しは `held` に入れる（画面の土台が持つ）。`false`：
+    /// 外すものが無い
     pub(crate) fn remove(
         &mut self,
         scope: &[u64],
         faces: &HashSet<ShapeId>,
         instances: &HashSet<u64>,
+        held: &mut Vec<Arc<LayerBase>>,
     ) -> bool {
         let mut changed = false;
         let mut items = Vec::new();
         for item in Self::items_of(&self.maps, &self.instances) {
             match item {
                 Item::Raw(path, m)
-                    if path.starts_with(scope)
-                        && m.base().map().labels().any(|id| faces.contains(&id)) =>
+                    if path.starts_with(scope) && m.base().has_any_face(faces, &path) =>
                 {
                     changed = true;
-                    let keep = |id: ShapeId| !faces.contains(&id);
-                    if let Some(kept) = m.restricted(&path, Some(&keep)) {
+                    if let Some((kept, base)) = m.restricted(&path, FaceKeep::Without(faces)) {
+                        held.extend(base);
                         items.push(Item::Raw(path, kept));
                     }
                 }
@@ -796,13 +797,15 @@ impl Cel {
 
     /// グループ化：階層 `scope` の中の、選んだ面（番号 `faces`。`scope` より深い階層の地図の）とインスタンス（番号
     /// `instances`）の階層の番号に、新しいグループ `gid` を入れ（`scope` のすぐ下）、`scope` の中身のいちばん上へ移す。
-    /// 階層 `scope` そのものの生の図形は、呼ぶ側が浮いた片の地図でグループの階層に書く。`false`：移すものが無い
+    /// 階層 `scope` そのものの生の図形は、呼ぶ側が浮いた片の地図でグループの階層に書く。面を外した地図の新しい写しは
+    /// `held` に入れる。`false`：移すものが無い
     pub(crate) fn group(
         &mut self,
         scope: &[u64],
         faces: &HashSet<ShapeId>,
         instances: &HashSet<u64>,
         gid: u64,
+        held: &mut Vec<Arc<LayerBase>>,
     ) -> bool {
         let depth = scope.len();
         let into = |p: &[u64]| {
@@ -818,14 +821,15 @@ impl Cel {
                 Item::Raw(path, m)
                     if path.starts_with(scope)
                         && path.len() > depth
-                        && m.base().map().labels().any(|id| faces.contains(&id)) =>
+                        && m.base().has_any_face(faces, &path) =>
                 {
                     first_at.get_or_insert(rest.len());
-                    if let Some(kept) = m.restricted(&path, Some(&|id| !faces.contains(&id))) {
+                    if let Some((kept, base)) = m.restricted(&path, FaceKeep::Without(faces)) {
+                        held.extend(base);
                         rest.push(Item::Raw(path.clone(), kept));
                     }
                     let to = into(&path);
-                    if let Some(picked) = m.restricted(&to, Some(&|id| faces.contains(&id))) {
+                    if let Some((picked, _)) = m.restricted(&to, FaceKeep::Only(faces)) {
                         moved.push(Item::Raw(to, picked));
                     }
                 }
@@ -855,13 +859,15 @@ impl Cel {
 
     /// グループの解除：階層 `scope` の中の、選んだ面（番号 `faces`。`scope` の孫より深い階層の地図の）とインスタンス
     /// （番号 `instances`。`scope` の子のグループの中のもの）の階層の番号から、`scope` の子の番号を外す（1つ上の階層へ）。
-    /// 階層 `lifted`（解くグループの生の図形の階層。呼ぶ側が浮いた片にした）の地図は外す。`false`：変わるものが無い
+    /// 階層 `lifted`（解くグループの生の図形の階層。呼ぶ側が浮いた片にした）の地図は外す。面を外した地図の新しい写しは
+    /// `held` に入れる。`false`：変わるものが無い
     pub(crate) fn ungroup(
         &mut self,
         scope: &[u64],
         faces: &HashSet<ShapeId>,
         instances: &HashSet<u64>,
         lifted: &[Vec<u64>],
+        held: &mut Vec<Arc<LayerBase>>,
     ) -> bool {
         let depth = scope.len();
         let up = |p: &[u64]| {
@@ -877,14 +883,15 @@ impl Cel {
                 Item::Raw(path, m)
                     if path.starts_with(scope)
                         && path.len() > depth + 1
-                        && m.base().map().labels().any(|id| faces.contains(&id)) =>
+                        && m.base().has_any_face(faces, &path) =>
                 {
                     changed = true;
-                    if let Some(kept) = m.restricted(&path, Some(&|id| !faces.contains(&id))) {
+                    if let Some((kept, base)) = m.restricted(&path, FaceKeep::Without(faces)) {
+                        held.extend(base);
                         items.push(Item::Raw(path.clone(), kept));
                     }
                     let to = up(&path);
-                    if let Some(picked) = m.restricted(&to, Some(&|id| faces.contains(&id))) {
+                    if let Some((picked, _)) = m.restricted(&to, FaceKeep::Only(faces)) {
                         items.push(Item::Raw(to, picked));
                     }
                 }
@@ -1064,7 +1071,7 @@ impl Cel {
                     if rel.is_empty() && has_raw {
                         continue;
                     }
-                    if let Some(m) = m.restricted(rel, Some(&|id| faces.contains(&id))) {
+                    if let Some((m, _)) = m.restricted(rel, FaceKeep::Only(faces)) {
                         items.push(Item::Raw(rel.to_vec(), m));
                     }
                 }
