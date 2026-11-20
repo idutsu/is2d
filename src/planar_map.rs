@@ -3204,6 +3204,7 @@ impl LayerBase {
         stacked(start, maps)
     }
 
+    #[cfg(test)]
     /// 地図の編集（`MapEdit::apply`）を、この写しの辺の計算に使う形と升目の索引で
     pub(crate) fn apply_edit(&self, edit: MapEdit) -> Option<PlanarMap> {
         edit.apply_known(self.map(), self.polys(), Some(self.map_index()))
@@ -3739,22 +3740,34 @@ impl PlanarMap {
     }
 }
 
-/// 輪郭の変形のドラッグ中の表示：地図 `base.map` に編集 `edit`（文書の座標）をかけて確定した結果を、図形の差分で返す
-/// （離したときの確定 `Cel::edit_map` と同じ計算）。`own` は地図の面の文書の図形。新しい形は、座標の変換 `xform` で置いた写し
+/// 輪郭の変形のドラッグ中の表示：地図 `base` に編集 `edit`（文書の座標。辺の引っぱり・頂点の移動）をかけて確定した結果
+/// を、図形の差分（消す図形の番号, 入れる図形）で返す。離したときの確定と同じ1本の道（`reshape_change` → `edit_local`）。
+/// 入れる図形は、レイヤー `layer_id` の、座標の変換 `xform` で置いた写し。辺・頂点が無いか、確定できなければ `None`
 pub(crate) fn reshape_result(
     base: &LayerBase,
     edit: MapEdit,
-    own: &[&FillShape],
     layer_id: LayerId,
     group_path: &[u64],
     xform: Affine,
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
-    let next = base.apply_edit(edit)?.written(base)?;
-    let change = base.diff(next, own, layer_id, group_path);
-    Some((
-        change.removed,
-        change.added.into_iter().map(|d| placed(d, xform)).collect(),
-    ))
+    let change = base.reshape_change(edit)??;
+    match base.edit_local(&change, group_path) {
+        LocalEdit::Same => Some((Vec::new(), Vec::new())),
+        LocalEdit::Refused(_) => None,
+        LocalEdit::Changed(w) => {
+            let added = w
+                .added
+                .iter()
+                .filter_map(|id| {
+                    let i = w.faces.binary_search_by_key(id, |s| s.shape_id).ok()?;
+                    let mut s = (*w.faces[i]).clone();
+                    s.layer_id = layer_id;
+                    Some(placed(s, xform))
+                })
+                .collect();
+            Some((w.removed, added))
+        }
+    }
 }
 
 /// `items` のそれぞれに `f` をかけた結果（`items` の順）。2つ以上あれば、CPU の数までのスレッドで同時に計算する

@@ -28579,8 +28579,7 @@ mod map_overlay {
                         }
                     };
                     let t = std::time::Instant::now();
-                    let own: Vec<&FillShape> = shapes.iter().collect();
-                    let out = reshape_result(&base, edit, &own, layer_id, &[], Affine::IDENTITY);
+                    let out = reshape_result(&base, edit, layer_id, &[], Affine::IDENTITY);
                     std::hint::black_box(out);
                     if i % 2 == 0 {
                         pull.push(ms(t));
@@ -34346,8 +34345,6 @@ fn measure_edit_scaling_by_cel_size() {
             // 10. 輪郭の変形のドラッグ中の1コマ（離したときと同じ計算：`reshape_result`）
             let cel = app.doc.root.layers[0].keyframes[0].cel.clone();
             let base = cel.scope_base(&[]);
-            let faces = base.faces(&[]);
-            let own: Vec<&FillShape> = faces.iter().map(|f| &**f).collect();
             let q = pick_edge(&mut r);
             let s = Instant::now();
             std::hint::black_box(reshape_result(
@@ -34357,7 +34354,6 @@ fn measure_edit_scaling_by_cel_size() {
                     grab_t: 0.5,
                     target: q.eval(0.5) + kurbo::Vec2::new(4.0, 3.0),
                 },
-                &own,
                 lid,
                 &[],
                 Affine::IDENTITY,
