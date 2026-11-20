@@ -462,7 +462,9 @@ impl PlanarMap {
             }));
         }
         // 計算に使う写しの升目の索引があれば、形・輪郭の変形は窓で行う（結果は前の地図全体で行ったときと同じ）
-        if let (Some(ix), MapInput::Shapes(_) | MapInput::Sweep(_)) = (index, input) {
+        if let (Some(ix), MapInput::Shapes(_) | MapInput::Sweep(_) | MapInput::Map(_)) =
+            (index, input)
+        {
             let got = self.overlay_windowed(known, ix, input, rules, &new_quads, &new_cols);
             // お手本（設計 段2b の 0.）：テストでは毎回、前の地図全体で重ねた結果と比べる
             #[cfg(test)]
@@ -674,11 +676,17 @@ impl PlanarMap {
                                         v.sort();
                                         v
                                     };
+                                    // 前の地図がセル画の地図（書き戻したもの：書き戻しても面が変わらない）のときだけ比べる（面に
+                                    // 番号の無い地図は、書き戻すと触らない面にも番号を振るので、触った所だけの答えとは違う）
+                                    let settled = self
+                                        .clone()
+                                        .written(&prev)
+                                        .is_some_and(|n| prev.diff(n, &own, 0, &[]).removed.is_empty());
                                     let mut a = change.removed.clone();
                                     a.sort_unstable();
                                     let mut b = full.removed.clone();
                                     b.sort_unstable();
-                                    a == b && norm(&change.added) == norm(&full.added)
+                                    !settled || (a == b && norm(&change.added) == norm(&full.added))
                                 });
                                 assert!(
                                     same,
@@ -786,6 +794,33 @@ impl PlanarMap {
             .reduce(|a, b| a.union(b))?;
         // 入れる辺（前の地図の番号）。輪郭の変形で動かした辺は、はじめから入れる
         let mut fed_init: std::collections::BTreeSet<usize> = moved_list.iter().copied().collect();
+        // 重ねる地図（`MapInput::Map`）の辺のうち、はじめから入れるもの（重ねる地図の番号。入れなかった辺が切った区間と
+        // 交わったときに足す）。重ねる地図の辺は、前の地図全体で行うときと同じく、前からある辺の後ろに並べる（`joined`）
+        let piece: Option<&PlanarMap> = match input {
+            MapInput::Map(p) => Some(p),
+            _ => None,
+        };
+        let np = input.joined_edges();
+        let mut fed_init_new: std::collections::BTreeSet<usize> = Default::default();
+        // 窓（前の地図の辺の一部を並べた地図 `m`）に重ねる地図の辺を並べた地図と、同じ線の組の相手（`same_edges`。前の
+        // 地図全体で行うときと同じ組：組になる前からある辺は、両端が重ねる地図の頂点の外形の中にあるので、外接矩形が
+        // 重ねるものの範囲にかかり、みな窓にある）
+        let with_piece = |m: PlanarMap| -> (PlanarMap, Vec<Option<(usize, bool)>>) {
+            let Some(p) = piece else {
+                return (m, Vec::new());
+            };
+            let (pairs, alias) = m.same_edges(p);
+            let n = m.edges.len();
+            let joined = m.joined(p, &alias);
+            let mut partner = vec![None; joined.edges.len()];
+            for &(e, f, same_dir) in &pairs {
+                partner[e] = Some((n + f, same_dir));
+                partner[n + f] = Some((e, same_dir));
+            }
+            (joined, partner)
+        };
+        // 重ねるときの種（重ねる地図は、辺として並べるので種は無い）
+        let seeds: &[QuadBez] = if piece.is_some() { &[] } else { new_quads };
         let mut extra: Option<KRect> = None;
         loop {
             // 1. 入れる辺を、重ねるもののまわりの下窓で決める（設計 段2b の 7. の 2b-7b）。入れる辺の近くの辺（外接矩形を
@@ -799,44 +834,64 @@ impl PlanarMap {
                 .map(|e| hull(quad_of(e)))
                 .fold(area, |a, b| a.union(b))
                 .inflate(WINDOW_PAD, WINDOW_PAD);
-            let (fed_dense, spans_dense) = loop {
+            let fed_dense = loop {
                 let mut sub_edges = region_edges(r0);
                 sub_edges.extend(fed_init.iter().copied());
                 sub_edges.sort_unstable();
                 sub_edges.dedup();
                 let (sub, sub_known) = tile_window(stored, &sub_edges);
                 let n0 = sub.edges.len();
-                let moved0: Vec<bool> = sub_edges.iter().map(|e| moved_list.contains(e)).collect();
-                let init0: Vec<bool> = sub_edges.iter().map(|e| fed_init.contains(e)).collect();
-                let f = sub.fed_edges(&sub_known, None, new_quads, &moved0, init0, n0..n0, &[])?;
+                let (sub, sub_partner) = with_piece(sub);
+                let mut moved0: Vec<bool> =
+                    sub_edges.iter().map(|e| moved_list.contains(e)).collect();
+                moved0.resize(n0 + np, false);
+                let mut init0: Vec<bool> = sub_edges.iter().map(|e| fed_init.contains(e)).collect();
+                init0.extend((0..np).map(|i| fed_init_new.contains(&i)));
+                let f = sub.fed_edges(
+                    &sub_known,
+                    None,
+                    seeds,
+                    &moved0,
+                    init0,
+                    n0..n0 + np,
+                    &sub_partner,
+                )?;
                 let fed_now: Vec<usize> = (0..n0).filter(|&e| f.fed[e]).collect();
+                // 重ねる地図の辺は、みな調べる（入れるかを決める）ので、どれも近くの辺が下窓にあるかを見る
                 let reach = fed_now
                     .iter()
-                    .map(|&e| reach_box(sub.quad(e)).inflate(4.0 * GRID_REACH, 4.0 * GRID_REACH))
+                    .copied()
+                    .chain(n0..n0 + np)
+                    .map(|e| reach_box(sub.quad(e)).inflate(4.0 * GRID_REACH, 4.0 * GRID_REACH))
                     .fold(area, |a, b| a.union(b));
                 if !inside(reach, r0) {
                     r0 = r0.union(reach.inflate(WINDOW_PAD, WINDOW_PAD));
                     continue;
                 }
-                let spans: Vec<(Line, Vec<Span>)> = f
+                // 線の番号を、窓によらない形にする（前からある辺は前の地図の番号、重ねる地図の辺はその番号）
+                let spans: Vec<(SpanLine, Vec<Span>)> = f
                     .spans
                     .iter()
                     .map(|(l, v)| {
                         let l = match *l {
-                            Line::Edge(e) => Line::Edge(sub_edges[e]),
-                            seed => seed,
+                            Line::Edge(e) if e < n0 => SpanLine::Old(sub_edges[e]),
+                            Line::Edge(e) => SpanLine::New(e - n0),
+                            Line::Seed(i) => SpanLine::Seed(i),
                         };
                         (l, v.clone())
                     })
                     .collect();
+                let fed_new: Vec<bool> = (0..np).map(|i| f.fed[n0 + i]).collect();
                 break (
                     fed_now
                         .into_iter()
                         .map(|e| sub_edges[e])
                         .collect::<Vec<usize>>(),
                     spans,
+                    fed_new,
                 );
             };
+            let (fed_dense, spans_dense, fed_new) = fed_dense;
             // 2. 窓：入れる辺と重ねるものの外接矩形を広げた範囲に外接矩形がかかる辺と、入れる辺と、それらの端の頂点に
             //    つながる辺。辺は塊から引き、頂点は座標で見分ける
             let mut region = fed_dense
@@ -870,14 +925,17 @@ impl PlanarMap {
             }
             let wedges: Vec<usize> = in_window.into_iter().collect();
             let (wmap, wknown) = tile_window(stored, &wedges);
+            let nw = wmap.edges.len();
+            let (wmap, wpartner) = with_piece(wmap);
             let to_window: IntMap<usize, usize> =
                 wedges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
             let spans: IntMap<Line, Vec<Span>> = spans_dense
                 .iter()
                 .map(|(l, v)| {
                     let l = match *l {
-                        Line::Edge(e) => Line::Edge(to_window[&e]),
-                        seed => seed,
+                        SpanLine::Old(e) => Line::Edge(to_window[&e]),
+                        SpanLine::New(i) => Line::Edge(nw + i),
+                        SpanLine::Seed(i) => Line::Seed(i),
                     };
                     (l, v.clone())
                 })
@@ -892,11 +950,15 @@ impl PlanarMap {
             };
             let fed_set: std::collections::HashSet<usize> = fed_dense.iter().copied().collect();
             let mut wset = FedEdges {
-                fed: wedges.iter().map(|e| fed_set.contains(e)).collect(),
+                fed: wedges
+                    .iter()
+                    .map(|e| fed_set.contains(e))
+                    .chain(fed_new.iter().copied())
+                    .collect(),
                 known: &wknown,
                 spans,
                 near: Some(NearEdges::new(&wmap, &wknown, None)),
-                partner: Vec::new(),
+                partner: wpartner,
                 outside: Some(Outside {
                     index: ix,
                     to_window: to_window.clone(),
@@ -926,7 +988,14 @@ impl PlanarMap {
                 Err(OverlayStop::Unfed(more)) => {
                     // 入れなかった辺が区間と交わった：その辺も入れて、1. からやり直す（前の地図全体で行うときと同じ）
                     fed_init.extend(fed_dense.iter().copied());
-                    fed_init.extend(more.into_iter().map(|e| wedges[e]));
+                    fed_init_new.extend((0..np).filter(|&i| fed_new[i]));
+                    for e in more {
+                        if e < nw {
+                            fed_init.insert(wedges[e]);
+                        } else {
+                            fed_init_new.insert(e - nw);
+                        }
+                    }
                 }
                 Err(OverlayStop::Refused) => return None,
             }
@@ -2443,6 +2512,15 @@ fn add_span(spans: &mut IntMap<Line, Vec<Span>>, line: Line, e: usize, pts: &Ove
         list.insert(at, span);
     }
     true
+}
+
+/// 窓で重ね合わせるときの、下窓から窓へ渡す線の番号（窓によらない形）：前からある辺（前の地図の番号）・重ねる地図の辺
+/// （その番号）・重ねる線（`Line::Seed`）
+#[derive(Clone, Copy)]
+enum SpanLine {
+    Old(usize),
+    New(usize),
+    Seed(usize),
 }
 
 /// 同じ線として扱う所（`Span`）にかかわる線：重ねる線（形・輪郭の変形の線。`fed_edges` の `seeds` の番号）か、辺（前から

@@ -34594,13 +34594,13 @@ fn windowed_overlay_matches_full_on_large_map() {
     let winds_before = crate::planar_map::outside_winds();
     let (mut compared, mut differed) = (0usize, Vec::<String>::new());
     let total = (4.0 * dx, 4.0 * dy);
-    for step in 0..60 {
+    for step in 0..84 {
         let base = LayerBase::new(&m);
         let full = base.map().clone();
         let c = colors[step % 4];
         // 場所：区画の中か、区画の境目のあたり
         let at = Point::new(bb.x0 + rng.f() * total.0, bb.y0 + rng.f() * total.1);
-        let kind = step % 5;
+        let kind = step % 7;
         let (a, b): (Vec<Option<PlanarMap>>, Vec<Option<PlanarMap>>) = match kind {
             0 | 1 => {
                 let r = 2.0 + rng.f() * 9.0;
@@ -34626,6 +34626,28 @@ fn windowed_overlay_matches_full_on_large_map() {
                 (
                     to_vec(base.overlay_rules(MapInput::Shapes(&rect), rules)),
                     to_vec(full.overlay_rules(MapInput::Shapes(&rect), rules)),
+                )
+            }
+            // 地図に地図を重ねる（片を置く・貼り付け）：矩形で切った片を、そのままの位置（同じ線の組ができる）か、少し
+            // ずらして、または遠くへ動かして重ねる
+            5 | 6 => {
+                let (w, h) = (20.0 + rng.f() * 150.0, 20.0 + rng.f() * 100.0);
+                let rect = vec![map_overlay::rect_shape(at.x, at.y, at.x + w, at.y + h, c)];
+                let Some(piece) = full.overlay(MapInput::Shapes(&rect), MapRule::KeepInside) else {
+                    continue;
+                };
+                let off = match (kind, step % 3) {
+                    (5, _) => KVec2::ZERO,
+                    (_, 0) => KVec2::new(rng.f() * 2.0, rng.f() * 2.0),
+                    _ => KVec2::new(
+                        (rng.f() - 0.5) * total.0 * 0.5,
+                        (rng.f() - 0.5) * total.1 * 0.5,
+                    ),
+                };
+                let moved = piece.transformed(kurbo::Affine::translate(off));
+                (
+                    vec![base.overlay(MapInput::Map(&moved), MapRule::Overlay)],
+                    vec![full.overlay(MapInput::Map(&moved), MapRule::Overlay)],
                 )
             }
             _ => {
@@ -34661,7 +34683,7 @@ fn windowed_overlay_matches_full_on_large_map() {
             }
         }
     }
-    assert!(compared >= 60, "比べた数 {compared}");
+    assert!(compared >= 70, "比べた数 {compared}");
     assert!(
         crate::planar_map::outside_winds() > winds_before,
         "窓の外の辺を点の色の数えに入れる道を通っていない"
