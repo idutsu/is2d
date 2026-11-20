@@ -142,6 +142,7 @@ impl PlanarMap {
         self.restricted_by(|id| keep.contains(&id))
     }
 
+    #[cfg(test)]
     /// 面の番号が `ids` にある面を外した地図（`restricted` の逆）
     pub(crate) fn without(&self, ids: &HashSet<ShapeId>) -> PlanarMap {
         self.restricted_by(|id| !ids.contains(&id))
@@ -438,6 +439,7 @@ impl PlanarMap {
             polys,
             cycles,
             cycle_regions,
+            #[cfg(test)]
             origin,
         })
     }
@@ -1232,7 +1234,9 @@ struct Checked {
     polys: Vec<Poly>,
     cycles: Vec<Cycle>,
     cycle_regions: Vec<CycleRegion>,
-    /// 辺ごとの、前の地図の同じ辺（`edge_origins`。前の地図が無ければ、みな `New`）
+    /// 辺ごとの、前の地図の同じ辺（`edge_origins`。前の地図が無ければ、みな `New`。前の地図に対して確かめ、書き戻す
+    /// 前の道 `written` が使う：テストのお手本だけ）
+    #[cfg(test)]
     origin: Vec<EdgeOrigin>,
 }
 
@@ -1792,6 +1796,7 @@ pub(crate) fn test_checks() -> bool {
 }
 
 impl PlanarMap {
+    #[cfg(test)]
     /// 編集で作った、セル画に書き戻す地図を確かめたもの（`valid_faces_since`：読み込みと同じ判定で、書き戻す先の今の
     /// 地図 `prev` にある辺どうしは確かめ直さない）。確かめは地図を作った所でこの1回だけで、書き戻し（`LayerBase::diff`）は
     /// 確かめた地図を受け取る。`None`：正しい地図でない（書き戻さずに断る。書けた地図は、保存して開いても必ず読める）。
@@ -3165,6 +3170,38 @@ impl LayerBase {
         out
     }
 
+    /// 番号が `ids` の面だけを残した、計算に使うふつうの地図（`PlanarMap::restricted` と同じ地図：辺と頂点の順も同じ）。
+    /// 残す面の輪郭の辺だけを塊から引いて作る（手間は残す面の大きさの分）
+    pub(crate) fn only_faces_map(&self, ids: &HashSet<ShapeId>, group_path: &[u64]) -> PlanarMap {
+        let mut m = PlanarMap::default();
+        let mut at: HashMap<[u64; 2], usize> = HashMap::new();
+        let mut node = |p: Point, m: &mut PlanarMap| -> usize {
+            *at.entry([p.x.to_bits(), p.y.to_bits()]).or_insert_with(|| {
+                m.nodes.push(p);
+                m.nodes.len() - 1
+            })
+        };
+        for e in self.faces_edges(ids, group_path) {
+            let te = self.stored.edge_at(e);
+            let left_src = te.left_src.filter(|id| ids.contains(id));
+            let right_src = te.right_src.filter(|id| ids.contains(id));
+            if left_src.is_none() && right_src.is_none() {
+                continue;
+            }
+            let (a, b) = (node(te.a, &mut m), node(te.b, &mut m));
+            m.edges.push(MapEdge {
+                a,
+                b,
+                ctrl: te.ctrl,
+                left: te.left.filter(|_| left_src.is_some()),
+                right: te.right.filter(|_| right_src.is_some()),
+                left_src,
+                right_src,
+            });
+        }
+        m
+    }
+
     /// 面を丸ごと外す・残す（`PlanarMap::restricted_by` と同じ答え：外す面の側の色と番号を消し、両側とも消えた辺を除く。
     /// 確かめ直さない：正しい地図の面を外しても、正しい地図のまま）を、触った所だけで：（新しいしまう形, 外したときは新しい
     /// 面の表（残る面の図形は前の表と共有する。輪郭と番号は変わらない））。外すときは、外す面の輪郭の辺だけを替える
@@ -3203,29 +3240,7 @@ impl LayerBase {
                 (!stored.is_empty()).then(|| (stored, Some(faces.into())))
             }
             FaceKeep::Only(ids) => {
-                let mut m = PlanarMap::default();
-                let mut at: HashMap<[u64; 2], usize> = HashMap::new();
-                let mut node = |p: Point, m: &mut PlanarMap| -> usize {
-                    *at.entry([p.x.to_bits(), p.y.to_bits()]).or_insert_with(|| {
-                        m.nodes.push(p);
-                        m.nodes.len() - 1
-                    })
-                };
-                for e in self.faces_edges(ids, group_path) {
-                    let Some(te) = restrict(self.stored.edge_at(e)) else {
-                        continue;
-                    };
-                    let (a, b) = (node(te.a, &mut m), node(te.b, &mut m));
-                    m.edges.push(MapEdge {
-                        a,
-                        b,
-                        ctrl: te.ctrl,
-                        left: te.left,
-                        right: te.right,
-                        left_src: te.left_src,
-                        right_src: te.right_src,
-                    });
-                }
+                let m = self.only_faces_map(ids, group_path);
                 (!m.edges.is_empty()).then(|| (StoredMap::from_dense(&m, Some(&self.stored)), None))
             }
         };

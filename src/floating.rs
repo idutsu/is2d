@@ -11,8 +11,8 @@ use kurbo::Affine;
 
 use crate::canvas_tool::{Placement, SceneBaseCache};
 use crate::planar_map::{
-    cut_out, parallel_map, realized, region_map, stacked, CheckedMap, LayerBase, LocalEdit,
-    LocalWrite, MapChange, MapInput, MapRule, PlanarMap,
+    cut_out, parallel_map, realized, region_map, stacked, CheckedMap, FaceKeep, LayerBase,
+    LocalEdit, LocalWrite, MapInput, MapRule, PlanarMap,
 };
 use crate::stored_map::StoredMap;
 use crate::vector_engine::FillShape;
@@ -167,8 +167,10 @@ pub(crate) struct Origin {
 }
 
 impl Origin {
-    /// セル画の地図 `cel` との差分 `change`（残りの地図。文書の座標）から。差分が無ければ（何も切れていない）`None`
-    fn of(change: MapChange, cel: &StoredMap) -> Option<Self> {
+    /// テスト用（お手本の前の道）：セル画の地図 `cel` との差分 `change`（残りの地図。文書の座標）から。差分が無ければ
+    /// （何も切れていない）`None`
+    #[cfg(test)]
+    fn of(change: crate::planar_map::MapChange, cel: &StoredMap) -> Option<Self> {
         if change.removed.is_empty() && change.added.is_empty() {
             return None;
         }
@@ -632,20 +634,46 @@ impl Floating {
             let Some(cel) = stage.cel(layer_id) else {
                 return false;
             };
-            let mut rest = l.content(&cel).map().clone();
-            for g in &back {
-                let Some(m) = rest.overlay(MapInput::Map(g.base().map()), MapRule::Overlay) else {
-                    return false;
-                };
-                rest = m;
-            }
-            let faces = cel.faces(stage.scope);
-            let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
-            let Some(rest) = rest.written(&cel) else {
+            // 1本の道：外した片を中身に窓で重ね（`stacked_local`）、セル画の地図との違いを差分から先に渡す
+            // （`replace_local`）。残りはセル画に対する答え
+            let content = l.content(&cel);
+            let Some(next) =
+                content.stacked_local(back.iter().map(|g| Some(g.base().map().clone())))
+            else {
                 return false;
             };
-            let change = cel.diff(rest, &own, layer_id, stage.scope);
-            l.origin = Origin::of(change, &cel.stored);
+            let origin = match cel.replace_local(&next, stage.scope) {
+                LocalEdit::Same => None,
+                LocalEdit::Changed(w) => Origin::of_local(w, &cel, stage.scope, None),
+                LocalEdit::Refused(_) => return false,
+            };
+            // お手本：前の道（中身の地図全体に片を重ね、セル画に対して確かめて書き戻す）の残りと同じ
+            #[cfg(test)]
+            if crate::planar_map::test_checks() {
+                let ok = crate::planar_map::uncounted(|| {
+                    let mut rest = content.map().clone();
+                    for g in &back {
+                        match rest.overlay(MapInput::Map(g.base().map()), MapRule::Overlay) {
+                            Some(m) => rest = m,
+                            None => return false,
+                        }
+                    }
+                    let faces = cel.faces(stage.scope);
+                    let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
+                    let full = rest.written(&cel).and_then(|r| {
+                        Origin::of(cel.diff(r, &own, layer_id, stage.scope), &cel.stored)
+                    });
+                    match (&origin, &full) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => {
+                            a.compare_key(stage.scope) == b.compare_key(stage.scope)
+                        }
+                        _ => false,
+                    }
+                });
+                assert!(ok, "片を戻した残りが、前の道で戻した残り（お手本）と違う");
+            }
+            l.origin = origin;
             l.groups = kept;
         }
         true
@@ -728,8 +756,11 @@ fn cut_layer(
     rect: Option<&FillShape>,
 ) -> Option<FloatLayer> {
     let cel = stage.cel(layer_id)?;
-    let faces = cel.faces(stage.scope);
-    let own: Vec<&FillShape> = faces.iter().map(|s| &**s).collect();
+    // お手本（前の道）が使う、セル画の面の図形
+    #[cfg(test)]
+    let cel_faces = cel.faces(stage.scope);
+    #[cfg(test)]
+    let own: Vec<&FillShape> = cel_faces.iter().map(|s| &**s).collect();
     let empty = FloatLayer {
         layer_id,
         origin: None,
@@ -738,23 +769,57 @@ fn cut_layer(
     let cur = cur.unwrap_or(&empty);
     let content_base = cur.content(&cel);
     let part = (!ids.is_empty())
-        .then(|| content_base.map().restricted(ids))
+        .then(|| content_base.only_faces_map(ids, stage.scope))
         .filter(|m| !m.edges.is_empty());
     let (origin, inside): (Option<Origin>, CheckedMap) = match (part, rect) {
         (None, None) => return Some(cur.clone()),
-        // 面を丸ごと持ち上げる：中身から、その面を外す（面の番号はそのまま。片は前と同じ番号の図形）
-        (Some(part), None) => (
-            Origin::of(
-                cel.diff(
-                    content_base.map().without(ids).written(&cel)?,
-                    &own,
-                    layer_id,
-                    stage.scope,
-                ),
-                &cel.stored,
-            ),
-            part.checked()?,
-        ),
+        // 面を丸ごと持ち上げる：中身から、その面を外す（面の番号はそのまま。片は前と同じ番号の図形）。外す面の輪郭の辺だけ
+        // を替える（`restricted_local`。正しい地図の面を外しても正しい地図のまま）。消した図形は外した面で、入れた図形は無い
+        (Some(part), None) => {
+            let faces = content_base.faces(stage.scope);
+            let (stored, rest_faces) = content_base
+                .restricted_local(FaceKeep::Without(ids), stage.scope)
+                .map(|(st, f)| (st, f.expect("外したときは面の表がある")))
+                .unwrap_or_else(|| {
+                    (
+                        StoredMap::from_dense(&PlanarMap::default(), None),
+                        Arc::from(Vec::new()),
+                    )
+                });
+            let removed: Vec<ShapeId> = faces
+                .iter()
+                .map(|s| s.shape_id)
+                .filter(|id| ids.contains(id))
+                .collect();
+            let w = LocalWrite {
+                stored,
+                faces: rest_faces,
+                removed,
+                added: Vec::new(),
+            };
+            let origin = Origin::of_local(w, &content_base, stage.scope, cur.origin.as_ref());
+            // お手本：前の道（中身の地図全体から面を外し、セル画に対して確かめて書き戻す）の残りと同じ
+            #[cfg(test)]
+            if crate::planar_map::test_checks() {
+                let ok = crate::planar_map::uncounted(|| {
+                    let full = content_base.map().without(ids).written(&cel).and_then(|r| {
+                        Origin::of(cel.diff(r, &own, layer_id, stage.scope), &cel.stored)
+                    });
+                    match (&origin, &full) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => {
+                            a.compare_key(stage.scope) == b.compare_key(stage.scope)
+                        }
+                        _ => false,
+                    }
+                });
+                assert!(
+                    ok,
+                    "面を持ち上げた残りが、前の道で持ち上げた残り（お手本）と違う"
+                );
+            }
+            (origin, part.checked()?)
+        }
         // 選ぶ所で切る（1本の道：`cut_out`）。残りは中身に対する答えなので、セル画に対する残りにする
         (part, Some(r)) => {
             let region_owned;
