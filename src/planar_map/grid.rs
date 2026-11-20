@@ -7,7 +7,7 @@ pub(super) type IPt = (i64, i64);
 
 /// 辺の、計算に使う形（`EdgeGeom`）。地図ごとの計算に使う写し（`LayerBase::polys`）が1回だけ作って持ち、前の地図と
 /// 同じ辺は引き継ぐ（`PlanarMap::polys_since`）
-pub(super) type Poly = Arc<EdgeGeom>;
+pub(crate) type Poly = Arc<EdgeGeom>;
 
 /// 面の輪郭：向きのある辺（辺の番号, 辺の向きにたどるか）を、たどる順に並べたもの（`PlanarMap::face_cycles_with`）
 pub(super) type Cycle = Vec<(usize, bool)>;
@@ -15,7 +15,7 @@ pub(super) type Cycle = Vec<(usize, bool)>;
 /// 辺（曲線）の、計算に使う形：判定の形（`grid_poly`。`Deref` で折れ線の点）と、重ね合わせで近くの辺を探すときの
 /// 外接矩形とマス（`edge_reach`。初めて要るときに作る：`fed_edges`）。どちらも曲線だけで決まる
 #[derive(Debug)]
-pub(super) struct EdgeGeom {
+pub(crate) struct EdgeGeom {
     poly: Box<[IPt]>,
     reach: OnceLock<EdgeReach>,
 }
@@ -32,7 +32,7 @@ impl std::ops::Deref for EdgeGeom {
 
 impl EdgeGeom {
     /// 曲線 `q` の、計算に使う形（判定の形を作る。外接矩形とマスは、初めて要るときに作る）
-    pub(super) fn of(q: &QuadBez) -> Poly {
+    pub(crate) fn of(q: &QuadBez) -> Poly {
         Arc::new(Self {
             poly: grid_poly(q).into(),
             reach: OnceLock::new(),

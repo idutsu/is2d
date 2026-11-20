@@ -16,10 +16,10 @@ use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use eframe::egui::Color32;
-use kurbo::Point;
+use kurbo::{Point, QuadBez};
 use serde::{Deserialize, Serialize};
 
-use crate::planar_map::{point_order, EdgeOrigin, IntMap, LayerBase, MapEdge, PlanarMap};
+use crate::planar_map::{point_order, EdgeGeom, EdgeOrigin, IntMap, LayerBase, MapEdge, PlanarMap, Poly};
 use crate::vector_engine::ShapeId;
 
 /// 塊の升目の大きさ（文書の座標の px）。ブラシ1本・消しゴム1本で変わるのは、ふつう升目の数個分
@@ -124,8 +124,43 @@ pub(crate) fn edge_size() -> usize {
     std::mem::size_of::<StoredEdge>()
 }
 
-/// 塊：1つの升目に入る辺の並び（決まった順。空の塊は無い）
-type Tile = Arc<[StoredEdge]>;
+/// 塊：1つの升目に入る辺の並び（決まった順。空の塊は無い）と、その辺の判定の形（初めて要るときに作る。塊を共有する
+/// 地図どうしで共有する：設計 段2b の 1.）
+type Tile = Arc<TileData>;
+
+/// 塊の中身
+#[derive(Debug)]
+struct TileData {
+    edges: Box<[StoredEdge]>,
+    /// 辺ごとの判定の形（`edges` の順。しまう辺の向きの曲線から作る：`EdgeGeom::of`）
+    polys: OnceLock<Box<[Poly]>>,
+}
+
+impl std::ops::Deref for TileData {
+    type Target = [StoredEdge];
+    fn deref(&self) -> &[StoredEdge] {
+        &self.edges
+    }
+}
+
+impl TileData {
+    fn new(edges: Box<[StoredEdge]>) -> Tile {
+        Arc::new(Self {
+            edges,
+            polys: OnceLock::new(),
+        })
+    }
+
+    /// 辺ごとの判定の形（初めて要るときに作る）
+    fn polys(&self) -> &[Poly] {
+        self.polys.get_or_init(|| {
+            self.edges
+                .iter()
+                .map(|e| EdgeGeom::of(&QuadBez::new(e.a, e.ctrl, e.b)))
+                .collect()
+        })
+    }
+}
 
 /// 塊に入れる辺：（升目, しまう辺, (地図の辺の番号, 向きを逆にしたか)）
 type Placed = ((i32, i32), StoredEdge, (usize, bool));
@@ -207,7 +242,7 @@ impl StoredMap {
             .map(|k| {
                 let run = &edges[start..start + k.len()];
                 start += k.len();
-                same_tile(prev, &mut j, run).unwrap_or_else(|| run.into())
+                same_tile(prev, &mut j, run).unwrap_or_else(|| TileData::new(run.into()))
             })
             .collect();
         let stored = Self(Arc::new(Stored {
@@ -307,7 +342,7 @@ impl StoredMap {
                     }
                     let run = fresh[f..].iter().take_while(|x| x.0 == b).count();
                     let group = &fresh[f..f + run];
-                    tiles.push(group.iter().map(|x| x.1).collect());
+                    tiles.push(TileData::new(group.iter().map(|x| x.1).collect()));
                     order.extend(group.iter().map(|x| x.2));
                     f += run;
                 }
@@ -397,6 +432,25 @@ impl StoredMap {
         })
     }
 
+    /// 計算に使う地図（`to_dense`）の辺 `e` の判定の形（辺の住む塊が持つ。塊を共有する地図どうしで共有する）
+    pub(crate) fn poly(&self, e: usize) -> &Poly {
+        let starts = self.starts();
+        let k = starts.partition_point(|&s| s as usize <= e) - 1;
+        &self.0.tiles[k].polys()[e - starts[k] as usize]
+    }
+
+    /// 計算に使う地図（`to_dense`）の辺の順の判定の形 `polys` を、まだ判定の形を持っていない塊に持たせる（確かめた地図を
+    /// しまうとき：`CheckedMap::into_stored_with_polys`。作り直さずに、確かめるときに作ったものを使う）
+    pub(crate) fn seed_polys(&self, polys: &[Poly]) {
+        let starts = self.starts();
+        for (k, t) in self.0.tiles.iter().enumerate() {
+            if t.polys.get().is_none() {
+                let s = starts[k] as usize;
+                let _ = t.polys.set(polys[s..s + t.len()].into());
+            }
+        }
+    }
+
     /// 升目 `home` の塊の `j` 番目の辺の、計算に使う地図（`to_dense`）での番号。その塊が無ければ `None`
     fn dense_edge(&self, home: (i32, i32), j: u32) -> Option<usize> {
         let k = self
@@ -464,13 +518,18 @@ impl StoredMap {
                 {
                     return t.clone();
                 }
-                t.iter()
-                    .map(|e| StoredEdge {
-                        left_src: new_src(e.left_src),
-                        right_src: new_src(e.right_src),
-                        ..*e
-                    })
-                    .collect()
+                // 形は変わらないので、判定の形は前の塊のものを使う
+                Arc::new(TileData {
+                    edges: t
+                        .iter()
+                        .map(|e| StoredEdge {
+                            left_src: new_src(e.left_src),
+                            right_src: new_src(e.right_src),
+                            ..*e
+                        })
+                        .collect(),
+                    polys: t.polys.get().cloned().map_or_else(OnceLock::new, OnceLock::from),
+                })
             })
             .collect();
         Self::of_tiles(tiles)
@@ -896,7 +955,7 @@ impl TileReader {
             if edges.is_empty() {
                 return None;
             }
-            tiles.push(edges.into());
+            tiles.push(TileData::new(edges.into()));
         }
         Some(Self { tiles })
     }

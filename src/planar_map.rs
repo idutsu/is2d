@@ -1815,6 +1815,15 @@ impl LayerBase {
     ) -> Arc<Self> {
         let base = Self::of_dense(polys.map, stored);
         debug_assert_eq!(polys.polys.len(), base.map.edges.len());
+        #[cfg(test)]
+        if test_checks() {
+            for (e, p) in polys.polys.iter().enumerate() {
+                assert!(
+                    p[..] == base.stored.poly(e)[..],
+                    "塊の判定の形が、写しの一覧の判定の形と違う（辺 {e}）"
+                );
+            }
+        }
         let _ = base.polys.set(polys.polys);
         let _ = base.cycles.set(polys.cycles);
         let _ = base.cycle_regions.set(polys.regions);
@@ -1985,7 +1994,11 @@ impl LayerBase {
 
     /// 辺ごとの判定の形（`map` の辺の順。初めて要るときに作る。編集で作った写しは、確かめたときのものを引き継いでいる）
     fn polys(&self) -> &[Poly] {
-        self.polys.get_or_init(|| self.map.polys())
+        self.polys.get_or_init(|| {
+            (0..self.map.edges.len())
+                .map(|e| Arc::clone(self.stored.poly(e)))
+                .collect()
+        })
     }
 
     /// 面の輪郭（`face_cycles_with`。初めて要るときに作る。編集で作った写しは、確かめたときのものを引き継いでいる）
@@ -3063,7 +3076,7 @@ impl CheckedMap {
                             && a.y.to_bits() == b.y.to_bits())
             );
         }
-        let polys = order
+        let polys: Vec<Poly> = order
             .iter()
             .map(|&(e, flipped)| {
                 if flipped {
@@ -3074,6 +3087,7 @@ impl CheckedMap {
                 }
             })
             .collect();
+        stored.seed_polys(&polys);
         // この地図の辺ごとの、しまう形の辺の番号と、向きを逆にしたか
         let mut at = vec![(0, false); order.len()];
         for (s, &(e, flipped)) in order.iter().enumerate() {
