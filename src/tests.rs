@@ -34139,7 +34139,6 @@ fn edits_do_not_depend_on_edge_and_node_numbering() {
 fn measure_edit_scaling_by_cel_size() {
     use crate::doc_actions::{apply, Action};
     use crate::planar_map::{reshape_result, LayerBase, MapEdit, MapInput, MapRule, PlanarMap};
-    use crate::timeline::MapOutcome;
     use std::time::Instant;
     let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
     let med = |mut v: Vec<f64>| {
@@ -34174,9 +34173,21 @@ fn measure_edit_scaling_by_cel_size() {
         block.nodes.len()
     );
     eprintln!(
-        "{:>7} | {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8} | ブラシの内訳: {:>7} {:>7} {:>7} {:>7} {:>7}",
-        "辺", "ブラシ", "消しゴム", "バケツ", "アンカー+", "アンカー-", "引っぱり", "頂点", "矩形", "片を置く", "ドラッグ中",
-        "重ねる", "確かめ", "差分", "しまう", "土台"
+        "{:>7} | {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8} {:>7} {:>7} {:>7}",
+        "辺",
+        "ブラシ",
+        "消しゴム",
+        "バケツ",
+        "アンカー+",
+        "アンカー-",
+        "引っぱり",
+        "頂点",
+        "矩形",
+        "片を置く",
+        "ドラッグ中",
+        "取り消し",
+        "取消最大",
+        "土台"
     );
     for side in [1usize, 2, 4, 8] {
         // 区画を side × side 個並べた地図
@@ -34232,7 +34243,7 @@ fn measure_edit_scaling_by_cel_size() {
         let pick_edge = |r: &mut map_overlay::Rng| {
             block.quad((r.f() * block.edges.len() as f64) as usize % block.edges.len())
         };
-        let mut t: [Vec<f64>; 15] = Default::default();
+        let mut t: [Vec<f64>; 12] = Default::default();
         for _ in 0..9 {
             // 1. ブラシ
             let p0 = pt(&mut r);
@@ -34247,7 +34258,10 @@ fn measure_edit_scaling_by_cel_size() {
                 }
             ));
             t[0].push(ms(s));
+            // 取り消し（画面の土台を作り直すまで）
+            let s = Instant::now();
             assert!(apply(&mut app, Action::Undo));
+            t[11].push(ms(s));
             // 2. 消しゴム
             let p0 = pt(&mut r);
             let ep = stroke(&mut r, p0);
@@ -34363,37 +34377,20 @@ fn measure_edit_scaling_by_cel_size() {
                 Affine::IDENTITY,
             ));
             t[9].push(ms(s));
-            // ブラシの内訳（同じ線を、セル画の写しで手順ごとに）
-            let sh = brush_line_shapes(&brush_line(&points, 4.0), colors[0]);
-            let s = Instant::now();
-            let next = base
-                .overlay(MapInput::Shapes(&sh), MapRule::Paint(Some(colors[0])))
-                .unwrap();
-            t[10].push(ms(s));
-            let s = Instant::now();
-            let checked = next.written(&base).unwrap();
-            t[11].push(ms(s));
-            let s = Instant::now();
-            let out = cel.outcome(&[], checked);
-            t[12].push(ms(s));
-            if let MapOutcome::Changed(map, shapes) = out {
-                let mut c2 = cel.clone();
-                let s = Instant::now();
-                std::hint::black_box(c2.put_map(&[], map, shapes));
-                t[13].push(ms(s));
-            }
+            // 画面の土台の作り直し（レイヤーの図形を取り出し直す）
             let s = Instant::now();
             app.session.base_cache.invalidate_layer(lid);
             app.refresh_scene_base();
-            t[14].push(ms(s));
+            t[10].push(ms(s));
         }
+        let undo_max = t[11].iter().copied().fold(0.0, f64::max);
         let m: Vec<f64> = t
             .into_iter()
             .map(|v| if v.is_empty() { f64::NAN } else { med(v) })
             .collect();
         eprintln!(
-            "{edges:>7} | {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>8.2} | {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2}",
-            m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14]
+            "{edges:>7} | {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>8.2} {:>7.2} {:>7.2} {:>7.2}",
+            m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[11], undo_max, m[10]
         );
     }
 }
@@ -34946,6 +34943,41 @@ fn collapsed_placement_hits_nothing() {
     }
     // ふつうの変換なら合う
     assert_eq!(base.hit_node(p, 1.0, Affine::IDENTITY), Some(p));
+}
+
+/// 描く・取り消す・やり直すを繰り返しても、地図全体の写し（`map()`）を作らない：取り消し・やり直しで画面の土台が写しを
+/// 作り直すとき、升目の索引と面の表は、直前まで出していた写しから変わった所だけ作る（`adopt_index`・`adopt_faces`）。
+/// 直す前は、取り消すたびに面の表を地図全体から作っていた（辺 96,896 本で 約28ms）
+#[test]
+fn undo_and_redo_do_not_rebuild_whole_maps() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = map_overlay::dense_scene_app(7);
+    app.tab_mut().refresh_scene_base();
+    let stroke = |app: &mut Is2dApp, y: f64| {
+        assert!(apply(
+            app,
+            Action::PaintStroke {
+                points: vec![Point::new(-200.0, y), Point::new(150.0, y + 40.0)],
+                radius: 6.0,
+                color: Color32::from_rgb(200, 30, 160),
+            }
+        ));
+    };
+    // 1回目は写しを用意する（読み込んだ直後の地図は、初めて使うときに全部作る）
+    stroke(&mut app, -100.0);
+    assert!(apply(&mut app, Action::Undo));
+    let before = crate::planar_map::dense_builds();
+    for k in 0..4 {
+        stroke(&mut app, -60.0 + 40.0 * k as f64);
+        assert!(apply(&mut app, Action::Undo));
+        assert!(apply(&mut app, Action::Redo));
+        assert!(apply(&mut app, Action::Undo));
+    }
+    assert_eq!(
+        crate::planar_map::dense_builds() - before,
+        0,
+        "描く・取り消す・やり直すで、地図全体の写しを作った"
+    );
 }
 
 #[test]

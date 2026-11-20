@@ -239,16 +239,26 @@ impl SceneBaseCache {
                     continue;
                 }
             }
+            // セル画の地図の写しの升目の索引と面の表は、直前まで画面に出していた写し（Undo・やり直しの前の地図など、塊を
+            // 共有する地図の写し）から、変わった所だけ作る（図形を取り出す前に。取り出す所は、生きている写しを使う）
+            let warm: Vec<Arc<LayerBase>> = match &prev {
+                Some((old_cl, _)) => layer.keyframes[kf_idx]
+                    .cel
+                    .maps
+                    .iter()
+                    .map(|m| {
+                        let b = m.base();
+                        b.adopt_index(&old_cl.bases);
+                        b.adopt_faces(&old_cl.bases, &m.group_path);
+                        b
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
             let ctx = SymbolEvalCtx::new(library);
             let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx.clone());
             let bases = ctx.into_state().take_held();
-            // 新しく作った写しの升目の索引は、直前まで画面に出していた写し（Undo・やり直しの前の地図など、塊を共有する
-            // 地図の写し）の索引から、変わった塊の分だけ作る
-            if let Some((old_cl, _)) = &prev {
-                for b in &bases {
-                    b.adopt_index(&old_cl.bases);
-                }
-            }
+            drop(warm);
             for s in &mut evaluated {
                 s.place(world_xform);
             }
