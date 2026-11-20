@@ -1971,7 +1971,10 @@ impl LayerBase {
             let head = if cur.1 { ed.b } else { ed.a };
             let list = around.entry(head).or_insert_with(|| self.out_sorted(head));
             let back = (cur.0, !cur.1);
-            let k = list.iter().position(|&h| h == back).expect("頂点から出ていく辺に入っている");
+            let k = list
+                .iter()
+                .position(|&h| h == back)
+                .expect("頂点から出ていく辺に入っている");
             let next = list[(k + list.len() - 1) % list.len()];
             if next == start {
                 break;
@@ -1984,6 +1987,32 @@ impl LayerBase {
             cycle.rotate_left(k);
         }
         cycle
+    }
+
+    /// テスト用：この地図に差分を当てた地図（`LocalMap::new`。窓の頂点 `wnodes` は、この地図の全部の頂点でもよい）
+    #[cfg(test)]
+    pub(crate) fn local_map<'a>(
+        &'a self,
+        wnodes: &[usize],
+        result: &PlanarMap,
+        removed: &[usize],
+        added: &[usize],
+    ) -> LocalMap<'a> {
+        LocalMap::new(&self.map, self.map_index(), wnodes, result, removed, added)
+    }
+
+    /// テスト用：新しい地図 `next` の、辺の決まり（格子に置ける・両側の色が違う・判定の形が2点以上・区間どうしが触れない・
+    /// 別々の頂点が別々の格子の点）を、この地図にある辺どうしを除いて全部で調べた答え（`checked_since` の前半と同じ）
+    #[cfg(test)]
+    pub(crate) fn edges_ok_full(&self, next: &PlanarMap) -> bool {
+        let (polys, origin) = next.polys_since(Some(self));
+        let fresh: Vec<bool> = origin
+            .iter()
+            .map(|o| matches!(o, EdgeOrigin::New))
+            .collect();
+        next.fits_grid(Affine::IDENTITY)
+            && next.edges.iter().all(|e| e.left != e.right)
+            && next.polys_apart(&polys, &fresh)
     }
 
     /// 升目の索引（初めて要るときに全部作る）

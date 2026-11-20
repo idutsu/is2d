@@ -19,7 +19,9 @@ use eframe::egui::Color32;
 use kurbo::{Point, QuadBez};
 use serde::{Deserialize, Serialize};
 
-use crate::planar_map::{point_order, EdgeGeom, EdgeOrigin, IntMap, LayerBase, MapEdge, PlanarMap, Poly};
+use crate::planar_map::{
+    point_order, EdgeGeom, EdgeOrigin, IntMap, LayerBase, MapEdge, PlanarMap, Poly,
+};
 use crate::vector_engine::ShapeId;
 
 /// 塊の升目の大きさ（文書の座標の px）。ブラシ1本・消しゴム1本で変わるのは、ふつう升目の数個分
@@ -651,7 +653,11 @@ impl StoredMap {
                             ..*e
                         })
                         .collect(),
-                    polys: t.polys.get().cloned().map_or_else(OnceLock::new, OnceLock::from),
+                    polys: t
+                        .polys
+                        .get()
+                        .cloned()
+                        .map_or_else(OnceLock::new, OnceLock::from),
                 })
             })
             .collect();

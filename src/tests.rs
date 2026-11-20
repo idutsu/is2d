@@ -34696,7 +34696,10 @@ fn traced_cycles_match_the_cycle_list() {
         } else {
             MapRule::Paint(Some(c))
         };
-        if let Some(n) = m.overlay(MapInput::Shapes(&st), rule).and_then(|n| n.checked()) {
+        if let Some(n) = m
+            .overlay(MapInput::Shapes(&st), rule)
+            .and_then(|n| n.checked())
+        {
             m = n.uniquely_labeled().into_map();
         }
         if step % 10 != 9 || m.edges.is_empty() {
@@ -34723,9 +34726,123 @@ fn traced_cycles_match_the_cycle_list() {
             let e = (rng.f() * m.edges.len() as f64) as usize % m.edges.len();
             let h = (e, rng.f() < 0.5);
             let traced = base.trace_cycle(h);
-            assert_eq!(traced, canon(&list[owner[&h]]), "step {step} の向きのある辺 {h:?}");
+            assert_eq!(
+                traced,
+                canon(&list[owner[&h]]),
+                "step {step} の向きのある辺 {h:?}"
+            );
             checked += 1;
         }
     }
     assert!(checked >= 400, "確かめた数 {checked}");
+}
+
+/// 段2b-5a：前の地図に、わざと決まりを破りうる辺（ランダムな直線・曲線。ほかの辺と交わる・両側が同じ色・ほかの頂点と
+/// 同じ格子の点に端がある、など）を足した地図で、増えた辺の決まりを差分の近くだけで調べた答え（`added_edges_ok`）が、
+/// 新しい地図全体で調べた答え（`edges_ok_full`）と同じ。正しい答えと正しくない答えの両方が出ることも確かめる
+#[test]
+fn local_edge_rules_match_full_check() {
+    use crate::planar_map::{LayerBase, MapEdge, MapInput, MapRule, PlanarMap};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    let mut rng = map_overlay::Rng(29);
+    let mut m = PlanarMap::default();
+    for k in 0..40 {
+        let c = colors[k % 3];
+        let r = 2.0 + rng.f() * 8.0;
+        let st = wiggly_stroke(&mut rng, (100.0, 100.0, 300.0, 200.0), r, c);
+        if let Some(n) = m
+            .overlay(MapInput::Shapes(&st), MapRule::Paint(Some(c)))
+            .and_then(|n| n.checked())
+        {
+            m = n.uniquely_labeled().into_map();
+        }
+    }
+    let base = LayerBase::new(&m);
+    let full_map = base.map.clone();
+    let all_nodes: Vec<usize> = (0..full_map.nodes.len()).collect();
+    let (mut oks, mut bads) = (0, 0);
+    for _ in 0..300 {
+        // 足す辺：前の地図の頂点か、ランダムな点を結ぶ
+        // 絵の無い所（左の帯）に引く辺も混ぜる（正しい答えが十分に出るように）
+        let empty = rng.f() < 0.4;
+        let pick = |rng: &mut map_overlay::Rng| -> Point {
+            if empty {
+                Point::new(10.0 + rng.f() * 60.0, 100.0 + rng.f() * 200.0)
+            } else if rng.f() < 0.5 {
+                full_map.nodes
+                    [(rng.f() * full_map.nodes.len() as f64) as usize % full_map.nodes.len()]
+            } else {
+                Point::new(100.0 + rng.f() * 300.0, 100.0 + rng.f() * 200.0)
+            }
+        };
+        let (a, b) = (pick(&mut rng), pick(&mut rng));
+        if a == b {
+            continue;
+        }
+        let ctrl = if rng.f() < 0.5 {
+            a.midpoint(b)
+        } else {
+            a.midpoint(b) + KVec2::new(rng.f() * 20.0 - 10.0, rng.f() * 20.0 - 10.0)
+        };
+        let (l, r) = (
+            Some(colors[(rng.f() * 3.0) as usize % 3]),
+            if rng.f() < 0.15 {
+                None
+            } else {
+                Some(colors[(rng.f() * 3.0) as usize % 3])
+            },
+        );
+        // 窓の結果：前の地図の全部の辺と、足す辺
+        let mut result = full_map.clone();
+        let na = result.nodes.len();
+        result.nodes.push(a);
+        result.nodes.push(b);
+        result.edges.push(MapEdge {
+            a: na,
+            b: na + 1,
+            ctrl,
+            left: l,
+            right: r,
+            left_src: None,
+            right_src: None,
+        });
+        // 同じ座標の頂点は1つにする（窓の結果の頂点は、前の地図の頂点と同じ座標ならその頂点）
+        let mut joined = full_map.clone();
+        let at = |p: Point, joined: &mut PlanarMap| -> usize {
+            match joined.nodes.iter().position(|&q| q == p) {
+                Some(v) => v,
+                None => {
+                    joined.nodes.push(p);
+                    joined.nodes.len() - 1
+                }
+            }
+        };
+        let (ja, jb) = (at(a, &mut joined), at(b, &mut joined));
+        joined.edges.push(MapEdge {
+            a: ja,
+            b: jb,
+            ctrl,
+            left: l,
+            right: r,
+            left_src: None,
+            right_src: None,
+        });
+        let local = base.local_map(&all_nodes, &result, &[], &[result.edges.len() - 1]);
+        let got = local.added_edges_ok();
+        assert_eq!(
+            got,
+            base.edges_ok_full(&joined),
+            "足した辺 {a:?} → {b:?}（制御点 {ctrl:?}）"
+        );
+        if got {
+            oks += 1;
+        } else {
+            bads += 1;
+        }
+    }
+    assert!(oks > 10 && bads > 10, "正しい {oks}・正しくない {bads}");
 }

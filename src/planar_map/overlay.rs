@@ -470,7 +470,10 @@ impl PlanarMap {
                     let full = self.overlay_rules_known(known, None, input, rules);
                     super::same_results(got.as_ref().map(|m| &m[..]), full.as_ref().map(|m| &m[..]))
                 });
-                assert!(same, "窓で重ねた結果が、前の地図全体で重ねた結果（お手本）と違う");
+                assert!(
+                    same,
+                    "窓で重ねた結果が、前の地図全体で重ねた結果（お手本）と違う"
+                );
             }
             return got;
         }
@@ -702,7 +705,8 @@ impl PlanarMap {
                                 let local =
                                     LocalMap::new(self, ix, &wnodes, &m, &removed, &added);
                                 let touched = local.touched_cycles();
-                                (ix.stored.with_diff(self, &removed, &m, &added), touched.map(|t| {
+                                let edges_ok = local.added_edges_ok();
+                                (ix.stored.with_diff(self, &removed, &m, &added), edges_ok, touched.map(|t| {
                                     let mut shapes: Vec<_> = t
                                         .iter()
                                         .map(|c| cycle_shape(c.iter().map(|&h| local.half_key(h))))
@@ -714,7 +718,21 @@ impl PlanarMap {
                         });
                         let joined = self.with_window_result(m, &wnodes, &to_window, copy);
                         #[cfg(test)]
-                        if let Some((d, touched)) = diffed {
+                        if let Some((d, edges_ok, touched)) = diffed {
+                            // お手本（設計 段2b の 6. の 1.）：増えた辺の決まりの答えが、新しい地図全体で調べた答えと同じ
+                            let full_ok = super::uncounted(|| {
+                                let prev = LayerBase::new(self);
+                                let (polys, origin) = joined.polys_since(Some(&prev));
+                                let fresh: Vec<bool> =
+                                    origin.iter().map(|o| matches!(o, EdgeOrigin::New)).collect();
+                                joined.fits_grid(Affine::IDENTITY)
+                                    && joined.edges.iter().all(|e| e.left != e.right)
+                                    && joined.polys_apart(&polys, &fresh)
+                            });
+                            assert_eq!(
+                                edges_ok, full_ok,
+                                "増えた辺の決まりの答えが、新しい地図全体で調べた答え（お手本）と違う"
+                            );
                             let same = super::uncounted(|| {
                                 d.same_content(&StoredMap::from_dense(&joined, None))
                             });

@@ -213,6 +213,113 @@ impl<'a> LocalMap<'a> {
         Some(cycles)
     }
 
+    /// 点 `p`（文書の座標）を含むマスの升目にかかる辺（消えた辺を除いた前の地図の辺と、増えた辺。番号の順・1つずつ）
+    fn edges_near_point(&self, p: Point) -> Vec<usize> {
+        self.edges_over(KRect::from_points(p, p))
+    }
+
+    /// 矩形 `r`（文書の座標）にかかる升目の辺（消えた辺を除いた前の地図の辺と、増えた辺。番号の順・1つずつ）
+    fn edges_over(&self, r: KRect) -> Vec<usize> {
+        let mut out: Vec<usize> = Vec::new();
+        for t in index_tiles_over(r) {
+            self.index.index.edges_in(self.index.stored, t, &mut out);
+        }
+        out.retain(|e| !self.removed.contains(e));
+        out.extend(self.added_edges());
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// 2b-5a：増えた辺の決まり（`checked_since` の、格子に置ける・両側の色が違う・判定の形が2点以上・区間どうしが触れない・
+    /// 別々の頂点が別々の格子の点）。前の地図の辺どうしは、前の地図が正しいので調べない。区間どうしは、どちらかが、形が
+    /// 前の地図に無い増えた辺のものだけを調べる（消えた辺と形が同じ増えた辺は、判定の形も同じ：`valid_faces_since` と同じ
+    /// 考え）
+    pub(crate) fn added_edges_ok(&self) -> bool {
+        let base_keys: std::collections::HashSet<[u64; 6]> = self
+            .removed
+            .iter()
+            .map(|&e| quad_key(&self.base.quad(e)))
+            .collect();
+        let mut fresh: std::collections::HashSet<usize> = Default::default();
+        for e in self.added_edges() {
+            let q = self.quad(e);
+            let ed = self.edge(e);
+            if !on_grid([q.p0, q.p1, q.p2].into_iter()) || ed.left == ed.right {
+                return false;
+            }
+            if self.poly(e).len() < 2 {
+                return false;
+            }
+            if !base_keys.contains(&quad_key(&q)) {
+                fresh.insert(e);
+            }
+        }
+        // 増えた頂点が、ほかの頂点と同じ格子の点に丸まらないか（前の地図の頂点どうしは別々の格子の点）
+        let n_nodes = self.base.nodes.len();
+        let mut new_nodes: Vec<usize> = self
+            .added
+            .iter()
+            .flat_map(|ed| [ed.a, ed.b])
+            .filter(|&v| v >= n_nodes)
+            .collect();
+        new_nodes.sort_unstable();
+        new_nodes.dedup();
+        for &v in &new_nodes {
+            let p = self.node(v);
+            let gp = gpt(p);
+            for f in self.edges_near_point(p) {
+                let fd = self.edge(f);
+                for u in [fd.a, fd.b] {
+                    if u != v && gpt(self.node(u)) == gp {
+                        return false;
+                    }
+                }
+            }
+        }
+        // 区間どうし
+        let mut fresh_list: Vec<usize> = fresh.into_iter().collect();
+        fresh_list.sort_unstable();
+        for &e in &fresh_list {
+            let pe = self.poly(e).clone();
+            let ed = self.edge(e);
+            let reach = GridRect::of(&pe);
+            let rect = KRect::new(
+                reach.x0 as f64 / OVERLAY_GRID,
+                reach.y0 as f64 / OVERLAY_GRID,
+                reach.x1 as f64 / OVERLAY_GRID,
+                reach.y1 as f64 / OVERLAY_GRID,
+            )
+            .inflate(1.0 / OVERLAY_GRID, 1.0 / OVERLAY_GRID);
+            for f in self.edges_over(rect) {
+                let pf = self.poly(f).clone();
+                let fd = self.edge(f);
+                for k in 0..pe.len() - 1 {
+                    let rk = GridRect::of(&pe[k..k + 2]);
+                    for m in 0..pf.len().saturating_sub(1) {
+                        if e == f && m <= k {
+                            continue;
+                        }
+                        if !rk.overlaps(&GridRect::of(&pf[m..m + 2])) {
+                            continue;
+                        }
+                        let joint = (e == f && m == k + 1).then_some(pe[k + 1]);
+                        if seg_pair_clash(
+                            (pe[k], pe[k + 1]),
+                            seg_tags(&pe, k, ed.a, ed.b),
+                            (pf[m], pf[m + 1]),
+                            seg_tags(&pf, m, fd.a, fd.b),
+                            joint,
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// 向きのある辺の、番号によらない鍵（形の鍵 `edge_key` と、辺の決まった向きに進むか）
     pub(crate) fn half_key(&self, (e, forward): (usize, bool)) -> ([u64; 6], bool) {
         let q = self.quad(e);
