@@ -29747,7 +29747,6 @@ fn ungrouping_beside_an_unmoved_slice_leaves_no_cut() {
 /// Undo の控えと共有したままにする
 #[test]
 fn map_only_writes_share_the_instances() {
-    use crate::planar_map::{MapInput, MapRule};
     let red = Color32::from_rgb(235, 75, 75);
     let blue = Color32::from_rgb(55, 135, 245);
     let mut app = Is2dApp::default();
@@ -29779,18 +29778,15 @@ fn map_only_writes_share_the_instances() {
     assert!(canvas_tool::clear_selection(&mut app));
     let before = std::sync::Arc::clone(&app.doc.root.layers[0].keyframes[0].cel.instances);
     assert_eq!(before.len(), 1);
-    let stroke = make_stroke(
-        Point::new(300.0, 300.0),
-        Point::new(400.0, 300.0),
-        10.0,
-        blue,
-    );
-    let lid = app.doc.root.layers[0].id;
-    assert!(canvas_tool::edit_layer_map(app.tab_mut(), lid, |base| {
-        base.map()
-            .overlay(MapInput::Shapes(&stroke), MapRule::Paint(Some(blue)))
-            .and_then(|m| m.written(base))
-    }));
+    // 地図だけを書く編集（本番のブラシ：1本の道）
+    assert!(doc_actions::apply(
+        &mut app,
+        doc_actions::Action::PaintStroke {
+            points: vec![Point::new(300.0, 300.0), Point::new(400.0, 300.0)],
+            radius: 10.0,
+            color: blue,
+        }
+    ));
     let after = &app.doc.root.layers[0].keyframes[0].cel;
     assert!(!after.maps.is_empty());
     assert!(std::sync::Arc::ptr_eq(&before, &after.instances));

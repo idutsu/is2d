@@ -4,7 +4,7 @@ use eframe::egui::{Color32, Vec2};
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating, edit_layer_map,
+    active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating,
     editable_layer_ids, finish_cel_writes, focus_active_layer_by_id,
     focus_active_layer_to_shape_by_id, reset_session_after_timeline_change,
     select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode,
@@ -795,7 +795,7 @@ fn apply_stroke_shapes(tab: &mut Tab, active_tool: Tool, shapes: Vec<FillShape>)
     if !clear_selection(tab) {
         return false;
     }
-    // 絵が変わらなければ（同じ色で塗られた所の中をなぞった・何も消えないなど）edit_layer_map が false を返し、
+    // 絵が変わらなければ（同じ色で塗られた所の中をなぞった・何も消えないなど）write_local が false を返し、
     // apply が Undo の控えを捨てる
     push_undo(tab, None);
     let rule = MapRule::Paint(is_brush.then_some(brush_color));
@@ -813,7 +813,7 @@ fn apply_stroke_shapes(tab: &mut Tab, active_tool: Tool, shapes: Vec<FillShape>)
 /// 地図の編集を、レイヤー `layer_id` の編集中の階層に、触った所だけで書く（1本の道：`LayerBase::edit_local`・
 /// `Cel::edit_local`。設計：claude/触った所だけを計算する地図の設計_22fbbbe.md の段2b の 8.）。`f` は、計算に使う写しと
 /// 階層から、道具が作った重ね合わせに渡すもので編集した答えを返す。格子に置けないときは書かずに `Refusal::OffGrid`、正しい
-/// 地図にならなければ書かずに `Refusal::Unwritable` を知らせる（`write_map_edit` の重ね合わせと同じ）
+/// 地図にならなければ書かずに `Refusal::Unwritable` を知らせる
 fn write_local(
     tab: &mut Tab,
     layer_id: LayerId,
@@ -844,34 +844,6 @@ fn write_local(
     }
     let lids: Vec<LayerId> = written.then_some(layer_id).into_iter().collect();
     crate::canvas_tool::finish_cel_writes(tab, &lids);
-    if refusal.is_some() {
-        tab.session.refusal = refusal;
-    }
-    written
-}
-
-/// 地図の編集（ブラシ・消しゴム・バケツ・輪郭の変形・アンカー）を、レイヤー `layer_id` の編集中の階層に書く
-/// （`edit_layer_map`。作った地図は `written` で確かめる）。`edit` が `None` を返したら `on_none` を知らせる（`None` なら
-/// 変わらない・編集できないとして黙る：重ね合わせの `None` は格子に置けない座標がある `OffGrid`、バケツ・アンカーの
-/// `None` は変わらないこと）。作った地図が正しい地図でなければ、書かずに知らせる（`Refusal::Unwritable`。黙って捨てない）
-fn write_map_edit(
-    tab: &mut Tab,
-    layer_id: LayerId,
-    on_none: Option<Refusal>,
-    edit: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::PlanarMap>,
-) -> bool {
-    let mut refusal = None;
-    let written = edit_layer_map(tab, layer_id, |base| {
-        let Some(next) = edit(base) else {
-            refusal = on_none;
-            return None;
-        };
-        let written = next.written(base);
-        if written.is_none() {
-            refusal = Some(Refusal::Unwritable);
-        }
-        written
-    });
     if refusal.is_some() {
         tab.session.refusal = refusal;
     }
@@ -994,7 +966,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
 /// 同じレイヤー・同じ階層の線で囲まれた何も無い所）を `fill_color` にする（Animate と同じく、ほかのレイヤーや
 /// グループの図形は壁にしない）
 fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) -> bool {
-    // 塗っても絵が変わらないとき（同じ色・囲まれていない所）と、格子に置けない所（±65,536px の外）では、edit_layer_map
+    // 塗っても絵が変わらないとき（同じ色・囲まれていない所）と、格子に置けない所（±65,536px の外）では、write_local
     // が false を返し、apply が Undo の控えを捨てる
     push_undo(tab, None);
     // 地図は文書の座標なので、点も文書の座標へ写す
@@ -1191,7 +1163,7 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
     if tab.session.floating().is_some() {
         return false;
     }
-    // 形が変わらないとき・編集できないとき（消せない頂点など）は、edit_layer_map が false を返し、apply が Undo の控えを捨てる
+    // 形が変わらないとき・編集できないとき（消せない頂点など）は、write_local が false を返し、apply が Undo の控えを捨てる
     push_undo(tab, None);
     // 頂点・辺を動かす確定は重ね合わせで作る（`None` は格子の外）。アンカーの追加・削除の `None` は、編集できないこと
     let changed = match map_edit {
@@ -1207,7 +1179,9 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
             })
         }
         MapEdit::AddAnchor { .. } | MapEdit::DeleteAnchor { .. } => {
-            write_map_edit(tab, layer_id, None, |base| base.apply_edit(map_edit))
+            write_local(tab, layer_id, |base, scope| {
+                base.anchor_local(map_edit, scope)
+            })
         }
     };
     if changed {

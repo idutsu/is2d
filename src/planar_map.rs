@@ -2392,6 +2392,100 @@ impl LayerBase {
         }
     }
 
+    /// 道具の側（アンカーの追加・削除）：`edit` の差分を作り、1本の道の差分から先（`apply_diff`）に渡す（設計 段2b の 9.）。
+    /// 差分は、関わる辺（追加なら分ける辺、削除なら頂点につながる辺）のまわりの窓で、今の `with_anchor_added`・
+    /// `with_anchor_deleted` をそのまま使って作る（置き換えてよいかの確かめ `can_replace_path` が調べるのは、関わる辺と
+    /// 置き換える曲線の外形の範囲だけなので、その範囲を覆う窓で同じ答え）。編集できなければ（辺・頂点が無い・消せない頂点）
+    /// `Same`。答えは今のアンカー（`MapEdit::apply` で地図全体を編集し、書き戻す道）と同じ（テストでは毎回お手本と比べる）
+    pub(crate) fn anchor_local(&self, edit: MapEdit, group_path: &[u64]) -> LocalEdit {
+        let diff = self.anchor_diff(edit);
+        #[cfg(test)]
+        if test_checks() {
+            let ok = uncounted(|| match (&diff, edit.apply(self.map())) {
+                (None, None) => true,
+                (Some((m, removed, added)), Some(fm)) => self
+                    .stored
+                    .with_diff_tiles(removed, &tile_edges_of(m, added))
+                    .same_content(&StoredMap::from_dense(&fm, None)),
+                _ => false,
+            });
+            assert!(
+                ok,
+                "アンカーの差分が、地図全体を編集した地図（お手本）と違う"
+            );
+        }
+        match diff {
+            None => LocalEdit::Same,
+            Some((m, removed, added)) => self.apply_diff(&m, &removed, &added, group_path),
+        }
+    }
+
+    /// アンカーの差分（`anchor_local`）：（窓の結果, 消えた辺, 増えた辺）。編集できなければ `None`
+    fn anchor_diff(&self, edit: MapEdit) -> Option<(PlanarMap, Vec<usize>, Vec<usize>)> {
+        const WINDOW_PAD: f64 = 2.0;
+        let ix = self.map_index();
+        let stored = &self.stored;
+        let edges_at = |p: Point| -> Vec<usize> {
+            let mut at: Vec<usize> = Vec::new();
+            ix.ends.edges_in(stored, end_key(p), &mut at);
+            at.sort_unstable();
+            at.dedup();
+            at.retain(|&e| {
+                let te = stored.edge_at(e);
+                te.a == p || te.b == p
+            });
+            at
+        };
+        // 関わる辺
+        let involved: Vec<usize> = match edit {
+            MapEdit::AddAnchor { orig_seg, .. } => vec![stored.find_edge(&orig_seg)?.0],
+            MapEdit::DeleteAnchor { orig_vertex } => edges_at(orig_vertex),
+            MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => return None,
+        };
+        if involved.is_empty() {
+            return None;
+        }
+        let region = involved
+            .iter()
+            .map(|&e| {
+                let q = stored.edge_at(e).quad();
+                KRect::from_points(q.p0, q.p2).union_pt(q.p1)
+            })
+            .reduce(|a, b| a.union(b))?
+            .inflate(WINDOW_PAD, WINDOW_PAD);
+        let mut in_window: std::collections::BTreeSet<usize> = involved.iter().copied().collect();
+        let mut found: Vec<usize> = Vec::new();
+        for t in index_tiles_over(region) {
+            ix.index.edges_in(stored, t, &mut found);
+        }
+        in_window.extend(
+            found
+                .into_iter()
+                .filter(|&e| rects_overlap(reach_box(stored.edge_at(e).quad()), region)),
+        );
+        for &e in &involved {
+            let te = stored.edge_at(e);
+            in_window.extend(edges_at(te.a));
+            in_window.extend(edges_at(te.b));
+        }
+        let wedges: Vec<usize> = in_window.into_iter().collect();
+        let (wmap, _) = tile_window(stored, &wedges);
+        let m = match edit {
+            MapEdit::AddAnchor { orig_seg, t } => {
+                let (e, forward) = stored.find_edge(&orig_seg)?;
+                let w = wedges.binary_search(&e).ok()?;
+                wmap.with_anchor_added(w, if forward { t } else { 1.0 - t })?
+            }
+            MapEdit::DeleteAnchor { orig_vertex } => {
+                let v = wmap.nodes.iter().position(|&p| p == orig_vertex)?;
+                wmap.with_anchor_deleted(v)?
+            }
+            MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => return None,
+        };
+        let (removed, added) = stored.window_diff_tiles(&wedges, &m);
+        Some((m, removed, added))
+    }
+
     /// 前の地図の面の表（`BaseFaces`）：写しの面の図形 `faces_list` から、面の輪郭の最初の辺を形で引く
     fn faces_lookup<'f>(
         &'f self,

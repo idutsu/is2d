@@ -54,32 +54,6 @@ pub(crate) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
     tab.session.sanitize_editing_scope();
 }
 
-/// 地図の編集：今のコマ・今の階層の、レイヤー `layer_id` のセル画の地図（文書の座標）を `f` で編集する（`Cel::edit_map`。
-/// 図形はその地図の面から作る）。`false`：編集できない（ロック・非表示・キーフレームが無い・地図にできない）か、変わらない
-pub(crate) fn edit_layer_map(
-    tab: &mut Tab,
-    layer_id: LayerId,
-    f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::CheckedMap>,
-) -> bool {
-    let scope = tab.session.editing_group_path.clone();
-    edit_scope_map(tab, layer_id, &scope, f)
-}
-
-/// `edit_layer_map` の、階層 `scope`（グループの中の階層など）を編集するもの
-pub(crate) fn edit_scope_map(
-    tab: &mut Tab,
-    layer_id: LayerId,
-    scope: &[u64],
-    f: impl FnOnce(&crate::planar_map::LayerBase) -> Option<crate::planar_map::CheckedMap>,
-) -> bool {
-    let written: Vec<LayerId> = write_scope_map(tab, layer_id, scope, f)
-        .then_some(layer_id)
-        .into_iter()
-        .collect();
-    finish_cel_writes(tab, &written);
-    !written.is_empty()
-}
-
 /// 今のコマの、レイヤー `layer_id` の階層 `scope` のセル画の地図を `f` で編集する（`Cel::edit_map`）。後始末はしない
 /// ので、いくつかのレイヤー・階層を書いたあとに、書いたレイヤーで `finish_cel_writes` を1回呼ぶ。`false`：編集できない
 /// （ロック・非表示・キーフレームが無い・地図にできない）か、変わらない
