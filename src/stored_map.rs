@@ -985,7 +985,7 @@ impl StoredMap {
 type EdgeRef = ((i32, i32), u32);
 
 /// 升目の索引の1升目：（升目, その升目にかかる辺。辺の指し方の順）
-type IndexCell = ((i64, i64), Arc<[EdgeRef]>);
+type IndexCell = ((i64, i64), Box<[EdgeRef]>);
 
 /// 升目の索引：索引の升目（近さを調べる格子のマス 4×4）ごとの、その升目にかかる辺（判定の形の近くを探すマス
 /// `EdgeGeom::reach` か外接矩形が、その升目にかかる辺：`LayerBase::edge_tiles`）。近くの辺を探す所（重ね合わせの入れる辺を決める所・
@@ -994,8 +994,9 @@ type IndexCell = ((i64, i64), Arc<[EdgeRef]>);
 /// claude/触った所だけを計算する地図の設計_22fbbbe.md の 3.3
 #[derive(Debug, Default)]
 pub(crate) struct TileIndex {
-    /// 索引の升目の順の（升目, その升目にかかる辺。辺の指し方の順）
-    cells: Box<[IndexCell]>,
+    /// 索引の升目の順の（升目, その升目にかかる辺。辺の指し方の順）。塊に分けて持ち、作り直すときは、作り直す升目の
+    /// かかる塊だけを作り直し、ほかの塊は前の索引と共有する（`ChunkedList::replace_sorted`。設計 段2b の 15.）
+    cells: crate::chunked_list::ChunkedList<IndexCell>,
 }
 
 impl TileIndex {
@@ -1019,7 +1020,7 @@ impl TileIndex {
         all.dedup();
         let cells = all
             .chunk_by(|a, b| a.0 == b.0)
-            .map(|run| (run[0].0, run.iter().map(|x| x.1).collect()))
+            .map(|run| Arc::new((run[0].0, run.iter().map(|x| x.1).collect())))
             .collect();
         Self { cells }
     }
@@ -1091,17 +1092,17 @@ impl TileIndex {
         touched.dedup();
         added.sort_unstable();
         // 作り直す升目の中身：前の中身から消える塊の辺を除き、足す辺を入れる
-        let mut rebuilt: Vec<IndexCell> = Vec::with_capacity(touched.len());
+        let mut rebuilt: Vec<Arc<IndexCell>> = Vec::with_capacity(touched.len());
         let mut a = 0;
         for &c in &touched {
-            let mut list: Vec<EdgeRef> = match self.cells.binary_search_by_key(&c, |x| x.0) {
-                Ok(at) => self.cells[at]
+            let mut list: Vec<EdgeRef> = match self.cells.find_sorted(c, |x| x.0) {
+                Some(cell) => cell
                     .1
                     .iter()
                     .copied()
                     .filter(|r| !gone_homes.contains(&r.0))
                     .collect(),
-                Err(_) => Vec::new(),
+                None => Vec::new(),
             };
             while a < added.len() && added[a].0 < c {
                 a += 1;
@@ -1113,46 +1114,20 @@ impl TileIndex {
             if !list.is_empty() {
                 list.sort_unstable();
                 list.dedup();
-                rebuilt.push((c, list.into()));
+                rebuilt.push(Arc::new((c, list.into())));
             }
         }
-        // 升目の順に、変わらない升目と作り直した升目を並べる（どちらも升目の順なので、順に混ぜるだけ。作り直して空に
-        // なった升目は入れない）
-        let mut cells: Vec<IndexCell> = Vec::with_capacity(self.cells.len() + rebuilt.len());
-        let (mut x, mut y, mut r) = (0, 0, 0);
-        while x < self.cells.len() || y < touched.len() {
-            let old = self.cells.get(x).map(|c| c.0);
-            let t = touched.get(y).copied();
-            match (old, t) {
-                (Some(o), t) if t.is_none_or(|t| o < t) => {
-                    cells.push(self.cells[x].clone());
-                    x += 1;
-                }
-                (o, Some(t)) => {
-                    if o == Some(t) {
-                        x += 1;
-                    }
-                    if rebuilt.get(r).is_some_and(|c| c.0 == t) {
-                        cells.push(rebuilt[r].clone());
-                        r += 1;
-                    }
-                    y += 1;
-                }
-                (_, None) => unreachable!("升目の並びの終わり"),
-            }
-        }
-        debug_assert!(cells.windows(2).all(|w| w[0].0 < w[1].0));
-        Self {
-            cells: cells.into(),
-        }
+        // 作り直した升目を差し替える（作り直して空になった升目は消える）。ほかの升目の塊は前の索引と共有する
+        let mut cells = self.cells.clone();
+        cells.replace_sorted(&touched, rebuilt, |x| x.0);
+        Self { cells }
     }
 
     /// 索引の升目 `tile` にかかる辺の、地図 `map`（この索引の地図）の計算に使う地図での番号を `out` に足す
     pub(crate) fn edges_in(&self, map: &StoredMap, tile: (i64, i64), out: &mut Vec<usize>) {
-        if let Ok(at) = self.cells.binary_search_by_key(&tile, |x| x.0) {
+        if let Some(cell) = self.cells.find_sorted(tile, |x| x.0) {
             out.extend(
-                self.cells[at]
-                    .1
+                cell.1
                     .iter()
                     .filter_map(|&(home, j)| map.dense_edge(home, j)),
             );

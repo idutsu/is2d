@@ -94,7 +94,6 @@ impl<T> ChunkedList<T> {
         self.get(0)
     }
 
-    #[cfg(test)]
     pub(crate) fn last(&self) -> Option<&Arc<T>> {
         self.len.checked_sub(1).and_then(|i| self.get(i))
     }
