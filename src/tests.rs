@@ -35824,3 +35824,65 @@ fn passing_frames_does_not_keep_their_edge_shapes() {
         "通ったコマの塊が判定の形を持ち続ける：{counts:?}"
     );
 }
+
+/// N-4003（レビュー 5b822a3）：矩形で絵の一部を切ったあと、Shift で別の生の図形を足してシンボルにすると、足した図形は
+/// シンボルの中にだけ入り、元の場所に生の図形として残らない（前は、浮いた片の残りの確定が、足した図形を外す前のセル画から
+/// 作った残りで今の階層を書き直すので、足した図形がインスタンスの真下に戻り、気づかないまま保存されていた）
+#[test]
+fn converting_marquee_plus_shift_click_to_symbol_does_not_duplicate() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    for (y, c) in [(-60.0, Color32::RED), (60.0, Color32::BLUE)] {
+        app.tool.brush_color = c;
+        let pts: Vec<Point> = (0..=10)
+            .map(|i| Point::new(-200.0 + 40.0 * i as f64, y))
+            .collect();
+        commit_brush_line(&mut app, &brush_line(&pts, 12.0));
+    }
+    // 赤の左端を矩形で切る（浮いた片。動かさない）
+    assert!(apply(
+        &mut app,
+        Action::SelectMarquee {
+            p0: Point::new(-260.0, -130.0),
+            p1: Point::new(-100.0, 0.0),
+            additive: false,
+        },
+    ));
+    assert!(app.session.floating().is_some(), "赤の左端が浮いた片になる");
+    // 青を Shift クリックで足す
+    let blue = app
+        .scene()
+        .iter()
+        .position(|s| s.color == Color32::BLUE)
+        .expect("青の線");
+    assert!(apply(
+        &mut app,
+        Action::ToggleSelectionAt { scene_idx: blue }
+    ));
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    let cel = &app.doc.root.layers[0].keyframes[0].cel;
+    let raw_blue = cel
+        .shapes()
+        .iter()
+        .filter(|s| s.color == Color32::BLUE)
+        .count();
+    assert_eq!(raw_blue, 0, "シンボルに入れた青が、生の図形としても残る");
+    assert_eq!(cel.instances.len(), 1, "インスタンスが1つ");
+    // 赤の右側（選んでいない所）は生の図形のまま残る
+    assert!(
+        cel.shapes().iter().any(|s| s.color == Color32::RED),
+        "選んでいない赤は残る"
+    );
+    // 取り消すと、シンボルにする前（赤の左端が浮いた片、青を選んだところ）に戻る
+    assert!(apply(&mut app, Action::Undo));
+    assert!(canvas_tool::clear_selection(&mut app));
+    let cel = &app.doc.root.layers[0].keyframes[0].cel;
+    assert!(cel.instances.is_empty(), "取り消すとインスタンスは無い");
+    for c in [Color32::RED, Color32::BLUE] {
+        assert_eq!(
+            cel.shapes().iter().filter(|s| s.color == c).count(),
+            1,
+            "取り消すと元の1本に戻る"
+        );
+    }
+}

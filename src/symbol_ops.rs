@@ -54,25 +54,34 @@ pub(crate) fn prepare_convert_selection_to_symbol(
 
     before_mutate(tab);
 
+    // 選んだ生の図形は先に片に持ち上げる（グループ化と同じ：`prepare_group_selected_shapes`）。選んだ生の図形は片にだけ
+    // あり、残り（確定する分）には無いので、残りを書いても選んだ図形が今の階層に戻らない（選び方によらない。持ち上げずに
+    // 進むと、浮いた片があるとき、残りの確定が選んだ図形を外す前のセル画から作った地図で今の階層を書き直し、図形が
+    // インスタンスの下に二重に残っていた：レビュー 5b822a3 の N-4003）。持ち上げられなければ断る
+    let before = tab.session.floating().cloned();
+    if !tab.session.lift_selected_raw_shapes_to_floating() {
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
+        return None;
+    }
     // 浮いた片：選んだ片はシンボルの中身に入れたので捨て、残りと選んでいない片を確定する。書くものを先に決め（書けなければ
     // 断る）、インスタンスを置いてから書く（今の階層の中身をみな選んでいても、今の階層の地図がまだあるうちにインスタンス
     // を入れるので、今の階層の重なりの位置が変わらない）。断るのは文書を変える前（採番・登録より前）：`apply` は `false`
-    // なら文書は変わっていないものとして控えを捨て、採番を戻す
+    // なら文書は変わっていないものとして控えを捨て、採番を戻す。断るときは、浮いた片を持ち上げる前に戻す
     let rest_plan = match tab.session.take_floating() {
-        Some(fl) => {
+        Some(mut fl) => {
             let keep: HashSet<u64> = fl
                 .pieces()
                 .iter()
                 .filter(|p| selection.contains_shape(p))
                 .map(|p| p.shape_id)
                 .collect();
-            let Ok(rest) = fl.clone().split_off(&keep) else {
-                tab.session.set_floating(Some(fl));
+            let Ok(rest) = fl.split_off(&keep) else {
+                tab.session.set_floating(before);
                 tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
                 return None;
             };
             let Some(plan) = crate::canvas_tool::plan_commit(tab, &rest) else {
-                tab.session.set_floating(Some(fl));
+                tab.session.set_floating(before);
                 return None;
             };
             Some(plan)
