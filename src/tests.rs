@@ -34912,6 +34912,118 @@ fn local_edge_rules_match_full_check() {
 /// 段2b-5c：前の地図から辺をランダムに 1〜3 本消した地図（面の外周が開く・穴の入れ先が無くなる・何も無い側の輪郭が
 /// 色のある面に入り込む、などが起きる）で、触った所だけで確かめた答え（`added_edges_ok`・`touched_cycles_ok`・
 /// `regions_ok`）が、新しい地図全体を確かめた答え（`written_ok`）と同じ。正しい答えと正しくない答えの両方が出る
+/// 段2b-7g：何も無い側の決まり（何も無い所が色のある面に入り込まない）を触った所だけで確かめた答えが、新しい地図全体を
+/// 確かめた答えと同じ。入り込む地図を、わざと作って比べる：
+/// - そのままの面の中に、外が何も無い島を足す（前の地図の、点を含む面を、半直線が最初に横切る辺で決める所）
+/// - 前からある、外が何も無い島のまわりに、穴を開けずに色のある四角を足す（触った面の中に前の地図の辺が入る所）
+/// - 面の輪郭を作り直し（触った面にし）、その中に、外が何も無い島を足す（触った面の中に増えた辺が入る所）
+///
+/// どれも、島や四角を面の外に置けば正しい（入り込まない）地図になるので、それも比べる
+#[test]
+fn local_check_catches_unpainted_inside_painted() {
+    use crate::planar_map::{CycleMemo, LayerBase, MapInput, MapRule, PlanarMap};
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64, c: Color32| -> PlanarMap {
+        PlanarMap::default()
+            .overlay(
+                MapInput::Shapes(&[map_overlay::rect_shape(x0, y0, x1, y1, c)]),
+                MapRule::Paint(Some(c)),
+            )
+            .unwrap()
+    };
+    // 2つの地図の辺を1つに並べる（後ろの地図の頂点は後ろへずらす。重なる頂点は無い）
+    let join = |a: &PlanarMap, b: &PlanarMap| -> PlanarMap {
+        let n = a.nodes.len();
+        let mut m = a.clone();
+        m.nodes.extend(b.nodes.iter().copied());
+        m.edges
+            .extend(b.edges.iter().map(|e| crate::planar_map::MapEdge {
+                a: e.a + n,
+                b: e.b + n,
+                ..*e
+            }));
+        m
+    };
+    // 前の地図 `old` に、消す辺 `removed`（前の地図の番号）と、地図 `extra` の辺を足した地図を、触った所だけで確かめた
+    // 答えと、全体で確かめた答え
+    let check = |old: &PlanarMap, removed: &[usize], extra: &PlanarMap| -> (bool, bool) {
+        let old = old.clone().checked().unwrap().uniquely_labeled().into_map();
+        let base = LayerBase::new(&old);
+        let full_map = base.map().clone();
+        let kept: Vec<usize> = (0..full_map.edges.len())
+            .filter(|e| !removed.contains(e))
+            .collect();
+        let mut result = PlanarMap {
+            nodes: full_map.nodes.clone(),
+            edges: kept.iter().map(|&e| full_map.edges[e]).collect(),
+        };
+        let n0 = result.edges.len();
+        result = join(&result, extra);
+        let added: Vec<usize> = (n0..result.edges.len()).collect();
+        // 前の地図の辺の番号で消す辺を渡す（`local_map` は、増えた辺を `result` の番号で受け取る）
+        let table = base.faces_table();
+        let lookup =
+            |id: crate::vector_engine::ShapeId| table.get(&id).cloned().unwrap_or_default();
+        let local = base.local_map(&result, removed, &added);
+        let mut memo = CycleMemo::default();
+        let got = local.added_edges_ok()
+            && local
+                .touched_cycles_ok(&mut memo)
+                .is_some_and(|t| local.regions_ok(&t, &lookup, &mut memo) == Some(true));
+        (got, base.written_ok(&result))
+    };
+    let red_sq = rect(0.0, 0.0, 100.0, 100.0, red);
+    // 1. そのままの面（赤）の中に、外が何も無い青い島を足す：入り込む。赤の左に置けば正しい
+    let (got, full) = check(&red_sq, &[], &rect(40.0, 40.0, 60.0, 60.0, blue));
+    assert!(!full, "赤の中の、外が何も無い島は入り込む（全体の確かめ）");
+    assert_eq!(got, full, "そのままの面の中に足した島");
+    let (got, full) = check(&red_sq, &[], &rect(-60.0, 40.0, -40.0, 60.0, blue));
+    assert!(full, "赤の外の島は正しい");
+    assert_eq!(got, full, "そのままの面の外に足した島");
+    // 2. 前からある青い島のまわりに、穴を開けずに赤い四角を足す：入り込む。島から離せば正しい
+    let island = rect(40.0, 40.0, 60.0, 60.0, blue);
+    let (got, full) = check(&island, &[], &red_sq);
+    assert!(
+        !full,
+        "穴の無い赤の中の、前からある島は入り込む（全体の確かめ）"
+    );
+    assert_eq!(got, full, "前からある島のまわりに足した四角");
+    let (got, full) = check(&island, &[], &rect(100.0, 0.0, 200.0, 100.0, red));
+    assert!(full, "島から離れた赤は正しい");
+    assert_eq!(got, full, "前からある島から離れた四角");
+    // 3. 赤の輪郭を作り直し（消して同じ辺を足す：触った面）、その中に外が何も無い島を足す：入り込む。外に置けば正しい
+    let all: Vec<usize> = (0..LayerBase::new(
+        &red_sq
+            .clone()
+            .checked()
+            .unwrap()
+            .uniquely_labeled()
+            .into_map(),
+    )
+    .map()
+    .edges
+    .len())
+        .collect();
+    let redo = |island: &PlanarMap| -> PlanarMap {
+        let base = LayerBase::new(
+            &red_sq
+                .clone()
+                .checked()
+                .unwrap()
+                .uniquely_labeled()
+                .into_map(),
+        );
+        join(base.map(), island)
+    };
+    let (got, full) = check(&red_sq, &all, &redo(&rect(40.0, 40.0, 60.0, 60.0, blue)));
+    assert!(!full, "作り直した赤の中の島は入り込む（全体の確かめ）");
+    assert_eq!(got, full, "触った面の中に足した島");
+    let (got, full) = check(&red_sq, &all, &redo(&rect(-60.0, 40.0, -40.0, 60.0, blue)));
+    assert!(full, "作り直した赤の外の島は正しい");
+    assert_eq!(got, full, "触った面の外に足した島");
+}
+
 #[test]
 fn local_check_matches_full_check_when_edges_are_removed() {
     use crate::planar_map::{CycleMemo, LayerBase, MapInput, MapRule, PlanarMap};

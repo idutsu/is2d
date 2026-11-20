@@ -2672,10 +2672,7 @@ impl LayerBase {
                 Err(_) => Vec::new(),
             }
         };
-        if local.regions_ok(&touched, &lookup, &mut memo) != Some(true) {
-            return LocalEdit::Refused(LocalRefusal::Unwritable);
-        }
-        let Some(faces) = local.touched_faces(&touched, &lookup, &mut memo) else {
+        let Some(Some(faces)) = local.regions_faces(&touched, &lookup, &mut memo) else {
             return LocalEdit::Refused(LocalRefusal::Unwritable);
         };
         let orig_shape = |id: ShapeId| -> Option<Arc<FillShape>> {
