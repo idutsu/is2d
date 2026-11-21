@@ -26,8 +26,8 @@ impl Pcm {
     }
 }
 
-/// 音のライブラリの1つの音
-#[derive(Debug)]
+/// 音のライブラリの1つの音（写すのは名前だけ：バイトと波形は写しと共有する）
+#[derive(Clone, Debug)]
 pub(crate) struct Sound {
     pub(crate) id: u64,
     /// 読み込んだファイルの名前（ライブラリに出す）
@@ -35,19 +35,53 @@ pub(crate) struct Sound {
     /// 読み込んだ WAV・MP3 のバイトのまま（保存するのはこれ）
     pub(crate) encoded: Arc<[u8]>,
     /// 鳴らすための波形（`encoded` から作った写し。保存しない）
-    pub(crate) pcm: Pcm,
+    pub(crate) pcm: Arc<Pcm>,
+    /// 波形の絵のための、音の中の位置 `PEAK_UNITS` ごとの、左右の値のいちばん小さいもの・大きいもの（`pcm` から1回だけ
+    /// 作る写し。保存しない）。サンプルが1つも入らない所は、小さいほうが大きいほうより大きい（値が無い）
+    peaks: Arc<Vec<(i16, i16)>>,
 }
+
+/// 波形の絵の値の幅を持つ長さ（`SOUND_RATE` の単位）：タイムラインの画面の 1px に当たる音のいちばん短い長さ。1コマの
+/// 幅 `CELL_W` に、いちばん短いコマ（fps の上限 `MAX_FPS` の1コマ）が入るので、1px は 1 / (`MAX_FPS` × `CELL_W`) 秒
+/// （60fps・16px で 50）。これより細かく持っても画面に出ない
+const PEAK_UNITS: u64 =
+    SOUND_RATE / (crate::symbol::MAX_FPS as u64 * crate::timeline_ui::CELL_W as u64);
 
 impl Sound {
     /// 番号 `id`・名前 `name` の、バイト `encoded`（WAV か MP3）の音。波形にできなければ `Err`（壊れた音・読めない形式）
     pub(crate) fn new(id: u64, name: String, encoded: Arc<[u8]>) -> Result<Self, String> {
         let pcm = decode(&encoded)?;
+        let mut peaks: Vec<(i16, i16)> = Vec::new();
+        for (i, lr) in pcm.samples.chunks_exact(2).enumerate() {
+            let b = (i as u64 * SOUND_RATE / u64::from(pcm.rate) / PEAK_UNITS) as usize;
+            if b >= peaks.len() {
+                peaks.resize(b + 1, (i16::MAX, i16::MIN));
+            }
+            let p = &mut peaks[b];
+            *p = (p.0.min(lr[0]).min(lr[1]), p.1.max(lr[0]).max(lr[1]));
+        }
         Ok(Self {
             id,
             name,
             encoded,
-            pcm,
+            pcm: Arc::new(pcm),
+            peaks: Arc::new(peaks),
         })
+    }
+
+    /// 音の中の位置 `a` から `b` の前まで（`SOUND_RATE` の単位。`a < b`）の、左右の値のいちばん小さいもの・大きいもの
+    /// （-1〜1）。波形の絵に使う（`PEAK_UNITS` ごとに持った値から：範囲にかかる所を全部見る）。値が無い所は `None`
+    pub(crate) fn peak(&self, a: u64, b: u64) -> Option<(f32, f32)> {
+        let first = (a / PEAK_UNITS) as usize;
+        let last = (b.div_ceil(PEAK_UNITS) as usize).min(self.peaks.len());
+        let (lo, hi) = self
+            .peaks
+            .get(first..last)?
+            .iter()
+            .fold((i16::MAX, i16::MIN), |(lo, hi), &(l, h)| {
+                (lo.min(l), hi.max(h))
+            });
+        (lo <= hi).then(|| (f32::from(lo) / 32768.0, f32::from(hi) / 32768.0))
     }
 
     /// 音の長さ（`SOUND_RATE` の単位。終わりの端数は切り捨て）
@@ -69,18 +103,48 @@ pub(crate) struct SoundClip {
 }
 
 /// コマ数 `frames` を、作品の fps `fps` で、音の中の位置の単位（`SOUND_RATE`）にしたもの（いちばん近い整数）。コマと音の
-/// 位置を結ぶ決まりはこれ1つ（鳴らす位置 `sounding_at`・分割 `SoundClip::advanced`）
+/// 位置を結ぶ決まりはこれ1つ（鳴らす位置 `SoundClip::pos_at`・分割 `SoundClip::advanced`・端のドラッグ）
 pub(crate) fn frames_to_sound(frames: usize, fps: u32) -> u64 {
     let fps = u64::from(fps.max(1));
     (frames as u64 * SOUND_RATE * 2 + fps) / (2 * fps)
 }
 
+/// 音の中の長さ `units`（`SOUND_RATE` の単位）に届く、いちばん少ないコマ数：`frames_to_sound(n, fps) >= units` になる
+/// いちばん小さい `n`（`frames_to_sound` の逆）。R を `SOUND_RATE`、f を fps、L を `units` とすると、
+/// `frames_to_sound(n) = ⌊(2nR + f) / 2f⌋ ≥ L` は `2nR + f ≥ 2fL`、つまり `n ≥ f(2L − 1) / 2R` と同じなので、その切り上げ
+/// （L が 0 なら 0 コマ）
+pub(crate) fn frames_to_reach(units: u64, fps: u32) -> usize {
+    let fps = u64::from(fps.max(1));
+    units.checked_sub(1).map_or(0, |l1| {
+        (fps * (2 * l1 + 1)).div_ceil(2 * SOUND_RATE) as usize
+    })
+}
+
+/// 音の区間の端（タイムラインの波形の左端・右端のドラッグで動かす所）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SoundEdge {
+    /// 始まり（左端）
+    Start,
+    /// 終わり（右端）
+    End,
+}
+
 impl SoundClip {
+    /// この区間が、キーフレームの始まりから鳴るコマの数（区間の終わりに届くまで：`frames_to_reach`）
+    pub(crate) fn frames(&self, fps: u32) -> usize {
+        frames_to_reach(self.end - self.start, fps)
+    }
+
+    /// キーフレームの始まりから `frames` コマ進んだコマの始まりでの、音の中の位置。鳴るコマ（`frames`）を過ぎていれば
+    /// `None`。鳴るかどうかの決まりはこれ1つ（鳴らす `sounding_at`・分割 `advanced`・波形の絵）
+    pub(crate) fn pos_at(&self, frames: usize, fps: u32) -> Option<u64> {
+        (frames < self.frames(fps)).then(|| self.start + frames_to_sound(frames, fps))
+    }
+
     /// この区間を、キーフレームの始まりから `frames` コマ進んだ所で分けた後ろ（同じ音の続きから鳴らす：F6 の分割）。
     /// 進んだ所が終わり以降なら `None`（後ろに鳴らす音は無い）
     pub(crate) fn advanced(self, frames: usize, fps: u32) -> Option<Self> {
-        let start = self.start + frames_to_sound(frames, fps);
-        (start < self.end).then_some(Self { start, ..self })
+        self.pos_at(frames, fps).map(|start| Self { start, ..self })
     }
 
     /// 音 `s` の頭から終わりまで（読み込んだ・付けたときの区間）。長さが 0 の音は付けられないので `None`
@@ -218,9 +282,9 @@ fn collect_voices(
         let kf = &layer.keyframes[k];
         path.push(layer.id);
         if let Some(c) = kf.sound {
-            let pos = c.start + frames_to_sound(frame - kf_start, doc.fps);
+            let pos = c.pos_at(frame - kf_start, doc.fps);
             let sound = doc.sounds.iter().find(|s| s.id == c.sound);
-            if let (true, Some(sound)) = (pos < c.end, sound) {
+            if let (Some(pos), Some(sound)) = (pos, sound) {
                 out.push(Voice {
                     key: path.clone(),
                     sound: Arc::clone(sound),

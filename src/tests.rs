@@ -36564,3 +36564,305 @@ fn mixing_fades_only_where_the_sound_jumps() {
     assert!(left(5999) < 0.05 && left(6000) == 0.0, "頭へ戻る所でつなぎ直す");
     assert!((left(7000) - 0.5).abs() < 1e-6);
 }
+
+// ============================================================================
+// 音の 3 段目：画面（プロパティの「サウンド」の欄・ライブラリの音の一覧・波形の両端のドラッグ）
+// ============================================================================
+
+fn set_keyframe_sound(app: &mut Is2dApp, sound: Option<u64>) -> bool {
+    doc_actions::apply(app, doc_actions::Action::SetKeyframeSound { sound })
+}
+
+/// 「サウンド」の欄で音を選ぶと、頭から終わりまで付く。付け替えると、始まり・終わりは新しい音の頭から終わりに戻る。
+/// 「なし」で外すと空白のキーフレームに戻り、また絵を描ける。どれも取り消せる。付けられる所が無い・無い番号・
+/// 変わらないなら断る
+#[test]
+fn choosing_a_keyframe_sound_attaches_replaces_and_removes_with_undo() {
+    let mut app = Is2dApp::default();
+    assert!(import_sound(&mut app, short_wav()));
+    let long: Vec<i16> = vec![1000; 9600];
+    assert!(import_sound(&mut app, wav_bytes(48_000, 1, &long)));
+    let sounds = app.doc.sounds.clone();
+    let whole = |i: usize| crate::sound::SoundClip::whole(&sounds[i]);
+    let kf_sound = |app: &Is2dApp| app.doc.root.layers[0].keyframes[0].sound;
+    assert_eq!(kf_sound(&app), whole(1));
+
+    // 区間を切ってから付け替えると、新しい音の頭から終わりに戻る
+    app.doc.root.layers[0].keyframe_mut(0).sound.as_mut().unwrap().end = 100;
+    assert!(set_keyframe_sound(&mut app, Some(sounds[0].id)));
+    assert_eq!(kf_sound(&app), whole(0));
+    assert!(!set_keyframe_sound(&mut app, Some(sounds[0].id)), "変わらない");
+    assert!(!set_keyframe_sound(&mut app, Some(99)), "無い番号");
+
+    assert!(set_keyframe_sound(&mut app, None));
+    assert_eq!(kf_sound(&app), None);
+    assert!(!set_keyframe_sound(&mut app, None), "変わらない");
+    assert!(doc_actions::apply(&mut app, doc_actions::Action::Undo));
+    assert_eq!(kf_sound(&app), whole(0));
+    assert!(doc_actions::apply(&mut app, doc_actions::Action::Redo));
+    assert_eq!(kf_sound(&app), None);
+    // 外したら絵を描ける。絵のあるキーフレームには付けられない
+    assert!(doc_actions::apply(
+        &mut app,
+        doc_actions::Action::PaintStroke {
+            points: vec![Point::new(0.0, 0.0), Point::new(40.0, 10.0)],
+            radius: 6.0,
+            color: Color32::RED,
+        }
+    ));
+    assert!(!set_keyframe_sound(&mut app, Some(sounds[0].id)));
+    assert_eq!(kf_sound(&app), None);
+    // ロックしたレイヤーにも付けられない
+    let mut app = Is2dApp::default();
+    assert!(import_sound(&mut app, short_wav()));
+    let id = app.doc.sounds[0].id;
+    assert!(set_keyframe_sound(&mut app, None));
+    app.doc.root.layers[0].locked = true;
+    assert!(!set_keyframe_sound(&mut app, Some(id)));
+}
+
+/// ライブラリで音を消すと、その音を付けたキーフレーム（ルートとシンボルの中）は空白に戻り、無い音を指す区間は残らない
+/// （保存して開ける）。ほかの音を付けたキーフレームはそのまま。取り消すと音もキーフレームの音も戻る。名前の変更は、
+/// 続けて打った分を1つの取り消しにまとめる
+#[test]
+fn deleting_and_renaming_library_sounds_with_undo() {
+    let mut app = Is2dApp::default();
+    assert!(import_sound(&mut app, short_wav()));
+    let (a, b) = {
+        let id = app.doc.sounds[0].id;
+        assert!(set_keyframe_sound(&mut app, None));
+        assert!(import_sound(&mut app, short_wav()));
+        (id, app.doc.sounds[1].id)
+    };
+    // ルートのレイヤー 0 は音 b、シンボルの中は音 a。ルートに2枚目のレイヤーを足して音 a を付ける
+    let clip_a = crate::sound::SoundClip::whole(&app.doc.sounds[0]).unwrap();
+    let sym_id = app.doc.register_new_symbol(Vec::new());
+    put_clip(&mut app.doc.find_symbol_mut(sym_id).unwrap().timeline, 1, clip_a);
+    assert!(doc_actions::apply(&mut app, doc_actions::Action::AddLayer));
+    let top = app.doc.root.layers.len() - 1;
+    app.doc.root.layers[top].keyframe_mut(0).sound = Some(clip_a);
+    let snapshot = |app: &Is2dApp| {
+        (
+            app.doc.sounds.iter().map(|s| s.id).collect::<Vec<_>>(),
+            app.doc.root.layers.iter().map(|l| l.keyframes[0].sound).collect::<Vec<_>>(),
+            app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0].sound,
+        )
+    };
+    let before = snapshot(&app);
+
+    assert!(doc_actions::apply(&mut app, doc_actions::Action::DeleteSound { sound_id: a }));
+    let (ids, root, inner) = snapshot(&app);
+    assert_eq!(ids, vec![b]);
+    assert_eq!(root[top], None);
+    assert_eq!(root[0].map(|c| c.sound), Some(b), "ほかの音はそのまま");
+    assert_eq!(inner, None);
+    let saved = project_io::ProjectDocument::of(&app.doc);
+    assert!(saved.into_document().is_ok(), "無い音を指す区間は残らない");
+    assert!(!doc_actions::apply(&mut app, doc_actions::Action::DeleteSound { sound_id: a }));
+
+    assert!(doc_actions::apply(&mut app, doc_actions::Action::Undo));
+    assert_eq!(snapshot(&app), before);
+    assert!(doc_actions::apply(&mut app, doc_actions::Action::Redo));
+    assert_eq!(snapshot(&app).0, vec![b]);
+
+    // 名前の変更：続けて打った分は1つの取り消し
+    let undo_len = app.history.undo_stack.len();
+    for name in ["x", "xy", "xyz"] {
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::RenameSound {
+                sound_id: b,
+                new_name: name.to_owned(),
+            }
+        ));
+    }
+    assert!(!doc_actions::apply(
+        &mut app,
+        doc_actions::Action::RenameSound {
+            sound_id: b,
+            new_name: "xyz".to_owned(),
+        }
+    ));
+    assert_eq!(app.doc.sounds[0].name, "xyz");
+    assert_eq!(app.history.undo_stack.len(), undo_len + 1);
+    assert!(doc_actions::apply(&mut app, doc_actions::Action::Undo));
+    assert_eq!(app.doc.sounds[0].name, "テスト.wav");
+}
+
+/// コマ数に届く決まり `frames_to_reach` は `frames_to_sound` の逆（届くいちばん少ないコマ数）で、区間が鳴るかどうか
+/// （`SoundClip::pos_at`）は「区間の始まり＋進んだコマの位置が終わりより前」と同じ
+#[test]
+fn frames_to_reach_is_the_inverse_of_frames_to_sound() {
+    use crate::sound::{frames_to_reach, frames_to_sound, SoundClip};
+    for fps in [1, 7, 24, 25, 30, 59, 60] {
+        for units in (0..30_000u64).step_by(37).chain([47_999, 48_000, 48_001]) {
+            let n = frames_to_reach(units, fps);
+            assert!(frames_to_sound(n, fps) >= units, "fps {fps} units {units}");
+            assert!(n == 0 || frames_to_sound(n - 1, fps) < units, "fps {fps} units {units}");
+        }
+        let clip = SoundClip {
+            sound: 1,
+            start: 1234,
+            end: 20_000,
+        };
+        for d in 0..100 {
+            let pos = clip.start + frames_to_sound(d, fps);
+            assert_eq!(clip.pos_at(d, fps), (pos < clip.end).then_some(pos));
+        }
+    }
+}
+
+/// 波形の絵の値の幅：一定の値の音はどこでもその値。音の外は値が無い
+#[test]
+fn sound_peaks_follow_the_samples() {
+    let doc = doc_with_flat_sound();
+    let s = &doc.sounds[0];
+    assert_eq!(s.peak(0, 125), Some((0.5, 0.5)));
+    assert_eq!(s.peak(47_900, 48_000), Some((0.5, 0.5)));
+    assert_eq!(s.peak(48_000, 48_100), None);
+}
+
+/// テスト用：40 コマのレイヤーの、コマ 10 から 29 のキーフレームに音 1（1 秒）を頭から付け、コマ 0・30 は空白のキーフレーム
+/// にした文書（fps `fps`）
+fn doc_with_trim_layer(fps: u32) -> symbol::Document {
+    let mut doc = doc_with_flat_sound();
+    doc.fps = fps;
+    let layer = &mut doc.root.layers[0];
+    layer.frame_count = 40;
+    assert!(layer.insert_keyframe(10, false, fps));
+    assert!(layer.insert_keyframe(30, false, fps));
+    let k = layer.keyframe_index_starting_at(10).unwrap();
+    layer.keyframe_mut(k).sound = Some(flat_clip());
+    doc.root.sync_total_frames();
+    doc
+}
+
+fn trim(doc: &mut symbol::Document, kf_start: usize, edge: crate::sound::SoundEdge, frame: usize) -> bool {
+    let layer = &mut doc.root.layers[0];
+    let k = layer.keyframe_index_starting_at(kf_start).unwrap();
+    layer.trim_sound(k, edge, frame, &doc.sounds, doc.fps)
+}
+
+fn positions(doc: &symbol::Document) -> Vec<Option<u64>> {
+    (0..40)
+        .map(|f| crate::sound::sounding_at(doc, f).first().map(|v| v.pos))
+        .collect()
+}
+
+/// 波形の右端：終わりを、コマの境目に当たる位置にする。始まりより1コマ以上後ろから、音の本当の終わりとキーフレームの
+/// 区間の終わりの早いほうまで。残ったコマで鳴る位置は変わらない
+#[test]
+fn trimming_the_sound_end_respects_bounds_and_keeps_timing() {
+    use crate::sound::SoundEdge::End;
+    let mut doc = doc_with_trim_layer(24);
+    let range = |doc: &symbol::Document| {
+        let layer = &doc.root.layers[0];
+        let k = layer.keyframe_index_starting_at(10).unwrap();
+        layer.sound_trim_range(k, End, &doc.sounds, doc.fps).unwrap()
+    };
+    assert_eq!(range(&doc), 11..=30, "1 秒は 24 コマ分あるが、区間はコマ 29 まで");
+    let before = positions(&doc);
+    assert!(!trim(&mut doc, 10, End, 10), "始まりと同じ所");
+    assert!(!trim(&mut doc, 10, End, 31), "区間の外");
+    assert!(trim(&mut doc, 10, End, 20));
+    assert_eq!(doc.root.layers[0].keyframes[1].sound.unwrap().end, 20_000);
+    let after = positions(&doc);
+    assert_eq!(after[..20], before[..20]);
+    assert!(after[20..].iter().all(Option::is_none));
+    assert!(!trim(&mut doc, 10, End, 20), "変わらない");
+
+    // 区間より短い音：音の本当の終わりに届くコマまで。届くコマの境目では、終わりは音の本当の終わり
+    let mut doc = doc_with_trim_layer(24);
+    doc.root.layers[0].keyframe_mut(1).sound.as_mut().unwrap().start = 24_100;
+    assert_eq!(range(&doc), 11..=22, "残り 23,900 は 11.95 コマ");
+    assert!(trim(&mut doc, 10, End, 15));
+    assert!(trim(&mut doc, 10, End, 22));
+    assert_eq!(doc.root.layers[0].keyframes[1].sound.unwrap().end, 48_000);
+}
+
+/// 波形の左端：キーフレームをそのコマへ動かし、区間の始まりも同じ時間だけ進める（戻す）ので、鳴るタイミングは変わらない。
+/// 前のキーフレームの区間が伸び縮みする。前のキーフレームの次のコマから、鳴り終わるコマの1つ手前まで、区間の始まりが
+/// 音の頭より前にならない所まで
+#[test]
+fn trimming_the_sound_start_moves_the_keyframe_and_keeps_timing() {
+    use crate::sound::SoundEdge::Start;
+    for fps in [24, 7] {
+        let mut doc = doc_with_trim_layer(fps);
+        let before = positions(&doc);
+        let near = |a: &[Option<u64>], b: &[Option<u64>]| {
+            a.iter().zip(b).all(|(x, y)| match (x, y) {
+                (Some(x), Some(y)) => x.abs_diff(*y) <= 1,
+                _ => x == y,
+            })
+        };
+        assert!(!trim(&mut doc, 10, Start, 9), "音の頭より前には戻せない");
+        assert!(!trim(&mut doc, 10, Start, 30), "鳴り終わるコマの1つ手前まで");
+        assert!(trim(&mut doc, 10, Start, 15));
+        let layer = &doc.root.layers[0];
+        let starts: Vec<usize> = (0..layer.keyframes.len()).map(|k| layer.start_of(k)).collect();
+        assert_eq!(starts, vec![0, 15, 30], "前のキーフレームがコマ 14 まで伸びる");
+        let after = positions(&doc);
+        assert!(after[..15].iter().all(Option::is_none));
+        assert!(near(&after[15..], &before[15..]), "fps {fps}");
+        // 戻す：音の頭まで戻せる
+        assert!(!trim(&mut doc, 15, Start, 9));
+        assert!(trim(&mut doc, 15, Start, 10));
+        assert_eq!(doc.root.layers[0].keyframes[1].sound.unwrap().start, 0);
+        assert!(near(&positions(&doc), &before), "fps {fps}");
+    }
+
+    // 前のキーフレームの次のコマまで
+    let mut doc = doc_with_trim_layer(24);
+    assert!(trim(&mut doc, 10, Start, 20));
+    assert!(doc.root.layers[0].insert_keyframe(12, false, 24));
+    assert!(!trim(&mut doc, 20, Start, 12));
+    assert!(trim(&mut doc, 20, Start, 13));
+
+    // コマ 0 のキーフレームを動かすと、コマ 0 に空白のキーフレームを置く
+    let mut doc = doc_with_flat_sound();
+    put_clip(&mut doc.root, 30, flat_clip());
+    let k0 = |doc: &mut symbol::Document, f| {
+        doc.root.layers[0].trim_sound(0, Start, f, &doc.sounds.clone(), 24)
+    };
+    assert!(k0(&mut doc, 3));
+    let layer = &doc.root.layers[0];
+    assert_eq!(layer.keyframes.len(), 2);
+    assert_eq!(layer.keyframes[0].sound, None);
+    assert_eq!(layer.start_of(1), 3);
+    assert_eq!(layer.keyframes[1].sound.unwrap().start, 6000);
+}
+
+/// 波形の端のドラッグを離したときの操作（`Action::TrimSound`）は1回の取り消しで戻る。ロックしたレイヤー・音の無い
+/// キーフレーム・動かせない所は断る
+#[test]
+fn trim_sound_action_with_undo_and_refusals() {
+    use crate::sound::SoundEdge::{End, Start};
+    let trim_action = |app: &mut Is2dApp, kf_start, edge, frame| {
+        doc_actions::apply(
+            app,
+            doc_actions::Action::TrimSound {
+                layer: 0,
+                kf_start,
+                edge,
+                frame,
+            },
+        )
+    };
+    let mut app = Is2dApp::default();
+    app.doc.fps = 24;
+    app.doc.root.layers[0].frame_count = 10;
+    app.doc.root.sync_total_frames();
+    assert!(import_sound(&mut app, short_wav()));
+    let clip = app.doc.root.layers[0].keyframes[0].sound.unwrap();
+    assert_eq!(clip.end, 4800, "0.1 秒は 2.4 コマ");
+    assert!(trim_action(&mut app, 0, End, 2));
+    assert_eq!(app.doc.root.layers[0].keyframes[0].sound.unwrap().end, 4000);
+    assert!(doc_actions::apply(&mut app, doc_actions::Action::Undo));
+    assert_eq!(app.doc.root.layers[0].keyframes[0].sound, Some(clip));
+
+    assert!(!trim_action(&mut app, 0, End, 4), "音の本当の終わりを越える");
+    assert!(!trim_action(&mut app, 5, End, 6), "そこに始まるキーフレームが無い");
+    assert!(!trim_action(&mut app, 0, Start, 3), "鳴り終わるコマ（3 コマ目）の1つ手前まで");
+    app.doc.root.layers[0].locked = true;
+    assert!(!trim_action(&mut app, 0, End, 2), "ロックしたレイヤー");
+}

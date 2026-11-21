@@ -11,8 +11,9 @@ pub(crate) use crate::doc_actions::{
     timeline_delete_keyframe, timeline_extend_frame, timeline_insert_keyframe,
     timeline_move_or_copy_frames, timeline_remove_frame, timeline_reorder_layer,
 };
+use crate::sound::{frames_to_sound, SoundEdge};
 use crate::symbol::TweenState;
-use crate::timeline::TimelineCellSelection;
+use crate::timeline::{Layer, TimelineCellSelection};
 
 #[cfg(test)]
 thread_local! {
@@ -52,6 +53,7 @@ pub(crate) mod icons {
     pub(crate) const PIVOT_RESET: &str = "\u{e3b4}"; // center_focus_strong (ピボットリセット)
     pub(crate) const GROUP: &str = "\u{e1bd}"; // widgets (グループ表示)
     pub(crate) const SYMBOL: &str = "\u{e87b}"; // extension (シンボル表示)
+    pub(crate) const SOUND: &str = "\u{e3a1}"; // audiotrack (音)
     pub(crate) const WIREFRAME: &str = "\u{e922}"; // timeline (アンカー・パス表示)
     pub(crate) const DELETE: &str = "\u{e872}"; // delete (削除)
     pub(crate) const COPY: &str = "\u{e14d}"; // content_copy (複製)
@@ -121,6 +123,15 @@ pub(crate) enum TimelineGridDrag {
         curr_frame: usize,
         copy_mode: bool,
         has_moved: bool,
+    },
+    /// 音の波形の端 `edge` のドラッグ（レイヤー `layer` の、コマ `kf_start` に始まるキーフレームの音）。`from` はつかんだ
+    /// ときの端のコマの境目、`frame` は今の（動かせる所に収めた）コマの境目。離すまで文書は変えない
+    TrimSound {
+        layer: usize,
+        kf_start: usize,
+        edge: SoundEdge,
+        from: usize,
+        frame: usize,
     },
 }
 
@@ -556,13 +567,13 @@ fn draw_control_bar_frame_and_fps(host: &mut impl TimelineHost, ui: &mut egui::U
     let mut fps_val = host.tab().doc.fps;
     let fps_resp = ui.add(
         egui::DragValue::new(&mut fps_val)
-            .range(1..=60)
+            .range(1..=crate::symbol::MAX_FPS)
             .update_while_editing(false)
             .speed(0.25),
     );
     ui.label("FPS");
     if fps_resp.changed() {
-        let next_fps = fps_val.clamp(1, 60);
+        let next_fps = fps_val.clamp(1, crate::symbol::MAX_FPS);
         if apply(host, Action::SetFps { fps: next_fps }) && host.timeline_ui().is_playing {
             host.timeline_ui_mut().last_frame_advance_time = None;
         }
@@ -747,9 +758,10 @@ fn handle_timeline_pointer_input(
 ) -> Option<(usize, usize, Pos2)> {
     let (primary_pressed, shift_held) =
         ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift));
+    let handle_w = sound_handle_width(ui.ctx());
     if response.hovered() && primary_pressed {
         if let Some(pos) = pointer_pos {
-            handle_timeline_click_start(host, layout, pos, alt_held, shift_held);
+            handle_timeline_click_start(host, layout, pos, alt_held, shift_held, handle_w);
         }
     }
     update_timeline_grid_drag(host, layout, primary_down, alt_held, pointer_pos);
@@ -761,6 +773,7 @@ fn handle_timeline_pointer_input(
         alt_held,
         hover_pos,
         drag_layer_feedback.is_some(),
+        handle_w,
     );
     drag_layer_feedback
 }
@@ -772,6 +785,7 @@ fn handle_timeline_click_start(
     pos: Pos2,
     alt_held: bool,
     shift_held: bool,
+    handle_w: f32,
 ) {
     if layout.add_hdr_rect.contains(pos) {
         apply(host, Action::AddLayer);
@@ -848,6 +862,19 @@ fn handle_timeline_click_start(
                     return;
                 }
             }
+        }
+
+        // 音の波形の端のつまみ：コマの選択・移動より先に見るので、つまみの細い範囲の上だけはつまみが優先される
+        if let Some((layer, kf_start, edge, from)) = sound_handle_at(host, layout, pos, handle_w) {
+            host.stop_playback();
+            host.timeline_ui_mut().grid_drag = TimelineGridDrag::TrimSound {
+                layer,
+                kf_start,
+                edge,
+                from,
+                frame: from,
+            };
+            return;
         }
 
         let col = layout.frame_at_x(pos.x, host.timeline_ui().scroll_x);
@@ -1038,6 +1065,48 @@ fn update_timeline_grid_drag(
                 host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
             }
         }
+        TimelineGridDrag::TrimSound {
+            layer,
+            kf_start,
+            edge,
+            from,
+            frame,
+        } => {
+            if primary_down {
+                // マウスにいちばん近いコマの境目を、動かせる所（`Layer::sound_trim_range`）に収める
+                let tab = host.tab();
+                let tl = tab.active_timeline();
+                let range = tl.layers.get(layer).and_then(|l| {
+                    let k = l.keyframe_index_starting_at(kf_start)?;
+                    l.sound_trim_range(k, edge, &tab.doc.sounds, tab.doc.fps)
+                });
+                if let (Some(pos), Some(range)) = (pointer_pos, range) {
+                    let scroll_x = host.timeline_ui().scroll_x;
+                    let nearest = layout.frame_at_x(pos.x + CELL_W * 0.5, scroll_x);
+                    let frame = nearest.clamp(*range.start(), *range.end());
+                    host.timeline_ui_mut().grid_drag = TimelineGridDrag::TrimSound {
+                        layer,
+                        kf_start,
+                        edge,
+                        from,
+                        frame,
+                    };
+                }
+            } else {
+                host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
+                if frame != from {
+                    apply(
+                        host,
+                        Action::TrimSound {
+                            layer,
+                            kf_start,
+                            edge,
+                            frame,
+                        },
+                    );
+                }
+            }
+        }
         TimelineGridDrag::MoveFrames {
             orig_sel,
             grab_layer,
@@ -1130,8 +1199,20 @@ fn update_timeline_cursor_icon(
     alt_held: bool,
     hover_pos: Option<Pos2>,
     is_dragging_layer: bool,
+    handle_w: f32,
 ) {
-    if let TimelineGridDrag::MoveFrames {
+    let on_sound_handle = || {
+        matches!(host.timeline_ui().grid_drag, TimelineGridDrag::None)
+            && host.timeline_ui().dragging_layer.is_none()
+            && hover_pos.is_some_and(|p| sound_handle_at(host, layout, p, handle_w).is_some())
+    };
+    if matches!(
+        host.timeline_ui().grid_drag,
+        TimelineGridDrag::TrimSound { .. }
+    ) || on_sound_handle()
+    {
+        ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    } else if let TimelineGridDrag::MoveFrames {
         has_moved: true, ..
     } = host.timeline_ui().grid_drag
     {
@@ -1160,6 +1241,78 @@ fn update_timeline_cursor_icon(
     }
 }
 
+/// 音の波形の端のつまみの幅（画面の px）：egui が窓・パネルの端をつかんで大きさを変える所の幅
+/// （`resize_grab_radius_side`）と同じにして、どこでも同じ手ざわりにする（タイムラインの拡大・縮小によらない）。つまみは
+/// 波形の内側に置き、波形はいちばん短くて1コマ（`CELL_W`）なので、左右のつまみが重ならないよう1コマの半分を越えない
+fn sound_handle_width(ctx: &egui::Context) -> f32 {
+    ctx.style()
+        .interaction
+        .resize_grab_radius_side
+        .min(CELL_W * 0.5)
+}
+
+/// 位置 `pos` にある、音の波形の端のつまみ `(レイヤー, キーフレームの始まりのコマ, 端, 端のコマの境目)`。つまみは、
+/// 波形（`Layer::sounding_frames`）の内側の、左端・右端から幅 `handle_w` の所。タイムラインの操作を受けない（ロックした）
+/// レイヤーには無い
+fn sound_handle_at(
+    host: &impl TimelineHost,
+    layout: &TimelineLayout,
+    pos: Pos2,
+    handle_w: f32,
+) -> Option<(usize, usize, SoundEdge, usize)> {
+    if pos.x < layout.grid_left || pos.y < layout.grid_top {
+        return None;
+    }
+    let tab = host.tab();
+    let tl = tab.active_timeline();
+    let (scroll_x, scroll_y) = (host.timeline_ui().scroll_x, host.timeline_ui().scroll_y);
+    let layer_idx = layout.layer_at_y(pos.y, scroll_y, tl.layers.len())?;
+    let layer = &tl.layers[layer_idx];
+    if !layer.accepts_frame_ops() {
+        return None;
+    }
+    let k = layer.keyframe_index_at(layout.frame_at_x(pos.x, scroll_x))?;
+    let frames = layer.sounding_frames(k, tab.doc.fps)?;
+    let (xl, xr) = (
+        layout.frame_x(frames.start, scroll_x),
+        layout.frame_x(frames.end, scroll_x),
+    );
+    if pos.x < xl || pos.x > xr {
+        return None;
+    }
+    let (to_left, to_right) = (pos.x - xl, xr - pos.x);
+    let (edge, at) = if to_left <= to_right {
+        (SoundEdge::Start, frames.start)
+    } else {
+        (SoundEdge::End, frames.end)
+    };
+    (to_left.min(to_right) <= handle_w).then_some((layer_idx, frames.start, edge, at))
+}
+
+/// 波形の端をドラッグしているとき、そのレイヤー `layer_idx` に、離したときと同じ操作（`Layer::trim_sound`）を行った写し
+fn sound_trim_preview(host: &impl TimelineHost, layer_idx: usize) -> Option<Layer> {
+    let TimelineGridDrag::TrimSound {
+        layer,
+        kf_start,
+        edge,
+        frame,
+        ..
+    } = host.timeline_ui().grid_drag
+    else {
+        return None;
+    };
+    let tab = host.tab();
+    let mut copy = tab
+        .active_timeline()
+        .layers
+        .get(layer)
+        .filter(|_| layer == layer_idx)?
+        .clone();
+    let k = copy.keyframe_index_starting_at(kf_start)?;
+    copy.trim_sound(k, edge, frame, &tab.doc.sounds, tab.doc.fps);
+    Some(copy)
+}
+
 /// 4. 右側フレームグリッド（キーフレーム帯・セル選択ハイライト・フレーム移動ゴースト枠）の描画
 fn draw_timeline_frame_grid(
     host: &impl TimelineHost,
@@ -1184,7 +1337,12 @@ fn draw_timeline_frame_grid(
         if y1 < layout.grid_top || y0 > layout.panel_rect.bottom() {
             continue;
         }
-        draw_timeline_layer_row(host, grid_painter, layout, layer_idx, (y0, y1));
+        // 波形の端をドラッグしているレイヤーは、離したときと同じ操作（`Layer::trim_sound`）を写しに行った形を仮に描く
+        let preview = sound_trim_preview(host, layer_idx);
+        let layer = preview
+            .as_ref()
+            .unwrap_or(&host.tab().active_timeline().layers[layer_idx]);
+        draw_timeline_layer_row(host, grid_painter, layout, layer_idx, layer, (y0, y1));
     }
 
     draw_move_frames_ghost(host, grid_painter, layout, alt_held, pointer_pos);
@@ -1209,12 +1367,12 @@ fn draw_timeline_layer_row(
     grid_painter: &egui::Painter,
     layout: &TimelineLayout,
     layer_idx: usize,
+    layer: &Layer,
     (y0, y1): (f32, f32),
 ) {
     let tab = host.tab();
     let tl = tab.active_timeline();
     let scroll_x = host.timeline_ui().scroll_x;
-    let layer = &tl.layers[layer_idx];
     let is_layer_selected = tl
         .cell_selection
         .is_some_and(|s| s.contains_layer(layer_idx));
@@ -1251,7 +1409,15 @@ fn draw_timeline_layer_row(
         if start >= layer.frame_count || start > layout.last_vis_frame {
             break;
         }
-        draw_keyframe_span(host, grid_painter, layout, layer_idx, kf_idx, (y0, y1));
+        draw_keyframe_span(
+            host,
+            grid_painter,
+            layout,
+            layer_idx,
+            layer,
+            kf_idx,
+            (y0, y1),
+        );
     }
 
     if let Some(sel) = tl.cell_selection.filter(|s| s.contains_layer(layer_idx)) {
@@ -1370,11 +1536,11 @@ fn draw_keyframe_span(
     grid_painter: &egui::Painter,
     layout: &TimelineLayout,
     layer_idx: usize,
+    layer: &Layer,
     kf_idx: usize,
     (y0, y1): (f32, f32),
 ) {
     let tl = host.tab().active_timeline();
-    let layer = &tl.layers[layer_idx];
     let kf = &layer.keyframes[kf_idx];
     let span_start = layer.start_of(kf_idx);
     let span_end = layer.span_end_for_keyframe(kf_idx);
@@ -1419,6 +1585,7 @@ fn draw_keyframe_span(
             Stroke::new(1.0_f32, sep_col),
         );
     }
+    draw_sound_wave(host, grid_painter, layout, layer, kf_idx, (y0, y1));
     let border_col = if is_tween {
         Color32::from_rgb(146, 116, 194)
     } else {
@@ -1454,6 +1621,61 @@ fn draw_keyframe_span(
         (sx0, sx1),
         kf_center.y,
     );
+}
+
+/// キーフレーム `kf_idx` の音が鳴るコマ（`Layer::sounding_frames`）に、その音の区間の波形を薄く描く（レイヤーの行の
+/// 高さに収める）。見えているコマだけを、画面の 1px ごとに、その px に当たる音の範囲の値の幅（`Sound::peak`）の縦線で
+/// 描く。コマの中の音の位置は、鳴らすのと同じ決まり（コマの始まりは `frames_to_sound`、その中は時間に比例）
+fn draw_sound_wave(
+    host: &impl TimelineHost,
+    grid_painter: &egui::Painter,
+    layout: &TimelineLayout,
+    layer: &Layer,
+    kf_idx: usize,
+    (y0, y1): (f32, f32),
+) {
+    let doc = &host.tab().doc;
+    let Some(frames) = layer.sounding_frames(kf_idx, doc.fps) else {
+        return;
+    };
+    let Some(clip) = layer.keyframes[kf_idx].sound else {
+        return;
+    };
+    let Some(sound) = doc.sounds.iter().find(|s| s.id == clip.sound) else {
+        return;
+    };
+    let scroll_x = host.timeline_ui().scroll_x;
+    let band = Rect::from_min_max(
+        Pos2::new(layout.frame_x(frames.start, scroll_x), y0 + 1.0),
+        Pos2::new(layout.frame_x(frames.end, scroll_x), y1 - 1.0),
+    );
+    grid_painter.rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(40, 130, 210, 30));
+    let (mid, half) = (band.center().y, band.height() * 0.5);
+    let wave = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(30, 110, 190, 120));
+    let px = CELL_W as usize;
+    let kf_start = frames.start;
+    for f in frames.start.max(layout.first_vis_frame)..frames.end.min(layout.last_vis_frame + 1) {
+        let d = f - kf_start;
+        let Some(p0) = clip.pos_at(d, doc.fps) else {
+            break;
+        };
+        let p1 = clip.start + frames_to_sound(d + 1, doc.fps);
+        let x0 = layout.frame_x(f, scroll_x);
+        for j in 0..px {
+            let a = p0 + (p1 - p0) * j as u64 / px as u64;
+            let b = (p0 + (p1 - p0) * (j as u64 + 1) / px as u64).min(clip.end);
+            if a >= b {
+                break;
+            }
+            if let Some((lo, hi)) = sound.peak(a, b) {
+                let x = x0 + j as f32 + 0.5;
+                grid_painter.line_segment(
+                    [Pos2::new(x, mid - hi * half), Pos2::new(x, mid - lo * half)],
+                    wave,
+                );
+            }
+        }
+    }
 }
 
 /// キーフレームスパンの終端マーク `▯`、未完トゥイーン横点線 `----`、または完全トゥイーン矢印 `───▶` を描画
@@ -1994,7 +2216,7 @@ pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context)
         timeline_ui.last_frame_advance_time = None;
         return;
     }
-    let fps = tab.doc.fps.clamp(1, 60);
+    let fps = tab.doc.fps.clamp(1, crate::symbol::MAX_FPS);
     let frame_interval = 1.0 / (fps as f64);
     let now = ctx.input(|i| i.time);
 

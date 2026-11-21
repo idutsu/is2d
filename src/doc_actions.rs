@@ -269,6 +269,28 @@ pub(crate) enum Action {
         name: String,
         bytes: std::sync::Arc<[u8]>,
     },
+    /// 今のコマの音を付けられるキーフレームに、音のライブラリの番号 `sound` の音を頭から終わりまで付ける（付け替える）。
+    /// `None` は音を外す
+    SetKeyframeSound {
+        sound: Option<u64>,
+    },
+    /// 音のライブラリの音 `sound_id` の名前を変える（続けて打った文字は1つの取り消しにまとめる）
+    RenameSound {
+        sound_id: u64,
+        new_name: String,
+    },
+    /// 音のライブラリから音 `sound_id` を消す。その音を付けたキーフレーム（ルートと全シンボル）は空白に戻る
+    DeleteSound {
+        sound_id: u64,
+    },
+    /// 作業中のタイムラインのレイヤー `layer` の、コマ `kf_start` に始まるキーフレームの音の区間の端 `edge` を、コマの
+    /// 境目 `frame` へ動かす（`Layer::trim_sound`。タイムラインの波形の端のドラッグを離したとき）
+    TrimSound {
+        layer: usize,
+        kf_start: usize,
+        edge: crate::sound::SoundEdge,
+        frame: usize,
+    },
     InsertKeyframe {
         copy_prev: bool,
     },
@@ -323,6 +345,7 @@ impl Action {
             Self::SetStageSize { .. } => Some(CoalesceKey::StageSize),
             Self::SetFps { .. } => Some(CoalesceKey::Fps),
             Self::RenameSymbol { sym_id, .. } => Some(CoalesceKey::RenameSymbol(*sym_id)),
+            Self::RenameSound { sound_id, .. } => Some(CoalesceKey::RenameSound(*sound_id)),
             Self::SetSymbolPlayback {
                 loop_mode,
                 first_frame: Some(_),
@@ -377,23 +400,15 @@ fn push_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
     push_undo_entry_from_doc(tab, coalesce);
 }
 
-/// 音を読み込んで、今のコマの音を付けられるキーフレーム（作業中のレイヤー：`Layer::sound_slot_at`）に頭から終わりまで
-/// 付ける。付けられる所が無ければ断る。波形にできないバイト・長さが 0 の音は、知らせて断る（文書は変えない）
+/// 音を読み込んで、今のコマの音を付けられるキーフレーム（`Timeline::active_sound_slot`）に頭から終わりまで付ける。
+/// 付けられる所が無ければ断る。波形にできないバイト・長さが 0 の音は、知らせて断る（文書は変えない）
 fn apply_import_sound(
     tab: &mut Tab,
     toast: &mut Option<StatusToast>,
     name: String,
     bytes: std::sync::Arc<[u8]>,
 ) -> bool {
-    let tl = tab.active_timeline();
-    let frame = tl.current_frame;
-    let layer_idx = tl.active_layer;
-    if tl
-        .layers
-        .get(layer_idx)
-        .and_then(|l| l.sound_slot_at(frame))
-        .is_none()
-    {
+    if tab.active_timeline().active_sound_slot().is_none() {
         return false;
     }
     let sound = match crate::sound::Sound::new(tab.doc.next_sound_id, name, bytes) {
@@ -407,14 +422,47 @@ fn apply_import_sound(
         show_notice(toast, NoticeKind::Error, "音の長さが 0 です");
         return false;
     };
+    set_active_keyframe_sound(tab, Some(clip), Some(sound))
+}
+
+/// 今のコマの音を付けられるキーフレーム（`Timeline::active_sound_slot`）に、音のライブラリの番号 `sound` の音を頭から
+/// 終わりまで付ける（付いていれば付け替える）。`None` なら音を外す（キーフレームは空白に戻る）。付けられる所が無い・
+/// 無い番号・変わらないなら断る
+fn apply_set_keyframe_sound(tab: &mut Tab, sound: Option<u64>) -> bool {
+    let clip = match sound {
+        Some(id) => {
+            let Some(s) = tab.doc.sounds.iter().find(|s| s.id == id) else {
+                return false;
+            };
+            let Some(clip) = crate::sound::SoundClip::whole(s) else {
+                return false;
+            };
+            Some(clip)
+        }
+        None => None,
+    };
+    set_active_keyframe_sound(tab, clip, None)
+}
+
+/// 今のコマの音を付けられるキーフレームの音を `clip` にする（取り消しの1歩）。新しく読み込んだ音 `added` は、同じ1歩で
+/// 音のライブラリに足す。付けられる所が無い・変わらないなら断る
+fn set_active_keyframe_sound(
+    tab: &mut Tab,
+    clip: Option<crate::sound::SoundClip>,
+    added: Option<crate::sound::Sound>,
+) -> bool {
     mutate_timeline_with_undo(tab, |tl, doc| {
-        let layer = &mut tl.layers[layer_idx];
-        let Some(k) = layer.sound_slot_at(frame) else {
+        let Some((l, k)) = tl.active_sound_slot() else {
             return false;
         };
-        layer.keyframe_mut(k).sound = Some(clip);
-        std::sync::Arc::make_mut(&mut doc.sounds).push(std::sync::Arc::new(sound));
-        doc.next_sound_id += 1;
+        if tl.layers[l].keyframes[k].sound == clip {
+            return false;
+        }
+        tl.layers[l].keyframe_mut(k).sound = clip;
+        if let Some(s) = added {
+            std::sync::Arc::make_mut(&mut doc.sounds).push(std::sync::Arc::new(s));
+            doc.next_sound_id += 1;
+        }
         true
     })
 }
@@ -759,6 +807,29 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             true
         }
         Action::ImportSound { name, bytes } => apply_import_sound(tab, toast, name, bytes),
+        Action::SetKeyframeSound { sound } => apply_set_keyframe_sound(tab, sound),
+        Action::RenameSound { sound_id, new_name } => {
+            push_undo(tab, coalesce);
+            tab.doc.rename_sound(sound_id, new_name)
+        }
+        Action::DeleteSound { sound_id } => {
+            push_undo(tab, None);
+            tab.doc.remove_sound(sound_id)
+        }
+        Action::TrimSound {
+            layer,
+            kf_start,
+            edge,
+            frame,
+        } => mutate_timeline_with_undo(tab, |tl, doc| {
+            let Some(l) = tl.layers.get_mut(layer).filter(|l| l.accepts_frame_ops()) else {
+                return false;
+            };
+            let Some(k) = l.keyframe_index_starting_at(kf_start) else {
+                return false;
+            };
+            l.trim_sound(k, edge, frame, &doc.sounds, doc.fps)
+        }),
         Action::InsertKeyframe { copy_prev } => apply_timeline_insert_keyframe(tab, copy_prev),
         Action::DeleteKeyframe => apply_timeline_delete_keyframe(tab),
         Action::ExtendFrame => apply_timeline_extend_frame(tab),
@@ -1888,7 +1959,7 @@ fn apply_set_stage_size(tab: &mut Tab, next_size: Vec2, coalesce: Option<Coalesc
 }
 
 fn apply_set_fps(tab: &mut Tab, next_fps: u32, coalesce: Option<CoalesceKey>) -> bool {
-    let next_fps = next_fps.clamp(1, 60);
+    let next_fps = next_fps.clamp(1, crate::symbol::MAX_FPS);
     if next_fps != tab.doc.fps {
         push_undo(tab, coalesce);
         tab.doc.fps = next_fps;

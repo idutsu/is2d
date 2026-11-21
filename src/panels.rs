@@ -159,11 +159,7 @@ pub(crate) fn draw_top_menu_bar(
 ) {
     egui::TopBottomPanel::top("top_menu_bar").show(ctx, |ui| {
         egui::menu::bar(ui, |ui| {
-            let tl = tab.active_timeline();
-            let can_import_sound = tl
-                .layers
-                .get(tl.active_layer)
-                .is_some_and(|l| l.sound_slot_at(tl.current_frame).is_some());
+            let can_import_sound = tab.active_timeline().active_sound_slot().is_some();
             draw_file_menu(actions, ui, can_import_sound);
             draw_edit_menu(tab, clipboard, actions, ui);
             draw_view_menu(tab, actions, ui);
@@ -210,7 +206,7 @@ fn draw_file_menu(actions: &mut Vec<UiAction>, ui: &mut egui::Ui, can_import_sou
 
         ui.separator();
 
-        // 音を付けられるのは、作業中のレイヤーの今のコマが空白のキーフレームのときだけ（`Layer::sound_slot_at`）
+        // 音を付けられるのは、作業中のレイヤーの今のコマが空白のキーフレームのときだけ（`Timeline::active_sound_slot`）
         if menu_action_button(ui, can_import_sound, "音を読み込む（WAV・MP3）…", "") {
             actions.push(UiAction::ImportSoundDialog);
         }
@@ -726,6 +722,7 @@ fn draw_properties_tab(
     // - キャンバス上のシンボルを選択したとき（選択 / 自由変形ツール時）は「シンボル再生オプション」
     if tab.view.inspect_timeline_frame {
         draw_selected_frame_properties(tab, actions, ui);
+        draw_keyframe_sound_properties(tab, actions, ui);
     }
     if matches!(tool.tool, Tool::Select | Tool::Transform) {
         draw_selected_symbol_properties(tab, actions, ui);
@@ -1272,6 +1269,37 @@ pub(crate) fn draw_selected_frame_properties(
     }
 }
 
+/// タイムラインで選んだコマが音を付けられるキーフレーム（`Timeline::active_sound_slot`）のときにプロパティパネル下部に
+/// 表示する「サウンド」の欄：「なし」とライブラリの音の名前の一覧1つ。付いている音が選ばれた状態で出る。選ぶと付ける・
+/// 付け替える（頭から終わりまで）・外す（`Action::SetKeyframeSound`）
+fn draw_keyframe_sound_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+    let tl = tab.active_timeline();
+    let Some((l, k)) = tl.active_sound_slot() else {
+        return;
+    };
+    let current = tl.layers[l].keyframes[k].sound.map(|c| c.sound);
+    let name_of = |id: Option<u64>| {
+        id.and_then(|id| tab.doc.sounds.iter().find(|s| s.id == id))
+            .map_or("なし", |s| s.name.as_str())
+    };
+
+    draw_panel_separator(ui);
+    draw_panel_section_label(ui, "サウンド", 4.0);
+    let mut chosen = current;
+    egui::ComboBox::from_id_salt(("keyframe_sound", tab.id))
+        .width(ui.available_width())
+        .selected_text(name_of(current))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut chosen, None, "なし");
+            for s in tab.doc.sounds.iter() {
+                ui.selectable_value(&mut chosen, Some(s.id), s.name.as_str());
+            }
+        });
+    if chosen != current {
+        actions.push(UiAction::Doc(Action::SetKeyframeSound { sound: chosen }));
+    }
+}
+
 /// キャンバス上で単一のシンボルインスタンスを選択しているときにプロパティパネル下部に表示する再生オプション（1回再生 / ループ再生 / 任意のフレーム）
 pub(crate) fn draw_selected_symbol_properties(
     tab: &mut Tab,
@@ -1529,21 +1557,26 @@ pub(crate) fn draw_library_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &
             .size(11.5)
             .color(Color32::from_rgb(115, 122, 135)),
         );
-        return;
+    } else {
+        tab.ensure_valid_library_selection();
+
+        if let Some(sel_id) = tab.view.selected_library_symbol {
+            draw_selected_library_symbol_controls(tab, actions, ui, sel_id);
+        }
+
+        draw_panel_section_label(
+            ui,
+            &format!("登録シンボル一覧 ({})", tab.doc.library.len()),
+            4.0,
+        );
+        draw_library_symbol_list(tab, actions, ui);
     }
 
-    tab.ensure_valid_library_selection();
-
-    if let Some(sel_id) = tab.view.selected_library_symbol {
-        draw_selected_library_symbol_controls(tab, actions, ui, sel_id);
+    if !tab.doc.sounds.is_empty() {
+        draw_panel_separator(ui);
+        draw_panel_section_label(ui, &format!("音 ({})", tab.doc.sounds.len()), 4.0);
+        draw_library_sound_list(tab, actions, ui);
     }
-
-    draw_panel_section_label(
-        ui,
-        &format!("登録シンボル一覧 ({})", tab.doc.library.len()),
-        4.0,
-    );
-    draw_library_symbol_list(tab, actions, ui);
 }
 
 /// ライブラリで選択中のシンボルのミニプレビューおよび操作ボタン群（配置・編集・削除）を描画
@@ -1635,8 +1668,16 @@ fn draw_library_symbol_list(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut
     let mut clear_renaming_id: Option<u64> = None;
 
     let active_doc_id = tab.id;
+    // 下に音の一覧があるときは、残りの高さを2つの一覧で半分ずつ分ける（シンボルが少なければ、詰めた残りを音の一覧に回す）
+    let max_height = if tab.doc.sounds.is_empty() {
+        f32::INFINITY
+    } else {
+        ui.available_height() / 2.0
+    };
     egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
+        .id_salt("library_symbol_list")
+        .max_height(max_height)
+        .auto_shrink([false, true])
         .show(ui, |ui| {
             for (sym_id, mut name, total_frames) in entries {
                 ui.push_id((active_doc_id, sym_id), |ui| {
@@ -1709,6 +1750,81 @@ fn draw_library_symbol_list(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut
         actions.push(UiAction::Doc(Action::EndCoalesce {
             key: Some(CoalesceKey::RenameSymbol(finished_id)),
         }));
+    }
+}
+
+/// ライブラリの音の一覧（名前・長さ（秒））を描画し、名前の変更・削除の操作を発行する。行の形はシンボルの一覧と同じ
+fn draw_library_sound_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+    let mut rename_req: Option<(u64, String)> = None;
+    let mut finished_id: Option<u64> = None;
+    let mut delete_req: Option<u64> = None;
+    egui::ScrollArea::vertical()
+        .id_salt("library_sound_list")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for s in tab.doc.sounds.iter() {
+                ui.push_id((tab.id, "sound", s.id), |ui| {
+                    egui::Frame::NONE
+                        .fill(Color32::from_rgb(252, 253, 255))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(218, 222, 230)))
+                        .inner_margin(egui::Margin::symmetric(6, 4))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(icons::SOUND)
+                                        .size(15.0)
+                                        .color(Color32::from_rgb(0, 130, 220)),
+                                );
+                                // 右から削除のボタン・長さを置き、名前の欄は残りの幅いっぱいにする
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .small_button(icons::DELETE)
+                                            .on_hover_text(
+                                                "この音をライブラリから削除します（この音を付けたキーフレームは空白に戻ります）",
+                                            )
+                                            .clicked()
+                                        {
+                                            delete_req = Some(s.id);
+                                        }
+                                        let seconds =
+                                            s.len() as f64 / crate::sound::SOUND_RATE as f64;
+                                        ui.label(
+                                            egui::RichText::new(format!("{seconds:.2} 秒"))
+                                                .size(10.5)
+                                                .color(Color32::from_rgb(115, 122, 135)),
+                                        );
+                                        let mut name = s.name.clone();
+                                        let resp = ui.add(
+                                            egui::TextEdit::singleline(&mut name)
+                                                .desired_width(ui.available_width()),
+                                        );
+                                        if resp.changed() {
+                                            rename_req = Some((s.id, name));
+                                        }
+                                        if resp.lost_focus() {
+                                            finished_id = Some(s.id);
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                });
+                ui.add_space(3.0);
+            }
+        });
+
+    if let Some((sound_id, new_name)) = rename_req {
+        actions.push(UiAction::Doc(Action::RenameSound { sound_id, new_name }));
+    }
+    if let Some(id) = finished_id {
+        actions.push(UiAction::Doc(Action::EndCoalesce {
+            key: Some(CoalesceKey::RenameSound(id)),
+        }));
+    }
+    if let Some(sound_id) = delete_req {
+        actions.push(UiAction::Doc(Action::DeleteSound { sound_id }));
     }
 }
 

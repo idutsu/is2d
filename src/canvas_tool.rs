@@ -1957,6 +1957,7 @@ pub(crate) enum CoalesceKey {
     SymbolPlayback(u64),
     SymbolColorEffect(u64),
     RenameSymbol(u64),
+    RenameSound(u64),
     NudgeSelection,
 }
 

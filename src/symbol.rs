@@ -633,6 +633,9 @@ impl EditPath {
     }
 }
 
+/// 作品の fps の上限（fps は 1〜これ）
+pub(crate) const MAX_FPS: u32 = 60;
+
 /// ステージの大きさの下限（幅・高さとも px）
 pub(crate) const STAGE_MIN: f32 = 100.0;
 /// ステージの大きさの上限（幅・高さの px。4K）
@@ -882,6 +885,50 @@ impl Document {
         sym.name = new_name;
         sym.revision = crate::vector_engine::next_mesh_revision();
         self.bump_revision();
+        true
+    }
+
+    /// 音のライブラリの番号 `sound_id` の音の名前を `new_name` にする。無い番号・同じ名前なら変えない
+    pub(crate) fn rename_sound(&mut self, sound_id: u64, new_name: String) -> bool {
+        let Some(i) = self.sounds.iter().position(|s| s.id == sound_id) else {
+            return false;
+        };
+        if self.sounds[i].name == new_name {
+            return false;
+        }
+        Arc::make_mut(&mut Arc::make_mut(&mut self.sounds)[i]).name = new_name;
+        true
+    }
+
+    /// 音のライブラリから番号 `sound_id` の音を消し、ルートと全シンボルのタイムラインで、その音を付けたキーフレームから
+    /// 音を外す（空白のキーフレームに戻る。無い音を指す区間を残さない）。無い番号なら変えない
+    pub(crate) fn remove_sound(&mut self, sound_id: u64) -> bool {
+        if !self.sounds.iter().any(|s| s.id == sound_id) {
+            return false;
+        }
+        Arc::make_mut(&mut self.sounds).retain(|s| s.id != sound_id);
+        let uses = |kf: &crate::timeline::Keyframe| kf.sound.is_some_and(|c| c.sound == sound_id);
+        let remove_from_tl = |tl: &mut Timeline| {
+            for layer in &mut tl.layers {
+                for i in 0..layer.keyframes.len() {
+                    if uses(&layer.keyframes[i]) {
+                        layer.keyframe_mut(i).sound = None;
+                    }
+                }
+            }
+        };
+        remove_from_tl(&mut self.root);
+        // 音を付けたシンボルだけを書く（ほかのシンボルと塊は、Undo の控えと共有したまま）
+        for i in 0..self.library.len() {
+            if self.library[i]
+                .timeline
+                .layers
+                .iter()
+                .any(|l| l.keyframes.iter().any(|kf| uses(kf)))
+            {
+                remove_from_tl(&mut Arc::make_mut(&mut self.library[i]).timeline);
+            }
+        }
         true
     }
 

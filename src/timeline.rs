@@ -2027,6 +2027,95 @@ impl Layer {
         self.keyframes[k].cel.is_empty().then_some(k)
     }
 
+    /// キーフレーム `k` の音が鳴るコマ：始まりから、音の区間が鳴り終わる所（`SoundClip::frames`）とキーフレームの区間の
+    /// 終わりの早いほうまで。音が無ければ `None`。波形を描く所と、両端のつまみの所はこれで決める
+    pub(crate) fn sounding_frames(&self, k: usize, fps: u32) -> Option<std::ops::Range<usize>> {
+        let clip = self.keyframes[k].sound?;
+        let start = self.start_of(k);
+        Some(start..(start + clip.frames(fps)).min(self.span_end_for_keyframe(k) + 1))
+    }
+
+    /// キーフレーム `k` の音の区間の端 `edge` を動かせる所（コマの境目の番号：始まりはキーフレームの始まりのコマ、終わりは
+    /// 鳴り終わったコマの次のコマ。設計の 7 章）。音が無い・音のライブラリ `sounds` に無いなら `None`
+    /// - 終わり：始まりより1コマ以上後ろから、音の本当の終わりに届くコマと、キーフレームの区間の終わりの早いほうまで
+    /// - 始まり：前のキーフレームの次のコマ（前が無ければ 0）から、鳴り終わるコマの1つ手前まで。区間の始まりが音の頭より
+    ///   前にならない所まで（音の頭から数えて、区間の始まりまでに入りきるコマの数だけ戻せる）
+    pub(crate) fn sound_trim_range(
+        &self,
+        k: usize,
+        edge: crate::sound::SoundEdge,
+        sounds: &[Arc<crate::sound::Sound>],
+        fps: u32,
+    ) -> Option<std::ops::RangeInclusive<usize>> {
+        use crate::sound::{frames_to_reach, SoundEdge};
+        let clip = self.keyframes[k].sound?;
+        let len = sounds.iter().find(|s| s.id == clip.sound)?.len();
+        let shown = self.sounding_frames(k, fps)?;
+        let span_end = self.span_end_for_keyframe(k) + 1;
+        Some(match edge {
+            SoundEdge::End => {
+                shown.start + 1..=span_end.min(shown.start + frames_to_reach(len - clip.start, fps))
+            }
+            SoundEdge::Start => {
+                let after_prev = k.checked_sub(1).map_or(0, |p| self.start_of(p) + 1);
+                let back = frames_to_reach(clip.start + 1, fps) - 1;
+                after_prev.max(shown.start.saturating_sub(back))..=shown.end - 1
+            }
+        })
+    }
+
+    /// キーフレーム `k` の音の区間の端 `edge` を、コマの境目 `frame` へ動かす（設計の 7 章。動かせる所は
+    /// `sound_trim_range`）。終わりは、そのコマの境目に当たる音の中の位置にする（音の本当の終わりは越えない）。始まりは、
+    /// キーフレームをそのコマへ動かし、区間の始まりも同じ時間だけ進める（戻す）ので、鳴るタイミングは変わらない。空いた
+    /// コマ・詰まったコマは、前のキーフレームの区間が伸び縮みする（コマ 0 から動かしたら、コマ 0 に空白のキーフレームを
+    /// 置く：コマの移動と同じ決まり）。動かせない所・変わらないなら断る
+    pub(crate) fn trim_sound(
+        &mut self,
+        k: usize,
+        edge: crate::sound::SoundEdge,
+        frame: usize,
+        sounds: &[Arc<crate::sound::Sound>],
+        fps: u32,
+    ) -> bool {
+        use crate::sound::{frames_to_sound, SoundEdge};
+        let in_range = self
+            .sound_trim_range(k, edge, sounds, fps)
+            .is_some_and(|r| r.contains(&frame));
+        let Some(clip) = self.keyframes[k].sound.filter(|_| in_range) else {
+            return false;
+        };
+        let Some(sound) = sounds.iter().find(|x| x.id == clip.sound) else {
+            return false;
+        };
+        let s = self.start_of(k);
+        let trimmed = match edge {
+            SoundEdge::End => crate::sound::SoundClip {
+                end: (clip.start + frames_to_sound(frame - s, fps)).min(sound.len()),
+                ..clip
+            },
+            SoundEdge::Start => {
+                let start = if frame >= s {
+                    clip.pos_at(frame - s, fps)
+                } else {
+                    clip.start.checked_sub(frames_to_sound(s - frame, fps))
+                };
+                let Some(start) = start else {
+                    return false;
+                };
+                crate::sound::SoundClip { start, ..clip }
+            }
+        };
+        if trimmed == clip {
+            return false;
+        }
+        self.keyframe_mut(k).sound = Some(trimmed);
+        if edge == SoundEdge::Start {
+            self.keyframes.set_key(k, frame);
+            self.ensure_head_keyframe();
+        }
+        true
+    }
+
     /// タイムラインの操作（フレームの挿入・削除・移動、トゥイーンの設定）で、このレイヤーを変えてよいか（ロックして
     /// いない）。絵は書き換えないので、非表示のレイヤーも変える。この決まりはこれ1つ
     pub(crate) fn accepts_frame_ops(&self) -> bool {
@@ -2513,5 +2602,15 @@ impl Timeline {
             TweenState::Complete { .. }
         );
         Some((layer.start_of(kf_idx), kf.tween_rotate, is_complete))
+    }
+
+    /// 作業中のレイヤーの今のコマで音を付けられる所 `(レイヤーの番号, キーフレームの番号)`（`Layer::sound_slot_at`）。
+    /// 読み込みのメニュー・プロパティの「サウンド」の欄・付ける操作のどれもがこれで決める
+    pub(crate) fn active_sound_slot(&self) -> Option<(usize, usize)> {
+        let k = self
+            .layers
+            .get(self.active_layer)?
+            .sound_slot_at(self.current_frame)?;
+        Some((self.active_layer, k))
     }
 }

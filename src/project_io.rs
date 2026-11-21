@@ -797,7 +797,7 @@ impl ProjectDocument {
     /// 文書 `doc` の保存用の写し
     pub(crate) fn of(doc: &Document) -> Self {
         let mut saved_timeline: SavedTimeline = (&doc.root).into();
-        saved_timeline.fps = doc.fps.clamp(1, 60);
+        saved_timeline.fps = doc.fps.clamp(1, crate::symbol::MAX_FPS);
 
         let mut out = Self {
             stage_size: [doc.stage_size.x, doc.stage_size.y],
@@ -906,7 +906,7 @@ impl ProjectDocument {
             }
             sounds.push(Arc::new(crate::sound::Sound::new(s.id, s.name, s.bytes.into())?));
         }
-        let fps = self.timeline.fps.clamp(1, 60);
+        let fps = self.timeline.fps.clamp(1, crate::symbol::MAX_FPS);
         let mut timeline = Timeline::from_saved(self.timeline, trimmed)?;
 
         // 重複または不正（id == 0 / id > MAX_SAFE_ENTITY_ID）な SymbolDef::id を一意な安全IDへ再採番してライブラリを構築

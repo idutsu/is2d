@@ -315,7 +315,7 @@ fn run_video_export(
     }
 
     let (width, height) = export_dimensions(doc.stage_size);
-    let fps = doc.fps.clamp(1, 60);
+    let fps = doc.fps.clamp(1, crate::symbol::MAX_FPS);
 
     let mut encoder = match create_video_encoder(tmp_path, width, height, fps) {
         Ok(enc) => enc,
