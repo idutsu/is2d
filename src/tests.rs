@@ -8310,6 +8310,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
                         tween_rotate: timeline::TweenRotate::Auto,
                         maps: Vec::new(),
                         instances,
+                        sound: None,
                     }],
                 }],
             },
@@ -8324,6 +8325,8 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
         next_group_id: 100_000,
         recovery_source: None,
         map_tiles: Default::default(),
+        sounds: Vec::new(),
+        next_sound_id: 1,
     };
 
     let path = std::env::temp_dir().join(format!("is2d_dense_cycle_{}.is2d", std::process::id()));
@@ -13208,6 +13211,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
                             tween_rotate: timeline::TweenRotate::Auto,
                             maps: Vec::new(),
                             instances,
+                            sound: None,
                         }],
                     }],
                 },
@@ -13221,6 +13225,8 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
             next_group_id: (depth + 1) as u64,
             recovery_source: None,
             map_tiles: Default::default(),
+            sounds: Vec::new(),
+            next_sound_id: 1,
         }
     };
 
@@ -19550,6 +19556,7 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
             tween_rotate: crate::symbol::TweenRotate::Auto,
             maps: Vec::new(),
             instances: Vec::new(),
+            sound: None,
         });
     crate::project_io::write_project_file_atomically(&out_of_range_kf_path, &proj_kf).unwrap();
 
@@ -21628,6 +21635,8 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
         next_group_id: 1,
         recovery_source: None,
         map_tiles: Default::default(),
+        sounds: Vec::new(),
+        next_sound_id: 1,
     };
     let mut v2_bytes = project_io::project_file_bytes(&empty_doc).unwrap();
     v2_bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
@@ -32644,6 +32653,128 @@ fn double_click_needs_both_clicks_at_the_same_place() {
     }
 }
 
+/// 版 7 の保存用の型（版 8 で、キーフレームの音と音のライブラリを足す前のもの）。計測用の作品を今の版に直すためだけに
+/// 使う（アプリは前の版を開かない）。中身は今の型と同じで、音の項目だけが無い
+mod format_v7 {
+    use crate::project_io::{
+        ProjectDocument, SavedKeyframe, SavedLayer, SavedSymbolDef, SavedSymbolInstance,
+        SavedTimeline,
+    };
+    use crate::stored_map::SavedTiles;
+    use crate::timeline::SavedScopeMap;
+    use crate::timeline::TweenRotate;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    pub(super) struct Document {
+        stage_size: [f32; 2],
+        timeline: Timeline,
+        library: Vec<SymbolDef>,
+        next_symbol_id: u64,
+        next_group_id: u64,
+        recovery_source: Option<std::path::PathBuf>,
+        map_tiles: SavedTiles,
+    }
+
+    #[derive(Deserialize)]
+    struct Timeline {
+        fps: u32,
+        total_frames: usize,
+        current_frame: usize,
+        active_layer: usize,
+        next_layer_number: usize,
+        next_layer_id: u64,
+        layers: Vec<Layer>,
+    }
+
+    #[derive(Deserialize)]
+    struct Layer {
+        id: u64,
+        name: String,
+        visible: bool,
+        locked: bool,
+        frame_count: usize,
+        keyframes: Vec<Keyframe>,
+    }
+
+    #[derive(Deserialize)]
+    struct Keyframe {
+        start_frame: usize,
+        tween: bool,
+        tween_rotate: TweenRotate,
+        maps: Vec<SavedScopeMap>,
+        instances: Vec<SavedSymbolInstance>,
+    }
+
+    #[derive(Deserialize)]
+    struct SymbolDef {
+        id: u64,
+        name: String,
+        timeline: Timeline,
+    }
+
+    impl Timeline {
+        fn current(self) -> SavedTimeline {
+            SavedTimeline {
+                fps: self.fps,
+                total_frames: self.total_frames,
+                current_frame: self.current_frame,
+                active_layer: self.active_layer,
+                next_layer_number: self.next_layer_number,
+                next_layer_id: self.next_layer_id,
+                layers: self
+                    .layers
+                    .into_iter()
+                    .map(|l| SavedLayer {
+                        id: l.id,
+                        name: l.name,
+                        visible: l.visible,
+                        locked: l.locked,
+                        frame_count: l.frame_count,
+                        keyframes: l
+                            .keyframes
+                            .into_iter()
+                            .map(|k| SavedKeyframe {
+                                start_frame: k.start_frame,
+                                tween: k.tween,
+                                tween_rotate: k.tween_rotate,
+                                maps: k.maps,
+                                instances: k.instances,
+                                sound: None,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    impl Document {
+        /// 今の版の保存用の型（音は無い）
+        pub(super) fn current(self) -> ProjectDocument {
+            ProjectDocument {
+                stage_size: self.stage_size,
+                timeline: self.timeline.current(),
+                library: self
+                    .library
+                    .into_iter()
+                    .map(|s| SavedSymbolDef {
+                        id: s.id,
+                        name: s.name,
+                        timeline: s.timeline.current(),
+                    })
+                    .collect(),
+                next_symbol_id: self.next_symbol_id,
+                next_group_id: self.next_group_id,
+                recovery_source: self.recovery_source,
+                map_tiles: self.map_tiles,
+                sounds: Vec::new(),
+                next_sound_id: 1,
+            }
+        }
+    }
+}
+
 /// 前の版（版 5 の JSON・版 6）の保存用の型。計測用の作品を今の版に直すためだけに使う（アプリは前の版を開かない）。地図は
 /// 頂点と辺で書き、面の図形の番号は書かない
 mod old_format {
@@ -32731,12 +32862,16 @@ fn old_format_document(bytes: &[u8]) -> Option<(project_io::ProjectDocument, u32
     let (old, version): (old_format::Document, u32) = if bytes.first() == Some(&b'{') {
         assert!(
             bytes.starts_with(br#"{"version":5,"#),
-            "直せるのは、版 5 の JSON と版 6 のファイルだけ"
+            "直せるのは、版 5 の JSON と版 6・版 7 のファイルだけ"
         );
         (
             serde_json::from_slice(bytes).expect("版 5 の JSON として読めること"),
             5,
         )
+    } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 7u32.to_le_bytes() {
+        let v7: format_v7::Document =
+            postcard::from_bytes(&bytes[20..]).expect("版 7 の中身として読めること");
+        return Some((v7.current(), 7));
     } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 6u32.to_le_bytes() {
         (
             postcard::from_bytes(&bytes[20..]).expect("版 6 の中身として読めること"),
@@ -32820,6 +32955,7 @@ fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument
                                 })
                                 .collect(),
                             instances: k.instances,
+                            sound: None,
                         })
                         .collect(),
                 }
@@ -32842,6 +32978,8 @@ fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument
         next_group_id: old.next_group_id,
         recovery_source: old.recovery_source,
         map_tiles: Default::default(),
+        sounds: Vec::new(),
+        next_sound_id: 1,
     };
     pd.write_map_tiles();
     pd
@@ -36080,4 +36218,171 @@ fn converting_marquee_plus_shift_click_to_symbol_does_not_duplicate() {
             "取り消すと元の1本に戻る"
         );
     }
+}
+
+// ============================================================================
+// 音（設計：claude/オーディオの設計_9693dbf.md の 1 段目：データと保存と読み込み）
+// ============================================================================
+
+/// テスト用：16bit の PCM の WAV のバイト（`channels` 個ずつ並べた `samples`）
+fn wav_bytes(rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
+    let data_len = (samples.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&rate.to_le_bytes());
+    out.extend_from_slice(&(rate * u32::from(channels) * 2).to_le_bytes());
+    out.extend_from_slice(&(channels * 2).to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for s in samples {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    out
+}
+
+/// テスト用：0.1 秒の 1 つの音の WAV（44.1kHz）
+fn short_wav() -> Vec<u8> {
+    let samples: Vec<i16> = (0..4410).map(|i| ((i % 100) * 300 - 15000) as i16).collect();
+    wav_bytes(44_100, 1, &samples)
+}
+
+fn import_sound(app: &mut Is2dApp, bytes: Vec<u8>) -> bool {
+    doc_actions::apply(
+        app,
+        doc_actions::Action::ImportSound {
+            name: "テスト.wav".to_owned(),
+            bytes: bytes.into(),
+        },
+    )
+}
+
+/// WAV は、元のサンプルの速さのまま左右2つずつの波形になり（1 つの音は左右に同じ値）、長さは音の中の位置の単位
+/// （`SOUND_RATE`）で数える。WAV でも MP3 でもないバイトは読めない
+#[test]
+fn sounds_decode_wav_and_refuse_other_bytes() {
+    let bytes = short_wav();
+    let pcm = crate::sound::decode(&bytes).expect("WAV は読める");
+    assert_eq!(pcm.rate, 44_100);
+    assert_eq!(pcm.frames(), 4410);
+    assert!(pcm.samples.chunks(2).all(|lr| lr[0] == lr[1]));
+    let s = crate::sound::Sound::new(1, "a".to_owned(), bytes.clone().into()).unwrap();
+    assert_eq!(s.len(), crate::sound::SOUND_RATE / 10);
+    let stereo = wav_bytes(48_000, 2, &[1, 2, 3, 4, 5, 6]);
+    assert_eq!(crate::sound::decode(&stereo).unwrap().samples, vec![1, 2, 3, 4, 5, 6]);
+    assert!(crate::sound::decode(b"not a sound file at all").is_err());
+    assert!(crate::sound::decode(&bytes[..30]).is_err());
+}
+
+/// 空白のキーフレームに音を読み込むと、音のライブラリに入り、そのキーフレームに頭から終わりまで付く。取り消すと、
+/// 音のライブラリからも消え、やり直すと戻る
+#[test]
+fn importing_a_sound_attaches_it_to_the_blank_keyframe_with_undo() {
+    let mut app = Is2dApp::default();
+    assert!(import_sound(&mut app, short_wav()));
+    let sounds = app.doc.sounds.clone();
+    assert_eq!(sounds.len(), 1);
+    let kf_sound = app.doc.root.layers[0].keyframes[0].sound;
+    assert_eq!(kf_sound, crate::sound::SoundClip::whole(&sounds[0]));
+    assert!(doc_actions::apply(&mut app, doc_actions::Action::Undo));
+    assert!(app.doc.sounds.is_empty());
+    assert_eq!(app.doc.root.layers[0].keyframes[0].sound, None);
+    assert!(doc_actions::apply(&mut app, doc_actions::Action::Redo));
+    assert_eq!(app.doc.sounds.len(), 1);
+    assert_eq!(app.doc.root.layers[0].keyframes[0].sound, kf_sound);
+    // 読めないバイトは、文書を変えずに断る
+    assert!(!import_sound(&mut app, b"broken".to_vec()));
+    assert_eq!(app.doc.sounds.len(), 1);
+}
+
+/// 音の付いたキーフレームは音だけ：絵を描こうとしても断る。絵のあるキーフレームには音を付けられない
+#[test]
+fn sound_keyframes_hold_only_sound() {
+    let stroke = || doc_actions::Action::PaintStroke {
+        points: vec![Point::new(0.0, 0.0), Point::new(40.0, 10.0)],
+        radius: 6.0,
+        color: Color32::RED,
+    };
+    let mut app = Is2dApp::default();
+    assert!(import_sound(&mut app, short_wav()));
+    assert!(!doc_actions::apply(&mut app, stroke()));
+    assert!(app.doc.root.layers[0].keyframes[0].cel.is_empty());
+
+    let mut app = Is2dApp::default();
+    assert!(doc_actions::apply(&mut app, stroke()));
+    assert!(!import_sound(&mut app, short_wav()));
+    assert!(app.doc.sounds.is_empty());
+    assert_eq!(app.doc.root.layers[0].keyframes[0].sound, None);
+}
+
+/// 音は、保存して開いても、読み込んだバイト・名前・番号・キーフレームの区間が同じ
+#[test]
+fn sounds_survive_save_and_open() {
+    let mut app = Is2dApp::default();
+    assert!(import_sound(&mut app, short_wav()));
+    let saved = project_io::ProjectDocument::of(&app.doc);
+    let bytes = project_io::project_file_bytes(&saved).unwrap();
+    let doc = project_io::project_from_bytes(&bytes)
+        .unwrap()
+        .into_document()
+        .unwrap();
+    assert_eq!(doc.sounds.len(), 1);
+    assert_eq!(doc.sounds[0].id, app.doc.sounds[0].id);
+    assert_eq!(doc.sounds[0].name, "テスト.wav");
+    assert_eq!(doc.sounds[0].encoded, app.doc.sounds[0].encoded);
+    assert_eq!(doc.sounds[0].pcm, app.doc.sounds[0].pcm);
+    assert_eq!(
+        doc.root.layers[0].keyframes[0].sound,
+        app.doc.root.layers[0].keyframes[0].sound
+    );
+    assert!(doc.next_sound_id > doc.sounds[0].id);
+}
+
+/// 壊れた音のデータ（読めないバイト・無い音を指す区間・音の長さを越える区間・絵のあるキーフレームの音・重なる番号）は、
+/// 開くときに壊れたファイルとして断る（黙って音を外さない）
+#[test]
+fn broken_sound_data_is_refused_when_opening() {
+    let mut app = Is2dApp::default();
+    assert!(import_sound(&mut app, short_wav()));
+    let good = project_io::ProjectDocument::of(&app.doc);
+    assert!(good.clone().into_document().is_ok());
+    let refused = |f: &dyn Fn(&mut project_io::ProjectDocument)| {
+        let mut d = good.clone();
+        f(&mut d);
+        d.into_document().is_err()
+    };
+    fn kf(d: &mut project_io::ProjectDocument) -> &mut project_io::SavedKeyframe {
+        &mut d.timeline.layers[0].keyframes[0]
+    }
+    assert!(refused(&|d| d.sounds[0].bytes = b"broken".to_vec()));
+    assert!(refused(&|d| kf(d).sound.as_mut().unwrap().sound = 99));
+    assert!(refused(&|d| kf(d).sound.as_mut().unwrap().end += 1));
+    assert!(refused(&|d| {
+        let c = kf(d).sound.as_mut().unwrap();
+        c.start = c.end;
+    }));
+    assert!(refused(&|d| {
+        let s = d.sounds[0].clone();
+        d.sounds.push(s);
+    }));
+    // 絵のあるキーフレームの音
+    let mut drawn = Is2dApp::default();
+    assert!(doc_actions::apply(
+        &mut drawn,
+        doc_actions::Action::PaintStroke {
+            points: vec![Point::new(0.0, 0.0), Point::new(40.0, 10.0)],
+            radius: 6.0,
+            color: Color32::RED,
+        }
+    ));
+    let mut d = project_io::ProjectDocument::of(&drawn.doc);
+    d.sounds = good.sounds.clone();
+    d.timeline.layers[0].keyframes[0].sound = good.timeline.layers[0].keyframes[0].sound;
+    d.write_map_tiles();
+    assert!(d.into_document().is_err());
 }

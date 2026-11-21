@@ -125,6 +125,7 @@ pub(crate) enum UiAction {
     SaveProject,
     SaveProjectAsDialog,
     ExportVideoDialog,
+    ImportSoundDialog,
     CancelVideoExport,
     CloseActiveTab,
     CloseTab(usize),
@@ -158,7 +159,12 @@ pub(crate) fn draw_top_menu_bar(
 ) {
     egui::TopBottomPanel::top("top_menu_bar").show(ctx, |ui| {
         egui::menu::bar(ui, |ui| {
-            draw_file_menu(actions, ui);
+            let tl = tab.active_timeline();
+            let can_import_sound = tl
+                .layers
+                .get(tl.active_layer)
+                .is_some_and(|l| l.sound_slot_at(tl.current_frame).is_some());
+            draw_file_menu(actions, ui, can_import_sound);
             draw_edit_menu(tab, clipboard, actions, ui);
             draw_view_menu(tab, actions, ui);
         });
@@ -178,7 +184,7 @@ fn menu_action_button(ui: &mut egui::Ui, enabled: bool, label: &str, shortcut: &
     clicked
 }
 
-fn draw_file_menu(actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+fn draw_file_menu(actions: &mut Vec<UiAction>, ui: &mut egui::Ui, can_import_sound: bool) {
     ui.menu_button("ファイル", |ui| {
         ui.set_min_width(210.0);
         if menu_action_button(ui, true, "新規作成", &format!("{MOD_KEY}+N")) {
@@ -200,6 +206,13 @@ fn draw_file_menu(actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
             &format!("{MOD_KEY}+Shift+S"),
         ) {
             actions.push(UiAction::SaveProjectAsDialog);
+        }
+
+        ui.separator();
+
+        // 音を付けられるのは、作業中のレイヤーの今のコマが空白のキーフレームのときだけ（`Layer::sound_slot_at`）
+        if menu_action_button(ui, can_import_sound, "音を読み込む（WAV・MP3）…", "") {
+            actions.push(UiAction::ImportSoundDialog);
         }
 
         ui.separator();

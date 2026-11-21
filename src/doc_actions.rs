@@ -263,6 +263,12 @@ pub(crate) enum Action {
         f1: usize,
     },
     ClearTimelineCells,
+    /// 音（名前 `name`・WAV か MP3 のバイト `bytes`）を音のライブラリに入れ、今のコマの音を付けられるキーフレーム
+    /// （`Layer::sound_slot_at`）に、頭から終わりまで付ける
+    ImportSound {
+        name: String,
+        bytes: std::sync::Arc<[u8]>,
+    },
     InsertKeyframe {
         copy_prev: bool,
     },
@@ -349,6 +355,8 @@ fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
         timeline: tl_snap,
         // ライブラリは文書と共有する（書く所だけ `Arc::make_mut` で写す）
         library: tab.doc.library.clone(),
+        // 音のライブラリも文書と共有する
+        sounds: tab.doc.sounds.clone(),
         floating,
         edit_path: tab.session.edit_path.clone(),
         editing_group_path: tab.session.editing_group_path.clone(),
@@ -367,6 +375,48 @@ fn push_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
         }
     }
     push_undo_entry_from_doc(tab, coalesce);
+}
+
+/// 音を読み込んで、今のコマの音を付けられるキーフレーム（作業中のレイヤー：`Layer::sound_slot_at`）に頭から終わりまで
+/// 付ける。付けられる所が無ければ断る。波形にできないバイト・長さが 0 の音は、知らせて断る（文書は変えない）
+fn apply_import_sound(
+    tab: &mut Tab,
+    toast: &mut Option<StatusToast>,
+    name: String,
+    bytes: std::sync::Arc<[u8]>,
+) -> bool {
+    let tl = tab.active_timeline();
+    let frame = tl.current_frame;
+    let layer_idx = tl.active_layer;
+    if tl
+        .layers
+        .get(layer_idx)
+        .and_then(|l| l.sound_slot_at(frame))
+        .is_none()
+    {
+        return false;
+    }
+    let sound = match crate::sound::Sound::new(tab.doc.next_sound_id, name, bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            show_notice(toast, NoticeKind::Error, e);
+            return false;
+        }
+    };
+    let Some(clip) = crate::sound::SoundClip::whole(&sound) else {
+        show_notice(toast, NoticeKind::Error, "音の長さが 0 です");
+        return false;
+    };
+    mutate_timeline_with_undo(tab, |tl, doc| {
+        let layer = &mut tl.layers[layer_idx];
+        let Some(k) = layer.sound_slot_at(frame) else {
+            return false;
+        };
+        layer.keyframe_mut(k).sound = Some(clip);
+        std::sync::Arc::make_mut(&mut doc.sounds).push(std::sync::Arc::new(sound));
+        doc.next_sound_id += 1;
+        true
+    })
 }
 
 fn mutate_timeline_with_undo(
@@ -708,6 +758,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             tab.set_active_cell_selection(None);
             true
         }
+        Action::ImportSound { name, bytes } => apply_import_sound(tab, toast, name, bytes),
         Action::InsertKeyframe { copy_prev } => apply_timeline_insert_keyframe(tab, copy_prev),
         Action::DeleteKeyframe => apply_timeline_delete_keyframe(tab),
         Action::ExtendFrame => apply_timeline_extend_frame(tab),

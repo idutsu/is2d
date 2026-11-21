@@ -17,6 +17,8 @@ postcard = { version = "1.1", default-features = false, features = ["use-std"] }
 crc32fast = "1.5"
 rfd = "0.15"
 tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }
+# 音の読み込み（WAV・MP3 を波形に直す。Rust だけで書かれているので、テストで OS を使わずに確かめられる）
+symphonia = { version = "=0.5.4", default-features = false, features = ["wav", "pcm", "mp3"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = "0.30"

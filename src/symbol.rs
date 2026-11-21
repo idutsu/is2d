@@ -634,11 +634,15 @@ pub(crate) struct Document {
     pub(crate) root: Timeline,
     /// Undo の控えと共有する（書く所だけ `Arc::make_mut` で写す。控えを取る・戻すは `Arc` の入れ替えだけ）
     pub(crate) library: Library,
+    /// 音のライブラリ（キーフレームの音 `SoundClip` が番号で指す。Undo の控えと共有する）
+    pub(crate) sounds: crate::sound::SoundLibrary,
     /// いつも `stage_size_of` で決めた大きさ
     pub(crate) stage_size: Vec2,
     pub(crate) fps: u32,
     pub(crate) next_symbol_id: u64,
     pub(crate) next_group_id: u64,
+    /// 次に読み込む音の番号
+    pub(crate) next_sound_id: u64,
     /// `library` の内容変更世代番号（シンボルのプレビューの一時キャッシュの鍵）
     pub(crate) revision: u64,
     /// ファイルから読んだ地図のうち、使うときに確かめて壊れていたものの場所（画面が取り出して知らせる）
@@ -650,10 +654,12 @@ impl Default for Document {
         Self {
             root: Timeline::default(),
             library: Library::default(),
+            sounds: Default::default(),
             stage_size: Vec2::new(800.0, 450.0),
             fps: 24,
             next_symbol_id: 1,
             next_group_id: 1,
+            next_sound_id: 1,
             revision: 0,
             broken_maps: Default::default(),
         }

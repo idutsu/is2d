@@ -1938,6 +1938,7 @@ impl Session {
 pub(crate) struct UndoEntry {
     pub(crate) timeline: Timeline,
     pub(crate) library: Library,
+    pub(crate) sounds: crate::sound::SoundLibrary,
     pub(crate) floating: Option<Arc<Floating>>,
     pub(crate) edit_path: EditPath,
     pub(crate) editing_group_path: Vec<u64>,
@@ -2486,6 +2487,7 @@ impl Tab {
         let prev_entry = UndoEntry {
             timeline: std::mem::replace(&mut self.doc.root, entry.timeline),
             library: self.doc.library.clone(),
+            sounds: self.doc.sounds.clone(),
             floating: prev_floating,
             edit_path: std::mem::replace(&mut self.session.edit_path, entry.edit_path),
             editing_group_path: std::mem::replace(
@@ -2498,6 +2500,7 @@ impl Tab {
             commit_id: std::mem::replace(&mut self.history.current_commit_id, entry.commit_id),
         };
         self.doc.library = entry.library;
+        self.doc.sounds = entry.sounds;
         self.doc.revision = entry.symbols_revision;
         self.doc.validate_edit_path(
             &mut self.session.edit_path,

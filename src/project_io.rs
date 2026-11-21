@@ -24,7 +24,7 @@ use crate::timeline::{
 /// 変わった塊の量に見合い、開いた後のメモリが見る順に左右されない：レビュー f01d518 の R4 の (a)）。インスタンスの重なり
 /// 位置は階層の地図の並びで書く（`order`）。面の図形は文書に持たず、使うときに地図から作る。それより前の版は開かない。
 /// 設計：claude/保存の形をバイナリにする設計_版6_7b5f6c4.md、claude/ゼロベースレビューf01d518の直し_まとまり3の説明.md
-pub(crate) const PROJECT_FORMAT_VERSION: u32 = 7;
+pub(crate) const PROJECT_FORMAT_VERSION: u32 = 8;
 
 /// `.is2d` ファイルの先頭の印
 const PROJECT_FILE_MAGIC: [u8; 4] = *b"IS2D";
@@ -446,6 +446,25 @@ pub(crate) struct SavedKeyframe {
     pub(crate) maps: Vec<SavedScopeMap>,
     #[serde(default)]
     pub(crate) instances: Vec<SavedSymbolInstance>,
+    /// 付けた音の区間（版 8 から）
+    #[serde(default)]
+    pub(crate) sound: Option<SavedSoundClip>,
+}
+
+/// キーフレームの音の区間の保存の形（`SoundClip`：音の番号と、音の中の始まり・終わり。`SOUND_RATE` の単位）
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) struct SavedSoundClip {
+    pub(crate) sound: u64,
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+}
+
+/// 音のライブラリの1つの音の保存の形：番号・名前・読み込んだ WAV・MP3 のバイトのまま
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct SavedSound {
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    pub(crate) bytes: Vec<u8>,
 }
 
 impl SavedKeyframe {
@@ -462,6 +481,11 @@ impl SavedKeyframe {
                 .iter()
                 .map(SavedSymbolInstance::from)
                 .collect(),
+            sound: kf.sound.map(|c| SavedSoundClip {
+                sound: c.sound,
+                start: c.start,
+                end: c.end,
+            }),
         }
     }
 }
@@ -510,7 +534,20 @@ impl Keyframe {
             .collect();
         *trimmed |= instances.len() < saved_instances;
         let cel = Cel::from_saved(s.maps, instances);
-        Ok((s.start_frame, Self::with_cel(cel, s.tween, s.tween_rotate)))
+        // 音の付いたキーフレームは音だけ（セル画が空でなければ壊れたファイル）。音の区間が正しいかは、音のライブラリを
+        // 読んでから確かめる（`into_document_noting`）
+        if s.sound.is_some() && !cel.is_empty() {
+            return Err(broken());
+        }
+        let sound = s.sound.map(|c| crate::sound::SoundClip {
+            sound: c.sound,
+            start: c.start,
+            end: c.end,
+        });
+        Ok((
+            s.start_frame,
+            Self::with_cel(cel, s.tween, s.tween_rotate).with_sound(sound),
+        ))
     }
 }
 
@@ -723,6 +760,11 @@ pub(crate) struct ProjectDocument {
     /// 地図の塊の表（キーフレームの地図は、この表の塊の番号の並び）
     #[serde(default)]
     pub(crate) map_tiles: SavedTiles,
+    /// 音のライブラリ（版 8 から）
+    #[serde(default)]
+    pub(crate) sounds: Vec<SavedSound>,
+    #[serde(default)]
+    pub(crate) next_sound_id: u64,
 }
 
 /// 番号 `id`（レイヤー・シンボル・グループ・インスタンス）が、ファイルから読んでそのまま使える番号か（0 でなく、安全な
@@ -769,6 +811,16 @@ impl ProjectDocument {
             next_group_id: doc.next_group_id,
             recovery_source: None,
             map_tiles: SavedTiles::default(),
+            sounds: doc
+                .sounds
+                .iter()
+                .map(|s| SavedSound {
+                    id: s.id,
+                    name: s.name.clone(),
+                    bytes: s.encoded.to_vec(),
+                })
+                .collect(),
+            next_sound_id: doc.next_sound_id,
         };
         out.write_map_tiles();
         out
@@ -844,6 +896,16 @@ impl ProjectDocument {
             return Err(broken());
         }
         self.map_tiles = SavedTiles::default();
+        // 音のライブラリ：どの音も、使える番号（`is_safe_id`）で番号が重ならず、波形にできること。そうでなければ壊れた
+        // ファイル（黙って音を外さない）
+        let mut sounds: Vec<Arc<crate::sound::Sound>> = Vec::with_capacity(self.sounds.len());
+        let mut sound_ids = HashSet::with_capacity(self.sounds.len());
+        for s in std::mem::take(&mut self.sounds) {
+            if !is_safe_id(s.id) || !sound_ids.insert(s.id) {
+                return Err("プロジェクトファイルの音が壊れています".to_owned());
+            }
+            sounds.push(Arc::new(crate::sound::Sound::new(s.id, s.name, s.bytes.into())?));
+        }
         let fps = self.timeline.fps.clamp(1, 60);
         let mut timeline = Timeline::from_saved(self.timeline, trimmed)?;
 
@@ -964,13 +1026,31 @@ impl ProjectDocument {
         // 数が有限なことは、読み込みの初めに確かめてある（`only_finite_numbers`。ステージの大きさも同じ `stage_size_of`）
         let stage_size = crate::symbol::stage_size_of(Vec2::from(self.stage_size))
             .expect("読み込みの初めに有限か確かめてある");
+        // キーフレームの音の区間は、どれも音のライブラリの音を指し、その音の長さに収まること（`SoundClip::fits`）
+        let clips_fit = std::iter::once(&timeline)
+            .chain(library.iter().map(|s| &s.timeline))
+            .flat_map(|tl| tl.layers.iter())
+            .flat_map(|l| l.keyframes.iter())
+            .filter_map(|kf| kf.sound)
+            .all(|c| c.fits(&sounds));
+        if !clips_fit {
+            return Err("プロジェクトファイルの音が壊れています".to_owned());
+        }
+        let max_sound_id = sounds.iter().map(|s| s.id).max().unwrap_or(0);
+        let raw_next_sound_id = if self.next_sound_id <= MAX_SAFE_ENTITY_ID {
+            self.next_sound_id
+        } else {
+            1
+        };
         let doc = Document {
             root: timeline,
             library: library.into_iter().map(Arc::new).collect(),
+            sounds: Arc::new(sounds),
             stage_size,
             fps,
             next_symbol_id: raw_next_sym_id.max(max_sym_id.saturating_add(1)).max(1),
             next_group_id: raw_next_gid.max(next_gid).max(1),
+            next_sound_id: raw_next_sound_id.max(max_sound_id.saturating_add(1)).max(1),
             revision: crate::vector_engine::next_mesh_revision(),
             broken_maps: Default::default(),
         };

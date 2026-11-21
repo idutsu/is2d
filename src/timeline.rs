@@ -1476,7 +1476,8 @@ impl Cel {
     }
 }
 
-/// タイムライン上のキーフレーム（セル画 `Cel`、クラシックトゥイーン有効フラグ `tween`、トゥイーン回転方向 `tween_rotate`）。
+/// タイムライン上のキーフレーム（セル画 `Cel`、クラシックトゥイーン有効フラグ `tween`、トゥイーン回転方向 `tween_rotate`、
+/// 音 `sound`）。
 /// 始まりのコマ（0 から）はキーフレームの列が持つ（`Layer::start_of`。キーフレームには列の塊の基準からの差だけを持つ：
 /// `ChunkedList::key`）
 #[derive(Clone, Debug)]
@@ -1485,6 +1486,8 @@ pub(crate) struct Keyframe {
     pub(crate) cel: Cel,
     pub(crate) tween: bool,
     pub(crate) tween_rotate: TweenRotate,
+    /// 付けた音の区間（音を付けたキーフレームは音だけ：セル画は空。設計：claude/オーディオの設計_9693dbf.md）
+    pub(crate) sound: Option<crate::sound::SoundClip>,
 }
 
 impl crate::chunked_list::Keyed for Keyframe {
@@ -1508,17 +1511,25 @@ impl Keyframe {
             cel,
             tween,
             tween_rotate,
+            sound: None,
         }
     }
 
-    /// キーフレーム内のセル図形とトゥイーン設定をクリアし、変更があったかどうかを返す
+    /// 音の区間を `sound` にしたもの
+    pub(crate) fn with_sound(mut self, sound: Option<crate::sound::SoundClip>) -> Self {
+        self.sound = sound;
+        self
+    }
+
+    /// キーフレーム内のセル図形・トゥイーン設定・音をクリアし、変更があったかどうかを返す
     pub(crate) fn clear_cel(&mut self) -> bool {
-        if self.cel.is_empty() && !self.tween {
+        if self.cel.is_empty() && !self.tween && self.sound.is_none() {
             false
         } else {
             self.cel.clear(&[]);
             self.tween = false;
             self.tween_rotate = TweenRotate::Auto;
+            self.sound = None;
             true
         }
     }
@@ -1807,7 +1818,7 @@ impl Layer {
         let kf = &self.keyframes[kf_idx];
         let kf_start = self.start_of(kf_idx);
         if kf_start == frame {
-            return Keyframe::with_cel(kf.cel.clone(), kf.tween, kf.tween_rotate);
+            return Keyframe::with_cel(kf.cel.clone(), kf.tween, kf.tween_rotate).with_sound(kf.sound);
         }
 
         // 図形の列は元のキーフレームと共有する（このレイヤーのセルの図形は、もともと layer_id がこのレイヤー）。
@@ -1884,10 +1895,11 @@ impl Layer {
                 existing.cel = kf.cel;
                 existing.tween = valid_tween;
                 existing.tween_rotate = rotate_mode;
+                existing.sound = kf.sound;
             } else {
                 self.insert_keyframe_starting_at(
                     target_f,
-                    Keyframe::with_cel(kf.cel, valid_tween, rotate_mode),
+                    Keyframe::with_cel(kf.cel, valid_tween, rotate_mode).with_sound(kf.sound),
                 );
             }
         }
@@ -1966,7 +1978,7 @@ impl Layer {
         }
     }
 
-    /// 指定フレーム `frame` においてこのレイヤーが編集可能（表示中・非ロック・フレーム作成済み・キーフレームあり・トゥイーンの途中ではない）であるかを返す
+    /// 指定フレーム `frame` においてこのレイヤーが編集可能（表示中・非ロック・フレーム作成済み・キーフレームあり・トゥイーンの途中ではない・音の付いたキーフレームではない）であるかを返す
     pub(crate) fn is_editable_at(&self, frame: usize) -> bool {
         self.edit_block_at(frame).is_none()
     }
@@ -1980,9 +1992,27 @@ impl Layer {
             Some(EditBlock::NoFrame)
         } else if self.interpolated_tween_binding_at(frame).is_some() {
             Some(EditBlock::TweenMiddle)
+        } else if self
+            .keyframe_index_at(frame)
+            .is_some_and(|k| self.keyframes[k].sound.is_some())
+        {
+            Some(EditBlock::SoundKeyframe)
         } else {
             None
         }
+    }
+
+    /// コマ `frame` で音を付けられるキーフレームの番号：絵を描けるのと同じ決まり（音がもう付いていることだけは構わない：
+    /// 付け替える）で、セル画が空のキーフレーム。音を付けられる所の決まりはこれ1つ（読み込み・プロパティの欄）
+    pub(crate) fn sound_slot_at(&self, frame: usize) -> Option<usize> {
+        if !matches!(
+            self.edit_block_at(frame),
+            None | Some(EditBlock::SoundKeyframe)
+        ) {
+            return None;
+        }
+        let k = self.keyframe_index_at(frame)?;
+        self.keyframes[k].cel.is_empty().then_some(k)
     }
 
     /// タイムラインの操作（フレームの挿入・削除・移動、トゥイーンの設定）で、このレイヤーを変えてよいか（ロックして
@@ -2001,6 +2031,8 @@ pub(crate) enum EditBlock {
     NoFrame,
     /// トゥイーンの途中のコマ
     TweenMiddle,
+    /// 音の付いたキーフレーム（音だけ：絵は描けない）
+    SoundKeyframe,
 }
 
 /// レイヤー配列・現在のフレーム・セル範囲選択を管理するタイムライン構造体（永続ドキュメント状態）

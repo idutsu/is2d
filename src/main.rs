@@ -11,6 +11,7 @@ mod planar_map;
 mod project_io;
 mod recovery;
 mod select_ops;
+mod sound;
 mod stored_map;
 mod symbol;
 mod symbol_ops;
@@ -324,6 +325,37 @@ impl Is2dApp {
     }
 
     /// 保存先選択ダイアログを表示し、現在のタブの動画（MP4）書き出しをバックグラウンドで開始する
+    /// 音のファイル（WAV・MP3）を選んで読み、今のコマのキーフレームに付ける（`Action::ImportSound`）。読めなければ知らせる
+    pub(crate) fn import_sound_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("音 (*.wav, *.mp3)", &["wav", "mp3"])
+            .pick_file()
+        else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("音")
+            .to_owned();
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                apply(
+                    self,
+                    Action::ImportSound {
+                        name,
+                        bytes: bytes.into(),
+                    },
+                );
+            }
+            Err(e) => canvas_tool::show_notice(
+                &mut self.toast,
+                canvas_tool::NoticeKind::Error,
+                format!("音のファイルを読めません: {e}"),
+            ),
+        }
+    }
+
     pub(crate) fn export_video_dialog(&mut self) {
         if self.video_export.is_some() {
             return;
@@ -465,6 +497,7 @@ impl Is2dApp {
             UiAction::SaveProject => project_io::save_project(self),
             UiAction::SaveProjectAsDialog => project_io::save_project_as_dialog(self),
             UiAction::ExportVideoDialog => self.export_video_dialog(),
+            UiAction::ImportSoundDialog => self.import_sound_dialog(),
             UiAction::CancelVideoExport => self.cancel_active_video_export(),
             UiAction::CloseActiveTab => project_io::close_active_tab(self, Some(ctx)),
             UiAction::CloseTab(idx) => project_io::close_tab(self, idx, Some(ctx)),
@@ -815,6 +848,9 @@ impl Is2dApp {
             }
             Some(EditBlock::TweenMiddle) => {
                 "トゥイーンの途中のコマは編集できません（F6 でキーフレームを挿入してください）"
+            }
+            Some(EditBlock::SoundKeyframe) => {
+                "音の付いたキーフレームには絵を描けません（音を「なし」にするか、別のレイヤーを使ってください）"
             }
             Some(EditBlock::HiddenOrLocked) | None => {
                 "\u{e897} 現在のレイヤーはロック中または非表示のため編集できません"
