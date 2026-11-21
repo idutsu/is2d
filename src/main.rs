@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 mod app_menu_macos;
+mod audio_out;
 mod canvas_tool;
 mod chunked_list;
 mod clipboard_ops;
@@ -67,6 +68,7 @@ fn main() -> eframe::Result<()> {
             configure_japanese_fonts(&cc.egui_ctx);
             configure_sharp_light_theme(&cc.egui_ctx);
             let mut app = Is2dApp::default();
+            app.timeline_ui.audio = audio_out::AudioOut::open(&cc.egui_ctx);
             app.recovery.dir = recovery::default_recovery_dir();
             app.recovery.find_leftovers();
             Ok(Box::new(app))
@@ -1084,8 +1086,9 @@ impl Is2dApp {
             );
             ctx.request_repaint();
         }
-        // そのフレームの操作をすべて適用した後の状態からウィンドウタイトルを更新する
+        // そのフレームの操作をすべて適用した後の状態からウィンドウタイトルを更新し、コマが変わっていれば音を鳴らす
         project_io::update_window_title(self, ctx);
+        timeline_ui::scrub_on_frame_change(self);
     }
 }
 

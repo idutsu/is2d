@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
-use crate::canvas_tool::{cancel_active_drag, CoalesceKey, Tab};
+use crate::audio_out::AudioOut;
+use crate::canvas_tool::{cancel_active_drag, show_notice, CoalesceKey, NoticeKind, Tab};
 use crate::doc_actions::{apply, Action, ActionHost};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{
@@ -135,19 +136,33 @@ pub(crate) enum TimelineGridDrag {
     },
 }
 
+/// タイムラインの識別キー `(doc_id, edit_stack_len, active_symbol_id)`（`timeline_key`）
+type TimelineKey = (u64, usize, Option<u64>);
+
+/// タブ `tab` の今のタイムラインの識別キー（タブの切り替え・シンボルの出入りで変わる）
+fn timeline_key(tab: &Tab) -> TimelineKey {
+    (
+        tab.id,
+        tab.session.edit_path.len(),
+        tab.session.edit_path.last().map(|s| s.symbol_id),
+    )
+}
+
 /// タイムラインパネルの再生状態・ループ設定・スクロール位置・ドラッグ操作等のUI状態
-#[derive(Clone, Debug)]
 pub(crate) struct TimelineUiState {
     pub(crate) is_playing: bool,
     pub(crate) loop_playback: bool,
-    pub(crate) last_frame_advance_time: Option<f64>,
+    /// 再生とスクラブの音を鳴らし、再生のコマを決める数を数える（音の時計）
+    pub(crate) audio: AudioOut,
+    /// 直近の画面で見た、タイムラインとコマ（コマが変わったらスクラブで鳴らす：`scrub_on_frame_change`）
+    heard: Option<(TimelineKey, usize)>,
     pub(crate) scroll_x: f32,
     pub(crate) scroll_y: f32,
     pub(crate) last_ensured_frame: usize,
     pub(crate) dragging_layer: Option<usize>,
     pub(crate) grid_drag: TimelineGridDrag,
-    /// 直近に同期したタイムライン識別キー `(doc_id, edit_stack_len, active_symbol_id)`
-    last_timeline_key: (u64, usize, Option<u64>),
+    /// 直近に同期したタイムライン識別キー
+    last_timeline_key: TimelineKey,
 }
 
 impl Default for TimelineUiState {
@@ -155,7 +170,8 @@ impl Default for TimelineUiState {
         Self {
             is_playing: false,
             loop_playback: true,
-            last_frame_advance_time: None,
+            audio: AudioOut::silent(),
+            heard: None,
             scroll_x: 0.0,
             scroll_y: 0.0,
             last_ensured_frame: 0,
@@ -174,18 +190,28 @@ impl TimelineUiState {
 
     pub(crate) fn reset_for_timeline_switch(&mut self) {
         self.is_playing = false;
-        self.last_frame_advance_time = None;
+        self.audio.stop();
         self.scroll_x = 0.0;
         self.scroll_y = 0.0;
         self.last_ensured_frame = usize::MAX;
         self.cancel_drag();
     }
 
+    /// 今のタイムライン（ルートか、編集中のシンボルの）を、今のコマから鳴らして再生する（くり返すかは `loop_playback`）。
+    /// 再生のコマは鳴らした数から決める（`update_playback`）ので、fps・くり返しを変えたときも、ここで今のコマから鳴らし直す
+    fn start_playback(&mut self, tab: &Tab) {
+        let tl = tab.active_timeline();
+        let end = tl.total_frames.max(1);
+        self.audio
+            .play(&tab.doc, tl, tl.current_frame, end, self.loop_playback);
+        self.is_playing = true;
+    }
+
     /// 再生中であれば停止し、停止時点のフレームの状態に合わせて編集スコープを整合させる
     pub(crate) fn stop_playback(&mut self, tab: &mut Tab) {
         if self.is_playing {
             self.is_playing = false;
-            self.last_frame_advance_time = None;
+            self.audio.stop();
             tab.refresh_scene_base();
             tab.session.sanitize_editing_scope();
         }
@@ -194,11 +220,7 @@ impl TimelineUiState {
     /// `tab` の現在のタイムライン識別キー `(id, edit_stack_len, active_symbol_id)` を読み取り、
     /// シンボル進入/退出やタブ切り替えが発生していればスクロール・ドラッグ状態を自動リセットする
     pub(crate) fn ensure_timeline_context(&mut self, tab: &Tab) {
-        let key = (
-            tab.id,
-            tab.session.edit_path.len(),
-            tab.session.edit_path.last().map(|s| s.symbol_id),
-        );
+        let key = timeline_key(tab);
         if self.last_timeline_key != key {
             self.last_timeline_key = key;
             self.reset_for_timeline_switch();
@@ -556,6 +578,10 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
         .clicked()
     {
         host.timeline_ui_mut().loop_playback = !loop_pb;
+        if host.timeline_ui().is_playing {
+            let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
+            timeline_ui.start_playback(tab);
+        }
     }
 }
 
@@ -575,7 +601,8 @@ fn draw_control_bar_frame_and_fps(host: &mut impl TimelineHost, ui: &mut egui::U
     if fps_resp.changed() {
         let next_fps = fps_val.clamp(1, crate::symbol::MAX_FPS);
         if apply(host, Action::SetFps { fps: next_fps }) && host.timeline_ui().is_playing {
-            host.timeline_ui_mut().last_frame_advance_time = None;
+            let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
+            timeline_ui.start_playback(tab);
         }
     }
     if editing_idle(&[&fps_resp]) {
@@ -2202,53 +2229,51 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
         if curr_f >= total_f || (!loop_pb && curr_f >= last_f) {
             tab.set_active_frame(0);
         }
-        timeline_ui.is_playing = true;
-        timeline_ui.last_frame_advance_time = None;
+        timeline_ui.start_playback(tab);
     }
 }
 
-/// 再生中のフレーム自動進行を処理する
+/// 再生中のコマを、音の出力が鳴らした所から決める（音の時計：設計の 5.1。再生を始めたコマの始まりに、鳴らしたサンプルの
+/// 数を足した所が入るコマ）。くり返さないときは、最後のコマを鳴らし終えたら最後のコマで止める。音の出力が使えなくなって
+/// いたら知らせる
 /// （再生中は毎コマの `FillShape` クローンを行わず、`Cel` の結合メッシュキャッシュから直接高速描画する）
 pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context) {
+    if let Some(why) = host.timeline_ui_mut().audio.tick() {
+        show_notice(host.toast_mut(), NoticeKind::Warning, why);
+    }
     let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
     timeline_ui.ensure_timeline_context(tab);
     if !timeline_ui.is_playing {
-        timeline_ui.last_frame_advance_time = None;
         return;
     }
-    let fps = tab.doc.fps.clamp(1, crate::symbol::MAX_FPS);
-    let frame_interval = 1.0 / (fps as f64);
+    let fps = tab.doc.fps;
     let now = ctx.input(|i| i.time);
-
-    if let Some(last_time) = timeline_ui.last_frame_advance_time {
-        let elapsed = now - last_time;
-        if elapsed >= frame_interval {
-            let steps = ((elapsed / frame_interval).floor() as usize).max(1);
-            timeline_ui.last_frame_advance_time = Some(last_time + (steps as f64) * frame_interval);
-            let loop_pb = timeline_ui.loop_playback;
-            let (curr_f, total) = {
-                let tl = tab.active_timeline();
-                (tl.current_frame, tl.total_frames.max(1))
-            };
-            let (next_f, stopped) = if loop_pb {
-                ((curr_f + steps) % total, false)
-            } else {
-                let next = curr_f + steps;
-                if next >= total - 1 {
-                    (total - 1, true)
-                } else {
-                    (next, false)
-                }
-            };
-            tab.advance_playback_frame(next_f);
-            if stopped {
-                timeline_ui.stop_playback(tab);
-                return;
-            }
+    let rate = timeline_ui.audio.rate();
+    match timeline_ui.audio.position(now) {
+        Some(pos) => tab.advance_playback_frame(crate::sound::frame_at(pos, rate, fps)),
+        None => {
+            let last = tab.active_timeline().total_frames.max(1) - 1;
+            tab.advance_playback_frame(last);
+            timeline_ui.stop_playback(tab);
+            return;
         }
-    } else {
-        timeline_ui.last_frame_advance_time = Some(now);
     }
+    ctx.request_repaint_after(Duration::from_secs_f64(0.5 / f64::from(fps.max(1))));
+}
 
-    ctx.request_repaint_after(Duration::from_secs_f64(frame_interval * 0.5));
+/// 再生していないときに、同じタイムラインの今のコマが変わったら、そのコマの音を1コマ分だけ鳴らす（スクラブ：設計の
+/// 5.2。前のスクラブの音は打ち切る）。画面の操作をすべて終えた後に1回呼ぶ。タブの切り替え・シンボルの出入りは、コマを
+/// 動かしたのではないので鳴らさない
+pub(crate) fn scrub_on_frame_change(host: &mut impl TimelineHost) {
+    let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
+    let tl = tab.active_timeline();
+    let seen = (timeline_key(tab), tl.current_frame);
+    let before = timeline_ui.heard.replace(seen);
+    if timeline_ui.is_playing || before.is_none_or(|(key, frame)| key != seen.0 || frame == seen.1)
+    {
+        return;
+    }
+    timeline_ui
+        .audio
+        .play(&tab.doc, tl, seen.1, seen.1 + 1, false);
 }

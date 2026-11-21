@@ -19,6 +19,8 @@ rfd = "0.15"
 tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }
 # 音の読み込み（WAV・MP3 を波形に直す。Rust だけで書かれているので、テストで OS を使わずに確かめられる）
 symphonia = { version = "=0.5.4", default-features = false, features = ["wav", "pcm", "mp3"] }
+# 音の出力（macOS では Core Audio。再生とスクラブの音を鳴らし、鳴らした量で再生のコマを進める：src/audio_out.rs）
+cpal = { version = "=0.15.3", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = "0.30"

@@ -7540,7 +7540,7 @@ fn test_time_based_playback_advance_and_onion_skin_rendering() {
     assert_eq!(app.doc.root.current_frame, 1);
     assert!(app.timeline_ui.is_playing);
 
-    // t = 1.35s (最終フレーム Frame 2 に到達して自動停止)
+    // t = 1.35s (最終フレーム Frame 2 を鳴らし終えて（0.3 秒）自動停止)
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
@@ -7554,7 +7554,7 @@ fn test_time_based_playback_advance_and_onion_skin_rendering() {
     assert_eq!(app.doc.root.current_frame, 2);
     assert!(
         !app.timeline_ui.is_playing,
-        "loop_playback == false のとき最終フレーム到達で is_playing が false になり自動停止すること"
+        "loop_playback == false のとき最終フレームを鳴らし終えると is_playing が false になり自動停止すること"
     );
 }
 
@@ -13749,7 +13749,8 @@ fn test_g1_4_playback_advance_skips_base_cache_rebuild_and_stop_refreshes() {
         "再生停止時点で現在フレーム (Frame 1) の土台キャッシュが揃うこと"
     );
 
-    // 再び再生を開始し、最終フレーム (Frame 2) で自動停止した際にも stop_playback 経由で土台キャッシュが揃うこと
+    // 再び再生を開始し、最終フレーム (Frame 2) を鳴らし終えて自動停止した際にも stop_playback 経由で土台キャッシュが
+    // 揃うこと（Frame 1 から始めて 0.2 秒で Frame 2 の終わり）
     timeline_ui::toggle_playback(&mut app);
     assert!(app.timeline_ui.is_playing);
     let _ = ctx.run(
@@ -13765,7 +13766,7 @@ fn test_g1_4_playback_advance_skips_base_cache_rebuild_and_stop_refreshes() {
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
-            time: Some(2.15),
+            time: Some(2.25),
             ..Default::default()
         },
         |ctx| {
@@ -15780,14 +15781,22 @@ fn test_m2_8_document_shapes_never_store_fill_mesh_after_playback_onion_edit_and
     app.view.onion_skin_enabled = true;
     app.view.onion_prev_frames = 2;
     app.view.onion_next_frames = 2;
-    for f in 0..8 {
-        app.advance_playback_frame(f);
-        app.timeline_ui.is_playing = true;
-        app.timeline_ui.last_frame_advance_time = None;
-        let full_output = ctx.run(raw_input.clone(), |ctx| {
-            app.update_ui(ctx);
-        });
+    // 再生のコマは鳴らした数（装置の無いテストでは画面の時刻）で進む：時刻 0 で始め、コマ f の半ばの時刻に描く
+    timeline_ui::toggle_playback(&mut app);
+    let fps = f64::from(app.doc.fps);
+    for (f, time) in std::iter::once((0, 0.0)).chain((0..8).map(|f| (f, (f as f64 + 0.5) / fps))) {
+        let full_output = ctx.run(
+            egui::RawInput {
+                time: Some(time),
+                ..raw_input.clone()
+            },
+            |ctx| {
+                app.update_ui(ctx);
+            },
+        );
         let _ = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        assert!(app.timeline_ui.is_playing);
+        assert_eq!(app.doc.root.current_frame, f);
     }
     app.stop_playback();
     assert!(
@@ -36422,7 +36431,7 @@ fn sounding_at_follows_the_frame_on_the_root() {
     let mut doc = doc_with_flat_sound();
     put_clip(&mut doc.root, 30, flat_clip());
     let pos = |doc: &symbol::Document, f: usize| -> Vec<u64> {
-        crate::sound::sounding_at(doc, f).iter().map(|v| v.pos).collect()
+        crate::sound::sounding_at(doc, &doc.root, f).iter().map(|v| v.pos).collect()
     };
     assert_eq!(pos(&doc, 0), vec![0]);
     assert_eq!(pos(&doc, 12), vec![24_000]);
@@ -36439,9 +36448,9 @@ fn splitting_a_sound_with_f6_keeps_the_same_sound() {
     let mut doc = doc_with_flat_sound();
     put_clip(&mut doc.root, 30, flat_clip());
     let before: Vec<Vec<u64>> = (0..30)
-        .map(|f| crate::sound::sounding_at(&doc, f).iter().map(|v| v.pos).collect())
+        .map(|f| crate::sound::sounding_at(&doc, &doc.root, f).iter().map(|v| v.pos).collect())
         .collect();
-    let mixed_before = crate::sound::mix(&doc, 0, 48_000, 48_000);
+    let mixed_before = crate::sound::mix(&doc, &doc.root, 0, 48_000, 48_000);
     assert!(doc.root.layers[0].insert_keyframe(12, true, doc.fps));
     let kfs: Vec<_> = doc.root.layers[0].keyframes.iter().map(|k| k.sound).collect();
     assert_eq!(
@@ -36452,17 +36461,17 @@ fn splitting_a_sound_with_f6_keeps_the_same_sound() {
         ]
     );
     let after: Vec<Vec<u64>> = (0..30)
-        .map(|f| crate::sound::sounding_at(&doc, f).iter().map(|v| v.pos).collect())
+        .map(|f| crate::sound::sounding_at(&doc, &doc.root, f).iter().map(|v| v.pos).collect())
         .collect();
     assert_eq!(before, after);
-    assert_eq!(crate::sound::mix(&doc, 0, 48_000, 48_000), mixed_before);
+    assert_eq!(crate::sound::mix(&doc, &doc.root, 0, 48_000, 48_000), mixed_before);
 
     // 48,000 を割り切らない fps（7）でも、分けた所で音が途切れない（位置の丸めのずれは 1 まで）
     let mut doc = doc_with_flat_sound();
     doc.fps = 7;
     put_clip(&mut doc.root, 30, flat_clip());
     assert!(doc.root.layers[0].insert_keyframe(3, true, doc.fps));
-    let m = crate::sound::mix(&doc, 0, 48_000, 48_000);
+    let m = crate::sound::mix(&doc, &doc.root, 0, 48_000, 48_000);
     let split = 3 * 48_000 / 7;
     assert!(
         (split - 200..split + 200).all(|i| (m[2 * i] - 0.5).abs() < 1e-6),
@@ -36504,7 +36513,7 @@ fn sounds_inside_symbols_follow_the_internal_frame() {
         doc
     };
     let pos = |doc: &symbol::Document, f: usize| -> Vec<u64> {
-        crate::sound::sounding_at(doc, f).iter().map(|v| v.pos).collect()
+        crate::sound::sounding_at(doc, &doc.root, f).iter().map(|v| v.pos).collect()
     };
     let looped = build(&[SymbolLoopMode::Loop]);
     let got: Vec<Vec<u64>> = (0..6).map(|f| pos(&looped, f)).collect();
@@ -36518,7 +36527,7 @@ fn sounds_inside_symbols_follow_the_internal_frame() {
     let fixed = build(&[SymbolLoopMode::SingleFrame]);
     assert!((0..6).all(|f| pos(&fixed, f).is_empty()));
     let two = build(&[SymbolLoopMode::Loop, SymbolLoopMode::Loop]);
-    let voices = crate::sound::sounding_at(&two, 1);
+    let voices = crate::sound::sounding_at(&two, &two.root, 1);
     assert_eq!(voices.len(), 2);
     assert_ne!(voices[0].key, voices[1].key);
 }
@@ -36528,10 +36537,10 @@ fn sounds_inside_symbols_follow_the_internal_frame() {
 #[test]
 fn mixing_fades_only_where_the_sound_jumps() {
     let empty = symbol::Document::default();
-    assert!(crate::sound::mix(&empty, 0, 4800, 48_000).iter().all(|&x| x == 0.0));
+    assert!(crate::sound::mix(&empty, &empty.root, 0, 4800, 48_000).iter().all(|&x| x == 0.0));
     let mut doc = doc_with_flat_sound();
     put_clip(&mut doc.root, 30, flat_clip());
-    let m = crate::sound::mix(&doc, 0, 48_000, 48_000);
+    let m = crate::sound::mix(&doc, &doc.root, 0, 48_000, 48_000);
     let left = |i: usize| m[2 * i];
     assert_eq!(left(0), 0.0, "鳴り始めは 0 から");
     assert!(left(10) > 0.0 && left(10) < 0.5);
@@ -36558,7 +36567,7 @@ fn mixing_fades_only_where_the_sound_jumps() {
         parent_scope: Vec::new(),
         order: 0,
     });
-    let m = crate::sound::mix(&doc, 0, 12_000, 48_000);
+    let m = crate::sound::mix(&doc, &doc.root, 0, 12_000, 48_000);
     let left = |i: usize| m[2 * i];
     assert!((left(5000) - 0.5).abs() < 1e-6, "3 コマの中は途切れない");
     assert!(left(5999) < 0.05 && left(6000) == 0.0, "頭へ戻る所でつなぎ直す");
@@ -36745,7 +36754,7 @@ fn trim(doc: &mut symbol::Document, kf_start: usize, edge: crate::sound::SoundEd
 
 fn positions(doc: &symbol::Document) -> Vec<Option<u64>> {
     (0..40)
-        .map(|f| crate::sound::sounding_at(doc, f).first().map(|v| v.pos))
+        .map(|f| crate::sound::sounding_at(doc, &doc.root, f).first().map(|v| v.pos))
         .collect()
 }
 
@@ -36865,4 +36874,156 @@ fn trim_sound_action_with_undo_and_refusals() {
     assert!(!trim_action(&mut app, 0, Start, 3), "鳴り終わるコマ（3 コマ目）の1つ手前まで");
     app.doc.root.layers[0].locked = true;
     assert!(!trim_action(&mut app, 0, End, 2), "ロックしたレイヤー");
+}
+
+// ============================================================================
+// 音を鳴らす（設計：claude/オーディオの設計_9693dbf.md の 4 段目：音の時計・くり返しのつなぎ・スクラブ）
+// ============================================================================
+
+/// テスト用：fps 24 で、ルートの1枚目のレイヤー 10 コマのコマ 0 に、のこぎりの形の 1 秒の音（位置ごとに値が違う）を
+/// 付けた文書（音はレイヤーの終わりのコマ 10 で切れる）
+fn doc_with_saw_sound() -> symbol::Document {
+    let mut doc = symbol::Document {
+        fps: 24,
+        ..Default::default()
+    };
+    let samples: Vec<i16> = (0..48_000).map(|i| ((i % 4000) * 8 - 16000) as i16).collect();
+    let bytes = wav_bytes(48_000, 1, &samples);
+    let s = crate::sound::Sound::new(1, "saw".to_owned(), bytes.into()).unwrap();
+    std::sync::Arc::make_mut(&mut doc.sounds).push(std::sync::Arc::new(s));
+    doc.next_sound_id = 2;
+    put_clip(&mut doc.root, 10, flat_clip());
+    doc
+}
+
+/// 再生のコマは、鳴らしたサンプルの数から決まる（設計の 5.1：始めたコマ ＋ ⌊鳴らした秒 × fps⌋）。くり返すときは
+/// 終わりで 0 へ戻り、くり返さないときは最後のコマを鳴らし終えたら終わる。コマの境目はサンプル1つの所で変わる
+#[test]
+fn playback_frame_follows_the_played_samples() {
+    use crate::audio_out::Span;
+    use crate::sound::{frame_at, frame_start};
+    // 44.1kHz・fps 24 は割り切れない（1コマ 1837.5 サンプル）
+    let (rate, fps) = (44_100, 24);
+    let frame = |span: &Span, played: u64| span.position(played).map(|p| frame_at(p, rate, fps));
+    let looping = Span::frames(3, 10, true, rate, fps);
+    let once = Span::frames(3, 10, false, rate, fps);
+    for k in 0..30usize {
+        // 始めてから k コマ目の半ば
+        let played = (2 * k as u64 + 1) * u64::from(rate) / (2 * u64::from(fps));
+        assert_eq!(frame(&looping, played), Some((3 + k) % 10));
+        assert_eq!(frame(&once, played), (3 + k < 10).then_some(3 + k));
+    }
+    let to_end = frame_start(10, rate, fps) - frame_start(3, rate, fps);
+    assert_eq!(frame(&once, to_end - 1), Some(9));
+    assert_eq!(frame(&once, to_end), None);
+    assert_eq!(looping.position(to_end), Some(0));
+    let f2 = frame_start(2, rate, fps);
+    assert_eq!(frame(&looping, to_end + f2 - 1), Some(1));
+    assert_eq!(frame(&looping, to_end + f2), Some(2));
+}
+
+/// くり返す再生は、終わりで 0 へ戻る所を、戻る前（コマ 8 から）と後（コマ 0 から）の2つの `mix` に分けて混ぜ、続けて
+/// 鳴らしたのと同じ波形になる。装置が細かく区切って求めても同じ。音は戻る前のコマの終わりでなめらかに止み、戻った後は
+/// 頭から鳴り直す。くり返さなければ、終わりから後は無音
+#[test]
+fn looping_playback_mixes_across_the_wrap_like_two_mixes() {
+    use crate::audio_out::Job;
+    use crate::sound::{frame_start, mix};
+    let doc = doc_with_saw_sound();
+    let rate = 44_100;
+    let (s8, end) = (frame_start(8, rate, 24), frame_start(10, rate, 24));
+    let before = (end - s8) as usize;
+    let n = before + 3000;
+    let job = Job::new(&doc, &doc.root, 8, 10, true, rate);
+    let mut whole = vec![0.0f32; 2 * n];
+    assert_eq!(job.fill(0, rate, &mut whole), n);
+    let mut expected = mix(&doc, &doc.root, s8, before, rate);
+    expected.extend(mix(&doc, &doc.root, 0, n - before, rate));
+    assert_eq!(whole, expected);
+
+    let mut pieces = vec![0.0f32; 2 * n];
+    let mut played = 0u64;
+    for chunk in pieces.chunks_mut(2 * 333) {
+        assert_eq!(job.fill(played, rate, chunk), chunk.len() / 2);
+        played += (chunk.len() / 2) as u64;
+    }
+    assert_eq!(pieces, whole);
+
+    assert!(whole[2 * (before - 1)].abs() < 0.01, "戻る直前はほぼ止んでいる");
+    assert!(whole[2 * (before + 200)].abs() > 0.1, "戻った後は頭から鳴っている");
+
+    let once = Job::new(&doc, &doc.root, 8, 10, false, rate);
+    let mut out = vec![1.0f32; 2 * n];
+    assert_eq!(once.fill(0, rate, &mut out), before);
+    assert_eq!(out[..2 * before], whole[..2 * before]);
+    assert!(out[2 * before..].iter().all(|&x| x == 0.0));
+}
+
+/// スクラブは、そのコマの1コマ分（1/fps 秒）だけを鳴らす。画面では、再生していないときに同じタイムラインのコマが
+/// 変わったときだけ鳴らし（最初に見たとき・同じコマ・再生中は鳴らさない）、新しいスクラブは前のを打ち切る
+#[test]
+fn scrub_plays_one_frame_when_the_frame_changes() {
+    use crate::audio_out::Job;
+    use crate::sound::{frame_start, mix};
+    let doc = doc_with_saw_sound();
+    let rate = 44_100;
+    let s3 = frame_start(3, rate, 24);
+    let len = (frame_start(4, rate, 24) - s3) as usize;
+    assert!(len == 1837 || len == 1838, "1/24 秒は 1837.5 サンプル");
+    let mut out = vec![1.0f32; 2 * 4000];
+    assert_eq!(Job::new(&doc, &doc.root, 3, 4, false, rate).fill(0, rate, &mut out), len);
+    assert_eq!(out[..2 * len], mix(&doc, &doc.root, s3, len, rate)[..]);
+    assert!(out[2 * len..].iter().all(|&x| x == 0.0));
+
+    let mut app = Is2dApp::default();
+    app.doc.fps = 24;
+    app.doc.root.layers[0].frame_count = 10;
+    app.doc.root.sync_total_frames();
+    let rate = app.timeline_ui.audio.rate();
+    let start = |f: usize| frame_start(f, rate, 24);
+    timeline_ui::scrub_on_frame_change(&mut app);
+    assert_eq!(app.timeline_ui.audio.position(0.0), None, "最初に見たときは鳴らさない");
+    timeline_ui::go_to_frame(&mut app, 3);
+    timeline_ui::scrub_on_frame_change(&mut app);
+    assert_eq!(app.timeline_ui.audio.position(0.0), Some(start(3)));
+    timeline_ui::go_to_frame(&mut app, 5);
+    timeline_ui::scrub_on_frame_change(&mut app);
+    assert_eq!(app.timeline_ui.audio.position(1.0), Some(start(5)), "前のスクラブを打ち切る");
+    // 時刻は2進で割り切れる値にする（1/64 秒 = 750 サンプル）
+    assert_eq!(app.timeline_ui.audio.position(1.0 + 1.0 / 64.0), Some(start(5) + 750));
+    assert_eq!(app.timeline_ui.audio.position(1.0 + 1.5 / 24.0), None, "1コマ分で止む");
+    timeline_ui::scrub_on_frame_change(&mut app);
+    assert_eq!(app.timeline_ui.audio.position(2.0), None, "同じコマでは鳴らさない");
+
+    timeline_ui::toggle_playback(&mut app);
+    assert_eq!(app.timeline_ui.audio.position(3.0), Some(start(5)));
+    app.advance_playback_frame(7);
+    timeline_ui::scrub_on_frame_change(&mut app);
+    assert_eq!(app.timeline_ui.audio.position(3.0), Some(start(5)), "再生中はスクラブしない");
+    timeline_ui::toggle_playback(&mut app);
+    timeline_ui::scrub_on_frame_change(&mut app);
+    assert_eq!(app.timeline_ui.audio.position(4.0), None, "止めたコマでは鳴らさない");
+}
+
+/// 出力の装置が無いとき（テストもこれ）は、画面の時刻で、装置と同じ速さで同じ数を数える。鳴らし始めてから最初に読んだ
+/// 時刻から数え、鳴らし直すと 0 から数え直す
+#[test]
+fn silent_output_counts_on_the_screen_clock() {
+    use crate::sound::frame_start;
+    let doc = doc_with_saw_sound();
+    let mut out = crate::audio_out::AudioOut::silent();
+    assert_eq!(out.rate(), 48_000);
+    assert_eq!(out.tick(), None);
+    assert_eq!(out.position(3.0), None, "鳴らす中身が無い");
+    let s2 = frame_start(2, 48_000, 24);
+    out.play(&doc, &doc.root, 2, 10, false);
+    assert_eq!(out.position(5.0), Some(s2));
+    assert_eq!(out.position(5.25), Some(s2 + 12_000));
+    // 時刻は2進で割り切れる値にする（0.375 秒 = 18,000 サンプル = 9 コマ）
+    assert_eq!(out.position(5.375), None, "8 コマを鳴らし終えた");
+    out.play(&doc, &doc.root, 2, 10, true);
+    assert_eq!(out.position(9.0), Some(s2));
+    assert_eq!(out.position(9.375), Some(frame_start(1, 48_000, 24)), "コマ 10 でコマ 0 へ戻った");
+    out.stop();
+    assert_eq!(out.position(10.0), None);
 }

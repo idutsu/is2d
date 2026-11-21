@@ -256,13 +256,17 @@ pub(crate) struct Voice {
     pub(crate) end: u64,
 }
 
-/// ルートのコマ `frame` で鳴っている音（`Voice`）。ルートのタイムラインの表示中のレイヤーの、そのコマを含むキーフレームの
-/// 音と、そのコマに置かれたシンボルの中の音（中のコマは絵と同じ `resolve_internal_frame` で決める。入れ子は描くのと同じく
-/// `MAX_SYMBOL_NEST_DEPTH` 段まで）。位置は「区間の始まり ＋ キーフレームの始まりから進んだコマ」（`frames_to_sound`）で、
-/// 区間の終わりから後は入れない
-pub(crate) fn sounding_at(doc: &crate::symbol::Document, frame: usize) -> Vec<Voice> {
+/// 文書 `doc` のタイムライン `tl`（ルートか、編集中のシンボルの：画面が再生するもの）のコマ `frame` で鳴っている音
+/// （`Voice`）。表示中のレイヤーの、そのコマを含むキーフレームの音と、そのコマに置かれたシンボルの中の音（中のコマは絵と
+/// 同じ `resolve_internal_frame` で決める。入れ子は描くのと同じく `MAX_SYMBOL_NEST_DEPTH` 段まで）。位置は「区間の始まり ＋
+/// キーフレームの始まりから進んだコマ」（`frames_to_sound`）で、区間の終わりから後は入れない
+pub(crate) fn sounding_at(
+    doc: &crate::symbol::Document,
+    tl: &crate::timeline::Timeline,
+    frame: usize,
+) -> Vec<Voice> {
     let mut out = Vec::new();
-    collect_voices(doc, &doc.root, frame, &mut Vec::new(), 0, &mut out);
+    collect_voices(doc, tl, frame, &mut Vec::new(), 0, &mut out);
     out
 }
 
@@ -348,32 +352,47 @@ fn sample_at(s: &Sound, p: f64) -> (f32, f32) {
     (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f)
 }
 
-/// 文書 `doc` の音を、出力の速さ `rate`（1 秒あたりのサンプルの数）で、ルートのコマ 0 の始まりから数えて `start` 番目の
-/// サンプルから `count` 個分混ぜた波形（左・右・左・右…）。再生・スクラブ・書き出しのどれもが使う、混ぜる決まりの1つ：
-/// コマごとに鳴っている音（`sounding_at`）を足し、前のコマから続かない音は鳴り始めを、次のコマへ続かない音は鳴り終わり
+/// 出力の速さ `rate`（1 秒あたりのサンプルの数）で、タイムラインのコマ 0 の始まりから数えて `sample` 番目のサンプルが
+/// 入るコマ（作品の fps `fps`）：⌊`sample` × fps / `rate`⌋。サンプルとコマを結ぶ決まりはこれと `frame_start` の2つだけ
+/// （混ぜる `mix`・再生のコマ・鳴らす範囲）
+pub(crate) fn frame_at(sample: u64, rate: u32, fps: u32) -> usize {
+    (sample * u64::from(fps.max(1)) / u64::from(rate.max(1))) as usize
+}
+
+/// コマ `frame` の最初のサンプル：`frame_at` がそのコマになる、いちばん小さいサンプルの番号（⌈`frame` × `rate` / fps⌉）
+pub(crate) fn frame_start(frame: usize, rate: u32, fps: u32) -> u64 {
+    (frame as u64 * u64::from(rate.max(1))).div_ceil(u64::from(fps.max(1)))
+}
+
+/// 文書 `doc` のタイムライン `tl`（`sounding_at` と同じ）の音を、出力の速さ `rate`（1 秒あたりのサンプルの数）で、コマ 0
+/// の始まりから数えて `start` 番目のサンプルから `count` 個分混ぜた波形（左・右・左・右…）。どのサンプルの値も、その
+/// サンプルの番号だけで決まる（区間をどう分けて作っても同じ波形になる）。再生・スクラブ・書き出しのどれもが使う、混ぜる
+/// 決まりの1つ：コマごとに鳴っている音（`sounding_at`）を足し、前のコマから続かない音は鳴り始めを、次のコマへ続かない音は鳴り終わり
 /// （区間の終わりか、コマの終わりの早いほう）を、`FADE_SECONDS` でなめらかにする（F6 で分けた所は続くので、なめらかに
 /// しない）。足した結果が -1〜1 を越える所はそこで切る
-pub(crate) fn mix(doc: &crate::symbol::Document, start: u64, count: usize, rate: u32) -> Vec<f32> {
+pub(crate) fn mix(
+    doc: &crate::symbol::Document,
+    tl: &crate::timeline::Timeline,
+    start: u64,
+    count: usize,
+    rate: u32,
+) -> Vec<f32> {
     let mut out = vec![0.0f32; 2 * count];
     let fps = doc.fps.max(1);
     let rate_f = f64::from(rate.max(1));
-    let frame_of = |n: u64| (n as f64 / rate_f * f64::from(fps)).floor() as usize;
     let mut cache: std::collections::HashMap<usize, Vec<Voice>> = Default::default();
     let mut voices = |f: usize| -> Vec<Voice> {
         cache
             .entry(f)
-            .or_insert_with(|| sounding_at(doc, f))
+            .or_insert_with(|| sounding_at(doc, tl, f))
             .clone()
     };
     let fade_units = FADE_SECONDS * SOUND_RATE as f64;
     let mut i = 0usize;
     while i < count {
-        let f = frame_of(start + i as u64);
-        // このコマに入るサンプルの範囲
-        let mut j = i;
-        while j < count && frame_of(start + j as u64) == f {
-            j += 1;
-        }
+        let f = frame_at(start + i as u64, rate, fps);
+        // このコマに入るサンプルの範囲（次のコマの最初のサンプルの手前まで）
+        let j = (frame_start(f + 1, rate, fps) - start).min(count as u64) as usize;
         let cur = voices(f);
         let prev = if f > 0 { voices(f - 1) } else { Vec::new() };
         let next = voices(f + 1);
