@@ -6,33 +6,74 @@ use eframe::egui::Vec2;
 
 use crate::canvas_tool::View;
 use crate::planar_map::LayerBase;
+use crate::sound::{frame_start, mix, SOUND_RATE};
 use crate::symbol::Document;
 
 /// OS ごとの H.264 MP4 動画エンコーダの共通インターフェース
 pub(crate) trait VideoEncoder {
-    /// 1コマ分の画像（幅×高さ×4 バイト、RGBA、上の行から順、アルファは 255）を渡す
+    /// 1コマ分の画像（幅×高さ×4 バイト、RGBA、上の行から順、アルファは 255）を渡す。音ありで作った入口は、絵を
+    /// 受け取れるようになるのを待つ間、音の入力が受け取れるだけ、続きの音を `AudioSource` から取って書く
     fn push_frame(&mut self, rgba: &[u8]) -> Result<(), String>;
-    /// 書き出しを終えて、ファイルを閉じる
+    /// 残りの音を書き、書き出しを終えて、ファイルを閉じる
     fn finish(self: Box<Self>) -> Result<(), String>;
 }
 
-/// `path` に、幅 `width`・高さ `height`（どちらも偶数）・`fps`（1〜60）の H.264 MP4 を書き出す入口を作る。
-/// 入力を整えて `path` を消しておくのは、呼び出し元（`run_video_export`）
-pub(crate) fn create_video_encoder(
+/// 書き出す音を、コマ 0 から1コマ分ずつ順に作って返すもの（全部返したら `None`：`export_audio`）。音は絵と同じ入口で
+/// コマごとに渡すのではなく、書き込む側が求めるときに取る。書き込む側（AVAssetWriter）は、絵と音の時刻が離れすぎない
+/// よう、絵の入力を、音が先へ進むまで止めることがあり、AAC の圧縮は音をためてから出すので、音は渡した所より手前までしか
+/// 進まない。そのとき今のコマより先の音を渡せないと、止まったままになる
+pub(crate) type AudioSource<'a> = Box<dyn FnMut() -> Option<Vec<f32>> + 'a>;
+
+/// `path` に、幅 `width`・高さ `height`（どちらも偶数）・`fps`（1〜60）の H.264 MP4 を書き出す入口を作る。`audio`
+/// があれば、その音（AAC・`EXPORT_AUDIO_RATE`・ステレオ）も入れる。入力を整えて `path` を消しておくのは、呼び出し元
+/// （`run_video_export`）
+pub(crate) fn create_video_encoder<'a>(
     path: &Path,
     width: u32,
     height: u32,
     fps: u32,
-) -> Result<Box<dyn VideoEncoder>, String> {
+    audio: Option<AudioSource<'a>>,
+) -> Result<Box<dyn VideoEncoder + 'a>, String> {
     #[cfg(target_os = "macos")]
     {
-        crate::video_export_macos::create_macos_encoder(path, width, height, fps)
+        crate::video_export_macos::create_macos_encoder(path, width, height, fps, audio)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (path, width, height, fps);
+        let _ = (path, width, height, fps, audio);
         Err("この OS ではまだ動画の書き出しに対応していません".to_owned())
     }
+}
+
+/// 書き出すコマの数（ルートのタイムラインのコマ 0 から最後のコマまで。コマが無くても1コマ）
+fn export_frames(doc: &Document) -> usize {
+    doc.root.total_frames.max(1)
+}
+
+/// 書き出す音の速さ（1 秒あたりのサンプルの数）。音の中の位置の単位 `SOUND_RATE`（48kHz）と同じにする
+pub(crate) const EXPORT_AUDIO_RATE: u32 = SOUND_RATE as u32;
+
+/// 書き出す音：書き出すコマ（`export_frames`）の `frame_audio` を、コマ 0 から順に1つずつ返す `AudioSource`。全部
+/// つなぐと、絵と同じ長さ（`frame_start(コマ数)` 個）の音になる
+pub(crate) fn export_audio(doc: &Document) -> AudioSource<'_> {
+    let mut frames = 0..export_frames(doc);
+    Box::new(move || frames.next().map(|f| frame_audio(doc, f)))
+}
+
+/// 書き出しの、ルートのタイムラインのコマ `frame` の間に鳴る音（左・右・左・右…）：コマの最初のサンプル
+/// （`frame_start(frame)`）から次のコマの最初のサンプルの手前までを、再生と同じ `sound::mix` で混ぜたもの（聞こえる音と
+/// 書き出す音は同じ）。`mix` はどのサンプルの値もその番号だけで決めるので、コマごとに作ってつないだ音は、続けて混ぜた音と
+/// 同じになる
+fn frame_audio(doc: &Document, frame: usize) -> Vec<f32> {
+    let start = frame_start(frame, EXPORT_AUDIO_RATE, doc.fps);
+    let end = frame_start(frame + 1, EXPORT_AUDIO_RATE, doc.fps);
+    mix(
+        doc,
+        &doc.root,
+        start,
+        (end - start) as usize,
+        EXPORT_AUDIO_RATE,
+    )
 }
 
 /// ステージの画素の大きさ。書き出す画素の大きさと原点は、みなこれから決める（ステージの大きさは、書く入口と読み込みで
@@ -169,7 +210,7 @@ impl VideoExportJob {
     pub(crate) fn start(doc: Document, target_path: PathBuf) -> Self {
         let target_path = crate::project_io::resolve_target_path(&target_path);
         let tmp_path = tmp_export_path(&target_path);
-        let total_frames = doc.root.total_frames.max(1);
+        let total_frames = export_frames(&doc);
         let completed_frames = Arc::new(AtomicUsize::new(0));
         let cancel_flag = Arc::new(AtomicBool::new(false));
 
@@ -262,7 +303,7 @@ pub(crate) fn render_frames_in_order(
     cancel_flag: &AtomicBool,
     mut push: impl FnMut(usize, &[u8]) -> Result<(), String>,
 ) -> VideoExportOutcome {
-    let total_frames = doc.root.total_frames.max(1);
+    let total_frames = export_frames(doc);
     // 前の組のコマで展開した地図の写し（次の組を塗る間持つので、続くコマの同じキーフレームの地図を作り直さない）
     let mut held: Vec<Arc<LayerBase>> = Vec::new();
     for first in (0..total_frames).step_by(threads) {
@@ -317,7 +358,9 @@ fn run_video_export(
     let (width, height) = export_dimensions(doc.stage_size);
     let fps = doc.fps.clamp(1, crate::symbol::MAX_FPS);
 
-    let mut encoder = match create_video_encoder(tmp_path, width, height, fps) {
+    // 音のライブラリが空なら、音を入れない（今までどおり音声なしの MP4）。音があれば、鳴らない所は無音で、いつも入れる
+    let audio = (!doc.sounds.is_empty()).then(|| export_audio(doc));
+    let mut encoder = match create_video_encoder(tmp_path, width, height, fps, audio) {
         Ok(enc) => enc,
         Err(err) => return VideoExportOutcome::Failed(err),
     };

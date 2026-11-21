@@ -37027,3 +37027,144 @@ fn silent_output_counts_on_the_screen_clock() {
     out.stop();
     assert_eq!(out.position(10.0), None);
 }
+
+// ============================================================================
+// 音を書き出す（設計：claude/オーディオの設計_9693dbf.md の 5 段目：動画の書き出しに音を入れる）
+// ============================================================================
+
+/// 書き出しの音（`export_audio`）は、1コマ分ずつ（そのコマの最初のサンプルから次のコマの最初のサンプルの手前まで）
+/// 返し、全部つなぐと、続けて混ぜた1つの `mix` と同じで、長さは `frame_start(全コマ数)`。fps が 48,000 を割り切らない
+/// とき（1コマのサンプルの数がコマごとに違う）も同じ
+#[test]
+fn export_audio_per_frame_joins_into_one_mix() {
+    use crate::sound::{frame_start, mix};
+    use crate::video_export::{export_audio, EXPORT_AUDIO_RATE};
+    for fps in [24, 7, 60] {
+        let mut doc = doc_with_saw_sound();
+        doc.fps = fps;
+        let total = doc.root.total_frames;
+        let pieces: Vec<Vec<f32>> = std::iter::from_fn(export_audio(&doc)).collect();
+        assert_eq!(pieces.len(), total, "fps {fps}");
+        for (f, p) in pieces.iter().enumerate() {
+            let len = frame_start(f + 1, EXPORT_AUDIO_RATE, fps) - frame_start(f, EXPORT_AUDIO_RATE, fps);
+            assert_eq!(p.len() as u64, 2 * len, "fps {fps} コマ {f}");
+        }
+        let joined = pieces.concat();
+        let n = frame_start(total, EXPORT_AUDIO_RATE, fps);
+        assert_eq!(joined.len() as u64, 2 * n, "fps {fps}");
+        assert_eq!(joined, mix(&doc, &doc.root, 0, n as usize, EXPORT_AUDIO_RATE));
+        assert!(joined.iter().any(|&x| x != 0.0), "音が入っている");
+    }
+}
+
+/// テスト用：MP4 のバイト `b` の `range` の中に並ぶ箱の、種類と中身の範囲
+fn mp4_boxes(b: &[u8], range: std::ops::Range<usize>) -> Vec<([u8; 4], std::ops::Range<usize>)> {
+    let mut out = Vec::new();
+    let mut i = range.start;
+    while i + 8 <= range.end {
+        // 大きさが 1 なら、種類の後の 64bit が本当の大きさ
+        let (size, head) = match u32::from_be_bytes(b[i..i + 4].try_into().unwrap()) {
+            1 => (u64::from_be_bytes(b[i + 8..i + 16].try_into().unwrap()) as usize, 16),
+            n => (n as usize, 8),
+        };
+        assert!(size >= head && i + size <= range.end, "箱の大きさ {size}");
+        out.push((b[i + 4..i + 8].try_into().unwrap(), i + head..i + size));
+        i += size;
+    }
+    out
+}
+
+/// テスト用：MP4 の `range` の中に並ぶ箱のうち、種類 `kind` の1つ目の中身の範囲
+fn mp4_child(b: &[u8], range: std::ops::Range<usize>, kind: &[u8; 4]) -> std::ops::Range<usize> {
+    mp4_boxes(b, range)
+        .into_iter()
+        .find(|(k, _)| k == kind)
+        .map(|(_, r)| r)
+        .unwrap_or_else(|| panic!("{} の箱がある", String::from_utf8_lossy(kind)))
+}
+
+/// テスト用：mvhd・mdhd（時間の単位と長さ）・tkhd（長さ。単位は mvhd の）の中身から `(単位, 長さ)`。tkhd の単位は 0
+fn mp4_time(b: &[u8], r: &std::ops::Range<usize>, tkhd: bool) -> (u64, u64) {
+    let be32 = |i: usize| u64::from(u32::from_be_bytes(b[i..i + 4].try_into().unwrap()));
+    let be64 = |i: usize| u64::from_be_bytes(b[i..i + 8].try_into().unwrap());
+    let s = r.start;
+    match (b[s], tkhd) {
+        (0, false) => (be32(s + 12), be32(s + 16)),
+        (1, false) => (be32(s + 20), be64(s + 24)),
+        (0, true) => (0, be32(s + 20)),
+        (1, true) => (0, be64(s + 28)),
+        (v, _) => panic!("知らない版 {v}"),
+    }
+}
+
+/// 音のある作品の書き出しの MP4 には、絵の入力と、音の入力（AAC・48kHz・ステレオ）が1つずつあり、作品と音と絵の長さは
+/// コマ数 ÷ fps（止まらずに書き終える）。音のライブラリが空の作品は、今までどおり音の入力の無い MP4 になる
+#[cfg(target_os = "macos")]
+#[test]
+fn video_export_includes_the_mixed_audio_track() {
+    use crate::video_export::{VideoExportJob, VideoExportOutcome};
+    let tmp_dir = std::env::temp_dir().join(format!("is2d_audio_export_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // 3 秒（音は始めの 1 秒）。AAC の圧縮は音をためてから出すので、1 秒に満たない作品では、絵と音を書く順の誤りで
+    // 書き込みが止まるのが見えない
+    let mut doc = doc_with_saw_sound();
+    doc.stage_size = Vec2::new(160.0, 90.0);
+    doc.root.layers[0].frame_count = 72;
+    doc.root.total_frames = 72;
+    let frames = doc.root.total_frames;
+    let export = |doc: &symbol::Document, name: &str| -> Vec<u8> {
+        let path = tmp_dir.join(name);
+        let mut job = VideoExportJob::start(doc.clone(), path.clone());
+        assert_eq!(job.wait(), VideoExportOutcome::Completed);
+        std::fs::read(&path).unwrap()
+    };
+    // 作品の長さ（秒）・各入力の `(種類, 長さ（秒）)`・音の入力の形（音の種類・左右の数・速さ）
+    type Summary = (f64, Vec<([u8; 4], f64)>, Option<([u8; 4], u16, u32)>);
+    let inspect = |b: &[u8]| -> Summary {
+        let moov = mp4_child(b, 0..b.len(), b"moov");
+        let (scale, len) = mp4_time(b, &mp4_child(b, moov.clone(), b"mvhd"), false);
+        let mut tracks = Vec::new();
+        let mut audio = None;
+        for (_, trak) in mp4_boxes(b, moov).into_iter().filter(|(k, _)| k == b"trak") {
+            let (_, tk_len) = mp4_time(b, &mp4_child(b, trak.clone(), b"tkhd"), true);
+            let mdia = mp4_child(b, trak, b"mdia");
+            let hdlr = mp4_child(b, mdia.clone(), b"hdlr");
+            let kind: [u8; 4] = b[hdlr.start + 8..hdlr.start + 12].try_into().unwrap();
+            tracks.push((kind, tk_len as f64 / scale as f64));
+            if &kind == b"soun" {
+                let stbl = mp4_child(b, mp4_child(b, mdia, b"minf"), b"stbl");
+                let stsd = mp4_child(b, stbl, b"stsd");
+                // stsd：版と印（4）・数（4）の後に、音の形の箱（大きさ（4）・種類（4）・予約（6）・番号（2）・予約（8）・
+                // 左右の数（2）・ビット（2）・予約（4）・速さ（16.16 の 4））
+                let e = stsd.start + 8;
+                let format: [u8; 4] = b[e + 4..e + 8].try_into().unwrap();
+                let channels = u16::from_be_bytes(b[e + 24..e + 26].try_into().unwrap());
+                let rate = u32::from_be_bytes(b[e + 32..e + 36].try_into().unwrap()) >> 16;
+                audio = Some((format, channels, rate));
+            }
+        }
+        (len as f64 / scale as f64, tracks, audio)
+    };
+    let expected = frames as f64 / f64::from(doc.fps);
+
+    let (len, tracks, audio) = inspect(&export(&doc, "with_sound.mp4"));
+    assert_eq!(audio, Some((*b"mp4a", 2, 48_000)));
+    let kinds: Vec<[u8; 4]> = tracks.iter().map(|t| t.0).collect();
+    assert_eq!(kinds.iter().filter(|k| *k == b"vide").count(), 1);
+    assert_eq!(kinds.iter().filter(|k| *k == b"soun").count(), 1);
+    assert!((len - expected).abs() < 1e-3, "作品の長さ {len} 秒");
+    for (kind, t) in &tracks {
+        assert!((t - expected).abs() < 1e-3, "{} の長さ {t} 秒", String::from_utf8_lossy(kind));
+    }
+
+    std::sync::Arc::make_mut(&mut doc.sounds).clear();
+    let (len, tracks, audio) = inspect(&export(&doc, "without_sound.mp4"));
+    assert_eq!(audio, None);
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(&tracks[0].0, b"vide");
+    assert!((len - expected).abs() < 1e-3, "作品の長さ {len} 秒");
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

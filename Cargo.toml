@@ -28,7 +28,9 @@ objc2 = "=0.6.5"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder", "NSWindow"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL", "NSValue"] }
 objc2-av-foundation = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-media", "objc2-core-video", "AVAssetWriter", "AVAssetWriterInput", "AVMediaFormat", "AVVideoSettings"] }
-objc2-core-media = { version = "=0.3.2", default-features = false, features = ["std", "CMTime"] }
+# 音の入力（AAC）へ渡す音の塊（CMSampleBuffer）とその形（CMAudioFormatDescription・AudioStreamBasicDescription）を作る
+objc2-core-media = { version = "=0.3.2", default-features = false, features = ["std", "objc2", "objc2-core-audio-types", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
+objc2-core-audio-types = { version = "=0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-core-video = { version = "=0.3.2", default-features = false, features = ["std", "objc2", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
 block2 = "=0.6.2"
 
