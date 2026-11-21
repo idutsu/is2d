@@ -50,19 +50,13 @@ impl Default for ColorEffect {
 }
 
 impl ColorEffect {
+    /// アルファ `alpha` と明度 `brightness` を範囲（アルファ 0〜1、明度 -1〜1）に収めた色効果。有限かは見ない（有限かを決める
+    /// のは、インスタンスを書く入口・ファイルを読む入口の判定 `SymbolInstanceBinding::is_finite` だけ）
     #[inline]
     pub(crate) fn new(alpha: f32, brightness: f32) -> Self {
         Self {
-            alpha: if alpha.is_finite() {
-                alpha.clamp(0.0, 1.0)
-            } else {
-                1.0
-            },
-            brightness: if brightness.is_finite() {
-                brightness.clamp(-1.0, 1.0)
-            } else {
-                0.0
-            },
+            alpha: alpha.clamp(0.0, 1.0),
+            brightness: brightness.clamp(-1.0, 1.0),
         }
     }
 
@@ -872,12 +866,13 @@ fn tessellate_contours_to_mesh(exterior: &Contour, holes: &[Contour], color: Col
     TESSELLATOR.with(|t| tessellate_lyon_path(&mut t.borrow_mut(), &path, color, FillRule::EvenOdd))
 }
 
-/// 選択表示の水玉の模様の一辺（画面の px）。千鳥に並んだ点が 6px おき
 /// 曲線をメッシュにするときの許容（文書の座標）。メッシュは表示の倍率によらず同じものを使う
 const MESH_TOL: f64 = 0.04;
-/// 持っているメッシュの頂点を写して使い回すときに許すずれ（文書の座標。100% 表示で 0.16px）。作る許容の 4 倍まで
-/// （4 倍までの拡大なら使い回す。再生でトゥイーンのコマごとにテッセレーションし直さない）
-const MESH_MAX_ERROR: f64 = 4.0 * MESH_TOL;
+/// 持っているメッシュの頂点を写して使い回すときに許すずれ（文書の座標）：見分けられないずれ（画面の画素の 1/4。形を
+/// 曲線に当てはめるときの許容 `FIT_TOL_PX` と同じ決まり）を、100% 表示の文書の座標にしたもの。形そのものが当てはめで
+/// これだけずれうるので、メッシュのずれがこの中なら、作り直しても見た目は変わらない（作る許容の 6.25 倍、つまり 6.25 倍
+/// までの拡大なら使い回す。再生でトゥイーンのコマごとにテッセレーションし直さない）
+const MESH_MAX_ERROR: f64 = crate::vector_stroke::FIT_TOL_PX;
 
 /// 持っているメッシュを、作ってから頂点を写した変換の最大の拡大率の積 `stretch` のまま使い回してよいか：メッシュのずれ
 /// （作る許容 × `stretch`）が許すずれを超えない。メッシュを写すかどうかは、どの変換でもこれ1つで決める
@@ -892,6 +887,7 @@ fn max_scale(affine: Affine) -> f64 {
     ((p + q) / 2.0 + (((p - q) / 2.0).powi(2) + r * r).sqrt()).sqrt()
 }
 
+/// 選択表示の水玉の模様の一辺（画面の px）。千鳥に並んだ点が 6px おき
 pub(crate) const SELECTION_DOT_TILE: usize = 12;
 
 /// 選択表示の水玉の繰り返しテクスチャ（`SELECTION_DOT_TILE` px 四方。6px おきの千鳥の 2×2px の白い点。egui の `Context`
@@ -1051,17 +1047,6 @@ pub(crate) fn transform_mesh_to_screen(
         }
     }
     mesh
-}
-
-/// メッシュ `mesh` の、点 `p` で見えている色：`p` を含む三角形のうち、いちばん後に描くもの（上に重なるもの）の頂点の色
-pub(crate) fn mesh_color_at(mesh: &Mesh, p: Pos2) -> Option<Color32> {
-    let cross = |a: Pos2, b: Pos2| (b - a).x * (p - a).y - (b - a).y * (p - a).x;
-    mesh.indices.chunks_exact(3).rev().find_map(|t| {
-        let [a, b, c] = [t[0], t[1], t[2]].map(|i| mesh.vertices[i as usize].pos);
-        let d = [cross(a, b), cross(b, c), cross(c, a)];
-        (d.iter().all(|&v| v >= 0.0) || d.iter().all(|&v| v <= 0.0))
-            .then(|| mesh.vertices[t[0] as usize].color)
-    })
 }
 
 /// 複数の `Mesh` を1つのバッチ `Mesh` に結合する（セル単位の一括キャッシュ構築用）

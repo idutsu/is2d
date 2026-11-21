@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use eframe::egui::{self, Vec2};
-use kurbo::Affine;
+use eframe::egui::{self, Color32, Vec2};
+use kurbo::{Affine, Point};
 
 use crate::planar_map::LayerBase;
 use crate::symbol::{
@@ -330,6 +330,8 @@ struct CachedCel {
     world_xform_bits: [u64; 6],
     cel_sig: ResolvedCelSig,
     world_mesh: Option<egui::Mesh>,
+    /// `world_mesh` にした図形（描く順。下から。メッシュの写しは持たない：`Timeline::build_cel_world`）
+    shapes: Vec<Arc<FillShape>>,
     /// 画面座標に写したもの（止まっている間は写し直さない）と、直前の描画で使ったか
     screens: Vec<(CelScreenKey, Arc<egui::Mesh>, bool)>,
     /// 直前の描画で使ったか
@@ -368,7 +370,7 @@ impl CelMeshCache {
     }
 
     /// 所 `scope` のタイムライン `tl` の、レイヤー `layer_idx` のコマ `frame` のセル画を、変換 `world_xform`・ズーム `zoom`・
-    /// パン `pan`・色の変え方 `tint` で描く画面座標の結合メッシュ（`Timeline::build_cel_world_batch_mesh` を画面に写したもの）。
+    /// パン `pan`・色の変え方 `tint` で描く画面座標の結合メッシュ（`Timeline::build_cel_world` のメッシュを画面に写したもの）。
     /// セル画が変わらなければ作り直さず、ズーム・パン・色の変え方も同じなら写し直さない
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn screen_mesh(
@@ -398,9 +400,11 @@ impl CelMeshCache {
         Some(mesh)
     }
 
-    /// 所 `scope` のタイムライン `tl` の、レイヤー `layer_idx` のコマ `frame` のセル画の、変換 `world_xform` のワールド座標の
-    /// 結合メッシュ（描くのと同じ写し：`screen_mesh`。無ければ作る）
-    pub(crate) fn world_mesh(
+    /// 所 `scope` のタイムライン `tl` の、レイヤー `layer_idx` のコマ `frame` のセル画を変換 `world_xform` で置いたとき、点
+    /// `pt`（ステージの座標）で見えている色：描くのと同じ写し（`screen_mesh`。無ければ作る）の図形を、上に描くものから
+    /// 順に、点の内外の判定 `FillShape::contains_point` でたどる
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn color_at(
         &mut self,
         tl: &Timeline,
         scope: CelScope,
@@ -408,9 +412,15 @@ impl CelMeshCache {
         layer_idx: usize,
         frame: usize,
         world_xform: Affine,
-    ) -> Option<&egui::Mesh> {
+        pt: Point,
+    ) -> Option<Color32> {
         let idx = self.entry_index(tl, scope, ctx, layer_idx, frame, world_xform)?;
-        self.entries[idx].world_mesh.as_ref()
+        self.entries[idx]
+            .shapes
+            .iter()
+            .rev()
+            .find(|s| s.contains_point(pt))
+            .map(|s| s.color)
     }
 
     /// 写しの番号（無ければワールド座標の結合メッシュを作って入れる）。この描画で使った印を付ける
@@ -428,8 +438,8 @@ impl CelMeshCache {
         let idx = match self.find(tl, scope, library, &key) {
             Some(i) => i,
             None => {
-                let world_mesh = key.build(tl, scope, world_xform, ctx);
-                self.insert(tl, scope, library, &key, world_mesh)
+                let built = key.build(tl, scope, world_xform, ctx);
+                self.insert(tl, scope, library, &key, built)
             }
         };
         self.entries[idx].used = true;
@@ -463,8 +473,8 @@ impl CelMeshCache {
         let built = crate::planar_map::parallel_map(&missing, |key| {
             key.build(tl, scope, world_xform, ctx.clone())
         });
-        for (key, world_mesh) in missing.iter().zip(built) {
-            self.insert(tl, scope, library, key, world_mesh);
+        for (key, built) in missing.iter().zip(built) {
+            self.insert(tl, scope, library, key, built);
         }
     }
 
@@ -486,16 +496,17 @@ impl CelMeshCache {
         })
     }
 
-    /// 鍵 `key` の写しを、ワールド座標の結合メッシュ `world_mesh` で入れて、その番号を返す（同じ所・レイヤー・評価する
-    /// コマの古い写しは捨てる）
+    /// 鍵 `key` の写しを、作った写し `built`（ワールド座標の結合メッシュと、その図形）で入れて、その番号を返す（同じ所・
+    /// レイヤー・評価するコマの古い写しは捨てる）
     fn insert(
         &mut self,
         tl: &Timeline,
         scope: CelScope,
         library: &Library,
         key: &CelKey,
-        world_mesh: Option<egui::Mesh>,
+        built: Option<(egui::Mesh, Vec<Arc<FillShape>>)>,
     ) -> usize {
+        let (world_mesh, shapes) = built.map_or((None, Vec::new()), |(m, s)| (Some(m), s));
         let layer = &tl.layers[key.layer_idx];
         self.entries.retain(|e| {
             !(e.scope == scope && e.layer_id == layer.id && e.eval_frame == key.eval_frame)
@@ -512,6 +523,7 @@ impl CelMeshCache {
                 library,
             ),
             world_mesh,
+            shapes,
             screens: Vec::new(),
             used: false,
         });
@@ -552,15 +564,15 @@ impl CelKey {
         })
     }
 
-    /// ワールド座標の結合メッシュを作る
+    /// 写し（ワールド座標の結合メッシュと、その図形）を作る
     fn build(
         &self,
         tl: &Timeline,
         scope: CelScope,
         world_xform: Affine,
         ctx: SymbolEvalCtx<'_>,
-    ) -> Option<egui::Mesh> {
-        tl.build_cel_world_batch_mesh(
+    ) -> Option<(egui::Mesh, Vec<Arc<FillShape>>)> {
+        tl.build_cel_world(
             self.layer_idx,
             self.frame,
             world_xform,

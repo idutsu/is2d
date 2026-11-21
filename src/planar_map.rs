@@ -83,7 +83,8 @@ pub(crate) struct IntHasher(u64);
 
 impl std::hash::Hasher for IntHasher {
     /// 掛け算は下の桁を上の桁へしか混ぜない（下の桁が 0 の多い座標のビットだと、表の位置を決める下の桁がそろう）ので、
-    /// よく混ざった上の桁を下へ回す
+    /// よく混ざった上の桁を下へ回す。混ぜ方（`write_u64` の回す量 5 と掛ける数）は rustc-hash 1 の `FxHasher`、ここで回す
+    /// 量 26 は rustc-hash 2 の `FxHasher::finish`（同じ理由で `rotate_left(26)` する）と同じ
     #[inline]
     fn finish(&self) -> u64 {
         self.0.rotate_left(26)
@@ -660,34 +661,6 @@ impl PlanarMap {
         (0..self.edges.len())
             .filter(|&e| self.edges[e].a == v || self.edges[e].b == v)
             .collect()
-    }
-
-    /// 頂点 `v` を `target` へ動かして確定した地図（重ね合わせ `MapRule::Sweep` で。`None`：格子に置けない座標がある）。
-    /// つながる辺の制御点は、動いた量の半分だけ動かす（今の頂点の移動と同じ決まり）。`target` がほかの頂点と同じ座標なら
-    /// （吸着）、重ね合わせが格子の同じ点を1つの頂点にするので、2つの頂点は1つになる（`MapEdit::apply`）
-    pub(crate) fn moved_vertex(&self, v: usize, target: Point) -> Option<PlanarMap> {
-        let d = target - self.nodes[v];
-        let pos = |w: usize| if w == v { target } else { self.nodes[w] };
-        let moved: Vec<MovedEdge> = self
-            .edges_at(v)
-            .into_iter()
-            .map(|e| {
-                let ed = self.edges[e];
-                let k = (ed.a == v) as u8 + (ed.b == v) as u8;
-                (
-                    e,
-                    QuadBez::new(pos(ed.a), ed.ctrl + d * (0.5 * k as f64), pos(ed.b)),
-                )
-            })
-            .collect();
-        self.overlay(MapInput::Sweep(&moved), MapRule::Sweep)
-    }
-
-    /// 辺 `e` の `grab_t` の所を `target` へ引っぱって確定した地図（重ね合わせ `MapRule::Sweep` で。`None`：格子に置けない
-    /// 座標がある）。引っぱった曲線は、今の辺のつまみと同じ決まり（両端は動かない：`pulled_quad`。`MapEdit::apply`）
-    pub(crate) fn pulled_edge(&self, e: usize, grab_t: f64, target: Point) -> Option<PlanarMap> {
-        let pulled = pulled_quad(self.quad(e), grab_t, target);
-        self.overlay(MapInput::Sweep(&[(e, pulled)]), MapRule::Sweep)
     }
 }
 
@@ -1510,53 +1483,37 @@ impl LayerBase {
         }
     }
 
-    /// 道具の側（輪郭の変形）：辺の引っぱり・頂点の移動 `edit` で、重ね合わせに渡すもの（動かした辺と、動かした後の曲線。
-    /// `MapEdit::apply` と同じ決まり。辺・頂点は塊から引く）。アンカーの追加・削除は重ね合わせでないので `None`。
-    /// 辺・頂点が無ければ `Some(None)`
-    pub(crate) fn reshape_change(&self, edit: MapEdit) -> Option<Option<LocalChange<'static>>> {
+    /// 道具の側（輪郭の変形）：辺の引っぱり・頂点の移動 `edit` で、重ね合わせに渡すもの（動かした辺と、動かした後の曲線：
+    /// `pulled_quad`・`moved_quad`。辺・頂点は塊から引く）。確定（`edit_local`）とドラッグ中の表示（`reshape_result`）の
+    /// どちらもこれで作る。辺・頂点が無ければ `None`
+    pub(crate) fn reshape_change(&self, edit: ReshapeEdit) -> Option<LocalChange<'static>> {
         let moved: Vec<(usize, QuadBez)> = match edit {
-            MapEdit::PullEdge {
+            ReshapeEdit::PullEdge {
                 orig_seg,
                 grab_t,
                 target,
             } => {
-                let Some((e, forward)) = self.stored.find_edge(&orig_seg) else {
-                    return Some(None);
-                };
+                let (e, forward) = self.stored.find_edge(&orig_seg)?;
                 let t = if forward { grab_t } else { 1.0 - grab_t };
                 vec![(e, pulled_quad(self.stored.edge_at(e).quad(), t, target))]
             }
-            MapEdit::MoveVertex {
+            ReshapeEdit::MoveVertex {
                 orig_vertex,
                 target,
             } => {
-                let ix = self.map_index();
-                let mut at: Vec<usize> = Vec::new();
-                ix.ends
-                    .edges_in(&self.stored, end_key(orig_vertex), &mut at);
-                at.sort_unstable();
-                at.dedup();
-                at.retain(|&e| {
-                    let te = self.stored.edge_at(e);
-                    te.a == orig_vertex || te.b == orig_vertex
-                });
+                let at = self.edges_at_node(orig_vertex);
                 if at.is_empty() {
-                    return Some(None);
+                    return None;
                 }
-                let d = target - orig_vertex;
-                let pos = |p: Point| if p == orig_vertex { target } else { p };
-                at.iter()
-                    .map(|&e| {
-                        let te = self.stored.edge_at(e);
-                        let k = (te.a == orig_vertex) as u8 + (te.b == orig_vertex) as u8;
+                at.into_iter()
+                    .map(|e| {
                         (
                             e,
-                            QuadBez::new(pos(te.a), te.ctrl + d * (0.5 * k as f64), pos(te.b)),
+                            moved_quad(self.stored.edge_at(e).quad(), orig_vertex, target),
                         )
                     })
                     .collect()
             }
-            MapEdit::AddAnchor { .. } | MapEdit::DeleteAnchor { .. } => return None,
         };
         let quads = moved.iter().map(|&(_, q)| q).collect();
         let cols = moved
@@ -1566,12 +1523,12 @@ impl LayerBase {
                 (te.left, te.right)
             })
             .collect();
-        Some(Some(LocalChange {
+        Some(LocalChange {
             input: ChangeInput::Sweep(moved),
             quads,
             cols,
             rule: MapRule::Sweep,
-        }))
+        })
     }
 
     /// 1本の道：道具が作った重ね合わせに渡すもの `change` で、地図を触った所だけで編集する（設計 段2b の 7. の 2b-7c と
@@ -1852,12 +1809,12 @@ impl LayerBase {
     }
 
     /// 道具の側（アンカーの追加・削除）：`edit` の差分を作り、1本の道の差分から先（`apply_diff`）に渡す（設計 段2b の 9.）。
-    /// 差分は、関わる辺（追加なら分ける辺、削除なら頂点につながる辺）のまわりの窓で、今の `with_anchor_added`・
-    /// `with_anchor_deleted` をそのまま使って作る（置き換えてよいかの確かめ `can_replace_path` が調べるのは、関わる辺と
+    /// 差分は、関わる辺（追加なら分ける辺、削除なら頂点につながる辺）のまわりの窓の地図に、浮いた片の地図の編集と同じ
+    /// `AnchorEdit::apply`（`with_anchor_added`・`with_anchor_deleted`）をかけて作る（置き換えてよいかの確かめ `can_replace_path` が調べるのは、関わる辺と
     /// 置き換える曲線の外形の範囲だけなので、その範囲を覆う窓で同じ答え）。編集できなければ（辺・頂点が無い・消せない頂点）
-    /// `Same`。テストでは毎回、前のしまう形に差分を当てた形が、地図全体を編集した地図（`MapEdit::apply`。浮いた片の地図の
-    /// 編集と同じ）と同じことを確かめる
-    pub(crate) fn anchor_local(&self, edit: MapEdit, group_path: &[u64]) -> LocalEdit {
+    /// `Same`。テストでは毎回、前のしまう形に差分を当てた形が、地図全体に同じ `AnchorEdit::apply` をかけた地図と同じ
+    /// ことを確かめる
+    pub(crate) fn anchor_local(&self, edit: AnchorEdit, group_path: &[u64]) -> LocalEdit {
         let diff = self.anchor_diff(edit);
         #[cfg(test)]
         if test_checks() {
@@ -1880,15 +1837,13 @@ impl LayerBase {
     }
 
     /// アンカーの差分（`anchor_local`）：（窓の結果, 消えた辺, 増えた辺）。編集できなければ `None`
-    fn anchor_diff(&self, edit: MapEdit) -> Option<LocalDiff> {
+    fn anchor_diff(&self, edit: AnchorEdit) -> Option<LocalDiff> {
         let ix = self.map_index();
         let stored = &self.stored;
-        let edges_at = |p: Point| self.edges_at_node(p);
         // 関わる辺
         let involved: Vec<usize> = match edit {
-            MapEdit::AddAnchor { orig_seg, .. } => vec![stored.find_edge(&orig_seg)?.0],
-            MapEdit::DeleteAnchor { orig_vertex } => edges_at(orig_vertex),
-            MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => return None,
+            AnchorEdit::Add { orig_seg, .. } => vec![stored.find_edge(&orig_seg)?.0],
+            AnchorEdit::Delete { orig_vertex } => self.edges_at_node(orig_vertex),
         };
         if involved.is_empty() {
             return None;
@@ -1903,18 +1858,8 @@ impl LayerBase {
             .inflate(WINDOW_PAD, WINDOW_PAD);
         let wedges = window_edges(ix, involved.iter().copied(), Some(region));
         let (wmap, _) = tile_window(ix, &wedges);
-        let m = match edit {
-            MapEdit::AddAnchor { orig_seg, t } => {
-                let (e, forward) = stored.find_edge(&orig_seg)?;
-                let w = wedges.binary_search(&e).ok()?;
-                wmap.with_anchor_added(w, if forward { t } else { 1.0 - t })?
-            }
-            MapEdit::DeleteAnchor { orig_vertex } => {
-                let v = wmap.nodes.iter().position(|&p| p == orig_vertex)?;
-                wmap.with_anchor_deleted(v)?
-            }
-            MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => return None,
-        };
+        // 窓の地図に、浮いた片の地図と同じ編集をかける
+        let m = edit.apply(&wmap)?;
         let (removed, added) = stored.window_diff_tiles(&wedges, &m);
         Some((m, removed, added))
     }
@@ -1960,6 +1905,18 @@ impl LayerBase {
             );
         }
         got
+    }
+
+    /// テスト用：1本の道の差分から先（`apply_diff_inner`）が確かめに使う、差分を前の地図に当てた地図（同じ `LocalMap::new`。
+    /// どの決まりで断ったかをテストが数えるため）
+    #[cfg(test)]
+    pub(crate) fn local_map<'a>(
+        &'a self,
+        result: &'a PlanarMap,
+        removed: &'a [usize],
+        added: &'a [usize],
+    ) -> LocalMap<'a> {
+        LocalMap::new(self.map_index(), result, removed, added)
     }
 
     /// テスト用（お手本）：この地図を地図 `next` にする差分を、地図全体を触った所として（前の辺をみな消し、`next` の辺を
@@ -2178,8 +2135,8 @@ impl LayerBase {
         xform: Affine,
         skip: Option<Point>,
     ) -> Option<Point> {
-        // 潰れた変換（逆にできない）で置いた地図は描かない（面積 0 の絵は見えない）ので、何にも合わない
-        if xform.determinant().abs() <= 0.0 {
+        // 潰れた変換（逆にできない：`invertible`）で置いた地図は描かない（面積 0 の絵は見えない）ので、何にも合わない
+        if !crate::vector_engine::invertible(xform) {
             return None;
         }
         let area = KRect::from_points(p, p).inflate(radius, radius);
@@ -2189,25 +2146,32 @@ impl LayerBase {
         for t in end_keys_over(doc_area) {
             ix.ends.edges_in(ix.stored, t, &mut edges);
         }
-        let pts = edges.iter().flat_map(|&e| {
-            let te = self.stored.edge_at(e);
-            [te.a, te.b]
-        });
-        nearest_of(pts.filter(|&v| Some(v) != skip), radius, |v| (xform * v - p).hypot())
+        let nearest = |edges: &mut dyn Iterator<Item = usize>| {
+            let pts = edges.flat_map(|e| {
+                let te = self.stored.edge_at(e);
+                [te.a, te.b]
+            });
+            nearest_of(pts.filter(|&v| Some(v) != skip), radius, |v| {
+                (xform * v - p).hypot()
+            })
+        };
+        let got = nearest(&mut edges.into_iter());
+        // お手本：同じ決まり（`nearest_of`）に、地図全体の辺の端を渡した答えと同じ（索引で集めた頂点に、半径の中の頂点が
+        // みなある）
+        #[cfg(test)]
+        if test_checks() {
+            let whole = uncounted(|| nearest(&mut (0..self.stored.edge_count())));
+            assert_eq!(
+                got, whole,
+                "索引で引いた近い頂点が、地図全体の頂点で引いた答え（お手本）と違う"
+            );
+        }
+        got
     }
 
     /// 頂点 `p`（文書の座標）を端に持つ辺（計算に使う地図での番号の順）。端の升目の索引で引く
     pub(crate) fn edges_at_node(&self, p: Point) -> Vec<usize> {
-        let ix = self.map_index();
-        let mut at: Vec<usize> = Vec::new();
-        ix.ends.edges_in(&self.stored, end_key(p), &mut at);
-        at.sort_unstable();
-        at.dedup();
-        at.retain(|&e| {
-            let te = self.stored.edge_at(e);
-            te.a == p || te.b == p
-        });
-        at
+        self.map_index().edges_at_node(p)
     }
 
     /// 面（階層 `group_path`）のうち、番号が `ids` にあるものがあるか（面の表で引く）
@@ -2355,7 +2319,7 @@ impl LayerBase {
 
     /// アンカーの追加・削除 `edit` ができるか（`anchor_diff` が差分を作れるか：今の `with_anchor_added`・
     /// `with_anchor_deleted` が形を返すか）
-    pub(crate) fn anchor_possible(&self, edit: MapEdit) -> bool {
+    pub(crate) fn anchor_possible(&self, edit: AnchorEdit) -> bool {
         self.anchor_diff(edit).is_some()
     }
 
@@ -2364,7 +2328,7 @@ impl LayerBase {
     /// `r` 以内を通る辺は、その所を含むマスの升目にある）
     pub(crate) fn hit_edge(&self, p: Point, r: f64, xform: Affine) -> Option<(usize, f64)> {
         // 潰れた変換で置いた地図は描かないので、何にも合わない（`nearest_node` と同じ）
-        if xform.determinant().abs() <= 0.0 {
+        if !crate::vector_engine::invertible(xform) {
             return None;
         }
         let near = KRect::from_center_size(p, (2.0 * r, 2.0 * r));
@@ -2375,18 +2339,30 @@ impl LayerBase {
         }
         cands.sort_unstable();
         cands.dedup();
-        // 辺は塊から引く
-        cands
-            .into_iter()
-            .map(|e| (e, xform * self.stored.edge_at(e).quad()))
-            .filter(|(_, q)| rects_overlap(q.bounding_box(), near))
-            .map(|(e, q)| {
-                let (t, d) = nearest_on_quad(&q, p);
-                (e, t, d)
-            })
-            .filter(|x| x.2 <= r)
-            .min_by(|a, b| a.2.total_cmp(&b.2))
-            .map(|(e, t, _)| (e, t))
+        // 辺（番号の順）のうち、いちばん近いもの。辺は塊から引く
+        let nearest = |cands: &mut dyn Iterator<Item = usize>| {
+            cands
+                .map(|e| (e, xform * self.stored.edge_at(e).quad()))
+                .filter(|(_, q)| rects_overlap(q.bounding_box(), near))
+                .map(|(e, q)| {
+                    let (t, d) = nearest_on_quad(&q, p);
+                    (e, t, d)
+                })
+                .filter(|x| x.2 <= r)
+                .min_by(|a, b| a.2.total_cmp(&b.2))
+                .map(|(e, t, _)| (e, t))
+        };
+        let got = nearest(&mut cands.into_iter());
+        // お手本：同じ決まりに、地図全体の辺を渡した答えと同じ（索引で集めた辺に、半径の中を通る辺がみなある）
+        #[cfg(test)]
+        if test_checks() {
+            let whole = uncounted(|| nearest(&mut (0..self.stored.edge_count())));
+            assert_eq!(
+                got, whole,
+                "索引で引いた近い辺が、地図全体の辺で引いた答え（お手本）と違う"
+            );
+        }
+        got
     }
 
     /// 辺ごとの判定の形（`map` の辺の順。初めて要るときに作る。編集で作った写しは、確かめたときのものを引き継いでいる）
@@ -2579,9 +2555,10 @@ pub(crate) fn is_map_shape(s: &FillShape, scope: &[u64]) -> bool {
     s.is_raw_at_scope(scope) && s.symbol_instance.is_none() && !s.exterior.segments.is_empty()
 }
 
-/// 輪郭の変形の1回分（どの辺・頂点かは、形と位置で探す）
+/// 輪郭の変形の1回分（どの辺・頂点かは、形と位置で探す）。確定もドラッグ中の表示も、重ね合わせに渡すものは
+/// `LayerBase::reshape_change` の1つで作る
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum MapEdit {
+pub(crate) enum ReshapeEdit {
     /// 形が `orig_seg` の辺の `grab_t` の所を `target` へ引っぱる
     PullEdge {
         orig_seg: QuadBez,
@@ -2590,35 +2567,28 @@ pub(crate) enum MapEdit {
     },
     /// `orig_vertex` にある頂点を `target` へ動かす
     MoveVertex { orig_vertex: Point, target: Point },
-    /// 形が `orig_seg` の辺の `t` の所に頂点を足す（境目なら両側の図形に入る）
-    AddAnchor { orig_seg: QuadBez, t: f64 },
-    /// `orig_vertex` にある頂点を消し、前後の辺を1本の直線にする
-    DeleteAnchor { orig_vertex: Point },
 }
 
-impl MapEdit {
-    /// 地図 `map` にこの編集をかけて確定した地図。`None`：その辺・頂点が無いか、編集できない
+/// アンカーの追加・削除の1回分（どの辺・頂点かは、形と位置で探す）
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum AnchorEdit {
+    /// 形が `orig_seg` の辺の `t` の所に頂点を足す（境目なら両側の図形に入る）
+    Add { orig_seg: QuadBez, t: f64 },
+    /// `orig_vertex` にある頂点を消し、前後の辺を1本の直線にする
+    Delete { orig_vertex: Point },
+}
+
+impl AnchorEdit {
+    /// 地図 `map` にこの編集をかけた地図（浮いた片の地図の編集。セル画の地図の窓での編集 `anchor_diff` も、窓の地図に同じ
+    /// `with_anchor_added`・`with_anchor_deleted` をかける）。`None`：その辺・頂点が無いか、編集できない
     pub(crate) fn apply(self, map: &PlanarMap) -> Option<PlanarMap> {
-        let vertex = |p: Point| (0..map.nodes.len()).find(|&v| map.nodes[v] == p);
         match self {
-            MapEdit::AddAnchor { orig_seg, t } => {
+            AnchorEdit::Add { orig_seg, t } => {
                 let (e, forward) = map.find_edge(&orig_seg)?;
                 map.with_anchor_added(e, if forward { t } else { 1.0 - t })
             }
-            MapEdit::DeleteAnchor { orig_vertex } => map.with_anchor_deleted(vertex(orig_vertex)?),
-            MapEdit::PullEdge {
-                orig_seg,
-                grab_t,
-                target,
-            } => {
-                let (e, forward) = map.find_edge(&orig_seg)?;
-                let t = if forward { grab_t } else { 1.0 - grab_t };
-                map.pulled_edge(e, t, target)
-            }
-            MapEdit::MoveVertex {
-                orig_vertex,
-                target,
-            } => map.moved_vertex(vertex(orig_vertex)?, target),
+            AnchorEdit::Delete { orig_vertex } => map
+                .with_anchor_deleted((0..map.nodes.len()).find(|&v| map.nodes[v] == orig_vertex)?),
         }
     }
 }
@@ -2738,12 +2708,12 @@ impl PlanarMap {
 /// 入れる図形は、レイヤー `layer_id` の、座標の変換 `xform` で置いた写し。辺・頂点が無いか、確定できなければ `None`
 pub(crate) fn reshape_result(
     base: &LayerBase,
-    edit: MapEdit,
+    edit: ReshapeEdit,
     layer_id: LayerId,
     group_path: &[u64],
     xform: Affine,
 ) -> Option<(Vec<ShapeId>, Vec<FillShape>)> {
-    let change = base.reshape_change(edit)??;
+    let change = base.reshape_change(edit)?;
     match base.edit_local(&change, group_path) {
         LocalEdit::Same => Some((Vec::new(), Vec::new())),
         LocalEdit::Refused(_) => None,
@@ -2889,13 +2859,25 @@ impl PlanarMap {
     }
 }
 
-/// 曲線 `q` の `t` の所を `target` へ引っぱった曲線（両端は動かさず、制御点を動かす。輪郭のつまみの決まり。確定
-/// `pulled_edge` とドラッグ中の表示が同じこれを使う）。`t` は `grab_t` で寄せたもの
+/// 曲線 `q` の `t` の所を `target` へ引っぱった曲線（両端は動かさず、制御点を動かす。輪郭のつまみの決まり。確定と
+/// ドラッグ中の表示が同じこれを使う：`reshape_change`）。`t` は `grab_t` で寄せたもの
 pub(crate) fn pulled_quad(q: QuadBez, t: f64, target: Point) -> QuadBez {
     QuadBez::new(
         q.p0,
         q.p1 + (target - q.eval(t)) / (2.0 * t * (1.0 - t)),
         q.p2,
+    )
+}
+
+/// 曲線 `q` の、`orig` にある端を `target` へ動かした曲線（輪郭の頂点の移動の決まり：動かす端は `target` へ、制御点は
+/// 動いた量の半分だけ動かす。両端が `orig` の辺は両端とも動き、制御点も動いた量だけ動く）
+pub(crate) fn moved_quad(q: QuadBez, orig: Point, target: Point) -> QuadBez {
+    let pos = |p: Point| if p == orig { target } else { p };
+    let k = (q.p0 == orig) as u8 + (q.p2 == orig) as u8;
+    QuadBez::new(
+        pos(q.p0),
+        q.p1 + (target - orig) * (0.5 * k as f64),
+        pos(q.p2),
     )
 }
 

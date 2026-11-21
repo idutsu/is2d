@@ -17,7 +17,8 @@ use crate::vector_engine::{left_normal, normalize_vec, point_to_segment_dist, Co
 // ============================================================================
 
 /// 曲線に当てはめるときの許容（画面の px）。画面の画素の 1/4 で、当てはめで生じる差は描いた倍率では見分けられない
-const FIT_TOL_PX: f64 = 0.25;
+/// （メッシュを使い回すときに許すずれ `MESH_MAX_ERROR` も同じ決まり）
+pub(crate) const FIT_TOL_PX: f64 = 0.25;
 /// 中心線と輪郭を折れ線にするときの許容の、当てはめの許容に対する割合（折れ線のずれで当てはめの許容をほとんど使わない）
 const FLAT_RATIO: f64 = 0.1;
 /// 輪郭の自分との交わりを整理するとき落とす輪郭の面積（画面の px²）
@@ -791,7 +792,7 @@ fn fit_ring(ring: &[Point], tan_of: &dyn Fn(Point) -> Option<KVec2>, eps: f64) -
 
 /// 表示の倍率 `zoom` と画面の倍率 `pixels_per_point` での、丸めの刻み（画面の1画素を文書の座標に直したもの）
 pub(crate) fn input_step(zoom: f64, pixels_per_point: f64) -> f64 {
-    1.0 / (pixels_per_point.max(1e-3) * zoom)
+    1.0 / (pixels_per_point * zoom)
 }
 
 /// 中心線の節 `from..=to` を半径 `radius` で太らせた輪郭（描いている間に見せる形。NonZero で塗る閉じた折れ線、

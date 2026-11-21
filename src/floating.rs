@@ -132,28 +132,47 @@ impl PieceGroup {
 }
 
 /// 浮いた片 `fl` のすべての片の組と、まだ持ち上げていない生の図形 `raw`（レイヤーごとの面の番号。持ち上げると、中身の
-/// 地図のその面だけの片になる：`cut_layer`）に、文書の座標の変換 `doc` を重ねても、確定で地図にできるか（確定と同じ式：
-/// 片の地図に、重ねた変換をかけた点がみな格子に置ける：`PlanarMap::fits_grid`）
-pub(crate) fn pieces_fit(
+/// 地図のその面だけの片になる：`cut_layer`）の、確定のときに変換をかける地図と、その地図に先にかかっている変換（片の組の
+/// 変換。持ち上げていない図形は無し）。置けるかの判定は `canvas_tool::TransformFit::fits`
+pub(crate) fn piece_maps(
     fl: Option<&Floating>,
     stage: Stage<'_>,
     raw: &[(LayerId, HashSet<ShapeId>)],
-    doc: Affine,
-) -> bool {
+) -> Vec<(FitMap, Affine)> {
     let layers = fl.map_or(&[][..], |fl| &fl.layers[..]);
-    layers
+    let pieces = layers
         .iter()
         .flat_map(|l| &l.groups)
-        .all(|g| g.base().map().fits_grid(doc * g.xform))
-        && raw.iter().all(|(layer_id, ids)| {
-            stage.cel(*layer_id).is_none_or(|cel| {
-                let content = match layers.iter().find(|l| l.layer_id == *layer_id) {
-                    Some(l) => l.content(&cel),
-                    None => cel,
-                };
-                content.only_faces_map(ids, stage.scope).fits_grid(doc)
-            })
-        })
+        .map(|g| (FitMap::Held(g.base()), g.xform));
+    let unlifted = raw.iter().filter_map(|(layer_id, ids)| {
+        let cel = stage.cel(*layer_id)?;
+        let content = match layers.iter().find(|l| l.layer_id == *layer_id) {
+            Some(l) => l.content(&cel),
+            None => cel,
+        };
+        Some((
+            FitMap::Owned(content.only_faces_map(ids, stage.scope)),
+            Affine::IDENTITY,
+        ))
+    });
+    pieces.chain(unlifted).collect()
+}
+
+/// 置けるかを調べる地図（`piece_maps`・`Session::transform_fit`）：写しが持つ地図（片の組・グループの階層。写しを生かして
+/// おくだけで地図を写さない）か、面だけを残して作った地図（まだ持ち上げていない生の図形）
+#[derive(Debug)]
+pub(crate) enum FitMap {
+    Held(Arc<LayerBase>),
+    Owned(PlanarMap),
+}
+
+impl FitMap {
+    pub(crate) fn map(&self) -> &PlanarMap {
+        match self {
+            FitMap::Held(base) => base.map(),
+            FitMap::Owned(m) => m,
+        }
+    }
 }
 
 /// 片の地図が、格子の上で正しい地図にならない（片の操作を断る）
@@ -467,7 +486,7 @@ impl Floating {
         failed
     }
 
-    /// 動かす・回す・拡大：すべての片の組に、文書の座標の変換 `doc` を重ねる（重ねてよいかは先に `pieces_fit` で
+    /// 動かす・回す・拡大：すべての片の組に、文書の座標の変換 `doc` を重ねる（重ねてよいかは先に `TransformFit::fits` で
     /// 確かめる）
     pub(crate) fn transform(&mut self, doc: Affine) {
         for g in self.layers.iter_mut().flat_map(|l| &mut l.groups) {

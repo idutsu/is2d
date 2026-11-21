@@ -7,7 +7,7 @@ use std::sync::Arc;
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{HoverTarget, MapOwner, Scene, Session};
-use crate::planar_map::{is_map_shape, parallel_map, LayerBase, MapEdit};
+use crate::planar_map::{is_map_shape, parallel_map, AnchorEdit, LayerBase};
 use crate::vector_engine::{quad_deriv, FillShape, LayerId, ShapeId};
 
 /// 1つのレイヤーの、編集中の階層の生の図形から作った地図
@@ -184,7 +184,7 @@ fn anchor_hover_in(
             let d = (p - mouse_pt).hypot();
             if best.as_ref().is_none_or(|b| d < b.0)
                 && !hidden_by_front(scene, session, lm, p)
-                && lm.base.anchor_possible(MapEdit::AddAnchor {
+                && lm.base.anchor_possible(AnchorEdit::Add {
                     orig_seg: lm.quad(e),
                     t,
                 })
@@ -215,7 +215,7 @@ fn anchor_hover_in(
             && !hidden_by_front(scene, session, lm, p)
             && lm
                 .base
-                .anchor_possible(MapEdit::DeleteAnchor { orig_vertex: v })
+                .anchor_possible(AnchorEdit::Delete { orig_vertex: v })
         {
             best = Some((d, lm, v));
         }

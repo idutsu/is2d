@@ -2054,16 +2054,8 @@ pub(super) fn window_edges(
     }
     ends.sort_by(|a, b| point_order(*a, *b));
     ends.dedup();
-    let mut at: Vec<usize> = Vec::new();
     for p in ends {
-        at.clear();
-        ix.ends.edges_in(stored, end_key(p), &mut at);
-        for &e in &at {
-            let te = stored.edge_at(e);
-            if te.a == p || te.b == p {
-                in_window.insert(e);
-            }
-        }
+        in_window.extend(ix.edges_at_node(p));
     }
     in_window.into_iter().collect()
 }
@@ -2194,7 +2186,7 @@ pub(super) fn crossing_cols(poly: &[IPt], p2: IPt) -> impl Iterator<Item = i64> 
     })
 }
 
-/// 行の帯（升目の行の範囲）ごとの、辺のある升目の列とその列の辺の控え（`RayCols::next_col_cached`）。帯ごとに、引いた
+/// 行の帯（升目の行の範囲）ごとの、辺のある升目の列とその列の辺の控え（`RayCols::next_col`）。帯ごとに、引いた
 /// 列の範囲だけを持ち、要る所まで少しずつ広げる（なめる点が少なければ、引くのは点の近くの列だけ）
 #[derive(Default)]
 pub(super) struct RayBands(std::cell::RefCell<IntMap<(i64, i64), RayBand>>);
@@ -2302,9 +2294,10 @@ impl RayCols {
         self.rows
     }
 
-    /// `next_col` と同じだが、升目の列の辺を、行の帯ごとの控え `bands` から引き（同じ帯の点を何度もなめるとき、索引を
-    /// 1回だけ引く）、辺の無い列は飛ばす。ただし列 `stop`（ほかの辺がある列）より先へは飛ばさない（その列は空で返す）
-    pub(super) fn next_col_cached(
+    /// 次の列（列, その列で半直線を横切る前の地図の辺のうち `keep` が通すもの。番号の順）。升目の列の辺は、行の帯ごとの
+    /// 控え `bands` から引き（同じ帯の点を何度もなめるとき、索引を1回だけ引く）、辺の無い列は飛ばす。ただし列 `stop`
+    /// （ほかの辺がある列）より先へは飛ばさない（その列は空で返す）。列が尽きたら `None`。半直線の列を進めるのはこれ1つ
+    pub(super) fn next_col(
         &mut self,
         ix: MapIndex<'_>,
         bands: &RayBands,
@@ -2326,27 +2319,6 @@ impl RayCols {
         list.retain(|&e| keep(e) && crossing_cols(ix.poly(e), self.p2).any(|c| c == tx));
         Some((tx, list))
     }
-
-    /// 次の列（列, その列で半直線を横切る前の地図の辺のうち `keep` が通すもの。番号の順。無い列は空）。列が尽きたら `None`
-    pub(super) fn next_col(
-        &mut self,
-        ix: MapIndex<'_>,
-        keep: impl Fn(usize) -> bool,
-    ) -> Option<(i64, Vec<usize>)> {
-        if self.next > self.last {
-            return None;
-        }
-        let tx = self.next;
-        self.next += 1;
-        let mut cands: Vec<usize> = Vec::new();
-        for ty in self.rows.0..=self.rows.1 {
-            ix.index.edges_in(ix.stored, (tx, ty), &mut cands);
-        }
-        cands.sort_unstable();
-        cands.dedup();
-        cands.retain(|&e| keep(e) && crossing_cols(ix.poly(e), self.p2).any(|c| c == tx));
-        Some((tx, cands))
-    }
 }
 
 /// 格子の点を2倍の座標にする
@@ -2361,7 +2333,8 @@ fn dbl(p: IPt) -> IPt {
 /// 升目の索引を引く（手間は、最初に横切る辺までの分）
 pub(super) fn first_crossing(ix: MapIndex<'_>, q: IPt) -> Option<(usize, bool)> {
     let mut rc = RayCols::new(ix, q, None);
-    while let Some((tx, edges)) = rc.next_col(ix, |_| true) {
+    let bands = RayBands::default();
+    while let Some((tx, edges)) = rc.next_col(ix, &bands, |_| true, None) {
         let mut best: Option<Crossing> = None;
         for e in edges {
             for s in ix.poly(e).windows(2) {
@@ -2631,6 +2604,20 @@ impl<'a> MapIndex<'a> {
     /// しまう形の辺 `e` の判定の形（`StoredMap::poly`）
     pub(crate) fn poly(&self, e: usize) -> &'a Poly {
         self.stored.poly(e, self.hold)
+    }
+
+    /// 頂点 `p`（文書の座標）を端に持つ辺（しまう形の番号の順）。端の升目の索引で引く。頂点の辺を探すのはこれ1つ（窓を
+    /// 作る `window_edges`・頂点の移動 `reshape_change`・`LayerBase::edges_at_node`）
+    pub(crate) fn edges_at_node(&self, p: Point) -> Vec<usize> {
+        let mut at: Vec<usize> = Vec::new();
+        self.ends.edges_in(self.stored, end_key(p), &mut at);
+        at.sort_unstable();
+        at.dedup();
+        at.retain(|&e| {
+            let te = self.stored.edge_at(e);
+            te.a == p || te.b == p
+        });
+        at
     }
 }
 

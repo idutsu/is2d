@@ -15,7 +15,7 @@ use crate::clipboard_ops::{
     content_xform, import_clipboard_symbols, pasteable_content, prepare_copy_selected_shapes,
     prepare_placement, put_placements, remap_timeline_ids, selected_content,
 };
-use crate::planar_map::{MapEdit, MapRule};
+use crate::planar_map::{AnchorEdit, MapRule, ReshapeEdit};
 use crate::select_ops::{
     apply_marquee_selection, compute_hover_target, enter_group_at, exit_current_group,
     prepare_arrange_selected, prepare_clear_active_frame_shapes, prepare_delete_selected_shapes,
@@ -528,7 +528,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             tab,
             layer_id,
             (orig_seg.eval(grab_t), target_pos),
-            MapEdit::PullEdge {
+            ReshapeEdit::PullEdge {
                 orig_seg,
                 grab_t,
                 target: target_pos,
@@ -542,7 +542,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             tab,
             layer_id,
             (orig_vertex, target_pos),
-            MapEdit::MoveVertex {
+            ReshapeEdit::MoveVertex {
                 orig_vertex,
                 target: target_pos,
             },
@@ -854,8 +854,9 @@ fn write_local(
 }
 
 /// 点 `pt`（ステージの座標）で見えている、いちばん上のもの：（レイヤーの番号, 色）（バケツとスポイト用）。画面に描くのと
-/// 同じ写しを、上から順に参照でたどる：編集できるレイヤーは画面の図形（`Scene`）、ロック中のレイヤーはセル画の結合
-/// メッシュの写し（`Tab::cached_cel_color_at`）。図形は複製しない
+/// 同じ写しの図形を、上から順に参照でたどる：編集できるレイヤーは画面の図形（`Scene`）、ロック中のレイヤーはセル画の
+/// 結合メッシュの写しが持つ図形（`Tab::cached_cel_color_at`）。点の内外はどちらも `FillShape::contains_point`。図形は
+/// 複製しない
 pub(crate) fn topmost_visible_at(tab: &Tab, pt: Point) -> Option<(usize, Color32)> {
     let tl = tab.active_timeline();
     let hit = tab
@@ -979,19 +980,28 @@ fn has_editable_selection(tab: &Tab) -> bool {
     })
 }
 
-fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
+/// 選んでいるものに、ステージの座標の変換 `affine` をかける。`pivot_to_instance`：置けると決めたあと、変形の基準点
+/// （`transform_pivot`）を選んだインスタンスの中心点に書く（拡大・回転・反転の確定。移動は基準点も一緒に動くので書かない）
+fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: bool) -> bool {
     if tab.session.selection.is_empty() {
         return false;
     }
-    // 選んだ生の図形は片に持ち上げて、片の変換で動かす（持ち上げられなければ断る）
-    if !tab.session.lift_selected_raw_shapes_to_floating() {
+    // 地図は格子の内の形しか持てないので、生の図形（浮いた片と、まだ持ち上げていない選んだ生の図形と、選んだグループの中の
+    // 生の図形）が格子の外（±65,536px の外）へ出る変形と、潰れる変形は、文書を変える前に断る。確かめるのは確定と同じ式
+    // （`TransformFit::fits`。ドラッグ中の「置けない」の表示も同じ）なので、確かめを通れば確定で失敗しない
+    if !tab.session.transform_fit().fits(affine) {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     }
-    // 地図は格子の内の形しか持てないので、生の図形（浮いた片と、選んだグループの中の生の図形）が格子の外（±65,536px の
-    // 外）へ出る変形と、潰れる変形は、文書を変える前に断る。確かめるのは確定と同じ式（`Session::fits_transform`。ドラッグ
-    // 中の「置けない」の表示も同じ）なので、確かめを通れば確定で失敗しない
-    if !tab.session.fits_transform(affine) {
+    if pivot_to_instance {
+        if let Some(piv) = tab.session.transform_pivot {
+            if apply_set_selected_symbol_world_pivot(tab, Some(piv)) {
+                tab.session.transform_pivot = None;
+            }
+        }
+    }
+    // 選んだ生の図形は片に持ち上げて、片の変換で動かす（持ち上げられなければ断る）
+    if !tab.session.lift_selected_raw_shapes_to_floating() {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     }
@@ -1094,7 +1104,7 @@ fn apply_finish_move_selection_drag(
     if alt_duplicate {
         return duplicate_selected_in_working_copy(tab, total_delta);
     }
-    transform_selected_shapes(tab, Affine::translate(total_delta))
+    transform_selected_shapes(tab, Affine::translate(total_delta), false)
 }
 
 fn apply_move_selected(tab: &mut Tab, delta: KVec2, coalesce: Option<CoalesceKey>) -> bool {
@@ -1103,7 +1113,7 @@ fn apply_move_selected(tab: &mut Tab, delta: KVec2, coalesce: Option<CoalesceKey
         return false;
     }
     push_undo(tab, coalesce);
-    let moved = transform_selected_shapes(tab, Affine::translate(delta));
+    let moved = transform_selected_shapes(tab, Affine::translate(delta), false);
     if let Some(piv) = &mut tab.session.transform_pivot {
         *piv += delta;
     }
@@ -1116,7 +1126,7 @@ fn apply_map_reshape(
     tab: &mut Tab,
     layer_id: LayerId,
     (from, to): (Point, Point),
-    map_edit: MapEdit,
+    edit: ReshapeEdit,
 ) -> bool {
     tab.session.clear_overlay();
     let xform = tab.session.edit_path.world_xform();
@@ -1126,12 +1136,22 @@ fn apply_map_reshape(
     {
         return false;
     }
-    apply_map_edit(tab, layer_id, map_edit)
+    // 頂点・辺を動かす確定は重ね合わせで作る。辺・頂点が無い（つかんだあとに地図が変わった）ときは、変わらない
+    apply_map_edit(tab, layer_id, |base, scope| {
+        match base.reshape_change(edit) {
+            Some(change) => base.edit_local(&change, scope),
+            None => crate::planar_map::LocalEdit::Same,
+        }
+    })
 }
 
-/// 地図での編集（輪郭の変形・アンカーの追加・削除）を確定する。レイヤー `layer_id` の、編集中の階層の生の図形を境目の線で持つ
-/// 地図にして編集し、変わった図形だけを差し替える
-fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
+/// 地図での編集（輪郭の変形・アンカーの追加・削除。何を書くかは `edit` が1本の道で決める）を確定する。レイヤー
+/// `layer_id` の、編集中の階層の生の図形を境目の線で持つ地図にして編集し、変わった図形だけを差し替える
+fn apply_map_edit(
+    tab: &mut Tab,
+    layer_id: LayerId,
+    edit: impl FnOnce(&crate::planar_map::LayerBase, &[u64]) -> crate::planar_map::LocalEdit,
+) -> bool {
     if !editable_layer_ids(tab).contains(&layer_id) {
         return false;
     }
@@ -1141,22 +1161,7 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
     }
     // 形が変わらないとき・編集できないとき（消せない頂点など）は、write_local が false を返し、apply が Undo の控えを捨てる
     push_undo(tab, None);
-    // 頂点・辺を動かす確定は重ね合わせで作る。辺・頂点が無い（つかんだあとに地図が変わった）ときは、変わらない
-    let changed = match map_edit {
-        MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => {
-            write_local(tab, layer_id, |base, scope| {
-                match base.reshape_change(map_edit) {
-                    Some(Some(change)) => base.edit_local(&change, scope),
-                    _ => crate::planar_map::LocalEdit::Same,
-                }
-            })
-        }
-        MapEdit::AddAnchor { .. } | MapEdit::DeleteAnchor { .. } => {
-            write_local(tab, layer_id, |base, scope| {
-                base.anchor_local(map_edit, scope)
-            })
-        }
-    };
+    let changed = write_local(tab, layer_id, edit);
     if changed {
         focus_active_layer_by_id(tab, layer_id);
     }
@@ -1189,7 +1194,7 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         tab,
         layer_id,
         (orig_seg.eval(grab_t), target),
-        MapEdit::PullEdge {
+        ReshapeEdit::PullEdge {
             orig_seg,
             grab_t,
             target,
@@ -1221,7 +1226,7 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         tab,
         layer_id,
         (orig_vertex, target),
-        MapEdit::MoveVertex {
+        ReshapeEdit::MoveVertex {
             orig_vertex,
             target,
         },
@@ -1244,14 +1249,14 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
                 map_edge: Some((owner, orig_seg)),
                 ..
             },
-        ) => Some((owner, MapEdit::AddAnchor { orig_seg, t })),
+        ) => Some((owner, AnchorEdit::Add { orig_seg, t })),
         (
             false,
             HoverTarget::Vertex {
                 map_node: Some((owner, orig_vertex)),
                 ..
             },
-        ) => Some((owner, MapEdit::DeleteAnchor { orig_vertex })),
+        ) => Some((owner, AnchorEdit::Delete { orig_vertex })),
         _ => None,
     };
     // 動かして浮いている片は、そのレイヤーの片の地図で編集する（境目なら両側の片が変わる）
@@ -1266,14 +1271,16 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         target = compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode);
     }
     match edit_of(target) {
-        Some((MapOwner::Layer(layer_id), edit)) => apply_map_edit(tab, layer_id, edit),
+        Some((MapOwner::Layer(layer_id), edit)) => {
+            apply_map_edit(tab, layer_id, |base, scope| base.anchor_local(edit, scope))
+        }
         _ => false,
     }
 }
 
 /// 動かして浮いている片のうち、レイヤー `layer_id` の組 `group` の片の地図（アンカーのカーソル合わせと同じ地図）を `edit` で
 /// 編集する（境目なら両側の片が変わる。選択も入れ替える）
-fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, group: usize, edit: MapEdit) -> bool {
+fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, group: usize, edit: AnchorEdit) -> bool {
     let Some(mut fl) = tab.session.floating().filter(|fl| fl.modified).cloned() else {
         return false;
     };
@@ -1322,18 +1329,9 @@ fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     if affine == Affine::IDENTITY || !has_editable_selection(tab) {
         return false;
     }
-    // 置けない変換は、中心点も書かずに断る（判定は変形の確定と同じ `Session::fits_transform`）
-    if !tab.session.fits_transform(affine) {
-        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
-        return false;
-    }
     push_undo(tab, None);
-    if let Some(piv) = tab.session.transform_pivot {
-        if apply_set_selected_symbol_world_pivot(tab, Some(piv)) {
-            tab.session.transform_pivot = None;
-        }
-    }
-    transform_selected_shapes(tab, affine)
+    // 置けない変換は、中心点も書かずに断る（`transform_selected_shapes` が置けると決めてから中心点を書く）
+    transform_selected_shapes(tab, affine, true)
 }
 
 fn apply_paste_clipboard(
@@ -1823,6 +1821,10 @@ fn apply_set_layer_flag(
 }
 
 fn apply_set_stage_size(tab: &mut Tab, next_size: Vec2, coalesce: Option<CoalesceKey>) -> bool {
+    // 文書に入れる大きさは1つの決まり（範囲にそろえ、有限でなければ断る）
+    let Some(next_size) = crate::symbol::stage_size_of(next_size) else {
+        return false;
+    };
     if (next_size.x - tab.doc.stage_size.x).abs() <= f32::EPSILON
         && (next_size.y - tab.doc.stage_size.y).abs() <= f32::EPSILON
     {

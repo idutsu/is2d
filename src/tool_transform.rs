@@ -113,6 +113,7 @@ pub(crate) fn start_transform_drag(
                     orig_shapes,
                     last_affine: Affine::IDENTITY,
                     changed: false,
+                    fit: std::sync::Arc::new(tab.session.transform_fit()),
                     fits: true,
                 });
             }
@@ -129,6 +130,7 @@ pub(crate) fn start_transform_drag(
                     start_angle: (pt.y - pivot.y).atan2(pt.x - pivot.x),
                     current_angle: 0.0,
                     orig_shapes,
+                    fit: std::sync::Arc::new(tab.session.transform_fit()),
                     fits: true,
                 });
             }
@@ -184,6 +186,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                 orig_shapes,
                 last_affine,
                 changed,
+                fit,
                 fits,
                 ..
             } => {
@@ -207,7 +210,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                 let affine = affine_scale_around(eff_anchor, sx, sy);
                 *last_affine = affine;
                 *changed = transform_moves(&tab.view, affine, *orig_bbox);
-                *fits = tab.session.fits_transform(affine);
+                *fits = fit.fits(affine);
                 tab.session.update_transform_overlay(orig_shapes, affine);
                 if tab.session.transform_pivot.is_some() {
                     tab.session.transform_pivot = Some(affine * *orig_pivot);
@@ -218,6 +221,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                 start_angle,
                 current_angle,
                 orig_shapes,
+                fit,
                 fits,
                 ..
             } => {
@@ -231,7 +235,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                     }
                     *current_angle = delta_angle;
                     let affine = affine_rotate_around(*pivot, delta_angle);
-                    *fits = tab.session.fits_transform(affine);
+                    *fits = fit.fits(affine);
                     tab.session.update_transform_overlay(orig_shapes, affine);
                 }
             }

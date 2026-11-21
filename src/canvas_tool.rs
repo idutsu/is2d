@@ -164,8 +164,8 @@ pub(crate) enum HoverTarget {
         /// 頂点のある輪郭（`shape_id` の図形の何番目の輪郭か。ワイヤーフレームで、その輪郭の頂点を出す）
         contour_idx: usize,
         pos: Point,
-        /// 地図の頂点（どの地図か, 文書の座標の位置）。`pos` はステージの座標の位置（表示と距離）、編集（`MapEdit`）は
-        /// 文書の座標の位置で頂点を探す
+        /// 地図の頂点（どの地図か, 文書の座標の位置）。`pos` はステージの座標の位置（表示と距離）、編集（`ReshapeEdit`・
+        /// `AnchorEdit`）は文書の座標の位置で頂点を探す
         map_node: Option<(MapOwner, Point)>,
     },
     Edge {
@@ -174,7 +174,7 @@ pub(crate) enum HoverTarget {
         closest_pos: Point,
         /// 強調表示する曲線（地図の辺のステージの座標の形）
         seg: QuadBez,
-        /// 地図の辺（どの地図か, 文書の座標の形）。編集（`MapEdit`）はこの形で辺を探す
+        /// 地図の辺（どの地図か, 文書の座標の形）。編集（`ReshapeEdit`・`AnchorEdit`）はこの形で辺を探す
         map_edge: Option<(MapOwner, QuadBez)>,
     },
     Fill {
@@ -321,7 +321,9 @@ pub(crate) enum TransformDragState {
         orig_shapes: Vec<FillShape>,
         last_affine: Affine,
         changed: bool,
-        /// いまの変換で置けるか（確定と同じ判定：`Session::fits_transform`。置けなければ知らせを出す）
+        /// 置けるかを決めるもの（始めるときに1回だけ作る：`Session::transform_fit`）
+        fit: Arc<TransformFit>,
+        /// いまの変換で置けるか（確定と同じ判定：`TransformFit::fits`。置けなければ知らせを出す）
         fits: bool,
     },
     Rotate {
@@ -331,9 +333,32 @@ pub(crate) enum TransformDragState {
         start_angle: f64,
         current_angle: f64,
         orig_shapes: Vec<FillShape>,
-        /// いまの変換で置けるか（`Scale` と同じ）
+        /// 置けるかを決めるものと、いまの変換で置けるか（`Scale` と同じ）
+        fit: Arc<TransformFit>,
         fits: bool,
     },
+}
+
+/// 選んでいるものに変換をかけて置けるかを決めるもの（`Session::transform_fit`）：確定のときに変換をかける地図と、その地図に
+/// 先にかかっている変換、ステージの座標から文書の座標への変換
+#[derive(Debug)]
+pub(crate) struct TransformFit {
+    world: Affine,
+    maps: Vec<(crate::floating::FitMap, Affine)>,
+}
+
+impl TransformFit {
+    /// ステージの座標の変換 `affine` をかけて置けるか。変形の確定（`transform_selected_shapes`）と、拡大・回転のドラッグ中の
+    /// 「置けない」の表示（`TransformDragState` の `fits`）の判定はこれ1つ：変換が潰れず（`invertible`）、地図にその変換を
+    /// 重ねた点がみな格子に置ける（`PlanarMap::fits_grid`。確定と同じ式）
+    pub(crate) fn fits(&self, affine: Affine) -> bool {
+        let doc = self.world.inverse() * affine * self.world;
+        crate::vector_engine::invertible(doc)
+            && self
+                .maps
+                .iter()
+                .all(|(m, pre)| m.map().fits_grid(doc * *pre))
+    }
 }
 
 impl ActiveCanvasDrag {
@@ -381,7 +406,7 @@ pub(crate) struct View {
     /// なので、読む所は範囲に収め直さない）
     zoom: f32,
     /// 画面の倍率（論理の1点あたりの画素の数。Retina なら 2）。ブラシ・消しゴムで、マウスの点の丸めの刻みを決める
-    /// （`vector_stroke::input_step`）。ブラシ・消しゴムを使うたびに画面から取る
+    /// （`vector_stroke::input_step`）。ブラシ・消しゴムを使うたびに画面から取る（egui の値で、いつも正。初めは 1）
     pub(crate) pixels_per_point: f32,
     /// キャンバスのパンオフセット（スクリーンピクセル単位）
     pub(crate) pan: Vec2,
@@ -894,11 +919,11 @@ pub(crate) fn build_scene_order_by_layer_ids(
             Placement::ReplaceAt(target_id) => {
                 // 元の図形は、この上乗せを作った土台にいつもある（`Placement::ReplaceAt`。レイヤーの順で入れる逃げ道は
                 // 置かない）
-                let pos = base.iter().position(|s| s.shape_id == *target_id);
-                debug_assert!(pos.is_some(), "ReplaceAt の相手が土台に無い");
-                if let Some(pos) = pos {
-                    replace_at_base[pos].push(add_idx);
-                }
+                let pos = base
+                    .iter()
+                    .position(|s| s.shape_id == *target_id)
+                    .expect("ReplaceAt の相手は、上乗せを作った土台にある");
+                replace_at_base[pos].push(add_idx);
                 None
             }
             Placement::RawOf(lid, scope) => {
@@ -1586,26 +1611,30 @@ impl Session {
         !failed
     }
 
-    /// 選んでいるものに、ステージの座標の変換 `affine` をかけて置けるか。変形の確定（`transform_selected_shapes`）と、
-    /// 拡大・回転のドラッグ中の「置けない」の表示（`TransformDragState` の `fits`）の判定はこれ1つ：変換が潰れず
-    /// （`invertible`）、浮いた片と、まだ持ち上げていない選んだ生の図形（`floating::pieces_fit`）と、選んだグループの
-    /// 中の生の図形の階層の地図（`selected_group_scopes`）が、みな格子に置ける（`PlanarMap::fits_grid`）。インスタンスは
-    /// 地図を持たないので、変換が潰れなければ置ける
-    pub(crate) fn fits_transform(&self, affine: Affine) -> bool {
-        let world = self.edit_path.world_xform();
-        let doc = world.inverse() * affine * world;
-        crate::vector_engine::invertible(doc)
-            && crate::floating::pieces_fit(
-                self.floating.as_ref(),
-                self.stage(),
-                &self.selected_raw_ids_by_layer(true),
-                doc,
-            )
-            && self.selected_group_scopes().iter().all(|(layer_id, path)| {
-                self.base_cache
-                    .cel(*layer_id)
-                    .is_none_or(|c| c.scope_base(path).map().fits_grid(doc))
-            })
+    /// 選んでいるものに変換をかけて置けるかを決めるもの（`TransformFit`）：浮いた片と、まだ持ち上げていない選んだ生の
+    /// 図形（`floating::piece_maps`）と、選んだグループの中の生の図形の階層の地図（`selected_group_scopes`）。インスタンスは
+    /// 地図を持たないので、変換が潰れなければ置ける。拡大・回転のドラッグは、始めるときに1回だけ作って持つ
+    pub(crate) fn transform_fit(&self) -> TransformFit {
+        let mut maps = crate::floating::piece_maps(
+            self.floating.as_ref(),
+            self.stage(),
+            &self.selected_raw_ids_by_layer(true),
+        );
+        maps.extend(
+            self.selected_group_scopes()
+                .iter()
+                .filter_map(|(layer_id, path)| {
+                    let cel = self.base_cache.cel(*layer_id)?;
+                    Some((
+                        crate::floating::FitMap::Held(cel.scope_base(path)),
+                        Affine::IDENTITY,
+                    ))
+                }),
+        );
+        TransformFit {
+            world: self.edit_path.world_xform(),
+            maps,
+        }
     }
 
     /// 選んでいるグループの中の生の図形の階層：（レイヤー, 階層）。浮いた片が隠すセル画の図形と、今の階層の生の図形
@@ -2329,7 +2358,7 @@ impl Tab {
     }
 
     /// ロック中のレイヤー `layer_idx` のコマ `frame` のセル画の、点 `pt`（ステージの座標）で見えている色（描くのと同じ写し
-    /// のワールド座標の結合メッシュを、上に描く三角形から順にたどる：`CelMeshCache::world_mesh`・`mesh_color_at`）
+    /// の図形を、上に描くものから順に点の内外の判定でたどる：`CelMeshCache::color_at`）
     pub(crate) fn cached_cel_color_at(
         &self,
         layer_idx: usize,
@@ -2340,9 +2369,15 @@ impl Tab {
         let world_xform = self.session.edit_path.world_xform();
         let scope = self.active_cel_scope();
         self.with_symbol_eval(|ctx| {
-            let mut cache = self.session.cel_cache.lock();
-            let mesh = cache.world_mesh(tl, scope, ctx, layer_idx, frame, world_xform)?;
-            crate::vector_engine::mesh_color_at(mesh, Pos2::new(pt.x as f32, pt.y as f32))
+            self.session.cel_cache.lock().color_at(
+                tl,
+                scope,
+                ctx,
+                layer_idx,
+                frame,
+                world_xform,
+                pt,
+            )
         })
     }
 

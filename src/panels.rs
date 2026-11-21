@@ -8,7 +8,10 @@ use crate::canvas_tool::{
 use crate::doc_actions::Action;
 use crate::project_io::PendingCloseConfirm;
 use crate::select_ops::ArrangeMode;
-use crate::symbol::{ColorEffect, SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
+use crate::symbol::{
+    ColorEffect, SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate, STAGE_MAX,
+    STAGE_MIN,
+};
 use crate::symbol_ops::selected_single_symbol_info;
 pub(crate) use crate::timeline_ui::icons;
 use crate::timeline_ui::{editing_idle, TimelineUiState};
@@ -1056,7 +1059,7 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
         let w_resp = ui
             .add(
                 egui::DragValue::new(&mut w)
-                    .range(100..=3840)
+                    .range(STAGE_MIN as i32..=STAGE_MAX.x as i32)
                     .speed(2.0)
                     .update_while_editing(false),
             )
@@ -1065,7 +1068,7 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
         let h_resp = ui
             .add(
                 egui::DragValue::new(&mut h)
-                    .range(100..=2160)
+                    .range(STAGE_MIN as i32..=STAGE_MAX.y as i32)
                     .speed(2.0)
                     .suffix(" px")
                     .update_while_editing(false),

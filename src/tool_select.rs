@@ -9,7 +9,7 @@ use crate::canvas_tool::{
 use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::map_hover::scope_maps;
-use crate::planar_map::{reshape_result, LayerBase, MapEdit};
+use crate::planar_map::{reshape_result, LayerBase, ReshapeEdit};
 use crate::select_ops::{apply_click_selection, finish_selection_drag, update_selection_drag};
 pub(crate) use crate::select_ops::{compute_hover_target, handle_canvas_double_click};
 use crate::vector_engine::{FillShape, LayerId};
@@ -306,7 +306,7 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
             *snapped_to = snap.map(|p| xform * p);
             Some((
                 base.clone(),
-                MapEdit::MoveVertex {
+                ReshapeEdit::MoveVertex {
                     orig_vertex: *orig_vertex,
                     target: *target,
                 },
@@ -327,7 +327,7 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
             let target = *target;
             Some((
                 base.clone(),
-                MapEdit::PullEdge {
+                ReshapeEdit::PullEdge {
                     orig_seg: *orig_seg,
                     grab_t: *grab_t,
                     target,

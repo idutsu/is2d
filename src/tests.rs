@@ -4215,7 +4215,7 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
 }
 
 /// レビュー 96fdc26 の場当たりの直し（`tool_transform.rs` の倍率の下限 0.02）：拡大のドラッグに倍率の下限は無く、潰れる
-/// 変換（0 倍）は、ドラッグの間「置けない」と見せ（確定と同じ判定 `Session::fits_transform`）、離すと断る（文書は変わらない）
+/// 変換（0 倍）は、ドラッグの間「置けない」と見せ（確定と同じ判定 `TransformFit::fits`）、離すと断る（文書は変わらない）
 #[test]
 fn collapsing_scale_drag_shows_unplaceable_and_commit_refuses() {
     let mut app = Is2dApp::default();
@@ -8929,9 +8929,17 @@ fn test_scale_commit_and_repeated_transform_rebuild_mesh_cache() {
     .remove(0);
     let v0 = s.fill_mesh().vertices.len();
     let step_scale = kurbo::Affine::scale(1.2);
-    for _ in 0..8 {
+    // 拡大率の積が使い回せる上限（許すずれ ÷ 作る許容 = 0.25 ÷ 0.04 = 6.25 倍：`keeps_mesh`）の中の間は頂点を写して
+    // 使い回し（1.2 の 10 乗 ≒ 6.19）、超えたら作り直す（11 乗 ≒ 7.43）
+    for _ in 0..10 {
         s.transform(step_scale);
     }
+    assert_eq!(
+        s.fill_mesh().vertices.len(),
+        v0,
+        "拡大率の積が上限の中の間は、メッシュを使い回すこと"
+    );
+    s.transform(step_scale);
     let v_after = s.fill_mesh().vertices.len();
     assert!(
         v_after > v0,
@@ -18240,14 +18248,19 @@ fn test_symbol_color_effect_alpha_brightness_tween_export_nested_io_undo_ungroup
             brightness: -1.0,
         }
     );
-    assert_eq!(
-        ColorEffect::new(f32::NAN, f32::INFINITY),
-        ColorEffect::default()
-    );
-    assert_eq!(
-        ColorEffect::new(f32::NEG_INFINITY, f32::NAN),
-        ColorEffect::default()
-    );
+    // 有限かは見ない：NaN は NaN のまま残り、インスタンスを書く入口・ファイルを読む入口の判定（`is_finite`）が断る
+    // （`non_finite_instance_numbers_are_refused_at_the_entries`）。無限大は範囲の端にそろう
+    let nan = ColorEffect::new(f32::NAN, f32::INFINITY);
+    assert!(nan.alpha.is_nan());
+    assert_eq!(nan.brightness, 1.0);
+    assert!(!SymbolInstanceBinding {
+        color_effect: nan,
+        ..SymbolInstanceBinding::new(1, 1, kurbo::Affine::IDENTITY)
+    }
+    .is_finite());
+    let nan = ColorEffect::new(f32::NEG_INFINITY, f32::NAN);
+    assert_eq!(nan.alpha, 0.0);
+    assert!(nan.brightness.is_nan());
 
     // 3. トゥイーン（開始 0% → 4コマ後 100% の 2コマ目でアルファ 128±1）
     let mut tween_app = Is2dApp::default();
@@ -18412,13 +18425,19 @@ fn test_symbol_color_effect_alpha_brightness_tween_export_nested_io_undo_ungroup
             brightness: f32::NAN,
         },
     };
-    let sanitized_binding = SymbolInstanceBinding::from(out_of_range_saved);
+    // 読むときに直さない：書いてある数のまま読み、有限でなければ書く入口と同じ判定（`is_finite`）が断る（ファイルを読む入口
+    // `only_finite_numbers`）。範囲の外の有限な色効果は、描くとき（`ColorEffect::apply`）に色の範囲へ収まる
+    let read_binding = SymbolInstanceBinding::from(out_of_range_saved);
+    assert_eq!(read_binding.color_effect.alpha, 5.0);
+    assert!(read_binding.color_effect.brightness.is_nan());
+    assert!(!read_binding.is_finite());
+    let finite_out_of_range = ColorEffect {
+        alpha: 5.0,
+        brightness: 0.0,
+    };
     assert_eq!(
-        sanitized_binding.color_effect,
-        ColorEffect {
-            alpha: 1.0,
-            brightness: 0.0,
-        }
+        finite_out_of_range.apply(Color32::from_rgba_unmultiplied(255, 0, 0, 128)),
+        Color32::from_rgba_unmultiplied(255, 0, 0, 255)
     );
 
     // 7. 取り消し（SetSymbolColorEffect を3回続けて送り EndCoalesce → Undo 1回で元の値に戻る）
@@ -23792,8 +23811,36 @@ fn test_anchor_delete_refuses_junction_vertex() {
 
 mod map_overlay {
     use super::*;
-    use crate::planar_map::{LayerBase, LocalEdit, MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{
+        LayerBase, LocalEdit, LocalRefusal, MapInput, MapRule, PlanarMap, ReshapeEdit,
+    };
     use crate::vector_engine::nearest_on_quad;
+
+    /// 地図 `m`（正しい地図）の、本番と同じ計算に使う写し（面に1つずつ別の番号を記したもの）
+    pub(super) fn labeled_base(m: &PlanarMap) -> LayerBase {
+        LayerBase::new(
+            &m.clone()
+                .checked()
+                .expect("正しい地図")
+                .uniquely_labeled()
+                .into_map(),
+        )
+    }
+
+    /// 輪郭の変形（本番の1本の道：`reshape_change` → `edit_local`）を写し `base` にかけた答え：`Ok(Some(地図))`（書き戻した
+    /// 地図）、`Ok(None)`（変わらない）、`Err`（断った：格子の外 `OffGrid`、正しい地図にならない `Unwritable`）。辺・頂点は
+    /// いつもある
+    pub(super) fn reshaped(
+        base: &LayerBase,
+        edit: ReshapeEdit,
+    ) -> Result<Option<PlanarMap>, LocalRefusal> {
+        let change = base.reshape_change(edit).expect("辺・頂点がある");
+        match base.edit_local(&change, &[]) {
+            LocalEdit::Changed(w) => Ok(Some(w.stored.to_dense())),
+            LocalEdit::Same => Ok(None),
+            LocalEdit::Refused(r) => Err(r),
+        }
+    }
 
     /// バケツ（1本の道 `fill_local`）：地図 `m`（正しい地図）の、点 `p` を含む面を `color` にした地図（面に1つずつ別の番号を
     /// 記した、書き戻した地図）。変わらない・書けないときは `None`
@@ -23950,6 +23997,7 @@ mod map_overlay {
         reach: f64,
     ) -> (usize, Vec<String>) {
         let mut r = Rng(seed);
+        let base = labeled_base(m);
         let (mut bad, mut done) = (Vec::new(), 0);
         for k in 0..ks.end {
             let d = kurbo::Vec2::new(r.f() - 0.5, r.f() - 0.5) * reach;
@@ -23957,19 +24005,42 @@ mod map_overlay {
             if k < ks.start {
                 continue;
             }
-            let (next, what) = if k % 2 == 0 {
+            let (edit, what) = if k % 2 == 0 {
                 let v = (pick * m.nodes.len() as f64) as usize % m.nodes.len();
-                (m.moved_vertex(v, m.nodes[v] + d), format!("頂点 {v}"))
+                let p = m.nodes[v];
+                (
+                    ReshapeEdit::MoveVertex {
+                        orig_vertex: p,
+                        target: p + d,
+                    },
+                    format!("頂点 {v}"),
+                )
             } else {
                 let e = (pick * m.edges.len() as f64) as usize % m.edges.len();
-                let target = m.quad(e).eval(0.5) + d;
-                (m.pulled_edge(e, 0.5, target), format!("辺 {e}"))
+                let q = m.quad(e);
+                (
+                    ReshapeEdit::PullEdge {
+                        orig_seg: q,
+                        grab_t: 0.5,
+                        target: q.eval(0.5) + d,
+                    },
+                    format!("辺 {e}"),
+                )
             };
-            if let Some(next) = next {
-                done += 1;
-                if !next.is_valid() {
-                    bad.push(format!("{k}（{what}）：{}", next.validity_report()));
+            // 確定できた回：書いたか、変わらない。書けない（正しい地図にならない）回は確定できたうえで壊れた回として数える
+            // （1本の道は、正しい地図でない結果を書かずに断る：`apply_diff`。お手本との比べは道の中で毎回）。格子の外は数えない
+            match reshaped(&base, edit) {
+                Ok(next) => {
+                    done += 1;
+                    if let Some(next) = next {
+                        assert!(next.is_valid(), "書いた地図は正しい地図");
+                    }
                 }
+                Err(LocalRefusal::Unwritable) => {
+                    done += 1;
+                    bad.push(format!("{k}（{what}）：正しい地図にならず書けない"));
+                }
+                Err(LocalRefusal::OffGrid) => {}
             }
         }
         (done, bad)
@@ -24250,15 +24321,22 @@ mod map_overlay {
                 return (0, 0, 0, 0, notes);
             }
             let before = m.color_locator();
+            let base = labeled_base(&m);
             let mut r = Rng(seed * 7919 + 1);
             for i in 0..per {
                 let dist = 2.0 + r.f() * 60.0;
                 let ang = r.f() * std::f64::consts::TAU;
                 let d = KVec2::new(ang.cos(), ang.sin()) * dist;
-                let (next, moved): (Option<PlanarMap>, Vec<usize>) = if i % 2 == 0 {
+                let (edit, moved): (ReshapeEdit, Vec<usize>) = if i % 2 == 0 {
                     let v = (r.f() * m.nodes.len() as f64) as usize % m.nodes.len();
-                    let target = m.nodes[v] + d;
-                    (m.moved_vertex(v, target), m.edges_at(v))
+                    let p = m.nodes[v];
+                    (
+                        ReshapeEdit::MoveVertex {
+                            orig_vertex: p,
+                            target: p + d,
+                        },
+                        m.edges_at(v),
+                    )
                 } else {
                     let e = (r.f() * m.edges.len() as f64) as usize % m.edges.len();
                     let t = 0.18 + r.f() * 0.64;
@@ -24267,29 +24345,31 @@ mod map_overlay {
                     if (p - q.p0).hypot() <= 9.0 || (p - q.p2).hypot() <= 9.0 {
                         continue;
                     }
-                    (m.pulled_edge(e, t, p + d), vec![e])
+                    (
+                        ReshapeEdit::PullEdge {
+                            orig_seg: q,
+                            grab_t: t,
+                            target: p + d,
+                        },
+                        vec![e],
+                    )
                 };
                 n += 1;
-                let Some(next) = next else {
-                    cancelled += 1;
-                    continue;
-                };
-                if !next.is_valid() {
-                    invalid += 1;
-                    if notes.len() < 3 {
-                        notes.push(format!(
-                            "seed {seed} edit {i}: {}",
-                            next.validity_report().chars().take(200).collect::<String>()
-                        ));
+                // 変わらない・格子の外は取り消し、正しい地図にならず書けないものは正しくない結果
+                let next = match reshaped(&base, edit) {
+                    Ok(Some(next)) => next,
+                    Ok(None) | Err(LocalRefusal::OffGrid) => {
+                        cancelled += 1;
+                        continue;
                     }
-                    continue;
-                }
-                if next.edges.len() == m.edges.len()
-                    && (0..m.edges.len()).all(|e| next.quad(e) == m.quad(e))
-                {
-                    cancelled += 1;
-                    continue;
-                }
+                    Err(LocalRefusal::Unwritable) => {
+                        invalid += 1;
+                        if notes.len() < 3 {
+                            notes.push(format!("seed {seed} edit {i}: 正しい地図にならず書けない"));
+                        }
+                        continue;
+                    }
+                };
                 // 動かした辺が届く所（元の外接矩形を、動かした量の2倍と 1px 広げる）の外で、色が変わった点（4px おき）
                 let reach = moved
                     .iter()
@@ -24863,7 +24943,15 @@ mod map_overlay {
             .find(|&v| m.nodes[v] == Point::new(200.0, 100.0))
             .expect("赤の右上の頂点");
         let w = Point::new(250.0, 100.0);
-        let next = m.moved_vertex(v, w).expect("確定できる");
+        let next = reshaped(
+            &labeled_base(&m),
+            ReshapeEdit::MoveVertex {
+                orig_vertex: m.nodes[v],
+                target: w,
+            },
+        )
+        .expect("確定できる")
+        .expect("変わる");
         assert!(valid(&next));
         assert_eq!(
             next.nodes.iter().filter(|&&p| p == w).count(),
@@ -27740,7 +27828,7 @@ mod map_overlay {
             drop_map_copies(&mut app);
             let t = std::time::Instant::now();
             for i in 0..ids.len() {
-                let _ = app.doc.root.build_cel_world_batch_mesh(
+                let _ = app.doc.root.build_cel_world(
                     i,
                     0,
                     kurbo::Affine::IDENTITY,
@@ -28897,7 +28985,7 @@ mod map_overlay {
     #[test]
     #[ignore]
     fn probe_reshape_timing() {
-        use crate::planar_map::{reshape_result, LayerBase, MapEdit};
+        use crate::planar_map::{reshape_result, LayerBase, ReshapeEdit};
         let app = dense_scene_app(7);
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
         let stats = |v: &[f64]| {
@@ -28930,14 +29018,14 @@ mod map_overlay {
                     let edit = if i % 2 == 0 {
                         let e = (r.f() * map.edges.len() as f64) as usize % map.edges.len();
                         let q = map.quad(e);
-                        MapEdit::PullEdge {
+                        ReshapeEdit::PullEdge {
                             orig_seg: q,
                             grab_t: 0.5,
                             target: q.eval(0.5) + d,
                         }
                     } else {
                         let v = (r.f() * map.nodes.len() as f64) as usize % map.nodes.len();
-                        MapEdit::MoveVertex {
+                        ReshapeEdit::MoveVertex {
                             orig_vertex: map.nodes[v],
                             target: map.nodes[v] + d,
                         }
@@ -28952,10 +29040,7 @@ mod map_overlay {
                     }
                     // 離したときの確定（1本の道：`reshape_change` → `edit_local`）
                     let t = std::time::Instant::now();
-                    let out = base
-                        .reshape_change(edit)
-                        .flatten()
-                        .map(|c| base.edit_local(&c, &[]));
+                    let out = base.reshape_change(edit).map(|c| base.edit_local(&c, &[]));
                     std::hint::black_box(out);
                     commit.push(ms(t));
                 }
@@ -29844,7 +29929,17 @@ fn valid_maps_are_on_the_grid_with_two_colors_per_edge() {
     let target = q.eval(0.18) + kurbo::Vec2::new(300.0, 0.0);
     let ctrl = q.p1 + (target - q.eval(0.18)) / (2.0 * 0.18 * 0.82);
     assert!(ctrl.x > 65_536.0 && q.eval(0.5).x < 65_536.0);
-    assert!(near.pulled_edge(e, 0.18, target).is_none());
+    assert!(matches!(
+        map_overlay::reshaped(
+            &map_overlay::labeled_base(&near),
+            crate::planar_map::ReshapeEdit::PullEdge {
+                orig_seg: q,
+                grab_t: 0.18,
+                target,
+            },
+        ),
+        Err(crate::planar_map::LocalRefusal::OffGrid)
+    ));
 }
 
 /// S-1：ファイルを読み込むと、同じレイヤーの前後のキーフレームで、形と色が同じ辺は同じ番号を持ち、地図の塊を共有する
@@ -34137,6 +34232,50 @@ fn project_file_refuses_wrong_or_broken_files() {
     }
 }
 
+/// ステージの大きさは、書く入口（`apply` の `SetStageSize`）とファイルを読む入口が同じ1つの判定（`stage_size_of`）で決める：
+/// 有限でない大きさは書く入口で断り（文書も Undo も変わらない）、ファイルなら壊れたファイルとして断る。範囲の外は範囲に
+/// そろえる（画面の欄と同じ範囲）
+#[test]
+fn stage_size_is_decided_by_one_rule_at_the_entries() {
+    use crate::doc_actions::{apply, Action};
+    use crate::symbol::{STAGE_MAX, STAGE_MIN};
+    let mut app = Is2dApp::default();
+    let before = app.doc.stage_size;
+    let undo_before = app.history.undo_stack.len();
+    for bad in [Vec2::new(f32::NAN, 450.0), Vec2::new(800.0, f32::INFINITY)] {
+        assert!(!apply(&mut app, Action::SetStageSize { size: bad }));
+        assert_eq!(app.doc.stage_size, before, "有限でない大きさは書かない");
+    }
+    assert_eq!(app.history.undo_stack.len(), undo_before, "Undo も積まない");
+    assert!(apply(
+        &mut app,
+        Action::SetStageSize {
+            size: Vec2::new(1.0, 100_000.0),
+        },
+    ));
+    assert_eq!(
+        app.doc.stage_size,
+        Vec2::new(STAGE_MIN, STAGE_MAX.y),
+        "範囲にそろえる"
+    );
+    // ファイルを読む入口も同じ判定：有限でない大きさのファイルは断り、範囲の外はそろえて読む
+    let pd = project_io::ProjectDocument::from_app(app.tab()).unwrap();
+    let mut nan_stage = pd.clone();
+    nan_stage.stage_size = [f32::NAN, 450.0];
+    assert_eq!(
+        project_io::project_from_bytes(&project_io::project_file_bytes(&nan_stage).unwrap())
+            .expect_err("断る"),
+        "ファイルが壊れています（有限でない数があります）"
+    );
+    let mut wide = pd;
+    wide.stage_size = [10_000.0, 10.0];
+    let doc = project_io::project_from_bytes(&project_io::project_file_bytes(&wide).unwrap())
+        .expect("読める")
+        .into_document()
+        .expect("読める");
+    assert_eq!(doc.stage_size, Vec2::new(STAGE_MAX.x, STAGE_MIN));
+}
+
 /// レビュー 96fdc26 の N-5002：インスタンスの数（変換・中心点・色効果）が有限でなくなる書き込みは、書く入口で断る（文書は
 /// 変わらず、知らせが出る）。ファイルを読む入口も同じ判定（`SymbolInstanceBinding::is_finite`）で、有限でない数の
 /// インスタンスがあるファイルを断る（前の版が書いたファイルも）。文書のインスタンスはいつも有限なので、保存で直す所は無い
@@ -34193,7 +34332,12 @@ fn non_finite_instance_numbers_are_refused_at_the_entries() {
         .binding
         .color_effect
         .alpha = f32::NAN;
-    for broken in [nan_inst, nan_effect] {
+    let mut inf_effect = pd.clone();
+    inf_effect.timeline.layers[0].keyframes[0].instances[0]
+        .binding
+        .color_effect
+        .brightness = f32::INFINITY;
+    for broken in [nan_inst, nan_effect, inf_effect] {
         assert_eq!(
             project_io::project_from_bytes(&project_io::project_file_bytes(&broken).unwrap())
                 .expect_err("断る"),
@@ -34356,9 +34500,22 @@ fn edits_do_not_depend_on_edge_and_node_numbering() {
                     let pull = m.quad(e).eval(t) + d;
                     Box::new(move |x, shuf| {
                         let (v, e) = if shuf { (vs, es) } else { (v, e) };
+                        // 輪郭の変形は本番の1本の道（`reshape_change` → `edit_local`。地図はしまう形にしてから編集する）
+                        let reshape = |edit| match map_overlay::reshaped(&LayerBase::new(x), edit) {
+                            Ok(Some(next)) => Some(next),
+                            Ok(None) => Some(x.clone()),
+                            Err(_) => None,
+                        };
                         vec![match kind {
-                            3 => x.moved_vertex(v, mv),
-                            4 => x.pulled_edge(e, t, pull),
+                            3 => reshape(crate::planar_map::ReshapeEdit::MoveVertex {
+                                orig_vertex: x.nodes[v],
+                                target: mv,
+                            }),
+                            4 => reshape(crate::planar_map::ReshapeEdit::PullEdge {
+                                orig_seg: x.quad(e),
+                                grab_t: t,
+                                target: pull,
+                            }),
                             5 => x.with_anchor_added(e, t),
                             _ => x.with_anchor_deleted(v),
                         }]
@@ -34467,7 +34624,7 @@ fn edits_do_not_depend_on_edge_and_node_numbering() {
 #[ignore]
 fn measure_edit_scaling_by_cel_size() {
     use crate::doc_actions::{apply, Action};
-    use crate::planar_map::{reshape_result, LayerBase, MapEdit, MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{reshape_result, LayerBase, MapInput, MapRule, PlanarMap, ReshapeEdit};
     use std::time::Instant;
     let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
     let med = |mut v: Vec<f64>| {
@@ -34723,7 +34880,7 @@ fn measure_edit_scaling_by_cel_size() {
             let s = Instant::now();
             std::hint::black_box(reshape_result(
                 &base,
-                MapEdit::PullEdge {
+                ReshapeEdit::PullEdge {
                     orig_seg: q,
                     grab_t: 0.5,
                     target: q.eval(0.5) + kurbo::Vec2::new(4.0, 3.0),
@@ -34757,7 +34914,7 @@ fn measure_edit_scaling_by_cel_size() {
 /// `cut_local`）が毎回確かめる。窓の外の辺を点の色の数えに入れる道も通る
 #[test]
 fn windowed_overlay_matches_full_on_large_map() {
-    use crate::planar_map::{LayerBase, LocalEdit, MapEdit, MapInput, MapRule, PlanarMap};
+    use crate::planar_map::{LayerBase, LocalEdit, MapInput, MapRule, PlanarMap, ReshapeEdit};
     let colors = [
         Color32::from_rgb(235, 75, 75),
         Color32::from_rgb(55, 135, 245),
@@ -34854,18 +35011,18 @@ fn windowed_overlay_matches_full_on_large_map() {
                         let ang = rng.f() * std::f64::consts::TAU;
                         let d = KVec2::new(ang.cos(), ang.sin()) * (0.5 + rng.f() * 10.0);
                         let edit = if kind == 3 {
-                            MapEdit::PullEdge {
+                            ReshapeEdit::PullEdge {
                                 orig_seg: q,
                                 grab_t: 0.5,
                                 target: q.eval(0.5) + d,
                             }
                         } else {
-                            MapEdit::MoveVertex {
+                            ReshapeEdit::MoveVertex {
                                 orig_vertex: q.p0,
                                 target: q.p0 + d,
                             }
                         };
-                        let change = base.reshape_change(edit).flatten().expect("辺と頂点がある");
+                        let change = base.reshape_change(edit).expect("辺と頂点がある");
                         base.edit_local(&change, &[])
                     }
                 };
@@ -34916,6 +35073,7 @@ fn local_edge_rules_match_full_check() {
     let full_map = base.map().clone();
     let color = |rng: &mut map_overlay::Rng| Some(colors[(rng.f() * 3.0) as usize % 3]);
     let (mut good, mut bad) = (0, 0);
+    let (mut edges_bad, mut cycles_bad, mut cycles_good) = (0, 0, 0);
     for _ in 0..400 {
         // 足す辺：（始点, 終点, 制御点, 左の色, 右の色）
         type Added = (Point, Point, Point, Option<Color32>, Option<Color32>);
@@ -34993,13 +35151,39 @@ fn local_edge_rules_match_full_check() {
             LocalEdit::Refused(_)
         );
         assert_eq!(got, joined.is_valid(), "足した辺 {adds:?}");
+        // どの決まりで断ったか（1本の道が確かめる順：増えた辺の決まり → 触った輪郭の決まり → 穴の入れ先と何も無い側）
+        let local = base.local_map(&result, &[], &added);
+        let edges_ok = local.added_edges_ok();
+        let cycles_ok = edges_ok
+            && local
+                .touched_cycles_ok(&mut crate::planar_map::CycleMemo::default())
+                .is_some();
+        assert!(
+            edges_ok || !got,
+            "増えた辺の決まりを破るのに書けた：足した辺 {adds:?}"
+        );
+        assert!(
+            cycles_ok || !got,
+            "輪郭の決まりを破るのに書けた：足した辺 {adds:?}"
+        );
+        match (edges_ok, cycles_ok) {
+            (false, _) => edges_bad += 1,
+            (true, false) => cycles_bad += 1,
+            (true, true) => cycles_good += 1,
+        }
         if got {
             good += 1;
         } else {
             bad += 1;
         }
     }
+    // 正しい答えと正しくない答えが両方出て、増えた辺の決まりで断る場合と、辺の決まりは満たすが輪郭の決まりで断る場合と、
+    // 輪郭の決まりまで満たす場合が、どれも出る
     assert!(good > 0 && bad > 10, "正しい {good}・正しくない {bad}");
+    assert!(
+        edges_bad > 10 && cycles_bad > 5 && cycles_good > 5,
+        "辺の決まりで断る {edges_bad}・辺は正しいが輪郭で断る {cycles_bad}・輪郭まで正しい {cycles_good}"
+    );
 }
 
 /// 潰れた変換（逆にできない）で置いた地図は描かない（面積 0 の絵は見えない）ので、カーソル合わせと吸い付きは何にも

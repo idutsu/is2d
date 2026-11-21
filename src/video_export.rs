@@ -35,8 +35,8 @@ pub(crate) fn create_video_encoder(
     }
 }
 
-/// ステージの画素の大きさ。書き出す画素の大きさと原点は、みなこれから決める（ステージの大きさは、読み込み・画面で
-/// 100〜3840 × 100〜2160 にそろえてある：レビュー f01d518 の N-4007）
+/// ステージの画素の大きさ。書き出す画素の大きさと原点は、みなこれから決める（ステージの大きさは、書く入口と読み込みで
+/// `symbol::stage_size_of` で範囲にそろえてある：レビュー f01d518 の N-4007）
 fn stage_pixel_size(stage_size: Vec2) -> (u32, u32) {
     (stage_size.x.round() as u32, stage_size.y.round() as u32)
 }

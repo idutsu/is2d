@@ -554,7 +554,7 @@ impl LocalMap<'_> {
     fn next_ray_col(&self, rc: &mut LocalRayCols) -> Option<(i64, Vec<usize>)> {
         loop {
             let stop = rc.added.keys().next().copied();
-            let (tx, mut list) = rc.base.next_col_cached(
+            let (tx, mut list) = rc.base.next_col(
                 self.index,
                 &self.ray_bands,
                 |e| !self.removed.contains(&e),

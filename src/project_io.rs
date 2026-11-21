@@ -380,8 +380,9 @@ impl From<SymbolInstanceBinding> for SavedSymbolInstanceBinding {
 
 impl From<SavedSymbolInstanceBinding> for SymbolInstanceBinding {
     fn from(s: SavedSymbolInstanceBinding) -> Self {
-        // 潰れた変換もそのまま読む（そのインスタンスは描かない：`instantiate_shapes`）。数が有限かは読み込みの初めに確かめる
-        // （`only_finite_numbers`）
+        // 書いてある数をそのまま読む。潰れた変換も読む（そのインスタンスは描かない：`instantiate_shapes`）。数が有限かは
+        // 読み込みの初めに、書く入口と同じ判定で確かめる（`only_finite_numbers`）。色効果を描くとき（`ColorEffect::apply`）は
+        // 色の範囲に収めるので、範囲の外の色効果も描ける
         let xform = Affine::new(s.xform);
         Self {
             instance_gid: s.instance_gid,
@@ -390,7 +391,7 @@ impl From<SavedSymbolInstanceBinding> for SymbolInstanceBinding {
             pivot: Point::new(s.pivot[0], s.pivot[1]),
             loop_mode: s.loop_mode,
             first_frame: s.first_frame,
-            color_effect: ColorEffect::new(s.color_effect.alpha, s.color_effect.brightness),
+            color_effect: s.color_effect,
         }
     }
 }
@@ -797,9 +798,9 @@ impl ProjectDocument {
     }
 
     /// 書いてある小数（ステージの大きさ、地図の頂点と制御点、インスタンスの変換・中心点・色効果）がみな有限か。文書には
-    /// 有限な数しか入らない（ステージの大きさは整数の欄から、地図は格子の内：`fits_grid`、インスタンスは書く入口で確かめる：
-    /// `SymbolInstanceBinding::is_finite`）ので、そうでなければ壊れたファイル（読むときに断る：`project_from_bytes`。前の版の
-    /// アプリが書いた有限でない数のあるファイルも、ここで断る）
+    /// 有限な数しか入らない（ステージの大きさは書く入口と同じ `stage_size_of`、地図は格子の内：`fits_grid`、インスタンスは
+    /// 書く入口と同じ `SymbolInstanceBinding::is_finite`）ので、そうでなければ壊れたファイル（読むときに断る：
+    /// `project_from_bytes`。前の版のアプリが書いた有限でない数のあるファイルも、ここで断る）
     pub(crate) fn only_finite_numbers(&self) -> bool {
         let tiles_ok = self.map_tiles.tiles.iter().all(|t| {
             t.nodes.iter().flatten().all(|v| v.is_finite())
@@ -807,17 +808,13 @@ impl ProjectDocument {
         });
         let timeline_ok = |tl: &SavedTimeline| {
             tl.layers.iter().flat_map(|l| &l.keyframes).all(|kf| {
-                // インスタンスは書く入口と同じ判定（色効果は、読むときに直す前の数で）
-                kf.instances.iter().all(|inst| {
-                    SymbolInstanceBinding {
-                        color_effect: inst.binding.color_effect,
-                        ..inst.binding.into()
-                    }
-                    .is_finite()
-                })
+                // インスタンスは書く入口と同じ判定
+                kf.instances
+                    .iter()
+                    .all(|inst| SymbolInstanceBinding::from(inst.binding).is_finite())
             })
         };
-        self.stage_size.iter().all(|v| v.is_finite())
+        crate::symbol::stage_size_of(Vec2::from(self.stage_size)).is_some()
             && tiles_ok
             && std::iter::once(&self.timeline)
                 .chain(self.library.iter().map(|s| &s.timeline))
@@ -964,12 +961,13 @@ impl ProjectDocument {
         } else {
             1
         };
-        let w = self.stage_size[0].clamp(100.0, 3840.0);
-        let h = self.stage_size[1].clamp(100.0, 2160.0);
+        // 数が有限なことは、読み込みの初めに確かめてある（`only_finite_numbers`。ステージの大きさも同じ `stage_size_of`）
+        let stage_size = crate::symbol::stage_size_of(Vec2::from(self.stage_size))
+            .expect("読み込みの初めに有限か確かめてある");
         let doc = Document {
             root: timeline,
             library: library.into_iter().map(Arc::new).collect(),
-            stage_size: Vec2::new(w, h),
+            stage_size,
             fps,
             next_symbol_id: raw_next_sym_id.max(max_sym_id.saturating_add(1)).max(1),
             next_group_id: raw_next_gid.max(next_gid).max(1),

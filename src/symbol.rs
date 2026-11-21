@@ -616,12 +616,25 @@ impl EditPath {
     }
 }
 
+/// ステージの大きさの下限（幅・高さとも px）
+pub(crate) const STAGE_MIN: f32 = 100.0;
+/// ステージの大きさの上限（幅・高さの px。4K）
+pub(crate) const STAGE_MAX: Vec2 = Vec2::new(3840.0, 2160.0);
+
+/// 文書に入れるステージの大きさ：`size` を範囲（`STAGE_MIN`〜`STAGE_MAX`）に収めたもの。有限でなければ `None`（ステージの
+/// 大きさを書く入口 `apply`・ファイルを読む入口の判定はこれ1つ。範囲の外はそろえ、有限でない数は断る）
+pub(crate) fn stage_size_of(size: Vec2) -> Option<Vec2> {
+    size.is_finite()
+        .then(|| size.clamp(Vec2::splat(STAGE_MIN), STAGE_MAX))
+}
+
 /// 保存対象の文書状態（唯一の正解データ：ルートタイムライン・シンボルライブラリ・ステージサイズ・ID採番・リビジョン）
 #[derive(Clone, Debug)]
 pub(crate) struct Document {
     pub(crate) root: Timeline,
     /// Undo の控えと共有する（書く所だけ `Arc::make_mut` で写す。控えを取る・戻すは `Arc` の入れ替えだけ）
     pub(crate) library: Library,
+    /// いつも `stage_size_of` で決めた大きさ
     pub(crate) stage_size: Vec2,
     pub(crate) fps: u32,
     pub(crate) next_symbol_id: u64,
@@ -1125,16 +1138,17 @@ impl Timeline {
         layer.evaluate_shapes_at(frame, layer.id, ctx)
     }
 
-    /// レイヤー `layer_idx` のコマ `frame` のセル画を、変換 `world_xform` で描くワールド座標の結合メッシュ（インスタンス
-    /// `excluded_instance` の絵は除く）。絵が無ければ `None`
-    pub(crate) fn build_cel_world_batch_mesh(
+    /// レイヤー `layer_idx` のコマ `frame` のセル画を、変換 `world_xform` で置いた写し（インスタンス `excluded_instance` の
+    /// 絵は除く）：ワールド座標の結合メッシュと、そのメッシュにした図形（描く順。下から）。図形は、点で見えている色を
+    /// 探す所（`CelMeshCache::color_at`）が、描くのと同じ写しとして使う（メッシュの写しは持たない）。絵が無ければ `None`
+    pub(crate) fn build_cel_world(
         &self,
         layer_idx: usize,
         frame: usize,
         world_xform: Affine,
         excluded_instance: Option<u64>,
         ctx: SymbolEvalCtx<'_>,
-    ) -> Option<Mesh> {
+    ) -> Option<(Mesh, Vec<Arc<FillShape>>)> {
         let layer = self.layers.get(layer_idx)?;
         let kf_idx = layer.keyframe_index_at(frame)?;
         let kf = &layer.keyframes[kf_idx];
@@ -1142,31 +1156,37 @@ impl Timeline {
             return None;
         }
         let has_tween = layer.interpolated_tween_binding_at(frame).is_some();
-        if !has_tween && kf.cel.instances.is_empty() && world_xform == Affine::IDENTITY {
-            let mut batch = Mesh::default();
-            for s in kf.cel.shapes() {
-                s.append_fill_mesh_to(&mut batch);
-            }
-            return (!batch.is_empty()).then_some(batch);
-        }
-        let mut resolved = self.evaluate_layer_shapes_with(layer_idx, frame, ctx);
-        if let Some(gid) = excluded_instance {
-            resolved.retain(|s| s.symbol_instance.is_none_or(|b| b.instance_gid != gid));
-        }
-        if world_xform != Affine::IDENTITY {
-            for s in &mut resolved {
-                s.transform(world_xform);
-            }
-        }
         let mut batch = Mesh::default();
-        for s in &resolved {
-            s.append_fill_mesh_to(&mut batch);
-        }
-        (!batch.is_empty()).then_some(batch)
+        let shapes: Vec<Arc<FillShape>> =
+            if !has_tween && kf.cel.instances.is_empty() && world_xform == Affine::IDENTITY {
+                let shapes = kf.cel.shapes();
+                for s in &shapes {
+                    s.append_fill_mesh_to(&mut batch);
+                }
+                shapes
+            } else {
+                let mut resolved = self.evaluate_layer_shapes_with(layer_idx, frame, ctx);
+                if let Some(gid) = excluded_instance {
+                    resolved.retain(|s| s.symbol_instance.is_none_or(|b| b.instance_gid != gid));
+                }
+                resolved
+                    .into_iter()
+                    .map(|mut s| {
+                        if world_xform != Affine::IDENTITY {
+                            s.transform(world_xform);
+                        }
+                        s.append_fill_mesh_to(&mut batch);
+                        // 図形のメッシュは結合メッシュに入れたので、写しの図形は持たない
+                        s.strip_transient_caches();
+                        Arc::new(s)
+                    })
+                    .collect()
+            };
+        (!batch.is_empty()).then_some((batch, shapes))
     }
 
     /// テスト用：指定レイヤー・フレームの描画用スクリーン `Arc<Mesh>` を、写しを使わずにその場で構築して返す（本番は
-    /// 写しから：`CelMeshCache::screen_mesh`。同じ `build_cel_world_batch_mesh` と `tinted_screen_mesh`）
+    /// 写しから：`CelMeshCache::screen_mesh`。同じ `build_cel_world` と `tinted_screen_mesh`）
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolved_cel_screen_mesh(
@@ -1179,8 +1199,7 @@ impl Timeline {
         world_xform: Affine,
         ctx: SymbolEvalCtx<'_>,
     ) -> Option<Arc<Mesh>> {
-        let world_batch =
-            self.build_cel_world_batch_mesh(layer_idx, frame, world_xform, None, ctx)?;
+        let (world_batch, _) = self.build_cel_world(layer_idx, frame, world_xform, None, ctx)?;
         let tint = if dim_backdrop {
             crate::vector_engine::CelTint::Dim
         } else {

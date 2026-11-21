@@ -243,21 +243,9 @@ impl TileData {
 #[derive(Default, Debug)]
 pub(crate) struct PolyHold(OnceLock<Box<[OnceLock<TilePolys>]>>);
 
-/// 塊に入れる辺：（升目, しまう辺, (地図の辺の番号, 向きを逆にしたか)）
-type Placed = ((i32, i32), StoredEdge, (usize, bool));
-
-/// 地図 `map` の辺 `e` を、塊に入れる辺にする
-fn placed(map: &PlanarMap, e: usize) -> Placed {
-    let ed = &map.edges[e];
-    let se = StoredEdge::of(map, ed);
-    // `StoredEdge::of` と同じ決め方
-    let flipped = point_order(map.nodes[ed.a], map.nodes[ed.b]).is_gt();
-    (se.tile(), se, (e, flipped))
-}
-
 #[cfg(test)]
 thread_local! {
-    /// テスト用：このスレッドで、塊を作るために並べた辺の数（`from_dense_ordered`）
+    /// テスト用：このスレッドで、塊を作るために並べた辺の数（`from_dense`）
     pub(crate) static EDGES_SORTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -299,22 +287,19 @@ impl StoredMap {
     /// 地図 `map` のしまう形。辺を決まった向きにして升目ごとに分け、塊の中を決まった順に並べる。置き換える前の地図
     /// `prev` の同じ升目の塊と中身が同じ塊は、その塊を共有する（塊はどちらも升目の順なので、並べて1回なめるだけ）
     pub(crate) fn from_dense(map: &PlanarMap, prev: Option<&StoredMap>) -> Self {
-        Self::from_dense_ordered(map, prev).0
-    }
-
-    /// `from_dense` と、しまった辺の順（`to_dense` の辺の順）ごとの、`map` の辺の番号と、向きを逆にしたか（`map` の辺の
-    /// 順に作ったもの、たとえば判定の形を、しまう形から作った地図に引き継ぐため）
-    pub(crate) fn from_dense_ordered(
-        map: &PlanarMap,
-        prev: Option<&StoredMap>,
-    ) -> (Self, Vec<(usize, bool)>) {
-        let mut all: Vec<Placed> = (0..map.edges.len()).map(|e| placed(map, e)).collect();
+        // 塊に入れる辺：（升目, しまう辺）
+        let mut all: Vec<((i32, i32), StoredEdge)> = map
+            .edges
+            .iter()
+            .map(|ed| {
+                let se = StoredEdge::of(map, ed);
+                (se.tile(), se)
+            })
+            .collect();
         #[cfg(test)]
         EDGES_SORTED.with(|n| n.set(n.get() + all.len()));
         all.sort_unstable_by(|x, y| x.0.cmp(&y.0).then_with(|| x.1.order(&y.1)));
-        let order: Vec<(usize, bool)> = all.iter().map(|x| x.2).collect();
-        let (keys, edges): (Vec<(i32, i32)>, Vec<StoredEdge>) =
-            all.into_iter().map(|(k, e, _)| (k, e)).unzip();
+        let (keys, edges): (Vec<(i32, i32)>, Vec<StoredEdge>) = all.into_iter().unzip();
         let prev_tiles: &[Tile] = prev.map_or(&[], |p| &p.0.tiles);
         let (mut j, mut start) = (0, 0);
         let tiles: Vec<Tile> = keys
@@ -330,15 +315,14 @@ impl StoredMap {
             if tiles.len() == prev_tiles.len()
                 && tiles.iter().zip(prev_tiles).all(|(a, b)| Arc::ptr_eq(a, b))
             {
-                return (p.clone(), order);
+                return p.clone();
             }
         }
-        let stored = Self(Arc::new(Stored {
+        Self(Arc::new(Stored {
             tiles: tiles.into(),
             dense: std::sync::Mutex::new(Weak::new()),
             starts: OnceLock::new(),
-        }));
-        (stored, order)
+        }))
     }
 
     /// 計算に使う写しへの弱い参照（`LayerBase::of_stored` だけが使う）
