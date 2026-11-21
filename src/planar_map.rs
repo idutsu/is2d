@@ -761,13 +761,13 @@ impl PlanarMap {
     /// `built`：この地図の辺の判定の形の索引と、辺の番号 → 索引の番号（曲線に戻したあとの
     /// 索引：`ChainRestorer::finish`）。無ければ初めて要るときに作る。どちらでも、まとめが索引の範囲に収まらなければ、
     /// 範囲を広げて作り直す（索引は範囲にかかる区間と頂点をみな持つので、範囲に収まる調べの答えは、索引の範囲によらない）
-    /// 戻り値は、最後に使った判定の形の索引の範囲（索引を使わなければ `None`。ほかの辺を調べたのはこの中だけ：重ね合わせを
-    /// 窓で行うとき、窓がこの範囲を覆うかを確かめる）
+    /// 戻り値は、判定の形の索引でほかの辺を調べた所（`PolyIndex::can_replace` が引いたマス。調べなければ空。重ね合わせを
+    /// 窓で行うとき、窓の範囲がこの所を覆うかを確かめる：`CellSet::covers`）
     pub(crate) fn merge_degree2(
         &mut self,
         candidates: impl IntoIterator<Item = usize>,
         built: Option<(PolyIndex, Vec<usize>)>,
-    ) -> Option<GridRect> {
+    ) -> CellSet {
         let mut is_cand = vec![false; self.nodes.len()];
         for v in candidates {
             is_cand[v] = true;
@@ -812,6 +812,7 @@ impl PlanarMap {
             .unwrap_or(KRect::ZERO);
         // まとめると、判定の形でつながりが変わってしまう頂点（まとめない）
         let mut rejected = vec![false; self.nodes.len()];
+        let mut used = CellSet::default();
         while let Some(v) = pending.pop_first() {
             if rejected[v] || !candidate(v, &at) {
                 continue;
@@ -881,17 +882,20 @@ impl PlanarMap {
             let mut path = path_of(ix, &ix_id);
             let reach = GridRect::of(&path).union(&GridRect::of(&pc));
             if !ix.covers(&reach) {
-                ix_area = ix_area.union(KRect::new(
-                    reach.x0 as f64 / OVERLAY_GRID,
-                    reach.y0 as f64 / OVERLAY_GRID,
-                    reach.x1 as f64 / OVERLAY_GRID,
-                    reach.y1 as f64 / OVERLAY_GRID,
-                ));
+                ix_area = ix_area.union(reach.px());
                 *ix = PolyIndex::build(&self.nodes, &edges, |f| alive[f], Some(ix_area));
                 ix_id = (0..n).collect();
                 path = path_of(ix, &ix_id);
             }
-            if !ix.can_replace(&[ix_id[i], ix_id[j]], &path, &[v], &pc, e1.a, e2.b) {
+            if !ix.can_replace(
+                &[ix_id[i], ix_id[j]],
+                &path,
+                &[v],
+                &pc,
+                e1.a,
+                e2.b,
+                &mut used,
+            ) {
                 rejected[v] = true;
                 continue;
             }
@@ -923,7 +927,7 @@ impl PlanarMap {
             }
         }
         self.edges = order.iter().map(|&i| edges[i]).collect();
-        index.and_then(|ix| ix.area)
+        used
     }
 
     /// どの辺にもつながらない頂点を消して、番号を詰める
@@ -1059,8 +1063,8 @@ fn tile_edges_of(m: &PlanarMap, edges: &[usize]) -> Vec<crate::stored_map::TileE
 /// （輪郭の変形）・決まり。1本の道（`LayerBase::edit_local`）は、これだけを受け取る
 pub(crate) struct LocalChange<'a> {
     input: ChangeInput<'a>,
-    quads: Vec<QuadBez>,
-    cols: Vec<(Option<Color32>, Option<Color32>)>,
+    /// 重ねるものの線（`MapInput::lines`）
+    lines: Lines,
     rule: MapRule,
 }
 
@@ -1449,17 +1453,20 @@ impl LayerBase {
         }
     }
 
-    /// 辺 `e` がかかる、升目の索引の升目：辺の近くを探すマス（`EdgeGeom::reach`）の升目と、外接矩形（`reach_box`）にかかる
-    /// 升目。マスで探す所（`NearEdges`）も、外接矩形が重なるかで探す所（重ね合わせを窓で行うときの窓）も、その升目を引けば
-    /// 必ず見つかる
+    /// 辺 `e` がかかる、升目の索引の升目：辺の近くを探すマス（`EdgeGeom::reach`）の升目。マスで探す所（窓の辺
+    /// `region_edges`・`NearEdges`）も、点のまわりや半直線の所を探す所（辺の点は、その点を含むマスにある）も、その升目を
+    /// 引けば必ず見つかる
     fn edge_tiles(&self, e: usize) -> Vec<(i64, i64)> {
         // 写しの一覧を作らずに、塊の判定の形と辺から（差分から作った写しでも、一覧を作らない）
-        let (bbox, cells) = self.stored_poly(e).reach(self.stored.edge_at(e).quad());
-        let mut t = index_tiles(cells);
-        t.extend(index_tiles_over(*bbox));
-        t.sort_unstable();
-        t.dedup();
-        t
+        let (_, cells) = self.stored_poly(e).reach(self.stored.edge_at(e).quad());
+        index_tiles(cells.iter().copied())
+    }
+
+    /// 辺 `e`（計算に使う地図の番号）の曲線と左右の色（輪郭の変形で動かした辺の前の曲線と色：`MapInput::lines`）。塊から
+    /// 引く
+    fn old_edge(&self, e: usize) -> (QuadBez, Sides) {
+        let te = self.stored.edge_at(e);
+        (te.quad(), (te.left, te.right))
     }
 
     /// 道具の側（ブラシ・消しゴム）：形 `shapes`（文書の座標）を決まり `rule` で重ねるときに、重ね合わせに渡すもの。形の線の
@@ -1469,16 +1476,11 @@ impl LayerBase {
         shapes: &'a [FillShape],
         rule: MapRule,
     ) -> LocalChange<'a> {
-        let mut quads: Vec<QuadBez> = shapes
-            .iter()
-            .flat_map(|s| s.contours())
-            .flat_map(|c| c.segments.iter().copied())
-            .collect();
-        self.snap_ends(&mut quads);
+        let mut lines = MapInput::Shapes(shapes).lines(|e| self.old_edge(e));
+        self.snap_ends(&mut lines.quads);
         LocalChange {
             input: ChangeInput::Shapes(shapes),
-            quads,
-            cols: Vec::new(),
+            lines,
             rule,
         }
     }
@@ -1515,18 +1517,10 @@ impl LayerBase {
                     .collect()
             }
         };
-        let quads = moved.iter().map(|&(_, q)| q).collect();
-        let cols = moved
-            .iter()
-            .map(|&(e, _)| {
-                let te = self.stored.edge_at(e);
-                (te.left, te.right)
-            })
-            .collect();
+        let lines = MapInput::Sweep(&moved).lines(|e| self.old_edge(e));
         Some(LocalChange {
             input: ChangeInput::Sweep(moved),
-            quads,
-            cols,
+            lines,
             rule: MapRule::Sweep,
         })
     }
@@ -1570,18 +1564,13 @@ impl LayerBase {
         &self,
         change: &LocalChange<'_>,
     ) -> Result<Option<LocalDiff>, LocalRefusal> {
-        if change.quads.is_empty() {
+        if change.lines.quads.is_empty() {
             return Ok(None);
         }
         let ix = self.map_index();
-        let (maps, wedges) = PlanarMap::window_overlay(
-            ix,
-            change.input(),
-            &[change.rule],
-            &change.quads,
-            &change.cols,
-        )
-        .ok_or(LocalRefusal::OffGrid)?;
+        let (maps, wedges) =
+            PlanarMap::window_overlay(ix, change.input(), &[change.rule], &change.lines)
+                .ok_or(LocalRefusal::OffGrid)?;
         let [m]: [PlanarMap; 1] = maps.try_into().expect("決まりごとに1つの地図");
         let (removed, added) = self.stored.window_diff_tiles(&wedges, &m);
         Ok(Some((m, removed, added)))
@@ -1591,28 +1580,15 @@ impl LayerBase {
     /// 結果）と、中を消した地図（残り。前のしまう形に窓の差分を当てたしまう形。確かめと書き戻しは、使う側がセル画の地図に
     /// 対して1本の道で行う：`cut_out`）に分ける。窓で重ねるのは1回（2つの決まりを一度に）。`None`：格子に置けない
     pub(crate) fn cut_local(&self, region: MapInput<'_>) -> Option<(PlanarMap, StoredMap)> {
-        let (quads, cols): (Vec<QuadBez>, Vec<Sides>) = match region {
-            MapInput::Shapes(shapes) => {
-                let mut q: Vec<QuadBez> = shapes
-                    .iter()
-                    .flat_map(|s| s.contours())
-                    .flat_map(|c| c.segments.iter().copied())
-                    .collect();
-                self.snap_ends(&mut q);
-                (q, Vec::new())
-            }
-            MapInput::Map(p) => (
-                (0..p.edges.len()).map(|e| p.quad(e)).collect(),
-                p.edges.iter().map(|e| (e.left, e.right)).collect(),
-            ),
-            MapInput::Sweep(_) | MapInput::Stack(_) => return None,
-        };
-        if quads.is_empty() {
+        let mut lines = region.lines(|e| self.old_edge(e));
+        if let MapInput::Shapes(_) = region {
+            self.snap_ends(&mut lines.quads);
+        }
+        if lines.quads.is_empty() {
             return Some((PlanarMap::default(), self.stored.clone()));
         }
         let rules = [MapRule::KeepInside, MapRule::Paint(None)];
-        let (maps, wedges) =
-            PlanarMap::window_overlay(self.map_index(), region, &rules, &quads, &cols)?;
+        let (maps, wedges) = PlanarMap::window_overlay(self.map_index(), region, &rules, &lines)?;
         let [inside, rest]: [PlanarMap; 2] = maps.try_into().expect("決まりごとに1つの地図");
         let (removed, added) = self.stored.window_diff_tiles(&wedges, &rest);
         let rest = self
@@ -1642,8 +1618,7 @@ impl LayerBase {
     pub(crate) fn map_change<'a>(&self, p: &'a PlanarMap) -> LocalChange<'a> {
         LocalChange {
             input: ChangeInput::Map(p),
-            quads: (0..p.edges.len()).map(|e| p.quad(e)).collect(),
-            cols: p.edges.iter().map(|e| (e.left, e.right)).collect(),
+            lines: MapInput::Map(p).lines(|e| self.old_edge(e)),
             rule: MapRule::Overlay,
         }
     }
@@ -1760,48 +1735,39 @@ impl LayerBase {
 
     /// バケツの差分（`fill_local`）：点を含む面（`LocalMap::face_at`）の輪郭の向きのある辺の側を `color` にし、両側が同じ色に
     /// なった辺を消して、2本だけがつながる頂点をまとめる（`color_sides`）。計算は、面の輪郭の辺と、その端の頂点に
-    /// つながる辺と、消える辺のまわりの辺を並べた窓で行う。2本をまとめる所がほかの辺を調べた範囲が窓の範囲から出たら、範囲を
-    /// 広げてやり直す（重ね合わせの窓と同じ決まり）。（窓の結果, 消えた辺, 増えた辺）。変わらなければ `None`
+    /// つながる辺と、消える辺のまわりの辺を並べた窓で行う。窓の範囲は、消える辺ごとに、その辺と端につながる辺の外形の
+    /// マス（辺ごとに分けるので、離れた所にある消える辺の間のマスは入らない）。2本をまとめる所がほかの辺を調べた所が窓の
+    /// 範囲から出たら、範囲を広げてやり直す（重ね合わせの窓と同じ決まり）。（窓の結果, 消えた辺, 増えた辺）。変わらなければ
+    /// `None`
     fn fill_diff(&self, p: Point, color: Color32, group_path: &[u64]) -> Option<LocalDiff> {
         let halves = self.fill_sides(p, color, group_path)?;
         let ix = self.map_index();
         let stored = &self.stored;
-        let hull = |e: usize| {
-            let q = stored.edge_at(e).quad();
-            KRect::from_points(q.p0, q.p2).union_pt(q.p1)
-        };
         let edges_at = |p: Point| self.edges_at_node(p);
         let side_edges: std::collections::BTreeSet<usize> = halves.iter().map(|h| h.0).collect();
-        // 消える辺（塗ったあとに両側が同じ色になる辺）と、その端につながる辺の外形
-        let mut region: Option<KRect> = None;
+        // 消える辺（塗ったあとに両側が同じ色になる辺）ごとの、その辺と端につながる辺の外形
+        let mut region = CellSet::default();
         for &(e, forward) in &halves {
             let te = stored.edge_at(e);
             let other = if forward { te.right } else { te.left };
             if other == Some(color) {
-                for f in std::iter::once(e)
-                    .chain(edges_at(te.a))
+                let hull = edges_at(te.a)
+                    .into_iter()
                     .chain(edges_at(te.b))
-                {
-                    let h = hull(f);
-                    region = Some(region.map_or(h, |r| r.union(h)));
-                }
+                    .map(|f| hull_of(stored.edge_at(f).quad()))
+                    .fold(hull_of(te.quad()), |a, b| a.union(b));
+                region.add(rect_cells(window_rect(hull)));
             }
         }
-        let mut region = region.map(|r| r.inflate(WINDOW_PAD, WINDOW_PAD));
         loop {
-            let wedges = window_edges(ix, side_edges.iter().copied(), region);
+            let wedges = window_edges(ix, side_edges.iter().copied(), &region);
             let (mut m, _) = tile_window(ix, &wedges);
             let to_window: IntMap<usize, usize> =
                 wedges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
             let used = m.color_sides(halves.iter().map(|&(e, f)| (to_window[&e], f)), color);
-            if let Some(u) = used.map(px_rect) {
-                if !region.is_some_and(|r| rect_inside(u, r)) {
-                    let grown = region
-                        .map_or(u, |r| r.union(u))
-                        .inflate(WINDOW_PAD, WINDOW_PAD);
-                    region = Some(grown);
-                    continue;
-                }
+            if !region.covers(&used) {
+                region.add_set(&used);
+                continue;
             }
             let (removed, added) = stored.window_diff_tiles(&wedges, &m);
             return Some((m, removed, added));
@@ -1845,18 +1811,13 @@ impl LayerBase {
             AnchorEdit::Add { orig_seg, .. } => vec![stored.find_edge(&orig_seg)?.0],
             AnchorEdit::Delete { orig_vertex } => self.edges_at_node(orig_vertex),
         };
-        if involved.is_empty() {
-            return None;
-        }
-        let region = involved
+        let hull = involved
             .iter()
-            .map(|&e| {
-                let q = stored.edge_at(e).quad();
-                KRect::from_points(q.p0, q.p2).union_pt(q.p1)
-            })
-            .reduce(|a, b| a.union(b))?
-            .inflate(WINDOW_PAD, WINDOW_PAD);
-        let wedges = window_edges(ix, involved.iter().copied(), Some(region));
+            .map(|&e| hull_of(stored.edge_at(e).quad()))
+            .reduce(|a, b| a.union(b))?;
+        let mut region = CellSet::default();
+        region.add(rect_cells(window_rect(hull)));
+        let wedges = window_edges(ix, involved.iter().copied(), &region);
         let (wmap, _) = tile_window(ix, &wedges);
         // 窓の地図に、浮いた片の地図と同じ編集をかける
         let m = edit.apply(&wmap)?;
@@ -2063,21 +2024,19 @@ impl LayerBase {
     }
 
     /// 重ねる形の線の端を、前からある頂点から `FLAT_TOL` 以内なら、その頂点（いちばん近いもの：`NearPoints`。`overlay` の
-    /// 形の線の端を寄せる所と同じ）に寄せる。頂点は塊から引き、升目の索引で端の近くの辺の端だけを見る
+    /// 形の線の端を寄せる所と同じ）に寄せる。頂点は塊から引き、端の点ごとに、そのまわりの端の升目の索引の升目にある辺の
+    /// 端だけを見る（線の端の点みなの外接矩形はなめない。手間は端の点の数とまわりの中身で決まる：レビュー 96fdc26 の
+    /// N-1004）
     fn snap_ends(&self, quads: &mut [QuadBez]) {
-        let Some(area) = quads
-            .iter()
-            .flat_map(|q| [q.p0, q.p2])
-            .map(|p| KRect::from_points(p, p))
-            .reduce(|a, b| a.union(b))
-        else {
-            return;
-        };
         let ix = self.map_index();
         let mut edges: Vec<usize> = Vec::new();
-        for t in end_keys_over(area.inflate(FLAT_TOL, FLAT_TOL)) {
-            ix.ends.edges_in(&self.stored, t, &mut edges);
+        for p in quads.iter().flat_map(|q| [q.p0, q.p2]) {
+            let [lo, hi] = end_key_span(KRect::from_points(p, p).inflate(FLAT_TOL, FLAT_TOL));
+            ix.ends
+                .edges_over(&self.stored, lo, hi, |_, es| edges.extend(es));
         }
+        edges.sort_unstable();
+        edges.dedup();
         let pts = edges.iter().flat_map(|&e| {
             let te = self.stored.edge_at(e);
             [te.a, te.b]
@@ -2127,7 +2086,8 @@ impl LayerBase {
 
     /// 地図を座標の変換 `xform` で置いたとき、点 `p`（置いた座標）から `radius` 以内でいちばん近い頂点の位置（文書の
     /// 座標。位置が `skip` の頂点は除く）。頂点は、点のまわりの端の升目の索引にある辺の端から引く（地図全体の写しを
-    /// 作らない：設計 段2b の 7. の 2b-7d）。同じ距離の頂点は、座標の順で先のもの
+    /// 作らない：設計 段2b の 7. の 2b-7d。引くのは辺の入っている升目だけなので、小さく縮めて置いた地図で文書の座標の
+    /// 範囲が広くなっても、手間はまわりの中身で決まる：`TileIndex::edges_over`）。同じ距離の頂点は、座標の順で先のもの
     fn nearest_node(
         &self,
         p: Point,
@@ -2143,9 +2103,9 @@ impl LayerBase {
         let doc_area = xform.inverse().transform_rect_bbox(area);
         let ix = self.map_index();
         let mut edges: Vec<usize> = Vec::new();
-        for t in end_keys_over(doc_area) {
-            ix.ends.edges_in(ix.stored, t, &mut edges);
-        }
+        let [lo, hi] = end_key_span(doc_area);
+        ix.ends
+            .edges_over(ix.stored, lo, hi, |_, es| edges.extend(es));
         let nearest = |edges: &mut dyn Iterator<Item = usize>| {
             let pts = edges.flat_map(|e| {
                 let te = self.stored.edge_at(e);
@@ -2325,7 +2285,7 @@ impl LayerBase {
 
     /// カーソル合わせ：地図を座標の変換 `xform` で置いたとき、`p` から `r` 以内でいちばん近い辺と、その上のパラメータ
     /// （距離は置いた座標で測る。パラメータはアフィン変換で変わらない）。見る辺は、点のまわりの升目にかかる辺だけ（`p` から
-    /// `r` 以内を通る辺は、その所を含むマスの升目にある）
+    /// `r` 以内を通る辺は、その所を含むマスの升目にある。引くのは辺の入っている升目だけ：`TileIndex::edges_over`）
     pub(crate) fn hit_edge(&self, p: Point, r: f64, xform: Affine) -> Option<(usize, f64)> {
         // 潰れた変換で置いた地図は描かないので、何にも合わない（`nearest_node` と同じ）
         if !crate::vector_engine::invertible(xform) {
@@ -2334,9 +2294,9 @@ impl LayerBase {
         let near = KRect::from_center_size(p, (2.0 * r, 2.0 * r));
         let ix = self.map_index();
         let mut cands: Vec<usize> = Vec::new();
-        for t in index_tiles_over(xform.inverse().transform_rect_bbox(near)) {
-            ix.index.edges_in(ix.stored, t, &mut cands);
-        }
+        let [lo, hi] = index_tile_span(xform.inverse().transform_rect_bbox(near));
+        ix.index
+            .edges_over(ix.stored, lo, hi, |_, es| cands.extend(es));
         cands.sort_unstable();
         cands.dedup();
         // 辺（番号の順）のうち、いちばん近いもの。辺は塊から引く
@@ -2692,14 +2652,16 @@ impl PlanarMap {
         if at != nb {
             return false;
         }
-        let r = GridRect::of(&path).union(&GridRect::of(pc));
-        let area = KRect::new(
-            r.x0 as f64 / OVERLAY_GRID,
-            r.y0 as f64 / OVERLAY_GRID,
-            r.x1 as f64 / OVERLAY_GRID,
-            r.y1 as f64 / OVERLAY_GRID,
-        );
-        PolyIndex::new(self, Some(area)).can_replace(part, &path, &inner, pc, na, nb)
+        let area = GridRect::of(&path).union(&GridRect::of(pc)).px();
+        PolyIndex::new(self, Some(area)).can_replace(
+            part,
+            &path,
+            &inner,
+            pc,
+            na,
+            nb,
+            &mut CellSet::default(),
+        )
     }
 }
 
@@ -2832,13 +2794,13 @@ impl PlanarMap {
 
     /// 辺の側 `sides`（辺の番号と、左の側なら `true`）の色を `color` にする（面の塗り替えはこれ1つ：選んだ面の塗り替え
     /// `recolored` は地図全体で、バケツ `fill_diff` は窓で）。両側が同じ色になった辺は外し、外した辺の端を、2本だけが
-    /// つながる頂点をまとめる候補にする（`merge_degree2`）。戻り値は、まとめるときにほかの辺を調べた範囲
-    /// （`merge_degree2`。窓で行うとき、窓がこの範囲を覆うかを確かめる）
+    /// つながる頂点をまとめる候補にする（`merge_degree2`）。戻り値は、まとめるときにほかの辺を調べた所
+    /// （`merge_degree2`。窓で行うとき、窓がこの所を覆うかを確かめる）
     fn color_sides(
         &mut self,
         sides: impl IntoIterator<Item = (usize, bool)>,
         color: Color32,
-    ) -> Option<GridRect> {
+    ) -> CellSet {
         for (i, left) in sides {
             if left {
                 self.edges[i].left = Some(color);

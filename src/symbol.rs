@@ -695,7 +695,8 @@ impl Document {
     }
 
     /// まだ確かめていない地図（ファイルから読んだもの）を、裏のスレッドで、コマの順に確かめる（開いたあと、初めて見る
-    /// コマで待たないように：`UncheckedMaps`。このスレッドが、コア数までのスレッドで分けて確かめる）。ルートのタイムライン、ライブラリのシンボルの順。スレッドを作れなければ
+    /// コマで待たないように：`UncheckedMaps`。このスレッドを含めて、コア数から画面のスレッドの分の1つを引いた数までの
+    /// スレッドで分けて確かめる）。ルートのタイムライン、ライブラリのシンボルの順。スレッドを作れなければ
     /// `None`（使うときに確かめる）。スレッドは確かめた地図の数を返す
     pub(crate) fn check_maps_in_background(&self) -> Option<std::thread::JoinHandle<usize>> {
         let maps = crate::timeline::UncheckedMaps::of(

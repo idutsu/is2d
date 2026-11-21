@@ -49,13 +49,24 @@ impl EdgeGeom {
 /// 端を格子に置き直すと曲線は最大で `GRID_REACH` 動き、判定の形の点は丸めでさらに `GRID_REACH` 動くので、その分と、
 /// 近くとみなす距離（`GRID_REACH`）の分を広げておく（`fed_edges`）
 pub(super) fn edge_reach(q: QuadBez) -> EdgeReach {
+    edge_reach_on(q, cell_chords(q), chord_pad(&q))
+}
+
+/// `edge_reach` の、曲線 `q` の弦の点 `pts` と弦の太らせ分 `cp`（`cell_chords`・`chord_pad`）をもらう形（弦をほかにも使う
+/// 所が、作り直さずに渡す）
+pub(super) fn edge_reach_on(q: QuadBez, pts: impl Iterator<Item = IPt>, cp: i64) -> EdgeReach {
     #[cfg(test)]
     super::REACHES_BUILT.with(|n| n.set(n.get() + 1));
-    let pad = (3.0 * GRID_REACH * OVERLAY_GRID).ceil() as i64;
-    let mut cells: Vec<(i64, i64)> = quad_cells(q, pad).collect();
+    let mut cells: Vec<(i64, i64)> = chord_cells(pts, cp + reach_pad()).collect();
     cells.sort_unstable();
     cells.dedup();
     (reach_box(q), cells.into())
+}
+
+/// 近くを探すマスの太らせ分（格子の目）：端を格子に置き直す分・判定の形の点の丸めの分・近くとみなす距離の分（どれも
+/// `GRID_REACH`）
+fn reach_pad() -> i64 {
+    (3.0 * GRID_REACH * OVERLAY_GRID).ceil() as i64
 }
 
 /// 重ね合わせで近くの辺を探すときの、辺（曲線 `q`）の外接矩形（`edge_reach` の矩形。マスを作らずに求める）
@@ -288,13 +299,7 @@ impl PolyIndex {
     ) -> Self {
         #[cfg(test)]
         super::INDEX_BUILDS.with(|n| n.set(n.get() + 1));
-        // 格子の点に直すとき、外へ1目広げる（丸めで内側へ寄らないように）
-        let area = area.map(|r| GridRect {
-            x0: (r.x0 * OVERLAY_GRID).floor() as i64 - 1,
-            y0: (r.y0 * OVERLAY_GRID).floor() as i64 - 1,
-            x1: (r.x1 * OVERLAY_GRID).ceil() as i64 + 1,
-            y1: (r.y1 * OVERLAY_GRID).ceil() as i64 + 1,
-        });
+        let area = area.map(GridRect::around);
         let mut ix = PolyIndex {
             pts: Vec::new(),
             poly_at: Vec::with_capacity(edges.len()),
@@ -400,6 +405,11 @@ impl PolyIndex {
     /// 1. `pc` が自分とも、ほかの辺の折れ線とも、共有する端のほかで触れない
     /// 2. `path` と `pc` で囲まれた所（境目の上を含む）に、ほかの頂点が無い
     /// 3. `na`・`nb` につながるほかの辺の最初の区間の真ん中が、囲まれた所（境目の上を含む）に無い
+    ///
+    /// ほかの辺の区間と頂点を引いたマスを `examined` に足す（答えは、そのマスにある区間と頂点と、`na`・`nb` につながる辺
+    /// だけで決まる。重ね合わせを窓で行うとき、窓の範囲がこのマスを覆うかを確かめる：ほかの辺の区間と端の頂点は、その辺の
+    /// 近くを探すマス `EdgeGeom::reach` に入るので、範囲がこのマスを覆えば、窓に無い辺はこのマスに無い）
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn can_replace(
         &self,
         part: &[usize],
@@ -408,6 +418,7 @@ impl PolyIndex {
         pc: &[IPt],
         na: usize,
         nb: usize,
+        examined: &mut CellSet,
     ) -> bool {
         if pc.len() < 2 || na == nb {
             return false;
@@ -435,6 +446,7 @@ impl PolyIndex {
             let sg = (pc[k], pc[k + 1]);
             let tags = seg_tags(pc, k, na, nb);
             for c in seg_cells(sg, 0) {
+                examined.add([c]);
                 for id in self.grid.at(c) {
                     let (f, m) = self.segs[id as usize];
                     let (f, m) = (f as usize, m as usize);
@@ -467,7 +479,8 @@ impl PolyIndex {
                 .is_none_or(|w| w != 0)
         };
         // 2. 帯の中の頂点（帯の中と輪郭がかかるマスにある）
-        for c in polygon_cells(&band) {
+        for c in polygon_squares::<GRID_CELL>(&band) {
+            examined.add([c]);
             for v in self.node_grid.at(c) {
                 let v = v as usize;
                 if self.deg[v] == 0 || v == na || v == nb || inner.contains(&v) {
@@ -923,6 +936,17 @@ pub(crate) struct GridRect {
 }
 
 impl GridRect {
+    /// px の矩形 `r` を含む、格子の点の矩形（丸めで内側へ寄らないように、外へ1目広げる。px の矩形を格子の点の矩形に
+    /// するのはこれ1つ）
+    pub(super) fn around(r: KRect) -> Self {
+        GridRect {
+            x0: (r.x0 * OVERLAY_GRID).floor() as i64 - 1,
+            y0: (r.y0 * OVERLAY_GRID).floor() as i64 - 1,
+            x1: (r.x1 * OVERLAY_GRID).ceil() as i64 + 1,
+            y1: (r.y1 * OVERLAY_GRID).ceil() as i64 + 1,
+        }
+    }
+
     pub(super) fn of(pts: &[IPt]) -> Self {
         pts.iter().fold(
             GridRect {
@@ -938,6 +962,29 @@ impl GridRect {
                 y1: r.y1.max(p.1),
             },
         )
+    }
+
+    /// px の矩形（角は格子の点の座標：`from_grid`。格子の点の矩形を px の矩形にするのはこれ1つ）
+    pub(super) fn px(&self) -> KRect {
+        KRect::from_points(from_grid(self.x0, self.y0), from_grid(self.x1, self.y1))
+    }
+
+    /// どの向きにも `d` 目広げた矩形
+    pub(super) fn grown(&self, d: i64) -> GridRect {
+        GridRect {
+            x0: self.x0 - d,
+            y0: self.y0 - d,
+            x1: self.x1 + d,
+            y1: self.y1 + d,
+        }
+    }
+
+    /// この矩形にかかる、升目の索引の升目（矩形の中の点は、その点を含むマスの升目にある）
+    pub(super) fn index_tiles(&self) -> impl Iterator<Item = (i64, i64)> {
+        span_tiles([
+            index_tile(cell_of((self.x0, self.y0))),
+            index_tile(cell_of((self.x1, self.y1))),
+        ])
     }
 
     pub(super) fn union(&self, o: &GridRect) -> GridRect {
@@ -983,11 +1030,11 @@ pub(super) fn index_tile(c: (i64, i64)) -> (i64, i64) {
     )
 }
 
-/// マスの並び `cells` がかかる、升目の索引の升目（並べて同じ升目は1つ）。辺を索引に入れる升目は、辺の近くを探すマス
-/// （`EdgeGeom::reach`）の升目なので、マスでその辺を見つける所（`CellGrid` と同じ探し方）は、そのマスの升目を引けば
-/// 必ず見つかる
-pub(super) fn index_tiles(cells: &[(i64, i64)]) -> Vec<(i64, i64)> {
-    let mut t: Vec<(i64, i64)> = cells.iter().map(|&c| index_tile(c)).collect();
+/// マスの並び `cells` がかかる、升目の索引の升目（升目の順。同じ升目は1つ）。辺を索引に入れる升目は、辺の近くを探すマス
+/// （`EdgeGeom::reach`）の升目なので、マスでその辺を見つける所（`CellGrid` と同じ探し方。窓の辺 `region_edges`）は、
+/// そのマスの升目を引けば必ず見つかる
+pub(super) fn index_tiles(cells: impl IntoIterator<Item = (i64, i64)>) -> Vec<(i64, i64)> {
+    let mut t: Vec<(i64, i64)> = cells.into_iter().map(index_tile).collect();
     t.sort_unstable();
     t.dedup();
     t
@@ -999,24 +1046,45 @@ pub(super) fn end_key(p: Point) -> (i64, i64) {
     cell_of(gpt(p))
 }
 
-/// 矩形 `r`（文書の座標）にかかる、端の升目の索引の升目
-pub(super) fn end_keys_over(r: KRect) -> impl Iterator<Item = (i64, i64)> {
-    let a = end_key(Point::new(r.x0, r.y0));
-    let b = end_key(Point::new(r.x1, r.y1));
-    (a.0..=b.0).flat_map(move |x| (a.1..=b.1).map(move |y| (x, y)))
+/// 矩形 `r`（文書の座標）にかかる、端の升目の索引の升目の範囲（左上, 右下。両端を含む：`TileIndex::edges_over`）
+pub(super) fn end_key_span(r: KRect) -> [(i64, i64); 2] {
+    [
+        end_key(Point::new(r.x0, r.y0)),
+        end_key(Point::new(r.x1, r.y1)),
+    ]
 }
 
-/// 矩形 `r`（文書の座標）にかかる、升目の索引の升目。矩形の中の点は、その点を含むマスの升目にある
+/// 矩形 `r`（文書の座標）にかかる、升目の索引の升目の範囲（左上, 右下。両端を含む）。矩形の中の点は、その点を含むマスの
+/// 升目にある
+pub(super) fn index_tile_span(r: KRect) -> [(i64, i64); 2] {
+    [
+        index_tile(cell_of(gpt(Point::new(r.x0, r.y0)))),
+        index_tile(cell_of(gpt(Point::new(r.x1, r.y1)))),
+    ]
+}
+
+/// 矩形 `r`（文書の座標）にかかる、升目の索引の升目（`index_tile_span` の中を全部）
 pub(super) fn index_tiles_over(r: KRect) -> impl Iterator<Item = (i64, i64)> {
-    let a = index_tile(cell_of(gpt(Point::new(r.x0, r.y0))));
-    let b = index_tile(cell_of(gpt(Point::new(r.x1, r.y1))));
+    span_tiles(index_tile_span(r))
+}
+
+/// 升目の範囲（左上, 右下。両端を含む）の中の升目
+fn span_tiles([a, b]: [(i64, i64); 2]) -> impl Iterator<Item = (i64, i64)> {
     (a.0..=b.0).flat_map(move |x| (a.1..=b.1).map(move |y| (x, y)))
 }
 
 /// 区間 `a`–`b`（格子の点）を、どの向きにも `pad` 目だけ太らせたものがかかるマス。列ごとに、その列にかかる区間の y の
 /// 範囲のマスをたどる。区間の上（太らせたなら `pad` 以内）のどの点も、その点を含むマスが返るので、触れる区間どうし
 /// （`pad` 以内に近づく区間どうし）は、必ず同じマスを持つ
-pub(super) fn seg_cells((a, b): (IPt, IPt), pad: i64) -> impl Iterator<Item = (i64, i64)> {
+pub(super) fn seg_cells(ab: (IPt, IPt), pad: i64) -> impl Iterator<Item = (i64, i64)> {
+    seg_squares::<GRID_CELL>(ab, pad)
+}
+
+/// 区間 `a`–`b`（格子の点）を `pad` 目だけ太らせたものがかかる、1辺 `C`（格子の点）の升（`seg_cells` は近さを調べる格子の
+/// マス。輪の上の升を数える `polygon_squares` も使う）
+fn seg_squares<const C: i64>((a, b): (IPt, IPt), pad: i64) -> impl Iterator<Item = (i64, i64)> {
+    // 升の大きさは定数（2の冪なので、割り算はずらすだけになる）
+    let c = C;
     let (a, b) = if a.0 <= b.0 { (a, b) } else { (b, a) };
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     // x（a.0 ≤ x ≤ b.0）での区間の y の切り捨て（`up` なら切り上げ）。格子の範囲（±65,536px）の点なら積は i64 に収まる
@@ -1039,9 +1107,9 @@ pub(super) fn seg_cells((a, b): (IPt, IPt), pad: i64) -> impl Iterator<Item = (i
         };
         a.1 + q
     };
-    let c = GRID_CELL;
-    // 太らせないとき、両端が同じマスにあれば、区間はそのマスの中にある（下のたどり方でも、そのマスだけになる）
-    let one = (pad == 0 && cell_of(a) == cell_of(b)).then(|| cell_of(a));
+    let sq = move |p: IPt| (p.0.div_euclid(c), p.1.div_euclid(c));
+    // 太らせないとき、両端が同じ升にあれば、区間はその升の中にある（下のたどり方でも、その升だけになる）
+    let one = (pad == 0 && sq(a) == sq(b)).then(|| sq(a));
     let columns = one
         .is_none()
         .then(|| (a.0 - pad).div_euclid(c)..=(b.0 + pad).div_euclid(c));
@@ -1057,38 +1125,185 @@ pub(super) fn seg_cells((a, b): (IPt, IPt), pad: i64) -> impl Iterator<Item = (i
 /// 曲線 `q`（px）と、その判定の形を、`pad` 目だけ太らせたものがかかるマス。曲線を、弦とのずれが半マスほどになる数に
 /// 等分し（`flat_count`）、弦を、ずれの分と `pad` だけ太らせてたどる
 pub(super) fn quad_cells(q: QuadBez, pad: i64) -> impl Iterator<Item = (i64, i64)> {
-    let tol = GRID_CELL as f64 / OVERLAY_GRID / 2.0;
-    // 太らせる分：弦と曲線のずれ、判定の形（同じ等分の、`FLAT_TOL` の数）と曲線のずれ、両方の点の丸め（それぞれ
-    // 対角線の半分まで）
-    let dev = flat_dev(&q, flat_count(&q, tol)) + flat_dev(&q, flat_count(&q, FLAT_TOL));
-    let pad = pad + (dev * OVERLAY_GRID).ceil() as i64 + 2;
-    let mut pts = flat_points(q, tol).map(|(p, _)| gpt(p));
+    chord_cells(cell_chords(q), pad + chord_pad(&q))
+}
+
+/// 曲線 `q` の弦（`cell_chords`）を太らせる分（格子の目）：弦と曲線のずれ、判定の形（同じ等分の、`FLAT_TOL` の数）と
+/// 曲線のずれ、両方の点の丸め（それぞれ対角線の半分まで）
+pub(super) fn chord_pad(q: &QuadBez) -> i64 {
+    let dev = flat_dev(q, flat_count(q, CELL_CHORD_TOL)) + flat_dev(q, flat_count(q, FLAT_TOL));
+    (dev * OVERLAY_GRID).ceil() as i64 + 2
+}
+
+/// 弦の点 `pts` の区間を、`pad` 目だけ太らせてたどったマス（`quad_cells` の弦のたどり方。弦をほかにも使う所が、作り
+/// 直さずに渡す）
+pub(super) fn chord_cells(
+    mut pts: impl Iterator<Item = IPt>,
+    pad: i64,
+) -> impl Iterator<Item = (i64, i64)> {
     let first = pts.next();
     pts.scan(first, |prev, b| prev.replace(b).map(|a| (a, b)))
         .flat_map(move |ab| seg_cells(ab, pad))
 }
 
-/// 多角形（格子の点）の中と輪郭がかかるマス：輪郭の区間がかかるマスを列ごとに集め、列の中では一番下から一番上までの
-/// マス（細い帯なら、輪郭のマスとほとんど同じ）
-pub(super) fn polygon_cells(pts: &[IPt]) -> impl Iterator<Item = (i64, i64)> {
-    // 列は、点の x の範囲の列（区間がかかるマスの列は、その中にある）。列ごとの（一番下, 一番上）
-    let r = GridRect::of(pts);
-    let cx0 = r.x0.div_euclid(GRID_CELL);
-    let cols = if pts.is_empty() {
-        0
-    } else {
-        (r.x1.div_euclid(GRID_CELL) - cx0 + 1) as usize
-    };
-    let mut span: Vec<(i64, i64)> = vec![(i64::MAX, i64::MIN); cols];
-    for k in 0..pts.len() {
-        for (cx, cy) in seg_cells((pts[k], pts[(k + 1) % pts.len()]), 0) {
-            let e = &mut span[(cx - cx0) as usize];
-            *e = (e.0.min(cy), e.1.max(cy));
+/// マスをたどる弦と曲線のずれの目安（px。半マス）
+const CELL_CHORD_TOL: f64 = GRID_CELL as f64 / OVERLAY_GRID / 2.0;
+
+/// 曲線 `q` を、弦とのずれが半マスほどになる数に等分した弦の点（格子の点。両端は曲線の端）。`quad_cells` がたどる弦で、
+/// 弦と判定の形と曲線の間はみな `quad_cells` のマスに入る
+pub(super) fn cell_chords(q: QuadBez) -> impl Iterator<Item = IPt> {
+    flat_points(q, CELL_CHORD_TOL).map(|(p, _)| gpt(p))
+}
+
+/// 格子の点の矩形 `r`（端を含む）にかかるマス
+pub(super) fn rect_cells(r: GridRect) -> impl Iterator<Item = (i64, i64)> {
+    let (a, b) = (cell_of((r.x0, r.y0)), cell_of((r.x1, r.y1)));
+    (a.0..=b.0).flat_map(move |x| (a.1..=b.1).map(move |y| (x, y)))
+}
+
+/// 触る範囲：近さを調べる格子のマスの集まり。窓で行う計算が前の地図のどの辺を見るか（辺の近くを探すマス
+/// `EdgeGeom::reach` のどれかが入っている辺）と、ほかの辺を調べた所はどこか（その所のマス）を表す。範囲を外接矩形1つで
+/// 表すと、線が触れない矩形の中の辺まで見ることになり、手間が矩形の中の辺の数で決まってしまう（レビュー 96fdc26 の
+/// N-1003）。マスの決まりは近さの格子（`CellGrid`）と同じ1つ
+#[derive(Clone, Default, Debug)]
+pub(crate) struct CellSet(IntSet<(i64, i64)>);
+
+impl CellSet {
+    /// マス `cells` を入れる（線をたどったマスは続けて同じマスが多いので、続けて同じマスは1回だけ入れる）
+    pub(super) fn add(&mut self, cells: impl IntoIterator<Item = (i64, i64)>) {
+        let mut last = None;
+        for c in cells {
+            if last != Some(c) {
+                self.0.insert(c);
+                last = Some(c);
+            }
         }
     }
-    span.into_iter()
-        .enumerate()
-        .flat_map(move |(i, (y0, y1))| (y0..=y1).map(move |cy| (cx0 + i as i64, cy)))
+
+    /// `o` のマスをみな入れる
+    pub(super) fn add_set(&mut self, o: &CellSet) {
+        self.0.extend(o.0.iter().copied());
+    }
+
+    /// マスの並び `cells` のどれかが入っているか（辺がこの範囲にかかるか）
+    pub(super) fn meets(&self, cells: &[(i64, i64)]) -> bool {
+        cells.iter().any(|c| self.0.contains(c))
+    }
+
+    /// マスの並び `cells` がみな入っているか
+    pub(super) fn contains_all(&self, cells: &[(i64, i64)]) -> bool {
+        cells.iter().all(|c| self.0.contains(c))
+    }
+
+    /// `o` のマスがみな入っているか（ほかの辺を調べた所を、窓の範囲が覆うか）
+    pub(super) fn covers(&self, o: &CellSet) -> bool {
+        o.0.iter().all(|c| self.0.contains(c))
+    }
+
+    /// マスがかかる、升目の索引の升目（升目の順）
+    pub(super) fn tiles(&self) -> Vec<(i64, i64)> {
+        index_tiles(self.0.iter().copied())
+    }
+}
+
+/// 閉じた折れ線 `pts`（輪郭の点。最後の点から最初の点へ閉じる）の上と中にかかる、1辺 `C`（格子の点）の升（升の順。同じ升は
+/// 1つ）。輪の上と中の点は、このどれかの升にある。上の升は区間をたどり（`seg_squares`）、中の升は巻き数で数える
+/// （`inside_runs`）ので、手間は輪の長さと中の升の数で決まる。輪の上と中の升を決めるのはこれ1つ（近さを調べる格子のマス
+/// `GRID_CELL`・升目の索引の升目 `INDEX_TILE`）
+pub(super) fn polygon_squares<const C: i64>(pts: &[IPt]) -> Vec<(i64, i64)> {
+    let (Some(&first), Some(&last)) = (pts.first(), pts.last()) else {
+        return Vec::new();
+    };
+    // 閉じる区間（最後の点から最初の点へ）
+    let close = [last, first];
+    let segs = pts.windows(2).chain(std::iter::once(&close[..]));
+    // 続く区間はたいてい同じ升にかかるので、続けて同じ升は1つにする
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    for s in segs {
+        for t in seg_squares::<C>((s[0], s[1]), 0) {
+            if out.last() != Some(&t) {
+                out.push(t);
+            }
+        }
+    }
+    inside_runs::<C>([(pts, (1, 0)), (&close[..], (1, 0))], |x, y0, y1| {
+        out.extend((y0..=y1).map(|y| (x, y)));
+    });
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// 升目の索引の升目の1辺（格子の点）
+pub(super) const INDEX_TILE: i64 = GRID_CELL * INDEX_TILE_CELLS;
+
+impl CellSet {
+    /// 折れ線 `lines`（格子の点の折れ線と、その左右の印。印ごとに閉じていること）に囲まれた中のマスを入れる（`inside_runs`）
+    pub(super) fn add_inside<'a>(
+        &mut self,
+        lines: impl IntoIterator<Item = (&'a [IPt], (u64, u64))>,
+    ) {
+        inside_runs::<GRID_CELL>(lines, |cx, cy0, cy1| {
+            self.add((cy0..=cy1).map(|cy| (cx, cy)));
+        });
+    }
+}
+
+/// 折れ線 `lines`（格子の点の折れ線と、その左右の印。印ごとに閉じていること）に囲まれた中の、1辺 `C`（格子の点）の升を、
+/// 列ごとの範囲（列, 一番上, 一番下）で `f` に渡す。中は、どれかの印の巻き数が 0 でない所（線を下へ横切るたびに、入る側の
+/// 印に 1 を足し、出る側の印から 1 を引く。線の外では、どの印も 0）。折れ線の通らない升は、どこでも巻き数が同じなので、
+/// 升の列の真ん中の縦の線の上で決まる：列ごとに、真ん中の線が区間を横切る所を上から順にたどって数え、巻き数が 0 でない
+/// 間の升を渡す（間の両端の升は、折れ線の通る升）。手間は折れ線の長さと中の升の数で決まる。中の升を決めるのはこれ1つ
+/// （輪1つなら `polygon_squares`、印のある線の集まりなら `CellSet::add_inside`）
+pub(super) fn inside_runs<'a, const C: i64>(
+    lines: impl IntoIterator<Item = (&'a [IPt], (u64, u64))>,
+    mut f: impl FnMut(i64, i64, i64),
+) {
+    let c = C;
+    // 横切る所：（列, 横切る所の y の切り捨て, 入る側の印, 出る側の印）
+    let mut cross: Vec<(i64, i64, u64, u64)> = Vec::new();
+    for (pl, (left, right)) in lines {
+        for s in pl.windows(2) {
+            let (a, b) = (s[0], s[1]);
+            if a.0 == b.0 {
+                continue;
+            }
+            // x の増える向きの区間の左（`orient` が正の側）は y の大きい側なので、下へ横切ると左へ入る
+            let (from, into) = if a.0 < b.0 {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            let (lo, hi) = if a.0 < b.0 { (a, b) } else { (b, a) };
+            // 真ん中の線 x = 列·c + c/2 が lo.0 ≤ x < hi.0 にある列
+            let first = (lo.0 - c / 2).div_euclid(c) + i64::from((lo.0 - c / 2).rem_euclid(c) != 0);
+            let last = (hi.0 - c / 2 - 1).div_euclid(c);
+            for cx in first..=last {
+                let x = cx * c + c / 2;
+                let num = (x - lo.0) as i128 * (hi.1 - lo.1) as i128;
+                let y = lo.1 + num.div_euclid((hi.0 - lo.0) as i128) as i64;
+                cross.push((cx, y, into, from));
+            }
+        }
+    }
+    cross.sort_unstable();
+    let mut wind: Vec<(u64, i32)> = Vec::new();
+    for col in cross.chunk_by(|x, y| x.0 == y.0) {
+        wind.clear();
+        for (k, &(cx, y, into, from)) in col.iter().enumerate() {
+            for (label, d) in [(into, 1), (from, -1)] {
+                match wind.iter_mut().find(|w| w.0 == label) {
+                    Some(w) => w.1 += d,
+                    None => wind.push((label, d)),
+                }
+            }
+            if let Some(next) = col.get(k + 1) {
+                if wind.iter().any(|w| w.1 != 0) {
+                    f(cx, y.div_euclid(c), next.1.div_euclid(c));
+                }
+            }
+        }
+    }
 }
 
 /// 近さを調べる格子：マスごとの番号の一覧。番号はみな1つの並び（`items`）に入れ、マスごとに入れた順につなぐ（マスごとに

@@ -204,15 +204,29 @@ impl<T> ChunkedList<T> {
         (shared, self.chunks.chunks.len())
     }
 
-    /// 鍵 `key`（列は鍵の順で、鍵は1つずつ別）が `k` の要素。まず塊を探し（塊のいちばん後ろの鍵で）、塊の中を引く
+    /// 鍵 `key`（列は鍵の順で、鍵は1つずつ別）が `k` の要素（`sorted_from` の最初の要素の鍵が `k` なら、それ）
     pub(crate) fn find_sorted<K: Ord>(&self, k: K, key: impl Fn(&T) -> K) -> Option<&Arc<T>> {
-        let chunks = &self.chunks.chunks;
-        let c = chunks.partition_point(|c| key(&c[c.len() - 1]) < k);
-        let chunk = chunks.get(c)?;
-        chunk
-            .binary_search_by(|x| key(x).cmp(&k))
-            .ok()
-            .map(|i| &chunk[i])
+        self.sorted_from(&k, &key).next().filter(|x| key(x) == k)
+    }
+
+    /// 鍵の順の列（鍵 `key`）の、鍵が `k` 以上の要素を順に。まず塊を探し（塊のいちばん後ろの鍵で）、塊の中を引く（鍵で
+    /// 引くのはこれ1つ）
+    pub(crate) fn sorted_from<K: Ord>(&self, k: &K, key: impl Fn(&T) -> K) -> ChunkedIter<'_, T> {
+        let all = &self.chunks;
+        let c = all.chunks.partition_point(|c| key(&c[c.len() - 1]) < *k);
+        let Some(chunk) = all.chunks.get(c) else {
+            return ChunkedIter {
+                chunks: all.chunks[..0].iter(),
+                cur: [].iter(),
+                remaining: 0,
+            };
+        };
+        let i = chunk.partition_point(|x| key(x) < *k);
+        ChunkedIter {
+            chunks: all.chunks[c + 1..].iter(),
+            cur: chunk[i..].iter(),
+            remaining: self.len - (all.starts[c] + i),
+        }
     }
 
     /// 鍵の順の列（鍵 `key` は1つずつ別。塊の基準を使わない列：`Keyed` の列には使わない）から、鍵が `gone`（鍵の順）の

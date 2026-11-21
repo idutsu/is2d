@@ -782,7 +782,7 @@ type EdgeRef = ((i32, i32), u32);
 type IndexCell = ((i64, i64), Box<[EdgeRef]>);
 
 /// 升目の索引：索引の升目（近さを調べる格子のマス 4×4）ごとの、その升目にかかる辺（判定の形の近くを探すマス
-/// `EdgeGeom::reach` か外接矩形が、その升目にかかる辺：`LayerBase::edge_tiles`）。近くの辺を探す所（重ね合わせの入れる辺を決める所・
+/// `EdgeGeom::reach` が、その升目にかかる辺：`LayerBase::edge_tiles`）。近くの辺を探す所（重ね合わせの窓・
 /// カーソル合わせ）が、毎回全部の辺を格子に入れ直さずに引く。持つのは計算に使う写し（`LayerBase::index`）で、地図を
 /// 書き換えたときは、前の写しの索引から、変わった塊の辺がかかる升目だけを作り直す（`derive`）。設計：
 /// claude/触った所だけを計算する地図の設計_22fbbbe.md の 3.3
@@ -925,6 +925,44 @@ impl TileIndex {
                     .iter()
                     .filter_map(|&(home, j)| map.dense_edge(home, j)),
             );
+        }
+    }
+
+    /// 索引の升目の矩形 `lo`..=`hi`（両端を含む）の中の、辺の入っている升目ごとに、その升目と、その升目にかかる辺の地図
+    /// `map` の計算に使う地図での番号を `f` に渡す（升目の順）。辺の入っている升目だけを、x の列ごとに y の範囲の始めから二分探索で
+    /// 引くので、手間は矩形の中の辺の入っている升目と列の数で決まり、矩形の広さによらない（レビュー 96fdc26 の N-1004）。
+    /// 矩形で索引を引くのはこれ1つ
+    pub(crate) fn edges_over(
+        &self,
+        map: &StoredMap,
+        lo: (i64, i64),
+        hi: (i64, i64),
+        mut f: impl FnMut((i64, i64), &mut dyn Iterator<Item = usize>),
+    ) {
+        let mut from = lo;
+        'seek: loop {
+            for cell in self.cells.sorted_from(&from, |x| x.0) {
+                let (x, y) = cell.0;
+                if x > hi.0 {
+                    return;
+                }
+                if y < lo.1 {
+                    from = (x, lo.1);
+                    continue 'seek;
+                }
+                if y > hi.1 {
+                    from = (x + 1, lo.1);
+                    continue 'seek;
+                }
+                f(
+                    cell.0,
+                    &mut cell
+                        .1
+                        .iter()
+                        .filter_map(|&(home, j)| map.dense_edge(home, j)),
+                );
+            }
+            return;
         }
     }
 

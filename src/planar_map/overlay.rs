@@ -123,6 +123,172 @@ impl MapInput<'_> {
     }
 }
 
+/// 線ごとの弦の点（みな1つの並び）と、線ごとの（弦の点の範囲, 弦の太らせ分 `chord_pad`）
+type Chords = (Vec<IPt>, Vec<(std::ops::Range<usize>, i64)>);
+
+/// 重ねるものの線：重ねる線 `quads`（重ねる地図・輪郭の変形なら線ごとの左右の色 `cols`）と、輪郭の変形で動かした辺の前の
+/// 曲線と左右の色 `moved_old`、線ごとの（重ねる線、前の曲線の順）触る範囲を数える印 `labels`（`InputLines::touched`）。
+/// 作るのは `MapInput::lines` だけ（線と印を同じ所で一緒に作る）
+#[derive(Default)]
+pub(crate) struct Lines {
+    pub(crate) quads: Vec<QuadBez>,
+    pub(crate) cols: Vec<Sides>,
+    moved_old: Vec<(QuadBez, Sides)>,
+    labels: Vec<(u64, u64)>,
+}
+
+impl MapInput<'_> {
+    /// 重ねるものの線（`Lines`。作るのはこれ1つ）。`old`：輪郭の変形で動かした辺の、前の地図での曲線と左右の色。印は、中のとき
+    /// に重ねるものの値が外と違いうる所が、どれかの印の巻き数が 0 でない所に入るように決める：形は1つの印（偶奇で中の所は
+    /// 巻き数が奇数）、下から上へ並べた形は形ごとの印、重ねる地図と輪郭の変形は色（中の所の値は色ごとの巻き数で決まる）。
+    /// 前の曲線は引く分なので、左右を入れかえる
+    pub(crate) fn lines(&self, old: impl Fn(usize) -> (QuadBez, Sides)) -> Lines {
+        let color =
+            |c: Option<Color32>| c.map_or(0, |c| 1 + u32::from_be_bytes(c.to_array()) as u64);
+        let mut l = Lines::default();
+        fn segments(s: &FillShape) -> impl Iterator<Item = QuadBez> + '_ {
+            s.contours().flat_map(|c| c.segments.iter().copied())
+        }
+        match *self {
+            MapInput::Shapes(shapes) => {
+                for q in shapes.iter().flat_map(segments) {
+                    l.quads.push(q);
+                    l.labels.push((1, 0));
+                }
+            }
+            MapInput::Stack(shapes) => {
+                for (i, s) in shapes.iter().enumerate() {
+                    for q in segments(s) {
+                        l.quads.push(q);
+                        l.labels.push((1 + i as u64, 0));
+                    }
+                }
+            }
+            MapInput::Map(p) => {
+                for (e, ed) in p.edges.iter().enumerate() {
+                    l.quads.push(p.quad(e));
+                    l.cols.push((ed.left, ed.right));
+                    l.labels.push((color(ed.left), color(ed.right)));
+                }
+            }
+            // 後の曲線を、元の辺の左右の色で重ねる
+            MapInput::Sweep(moved) => {
+                for &(e, after) in moved {
+                    let (before, (left, right)) = old(e);
+                    l.quads.push(after);
+                    l.cols.push((left, right));
+                    l.labels.push((color(left), color(right)));
+                    l.moved_old.push((before, (left, right)));
+                }
+            }
+        }
+        let moved_labels: Vec<(u64, u64)> = l
+            .moved_old
+            .iter()
+            .map(|&(_, (left, right))| (color(right), color(left)))
+            .collect();
+        l.labels.extend(moved_labels);
+        l
+    }
+}
+
+/// 重ねるものの線（`Lines`）の、線のマス・触る範囲・重ねる地図の辺の近くを探す形。どれも初めて要るときに作る（前からある
+/// 入れない辺が無い重ね合わせ、たとえば何も無い地図に地図全体で塗り重ねるときは、作らずに済む）
+pub(super) struct InputLines<'a> {
+    input: MapInput<'a>,
+    lines: &'a Lines,
+    /// 線ごとの弦（`cell_chords`。みな1つの並びに入れる）と、線ごとの（弦の範囲, 弦の太らせ分 `chord_pad`）
+    chords: std::cell::OnceCell<Chords>,
+    reach: std::cell::OnceCell<Vec<EdgeReach>>,
+    cells: std::cell::OnceCell<CellSet>,
+    touched: std::cell::OnceCell<CellSet>,
+}
+
+impl<'a> InputLines<'a> {
+    /// 格子に置けない座標（頂点と制御点：`fits_grid` と同じ）があれば `None`（マスを数える前に断る）
+    pub(super) fn new(input: MapInput<'a>, lines: &'a Lines) -> Option<Self> {
+        let lines = Self {
+            input,
+            lines,
+            chords: Default::default(),
+            reach: Default::default(),
+            cells: Default::default(),
+            touched: Default::default(),
+        };
+        on_grid(lines.quads().flat_map(|q| [q.p0, q.p1, q.p2])).then_some(lines)
+    }
+
+    /// 線の曲線（重ねる線、動かした辺の前の曲線の順）
+    fn quads(&self) -> impl Iterator<Item = QuadBez> + '_ {
+        self.lines
+            .quads
+            .iter()
+            .chain(self.lines.moved_old.iter().map(|m| &m.0))
+            .copied()
+    }
+
+    /// 線ごとの弦と太らせ分（線のマス・中を数える所・近くを探す形が、みなこれを使う）
+    fn chords(&self) -> &Chords {
+        self.chords.get_or_init(|| {
+            let mut pts: Vec<IPt> = Vec::new();
+            let mut lines = Vec::new();
+            for q in self.quads() {
+                let start = pts.len();
+                pts.extend(cell_chords(q));
+                lines.push((start..pts.len(), chord_pad(&q)));
+            }
+            (pts, lines)
+        })
+    }
+
+    /// 重ねる地図の辺の近くを探す形（重ねる地図の辺の順。`edge_reach` と同じもの。重ねる地図の辺は重ねる線の先頭の
+    /// `joined_edges` 本と同じ曲線なので、その弦から作り、`NearEdges` が作り直さずに使う。重ねる地図でなければ空）
+    pub(super) fn piece_reach(&self) -> &[EdgeReach] {
+        self.reach.get_or_init(|| {
+            let (pts, lines) = self.chords();
+            self.quads()
+                .zip(lines)
+                .take(self.input.joined_edges())
+                .map(|(q, (r, cp))| edge_reach_on(q, pts[r.clone()].iter().copied(), *cp))
+                .collect()
+        })
+    }
+
+    /// 線のマス：線を `WINDOW_PAD` だけ太らせたものがかかるマス（`window_cells`。辺の近くのマス `edge_reach` より広い。
+    /// 触る範囲と一緒に作る：`touched`）
+    pub(super) fn cells(&self) -> &CellSet {
+        self.touched();
+        self.cells.get().expect("触る範囲と一緒に作る")
+    }
+
+    /// 重ねるものが触る範囲：線のマス（`cells`）と、線に囲まれた中のマス（`CellSet::add_inside`。線ごとの印 `Lines::labels`
+    /// の巻き数で数える）。線のマスでないマスには、曲線も判定の形も、マスをたどる弦（`cell_chords`）も通らず、それらの間の所も
+    /// 入らないので、中かどうかは弦で数えても同じ（判定の形は作らない）。手間は線の長さと中のマスの数で決まり、外接矩形の
+    /// 大きさによらない（レビュー 96fdc26 の N-1003）
+    pub(super) fn touched(&self) -> &CellSet {
+        self.touched.get_or_init(|| {
+            // 線ごとの弦（`chords`）を、線のマス（`window_cells` と同じ太らせ方）と中を数える所の両方に使う
+            let (pts, lines) = self.chords();
+            let mut cells = CellSet::default();
+            for (r, cp) in lines {
+                cells.add(chord_cells(
+                    pts[r.clone()].iter().copied(),
+                    cp + window_pad(),
+                ));
+            }
+            let mut touched = cells.clone();
+            touched.add_inside(
+                lines
+                    .iter()
+                    .zip(&self.lines.labels)
+                    .map(|((r, _), &l)| (&pts[r.clone()], l)),
+            );
+            let _ = self.cells.set(cells);
+            touched
+        })
+    }
+}
+
 /// 区間の出どころ：（出どころの曲線の番号, 区間の始点の t, 終点の t, 区間の向き（始点→終点）が出どころの曲線の t の増える
 /// 向きか）。向きは t の大小から求めない：i_overlay が交点を格子へ丸めて区間の端の外へ寄せると、切った区間の t の幅が 0 に
 /// なることがある（`split` は端で止める）。向きは区間を作るときに決め、切っても変わらず、区間を裏返すときだけ変わる
@@ -333,63 +499,37 @@ impl PlanarMap {
         input: MapInput<'_>,
         rules: [MapRule; N],
     ) -> Option<[PlanarMap; N]> {
-        let mut new_quads: Vec<QuadBez> = Vec::new();
-        let mut new_cols: Vec<(Option<Color32>, Option<Color32>)> = Vec::new();
-        match input {
-            MapInput::Shapes(shapes) => {
-                new_quads.extend(
-                    shapes
-                        .iter()
-                        .flat_map(|s| s.contours())
-                        .flat_map(|c| c.segments.iter().copied()),
+        // 重ねるものの線（輪郭の変形の前の曲線と色は、この地図の辺）
+        let mut input_lines =
+            input.lines(|e| (self.quad(e), (self.edges[e].left, self.edges[e].right)));
+        if let MapInput::Shapes(_) = input {
+            // 形の線の端を、前からある頂点から `FLAT_TOL` 以内なら、その頂点（いちばん近いもの）に寄せる。地図の精度
+            // では同じ点なので、寄せないと2つの頂点が格子の別々の点に残り、同じ線として扱う所（`Span`）の端で2本の
+            // 折れ線が分かれて、見えない欠片の面ができる（`stitched` は線の端にいつも自分の端の点を置く。レビュー
+            // 4cb53aa の N-1002）。続く線の端は同じ点なので、輪郭は閉じたまま。形は偶奇の規則で数えるので、寄せて
+            // 輪郭が自分に触れても重ね合わせは成り立つ。重ねる地図の頂点は寄せない：重ねる地図は正しい地図であることを
+            // 前提に、辺どうしを調べずに入れるので（`fed_edges`）、地図の中の 0.002px 以内の2つの頂点が1つに寄って
+            // 重なると、結果が正しい地図でなくなる
+            if let Some(area) = input_lines
+                .quads
+                .iter()
+                .flat_map(|q| [q.p0, q.p2])
+                .map(|p| KRect::from_points(p, p))
+                .reduce(|a, b| a.union(b))
+            {
+                let area = area.inflate(FLAT_TOL, FLAT_TOL);
+                let near = NearPoints::new(
+                    self.nodes.iter().copied().filter(|&q| area.contains(q)),
+                    FLAT_TOL,
                 );
-                // 形の線の端を、前からある頂点から `FLAT_TOL` 以内なら、その頂点（いちばん近いもの）に寄せる。地図の精度
-                // では同じ点なので、寄せないと2つの頂点が格子の別々の点に残り、同じ線として扱う所（`Span`）の端で2本の
-                // 折れ線が分かれて、見えない欠片の面ができる（`stitched` は線の端にいつも自分の端の点を置く。レビュー
-                // 4cb53aa の N-1002）。続く線の端は同じ点なので、輪郭は閉じたまま。形は偶奇の規則で数えるので、寄せて
-                // 輪郭が自分に触れても重ね合わせは成り立つ。重ねる地図の頂点は寄せない：重ねる地図は正しい地図であることを
-                // 前提に、辺どうしを調べずに入れるので（`fed_edges`）、地図の中の 0.002px 以内の2つの頂点が1つに寄って
-                // 重なると、結果が正しい地図でなくなる
-                if let Some(area) = new_quads
-                    .iter()
-                    .flat_map(|q| [q.p0, q.p2])
-                    .map(|p| KRect::from_points(p, p))
-                    .reduce(|a, b| a.union(b))
-                {
-                    let area = area.inflate(FLAT_TOL, FLAT_TOL);
-                    let near = NearPoints::new(
-                        self.nodes.iter().copied().filter(|&q| area.contains(q)),
-                        FLAT_TOL,
-                    );
-                    let snap = |p: Point| near.nearest(p).unwrap_or(p);
-                    for q in &mut new_quads {
-                        q.p0 = snap(q.p0);
-                        q.p2 = snap(q.p2);
-                    }
-                }
-            }
-            MapInput::Stack(shapes) => {
-                new_quads.extend(
-                    shapes
-                        .iter()
-                        .flat_map(|s| s.contours())
-                        .flat_map(|c| c.segments.iter().copied()),
-                );
-            }
-            MapInput::Map(p) => {
-                for e in 0..p.edges.len() {
-                    new_quads.push(p.quad(e));
-                    new_cols.push((p.edges[e].left, p.edges[e].right));
-                }
-            }
-            // 後の曲線を、元の辺の左右の色で重ねる。元の辺（前の曲線）はいつも入れる
-            MapInput::Sweep(moved) => {
-                for &(e, after) in moved {
-                    new_quads.push(after);
-                    new_cols.push((self.edges[e].left, self.edges[e].right));
+                let snap = |p: Point| near.nearest(p).unwrap_or(p);
+                for q in &mut input_lines.quads {
+                    q.p0 = snap(q.p0);
+                    q.p2 = snap(q.p2);
                 }
             }
         }
+        let (new_quads, new_cols) = (&input_lines.quads[..], &input_lines.cols[..]);
         if new_quads.is_empty() {
             // 重ねるものが無い：外は前のまま（中だけ残すなら、何も残らない）
             return Some(rules.map(|rule| match rule {
@@ -397,6 +537,10 @@ impl PlanarMap {
                 _ => self.clone(),
             }));
         }
+        // 触る範囲などは、要るときに作る。格子に置けない座標は、ここで断る
+        let lines = InputLines::new(input, &input_lines)?;
+        // 重ねる地図の辺の近くを探す形は、重ねるものの線のもの（同じ曲線）を使い、作り直さない
+        let check_reach = lines.piece_reach();
         // 重ねる地図の辺も、前からある辺と同じ決まりで入れるかを決める（入れない辺はそのまま写し、色だけ決める）。そのために
         // 2つの地図の辺を1つに並べる（前からある辺が 0..n_old、重ねる地図の辺がその後ろ）。形と輪郭の変形の線はみな入れる
         let joined;
@@ -413,21 +557,36 @@ impl PlanarMap {
                 }
                 (&joined, &[])
             }
-            _ => (self, &new_quads),
+            _ => (self, new_quads),
         };
         let check = self.edges.len()..cands.edges.len();
         let moved = input.moved_flags(cands.edges.len());
-        let mut fed =
-            cands.fed_edges(&[], seeds, &moved, moved.clone(), check.clone(), &partner)?;
+        let mut fed = cands.fed_edges(
+            &[],
+            check_reach,
+            seeds,
+            &moved,
+            moved.clone(),
+            check.clone(),
+            &partner,
+        )?;
         loop {
-            match cands.overlay_with(input, &rules, &new_quads, &new_cols, &mut fed) {
+            match cands.overlay_with(input, &rules, new_quads, new_cols, &lines, &mut fed) {
                 Ok(maps) => return Some(maps.try_into().expect("決まりごとに1つの地図")),
                 Err(OverlayStop::Unfed(more)) => {
                     let mut set = std::mem::take(&mut fed.fed);
                     for e in more {
                         set[e] = true;
                     }
-                    fed = cands.fed_edges(&[], seeds, &moved, set, check.clone(), &partner)?;
+                    fed = cands.fed_edges(
+                        &[],
+                        check_reach,
+                        seeds,
+                        &moved,
+                        set,
+                        check.clone(),
+                        &partner,
+                    )?;
                 }
                 Err(OverlayStop::Refused) => return None,
             }
@@ -436,17 +595,20 @@ impl PlanarMap {
 
     /// 重ね合わせ（`overlay_rules`）を、前の地図の窓で行う（形・地図・輪郭の変形のとき。設計：
     /// claude/触った所だけを計算する地図の設計_22fbbbe.md の 3.4）。前の地図は升目の索引 `ix` で引き、全体の写しを作らない。
+    /// 範囲はみなマスの集まり（`CellSet`）で表し、外接矩形1つでは表さない（線が触れない矩形の中の辺は見ない：レビュー
+    /// 96fdc26 の N-1003）。
     ///
     /// 1. 入れる辺を、重ねるもののまわりの下窓で決める（`fed_edges`）
-    /// 2. 窓：入れる辺と重ねるものの外接矩形（制御点まで）を広げた範囲 `region` に外接矩形がかかる辺と、それらの端の頂点に
-    ///    つながる辺。前の地図の辺の番号の順に並べる（窓の中の番号の順は、前の地図の番号の順と同じ）
+    /// 2. 窓：重ねるものが触る範囲（`InputLines::touched`）と、入れる辺の線を `WINDOW_PAD` だけ広げたマスに
+    ///    かかる辺と、入れる辺と、それらの端の頂点につながる辺。前の地図の辺の番号の順に並べる（窓の中の番号の順は、前の
+    ///    地図の番号の順と同じ）。窓を決めるのに要るので、触る範囲と線のマスは、前の地図に辺が無くても作る
     /// 3. 窓で重ね合わせる（`overlay_with`）。前の地図全体で行ったときと比べて違いうるのは、窓に無い辺を見る所だけで、
     ///    それは次の3つ。どれも結果を同じにする：
     ///    - 点のある所の前の地図の色を数える所は、窓の外の辺も前の地図の番号の順に数える（`Outside`）
-    ///    - 中の辺（重ねるものの外接矩形にかかる入れない辺）・入れる辺の端の頂点につながる辺・2本をまとめる候補の頂点に
-    ///      つながる辺は、みな窓にある
-    ///    - 曲線に戻す所と2本をまとめる所がほかの辺を調べた範囲（`FedEdges::used`）が `region` に入っていなければ、
-    ///      `region` を広げてやり直す（`region` に外接矩形がかかる辺はみな窓にあるので、入っていれば調べた相手は同じ）
+    ///    - 中の辺（触る範囲にかかる入れない辺）・入れる辺の端の頂点につながる辺・2本をまとめる候補の頂点につながる辺は、
+    ///      みな窓にある
+    ///    - 曲線に戻す所と2本をまとめる所がほかの辺を調べた所（`FedEdges::used`）が窓の範囲に入っていなければ、範囲を
+    ///      広げてやり直す（窓の範囲にかかる辺はみな窓にあるので、入っていれば調べた相手は同じ）
     ///
     /// 入れなかった辺が切った区間と交わったとき（`Unfed`）は、入れる辺を足して 1. からやり直す（前の地図全体で行うときと
     /// 同じ）。（決まりごとの窓の結果, 窓の辺）。外が前のままの決まりの答えは、前のしまう形に窓の結果の差分を当てたもの
@@ -456,24 +618,20 @@ impl PlanarMap {
         ix: MapIndex<'_>,
         input: MapInput<'_>,
         rules: &[MapRule],
-        new_quads: &[QuadBez],
-        new_cols: &[(Option<Color32>, Option<Color32>)],
+        input_lines: &Lines,
     ) -> Option<(Vec<PlanarMap>, Vec<usize>)> {
         let stored = ix.stored;
-        let hull = |q: QuadBez| KRect::from_points(q.p0, q.p2).union_pt(q.p1);
         let quad_of = |e: usize| stored.edge_at(e).quad();
-        let region_edges = |r: KRect| region_edges(ix, r);
+        let (new_quads, new_cols) = (&input_lines.quads[..], &input_lines.cols[..]);
         let moved_list: Vec<usize> = match input {
             MapInput::Sweep(m) => m.iter().map(|&(e, _)| e).collect(),
             _ => Vec::new(),
         };
-        // 重ねるもの（輪郭の変形なら前の曲線も）の範囲。`overlay_fed` は、これが無ければ重ねない
-        let area = new_quads
-            .iter()
-            .copied()
-            .chain(moved_list.iter().map(|&e| quad_of(e)))
-            .map(hull)
-            .reduce(|a, b| a.union(b))?;
+        // 格子に置けない座標（頂点と制御点：`fits_grid` と同じ）は、マスを数える前に断る
+        let lines = InputLines::new(input, input_lines)?;
+        let touched = lines.touched();
+        // 重ねるものの線を `WINDOW_PAD` だけ広げたマス
+        let line_cells = lines.cells();
         // 入れる辺（前の地図の番号）。輪郭の変形で動かした辺は、はじめから入れる
         let mut fed_init: std::collections::BTreeSet<usize> = moved_list.iter().copied().collect();
         // 重ねる地図（`MapInput::Map`）の辺のうち、はじめから入れるもの（重ねる地図の番号。入れなかった辺が切った区間と
@@ -483,10 +641,12 @@ impl PlanarMap {
             _ => None,
         };
         let np = input.joined_edges();
+        // 重ねる地図の辺（窓の地図の後ろに並べる）の近くを探す形は、重ねるものの線のもの（同じ曲線）を使い、作り直さない
+        let piece_reach = lines.piece_reach();
         let mut fed_init_new: std::collections::BTreeSet<usize> = Default::default();
         // 窓（前の地図の辺の一部を並べた地図 `m`）に重ねる地図の辺を並べた地図と、同じ線の組の相手（`same_edges`。前の
-        // 地図全体で行うときと同じ組：組になる前からある辺は、両端が重ねる地図の頂点の外形の中にあるので、外接矩形が
-        // 重ねるものの範囲にかかり、みな窓にある）
+        // 地図全体で行うときと同じ組：組になる前からある辺は、両端が重ねる地図の頂点の外形の中にあるので、近くのマスが
+        // 重ねるものの線のマスにかかり、みな窓にある）
         let with_piece = |m: PlanarMap| -> (PlanarMap, Vec<Option<(usize, bool)>>) {
             let Some(p) = piece else {
                 return (m, Vec::new());
@@ -503,21 +663,19 @@ impl PlanarMap {
         };
         // 重ねるときの種（重ねる地図は、辺として並べるので種は無い）
         let seeds: &[QuadBez] = if piece.is_some() { &[] } else { new_quads };
-        let mut extra: Option<KRect> = None;
+        // 曲線に戻す所と2本をまとめる所がほかの辺を調べた所（窓の範囲に足していく）
+        let mut extra = CellSet::default();
         loop {
-            // 1. 入れる辺を、重ねるもののまわりの下窓で決める（設計 段2b の 7. の 2b-7b）。入れる辺の近くの辺（外接矩形を
-            //    広げた所）は、みな下窓にある。入れる辺の外接矩形を広げた所が下窓の範囲から出たら、範囲を広げてやり直す
-            // 下窓のはじめの範囲は、重ねるものと、それに外接矩形がかかる辺（入れる辺になりやすい）の外形まで。たいていは
-            //  やり直さずに済む
-            let mut r0 = fed_init
-                .iter()
-                .copied()
-                .chain(region_edges(area))
-                .map(|e| hull(quad_of(e)))
-                .fold(area, |a, b| a.union(b))
-                .inflate(WINDOW_PAD, WINDOW_PAD);
+            // 1. 入れる辺を、重ねるもののまわりの下窓で決める（設計 段2b の 7. の 2b-7b）。入れる辺の近くの辺は、みな
+            //    下窓にある。入れる辺の近くのマスが下窓の範囲から出たら、範囲を広げてやり直す
+            // 下窓のはじめの範囲は、重ねるものの線のマスと、はじめから入れる辺と、重ねるものの線のマスにかかる辺（入れる辺
+            //  になりやすい）の近くのマス（計算に使う写しが持つもの）。たいていはやり直さずに済む
+            let mut sub_cells = line_cells.clone();
+            for e in fed_init.iter().copied().chain(region_edges(ix, line_cells)) {
+                sub_cells.add(ix.poly(e).reach(quad_of(e)).1.iter().copied());
+            }
             let fed_dense = loop {
-                let mut sub_edges = region_edges(r0);
+                let mut sub_edges = region_edges(ix, &sub_cells);
                 sub_edges.extend(fed_init.iter().copied());
                 sub_edges.sort_unstable();
                 sub_edges.dedup();
@@ -529,23 +687,29 @@ impl PlanarMap {
                 moved0.resize(n0 + np, false);
                 let mut init0: Vec<bool> = sub_edges.iter().map(|e| fed_init.contains(e)).collect();
                 init0.extend((0..np).map(|i| fed_init_new.contains(&i)));
-                let f =
-                    sub.fed_edges(&sub_known, seeds, &moved0, init0, n0..n0 + np, &sub_partner)?;
+                let f = sub.fed_edges(
+                    &sub_known,
+                    piece_reach,
+                    seeds,
+                    &moved0,
+                    init0,
+                    n0..n0 + np,
+                    &sub_partner,
+                )?;
                 let fed_now: Vec<usize> = (0..n0).filter(|&e| f.fed[e]).collect();
                 // 重ねる地図の辺は、みな調べる（入れるかを決める）ので、どれも近くの辺が下窓にあるかを見る。入れる辺 E の
-                // 近く（`fed_edges`：判定の形が `GRID_REACH` 以内）を通る辺 X は、その点が E の判定の形（端の置き直しと
-                // 丸めで、E の外接矩形から 2·`GRID_REACH` 以内）から `GRID_REACH` 以内、つまり `reach_box(E)` の中にあり、
-                // その点は X の判定の形の点なので `reach_box(X)` の中にもある。E と頂点を共有する辺も、その頂点が E の
-                // 外接矩形にある。どちらも `reach_box(X)` が `reach_box(E)` にかかるので、`reach_box(E)` が下窓の範囲に
-                // 入っていれば、X は下窓にある（`region_edges` は `reach_box` が範囲にかかる辺）。余白は足さない
-                let reach = fed_now
-                    .iter()
-                    .copied()
-                    .chain(n0..n0 + np)
-                    .map(|e| reach_box(sub.quad(e)))
-                    .fold(area, |a, b| a.union(b));
-                if !rect_inside(reach, r0) {
-                    r0 = r0.union(reach.inflate(WINDOW_PAD, WINDOW_PAD));
+                // 近く（`fed_edges`：判定の形が `GRID_REACH` 以内）を通る辺 X は、その所で E と同じマスにかかり
+                // （`edge_reach` はどちらもその分を太らせてある）、E と頂点を共有する辺も、その頂点のマスにかかる。
+                // どちらも X の近くのマスが E の近くのマスと重なるので、E の近くのマスがみな下窓の範囲にあれば、X は下窓に
+                // ある（`region_edges` は近くのマスが範囲にかかる辺）。重ねる線の近くのマスは、はじめから範囲にある
+                let mut grown = false;
+                for e in fed_now.iter().copied().chain(n0..n0 + np) {
+                    if !sub_cells.contains_all(f.near().cells(e)) {
+                        sub_cells.add(f.near().cells(e).iter().copied());
+                        grown = true;
+                    }
+                }
+                if grown {
                     continue;
                 }
                 // 線の番号を、窓によらない形にする（前からある辺は前の地図の番号、重ねる地図の辺はその番号）
@@ -572,17 +736,14 @@ impl PlanarMap {
                 );
             };
             let (fed_dense, spans_dense, fed_new) = fed_dense;
-            // 2. 窓：入れる辺と重ねるものの外接矩形を広げた範囲に外接矩形がかかる辺と、入れる辺と、それらの端の頂点に
-            //    つながる辺。辺は塊から引き、頂点は座標で見分ける
-            let mut region = fed_dense
-                .iter()
-                .map(|&e| hull(quad_of(e)))
-                .fold(area, |a, b| a.union(b));
-            if let Some(x) = extra {
-                region = region.union(x);
+            // 2. 窓：触る範囲と、重ねるものと入れる辺の線を広げたマスと、調べた所にかかる辺と、入れる辺と、それらの端の
+            //    頂点につながる辺。辺は塊から引き、頂点は座標で見分ける
+            let mut region = touched.clone();
+            region.add_set(&extra);
+            for &e in &fed_dense {
+                region.add(window_cells(quad_of(e)));
             }
-            let region = region.inflate(WINDOW_PAD, WINDOW_PAD);
-            let wedges = window_edges(ix, fed_dense.iter().copied(), Some(region));
+            let wedges = window_edges(ix, fed_dense.iter().copied(), &region);
             let (wmap, wknown) = tile_window(ix, &wedges);
             let nw = wmap.edges.len();
             let (wmap, wpartner) = with_piece(wmap);
@@ -616,21 +777,19 @@ impl PlanarMap {
                     .collect(),
                 known: &wknown,
                 spans,
-                near: Some(NearEdges::new(&wmap, &wknown)),
+                near: Some(NearEdges::new(&wmap, &wknown, piece_reach)),
                 partner: wpartner,
                 outside: Some(Outside {
                     index: ix,
                     from_window: wedges.clone(),
                 }),
-                used: None,
+                used: CellSet::default(),
             };
-            match wmap.overlay_with(winput, rules, new_quads, new_cols, &mut wset) {
+            match wmap.overlay_with(winput, rules, new_quads, new_cols, &lines, &mut wset) {
                 Ok(maps) => {
-                    if let Some(u) = wset.used.map(px_rect) {
-                        if !rect_inside(u, region) {
-                            extra = Some(extra.map_or(u, |x| x.union(u)));
-                            continue;
-                        }
+                    if !region.covers(&wset.used) {
+                        extra.add_set(&wset.used);
+                        continue;
                     }
                     return Some((maps, wedges));
                 }
@@ -717,11 +876,14 @@ impl PlanarMap {
     /// 入れた辺の端の頂点は格子に置き直すので、その頂点につながる入れない辺は、置き直した形で調べ直す
     /// （ほかの入れない辺と交わらないかも見る）。`check` の辺（重ねる地図の辺）も、はじめに同じく調べる：入れない辺と
     /// 触れれば入れる。`moved` は輪郭の変形で動かした辺（前の形は同じ線の比べ先にしない）。`known`：前から `known.len()`
-    /// 本の辺の計算に使う形（外接矩形とマスを使い回す：`EdgeGeom::reach`）。`None`：格子に置けない座標がある
+    /// 本の辺の計算に使う形（外接矩形とマスを使い回す：`EdgeGeom::reach`）。`check_reach`：後ろの `check_reach.len()` 本
+    /// （重ねる地図の辺）の外接矩形とマス（重ねるものの線のもの：`InputLines::reach`）。重ねる線（`seeds` と `check` の辺）は、
+    /// 格子に置けることを呼ぶ所が確かめてあること（`InputLines::new`）。`None`：入れる前からある辺に格子に置けない座標がある
     #[allow(clippy::too_many_arguments)]
     pub(super) fn fed_edges<'a>(
         &'a self,
         known: &'a [Poly],
+        check_reach: &'a [EdgeReach],
         seeds: &[QuadBez],
         moved: &[bool],
         mut fed: Vec<bool>,
@@ -732,7 +894,7 @@ impl PlanarMap {
         super::FED_RUNS.with(|n| n.set(n.get() + 1));
         let mut snapped = vec![false; self.nodes.len()];
         // 近くの辺と、頂点ごとの辺を探す道具
-        let mut near = NearEdges::new(self, known);
+        let mut near = NearEdges::new(self, known, check_reach);
         let mut cells: Vec<(i64, i64)> = Vec::new();
         let mut adj_buf: Vec<usize> = Vec::new();
         // 頂点 `v` を格子に置き直すと動くか
@@ -826,8 +988,7 @@ impl PlanarMap {
             .chain(check.clone().map(|c| (Line::Edge(c), self.quad(c))))
             .collect();
         for &(line, q) in &new_lines {
-            // 格子に置けない座標（頂点と制御点：`fits_grid` と同じ）は、ここで断る
-            on_grid([q.p0, q.p1, q.p2].into_iter()).then_some(())?;
+            // 重ねる線（種と重ねる地図の辺）が格子に置けることは、呼ぶ所が確かめてある（`InputLines::new`）
             // 同じ線の組（`same_edges`）は入れない（あとで片方を入れるときに、重なる所を記す）
             if matches!(line, Line::Edge(c) if partner.get(c).copied().flatten().is_some()) {
                 continue;
@@ -856,7 +1017,7 @@ impl PlanarMap {
             near: None,
             partner: Vec::new(),
             outside: None,
-            used: None,
+            used: CellSet::default(),
         };
         let mut pbuf = PointsBuf::default();
         let mut gline: Vec<IPt> = Vec::new();
@@ -985,27 +1146,31 @@ impl PlanarMap {
     }
 
     /// `overlay_rules` の1回分（入れる辺 `fed` を決めたあと）。決まりごとの地図（`rules` の順）。入れなかった辺が切った
-    /// 区間と交わったら `Unfed`（その辺）。`self` は前の地図（重ねる地図なら、その辺を後ろに並べたもの：`joined`）
+    /// 区間と交わったら `Unfed`（その辺）。`self` は前の地図（重ねる地図なら、その辺を後ろに並べたもの：`joined`）。
+    /// `lines` は重ねるものの線（触る範囲：`InputLines::touched`）
     pub(super) fn overlay_with(
         &self,
         input: MapInput<'_>,
         rules: &[MapRule],
         new_quads: &[QuadBez],
         new_cols: &[(Option<Color32>, Option<Color32>)],
+        lines: &InputLines<'_>,
         fed_set: &mut FedEdges<'_>,
     ) -> Result<Vec<PlanarMap>, OverlayStop> {
         let fed = std::mem::take(&mut fed_set.fed);
-        let out = self.overlay_fed(input, rules, new_quads, new_cols, &fed, fed_set);
+        let out = self.overlay_fed(input, rules, new_quads, new_cols, lines, &fed, fed_set);
         fed_set.fed = fed;
         out
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn overlay_fed(
         &self,
         input: MapInput<'_>,
         rules: &[MapRule],
         new_quads: &[QuadBez],
         new_cols: &[(Option<Color32>, Option<Color32>)],
+        lines: &InputLines<'_>,
         fed: &[bool],
         fed_set: &mut FedEdges<'_>,
     ) -> Result<Vec<PlanarMap>, OverlayStop> {
@@ -1019,21 +1184,8 @@ impl PlanarMap {
         let moved = input.moved_flags(self.edges.len());
         // 辺 0..n_old が前からある辺、その後ろが重ねる地図の辺（`joined`）
         let n_old = self.edges.len() - input.joined_edges();
-        // 重ねるもの（輪郭の変形なら前の曲線も）の外接矩形。これにかからない入れない辺は、重ねるものの外にある
-        let area = new_quads
-            .iter()
-            .copied()
-            .chain(
-                (0..self.edges.len())
-                    .filter(|&e| moved[e])
-                    .map(|e| self.quad(e)),
-            )
-            .map(|q| q.bounding_box())
-            .reduce(|a, b| a.union(b))
-            .ok_or(OverlayStop::Refused)?;
-
         // 0. 出どころの曲線：入れる辺（前からある辺と重ねる地図の辺）と、重ねる形・線。入れない辺のうち、重ねる地図の辺と、
-        //    重ねるものの外接矩形にかかる前からある辺は「中の辺」（色を決め直す）
+        //    触る範囲にかかる前からある辺は「中の辺」（色を決め直す）
         let mut srcs: Vec<(QuadBez, OverlaySrc)> = Vec::new();
         let mut interior = vec![false; self.edges.len()];
         // 同じ線の組（`same_edges`）のうち入れなかったもの：前からある辺を1本で残し、重ねる地図の辺は出さない（`dropped`）
@@ -1049,7 +1201,9 @@ impl PlanarMap {
                 };
                 srcs.push((self.quad(e), src));
             } else {
-                interior[e] = e >= n_old || rects_overlap(fed_set.near().bbox(e), area);
+                // 触る範囲（`InputLines::touched`）にかからない入れない辺は、重ねるものの線から離れていて、中でもない
+                // （重ねるものの値が外と同じ）
+                interior[e] = e >= n_old || lines.touched().meets(fed_set.near().cells(e));
             }
         }
         if !matches!(input, MapInput::Map(_)) {
@@ -1602,7 +1756,7 @@ impl PlanarMap {
                 .map(|k| (label(2 * k + 1), label(2 * k)))
                 .collect()
         });
-        // 中の辺（入れなかった辺のうち、重ねるものの範囲の中にある前からある辺と、重ねる地図の辺）：その所での、もう片方の
+        // 中の辺（入れなかった辺のうち、重ねるものが触る範囲にかかる前からある辺と、重ねる地図の辺）：その所での、もう片方の
         // 地図の値（前からある辺なら重ねるものの値、重ねる地図の辺なら前の色）を、切った区間の印で整数で決めて（決まりに
         // よらない）、両側に決まりごとに `rule` を当てる。左右が同じ色になれば消える。中の辺は区間にも、もう片方の地図の入れなかった辺にも触れないので、
         // 値は辺のどこでも同じで、区間の頂点でない頂点でつながる同じ地図の中の辺（組）でも同じ（組ごとに1回だけ調べる）
@@ -2004,12 +2158,9 @@ impl PlanarMap {
             for (c, ids) in chains.iter().zip(&chain_edges) {
                 restorer.restore(c, ids);
             }
-            let (mut m, index) = restorer.finish();
-            let used = m.merge_degree2(dropped_ends, index);
-            fed_set.used = match (fed_set.used, used) {
-                (Some(a), Some(b)) => Some(a.union(&b)),
-                (a, b) => a.or(b),
-            };
+            let (mut m, index, chain_used) = restorer.finish();
+            fed_set.used.add_set(&chain_used);
+            fed_set.used.add_set(&m.merge_degree2(dropped_ends, index));
             m.compact_nodes();
             maps.push(m);
         }
@@ -2017,35 +2168,54 @@ impl PlanarMap {
     }
 }
 
-/// 窓の範囲を、関わる辺と重ねるものの外接矩形から広げる幅（px）。広いほどやり直しが減り、窓は大きくなる（窓を作る所は
+/// 窓の範囲を、関わる辺と重ねるものの線から広げる幅（px）。広いほどやり直しが減り、窓は大きくなる（窓を作る所は
 /// みなこれ：重ね合わせ `window_overlay`・バケツ `fill_diff`・アンカー `anchor_diff`）
 pub(super) const WINDOW_PAD: f64 = 2.0;
 
-/// 範囲 `r` に外接矩形（`reach_box`）がかかる前の地図の辺（升目の索引で引く。番号の順）
-pub(super) fn region_edges(ix: MapIndex<'_>, r: KRect) -> Vec<usize> {
+/// 曲線 `q` を `WINDOW_PAD` だけ太らせたものがかかるマス（窓の範囲に入れる、関わる辺と重ねるものの線のマス）
+pub(super) fn window_cells(q: QuadBez) -> impl Iterator<Item = (i64, i64)> {
+    quad_cells(q, window_pad())
+}
+
+/// `WINDOW_PAD` の格子の目の数
+fn window_pad() -> i64 {
+    (WINDOW_PAD * OVERLAY_GRID).ceil() as i64
+}
+
+/// 曲線 `q` の外形（端と制御点の外接矩形）
+pub(super) fn hull_of(q: QuadBez) -> KRect {
+    KRect::from_points(q.p0, q.p2).union_pt(q.p1)
+}
+
+/// 外形 `r`（px）を `WINDOW_PAD` だけ広げた、格子の点の矩形（窓の範囲に入れる外形：`rect_cells`）
+pub(super) fn window_rect(r: KRect) -> GridRect {
+    GridRect::around(r.inflate(WINDOW_PAD, WINDOW_PAD))
+}
+
+/// 範囲 `cells` にかかる前の地図の辺（辺の近くを探すマス `EdgeGeom::reach` のどれかが入っている辺。升目の索引で、
+/// マスの升目を引く。番号の順）
+pub(super) fn region_edges(ix: MapIndex<'_>, cells: &CellSet) -> Vec<usize> {
     let stored = ix.stored;
     let mut found: Vec<usize> = Vec::new();
-    for t in index_tiles_over(r) {
+    for t in cells.tiles() {
         ix.index.edges_in(stored, t, &mut found);
     }
     found.sort_unstable();
     found.dedup();
-    found.retain(|&e| rects_overlap(reach_box(stored.edge_at(e).quad()), r));
+    found.retain(|&e| cells.meets(&ix.poly(e).reach(stored.edge_at(e).quad()).1));
     found
 }
 
-/// 窓の辺（前の地図の番号の順）：関わる辺 `seeds` と、範囲 `region` に外接矩形がかかる辺と、それらの端の頂点につながる
-/// 辺（窓の頂点のまわりの辺は、みな窓にある）。窓を作るのはこれ1つ
+/// 窓の辺（前の地図の番号の順）：関わる辺 `seeds` と、範囲 `region` にかかる辺（`region_edges`）と、それらの端の頂点に
+/// つながる辺（窓の頂点のまわりの辺は、みな窓にある）。窓を作るのはこれ1つ
 pub(super) fn window_edges(
     ix: MapIndex<'_>,
     seeds: impl IntoIterator<Item = usize>,
-    region: Option<KRect>,
+    region: &CellSet,
 ) -> Vec<usize> {
     let stored = ix.stored;
     let mut in_window: std::collections::BTreeSet<usize> = seeds.into_iter().collect();
-    if let Some(r) = region {
-        in_window.extend(region_edges(ix, r));
-    }
+    in_window.extend(region_edges(ix, region));
     let mut ends: Vec<Point> = Vec::new();
     for &e in &in_window {
         let te = stored.edge_at(e);
@@ -2058,21 +2228,6 @@ pub(super) fn window_edges(
         in_window.extend(ix.edges_at_node(p));
     }
     in_window.into_iter().collect()
-}
-
-/// 格子の座標の矩形 `u` を、px の矩形にする
-pub(super) fn px_rect(u: GridRect) -> KRect {
-    KRect::new(
-        u.x0 as f64 / OVERLAY_GRID,
-        u.y0 as f64 / OVERLAY_GRID,
-        u.x1 as f64 / OVERLAY_GRID,
-        u.y1 as f64 / OVERLAY_GRID,
-    )
-}
-
-/// 矩形 `u` が矩形 `r` の中にある（境目を含む）
-pub(super) fn rect_inside(u: KRect, r: KRect) -> bool {
-    u.x0 >= r.x0 && u.y0 >= r.y0 && u.x1 <= r.x1 && u.y1 <= r.y1
 }
 
 /// 前の地図の辺 `edges`（計算に使う地図の番号の順）を並べた小さな地図と、辺ごとの計算に使う形。辺は塊から引き
@@ -2175,7 +2330,7 @@ pub(super) fn crossing_x(a: IPt, b: IPt, p2: IPt) -> (i128, i128) {
 
 /// 横切る所の x（`crossing_x`）の升目の列（`index_tile` の列。境目の上なら右の列：その点を含むマスの升目）
 fn crossing_col((num, den): (i128, i128)) -> i64 {
-    num.div_euclid(den * (2 * GRID_CELL * INDEX_TILE_CELLS) as i128) as i64
+    num.div_euclid(den * (2 * INDEX_TILE) as i128) as i64
 }
 
 /// 辺の判定の形 `poly`（格子の点）の区間が、点 `p2`（2倍の座標）から右へ伸ばした半直線を横切る所の、升目の列
@@ -2208,20 +2363,17 @@ impl RayBands {
         upto: i64,
     ) -> Option<(i64, Vec<usize>)> {
         let scan = |a: i64, b: i64| -> Vec<(i64, Box<[usize]>)> {
-            let mut out = Vec::new();
-            let mut cands: Vec<usize> = Vec::new();
-            for tx in a..=b {
-                cands.clear();
-                for ty in rows.0..=rows.1 {
-                    ix.index.edges_in(ix.stored, (tx, ty), &mut cands);
-                }
-                if !cands.is_empty() {
-                    cands.sort_unstable();
-                    cands.dedup();
-                    out.push((tx, cands.as_slice().into()));
-                }
-            }
-            out
+            let mut found: Vec<(i64, usize)> = Vec::new();
+            ix.index
+                .edges_over(ix.stored, (a, rows.0), (b, rows.1), |t, es| {
+                    found.extend(es.map(|e| (t.0, e)));
+                });
+            found.sort_unstable();
+            found.dedup();
+            found
+                .chunk_by(|x, y| x.0 == y.0)
+                .map(|col| (col[0].0, col.iter().map(|x| x.1).collect()))
+                .collect()
         };
         let mut bands = self.0.borrow_mut();
         let band = bands.entry(rows).or_insert(RayBand {
@@ -2564,9 +2716,9 @@ pub(super) struct FedEdges<'a> {
     partner: Vec<Option<(usize, bool)>>,
     /// 重ね合わせを窓で行うときの、窓の外（`overlay_rules_windowed`。窓で行わなければ `None`）
     outside: Option<Outside<'a>>,
-    /// ほかの辺を判定の形で調べた範囲（2本をまとめる所の索引の範囲：`merge_degree2`。窓で行うとき、窓がこれを
-    /// 覆うかを確かめる）
-    used: Option<GridRect>,
+    /// ほかの辺を判定の形で調べた所（曲線に戻す所 `ChainRestorer` と2本をまとめる所 `merge_degree2`。窓で行うとき、
+    /// 窓の範囲がこれを覆うかを確かめる）
+    used: CellSet,
 }
 
 /// 重ね合わせを窓（前の地図の辺の一部を、番号の順のまま並べた小さな地図）で行うときの、窓の外：前の地図と、その辺の
@@ -2626,7 +2778,10 @@ impl<'a> MapIndex<'a> {
 pub(super) struct NearEdges<'a> {
     map: &'a PlanarMap,
     known: &'a [Poly],
-    /// `known` に無い辺の外接矩形とマス
+    /// 後ろの `given.len()` 本の辺の外接矩形とマス（受け取ったもの）と、その始まりの辺の番号
+    given: &'a [EdgeReach],
+    tail: usize,
+    /// `known` と `given` に無い辺の外接矩形とマス
     made: Vec<EdgeReach>,
     /// 辺の格子と、頂点ごとの辺（辺の番号の順）
     local: CellGrid,
@@ -2638,14 +2793,18 @@ pub(super) struct NearEdges<'a> {
 }
 
 impl<'a> NearEdges<'a> {
-    pub(super) fn new(map: &'a PlanarMap, known: &'a [Poly]) -> Self {
-        let from = known.len().min(map.edges.len());
-        let made: Vec<EdgeReach> = (from..map.edges.len())
+    /// `known`：前から `known.len()` 本の辺の計算に使う形。`given`：後ろの `given.len()` 本の辺の外接矩形とマス
+    pub(super) fn new(map: &'a PlanarMap, known: &'a [Poly], given: &'a [EdgeReach]) -> Self {
+        let n = map.edges.len();
+        let from = known.len().min(n);
+        let made: Vec<EdgeReach> = (from..n - given.len())
             .map(|e| edge_reach(map.quad(e)))
             .collect();
         let mut near = Self {
             map,
             known,
+            given,
+            tail: n - given.len(),
             made,
             local: CellGrid::new(),
             local_adj: IntMap::default(),
@@ -2668,6 +2827,7 @@ impl<'a> NearEdges<'a> {
     fn reach(&self, e: usize) -> &EdgeReach {
         match self.known.get(e) {
             Some(g) => g.reach(self.map.quad(e)),
+            None if e >= self.tail => &self.given[e - self.tail],
             None => &self.made[e - self.known.len()],
         }
     }
@@ -2805,6 +2965,10 @@ pub(super) struct Chain {
     whole_poly: Option<Poly>,
 }
 
+/// 置き換え終わった地図と、その判定の形の索引・辺の番号 → 索引の番号（作らなかったら `None`）と、索引でほかの辺を調べた所
+/// （`ChainRestorer::finish`）
+type Restored = (PlanarMap, Option<(PolyIndex, Vec<usize>)>, CellSet);
+
 /// 直線の区間の鎖を、元の曲線の一部へ置き換える。置き換えてよいのは、今の地図で、曲線 C の判定の形が次の3つを
 /// 満たすときだけ（`PolyIndex::can_replace`。設計 段階2 の 2-4）：
 /// 1. C が、自分とも、ほかの辺とも、共有する端のほかで触れない
@@ -2821,6 +2985,8 @@ pub(super) struct ChainRestorer {
     index: Option<PolyIndex>,
     /// 辺ごとの、使っているか（`map.edges` の順。索引を作る前の置き換えの分も持つ）
     alive: Vec<bool>,
+    /// 索引でほかの辺を調べた所（`PolyIndex::can_replace` が引いたマス）
+    used: CellSet,
     /// 使い回す入れ物（調べる鎖の範囲・途中の頂点・道の点・曲線の判定の形）
     spans: Vec<(usize, usize)>,
     inner: Vec<usize>,
@@ -2837,6 +3003,7 @@ impl ChainRestorer {
             map,
             active,
             index: None,
+            used: CellSet::default(),
             spans: Vec::new(),
             inner: Vec::new(),
             path: Vec::new(),
@@ -2901,7 +3068,15 @@ impl ChainRestorer {
             let index = self
                 .index
                 .get_or_insert_with(|| PolyIndex::build(nodes, edges, |f| alive[f], Some(area)));
-            if !index.can_replace(part, &self.path, &self.inner, &self.pc, na, nb) {
+            if !index.can_replace(
+                part,
+                &self.path,
+                &self.inner,
+                &self.pc,
+                na,
+                nb,
+                &mut self.used,
+            ) {
                 return false;
             }
         }
@@ -2928,8 +3103,9 @@ impl ChainRestorer {
     }
 
     /// 置き換え終わった地図（使わなくなった辺を除く）と、その辺の判定の形の索引・辺の番号 → 索引の番号（索引を作らな
-    /// かったら `None`。続く `merge_degree2` が使い、無ければ要るときに作る：答えは索引の範囲によらない）
-    pub(super) fn finish(self) -> (PlanarMap, Option<(PolyIndex, Vec<usize>)>) {
+    /// かったら `None`。続く `merge_degree2` が使い、無ければ要るときに作る：答えは索引の範囲によらない）と、索引で
+    /// ほかの辺を調べた所
+    pub(super) fn finish(self) -> Restored {
         let mut map = self.map;
         // 地図の辺と、`alive`・索引の辺は、同じ番号で1つずつ足してきた
         let mut k = 0;
@@ -2941,7 +3117,7 @@ impl ChainRestorer {
             let ids = (0..self.alive.len()).filter(|&f| self.alive[f]).collect();
             (index, ids)
         });
-        (map, index)
+        (map, index, self.used)
     }
 }
 

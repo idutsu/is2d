@@ -43,8 +43,9 @@ pub(crate) struct LocalMap<'a> {
     added_polys: Vec<Poly>,
     /// 頂点ごとの、増えた辺（辺の番号の順）
     added_at: IntMap<usize, Vec<usize>>,
-    /// 升目の索引の升目ごとの、増えた辺（辺の番号の順）。前の地図の辺の升目の索引と同じ升目に、外接矩形（`reach_box`）が
-    /// かかる升目で入れる。矩形にかかる辺を探す所（`edges_over`）が、増えた辺も、矩形にかかる升目の分だけ引く
+    /// 升目の索引の升目ごとの、増えた辺（辺の番号の順）。外接矩形（`reach_box`）がかかる升目で入れる（マスを作らずに
+    /// 済む）。ここを引く所（輪の上と中の辺を探す `edges_in_ring`・半直線を横切る辺を探す `ray_cols`）は、どれも辺の上の
+    /// 点を含むマスの升目を引くので、辺の上の点がみな入る外接矩形の升目で足りる
     added_tiles: IntMap<(i64, i64), Vec<usize>>,
     /// 升目の行ごとの、増えた辺（辺の番号の順・1つずつ。`added_tiles` を行でまとめたもの）。右へ伸ばした半直線を横切る
     /// 辺を探す所（`ray_cols`）が、半直線の通る行の分だけ引く
@@ -75,12 +76,12 @@ impl<'a> LocalMap<'a> {
             list.push(MapEdge { a, b, ..ed });
             let q = result.quad(r);
             polys.push(EdgeGeom::of(&q));
+            for t in index_tiles_over(reach_box(q)) {
+                added_tiles.entry(t).or_default().push(n_base + i);
+            }
             added_at.entry(a).or_default().push(n_base + i);
             if b != a {
                 added_at.entry(b).or_default().push(n_base + i);
-            }
-            for t in index_tiles_over(reach_box(q)) {
-                added_tiles.entry(t).or_default().push(n_base + i);
             }
         }
         let mut added_rows: IntMap<i64, Vec<usize>> = IntMap::default();
@@ -232,15 +233,19 @@ impl<'a> LocalMap<'a> {
         list
     }
 
-    /// 矩形 `r`（文書の座標）にかかる升目の辺（消えた辺を除いた前の地図の辺と、増えた辺。番号の順・1つずつ）
-    fn edges_over(&self, r: KRect) -> Vec<usize> {
+    /// 閉じた折れ線 `pts`（輪郭の点：`Ring::pts`）の上と中にかかりうる辺（消えた辺を除いた前の地図の辺と、増えた辺。
+    /// 番号の順・1つずつ）：輪の上と中の升目（`polygon_squares`）にある辺。輪の中に点がある辺は、その点のマスの升目に
+    /// あるので、みな入る。輪の外接矩形はなめないので、手間は輪の長さと中の広さで決まり、輪の外接矩形の中の辺の数によら
+    /// ない（レビュー 96fdc26 の N-1003）
+    fn edges_in_ring(&self, pts: &[IPt]) -> Vec<usize> {
         let mut out: Vec<usize> = Vec::new();
-        for t in index_tiles_over(r) {
+        let tiles = polygon_squares::<INDEX_TILE>(pts);
+        for &t in &tiles {
             self.index.index.edges_in(self.index.stored, t, &mut out);
         }
         out.retain(|e| !self.removed.contains(e));
-        for t in index_tiles_over(r) {
-            if let Some(list) = self.added_tiles.get(&t) {
+        for t in &tiles {
+            if let Some(list) = self.added_tiles.get(t) {
                 out.extend(list.iter().copied());
             }
         }
@@ -276,15 +281,7 @@ impl<'a> LocalMap<'a> {
             if !base_keys.contains(&quad_key(&q)) {
                 fresh.insert(e);
             }
-            let reach = GridRect::of(pe);
-            let rect = KRect::new(
-                reach.x0 as f64 / OVERLAY_GRID,
-                reach.y0 as f64 / OVERLAY_GRID,
-                reach.x1 as f64 / OVERLAY_GRID,
-                reach.y1 as f64 / OVERLAY_GRID,
-            )
-            .inflate(1.0 / OVERLAY_GRID, 1.0 / OVERLAY_GRID);
-            tiles.extend(index_tiles_over(rect));
+            tiles.extend(GridRect::of(pe).grown(1).index_tiles());
         }
         tiles.sort_unstable();
         tiles.dedup();
@@ -727,8 +724,9 @@ impl LocalMap<'_> {
     /// - 触った色のある穴：入れ先が無ければ正しくない
     /// - 前の地図の穴で、入れ先の外周が触られたもの（前の地図の面の表 `base_faces` で、触った前の地図の外周の面の穴を
     ///   引く）：入れ先が無ければ正しくない
-    /// - 触った何も無い側の輪郭と、新しい輪の外接矩形に辺がかかる前の地図の何も無い側の輪郭：色のある面に入り込めば
-    ///   正しくない（調べる輪郭は今の決まりより多いが、どれも正しい地図で成り立つ決まりなので、答えは同じ）
+    /// - 触った何も無い側の輪郭と、新しい輪の中に点がある前の地図の何も無い側の輪郭（輪の上と中のマスの辺から探す：
+    ///   `edges_in_ring`）：色のある面に入り込めば正しくない（調べる輪郭は今の決まりより多いが、どれも正しい地図で成り立つ
+    ///   決まりなので、答えは同じ）
     ///
     /// `Some(None)`：正しくない。`None`：輪郭が閉じないか、穴の入れ先が無い
     pub(crate) fn regions_faces(
@@ -797,14 +795,9 @@ impl LocalMap<'_> {
             .filter(|&ci| memo.cycles[ci].ring.is_some())
             .collect();
         for ci in made_rings {
-            let r = memo.cycles[ci].ring.as_ref().expect("色のある輪郭").rect;
-            let rect = KRect::new(
-                r.x0 as f64 / OVERLAY_GRID,
-                r.y0 as f64 / OVERLAY_GRID,
-                r.x1 as f64 / OVERLAY_GRID,
-                r.y1 as f64 / OVERLAY_GRID,
-            );
-            for e in self.edges_over(rect) {
+            let near =
+                self.edges_in_ring(&memo.cycles[ci].ring.as_ref().expect("色のある輪郭").pts);
+            for e in near {
                 for side in [true, false] {
                     let h = (e, side);
                     if self.side_color(h).is_some()
@@ -913,7 +906,7 @@ impl LocalMap<'_> {
 
     /// バケツの面（点を含む面。何も無い側の囲まれた所も面）：点 `p2`（2倍の座標）を含む
     /// いちばん小さい外周と、その穴（同じ色で、入れ先がその外周の輪郭）の、向きのある辺。色のある面の穴は、前の地図の面の
-    /// 表 `base_faces` で引く。何も無い所の穴は、外周の外接矩形にかかる何も無い側の輪郭から探す。点が輪郭の上にあるか、
+    /// 表 `base_faces` で引く。何も無い所の穴は、外周の上と中のマスの辺（`edges_in_ring`）の何も無い側の輪郭から探す。点が輪郭の上にあるか、
     /// どの外周にも入らなければ `None`。（面の色, 面の輪郭の向きのある辺）
     pub(crate) fn face_at(
         &self,
@@ -940,14 +933,8 @@ impl LocalMap<'_> {
                 }
             }
             None => {
-                let r = self.ring_any(ext, memo).rect;
-                let rect = KRect::new(
-                    r.x0 as f64 / OVERLAY_GRID,
-                    r.y0 as f64 / OVERLAY_GRID,
-                    r.x1 as f64 / OVERLAY_GRID,
-                    r.y1 as f64 / OVERLAY_GRID,
-                );
-                for e in self.edges_over(rect) {
+                let near = self.edges_in_ring(&self.ring_any(ext, memo).pts);
+                for e in near {
                     for side in [true, false] {
                         if self.side_color((e, side)).is_some() {
                             continue;
@@ -1058,24 +1045,20 @@ impl LocalMap<'_> {
                 }
             }
         }
-        // 触った外周の中に入った前の地図の穴（新しく作った同じ色の外周の外接矩形が調べる点を含む穴は、入れ先を決め直す）
+        // 触った外周の中に入った前の地図の穴（新しく作った同じ色の外周の中か上に調べる点がある穴は、入れ先を決め直す。外の
+        // 穴の入れ先は、この外周では変わらない）
         let new_exteriors: Vec<usize> = touched_ids
             .iter()
             .copied()
             .filter(|&ci| painted(ci, memo).is_some_and(|a| a > 0))
             .collect();
         for ext in new_exteriors {
-            let (color, r) = {
+            let (color, near) = {
                 let c = &memo.cycles[ext];
-                (c.color, c.ring.as_ref().expect("色のある輪郭").rect)
+                let ring = c.ring.as_ref().expect("色のある輪郭");
+                (c.color, self.edges_in_ring(&ring.pts))
             };
-            let rect = KRect::new(
-                r.x0 as f64 / OVERLAY_GRID,
-                r.y0 as f64 / OVERLAY_GRID,
-                r.x1 as f64 / OVERLAY_GRID,
-                r.y1 as f64 / OVERLAY_GRID,
-            );
-            for e in self.edges_over(rect) {
+            for e in near {
                 for side in [true, false] {
                     if self.side_color((e, side)) != color {
                         continue;
@@ -1084,7 +1067,9 @@ impl LocalMap<'_> {
                     if touched_set.contains(&ci) || painted(ci, memo).is_none_or(|a| a >= 0) {
                         continue;
                     }
-                    if r.contains2(self.probe(&memo.cycles[ci].cycle)) {
+                    let hp = self.probe(&memo.cycles[ci].cycle);
+                    let ring = memo.cycles[ext].ring.as_ref().expect("色のある輪郭");
+                    if ring.contains(hp) != Some(false) {
                         holes.push((ci, None));
                     }
                 }
