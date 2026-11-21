@@ -23,7 +23,7 @@ pub(crate) fn handle_transform_tool_input(
 ) {
     let shift_held = ui.input(|i| i.modifiers.shift);
     let alt_held = ui.input(|i| i.modifiers.alt);
-    let zoom = host.tab().view.zoom;
+    let zoom = host.tab().view.zoom();
 
     if host.tab_mut().view.double_clicked(ui.ctx(), response) {
         if let Some(pt) = mouse_pt {
@@ -63,7 +63,7 @@ pub(crate) fn handle_transform_tool_input(
     let tab = host.tab_mut();
     if matches!(tab.session.drag, ActiveCanvasDrag::None) {
         let hover = mouse_pt
-            .map(|pt| compute_transform_hover(tab.scene(), &tab.session, pt, tab.view.zoom))
+            .map(|pt| compute_transform_hover(tab.scene(), &tab.session, pt, tab.view.zoom()))
             .unwrap_or(TransformHoverTarget::None);
         tab.session.transform_hover = hover;
     }
@@ -77,7 +77,7 @@ pub(crate) fn start_transform_drag(
 ) {
     let sub_mode = host.tool().select_sub_mode;
     host.tab_mut().view.inspect_timeline_frame = false;
-    let zoom = host.tab().view.zoom;
+    let zoom = host.tab().view.zoom();
     let hover = compute_transform_hover(host.tab().scene(), &host.tab().session, pt, zoom);
     if shift_held && hover == TransformHoverTarget::None {
         host.tab_mut().session.drag = ActiveCanvasDrag::Marquee(MarqueeDrag::new(pt, true));
@@ -113,6 +113,7 @@ pub(crate) fn start_transform_drag(
                     orig_shapes,
                     last_affine: Affine::IDENTITY,
                     changed: false,
+                    fits: true,
                 });
             }
         }
@@ -128,6 +129,7 @@ pub(crate) fn start_transform_drag(
                     start_angle: (pt.y - pivot.y).atan2(pt.x - pivot.x),
                     current_angle: 0.0,
                     orig_shapes,
+                    fits: true,
                 });
             }
         }
@@ -182,6 +184,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                 orig_shapes,
                 last_affine,
                 changed,
+                fits,
                 ..
             } => {
                 let eff_anchor = if alt_held { *orig_pivot } else { *anchor };
@@ -200,12 +203,11 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                     sx = mag.copysign(sx);
                     sy = mag.copysign(sy);
                 }
-                sx = sx.abs().max(0.02).copysign(sx);
-                sy = sy.abs().max(0.02).copysign(sy);
-
+                // 倍率に下限は置かない（0 倍の潰れた変換も、置けないと見せるだけ。離せば確定と同じ判定で断る）
                 let affine = affine_scale_around(eff_anchor, sx, sy);
                 *last_affine = affine;
                 *changed = transform_moves(&tab.view, affine, *orig_bbox);
+                *fits = tab.session.fits_transform(affine);
                 tab.session.update_transform_overlay(orig_shapes, affine);
                 if tab.session.transform_pivot.is_some() {
                     tab.session.transform_pivot = Some(affine * *orig_pivot);
@@ -216,10 +218,11 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                 start_angle,
                 current_angle,
                 orig_shapes,
+                fits,
                 ..
             } => {
                 // 基準点のまわりの不感帯（画面で 2px。ほかのつかむ距離と同じく倍率で割る）
-                if (pt - *pivot).hypot() > 2.0 / (tab.view.zoom as f64) {
+                if (pt - *pivot).hypot() > 2.0 / (tab.view.zoom() as f64) {
                     let raw = (pt.y - pivot.y).atan2(pt.x - pivot.x) - *start_angle;
                     let mut delta_angle = raw.sin().atan2(raw.cos());
                     if shift_held {
@@ -228,6 +231,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                     }
                     *current_angle = delta_angle;
                     let affine = affine_rotate_around(*pivot, delta_angle);
+                    *fits = tab.session.fits_transform(affine);
                     tab.session.update_transform_overlay(orig_shapes, affine);
                 }
             }
@@ -317,7 +321,7 @@ pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option
 
 fn handle_transform_click(host: &mut impl ActionHost, pt: Point, shift_held: bool) {
     host.tab_mut().view.inspect_timeline_frame = false;
-    let zoom = host.tab().view.zoom;
+    let zoom = host.tab().view.zoom();
     let hover = compute_transform_hover(host.tab().scene(), &host.tab().session, pt, zoom);
     // ピボットのクリックでは選択を変えない。変形枠の中の空白では選択を外さない
     if shift_held || hover != TransformHoverTarget::Pivot {
@@ -399,7 +403,7 @@ pub(crate) fn draw_free_transform_box(session: &Session, painter: &egui::Painter
                 affine_rotate_around(*pivot, *current_angle),
                 *pivot,
             )
-        } else if let Some((bbox, piv)) = session.selection_bbox_and_pivot(view.zoom) {
+        } else if let Some((bbox, piv)) = session.selection_bbox_and_pivot(view.zoom()) {
             (bbox, Affine::IDENTITY, piv)
         } else {
             return;

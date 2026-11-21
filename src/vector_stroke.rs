@@ -10,10 +10,7 @@ use i_overlay9::{
 };
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
-use crate::vector_engine::{
-    left_normal, normalize_vec, point_to_segment_dist, Contour, FillShape, MAX_VIEW_ZOOM,
-    MIN_VIEW_ZOOM,
-};
+use crate::vector_engine::{left_normal, normalize_vec, point_to_segment_dist, Contour, FillShape};
 
 // ============================================================================
 // ブラシ：マウスの点 → なめらかな中心線 → 太らせた輪郭 → 2次ベジェ（GEOMETRY.md 2章）
@@ -794,15 +791,7 @@ fn fit_ring(ring: &[Point], tan_of: &dyn Fn(Point) -> Option<KVec2>, eps: f64) -
 
 /// 表示の倍率 `zoom` と画面の倍率 `pixels_per_point` での、丸めの刻み（画面の1画素を文書の座標に直したもの）
 pub(crate) fn input_step(zoom: f64, pixels_per_point: f64) -> f64 {
-    1.0 / (pixels_per_point.max(1e-3) * clamp_zoom(zoom))
-}
-
-fn clamp_zoom(zoom: f64) -> f64 {
-    if zoom.is_finite() {
-        zoom.clamp(MIN_VIEW_ZOOM as f64, MAX_VIEW_ZOOM as f64)
-    } else {
-        1.0
-    }
+    1.0 / (pixels_per_point.max(1e-3) * zoom)
 }
 
 /// 中心線の節 `from..=to` を半径 `radius` で太らせた輪郭（描いている間に見せる形。NonZero で塗る閉じた折れ線、
@@ -817,18 +806,18 @@ pub(crate) fn stroke_preview_outline(
     if cl.len() == 0 || from >= cl.len() || !radius.is_finite() || radius <= 0.0 {
         return Vec::new();
     }
-    let eps = FIT_TOL_PX * FLAT_RATIO / clamp_zoom(zoom);
+    let eps = FIT_TOL_PX * FLAT_RATIO / zoom;
     let cs = cl.samples(from, to.min(cl.len() - 1), radius, eps);
     brush_outline(&cs, radius, eps, [true, true]).0
 }
 
 /// マウスの点 `points`（文書の座標）と半径 `radius` から、離したあとの図形を作る。丸めの刻みは `step`
-/// （`input_step`）、当てはめの許容は表示の倍率 `zoom` で画面に合わせる（`FIT_TOL_PX`）
+/// （`input_step`）、当てはめの許容は表示の倍率 `z`（`View::zoom`。いつも範囲の中）で画面に合わせる（`FIT_TOL_PX`）
 pub(crate) fn stroke_shapes(
     points: &[Point],
     radius: f64,
     step: f64,
-    zoom: f64,
+    z: f64,
     color: Color32,
 ) -> Vec<FillShape> {
     if !radius.is_finite() || radius <= 0.0 || !step.is_finite() || step <= 0.0 {
@@ -839,7 +828,6 @@ pub(crate) fn stroke_shapes(
         return Vec::new();
     }
     // 輪郭の整理と当てはめは画面の px で行い、最後に文書の座標へ戻す
-    let z = clamp_zoom(zoom);
     let eps_flat = FIT_TOL_PX * FLAT_RATIO;
     let cs: Vec<Sample> = cl
         .samples(0, cl.len() - 1, radius, eps_flat / z)

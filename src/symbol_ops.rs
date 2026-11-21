@@ -75,7 +75,7 @@ pub(crate) fn prepare_convert_selection_to_symbol(
                 .filter(|p| selection.contains_shape(p))
                 .map(|p| p.shape_id)
                 .collect();
-            let Ok(rest) = fl.split_off(&keep) else {
+            let Ok(rest) = fl.split_off(&keep, &tab.session.editing_group_path) else {
                 tab.session.set_floating(before);
                 tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
                 return None;

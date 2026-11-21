@@ -532,12 +532,17 @@ impl PlanarMap {
                 let f =
                     sub.fed_edges(&sub_known, seeds, &moved0, init0, n0..n0 + np, &sub_partner)?;
                 let fed_now: Vec<usize> = (0..n0).filter(|&e| f.fed[e]).collect();
-                // 重ねる地図の辺は、みな調べる（入れるかを決める）ので、どれも近くの辺が下窓にあるかを見る
+                // 重ねる地図の辺は、みな調べる（入れるかを決める）ので、どれも近くの辺が下窓にあるかを見る。入れる辺 E の
+                // 近く（`fed_edges`：判定の形が `GRID_REACH` 以内）を通る辺 X は、その点が E の判定の形（端の置き直しと
+                // 丸めで、E の外接矩形から 2·`GRID_REACH` 以内）から `GRID_REACH` 以内、つまり `reach_box(E)` の中にあり、
+                // その点は X の判定の形の点なので `reach_box(X)` の中にもある。E と頂点を共有する辺も、その頂点が E の
+                // 外接矩形にある。どちらも `reach_box(X)` が `reach_box(E)` にかかるので、`reach_box(E)` が下窓の範囲に
+                // 入っていれば、X は下窓にある（`region_edges` は `reach_box` が範囲にかかる辺）。余白は足さない
                 let reach = fed_now
                     .iter()
                     .copied()
                     .chain(n0..n0 + np)
-                    .map(|e| reach_box(sub.quad(e)).inflate(4.0 * GRID_REACH, 4.0 * GRID_REACH))
+                    .map(|e| reach_box(sub.quad(e)))
                     .fold(area, |a, b| a.union(b));
                 if !rect_inside(reach, r0) {
                     r0 = r0.union(reach.inflate(WINDOW_PAD, WINDOW_PAD));

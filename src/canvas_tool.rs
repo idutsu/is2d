@@ -321,6 +321,8 @@ pub(crate) enum TransformDragState {
         orig_shapes: Vec<FillShape>,
         last_affine: Affine,
         changed: bool,
+        /// いまの変換で置けるか（確定と同じ判定：`Session::fits_transform`。置けなければ知らせを出す）
+        fits: bool,
     },
     Rotate {
         orig_bbox: KRect,
@@ -329,7 +331,22 @@ pub(crate) enum TransformDragState {
         start_angle: f64,
         current_angle: f64,
         orig_shapes: Vec<FillShape>,
+        /// いまの変換で置けるか（`Scale` と同じ）
+        fits: bool,
     },
+}
+
+impl ActiveCanvasDrag {
+    /// 拡大・回転のドラッグで、いまの変換では置けない（離すと断る：`Refusal::OffGrid`）
+    pub(crate) fn unplaceable(&self) -> bool {
+        matches!(
+            self,
+            ActiveCanvasDrag::Transform(
+                TransformDragState::Scale { fits: false, .. }
+                    | TransformDragState::Rotate { fits: false, .. }
+            )
+        )
+    }
 }
 
 /// キャンバス上で進行中のドラッグ操作を表す排他的状態マシン
@@ -360,8 +377,9 @@ pub(crate) enum ActiveCanvasDrag {
 /// タブごとの表示状態（ズーム・パン・枠外マスク・アンカー表示・オニオンスキン・ライブラリ選択、保存しない）
 #[derive(Clone)]
 pub(crate) struct View {
-    /// キャンバスのズーム倍率（1.0 = 100%, 範囲 0.15..=16.0）
-    pub(crate) zoom: f32,
+    /// キャンバスのズーム倍率（1.0 = 100%）。いつも `MIN_VIEW_ZOOM..=MAX_VIEW_ZOOM` の中（書くのは `set_zoom` だけ
+    /// なので、読む所は範囲に収め直さない）
+    zoom: f32,
     /// 画面の倍率（論理の1点あたりの画素の数。Retina なら 2）。ブラシ・消しゴムで、マウスの点の丸めの刻みを決める
     /// （`vector_stroke::input_step`）。ブラシ・消しゴムを使うたびに画面から取る
     pub(crate) pixels_per_point: f32,
@@ -414,7 +432,7 @@ pub(crate) const MIN_DRAG_SCREEN_PX: f64 = 0.5;
 
 impl View {
     /// ステージの座標で長さ `len` の動きが、画面で動いたとみなす量（`MIN_DRAG_SCREEN_PX`）を超えるか。ドラッグで
-    /// 「変わったか」はみなこれで決める（ピボットの移動・輪郭の変形・拡大・回転。選択の大きさとズームによらない）
+    /// 「変わったか」はみなこれで決める（移動・ピボットの移動・輪郭の変形・拡大・回転。選択の大きさとズームによらない）
     pub(crate) fn moves_on_screen(&self, len: f64) -> bool {
         len * self.zoom as f64 > MIN_DRAG_SCREEN_PX
     }
@@ -486,13 +504,26 @@ impl View {
         (now - press).hypot() > crate::vector_engine::SAME_TOL
     }
 
+    /// ズーム倍率（いつも `MIN_VIEW_ZOOM..=MAX_VIEW_ZOOM` の中）
+    pub(crate) fn zoom(&self) -> f32 {
+        self.zoom
+    }
+
+    /// ズーム倍率を `zoom` にする（`MIN_VIEW_ZOOM..=MAX_VIEW_ZOOM` に収める。有限でない倍率は使わない）。倍率を書くのは
+    /// これ1つ
+    pub(crate) fn set_zoom(&mut self, zoom: f32) {
+        if zoom.is_finite() {
+            self.zoom = zoom.clamp(
+                crate::vector_engine::MIN_VIEW_ZOOM,
+                crate::vector_engine::MAX_VIEW_ZOOM,
+            );
+        }
+    }
+
     /// スクリーン上の指定位置 `anchor_screen`（マウスカーソル位置）がズーム前後で動かないように倍率 `factor` を掛ける
     pub(crate) fn zoom_around_screen_pos(&mut self, anchor_screen: Pos2, factor: f32) {
         let world_before = self.screen_to_world(anchor_screen);
-        self.zoom = (self.zoom * factor).clamp(
-            crate::vector_engine::MIN_VIEW_ZOOM,
-            crate::vector_engine::MAX_VIEW_ZOOM,
-        );
+        self.set_zoom(self.zoom * factor);
         self.pan = Vec2::new(
             anchor_screen.x - (world_before.x as f32) * self.zoom,
             anchor_screen.y - (world_before.y as f32) * self.zoom,
@@ -501,7 +532,7 @@ impl View {
 
     /// ズーム倍率を 100%（`1.0`）、パン位置を原点（`Vec2::ZERO`）へリセットする（`Cmd+1` / `Cmd+0`）
     pub(crate) fn reset_view(&mut self) {
-        self.zoom = 1.0;
+        self.set_zoom(1.0);
         self.pan = Vec2::ZERO;
     }
 
@@ -511,13 +542,10 @@ impl View {
         let stage_h = stage_size.y.max(100.0);
         let avail_w = (canvas_rect.width() - 48.0).max(64.0);
         let avail_h = (canvas_rect.height() - 48.0).max(64.0);
-        let zoom = (avail_w / stage_w).min(avail_h / stage_h).clamp(
-            crate::vector_engine::MIN_VIEW_ZOOM,
-            crate::vector_engine::MAX_VIEW_ZOOM,
-        );
+        self.set_zoom((avail_w / stage_w).min(avail_h / stage_h));
+        let zoom = self.zoom;
         let center = Self::DEFAULT_STAGE_CENTER;
         let screen_center = canvas_rect.center();
-        self.zoom = zoom;
         self.pan = Vec2::new(
             screen_center.x - (center.x as f32) * zoom,
             screen_center.y - (center.y as f32) * zoom,
@@ -803,8 +831,12 @@ use scene_base_cache::{CelMeshCache, CelScope};
 /// `Overlay` で追加する図形の重なり順指定
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Placement {
-    /// 隠した元の図形と同じ重なり順に置く
+    /// 隠した元の図形（ドラッグで動かしている、グループ・インスタンスの図形そのもの）と同じ重なり順に置く。元の図形は、
+    /// この上乗せを作った土台にあり、ドラッグの間は土台が変わらない（文書を変えるとドラッグは終わり、上乗せも作り直す）
     ReplaceAt(ShapeId),
+    /// そのレイヤー・その階層の生の図形の置き場（階層のいちばん下。生の図形どうしに前後は無いので、番号で指さない。
+    /// 浮いた片の残り・輪郭の変形の仮表示）
+    RawOf(LayerId, Scope),
     /// そのレイヤー・その編集スコープの一番上に置く
     TopOfLayer(LayerId, Scope),
 }
@@ -856,15 +888,29 @@ pub(crate) fn build_scene_order_by_layer_ids(
     let mut after_base: Vec<Vec<(usize, usize)>> = vec![Vec::new(); base.len()];
     let mut replace_at_base: Vec<Vec<usize>> = vec![Vec::new(); base.len()];
 
-    for (add_idx, (placement, shape)) in overlay.add.iter().enumerate() {
-        // 置き場が見つからなかったときに、レイヤーの順番で入れる位置を決めるレイヤー
+    for (add_idx, (placement, _)) in overlay.add.iter().enumerate() {
+        // そのレイヤー・階層に土台の図形が無いとき（空のレイヤー）に、レイヤーの順番で入れる位置を決めるレイヤー
         let layer_order_fallback = match placement {
             Placement::ReplaceAt(target_id) => {
-                if let Some(pos) = base.iter().position(|s| s.shape_id == *target_id) {
+                // 元の図形は、この上乗せを作った土台にいつもある（`Placement::ReplaceAt`。レイヤーの順で入れる逃げ道は
+                // 置かない）
+                let pos = base.iter().position(|s| s.shape_id == *target_id);
+                debug_assert!(pos.is_some(), "ReplaceAt の相手が土台に無い");
+                if let Some(pos) = pos {
                     replace_at_base[pos].push(add_idx);
-                    None
-                } else {
-                    Some(shape.layer_id)
+                }
+                None
+            }
+            Placement::RawOf(lid, scope) => {
+                match base
+                    .iter()
+                    .position(|s| s.layer_id == *lid && s.is_in_editing_scope(scope))
+                {
+                    Some(pos) => {
+                        replace_at_base[pos].push(add_idx);
+                        None
+                    }
+                    None => Some(*lid),
                 }
             }
             Placement::TopOfLayer(lid, scope) => {
@@ -1384,7 +1430,7 @@ impl Session {
     }
 
     /// 輪郭の変形の仮表示を、確定と同じ計算の結果（消す元の図形 `removed`、新しく入れる塗りの形 `added`）にする。
-    /// 新しい形は、消した図形のうち最初のものの位置に置く（生の図形どうしは重ならないので、並びは見た目に出ない）
+    /// 新しい形は、その階層の生の図形の置き場に置く（確定と同じ。生の図形どうしは重ならないので、並びは見た目に出ない）
     pub(crate) fn set_reshape_overlay(
         &mut self,
         removed: &[ShapeId],
@@ -1396,10 +1442,7 @@ impl Session {
         self.overlay_only_selected = false;
         self.overlay_movable_start = 0;
         self.overlay.hide.extend(removed.iter().copied());
-        let placement = match removed.first() {
-            Some(&id) => Placement::ReplaceAt(id),
-            None => Placement::TopOfLayer(layer_id, group_path.to_vec()),
-        };
+        let placement = Placement::RawOf(layer_id, group_path.to_vec());
         self.overlay
             .add
             .extend(added.into_iter().map(|s| (placement.clone(), s)));
@@ -1541,6 +1584,48 @@ impl Session {
             self.set_floating(before);
         }
         !failed
+    }
+
+    /// 選んでいるものに、ステージの座標の変換 `affine` をかけて置けるか。変形の確定（`transform_selected_shapes`）と、
+    /// 拡大・回転のドラッグ中の「置けない」の表示（`TransformDragState` の `fits`）の判定はこれ1つ：変換が潰れず
+    /// （`invertible`）、浮いた片と、まだ持ち上げていない選んだ生の図形（`floating::pieces_fit`）と、選んだグループの
+    /// 中の生の図形の階層の地図（`selected_group_scopes`）が、みな格子に置ける（`PlanarMap::fits_grid`）。インスタンスは
+    /// 地図を持たないので、変換が潰れなければ置ける
+    pub(crate) fn fits_transform(&self, affine: Affine) -> bool {
+        let world = self.edit_path.world_xform();
+        let doc = world.inverse() * affine * world;
+        crate::vector_engine::invertible(doc)
+            && crate::floating::pieces_fit(
+                self.floating.as_ref(),
+                self.stage(),
+                &self.selected_raw_ids_by_layer(true),
+                doc,
+            )
+            && self.selected_group_scopes().iter().all(|(layer_id, path)| {
+                self.base_cache
+                    .cel(*layer_id)
+                    .is_none_or(|c| c.scope_base(path).map().fits_grid(doc))
+            })
+    }
+
+    /// 選んでいるグループの中の生の図形の階層：（レイヤー, 階層）。浮いた片が隠すセル画の図形と、今の階層の生の図形
+    /// （浮いた片にして動かす）は入れない
+    pub(crate) fn selected_group_scopes(&self) -> Vec<(LayerId, Vec<u64>)> {
+        let hidden = self.floating.as_ref().map(|fl| fl.hidden());
+        let mut scopes: Vec<(LayerId, Vec<u64>)> = Vec::new();
+        for s in self.base_cache.shapes() {
+            if !hidden.is_some_and(|h| h.contains(&s.shape_id))
+                && self.selection.contains_shape(s)
+                && s.symbol_instance.is_none()
+                && !s.is_raw_at_scope(&self.editing_group_path)
+                && !scopes
+                    .iter()
+                    .any(|x| x.0 == s.layer_id && x.1 == s.group_path)
+            {
+                scopes.push((s.layer_id, s.group_path.clone()));
+            }
+        }
+        scopes
     }
 
     /// 選択中の生の図形の、レイヤーごとの番号。`base` なら隠していないセル画の図形も、そうでなければ浮いている残りだけ
@@ -2042,6 +2127,16 @@ impl Tab {
         self.doc.library.iter().position(|s| s.id == last.symbol_id)
     }
 
+    /// テスト用：画面の土台が最新か（`refresh_scene_base` で作り直すものが無い）
+    #[cfg(test)]
+    pub(crate) fn scene_base_is_fresh(&self) -> bool {
+        self.session.base_cache.is_fresh(
+            self.active_timeline(),
+            &self.doc.library,
+            self.session.edit_path.world_xform(),
+        )
+    }
+
     /// `Document` の現在フレームおよび `edit_path` から `Scene` のレイヤー別土台キャッシュを再構築する
     pub(crate) fn refresh_scene_base(&mut self) {
         let world_xform = self.session.edit_path.world_xform();
@@ -2231,6 +2326,24 @@ impl Tab {
         tint: CelTint,
     ) -> Option<Arc<egui::Mesh>> {
         self.cel_screen_mesh(&self.session.cel_cache, layer_idx, frame, (zoom, pan), tint)
+    }
+
+    /// ロック中のレイヤー `layer_idx` のコマ `frame` のセル画の、点 `pt`（ステージの座標）で見えている色（描くのと同じ写し
+    /// のワールド座標の結合メッシュを、上に描く三角形から順にたどる：`CelMeshCache::world_mesh`・`mesh_color_at`）
+    pub(crate) fn cached_cel_color_at(
+        &self,
+        layer_idx: usize,
+        frame: usize,
+        pt: Point,
+    ) -> Option<Color32> {
+        let tl = self.active_timeline();
+        let world_xform = self.session.edit_path.world_xform();
+        let scope = self.active_cel_scope();
+        self.with_symbol_eval(|ctx| {
+            let mut cache = self.session.cel_cache.lock();
+            let mesh = cache.world_mesh(tl, scope, ctx, layer_idx, frame, world_xform)?;
+            crate::vector_engine::mesh_color_at(mesh, Pos2::new(pt.x as f32, pt.y as f32))
+        })
     }
 
     fn cel_screen_mesh(

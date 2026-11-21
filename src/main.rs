@@ -73,11 +73,12 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// `fonts/` フォルダ内の日本語フォント（NotoSansJP）とアイコンフォント（MaterialIcons）を読み込む。太字のフォントは
-/// 持たない（egui は同じ字を持つフォントを探し順の後ろから選ばず、`.strong()` も色を変えるだけなので、使われない：
-/// レビュー f01d518 の N-5006）
+/// `fonts/` フォルダ内の日本語フォント（NotoSansJP）とアイコンフォント（MaterialIcons）を読み込む。文字を描くフォントは
+/// この2つだけ（egui の既定のフォントは入れない：Cargo.toml。画面の字はみなこの2つにある）。太字のフォントは持たない
+/// （egui は同じ字を持つフォントを探し順の後ろから選ばず、`.strong()` も色を変えるだけなので、使われない：レビュー
+/// f01d518 の N-5006）
 fn configure_japanese_fonts(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
+    let mut fonts = egui::FontDefinitions::empty();
 
     fonts.font_data.insert(
         "noto_sans_jp_regular".to_owned(),
@@ -92,13 +93,14 @@ fn configure_japanese_fonts(ctx: &egui::Context) {
         ))),
     );
 
-    if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-        proportional.insert(0, "noto_sans_jp_regular".to_owned());
-        proportional.insert(1, "material_icons".to_owned());
-    }
-    if let Some(monospace) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-        monospace.push("noto_sans_jp_regular".to_owned());
-        monospace.push("material_icons".to_owned());
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts.families.insert(
+            family,
+            vec![
+                "noto_sans_jp_regular".to_owned(),
+                "material_icons".to_owned(),
+            ],
+        );
     }
 
     ctx.set_fonts(fonts);
@@ -121,6 +123,14 @@ fn configure_sharp_light_theme(ctx: &egui::Context) {
 // ============================================================================
 // メインアプリケーション状態 & ショートカット・アクションディスパッチ制御
 // ============================================================================
+
+/// 出ている間、ほかの操作を止めるダイアログ（`Is2dApp::shown_dialog`）
+#[derive(Clone, Copy)]
+enum Dialog {
+    VideoExport,
+    Recovery,
+    CloseConfirm,
+}
 
 /// アプリケーション全体のルート構造体（開いているタブ列 `tabs`・現在タブ `active`・アプリ共通のツール/クリップボード/トースト・パネルUI状態）
 pub(crate) struct Is2dApp {
@@ -375,6 +385,20 @@ impl Is2dApp {
             .is_some_and(|j| !j.is_cancelled())
     }
 
+    /// いま出ているダイアログ（いちばん上に描くもの：動画の書き出し・復旧・閉じる前の確認の順）。出ている間は、その
+    /// ダイアログの操作のほか（ほかの UI の操作・ショートカット・キャンバスの操作）を止める。判定はこれ1つ
+    fn shown_dialog(&self) -> Option<Dialog> {
+        if self.is_exporting_video() {
+            Some(Dialog::VideoExport)
+        } else if !self.recovery.found.is_empty() {
+            Some(Dialog::Recovery)
+        } else if self.pending_close_confirm.is_some() {
+            Some(Dialog::CloseConfirm)
+        } else {
+            None
+        }
+    }
+
     /// 進行中の動画書き出しに中止の合図を送る（裏の処理の終わりと通知は `poll_video_export` が受け取る）
     pub(crate) fn cancel_active_video_export(&mut self) {
         if let Some(job) = &self.video_export {
@@ -400,33 +424,40 @@ impl Is2dApp {
 
     /// UIパネルから収集した `UiAction` を一括ディスパッチする
     pub(crate) fn apply_action(&mut self, action: UiAction, ctx: &egui::Context) {
-        if !self.recovery.found.is_empty() {
-            match action {
-                UiAction::RestoreRecovered => {
-                    let mut recovery = std::mem::take(&mut self.recovery);
-                    recovery.restore_found(self);
-                    self.recovery = recovery;
-                }
-                UiAction::DiscardRecovered => self.recovery.discard_found(),
-                _ => {}
+        match (self.shown_dialog(), action) {
+            (Some(Dialog::Recovery), UiAction::RestoreRecovered) => {
+                let mut recovery = std::mem::take(&mut self.recovery);
+                recovery.restore_found(self);
+                self.recovery = recovery;
             }
-            return;
-        }
-        if self.is_exporting_video() {
-            match action {
-                UiAction::CancelVideoExport => self.cancel_active_video_export(),
-                UiAction::CloseActiveTab => {
-                    self.cancel_active_video_export();
-                    project_io::close_active_tab(self, Some(ctx));
-                }
-                UiAction::CloseTab(idx) => {
-                    self.cancel_active_video_export();
-                    project_io::close_tab(self, idx, Some(ctx));
-                }
-                _ => {}
+            (Some(Dialog::Recovery), UiAction::DiscardRecovered) => self.recovery.discard_found(),
+            (Some(Dialog::VideoExport), UiAction::CancelVideoExport) => {
+                self.cancel_active_video_export()
             }
-            return;
+            (Some(Dialog::VideoExport), UiAction::CloseActiveTab) => {
+                self.cancel_active_video_export();
+                project_io::close_active_tab(self, Some(ctx));
+            }
+            (Some(Dialog::VideoExport), UiAction::CloseTab(idx)) => {
+                self.cancel_active_video_export();
+                project_io::close_tab(self, idx, Some(ctx));
+            }
+            (Some(Dialog::CloseConfirm), UiAction::ConfirmPendingCloseSave) => {
+                project_io::confirm_pending_close_save(self, ctx)
+            }
+            (Some(Dialog::CloseConfirm), UiAction::ConfirmPendingCloseDiscard) => {
+                project_io::confirm_pending_close_discard(self, ctx)
+            }
+            (Some(Dialog::CloseConfirm), UiAction::ConfirmPendingCloseCancel) => {
+                project_io::confirm_pending_close_cancel(self, ctx)
+            }
+            (Some(_), _) => {}
+            (None, action) => self.apply_action_without_dialog(action, ctx),
         }
+    }
+
+    /// ダイアログが出ていないときの `UiAction` の適用
+    fn apply_action_without_dialog(&mut self, action: UiAction, ctx: &egui::Context) {
         match action {
             UiAction::NewProject => project_io::new_project(self, ctx),
             UiAction::FitStageToWindow => self.fit_stage_to_window(),
@@ -440,14 +471,11 @@ impl Is2dApp {
             UiAction::SwitchToTab(idx) => {
                 project_io::switch_to_tab(self, idx, Some(ctx));
             }
-            UiAction::ConfirmPendingCloseSave => project_io::confirm_pending_close_save(self, ctx),
-            UiAction::ConfirmPendingCloseDiscard => {
-                project_io::confirm_pending_close_discard(self, ctx)
-            }
-            UiAction::ConfirmPendingCloseCancel => {
-                project_io::confirm_pending_close_cancel(self, ctx)
-            }
-            UiAction::RestoreRecovered | UiAction::DiscardRecovered => {}
+            UiAction::ConfirmPendingCloseSave
+            | UiAction::ConfirmPendingCloseDiscard
+            | UiAction::ConfirmPendingCloseCancel
+            | UiAction::RestoreRecovered
+            | UiAction::DiscardRecovered => {}
             UiAction::Doc(action) => {
                 apply(self, action);
             }
@@ -462,17 +490,18 @@ impl Is2dApp {
         let input = ctx.input(|i| i.clone());
         // V の押す・離すの合図は、ほかの判定で抜ける前に毎コマ見る（`Clipboard::swallowed_paste`）
         let swallowed_paste = self.clipboard.swallowed_paste(&input.events);
-        if self.pending_close_confirm.is_some() || !self.recovery.found.is_empty() {
-            return;
-        }
         let cmd = input.modifiers.command || input.modifiers.ctrl;
-        if self.is_exporting_video() {
-            if cmd && key_pressed_no_repeat(&input, Key::W) {
-                self.apply_action(UiAction::CloseActiveTab, ctx);
-            } else if cmd && key_pressed_no_repeat(&input, Key::Q) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        match self.shown_dialog() {
+            Some(Dialog::VideoExport) => {
+                if cmd && key_pressed_no_repeat(&input, Key::W) {
+                    self.apply_action(UiAction::CloseActiveTab, ctx);
+                } else if cmd && key_pressed_no_repeat(&input, Key::Q) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                return;
             }
-            return;
+            Some(Dialog::Recovery | Dialog::CloseConfirm) => return,
+            None => {}
         }
         if cmd && key_pressed_no_repeat(&input, Key::N) {
             project_io::new_project(self, ctx);
@@ -806,6 +835,9 @@ impl Is2dApp {
 
     /// 現在のレイヤー・フレーム状態から常時表示すべき状態連動メッセージを判定する
     fn current_state_notice(&self, tool_allowed: bool) -> Option<(NoticeKind, &'static str)> {
+        if self.tab().session.drag.unplaceable() {
+            return Some((NoticeKind::Warning, canvas_tool::Refusal::OffGrid.message()));
+        }
         if tool_allowed {
             return None;
         }
@@ -969,9 +1001,7 @@ impl Is2dApp {
                     .or_else(|| ctx.pointer_hover_pos());
 
                 // 0. ビューポートのズーム・パン移動操作ハンドリング
-                let modal_open = self.pending_close_confirm.is_some()
-                    || self.is_exporting_video()
-                    || !self.recovery.found.is_empty();
+                let modal_open = self.shown_dialog().is_some();
                 let pan_state @ (is_panning, _) = if modal_open {
                     self.tab_mut().view.pan_last_screen_pos = None;
                     (false, false)

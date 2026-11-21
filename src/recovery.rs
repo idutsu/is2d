@@ -72,7 +72,6 @@ impl Recovery {
                 .unwrap_or_else(|| tab.doc.clone());
             let mut proj_doc = ProjectDocument::of(&doc);
             proj_doc.recovery_source = tab.file.clone();
-            proj_doc.remove_non_finite();
 
             let entry_path = dir.join(format!("{pid}-{}.entry", tab.id));
             let rec_name = format!("RECOVER_{name}");

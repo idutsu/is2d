@@ -20,7 +20,7 @@ use crate::vector_engine::{FillShape, LayerId};
 
 /// Flash風ドット柄（Polka-Dot）選択オーバーレイを描画
 pub(crate) fn draw_flash_selection_overlay(tab: &Tab, painter: &egui::Painter, scene_idx: usize) {
-    let zoom = tab.view.zoom;
+    let zoom = tab.view.zoom();
     let pan = tab.view.pan;
     let Some(shape) = tab.scene().get(scene_idx) else {
         return;
@@ -38,7 +38,7 @@ pub(crate) fn draw_shape_contour_lines(
     stroke: Stroke,
     show_anchors: bool,
 ) {
-    let z = tab.view.zoom as f64;
+    let z = tab.view.zoom() as f64;
     let pad = 4.0 / z;
     let view_rect = tab
         .view
@@ -145,7 +145,7 @@ pub(crate) fn handle_select_tool_input(
     // アンカーの追加・削除のモードではドラッグを始めないので、どのモードでも同じ条件でよい
     let tab = host.tab_mut();
     if matches!(tab.session.drag, ActiveCanvasDrag::None) {
-        let zoom = tab.view.zoom;
+        let zoom = tab.view.zoom();
         let hover = mouse_pt
             .map(|pt| compute_hover_target(tab.scene(), &tab.session, pt, zoom, sub_mode))
             .unwrap_or(HoverTarget::None);
@@ -200,7 +200,7 @@ pub(crate) fn start_reshape_drag(
         host.tab().scene(),
         &host.tab().session,
         pt,
-        host.tab().view.zoom,
+        host.tab().view.zoom(),
         sub_mode,
     );
     if alt_held {
@@ -224,7 +224,7 @@ pub(crate) fn start_reshape_drag(
             host.tab().scene(),
             &host.tab().session,
             pt,
-            host.tab().view.zoom,
+            host.tab().view.zoom(),
             sub_mode,
         );
     }
@@ -288,7 +288,7 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
     if update_selection_drag(tab, pt) {
         return;
     }
-    let snap_radius = 12.0 / (tab.view.zoom as f64);
+    let snap_radius = 12.0 / (tab.view.zoom() as f64);
     // 地図は文書の座標。マウスの位置は、変換の逆で文書の座標へ写す（吸い付く距離はステージで測る）
     let xform = tab.session.edit_path.world_xform();
     // ドラッグ中も、離したときと同じ計算（交われば辺を切って色を決め直す）をして、その結果を見せる

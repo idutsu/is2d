@@ -49,7 +49,7 @@ impl SymbolInstanceBinding {
             full_path.extend_from_slice(scope_prefix);
             full_path.push(self.instance_gid);
             full_path.extend(inst_s.group_path.iter().copied());
-            inst_s.transform_with_cached_mesh(self.xform);
+            inst_s.transform(self.xform);
             inst_s.layer_id = layer_id;
             inst_s.group_path = full_path;
             inst_s.symbol_instance = Some(self);
@@ -185,7 +185,7 @@ pub(crate) struct SymbolDef {
 
 pub(crate) const MAX_SYMBOL_NEST_DEPTH: usize = 8;
 
-type SymbolEvalMemoKey = (u64, usize, usize, usize);
+type SymbolEvalMemoKey = (u64, usize, usize);
 
 /// シンボルの中身を評価した結果（シンボルの座標の図形。画面に出すときはメッシュも持つ）のメモ。
 /// `SymbolEvalCtx::new` のものは1回の評価の間だけ使う。セッションが持つもの（`Session::symbol_memo`）は、
@@ -379,7 +379,7 @@ impl SymbolDef {
         }
     }
 
-    /// このシンボル自身、または内部の入れ子シンボルが複数フレーム（または先頭フレーム空白）を持つかを再帰判定する
+    /// このシンボル自身、または内部の入れ子シンボルが複数フレームを持つか（コマで絵が変わるか）を再帰判定する
     pub(crate) fn has_dynamic_animation(&self, library: &Library) -> bool {
         let mut known = Vec::new();
         self.has_dynamic_animation_inner(library, 0, &mut known)
@@ -395,12 +395,7 @@ impl SymbolDef {
         if depth >= MAX_SYMBOL_NEST_DEPTH {
             return false;
         }
-        let frame_zero_empty = self
-            .timeline
-            .layers
-            .iter()
-            .all(|l| !l.visible || l.cel_at(0).is_none_or(|c| c.is_empty()));
-        if self.timeline.total_frames > 1 || frame_zero_empty {
+        if self.timeline.total_frames > 1 {
             return true;
         }
         self.timeline.instances().any(|inst| {
@@ -441,26 +436,26 @@ impl SymbolDef {
     fn collect_visible_local_shapes_at(
         &self,
         frame: usize,
-        child_eval_frame: usize,
         ctx: SymbolEvalCtx<'_>,
     ) -> Vec<FillShape> {
         let mut out = Vec::new();
         for layer in &self.timeline.layers {
             if layer.visible {
-                out.extend(layer.evaluate_shapes_at((frame, child_eval_frame), 1, ctx.clone()));
+                out.extend(layer.evaluate_shapes_at(frame, 1, ctx.clone()));
             }
         }
         out
     }
 
     /// インスタンスの再生設定（`binding.loop_mode`, `binding.first_frame`）とキーフレーム開始フレーム `kf_start_frame`、
-    /// 現在の親フレーム `current_frame` から、`(内部フレーム番号, 子インスタンスを動かす時計)` を返す
+    /// 現在の親フレーム `current_frame` から、内部フレーム番号を返す（グラフィックシンボルの決まり：中の子インスタンスも
+    /// この内部フレームで動く。1コマのシンボルの中の子は、そのコマのまま）
     pub(crate) fn resolve_internal_frame(
         &self,
         binding: SymbolInstanceBinding,
         kf_start_frame: usize,
         current_frame: usize,
-    ) -> (usize, usize) {
+    ) -> usize {
         let fc = self.timeline.total_frames.max(1);
         let elapsed = current_frame.saturating_sub(kf_start_frame);
         let internal_frame = match binding.loop_mode {
@@ -472,14 +467,7 @@ impl SymbolDef {
                 .min(fc - 1),
             SymbolLoopMode::SingleFrame => binding.first_frame.min(fc - 1),
         };
-        let child_eval_frame = if self.timeline.total_frames <= 1
-            && binding.loop_mode != SymbolLoopMode::SingleFrame
-        {
-            binding.first_frame.saturating_add(elapsed)
-        } else {
-            internal_frame
-        };
-        (internal_frame % fc, child_eval_frame)
+        internal_frame % fc
     }
 
     /// シンボルインスタンス `parent_binding` を現在コマ `current_frame`（親キーフレーム開始コマ `parent_kf_start`）で分解した
@@ -493,8 +481,7 @@ impl SymbolDef {
         current_frame: usize,
         library: &Library,
     ) -> Vec<Cel> {
-        let (frame_idx, child_eval_frame) =
-            self.resolve_internal_frame(parent_binding, parent_kf_start, current_frame);
+        let frame_idx = self.resolve_internal_frame(parent_binding, parent_kf_start, current_frame);
         let stage_elapsed = current_frame.saturating_sub(parent_kf_start);
         let mut out = Vec::new();
         for layer in self.timeline.layers.iter().filter(|l| l.visible) {
@@ -502,7 +489,7 @@ impl SymbolDef {
                 continue;
             };
             let kf = &layer.keyframes[kf_idx];
-            let child_elapsed = child_eval_frame.saturating_sub(layer.start_of(kf_idx));
+            let child_elapsed = frame_idx.saturating_sub(layer.start_of(kf_idx));
             let mut cel = match layer.interpolated_tween_binding_at(frame_idx) {
                 Some(b) => {
                     let mut c = Cel::default();
@@ -543,29 +530,12 @@ impl SymbolDef {
         current_frame: usize,
         ctx: SymbolEvalCtx<'_>,
     ) -> Arc<Vec<FillShape>> {
-        let (frame_idx, child_eval_frame) =
-            self.resolve_internal_frame(binding, kf_start_frame, current_frame);
-        // `child_eval_frame`（子インスタンスを動かす時計）が結果を変えるのは、このフレームに子インスタンス
-        // （トゥイーンを含む）があるときだけ。無いときは鍵に入れない（親のコマが進んでも同じ中身を使い回す）
-        let uses_clock = self.timeline.layers.iter().any(|l| {
-            l.visible
-                && (l.interpolated_tween_binding_at(frame_idx).is_some()
-                    || l.cel_at(frame_idx).is_some_and(|c| !c.instances.is_empty()))
-        });
-        let memo_key = (
-            self.id,
-            frame_idx,
-            if uses_clock { child_eval_frame } else { 0 },
-            ctx.depth,
-        );
+        let frame_idx = self.resolve_internal_frame(binding, kf_start_frame, current_frame);
+        let memo_key = (self.id, frame_idx, ctx.depth);
         if let Some(cached) = ctx.get_memo(&memo_key) {
             return cached;
         }
-        let evaluated = Arc::new(self.collect_visible_local_shapes_at(
-            frame_idx,
-            child_eval_frame,
-            ctx.clone(),
-        ));
+        let evaluated = Arc::new(self.collect_visible_local_shapes_at(frame_idx, ctx.clone()));
         ctx.insert_memo(memo_key, Arc::clone(&evaluated));
         evaluated
     }
@@ -1105,7 +1075,7 @@ impl Layer {
     /// このレイヤーの指定フレーム `frame` における図形列を、クラシックトゥイーン補間およびシンボル内タイムライン評価込みで返す
     pub(crate) fn evaluate_shapes_at(
         &self,
-        (frame, child_eval_frame): (usize, usize),
+        frame: usize,
         out_layer_id: u64,
         ctx: SymbolEvalCtx<'_>,
     ) -> Vec<FillShape> {
@@ -1115,14 +1085,14 @@ impl Layer {
         let kf = &self.keyframes[kf_idx];
         if let Some(interp_b) = self.interpolated_tween_binding_at(frame) {
             return interp_b.expand(
-                (self.start_of(kf_idx), child_eval_frame),
+                (self.start_of(kf_idx), frame),
                 out_layer_id,
                 &[],
                 ctx,
             );
         }
 
-        resolve_cel_with_library(&kf.cel, self.start_of(kf_idx), child_eval_frame, ctx)
+        resolve_cel_with_library(&kf.cel, self.start_of(kf_idx), frame, ctx)
             .into_iter()
             .map(|s| s.with_layer_id(out_layer_id))
             .collect()
@@ -1130,7 +1100,9 @@ impl Layer {
 }
 
 impl Timeline {
-    /// 指定レイヤー `layer_idx` の指定フレーム `frame` における図形列を、クラシックトゥイーン補間およびシンボル内タイムライン評価込みで返す
+    /// テスト用：指定レイヤー `layer_idx` の指定フレーム `frame` における図形列を、クラシックトゥイーン補間およびシンボル内
+    /// タイムライン評価込みで返す（`evaluate_layer_shapes_with` にメモの無い評価を渡す）
+    #[cfg(test)]
     pub(crate) fn evaluate_layer_shapes_at(
         &self,
         layer_idx: usize,
@@ -1150,7 +1122,7 @@ impl Timeline {
         let Some(layer) = self.layers.get(layer_idx) else {
             return Vec::new();
         };
-        layer.evaluate_shapes_at((frame, frame), layer.id, ctx)
+        layer.evaluate_shapes_at(frame, layer.id, ctx)
     }
 
     /// レイヤー `layer_idx` のコマ `frame` のセル画を、変換 `world_xform` で描くワールド座標の結合メッシュ（インスタンス
@@ -1183,7 +1155,7 @@ impl Timeline {
         }
         if world_xform != Affine::IDENTITY {
             for s in &mut resolved {
-                s.transform_with_cached_mesh(world_xform);
+                s.transform(world_xform);
             }
         }
         let mut batch = Mesh::default();

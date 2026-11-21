@@ -67,6 +67,7 @@ pub(crate) mod icons {
     pub(crate) const STEP_NEXT: &str = "\u{e409}"; // navigate_next (次のフレームへ)
     pub(crate) const SKIP_NEXT: &str = "\u{e044}"; // skip_next (最終フレームへ)
     pub(crate) const ONION_SKIN: &str = "\u{e3e0}"; // filter_none (オニオンスキン)
+    pub(crate) const REPEAT: &str = "\u{e040}"; // repeat (ループ再生)
 }
 
 // ============================================================================
@@ -539,7 +540,7 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
     }
     let loop_pb = host.timeline_ui().loop_playback;
     if ui
-        .selectable_label(loop_pb, "↻")
+        .selectable_label(loop_pb, icons::REPEAT)
         .on_hover_text("ループ再生 ON / OFF（OFF時は最終フレームで自動停止）")
         .clicked()
     {

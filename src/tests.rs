@@ -39,8 +39,8 @@ fn brush_line_shapes_at_zoom(line: &BrushLine, color: Color32, zoom: f64) -> Vec
 
 /// 線 `line` を、今のツール（ブラシなら今の色で塗る、消しゴムなら消す）で確定する（表示の倍率は線のもの）
 fn commit_brush_line(app: &mut Is2dApp, line: &BrushLine) {
-    let prev_zoom = app.tab().view.zoom;
-    app.tab_mut().view.zoom = line.zoom as f32;
+    let prev_zoom = app.tab().view.zoom();
+    app.tab_mut().view.set_zoom(line.zoom as f32);
     let action = if app.tool.tool == Tool::Eraser {
         Action::EraseStroke {
             points: line.pts.clone(),
@@ -54,7 +54,7 @@ fn commit_brush_line(app: &mut Is2dApp, line: &BrushLine) {
         }
     };
     doc_actions::apply(app, action);
-    app.tab_mut().view.zoom = prev_zoom;
+    app.tab_mut().view.set_zoom(prev_zoom);
 }
 
 /// テスト用：点 `points` をブラシ（半径 `radius`、表示と画面の倍率 1）で描いている途中のドラッグ
@@ -753,7 +753,7 @@ fn brush_preview_matches_the_committed_shape() {
         frame(&mut app, vec![press(*path.last().unwrap(), false)]);
         let shapes = scene_summary(&app).shapes;
         assert!(!shapes.is_empty(), "{name}：離したあとの形が無い");
-        let zoom = app.tab().view.zoom as f64;
+        let zoom = app.tab().view.zoom() as f64;
         let tol = STROKE_DEV_PX / zoom;
         let outline = shape_outline_polylines(&shapes, 0.005 / zoom);
         let near_outline = SegGrid::new(&outline, true, 4.0);
@@ -1831,7 +1831,7 @@ fn test_zoom_around_cursor_preserves_world_point_and_clamps_bounds() {
     let world_before = app.view.screen_to_world(cursor);
     app.view.zoom_around_screen_pos(cursor, 4.0);
     app.view.zoom_around_screen_pos(cursor, 2.0);
-    assert!((app.view.zoom - 8.0).abs() < 1e-5);
+    assert!((app.view.zoom() - 8.0).abs() < 1e-5);
     let world_after = app.view.screen_to_world(cursor);
     assert!(
         (world_before - world_after).hypot() < 1e-4,
@@ -1842,27 +1842,27 @@ fn test_zoom_around_cursor_preserves_world_point_and_clamps_bounds() {
 
     // 上限 (MAX_VIEW_ZOOM = 16.0) と下限 (MIN_VIEW_ZOOM = 0.15) でクランプされ、かつカーソル下の座標が保たれること
     app.view.zoom_around_screen_pos(cursor, 100.0);
-    assert_eq!(app.view.zoom, crate::vector_engine::MAX_VIEW_ZOOM);
+    assert_eq!(app.view.zoom(), crate::vector_engine::MAX_VIEW_ZOOM);
     assert!((app.view.screen_to_world(cursor) - world_before).hypot() < 1e-3);
 
     app.view.zoom_around_screen_pos(cursor, 0.001);
-    assert_eq!(app.view.zoom, crate::vector_engine::MIN_VIEW_ZOOM);
+    assert_eq!(app.view.zoom(), crate::vector_engine::MIN_VIEW_ZOOM);
     assert!((app.view.screen_to_world(cursor) - world_before).hypot() < 1e-3);
 
     app.view.reset_view();
-    assert_eq!(app.view.zoom, 1.0);
+    assert_eq!(app.view.zoom(), 1.0);
     assert_eq!(app.view.pan, Vec2::ZERO);
 }
 
 #[test]
 fn test_fine_brush_and_zoom_invariant_stroke_smoothing() {
     let mut app = Is2dApp::default();
-    app.view.zoom = 8.0;
+    app.view.set_zoom(8.0);
     app.tool.brush_radius = 0.5;
     let fine_raw = brush_line_at_zoom(
         &[Point::new(320.0, 240.0), Point::new(323.0, 240.0)],
         app.tool.brush_radius as f64,
-        app.view.zoom as f64,
+        app.view.zoom() as f64,
     );
     commit_brush_line(&mut app, &fine_raw);
     let s = scene_summary(&app);
@@ -1955,7 +1955,7 @@ fn test_copy_paste_group_assigns_new_gid_and_alt_drag_symbol_undo() {
 
     assert!(doc_actions::copy_selected_shapes(&mut app));
     // 高ズーム時でもワールド座標上の一定オフセット (+16, +16) で貼り付けられること
-    app.view.zoom = 4.0;
+    app.view.set_zoom(4.0);
     assert!(doc_actions::paste_clipboard(&mut app, false));
     let s = scene_summary(&app);
     assert_eq!(s.shapes.len(), 2);
@@ -2394,7 +2394,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
             app.scene(),
             &app.session,
             vertex_pt,
-            app.view.zoom,
+            app.view.zoom(),
             app.tool.select_sub_mode
         ),
         HoverTarget::Vertex { shape_id, .. } if shape_id == s0_id
@@ -2404,7 +2404,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
             app.scene(),
             &app.session,
             edge_pt,
-            app.view.zoom,
+            app.view.zoom(),
             app.tool.select_sub_mode
         ),
         HoverTarget::Edge { shape_id, .. } | HoverTarget::Vertex { shape_id, .. } if shape_id == s0_id
@@ -2427,7 +2427,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
             app.scene(),
             &app.session,
             vertex_pt,
-            app.view.zoom,
+            app.view.zoom(),
             app.tool.select_sub_mode
         ),
         HoverTarget::Fill { shape_id: s0_id },
@@ -2438,7 +2438,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
             app.scene(),
             &app.session,
             edge_pt,
-            app.view.zoom,
+            app.view.zoom(),
             app.tool.select_sub_mode
         ),
         HoverTarget::Fill { shape_id: s0_id },
@@ -2449,7 +2449,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
             app.scene(),
             &app.session,
             Point::new(160.0, 204.5),
-            app.view.zoom,
+            app.view.zoom(),
             app.tool.select_sub_mode
         ),
         HoverTarget::Fill { shape_id: s0_id },
@@ -2840,7 +2840,7 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
     app.session.set_selected_indices(vec![0]);
     let bbox_f4 = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom)
+        .selection_bounding_box(&app.session.selection, app.view.zoom())
         .unwrap();
     assert!(
         (app.scene().active_transform_pivot(
@@ -3038,6 +3038,14 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
     app.session.set_selected_indices(vec![0]);
     let parent_sym_id = doc_actions::convert_selection_to_symbol(&mut app).unwrap();
     assert_ne!(child_sym_id, parent_sym_id);
+    // グラフィックシンボルの決まり：中の子は親シンボルの内部フレームで動くので、子を動かすには親にもコマ数が要る
+    assert!(symbol_ops::enter_symbol_from_library(
+        &mut app,
+        parent_sym_id
+    ));
+    assert!(timeline_ui::timeline_extend_frame(&mut app));
+    assert!(timeline_ui::timeline_extend_frame(&mut app));
+    assert!(symbol_ops::exit_symbol_timeline(&mut app));
 
     assert!(timeline_ui::timeline_extend_frame(&mut app));
     timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
@@ -4204,6 +4212,106 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
             .all(|m| m.base.map().nodes.iter().all(|p| (*p - Point::new(50.0, 50.0)).hypot() > 1.0)),
         "空白フレームのシンボルマーカーの基準点が、輪郭の変形の頂点（磁気スナップの吸い付き先）にならないこと"
     );
+}
+
+/// レビュー 96fdc26 の場当たりの直し（`tool_transform.rs` の倍率の下限 0.02）：拡大のドラッグに倍率の下限は無く、潰れる
+/// 変換（0 倍）は、ドラッグの間「置けない」と見せ（確定と同じ判定 `Session::fits_transform`）、離すと断る（文書は変わらない）
+#[test]
+fn collapsing_scale_drag_shows_unplaceable_and_commit_refuses() {
+    let mut app = Is2dApp::default();
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 200.0),
+            Point::new(200.0, 200.0),
+            10.0,
+            Color32::RED,
+        ),
+    );
+    app.session.set_selected_indices(vec![0]);
+    doc_actions::apply(
+        &mut app,
+        doc_actions::Action::SetTool {
+            tool: Tool::Transform,
+        },
+    );
+    let bbox = app
+        .scene()
+        .selection_bounding_box(&app.session.selection, app.view.zoom())
+        .unwrap();
+    let before = app.doc.root.layers[0].keyframes[0].cel.shapes();
+    // 右の辺のつまみを、左の辺（拡大の基準）まで引く：横の倍率が 0
+    let handle = Point::new(bbox.x1, bbox.center().y);
+    tool_transform::start_transform_drag(&mut app, handle, false, false);
+    assert!(matches!(
+        app.session.drag,
+        canvas_tool::ActiveCanvasDrag::Transform(canvas_tool::TransformDragState::Scale { .. })
+    ));
+    let collapsed = Point::new(bbox.x0, bbox.center().y);
+    tool_transform::update_transform_drag(app.tab_mut(), collapsed, false, false);
+    assert!(app.session.drag.unplaceable(), "0 倍は置けない");
+    tool_transform::update_transform_drag(
+        app.tab_mut(),
+        Point::new(bbox.x1 + 20.0, bbox.center().y),
+        false,
+        false,
+    );
+    assert!(!app.session.drag.unplaceable(), "ふつうの拡大は置ける");
+    tool_transform::update_transform_drag(app.tab_mut(), collapsed, false, false);
+    app.toast = None;
+    tool_transform::finish_transform_drag(&mut app, Some(collapsed));
+    let after = app.doc.root.layers[0].keyframes[0].cel.shapes();
+    assert_eq!(after.len(), before.len());
+    assert!(after
+        .iter()
+        .zip(&before)
+        .all(|(a, b)| a.exterior.segments == b.exterior.segments));
+    assert_eq!(
+        app.toast.as_ref().map(|t| t.message.as_str()),
+        Some(canvas_tool::Refusal::OffGrid.message())
+    );
+}
+
+/// レビュー 96fdc26 の N-6004：スポイトとバケツの「上に重なっているか」は、画面に描くのと同じ写しを上から順にたどる
+/// （編集できるレイヤーは画面の図形、ロック中のレイヤーはセル画の結合メッシュの写し）。ロック中のレイヤーを文書から
+/// 作り直す2つ目の道は無い
+#[test]
+fn eyedropper_and_bucket_see_locked_layers_through_the_drawn_copy() {
+    let (red, blue, green) = (
+        Color32::from_rgb(220, 50, 50),
+        Color32::from_rgb(40, 90, 220),
+        Color32::from_rgb(40, 180, 60),
+    );
+    let mut app = Is2dApp::default();
+    app.tool.brush_color = red;
+    commit_brush_line(
+        &mut app,
+        &brush_line(&[Point::new(100.0, 200.0), Point::new(300.0, 200.0)], 12.0),
+    );
+    timeline_ui::timeline_add_layer(&mut app);
+    app.tool.brush_color = blue;
+    commit_brush_line(
+        &mut app,
+        &brush_line(&[Point::new(200.0, 100.0), Point::new(200.0, 300.0)], 12.0),
+    );
+    timeline_ui::set_layer_locked(&mut app, 1, true);
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    // 重なる所は、上のロック中のレイヤーの青。赤だけの所は赤。何も無い所は無い
+    let color_at = |app: &Is2dApp, p: Point| tool_paint::topmost_visible_color_at(app, p);
+    let crossing = Point::new(200.0, 200.0);
+    let red_only = Point::new(120.0, 200.0);
+    assert_eq!(color_at(&app, crossing), Some(blue));
+    assert_eq!(color_at(&app, red_only), Some(red));
+    assert_eq!(color_at(&app, Point::new(20.0, 20.0)), None);
+    // バケツは、上のロック中のレイヤーに覆われた所では塗らず、覆われていない所では塗る
+    app.tool.brush_color = green;
+    assert!(!doc_actions::bucket_fill_at(&mut app, crossing));
+    assert_eq!(color_at(&app, red_only), Some(red));
+    assert!(doc_actions::bucket_fill_at(&mut app, red_only));
+    assert_eq!(color_at(&app, red_only), Some(green));
+    assert_eq!(color_at(&app, crossing), Some(blue));
 }
 
 #[test]
@@ -6025,9 +6133,9 @@ fn test_viewport_fit_stage_to_window() {
     app.doc.stage_size = Vec2::new(800.0, 450.0);
     app.fit_stage_to_window();
     assert!(
-        app.view.zoom > 1.5 && app.view.zoom <= 2.0,
+        app.view.zoom() > 1.5 && app.view.zoom() <= 2.0,
         "1600x900 キャンバスに対して 800x450 ステージがマージン付きでフィット拡大されること: zoom={}",
-        app.view.zoom
+        app.view.zoom()
     );
     let center = app.canvas_rect.center();
     let world_before = app.view.screen_to_world(center);
@@ -6385,7 +6493,7 @@ fn test_noop_eraser_does_not_push_undo_and_active_layer_lock_blocks_paint_tools(
 }
 
 #[test]
-fn test_saved_file_reads_back_nan_is_fixed_and_undo_history_cap() {
+fn test_saved_file_reads_back_and_undo_history_cap() {
     let red = Color32::from_rgb(220, 40, 40);
     let tmp_compact =
         std::env::temp_dir().join(format!("is2d_compact_test_{}.is2d", std::process::id()));
@@ -6401,14 +6509,6 @@ fn test_saved_file_reads_back_nan_is_fixed_and_undo_history_cap() {
         crate::project_io::read_project_document(&tmp_compact).is_ok(),
         "保存したファイルを読み戻せること"
     );
-    save_app.doc.stage_size = Vec2::new(f32::NAN, 450.0);
-    let fixed = crate::project_io::save_project_to_path(&mut save_app, &tmp_compact)
-        .expect("NaN が含まれる状態でも壊れた数値を補正して保存が成功すること");
-    assert_eq!(fixed, vec!["ステージサイズ".to_owned()]);
-    let nan_fixed = crate::project_io::read_project_document(&tmp_compact)
-        .expect("補正したファイルは、数がみな有限なので読める");
-    assert_eq!(nan_fixed.stage_size, [800.0, 450.0], "補正した値で書く");
-    save_app.doc.stage_size = Vec2::new(800.0, 450.0);
     let _ = std::fs::remove_file(&tmp_compact);
 
     for i in 0..110 {
@@ -6561,7 +6661,7 @@ fn test_onion_skin_passes_cached_mesh_to_egui_without_copying() {
     );
     // コマ 1 のオニオンスキン（1つ前・色 [45, 115, 245]・濃さ 84）の写し
     let cached = app
-        .cached_onion_cel_screen_mesh(0, 0, app.view.zoom, app.view.pan, ([45, 115, 245], 84))
+        .cached_onion_cel_screen_mesh(0, 0, app.view.zoom(), app.view.pan, ([45, 115, 245], 84))
         .expect("コマ 1 に絵がある");
     // 写し・描いた形・ここで受け取ったもの、の3つが同じメッシュを指す（描いた形が複製なら 2）
     assert_eq!(std::sync::Arc::strong_count(&cached), 3);
@@ -6936,7 +7036,7 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
         },
     );
     assert!(
-        (app.view.zoom - 1.25).abs() < 1e-6,
+        (app.view.zoom() - 1.25).abs() < 1e-6,
         "Cmd+Plus でキャンバスの zoom が 1.25 に拡大されること"
     );
     assert!(
@@ -6962,7 +7062,7 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
         },
     );
     assert!(
-        (app.view.zoom - 1.0).abs() < 1e-6 && app.view.pan == Vec2::ZERO,
+        (app.view.zoom() - 1.0).abs() < 1e-6 && app.view.pan == Vec2::ZERO,
         "Cmd+0 でキャンバスの zoom が 1.0、pan が ZERO にリセットされること"
     );
 
@@ -7077,7 +7177,7 @@ fn small_scale_and_rotate_drags_at_high_zoom_are_committed() {
     );
     apply(&mut app, Action::SelectAll);
     let zoom = 4.0;
-    app.tab_mut().view.zoom = zoom;
+    app.tab_mut().view.set_zoom(zoom);
     let bounds = |app: &Is2dApp| {
         app.scene()
             .iter()
@@ -7226,7 +7326,7 @@ fn test_egui_select_and_transform_tool_raw_input_interactions() {
         },
     );
     let moved_center = app.scene().get(0).unwrap().bounding_box().center();
-    let expected_dx = 50.0 / (app.view.zoom as f64);
+    let expected_dx = 50.0 / (app.view.zoom() as f64);
     assert!(
         (moved_center.x - (initial_bbox_center.x + expected_dx)).abs() < 2.0,
         "handle_transform_tool_input 経由の左ドラッグでシェイプが平行移動されること: moved_center={:?}, expected_x={}",
@@ -7650,7 +7750,7 @@ fn test_pivot_commit_restores_marquee_slice_and_persists() {
     );
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom)
+        .selection_bounding_box(&app.session.selection, app.view.zoom())
         .unwrap();
     let current_pivot = app.scene().active_transform_pivot(
         &app.session.selection,
@@ -7959,7 +8059,7 @@ fn test_cancel_drag_and_noop_drag_preserve_tessellated_mesh_caches() {
     app.session.set_selected_indices(vec![0]);
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom)
+        .selection_bounding_box(&app.session.selection, app.view.zoom())
         .unwrap();
     tool_transform::start_transform_drag(
         &mut app,
@@ -8405,7 +8505,7 @@ fn test_transform_rotate_zone_only_near_four_corners_and_paste_staircase_across_
     app.session.set_selected_indices(vec![0]);
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom)
+        .selection_bounding_box(&app.session.selection, app.view.zoom())
         .unwrap();
 
     // 1. 四隅の少し外側 (+10px, -10px) は Rotate になるが、上辺中央の少し外側 (四隅から100px以上離れた位置) は Rotate にならないこと (#17)
@@ -8415,7 +8515,7 @@ fn test_transform_rotate_zone_only_near_four_corners_and_paste_staircase_across_
             app.scene(),
             &app.session,
             corner_outside,
-            app.view.zoom
+            app.view.zoom()
         ),
         canvas_tool::TransformHoverTarget::Rotate,
         "四隅の外側近傍では Rotate ゾーンになること (#17)"
@@ -8426,14 +8526,14 @@ fn test_transform_rotate_zone_only_near_four_corners_and_paste_staircase_across_
             app.scene(),
             &app.session,
             top_edge_outside,
-            app.view.zoom
+            app.view.zoom()
         ),
         canvas_tool::TransformHoverTarget::None,
         "四隅から離れた辺中央の外側は Rotate ゾーンにならないこと (#17)"
     );
 
     // 2. 連続ペーストの途中にズーム倍率を変更しても、毎回前回位置から +16px (画面上) ずつ単調増加の階段状に配置されること (#18)
-    app.view.zoom = 1.0;
+    app.view.set_zoom(1.0);
     doc_actions::copy_selected_shapes(&mut app);
     let c0 = scene_summary(&app).shapes[0].bounding_box().center();
 
@@ -8447,7 +8547,7 @@ fn test_transform_rotate_zone_only_near_four_corners_and_paste_staircase_across_
     assert!((c1.x - (c0.x + 16.0)).abs() < 1e-4);
 
     // 途中でズームイン (zoom = 4.0 -> 1ステップ = 4.0 ワールド座標) してから2回目のペースト
-    app.view.zoom = 4.0;
+    app.view.set_zoom(4.0);
     doc_actions::paste_clipboard(&mut app, false);
     let c2 = app
         .scene()
@@ -9003,7 +9103,7 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
     app.session.set_selected_indices(vec![0]);
     let bbox_before = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom)
+        .selection_bounding_box(&app.session.selection, app.view.zoom())
         .unwrap();
     let br_world = canvas_tool::ScaleHandle::BottomRight.position(bbox_before);
     let br_screen = app.view.world_to_screen(br_world);
@@ -9053,7 +9153,7 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
     );
     let bbox_scaled = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom)
+        .selection_bounding_box(&app.session.selection, app.view.zoom())
         .unwrap();
     assert!(
         bbox_scaled.width() > bbox_before.width() + 40.0,
@@ -9115,7 +9215,7 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
     );
 
     // マウスホイールによるカーソル中心ズームの RawInput 検証
-    let zoom_before = app.view.zoom;
+    let zoom_before = app.view.zoom();
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
@@ -9134,7 +9234,7 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
         },
     );
     assert!(
-        app.view.zoom > zoom_before,
+        app.view.zoom() > zoom_before,
         "キャンバス上のマウスホイール入力でズームインすること"
     );
 
@@ -10636,7 +10736,7 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
             app.scene(),
             &app.session,
             Point::new(140.0, 100.0),
-            app.view.zoom,
+            app.view.zoom(),
             app.tool.select_sub_mode,
         ),
         HoverTarget::Fill { shape_id: s0_id },
@@ -10664,7 +10764,7 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
     assert_eq!(mask, vec![true]);
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom)
+        .selection_bounding_box(&app.session.selection, app.view.zoom())
         .unwrap();
     let tl_handle = canvas_tool::ScaleHandle::TopLeft.position(bbox);
     assert_eq!(
@@ -10672,7 +10772,7 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
             app.scene(),
             &app.session,
             tl_handle,
-            app.view.zoom
+            app.view.zoom()
         ),
         canvas_tool::TransformHoverTarget::Scale(canvas_tool::ScaleHandle::TopLeft),
         "compute_transform_hover が Scene<'_> と &Session からスケールハンドルを判定できること"
@@ -13667,7 +13767,7 @@ fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
 
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom)
+        .selection_bounding_box(&app.session.selection, app.view.zoom())
         .unwrap();
 
     // 1. 四隅の回転ゾーン（図形外・境界枠の左上コーナー外側）の座標を確認し、クリックしても選択が外れないこと
@@ -13681,7 +13781,7 @@ fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
             app.scene(),
             &app.session,
             rotate_pt,
-            app.view.zoom
+            app.view.zoom()
         ),
         TransformHoverTarget::Rotate
     );
@@ -13731,7 +13831,12 @@ fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
         "拡縮ハンドル上の座標は図形の外側であること"
     );
     assert!(matches!(
-        tool_transform::compute_transform_hover(app.scene(), &app.session, scale_pt, app.view.zoom),
+        tool_transform::compute_transform_hover(
+            app.scene(),
+            &app.session,
+            scale_pt,
+            app.view.zoom()
+        ),
         TransformHoverTarget::Scale(_)
     ));
     let scale_scr = app.view.world_to_screen(scale_pt);
@@ -13776,7 +13881,12 @@ fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
     // 3. 何もない場所をクリックしたときは選択が外れること
     let empty_pt = Point::new(bbox.x0 - 80.0, bbox.y0 - 80.0);
     assert_eq!(
-        tool_transform::compute_transform_hover(app.scene(), &app.session, empty_pt, app.view.zoom),
+        tool_transform::compute_transform_hover(
+            app.scene(),
+            &app.session,
+            empty_pt,
+            app.view.zoom()
+        ),
         TransformHoverTarget::None
     );
     let empty_scr = app.view.world_to_screen(empty_pt);
@@ -18073,7 +18183,7 @@ fn test_transform_move_drag_translates_custom_pivot_once() {
 
     let (_, init_pivot) = app
         .session
-        .selection_bbox_and_pivot(app.view.zoom)
+        .selection_bbox_and_pivot(app.view.zoom())
         .expect("selection bbox and pivot should exist");
     tool_transform::start_transform_drag(&mut app, init_pivot, false, false);
     tool_transform::update_transform_drag(app.tab_mut(), Point::new(20.0, 60.0), false, false);
@@ -18643,8 +18753,7 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     let nan_save_path = proj_dir.join("nan_saved.is2d");
     // 座標が有限でない図形がある書き込みは、地図にできないので断る（セル画は変わらない）
     assert!(nan_app.doc.root.layers[0].keyframes[0].cel.is_empty());
-    let fixed_locs = crate::project_io::save_project_to_path(&mut nan_app, &nan_save_path).unwrap();
-    assert!(fixed_locs.is_empty());
+    crate::project_io::save_project_to_path(&mut nan_app, &nan_save_path).unwrap();
     // 読むときに数がみな有限か確かめる（`only_finite_numbers`）ので、読めれば有限でない数は入っていない
     let reloaded = crate::project_io::read_project_document(&nan_save_path)
         .unwrap()
@@ -18782,7 +18891,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         assert_eq!(cel_undo.instances[0].binding.symbol_id, sym_a_id);
     }
 
-    // 4. 表示コマが合う: (a) A が1コマで F=5、(b) A が4コマループで F=10
+    // 4. 分解した直後の表示コマが合う: (a) A が1コマで F=5、(b) A が4コマループで F=10
     for (a_frames, target_f) in [(1usize, 5usize), (4usize, 10usize)] {
         let (mut app, _, sym_b_id) = build_nested_app(a_frames);
         let sym_a = &mut std::sync::Arc::make_mut(&mut app.doc.library[1]);
@@ -18848,7 +18957,14 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
             .find(|s| s.symbol_instance.is_some_and(|b| b.symbol_id == sym_b_id))
             .unwrap()
             .color;
-        assert_eq!(color_after_f_next, color_before_f_next);
+        if a_frames == 1 {
+            // グラフィックシンボルの決まり：1コマの A の中の B は A の内部フレームのまま止まる。分解したあとの B は
+            // ステージの時計で進む
+            assert_eq!(color_before_f_next, color_before_f);
+            assert_eq!((color_before_f, color_after_f_next), (c1, c2));
+        } else {
+            assert_eq!(color_after_f_next, color_before_f_next);
+        }
     }
 
     // 5. ステージ側のキーフレームが 0 コマ目から始まっていない場合（S=3, F=7）
@@ -21354,7 +21470,7 @@ fn test_video_export_parallel_render_frames_and_without_mesh() {
     }
     let layer = &doc.root.layers[0];
     let without_mesh_shapes = layer.evaluate_shapes_at(
-        (2, 2),
+        2,
         layer.id,
         SymbolEvalCtx::new(&doc.library).without_mesh(),
     );
@@ -21367,7 +21483,7 @@ fn test_video_export_parallel_render_frames_and_without_mesh() {
     );
 
     let with_mesh_shapes =
-        layer.evaluate_shapes_at((2, 2), layer.id, SymbolEvalCtx::new(&doc.library));
+        layer.evaluate_shapes_at(2, layer.id, SymbolEvalCtx::new(&doc.library));
     assert!(!with_mesh_shapes.is_empty());
     assert!(
         with_mesh_shapes.iter().all(|s| s.has_cached_fill_mesh()),
@@ -22705,7 +22821,7 @@ fn test_reshape_hover_has_no_front_and_back() {
             app.scene(),
             &app.session,
             pt,
-            app.view.zoom,
+            app.view.zoom(),
             crate::canvas_tool::SelectSubMode::Reshape,
         )
     };
@@ -23576,7 +23692,7 @@ fn test_anchor_add_and_delete_on_shared_boundary_change_both_sides() {
         app.scene(),
         &app.session,
         pt,
-        app.view.zoom,
+        app.view.zoom(),
         crate::canvas_tool::SelectSubMode::AddAnchor,
     );
     let crate::canvas_tool::HoverTarget::Edge {
@@ -23647,7 +23763,7 @@ fn test_anchor_delete_refuses_junction_vertex() {
         app.scene(),
         &app.session,
         corner,
-        app.view.zoom,
+        app.view.zoom(),
         crate::canvas_tool::SelectSubMode::DeleteAnchor,
     );
     assert!(
@@ -30215,8 +30331,11 @@ fn rotation_dead_zone_is_measured_on_screen() {
         Point::new(250.0, 150.0),
         false,
     );
-    app.view.zoom = 16.0;
-    let (bbox, pivot) = app.session.selection_bbox_and_pivot(app.view.zoom).unwrap();
+    app.view.set_zoom(16.0);
+    let (bbox, pivot) = app
+        .session
+        .selection_bbox_and_pivot(app.view.zoom())
+        .unwrap();
     let corner = Point::new(bbox.x1, bbox.y1);
     tool_transform::start_transform_drag(&mut app, corner + KVec2::new(0.5, 0.5), false, false);
     // 基準点から 1px（画面で 16px）の真上
@@ -30259,12 +30378,18 @@ fn releasing_alt_while_scaling_returns_to_the_opposite_handle() {
         Point::new(250.0, 150.0),
         false,
     );
-    let (bbox, _) = app.session.selection_bbox_and_pivot(app.view.zoom).unwrap();
+    let (bbox, _) = app
+        .session
+        .selection_bbox_and_pivot(app.view.zoom())
+        .unwrap();
     let right = Point::new(bbox.x1, bbox.center().y);
     tool_transform::start_transform_drag(&mut app, right, false, true);
     tool_transform::update_transform_drag(&mut app, right + KVec2::new(50.0, 0.0), false, false);
     tool_transform::finish_transform_drag(&mut app, Some(right + KVec2::new(50.0, 0.0)));
-    let (after, _) = app.session.selection_bbox_and_pivot(app.view.zoom).unwrap();
+    let (after, _) = app
+        .session
+        .selection_bbox_and_pivot(app.view.zoom())
+        .unwrap();
     assert!(
         (after.x0 - bbox.x0).abs() < 0.5,
         "{} → {}",
@@ -30375,7 +30500,7 @@ fn anchor_hover_works_on_unmoved_slices() {
         app.scene(),
         &app.session,
         pt,
-        app.view.zoom,
+        app.view.zoom(),
         SelectSubMode::AddAnchor,
     );
     assert!(
@@ -34012,6 +34137,72 @@ fn project_file_refuses_wrong_or_broken_files() {
     }
 }
 
+/// レビュー 96fdc26 の N-5002：インスタンスの数（変換・中心点・色効果）が有限でなくなる書き込みは、書く入口で断る（文書は
+/// 変わらず、知らせが出る）。ファイルを読む入口も同じ判定（`SymbolInstanceBinding::is_finite`）で、有限でない数の
+/// インスタンスがあるファイルを断る（前の版が書いたファイルも）。文書のインスタンスはいつも有限なので、保存で直す所は無い
+#[test]
+fn non_finite_instance_numbers_are_refused_at_the_entries() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    let c = Point::new(200.0, 200.0);
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![c, Point::new(c.x + 60.0, c.y)],
+            radius: 6.0,
+            color: Color32::RED,
+        },
+    ));
+    assert!(apply(&mut app, Action::SelectSingleAt { pt: c }));
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    let binding = |app: &Is2dApp| app.doc.root.layers[0].keyframes[0].cel.instances[0].binding;
+    let before = binding(&app);
+    let undo_before = app.history.undo_stack.len();
+    app.toast = None;
+    // 中心点を有限でない所に置く（変換の逆で写すと NaN）：書く入口で断る
+    assert!(!apply(
+        &mut app,
+        Action::SetTransformPivot {
+            world_pivot: Some(Point::new(f64::NAN, 0.0)),
+        },
+    ));
+    assert_eq!(binding(&app), before, "インスタンスは変わらない");
+    assert_eq!(app.history.undo_stack.len(), undo_before);
+    assert_eq!(
+        app.toast.as_ref().map(|t| t.message.as_str()),
+        Some(crate::canvas_tool::Refusal::OffGrid.message())
+    );
+    // 書く入口そのもの：断るときは何も変えない
+    let mut cel = app.doc.root.layers[0].keyframes[0].cel.clone();
+    assert_eq!(
+        cel.update_instances(|_| true, |b| b.xform = kurbo::Affine::scale(f64::INFINITY)),
+        Err(crate::timeline::Unmappable)
+    );
+    assert_eq!(cel.instances[0].binding, before);
+    let mut content = cel.clone();
+    content.instances_mut()[0].binding.pivot = Point::new(f64::NAN, 0.0);
+    assert!(!cel.insert_content(&[], &content, None));
+    // ファイルを読む入口も同じ判定で断る
+    let pd = project_io::ProjectDocument::from_app(app.tab()).unwrap();
+    let mut nan_inst = pd.clone();
+    nan_inst.timeline.layers[0].keyframes[0].instances[0]
+        .binding
+        .xform[4] = f64::NAN;
+    let mut nan_effect = pd.clone();
+    nan_effect.timeline.layers[0].keyframes[0].instances[0]
+        .binding
+        .color_effect
+        .alpha = f32::NAN;
+    for broken in [nan_inst, nan_effect] {
+        assert_eq!(
+            project_io::project_from_bytes(&project_io::project_file_bytes(&broken).unwrap())
+                .expect_err("断る"),
+            "ファイルが壊れています（有限でない数があります）"
+        );
+    }
+    assert!(project_io::project_from_bytes(&project_io::project_file_bytes(&pd).unwrap()).is_ok());
+}
+
 /// 段0（claude/触った所だけを計算する地図の設計_22fbbbe.md）：地図の頂点と辺の番号をでたらめに並べ替え、辺の向きも
 /// でたらめに裏返した地図に、同じ編集（ブラシ・消しゴム・バケツ・頂点の移動・辺の引っぱり・アンカーの追加と削除・
 /// 矩形で切る中と外）をしても、結果の地図（しまう形）と、面に記す番号と、書き戻しの差分が同じになる。新しい作りでは、
@@ -34368,7 +34559,8 @@ fn measure_edit_scaling_by_cel_size() {
             let (w, h) = (side as f64 * dx, side as f64 * dy);
             let zoom = (1100.0 / w).min(700.0 / h).min(1.0) as f32;
             let view = &mut app.tab_mut().view;
-            view.zoom = zoom;
+            view.set_zoom(zoom);
+            let zoom = view.zoom();
             view.pan = egui::vec2(-(bb.x0 as f32) * zoom + 40.0, -(bb.y0 as f32) * zoom + 60.0);
         }
         for _ in 0..2 {

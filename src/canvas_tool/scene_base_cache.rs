@@ -163,16 +163,11 @@ impl SceneBaseCache {
 
     /// キー `(layer_id, cel_revision, eval_frame, world_xform, 参照シンボルの revision)` が変わったレイヤーだけ作り直し、
     /// `shape_id` と `mesh_revision` が同じ図形は描画キャッシュを `HashMap` で引き継ぐ
-    pub(crate) fn rebuild(
-        &mut self,
-        tl: &Timeline,
-        library: &Library,
-        world_xform: Affine,
-    ) -> bool {
+    /// タイムライン `tl` の今のコマ（変換 `world_xform`）を、作り直さずにそのまま見せてよいか（どのレイヤーの鍵も同じ）
+    pub(crate) fn is_fresh(&self, tl: &Timeline, library: &Library, world_xform: Affine) -> bool {
         let frame = tl.current_frame;
         let xform_bits = world_xform.as_coeffs().map(f64::to_bits);
-
-        let same_layer_list = self.layers.len() == tl.layers.len()
+        self.layers.len() == tl.layers.len()
             && self.layers.iter().zip(&tl.layers).all(|(c, l)| {
                 c.matches(
                     l,
@@ -180,10 +175,20 @@ impl SceneBaseCache {
                     library,
                     xform_bits,
                 )
-            });
-        if same_layer_list {
+            })
+    }
+
+    pub(crate) fn rebuild(
+        &mut self,
+        tl: &Timeline,
+        library: &Library,
+        world_xform: Affine,
+    ) -> bool {
+        if self.is_fresh(tl, library, world_xform) {
             return false;
         }
+        let frame = tl.current_frame;
+        let xform_bits = world_xform.as_coeffs().map(f64::to_bits);
 
         let old_layers = std::mem::take(&mut self.layers);
         let old_flat = std::mem::take(&mut self.flat_shapes);
@@ -256,7 +261,7 @@ impl SceneBaseCache {
                 None => Vec::new(),
             };
             let ctx = SymbolEvalCtx::new(library);
-            let mut evaluated = layer.evaluate_shapes_at((frame, frame), layer.id, ctx.clone());
+            let mut evaluated = layer.evaluate_shapes_at(frame, layer.id, ctx.clone());
             let bases = ctx.into_state().take_held();
             drop(warm);
             for s in &mut evaluated {
@@ -378,17 +383,8 @@ impl CelMeshCache {
         pan: Vec2,
         tint: CelTint,
     ) -> Option<Arc<egui::Mesh>> {
-        let library = ctx.library;
-        let key = CelKey::of(tl, scope, library, layer_idx, frame, world_xform)?;
-        let idx = match self.find(tl, scope, library, &key) {
-            Some(i) => i,
-            None => {
-                let world_mesh = key.build(tl, scope, world_xform, ctx);
-                self.insert(tl, scope, library, &key, world_mesh)
-            }
-        };
+        let idx = self.entry_index(tl, scope, ctx, layer_idx, frame, world_xform)?;
         let entry = &mut self.entries[idx];
-        entry.used = true;
         let world_batch = entry.world_mesh.as_ref()?;
         let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits(), tint);
         if let Some(s) = entry.screens.iter_mut().find(|s| s.0 == key) {
@@ -400,6 +396,44 @@ impl CelMeshCache {
         entry.screens.retain(|s| s.0 .3 != tint);
         entry.screens.push((key, Arc::clone(&mesh), true));
         Some(mesh)
+    }
+
+    /// 所 `scope` のタイムライン `tl` の、レイヤー `layer_idx` のコマ `frame` のセル画の、変換 `world_xform` のワールド座標の
+    /// 結合メッシュ（描くのと同じ写し：`screen_mesh`。無ければ作る）
+    pub(crate) fn world_mesh(
+        &mut self,
+        tl: &Timeline,
+        scope: CelScope,
+        ctx: SymbolEvalCtx<'_>,
+        layer_idx: usize,
+        frame: usize,
+        world_xform: Affine,
+    ) -> Option<&egui::Mesh> {
+        let idx = self.entry_index(tl, scope, ctx, layer_idx, frame, world_xform)?;
+        self.entries[idx].world_mesh.as_ref()
+    }
+
+    /// 写しの番号（無ければワールド座標の結合メッシュを作って入れる）。この描画で使った印を付ける
+    fn entry_index(
+        &mut self,
+        tl: &Timeline,
+        scope: CelScope,
+        ctx: SymbolEvalCtx<'_>,
+        layer_idx: usize,
+        frame: usize,
+        world_xform: Affine,
+    ) -> Option<usize> {
+        let library = ctx.library;
+        let key = CelKey::of(tl, scope, library, layer_idx, frame, world_xform)?;
+        let idx = match self.find(tl, scope, library, &key) {
+            Some(i) => i,
+            None => {
+                let world_mesh = key.build(tl, scope, world_xform, ctx);
+                self.insert(tl, scope, library, &key, world_mesh)
+            }
+        };
+        self.entries[idx].used = true;
+        Some(idx)
     }
 
     /// 所 `scope` のタイムライン `tl` の、セル画 `cels`（レイヤーの番号、コマ）のうち写しの無いものの、変換 `world_xform` の

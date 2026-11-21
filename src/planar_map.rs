@@ -337,11 +337,11 @@ impl PlanarMap {
     /// どこでもこれ1つ）。`None`：正しい地図でない
     #[cfg(test)]
     pub(crate) fn valid_faces(&self) -> Option<Vec<MapFace>> {
-        self.check().map(|c| c.faces)
+        self.check()
     }
 
-    /// 正しい地図かの判定の本体（`checked`・`valid_faces`）。正しい地図なら、その面と、辺ごとの判定の形と、面の輪郭
-    fn check(&self) -> Option<Checked> {
+    /// 正しい地図かの判定の本体（`checked`・`valid_faces`）。正しい地図なら、その面
+    fn check(&self) -> Option<Vec<MapFace>> {
         #[cfg(test)]
         FULL_CHECKS.with(|n| n.set(n.get() + 1));
         // 頂点と制御点が格子に置ける（±65,536px の内で有限：`fits_grid`）こと、両側が同じ色の辺が無いことを先に確かめる
@@ -387,11 +387,7 @@ impl PlanarMap {
                 }
             }
         }
-        Some(Checked {
-            faces: regions.into_faces(self),
-            polys,
-            cycles,
-        })
+        Some(regions.into_faces(self))
     }
 
     /// テスト用：正しくないとき、どこがだめか
@@ -770,13 +766,6 @@ impl PlanarMap {
         }
         cycles
     }
-}
-
-/// 確かめた地図の、確かめるときに作ったもの：面と、辺ごとの判定の形と、面の輪郭（`check`）
-struct Checked {
-    faces: Vec<MapFace>,
-    polys: Vec<Poly>,
-    cycles: Vec<Cycle>,
 }
 
 impl PlanarMap {
@@ -2279,6 +2268,37 @@ impl LayerBase {
         m
     }
 
+    /// この写しの地図の、番号が `ids` の面だけを残した地図（`only_faces_map`。`None` なら地図全体）を、確かめた地図にする。
+    /// 確かめ直さない：写しの地図はいつも正しい地図で、面に1つずつ別の番号が記してある（写しを作るのは、確かめた地図の
+    /// しまう形からだけ：セル画の地図は使う入口 `ScopeMap::stored`、片の組は `PieceGroup::new`、残りは1本の道の答え）。
+    /// 正しい地図の面を丸ごと残した一部は、そのまま正しい地図（`PlanarMap::restricted`。`ScopeMap::restricted` と同じ
+    /// 決まり）。面は残した地図から取り出す（地図全体のときは、写しの判定の形と輪郭から）。テストでは毎回、確かめた地図
+    /// （`checked`）と同じことを確かめる
+    pub(crate) fn checked_part(
+        &self,
+        ids: Option<&HashSet<ShapeId>>,
+        group_path: &[u64],
+    ) -> CheckedMap {
+        let (map, faces) = match ids {
+            None => {
+                let (faces, _) = self.map().faces_of(self.polys(), self.cycles());
+                (self.map().clone(), faces)
+            }
+            Some(ids) => {
+                let map = self.only_faces_map(ids, group_path);
+                let (faces, _) = map.faces();
+                (map, faces)
+            }
+        };
+        // お手本：確かめた地図（`checked`）と同じ
+        #[cfg(test)]
+        if test_checks() {
+            let ok = uncounted(|| map.clone().checked().is_some_and(|c| c.faces == faces));
+            assert!(ok, "正しい地図の一部が、確かめた地図（お手本）と違う");
+        }
+        CheckedMap { map, faces }
+    }
+
     /// 面を丸ごと外した・残した地図のしまう形（`PlanarMap::restricted_by` と同じ地図：外す面の側の色と番号を消し、両側とも
     /// 消えた辺を除く。正しい地図の面を外しても、正しい地図のまま）を、触った所だけで作る。外すときは、外す面の輪郭の辺
     /// だけを替える（前のしまう形に差分を当てる。書くのは、この地図に対する差分として1本の道に渡す：`ScopeMap::restricted`）。
@@ -2995,32 +3015,20 @@ fn face_key(map: &PlanarMap, f: &MapFace) -> ([u64; 6], bool) {
         .expect("面の輪郭には辺がある")
 }
 
-/// 正しい地図（`valid_faces` で確かめたもの）と、その面。作れるのは `PlanarMap::checked` と、正しい地図を正しいまま
-/// 変える、このあとのメソッドだけなので、これを受け取る所（セル画にしまう地図：`ScopeMap::new`）は確かめ直さない
+/// 正しい地図（`valid_faces` で確かめたもの）と、その面。作れるのは `PlanarMap::checked` と、正しい地図の一部を取り出す
+/// `LayerBase::checked_part` と、正しい地図を正しいまま変える、このあとのメソッドだけなので、これを受け取る所（セル画に
+/// しまう地図：`ScopeMap::new`、片の組：`PieceGroup::new`）は確かめ直さない
 #[derive(Clone, Debug)]
 pub(crate) struct CheckedMap {
     map: PlanarMap,
     faces: Vec<MapFace>,
-    /// 辺ごとの判定の形（`map` の辺の順。確かめるときに作ったもの）
-    polys: Vec<Poly>,
-    /// 面の輪郭（`face_cycles_with` と同じ並び。確かめるときに作ったもの）
-    cycles: Vec<Cycle>,
 }
 
 impl PlanarMap {
     /// 正しい地図なら（`valid_faces`。受け入れの判定はこれ1つ）、確かめた地図にする。`None`：正しい地図でない
     pub(crate) fn checked(self) -> Option<CheckedMap> {
-        let Checked {
-            faces,
-            polys,
-            cycles,
-        } = self.check()?;
-        Some(CheckedMap {
-            map: self,
-            faces,
-            polys,
-            cycles,
-        })
+        let faces = self.check()?;
+        Some(CheckedMap { map: self, faces })
     }
 }
 
@@ -3066,12 +3074,7 @@ impl CheckedMap {
                 f
             })
             .collect();
-        CheckedMap {
-            map,
-            faces,
-            polys: self.polys,
-            cycles: self.cycles,
-        }
+        CheckedMap { map, faces }
     }
 }
 

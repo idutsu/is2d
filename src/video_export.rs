@@ -84,7 +84,7 @@ fn paint_frame(
         if !layer.visible {
             continue;
         }
-        let shapes = layer.evaluate_shapes_at((frame, frame), layer.id, ctx.clone());
+        let shapes = layer.evaluate_shapes_at(frame, layer.id, ctx.clone());
         for shape in &shapes {
             if shape.is_empty_symbol_marker() {
                 continue;

@@ -114,39 +114,62 @@ impl PieceGroup {
         Ok(Some(Self::new(map, Affine::IDENTITY)))
     }
 
-    /// 番号が `keep` にある片だけの組（`Ok(None)`：1つも無い。`Err`：正しい地図にならない）
-    fn restricted(&self, keep: &HashSet<ShapeId>) -> Result<Option<Self>, Unplaceable> {
+    /// 番号が `keep` にある片だけの組（編集中の階層 `scope`。`None`：1つも無い）。正しい地図の面の一部なので、確かめ
+    /// 直さない（`LayerBase::checked_part`）
+    fn restricted(&self, keep: &HashSet<ShapeId>, scope: &[u64]) -> Option<Self> {
         let ids = self.ids();
         if ids.iter().all(|id| keep.contains(id)) {
-            return Ok(Some(self.clone()));
+            return Some(self.clone());
         }
         if !ids.iter().any(|id| keep.contains(id)) {
-            return Ok(None);
+            return None;
         }
-        let map = self
-            .base()
-            .map()
-            .restricted(keep)
-            .checked()
-            .ok_or(Unplaceable)?;
-        Ok(Some(Self::new(map, self.xform)))
+        Some(Self::new(
+            self.base().checked_part(Some(keep), scope),
+            self.xform,
+        ))
     }
+}
+
+/// 浮いた片 `fl` のすべての片の組と、まだ持ち上げていない生の図形 `raw`（レイヤーごとの面の番号。持ち上げると、中身の
+/// 地図のその面だけの片になる：`cut_layer`）に、文書の座標の変換 `doc` を重ねても、確定で地図にできるか（確定と同じ式：
+/// 片の地図に、重ねた変換をかけた点がみな格子に置ける：`PlanarMap::fits_grid`）
+pub(crate) fn pieces_fit(
+    fl: Option<&Floating>,
+    stage: Stage<'_>,
+    raw: &[(LayerId, HashSet<ShapeId>)],
+    doc: Affine,
+) -> bool {
+    let layers = fl.map_or(&[][..], |fl| &fl.layers[..]);
+    layers
+        .iter()
+        .flat_map(|l| &l.groups)
+        .all(|g| g.base().map().fits_grid(doc * g.xform))
+        && raw.iter().all(|(layer_id, ids)| {
+            stage.cel(*layer_id).is_none_or(|cel| {
+                let content = match layers.iter().find(|l| l.layer_id == *layer_id) {
+                    Some(l) => l.content(&cel),
+                    None => cel,
+                };
+                content.only_faces_map(ids, stage.scope).fits_grid(doc)
+            })
+        })
 }
 
 /// 片の地図が、格子の上で正しい地図にならない（片の操作を断る）
 #[derive(Debug)]
 pub(crate) struct Unplaceable;
 
-/// 片の組 `groups` のうち、番号が `keep` にある片だけの組（片の無くなった組は外す。`Err`：どれかが正しい地図にならない）
+/// 片の組 `groups` のうち、番号が `keep` にある片だけの組（編集中の階層 `scope`。片の無くなった組は外す）
 fn restricted_groups(
     groups: &[PieceGroup],
     keep: &HashSet<ShapeId>,
-) -> Result<Vec<PieceGroup>, Unplaceable> {
-    let mut out = Vec::new();
-    for g in groups {
-        out.extend(g.restricted(keep)?);
-    }
-    Ok(out)
+    scope: &[u64],
+) -> Vec<PieceGroup> {
+    groups
+        .iter()
+        .filter_map(|g| g.restricted(keep, scope))
+        .collect()
 }
 
 /// 持ち上げたレイヤーの残り
@@ -231,7 +254,7 @@ impl FloatLayer {
             .content(&stage.cel(self.layer_id)?)
             .map()
             .restricted(ids);
-        let groups = restricted_groups(&self.groups, ids).ok()?;
+        let groups = restricted_groups(&self.groups, ids, stage.scope);
         stacked(start, groups.iter().map(PieceGroup::placed))?.checked()
     }
 
@@ -323,10 +346,7 @@ impl Floating {
             let layer_id = l.layer_id;
             if let Some(o) = &mut l.origin {
                 self.hidden.extend(o.hidden.iter().copied());
-                let at = o.hidden.first().map_or_else(
-                    || Placement::TopOfLayer(layer_id, scope.to_vec()),
-                    |&id| Placement::ReplaceAt(id),
-                );
+                let at = Placement::RawOf(layer_id, scope.to_vec());
                 let added: HashSet<ShapeId> = o.remainder.iter().copied().collect();
                 for f in o.hold().faces(scope).iter() {
                     if added.contains(&f.shape_id) {
@@ -447,16 +467,7 @@ impl Floating {
         failed
     }
 
-    /// すべての片の組に文書の座標の変換 `doc` を重ねても、確定で地図にできるか（確定と同じ式：片の組の地図に、重ねた
-    /// 変換をかけた点がみな格子に置ける：`PlanarMap::fits_grid`）
-    pub(crate) fn fits_transform(&self, doc: Affine) -> bool {
-        self.layers
-            .iter()
-            .flat_map(|l| &l.groups)
-            .all(|g| g.base().map().fits_grid(doc * g.xform))
-    }
-
-    /// 動かす・回す・拡大：すべての片の組に、文書の座標の変換 `doc` を重ねる（重ねてよいかは先に `fits_transform` で
+    /// 動かす・回す・拡大：すべての片の組に、文書の座標の変換 `doc` を重ねる（重ねてよいかは先に `pieces_fit` で
     /// 確かめる）
     pub(crate) fn transform(&mut self, doc: Affine) {
         for g in self.layers.iter_mut().flat_map(|l| &mut l.groups) {
@@ -530,17 +541,13 @@ impl Floating {
             .collect();
         for l in &mut self.layers {
             let layer_id = l.layer_id;
-            let Ok(kept) = restricted_groups(&l.groups, keep) else {
-                return false;
-            };
+            let kept = restricted_groups(&l.groups, keep, stage.scope);
             if kept.is_empty() {
                 l.origin = None;
                 l.groups.clear();
                 continue;
             }
-            let Ok(back) = restricted_groups(&l.groups, &drop) else {
-                return false;
-            };
+            let back = restricted_groups(&l.groups, &drop, stage.scope);
             if back.is_empty() {
                 continue;
             }
@@ -571,7 +578,11 @@ impl Floating {
     /// 出す片は確定してレイヤーの中身になり、浮いた片はいつもレイヤーのいちばん上に描かれるので、消さないと、確定した
     /// 片の上へ繰り上がる。上の片を確定すれば下の片が削られるのと同じ。レビュー f01d518 の N-3002）。残す片は確定しない
     /// ので、その下のレイヤーの中身は変えない。全部か無しか：`Err`：片の地図が正しい地図にならない（何も変えない）
-    pub(crate) fn split_off(&mut self, keep: &HashSet<ShapeId>) -> Result<Floating, Unplaceable> {
+    pub(crate) fn split_off(
+        &mut self,
+        keep: &HashSet<ShapeId>,
+        scope: &[u64],
+    ) -> Result<Floating, Unplaceable> {
         let drop: HashSet<ShapeId> = self
             .layers
             .iter()
@@ -585,10 +596,10 @@ impl Floating {
                 // 上の組から順に見て、それまでに取り出す片の置いた地図（覆う所）を集める
                 let (mut dropped, mut kept, mut cover) = (Vec::new(), Vec::new(), Vec::new());
                 for g in l.groups.iter().rev() {
-                    if let Some(k) = g.restricted(keep)? {
+                    if let Some(k) = g.restricted(keep, scope) {
                         kept.extend(k.erased(&cover)?);
                     }
-                    if let Some(d) = g.restricted(&drop)? {
+                    if let Some(d) = g.restricted(&drop, scope) {
                         cover.push(d.placed().ok_or(Unplaceable)?);
                         dropped.push(d);
                     }
@@ -650,14 +661,17 @@ fn cut_layer(
     };
     let cur = cur.unwrap_or(&empty);
     let content_base = cur.content(&cel);
-    let part = (!ids.is_empty())
-        .then(|| content_base.only_faces_map(ids, stage.scope))
-        .filter(|m| !m.edges.is_empty());
-    let (origin, inside): (Option<Origin>, CheckedMap) = match (part, rect) {
-        (None, None) => return Some(cur.clone()),
-        // 面を丸ごと持ち上げる：中身から、その面を外す（面の番号はそのまま。片は前と同じ番号の図形）。外す面の輪郭の辺だけ
-        // を替えたしまう形（`restricted_local`）を、セル画の地図に対する差分として1本の道に渡す（`replace_local`）
-        (Some(part), None) => {
+    let (origin, inside): (Option<Origin>, CheckedMap) = match rect {
+        // 面を丸ごと持ち上げる：中身から、その面を外す（面の番号はそのまま。片は前と同じ番号の図形。正しい地図の面の一部
+        // なので確かめ直さない：`checked_part`）。外す面の輪郭の辺だけを替えたしまう形（`restricted_local`）を、セル画の
+        // 地図に対する差分として1本の道に渡す（`replace_local`）
+        None => {
+            let part = (!ids.is_empty())
+                .then(|| content_base.checked_part(Some(ids), stage.scope))
+                .filter(|m| !m.map().edges.is_empty());
+            let Some(part) = part else {
+                return Some(cur.clone());
+            };
             let rest = content_base
                 .restricted_local(FaceKeep::Without(ids), stage.scope)
                 .unwrap_or_else(|| StoredMap::from_dense(&PlanarMap::default(), None));
@@ -666,10 +680,13 @@ fn cut_layer(
                 LocalEdit::Changed(w) => Some(Origin::of_local(w, &cel, stage.scope)),
                 LocalEdit::Refused(_) => return None,
             };
-            (origin, part.checked()?)
+            (origin, part)
         }
         // 選ぶ所で切る（1本の道：`cut_out`）。残りは中身に対する答えなので、セル画に対する残りにする
-        (part, Some(r)) => {
+        Some(r) => {
+            let part = (!ids.is_empty())
+                .then(|| content_base.only_faces_map(ids, stage.scope))
+                .filter(|m| !m.edges.is_empty());
             let region_owned;
             let region = match part {
                 None => MapInput::Shapes(std::slice::from_ref(r)),

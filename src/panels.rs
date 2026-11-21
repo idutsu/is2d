@@ -75,7 +75,7 @@ pub(crate) const fn tool_icon(tool: Tool) -> &'static str {
         Tool::Select => "\u{f1e2}",
         Tool::Transform => "\u{e5c3}",
         Tool::Brush => "\u{e3ae}",
-        Tool::Eraser => "\u{e6d0}",
+        Tool::Eraser => "\u{e23b}",
         Tool::Bucket => "\u{e23a}",
         Tool::Eyedropper => "\u{e3b8}",
     }
@@ -518,7 +518,7 @@ pub(crate) fn draw_stage_header_bar(tab: &Tab, actions: &mut Vec<UiAction>, ctx:
                 draw_group_breadcrumb(tab, actions, ui);
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let zoom_pct = (tab.view.zoom * 100.0).round() as i32;
+                    let zoom_pct = (tab.view.zoom() * 100.0).round() as i32;
                     ui.label(
                         egui::RichText::new(format!("{zoom_pct}%"))
                             .size(11.5)
@@ -1342,7 +1342,7 @@ pub(crate) fn draw_selected_symbol_properties(
         SymbolLoopMode::SingleFrame => "表示フレーム:",
         SymbolLoopMode::Loop | SymbolLoopMode::PlayOnce => "開始フレーム:",
     };
-    let mut drag_active = false;
+    let mut idle = true;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(
@@ -1350,7 +1350,6 @@ pub(crate) fn draw_selected_symbol_properties(
                 .size(11.0)
                 .color(Color32::from_rgb(55, 62, 74)),
         );
-        let mut step_clicked = false;
         if ui
             .add_enabled(
                 next_first_1based > 1,
@@ -1360,7 +1359,6 @@ pub(crate) fn draw_selected_symbol_properties(
             .clicked()
         {
             next_first_1based = next_first_1based.saturating_sub(1).max(1);
-            step_clicked = true;
         }
         let drag_resp = ui.add_sized(
             Vec2::new(56.0, 22.0),
@@ -1379,12 +1377,8 @@ pub(crate) fn draw_selected_symbol_properties(
             .clicked()
         {
             next_first_1based = (next_first_1based + 1).min(max_first_1based);
-            step_clicked = true;
         }
-        drag_active = !step_clicked
-            && (drag_resp.dragged() || drag_resp.has_focus())
-            && !drag_resp.drag_stopped()
-            && !drag_resp.lost_focus();
+        idle = editing_idle(&[&drag_resp]);
     });
 
     if next_mode == SymbolLoopMode::SingleFrame && (2..=12).contains(&max_first_1based) {
@@ -1404,7 +1398,6 @@ pub(crate) fn draw_selected_symbol_properties(
                         .clicked()
                     {
                         next_first_1based = f;
-                        drag_active = false;
                     }
                 }
             });
@@ -1414,7 +1407,7 @@ pub(crate) fn draw_selected_symbol_properties(
         }
     }
 
-    if next_mode != binding.loop_mode || !drag_active {
+    if next_mode != binding.loop_mode || idle {
         actions.push(UiAction::Doc(Action::EndCoalesce {
             key: Some(CoalesceKey::SymbolPlayback(binding.instance_gid)),
         }));
@@ -1767,7 +1760,7 @@ pub(crate) fn draw_tool_cursor_and_feedback(
             } else {
                 Color32::from_rgb(220, 60, 60)
             };
-            painter.circle_stroke(pos, r * tab.view.zoom, Stroke::new(1.5_f32, ring_col));
+            painter.circle_stroke(pos, r * tab.view.zoom(), Stroke::new(1.5_f32, ring_col));
         }
         Tool::Bucket => {
             ctx.set_cursor_icon(CursorIcon::PointingHand);
@@ -1810,7 +1803,7 @@ pub(crate) fn draw_canvas_contents(
     painter: &egui::Painter,
 ) {
     let in_group_edit = !tab.session.editing_group_path.is_empty();
-    let zoom = tab.view.zoom;
+    let zoom = tab.view.zoom();
     let pan = tab.view.pan;
     let stage_size = tab.doc.stage_size;
     let shows_stage = tab.session.edit_path.shows_stage();
@@ -1942,7 +1935,7 @@ fn draw_shapes_outside_group(
     range: std::ops::Range<usize>,
     view_world_rect: KRect,
 ) {
-    let (zoom, pan) = (tab.view.zoom, tab.view.pan);
+    let (zoom, pan) = (tab.view.zoom(), tab.view.pan);
     for idx in range {
         let Some(shape) = tab.scene().get(idx) else {
             continue;
@@ -1978,7 +1971,7 @@ fn draw_editable_layer_shapes(
             TransformDragState::Scale { .. } | TransformDragState::Rotate { .. }
         )
     );
-    let zoom = tab.view.zoom;
+    let zoom = tab.view.zoom();
     let pan = tab.view.pan;
 
     for idx in range {
@@ -2103,7 +2096,7 @@ fn draw_onion_skin_frame(
     tint_rgb: [u8; 3],
     alpha: u8,
 ) {
-    let zoom = tab.view.zoom;
+    let zoom = tab.view.zoom();
     let pan = tab.view.pan;
     let tl = tab.active_timeline();
     for (layer_idx, layer) in tl.layers.iter().enumerate() {

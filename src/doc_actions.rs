@@ -394,6 +394,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     debug_assert!(host.tab().history.pending.is_none());
     if !matches!(action, Action::SetFps { .. } | Action::EndCoalesce { .. }) {
         host.stop_playback();
+        // 画面の土台を最新にする（ここ1か所。`apply` の中で土台を読む所（浮いた片の確定 `plan_commit` など）は作り直さ
+        // ない。文書を変えた所は、後始末（`finish_cel_writes`・`with_active_timeline_mut` など）でその場で作り直す）
+        host.tab_mut().refresh_scene_base();
     }
     let check_symbol_nest = matches!(
         action,
@@ -553,13 +556,13 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
 
         #[cfg(test)]
         Action::ScaleSelection { sx, sy } => {
-            let Some((_, pivot)) = tab.session.selection_bbox_and_pivot(tab.view.zoom) else {
+            let Some((_, pivot)) = tab.session.selection_bbox_and_pivot(tab.view.zoom()) else {
                 return false;
             };
             apply_affine_to_selected_inner(tab, affine_scale_around(pivot, sx, sy))
         }
         Action::FlipSelection { flip_x, flip_y } => {
-            let Some((_, pivot)) = tab.session.selection_bbox_and_pivot(tab.view.zoom) else {
+            let Some((_, pivot)) = tab.session.selection_bbox_and_pivot(tab.view.zoom()) else {
                 return false;
             };
             let sx = if flip_x { -1.0 } else { 1.0 };
@@ -567,7 +570,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             apply_affine_to_selected_inner(tab, affine_scale_around(pivot, sx, sy))
         }
         Action::RotateSelection { angle_rad } => {
-            let Some((_, pivot)) = tab.session.selection_bbox_and_pivot(tab.view.zoom) else {
+            let Some((_, pivot)) = tab.session.selection_bbox_and_pivot(tab.view.zoom()) else {
                 return false;
             };
             apply_affine_to_selected_inner(tab, affine_rotate_around(pivot, angle_rad))
@@ -760,7 +763,7 @@ fn stroke_shapes_in_view(
     radius: f32,
     color: Color32,
 ) -> Vec<FillShape> {
-    let zoom = tab.view.zoom as f64;
+    let zoom = tab.view.zoom() as f64;
     let step = input_step(zoom, tab.view.pixels_per_point as f64);
     stroke_shapes(points, radius as f64, step, zoom, color)
 }
@@ -850,30 +853,26 @@ fn write_local(
     written
 }
 
-/// 表示中の全レイヤーの図形を、下のレイヤーから順に、ステージ座標で集める（バケツとスポイト用）
-pub(crate) fn collect_all_visible_shapes(tab: &Tab) -> Vec<FillShape> {
-    let mut out = Vec::with_capacity(tab.scene().len());
+/// 点 `pt`（ステージの座標）で見えている、いちばん上のもの：（レイヤーの番号, 色）（バケツとスポイト用）。画面に描くのと
+/// 同じ写しを、上から順に参照でたどる：編集できるレイヤーは画面の図形（`Scene`）、ロック中のレイヤーはセル画の結合
+/// メッシュの写し（`Tab::cached_cel_color_at`）。図形は複製しない
+pub(crate) fn topmost_visible_at(tab: &Tab, pt: Point) -> Option<(usize, Color32)> {
     let tl = tab.active_timeline();
-    let world_xform = tab.session.edit_path.world_xform();
-    for (layer_idx, layer) in tl.layers.iter().enumerate() {
-        if !layer.visible {
-            continue;
-        }
-        if layer.locked {
-            let mut eval =
-                tl.evaluate_layer_shapes_at(layer_idx, tl.current_frame, &tab.doc.library);
-            if world_xform != Affine::IDENTITY {
-                for s in &mut eval {
-                    s.transform(world_xform);
-                }
-            }
-            out.extend(eval);
-        } else {
-            let lid = layer.id;
-            out.extend(tab.scene().iter().filter(|s| s.layer_id == lid).cloned());
-        }
-    }
-    out
+    let hit = tab
+        .scene()
+        .iter()
+        .rev()
+        .find(|s| s.contains_point(pt))
+        .and_then(|s| Some((tl.layer_index_by_id(s.layer_id)?, s.color)));
+    // 当たった図形より上のロック中のレイヤー（上から順）
+    tl.layers
+        .iter()
+        .enumerate()
+        .rev()
+        .take_while(|(i, _)| hit.is_none_or(|(h, _)| *i > h))
+        .filter(|(_, l)| l.visible && l.locked)
+        .find_map(|(i, _)| Some((i, tab.cached_cel_color_at(i, tl.current_frame, pt)?)))
+        .or(hit)
 }
 
 fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
@@ -926,7 +925,6 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
         return false;
     }
 
-    let all_visible_shapes = collect_all_visible_shapes(tab);
     let target_layer_ord = tab
         .active_timeline()
         .layer_index_by_id(target_lid)
@@ -941,14 +939,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
             && s.is_in_editing_scope(&tab.session.editing_group_path)
             && s.contains_point(pt)
     }) {
-        let tl = tab.active_timeline();
-        let occluded_above = (target_layer_ord + 1..tl.layers.len()).any(|l_idx| {
-            let layer = &tl.layers[l_idx];
-            layer.visible
-                && all_visible_shapes
-                    .iter()
-                    .any(|s| s.layer_id == layer.id && s.contains_point(pt))
-        });
+        let occluded_above = topmost_visible_at(tab, pt).is_some_and(|(l, _)| l > target_layer_ord);
 
         let Some(hit_shape) = scene.get(hit_idx).cloned() else {
             return false;
@@ -997,6 +988,13 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     }
+    // 地図は格子の内の形しか持てないので、生の図形（浮いた片と、選んだグループの中の生の図形）が格子の外（±65,536px の
+    // 外）へ出る変形と、潰れる変形は、文書を変える前に断る。確かめるのは確定と同じ式（`Session::fits_transform`。ドラッグ
+    // 中の「置けない」の表示も同じ）なので、確かめを通れば確定で失敗しない
+    if !tab.session.fits_transform(affine) {
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
+        return false;
+    }
     let mut any_transformed = false;
     let selection = tab.session.selection.clone();
     let world = tab.session.edit_path.world_xform();
@@ -1006,37 +1004,8 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         .floating()
         .map(|fl| fl.hidden().clone())
         .unwrap_or_default();
-    let picked = |s: &FillShape| !hidden.contains(&s.shape_id) && selection.contains_shape(s);
     // 選んだグループの中の生の図形の階層（レイヤー, 階層）
-    let mut scopes: Vec<(LayerId, Vec<u64>)> = Vec::new();
-    for s in tab.session.base_cache.shapes() {
-        if picked(s)
-            && s.symbol_instance.is_none()
-            && !scopes
-                .iter()
-                .any(|x| x.0 == s.layer_id && x.1 == s.group_path)
-        {
-            scopes.push((s.layer_id, s.group_path.clone()));
-        }
-    }
-    // 地図は格子の内の形しか持てないので、生の図形（浮いた片と、選んだグループの中の生の図形）が格子の外（±65,536px の
-    // 外）へ出る変形は、文書を変える前に断る。確かめるのは確定と同じ式（片の組の地図に重ねた変換、グループの階層の地図に
-    // 文書の座標の変換をかけた点：`PlanarMap::fits_grid`）なので、確かめを通れば確定で失敗しない（インスタンスは地図を
-    // 持たないので、どこへでも動かせる）
-    let fits = tab
-        .session
-        .floating()
-        .is_none_or(|fl| fl.fits_transform(doc))
-        && scopes.iter().all(|(layer_id, path)| {
-            tab.session
-                .base_cache
-                .cel(*layer_id)
-                .is_none_or(|c| c.scope_base(path).map().fits_grid(doc))
-        });
-    if !fits {
-        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
-        return false;
-    }
+    let scopes = tab.session.selected_group_scopes();
     // 浮いた片（いつもみな選ばれている）は、片の組の変換に、文書の座標の変換を重ねる（確定のときに地図にかける）
     tab.session.update_floating(|fl_opt| {
         if let Some(fl) = fl_opt {
@@ -1080,14 +1049,12 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine) -> bool {
         any_transformed |= !written.is_empty();
         finish_cel_writes(tab, &written);
         // インスタンスは、結び付けの変換に文書の座標の変換を重ねる（生の図形は、片か、グループの階層の地図で動かした）
-        if crate::vector_engine::invertible(doc) {
-            any_transformed |= update_instances(
-                tab,
-                &target_lids,
-                |gid| selection.instances.contains(&gid),
-                |b| b.xform = doc * b.xform,
-            );
-        }
+        any_transformed |= update_instances(
+            tab,
+            &target_lids,
+            |gid| selection.instances.contains(&gid),
+            |b| b.xform = doc * b.xform,
+        );
     }
     any_transformed
 }
@@ -1117,8 +1084,7 @@ fn apply_finish_move_selection_drag(
     alt_duplicate: bool,
 ) -> bool {
     tab.session.clear_overlay();
-    let min_move = 1.0 / (tab.view.zoom as f64);
-    if total_delta.hypot() <= min_move || !has_editable_selection(tab) {
+    if !tab.view.moves_on_screen(total_delta.hypot()) || !has_editable_selection(tab) {
         if let Some(piv) = &mut tab.session.transform_pivot {
             *piv -= total_delta;
         }
@@ -1175,16 +1141,13 @@ fn apply_map_edit(tab: &mut Tab, layer_id: LayerId, map_edit: MapEdit) -> bool {
     }
     // 形が変わらないとき・編集できないとき（消せない頂点など）は、write_local が false を返し、apply が Undo の控えを捨てる
     push_undo(tab, None);
-    // 頂点・辺を動かす確定は重ね合わせで作る（`None` は格子の外）。アンカーの追加・削除の `None` は、編集できないこと
+    // 頂点・辺を動かす確定は重ね合わせで作る。辺・頂点が無い（つかんだあとに地図が変わった）ときは、変わらない
     let changed = match map_edit {
         MapEdit::PullEdge { .. } | MapEdit::MoveVertex { .. } => {
             write_local(tab, layer_id, |base, scope| {
                 match base.reshape_change(map_edit) {
                     Some(Some(change)) => base.edit_local(&change, scope),
-                    // 辺・頂点が無いときも、格子の外として知らせる（浮いた片の地図の編集 `MapEdit::apply` が `None` を返すときと同じ）
-                    _ => crate::planar_map::LocalEdit::Refused(
-                        crate::planar_map::LocalRefusal::OffGrid,
-                    ),
+                    _ => crate::planar_map::LocalEdit::Same,
                 }
             })
         }
@@ -1209,7 +1172,7 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         tab.scene(),
         &tab.session,
         from,
-        tab.view.zoom,
+        tab.view.zoom(),
         SelectSubMode::Reshape,
     );
     let HoverTarget::Edge {
@@ -1243,7 +1206,7 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         tab.scene(),
         &tab.session,
         from,
-        tab.view.zoom,
+        tab.view.zoom(),
         SelectSubMode::Reshape,
     );
     let HoverTarget::Vertex {
@@ -1266,7 +1229,7 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
 }
 
 fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
-    let zoom = tab.view.zoom;
+    let zoom = tab.view.zoom();
     let sub_mode = if is_add {
         SelectSubMode::AddAnchor
     } else {
@@ -1359,6 +1322,11 @@ fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     if affine == Affine::IDENTITY || !has_editable_selection(tab) {
         return false;
     }
+    // 置けない変換は、中心点も書かずに断る（判定は変形の確定と同じ `Session::fits_transform`）
+    if !tab.session.fits_transform(affine) {
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
+        return false;
+    }
     push_undo(tab, None);
     if let Some(piv) = tab.session.transform_pivot {
         if apply_set_selected_symbol_world_pivot(tab, Some(piv)) {
@@ -1407,7 +1375,7 @@ fn apply_paste_clipboard(
             clipboard.paste_offset = KVec2::ZERO;
         }
         clipboard.paste_count += 1;
-        let step = 16.0 / (tab.view.zoom as f64);
+        let step = 16.0 / (tab.view.zoom() as f64);
         clipboard.paste_offset += KVec2::new(step, step);
         clipboard.paste_offset
     };

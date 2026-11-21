@@ -119,6 +119,16 @@ impl SymbolInstanceBinding {
         }
     }
 
+    /// 数がみな有限か（変換・中心点・色効果）。インスタンスの受け入れの判定はこれ1つ：インスタンスを書く入口
+    /// （`Cel::update_instances`・`Cel::insert_content`）、置く準備（`Cel::transformed`）、ファイルを読む入口
+    /// （`ProjectDocument::only_finite_numbers`）。文書のインスタンスはいつも有限なので、保存で直す所は無い
+    pub(crate) fn is_finite(&self) -> bool {
+        self.xform.is_finite()
+            && self.pivot.is_finite()
+            && self.color_effect.alpha.is_finite()
+            && self.color_effect.brightness.is_finite()
+    }
+
     /// 再生位置を `d` コマ進める：キーフレームの始めを `d` コマ後ろへずらしても、同じコマに同じ絵を出す（1コマだけの
     /// 表示は変えない）。再生位置をずらす式は、これと `rewind` だけ
     pub(crate) fn advance(&mut self, d: usize) {
@@ -341,6 +351,9 @@ pub(crate) struct FillShape {
     pub(crate) mesh_revision: u64,
     bbox: KRect,
     fill_mesh: OnceLock<Arc<Mesh>>,
+    /// `fill_mesh` を作ったあとに、その頂点を写した変換の最大の拡大率を掛け合わせたもの（メッシュのずれは、作る許容の
+    /// この倍まで：`keeps_mesh`）。メッシュが無いときは 1
+    mesh_stretch: f64,
     hit_bez_path: OnceLock<Arc<BezPath>>,
 }
 
@@ -357,6 +370,7 @@ impl FillShape {
             mesh_revision: 0,
             bbox: KRect::ZERO,
             fill_mesh: OnceLock::new(),
+            mesh_stretch: 1.0,
             hit_bez_path: OnceLock::new(),
         };
         shape.rebuild_cache();
@@ -408,6 +422,7 @@ impl FillShape {
     pub(crate) fn strip_transient_caches(&mut self) {
         self.hit_bez_path = OnceLock::new();
         self.fill_mesh = OnceLock::new();
+        self.mesh_stretch = 1.0;
     }
 
     /// 座標の変換 `xform` で置いた写しにする（シンボルの中の表示の図形）。番号と `mesh_revision` は文書の図形のまま
@@ -417,12 +432,7 @@ impl FillShape {
             return;
         }
         let orig_rev = self.mesh_revision;
-        if self.symbol_instance.is_some() {
-            let _ = self.fill_mesh();
-            self.transform_with_cached_mesh(xform);
-        } else {
-            self.transform(xform);
-        }
+        self.transform(xform);
         self.mesh_revision = orig_rev;
     }
 
@@ -450,6 +460,7 @@ impl FillShape {
         if self.fill_mesh.get().is_none() {
             if let Some(m) = donor.fill_mesh.get() {
                 let _ = self.fill_mesh.set(Arc::clone(m));
+                self.mesh_stretch = donor.mesh_stretch;
             }
         }
     }
@@ -583,22 +594,16 @@ impl FillShape {
         self.mesh_revision = next_mesh_revision();
     }
 
+    /// 変換をかける。持っているメッシュは、変換したあとも許すずれに収まるなら頂点を写して使い回し（`keeps_mesh`。
+    /// メッシュを作ってから写した変換の拡大率を掛け合わせて見るので、小さな拡大を重ねても許すずれを超えない。再生・
+    /// オニオンスキンで、トゥイーンのコマごとにシンボルの中身をテッセレーションし直さない）、収まらなければ捨てる（次に
+    /// 要るとき、変換した曲線から作る）
     pub(crate) fn transform(&mut self, affine: Affine) {
-        self.transform_with_max_scale_sq(affine, 1.001 * 1.001);
-    }
-
-    /// シンボルインスタンス展開やトゥイーン補間など、既にテッセレーション済みの `fill_mesh` を保持したまま
-    /// アフィン変換を適用し、再生中やオニオンスキン描画での毎フレームの再テッセレーションを回避する
-    pub(crate) fn transform_with_cached_mesh(&mut self, affine: Affine) {
-        self.transform_with_max_scale_sq(affine, 16.0);
-    }
-
-    fn transform_with_max_scale_sq(&mut self, affine: Affine, max_scale_sq_limit: f64) {
         // 数が有限でない変換はかけない（潰れた変換はかける：`Contour::transform`）
         if !affine.is_finite() {
             return;
         }
-        let coeffs @ [a, b, c, d, _, _] = affine.as_coeffs();
+        let coeffs = affine.as_coeffs();
         self.exterior.transform(affine);
         for hole in &mut self.holes {
             hole.transform(affine);
@@ -606,14 +611,15 @@ impl FillShape {
         if let Some(binding) = &mut self.symbol_instance {
             binding.xform = affine * binding.xform;
         }
-        let max_scale_sq = (a * a + b * b).max(c * c + d * d);
-        if max_scale_sq > max_scale_sq_limit && !self.exterior.segments.is_empty() {
+        let stretch = self.mesh_stretch * max_scale(affine);
+        if !keeps_mesh(stretch) && !self.exterior.segments.is_empty() {
             self.rebuild_cache();
         } else {
             self.bbox = self.compute_bbox();
             self.hit_bez_path = OnceLock::new();
             if let Some(arc_mesh) = self.fill_mesh.get_mut() {
                 transform_mesh_vertices_in_place(&mut Arc::make_mut(arc_mesh).vertices, coeffs);
+                self.mesh_stretch = stretch;
             }
             self.mesh_revision = next_mesh_revision();
         }
@@ -660,8 +666,10 @@ impl FillShape {
                 transform_mesh_vertices_in_place(&mut cloned.vertices, coeffs);
                 self.fill_mesh = OnceLock::from(Arc::new(cloned));
             }
+            self.mesh_stretch = orig.mesh_stretch * max_scale(affine);
         } else {
             self.fill_mesh = OnceLock::new();
+            self.mesh_stretch = 1.0;
         }
         self.mesh_revision = next_mesh_revision();
     }
@@ -865,6 +873,25 @@ fn tessellate_contours_to_mesh(exterior: &Contour, holes: &[Contour], color: Col
 }
 
 /// 選択表示の水玉の模様の一辺（画面の px）。千鳥に並んだ点が 6px おき
+/// 曲線をメッシュにするときの許容（文書の座標）。メッシュは表示の倍率によらず同じものを使う
+const MESH_TOL: f64 = 0.04;
+/// 持っているメッシュの頂点を写して使い回すときに許すずれ（文書の座標。100% 表示で 0.16px）。作る許容の 4 倍まで
+/// （4 倍までの拡大なら使い回す。再生でトゥイーンのコマごとにテッセレーションし直さない）
+const MESH_MAX_ERROR: f64 = 4.0 * MESH_TOL;
+
+/// 持っているメッシュを、作ってから頂点を写した変換の最大の拡大率の積 `stretch` のまま使い回してよいか：メッシュのずれ
+/// （作る許容 × `stretch`）が許すずれを超えない。メッシュを写すかどうかは、どの変換でもこれ1つで決める
+fn keeps_mesh(stretch: f64) -> bool {
+    MESH_TOL * stretch <= MESH_MAX_ERROR
+}
+
+/// 変換 `affine` の最大の拡大率（AᵀA の大きいほうの固有値の平方根。列の長さの2乗 p・q と内積 r から）
+fn max_scale(affine: Affine) -> f64 {
+    let [a, b, c, d, _, _] = affine.as_coeffs();
+    let (p, q, r) = (a * a + b * b, c * c + d * d, a * c + b * d);
+    ((p + q) / 2.0 + (((p - q) / 2.0).powi(2) + r * r).sqrt()).sqrt()
+}
+
 pub(crate) const SELECTION_DOT_TILE: usize = 12;
 
 /// 選択表示の水玉の繰り返しテクスチャ（`SELECTION_DOT_TILE` px 四方。6px おきの千鳥の 2×2px の白い点。egui の `Context`
@@ -917,7 +944,7 @@ fn tessellate_lyon_path(
     fill_rule: FillRule,
 ) -> Mesh {
     let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
-    let options = FillOptions::tolerance(0.04).with_fill_rule(fill_rule);
+    let options = FillOptions::tolerance(MESH_TOL as f32).with_fill_rule(fill_rule);
 
     if tessellator
         .tessellate_path(
@@ -1024,6 +1051,17 @@ pub(crate) fn transform_mesh_to_screen(
         }
     }
     mesh
+}
+
+/// メッシュ `mesh` の、点 `p` で見えている色：`p` を含む三角形のうち、いちばん後に描くもの（上に重なるもの）の頂点の色
+pub(crate) fn mesh_color_at(mesh: &Mesh, p: Pos2) -> Option<Color32> {
+    let cross = |a: Pos2, b: Pos2| (b - a).x * (p - a).y - (b - a).y * (p - a).x;
+    mesh.indices.chunks_exact(3).rev().find_map(|t| {
+        let [a, b, c] = [t[0], t[1], t[2]].map(|i| mesh.vertices[i as usize].pos);
+        let d = [cross(a, b), cross(b, c), cross(c, a)];
+        (d.iter().all(|&v| v >= 0.0) || d.iter().all(|&v| v <= 0.0))
+            .then(|| mesh.vertices[t[0] as usize].color)
+    })
 }
 
 /// 複数の `Mesh` を1つのバッチ `Mesh` に結合する（セル単位の一括キャッシュ構築用）

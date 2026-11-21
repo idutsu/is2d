@@ -107,7 +107,7 @@ pub(crate) fn apply_click_selection(
     deselect_on_miss: bool,
 ) {
     let sub_mode = host.tool().select_sub_mode;
-    let zoom = host.tab().view.zoom;
+    let zoom = host.tab().view.zoom();
     let hit_shape =
         host.tab()
             .scene()
@@ -162,7 +162,7 @@ pub(crate) fn select_single_shape_at(tab: &mut Tab, sub_mode: SelectSubMode, pt:
     if !clear_selection(tab) {
         return false;
     }
-    let zoom = tab.view.zoom;
+    let zoom = tab.view.zoom();
     let scene = tab.scene();
     if let Some(hit_idx) = scene
         .hit_shape_or_hover_at(&tab.session, pt, zoom, sub_mode)
@@ -224,7 +224,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     let min_y = p0.y.min(p1.y);
     let max_y = p0.y.max(p1.y);
 
-    let min_marquee = 2.0 / (tab.view.zoom as f64);
+    let min_marquee = 2.0 / (tab.view.zoom() as f64);
     if (max_x - min_x) < min_marquee || (max_y - min_y) < min_marquee {
         if !additive {
             let _ = clear_selection(tab);
@@ -660,8 +660,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
             }
         }
     }
-    // グループの生の図形の地図（浮いた片にする）
-    // （確かめた地図にする。正しい地図にならなければ、文書を変える前に断る）
+    // グループの生の図形の地図（浮いた片にする。セル画の地図の写しは正しい地図なので、確かめ直さない：`checked_part`）
     let mut group_maps: Vec<(LayerId, crate::planar_map::CheckedMap, Affine)> = Vec::new();
     let mut group_raw: Vec<(LayerId, Vec<u64>)> = Vec::new();
     for s in tab.session.base_cache.shapes() {
@@ -680,11 +679,11 @@ pub(crate) fn prepare_ungroup_selected_shapes(
         let Some(cel) = tab.session.base_cache.cel(*layer_id) else {
             continue;
         };
-        let Some(map) = cel.scope_base(path).map().clone().checked() else {
-            tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
-            return false;
-        };
-        group_maps.push((*layer_id, map, Affine::IDENTITY));
+        group_maps.push((
+            *layer_id,
+            cel.scope_base(path).checked_part(None, path),
+            Affine::IDENTITY,
+        ));
     }
     before_mutate(tab);
     // グループは、セル画の並びで、その番号を階層から外す（中のグループ・インスタンスは1段上の階層へ。グループの生の図形は
@@ -813,10 +812,9 @@ pub(crate) fn prepare_delete_selected_shapes(
         .scene()
         .iter()
         .any(|s| layer_ids.contains(&s.layer_id) && tab.session.selection.contains_shape(s));
+    // 編集できるレイヤーに選んだものが無ければ何もしない（浮いた片も選択もそのまま。片はいつも文書か浮いた片のどちらかに
+    // あり、黙って消えない）
     if !any_valid {
-        tab.session.selection.clear();
-        tab.session.set_floating(None);
-        tab.session.transform_pivot = None;
         return false;
     }
 

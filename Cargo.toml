@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eframe = "0.31"
+# 要る機能だけ：描画（glow）と読み上げ（accesskit）。egui の既定のフォントは入れない（文字は fonts/ の NotoSansJP と
+# MaterialIcons で描く：`configure_japanese_fonts`）。Linux の窓（x11・wayland）とウェブの機能も入れない（macOS 用）
+eframe = { version = "0.31", default-features = false, features = ["accesskit", "glow"] }
 kurbo = "0.13"
 lyon_tessellation = "1.0"
 # 地図の重ね合わせと、ブラシの輪郭の自己交差の解消（vendor/i_overlay。9.1.0 に足した所がある写し。vendor/i_overlay/PATCH.md）

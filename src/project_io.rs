@@ -122,11 +122,8 @@ fn reset_active_document_state(tab: &mut Tab, doc: Document) {
     tab.doc = doc;
     tab.history = UndoHistory::default();
     tab.session = Session::default();
-    tab.view = View {
-        selected_library_symbol,
-        ..Default::default()
-    };
-    tab.view.reset_view();
+    tab.view = View::default();
+    tab.view.selected_library_symbol = selected_library_symbol;
     tab.refresh_scene_base();
 }
 
@@ -799,51 +796,10 @@ impl ProjectDocument {
         }
     }
 
-    /// 保存用の写しから非有限値（`NaN` / `Infinity`）を除去・補正し、補正した箇所の説明一覧を返す
-    pub(crate) fn remove_non_finite(&mut self) -> Vec<String> {
-        let mut fixed = Vec::new();
-        if !self.stage_size[0].is_finite() || !self.stage_size[1].is_finite() {
-            self.stage_size = [800.0, 450.0];
-            fixed.push("ステージサイズ".to_owned());
-        }
-        // 地図は正しい地図（地図にできない形はセル画に書かない：`on_grid`）か、ファイルから読んだままの地図（読むときに
-        // 数が有限か確かめてある：`only_finite_numbers`）なので、座標は有限。インスタンスの変換だけを確かめる
-        let mut clean_timeline = |tl: &mut SavedTimeline, sym_name: Option<&str>| {
-            for layer in &mut tl.layers {
-                for kf in &mut layer.keyframes {
-                    let mut kf_fixed = false;
-                    for inst in &mut kf.instances {
-                        if !inst.binding.xform.iter().all(|v| v.is_finite()) {
-                            inst.binding.xform = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-                            kf_fixed = true;
-                        }
-                        if !inst.binding.pivot.iter().all(|v| v.is_finite()) {
-                            inst.binding.pivot = [0.0, 0.0];
-                            kf_fixed = true;
-                        }
-                    }
-                    if kf_fixed {
-                        let frame_no = kf.start_frame + 1;
-                        let loc = match sym_name {
-                            Some(sym) => {
-                                format!("シンボル「{sym}」の「{}」の {frame_no} コマ目", layer.name)
-                            }
-                            None => format!("「{}」の {frame_no} コマ目", layer.name),
-                        };
-                        fixed.push(loc);
-                    }
-                }
-            }
-        };
-        clean_timeline(&mut self.timeline, None);
-        for sym in &mut self.library {
-            clean_timeline(&mut sym.timeline, Some(&sym.name));
-        }
-        fixed
-    }
-
-    /// 書いてある小数（ステージの大きさ、地図の頂点と制御点、インスタンスの変換・中心点・色効果）がみな有限か。アプリは
-    /// 有限な数しか書かない（`remove_non_finite`）ので、そうでなければ壊れたファイル（読むときに断る：`project_from_bytes`）
+    /// 書いてある小数（ステージの大きさ、地図の頂点と制御点、インスタンスの変換・中心点・色効果）がみな有限か。文書には
+    /// 有限な数しか入らない（ステージの大きさは整数の欄から、地図は格子の内：`fits_grid`、インスタンスは書く入口で確かめる：
+    /// `SymbolInstanceBinding::is_finite`）ので、そうでなければ壊れたファイル（読むときに断る：`project_from_bytes`。前の版の
+    /// アプリが書いた有限でない数のあるファイルも、ここで断る）
     pub(crate) fn only_finite_numbers(&self) -> bool {
         let tiles_ok = self.map_tiles.tiles.iter().all(|t| {
             t.nodes.iter().flatten().all(|v| v.is_finite())
@@ -851,11 +807,13 @@ impl ProjectDocument {
         });
         let timeline_ok = |tl: &SavedTimeline| {
             tl.layers.iter().flat_map(|l| &l.keyframes).all(|kf| {
+                // インスタンスは書く入口と同じ判定（色効果は、読むときに直す前の数で）
                 kf.instances.iter().all(|inst| {
-                    let b = &inst.binding;
-                    b.xform.iter().chain(&b.pivot).all(|v| v.is_finite())
-                        && b.color_effect.alpha.is_finite()
-                        && b.color_effect.brightness.is_finite()
+                    SymbolInstanceBinding {
+                        color_effect: inst.binding.color_effect,
+                        ..inst.binding.into()
+                    }
+                    .is_finite()
                 })
             })
         };
@@ -1190,11 +1148,10 @@ pub(crate) fn write_project_file_atomically(
 pub(crate) fn save_project_to_path(
     ws: &mut impl ProjectWorkspace,
     path: &Path,
-) -> Result<Vec<String>, String> {
+) -> Result<(), String> {
     prepare_active_tab_for_switch_or_save(ws);
 
-    let mut proj_doc = ProjectDocument::from_app(ws.tab())?;
-    let fixed = proj_doc.remove_non_finite();
+    let proj_doc = ProjectDocument::from_app(ws.tab())?;
 
     let target_path = resolve_target_path(path);
     write_project_file_atomically(&target_path, &proj_doc)?;
@@ -1229,7 +1186,7 @@ pub(crate) fn save_project_to_path(
 
     ws.tab_mut().file = Some(path.to_path_buf());
     ws.tab_mut().history.mark_saved();
-    Ok(fixed)
+    Ok(())
 }
 
 /// 指定されたファイルパス `path` から `ProjectDocument` を読み込み・確かめて返す（`project_from_bytes`）
@@ -1357,17 +1314,9 @@ pub(crate) fn pick_save_path(tab: &Tab, filter: &str, ext: &str, name: &str) -> 
 
 fn save_project_and_notify(ws: &mut impl ProjectWorkspace, path: &Path, action_desc: &str) {
     match save_project_to_path(ws, path) {
-        Ok(fixed) => {
+        Ok(()) => {
             let name = file_name_or(path, "ファイル");
-            if fixed.is_empty() {
-                ws.notify_info(format!("「{name}」{action_desc}"));
-            } else {
-                crate::canvas_tool::show_notice(
-                    ws.toast_mut(),
-                    crate::canvas_tool::NoticeKind::Warning,
-                    format!("壊れたデータを除いて保存しました：{}", fixed.join("、")),
-                );
-            }
+            ws.notify_info(format!("「{name}」{action_desc}"));
         }
         Err(err) => ws.notify_error(err),
     }

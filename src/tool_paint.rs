@@ -2,10 +2,8 @@ use eframe::egui::{self, Color32, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::Point;
 
 use crate::canvas_tool::{ActiveCanvasDrag, Tab, Tool};
-use crate::doc_actions::{apply, collect_all_visible_shapes, Action, ActionHost};
-use crate::vector_engine::{
-    append_mesh, tessellate_raw_polygon, transform_mesh_to_screen, MAX_VIEW_ZOOM, MIN_VIEW_ZOOM,
-};
+use crate::doc_actions::{apply, topmost_visible_at, Action, ActionHost};
+use crate::vector_engine::{append_mesh, tessellate_raw_polygon, transform_mesh_to_screen};
 use crate::vector_stroke::{input_step, stroke_preview_outline, CenterlineBuilder};
 
 // ============================================================================
@@ -34,7 +32,7 @@ pub(crate) fn handle_brush_or_eraser_input(
     };
     // 描いている間の形は、離したあとの形と同じ中心線（`CenterlineBuilder`）を太らせたもの。確定した所は確定するたびに
     // 足し、確定していない所は点が来るたびに作り直す
-    let z = (host.tab().view.zoom as f64).clamp(MIN_VIEW_ZOOM as f64, MAX_VIEW_ZOOM as f64);
+    let z = host.tab().view.zoom() as f64;
     let ppp = response.ctx.pixels_per_point();
     host.tab_mut().view.pixels_per_point = ppp;
     let tail_of = |b: &CenterlineBuilder| {
@@ -125,11 +123,7 @@ pub(crate) fn handle_brush_or_eraser_input(
 
 /// 編集スコープおよび表示中の全レイヤーを対象に、指定座標 `pt` にヒットする最前面シェイプの色を返す（スポイト用）
 pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> {
-    collect_all_visible_shapes(tab)
-        .iter()
-        .rev()
-        .find(|s| s.contains_point(pt))
-        .map(|s| s.color)
+    topmost_visible_at(tab, pt).map(|(_, color)| color)
 }
 
 /// スポイトツール（色抽出）：指定位置 `pt` の最前面シェイプの色を抽出し、`host.tool_mut().brush_color` に設定する
@@ -152,7 +146,7 @@ pub(crate) fn draw_active_stroke_preview(tab: &Tab, artwork_painter: &egui::Pain
     if !committed_world_mesh.is_empty() {
         artwork_painter.add(egui::Shape::mesh(transform_mesh_to_screen(
             committed_world_mesh.clone(),
-            tab.view.zoom,
+            tab.view.zoom(),
             tab.view.pan,
             None,
         )));
@@ -160,7 +154,7 @@ pub(crate) fn draw_active_stroke_preview(tab: &Tab, artwork_painter: &egui::Pain
     if !tail_mesh.is_empty() {
         artwork_painter.add(egui::Shape::mesh(transform_mesh_to_screen(
             tail_mesh.clone(),
-            tab.view.zoom,
+            tab.view.zoom(),
             tab.view.pan,
             None,
         )));

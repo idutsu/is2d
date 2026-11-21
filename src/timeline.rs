@@ -513,7 +513,8 @@ pub(crate) enum Part {
     Instance(SymbolInstance),
 }
 
-/// 地図にできない形（格子に置けない座標：±65,536px の外か、有限でない座標）があり、セル画に書けない
+/// 地図にできない形（格子に置けない座標：±65,536px の外か、有限でない座標）か、数が有限でないインスタンスがあり、セル画に
+/// 書けない
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Unmappable;
 
@@ -716,14 +717,12 @@ impl Cel {
     /// 重なりの順の中身（図形とインスタンス）
     pub(crate) fn parts(&self) -> Vec<Part> {
         let mut parts = Vec::new();
-        let mut insts = self.instances.iter().peekable();
-        for (k, m) in self.maps.iter().enumerate() {
-            while let Some(inst) = insts.next_if(|i| i.order <= k) {
-                parts.push(Part::Instance(inst.clone()));
+        for item in Self::items_of(&self.maps, &self.instances) {
+            match item {
+                Item::Raw(_, m) => parts.extend(m.faces().iter().cloned().map(Part::Shape)),
+                Item::Instance(inst) => parts.push(Part::Instance(inst)),
             }
-            parts.extend(m.faces().iter().cloned().map(Part::Shape));
         }
-        parts.extend(insts.cloned().map(Part::Instance));
         parts
     }
 
@@ -983,24 +982,33 @@ impl Cel {
         true
     }
 
-    /// 番号が `pick` に合うインスタンスの結び付けを `f` で書き換える。`false`：当てはまるインスタンスが無いか、変わらない
+    /// 番号が `pick` に合うインスタンスの結び付けを `f` で書き換える。`Ok(false)`：当てはまるインスタンスが無いか、変わらない。
+    /// `Err`：数が有限でない結び付けになる（`SymbolInstanceBinding::is_finite`。何も変えない）
     pub(crate) fn update_instances(
         &mut self,
         pick: impl Fn(u64) -> bool,
         f: impl Fn(&mut SymbolInstanceBinding),
-    ) -> bool {
+    ) -> Result<bool, Unmappable> {
         if !self.instances.iter().any(|i| pick(i.binding.instance_gid)) {
-            return false;
+            return Ok(false);
         }
+        let mut instances = (*self.instances).clone();
         let mut changed = false;
-        for inst in self.instances_mut() {
-            if pick(inst.binding.instance_gid) {
-                let before = inst.binding;
-                f(&mut inst.binding);
-                changed |= inst.binding != before;
+        for inst in instances
+            .iter_mut()
+            .filter(|i| pick(i.binding.instance_gid))
+        {
+            let before = inst.binding;
+            f(&mut inst.binding);
+            if !inst.binding.is_finite() {
+                return Err(Unmappable);
             }
+            changed |= inst.binding != before;
         }
-        changed
+        if changed {
+            *self.instances_mut() = instances;
+        }
+        Ok(changed)
     }
 
     #[inline]
@@ -1158,7 +1166,8 @@ impl Cel {
     }
 
     /// 座標の変換 `xform` をかけたセル画：地図は、その座標の格子で正しい地図にし（`realized`）、面にみな新しい番号を
-    /// 記す（元の面と番号が重ならない）。インスタンスの変換に `xform` を重ねる。`None`：格子に置けない座標がある
+    /// 記す（元の面と番号が重ならない）。インスタンスの変換に `xform` を重ねる。`None`：格子に置けない座標があるか、数が
+    /// 有限でないインスタンスになる（書く入口 `insert_content` と同じ判定：`SymbolInstanceBinding::is_finite`）
     pub(crate) fn transformed(&self, xform: Affine) -> Option<Cel> {
         let mut items = Vec::with_capacity(self.maps.len() + self.instances.len());
         for item in Self::items_of(&self.maps, &self.instances) {
@@ -1171,6 +1180,9 @@ impl Cel {
                 }
                 Item::Instance(mut inst) => {
                     inst.binding.xform = xform * inst.binding.xform;
+                    if !inst.binding.is_finite() {
+                        return None;
+                    }
                     items.push(Item::Instance(inst));
                 }
             }
@@ -1207,7 +1219,8 @@ impl Cel {
     /// 中身 `content`（階層の番号の並びは `scope` からの相対。生の図形の地図は持たない：浮いた片にする）を、階層 `scope` に
     /// 入れる：インスタンス `replacing` があればそれと入れ替え（その重なりの位置に）、無ければ階層 `scope` のいちばん上に。
     /// グループとインスタンスは中身の順のまま（グループの生の図形は、その階層のいちばん下）。`false`：入れ替えるインスタンスが
-    /// 無いか、中身に階層 `scope` の生の図形の地図がある（同じ階層の地図が2つになる。セル画は変えない）
+    /// 無いか、中身に階層 `scope` の生の図形の地図があるか（同じ階層の地図が2つになる）、数が有限でないインスタンスがある
+    /// （`SymbolInstanceBinding::is_finite`）。断るときはセル画を変えない
     pub(crate) fn insert_content(
         &mut self,
         scope: &[u64],
@@ -1215,7 +1228,9 @@ impl Cel {
         replacing: Option<u64>,
     ) -> bool {
         // 階層があるかだけを見る（地図を確かめさせない）
-        if content.maps.iter().any(|m| m.group_path.is_empty()) {
+        if content.maps.iter().any(|m| m.group_path.is_empty())
+            || !content.instances.iter().all(|i| i.binding.is_finite())
+        {
             return false;
         }
         let mut items = Self::items_of(&self.maps, &self.instances);

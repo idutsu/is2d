@@ -105,14 +105,29 @@ pub(crate) fn write_cels(
 }
 
 /// 今のコマの、レイヤー `layer_ids` のセル画の、番号が `pick` に合うインスタンスの結び付けを `f` で書き換え、後始末を
-/// する（`Cel::update_instances`・`finish_cel_writes`）。`false`：どのレイヤーも書かなかった
+/// する（`Cel::update_instances`・`finish_cel_writes`）。全部か無しか：数が有限でない結び付けになるレイヤーが1つでも
+/// あれば、どれも書かずに断る（`Refusal::OffGrid`。判定は書く入口と同じ `Cel::update_instances`）。`false`：どのレイヤーも
+/// 書かなかった
 pub(crate) fn update_instances(
     tab: &mut Tab,
     layer_ids: &[LayerId],
     pick: impl Fn(u64) -> bool,
     f: impl Fn(&mut crate::vector_engine::SymbolInstanceBinding),
 ) -> bool {
-    write_cels(tab, layer_ids, |_, cel, _| cel.update_instances(&pick, &f))
+    let tl = tab.active_timeline();
+    let accepted = tl
+        .layers
+        .iter()
+        .filter(|l| layer_ids.contains(&l.id))
+        .filter_map(|l| l.cel_at(tl.current_frame))
+        .all(|cel| cel.clone().update_instances(&pick, &f).is_ok());
+    if !accepted {
+        tab.session.refusal = Some(Refusal::OffGrid);
+        return false;
+    }
+    write_cels(tab, layer_ids, |_, cel, _| {
+        cel.update_instances(&pick, &f) == Ok(true)
+    })
 }
 
 /// 現在の編集スコープ（グループ内であればそのグループの所属レイヤー、そうでなければ現在のアクティブレイヤー）の `layer_id` を返す
@@ -283,10 +298,16 @@ pub(crate) type CommitPlan = Vec<(
 /// 計算から何を書くかまでをレイヤーごとに同時に作る（レイヤーをまたがないので、待ち時間はいちばん重いレイヤー1つ分）。
 /// 全部か無しか：1つでも書けない（編集できないレイヤーを含む）なら `None` を返して知らせる（浮いた片を残すのは呼ぶ側。
 /// 片はいつも文書か浮いた片のどちらかにあり、黙って消えない）。片の組の変換はかける前に確定と同じ式で確かめてある（変形
-/// は `Floating::fits_transform`、新しい中身は `prepare_placement`）
+/// は `floating::pieces_fit`、新しい中身は `prepare_placement`）
 pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
     use crate::planar_map::LocalEdit;
-    tab.refresh_scene_base();
+    // 画面の土台はいつも最新（`apply` の入口で作り直し、文書を変えた所は後始末で作り直す。Undo・保存の写しは確定の前に
+    // 作り直す）ので、ここでは作り直さない
+    #[cfg(test)]
+    assert!(
+        tab.scene_base_is_fresh(),
+        "浮いた片を確定するとき、画面の土台が古い"
+    );
     let scope = tab.session.editing_group_path.clone();
     let editable = editable_layer_ids(tab);
     // 1本の道（設計 段2b の 11. の F2）：片を窓で重ねたしまう形（`committed_local`）とセル画のしまう形の違いを差分にして、
@@ -418,7 +439,10 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
     let merged_any = !all_kept || (keep.is_empty() && had_rest);
     // 確定を断ったら、分ける前の浮いた片と選択に戻す
     let whole = merged_any.then(|| fl.clone());
-    let to_commit = match merged_any.then(|| fl.split_off(&keep)).transpose() {
+    let to_commit = match merged_any
+        .then(|| fl.split_off(&keep, &tab.session.editing_group_path))
+        .transpose()
+    {
         Ok(to_commit) => to_commit,
         Err(_) => {
             tab.session.set_floating(whole);
