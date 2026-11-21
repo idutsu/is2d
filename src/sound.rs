@@ -68,7 +68,21 @@ pub(crate) struct SoundClip {
     pub(crate) end: u64,
 }
 
+/// コマ数 `frames` を、作品の fps `fps` で、音の中の位置の単位（`SOUND_RATE`）にしたもの（いちばん近い整数）。コマと音の
+/// 位置を結ぶ決まりはこれ1つ（鳴らす位置 `sounding_at`・分割 `SoundClip::advanced`）
+pub(crate) fn frames_to_sound(frames: usize, fps: u32) -> u64 {
+    let fps = u64::from(fps.max(1));
+    (frames as u64 * SOUND_RATE * 2 + fps) / (2 * fps)
+}
+
 impl SoundClip {
+    /// この区間を、キーフレームの始まりから `frames` コマ進んだ所で分けた後ろ（同じ音の続きから鳴らす：F6 の分割）。
+    /// 進んだ所が終わり以降なら `None`（後ろに鳴らす音は無い）
+    pub(crate) fn advanced(self, frames: usize, fps: u32) -> Option<Self> {
+        let start = self.start + frames_to_sound(frames, fps);
+        (start < self.end).then_some(Self { start, ..self })
+    }
+
     /// 音 `s` の頭から終わりまで（読み込んだ・付けたときの区間）。長さが 0 の音は付けられないので `None`
     pub(crate) fn whole(s: &Sound) -> Option<Self> {
         let end = s.len();
@@ -162,4 +176,174 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Pcm, String> {
         return Err(bad("音が入っていません"));
     }
     Ok(Pcm { rate, samples })
+}
+
+// ============================================================================
+// いま、どの音のどこを鳴らすか（再生・スクラブ・書き出しのどれもが使う決まり：設計の 4 章）
+// ============================================================================
+
+/// コマ1つの間に鳴っている音1つ：どこから来た音か `key`（レイヤーの番号と、たどったインスタンスの番号の並び。
+/// 同じシンボルを2つ置けば別の音）、音、そのコマの始まりでの音の中の位置 `pos` と、音の終わり `end`（`SOUND_RATE` の単位）
+#[derive(Clone, Debug)]
+pub(crate) struct Voice {
+    pub(crate) key: Vec<u64>,
+    pub(crate) sound: Arc<Sound>,
+    pub(crate) pos: u64,
+    pub(crate) end: u64,
+}
+
+/// ルートのコマ `frame` で鳴っている音（`Voice`）。ルートのタイムラインの表示中のレイヤーの、そのコマを含むキーフレームの
+/// 音と、そのコマに置かれたシンボルの中の音（中のコマは絵と同じ `resolve_internal_frame` で決める。入れ子は描くのと同じく
+/// `MAX_SYMBOL_NEST_DEPTH` 段まで）。位置は「区間の始まり ＋ キーフレームの始まりから進んだコマ」（`frames_to_sound`）で、
+/// 区間の終わりから後は入れない
+pub(crate) fn sounding_at(doc: &crate::symbol::Document, frame: usize) -> Vec<Voice> {
+    let mut out = Vec::new();
+    collect_voices(doc, &doc.root, frame, &mut Vec::new(), 0, &mut out);
+    out
+}
+
+fn collect_voices(
+    doc: &crate::symbol::Document,
+    tl: &crate::timeline::Timeline,
+    frame: usize,
+    path: &mut Vec<u64>,
+    depth: usize,
+    out: &mut Vec<Voice>,
+) {
+    for layer in tl.layers.iter().filter(|l| l.visible) {
+        let Some(k) = layer.keyframe_index_at(frame) else {
+            continue;
+        };
+        let kf_start = layer.start_of(k);
+        let kf = &layer.keyframes[k];
+        path.push(layer.id);
+        if let Some(c) = kf.sound {
+            let pos = c.start + frames_to_sound(frame - kf_start, doc.fps);
+            let sound = doc.sounds.iter().find(|s| s.id == c.sound);
+            if let (true, Some(sound)) = (pos < c.end, sound) {
+                out.push(Voice {
+                    key: path.clone(),
+                    sound: Arc::clone(sound),
+                    pos,
+                    end: c.end,
+                });
+            }
+        }
+        if depth < crate::symbol::MAX_SYMBOL_NEST_DEPTH {
+            // トゥイーンの途中は、絵と同じく、そのコマの結び付けのインスタンスだけ
+            let bindings: Vec<crate::vector_engine::SymbolInstanceBinding> =
+                match layer.interpolated_tween_binding_at(frame) {
+                    Some(b) => vec![b],
+                    None => kf.cel.instances.iter().map(|i| i.binding).collect(),
+                };
+            for b in bindings {
+                let Some(sym) = doc.library.iter().find(|s| s.id == b.symbol_id) else {
+                    continue;
+                };
+                if let Some(inner) = sym.playing_internal_frame(b, kf_start, frame) {
+                    path.push(b.instance_gid);
+                    collect_voices(doc, &sym.timeline, inner, path, depth + 1, out);
+                    path.pop();
+                }
+            }
+        }
+        path.pop();
+    }
+}
+
+/// 音を切り替える所（鳴り始め・鳴り終わり・位置が飛んだ所）を、なめらかにつなぐ長さ（秒）。波形が急に途切れると
+/// 「ぷつっ」と鳴るのを防ぐ。耳にそれと分からない短さで、どの fps の1コマ（60fps で約 17ms）よりも十分短い
+const FADE_SECONDS: f64 = 0.002;
+
+/// 前のコマの音 `prev` から、このコマの音 `cur` へ、途切れずに続くか：同じ所から来た同じ音で、位置が1コマ分だけ進んで
+/// いる。位置はコマごとに `frames_to_sound` でいちばん近い整数に丸めるので、1コマ分の進みは、ちょうどの値から 1 まで
+/// ずれうる（丸めのずれは1つにつき 0.5 まで）。F6 で分けた所も、分ける前と同じく続く
+fn continues(prev: &Voice, cur: &Voice, fps: u32) -> bool {
+    let step = SOUND_RATE as f64 / f64::from(fps.max(1));
+    prev.key == cur.key
+        && prev.sound.id == cur.sound.id
+        && (cur.pos as f64 - (prev.pos as f64 + step)).abs() <= 1.0
+}
+
+/// 音 `s` の、音の中の位置 `p`（`SOUND_RATE` の単位。小数も）の左右の値（-1〜1）。元のサンプルの速さに合わせて、
+/// となりの2つのサンプルの間を直線でつなぐ（速さを合わせる決まりはここ1つ）。音の外は 0
+fn sample_at(s: &Sound, p: f64) -> (f32, f32) {
+    let x = p * f64::from(s.pcm.rate) / SOUND_RATE as f64;
+    if x < 0.0 {
+        return (0.0, 0.0);
+    }
+    let i = x.floor() as usize;
+    let f = (x - i as f64) as f32;
+    let at = |k: usize| -> (f32, f32) {
+        match s.pcm.samples.get(2 * k..2 * k + 2) {
+            Some(lr) => (f32::from(lr[0]) / 32768.0, f32::from(lr[1]) / 32768.0),
+            None => (0.0, 0.0),
+        }
+    };
+    let (a, b) = (at(i), at(i + 1));
+    (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f)
+}
+
+/// 文書 `doc` の音を、出力の速さ `rate`（1 秒あたりのサンプルの数）で、ルートのコマ 0 の始まりから数えて `start` 番目の
+/// サンプルから `count` 個分混ぜた波形（左・右・左・右…）。再生・スクラブ・書き出しのどれもが使う、混ぜる決まりの1つ：
+/// コマごとに鳴っている音（`sounding_at`）を足し、前のコマから続かない音は鳴り始めを、次のコマへ続かない音は鳴り終わり
+/// （区間の終わりか、コマの終わりの早いほう）を、`FADE_SECONDS` でなめらかにする（F6 で分けた所は続くので、なめらかに
+/// しない）。足した結果が -1〜1 を越える所はそこで切る
+pub(crate) fn mix(doc: &crate::symbol::Document, start: u64, count: usize, rate: u32) -> Vec<f32> {
+    let mut out = vec![0.0f32; 2 * count];
+    let fps = doc.fps.max(1);
+    let rate_f = f64::from(rate.max(1));
+    let frame_of = |n: u64| (n as f64 / rate_f * f64::from(fps)).floor() as usize;
+    let mut cache: std::collections::HashMap<usize, Vec<Voice>> = Default::default();
+    let mut voices = |f: usize| -> Vec<Voice> {
+        cache
+            .entry(f)
+            .or_insert_with(|| sounding_at(doc, f))
+            .clone()
+    };
+    let fade_units = FADE_SECONDS * SOUND_RATE as f64;
+    let mut i = 0usize;
+    while i < count {
+        let f = frame_of(start + i as u64);
+        // このコマに入るサンプルの範囲
+        let mut j = i;
+        while j < count && frame_of(start + j as u64) == f {
+            j += 1;
+        }
+        let cur = voices(f);
+        let prev = if f > 0 { voices(f - 1) } else { Vec::new() };
+        let next = voices(f + 1);
+        let frame_t0 = f as f64 / f64::from(fps);
+        let frame_t1 = (f + 1) as f64 / f64::from(fps);
+        for v in &cur {
+            let fade_in = !prev.iter().any(|p| continues(p, v, fps));
+            let fade_out = !next.iter().any(|n| continues(v, n, fps));
+            for (k, o) in out.chunks_exact_mut(2).enumerate().take(j).skip(i) {
+                let t = (start + k as u64) as f64 / rate_f;
+                let p = v.pos as f64 + (t - frame_t0) * SOUND_RATE as f64;
+                if p >= v.end as f64 {
+                    break;
+                }
+                let mut g = 1.0f64;
+                if fade_in {
+                    g = g.min((t - frame_t0) * SOUND_RATE as f64 / fade_units);
+                }
+                if fade_out {
+                    // 次のコマへ続かない：区間の終わりか、このコマの終わりの早いほうでなめらかに止める
+                    g = g
+                        .min((v.end as f64 - p) / fade_units)
+                        .min((frame_t1 - t) * SOUND_RATE as f64 / fade_units);
+                }
+                let g = g.clamp(0.0, 1.0) as f32;
+                let (l, r) = sample_at(&v.sound, p);
+                o[0] += l * g;
+                o[1] += r * g;
+            }
+        }
+        i = j;
+    }
+    for x in &mut out {
+        *x = x.clamp(-1.0, 1.0);
+    }
+    out
 }

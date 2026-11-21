@@ -1741,8 +1741,8 @@ fn apply_timeline_insert_keyframe(tab: &mut Tab, clone_prev: bool) -> bool {
     if targets.is_empty() {
         return false;
     }
-    let changed = mutate_timeline_with_undo(tab, |tl, _| {
-        tl.insert_keyframe_on_targets(&targets, clone_prev)
+    let changed = mutate_timeline_with_undo(tab, |tl, doc| {
+        tl.insert_keyframe_on_targets(&targets, clone_prev, doc.fps)
     });
     if changed && clone_prev {
         select_shapes_for_timeline_selection(tab);
@@ -1809,7 +1809,8 @@ fn apply_timeline_move_or_copy_frames(
         return false;
     };
     mutate_timeline_with_undo(tab, |tl, doc| {
-        tl.move_or_copy_frames(sel, dst_sel, actual_dl, copy_mode, || doc.alloc_group_id());
+        let fps = doc.fps;
+        tl.move_or_copy_frames(sel, dst_sel, actual_dl, copy_mode, fps, || doc.alloc_group_id());
         true
     });
     select_shapes_for_timeline_selection(tab);

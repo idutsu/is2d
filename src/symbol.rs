@@ -470,6 +470,23 @@ impl SymbolDef {
         internal_frame % fc
     }
 
+    /// 音を鳴らすときの中のコマ（`resolve_internal_frame`）。コマ固定は音を進めようがないので鳴らさず、1回再生は最後のコマを
+    /// 過ぎたら止まる（どちらも `None`。設計：claude/オーディオの設計_9693dbf.md）
+    pub(crate) fn playing_internal_frame(
+        &self,
+        binding: SymbolInstanceBinding,
+        kf_start_frame: usize,
+        current_frame: usize,
+    ) -> Option<usize> {
+        let fc = self.timeline.total_frames.max(1);
+        let elapsed = current_frame.saturating_sub(kf_start_frame);
+        match binding.loop_mode {
+            SymbolLoopMode::SingleFrame => None,
+            SymbolLoopMode::PlayOnce if binding.first_frame.min(fc - 1) + elapsed > fc - 1 => None,
+            _ => Some(self.resolve_internal_frame(binding, kf_start_frame, current_frame)),
+        }
+    }
+
     /// シンボルインスタンス `parent_binding` を現在コマ `current_frame`（親キーフレーム開始コマ `parent_kf_start`）で分解した
     /// ときの中身：見えているレイヤーごと（下から順）の、そのコマのセル画（展開と同じ決まりでコマを選ぶ：
     /// `resolve_internal_frame`）。トゥイーンの途中のレイヤーは、そのコマの結び付けのインスタンスだけ。中のインスタンスの

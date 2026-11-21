@@ -1697,7 +1697,8 @@ impl Layer {
     }
 
     /// 指定フレーム `frame` にキーフレームを挿入する（`clone_prev == true`: `F6` 複製 / `false`: `F7` 空白）
-    pub(crate) fn insert_keyframe(&mut self, frame: usize, clone_prev: bool) -> bool {
+    /// （`fps`：作品の fps。音の区間を分けた位置を、音の中の位置にする：`SoundClip::advanced`）
+    pub(crate) fn insert_keyframe(&mut self, frame: usize, clone_prev: bool, fps: u32) -> bool {
         let mut changed = false;
         if frame >= self.frame_count {
             self.frame_count = frame + 1;
@@ -1713,12 +1714,20 @@ impl Layer {
             return changed;
         }
 
+        let prev = self.keyframe_index_at(frame);
         let new_kf = if clone_prev {
-            self.snapshot_keyframe_at(frame)
+            self.snapshot_keyframe_at(frame, fps)
         } else {
             Keyframe::new_blank()
         };
+        // 音の区間の途中で分けたら、前の区間は分けた所で終わる（後ろは続きから鳴る）
+        let split_at = new_kf.sound.map(|c| c.start);
         self.insert_keyframe_starting_at(frame, new_kf);
+        if let (Some(at), Some(p)) = (split_at, prev) {
+            if let Some(c) = &mut self.keyframe_mut(p).sound {
+                c.end = at;
+            }
+        }
         true
     }
 
@@ -1808,7 +1817,8 @@ impl Layer {
 
     /// 指定フレーム `frame` における評価済みセル姿勢（クラシックトゥイーン中割り姿勢および経過フレーム分の内部 `first_frame` 進行を含む）を、
     /// 新しい `Keyframe` として構築して返す（始まりのコマは、列に入れるときに決める）
-    pub(crate) fn snapshot_keyframe_at(&self, frame: usize) -> Keyframe {
+    /// 音の区間は、途中のコマなら、そこまで進んだ続きから鳴らす区間にする（`SoundClip::advanced`。`fps`：作品の fps）
+    pub(crate) fn snapshot_keyframe_at(&self, frame: usize, fps: u32) -> Keyframe {
         if frame >= self.frame_count {
             return Keyframe::new_blank();
         }
@@ -1838,6 +1848,7 @@ impl Layer {
         }
         let (tween, tween_rotate) = valid_tween_settings(kf.tween, kf.tween_rotate, &cel);
         Keyframe::with_cel(cel, tween, tween_rotate)
+            .with_sound(kf.sound.and_then(|c| c.advanced(frame - kf_start, fps)))
     }
 
     /// 指定フレーム区間 `[min_frame..=max_frame]` 内のキーフレーム群を、相対フレーム位置（`0..=max_frame - min_frame`）と組にして抽出する
@@ -1846,6 +1857,7 @@ impl Layer {
         &self,
         min_frame: usize,
         max_frame: usize,
+        fps: u32,
     ) -> RelativeKeyframes {
         let mut kfs: RelativeKeyframes = self
             .keyframes_with_start()
@@ -1854,7 +1866,7 @@ impl Layer {
             .collect();
 
         if kfs.first().is_none_or(|&(rel, _)| rel != 0) {
-            kfs.insert(0, (0, self.snapshot_keyframe_at(min_frame)));
+            kfs.insert(0, (0, self.snapshot_keyframe_at(min_frame, fps)));
         }
         kfs
     }
@@ -2189,6 +2201,7 @@ impl Timeline {
         &mut self,
         targets: &[usize],
         clone_prev: bool,
+        fps: u32,
     ) -> bool {
         let curr_f = self.current_frame;
         let should_advance = if clone_prev {
@@ -2222,7 +2235,7 @@ impl Timeline {
                 if shift_for_blank {
                     layer.insert_frame_at(curr_f);
                 }
-                changed |= layer.insert_keyframe(target_frame, clone_prev);
+                changed |= layer.insert_keyframe(target_frame, clone_prev, fps);
             }
         }
         self.sync_total_frames();
@@ -2379,6 +2392,7 @@ impl Timeline {
         dst_sel: TimelineCellSelection,
         actual_dl: isize,
         copy_mode: bool,
+        fps: u32,
         mut alloc_group_id: impl FnMut() -> u64,
     ) {
         let extracted: Vec<(usize, usize, usize, usize, RelativeKeyframes)> = (sel.min_layer
@@ -2392,7 +2406,8 @@ impl Timeline {
                 }
                 let src_max_frame = sel.max_frame.min(src_layer.frame_count - 1);
                 let dst_max_frame = dst_sel.min_frame + (src_max_frame - sel.min_frame);
-                let mut kfs = src_layer.extract_keyframes_in_range(sel.min_frame, src_max_frame);
+                let mut kfs =
+                    src_layer.extract_keyframes_in_range(sel.min_frame, src_max_frame, fps);
                 // 番号を振り直すのは、別のレイヤーへ移す・複製するときだけ。同じレイヤーの別のコマは
                 // 同時に表示されないので、F6 と同じく番号のまま置き、セルを元と共有する
                 if actual_dl != 0 {

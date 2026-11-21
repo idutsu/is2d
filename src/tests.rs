@@ -2014,14 +2014,14 @@ fn test_timeline_layer_keyframe_insertion_and_cel_lookup() {
     put_cel_shapes(&mut app, 0, 0, stroke);
     assert_eq!(app.doc.root.active_cel_shapes().len(), 1);
 
-    app.doc.root.layers[0].insert_keyframe(4, false);
+    app.doc.root.layers[0].insert_keyframe(4, false, 24);
     assert_eq!(app.doc.root.layers[0].frame_count, 5);
     assert_eq!(app.doc.root.layers[0].keyframe_index_at(3), Some(0));
     assert_eq!(app.doc.root.layers[0].keyframe_index_at(4), Some(1));
     assert_eq!(app.doc.root.layers[0].cel_at(2).unwrap().shapes().len(), 1);
     assert!(app.doc.root.layers[0].cel_at(4).unwrap().is_empty());
 
-    app.doc.root.layers[0].insert_keyframe(3, true);
+    app.doc.root.layers[0].insert_keyframe(3, true, 24);
     assert_eq!(app.doc.root.layers[0].cel_at(3).unwrap().shapes().len(), 1);
 }
 
@@ -2321,8 +2321,8 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
     assert!(app.doc.root.layers[0].cel_at(1).unwrap().is_empty());
     assert!(!app.doc.root.layers[0].cel_at(2).unwrap().is_empty());
 
-    app.doc.root.layers[1].insert_keyframe(3, false);
-    app.doc.root.layers[1].insert_keyframe(4, false);
+    app.doc.root.layers[1].insert_keyframe(3, false, 24);
+    app.doc.root.layers[1].insert_keyframe(4, false, 24);
     let kf_count_before = app.doc.root.layers[1].keyframes.len();
     timeline_ui::select_timeline_cells(&mut app, 1, 0, 1, 0);
     assert!(timeline_ui::timeline_remove_frame(&mut app));
@@ -4674,7 +4674,7 @@ fn test_keyframe_list_copy_shares_untouched_chunks() {
     use crate::timeline::Layer;
     let mut layer = Layer::new_with_id_and_frames(1, "L", 3000);
     for f in 1..3000 {
-        layer.insert_keyframe(f, false);
+        layer.insert_keyframe(f, false, 24);
     }
     let snapshot = layer.clone();
     layer.keyframe_mut(1500).tween = true;
@@ -4692,7 +4692,7 @@ fn test_frame_insert_and_remove_keep_later_keyframe_chunks_shared() {
     use crate::timeline::{Layer, Timeline, TimelineCellSelection};
     let mut layer = Layer::new_with_id_and_frames(1, "L", 6000);
     for f in (2..6000).step_by(2) {
-        layer.insert_keyframe(f, false);
+        layer.insert_keyframe(f, false, 24);
     }
     let keyframes = layer.keyframes.len();
     // キーフレームの始まりのコマ（保持の終わりから求める）
@@ -6295,7 +6295,7 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
     sym_f6_app.with_active_timeline_mut(|tl, _| {
         tl.layers[0].insert_frame_at(3);
         tl.sync_total_frames();
-        tl.layers[0].insert_keyframe(2, false);
+        tl.layers[0].insert_keyframe(2, false, 24);
     });
     put_cel_shapes(
         &mut sym_f6_app,
@@ -6584,7 +6584,7 @@ fn test_onion_prepare_in_parallel_matches_one_by_one() {
         crate::doc_actions::switch_to_layer_and_frame(&mut app, layer, 0);
         assert!(apply(&mut app, stroke(220.0, Color32::BLUE)));
         for f in 1..12 {
-            assert!(app.doc.root.layers[layer].insert_keyframe(f, true));
+            assert!(app.doc.root.layers[layer].insert_keyframe(f, true, 24));
             crate::doc_actions::switch_to_layer_and_frame(&mut app, layer, f);
             let lid = app.doc.root.layers[layer].id;
             let idx: Vec<usize> = (0..app.scene().len())
@@ -6642,7 +6642,7 @@ fn test_onion_skin_passes_cached_mesh_to_egui_without_copying() {
             color: Color32::RED,
         }
     ));
-    assert!(app.doc.root.layers[0].insert_keyframe(1, true));
+    assert!(app.doc.root.layers[0].insert_keyframe(1, true, 24));
     app.doc.root.sync_total_frames();
     crate::doc_actions::switch_to_layer_and_frame(&mut app, 0, 1);
     app.view.onion_skin_enabled = true;
@@ -14696,7 +14696,7 @@ fn test_g6_1_resolved_cel_cache_byte_limit_and_2min_playback_memory() {
         .cel
         .set_shapes_and_instances(Vec::new(), vec![inst_start]);
     app.doc.root.layers[0].keyframe_mut(0).tween = true;
-    app.doc.root.layers[0].insert_keyframe(2_879, true);
+    app.doc.root.layers[0].insert_keyframe(2_879, true, 24);
     let last_kf_idx = app.doc.root.layers[0].keyframes.len() - 1;
     app.doc.root.layers[0]
         .keyframe_mut(last_kf_idx)
@@ -15390,7 +15390,7 @@ fn test_m2_4_delete_symbol_2880_keyframes_fast_and_no_memory_growth() {
         sym.timeline.total_frames = 8;
         sym.timeline.layers[0].frame_count = 8;
         for f in 1..8 {
-            sym.timeline.layers[0].insert_keyframe(f, false);
+            sym.timeline.layers[0].insert_keyframe(f, false, 24);
             sym.timeline.layers[0].keyframe_mut(f).cel =
                 timeline::Cel::from_shapes_unwrap(shapes.clone());
         }
@@ -19187,7 +19187,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
                 vec![sym_a.timeline.layers[0].keyframes[0].cel.instances[0].clone()],
             );
             sym_a.timeline.layers[0].keyframe_mut(0).tween = true;
-            sym_a.timeline.layers[0].insert_keyframe(4, true);
+            sym_a.timeline.layers[0].insert_keyframe(4, true, 24);
             sym_a.timeline.layers[0].keyframe_mut(1).cel.instances_mut()[0]
                 .binding
                 .xform *= Affine::translate((80.0, 0.0));
@@ -30751,7 +30751,7 @@ fn keyframes_after_frame_100000_survive_saving_and_opening() {
     let path = dir.join("long.is2d");
     let mut app = Is2dApp::default();
     app.tab_mut().with_active_timeline_mut(|tl, _| {
-        assert!(tl.layers[0].insert_keyframe(100_005, false));
+        assert!(tl.layers[0].insert_keyframe(100_005, false, 24));
         tl.sync_total_frames();
     });
     put_cel_shapes(
@@ -33554,7 +33554,7 @@ fn save_many_keyframes(name: &str, n: usize) -> std::path::PathBuf {
     for k in 0..n {
         if k > 0 {
             app.tab_mut().with_active_timeline_mut(|tl, _| {
-                assert!(tl.layers[0].insert_keyframe(2 * k, false));
+                assert!(tl.layers[0].insert_keyframe(2 * k, false, 24));
                 tl.sync_total_frames();
             });
         }
@@ -33614,7 +33614,7 @@ fn drawing_the_timeline_examines_only_visible_keyframes() {
     let mut app = Is2dApp::default();
     app.tab_mut().with_active_timeline_mut(|tl, _| {
         for k in 1..2000 {
-            assert!(tl.layers[0].insert_keyframe(2 * k, false));
+            assert!(tl.layers[0].insert_keyframe(2 * k, false, 24));
         }
         tl.sync_total_frames();
     });
@@ -36385,4 +36385,182 @@ fn broken_sound_data_is_refused_when_opening() {
     d.timeline.layers[0].keyframes[0].sound = good.timeline.layers[0].keyframes[0].sound;
     d.write_map_tiles();
     assert!(d.into_document().is_err());
+}
+
+/// テスト用：1 秒の、値がいつも 0.5 の音（48kHz・1 つの音）を音のライブラリに入れた文書（fps 24）。音の番号は 1
+fn doc_with_flat_sound() -> symbol::Document {
+    let mut doc = symbol::Document {
+        fps: 24,
+        ..Default::default()
+    };
+    let bytes = wav_bytes(48_000, 1, &vec![16384i16; 48_000]);
+    let s = crate::sound::Sound::new(1, "flat".to_owned(), bytes.into()).unwrap();
+    std::sync::Arc::make_mut(&mut doc.sounds).push(std::sync::Arc::new(s));
+    doc.next_sound_id = 2;
+    doc
+}
+
+/// テスト用：タイムライン `tl` の1枚目のレイヤーを `frames` コマにし、コマ 0 のキーフレームに音 1 の区間 `clip` を付ける
+fn put_clip(tl: &mut timeline::Timeline, frames: usize, clip: crate::sound::SoundClip) {
+    tl.layers[0].frame_count = frames;
+    tl.layers[0].keyframe_mut(0).sound = Some(clip);
+    tl.total_frames = tl.total_frames.max(frames);
+}
+
+fn flat_clip() -> crate::sound::SoundClip {
+    crate::sound::SoundClip {
+        sound: 1,
+        start: 0,
+        end: crate::sound::SOUND_RATE,
+    }
+}
+
+/// ルートのキーフレームの音は、キーフレームの始まりから進んだコマの分の位置で鳴り、区間の終わりから後は鳴らない。
+/// 非表示のレイヤーの音は鳴らない
+#[test]
+fn sounding_at_follows_the_frame_on_the_root() {
+    let mut doc = doc_with_flat_sound();
+    put_clip(&mut doc.root, 30, flat_clip());
+    let pos = |doc: &symbol::Document, f: usize| -> Vec<u64> {
+        crate::sound::sounding_at(doc, f).iter().map(|v| v.pos).collect()
+    };
+    assert_eq!(pos(&doc, 0), vec![0]);
+    assert_eq!(pos(&doc, 12), vec![24_000]);
+    assert_eq!(pos(&doc, 23), vec![46_000]);
+    assert!(pos(&doc, 24).is_empty(), "1 秒の音は 24 コマ目から鳴らない");
+    doc.root.layers[0].visible = false;
+    assert!(pos(&doc, 0).is_empty());
+}
+
+/// F6 で音の区間の途中を分けると、後ろのキーフレームは続きから鳴り、前の区間は分けた所で終わる。鳴る音は分ける前と
+/// 同じ（混ぜた波形もビットまで同じ：fps 24 は 48,000 を割り切る）
+#[test]
+fn splitting_a_sound_with_f6_keeps_the_same_sound() {
+    let mut doc = doc_with_flat_sound();
+    put_clip(&mut doc.root, 30, flat_clip());
+    let before: Vec<Vec<u64>> = (0..30)
+        .map(|f| crate::sound::sounding_at(&doc, f).iter().map(|v| v.pos).collect())
+        .collect();
+    let mixed_before = crate::sound::mix(&doc, 0, 48_000, 48_000);
+    assert!(doc.root.layers[0].insert_keyframe(12, true, doc.fps));
+    let kfs: Vec<_> = doc.root.layers[0].keyframes.iter().map(|k| k.sound).collect();
+    assert_eq!(
+        kfs,
+        vec![
+            Some(crate::sound::SoundClip { end: 24_000, ..flat_clip() }),
+            Some(crate::sound::SoundClip { start: 24_000, ..flat_clip() }),
+        ]
+    );
+    let after: Vec<Vec<u64>> = (0..30)
+        .map(|f| crate::sound::sounding_at(&doc, f).iter().map(|v| v.pos).collect())
+        .collect();
+    assert_eq!(before, after);
+    assert_eq!(crate::sound::mix(&doc, 0, 48_000, 48_000), mixed_before);
+
+    // 48,000 を割り切らない fps（7）でも、分けた所で音が途切れない（位置の丸めのずれは 1 まで）
+    let mut doc = doc_with_flat_sound();
+    doc.fps = 7;
+    put_clip(&mut doc.root, 30, flat_clip());
+    assert!(doc.root.layers[0].insert_keyframe(3, true, doc.fps));
+    let m = crate::sound::mix(&doc, 0, 48_000, 48_000);
+    let split = 3 * 48_000 / 7;
+    assert!(
+        (split - 200..split + 200).all(|i| (m[2 * i] - 0.5).abs() < 1e-6),
+        "分けた所の前後で小さくならない"
+    );
+}
+
+/// シンボルの中の音は、中のコマで鳴る：ループは頭から鳴り直し、1回再生は最後のコマを過ぎたら止まり、コマ固定は鳴らない。
+/// 2つ置けば、別々の音として2つ鳴る
+#[test]
+fn sounds_inside_symbols_follow_the_internal_frame() {
+    use crate::symbol::SymbolLoopMode;
+    let build = |modes: &[SymbolLoopMode]| -> symbol::Document {
+        let mut doc = doc_with_flat_sound();
+        let sym_id = doc.register_new_symbol(Vec::new());
+        {
+            let sym = doc.find_symbol_mut(sym_id).unwrap();
+            put_clip(&mut sym.timeline, 3, flat_clip());
+        }
+        doc.root.layers[0].frame_count = 6;
+        doc.root.total_frames = 6;
+        for (k, &mode) in modes.iter().enumerate() {
+            let mut b = crate::vector_engine::SymbolInstanceBinding::new(
+                100 + k as u64,
+                sym_id,
+                kurbo::Affine::IDENTITY,
+            );
+            b.loop_mode = mode;
+            let lid = doc.root.layers[0].id;
+            doc.root.layers[0].keyframe_mut(0).cel.instances_mut().push(
+                timeline::SymbolInstance {
+                    binding: b,
+                    layer_id: lid,
+                    parent_scope: Vec::new(),
+                    order: 0,
+                },
+            );
+        }
+        doc
+    };
+    let pos = |doc: &symbol::Document, f: usize| -> Vec<u64> {
+        crate::sound::sounding_at(doc, f).iter().map(|v| v.pos).collect()
+    };
+    let looped = build(&[SymbolLoopMode::Loop]);
+    let got: Vec<Vec<u64>> = (0..6).map(|f| pos(&looped, f)).collect();
+    assert_eq!(
+        got,
+        vec![vec![0], vec![2000], vec![4000], vec![0], vec![2000], vec![4000]]
+    );
+    let once = build(&[SymbolLoopMode::PlayOnce]);
+    let got: Vec<Vec<u64>> = (0..6).map(|f| pos(&once, f)).collect();
+    assert_eq!(got, vec![vec![0], vec![2000], vec![4000], vec![], vec![], vec![]]);
+    let fixed = build(&[SymbolLoopMode::SingleFrame]);
+    assert!((0..6).all(|f| pos(&fixed, f).is_empty()));
+    let two = build(&[SymbolLoopMode::Loop, SymbolLoopMode::Loop]);
+    let voices = crate::sound::sounding_at(&two, 1);
+    assert_eq!(voices.len(), 2);
+    assert_ne!(voices[0].key, voices[1].key);
+}
+
+/// 混ぜた波形：音の無い文書は無音。鳴り始めはなめらかに大きくなり、コマの境目では途切れず、ループで頭に戻る所は
+/// なめらかにつなぎ直す
+#[test]
+fn mixing_fades_only_where_the_sound_jumps() {
+    let empty = symbol::Document::default();
+    assert!(crate::sound::mix(&empty, 0, 4800, 48_000).iter().all(|&x| x == 0.0));
+    let mut doc = doc_with_flat_sound();
+    put_clip(&mut doc.root, 30, flat_clip());
+    let m = crate::sound::mix(&doc, 0, 48_000, 48_000);
+    let left = |i: usize| m[2 * i];
+    assert_eq!(left(0), 0.0, "鳴り始めは 0 から");
+    assert!(left(10) > 0.0 && left(10) < 0.5);
+    assert!((left(1000) - 0.5).abs() < 1e-6);
+    // コマの境目（2000 サンプルごと）でも途切れない
+    assert!((left(2000) - 0.5).abs() < 1e-6 && (left(1999) - 0.5).abs() < 1e-6);
+    // 区間の終わり（1 秒）の手前でなめらかに小さくなる
+    assert!(left(47_999) < 0.05);
+
+    // 3 コマのシンボルをループで置くと、3 コマごとに頭へ戻る所でつなぎ直す
+    let mut doc = doc_with_flat_sound();
+    let sym_id = doc.register_new_symbol(Vec::new());
+    {
+        let sym = doc.find_symbol_mut(sym_id).unwrap();
+        put_clip(&mut sym.timeline, 3, flat_clip());
+    }
+    doc.root.layers[0].frame_count = 6;
+    doc.root.total_frames = 6;
+    let b = crate::vector_engine::SymbolInstanceBinding::new(7, sym_id, kurbo::Affine::IDENTITY);
+    let lid = doc.root.layers[0].id;
+    doc.root.layers[0].keyframe_mut(0).cel.instances_mut().push(timeline::SymbolInstance {
+        binding: b,
+        layer_id: lid,
+        parent_scope: Vec::new(),
+        order: 0,
+    });
+    let m = crate::sound::mix(&doc, 0, 12_000, 48_000);
+    let left = |i: usize| m[2 * i];
+    assert!((left(5000) - 0.5).abs() < 1e-6, "3 コマの中は途切れない");
+    assert!(left(5999) < 0.05 && left(6000) == 0.0, "頭へ戻る所でつなぎ直す");
+    assert!((left(7000) - 0.5).abs() < 1e-6);
 }
