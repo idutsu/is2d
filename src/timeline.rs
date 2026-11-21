@@ -6,7 +6,10 @@ use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, OnceLock, PoisonError, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock, PoisonError, Weak,
+    },
 };
 
 /// 1タイムラインあたりの最大許容レイヤー数
@@ -308,14 +311,34 @@ impl UncheckedMaps {
     }
 
     /// 確かめる（使うときと同じ入口 `LazyStored::get` を通るので、同じ地図を同時に使えば、片方が待つだけ。壊れていれば
-    /// 知らせる）。まだ残っていて確かめた地図の数
+    /// 知らせる）。まだ残っていて確かめた地図の数。確かめ1回の手間は辺の数に比例するので（レビュー 96fdc26 の N-6001
+    /// で測った）、確かめ終わるまでの時間は、スレッドを増やして短くする：このスレッドと、コア数から画面のスレッドの分の
+    /// 1つを引いた数まで（作品の量に比例させない）のスレッドが、並びの前から1枚ずつ取って確かめる（取るのはコマの順）
     pub(crate) fn check(self) -> usize {
-        let mut checked = 0;
-        for m in self.0.iter().filter_map(Weak::upgrade) {
-            m.get();
-            checked += 1;
-        }
-        checked
+        let next = AtomicUsize::new(0);
+        let checked = AtomicUsize::new(0);
+        let work = || loop {
+            let Some(m) = self.0.get(next.fetch_add(1, Ordering::Relaxed)) else {
+                break;
+            };
+            if let Some(m) = m.upgrade() {
+                m.get();
+                checked.fetch_add(1, Ordering::Relaxed);
+            }
+        };
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get().saturating_sub(1))
+            .clamp(1, self.0.len().max(1));
+        std::thread::scope(|s| {
+            // 作れなかったスレッドの分は、作れたスレッドが取って確かめる
+            for _ in 1..threads {
+                let _ = std::thread::Builder::new()
+                    .name("is2d-map-check".to_owned())
+                    .spawn_scoped(s, work);
+            }
+            work();
+        });
+        checked.into_inner()
     }
 }
 

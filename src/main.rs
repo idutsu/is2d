@@ -644,43 +644,12 @@ impl Is2dApp {
             }
             self.tool.select_sub_mode = SelectSubMode::Reshape;
         } else if self.tool.tool == Tool::Select {
-            let has_repeat_key = i.events.iter().any(|ev| {
-                matches!(
-                    ev,
-                    egui::Event::Key {
-                        pressed: true,
-                        repeat: true,
-                        ..
-                    }
-                )
-            });
-            let plus_pressed = key_pressed_no_repeat(i, Key::Plus)
-                || key_pressed_no_repeat(i, Key::Equals)
-                || key_pressed_no_repeat(i, Key::Semicolon)
-                || (!has_repeat_key
-                    && i.events.iter().any(|ev| {
-                        matches!(ev, egui::Event::Text(t) if t == "+" || t == "=" || t == ";" || t == "＋")
-                    }));
-            let minus_pressed = key_pressed_no_repeat(i, Key::Minus)
-                || (!has_repeat_key
-                    && i.events.iter().any(
-                        |ev| matches!(ev, egui::Event::Text(t) if t == "-" || t == "ー" || t == "－"),
-                    ));
-
-            if plus_pressed {
-                apply(
-                    self,
-                    Action::ToggleSelectSubMode {
-                        mode: SelectSubMode::AddAnchor,
-                    },
-                );
-            } else if minus_pressed {
-                apply(
-                    self,
-                    Action::ToggleSelectSubMode {
-                        mode: SelectSubMode::DeleteAnchor,
-                    },
-                );
+            if let Some(key) = plus_minus_pressed(&i.events, false) {
+                let mode = match key {
+                    PlusMinus::Plus => SelectSubMode::AddAnchor,
+                    PlusMinus::Minus => SelectSubMode::DeleteAnchor,
+                };
+                apply(self, Action::ToggleSelectSubMode { mode });
             }
         }
     }
@@ -716,22 +685,16 @@ impl Is2dApp {
         } else if cmd && key_pressed_no_repeat(i, Key::Num3) {
             let next = !self.tab().view.clip_outside_stage;
             self.tab_mut().view.clip_outside_stage = next;
-        } else if cmd
-            && (i.key_pressed(Key::Plus)
-                || i.key_pressed(Key::Equals)
-                || i.key_pressed(Key::Semicolon))
-        {
+        } else if let Some(key) = plus_minus_pressed(&i.events, true).filter(|_| cmd) {
+            let factor = match key {
+                PlusMinus::Plus => 1.25,
+                PlusMinus::Minus => 0.8,
+            };
             let center = i
                 .pointer
                 .hover_pos()
                 .unwrap_or_else(|| self.canvas_rect.center());
-            self.tab_mut().view.zoom_around_screen_pos(center, 1.25);
-        } else if cmd && i.key_pressed(Key::Minus) {
-            let center = i
-                .pointer
-                .hover_pos()
-                .unwrap_or_else(|| self.canvas_rect.center());
-            self.tab_mut().view.zoom_around_screen_pos(center, 0.8);
+            self.tab_mut().view.zoom_around_screen_pos(center, factor);
         } else if cmd && key_pressed_no_repeat(i, Key::G) {
             if i.modifiers.shift {
                 apply(self, Action::Ungroup);
@@ -1088,6 +1051,39 @@ impl Is2dApp {
         // そのフレームの操作をすべて適用した後の状態からウィンドウタイトルを更新する
         project_io::update_window_title(self, ctx);
     }
+}
+
+/// `+` と `-` のキー（選択ツールのアンカー追加・削除、`Cmd` と合わせてズームイン・アウト）
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PlusMinus {
+    Plus,
+    Minus,
+}
+
+/// このコマに押した `+`／`-` のキーを、キーの位置（`Event::Key` の `physical_key`）だけで決める。
+/// キーの位置は配列（US・JIS など）や日本語入力に左右されないので、文字の合図は見ない。
+///
+/// キーの位置の名前は US 配列の刻印で付いている。`-` は、どちらの配列でも `0` の右のキー
+/// （`Key::Minus`。テンキーの `-` も同じ名前で来る）。`+` の刻印は、US では `0` の2つ右のキー
+/// （`Key::Equals`）、JIS では `L` の右のキー（`Key::Semicolon`）にある。キーの位置からは配列が
+/// わからないので、`+` はこの2つの位置とテンキーの `+`（`Key::Plus`）のどれでも `+` とする
+/// （そのため US の `;`、JIS の `^` のキーも `+` になる）。
+///
+/// `repeat` が偽なら、押しっぱなしの繰り返しの合図は数えない
+fn plus_minus_pressed(events: &[egui::Event], repeat: bool) -> Option<PlusMinus> {
+    events.iter().find_map(|ev| match ev {
+        egui::Event::Key {
+            physical_key: Some(key),
+            pressed: true,
+            repeat: is_repeat,
+            ..
+        } if repeat || !is_repeat => match key {
+            Key::Equals | Key::Semicolon | Key::Plus => Some(PlusMinus::Plus),
+            Key::Minus => Some(PlusMinus::Minus),
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 impl eframe::App for Is2dApp {

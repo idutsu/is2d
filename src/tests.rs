@@ -7012,7 +7012,7 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
     );
     assert_eq!(app.tool.tool, Tool::Transform);
 
-    // 3. Cmd+Plus でキャンバスのみがズームインし egui 全体の UI zoom_factor は 1.0 のまま維持され、Cmd+0 で viewport.zoom が 1.0 にリセットされること (#1)
+    // 3. Cmd+Plus（US 配列の `=`／`+` のキー）でキャンバスのみがズームインし egui 全体の UI zoom_factor は 1.0 のまま維持され、Cmd+0 で viewport.zoom が 1.0 にリセットされること (#1)
     let cmd_mods = egui::Modifiers {
         command: true,
         ctrl: true,
@@ -7024,7 +7024,7 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
             modifiers: cmd_mods,
             events: vec![egui::Event::Key {
                 key: egui::Key::Plus,
-                physical_key: None,
+                physical_key: Some(egui::Key::Equals),
                 pressed: true,
                 repeat: false,
                 modifiers: cmd_mods,
@@ -7089,6 +7089,49 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
         Tool::Transform,
         "Esc で選択解除しても現在のツール (Tool::Transform) が勝手に Tool::Select へ切り替わらないこと"
     );
+}
+
+/// `+`／`-` のキーは、キーの位置だけで決まる（レビュー 96fdc26 の H4）。配列や日本語入力で論理キーが
+/// 何になっても（来なくても）、位置が同じなら同じ答え。US・JIS の `+` の刻印の位置はどちらも `+`
+#[test]
+fn plus_minus_keys_are_decided_by_key_position() {
+    use super::{plus_minus_pressed, PlusMinus};
+    use eframe::egui::{self, Key};
+    let event = |key: Key, at: Option<Key>, pressed: bool, repeat: bool| egui::Event::Key {
+        key,
+        physical_key: at,
+        pressed,
+        repeat,
+        modifiers: egui::Modifiers::NONE,
+    };
+    // 論理キー `key`・位置 `at` のキーを1回押したときの答え
+    let once =
+        |key: Key, at: Option<Key>| plus_minus_pressed(&[event(key, at, true, false)], false);
+    let (plus, minus) = (Some(PlusMinus::Plus), Some(PlusMinus::Minus));
+    // US の `=`／`+` のキー（Shift の有無で論理キーが変わっても同じ）
+    assert_eq!(once(Key::Equals, Some(Key::Equals)), plus);
+    assert_eq!(once(Key::Plus, Some(Key::Equals)), plus);
+    // JIS の `;`／`+` のキー（論理キーは `;`・`+`）
+    assert_eq!(once(Key::Semicolon, Some(Key::Semicolon)), plus);
+    assert_eq!(once(Key::Plus, Some(Key::Semicolon)), plus);
+    // テンキーの `+`（テンキーの `-` は `-` のキーと同じ位置の名前で来る）
+    assert_eq!(once(Key::Plus, Some(Key::Plus)), plus);
+    // `-` のキー（日本語入力で論理キーが来ないときは、egui-winit が位置の名前を論理キーにする）
+    assert_eq!(once(Key::Minus, Some(Key::Minus)), minus);
+    // 論理キーが `+`・`-` でも、位置が違えば `+`／`-` ではない（配列で刻印が動いても位置で決める）
+    assert_eq!(once(Key::Plus, Some(Key::Num1)), None);
+    assert_eq!(once(Key::Minus, Some(Key::Quote)), None);
+    assert_eq!(once(Key::Minus, None), None);
+    // 押しっぱなしの繰り返しは、`repeat` が偽なら数えず、真なら数える
+    let held = [event(Key::Minus, Some(Key::Minus), true, true)];
+    assert_eq!(plus_minus_pressed(&held, false), None);
+    assert_eq!(plus_minus_pressed(&held, true), minus);
+    // 離した合図と文字の合図は見ない
+    let others = [
+        event(Key::Minus, Some(Key::Minus), false, false),
+        egui::Event::Text("ー".into()),
+    ];
+    assert_eq!(plus_minus_pressed(&others, true), None);
 }
 
 /// `Cmd` のショートカット（コピーなど）のすぐ後に、ふつうに `V`（選択ツール）を押して離しても貼り付けない。直す前は、
