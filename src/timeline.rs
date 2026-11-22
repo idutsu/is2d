@@ -2225,6 +2225,18 @@ impl Timeline {
             .unwrap_or(1)
     }
 
+    /// レイヤー `layer_id` の名前を `new_name` にする。無い番号・同じ名前なら変えない
+    pub(crate) fn rename_layer(&mut self, layer_id: u64, new_name: String) -> bool {
+        let Some(layer) = self.layers.iter_mut().find(|l| l.id == layer_id) else {
+            return false;
+        };
+        if layer.name == new_name {
+            return false;
+        }
+        layer.name = new_name;
+        true
+    }
+
     /// 指定した `layer_id` を持つレイヤーのインデックス（`0..layers.len()`）を返す
     pub(crate) fn layer_index_by_id(&self, layer_id: u64) -> Option<usize> {
         self.layers.iter().position(|l| l.id == layer_id)

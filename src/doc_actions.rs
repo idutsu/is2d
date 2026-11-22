@@ -317,6 +317,11 @@ pub(crate) enum Action {
         layer_idx: usize,
         locked: bool,
     },
+    /// 今のタイムラインのレイヤー `layer_id` の名前を変える（続けて打った文字は1つの取り消しにまとめる）
+    RenameLayer {
+        layer_id: u64,
+        new_name: String,
+    },
     SetFps {
         fps: u32,
     },
@@ -346,6 +351,7 @@ impl Action {
             Self::SetFps { .. } => Some(CoalesceKey::Fps),
             Self::RenameSymbol { sym_id, .. } => Some(CoalesceKey::RenameSymbol(*sym_id)),
             Self::RenameSound { sound_id, .. } => Some(CoalesceKey::RenameSound(*sound_id)),
+            Self::RenameLayer { layer_id, .. } => Some(CoalesceKey::RenameLayer(*layer_id)),
             Self::SetSymbolPlayback {
                 loop_mode,
                 first_frame: Some(_),
@@ -850,6 +856,10 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         }
         Action::SetLayerLocked { layer_idx, locked } => {
             apply_set_layer_flag(tab, layer_idx, locked, |l| l.locked, |l| &mut l.locked)
+        }
+        Action::RenameLayer { layer_id, new_name } => {
+            push_undo(tab, coalesce);
+            tab.with_active_timeline_mut(|tl, _| tl.rename_layer(layer_id, new_name))
         }
         Action::SetFps { fps } => apply_set_fps(tab, fps, coalesce),
         Action::SetStageSize { size } => apply_set_stage_size(tab, size, coalesce),

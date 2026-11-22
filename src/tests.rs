@@ -37417,3 +37417,37 @@ fn video_export_includes_the_mixed_audio_track() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+/// レイヤーの名前を変える：続けて打った文字は1つの取り消しにまとまり、Undo で前の名前に戻る。空の名前も受け付け（シンボル・
+/// 音の名前と同じ）、無い番号・同じ名前は変えない（Undo も積まない）。保存して開いても名前が残る
+#[test]
+fn renaming_a_layer_is_one_undo_step_and_is_saved() {
+    use crate::canvas_tool::CoalesceKey;
+    use doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    let layer_id = app.tab().active_timeline().layers[0].id;
+    let before = app.tab().active_timeline().layers[0].name.clone();
+    let name = |app: &Is2dApp| app.tab().active_timeline().layers[0].name.clone();
+    let undo_len = |app: &Is2dApp| app.tab().history.undo_stack.len();
+    let base = undo_len(&app);
+
+    for typed in ["背", "背景", ""] {
+        assert!(apply(&mut app, Action::RenameLayer { layer_id, new_name: typed.to_owned() }));
+    }
+    assert_eq!(name(&app), "");
+    assert!(apply(&mut app, Action::RenameLayer { layer_id, new_name: "背景".to_owned() }));
+    assert!(!apply(&mut app, Action::RenameLayer { layer_id, new_name: "背景".to_owned() }));
+    assert!(!apply(&mut app, Action::RenameLayer { layer_id: u64::MAX, new_name: "x".to_owned() }));
+    let _ = apply(&mut app, Action::EndCoalesce { key: Some(CoalesceKey::RenameLayer(layer_id)) });
+    assert_eq!(undo_len(&app), base + 1, "続けて打った文字は1つの取り消し");
+    assert_eq!(name(&app), "背景");
+
+    let opened = opened_document(
+        &project_io::project_file_bytes(&project_io::ProjectDocument::of(&app.doc)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(opened.root.layers[0].name, "背景", "保存して開いても名前が残る");
+
+    assert!(apply(&mut app, Action::Undo));
+    assert_eq!(name(&app), before, "Undo で前の名前に戻る");
+}

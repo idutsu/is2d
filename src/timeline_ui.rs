@@ -39,6 +39,8 @@ const LAYER_LOCK_HIT_RANGE: std::ops::Range<f32> = 30.0..54.0;
 const LAYER_VIS_ICON_X: f32 = 18.0;
 const LAYER_LOCK_ICON_X: f32 = 42.0;
 const LAYER_NAME_X: f32 = 60.0;
+/// レイヤー行の右端の、つかんで並べ替える印（≡）の幅
+const LAYER_GRIP_W: f32 = 24.0;
 
 // ============================================================================
 // Material Icons (`fonts/MaterialIcons-Regular.ttf`) コードポイント定義
@@ -160,6 +162,9 @@ pub(crate) struct TimelineUiState {
     pub(crate) scroll_y: f32,
     pub(crate) last_ensured_frame: usize,
     pub(crate) dragging_layer: Option<usize>,
+    /// 名前を書き換えているレイヤー（どのタイムラインの、どの番号のレイヤーか）。名前をダブルクリックで始まり、入力欄から
+    /// 離れると終わる
+    renaming_layer: Option<(TimelineKey, u64)>,
     pub(crate) grid_drag: TimelineGridDrag,
     /// 直近に同期したタイムライン識別キー
     last_timeline_key: TimelineKey,
@@ -176,6 +181,7 @@ impl Default for TimelineUiState {
             scroll_y: 0.0,
             last_ensured_frame: 0,
             dragging_layer: None,
+            renaming_layer: None,
             grid_drag: TimelineGridDrag::None,
             last_timeline_key: (1, 0, None),
         }
@@ -504,7 +510,93 @@ pub(crate) fn draw_timeline_panel(host: &mut impl TimelineHost, ctx: &egui::Cont
                 drag_layer_feedback,
             );
             draw_timeline_scrollbars(host, &painter, &layout);
+            draw_layer_rename_field(host, ui, &layout);
         });
+}
+
+/// レイヤー名の入力欄の番号（ダブルクリックで、この欄に先に入力を向けて、名前を全部選んでおく）
+fn layer_rename_id(layer_id: u64) -> egui::Id {
+    egui::Id::new(("layer_rename", layer_id))
+}
+
+/// 位置 `pos`（レイヤー列の名前の所）のレイヤーの名前を書き換え始める
+fn start_layer_rename(
+    host: &mut impl TimelineHost,
+    ctx: &egui::Context,
+    layout: &TimelineLayout,
+    pos: Pos2,
+) {
+    let tl = host.tab().active_timeline();
+    let in_names = pos.x < layout.grid_left
+        && pos.y >= layout.grid_top
+        && pos.x - layout.panel_rect.left() >= LAYER_LOCK_HIT_RANGE.end;
+    let Some(layer) = in_names
+        .then(|| layout.layer_at_y(pos.y, host.timeline_ui().scroll_y, tl.layers.len()))
+        .flatten()
+        .map(|i| &tl.layers[i])
+    else {
+        return;
+    };
+    let (id, chars) = (layer_rename_id(layer.id), layer.name.chars().count());
+    let key = (timeline_key(host.tab()), layer.id);
+    let mut state = egui::text_edit::TextEditState::default();
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+        egui::text::CCursor::new(0),
+        egui::text::CCursor::new(chars),
+    )));
+    state.store(ctx, id);
+    ctx.memory_mut(|m| m.request_focus(id));
+    finish_layer_rename(host);
+    host.timeline_ui_mut().renaming_layer = Some(key);
+}
+
+/// 名前を書き換えているレイヤーの行に入力欄を出し、打つそばから名前を変える（`Action::RenameLayer`）。入力欄から離れたか、
+/// そのレイヤーが今のタイムラインに無いか、行が見えていなければ終える
+fn draw_layer_rename_field(host: &mut impl TimelineHost, ui: &mut egui::Ui, layout: &TimelineLayout) {
+    let Some((key, layer_id)) = host.timeline_ui().renaming_layer else {
+        return;
+    };
+    let tl = host.tab().active_timeline();
+    let field = (key == timeline_key(host.tab()))
+        .then(|| tl.layer_index_by_id(layer_id))
+        .flatten()
+        .map(|i| {
+            let y0 = layout.row_y(tl.layers.len() - 1 - i, host.timeline_ui().scroll_y);
+            let rect = Rect::from_min_max(
+                Pos2::new(layout.panel_rect.left() + LAYER_NAME_X, y0),
+                Pos2::new(layout.grid_left - LAYER_GRIP_W, y0 + ROW_H),
+            );
+            (rect, tl.layers[i].name.clone())
+        })
+        .filter(|(r, _)| r.top() >= layout.grid_top && r.bottom() <= layout.panel_rect.bottom());
+    let Some((rect, mut name)) = field else {
+        finish_layer_rename(host);
+        return;
+    };
+    let resp = ui.put(
+        rect,
+        egui::TextEdit::singleline(&mut name)
+            .id(layer_rename_id(layer_id))
+            .desired_width(rect.width()),
+    );
+    if resp.changed() {
+        apply(host, Action::RenameLayer { layer_id, new_name: name });
+    }
+    if resp.lost_focus() {
+        finish_layer_rename(host);
+    }
+}
+
+/// レイヤーの名前の書き換えを終える（続けて打った文字を1つの取り消しにまとめるのを、ここで区切る）
+fn finish_layer_rename(host: &mut impl TimelineHost) {
+    if let Some((_, layer_id)) = host.timeline_ui_mut().renaming_layer.take() {
+        apply(
+            host,
+            Action::EndCoalesce {
+                key: Some(CoalesceKey::RenameLayer(layer_id)),
+            },
+        );
+    }
 }
 
 /// 1. 上部タイムライン操作バーの描画とボタンイベント処理
@@ -789,6 +881,11 @@ fn handle_timeline_pointer_input(
     if response.hovered() && primary_pressed {
         if let Some(pos) = pointer_pos {
             handle_timeline_click_start(host, layout, pos, alt_held, shift_held, handle_w);
+        }
+    }
+    if response.double_clicked() {
+        if let Some(pos) = pointer_pos {
+            start_layer_rename(host, ui.ctx(), layout, pos);
         }
     }
     update_timeline_grid_drag(host, layout, primary_down, alt_held, pointer_pos);
@@ -1990,7 +2087,7 @@ fn draw_timeline_layer_list(
             Color32::from_rgb(150, 158, 170)
         };
         layer_painter.text(
-            Pos2::new(layout.grid_left - 12.0, cy),
+            Pos2::new(layout.grid_left - LAYER_GRIP_W / 2.0, cy),
             Align2::CENTER_CENTER,
             "≡",
             FontId::proportional(12.0),
