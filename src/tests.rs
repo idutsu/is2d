@@ -9873,6 +9873,16 @@ fn write_project_json_as_file(path: &std::path::Path, json: &str) {
     write_project_file(path, &doc);
 }
 
+/// `.is2d` ファイルの中身 `bytes` を、アプリが開くのと同じ道で文書にする（`read_project`・`into_document`）
+fn opened_document(bytes: &[u8]) -> Result<crate::symbol::Document, String> {
+    project_io::read_project::<crate::stored_map::ReadTiles>(bytes)?.into_document()
+}
+
+/// 作品のファイル `path` を、塊の表を保存の形のまま読む（中身を見たり細工したりする：`project_from_bytes`）
+fn saved_project_at(path: &std::path::Path) -> project_io::ProjectDocument {
+    project_io::project_from_bytes(&std::fs::read(path).unwrap()).unwrap()
+}
+
 /// 保存用の型 `doc` を今の版の `.is2d` の中身に書いて、読み戻す（保存して開くのと同じ形を通る）
 fn saved_and_read_back(doc: &project_io::ProjectDocument) -> project_io::ProjectDocument {
     project_io::project_from_bytes(&project_io::project_file_bytes(doc).unwrap()).unwrap()
@@ -16812,8 +16822,8 @@ fn test_m4_3_saved_map_roundtrip_bit_exact_and_load_shrinks_capacities() {
     let mut writer = crate::stored_map::TileWriter::default();
     let indices = writer.tiles_of(cel.maps[0].stored());
     let bytes = postcard::to_allocvec(&writer.finish()).unwrap();
-    let table: stored_map::SavedTiles = postcard::from_bytes(&bytes).unwrap();
-    let back = crate::stored_map::TileReader::new(&table)
+    let table: stored_map::ReadTiles = postcard::from_bytes(&bytes).unwrap();
+    let back = crate::stored_map::TileReader::new(table)
         .and_then(|r| r.map(&indices))
         .expect("地図に戻る")
         .to_dense()
@@ -19561,7 +19571,7 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
 
     // 1. レイヤーの長さ（frame_count）より後ろにキーフレームがあるファイルを開くと LoadedWithTrimmedData が返り、未保存になる
     let out_of_range_kf_path = base_dir.join("out_of_range_kf.is2d");
-    let mut proj_kf = crate::project_io::read_project_document(&normal_path).unwrap();
+    let mut proj_kf = saved_project_at(&normal_path);
     proj_kf.timeline.layers[0].frame_count = 1;
     proj_kf.timeline.layers[0]
         .keyframes
@@ -19606,7 +19616,7 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
 
     // 2. レイヤーが 1001 個あるファイルを開いても LoadedWithTrimmedData が返り、未保存になる
     let over_layers_path = base_dir.join("over_1001_layers.is2d");
-    let mut proj_layers = crate::project_io::read_project_document(&normal_path).unwrap();
+    let mut proj_layers = saved_project_at(&normal_path);
     let sample_layer = proj_layers.timeline.layers[0].clone();
     while proj_layers.timeline.layers.len() < 1001 {
         let mut l = sample_layer.clone();
@@ -19627,13 +19637,13 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
     // 4. 地図に直せないファイル（塊の番号が表の外）は開かない。正しい地図でないだけ（面の輪郭の色がそろわない）の
     //    ファイルは開き、その地図は使うときに確かめて、何も無い地図にする（`broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is`）
     let broken_path = base_dir.join("broken_map.is2d");
-    let mut proj_broken = crate::project_io::read_project_document(&normal_path).unwrap();
+    let mut proj_broken = saved_project_at(&normal_path);
     let n = proj_broken.map_tiles.tiles.len() as u32;
     proj_broken.timeline.layers[0].keyframes[0].maps[0].tiles[0] = n + 5;
     crate::project_io::write_project_file_atomically(&broken_path, &proj_broken).unwrap();
     let err = open_project_in_tab(&mut Is2dApp::default(), &broken_path, None).unwrap_err();
     assert!(err.contains("地図が壊れています"), "{err}");
-    let mut proj_cross = crate::project_io::read_project_document(&normal_path).unwrap();
+    let mut proj_cross = saved_project_at(&normal_path);
     break_map_colors(&mut proj_cross, 0);
     crate::project_io::write_project_file_atomically(&broken_path, &proj_cross).unwrap();
     let mut app_cross = Is2dApp::default();
@@ -30758,8 +30768,8 @@ fn anchor_hover_works_on_unmoved_slices() {
 fn loading_checks_scopes_and_reports_every_trim() {
     use crate::doc_actions::{apply, Action};
     use crate::project_io::{
-        open_project_in_tab, read_project_document, save_project_to_path,
-        write_project_file_atomically, OpenProjectOutcome,
+        open_project_in_tab, save_project_to_path, write_project_file_atomically,
+        OpenProjectOutcome,
     };
     let dir = std::env::temp_dir().join(format!("is2d_load_scopes_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -30776,7 +30786,7 @@ fn loading_checks_scopes_and_reports_every_trim() {
     ));
     save_project_to_path(&mut src, &normal).unwrap();
     let open = |name: &str, edit: &dyn Fn(&mut crate::project_io::ProjectDocument)| {
-        let mut proj = read_project_document(&normal).unwrap();
+        let mut proj = saved_project_at(&normal);
         edit(&mut proj);
         let path = dir.join(name);
         write_project_file_atomically(&path, &proj).unwrap();
@@ -33096,7 +33106,7 @@ fn convert_work_files_to_current_format() {
     };
     let opens = |path: &std::path::Path| {
         project_io::read_project_document(path)
-            .and_then(project_io::ProjectDocument::into_document)
+            .and_then(project_io::ProjectDocument::<crate::stored_map::ReadTiles>::into_document)
             .is_ok()
     };
     for path in list
@@ -33151,8 +33161,7 @@ fn measure_work() {
     let path = work_file_in_current_format(std::path::Path::new(&path));
     let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
     // 作品の中身と、コマごとの線の量（ファイルから読んだまま数える。地図を確かめさせない）
-    let saved = crate::project_io::read_project_document(std::path::Path::new(&path))
-        .expect("作品を読めること");
+    let saved = saved_project_at(std::path::Path::new(&path));
     let (mut layers, mut keyframes, mut maps, mut edges) = (0usize, 0usize, 0usize, 0usize);
     // 地図の辺の数（塊の辺の数の和）
     let map_edges = |m: &crate::timeline::SavedScopeMap| -> usize {
@@ -33791,7 +33800,7 @@ fn saving_an_unviewed_file_writes_the_same_maps_without_checking() {
     );
     // 地図を、ビットまで比べられる形にする
     let maps = |p: &std::path::Path| -> Vec<String> {
-        let d = crate::project_io::read_project_document(p).unwrap();
+        let d = saved_project_at(p);
         d.timeline.layers[0]
             .keyframes
             .iter()
@@ -33875,7 +33884,7 @@ fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
     use crate::doc_actions::{apply, Action};
     let path = save_many_keyframes("lazy_broken", 3);
     // コマ 3 のキーフレームの地図で、1本の辺の片側だけ色を変える（面の輪郭の色がそろわない）
-    let mut proj = crate::project_io::read_project_document(&path).unwrap();
+    let mut proj = saved_project_at(&path);
     break_map_colors(&mut proj, 1);
     let broken = saved_map_content(&proj, &proj.timeline.layers[0].keyframes[1].maps[0]);
     crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
@@ -33895,7 +33904,7 @@ fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
     // 保存すると、壊れた地図は読んだままに書く
     let out = path.with_file_name("saved_again.is2d");
     crate::project_io::save_project_to_path(&mut app, &out).unwrap();
-    let back = crate::project_io::read_project_document(&out).unwrap();
+    let back = saved_project_at(&out);
     assert_eq!(
         saved_map_content(&back, &back.timeline.layers[0].keyframes[1].maps[0]),
         broken
@@ -33910,7 +33919,7 @@ fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
 fn maps_are_checked_in_the_background_after_opening() {
     use crate::doc_actions::{apply, Action};
     let path = save_many_keyframes("background_check", 4);
-    let mut proj = crate::project_io::read_project_document(&path).unwrap();
+    let mut proj = saved_project_at(&path);
     break_map_colors(&mut proj, 1);
     crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
 
@@ -34005,7 +34014,7 @@ fn shape_labels_in_a_file_never_become_shape_numbers() {
         "読むたびに新しい番号"
     );
 
-    let mut proj = crate::project_io::read_project_document(&path).unwrap();
+    let mut proj = saved_project_at(&path);
     proj.map_tiles.tiles[0].edges[0].left_src = u64::MAX - 1;
     crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
     let mut app = Is2dApp::default();
@@ -34415,7 +34424,7 @@ fn project_file_refuses_wrong_or_broken_files() {
     let pd =
         project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(1, 1)).unwrap();
     let good = project_io::project_file_bytes(&pd).unwrap();
-    assert!(project_io::project_from_bytes(&good).is_ok());
+    assert!(opened_document(&good).is_ok());
     // 中身 `body` に正しい頭を付けたファイル
     let with_header = |version: u32, body: &[u8]| -> Vec<u8> {
         let mut b = b"IS2D".to_vec();
@@ -34425,7 +34434,7 @@ fn project_file_refuses_wrong_or_broken_files() {
         b.extend_from_slice(body);
         b
     };
-    let err = |bytes: &[u8]| project_io::project_from_bytes(bytes).expect_err("断る");
+    let err = |bytes: &[u8]| opened_document(bytes).expect_err("断る");
     let body = &good[20..];
 
     let json = serde_json::to_vec(&pd).unwrap();
@@ -34498,6 +34507,64 @@ fn project_file_refuses_wrong_or_broken_files() {
     }
 }
 
+/// レビュー e90f27c の N-5002：ファイルは流しながら読み、CRC32 は読み終えてから確かめるので、壊れたファイルの長さの数
+/// （塊・色・音の数、文字列の長さ）がどれだけ大きくても、その数で前もって取らない（取るのは読めたバイトの分だけ）。
+/// 数を大きくした中身は、頭の CRC32 が合わなければ「中身が変わっています」、合っていても読めないので「形式が正しく
+/// ありません」で断る。途中で切れたファイルも同じ
+#[test]
+fn project_file_with_huge_counts_or_cut_body_is_refused_without_taking_memory() {
+    let pd =
+        project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(1, 1)).unwrap();
+    let good = project_io::project_file_bytes(&pd).unwrap();
+    let body = &good[20..];
+    // 中身の終わりは、復旧の元の場所（無し）・色の数・塊の数・音の数・次の音の番号
+    let (prefix, tail) = body.split_at(body.len() - 5);
+    assert_eq!(tail, [0, 0, 0, 0, 1]);
+    let file = |body: &[u8], crc: u32| -> Vec<u8> {
+        let mut b = good[..8].to_vec();
+        b.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        b.extend_from_slice(&crc.to_le_bytes());
+        b.extend_from_slice(body);
+        b
+    };
+    for huge in [usize::MAX, 1 << 40] {
+        let count = postcard::to_allocvec(&huge).unwrap();
+        // 文字列の長さ・色の数・塊の数・音の数を大きくし、その後ろは無い
+        for head in [&[1u8][..], &[0], &[0, 0], &[0, 0, 0]] {
+            let broken = [prefix, head, &count].concat();
+            assert_eq!(
+                opened_document(&file(&broken, crc32fast::hash(&broken) ^ 1)).expect_err("断る"),
+                "ファイルが壊れています（中身が変わっています）"
+            );
+            assert!(opened_document(&file(&broken, crc32fast::hash(&broken)))
+                .expect_err("断る")
+                .starts_with("プロジェクトファイルの形式が正しくありません: "));
+        }
+    }
+    // 地図のある作品の中身を途中で切ったファイル：頭の長さのままなら「長さが合いません」、頭を合わせても読めない
+    let mut app = Is2dApp::default();
+    run(
+        &mut app,
+        &[doc_actions::Action::PaintStroke {
+            points: vec![Point::new(100.0, 100.0), Point::new(200.0, 120.0)],
+            radius: 10.0,
+            color: Color32::RED,
+        }],
+    );
+    let drawn =
+        project_io::project_file_bytes(&project_io::ProjectDocument::from_app(app.tab()).unwrap())
+            .unwrap();
+    let cut = &drawn[..20 + (drawn.len() - 20) / 2];
+    assert_eq!(
+        opened_document(cut).expect_err("断る"),
+        "ファイルが壊れています（長さが合いません）"
+    );
+    let cut_body = &cut[20..];
+    assert!(opened_document(&file(cut_body, crc32fast::hash(cut_body)))
+        .expect_err("断る")
+        .starts_with("プロジェクトファイルの形式が正しくありません: "));
+}
+
 /// ステージの大きさは、書く入口（`apply` の `SetStageSize`）とファイルを読む入口が同じ1つの判定（`stage_size_of`）で決める：
 /// 有限でない大きさは書く入口で断り（文書も Undo も変わらない）、ファイルなら壊れたファイルとして断る。範囲の外は範囲に
 /// そろえる（画面の欄と同じ範囲）
@@ -34529,8 +34596,7 @@ fn stage_size_is_decided_by_one_rule_at_the_entries() {
     let mut nan_stage = pd.clone();
     nan_stage.stage_size = [f32::NAN, 450.0];
     assert_eq!(
-        project_io::project_from_bytes(&project_io::project_file_bytes(&nan_stage).unwrap())
-            .expect_err("断る"),
+        opened_document(&project_io::project_file_bytes(&nan_stage).unwrap()).expect_err("断る"),
         "ファイルが壊れています（有限でない数があります）"
     );
     let mut wide = pd;
@@ -34605,12 +34671,11 @@ fn non_finite_instance_numbers_are_refused_at_the_entries() {
         .brightness = f32::INFINITY;
     for broken in [nan_inst, nan_effect, inf_effect] {
         assert_eq!(
-            project_io::project_from_bytes(&project_io::project_file_bytes(&broken).unwrap())
-                .expect_err("断る"),
+            opened_document(&project_io::project_file_bytes(&broken).unwrap()).expect_err("断る"),
             "ファイルが壊れています（有限でない数があります）"
         );
     }
-    assert!(project_io::project_from_bytes(&project_io::project_file_bytes(&pd).unwrap()).is_ok());
+    assert!(opened_document(&project_io::project_file_bytes(&pd).unwrap()).is_ok());
 }
 
 /// 段0（claude/触った所だけを計算する地図の設計_22fbbbe.md）：地図の頂点と辺の番号をでたらめに並べ替え、辺の向きも

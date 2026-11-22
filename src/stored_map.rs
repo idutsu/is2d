@@ -17,6 +17,7 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use eframe::egui::Color32;
 use kurbo::{Point, QuadBez};
+use serde::de::{self, DeserializeSeed, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::planar_map::{
@@ -1020,7 +1021,7 @@ pub(crate) struct SavedEdge {
 }
 
 /// 文書の地図の塊の表：色の表と、塊の表。地図は塊の番号の並びで指すので、キーフレームどうしで共有する塊は1回だけ書く
-/// （`TileWriter`・`TileReader`）
+/// （`TileWriter`。読むときは、この形を丸ごと持たずに、読みながら塊にする：`ReadTiles`）
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct SavedTiles {
     pub(crate) colors: Vec<[u8; 4]>,
@@ -1111,64 +1112,142 @@ impl TileWriter {
     }
 }
 
-/// 保存の形の塊の表（`SavedTiles`）から読んだ塊。地図は塊の番号の並びから作り、同じ番号の塊は共有する（ファイルで共有
-/// していた塊は、読んでも共有したまま。見る順によらない）
-pub(crate) struct TileReader {
-    tiles: Vec<Tile>,
+/// 読んだ塊の表：ファイルの塊の表（`SavedTiles` の形）を読みながら、塊ごとにしまう形の辺の並びにしたもの（保存の形の
+/// 塊の表を丸ごと持たない：レビュー e90f27c の N-5002）。postcard が書いた並びの順に読む。辺の側の図形の印は、まだファイル
+/// の印のまま（新しい図形の番号に替えるのは、ファイルが壊れていないと確かめたあと：`TileReader::new`）。読みながらは断ら
+/// ない：色・点の番号が表の外の塊、辺の無い塊があれば `broken` に、有限でない座標があれば `non_finite` に記す
+#[derive(Default)]
+pub(crate) struct ReadTiles {
+    colors: Vec<[u8; 4]>,
+    tiles: Vec<Box<[StoredEdge]>>,
+    /// 辺の側の数と、いちばん大きい印
+    sides: u64,
+    labels: u64,
+    broken: bool,
+    non_finite: bool,
 }
 
-impl TileReader {
-    /// 塊の表 `saved` を読む。色の番号・点の番号が表の外か、辺の無い塊があれば `None`（壊れたファイル）。辺の側の図形の
-    /// 印（1 からの通し番号：`TileWriter`）は、続けて取った新しい図形の番号に替える（同じ印は同じ番号。ファイルに書いた
-    /// 数がそのまま番号になることは無いので、細工したファイルでも、これから振る番号が今ある番号と重ならない）。印が辺の
-    /// 側の数より大きければ（アプリは書かない）`None`
-    pub(crate) fn new(saved: &SavedTiles) -> Option<Self> {
-        let sides: u64 = saved.tiles.iter().map(|t| 2 * t.edges.len() as u64).sum();
-        let labels = saved
-            .tiles
-            .iter()
-            .flat_map(|t| &t.edges)
-            .map(|e| e.left_src.max(e.right_src))
-            .max()
-            .unwrap_or(0);
-        if labels > sides {
-            return None;
-        }
-        let first = crate::vector_engine::new_shape_ids(labels);
-        let label = |n: u64| NonZeroU64::new(n).and_then(|n| NonZeroU64::new(first + n.get() - 1));
+impl ReadTiles {
+    /// 座標（辺の端の点・制御点）がみな有限か
+    pub(crate) fn only_finite_numbers(&self) -> bool {
+        !self.non_finite
+    }
+
+    /// 読んだ塊 `t` を、しまう形の辺の並びにして足す
+    fn push(&mut self, t: SavedTile) {
+        self.non_finite |= !(t.nodes.iter().flatten().all(|v| v.is_finite())
+            && t.edges.iter().all(|e| e.ctrl.iter().all(|v| v.is_finite())));
+        self.sides += 2 * t.edges.len() as u64;
+        let labels = t.edges.iter().map(|e| e.left_src.max(e.right_src)).max();
+        self.labels = self.labels.max(labels.unwrap_or(0));
         let color = |i: u32| -> Option<Option<Color32>> {
             match i {
                 0 => Some(None),
-                _ => saved
+                _ => self
                     .colors
                     .get(i as usize - 1)
                     .map(|c| Some(Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3]))),
             }
         };
-        let mut tiles = Vec::with_capacity(saved.tiles.len());
-        for t in &saved.tiles {
-            let node = |i: u32| t.nodes.get(i as usize).map(|p| Point::new(p[0], p[1]));
-            let edges: Option<Vec<StoredEdge>> = t
-                .edges
-                .iter()
-                .map(|e| {
-                    Some(StoredEdge {
-                        a: node(e.a)?,
-                        b: node(e.b)?,
-                        ctrl: Point::new(e.ctrl[0], e.ctrl[1]),
-                        left: color(e.left)?,
-                        right: color(e.right)?,
-                        left_src: label(e.left_src),
-                        right_src: label(e.right_src),
-                    })
-                })
-                .collect();
-            let edges = edges?;
-            if edges.is_empty() {
-                return None;
-            }
-            tiles.push(TileData::new(edges.into()));
+        let node = |i: u32| t.nodes.get(i as usize).map(|p| Point::new(p[0], p[1]));
+        let edge = |e: &SavedEdge| {
+            Some(StoredEdge {
+                a: node(e.a)?,
+                b: node(e.b)?,
+                ctrl: Point::new(e.ctrl[0], e.ctrl[1]),
+                left: color(e.left)?,
+                right: color(e.right)?,
+                left_src: NonZeroU64::new(e.left_src),
+                right_src: NonZeroU64::new(e.right_src),
+            })
+        };
+        // 塊の辺の並びは、ちょうどの大きさで1回だけ取る
+        let mut edges = Vec::with_capacity(t.edges.len());
+        edges.extend(t.edges.iter().map_while(edge));
+        if edges.is_empty() || edges.len() < t.edges.len() {
+            self.broken = true;
+        } else {
+            self.tiles.push(edges.into_boxed_slice());
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for ReadTiles {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_struct("SavedTiles", &["colors", "tiles"], ReadTiles::default())
+    }
+}
+
+/// 塊の表（色の表、塊の並び）を読む
+impl<'de> Visitor<'de> for ReadTiles {
+    type Value = ReadTiles;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("塊の表")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(mut self, mut seq: A) -> Result<ReadTiles, A::Error> {
+        self.colors = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(0, &"色の表と塊の並び"))?;
+        seq.next_element_seed(&mut self)?
+            .ok_or_else(|| de::Error::invalid_length(1, &"色の表と塊の並び"))?;
+        Ok(self)
+    }
+}
+
+/// 塊の並びを、1つずつ読んでしまう形にする（保存の形の塊は、読んでいる1つだけ持つ）
+impl<'de> DeserializeSeed<'de> for &mut ReadTiles {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for &mut ReadTiles {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("塊の並び")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        while let Some(t) = seq.next_element::<SavedTile>()? {
+            self.push(t);
+        }
+        Ok(())
+    }
+}
+
+/// 読んだ塊の表の塊。地図は塊の番号の並びから作り、同じ番号の塊は共有する（ファイルで共有していた塊は、読んでも共有した
+/// まま。見る順によらない）
+pub(crate) struct TileReader {
+    tiles: Vec<Tile>,
+}
+
+impl TileReader {
+    /// 読んだ塊の表 `read` の塊。表の外の番号・辺の無い塊があれば `None`（壊れたファイル）。辺の側の図形の印（1 からの
+    /// 通し番号：`TileWriter`）は、続けて取った新しい図形の番号に替える（同じ印は同じ番号。ファイルに書いた数がそのまま
+    /// 番号になることは無いので、細工したファイルでも、これから振る番号が今ある番号と重ならない）。印が辺の側の数より
+    /// 大きければ（アプリは書かない）`None`
+    pub(crate) fn new(read: ReadTiles) -> Option<Self> {
+        if read.broken || read.labels > read.sides {
+            return None;
+        }
+        let first = crate::vector_engine::new_shape_ids(read.labels);
+        let label = |n: Option<NonZeroU64>| n.and_then(|n| NonZeroU64::new(first + n.get() - 1));
+        let tiles = read
+            .tiles
+            .into_iter()
+            .map(|mut edges| {
+                for e in edges.iter_mut() {
+                    e.left_src = label(e.left_src);
+                    e.right_src = label(e.right_src);
+                }
+                TileData::new(edges)
+            })
+            .collect();
         Some(Self { tiles })
     }
 

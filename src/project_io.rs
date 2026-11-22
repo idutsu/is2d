@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Vec2};
 use kurbo::{Affine, Point};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{cancel_active_drag, SelectSubMode, Session, Tab, UndoHistory, View};
-use crate::stored_map::{SavedTiles, TileReader, TileWriter};
+use crate::stored_map::{ReadTiles, SavedTiles, TileReader, TileWriter};
 use crate::symbol::{
     ColorEffect, Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode,
     TweenRotate,
@@ -744,9 +745,11 @@ impl SymbolDef {
 }
 
 /// `.is2d` ファイルの中身のルート構造体（版の番号はファイルの頭にだけ持つ：`project_file_head`）。postcard は項目を
-/// 並びの位置で読むので、書かない項目（`skip_serializing_if`）は作らない
+/// 並びの位置で読むので、書かない項目（`skip_serializing_if`）は作らない。塊の表は、書くときは保存の形（`SavedTiles`）、
+/// アプリが読むときは読みながら塊にした形（`ReadTiles`）。テストは、中身を見たり細工したりするために保存の形のまま読む
+/// （どちらも同じ読み込みの道 `read_project` を通る）
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct ProjectDocument {
+pub(crate) struct ProjectDocument<T = SavedTiles> {
     pub(crate) stage_size: [f32; 2],
     pub(crate) timeline: SavedTimeline,
     #[serde(default)]
@@ -759,7 +762,7 @@ pub(crate) struct ProjectDocument {
     pub(crate) recovery_source: Option<PathBuf>,
     /// 地図の塊の表（キーフレームの地図は、この表の塊の番号の並び）
     #[serde(default)]
-    pub(crate) map_tiles: SavedTiles,
+    pub(crate) map_tiles: T,
     /// 音のライブラリ（版 8 から）
     #[serde(default)]
     pub(crate) sounds: Vec<SavedSound>,
@@ -838,6 +841,22 @@ impl ProjectDocument {
         self.map_tiles = writer.finish();
     }
 
+    /// テスト用：保存用の写しを書いて読み戻してから文書を作る（アプリと同じ読み込みの道：`read_project`・
+    /// `into_document_noting`）
+    #[cfg(test)]
+    pub(crate) fn into_document(self) -> Result<Document, String> {
+        read_project::<ReadTiles>(&project_file_bytes(&self)?[..])?.into_document()
+    }
+
+    /// 読み込んだ `ProjectDocument` を現在のアクティブタブへ適用し、作業キャンバスや履歴を初期化する
+    #[cfg(test)]
+    pub(crate) fn apply_to_app(self, tab: &mut Tab) {
+        let doc = self.into_document().expect("正しい地図の文書");
+        reset_active_document_state(tab, doc);
+    }
+}
+
+impl<T> ProjectDocument<T> {
     /// 書いてある地図（ルートとシンボルのタイムラインの、キーフレームの順）みなに `f`
     pub(crate) fn for_each_map(&mut self, mut f: impl FnMut(&mut SavedScopeMap)) {
         let timelines = std::iter::once(&mut self.timeline)
@@ -848,16 +867,14 @@ impl ProjectDocument {
             }
         }
     }
+}
 
+impl ProjectDocument<ReadTiles> {
     /// 書いてある小数（ステージの大きさ、地図の頂点と制御点、インスタンスの変換・中心点・色効果）がみな有限か。文書には
     /// 有限な数しか入らない（ステージの大きさは書く入口と同じ `stage_size_of`、地図は格子の内：`fits_grid`、インスタンスは
     /// 書く入口と同じ `SymbolInstanceBinding::is_finite`）ので、そうでなければ壊れたファイル（読むときに断る：
-    /// `project_from_bytes`。前の版のアプリが書いた有限でない数のあるファイルも、ここで断る）
-    pub(crate) fn only_finite_numbers(&self) -> bool {
-        let tiles_ok = self.map_tiles.tiles.iter().all(|t| {
-            t.nodes.iter().flatten().all(|v| v.is_finite())
-                && t.edges.iter().all(|e| e.ctrl.iter().all(|v| v.is_finite()))
-        });
+    /// `into_document_noting`。前の版のアプリが書いた有限でない数のあるファイルも、ここで断る）
+    fn only_finite_numbers(&self) -> bool {
         let timeline_ok = |tl: &SavedTimeline| {
             tl.layers.iter().flat_map(|l| &l.keyframes).all(|kf| {
                 // インスタンスは書く入口と同じ判定
@@ -867,13 +884,12 @@ impl ProjectDocument {
             })
         };
         crate::symbol::stage_size_of(Vec2::from(self.stage_size)).is_some()
-            && tiles_ok
+            && self.map_tiles.only_finite_numbers()
             && std::iter::once(&self.timeline)
                 .chain(self.library.iter().map(|s| &s.timeline))
                 .all(timeline_ok)
     }
 
-    /// 読み込んだ `ProjectDocument` から正規化済みの `Document` を構築する。地図が壊れていれば `Err`
     /// 読んだ中身から文書を作る（中身の一部を除いたかは要らないとき：`into_document_noting`）
     pub(crate) fn into_document(self) -> Result<Document, String> {
         self.into_document_noting(&mut false)
@@ -883,10 +899,13 @@ impl ProjectDocument {
     /// キーフレーム・インスタンスの `from_saved` と、無いシンボルを指すインスタンス。番号の振り直しや、空のキーフレーム・
     /// レイヤーを足すことは何も除かないので記さない）
     pub(crate) fn into_document_noting(mut self, trimmed: &mut bool) -> Result<Document, String> {
+        if !self.only_finite_numbers() {
+            return Err("ファイルが壊れています（有限でない数があります）".to_owned());
+        }
         // 地図：塊の表から、塊を共有したしまう形を作る（番号が表の外なら壊れたファイル。塊に記した図形の印は新しい番号に
         // 替える：`TileReader::new`）
         let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
-        let reader = TileReader::new(&self.map_tiles).ok_or_else(broken)?;
+        let reader = TileReader::new(std::mem::take(&mut self.map_tiles)).ok_or_else(broken)?;
         let mut all_read = true;
         self.for_each_map(|m| {
             m.stored = reader.map(&m.tiles);
@@ -895,7 +914,6 @@ impl ProjectDocument {
         if !all_read {
             return Err(broken());
         }
-        self.map_tiles = SavedTiles::default();
         // 音のライブラリ：どの音も、使える番号（`is_safe_id`）で番号が重ならず、波形にできること。そうでなければ壊れた
         // ファイル（黙って音を外さない）
         let mut sounds: Vec<Arc<crate::sound::Sound>> = Vec::with_capacity(self.sounds.len());
@@ -1055,13 +1073,6 @@ impl ProjectDocument {
         doc.watch_broken_maps();
         Ok(doc)
     }
-
-    /// 読み込んだ `ProjectDocument` を現在のアクティブタブへ適用し、作業キャンバスや履歴を初期化する
-    #[cfg(test)]
-    pub(crate) fn apply_to_app(self, tab: &mut Tab) {
-        let doc = self.into_document().expect("正しい地図の文書");
-        reset_active_document_state(tab, doc);
-    }
 }
 
 // ============================================================================
@@ -1099,7 +1110,7 @@ pub(crate) fn update_window_title(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
 }
 
 /// `.is2d` ファイルの頭：印・版・中身の長さ `len`・中身の CRC32 `crc`。頭を作るのはここだけ（確かめるのは
-/// `project_from_bytes` だけ）
+/// `read_project` だけ）
 fn project_file_head(len: u64, crc: u32) -> [u8; PROJECT_FILE_HEADER_LEN] {
     let mut head = [0u8; PROJECT_FILE_HEADER_LEN];
     head[..4].copy_from_slice(&PROJECT_FILE_MAGIC);
@@ -1172,42 +1183,175 @@ pub(crate) fn project_file_bytes(doc: &ProjectDocument) -> Result<Vec<u8>, Strin
         .map_err(|e| e.to_string())
 }
 
-/// `.is2d` ファイルの中身 `bytes` を読む。頭（印・版・中身の長さ・CRC32）を順に確かめてから中身を読み、数がみな有限か
-/// 確かめる（`only_finite_numbers`）。どれかが合わなければ、何が違うかを書いた `Err`
-pub(crate) fn project_from_bytes(bytes: &[u8]) -> Result<ProjectDocument, String> {
-    if bytes.len() < PROJECT_FILE_HEADER_LEN || bytes[..4] != PROJECT_FILE_MAGIC {
-        return Err(if bytes.first() == Some(&b'{') {
+/// 読んだバイトの長さと CRC32 を数えながら `inner` から読む読み手（中身を手元に持たずに、頭の数と照らす：
+/// `read_project`）。postcard は読み手の失敗を自分の失敗（中身が途中で終わった）に置き換えるので、読み手の失敗は返さずに
+/// ここに取っておき（失敗した後は終わりとして何も読まない）、読み終えてから見る
+struct BodyReader<R> {
+    inner: R,
+    len: u64,
+    crc: crc32fast::Hasher,
+    failed: Option<std::io::Error>,
+}
+
+impl<R: std::io::Read> std::io::Read for BodyReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.failed.is_none() {
+            match self.inner.read(buf) {
+                Ok(n) => {
+                    self.len += n as u64;
+                    self.crc.update(&buf[..n]);
+                    return Ok(n);
+                }
+                // 割り込まれただけなら読み直す（`Read` の決まり）
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => self.failed = Some(e),
+            }
+        }
+        Ok(0)
+    }
+}
+
+/// 中身を流しながら postcard に渡す所（postcard の `Flavor`）。数バイトずつ渡すときは、`input` の手元の一続きをそのまま
+/// 貸し（写さない）、貸した所は次に読むときに読み終えたことにする（`lent`）。手元の一続きに収まらない長さ（長い文字列・
+/// 一続きの切れ目にかかる数）は `scratch` に、読めたバイトの分だけ広げて置く（長さに上限を置かず、細工した長さでも
+/// ファイルの大きさを越えて取らない）。保存用の型は借りる値を持たないので、借りたまま返す読み方（`try_take_n`）は無い
+struct BodyFlavor<R> {
+    input: std::io::BufReader<R>,
+    lent: usize,
+    scratch: Vec<u8>,
+}
+
+impl<R: std::io::Read> BodyFlavor<R> {
+    /// 手元の、まだ渡していない一続き（無ければ次を読む。中身の終わりなら空）
+    fn buffered(&mut self) -> postcard::Result<&[u8]> {
+        use std::io::BufRead;
+        self.input.consume(std::mem::take(&mut self.lent));
+        self.input
+            .fill_buf()
+            .map_err(|_| postcard::Error::DeserializeUnexpectedEnd)
+    }
+}
+
+impl<'de, R: std::io::Read + 'de> postcard::de_flavors::Flavor<'de> for BodyFlavor<R> {
+    type Remainder = std::io::BufReader<R>;
+    type Source = R;
+
+    fn pop(&mut self) -> postcard::Result<u8> {
+        let byte = *self
+            .buffered()?
+            .first()
+            .ok_or(postcard::Error::DeserializeUnexpectedEnd)?;
+        self.lent = 1;
+        Ok(byte)
+    }
+
+    fn try_take_n(&mut self, _ct: usize) -> postcard::Result<&'de [u8]> {
+        Err(postcard::Error::WontImplement)
+    }
+
+    fn try_take_n_temp<'a>(&'a mut self, ct: usize) -> postcard::Result<&'a [u8]>
+    where
+        'de: 'a,
+    {
+        use std::io::Read;
+        if self.buffered()?.len() >= ct {
+            self.lent = ct;
+            return Ok(&self.input.buffer()[..ct]);
+        }
+        self.scratch.clear();
+        let got = (&mut self.input)
+            .take(ct as u64)
+            .read_to_end(&mut self.scratch)
+            .map_err(|_| postcard::Error::DeserializeUnexpectedEnd)?;
+        if got < ct {
+            return Err(postcard::Error::DeserializeUnexpectedEnd);
+        }
+        Ok(&self.scratch)
+    }
+
+    fn finalize(mut self) -> postcard::Result<std::io::BufReader<R>> {
+        use std::io::BufRead;
+        self.input.consume(self.lent);
+        Ok(self.input)
+    }
+}
+
+/// 作品のファイルを1回に読む大きさ（`read_project`）。読む1回ごとにシステムコールの手間がかかるので、小さいと開くのが
+/// 遅くなる（`BufReader` の標準の 8KB では、作品 A（277MB）を読む回数が約 3 万 4 千回になり、読み込みが 465ms。256KB で
+/// 368ms）。1MB・4MB でも 365〜370ms で変わらないので、速さが頭打ちになるいちばん小さい大きさにする（計測：Apple M5）
+const READ_CHUNK_LEN: usize = 256 * 1024;
+
+/// ファイルを読めなかったときの知らせ
+fn read_failed(e: std::io::Error) -> String {
+    format!("ファイルの読み込みに失敗しました: {e}")
+}
+
+/// `.is2d` ファイルを `input` から流しながら読む（ファイル全体のバイトも、保存の形の塊の表も手元に持たない：レビュー
+/// e90f27c の N-5002）。頭（印・版）を確かめてから、中身を postcard で読みつつ長さと CRC32 を数え（`BodyReader`）、最後
+/// まで読み切ってから、長さ・CRC32・postcard で読めたか（後ろに余りが無いか）を順に確かめる。どれかが合わなければ、
+/// 何が違うかを書いた `Err` で、読んだ物は返さない（CRC32 を確かめる前に、読んだ物はどこにも使わない。中身の確かめは
+/// `into_document_noting`）。CRC32 を確かめる前に読むので、壊れたファイルの長さの数で大きく取らない：取るのは、読めた
+/// バイトに見合う分だけ（並びは長さの数によらず読めた要素の分だけ育つ。serde は長さの数で前もって取る分を小さく打ち切る。
+/// 文字列は `BodyFlavor`）。頭を確かめるのはここだけ。塊の表は `T` の形で読む（アプリは `ReadTiles`）
+pub(crate) fn read_project<T: DeserializeOwned + Default>(
+    mut input: impl std::io::Read,
+) -> Result<ProjectDocument<T>, String> {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(PROJECT_FILE_HEADER_LEN);
+    (&mut input)
+        .take(PROJECT_FILE_HEADER_LEN as u64)
+        .read_to_end(&mut head)
+        .map_err(read_failed)?;
+    if head.len() < PROJECT_FILE_HEADER_LEN || head[..4] != PROJECT_FILE_MAGIC {
+        return Err(if head.first() == Some(&b'{') {
             "前の形式（JSON）のファイルは開けません".to_owned()
         } else {
             "is2d のファイルではありません".to_owned()
         });
     }
-    let u32_at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().expect("4 バイト"));
+    let u32_at = |i: usize| u32::from_le_bytes(head[i..i + 4].try_into().expect("4 バイト"));
     let version = u32_at(4);
     if version != PROJECT_FORMAT_VERSION {
         return Err(format!(
             "未対応のプロジェクトバージョンです (version: {version})"
         ));
     }
-    let body_len = u64::from_le_bytes(bytes[8..16].try_into().expect("8 バイト"));
-    let body = &bytes[PROJECT_FILE_HEADER_LEN..];
-    if body.len() as u64 != body_len {
+    let body_len = u64::from_le_bytes(head[8..16].try_into().expect("8 バイト"));
+    let body = BodyReader {
+        inner: input,
+        len: 0,
+        crc: crc32fast::Hasher::new(),
+        failed: None,
+    };
+    let mut de = postcard::Deserializer::from_flavor(BodyFlavor {
+        input: std::io::BufReader::with_capacity(READ_CHUNK_LEN, body),
+        lent: 0,
+        scratch: Vec::new(),
+    });
+    let read = ProjectDocument::<T>::deserialize(&mut de);
+    let mut rest = de.finalize().expect("流す所の終わりは失敗しない");
+    let left = std::io::copy(&mut rest, &mut std::io::sink()).map_err(read_failed)?;
+    let body = rest.into_inner();
+    if let Some(e) = body.failed {
+        return Err(read_failed(e));
+    }
+    if body.len != body_len {
         return Err("ファイルが壊れています（長さが合いません）".to_owned());
     }
-    if crc32fast::hash(body) != u32_at(16) {
+    if body.crc.finalize() != u32_at(16) {
         return Err("ファイルが壊れています（中身が変わっています）".to_owned());
     }
-    let doc = match postcard::take_from_bytes::<ProjectDocument>(body) {
-        Ok((doc, [])) => doc,
-        Ok(_) => {
-            return Err("プロジェクトファイルの形式が正しくありません（余りがあります）".to_owned())
-        }
-        Err(e) => return Err(format!("プロジェクトファイルの形式が正しくありません: {e}")),
-    };
-    if !doc.only_finite_numbers() {
-        return Err("ファイルが壊れています（有限でない数があります）".to_owned());
+    match read {
+        Ok(doc) if left == 0 => Ok(doc),
+        Ok(_) => Err("プロジェクトファイルの形式が正しくありません（余りがあります）".to_owned()),
+        Err(e) => Err(format!("プロジェクトファイルの形式が正しくありません: {e}")),
     }
-    Ok(doc)
+}
+
+/// テスト用：`.is2d` ファイルの中身 `bytes` を、塊の表を保存の形のまま読む（`read_project`）
+#[cfg(test)]
+pub(crate) fn project_from_bytes(bytes: &[u8]) -> Result<ProjectDocument, String> {
+    read_project(bytes)
 }
 
 /// 保存・書き出し先のパスがシンボリックリンクである場合は実体パスへ解決して返す
@@ -1302,11 +1446,9 @@ pub(crate) fn save_project_to_path(
     Ok(())
 }
 
-/// 指定されたファイルパス `path` から `ProjectDocument` を読み込み・確かめて返す（`project_from_bytes`）
-pub(crate) fn read_project_document(path: &Path) -> Result<ProjectDocument, String> {
-    let bytes =
-        std::fs::read(path).map_err(|e| format!("ファイルの読み込みに失敗しました: {e}"))?;
-    project_from_bytes(&bytes)
+/// ファイル `path` の作品を読み、確かめて返す（`read_project`。塊の表は、読みながら塊にする）
+pub(crate) fn read_project_document(path: &Path) -> Result<ProjectDocument<ReadTiles>, String> {
+    read_project(std::fs::File::open(path).map_err(read_failed)?)
 }
 
 /// 検証済みの `Document` を新しいタブ（または未編集の白紙無題タブ）へ読み込んでアクティブ化する
