@@ -479,7 +479,7 @@ impl PolyIndex {
                 .is_none_or(|w| w != 0)
         };
         // 2. 帯の中の頂点（帯の中と輪郭がかかるマスにある）
-        for c in polygon_squares::<GRID_CELL>(&band) {
+        for c in polygon_squares::<GRID_CELL>(&band).squares() {
             examined.add([c]);
             for v in self.node_grid.at(c) {
                 let v = v as usize;
@@ -1155,18 +1155,64 @@ pub(super) fn cell_chords(q: QuadBez) -> impl Iterator<Item = IPt> {
     flat_points(q, CELL_CHORD_TOL).map(|(p, _)| gpt(p))
 }
 
-/// 格子の点の矩形 `r`（端を含む）にかかるマス
-pub(super) fn rect_cells(r: GridRect) -> impl Iterator<Item = (i64, i64)> {
-    let (a, b) = (cell_of((r.x0, r.y0)), cell_of((r.x1, r.y1)));
-    (a.0..=b.0).flat_map(move |x| (a.1..=b.1).map(move |y| (x, y)))
+/// 升の列ごとの範囲の集まり：（列, 一番上, 一番下）を列・上の順に並べ、同じ列で重なる・続く範囲は1つにしたもの。線に
+/// 囲まれた中のような広い所も、列ごとに1つの範囲で持つので、持つ数は中の広さでなく列の数で決まる（レビュー 983236e の
+/// N-1001）
+#[derive(Clone, Default, Debug)]
+pub(super) struct Runs(Vec<(i64, i64, i64)>);
+
+impl Runs {
+    /// 範囲の並び（順も重なりも問わない）から作る
+    fn new(mut v: Vec<(i64, i64, i64)>) -> Self {
+        v.sort_unstable();
+        let mut out: Vec<(i64, i64, i64)> = Vec::with_capacity(v.len());
+        for r in v {
+            match out.last_mut() {
+                Some(l) if l.0 == r.0 && r.1 <= l.2 + 1 => l.2 = l.2.max(r.2),
+                _ => out.push(r),
+            }
+        }
+        #[cfg(test)]
+        super::RANGE_ENTRIES.with(|n| n.set(n.get() + out.len()));
+        Self(out)
+    }
+
+    /// 範囲 `more` を足す
+    fn add(&mut self, more: impl IntoIterator<Item = (i64, i64, i64)>) {
+        let mut v = std::mem::take(&mut self.0);
+        v.extend(more);
+        *self = Self::new(v);
+    }
+
+    /// 升 `(x, y)` が入っているか（列・上の順に並べてあるので、二分探索で引く）
+    fn contains(&self, (x, y): (i64, i64)) -> bool {
+        let k = self.0.partition_point(|r| (r.0, r.1) <= (x, y));
+        k > 0 && self.0[k - 1].0 == x && y <= self.0[k - 1].2
+    }
+
+    /// 範囲（列・上の順）
+    pub(super) fn iter(&self) -> impl Iterator<Item = (i64, i64, i64)> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// 升（列・上の順。1つずつ）
+    fn squares(&self) -> impl Iterator<Item = (i64, i64)> + '_ {
+        self.iter()
+            .flat_map(|(x, y0, y1)| (y0..=y1).map(move |y| (x, y)))
+    }
 }
 
 /// 触る範囲：近さを調べる格子のマスの集まり。窓で行う計算が前の地図のどの辺を見るか（辺の近くを探すマス
 /// `EdgeGeom::reach` のどれかが入っている辺）と、ほかの辺を調べた所はどこか（その所のマス）を表す。範囲を外接矩形1つで
 /// 表すと、線が触れない矩形の中の辺まで見ることになり、手間が矩形の中の辺の数で決まってしまう（レビュー 96fdc26 の
-/// N-1003）。マスの決まりは近さの格子（`CellGrid`）と同じ1つ
+/// N-1003）。線の近くのマスは1つずつ、線に囲まれた中と矩形は列ごとの範囲（`Runs`）で持つ（中のマスを1つずつ持つと、
+/// 持つ数と手間が文書の座標での中の広さで決まり、ズームを下げた画面や縮めたシンボルの中では、中身と関係なく重くなる：
+/// レビュー 983236e の N-1001）。マスの決まりは近さの格子（`CellGrid`）と同じ1つ
 #[derive(Clone, Default, Debug)]
-pub(crate) struct CellSet(IntSet<(i64, i64)>);
+pub(crate) struct CellSet {
+    cells: IntSet<(i64, i64)>,
+    runs: Runs,
+}
 
 impl CellSet {
     /// マス `cells` を入れる（線をたどったマスは続けて同じマスが多いので、続けて同じマスは1回だけ入れる）
@@ -1174,86 +1220,122 @@ impl CellSet {
         let mut last = None;
         for c in cells {
             if last != Some(c) {
-                self.0.insert(c);
+                #[cfg(test)]
+                if !self.cells.contains(&c) {
+                    super::RANGE_ENTRIES.with(|n| n.set(n.get() + 1));
+                }
+                self.cells.insert(c);
                 last = Some(c);
             }
         }
     }
 
+    /// 格子の点の矩形 `rects`（端を含む）にかかるマスを入れる（矩形ごとに、列ごとの範囲で）
+    pub(super) fn add_rects(&mut self, rects: impl IntoIterator<Item = GridRect>) {
+        let mut v: Vec<(i64, i64, i64)> = Vec::new();
+        for r in rects {
+            let (a, b) = (cell_of((r.x0, r.y0)), cell_of((r.x1, r.y1)));
+            v.extend((a.0..=b.0).map(|x| (x, a.1, b.1)));
+        }
+        self.runs.add(v);
+    }
+
+    /// 折れ線 `lines`（格子の点の折れ線と、その左右の印。印ごとに閉じていること）に囲まれた中のマスを入れる（`inside_runs`
+    /// の列ごとの範囲のまま）
+    pub(super) fn add_inside<'a>(
+        &mut self,
+        lines: impl IntoIterator<Item = (&'a [IPt], (u64, u64))>,
+    ) {
+        let mut v: Vec<(i64, i64, i64)> = Vec::new();
+        inside_runs::<GRID_CELL>(lines, |cx, cy0, cy1| v.push((cx, cy0, cy1)));
+        self.runs.add(v);
+    }
+
     /// `o` のマスをみな入れる
     pub(super) fn add_set(&mut self, o: &CellSet) {
-        self.0.extend(o.0.iter().copied());
+        self.cells.extend(o.cells.iter().copied());
+        self.runs.add(o.runs.iter());
+    }
+
+    /// マス `c` が入っているか
+    fn contains(&self, c: (i64, i64)) -> bool {
+        self.cells.contains(&c) || self.runs.contains(c)
     }
 
     /// マスの並び `cells` のどれかが入っているか（辺がこの範囲にかかるか）
     pub(super) fn meets(&self, cells: &[(i64, i64)]) -> bool {
-        cells.iter().any(|c| self.0.contains(c))
+        cells.iter().any(|&c| self.contains(c))
     }
 
     /// マスの並び `cells` がみな入っているか
     pub(super) fn contains_all(&self, cells: &[(i64, i64)]) -> bool {
-        cells.iter().all(|c| self.0.contains(c))
+        cells.iter().all(|&c| self.contains(c))
     }
 
-    /// `o` のマスがみな入っているか（ほかの辺を調べた所を、窓の範囲が覆うか）
+    /// `o` のマスがみな入っているか（ほかの辺を調べた所を、窓の範囲が覆うか。調べた所は線の近くのマスなので、1つずつ
+    /// 確かめる）
     pub(super) fn covers(&self, o: &CellSet) -> bool {
-        o.0.iter().all(|c| self.0.contains(c))
+        o.cells
+            .iter()
+            .copied()
+            .chain(o.runs.squares())
+            .all(|c| self.contains(c))
     }
 
-    /// マスがかかる、升目の索引の升目（升目の順）
-    pub(super) fn tiles(&self) -> Vec<(i64, i64)> {
-        index_tiles(self.0.iter().copied())
+    /// マスがかかる、升目の索引の升目（列ごとの範囲）
+    pub(super) fn tiles(&self) -> Runs {
+        let one = |c| {
+            let t = index_tile(c);
+            (t.0, t.1, t.1)
+        };
+        let span = |(x, y0, y1)| {
+            let (a, b) = (index_tile((x, y0)), index_tile((x, y1)));
+            (a.0, a.1, b.1)
+        };
+        Runs::new(
+            self.cells
+                .iter()
+                .map(|&c| one(c))
+                .chain(self.runs.iter().map(span))
+                .collect(),
+        )
     }
 }
 
-/// 閉じた折れ線 `pts`（輪郭の点。最後の点から最初の点へ閉じる）の上と中にかかる、1辺 `C`（格子の点）の升（升の順。同じ升は
-/// 1つ）。輪の上と中の点は、このどれかの升にある。上の升は区間をたどり（`seg_squares`）、中の升は巻き数で数える
-/// （`inside_runs`）ので、手間は輪の長さと中の升の数で決まる。輪の上と中の升を決めるのはこれ1つ（近さを調べる格子のマス
+/// 閉じた折れ線 `pts`（輪郭の点。最後の点から最初の点へ閉じる）の上と中にかかる、1辺 `C`（格子の点）の升（列ごとの範囲
+/// `Runs`）。輪の上と中の点は、このどれかの升にある。上の升は区間をたどり（`seg_squares`）、中の升は巻き数で数えた列ごとの
+/// 範囲のまま持つ（`inside_runs`）ので、手間は輪の長さで決まり、中の広さによらない。輪の上と中の升を決めるのはこれ1つ（近さを調べる格子のマス
 /// `GRID_CELL`・升目の索引の升目 `INDEX_TILE`）
-pub(super) fn polygon_squares<const C: i64>(pts: &[IPt]) -> Vec<(i64, i64)> {
+pub(super) fn polygon_squares<const C: i64>(pts: &[IPt]) -> Runs {
     let (Some(&first), Some(&last)) = (pts.first(), pts.last()) else {
-        return Vec::new();
+        return Runs::default();
     };
     // 閉じる区間（最後の点から最初の点へ）
     let close = [last, first];
     let segs = pts.windows(2).chain(std::iter::once(&close[..]));
     // 続く区間はたいてい同じ升にかかるので、続けて同じ升は1つにする
-    let mut out: Vec<(i64, i64)> = Vec::new();
+    let mut out: Vec<(i64, i64, i64)> = Vec::new();
     for s in segs {
         for t in seg_squares::<C>((s[0], s[1]), 0) {
-            if out.last() != Some(&t) {
-                out.push(t);
+            if out.last() != Some(&(t.0, t.1, t.1)) {
+                out.push((t.0, t.1, t.1));
             }
         }
     }
     inside_runs::<C>([(pts, (1, 0)), (&close[..], (1, 0))], |x, y0, y1| {
-        out.extend((y0..=y1).map(|y| (x, y)));
+        out.push((x, y0, y1));
     });
-    out.sort_unstable();
-    out.dedup();
-    out
+    Runs::new(out)
 }
 
 /// 升目の索引の升目の1辺（格子の点）
 pub(super) const INDEX_TILE: i64 = GRID_CELL * INDEX_TILE_CELLS;
 
-impl CellSet {
-    /// 折れ線 `lines`（格子の点の折れ線と、その左右の印。印ごとに閉じていること）に囲まれた中のマスを入れる（`inside_runs`）
-    pub(super) fn add_inside<'a>(
-        &mut self,
-        lines: impl IntoIterator<Item = (&'a [IPt], (u64, u64))>,
-    ) {
-        inside_runs::<GRID_CELL>(lines, |cx, cy0, cy1| {
-            self.add((cy0..=cy1).map(|cy| (cx, cy)));
-        });
-    }
-}
-
 /// 折れ線 `lines`（格子の点の折れ線と、その左右の印。印ごとに閉じていること）に囲まれた中の、1辺 `C`（格子の点）の升を、
 /// 列ごとの範囲（列, 一番上, 一番下）で `f` に渡す。中は、どれかの印の巻き数が 0 でない所（線を下へ横切るたびに、入る側の
 /// 印に 1 を足し、出る側の印から 1 を引く。線の外では、どの印も 0）。折れ線の通らない升は、どこでも巻き数が同じなので、
 /// 升の列の真ん中の縦の線の上で決まる：列ごとに、真ん中の線が区間を横切る所を上から順にたどって数え、巻き数が 0 でない
-/// 間の升を渡す（間の両端の升は、折れ線の通る升）。手間は折れ線の長さと中の升の数で決まる。中の升を決めるのはこれ1つ
+/// 間の升を渡す（間の両端の升は、折れ線の通る升）。手間は折れ線の長さで決まり、中の升の数によらない。中の升を決めるのはこれ1つ
 /// （輪1つなら `polygon_squares`、印のある線の集まりなら `CellSet::add_inside`）
 pub(super) fn inside_runs<'a, const C: i64>(
     lines: impl IntoIterator<Item = (&'a [IPt], (u64, u64))>,

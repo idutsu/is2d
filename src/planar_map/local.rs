@@ -45,8 +45,9 @@ pub(crate) struct LocalMap<'a> {
     added_at: IntMap<usize, Vec<usize>>,
     /// 升目の索引の升目ごとの、増えた辺（辺の番号の順）。外接矩形（`reach_box`）がかかる升目で入れる（マスを作らずに
     /// 済む）。ここを引く所（輪の上と中の辺を探す `edges_in_ring`・半直線を横切る辺を探す `ray_cols`）は、どれも辺の上の
-    /// 点を含むマスの升目を引くので、辺の上の点がみな入る外接矩形の升目で足りる
-    added_tiles: IntMap<(i64, i64), Vec<usize>>,
+    /// 点を含むマスの升目を引くので、辺の上の点がみな入る外接矩形の升目で足りる。升目の順に並べ、列ごとの範囲で引ける
+    /// ようにする（`edges_in_ring`）
+    added_tiles: std::collections::BTreeMap<(i64, i64), Vec<usize>>,
     /// 升目の行ごとの、増えた辺（辺の番号の順・1つずつ。`added_tiles` を行でまとめたもの）。右へ伸ばした半直線を横切る
     /// 辺を探す所（`ray_cols`）が、半直線の通る行の分だけ引く
     added_rows: IntMap<i64, Vec<usize>>,
@@ -69,7 +70,8 @@ impl<'a> LocalMap<'a> {
         let mut list: Vec<MapEdge> = Vec::with_capacity(added.len());
         let mut polys: Vec<Poly> = Vec::with_capacity(added.len());
         let mut added_at: IntMap<usize, Vec<usize>> = IntMap::default();
-        let mut added_tiles: IntMap<(i64, i64), Vec<usize>> = IntMap::default();
+        let mut added_tiles: std::collections::BTreeMap<(i64, i64), Vec<usize>> =
+            Default::default();
         for (i, &r) in added.iter().enumerate() {
             let ed = result.edges[r];
             let (a, b) = (nodes.id(result.nodes[ed.a]), nodes.id(result.nodes[ed.b]));
@@ -234,18 +236,16 @@ impl<'a> LocalMap<'a> {
     }
 
     /// 閉じた折れ線 `pts`（輪郭の点：`Ring::pts`）の上と中にかかりうる辺（消えた辺を除いた前の地図の辺と、増えた辺。
-    /// 番号の順・1つずつ）：輪の上と中の升目（`polygon_squares`）にある辺。輪の中に点がある辺は、その点のマスの升目に
-    /// あるので、みな入る。輪の外接矩形はなめないので、手間は輪の長さと中の広さで決まり、輪の外接矩形の中の辺の数によら
-    /// ない（レビュー 96fdc26 の N-1003）
+    /// 番号の順・1つずつ）：輪の上と中の升目（`polygon_squares` の列ごとの範囲）にある辺。輪の中に点がある辺は、その点の
+    /// マスの升目にあるので、みな入る。範囲ごとに中身のある升目だけを引くので、手間は輪の長さと中身で決まり、輪の外接矩形の
+    /// 中の辺の数（レビュー 96fdc26 の N-1003）にも、中の広さ（レビュー 983236e の N-1001）にもよらない
     fn edges_in_ring(&self, pts: &[IPt]) -> Vec<usize> {
         let mut out: Vec<usize> = Vec::new();
         let tiles = polygon_squares::<INDEX_TILE>(pts);
-        for &t in &tiles {
-            self.index.index.edges_in(self.index.stored, t, &mut out);
-        }
+        self.index.edges_over_runs(&tiles, &mut out);
         out.retain(|e| !self.removed.contains(e));
-        for t in &tiles {
-            if let Some(list) = self.added_tiles.get(t) {
+        for (x, y0, y1) in tiles.iter() {
+            for (_, list) in self.added_tiles.range((x, y0)..=(x, y1)) {
                 out.extend(list.iter().copied());
             }
         }

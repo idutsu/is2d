@@ -2187,19 +2187,17 @@ pub(super) fn hull_of(q: QuadBez) -> KRect {
     KRect::from_points(q.p0, q.p2).union_pt(q.p1)
 }
 
-/// 外形 `r`（px）を `WINDOW_PAD` だけ広げた、格子の点の矩形（窓の範囲に入れる外形：`rect_cells`）
+/// 外形 `r`（px）を `WINDOW_PAD` だけ広げた、格子の点の矩形（窓の範囲に入れる外形：`CellSet::add_rects`）
 pub(super) fn window_rect(r: KRect) -> GridRect {
     GridRect::around(r.inflate(WINDOW_PAD, WINDOW_PAD))
 }
 
 /// 範囲 `cells` にかかる前の地図の辺（辺の近くを探すマス `EdgeGeom::reach` のどれかが入っている辺。升目の索引で、
-/// マスの升目を引く。番号の順）
+/// マスの升目の列ごとの範囲を引く：`MapIndex::edges_over_runs`。番号の順）
 pub(super) fn region_edges(ix: MapIndex<'_>, cells: &CellSet) -> Vec<usize> {
     let stored = ix.stored;
     let mut found: Vec<usize> = Vec::new();
-    for t in cells.tiles() {
-        ix.index.edges_in(stored, t, &mut found);
-    }
+    ix.edges_over_runs(&cells.tiles(), &mut found);
     found.sort_unstable();
     found.dedup();
     found.retain(|&e| cells.meets(&ix.poly(e).reach(stored.edge_at(e).quad()).1));
@@ -2770,6 +2768,16 @@ impl<'a> MapIndex<'a> {
             te.a == p || te.b == p
         });
         at
+    }
+
+    /// 升目の索引の升目の列ごとの範囲 `tiles` にかかる辺を `out` に足す（重なることがある）。範囲ごとに、辺の入っている
+    /// 升目だけを引く（`TileIndex::edges_over`）ので、手間は範囲の数と中身のある升目の数で決まり、範囲の広さによらない
+    /// （レビュー 983236e の N-1001）
+    pub(super) fn edges_over_runs(&self, tiles: &Runs, out: &mut Vec<usize>) {
+        for (x, y0, y1) in tiles.iter() {
+            self.index
+                .edges_over(self.stored, (x, y0), (x, y1), |_, es| out.extend(es));
+        }
     }
 }
 

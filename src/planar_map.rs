@@ -1135,7 +1135,7 @@ pub(crate) struct LocalWrite {
 #[cfg(test)]
 pub(crate) fn uncounted<R>(f: impl FnOnce() -> R) -> R {
     type Counter = std::thread::LocalKey<std::cell::Cell<usize>>;
-    let counters: [&'static Counter; 13] = [
+    let counters: [&'static Counter; 14] = [
         &FROM_SHAPES,
         &FULL_CHECKS,
         &DENSE_BUILDS,
@@ -1148,6 +1148,7 @@ pub(crate) fn uncounted<R>(f: impl FnOnce() -> R) -> R {
         &KEYS_BUILT,
         &CUTS,
         &OUTSIDE_WINDS,
+        &RANGE_ENTRIES,
         &crate::stored_map::EDGES_SORTED,
     ];
     let saved: Vec<usize> = counters.iter().map(|c| c.with(|n| n.get())).collect();
@@ -1747,18 +1748,18 @@ impl LayerBase {
         let side_edges: std::collections::BTreeSet<usize> = halves.iter().map(|h| h.0).collect();
         // 消える辺（塗ったあとに両側が同じ色になる辺）ごとの、その辺と端につながる辺の外形
         let mut region = CellSet::default();
-        for &(e, forward) in &halves {
+        region.add_rects(halves.iter().filter_map(|&(e, forward)| {
             let te = stored.edge_at(e);
             let other = if forward { te.right } else { te.left };
-            if other == Some(color) {
+            (other == Some(color)).then(|| {
                 let hull = edges_at(te.a)
                     .into_iter()
                     .chain(edges_at(te.b))
                     .map(|f| hull_of(stored.edge_at(f).quad()))
                     .fold(hull_of(te.quad()), |a, b| a.union(b));
-                region.add(rect_cells(window_rect(hull)));
-            }
-        }
+                window_rect(hull)
+            })
+        }));
         loop {
             let wedges = window_edges(ix, side_edges.iter().copied(), &region);
             let (mut m, _) = tile_window(ix, &wedges);
@@ -1816,7 +1817,7 @@ impl LayerBase {
             .map(|&e| hull_of(stored.edge_at(e).quad()))
             .reduce(|a, b| a.union(b))?;
         let mut region = CellSet::default();
-        region.add(rect_cells(window_rect(hull)));
+        region.add_rects([window_rect(hull)]);
         let wedges = window_edges(ix, involved.iter().copied(), &region);
         let (wmap, _) = tile_window(ix, &wedges);
         // 窓の地図に、浮いた片の地図と同じ編集をかける
@@ -2432,6 +2433,14 @@ thread_local! {
     /// テスト用：このスレッドで、窓で重ね合わせるとき、点の色の数えに窓の外の辺の分（前の地図の面の色：`first_crossing`）を
     /// 入れた回数（`Outside`）
     pub(super) static OUTSIDE_WINDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// テスト用：このスレッドで、範囲（窓の範囲 `CellSet`・輪の上と中の升 `polygon_squares`）に入れた項目の数
+    pub(super) static RANGE_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、範囲に入れた項目の数
+#[cfg(test)]
+pub(crate) fn range_entries() -> usize {
+    RANGE_ENTRIES.with(|n| n.get())
 }
 
 /// テスト用：このスレッドで、点の色の数えに窓の外の辺の分を入れた回数

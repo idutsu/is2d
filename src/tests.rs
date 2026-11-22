@@ -37436,3 +37436,41 @@ fn renaming_a_layer_is_one_undo_step_and_is_saved() {
     assert!(apply(&mut app, Action::Undo));
     assert_eq!(name(&app), before, "Undo で前の名前に戻る");
 }
+
+/// レビュー 983236e の N-1001：重ねるものが触る範囲（窓の範囲）は、文書の座標での中の広さでなく、線の長さと中身で決まる。
+/// 何も無い所の広さだけを変えて矩形で選んでも、範囲が持つ項目の数は矩形の辺の長さほどにしか増えない（直す前は、中の
+/// マスを1つずつ持ったので、中の広さに比例した。縮めたシンボルの中で最小のズームで選ぶと、数秒固まり、メモリが数 GB 増えた）
+#[test]
+fn touched_range_grows_with_length_not_area() {
+    use crate::doc_actions::Action;
+    let entries = |side: f64| -> usize {
+        let mut app = Is2dApp::default();
+        let lid = app.doc.root.layers[0].id;
+        let mut shapes = make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(300.0, 100.0),
+            20.0,
+            Color32::RED,
+        );
+        shapes[0].layer_id = lid;
+        put_cel_shapes(&mut app, 0, 0, shapes);
+        let before = crate::planar_map::range_entries();
+        run(
+            &mut app,
+            &[Action::SelectMarquee {
+                p0: Point::new(200.0 - side / 2.0, 100.0 - side / 2.0),
+                p1: Point::new(200.0 + side / 2.0, 100.0 + side / 2.0),
+                additive: false,
+            }],
+        );
+        assert_eq!(
+            app.session.floating().map(|fl| fl.pieces().len()),
+            Some(1),
+            "線をまるごと選ぶ"
+        );
+        crate::planar_map::range_entries() - before
+    };
+    let (small, big) = (entries(1_000.0), entries(4_000.0));
+    // 辺の長さは4倍、中の広さは16倍。その間（8倍）より少ない
+    assert!(big < small * 8, "範囲の項目の数 {small} → {big}");
+}
