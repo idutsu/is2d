@@ -900,6 +900,30 @@ impl Document {
         true
     }
 
+    /// 音 `sound` を、新しい番号を付けて音のライブラリの終わりに足し、その番号を返す（音を足す所はこれ1つ：読み込み・
+    /// 別の文書から持ち込む `adopt_sound`）
+    pub(crate) fn add_sound(&mut self, mut sound: crate::sound::Sound) -> u64 {
+        let id = self.next_sound_id;
+        self.next_sound_id += 1;
+        sound.id = id;
+        Arc::make_mut(&mut self.sounds).push(Arc::new(sound));
+        id
+    }
+
+    /// 音 `sound`（別の文書の音でもよい）を指すのに使う、この文書の音のライブラリの番号：同じバイトを共有する音があれば
+    /// その番号、無ければ新しい番号で足した写し（バイトと波形は共有する）の番号。持ち込む中身の音を入れる所はこれ1つ
+    /// （クリップボードのシンボルの移植：`clipboard_ops::import_clipboard_symbols`）
+    pub(crate) fn adopt_sound(&mut self, sound: &crate::sound::Sound) -> u64 {
+        match self
+            .sounds
+            .iter()
+            .find(|s| Arc::ptr_eq(&s.encoded, &sound.encoded))
+        {
+            Some(s) => s.id,
+            None => self.add_sound(sound.clone()),
+        }
+    }
+
     /// 音のライブラリから番号 `sound_id` の音を消し、ルートと全シンボルのタイムラインで、その音を付けたキーフレームから
     /// 音を外す（空白のキーフレームに戻る。無い音を指す区間を残さない）。無い番号なら変えない
     pub(crate) fn remove_sound(&mut self, sound_id: u64) -> bool {

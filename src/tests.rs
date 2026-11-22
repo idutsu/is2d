@@ -16165,17 +16165,23 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
 }
 
 #[test]
-fn test_m3_1_write_project_bytes_reports_write_error() {
+fn test_m3_1_write_project_reports_write_error() {
     let tab = crate::canvas_tool::Tab::new_empty(1, 1);
     let doc = crate::project_io::ProjectDocument::from_app(&tab).unwrap();
-    let (head, body) = crate::project_io::project_file_parts(&doc).unwrap();
 
     let tmp = std::env::temp_dir().join(format!("is2d_m3_1_ro_{}.tmp", std::process::id()));
     std::fs::write(&tmp, b"orig").unwrap();
     let ro_file = std::fs::File::open(&tmp).unwrap();
-    let res = crate::project_io::write_project_bytes(ro_file, &head, &body);
+    let res = crate::project_io::write_project(ro_file, &doc);
     let _ = std::fs::remove_file(&tmp);
     assert!(res.is_err(), "書き込みの失敗が Err として返ること");
+    // 中身の途中で書けなくなっても（入りきらない書き先）、書き込みの失敗として返る
+    let (app, _) = copied_symbol_with_sound();
+    let doc = crate::project_io::ProjectDocument::of(&app.doc);
+    let mut small = [0u8; 1000];
+    let err = crate::project_io::write_project(std::io::Cursor::new(&mut small[..]), &doc)
+        .expect_err("入りきらない書き先は Err が返ること");
+    assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
 
     #[cfg(target_os = "linux")]
     {
@@ -16183,7 +16189,7 @@ fn test_m3_1_write_project_bytes_reports_write_error() {
             .write(true)
             .open("/dev/full")
             .unwrap();
-        let err = crate::project_io::write_project_bytes(dev_full, &head, &body)
+        let err = crate::project_io::write_project(dev_full, &doc)
             .expect_err("/dev/full への書き込みは Err が返ること");
         assert_eq!(err.kind(), std::io::ErrorKind::StorageFull);
     }
@@ -34304,6 +34310,14 @@ fn project_file_round_trip_keeps_every_bit() {
         u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
         crc32fast::hash(&bytes[20..])
     );
+    // 流し込んで書いた中身は、postcard でまとめて書いたものとバイトまで同じ。ファイルへの保存（復旧ファイルも同じ）も同じ
+    // バイト列を書く
+    assert_eq!(bytes[20..], postcard::to_allocvec(&pd).unwrap());
+    let path = std::env::temp_dir().join(format!("is2d_round_trip_{}.is2d", std::process::id()));
+    project_io::write_project_file_atomically(&path, &pd).unwrap();
+    let written = std::fs::read(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(written, bytes);
     let back = project_io::project_from_bytes(&bytes).unwrap();
     // 中身を JSON にして比べる（f64 は読み戻すと同じ値になる最短の10進で書くので、文字が同じなら数もビットまで同じ）
     assert_eq!(
@@ -36696,6 +36710,111 @@ fn deleting_and_renaming_library_sounds_with_undo() {
     assert_eq!(app.history.undo_stack.len(), undo_len + 1);
     assert!(doc_actions::apply(&mut app, doc_actions::Action::Undo));
     assert_eq!(app.doc.sounds[0].name, "テスト.wav");
+}
+
+/// テスト用：線を描いてシンボルにし、その中に足したレイヤーに音を読み込んでから、ルートで全選択してコピーしたアプリと、
+/// そのシンボルの番号
+fn copied_symbol_with_sound() -> (Is2dApp, u64) {
+    use doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke {
+            points: vec![Point::new(50.0, 50.0), Point::new(120.0, 50.0)],
+            radius: 8.0,
+            color: Color32::RED,
+        },
+    ));
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    let sym_id = app.doc.library[0].id;
+    assert!(apply(&mut app, Action::EnterSymbolFromLibrary { sym_id }));
+    assert!(apply(&mut app, Action::AddLayer));
+    assert!(import_sound(&mut app, short_wav()));
+    assert!(apply(&mut app, Action::ExitSymbolTimeline));
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::Copy));
+    (app, sym_id)
+}
+
+/// テスト用：文書 `doc` を保存したバイトを開き直した文書（開けなければ `Err`）
+fn reopened(doc: &symbol::Document) -> Result<symbol::Document, String> {
+    let bytes = project_io::project_file_bytes(&project_io::ProjectDocument::of(doc))?;
+    project_io::project_from_bytes(&bytes)?.into_document()
+}
+
+/// 文書 `doc` のシンボル `sym_id` のタイムラインの音の区間が指す音のバイト（区間がライブラリの音に収まること）
+fn symbol_sound_bytes(doc: &symbol::Document, sym_id: u64) -> Vec<Vec<u8>> {
+    doc.find_symbol(sym_id)
+        .unwrap()
+        .timeline
+        .sound_clips()
+        .map(|c| {
+            assert!(c.fits(&doc.sounds), "区間は音のライブラリの音を指す");
+            let s = doc.sounds.iter().find(|s| s.id == c.sound).unwrap();
+            s.encoded.to_vec()
+        })
+        .collect()
+}
+
+/// 中に音を付けたシンボルを別のタブへ貼ると、音も貼り先の音のライブラリに入る（貼り先に同じ番号の別の音があっても、
+/// 新しい番号で入れて区間を付け替える）。保存して開け、取り消すと足した音も消える（レビュー e90f27c の N-4001）
+#[test]
+fn pasting_a_symbol_with_sound_into_another_tab_brings_the_sound() {
+    use doc_actions::{apply, Action};
+    let ctx = egui::Context::default();
+    let (mut app, _) = copied_symbol_with_sound();
+    let src_bytes = app.doc.sounds[0].encoded.to_vec();
+    project_io::new_project(&mut app, &ctx);
+    let other = wav_bytes(48_000, 1, &vec![1000i16; 4800]);
+    assert!(import_sound(&mut app, other.clone()));
+    assert_eq!(app.doc.sounds[0].id, 1, "コピー元の音と同じ番号");
+    assert!(apply(&mut app, Action::AddLayer));
+
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    assert_eq!(app.doc.sounds.len(), 2);
+    let pasted = app.doc.library[0].id;
+    assert_eq!(
+        symbol_sound_bytes(&app.doc, pasted),
+        vec![src_bytes.clone()]
+    );
+    assert_eq!(*app.doc.sounds[0].encoded, *other, "貼り先の音はそのまま");
+    let doc = reopened(&app.doc).expect("保存したファイルを開ける");
+    assert_eq!(symbol_sound_bytes(&doc, pasted), vec![src_bytes]);
+
+    assert!(apply(&mut app, Action::Undo));
+    assert_eq!(app.doc.sounds.len(), 1);
+    assert!(app.doc.library.is_empty());
+}
+
+/// 同じタブでも、コピーのあと音とシンボルを消してから貼ると、シンボルと一緒に音もライブラリに戻る（新しい番号で）。
+/// 消していなければ、今の音をそのまま使い、音を増やさない
+#[test]
+fn pasting_a_symbol_after_deleting_its_sound_restores_the_sound() {
+    use doc_actions::{apply, Action};
+    let (mut app, sym_id) = copied_symbol_with_sound();
+    let src_bytes = app.doc.sounds[0].encoded.to_vec();
+    assert!(apply(&mut app, Action::Paste { in_place: false }));
+    assert_eq!(app.doc.sounds.len(), 1);
+    assert_eq!(app.doc.library.len(), 1);
+    assert!(apply(&mut app, Action::Undo));
+
+    let sound_id = app.doc.sounds[0].id;
+    assert!(apply(&mut app, Action::DeleteSound { sound_id }));
+    assert!(apply(&mut app, Action::DeleteSymbol { sym_id }));
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    assert_eq!(app.doc.sounds.len(), 1);
+    assert_ne!(app.doc.sounds[0].id, sound_id, "消した音の番号は使わない");
+    assert_eq!(
+        symbol_sound_bytes(&app.doc, sym_id),
+        vec![src_bytes.clone()]
+    );
+    let doc = reopened(&app.doc).expect("保存したファイルを開ける");
+    assert_eq!(symbol_sound_bytes(&doc, sym_id), vec![src_bytes]);
+
+    assert!(apply(&mut app, Action::Undo));
+    assert!(app.doc.sounds.is_empty());
+    assert!(app.doc.library.is_empty());
 }
 
 /// コマ数に届く決まり `frames_to_reach` は `frames_to_sound` の逆（届くいちばん少ないコマ数）で、区間が鳴るかどうか

@@ -445,7 +445,8 @@ fn apply_set_keyframe_sound(tab: &mut Tab, sound: Option<u64>) -> bool {
 }
 
 /// 今のコマの音を付けられるキーフレームの音を `clip` にする（取り消しの1歩）。新しく読み込んだ音 `added` は、同じ1歩で
-/// 音のライブラリに足す。付けられる所が無い・変わらないなら断る
+/// 音のライブラリに足す（付く番号は次の音の番号 `next_sound_id`：`clip` はその番号で作ってある）。付けられる所が無い・
+/// 変わらないなら断る
 fn set_active_keyframe_sound(
     tab: &mut Tab,
     clip: Option<crate::sound::SoundClip>,
@@ -460,8 +461,7 @@ fn set_active_keyframe_sound(
         }
         tl.layers[l].keyframe_mut(k).sound = clip;
         if let Some(s) = added {
-            std::sync::Arc::make_mut(&mut doc.sounds).push(std::sync::Arc::new(s));
-            doc.next_sound_id += 1;
+            doc.add_sound(s);
         }
         true
     })
@@ -1583,7 +1583,12 @@ fn apply_duplicate_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     );
     copy.id = tab.doc.alloc_symbol_id();
     copy.revision = crate::vector_engine::next_mesh_revision();
-    remap_timeline_ids(&mut copy.timeline, &mut tab.doc, &Default::default());
+    remap_timeline_ids(
+        &mut copy.timeline,
+        &mut tab.doc,
+        &Default::default(),
+        &Default::default(),
+    );
     let new_id = copy.id;
     tab.doc.library.insert(i + 1, std::sync::Arc::new(copy));
     tab.doc.bump_revision();

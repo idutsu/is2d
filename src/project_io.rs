@@ -18,7 +18,7 @@ use crate::timeline::{
 };
 
 /// `.is2d` プロジェクトファイルの現在のフォーマットバージョン。頭（印・版・中身の長さ・中身の CRC32）のあとに、保存用の型
-/// （`ProjectDocument`）を postcard で書いた中身を置く（`project_file_parts`。版 6 から）。版 7 は、地図をセル画にしまう
+/// （`ProjectDocument`）を postcard で書いた中身を置く（`write_project`。版 6 から）。版 7 は、地図をセル画にしまう
 /// 形のまま書く：文書に1つの塊の表（升目ごとの、境目の線を1本で持つ辺の並び。辺は側の図形の番号も持つ）と、階層ごとの
 /// 地図の塊の番号の並び。キーフレームどうしで共有する塊は1回だけ書き、読むときも共有したまま作る（ファイルの大きさが
 /// 変わった塊の量に見合い、開いた後のメモリが見る順に左右されない：レビュー f01d518 の R4 の (a)）。インスタンスの重なり
@@ -743,7 +743,7 @@ impl SymbolDef {
     }
 }
 
-/// `.is2d` ファイルの中身のルート構造体（版の番号はファイルの頭にだけ持つ：`project_file_parts`）。postcard は項目を
+/// `.is2d` ファイルの中身のルート構造体（版の番号はファイルの頭にだけ持つ：`project_file_head`）。postcard は項目を
 /// 並びの位置で読むので、書かない項目（`skip_serializing_if`）は作らない
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ProjectDocument {
@@ -1029,9 +1029,7 @@ impl ProjectDocument {
         // キーフレームの音の区間は、どれも音のライブラリの音を指し、その音の長さに収まること（`SoundClip::fits`）
         let clips_fit = std::iter::once(&timeline)
             .chain(library.iter().map(|s| &s.timeline))
-            .flat_map(|tl| tl.layers.iter())
-            .flat_map(|l| l.keyframes.iter())
-            .filter_map(|kf| kf.sound)
+            .flat_map(|tl| tl.sound_clips())
             .all(|c| c.fits(&sounds));
         if !clips_fit {
             return Err("プロジェクトファイルの音が壊れています".to_owned());
@@ -1100,27 +1098,78 @@ pub(crate) fn update_window_title(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
     }
 }
 
-/// 保存用の写し `doc` の `.is2d` ファイルの中身を、頭（印・版・中身の長さ・中身の CRC32）と、postcard で書いた中身に
-/// 分けて作る。頭を作るのはここだけ（確かめるのは `project_from_bytes` だけ）。ファイルにはこの順に続けて書く
-/// （`write_project_bytes`。中身を頭と1つの並びに写し直さない：レビュー f01d518 の N-5007）
-pub(crate) fn project_file_parts(
-    doc: &ProjectDocument,
-) -> Result<([u8; PROJECT_FILE_HEADER_LEN], Vec<u8>), String> {
-    let body =
-        postcard::to_allocvec(doc).map_err(|e| format!("保存する形にできませんでした: {e}"))?;
+/// `.is2d` ファイルの頭：印・版・中身の長さ `len`・中身の CRC32 `crc`。頭を作るのはここだけ（確かめるのは
+/// `project_from_bytes` だけ）
+fn project_file_head(len: u64, crc: u32) -> [u8; PROJECT_FILE_HEADER_LEN] {
     let mut head = [0u8; PROJECT_FILE_HEADER_LEN];
     head[..4].copy_from_slice(&PROJECT_FILE_MAGIC);
     head[4..8].copy_from_slice(&PROJECT_FORMAT_VERSION.to_le_bytes());
-    head[8..16].copy_from_slice(&(body.len() as u64).to_le_bytes());
-    head[16..].copy_from_slice(&crc32fast::hash(&body).to_le_bytes());
-    Ok((head, body))
+    head[8..16].copy_from_slice(&len.to_le_bytes());
+    head[16..].copy_from_slice(&crc.to_le_bytes());
+    head
 }
 
-/// テスト用：`.is2d` ファイルの中身を1つの並びにしたもの（頭と中身：`project_file_parts`）
+/// 書いたバイトの長さと CRC32 を数えながら `inner` に書く書き手（中身を手元に持たずに、頭の数を出す）。postcard は
+/// 書き手の失敗を自分の失敗に置き換えるので、書き手の失敗は返さずにここに取っておき（失敗した後は `inner` に書かない）、
+/// 書き終えてから見る
+struct BodyWriter<W> {
+    inner: W,
+    len: u64,
+    crc: crc32fast::Hasher,
+    failed: Option<std::io::Error>,
+}
+
+impl<W: std::io::Write> std::io::Write for BodyWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.failed.is_none() {
+            self.failed = self.inner.write_all(buf).err();
+        }
+        self.len += buf.len() as u64;
+        self.crc.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.failed.is_none() {
+            self.failed = self.inner.flush().err();
+        }
+        Ok(())
+    }
+}
+
+/// 保存用の写し `doc` の `.is2d` ファイル（頭と、postcard で書いた中身）を `out` に書き、`out` を返す。頭の場所を空けて
+/// 中身を流し込み（長さと CRC32 を数えながら：`BodyWriter`）、最後に頭へ戻って頭を書く。中身全体を1つの並びに持たない
+/// （ファイルの大きさの一時領域を取らない：レビュー e90f27c の N-5001）
+pub(crate) fn write_project<W: std::io::Write + std::io::Seek>(
+    mut out: W,
+    doc: &ProjectDocument,
+) -> std::io::Result<W> {
+    out.write_all(&[0; PROJECT_FILE_HEADER_LEN])?;
+    let mut buffered = std::io::BufWriter::new(BodyWriter {
+        inner: out,
+        len: 0,
+        crc: crc32fast::Hasher::new(),
+        failed: None,
+    });
+    let streamed = postcard::to_io(doc, &mut buffered).map(drop);
+    let body = buffered.into_inner().map_err(|e| e.into_error())?;
+    if let Some(e) = body.failed {
+        return Err(e);
+    }
+    streamed.map_err(|e| std::io::Error::other(format!("保存する形にできませんでした: {e}")))?;
+    let head = project_file_head(body.len, body.crc.finalize());
+    let mut out = body.inner;
+    out.seek(std::io::SeekFrom::Start(0))?;
+    out.write_all(&head)?;
+    Ok(out)
+}
+
+/// テスト用：`.is2d` ファイルの中身を1つの並びにしたもの（`write_project`）
 #[cfg(test)]
 pub(crate) fn project_file_bytes(doc: &ProjectDocument) -> Result<Vec<u8>, String> {
-    let (head, body) = project_file_parts(doc)?;
-    Ok([&head[..], &body].concat())
+    write_project(std::io::Cursor::new(Vec::new()), doc)
+        .map(std::io::Cursor::into_inner)
+        .map_err(|e| e.to_string())
 }
 
 /// `.is2d` ファイルの中身 `bytes` を読む。頭（印・版・中身の長さ・CRC32）を順に確かめてから中身を読み、数がみな有限か
@@ -1161,20 +1210,6 @@ pub(crate) fn project_from_bytes(bytes: &[u8]) -> Result<ProjectDocument, String
     Ok(doc)
 }
 
-/// `.is2d` ファイルの頭 `head` と中身 `body`（`project_file_parts`）を、この順にファイル `file` に書いて、ディスクまで書き
-/// 込む
-pub(crate) fn write_project_bytes(
-    file: std::fs::File,
-    head: &[u8],
-    body: &[u8],
-) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut file = file;
-    file.write_all(head)?;
-    file.write_all(body)?;
-    file.sync_all()
-}
-
 /// 保存・書き出し先のパスがシンボリックリンクである場合は実体パスへ解決して返す
 pub(crate) fn resolve_target_path(path: &Path) -> PathBuf {
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -1202,9 +1237,9 @@ pub(crate) fn write_project_file_atomically(
         std::process::id()
     );
     let tmp_path = target_path.with_file_name(tmp_name);
-    let (head, body) = project_file_parts(proj_doc)?;
-    let write_res =
-        std::fs::File::create(&tmp_path).and_then(|file| write_project_bytes(file, &head, &body));
+    let write_res = std::fs::File::create(&tmp_path)
+        .and_then(|file| write_project(file, proj_doc))
+        .and_then(|file| file.sync_all());
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("一時ファイルの書き込みに失敗しました: {e}"));

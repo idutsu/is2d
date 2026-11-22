@@ -2238,6 +2238,14 @@ impl Timeline {
             .flat_map(|kf| kf.cel.instances.iter())
     }
 
+    /// 全レイヤー・全キーフレームの音の区間を列挙する
+    pub(crate) fn sound_clips(&self) -> impl Iterator<Item = crate::sound::SoundClip> + '_ {
+        self.layers
+            .iter()
+            .flat_map(|l| l.keyframes.iter())
+            .filter_map(|kf| kf.sound)
+    }
+
     /// `F5` / `Shift+F5` 等のフレーム操作対象となるレイヤーインデックス一覧を返す：
     /// - 特定のレイヤー（または複数レイヤー範囲）が選択されていれば、その選択レイヤー群のみ。
     /// - どのレイヤーも選択されていなければ（`cell_selection == None`）、全非ロックレイヤー。

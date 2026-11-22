@@ -8,6 +8,7 @@ use crate::canvas_tool::{
     MoveSelectionDrag, Tab,
 };
 use crate::planar_map::CheckedMap;
+use crate::sound::{Sound, SoundClip};
 use crate::symbol::{Document, Library, SymbolDef};
 use crate::timeline::{Cel, Timeline};
 use crate::vector_engine::LayerId;
@@ -244,20 +245,32 @@ fn collect_symbol_and_descendants(
     out.push(Arc::clone(sym));
 }
 
-/// 別タブから移植されるシンボルの内部タイムライン内の子シンボル参照ID（`sym_map` にあるもの）と全グループIDを、貼り付け先タブの `Document` のIDへ一括リマップする
+/// 別タブから移植されるシンボルの内部タイムライン内の子シンボル参照ID（`sym_map` にあるもの）・音の区間の音の番号
+/// （`sound_map` にあるもの）と全グループIDを、貼り付け先タブの `Document` のIDへ一括リマップする
 pub(crate) fn remap_timeline_ids(
     tl: &mut Timeline,
     doc: &mut Document,
     sym_map: &HashMap<u64, u64>,
+    sound_map: &HashMap<u64, u64>,
 ) {
     let mut gid_map: HashMap<u64, u64> = HashMap::new();
     for layer in &mut tl.layers {
         for i in 0..layer.keyframes.len() {
-            let cel = &layer.keyframes[i].cel;
-            if cel.maps.iter().all(|m| m.group_path.is_empty()) && cel.instances.is_empty() {
+            let kf = &layer.keyframes[i];
+            let sound = kf.sound.map(|c| SoundClip {
+                sound: sound_map.get(&c.sound).copied().unwrap_or(c.sound),
+                ..c
+            });
+            let cel = &kf.cel;
+            if sound == kf.sound
+                && cel.maps.iter().all(|m| m.group_path.is_empty())
+                && cel.instances.is_empty()
+            {
                 continue;
             }
-            layer.keyframe_mut(i).cel.remap_ids(
+            let kf = layer.keyframe_mut(i);
+            kf.sound = sound;
+            kf.cel.remap_ids(
                 |gid| remap_gid(&mut gid_map, gid, doc),
                 |sym| sym_map.get(&sym).copied().unwrap_or(sym),
                 None,
@@ -266,7 +279,8 @@ pub(crate) fn remap_timeline_ids(
     }
 }
 
-/// `copy_selected_shapes`（`Cmd+C`）実行時に、クリップボード内の図形が参照しているシンボル定義（入れ子含む）を `Arc` 共有スナップショットとして退避する
+/// `copy_selected_shapes`（`Cmd+C`）実行時に、クリップボード内の図形が参照しているシンボル定義（入れ子含む）と、
+/// そのタイムラインの音の区間が指す音を `Arc` 共有スナップショットとして退避する
 pub(crate) fn capture_clipboard_symbols(tab: &Tab, clipboard: &mut Clipboard) {
     clipboard.source_doc_id = tab.id;
     clipboard.symbols.clear();
@@ -280,6 +294,21 @@ pub(crate) fn capture_clipboard_symbols(tab: &Tab, clipboard: &mut Clipboard) {
     for id in ids {
         collect_symbol_and_descendants(id, &tab.doc.library, &mut visited, &mut clipboard.symbols);
     }
+    clipboard.sounds = sounds_used_by(&tab.doc.sounds, &clipboard.symbols)
+        .cloned()
+        .collect();
+}
+
+/// 音 `sounds` のうち、シンボル `symbols` のタイムラインの音の区間が指すもの
+fn sounds_used_by<'a>(
+    sounds: &'a [Arc<Sound>],
+    symbols: &'a [Arc<SymbolDef>],
+) -> impl Iterator<Item = &'a Arc<Sound>> {
+    sounds.iter().filter(|s| {
+        symbols
+            .iter()
+            .any(|sym| sym.timeline.sound_clips().any(|c| c.sound == s.id))
+    })
 }
 
 /// クリップボードのシンボル `src_sym_id` の代わりに使える、貼り先のタブのシンボルの番号を返す。
@@ -460,6 +489,17 @@ pub(crate) fn import_clipboard_symbols(
         );
     }
 
+    // 移植するシンボルの音の区間が指す音を、貼り先の音のライブラリに入れる（同じ音があればそれを使う）
+    let imports: Vec<Arc<SymbolDef>> = clipboard
+        .symbols
+        .iter()
+        .filter(|s| needed_imports.contains(&s.id))
+        .cloned()
+        .collect();
+    let sound_map: HashMap<u64, u64> = sounds_used_by(&clipboard.sounds, &imports)
+        .map(|s| (s.id, tab.doc.adopt_sound(s)))
+        .collect();
+
     let mut any_imported = false;
     for idx in 0..clipboard.symbols.len() {
         let src_sym_id = clipboard.symbols[idx].id;
@@ -489,7 +529,12 @@ pub(crate) fn import_clipboard_symbols(
         imported.name = tab.doc.unused_symbol_name(
             std::iter::once(base.clone()).chain((2u64..).map(|n| format!("{base} ({n})"))),
         );
-        remap_timeline_ids(&mut imported.timeline, &mut tab.doc, &local_sym_map);
+        remap_timeline_ids(
+            &mut imported.timeline,
+            &mut tab.doc,
+            &local_sym_map,
+            &sound_map,
+        );
 
         tab.doc.library.push(Arc::new(imported));
         if tab.view.selected_library_symbol.is_none() {

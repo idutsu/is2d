@@ -762,6 +762,8 @@ pub(crate) struct Clipboard {
     pub(crate) source_doc_id: u64,
     /// クリップボード内のシェイプが参照しているシンボル定義のスナップショット群（依存順）
     pub(crate) symbols: Vec<Arc<SymbolDef>>,
+    /// `symbols` のタイムラインの音の区間が指す音（コピー元の音のライブラリの音を共有する。移植で貼り先へ持ち込む）
+    pub(crate) sounds: Vec<Arc<crate::sound::Sound>>,
     /// 各コピー元タブから貼り付け先タブへ既にインポート済みのシンボルID対応表 `(source_doc_id, source_sym_id, target_doc_id) -> target_sym_id`
     pub(crate) imported_map: HashMap<(u64, u64, u64), u64>,
     /// 最後に V を離してから、V を押した合図（`Key`）か貼り付けの合図（`Paste`）が来たか（`swallowed_paste`）
