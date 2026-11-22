@@ -341,8 +341,18 @@ impl PlanarMap {
         self.check()
     }
 
-    /// 正しい地図かの判定の本体（`checked`・`valid_faces`）。正しい地図なら、その面
+    /// 正しい地図かの判定（`checked`・`valid_faces`）。正しい地図なら、その面
     fn check(&self) -> Option<Vec<MapFace>> {
+        self.check_with(|| self.polys(), |polys| self.face_cycles_with(polys))
+    }
+
+    /// 正しい地図かの判定の本体（`check`・読んだ地図の確かめ `LayerBase::checked_stored`）。判定の形を `polys` で、面の
+    /// 輪郭を `cycles` で得る（どちらも、要ると分かってから呼ぶ）。正しい地図なら、その面
+    fn check_with<P: std::ops::Deref<Target = [Poly]>, C: std::ops::Deref<Target = [Cycle]>>(
+        &self,
+        polys: impl FnOnce() -> P,
+        cycles: impl FnOnce(&[Poly]) -> C,
+    ) -> Option<Vec<MapFace>> {
         #[cfg(test)]
         FULL_CHECKS.with(|n| n.set(n.get() + 1));
         // 頂点と制御点が格子に置ける（±65,536px の内で有限：`fits_grid`）こと、両側が同じ色の辺が無いことを先に確かめる
@@ -350,11 +360,11 @@ impl PlanarMap {
         if !self.fits_grid(Affine::IDENTITY) || self.edges.iter().any(|e| e.left == e.right) {
             return None;
         }
-        let polys = self.polys();
+        let polys = polys();
         if !self.polys_apart(&polys) {
             return None;
         }
-        let cycles = self.face_cycles_with(&polys);
+        let cycles = cycles(&polys);
         let regions = self.regions(&polys, &cycles);
         if regions.broken > 0 {
             return None;
@@ -1184,6 +1194,8 @@ pub(crate) struct LayerBase {
     polys: OnceLock<Vec<Poly>>,
     /// 面の輪郭（`face_cycles_with`）
     cycles: OnceLock<Vec<Cycle>>,
+    /// 面（`faces_of`。読んだ地図の確かめで作った面は、ここに残す：`checked_stored`）
+    map_faces: OnceLock<Vec<MapFace>>,
     /// 面の図形：（階層, 面ごとの図形。番号は面の印。番号の順）
     faces: SyncCache<Option<FaceShapes>>,
     /// 升目の索引（初めて要るときに作る。地図を書き換えたあとの写しは、前の写しの索引から変わった所だけ作り直したもの
@@ -1234,6 +1246,7 @@ impl LayerBase {
             stored,
             polys: OnceLock::new(),
             cycles: OnceLock::new(),
+            map_faces: OnceLock::new(),
             faces: SyncCache::new(None),
             index: OnceLock::new(),
             ends: OnceLock::new(),
@@ -1301,6 +1314,7 @@ impl LayerBase {
             stored,
             polys: OnceLock::new(),
             cycles: OnceLock::new(),
+            map_faces: OnceLock::new(),
             faces: SyncCache::new(Some((group_path.to_vec(), faces))),
             index: OnceLock::new(),
             ends: OnceLock::new(),
@@ -2144,10 +2158,7 @@ impl LayerBase {
         group_path: &[u64],
     ) -> CheckedMap {
         let (map, faces) = match ids {
-            None => {
-                let (faces, _) = self.map().faces_of(self.polys(), self.cycles());
-                (self.map().clone(), faces)
-            }
+            None => (self.map().clone(), self.map_faces().to_vec()),
             Some(ids) => {
                 let map = self.only_faces_map(ids, group_path);
                 let (faces, _) = map.faces();
@@ -2280,6 +2291,38 @@ impl LayerBase {
             .get_or_init(|| self.map().face_cycles_with(self.polys()))
     }
 
+    /// 面（`faces_of`。初めて要るときに、この写しの判定の形と輪郭から作る。読んだ地図の確かめで作った面があればそれ）
+    fn map_faces(&self) -> &[MapFace] {
+        self.map_faces
+            .get_or_init(|| self.map().faces_of(self.polys(), self.cycles()).0)
+    }
+
+    /// 読んだ地図（この写しのしまう形。まだ確かめていない）の確かめ：正しい地図なら（判定は `PlanarMap::checked` と同じ
+    /// `check_with`。判定の形と面の輪郭は、この写しのものを使い、この写しに残る）、面に1つずつ別の番号を記したしまう形
+    /// （`CheckedMap::uniquely_labeled`）。番号が変わらなければ（アプリが書いた地図はみなそう）、この写しのしまう形
+    /// そのもので、作った面もこの写しに残す（面の図形はそこから作る：初めて見るときの計算が1回で済む。レビュー 983236e
+    /// の N-6001）。変われば、その塊を共有して作る。`None`：正しい地図でない
+    pub(crate) fn checked_stored(&self) -> Option<StoredMap> {
+        let map = self.map();
+        let faces = map.check_with(|| self.polys(), |_| self.cycles())?;
+        let labeled = CheckedMap {
+            map: map.clone(),
+            faces,
+        }
+        .uniquely_labeled();
+        let same = labeled
+            .map
+            .edges
+            .iter()
+            .zip(&map.edges)
+            .all(|(a, b)| (a.left_src, a.right_src) == (b.left_src, b.right_src));
+        if !same {
+            return Some(StoredMap::from_dense(&labeled.map, Some(&self.stored)));
+        }
+        self.map_faces.get_or_init(|| labeled.faces);
+        Some(self.stored.clone())
+    }
+
     /// テスト用：持っている判定の形と面の輪郭（引き継いだもの）が、地図から作り直したものと同じか。まだ持っていなければ
     /// `None`
     #[cfg(test)]
@@ -2310,8 +2353,8 @@ impl LayerBase {
 
     /// 面の図形を地図から作る（`faces`。番号の順）
     fn face_shapes(&self, group_path: &[u64]) -> FaceTable {
-        let (faces, _) = self.map().faces_of(self.polys(), self.cycles());
-        let ids = face_ids(self.map(), &faces, FaceIds::Keep);
+        let faces = self.map_faces();
+        let ids = face_ids(self.map(), faces, FaceIds::Keep);
         let mut shapes: Vec<Arc<FillShape>> = faces
             .iter()
             .zip(&ids)

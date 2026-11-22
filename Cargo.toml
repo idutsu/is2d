@@ -11,7 +11,7 @@ kurbo = "0.13"
 lyon_tessellation = "1.0"
 # 地図の重ね合わせと、ブラシの輪郭の自己交差の解消（vendor/i_overlay。9.1.0 に足した所がある写し。vendor/i_overlay/PATCH.md）
 i_overlay9 = { package = "i_overlay", path = "vendor/i_overlay" }
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 # .is2d の中身（保存用の型を postcard で書く。書き方の仕様は 1.0 から変わらない）と、中身の CRC32（eframe も PNG のために使う）
 postcard = { version = "1.1", default-features = false, features = ["use-std"] }
 crc32fast = "1.5"

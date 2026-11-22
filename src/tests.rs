@@ -8220,7 +8220,7 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
         max = u64::MAX
     );
 
-    let doc: project_io::ProjectDocument = serde_json::from_str(&crafted_json).unwrap();
+    let doc: SavedProject = serde_json::from_str(&crafted_json).unwrap();
     let mut app = Is2dApp::default();
     doc.apply_to_app(&mut app);
 
@@ -8317,7 +8317,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
         });
     }
 
-    let doc = project_io::ProjectDocument {
+    let doc = SavedProject {
         stage_size: [800.0, 450.0],
         timeline: (&timeline::Timeline::default()).into(),
         library,
@@ -9458,7 +9458,7 @@ fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
             sym_json_list.join(","),
         );
 
-        let doc: project_io::ProjectDocument = serde_json::from_str(&raw_json)
+        let doc: SavedProject = serde_json::from_str(&raw_json)
             .expect("有効なJSON構文の ProjectDocument がパースできること");
         let mut app = Is2dApp::default();
         doc.apply_to_app(&mut app);
@@ -9822,7 +9822,7 @@ fn content_json(pd: &project_io::ProjectDocument) -> String {
 
 /// テスト用：保存用の写し `proj` の地図 `m` の中身を、ビットまで比べられる形にしたもの（階層の番号と、塊の順の辺。色は
 /// 色の表から引いた値、座標は小数の表し方（読み戻すとビットまで同じ値））
-fn saved_map_content(proj: &project_io::ProjectDocument, m: &timeline::SavedScopeMap) -> String {
+fn saved_map_content(proj: &SavedProject, m: &timeline::SavedScopeMap) -> String {
     let color = |i: u32| (i > 0).then(|| proj.map_tiles.colors[i as usize - 1]);
     let edges: Vec<_> = m
         .tiles
@@ -9847,7 +9847,7 @@ fn saved_map_content(proj: &project_io::ProjectDocument, m: &timeline::SavedScop
 /// テスト用：保存用の写し `proj` の、ルートの最初のレイヤーのキーフレーム `kf` の最初の地図の、最初の塊の辺1本の片側の色を
 /// 新しい色にする（面の輪郭の色がそろわない、正しくない地図になる）。塊はほかの地図と共有していることがあるので、写して
 /// から変え、その地図だけが写しを指すようにする
-fn break_map_colors(proj: &mut project_io::ProjectDocument, kf: usize) {
+fn break_map_colors(proj: &mut SavedProject, kf: usize) {
     let m = &mut proj.timeline.layers[0].keyframes[kf].maps[0];
     let mut tile = proj.map_tiles.tiles[m.tiles[0] as usize].clone();
     proj.map_tiles.colors.push([1, 2, 3, 255]);
@@ -9863,13 +9863,16 @@ fn break_map_colors(proj: &mut project_io::ProjectDocument, kf: usize) {
 }
 
 /// 保存用の型 `doc` を、今の版の `.is2d` ファイルとして `path` に書く（`project_file_bytes`）
-fn write_project_file(path: &std::path::Path, doc: &project_io::ProjectDocument) {
+fn write_project_file<T: serde::Serialize>(
+    path: &std::path::Path,
+    doc: &project_io::ProjectDocument<T>,
+) {
     std::fs::write(path, project_io::project_file_bytes(doc).unwrap()).unwrap();
 }
 
 /// JSON で書いた保存用の型 `json` を、今の版の `.is2d` ファイルとして `path` に書く（テストで細工したファイルを作る）
 fn write_project_json_as_file(path: &std::path::Path, json: &str) {
-    let doc: project_io::ProjectDocument = serde_json::from_str(json).unwrap();
+    let doc: SavedProject = serde_json::from_str(json).unwrap();
     write_project_file(path, &doc);
 }
 
@@ -9878,14 +9881,31 @@ fn opened_document(bytes: &[u8]) -> Result<crate::symbol::Document, String> {
     project_io::read_project::<crate::stored_map::ReadTiles>(bytes)?.into_document()
 }
 
+/// 文書の地図の塊の表の保存の形：色の表と、塊の表（ファイルの塊の表の並び。アプリはこの形を丸ごと持たない：書くときは
+/// 文書の塊から流す `WriteTiles`、読むときは読みながら塊にする `ReadTiles`）。テストは、中身を見たり細工したりするために、
+/// この形で読み書きする
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SavedTiles {
+    pub(crate) colors: Vec<[u8; 4]>,
+    pub(crate) tiles: Vec<stored_map::SavedTile>,
+}
+
+/// 塊の表を保存の形（`SavedTiles`）のまま持つ保存用の型（中身を見たり細工したりする）
+type SavedProject = project_io::ProjectDocument<SavedTiles>;
+
+/// `.is2d` ファイルの中身 `bytes` を、塊の表を保存の形のまま読む（アプリと同じ読み込みの道 `read_project`）
+fn project_from_bytes(bytes: &[u8]) -> Result<SavedProject, String> {
+    project_io::read_project(bytes)
+}
+
 /// 作品のファイル `path` を、塊の表を保存の形のまま読む（中身を見たり細工したりする：`project_from_bytes`）
-fn saved_project_at(path: &std::path::Path) -> project_io::ProjectDocument {
-    project_io::project_from_bytes(&std::fs::read(path).unwrap()).unwrap()
+fn saved_project_at(path: &std::path::Path) -> SavedProject {
+    project_from_bytes(&std::fs::read(path).unwrap()).unwrap()
 }
 
 /// 保存用の型 `doc` を今の版の `.is2d` の中身に書いて、読み戻す（保存して開くのと同じ形を通る）
-fn saved_and_read_back(doc: &project_io::ProjectDocument) -> project_io::ProjectDocument {
-    project_io::project_from_bytes(&project_io::project_file_bytes(doc).unwrap()).unwrap()
+fn saved_and_read_back<T: serde::Serialize>(doc: &project_io::ProjectDocument<T>) -> SavedProject {
+    project_from_bytes(&project_io::project_file_bytes(doc).unwrap()).unwrap()
 }
 
 fn run(host: &mut impl doc_actions::ActionHost, actions: &[doc_actions::Action]) {
@@ -16819,9 +16839,9 @@ fn test_m4_3_saved_map_roundtrip_bit_exact_and_load_shrinks_capacities() {
     let cel = &app.doc.root.layers[0].keyframes[0].cel;
     let base0 = cel.maps[0].base();
     let map = &base0.map();
-    let mut writer = crate::stored_map::TileWriter::default();
+    let mut writer = crate::stored_map::WriteTiles::default();
     let indices = writer.tiles_of(cel.maps[0].stored());
-    let bytes = postcard::to_allocvec(&writer.finish()).unwrap();
+    let bytes = postcard::to_allocvec(&writer).unwrap();
     let table: stored_map::ReadTiles = postcard::from_bytes(&bytes).unwrap();
     let back = crate::stored_map::TileReader::new(table)
         .and_then(|r| r.map(&indices))
@@ -21284,7 +21304,7 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
         file1[4..8],
         project_io::PROJECT_FORMAT_VERSION.to_le_bytes()
     );
-    let parsed_val = serde_json::to_value(project_io::project_from_bytes(&file1).unwrap()).unwrap();
+    let parsed_val = serde_json::to_value(project_from_bytes(&file1).unwrap()).unwrap();
     let kf_json = &parsed_val["timeline"]["layers"][0]["keyframes"][0];
     assert!(kf_json.get("shapes").is_none(), "図形は書かない");
     let maps_json = kf_json["maps"].as_array().unwrap();
@@ -21652,7 +21672,7 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
     assert_eq!(after_shape.exterior.segments.len(), orig_seg_count);
 
     // 2. 前の版（版 2）のファイルは、図形がなくても開くと「未対応のプロジェクトバージョン」エラーが返り、タブが増えない
-    let empty_doc = project_io::ProjectDocument {
+    let empty_doc = SavedProject {
         stage_size: [800.0, 450.0],
         timeline: (&timeline::Timeline::default()).into(),
         library: Vec::new(),
@@ -30785,7 +30805,7 @@ fn loading_checks_scopes_and_reports_every_trim() {
         },
     ));
     save_project_to_path(&mut src, &normal).unwrap();
-    let open = |name: &str, edit: &dyn Fn(&mut crate::project_io::ProjectDocument)| {
+    let open = |name: &str, edit: &dyn Fn(&mut SavedProject)| {
         let mut proj = saved_project_at(&normal);
         edit(&mut proj);
         let path = dir.join(name);
@@ -32747,7 +32767,7 @@ mod format_v7 {
         ProjectDocument, SavedKeyframe, SavedLayer, SavedSymbolDef, SavedSymbolInstance,
         SavedTimeline,
     };
-    use crate::stored_map::SavedTiles;
+    use crate::tests::SavedTiles;
     use crate::timeline::SavedScopeMap;
     use crate::timeline::TweenRotate;
     use serde::Deserialize;
@@ -32838,7 +32858,7 @@ mod format_v7 {
 
     impl Document {
         /// 今の版の保存用の型（音は無い）
-        pub(super) fn current(self) -> ProjectDocument {
+        pub(super) fn current(self) -> ProjectDocument<SavedTiles> {
             ProjectDocument {
                 stage_size: self.stage_size,
                 timeline: self.timeline.current(),
@@ -32945,7 +32965,7 @@ mod old_format {
 
 /// 計測の作品のファイルの中身 `bytes` が前の版（版 5 の JSON・版 6）なら、今の版の保存用の型に直したものと、前の版の番号
 /// （計測用の作品を作り直さずに使うため）。今の版のファイルなら `None`
-fn old_format_document(bytes: &[u8]) -> Option<(project_io::ProjectDocument, u32)> {
+fn old_format_document(bytes: &[u8]) -> Option<(SavedProject, u32)> {
     let (old, version): (old_format::Document, u32) = if bytes.first() == Some(&b'{') {
         assert!(
             bytes.starts_with(br#"{"version":5,"#),
@@ -32967,7 +32987,7 @@ fn old_format_document(bytes: &[u8]) -> Option<(project_io::ProjectDocument, u32
     } else {
         return None;
     };
-    Some((current_document_of(old), version))
+    Some((saved_and_read_back(&current_document_of(old)), version))
 }
 
 /// 前の版の保存用の型 `old` を、今の版の保存用の型にする。地図は確かめて面に1つずつ別の番号を記し（`uniquely_labeled`）、
@@ -34389,13 +34409,13 @@ fn project_file_round_trip_keeps_every_bit() {
     let written = std::fs::read(&path).unwrap();
     let _ = std::fs::remove_file(&path);
     assert_eq!(written, bytes);
-    let back = project_io::project_from_bytes(&bytes).unwrap();
+    let back = project_from_bytes(&bytes).unwrap();
     // 中身を JSON にして比べる（f64 は読み戻すと同じ値になる最短の10進で書くので、文字が同じなら数もビットまで同じ）
     assert_eq!(
         serde_json::to_string(&back).unwrap(),
         serde_json::to_string(&pd).unwrap()
     );
-    let nodes = |d: &project_io::ProjectDocument| -> Vec<u64> {
+    let nodes = |d: &SavedProject| -> Vec<u64> {
         d.map_tiles
             .tiles
             .iter()
@@ -34408,8 +34428,11 @@ fn project_file_round_trip_keeps_every_bit() {
             })
             .collect()
     };
-    assert!(!nodes(&pd).is_empty());
-    assert_eq!(nodes(&back), nodes(&pd), "頂点の座標はビットまで同じ");
+    // 書いた塊の表を、postcard を通さずに（JSON で）保存の形にしたものとも比べる
+    let pd_saved: SavedProject =
+        serde_json::from_value(serde_json::to_value(&pd).unwrap()).unwrap();
+    assert!(!nodes(&pd_saved).is_empty());
+    assert_eq!(nodes(&back), nodes(&pd_saved), "頂点の座標はビットまで同じ");
     assert_eq!(back.library[0].name, "顔のパーツ（目）");
     assert_eq!(back.recovery_source, pd.recovery_source);
     // 読み戻した文書を保存し直すと、同じバイト列になる
@@ -34494,7 +34517,7 @@ fn project_file_refuses_wrong_or_broken_files() {
             color: Color32::RED,
         }],
     );
-    let drawn = project_io::ProjectDocument::from_app(app.tab()).unwrap();
+    let drawn = saved_and_read_back(&project_io::ProjectDocument::from_app(app.tab()).unwrap());
     let mut nan_node = drawn.clone();
     nan_node.map_tiles.tiles[0].nodes[0][0] = f64::NAN;
     let mut inf_stage = drawn.clone();
@@ -34601,7 +34624,7 @@ fn stage_size_is_decided_by_one_rule_at_the_entries() {
     );
     let mut wide = pd;
     wide.stage_size = [10_000.0, 10.0];
-    let doc = project_io::project_from_bytes(&project_io::project_file_bytes(&wide).unwrap())
+    let doc = project_from_bytes(&project_io::project_file_bytes(&wide).unwrap())
         .expect("読める")
         .into_document()
         .expect("読める");
@@ -36471,7 +36494,7 @@ fn sounds_survive_save_and_open() {
     assert!(import_sound(&mut app, short_wav()));
     let saved = project_io::ProjectDocument::of(&app.doc);
     let bytes = project_io::project_file_bytes(&saved).unwrap();
-    let doc = project_io::project_from_bytes(&bytes)
+    let doc = project_from_bytes(&bytes)
         .unwrap()
         .into_document()
         .unwrap();
@@ -36503,7 +36526,7 @@ fn broken_sound_data_is_refused_when_opening() {
     fn kf(d: &mut project_io::ProjectDocument) -> &mut project_io::SavedKeyframe {
         &mut d.timeline.layers[0].keyframes[0]
     }
-    assert!(refused(&|d| d.sounds[0].bytes = b"broken".to_vec()));
+    assert!(refused(&|d| d.sounds[0].bytes = b"broken"[..].into()));
     assert!(refused(&|d| kf(d).sound.as_mut().unwrap().sound = 99));
     assert!(refused(&|d| kf(d).sound.as_mut().unwrap().end += 1));
     assert!(refused(&|d| {
@@ -36882,7 +36905,7 @@ fn copied_symbol_with_sound() -> (Is2dApp, u64) {
 /// テスト用：文書 `doc` を保存したバイトを開き直した文書（開けなければ `Err`）
 fn reopened(doc: &symbol::Document) -> Result<symbol::Document, String> {
     let bytes = project_io::project_file_bytes(&project_io::ProjectDocument::of(doc))?;
-    project_io::project_from_bytes(&bytes)?.into_document()
+    project_from_bytes(&bytes)?.into_document()
 }
 
 /// 文書 `doc` のシンボル `sym_id` のタイムラインの音の区間が指す音のバイト（区間がライブラリの音に収まること）

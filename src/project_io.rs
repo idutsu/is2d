@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::canvas_tool::{cancel_active_drag, SelectSubMode, Session, Tab, UndoHistory, View};
-use crate::stored_map::{ReadTiles, SavedTiles, TileReader, TileWriter};
+use crate::stored_map::{ReadTiles, TileReader, WriteTiles};
 use crate::symbol::{
     ColorEffect, Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode,
     TweenRotate,
@@ -460,12 +460,13 @@ pub(crate) struct SavedSoundClip {
     pub(crate) end: u64,
 }
 
-/// 音のライブラリの1つの音の保存の形：番号・名前・読み込んだ WAV・MP3 のバイトのまま
+/// 音のライブラリの1つの音の保存の形：番号・名前・読み込んだ WAV・MP3 のバイトのまま（書くときは文書の音のバイトを
+/// 共有して書き、写さない）
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SavedSound {
     pub(crate) id: u64,
     pub(crate) name: String,
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) bytes: Arc<[u8]>,
 }
 
 impl SavedKeyframe {
@@ -745,11 +746,11 @@ impl SymbolDef {
 }
 
 /// `.is2d` ファイルの中身のルート構造体（版の番号はファイルの頭にだけ持つ：`project_file_head`）。postcard は項目を
-/// 並びの位置で読むので、書かない項目（`skip_serializing_if`）は作らない。塊の表は、書くときは保存の形（`SavedTiles`）、
-/// アプリが読むときは読みながら塊にした形（`ReadTiles`）。テストは、中身を見たり細工したりするために保存の形のまま読む
-/// （どちらも同じ読み込みの道 `read_project` を通る）
+/// 並びの位置で読むので、書かない項目（`skip_serializing_if`）は作らない。塊の表は、書くときは文書の塊から流す形
+/// （`WriteTiles`）、アプリが読むときは読みながら塊にした形（`ReadTiles`）。テストは、中身を見たり細工したりするために
+/// 塊の表を保存の形のまま読み書きする（読むのはどれも同じ読み込みの道 `read_project` を通る）
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct ProjectDocument<T = SavedTiles> {
+pub(crate) struct ProjectDocument<T = WriteTiles> {
     pub(crate) stage_size: [f32; 2],
     pub(crate) timeline: SavedTimeline,
     #[serde(default)]
@@ -813,14 +814,14 @@ impl ProjectDocument {
             next_symbol_id: doc.next_symbol_id,
             next_group_id: doc.next_group_id,
             recovery_source: None,
-            map_tiles: SavedTiles::default(),
+            map_tiles: WriteTiles::default(),
             sounds: doc
                 .sounds
                 .iter()
                 .map(|s| SavedSound {
                     id: s.id,
                     name: s.name.clone(),
-                    bytes: s.encoded.to_vec(),
+                    bytes: s.encoded.clone(),
                 })
                 .collect(),
             next_sound_id: doc.next_sound_id,
@@ -829,27 +830,28 @@ impl ProjectDocument {
         out
     }
 
-    /// 地図のしまう形（`SavedScopeMap::stored`）を、塊の表（`map_tiles`）と塊の番号の並びにする。共有している塊は1回だけ
-    /// 書く
+    /// 地図のしまう形（`SavedScopeMap::stored`）を、塊の表（`map_tiles`）の塊の番号の並びにする。共有している塊は1回だけ
+    /// 表に足す（塊は写さない：書くときに文書の塊から流す）
     pub(crate) fn write_map_tiles(&mut self) {
-        let mut writer = TileWriter::default();
+        let mut writer = std::mem::take(&mut self.map_tiles);
         self.for_each_map(|m| {
             if let Some(stored) = m.stored.take() {
                 m.tiles = writer.tiles_of(&stored);
             }
         });
-        self.map_tiles = writer.finish();
+        self.map_tiles = writer;
     }
+}
 
-    /// テスト用：保存用の写しを書いて読み戻してから文書を作る（アプリと同じ読み込みの道：`read_project`・
-    /// `into_document_noting`）
-    #[cfg(test)]
+/// テスト用：保存用の写し（書く形 `WriteTiles` でも、テストの保存の形でも）を、書いて読み戻してから使う
+#[cfg(test)]
+impl<T: Serialize> ProjectDocument<T> {
+    /// 書いて読み戻してから文書を作る（アプリと同じ読み込みの道：`read_project`・`into_document_noting`）
     pub(crate) fn into_document(self) -> Result<Document, String> {
         read_project::<ReadTiles>(&project_file_bytes(&self)?[..])?.into_document()
     }
 
     /// 読み込んだ `ProjectDocument` を現在のアクティブタブへ適用し、作業キャンバスや履歴を初期化する
-    #[cfg(test)]
     pub(crate) fn apply_to_app(self, tab: &mut Tab) {
         let doc = self.into_document().expect("正しい地図の文書");
         reset_active_document_state(tab, doc);
@@ -922,7 +924,7 @@ impl ProjectDocument<ReadTiles> {
             if !is_safe_id(s.id) || !sound_ids.insert(s.id) {
                 return Err("プロジェクトファイルの音が壊れています".to_owned());
             }
-            sounds.push(Arc::new(crate::sound::Sound::new(s.id, s.name, s.bytes.into())?));
+            sounds.push(Arc::new(crate::sound::Sound::new(s.id, s.name, s.bytes)?));
         }
         let fps = self.timeline.fps.clamp(1, crate::symbol::MAX_FPS);
         let mut timeline = Timeline::from_saved(self.timeline, trimmed)?;
@@ -1151,9 +1153,9 @@ impl<W: std::io::Write> std::io::Write for BodyWriter<W> {
 /// 保存用の写し `doc` の `.is2d` ファイル（頭と、postcard で書いた中身）を `out` に書き、`out` を返す。頭の場所を空けて
 /// 中身を流し込み（長さと CRC32 を数えながら：`BodyWriter`）、最後に頭へ戻って頭を書く。中身全体を1つの並びに持たない
 /// （ファイルの大きさの一時領域を取らない：レビュー e90f27c の N-5001）
-pub(crate) fn write_project<W: std::io::Write + std::io::Seek>(
+pub(crate) fn write_project<W: std::io::Write + std::io::Seek, T: Serialize>(
     mut out: W,
-    doc: &ProjectDocument,
+    doc: &ProjectDocument<T>,
 ) -> std::io::Result<W> {
     out.write_all(&[0; PROJECT_FILE_HEADER_LEN])?;
     let mut buffered = std::io::BufWriter::new(BodyWriter {
@@ -1177,7 +1179,9 @@ pub(crate) fn write_project<W: std::io::Write + std::io::Seek>(
 
 /// テスト用：`.is2d` ファイルの中身を1つの並びにしたもの（`write_project`）
 #[cfg(test)]
-pub(crate) fn project_file_bytes(doc: &ProjectDocument) -> Result<Vec<u8>, String> {
+pub(crate) fn project_file_bytes<T: Serialize>(
+    doc: &ProjectDocument<T>,
+) -> Result<Vec<u8>, String> {
     write_project(std::io::Cursor::new(Vec::new()), doc)
         .map(std::io::Cursor::into_inner)
         .map_err(|e| e.to_string())
@@ -1348,11 +1352,6 @@ pub(crate) fn read_project<T: DeserializeOwned + Default>(
     }
 }
 
-/// テスト用：`.is2d` ファイルの中身 `bytes` を、塊の表を保存の形のまま読む（`read_project`）
-#[cfg(test)]
-pub(crate) fn project_from_bytes(bytes: &[u8]) -> Result<ProjectDocument, String> {
-    read_project(bytes)
-}
 
 /// 保存・書き出し先のパスがシンボリックリンクである場合は実体パスへ解決して返す
 pub(crate) fn resolve_target_path(path: &Path) -> PathBuf {
@@ -1371,9 +1370,9 @@ pub(crate) fn file_name_or<'a>(path: &'a Path, fallback: &'a str) -> &'a str {
 }
 
 /// 指定されたパスへ `ProjectDocument` を一時ファイル経由でアトミックに書き出し、親ディレクトリを同期する
-pub(crate) fn write_project_file_atomically(
+pub(crate) fn write_project_file_atomically<T: Serialize>(
     target_path: &Path,
-    proj_doc: &ProjectDocument,
+    proj_doc: &ProjectDocument<T>,
 ) -> Result<(), String> {
     let tmp_name = format!(
         ".{}.{}.tmp",

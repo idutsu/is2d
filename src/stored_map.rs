@@ -990,7 +990,7 @@ pub(crate) struct SavedTile {
 
 /// しまう辺の保存の形：両端（塊の点の番号）、制御点の座標、左右の色（文書の色の表の 1 からの番号。0 は何も無い）、左右の
 /// 側の図形の印（文書の中の 1 からの通し番号で、同じ印は同じ図形。0 は無い。読むときに新しい図形の番号に替える：
-/// `TileWriter`・`TileReader`）
+/// `WriteTiles`・`TileReader`）
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub(crate) struct SavedEdge {
     pub(crate) a: u32,
@@ -1002,28 +1002,26 @@ pub(crate) struct SavedEdge {
     pub(crate) right_src: u64,
 }
 
-/// 文書の地図の塊の表：色の表と、塊の表。地図は塊の番号の並びで指すので、キーフレームどうしで共有する塊は1回だけ書く
-/// （`TileWriter`。読むときは、この形を丸ごと持たずに、読みながら塊にする：`ReadTiles`）
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) struct SavedTiles {
-    pub(crate) colors: Vec<[u8; 4]>,
-    pub(crate) tiles: Vec<SavedTile>,
-}
-
-/// 地図を保存の形（塊の表と、地図ごとの塊の番号の並び：`SavedTiles`）にする。同じ塊（同じ `Arc`）は1回だけ書くので、
-/// キーフレームや Undo の控えで共有している塊は、ファイルでも共有したまま（ファイルの大きさが変わった塊の量に見合う：
-/// レビュー f01d518 の N-5001）
-#[derive(Default)]
-pub(crate) struct TileWriter {
+/// 書く塊の表：地図の塊（文書の塊そのもの。写さない）を番号の順に並べたものと、色の表。書くときは、ファイルの
+/// 塊の表の並び（色の表 → 塊の表）で、塊ごとの点の表と辺をその場で作って流す（塊の表の写しを丸ごと
+/// 持たないので、保存の一時領域は塊の数に比例する番号の表だけ：レビュー 983236e の N-5001）。同じ塊（同じ `Arc`）は
+/// 1回だけ書くので、キーフレームや Undo の控えで共有している塊は、ファイルでも共有したまま（ファイルの大きさが変わった
+/// 塊の量に見合う：レビュー f01d518 の N-5001）
+#[derive(Clone, Default)]
+pub(crate) struct WriteTiles {
+    /// 塊の番地から、塊の番号
     index: IntMap<usize, u32>,
-    colors: std::collections::HashMap<[u8; 4], u32>,
+    /// 番号の順の塊
+    tiles: Vec<Tile>,
+    /// 色から、色の番号（1 から。初めて出てきた順）と、番号の順の色
+    color_no: std::collections::HashMap<[u8; 4], u32>,
+    colors: Vec<[u8; 4]>,
     /// 図形の番号から、書く印（1 からの通し番号。初めて出てきた順）
     labels: IntMap<ShapeId, u64>,
-    out: SavedTiles,
 }
 
-impl TileWriter {
-    /// 地図 `map` の塊の番号の並び（まだ書いていない塊は表に足す）
+impl WriteTiles {
+    /// 地図 `map` の塊の番号の並び（まだ並べていない塊は表に足し、その辺の色と図形の印に、出てきた順に番号を振る）
     pub(crate) fn tiles_of(&mut self, map: &StoredMap) -> Vec<u32> {
         map.0
             .tiles
@@ -1033,68 +1031,74 @@ impl TileWriter {
                 if let Some(&i) = self.index.get(&key) {
                     return i;
                 }
-                let mut tile = SavedTile::default();
-                let mut node_of: IntMap<[u64; 2], u32> = IntMap::default();
                 for e in t.iter() {
-                    let mut node = |p: Point| -> u32 {
-                        *node_of
-                            .entry([p.x.to_bits(), p.y.to_bits()])
-                            .or_insert_with(|| {
-                                tile.nodes.push([p.x, p.y]);
-                                tile.nodes.len() as u32 - 1
-                            })
-                    };
-                    let (a, b) = (node(e.a), node(e.b));
-                    let edge = self.saved_edge(e, a, b);
-                    tile.edges.push(edge);
+                    for c in [e.left, e.right].into_iter().flatten() {
+                        let next = self.colors.len() as u32 + 1;
+                        if *self.color_no.entry(c.to_array()).or_insert(next) == next {
+                            self.colors.push(c.to_array());
+                        }
+                    }
+                    for id in [e.left_src, e.right_src].into_iter().flatten() {
+                        let next = self.labels.len() as u64 + 1;
+                        self.labels.entry(id.get()).or_insert(next);
+                    }
                 }
-                let i = self.out.tiles.len() as u32;
-                self.out.tiles.push(tile);
+                let i = self.tiles.len() as u32;
+                self.tiles.push(t.clone());
                 self.index.insert(key, i);
                 i
             })
             .collect()
     }
 
-    fn saved_edge(&mut self, e: &StoredEdge, a: u32, b: u32) -> SavedEdge {
-        let mut color = |c: Option<Color32>| -> u32 {
-            let Some(c) = c else {
-                return 0;
+    /// 塊 `t` の保存の形（書く1つだけを作る）
+    fn saved_tile(&self, t: &TileData) -> SavedTile {
+        let mut tile = SavedTile::default();
+        let mut node_of: IntMap<[u64; 2], u32> = IntMap::default();
+        let color = |c: Option<Color32>| c.map_or(0, |c| self.color_no[&c.to_array()]);
+        let label = |id: Option<NonZeroU64>| id.map_or(0, |id| self.labels[&id.get()]);
+        for e in t.iter() {
+            let mut node = |p: Point| -> u32 {
+                *node_of
+                    .entry([p.x.to_bits(), p.y.to_bits()])
+                    .or_insert_with(|| {
+                        tile.nodes.push([p.x, p.y]);
+                        tile.nodes.len() as u32 - 1
+                    })
             };
-            let next = self.colors.len() as u32 + 1;
-            let no = *self.colors.entry(c.to_array()).or_insert(next);
-            if no == next {
-                self.out.colors.push(c.to_array());
-            }
-            no
-        };
-        let left = color(e.left);
-        let right = color(e.right);
-        let mut label = |id: Option<NonZeroU64>| -> u64 {
-            let Some(id) = id else {
-                return 0;
-            };
-            let next = self.labels.len() as u64 + 1;
-            *self.labels.entry(id.get()).or_insert(next)
-        };
-        SavedEdge {
-            a,
-            b,
-            ctrl: [e.ctrl.x, e.ctrl.y],
-            left,
-            right,
-            left_src: label(e.left_src),
-            right_src: label(e.right_src),
+            let (a, b) = (node(e.a), node(e.b));
+            tile.edges.push(SavedEdge {
+                a,
+                b,
+                ctrl: [e.ctrl.x, e.ctrl.y],
+                left: color(e.left),
+                right: color(e.right),
+                left_src: label(e.left_src),
+                right_src: label(e.right_src),
+            });
         }
-    }
-
-    /// 書いた塊の表
-    pub(crate) fn finish(self) -> SavedTiles {
-        self.out
+        tile
     }
 }
 
-/// 読んだ塊の表：ファイルの塊の表（`SavedTiles` の形）を読みながら、塊ごとにしまう形の辺の並びにしたもの（保存の形の
+/// ファイルの塊の表の並びで書く：色の表と、塊の表
+impl Serialize for WriteTiles {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        struct Tiles<'a>(&'a WriteTiles);
+        impl Serialize for Tiles<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.collect_seq(self.0.tiles.iter().map(|t| self.0.saved_tile(t)))
+            }
+        }
+        let mut st = s.serialize_struct("SavedTiles", 2)?;
+        st.serialize_field("colors", &self.colors)?;
+        st.serialize_field("tiles", &Tiles(self))?;
+        st.end()
+    }
+}
+
+/// 読んだ塊の表：ファイルの塊の表（色の表 → 塊の表）を読みながら、塊ごとにしまう形の辺の並びにしたもの（保存の形の
 /// 塊の表を丸ごと持たない：レビュー e90f27c の N-5002）。postcard が書いた並びの順に読む。辺の側の図形の印は、まだファイル
 /// の印のまま（新しい図形の番号に替えるのは、ファイルが壊れていないと確かめたあと：`TileReader::new`）。読みながらは断ら
 /// ない：色・点の番号が表の外の塊、辺の無い塊があれば `broken` に、有限でない座標があれば `non_finite` に記す
@@ -1210,7 +1214,7 @@ pub(crate) struct TileReader {
 
 impl TileReader {
     /// 読んだ塊の表 `read` の塊。表の外の番号・辺の無い塊があれば `None`（壊れたファイル）。辺の側の図形の印（1 からの
-    /// 通し番号：`TileWriter`）は、続けて取った新しい図形の番号に替える（同じ印は同じ番号。ファイルに書いた数がそのまま
+    /// 通し番号：`WriteTiles`）は、続けて取った新しい図形の番号に替える（同じ印は同じ番号。ファイルに書いた数がそのまま
     /// 番号になることは無いので、細工したファイルでも、これから振る番号が今ある番号と重ならない）。印が辺の側の数より
     /// 大きければ（アプリは書かない）`None`
     pub(crate) fn new(read: ReadTiles) -> Option<Self> {

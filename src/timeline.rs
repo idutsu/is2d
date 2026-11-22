@@ -267,29 +267,18 @@ impl LazyStored {
             .unwrap_or_else(|| empty_stored())
     }
 
-    /// 確かめた地図（`PlanarMap::checked`。受け入れの判定はこれ1つ）：正しければ、面に1つずつ別の番号を記した地図
-    /// （`CheckedMap::uniquely_labeled`。番号が変わらなければ、しまった地図そのもの。変われば、その塊を共有して作る）。
-    /// 壊れていれば `None` にして知らせる
+    /// 確かめた地図：しまった地図の計算に使う写し（`LayerBase::of_stored`。持ち主（画面の土台など）が持っていればそれ）で
+    /// 確かめる（`LayerBase::checked_stored`。受け入れの判定は `PlanarMap::checked` と同じ1つ）。正しければ、面に1つずつ
+    /// 別の番号を記した地図（番号が変わらなければ、しまった地図そのもの）。確かめに作った判定の形・輪郭・面は写しに残る
+    /// ので、写しの持ち主はそのまま使える（`ScopeMap::base`）。壊れていれば `None` にして知らせる
     fn check(&self) -> Option<StoredMap> {
-        let dense = self.stored.to_dense();
-        let Some(checked) = dense.clone().checked() else {
+        let checked = LayerBase::of_stored(&self.stored).checked_stored();
+        if checked.is_none() {
             if let Some((sink, at)) = self.notice.get() {
                 sink.push(at.clone());
             }
-            return None;
-        };
-        let labeled = checked.uniquely_labeled();
-        let same = labeled
-            .map()
-            .edges
-            .iter()
-            .zip(&dense.edges)
-            .all(|(a, b)| (a.left_src, a.right_src) == (b.left_src, b.right_src));
-        Some(if same {
-            self.stored.clone()
-        } else {
-            StoredMap::from_dense(labeled.map(), Some(&self.stored))
-        })
+        }
+        checked
     }
 }
 
@@ -519,8 +508,11 @@ impl ScopeMap {
         self.map.get()
     }
 
-    /// 計算に使う写し（持ち主（画面の土台など）が持っていればそれ、無ければ塊から作る：`LayerBase::of_stored`）
+    /// 計算に使う写し（持ち主（画面の土台など）が持っていればそれ、無ければ塊から作る：`LayerBase::of_stored`）。まだ
+    /// 確かめていない地図は、しまった地図の写しを先に作って持ってから確かめる（`LazyStored::check` がこの写しで確かめる
+    /// ので、確かめに作った判定の形・輪郭・面を、この写しでそのまま使う。正しい地図は、ふつう、しまった地図そのもの）
     pub(crate) fn base(&self) -> Arc<LayerBase> {
+        let _read = LayerBase::of_stored(&self.map.stored);
         LayerBase::of_stored(self.stored())
     }
 
