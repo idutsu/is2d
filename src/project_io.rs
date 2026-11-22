@@ -661,25 +661,12 @@ impl Timeline {
             layers.push(Layer::new_with_id(1, "Layer 1"));
         }
 
-        // 重複または安全上限（MAX_SAFE_ENTITY_ID）超過の Layer::id があれば一意な安全IDへ再採番し、各キーフレーム内の図形・インスタンスの layer_id も正規化する
+        // 使えない・重なるレイヤーの番号は新しい番号にし（`FreshIds`）、各キーフレームのインスタンスの layer_id もそろえる
         let mut seen_layer_ids = HashSet::with_capacity(layers.len());
-        let mut max_layer_id = layers
-            .iter()
-            .map(|l| l.id)
-            .filter(|&id| is_safe_id(id))
-            .max()
-            .unwrap_or(0);
+        let mut layer_ids = FreshIds::after(layers.iter().map(|l| l.id));
         for layer in &mut layers {
             if !is_safe_id(layer.id) || !seen_layer_ids.insert(layer.id) {
-                loop {
-                    max_layer_id = max_layer_id.saturating_add(1).max(1);
-                    if seen_layer_ids.insert(max_layer_id) {
-                        layer.id = max_layer_id;
-                        break;
-                    }
-                }
-            } else {
-                max_layer_id = max_layer_id.max(layer.id);
+                layer.id = layer_ids.take();
             }
             let lid = layer.id;
             for i in 0..layer.keyframes.len() {
@@ -698,18 +685,13 @@ impl Timeline {
             .max(1);
         let active_layer = s.active_layer.min(layers.len().saturating_sub(1));
         let current_frame = s.current_frame.min(total_frames.saturating_sub(1));
-        let raw_next_layer_id = if s.next_layer_id <= MAX_SAFE_ENTITY_ID {
-            s.next_layer_id
-        } else {
-            2
-        };
         let mut tl = Self {
             layers,
             current_frame,
             active_layer,
             total_frames,
             next_layer_number: s.next_layer_number.max(2),
-            next_layer_id: raw_next_layer_id.max(max_layer_id.saturating_add(1)).max(2),
+            next_layer_id: layer_ids.next_to_save(s.next_layer_id),
             cell_selection: Some(TimelineCellSelection::single(active_layer, current_frame)),
         };
         tl.sync_total_frames();
@@ -777,13 +759,36 @@ fn is_safe_id(id: u64) -> bool {
     id > 0 && id <= MAX_SAFE_ENTITY_ID
 }
 
-/// 使えない番号 `gid` の、新しいグループの番号（同じ番号には同じ新しい番号。新しい番号は `next` から順に振る）
-fn renumbered_gid(map: &mut HashMap<u64, u64>, next: &mut u64, gid: u64) -> u64 {
-    *map.entry(gid).or_insert_with(|| {
-        let id = *next;
-        *next = next.saturating_add(1);
+/// 読み込みで新しく振る番号（レイヤー・シンボル・グループ・音。番号を新しくする決まりはこれ1つ）：ファイルにある使える
+/// 番号（`is_safe_id`）のいちばん大きいものの次から順に振るので、ファイルにある使える番号とも、振った番号どうしとも
+/// 重ならない
+struct FreshIds {
+    next: u64,
+}
+
+impl FreshIds {
+    /// ファイルにある番号 `ids` のあとから振る
+    fn after(ids: impl Iterator<Item = u64>) -> Self {
+        let max = ids.filter(|&id| is_safe_id(id)).max().unwrap_or(0);
+        Self { next: max + 1 }
+    }
+
+    /// 新しい番号を1つ取る
+    fn take(&mut self) -> u64 {
+        let id = self.next;
+        self.next += 1;
         id
-    })
+    }
+
+    /// 文書に入れる「次に振る番号」：ファイルに書いてある次の番号 `saved`（使えない番号なら無いものとする）を、ファイル
+    /// にある番号と振った番号のどれよりも後にしたもの
+    fn next_to_save(&self, saved: u64) -> u64 {
+        if is_safe_id(saved) {
+            saved.max(self.next)
+        } else {
+            self.next
+        }
+    }
 }
 
 impl ProjectDocument {
@@ -929,28 +934,16 @@ impl ProjectDocument<ReadTiles> {
         let fps = self.timeline.fps.clamp(1, crate::symbol::MAX_FPS);
         let mut timeline = Timeline::from_saved(self.timeline, trimmed)?;
 
-        // 重複または不正（id == 0 / id > MAX_SAFE_ENTITY_ID）な SymbolDef::id を一意な安全IDへ再採番してライブラリを構築
+        // 使えない・重なるシンボルの番号は新しい番号にして（`FreshIds`）ライブラリを作る
         let mut seen_sym_ids = HashSet::with_capacity(self.library.len());
-        let mut next_fallback_sym_id = self
-            .library
-            .iter()
-            .map(|s| s.id)
-            .filter(|&id| is_safe_id(id))
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1)
-            .max(1);
+        let mut sym_ids = FreshIds::after(self.library.iter().map(|s| s.id));
         let mut sym_id_remap: HashMap<u64, u64> = HashMap::new();
         let mut library: Vec<SymbolDef> = Vec::with_capacity(self.library.len());
         for saved_sym in self.library {
             let mut sym = SymbolDef::from_saved(saved_sym, trimmed)?;
             let orig_id = sym.id;
             if !is_safe_id(sym.id) || !seen_sym_ids.insert(sym.id) {
-                while seen_sym_ids.contains(&next_fallback_sym_id) {
-                    next_fallback_sym_id = next_fallback_sym_id.saturating_add(1);
-                }
-                sym.id = next_fallback_sym_id;
-                next_fallback_sym_id = next_fallback_sym_id.saturating_add(1);
+                sym.id = sym_ids.take();
                 seen_sym_ids.insert(sym.id);
                 if orig_id > 0 && !seen_sym_ids.contains(&orig_id) {
                     sym_id_remap.entry(orig_id).or_insert(sym.id);
@@ -959,32 +952,26 @@ impl ProjectDocument<ReadTiles> {
             library.push(sym);
         }
 
-        // 安全上限を超える group_id / instance_gid の上限を把握し、必要時に再採番するためのカウンタを準備
-        let mut max_valid_gid = 0_u64;
-        for tl in std::iter::once(&timeline).chain(library.iter().map(|s| &s.timeline)) {
-            for layer in &tl.layers {
-                for kf in &layer.keyframes {
-                    for m in kf.cel.maps.iter() {
-                        for &gid in &m.group_path {
-                            if is_safe_id(gid) {
-                                max_valid_gid = max_valid_gid.max(gid);
-                            }
-                        }
-                    }
-                    for inst in kf.cel.instances.iter() {
-                        for &gid in &inst.parent_scope {
-                            if is_safe_id(gid) {
-                                max_valid_gid = max_valid_gid.max(gid);
-                            }
-                        }
-                        if is_safe_id(inst.binding.instance_gid) {
-                            max_valid_gid = max_valid_gid.max(inst.binding.instance_gid);
-                        }
-                    }
-                }
-            }
-        }
-        let mut next_gid = max_valid_gid.saturating_add(1).max(1);
+        // 使えないグループの番号（group_id / instance_gid）を振り直す番号（`FreshIds`。同じ番号には同じ新しい番号）
+        let used_gids = std::iter::once(&timeline)
+            .chain(library.iter().map(|s| &s.timeline))
+            .flat_map(|tl| &tl.layers)
+            .flat_map(|layer| &layer.keyframes)
+            .flat_map(|kf| {
+                let maps = kf
+                    .cel
+                    .maps
+                    .iter()
+                    .flat_map(|m| m.group_path.iter().copied());
+                let insts = kf.cel.instances.iter().flat_map(|inst| {
+                    inst.parent_scope
+                        .iter()
+                        .copied()
+                        .chain([inst.binding.instance_gid])
+                });
+                maps.chain(insts)
+            });
+        let mut gids = FreshIds::after(used_gids);
         let mut gid_map: HashMap<u64, u64> = HashMap::new();
 
         // 存在しない symbol_id（孤児インスタンス）をルートタイムラインおよび各シンボルタイムラインから除去し、
@@ -1010,7 +997,7 @@ impl ProjectDocument<ReadTiles> {
                                 if is_safe_id(gid) {
                                     gid
                                 } else {
-                                    renumbered_gid(&mut gid_map, &mut next_gid, gid)
+                                    *gid_map.entry(gid).or_insert_with(|| gids.take())
                                 }
                             },
                             |sym| sym_id_remap.get(&sym).copied().unwrap_or(sym),
@@ -1032,17 +1019,6 @@ impl ProjectDocument<ReadTiles> {
             }
         }
 
-        let max_sym_id = library.iter().map(|s| s.id).max().unwrap_or(0);
-        let raw_next_sym_id = if self.next_symbol_id <= MAX_SAFE_ENTITY_ID {
-            self.next_symbol_id
-        } else {
-            1
-        };
-        let raw_next_gid = if self.next_group_id <= MAX_SAFE_ENTITY_ID {
-            self.next_group_id
-        } else {
-            1
-        };
         // 数が有限なことは、読み込みの初めに確かめてある（`only_finite_numbers`。ステージの大きさも同じ `stage_size_of`）
         let stage_size = crate::symbol::stage_size_of(Vec2::from(self.stage_size))
             .expect("読み込みの初めに有限か確かめてある");
@@ -1054,21 +1030,16 @@ impl ProjectDocument<ReadTiles> {
         if !clips_fit {
             return Err("プロジェクトファイルの音が壊れています".to_owned());
         }
-        let max_sound_id = sounds.iter().map(|s| s.id).max().unwrap_or(0);
-        let raw_next_sound_id = if self.next_sound_id <= MAX_SAFE_ENTITY_ID {
-            self.next_sound_id
-        } else {
-            1
-        };
+        let fresh_sound_ids = FreshIds::after(sounds.iter().map(|s| s.id));
         let doc = Document {
             root: timeline,
             library: library.into_iter().map(Arc::new).collect(),
             sounds: Arc::new(sounds),
             stage_size,
             fps,
-            next_symbol_id: raw_next_sym_id.max(max_sym_id.saturating_add(1)).max(1),
-            next_group_id: raw_next_gid.max(next_gid).max(1),
-            next_sound_id: raw_next_sound_id.max(max_sound_id.saturating_add(1)).max(1),
+            next_symbol_id: sym_ids.next_to_save(self.next_symbol_id),
+            next_group_id: gids.next_to_save(self.next_group_id),
+            next_sound_id: fresh_sound_ids.next_to_save(self.next_sound_id),
             revision: crate::vector_engine::next_mesh_revision(),
             broken_maps: Default::default(),
         };

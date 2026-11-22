@@ -562,12 +562,11 @@ impl View {
     }
 
     /// ステージ枠全体が中央キャンバス領域 `canvas_rect` に余白付きでぴったり収まるようにズーム倍率とパン位置を自動調整する（「ウィンドウに合わせる」）
+    /// （ステージの大きさ `stage_size` は文書の大きさ。範囲は `symbol::stage_size_of` でそろえてある）
     pub(crate) fn fit_stage_to_window(&mut self, stage_size: Vec2, canvas_rect: egui::Rect) {
-        let stage_w = stage_size.x.max(100.0);
-        let stage_h = stage_size.y.max(100.0);
         let avail_w = (canvas_rect.width() - 48.0).max(64.0);
         let avail_h = (canvas_rect.height() - 48.0).max(64.0);
-        self.set_zoom((avail_w / stage_w).min(avail_h / stage_h));
+        self.set_zoom((avail_w / stage_size.x).min(avail_h / stage_size.y));
         let zoom = self.zoom;
         let center = Self::DEFAULT_STAGE_CENTER;
         let screen_center = canvas_rect.center();
@@ -580,12 +579,12 @@ impl View {
     /// ステージ（カメラ出力枠）の初期ワールド中心座標
     pub(crate) const DEFAULT_STAGE_CENTER: Point = Point::new(536.0, 310.0);
 
-    /// ステージ（カメラ出力枠）のワールド座標矩形 `KRect` を返す
+    /// ステージ（カメラ出力枠）のワールド座標矩形 `KRect` を返す（大きさ `stage_size` は文書の大きさ：`symbol::stage_size_of`）
     #[inline]
     pub(crate) fn stage_world_rect(&self, stage_size: Vec2) -> KRect {
         let center = Self::DEFAULT_STAGE_CENTER;
-        let half_w = (stage_size.x.max(100.0) as f64) * 0.5;
-        let half_h = (stage_size.y.max(100.0) as f64) * 0.5;
+        let half_w = stage_size.x as f64 * 0.5;
+        let half_h = stage_size.y as f64 * 0.5;
         KRect::new(
             center.x - half_w,
             center.y - half_h,

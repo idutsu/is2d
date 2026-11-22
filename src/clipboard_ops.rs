@@ -150,8 +150,8 @@ pub(crate) fn prepare_placement(
         let (raw, nested) = cel.split_raw();
         let nested = nested.transformed(xform)?;
         let raw = match raw {
-            Some(m) if !m.fits_grid(xform) => return None,
-            Some(m) => Some(m.checked()?.freshly_labeled()),
+            Some(m) if !m.map().fits_grid(xform) => return None,
+            Some(m) => Some(m.freshly_labeled()),
             None => None,
         };
         let i = match by_layer.iter().position(|l| l.0 == target) {

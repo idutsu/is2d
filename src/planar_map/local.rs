@@ -184,6 +184,24 @@ impl<'a> LocalMap<'a> {
         out
     }
 
+    /// 触った前の地図の面（形が変わりうる前の地図の面を集める決まりはこれ1つ：`regions_faces`・`touched_faces`・
+    /// `rewrite`）：消えた辺と、まわりの辺が変わった頂点の、前の地図の辺の側の番号（小さい順・重なり無し）
+    fn changed_base_faces(&self) -> Vec<ShapeId> {
+        let mut out: Vec<ShapeId> = Vec::new();
+        let base_edges = self
+            .dirty_nodes()
+            .into_iter()
+            .flat_map(|v| self.base_edges_at(v));
+        for e in self.removed.iter().copied().chain(base_edges) {
+            let ed = self.base_edge(e);
+            out.extend(ed.left_src);
+            out.extend(ed.right_src);
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// 頂点 `v` を端に持つ前の地図の辺（消えた辺も。番号の順）
     fn base_edges_at(&self, v: usize) -> Vec<usize> {
         let p = self.node(v);
@@ -752,22 +770,7 @@ impl LocalMap<'_> {
         }
         // 前の地図の穴で、入れ先の外周が触られたもの：触った前の地図の外周（消えた辺と、まわりの辺が変わった前の地図の
         // 頂点の、前の地図の向きのある辺の左の面）の面の、前の地図の輪郭のうち、新しい地図にそのままあるもの
-        let mut old_faces: Vec<ShapeId> = Vec::new();
-        for &e in &self.removed {
-            let ed = self.base_edge(e);
-            old_faces.extend(ed.left_src);
-            old_faces.extend(ed.right_src);
-        }
-        for v in self.dirty_nodes() {
-            for e in self.base_edges_at(v) {
-                let ed = self.base_edge(e);
-                old_faces.extend(ed.left_src);
-                old_faces.extend(ed.right_src);
-            }
-        }
-        old_faces.sort_unstable();
-        old_faces.dedup();
-        for id in old_faces {
+        for id in self.changed_base_faces() {
             let kept = self.kept_exterior(id, base_faces, &touched_set, memo)?;
             for h in base_faces(id) {
                 if self.removed.contains(&h.0) {
@@ -1001,22 +1004,7 @@ impl LocalMap<'_> {
             .map(|ci| (ci, None))
             .collect();
         // 触った前の地図の面：外周がそのままなら穴が変わる面。そのままの穴は入れ先を決め直す
-        let mut old_faces: Vec<ShapeId> = Vec::new();
-        for &e in &self.removed {
-            let ed = self.base_edge(e);
-            old_faces.extend(ed.left_src);
-            old_faces.extend(ed.right_src);
-        }
-        for v in self.dirty_nodes() {
-            for e in self.base_edges_at(v) {
-                let ed = self.base_edge(e);
-                old_faces.extend(ed.left_src);
-                old_faces.extend(ed.right_src);
-            }
-        }
-        old_faces.sort_unstable();
-        old_faces.dedup();
-        for id in old_faces {
+        for id in self.changed_base_faces() {
             let kept = self.kept_exterior(id, base_faces, &touched_set, memo)?;
             for h in base_faces(id) {
                 if self.removed.contains(&h.0) {
@@ -1108,7 +1096,7 @@ impl LocalMap<'_> {
     }
 }
 
-/// 曲線の形の鍵（`edge_key` と同じ：両端を決まった順にし、制御点と合わせたビット）
+/// 曲線の形の鍵（両端を決まった順にし、制御点と合わせたビット。地図の辺の鍵 `edge_key` もこれを呼ぶ）
 pub(super) fn quad_key(q: &QuadBez) -> [u64; 6] {
     let (p0, p2) = if point_order(q.p0, q.p2).is_le() {
         (q.p0, q.p2)
@@ -1222,19 +1210,8 @@ impl LocalMap<'_> {
     ) -> LocalChange {
         // 形が変わりうる前の地図の面：消えた辺と、まわりの辺が変わった頂点の、前の地図の辺の側の面と、触った面のうち外周が
         // 前の地図にそのままある面
-        let mut old_faces: std::collections::BTreeSet<ShapeId> = Default::default();
-        for &e in &self.removed {
-            let ed = self.base_edge(e);
-            old_faces.extend(ed.left_src);
-            old_faces.extend(ed.right_src);
-        }
-        for v in self.dirty_nodes() {
-            for e in self.base_edges_at(v) {
-                let ed = self.base_edge(e);
-                old_faces.extend(ed.left_src);
-                old_faces.extend(ed.right_src);
-            }
-        }
+        let mut old_faces: std::collections::BTreeSet<ShapeId> =
+            self.changed_base_faces().into_iter().collect();
         for f in faces {
             let h0 = memo.cycles[f.cycles[0]].cycle[0];
             if h0.0 < self.n_base() {
@@ -1379,9 +1356,9 @@ impl LocalMap<'_> {
             .into_iter()
             .map(|i| {
                 let f = &faces[i];
-                let mut contours = f.cycles.iter().map(|&ci| {
-                    let cycle = &memo.cycles[ci].cycle;
-                    let quads: Vec<QuadBez> = cycle
+                let cycles = f.cycles.iter().map(|&ci| {
+                    memo.cycles[ci]
+                        .cycle
                         .iter()
                         .map(|&(e, forward)| {
                             let q = self.quad(e);
@@ -1391,14 +1368,11 @@ impl LocalMap<'_> {
                                 QuadBez::new(q.p2, q.p1, q.p0)
                             }
                         })
-                        .collect();
-                    reuse(cycle, &quads).unwrap_or_else(|| Contour::new(from_lowest_point(quads)))
+                        .collect()
                 });
-                let exterior = contours.next().unwrap_or_else(|| Contour::new(Vec::new()));
-                let mut holes: Vec<Contour> = contours.collect();
-                holes.sort_by(|a, b| starts_order(&a.segments, &b.segments));
-                let mut s =
-                    FillShape::new(f.color, exterior, holes).with_scope(layer_id, group_path);
+                let reuse =
+                    |k: usize, quads: &[QuadBez]| reuse(&memo.cycles[f.cycles[k]].cycle, quads);
+                let mut s = cycles_shape(f.color, cycles, reuse, layer_id, group_path);
                 if let Some(src) = choice[i].filter(|src| heir.get(src).is_some_and(|h| h.1 == i)) {
                     s.shape_id = src;
                 }

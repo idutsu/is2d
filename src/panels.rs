@@ -1998,21 +1998,18 @@ pub(crate) fn draw_canvas_contents(
             continue;
         }
 
-        if num_layers > 1 {
-            while shape_cursor < scene_len
-                && scene.get(shape_cursor).is_some_and(|s| {
-                    s.layer_id != lid
-                        && tl
-                            .layer_index_by_id(s.layer_id)
-                            .is_none_or(|ord| ord < layer_idx)
-                })
-            {
-                shape_cursor += 1;
-            }
+        while shape_cursor < scene_len
+            && scene.get(shape_cursor).is_some_and(|s| {
+                s.layer_id != lid
+                    && tl
+                        .layer_index_by_id(s.layer_id)
+                        .is_none_or(|ord| ord < layer_idx)
+            })
+        {
+            shape_cursor += 1;
         }
         let start_idx = shape_cursor;
-        while shape_cursor < scene_len
-            && (num_layers <= 1 || scene.get(shape_cursor).is_some_and(|s| s.layer_id == lid))
+        while shape_cursor < scene_len && scene.get(shape_cursor).is_some_and(|s| s.layer_id == lid)
         {
             shape_cursor += 1;
         }

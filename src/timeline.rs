@@ -1181,11 +1181,13 @@ impl Cel {
         Some(cel)
     }
 
-    /// （生の図形の地図（階層 `[]`）, それを除いたセル画）
-    pub(crate) fn split_raw(&self) -> (Option<PlanarMap>, Cel) {
-        let Some(raw) = self.scope_stored(&[]).map(StoredMap::to_dense) else {
+    /// （生の図形の地図（階層 `[]`）, それを除いたセル画）。地図は確かめた地図のまま渡す（セル画の地図は使う入口
+    /// `ScopeMap::stored` で確かめてあるので、その写しの一部 `LayerBase::checked_part` にする。確かめ直さない）
+    pub(crate) fn split_raw(&self) -> (Option<CheckedMap>, Cel) {
+        let Some(raw) = self.maps.iter().find(|m| m.group_path.is_empty()) else {
             return (None, self.clone());
         };
+        let raw = raw.base().checked_part(None, &[]);
         let mut items = Self::items_of(&self.maps, &self.instances);
         items.retain(|it| !matches!(it, Item::Raw(p, _) if p.is_empty()));
         let mut rest = Cel::default();
@@ -2544,9 +2546,15 @@ impl Timeline {
         self.cell_selection = Some(dst_sel);
     }
 
-    /// 新しいレイヤーを現在のアクティブレイヤーの1つ上（前面）に追加して選択する（上限 `MAX_LAYERS_PER_TIMELINE` を超える場合は追加しない）
+    /// レイヤーをもう1枚足せるか（上限 `MAX_LAYERS_PER_TIMELINE` の決まりはこれ1つ：足す所 `add_layer_above_active` と、
+    /// 浮いた片を確定する前に断る `apply` の入口）
+    pub(crate) fn can_add_layer(&self) -> bool {
+        self.layers.len() < MAX_LAYERS_PER_TIMELINE
+    }
+
+    /// 新しいレイヤーを現在のアクティブレイヤーの1つ上（前面）に追加して選択する（足せない（`can_add_layer`）なら追加しない）
     pub(crate) fn add_layer_above_active(&mut self) {
-        if self.layers.len() >= MAX_LAYERS_PER_TIMELINE {
+        if !self.can_add_layer() {
             return;
         }
         let name = format!("Layer {}", self.next_layer_number);

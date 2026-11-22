@@ -622,31 +622,13 @@ impl PlanarMap {
         out
     }
 
-    /// 面 `f` の今の形を、塗りの形にする。輪郭は座標のいちばん小さい点から始め、穴はその点の順に並べる（形は地図の面
-    /// だけで決まり、辺の並びや作り方（差分から作る・しまった地図から作り直す）によらない）
+    /// 面 `f` の今の形を、塗りの形にする（`cycles_shape`）
     pub(crate) fn face_shape(&self, f: &MapFace, layer_id: u64, group_path: &[u64]) -> FillShape {
-        self.face_shape_with(f, layer_id, group_path, |_| None)
-    }
-
-    /// `face_shape` の、形の同じ輪郭を `reuse` が返す輪郭（前の図形の輪郭。同じ決まりで作ったもの）にするもの
-    fn face_shape_with(
-        &self,
-        f: &MapFace,
-        layer_id: u64,
-        group_path: &[u64],
-        reuse: impl Fn(&[(usize, bool)]) -> Option<Contour>,
-    ) -> FillShape {
-        let mut contours = f.cycles.iter().map(|c| {
-            reuse(c).unwrap_or_else(|| {
-                Contour::new(from_lowest_point(
-                    c.iter().map(|h| self.half_quad(*h)).collect(),
-                ))
-            })
-        });
-        let exterior = contours.next().unwrap_or_else(|| Contour::new(Vec::new()));
-        let mut holes: Vec<Contour> = contours.collect();
-        holes.sort_by(|a, b| starts_order(&a.segments, &b.segments));
-        FillShape::new(f.color, exterior, holes).with_scope(layer_id, group_path)
+        let cycles = f
+            .cycles
+            .iter()
+            .map(|c| c.iter().map(|&h| self.half_quad(h)).collect());
+        cycles_shape(f.color, cycles, |_, _| None, layer_id, group_path)
     }
 
     /// 辺から塗りの形を作る。戻り値の2つ目は、壊れた輪郭の数（`faces` と同じ）
@@ -963,26 +945,32 @@ impl PlanarMap {
     }
 }
 
+/// 色 `color` の面の、輪郭（外周、穴の順）の曲線の並び `cycles` から、塗りの形を作る（面の図形を作る決まりはこれ1つ：
+/// 地図から作る `PlanarMap::face_shape`・書き戻しで作る `LocalMap::rewrite`）。輪郭は座標のいちばん小さい点から始め
+/// （`reuse` が k 番目の輪郭と形の同じ輪郭（前の図形の輪郭。同じ決まりで作ったもの）を返せばそれ）、穴はその点の順に
+/// 並べる（形は地図の面だけで決まり、辺の並びや作り方（差分から作る・しまった地図から作り直す）によらない）
+fn cycles_shape(
+    color: Color32,
+    cycles: impl Iterator<Item = Vec<QuadBez>>,
+    reuse: impl Fn(usize, &[QuadBez]) -> Option<Contour>,
+    layer_id: u64,
+    group_path: &[u64],
+) -> FillShape {
+    let mut contours = cycles.enumerate().map(|(k, quads)| {
+        reuse(k, &quads).unwrap_or_else(|| Contour::new(from_lowest_point(quads)))
+    });
+    let exterior = contours.next().unwrap_or_else(|| Contour::new(Vec::new()));
+    let mut holes: Vec<Contour> = contours.collect();
+    holes.sort_by(|a, b| starts_order(&a.segments, &b.segments));
+    FillShape::new(color, exterior, holes).with_scope(layer_id, group_path)
+}
+
 /// 辺の形が同じかを比べるための鍵（向きはそろえる）。色は入れない：辺のその側が変わっていないかは、側の元の図形の印で
 /// 分かる（重ね合わせ・バケツは、色を変えた側の印を消す）
 fn edge_key(m: &PlanarMap, e: usize) -> [u64; 6] {
     #[cfg(test)]
     KEYS_BUILT.with(|n| n.set(n.get() + 1));
-    let ed = &m.edges[e];
-    let (p0, p2) = (m.nodes[ed.a], m.nodes[ed.b]);
-    let (p0, p2) = if point_order(p0, p2).is_le() {
-        (p0, p2)
-    } else {
-        (p2, p0)
-    };
-    [
-        p0.x.to_bits(),
-        p0.y.to_bits(),
-        ed.ctrl.x.to_bits(),
-        ed.ctrl.y.to_bits(),
-        p2.x.to_bits(),
-        p2.y.to_bits(),
-    ]
+    local::quad_key(&m.quad(e))
 }
 
 /// 書き戻しで、面が元の図形と番号をそのまま残すか（残す面の決まりはこれ1つ：1本の道 `LocalMap::rewrite`・切り出した片の

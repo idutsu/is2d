@@ -29,7 +29,7 @@ use crate::symbol_ops::{
     prepare_convert_selection_to_symbol, prepare_place_symbol_instance,
     prepare_swap_selected_instances, selected_single_symbol_info,
 };
-use crate::timeline::{Layer, Timeline, TimelineCellSelection, MAX_LAYERS_PER_TIMELINE};
+use crate::timeline::{Layer, Timeline, TimelineCellSelection};
 use crate::vector_engine::{
     affine_rotate_around, affine_scale_around, rects_overlap, FillShape, LayerId,
 };
@@ -1904,7 +1904,7 @@ fn apply_timeline_move_or_copy_frames(
 }
 
 fn apply_timeline_add_layer(tab: &mut Tab) -> bool {
-    if tab.active_timeline().layers.len() >= MAX_LAYERS_PER_TIMELINE {
+    if !tab.active_timeline().can_add_layer() {
         return false;
     }
     mutate_timeline_with_undo(tab, |tl, _| {
