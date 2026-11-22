@@ -326,8 +326,7 @@ pub(crate) fn draw_left_toolbar(
         .frame(
             egui::Frame::NONE
                 .fill(Color32::from_rgb(245, 246, 248))
-                .inner_margin(egui::Margin::symmetric(4, 6))
-                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(210, 214, 222))),
+                .inner_margin(egui::Margin::symmetric(4, 6)),
         )
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -619,8 +618,7 @@ pub(crate) fn draw_right_properties_panel(
         .frame(
             egui::Frame::NONE
                 .fill(TAB_ACTIVE_BG)
-                .inner_margin(egui::Margin::ZERO)
-                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(214, 218, 226))),
+                .inner_margin(egui::Margin::ZERO),
         )
         .show(ctx, |ui| {
             // 上部タブバー（プロパティ | カラー | ライブラリ | キャンバス）
