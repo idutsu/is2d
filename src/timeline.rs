@@ -1,5 +1,5 @@
 use crate::planar_map::{realized, CheckedMap, FaceKeep, LayerBase, PlanarMap};
-use crate::stored_map::StoredMap;
+use crate::stored_map::{Relabeled, StoredMap};
 use crate::vector_engine::ShapeId;
 use crate::vector_engine::{FillShape, SymbolInstanceBinding};
 use kurbo::{Affine, Point};
@@ -230,6 +230,17 @@ struct LazyStored {
     checked: OnceLock<Option<StoredMap>>,
     /// 壊れていたときの知らせ先と、その場所（読み込みのあとに付ける：`Document::watch_broken_maps`）
     notice: OnceLock<(BrokenMaps, String)>,
+}
+
+/// 図形の番号をみな新しい番号にする替え方（1回の作業（キーフレームの移動・複製）で1つ。グループの番号の `gid_map` と
+/// 同じ）：番号ごとの新しい番号（同じ番号は同じ新しい番号）と、作り直した地図の控え（元の地図の番地 → 元の地図と新しい
+/// 地図。元の地図も持つので、作業の間は番地がほかの地図に使い回されない）と、作り直した塊の控え。共有していた地図・塊は、
+/// 替えたあとも共有するので、運んだ先でも増えるのは中身の違う地図の分だけ（レビュー e90f27c の N-2002）
+#[derive(Default)]
+pub(crate) struct ShapeIdRenewal {
+    fresh: HashMap<ShapeId, ShapeId>,
+    maps: HashMap<usize, (Arc<LazyStored>, Arc<LazyStored>)>,
+    tiles: Relabeled,
 }
 
 /// 壊れていた地図の代わりに使う、何も無い地図
@@ -471,35 +482,36 @@ impl ScopeMap {
 
     /// 面の番号を、番号ごとにみな新しい番号にする（同じ番号は同じ新しい番号。番号は面の形を変えないので、正しい地図の
     /// まま）。しまった地図の辺の番号を直接替えるので、計算に使う地図を作らず、まだ確かめていない地図も確かめない
-    /// （レビュー f01d518 の N-2001）。壊れていたときの知らせ先と場所は元のまま（壊れた地図を読んだ所）
-    fn renew_labels(&mut self) {
-        let mut fresh: HashMap<ShapeId, ShapeId> = HashMap::new();
-        let mut renew = |m: &StoredMap| {
-            m.relabeled(|id| {
-                *fresh
-                    .entry(id)
-                    .or_insert_with(crate::vector_engine::next_shape_id)
-            })
-        };
-        // 正しいかは番号で変わらないので、確かめた結果も知らせ先も引き継ぐ（まだ確かめていなければ確かめない）
-        let (stored, checked) = match self.map.checked.get() {
-            Some(Some(checked)) => {
-                let m = renew(checked);
-                (m.clone(), OnceLock::from(Some(m)))
-            }
-            Some(None) => (renew(&self.map.stored), OnceLock::from(None)),
-            None => (renew(&self.map.stored), OnceLock::new()),
-        };
-        self.map = Arc::new(LazyStored {
-            stored,
-            checked,
-            notice: self
-                .map
-                .notice
-                .get()
-                .cloned()
-                .map_or_else(OnceLock::new, OnceLock::from),
+    /// （レビュー f01d518 の N-2001）。壊れていたときの知らせ先と場所は元のまま（壊れた地図を読んだ所）。替え方 `r` は
+    /// 1回の作業で1つなので、同じ地図は同じ新しい地図になる（`ShapeIdRenewal`）
+    fn renew_labels(&mut self, r: &mut ShapeIdRenewal) {
+        let ShapeIdRenewal { fresh, maps, tiles } = r;
+        let old = &self.map;
+        let made = maps.entry(Arc::as_ptr(old) as usize).or_insert_with(|| {
+            let mut renew = |m: &StoredMap| {
+                m.relabeled(
+                    |id| {
+                        *fresh
+                            .entry(id)
+                            .or_insert_with(crate::vector_engine::next_shape_id)
+                    },
+                    tiles,
+                )
+            };
+            // 正しいかは番号で変わらないので、確かめた結果も知らせ先も引き継ぐ（まだ確かめていなければ確かめない）
+            let (stored, checked) = match old.checked.get() {
+                Some(Some(checked)) => {
+                    let m = renew(checked);
+                    (m.clone(), OnceLock::from(Some(m)))
+                }
+                Some(None) => (renew(&old.stored), OnceLock::from(None)),
+                None => (renew(&old.stored), OnceLock::new()),
+            };
+            let notice = old.notice.get().cloned();
+            let notice = notice.map_or_else(OnceLock::new, OnceLock::from);
+            (old.clone(), Arc::new(LazyStored { stored, checked, notice }))
         });
+        self.map = made.1.clone();
     }
 
     /// しまった地図（地図を取り出す入口はこれ1つ。まだ確かめていなければ、ここで確かめる：`LazyStored::get`）
@@ -1053,13 +1065,14 @@ impl Cel {
         self.revision = crate::vector_engine::next_mesh_revision();
     }
 
-    /// 面の図形の番号を、みな新しい番号にする（キーフレームを写したとき。同じコマに同じ番号の図形が2つ出ないように）
-    pub(crate) fn renew_shape_ids(&mut self) {
+    /// 面の図形の番号を、みな新しい番号にする（キーフレームを写したとき。同じコマに同じ番号の図形が2つ出ないように）。
+    /// 替え方 `r` は1回の作業で1つ（`ShapeIdRenewal`）
+    pub(crate) fn renew_shape_ids(&mut self, r: &mut ShapeIdRenewal) {
         if self.maps.is_empty() {
             return;
         }
         for m in Arc::make_mut(&mut self.maps) {
-            m.renew_labels();
+            m.renew_labels(r);
         }
         self.revision = crate::vector_engine::next_mesh_revision();
     }
@@ -1552,8 +1565,9 @@ fn remap_keyframes_group_and_instance_ids(
     let mut alloc_gid = |old_id: u64, map: &mut HashMap<u64, u64>| -> u64 {
         *map.entry(old_id).or_insert_with(&mut alloc_group_id)
     };
+    let mut renewal = ShapeIdRenewal::default();
     for (_, kf) in kfs {
-        kf.cel.renew_shape_ids();
+        kf.cel.renew_shape_ids(&mut renewal);
         kf.cel
             .remap_ids(|gid| alloc_gid(gid, &mut gid_map), |sym| sym, None);
     }

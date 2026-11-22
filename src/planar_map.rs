@@ -1962,7 +1962,9 @@ impl LayerBase {
         let mut ids: Vec<ShapeId> = w.faces.iter().map(|s| renamed(s.shape_id)).collect();
         ids.sort_unstable();
         ids.iter().copied().eq(f.faces.iter().map(|s| s.shape_id))
-            && w.stored.relabeled(renamed).same_content(&f.stored)
+            && w.stored
+                .relabeled(renamed, &mut Default::default())
+                .same_content(&f.stored)
     }
 
     fn apply_diff_inner(

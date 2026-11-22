@@ -29366,7 +29366,7 @@ fn renewing_labels_keeps_equal_labels_equal_and_distinct_labels_distinct() {
         .iter()
         .flat_map(|e| [e.left_src, e.right_src])
         .collect();
-    cel.renew_shape_ids();
+    cel.renew_shape_ids(&mut Default::default());
     let renewed = cel.maps[0].dense();
     let new: Vec<_> = renewed
         .edges
@@ -29386,6 +29386,68 @@ fn renewing_labels_keeps_equal_labels_equal_and_distinct_labels_distinct() {
     let distinct_new: std::collections::HashSet<_> = pairs.values().collect();
     assert_eq!(distinct_old.len(), distinct_new.len());
     assert_eq!(distinct_old.len(), 2);
+}
+
+/// F6 で写した（地図を共有する）キーフレームを別のレイヤーへ複製・移動しても、運んだ先の写しどうしは地図と塊を共有した
+/// まま：メモリの増え方は地図1枚分、ファイルの増え方は地図1枚分と写しごとの塊の番号の並びで、写しの数の地図にならない。
+/// Undo で元に戻る（レビュー e90f27c の N-2002）
+#[test]
+fn moving_shared_keyframes_to_another_layer_keeps_their_maps_shared() {
+    const N: usize = 20;
+    let file = |app: &Is2dApp| {
+        project_io::project_file_bytes(&project_io::ProjectDocument::of(&app.doc))
+            .unwrap()
+            .len()
+    };
+    let mut app = Is2dApp::default();
+    let empty = file(&app);
+    for k in 0..6 {
+        let y = -180.0 + k as f64 * 70.0;
+        let pts: Vec<Point> = (0..=40)
+            .map(|j| Point::new(-380.0 + j as f64 * 19.0, y + 20.0 * (j as f64 * 0.5).sin()))
+            .collect();
+        commit_brush_line(&mut app, &brush_line(&pts, 6.0));
+    }
+    let one_map = file(&app) - empty;
+    for f in 1..N {
+        timeline_ui::scrub_ruler_to_frame(&mut app, f);
+        assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
+    }
+    timeline_ui::timeline_add_layer(&mut app);
+    // レイヤー `l` の地図の大きさ（塊の並びと辺のバイト。共有しているものは1回だけ数える）
+    let map_bytes = |app: &Is2dApp, l: usize| {
+        let mut seen = std::collections::HashSet::new();
+        app.doc.root.layers[l]
+            .keyframes
+            .iter()
+            .flat_map(|kf| kf.cel.maps.iter())
+            .map(|m| {
+                let (list, edges) = m.stored().bytes_unseen(&mut seen);
+                list + edges
+            })
+            .sum::<usize>()
+    };
+    let shared = map_bytes(&app, 0);
+    let before = file(&app);
+    for copy_mode in [true, false] {
+        let sel = timeline::TimelineCellSelection::from_corners(0, 0, 0, N - 1);
+        assert!(timeline_ui::timeline_move_or_copy_frames(
+            &mut app, sel, 1, 0, copy_mode
+        ));
+        assert_eq!(app.doc.root.layers[1].keyframes.len(), N);
+        assert_eq!(map_bytes(&app, 1), shared, "運んだ先の写しが地図を共有する");
+        assert!(
+            file(&app) - before < 2 * one_map,
+            "ファイルの増え方が地図1枚分（写しの数 {N} 枚分でない）"
+        );
+        app.undo();
+        assert_eq!(file(&app), before);
+        assert_eq!(map_bytes(&app, 0), shared);
+        assert!(app.doc.root.layers[1]
+            .keyframes
+            .iter()
+            .all(|kf| kf.cel.is_empty()));
+    }
 }
 
 /// 直線の辺の両端を端に持つ曲線（D 字の形）を塗ると、その中が塗られる：曲線の両端が直線の辺の両端と同じでも、制御点が
@@ -34592,7 +34654,10 @@ fn edits_do_not_depend_on_edge_and_node_numbering() {
     /// 地図のしまう形（番号によらない形）。`fresh` でない番号はそのまま、`fresh` な番号（編集で新しく振った番号）は
     /// 無いことにする（新しく振る番号は回ごとに違うので、どの面が元の番号を引き継いだかだけを比べる）
     fn canonical(m: &PlanarMap, keep: &HashSet<u64>) -> StoredMap {
-        StoredMap::from_dense(m, None).relabeled(|id| if keep.contains(&id) { id } else { 0 })
+        StoredMap::from_dense(m, None).relabeled(
+            |id| if keep.contains(&id) { id } else { 0 },
+            &mut Default::default(),
+        )
     }
 
     // 診断：形の違う辺の数、色・番号だけ違う辺の数、形の違いの大きさ

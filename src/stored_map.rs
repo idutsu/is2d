@@ -184,6 +184,12 @@ pub(crate) fn edge_size() -> usize {
 /// 共有する：設計 段2b の 1.）
 type Tile = Arc<TileData>;
 
+/// 番号を替えて作り直した塊の控え（元の塊の番地 → 元の塊と、作り直した塊。`StoredMap::relabeled`）。同じ替え方で替える
+/// 間（1回の作業）だけ使い回すので、同じ塊は同じ新しい塊になり、塊を共有していた地図は、替えたあとも共有する。元の塊も
+/// 持つので、控えている間は、その番地がほかの塊に使い回されない
+#[derive(Default)]
+pub(crate) struct Relabeled(IntMap<usize, (Tile, Tile)>);
+
 /// 塊の辺ごとの判定の形（`edges` の順）。並びは `Box` に入れる：塊が持つ弱い参照が残す領域を、生かす所が無くなったあと
 /// 小さくするため（`Arc<[Poly]>` だと、並びそのものが弱い参照の残す領域に入り、辺1本ごとに残る）
 type TilePolys = Arc<Box<[Poly]>>;
@@ -684,8 +690,13 @@ impl StoredMap {
     }
 
     /// 側の図形の番号を `renew` で替えた地図（番号の無い側は無いまま）。形と色は変えず、辺の並びも同じなので、正しい地図は
-    /// 正しいまま（確かめ直さない）。番号の無い塊は、この地図と共有する
-    pub(crate) fn relabeled(&self, mut renew: impl FnMut(ShapeId) -> ShapeId) -> Self {
+    /// 正しいまま（確かめ直さない）。番号の無い塊は、この地図と共有する。番号のある塊は、作り直した塊の控え `done`（同じ
+    /// `renew` で替える間だけ使い回す）にあればそれを使う
+    pub(crate) fn relabeled(
+        &self,
+        mut renew: impl FnMut(ShapeId) -> ShapeId,
+        done: &mut Relabeled,
+    ) -> Self {
         let mut new_src =
             |src: Option<NonZeroU64>| src.and_then(|s| NonZeroU64::new(renew(s.get())));
         let tiles = self
@@ -699,17 +710,20 @@ impl StoredMap {
                     return t.clone();
                 }
                 // 形は変わらないので、判定の形は前の塊のものを使う
-                Arc::new(TileData {
-                    edges: t
+                let key = Arc::as_ptr(t) as *const u8 as usize;
+                let made = done.0.entry(key).or_insert_with(|| {
+                    let edges = t
                         .iter()
                         .map(|e| StoredEdge {
                             left_src: new_src(e.left_src),
                             right_src: new_src(e.right_src),
                             ..*e
                         })
-                        .collect(),
-                    polys: Mutex::new(t.polys.lock().clone()),
-                })
+                        .collect();
+                    let polys = Mutex::new(t.polys.lock().clone());
+                    (t.clone(), Arc::new(TileData { edges, polys }))
+                });
+                made.1.clone()
             })
             .collect();
         Self::of_tiles(tiles)
