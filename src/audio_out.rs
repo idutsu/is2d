@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use eframe::egui;
 
-use crate::sound::{frame_start, mix, SOUND_RATE};
+use crate::sound::{frame_at, frame_start, mix, SOUND_RATE};
 use crate::symbol::Document;
 use crate::timeline::Timeline;
 
@@ -46,6 +46,17 @@ impl Span {
             (p < self.end).then_some(p)
         }
     }
+
+    /// 鳴らし始めてから `played` 個のサンプルを鳴らした所を含む、続けて鳴らすコマの範囲（出力の速さ `rate`・作品の fps
+    /// `fps`）：初めは鳴らし始めたコマから、くり返して 0 へ戻った後はコマ 0 から、終わりのコマの手前まで
+    fn run_frames(&self, played: u64, rate: u32, fps: u32) -> std::ops::Range<usize> {
+        let start = if self.start + played < self.end {
+            self.start
+        } else {
+            0
+        };
+        frame_at(start, rate, fps)..frame_at(self.end, rate, fps)
+    }
 }
 
 /// 鳴らす中身：文書の写し（鳴らし始めたときのもの。文書を変える操作は再生を止める：`apply`）と、鳴らすタイムライン
@@ -75,7 +86,8 @@ impl Job {
     }
 
     /// `played` 個鳴らした所から、出力の速さ `rate` で `out`（左・右・左・右…）を埋め、範囲の音で埋めた数（左右の組の数）
-    /// を返す。範囲の終わりで 0 へ戻る所は、戻る前と後を別々に混ぜる（`mix` は続いた区間を作るので）。鳴らし終えた後は無音
+    /// を返す。範囲の終わりで 0 へ戻る所は、戻る前と後を、それぞれの続けて鳴らす範囲（`Span::run_frames`）で別々に混ぜる
+    /// （`mix` は続いた区間を作り、範囲の端で鳴り始め・鳴り終わりをなめらかにするので）。鳴らし終えた後は無音
     pub(crate) fn fill(&self, played: u64, rate: u32, out: &mut [f32]) -> usize {
         let frames = out.len() / 2;
         let mut done = 0;
@@ -87,6 +99,8 @@ impl Job {
             out[2 * done..2 * (done + run)].copy_from_slice(&mix(
                 &self.doc,
                 &self.timeline,
+                self.span
+                    .run_frames(played + done as u64, rate, self.doc.fps),
                 pos,
                 run,
                 rate,

@@ -364,15 +364,18 @@ pub(crate) fn frame_start(frame: usize, rate: u32, fps: u32) -> u64 {
     (frame as u64 * u64::from(rate.max(1))).div_ceil(u64::from(fps.max(1)))
 }
 
-/// 文書 `doc` のタイムライン `tl`（`sounding_at` と同じ）の音を、出力の速さ `rate`（1 秒あたりのサンプルの数）で、コマ 0
-/// の始まりから数えて `start` 番目のサンプルから `count` 個分混ぜた波形（左・右・左・右…）。どのサンプルの値も、その
-/// サンプルの番号だけで決まる（区間をどう分けて作っても同じ波形になる）。再生・スクラブ・書き出しのどれもが使う、混ぜる
-/// 決まりの1つ：コマごとに鳴っている音（`sounding_at`）を足し、前のコマから続かない音は鳴り始めを、次のコマへ続かない音は鳴り終わり
-/// （区間の終わりか、コマの終わりの早いほう）を、`FADE_SECONDS` でなめらかにする（F6 で分けた所は続くので、なめらかに
-/// しない）。足した結果が -1〜1 を越える所はそこで切る
+/// 文書 `doc` のタイムライン `tl`（`sounding_at` と同じ）の、続けて鳴らすコマの範囲 `frames` の音を、出力の速さ `rate`
+/// （1 秒あたりのサンプルの数）で、コマ 0 の始まりから数えて `start` 番目のサンプルから `count` 個分混ぜた波形（左・右・
+/// 左・右…）。どのサンプルの値も、その番号と `frames` だけで決まる（区間をどう分けて作っても同じ波形になる）。
+/// 再生・スクラブ・途中からの再生・くり返しの戻り・書き出しのどれもが使う、混ぜる決まりの1つ：コマごとに
+/// 鳴っている音（`sounding_at`）を足し、前のコマから続かない音は鳴り始めを、次のコマへ続かない音は鳴り終わり（区間の
+/// 終わりか、コマの終わりの早いほう）を、`FADE_SECONDS` でなめらかにする（F6 で分けた所は続くので、なめらかにしない）。
+/// `frames` の最初のコマの前と、最後のコマの後は鳴らさないので、そこの音は「無い」とする。足した結果が -1〜1 を越える所は
+/// そこで切る
 pub(crate) fn mix(
     doc: &crate::symbol::Document,
     tl: &crate::timeline::Timeline,
+    frames: std::ops::Range<usize>,
     start: u64,
     count: usize,
     rate: u32,
@@ -394,8 +397,16 @@ pub(crate) fn mix(
         // このコマに入るサンプルの範囲（次のコマの最初のサンプルの手前まで）
         let j = (frame_start(f + 1, rate, fps) - start).min(count as u64) as usize;
         let cur = voices(f);
-        let prev = if f > 0 { voices(f - 1) } else { Vec::new() };
-        let next = voices(f + 1);
+        let prev = if f > frames.start {
+            voices(f - 1)
+        } else {
+            Vec::new()
+        };
+        let next = if f + 1 < frames.end {
+            voices(f + 1)
+        } else {
+            Vec::new()
+        };
         let frame_t0 = f as f64 / f64::from(fps);
         let frame_t1 = (f + 1) as f64 / f64::from(fps);
         for v in &cur {

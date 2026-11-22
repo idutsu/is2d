@@ -773,6 +773,23 @@ impl Document {
             .expect("名前の候補は尽きない")
     }
 
+    /// ライブラリの `i` 番目のシンボルのタイムラインを `f(タイムライン, 文書)` で書き、そのシンボルの版とライブラリの版を
+    /// 上げる。シンボルの中身を書く入口はこれ1つ（版で中身を見分ける所：クリップボードの使い回し・写しの鍵が、書いた後の
+    /// 中身を古い中身と取り違えない）。書いている間、タイムラインは文書から外してある
+    pub(crate) fn write_symbol_timeline<R>(
+        &mut self,
+        i: usize,
+        f: impl FnOnce(&mut Timeline, &mut Document) -> R,
+    ) -> R {
+        let mut tl = std::mem::take(&mut Arc::make_mut(&mut self.library[i]).timeline);
+        let res = f(&mut tl, self);
+        let sym = Arc::make_mut(&mut self.library[i]);
+        sym.timeline = tl;
+        sym.revision = crate::vector_engine::next_mesh_revision();
+        self.bump_revision();
+        res
+    }
+
     /// 指定した `symbol_id` のシンボル定義を参照する
     pub(crate) fn find_symbol(&self, symbol_id: u64) -> Option<&SymbolDef> {
         self.library
@@ -950,7 +967,7 @@ impl Document {
                 .iter()
                 .any(|l| l.keyframes.iter().any(|kf| uses(kf)))
             {
-                remove_from_tl(&mut Arc::make_mut(&mut self.library[i]).timeline);
+                self.write_symbol_timeline(i, |tl, _| remove_from_tl(tl));
             }
         }
         true
@@ -987,9 +1004,7 @@ impl Document {
                 .instances()
                 .any(|inst| inst.binding.symbol_id == symbol_id)
             {
-                let sym_def = Arc::make_mut(&mut self.library[i]);
-                remove_from_tl(&mut sym_def.timeline);
-                sym_def.revision = crate::vector_engine::next_mesh_revision();
+                self.write_symbol_timeline(i, |tl, _| remove_from_tl(tl));
             }
         }
         self.bump_revision();

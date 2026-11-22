@@ -4724,7 +4724,7 @@ fn test_frame_insert_and_remove_keep_later_keyframe_chunks_shared() {
 
     // Shift+F5：コマ 11 を消す。元に戻る
     let snapshot = layer.clone();
-    assert!(layer.remove_frame_at(10));
+    assert!(layer.remove_frame_at(10, 24));
     let (shared, total) = layer.keyframes.shared_chunks_with(&snapshot.keyframes);
     assert!(
         shared + 1 >= total,
@@ -4739,7 +4739,7 @@ fn test_frame_insert_and_remove_keep_later_keyframe_chunks_shared() {
     tl.layers[0] = layer;
     tl.cell_selection = Some(TimelineCellSelection::from_corners(0, 10, 0, 1009));
     let snapshot = tl.layers[0].clone();
-    assert!(tl.remove_frame_on_targets(&[0]));
+    assert!(tl.remove_frame_on_targets(&[0], 24));
     let layer = &tl.layers[0];
     let (shared, total) = layer.keyframes.shared_chunks_with(&snapshot.keyframes);
     assert!(
@@ -4755,8 +4755,8 @@ fn test_frame_insert_and_remove_keep_later_keyframe_chunks_shared() {
     assert_eq!(layer.frame_count, 5000);
 }
 
-/// コマ `first` から `count` コマを一度に消す（`remove_frames`）と、1コマずつ消す元の決まり（Adobe Animate の Shift+F5）を
-/// `count` 回くり返したのと同じになる（レビュー f01d518 の R5）
+/// コマ `first` から `count` コマを一度に消す（`remove_frames`）と、キーフレームの並び（始まりのコマと、どのキーフレーム
+/// か）は、1コマずつ消す元の決まり（Adobe Animate の Shift+F5）を `count` 回くり返したのと同じになる（レビュー f01d518 の R5）
 #[test]
 fn test_remove_frames_matches_repeated_single_frame_removal() {
     use crate::timeline::{Cel, Keyframe, KeyframeList, Layer, SymbolInstance, TweenRotate};
@@ -4832,7 +4832,7 @@ fn test_remove_frames_matches_repeated_single_frame_removal() {
         for _ in 0..count {
             want_changed |= reference_remove(&mut want, &mut want_n, first);
         }
-        let changed = layer.remove_frames(first, count);
+        let changed = layer.remove_frames(first, count, 24);
         assert_eq!(
             (read(&layer), layer.frame_count, changed),
             (want, want_n, want_changed),
@@ -35546,41 +35546,6 @@ fn collapsed_placement_hits_nothing() {
     assert_eq!(base.hit_node(p, 1.0, Affine::IDENTITY), Some(p));
 }
 
-/// 描く・取り消す・やり直すを繰り返しても、地図全体の写し（`map()`）を作らない：取り消し・やり直しで画面の土台が写しを
-/// 作り直すとき、升目の索引と面の表は、直前まで出していた写しから変わった所だけ作る（`adopt_index`・`adopt_faces`）。
-/// 直す前は、取り消すたびに面の表を地図全体から作っていた（辺 96,896 本で 約28ms）
-#[test]
-fn undo_and_redo_do_not_rebuild_whole_maps() {
-    use crate::doc_actions::{apply, Action};
-    let mut app = map_overlay::dense_scene_app(7);
-    app.tab_mut().refresh_scene_base();
-    let stroke = |app: &mut Is2dApp, y: f64| {
-        assert!(apply(
-            app,
-            Action::PaintStroke {
-                points: vec![Point::new(-200.0, y), Point::new(150.0, y + 40.0)],
-                radius: 6.0,
-                color: Color32::from_rgb(200, 30, 160),
-            }
-        ));
-    };
-    // 1回目は写しを用意する（読み込んだ直後の地図は、初めて使うときに全部作る）
-    stroke(&mut app, -100.0);
-    assert!(apply(&mut app, Action::Undo));
-    let before = crate::planar_map::dense_builds();
-    for k in 0..4 {
-        stroke(&mut app, -60.0 + 40.0 * k as f64);
-        assert!(apply(&mut app, Action::Undo));
-        assert!(apply(&mut app, Action::Redo));
-        assert!(apply(&mut app, Action::Undo));
-    }
-    assert_eq!(
-        crate::planar_map::dense_builds() - before,
-        0,
-        "描く・取り消す・やり直すで、地図全体の写しを作った"
-    );
-}
-
 /// ランダムな操作の長いテストの、1回ごとの確かめ：どのレイヤー・キーフレームのセル画の地図も正しく（保存して開いても
 /// 読める）、面の表の図形の輪郭の辺がみなしまう形にあってその面の側にその面の番号が記してあり、面の表が地図全体から
 /// 作った面の表と同じ（番号・色・輪郭がビットまで）
@@ -36473,6 +36438,32 @@ fn sound_keyframes_hold_only_sound() {
     assert_eq!(app.doc.root.layers[0].keyframes[0].sound, None);
 }
 
+/// 音だけのキーフレームも空白ではない：コマ 1 で `Shift+F6` を押すと白紙にクリアされ、1コマだけのレイヤーで
+/// `Shift+F5` を押しても白紙になる（どちらも取り消せる）。先頭で `F7` を押すと、音を消さずに次のコマへ進んで白紙の
+/// キーフレームを作る
+#[test]
+fn sound_only_keyframes_are_not_blank() {
+    let mut app = Is2dApp::default();
+    assert!(import_sound(&mut app, short_wav()));
+    let clip = app.doc.root.layers[0].keyframes[0].sound;
+    assert!(clip.is_some());
+    for action in [doc_actions::Action::DeleteKeyframe, doc_actions::Action::RemoveFrame] {
+        assert!(doc_actions::apply(&mut app, action), "音のキーフレームは消せる");
+        assert_eq!(app.doc.root.layers[0].keyframes[0].sound, None);
+        assert!(doc_actions::apply(&mut app, doc_actions::Action::Undo));
+        assert_eq!(app.doc.root.layers[0].keyframes[0].sound, clip);
+    }
+    assert!(doc_actions::apply(
+        &mut app,
+        doc_actions::Action::InsertKeyframe { copy_prev: false }
+    ));
+    let layer = &app.doc.root.layers[0];
+    assert_eq!(layer.keyframes.len(), 2);
+    assert_eq!(layer.keyframes[0].sound, clip);
+    assert!(layer.keyframes[1].cel.is_empty() && layer.keyframes[1].sound.is_none());
+    assert_eq!(app.doc.root.current_frame, 1);
+}
+
 /// 音は、保存して開いても、読み込んだバイト・名前・番号・キーフレームの区間が同じ
 #[test]
 fn sounds_survive_save_and_open() {
@@ -36594,7 +36585,7 @@ fn splitting_a_sound_with_f6_keeps_the_same_sound() {
     let before: Vec<Vec<u64>> = (0..30)
         .map(|f| crate::sound::sounding_at(&doc, &doc.root, f).iter().map(|v| v.pos).collect())
         .collect();
-    let mixed_before = crate::sound::mix(&doc, &doc.root, 0, 48_000, 48_000);
+    let mixed_before = crate::sound::mix(&doc, &doc.root, 0..30, 0, 48_000, 48_000);
     assert!(doc.root.layers[0].insert_keyframe(12, true, doc.fps));
     let kfs: Vec<_> = doc.root.layers[0].keyframes.iter().map(|k| k.sound).collect();
     assert_eq!(
@@ -36608,19 +36599,40 @@ fn splitting_a_sound_with_f6_keeps_the_same_sound() {
         .map(|f| crate::sound::sounding_at(&doc, &doc.root, f).iter().map(|v| v.pos).collect())
         .collect();
     assert_eq!(before, after);
-    assert_eq!(crate::sound::mix(&doc, &doc.root, 0, 48_000, 48_000), mixed_before);
+    assert_eq!(crate::sound::mix(&doc, &doc.root, 0..30, 0, 48_000, 48_000), mixed_before);
 
     // 48,000 を割り切らない fps（7）でも、分けた所で音が途切れない（位置の丸めのずれは 1 まで）
     let mut doc = doc_with_flat_sound();
     doc.fps = 7;
     put_clip(&mut doc.root, 30, flat_clip());
     assert!(doc.root.layers[0].insert_keyframe(3, true, doc.fps));
-    let m = crate::sound::mix(&doc, &doc.root, 0, 48_000, 48_000);
+    let m = crate::sound::mix(&doc, &doc.root, 0..30, 0, 48_000, 48_000);
     let split = 3 * 48_000 / 7;
     assert!(
         (split - 200..split + 200).all(|i| (m[2 * i] - 0.5).abs() < 1e-6),
         "分けた所の前後で小さくならない"
     );
+}
+
+/// 音のキーフレームの始まりをまたいでコマを消す（範囲の `Shift+F5`）と、消したコマのあとの音は、消す前と同じ所から
+/// 続けて鳴る（絵より遅れない）
+#[test]
+fn removing_frames_across_a_sound_keyframe_keeps_the_sound_in_place() {
+    let mut doc = doc_with_flat_sound();
+    doc.root.layers[0].frame_count = 30;
+    doc.root.total_frames = 30;
+    assert!(doc.root.layers[0].insert_keyframe(10, false, doc.fps));
+    doc.root.layers[0].keyframe_mut(1).sound = Some(flat_clip());
+    let before = doc.clone();
+    let pos = |doc: &symbol::Document, f: usize| -> Vec<u64> {
+        crate::sound::sounding_at(doc, &doc.root, f).iter().map(|v| v.pos).collect()
+    };
+    assert!(doc.root.layers[0].remove_frames(5, 10, doc.fps));
+    assert_eq!(doc.root.layers[0].frame_count, 20);
+    assert_eq!(doc.root.layers[0].start_of(1), 5);
+    for f in 5..20 {
+        assert_eq!(pos(&doc, f), pos(&before, f + 10), "コマ {f}");
+    }
 }
 
 /// シンボルの中の音は、中のコマで鳴る：ループは頭から鳴り直し、1回再生は最後のコマを過ぎたら止まり、コマ固定は鳴らない。
@@ -36681,10 +36693,10 @@ fn sounds_inside_symbols_follow_the_internal_frame() {
 #[test]
 fn mixing_fades_only_where_the_sound_jumps() {
     let empty = symbol::Document::default();
-    assert!(crate::sound::mix(&empty, &empty.root, 0, 4800, 48_000).iter().all(|&x| x == 0.0));
+    assert!(crate::sound::mix(&empty, &empty.root, 0..3, 0, 4800, 48_000).iter().all(|&x| x == 0.0));
     let mut doc = doc_with_flat_sound();
     put_clip(&mut doc.root, 30, flat_clip());
-    let m = crate::sound::mix(&doc, &doc.root, 0, 48_000, 48_000);
+    let m = crate::sound::mix(&doc, &doc.root, 0..30, 0, 48_000, 48_000);
     let left = |i: usize| m[2 * i];
     assert_eq!(left(0), 0.0, "鳴り始めは 0 から");
     assert!(left(10) > 0.0 && left(10) < 0.5);
@@ -36711,7 +36723,7 @@ fn mixing_fades_only_where_the_sound_jumps() {
         parent_scope: Vec::new(),
         order: 0,
     });
-    let m = crate::sound::mix(&doc, &doc.root, 0, 12_000, 48_000);
+    let m = crate::sound::mix(&doc, &doc.root, 0..6, 0, 12_000, 48_000);
     let left = |i: usize| m[2 * i];
     assert!((left(5000) - 0.5).abs() < 1e-6, "3 コマの中は途切れない");
     assert!(left(5999) < 0.05 && left(6000) == 0.0, "頭へ戻る所でつなぎ直す");
@@ -36915,6 +36927,28 @@ fn pasting_a_symbol_with_sound_into_another_tab_brings_the_sound() {
     assert!(apply(&mut app, Action::Undo));
     assert_eq!(app.doc.sounds.len(), 1);
     assert!(app.doc.library.is_empty());
+}
+
+/// 別のタブから貼ったシンボルの音を貼り先で消してから、もう一度貼ると、消した後のシンボルを使い回さず、コピーしたときの
+/// 中身（音入り）が新しいシンボルとして取り込まれる（音を消すのもシンボルの中身を書くことなので、版が上がる）
+#[test]
+fn pasting_again_after_deleting_the_pasted_symbols_sound_brings_the_copied_contents() {
+    use doc_actions::{apply, Action};
+    let ctx = egui::Context::default();
+    let (mut app, _) = copied_symbol_with_sound();
+    let src_bytes = app.doc.sounds[0].encoded.to_vec();
+    project_io::new_project(&mut app, &ctx);
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    let first = app.doc.library[0].id;
+    let sound_id = app.doc.sounds[0].id;
+    assert!(apply(&mut app, Action::DeleteSound { sound_id }));
+    assert!(symbol_sound_bytes(&app.doc, first).is_empty());
+
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    assert_eq!(app.doc.library.len(), 2, "新しいシンボルとして取り込む");
+    let second = app.doc.library[1].id;
+    assert_eq!(symbol_sound_bytes(&app.doc, second), vec![src_bytes]);
+    assert!(symbol_sound_bytes(&app.doc, first).is_empty());
 }
 
 /// 同じタブでも、コピーのあと音とシンボルを消してから貼ると、シンボルと一緒に音もライブラリに戻る（新しい番号で）。
@@ -37171,8 +37205,8 @@ fn looping_playback_mixes_across_the_wrap_like_two_mixes() {
     let job = Job::new(&doc, &doc.root, 8, 10, true, rate);
     let mut whole = vec![0.0f32; 2 * n];
     assert_eq!(job.fill(0, rate, &mut whole), n);
-    let mut expected = mix(&doc, &doc.root, s8, before, rate);
-    expected.extend(mix(&doc, &doc.root, 0, n - before, rate));
+    let mut expected = mix(&doc, &doc.root, 8..10, s8, before, rate);
+    expected.extend(mix(&doc, &doc.root, 0..10, 0, n - before, rate));
     assert_eq!(whole, expected);
 
     let mut pieces = vec![0.0f32; 2 * n];
@@ -37193,6 +37227,27 @@ fn looping_playback_mixes_across_the_wrap_like_two_mixes() {
     assert!(out[2 * before..].iter().all(|&x| x == 0.0));
 }
 
+/// 鳴らす範囲の端では、前後のコマに音が続いていても、鳴り始め・鳴り終わりをなめらかにする：音の途中のコマのスクラブ
+/// （1コマ分）は 0 から鳴り始めて 0 近くで止み、途中のコマから始めた再生も 0 から鳴り始める
+#[test]
+fn playing_from_the_middle_of_a_sound_fades_at_the_range_ends() {
+    use crate::audio_out::Job;
+    use crate::sound::frame_start;
+    let mut doc = doc_with_flat_sound();
+    put_clip(&mut doc.root, 30, flat_clip());
+    let rate = 48_000;
+    let len = (frame_start(6, rate, 24) - frame_start(5, rate, 24)) as usize;
+    let mut out = vec![1.0f32; 2 * len];
+    assert_eq!(Job::new(&doc, &doc.root, 5, 6, false, rate).fill(0, rate, &mut out), len);
+    assert_eq!(out[0], 0.0, "スクラブの頭は 0 から");
+    assert!(out[2 * (len - 1)] < 0.05, "スクラブの終わりは止んでいる");
+    assert!((out[len] - 0.5).abs() < 1e-6, "コマの中ほどは元の大きさ");
+    let mut out = vec![1.0f32; 2 * len];
+    assert_eq!(Job::new(&doc, &doc.root, 5, 30, false, rate).fill(0, rate, &mut out), len);
+    assert_eq!(out[0], 0.0, "途中からの再生の頭は 0 から");
+    assert!((out[2 * (len - 1)] - 0.5).abs() < 1e-6, "次のコマへ続く所は小さくしない");
+}
+
 /// スクラブは、そのコマの1コマ分（1/fps 秒）だけを鳴らす。画面では、再生していないときに同じタイムラインのコマが
 /// 変わったときだけ鳴らし（最初に見たとき・同じコマ・再生中は鳴らさない）、新しいスクラブは前のを打ち切る
 #[test]
@@ -37206,7 +37261,7 @@ fn scrub_plays_one_frame_when_the_frame_changes() {
     assert!(len == 1837 || len == 1838, "1/24 秒は 1837.5 サンプル");
     let mut out = vec![1.0f32; 2 * 4000];
     assert_eq!(Job::new(&doc, &doc.root, 3, 4, false, rate).fill(0, rate, &mut out), len);
-    assert_eq!(out[..2 * len], mix(&doc, &doc.root, s3, len, rate)[..]);
+    assert_eq!(out[..2 * len], mix(&doc, &doc.root, 3..4, s3, len, rate)[..]);
     assert!(out[2 * len..].iter().all(|&x| x == 0.0));
 
     let mut app = Is2dApp::default();
@@ -37286,7 +37341,7 @@ fn export_audio_per_frame_joins_into_one_mix() {
         let joined = pieces.concat();
         let n = frame_start(total, EXPORT_AUDIO_RATE, fps);
         assert_eq!(joined.len() as u64, 2 * n, "fps {fps}");
-        assert_eq!(joined, mix(&doc, &doc.root, 0, n as usize, EXPORT_AUDIO_RATE));
+        assert_eq!(joined, mix(&doc, &doc.root, 0..total, 0, n as usize, EXPORT_AUDIO_RATE));
         assert!(joined.iter().any(|&x| x != 0.0), "音が入っている");
     }
 }

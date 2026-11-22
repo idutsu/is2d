@@ -465,24 +465,6 @@ impl StoredMap {
         Some((self.starts()[k] + j) as usize)
     }
 
-    /// `other` と、同じ升目に同じ塊（同じ `Arc`）を持つ数（塊の数に比例する手間。辺の数にはよらない）
-    pub(crate) fn shared_tile_count(&self, other: &Self) -> usize {
-        let (a, b) = (&self.0.tiles, &other.0.tiles);
-        let (mut i, mut k, mut n) = (0, 0, 0);
-        while i < a.len() && k < b.len() {
-            match a[i][0].tile().cmp(&b[k][0].tile()) {
-                std::cmp::Ordering::Less => i += 1,
-                std::cmp::Ordering::Greater => k += 1,
-                std::cmp::Ordering::Equal => {
-                    n += Arc::ptr_eq(&a[i], &b[k]) as usize;
-                    i += 1;
-                    k += 1;
-                }
-            }
-        }
-        n
-    }
-
     /// 計算に使う地図の辺 `e` のしまう辺
     fn stored_edge(&self, e: usize) -> &StoredEdge {
         let starts = self.starts();

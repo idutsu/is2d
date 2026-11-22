@@ -37,18 +37,11 @@ pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
 }
 
 /// セル画を書いたあとの後始末。セル画を書く入口（`write_cel`）のあとに、書いたレイヤーの一覧
-/// `lids` で1回だけ呼ぶ：書いたレイヤーがあれば、編集中のシンボルの版と `Document::revision` を上げ、画面の土台のその
-/// レイヤーを作り直す。編集中の階層が無くなっていれば、ある所まで戻る
+/// `lids` で1回だけ呼ぶ：画面の土台の、書いたレイヤーを作り直す（編集中のシンボルの版は、書いた所で上がっている：
+/// `Tab::write_active_timeline`）。編集中の階層が無くなっていれば、ある所まで戻る
 pub(crate) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
-    if !lids.is_empty() {
-        if let Some(idx) = tab.active_symbol_index() {
-            Arc::make_mut(&mut tab.doc.library[idx]).revision =
-                crate::vector_engine::next_mesh_revision();
-            tab.doc.bump_revision();
-        }
-        for &lid in lids {
-            tab.session.base_cache.invalidate_layer(lid);
-        }
+    for &lid in lids {
+        tab.session.base_cache.invalidate_layer(lid);
     }
     tab.refresh_scene_base();
     tab.session.sanitize_editing_scope();
@@ -62,23 +55,23 @@ pub(crate) fn write_cel(
     layer_id: LayerId,
     f: impl FnOnce(&mut crate::timeline::Cel) -> bool,
 ) -> bool {
-    let tl = tab.active_timeline_raw_mut();
+    let tl = tab.active_timeline();
     let frame = tl.current_frame;
-    let Some(layer) = tl
+    let Some(li) = tl
         .layers
-        .iter_mut()
-        .find(|l| l.id == layer_id && l.is_editable_at(frame))
+        .iter()
+        .position(|l| l.id == layer_id && l.is_editable_at(frame))
     else {
         return false;
     };
-    let Some(kf) = layer.keyframe_index_at(frame) else {
+    let Some(kf) = tl.layers[li].keyframe_index_at(frame) else {
         return false;
     };
-    let mut cel = layer.keyframes[kf].cel.clone();
+    let mut cel = tl.layers[li].keyframes[kf].cel.clone();
     if !f(&mut cel) {
         return false;
     }
-    Arc::make_mut(&mut layer.keyframes[kf]).cel = cel;
+    tab.write_active_timeline(|tl, _| tl.layers[li].keyframe_mut(kf).cel = cel);
     true
 }
 

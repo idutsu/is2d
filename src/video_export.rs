@@ -61,15 +61,16 @@ pub(crate) fn export_audio(doc: &Document) -> AudioSource<'_> {
 }
 
 /// 書き出しの、ルートのタイムラインのコマ `frame` の間に鳴る音（左・右・左・右…）：コマの最初のサンプル
-/// （`frame_start(frame)`）から次のコマの最初のサンプルの手前までを、再生と同じ `sound::mix` で混ぜたもの（聞こえる音と
-/// 書き出す音は同じ）。`mix` はどのサンプルの値もその番号だけで決めるので、コマごとに作ってつないだ音は、続けて混ぜた音と
-/// 同じになる
+/// （`frame_start(frame)`）から次のコマの最初のサンプルの手前までを、再生と同じ `sound::mix` で、書き出す全部のコマを
+/// 続けて鳴らす範囲として混ぜたもの（聞こえる音と書き出す音は同じ）。`mix` はどのサンプルの値もその番号と範囲だけで
+/// 決めるので、コマごとに作ってつないだ音は、続けて混ぜた音と同じになる
 fn frame_audio(doc: &Document, frame: usize) -> Vec<f32> {
     let start = frame_start(frame, EXPORT_AUDIO_RATE, doc.fps);
     let end = frame_start(frame + 1, EXPORT_AUDIO_RATE, doc.fps);
     mix(
         doc,
         &doc.root,
+        0..export_frames(doc),
         start,
         (end - start) as usize,
         EXPORT_AUDIO_RATE,

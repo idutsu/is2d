@@ -1878,7 +1878,7 @@ fn apply_timeline_remove_frame(tab: &mut Tab) -> bool {
     if !tab.active_timeline().can_remove_frame_on_targets(&targets) {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl, _| tl.remove_frame_on_targets(&targets))
+    mutate_timeline_with_undo(tab, |tl, doc| tl.remove_frame_on_targets(&targets, doc.fps))
 }
 
 fn apply_timeline_move_or_copy_frames(

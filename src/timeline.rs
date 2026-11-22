@@ -1534,9 +1534,15 @@ impl Keyframe {
         self
     }
 
+    /// 中身の無い空白のキーフレームか：セル画が空で、トゥイーンも音も無い。「空白か」の決まりはこれ1つ
+    /// （`F7` で次へ進むか・消せるか・縮められるか・クリアで変わるか）
+    pub(crate) fn is_blank(&self) -> bool {
+        self.cel.is_empty() && !self.tween && self.sound.is_none()
+    }
+
     /// キーフレーム内のセル図形・トゥイーン設定・音をクリアし、変更があったかどうかを返す
     pub(crate) fn clear_cel(&mut self) -> bool {
-        if self.cel.is_empty() && !self.tween && self.sound.is_none() {
+        if self.is_blank() {
             false
         } else {
             self.cel.clear(&[]);
@@ -1719,10 +1725,7 @@ impl Layer {
             changed = true;
         }
         if let Some(existing_idx) = self.keyframe_index_starting_at(frame) {
-            if !clone_prev
-                && (!self.keyframes[existing_idx].cel.is_empty()
-                    || self.keyframes[existing_idx].tween)
-            {
+            if !clone_prev && !self.keyframes[existing_idx].is_blank() {
                 changed |= self.keyframe_mut(existing_idx).clear_cel();
             }
             return changed;
@@ -1773,18 +1776,20 @@ impl Layer {
         }
     }
 
-    /// Adobe Animate 仕様のフレーム削除（`Shift+F5`）を1コマ分：`remove_frames(frame, 1)`
-    pub(crate) fn remove_frame_at(&mut self, frame: usize) -> bool {
-        self.remove_frames(frame, 1)
+    /// Adobe Animate 仕様のフレーム削除（`Shift+F5`）を1コマ分：`remove_frames(frame, 1, fps)`
+    pub(crate) fn remove_frame_at(&mut self, frame: usize, fps: u32) -> bool {
+        self.remove_frames(frame, 1, fps)
     }
 
-    /// Adobe Animate 仕様のフレーム削除（`Shift+F5`）を、コマ `first` から `count` コマ分、一度に行う（`first` で
-    /// 1コマずつ `count` 回消すのと同じ結果）：
+    /// Adobe Animate 仕様のフレーム削除（`Shift+F5`）を、コマ `first` から `count` コマ分、一度に行う（キーフレームの
+    /// 並びは、`first` で1コマずつ `count` 回消すのと同じ）：
     /// - 消すコマ `[first, first + count)` に始まるキーフレームは外す。ただし、消すコマのすぐ後ろのコマを保持する
-    ///   キーフレームは残し、`first` に詰める（消したコマのあとの絵が、`first` から続く）。
+    ///   キーフレームは、そのコマの姿（`snapshot_keyframe_at`：F6・コマの移動と同じ決まり。音・シンボルの中のコマ・
+    ///   トゥイーンの中割りは、そのコマから続く。`fps`：作品の fps）にして `first` に置く（消したコマのあとの絵と音が、
+    ///   `first` から続く）。
     /// - 後ろのキーフレームは `count` コマ左へ詰める。
     /// - コマを全部消すときは、1コマだけ残し、最後のキーフレームを空白にしてコマ 1 に置く。
-    pub(crate) fn remove_frames(&mut self, first: usize, count: usize) -> bool {
+    pub(crate) fn remove_frames(&mut self, first: usize, count: usize, fps: u32) -> bool {
         let n = self.frame_count;
         if first >= n || count == 0 {
             return false;
@@ -1803,19 +1808,16 @@ impl Layer {
             return n > 1 || cleared;
         }
         let end = first + removed;
-        // 消すコマのすぐ後ろのコマ `end` を保持するキーフレームの始まり（始まりのコマは重ならないので、これで1つに決まる）
-        let kept_start =
-            (end < n).then(|| self.start_of(self.keyframes.partition_point_key(|s| s <= end) - 1));
+        // 消すコマのすぐ後ろのコマ `end` を保持するキーフレームが消すコマに始まるなら、`end` の姿を `first` に置く
+        let kept = self
+            .keyframe_index_at(end)
+            .filter(|&k| (first..end).contains(&self.start_of(k)))
+            .map(|_| self.snapshot_keyframe_at(end, fps));
+        self.keyframes.retain_keyed(|s, _| !(first..end).contains(&s));
         self.keyframes
-            .retain_keyed(|s, _| !(first..end).contains(&s) || Some(s) == kept_start);
-        let from = self.keyframes_before(first);
-        if from < self.keyframes.len() && self.start_of(from) < end {
-            if self.start_of(from) != first {
-                self.keyframes.set_key(from, first);
-            }
-            self.keyframes.shift_keys_from(from + 1, -(removed as i64));
-        } else {
-            self.keyframes.shift_keys_from(from, -(removed as i64));
+            .shift_keys_from(self.keyframes_before(first), -(removed as i64));
+        if let Some(kf) = kept {
+            self.insert_keyframe_starting_at(first, kf);
         }
         self.frame_count = n - removed;
         self.ensure_head_keyframe();
@@ -2331,7 +2333,7 @@ impl Timeline {
             targets.iter().any(|&l_idx| {
                 self.layers.get(l_idx).is_some_and(|l| {
                     l.keyframe_index_starting_at(curr_f)
-                        .is_some_and(|i| !l.keyframes[i].cel.is_empty())
+                        .is_some_and(|i| !l.keyframes[i].is_blank())
                 })
             })
         };
@@ -2342,7 +2344,7 @@ impl Timeline {
             && targets.iter().any(|&l_idx| {
                 self.layers.get(l_idx).is_some_and(|l| {
                     l.keyframe_index_starting_at(target_frame)
-                        .is_some_and(|i| !l.keyframes[i].cel.is_empty())
+                        .is_some_and(|i| !l.keyframes[i].is_blank())
                 })
             });
 
@@ -2370,8 +2372,7 @@ impl Timeline {
         targets.iter().any(|&l_idx| {
             self.layers.get(l_idx).is_some_and(|layer| {
                 layer.keyframe_index_at(curr_f).is_some_and(|idx| {
-                    let kf = &layer.keyframes[idx];
-                    layer.start_of(idx) == curr_f && (idx > 0 || !kf.cel.is_empty() || kf.tween)
+                    layer.start_of(idx) == curr_f && (idx > 0 || !layer.keyframes[idx].is_blank())
                 })
             })
         })
@@ -2410,22 +2411,19 @@ impl Timeline {
         targets.iter().any(|&l_idx| {
             self.layers.get(l_idx).is_some_and(|l| {
                 start_f < l.frame_count
-                    && (l.frame_count > 1
-                        || l.keyframes
-                            .first()
-                            .is_some_and(|kf| !kf.cel.is_empty() || kf.tween))
+                    && (l.frame_count > 1 || l.keyframes.first().is_some_and(|kf| !kf.is_blank()))
             })
         })
     }
 
     /// 対象レイヤー群 `targets` のフレーム（範囲選択時は選択範囲まとめて、単一選択時は1フレーム）を削除する（`Shift+F5`）
-    pub(crate) fn remove_frame_on_targets(&mut self, targets: &[usize]) -> bool {
+    pub(crate) fn remove_frame_on_targets(&mut self, targets: &[usize], fps: u32) -> bool {
         let range_sel = self.cell_selection.filter(|s| s.max_frame > s.min_frame);
         let mut any_changed = false;
         if let Some(sel) = range_sel {
             for &l_idx in targets {
                 if let Some(layer) = self.layers.get_mut(l_idx) {
-                    if layer.remove_frames(sel.min_frame, sel.max_frame - sel.min_frame + 1) {
+                    if layer.remove_frames(sel.min_frame, sel.max_frame - sel.min_frame + 1, fps) {
                         any_changed = true;
                     }
                 }
@@ -2441,7 +2439,7 @@ impl Timeline {
             let curr_f = self.current_frame;
             for &l_idx in targets {
                 if let Some(layer) = self.layers.get_mut(l_idx) {
-                    if layer.remove_frame_at(curr_f) {
+                    if layer.remove_frame_at(curr_f, fps) {
                         any_changed = true;
                     }
                 }

@@ -2196,6 +2196,8 @@ impl Tab {
         }
     }
 
+    /// 編集中のタイムラインの、中身でない状態（見ているコマ・選んだレイヤー・セルの範囲選択。版は上げない）を書くための
+    /// 可変参照。中身を書くのは `write_active_timeline`
     #[inline]
     fn active_timeline_raw_mut(&mut self) -> &mut Timeline {
         match self.active_symbol_index() {
@@ -2228,26 +2230,30 @@ impl Tab {
         self.active_timeline_raw_mut().cell_selection = sel;
     }
 
-    /// 現在編集中のタイムラインへの可変参照と文書への可変参照を渡して絵を変える編集を実行し、リビジョンを上げる
+    /// 現在編集中のタイムラインへの可変参照と文書への可変参照を渡して絵を変える編集を実行し（`write_active_timeline`）、
+    /// 画面の土台を作り直す
     pub(crate) fn with_active_timeline_mut<R>(
         &mut self,
         f: impl FnOnce(&mut Timeline, &mut Document) -> R,
     ) -> R {
+        let res = self.write_active_timeline(f);
+        self.refresh_scene_base();
+        res
+    }
+
+    /// 現在編集中のタイムラインを `f(タイムライン, 文書)` で書く。編集中のタイムラインの中身を書く所はこれ1つ：シンボルの
+    /// 中なら、版を上げる入口 `Document::write_symbol_timeline` を通る（ルートでは `Document::revision` は上げない）。
+    /// 画面の土台は作り直さない（書いた後の後始末は呼ぶ側：`with_active_timeline_mut`・`finish_cel_writes`）
+    pub(crate) fn write_active_timeline<R>(
+        &mut self,
+        f: impl FnOnce(&mut Timeline, &mut Document) -> R,
+    ) -> R {
         if let Some(idx) = self.active_symbol_index() {
-            let mut taken_tl =
-                std::mem::take(&mut Arc::make_mut(&mut self.doc.library[idx]).timeline);
-            let res = f(&mut taken_tl, &mut self.doc);
-            let sym = Arc::make_mut(&mut self.doc.library[idx]);
-            sym.timeline = taken_tl;
-            sym.revision = crate::vector_engine::next_mesh_revision();
-            self.doc.bump_revision();
-            self.refresh_scene_base();
-            return res;
+            return self.doc.write_symbol_timeline(idx, f);
         }
         let mut taken_root = std::mem::take(&mut self.doc.root);
         let res = f(&mut taken_root, &mut self.doc);
         self.doc.root = taken_root;
-        self.refresh_scene_base();
         res
     }
 

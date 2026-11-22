@@ -1391,69 +1391,6 @@ impl LayerBase {
         })
     }
 
-    /// まだ升目の索引を持っていなければ、写し `donors` のうち索引を持ち、この地図といちばん多く塊を共有するものから作る
-    /// （Undo・やり直しで画面の土台が写しを作り直すとき、直前まで画面に出していた写しから。共有する塊が無ければ何も
-    /// しない：初めて要るときに全部作る）
-    pub(crate) fn adopt_index(&self, donors: &[Arc<LayerBase>]) {
-        if self.index.get().is_some() {
-            return;
-        }
-        let best = donors
-            .iter()
-            .filter(|d| d.index.get().is_some() && !d.stored.same(&self.stored))
-            .map(|d| (self.stored.shared_tile_count(&d.stored), d))
-            .filter(|(n, _)| *n > 0)
-            .max_by_key(|(n, _)| *n);
-        if let Some((_, d)) = best {
-            self.inherit_index(Some(d));
-        }
-    }
-
-    /// まだ階層 `group_path` の面の表を持っていなければ、写し `donors` のうち、その階層の面の表と升目の索引を持ち、この
-    /// 地図といちばん多く塊を共有するものから作る（取り消し・やり直しで画面の土台が写しを作り直すとき、直前まで画面に出して
-    /// いた写しから）：その写しの地図をこの地図にする差分を1本の道に通した答え（`replace_local`）の面の表。この地図は書き
-    /// 戻した正しい地図（面に1つずつ別の番号）なので、答えの面の番号は辺の番号のまま、答えのしまう形もこの地図と同じ（テスト
-    /// では毎回確かめる）。手間は変わった所の面の分。共有する塊が無いか、答えが書けない（正しい地図なので起きないはず）
-    /// ときは何もしない（初めて要るときに全部作る：`adopt_index` と同じ）
-    pub(crate) fn adopt_faces(&self, donors: &[Arc<LayerBase>], group_path: &[u64]) {
-        let has_faces = |b: &LayerBase| {
-            b.faces
-                .lock()
-                .as_ref()
-                .is_some_and(|(gp, _)| gp == group_path)
-        };
-        if has_faces(self) {
-            return;
-        }
-        let best = donors
-            .iter()
-            .filter(|d| d.index.get().is_some() && has_faces(d) && !d.stored.same(&self.stored))
-            .map(|d| (self.stored.shared_tile_count(&d.stored), d))
-            .filter(|(n, _)| *n > 0)
-            .max_by_key(|(n, _)| *n);
-        let Some((_, d)) = best else {
-            return;
-        };
-        let faces = match d.replace_local(&self.stored, group_path) {
-            LocalEdit::Same => d.faces(group_path),
-            LocalEdit::Changed(w) => {
-                #[cfg(test)]
-                if test_checks() {
-                    assert!(
-                        uncounted(|| w.stored.same_content(&self.stored)),
-                        "書き戻した地図にする答えのしまう形が、その地図と違う（面の番号が辺の番号でない）"
-                    );
-                }
-                w.faces
-            }
-            LocalEdit::Refused(_) => return,
-        };
-        let mut cached = self.faces.lock();
-        if cached.is_none() {
-            *cached = Some((group_path.to_vec(), faces));
-        }
-    }
-
     /// 辺 `e` がかかる、升目の索引の升目：辺の近くを探すマス（`EdgeGeom::reach`）の升目。マスで探す所（窓の辺
     /// `region_edges`・`NearEdges`）も、点のまわりや半直線の所を探す所（辺の点は、その点を含むマスにある）も、その升目を
     /// 引けば必ず見つかる
