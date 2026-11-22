@@ -2052,8 +2052,8 @@ impl Layer {
     /// キーフレーム `k` の音の区間の端 `edge` を動かせる所（コマの境目の番号：始まりはキーフレームの始まりのコマ、終わりは
     /// 鳴り終わったコマの次のコマ。設計の 7 章）。音が無い・音のライブラリ `sounds` に無いなら `None`
     /// - 終わり：始まりより1コマ以上後ろから、音の本当の終わりに届くコマと、キーフレームの区間の終わりの早いほうまで
-    /// - 始まり：前のキーフレームの次のコマ（前が無ければ 0）から、鳴り終わるコマの1つ手前まで。区間の始まりが音の頭より
-    ///   前にならない所まで（音の頭から数えて、区間の始まりまでに入りきるコマの数だけ戻せる）
+    /// - 始まり：鳴り終わるコマの1つ手前まで削れる。戻すのは、区間の始まりが音の頭より前にならない所まで（削った頭に
+    ///   入りきるコマの数だけ、キーフレームより前へ戻せる）
     pub(crate) fn sound_trim_range(
         &self,
         k: usize,
@@ -2071,18 +2071,16 @@ impl Layer {
                 shown.start + 1..=span_end.min(shown.start + frames_to_reach(len - clip.start, fps))
             }
             SoundEdge::Start => {
-                let after_prev = k.checked_sub(1).map_or(0, |p| self.start_of(p) + 1);
                 let back = frames_to_reach(clip.start + 1, fps) - 1;
-                after_prev.max(shown.start.saturating_sub(back))..=shown.end - 1
+                shown.start.saturating_sub(back)..=shown.end - 1
             }
         })
     }
 
     /// キーフレーム `k` の音の区間の端 `edge` を、コマの境目 `frame` へ動かす（設計の 7 章。動かせる所は
     /// `sound_trim_range`）。終わりは、そのコマの境目に当たる音の中の位置にする（音の本当の終わりは越えない）。始まりは、
-    /// キーフレームをそのコマへ動かし、区間の始まりも同じ時間だけ進める（戻す）ので、鳴るタイミングは変わらない。空いた
-    /// コマ・詰まったコマは、前のキーフレームの区間が伸び縮みする（コマ 0 から動かしたら、コマ 0 に空白のキーフレームを
-    /// 置く：コマの移動と同じ決まり）。動かせない所・変わらないなら断る
+    /// 区間の始まりを、キーフレームからそのコマまでの時間だけ進める（戻す）。どちらの端も、キーフレームは動かさない（頭を
+    /// 削ると、残りの音がキーフレームのコマから鳴る）。動かせない所・変わらないなら断る
     pub(crate) fn trim_sound(
         &mut self,
         k: usize,
@@ -2123,10 +2121,6 @@ impl Layer {
             return false;
         }
         self.keyframe_mut(k).sound = Some(trimmed);
-        if edge == SoundEdge::Start {
-            self.keyframes.set_key(k, frame);
-            self.ensure_head_keyframe();
-        }
         true
     }
 
