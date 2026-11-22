@@ -2557,8 +2557,8 @@ impl PlanarMap {
     pub(super) fn overlap(&self, q: &QuadBez, e: usize) -> Option<OverlapPts> {
         use kurbo::ParamCurveNearest;
         let m = self.quad(e);
-        // 曲線から確かに `FLAT_TOL` より遠い点は、いちばん近い点を探さない（`nearest_on_quad` の距離は本当の距離以上
-        // なので、探しても同じく外れる）。曲線は外接矩形の中にあり、弦から `bend / 4` 以内にある（2次ベジェと弦の差は
+        // 曲線から確かに `FLAT_TOL` より遠い点は、いちばん近い点を探さない（`nearest_on_quad` の距離は本当のいちばん近い
+        // 距離なので、探しても同じく外れる）。曲線は外接矩形の中にあり、弦から `bend / 4` 以内にある（2次ベジェと弦の差は
         // 2t(1−t)(p1 − (p0 + p2)/2) で、2t(1−t) ≤ 1/2）ので、矩形から遠い点と、弦までの距離から `bend / 4` を引いても
         // 遠い点（丸めの分の余裕をとる）は遠い
         let (qr, mr) = (q.bounding_box(), m.bounding_box());

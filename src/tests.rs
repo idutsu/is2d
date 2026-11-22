@@ -37474,3 +37474,38 @@ fn touched_range_grows_with_length_not_area() {
     // 辺の長さは4倍、中の広さは16倍。その間（8倍）より少ない
     assert!(big < small * 8, "範囲の項目の数 {small} → {big}");
 }
+
+/// 曲線の上のいちばん近い点（`nearest_on_quad`）は、どんな形でも大域のいちばん近い点：折り返した曲線（とげ）を含む、
+/// いろいろな曲線の上の点は、地図の精度（`FLAT_TOL` = 0.002px）の中で曲線の上にあり、曲線の近くの点の距離は、密に調べた
+/// 距離のいちばん小さいものより地図の精度以上に遠くならない（もう一方の枝の点を返さない）
+#[test]
+fn nearest_on_quad_finds_the_global_nearest_point_even_on_spikes() {
+    use crate::vector_engine::nearest_on_quad;
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f64 / (1u64 << 53) as f64 * 200.0 - 100.0
+    };
+    let mut quads = vec![
+        QuadBez::new((0.0, 0.0), (100.0, 1.0), (0.0, 2.0)),
+        QuadBez::new((0.0, 0.0), (80.0, 30.0), (10.0, 5.0)),
+    ];
+    quads.extend((0..200).map(|_| {
+        QuadBez::new((next(), next()), (next(), next()), (next(), next()))
+    }));
+    let flat_tol = 0.002;
+    for q in &quads {
+        for k in 0..=200 {
+            let on = q.eval(k as f64 / 200.0);
+            let (t, d) = nearest_on_quad(q, on);
+            assert!(d <= flat_tol, "曲線の上の点 {on:?} が {d} 離れている（t {t}、{q:?}）");
+            let off = Point::new(on.x + next() * 0.05, on.y + next() * 0.05);
+            let dense = (0..=4000)
+                .map(|j| q.eval(j as f64 / 4000.0).distance(off))
+                .fold(f64::INFINITY, f64::min);
+            assert!(nearest_on_quad(q, off).1 <= dense + flat_tol, "{off:?} の距離が大域の最小より遠い（{q:?}）");
+        }
+    }
+}

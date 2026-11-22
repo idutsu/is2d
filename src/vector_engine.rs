@@ -759,38 +759,26 @@ pub(crate) fn left_normal(v: KVec2) -> KVec2 {
 }
 
 /// 曲線 `q` の上で点 `p` にいちばん近い所の（パラメータ, 距離）。曲線の上のいちばん近い点を求めるのはこれ1つ
+/// - どの所か：距離の2乗の導関数（3次式）の [0,1] の根と両端を全部比べて決める（kurbo の `ParamCurveNearest::nearest`。
+///   2次ベジェでは精度の引数を使わない）ので、折り返した曲線でも大域のいちばん近い所になる
+/// - パラメータの細かさ：3次式の根の公式は丸めで少しずれる（曲線の上の点でも 1e-9px ほど離れる）。同じ線を見分ける所
+///   （`overlap`）では、曲線の上の頂点のパラメータがずれると折れ線がそろわないので、その根からニュートン法で、距離が
+///   もう縮まなくなるまで詰める（根の所の谷の中を進むので、ほかの所へは移らない）
 pub(crate) fn nearest_on_quad(q: &QuadBez, p: Point) -> (f64, f64) {
-    let dist_sq = |t: f64| (q.eval(t) - p).hypot2();
-    // 等分の点のうち、いちばん近いもの（同じ距離なら前の点）。距離は点ごとに1回だけ求める。初めていちばん近くなった点が
-    // `p` そのものなら、ほかの点はそれより近くならず、ニュートン法でも動かない（ずれが 0）ので、そこで決まる（共有する
-    // 頂点を調べることが多い：`overlap`）。距離が NaN になりうる大きすぎる座標（計算があふれる）では、決めずに続ける
-    let finite = [q.p0, q.p1, q.p2, p]
-        .iter()
-        .all(|v| v.x.abs() < 1e150 && v.y.abs() < 1e150);
-    let mut best = (0.0, 0.0);
-    for k in 0..=16 {
-        let t = k as f64 / 16.0;
-        let at = q.eval(t);
-        let d = (at - p).hypot2();
-        if k == 0 || d.total_cmp(&best.1) == std::cmp::Ordering::Less {
-            if finite && at == p {
-                return (t, 0.0);
-            }
-            best = (t, d);
-        }
-    }
-    let mut t = best.0;
+    let n = kurbo::ParamCurveNearest::nearest(q, p, 0.0);
+    let (mut t, mut d) = (n.t, n.distance_sq);
     let second = (q.p0.to_vec2() - q.p1.to_vec2() * 2.0 + q.p2.to_vec2()) * 2.0;
-    for _ in 0..6 {
+    loop {
         let b = q.eval(t) - p;
         let first = quad_deriv(q, t);
-        let slope = first.dot(first) + b.dot(second);
-        if slope.abs() < 1e-14 {
+        let next = (t - b.dot(first) / (first.dot(first) + b.dot(second))).clamp(0.0, 1.0);
+        let dn = (q.eval(next) - p).hypot2();
+        if dn.total_cmp(&d).is_ge() {
             break;
         }
-        t = (t - b.dot(first) / slope).clamp(0.0, 1.0);
+        (t, d) = (next, dn);
     }
-    (t, dist_sq(t).sqrt())
+    (t, d.sqrt())
 }
 
 /// 曲線 `q` の t での向き（微分）
