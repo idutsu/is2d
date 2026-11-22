@@ -20350,7 +20350,7 @@ fn pasting_drawing_copied_from_several_layers_goes_into_the_working_layer() {
 }
 
 #[test]
-fn test_group_rejects_cross_layer_selection_and_allows_single_layer() {
+fn test_group_and_symbol_reject_cross_layer_selection_and_allow_single_layer() {
     use crate::doc_actions::{apply, Action};
 
     let mut app = Is2dApp::default();
@@ -20377,13 +20377,16 @@ fn test_group_rejects_cross_layer_selection_and_allows_single_layer() {
         },
     ));
 
-    // 1. 下のレイヤーの赤と上のレイヤーの青を選んで Action::Group → false が返り、文書と Undo 履歴が変わらない
+    // 1. 下のレイヤーの赤と上のレイヤーの青を選んで Action::Group・Action::ConvertToSymbol → どちらも false が返り、
+    //    文書（ライブラリを含む）と Undo 履歴が変わらない（どちらも1つのレイヤーの中で選んだものだけ）
     assert!(apply(&mut app, Action::SelectAll));
     assert_eq!(app.session.selected_indices().len(), 2);
     assert_eq!(crate::select_ops::selected_single_layer_id(&app), None);
     let undo_len_before = app.history.undo_stack.len();
     assert!(!apply(&mut app, Action::Group));
+    assert!(!apply(&mut app, Action::ConvertToSymbol));
     assert_eq!(app.history.undo_stack.len(), undo_len_before);
+    assert!(app.doc.library.is_empty());
     assert!(app.scene().iter().all(|s| s.group_path.is_empty()));
 
     // 2. 同じレイヤーの2つの図形なら、今までどおりグループになる
@@ -27505,14 +27508,17 @@ mod map_overlay {
             }
         ));
         act(&mut app, doc_actions::Action::Deselect);
-        // 1枚目のレイヤーをグループ化 → 全部をシンボル化 → 分解（グループとして戻る）→ グループの解除 → 確定
+        // 1枚目のレイヤーをグループ化 → 1枚目のレイヤーの全部をシンボル化 → 分解（グループとして戻る）→ グループの解除 → 確定
         let lid0 = app.doc.root.layers[0].id;
         let first: Vec<usize> = (0..app.scene().len())
             .filter(|&i| app.scene().get(i).unwrap().layer_id == lid0)
             .collect();
         app.session.set_selected_indices(first);
         assert!(doc_actions::group_selected_shapes(&mut app).is_some());
-        assert!(act(&mut app, doc_actions::Action::SelectAll));
+        let first: Vec<usize> = (0..app.scene().len())
+            .filter(|&i| app.scene().get(i).unwrap().layer_id == lid0)
+            .collect();
+        app.session.set_selected_indices(first);
         let sym = doc_actions::convert_selection_to_symbol(&mut app).expect("シンボル化");
         assert!(
             doc_actions::ungroup_selected_shapes(&mut app),
@@ -29868,6 +29874,17 @@ fn refused_convert_to_symbol_leaves_no_symbol_in_the_library() {
     run(&mut app, &[Action::SelectAll]);
     doc_actions::finish_move_selection_drag(&mut app, KVec2::new(0.0, 100.0), false);
     assert!(app.session.floating().is_some());
+    // シンボルにするのは1枚目のレイヤーの片だけ（シンボルにできるのは1つのレイヤーの中で選んだものだけ）。2枚目の
+    // レイヤーの片は、浮いたまま選ばない（残りとして確定する分）
+    let lid0 = app.doc.root.layers[0].id;
+    let select_first = |app: &mut Is2dApp| {
+        let first: Vec<usize> = (0..app.scene().len())
+            .filter(|&i| app.scene().get(i).unwrap().layer_id == lid0)
+            .collect();
+        app.session.set_selected_indices(first);
+    };
+    select_first(&mut app);
+    assert!(app.session.floating().is_some());
     // 残りを書くレイヤーの1つを、確定を通さずに編集できなくする（確定が断られる場面の代わり）
     app.tab_mut().with_active_timeline_mut(|tl, _| {
         tl.layers[1].locked = true;
@@ -29881,11 +29898,13 @@ fn refused_convert_to_symbol_leaves_no_symbol_in_the_library() {
         "置かれないシンボルを残さない"
     );
     assert_eq!(app.history.undo_stack.len(), undo_len);
-    // 確定できるようにして F8：シンボルは1つだけで、置いたインスタンスはそのシンボルを指す
+    // 確定できるようにして F8：シンボルは1つだけで、置いたインスタンスはそのシンボルを指す（断ったときは、文書と浮いた
+    // 片を控えから戻すので、選択も浮いた片の全部に戻る。1枚目のレイヤーの片を選び直す）
     app.tab_mut().with_active_timeline_mut(|tl, _| {
         tl.layers[1].locked = false;
         true
     });
+    select_first(&mut app);
     assert!(apply(&mut app, Action::ConvertToSymbol));
     let lib = &app.tab().doc.library;
     assert_eq!(lib.len(), 1);

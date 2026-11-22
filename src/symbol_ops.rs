@@ -33,20 +33,21 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         return None;
     }
 
-    let layer_ids = editable_layer_ids(tab);
+    // シンボルにできるのは、1つのレイヤーの中で選んだものだけ（グループ化と同じ決まり：`selected_single_layer_id`）
+    let target_lid = crate::select_ops::selected_single_layer_id(tab)?;
+    if !editable_layer_ids(tab).contains(&target_lid) {
+        return None;
+    }
     let scope = tab.session.editing_group_path.clone();
     let selection = tab.session.selection.clone();
     // シンボルの中身は、文書を変える前に、選んでいるものの中身（地図とインスタンス：`selected_content`。浮いた片は
-    // 確定と同じ重ね方）から作る：編集できるレイヤーの中身を1枚に重ね（`Cel::stacked`）、外接矩形の中心を原点へ寄せる
-    // （`Cel::transformed`）。地図にできなければ断る。インスタンスは、中身のいちばん上のレイヤーに置く
+    // 確定と同じ重ね方）から作る：そのレイヤーの中身の、外接矩形の中心を原点へ寄せる（`Cel::transformed`）。地図に
+    // できなければ断る。インスタンスは、そのレイヤーに置く
     let mut content = selected_content(tab)?;
-    content.layers.retain(|(id, _)| layer_ids.contains(id));
-    let target_lid = content.layers.last()?.0;
+    content.layers.retain(|(id, _)| *id == target_lid);
     let center = content_center(tab, &content);
-    let cels: Vec<Cel> = content.layers.into_iter().map(|(_, c)| c).collect();
-    let Some(cel) =
-        Cel::stacked(&cels).and_then(|c| c.transformed(Affine::translate(-center.to_vec2())))
-    else {
+    let (_, cel) = content.layers.pop()?;
+    let Some(cel) = cel.transformed(Affine::translate(-center.to_vec2())) else {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return None;
     };
@@ -108,7 +109,7 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     .into_iter()
     .collect();
     finish_cel_writes(tab, &written);
-    write_cels(tab, &layer_ids, |_, cel, held| {
+    write_cels(tab, &[target_lid], |_, cel, held| {
         cel.remove(&scope, &selection.shapes, &selection.instances, held)
     });
     if let Some(plan) = rest_plan {

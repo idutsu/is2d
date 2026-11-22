@@ -823,17 +823,17 @@ fn draw_select_tool_properties(
 fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     draw_panel_section_label(ui, "シンボル・グループ", 4.0);
 
-    let has_sel = !tab.session.selection.is_empty();
     let has_group = tab
         .scene()
         .selection_has_group(&tab.session.selection, &tab.session.editing_group_path);
     if ui
         .add_enabled(
-            has_sel,
+            crate::select_ops::selected_single_layer_id(tab).is_some(),
             egui::Button::new(format!("{} シンボルに変換 (F8)", icons::SYMBOL))
                 .min_size(Vec2::new(ui.available_width(), 28.0)),
         )
         .on_hover_text("選択中の図形をシンボルに変換してライブラリに登録します (F8)")
+        .on_disabled_hover_text("シンボルにできるのは、1つのレイヤーの中で選んだ図形だけです")
         .clicked()
     {
         actions.push(UiAction::Doc(Action::ConvertToSymbol));
@@ -1532,14 +1532,14 @@ fn draw_symbol_color_effect(
 
 /// 「ライブラリ」タブの描画（シンボルのプレビュー・一覧・名前変更・ステージ配置・編集・削除）
 pub(crate) fn draw_library_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
-    let has_sel = !tab.session.selection.is_empty();
     if ui
         .add_enabled(
-            has_sel,
+            crate::select_ops::selected_single_layer_id(tab).is_some(),
             egui::Button::new(format!("{} 選択図形をシンボル化 (F8)", icons::ADD))
                 .min_size(Vec2::new(ui.available_width(), 28.0)),
         )
         .on_hover_text("キャンバスで選択中の図形を新しいシンボルとして登録 (F8)")
+        .on_disabled_hover_text("シンボルにできるのは、1つのレイヤーの中で選んだ図形だけです")
         .clicked()
     {
         actions.push(UiAction::Doc(Action::ConvertToSymbol));
