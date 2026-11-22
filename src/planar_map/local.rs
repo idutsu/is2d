@@ -564,16 +564,19 @@ impl LocalMap<'_> {
         }
     }
 
-    /// 色 `color` の穴（調べる点 `probe`）の入れ先：点を含む同じ色の外周のうち、いちばん小さいもの（今の `regions` と同じ
-    /// 決まり）。外周は点を含めば、点から右へ伸ばした半直線と交わる。正しい地図では外周どうしは入れ子か離れているので、
-    /// 点を含む外周のうちいちばん内側のものが、半直線と最初に交わる。そこで、横切る所の列（丸めずに決める：`crossing_cols`）
-    /// の順に輪郭を調べ、見つかった列の中でいちばん小さいものにする。`None`：輪郭が閉じない。`Some(None)`：入れ先が無い
-    fn owner_of(
+    /// 色 `color`（`None` ならどの色も。何も無い色は `Some(None)`）の、点 `probe` を含む外周（何も無い側の輪郭も数える）の
+    /// うち、いちばん小さいもの（今の `regions` と同じ決まり。穴の入れ先・バケツの面の外周を探すのはこれ1つ）。外周は点を
+    /// 含めば、点から右へ伸ばした半直線と交わる。正しい地図では外周どうしは入れ子か離れているので、点を含む外周のうち
+    /// いちばん内側のものが、半直線と最初に交わる。そこで、横切る所の列（丸めずに決める：`crossing_cols`）の順に輪郭を
+    /// 調べ、見つかった列の中でいちばん小さいものにする。`None`：輪郭が閉じない。`Some(None)`：入れ先が無い
+    fn owner(
         &self,
-        color: Option<Color32>,
+        color: Option<Option<Color32>>,
         probe: IPt,
         memo: &mut CycleMemo,
     ) -> Option<Option<usize>> {
+        #[cfg(test)]
+        super::OWNER_SEARCHES.with(|n| n.set(n.get() + 1));
         let mut best: Option<(i128, usize)> = None;
         let mut found_col: Option<i64> = None;
         let mut rc = self.ray_cols(probe);
@@ -584,12 +587,11 @@ impl LocalMap<'_> {
             for e in edges {
                 for side in [true, false] {
                     let ci = self.cycle_of((e, side), memo)?;
-                    let c = &memo.cycles[ci];
-                    let Some(r) = &c.ring else {
+                    if color.is_some_and(|c| memo.cycles[ci].color != c) {
                         continue;
-                    };
+                    }
+                    let r = self.ring_any(ci, memo);
                     if r.area2 > 0
-                        && c.color == color
                         && r.contains(probe) == Some(true)
                         && best.is_none_or(|b| r.area2 < b.0)
                     {
@@ -660,7 +662,7 @@ impl LocalMap<'_> {
         Some(true)
     }
 
-    /// 色のある穴 `ci` の入れ先（`owner_of`。決めたものは控え `memo` に入れ、2回探さない）。前の地図の穴で、前の入れ先の
+    /// 色のある穴 `ci` の入れ先（`owner`。決めたものは控え `memo` に入れ、2回探さない）。前の地図の穴で、前の入れ先の
     /// 外周 `kept`（`kept_exterior`）が新しい地図にそのまま残り、同じ色の新しい外周（触った外周 `made`：（色, 外接矩形））の
     /// 外接矩形が穴の調べる点を含まなければ、前の入れ先のまま（入れ先は、穴を含む同じ色の外周のうちいちばん小さいもの。
     /// 残った外周の中では前と同じものがいちばん小さく、新しい外周はその点を含まない）。`None`：輪郭が閉じない
@@ -678,7 +680,7 @@ impl LocalMap<'_> {
         let p = self.probe(&memo.cycles[ci].cycle);
         let o = match kept.filter(|_| !made.iter().any(|&(c, r)| c == color && r.contains2(p))) {
             Some(k) => Some(k),
-            None => self.owner_of(color, p, memo)?,
+            None => self.owner(Some(color), p, memo)?,
         };
         memo.owners.insert(ci, o);
         Some(o)
@@ -869,45 +871,11 @@ impl LocalMap<'_> {
         })
     }
 
-    /// 色 `color`（何も無い色も）の、点 `probe` を含むいちばん小さい外周（何も無い側の輪郭も数える。`owner_of` と同じ
-    /// 決め方）。`None`：輪郭が閉じない
-    fn owner_any(
-        &self,
-        color: Option<Option<Color32>>,
-        probe: IPt,
-        memo: &mut CycleMemo,
-    ) -> Option<Option<usize>> {
-        let mut best: Option<(i128, usize)> = None;
-        let mut found_col: Option<i64> = None;
-        let mut rc = self.ray_cols(probe);
-        while let Some((col, edges)) = self.next_ray_col(&mut rc) {
-            if found_col.is_some_and(|fc| col > fc) {
-                break;
-            }
-            for e in edges {
-                for side in [true, false] {
-                    let ci = self.cycle_of((e, side), memo)?;
-                    if color.is_some_and(|c| memo.cycles[ci].color != c) {
-                        continue;
-                    }
-                    let r = self.ring_any(ci, memo);
-                    if r.area2 > 0
-                        && r.contains(probe) == Some(true)
-                        && best.is_none_or(|b| r.area2 < b.0)
-                    {
-                        best = Some((r.area2, ci));
-                        found_col.get_or_insert(col);
-                    }
-                }
-            }
-        }
-        Some(best.map(|b| b.1))
-    }
-
     /// バケツの面（点を含む面。何も無い側の囲まれた所も面）：点 `p2`（2倍の座標）を含む
     /// いちばん小さい外周と、その穴（同じ色で、入れ先がその外周の輪郭）の、向きのある辺。色のある面の穴は、前の地図の面の
-    /// 表 `base_faces` で引く。何も無い所の穴は、外周の上と中のマスの辺（`edges_in_ring`）の何も無い側の輪郭から探す。点が輪郭の上にあるか、
-    /// どの外周にも入らなければ `None`。（面の色, 面の輪郭の向きのある辺）
+    /// 表 `base_faces` で引く。何も無い所の穴は、外周の上と中のマスの辺（`edges_in_ring`）の何も無い側の輪郭から探し、
+    /// 入れ先はその中の別の外周とだけ比べて決める。点が輪郭の上にあるか、どの外周にも入らなければ `None`。
+    /// （面の色, 面の輪郭の向きのある辺）
     pub(crate) fn face_at(
         &self,
         p2: IPt,
@@ -917,37 +885,59 @@ impl LocalMap<'_> {
         if self.on_some_edge(p2) {
             return None;
         }
-        let ext = self.owner_any(None, p2, memo)??;
+        let ext = self.owner(None, p2, memo)??;
         let color = memo.cycles[ext].color;
         let mut cycles = vec![ext];
-        let mut in_face: IntSet<usize> = [ext].into_iter().collect();
+        let mut seen: IntSet<usize> = [ext].into_iter().collect();
         match color {
             Some(_) => {
                 let h0 = memo.cycles[ext].cycle[0];
                 let id = self.side_src(h0)?;
                 for h in base_faces(id) {
                     let ci = self.cycle_of(h, memo)?;
-                    if in_face.insert(ci) {
+                    if seen.insert(ci) {
                         cycles.push(ci);
                     }
                 }
             }
             None => {
+                // 外周の上と中のマスの辺の、何も無い側の輪郭を、別の外周（面積が正）と穴の候補（面積が負）に分ける
                 let near = self.edges_in_ring(&self.ring_any(ext, memo).pts);
+                let (mut others, mut holes): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
                 for e in near {
                     for side in [true, false] {
                         if self.side_color((e, side)).is_some() {
                             continue;
                         }
                         let ci = self.cycle_of((e, side), memo)?;
-                        if in_face.contains(&ci) || self.ring_any(ci, memo).area2 >= 0 {
-                            continue;
+                        if seen.insert(ci) {
+                            match self.ring_any(ci, memo).area2 {
+                                a if a > 0 => others.push(ci),
+                                a if a < 0 => holes.push(ci),
+                                _ => {}
+                            }
                         }
-                        let hp = self.probe(&memo.cycles[ci].cycle);
-                        if self.owner_any(Some(None), hp, memo)? == Some(ext) {
-                            in_face.insert(ci);
-                            cycles.push(ci);
-                        }
+                    }
+                }
+                // 穴の入れ先は、調べる点を含む何も無い側の外周のうちいちばん小さいもの（`owner` と同じ決まり）。`ext` より
+                // 小さくて点を含む外周は `ext` の中にあるので、その辺は `ext` の上と中のマスにあり、`others` に入っている。
+                // そこで、点を含みうる外周（外接矩形の高さの帯の索引で引く）とだけ比べ、半直線はなめない
+                let rings = &memo.unpainted_rings;
+                let bands = YBands::new(
+                    others
+                        .iter()
+                        .map(|ci| (2 * rings[ci].rect.y0, 2 * rings[ci].rect.y1)),
+                );
+                let ext_ring = &rings[&ext];
+                for ci in holes {
+                    let hp = self.probe(&memo.cycles[ci].cycle);
+                    let inside = |r: &Ring| r.contains(hp) == Some(true);
+                    let in_other = bands.at(hp.1).iter().any(|&k| {
+                        let r = &rings[&others[k as usize]];
+                        r.area2 < ext_ring.area2 && inside(r)
+                    });
+                    if inside(ext_ring) && !in_other {
+                        cycles.push(ci);
                     }
                 }
             }

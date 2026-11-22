@@ -31904,6 +31904,65 @@ fn holes_follow_new_exteriors_on_the_touched_only_path() {
     }
 }
 
+/// 同じ色の四角 `(x0, y0)-(x1, y1)` の穴の輪郭（外周と逆の向き）
+fn reversed_rect(x0: f64, y0: f64, x1: f64, y1: f64) -> crate::vector_engine::Contour {
+    let s = map_overlay::rect_shape(x0, y0, x1, y1, Color32::WHITE);
+    crate::vector_engine::Contour::new(
+        s.exterior
+            .segments
+            .iter()
+            .rev()
+            .map(|q| kurbo::QuadBez::new(q.p2, q.p1, q.p0))
+            .collect(),
+    )
+}
+
+/// 線で囲まれた何も無い所をバケツで塗るとき、塗る面（`LocalMap::face_at`）を決めるのに半直線で探すのは、点を含む外周の
+/// 1回だけ。囲いの中の島の外周の入れ先は、囲いの中の何も無い側の別の外周とだけ比べる（レビュー 983236e の N-1004）。
+/// 書き戻し（`apply_diff`）は、塗った面の触った穴（島の外周）ごとに入れ先を探すので、島が1つ増えると、探す回数は1回
+/// 増える（面を決める所でも島ごとに探すと、2回増える）
+#[test]
+fn bucket_in_an_enclosure_searches_the_face_once_whatever_the_islands() {
+    let red = Color32::from_rgb(220, 60, 60);
+    let blue = Color32::from_rgb(60, 90, 220);
+    let searches = |k: usize| -> usize {
+        // 枠（四角い輪）の中に、離れた小さな四角が k×k 個と、中に何も無い所（別の外周）のある輪が1つ
+        let w = k as f64 * 20.0 + 60.0;
+        let frame = map_overlay::rect_shape(0.0, 0.0, w, w, red).exterior;
+        let inner = reversed_rect(10.0, 10.0, w - 10.0, w - 10.0);
+        let ring = map_overlay::rect_shape(w - 35.0, w - 35.0, w - 15.0, w - 15.0, red).exterior;
+        let mut shapes = vec![
+            FillShape::new(red, frame, vec![inner]),
+            FillShape::new(red, ring, vec![reversed_rect(w - 30.0, w - 30.0, w - 20.0, w - 20.0)]),
+        ];
+        for i in 0..k * k {
+            let (x, y) = ((i % k) as f64 * 20.0 + 25.0, (i / k) as f64 * 20.0 + 25.0);
+            shapes.push(map_overlay::rect_shape(x, y, x + 10.0, y + 10.0, red));
+        }
+        let mut app = Is2dApp::default();
+        put_cel_shapes(&mut app, 0, 0, shapes);
+        let before = crate::planar_map::owner_searches();
+        assert!(doc_actions::apply(
+            &mut app,
+            doc_actions::Action::BucketFill {
+                pt: Point::new(15.0, 15.0),
+                color: blue,
+            },
+        ));
+        let n = crate::planar_map::owner_searches() - before;
+        // 塗った面：囲いの内側を外周に、島と輪の外周を穴に持つ（輪の中の何も無い所は塗らない）
+        let filled: Vec<usize> = app
+            .scene()
+            .iter()
+            .filter(|s| s.color == blue)
+            .map(|s| s.holes.len())
+            .collect();
+        assert_eq!(filled, vec![k * k + 1]);
+        n
+    };
+    assert_eq!(searches(6) - searches(3), 6 * 6 - 3 * 3);
+}
+
 /// 計測（N-2001）：線の多いセル画（今の地図から描いて作る）に、ブラシを1本描く1回（入口から文書への書き戻しまで）
 #[test]
 #[ignore]

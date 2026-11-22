@@ -1145,7 +1145,7 @@ pub(crate) struct LocalWrite {
 #[cfg(test)]
 pub(crate) fn uncounted<R>(f: impl FnOnce() -> R) -> R {
     type Counter = std::thread::LocalKey<std::cell::Cell<usize>>;
-    let counters: [&'static Counter; 14] = [
+    let counters: [&'static Counter; 15] = [
         &FROM_SHAPES,
         &FULL_CHECKS,
         &DENSE_BUILDS,
@@ -1159,6 +1159,7 @@ pub(crate) fn uncounted<R>(f: impl FnOnce() -> R) -> R {
         &CUTS,
         &OUTSIDE_WINDS,
         &RANGE_ENTRIES,
+        &OWNER_SEARCHES,
         &crate::stored_map::EDGES_SORTED,
     ];
     let saved: Vec<usize> = counters.iter().map(|c| c.with(|n| n.get())).collect();
@@ -2415,6 +2416,14 @@ thread_local! {
     pub(super) static OUTSIDE_WINDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// テスト用：このスレッドで、範囲（窓の範囲 `CellSet`・輪の上と中の升 `polygon_squares`）に入れた項目の数
     pub(super) static RANGE_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// テスト用：このスレッドで、点を含むいちばん小さい外周を、点から右へ伸ばした半直線で探した回数（`LocalMap::owner`）
+    pub(super) static OWNER_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// テスト用：このスレッドで、点を含むいちばん小さい外周を半直線で探した回数
+#[cfg(test)]
+pub(crate) fn owner_searches() -> usize {
+    OWNER_SEARCHES.with(|n| n.get())
 }
 
 /// テスト用：このスレッドで、範囲に入れた項目の数
