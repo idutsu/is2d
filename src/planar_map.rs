@@ -1106,18 +1106,20 @@ fn line_runs(edges: &[(usize, crate::stored_map::TileEdge)]) -> Vec<LineRun> {
     runs
 }
 
-/// 線のひと区切り `run`（辺は `edges` の番号）の番号：ひと区切りの辺の形（決まった向きの両端と制御点のビット）のうち
-/// いちばん小さいもの、線、ひと区切りの辺の側の番号（面の番号と線のラベル：`line_label`）のうちいちばん小さいものから決める
-/// （形・線・番号が同じ間は同じ番号。番号を入れるので、同じ形の線がほかのレイヤーに写してあっても、ぶつからない。線の番号の
-/// 印 `LINE_ID_BIT` を立てる）
+/// 線のひと区切り `run`（辺は `edges` の番号）の番号：ひと区切りの辺みなの形（決まった向きの両端と制御点のビット。小さい順）、
+/// 線、ひと区切りの辺の側の番号（面の番号と線のラベル：`line_label`）のうちいちばん小さいものから決める（形・線・番号が
+/// みな同じ間だけ同じ番号なので、形が少しでも変わったひと区切りは別の番号になり、図形を作り直す：`LayerBase::lines`。
+/// 番号を入れるので、同じ形の線がほかのレイヤーに写してあっても、ぶつからない。線の番号の印 `LINE_ID_BIT` を立てる）
 fn line_id(run: &LineRun, edges: &[(usize, crate::stored_map::TileEdge)]) -> ShapeId {
     use std::hash::{Hash, Hasher};
     let bits = |q: &QuadBez| {
         let (a, b) = if point_order(q.p0, q.p2).is_le() { (q.p0, q.p2) } else { (q.p2, q.p0) };
         [a.x, a.y, b.x, b.y, q.p1.x, q.p1.y].map(f64::to_bits)
     };
+    let mut keys: Vec<[u64; 6]> = run.quads.iter().map(bits).collect();
+    keys.sort_unstable();
     let mut h = IntHasher::default();
-    run.quads.iter().map(bits).min().hash(&mut h);
+    keys.hash(&mut h);
     run.stroke.hash(&mut h);
     run.edges
         .iter()

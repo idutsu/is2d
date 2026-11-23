@@ -38721,5 +38721,9 @@ mod strokes {
             }
         }
         assert!(stroked_length(m) > 400.0);
+        // 画面の線の図形も、塗った所の線が無い（前の線の図形を使い回さない）
+        let covered = Point::new(300.0, 200.0);
+        assert!(!app.scene().iter().any(|s| s.line.is_some() && s.contains_point(covered)));
+        assert!(app.scene().iter().any(|s| s.line.is_some() && s.contains_point(Point::new(200.0, 100.0))));
     }
 }
