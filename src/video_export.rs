@@ -38,7 +38,11 @@ pub(crate) fn create_video_encoder<'a>(
     {
         crate::video_export_macos::create_macos_encoder(path, width, height, fps, audio)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        crate::video_export_windows::create_windows_encoder(path, width, height, fps, audio)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (path, width, height, fps, audio);
         Err("この OS ではまだ動画の書き出しに対応していません".to_owned())
@@ -52,6 +56,37 @@ fn export_frames(doc: &Document) -> usize {
 
 /// 書き出す音の速さ（1 秒あたりのサンプルの数）。音の中の位置の単位 `SOUND_RATE`（48kHz）と同じにする
 pub(crate) const EXPORT_AUDIO_RATE: u32 = SOUND_RATE as u32;
+/// 書き出す音のチャンネルの数（ステレオ。`AudioSource` が返す音は、左・右・左・右…と交互に並ぶ）
+pub(crate) const EXPORT_AUDIO_CHANNELS: u32 = 2;
+/// 書き出す音（AAC）のビットレート（1 秒あたりのビットの数。ステレオで 192kbps）
+pub(crate) const EXPORT_AUDIO_BIT_RATE: u32 = 192_000;
+
+/// 書き出す動画（H.264）の、1画素・1コマあたりのビットの数（平均ビットレートの式：`video_bit_rate`）
+const VIDEO_BITS_PER_PIXEL: f64 = 0.15;
+/// 書き出す動画のキーフレームの、いちばん長い間隔（秒）
+const KEY_FRAME_INTERVAL_SECONDS: u32 = 2;
+
+/// 書き出す動画の平均ビットレート（1 秒あたりのビットの数）：幅×高さ×fps×`VIDEO_BITS_PER_PIXEL`。どの OS の入口も
+/// これを使う（決め方は1つ）
+pub(crate) fn video_bit_rate(width: u32, height: u32, fps: u32) -> u64 {
+    (f64::from(width) * f64::from(height) * f64::from(fps) * VIDEO_BITS_PER_PIXEL).round() as u64
+}
+
+/// 書き出す動画のキーフレームの、いちばん長い間隔（コマの数）：fps×`KEY_FRAME_INTERVAL_SECONDS`。どの OS の入口も
+/// これを使う
+pub(crate) fn key_frame_interval(fps: u32) -> u32 {
+    fps.saturating_mul(KEY_FRAME_INTERVAL_SECONDS)
+}
+
+/// 1行分の RGBA の画素 `rgba` を、BGRA に並べ替えて `bgra` に書く（どの OS の入口も、絵をこの並びで渡す）
+pub(crate) fn rgba_to_bgra(rgba: &[u8], bgra: &mut [u8]) {
+    for (dst, src) in bgra.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
+        dst[0] = src[2];
+        dst[1] = src[1];
+        dst[2] = src[0];
+        dst[3] = src[3];
+    }
+}
 
 /// 書き出す音：書き出すコマ（`export_frames`）の `frame_audio` を、コマ 0 から順に1つずつ返す `AudioSource`。全部
 /// つなぐと、絵と同じ長さ（`frame_start(コマ数)` 個）の音になる

@@ -27,6 +27,8 @@ mod vector_stroke;
 mod video_export;
 #[cfg(target_os = "macos")]
 mod video_export_macos;
+#[cfg(target_os = "windows")]
+mod video_export_windows;
 
 use std::time::Instant;
 

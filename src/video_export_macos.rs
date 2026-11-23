@@ -34,7 +34,10 @@ use objc2_core_video::{
 };
 use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
 
-use crate::video_export::{AudioSource, VideoEncoder, EXPORT_AUDIO_RATE};
+use crate::video_export::{
+    key_frame_interval, rgba_to_bgra, video_bit_rate, AudioSource, VideoEncoder,
+    EXPORT_AUDIO_BIT_RATE, EXPORT_AUDIO_CHANNELS, EXPORT_AUDIO_RATE,
+};
 
 // 音の入力の設定のキー（AVFAudio の AVAudioSettings.h）。objc2-av-foundation 0.3.2 の `AVAudioSettings` は中身が空なので、
 // AVFAudio にある定数をここで宣言して使う
@@ -45,9 +48,6 @@ extern "C" {
     static AVNumberOfChannelsKey: &'static NSString;
     static AVEncoderBitRateKey: &'static NSString;
 }
-
-/// 書き出す音（AAC）のビットレート（ステレオで 192kbps）
-const AUDIO_BIT_RATE: u32 = 192_000;
 
 pub(crate) struct MacosVideoEncoder<'a> {
     writer: Retained<AVAssetWriter>,
@@ -116,11 +116,10 @@ pub(crate) fn create_macos_encoder<'a>(
     }
 
     let url = NSURL::fileURLWithPath(&NSString::from_str(path_str));
-    let bitrate = ((width as f64) * (height as f64) * (fps as f64) * 0.15).round() as u64;
     let num_width = NSNumber::new_u32(width);
     let num_height = NSNumber::new_u32(height);
-    let num_bitrate = NSNumber::new_u64(bitrate);
-    let num_keyframe = NSNumber::new_u32(fps.saturating_mul(2));
+    let num_bitrate = NSNumber::new_u64(video_bit_rate(width, height, fps));
+    let num_keyframe = NSNumber::new_u32(key_frame_interval(fps));
     let num_bgra = NSNumber::new_u32(kCVPixelFormatType_32BGRA);
 
     // SAFETY: AVFoundation / CoreVideo の定数キーと有効な引数を用いて Objective-C API を呼び出し、
@@ -242,17 +241,19 @@ fn add_audio_track<'a>(
 ) -> Result<AudioTrack<'a>, String> {
     let num_format = NSNumber::new_u32(kAudioFormatMPEG4AAC);
     let num_rate = NSNumber::new_u32(EXPORT_AUDIO_RATE);
-    let num_channels = NSNumber::new_u32(2);
-    let num_bitrate = NSNumber::new_u32(AUDIO_BIT_RATE);
+    let num_channels = NSNumber::new_u32(EXPORT_AUDIO_CHANNELS);
+    let num_bitrate = NSNumber::new_u32(EXPORT_AUDIO_BIT_RATE);
+    // 左右の組1つ（1サンプルの時刻の分）のバイトの数
+    let bytes_per_frame = EXPORT_AUDIO_CHANNELS * size_of::<f32>() as u32;
     let asbd = AudioStreamBasicDescription {
         mSampleRate: f64::from(EXPORT_AUDIO_RATE),
         mFormatID: kAudioFormatLinearPCM,
         mFormatFlags: kAudioFormatFlagsNativeFloatPacked,
-        mBytesPerPacket: 8,
+        mBytesPerPacket: bytes_per_frame,
         mFramesPerPacket: 1,
-        mBytesPerFrame: 8,
-        mChannelsPerFrame: 2,
-        mBitsPerChannel: 32,
+        mBytesPerFrame: bytes_per_frame,
+        mChannelsPerFrame: EXPORT_AUDIO_CHANNELS,
+        mBitsPerChannel: size_of::<f32>() as u32 * u8::BITS,
         mReserved: 0,
     };
     // SAFETY: AVFAudio の定数キーと有効な引数で Objective-C / CoreMedia の API を呼び、作ったものの所有権は
@@ -346,7 +347,7 @@ impl AudioTrack<'_> {
     /// 1コマ分の音 `samples`（左・右・左・右…）を、続きの時刻（`written`）に置く音の塊にする
     fn sample_buffer(&mut self, samples: &[f32]) -> Result<Retained<CMSampleBuffer>, String> {
         let bytes = std::mem::size_of_val(samples);
-        let frames = (samples.len() / 2) as i64;
+        let frames = (samples.len() / EXPORT_AUDIO_CHANNELS as usize) as i64;
         // SAFETY: 長さ `bytes` の領域をすぐに確保した塊を作り（音が空なら、長さ 0 は断られて Err になる）、`samples` の
         // `bytes` バイトをそこへ写してから、音の塊に包む。作ったものの所有権は `Retained` で持つ
         unsafe {
@@ -461,13 +462,7 @@ impl VideoEncoder for MacosVideoEncoder<'_> {
                     let src_row = &rgba[y * row_bytes..(y + 1) * row_bytes];
                     let dst_row =
                         std::slice::from_raw_parts_mut(base_ptr.add(y * bytes_per_row), row_bytes);
-                    for (dst_px, src_px) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4))
-                    {
-                        dst_px[0] = src_px[2];
-                        dst_px[1] = src_px[1];
-                        dst_px[2] = src_px[0];
-                        dst_px[3] = src_px[3];
-                    }
+                    rgba_to_bgra(src_row, dst_row);
                 }
                 let _ = CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags(0));
 

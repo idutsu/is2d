@@ -1700,6 +1700,7 @@ dependencies = [
  "serde_json",
  "symphonia",
  "tiny-skia",
+ "windows 0.58.0",
  "winit",
 ]
 

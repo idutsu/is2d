@@ -17483,9 +17483,9 @@ fn test_video_export_common_render_and_dimensions() {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[test]
-fn test_video_export_macos_mp4_cancel_and_error() {
+fn test_video_export_mp4_cancel_and_error() {
     use crate::canvas_tool::View;
     use crate::vector_engine::Contour;
     use crate::video_export::{tmp_export_path, VideoExportJob, VideoExportOutcome};
@@ -37489,7 +37489,7 @@ fn mp4_time(b: &[u8], r: &std::ops::Range<usize>, tkhd: bool) -> (u64, u64) {
 
 /// 音のある作品の書き出しの MP4 には、絵の入力と、音の入力（AAC・48kHz・ステレオ）が1つずつあり、作品と音と絵の長さは
 /// コマ数 ÷ fps（止まらずに書き終える）。音のライブラリが空の作品は、今までどおり音の入力の無い MP4 になる
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[test]
 fn video_export_includes_the_mixed_audio_track() {
     use crate::video_export::{VideoExportJob, VideoExportOutcome};

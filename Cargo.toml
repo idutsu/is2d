@@ -34,6 +34,12 @@ objc2-core-audio-types = { version = "=0.3.2", default-features = false, feature
 objc2-core-video = { version = "=0.3.2", default-features = false, features = ["std", "objc2", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
 block2 = "=0.6.2"
 
+[target.'cfg(windows)'.dependencies]
+# 動画の書き出し（Media Foundation の書き込む係 IMFSinkWriter で、H.264・AAC の MP4 を書く：src/video_export_windows.rs）と、
+# そのための COM の始まり・終わり、Media Foundation の DLL があるかの確かめ。版は eframe（accesskit_windows）が Windows で
+# もう使っている 0.58.0 にそろえ、同じ道具の2つ目の版を増やさない
+windows = { version = "=0.58.0", default-features = false, features = ["std", "Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_LibraryLoader"] }
+
 [dev-dependencies]
 fastrand = "2"
 # テストで、保存用の型を文字から作ったり、中を見たりする
