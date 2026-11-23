@@ -1,5 +1,8 @@
 /target
-/src/README.md
-/files/
 /claude/
-
+# ビルドに要らない説明書・レビューの手順書（手元だけに置く）
+/DOCUMENT.md
+/ARCHITECTURE.md
+/GEOMETRY.md
+/review-prompt.md
+/dedup-prompt.md
