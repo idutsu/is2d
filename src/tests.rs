@@ -38453,6 +38453,127 @@ mod strokes {
         assert!(m.edges.iter().all(|e| e.stroke == Some(INK)));
     }
 
+    /// 線の図形と面の図形の数（画面の図形）
+    fn counts(app: &Is2dApp) -> (usize, usize) {
+        let shapes: Vec<_> = app.scene().iter().cloned().collect();
+        let lines = shapes.iter().filter(|s| s.line.is_some()).count();
+        (shapes.len() - lines, lines)
+    }
+
+    /// 赤い正方形（100〜300）の輪郭に線 `INK` を乗せたアプリ
+    fn inked_square_app() -> Is2dApp {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(&mut app, 0, 0, vec![rect(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+        assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: INK }));
+        assert_eq!(counts(&app), (1, 1));
+        app
+    }
+
+    #[test]
+    fn clicking_selects_a_fill_or_a_line_separately() {
+        // 塗りをクリックして消す：線は残る（Animate と同じ）
+        let mut app = inked_square_app();
+        assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, 200.0) }));
+        assert_eq!(app.session.selection.shapes.len(), 1);
+        assert!(apply(&mut app, Action::DeleteSelection));
+        assert_eq!(counts(&app), (0, 1));
+        let m = cel_map(&app);
+        assert!(m.edges.iter().all(|e| e.left.is_none() && e.right.is_none() && e.stroke == Some(INK)));
+        // 線をクリックして消す：塗りは残り、線は無くなる
+        let mut app = inked_square_app();
+        assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, 100.5) }));
+        let picked: Vec<_> = app.session.selection.shapes.iter().copied().collect();
+        assert!(picked.len() == 1 && crate::planar_map::is_line_id(picked[0]));
+        assert!(apply(&mut app, Action::DeleteSelection));
+        assert_eq!(counts(&app), (1, 0));
+        assert!(cel_map(&app).edges.iter().all(|e| e.stroke.is_none()));
+        // ダブルクリックで塗りと輪郭の線を選んで消す：何も残らない
+        let mut app = inked_square_app();
+        assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(200.0, 200.0) }));
+        assert_eq!(app.session.selection.shapes.len(), 2);
+        assert!(apply(&mut app, Action::DeleteSelection));
+        assert_eq!(counts(&app), (0, 0));
+        // 塗りだけを選んで動かす：線は元の場所に残り、塗りだけが動く
+        let mut app = inked_square_app();
+        assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, 200.0) }));
+        run(
+            &mut app,
+            &[
+                Action::FinishMoveSelectionDrag {
+                    total_delta: KVec2::new(400.0, 0.0),
+                    alt_duplicate: false,
+                },
+                Action::Deselect,
+            ],
+        );
+        let m = cel_map(&app);
+        let (faces, _) = m.faces();
+        assert_eq!(faces.len(), 1);
+        let line = app.scene().iter().find(|s| s.line.is_some()).unwrap().bounding_box();
+        assert!((line.x0 - 98.0).abs() < 0.05);
+        let fill = app.scene().iter().find(|s| s.line.is_none()).unwrap().bounding_box();
+        assert!((fill.x0 - 500.0).abs() < 1e-6);
+        // 線だけを選んで動かす：塗りは残り、線だけが動く
+        let mut app = inked_square_app();
+        assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, 100.5) }));
+        run(
+            &mut app,
+            &[
+                Action::FinishMoveSelectionDrag {
+                    total_delta: KVec2::new(0.0, 400.0),
+                    alt_duplicate: false,
+                },
+                Action::Deselect,
+            ],
+        );
+        assert_eq!(counts(&app), (1, 1));
+        let line = app.scene().iter().find(|s| s.line.is_some()).unwrap().bounding_box();
+        assert!((line.y0 - 498.0).abs() < 0.05);
+        let fill = app.scene().iter().find(|s| s.line.is_none()).unwrap().bounding_box();
+        assert!((fill.y0 - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn double_clicking_a_line_selects_the_connected_same_lines() {
+        let mut app = Is2dApp::default();
+        let c = Point::new(300.0, 300.0);
+        let thin = EdgeStroke {
+            color: Color32::BLUE,
+            width: 2,
+        };
+        // 3本が1点で交わる（ひと区切りは3つ）。離れた所の別の線と、つながっているが線の違う線
+        let segs = vec![
+            line(Point::new(200.0, 300.0), c, INK),
+            line(c, Point::new(400.0, 300.0), INK),
+            line(c, Point::new(300.0, 200.0), INK),
+        ];
+        assert!(apply(&mut app, Action::DrawLines { segs }));
+        assert!(apply(&mut app, Action::DrawLines { segs: vec![line(c, Point::new(300.0, 400.0), thin)] }));
+        assert!(apply(&mut app, Action::DrawLines { segs: vec![line(Point::new(600.0, 300.0), Point::new(700.0, 300.0), INK)] }));
+        assert_eq!(counts(&app).1, 5);
+        assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(250.0, 300.5) }));
+        assert_eq!(app.session.selection.shapes.len(), 3);
+        // クリックは、ひと区切りだけ
+        assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(250.0, 300.5) }));
+        assert_eq!(app.session.selection.shapes.len(), 1);
+    }
+
+    #[test]
+    fn a_line_copied_to_another_layer_is_a_different_line() {
+        let mut app = Is2dApp::default();
+        let seg = line(Point::new(100.0, 100.0), Point::new(300.0, 150.0), INK);
+        assert!(apply(&mut app, Action::DrawLines { segs: vec![seg] }));
+        // 同じ所に貼り付けて、別のレイヤーへ
+        run(&mut app, &[Action::SelectAll, Action::Copy, Action::AddLayer, Action::Paste { in_place: true }, Action::Deselect]);
+        let lines: Vec<_> = app.scene().iter().filter(|s| s.line.is_some()).map(|s| (s.layer_id, s.shape_id)).collect();
+        assert_eq!(lines.len(), 2);
+        assert_ne!(lines[0].0, lines[1].0);
+        assert_ne!(lines[0].1, lines[1].1);
+        // 上のレイヤーの線をクリックしても、下のレイヤーの線は選ばれない
+        assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, 125.5) }));
+        assert_eq!(app.session.selection.shapes.len(), 1);
+    }
+
     /// 乱数の絵に、インクボトル・バケツ・ブラシ・消しゴムをくり返しかける（書くたびに、触った所だけの計算と地図全体で
     /// 計算した答えを比べる確かめが、テストでは毎回動く：`test_checks`）
     #[test]
@@ -38530,7 +38651,20 @@ mod strokes {
                 let tl = app.tab().active_timeline();
                 if let Some(cel) = tl.layers[0].cel_at(0) {
                     for m in cel.maps.iter() {
-                        assert!(m.base().map().is_valid(), "round {round} step {step}");
+                        let map = m.base().map().clone();
+                        assert!(map.is_valid(), "round {round} step {step}");
+                        // 線のラベル（色の無い側の番号）は、線を乗せた辺にだけあり、面の番号とぶつからない
+                        let faces: std::collections::HashSet<_> = map.labels().collect();
+                        for e in &map.edges {
+                            for (c, src) in [(e.left, e.left_src), (e.right, e.right_src)] {
+                                if c.is_none() {
+                                    if let Some(l) = src {
+                                        assert!(e.stroke.is_some(), "round {round} step {step}");
+                                        assert!(!faces.contains(&l), "round {round} step {step}");
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -391,22 +391,28 @@ impl StoredMap {
         })
     }
 
-    /// 線を乗せた辺（塊の順。線の図形を作る：`LayerBase::lines`）
-    pub(crate) fn stroked_edges(&self) -> Vec<TileEdge> {
+    /// 線を乗せた辺と、その計算に使う地図（`to_dense`）での番号（番号の順。線の図形を作る：`LayerBase::lines`）
+    pub(crate) fn stroked_edges(&self) -> Vec<(usize, TileEdge)> {
         self.0
             .tiles
             .iter()
             .flat_map(|t| t.iter())
-            .filter(|se| se.stroke.is_some())
-            .map(|se| TileEdge {
-                a: se.a,
-                b: se.b,
-                ctrl: se.ctrl,
-                left: se.left,
-                right: se.right,
-                left_src: se.left_src.map(NonZeroU64::get),
-                right_src: se.right_src.map(NonZeroU64::get),
-                stroke: se.stroke,
+            .enumerate()
+            .filter(|(_, se)| se.stroke.is_some())
+            .map(|(i, se)| {
+                (
+                    i,
+                    TileEdge {
+                        a: se.a,
+                        b: se.b,
+                        ctrl: se.ctrl,
+                        left: se.left,
+                        right: se.right,
+                        left_src: se.left_src.map(NonZeroU64::get),
+                        right_src: se.right_src.map(NonZeroU64::get),
+                        stroke: se.stroke,
+                    },
+                )
             })
             .collect()
     }

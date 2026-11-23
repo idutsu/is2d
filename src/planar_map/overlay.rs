@@ -61,6 +61,8 @@ impl MapRule {
         let color = self.apply(over, old.0);
         let src = match (self, over) {
             (MapRule::Overlay, Over::Color(Some(_))) => over_src,
+            // 引いた線の区間の色の無い側は、引いた線のラベル
+            (MapRule::Line, _) if old.0.is_none() => over_src.or(old.1),
             _ if color == old.0 => old.1,
             _ => None,
         };
@@ -109,6 +111,15 @@ impl MapRule {
     }
 }
 
+/// 区間（か中の辺）の側の新しい印 `new`（前の印 `old`、新しい線 `stroke`）：線を残す辺で、色が無くなった側に番号が無ければ、
+/// 前の側の番号を線のラベルとして残す（面を消しても、輪郭の線は同じ線のまま：`line_label`）
+fn kept_label(new: Label, old: Label, stroke: Option<EdgeStroke>) -> Label {
+    match new {
+        (None, None) => (None, line_label(None, label_of_face(old.0, old.1), stroke)),
+        _ => new,
+    }
+}
+
 /// 輪郭の変形での新しい色（設計：claude/輪郭の変形を重ね合わせで確定する設計_08c15dd段階3_cf66a87.md の 2-1）。
 /// `w` は、動かしたことによる色ごとの巻き数の変わり方（動かした辺の並びで、左・右の順）。前の色を足した巻き数が正の色の
 /// うち、広がってきた色（前の色でない色）があれば、並びで先のもの。無ければ、前の色の巻き数が正なら前の色、でなければ何も無い
@@ -136,8 +147,9 @@ pub(crate) enum MapInput<'a> {
     Map(&'a PlanarMap),
     Sweep(&'a [MovedEdge]),
     Stack(&'a [&'a FillShape]),
-    /// 引く線（鉛筆。`MapRule::Line` で重ねる）：中も外も無い、線の区間の並び
-    Lines(&'a [LineSeg]),
+    /// 引く線（鉛筆。`MapRule::Line` で重ねる）：中も外も無い、線の区間の並びと、その線のラベル（`line_label`。何も無い
+    /// 所を通る区間の色の無い側に付ける）
+    Lines(&'a [LineSeg], ShapeId),
 }
 
 impl MapInput<'_> {
@@ -215,7 +227,7 @@ impl MapInput<'_> {
                 }
             }
             // 線は囲む所が無いので、中を数える印は持たない
-            MapInput::Lines(segs) => {
+            MapInput::Lines(segs, _) => {
                 for &(q, stroke) in segs {
                     l.quads.push(q);
                     l.strokes.push(Some(stroke));
@@ -567,7 +579,7 @@ impl PlanarMap {
                 let ed = self.edges[e];
                 (self.quad(e), (ed.left, ed.right), ed.stroke)
             });
-        if let MapInput::Shapes(_) | MapInput::Lines(_) = input {
+        if let MapInput::Shapes(_) | MapInput::Lines(..) = input {
             // 形・引く線の端を、前からある頂点から `FLAT_TOL` 以内なら、その頂点（いちばん近いもの）に寄せる。地図の精度
             // では同じ点なので、寄せないと2つの頂点が格子の別々の点に残り、同じ線として扱う所（`Span`）の端で2本の
             // 折れ線が分かれて、見えない欠片の面ができる（`stitched` は線の端にいつも自分の端の点を置く。レビュー
@@ -1863,7 +1875,7 @@ impl PlanarMap {
             }
             MapInput::Map(_) => Over::Color(new_at(p2)),
             MapInput::Sweep(_) => Over::Swept(swept_winding(p2)),
-            MapInput::Lines(_) => Over::Inside(false),
+            MapInput::Lines(..) => Over::Inside(false),
             MapInput::Stack(_) => {
                 Over::Color(stack.as_ref().and_then(|st| st.label(&st.odd_at(p2)).0))
             }
@@ -1923,7 +1935,10 @@ impl PlanarMap {
                             (Over::Color(l.0), l.1)
                         }
                         MapInput::Sweep(_) => (Over::Swept(swept_side(k, fwd)), None),
-                        MapInput::Lines(_) => (Over::Inside(false), None),
+                        // 引いた線の区間なら、色の無い側に付ける線のラベル
+                        MapInput::Lines(_, label) => {
+                            (Over::Inside(false), piece_lines[k].0.is_some().then_some(label))
+                        }
                         MapInput::Stack(_) => {
                             let l = pick(stack_sides[k]);
                             (Over::Color(l.0), l.1)
@@ -1934,6 +1949,11 @@ impl PlanarMap {
                 let ((left, over_l), (right, over_r)) = (side(true), side(false));
                 let (input_line, old_line) = piece_lines[k];
                 let stroke = rule.stroke(&over_l, &over_r, input_line, old_line);
+                // 線を残す区間で、色が無くなった側は、前の側の番号を線のラベルとして残す（`line_label`）
+                let (left, right) = (
+                    kept_label(left, old_sides[k].0, stroke),
+                    kept_label(right, old_sides[k].1, stroke),
+                );
                 piece_cols.push((left.0, right.0));
                 let needed = edge_needed(left.0, right.0, stroke);
                 piece_gone.push(!needed);
@@ -1969,6 +1989,10 @@ impl PlanarMap {
                     let r = rule.apply_label(&over_r, fr.1, (ed.right, ed.right_src));
                     // 線は、上に置く重ねる地図の辺のもの（区間の線と同じ決まり）
                     let stroke = rule.stroke(&over_l, &over_r, Some(fd.stroke), ed.stroke);
+                    let (l, r) = (
+                        kept_label(l, (ed.left, ed.left_src), stroke),
+                        kept_label(r, (ed.right, ed.right_src), stroke),
+                    );
                     inner_cols.insert(e, (l.0, r.0));
                     if edge_needed(l.0, r.0, stroke) {
                         interior_kept.push(MapEdge {
@@ -2014,8 +2038,18 @@ impl PlanarMap {
                         b: node_at(ed.b),
                         left: l,
                         right: r,
-                        left_src: if l == ed.left { ed.left_src } else { None },
-                        right_src: if r == ed.right { ed.right_src } else { None },
+                        left_src: kept_label(
+                            (l, if l == ed.left { ed.left_src } else { None }),
+                            (ed.left, ed.left_src),
+                            stroke,
+                        )
+                        .1,
+                        right_src: kept_label(
+                            (r, if r == ed.right { ed.right_src } else { None }),
+                            (ed.right, ed.right_src),
+                            stroke,
+                        )
+                        .1,
                         stroke,
                         ..ed
                     });

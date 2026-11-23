@@ -139,6 +139,10 @@ pub(crate) enum Action {
     EnterGroupAt {
         pt: Point,
     },
+    /// ダブルクリック：点の生の図形と、つながったものを選ぶ（線なら、つながった同じ線。塗りなら、輪郭の線も）
+    SelectConnectedAt {
+        pt: Point,
+    },
     ExitGroupSteps {
         steps: usize,
     },
@@ -623,6 +627,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         Action::Ungroup => prepare_ungroup_selected_shapes(tab, |tab| push_undo(tab, None)),
         Action::Arrange { mode } => prepare_arrange_selected(tab, mode, |tab| push_undo(tab, None)),
         Action::EnterGroupAt { pt } => enter_group_at(tab, pt),
+        Action::SelectConnectedAt { pt } => crate::select_ops::select_connected_at(tab, pt),
         Action::ExitGroupSteps { steps } => {
             let mut exited = false;
             for _ in 0..steps {
@@ -1128,8 +1133,10 @@ fn apply_draw_lines(tab: &mut Tab, segs: Vec<crate::planar_map::LineSeg>) -> boo
         .into_iter()
         .map(|(q, stroke)| (to_doc * q, stroke))
         .collect();
+    // 引いた線は、新しい線のラベルを持つ（`line_label`）
+    let label = crate::vector_engine::next_shape_id();
     write_local(tab, target_lid, |base, scope| {
-        base.edit_local(&base.line_change(&segs), scope)
+        base.edit_local(&base.line_change(&segs, label), scope)
     })
 }
 

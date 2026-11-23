@@ -88,15 +88,53 @@ pub(crate) fn exit_current_group(tab: &mut Tab) -> bool {
 
 /// キャンバス上のダブルクリックによるグループ/シンボルへのインプレイス進入、または空白背景ダブルクリックによる親階層への復帰を処理する
 pub(crate) fn handle_canvas_double_click(host: &mut impl ActionHost, pt: Point) {
-    if !apply(host, Action::EnterGroupAt { pt })
-        && host
-            .tab()
-            .scene()
-            .topmost_shape_at(pt, &host.tab().session.editing_group_path)
-            .is_none()
-    {
+    if apply(host, Action::EnterGroupAt { pt }) {
+        return;
+    }
+    let hit = host
+        .tab()
+        .scene()
+        .topmost_shape_at(pt, &host.tab().session.editing_group_path);
+    if hit.is_some() {
+        apply(host, Action::SelectConnectedAt { pt });
+    } else {
         apply(host, Action::ExitGroupSteps { steps: 1 });
     }
+}
+
+/// ダブルクリックで選ぶ：点 `pt` のいちばん上の、編集できるレイヤーの今の階層の生の図形（面か線）と、それにつながったもの
+/// （`LayerBase::connected_ids`）を選ぶ。そういう図形が無ければ何もしない
+pub(crate) fn select_connected_at(tab: &mut Tab, pt: Point) -> bool {
+    let scope = tab.session.editing_group_path.clone();
+    let scene = tab.scene();
+    let Some(hit) = scene
+        .topmost_shape_at(pt, &scope)
+        .and_then(|i| scene.get(i))
+        .filter(|s| s.is_raw_at_scope(&scope) && s.symbol_instance.is_none())
+        .filter(|s| tab.active_timeline().is_layer_editable_by_id(s.layer_id))
+        .map(|s| (s.layer_id, s.shape_id))
+    else {
+        return false;
+    };
+    let (layer_id, id) = hit;
+    let Some(base) = tab.session.base_cache.cel(layer_id).map(|c| c.scope_base(&scope)) else {
+        return false;
+    };
+    let ids = base.connected_ids(id, &scope);
+    if !clear_selection(tab) {
+        return false;
+    }
+    let scene = tab.scene();
+    let picked: Vec<usize> = (0..scene.len())
+        .filter(|&i| {
+            scene.get(i).is_some_and(|s| {
+                s.layer_id == layer_id && s.is_raw_at_scope(&scope) && ids.contains(&s.shape_id)
+            })
+        })
+        .collect();
+    tab.session.set_selected_indices(picked);
+    sync_timeline_layer_from_canvas_selection(tab);
+    true
 }
 
 /// クリックした点 `pt` の図形に応じて選択を切り替える（選択ツール・自由変形ツール共通）

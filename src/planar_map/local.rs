@@ -195,8 +195,8 @@ impl<'a> LocalMap<'a> {
             .flat_map(|v| self.base_edges_at(v));
         for e in self.removed.iter().copied().chain(base_edges) {
             let ed = self.base_edge(e);
-            out.extend(ed.left_src);
-            out.extend(ed.right_src);
+            out.extend(ed.left.and(ed.left_src));
+            out.extend(ed.right.and(ed.right_src));
         }
         out.sort_unstable();
         out.dedup();
@@ -1125,9 +1125,17 @@ impl LocalMap<'_> {
         ids: &[ShapeId],
         memo: &CycleMemo,
     ) -> (Vec<usize>, Vec<crate::stored_map::TileEdge>) {
+        // 増えた辺は、色の無い側の線のラベル（`line_label`）だけを持って始める（色のある側は面の番号を振り直す）
         let mut sides: IntMap<usize, (Option<ShapeId>, Option<ShapeId>)> = IntMap::default();
         for e in self.added_edges() {
-            sides.insert(e, (None, None));
+            let ed = self.edge(e);
+            sides.insert(
+                e,
+                (
+                    line_label(ed.left, ed.left_src, ed.stroke),
+                    line_label(ed.right, ed.right_src, ed.stroke),
+                ),
+            );
         }
         for (f, &id) in faces.iter().zip(ids) {
             for &ci in &f.cycles {
