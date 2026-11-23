@@ -430,6 +430,9 @@ pub(crate) struct View {
     pub(crate) symbol_previews: crate::symbol::SymbolPreviews,
     /// キャンバスでの前の主ボタンのクリック（画面の位置と時刻）。ダブルクリックを位置も比べて決めるため（`double_clicked`）
     pub(crate) last_click: Option<(Pos2, f64)>,
+    /// まだキャンバスの大きさに合わせていない（新しく作った・開いた作品は、初めて画面に出すときに、ステージ全体が
+    /// キャンバスに収まるようズーム・パンを合わせる：`fit_stage_to_window`）
+    pub(crate) fit_pending: bool,
 }
 
 impl Default for View {
@@ -448,6 +451,7 @@ impl Default for View {
             selected_library_symbol: None,
             symbol_previews: Default::default(),
             last_click: None,
+            fit_pending: true,
         }
     }
 }

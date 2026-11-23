@@ -1054,6 +1054,10 @@ impl Is2dApp {
                 let (canvas_rect, response) =
                     ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
                 self.canvas_rect = canvas_rect;
+                if self.tab().view.fit_pending {
+                    self.fit_stage_to_window();
+                    self.tab_mut().view.fit_pending = false;
+                }
                 let painter = ui.painter_at(canvas_rect);
 
                 let pointer_pos = response

@@ -27,7 +27,7 @@ pub(crate) enum SymbolLoopMode {
     Loop,
     /// 1回再生：キーフレーム開始位置からシンボル内部の最終フレームまで再生して停止する
     PlayOnce,
-    /// 任意のフレーム：指定された `first_frame` の1コマだけを固定表示する
+    /// 停止（コマ固定）：指定された `first_frame` の1コマだけを固定表示する
     SingleFrame,
 }
 

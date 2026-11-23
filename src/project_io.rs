@@ -1511,7 +1511,6 @@ pub(crate) fn new_project(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
     ws.tabs_mut()
         .insert(insert_idx, Tab::new_empty(doc_id, untitled_num));
     activate_tab_index(ws, insert_idx);
-    ws.tab_mut().view.reset_view();
 
     surrender_focused_widget(ctx);
     ws.notify_info(format!("新規タブ「無題-{untitled_num}」を作成しました"));

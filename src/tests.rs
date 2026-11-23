@@ -3459,7 +3459,7 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     doc_actions::apply(
         &mut sym_app,
         doc_actions::Action::SetStageSize {
-            size: Vec2::new(1920.0, 1080.0),
+            size: orig_stage * 0.5,
         },
     );
     let last_undo = sym_app.history.undo_stack.back().unwrap();
@@ -3470,7 +3470,7 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     sym_app.undo();
     assert_eq!(sym_app.doc.stage_size, orig_stage);
     sym_app.redo();
-    assert_eq!(sym_app.doc.stage_size, Vec2::new(1920.0, 1080.0));
+    assert_eq!(sym_app.doc.stage_size, orig_stage * 0.5);
 
     // 選択表示は塗りのメッシュに水玉のテクスチャを貼ったもの：頂点は塗りのメッシュと同じ数で、ズームを変えても増えない
     let fill_n = sym_app.scene().get(0).unwrap().fill_mesh().vertices.len();
@@ -6804,6 +6804,8 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
     let ctx = egui::Context::default();
     crate::configure_sharp_light_theme(&ctx);
     let mut app = Is2dApp::default();
+    // 画面の座標を文書の座標のまま使う（表示は 100%・ずらしなし。開いたときの窓への合わせはしない）
+    app.view.fit_pending = false;
     let screen_rect = Some(egui::Rect::from_min_size(
         Pos2::ZERO,
         Vec2::new(1280.0, 820.0),
@@ -13820,6 +13822,8 @@ fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
 
     let ctx = egui::Context::default();
     let mut app = Is2dApp::default();
+    // 画面の座標を文書の座標のまま使う（表示は 100%・ずらしなし。開いたときの窓への合わせはしない）
+    app.view.fit_pending = false;
     let screen_rect = Some(egui::Rect::from_min_size(
         Pos2::ZERO,
         Vec2::new(1280.0, 820.0),
@@ -17387,6 +17391,7 @@ fn test_video_export_common_render_and_dimensions() {
 
     // 1. ステージ 800×450、背景だけの作品で、render_frame の画像がすべて白
     let mut app = Is2dApp::default();
+    app.doc.stage_size = Vec2::new(800.0, 450.0);
     let (w, h) = export_dimensions(app.tab().doc.stage_size);
     assert_eq!((w, h), (800, 450));
     let bg_only = render_frame(&app.tab().doc, 0, w, h);
@@ -17422,6 +17427,7 @@ fn test_video_export_common_render_and_dimensions() {
 
     // 5. シンボルのクラシックトゥイーン（左端から右端へ移動）の途中のコマで、四角が途中の位置に塗られる
     let mut tween_app = Is2dApp::default();
+    tween_app.doc.stage_size = Vec2::new(800.0, 450.0);
     let stage_left = center.x - 400.0;
     let start_cx = stage_left + 100.0;
     let end_cx = stage_left + 700.0;

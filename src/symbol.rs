@@ -537,7 +537,7 @@ impl SymbolDef {
         out
     }
 
-    /// インスタンスの再生設定（ループ再生 / 1回再生 / 任意のフレーム）に基づいて、
+    /// インスタンスの再生設定（ループ再生 / 1回再生 / 停止）に基づいて、
     /// 指定フレーム `current_frame`（開始キーフレーム `kf_start_frame`）でのローカル図形列を返す。
     /// `ctx` は、呼び出し元が1段 `nested()` したもの
     pub(crate) fn evaluated_local_shapes_for_instance(
@@ -675,7 +675,7 @@ impl Default for Document {
             root: Timeline::default(),
             library: Library::default(),
             sounds: Default::default(),
-            stage_size: Vec2::new(800.0, 450.0),
+            stage_size: Vec2::new(1920.0, 1080.0),
             fps: 24,
             next_symbol_id: 1,
             next_group_id: 1,

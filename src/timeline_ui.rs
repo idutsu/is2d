@@ -1954,13 +1954,6 @@ fn draw_timeline_ruler(
             Stroke::new(1.0_f32, Color32::from_rgb(175, 25, 25)),
             egui::StrokeKind::Middle,
         );
-        ruler_painter.text(
-            head_box.center(),
-            Align2::CENTER_CENTER,
-            format!("{}", tl.current_frame + 1),
-            FontId::proportional(11.0),
-            Color32::WHITE,
-        );
         grid_painter.line_segment(
             [
                 Pos2::new(head_x, layout.grid_top),

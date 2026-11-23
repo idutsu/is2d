@@ -624,22 +624,23 @@ fn draw_properties_tab(
         Tool::Select => draw_select_tool_properties(tab, tool, actions, ui),
         Tool::Transform => draw_transform_tool_properties(tab, actions, ui),
         Tool::Brush => {
-            draw_radius_slider_section(ui, "ブラシサイズ", &mut tool.brush_radius, 0.5, 70.0, 0.5)
+            labeled_slider(ui, "ブラシサイズ", &mut tool.brush_radius, 1.0..=70.0, "");
         }
-        Tool::Eraser => draw_radius_slider_section(
-            ui,
-            "消しゴムサイズ",
-            &mut tool.eraser_radius,
-            1.0,
-            80.0,
-            1.0,
-        ),
+        Tool::Eraser => {
+            labeled_slider(
+                ui,
+                "消しゴムサイズ",
+                &mut tool.eraser_radius,
+                1.0..=80.0,
+                "",
+            );
+        }
         Tool::Bucket | Tool::Eyedropper => draw_color_palette_section(tool, ui),
     }
 
     // 下部ぶら下がりセクション：
     // - タイムラインのフレームを明示的に選択したときは「キーフレーム / トゥイーン設定（回転の向き等）」
-    // - キャンバス上のシンボルを選択したとき（選択 / 自由変形ツール時）は「シンボル再生オプション」
+    // - キャンバス上のシンボルを選択したとき（選択 / 自由変形ツール時）は再生オプション
     if tab.view.inspect_timeline_frame {
         draw_selected_frame_properties(tab, actions, ui);
         draw_keyframe_sound_properties(tab, actions, ui);
@@ -658,11 +659,11 @@ fn draw_select_tool_properties(
 ) {
     draw_panel_section_label(ui, "アンカー編集モード", 4.0);
 
-    half_width_row(ui, |ui, half_w| {
+    equal_width_row(ui, 3, |ui, cell_w| {
         if ui
             .add_sized(
-                Vec2::new(half_w, 28.0),
-                egui::Button::new(format!("{} アンカー追加", icons::ADD))
+                Vec2::new(cell_w, 28.0),
+                egui::Button::new(format!("{} 追加", icons::ADD))
                     .selected(tool.select_sub_mode == SelectSubMode::AddAnchor),
             )
             .on_hover_text("輪郭上をクリックしてアンカーポイントを追加 (+)")
@@ -674,8 +675,8 @@ fn draw_select_tool_properties(
         }
         if ui
             .add_sized(
-                Vec2::new(half_w, 28.0),
-                egui::Button::new(format!("{} アンカー削除", icons::REMOVE))
+                Vec2::new(cell_w, 28.0),
+                egui::Button::new(format!("{} 削除", icons::REMOVE))
                     .selected(tool.select_sub_mode == SelectSubMode::DeleteAnchor),
             )
             .on_hover_text("アンカーポイントをクリックして削除 (-)")
@@ -685,21 +686,18 @@ fn draw_select_tool_properties(
                 mode: SelectSubMode::DeleteAnchor,
             }));
         }
+        if ui
+            .add_sized(
+                Vec2::new(cell_w, 28.0),
+                egui::Button::new(format!("{} 表示", icons::WIREFRAME))
+                    .selected(tab.view.show_wireframe),
+            )
+            .on_hover_text("選択ツール使用中にベクター輪郭のアンカーポイントとパスを表示")
+            .clicked()
+        {
+            actions.push(UiAction::ToggleView(ViewSwitch::Anchors));
+        }
     });
-
-    ui.add_space(6.0);
-
-    if ui
-        .add_sized(
-            Vec2::new(ui.available_width(), 28.0),
-            egui::Button::new(format!("{} アンカーを表示", icons::WIREFRAME))
-                .selected(tab.view.show_wireframe),
-        )
-        .on_hover_text("選択ツール使用中にベクター輪郭のアンカーポイントとパスを表示")
-        .clicked()
-    {
-        actions.push(UiAction::ToggleView(ViewSwitch::Anchors));
-    }
 
     draw_panel_separator(ui);
 
@@ -710,12 +708,12 @@ fn draw_select_tool_properties(
     draw_panel_section_label(ui, "消去アクション", 4.0);
 
     let has_sel = !tab.session.selection.is_empty();
-    half_width_row(ui, |ui, half_w| {
+    equal_width_row(ui, 2, |ui, cell_w| {
         if ui
             .add_enabled(
                 has_sel,
                 egui::Button::new(format!("{} 選択削除", icons::DELETE))
-                    .min_size(Vec2::new(half_w, 28.0)),
+                    .min_size(Vec2::new(cell_w, 28.0)),
             )
             .on_hover_text("選択中の図形を削除 (Backspace / Delete)")
             .clicked()
@@ -729,7 +727,7 @@ fn draw_select_tool_properties(
         if ui
             .add_enabled(
                 has_any,
-                egui::Button::new("フレーム全消去").min_size(Vec2::new(half_w, 28.0)),
+                egui::Button::new("フレーム全消去").min_size(Vec2::new(cell_w, 28.0)),
             )
             .on_hover_text("現在の編集スコープ・フレーム内の図形をすべて消去")
             .clicked()
@@ -746,27 +744,22 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
     let has_group = tab
         .scene()
         .selection_has_group(&tab.session.selection, &tab.session.editing_group_path);
-    if ui
-        .add_enabled(
-            crate::select_ops::selected_single_layer_id(tab).is_some(),
-            egui::Button::new(format!("{} シンボルに変換 (F8)", icons::SYMBOL))
-                .min_size(Vec2::new(ui.available_width(), 28.0)),
-        )
-        .on_hover_text("選択中の図形をシンボルに変換してライブラリに登録します (F8)")
-        .on_disabled_hover_text("シンボルにできるのは、1つのレイヤーの中で選んだ図形だけです")
-        .clicked()
-    {
-        actions.push(UiAction::Doc(Action::ConvertToSymbol));
-    }
-
-    ui.add_space(4.0);
-
-    half_width_row(ui, |ui, half_w| {
+    equal_width_row(ui, 3, |ui, cell_w| {
         if ui
             .add_enabled(
                 crate::select_ops::selected_single_layer_id(tab).is_some(),
-                egui::Button::new(format!("{} グループ化", icons::GROUP))
-                    .min_size(Vec2::new(half_w, 28.0)),
+                egui::Button::new("シンボル化").min_size(Vec2::new(cell_w, 28.0)),
+            )
+            .on_hover_text("選択中の図形をシンボルに変換してライブラリに登録します (F8)")
+            .on_disabled_hover_text("シンボルにできるのは、1つのレイヤーの中で選んだ図形だけです")
+            .clicked()
+        {
+            actions.push(UiAction::Doc(Action::ConvertToSymbol));
+        }
+        if ui
+            .add_enabled(
+                crate::select_ops::selected_single_layer_id(tab).is_some(),
+                egui::Button::new("グループ化").min_size(Vec2::new(cell_w, 28.0)),
             )
             .on_hover_text(format!(
                 "選択中のオブジェクトを1つのグループにまとめる ({MOD_KEY}+G)"
@@ -779,7 +772,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
         if ui
             .add_enabled(
                 has_group,
-                egui::Button::new(format!("解除 ({MOD_KEY}+B)")).min_size(Vec2::new(half_w, 28.0)),
+                egui::Button::new("解除").min_size(Vec2::new(cell_w, 28.0)),
             )
             .on_hover_text(format!(
                 "選択中のグループまたはシンボルインスタンスを1段階解除する ({MOD_KEY}+B)"
@@ -801,12 +794,12 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
         ],
     ] {
         ui.add_space(4.0);
-        half_width_row(ui, |ui, half_w| {
+        equal_width_row(ui, 2, |ui, cell_w| {
             for (mode, label, suffix) in pair {
                 if ui
                     .add_enabled(
                         has_group,
-                        egui::Button::new(label).min_size(Vec2::new(half_w, 28.0)),
+                        egui::Button::new(label).min_size(Vec2::new(cell_w, 28.0)),
                     )
                     .on_hover_text(format!(
                         "選択中のグループまたはシンボルの重ね順を変更 ({MOD_KEY}{suffix})"
@@ -827,10 +820,10 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
     draw_panel_section_label(ui, "変形アクション", 4.0);
 
     ui.add_enabled_ui(has_sel, |ui| {
-        half_width_row(ui, |ui, half_w| {
+        equal_width_row(ui, 2, |ui, cell_w| {
             if ui
                 .add_sized(
-                    Vec2::new(half_w, 28.0),
+                    Vec2::new(cell_w, 28.0),
                     egui::Button::new(format!("{} 左右反転", icons::FLIP_H)),
                 )
                 .on_hover_text("選択シェイプを左右反転")
@@ -843,7 +836,7 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
             }
             if ui
                 .add_sized(
-                    Vec2::new(half_w, 28.0),
+                    Vec2::new(cell_w, 28.0),
                     egui::Button::new(format!("{} 上下反転", icons::FLIP_V)),
                 )
                 .on_hover_text("選択シェイプを上下反転")
@@ -858,10 +851,10 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
 
         ui.add_space(4.0);
 
-        half_width_row(ui, |ui, half_w| {
+        equal_width_row(ui, 2, |ui, cell_w| {
             if ui
                 .add_sized(
-                    Vec2::new(half_w, 28.0),
+                    Vec2::new(cell_w, 28.0),
                     egui::Button::new(format!("{} -90° 回転", icons::ROTATE_LEFT)),
                 )
                 .on_hover_text("選択シェイプを反時計回りに 90° 回転")
@@ -873,7 +866,7 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
             }
             if ui
                 .add_sized(
-                    Vec2::new(half_w, 28.0),
+                    Vec2::new(cell_w, 28.0),
                     egui::Button::new(format!("{} +90° 回転", icons::ROTATE_RIGHT)),
                 )
                 .on_hover_text("選択シェイプを時計回りに 90° 回転")
@@ -912,23 +905,38 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
     draw_symbol_and_group_section(tab, actions, ui);
 }
 
-/// ブラシ・消しゴムのサイズスライダー共通UIセクション
-fn draw_radius_slider_section(
+/// 1行目に見出しと、その右端に数字（ドラッグか打ち込みで変えられる。後ろに `suffix`）、2行目にパネルの幅いっぱいの
+/// スライダー（数字は出さない）を置く欄。値は `range` の整数。2つの部品の応答を合わせて返す
+fn labeled_slider<N: egui::emath::Numeric>(
     ui: &mut egui::Ui,
     label: &str,
-    radius: &mut f32,
-    min_r: f32,
-    max_r: f32,
-    step: f64,
-) {
-    draw_panel_section_label(ui, label, 4.0);
-    let mut slider = egui::Slider::new(radius, min_r..=max_r)
-        .step_by(step)
-        .suffix(" px");
-    if (step - 1.0).abs() < 1e-6 {
-        slider = slider.integer();
-    }
-    ui.add(slider);
+    value: &mut N,
+    range: std::ops::RangeInclusive<N>,
+    suffix: &str,
+) -> egui::Response {
+    let number = ui
+        .horizontal(|ui| {
+            draw_panel_section_label(ui, label, 0.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::DragValue::new(value)
+                        .range(range.clone())
+                        .speed(1.0)
+                        .max_decimals(0)
+                        .suffix(suffix),
+                )
+            })
+            .inner
+        })
+        .inner;
+    ui.add_space(4.0);
+    let slider = ui
+        .scope(|ui| {
+            ui.spacing_mut().slider_width = ui.available_width();
+            ui.add(egui::Slider::new(value, range).integer().show_value(false))
+        })
+        .inner;
+    number.union(slider)
 }
 
 /// カラーピッカーの共通UIセクション
@@ -1000,7 +1008,6 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
                 egui::DragValue::new(&mut h)
                     .range(STAGE_MIN as i32..=STAGE_MAX.y as i32)
                     .speed(2.0)
-                    .suffix(" px")
                     .update_while_editing(false),
             )
             .on_hover_text("ステージの高さ (px)");
@@ -1092,12 +1099,17 @@ fn draw_panel_separator(ui: &mut egui::Ui) {
     ui.add_space(6.0);
 }
 
-/// ボタン2つを横に並べる行を作り、`add_contents` にボタン1つ分の幅（行の幅の半分）を渡す
-fn half_width_row(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui, f32)) {
+/// ボタン `columns` 個を同じ幅で横に並べる行を作り、`add_contents` にボタン1つ分の幅を渡す
+fn equal_width_row(
+    ui: &mut egui::Ui,
+    columns: usize,
+    add_contents: impl FnOnce(&mut egui::Ui, f32),
+) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        let half_w = (ui.available_width() - 6.0) * 0.5;
-        add_contents(ui, half_w);
+        let gaps = 6.0 * (columns - 1) as f32;
+        let cell_w = (ui.available_width() - gaps) / columns as f32;
+        add_contents(ui, cell_w);
     });
 }
 
@@ -1157,10 +1169,10 @@ pub(crate) fn draw_selected_frame_properties(
 
     ui.add_space(4.0);
 
-    half_width_row(ui, |ui, half_w| {
+    equal_width_row(ui, 2, |ui, cell_w| {
         if ui
             .add_sized(
-                Vec2::new(half_w, 26.0),
+                Vec2::new(cell_w, 26.0),
                 egui::Button::new(format!("{} 時計回り (CW)", icons::ROTATE_RIGHT))
                     .selected(current_rotate == TweenRotate::Clockwise),
             )
@@ -1171,7 +1183,7 @@ pub(crate) fn draw_selected_frame_properties(
         }
         if ui
             .add_sized(
-                Vec2::new(half_w, 26.0),
+                Vec2::new(cell_w, 26.0),
                 egui::Button::new(format!("{} 反時計回り (CCW)", icons::ROTATE_LEFT))
                     .selected(current_rotate == TweenRotate::CounterClockwise),
             )
@@ -1220,7 +1232,7 @@ fn draw_keyframe_sound_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
     }
 }
 
-/// キャンバス上で単一のシンボルインスタンスを選択しているときにプロパティパネル下部に表示する再生オプション（1回再生 / ループ再生 / 任意のフレーム）
+/// キャンバス上で単一のシンボルインスタンスを選択しているときにプロパティパネル下部に表示する再生オプション（ループ再生 / 1回再生 / 停止）
 pub(crate) fn draw_selected_symbol_properties(
     tab: &mut Tab,
     actions: &mut Vec<UiAction>,
@@ -1232,24 +1244,14 @@ pub(crate) fn draw_selected_symbol_properties(
 
     draw_panel_separator(ui);
 
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(format!("{} {sym_name}", icons::SYMBOL))
-                .size(11.5)
-                .strong()
-                .color(Color32::from_rgb(0, 120, 215)),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(format!("全 {sym_total_frames} f"))
-                    .size(10.5)
-                    .color(Color32::from_rgb(110, 118, 130)),
-            );
-        });
-    });
+    ui.label(
+        egui::RichText::new(format!("{} {sym_name}", icons::SYMBOL))
+            .size(11.5)
+            .strong()
+            .color(Color32::from_rgb(0, 120, 215)),
+    );
 
     ui.add_space(6.0);
-    draw_panel_section_label(ui, "シンボル再生オプション", 4.0);
 
     let mut next_mode = binding.loop_mode;
     let max_first_1based = sym_total_frames.max(1);
@@ -1260,10 +1262,10 @@ pub(crate) fn draw_selected_symbol_properties(
     };
     let mut next_first_1based = current_first_1based;
 
-    half_width_row(ui, |ui, half_w| {
+    equal_width_row(ui, 3, |ui, cell_w| {
         if ui
             .add_sized(
-                Vec2::new(half_w, 26.0),
+                Vec2::new(cell_w, 26.0),
                 egui::Button::new("ループ再生").selected(binding.loop_mode == SymbolLoopMode::Loop),
             )
             .on_hover_text("キーフレーム開始位置からシンボル内部フレームをループ再生します")
@@ -1273,7 +1275,7 @@ pub(crate) fn draw_selected_symbol_properties(
         }
         if ui
             .add_sized(
-                Vec2::new(half_w, 26.0),
+                Vec2::new(cell_w, 26.0),
                 egui::Button::new("1回再生")
                     .selected(binding.loop_mode == SymbolLoopMode::PlayOnce),
             )
@@ -1284,21 +1286,18 @@ pub(crate) fn draw_selected_symbol_properties(
         {
             next_mode = SymbolLoopMode::PlayOnce;
         }
+        if ui
+            .add_sized(
+                Vec2::new(cell_w, 26.0),
+                egui::Button::new("停止")
+                    .selected(binding.loop_mode == SymbolLoopMode::SingleFrame),
+            )
+            .on_hover_text("指定したシンボル内部フレーム（1コマ）を固定表示します")
+            .clicked()
+        {
+            next_mode = SymbolLoopMode::SingleFrame;
+        }
     });
-
-    ui.add_space(4.0);
-
-    if ui
-        .add_sized(
-            Vec2::new(ui.available_width(), 26.0),
-            egui::Button::new("任意のフレーム")
-                .selected(binding.loop_mode == SymbolLoopMode::SingleFrame),
-        )
-        .on_hover_text("指定したシンボル内部フレーム（1コマ）を固定表示します")
-        .clicked()
-    {
-        next_mode = SymbolLoopMode::SingleFrame;
-    }
 
     ui.add_space(6.0);
 
@@ -1329,7 +1328,6 @@ pub(crate) fn draw_selected_symbol_properties(
             egui::DragValue::new(&mut next_first_1based)
                 .range(1..=max_first_1based)
                 .speed(0.15)
-                .suffix(" f")
                 .update_while_editing(false),
         );
         if ui
@@ -1406,24 +1404,13 @@ fn draw_symbol_color_effect(
     ui: &mut egui::Ui,
 ) {
     ui.add_space(6.0);
-    draw_panel_section_label(ui, "色効果", 4.0);
-
     let mut alpha_pct = (binding.color_effect.alpha * 100.0).round() as i32;
     let mut brightness_pct = (binding.color_effect.brightness * 100.0).round() as i32;
 
-    let a_resp = ui
-        .add(
-            egui::Slider::new(&mut alpha_pct, 0..=100)
-                .text("アルファ")
-                .suffix(" %"),
-        )
+    let a_resp = labeled_slider(ui, "アルファ", &mut alpha_pct, 0..=100, "%")
         .on_hover_text("シンボル全体の不透明度（0% で見えなくなります）");
-    let b_resp = ui
-        .add(
-            egui::Slider::new(&mut brightness_pct, -100..=100)
-                .text("明度")
-                .suffix(" %"),
-        )
+    ui.add_space(6.0);
+    let b_resp = labeled_slider(ui, "明度", &mut brightness_pct, -100..=100, "%")
         .on_hover_text("シンボル全体の明るさ（−100% で黒、+100% で白）");
 
     let next_effect = ColorEffect::new(
@@ -1452,23 +1439,6 @@ fn draw_symbol_color_effect(
 
 /// 「ライブラリ」タブの描画（シンボルのプレビュー・一覧・名前変更・ステージ配置・編集・削除）
 pub(crate) fn draw_library_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
-    if ui
-        .add_enabled(
-            crate::select_ops::selected_single_layer_id(tab).is_some(),
-            egui::Button::new(format!("{} 選択図形をシンボル化 (F8)", icons::ADD))
-                .min_size(Vec2::new(ui.available_width(), 28.0)),
-        )
-        .on_hover_text("キャンバスで選択中の図形を新しいシンボルとして登録 (F8)")
-        .on_disabled_hover_text("シンボルにできるのは、1つのレイヤーの中で選んだ図形だけです")
-        .clicked()
-    {
-        actions.push(UiAction::Doc(Action::ConvertToSymbol));
-    }
-
-    ui.add_space(6.0);
-    ui.separator();
-    ui.add_space(6.0);
-
     if tab.doc.library.is_empty() {
         ui.label(
             egui::RichText::new(
@@ -1577,11 +1547,11 @@ fn draw_selected_library_symbol_controls(
 
 /// ライブラリ登録シンボルのスクロール一覧を描画し、選択切替・名前変更コマンドを発行する
 fn draw_library_symbol_list(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
-    let entries: Vec<(u64, String, usize)> = tab
+    let entries: Vec<(u64, String)> = tab
         .doc
         .library
         .iter()
-        .map(|s| (s.id, s.name.clone(), s.timeline.total_frames.max(1)))
+        .map(|s| (s.id, s.name.clone()))
         .collect();
     let mut select_req: Option<u64> = None;
     let mut rename_req: Option<(u64, String)> = None;
@@ -1599,7 +1569,7 @@ fn draw_library_symbol_list(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut
         .max_height(max_height)
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            for (sym_id, mut name, total_frames) in entries {
+            for (sym_id, mut name) in entries {
                 ui.push_id((active_doc_id, sym_id), |ui| {
                     let is_sel = tab.view.selected_library_symbol == Some(sym_id);
                     let row_fill = if is_sel {
@@ -1630,9 +1600,9 @@ fn draw_library_symbol_list(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut
                                 {
                                     select_req = Some(sym_id);
                                 }
-                                let text_w = (ui.available_width() - 36.0).max(60.0);
                                 let resp = ui.add(
-                                    egui::TextEdit::singleline(&mut name).desired_width(text_w),
+                                    egui::TextEdit::singleline(&mut name)
+                                        .desired_width(ui.available_width()),
                                 );
                                 if resp.clicked() || resp.gained_focus() {
                                     select_req = Some(sym_id);
@@ -1643,16 +1613,6 @@ fn draw_library_symbol_list(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut
                                 if resp.lost_focus() {
                                     clear_renaming_id = Some(sym_id);
                                 }
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.label(
-                                            egui::RichText::new(format!("{total_frames} f"))
-                                                .size(10.5)
-                                                .color(Color32::from_rgb(115, 122, 135)),
-                                        );
-                                    },
-                                );
                             });
                         });
                 });
