@@ -37487,8 +37487,10 @@ fn mp4_time(b: &[u8], r: &std::ops::Range<usize>, tkhd: bool) -> (u64, u64) {
     }
 }
 
-/// 音のある作品の書き出しの MP4 には、絵の入力と、音の入力（AAC・48kHz・ステレオ）が1つずつあり、作品と音と絵の長さは
-/// コマ数 ÷ fps（止まらずに書き終える）。音のライブラリが空の作品は、今までどおり音の入力の無い MP4 になる
+/// 音のある作品の書き出しの MP4 には、絵の入力と、音の入力（AAC・48kHz・ステレオ）が1つずつあり、絵の長さはコマ数 ÷ fps
+/// （止まらずに書き終える）。音の長さ（と、いちばん長い入力で決まる作品の長さ）は、コマ数 ÷ fps から、AAC の塊1つ分に
+/// 満たない分まで長い（AAC は音を 1024 個ずつの塊で詰め、最後の塊の残りは無音で埋まる。Mac の書き込む係は編集リストで
+/// 隠すが、Windows の Media Foundation は隠さない）。音のライブラリが空の作品は、今までどおり音の入力の無い MP4 になる
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 #[test]
 fn video_export_includes_the_mixed_audio_track() {
@@ -37538,15 +37540,23 @@ fn video_export_includes_the_mixed_audio_track() {
         (len as f64 / scale as f64, tracks, audio)
     };
     let expected = frames as f64 / f64::from(doc.fps);
+    // AAC（AAC-LC）の1つの塊の音の数（決まりで 1024）。音の長さは、その分に満たないだけ長くなりうる
+    const AAC_FRAME_SAMPLES: f64 = 1024.0;
+    let aac_frame = AAC_FRAME_SAMPLES / f64::from(crate::video_export::EXPORT_AUDIO_RATE);
+    let audio_len_ok = |t: f64| t > expected - 1e-3 && t < expected + aac_frame;
 
     let (len, tracks, audio) = inspect(&export(&doc, "with_sound.mp4"));
     assert_eq!(audio, Some((*b"mp4a", 2, 48_000)));
     let kinds: Vec<[u8; 4]> = tracks.iter().map(|t| t.0).collect();
     assert_eq!(kinds.iter().filter(|k| *k == b"vide").count(), 1);
     assert_eq!(kinds.iter().filter(|k| *k == b"soun").count(), 1);
-    assert!((len - expected).abs() < 1e-3, "作品の長さ {len} 秒");
+    assert!(audio_len_ok(len), "作品の長さ {len} 秒");
     for (kind, t) in &tracks {
-        assert!((t - expected).abs() < 1e-3, "{} の長さ {t} 秒", String::from_utf8_lossy(kind));
+        let ok = match kind {
+            b"soun" => audio_len_ok(*t),
+            _ => (t - expected).abs() < 1e-3,
+        };
+        assert!(ok, "{} の長さ {t} 秒", String::from_utf8_lossy(kind));
     }
 
     std::sync::Arc::make_mut(&mut doc.sounds).clear();
