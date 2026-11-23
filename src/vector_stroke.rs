@@ -798,34 +798,74 @@ fn fit_run(pts: &[Point], tv: &[Option<KVec2>], eps: f64) -> Vec<QuadBez> {
     out
 }
 
+/// 線の端の形（`quad_band`）
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum LineEnd {
+    /// 半円の端（線が途切れる所：行き止まり・ほかの線との交わり・線の色や太さの変わり目）
+    Cap,
+    /// 同じ線が続くつなぎ目で、外側のすき間は隣の線が埋める（何も足さない）
+    Open,
+    /// 同じ線が続くつなぎ目で、こちらが外側のすき間を扇で埋める（丸いつなぎ目）。中身は、隣の線の、その点から出ていく向き
+    Join(KVec2),
+}
+
 /// 2次ベジェ `q` を中心線にして、半径 `r` で太らせた形（線の図形：`planar_map::line_shape`）の、輪郭と、色 `color` の
-/// メッシュ。中心線の点（`quad_samples`）の左右に半径ずつずらした帯と、両端の半円でできる（刻みは弦のずれ `eps` から決める：
-/// `arc_step`）。輪郭は、左の点を前へ・終わりの半円・右の点を後ろへ・始めの半円の順に並べた1本の閉じた折れ線（曲がる内側で
-/// 自分と重なることがあるので NonZero で塗る形）。メッシュは、同じ点を帯の三角形と半円の扇でつなぐ（多角形を三角形に分ける
-/// 計算をしない）。どちらも手間は点の数に比例する
-pub(crate) fn quad_band(q: QuadBez, r: f64, eps: f64, color: Color32) -> (Vec<Point>, eframe::egui::Mesh) {
+/// メッシュ。中心線の点（`quad_samples`）の左右に半径ずつずらした帯と、両端（始め・終わり）の形 `ends` でできる（刻みは
+/// 弦のずれ `eps` から決める：`arc_step`）：途切れる端は半円、つなぎ目は何も足さないか、2本の帯の外側のすき間を埋める扇
+/// （2本の帯の外側の角を、つなぎ目の点を中心に結ぶ円弧。なめらかなつなぎ目では、すき間が `eps` 以下なので足さない）。
+/// 輪郭は、左の点を前へ・終わりの端・右の点を後ろへ・始めの端の順に並べた1本の閉じた折れ線と、扇ごとの輪（曲がる内側で
+/// 自分と重なることがあるので NonZero で塗る形）。メッシュは、同じ点を帯の三角形と扇でつなぐ（多角形を三角形に分ける計算を
+/// しない）。どれも手間は点の数に比例する
+pub(crate) fn quad_band(
+    q: QuadBez,
+    r: f64,
+    eps: f64,
+    color: Color32,
+    ends: [LineEnd; 2],
+) -> (Vec<Vec<Point>>, eframe::egui::Mesh) {
     use eframe::egui::{epaint::Vertex, Mesh, Pos2};
     let cs = quad_samples(q, r, eps);
-    let cap_n = ((std::f64::consts::PI / arc_step(r, eps)).ceil() as usize).max(2);
-    // 半円の点（中心 c、始めの向き start から、dir の側を回って逆向きまで。両端を除く）
-    let arc = |c: Point, start: KVec2, dir: KVec2| -> Vec<Point> {
-        (1..cap_n)
-            .map(|k| {
-                let a = std::f64::consts::PI * k as f64 / cap_n as f64;
-                c + (start * a.cos() + dir * a.sin()) * r
-            })
-            .collect()
+    let phi = arc_step(r, eps);
+    let rot = |v: KVec2, a: f64| KVec2::new(v.x * a.cos() - v.y * a.sin(), v.x * a.sin() + v.y * a.cos());
+    // 中心 c で、向き from から角 a だけ回した円弧の点（両端を含む。刻みは phi 以下）
+    let arc = |c: Point, from: KVec2, a: f64| -> Vec<Point> {
+        let k = ((a.abs() / phi).ceil() as usize).max(1);
+        (0..=k).map(|j| c + rot(from, a * j as f64 / k as f64) * r).collect()
     };
     let left: Vec<Point> = cs.iter().map(|c| c.p + left_normal(c.t) * r).collect();
     let right: Vec<Point> = cs.iter().map(|c| c.p - left_normal(c.t) * r).collect();
     let (first, last) = (cs[0], cs[cs.len() - 1]);
-    let end_cap = arc(last.p, left_normal(last.t), last.t);
-    let start_cap = arc(first.p, -left_normal(first.t), -first.t);
-    // 輪郭
-    let mut outline: Vec<Point> = left.clone();
-    outline.extend(&end_cap);
-    outline.extend(right.iter().rev());
-    outline.extend(&start_cap);
+    // 端の形：輪郭に入れる点（帯の角どうしの間。半円なら円弧の中の点）と、つなぎ目の扇（中心と円弧の点）
+    let end_shape = |c: Point, out: KVec2, end: LineEnd, cap_from: KVec2| -> (Vec<Point>, Option<Vec<Point>>) {
+        match end {
+            LineEnd::Cap => {
+                let pts = arc(c, cap_from, -std::f64::consts::PI);
+                (pts[1..pts.len() - 1].to_vec(), None)
+            }
+            LineEnd::Open => (Vec::new(), None),
+            LineEnd::Join(v) => {
+                // 隣の線からつなぎ目へ入り（向き −v）、こちらへ出ていく（向き out）ときの曲がる角。外側は曲がる向きと逆の側
+                let (t_in, t_out) = (-v, out);
+                let a = t_in.cross(t_out).atan2(t_in.dot(t_out));
+                if a.abs() * r <= eps {
+                    return (Vec::new(), None);
+                }
+                let outer = if a > 0.0 { KVec2::new(t_in.y, -t_in.x) } else { KVec2::new(-t_in.y, t_in.x) };
+                let mut fan = vec![c];
+                fan.extend(arc(c, outer, a));
+                (Vec::new(), Some(fan))
+            }
+        }
+    };
+    // 終わりの端は、左の角から前を回って右の角へ（出ていく向きは後ろ向き）。始めの端は、右の角から後ろを回って左の角へ
+    let (end_pts, end_fan) = end_shape(last.p, -last.t, ends[1], left_normal(last.t));
+    let (start_pts, start_fan) = end_shape(first.p, first.t, ends[0], -left_normal(first.t));
+    let mut ring: Vec<Point> = left.clone();
+    ring.extend(&end_pts);
+    ring.extend(right.iter().rev());
+    ring.extend(&start_pts);
+    let mut rings = vec![ring];
+    rings.extend(end_fan.iter().chain(start_fan.iter()).cloned());
     // メッシュ
     let mut mesh = Mesh::default();
     let mut vert = |p: Point| -> u32 {
@@ -837,15 +877,19 @@ pub(crate) fn quad_band(q: QuadBez, r: f64, eps: f64, color: Color32) -> (Vec<Po
         mesh.vertices.len() as u32 - 1
     };
     let side: Vec<(u32, u32)> = left.iter().zip(&right).map(|(&l, &r)| (vert(l), vert(r))).collect();
-    let mut tri: Vec<u32> = Vec::with_capacity(6 * side.len() + 6 * cap_n);
+    let mut tri: Vec<u32> = Vec::with_capacity(6 * side.len());
     for w in side.windows(2) {
         let ((l0, r0), (l1, r1)) = (w[0], w[1]);
         tri.extend([l0, r0, l1, r0, r1, l1]);
     }
+    // 半円の端：帯の角から円弧の点を通って反対の角へ、端の点を中心にした扇
     for (c, from, to, pts) in [
-        (last.p, side[side.len() - 1].0, side[side.len() - 1].1, &end_cap),
-        (first.p, side[0].1, side[0].0, &start_cap),
+        (last.p, side[side.len() - 1].0, side[side.len() - 1].1, &end_pts),
+        (first.p, side[0].1, side[0].0, &start_pts),
     ] {
+        if pts.is_empty() {
+            continue;
+        }
         let center = vert(c);
         let mut prev = from;
         for &p in pts.iter() {
@@ -855,8 +899,26 @@ pub(crate) fn quad_band(q: QuadBez, r: f64, eps: f64, color: Color32) -> (Vec<Po
         }
         tri.extend([center, prev, to]);
     }
+    // つなぎ目の扇
+    for fan in end_fan.iter().chain(start_fan.iter()) {
+        let ids: Vec<u32> = fan.iter().map(|&p| vert(p)).collect();
+        for w in ids[1..].windows(2) {
+            tri.extend([ids[0], w[0], w[1]]);
+        }
+    }
     mesh.indices = tri;
-    (outline, mesh)
+    (rings, mesh)
+}
+
+/// 2次ベジェ `q` の、媒介変数 `t` での向き（単位。制御点が端の点と重なって速さが 0 の所は弦の向き。線の帯の点と、線の
+/// つなぎ目の向きの決まりはこれ1つ：`quad_samples`・`planar_map::line_ends`）
+pub(crate) fn quad_tangent(q: &QuadBez, t: f64) -> KVec2 {
+    let d = crate::vector_engine::quad_deriv(q, t);
+    if d.hypot() > 0.0 {
+        normalize_vec(d)
+    } else {
+        normalize_vec(q.p2 - q.p0)
+    }
 }
 
 /// 2次ベジェ `q` を太らせるための中心線の点（`quad_band`）：点の数は、中心線そのものの弦のずれ（2次
@@ -873,15 +935,12 @@ fn quad_samples(q: QuadBez, r: f64, eps: f64) -> Vec<Sample> {
     let n = ((dd / (8.0 * eps)).sqrt().ceil())
         .max((turn / arc_step(r, eps)).ceil())
         .max(1.0) as usize;
-    // 端で制御点が端の点と重なる曲線は、そこでの向きを弦の向きにする
-    let chord = normalize_vec(q.p2 - q.p0);
     (0..=n)
         .map(|i| {
             let t = i as f64 / n as f64;
-            let d = crate::vector_engine::quad_deriv(&q, t);
             Sample {
                 p: q.eval(t),
-                t: if d.hypot() > 0.0 { normalize_vec(d) } else { chord },
+                t: quad_tangent(&q, t),
             }
         })
         .collect()

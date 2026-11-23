@@ -38213,11 +38213,18 @@ mod strokes {
         let lines = base.lines(&[]);
         assert_eq!(lines.len(), 4);
         assert!(lines.iter().all(|l| l.line == Some(INK) && crate::planar_map::is_line_id(l.shape_id)));
-        // 上の辺の線：線の太さの半分だけ外と中に広がり、端は丸
+        // 上の辺の線：線の太さの半分だけ外と中に広がる
         let line = lines.iter().find(|l| l.contains_point(Point::new(200.0, 99.0))).unwrap();
         assert_eq!(line.color, INK.color);
-        let b = line.bounding_box();
-        assert!((b.x0 - 98.0).abs() < 0.05 && (b.x1 - 302.0).abs() < 0.05 && (b.y1 - 102.0).abs() < 0.05);
+        assert!((line.bounding_box().y1 - 102.0).abs() < 0.05);
+        // 4本を合わせた外形は、太さの半分だけ広がる。角は丸いつなぎ目：角のすぐ外は塗られ、四角い角の先は塗られない
+        let all = lines.iter().map(|l| l.bounding_box()).reduce(|a, b| a.union(b)).unwrap();
+        assert!((all.x0 - 98.0).abs() < 0.05 && (all.x1 - 302.0).abs() < 0.05);
+        assert!((all.y0 - 98.0).abs() < 0.05 && (all.y1 - 302.0).abs() < 0.05);
+        assert!(lines.iter().any(|l| l.contains_point(Point::new(99.0, 99.0))));
+        assert!(!lines.iter().any(|l| l.contains_point(Point::new(98.3, 98.3))));
+        // 角では、2本のうち1本だけが扇で埋める（丸い端を2つ重ねない）
+        assert_eq!(lines.iter().filter(|l| l.contains_point(Point::new(99.0, 99.0))).count(), 1);
         // 輪郭の表示とアンカーは、太らせた形の輪郭でなく、線の中心を通る曲線（地図の辺）で描く
         let wire: Vec<QuadBez> = lines
             .iter()

@@ -1041,31 +1041,71 @@ fn tile_edge(m: &PlanarMap, e: usize) -> crate::stored_map::TileEdge {
     }
 }
 
-/// 線を乗せた辺 `te` を、線の太さに太らせた形の線の図形（端は丸。階層 `group_path`、番号 `id`）。輪郭とメッシュは、中心線の
-/// 左右の帯と両端の半円から直接作る（`quad_band`。描画の許容 `MESH_TOL`。交わりを解く計算も、多角形を三角形に分ける計算も
-/// しないので、手間は点の数に比例する）。輪郭は曲がる内側で自分と重なることがあるので、線の図形は NonZero で塗る
-/// （`FillShape::fills_nonzero`）。つなぎ目は、隣の辺の線の丸い端と重なって丸くなる
-fn line_shape(te: &crate::stored_map::TileEdge, id: ShapeId, group_path: &[u64]) -> Option<FillShape> {
+/// 線を乗せた辺 `te` を、線の太さに太らせた形の線の図形（端の形は `ends`：`line_ends`。階層 `group_path`、番号 `id`）。輪郭と
+/// メッシュは、中心線の左右の帯と端の形から直接作る（`quad_band`。描画の許容 `MESH_TOL`。交わりを解く計算も、多角形を三角形に
+/// 分ける計算もしないので、手間は点の数に比例する）。輪郭は曲がる内側で自分と重なることがあるので、線の図形は NonZero で塗る
+/// （`FillShape::fills_nonzero`）
+fn line_shape(
+    te: &crate::stored_map::TileEdge,
+    ends: [crate::vector_stroke::LineEnd; 2],
+    id: ShapeId,
+    group_path: &[u64],
+) -> Option<FillShape> {
     let stroke = te.stroke?;
-    let (ring, mesh) = crate::vector_stroke::quad_band(
+    let (rings, mesh) = crate::vector_stroke::quad_band(
         te.quad(),
         stroke.width as f64 / 2.0,
         crate::vector_engine::MESH_TOL,
         stroke.color,
+        ends,
     );
-    let segs = (0..ring.len())
-        .map(|i| {
-            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
-            QuadBez::new(a, a.midpoint(b), b)
-        })
-        .collect();
+    let mut contours = rings.into_iter().map(|ring| {
+        let segs = (0..ring.len())
+            .map(|i| {
+                let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                QuadBez::new(a, a.midpoint(b), b)
+            })
+            .collect();
+        Contour::new(segs)
+    });
+    let exterior = contours.next()?;
     // メッシュは、多角形を三角形に分けず、帯から直接作ったもの（輪郭と同じ形）
-    let mut s = FillShape::new(stroke.color, Contour::new(segs), Vec::new())
+    let mut s = FillShape::new(stroke.color, exterior, contours.collect())
         .with_scope(0, group_path)
         .with_line(stroke, vec![te.quad()])
         .with_mesh(mesh);
     s.shape_id = id;
     Some(s)
+}
+
+/// 線を乗せた辺 `te` の、始め（`te.a`）と終わり（`te.b`）の端の形（線の端の決まりはこれ1つ）。`others(p)` は、点 `p` に端の
+/// ある線を乗せた辺（`te` も含めてよい）。その点にほかの線がちょうど1本で同じ線なら、つなぎ目：2本のうち形の鍵（決まった
+/// 向きの両端と制御点のビット）が小さい方が外側のすき間を扇で埋め（`Join`。隣の線の、その点から出ていく向きを渡す）、もう
+/// 1本は何も足さない（`Open`）。そうでなければ（行き止まり・交わり・線の変わり目）半円（`Cap`）。辺の向きはどちらでもよい
+fn line_ends(
+    te: &crate::stored_map::TileEdge,
+    others: impl Fn(Point) -> Vec<crate::stored_map::TileEdge>,
+) -> [crate::vector_stroke::LineEnd; 2] {
+    use crate::vector_stroke::{quad_tangent, LineEnd};
+    let key = |e: &crate::stored_map::TileEdge| {
+        let (a, b) = if point_order(e.a, e.b).is_le() { (e.a, e.b) } else { (e.b, e.a) };
+        [a.x, a.y, b.x, b.y, e.ctrl.x, e.ctrl.y].map(f64::to_bits)
+    };
+    let me = key(te);
+    [te.a, te.b].map(|p| {
+        let near: Vec<crate::stored_map::TileEdge> =
+            others(p).into_iter().filter(|e| key(e) != me).collect();
+        match near.as_slice() {
+            [f] if f.stroke == te.stroke => {
+                if key(f) < me {
+                    return LineEnd::Open;
+                }
+                let q = f.quad();
+                LineEnd::Join(if f.a == p { quad_tangent(&q, 0.0) } else { -quad_tangent(&q, 1.0) })
+            }
+            _ => LineEnd::Cap,
+        }
+    })
 }
 
 /// 辺の形が同じかを比べるための鍵（向きはそろえる）。色は入れない：辺のその側が変わっていないかは、側の元の図形の印で
@@ -2633,71 +2673,101 @@ impl LayerBase {
         let table = match prev {
             Some(((_, mut table), prev_stored)) => {
                 let (removed, added) = prev_stored.diff_tiles(&self.stored);
+                // 作り直す線：増えた辺と、消えた辺・増えた辺の端につながる線（つなぎ目の形が変わりうる）
+                let redo = self.lines_near(&removed.iter().map(|&e| prev_stored.edge_at(e)).collect::<Vec<_>>(), &added);
                 let mut gone: Vec<ShapeId> = removed
                     .iter()
                     .filter_map(|&e| line_id_of(&prev_stored.edge_at(e)))
+                    .chain(redo.iter().filter_map(line_id_of))
                     .collect();
                 gone.sort_unstable();
                 gone.dedup();
-                let mut new: Vec<Arc<FillShape>> = added
+                let mut new: Vec<Arc<FillShape>> = redo
                     .iter()
-                    .filter_map(|te| {
-                        let id = line_id_of(te)?;
-                        match table.find_sorted(id, |s| s.shape_id) {
-                            Some(s) => Some(s.clone()),
-                            None => line_shape(te, id, group_path).map(Arc::new),
-                        }
-                    })
+                    .filter_map(|te| self.line_shape_at(te, group_path).map(Arc::new))
                     .collect();
                 new.sort_unstable_by_key(|s| s.shape_id);
                 new.dedup_by_key(|s| s.shape_id);
-                // 消さずに残る番号の図形は、もう表にある
-                new.retain(|s| {
-                    gone.binary_search(&s.shape_id).is_ok()
-                        || table.find_sorted(s.shape_id, |x| x.shape_id).is_none()
-                });
                 table.replace_sorted(&gone, new, |s| s.shape_id);
-                // お手本：地図全体の線を乗せた辺から作った表と、番号と形が同じ
+                // お手本：地図全体の線を乗せた辺から作った表と、番号と形（輪郭のビット）が同じ
                 #[cfg(test)]
                 if test_checks() {
                     let ok = uncounted(|| {
-                        let mut whole: Vec<(ShapeId, [u64; 6])> = self
-                            .stored
-                            .stroked_edges()
-                            .iter()
-                            .filter_map(|(_, te)| {
-                                let q = te.quad();
-                                Some((line_id_of(te)?, [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y].map(f64::to_bits)))
-                            })
-                            .collect();
-                        whole.sort_unstable_by_key(|x| x.0);
-                        let got: Vec<(ShapeId, [u64; 6])> = table
-                            .iter()
-                            .map(|s| {
-                                let q = s.wire_contours().next().expect("線の曲線").segments[0];
-                                (s.shape_id, [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y].map(f64::to_bits))
-                            })
-                            .collect();
+                        let sig = |s: &FillShape| -> (ShapeId, Vec<[u64; 6]>) {
+                            let bits = s
+                                .contours()
+                                .flat_map(|c| c.segments.iter())
+                                .map(|q| [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y].map(f64::to_bits))
+                                .collect();
+                            (s.shape_id, bits)
+                        };
+                        let whole: Vec<_> = self.whole_lines(group_path).iter().map(|s| sig(s)).collect();
+                        let got: Vec<_> = table.iter().map(|s| sig(s)).collect();
                         whole == got
                     });
                     assert!(ok, "変わった所だけで作った線の図形の表が、地図全体から作った表（お手本）と違う");
                 }
                 table
             }
-            None => {
-                let mut shapes: Vec<Arc<FillShape>> = self
-                    .stored
-                    .stroked_edges()
-                    .iter()
-                    .filter_map(|(_, te)| line_shape(te, line_id_of(te)?, group_path).map(Arc::new))
-                    .collect();
-                shapes.sort_unstable_by_key(|s| s.shape_id);
-                shapes.dedup_by_key(|s| s.shape_id);
-                shapes.into()
-            }
+            None => self.whole_lines(group_path).into(),
         };
         *cached = Some((group_path.to_vec(), table.clone()));
         table
+    }
+
+    /// 地図全体の線を乗せた辺から作った線の図形（番号の順。初めて見る地図）。端の形は、線を乗せた辺の端の表で決める
+    fn whole_lines(&self, group_path: &[u64]) -> Vec<Arc<FillShape>> {
+        let stroked = self.stored.stroked_edges();
+        let key = |p: Point| [p.x.to_bits(), p.y.to_bits()];
+        let mut at: HashMap<[u64; 2], Vec<usize>> = HashMap::new();
+        for (i, (_, te)) in stroked.iter().enumerate() {
+            at.entry(key(te.a)).or_default().push(i);
+            at.entry(key(te.b)).or_default().push(i);
+        }
+        let others = |p: Point| -> Vec<crate::stored_map::TileEdge> {
+            at.get(&key(p)).map_or_else(Vec::new, |v| v.iter().map(|&i| stroked[i].1).collect())
+        };
+        let mut shapes: Vec<Arc<FillShape>> = stroked
+            .iter()
+            .filter_map(|(_, te)| line_shape(te, line_ends(te, &others), line_id_of(te)?, group_path).map(Arc::new))
+            .collect();
+        shapes.sort_unstable_by_key(|s| s.shape_id);
+        shapes.dedup_by_key(|s| s.shape_id);
+        shapes
+    }
+
+    /// この地図の線を乗せた辺 `te` の線の図形（端の形は、頂点の辺の索引で引いたまわりの線で決める：`line_ends`）
+    fn line_shape_at(&self, te: &crate::stored_map::TileEdge, group_path: &[u64]) -> Option<FillShape> {
+        let others = |p: Point| -> Vec<crate::stored_map::TileEdge> {
+            self.edges_at_node(p)
+                .into_iter()
+                .map(|e| self.stored.edge_at(e))
+                .filter(|e| e.stroke.is_some())
+                .collect()
+        };
+        line_shape(te, line_ends(te, others), line_id_of(te)?, group_path)
+    }
+
+    /// 前の地図から消えた辺 `gone` と増えた辺 `added`（この地図の辺）があるとき、線の図形を作り直す、この地図の線を乗せた辺：
+    /// 増えた辺と、消えた辺・増えた辺の端につながる線（つなぎ目の形が変わりうる）。頂点の辺は索引で引く（手間は変わった所の分）
+    fn lines_near(
+        &self,
+        gone: &[crate::stored_map::TileEdge],
+        added: &[crate::stored_map::TileEdge],
+    ) -> Vec<crate::stored_map::TileEdge> {
+        let mut out: Vec<crate::stored_map::TileEdge> = added.iter().filter(|e| e.stroke.is_some()).copied().collect();
+        let mut seen: IntSet<usize> = IntSet::default();
+        for p in gone.iter().chain(added).flat_map(|e| [e.a, e.b]) {
+            for e in self.edges_at_node(p) {
+                if seen.insert(e) {
+                    let te = self.stored.edge_at(e);
+                    if te.stroke.is_some() {
+                        out.push(te);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// 番号が `id` の線の図形の辺（計算に使う地図の番号。線の図形の表で引き、その曲線の辺を塊から引く）
@@ -2716,12 +2786,16 @@ impl LayerBase {
         group_path: &[u64],
     ) -> (Vec<ShapeId>, Vec<Arc<FillShape>>) {
         let (removed, added) = self.stored.diff_tiles(&next_base.stored);
+        let removed: Vec<crate::stored_map::TileEdge> = removed.iter().map(|&e| self.stored.edge_at(e)).collect();
+        // 作り直した線（増えた辺と、端につながる線）は、前の線を隠して新しい線を出す（番号が同じでも、つなぎ目の形が変わる）
+        let redo = next_base.lines_near(&removed, &added);
+        let then = next_base.lines(group_path);
         let gone = removed
             .iter()
-            .filter_map(|&e| line_id_of(&self.stored.edge_at(e)))
+            .chain(&redo)
+            .filter_map(line_id_of)
             .collect();
-        let then = next_base.lines(group_path);
-        let made = added
+        let made = redo
             .iter()
             .filter_map(|te| then.find_sorted(line_id_of(te)?, |s| s.shape_id).cloned())
             .collect();
