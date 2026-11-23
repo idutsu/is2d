@@ -2749,7 +2749,9 @@ impl LayerBase {
     }
 
     /// 前の地図から消えた辺 `gone` と増えた辺 `added`（この地図の辺）があるとき、線の図形を作り直す、この地図の線を乗せた辺：
-    /// 増えた辺と、消えた辺・増えた辺の端につながる線（つなぎ目の形が変わりうる）。頂点の辺は索引で引く（手間は変わった所の分）
+    /// 増えた線と、消えた線・増えた線の端につながる線（つなぎ目の形が変わりうる）。線の端の形は、その点の線を乗せた辺だけで
+    /// 決まる（`line_ends`）ので、線の無い辺が消えても増えても、まわりの線は作り直さない。頂点の辺は索引で引く（手間は変わった
+    /// 線の分）
     fn lines_near(
         &self,
         gone: &[crate::stored_map::TileEdge],
@@ -2757,7 +2759,8 @@ impl LayerBase {
     ) -> Vec<crate::stored_map::TileEdge> {
         let mut out: Vec<crate::stored_map::TileEdge> = added.iter().filter(|e| e.stroke.is_some()).copied().collect();
         let mut seen: IntSet<usize> = IntSet::default();
-        for p in gone.iter().chain(added).flat_map(|e| [e.a, e.b]) {
+        let lined = gone.iter().chain(added).filter(|e| e.stroke.is_some());
+        for p in lined.flat_map(|e| [e.a, e.b]) {
             for e in self.edges_at_node(p) {
                 if seen.insert(e) {
                     let te = self.stored.edge_at(e);
