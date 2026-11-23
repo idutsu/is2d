@@ -2170,22 +2170,48 @@ pub(crate) fn draw_unsaved_close_confirm_modal(
     modal_window(ctx, "未保存の変更の確認", |ui| {
         ui.set_min_width(320.0);
         ui.add_space(4.0);
-        ui.label(format!(
-            "「{tab_name}」には未保存の変更があります。\n閉じる前に変更を保存しますか？"
-        ));
+        ui.label(format!("「{tab_name}」には未保存の変更があります。"));
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            if ui.button("保存して閉じる").clicked() {
-                actions.push(UiAction::ConfirmPendingCloseSave);
-            }
-            if ui.button("保存せずに破棄").clicked() {
-                actions.push(UiAction::ConfirmPendingCloseDiscard);
-            }
-            if ui.button("キャンセル").clicked() {
-                actions.push(UiAction::ConfirmPendingCloseCancel);
-            }
-        });
+        actions.extend(centered_buttons(
+            ui,
+            [
+                ("保存して閉じる", UiAction::ConfirmPendingCloseSave),
+                ("保存せずに閉じる", UiAction::ConfirmPendingCloseDiscard),
+                ("キャンセル", UiAction::ConfirmPendingCloseCancel),
+            ],
+        ));
     });
+}
+
+/// ボタン（名前と、押したときに返すもの `choices`）を、それまでに置いた中身の幅の真ん中にそろえて横に並べ、押したボタン
+/// のものを返す。egui の横並びは左から詰めるので、ボタンの幅（文字の幅と、ボタンの左右の余白）とボタンの間を足した幅から、
+/// 左の空きを決める。基準は、それまでに置いた中身の幅（`min_rect`）：中身に合わせて大きさが決まる窓では、使える幅
+/// （`available_width`）は窓が広がれる最大の幅で、実際の窓の幅ではないため
+fn centered_buttons<T, const N: usize>(ui: &mut egui::Ui, choices: [(&str, T); N]) -> Option<T> {
+    let mut clicked = None;
+    let content_width = ui.min_rect().width();
+    ui.horizontal(|ui| {
+        let spacing = ui.spacing().item_spacing.x;
+        let padding = ui.spacing().button_padding.x;
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let width: f32 = choices
+            .iter()
+            .map(|(label, _)| {
+                ui.fonts(|f| f.layout_no_wrap((*label).to_owned(), font.clone(), Color32::WHITE))
+                    .size()
+                    .x
+                    + 2.0 * padding
+            })
+            .sum::<f32>()
+            + spacing * N.saturating_sub(1) as f32;
+        ui.add_space(((content_width - width) / 2.0).max(0.0));
+        for (label, value) in choices {
+            if ui.button(label).clicked() {
+                clicked = Some(value);
+            }
+        }
+    });
+    clicked
 }
 
 /// 前回保存されないまま終了した作業の復元モーダルダイアログを描画する

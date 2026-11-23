@@ -8059,7 +8059,7 @@ fn test_unsaved_tab_close_modal_non_blocking_save_discard_and_cancel() {
     assert_eq!(app.tabs.len(), 2);
     assert_eq!(app.active, 1);
 
-    // 再度閉じて「保存せずに破棄」を選ぶとタブ0が閉じられること
+    // 再度閉じて「保存せずに閉じる」を選ぶとタブ0が閉じられること
     project_io::close_tab(&mut app, 0, Some(&ctx));
     project_io::confirm_pending_close_discard(&mut app, &ctx);
     assert!(app.pending_close_confirm.is_none());

@@ -211,7 +211,7 @@ pub(crate) fn confirm_pending_close_save(ws: &mut impl ProjectWorkspace, ctx: &e
     }
 }
 
-/// 未保存変更確認モーダルで「保存せずに破棄」が選択された際の処理を実行する
+/// 未保存変更確認モーダルで「保存せずに閉じる」が選択された際の処理を実行する
 pub(crate) fn confirm_pending_close_discard(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
     let Some(pending) = ws.pending_close_confirm_mut().take() else {
         return;
