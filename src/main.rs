@@ -823,7 +823,7 @@ impl Is2dApp {
     fn is_current_tool_allowed(&self) -> bool {
         match self.tool.tool {
             Tool::Eyedropper => true,
-            Tool::Brush | Tool::Eraser | Tool::Bucket => {
+            Tool::Brush | Tool::Eraser | Tool::Bucket | Tool::InkBottle => {
                 self.tab().active_timeline().is_active_layer_editable()
             }
             Tool::Select | Tool::Transform => self.tab().active_timeline().has_any_editable_layer(),
@@ -870,6 +870,16 @@ impl Is2dApp {
                         if let Some(pt) = mouse_pt {
                             let color = self.tool.brush_color;
                             apply(self, Action::BucketFill { pt, color });
+                        }
+                    }
+                }
+                Tool::InkBottle => {
+                    let just_pressed =
+                        response.hovered() && ui.input(|i| i.pointer.primary_pressed());
+                    if just_pressed {
+                        if let Some(pt) = mouse_pt {
+                            let stroke = self.tool.stroke;
+                            apply(self, Action::InkBottle { pt, stroke });
                         }
                     }
                 }

@@ -126,23 +126,25 @@ impl MapInput<'_> {
 /// 線ごとの弦の点（みな1つの並び）と、線ごとの（弦の点の範囲, 弦の太らせ分 `chord_pad`）
 type Chords = (Vec<IPt>, Vec<(std::ops::Range<usize>, i64)>);
 
-/// 重ねるものの線：重ねる線 `quads`（重ねる地図・輪郭の変形なら線ごとの左右の色 `cols`）と、輪郭の変形で動かした辺の前の
+/// 重ねるものの線：重ねる線 `quads`（重ねる地図・輪郭の変形なら線ごとの左右の色 `cols`）と、重ねる線ごとの乗せた線
+/// `strokes`（重ねる地図の辺の線、輪郭の変形で動かした辺の線。形の線には無い）、輪郭の変形で動かした辺の前の
 /// 曲線と左右の色 `moved_old`、線ごとの（重ねる線、前の曲線の順）触る範囲を数える印 `labels`（`InputLines::touched`）。
 /// 作るのは `MapInput::lines` だけ（線と印を同じ所で一緒に作る）
 #[derive(Default)]
 pub(crate) struct Lines {
     pub(crate) quads: Vec<QuadBez>,
     pub(crate) cols: Vec<Sides>,
+    strokes: Vec<Option<EdgeStroke>>,
     moved_old: Vec<(QuadBez, Sides)>,
     labels: Vec<(u64, u64)>,
 }
 
 impl MapInput<'_> {
-    /// 重ねるものの線（`Lines`。作るのはこれ1つ）。`old`：輪郭の変形で動かした辺の、前の地図での曲線と左右の色。印は、中のとき
+    /// 重ねるものの線（`Lines`。作るのはこれ1つ）。`old`：輪郭の変形で動かした辺の、前の地図での曲線と左右の色と線。印は、中のとき
     /// に重ねるものの値が外と違いうる所が、どれかの印の巻き数が 0 でない所に入るように決める：形は1つの印（偶奇で中の所は
     /// 巻き数が奇数）、下から上へ並べた形は形ごとの印、重ねる地図と輪郭の変形は色（中の所の値は色ごとの巻き数で決まる）。
     /// 前の曲線は引く分なので、左右を入れかえる
-    pub(crate) fn lines(&self, old: impl Fn(usize) -> (QuadBez, Sides)) -> Lines {
+    pub(crate) fn lines(&self, old: impl Fn(usize) -> (QuadBez, Sides, Option<EdgeStroke>)) -> Lines {
         let color =
             |c: Option<Color32>| c.map_or(0, |c| 1 + u32::from_be_bytes(c.to_array()) as u64);
         let mut l = Lines::default();
@@ -153,6 +155,7 @@ impl MapInput<'_> {
             MapInput::Shapes(shapes) => {
                 for q in shapes.iter().flat_map(segments) {
                     l.quads.push(q);
+                    l.strokes.push(None);
                     l.labels.push((1, 0));
                 }
             }
@@ -160,6 +163,7 @@ impl MapInput<'_> {
                 for (i, s) in shapes.iter().enumerate() {
                     for q in segments(s) {
                         l.quads.push(q);
+                        l.strokes.push(None);
                         l.labels.push((1 + i as u64, 0));
                     }
                 }
@@ -168,15 +172,17 @@ impl MapInput<'_> {
                 for (e, ed) in p.edges.iter().enumerate() {
                     l.quads.push(p.quad(e));
                     l.cols.push((ed.left, ed.right));
+                    l.strokes.push(ed.stroke);
                     l.labels.push((color(ed.left), color(ed.right)));
                 }
             }
             // 後の曲線を、元の辺の左右の色で重ねる
             MapInput::Sweep(moved) => {
                 for &(e, after) in moved {
-                    let (before, (left, right)) = old(e);
+                    let (before, (left, right), stroke) = old(e);
                     l.quads.push(after);
                     l.cols.push((left, right));
+                    l.strokes.push(stroke);
                     l.labels.push((color(left), color(right)));
                     l.moved_old.push((before, (left, right)));
                 }
@@ -501,7 +507,10 @@ impl PlanarMap {
     ) -> Option<[PlanarMap; N]> {
         // 重ねるものの線（輪郭の変形の前の曲線と色は、この地図の辺）
         let mut input_lines =
-            input.lines(|e| (self.quad(e), (self.edges[e].left, self.edges[e].right)));
+            input.lines(|e| {
+                let ed = self.edges[e];
+                (self.quad(e), (ed.left, ed.right), ed.stroke)
+            });
         if let MapInput::Shapes(_) = input {
             // 形の線の端を、前からある頂点から `FLAT_TOL` 以内なら、その頂点（いちばん近いもの）に寄せる。地図の精度
             // では同じ点なので、寄せないと2つの頂点が格子の別々の点に残り、同じ線として扱う所（`Span`）の端で2本の
@@ -1180,6 +1189,8 @@ impl PlanarMap {
         use i_overlay9::vector::edge::{CLIP_LEFT, CLIP_RIGHT};
         // 外が前のままの決まりのときだけ、重ねるものから離れた辺をそのまま残す
         let copies_untouched = |rule: MapRule| rule != MapRule::KeepInside;
+        // 重ねる線ごとの乗せた線（下で `lines` の名前を区間の線の並びに使うので、先に取る）
+        let new_strokes = &lines.lines.strokes;
         let copy_any = rules.iter().any(|&r| copies_untouched(r));
         let moved = input.moved_flags(self.edges.len());
         // 辺 0..n_old が前からある辺、その後ろが重ねる地図の辺（`joined`）
@@ -1809,6 +1820,26 @@ impl PlanarMap {
             interior_kept: Vec<MapEdge>,
             inner_cols: IntMap<usize, Sides>,
         }
+        // 区間ごとの乗せた線（決まりによらない）：出どころのうち、重ねる地図の辺・輪郭の変形で動かした辺（上に置く線）、
+        // 前からある辺（動かした辺の前の曲線でないもの）の順に、最初の出どころの線。形の線と、動かした辺の前の曲線は線を
+        // 持たない（前からある辺と同じ所を通っても、前からある辺の線が残る）。区間が残るか（左右の色が違うか）は決まりで決まり、
+        // 残った区間はこの線を持つ（設計：claude/線の設計_68a596e.md の 2.3 の 1）
+        let piece_strokes: Vec<Option<EdgeStroke>> = pieces
+            .iter()
+            .map(|p| {
+                piece_provs[p.prov.clone()]
+                    .iter()
+                    .map(|pv| match srcs[pv.src as usize].1 {
+                        OverlaySrc::New(i) if !matches!(input, MapInput::Shapes(_) | MapInput::Stack(_)) => {
+                            (0, new_strokes[i])
+                        }
+                        OverlaySrc::Old(e) if !moved[e] => (1, self.edges[e].stroke),
+                        _ => (2, None),
+                    })
+                    .min_by_key(|x| x.0)
+                    .and_then(|x| x.1)
+            })
+            .collect();
         let mut ruled: Vec<Ruled> = Vec::with_capacity(rules.len());
         let mut refeed: Vec<usize> = Vec::new();
         let mut turns: Vec<(IPt, Sides, Option<usize>)> = Vec::new();
@@ -1867,6 +1898,7 @@ impl PlanarMap {
                     let r = rule.apply_label(&Over::Color(fr.0), fr.1, (ed.right, ed.right_src));
                     inner_cols.insert(e, (l.0, r.0));
                     if l.0 != r.0 {
+                        // 線は、上に置く重ねる地図の辺のもの（区間の線 `piece_strokes` と同じ決まり）
                         interior_kept.push(MapEdge {
                             a: node_at(ed.a),
                             b: node_at(ed.b),
@@ -1874,6 +1906,7 @@ impl PlanarMap {
                             right: r.0,
                             left_src: l.1,
                             right_src: r.1,
+                            stroke: fd.stroke,
                             ..ed
                         });
                     }
@@ -2009,8 +2042,9 @@ impl PlanarMap {
                 used[start] = true;
                 // 鎖は左右の色が同じ区間をつなぐ。図形の番号は、鎖の左右それぞれで最初に見つかったもの（鎖の左右は、それぞれ
                 // 結果の1つの面。番号は面と図形を対応づけるだけなので、区間ごとの番号の違いでは鎖を分けない）
-                let (_, _, (mut sl, mut sr), _) = kept[start];
+                let (_, _, (mut sl, mut sr), start_piece) = kept[start];
                 let s_src = main_src(start).src;
+                let stroke = piece_strokes[start_piece];
                 for forward in [true, false] {
                     loop {
                         let cur = if forward {
@@ -2030,7 +2064,10 @@ impl PlanarMap {
                         if used[nk] || main_src(nk).src != s_src {
                             break;
                         }
-                        let (na, nb, (nl, nr), _) = kept[nk];
+                        let (na, nb, (nl, nr), n_piece) = kept[nk];
+                        if piece_strokes[n_piece] != stroke {
+                            break;
+                        }
                         let n_same = if forward { na == end } else { nb == end };
                         let (l, r) = if n_same { (nl, nr) } else { (nr, nl) };
                         let (_, _, nta, ntb) = piece_ends(&(nk, n_same));
@@ -2085,6 +2122,7 @@ impl PlanarMap {
                     steps,
                     left: sl,
                     right: sr,
+                    stroke,
                     curve: srcs[s_src as usize].0,
                     whole,
                     whole_poly,
@@ -2115,6 +2153,7 @@ impl PlanarMap {
                                 right: c.right.0,
                                 left_src: c.left.1,
                                 right_src: c.right.1,
+                                stroke: c.stroke,
                             });
                             edges.len() - 1
                         })
@@ -2256,6 +2295,7 @@ pub(super) fn tile_window(ix: MapIndex<'_>, edges: &[usize]) -> (PlanarMap, Vec<
             right: te.right,
             left_src: te.left_src,
             right_src: te.right_src,
+            stroke: te.stroke,
         });
         polys.push(Arc::clone(ix.poly(e)));
     }
@@ -2965,6 +3005,8 @@ pub(super) struct Chain {
     /// 左右の印（色と図形の番号）
     left: Label,
     right: Label,
+    /// 線（鎖の区間はみな同じ線：`piece_stroke`）
+    stroke: Option<EdgeStroke>,
     /// 出どころの曲線
     curve: QuadBez,
     /// 入れた辺が丸ごと残ったとき：元の制御点
@@ -3102,6 +3144,7 @@ impl ChainRestorer {
             right: c.right.0,
             left_src: c.left.1,
             right_src: c.right.1,
+            stroke: c.stroke,
         });
         self.alive.push(true);
         if let Some(index) = self.index.as_mut() {

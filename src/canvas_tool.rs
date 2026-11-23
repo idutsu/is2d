@@ -46,17 +46,19 @@ pub(crate) enum Tool {
     Brush,      // B キー
     Eraser,     // E キー
     Bucket,     // K キー
+    InkBottle,  // S キー（インクボトル：面の輪郭や線に、線を乗せる）
     Eyedropper, // I キー（スポイトツール）
 }
 
 impl Tool {
     /// 全ツールバリアントの標準順序
-    pub(crate) const ALL: [Tool; 6] = [
+    pub(crate) const ALL: [Tool; 7] = [
         Tool::Select,
         Tool::Transform,
         Tool::Brush,
         Tool::Eraser,
         Tool::Bucket,
+        Tool::InkBottle,
         Tool::Eyedropper,
     ];
 
@@ -68,6 +70,7 @@ impl Tool {
             Tool::Brush => Key::B,
             Tool::Eraser => Key::E,
             Tool::Bucket => Key::K,
+            Tool::InkBottle => Key::S,
             Tool::Eyedropper => Key::I,
         }
     }
@@ -2111,6 +2114,8 @@ pub(crate) struct ToolSettings {
     pub(crate) brush_radius: f32,
     pub(crate) eraser_radius: f32,
     pub(crate) brush_color: Color32,
+    /// インクボトルで乗せる線
+    pub(crate) stroke: crate::planar_map::EdgeStroke,
 }
 
 impl Default for ToolSettings {
@@ -2121,6 +2126,10 @@ impl Default for ToolSettings {
             brush_radius: 8.0,
             eraser_radius: 22.0,
             brush_color: Color32::from_rgb(40, 45, 55),
+            stroke: crate::planar_map::EdgeStroke {
+                color: Color32::BLACK,
+                width: 2,
+            },
         }
     }
 }

@@ -136,6 +136,7 @@ impl<'a> LocalMap<'a> {
                     right: te.right,
                     left_src: te.left_src,
                     right_src: te.right_src,
+                    stroke: te.stroke,
                 }
             }
         }
@@ -1162,6 +1163,7 @@ impl LocalMap<'_> {
                 right: ed.right,
                 left_src: l,
                 right_src: r,
+                stroke: ed.stroke,
             });
         }
         (changed_base, add)
@@ -1236,9 +1238,10 @@ impl LocalMap<'_> {
             .iter()
             .map(|&e| (quad_key(&self.base_edge(e).quad()), e))
             .collect();
-        let added_keys: IntSet<[u64; 6]> = self
+        // 増えた辺の形 → その線
+        let added_keys: IntMap<[u64; 6], Option<EdgeStroke>> = self
             .added_edges()
-            .map(|e| quad_key(&self.quad(e)))
+            .map(|e| (quad_key(&self.quad(e)), self.edge(e).stroke))
             .collect();
         let same =
             |e: usize| e < self.n_base() || removed_keys.contains_key(&quad_key(&self.quad(e)));
@@ -1257,11 +1260,12 @@ impl LocalMap<'_> {
                 te.right_src
             }
         };
-        // 辺が消えた元の図形
+        // 辺が消えた元の図形（形が同じ辺が増えても、線が替わったなら消えたとみなす：面の図形は輪郭の線も持つので、
+        // 作り直す。インクボトル）
         let mut cut: IntSet<ShapeId> = Default::default();
         for (k, &e) in &removed_keys {
-            if !added_keys.contains(k) {
-                let ed = self.base_edge(e);
+            let ed = self.base_edge(e);
+            if added_keys.get(k) != Some(&ed.stroke) {
                 cut.extend(ed.left_src);
                 cut.extend(ed.right_src);
             }
@@ -1362,11 +1366,12 @@ impl LocalMap<'_> {
                         .iter()
                         .map(|&(e, forward)| {
                             let q = self.quad(e);
-                            if forward {
+                            let q = if forward {
                                 q
                             } else {
                                 QuadBez::new(q.p2, q.p1, q.p0)
-                            }
+                            };
+                            (q, self.edge(e).stroke)
                         })
                         .collect()
                 });

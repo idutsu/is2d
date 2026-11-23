@@ -126,11 +126,27 @@ pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> 
     topmost_visible_at(tab, pt).map(|(_, color)| color)
 }
 
-/// スポイトツール（色抽出）：指定位置 `pt` の最前面シェイプの色を抽出し、`host.tool_mut().brush_color` に設定する
+/// スポイトツール（色抽出）：指定位置 `pt` が線の上なら、その線の色と太さをインクボトルの線に、そうでなければ最前面
+/// シェイプの色を `host.tool_mut().brush_color` に設定する
 pub(crate) fn pick_color_at(host: &mut impl ActionHost, pt: Point) -> Option<Color32> {
+    if let Some(stroke) = topmost_line_at(host.tab(), pt) {
+        host.tool_mut().stroke = stroke;
+        return Some(stroke.color);
+    }
     let picked = topmost_visible_color_at(host.tab(), pt)?;
     host.tool_mut().brush_color = picked;
     Some(picked)
+}
+
+/// 点 `pt` にいちばん上に見えているのが線なら、その線（図形は上から見て、塗りより先に、その図形の線を見る）
+fn topmost_line_at(tab: &Tab, pt: Point) -> Option<crate::planar_map::EdgeStroke> {
+    tab.scene().iter().rev().find_map(|s| match s.outline_at(pt) {
+        Some(o) => Some(Some(crate::planar_map::EdgeStroke {
+            color: o.color,
+            width: o.width,
+        })),
+        None => s.contains_point(pt).then_some(None),
+    })?
 }
 
 /// 進行中のブラシ・消しゴムストロークの増分プレビューメッシュを描画する

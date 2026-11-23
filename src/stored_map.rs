@@ -21,6 +21,7 @@ use serde::de::{self, DeserializeSeed, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::planar_map::{
+    EdgeStroke, STROKE_WIDTHS,
     point_order, EdgeGeom, IntMap, LayerBase, MapEdge, PlanarMap, Poly,
 };
 use crate::vector_engine::ShapeId;
@@ -39,6 +40,7 @@ struct StoredEdge {
     right: Option<Color32>,
     left_src: Option<NonZeroU64>,
     right_src: Option<NonZeroU64>,
+    stroke: Option<EdgeStroke>,
 }
 
 impl StoredEdge {
@@ -55,6 +57,7 @@ impl StoredEdge {
                 right: e.right,
                 left_src: src(e.left_src),
                 right_src: src(e.right_src),
+                stroke: e.stroke,
             }
         } else {
             Self {
@@ -65,6 +68,7 @@ impl StoredEdge {
                 right: e.left,
                 left_src: src(e.right_src),
                 right_src: src(e.left_src),
+                stroke: e.stroke,
             }
         }
     }
@@ -81,6 +85,7 @@ impl StoredEdge {
                 right: te.right,
                 left_src: src(te.left_src),
                 right_src: src(te.right_src),
+                stroke: te.stroke,
             }
         } else {
             Self {
@@ -91,6 +96,7 @@ impl StoredEdge {
                 right: te.left,
                 left_src: src(te.right_src),
                 right_src: src(te.left_src),
+                stroke: te.stroke,
             }
         }
     }
@@ -105,6 +111,7 @@ impl StoredEdge {
             right: self.right,
             left_src: self.left_src.map(NonZeroU64::get),
             right_src: self.right_src.map(NonZeroU64::get),
+            stroke: self.stroke,
         }
     }
 
@@ -142,6 +149,7 @@ impl PartialEq for StoredEdge {
             && self.right == other.right
             && self.left_src == other.left_src
             && self.right_src == other.right_src
+            && self.stroke == other.stroke
     }
 }
 
@@ -154,10 +162,11 @@ impl std::hash::Hash for StoredEdge {
         self.right.hash(h);
         self.left_src.hash(h);
         self.right_src.hash(h);
+        self.stroke.hash(h);
     }
 }
 
-/// 塊から引いた辺（`StoredMap::edge_at`）：両端の座標・制御点・左右の色・左右の側の図形の番号
+/// 塊から引いた辺（`StoredMap::edge_at`）：両端の座標・制御点・左右の色・左右の側の図形の番号・線
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TileEdge {
     pub(crate) a: Point,
@@ -167,6 +176,7 @@ pub(crate) struct TileEdge {
     pub(crate) right: Option<Color32>,
     pub(crate) left_src: Option<ShapeId>,
     pub(crate) right_src: Option<ShapeId>,
+    pub(crate) stroke: Option<EdgeStroke>,
 }
 
 impl TileEdge {
@@ -395,6 +405,7 @@ impl StoredMap {
             right: se.right,
             left_src: se.left_src.map(NonZeroU64::get),
             right_src: se.right_src.map(NonZeroU64::get),
+            stroke: se.stroke,
         }
     }
 
@@ -513,6 +524,7 @@ impl StoredMap {
             right: None,
             left_src: None,
             right_src: None,
+            stroke: None,
         };
         let k = self
             .0
@@ -541,6 +553,7 @@ impl StoredMap {
             right: se.right,
             left_src: se.left_src.map(NonZeroU64::get),
             right_src: se.right_src.map(NonZeroU64::get),
+            stroke: se.stroke,
         };
         let (mut i, mut j) = (0usize, 0usize);
         while i < a.len() || j < b.len() {
@@ -988,9 +1001,20 @@ pub(crate) struct SavedTile {
     pub(crate) edges: Vec<SavedEdge>,
 }
 
+/// 線を乗せた辺の線の保存の形（版 9 から。塊の表の最後の、文書に1つの線の並びに書く。線の無い作品では空の並びだけなので、
+/// ファイルの大きさも読む手間も変わらない）：塊（塊の表の番号）、辺（その塊の辺の並びの番号）、線の色（文書の色の表の
+/// 1 からの番号）、太さ（`STROKE_WIDTHS`）
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) struct SavedStroke {
+    pub(crate) tile: u32,
+    pub(crate) edge: u32,
+    pub(crate) color: u32,
+    pub(crate) width: u8,
+}
+
 /// しまう辺の保存の形：両端（塊の点の番号）、制御点の座標、左右の色（文書の色の表の 1 からの番号。0 は何も無い）、左右の
 /// 側の図形の印（文書の中の 1 からの通し番号で、同じ印は同じ図形。0 は無い。読むときに新しい図形の番号に替える：
-/// `WriteTiles`・`TileReader`）
+/// `WriteTiles`・`TileReader`）。辺の線は、塊の表の線の並び（`SavedStroke`）に書く
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub(crate) struct SavedEdge {
     pub(crate) a: u32,
@@ -1018,6 +1042,8 @@ pub(crate) struct WriteTiles {
     colors: Vec<[u8; 4]>,
     /// 図形の番号から、書く印（1 からの通し番号。初めて出てきた順）
     labels: IntMap<ShapeId, u64>,
+    /// 線の並び（塊の順、塊の中は辺の順。塊を表に足すときに、色を数えるのと同じなめ方で拾う）
+    strokes: Vec<SavedStroke>,
 }
 
 impl WriteTiles {
@@ -1031,8 +1057,10 @@ impl WriteTiles {
                 if let Some(&i) = self.index.get(&key) {
                     return i;
                 }
-                for e in t.iter() {
-                    for c in [e.left, e.right].into_iter().flatten() {
+                let i = self.tiles.len() as u32;
+                for (ei, e) in t.iter().enumerate() {
+                    let stroke = e.stroke.map(|s| s.color);
+                    for c in [e.left, e.right, stroke].into_iter().flatten() {
                         let next = self.colors.len() as u32 + 1;
                         if *self.color_no.entry(c.to_array()).or_insert(next) == next {
                             self.colors.push(c.to_array());
@@ -1042,8 +1070,15 @@ impl WriteTiles {
                         let next = self.labels.len() as u64 + 1;
                         self.labels.entry(id.get()).or_insert(next);
                     }
+                    if let Some(st) = e.stroke {
+                        self.strokes.push(SavedStroke {
+                            tile: i,
+                            edge: ei as u32,
+                            color: self.color_no[&st.color.to_array()],
+                            width: st.width,
+                        });
+                    }
                 }
-                let i = self.tiles.len() as u32;
                 self.tiles.push(t.clone());
                 self.index.insert(key, i);
                 i
@@ -1081,7 +1116,7 @@ impl WriteTiles {
     }
 }
 
-/// ファイルの塊の表の並びで書く：色の表と、塊の表
+/// ファイルの塊の表の並びで書く：色の表と、塊の表と、線の並び（塊の順、塊の中は辺の順）
 impl Serialize for WriteTiles {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
@@ -1091,9 +1126,10 @@ impl Serialize for WriteTiles {
                 s.collect_seq(self.0.tiles.iter().map(|t| self.0.saved_tile(t)))
             }
         }
-        let mut st = s.serialize_struct("SavedTiles", 2)?;
+        let mut st = s.serialize_struct("SavedTiles", 3)?;
         st.serialize_field("colors", &self.colors)?;
         st.serialize_field("tiles", &Tiles(self))?;
+        st.serialize_field("strokes", &self.strokes)?;
         st.end()
     }
 }
@@ -1145,6 +1181,7 @@ impl ReadTiles {
                 right: color(e.right)?,
                 left_src: NonZeroU64::new(e.left_src),
                 right_src: NonZeroU64::new(e.right_src),
+                stroke: None,
             })
         };
         // 塊の辺の並びは、ちょうどの大きさで1回だけ取る
@@ -1156,15 +1193,48 @@ impl ReadTiles {
             self.tiles.push(edges.into_boxed_slice());
         }
     }
+
+    /// 線の並びの線を、読んだ塊の辺に乗せる。塊・辺の番号が表の内、色が表の内（線なしの 0 でない）、太さが範囲の内で、
+    /// 同じ辺に2回乗せないこと。そうでない線があれば `broken` に記す（壊れた塊があれば、塊の番号がずれるので乗せない）
+    fn put_strokes(&mut self, strokes: &[SavedStroke]) {
+        if self.broken {
+            return;
+        }
+        for s in strokes {
+            let color = match s.color {
+                0 => None,
+                i => self.colors.get(i as usize - 1).copied(),
+            };
+            let stroke = color.filter(|_| STROKE_WIDTHS.contains(&s.width)).map(|c| EdgeStroke {
+                color: Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3]),
+                width: s.width,
+            });
+            let edge = self
+                .tiles
+                .get_mut(s.tile as usize)
+                .and_then(|t| t.get_mut(s.edge as usize));
+            match (edge, stroke) {
+                (Some(e), Some(stroke)) if e.stroke.is_none() => e.stroke = Some(stroke),
+                _ => {
+                    self.broken = true;
+                    return;
+                }
+            }
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for ReadTiles {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        d.deserialize_struct("SavedTiles", &["colors", "tiles"], ReadTiles::default())
+        d.deserialize_struct(
+            "SavedTiles",
+            &["colors", "tiles", "strokes"],
+            ReadTiles::default(),
+        )
     }
 }
 
-/// 塊の表（色の表、塊の並び）を読む
+/// 塊の表（色の表、塊の並び、線の並び）を読む
 impl<'de> Visitor<'de> for ReadTiles {
     type Value = ReadTiles;
 
@@ -1173,11 +1243,16 @@ impl<'de> Visitor<'de> for ReadTiles {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(mut self, mut seq: A) -> Result<ReadTiles, A::Error> {
+        let expected = &"色の表と塊の並びと線の並び";
         self.colors = seq
             .next_element()?
-            .ok_or_else(|| de::Error::invalid_length(0, &"色の表と塊の並び"))?;
+            .ok_or_else(|| de::Error::invalid_length(0, expected))?;
         seq.next_element_seed(&mut self)?
-            .ok_or_else(|| de::Error::invalid_length(1, &"色の表と塊の並び"))?;
+            .ok_or_else(|| de::Error::invalid_length(1, expected))?;
+        let strokes: Vec<SavedStroke> = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(2, expected))?;
+        self.put_strokes(&strokes);
         Ok(self)
     }
 }

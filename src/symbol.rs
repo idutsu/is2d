@@ -54,7 +54,7 @@ impl SymbolInstanceBinding {
             inst_s.group_path = full_path;
             inst_s.symbol_instance = Some(self);
             if self.color_effect != ColorEffect::default() {
-                inst_s.set_color(self.color_effect.apply(inst_s.color));
+                inst_s.recolor(|c| self.color_effect.apply(c));
             }
             out.push(inst_s);
         }

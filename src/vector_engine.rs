@@ -327,6 +327,15 @@ pub(crate) type ShapeId = u64;
 /// レイヤーの番号（`FillShape::layer_id`）
 pub(crate) type LayerId = u64;
 
+/// 面の輪郭に乗せた線を太らせた形の1つ：線の色と太さ（px）、偶奇で塗る輪郭（直線の区間の並び）。面の塗りのあとに描く
+/// （設計：claude/線の設計_68a596e.md）
+#[derive(Clone, Debug)]
+pub(crate) struct Outline {
+    pub(crate) color: Color32,
+    pub(crate) width: u8,
+    pub(crate) rings: Vec<Contour>,
+}
+
 /// キャンバス上の1つの塗りシェイプ（色 + 外周2次ベジェ輪郭 + 穴の2次ベジェ輪郭リスト + 所属レイヤーID + グループ階層 + シンボル紐付け + 描画・判定キャッシュ）
 #[derive(Clone, Debug)]
 pub(crate) struct FillShape {
@@ -343,6 +352,9 @@ pub(crate) struct FillShape {
     pub(crate) symbol_instance: Option<SymbolInstanceBinding>,
     /// メッシュ内容が更新されるたびにインクリメントされるリビジョン番号（土台キャッシュや書き戻しでの差分検知用）
     pub(crate) mesh_revision: u64,
+    /// 輪郭に乗せた線（無ければ `None`）。塗りと同じ変換で写り、塗りのメッシュの続きに描く（同じ線を両側の面が持つので、
+    /// あとに描いた面の線が、先に描いた面の塗りの上に来る）
+    outline: Option<Arc<Vec<Outline>>>,
     bbox: KRect,
     fill_mesh: OnceLock<Arc<Mesh>>,
     /// `fill_mesh` を作ったあとに、その頂点を写した変換の最大の拡大率を掛け合わせたもの（メッシュのずれは、作る許容の
@@ -362,6 +374,7 @@ impl FillShape {
             group_path: Vec::new(),
             symbol_instance: None,
             mesh_revision: 0,
+            outline: None,
             bbox: KRect::ZERO,
             fill_mesh: OnceLock::new(),
             mesh_stretch: 1.0,
@@ -377,15 +390,32 @@ impl FillShape {
         self.exterior.segments.is_empty() && self.symbol_instance.is_some()
     }
 
+    /// 輪郭に乗せた線を付けた図形（`Outline` の並び。空なら線なし）
+    pub(crate) fn with_outline(mut self, outline: Vec<Outline>) -> Self {
+        self.outline = (!outline.is_empty()).then(|| Arc::new(outline));
+        self.rebuild_cache();
+        self
+    }
+
+    /// 輪郭に乗せた線
+    pub(crate) fn outline(&self) -> &[Outline] {
+        self.outline.as_deref().map_or(&[], |o| o.as_slice())
+    }
+
+    /// 点 `pt` にかかる、輪郭に乗せた線（スポイト）
+    pub(crate) fn outline_at(&self, pt: Point) -> Option<&Outline> {
+        self.outline().iter().find(|o| {
+            let mut path = BezPath::new();
+            for ring in &o.rings {
+                ring.append_to_bez_path(&mut path);
+            }
+            path.bounding_box().contains(pt) && (path.winding(pt) & 1) != 0
+        })
+    }
+
     /// 描画用の塗り `egui::Mesh` を遅延テッセレーションして返す（キャッシュ済みの場合は O(1) で参照を返す）
     pub(crate) fn fill_mesh(&self) -> &Arc<Mesh> {
-        self.fill_mesh.get_or_init(|| {
-            Arc::new(tessellate_contours_to_mesh(
-                &self.exterior,
-                &self.holes,
-                self.color,
-            ))
-        })
+        self.fill_mesh.get_or_init(|| Arc::new(self.tessellate()))
     }
 
     /// キャッシュ済みの `fill_mesh` があればそれを、無ければその場でテッセレーションしたメッシュを `dst` に追記する（自身の `fill_mesh` には保存しない）
@@ -393,9 +423,28 @@ impl FillShape {
         if let Some(m) = self.fill_mesh.get() {
             append_mesh(dst, m);
         } else {
-            let m = tessellate_contours_to_mesh(&self.exterior, &self.holes, self.color);
-            append_mesh(dst, &m);
+            append_mesh(dst, &self.tessellate());
         }
+    }
+
+    /// 塗りのメッシュ：塗りの輪郭を塗り、続けて輪郭に乗せた線を線の色で塗る
+    fn tessellate(&self) -> Mesh {
+        let mut mesh = tessellate_contours_to_mesh(&self.exterior, &self.holes, self.color);
+        for o in self.outline() {
+            if let Some((first, rest)) = o.rings.split_first() {
+                append_mesh(&mut mesh, &tessellate_contours_to_mesh(first, rest, o.color));
+            }
+        }
+        mesh
+    }
+
+    /// 輪郭に乗せた線の輪郭みな
+    fn outline_rings_mut(&mut self) -> impl Iterator<Item = &mut Contour> {
+        self.outline
+            .as_mut()
+            .into_iter()
+            .flat_map(|o| Arc::make_mut(o).iter_mut())
+            .flat_map(|o| o.rings.iter_mut())
     }
 
     /// 指定された `(zoom, pan, dim_backdrop)` に対応するスクリーン座標変換済み `Mesh` を返す
@@ -516,6 +565,9 @@ impl FillShape {
             }
         }
         let mut bbox = self.exterior.bounding_box();
+        for ring in self.outline().iter().flat_map(|o| &o.rings) {
+            bbox = bbox.union(ring.bounding_box());
+        }
         for hole in &self.holes {
             bbox = bbox.union(hole.bounding_box());
         }
@@ -528,15 +580,17 @@ impl FillShape {
         self.mesh_revision = next_mesh_revision();
     }
 
-    /// 再テッセレーションを行わずに塗り色とキャッシュ済み頂点カラーのみを高速更新する
-    pub(crate) fn set_color(&mut self, color: Color32) {
-        if self.color == color {
-            return;
+    /// 塗りの色と線の色を `f` で替える（色効果）。再テッセレーションを行わず、キャッシュ済みの頂点の色も `f` で替える
+    pub(crate) fn recolor(&mut self, f: impl Fn(Color32) -> Color32) {
+        self.color = f(self.color);
+        if let Some(o) = self.outline.as_mut() {
+            for part in Arc::make_mut(o).iter_mut() {
+                part.color = f(part.color);
+            }
         }
-        self.color = color;
         if let Some(arc_mesh) = self.fill_mesh.get_mut() {
             for v in &mut Arc::make_mut(arc_mesh).vertices {
-                v.color = color;
+                v.color = f(v.color);
             }
         }
         self.mesh_revision = next_mesh_revision();
@@ -574,6 +628,9 @@ impl FillShape {
         for hole in &mut self.holes {
             hole.translate(delta);
         }
+        for ring in self.outline_rings_mut() {
+            ring.translate(delta);
+        }
         if let Some(binding) = &mut self.symbol_instance {
             binding.xform = Affine::translate(delta) * binding.xform;
         }
@@ -601,6 +658,9 @@ impl FillShape {
         self.exterior.transform(affine);
         for hole in &mut self.holes {
             hole.transform(affine);
+        }
+        for ring in self.outline_rings_mut() {
+            ring.transform(affine);
         }
         if let Some(binding) = &mut self.symbol_instance {
             binding.xform = affine * binding.xform;
@@ -633,6 +693,10 @@ impl FillShape {
         self.holes.clone_from(&orig.holes);
         for hole in &mut self.holes {
             hole.transform(affine);
+        }
+        self.outline.clone_from(&orig.outline);
+        for ring in self.outline_rings_mut() {
+            ring.transform(affine);
         }
         self.symbol_instance = orig.symbol_instance.map(|mut binding| {
             binding.xform = affine * binding.xform;
@@ -845,7 +909,7 @@ fn tessellate_contours_to_mesh(exterior: &Contour, holes: &[Contour], color: Col
 }
 
 /// 曲線をメッシュにするときの許容（文書の座標）。メッシュは表示の倍率によらず同じものを使う
-const MESH_TOL: f64 = 0.04;
+pub(crate) const MESH_TOL: f64 = 0.04;
 /// 持っているメッシュの頂点を写して使い回すときに許すずれ（文書の座標）：見分けられないずれ（画面の画素の 1/4。形を
 /// 曲線に当てはめるときの許容 `FIT_TOL_PX` と同じ決まり）を、100% 表示の文書の座標にしたもの。形そのものが当てはめで
 /// これだけずれうるので、メッシュのずれがこの中なら、作り直しても見た目は変わらない（作る許容の 6.25 倍、つまり 6.25 倍

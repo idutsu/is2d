@@ -17,6 +17,7 @@ use crate::symbol::{
 use crate::symbol_ops::selected_single_symbol_info;
 pub(crate) use crate::timeline_ui::icons;
 use crate::timeline_ui::{editing_idle, TimelineUiState};
+use crate::planar_map::STROKE_WIDTHS;
 use crate::vector_engine::transform_mesh_to_screen;
 
 /// OS標準の修飾キー表記（macOS では `"Cmd"`、Windows / Linux では `"Ctrl"`）
@@ -82,6 +83,7 @@ pub(crate) const fn tool_icon(tool: Tool) -> &'static str {
         Tool::Brush => "\u{e3ae}",
         Tool::Eraser => "\u{e23b}",
         Tool::Bucket => "\u{e23a}",
+        Tool::InkBottle => "\u{e22b}",
         Tool::Eyedropper => "\u{e3b8}",
     }
 }
@@ -94,6 +96,7 @@ pub(crate) const fn tool_label(tool: Tool) -> &'static str {
         Tool::Brush => "ブラシツール",
         Tool::Eraser => "消しゴムツール",
         Tool::Bucket => "バケツ塗りツール",
+        Tool::InkBottle => "インクボトルツール",
         Tool::Eyedropper => "スポイトツール",
     }
 }
@@ -110,6 +113,7 @@ pub(crate) const fn tool_tooltip(tool: Tool) -> &'static str {
         Tool::Brush => "ブラシツール (B) - ベクター塗りストロークを描画",
         Tool::Eraser => "消しゴムツール (E) - ベクターシェイプを削る・分割する",
         Tool::Bucket => "バケツ塗りツール (K) - 閉じた隙間領域の塗りつぶし / 既存塗りの色変更",
+        Tool::InkBottle => "インクボトルツール (S) - 塗りの輪郭に線を付ける / 線の色と太さを変える",
         Tool::Eyedropper => "スポイトツール (I) - クリックした図形の色を抽出してブラシへ設定",
     }
 }
@@ -551,7 +555,9 @@ pub(crate) fn draw_right_properties_panel(
                 .inner_margin(egui::Margin::symmetric(10, 8))
                 .show(ui, |ui| match *right_panel_tab {
                     RightPanelTab::Properties => draw_properties_tab(tab, tool, actions, ui),
-                    RightPanelTab::Color => draw_color_palette_section(tool, ui),
+                    RightPanelTab::Color => {
+                        draw_color_palette_section(ui, "現在の塗りカラー", &mut tool.brush_color)
+                    }
                     RightPanelTab::Library => draw_library_tab(tab, actions, ui),
                     RightPanelTab::Canvas => draw_canvas_tab(tab, actions, ui),
                 });
@@ -635,7 +641,15 @@ fn draw_properties_tab(
                 "",
             );
         }
-        Tool::Bucket | Tool::Eyedropper => draw_color_palette_section(tool, ui),
+        Tool::Bucket | Tool::Eyedropper => {
+            draw_color_palette_section(ui, "現在の塗りカラー", &mut tool.brush_color)
+        }
+        Tool::InkBottle => {
+            let range = *STROKE_WIDTHS.start()..=*STROKE_WIDTHS.end();
+            labeled_slider(ui, "線の太さ", &mut tool.stroke.width, range, "");
+            ui.add_space(6.0);
+            draw_color_palette_section(ui, "現在の線カラー", &mut tool.stroke.color);
+        }
     }
 
     // 下部ぶら下がりセクション：
@@ -939,13 +953,13 @@ fn labeled_slider<N: egui::emath::Numeric>(
     number.union(slider)
 }
 
-/// カラーピッカーの共通UIセクション
-fn draw_color_palette_section(tool: &mut ToolSettings, ui: &mut egui::Ui) {
+/// カラーピッカーの共通UIセクション：見出し `label` と、色 `color` の16進の欄とカラーピッカー
+fn draw_color_palette_section(ui: &mut egui::Ui, label: &str, color: &mut Color32) {
     ui.horizontal(|ui| {
-        draw_panel_section_label(ui, "現在の塗りカラー", 0.0);
-        let [r, g, b, a] = tool.brush_color.to_srgba_unmultiplied();
+        draw_panel_section_label(ui, label, 0.0);
+        let [r, g, b, a] = color.to_srgba_unmultiplied();
         let current_hex = format!("#{r:02X}{g:02X}{b:02X}");
-        let hex_id = ui.make_persistent_id("brush_color_hex_edit");
+        let hex_id = ui.make_persistent_id((label, "color_hex_edit"));
         let mut hex_buf = ui
             .data_mut(|d| d.get_temp::<String>(hex_id))
             .unwrap_or_else(|| current_hex.clone());
@@ -961,7 +975,7 @@ fn draw_color_palette_section(tool: &mut ToolSettings, ui: &mut egui::Ui) {
                 if let Ok(parsed) = egui::ecolor::HexColor::from_str_without_hash(trimmed) {
                     let [pr, pg, pb, pa] = parsed.color().to_srgba_unmultiplied();
                     let next_a = if trimmed.len() == 8 { pa } else { a };
-                    tool.brush_color = Color32::from_rgba_unmultiplied(pr, pg, pb, next_a);
+                    *color = Color32::from_rgba_unmultiplied(pr, pg, pb, next_a);
                 }
             }
         }
@@ -972,7 +986,7 @@ fn draw_color_palette_section(tool: &mut ToolSettings, ui: &mut egui::Ui) {
         }
     });
     ui.add_space(4.0);
-    crate::color_picker::color_picker(ui, &mut tool.brush_color);
+    crate::color_picker::color_picker(ui, color);
 }
 
 /// 「キャンバス」タブの描画（ステージサイズ・枠外マスク・ウィンドウに合わせる・表示倍率リセット）
@@ -1767,9 +1781,14 @@ pub(crate) fn draw_tool_cursor_and_feedback(
             };
             painter.circle_stroke(pos, r * tab.view.zoom(), Stroke::new(1.5_f32, ring_col));
         }
-        Tool::Bucket => {
+        Tool::Bucket | Tool::InkBottle => {
+            let color = if tool.tool == Tool::Bucket {
+                tool.brush_color
+            } else {
+                tool.stroke.color
+            };
             ctx.set_cursor_icon(CursorIcon::PointingHand);
-            painter.circle_filled(pos, 5.5, tool.brush_color);
+            painter.circle_filled(pos, 5.5, color);
             painter.circle_stroke(pos, 5.5, Stroke::new(1.8_f32, Color32::WHITE));
         }
         Tool::Eyedropper => {

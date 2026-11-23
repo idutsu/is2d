@@ -3704,7 +3704,7 @@ fn test_reverse_order_nested_symbol_topological_propagation_and_cycle_guard() {
     assert!(symbol_ops::enter_symbol_from_library(&mut nest_app, sym_c));
     let mut shapes = scene_summary(&nest_app).shapes;
     for s in &mut shapes {
-        s.set_color(updated_green);
+        s.recolor(|_| updated_green);
     }
     put_cel_shapes(&mut nest_app, 0, 0, shapes);
     assert!(symbol_ops::exit_symbol_timeline(&mut nest_app));
@@ -9890,6 +9890,8 @@ fn opened_document(bytes: &[u8]) -> Result<crate::symbol::Document, String> {
 pub(crate) struct SavedTiles {
     pub(crate) colors: Vec<[u8; 4]>,
     pub(crate) tiles: Vec<stored_map::SavedTile>,
+    #[serde(default)]
+    pub(crate) strokes: Vec<stored_map::SavedStroke>,
 }
 
 /// 塊の表を保存の形（`SavedTiles`）のまま持つ保存用の型（中身を見たり細工したりする）
@@ -23554,6 +23556,7 @@ fn test_merge_degree2_does_not_fold_nearly_straight_pair() {
         right: Some(Color32::BLUE),
         left_src: None,
         right_src: None,
+        stroke: None,
     };
     let mut map = PlanarMap {
         nodes: vec![a, v, b],
@@ -24917,6 +24920,7 @@ mod map_overlay {
             right: None,
             left_src: None,
             right_src: None,
+            stroke: None,
         };
         let mut m = PlanarMap {
             nodes: vec![a, v, b, c],
@@ -24969,6 +24973,7 @@ mod map_overlay {
                 right: None,
                 left_src: None,
                 right_src: None,
+                stroke: None,
             };
             PlanarMap {
                 nodes: vec![q1.p0, q1.p2, q2.p2, c],
@@ -25123,6 +25128,7 @@ mod map_overlay {
                 right: Some(Color32::RED),
                 left_src: None,
                 right_src: None,
+                stroke: None,
             });
             m.edges.push(crate::planar_map::MapEdge {
                 a,
@@ -25132,6 +25138,7 @@ mod map_overlay {
                 right: Some(yellow),
                 left_src: None,
                 right_src: None,
+                stroke: None,
             });
             m
         };
@@ -30044,6 +30051,7 @@ fn valid_maps_are_on_the_grid_with_two_colors_per_edge() {
                 right: Some(red),
                 left_src: None,
                 right_src: None,
+                stroke: None,
             })
             .collect();
         PlanarMap { nodes, edges }
@@ -30093,6 +30101,7 @@ fn valid_maps_are_on_the_grid_with_two_colors_per_edge() {
         right: None,
         left_src: None,
         right_src: None,
+        stroke: None,
     });
     assert!(!ghost.is_valid());
     // 端の近くの正方形の辺を引っぱり、曲線は格子の内でも制御点が外へ出る確定は断る
@@ -32846,6 +32855,58 @@ fn double_click_needs_both_clicks_at_the_same_place() {
 
 /// 版 7 の保存用の型（版 8 で、キーフレームの音と音のライブラリを足す前のもの）。計測用の作品を今の版に直すためだけに
 /// 使う（アプリは前の版を開かない）。中身は今の型と同じで、音の項目だけが無い
+/// 版 8 の保存の形（塊の表に線の並びが無い）。版 9 との違いは塊の表だけなので、塊の表だけを版 8 の形で読み、線の無い塊の表にする
+mod format_v8 {
+    use crate::project_io::ProjectDocument;
+    use crate::stored_map::{SavedEdge, SavedTile};
+    use crate::tests::SavedTiles;
+    use serde::Deserialize;
+
+    #[derive(Default, Deserialize)]
+    pub(super) struct Tiles {
+        colors: Vec<[u8; 4]>,
+        tiles: Vec<Tile>,
+    }
+
+    #[derive(Deserialize)]
+    struct Tile {
+        nodes: Vec<[f64; 2]>,
+        edges: Vec<SavedEdge>,
+    }
+
+    /// 版 8 の文書を、今の版の保存用の型にする（辺はみな線なし）
+    pub(super) fn current(v8: ProjectDocument<Tiles>) -> ProjectDocument<SavedTiles> {
+        ProjectDocument {
+            stage_size: v8.stage_size,
+            timeline: v8.timeline,
+            library: v8.library,
+            next_symbol_id: v8.next_symbol_id,
+            next_group_id: v8.next_group_id,
+            recovery_source: v8.recovery_source,
+            map_tiles: tiles(v8.map_tiles),
+            sounds: v8.sounds,
+            next_sound_id: v8.next_sound_id,
+        }
+    }
+
+    /// 版 8（と版 7）の塊の表を、今の版の塊の表にする（辺はみな線なし）
+    pub(super) fn tiles(t: Tiles) -> SavedTiles {
+        let tiles = t
+            .tiles
+            .into_iter()
+            .map(|t| SavedTile {
+                nodes: t.nodes,
+                edges: t.edges,
+            })
+            .collect();
+        SavedTiles {
+            colors: t.colors,
+            tiles,
+            strokes: Vec::new(),
+        }
+    }
+}
+
 mod format_v7 {
     use crate::project_io::{
         ProjectDocument, SavedKeyframe, SavedLayer, SavedSymbolDef, SavedSymbolInstance,
@@ -32864,7 +32925,7 @@ mod format_v7 {
         next_symbol_id: u64,
         next_group_id: u64,
         recovery_source: Option<std::path::PathBuf>,
-        map_tiles: SavedTiles,
+        map_tiles: super::format_v8::Tiles,
     }
 
     #[derive(Deserialize)]
@@ -32958,7 +33019,7 @@ mod format_v7 {
                 next_symbol_id: self.next_symbol_id,
                 next_group_id: self.next_group_id,
                 recovery_source: self.recovery_source,
-                map_tiles: self.map_tiles,
+                map_tiles: super::format_v8::tiles(self.map_tiles),
                 sounds: Vec::new(),
                 next_sound_id: 1,
             }
@@ -33053,12 +33114,16 @@ fn old_format_document(bytes: &[u8]) -> Option<(SavedProject, u32)> {
     let (old, version): (old_format::Document, u32) = if bytes.first() == Some(&b'{') {
         assert!(
             bytes.starts_with(br#"{"version":5,"#),
-            "直せるのは、版 5 の JSON と版 6・版 7 のファイルだけ"
+            "直せるのは、版 5 の JSON と版 6・版 7・版 8 のファイルだけ"
         );
         (
             serde_json::from_slice(bytes).expect("版 5 の JSON として読めること"),
             5,
         )
+    } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 8u32.to_le_bytes() {
+        let v8: project_io::ProjectDocument<format_v8::Tiles> =
+            postcard::from_bytes(&bytes[20..]).expect("版 8 の中身として読めること");
+        return Some((format_v8::current(v8), 8));
     } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 7u32.to_le_bytes() {
         let v7: format_v7::Document =
             postcard::from_bytes(&bytes[20..]).expect("版 7 の中身として読めること");
@@ -33098,6 +33163,7 @@ fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument
                     right: color(r),
                     left_src: None,
                     right_src: None,
+                    stroke: None,
                 })
                 .collect(),
         };
@@ -33195,7 +33261,7 @@ fn work_file_in_current_format(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// 計測用の作品のファイルを、その場で今の版に直す（ゼロベースレビューの前に `claude/review-bench/A.is2d`・`B.is2d` を
-/// 直すため）。直すのは前の版（版 5 の JSON・版 6）のファイルだけで、元のファイルは同じフォルダに `<名前>.v<版>.is2d`
+/// 直すため）。直すのは前の版（版 5 の JSON・版 6・版 7・版 8）のファイルだけで、元のファイルは同じフォルダに `<名前>.v<版>.is2d`
 /// として残す。今の版のファイルは、開けることを確かめるだけで変えない（何度流してもよい）
 ///
 /// 実行：`IS2D_CONVERT=作品のパス,作品のパス cargo test --release convert_work_files_to_current_format -- --ignored --nocapture`
@@ -35580,6 +35646,7 @@ fn local_edge_rules_match_full_check() {
                 right: r,
                 left_src: None,
                 right_src: None,
+                stroke: None,
             };
             let (ra, rb) = (at(a, &mut result), at(b, &mut result));
             result.edges.push(edge(ra, rb));
@@ -37994,4 +38061,259 @@ fn os_menu_choices_dispatch_like_keys_and_forward_text_ops_to_fields() {
     });
     assert!(app.clipboard.content.is_some());
     assert_eq!(app.scene().len(), 0);
+}
+
+/// 線（1段目：塗りの輪郭に線を乗せる。設計：claude/線の設計_68a596e.md）
+mod strokes {
+    use super::*;
+    use crate::planar_map::{EdgeStroke, LayerBase, MapInput, MapRule, PlanarMap};
+    use crate::stored_map::StoredMap;
+    use doc_actions::{apply, Action};
+    use kurbo::ParamCurveArclen;
+
+    const INK: EdgeStroke = EdgeStroke {
+        color: Color32::BLACK,
+        width: 4,
+    };
+
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64, color: Color32) -> FillShape {
+        let mut s = vector_engine::make_marquee_rect_shape(kurbo::Rect::new(x0, y0, x1, y1));
+        s.color = color;
+        s
+    }
+
+    /// 赤い正方形（100〜300）で、輪郭の辺みなに線 `INK` を乗せた地図
+    fn inked_square() -> PlanarMap {
+        let mut m = PlanarMap::default()
+            .overlay(
+                MapInput::Shapes(&[rect(100.0, 100.0, 300.0, 300.0, Color32::RED)]),
+                MapRule::Paint(Some(Color32::RED)),
+            )
+            .unwrap();
+        for e in &mut m.edges {
+            e.stroke = Some(INK);
+        }
+        assert!(m.is_valid());
+        m
+    }
+
+    /// 線を乗せた辺の長さの合計
+    fn stroked_length(m: &PlanarMap) -> f64 {
+        (0..m.edges.len())
+            .filter(|&e| m.edges[e].stroke.is_some())
+            .map(|e| m.quad(e).arclen(1e-6))
+            .sum()
+    }
+
+    /// 線を乗せた辺が、みな元の正方形の輪郭の上にある
+    fn strokes_on_square(m: &PlanarMap) -> bool {
+        let on = |p: Point| {
+            let edge = |v: f64| (v - 100.0).abs() < 1e-6 || (v - 300.0).abs() < 1e-6;
+            edge(p.x) || edge(p.y)
+        };
+        (0..m.edges.len())
+            .filter(|&e| m.edges[e].stroke.is_some())
+            .all(|e| on(m.quad(e).eval(0.5)))
+    }
+
+    #[test]
+    fn brush_over_a_line_removes_it_and_cut_pieces_keep_it() {
+        let m = inked_square();
+        // ブラシ（青）が右の辺の 150〜250 を覆う：覆った所の線は消え、残りは交わりで切れても線を引き継ぐ
+        let painted = m
+            .overlay(
+                MapInput::Shapes(&[rect(200.0, 150.0, 400.0, 250.0, Color32::BLUE)]),
+                MapRule::Paint(Some(Color32::BLUE)),
+            )
+            .unwrap();
+        assert!(painted.is_valid());
+        assert!((stroked_length(&painted) - 700.0).abs() < 1e-3);
+        assert!(strokes_on_square(&painted));
+        // ブラシの輪郭（新しい境目）には線が無い
+        assert!(painted
+            .edges
+            .iter()
+            .filter(|e| e.left == Some(Color32::BLUE) || e.right == Some(Color32::BLUE))
+            .filter(|e| e.left != Some(Color32::RED) && e.right != Some(Color32::RED))
+            .all(|e| e.stroke.is_none()));
+        // 矩形で切る：中の片は中の線を持ち、切り口には線が無い。外の残りは外の線を持つ
+        let cut = vector_engine::make_marquee_rect_shape(kurbo::Rect::new(50.0, 50.0, 200.0, 200.0));
+        let inside = m
+            .overlay(MapInput::Shapes(std::slice::from_ref(&cut)), MapRule::KeepInside)
+            .unwrap();
+        let outside = m
+            .overlay(MapInput::Shapes(std::slice::from_ref(&cut)), MapRule::Paint(None))
+            .unwrap();
+        assert!(inside.is_valid() && outside.is_valid());
+        assert!((stroked_length(&inside) - 200.0).abs() < 1e-3);
+        assert!((stroked_length(&outside) - 600.0).abs() < 1e-3);
+        assert!(strokes_on_square(&inside) && strokes_on_square(&outside));
+        // 消しゴム（何も無いにする）で覆った所の線も消える
+        let erased = m
+            .overlay(
+                MapInput::Shapes(&[rect(200.0, 150.0, 400.0, 250.0, Color32::BLUE)]),
+                MapRule::Paint(None),
+            )
+            .unwrap();
+        assert!((stroked_length(&erased) - 700.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn placing_a_piece_keeps_its_lines_and_covers_lines_under_it() {
+        let under = inked_square();
+        // 線の無い青い片を、正方形の右下にかぶせて置く：片の色のある所の下の線は消える
+        let piece = PlanarMap::default()
+            .overlay(
+                MapInput::Shapes(&[rect(250.0, 250.0, 350.0, 350.0, Color32::BLUE)]),
+                MapRule::Paint(Some(Color32::BLUE)),
+            )
+            .unwrap();
+        let placed = under.overlay(MapInput::Map(&piece), MapRule::Overlay).unwrap();
+        assert!(placed.is_valid());
+        assert!((stroked_length(&placed) - 700.0).abs() < 1e-3);
+        // 線のある片を、何も無い所に置く：片の線はそのまま入る
+        let mut inked_piece = piece.clone();
+        for e in &mut inked_piece.edges {
+            e.stroke = Some(EdgeStroke {
+                color: Color32::GREEN,
+                width: 1,
+            });
+        }
+        let far = inked_piece.transformed(Affine::translate((500.0, 0.0)));
+        let both = under.overlay(MapInput::Map(&far), MapRule::Overlay).unwrap();
+        let green: f64 = (0..both.edges.len())
+            .filter(|&e| both.edges[e].stroke.is_some_and(|s| s.color == Color32::GREEN))
+            .map(|e| both.quad(e).arclen(1e-6))
+            .sum();
+        assert!((green - 400.0).abs() < 1e-3);
+        assert!((stroked_length(&both) - 1200.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn two_edges_merge_only_when_their_lines_match() {
+        let mut m = inked_square();
+        // 上の辺（y = 100）だけ線を外す。上の辺の両端の角は、線の違う2本がつながるので消せない。下の2つの角は消せる
+        for i in 0..m.edges.len() {
+            let q = m.quad(i);
+            if q.p0.y == 100.0 && q.p2.y == 100.0 {
+                m.edges[i].stroke = None;
+            }
+        }
+        let corner = |p: Point| m.nodes.iter().position(|&n| n == p).unwrap();
+        assert!(m.with_anchor_deleted(corner(Point::new(100.0, 100.0))).is_none());
+        assert!(m.with_anchor_deleted(corner(Point::new(300.0, 100.0))).is_none());
+        assert!(m.with_anchor_deleted(corner(Point::new(300.0, 300.0))).is_some());
+    }
+
+    #[test]
+    fn face_shapes_carry_their_outline_lines() {
+        let m = inked_square().checked().unwrap();
+        let base = LayerBase::of_stored(&StoredMap::from_dense(m.uniquely_labeled().map(), None));
+        let faces = base.faces(&[]);
+        let face = faces.iter().next().unwrap();
+        let outline = face.outline();
+        assert_eq!(outline.len(), 1);
+        assert_eq!((outline[0].color, outline[0].width), (INK.color, INK.width));
+        // 線の太さの半分だけ、図形の外形が広がる
+        let b = face.bounding_box();
+        assert!((b.x0 - 98.0).abs() < 0.05 && (b.x1 - 302.0).abs() < 0.05);
+        // 塗りのメッシュに、線の色の頂点が入る
+        assert!(face.fill_mesh().vertices.iter().any(|v| v.color == INK.color));
+        assert!(face.fill_mesh().vertices.iter().any(|v| v.color == Color32::RED));
+        // 線の上の点（輪郭から 1px 外）で、線が当たる
+        assert!(face.outline_at(Point::new(200.0, 99.0)).is_some());
+        assert!(face.outline_at(Point::new(200.0, 105.0)).is_none());
+    }
+
+    /// 作業中のレイヤーの今のコマの地図の辺
+    fn cel_edges(app: &Is2dApp) -> Vec<crate::planar_map::MapEdge> {
+        let tl = app.tab().active_timeline();
+        let cel = tl.layers[tl.active_layer].cel_at(tl.current_frame).unwrap();
+        cel.maps.iter().flat_map(|m| m.base().map().edges.clone()).collect()
+    }
+
+    #[test]
+    fn ink_bottle_outlines_a_fill_changes_one_line_and_survives_save() {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(&mut app, 0, 0, vec![rect(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+        // 塗りの中をクリック：輪郭の辺みなに線が乗る
+        assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: INK }));
+        assert!(cel_edges(&app).iter().all(|e| e.stroke == Some(INK)));
+        // 同じ線でもう一度：替わらない
+        assert!(!apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: INK }));
+        // 画面の図形は、輪郭の線を持つ
+        assert!(app.scene().iter().any(|s| !s.outline().is_empty()));
+        // 保存して開き直しても、線はそのまま
+        let reopened_doc = reopened(&app.doc).unwrap();
+        let cel = reopened_doc.root.layers[0].cel_at(0).unwrap();
+        let edges: Vec<_> = cel.maps.iter().flat_map(|m| m.base().map().edges.clone()).collect();
+        assert!(!edges.is_empty() && edges.iter().all(|e| e.stroke == Some(INK)));
+        // 線の上をクリック：その線のひと続き（角は2本だけがつながる頂点なので、輪郭みな）が新しい線になる
+        let thin = EdgeStroke {
+            color: Color32::GREEN,
+            width: 1,
+        };
+        assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 101.0), stroke: thin }));
+        assert!(cel_edges(&app).iter().all(|e| e.stroke == Some(thin)));
+        // Undo で戻る
+        assert!(apply(&mut app, Action::Undo));
+        assert!(cel_edges(&app).iter().all(|e| e.stroke == Some(INK)));
+        assert!(apply(&mut app, Action::Undo));
+        assert!(cel_edges(&app).iter().all(|e| e.stroke.is_none()));
+        // 何も無い所：乗せない
+        assert!(!apply(&mut app, Action::InkBottle { pt: Point::new(600.0, 600.0), stroke: INK }));
+    }
+
+    #[test]
+    fn ink_bottle_on_one_of_two_touching_fills_lines_their_shared_edge() {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                rect(100.0, 100.0, 200.0, 200.0, Color32::RED),
+                rect(200.0, 100.0, 300.0, 200.0, Color32::BLUE),
+            ],
+        );
+        assert!(apply(&mut app, Action::InkBottle { pt: Point::new(150.0, 150.0), stroke: INK }));
+        let edges = cel_edges(&app);
+        // 赤の輪郭（共有する境目を含む）に線が乗り、青だけの辺には乗らない
+        for e in &edges {
+            let red = e.left == Some(Color32::RED) || e.right == Some(Color32::RED);
+            assert_eq!(e.stroke.is_some(), red);
+        }
+        // 共有する境目の線は、両側の面の図形が持つ（あとに描く面の線が、先に描く面の塗りの上に来る）
+        let with_lines = app.scene().iter().filter(|s| !s.outline().is_empty()).count();
+        assert_eq!(with_lines, 2);
+        // スポイトで線の上を取ると、線の色と太さを拾う
+        app.tool.stroke = EdgeStroke {
+            color: Color32::WHITE,
+            width: 9,
+        };
+        crate::tool_paint::pick_color_at(&mut app, Point::new(150.0, 99.0));
+        assert_eq!(app.tool.stroke, INK);
+    }
+
+    #[test]
+    fn brushing_over_an_inked_outline_removes_the_covered_line() {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(&mut app, 0, 0, vec![rect(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+        assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: INK }));
+        apply(&mut app, Action::SetTool { tool: Tool::Brush });
+        app.tool.brush_color = Color32::BLUE;
+        commit_brush_line(&mut app, &brush_line(&[Point::new(300.0, 120.0), Point::new(300.0, 280.0)], 15.0));
+        // 右の辺の、ブラシが覆った所（y がおよそ 105〜295）には線が残らない
+        let tl = app.tab().active_timeline();
+        let cel = tl.layers[0].cel_at(0).unwrap();
+        let base = cel.maps[0].base();
+        let m = base.map();
+        for e in 0..m.edges.len() {
+            if m.edges[e].stroke.is_some() {
+                let mid = m.quad(e).eval(0.5);
+                assert!(!((mid.x - 300.0).abs() < 1.0 && mid.y > 110.0 && mid.y < 290.0));
+            }
+        }
+        assert!(stroked_length(m) > 400.0);
+    }
 }

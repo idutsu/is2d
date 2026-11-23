@@ -166,36 +166,11 @@ fn paint_frame(
             if shape.is_empty_symbol_marker() {
                 continue;
             }
-            let mut pb = tiny_skia::PathBuilder::new();
-            for contour in shape.contours() {
-                let Some(first) = contour.segments.first() else {
-                    continue;
-                };
-                pb.move_to(first.p0.x as f32 - origin_x, first.p0.y as f32 - origin_y);
-                for seg in contour.segments.iter() {
-                    pb.quad_to(
-                        seg.p1.x as f32 - origin_x,
-                        seg.p1.y as f32 - origin_y,
-                        seg.p2.x as f32 - origin_x,
-                        seg.p2.y as f32 - origin_y,
-                    );
-                }
-                pb.close();
+            // 塗り、続けて輪郭に乗せた線（画面のメッシュと同じ順）
+            fill_contours(&mut pixmap, shape.contours(), shape.color, (origin_x, origin_y));
+            for o in shape.outline() {
+                fill_contours(&mut pixmap, o.rings.iter(), o.color, (origin_x, origin_y));
             }
-            let Some(path) = pb.finish() else {
-                continue;
-            };
-            let [r, g, b, a] = shape.color.to_srgba_unmultiplied();
-            let mut paint = tiny_skia::Paint::default();
-            paint.set_color_rgba8(r, g, b, a);
-            paint.anti_alias = true;
-            pixmap.fill_path(
-                &path,
-                &paint,
-                tiny_skia::FillRule::EvenOdd,
-                tiny_skia::Transform::identity(),
-                None,
-            );
         }
     }
 
@@ -215,6 +190,45 @@ fn paint_frame(
         data[stage_h_usize * w_usize * 4..].fill(255);
     }
     Some(data)
+}
+
+/// 輪郭 `contours`（文書の座標）を、偶奇の規則で色 `color` に塗る（`origin` は書き出す絵の左上の文書の座標）
+fn fill_contours<'a>(
+    pixmap: &mut tiny_skia::Pixmap,
+    contours: impl Iterator<Item = &'a crate::vector_engine::Contour>,
+    color: eframe::egui::Color32,
+    (origin_x, origin_y): (f32, f32),
+) {
+    let mut pb = tiny_skia::PathBuilder::new();
+    for contour in contours {
+        let Some(first) = contour.segments.first() else {
+            continue;
+        };
+        pb.move_to(first.p0.x as f32 - origin_x, first.p0.y as f32 - origin_y);
+        for seg in contour.segments.iter() {
+            pb.quad_to(
+                seg.p1.x as f32 - origin_x,
+                seg.p1.y as f32 - origin_y,
+                seg.p2.x as f32 - origin_x,
+                seg.p2.y as f32 - origin_y,
+            );
+        }
+        pb.close();
+    }
+    let Some(path) = pb.finish() else {
+        return;
+    };
+    let [r, g, b, a] = color.to_srgba_unmultiplied();
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color_rgba8(r, g, b, a);
+    paint.anti_alias = true;
+    pixmap.fill_path(
+        &path,
+        &paint,
+        tiny_skia::FillRule::EvenOdd,
+        tiny_skia::Transform::identity(),
+        None,
+    );
 }
 
 /// 書き出し先 `target_path` と同じフォルダに置く一時ファイルパス（`.<名前>.<プロセスID>.mp4.tmp`）を返す

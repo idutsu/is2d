@@ -88,6 +88,11 @@ pub(crate) enum Action {
         pt: Point,
         color: Color32,
     },
+    /// インクボトル：点の線か、点を含む面の輪郭に、線 `stroke` を乗せる
+    InkBottle {
+        pt: Point,
+        stroke: crate::planar_map::EdgeStroke,
+    },
 
     // 選択・移動・グループ階層
     SelectSingleAt {
@@ -570,6 +575,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             apply_stroke_shapes(tab, tool.tool, shapes)
         }
         Action::BucketFill { pt, color } => apply_bucket_fill(tab, color, pt),
+        Action::InkBottle { pt, stroke } => apply_ink_bottle(tab, stroke, pt),
 
         Action::SelectSingleAt { pt } => select_single_shape_at(tab, tool.select_sub_mode, pt),
         Action::ToggleSelectionAt { scene_idx } => {
@@ -1097,6 +1103,27 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
     let doc_pt = tab.session.edit_path.world_xform().inverse() * pt;
     write_local(tab, target_lid, |base, scope| {
         base.fill_local(doc_pt, fill_color, scope)
+    })
+}
+
+/// インクボトル：作業中のレイヤー・編集中の階層の地図の、点 `pt` の線か、点を含む面の輪郭に、線 `stroke` を乗せる
+/// （`LayerBase::stroke_local`）。前面のレイヤーに覆われている所には乗せない（バケツと同じ）
+fn apply_ink_bottle(tab: &mut Tab, stroke: crate::planar_map::EdgeStroke, pt: Point) -> bool {
+    let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
+    let tl = tab.active_timeline();
+    let Some(target_ord) = tl.layer_index_by_id(target_lid) else {
+        return false;
+    };
+    if !tl.is_layer_editable_by_id(target_lid)
+        || topmost_visible_at(tab, pt).is_some_and(|(l, _)| l > target_ord)
+    {
+        return false;
+    }
+    // 線が替わらないときは、write_local が false を返し、apply が Undo の控えを捨てる
+    push_undo(tab, None);
+    let doc_pt = tab.session.edit_path.world_xform().inverse() * pt;
+    write_local(tab, target_lid, |base, scope| {
+        base.stroke_local(doc_pt, stroke, scope)
     })
 }
 

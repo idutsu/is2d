@@ -27,9 +27,20 @@ type Sides = (Option<Color32>, Option<Color32>);
 /// 面の印：色と、その面の図形の番号（重ね合わせで、色と一緒に伝える）
 type Label = (Option<Color32>, Option<ShapeId>);
 
+/// 線の太さの範囲（px。整数だけ）
+pub(crate) const STROKE_WIDTHS: std::ops::RangeInclusive<u8> = 1..=10;
+
+/// 辺に乗せた線：色と太さ（px。`STROKE_WIDTHS` の内）。端と角は丸だけ（設計：claude/線の設計_68a596e.md の 5章）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct EdgeStroke {
+    pub(crate) color: Color32,
+    pub(crate) width: u8,
+}
+
 /// 辺。a → b に進んだときの左（面積の式で正の側）の色と、右の色を持つ。`None` は何も無い所。
 /// `left_src`・`right_src` は、その側の面の図形の番号（セル画の地図は面ごとに1つずつ別の番号を記してしまう：
-/// `CheckedMap::uniquely_labeled`。重ね合わせでは、どの図形から来たかを運ぶ）
+/// `CheckedMap::uniquely_labeled`。重ね合わせでは、どの図形から来たかを運ぶ）。`stroke` は辺に乗せた線（無ければ `None`。
+/// 線は向きを持たないので、左右を入れ替えても変わらない）
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MapEdge {
     pub(crate) a: usize,
@@ -39,9 +50,16 @@ pub(crate) struct MapEdge {
     pub(crate) right: Option<Color32>,
     pub(crate) left_src: Option<ShapeId>,
     pub(crate) right_src: Option<ShapeId>,
+    pub(crate) stroke: Option<EdgeStroke>,
 }
 
 impl MapEdge {
+    /// つながった2本（向きをそろえたもの）を1本の辺にまとめてよい中身か：左右の色と線が同じ（2本のまとめ `merge_degree2`
+    /// とアンカーの削除 `with_anchor_deleted` の決まりはこれ1つ）
+    fn same_content(&self, next: &MapEdge) -> bool {
+        self.left == next.left && self.right == next.right && self.stroke == next.stroke
+    }
+
     /// `start` なら頂点 `v` から始まる向き、そうでなければ `v` で終わる向きにした写し（逆にするときは左右も入れ替える）
     fn oriented(self, start: bool, v: usize) -> MapEdge {
         let ok = if start { self.a == v } else { self.b == v };
@@ -210,6 +228,7 @@ impl PlanarMap {
                 right: e.right.filter(|_| right_src.is_some()),
                 left_src,
                 right_src,
+                stroke: e.stroke,
             });
         }
         PlanarMap { nodes, edges }
@@ -302,6 +321,7 @@ impl PlanarMap {
                 right,
                 left_src: Some(s.src),
                 right_src,
+                stroke: None,
             });
         }
         Self { nodes, edges }
@@ -624,10 +644,11 @@ impl PlanarMap {
 
     /// 面 `f` の今の形を、塗りの形にする（`cycles_shape`）
     pub(crate) fn face_shape(&self, f: &MapFace, layer_id: u64, group_path: &[u64]) -> FillShape {
-        let cycles = f
-            .cycles
-            .iter()
-            .map(|c| c.iter().map(|&h| self.half_quad(h)).collect());
+        let cycles = f.cycles.iter().map(|c| {
+            c.iter()
+                .map(|&h| (self.half_quad(h), self.edges[h.0].stroke))
+                .collect()
+        });
         cycles_shape(f.color, cycles, |_, _| None, layer_id, group_path)
     }
 
@@ -816,7 +837,7 @@ impl PlanarMap {
                 (at[v][1], at[v][0])
             };
             let (e1, e2) = (edges[i].oriented(false, v), edges[j].oriented(true, v));
-            if e1.a == e2.b || e1.left != e2.left || e1.right != e2.right {
+            if e1.a == e2.b || !e1.same_content(&e2) {
                 continue;
             }
             let (q1, q2) = (
@@ -945,24 +966,119 @@ impl PlanarMap {
     }
 }
 
-/// 色 `color` の面の、輪郭（外周、穴の順）の曲線の並び `cycles` から、塗りの形を作る（面の図形を作る決まりはこれ1つ：
-/// 地図から作る `PlanarMap::face_shape`・書き戻しで作る `LocalMap::rewrite`）。輪郭は座標のいちばん小さい点から始め
-/// （`reuse` が k 番目の輪郭と形の同じ輪郭（前の図形の輪郭。同じ決まりで作ったもの）を返せばそれ）、穴はその点の順に
-/// 並べる（形は地図の面だけで決まり、辺の並びや作り方（差分から作る・しまった地図から作り直す）によらない）
+/// 色 `color` の面の、輪郭（外周、穴の順）の（曲線, その辺の線）の並び `cycles` から、塗りの形を作る（面の図形を作る決まり
+/// はこれ1つ：地図から作る `PlanarMap::face_shape`・書き戻しで作る `LocalMap::rewrite`）。輪郭は座標のいちばん小さい点から
+/// 始め（`reuse` が k 番目の輪郭と形の同じ輪郭（前の図形の輪郭。同じ決まりで作ったもの）を返せばそれ）、穴はその点の順に
+/// 並べる（形は地図の面だけで決まり、辺の並びや作り方（差分から作る・しまった地図から作り直す）によらない）。輪郭の辺の線は、
+/// 太らせて面の図形に付ける（`outline_of`）
 fn cycles_shape(
     color: Color32,
-    cycles: impl Iterator<Item = Vec<QuadBez>>,
+    cycles: impl Iterator<Item = Vec<(QuadBez, Option<EdgeStroke>)>>,
     reuse: impl Fn(usize, &[QuadBez]) -> Option<Contour>,
     layer_id: u64,
     group_path: &[u64],
 ) -> FillShape {
-    let mut contours = cycles.enumerate().map(|(k, quads)| {
+    let cycles: Vec<Vec<(QuadBez, Option<EdgeStroke>)>> = cycles.collect();
+    let mut contours = cycles.iter().enumerate().map(|(k, c)| {
+        let quads: Vec<QuadBez> = c.iter().map(|x| x.0).collect();
         reuse(k, &quads).unwrap_or_else(|| Contour::new(from_lowest_point(quads)))
     });
     let exterior = contours.next().unwrap_or_else(|| Contour::new(Vec::new()));
     let mut holes: Vec<Contour> = contours.collect();
     holes.sort_by(|a, b| starts_order(&a.segments, &b.segments));
-    FillShape::new(color, exterior, holes).with_scope(layer_id, group_path)
+    FillShape::new(color, exterior, holes)
+        .with_scope(layer_id, group_path)
+        .with_outline(outline_of(&cycles))
+}
+
+/// 面の輪郭（`cycles_shape` の並び）に乗せた線を太らせた形：輪郭ごとに、同じ線の続いた辺を1本の折れ線にし（輪郭がみな
+/// 同じ線なら閉じた折れ線）、線ごとに、折れ線を線の太さに太らせて重ねる（端も角も丸）。曲線は、描画の許容 `MESH_TOL` で
+/// 折れ線にし、丸い端と角も同じ許容の折れ線にする（半径 r の円弧を、弦と円弧のずれが許容ほどになる角 √(8·許容/r) ごとに
+/// 折る）。線の無い面は空
+fn outline_of(cycles: &[Vec<(QuadBez, Option<EdgeStroke>)>]) -> Vec<crate::vector_engine::Outline> {
+    use crate::vector_engine::{Outline, MESH_TOL};
+    use i_overlay9::mesh::float::stroke::offset::StrokeOffset;
+    use i_overlay9::mesh::float::style::{LineCap, LineJoin, StrokeStyle};
+    // 線ごとの（閉じた折れ線, 開いた折れ線）
+    type Paths = (Vec<Vec<[f64; 2]>>, Vec<Vec<[f64; 2]>>);
+    let mut by_stroke: Vec<(EdgeStroke, Paths)> = Vec::new();
+    let mut add = |stroke: EdgeStroke, run: &[(QuadBez, Option<EdgeStroke>)], closed: bool| {
+        let mut path: Vec<[f64; 2]> = Vec::new();
+        for (q, _) in run {
+            let skip = usize::from(!path.is_empty());
+            path.extend(flat_points(*q, MESH_TOL).skip(skip).map(|(p, _)| [p.x, p.y]));
+        }
+        if closed {
+            path.pop();
+        }
+        let slot = match by_stroke.iter().position(|(s, _)| *s == stroke) {
+            Some(i) => &mut by_stroke[i].1,
+            None => {
+                by_stroke.push((stroke, Default::default()));
+                &mut by_stroke.last_mut().expect("足した").1
+            }
+        };
+        if closed { &mut slot.0 } else { &mut slot.1 }.push(path);
+    };
+    for c in cycles {
+        let n = c.len();
+        // 線の変わり目（前の辺と線が違う辺）から回る。変わり目が無ければ、輪郭みな同じ線か、みな線なし
+        let Some(start) = (0..n).find(|&i| c[i].1 != c[(i + n - 1) % n].1) else {
+            if let Some(Some(stroke)) = c.first().map(|x| x.1) {
+                add(stroke, c, true);
+            }
+            continue;
+        };
+        let mut i = 0;
+        while i < n {
+            let stroke = c[(start + i) % n].1;
+            let mut j = i + 1;
+            while j < n && c[(start + j) % n].1 == stroke {
+                j += 1;
+            }
+            if let Some(stroke) = stroke {
+                let run: Vec<_> = (i..j).map(|k| c[(start + k) % n]).collect();
+                add(stroke, &run, false);
+            }
+            i = j;
+        }
+    }
+    let mut out = Vec::new();
+    for (stroke, (closed, open)) in by_stroke {
+        let step = (8.0 * MESH_TOL / (stroke.width as f64 / 2.0)).sqrt();
+        let style = || {
+            StrokeStyle::new(stroke.width as f64)
+                .line_join(LineJoin::Round(step))
+                .start_cap(LineCap::Round(step))
+                .end_cap(LineCap::Round(step))
+        };
+        let mut rings: Vec<Contour> = Vec::new();
+        for (paths, is_closed) in [(closed, true), (open, false)] {
+            if paths.is_empty() {
+                continue;
+            }
+            for shape in paths.stroke(style(), is_closed) {
+                for ring in shape.iter().filter(|r| r.len() >= 3) {
+                    let segs = (0..ring.len())
+                        .map(|i| {
+                            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                            let (a, b) = (Point::new(a[0], a[1]), Point::new(b[0], b[1]));
+                            QuadBez::new(a, a.midpoint(b), b)
+                        })
+                        .collect();
+                    rings.push(Contour::new(segs));
+                }
+            }
+        }
+        if !rings.is_empty() {
+            out.push(Outline {
+                color: stroke.color,
+                width: stroke.width,
+                rings,
+            });
+        }
+    }
+    out
 }
 
 /// 辺の形が同じかを比べるための鍵（向きはそろえる）。色は入れない：辺のその側が変わっていないかは、側の元の図形の印で
@@ -1052,6 +1168,7 @@ fn tile_edges_of(m: &PlanarMap, edges: &[usize]) -> Vec<crate::stored_map::TileE
                 right: ed.right,
                 left_src: ed.left_src,
                 right_src: ed.right_src,
+                stroke: ed.stroke,
             }
         })
         .collect()
@@ -1403,11 +1520,11 @@ impl LayerBase {
         index_tiles(cells.iter().copied())
     }
 
-    /// 辺 `e`（計算に使う地図の番号）の曲線と左右の色（輪郭の変形で動かした辺の前の曲線と色：`MapInput::lines`）。塊から
+    /// 辺 `e`（計算に使う地図の番号）の曲線と左右の色と線（輪郭の変形で動かした辺の前の曲線と色：`MapInput::lines`）。塊から
     /// 引く
-    fn old_edge(&self, e: usize) -> (QuadBez, Sides) {
+    fn old_edge(&self, e: usize) -> (QuadBez, Sides, Option<EdgeStroke>) {
         let te = self.stored.edge_at(e);
-        (te.quad(), (te.left, te.right))
+        (te.quad(), (te.left, te.right), te.stroke)
     }
 
     /// 道具の側（ブラシ・消しゴム）：形 `shapes`（文書の座標）を決まり `rule` で重ねるときに、重ね合わせに渡すもの。形の線の
@@ -1628,6 +1745,7 @@ impl LayerBase {
                 right: te.right,
                 left_src: te.left_src,
                 right_src: te.right_src,
+                stroke: te.stroke,
             });
         }
         let added: Vec<usize> = (0..m.edges.len()).collect();
@@ -1713,6 +1831,95 @@ impl LayerBase {
             let (removed, added) = stored.window_diff_tiles(&wedges, &m);
             return Some((m, removed, added));
         }
+    }
+
+    /// 道具の側（インクボトル）：点 `p`（文書の座標）の線か面の輪郭（`stroke_targets`）の辺に、線 `stroke` を乗せる差分を
+    /// 作り、1本の道の差分から先（`apply_diff`）に渡す。形は変わらないので、差分は線の替わる辺だけ（2本のまとめはしない：
+    /// まとめる候補は操作が作った切れ目だけで、線を替えても切れ目はできない）。替わる辺が無ければ `Same`。テストでは毎回、
+    /// 地図全体の同じ辺の線を替えた地図（お手本）と同じことを確かめる（設計：claude/線の設計_68a596e.md の 2.1）
+    pub(crate) fn stroke_local(&self, p: Point, stroke: EdgeStroke, group_path: &[u64]) -> LocalEdit {
+        let edges: Vec<usize> = self
+            .stroke_targets(p, group_path)
+            .into_iter()
+            .filter(|&e| self.stored.edge_at(e).stroke != Some(stroke))
+            .collect();
+        if edges.is_empty() {
+            return LocalEdit::Same;
+        }
+        let (mut m, _) = tile_window(self.map_index(), &edges);
+        for ed in &mut m.edges {
+            ed.stroke = Some(stroke);
+        }
+        let (removed, added) = self.stored.window_diff_tiles(&edges, &m);
+        #[cfg(test)]
+        if test_checks() {
+            let ok = uncounted(|| {
+                let mut whole = self.map().clone();
+                for &e in &edges {
+                    whole.edges[e].stroke = Some(stroke);
+                }
+                self.diffed(Some(&(m.clone(), removed.clone(), added.clone())))
+                    .same_content(&StoredMap::from_dense(&whole, None))
+            });
+            assert!(
+                ok,
+                "インクボトルの差分が、地図全体で線を替えた地図（お手本）と違う"
+            );
+        }
+        self.apply_diff(&m, &removed, &added, group_path)
+    }
+
+    /// インクボトルで線を乗せる辺（計算に使う地図の番号）：点 `p` が線の上（線の太さの半分以内）なら、その線のひと続き
+    /// （その辺と、2本だけがつながる頂点の先の、同じ線の辺をたどったもの。交わりと交わりの間）。そうでなければ、点を含む
+    /// 色のある面の輪郭の辺。どちらでもなければ空
+    fn stroke_targets(&self, p: Point, group_path: &[u64]) -> Vec<usize> {
+        let reach = *STROKE_WIDTHS.end() as f64 / 2.0;
+        if let Some((e, t)) = self.hit_edge(p, reach, Affine::IDENTITY) {
+            let te = self.stored.edge_at(e);
+            if let Some(stroke) = te.stroke {
+                if te.quad().eval(t).distance(p) <= stroke.width as f64 / 2.0 {
+                    return self.stroke_run(e, stroke);
+                }
+            }
+        }
+        let empty = PlanarMap::default();
+        let local = LocalMap::new(self.map_index(), &empty, &[], &[]);
+        let faces_list = self.faces(group_path);
+        let lookup = self.faces_lookup(&faces_list);
+        let g = gpt(p);
+        let mut memo = CycleMemo::default();
+        match local.face_at((2 * g.0, 2 * g.1), &lookup, &mut memo) {
+            Some((Some(_), halves)) => {
+                let mut edges: Vec<usize> = halves.iter().map(|h| h.0).collect();
+                edges.sort_unstable();
+                edges.dedup();
+                edges
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// 線 `stroke` の辺 `e` から、2本だけがつながる頂点を越えて、同じ線の辺をたどったひと続き（番号の順）
+    fn stroke_run(&self, e: usize, stroke: EdgeStroke) -> Vec<usize> {
+        let mut run = vec![e];
+        let mut todo = vec![e];
+        while let Some(f) = todo.pop() {
+            let te = self.stored.edge_at(f);
+            for v in [te.a, te.b] {
+                let at = self.edges_at_node(v);
+                if at.len() != 2 {
+                    continue;
+                }
+                for g in at {
+                    if !run.contains(&g) && self.stored.edge_at(g).stroke == Some(stroke) {
+                        run.push(g);
+                        todo.push(g);
+                    }
+                }
+            }
+        }
+        run.sort_unstable();
+        run
     }
 
     /// 道具の側（アンカーの追加・削除）：`edit` の差分を作り、1本の道の差分から先（`apply_diff`）に渡す（設計 段2b の 9.）。
@@ -2130,6 +2337,7 @@ impl LayerBase {
                 right: te.right.filter(|_| right_src.is_some()),
                 left_src,
                 right_src,
+                stroke: te.stroke,
             });
         }
         m
@@ -2595,7 +2803,7 @@ impl PlanarMap {
             self.edges[at[0]].oriented(false, v),
             self.edges[at[1]].oriented(true, v),
         );
-        if e1.a == e2.b || e1.a == v || e2.b == v || e1.left != e2.left || e1.right != e2.right {
+        if e1.a == e2.b || e1.a == v || e2.b == v || !e1.same_content(&e2) {
             return None;
         }
         let (pa, pb) = (self.nodes[e1.a], self.nodes[e2.b]);
