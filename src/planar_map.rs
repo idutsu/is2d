@@ -212,36 +212,6 @@ impl PlanarMap {
             )
     }
 
-    /// 辺ごとの、その辺の線の図形の番号（`line_id`。線の無い辺は `None`）
-    pub(crate) fn edge_lines(&self) -> Vec<Option<ShapeId>> {
-        let stroked: Vec<(usize, crate::stored_map::TileEdge)> = self
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.stroke.is_some())
-            .map(|(i, e)| {
-                (
-                    i,
-                    crate::stored_map::TileEdge {
-                        a: self.nodes[e.a],
-                        b: self.nodes[e.b],
-                        ctrl: e.ctrl,
-                        left: e.left,
-                        right: e.right,
-                        left_src: e.left_src,
-                        right_src: e.right_src,
-                        stroke: e.stroke,
-                    },
-                )
-            })
-            .collect();
-        let mut out = vec![None; self.edges.len()];
-        for run in line_runs(&stroked) {
-            out[stroked[run.edge].0] = Some(line_id(&run, &stroked));
-        }
-        out
-    }
-
     /// 面の番号と線の番号が `keep` に合う面と線だけを残した地図（`restricted`。辺の決まりは `restricted_sides`）
     pub(crate) fn restricted_by(&self, keep: impl Fn(ShapeId) -> bool) -> PlanarMap {
         let mut index: Vec<usize> = vec![usize::MAX; self.nodes.len()];
@@ -253,13 +223,12 @@ impl PlanarMap {
             }
             index[v]
         };
-        let lines = self.edge_lines();
         let mut edges = Vec::new();
         for (i, e) in self.edges.iter().enumerate() {
             let Some(([l, r], stroke)) = restricted_sides(
                 [(e.left, e.left_src), (e.right, e.right_src)],
                 e.stroke,
-                lines[i],
+                line_id_of(&tile_edge(self, i)),
                 &keep,
             ) else {
                 continue;
@@ -1034,54 +1003,53 @@ pub(crate) fn is_line_id(id: ShapeId) -> bool {
     id & LINE_ID_BIT != 0
 }
 
-/// 線の図形1つ分（線を選ぶ単位）：線を乗せた辺1本（アンカーとアンカーの間。`line_runs` に渡した並びの番号）と、その曲線と線
-pub(crate) struct LineRun {
-    edge: usize,
-    quad: QuadBez,
-    stroke: EdgeStroke,
-}
+/// 線の図形の表：線を乗せた辺1本ずつ（アンカーとアンカーの間。クリックで選ぶ単位：設計 claude/線の設計_68a596e.md の
+/// 6.4）の線の図形を、番号（`line_id_of`）の順に並べたもの（面の表と同じ入れ物。変わった所のかかる塊だけを作り直す）
+pub(crate) type LineTable = crate::chunked_list::ChunkedList<FillShape>;
 
-/// 線を乗せた辺 `edges`（（番号, 辺）の並び）の、線の図形1つ分ずつ（辺1本ずつ。画面に見えるアンカーとアンカーの間が、
-/// クリックで選ぶ単位：設計 claude/線の設計_68a596e.md の 6.4）
-fn line_runs(edges: &[(usize, crate::stored_map::TileEdge)]) -> Vec<LineRun> {
-    edges
-        .iter()
-        .enumerate()
-        .filter_map(|(i, (_, e))| {
-            Some(LineRun {
-                edge: i,
-                quad: e.quad(),
-                stroke: e.stroke?,
-            })
-        })
-        .collect()
-}
-
-/// 線の図形1つ分 `run`（辺は `edges` の番号）の番号：辺の形（決まった向きの両端と制御点のビット）、線、辺の側の番号（面の
-/// 番号と線のラベル：`line_label`）から決める（形・線・番号がみな同じ間だけ同じ番号なので、形が少しでも変われば別の番号に
-/// なり、図形を作り直す：`LayerBase::lines`。番号を入れるので、同じ形の線がほかのレイヤーに写してあっても、ぶつからない。
-/// 線の番号の印 `LINE_ID_BIT` を立てる）
-fn line_id(run: &LineRun, edges: &[(usize, crate::stored_map::TileEdge)]) -> ShapeId {
+/// 辺 `te` の線の図形の番号（線の無い辺は `None`）：辺の形（決まった向きの両端と制御点のビット）、線、辺の側の番号（面の
+/// 番号と線のラベル：`line_label`。決まった向きにそろえる）から決める（形・線・番号がみな同じ間だけ同じ番号なので、形が
+/// 少しでも変われば別の番号になり、図形を作り直す。番号を入れるので、同じ形の線がほかのレイヤーに写してあっても、ぶつから
+/// ない。線の番号の印 `LINE_ID_BIT` を立てる）。辺1本から決まるので、ほかの辺を見ずに引ける
+pub(crate) fn line_id_of(te: &crate::stored_map::TileEdge) -> Option<ShapeId> {
     use std::hash::{Hash, Hasher};
-    let q = run.quad;
-    let (a, b) = if point_order(q.p0, q.p2).is_le() { (q.p0, q.p2) } else { (q.p2, q.p0) };
-    let e = &edges[run.edge].1;
+    let stroke = te.stroke?;
+    let (a, b, srcs) = if point_order(te.a, te.b).is_le() {
+        (te.a, te.b, [te.left_src, te.right_src])
+    } else {
+        (te.b, te.a, [te.right_src, te.left_src])
+    };
     let mut h = IntHasher::default();
-    [a.x, a.y, b.x, b.y, q.p1.x, q.p1.y].map(f64::to_bits).hash(&mut h);
-    run.stroke.hash(&mut h);
-    [e.left_src, e.right_src].hash(&mut h);
-    LINE_ID_BIT | (h.finish() >> 1)
+    [a.x, a.y, b.x, b.y, te.ctrl.x, te.ctrl.y].map(f64::to_bits).hash(&mut h);
+    stroke.hash(&mut h);
+    srcs.hash(&mut h);
+    Some(LINE_ID_BIT | (h.finish() >> 1))
 }
 
-/// 線の図形1つ分 `run` を、線の太さに太らせた形の図形（端は丸。階層 `group_path`、番号 `id`）。曲線は描画の許容
+/// 地図 `m` の辺 `e` を、塊から引いた辺の形にする（線の番号 `line_id_of` を引く）
+fn tile_edge(m: &PlanarMap, e: usize) -> crate::stored_map::TileEdge {
+    let ed = m.edges[e];
+    crate::stored_map::TileEdge {
+        a: m.nodes[ed.a],
+        b: m.nodes[ed.b],
+        ctrl: ed.ctrl,
+        left: ed.left,
+        right: ed.right,
+        left_src: ed.left_src,
+        right_src: ed.right_src,
+        stroke: ed.stroke,
+    }
+}
+
+/// 線を乗せた辺 `te` を、線の太さに太らせた形の線の図形（端は丸。階層 `group_path`、番号 `id`）。曲線は描画の許容
 /// `MESH_TOL` で折れ線にし、丸い端も同じ許容の折れ線にする（半径 r の円弧を、弦と円弧のずれが許容ほどになる角
 /// √(8·許容/r) ごとに折る）。重なりの無い輪郭を偶奇で塗る。つなぎ目は、隣の辺の線の丸い端と重なって丸くなる
-fn line_shape(run: &LineRun, id: ShapeId, group_path: &[u64]) -> Option<FillShape> {
+fn line_shape(te: &crate::stored_map::TileEdge, id: ShapeId, group_path: &[u64]) -> Option<FillShape> {
     use crate::vector_engine::MESH_TOL;
     use i_overlay9::mesh::float::stroke::offset::StrokeOffset;
     use i_overlay9::mesh::float::style::{LineCap, LineJoin, StrokeStyle};
-    let stroke = &run.stroke;
-    let path: Vec<[f64; 2]> = flat_points(run.quad, MESH_TOL).map(|(p, _)| [p.x, p.y]).collect();
+    let stroke = te.stroke?;
+    let path: Vec<[f64; 2]> = flat_points(te.quad(), MESH_TOL).map(|(p, _)| [p.x, p.y]).collect();
     let step = (8.0 * MESH_TOL / (stroke.width as f64 / 2.0)).sqrt();
     let style = StrokeStyle::new(stroke.width as f64)
         .line_join(LineJoin::Round(step))
@@ -1109,7 +1077,7 @@ fn line_shape(run: &LineRun, id: ShapeId, group_path: &[u64]) -> Option<FillShap
     let exterior = rings.remove(0);
     let mut s = FillShape::new(stroke.color, exterior, rings)
         .with_scope(0, group_path)
-        .with_line(*stroke, vec![run.quad]);
+        .with_line(stroke, vec![te.quad()]);
     s.shape_id = id;
     Some(s)
 }
@@ -1401,11 +1369,11 @@ pub(crate) struct LayerBase {
     map_faces: OnceLock<Vec<MapFace>>,
     /// 面の図形：（階層, 面ごとの図形。番号は面の印。番号の順）
     faces: SyncCache<Option<FaceShapes>>,
-    /// 線の図形：（階層, 線を乗せた辺ごとの図形。番号は線の番号。番号の順）。初めて要るときに作る（`lines`）
+    /// 線の図形の表：（階層, 線の図形の表）。初めて要るときに作る（`lines`）
     lines: SyncCache<Option<LineShapes>>,
-    /// 前の写し（この写しの地図に書き換える前の地図の写し）が作ってあった線の図形。線の図形を作るとき、形も線も同じ
-    /// 辺（同じ番号）の図形を使い回す（作り終えたら手放す）
-    prev_lines: SyncCache<Option<LineShapes>>,
+    /// 前の写し（この写しの地図に書き換える前の地図の写し）が作ってあった線の図形の表と、その地図。線の図形の表を作る
+    /// とき、前の表から、変わった辺の分だけを替えて作る（作り終えたら手放す）
+    prev_lines: SyncCache<Option<(LineShapes, StoredMap)>>,
     /// 升目の索引（初めて要るときに作る。地図を書き換えたあとの写しは、前の写しの索引から変わった所だけ作り直したもの
     /// を持つ：`of_local`・`of_stored_after`）
     index: OnceLock<crate::stored_map::TileIndex>,
@@ -1425,8 +1393,8 @@ impl Drop for LayerBase {
 /// 地図の面の図形（写し）：（階層, 面の番号の順の図形）
 type FaceShapes = (Vec<u64>, FaceTable);
 
-/// 地図の線の図形：（階層, 線の番号の順の図形）
-type LineShapes = (Vec<u64>, Arc<[Arc<FillShape>]>);
+/// 地図の線の図形の表：（階層, 線の図形の表）
+type LineShapes = (Vec<u64>, LineTable);
 
 /// 面の表：面の図形を番号の順に並べたもの（塊に分けて持つ。編集のあとの表は、変わった面のかかる塊だけを作り直し、
 /// ほかの塊は前の表と共有する：`ChunkedList::replace_sorted`。設計 段2b の 15.）
@@ -1569,8 +1537,8 @@ impl LayerBase {
         let Some(prev) = prev else {
             return;
         };
-        // 前の写しの線の図形も受け取る（`lines` が形の同じ辺の図形を使い回す）
-        *self.prev_lines.lock() = prev.lines.lock().clone();
+        // 前の写しの線の図形の表も受け取る（`lines` が変わった辺の分だけを替える）
+        *self.prev_lines.lock() = prev.lines.lock().clone().map(|t| (t, prev.stored.clone()));
         self.derive_index(prev, |b| &b.index, LayerBase::edge_tiles);
         self.derive_index(prev, |b| &b.ends, LayerBase::end_tiles);
     }
@@ -2395,7 +2363,7 @@ impl LayerBase {
         let lines = self.lines(group_path);
         ids.iter().any(|&id| {
             faces.by_id(id).is_some()
-                || (is_line_id(id) && lines.binary_search_by_key(&id, |s| s.shape_id).is_ok())
+                || (is_line_id(id) && lines.find_sorted(id, |s| s.shape_id).is_some())
         })
     }
 
@@ -2430,13 +2398,12 @@ impl LayerBase {
                 m.nodes.len() - 1
             })
         };
-        let lines = self.edge_lines();
         for e in self.selected_edges(ids, group_path) {
             let te = self.stored.edge_at(e);
             let Some(([l, r], stroke)) = restricted_sides(
                 [(te.left, te.left_src), (te.right, te.right_src)],
                 te.stroke,
-                lines.get(&e).copied(),
+                line_id_of(&te),
                 |id| ids.contains(&id),
             ) else {
                 continue;
@@ -2496,7 +2463,6 @@ impl LayerBase {
         let stored = match keep {
             FaceKeep::Without(ids) => {
                 let touched = self.selected_edges(ids, group_path);
-                let lines = self.edge_lines();
                 let added: Vec<crate::stored_map::TileEdge> = touched
                     .iter()
                     .filter_map(|&e| {
@@ -2504,7 +2470,7 @@ impl LayerBase {
                         let ([l, r], stroke) = restricted_sides(
                             [(te.left, te.left_src), (te.right, te.right_src)],
                             te.stroke,
-                            lines.get(&e).copied(),
+                            line_id_of(&te),
                             |id| keep.keeps(id),
                         )?;
                         Some(crate::stored_map::TileEdge {
@@ -2665,86 +2631,144 @@ impl LayerBase {
         shapes
     }
 
-    /// 線の図形（階層 `group_path` の文書の座標。写しに控える）：線を乗せた辺1本ずつ（`line_runs`。アンカーとアンカーの間）を、
-    /// 太らせた形の図形にしたもの（番号は `line_id`。番号の順）。同じ地図の面の図形を全部描いたあとに描く
-    /// （線は塗りより上：`ScopeMap::drawn_shapes`）。前の写しが作ってあった図形のうち、番号の同じもの（形も線も同じ
-    /// 辺）は使い回すので、作り直すのは変わった辺の分だけ（設計：claude/線の設計_68a596e.md の 6.3）
-    pub(crate) fn lines(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
+    /// 線の図形の表（階層 `group_path` の文書の座標。写しに控える）：線を乗せた辺1本ずつ（アンカーとアンカーの間）を、
+    /// 太らせた形の図形にしたもの（番号は `line_id_of`。番号の順）。同じ地図の面の図形を全部描いたあとに描く（線は塗りより
+    /// 上：`drawn_shapes`）。前の写しの表があれば、前の地図との差分（`StoredMap::diff_tiles`：共有しない塊の中で、中身の
+    /// 変わった辺）の分だけを替えて作る（手間は変わった所の分。消えた辺の線を外し、増えた辺の線を足す。番号の同じ図形は
+    /// 使い回す）。無ければ（初めて見る地図）、線を乗せた辺をみな図形にする（設計：claude/線の設計_68a596e.md の 6.3）
+    pub(crate) fn lines(&self, group_path: &[u64]) -> LineTable {
         let mut cached = self.lines.lock();
-        if let Some((gp, shapes)) = &*cached {
+        if let Some((gp, table)) = &*cached {
             if gp == group_path {
-                return shapes.clone();
+                return table.clone();
             }
         }
-        let prev = self.prev_lines.lock().take().filter(|(gp, _)| gp == group_path);
-        let reuse = |id: ShapeId| {
-            let (_, list) = prev.as_ref()?;
-            let k = list.binary_search_by_key(&id, |s| s.shape_id).ok()?;
-            Some(list[k].clone())
+        let prev = self.prev_lines.lock().take().filter(|((gp, _), _)| gp == group_path);
+        let table = match prev {
+            Some(((_, mut table), prev_stored)) => {
+                let (removed, added) = prev_stored.diff_tiles(&self.stored);
+                let mut gone: Vec<ShapeId> = removed
+                    .iter()
+                    .filter_map(|&e| line_id_of(&prev_stored.edge_at(e)))
+                    .collect();
+                gone.sort_unstable();
+                gone.dedup();
+                let mut new: Vec<Arc<FillShape>> = added
+                    .iter()
+                    .filter_map(|te| {
+                        let id = line_id_of(te)?;
+                        match table.find_sorted(id, |s| s.shape_id) {
+                            Some(s) => Some(s.clone()),
+                            None => line_shape(te, id, group_path).map(Arc::new),
+                        }
+                    })
+                    .collect();
+                new.sort_unstable_by_key(|s| s.shape_id);
+                new.dedup_by_key(|s| s.shape_id);
+                // 消さずに残る番号の図形は、もう表にある
+                new.retain(|s| {
+                    gone.binary_search(&s.shape_id).is_ok()
+                        || table.find_sorted(s.shape_id, |x| x.shape_id).is_none()
+                });
+                table.replace_sorted(&gone, new, |s| s.shape_id);
+                // お手本：地図全体の線を乗せた辺から作った表と、番号と形が同じ
+                #[cfg(test)]
+                if test_checks() {
+                    let ok = uncounted(|| {
+                        let mut whole: Vec<(ShapeId, [u64; 6])> = self
+                            .stored
+                            .stroked_edges()
+                            .iter()
+                            .filter_map(|(_, te)| {
+                                let q = te.quad();
+                                Some((line_id_of(te)?, [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y].map(f64::to_bits)))
+                            })
+                            .collect();
+                        whole.sort_unstable_by_key(|x| x.0);
+                        let got: Vec<(ShapeId, [u64; 6])> = table
+                            .iter()
+                            .map(|s| {
+                                let q = s.wire_contours().next().expect("線の曲線").segments[0];
+                                (s.shape_id, [q.p0.x, q.p0.y, q.p1.x, q.p1.y, q.p2.x, q.p2.y].map(f64::to_bits))
+                            })
+                            .collect();
+                        whole == got
+                    });
+                    assert!(ok, "変わった所だけで作った線の図形の表が、地図全体から作った表（お手本）と違う");
+                }
+                table
+            }
+            None => {
+                let mut shapes: Vec<Arc<FillShape>> = self
+                    .stored
+                    .stroked_edges()
+                    .iter()
+                    .filter_map(|(_, te)| line_shape(te, line_id_of(te)?, group_path).map(Arc::new))
+                    .collect();
+                shapes.sort_unstable_by_key(|s| s.shape_id);
+                shapes.dedup_by_key(|s| s.shape_id);
+                shapes.into()
+            }
         };
-        let stroked = self.stored.stroked_edges();
-        let mut shapes: Vec<Arc<FillShape>> = line_runs(&stroked)
-            .iter()
-            .filter_map(|run| {
-                let id = line_id(run, &stroked);
-                reuse(id).or_else(|| line_shape(run, id, group_path).map(Arc::new))
-            })
-            .collect();
-        shapes.sort_unstable_by_key(|s| s.shape_id);
-        shapes.dedup_by_key(|s| s.shape_id);
-        let shapes: Arc<[Arc<FillShape>]> = shapes.into();
-        *cached = Some((group_path.to_vec(), shapes.clone()));
-        shapes
+        *cached = Some((group_path.to_vec(), table.clone()));
+        table
     }
 
-    /// 線を乗せた辺（計算に使う地図の番号）ごとの、その辺の線の図形の番号（`line_id`）
-    fn edge_lines(&self) -> IntMap<usize, ShapeId> {
-        let stroked = self.stored.stroked_edges();
-        let mut out: IntMap<usize, ShapeId> = IntMap::default();
-        for run in line_runs(&stroked) {
-            out.insert(stroked[run.edge].0, line_id(&run, &stroked));
-        }
-        out
+    /// 番号が `id` の線の図形の辺（計算に使う地図の番号。線の図形の表で引き、その曲線の辺を塊から引く）
+    fn line_edge(&self, id: ShapeId, group_path: &[u64]) -> Option<usize> {
+        let lines = self.lines(group_path);
+        let s = lines.find_sorted(id, |s| s.shape_id)?;
+        let q = s.wire_contours().next()?.segments.first().copied()?;
+        Some(self.stored.find_edge(&q)?.0)
+    }
+
+    /// この地図を地図 `next_base`（この地図に差分を当てたものの写し）にしたときの、線の図形の変わり方：消えた線の番号と、
+    /// 増えた線の図形（`next_base` の表から）。手間は変わった所の分（`StoredMap::diff_tiles`）
+    pub(crate) fn line_changes(
+        &self,
+        next_base: &LayerBase,
+        group_path: &[u64],
+    ) -> (Vec<ShapeId>, Vec<Arc<FillShape>>) {
+        let (removed, added) = self.stored.diff_tiles(&next_base.stored);
+        let gone = removed
+            .iter()
+            .filter_map(|&e| line_id_of(&self.stored.edge_at(e)))
+            .collect();
+        let then = next_base.lines(group_path);
+        let made = added
+            .iter()
+            .filter_map(|te| then.find_sorted(line_id_of(te)?, |s| s.shape_id).cloned())
+            .collect();
+        (gone, made)
     }
 
     /// ダブルクリックで一緒に選ぶもの（階層 `group_path`）：線の番号 `id` なら、その線の辺と、端でつながった同じ線の辺を
-    /// たどったもの。面の番号なら、その面と、輪郭の辺の線（Animate と同じ：設計 claude/線の設計_68a596e.md の 6.4）
+    /// たどったもの（頂点の辺は索引で引く：`edges_at_node`。手間はつながった線の分）。面の番号なら、その面と、輪郭の辺の線
+    /// （Animate と同じ：設計 claude/線の設計_68a596e.md の 6.4）
     pub(crate) fn connected_ids(&self, id: ShapeId, group_path: &[u64]) -> HashSet<ShapeId> {
-        let stroked = self.stored.stroked_edges();
-        let runs: Vec<(ShapeId, LineRun)> = line_runs(&stroked)
-            .into_iter()
-            .map(|r| (line_id(&r, &stroked), r))
-            .collect();
         let mut out: HashSet<ShapeId> = HashSet::from([id]);
-        if is_line_id(id) {
-            let ends = |r: &LineRun| -> [[u64; 2]; 2] {
-                let (a, b) = (r.quad.p0, r.quad.p2);
-                [[a.x.to_bits(), a.y.to_bits()], [b.x.to_bits(), b.y.to_bits()]]
-            };
-            let mut todo = vec![id];
-            while let Some(cur) = todo.pop() {
-                let Some((_, run)) = runs.iter().find(|(i, _)| *i == cur) else {
-                    continue;
-                };
-                let cur_ends = ends(run);
-                for (other, r) in &runs {
-                    if r.stroke == run.stroke
-                        && !out.contains(other)
-                        && ends(r).iter().any(|p| cur_ends.contains(p))
-                    {
-                        out.insert(*other);
-                        todo.push(*other);
-                    }
-                }
+        if !is_line_id(id) {
+            for e in self.faces_edges(&HashSet::from([id]), group_path) {
+                out.extend(line_id_of(&self.stored.edge_at(e)));
             }
-        } else {
-            let edges: IntSet<usize> = self
-                .faces_edges(&HashSet::from([id]), group_path)
-                .into_iter()
-                .collect();
-            for (rid, r) in &runs {
-                if edges.contains(&stroked[r.edge].0) {
-                    out.insert(*rid);
+            return out;
+        }
+        let Some(start) = self.line_edge(id, group_path) else {
+            return out;
+        };
+        let stroke = self.stored.edge_at(start).stroke;
+        let mut seen: IntSet<usize> = IntSet::default();
+        seen.insert(start);
+        let mut todo = vec![start];
+        while let Some(f) = todo.pop() {
+            let te = self.stored.edge_at(f);
+            for p in [te.a, te.b] {
+                for g in self.edges_at_node(p) {
+                    let ge = self.stored.edge_at(g);
+                    if ge.stroke == stroke && seen.insert(g) {
+                        out.extend(line_id_of(&ge));
+                        todo.push(g);
+                    }
                 }
             }
         }
@@ -2756,10 +2780,9 @@ impl LayerBase {
         let mut out = self.faces_edges(ids, group_path);
         if ids.iter().any(|&id| is_line_id(id)) {
             out.extend(
-                self.edge_lines()
-                    .into_iter()
-                    .filter(|(_, id)| ids.contains(id))
-                    .map(|(e, _)| e),
+                ids.iter()
+                    .filter(|&&id| is_line_id(id))
+                    .filter_map(|&id| self.line_edge(id, group_path)),
             );
             out.sort_unstable();
             out.dedup();
@@ -3111,16 +3134,13 @@ pub(crate) fn reshape_result(
                     Some(placed(s, xform))
                 })
                 .collect();
-            // 線の図形：今の地図の線のうち新しい地図に無いものを消し、新しい地図の線のうち今の地図に無いものを入れる
-            // （線の番号は形と線で決まる：`LayerBase::lines`）
+            // 線の図形：変わった辺の線を消し、増えた辺の線を入れる（手間は変わった所の分：`line_changes`）
             let mut removed = w.removed;
             let next = LayerBase::of_local(w.stored, group_path, w.faces, base);
-            let now = base.lines(group_path);
-            let then = next.lines(group_path);
-            let has = |list: &[Arc<FillShape>], id: ShapeId| list.binary_search_by_key(&id, |s| s.shape_id).is_ok();
-            removed.extend(now.iter().map(|s| s.shape_id).filter(|&id| !has(&then, id)));
-            added.extend(then.iter().filter(|s| !has(&now, s.shape_id)).map(|s| {
-                let mut s = (**s).clone();
+            let (gone, made) = base.line_changes(&next, group_path);
+            removed.extend(gone);
+            added.extend(made.into_iter().map(|s| {
+                let mut s = (*s).clone();
                 s.layer_id = layer_id;
                 placed(s, xform)
             }));

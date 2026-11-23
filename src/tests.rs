@@ -38243,7 +38243,7 @@ mod strokes {
         assert!(drawn[0].line.is_none() && drawn[1..].iter().all(|s| s.line.is_some()));
         // 線の番号は形と線で決まる：同じ地図から作り直しても同じ番号
         let again = LayerBase::of_stored(&StoredMap::from_dense(base.map(), None));
-        let ids = |l: &[std::sync::Arc<FillShape>]| l.iter().map(|s| s.shape_id).collect::<Vec<_>>();
+        let ids = |l: &crate::planar_map::LineTable| l.iter().map(|s| s.shape_id).collect::<Vec<_>>();
         assert_eq!(ids(&again.lines(&[])), ids(&lines));
     }
 
@@ -38722,6 +38722,8 @@ mod strokes {
                         commit_brush_line(&mut app, &brush_line(&[a, a.midpoint(b), b], rng.f64() * 20.0 + 3.0));
                     }
                 }
+                // 画面の図形を毎回作る（線の図形の表を、変わった所だけで作る道と、そのお手本の確かめを通す）
+                let _ = app.scene().len();
                 let tl = app.tab().active_timeline();
                 if let Some(cel) = tl.layers[0].cel_at(0) {
                     for m in cel.maps.iter() {

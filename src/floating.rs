@@ -206,17 +206,16 @@ pub(crate) struct Origin {
 
 impl Origin {
     /// セル画の地図 `cel` を残りの地図にする1本の道の答え `w`（`LayerBase::replace_local`）から：消した図形が隠す図形、
-    /// 入れた図形が残りの図形。線の図形は、セル画の線のうち残りの地図に無いものが隠す図形、残りの地図の線のうちセル画に
-    /// 無いものが残りの図形（線の番号は形と線で決まる：`LayerBase::lines`）。升目の索引は、セル画の写しから変わった所だけ
+    /// 入れた図形が残りの図形。線の図形は、セル画の地図から変わった辺の線が隠す図形、増えた辺の線が残りの図形
+    /// （`LayerBase::line_changes`）。升目の索引は、セル画の写しから変わった所だけ
     /// 作る。答えが変わらない（セル画の地図のまま）ときは、使う側が残りを持たない
     fn of_local(w: LocalWrite, cel: &LayerBase, scope: &[u64]) -> Self {
         let base = LayerBase::of_local(w.stored, scope, w.faces, cel);
-        let ids = |b: &LayerBase| -> HashSet<ShapeId> { b.lines(scope).iter().map(|s| s.shape_id).collect() };
-        let (cel_lines, rest_lines) = (ids(cel), ids(&base));
+        let (gone, made) = cel.line_changes(&base, scope);
         let mut hidden = w.removed;
-        hidden.extend(cel_lines.difference(&rest_lines));
+        hidden.extend(gone);
         let mut remainder = w.added;
-        remainder.extend(rest_lines.difference(&cel_lines));
+        remainder.extend(made.iter().map(|s| s.shape_id));
         Self {
             rest: base.stored.clone(),
             held: Some(base),
