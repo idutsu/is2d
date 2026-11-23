@@ -452,6 +452,17 @@ impl Default for View {
     }
 }
 
+/// 表示メニューで切り替える、タブごとの表示のオン・オフ（`View::switch`）
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ViewSwitch {
+    /// 枠外を隠す（`View::clip_outside_stage`）
+    ClipOutsideStage,
+    /// アンカーを表示（`View::show_wireframe`）
+    Anchors,
+    /// オニオンスキン（`View::onion_skin_enabled`）
+    OnionSkin,
+}
+
 /// 画面で動いたとみなす最小の量（px）。ドラッグで「変わったか」はみなこれで決める（`View::moves_on_screen`）
 pub(crate) const MIN_DRAG_SCREEN_PX: f64 = 0.5;
 
@@ -559,6 +570,25 @@ impl View {
     pub(crate) fn reset_view(&mut self) {
         self.set_zoom(1.0);
         self.pan = Vec2::ZERO;
+    }
+
+    /// 表示のオン・オフ `switch` の今の状態
+    pub(crate) fn switch(&self, switch: ViewSwitch) -> bool {
+        match switch {
+            ViewSwitch::ClipOutsideStage => self.clip_outside_stage,
+            ViewSwitch::Anchors => self.show_wireframe,
+            ViewSwitch::OnionSkin => self.onion_skin_enabled,
+        }
+    }
+
+    /// 表示のオン・オフ `switch` を切り替える
+    pub(crate) fn toggle(&mut self, switch: ViewSwitch) {
+        let flag = match switch {
+            ViewSwitch::ClipOutsideStage => &mut self.clip_outside_stage,
+            ViewSwitch::Anchors => &mut self.show_wireframe,
+            ViewSwitch::OnionSkin => &mut self.onion_skin_enabled,
+        };
+        *flag = !*flag;
     }
 
     /// ステージ枠全体が中央キャンバス領域 `canvas_rect` に余白付きでぴったり収まるようにズーム倍率とパン位置を自動調整する（「ウィンドウに合わせる」）

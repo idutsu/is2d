@@ -37665,3 +37665,317 @@ fn nearest_on_quad_finds_the_global_nearest_point_even_on_spikes() {
         }
     }
 }
+
+// ============================================================================
+// メニューの項目の表（`menu::COMMANDS`）・キー・OS のメニューの受け箱から `apply_action` までの道
+// ============================================================================
+
+/// 表の名前の番号（テストで項目を名前で指す）
+fn menu_index(label: &str) -> usize {
+    menu::COMMANDS
+        .iter()
+        .position(|c| c.label == label)
+        .expect("表にある項目")
+}
+
+/// 1コマ動かす（`modifiers` を押したまま、合図 `events` を送る）。`before` はそのコマの初めに呼ぶ
+fn menu_test_frame(
+    ctx: &egui::Context,
+    app: &mut Is2dApp,
+    modifiers: egui::Modifiers,
+    events: Vec<egui::Event>,
+    before: impl FnOnce(&egui::Context, &mut Is2dApp),
+) {
+    let mut before = Some(before);
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(1280.0, 820.0),
+            )),
+            modifiers,
+            events,
+            ..Default::default()
+        },
+        |ctx| {
+            if let Some(before) = before.take() {
+                before(ctx, app);
+            }
+            app.update_ui(ctx);
+        },
+    );
+}
+
+/// キーを押して離す合図（離さないと、egui は次に押したときを押しっぱなしの繰り返しとする）
+fn menu_key_tap(key: egui::Key, modifiers: egui::Modifiers) -> Vec<egui::Event> {
+    [true, false]
+        .map(|pressed| egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat: false,
+            modifiers,
+        })
+        .to_vec()
+}
+
+/// 表の決まり：Mac の OS のメニューに付ける `Cmd` のショートカットは1文字のキー（`keyEquivalent` にする）。
+/// egui のキー処理が受け取るキーは、項目どうしで重ならない（OS のメニューがあってもなくても）
+#[test]
+fn menu_table_keys_are_unique_and_command_keys_are_single_characters() {
+    for command in &menu::COMMANDS {
+        if let Some(s) = command.shortcut.filter(|s| s.command) {
+            assert_eq!(s.key.name().chars().count(), 1, "{}", command.label);
+        }
+    }
+    let keys: Vec<menu::Shortcut> = menu::COMMANDS
+        .iter()
+        .flat_map(|c| c.shortcut.into_iter().chain(c.alias))
+        .collect();
+    for (i, a) in keys.iter().enumerate() {
+        assert!(!keys[i + 1..].contains(a), "{a:?} が2つの項目にある");
+        for os_menu in [false, true] {
+            assert!(menu::command_for_key(*a, os_menu).is_some() || (os_menu && a.command));
+        }
+    }
+    // OS のメニューがあるときは、メニューに出す `Cmd` のキーだけを egui が受け取らない
+    let cmd_c = menu::Shortcut {
+        key: egui::Key::C,
+        command: true,
+        shift: false,
+    };
+    assert_eq!(
+        menu::command_for_key(cmd_c, false),
+        Some(menu_index("コピー"))
+    );
+    assert_eq!(menu::command_for_key(cmd_c, true), None);
+    let backspace = menu::Shortcut {
+        key: egui::Key::Backspace,
+        command: false,
+        shift: false,
+    };
+    assert_eq!(
+        menu::command_for_key(backspace, true),
+        Some(menu_index("選択削除"))
+    );
+    let cmd_shift_z = menu::Shortcut {
+        key: egui::Key::Z,
+        command: true,
+        shift: true,
+    };
+    assert_eq!(
+        menu::command_for_key(cmd_shift_z, true),
+        Some(menu_index("やり直し"))
+    );
+}
+
+/// メニューの見せ方：表の決まり（今と同じ）で使えるかが決まり、表示の切り替えにはチェックが付く。入力欄に文字を
+/// 入れている最中は、文字の操作のある項目はいつも使える。復旧のダイアログが出ている間は、アプリへ渡す項目は使えない
+#[test]
+fn menu_states_follow_table_rules_typing_and_dialogs() {
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let copy = menu_index("コピー");
+    let save = menu_index("保存");
+    let onion = menu_index("オニオンスキン");
+    assert!(
+        !app.menu_item_state(copy, false).enabled,
+        "選んでいないとコピーできない"
+    );
+    assert!(
+        app.menu_item_state(copy, true).enabled,
+        "入力欄へはいつも渡せる"
+    );
+    assert!(app.menu_item_state(save, false).enabled);
+    assert_eq!(app.menu_item_state(onion, false).checked, Some(false));
+    assert_eq!(app.menu_item_state(save, false).checked, None);
+    app.view.onion_skin_enabled = true;
+    assert_eq!(app.menu_item_state(onion, false).checked, Some(true));
+
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(180.0, 100.0),
+            12.0,
+            Color32::RED,
+        ),
+    );
+    app.session.set_selected_indices(vec![0]);
+    assert!(app.menu_item_state(copy, false).enabled);
+
+    app.recovery.found.push(recovery::Found {
+        entry_path: "a".into(),
+        recovery_path: "b".into(),
+        modified: std::time::SystemTime::UNIX_EPOCH,
+    });
+    menu_test_frame(&ctx, &mut app, egui::Modifiers::NONE, vec![], |_, _| {});
+    let states = app.menu_states(&ctx);
+    assert!(
+        states.iter().all(|s| !s.enabled),
+        "復旧のダイアログの間は使えない"
+    );
+}
+
+/// キーの道：表のキーで表の `UiAction` が1回だけ動く。入力欄に文字を入れている最中は、文字の操作のある項目のキーと
+/// `Cmd` の付かないキーは入力欄のもの（絵は変わらない）。ファイルのキーは入力中も動く
+#[test]
+fn menu_keys_dispatch_table_actions_and_leave_text_keys_to_fields() {
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let cmd = egui::Modifiers::COMMAND;
+    let none = egui::Modifiers::NONE;
+    menu_test_frame(
+        &ctx,
+        &mut app,
+        cmd,
+        menu_key_tap(egui::Key::Num3, cmd),
+        |_, _| {},
+    );
+    assert!(
+        app.view.clip_outside_stage,
+        "Cmd+3 で枠外を隠す（1回だけ切り替わる）"
+    );
+    menu_test_frame(
+        &ctx,
+        &mut app,
+        none,
+        menu_key_tap(egui::Key::O, none),
+        |_, _| {},
+    );
+    assert!(app.view.onion_skin_enabled, "O でオニオンスキン");
+
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(180.0, 100.0),
+            12.0,
+            Color32::RED,
+        ),
+    );
+    app.session.set_selected_indices(vec![0]);
+    let focus = |ctx: &egui::Context, _: &mut Is2dApp| {
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new("入力欄")));
+    };
+    // 入力中：コピー（Cmd+C は egui-winit がコピーの合図にする）・O・Backspace は入力欄のもの
+    menu_test_frame(&ctx, &mut app, cmd, vec![egui::Event::Copy], focus);
+    assert!(
+        app.clipboard.content.is_none(),
+        "入力中のコピーは絵をコピーしない"
+    );
+    menu_test_frame(
+        &ctx,
+        &mut app,
+        none,
+        menu_key_tap(egui::Key::O, none),
+        focus,
+    );
+    assert!(app.view.onion_skin_enabled, "入力中の O は入力欄の文字");
+    menu_test_frame(
+        &ctx,
+        &mut app,
+        none,
+        menu_key_tap(egui::Key::Backspace, none),
+        focus,
+    );
+    assert_eq!(app.scene().len(), 1, "入力中の Backspace は絵を消さない");
+    // 入力中でない：同じキーで絵が変わる（egui は、頼んだ次のコマまで focus を残すので、ここで外す）
+    let unfocus = |ctx: &egui::Context, _: &mut Is2dApp| {
+        ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("入力欄")));
+    };
+    menu_test_frame(&ctx, &mut app, cmd, vec![egui::Event::Copy], unfocus);
+    assert!(app.clipboard.content.is_some());
+    menu_test_frame(
+        &ctx,
+        &mut app,
+        none,
+        menu_key_tap(egui::Key::Backspace, none),
+        |_, _| {},
+    );
+    assert_eq!(app.scene().len(), 0, "Backspace で選択削除");
+}
+
+/// OS のメニューの受け箱から `apply_action` までの道：項目の番号で、キーと同じ `UiAction` が動く。入力欄に文字を
+/// 入れている最中の文字の操作は、絵の操作でなく egui の入力の合図にして入力欄へ渡す
+#[cfg(target_os = "macos")]
+#[test]
+fn os_menu_choices_dispatch_like_keys_and_forward_text_ops_to_fields() {
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let none = egui::Modifiers::NONE;
+    let choose = |labels: &'static [&'static str]| {
+        move |ctx: &egui::Context, app: &mut Is2dApp| {
+            app.run_os_menu_choices(labels.iter().map(|l| menu_index(l)).collect(), ctx);
+        }
+    };
+    menu_test_frame(
+        &ctx,
+        &mut app,
+        none,
+        vec![],
+        choose(&["枠外を隠す", "オニオンスキン"]),
+    );
+    assert!(app.view.clip_outside_stage && app.view.onion_skin_enabled);
+    app.tab_mut().view.set_zoom(2.0);
+    menu_test_frame(&ctx, &mut app, none, vec![], choose(&["100%表示"]));
+    assert_eq!(app.view.zoom(), 1.0);
+
+    put_cel_shapes(
+        &mut app,
+        0,
+        0,
+        make_stroke(
+            Point::new(100.0, 100.0),
+            Point::new(180.0, 100.0),
+            12.0,
+            Color32::RED,
+        ),
+    );
+    app.session.set_selected_indices(vec![0]);
+    let undo_len = app.history.undo_stack.len();
+
+    // 入力中：コピー・元に戻す・選択削除は、入力欄への合図になり、絵は変わらない
+    let forwarded = std::cell::RefCell::new(Vec::new());
+    menu_test_frame(&ctx, &mut app, none, vec![], |ctx, app| {
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new("入力欄")));
+        app.run_os_menu_choices(
+            ["コピー", "元に戻す", "選択削除"]
+                .iter()
+                .map(|l| menu_index(l))
+                .collect(),
+            ctx,
+        );
+        forwarded.replace(ctx.input(|i| i.events.clone()));
+    });
+    let forwarded = forwarded.into_inner();
+    assert!(matches!(forwarded[0], egui::Event::Copy));
+    assert!(matches!(
+        forwarded[1],
+        egui::Event::Key { key: egui::Key::Z, pressed: true, modifiers, .. }
+            if modifiers.matches_logically(egui::Modifiers::COMMAND)
+    ));
+    assert!(matches!(
+        forwarded[2],
+        egui::Event::Key {
+            key: egui::Key::Backspace,
+            pressed: true,
+            ..
+        }
+    ));
+    assert!(app.clipboard.content.is_none(), "絵はコピーしない");
+    assert_eq!(app.scene().len(), 1, "絵は消さない");
+    assert_eq!(app.history.undo_stack.len(), undo_len, "文書は元に戻さない");
+
+    // 入力中でない：同じ番号で絵の操作になる（egui は、頼んだ次のコマまで focus を残すので、ここで外す）
+    menu_test_frame(&ctx, &mut app, none, vec![], |ctx, app| {
+        ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("入力欄")));
+        choose(&["コピー", "選択削除"])(ctx, app);
+    });
+    assert!(app.clipboard.content.is_some());
+    assert_eq!(app.scene().len(), 0);
+}

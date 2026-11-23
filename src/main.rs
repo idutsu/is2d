@@ -7,6 +7,7 @@ mod clipboard_ops;
 mod doc_actions;
 mod floating;
 mod map_hover;
+mod menu;
 mod panels;
 mod planar_map;
 mod project_io;
@@ -63,11 +64,13 @@ fn main() -> eframe::Result<()> {
         "is2d",
         native_options,
         Box::new(|cc| {
-            #[cfg(target_os = "macos")]
-            app_menu_macos::install();
             configure_japanese_fonts(&cc.egui_ctx);
             configure_sharp_light_theme(&cc.egui_ctx);
             let mut app = Is2dApp::default();
+            #[cfg(target_os = "macos")]
+            {
+                app.os_menu = app_menu_macos::install(&cc.egui_ctx);
+            }
             app.timeline_ui.audio = audio_out::AudioOut::open(&cc.egui_ctx);
             app.recovery.dir = recovery::default_recovery_dir();
             app.recovery.find_leftovers();
@@ -135,6 +138,32 @@ enum Dialog {
     CloseConfirm,
 }
 
+impl Dialog {
+    /// このダイアログが出ている間も受け付ける操作か（ダイアログのボタンと、動画の書き出し中にタブを閉じること）。
+    /// 操作を受け付けるか（`Is2dApp::apply_action`）と、メニューの項目を使えるか（`Is2dApp::menu_item_state`）は、
+    /// これ1つで決める
+    fn accepts(self, action: &UiAction) -> bool {
+        match self {
+            Dialog::VideoExport => matches!(
+                action,
+                UiAction::CancelVideoExport | UiAction::CloseActiveTab | UiAction::CloseTab(_)
+            ),
+            Dialog::Recovery => {
+                matches!(
+                    action,
+                    UiAction::RestoreRecovered | UiAction::DiscardRecovered
+                )
+            }
+            Dialog::CloseConfirm => matches!(
+                action,
+                UiAction::ConfirmPendingCloseSave
+                    | UiAction::ConfirmPendingCloseDiscard
+                    | UiAction::ConfirmPendingCloseCancel
+            ),
+        }
+    }
+}
+
 /// アプリケーション全体のルート構造体（開いているタブ列 `tabs`・現在タブ `active`・アプリ共通のツール/クリップボード/トースト・パネルUI状態）
 pub(crate) struct Is2dApp {
     /// 開いている全ドキュメントタブ（各タブが独立した `Document` / `Session` / `View` / `UndoHistory` を保持）
@@ -167,6 +196,9 @@ pub(crate) struct Is2dApp {
     pub(crate) recovery: recovery::Recovery,
     /// 直近フレームの中央キャンバス描画領域（スクリーン座標。画面に1つだけで、どのタブでも同じ）
     pub(crate) canvas_rect: egui::Rect,
+    /// OS のメニューバーの「ファイル」「編集」「表示」（Mac。起動のときに作る。テストでは作らない）
+    #[cfg(target_os = "macos")]
+    pub(crate) os_menu: Option<app_menu_macos::OsMenu>,
 }
 
 impl Default for Is2dApp {
@@ -187,6 +219,8 @@ impl Default for Is2dApp {
             video_export: None,
             recovery: recovery::Recovery::default(),
             canvas_rect: egui::Rect::from_min_max(Pos2::new(52.0, 30.0), Pos2::new(1000.0, 590.0)),
+            #[cfg(target_os = "macos")]
+            os_menu: None,
         }
     }
 }
@@ -318,10 +352,14 @@ impl TimelineHost for Is2dApp {
 }
 
 impl Is2dApp {
+    /// テストで元に戻す（アプリではキーとメニューから `UiAction::Doc(Action::Undo)` が来る）
+    #[cfg(test)]
     pub(crate) fn undo(&mut self) {
         apply(self, Action::Undo);
     }
 
+    /// テストでやり直す
+    #[cfg(test)]
     pub(crate) fn redo(&mut self) {
         apply(self, Action::Redo);
     }
@@ -458,43 +496,70 @@ impl Is2dApp {
 
     /// UIパネルから収集した `UiAction` を一括ディスパッチする
     pub(crate) fn apply_action(&mut self, action: UiAction, ctx: &egui::Context) {
-        match (self.shown_dialog(), action) {
-            (Some(Dialog::Recovery), UiAction::RestoreRecovered) => {
+        match self.shown_dialog() {
+            None => self.apply_action_without_dialog(action, ctx),
+            Some(dialog) if dialog.accepts(&action) => self.apply_dialog_action(action, ctx),
+            Some(_) => {}
+        }
+    }
+
+    /// ダイアログが出ている間に受け付けた `UiAction`（`Dialog::accepts`）の適用
+    fn apply_dialog_action(&mut self, action: UiAction, ctx: &egui::Context) {
+        match action {
+            UiAction::RestoreRecovered => {
                 let mut recovery = std::mem::take(&mut self.recovery);
                 recovery.restore_found(self);
                 self.recovery = recovery;
             }
-            (Some(Dialog::Recovery), UiAction::DiscardRecovered) => self.recovery.discard_found(),
-            (Some(Dialog::VideoExport), UiAction::CancelVideoExport) => {
-                self.cancel_active_video_export()
-            }
-            (Some(Dialog::VideoExport), UiAction::CloseActiveTab) => {
+            UiAction::DiscardRecovered => self.recovery.discard_found(),
+            UiAction::CancelVideoExport => self.cancel_active_video_export(),
+            UiAction::CloseActiveTab => {
                 self.cancel_active_video_export();
                 project_io::close_active_tab(self, Some(ctx));
             }
-            (Some(Dialog::VideoExport), UiAction::CloseTab(idx)) => {
+            UiAction::CloseTab(idx) => {
                 self.cancel_active_video_export();
                 project_io::close_tab(self, idx, Some(ctx));
             }
-            (Some(Dialog::CloseConfirm), UiAction::ConfirmPendingCloseSave) => {
-                project_io::confirm_pending_close_save(self, ctx)
-            }
-            (Some(Dialog::CloseConfirm), UiAction::ConfirmPendingCloseDiscard) => {
+            UiAction::ConfirmPendingCloseSave => project_io::confirm_pending_close_save(self, ctx),
+            UiAction::ConfirmPendingCloseDiscard => {
                 project_io::confirm_pending_close_discard(self, ctx)
             }
-            (Some(Dialog::CloseConfirm), UiAction::ConfirmPendingCloseCancel) => {
+            UiAction::ConfirmPendingCloseCancel => {
                 project_io::confirm_pending_close_cancel(self, ctx)
             }
-            (Some(_), _) => {}
-            (None, action) => self.apply_action_without_dialog(action, ctx),
+            _ => {}
         }
+    }
+
+    /// メニューの項目 `index`（`menu::COMMANDS` の番号）の今の見せ方。入力欄へ渡すとき（`MenuCommand::text_op_for`）は
+    /// いつも使え、アプリへ渡すときは、ダイアログが受け付け（`Dialog::accepts`）、表の決まりで使えるときだけ使える
+    fn menu_item_state(&self, index: usize, typing: bool) -> menu::ItemState {
+        let command = &menu::COMMANDS[index];
+        let enabled = command.text_op_for(typing).is_some()
+            || (self
+                .shown_dialog()
+                .is_none_or(|d| d.accepts(&command.action))
+                && (command.enabled)(self.tab(), &self.clipboard));
+        menu::ItemState {
+            enabled,
+            checked: command.checked(&self.tab().view),
+        }
+    }
+
+    /// メニューの全項目の今の見せ方（`menu::COMMANDS` と同じ並び）
+    fn menu_states(&self, ctx: &egui::Context) -> [menu::ItemState; menu::COMMAND_COUNT] {
+        let typing = ctx.wants_keyboard_input();
+        std::array::from_fn(|index| self.menu_item_state(index, typing))
     }
 
     /// ダイアログが出ていないときの `UiAction` の適用
     fn apply_action_without_dialog(&mut self, action: UiAction, ctx: &egui::Context) {
         match action {
             UiAction::NewProject => project_io::new_project(self, ctx),
+            UiAction::ResetView => self.tab_mut().view.reset_view(),
             UiAction::FitStageToWindow => self.fit_stage_to_window(),
+            UiAction::ToggleView(switch) => self.tab_mut().view.toggle(switch),
             UiAction::OpenProjectDialog => project_io::open_project_dialog(self, ctx),
             UiAction::SaveProject => project_io::save_project(self),
             UiAction::SaveProjectAsDialog => project_io::save_project_as_dialog(self),
@@ -525,12 +590,14 @@ impl Is2dApp {
         let input = ctx.input(|i| i.clone());
         // V の押す・離すの合図は、ほかの判定で抜ける前に毎コマ見る（`Clipboard::swallowed_paste`）
         let swallowed_paste = self.clipboard.swallowed_paste(&input.events);
+        let typing = ctx.wants_keyboard_input();
+        for (shortcut, repeat) in menu::pressed_shortcuts(&input, swallowed_paste) {
+            self.run_menu_key(shortcut, repeat, typing, ctx);
+        }
         let cmd = input.modifiers.command || input.modifiers.ctrl;
         match self.shown_dialog() {
             Some(Dialog::VideoExport) => {
-                if cmd && key_pressed_no_repeat(&input, Key::W) {
-                    self.apply_action(UiAction::CloseActiveTab, ctx);
-                } else if cmd && key_pressed_no_repeat(&input, Key::Q) {
+                if cmd && key_pressed_no_repeat(&input, Key::Q) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 return;
@@ -538,53 +605,74 @@ impl Is2dApp {
             Some(Dialog::Recovery | Dialog::CloseConfirm) => return,
             None => {}
         }
-        if cmd && key_pressed_no_repeat(&input, Key::N) {
-            project_io::new_project(self, ctx);
-            return;
-        } else if cmd && key_pressed_no_repeat(&input, Key::O) {
-            project_io::open_project_dialog(self, ctx);
-            return;
-        } else if cmd && key_pressed_no_repeat(&input, Key::S) {
-            if input.modifiers.shift {
-                project_io::save_project_as_dialog(self);
-            } else {
-                project_io::save_project(self);
-            }
-            return;
-        } else if cmd && key_pressed_no_repeat(&input, Key::W) {
-            project_io::close_active_tab(self, Some(ctx));
+        if typing {
             return;
         }
-        if ctx.wants_keyboard_input() {
-            return;
-        }
-        let copy_event = input
-            .events
-            .iter()
-            .any(|ev| matches!(ev, egui::Event::Copy));
-        let cut_event = input.events.iter().any(|ev| matches!(ev, egui::Event::Cut));
-        let paste_event = input
-            .events
-            .iter()
-            .any(|ev| matches!(ev, egui::Event::Paste(_)));
+        let clipboard_event = input.events.iter().any(|ev| {
+            matches!(
+                ev,
+                egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_)
+            )
+        });
 
-        self.handle_command_shortcuts(
-            ctx,
-            &input,
-            cmd,
-            copy_event,
-            cut_event,
-            paste_event || swallowed_paste,
-        );
+        self.handle_command_shortcuts(ctx, &input, cmd);
 
-        if !cmd && !copy_event && !cut_event && !paste_event {
+        if !cmd && !clipboard_event {
             self.handle_single_key_shortcuts(&input, input.modifiers.shift);
         }
+    }
 
-        if key_pressed_no_repeat(&input, Key::Delete)
-            || key_pressed_no_repeat(&input, Key::Backspace)
-        {
-            apply(self, Action::DeleteSelection);
+    /// メニューの項目のキー `shortcut`（`repeat` は押しっぱなしの繰り返しか）を、表（`menu::COMMANDS`）で決めて動かす。
+    /// 入力欄に文字を入れている最中（`typing`）は、入力欄が使うキー（`Cmd` の付かないキーと、文字の操作のある項目の
+    /// キー：`MenuCommand::text_op_for`）は入力欄のもの（キーの合図は egui が入力欄へ渡している）
+    fn run_menu_key(
+        &mut self,
+        shortcut: menu::Shortcut,
+        repeat: bool,
+        typing: bool,
+        ctx: &egui::Context,
+    ) {
+        let Some(index) = menu::command_for_key(shortcut, self.os_menu_has_keys()) else {
+            return;
+        };
+        let command = &menu::COMMANDS[index];
+        if repeat && !command.repeats {
+            return;
+        }
+        if typing && (!shortcut.command || command.text_op_for(typing).is_some()) {
+            return;
+        }
+        self.apply_action(command.action.clone(), ctx);
+    }
+
+    /// OS のメニューが、表の `Cmd` のショートカットを受け取るか（Mac で OS のメニューを作ったとき。
+    /// `MenuCommand::egui_keys`）
+    #[cfg(target_os = "macos")]
+    fn os_menu_has_keys(&self) -> bool {
+        self.os_menu.is_some()
+    }
+
+    /// OS のメニューが、表の `Cmd` のショートカットを受け取るか（Windows・Linux では OS のメニューを作らない）
+    #[cfg(not(target_os = "macos"))]
+    fn os_menu_has_keys(&self) -> bool {
+        false
+    }
+
+    /// OS のメニューで押された項目 `chosen`（`menu::COMMANDS` の番号）を、押した順に渡す。渡す先は
+    /// `MenuCommand::text_op_for` で決める：入力欄に文字を入れている最中の文字の操作は、egui の入力の合図にして入力欄へ
+    /// （このあと描く入力欄が受け取る）、ほかはキーと同じ `apply_action` へ
+    #[cfg(target_os = "macos")]
+    fn run_os_menu_choices(&mut self, chosen: Vec<usize>, ctx: &egui::Context) {
+        let typing = ctx.wants_keyboard_input();
+        for index in chosen {
+            let command = &menu::COMMANDS[index];
+            match command.text_op_for(typing) {
+                Some(op) => {
+                    let event = op.event(app_menu_macos::pasteboard_text);
+                    ctx.input_mut(|i| i.events.push(event));
+                }
+                None => self.apply_action(command.action.clone(), ctx),
+            }
         }
     }
 
@@ -663,9 +751,6 @@ impl Is2dApp {
             } else {
                 apply(self, Action::ExtendFrame);
             }
-        } else if key_pressed_no_repeat(i, Key::O) {
-            let next = !self.tab().view.onion_skin_enabled;
-            self.tab_mut().view.onion_skin_enabled = next;
         } else if key_pressed_no_repeat(i, Key::T) {
             apply(self, Action::ToggleTween);
         } else if let Some(tool) = Tool::from_shortcut_input(i) {
@@ -689,37 +774,10 @@ impl Is2dApp {
         }
     }
 
-    fn handle_command_shortcuts(
-        &mut self,
-        ctx: &egui::Context,
-        i: &egui::InputState,
-        cmd: bool,
-        copy_event: bool,
-        cut_event: bool,
-        paste_event: bool,
-    ) {
+    /// 表（`menu::COMMANDS`）に無い `Cmd` のショートカット
+    fn handle_command_shortcuts(&mut self, ctx: &egui::Context, i: &egui::InputState, cmd: bool) {
         if cmd && key_pressed_no_repeat(i, Key::Q) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        } else if copy_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::C)) {
-            apply(self, Action::Copy);
-        } else if cut_event || (cmd && !i.modifiers.shift && key_pressed_no_repeat(i, Key::X)) {
-            apply(self, Action::Cut);
-        } else if paste_event {
-            apply(
-                self,
-                Action::Paste {
-                    in_place: i.modifiers.shift,
-                },
-            );
-        } else if cmd
-            && (key_pressed_no_repeat(i, Key::Num1) || key_pressed_no_repeat(i, Key::Num0))
-        {
-            self.tab_mut().view.reset_view();
-        } else if cmd && key_pressed_no_repeat(i, Key::Num2) {
-            self.fit_stage_to_window();
-        } else if cmd && key_pressed_no_repeat(i, Key::Num3) {
-            let next = !self.tab().view.clip_outside_stage;
-            self.tab_mut().view.clip_outside_stage = next;
         } else if let Some(key) = plus_minus_pressed(&i.events, true).filter(|_| cmd) {
             let factor = match key {
                 PlusMinus::Plus => 1.25,
@@ -752,14 +810,6 @@ impl Is2dApp {
                 ArrangeMode::Backward
             };
             apply(self, Action::Arrange { mode });
-        } else if cmd && i.key_pressed(Key::Z) {
-            if i.modifiers.shift {
-                self.redo();
-            } else {
-                self.undo();
-            }
-        } else if cmd && i.key_pressed(Key::Y) {
-            self.redo();
         }
     }
 
@@ -949,16 +999,23 @@ impl Is2dApp {
         project_io::handle_viewport_close_request(self, ctx);
         timeline_ui::update_playback(self, ctx);
         self.handle_shortcuts(ctx);
+        #[cfg(target_os = "macos")]
+        if let Some(chosen) = self
+            .os_menu
+            .as_ref()
+            .map(app_menu_macos::OsMenu::take_chosen)
+        {
+            self.run_os_menu_choices(chosen, ctx);
+        }
 
         let mut actions = Vec::new();
-        panels::draw_top_menu_bar(
-            &mut self.tabs[self.active],
-            &self.clipboard,
-            &mut actions,
-            ctx,
-        );
-        for action in actions.drain(..) {
-            self.apply_action(action, ctx);
+        // Mac ではメニューは OS のメニューバーにあるので、窓の中のメニューバーは出さない
+        #[cfg(not(target_os = "macos"))]
+        {
+            panels::draw_top_menu_bar(&self.menu_states(ctx), &mut actions, ctx);
+            for action in actions.drain(..) {
+                self.apply_action(action, ctx);
+            }
         }
 
         panels::draw_left_toolbar(&self.tool, &mut actions, ctx);
@@ -1086,7 +1143,12 @@ impl Is2dApp {
             );
             ctx.request_repaint();
         }
-        // そのフレームの操作をすべて適用した後の状態からウィンドウタイトルを更新し、コマが変わっていれば音を鳴らす
+        // そのフレームの操作をすべて適用した後の状態から、OS のメニューの見せ方とウィンドウタイトルを更新し、コマが
+        // 変わっていれば音を鳴らす
+        #[cfg(target_os = "macos")]
+        if let Some(os_menu) = &self.os_menu {
+            os_menu.show_states(&self.menu_states(ctx));
+        }
         project_io::update_window_title(self, ctx);
         timeline_ui::scrub_on_frame_change(self);
     }

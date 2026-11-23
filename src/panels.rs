@@ -2,10 +2,12 @@ use eframe::egui::{self, Color32, CursorIcon, Pos2, Stroke, Vec2};
 use kurbo::{Point, Rect as KRect};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, CelTint, Clipboard,
-    CoalesceKey, NoticeKind, SelectSubMode, Tab, Tool, ToolSettings, TransformDragState,
+    active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, CelTint, CoalesceKey,
+    NoticeKind, SelectSubMode, Tab, Tool, ToolSettings, TransformDragState, ViewSwitch,
 };
 use crate::doc_actions::Action;
+#[cfg(not(target_os = "macos"))]
+use crate::menu::{ItemState, Menu, MenuCommand, COMMANDS, COMMAND_COUNT};
 use crate::project_io::PendingCloseConfirm;
 use crate::select_ops::ArrangeMode;
 use crate::symbol::{
@@ -136,8 +138,13 @@ pub(crate) enum UiAction {
     RestoreRecovered,
     DiscardRecovered,
 
-    // 表示（キャンバス領域を知っているアプリ側で行う）
+    // 表示
+    /// 100%表示（ズーム 100%・初期位置）
+    ResetView,
+    /// ウィンドウに合わせる（キャンバス領域を知っているアプリ側で行う）
     FitStageToWindow,
+    /// 表示のオン・オフの切り替え（枠外を隠す・アンカーを表示・オニオンスキン）
+    ToggleView(ViewSwitch),
 
     // 文書・編集アクション（`doc_actions::apply` へそのまま渡す）
     Doc(Action),
@@ -148,167 +155,82 @@ pub(crate) enum UiAction {
 // ============================================================================
 
 // ------------------------------------------------------------------------
-// 0. 最上部メニューバー（ファイル・編集・表示）
+// 0. 最上部メニューバー（ファイル・編集・表示。Windows・Linux）
 // ------------------------------------------------------------------------
 
+/// 窓の中のメニューバーの高さ（「ファイル」などのボタンの行の高さ。パネルの上下の余白は取らないので、バーの高さそのもの。
+/// マウスを乗せたときの色も、この高さいっぱいに付く）
+#[cfg(not(target_os = "macos"))]
+const MENU_BAR_HEIGHT: f32 = 28.0;
+
+/// メニューの項目の表（`menu::COMMANDS`）から、窓の中のメニューバーを描く。項目の見せ方 `states` は表と同じ並び
+/// （`Is2dApp::menu_states`）。押した項目の `UiAction` を `actions` に入れる。Mac ではメニューは OS のメニューバー
+/// （`app_menu_macos`）にあるので、これは Windows・Linux だけ
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn draw_top_menu_bar(
-    tab: &mut Tab,
-    clipboard: &Clipboard,
+    states: &[ItemState; COMMAND_COUNT],
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
-    egui::TopBottomPanel::top("top_menu_bar").show(ctx, |ui| {
-        egui::menu::bar(ui, |ui| {
-            let can_import_sound = tab.active_timeline().active_sound_slot().is_some();
-            draw_file_menu(actions, ui, can_import_sound);
-            draw_edit_menu(tab, clipboard, actions, ui);
-            draw_view_menu(tab, actions, ui);
+    let frame =
+        egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(8, 0));
+    egui::TopBottomPanel::top("top_menu_bar")
+        .frame(frame)
+        .show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.spacing_mut().interact_size.y = MENU_BAR_HEIGHT;
+                for menu in Menu::ALL {
+                    ui.menu_button(menu.label(), |ui| {
+                        ui.set_min_width(menu_min_width(menu));
+                        for (command, state) in COMMANDS.iter().zip(states) {
+                            if command.menu != menu {
+                                continue;
+                            }
+                            if command.separator_before {
+                                ui.separator();
+                            }
+                            if draw_menu_item(ui, command, *state) {
+                                actions.push(command.action.clone());
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                }
+            });
         });
-    });
 }
 
-fn menu_action_button(ui: &mut egui::Ui, enabled: bool, label: &str, shortcut: &str) -> bool {
-    let btn = if shortcut.is_empty() {
-        egui::Button::new(label)
-    } else {
-        egui::Button::new(label).shortcut_text(shortcut)
-    };
-    let clicked = ui.add_enabled(enabled, btn).clicked();
-    if clicked {
-        ui.close_menu();
+/// メニューを開いたときの最小の幅
+#[cfg(not(target_os = "macos"))]
+const fn menu_min_width(menu: Menu) -> f32 {
+    match menu {
+        Menu::File => 210.0,
+        Menu::Edit => 230.0,
+        Menu::View => 220.0,
     }
-    clicked
 }
 
-fn draw_file_menu(actions: &mut Vec<UiAction>, ui: &mut egui::Ui, can_import_sound: bool) {
-    ui.menu_button("ファイル", |ui| {
-        ui.set_min_width(210.0);
-        if menu_action_button(ui, true, "新規作成", &format!("{MOD_KEY}+N")) {
-            actions.push(UiAction::NewProject);
+/// メニューの項目1つを描き、押したか返す。チェックの付く項目はチェックボックスにし、ショートカットは名前の後ろに添える
+#[cfg(not(target_os = "macos"))]
+fn draw_menu_item(ui: &mut egui::Ui, command: &MenuCommand, state: ItemState) -> bool {
+    let response = match state.checked {
+        Some(checked) => {
+            let label = match command.shortcut {
+                Some(shortcut) => format!("{} ({})", command.label, shortcut.text()),
+                None => command.label.to_owned(),
+            };
+            let mut shown = checked;
+            ui.add_enabled(state.enabled, egui::Checkbox::new(&mut shown, label))
         }
-
-        ui.separator();
-
-        if menu_action_button(ui, true, "開く...", &format!("{MOD_KEY}+O")) {
-            actions.push(UiAction::OpenProjectDialog);
+        None => {
+            let mut button = egui::Button::new(command.label);
+            if let Some(shortcut) = command.shortcut {
+                button = button.shortcut_text(shortcut.text());
+            }
+            ui.add_enabled(state.enabled, button)
         }
-        if menu_action_button(ui, true, "保存", &format!("{MOD_KEY}+S")) {
-            actions.push(UiAction::SaveProject);
-        }
-        if menu_action_button(
-            ui,
-            true,
-            "名前を付けて保存...",
-            &format!("{MOD_KEY}+Shift+S"),
-        ) {
-            actions.push(UiAction::SaveProjectAsDialog);
-        }
-
-        ui.separator();
-
-        // 音を付けられるのは、作業中のレイヤーの今のコマが空白のキーフレームのときだけ（`Timeline::active_sound_slot`）
-        if menu_action_button(ui, can_import_sound, "音を読み込む（WAV・MP3）…", "") {
-            actions.push(UiAction::ImportSoundDialog);
-        }
-
-        ui.separator();
-
-        if menu_action_button(ui, true, "動画を書き出し（MP4）…", "") {
-            actions.push(UiAction::ExportVideoDialog);
-        }
-
-        ui.separator();
-
-        if menu_action_button(ui, true, "タブを閉じる", &format!("{MOD_KEY}+W")) {
-            actions.push(UiAction::CloseActiveTab);
-        }
-    });
-}
-
-fn draw_edit_menu(
-    tab: &Tab,
-    clipboard: &Clipboard,
-    actions: &mut Vec<UiAction>,
-    ui: &mut egui::Ui,
-) {
-    ui.menu_button("編集", |ui| {
-        ui.set_min_width(230.0);
-        let can_undo = !tab.history.undo_stack.is_empty();
-        let can_redo = !tab.history.redo_stack.is_empty();
-        let has_selection = !tab.session.selection.is_empty();
-        let tl = tab.active_timeline();
-        let can_paste = clipboard.content.is_some()
-            && tl.is_layer_editable_by_id(active_scope_layer_id(&tab.session, tl));
-
-        if menu_action_button(ui, can_undo, "元に戻す", &format!("{MOD_KEY}+Z")) {
-            actions.push(UiAction::Doc(Action::Undo));
-        }
-        if menu_action_button(ui, can_redo, "やり直し", &format!("{MOD_KEY}+Y")) {
-            actions.push(UiAction::Doc(Action::Redo));
-        }
-
-        ui.separator();
-
-        if menu_action_button(ui, has_selection, "カット", &format!("{MOD_KEY}+X")) {
-            actions.push(UiAction::Doc(Action::Cut));
-        }
-        if menu_action_button(ui, has_selection, "コピー", &format!("{MOD_KEY}+C")) {
-            actions.push(UiAction::Doc(Action::Copy));
-        }
-        if menu_action_button(ui, can_paste, "ペースト", &format!("{MOD_KEY}+V")) {
-            actions.push(UiAction::Doc(Action::Paste { in_place: false }));
-        }
-        if menu_action_button(
-            ui,
-            can_paste,
-            "同じ位置にペースト",
-            &format!("{MOD_KEY}+Shift+V"),
-        ) {
-            actions.push(UiAction::Doc(Action::Paste { in_place: true }));
-        }
-
-        ui.separator();
-
-        if menu_action_button(ui, has_selection, "選択削除", "Backspace") {
-            actions.push(UiAction::Doc(Action::DeleteSelection));
-        }
-    });
-}
-
-fn draw_view_menu(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
-    ui.menu_button("表示", |ui| {
-        ui.set_min_width(220.0);
-        if menu_action_button(ui, true, "100%表示", &format!("{MOD_KEY}+1")) {
-            tab.view.reset_view();
-        }
-        if menu_action_button(ui, true, "ウィンドウに合わせる", &format!("{MOD_KEY}+2")) {
-            actions.push(UiAction::FitStageToWindow);
-        }
-
-        ui.separator();
-
-        if ui
-            .checkbox(
-                &mut tab.view.clip_outside_stage,
-                format!("枠外を隠す ({MOD_KEY}+3)"),
-            )
-            .clicked()
-        {
-            ui.close_menu();
-        }
-        if ui
-            .checkbox(&mut tab.view.show_wireframe, "アンカーを表示")
-            .clicked()
-        {
-            ui.close_menu();
-        }
-        if ui
-            .checkbox(&mut tab.view.onion_skin_enabled, "オニオンスキン (O)")
-            .clicked()
-        {
-            ui.close_menu();
-        }
-    });
+    };
+    response.clicked()
 }
 
 // ------------------------------------------------------------------------
@@ -776,7 +698,7 @@ fn draw_select_tool_properties(
         .on_hover_text("選択ツール使用中にベクター輪郭のアンカーポイントとパスを表示")
         .clicked()
     {
-        tab.view.show_wireframe = !tab.view.show_wireframe;
+        actions.push(UiAction::ToggleView(ViewSwitch::Anchors));
     }
 
     draw_panel_separator(ui);
@@ -1118,7 +1040,7 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
         ))
         .clicked()
     {
-        tab.view.clip_outside_stage = !tab.view.clip_outside_stage;
+        actions.push(UiAction::ToggleView(ViewSwitch::ClipOutsideStage));
     }
 
     ui.add_space(6.0);
@@ -1148,7 +1070,7 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
         ))
         .clicked()
     {
-        tab.view.reset_view();
+        actions.push(UiAction::ResetView);
     }
 }
 
