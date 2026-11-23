@@ -19,16 +19,16 @@ pub(crate) fn handle_brush_or_eraser_input(
     let brush_radius = host.tool().brush_radius;
     let eraser_radius = host.tool().eraser_radius;
     let brush_color = host.tool().brush_color;
+    let stroke = host.tool().stroke;
 
-    let base_r = if active_tool == Tool::Brush {
-        brush_radius as f64
-    } else {
-        eraser_radius as f64
-    };
-    let preview_color = if active_tool == Tool::Brush {
-        brush_color
-    } else {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+    // 描いている間の形の半径と色（鉛筆は、引く線の太さの半分と線の色）
+    let (base_r, preview_color) = match active_tool {
+        Tool::Brush => (brush_radius as f64, brush_color),
+        Tool::Pencil => (stroke.width as f64 / 2.0, stroke.color),
+        _ => (
+            eraser_radius as f64,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 220),
+        ),
     };
     // 描いている間の形は、離したあとの形と同じ中心線（`CenterlineBuilder`）を太らせたもの。確定した所は確定するたびに
     // 足し、確定していない所は点が来るたびに作り直す
@@ -92,20 +92,18 @@ pub(crate) fn handle_brush_or_eraser_input(
             }
         }
     }
-    // 点の列から、ブラシなら塗り、消しゴムなら消す操作を作る
-    let stroke_action = |points: Vec<Point>| {
-        if active_tool == Tool::Brush {
-            Action::PaintStroke {
-                points,
-                radius: brush_radius,
-                color: brush_color,
-            }
-        } else {
-            Action::EraseStroke {
-                points,
-                radius: eraser_radius,
-            }
-        }
+    // 点の列から、ブラシなら塗り、鉛筆なら線を引き、消しゴムなら消す操作を作る
+    let stroke_action = |points: Vec<Point>| match active_tool {
+        Tool::Brush => Action::PaintStroke {
+            points,
+            radius: brush_radius,
+            color: brush_color,
+        },
+        Tool::Pencil => Action::PencilStroke { points, stroke },
+        _ => Action::EraseStroke {
+            points,
+            radius: eraser_radius,
+        },
     };
     if response.drag_stopped_by(PointerButton::Primary) {
         let drag = std::mem::take(&mut host.tab_mut().session.drag);

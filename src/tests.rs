@@ -38574,6 +38574,36 @@ mod strokes {
         assert_eq!(app.session.selection.shapes.len(), 1);
     }
 
+    #[test]
+    fn the_pencil_draws_a_smooth_line_with_few_curves() {
+        let mut app = Is2dApp::default();
+        apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+        // まっすぐな線：1本の直線になる
+        let straight: Vec<Point> = (0..=100).map(|i| Point::new(100.0 + 3.0 * i as f64, 100.0)).collect();
+        assert!(apply(&mut app, Action::PencilStroke { points: straight, stroke: INK }));
+        let m = cel_map(&app);
+        assert_eq!(m.edges.len(), 1);
+        assert!((m.quad(0).p0 - Point::new(100.0, 100.0)).hypot() < 1.0);
+        assert!((m.quad(0).p2 - Point::new(400.0, 100.0)).hypot() < 1.0);
+        // 半円：少ない曲線で、点の近くを通る
+        let arc: Vec<Point> = (0..=180)
+            .map(|d| {
+                let a = (d as f64).to_radians();
+                Point::new(300.0 + 100.0 * a.cos(), 400.0 + 100.0 * a.sin())
+            })
+            .collect();
+        assert!(apply(&mut app, Action::PencilStroke { points: arc.clone(), stroke: INK }));
+        let m = cel_map(&app);
+        let curves: Vec<QuadBez> = (0..m.edges.len()).map(|e| m.quad(e)).filter(|q| q.p0.y > 300.0 || q.p2.y > 300.0).collect();
+        assert!(!curves.is_empty() && curves.len() <= 8, "曲線 {} 本", curves.len());
+        for p in arc.iter().step_by(10) {
+            let d = curves.iter().map(|q| crate::vector_engine::nearest_on_quad(q, *p).1).fold(f64::MAX, f64::min);
+            assert!(d < 1.0, "点 {p:?} から {d}");
+        }
+        // 点が1つだけ（クリック）なら引かない
+        assert!(!apply(&mut app, Action::PencilStroke { points: vec![Point::new(50.0, 50.0)], stroke: INK }));
+    }
+
     /// 乱数の絵に、インクボトル・バケツ・ブラシ・消しゴムをくり返しかける（書くたびに、触った所だけの計算と地図全体で
     /// 計算した答えを比べる確かめが、テストでは毎回動く：`test_checks`）
     #[test]

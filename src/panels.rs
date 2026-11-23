@@ -81,6 +81,7 @@ pub(crate) const fn tool_icon(tool: Tool) -> &'static str {
         Tool::Select => "\u{f1e2}",
         Tool::Transform => "\u{e5c3}",
         Tool::Brush => "\u{e3ae}",
+        Tool::Pencil => "\u{e3c9}",
         Tool::Eraser => "\u{e23b}",
         Tool::Bucket => "\u{e23a}",
         Tool::InkBottle => "\u{e22b}",
@@ -94,6 +95,7 @@ pub(crate) const fn tool_label(tool: Tool) -> &'static str {
         Tool::Select => "選択ツール",
         Tool::Transform => "自由変形ツール",
         Tool::Brush => "ブラシツール",
+        Tool::Pencil => "鉛筆ツール",
         Tool::Eraser => "消しゴムツール",
         Tool::Bucket => "バケツ塗りツール",
         Tool::InkBottle => "インクボトルツール",
@@ -111,6 +113,7 @@ pub(crate) const fn tool_tooltip(tool: Tool) -> &'static str {
             "自由変形ツール (Q) - バウンディングボックスで拡大縮小・回転・基準点移動"
         }
         Tool::Brush => "ブラシツール (B) - ベクター塗りストロークを描画",
+        Tool::Pencil => "鉛筆ツール (Y) - 線だけを引く（塗りの上に引くと塗りが線で分かれる）",
         Tool::Eraser => "消しゴムツール (E) - ベクターシェイプを削る・分割する",
         Tool::Bucket => "バケツ塗りツール (K) - 閉じた隙間領域の塗りつぶし / 既存塗りの色変更",
         Tool::InkBottle => "インクボトルツール (S) - 塗りの輪郭に線を付ける / 線の色と太さを変える",
@@ -644,7 +647,7 @@ fn draw_properties_tab(
         Tool::Bucket | Tool::Eyedropper => {
             draw_color_palette_section(ui, "現在の塗りカラー", &mut tool.brush_color)
         }
-        Tool::InkBottle => {
+        Tool::Pencil | Tool::InkBottle => {
             let range = *STROKE_WIDTHS.start()..=*STROKE_WIDTHS.end();
             labeled_slider(ui, "線の太さ", &mut tool.stroke.width, range, "");
             ui.add_space(6.0);
@@ -1767,17 +1770,12 @@ pub(crate) fn draw_tool_cursor_and_feedback(
     pos: Pos2,
 ) {
     match tool.tool {
-        Tool::Brush | Tool::Eraser => {
+        Tool::Brush | Tool::Eraser | Tool::Pencil => {
             ctx.set_cursor_icon(CursorIcon::Crosshair);
-            let r = if tool.tool == Tool::Brush {
-                tool.brush_radius
-            } else {
-                tool.eraser_radius
-            };
-            let ring_col = if tool.tool == Tool::Brush {
-                tool.brush_color
-            } else {
-                Color32::from_rgb(220, 60, 60)
+            let (r, ring_col) = match tool.tool {
+                Tool::Brush => (tool.brush_radius, tool.brush_color),
+                Tool::Pencil => (tool.stroke.width as f32 / 2.0, tool.stroke.color),
+                _ => (tool.eraser_radius, Color32::from_rgb(220, 60, 60)),
             };
             painter.circle_stroke(pos, r * tab.view.zoom(), Stroke::new(1.5_f32, ring_col));
         }

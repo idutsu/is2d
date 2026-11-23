@@ -823,7 +823,7 @@ impl Is2dApp {
     fn is_current_tool_allowed(&self) -> bool {
         match self.tool.tool {
             Tool::Eyedropper => true,
-            Tool::Brush | Tool::Eraser | Tool::Bucket | Tool::InkBottle => {
+            Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Bucket | Tool::InkBottle => {
                 self.tab().active_timeline().is_active_layer_editable()
             }
             Tool::Select | Tool::Transform => self.tab().active_timeline().has_any_editable_layer(),
@@ -860,7 +860,7 @@ impl Is2dApp {
             }
         } else if tool_allowed {
             match self.tool.tool {
-                Tool::Brush | Tool::Eraser => {
+                Tool::Brush | Tool::Pencil | Tool::Eraser => {
                     tool_paint::handle_brush_or_eraser_input(self, response, mouse_pt);
                 }
                 Tool::Bucket => {

@@ -677,117 +677,150 @@ fn fit_ring(ring: &[Point], tan_of: &dyn Fn(Point) -> Option<KVec2>, eps: f64) -
     for (a, b) in runs {
         let pts: Vec<Point> = (a..=b).map(|i| ring[i % n]).collect();
         let tv: Vec<Option<KVec2>> = (a..=b).map(|i| tans[i % n]).collect();
-        let last = pts.len() - 1;
-        // 点 k の、進む向きにそろえた接線（角なら、区間の始めは出ていく弦、終わりは入ってくる弦の向き）
-        let tan_at = |k: usize, end: bool| -> KVec2 {
-            match tv[k] {
-                Some(t) => {
-                    let chord = if k == 0 {
-                        pts[1] - pts[0]
-                    } else if k == last {
-                        pts[last] - pts[last - 1]
-                    } else {
-                        pts[k + 1] - pts[k - 1]
-                    };
-                    if t.dot(chord) >= 0.0 {
-                        t
-                    } else {
-                        -t
-                    }
-                }
-                None if end => normalize_vec(pts[k] - pts[k - 1]),
-                None => normalize_vec(pts[k + 1] - pts[k]),
-            }
-        };
-        let fit = |i: usize, j: usize| -> Option<QuadBez> {
-            let (p0, p2) = (pts[i], pts[j]);
-            let line = QuadBez::new(p0, p0.lerp(p2, 0.5), p2);
-            if j == i + 1 {
-                return Some(line);
-            }
-            // 点の列 `from` のどれもが、折れ線 `to` から eps 以内か（どちらも進む向きに並ぶので、近い区間を順にたどる）
-            let within = |from: &[Point], to: &[Point]| -> bool {
-                let mut cur = 0usize;
-                for &q in from {
-                    let mut best = point_to_segment_dist(q, to[cur], to[cur + 1]);
-                    while cur + 2 < to.len() {
-                        let nd = point_to_segment_dist(q, to[cur + 1], to[cur + 2]);
-                        if nd > best {
-                            break;
-                        }
-                        best = nd;
-                        cur += 1;
-                    }
-                    if best > eps {
-                        return false;
-                    }
-                }
-                true
-            };
-            let fits = |quad: &QuadBez| -> bool {
-                let dd = (quad.p0.to_vec2() - quad.p1.to_vec2() * 2.0 + quad.p2.to_vec2()).hypot();
-                let mq = ((dd / (0.4 * eps)).sqrt().ceil() as usize).max(1);
-                let fq: Vec<Point> = (0..=mq).map(|u| quad.eval(u as f64 / mq as f64)).collect();
-                within(&pts[i + 1..j], &fq) && within(&fq[1..mq], &pts[i..=j])
-            };
-            // 直線で当てはまるなら直線にする（制御点が端に寄った、ほとんど直線の曲線にしない。つなぎ目の向きの違いは、
-            // 当てはめの許容の中）
-            if fits(&line) {
-                return Some(line);
-            }
-            let (t0, t2) = (tan_at(i, false), tan_at(j, true));
-            let d = p2 - p0;
-            let det = t0.cross(t2);
-            if det.abs() < 1e-12 {
-                return None;
-            }
-            let (al, be) = (d.cross(t2) / det, t0.cross(d) / det);
-            if al <= 0.0 || be <= 0.0 {
-                return None;
-            }
-            // 速さ（両端で 2|p1 − p0| と 2|p2 − p1|）の比が 1/2 より偏る曲線は使わず、もっと短く分ける。地図は、切った
-            // 所の媒介変数を、折れ線の区間の中で比例で決めて曲線を戻す（`Prov`）ので、速さが大きく偏る曲線では、戻した
-            // 片が曲線から外れ、同じ線を重ねるたびに欠片や切れ目の頂点が残る（試しで、比 0.25 では欠片が10通り中1通り、
-            // 1/2 では0通り。今のブラシは1通り）
-            let quad = QuadBez::new(p0, p0 + t0 * al, p2);
-            let (l0, l1) = ((quad.p1 - quad.p0).hypot(), (quad.p2 - quad.p1).hypot());
-            if 2.0 * l0.min(l1) < l0.max(l1) {
-                return None;
-            }
-            fits(&quad).then_some(quad)
-        };
-        // 始めの点から、当てはまるいちばん遠い点を、倍に伸ばしてから2分して探す
-        let mut i = 0;
-        while i < last {
-            let mut good = i + 1;
-            let mut good_q = fit(i, good).expect("隣どうしは直線で当てはまる");
-            let mut step = 2;
-            loop {
-                let j = (i + step).min(last);
-                if j <= good {
-                    break;
-                }
-                if let Some(q) = fit(i, j) {
-                    (good, good_q) = (j, q);
-                    step *= 2;
-                    continue;
-                }
-                let (mut lo, mut hi) = (good, j);
-                while hi - lo > 1 {
-                    let mid = (lo + hi) / 2;
-                    match fit(i, mid) {
-                        Some(q) => (lo, good_q) = (mid, q),
-                        None => hi = mid,
-                    }
-                }
-                good = lo;
-                break;
-            }
-            out.push(good_q);
-            i = good;
-        }
+        out.extend(fit_run(&pts, &tv, eps));
     }
     out
+}
+
+/// 点の並び `pts`（進む向きに並び、両端は動かさない）を、点 `k` の接線 `tv[k]`（角は `None`）に沿って、2次ベジェの並びに
+/// 当てはめる（当てはめの許容 `eps`。輪 `fit_ring` の角と角の間と、鉛筆の線 `pencil_curves` が使う）
+fn fit_run(pts: &[Point], tv: &[Option<KVec2>], eps: f64) -> Vec<QuadBez> {
+    let mut out = Vec::new();
+    let last = pts.len() - 1;
+    // 点 k の、進む向きにそろえた接線（角なら、区間の始めは出ていく弦、終わりは入ってくる弦の向き）
+    let tan_at = |k: usize, end: bool| -> KVec2 {
+        match tv[k] {
+            Some(t) => {
+                let chord = if k == 0 {
+                    pts[1] - pts[0]
+                } else if k == last {
+                    pts[last] - pts[last - 1]
+                } else {
+                    pts[k + 1] - pts[k - 1]
+                };
+                if t.dot(chord) >= 0.0 {
+                    t
+                } else {
+                    -t
+                }
+            }
+            None if end => normalize_vec(pts[k] - pts[k - 1]),
+            None => normalize_vec(pts[k + 1] - pts[k]),
+        }
+    };
+    let fit = |i: usize, j: usize| -> Option<QuadBez> {
+        let (p0, p2) = (pts[i], pts[j]);
+        let line = QuadBez::new(p0, p0.lerp(p2, 0.5), p2);
+        if j == i + 1 {
+            return Some(line);
+        }
+        // 点の列 `from` のどれもが、折れ線 `to` から eps 以内か（どちらも進む向きに並ぶので、近い区間を順にたどる）
+        let within = |from: &[Point], to: &[Point]| -> bool {
+            let mut cur = 0usize;
+            for &q in from {
+                let mut best = point_to_segment_dist(q, to[cur], to[cur + 1]);
+                while cur + 2 < to.len() {
+                    let nd = point_to_segment_dist(q, to[cur + 1], to[cur + 2]);
+                    if nd > best {
+                        break;
+                    }
+                    best = nd;
+                    cur += 1;
+                }
+                if best > eps {
+                    return false;
+                }
+            }
+            true
+        };
+        let fits = |quad: &QuadBez| -> bool {
+            let dd = (quad.p0.to_vec2() - quad.p1.to_vec2() * 2.0 + quad.p2.to_vec2()).hypot();
+            let mq = ((dd / (0.4 * eps)).sqrt().ceil() as usize).max(1);
+            let fq: Vec<Point> = (0..=mq).map(|u| quad.eval(u as f64 / mq as f64)).collect();
+            within(&pts[i + 1..j], &fq) && within(&fq[1..mq], &pts[i..=j])
+        };
+        // 直線で当てはまるなら直線にする（制御点が端に寄った、ほとんど直線の曲線にしない。つなぎ目の向きの違いは、
+        // 当てはめの許容の中）
+        if fits(&line) {
+            return Some(line);
+        }
+        let (t0, t2) = (tan_at(i, false), tan_at(j, true));
+        let d = p2 - p0;
+        let det = t0.cross(t2);
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        let (al, be) = (d.cross(t2) / det, t0.cross(d) / det);
+        if al <= 0.0 || be <= 0.0 {
+            return None;
+        }
+        // 速さ（両端で 2|p1 − p0| と 2|p2 − p1|）の比が 1/2 より偏る曲線は使わず、もっと短く分ける。地図は、切った
+        // 所の媒介変数を、折れ線の区間の中で比例で決めて曲線を戻す（`Prov`）ので、速さが大きく偏る曲線では、戻した
+        // 片が曲線から外れ、同じ線を重ねるたびに欠片や切れ目の頂点が残る（試しで、比 0.25 では欠片が10通り中1通り、
+        // 1/2 では0通り。今のブラシは1通り）
+        let quad = QuadBez::new(p0, p0 + t0 * al, p2);
+        let (l0, l1) = ((quad.p1 - quad.p0).hypot(), (quad.p2 - quad.p1).hypot());
+        if 2.0 * l0.min(l1) < l0.max(l1) {
+            return None;
+        }
+        fits(&quad).then_some(quad)
+    };
+    // 始めの点から、当てはまるいちばん遠い点を、倍に伸ばしてから2分して探す
+    let mut i = 0;
+    while i < last {
+        let mut good = i + 1;
+        let mut good_q = fit(i, good).expect("隣どうしは直線で当てはまる");
+        let mut step = 2;
+        loop {
+            let j = (i + step).min(last);
+            if j <= good {
+                break;
+            }
+            if let Some(q) = fit(i, j) {
+                (good, good_q) = (j, q);
+                step *= 2;
+                continue;
+            }
+            let (mut lo, mut hi) = (good, j);
+            while hi - lo > 1 {
+                let mid = (lo + hi) / 2;
+                match fit(i, mid) {
+                    Some(q) => (lo, good_q) = (mid, q),
+                    None => hi = mid,
+                }
+            }
+            good = lo;
+            break;
+        }
+        out.push(good_q);
+        i = good;
+    }
+    out
+}
+
+/// 鉛筆の線：マウスの点 `points`（文書の座標）から、ブラシと同じなめらかな中心線（`centerline`。丸めの刻み `step`）を作り、
+/// 2次ベジェの並びに当てはめたもの（文書の座標）。当てはめはブラシと同じく画面の px で行う（表示の倍率 `z`。許容
+/// `FIT_TOL_PX`）。点が1つだけなら空
+pub(crate) fn pencil_curves(points: &[Point], step: f64, z: f64) -> Vec<QuadBez> {
+    if !step.is_finite() || step <= 0.0 || !z.is_finite() || z <= 0.0 {
+        return Vec::new();
+    }
+    let cl = centerline(points, step);
+    if cl.len() < 2 {
+        return Vec::new();
+    }
+    // 中心線の点（画面の px）。太らせないので、点の細かさは中心線そのものの弦のずれだけで決まる（半径 0）
+    let cs = cl.samples(0, cl.len() - 1, 0.0, FIT_TOL_PX * FLAT_RATIO / z);
+    let pts: Vec<Point> = cs.iter().map(|c| (c.p.to_vec2() * z).to_point()).collect();
+    let tv: Vec<Option<KVec2>> = cs.iter().map(|c| Some(c.t)).collect();
+    fit_run(&pts, &tv, FIT_TOL_PX)
+        .into_iter()
+        .map(|q| QuadBez::new(
+            (q.p0.to_vec2() / z).to_point(),
+            (q.p1.to_vec2() / z).to_point(),
+            (q.p2.to_vec2() / z).to_point(),
+        ))
+        .collect()
 }
 
 /// 表示の倍率 `zoom` と画面の倍率 `pixels_per_point` での、丸めの刻み（画面の1画素を文書の座標に直したもの）

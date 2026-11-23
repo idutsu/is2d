@@ -88,7 +88,13 @@ pub(crate) enum Action {
         pt: Point,
         color: Color32,
     },
-    /// 線を引く（鉛筆）：線の区間 `segs`（ステージの座標）を、作業中のレイヤーの編集中の階層に引く
+    /// 鉛筆：マウスの点 `points`（ステージの座標）から作った線（`pencil_curves`）を、線 `stroke` で引く
+    PencilStroke {
+        points: Vec<Point>,
+        stroke: crate::planar_map::EdgeStroke,
+    },
+    /// テスト用：線の区間 `segs`（ステージの座標）を、作業中のレイヤーの編集中の階層に引く（鉛筆と同じ道）
+    #[cfg(test)]
     DrawLines {
         segs: Vec<crate::planar_map::LineSeg>,
     },
@@ -584,7 +590,17 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         }
         Action::BucketFill { pt, color } => apply_bucket_fill(tab, color, pt),
         Action::InkBottle { pt, stroke } => apply_ink_bottle(tab, stroke, pt),
+        #[cfg(test)]
         Action::DrawLines { segs } => apply_draw_lines(tab, segs),
+        Action::PencilStroke { points, stroke } => {
+            let zoom = tab.view.zoom() as f64;
+            let step = input_step(zoom, tab.view.pixels_per_point as f64);
+            let segs = crate::vector_stroke::pencil_curves(&points, step, zoom)
+                .into_iter()
+                .map(|q| (q, stroke))
+                .collect();
+            apply_draw_lines(tab, segs)
+        }
 
         Action::SelectSingleAt { pt } => select_single_shape_at(tab, tool.select_sub_mode, pt),
         Action::ToggleSelectionAt { scene_idx } => {
