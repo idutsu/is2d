@@ -343,7 +343,7 @@ pub(crate) struct FillShape {
     pub(crate) symbol_instance: Option<SymbolInstanceBinding>,
     /// メッシュ内容が更新されるたびにインクリメントされるリビジョン番号（土台キャッシュや書き戻しでの差分検知用）
     pub(crate) mesh_revision: u64,
-    /// 線の図形なら、その線（`LayerBase::lines`：線のひと区切りを太らせた形。番号は線の番号 `line_id`）。面の図形は `None`
+    /// 線の図形なら、その線（`LayerBase::lines`：線を乗せた辺1本を太らせた形。番号は線の番号 `line_id`）。面の図形は `None`
     pub(crate) line: Option<crate::planar_map::EdgeStroke>,
     /// 線の図形なら、線の中心を通る曲線（地図の辺。つながった順）。輪郭の表示とアンカーは、太らせた形の輪郭でなく、これで
     /// 描く（`wire_contours`）。図形と同じ変換で写る

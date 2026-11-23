@@ -38209,17 +38209,20 @@ mod strokes {
     fn lines_are_their_own_shapes_drawn_after_the_fills() {
         let m = inked_square().checked().unwrap();
         let base = LayerBase::of_stored(&StoredMap::from_dense(m.uniquely_labeled().map(), None));
-        // 正方形の輪郭は、線と線の交わりが無いので、1つのひと区切り（輪）：線の図形は1つ
+        // 正方形の輪郭は辺が4本：線の図形は辺1本ずつ（アンカーとアンカーの間）で4つ
         let lines = base.lines(&[]);
-        assert_eq!(lines.len(), 1);
-        let line = &lines[0];
-        assert_eq!((line.color, line.line), (INK.color, Some(INK)));
-        assert!(crate::planar_map::is_line_id(line.shape_id));
-        // 線の太さの半分だけ、輪郭の外と中に広がる（輪の形）
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(|l| l.line == Some(INK) && crate::planar_map::is_line_id(l.shape_id)));
+        // 上の辺の線：線の太さの半分だけ外と中に広がり、端は丸
+        let line = lines.iter().find(|l| l.contains_point(Point::new(200.0, 99.0))).unwrap();
+        assert_eq!(line.color, INK.color);
         let b = line.bounding_box();
-        assert!((b.x0 - 98.0).abs() < 0.05 && (b.x1 - 302.0).abs() < 0.05);
+        assert!((b.x0 - 98.0).abs() < 0.05 && (b.x1 - 302.0).abs() < 0.05 && (b.y1 - 102.0).abs() < 0.05);
         // 輪郭の表示とアンカーは、太らせた形の輪郭でなく、線の中心を通る曲線（地図の辺）で描く
-        let wire: Vec<QuadBez> = line.wire_contours().flat_map(|c| c.segments.iter().copied()).collect();
+        let wire: Vec<QuadBez> = lines
+            .iter()
+            .flat_map(|l| l.wire_contours().flat_map(|c| c.segments.iter().copied()).collect::<Vec<_>>())
+            .collect();
         assert_eq!(wire.len(), base.map().edges.len());
         assert!(wire.iter().all(|q| {
             let on = |p: Point| (p.x - 100.0).abs() < 1e-9 || (p.x - 300.0).abs() < 1e-9 || (p.y - 100.0).abs() < 1e-9 || (p.y - 300.0).abs() < 1e-9;
@@ -38236,11 +38239,12 @@ mod strokes {
         assert!((fb.x0 - 100.0).abs() < 1e-9 && (fb.x1 - 300.0).abs() < 1e-9);
         // 描く順は、面の図形を全部描いたあとに線の図形
         let drawn = base.drawn_shapes(&[]);
-        assert_eq!(drawn.len(), 2);
-        assert!(drawn[0].line.is_none() && drawn[1].line.is_some());
+        assert_eq!(drawn.len(), 5);
+        assert!(drawn[0].line.is_none() && drawn[1..].iter().all(|s| s.line.is_some()));
         // 線の番号は形と線で決まる：同じ地図から作り直しても同じ番号
         let again = LayerBase::of_stored(&StoredMap::from_dense(base.map(), None));
-        assert_eq!(again.lines(&[])[0].shape_id, line.shape_id);
+        let ids = |l: &[std::sync::Arc<FillShape>]| l.iter().map(|s| s.shape_id).collect::<Vec<_>>();
+        assert_eq!(ids(&again.lines(&[])), ids(&lines));
     }
 
     /// 作業中のレイヤーの今のコマの地図の辺
@@ -38266,13 +38270,21 @@ mod strokes {
         let cel = reopened_doc.root.layers[0].cel_at(0).unwrap();
         let edges: Vec<_> = cel.maps.iter().flat_map(|m| m.base().map().edges.clone()).collect();
         assert!(!edges.is_empty() && edges.iter().all(|e| e.stroke == Some(INK)));
-        // 線の上をクリック：その線のひと続き（角は2本だけがつながる頂点なので、輪郭みな）が新しい線になる
+        // 線の上をクリック：その線の辺1本（上の辺）だけが新しい線になる
         let thin = EdgeStroke {
             color: Color32::GREEN,
             width: 1,
         };
         assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 101.0), stroke: thin }));
-        assert!(cel_edges(&app).iter().all(|e| e.stroke == Some(thin)));
+        let edges = cel_edges(&app);
+        assert!(edges.iter().any(|e| e.stroke == Some(thin)));
+        assert!(edges.iter().any(|e| e.stroke == Some(INK)));
+        let m = cel_map(&app);
+        for e in 0..m.edges.len() {
+            let q = m.quad(e);
+            let top = (q.p0.y - 100.0).abs() < 1e-9 && (q.p2.y - 100.0).abs() < 1e-9;
+            assert_eq!(m.edges[e].stroke, Some(if top { thin } else { INK }));
+        }
         // Undo で戻る
         assert!(apply(&mut app, Action::Undo));
         assert!(cel_edges(&app).iter().all(|e| e.stroke == Some(INK)));
@@ -38301,9 +38313,9 @@ mod strokes {
             let red = e.left == Some(Color32::RED) || e.right == Some(Color32::RED);
             assert_eq!(e.stroke.is_some(), red);
         }
-        // 赤の輪郭は、交わりの無い1つのひと区切り（共有する境目の角では、線のある辺が2本だけ）：線の図形は1つ
+        // 赤の輪郭は辺が4本（共有する境目も1本）：線の図形は4つ
         let lines = app.scene().iter().filter(|s| s.line.is_some()).count();
-        assert_eq!(lines, 1);
+        assert_eq!(lines, 4);
         // スポイトで線の上を取ると、線の色と太さを拾う
         app.tool.stroke = EdgeStroke {
             color: Color32::WHITE,
@@ -38422,6 +38434,8 @@ mod strokes {
         let (faces, broken) = m.faces();
         assert_eq!((faces.len(), broken), (2, 0));
         assert!((stroked_length(&m) - 300.0).abs() < 1e-3);
+        // 線は、塗りの境目と交わった所で辺が分かれる（アンカーができる）：線の図形は辺1本ずつで3つ
+        assert_eq!(counts(&app).1, 3);
         // 塗りの中で止まる線（行き止まり）：面の数は変わらない
         let spur = line(Point::new(150.0, 100.0), Point::new(150.0, 150.0), INK);
         assert!(apply(&mut app, Action::DrawLines { segs: vec![spur] }));
@@ -38472,7 +38486,7 @@ mod strokes {
         let mut app = Is2dApp::default();
         put_cel_shapes(&mut app, 0, 0, vec![rect(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
         assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: INK }));
-        assert_eq!(counts(&app), (1, 1));
+        assert_eq!(counts(&app), (1, 4));
         app
     }
 
@@ -38483,21 +38497,30 @@ mod strokes {
         assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, 200.0) }));
         assert_eq!(app.session.selection.shapes.len(), 1);
         assert!(apply(&mut app, Action::DeleteSelection));
-        assert_eq!(counts(&app), (0, 1));
+        assert_eq!(counts(&app), (0, 4));
         let m = cel_map(&app);
         assert!(m.edges.iter().all(|e| e.left.is_none() && e.right.is_none() && e.stroke == Some(INK)));
-        // 線をクリックして消す：塗りは残り、線は無くなる
+        // 線（上の辺）をクリックして消す：塗りと、ほかの3辺の線は残る
         let mut app = inked_square_app();
         assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, 100.5) }));
         let picked: Vec<_> = app.session.selection.shapes.iter().copied().collect();
         assert!(picked.len() == 1 && crate::planar_map::is_line_id(picked[0]));
         assert!(apply(&mut app, Action::DeleteSelection));
-        assert_eq!(counts(&app), (1, 0));
-        assert!(cel_map(&app).edges.iter().all(|e| e.stroke.is_none()));
+        assert_eq!(counts(&app), (1, 3));
+        let m = cel_map(&app);
+        for e in 0..m.edges.len() {
+            let q = m.quad(e);
+            let top = (q.p0.y - 100.0).abs() < 1e-9 && (q.p2.y - 100.0).abs() < 1e-9;
+            assert_eq!(m.edges[e].stroke.is_none(), top);
+        }
+        // 線をダブルクリック：角でつながった4辺をまとめて選ぶ
+        let mut app = inked_square_app();
+        assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(200.0, 100.5) }));
+        assert_eq!(app.session.selection.shapes.len(), 4);
         // ダブルクリックで塗りと輪郭の線を選んで消す：何も残らない
         let mut app = inked_square_app();
         assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(200.0, 200.0) }));
-        assert_eq!(app.session.selection.shapes.len(), 2);
+        assert_eq!(app.session.selection.shapes.len(), 5);
         assert!(apply(&mut app, Action::DeleteSelection));
         assert_eq!(counts(&app), (0, 0));
         // 塗りだけを選んで動かす：線は元の場所に残り、塗りだけが動く
@@ -38516,7 +38539,13 @@ mod strokes {
         let m = cel_map(&app);
         let (faces, _) = m.faces();
         assert_eq!(faces.len(), 1);
-        let line = app.scene().iter().find(|s| s.line.is_some()).unwrap().bounding_box();
+        let line = app
+            .scene()
+            .iter()
+            .filter(|s| s.line.is_some())
+            .map(|s| s.bounding_box())
+            .reduce(|a, b| a.union(b))
+            .unwrap();
         assert!((line.x0 - 98.0).abs() < 0.05);
         let fill = app.scene().iter().find(|s| s.line.is_none()).unwrap().bounding_box();
         assert!((fill.x0 - 500.0).abs() < 1e-6);
@@ -38533,8 +38562,14 @@ mod strokes {
                 Action::Deselect,
             ],
         );
-        assert_eq!(counts(&app), (1, 1));
-        let line = app.scene().iter().find(|s| s.line.is_some()).unwrap().bounding_box();
+        assert_eq!(counts(&app), (1, 4));
+        let moved = app
+            .scene()
+            .iter()
+            .filter(|s| s.line.is_some() && s.bounding_box().y0 > 400.0)
+            .count();
+        assert_eq!(moved, 1);
+        let line = app.scene().iter().find(|s| s.line.is_some() && s.bounding_box().y0 > 400.0).unwrap().bounding_box();
         assert!((line.y0 - 498.0).abs() < 0.05);
         let fill = app.scene().iter().find(|s| s.line.is_none()).unwrap().bounding_box();
         assert!((fill.y0 - 100.0).abs() < 1e-6);
@@ -38548,7 +38583,7 @@ mod strokes {
             color: Color32::BLUE,
             width: 2,
         };
-        // 3本が1点で交わる（ひと区切りは3つ）。離れた所の別の線と、つながっているが線の違う線
+        // 3本が1点で交わる（辺は3本）。離れた所の別の線と、つながっているが線の違う線
         let segs = vec![
             line(Point::new(200.0, 300.0), c, INK),
             line(c, Point::new(400.0, 300.0), INK),
@@ -38560,7 +38595,7 @@ mod strokes {
         assert_eq!(counts(&app).1, 5);
         assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(250.0, 300.5) }));
         assert_eq!(app.session.selection.shapes.len(), 3);
-        // クリックは、ひと区切りだけ
+        // クリックは、辺1本だけ
         assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(250.0, 300.5) }));
         assert_eq!(app.session.selection.shapes.len(), 1);
     }
@@ -38603,6 +38638,8 @@ mod strokes {
         let m = cel_map(&app);
         let curves: Vec<QuadBez> = (0..m.edges.len()).map(|e| m.quad(e)).filter(|q| q.p0.y > 300.0 || q.p2.y > 300.0).collect();
         assert!(!curves.is_empty() && curves.len() <= 8, "曲線 {} 本", curves.len());
+        // 線の図形は辺1本ずつ：まっすぐな線の1本と、半円の曲線の数
+        assert_eq!(counts(&app).1, 1 + curves.len());
         for p in arc.iter().step_by(10) {
             let d = curves.iter().map(|q| crate::vector_engine::nearest_on_quad(q, *p).1).fold(f64::MAX, f64::min);
             assert!(d < 1.0, "点 {p:?} から {d}");

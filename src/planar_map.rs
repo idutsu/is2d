@@ -212,7 +212,7 @@ impl PlanarMap {
             )
     }
 
-    /// 辺ごとの、その辺の線のひと区切りの番号（`line_id`。線の無い辺は `None`）
+    /// 辺ごとの、その辺の線の図形の番号（`line_id`。線の無い辺は `None`）
     pub(crate) fn edge_lines(&self) -> Vec<Option<ShapeId>> {
         let stroked: Vec<(usize, crate::stored_map::TileEdge)> = self
             .edges
@@ -237,10 +237,7 @@ impl PlanarMap {
             .collect();
         let mut out = vec![None; self.edges.len()];
         for run in line_runs(&stroked) {
-            let id = line_id(&run, &stroked);
-            for &k in &run.edges {
-                out[stroked[k].0] = Some(id);
-            }
+            out[stroked[run.edge].0] = Some(line_id(&run, &stroked));
         }
         out
     }
@@ -1037,123 +1034,61 @@ pub(crate) fn is_line_id(id: ShapeId) -> bool {
     id & LINE_ID_BIT != 0
 }
 
-/// 頂点で、線のひと区切りが続くか（線のひと区切りの決まりはこれ1つ：線の図形 `line_runs`・インクボトル `stroke_run`）：
-/// 頂点につながる線を乗せた辺の線 `strokes` が、ちょうど2本で同じ線（交わり・線の変わる所・行き止まりで切れる）
-fn line_continues(strokes: &[EdgeStroke]) -> bool {
-    matches!(strokes, [a, b] if a == b)
-}
-
-/// 線のひと区切り：辺（`line_runs` に渡した並びの番号。つながった順）と、向きをそろえた辺の曲線と、線
+/// 線の図形1つ分（線を選ぶ単位）：線を乗せた辺1本（アンカーとアンカーの間。`line_runs` に渡した並びの番号）と、その曲線と線
 pub(crate) struct LineRun {
-    edges: Vec<usize>,
-    quads: Vec<QuadBez>,
+    edge: usize,
+    quad: QuadBez,
     stroke: EdgeStroke,
 }
 
-/// 線を乗せた辺 `edges`（（番号, 辺）の並び）を、線のひと区切りに分ける（`line_continues` で続く頂点を越えてつなぐ）。
-/// 行き止まり・交わりから始まるものを先に、残り（輪になったもの）をそのあとにたどる
+/// 線を乗せた辺 `edges`（（番号, 辺）の並び）の、線の図形1つ分ずつ（辺1本ずつ。画面に見えるアンカーとアンカーの間が、
+/// クリックで選ぶ単位：設計 claude/線の設計_68a596e.md の 6.4）
 fn line_runs(edges: &[(usize, crate::stored_map::TileEdge)]) -> Vec<LineRun> {
-    let key = |p: Point| [p.x.to_bits(), p.y.to_bits()];
-    let mut at: HashMap<[u64; 2], Vec<usize>> = HashMap::new();
-    for (i, (_, e)) in edges.iter().enumerate() {
-        at.entry(key(e.a)).or_default().push(i);
-        at.entry(key(e.b)).or_default().push(i);
-    }
-    let continues = |p: Point| {
-        let strokes: Vec<EdgeStroke> = at[&key(p)].iter().filter_map(|&i| edges[i].1.stroke).collect();
-        line_continues(&strokes)
-    };
-    let mut used = vec![false; edges.len()];
-    let mut runs = Vec::new();
-    // 辺 `start` を、点 `from` から出る向きでたどり始める
-    let walk = |start: usize, from: Point, used: &mut Vec<bool>| {
-        let stroke = edges[start].1.stroke.expect("線を乗せた辺");
-        let (mut run_edges, mut quads) = (Vec::new(), Vec::new());
-        let (mut e, mut p) = (start, from);
-        loop {
-            used[e] = true;
-            let q = edges[e].1.quad();
-            let q = if q.p0 == p { q } else { QuadBez::new(q.p2, q.p1, q.p0) };
-            run_edges.push(e);
-            quads.push(q);
-            p = q.p2;
-            if !continues(p) {
-                break;
-            }
-            match at[&key(p)].iter().copied().find(|&f| !used[f]) {
-                Some(f) => e = f,
-                None => break,
-            }
-        }
-        LineRun {
-            edges: run_edges,
-            quads,
-            stroke,
-        }
-    };
-    for i in 0..edges.len() {
-        for end in [edges[i].1.a, edges[i].1.b] {
-            if !used[i] && !continues(end) {
-                runs.push(walk(i, end, &mut used));
-            }
-        }
-    }
-    for i in 0..edges.len() {
-        if !used[i] {
-            runs.push(walk(i, edges[i].1.a, &mut used));
-        }
-    }
-    runs
+    edges
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, e))| {
+            Some(LineRun {
+                edge: i,
+                quad: e.quad(),
+                stroke: e.stroke?,
+            })
+        })
+        .collect()
 }
 
-/// 線のひと区切り `run`（辺は `edges` の番号）の番号：ひと区切りの辺みなの形（決まった向きの両端と制御点のビット。小さい順）、
-/// 線、ひと区切りの辺の側の番号（面の番号と線のラベル：`line_label`）のうちいちばん小さいものから決める（形・線・番号が
-/// みな同じ間だけ同じ番号なので、形が少しでも変わったひと区切りは別の番号になり、図形を作り直す：`LayerBase::lines`。
-/// 番号を入れるので、同じ形の線がほかのレイヤーに写してあっても、ぶつからない。線の番号の印 `LINE_ID_BIT` を立てる）
+/// 線の図形1つ分 `run`（辺は `edges` の番号）の番号：辺の形（決まった向きの両端と制御点のビット）、線、辺の側の番号（面の
+/// 番号と線のラベル：`line_label`）から決める（形・線・番号がみな同じ間だけ同じ番号なので、形が少しでも変われば別の番号に
+/// なり、図形を作り直す：`LayerBase::lines`。番号を入れるので、同じ形の線がほかのレイヤーに写してあっても、ぶつからない。
+/// 線の番号の印 `LINE_ID_BIT` を立てる）
 fn line_id(run: &LineRun, edges: &[(usize, crate::stored_map::TileEdge)]) -> ShapeId {
     use std::hash::{Hash, Hasher};
-    let bits = |q: &QuadBez| {
-        let (a, b) = if point_order(q.p0, q.p2).is_le() { (q.p0, q.p2) } else { (q.p2, q.p0) };
-        [a.x, a.y, b.x, b.y, q.p1.x, q.p1.y].map(f64::to_bits)
-    };
-    let mut keys: Vec<[u64; 6]> = run.quads.iter().map(bits).collect();
-    keys.sort_unstable();
+    let q = run.quad;
+    let (a, b) = if point_order(q.p0, q.p2).is_le() { (q.p0, q.p2) } else { (q.p2, q.p0) };
+    let e = &edges[run.edge].1;
     let mut h = IntHasher::default();
-    keys.hash(&mut h);
+    [a.x, a.y, b.x, b.y, q.p1.x, q.p1.y].map(f64::to_bits).hash(&mut h);
     run.stroke.hash(&mut h);
-    run.edges
-        .iter()
-        .flat_map(|&k| [edges[k].1.left_src, edges[k].1.right_src])
-        .flatten()
-        .min()
-        .hash(&mut h);
+    [e.left_src, e.right_src].hash(&mut h);
     LINE_ID_BIT | (h.finish() >> 1)
 }
 
-/// 線のひと区切り `run` を、線の太さに太らせた形の図形（端も角も丸。階層 `group_path`、番号 `id`）。曲線は描画の許容
-/// `MESH_TOL` で折れ線にし、丸い端と角も同じ許容の折れ線にする（半径 r の円弧を、弦と円弧のずれが許容ほどになる角
-/// √(8·許容/r) ごとに折る）。重なりの無い輪郭を偶奇で塗る
+/// 線の図形1つ分 `run` を、線の太さに太らせた形の図形（端は丸。階層 `group_path`、番号 `id`）。曲線は描画の許容
+/// `MESH_TOL` で折れ線にし、丸い端も同じ許容の折れ線にする（半径 r の円弧を、弦と円弧のずれが許容ほどになる角
+/// √(8·許容/r) ごとに折る）。重なりの無い輪郭を偶奇で塗る。つなぎ目は、隣の辺の線の丸い端と重なって丸くなる
 fn line_shape(run: &LineRun, id: ShapeId, group_path: &[u64]) -> Option<FillShape> {
     use crate::vector_engine::MESH_TOL;
     use i_overlay9::mesh::float::stroke::offset::StrokeOffset;
     use i_overlay9::mesh::float::style::{LineCap, LineJoin, StrokeStyle};
-    let (quads, stroke) = (&run.quads, &run.stroke);
-    let closed = quads.first().map(|q| q.p0) == quads.last().map(|q| q.p2);
-    let mut path: Vec<[f64; 2]> = Vec::new();
-    for q in quads {
-        let skip = usize::from(!path.is_empty());
-        path.extend(flat_points(*q, MESH_TOL).skip(skip).map(|(p, _)| [p.x, p.y]));
-    }
-    if closed {
-        path.pop();
-    }
+    let stroke = &run.stroke;
+    let path: Vec<[f64; 2]> = flat_points(run.quad, MESH_TOL).map(|(p, _)| [p.x, p.y]).collect();
     let step = (8.0 * MESH_TOL / (stroke.width as f64 / 2.0)).sqrt();
     let style = StrokeStyle::new(stroke.width as f64)
         .line_join(LineJoin::Round(step))
         .start_cap(LineCap::Round(step))
         .end_cap(LineCap::Round(step));
     let mut rings: Vec<Contour> = path
-        .stroke(style, closed)
+        .stroke(style, false)
         .iter()
         .flatten()
         .filter(|r| r.len() >= 3)
@@ -1174,7 +1109,7 @@ fn line_shape(run: &LineRun, id: ShapeId, group_path: &[u64]) -> Option<FillShap
     let exterior = rings.remove(0);
     let mut s = FillShape::new(stroke.color, exterior, rings)
         .with_scope(0, group_path)
-        .with_line(*stroke, quads.clone());
+        .with_line(*stroke, vec![run.quad]);
     s.shape_id = id;
     Some(s)
 }
@@ -1274,7 +1209,7 @@ pub(crate) fn label_of_face(color: Option<Color32>, src: Option<ShapeId>) -> Opt
 
 /// 面と線を残す・外すときの辺の両側と線（決まりはこれ1つ：地図全体の `PlanarMap::restricted_by`、塊から作る
 /// `LayerBase::only_faces_map`・`restricted_local`）。`keep` は面の番号と線の番号（`line_id`）に答える。色のある側は、その面を
-/// 残すなら残し、外すなら何も無いにする。線は、その辺の線のひと区切りの番号 `line` を残すなら残し、外すなら外す（Animate と
+/// 残すなら残し、外すなら何も無いにする。線は、その辺の線の図形の番号 `line` を残すなら残し、外すなら外す（Animate と
 /// 同じく、面と線は別々に選ぶ。設計：claude/線の設計_68a596e.md の 6.4）。線を残した辺の色の無い側には、線のラベル
 /// （`line_label`。外した面の側は、その面の番号）を残す。残す辺でなければ `None`
 #[allow(clippy::type_complexity)]
@@ -1466,10 +1401,10 @@ pub(crate) struct LayerBase {
     map_faces: OnceLock<Vec<MapFace>>,
     /// 面の図形：（階層, 面ごとの図形。番号は面の印。番号の順）
     faces: SyncCache<Option<FaceShapes>>,
-    /// 線の図形：（階層, 線のひと区切りごとの図形。番号は線の番号。番号の順）。初めて要るときに作る（`lines`）
+    /// 線の図形：（階層, 線を乗せた辺ごとの図形。番号は線の番号。番号の順）。初めて要るときに作る（`lines`）
     lines: SyncCache<Option<LineShapes>>,
     /// 前の写し（この写しの地図に書き換える前の地図の写し）が作ってあった線の図形。線の図形を作るとき、形も線も同じ
-    /// ひと区切り（同じ番号）の図形を使い回す（作り終えたら手放す）
+    /// 辺（同じ番号）の図形を使い回す（作り終えたら手放す）
     prev_lines: SyncCache<Option<LineShapes>>,
     /// 升目の索引（初めて要るときに作る。地図を書き換えたあとの写しは、前の写しの索引から変わった所だけ作り直したもの
     /// を持つ：`of_local`・`of_stored_after`）
@@ -1634,7 +1569,7 @@ impl LayerBase {
         let Some(prev) = prev else {
             return;
         };
-        // 前の写しの線の図形も受け取る（`lines` が形の同じひと区切りの図形を使い回す）
+        // 前の写しの線の図形も受け取る（`lines` が形の同じ辺の図形を使い回す）
         *self.prev_lines.lock() = prev.lines.lock().clone();
         self.derive_index(prev, |b| &b.index, LayerBase::edge_tiles);
         self.derive_index(prev, |b| &b.ends, LayerBase::end_tiles);
@@ -2057,16 +1992,15 @@ impl LayerBase {
         self.apply_diff(&m, &removed, &added, group_path)
     }
 
-    /// インクボトルで線を乗せる辺（計算に使う地図の番号）：点 `p` が線の上（線の太さの半分以内）なら、その線のひと続き
-    /// （その辺と、2本だけがつながる頂点の先の、同じ線の辺をたどったもの。交わりと交わりの間）。そうでなければ、点を含む
-    /// 色のある面の輪郭の辺。どちらでもなければ空
+    /// インクボトルで線を乗せる辺（計算に使う地図の番号）：点 `p` が線の上（線の太さの半分以内）なら、その線の辺1本
+    /// （アンカーとアンカーの間。線を選ぶ単位と同じ）。そうでなければ、点を含む色のある面の輪郭の辺。どちらでもなければ空
     fn stroke_targets(&self, p: Point, group_path: &[u64]) -> Vec<usize> {
         let reach = *STROKE_WIDTHS.end() as f64 / 2.0;
         if let Some((e, t)) = self.hit_edge(p, reach, Affine::IDENTITY) {
             let te = self.stored.edge_at(e);
             if let Some(stroke) = te.stroke {
                 if te.quad().eval(t).distance(p) <= stroke.width as f64 / 2.0 {
-                    return self.stroke_run(e);
+                    return vec![e];
                 }
             }
         }
@@ -2085,35 +2019,6 @@ impl LayerBase {
             }
             _ => Vec::new(),
         }
-    }
-
-    /// 線を乗せた辺 `e` の線のひと区切り（`line_continues` で続く頂点を越えて、線を乗せた辺をたどったもの。番号の順）
-    fn stroke_run(&self, e: usize) -> Vec<usize> {
-        let mut run = vec![e];
-        let mut todo = vec![e];
-        while let Some(f) = todo.pop() {
-            let te = self.stored.edge_at(f);
-            for v in [te.a, te.b] {
-                let stroked: Vec<usize> = self
-                    .edges_at_node(v)
-                    .into_iter()
-                    .filter(|&g| self.stored.edge_at(g).stroke.is_some())
-                    .collect();
-                let strokes: Vec<EdgeStroke> =
-                    stroked.iter().filter_map(|&g| self.stored.edge_at(g).stroke).collect();
-                if !line_continues(&strokes) {
-                    continue;
-                }
-                for g in stroked {
-                    if !run.contains(&g) {
-                        run.push(g);
-                        todo.push(g);
-                    }
-                }
-            }
-        }
-        run.sort_unstable();
-        run
     }
 
     /// 道具の側（アンカーの追加・削除）：`edit` の差分を作り、1本の道の差分から先（`apply_diff`）に渡す（設計 段2b の 9.）。
@@ -2760,10 +2665,10 @@ impl LayerBase {
         shapes
     }
 
-    /// 線の図形（階層 `group_path` の文書の座標。写しに控える）：線を乗せた辺を線のひと区切り（`line_runs`）に分け、
-    /// ひと区切りごとに太らせた形の図形にしたもの（番号は `line_id`。番号の順）。同じ地図の面の図形を全部描いたあとに描く
+    /// 線の図形（階層 `group_path` の文書の座標。写しに控える）：線を乗せた辺1本ずつ（`line_runs`。アンカーとアンカーの間）を、
+    /// 太らせた形の図形にしたもの（番号は `line_id`。番号の順）。同じ地図の面の図形を全部描いたあとに描く
     /// （線は塗りより上：`ScopeMap::drawn_shapes`）。前の写しが作ってあった図形のうち、番号の同じもの（形も線も同じ
-    /// ひと区切り）は使い回すので、作り直すのは変わったひと区切りの分だけ（設計：claude/線の設計_68a596e.md の 6.3）
+    /// 辺）は使い回すので、作り直すのは変わった辺の分だけ（設計：claude/線の設計_68a596e.md の 6.3）
     pub(crate) fn lines(&self, group_path: &[u64]) -> Arc<[Arc<FillShape>]> {
         let mut cached = self.lines.lock();
         if let Some((gp, shapes)) = &*cached {
@@ -2792,22 +2697,18 @@ impl LayerBase {
         shapes
     }
 
-    /// 線を乗せた辺（計算に使う地図の番号）ごとの、その辺の線のひと区切りの番号（`line_id`）
+    /// 線を乗せた辺（計算に使う地図の番号）ごとの、その辺の線の図形の番号（`line_id`）
     fn edge_lines(&self) -> IntMap<usize, ShapeId> {
         let stroked = self.stored.stroked_edges();
         let mut out: IntMap<usize, ShapeId> = IntMap::default();
         for run in line_runs(&stroked) {
-            let id = line_id(&run, &stroked);
-            for &k in &run.edges {
-                out.insert(stroked[k].0, id);
-            }
+            out.insert(stroked[run.edge].0, line_id(&run, &stroked));
         }
         out
     }
 
-    /// ダブルクリックで一緒に選ぶもの（階層 `group_path`）：線の番号 `id` なら、その線のひと区切りと、端でつながった同じ線の
-    /// ひと区切りをたどったもの。面の番号なら、その面と、輪郭の辺の線のひと区切り（Animate と同じ：設計
-    /// claude/線の設計_68a596e.md の 6.4）
+    /// ダブルクリックで一緒に選ぶもの（階層 `group_path`）：線の番号 `id` なら、その線の辺と、端でつながった同じ線の辺を
+    /// たどったもの。面の番号なら、その面と、輪郭の辺の線（Animate と同じ：設計 claude/線の設計_68a596e.md の 6.4）
     pub(crate) fn connected_ids(&self, id: ShapeId, group_path: &[u64]) -> HashSet<ShapeId> {
         let stroked = self.stored.stroked_edges();
         let runs: Vec<(ShapeId, LineRun)> = line_runs(&stroked)
@@ -2817,7 +2718,7 @@ impl LayerBase {
         let mut out: HashSet<ShapeId> = HashSet::from([id]);
         if is_line_id(id) {
             let ends = |r: &LineRun| -> [[u64; 2]; 2] {
-                let (a, b) = (r.quads[0].p0, r.quads[r.quads.len() - 1].p2);
+                let (a, b) = (r.quad.p0, r.quad.p2);
                 [[a.x.to_bits(), a.y.to_bits()], [b.x.to_bits(), b.y.to_bits()]]
             };
             let mut todo = vec![id];
@@ -2842,7 +2743,7 @@ impl LayerBase {
                 .into_iter()
                 .collect();
             for (rid, r) in &runs {
-                if r.edges.iter().any(|&k| edges.contains(&stroked[k].0)) {
+                if edges.contains(&stroked[r.edge].0) {
                     out.insert(*rid);
                 }
             }
