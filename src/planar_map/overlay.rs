@@ -39,6 +39,9 @@ pub(crate) enum MapRule {
     /// 輪郭の変形（重ねるものは `MapInput::Sweep`）。前の色と、動かしたことによる色ごとの巻き数の変わり方で決める
     /// （`swept_color`）
     Sweep,
+    /// 線を引く（鉛筆。重ねるものは `MapInput::Lines`）。色は両側とも前のまま、引いた線の区間に線を乗せる（設計：
+    /// claude/線の設計_68a596e.md の 6.2 の (b)）
+    Line,
 }
 
 /// 区間の片側（または中の辺）での、重ねるものの値
@@ -120,6 +123,9 @@ pub(super) fn swept_color(old: Option<Color32>, w: &[(Option<Color32>, i32)]) ->
 /// 輪郭の変形で動かした辺：（辺の番号, 後の曲線）
 pub(crate) type MovedEdge = (usize, QuadBez);
 
+/// 引く線の1区間：（曲線, 線）
+pub(crate) type LineSeg = (QuadBez, EdgeStroke);
+
 /// 重ねるもの：塗りの形（中は巻き数が奇数の所。i_overlay が数える）か、地図（中は色のある面。その座標で正しい地図で
 /// あること：前の地図の線に触れない辺は、そのまま写す）か、輪郭の変形で動かした辺（`MapRule::Sweep` で重ねる。後の曲線を
 /// 重ね、前の曲線＝元の地図の辺を引く分として数える）か、下から上へ並べた塗りの形（色は、巻き数が奇数の形のうち並びで
@@ -130,6 +136,8 @@ pub(crate) enum MapInput<'a> {
     Map(&'a PlanarMap),
     Sweep(&'a [MovedEdge]),
     Stack(&'a [&'a FillShape]),
+    /// 引く線（鉛筆。`MapRule::Line` で重ねる）：中も外も無い、線の区間の並び
+    Lines(&'a [LineSeg]),
 }
 
 impl MapInput<'_> {
@@ -204,6 +212,14 @@ impl MapInput<'_> {
                     l.cols.push((ed.left, ed.right));
                     l.strokes.push(ed.stroke);
                     l.labels.push((color(ed.left), color(ed.right)));
+                }
+            }
+            // 線は囲む所が無いので、中を数える印は持たない
+            MapInput::Lines(segs) => {
+                for &(q, stroke) in segs {
+                    l.quads.push(q);
+                    l.strokes.push(Some(stroke));
+                    l.labels.push((0, 0));
                 }
             }
             // 後の曲線を、元の辺の左右の色で重ねる
@@ -551,8 +567,8 @@ impl PlanarMap {
                 let ed = self.edges[e];
                 (self.quad(e), (ed.left, ed.right), ed.stroke)
             });
-        if let MapInput::Shapes(_) = input {
-            // 形の線の端を、前からある頂点から `FLAT_TOL` 以内なら、その頂点（いちばん近いもの）に寄せる。地図の精度
+        if let MapInput::Shapes(_) | MapInput::Lines(_) = input {
+            // 形・引く線の端を、前からある頂点から `FLAT_TOL` 以内なら、その頂点（いちばん近いもの）に寄せる。地図の精度
             // では同じ点なので、寄せないと2つの頂点が格子の別々の点に残り、同じ線として扱う所（`Span`）の端で2本の
             // 折れ線が分かれて、見えない欠片の面ができる（`stitched` は線の端にいつも自分の端の点を置く。レビュー
             // 4cb53aa の N-1002）。続く線の端は同じ点なので、輪郭は閉じたまま。形は偶奇の規則で数えるので、寄せて
@@ -1847,6 +1863,7 @@ impl PlanarMap {
             }
             MapInput::Map(_) => Over::Color(new_at(p2)),
             MapInput::Sweep(_) => Over::Swept(swept_winding(p2)),
+            MapInput::Lines(_) => Over::Inside(false),
             MapInput::Stack(_) => {
                 Over::Color(stack.as_ref().and_then(|st| st.label(&st.odd_at(p2)).0))
             }
@@ -1906,6 +1923,7 @@ impl PlanarMap {
                             (Over::Color(l.0), l.1)
                         }
                         MapInput::Sweep(_) => (Over::Swept(swept_side(k, fwd)), None),
+                        MapInput::Lines(_) => (Over::Inside(false), None),
                         MapInput::Stack(_) => {
                             let l = pick(stack_sides[k]);
                             (Over::Color(l.0), l.1)

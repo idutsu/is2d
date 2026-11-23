@@ -1213,6 +1213,7 @@ enum ChangeInput<'a> {
     Shapes(&'a [FillShape]),
     Sweep(Vec<(usize, QuadBez)>),
     Map(&'a PlanarMap),
+    Lines(&'a [LineSeg]),
 }
 
 impl LocalChange<'_> {
@@ -1221,6 +1222,7 @@ impl LocalChange<'_> {
             ChangeInput::Shapes(s) => MapInput::Shapes(s),
             ChangeInput::Sweep(m) => MapInput::Sweep(m),
             ChangeInput::Map(p) => MapInput::Map(p),
+            ChangeInput::Lines(l) => MapInput::Lines(l),
         }
     }
 }
@@ -1565,6 +1567,18 @@ impl LayerBase {
             input: ChangeInput::Shapes(shapes),
             lines,
             rule,
+        }
+    }
+
+    /// 道具の側（鉛筆）：線 `segs`（文書の座標）を引くときに、重ね合わせに渡すもの（`MapRule::Line`）。線の端は、前からある
+    /// 頂点から `FLAT_TOL` 以内なら、その頂点に寄せる（形と同じ）
+    pub(crate) fn line_change<'a>(&self, segs: &'a [LineSeg]) -> LocalChange<'a> {
+        let mut lines = MapInput::Lines(segs).lines(|e| self.old_edge(e));
+        self.snap_ends(&mut lines.quads);
+        LocalChange {
+            input: ChangeInput::Lines(segs),
+            lines,
+            rule: MapRule::Line,
         }
     }
 
@@ -2166,14 +2180,19 @@ impl LayerBase {
         };
         let orig_shape = |id: ShapeId| -> Option<Arc<FillShape>> { faces_list.by_id(id).cloned() };
         let change = local.rewrite(&faces, &lookup, &orig_shape, &memo, 0, group_path);
-        if change.removed.is_empty() && change.added.is_empty() {
-            return LocalEdit::Same;
-        }
         let (relabel, add_edges) = local.relabeled_edges(&faces, &change.ids, &memo);
         let mut all_removed = removed.to_vec();
         all_removed.extend(relabel);
         all_removed.sort_unstable();
         all_removed.dedup();
+        // 面も辺の中身も変わらなければ、変わらない（線だけの辺は、面を変えずに増える・消える・線が替わる：設計
+        // claude/線の設計_68a596e.md の 6.2）
+        if change.removed.is_empty()
+            && change.added.is_empty()
+            && !self.stored.diff_changes(&all_removed, &add_edges)
+        {
+            return LocalEdit::Same;
+        }
         let stored = self.stored.with_diff_tiles(&all_removed, &add_edges);
         let added: Vec<Arc<FillShape>> = change
             .added

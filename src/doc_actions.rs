@@ -88,6 +88,10 @@ pub(crate) enum Action {
         pt: Point,
         color: Color32,
     },
+    /// 線を引く（鉛筆）：線の区間 `segs`（ステージの座標）を、作業中のレイヤーの編集中の階層に引く
+    DrawLines {
+        segs: Vec<crate::planar_map::LineSeg>,
+    },
     /// インクボトル：点の線か、点を含む面の輪郭に、線 `stroke` を乗せる
     InkBottle {
         pt: Point,
@@ -576,6 +580,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         }
         Action::BucketFill { pt, color } => apply_bucket_fill(tab, color, pt),
         Action::InkBottle { pt, stroke } => apply_ink_bottle(tab, stroke, pt),
+        Action::DrawLines { segs } => apply_draw_lines(tab, segs),
 
         Action::SelectSingleAt { pt } => select_single_shape_at(tab, tool.select_sub_mode, pt),
         Action::ToggleSelectionAt { scene_idx } => {
@@ -1103,6 +1108,28 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
     let doc_pt = tab.session.edit_path.world_xform().inverse() * pt;
     write_local(tab, target_lid, |base, scope| {
         base.fill_local(doc_pt, fill_color, scope)
+    })
+}
+
+/// 線を引く（鉛筆）：線の区間 `segs`（ステージの座標）を、作業中のレイヤー・編集中の階層の地図に引く
+/// （`LayerBase::line_change`・`MapRule::Line`。塗りの色は変えず、塗りの上なら塗りが線で分かれる）
+fn apply_draw_lines(tab: &mut Tab, segs: Vec<crate::planar_map::LineSeg>) -> bool {
+    let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
+    if segs.is_empty() || !tab.active_timeline().is_layer_editable_by_id(target_lid) {
+        return false;
+    }
+    if !clear_selection(tab) {
+        return false;
+    }
+    push_undo(tab, None);
+    // 地図は文書の座標なので、線も文書の座標へ写す
+    let to_doc = tab.session.edit_path.world_xform().inverse();
+    let segs: Vec<crate::planar_map::LineSeg> = segs
+        .into_iter()
+        .map(|(q, stroke)| (to_doc * q, stroke))
+        .collect();
+    write_local(tab, target_lid, |base, scope| {
+        base.edit_local(&base.line_change(&segs), scope)
     })
 }
 

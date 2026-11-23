@@ -38295,6 +38295,15 @@ mod strokes {
         assert_eq!(app.tool.stroke, INK);
     }
 
+    /// 作業中のレイヤーの今のコマの地図（無ければ空の地図）
+    fn cel_map_or_empty(app: &Is2dApp) -> PlanarMap {
+        let tl = app.tab().active_timeline();
+        tl.layers[tl.active_layer]
+            .cel_at(tl.current_frame)
+            .and_then(|cel| cel.maps.first().map(|m| m.base().map().clone()))
+            .unwrap_or_default()
+    }
+
     /// 作業中のレイヤーの今のコマの地図
     fn cel_map(app: &Is2dApp) -> PlanarMap {
         let tl = app.tab().active_timeline();
@@ -38353,6 +38362,68 @@ mod strokes {
         assert_eq!(m.faces().0.len(), 1);
     }
 
+    /// 直線の線の区間（`a` から `b`）
+    fn line(a: Point, b: Point, stroke: EdgeStroke) -> crate::planar_map::LineSeg {
+        (QuadBez::new(a, a.midpoint(b), b), stroke)
+    }
+
+    #[test]
+    fn lines_can_be_drawn_on_nothing_across_fills_and_inside_fills() {
+        let mut app = Is2dApp::default();
+        // 何も無い所の線：両側が何も無く、線のある辺が1本（塗りは無い）
+        let seg = line(Point::new(500.0, 100.0), Point::new(700.0, 150.0), INK);
+        assert!(apply(&mut app, Action::DrawLines { segs: vec![seg] }));
+        let m = cel_map(&app);
+        assert_eq!(m.edges.len(), 1);
+        assert_eq!((m.edges[0].left, m.edges[0].right, m.edges[0].stroke), (None, None, Some(INK)));
+        assert!(m.faces().0.is_empty());
+        // 赤い正方形を横切る線：赤が2つの面に分かれ、正方形の外の線は何も無い所の線になる
+        let mut app = Is2dApp::default();
+        put_cel_shapes(&mut app, 0, 0, vec![rect(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+        let across = line(Point::new(50.0, 200.0), Point::new(350.0, 200.0), INK);
+        assert!(apply(&mut app, Action::DrawLines { segs: vec![across] }));
+        let m = cel_map(&app);
+        let (faces, broken) = m.faces();
+        assert_eq!((faces.len(), broken), (2, 0));
+        assert!((stroked_length(&m) - 300.0).abs() < 1e-3);
+        // 塗りの中で止まる線（行き止まり）：面の数は変わらない
+        let spur = line(Point::new(150.0, 100.0), Point::new(150.0, 150.0), INK);
+        assert!(apply(&mut app, Action::DrawLines { segs: vec![spur] }));
+        let m = cel_map(&app);
+        assert_eq!(m.faces().0.len(), 2);
+        assert!(m.is_valid());
+        // 塗りの中に浮いた線（どこにもつながらない）：面積 0 の穴として、それを含む面に入る
+        let island = line(Point::new(200.0, 250.0), Point::new(260.0, 270.0), INK);
+        assert!(apply(&mut app, Action::DrawLines { segs: vec![island] }));
+        let m = cel_map(&app);
+        let (faces, broken) = m.faces();
+        assert_eq!((faces.len(), broken), (2, 0));
+        assert!(m.is_valid());
+        // 浮いた線の上をバケツ：浮いた線を穴に持つ面だけが塗り替わる
+        assert!(apply(&mut app, Action::BucketFill { pt: Point::new(150.0, 270.0), color: Color32::BLUE }));
+        let m = cel_map(&app);
+        let mut colors: Vec<_> = m.faces().0.iter().map(|f| f.color.to_array()).collect();
+        colors.sort();
+        let mut expected = vec![Color32::RED.to_array(), Color32::BLUE.to_array()];
+        expected.sort();
+        assert_eq!(colors, expected);
+        // 線で閉じた何も無い所を、バケツで塗れる
+        let mut app = Is2dApp::default();
+        let (a, b, c, d) = (
+            Point::new(500.0, 500.0),
+            Point::new(600.0, 500.0),
+            Point::new(600.0, 600.0),
+            Point::new(500.0, 600.0),
+        );
+        let square = vec![line(a, b, INK), line(b, c, INK), line(c, d, INK), line(d, a, INK)];
+        assert!(apply(&mut app, Action::DrawLines { segs: square }));
+        assert!(apply(&mut app, Action::BucketFill { pt: Point::new(550.0, 550.0), color: Color32::GREEN }));
+        let m = cel_map(&app);
+        let (faces, _) = m.faces();
+        assert_eq!(faces.len(), 1);
+        assert!(m.edges.iter().all(|e| e.stroke == Some(INK)));
+    }
+
     /// 乱数の絵に、インクボトル・バケツ・ブラシ・消しゴムをくり返しかける（書くたびに、触った所だけの計算と地図全体で
     /// 計算した答えを比べる確かめが、テストでは毎回動く：`test_checks`）
     #[test]
@@ -38371,7 +38442,44 @@ mod strokes {
             put_cel_shapes(&mut app, 0, 0, shapes);
             let pt = |rng: &mut fastrand::Rng| Point::new(rng.f64() * 400.0 + 100.0, rng.f64() * 400.0 + 100.0);
             for step in 0..40 {
-                match rng.usize(..5) {
+                match rng.usize(..8) {
+                    6 | 7 => {
+                        // 輪郭の変形：地図の辺をつまんで引っぱる・角を動かす（線の辺も含む）
+                        let m = cel_map_or_empty(&app);
+                        if m.edges.is_empty() {
+                            continue;
+                        }
+                        let e = rng.usize(..m.edges.len());
+                        let lid = app.tab().active_timeline().layers[0].id;
+                        let target = pt(&mut rng);
+                        let action = if rng.bool() {
+                            Action::ReshapeEdge {
+                                layer_id: lid,
+                                grab_t: 0.2 + rng.f64() * 0.6,
+                                target_pos: m.nodes[m.edges[e].a].lerp(target, 0.3),
+                                orig_seg: m.quad(e),
+                            }
+                        } else {
+                            Action::MoveVertex {
+                                layer_id: lid,
+                                orig_vertex: m.nodes[m.edges[e].a],
+                                target_pos: m.nodes[m.edges[e].a].lerp(target, 0.2),
+                            }
+                        };
+                        apply(&mut app, action);
+                    }
+                    5 => {
+                        let stroke = EdgeStroke {
+                            color: colors[rng.usize(..colors.len())],
+                            width: rng.u8(1..=10),
+                        };
+                        let (a, b, c) = (pt(&mut rng), pt(&mut rng), pt(&mut rng));
+                        let segs = vec![
+                            (QuadBez::new(a, a.lerp(b, rng.f64()), b), stroke),
+                            (QuadBez::new(b, b.lerp(c, rng.f64()), c), stroke),
+                        ];
+                        apply(&mut app, Action::DrawLines { segs });
+                    }
                     0 | 1 => {
                         let stroke = EdgeStroke {
                             color: colors[rng.usize(..colors.len())],

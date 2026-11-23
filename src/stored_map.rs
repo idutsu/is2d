@@ -661,6 +661,22 @@ impl StoredMap {
         Self::of_tiles(out.into())
     }
 
+    /// 差分（消す辺 `removed`：計算に使う地図の番号、足す辺 `added`）を当てると、中身が変わるか（消す辺と足す辺が、
+    /// 中身まで同じ辺の集まりでなければ変わる）。手間は差分の大きさの分
+    pub(crate) fn diff_changes(&self, removed: &[usize], added: &[TileEdge]) -> bool {
+        if removed.len() != added.len() {
+            return true;
+        }
+        let mut count: std::collections::HashMap<StoredEdge, i64> = Default::default();
+        for &e in removed {
+            *count.entry(*self.stored_edge(e)).or_default() += 1;
+        }
+        for te in added {
+            *count.entry(StoredEdge::of_tile(te)).or_default() -= 1;
+        }
+        count.values().any(|&n| n != 0)
+    }
+
     /// 同じ `Arc` か（同じしまった地図）
     pub(crate) fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)

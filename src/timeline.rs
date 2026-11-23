@@ -1377,7 +1377,7 @@ impl Cel {
         Some(base)
     }
 
-    /// テスト用：地図と重なりの順が決まりどおりか（どの地図も正しい地図で面があり、面に1つずつ別の番号が記してある。
+    /// テスト用：地図と重なりの順が決まりどおりか（どの地図も正しい地図で辺があり（線だけの地図は面が無い）、面に1つずつ別の番号が記してある。
     /// 同じ階層の地図は1つで、階層の地図はその親の階層の地図より後ろ。インスタンスは重なり位置の順で、位置は地図の数以下、
     /// 親の階層の地図より後ろ）。決まりどおりでなければ、その中身
     #[cfg(test)]
@@ -1392,8 +1392,8 @@ impl Cel {
                 ));
             }
             let (faces, _) = base.map().faces();
-            if faces.is_empty() {
-                return Some(format!("階層 {:?} の地図に面が無い", m.group_path));
+            if base.map().edges.is_empty() {
+                return Some(format!("階層 {:?} の地図に辺が無い", m.group_path));
             }
             let mut ids = std::collections::HashSet::new();
             for f in &faces {
