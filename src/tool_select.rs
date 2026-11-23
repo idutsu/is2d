@@ -18,16 +18,13 @@ use crate::vector_engine::{FillShape, LayerId};
 // 選択ツール（Tool::Select / V キー）・輪郭変形・アンカー編集・グループ・クリップボード
 // ============================================================================
 
-/// Flash風ドット柄（Polka-Dot）選択オーバーレイを描画
-pub(crate) fn draw_flash_selection_overlay(tab: &Tab, painter: &egui::Painter, scene_idx: usize) {
-    let zoom = tab.view.zoom();
-    let pan = tab.view.pan;
+/// 選んだ生の図形に、半透明の選択の色を重ねて描く（`FillShape::selection_screen_mesh`）
+pub(crate) fn draw_selection_overlay(tab: &Tab, painter: &egui::Painter, scene_idx: usize) {
     let Some(shape) = tab.scene().get(scene_idx) else {
         return;
     };
-    let dots = crate::vector_engine::selection_dots_texture(painter.ctx());
     painter.add(egui::Shape::mesh(
-        shape.selection_screen_mesh(zoom, pan, dots),
+        shape.selection_screen_mesh(tab.view.zoom(), tab.view.pan),
     ));
 }
 

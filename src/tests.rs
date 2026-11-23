@@ -3472,14 +3472,14 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     sym_app.redo();
     assert_eq!(sym_app.doc.stage_size, orig_stage * 0.5);
 
-    // 選択表示は塗りのメッシュに水玉のテクスチャを貼ったもの：頂点は塗りのメッシュと同じ数で、ズームを変えても増えない
+    // 選択表示は塗りのメッシュを選択の色で塗ったもの：頂点は塗りのメッシュと同じ数で、ズームを変えても増えない
     let fill_n = sym_app.scene().get(0).unwrap().fill_mesh().vertices.len();
     for zoom in [0.15f32, 1.25, 16.0] {
-        let sel = sym_app.scene().get(0).unwrap().selection_screen_mesh(
-            zoom,
-            Vec2::ZERO,
-            egui::TextureId::default(),
-        );
+        let sel = sym_app
+            .scene()
+            .get(0)
+            .unwrap()
+            .selection_screen_mesh(zoom, Vec2::ZERO);
         assert_eq!(sel.vertices.len(), fill_n);
     }
     // プレビューは、2回目は写しから引く（作り直さない）。同じシンボル・世代なら同じ外接矩形とメッシュ
@@ -14920,7 +14920,7 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
         let _ = stage_s1.fill_mesh();
         assert!(stage_s1.contains_point(Point::new(140.0, 100.0)));
         let _ = stage_s1.screen_mesh(1.0, Vec2::ZERO, false);
-        let _ = stage_s1.selection_screen_mesh(1.0, Vec2::ZERO, egui::TextureId::default());
+        let _ = stage_s1.selection_screen_mesh(1.0, Vec2::ZERO);
         assert!(stage_s1.has_cached_fill_mesh());
         assert!(stage_s1.has_cached_hit_bez_path());
     }
@@ -14960,7 +14960,7 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     app.refresh_scene_base();
     for s in app.scene().iter() {
         let _ = s.screen_mesh(1.25, Vec2::new(10.0, 20.0), false);
-        let _ = s.selection_screen_mesh(1.25, Vec2::new(10.0, 20.0), egui::TextureId::default());
+        let _ = s.selection_screen_mesh(1.25, Vec2::new(10.0, 20.0));
     }
     let all_ids: Vec<_> = app.scene().iter().cloned().collect();
     for s in &all_ids {
@@ -14969,7 +14969,7 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     let _ = apply(&mut app, Action::Group);
     for s in app.scene().iter() {
         let _ = s.screen_mesh(1.25, Vec2::new(10.0, 20.0), false);
-        let _ = s.selection_screen_mesh(1.25, Vec2::new(10.0, 20.0), egui::TextureId::default());
+        let _ = s.selection_screen_mesh(1.25, Vec2::new(10.0, 20.0));
     }
     let _ = apply(
         &mut app,
@@ -14987,7 +14987,7 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     // 4. シンボル変換後も、シンボル定義内の文書図形が描画用メッシュを持たないこと
     for s in app.scene().iter() {
         let _ = s.screen_mesh(1.0, Vec2::ZERO, false);
-        let _ = s.selection_screen_mesh(1.0, Vec2::ZERO, egui::TextureId::default());
+        let _ = s.selection_screen_mesh(1.0, Vec2::ZERO);
     }
     let _ = apply(&mut app, Action::ConvertToSymbol);
     assert_eq!(app.doc.library.len(), 1);

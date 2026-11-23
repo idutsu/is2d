@@ -2028,7 +2028,7 @@ fn draw_editable_layer_shapes(
             );
         }
         if shape_sel && sel_gid.is_none() {
-            crate::tool_select::draw_flash_selection_overlay(tab, gizmo_painter, idx);
+            crate::tool_select::draw_selection_overlay(tab, gizmo_painter, idx);
         }
     }
 }

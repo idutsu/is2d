@@ -668,23 +668,13 @@ impl FillShape {
         self.mesh_revision = next_mesh_revision();
     }
 
-    /// 選択表示：図形の塗りのメッシュを画面座標に写し、水玉の繰り返しテクスチャ `dots`（`selection_dots_texture`）を
-    /// 貼ったもの。模様は絵の座標に固定し（パンしても図形の上を滑らない）、画面で `SELECTION_DOT_TILE` px の大きさで繰り返す
-    /// （前は、ズームが変わるたびに点ごとの四角形のメッシュを CPU で作り直していた：レビュー「軽量化・高速化」の★2）
-    pub(crate) fn selection_screen_mesh(
-        &self,
-        zoom: f32,
-        pan: Vec2,
-        dots: egui::TextureId,
-    ) -> Mesh {
+    /// 選択表示：図形の塗りのメッシュ（作ってある写しを使う）を画面座標に写し、半透明の選択の色 `SELECTION_TINT` で
+    /// 塗ったもの。図形の上に重ねて描く。どの倍率でも、図形と同じ形のまま薄く色が付く
+    pub(crate) fn selection_screen_mesh(&self, zoom: f32, pan: Vec2) -> Mesh {
         let mut mesh = (**self.fill_mesh()).clone();
-        mesh.texture_id = dots;
-        let uv_scale = zoom / SELECTION_DOT_TILE as f32;
         for v in &mut mesh.vertices {
-            let (x, y) = (v.pos.x, v.pos.y);
-            v.uv = Pos2::new(x * uv_scale, y * uv_scale);
-            v.pos = to_screen(x, y, zoom, pan);
-            v.color = Color32::WHITE;
+            v.pos = to_screen(v.pos.x, v.pos.y, zoom, pan);
+            v.color = SELECTION_TINT;
         }
         mesh
     }
@@ -875,37 +865,8 @@ fn max_scale(affine: Affine) -> f64 {
     ((p + q) / 2.0 + (((p - q) / 2.0).powi(2) + r * r).sqrt()).sqrt()
 }
 
-/// 選択表示の水玉の模様の一辺（画面の px）。千鳥に並んだ点が 6px おき
-pub(crate) const SELECTION_DOT_TILE: usize = 12;
-
-/// 選択表示の水玉の繰り返しテクスチャ（`SELECTION_DOT_TILE` px 四方。6px おきの千鳥の 2×2px の白い点。egui の `Context`
-/// ごとに1枚作り、その `Context` の記憶に持つ）
-pub(crate) fn selection_dots_texture(ctx: &egui::Context) -> egui::TextureId {
-    let key = egui::Id::new("is2d_selection_dots");
-    if let Some(handle) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(key)) {
-        return handle.id();
-    }
-    let n = SELECTION_DOT_TILE;
-    let dot = Color32::from_rgba_unmultiplied(255, 255, 255, 220);
-    let mut pixels = vec![Color32::TRANSPARENT; n * n];
-    for (cx, cy) in [(0, 0), (6, 0), (3, 6), (9, 6)] {
-        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-            pixels[(cy + dy) * n + (cx + dx)] = dot;
-        }
-    }
-    let image = egui::ColorImage {
-        size: [n, n],
-        pixels,
-    };
-    let handle = ctx.load_texture(
-        "selection_dots",
-        image,
-        egui::TextureOptions::NEAREST_REPEAT,
-    );
-    let id = handle.id();
-    ctx.data_mut(|d| d.insert_temp(key, handle));
-    id
-}
+/// 選択表示で、選んだ図形に重ねる半透明の色（明るい青）
+const SELECTION_TINT: Color32 = Color32::from_rgba_premultiplied(0, 46, 100, 100);
 
 pub(crate) fn tessellate_raw_polygon(pts: &[Point], color: Color32) -> Mesh {
     if pts.len() < 3 {

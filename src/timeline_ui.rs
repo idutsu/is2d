@@ -41,6 +41,13 @@ const LAYER_LOCK_ICON_X: f32 = 42.0;
 const LAYER_NAME_X: f32 = 60.0;
 /// レイヤー行の右端の、つかんで並べ替える印（≡）の幅
 const LAYER_GRIP_W: f32 = 24.0;
+/// ドラッグ中の自動スクロールの速さ：端の所に入った深さ 1px あたり、1秒に何 px スクロールするか（縦は、端そのもの
+/// （深さ1行分）で1秒に 12 行ほど。横は、深さ1コマ分で1秒に 12 コマほど）
+const DRAG_SCROLL_RATE: f32 = 12.0;
+/// レイヤー名の文字の大きさ（行に描く名前と、名前の入力欄で同じ）
+const LAYER_NAME_FONT_SIZE: f32 = 12.5;
+/// レイヤー名の入力欄の、文字のまわりの余白（左右・上下。画面の px）
+const LAYER_RENAME_PAD: Vec2 = Vec2::new(3.0, 2.0);
 
 // ============================================================================
 // Material Icons (`fonts/MaterialIcons-Regular.ttf`) コードポイント定義
@@ -330,6 +337,16 @@ impl TimelineLayout {
         (row >= 0 && (row as usize) < num_layers).then(|| num_layers - 1 - (row as usize))
     }
 
+    /// 横のスクロールのいちばん大きい量（出しているコマのうち、見えていない分の幅）
+    fn max_scroll_x(&self) -> f32 {
+        ((self.max_frames_shown as f32) * CELL_W - self.grid_w).max(0.0)
+    }
+
+    /// 縦のスクロールのいちばん大きい量（`num_layers` 行のうち、見えていない分の高さ）
+    fn max_scroll_y(&self, num_layers: usize) -> f32 {
+        ((num_layers as f32) * ROW_H - self.grid_h).max(0.0)
+    }
+
     fn clamped_layer_at_y(&self, y: f32, scroll_y: f32, num_layers: usize) -> usize {
         let row = self
             .row_at_y(y, scroll_y)
@@ -428,34 +445,6 @@ impl TimelineLayout {
     }
 }
 
-/// ドラッグ中（フレーム移動/複製・レイヤー入れ替え）にカーソル脇へ表示するフローティングバッジを描画する
-fn draw_floating_drag_badge(
-    painter: &egui::Painter,
-    badge_rect: Rect,
-    border_col: Color32,
-    label: &str,
-    font_size: f32,
-) {
-    painter.rect_filled(
-        badge_rect,
-        0.0,
-        Color32::from_rgba_unmultiplied(255, 255, 255, 242),
-    );
-    painter.rect_stroke(
-        badge_rect,
-        0.0,
-        Stroke::new(1.2_f32, border_col),
-        egui::StrokeKind::Middle,
-    );
-    painter.text(
-        badge_rect.center(),
-        Align2::CENTER_CENTER,
-        label,
-        FontId::proportional(font_size),
-        Color32::from_rgb(20, 25, 35),
-    );
-}
-
 // ============================================================================
 // 2. 下部タイムラインパネル UI（コントロールバー・入力処理・各領域描画）
 // ============================================================================
@@ -512,7 +501,7 @@ pub(crate) fn draw_timeline_panel(host: &mut impl TimelineHost, ctx: &egui::Cont
             );
             let grid_painter = painter.with_clip_rect(grid_rect);
 
-            draw_timeline_frame_grid(host, &grid_painter, &layout, alt_held, pointer_pos);
+            draw_timeline_frame_grid(host, &grid_painter, &layout, alt_held);
             draw_timeline_ruler(host, &painter, &grid_painter, &layout);
             draw_timeline_layer_list(
                 host,
@@ -575,15 +564,23 @@ fn draw_layer_rename_field(
     let Some((key, layer_id)) = host.timeline_ui().renaming_layer else {
         return;
     };
+    // 入力欄は、文字の高さに余白を足した高さで行の上下の真ん中に置き、左は余白の分だけ前に出す（入力中も、名前の文字が
+    // 行に描くときと同じ位置に来る）
+    let font = FontId::proportional(LAYER_NAME_FONT_SIZE);
+    let height = ui.fonts(|f| f.row_height(&font)) + 2.0 * LAYER_RENAME_PAD.y;
     let tl = host.tab().active_timeline();
     let field = (key == timeline_key(host.tab()))
         .then(|| tl.layer_index_by_id(layer_id))
         .flatten()
         .map(|i| {
             let y0 = layout.row_y(tl.layers.len() - 1 - i, host.timeline_ui().scroll_y);
+            let cy = y0 + ROW_H * 0.5;
             let rect = Rect::from_min_max(
-                Pos2::new(layout.panel_rect.left() + LAYER_NAME_X, y0),
-                Pos2::new(layout.grid_left - LAYER_GRIP_W, y0 + ROW_H),
+                Pos2::new(
+                    layout.panel_rect.left() + LAYER_NAME_X - LAYER_RENAME_PAD.x,
+                    cy - height * 0.5,
+                ),
+                Pos2::new(layout.grid_left - LAYER_GRIP_W, cy + height * 0.5),
             );
             (rect, tl.layers[i].name.clone())
         })
@@ -592,11 +589,25 @@ fn draw_layer_rename_field(
         finish_layer_rename(host);
         return;
     };
+    // 枠は自分で描く（細く淡い線・直角の角）。入力欄の枠は出さない
+    ui.painter().rect(
+        rect,
+        0.0,
+        Color32::WHITE,
+        Stroke::new(1.0_f32, Color32::from_rgb(190, 196, 206)),
+        egui::StrokeKind::Inside,
+    );
     let resp = ui.put(
         rect,
         egui::TextEdit::singleline(&mut name)
             .id(layer_rename_id(layer_id))
-            .desired_width(rect.width()),
+            .font(font)
+            .frame(false)
+            .margin(egui::Margin::symmetric(
+                LAYER_RENAME_PAD.x as i8,
+                LAYER_RENAME_PAD.y as i8,
+            ))
+            .desired_width(rect.width() - 2.0 * LAYER_RENAME_PAD.x),
     );
     if resp.changed() {
         apply(
@@ -835,9 +846,8 @@ fn handle_timeline_scroll(
     response: &egui::Response,
     layout: &mut TimelineLayout,
 ) {
-    let max_scroll_x = ((layout.max_frames_shown as f32) * CELL_W - layout.grid_w).max(0.0);
-    let max_scroll_y =
-        ((host.tab().active_timeline().layers.len() as f32) * ROW_H - layout.grid_h).max(0.0);
+    let max_scroll_x = layout.max_scroll_x();
+    let max_scroll_y = layout.max_scroll_y(host.tab().active_timeline().layers.len());
 
     let pointer_in_timeline = response.hovered() || ui.rect_contains_pointer(ui.max_rect());
     if pointer_in_timeline {
@@ -879,7 +889,7 @@ fn handle_timeline_pointer_input(
     response: &egui::Response,
     layout: &mut TimelineLayout,
     (primary_down, alt_held, pointer_pos, hover_pos): (bool, bool, Option<Pos2>, Option<Pos2>),
-) -> Option<(usize, usize, Pos2)> {
+) -> Option<(usize, usize)> {
     let (primary_pressed, shift_held) =
         ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift));
     let handle_w = handle_width(ui.ctx());
@@ -893,8 +903,9 @@ fn handle_timeline_pointer_input(
             start_layer_rename(host, ui.ctx(), layout, pos);
         }
     }
-    update_timeline_grid_drag(host, layout, primary_down, alt_held, pointer_pos);
-    let drag_layer_feedback = update_timeline_layer_drag(host, layout, primary_down, pointer_pos);
+    update_timeline_grid_drag(host, ui.ctx(), layout, primary_down, alt_held, pointer_pos);
+    let drag_layer_feedback =
+        update_timeline_layer_drag(host, ui.ctx(), layout, primary_down, pointer_pos);
     update_timeline_cursor_icon(
         host,
         ui.ctx(),
@@ -1136,6 +1147,7 @@ fn drag_scrollbar_thumb(
 /// ルーラースクラブ・スクロールバー操作・セル範囲選択・フレーム移動/複製ドラッグの継続および確定処理
 fn update_timeline_grid_drag(
     host: &mut impl TimelineHost,
+    ctx: &egui::Context,
     layout: &mut TimelineLayout,
     primary_down: bool,
     alt_held: bool,
@@ -1170,6 +1182,7 @@ fn update_timeline_grid_drag(
         } => {
             if primary_down {
                 if let Some(pos) = pointer_pos {
+                    scroll_at_edges(host, ctx, layout, pos, true);
                     let scroll_x = host.timeline_ui().scroll_x;
                     let scroll_y = host.timeline_ui().scroll_y;
                     let tl = host.tab().active_timeline();
@@ -1273,6 +1286,7 @@ fn update_timeline_grid_drag(
         } => {
             if primary_down {
                 if let Some(pos) = pointer_pos {
+                    scroll_at_edges(host, ctx, layout, pos, true);
                     let scroll_x = host.timeline_ui().scroll_x;
                     let scroll_y = host.timeline_ui().scroll_y;
                     let num_layers = host.tab().active_timeline().layers.len();
@@ -1323,10 +1337,11 @@ fn update_timeline_grid_drag(
 /// レイヤーD&D並び替えの継続およびドロップ確定処理
 fn update_timeline_layer_drag(
     host: &mut impl TimelineHost,
-    layout: &TimelineLayout,
+    ctx: &egui::Context,
+    layout: &mut TimelineLayout,
     primary_down: bool,
     pointer_pos: Option<Pos2>,
-) -> Option<(usize, usize, Pos2)> {
+) -> Option<(usize, usize)> {
     let src_idx = host.timeline_ui().dragging_layer?;
     let num_layers = host.tab().active_timeline().layers.len();
     if src_idx >= num_layers {
@@ -1334,9 +1349,12 @@ fn update_timeline_layer_drag(
         return None;
     }
     if let Some(pos) = pointer_pos {
+        if primary_down {
+            scroll_at_edges(host, ctx, layout, pos, false);
+        }
         let dst_idx = layout.clamped_layer_at_y(pos.y, host.timeline_ui().scroll_y, num_layers);
         if primary_down {
-            return Some((src_idx, dst_idx, pos));
+            return Some((src_idx, dst_idx));
         }
         host.timeline_ui_mut().dragging_layer = None;
         apply(host, Action::ReorderLayer { src_idx, dst_idx });
@@ -1344,6 +1362,62 @@ fn update_timeline_layer_drag(
         host.timeline_ui_mut().dragging_layer = None;
     }
     None
+}
+
+/// ドラッグしている間、マウス（`pos`）が、レイヤーの並び（縦）の上下の端から1行分の所、または `horizontal` ならコマの
+/// 並び（横）の左右の端から1コマ分の所に入ったら、その向きへスクロールする。速さは、その所に入った深さ（端を越えた分
+/// も含む）に比例し（`DRAG_SCROLL_RATE`）、マウスを止めていても端にある間はスクロールし続ける（描き直しを頼む）。見えて
+/// いない所のレイヤー・コマへも運べる。端の行・列を押しただけ（クリックかもしれない間）はスクロールしない（egui の
+/// 「クリックでなくドラッグと決まった」：`is_decidedly_dragging`）
+fn scroll_at_edges(
+    host: &mut impl TimelineHost,
+    ctx: &egui::Context,
+    layout: &mut TimelineLayout,
+    pos: Pos2,
+    horizontal: bool,
+) {
+    if !ctx.input(|i| i.pointer.is_decidedly_dragging()) {
+        return;
+    }
+    // 範囲 `lo..hi` の端から `zone` の所に入った深さ（前の端は負、後ろの端は正。入っていなければ 0）
+    let depth = |p: f32, lo: f32, hi: f32, zone: f32| {
+        if p < lo + zone {
+            p - (lo + zone)
+        } else if p > hi - zone {
+            p - (hi - zone)
+        } else {
+            0.0
+        }
+    };
+    let dy = depth(
+        pos.y,
+        layout.grid_top,
+        layout.grid_top + layout.grid_h,
+        ROW_H,
+    );
+    let dx = if horizontal {
+        depth(
+            pos.x,
+            layout.grid_left,
+            layout.grid_left + layout.grid_w,
+            CELL_W,
+        )
+    } else {
+        0.0
+    };
+    if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    let step = DRAG_SCROLL_RATE * ctx.input(|i| i.stable_dt);
+    let (max_x, max_y) = (
+        layout.max_scroll_x(),
+        layout.max_scroll_y(host.tab().active_timeline().layers.len()),
+    );
+    let ui_state = host.timeline_ui_mut();
+    ui_state.scroll_x = (ui_state.scroll_x + dx * step).clamp(0.0, max_x);
+    ui_state.scroll_y = (ui_state.scroll_y + dy * step).clamp(0.0, max_y);
+    layout.sync_visible_frames(ui_state.scroll_x);
+    ctx.request_repaint();
 }
 
 /// タイムライン上のドラッグ状態およびホバー位置に応じてOSカーソルアイコンを更新する
@@ -1506,7 +1580,6 @@ fn draw_timeline_frame_grid(
     grid_painter: &egui::Painter,
     layout: &TimelineLayout,
     alt_held: bool,
-    pointer_pos: Option<Pos2>,
 ) {
     let grid_rect = Rect::from_min_max(
         Pos2::new(layout.grid_left, layout.grid_top),
@@ -1532,7 +1605,7 @@ fn draw_timeline_frame_grid(
         draw_timeline_layer_row(host, grid_painter, layout, layer_idx, layer, (y0, y1));
     }
 
-    draw_move_frames_ghost(host, grid_painter, layout, alt_held, pointer_pos);
+    draw_move_frames_ghost(host, grid_painter, layout, alt_held);
 
     for f in layout.first_vis_frame..=layout.last_vis_frame {
         if (f + 1) % 5 == 0 {
@@ -1642,7 +1715,6 @@ fn draw_move_frames_ghost(
     grid_painter: &egui::Painter,
     layout: &TimelineLayout,
     alt_held: bool,
-    pointer_pos: Option<Pos2>,
 ) {
     let TimelineGridDrag::MoveFrames {
         orig_sel,
@@ -1695,26 +1767,6 @@ fn draw_move_frames_ghost(
         Stroke::new(2.0_f32, accent),
         egui::StrokeKind::Middle,
     );
-
-    if let Some(pos) = pointer_pos {
-        let badge_label = if is_copy {
-            "＋ コマを複製 (Alt)"
-        } else {
-            "↔ コマを移動"
-        };
-        let min_bx = layout.grid_left + 4.0;
-        let max_bx = (layout.panel_rect.right() - 135.0).max(min_bx);
-        let min_by = layout.grid_top + 2.0;
-        let max_by = (layout.panel_rect.bottom() - 22.0).max(min_by);
-        let badge_rect = Rect::from_min_size(
-            Pos2::new(
-                (pos.x + 12.0).clamp(min_bx, max_bx),
-                (pos.y - 22.0).clamp(min_by, max_by),
-            ),
-            Vec2::new(130.0, 20.0),
-        );
-        draw_floating_drag_badge(grid_painter, badge_rect, accent, badge_label, 11.0);
-    }
 }
 
 /// 1つのキーフレーム保持区間（帯・1コマ区切り線・先頭丸記号 `●`/`○`・終端マーク `▯` またはトゥイーン点線/矢印）を描画する
@@ -2043,7 +2095,7 @@ fn draw_timeline_layer_list(
     layout: &TimelineLayout,
     primary_down: bool,
     hover_pos: Option<Pos2>,
-    drag_layer_feedback: Option<(usize, usize, Pos2)>,
+    drag_layer_feedback: Option<(usize, usize)>,
 ) {
     let tl = host.tab().active_timeline();
     let timeline_ui = host.timeline_ui();
@@ -2134,7 +2186,7 @@ fn draw_timeline_layer_list(
             Pos2::new(layout.panel_rect.left() + LAYER_NAME_X, cy),
             Align2::LEFT_CENTER,
             &layer.name,
-            FontId::proportional(12.5),
+            FontId::proportional(LAYER_NAME_FONT_SIZE),
             name_color,
         );
 
@@ -2160,7 +2212,7 @@ fn draw_timeline_layer_list(
         );
     }
 
-    if let Some((src_idx, dst_idx, drag_pos)) = drag_layer_feedback {
+    if let Some((src_idx, dst_idx)) = drag_layer_feedback {
         if dst_idx != src_idx && dst_idx < num_layers {
             let dst_row = num_layers.saturating_sub(1 + dst_idx);
             let drop_y = if dst_idx > src_idx {
@@ -2180,26 +2232,6 @@ fn draw_timeline_layer_list(
                 Pos2::new(layout.panel_rect.left() + 6.0, drop_y),
                 3.5,
                 indicator_col,
-            );
-        }
-        if let Some(src_layer) = tl.layers.get(src_idx) {
-            let min_bx = layout.panel_rect.left() + 8.0;
-            let max_bx = (layout.grid_left - 90.0).max(min_bx);
-            let min_by = layout.grid_top + 2.0;
-            let max_by = (layout.panel_rect.bottom() - 22.0).max(min_by);
-            let badge_rect = Rect::from_min_size(
-                Pos2::new(
-                    drag_pos.x.clamp(min_bx, max_bx),
-                    (drag_pos.y - 11.0).clamp(min_by, max_by),
-                ),
-                Vec2::new(105.0, 20.0),
-            );
-            draw_floating_drag_badge(
-                painter,
-                badge_rect,
-                Color32::from_rgb(0, 130, 235),
-                &format!("↕ {}", src_layer.name),
-                11.5,
             );
         }
     }
