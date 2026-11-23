@@ -290,7 +290,7 @@ impl<'a> LocalMap<'a> {
         for e in self.added_edges() {
             let q = self.quad(e);
             let ed = self.edge(e);
-            if !on_grid([q.p0, q.p1, q.p2].into_iter()) || ed.left == ed.right {
+            if !on_grid([q.p0, q.p1, q.p2].into_iter()) || !ed.needed() {
                 return false;
             }
             let pe = self.poly(e);
@@ -610,7 +610,7 @@ impl LocalMap<'_> {
                         continue;
                     }
                     let r = self.ring_any(ci, memo);
-                    if r.area2 > 0
+                    if r.is_exterior()
                         && r.contains(probe) == Some(true)
                         && best.is_none_or(|b| r.area2 < b.0)
                     {
@@ -719,7 +719,7 @@ impl LocalMap<'_> {
                 continue;
             }
             let ci = self.cycle_of(h, memo)?;
-            if memo.cycles[ci].ring.as_ref().is_some_and(|r| r.area2 > 0) {
+            if memo.cycles[ci].ring.as_ref().is_some_and(|r| r.is_exterior()) {
                 return Some((!touched.contains(&ci)).then_some(ci));
             }
         }
@@ -734,7 +734,7 @@ impl LocalMap<'_> {
                 let c = &memo.cycles[ci];
                 c.ring
                     .as_ref()
-                    .filter(|r| r.area2 > 0)
+                    .filter(|r| r.is_exterior())
                     .map(|r| (c.color, r.rect))
             })
             .collect()
@@ -764,7 +764,7 @@ impl LocalMap<'_> {
         let made = Self::made_exteriors(&touched_ids, memo);
         // 触った色のある穴
         for &ci in &touched_ids {
-            let hole = memo.cycles[ci].ring.as_ref().is_some_and(|r| r.area2 < 0);
+            let hole = memo.cycles[ci].ring.as_ref().is_some_and(|r| !r.is_exterior());
             if hole && self.hole_owner(ci, None, &made, memo)?.is_none() {
                 return Some(None);
             }
@@ -781,7 +781,7 @@ impl LocalMap<'_> {
                 if touched_set.contains(&ci) {
                     continue;
                 }
-                let hole = memo.cycles[ci].ring.as_ref().is_some_and(|r| r.area2 < 0);
+                let hole = memo.cycles[ci].ring.as_ref().is_some_and(|r| !r.is_exterior());
                 if hole && self.hole_owner(ci, kept, &made, memo)?.is_none() {
                     return Some(None);
                 }
@@ -915,10 +915,10 @@ impl LocalMap<'_> {
                         }
                         let ci = self.cycle_of((e, side), memo)?;
                         if seen.insert(ci) {
-                            match self.ring_any(ci, memo).area2 {
-                                a if a > 0 => others.push(ci),
-                                a if a < 0 => holes.push(ci),
-                                _ => {}
+                            if self.ring_any(ci, memo).is_exterior() {
+                                others.push(ci);
+                            } else {
+                                holes.push(ci);
                             }
                         }
                     }
@@ -990,18 +990,19 @@ impl LocalMap<'_> {
         }
         let touched_set: IntSet<usize> = touched_ids.iter().copied().collect();
         let made = Self::made_exteriors(&touched_ids, memo);
-        let painted = |ci: usize, memo: &CycleMemo| memo.cycles[ci].ring.as_ref().map(|r| r.area2);
+        // 色のある輪郭なら、外周か（`Ring::is_exterior`）
+        let painted = |ci: usize, memo: &CycleMemo| memo.cycles[ci].ring.as_ref().map(Ring::is_exterior);
         // 面に入る外周（触った外周と、穴が変わる外周）
         let mut exteriors: std::collections::BTreeSet<usize> = touched_ids
             .iter()
             .copied()
-            .filter(|&ci| painted(ci, memo).is_some_and(|a| a > 0))
+            .filter(|&ci| painted(ci, memo) == Some(true))
             .collect();
         // 入れ先を決め直す穴（と、前の地図の穴なら前の入れ先の外周がそのまま残っているか：`hole_owner`）
         let mut holes: Vec<(usize, Option<usize>)> = touched_ids
             .iter()
             .copied()
-            .filter(|&ci| painted(ci, memo).is_some_and(|a| a < 0))
+            .filter(|&ci| painted(ci, memo) == Some(false))
             .map(|ci| (ci, None))
             .collect();
         // 触った前の地図の面：外周がそのままなら穴が変わる面。そのままの穴は入れ先を決め直す
@@ -1016,10 +1017,10 @@ impl LocalMap<'_> {
                     continue;
                 }
                 match painted(ci, memo) {
-                    Some(a) if a > 0 => {
+                    Some(true) => {
                         exteriors.insert(ci);
                     }
-                    Some(_) => holes.push((ci, kept)),
+                    Some(false) => holes.push((ci, kept)),
                     None => {}
                 }
             }
@@ -1029,7 +1030,7 @@ impl LocalMap<'_> {
         let new_exteriors: Vec<usize> = touched_ids
             .iter()
             .copied()
-            .filter(|&ci| painted(ci, memo).is_some_and(|a| a > 0))
+            .filter(|&ci| painted(ci, memo) == Some(true))
             .collect();
         for ext in new_exteriors {
             let (color, near) = {
@@ -1043,7 +1044,7 @@ impl LocalMap<'_> {
                         continue;
                     }
                     let ci = self.cycle_of((e, side), memo)?;
-                    if touched_set.contains(&ci) || painted(ci, memo).is_none_or(|a| a >= 0) {
+                    if touched_set.contains(&ci) || painted(ci, memo) != Some(false) {
                         continue;
                     }
                     let hp = self.probe(&memo.cycles[ci].cycle);

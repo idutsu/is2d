@@ -53,7 +53,17 @@ pub(crate) struct MapEdge {
     pub(crate) stroke: Option<EdgeStroke>,
 }
 
+/// 辺を残すか（辺を残す決まりはこれ1つ）：左右の色が違うか、線が付いている（設計：claude/線の設計_68a596e.md の 6.2 の (a)）
+pub(crate) fn edge_needed(left: Option<Color32>, right: Option<Color32>, stroke: Option<EdgeStroke>) -> bool {
+    left != right || stroke.is_some()
+}
+
 impl MapEdge {
+    /// この辺を地図に残すか（`edge_needed`）
+    pub(crate) fn needed(&self) -> bool {
+        edge_needed(self.left, self.right, self.stroke)
+    }
+
     /// つながった2本（向きをそろえたもの）を1本の辺にまとめてよい中身か：左右の色と線が同じ（2本のまとめ `merge_degree2`
     /// とアンカーの削除 `with_anchor_deleted` の決まりはこれ1つ）
     fn same_content(&self, next: &MapEdge) -> bool {
@@ -377,7 +387,7 @@ impl PlanarMap {
         FULL_CHECKS.with(|n| n.set(n.get() + 1));
         // 頂点と制御点が格子に置ける（±65,536px の内で有限：`fits_grid`）こと、両側が同じ色の辺が無いことを先に確かめる
         // （格子の外の座標で、判定の形を作らない）
-        if !self.fits_grid(Affine::IDENTITY) || self.edges.iter().any(|e| e.left == e.right) {
+        if !self.fits_grid(Affine::IDENTITY) || self.edges.iter().any(|e| !e.needed()) {
             return None;
         }
         let polys = polys();
@@ -610,7 +620,7 @@ impl PlanarMap {
             }
             let k = out.rings.len();
             let ring = Arc::new(Ring::new(polys, cycle));
-            if ring.area2 > 0 {
+            if ring.is_exterior() {
                 out.groups.push((color, vec![k]));
             } else {
                 holes.push((color, k));
@@ -769,8 +779,12 @@ impl PlanarMap {
     /// 候補は、その操作で消えた線（左右が同じ色になって捨てた区間・辺）の端の頂点（`overlay`・面の塗り替え `color_sides`）：
     /// 操作が作った切れ目（交わりで切った点・消えた境目の端）だけを消し、操作の前から2本だけだった頂点（足した角）は
     /// どの操作でも候補にならないので残る。切れ目の後始末の決まりはこれ1つ。
-    /// 頂点は番号の小さい順に調べ、まとめたら、つながりの変わった両端の頂点だけを調べ直す（まとめた結果は、
-    /// まとめるたびに最初から調べ直すのと同じ）。辺の並びは、まとめた辺を消すたびに最後の辺をそこへ移すのと同じ順にする。
+    /// 頂点は位置の順（`point_order`）に調べ、まとめたら、つながりの変わった両端の頂点だけを調べ直す（まとめた結果は、
+    /// まとめるたびに最初から調べ直すのと同じ）。辺の並びは元の番号の順のまま（まとめた2本は番号が先の辺に入れ、後ろの辺を
+    /// 抜く）。番号の順でなく位置の順に調べ、辺の並びを抜くだけにするのは、同じ線の上に候補が続くとき、まとめる
+    /// 順と残す辺で結果（曲線の数の最後の桁と、引き継ぐ面の番号）が変わるので、頂点の番号の振り方と辺の数が違う窓と地図
+    /// 全体で同じ答えにするため（窓の辺は、地図全体の辺を番号の順のまま抜き出したもの。線の辺の行き止まりや、線の両側の
+    /// 同じ色の面で、候補が続きやすくなった：設計 claude/線の設計_68a596e.md）。
     /// `built`：この地図の辺の判定の形の索引と、辺の番号 → 索引の番号（曲線に戻したあとの
     /// 索引：`ChainRestorer::finish`）。無ければ初めて要るときに作る。どちらでも、まとめが索引の範囲に収まらなければ、
     /// 範囲を広げて作り直す（索引は範囲にかかる区間と頂点をみな持つので、範囲に収まる調べの答えは、索引の範囲によらない）
@@ -786,12 +800,9 @@ impl PlanarMap {
             is_cand[v] = true;
         }
         let n = self.edges.len();
-        // 辺は元の番号のまま持ち、消した辺は印だけ付ける。`order` は今の並び（消すたびに最後の辺をそこへ移す）、
-        // `pos` はその中の位置
+        // 辺は元の番号のまま持ち、消した辺は印だけ付ける（残った辺の並びは元の番号の順）
         let mut edges = std::mem::take(&mut self.edges);
         let mut alive = vec![true; n];
-        let mut order: Vec<usize> = (0..n).collect();
-        let mut pos: Vec<usize> = (0..n).collect();
         let mut at: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
         for (i, e) in edges.iter().enumerate() {
             at[e.a].push(i);
@@ -800,8 +811,10 @@ impl PlanarMap {
             }
         }
         let candidate = |v: usize, at: &[Vec<usize>]| at[v].len() == 2 && is_cand[v];
-        let mut pending: std::collections::BTreeSet<usize> = (0..self.nodes.len())
+        let place = |v: usize| (Place(self.nodes[v]), v);
+        let mut pending: std::collections::BTreeSet<(Place, usize)> = (0..self.nodes.len())
             .filter(|&v| candidate(v, &at))
+            .map(place)
             .collect();
         // 判定の形の索引（受け取らなければ、初めて要るときに作る）と、辺の番号 → 索引の番号。作るときの範囲は、まとめる
         // 候補の頂点につながる辺の外接矩形（まとめた辺が範囲から出るときは、広げて作り直す）
@@ -812,7 +825,7 @@ impl PlanarMap {
         debug_assert_eq!(ix_id.len(), n, "辺ごとの索引の番号");
         let mut ix_area = pending
             .iter()
-            .flat_map(|&v| at[v].iter())
+            .flat_map(|&(_, v)| at[v].iter())
             .map(|&i| {
                 let (a, c, b) = (
                     self.nodes[edges[i].a],
@@ -826,12 +839,12 @@ impl PlanarMap {
         // まとめると、判定の形でつながりが変わってしまう頂点（まとめない）
         let mut rejected = vec![false; self.nodes.len()];
         let mut used = CellSet::default();
-        while let Some(v) = pending.pop_first() {
+        while let Some((_, v)) = pending.pop_first() {
             if rejected[v] || !candidate(v, &at) {
                 continue;
             }
-            // 今の並びで先にある辺が i（v で終わる向き）、後ろが j（v から始まる向き）
-            let (i, j) = if pos[at[v][0]] < pos[at[v][1]] {
+            // 番号が先の辺が i（v で終わる向き）、後ろが j（v から始まる向き）
+            let (i, j) = if at[v][0] < at[v][1] {
                 (at[v][0], at[v][1])
             } else {
                 (at[v][1], at[v][0])
@@ -927,19 +940,13 @@ impl PlanarMap {
             for x in at[e2.b].iter_mut().filter(|x| **x == j) {
                 *x = i;
             }
-            let p = pos[j];
-            let last = *order.last().expect("辺がある");
-            order.swap_remove(p);
-            if p < order.len() {
-                pos[last] = p;
-            }
             for w in [e1.a, e2.b] {
                 if candidate(w, &at) && !rejected[w] {
-                    pending.insert(w);
+                    pending.insert(place(w));
                 }
             }
         }
-        self.edges = order.iter().map(|&i| edges[i]).collect();
+        self.edges = (0..n).filter(|&i| alive[i]).map(|i| edges[i]).collect();
         used
     }
 
@@ -1149,6 +1156,24 @@ fn labeled(mut map: PlanarMap, faces: &[MapFace], ids: &[ShapeId]) -> PlanarMap 
         }
     }
     map
+}
+
+/// 頂点を位置の順（`point_order`）に並べる鍵（2本のまとめ `merge_degree2` の調べる順）
+#[derive(Clone, Copy, PartialEq)]
+struct Place(Point);
+
+impl Eq for Place {}
+
+impl PartialOrd for Place {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Place {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        point_order(self.0, other.0)
+    }
 }
 
 /// 差分（窓の結果, 消えた辺, 増えた辺）：`LayerBase::apply_diff` に渡すもの
@@ -1809,7 +1834,7 @@ impl LayerBase {
         region.add_rects(halves.iter().filter_map(|&(e, forward)| {
             let te = stored.edge_at(e);
             let other = if forward { te.right } else { te.left };
-            (other == Some(color)).then(|| {
+            (!edge_needed(Some(color), other, te.stroke)).then(|| {
                 let hull = edges_at(te.a)
                     .into_iter()
                     .chain(edges_at(te.b))
@@ -3007,10 +3032,10 @@ impl PlanarMap {
         let dropped_ends: Vec<usize> = self
             .edges
             .iter()
-            .filter(|e| e.left == e.right)
+            .filter(|e| !e.needed())
             .flat_map(|e| [e.a, e.b])
             .collect();
-        self.edges.retain(|e| e.left != e.right);
+        self.edges.retain(MapEdge::needed);
         let used = self.merge_degree2(dropped_ends, None);
         self.compact_nodes();
         used

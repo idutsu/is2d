@@ -1471,7 +1471,7 @@ impl CellGrid {
     }
 }
 
-/// 面の輪郭1つ：判定の形の点・面積の2倍（外周は正、穴は負）・外接矩形
+/// 面の輪郭1つ：判定の形の点・面積の2倍（外周は正、穴は負か 0）・外接矩形
 pub(super) struct Ring {
     /// 輪郭の点（`cycle_points`）。始まりの点に意味は無い：使い道（面積の2倍・外接矩形・巻き数）は、どの点から
     /// 始めても同じ
@@ -1492,6 +1492,12 @@ impl std::fmt::Debug for Ring {
 }
 
 impl Ring {
+    /// 外周か（外周か穴かの決まりはこれ1つ：面積が正なら外周、そうでなければ穴）。どこにもつながらない線（設計：
+    /// claude/線の設計_68a596e.md の 6.2 の (c)）の輪郭は、同じ辺を行きと帰りで通るので面積が 0 で、それを含む面の穴になる
+    pub(super) fn is_exterior(&self) -> bool {
+        self.area2 > 0
+    }
+
     pub(super) fn new(polys: &[Poly], cycle: &[(usize, bool)]) -> Self {
         #[cfg(test)]
         super::RINGS_BUILT.with(|n| n.set(n.get() + 1));

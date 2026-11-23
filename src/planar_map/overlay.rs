@@ -64,6 +64,36 @@ impl MapRule {
         (color, src)
     }
 
+    /// 区間（か中の辺）の新しい線（線の決まりはこれ1つ。設計：claude/線の設計_68a596e.md の 6.2 の (b)）：重ねるものの線の辺
+    /// がそこを通れば（`input`。重ねる地図の辺・輪郭の変形で動かした辺）、上に置くその辺の線。通らなければ前の線 `old`。
+    /// ただし、両側とも決まりが前の色によらず色を決める所（`covers`：塗った所・中だけ残すときの外・片の色のある所）なら、
+    /// 前の線は消える（ブラシで線の上を塗ると、下の線が消える）
+    pub(super) fn stroke(
+        self,
+        left: &Over,
+        right: &Over,
+        input: Option<Option<EdgeStroke>>,
+        old: Option<EdgeStroke>,
+    ) -> Option<EdgeStroke> {
+        match input {
+            Some(s) => s,
+            None if self.covers(left) && self.covers(right) => None,
+            None => old,
+        }
+    }
+
+    /// 重ねるものの値 `over` の所で、決まりが前の色によらず色を決めるか（`apply` が前の色を使わない所）
+    fn covers(self, over: &Over) -> bool {
+        match (self, over) {
+            (MapRule::Paint(_), Over::Inside(inside)) => *inside,
+            (MapRule::Paint(_), Over::Color(c)) => c.is_some(),
+            (MapRule::KeepInside, Over::Inside(inside)) => !*inside,
+            (MapRule::KeepInside, Over::Color(c)) => c.is_none(),
+            (MapRule::Overlay, Over::Color(c)) => c.is_some(),
+            _ => false,
+        }
+    }
+
     /// 重ねるものの値 `over` と前の色 `old` から、新しい色
     pub(super) fn apply(self, over: &Over, old: Option<Color32>) -> Option<Color32> {
         match (self, over) {
@@ -293,6 +323,16 @@ impl<'a> InputLines<'a> {
             touched
         })
     }
+}
+
+/// 決まりで残した区間：始点・終点（頂点の番号）、左右の印、区間の番号、線
+#[derive(Clone, Copy)]
+pub(super) struct Kept {
+    a: usize,
+    b: usize,
+    sides: (Label, Label),
+    piece: usize,
+    stroke: Option<EdgeStroke>,
 }
 
 /// 区間の出どころ：（出どころの曲線の番号, 区間の始点の t, 終点の t, 区間の向き（始点→終点）が出どころの曲線の t の増える
@@ -1813,31 +1853,31 @@ impl PlanarMap {
         };
         let mut over_memo: IntMap<u32, Over> = IntMap::default();
         let mut old_color_memo: IntMap<u32, Option<Color32>> = IntMap::default();
-        // 決まりごとの、残す区間（`kept`）・区間の新しい色・残す中の辺・中の辺の新しい色
+        // 決まりごとの、残す区間（`kept`）・残さない区間の印・残す中の辺・残さない中の辺
         struct Ruled {
-            kept: Vec<(usize, usize, (Label, Label), usize)>,
-            piece_cols: Vec<Sides>,
+            kept: Vec<Kept>,
+            piece_gone: Vec<bool>,
             interior_kept: Vec<MapEdge>,
-            inner_cols: IntMap<usize, Sides>,
+            inner_gone: Vec<usize>,
         }
-        // 区間ごとの乗せた線（決まりによらない）：出どころのうち、重ねる地図の辺・輪郭の変形で動かした辺（上に置く線）、
-        // 前からある辺（動かした辺の前の曲線でないもの）の順に、最初の出どころの線。形の線と、動かした辺の前の曲線は線を
-        // 持たない（前からある辺と同じ所を通っても、前からある辺の線が残る）。区間が残るか（左右の色が違うか）は決まりで決まり、
-        // 残った区間はこの線を持つ（設計：claude/線の設計_68a596e.md の 2.3 の 1）
-        let piece_strokes: Vec<Option<EdgeStroke>> = pieces
+        // 区間ごとの、線を決めるもの（決まりによらない）：（重ねるものの線の辺の線、前の線）。重ねるものの線の辺は、出どころの
+        // うち重ねる地図の辺・輪郭の変形で動かした辺の最初のもの（形の線は線の辺でない）。前の線は、前からある辺（動かした辺の
+        // 前の曲線でないもの）の出どころの最初の線。区間の線は、決まりごとに `MapRule::stroke` で決める（設計：
+        // claude/線の設計_68a596e.md の 2.3 の 1・6.2 の (b)）
+        let line_input = !matches!(input, MapInput::Shapes(_) | MapInput::Stack(_));
+        let piece_lines: Vec<(Option<Option<EdgeStroke>>, Option<EdgeStroke>)> = pieces
             .iter()
             .map(|p| {
-                piece_provs[p.prov.clone()]
-                    .iter()
-                    .map(|pv| match srcs[pv.src as usize].1 {
-                        OverlaySrc::New(i) if !matches!(input, MapInput::Shapes(_) | MapInput::Stack(_)) => {
-                            (0, new_strokes[i])
-                        }
-                        OverlaySrc::Old(e) if !moved[e] => (1, self.edges[e].stroke),
-                        _ => (2, None),
-                    })
-                    .min_by_key(|x| x.0)
-                    .and_then(|x| x.1)
+                let provs = &piece_provs[p.prov.clone()];
+                let input_line = provs.iter().find_map(|pv| match srcs[pv.src as usize].1 {
+                    OverlaySrc::New(i) if line_input => Some(new_strokes[i]),
+                    _ => None,
+                });
+                let old_line = provs.iter().find_map(|pv| match srcs[pv.src as usize].1 {
+                    OverlaySrc::Old(e) if !moved[e] => self.edges[e].stroke,
+                    _ => None,
+                });
+                (input_line, old_line)
             })
             .collect();
         let mut ruled: Vec<Ruled> = Vec::with_capacity(rules.len());
@@ -1845,10 +1885,11 @@ impl PlanarMap {
         let mut turns: Vec<(IPt, Sides, Option<usize>)> = Vec::new();
         for &rule in rules {
             let copy_untouched = copies_untouched(rule);
-            // 5. 区間の新しい印（色と図形の番号）。左右の色が違う区間だけ残す：（始点, 終点, (左の印, 右の印), 区間の番号）
-            let mut kept: Vec<(usize, usize, (Label, Label), usize)> = Vec::new();
-            // 区間ごとの新しい色（残さない区間も）
+            // 5. 区間の新しい印（色と図形の番号）と線。残す区間（`MapEdge::needed`）だけ並べる
+            let mut kept: Vec<Kept> = Vec::new();
+            // 区間ごとの新しい色と、残さないか（残さない区間も）
             let mut piece_cols: Vec<Sides> = Vec::with_capacity(pieces.len());
+            let mut piece_gone: Vec<bool> = Vec::with_capacity(pieces.len());
             for (k, piece) in pieces.iter().enumerate() {
                 let side = |fwd: bool| {
                     let pick = |s: (Label, Label)| if fwd { s.0 } else { s.1 };
@@ -1870,17 +1911,28 @@ impl PlanarMap {
                             (Over::Color(l.0), l.1)
                         }
                     };
-                    rule.apply_label(&over, over_src, old)
+                    (rule.apply_label(&over, over_src, old), over)
                 };
-                let (left, right) = (side(true), side(false));
+                let ((left, over_l), (right, over_r)) = (side(true), side(false));
+                let (input_line, old_line) = piece_lines[k];
+                let stroke = rule.stroke(&over_l, &over_r, input_line, old_line);
                 piece_cols.push((left.0, right.0));
-                if left.0 != right.0 {
-                    kept.push((piece.a, piece.b, (left, right), k));
+                let needed = edge_needed(left.0, right.0, stroke);
+                piece_gone.push(!needed);
+                if needed {
+                    kept.push(Kept {
+                        a: piece.a,
+                        b: piece.b,
+                        sides: (left, right),
+                        piece: k,
+                        stroke,
+                    });
                 }
             }
             let mut interior_kept: Vec<MapEdge> = Vec::new();
-            // 中の辺ごとの新しい色（残さない辺も）
+            // 中の辺ごとの新しい色（残さない辺も）と、残さない中の辺
             let mut inner_cols: IntMap<usize, Sides> = IntMap::default();
+            let mut inner_gone: Vec<usize> = Vec::new();
             for (i, &e) in inner.iter().enumerate() {
                 let ed = self.edges[e];
                 if dropped(e) {
@@ -1894,11 +1946,13 @@ impl PlanarMap {
                     } else {
                         ((fd.right, fd.right_src), (fd.left, fd.left_src))
                     };
-                    let l = rule.apply_label(&Over::Color(fl.0), fl.1, (ed.left, ed.left_src));
-                    let r = rule.apply_label(&Over::Color(fr.0), fr.1, (ed.right, ed.right_src));
+                    let (over_l, over_r) = (Over::Color(fl.0), Over::Color(fr.0));
+                    let l = rule.apply_label(&over_l, fl.1, (ed.left, ed.left_src));
+                    let r = rule.apply_label(&over_r, fr.1, (ed.right, ed.right_src));
+                    // 線は、上に置く重ねる地図の辺のもの（区間の線と同じ決まり）
+                    let stroke = rule.stroke(&over_l, &over_r, Some(fd.stroke), ed.stroke);
                     inner_cols.insert(e, (l.0, r.0));
-                    if l.0 != r.0 {
-                        // 線は、上に置く重ねる地図の辺のもの（区間の線 `piece_strokes` と同じ決まり）
+                    if edge_needed(l.0, r.0, stroke) {
                         interior_kept.push(MapEdge {
                             a: node_at(ed.a),
                             b: node_at(ed.b),
@@ -1906,25 +1960,36 @@ impl PlanarMap {
                             right: r.0,
                             left_src: l.1,
                             right_src: r.1,
-                            stroke: fd.stroke,
+                            stroke,
                             ..ed
                         });
+                    } else {
+                        inner_gone.push(e);
                     }
                     continue;
                 }
                 let g = dsu_find(&mut group, i as u32);
-                let (l, r) = if e < n_old {
+                // 前からある辺は、その所の重ねるものの値（両側で同じ）で線を決め、重ねる地図の辺は、自分の線を上に置く
+                let (l, r, stroke) = if e < n_old {
                     let over = over_memo.entry(g).or_insert_with(|| over_at(probe(e)));
-                    (rule.apply(over, ed.left), rule.apply(over, ed.right))
+                    (
+                        rule.apply(over, ed.left),
+                        rule.apply(over, ed.right),
+                        rule.stroke(over, over, None, ed.stroke),
+                    )
                 } else {
                     let old = *old_color_memo.entry(g).or_insert_with(|| old_at(probe(e)));
+                    let (over_l, over_r) = (Over::Color(ed.left), Over::Color(ed.right));
                     (
-                        rule.apply(&Over::Color(ed.left), old),
-                        rule.apply(&Over::Color(ed.right), old),
+                        rule.apply(&over_l, old),
+                        rule.apply(&over_r, old),
+                        rule.stroke(&over_l, &over_r, Some(ed.stroke), None),
                     )
                 };
                 inner_cols.insert(e, (l, r));
-                if l != r {
+                if !edge_needed(l, r, stroke) {
+                    inner_gone.push(e);
+                } else {
                     // 元の図形の印は、色が変わらない側だけ残す
                     interior_kept.push(MapEdge {
                         a: node_at(ed.a),
@@ -1933,6 +1998,7 @@ impl PlanarMap {
                         right: r,
                         left_src: if l == ed.left { ed.left_src } else { None },
                         right_src: if r == ed.right { ed.right_src } else { None },
+                        stroke,
                         ..ed
                     });
                 }
@@ -1969,9 +2035,9 @@ impl PlanarMap {
             }
             ruled.push(Ruled {
                 kept,
-                piece_cols,
+                piece_gone,
                 interior_kept,
-                inner_cols,
+                inner_gone,
             });
         }
         if !refeed.is_empty() {
@@ -1984,16 +2050,16 @@ impl PlanarMap {
             let copy_untouched = copies_untouched(rule);
             let Ruled {
                 kept,
-                piece_cols,
+                piece_gone,
                 interior_kept,
-                inner_cols,
+                inner_gone,
             } = r;
             // 6. 区間をつないで鎖にする。頂点の次数が 2 で、出どころと左右の色が同じで、t が続いていれば、つなげる
             let at: Grouped<usize> = Grouped::new(
                 nodes.len(),
                 kept.iter()
                     .enumerate()
-                    .flat_map(|(ki, &(a, b, ..))| [(a, ki), (b, ki)]),
+                    .flat_map(|(ki, k)| [(k.a, ki), (k.b, ki)]),
             );
             let mut untouched_deg: Vec<usize> = vec![0; nodes.len()];
             for (e, ed) in self.edges.iter().enumerate() {
@@ -2014,14 +2080,14 @@ impl PlanarMap {
                     OverlaySrc::New(_) => 1,
                     OverlaySrc::Old(_) => 2,
                 };
-                *piece_provs[pieces[kept[ki].3].prov.clone()]
+                *piece_provs[pieces[kept[ki].piece].prov.clone()]
                     .iter()
                     .min_by_key(rank)
                     .expect("区間には出どころがある")
             };
             // 鎖の向きでの（始点, 終点, t の始め, t の終わり）
             let piece_ends = |&(ki, fwd): &(usize, bool)| {
-                let (a, b, ..) = kept[ki];
+                let Kept { a, b, .. } = kept[ki];
                 let m = main_src(ki);
                 if fwd {
                     (a, b, m.t0, m.t1)
@@ -2042,9 +2108,12 @@ impl PlanarMap {
                 used[start] = true;
                 // 鎖は左右の色が同じ区間をつなぐ。図形の番号は、鎖の左右それぞれで最初に見つかったもの（鎖の左右は、それぞれ
                 // 結果の1つの面。番号は面と図形を対応づけるだけなので、区間ごとの番号の違いでは鎖を分けない）
-                let (_, _, (mut sl, mut sr), start_piece) = kept[start];
+                let Kept {
+                    sides: (mut sl, mut sr),
+                    stroke,
+                    ..
+                } = kept[start];
                 let s_src = main_src(start).src;
-                let stroke = piece_strokes[start_piece];
                 for forward in [true, false] {
                     loop {
                         let cur = if forward {
@@ -2064,8 +2133,14 @@ impl PlanarMap {
                         if used[nk] || main_src(nk).src != s_src {
                             break;
                         }
-                        let (na, nb, (nl, nr), n_piece) = kept[nk];
-                        if piece_strokes[n_piece] != stroke {
+                        let Kept {
+                            a: na,
+                            b: nb,
+                            sides: (nl, nr),
+                            stroke: n_stroke,
+                            ..
+                        } = kept[nk];
+                        if n_stroke != stroke {
                             break;
                         }
                         let n_same = if forward { na == end } else { nb == end };
@@ -2177,13 +2252,12 @@ impl PlanarMap {
             // まとめる候補（`merge_degree2`。切り口の点が、相手の線が消えた後に角として残らない）
             let dropped_ends: Vec<usize> = pieces
                 .iter()
-                .zip(&piece_cols)
-                .filter(|(_, c)| c.0 == c.1)
+                .zip(&piece_gone)
+                .filter(|(_, &gone)| gone)
                 .flat_map(|(p, _)| [p.a, p.b])
                 .chain(
-                    inner
+                    inner_gone
                         .iter()
-                        .filter(|e| inner_cols.get(e).is_some_and(|c| c.0 == c.1))
                         .flat_map(|&e| [node_at(self.edges[e].a), node_at(self.edges[e].b)]),
                 )
                 .collect();

@@ -38295,6 +38295,111 @@ mod strokes {
         assert_eq!(app.tool.stroke, INK);
     }
 
+    /// 作業中のレイヤーの今のコマの地図
+    fn cel_map(app: &Is2dApp) -> PlanarMap {
+        let tl = app.tab().active_timeline();
+        let cel = tl.layers[tl.active_layer].cel_at(tl.current_frame).unwrap();
+        let base = cel.maps[0].base();
+        base.map().clone()
+    }
+
+    #[test]
+    fn a_line_between_two_fills_stays_when_they_become_one_color() {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                rect(100.0, 100.0, 200.0, 200.0, Color32::RED),
+                rect(200.0, 100.0, 300.0, 200.0, Color32::BLUE),
+            ],
+        );
+        assert!(apply(&mut app, Action::InkBottle { pt: Point::new(150.0, 150.0), stroke: INK }));
+        // 青を赤で塗る：間の線は残り、線で分かれた赤い面が2つになる（Animate と同じ）
+        assert!(apply(&mut app, Action::BucketFill { pt: Point::new(250.0, 150.0), color: Color32::RED }));
+        let m = cel_map(&app);
+        let shared: Vec<_> = m
+            .edges
+            .iter()
+            .filter(|e| e.left == Some(Color32::RED) && e.right == Some(Color32::RED))
+            .collect();
+        assert!(!shared.is_empty() && shared.iter().all(|e| e.stroke == Some(INK)));
+        let (faces, broken) = m.faces();
+        assert_eq!((faces.len(), broken), (2, 0));
+        assert!(faces.iter().all(|f| f.color == Color32::RED));
+        // 片方を緑に塗る：もう片方は赤のまま
+        assert!(apply(&mut app, Action::BucketFill { pt: Point::new(150.0, 150.0), color: Color32::GREEN }));
+        let m = cel_map(&app);
+        let mut colors: Vec<_> = m.faces().0.iter().map(|f| f.color.to_array()).collect();
+        colors.sort();
+        let mut expected = vec![Color32::RED.to_array(), Color32::GREEN.to_array()];
+        expected.sort();
+        assert_eq!(colors, expected);
+        // 赤のブラシで、間の線の真ん中を塗る：塗った所の線だけが消え、2つの赤い面の間が塗りでつながる
+        assert!(apply(&mut app, Action::BucketFill { pt: Point::new(150.0, 150.0), color: Color32::RED }));
+        apply(&mut app, Action::SetTool { tool: Tool::Brush });
+        app.tool.brush_color = Color32::RED;
+        commit_brush_line(&mut app, &brush_line(&[Point::new(180.0, 150.0), Point::new(220.0, 150.0)], 10.0));
+        let m = cel_map(&app);
+        assert!(m.is_valid());
+        for e in 0..m.edges.len() {
+            if m.edges[e].stroke.is_some() {
+                let mid = m.quad(e).eval(0.5);
+                assert!(!((mid.x - 200.0).abs() < 1.0 && (mid.y - 150.0).abs() < 8.0));
+            }
+        }
+        // 線がつながっていないので、2つの赤い面は1つになる
+        assert_eq!(m.faces().0.len(), 1);
+    }
+
+    /// 乱数の絵に、インクボトル・バケツ・ブラシ・消しゴムをくり返しかける（書くたびに、触った所だけの計算と地図全体で
+    /// 計算した答えを比べる確かめが、テストでは毎回動く：`test_checks`）
+    #[test]
+    fn random_edits_with_lines_keep_the_map_valid() {
+        let mut rng = fastrand::Rng::with_seed(0x11AE_2026_1123);
+        let colors = [Color32::RED, Color32::BLUE, Color32::GREEN];
+        for round in 0..12 {
+            let mut app = Is2dApp::default();
+            let shapes: Vec<FillShape> = (0..4)
+                .map(|_| {
+                    let (x, y) = (rng.f64() * 300.0 + 100.0, rng.f64() * 300.0 + 100.0);
+                    let (w, h) = (rng.f64() * 150.0 + 40.0, rng.f64() * 150.0 + 40.0);
+                    rect(x, y, x + w, y + h, colors[rng.usize(..colors.len())])
+                })
+                .collect();
+            put_cel_shapes(&mut app, 0, 0, shapes);
+            let pt = |rng: &mut fastrand::Rng| Point::new(rng.f64() * 400.0 + 100.0, rng.f64() * 400.0 + 100.0);
+            for step in 0..40 {
+                match rng.usize(..5) {
+                    0 | 1 => {
+                        let stroke = EdgeStroke {
+                            color: colors[rng.usize(..colors.len())],
+                            width: rng.u8(1..=10),
+                        };
+                        apply(&mut app, Action::InkBottle { pt: pt(&mut rng), stroke });
+                    }
+                    2 => {
+                        let color = colors[rng.usize(..colors.len())];
+                        apply(&mut app, Action::BucketFill { pt: pt(&mut rng), color });
+                    }
+                    k => {
+                        apply(&mut app, Action::SetTool { tool: if k == 3 { Tool::Brush } else { Tool::Eraser } });
+                        app.tool.brush_color = colors[rng.usize(..colors.len())];
+                        let (a, b) = (pt(&mut rng), pt(&mut rng));
+                        commit_brush_line(&mut app, &brush_line(&[a, a.midpoint(b), b], rng.f64() * 20.0 + 3.0));
+                    }
+                }
+                let tl = app.tab().active_timeline();
+                if let Some(cel) = tl.layers[0].cel_at(0) {
+                    for m in cel.maps.iter() {
+                        assert!(m.base().map().is_valid(), "round {round} step {step}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn brushing_over_an_inked_outline_removes_the_covered_line() {
         let mut app = Is2dApp::default();
