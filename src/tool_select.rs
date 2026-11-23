@@ -45,7 +45,7 @@ pub(crate) fn draw_shape_contour_lines(
             tab.session.edit_path.shows_stage(),
         )
         .inflate(pad, pad);
-    for contour in shape.contours() {
+    for contour in shape.wire_contours() {
         for seg in contour.segments.iter() {
             if seg.p0.x.max(seg.p1.x).max(seg.p2.x) < view_rect.x0
                 || seg.p0.x.min(seg.p1.x).min(seg.p2.x) > view_rect.x1
@@ -80,16 +80,26 @@ pub(crate) fn draw_shape_contour_lines(
                 }
             }
             if show_anchors {
-                let a = tab.view.world_to_screen(seg.p0);
-                painter.circle_filled(a, 3.0, Color32::WHITE);
-                painter.circle_stroke(
-                    a,
-                    3.0,
-                    Stroke::new(1.2_f32, Color32::from_rgb(30, 120, 230)),
-                );
+                draw_anchor_dot(tab, painter, seg.p0);
+            }
+        }
+        // 閉じていない曲線（線の図形の中心の曲線）は、終わりの端もアンカー
+        if show_anchors {
+            let segs = &contour.segments;
+            if let (Some(first), Some(last)) = (segs.first(), segs.last()) {
+                if first.p0 != last.p2 {
+                    draw_anchor_dot(tab, painter, last.p2);
+                }
             }
         }
     }
+}
+
+/// 輪郭の表示のアンカー1つ（文書の座標 `p`）
+fn draw_anchor_dot(tab: &Tab, painter: &egui::Painter, p: Point) {
+    let a = tab.view.world_to_screen(p);
+    painter.circle_filled(a, 3.0, Color32::WHITE);
+    painter.circle_stroke(a, 3.0, Stroke::new(1.2_f32, Color32::from_rgb(30, 120, 230)));
 }
 
 pub(crate) fn handle_select_tool_input(

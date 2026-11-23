@@ -38218,6 +38218,13 @@ mod strokes {
         // 線の太さの半分だけ、輪郭の外と中に広がる（輪の形）
         let b = line.bounding_box();
         assert!((b.x0 - 98.0).abs() < 0.05 && (b.x1 - 302.0).abs() < 0.05);
+        // 輪郭の表示とアンカーは、太らせた形の輪郭でなく、線の中心を通る曲線（地図の辺）で描く
+        let wire: Vec<QuadBez> = line.wire_contours().flat_map(|c| c.segments.iter().copied()).collect();
+        assert_eq!(wire.len(), base.map().edges.len());
+        assert!(wire.iter().all(|q| {
+            let on = |p: Point| (p.x - 100.0).abs() < 1e-9 || (p.x - 300.0).abs() < 1e-9 || (p.y - 100.0).abs() < 1e-9 || (p.y - 300.0).abs() < 1e-9;
+            on(q.p0) && on(q.p2)
+        }));
         assert!(line.contains_point(Point::new(200.0, 99.0)));
         assert!(line.contains_point(Point::new(200.0, 101.5)));
         assert!(!line.contains_point(Point::new(200.0, 105.0)));

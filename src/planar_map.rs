@@ -1172,9 +1172,10 @@ fn line_shape(run: &LineRun, id: ShapeId, group_path: &[u64]) -> Option<FillShap
         return None;
     }
     let exterior = rings.remove(0);
-    let mut s = FillShape::new(stroke.color, exterior, rings).with_scope(0, group_path);
+    let mut s = FillShape::new(stroke.color, exterior, rings)
+        .with_scope(0, group_path)
+        .with_line(*stroke, quads.clone());
     s.shape_id = id;
-    s.line = Some(*stroke);
     Some(s)
 }
 

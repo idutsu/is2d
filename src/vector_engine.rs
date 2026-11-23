@@ -345,6 +345,9 @@ pub(crate) struct FillShape {
     pub(crate) mesh_revision: u64,
     /// 線の図形なら、その線（`LayerBase::lines`：線のひと区切りを太らせた形。番号は線の番号 `line_id`）。面の図形は `None`
     pub(crate) line: Option<crate::planar_map::EdgeStroke>,
+    /// 線の図形なら、線の中心を通る曲線（地図の辺。つながった順）。輪郭の表示とアンカーは、太らせた形の輪郭でなく、これで
+    /// 描く（`wire_contours`）。図形と同じ変換で写る
+    spine: Option<Contour>,
     bbox: KRect,
     fill_mesh: OnceLock<Arc<Mesh>>,
     /// `fill_mesh` を作ったあとに、その頂点を写した変換の最大の拡大率を掛け合わせたもの（メッシュのずれは、作る許容の
@@ -365,6 +368,7 @@ impl FillShape {
             symbol_instance: None,
             mesh_revision: 0,
             line: None,
+            spine: None,
             bbox: KRect::ZERO,
             fill_mesh: OnceLock::new(),
             mesh_stretch: 1.0,
@@ -531,6 +535,21 @@ impl FillShape {
         self.mesh_revision = next_mesh_revision();
     }
 
+    /// 線の図形にする：線 `stroke` と、線の中心を通る曲線 `spine`（`LayerBase::lines`）
+    pub(crate) fn with_line(mut self, stroke: crate::planar_map::EdgeStroke, spine: Vec<QuadBez>) -> Self {
+        self.line = Some(stroke);
+        self.spine = Some(Contour::new(spine));
+        self
+    }
+
+    /// 輪郭の表示とアンカーに使う曲線：面の図形は輪郭（外周と穴）、線の図形は線の中心を通る曲線
+    pub(crate) fn wire_contours(&self) -> impl Iterator<Item = &Contour> {
+        let spine = self.spine.as_ref();
+        spine
+            .into_iter()
+            .chain(self.contours().filter(move |_| spine.is_none()))
+    }
+
     /// 色を `f` で替える（色効果）。再テッセレーションを行わず、キャッシュ済みの頂点の色も `f` で替える
     pub(crate) fn recolor(&mut self, f: impl Fn(Color32) -> Color32) {
         self.color = f(self.color);
@@ -574,6 +593,9 @@ impl FillShape {
         for hole in &mut self.holes {
             hole.translate(delta);
         }
+        if let Some(spine) = &mut self.spine {
+            spine.translate(delta);
+        }
         if let Some(binding) = &mut self.symbol_instance {
             binding.xform = Affine::translate(delta) * binding.xform;
         }
@@ -601,6 +623,9 @@ impl FillShape {
         self.exterior.transform(affine);
         for hole in &mut self.holes {
             hole.transform(affine);
+        }
+        if let Some(spine) = &mut self.spine {
+            spine.transform(affine);
         }
         if let Some(binding) = &mut self.symbol_instance {
             binding.xform = affine * binding.xform;
@@ -633,6 +658,10 @@ impl FillShape {
         self.holes.clone_from(&orig.holes);
         for hole in &mut self.holes {
             hole.transform(affine);
+        }
+        self.spine.clone_from(&orig.spine);
+        if let Some(spine) = &mut self.spine {
+            spine.transform(affine);
         }
         self.symbol_instance = orig.symbol_instance.map(|mut binding| {
             binding.xform = affine * binding.xform;
