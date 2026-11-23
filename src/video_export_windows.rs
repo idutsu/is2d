@@ -3,7 +3,8 @@
 //! - 絵の入口は 32bit の BGRA（`MFVideoFormat_RGB32`。メモリの並びは 青・緑・赤・アルファ）。1行のバイトの数（ストライド）は、
 //!   Media Foundation の決まりどおり `MFGetStrideForBitmapInfoHeader` で決め、入口の形の `MF_MT_DEFAULT_STRIDE` に書く。
 //!   Media Foundation の決まりでは、ストライドが正なら、メモリの先頭の行が絵のいちばん上の行（上から下へ）、負なら
-//!   いちばん下の行（下から上へ）。正のストライドを書くので、受け取った RGBA を上の行から順に、そのストライドおきに並べる。
+//!   いちばん下の行（下から上へ）。RGB の形の最小のストライドは負（下から上へ並べる、Windows の画像のふつうの並び）なので、
+//!   決まったストライドの符号で並べる向きを決め（`row_offset`）、受け取った RGBA の各行を、その位置に並べる。
 //! - 時刻と長さは Media Foundation の単位（100ns）。絵のコマ `n` の時刻は `n`÷fps 秒、音の塊の時刻は、それまでに書いた
 //!   左右の組の数÷`EXPORT_AUDIO_RATE` 秒（どちらも端数は切り捨て）。長さは次の時刻との差にする（端数がたまらない）。
 //! - Media Foundation の DLL は遅延読み込み（build.rs）なので、Media Foundation の関数を初めて呼ぶ前に、DLL がみな読み込める
@@ -52,8 +53,8 @@ pub(crate) struct WindowsVideoEncoder<'a> {
     width: u32,
     height: u32,
     fps: u32,
-    /// 絵の入口の1行のバイトの数（入口の形の `MF_MT_DEFAULT_STRIDE` に書いたもの）
-    stride: usize,
+    /// 絵の入口の1行のバイトの数（入口の形の `MF_MT_DEFAULT_STRIDE` に書いたもの。負なら下の行から並べる）
+    stride: i32,
     /// 次に書く絵のコマの番号
     frame_index: usize,
     /// Media Foundation と COM。いちばん後ろに置き、上の Media Foundation のもの（`writer`）を手放してから終える
@@ -205,6 +206,14 @@ fn attributes(values: &[(GUID, Value)]) -> windows::core::Result<IMFAttributes> 
     Ok(attributes)
 }
 
+/// 高さ `height` の絵の上から `y` 番目の行を置く、バッファの先頭からのバイトの位置。ストライド `stride` が正なら上の行から、
+/// 負なら下の行から並べる（Media Foundation の決まり：このファイルの始めの説明）
+fn row_offset(stride: i32, y: usize, height: usize) -> usize {
+    let pitch = stride.unsigned_abs() as usize;
+    let row = if stride >= 0 { y } else { height - 1 - y };
+    row * pitch
+}
+
 /// 長さ `len` バイトの領域を作り、`fill` で中身を書いたもの
 fn media_buffer(len: usize, fill: impl FnOnce(&mut [u8])) -> Result<IMFMediaBuffer, String> {
     let len_u32 =
@@ -315,13 +324,13 @@ pub(crate) fn create_windows_encoder<'a>(
     }))
 }
 
-/// `writer` に、絵の流れ（出口は H.264、入口は 32bit の BGRA）を足し、`(流れの番号, 入口の1行のバイトの数)` を返す
+/// `writer` に、絵の流れ（出口は H.264、入口は 32bit の BGRA）を足し、`(流れの番号, 入口の1行のバイトの数（符号付き。負なら下の行から並べる）)` を返す
 fn add_video_stream(
     writer: &IMFSinkWriter,
     width: u32,
     height: u32,
     fps: u32,
-) -> Result<(u32, usize), String> {
+) -> Result<(u32, i32), String> {
     let bit_rate = u32::try_from(video_bit_rate(width, height, fps))
         .map_err(|_| "動画のビットレートが大きすぎます".to_owned())?;
     let frame_size = pair(width, height);
@@ -332,14 +341,13 @@ fn add_video_stream(
     let progressive = MFVideoInterlace_Progressive.0 as u32;
 
     // 入口の1行のバイトの数：Media Foundation が決める、その形の最小のストライド（RGB の形の番号は、GUID の先頭の
-    // 32bit：`MFGetStrideForBitmapInfoHeader` の決まり）。正なので、絵は上の行から並べる（このファイルの始めの説明）
+    // 32bit：`MFGetStrideForBitmapInfoHeader` の決まり）。符号が並べる向き（このファイルの始めの説明）
     // SAFETY: 引数は数だけ
     let stride = unsafe { MFGetStrideForBitmapInfoHeader(MFVideoFormat_RGB32.data1, width) }
         .map_err(failed("絵の1行のバイトの数を決められませんでした"))?;
-    let stride_bytes = usize::try_from(stride)
-        .ok()
-        .filter(|&bytes| bytes >= width as usize * 4)
-        .ok_or_else(|| format!("絵の1行のバイトの数（{stride}）が幅に合いません"))?;
+    if (stride.unsigned_abs() as usize) < width as usize * 4 {
+        return Err(format!("絵の1行のバイトの数（{stride}）が幅に合いません"));
+    }
 
     let output = media_type(&[
         (MF_MT_MAJOR_TYPE, Value::Guid(MFMediaType_Video)),
@@ -364,6 +372,7 @@ fn add_video_stream(
         (MF_MT_FRAME_RATE, Value::U64(frame_rate)),
         (MF_MT_PIXEL_ASPECT_RATIO, Value::U64(square_pixel)),
         // 符号付きのストライドを、そのまま 32bit の数として書く（`MF_MT_DEFAULT_STRIDE` の決まり）
+        // 負のストライドも、Media Foundation の決まりどおり 32bit の符号付きの値のビットのまま書く
         (MF_MT_DEFAULT_STRIDE, Value::U32(stride as u32)),
     ])
     .map_err(failed("動画の入口の形を作れませんでした"))?;
@@ -380,7 +389,7 @@ fn add_video_stream(
     // SAFETY: 同上。流れの番号は `AddStream` が返したもの
     unsafe { writer.SetInputMediaType(stream, &input, &encoding) }
         .map_err(failed("動画エンコーダの入力の形を設定できませんでした"))?;
-    Ok((stream, stride_bytes))
+    Ok((stream, stride))
 }
 
 /// `writer` に、音の流れ（出口は AAC・`EXPORT_AUDIO_RATE`・ステレオ、入口は 16bit の整数の PCM）を足し、流れの番号を返す
@@ -463,13 +472,12 @@ impl VideoEncoder for WindowsVideoEncoder<'_> {
         if rgba.len() != row_bytes * height {
             return Err("フレーム画像のバイト数がサイズと一致しません".to_owned());
         }
-        // 上の行から順に、ストライドおきに並べる（ストライドは正：このファイルの始めの説明）
-        let buffer = media_buffer(self.stride * height, |bgra| {
-            for (src, dst) in rgba
-                .chunks_exact(row_bytes)
-                .zip(bgra.chunks_exact_mut(self.stride))
-            {
-                rgba_to_bgra(src, &mut dst[..row_bytes]);
+        // 絵の各行を、ストライドの符号で決まる位置に並べる（このファイルの始めの説明）
+        let pitch = self.stride.unsigned_abs() as usize;
+        let buffer = media_buffer(pitch * height, |bgra| {
+            for (y, src) in rgba.chunks_exact(row_bytes).enumerate() {
+                let at = row_offset(self.stride, y, height);
+                rgba_to_bgra(src, &mut bgra[at..at + row_bytes]);
             }
         })?;
         let frame = self.frame_index as u64;
@@ -502,6 +510,15 @@ impl VideoEncoder for WindowsVideoEncoder<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// ストライドが正なら上の行がバッファの先頭、負なら下の行がバッファの先頭（どちらも1行はストライドの大きさおき）
+    #[test]
+    fn rows_follow_the_sign_of_the_stride() {
+        assert_eq!(super::row_offset(3200, 0, 3), 0);
+        assert_eq!(super::row_offset(3200, 2, 3), 6400);
+        assert_eq!(super::row_offset(-3200, 0, 3), 6400);
+        assert_eq!(super::row_offset(-3200, 2, 3), 0);
+    }
+
     use super::*;
 
     #[test]
