@@ -166,7 +166,12 @@ fn paint_frame(
             if shape.is_empty_symbol_marker() {
                 continue;
             }
-            fill_contours(&mut pixmap, shape.contours(), shape.color, (origin_x, origin_y));
+            let rule = if shape.fills_nonzero() {
+                tiny_skia::FillRule::Winding
+            } else {
+                tiny_skia::FillRule::EvenOdd
+            };
+            fill_contours(&mut pixmap, shape.contours(), shape.color, rule, (origin_x, origin_y));
         }
     }
 
@@ -188,11 +193,12 @@ fn paint_frame(
     Some(data)
 }
 
-/// 輪郭 `contours`（文書の座標）を、偶奇の規則で色 `color` に塗る（`origin` は書き出す絵の左上の文書の座標）
+/// 輪郭 `contours`（文書の座標）を、塗りの決まり `rule` で色 `color` に塗る（`origin` は書き出す絵の左上の文書の座標）
 fn fill_contours<'a>(
     pixmap: &mut tiny_skia::Pixmap,
     contours: impl Iterator<Item = &'a crate::vector_engine::Contour>,
     color: eframe::egui::Color32,
+    rule: tiny_skia::FillRule,
     (origin_x, origin_y): (f32, f32),
 ) {
     let mut pb = tiny_skia::PathBuilder::new();
@@ -221,7 +227,7 @@ fn fill_contours<'a>(
     pixmap.fill_path(
         &path,
         &paint,
-        tiny_skia::FillRule::EvenOdd,
+        rule,
         tiny_skia::Transform::identity(),
         None,
     );

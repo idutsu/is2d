@@ -391,6 +391,7 @@ impl FillShape {
                 &self.exterior,
                 &self.holes,
                 self.color,
+                self.fill_rule(),
             ))
         })
     }
@@ -400,7 +401,7 @@ impl FillShape {
         if let Some(m) = self.fill_mesh.get() {
             append_mesh(dst, m);
         } else {
-            let m = tessellate_contours_to_mesh(&self.exterior, &self.holes, self.color);
+            let m = tessellate_contours_to_mesh(&self.exterior, &self.holes, self.color, self.fill_rule());
             append_mesh(dst, &m);
         }
     }
@@ -542,6 +543,19 @@ impl FillShape {
         self
     }
 
+    /// 輪郭と同じ形のメッシュ `mesh` を、先に持たせる（線の図形：帯で直接作ったメッシュ `quad_band_mesh`。変換で許すずれを
+    /// 超えて捨てたあとは、輪郭から作り直す）
+    pub(crate) fn with_mesh(self, mesh: Mesh) -> Self {
+        let _ = self.fill_mesh.set(Arc::new(mesh));
+        self
+    }
+
+    /// 塗りの決まりが NonZero か（線の図形：輪郭がブラシと同じ作り方で、自分と重なることがある。面の図形は偶奇）。メッシュ・
+    /// 当たり判定・動画の書き出しが、この決まりで塗る
+    pub(crate) fn fills_nonzero(&self) -> bool {
+        self.line.is_some()
+    }
+
     /// 輪郭の表示とアンカーに使う曲線：面の図形は輪郭（外周と穴）、線の図形は線の中心を通る曲線
     pub(crate) fn wire_contours(&self) -> impl Iterator<Item = &Contour> {
         let spine = self.spine.as_ref();
@@ -582,7 +596,21 @@ impl FillShape {
             }
             Arc::new(p)
         });
-        (path.winding(pt) & 1) != 0
+        let w = path.winding(pt);
+        if self.fills_nonzero() {
+            w != 0
+        } else {
+            (w & 1) != 0
+        }
+    }
+
+    /// メッシュにするときの塗りの決まり（`fills_nonzero`）
+    fn fill_rule(&self) -> FillRule {
+        if self.fills_nonzero() {
+            FillRule::NonZero
+        } else {
+            FillRule::EvenOdd
+        }
     }
 
     pub(crate) fn translate(&mut self, delta: KVec2) {
@@ -852,7 +880,12 @@ pub(crate) fn union_bounding_boxes(shapes: &[FillShape]) -> KRect {
 // Lyon テッセレーション描画エンジン (2次ベジェパス -> GPU Mesh)
 // ============================================================================
 
-fn tessellate_contours_to_mesh(exterior: &Contour, holes: &[Contour], color: Color32) -> Mesh {
+fn tessellate_contours_to_mesh(
+    exterior: &Contour,
+    holes: &[Contour],
+    color: Color32,
+    fill_rule: FillRule,
+) -> Mesh {
     let mut builder = LyonPath::builder();
     for contour in std::iter::once(exterior).chain(holes.iter()) {
         if let Some(first) = contour.segments.first() {
@@ -870,7 +903,7 @@ fn tessellate_contours_to_mesh(exterior: &Contour, holes: &[Contour], color: Col
         }
     }
     let path = builder.build();
-    TESSELLATOR.with(|t| tessellate_lyon_path(&mut t.borrow_mut(), &path, color, FillRule::EvenOdd))
+    TESSELLATOR.with(|t| tessellate_lyon_path(&mut t.borrow_mut(), &path, color, fill_rule))
 }
 
 /// 曲線をメッシュにするときの許容（文書の座標）。メッシュは表示の倍率によらず同じものを使う

@@ -1041,43 +1041,29 @@ fn tile_edge(m: &PlanarMap, e: usize) -> crate::stored_map::TileEdge {
     }
 }
 
-/// 線を乗せた辺 `te` を、線の太さに太らせた形の線の図形（端は丸。階層 `group_path`、番号 `id`）。曲線は描画の許容
-/// `MESH_TOL` で折れ線にし、丸い端も同じ許容の折れ線にする（半径 r の円弧を、弦と円弧のずれが許容ほどになる角
-/// √(8·許容/r) ごとに折る）。重なりの無い輪郭を偶奇で塗る。つなぎ目は、隣の辺の線の丸い端と重なって丸くなる
+/// 線を乗せた辺 `te` を、線の太さに太らせた形の線の図形（端は丸。階層 `group_path`、番号 `id`）。輪郭とメッシュは、中心線の
+/// 左右の帯と両端の半円から直接作る（`quad_band`。描画の許容 `MESH_TOL`。交わりを解く計算も、多角形を三角形に分ける計算も
+/// しないので、手間は点の数に比例する）。輪郭は曲がる内側で自分と重なることがあるので、線の図形は NonZero で塗る
+/// （`FillShape::fills_nonzero`）。つなぎ目は、隣の辺の線の丸い端と重なって丸くなる
 fn line_shape(te: &crate::stored_map::TileEdge, id: ShapeId, group_path: &[u64]) -> Option<FillShape> {
-    use crate::vector_engine::MESH_TOL;
-    use i_overlay9::mesh::float::stroke::offset::StrokeOffset;
-    use i_overlay9::mesh::float::style::{LineCap, LineJoin, StrokeStyle};
     let stroke = te.stroke?;
-    let path: Vec<[f64; 2]> = flat_points(te.quad(), MESH_TOL).map(|(p, _)| [p.x, p.y]).collect();
-    let step = (8.0 * MESH_TOL / (stroke.width as f64 / 2.0)).sqrt();
-    let style = StrokeStyle::new(stroke.width as f64)
-        .line_join(LineJoin::Round(step))
-        .start_cap(LineCap::Round(step))
-        .end_cap(LineCap::Round(step));
-    let mut rings: Vec<Contour> = path
-        .stroke(style, false)
-        .iter()
-        .flatten()
-        .filter(|r| r.len() >= 3)
-        .map(|ring| {
-            let segs = (0..ring.len())
-                .map(|i| {
-                    let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
-                    let (a, b) = (Point::new(a[0], a[1]), Point::new(b[0], b[1]));
-                    QuadBez::new(a, a.midpoint(b), b)
-                })
-                .collect();
-            Contour::new(segs)
+    let (ring, mesh) = crate::vector_stroke::quad_band(
+        te.quad(),
+        stroke.width as f64 / 2.0,
+        crate::vector_engine::MESH_TOL,
+        stroke.color,
+    );
+    let segs = (0..ring.len())
+        .map(|i| {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            QuadBez::new(a, a.midpoint(b), b)
         })
         .collect();
-    if rings.is_empty() {
-        return None;
-    }
-    let exterior = rings.remove(0);
-    let mut s = FillShape::new(stroke.color, exterior, rings)
+    // メッシュは、多角形を三角形に分けず、帯から直接作ったもの（輪郭と同じ形）
+    let mut s = FillShape::new(stroke.color, Contour::new(segs), Vec::new())
         .with_scope(0, group_path)
-        .with_line(stroke, vec![te.quad()]);
+        .with_line(stroke, vec![te.quad()])
+        .with_mesh(mesh);
     s.shape_id = id;
     Some(s)
 }

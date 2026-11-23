@@ -798,6 +798,95 @@ fn fit_run(pts: &[Point], tv: &[Option<KVec2>], eps: f64) -> Vec<QuadBez> {
     out
 }
 
+/// 2次ベジェ `q` を中心線にして、半径 `r` で太らせた形（線の図形：`planar_map::line_shape`）の、輪郭と、色 `color` の
+/// メッシュ。中心線の点（`quad_samples`）の左右に半径ずつずらした帯と、両端の半円でできる（刻みは弦のずれ `eps` から決める：
+/// `arc_step`）。輪郭は、左の点を前へ・終わりの半円・右の点を後ろへ・始めの半円の順に並べた1本の閉じた折れ線（曲がる内側で
+/// 自分と重なることがあるので NonZero で塗る形）。メッシュは、同じ点を帯の三角形と半円の扇でつなぐ（多角形を三角形に分ける
+/// 計算をしない）。どちらも手間は点の数に比例する
+pub(crate) fn quad_band(q: QuadBez, r: f64, eps: f64, color: Color32) -> (Vec<Point>, eframe::egui::Mesh) {
+    use eframe::egui::{epaint::Vertex, Mesh, Pos2};
+    let cs = quad_samples(q, r, eps);
+    let cap_n = ((std::f64::consts::PI / arc_step(r, eps)).ceil() as usize).max(2);
+    // 半円の点（中心 c、始めの向き start から、dir の側を回って逆向きまで。両端を除く）
+    let arc = |c: Point, start: KVec2, dir: KVec2| -> Vec<Point> {
+        (1..cap_n)
+            .map(|k| {
+                let a = std::f64::consts::PI * k as f64 / cap_n as f64;
+                c + (start * a.cos() + dir * a.sin()) * r
+            })
+            .collect()
+    };
+    let left: Vec<Point> = cs.iter().map(|c| c.p + left_normal(c.t) * r).collect();
+    let right: Vec<Point> = cs.iter().map(|c| c.p - left_normal(c.t) * r).collect();
+    let (first, last) = (cs[0], cs[cs.len() - 1]);
+    let end_cap = arc(last.p, left_normal(last.t), last.t);
+    let start_cap = arc(first.p, -left_normal(first.t), -first.t);
+    // 輪郭
+    let mut outline: Vec<Point> = left.clone();
+    outline.extend(&end_cap);
+    outline.extend(right.iter().rev());
+    outline.extend(&start_cap);
+    // メッシュ
+    let mut mesh = Mesh::default();
+    let mut vert = |p: Point| -> u32 {
+        mesh.vertices.push(Vertex {
+            pos: Pos2::new(p.x as f32, p.y as f32),
+            uv: eframe::egui::epaint::WHITE_UV,
+            color,
+        });
+        mesh.vertices.len() as u32 - 1
+    };
+    let side: Vec<(u32, u32)> = left.iter().zip(&right).map(|(&l, &r)| (vert(l), vert(r))).collect();
+    let mut tri: Vec<u32> = Vec::with_capacity(6 * side.len() + 6 * cap_n);
+    for w in side.windows(2) {
+        let ((l0, r0), (l1, r1)) = (w[0], w[1]);
+        tri.extend([l0, r0, l1, r0, r1, l1]);
+    }
+    for (c, from, to, pts) in [
+        (last.p, side[side.len() - 1].0, side[side.len() - 1].1, &end_cap),
+        (first.p, side[0].1, side[0].0, &start_cap),
+    ] {
+        let center = vert(c);
+        let mut prev = from;
+        for &p in pts.iter() {
+            let cur = vert(p);
+            tri.extend([center, prev, cur]);
+            prev = cur;
+        }
+        tri.extend([center, prev, to]);
+    }
+    mesh.indices = tri;
+    (outline, mesh)
+}
+
+/// 2次ベジェ `q` を太らせるための中心線の点（`quad_band`）：点の数は、中心線そのものの弦のずれ（2次
+/// ベジェは n 等分で |p0 − 2·p1 + p2| / (8n²)）と、太らせた輪郭の弦のずれ（曲線が回る角度を、半径 `r` の円弧で弦のずれが
+/// `eps` になる角度 `arc_step` で割った数）の、どちらも `eps` 以内になる数
+fn quad_samples(q: QuadBez, r: f64, eps: f64) -> Vec<Sample> {
+    let (d0, d1) = (q.p1 - q.p0, q.p2 - q.p1);
+    let dd = (d1 - d0).hypot();
+    let turn = if d0.hypot() > 0.0 && d1.hypot() > 0.0 {
+        d0.cross(d1).atan2(d0.dot(d1)).abs()
+    } else {
+        0.0
+    };
+    let n = ((dd / (8.0 * eps)).sqrt().ceil())
+        .max((turn / arc_step(r, eps)).ceil())
+        .max(1.0) as usize;
+    // 端で制御点が端の点と重なる曲線は、そこでの向きを弦の向きにする
+    let chord = normalize_vec(q.p2 - q.p0);
+    (0..=n)
+        .map(|i| {
+            let t = i as f64 / n as f64;
+            let d = crate::vector_engine::quad_deriv(&q, t);
+            Sample {
+                p: q.eval(t),
+                t: if d.hypot() > 0.0 { normalize_vec(d) } else { chord },
+            }
+        })
+        .collect()
+}
+
 /// 鉛筆の線：マウスの点 `points`（文書の座標）から、ブラシと同じなめらかな中心線（`centerline`。丸めの刻み `step`）を作り、
 /// 2次ベジェの並びに当てはめたもの（文書の座標）。当てはめはブラシと同じく画面の px で行う（表示の倍率 `z`。許容
 /// `FIT_TOL_PX`）。点が1つだけなら空
