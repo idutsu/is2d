@@ -138,15 +138,9 @@ pub(crate) fn pick_color_at(host: &mut impl ActionHost, pt: Point) -> Option<Col
     Some(picked)
 }
 
-/// 点 `pt` にいちばん上に見えているのが線なら、その線（図形は上から見て、塗りより先に、その図形の線を見る）
+/// 点 `pt` にいちばん上に見えているのが線なら、その線
 fn topmost_line_at(tab: &Tab, pt: Point) -> Option<crate::planar_map::EdgeStroke> {
-    tab.scene().iter().rev().find_map(|s| match s.outline_at(pt) {
-        Some(o) => Some(Some(crate::planar_map::EdgeStroke {
-            color: o.color,
-            width: o.width,
-        })),
-        None => s.contains_point(pt).then_some(None),
-    })?
+    tab.scene().iter().rev().find(|s| s.contains_point(pt))?.line
 }
 
 /// 進行中のブラシ・消しゴムストロークの増分プレビューメッシュを描画する

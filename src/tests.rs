@@ -28416,7 +28416,7 @@ mod map_overlay {
                 .cel
                 .maps
                 .iter()
-                .flat_map(|m| m.faces().iter().cloned().collect::<Vec<_>>())
+                .flat_map(|m| m.base().faces(&m.group_path).iter().cloned().collect::<Vec<_>>())
                 .filter(|s| s.color == c)
                 .map(|s| s.contours().map(|k| k.signed_area()).sum::<f64>().abs())
                 .sum()
@@ -38206,23 +38206,34 @@ mod strokes {
     }
 
     #[test]
-    fn face_shapes_carry_their_outline_lines() {
+    fn lines_are_their_own_shapes_drawn_after_the_fills() {
         let m = inked_square().checked().unwrap();
         let base = LayerBase::of_stored(&StoredMap::from_dense(m.uniquely_labeled().map(), None));
+        // 正方形の輪郭は、線と線の交わりが無いので、1つのひと区切り（輪）：線の図形は1つ
+        let lines = base.lines(&[]);
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0];
+        assert_eq!((line.color, line.line), (INK.color, Some(INK)));
+        assert!(crate::planar_map::is_line_id(line.shape_id));
+        // 線の太さの半分だけ、輪郭の外と中に広がる（輪の形）
+        let b = line.bounding_box();
+        assert!((b.x0 - 98.0).abs() < 0.05 && (b.x1 - 302.0).abs() < 0.05);
+        assert!(line.contains_point(Point::new(200.0, 99.0)));
+        assert!(line.contains_point(Point::new(200.0, 101.5)));
+        assert!(!line.contains_point(Point::new(200.0, 105.0)));
+        // 面の図形は塗りだけ
         let faces = base.faces(&[]);
         let face = faces.iter().next().unwrap();
-        let outline = face.outline();
-        assert_eq!(outline.len(), 1);
-        assert_eq!((outline[0].color, outline[0].width), (INK.color, INK.width));
-        // 線の太さの半分だけ、図形の外形が広がる
-        let b = face.bounding_box();
-        assert!((b.x0 - 98.0).abs() < 0.05 && (b.x1 - 302.0).abs() < 0.05);
-        // 塗りのメッシュに、線の色の頂点が入る
-        assert!(face.fill_mesh().vertices.iter().any(|v| v.color == INK.color));
-        assert!(face.fill_mesh().vertices.iter().any(|v| v.color == Color32::RED));
-        // 線の上の点（輪郭から 1px 外）で、線が当たる
-        assert!(face.outline_at(Point::new(200.0, 99.0)).is_some());
-        assert!(face.outline_at(Point::new(200.0, 105.0)).is_none());
+        assert!(face.line.is_none());
+        let fb = face.bounding_box();
+        assert!((fb.x0 - 100.0).abs() < 1e-9 && (fb.x1 - 300.0).abs() < 1e-9);
+        // 描く順は、面の図形を全部描いたあとに線の図形
+        let drawn = base.drawn_shapes(&[]);
+        assert_eq!(drawn.len(), 2);
+        assert!(drawn[0].line.is_none() && drawn[1].line.is_some());
+        // 線の番号は形と線で決まる：同じ地図から作り直しても同じ番号
+        let again = LayerBase::of_stored(&StoredMap::from_dense(base.map(), None));
+        assert_eq!(again.lines(&[])[0].shape_id, line.shape_id);
     }
 
     /// 作業中のレイヤーの今のコマの地図の辺
@@ -38241,8 +38252,8 @@ mod strokes {
         assert!(cel_edges(&app).iter().all(|e| e.stroke == Some(INK)));
         // 同じ線でもう一度：替わらない
         assert!(!apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: INK }));
-        // 画面の図形は、輪郭の線を持つ
-        assert!(app.scene().iter().any(|s| !s.outline().is_empty()));
+        // 画面に線の図形がある
+        assert!(app.scene().iter().any(|s| s.line == Some(INK)));
         // 保存して開き直しても、線はそのまま
         let reopened_doc = reopened(&app.doc).unwrap();
         let cel = reopened_doc.root.layers[0].cel_at(0).unwrap();
@@ -38283,9 +38294,9 @@ mod strokes {
             let red = e.left == Some(Color32::RED) || e.right == Some(Color32::RED);
             assert_eq!(e.stroke.is_some(), red);
         }
-        // 共有する境目の線は、両側の面の図形が持つ（あとに描く面の線が、先に描く面の塗りの上に来る）
-        let with_lines = app.scene().iter().filter(|s| !s.outline().is_empty()).count();
-        assert_eq!(with_lines, 2);
+        // 赤の輪郭は、交わりの無い1つのひと区切り（共有する境目の角では、線のある辺が2本だけ）：線の図形は1つ
+        let lines = app.scene().iter().filter(|s| s.line.is_some()).count();
+        assert_eq!(lines, 1);
         // スポイトで線の上を取ると、線の色と太さを拾う
         app.tool.stroke = EdgeStroke {
             color: Color32::WHITE,
@@ -38377,6 +38388,24 @@ mod strokes {
         assert_eq!(m.edges.len(), 1);
         assert_eq!((m.edges[0].left, m.edges[0].right, m.edges[0].stroke), (None, None, Some(INK)));
         assert!(m.faces().0.is_empty());
+        // 何も無い所の線も、線の図形として画面に出る
+        assert_eq!(app.scene().iter().filter(|s| s.line == Some(INK)).count(), 1);
+        // 離れた所にもう1本引き、1本目の上をブラシで塗る：触っていない2本目の線の図形は、作り直さずに使い回す
+        let far = line(Point::new(500.0, 400.0), Point::new(700.0, 450.0), INK);
+        assert!(apply(&mut app, Action::DrawLines { segs: vec![far] }));
+        let lines_of = |app: &Is2dApp| {
+            let tl = app.tab().active_timeline();
+            let cel = tl.layers[0].cel_at(0).unwrap();
+            cel.maps[0].base().lines(&[])
+        };
+        let before = lines_of(&app);
+        let kept = before.iter().find(|s| s.bounding_box().y0 > 300.0).unwrap().clone();
+        apply(&mut app, Action::SetTool { tool: Tool::Brush });
+        app.tool.brush_color = Color32::BLUE;
+        commit_brush_line(&mut app, &brush_line(&[Point::new(600.0, 100.0), Point::new(600.0, 160.0)], 12.0));
+        let after = lines_of(&app);
+        assert_eq!(after.len(), 3);
+        assert!(after.iter().any(|s| std::sync::Arc::ptr_eq(s, &kept)));
         // 赤い正方形を横切る線：赤が2つの面に分かれ、正方形の外の線は何も無い所の線になる
         let mut app = Is2dApp::default();
         put_cel_shapes(&mut app, 0, 0, vec![rect(100.0, 100.0, 300.0, 300.0, Color32::RED)]);

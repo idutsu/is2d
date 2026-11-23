@@ -206,15 +206,22 @@ pub(crate) struct Origin {
 
 impl Origin {
     /// セル画の地図 `cel` を残りの地図にする1本の道の答え `w`（`LayerBase::replace_local`）から：消した図形が隠す図形、
-    /// 入れた図形が残りの図形。升目の索引は、セル画の写しから変わった所だけ作る。答えが変わらない（セル画の地図のまま）
-    /// ときは、使う側が残りを持たない
+    /// 入れた図形が残りの図形。線の図形は、セル画の線のうち残りの地図に無いものが隠す図形、残りの地図の線のうちセル画に
+    /// 無いものが残りの図形（線の番号は形と線で決まる：`LayerBase::lines`）。升目の索引は、セル画の写しから変わった所だけ
+    /// 作る。答えが変わらない（セル画の地図のまま）ときは、使う側が残りを持たない
     fn of_local(w: LocalWrite, cel: &LayerBase, scope: &[u64]) -> Self {
         let base = LayerBase::of_local(w.stored, scope, w.faces, cel);
+        let ids = |b: &LayerBase| -> HashSet<ShapeId> { b.lines(scope).iter().map(|s| s.shape_id).collect() };
+        let (cel_lines, rest_lines) = (ids(cel), ids(&base));
+        let mut hidden = w.removed;
+        hidden.extend(cel_lines.difference(&rest_lines));
+        let mut remainder = w.added;
+        remainder.extend(rest_lines.difference(&cel_lines));
         Self {
             rest: base.stored.clone(),
             held: Some(base),
-            hidden: w.removed,
-            remainder: w.added,
+            hidden,
+            remainder,
         }
     }
 
@@ -367,9 +374,9 @@ impl Floating {
                 self.hidden.extend(o.hidden.iter().copied());
                 let at = Placement::RawOf(layer_id, scope.to_vec());
                 let added: HashSet<ShapeId> = o.remainder.iter().copied().collect();
-                for f in o.hold().faces(scope).iter() {
+                for f in o.hold().drawn_shapes(scope) {
                     if added.contains(&f.shape_id) {
-                        let mut s = (**f).clone();
+                        let mut s = (*f).clone();
                         s.layer_id = layer_id;
                         s.place(world);
                         self.remainder.push((at.clone(), s));
@@ -377,8 +384,8 @@ impl Floating {
                 }
             }
             for g in &mut l.groups {
-                for f in g.hold().faces(scope).iter() {
-                    let mut s = (**f).clone();
+                for f in g.hold().drawn_shapes(scope) {
+                    let mut s = (*f).clone();
                     s.layer_id = layer_id;
                     if g.xform != Affine::IDENTITY {
                         s.transform(g.xform);

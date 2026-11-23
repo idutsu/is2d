@@ -1239,10 +1239,9 @@ impl LocalMap<'_> {
             .iter()
             .map(|&e| (quad_key(&self.base_edge(e).quad()), e))
             .collect();
-        // 増えた辺の形 → その線
-        let added_keys: IntMap<[u64; 6], Option<EdgeStroke>> = self
+        let added_keys: IntSet<[u64; 6]> = self
             .added_edges()
-            .map(|e| (quad_key(&self.quad(e)), self.edge(e).stroke))
+            .map(|e| quad_key(&self.quad(e)))
             .collect();
         let same =
             |e: usize| e < self.n_base() || removed_keys.contains_key(&quad_key(&self.quad(e)));
@@ -1261,12 +1260,11 @@ impl LocalMap<'_> {
                 te.right_src
             }
         };
-        // 辺が消えた元の図形（形が同じ辺が増えても、線が替わったなら消えたとみなす：面の図形は輪郭の線も持つので、
-        // 作り直す。インクボトル）
+        // 辺が消えた元の図形
         let mut cut: IntSet<ShapeId> = Default::default();
         for (k, &e) in &removed_keys {
-            let ed = self.base_edge(e);
-            if added_keys.get(k) != Some(&ed.stroke) {
+            if !added_keys.contains(k) {
+                let ed = self.base_edge(e);
                 cut.extend(ed.left_src);
                 cut.extend(ed.right_src);
             }
@@ -1367,12 +1365,11 @@ impl LocalMap<'_> {
                         .iter()
                         .map(|&(e, forward)| {
                             let q = self.quad(e);
-                            let q = if forward {
+                            if forward {
                                 q
                             } else {
                                 QuadBez::new(q.p2, q.p1, q.p0)
-                            };
-                            (q, self.edge(e).stroke)
+                            }
                         })
                         .collect()
                 });

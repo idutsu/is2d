@@ -391,6 +391,26 @@ impl StoredMap {
         })
     }
 
+    /// 線を乗せた辺（塊の順。線の図形を作る：`LayerBase::lines`）
+    pub(crate) fn stroked_edges(&self) -> Vec<TileEdge> {
+        self.0
+            .tiles
+            .iter()
+            .flat_map(|t| t.iter())
+            .filter(|se| se.stroke.is_some())
+            .map(|se| TileEdge {
+                a: se.a,
+                b: se.b,
+                ctrl: se.ctrl,
+                left: se.left,
+                right: se.right,
+                left_src: se.left_src.map(NonZeroU64::get),
+                right_src: se.right_src.map(NonZeroU64::get),
+                stroke: se.stroke,
+            })
+            .collect()
+    }
+
     /// 計算に使う地図（`to_dense`）の辺 `e` を、塊から引く（両端は座標で。向きはしまう辺の向きで、`to_dense` の辺と同じ。
     /// 写しの通し番号の一覧を作らずに辺を引く：設計 段2b の 7. の 2b-7a）
     pub(crate) fn edge_at(&self, e: usize) -> TileEdge {

@@ -166,11 +166,7 @@ fn paint_frame(
             if shape.is_empty_symbol_marker() {
                 continue;
             }
-            // 塗り、続けて輪郭に乗せた線（画面のメッシュと同じ順）
             fill_contours(&mut pixmap, shape.contours(), shape.color, (origin_x, origin_y));
-            for o in shape.outline() {
-                fill_contours(&mut pixmap, o.rings.iter(), o.color, (origin_x, origin_y));
-            }
         }
     }
 
