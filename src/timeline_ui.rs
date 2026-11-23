@@ -136,7 +136,20 @@ pub(crate) enum TimelineGridDrag {
         from: usize,
         frame: usize,
     },
+    /// オニオンスキンの範囲の端のドラッグ（`Prev` は前の範囲の左端、`Next` は後ろの範囲の右端）。今のコマから端までの
+    /// コマ数を、ドラッグに合わせて変える（表示の設定なので、文書も Undo も変えない）
+    OnionEdge(OnionSide),
 }
+
+/// オニオンスキンの範囲のどちらの端か
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OnionSide {
+    Prev,
+    Next,
+}
+
+/// オニオンスキンで透かす前後のコマ数の上限
+const ONION_MAX_FRAMES: usize = 10;
 
 /// タイムラインの識別キー `(doc_id, edit_stack_len, active_symbol_id)`（`timeline_key`）
 type TimelineKey = (u64, usize, Option<u64>);
@@ -540,10 +553,12 @@ fn start_layer_rename(
     let (id, chars) = (layer_rename_id(layer.id), layer.name.chars().count());
     let key = (timeline_key(host.tab()), layer.id);
     let mut state = egui::text_edit::TextEditState::default();
-    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-        egui::text::CCursor::new(0),
-        egui::text::CCursor::new(chars),
-    )));
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(chars),
+        )));
     state.store(ctx, id);
     ctx.memory_mut(|m| m.request_focus(id));
     finish_layer_rename(host);
@@ -552,7 +567,11 @@ fn start_layer_rename(
 
 /// 名前を書き換えているレイヤーの行に入力欄を出し、打つそばから名前を変える（`Action::RenameLayer`）。入力欄から離れたか、
 /// そのレイヤーが今のタイムラインに無いか、行が見えていなければ終える
-fn draw_layer_rename_field(host: &mut impl TimelineHost, ui: &mut egui::Ui, layout: &TimelineLayout) {
+fn draw_layer_rename_field(
+    host: &mut impl TimelineHost,
+    ui: &mut egui::Ui,
+    layout: &TimelineLayout,
+) {
     let Some((key, layer_id)) = host.timeline_ui().renaming_layer else {
         return;
     };
@@ -580,7 +599,13 @@ fn draw_layer_rename_field(host: &mut impl TimelineHost, ui: &mut egui::Ui, layo
             .desired_width(rect.width()),
     );
     if resp.changed() {
-        apply(host, Action::RenameLayer { layer_id, new_name: name });
+        apply(
+            host,
+            Action::RenameLayer {
+                layer_id,
+                new_name: name,
+            },
+        );
     }
     if resp.lost_focus() {
         finish_layer_rename(host);
@@ -801,26 +826,6 @@ fn draw_control_bar_onion_controls(tab: &mut Tab, ui: &mut egui::Ui) {
     {
         tab.view.onion_skin_enabled = !tab.view.onion_skin_enabled;
     }
-    if tab.view.onion_skin_enabled {
-        for (label, frames) in [
-            ("前:", &mut tab.view.onion_prev_frames),
-            ("後:", &mut tab.view.onion_next_frames),
-        ] {
-            let mut n = *frames as u32;
-            ui.label(label);
-            if ui
-                .add(
-                    egui::DragValue::new(&mut n)
-                        .range(0..=10)
-                        .update_while_editing(false)
-                        .speed(0.1),
-                )
-                .changed()
-            {
-                *frames = n as usize;
-            }
-        }
-    }
 }
 
 /// 2. マウスホイールによるタイムライン横・縦スクロール更新と範囲クランプ
@@ -877,7 +882,7 @@ fn handle_timeline_pointer_input(
 ) -> Option<(usize, usize, Pos2)> {
     let (primary_pressed, shift_held) =
         ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift));
-    let handle_w = sound_handle_width(ui.ctx());
+    let handle_w = handle_width(ui.ctx());
     if response.hovered() && primary_pressed {
         if let Some(pos) = pointer_pos {
             handle_timeline_click_start(host, layout, pos, alt_held, shift_held, handle_w);
@@ -986,6 +991,12 @@ fn handle_timeline_click_start(
                     return;
                 }
             }
+        }
+
+        // オニオンスキンの範囲の端のつまみ：ルーラーのスクラブより先に見る
+        if let Some(side) = onion_handle_at(host, layout, pos, handle_w) {
+            host.timeline_ui_mut().grid_drag = TimelineGridDrag::OnionEdge(side);
+            return;
         }
 
         // 音の波形の端のつまみ：コマの選択・移動より先に見るので、つまみの細い範囲の上だけはつまみが優先される
@@ -1189,6 +1200,26 @@ fn update_timeline_grid_drag(
                 host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
             }
         }
+        TimelineGridDrag::OnionEdge(side) => {
+            if !primary_down {
+                host.timeline_ui_mut().grid_drag = TimelineGridDrag::None;
+            } else if let Some(pos) = pointer_pos {
+                // マウスにいちばん近いコマの境目までの、今のコマからのコマ数（上限 `ONION_MAX_FRAMES`）
+                let scroll_x = host.timeline_ui().scroll_x;
+                let boundary = layout.frame_at_x(pos.x + CELL_W * 0.5, scroll_x);
+                let cf = host.tab().active_timeline().current_frame;
+                let view = &mut host.tab_mut().view;
+                match side {
+                    OnionSide::Prev => {
+                        view.onion_prev_frames = cf.saturating_sub(boundary).min(ONION_MAX_FRAMES);
+                    }
+                    OnionSide::Next => {
+                        view.onion_next_frames =
+                            boundary.saturating_sub(cf + 1).min(ONION_MAX_FRAMES);
+                    }
+                }
+            }
+        }
         TimelineGridDrag::TrimSound {
             layer,
             kf_start,
@@ -1325,15 +1356,18 @@ fn update_timeline_cursor_icon(
     is_dragging_layer: bool,
     handle_w: f32,
 ) {
-    let on_sound_handle = || {
+    let on_handle = || {
         matches!(host.timeline_ui().grid_drag, TimelineGridDrag::None)
             && host.timeline_ui().dragging_layer.is_none()
-            && hover_pos.is_some_and(|p| sound_handle_at(host, layout, p, handle_w).is_some())
+            && hover_pos.is_some_and(|p| {
+                onion_handle_at(host, layout, p, handle_w).is_some()
+                    || sound_handle_at(host, layout, p, handle_w).is_some()
+            })
     };
     if matches!(
         host.timeline_ui().grid_drag,
-        TimelineGridDrag::TrimSound { .. }
-    ) || on_sound_handle()
+        TimelineGridDrag::TrimSound { .. } | TimelineGridDrag::OnionEdge(_)
+    ) || on_handle()
     {
         ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     } else if let TimelineGridDrag::MoveFrames {
@@ -1365,14 +1399,43 @@ fn update_timeline_cursor_icon(
     }
 }
 
-/// 音の波形の端のつまみの幅（画面の px）：egui が窓・パネルの端をつかんで大きさを変える所の幅
+/// 音の波形の端・オニオンスキンの範囲の端のつまみの幅（画面の px）：egui が窓・パネルの端をつかんで大きさを変える所の幅
 /// （`resize_grab_radius_side`）と同じにして、どこでも同じ手ざわりにする（タイムラインの拡大・縮小によらない）。つまみは
 /// 波形の内側に置き、波形はいちばん短くて1コマ（`CELL_W`）なので、左右のつまみが重ならないよう1コマの半分を越えない
-fn sound_handle_width(ctx: &egui::Context) -> f32 {
+fn handle_width(ctx: &egui::Context) -> f32 {
     ctx.style()
         .interaction
         .resize_grab_radius_side
         .min(CELL_W * 0.5)
+}
+
+/// 位置 `pos`（ルーラーの上）にある、オニオンスキンの範囲の端のつまみ。つまみは、前の範囲の左端と後ろの範囲の右端の
+/// コマの境目から、左右に幅 `handle_w` の所（範囲が 0 コマなら、今のコマの左右の境目）。オニオンスキンが切りのときは無い
+fn onion_handle_at(
+    host: &impl TimelineHost,
+    layout: &TimelineLayout,
+    pos: Pos2,
+    handle_w: f32,
+) -> Option<OnionSide> {
+    let tab = host.tab();
+    if !tab.view.onion_skin_enabled || pos.y >= layout.grid_top || pos.x < layout.grid_left {
+        return None;
+    }
+    let (cf, scroll_x) = (
+        tab.active_timeline().current_frame,
+        host.timeline_ui().scroll_x,
+    );
+    let edges = [
+        (
+            OnionSide::Prev,
+            cf.saturating_sub(tab.view.onion_prev_frames),
+        ),
+        (OnionSide::Next, cf + 1 + tab.view.onion_next_frames),
+    ];
+    edges
+        .into_iter()
+        .find(|&(_, b)| (pos.x - layout.frame_x(b, scroll_x)).abs() <= handle_w)
+        .map(|(side, _)| side)
 }
 
 /// 位置 `pos` にある、音の波形の端のつまみ `(レイヤー, キーフレームの始まりのコマ, 端, 端のコマの境目)`。つまみは、
@@ -1897,7 +1960,8 @@ fn draw_timeline_ruler(
                 Color32::from_rgba_unmultiplied(45, 125, 240, 65),
             );
         }
-        let next_end = (cf + tab.view.onion_next_frames).min(tl.total_frames.saturating_sub(1));
+        // 範囲は、端のつまみ（`onion_handle_at`）と同じ所まで描く（タイムラインの終わりを越えた分は透かす絵が無い）
+        let next_end = cf + tab.view.onion_next_frames;
         if next_end > cf {
             ruler_painter.rect_filled(
                 Rect::from_min_max(

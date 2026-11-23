@@ -972,14 +972,7 @@ fn draw_color_palette_section(tool: &mut ToolSettings, ui: &mut egui::Ui) {
         }
     });
     ui.add_space(4.0);
-    let prev_slider_w = ui.spacing().slider_width;
-    ui.spacing_mut().slider_width = ui.available_width();
-    egui::color_picker::color_picker_color32(
-        ui,
-        &mut tool.brush_color,
-        egui::color_picker::Alpha::OnlyBlend,
-    );
-    ui.spacing_mut().slider_width = prev_slider_w;
+    crate::color_picker::color_picker(ui, &mut tool.brush_color);
 }
 
 /// 「キャンバス」タブの描画（ステージサイズ・枠外マスク・ウィンドウに合わせる・表示倍率リセット）

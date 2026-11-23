@@ -4,6 +4,7 @@ mod audio_out;
 mod canvas_tool;
 mod chunked_list;
 mod clipboard_ops;
+mod color_picker;
 mod doc_actions;
 mod floating;
 mod map_hover;
