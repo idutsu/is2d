@@ -2729,7 +2729,7 @@ impl LayerBase {
         };
         let mut shapes: Vec<Arc<FillShape>> = stroked
             .iter()
-            .filter_map(|(_, te)| line_shape(te, line_ends(te, &others), line_id_of(te)?, group_path).map(Arc::new))
+            .filter_map(|(_, te)| line_shape(te, line_ends(te, others), line_id_of(te)?, group_path).map(Arc::new))
             .collect();
         shapes.sort_unstable_by_key(|s| s.shape_id);
         shapes.dedup_by_key(|s| s.shape_id);
