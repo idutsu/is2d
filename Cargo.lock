@@ -1680,6 +1680,7 @@ name = "is2d"
 version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
+ "coreaudio-sys",
  "cpal",
  "crc32fast",
  "eframe",

@@ -33,6 +33,9 @@ objc2-core-media = { version = "=0.3.2", default-features = false, features = ["
 objc2-core-audio-types = { version = "=0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-core-video = { version = "=0.3.2", default-features = false, features = ["std", "objc2", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
 block2 = "=0.6.2"
+# 音の出力の装置の遅れ（装置・安全分・流れの遅れ）を OS に聞く（再生のコマを、耳に届いた音に合わせる：src/audio_out.rs）。
+# cpal がもう使っている版と機能にそろえ、増やさない
+coreaudio-sys = { version = "=0.2.18", default-features = false, features = ["core_audio"] }
 
 [target.'cfg(windows)'.dependencies]
 # 動画の書き出し（Media Foundation の書き込む係 IMFSinkWriter で、H.264・AAC の MP4 を書く：src/video_export_windows.rs）と、

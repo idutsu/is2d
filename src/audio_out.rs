@@ -2,8 +2,9 @@
 //! の 5 章
 //!
 //! 鳴らす中身（`Job`：文書の写しと、タイムラインのどこからどこまで）を1つ持つ。出力の装置が次の分を求めるたびに
-//! `sound::mix` で作って渡し、渡した数を共有の数（`Shared::played`）に足す。再生のコマは、画面がこの数から決める
-//! （`AudioOut::position` → `sound::frame_at`）。装置が使えないときは、同じ数を画面の時刻で同じ速さに進める
+//! `sound::mix` で作って渡し、渡した数を共有の数（`Shared::played`）に足す。再生のコマは、画面がこの数から、まだ耳に
+//! 届いていない数（`Shared::ahead`：渡した分と、出力の遅れ）を引いた、鳴った所から決める（`AudioOut::position` →
+//! `sound::frame_at`。Bluetooth など遅れの大きい出力でも、絵が耳に届く音より先に進まない）。装置が使えないときは、同じ数を画面の時刻で同じ速さに進める
 //! （`Output::Clock`。鳴らさない）ので、コマの決め方は装置の有る無しによらず1つ
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -120,6 +121,9 @@ struct Shared {
     job: Mutex<Option<Job>>,
     /// 今の中身を鳴らし始めてから、装置に渡したサンプルの数（音の時計）
     played: AtomicU64,
+    /// 渡した数のうち、最後に装置が求めたときにまだ耳に届いていなかった数：そのとき渡した分と、装置がその分を鳴らし
+    /// 始めるまで（cpal が知らせる）と、装置が受け取ってから耳に届くまで（OS が知らせる：`output_latency`）
+    ahead: AtomicU64,
     /// 中身を鳴らし終え、渡した分が装置で鳴り終わった（画面が見て装置を止める：止めないと、無音でも Mac がスリープ
     /// しない）
     idle: AtomicBool,
@@ -135,6 +139,7 @@ impl Shared {
             rate,
             job: Mutex::new(None),
             played: AtomicU64::new(0),
+            ahead: AtomicU64::new(0),
             idle: AtomicBool::new(false),
             failed: Mutex::new(None),
             wake,
@@ -145,10 +150,11 @@ impl Shared {
         self.job.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// 装置が次の `out`（左・右…）を求めたとき：今の中身で埋め、渡した数を進める。`idle_after` は範囲の音で埋めた数を
+    /// 装置が次の `out`（左・右…）を求めたとき：今の中身で埋め、渡した数を進める。`delay` は、渡す分を装置が鳴らし始めて
+    /// から耳に届くまでのサンプルの数（まだ耳に届いていない数は、これと渡す分の和）。`idle_after` は範囲の音で埋めた数を
     /// 受けて、もう鳴り終わったかを返す。中身を取り替える所（`AudioOut::play`）と食い違わないよう、ここまでを中身の鍵の
     /// 中で行う
-    fn render(&self, out: &mut [f32], idle_after: impl FnOnce(usize) -> bool) {
+    fn render(&self, out: &mut [f32], delay: u64, idle_after: impl FnOnce(usize) -> bool) {
         let job = self.job();
         let played = self.played.load(Ordering::Relaxed);
         let covered = match &*job {
@@ -158,6 +164,8 @@ impl Shared {
                 0
             }
         };
+        self.ahead
+            .store(delay + (out.len() / 2) as u64, Ordering::Relaxed);
         self.played
             .store(played + (out.len() / 2) as u64, Ordering::Relaxed);
         if idle_after(covered) && !self.idle.swap(true, Ordering::Relaxed) {
@@ -271,8 +279,9 @@ impl AudioOut {
         *self.shared.job() = None;
     }
 
-    /// 今の中身を鳴らしている所の、タイムラインのサンプルの番号（再生のコマはここから：`sound::frame_at`）。中身が
-    /// 無いか、くり返さずに鳴らし終えていれば `None`。`now` は画面の時刻（秒。時計で数えるときだけ使う）
+    /// 今の中身の、耳に届いた所の、タイムラインのサンプルの番号（再生のコマはここから：`sound::frame_at`）：渡した数から、
+    /// まだ耳に届いていない数を引いた所（鳴らし始めてすぐ、まだ何も届いていない間は、鳴らし始めた所）。中身が無いか、
+    /// くり返さずに鳴らし終えていれば `None`。`now` は画面の時刻（秒。時計で数えるときだけ使う。時計には遅れが無い）
     pub(crate) fn position(&mut self, now: f64) -> Option<u64> {
         let rate = f64::from(self.rate());
         if let Output::Clock { since, base } = &mut self.output {
@@ -280,8 +289,9 @@ impl AudioOut {
             let n = *base + (elapsed * rate).floor() as u64;
             self.shared.played.store(n, Ordering::Relaxed);
         }
+        let ahead = self.shared.ahead.load(Ordering::Relaxed);
         self.span?
-            .position(self.shared.played.load(Ordering::Relaxed))
+            .position(self.shared.played.load(Ordering::Relaxed).saturating_sub(ahead))
     }
 
     /// 画面の毎コマ：装置が鳴り終わっていれば止め、装置が使えなくなっていれば時計に切り替えて、わけを返す（1回だけ）
@@ -294,9 +304,11 @@ impl AudioOut {
             .take();
         if let Some(why) = failed {
             if matches!(self.output, Output::Device(_)) {
+                // 時計は耳に届いた所から続ける（時計には遅れが無い）
+                let ahead = self.shared.ahead.swap(0, Ordering::Relaxed);
                 self.output = Output::Clock {
                     since: None,
-                    base: self.shared.played.load(Ordering::Relaxed),
+                    base: self.shared.played.load(Ordering::Relaxed).saturating_sub(ahead),
                 };
                 self.running = false;
             }
@@ -327,10 +339,11 @@ fn open_device(ctx: &egui::Context) -> Result<(Arc<Shared>, cpal::Stream), Strin
     let format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
     let shared = Arc::new(Shared::new(config.sample_rate.0, Some(ctx.clone())));
+    let latency = output_latency();
     let stream = match format {
-        cpal::SampleFormat::F32 => build::<f32>(&device, &config, &shared),
-        cpal::SampleFormat::I16 => build::<i16>(&device, &config, &shared),
-        cpal::SampleFormat::U16 => build::<u16>(&device, &config, &shared),
+        cpal::SampleFormat::F32 => build::<f32>(&device, &config, &shared, latency),
+        cpal::SampleFormat::I16 => build::<i16>(&device, &config, &shared, latency),
+        cpal::SampleFormat::U16 => build::<u16>(&device, &config, &shared, latency),
         f => return Err(format!("サンプルの形 {f} に対応していません")),
     }
     .map_err(|e| e.to_string())?;
@@ -340,11 +353,13 @@ fn open_device(ctx: &egui::Context) -> Result<(Arc<Shared>, cpal::Stream), Strin
 
 /// サンプルの形 `T` の出力を作る。装置が求めるたびに `Shared::render` で左右の波形を作り、装置の音の数に合わせて書く
 /// （1つなら左右の平均、2つ以上なら前の2つに左右、残りは無音）。鳴り終わりは、範囲の音の後ろの無音が装置で鳴り始める
-/// 時刻（装置が知らせる、渡した分を鳴らす時刻から）を、装置が次を求める時刻が過ぎたときとする
+/// 時刻（装置が知らせる、渡した分を鳴らす時刻から）を、装置が次を求める時刻が過ぎたときとする。`latency` は、装置が
+/// 受け取ってから耳に届くまでのサンプルの数（`output_latency`）
 fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     shared: &Arc<Shared>,
+    latency: u64,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     use cpal::traits::DeviceTrait;
     let channels = usize::from(config.channels.max(1));
@@ -358,7 +373,10 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
             let frames = data.len() / channels;
             stereo.resize(2 * frames, 0.0);
             let ts = info.timestamp();
-            render.render(&mut stereo, |covered| {
+            // 渡す分を装置が鳴らし始めるまで（cpal が知らせる）と、耳に届くまで
+            let start = ts.playback.duration_since(&ts.callback).unwrap_or_default();
+            let delay = (start.as_secs_f64() * rate).round() as u64 + latency;
+            render.render(&mut stereo, delay, |covered| {
                 if covered > 0 || quiet_from.is_none() {
                     quiet_from = ts
                         .playback
@@ -380,4 +398,60 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
         move |e| fail.fail(e.to_string()),
         None,
     )
+}
+
+/// 既定の出力の装置が受け取った音が耳に届くまでのサンプルの数（装置の速さで。macOS が知らせる、装置の遅れ・安全分・
+/// 最初の出力の流れの遅れの和。Bluetooth の装置では大きい。cpal が開く既定の出力の装置と同じものを聞く）。聞けなければ 0
+#[cfg(target_os = "macos")]
+fn output_latency() -> u64 {
+    use coreaudio_sys::{
+        kAudioDevicePropertyLatency, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyStreams,
+        kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyElementMain,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
+        kAudioStreamPropertyLatency, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
+        AudioObjectID, AudioObjectPropertyAddress,
+    };
+    let addr = |selector: u32, scope: u32| AudioObjectPropertyAddress {
+        mSelector: selector,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    // 物 `obj` の性質 `a` の、32 ビットの値の並び
+    let get = |obj: AudioObjectID, a: AudioObjectPropertyAddress| -> Vec<u32> {
+        let mut size = 0u32;
+        // SAFETY: 性質の大きさを聞くだけ（書く先は `size`）
+        if unsafe { AudioObjectGetPropertyDataSize(obj, &a, 0, std::ptr::null(), &mut size) } != 0 {
+            return Vec::new();
+        }
+        let mut v = vec![0u32; size as usize / std::mem::size_of::<u32>()];
+        let mut size = (v.len() * std::mem::size_of::<u32>()) as u32;
+        // SAFETY: 書く先は `v`（`size` バイト）
+        let st = unsafe {
+            AudioObjectGetPropertyData(obj, &a, 0, std::ptr::null(), &mut size, v.as_mut_ptr().cast())
+        };
+        if st != 0 {
+            return Vec::new();
+        }
+        v.truncate(size as usize / std::mem::size_of::<u32>());
+        v
+    };
+    let (global, out) = (kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeOutput);
+    let Some(&device) = get(kAudioObjectSystemObject, addr(kAudioHardwarePropertyDefaultOutputDevice, global)).first()
+    else {
+        return 0;
+    };
+    let first = |v: Vec<u32>| u64::from(v.first().copied().unwrap_or(0));
+    let stream = get(device, addr(kAudioDevicePropertyStreams, out))
+        .first()
+        .map_or(0, |&s| first(get(s, addr(kAudioStreamPropertyLatency, global))));
+    first(get(device, addr(kAudioDevicePropertyLatency, out)))
+        + first(get(device, addr(kAudioDevicePropertySafetyOffset, out)))
+        + stream
+}
+
+/// macOS のほかでは、装置が受け取ってから耳に届くまでの遅れを OS に聞かない（0。cpal が知らせる、装置が鳴らし始める
+/// までだけを数える）
+#[cfg(not(target_os = "macos"))]
+fn output_latency() -> u64 {
+    0
 }
