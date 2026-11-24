@@ -20511,6 +20511,60 @@ fn test_cross_tab_symbol_roundtrip_paste_reuses_original_symbol() {
     assert_eq!(app.doc.library.len(), 1);
 }
 
+/// レビュー d91cd4c の N-3001：スポイトは、ロックの有無によらず、点でいちばん手前に見えているものを吸う。見えているのが
+/// 線なら線の色と太さを線の設定に、塗りなら塗りの色に（前は、線かどうかをロック中のレイヤーを含まない画面の図形だけで
+/// 決めたので、ロックした上の塗りの下の線を吸い、ロックしたレイヤーの線の色を塗りの色に入れていた）
+#[test]
+fn the_eyedropper_picks_what_is_seen_even_with_locked_layers() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::EdgeStroke;
+    let green = EdgeStroke { color: Color32::from_rgb(40, 180, 90), width: 6 };
+    let red = Color32::from_rgb(235, 75, 75);
+    let white = Color32::WHITE;
+    let default_stroke = EdgeStroke { color: Color32::BLACK, width: 2 };
+    // 下のレイヤー 0：緑の線（太さ 6）。上のレイヤー 1：線を覆う赤い塗り
+    let setup = || {
+        let mut app = Is2dApp::default();
+        apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+        let line: Vec<Point> = (0..=100).map(|i| Point::new(100.0 + 3.0 * i as f64, 200.0)).collect();
+        assert!(apply(&mut app, Action::PencilStroke { points: line, stroke: green }));
+        apply(&mut app, Action::AddLayer);
+        let top = app.tab().active_timeline().active_layer;
+        put_cel_shapes(&mut app, top, 0, vec![map_overlay::rect_shape(150.0, 150.0, 300.0, 250.0, red)]);
+        app.tool.brush_color = white;
+        app.tool.stroke = default_stroke;
+        (app, top)
+    };
+    let on_line_under_fill = Point::new(200.0, 200.0);
+    let on_line_alone = Point::new(350.0, 200.0);
+    for lock_top in [false, true] {
+        let (mut app, top) = setup();
+        app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[top].locked = lock_top);
+        assert_eq!(tool_paint::pick_color_at(&mut app, on_line_under_fill), Some(red), "上をロック {lock_top}");
+        assert_eq!(app.tool.brush_color, red, "上をロック {lock_top}：見えている赤い塗りを吸わない");
+        assert_eq!(app.tool.stroke, default_stroke, "上をロック {lock_top}：隠れている線を吸った");
+    }
+    // 線のレイヤーをロックする：線の上なら、線の色と太さを線の設定に吸う（塗りの色は変えない）。線がグループやシンボルの
+    // 中にあっても同じ（ロック中のレイヤーの図形は、描くのと同じ写しからたどる）
+    for wrap in [None, Some(Action::Group), Some(Action::ConvertToSymbol)] {
+        let (mut app, top) = setup();
+        if let Some(wrap) = wrap.clone() {
+            // 下のレイヤーの線だけを選んで包む（上のレイヤーは、包む間だけロック）
+            app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[top].locked = true);
+            timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+            apply(&mut app, Action::SetTool { tool: Tool::Select });
+            assert!(apply(&mut app, Action::SelectAll));
+            assert!(apply(&mut app, wrap));
+            apply(&mut app, Action::Deselect);
+            app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[top].locked = false);
+        }
+        app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[0].locked = true);
+        assert_eq!(tool_paint::pick_color_at(&mut app, on_line_alone), Some(green.color), "{wrap:?}");
+        assert_eq!(app.tool.stroke, green, "{wrap:?}：ロックしたレイヤーの線の色と太さを吸わない");
+        assert_eq!(app.tool.brush_color, white, "{wrap:?}：ロックしたレイヤーの線の色を塗りの色に入れた");
+    }
+}
+
 /// 先読みのテスト用：レイヤー 0 のコマ 0・3・6・9 にキーフレームを打ち、それぞれに違う四角を置いたアプリ（12 コマ）
 fn app_with_cels_every_three_frames() -> Is2dApp {
     let mut app = Is2dApp::default();

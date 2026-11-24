@@ -2498,19 +2498,19 @@ impl Tab {
         self.cel_screen_mesh(&self.session.cel_cache, layer_idx, frame, (zoom, pan), tint)
     }
 
-    /// ロック中のレイヤー `layer_idx` のコマ `frame` のセル画の、点 `pt`（ステージの座標）で見えている色（描くのと同じ写し
-    /// の図形を、上に描くものから順に点の内外の判定でたどる：`CelMeshCache::color_at`）
-    pub(crate) fn cached_cel_color_at(
+    /// ロック中のレイヤー `layer_idx` のコマ `frame` のセル画の、点 `pt`（ステージの座標）で見えているもの（色と、線なら
+    /// その線。描くのと同じ写しの図形を、上に描くものから順に点の内外の判定でたどる：`CelMeshCache::seen_at`）
+    pub(crate) fn cached_cel_seen_at(
         &self,
         layer_idx: usize,
         frame: usize,
         pt: Point,
-    ) -> Option<Color32> {
+    ) -> Option<(Color32, Option<crate::planar_map::EdgeStroke>)> {
         let tl = self.active_timeline();
         let world_xform = self.session.edit_path.world_xform();
         let scope = self.active_cel_scope();
         self.with_symbol_eval(|ctx| {
-            self.session.cel_cache.lock().color_at(
+            self.session.cel_cache.lock().seen_at(
                 tl,
                 scope,
                 ctx,

@@ -391,10 +391,10 @@ impl CelMeshCache {
     }
 
     /// 所 `scope` のタイムライン `tl` の、レイヤー `layer_idx` のコマ `frame` のセル画を変換 `world_xform` で置いたとき、点
-    /// `pt`（ステージの座標）で見えている色：描くのと同じ写し（`screen_mesh`。無ければ作る）の図形を、上に描くものから
-    /// 順に、点の内外の判定 `FillShape::contains_point` でたどる
+    /// `pt`（ステージの座標）で見えているもの（色と、線ならその線）：描くのと同じ写し（`screen_mesh`。無ければ作る）の
+    /// 図形を、上に描くものから順に、点の内外の判定 `FillShape::contains_point` でたどる
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn color_at(
+    pub(crate) fn seen_at(
         &mut self,
         tl: &Timeline,
         scope: CelScope,
@@ -403,14 +403,14 @@ impl CelMeshCache {
         frame: usize,
         world_xform: Affine,
         pt: Point,
-    ) -> Option<Color32> {
+    ) -> Option<(Color32, Option<crate::planar_map::EdgeStroke>)> {
         let idx = self.entry_index(tl, scope, ctx, layer_idx, frame, world_xform)?;
         self.entries[idx]
             .shapes
             .iter()
             .rev()
             .find(|s| s.contains_point(pt))
-            .map(|s| s.color)
+            .map(|s| (s.color, s.line))
     }
 
     /// 写しの番号（無ければワールド座標の結合メッシュを作って入れる）。この描画で使った印を付ける

@@ -121,24 +121,18 @@ pub(crate) fn handle_brush_or_eraser_input(
 
 /// 編集スコープおよび表示中の全レイヤーを対象に、指定座標 `pt` にヒットする最前面シェイプの色を返す（スポイト用）
 pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> {
-    topmost_visible_at(tab, pt).map(|(_, color)| color)
+    topmost_visible_at(tab, pt).map(|h| h.color)
 }
 
-/// スポイトツール（色抽出）：指定位置 `pt` が線の上なら、その線の色と太さをインクボトルの線に、そうでなければ最前面
-/// シェイプの色を `host.tool_mut().brush_color` に設定する
+/// スポイトツール（色抽出）：指定位置 `pt` でいちばん手前に見えているもの（`topmost_visible_at`）が線なら、その線の色と
+/// 太さをインクボトルの線に、塗りならその色を `host.tool_mut().brush_color` に設定する
 pub(crate) fn pick_color_at(host: &mut impl ActionHost, pt: Point) -> Option<Color32> {
-    if let Some(stroke) = topmost_line_at(host.tab(), pt) {
-        host.tool_mut().stroke = stroke;
-        return Some(stroke.color);
+    let seen = topmost_visible_at(host.tab(), pt)?;
+    match seen.line {
+        Some(stroke) => host.tool_mut().stroke = stroke,
+        None => host.tool_mut().brush_color = seen.color,
     }
-    let picked = topmost_visible_color_at(host.tab(), pt)?;
-    host.tool_mut().brush_color = picked;
-    Some(picked)
-}
-
-/// 点 `pt` にいちばん上に見えているのが線なら、その線
-fn topmost_line_at(tab: &Tab, pt: Point) -> Option<crate::planar_map::EdgeStroke> {
-    tab.scene().iter().rev().find(|s| s.contains_point(pt))?.line
+    Some(seen.color)
 }
 
 /// 進行中のブラシ・消しゴムストロークの増分プレビューメッシュを描画する

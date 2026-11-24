@@ -1017,26 +1017,42 @@ fn write_local(
     written
 }
 
-/// 点 `pt`（ステージの座標）で見えている、いちばん上のもの：（レイヤーの番号, 色）（バケツとスポイト用）。画面に描くのと
-/// 同じ写しの図形を、上から順に参照でたどる：編集できるレイヤーは画面の図形（`Scene`）、ロック中のレイヤーはセル画の
-/// 結合メッシュの写しが持つ図形（`Tab::cached_cel_color_at`）。点の内外はどちらも `FillShape::contains_point`。図形は
-/// 複製しない
-pub(crate) fn topmost_visible_at(tab: &Tab, pt: Point) -> Option<(usize, Color32)> {
+/// 点で見えている、いちばん上のもの（`topmost_visible_at`）
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Seen {
+    /// レイヤーの番号
+    pub(crate) layer: usize,
+    /// 図形の色（線なら線の色）
+    pub(crate) color: Color32,
+    /// 線なら、その線（色と太さ）
+    pub(crate) line: Option<crate::planar_map::EdgeStroke>,
+}
+
+/// 点 `pt`（ステージの座標）で見えている、いちばん上のもの（バケツとスポイト用。点でいちばん手前のものの判定はこれ1つ）。
+/// 画面に描くのと同じ写しの図形を、上から順に参照でたどる：編集できるレイヤーは画面の図形（`Scene`）、ロック中の
+/// レイヤーはセル画の結合メッシュの写しが持つ図形（`Tab::cached_cel_seen_at`）。点の内外はどちらも
+/// `FillShape::contains_point`。図形は複製しない
+pub(crate) fn topmost_visible_at(tab: &Tab, pt: Point) -> Option<Seen> {
     let tl = tab.active_timeline();
     let hit = tab
         .scene()
         .iter()
         .rev()
         .find(|s| s.contains_point(pt))
-        .and_then(|s| Some((tl.layer_index_by_id(s.layer_id)?, s.color)));
+        .and_then(|s| {
+            Some(Seen { layer: tl.layer_index_by_id(s.layer_id)?, color: s.color, line: s.line })
+        });
     // 当たった図形より上のロック中のレイヤー（上から順）
     tl.layers
         .iter()
         .enumerate()
         .rev()
-        .take_while(|(i, _)| hit.is_none_or(|(h, _)| *i > h))
+        .take_while(|(i, _)| hit.is_none_or(|h| *i > h.layer))
         .filter(|(_, l)| l.visible && l.locked)
-        .find_map(|(i, _)| Some((i, tab.cached_cel_color_at(i, tl.current_frame, pt)?)))
+        .find_map(|(i, _)| {
+            let (color, line) = tab.cached_cel_seen_at(i, tl.current_frame, pt)?;
+            Some(Seen { layer: i, color, line })
+        })
         .or(hit)
 }
 
@@ -1104,7 +1120,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
             && s.is_in_editing_scope(&tab.session.editing_group_path)
             && s.contains_point(pt)
     }) {
-        let occluded_above = topmost_visible_at(tab, pt).is_some_and(|(l, _)| l > target_layer_ord);
+        let occluded_above = topmost_visible_at(tab, pt).is_some_and(|h| h.layer > target_layer_ord);
 
         let Some(hit_shape) = scene.get(hit_idx).cloned() else {
             return false;
@@ -1165,7 +1181,7 @@ fn apply_ink_bottle(tab: &mut Tab, stroke: crate::planar_map::EdgeStroke, pt: Po
         return false;
     };
     if !tl.is_layer_editable_by_id(target_lid)
-        || topmost_visible_at(tab, pt).is_some_and(|(l, _)| l > target_ord)
+        || topmost_visible_at(tab, pt).is_some_and(|h| h.layer > target_ord)
     {
         return false;
     }
