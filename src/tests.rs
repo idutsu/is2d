@@ -38631,6 +38631,32 @@ mod strokes {
     }
 
     #[test]
+    fn grabbing_anywhere_on_a_visible_line_reshapes_its_edge_at_any_zoom() {
+        // 上の辺（y=100。太さ 4 なので、中心から 2 までが見えている線）。拡大して線が合わせる幅より太く見えても、線の上なら
+        // どこをつかんでも辺の変形になる（線の図形をつかんで線が外れない）。線の外は、塗りか何も無い所
+        let app = inked_square_app();
+        let hover = |y: f64, zoom: f32| {
+            crate::select_ops::compute_hover_target(
+                app.scene(),
+                &app.session,
+                Point::new(200.0, y),
+                zoom,
+                SelectSubMode::Reshape,
+            )
+        };
+        for zoom in [1.0f32, 2.0, 4.0, 8.0, 16.0] {
+            for y in [98.2, 99.0, 100.0, 101.0, 101.8] {
+                assert!(matches!(hover(y, zoom), HoverTarget::Edge { .. }), "倍率 {zoom}、y={y} は線の上");
+            }
+        }
+        assert!(matches!(hover(97.0, 16.0), HoverTarget::None));
+        match hover(103.0, 16.0) {
+            HoverTarget::Fill { shape_id } => assert!(!crate::planar_map::is_line_id(shape_id)),
+            other => panic!("線の内側の外は塗り：{other:?}"),
+        }
+    }
+
+    #[test]
     fn lines_redrawn_while_a_piece_floats_stay_above_the_fills() {
         // 線を乗せた赤い正方形の角から外へ出るヒゲ。ヒゲを持ち上げると、角の線のつなぎ目が変わり、角の輪郭の線を作り
         // 直して出す（浮いた片の残り）。作り直した線も、塗りより上に描く

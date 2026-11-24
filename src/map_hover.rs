@@ -287,9 +287,13 @@ pub(crate) fn reshape_hover(
             map_node: Some((lm.owner, v)),
         };
     }
+    // 線を乗せた辺は、見えている線の上（中心線から線の太さの半分まで）も辺に合う（拡大して線が合わせる幅より太く見えても、
+    // 線のふち寄りをつかめば変形になる）。探す半径は、いちばん太い線の半分を置いた座標にした長さまで広げる
+    let widest_half = *crate::planar_map::STROKE_WIDTHS.end() as f64 / 2.0;
     let mut best_e: Option<(f64, &LayerMap, usize, f64, ShapeId)> = None;
     for lm in &maps.maps {
-        let Some((e, t)) = lm.base.hit_edge(mouse_pt, outer_r, lm.xform) else {
+        let search_r = outer_r.max(widest_half * crate::vector_engine::max_scale(lm.xform));
+        let Some((e, t)) = lm.base.hit_edge(mouse_pt, search_r, lm.xform) else {
             continue;
         };
         let q = lm.placed_quad(e);
@@ -306,8 +310,13 @@ pub(crate) fn reshape_hover(
             (ed.right, ed.right_src)
         };
         let max = if side.is_some() { inner_r } else { outer_r };
+        // 見えている線の上か（線の図形は文書の座標で太らせて置くので、文書の座標の距離で測る）
+        let on_line = ed.stroke.is_some_and(|s| {
+            let doc_pt = lm.xform.inverse() * mouse_pt;
+            crate::vector_engine::nearest_on_quad(&ed.quad(), doc_pt).1 <= s.width as f64 / 2.0
+        });
         let src = side_src.or(ed.left_src).or(ed.right_src).unwrap_or(0);
-        if d <= max && best_e.as_ref().is_none_or(|b| d < b.0) && !hidden(lm, p) {
+        if (d <= max || on_line) && best_e.as_ref().is_none_or(|b| d < b.0) && !hidden(lm, p) {
             best_e = Some((d, lm, e, t, src));
         }
     }

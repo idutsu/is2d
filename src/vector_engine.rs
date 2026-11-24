@@ -921,7 +921,7 @@ fn keeps_mesh(stretch: f64) -> bool {
 }
 
 /// 変換 `affine` の最大の拡大率（AᵀA の大きいほうの固有値の平方根。列の長さの2乗 p・q と内積 r から）
-fn max_scale(affine: Affine) -> f64 {
+pub(crate) fn max_scale(affine: Affine) -> f64 {
     let [a, b, c, d, _, _] = affine.as_coeffs();
     let (p, q, r) = (a * a + b * b, c * c + d * d, a * c + b * d);
     ((p + q) / 2.0 + (((p - q) / 2.0).powi(2) + r * r).sqrt()).sqrt()
