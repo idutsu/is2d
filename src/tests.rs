@@ -29592,6 +29592,51 @@ fn painting_faces_back_keeps_their_ids() {
     assert!(tried > 0, "塗り重ねに回る変換が無かった");
 }
 
+/// レビュー f478c69 の N-5003：タイムラインのドラッグの途中で、ほかの所（キー・Undo）で文書が変わったら、ドラッグを捨てる
+/// （ドラッグが持つレイヤー・コマの番号は始めたときの文書のもので、変わった文書に当てると、別のレイヤー・キーフレームを書き
+/// 換える）。文書が変わらない間は、ドラッグはそのまま
+#[test]
+fn timeline_drags_are_dropped_when_the_document_changes_meanwhile() {
+    use crate::timeline::TimelineCellSelection;
+    use crate::timeline_ui::TimelineGridDrag;
+    let mut app = Is2dApp::default();
+    timeline_ui::timeline_add_layer(&mut app);
+    let moving = TimelineGridDrag::MoveFrames {
+        orig_sel: TimelineCellSelection::from_corners(0, 0, 0, 0),
+        grab_layer: 0,
+        grab_frame: 0,
+        curr_layer: 1,
+        curr_frame: 3,
+        copy_mode: false,
+        has_moved: true,
+    };
+    let generation = |app: &Is2dApp| app.tab().history.current_commit_id;
+    // コマ・レイヤーのドラッグ中に F5、そのあと Undo
+    for change in 0..2 {
+        for layer_drag in [false, true] {
+            if layer_drag {
+                app.timeline_ui.dragging_layer = Some(0);
+            } else {
+                app.timeline_ui.grid_drag = moving;
+            }
+            let g = generation(&app);
+            app.timeline_ui.remember_drag_generation(g);
+            // 文書が変わらない画面では、ドラッグはそのまま
+            app.timeline_ui.drop_drag_if_document_changed(g);
+            assert!(app.timeline_ui.dragging_layer.is_some() || !matches!(app.timeline_ui.grid_drag, TimelineGridDrag::None));
+            if change == 0 {
+                assert!(timeline_ui::timeline_extend_frame(&mut app));
+            } else {
+                assert!(app.tab_mut().undo());
+            }
+            let g = generation(&app);
+            app.timeline_ui.drop_drag_if_document_changed(g);
+            assert!(app.timeline_ui.dragging_layer.is_none(), "文書が変わったのにレイヤーのドラッグが残った");
+            assert!(matches!(app.timeline_ui.grid_drag, TimelineGridDrag::None), "文書が変わったのにコマのドラッグが残った");
+        }
+    }
+}
+
 /// レビュー f478c69 の N-1002：変換した地図が正しい地図にならないとき（縮めて頂点や辺が近づく）も、線が残る（前は面の形を
 /// 塗り重ねて作り直したので、線がみな消え、線だけの絵は丸ごと消えた）。境目がみな線の絵では、作り直したあとも、色の違う
 /// 面の境目はみな線のまま。線だけの絵は、線の辺がみな残る

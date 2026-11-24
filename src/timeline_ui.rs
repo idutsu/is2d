@@ -186,6 +186,8 @@ pub(crate) struct TimelineUiState {
     /// 離れると終わる
     renaming_layer: Option<(TimelineKey, u64)>,
     pub(crate) grid_drag: TimelineGridDrag,
+    /// ドラッグ中の、直近の画面の終わりの文書の世代（`UndoHistory::current_commit_id`）。ドラッグ中でなければ `None`
+    drag_generation: Option<u64>,
     /// 直近に同期したタイムライン識別キー
     last_timeline_key: TimelineKey,
 }
@@ -203,6 +205,7 @@ impl Default for TimelineUiState {
             dragging_layer: None,
             renaming_layer: None,
             grid_drag: TimelineGridDrag::None,
+            drag_generation: None,
             last_timeline_key: (1, 0, None),
         }
     }
@@ -212,6 +215,22 @@ impl TimelineUiState {
     pub(crate) fn cancel_drag(&mut self) {
         self.dragging_layer = None;
         self.grid_drag = TimelineGridDrag::None;
+        self.drag_generation = None;
+    }
+
+    /// ドラッグ中に、ほかの所（キー・メニュー・Undo など）で文書が変わっていたら（世代 `generation` が、直近の画面の終わりに
+    /// 覚えた世代と違う）、ドラッグを捨てる。ドラッグが持つレイヤー・コマの番号は、始めたときの文書のものなので、変わった
+    /// 文書に当てると、別のレイヤー・キーフレームを書き換える（レビュー f478c69 の N-5003）
+    pub(crate) fn drop_drag_if_document_changed(&mut self, generation: u64) {
+        if self.drag_generation.is_some_and(|g| g != generation) {
+            self.cancel_drag();
+        }
+    }
+
+    /// 画面の終わりに、ドラッグ中なら今の文書の世代 `generation` を覚える（ドラッグ自身が文書を変えたあとの世代）
+    pub(crate) fn remember_drag_generation(&mut self, generation: u64) {
+        let dragging = self.dragging_layer.is_some() || !matches!(self.grid_drag, TimelineGridDrag::None);
+        self.drag_generation = dragging.then_some(generation);
     }
 
     pub(crate) fn reset_for_timeline_switch(&mut self) {
@@ -892,6 +911,8 @@ fn handle_timeline_pointer_input(
 ) -> Option<(usize, usize)> {
     let (primary_pressed, shift_held) =
         ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift));
+    let generation = host.tab().history.current_commit_id;
+    host.timeline_ui_mut().drop_drag_if_document_changed(generation);
     let handle_w = handle_width(ui.ctx());
     if response.hovered() && primary_pressed {
         if let Some(pos) = pointer_pos {
@@ -906,6 +927,8 @@ fn handle_timeline_pointer_input(
     update_timeline_grid_drag(host, ui.ctx(), layout, primary_down, alt_held, pointer_pos);
     let drag_layer_feedback =
         update_timeline_layer_drag(host, ui.ctx(), layout, primary_down, pointer_pos);
+    let generation = host.tab().history.current_commit_id;
+    host.timeline_ui_mut().remember_drag_generation(generation);
     update_timeline_cursor_icon(
         host,
         ui.ctx(),
