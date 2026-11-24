@@ -20511,6 +20511,104 @@ fn test_cross_tab_symbol_roundtrip_paste_reuses_original_symbol() {
     assert_eq!(app.doc.library.len(), 1);
 }
 
+/// 先読みのテスト用：レイヤー 0 のコマ 0・3・6・9 にキーフレームを打ち、それぞれに違う四角を置いたアプリ（12 コマ）
+fn app_with_cels_every_three_frames() -> Is2dApp {
+    let mut app = Is2dApp::default();
+    for f in [0usize, 3, 6, 9] {
+        timeline_ui::switch_to_layer_and_frame(&mut app, 0, f);
+        if f > 0 {
+            assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
+        }
+        put_cel_shapes(&mut app, 0, f, vec![map_overlay::rect_shape(10.0 + f as f64, 10.0, 90.0, 90.0, Color32::RED)]);
+    }
+    app.tab_mut().with_active_timeline_mut(|tl, _| {
+        tl.layers[0].frame_count = 12;
+        tl.sync_total_frames();
+    });
+    app
+}
+
+/// 先読み（設計：claude/先読みの設計_31d78a6.md の 4.）：レイヤーごとに、今描いているコマの範囲のすぐ外の、次に見るセル画
+/// （進む向き。止まっているときは戻る向きも）。くり返すときは、端の先は反対の端。隠したレイヤーは先読みしない
+#[test]
+fn prefetch_picks_the_next_cels_just_outside_what_is_drawn() {
+    let mut app = app_with_cels_every_three_frames();
+    let tl = app.tab().active_timeline();
+    let layer = &tl.layers[0];
+    let map_at = |f: usize| layer.keyframes[layer.keyframe_index_at(f).unwrap()].cel.maps[0].clone();
+    let picked = |first: usize, last: usize, both: bool, wrap: bool| -> Vec<usize> {
+        let maps = crate::prefetch::wanted_maps(tl, first, last, both, wrap);
+        maps.iter()
+            .map(|m| [0usize, 3, 6, 9].into_iter().find(|&f| map_at(f).same(m)).expect("キーフレームの地図"))
+            .collect()
+    };
+    // コマ 4（コマ 3 のセル画）：進む向きはコマ 6、戻る向きはコマ 0
+    assert_eq!(picked(4, 4, false, false), vec![6]);
+    assert_eq!(picked(4, 4, true, false), vec![6, 0]);
+    // オニオンスキンの範囲 4..=7：その外のコマ 9 とコマ 0。範囲 2..=7 なら、コマ 0 のセル画はもう描いている（コマ 2 は
+    // コマ 0 のセル画）ので、戻る向きは無い
+    assert_eq!(picked(4, 7, true, false), vec![9, 0]);
+    assert_eq!(picked(2, 7, true, false), vec![9]);
+    // 端：くり返さなければ先は無い。くり返すなら反対の端
+    assert_eq!(picked(10, 10, true, false), vec![6]);
+    assert_eq!(picked(10, 10, false, true), vec![0]);
+    assert_eq!(picked(1, 1, true, true), vec![3, 9]);
+    app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[0].visible = false);
+    assert!(crate::prefetch::wanted_maps(app.tab().active_timeline(), 4, 4, true, true).is_empty());
+}
+
+/// 先読みした写しは、見るときにそのまま使われ（描く図形を作り直さない）、作り直したもの（お手本）と同じ図形になる
+#[test]
+fn prefetched_cels_are_drawn_as_built_and_match_a_fresh_build() {
+    let app = app_with_cels_every_three_frames();
+    let tl = app.tab().active_timeline();
+    let layer = &tl.layers[0];
+    let map = layer.keyframes[layer.keyframe_index_at(6).unwrap()].cel.maps[0].clone();
+    let mesh_of = |shapes: &[std::sync::Arc<FillShape>]| -> Vec<Vec<(u32, u32)>> {
+        shapes
+            .iter()
+            .map(|s| s.fill_mesh().vertices.iter().map(|v| (v.pos.x.to_bits(), v.pos.y.to_bits())).collect())
+            .collect()
+    };
+    let held = crate::prefetch::prefetched(&map);
+    let prefetched_shapes = held.drawn_shapes(&map.group_path);
+    let seen = map.drawn_shapes();
+    assert_eq!(seen.len(), prefetched_shapes.len());
+    for (a, b) in seen.iter().zip(&prefetched_shapes) {
+        assert!(std::sync::Arc::ptr_eq(a, b), "見るときに、先読みした図形を作り直した");
+    }
+    let prefetched_mesh = mesh_of(&prefetched_shapes);
+    drop((held, prefetched_shapes, seen));
+    // お手本：誰も写しを持たない所から作り直したもの
+    assert_eq!(mesh_of(&map.drawn_shapes()), prefetched_mesh);
+}
+
+/// 画面を描くと、先読みの係が、次に見るセル画の写しを裏で作って持つ（前は持たず、見る瞬間に作っていた）。描き変えたら、
+/// 描く図形は描き変えたあとの中身（古い写しを使わない）
+#[test]
+fn the_app_prefetches_the_next_cel_and_never_shows_a_stale_one() {
+    let mut app = app_with_cels_every_three_frames();
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
+    let ctx = egui::Context::default();
+    let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
+    let _ = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
+    let base_at = |app: &Is2dApp, f: usize| {
+        let layer = &app.tab().active_timeline().layers[0];
+        layer.keyframes[layer.keyframe_index_at(f).unwrap()].cel.maps[0].base()
+    };
+    // 係は裏で作るので、持つまで待つ（待つ長さはテストの守り）
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::sync::Arc::strong_count(&base_at(&app, 6)) < 2 {
+        assert!(std::time::Instant::now() < deadline, "先読みの係が、次に見るセル画（コマ 6）の写しを持たない");
+        std::thread::yield_now();
+    }
+    // 描き変えると、描く図形は新しい中身
+    put_cel_shapes(&mut app, 0, 6, vec![map_overlay::rect_shape(200.0, 200.0, 260.0, 260.0, Color32::BLUE)]);
+    let layer = &app.tab().active_timeline().layers[0];
+    let shapes = layer.keyframes[layer.keyframe_index_at(6).unwrap()].cel.shapes();
+    assert!(shapes.iter().any(|s| s.color == Color32::BLUE), "描き変えたあとの中身が描かれない");
+}
+
 /// レビュー d91cd4c の N-5002：オニオンスキンで描いたコマの、地図の計算に使う写し（面と線の図形の表を持つ）は、オニオン
 /// スキンの写しが持っているので、そのコマを今のコマとして描くときに作り直さない（前は、オニオンスキンの写しを作ると計算に
 /// 使う写しを捨てたので、同じコマの面と線の図形を2回ずつ作り、線の多い作品のスクラブが重かった）

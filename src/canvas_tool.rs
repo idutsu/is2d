@@ -2453,6 +2453,16 @@ impl Tab {
         )
     }
 
+    /// オニオンスキンで描くコマの範囲（今のコマの前後。タイムラインの中に切り詰める）。描く所（`panels::draw_onion_skins`）
+    /// と先読み（`Is2dApp::prefetch_next_cels`）の範囲の決まりはこれ1つ
+    pub(crate) fn onion_window(&self) -> (usize, usize) {
+        let tl = self.active_timeline();
+        let curr = tl.current_frame;
+        let first = curr.saturating_sub(self.view.onion_prev_frames);
+        let last = (curr + self.view.onion_next_frames).min(tl.total_frames.saturating_sub(1));
+        (first, last)
+    }
+
     /// オニオンスキンで描くセル画 `cels`（レイヤーの番号、コマ）のうち写しの無いものを、描く前に同時に作る
     /// （`CelMeshCache::prepare`）
     pub(crate) fn prepare_onion_cels(&self, cels: &[(usize, usize)]) {

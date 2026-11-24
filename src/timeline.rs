@@ -508,6 +508,11 @@ impl ScopeMap {
         self.map.get()
     }
 
+    /// 同じ地図か（同じ中身の箱を共有する、同じ階層の地図。先読みの一覧を見分ける：`prefetch::Prefetch`）
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.map, &other.map) && self.group_path == other.group_path
+    }
+
     /// 計算に使う写し（持ち主（画面の土台など）が持っていればそれ、無ければ塊から作る：`LayerBase::of_stored`）。まだ
     /// 確かめていない地図は、しまった地図の写しを先に作って持ってから確かめる（`LazyStored::check` がこの写しで確かめる
     /// ので、確かめに作った判定の形・輪郭・面を、この写しでそのまま使う。正しい地図は、ふつう、しまった地図そのもの）

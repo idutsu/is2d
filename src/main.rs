@@ -11,6 +11,7 @@ mod map_hover;
 mod menu;
 mod panels;
 mod planar_map;
+mod prefetch;
 mod project_io;
 mod recovery;
 mod select_ops;
@@ -211,6 +212,8 @@ pub(crate) struct Is2dApp {
     /// 確認なしに終わるときに書く、未保存のタブの控え（Windows のセッションの終わりで書く：`session_end_windows`）
     #[cfg(target_os = "windows")]
     pub(crate) unsaved: recovery::UnsavedTabs,
+    /// 先読みの係（次に見るセル画の写しを、裏で作って持つ：`prefetch`）
+    pub(crate) prefetch: prefetch::Prefetch,
     /// 直近フレームの中央キャンバス描画領域（スクリーン座標。画面に1つだけで、どのタブでも同じ）
     pub(crate) canvas_rect: egui::Rect,
     /// OS のメニューバーの「ファイル」「編集」「表示」（Mac。起動のときに作る。テストでは作らない）
@@ -237,6 +240,7 @@ impl Default for Is2dApp {
             recovery: recovery::Recovery::default(),
             #[cfg(target_os = "windows")]
             unsaved: recovery::UnsavedTabs::default(),
+            prefetch: prefetch::Prefetch::default(),
             canvas_rect: egui::Rect::from_min_max(Pos2::new(52.0, 30.0), Pos2::new(1000.0, 590.0)),
             #[cfg(target_os = "macos")]
             os_menu: None,
@@ -1184,9 +1188,29 @@ impl Is2dApp {
         }
         project_io::update_window_title(self, ctx);
         timeline_ui::scrub_on_frame_change(self);
+        self.prefetch_next_cels();
         // 確認なしに終わるときに書く控えを、今のタブにする（文書が変わったタブがあるときだけ写し直す）
         #[cfg(target_os = "windows")]
         self.unsaved.refresh(&self.tabs);
+    }
+}
+
+impl Is2dApp {
+    /// 今のタブの、次に見るセル画の写しを先読みの係に作らせる（`prefetch`）。今描いているコマの範囲（今のコマ。止まって
+    /// いてオニオンスキンが有れば、その範囲：オニオンスキンは再生中は描かない）のすぐ外の、レイヤーごとの次のセル画。
+    /// 再生中は進む向きだけ、止まっているときは前後とも（どちらへ動くか分からない）。くり返し再生なら、端の先は反対の端
+    /// （コマ送りも同じくり返しの決まり：`timeline_ui::step_frame`）
+    fn prefetch_next_cels(&mut self) {
+        let playing = self.timeline_ui.is_playing;
+        let tab = self.tab();
+        let tl = tab.active_timeline();
+        let (first, last) = if tab.view.onion_skin_enabled && !playing {
+            tab.onion_window()
+        } else {
+            (tl.current_frame, tl.current_frame)
+        };
+        let maps = prefetch::wanted_maps(tl, first, last, !playing, self.timeline_ui.loop_playback);
+        self.prefetch.want(maps);
     }
 }
 
