@@ -1,5 +1,7 @@
 #[cfg(target_os = "macos")]
 mod app_menu_macos;
+#[cfg(target_os = "macos")]
+mod audio_latency_macos;
 mod audio_out;
 mod canvas_tool;
 mod chunked_list;
