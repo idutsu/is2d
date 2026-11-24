@@ -900,8 +900,9 @@ pub(crate) enum Placement {
     /// 隠した元の図形（ドラッグで動かしている、グループ・インスタンスの図形そのもの）と同じ重なり順に置く。元の図形は、
     /// この上乗せを作った土台にあり、ドラッグの間は土台が変わらない（文書を変えるとドラッグは終わり、上乗せも作り直す）
     ReplaceAt(ShapeId),
-    /// そのレイヤー・その階層の生の図形の置き場（階層のいちばん下。生の図形どうしに前後は無いので、番号で指さない。
-    /// 浮いた片の残り・輪郭の変形の仮表示）
+    /// そのレイヤー・その階層の生の図形の置き場（面の図形は階層のいちばん下。面の図形どうしに前後は無いので、番号で
+    /// 指さない。線の図形は、線がいつも塗りより上なので、その階層の生の図形のいちばん上。浮いた片の残り・輪郭の変形の
+    /// 仮表示）
     RawOf(LayerId, Scope),
     /// そのレイヤー・その編集スコープの一番上に置く
     TopOfLayer(LayerId, Scope),
@@ -954,7 +955,7 @@ pub(crate) fn build_scene_order_by_layer_ids(
     let mut after_base: Vec<Vec<(usize, usize)>> = vec![Vec::new(); base.len()];
     let mut replace_at_base: Vec<Vec<usize>> = vec![Vec::new(); base.len()];
 
-    for (add_idx, (placement, _)) in overlay.add.iter().enumerate() {
+    for (add_idx, (placement, shape)) in overlay.add.iter().enumerate() {
         // そのレイヤー・階層に土台の図形が無いとき（空のレイヤー）に、レイヤーの順番で入れる位置を決めるレイヤー
         let layer_order_fallback = match placement {
             Placement::ReplaceAt(target_id) => {
@@ -968,15 +969,24 @@ pub(crate) fn build_scene_order_by_layer_ids(
                 None
             }
             Placement::RawOf(lid, scope) => {
-                match base
-                    .iter()
-                    .position(|s| s.layer_id == *lid && s.is_in_editing_scope(scope))
-                {
-                    Some(pos) => {
-                        replace_at_base[pos].push(add_idx);
-                        None
+                // 線は塗りより上：その階層の生の図形（面の図形のあとに線の図形）のいちばん上に置く
+                let line_pos = shape
+                    .line
+                    .and_then(|_| base.iter().rposition(|s| s.layer_id == *lid && s.is_raw_at_scope(scope)));
+                if let Some(pos) = line_pos {
+                    after_base[pos].push((0, add_idx));
+                    None
+                } else {
+                    match base
+                        .iter()
+                        .position(|s| s.layer_id == *lid && s.is_in_editing_scope(scope))
+                    {
+                        Some(pos) => {
+                            replace_at_base[pos].push(add_idx);
+                            None
+                        }
+                        None => Some(*lid),
                     }
-                    None => Some(*lid),
                 }
             }
             Placement::TopOfLayer(lid, scope) => {
@@ -987,10 +997,10 @@ pub(crate) fn build_scene_order_by_layer_ids(
                     })
                     .flatten();
                 if let Some(pos) = scope_pos {
-                    after_base[pos].push((0, add_idx));
+                    after_base[pos].push((1, add_idx));
                     None
                 } else if let Some(pos) = base.iter().rposition(|s| s.layer_id == *lid) {
-                    after_base[pos].push((1, add_idx));
+                    after_base[pos].push((2, add_idx));
                     None
                 } else {
                     Some(*lid)
@@ -1003,7 +1013,7 @@ pub(crate) fn build_scene_order_by_layer_ids(
                 .iter()
                 .rposition(|s| layer_order_index(layer_order_ids, s.layer_id) <= ord)
             {
-                after_base[pos].push((2 + ord.min(usize::MAX - 2), add_idx));
+                after_base[pos].push((3 + ord.min(usize::MAX - 3), add_idx));
             } else {
                 before_all.push((ord, add_idx));
             }

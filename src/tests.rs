@@ -38623,6 +38623,60 @@ mod strokes {
         assert_eq!(app.session.selection.shapes.len(), 1);
     }
 
+    /// 画面の図形のうち、線がみな塗りより上（あとに描く）にある
+    fn lines_above_fills(app: &Is2dApp) -> bool {
+        let shapes: Vec<_> = app.scene().iter().map(|s| s.line.is_some()).collect();
+        let first_line = shapes.iter().position(|&l| l).unwrap_or(shapes.len());
+        shapes[first_line..].iter().all(|&l| l)
+    }
+
+    #[test]
+    fn lines_redrawn_while_a_piece_floats_stay_above_the_fills() {
+        // 線を乗せた赤い正方形の角から外へ出るヒゲ。ヒゲを持ち上げると、角の線のつなぎ目が変わり、角の輪郭の線を作り
+        // 直して出す（浮いた片の残り）。作り直した線も、塗りより上に描く
+        let mut app = inked_square_app();
+        let whisker = line(Point::new(100.0, 100.0), Point::new(40.0, 60.0), INK);
+        assert!(apply(&mut app, Action::DrawLines { segs: vec![whisker] }));
+        assert!(lines_above_fills(&app));
+        assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(70.0, 80.0) }));
+        let picked: Vec<_> = app.session.selection.shapes.iter().copied().collect();
+        assert!(picked.len() == 1 && crate::planar_map::is_line_id(picked[0]));
+        assert!(app.session.lift_selected_raw_shapes_to_floating());
+        app.session.begin_move_overlay(false);
+        let remade = app.session.floating().unwrap().remainder().filter(|s| s.line.is_some()).count();
+        assert!(remade > 0, "角の輪郭の線を作り直す");
+        assert!(lines_above_fills(&app));
+        // 輪郭の変形の仮表示も同じ：線のある辺を引っぱっている間、作り直した線は塗りより上。赤の上の辺を引っぱると、
+        // 角でつながった隣の青の上の辺の線も作り直す（青の塗りは変わらない）
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![rect(100.0, 100.0, 300.0, 300.0, Color32::RED), rect(300.0, 100.0, 500.0, 300.0, Color32::BLUE)],
+        );
+        assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: INK }));
+        assert!(apply(&mut app, Action::InkBottle { pt: Point::new(400.0, 200.0), stroke: INK }));
+        assert_eq!(counts(&app), (2, 7));
+        let lid = app.tab().active_timeline().layers[0].id;
+        let (removed, added) = {
+            let tl = app.tab().active_timeline();
+            let base = tl.layers[0].cel_at(0).unwrap().maps[0].base();
+            let orig = QuadBez::new(Point::new(100.0, 100.0), Point::new(200.0, 100.0), Point::new(300.0, 100.0));
+            crate::planar_map::reshape_result(
+                &base,
+                crate::planar_map::ReshapeEdit::PullEdge { orig_seg: orig, grab_t: 0.5, target: Point::new(200.0, 60.0) },
+                lid,
+                &[],
+                Affine::IDENTITY,
+            )
+            .unwrap()
+        };
+        assert!(added.iter().any(|s| s.line.is_some()));
+        app.session.set_reshape_overlay(&removed, added, lid, &[]);
+        assert!(lines_above_fills(&app));
+    }
+
     #[test]
     fn the_pencil_draws_a_smooth_line_with_few_curves() {
         let mut app = Is2dApp::default();
