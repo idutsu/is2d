@@ -20485,6 +20485,60 @@ fn test_cross_tab_symbol_roundtrip_paste_reuses_original_symbol() {
     assert_eq!(app.doc.library.len(), 1);
 }
 
+/// レビュー d91cd4c の N-5001：OS がアプリを止める知らせ（Windows のセッションの終わり）で書く、未保存のタブの控え。
+/// 控えは文書が変わったときだけ控え直し、控えから、アプリの終わり（`on_exit`）と同じ復旧ファイルを書く。浮いた片は
+/// 置いた形で書く。セッションの終わりをやめたら、書いたものを消す（次の起動で要らない復元を聞かない）。控えを書く所は
+/// Windows の窓の受け口（`session_end_windows`）で、ここでは同じ控えと書き方を確かめる
+#[test]
+fn unsaved_tabs_snapshot_writes_the_same_recovery_and_can_be_discarded() {
+    use crate::recovery::{Recovery, UnsavedTabs};
+    let base_dir = std::env::temp_dir().join(format!("is2d_unsaved_snapshot_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let (proj_dir, rec_dir) = (base_dir.join("projects"), base_dir.join("recovery"));
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 40, 40);
+    let path = proj_dir.join("work.is2d");
+    let stroke = |app: &mut Is2dApp, y: f64| {
+        assert!(apply(app, Action::PaintStroke { points: vec![Point::new(30.0, y), Point::new(90.0, y)], radius: 6.0, color: red }));
+    };
+    stroke(&mut app, 30.0);
+    crate::project_io::save_project_to_path(&mut app, &path).unwrap();
+    let unsaved = UnsavedTabs::default();
+    // 保存したばかり：控えるタブは無い
+    unsaved.refresh(&app.tabs);
+    assert!(unsaved.get().is_empty());
+    // 描き足す：控える。描き足さなければ控え直さない（同じ控え）
+    stroke(&mut app, 100.0);
+    unsaved.refresh(&app.tabs);
+    assert_eq!(unsaved.get().len(), 1);
+    // 絵を持ち上げて動かしたまま（浮いた片）：控えは、置いた形で書く
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(0.0, 200.0), alt_duplicate: false }));
+    assert!(app.session.floating().is_some_and(|f| f.modified));
+    unsaved.refresh(&app.tabs);
+    let recovery = Recovery { dir: Some(rec_dir.clone()), found: Vec::new() };
+    recovery.write_unsaved(&unsaved.get());
+    let rec = proj_dir.join("RECOVER_work.is2d");
+    assert!(rec.is_file());
+    let written = crate::project_io::read_project_document(&rec).unwrap();
+    assert_eq!(written.recovery_source.as_deref(), Some(path.as_path()));
+    // 浮いた片を置いた形：動かした先（y が 200 ずれた所）に絵がある
+    let doc = written.into_document().unwrap();
+    let cel = doc.root.layers[0].cel_at(0).unwrap();
+    let shapes = cel.maps[0].base().drawn_shapes(&[]);
+    assert!(shapes.iter().all(|s| s.bounding_box().y0 > 200.0), "浮いた片を置いた形で書いていない");
+    // 書いたものは、アプリの終わりで書くもの（`write_unsaved_tabs`）とバイトまで同じ
+    let snapshot_bytes = std::fs::read(&rec).unwrap();
+    recovery.write_unsaved_tabs(&app.tabs);
+    assert_eq!(std::fs::read(&rec).unwrap(), snapshot_bytes);
+    // セッションの終わりをやめた：書いたもの（復旧ファイルと一覧）を消す
+    recovery.discard_written();
+    assert!(!rec.exists());
+    assert_eq!(std::fs::read_dir(&rec_dir).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(&base_dir);
+}
+
 #[test]
 fn test_recovery_fallback_same_filename_and_missing_parent_dir() {
     use crate::doc_actions::{apply, Action};

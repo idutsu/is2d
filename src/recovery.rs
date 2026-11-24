@@ -1,7 +1,12 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+#[cfg(any(target_os = "windows", test))]
+use std::sync::{Mutex, PoisonError};
 use std::time::SystemTime;
 
 use crate::canvas_tool::Tab;
+use crate::floating::Floating;
+use crate::symbol::{Document, EditPath};
 use crate::project_io::{
     open_document_in_new_tab, read_project_document, write_project_file_atomically,
     ProjectDocument, ProjectWorkspace,
@@ -24,6 +29,67 @@ pub(crate) struct Recovery {
     pub(crate) found: Vec<Found>,
 }
 
+/// 確認なしに終わるときに書く、未保存のタブ1つ分の控え（保存したことがあり、未保存の変更があるタブ）。文書と浮いた片は
+/// 共有して持つので、控えるのは安い。浮いた片を置いた文書は、書くときに作る（`canvas_tool::committed_document`）
+#[derive(Clone)]
+pub(crate) struct UnsavedTab {
+    id: u64,
+    untitled_number: usize,
+    file: PathBuf,
+    /// 控えたときの文書の世代（控え直すかを決める：`UnsavedTabs::refresh`）
+    #[cfg(any(target_os = "windows", test))]
+    commit: u64,
+    doc: Document,
+    edit_path: EditPath,
+    editing_group_path: Vec<u64>,
+    floating: Option<Arc<Floating>>,
+}
+
+impl UnsavedTab {
+    /// タブ `tab` の控え（保存したことがない・未保存の変更が無いタブは `None`）
+    pub(crate) fn of(tab: &Tab) -> Option<Self> {
+        let file = tab.file.clone().filter(|_| tab.history.is_dirty())?;
+        Some(Self {
+            id: tab.id,
+            untitled_number: tab.untitled_number,
+            file,
+            #[cfg(any(target_os = "windows", test))]
+            commit: tab.history.current_commit_id,
+            doc: tab.doc.clone(),
+            edit_path: tab.session.edit_path.clone(),
+            editing_group_path: tab.session.editing_group_path.clone(),
+            floating: tab.history.snapshot_floating(tab.session.floating()),
+        })
+    }
+}
+
+/// 確認なしに終わるときに書く、未保存のタブの控え（画面の毎コマの終わりに、タブの文書が変わったときだけ控え直す：
+/// `refresh`）。OS がアプリを終わらせる知らせ（Windows のログアウト・再起動・シャットダウン）は、画面の処理の外から来て、
+/// そのときにはタブを読めないので、書く中身をここに控えておく（Windows で使う。テストでは Mac でも同じものを確かめる）
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Default)]
+pub(crate) struct UnsavedTabs(Arc<Mutex<Vec<UnsavedTab>>>);
+
+#[cfg(any(target_os = "windows", test))]
+impl UnsavedTabs {
+    /// タブ `tabs` の今の控えにする（控えるタブとその文書の世代が前と同じなら何もしない）
+    pub(crate) fn refresh(&self, tabs: &[Tab]) {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = tabs
+            .iter()
+            .filter(|t| t.history.is_dirty() && t.file.is_some())
+            .map(|t| (t.id, t.history.current_commit_id, t.file.as_deref()));
+        if !now.eq(held.iter().map(|u| (u.id, u.commit, Some(u.file.as_path())))) {
+            *held = tabs.iter().filter_map(UnsavedTab::of).collect();
+        }
+    }
+
+    /// 今の控え
+    pub(crate) fn get(&self) -> Vec<UnsavedTab> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
 /// アプリ専用の復旧フォルダの場所を返す（環境変数が無ければ `None`）
 pub(crate) fn default_recovery_dir() -> Option<PathBuf> {
     let env_dir = |k: &str| {
@@ -44,39 +110,42 @@ pub(crate) fn default_recovery_dir() -> Option<PathBuf> {
 impl Recovery {
     /// 確認なしにアプリが終了するとき、保存したことのある未保存タブの復旧ファイルと一覧を書き出す
     pub(crate) fn write_unsaved_tabs(&self, tabs: &[Tab]) {
+        let items: Vec<UnsavedTab> = tabs.iter().filter_map(UnsavedTab::of).collect();
+        self.write_unsaved(&items);
+    }
+
+    /// 未保存のタブの控え `items` の復旧ファイルと一覧を書き出す（書き方はこれ1つ：アプリの終わり `on_exit` と、OS の
+    /// セッションの終わり `session_end_windows`）
+    pub(crate) fn write_unsaved(&self, items: &[UnsavedTab]) {
         let Some(dir) = &self.dir else {
             return;
         };
-        if !tabs
-            .iter()
-            .any(|t| t.history.is_dirty() && t.file.is_some())
-            || std::fs::create_dir_all(dir).is_err()
-        {
+        if items.is_empty() || std::fs::create_dir_all(dir).is_err() {
             return;
         }
         let pid = std::process::id();
-        for tab in tabs
-            .iter()
-            .filter(|t| t.history.is_dirty() && t.file.is_some())
-        {
-            let Some((parent, name)) = tab
-                .file
-                .as_deref()
+        for item in items {
+            let Some((parent, name)) = Some(item.file.as_path())
                 .and_then(|p| Some((p.parent()?, p.file_name()?.to_str()?)))
             else {
                 continue;
             };
             // 浮いた片を置けなければ、片を持ち上げる前の文書を書く（復旧は、何も書かないより前の絵を残す）
-            let doc = tab
-                .committed_document_copy()
-                .unwrap_or_else(|| tab.doc.clone());
+            let doc = crate::canvas_tool::committed_document(
+                (item.id, item.untitled_number),
+                &item.doc,
+                &item.edit_path,
+                &item.editing_group_path,
+                item.floating.as_deref(),
+            )
+            .unwrap_or_else(|| item.doc.clone());
             let mut proj_doc = ProjectDocument::of(&doc);
-            proj_doc.recovery_source = tab.file.clone();
+            proj_doc.recovery_source = Some(item.file.clone());
 
-            let entry_path = dir.join(format!("{pid}-{}.entry", tab.id));
+            let entry_path = dir.join(format!("{pid}-{}.entry", item.id));
             let rec_name = format!("RECOVER_{name}");
             let primary_path = parent.join(&rec_name);
-            let fallback_path = dir.join(format!("{pid}-{}-{rec_name}", tab.id));
+            let fallback_path = dir.join(format!("{pid}-{}-{rec_name}", item.id));
 
             if std::fs::write(&entry_path, primary_path.to_string_lossy().as_bytes()).is_err() {
                 continue;
@@ -173,6 +242,30 @@ impl Recovery {
             ws.notify_info(format!(
                 "前回保存されなかった作業を {restored} 件復元しました"
             ));
+        }
+    }
+
+    /// このアプリ（今のプロセス）が書いた復旧ファイルと一覧を消す（OS がセッションを終わらせるのをやめたとき：書いた
+    /// ものが残ると、次の起動で、もう要らない復元を聞いてしまう）
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn discard_written(&self) {
+        let Some(dir) = &self.dir else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let own = format!("{}-", std::process::id());
+        for path in entries.flatten().map(|e| e.path()) {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with(&own) && name.ends_with(".entry") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let _ = std::fs::remove_file(PathBuf::from(content.trim()));
+                }
+                let _ = std::fs::remove_file(&path);
+            }
         }
     }
 

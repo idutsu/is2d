@@ -2230,6 +2230,29 @@ impl Default for Tab {
     }
 }
 
+/// 文書 `doc` に、浮いている片 `floating`（編集位置 `edit_path`・グループの階層 `editing_group_path` で持ち上げたもの）を
+/// 置いた写し（タブ `(id, untitled_number)` の一時的な写しの上で確定し、元の文書には触れない）。片が無いか変わっていなければ
+/// 文書の写しのまま。`None`：浮いた片を置けない（`commit_floating_layers` が断る）。確定した文書の写しを作るのはこれ1つ
+/// （`Tab::committed_document_copy` と、確認なしに終わるときの復旧ファイル：`recovery::UnsavedTab`）
+pub(crate) fn committed_document(
+    (id, untitled_number): (u64, usize),
+    doc: &Document,
+    edit_path: &EditPath,
+    editing_group_path: &[u64],
+    floating: Option<&Floating>,
+) -> Option<Document> {
+    let Some(fl) = floating.filter(|fl| fl.modified) else {
+        return Some(doc.clone());
+    };
+    let mut temp_tab = Tab::new_empty(id, untitled_number);
+    temp_tab.doc = doc.clone();
+    temp_tab.session.edit_path = edit_path.clone();
+    temp_tab.session.editing_group_path = editing_group_path.to_vec();
+    temp_tab.session.set_floating(Some(fl.clone()));
+    temp_tab.refresh_scene_base();
+    commit_floating(&mut temp_tab).then_some(temp_tab.doc)
+}
+
 impl Tab {
     /// 指定された `id` と `untitled_number` で空の初期タブを生成する
     pub(crate) fn new_empty(id: u64, untitled_number: usize) -> Self {
@@ -2574,17 +2597,13 @@ impl Tab {
     /// 浮いている片（`Floating`）がある場合は一時タブ上で確定した `Document` の写しを返し、元のタブや文書には触れない。
     /// `None`：浮いた片を置けない（`commit_floating_layers` が断る。文書は、片を持ち上げる前のまま）
     pub(crate) fn committed_document_copy(&self) -> Option<Document> {
-        if let Some(fl) = self.session.floating().filter(|fl| fl.modified) {
-            let mut temp_tab = Self::new_empty(self.id, self.untitled_number);
-            temp_tab.doc = self.doc.clone();
-            temp_tab.session.edit_path = self.session.edit_path.clone();
-            temp_tab.session.editing_group_path = self.session.editing_group_path.clone();
-            temp_tab.session.set_floating(Some(fl.clone()));
-            temp_tab.refresh_scene_base();
-            commit_floating(&mut temp_tab).then_some(temp_tab.doc)
-        } else {
-            Some(self.doc.clone())
-        }
+        committed_document(
+            (self.id, self.untitled_number),
+            &self.doc,
+            &self.session.edit_path,
+            &self.session.editing_group_path,
+            self.session.floating(),
+        )
     }
 
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {

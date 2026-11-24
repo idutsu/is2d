@@ -29,6 +29,8 @@ mod video_export;
 #[cfg(target_os = "macos")]
 mod video_export_macos;
 #[cfg(target_os = "windows")]
+mod session_end_windows;
+#[cfg(target_os = "windows")]
 mod video_export_windows;
 
 use std::time::Instant;
@@ -77,6 +79,15 @@ fn main() -> eframe::Result<()> {
             app.timeline_ui.audio = audio_out::AudioOut::open(&cc.egui_ctx);
             app.recovery.dir = recovery::default_recovery_dir();
             app.recovery.find_leftovers();
+            // Windows のログアウト・再起動・シャットダウンでも、止められる前に復旧ファイルを書く（winit はその知らせを受け
+            // 取らないので、窓の受け口を包む）
+            #[cfg(target_os = "windows")]
+            {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Some(RawWindowHandle::Win32(w)) = cc.window_handle().ok().map(|h| h.as_raw()) {
+                    session_end_windows::install(w.hwnd.get(), app.recovery.dir.clone(), app.unsaved.clone());
+                }
+            }
             Ok(Box::new(app))
         }),
     )
@@ -197,6 +208,9 @@ pub(crate) struct Is2dApp {
     pub(crate) video_export: Option<video_export::VideoExportJob>,
     /// 確認なし終了時の復旧ファイル書き出し・次回起動時の復元管理状態
     pub(crate) recovery: recovery::Recovery,
+    /// 確認なしに終わるときに書く、未保存のタブの控え（Windows のセッションの終わりで書く：`session_end_windows`）
+    #[cfg(target_os = "windows")]
+    pub(crate) unsaved: recovery::UnsavedTabs,
     /// 直近フレームの中央キャンバス描画領域（スクリーン座標。画面に1つだけで、どのタブでも同じ）
     pub(crate) canvas_rect: egui::Rect,
     /// OS のメニューバーの「ファイル」「編集」「表示」（Mac。起動のときに作る。テストでは作らない）
@@ -221,6 +235,8 @@ impl Default for Is2dApp {
             allow_viewport_close: false,
             video_export: None,
             recovery: recovery::Recovery::default(),
+            #[cfg(target_os = "windows")]
+            unsaved: recovery::UnsavedTabs::default(),
             canvas_rect: egui::Rect::from_min_max(Pos2::new(52.0, 30.0), Pos2::new(1000.0, 590.0)),
             #[cfg(target_os = "macos")]
             os_menu: None,
@@ -1168,6 +1184,9 @@ impl Is2dApp {
         }
         project_io::update_window_title(self, ctx);
         timeline_ui::scrub_on_frame_change(self);
+        // 確認なしに終わるときに書く控えを、今のタブにする（文書が変わったタブがあるときだけ写し直す）
+        #[cfg(target_os = "windows")]
+        self.unsaved.refresh(&self.tabs);
     }
 }
 

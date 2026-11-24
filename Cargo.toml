@@ -42,10 +42,13 @@ coreaudio-sys = { version = "=0.2.18", default-features = false, features = ["co
 eframe = { version = "0.31", default-features = false, features = ["x11"] }
 
 [target.'cfg(windows)'.dependencies]
-# 動画の書き出し（Media Foundation の書き込む係 IMFSinkWriter で、H.264・AAC の MP4 を書く：src/video_export_windows.rs）と、
+# 動画の書き出し（Media Foundation の書き込む係 IMFSinkWriter で、H.264・AAC の MP4 を書く：src/video_export_windows.rs）・
+# セッションの終わりを受け取ってアプリが止められる前に復旧ファイルを書くこと（src/session_end_windows.rs）と、
 # そのための COM の始まり・終わり、Media Foundation の DLL があるかの確かめ。版は eframe（accesskit_windows）が Windows で
 # もう使っている 0.58.0 にそろえ、同じ道具の2つ目の版を増やさない
-windows = { version = "=0.58.0", default-features = false, features = ["std", "Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_LibraryLoader"] }
+windows = { version = "=0.58.0", default-features = false, features = ["std", "Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Shutdown", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# セッションの終わり（ログアウト・再起動）を受け取るために、アプリの窓を引く（src/session_end_windows.rs）。eframe と同じ版
+raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
 fastrand = "2"
