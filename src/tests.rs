@@ -20511,6 +20511,39 @@ fn test_cross_tab_symbol_roundtrip_paste_reuses_original_symbol() {
     assert_eq!(app.doc.library.len(), 1);
 }
 
+/// レビュー d91cd4c の N-3003：浮いた片の確定を断られた（置けない）ら、輪郭の頂点・辺をつかんでも、輪郭のドラッグを始めない
+/// （浮いた片はみな選ばれたまま。矩形選択などにも落ちない）。前は、断られたのを見ずに始め、選択を空にして浮いた片の表示を
+/// 消し、離しても何も起きなかった
+#[test]
+fn grabbing_an_outline_after_a_refused_placement_starts_nothing() {
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(235, 75, 75);
+    let blue = Color32::from_rgb(55, 135, 245);
+    let green = Color32::from_rgb(40, 180, 90);
+    put_cel_shapes(&mut app, 0, 0, make_stroke(Point::new(100.0, 200.0), Point::new(300.0, 200.0), 25.0, red));
+    doc_actions::apply(&mut app, doc_actions::Action::AddLayer);
+    put_cel_shapes(&mut app, 1, 0, make_stroke(Point::new(100.0, 300.0), Point::new(300.0, 300.0), 25.0, blue));
+    // 浮いた片に入らない、つかむための四角（レイヤー 0。浮いた片を置けなくしても、こちらはつかめる）
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    let mut both = make_stroke(Point::new(100.0, 200.0), Point::new(300.0, 200.0), 25.0, red);
+    both.push(map_overlay::rect_shape(500.0, 500.0, 600.0, 600.0, green));
+    put_cel_shapes(&mut app, 0, 0, both);
+    doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Select });
+    select_ops::apply_marquee_selection(&mut app, Point::new(50.0, 150.0), Point::new(350.0, 350.0), false);
+    doc_actions::finish_move_selection_drag(&mut app, KVec2::new(0.0, 100.0), false);
+    assert!(app.session.floating().is_some());
+    // 置く先のレイヤーの1つを編集できなくする（置けない場面の代わり）
+    app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[1].locked = true);
+    for grab in [Point::new(500.0, 500.0), Point::new(550.0, 500.0)] {
+        app.toast = None;
+        tool_select::start_reshape_drag(&mut app, grab, false, false);
+        assert!(app.toast.is_some(), "{grab:?}：置けないことを知らせない");
+        assert!(matches!(app.session.drag, canvas_tool::ActiveCanvasDrag::None), "{grab:?}：断られたのにドラッグを始めた");
+        assert!(app.session.floating().is_some());
+        assert!(!app.session.selection.is_empty(), "{grab:?}：浮いた片が選ばれていない");
+    }
+}
+
 /// レビュー d91cd4c の N-3001：スポイトは、ロックの有無によらず、点でいちばん手前に見えているものを吸う。見えているのが
 /// 線なら線の色と太さを線の設定に、塗りなら塗りの色に（前は、線かどうかをロック中のレイヤーを含まない画面の図形だけで
 /// 決めたので、ロックした上の塗りの下の線を吸い、ロックしたレイヤーの線の色を塗りの色に入れていた）

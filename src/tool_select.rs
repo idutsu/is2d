@@ -184,12 +184,12 @@ fn handle_anchor_edit_input(
     }
 }
 
-/// 地図での変形のドラッグを始める：レイヤー `layer_id` の地図から、ドラッグのあいだ使う元の地図と階層を作り、選択と仮表示を空にする
+/// 地図での変形のドラッグを始める：レイヤー `layer_id` の地図から、ドラッグのあいだ使う元の地図と階層を作り、仮表示を空にする
+/// （選択は空のとき：呼ぶ側が先に外す。選択を外すのは `clear_selection` だけ）
 fn begin_map_drag(tab: &mut Tab, layer_id: LayerId) -> Option<(Arc<LayerBase>, Vec<u64>)> {
     let maps = scope_maps(tab.scene(), &tab.session);
     let lm = maps.maps.iter().find(|m| m.layer_id == layer_id)?;
     let (base, group_path) = (lm.base.clone(), lm.group_path.clone());
-    tab.session.selection.clear();
     tab.session
         .set_reshape_overlay(&[], Vec::new(), layer_id, &group_path);
     Some((base, group_path))
@@ -230,7 +230,10 @@ pub(crate) fn start_reshape_drag(
         HoverTarget::Vertex { .. } | HoverTarget::Edge { .. }
     ) && (!host.tab().session.selection.is_empty() || host.tab().session.floating().is_some())
     {
-        apply(host, Action::Deselect);
+        // 浮いた片の確定を断られたら、何も始めない（浮いた片はみな選ばれたまま）
+        if !apply(host, Action::Deselect) {
+            return;
+        }
         target = compute_hover_target(
             host.tab().scene(),
             &host.tab().session,
