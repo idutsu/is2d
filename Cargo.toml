@@ -37,6 +37,10 @@ block2 = "=0.6.2"
 # cpal がもう使っている版と機能にそろえ、増やさない
 coreaudio-sys = { version = "=0.2.18", default-features = false, features = ["core_audio"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux で窓を開く仕組み（X11）。Linux でもビルドしてテストを回せるようにする（サーバーでのレビュー）。macOS・Windows には効かない
+eframe = { version = "0.31", default-features = false, features = ["x11"] }
+
 [target.'cfg(windows)'.dependencies]
 # 動画の書き出し（Media Foundation の書き込む係 IMFSinkWriter で、H.264・AAC の MP4 を書く：src/video_export_windows.rs）と、
 # そのための COM の始まり・終わり、Media Foundation の DLL があるかの確かめ。版は eframe（accesskit_windows）が Windows で
