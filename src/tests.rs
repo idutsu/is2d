@@ -20511,6 +20511,30 @@ fn test_cross_tab_symbol_roundtrip_paste_reuses_original_symbol() {
     assert_eq!(app.doc.library.len(), 1);
 }
 
+/// レビュー d91cd4c の N-5002：オニオンスキンで描いたコマの、地図の計算に使う写し（面と線の図形の表を持つ）は、オニオン
+/// スキンの写しが持っているので、そのコマを今のコマとして描くときに作り直さない（前は、オニオンスキンの写しを作ると計算に
+/// 使う写しを捨てたので、同じコマの面と線の図形を2回ずつ作り、線の多い作品のスクラブが重かった）
+#[test]
+fn onion_skin_keeps_the_cel_copies_it_drew() {
+    let mut app = Is2dApp::default();
+    for f in [0usize, 2] {
+        timeline_ui::switch_to_layer_and_frame(&mut app, 0, f);
+        assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
+        put_cel_shapes(&mut app, 0, f, vec![map_overlay::rect_shape(10.0 + f as f64, 10.0, 90.0, 90.0, Color32::RED)]);
+    }
+    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    app.tab_mut().view.onion_skin_enabled = true;
+    app.tab_mut().view.onion_next_frames = 2;
+    let ctx = egui::Context::default();
+    let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
+    let _ = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
+    // コマ 2 のセル画はオニオンスキンに描いた：その計算に使う写しを、オニオンスキンの写しも持っている
+    let tl = app.tab().active_timeline();
+    let kf = tl.layers[0].keyframe_index_at(2).unwrap();
+    let base = tl.layers[0].keyframes[kf].cel.maps[0].base();
+    assert!(std::sync::Arc::strong_count(&base) >= 2, "オニオンスキンの写しが、計算に使う写しを持っていない");
+}
+
 /// レビュー d91cd4c の N-5001：OS がアプリを止める知らせ（Windows のセッションの終わり）で書く、未保存のタブの控え。
 /// 控えは文書が変わったときだけ控え直し、控えから、アプリの終わり（`on_exit`）と同じ復旧ファイルを書く。浮いた片は
 /// 置いた形で書く。セッションの終わりをやめたら、書いたものを消す（次の起動で要らない復元を聞かない）。控えを書く所は

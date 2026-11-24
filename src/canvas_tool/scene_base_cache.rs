@@ -298,6 +298,9 @@ fn reuse_caches_by_key(shapes: &mut [FillShape], donors: &[FillShape]) {
 /// 画面の写しの鍵：ズーム・パン（ビット）と色の変え方
 type CelScreenKey = (u32, u32, u32, CelTint);
 
+/// 組み立てたセル画：ワールド座標の結合メッシュとその図形（何も描かないなら `None`）と、地図の計算に使う写し
+type Built = (Option<(egui::Mesh, Vec<Arc<FillShape>>)>, Vec<Arc<crate::planar_map::LayerBase>>);
+
 /// 描くセル画のある所：タイムライン（ルートは `None`、シンボルの中はシンボルの番号）と、描かないインスタンス（シンボルの
 /// 中を編集しているときの親の背景では、編集しているインスタンス。その中身は、編集している所として描く）
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -315,6 +318,10 @@ struct CachedCel {
     world_mesh: Option<egui::Mesh>,
     /// `world_mesh` にした図形（描く順。下から。メッシュの写しは持たない：`Timeline::build_cel_world`）
     shapes: Vec<Arc<FillShape>>,
+    /// セル画の地図の計算に使う写し（面と線の図形の表を持つ）。写しを持つ間は生かしておくので、同じセル画を今のコマとして
+    /// 描くとき（画面の土台）や、オニオンスキンの反対側に移ったときに、面と線の図形を作り直さない（しまう地図が生きている
+    /// 写しを返す：`LayerBase::of_stored`）。持つだけで読まない
+    _bases: Vec<Arc<crate::planar_map::LayerBase>>,
     /// 画面座標に写したもの（止まっている間は写し直さない）と、直前の描画で使ったか
     screens: Vec<(CelScreenKey, Arc<egui::Mesh>, bool)>,
     /// 直前の描画で使ったか
@@ -487,7 +494,7 @@ impl CelMeshCache {
         scope: CelScope,
         library: &Library,
         key: &CelKey,
-        built: Option<(egui::Mesh, Vec<Arc<FillShape>>)>,
+        (built, bases): Built,
     ) -> usize {
         let (world_mesh, shapes) = built.map_or((None, Vec::new()), |(m, s)| (Some(m), s));
         let layer = &tl.layers[key.layer_idx];
@@ -507,6 +514,7 @@ impl CelMeshCache {
             ),
             world_mesh,
             shapes,
+            _bases: bases,
             screens: Vec::new(),
             used: false,
         });
@@ -554,13 +562,21 @@ impl CelKey {
         scope: CelScope,
         world_xform: Affine,
         ctx: SymbolEvalCtx<'_>,
-    ) -> Option<(egui::Mesh, Vec<Arc<FillShape>>)> {
-        tl.build_cel_world(
+    ) -> Built {
+        // 計算に使う写しを先に手に入れて持つ（組み立てはこの写しを使い、面と線の図形の表がこの写しに残る）
+        let bases = tl.layers[self.layer_idx].keyframes[self.kf_idx]
+            .cel
+            .maps
+            .iter()
+            .map(|m| m.base())
+            .collect();
+        let built = tl.build_cel_world(
             self.layer_idx,
             self.frame,
             world_xform,
             scope.excluded_instance,
             ctx,
-        )
+        );
+        (built, bases)
     }
 }
