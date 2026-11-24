@@ -1651,10 +1651,17 @@ impl Session {
     /// 自由変形ドラッグ中、`orig_shapes` に対してキャッシュ済みメッシュ頂点バッファを再利用して `affine` を `overlay.add` へ適用する
     pub(crate) fn update_transform_overlay(&mut self, orig_shapes: &[FillShape], affine: Affine) {
         let start = self.overlay_movable_start.min(self.overlay.add.len());
+        let world = self.edit_path.world_xform();
         for ((_, overlay_shape), orig_shape) in
             self.overlay.add[start..].iter_mut().zip(orig_shapes.iter())
         {
-            overlay_shape.transform_from_origin(orig_shape, affine);
+            // 生の絵とグループの線は、拡大しても太さが変わらない（確定と同じ形。シンボルの中の線は図形ごと写して太くなる）
+            if orig_shape.line.is_some() && orig_shape.symbol_instance.is_none() {
+                overlay_shape.clone_from(orig_shape);
+                overlay_shape.transform_keeping_line_width(affine, world);
+            } else {
+                overlay_shape.transform_from_origin(orig_shape, affine);
+            }
         }
     }
 

@@ -38915,6 +38915,73 @@ mod strokes {
     }
 
     #[test]
+    fn a_moved_or_scaled_group_keeps_its_lines_selected() {
+        // 線を乗せた正方形をグループにして、動かす・拡大する。グループの線はみな選ばれたままで、選択の外接矩形は線の太さ
+        // まで入る（前は、線の番号が形の場所から決まるので、動かすと線が選択から外れ、外接矩形が塗りだけになって、線の
+        // 太さの真ん中を通った）
+        for scale in [false, true] {
+            let mut app = inked_square_app();
+            assert!(apply(&mut app, Action::SelectAll));
+            assert!(apply(&mut app, Action::Group));
+            if scale {
+                assert!(apply(&mut app, Action::ScaleSelection { sx: 2.0, sy: 2.0 }));
+            } else {
+                assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(30.0, 20.0), alt_duplicate: false }));
+            }
+            let place = if scale { "拡大" } else { "移動" };
+            for s in app.session.scene().iter() {
+                assert!(app.session.is_shape_id_selected(s.shape_id), "{place}：選択から外れた図形がある（線 {}）", s.line.is_some());
+            }
+            let (b, _) = app.session.selection_bbox_and_pivot(1.0).unwrap();
+            // 線の図形（太さまで）をみな合わせた外形
+            let moved = app.session.scene().iter().map(|s| s.bounding_box()).reduce(|a, b| a.union(b)).unwrap();
+            assert!(app.session.scene().iter().any(|s| s.line.is_some()));
+            let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+            assert!(
+                near(b.x0, moved.x0) && near(b.y0, moved.y0) && near(b.x1, moved.x1) && near(b.y1, moved.y1),
+                "{place}：選択の外接矩形が線の太さまで入らない：{b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scaling_keeps_line_width_except_in_symbols() {
+        // 線（太さ 4）を乗せた正方形を2倍にする。生の絵とグループの線は、拡大しても太さが変わらない：選んでいる間（浮いた片）
+        // も、拡大のドラッグ中も、確定したあとも 4。シンボルの線は一緒に太くなる（8）。前は、選んでいる間とドラッグ中だけ、
+        // 線の図形をそのまま拡大して太く見えた（確定すると 4 に戻った）
+        let thickness = |app: &Is2dApp| -> Vec<f64> {
+            let mut v: Vec<f64> = app.scene().iter().filter(|s| s.line.is_some()).map(|s| {
+                let b = s.bounding_box();
+                b.width().min(b.height())
+            }).collect();
+            v.sort_by(f64::total_cmp);
+            v.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+            v
+        };
+        let near = |v: &[f64], w: f64| v.iter().all(|t| (t - w).abs() < 1e-6) && !v.is_empty();
+        // 生の絵
+        let mut app = inked_square_app();
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::ScaleSelection { sx: 2.0, sy: 2.0 }));
+        assert!(near(&thickness(&app), 4.0), "生の絵：選んでいる間 {:?}", thickness(&app));
+        assert!(apply(&mut app, Action::Deselect));
+        assert!(near(&thickness(&app), 4.0), "生の絵：確定したあと {:?}", thickness(&app));
+        // グループの拡大のドラッグ中
+        let mut app = inked_square_app();
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::Group));
+        let orig = app.session.begin_transform_overlay();
+        app.session.update_transform_overlay(&orig, Affine::scale_about(2.0, Point::new(200.0, 200.0)));
+        assert!(near(&thickness(&app), 4.0), "グループ：ドラッグ中 {:?}", thickness(&app));
+        // シンボル
+        let mut app = inked_square_app();
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::ConvertToSymbol));
+        assert!(apply(&mut app, Action::ScaleSelection { sx: 2.0, sy: 2.0 }));
+        assert!(near(&thickness(&app), 8.0), "シンボル：拡大したあと {:?}", thickness(&app));
+    }
+
+    #[test]
     fn the_pencil_draws_a_smooth_line_with_few_curves() {
         let mut app = Is2dApp::default();
         apply(&mut app, Action::SetTool { tool: Tool::Pencil });

@@ -386,8 +386,9 @@ impl Floating {
                 for f in g.hold().drawn_shapes(scope) {
                     let mut s = (*f).clone();
                     s.layer_id = layer_id;
+                    // 生の絵の線は、拡大しても太さが変わらない（確定して地図の辺に変換をかけたのと同じ形）
                     if g.xform != Affine::IDENTITY {
-                        s.transform(g.xform);
+                        s.transform_keeping_line_width(g.xform, Affine::IDENTITY);
                     }
                     s.place(world);
                     self.pieces.push(s);

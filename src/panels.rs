@@ -1937,7 +1937,9 @@ pub(crate) fn draw_canvas_contents(
 
     tab.view
         .draw_stage_foreground_overlay(painter, stage_size, shows_stage);
-    draw_selected_group_and_symbol_boxes(tab, painter, &selected_group_boxes);
+    // 自由変形ツールでは、選んだものを変形の枠が囲むので、グループ・シンボルの選択の枠は描かない（Animate と同じ。枠が
+    // 二重にならない）
+    draw_selected_group_and_symbol_boxes(tab, painter, &selected_group_boxes, tool.tool != Tool::Transform);
 
     if tool.tool == Tool::Transform {
         crate::tool_transform::draw_free_transform_box(&tab.session, painter, &tab.view);
@@ -2050,21 +2052,25 @@ fn draw_editable_layer_shapes(
     }
 }
 
-/// 選択中のグループ塊およびシンボルインスタンス（水色枠＋シンボルは基準点 `＋` マーク）、シンボル編集中の基準点を描画
+/// 選択中のグループ塊およびシンボルインスタンス（水色枠＋シンボルは基準点 `＋` マーク）、シンボル編集中の基準点を描画。
+/// 水色枠は `boxes` のときだけ（自由変形ツールでは変形の枠が囲むので描かない）
 fn draw_selected_group_and_symbol_boxes(
     tab: &Tab,
     painter: &egui::Painter,
     selected_group_boxes: &[(u64, Option<KRect>, KRect, Option<Point>)],
+    boxes: bool,
 ) {
     for &(_, geom_bbox, fallback_bbox, sym_reg) in selected_group_boxes {
-        let g_bbox = geom_bbox.unwrap_or(fallback_bbox);
-        let rect = tab.view.world_rect_to_screen(g_bbox).expand(2.0);
-        painter.rect_stroke(
-            rect,
-            0.0,
-            Stroke::new(1.0_f32, Color32::from_rgb(0, 165, 255)),
-            egui::StrokeKind::Middle,
-        );
+        if boxes {
+            let g_bbox = geom_bbox.unwrap_or(fallback_bbox);
+            let rect = tab.view.world_rect_to_screen(g_bbox).expand(2.0);
+            painter.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(0, 165, 255)),
+                egui::StrokeKind::Middle,
+            );
+        }
         if let Some(origin) = sym_reg {
             draw_registration_cross(painter, tab.view.world_to_screen(origin), 3.2, true);
         }

@@ -348,6 +348,9 @@ pub(crate) struct FillShape {
     /// 線の図形なら、線の中心を通る曲線（地図の辺。つながった順）。輪郭の表示とアンカーは、太らせた形の輪郭でなく、これで
     /// 描く（`wire_contours`）。図形と同じ変換で写る
     spine: Option<Contour>,
+    /// 線の図形なら、線の始めと終わりの端の形（`planar_map::line_ends`。中心の曲線を写して作り直すとき：
+    /// `transform_keeping_line_width`）
+    line_ends: [crate::vector_stroke::LineEnd; 2],
     bbox: KRect,
     fill_mesh: OnceLock<Arc<Mesh>>,
     /// `fill_mesh` を作ったあとに、その頂点を写した変換の最大の拡大率を掛け合わせたもの（メッシュのずれは、作る許容の
@@ -369,6 +372,7 @@ impl FillShape {
             mesh_revision: 0,
             line: None,
             spine: None,
+            line_ends: [crate::vector_stroke::LineEnd::Cap; 2],
             bbox: KRect::ZERO,
             fill_mesh: OnceLock::new(),
             mesh_stretch: 1.0,
@@ -536,11 +540,56 @@ impl FillShape {
         self.mesh_revision = next_mesh_revision();
     }
 
-    /// 線の図形にする：線 `stroke` と、線の中心を通る曲線 `spine`（`LayerBase::lines`）
-    pub(crate) fn with_line(mut self, stroke: crate::planar_map::EdgeStroke, spine: Vec<QuadBez>) -> Self {
+    /// 線の図形にする：線 `stroke` と、線の中心を通る曲線 `spine` と、その端の形 `ends`（`LayerBase::lines`）
+    pub(crate) fn with_line(
+        mut self,
+        stroke: crate::planar_map::EdgeStroke,
+        spine: Vec<QuadBez>,
+        ends: [crate::vector_stroke::LineEnd; 2],
+    ) -> Self {
         self.line = Some(stroke);
         self.spine = Some(Contour::new(spine));
+        self.line_ends = ends;
         self
+    }
+
+    /// 線の図形を、線の太さはそのままに、中心の曲線に変換 `affine`（ステージの座標）をかけた所へ作り直す。生の絵とグループの
+    /// 線は、拡大しても太さが変わらない（確定すると地図の辺に変換をかけ、同じ太さの線で作り直す：その形と同じ。シンボルの線は
+    /// 図形ごと写す `transform` で、一緒に太くなる）。図形はステージの座標で、線の太さが決まる編集中の階層の座標からステージ
+    /// への変換が `world`。線の図形でなければ（作り直せなければ）`transform` と同じ
+    pub(crate) fn transform_keeping_line_width(&mut self, affine: Affine, world: Affine) {
+        let (Some(stroke), Some(&q)) = (self.line, self.spine.as_ref().and_then(|s| s.segments.first())) else {
+            self.transform(affine);
+            return;
+        };
+        if !affine.is_finite() || world.determinant() == 0.0 {
+            self.transform(affine);
+            return;
+        }
+        let inv = world.inverse();
+        let doc = inv * affine * world;
+        let at = |p: Point| doc * (inv * p);
+        let qd = QuadBez::new(at(q.p0), at(q.p1), at(q.p2));
+        let ends = self.line_ends.map(|e| e.transformed(doc));
+        let Some((exterior, holes, mesh)) = crate::planar_map::line_band(qd, stroke, ends) else {
+            self.transform(affine);
+            return;
+        };
+        let mut s = FillShape {
+            exterior,
+            holes,
+            spine: Some(Contour::new(vec![qd])),
+            line_ends: ends,
+            fill_mesh: OnceLock::new(),
+            mesh_stretch: 1.0,
+            hit_bez_path: OnceLock::new(),
+            ..self.clone()
+        };
+        s.bbox = s.compute_bbox();
+        let mut s = s.with_mesh(mesh);
+        s.mesh_revision = next_mesh_revision();
+        s.place(world);
+        *self = s;
     }
 
     /// 輪郭と同じ形のメッシュ `mesh` を、先に持たせる（線の図形：帯で直接作ったメッシュ `quad_band_mesh`。変換で許すずれを

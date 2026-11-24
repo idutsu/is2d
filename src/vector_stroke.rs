@@ -809,6 +809,19 @@ pub(crate) enum LineEnd {
     Join(KVec2),
 }
 
+impl LineEnd {
+    /// 変換 `affine` をかけた所での同じ端の形（つなぎ目の隣の線の向きは、変換の線形の部分で写して長さ 1 にする）
+    pub(crate) fn transformed(self, affine: Affine) -> Self {
+        match self {
+            LineEnd::Join(v) => {
+                let [a, b, c, d, _, _] = affine.as_coeffs();
+                LineEnd::Join(normalize_vec(KVec2::new(a * v.x + c * v.y, b * v.x + d * v.y)))
+            }
+            e => e,
+        }
+    }
+}
+
 /// 2次ベジェ `q` を中心線にして、半径 `r` で太らせた形（線の図形：`planar_map::line_shape`）の、輪郭と、色 `color` の
 /// メッシュ。中心線の点（`quad_samples`）の左右に半径ずつずらした帯と、両端（始め・終わり）の形 `ends` でできる（刻みは
 /// 弦のずれ `eps` から決める：`arc_step`）：途切れる端は半円、つなぎ目は何も足さないか、2本の帯の外側のすき間を埋める扇

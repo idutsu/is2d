@@ -1079,8 +1079,25 @@ fn line_shape(
     group_path: &[u64],
 ) -> Option<FillShape> {
     let stroke = te.stroke?;
+    let (exterior, holes, mesh) = line_band(te.quad(), stroke, ends)?;
+    let mut s = FillShape::new(stroke.color, exterior, holes)
+        .with_scope(0, group_path)
+        .with_line(stroke, vec![te.quad()], ends)
+        .with_mesh(mesh);
+    s.shape_id = id;
+    Some(s)
+}
+
+/// 中心の曲線 `q`・線 `stroke`・端の形 `ends` の線の図形の、輪郭（外周と、つなぎ目の扇）とメッシュ（中心線の左右の帯と端の形
+/// から直接作る：`quad_band`。描画の許容 `MESH_TOL`。メッシュは多角形を三角形に分けず、帯から直接作ったもの）。線の形を作る
+/// のはこれ1つ（地図の線の図形 `line_shape` と、太さを変えずに写して作り直す `FillShape::transform_keeping_line_width`）
+pub(crate) fn line_band(
+    q: QuadBez,
+    stroke: EdgeStroke,
+    ends: [crate::vector_stroke::LineEnd; 2],
+) -> Option<(Contour, Vec<Contour>, eframe::egui::Mesh)> {
     let (rings, mesh) = crate::vector_stroke::quad_band(
-        te.quad(),
+        q,
         stroke.width as f64 / 2.0,
         crate::vector_engine::MESH_TOL,
         stroke.color,
@@ -1096,13 +1113,7 @@ fn line_shape(
         Contour::new(segs)
     });
     let exterior = contours.next()?;
-    // メッシュは、多角形を三角形に分けず、帯から直接作ったもの（輪郭と同じ形）
-    let mut s = FillShape::new(stroke.color, exterior, contours.collect())
-        .with_scope(0, group_path)
-        .with_line(stroke, vec![te.quad()])
-        .with_mesh(mesh);
-    s.shape_id = id;
-    Some(s)
+    Some((exterior, contours.collect(), mesh))
 }
 
 /// 線を乗せた辺 `te` の、始め（`te.a`）と終わり（`te.b`）の端の形（線の端の決まりはこれ1つ）。`others(p)` は、点 `p` に端の
