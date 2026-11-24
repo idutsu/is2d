@@ -522,9 +522,12 @@ fn box_spline(s: &[f64], v: &[f64], hw: &[f64]) -> (Vec<f64>, Vec<f64>) {
 
 /// なめらかな中心線の点 `cs` を半径 `r` で太らせた形の輪郭（NonZero で塗る1本の閉じた折れ線）と、各点の輪郭の接線。
 ///
-/// 帯の点は、各点の法線の向き（`p ± r·n`）に置く。曲がる内側で、隣の点の法線と半径より内で交わる所（曲率半径が
-/// `r` より小さい所）は、区間の法線の帯と、中心の点を通る折り返しにする（塗った形が、各区間を太らせた形を合わせた
-/// ものになる）。その所の点は、中心の点の並びを弦のずれ `eps` で間引いてから使う。両端は半円のキャップで、
+/// 帯の点は、各点の法線の向き（`p ± r·n`）に置く。隣の法線と半径より内で交わる所（曲率半径が `r` より小さい所。
+/// 以下「きつい所」）は、区間の法線の帯にする（その所の点は、中心の点の並びを弦のずれ `eps` で間引いてから使う）。
+/// 帯の向きが変わるつなぎ目の決まりは1つ：その側から見て外へ回るなら、中心の点のまわりの半径 r の円弧（刻み φ）、
+/// きつい所の中で内へ回るなら、中心の点を通る折り返し（どちらも、塗った形が各区間を太らせた形を合わせたものになる）。
+/// きつくない点どうし・きつくない点ときつい所の境・きつい所の中の、どのつなぎ目にも同じ決まりを当てる（外へ回る所を
+/// 折り返しにすると、速さが 0 に近い折り返しの先の丸い端が欠ける：レビュー d91cd4c の N-2001）。両端は半円のキャップで、
 /// 刻みは弦のずれ `eps` から決める。`caps`（始め・終わり）が `false` の端は、キャップの代わりに、その点の法線に沿った
 /// 直径で平らに閉じる（区切りに分けて整理するとき：`stroke_shapes`）。1点だけなら円
 fn brush_outline(cs: &[Sample], r: f64, eps: f64, caps: [bool; 2]) -> (Vec<Point>, Vec<KVec2>) {
@@ -564,25 +567,31 @@ fn brush_outline(cs: &[Sample], r: f64, eps: f64, caps: [bool; 2]) -> (Vec<Point
         }
         t
     };
+    // 中心 c で、帯の向き a から b へ外へ回るつなぎ目の円弧の点（側 side。両端の点は入れない。刻みは φ 以下）
+    let arc = |c: Point, a: KVec2, b: KVec2, side: f64, v: &mut Vec<(Point, KVec2)>| {
+        let th = a.cross(b).atan2(a.dot(b));
+        let steps = (th.abs() / phi).ceil() as usize;
+        let d = left_normal(a) * side;
+        for k in 1..steps {
+            let (sn, cn) = (th * k as f64 / steps as f64).sin_cos();
+            let dir = KVec2::new(d.x * cn - d.y * sn, d.x * sn + d.y * cn);
+            v.push((c + dir * r, KVec2::new(-dir.y, dir.x)));
+        }
+    };
+    // 帯の向き a から b へ、側 side から見て外へ回るか（回る角は円弧と同じ atan2 で求める：ちょうど逆向きのときは +π
+    // になり、右の側が外になる。外積の符号だけで見ると、逆向きでどちらの側も外にならず、折り返しの先の丸い端が無くなる）
+    let outward = |a: KVec2, b: KVec2, side: f64| side * a.cross(b).atan2(a.dot(b)) < 0.0;
     let side_pts = |side: f64| -> Vec<(Point, KVec2)> {
         let tt = tight(side);
         let mut v = Vec::new();
         let mut i = 0;
         while i < n {
             if !tt[i] {
-                // 前の点から接線が外側へ刻み φ より大きく回るなら（速さが 0 に近い折り返しなど）、その間を、この点を
-                // 中心にした半径 r の円弧でつなぐ（`generate` の外側の円弧と同じ。円盤の和のふちを欠かさない）
-                if i > 0 && !tt[i - 1] {
-                    let th = cs[i - 1].t.cross(cs[i].t).atan2(cs[i - 1].t.dot(cs[i].t));
-                    if side * th < 0.0 && th.abs() > phi {
-                        let steps = (th.abs() / phi).ceil() as usize;
-                        for k in 1..steps {
-                            let a = th * k as f64 / steps as f64;
-                            let (sn, cn) = a.sin_cos();
-                            let d = nrm[i - 1] * side;
-                            let dir = KVec2::new(d.x * cn - d.y * sn, d.x * sn + d.y * cn);
-                            v.push((cs[i].p + dir * r, KVec2::new(-dir.y, dir.x)));
-                        }
+                // 前の点の帯の向き（前がきつい所なら、その最後の区間の向き）から外へ回るなら、この点を中心にした円弧
+                if i > 0 {
+                    let a = if tt[i - 1] { seg_dir[i - 1] } else { cs[i - 1].t };
+                    if outward(a, cs[i].t, side) {
+                        arc(cs[i].p, a, cs[i].t, side, &mut v);
                     }
                 }
                 v.push((cs[i].p + nrm[i] * (side * r), cs[i].t));
@@ -617,8 +626,16 @@ fn brush_outline(cs: &[Sample], r: f64, eps: f64, caps: [bool; 2]) -> (Vec<Point
                 } else {
                     cs[k].t
                 };
+                // きつくない点からきつい所に入るつなぎ目：前の点の向きから外へ回るなら、前の点を中心にした円弧
+                if kk == 0 && k > 0 && !tt[k - 1] && outward(cs[k - 1].t, din, side) {
+                    arc(cs[k - 1].p, cs[k - 1].t, din, side, &mut v);
+                }
                 v.push((p + left_normal(din) * (side * r), din));
-                v.push((p, cs[k].t));
+                if outward(din, dout, side) {
+                    arc(p, din, dout, side, &mut v);
+                } else {
+                    v.push((p, cs[k].t));
+                }
                 v.push((p + left_normal(dout) * (side * r), dout));
             }
             i += 1;

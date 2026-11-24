@@ -840,6 +840,32 @@ fn long_brush_stroke_keeps_its_shape() {
 /// - どのマウスの点も、どの中心線の点も塗られる（丸めの範囲と上限の中で）
 ///
 /// また、そのうち 200 本を 20 本ずつ同じ所に重ねて描き（ブラシ 3 色と消しゴム）、地図が正しいままであること
+/// レビュー d91cd4c の N-2001：速さが 0 に近い鋭い折り返しの先が欠けない。乱数の手描きの線で、種を変えると形が中心線から
+/// ずれた線（直す前はどれも失敗：折り返しの先の外へ回るつなぎ目を、円弧でなく中心を通る折り返しにしていたので、丸い端が
+/// 欠けて切れ込みができた）と、ちょうど逆向きに折り返す点のような線（外へ回るかを外積の符号だけで見ると、どちらの側も外に
+/// ならず、てっぺんが平らに欠ける）
+#[test]
+fn sharp_turn_tips_are_not_notched() {
+    let zooms = [0.25, 0.5, 1.0, 2.0, 4.0];
+    for (seed, line) in [(12345u64, 1658usize), (987654321, 950), (987654321, 1456), (0x1111_2222_3333, 997), (0x1111_2222_3333, 1153), (0x4444_5555_6666, 937), (0x4444_5555_6666, 466)] {
+        let mut rng = fastrand::Rng::with_seed(seed);
+        for k in 0..=line {
+            let zoom = zooms[rng.usize(0..zooms.len())];
+            let pts = random_hand_stroke(&mut rng, zoom);
+            let r_screen = 0.5 + 40.0 * rng.f64().powi(2);
+            if k == line {
+                let radius = (r_screen / zoom).clamp(0.5, 70.0);
+                let c = check_stroke_follows_centerline(&pts, radius, zoom);
+                assert!(
+                    c.worst_px <= STROKE_DEV_PX && c.outside_box + c.uncovered + c.missing == 0,
+                    "種 {seed:#x} の線 {line}（{} 点・半径 {radius:.2}・倍率 {zoom}）：{c:?}",
+                    pts.len()
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn random_hand_strokes_follow_their_centerlines() {
     let mut rng = fastrand::Rng::with_seed(0x0052_6000_2026);
