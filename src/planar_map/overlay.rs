@@ -48,15 +48,15 @@ pub(crate) enum MapRule {
 pub(super) enum Over {
     /// 重ねる形の中か（`MapInput::Shapes`）
     Inside(bool),
-    /// 重ねる地図の色（`MapInput::Map`。色があれば中）か、下から上へ並べた形の、そこでいちばん上の形の色（`MapInput::Stack`）
+    /// 重ねる地図の色（`MapInput::Map`。色があれば中）
     Color(Option<Color32>),
     /// 動かしたことによる、色ごとの巻き数の変わり方（`MapInput::Sweep`。並びは `swept_color`）
     Swept(Vec<(Option<Color32>, i32)>),
 }
 
 impl MapRule {
-    /// `apply` の新しい色に、その側の図形の番号を付けたもの：重ねるものの色を上に置いたなら（重ねる地図・下から上へ並べた
-    /// 形）重ねるものの番号 `over_src`、前の色のままなら前の番号、ほかは無し（新しい図形）
+    /// `apply` の新しい色に、その側の図形の番号を付けたもの：重ねるものの色を上に置いたなら（重ねる地図）
+    /// 重ねるものの番号 `over_src`、前の色のままなら前の番号、ほかは無し（新しい図形）
     pub(super) fn apply_label(self, over: &Over, over_src: Option<ShapeId>, old: Label) -> Label {
         let color = self.apply(over, old.0);
         let src = match (self, over) {
@@ -139,14 +139,12 @@ pub(crate) type LineSeg = (QuadBez, EdgeStroke);
 
 /// 重ねるもの：塗りの形（中は巻き数が奇数の所。i_overlay が数える）か、地図（中は色のある面。その座標で正しい地図で
 /// あること：前の地図の線に触れない辺は、そのまま写す）か、輪郭の変形で動かした辺（`MapRule::Sweep` で重ねる。後の曲線を
-/// 重ね、前の曲線＝元の地図の辺を引く分として数える）か、下から上へ並べた塗りの形（色は、巻き数が奇数の形のうち並びで
-/// いちばん上の形の色。重なる所は上の形が見える、という絵の決まりそのもの。`MapRule::Overlay` で重ねる）
+/// 重ね、前の曲線＝元の地図の辺を引く分として数える）
 #[derive(Clone, Copy)]
 pub(crate) enum MapInput<'a> {
     Shapes(&'a [FillShape]),
     Map(&'a PlanarMap),
     Sweep(&'a [MovedEdge]),
-    Stack(&'a [&'a FillShape]),
     /// 引く線（鉛筆。`MapRule::Line` で重ねる）：中も外も無い、線の区間の並びと、その線のラベル（`line_label`。何も無い
     /// 所を通る区間の色の無い側に付ける）
     Lines(&'a [LineSeg], ShapeId),
@@ -192,7 +190,7 @@ pub(crate) struct Lines {
 impl MapInput<'_> {
     /// 重ねるものの線（`Lines`。作るのはこれ1つ）。`old`：輪郭の変形で動かした辺の、前の地図での曲線と左右の色と線。印は、中のとき
     /// に重ねるものの値が外と違いうる所が、どれかの印の巻き数が 0 でない所に入るように決める：形は1つの印（偶奇で中の所は
-    /// 巻き数が奇数）、下から上へ並べた形は形ごとの印、重ねる地図と輪郭の変形は色（中の所の値は色ごとの巻き数で決まる）。
+    /// 巻き数が奇数）、重ねる地図と輪郭の変形は色（中の所の値は色ごとの巻き数で決まる）。
     /// 前の曲線は引く分なので、左右を入れかえる
     pub(crate) fn lines(&self, old: impl Fn(usize) -> (QuadBez, Sides, Option<EdgeStroke>)) -> Lines {
         let color =
@@ -207,15 +205,6 @@ impl MapInput<'_> {
                     l.quads.push(q);
                     l.strokes.push(None);
                     l.labels.push((1, 0));
-                }
-            }
-            MapInput::Stack(shapes) => {
-                for (i, s) in shapes.iter().enumerate() {
-                    for q in segments(s) {
-                        l.quads.push(q);
-                        l.strokes.push(None);
-                        l.labels.push((1 + i as u64, 0));
-                    }
                 }
             }
             MapInput::Map(p) => {
@@ -573,6 +562,26 @@ impl PlanarMap {
         input: MapInput<'_>,
         rules: [MapRule; N],
     ) -> Option<[PlanarMap; N]> {
+        self.overlay_feeding(input, rules, false)
+    }
+
+    /// この地図の辺を、辺どうしもみな切り直して、その座標の格子で正しい地図にしたもの。空の地図に、この地図を重ねる
+    /// （`MapRule::Overlay`）が、正しい地図を前提にせず、辺をみな入れる（`overlay_feeding`）。色・面の番号・線は、重ねる地図
+    /// と同じく重ね合わせの決まりで運ぶ（色は巻き数、線は `MapRule::stroke`）。辺が触れ合って正しくない地図（変換で頂点や辺が
+    /// 近づいたもの：`realized`）を正しい地図にするのはこれ1つ。`None`：格子に置けない座標がある
+    pub(crate) fn regridded(&self) -> Option<PlanarMap> {
+        let [m] = PlanarMap::default().overlay_feeding(MapInput::Map(self), [MapRule::Overlay], true)?;
+        Some(m)
+    }
+
+    /// 重ね合わせの本体（`overlay_rules`）。`feed_all`：重ねる地図の辺をはじめからみな入れる（重ねる地図が正しい地図でない
+    /// ときに、辺どうしも切る：`regridded`）。でなければ、重ねる地図は正しい地図で、入れない辺と触れる辺だけを入れる
+    fn overlay_feeding<const N: usize>(
+        &self,
+        input: MapInput<'_>,
+        rules: [MapRule; N],
+        feed_all: bool,
+    ) -> Option<[PlanarMap; N]> {
         // 重ねるものの線（輪郭の変形の前の曲線と色は、この地図の辺）
         let mut input_lines =
             input.lines(|e| {
@@ -638,12 +647,16 @@ impl PlanarMap {
         };
         let check = self.edges.len()..cands.edges.len();
         let moved = input.moved_flags(cands.edges.len());
+        let mut first = moved.clone();
+        if feed_all {
+            first[check.clone()].fill(true);
+        }
         let mut fed = cands.fed_edges(
             &[],
             check_reach,
             seeds,
             &moved,
-            moved.clone(),
+            first,
             check.clone(),
             &partner,
         )?;
@@ -1796,45 +1809,6 @@ impl PlanarMap {
             let (face, states) = swept_faces.as_ref().expect("輪郭の変形の面");
             states[face[2 * k + left as usize] as usize].clone()
         };
-        // 下から上へ並べた形：区間ごとに、出どころの形の並びの番号を印にする（区間を切ったあとの形で数えるので、i_overlay が
-        // 交点を丸めた結果と食い違わない）。点のある所の色は、巻き数が奇数の形のうち並びでいちばん上の形の色
-        let stack = match input {
-            MapInput::Stack(shapes) => {
-                let shape_of: Vec<u32> = shapes
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(i, s)| {
-                        s.contours()
-                            .flat_map(move |c| c.segments.iter().map(move |_| i as u32))
-                    })
-                    .collect();
-                let labels: Vec<Vec<u32>> = pieces
-                    .iter()
-                    .map(|p| {
-                        piece_provs[p.prov.clone()]
-                            .iter()
-                            .filter_map(|pv| match srcs[pv.src as usize].1 {
-                                OverlaySrc::New(i) => Some(shape_of[i]),
-                                OverlaySrc::Old(_) => None,
-                            })
-                            .collect()
-                    })
-                    .collect();
-                Some(StackColors::new(shapes, &piece_ends, labels))
-            }
-            _ => None,
-        };
-        // 面ごとの、巻き数が奇数の形の集まり：区間をまたぐと、その区間の出どころの形の偶奇だけが変わる（`propagate`）
-        let stack_sides: Vec<(Label, Label)> = stack.as_ref().map_or_else(Vec::new, |st| {
-            let (face, states) =
-                propagate(&piece_ends, &next_old, &|p2| st.odd_at(p2), &|set, k, _| {
-                    st.cross(set, k)
-                });
-            let label = |h: usize| st.label(&states[face[h] as usize]);
-            (0..pieces.len())
-                .map(|k| (label(2 * k + 1), label(2 * k)))
-                .collect()
-        });
         // 中の辺（入れなかった辺のうち、重ねるものが触る範囲にかかる前からある辺と、重ねる地図の辺）：その所での、もう片方の
         // 地図の値（前からある辺なら重ねるものの値、重ねる地図の辺なら前の色）を、切った区間の印で整数で決めて（決まりに
         // よらない）、両側に決まりごとに `rule` を当てる。左右が同じ色になれば消える。中の辺は区間にも、もう片方の地図の入れなかった辺にも触れないので、
@@ -1876,9 +1850,6 @@ impl PlanarMap {
             MapInput::Map(_) => Over::Color(new_at(p2)),
             MapInput::Sweep(_) => Over::Swept(swept_winding(p2)),
             MapInput::Lines(..) => Over::Inside(false),
-            MapInput::Stack(_) => {
-                Over::Color(stack.as_ref().and_then(|st| st.label(&st.odd_at(p2)).0))
-            }
         };
         let mut over_memo: IntMap<u32, Over> = IntMap::default();
         let mut old_color_memo: IntMap<u32, Option<Color32>> = IntMap::default();
@@ -1893,7 +1864,7 @@ impl PlanarMap {
         // うち重ねる地図の辺・輪郭の変形で動かした辺の最初のもの（形の線は線の辺でない）。前の線は、前からある辺（動かした辺の
         // 前の曲線でないもの）の出どころの最初の線。区間の線は、決まりごとに `MapRule::stroke` で決める（設計：
         // claude/線の設計_68a596e.md の 2.3 の 1・6.2 の (b)）
-        let line_input = !matches!(input, MapInput::Shapes(_) | MapInput::Stack(_));
+        let line_input = !matches!(input, MapInput::Shapes(_));
         let piece_lines: Vec<(Option<Option<EdgeStroke>>, Option<EdgeStroke>)> = pieces
             .iter()
             .map(|p| {
@@ -1938,10 +1909,6 @@ impl PlanarMap {
                         // 引いた線の区間なら、色の無い側に付ける線のラベル
                         MapInput::Lines(_, label) => {
                             (Over::Inside(false), piece_lines[k].0.is_some().then_some(label))
-                        }
-                        MapInput::Stack(_) => {
-                            let l = pick(stack_sides[k]);
-                            (Over::Color(l.0), l.1)
                         }
                     };
                     (rule.apply_label(&over, over_src, old), over)

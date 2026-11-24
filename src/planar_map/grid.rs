@@ -678,65 +678,6 @@ pub(super) fn ray_meets_row(r: GridRect, p: IPt) -> bool {
     2 * r.y0 <= p.1 && p.1 <= 2 * r.y1 && 2 * r.x1 >= p.0
 }
 
-/// 下から上へ並べた形（`MapInput::Stack`）の、点のある所の色：巻き数が奇数の形のうち、並びでいちばん上の形の色。
-/// 区間（格子の点）ごとに、出どころの形の並びの番号を印にする。点での「巻き数が奇数の形」の集まりは、形ごとに1ビットの
-/// 並びで持つ
-pub(super) struct StackColors<'a> {
-    shapes: &'a [&'a FillShape],
-    /// 区間ごとの、出どころの形の並びの番号
-    labels: Vec<Vec<u32>>,
-    segs: LabeledSegs<u32>,
-    /// ビットの並びの長さ（64 ビットの数がいくつか）
-    words: usize,
-}
-
-impl<'a> StackColors<'a> {
-    pub(super) fn new(
-        shapes: &'a [&'a FillShape],
-        ends: &[(IPt, IPt)],
-        labels: Vec<Vec<u32>>,
-    ) -> Self {
-        let segs = LabeledSegs::new(
-            ends.iter()
-                .zip(&labels)
-                .flat_map(|(&(a, b), ls)| ls.iter().map(move |&i| (a, b, i, i))),
-        );
-        Self {
-            shapes,
-            labels,
-            segs,
-            words: shapes.len().div_ceil(64),
-        }
-    }
-
-    /// ビットの並び `set` の、区間 `k` の出どころの形の偶奇を変える（区間を横切る）
-    pub(super) fn cross(&self, set: &mut [u64], k: usize) {
-        for &i in &self.labels[k] {
-            set[i as usize / 64] ^= 1 << (i % 64);
-        }
-    }
-
-    /// 点 `p`（2倍の座標。区間の上なら、点を右上へごくわずかずらした所）で巻き数が奇数の形：右へ伸ばした半直線が
-    /// 横切る数の偶奇
-    pub(super) fn odd_at(&self, p: IPt) -> Vec<u64> {
-        let mut set = vec![0u64; self.words];
-        self.segs
-            .crossings(p, |i, _, _| set[i as usize / 64] ^= 1 << (i % 64));
-        set
-    }
-
-    /// 巻き数が奇数の形の集まり `set` の印（並びでいちばん上の形の色と番号。無ければ何も無い所）
-    pub(super) fn label(&self, set: &[u64]) -> Label {
-        match set.iter().enumerate().rev().find(|(_, w)| **w != 0) {
-            Some((j, w)) => {
-                let s = self.shapes[64 * j + 63 - w.leading_zeros() as usize];
-                (Some(s.color), Some(s.shape_id))
-            }
-            None => (None, None),
-        }
-    }
-}
-
 /// 区間を左の面から右の面へ（`from_left`。でなければ右から左へ）またいだ巻き数 `w`：区間の出どころの辺ごとの左右の印
 /// `sides`（区間の向きにそろえたもの）の、出る側の印を −1、入る側の印を +1（`propagate` の地図・輪郭の変形のまたぎ方）
 pub(super) fn crossed<L: Copy + PartialEq>(
@@ -770,7 +711,7 @@ pub(super) fn dsu_union(parent: &mut [u32], x: usize, y: usize) {
 }
 
 /// 切った区間（端は `ends`）の面ごとの状態を、区間をまたぐたびに変えて、となりの面へ伝える。重ね合わせで、片方の地図の
-/// 色（前の地図・重ねる地図・輪郭の変形の巻き数の変わり方・下から上へ並べた形の偶奇）を決めるのはこれ1つ（設計：
+/// 色（前の地図・重ねる地図・輪郭の変形の巻き数の変わり方）を決めるのはこれ1つ（設計：
 /// claude/重ね合わせの面の色と番号を伝えて決める設計_N-1003_N-2001_c467cbf.md）。
 ///
 /// 面は、区間をたどってつながる向きのある区間（`next`。面の輪郭）。`cross(state, k, from_left)` は、区間 `k` を左の面から

@@ -3414,34 +3414,19 @@ pub(crate) fn grab_t(t: f64) -> f64 {
     t.clamp(0.18, 0.82)
 }
 
-/// 地図 `map`（文書の座標）に変換 `xform` をかけ、その座標の格子で正しい地図にしたもの。変換した地図が正しくなければ
-/// （縮小で頂点が近づくなど）、変換した面を塗り重ねて作る（面は重ならないので、絵は同じ。面の番号は残る）。
-/// 「変形した形を、その座標の格子で地図にする」決まり。結果は確かめた地図（`checked`）。`None`：格子に置けない座標が
-/// あるか、正しい地図にならない
+/// 地図 `map`（文書の座標）に変換 `xform` をかけ、その座標の格子で正しい地図にしたもの（「変形した形を、その座標の格子で
+/// 地図にする」決まり）。変換した地図が正しければそのまま（切り直す所が無い）。正しくなければ（縮小で頂点や辺が近づくなど）、
+/// 辺どうしもみな切り直す（`regridded`。色・面の番号・線は重ね合わせの決まりで運ぶので、面も線も残る）。結果は確かめた地図
+/// （`checked`）。`None`：格子に置けない座標があるか、正しい地図にならない
 pub(crate) fn realized(map: &PlanarMap, xform: Affine) -> Option<CheckedMap> {
     if !map.fits_grid(xform) {
         return None;
     }
     let t = map.transformed(xform);
-    if let Some(checked) = t.checked() {
-        return Some(checked);
+    match t.check() {
+        Some(faces) => Some(CheckedMap { map: t, faces }),
+        None => t.regridded()?.checked(),
     }
-    // 面の形には、面の番号（辺の側に記された番号が1つなら、その番号）を付けて塗る。塗り重ねは、いちばん上の形の番号を
-    // 面の印として運ぶので、面の番号が残る（レビュー 4f4e953 の N-2001）
-    let (faces, _) = map.faces();
-    let shapes: Vec<FillShape> = faces
-        .iter()
-        .map(|f| {
-            let mut s = map.face_shape(f, 0, &[]);
-            if let [id] = f.srcs[..] {
-                s.shape_id = id;
-            }
-            s.transform(xform);
-            s
-        })
-        .collect();
-    let refs: Vec<&FillShape> = shapes.iter().collect();
-    painted_map(&refs)?.checked()
 }
 
 /// 地図 `start` に、地図 `maps` を下から順に重ねた地図（`MapRule::Overlay`。重ねる地図の色が上）。`start` が空なら、
@@ -3726,11 +3711,14 @@ impl LayerBase {
     }
 }
 
-/// 図形 `shapes`（下から上への並び）を、並びの順に空の地図へ塗り重ねた地図（重なる所は上の図形が見える。絵の決まりそのもの）。
-/// 全部の図形を1回で重ねる（`MapInput::Stack`）。図形ごとに偶奇の規則なので、輪郭が自分と交わる図形もそのまま扱える。
-/// `None`：格子に置けない座標がある
+/// テスト用：図形 `shapes`（下から上への並び）を、並びの順に空の地図へ塗り重ねた地図（重なる所は上の図形が見える）。図形
+/// ごとにブラシと同じく塗る（`MapRule::Paint`。偶奇の規則なので、輪郭が自分と交わる図形もそのまま扱える）。`None`：格子に
+/// 置けない座標がある
+#[cfg(test)]
 fn painted_map(shapes: &[&FillShape]) -> Option<PlanarMap> {
-    PlanarMap::default().overlay(MapInput::Stack(shapes), MapRule::Overlay)
+    shapes.iter().try_fold(PlanarMap::default(), |m, s| {
+        m.overlay(MapInput::Shapes(std::slice::from_ref(*s)), MapRule::Paint(Some(s.color)))
+    })
 }
 
 /// テスト用：図形 `shapes`（下から上への並び）を塗り重ねた地図（`painted_map`）

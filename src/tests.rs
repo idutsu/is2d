@@ -29592,6 +29592,40 @@ fn painting_faces_back_keeps_their_ids() {
     assert!(tried > 0, "塗り重ねに回る変換が無かった");
 }
 
+/// レビュー f478c69 の N-1002：変換した地図が正しい地図にならないとき（縮めて頂点や辺が近づく）も、線が残る（前は面の形を
+/// 塗り重ねて作り直したので、線がみな消え、線だけの絵は丸ごと消えた）。境目がみな線の絵では、作り直したあとも、色の違う
+/// 面の境目はみな線のまま。線だけの絵は、線の辺がみな残る
+#[test]
+fn realizing_a_broken_transform_keeps_the_lines() {
+    let ink = crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 3 };
+    let mut tried = 0;
+    for seed in 0..40 {
+        for only_lines in [false, true] {
+            let mut map = tests::map_overlay::native_scene(seed, 12);
+            for e in &mut map.edges {
+                e.stroke = Some(ink);
+                if only_lines {
+                    (e.left, e.right) = (None, None);
+                }
+            }
+            for scale in [0.05, 0.02, 0.01] {
+                let xform = Affine::scale(scale);
+                if map.transformed(xform).is_valid() {
+                    continue;
+                }
+                tried += 1;
+                let back = crate::planar_map::realized(&map, xform).expect("作り直せる").into_map();
+                let place = format!("種 {seed}・線だけ {only_lines}・倍率 {scale}");
+                assert!(!back.edges.is_empty(), "{place}：絵が消えた");
+                for e in &back.edges {
+                    assert_eq!(e.stroke, Some(ink), "{place}：線の無い辺がある");
+                }
+            }
+        }
+    }
+    assert!(tried > 0, "作り直しに回る変換が無かった");
+}
+
 /// N-1001：浮いた片の確定は、片の面が元の面とまったく同じ形でも書かれる（まるごと選んで色だけ変えた片、元と同じ所に
 /// 貼った片）。元の図形と番号・色まで同じ面だけが「変わらない面」
 #[test]
