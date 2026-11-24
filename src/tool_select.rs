@@ -45,51 +45,55 @@ pub(crate) fn draw_shape_contour_lines(
             tab.session.edit_path.shows_stage(),
         )
         .inflate(pad, pad);
-    for contour in shape.wire_contours() {
-        for seg in contour.segments.iter() {
-            if seg.p0.x.max(seg.p1.x).max(seg.p2.x) < view_rect.x0
-                || seg.p0.x.min(seg.p1.x).min(seg.p2.x) > view_rect.x1
-                || seg.p0.y.max(seg.p1.y).max(seg.p2.y) < view_rect.y0
-                || seg.p0.y.min(seg.p1.y).min(seg.p2.y) > view_rect.y1
-            {
-                continue;
-            }
-            let mid_dev = (seg.p1 - seg.p0.lerp(seg.p2, 0.5)).hypot() * z;
-            if mid_dev <= 0.15 {
+    let draw_seg = |seg: &QuadBez| {
+        if seg.p0.x.max(seg.p1.x).max(seg.p2.x) < view_rect.x0
+            || seg.p0.x.min(seg.p1.x).min(seg.p2.x) > view_rect.x1
+            || seg.p0.y.max(seg.p1.y).max(seg.p2.y) < view_rect.y0
+            || seg.p0.y.min(seg.p1.y).min(seg.p2.y) > view_rect.y1
+        {
+            return;
+        }
+        let mid_dev = (seg.p1 - seg.p0.lerp(seg.p2, 0.5)).hypot() * z;
+        if mid_dev <= 0.15 {
+            painter.line_segment(
+                [
+                    tab.view.world_to_screen(seg.p0),
+                    tab.view.world_to_screen(seg.p2),
+                ],
+                stroke,
+            );
+        } else {
+            let mut prev = seg.p0;
+            let approx_len = ((seg.p1 - seg.p0).hypot() + (seg.p2 - seg.p1).hypot()) * z;
+            let steps = ((approx_len / 8.0).ceil() as usize).clamp(3, 18);
+            for k in 1..=steps {
+                let curr = seg.eval(k as f64 / steps as f64);
                 painter.line_segment(
                     [
-                        tab.view.world_to_screen(seg.p0),
-                        tab.view.world_to_screen(seg.p2),
+                        tab.view.world_to_screen(prev),
+                        tab.view.world_to_screen(curr),
                     ],
                     stroke,
                 );
-            } else {
-                let mut prev = seg.p0;
-                let approx_len = ((seg.p1 - seg.p0).hypot() + (seg.p2 - seg.p1).hypot()) * z;
-                let steps = ((approx_len / 8.0).ceil() as usize).clamp(3, 18);
-                for k in 1..=steps {
-                    let curr = seg.eval(k as f64 / steps as f64);
-                    painter.line_segment(
-                        [
-                            tab.view.world_to_screen(prev),
-                            tab.view.world_to_screen(curr),
-                        ],
-                        stroke,
-                    );
-                    prev = curr;
-                }
-            }
-            if show_anchors {
-                draw_anchor_dot(tab, painter, seg.p0);
+                prev = curr;
             }
         }
-        // 閉じていない曲線（線の図形の中心の曲線）は、終わりの端もアンカー
+    };
+    // 線の図形は、太らせた形の輪郭でなく、線の中心を通る曲線（両端がアンカー）。面の図形は輪郭（外周と穴。区間の始めが
+    // アンカー）
+    if let Some(c) = shape.center_curve() {
+        draw_seg(&c);
         if show_anchors {
-            let segs = &contour.segments;
-            if let (Some(first), Some(last)) = (segs.first(), segs.last()) {
-                if first.p0 != last.p2 {
-                    draw_anchor_dot(tab, painter, last.p2);
-                }
+            draw_anchor_dot(tab, painter, c.p0);
+            draw_anchor_dot(tab, painter, c.p2);
+        }
+        return;
+    }
+    for contour in shape.contours() {
+        for seg in contour.segments.iter() {
+            draw_seg(seg);
+            if show_anchors {
+                draw_anchor_dot(tab, painter, seg.p0);
             }
         }
     }

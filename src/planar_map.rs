@@ -1082,7 +1082,7 @@ fn line_shape(
     let (exterior, holes, mesh) = line_band(te.quad(), stroke, ends)?;
     let mut s = FillShape::new(stroke.color, exterior, holes)
         .with_scope(0, group_path)
-        .with_line(stroke, vec![te.quad()], ends)
+        .with_line(stroke, te.quad(), ends)
         .with_mesh(mesh);
     s.shape_id = id;
     Some(s)
@@ -2826,7 +2826,7 @@ impl LayerBase {
     fn line_edge(&self, id: ShapeId, group_path: &[u64]) -> Option<usize> {
         let lines = self.lines(group_path);
         let s = lines.find_sorted(id, |s| s.shape_id)?;
-        let q = s.wire_contours().next()?.segments.first().copied()?;
+        let q = s.center_curve()?;
         Some(self.stored.find_edge(&q)?.0)
     }
 

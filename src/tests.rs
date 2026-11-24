@@ -38307,7 +38307,7 @@ mod strokes {
         // 輪郭の表示とアンカーは、太らせた形の輪郭でなく、線の中心を通る曲線（地図の辺）で描く
         let wire: Vec<QuadBez> = lines
             .iter()
-            .flat_map(|l| l.wire_contours().flat_map(|c| c.segments.iter().copied()).collect::<Vec<_>>())
+            .filter_map(|l| l.center_curve())
             .collect();
         assert_eq!(wire.len(), base.map().edges.len());
         assert!(wire.iter().all(|q| {
@@ -38979,6 +38979,27 @@ mod strokes {
         assert!(apply(&mut app, Action::ConvertToSymbol));
         assert!(apply(&mut app, Action::ScaleSelection { sx: 2.0, sy: 2.0 }));
         assert!(near(&thickness(&app), 8.0), "シンボル：拡大したあと {:?}", thickness(&app));
+    }
+
+    #[test]
+    fn a_line_inside_a_moved_symbol_keeps_its_center_curve() {
+        // 線を乗せた正方形をシンボルにして動かし、シンボルの中に入る。画面の線の中心の曲線（アンカーの表示に使う開いた曲線）
+        // は、辺の両端のまま（長さ 200）。前は、図形を写すときに開いた曲線も閉じた輪としてつなぎ直したので、両端が真ん中に
+        // 寄って潰れ、塗りの中に「辺の両端の中点から曲線の真ん中へ伸びる」幽霊のアンカーが見えた
+        use crate::doc_actions::{apply, Action};
+        let mut app = inked_square_app();
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(apply(&mut app, Action::ConvertToSymbol));
+        assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(37.0, 21.0), alt_duplicate: false }));
+        let gid = app.tab().active_timeline().instances().next().unwrap().binding.instance_gid;
+        assert!(apply(&mut app, Action::EnterSymbolTimeline { instance_gid: gid }));
+        let mut n = 0;
+        for s in app.scene().iter().filter(|s| s.line.is_some()) {
+            let q = s.center_curve().unwrap();
+            assert!(((q.p2 - q.p0).hypot() - 200.0).abs() < 1e-6, "線の中心の曲線が潰れた：{q:?}");
+            n += 1;
+        }
+        assert_eq!(n, 4);
     }
 
     #[test]
