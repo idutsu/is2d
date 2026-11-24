@@ -315,7 +315,12 @@ pub(crate) fn reshape_hover(
             let doc_pt = lm.xform.inverse() * mouse_pt;
             crate::vector_engine::nearest_on_quad(&ed.quad(), doc_pt).1 <= s.width as f64 / 2.0
         });
-        let src = side_src.or(ed.left_src).or(ed.right_src).unwrap_or(0);
+        // 辺に合ったときに選ぶもの：辺に線があれば、そこに見えているのは線なので線（線の図形の番号）。無ければ塗り
+        let src = crate::planar_map::line_id_of(&ed)
+            .or(side_src)
+            .or(ed.left_src)
+            .or(ed.right_src)
+            .unwrap_or(0);
         if (d <= max || on_line) && best_e.as_ref().is_none_or(|b| d < b.0) && !hidden(lm, p) {
             best_e = Some((d, lm, e, t, src));
         }

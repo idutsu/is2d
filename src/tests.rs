@@ -38657,6 +38657,37 @@ mod strokes {
     }
 
     #[test]
+    fn clicking_near_a_line_selects_the_line_not_the_fill_beyond_it() {
+        // 線の外の近く（輪郭の変形で辺が光る所：何も無い側は画面で 9.5px まで）をクリックすると、その線を選ぶ。塗りの輪郭の
+        // 線の外側でも、線の向こうの塗りは選ばない。塗りの上は塗り。遠い所は何も選ばない
+        let thin = EdgeStroke { color: Color32::BLACK, width: 1 };
+        let picked = |y: f64, zoom: f32| {
+            let mut app = inked_square_app();
+            let seg = line(Point::new(100.0, 600.0), Point::new(300.0, 600.0), thin);
+            assert!(apply(&mut app, Action::DrawLines { segs: vec![seg] }));
+            app.tab_mut().view.set_zoom(zoom);
+            let _ = apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, y) });
+            let ids: Vec<_> = app.session.selection.shapes.iter().copied().collect();
+            match ids.as_slice() {
+                [] => "なし",
+                [id] if crate::planar_map::is_line_id(*id) => "線",
+                [_] => "塗り",
+                _ => "複数",
+            }
+        };
+        for zoom in [1.0f32, 4.0] {
+            let px = |n: f64| n / zoom as f64;
+            for n in [1.0, 4.0, 8.0, 9.0] {
+                assert_eq!(picked(100.0 - px(n), zoom), "線", "倍率 {zoom}：輪郭の線の外 {n}px");
+                assert_eq!(picked(600.0 - px(n), zoom), "線", "倍率 {zoom}：太さ 1 の線の外 {n}px");
+            }
+            assert_eq!(picked(100.0 - px(12.0), zoom), "なし");
+            assert_eq!(picked(600.0 - px(12.0), zoom), "なし");
+            assert_eq!(picked(100.0 + px(12.0), zoom), "塗り");
+        }
+    }
+
+    #[test]
     fn lines_redrawn_while_a_piece_floats_stay_above_the_fills() {
         // 線を乗せた赤い正方形の角から外へ出るヒゲ。ヒゲを持ち上げると、角の線のつなぎ目が変わり、角の輪郭の線を作り
         // 直して出す（浮いた片の残り）。作り直した線も、塗りより上に描く
