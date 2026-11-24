@@ -953,29 +953,40 @@ pub(crate) fn quad_tangent(q: &QuadBez, t: f64) -> KVec2 {
     }
 }
 
-/// 2次ベジェ `q` を太らせるための中心線の点（`quad_band`）：点の数は、中心線そのものの弦のずれ（2次
-/// ベジェは n 等分で |p0 − 2·p1 + p2| / (8n²)）と、太らせた輪郭の弦のずれ（曲線が回る角度を、半径 `r` の円弧で弦のずれが
-/// `eps` になる角度 `arc_step` で割った数）の、どちらも `eps` 以内になる数
+/// 2次ベジェ `q` を太らせるための中心線の点（`quad_band`）：太らせた輪郭（中心から `r` 離れた所）が、点を結んだ折れ線から
+/// `eps` 以内になるようにする。輪郭のずれは、中心線そのものの弦のずれと、向きが変わる分の半径 `r` の円弧の弦のずれの和
+/// なので、それぞれを `eps / 2` 以内にする。中心線は、弦のずれ（2次ベジェは n 等分で |p0 − 2·p1 + p2| / (4n²)）がそれ以内に
+/// なる数で等分し、そのうち曲線の向きが、半径 `r` の円弧で弦のずれがそれになる角度 `arc_step` より大きく回る区間は、回る
+/// 角度がそれ以下になるまで半分に分ける。向きの回る速さは速さの遅い所ほど大きいので、曲線全体の回る角度を等分に割らず、
+/// 区間ごとに回る角度で分ける。区間の端の t が分けられなくなる（浮動小数の限り）所では止める（前は弦のずれを
+/// /(8n²) と半分に見積もり、2つのずれもそれぞれ `eps` までにしていたので、輪郭が `eps` の2倍あまり外れた）
 fn quad_samples(q: QuadBez, r: f64, eps: f64) -> Vec<Sample> {
-    let (d0, d1) = (q.p1 - q.p0, q.p2 - q.p1);
-    let dd = (d1 - d0).hypot();
-    let turn = if d0.hypot() > 0.0 && d1.hypot() > 0.0 {
-        d0.cross(d1).atan2(d0.dot(d1)).abs()
-    } else {
-        0.0
+    let half = eps / 2.0;
+    let dd = ((q.p1 - q.p0) - (q.p2 - q.p1)).hypot();
+    let n = ((dd / (4.0 * half)).sqrt().ceil()).max(1.0) as usize;
+    let step = arc_step(r, half);
+    let sample = |t: f64| Sample {
+        p: q.eval(t),
+        t: quad_tangent(&q, t),
     };
-    let n = ((dd / (8.0 * eps)).sqrt().ceil())
-        .max((turn / arc_step(r, eps)).ceil())
-        .max(1.0) as usize;
-    (0..=n)
-        .map(|i| {
-            let t = i as f64 / n as f64;
-            Sample {
-                p: q.eval(t),
-                t: quad_tangent(&q, t),
+    let turn = |a: KVec2, b: KVec2| a.cross(b).atan2(a.dot(b)).abs();
+    let mut out = vec![sample(0.0)];
+    for i in 0..n {
+        let (mut t0, end) = (i as f64 / n as f64, (i + 1) as f64 / n as f64);
+        let mut ends = vec![end];
+        while let Some(&t1) = ends.last() {
+            let b = sample(t1);
+            let mid = (t0 + t1) / 2.0;
+            if turn(out[out.len() - 1].t, b.t) > step && mid > t0 && mid < t1 {
+                ends.push(mid);
+                continue;
             }
-        })
-        .collect()
+            out.push(b);
+            t0 = t1;
+            ends.pop();
+        }
+    }
+    out
 }
 
 /// 鉛筆の線：マウスの点 `points`（文書の座標）から、ブラシと同じなめらかな中心線（`centerline`。丸めの刻み `step`）を作り、

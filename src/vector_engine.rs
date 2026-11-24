@@ -345,15 +345,19 @@ pub(crate) struct FillShape {
     pub(crate) mesh_revision: u64,
     /// 線の図形なら、その線（`LayerBase::lines`：線を乗せた辺1本を太らせた形。番号は線の番号 `line_id`）。面の図形は `None`
     pub(crate) line: Option<crate::planar_map::EdgeStroke>,
-    /// 線の図形なら、線の中心を通る曲線（地図の辺1本）。輪郭の表示とアンカーは、太らせた形の輪郭でなく、これで描く
-    /// （`center_curve`）。図形と同じ変換で写る。閉じた輪郭（`Contour`）でなく曲線1本で持つので、写しても端と端を
-    /// つながない（つなぐと両端が真ん中に寄って潰れる）
+    /// 線の図形なら、線の中心を通る曲線（地図の辺1本）を、線の形を作った座標で持ったもの（今の座標の曲線は
+    /// `center_curve`：`line_xform` で写す）。輪郭の表示とアンカーは、太らせた形の輪郭でなく、これで描く。閉じた輪郭
+    /// （`Contour`）でなく曲線1本で持つので、写しても端と端をつながない（つなぐと両端が真ん中に寄って潰れる）
     center: Option<QuadBez>,
-    /// 線の図形なら、線の始めと終わりの端の形（`planar_map::line_ends`。中心の曲線を写して作り直すとき：
-    /// `transform_keeping_line_width`）
+    /// 線の図形なら、線の始めと終わりの端の形（`planar_map::line_ends`。線の形を作った座標の向き）
     line_ends: [crate::vector_stroke::LineEnd; 2],
+    /// 線の形を作った座標から今の座標への変換（線の形を作ったあとにかけた変換を掛け合わせたもの。シンボルの中の線は、
+    /// 太さも一緒にこれで写る）。線の形を作り直すとき（`zoom_mesh`）は、作った座標で帯を作ってこれで写す
+    line_xform: Affine,
     bbox: KRect,
     fill_mesh: OnceLock<Arc<Mesh>>,
+    /// 拡大して描くときの、`fill_mesh` より細かいメッシュ（段と一緒に1つだけ：`view_mesh`）
+    zoom_mesh: ZoomMesh,
     /// `fill_mesh` を作ったあとに、その頂点を写した変換の最大の拡大率を掛け合わせたもの（メッシュのずれは、作る許容の
     /// この倍まで：`keeps_mesh`）。メッシュが無いときは 1
     mesh_stretch: f64,
@@ -374,8 +378,10 @@ impl FillShape {
             line: None,
             center: None,
             line_ends: [crate::vector_stroke::LineEnd::Cap; 2],
+            line_xform: Affine::IDENTITY,
             bbox: KRect::ZERO,
             fill_mesh: OnceLock::new(),
+            zoom_mesh: ZoomMesh::default(),
             mesh_stretch: 1.0,
             hit_bez_path: OnceLock::new(),
         };
@@ -397,6 +403,7 @@ impl FillShape {
                 &self.holes,
                 self.color,
                 self.fill_rule(),
+                MESH_TOL,
             ))
         })
     }
@@ -406,15 +413,56 @@ impl FillShape {
         if let Some(m) = self.fill_mesh.get() {
             append_mesh(dst, m);
         } else {
-            let m = tessellate_contours_to_mesh(&self.exterior, &self.holes, self.color, self.fill_rule());
+            let m = tessellate_contours_to_mesh(&self.exterior, &self.holes, self.color, self.fill_rule(), MESH_TOL);
             append_mesh(dst, &m);
         }
     }
 
-    /// 指定された `(zoom, pan, dim_backdrop)` に対応するスクリーン座標変換済み `Mesh` を返す
+    /// 倍率 `zoom` で画面に描くメッシュ（文書の座標）：段（`mesh_level`）が 0 なら `fill_mesh`、それより上なら、その段の
+    /// 許容で作ったもの（1つだけ持ち、段が変われば作り直す）。画面に描く図形のメッシュはみなこれ（`screen_mesh`・
+    /// `selection_screen_mesh`・セル画の写しの拡大した表示 `CelMeshCache::screen_mesh`）
+    pub(crate) fn view_mesh(&self, zoom: f32) -> Arc<Mesh> {
+        let level = mesh_level(zoom);
+        if level == 0 {
+            return Arc::clone(self.fill_mesh());
+        }
+        let mut slot = self.zoom_mesh.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((l, m)) = &*slot {
+            if *l == level {
+                return Arc::clone(m);
+            }
+        }
+        let m = Arc::new(self.mesh_with_tol(MESH_TOL * 0.5f64.powi(level as i32)));
+        *slot = Some((level, Arc::clone(&m)));
+        m
+    }
+
+    /// 許容 `tol`（文書の座標）で作ったメッシュ。面の図形は輪郭の曲線から（`fill_mesh` と同じ作り方）。線の図形は、輪郭が
+    /// 帯を `MESH_TOL` で折れ線にしたものなので、線の形を作った座標で中心の曲線から帯を作り直し（`quad_band`。許容は
+    /// 変換の拡大率で割ったもの）、今の座標へ写す
+    fn mesh_with_tol(&self, tol: f64) -> Mesh {
+        match (self.line, self.center) {
+            (Some(stroke), Some(c)) => {
+                let s = max_scale(self.line_xform);
+                let local_tol = if s > 0.0 { tol / s } else { tol };
+                let (_, mut mesh) = crate::vector_stroke::quad_band(
+                    c,
+                    stroke.width as f64 / 2.0,
+                    local_tol,
+                    self.color,
+                    self.line_ends,
+                );
+                transform_mesh_vertices_in_place(&mut mesh.vertices, self.line_xform.as_coeffs());
+                mesh
+            }
+            _ => tessellate_contours_to_mesh(&self.exterior, &self.holes, self.color, self.fill_rule(), tol),
+        }
+    }
+
+    /// 指定された `(zoom, pan, dim_backdrop)` に対応するスクリーン座標変換済み `Mesh` を返す（倍率に合わせた細かさ：`view_mesh`）
     pub(crate) fn screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> Mesh {
         transform_mesh_to_screen(
-            (**self.fill_mesh()).clone(),
+            (*self.view_mesh(zoom)).clone(),
             zoom,
             pan,
             if dim_backdrop {
@@ -429,6 +477,7 @@ impl FillShape {
     pub(crate) fn strip_transient_caches(&mut self) {
         self.hit_bez_path = OnceLock::new();
         self.fill_mesh = OnceLock::new();
+        self.zoom_mesh = ZoomMesh::default();
         self.mesh_stretch = 1.0;
     }
 
@@ -551,12 +600,13 @@ impl FillShape {
         self.line = Some(stroke);
         self.center = Some(center);
         self.line_ends = ends;
+        self.line_xform = Affine::IDENTITY;
         self
     }
 
-    /// 線の図形なら、線の中心を通る曲線（地図の辺1本。輪郭の表示とアンカー・線の辺を探す所）
+    /// 線の図形なら、線の中心を通る曲線（今の座標。地図の辺1本。輪郭の表示とアンカー・線の辺を探す所）
     pub(crate) fn center_curve(&self) -> Option<QuadBez> {
-        self.center
+        self.center.map(|c| self.line_xform * c)
     }
 
     /// 線の図形を、線の太さはそのままに、中心の曲線に変換 `affine`（ステージの座標）をかけた所へ作り直す。生の絵とグループの
@@ -564,7 +614,7 @@ impl FillShape {
     /// 図形ごと写す `transform` で、一緒に太くなる）。図形はステージの座標で、線の太さが決まる編集中の階層の座標からステージ
     /// への変換が `world`。線の図形でなければ（作り直せなければ）`transform` と同じ
     pub(crate) fn transform_keeping_line_width(&mut self, affine: Affine, world: Affine) {
-        let (Some(stroke), Some(q)) = (self.line, self.center) else {
+        let (Some(stroke), Some(q)) = (self.line, self.center_curve()) else {
             self.transform(affine);
             return;
         };
@@ -576,7 +626,7 @@ impl FillShape {
         let doc = inv * affine * world;
         let at = |p: Point| doc * (inv * p);
         let qd = QuadBez::new(at(q.p0), at(q.p1), at(q.p2));
-        let ends = self.line_ends.map(|e| e.transformed(doc));
+        let ends = self.line_ends.map(|e| e.transformed(doc * self.line_xform));
         let Some((exterior, holes, mesh)) = crate::planar_map::line_band(qd, stroke, ends) else {
             self.transform(affine);
             return;
@@ -586,6 +636,7 @@ impl FillShape {
             holes,
             center: Some(qd),
             line_ends: ends,
+            line_xform: Affine::IDENTITY,
             fill_mesh: OnceLock::new(),
             mesh_stretch: 1.0,
             hit_bez_path: OnceLock::new(),
@@ -614,6 +665,7 @@ impl FillShape {
     /// 色を `f` で替える（色効果）。再テッセレーションを行わず、キャッシュ済みの頂点の色も `f` で替える
     pub(crate) fn recolor(&mut self, f: impl Fn(Color32) -> Color32) {
         self.color = f(self.color);
+        self.zoom_mesh = ZoomMesh::default();
         if let Some(arc_mesh) = self.fill_mesh.get_mut() {
             for v in &mut Arc::make_mut(arc_mesh).vertices {
                 v.color = f(v.color);
@@ -668,9 +720,8 @@ impl FillShape {
         for hole in &mut self.holes {
             hole.translate(delta);
         }
-        if let Some(c) = &mut self.center {
-            *c = Affine::translate(delta) * *c;
-        }
+        self.line_xform = Affine::translate(delta) * self.line_xform;
+        self.zoom_mesh = ZoomMesh::default();
         if let Some(binding) = &mut self.symbol_instance {
             binding.xform = Affine::translate(delta) * binding.xform;
         }
@@ -699,9 +750,8 @@ impl FillShape {
         for hole in &mut self.holes {
             hole.transform(affine);
         }
-        if let Some(c) = &mut self.center {
-            *c = affine * *c;
-        }
+        self.line_xform = affine * self.line_xform;
+        self.zoom_mesh = ZoomMesh::default();
         if let Some(binding) = &mut self.symbol_instance {
             binding.xform = affine * binding.xform;
         }
@@ -734,7 +784,9 @@ impl FillShape {
         for hole in &mut self.holes {
             hole.transform(affine);
         }
-        self.center = orig.center.map(|c| affine * c);
+        self.center = orig.center;
+        self.line_xform = affine * orig.line_xform;
+        self.zoom_mesh = ZoomMesh::default();
         self.symbol_instance = orig.symbol_instance.map(|mut binding| {
             binding.xform = affine * binding.xform;
             binding
@@ -772,7 +824,7 @@ impl FillShape {
     /// 選択表示：図形の塗りのメッシュ（作ってある写しを使う）を画面座標に写し、半透明の選択の色 `SELECTION_TINT` で
     /// 塗ったもの。図形の上に重ねて描く。どの倍率でも、図形と同じ形のまま薄く色が付く
     pub(crate) fn selection_screen_mesh(&self, zoom: f32, pan: Vec2) -> Mesh {
-        let mut mesh = (**self.fill_mesh()).clone();
+        let mut mesh = (*self.view_mesh(zoom)).clone();
         for v in &mut mesh.vertices {
             v.pos = to_screen(v.pos.x, v.pos.y, zoom, pan);
             v.color = SELECTION_TINT;
@@ -929,6 +981,7 @@ fn tessellate_contours_to_mesh(
     holes: &[Contour],
     color: Color32,
     fill_rule: FillRule,
+    tol: f64,
 ) -> Mesh {
     let mut builder = LyonPath::builder();
     for contour in std::iter::once(exterior).chain(holes.iter()) {
@@ -947,11 +1000,36 @@ fn tessellate_contours_to_mesh(
         }
     }
     let path = builder.build();
-    TESSELLATOR.with(|t| tessellate_lyon_path(&mut t.borrow_mut(), &path, color, fill_rule))
+    TESSELLATOR.with(|t| tessellate_lyon_path(&mut t.borrow_mut(), &path, color, fill_rule, tol))
 }
 
-/// 曲線をメッシュにするときの許容（文書の座標）。メッシュは表示の倍率によらず同じものを使う
+/// 曲線をメッシュにするときの許容（文書の座標）。図形が持つメッシュ（`fill_mesh`）と、セル画の結合メッシュはこれで作る
+/// （倍率が高いときに画面に描くメッシュは、段ごとにこの半分ずつ：`mesh_level`）
 pub(crate) const MESH_TOL: f64 = 0.04;
+
+/// 倍率 `zoom` で画面に描くメッシュの段 k（許容 `MESH_TOL / 2^k`）：画面でのずれ（許容 × 倍率）が見分けられないずれ
+/// `MESH_MAX_ERROR`（画面の画素の 1/4）を超えない、いちばん小さい k。6.25 倍までは 0（`fill_mesh`）。段にするのは、
+/// 倍率を少し変えるたびに作り直さないため（作り直すのは、倍率が 2 倍の境をまたいだときだけ）。倍率は表示の倍率
+/// （`MIN_VIEW_ZOOM..=MAX_VIEW_ZOOM`）
+pub(crate) fn mesh_level(zoom: f32) -> u32 {
+    let over = MESH_TOL * f64::from(zoom) / MESH_MAX_ERROR;
+    if over > 1.0 {
+        over.log2().ceil() as u32
+    } else {
+        0
+    }
+}
+
+/// 拡大して描くときの細かいメッシュの入れ物（`FillShape::view_mesh`）：（段, メッシュ）を1つ。図形を写す（複製する）
+/// ときは持ち越さない（形を変える前の複製から作られた図形が、古い形のメッシュを持たない）
+#[derive(Default, Debug)]
+struct ZoomMesh(Mutex<Option<(u32, Arc<Mesh>)>>);
+
+impl Clone for ZoomMesh {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
 /// 持っているメッシュの頂点を写して使い回すときに許すずれ（文書の座標）：見分けられないずれ（画面の画素の 1/4。形を
 /// 曲線に当てはめるときの許容 `FIT_TOL_PX` と同じ決まり）を、100% 表示の文書の座標にしたもの。形そのものが当てはめで
 /// これだけずれうるので、メッシュのずれがこの中なら、作り直しても見た目は変わらない（作る許容の 6.25 倍、つまり 6.25 倍
@@ -985,7 +1063,7 @@ pub(crate) fn tessellate_raw_polygon(pts: &[Point], color: Color32) -> Mesh {
     }
     builder.close();
     let path = builder.build();
-    TESSELLATOR.with(|t| tessellate_lyon_path(&mut t.borrow_mut(), &path, color, FillRule::NonZero))
+    TESSELLATOR.with(|t| tessellate_lyon_path(&mut t.borrow_mut(), &path, color, FillRule::NonZero, MESH_TOL))
 }
 
 fn tessellate_lyon_path(
@@ -993,9 +1071,10 @@ fn tessellate_lyon_path(
     path: &LyonPath,
     color: Color32,
     fill_rule: FillRule,
+    tol: f64,
 ) -> Mesh {
     let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
-    let options = FillOptions::tolerance(MESH_TOL as f32).with_fill_rule(fill_rule);
+    let options = FillOptions::tolerance(tol as f32).with_fill_rule(fill_rule);
 
     if tessellator
         .tessellate_path(

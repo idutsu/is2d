@@ -277,6 +277,9 @@ impl symbol::Document {
 }
 
 /// 編集中のタイムラインの指定レイヤー・指定フレームに、セル図形列から作ったセル画を置くテスト補助関数
+/// テスト用：画面に見えている範囲として渡す、地図の範囲の全部（セル画の写しの画面の結合メッシュ。倍率 1 では使わない）
+const WHOLE_VIEW: kurbo::Rect = kurbo::Rect::new(-65_536.0, -65_536.0, 65_536.0, 65_536.0);
+
 fn put_cel_shapes(app: &mut Is2dApp, layer_idx: usize, frame: usize, mut shapes: Vec<FillShape>) {
     let Some((lid, prev_frame, prev_vis, prev_lock)) =
         app.tab_mut().with_active_timeline_mut(|tl, _lib| {
@@ -3498,15 +3501,16 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     sym_app.redo();
     assert_eq!(sym_app.doc.stage_size, orig_stage * 0.5);
 
-    // 選択表示は塗りのメッシュを選択の色で塗ったもの：頂点は塗りのメッシュと同じ数で、ズームを変えても増えない
+    // 選択表示は、その倍率で描く塗りのメッシュ（`view_mesh`）を選択の色で塗ったもの：頂点は描く図形と同じ数（6.25 倍までは
+    // 図形が持つメッシュのまま。拡大して細かくした図形にも、同じ形のまま色が付く）
     let fill_n = sym_app.scene().get(0).unwrap().fill_mesh().vertices.len();
     for zoom in [0.15f32, 1.25, 16.0] {
-        let sel = sym_app
-            .scene()
-            .get(0)
-            .unwrap()
-            .selection_screen_mesh(zoom, Vec2::ZERO);
-        assert_eq!(sel.vertices.len(), fill_n);
+        let shape = sym_app.scene().get(0).unwrap();
+        let sel = shape.selection_screen_mesh(zoom, Vec2::ZERO);
+        assert_eq!(sel.vertices.len(), shape.view_mesh(zoom).vertices.len());
+        if crate::vector_engine::mesh_level(zoom) == 0 {
+            assert_eq!(sel.vertices.len(), fill_n);
+        }
     }
     // プレビューは、2回目は写しから引く（作り直さない）。同じシンボル・世代なら同じ外接矩形とメッシュ
     let preview = |app: &Is2dApp| {
@@ -4075,10 +4079,10 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
     );
 
     let m_onion_1 = grp_sym_app
-        .cached_onion_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, ([35, 175, 105], 90))
+        .cached_onion_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, WHOLE_VIEW, ([35, 175, 105], 90))
         .unwrap();
     let m_onion_2 = grp_sym_app
-        .cached_onion_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, ([35, 175, 105], 90))
+        .cached_onion_cel_screen_mesh(0, 1, 1.0, Vec2::ZERO, WHOLE_VIEW, ([35, 175, 105], 90))
         .unwrap();
     // ズーム・パン・色の変え方が同じなら、画面に写したものも写しから返す（写し直さない）
     assert!(std::sync::Arc::ptr_eq(&m_onion_1, &m_onion_2));
@@ -4123,12 +4127,12 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
         &mut grp_sym_app,
         inst_b.instance_gid
     ));
-    let bd_m1 = grp_sym_app.cached_backdrop_screen_meshes(1.0, Vec2::ZERO);
+    let bd_m1 = grp_sym_app.cached_backdrop_screen_meshes(1.0, Vec2::ZERO, WHOLE_VIEW);
     assert!(
         !bd_m1.is_empty(),
         "背景シェイプが存在するため backdrop メッシュが生成されること"
     );
-    let bd_m2 = grp_sym_app.cached_backdrop_screen_meshes(1.0, Vec2::ZERO);
+    let bd_m2 = grp_sym_app.cached_backdrop_screen_meshes(1.0, Vec2::ZERO, WHOLE_VIEW);
     assert!(
         bd_m1.len() == bd_m2.len()
             && bd_m1
@@ -6631,8 +6635,8 @@ fn test_onion_prepare_in_parallel_matches_one_by_one() {
     let entries = prepared.session.onion_cache.lock().entry_count();
     assert!(entries >= 20, "先に作った写し {entries} 個");
     for &(l, f) in &cels {
-        let a = one_by_one.cached_onion_cel_screen_mesh(l, f, 1.0, Vec2::ZERO, tint);
-        let b = prepared.cached_onion_cel_screen_mesh(l, f, 1.0, Vec2::ZERO, tint);
+        let a = one_by_one.cached_onion_cel_screen_mesh(l, f, 1.0, Vec2::ZERO, WHOLE_VIEW, tint);
+        let b = prepared.cached_onion_cel_screen_mesh(l, f, 1.0, Vec2::ZERO, WHOLE_VIEW, tint);
         let key = |m: Option<std::sync::Arc<eframe::egui::Mesh>>| {
             m.map(|m| {
                 (
@@ -6687,7 +6691,7 @@ fn test_onion_skin_passes_cached_mesh_to_egui_without_copying() {
     );
     // コマ 1 のオニオンスキン（1つ前・色 [45, 115, 245]・濃さ 84）の写し
     let cached = app
-        .cached_onion_cel_screen_mesh(0, 0, app.view.zoom(), app.view.pan, ([45, 115, 245], 84))
+        .cached_onion_cel_screen_mesh(0, 0, app.view.zoom(), app.view.pan, WHOLE_VIEW, ([45, 115, 245], 84))
         .expect("コマ 1 に絵がある");
     // 写し・描いた形・ここで受け取ったもの、の3つが同じメッシュを指す（描いた形が複製なら 2）
     assert_eq!(std::sync::Arc::strong_count(&cached), 3);
@@ -12775,7 +12779,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
     let bd_initial = {
         // アプリと同じく、描く前に写しとシンボルのメモの古いものを捨ててから（`draw_canvas_contents`）
         app.tabs[app.active].start_draw_pass();
-        app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO)
+        app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO, WHOLE_VIEW)
     };
     assert_eq!(
         bd_initial.len(),
@@ -12788,7 +12792,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
     let bd_after_step = {
         // アプリと同じく、描く前に写しとシンボルのメモの古いものを捨ててから（`draw_canvas_contents`）
         app.tabs[app.active].start_draw_pass();
-        app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO)
+        app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO, WHOLE_VIEW)
     };
     for s in app.scene().iter() {
         let _ = s.screen_mesh(1.0, Vec2::ZERO, false);
@@ -12817,7 +12821,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
     let bd_after_draw = {
         // アプリと同じく、描く前に写しとシンボルのメモの古いものを捨ててから（`draw_canvas_contents`）
         app.tabs[app.active].start_draw_pass();
-        app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO)
+        app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO, WHOLE_VIEW)
     };
     for s in app.scene().iter() {
         let _ = s.screen_mesh(1.0, Vec2::ZERO, false);
@@ -12835,7 +12839,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
     let bd_after_draw_2 = {
         // アプリと同じく、描く前に写しとシンボルのメモの古いものを捨ててから（`draw_canvas_contents`）
         app.tabs[app.active].start_draw_pass();
-        app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO)
+        app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO, WHOLE_VIEW)
     };
     assert!(same(&bd_after_draw, &bd_after_draw_2));
     println!(
@@ -20596,6 +20600,128 @@ fn the_eyedropper_picks_what_is_seen_even_with_locked_layers() {
         assert_eq!(app.tool.stroke, green, "{wrap:?}：ロックしたレイヤーの線の色と太さを吸わない");
         assert_eq!(app.tool.brush_color, white, "{wrap:?}：ロックしたレイヤーの線の色を塗りの色に入れた");
     }
+}
+
+/// 拡大したときの曲線のなめらかさ（設計：claude/拡大したときの曲線のなめらかさの設計_41766f9.md）：画面に描くメッシュの段は、
+/// 画面でのずれ（許容 × 倍率）が画素の 1/4 を超えないいちばん小さい段。6.25 倍までは図形が持つメッシュのまま
+#[test]
+fn the_mesh_level_keeps_the_screen_error_under_a_quarter_pixel() {
+    use crate::vector_engine::{mesh_level, MAX_VIEW_ZOOM, MESH_TOL, MIN_VIEW_ZOOM};
+    let quarter = crate::vector_stroke::FIT_TOL_PX;
+    let mut zoom = MIN_VIEW_ZOOM;
+    while zoom <= MAX_VIEW_ZOOM {
+        let k = mesh_level(zoom);
+        let tol = MESH_TOL * 0.5f64.powi(k as i32);
+        assert!(tol * f64::from(zoom) <= quarter * (1.0 + 1e-12), "倍率 {zoom}：段 {k} では粗い");
+        if k > 0 {
+            assert!(tol * 2.0 * f64::from(zoom) > quarter, "倍率 {zoom}：段 {k} は細かすぎる");
+        }
+        zoom *= 1.01;
+    }
+    assert_eq!(mesh_level(1.0), 0);
+    assert_eq!(mesh_level(6.25), 0);
+    assert_eq!(mesh_level(8.0), 1);
+    assert_eq!(mesh_level(16.0), 2);
+}
+
+/// メッシュ `mesh` の外周の辺（三角形の1つだけが使う辺）
+fn mesh_boundary(mesh: &egui::Mesh) -> Vec<(Point, Point)> {
+    let mut count: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+    for t in mesh.indices.chunks_exact(3) {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            *count.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let pt = |i: u32| {
+        let p = mesh.vertices[i as usize].pos;
+        Point::new(f64::from(p.x), f64::from(p.y))
+    };
+    count.into_iter().filter(|&(_, n)| n == 1).map(|((a, b), _)| (pt(a), pt(b))).collect()
+}
+
+/// 点 `p` から、外周の辺 `edges` のいちばん近いものまでの距離
+fn distance_to_edges(p: Point, edges: &[(Point, Point)]) -> f64 {
+    use kurbo::ParamCurveNearest;
+    edges
+        .iter()
+        .map(|&(a, b)| kurbo::Line::new(a, b).nearest(p, 0.0).distance_sq.sqrt())
+        .fold(f64::MAX, f64::min)
+}
+
+/// 倍率が高いときに画面に描くメッシュは、その段の許容で曲線に沿う（塗りは輪郭の曲線、線は中心の曲線から太さの半分の
+/// 所。シンボルの中のように、縦横で違う拡大をかけた線も、太さごと写した形に沿う）。倍率を戻すと、図形が持つメッシュを使う
+#[test]
+fn zoomed_in_meshes_follow_the_curves_within_the_level_tolerance() {
+    use crate::vector_engine::{mesh_level, MESH_TOL};
+    let zoom = 16.0f32;
+    let tol = MESH_TOL * 0.5f64.powi(mesh_level(zoom) as i32);
+    // 塗り：大きく曲がった輪郭の図形
+    let q = QuadBez::new((0.0, 0.0), (200.0, 300.0), (400.0, 0.0));
+    let fill = FillShape::new(
+        Color32::RED,
+        crate::vector_engine::Contour::new(vec![q, QuadBez::new((400.0, 0.0), (200.0, 0.0), (0.0, 0.0))]),
+        Vec::new(),
+    );
+    let edges = mesh_boundary(&fill.view_mesh(zoom));
+    let coarse = mesh_boundary(fill.fill_mesh());
+    let worst = |edges: &[(Point, Point)]| (0..=400).map(|i| distance_to_edges(q.eval(i as f64 / 400.0), edges)).fold(0.0, f64::max);
+    assert!(worst(&edges) <= tol * 1.01, "塗りのずれ {} > {tol}", worst(&edges));
+    assert!(worst(&coarse) > tol * 1.01, "図形が持つメッシュの方が粗いはず（試しの形が粗さを見分けない）");
+    assert!(std::sync::Arc::ptr_eq(&fill.view_mesh(1.0), fill.fill_mesh()), "倍率を戻したら図形が持つメッシュ");
+    // 線：中心の曲線から太さの半分の所。縦横で違う拡大をかけた線（シンボルの中）も同じ
+    let stroke = crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 10 };
+    let center = QuadBez::new((0.0, 0.0), (60.0, 90.0), (120.0, 0.0));
+    let ends = [crate::vector_stroke::LineEnd::Cap; 2];
+    let (ext, holes, mesh) = crate::planar_map::line_band(center, stroke, ends).unwrap();
+    let line = FillShape::new(stroke.color, ext, holes).with_line(stroke, center, ends).with_mesh(mesh);
+    for xform in [Affine::IDENTITY, Affine::new([2.0, 0.0, 0.3, 0.5, 40.0, 10.0])] {
+        let mut s = line.clone();
+        s.place(xform);
+        let edges = mesh_boundary(&s.view_mesh(zoom));
+        let mut worst = 0.0f64;
+        for i in 1..400 {
+            let t = i as f64 / 400.0;
+            let d = crate::vector_engine::quad_deriv(&center, t);
+            let n = KVec2::new(-d.y, d.x) / d.hypot() * 5.0;
+            for side in [n, -n] {
+                worst = worst.max(distance_to_edges(xform * (center.eval(t) + side), &edges));
+            }
+        }
+        assert!(worst <= tol * 1.05, "線（変換 {xform:?}）のずれ {worst} > {tol}");
+        assert_eq!(s.center_curve().unwrap().p1, xform * center.p1, "線の中心の曲線は今の座標");
+    }
+}
+
+/// ロック中のレイヤー（セル画の写しから描く絵）も、倍率が高いときは、画面に見えている図形だけを、編集している図形と同じ
+/// 細かさのメッシュで描く
+#[test]
+fn locked_layers_are_drawn_finely_when_zoomed_in() {
+    let mut app = Is2dApp::default();
+    let circle = |cx: f64| {
+        let r = 40.0;
+        let k = r * 0.4142;
+        let pts = [(r, 0.0), (r, k), (k, r), (0.0, r), (-k, r), (-r, k), (-r, 0.0), (-r, -k), (-k, -r), (0.0, -r), (k, -r), (r, -k)];
+        let segs: Vec<QuadBez> = (0..4)
+            .map(|i| {
+                let p = |j: usize| Point::new(cx + pts[j % 12].0, 100.0 + pts[j % 12].1);
+                QuadBez::new(p(3 * i), p(3 * i + 1), p(3 * i + 3))
+            })
+            .collect();
+        FillShape::new(Color32::RED, crate::vector_engine::Contour::new(segs), Vec::new())
+    };
+    put_cel_shapes(&mut app, 0, 0, vec![circle(100.0), circle(400.0)]);
+    app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[0].locked = true);
+    let tab = app.tab();
+    let plain = crate::vector_engine::CelTint::Plain;
+    let n = |zoom: f32, visible: kurbo::Rect| {
+        tab.cached_cel_screen_mesh(0, 0, zoom, Vec2::ZERO, visible, plain).map_or(0, |m| m.vertices.len())
+    };
+    let left = kurbo::Rect::new(0.0, 0.0, 200.0, 200.0);
+    let at_1 = n(1.0, WHOLE_VIEW);
+    let at_16_left = n(16.0, left);
+    let at_16_all = n(16.0, WHOLE_VIEW);
+    assert!(at_16_all > at_1, "拡大しても細かくならない：{at_16_all} ≤ {at_1}");
+    assert!(at_16_left * 2 <= at_16_all + 2 && at_16_left > 0, "見えていない図形まで描いた：{at_16_left} / {at_16_all}");
 }
 
 /// 先読みのテスト用：レイヤー 0 のコマ 0・3・6・9 にキーフレームを打ち、それぞれに違う四角を置いたアプリ（12 コマ）
@@ -29580,6 +29706,7 @@ mod map_overlay {
                                 g,
                                 1.0,
                                 eframe::egui::Vec2::ZERO,
+                                WHOLE_VIEW,
                                 ([0, 0, 0], 80),
                             );
                         }
@@ -33120,7 +33247,7 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
     assert!(!path.shows_stage());
     assert!(
         app.tabs[app.active]
-            .cached_backdrop_screen_meshes(1.0, Vec2::ZERO)
+            .cached_backdrop_screen_meshes(1.0, Vec2::ZERO, WHOLE_VIEW)
             .is_empty(),
         "シーンの絵（ほかのインスタンス・青い線）を見せない"
     );
@@ -33155,7 +33282,7 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
         !path.shows_stage(),
         "ライブラリから入った中なので、ステージは見せない"
     );
-    let backdrop = app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO);
+    let backdrop = app.tabs[app.active].cached_backdrop_screen_meshes(1.0, Vec2::ZERO, WHOLE_VIEW);
     assert!(!backdrop.is_empty(), "親のシンボルの絵");
     let colors: std::collections::HashSet<Color32> = backdrop
         .iter()

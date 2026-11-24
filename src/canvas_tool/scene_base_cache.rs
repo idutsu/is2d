@@ -295,8 +295,9 @@ fn reuse_caches_by_key(shapes: &mut [FillShape], donors: &[FillShape]) {
     }
 }
 
-/// 画面の写しの鍵：ズーム・パン（ビット）と色の変え方
-type CelScreenKey = (u32, u32, u32, CelTint);
+/// 画面の写しの鍵：ズーム・パン（ビット）と、画面に見えている範囲（ビット。見えている図形だけを描く段のときだけ：
+/// `CelMeshCache::screen_mesh`）と、色の変え方
+type CelScreenKey = (u32, u32, u32, Option<[u64; 4]>, CelTint);
 
 /// 組み立てたセル画：ワールド座標の結合メッシュとその図形（何も描かないなら `None`）と、地図の計算に使う写し
 type Built = (Option<(egui::Mesh, Vec<Arc<FillShape>>)>, Vec<Arc<crate::planar_map::LayerBase>>);
@@ -361,7 +362,9 @@ impl CelMeshCache {
 
     /// 所 `scope` のタイムライン `tl` の、レイヤー `layer_idx` のコマ `frame` のセル画を、変換 `world_xform`・ズーム `zoom`・
     /// パン `pan`・色の変え方 `tint` で描く画面座標の結合メッシュ（`Timeline::build_cel_world` のメッシュを画面に写したもの）。
-    /// セル画が変わらなければ作り直さず、ズーム・パン・色の変え方も同じなら写し直さない
+    /// 倍率が高く、図形が持つメッシュでは角が見える段（`mesh_level` が 1 以上）では、画面に見えている範囲 `visible`（ステージの
+    /// 座標）にかかる図形だけを、その倍率で描くメッシュ（`FillShape::view_mesh`。編集している図形と同じもの）で結合して写す。
+    /// セル画が変わらなければ作り直さず、ズーム・パン・見えている範囲・色の変え方も同じなら写し直さない
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn screen_mesh(
         &mut self,
@@ -373,19 +376,35 @@ impl CelMeshCache {
         world_xform: Affine,
         zoom: f32,
         pan: Vec2,
+        visible: kurbo::Rect,
         tint: CelTint,
     ) -> Option<Arc<egui::Mesh>> {
         let idx = self.entry_index(tl, scope, ctx, layer_idx, frame, world_xform)?;
         let entry = &mut self.entries[idx];
         let world_batch = entry.world_mesh.as_ref()?;
-        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits(), tint);
+        let level = crate::vector_engine::mesh_level(zoom);
+        let view_bits = (level > 0).then(|| [visible.x0, visible.y0, visible.x1, visible.y1].map(f64::to_bits));
+        let key = (zoom.to_bits(), pan.x.to_bits(), pan.y.to_bits(), view_bits, tint);
         if let Some(s) = entry.screens.iter_mut().find(|s| s.0 == key) {
             s.2 = true;
             return Some(Arc::clone(&s.1));
         }
-        let mesh = Arc::new(tinted_screen_mesh(world_batch, zoom, pan, tint));
+        let mesh = if level == 0 {
+            tinted_screen_mesh(world_batch, zoom, pan, tint)
+        } else {
+            let mut world = egui::Mesh::default();
+            for s in entry
+                .shapes
+                .iter()
+                .filter(|s| crate::vector_engine::rects_overlap(s.bounding_box(), visible))
+            {
+                crate::vector_engine::append_mesh(&mut world, &s.view_mesh(zoom));
+            }
+            tinted_screen_mesh(&world, zoom, pan, tint)
+        };
+        let mesh = Arc::new(mesh);
         // ズーム・パンが変わった古い写しは、同じ色の変え方なら置き換える（パン・ズームの間に写しを溜めない）
-        entry.screens.retain(|s| s.0 .3 != tint);
+        entry.screens.retain(|s| s.0 .4 != tint);
         entry.screens.push((key, Arc::clone(&mesh), true));
         Some(mesh)
     }

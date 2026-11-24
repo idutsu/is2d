@@ -1833,15 +1833,18 @@ pub(crate) fn draw_canvas_contents(
         tab.view
             .artwork_painter(painter, painter.clip_rect(), stage_size, shows_stage);
     tab.start_draw_pass();
+    let view_world_rect = tab
+        .view
+        .visible_world_rect(&artwork_painter, stage_size, shows_stage);
 
     // 0. シンボルの中を編集しているときは、親の背景をレイヤーごとの結合メッシュで薄く描く（ルートでは何も無い）
-    for mesh in tab.cached_backdrop_screen_meshes(zoom, pan) {
+    for mesh in tab.cached_backdrop_screen_meshes(zoom, pan, view_world_rect) {
         artwork_painter.add(egui::Shape::Mesh(mesh));
     }
 
     // 0.5 オニオンスキン描画（前のフレーム＝青系半透明、次のフレーム＝緑系半透明）
     if tab.view.onion_skin_enabled && !timeline_ui.is_playing {
-        draw_onion_skins(tab, &artwork_painter);
+        draw_onion_skins(tab, &artwork_painter, view_world_rect);
     } else {
         tab.clear_onion_skin_cache();
     }
@@ -1852,9 +1855,6 @@ pub(crate) fn draw_canvas_contents(
     let mut selected_group_boxes: Vec<(u64, Option<KRect>, KRect, Option<Point>)> = Vec::new();
     let (is_sel, has_sel) = tab.scene().selected_shape_mask(&tab.session.selection);
     let curr_f = tl.current_frame;
-    let view_world_rect = tab
-        .view
-        .visible_world_rect(&artwork_painter, stage_size, shows_stage);
     let scene = tab.scene();
     let scene_len = scene.len();
     let mut shape_cursor = 0usize;
@@ -1882,7 +1882,9 @@ pub(crate) fn draw_canvas_contents(
             } else {
                 CelTint::Plain
             };
-            if let Some(mesh) = tab.cached_cel_screen_mesh(layer_idx, curr_f, zoom, pan, tint) {
+            if let Some(mesh) =
+                tab.cached_cel_screen_mesh(layer_idx, curr_f, zoom, pan, view_world_rect, tint)
+            {
                 artwork_painter.add(egui::Shape::Mesh(mesh));
             }
             continue;
@@ -2082,7 +2084,7 @@ fn draw_selected_group_and_symbol_boxes(
     }
 }
 
-fn draw_onion_skins(tab: &Tab, painter: &egui::Painter) {
+fn draw_onion_skins(tab: &Tab, painter: &egui::Painter, visible: KRect) {
     let tl = tab.active_timeline();
     let curr_f = tl.current_frame;
     // 写しの無いコマ（スクラブで窓に入るコマ、飛んだときの窓の全部）を、描く前に同時に作る（レビュー f01d518 の N-5004）
@@ -2101,14 +2103,14 @@ fn draw_onion_skins(tab: &Tab, painter: &egui::Painter) {
     for step in (1..=tab.view.onion_prev_frames).rev() {
         if curr_f >= step {
             let alpha = (84 / step as u8).clamp(24, 84);
-            draw_onion_skin_frame(tab, painter, curr_f - step, [45, 115, 245], alpha);
+            draw_onion_skin_frame(tab, painter, curr_f - step, ([45, 115, 245], alpha), visible);
         }
     }
     for step in 1..=tab.view.onion_next_frames {
         let f = curr_f + step;
         if f < tl.total_frames {
             let alpha = (84 / step as u8).clamp(24, 84);
-            draw_onion_skin_frame(tab, painter, f, [35, 185, 105], alpha);
+            draw_onion_skin_frame(tab, painter, f, ([35, 185, 105], alpha), visible);
         }
     }
 }
@@ -2117,8 +2119,8 @@ fn draw_onion_skin_frame(
     tab: &Tab,
     painter: &egui::Painter,
     frame: usize,
-    tint_rgb: [u8; 3],
-    alpha: u8,
+    tint: ([u8; 3], u8),
+    visible: KRect,
 ) {
     let zoom = tab.view.zoom();
     let pan = tab.view.pan;
@@ -2127,9 +2129,7 @@ fn draw_onion_skin_frame(
         if !layer.visible {
             continue;
         }
-        if let Some(mesh) =
-            tab.cached_onion_cel_screen_mesh(layer_idx, frame, zoom, pan, (tint_rgb, alpha))
-        {
+        if let Some(mesh) = tab.cached_onion_cel_screen_mesh(layer_idx, frame, zoom, pan, visible, tint) {
             painter.add(egui::Shape::Mesh(mesh));
         }
     }

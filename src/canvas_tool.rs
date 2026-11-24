@@ -2383,6 +2383,7 @@ impl Tab {
         &self,
         zoom: f32,
         pan: Vec2,
+        visible: KRect,
     ) -> Vec<Arc<egui::Mesh>> {
         let edit_path = &self.session.edit_path;
         let mut meshes = Vec::new();
@@ -2422,6 +2423,7 @@ impl Tab {
                         world_xform,
                         zoom,
                         pan,
+                        visible,
                         CelTint::Dim,
                     ));
                 }
@@ -2442,13 +2444,14 @@ impl Tab {
         frame: usize,
         zoom: f32,
         pan: Vec2,
+        visible: KRect,
         (tint_rgb, alpha): ([u8; 3], u8),
     ) -> Option<Arc<egui::Mesh>> {
         self.cel_screen_mesh(
             &self.session.onion_cache,
             layer_idx,
             frame,
-            (zoom, pan),
+            (zoom, pan, visible),
             CelTint::Onion(tint_rgb, alpha),
         )
     }
@@ -2493,9 +2496,10 @@ impl Tab {
         frame: usize,
         zoom: f32,
         pan: Vec2,
+        visible: KRect,
         tint: CelTint,
     ) -> Option<Arc<egui::Mesh>> {
-        self.cel_screen_mesh(&self.session.cel_cache, layer_idx, frame, (zoom, pan), tint)
+        self.cel_screen_mesh(&self.session.cel_cache, layer_idx, frame, (zoom, pan, visible), tint)
     }
 
     /// ロック中のレイヤー `layer_idx` のコマ `frame` のセル画の、点 `pt`（ステージの座標）で見えているもの（色と、線なら
@@ -2527,7 +2531,7 @@ impl Tab {
         cache: &SyncCache<CelMeshCache>,
         layer_idx: usize,
         frame: usize,
-        (zoom, pan): (f32, Vec2),
+        (zoom, pan, visible): (f32, Vec2, KRect),
         tint: CelTint,
     ) -> Option<Arc<egui::Mesh>> {
         let tl = self.active_timeline();
@@ -2543,6 +2547,7 @@ impl Tab {
                 world_xform,
                 zoom,
                 pan,
+                visible,
                 tint,
             )
         })
