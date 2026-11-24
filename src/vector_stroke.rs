@@ -1146,7 +1146,8 @@ pub(crate) fn stroke_shapes(
 /// 閉じた折れ線 `rings`（どれも NonZero で塗る）を合わせた形（i_overlay の図形：外周と穴の並び）。1つずつ自分との
 /// 交わりを整理してから、隣どうしを2つずつ合わせていく（分割統治）。どの段も、全部の点の外接矩形から決めた同じ
 /// 整数の格子で計算するので、前の段で格子に置いた点は動かない。`options` の塵の面積は最後の段だけで使う（途中で
-/// 落とすと、ほかと合わさるはずの小さい所も消える）
+/// 落とすと、ほかと合わさるはずの小さい所も消える）。1つずつの整理と、同じ段の組どうしの合わせは、互いを見ないので、
+/// CPU の数までのスレッドで同時に計算する（`planar_map::parallel_map`。結果は順に計算したのと同じ）
 fn union_rings(rings: &[Vec<[f64; 2]>], options: OverlayOptions<f64>) -> Vec<Vec<Vec<[f64; 2]>>> {
     let adapter =
         FloatPointAdapter::<[f64; 2], i32>::with_iter_conservative(rings.iter().flatten());
@@ -1172,39 +1173,33 @@ fn union_rings(rings: &[Vec<[f64; 2]>], options: OverlayOptions<f64>) -> Vec<Vec
             OverlayRule::Subject,
         );
     }
-    let mut level: Vec<Vec<Vec<Vec<[f64; 2]>>>> = rings
-        .iter()
-        .map(|r| {
-            run(
-                inner,
-                &|o| o.unsafe_add_source(r, ShapeType::Subject),
-                r.len(),
-                OverlayRule::Subject,
-            )
-        })
-        .collect();
+    let mut level: Vec<Vec<Vec<Vec<[f64; 2]>>>> = crate::planar_map::parallel_map(rings, |r| {
+        run(
+            inner,
+            &|o| o.unsafe_add_source(r, ShapeType::Subject),
+            r.len(),
+            OverlayRule::Subject,
+        )
+    });
     while level.len() > 1 {
         let opts = if level.len() == 2 { options } else { inner };
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        let mut it = level.into_iter();
-        while let Some(a) = it.next() {
-            next.push(match it.next() {
-                Some(b) => {
-                    let cap = a.iter().chain(&b).flatten().map(|c| c.len()).sum();
-                    run(
-                        opts,
-                        &|o| {
-                            o.unsafe_add_source(&a, ShapeType::Subject)
-                                .unsafe_add_source(&b, ShapeType::Clip)
-                        },
-                        cap,
-                        OverlayRule::Union,
-                    )
-                }
-                None => a,
-            });
-        }
-        level = next;
+        let pairs: Vec<&[_]> = level.chunks(2).collect();
+        level = crate::planar_map::parallel_map(&pairs, |pair| match pair {
+            [a, b] => {
+                let cap = a.iter().chain(b).flatten().map(|c| c.len()).sum();
+                run(
+                    opts,
+                    &|o| {
+                        o.unsafe_add_source(a, ShapeType::Subject)
+                            .unsafe_add_source(b, ShapeType::Clip)
+                    },
+                    cap,
+                    OverlayRule::Union,
+                )
+            }
+            [a] => a.clone(),
+            _ => Vec::new(),
+        });
     }
     level.pop().unwrap_or_default()
 }
