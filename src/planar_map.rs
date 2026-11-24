@@ -2819,6 +2819,44 @@ impl LayerBase {
         Some(self.stored.find_edge(&q)?.0)
     }
 
+    /// 番号が `ids` の線（階層 `group_path`）を持ち上げて動かす間の線の図形：（動かす線, 動かす線の端につながる残る線）。線の
+    /// 端の形は隣の線で決まる（`line_ends`）ので、動かす線は動かす線どうしだけを、残る線は残る線どうしだけを隣として作り
+    /// 直す（持ち上げて確定したときの、浮いた片と残りの地図の線と同じ形）。番号は変わらない。手間は動かす線と、その端に
+    /// つながる線の分（頂点の辺は索引で引く）
+    pub(crate) fn detached_lines(
+        &self,
+        ids: &HashSet<ShapeId>,
+        group_path: &[u64],
+    ) -> (Vec<FillShape>, Vec<FillShape>) {
+        let moving: Vec<crate::stored_map::TileEdge> = ids
+            .iter()
+            .filter(|&&id| is_line_id(id))
+            .filter_map(|&id| Some(self.stored.edge_at(self.line_edge(id, group_path)?)))
+            .collect();
+        let is_moving = |e: &crate::stored_map::TileEdge| line_id_of(e).is_some_and(|id| ids.contains(&id));
+        // 点 `p` に端のある線を乗せた辺のうち、動かす線か（`moved`）、残る線か
+        let at = |p: Point, moved: bool| -> Vec<crate::stored_map::TileEdge> {
+            self.edges_at_node(p)
+                .into_iter()
+                .map(|e| self.stored.edge_at(e))
+                .filter(|e| e.stroke.is_some() && is_moving(e) == moved)
+                .collect()
+        };
+        let shape = |te: &crate::stored_map::TileEdge, moved: bool| {
+            line_shape(te, line_ends(te, |p| at(p, moved)), line_id_of(te)?, group_path)
+        };
+        let moved = moving.iter().filter_map(|te| shape(te, true)).collect();
+        let mut seen: HashSet<ShapeId> = HashSet::new();
+        let staying = moving
+            .iter()
+            .flat_map(|te| [te.a, te.b])
+            .flat_map(|p| at(p, false))
+            .filter(|te| line_id_of(te).is_some_and(|id| seen.insert(id)))
+            .filter_map(|te| shape(&te, false))
+            .collect();
+        (moved, staying)
+    }
+
     /// この地図を地図 `next_base`（この地図に差分を当てたものの写し）にしたときの、線の図形の変わり方：消えた線の番号と、
     /// 増えた線の図形（`next_base` の表から）。手間は変わった所の分（`StoredMap::diff_tiles`）
     pub(crate) fn line_changes(

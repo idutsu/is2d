@@ -1548,12 +1548,41 @@ impl Session {
             return Vec::new();
         }
         let scope = self.editing_group_path.clone();
+        // 線の端の形は隣の線で決まるので、動かす線と、その端につながる残る線は、持ち上げたときの形に作り直して出す
+        // （`LayerBase::detached_lines`。確定のときの浮いた片と残りの線と同じ形）。複製のときは元の線が残るので、残る線は
+        // そのまま
+        let world = self.edit_path.world_xform();
+        let mut moving: HashMap<ShapeId, FillShape> = HashMap::new();
+        let mut staying: Vec<FillShape> = Vec::new();
+        for (layer_id, ids) in self.selected_raw_ids_by_layer(true) {
+            let base = match self.floating.as_ref().and_then(|fl| fl.origin_base(layer_id)) {
+                Some(b) => b,
+                None => match self.base_cache.cel(layer_id) {
+                    Some(cel) => cel.scope_base(&scope),
+                    None => continue,
+                },
+            };
+            let (m, s) = base.detached_lines(&ids, &scope);
+            let placed = |mut f: FillShape| {
+                f.layer_id = layer_id;
+                f.place(world);
+                f
+            };
+            moving.extend(m.into_iter().map(|f| (f.shape_id, placed(f))));
+            if !alt_duplicate {
+                staying.extend(s.into_iter().map(placed));
+            }
+        }
+        let restaged: HashSet<ShapeId> = staying.iter().map(|f| f.shape_id).collect();
 
         if let Some(fl) = &self.floating {
             self.overlay.hide = fl.hidden().clone();
-            self.overlay
-                .add
-                .extend(fl.placed_remainder().iter().cloned());
+            self.overlay.add.extend(
+                fl.placed_remainder()
+                    .iter()
+                    .filter(|r| !restaged.contains(&r.1.shape_id))
+                    .cloned(),
+            );
             if alt_duplicate {
                 for piece in fl.pieces() {
                     self.overlay.add.push((
@@ -1562,6 +1591,12 @@ impl Session {
                     ));
                 }
             }
+        }
+        for f in staying {
+            self.overlay.hide.insert(f.shape_id);
+            self.overlay
+                .add
+                .push((Placement::RawOf(f.layer_id, scope.clone()), f));
         }
         self.overlay_movable_start = self.overlay.add.len();
 
@@ -1575,10 +1610,10 @@ impl Session {
                 continue;
             }
             if self.selection.contains_shape(shape) {
+                let cloned = moving.remove(&shape.shape_id).unwrap_or_else(|| shape.clone());
                 if for_transform {
-                    let _ = shape.fill_mesh();
+                    let _ = cloned.fill_mesh();
                 }
-                let cloned = shape.clone();
                 if !alt_duplicate {
                     self.overlay.hide.insert(shape.shape_id);
                 }

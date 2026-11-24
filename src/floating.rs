@@ -412,6 +412,16 @@ impl Floating {
         self.hidden = HashSet::new();
     }
 
+    /// レイヤー `layer_id` の、持ち上げた残りの地図の計算に使う写し（そのレイヤーから持ち上げていなければ `None`）
+    pub(crate) fn origin_base(&self, layer_id: LayerId) -> Option<Arc<LayerBase>> {
+        self.layers
+            .iter()
+            .find(|l| l.layer_id == layer_id)?
+            .origin
+            .as_ref()
+            .map(Origin::base)
+    }
+
     /// 直前の履歴スナップショットと同じ中身か（地図は同じ `Arc`、変換は同じ値）
     pub(crate) fn matches_undo_snapshot(&self, other: &Self) -> bool {
         self.modified == other.modified

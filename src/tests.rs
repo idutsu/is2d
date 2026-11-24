@@ -38866,6 +38866,55 @@ mod strokes {
     }
 
     #[test]
+    fn a_slightly_bent_joint_has_no_crack_at_any_zoom() {
+        // 太さ 4 の線を、つなぎ目でわずかに（0.01 ラジアン）曲げた2本の辺。外側のすき間の幅は 0.02px で、描画の許容より
+        // 小さいが、拡大すると見える。つなぎ目の外側（曲がりの二等分の向きに半径の 0.99 倍）が、どちらかの線で塗られる
+        // （前は、すき間が許容より小さければ埋めず、拡大すると白い切れ目が見えた）
+        let mut app = Is2dApp::default();
+        let (a, b) = (Point::new(100.0, 100.0), Point::new(200.0, 100.0));
+        let th: f64 = 0.01;
+        let c = b + KVec2::new(th.cos(), th.sin()) * 100.0;
+        assert!(apply(&mut app, Action::DrawLines { segs: vec![line(a, b, INK), line(b, c, INK)] }));
+        assert_eq!(counts(&app).1, 2);
+        let r = INK.width as f64 / 2.0;
+        // 曲がりは時計回り（y が下向きの座標で下へ）なので、外側は上（−y）の側
+        let outer = KVec2::new((th / 2.0).sin(), -(th / 2.0).cos());
+        let p = b + outer * (0.99 * r);
+        assert!(
+            app.scene().iter().any(|s| s.line.is_some() && s.contains_point(p)),
+            "つなぎ目の外側にすき間がある"
+        );
+    }
+
+    #[test]
+    fn line_ends_are_round_while_dragging_a_line() {
+        // 線を乗せた正方形の上の辺の線だけを選んで、下へ 50 動かすドラッグの途中。動かす線の両端と、残る左右の辺の線の、
+        // 上の辺とつながっていた端は、どれも丸い（前は、動かす前の形をずらしただけなので、つなぎ目の端が平らに切れた
+        // まま四角く見えた。離すと作り直して丸くなっていた）
+        let covered = |app: &Is2dApp, p: Point| app.scene().iter().any(|s| s.line.is_some() && s.contains_point(p));
+        for transform in [false, true] {
+            let mut app = inked_square_app();
+            assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, 100.5) }));
+            if transform {
+                let orig = app.session.begin_transform_overlay();
+                app.session.update_transform_overlay(&orig, Affine::translate((0.0, 50.0)));
+            } else {
+                app.session.begin_move_overlay(false);
+                app.session.translate_move_overlay(KVec2::new(0.0, 50.0));
+            }
+            let place = if transform { "変形のドラッグ" } else { "移動のドラッグ" };
+            // 動かす線の両端の丸（端の点から外へ 1.4。半径は 2）
+            assert!(covered(&app, Point::new(98.6, 150.0)), "{place}：動かす線の左の端");
+            assert!(covered(&app, Point::new(301.4, 150.0)), "{place}：動かす線の右の端");
+            // 残る左右の辺の線の、上の端の丸
+            assert!(covered(&app, Point::new(100.0, 98.6)), "{place}：残る左の辺の線の上の端");
+            assert!(covered(&app, Point::new(300.0, 98.6)), "{place}：残る右の辺の線の上の端");
+            // 動かした所には、元の線が残っていない
+            assert!(!covered(&app, Point::new(200.0, 100.0)), "{place}：元の線が残った");
+        }
+    }
+
+    #[test]
     fn the_pencil_draws_a_smooth_line_with_few_curves() {
         let mut app = Is2dApp::default();
         apply(&mut app, Action::SetTool { tool: Tool::Pencil });
