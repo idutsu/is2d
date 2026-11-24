@@ -30,6 +30,33 @@ type Label = (Option<Color32>, Option<ShapeId>);
 /// 線の太さの範囲（px。整数だけ）
 pub(crate) const STROKE_WIDTHS: std::ops::RangeInclusive<u8> = 1..=10;
 
+/// 点が辺に合う距離：辺の色のある側（`filled`）と何も無い側（`empty`）で別に持つ（色のある側は、輪郭の近くでも塗りを
+/// つかめるように狭い）
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct EdgeGrab {
+    pub(crate) filled: f64,
+    pub(crate) empty: f64,
+}
+
+impl EdgeGrab {
+    /// 辺に合う距離の決まり（画面の px）：選択ツールで辺が光る・辺を選ぶ距離と、インクボトルで辺1本に線を乗せる距離
+    pub(crate) const SCREEN_PX: EdgeGrab = EdgeGrab { filled: 5.5, empty: 9.5 };
+
+    /// 長さを `k` 倍したもの（画面の px を、置いた座標や文書の座標の長さにする）
+    pub(crate) fn scaled(self, k: f64) -> EdgeGrab {
+        EdgeGrab { filled: self.filled * k, empty: self.empty * k }
+    }
+
+    /// 点のある側に色がある（`filled`）ときの、辺に合う距離
+    pub(crate) fn at(self, filled: bool) -> f64 {
+        if filled {
+            self.filled
+        } else {
+            self.empty
+        }
+    }
+}
+
 /// 辺に乗せた線：色と太さ（px。`STROKE_WIDTHS` の内）。端と角は丸だけ（設計：claude/線の設計_68a596e.md の 5章）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct EdgeStroke {
@@ -1954,9 +1981,15 @@ impl LayerBase {
     /// 作り、1本の道の差分から先（`apply_diff`）に渡す。形は変わらないので、差分は線の替わる辺だけ（2本のまとめはしない：
     /// まとめる候補は操作が作った切れ目だけで、線を替えても切れ目はできない）。替わる辺が無ければ `Same`。テストでは毎回、
     /// 地図全体の同じ辺の線を替えた地図（お手本）と同じことを確かめる（設計：claude/線の設計_68a596e.md の 2.1）
-    pub(crate) fn stroke_local(&self, p: Point, stroke: EdgeStroke, group_path: &[u64]) -> LocalEdit {
+    pub(crate) fn stroke_local(
+        &self,
+        p: Point,
+        stroke: EdgeStroke,
+        reach: EdgeGrab,
+        group_path: &[u64],
+    ) -> LocalEdit {
         let edges: Vec<usize> = self
-            .stroke_targets(p, group_path)
+            .stroke_targets(p, reach, group_path)
             .into_iter()
             .filter(|&e| self.stored.edge_at(e).stroke != Some(stroke))
             .collect();
@@ -1986,16 +2019,21 @@ impl LayerBase {
         self.apply_diff(&m, &removed, &added, group_path)
     }
 
-    /// インクボトルで線を乗せる辺（計算に使う地図の番号）：点 `p` が線の上（線の太さの半分以内）なら、その線の辺1本
-    /// （アンカーとアンカーの間。線を選ぶ単位と同じ）。そうでなければ、点を含む色のある面の輪郭の辺。どちらでもなければ空
-    fn stroke_targets(&self, p: Point, group_path: &[u64]) -> Vec<usize> {
-        let reach = *STROKE_WIDTHS.end() as f64 / 2.0;
-        if let Some((e, t)) = self.hit_edge(p, reach, Affine::IDENTITY) {
+    /// インクボトルで線を乗せる辺（計算に使う地図の番号）：点 `p` がいちばん近い辺の上か近く（線の上：線の太さの半分以内、
+    /// または辺に合う距離 `reach` の中）なら、その辺1本（アンカーとアンカーの間。線を選ぶ単位と同じ）。そうでなければ、点を
+    /// 含む色のある面の輪郭の辺。どちらでもなければ空
+    fn stroke_targets(&self, p: Point, reach: EdgeGrab, group_path: &[u64]) -> Vec<usize> {
+        let search = (*STROKE_WIDTHS.end() as f64 / 2.0).max(reach.filled).max(reach.empty);
+        if let Some((e, t)) = self.hit_edge(p, search, Affine::IDENTITY) {
             let te = self.stored.edge_at(e);
-            if let Some(stroke) = te.stroke {
-                if te.quad().eval(t).distance(p) <= stroke.width as f64 / 2.0 {
-                    return vec![e];
-                }
+            let q = te.quad();
+            let at = q.eval(t);
+            let d = at.distance(p);
+            let tan = crate::vector_engine::quad_deriv(&q, t);
+            let side = if (p - at).dot(kurbo::Vec2::new(-tan.y, tan.x)) >= 0.0 { te.left } else { te.right };
+            let on_line = te.stroke.is_some_and(|s| d <= s.width as f64 / 2.0);
+            if on_line || d <= reach.at(side.is_some()) {
+                return vec![e];
             }
         }
         let empty = PlanarMap::default();

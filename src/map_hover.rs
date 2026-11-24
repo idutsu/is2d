@@ -265,7 +265,8 @@ pub(crate) fn reshape_hover(
     zoom: f32,
 ) -> HoverTarget {
     let inv_z = 1.0 / (zoom as f64);
-    let (vertex_r, inner_r, outer_r) = (9.0 * inv_z, 5.5 * inv_z, 9.5 * inv_z);
+    let vertex_r = 9.0 * inv_z;
+    let reach = crate::planar_map::EdgeGrab::SCREEN_PX.scaled(inv_z);
     let maps = scope_maps(scene, session);
     let hidden = |lm: &LayerMap, p: Point| hidden_by_front(scene, session, lm, p);
     let mut best_v: Option<(f64, &LayerMap, Point)> = None;
@@ -292,7 +293,7 @@ pub(crate) fn reshape_hover(
     let widest_half = *crate::planar_map::STROKE_WIDTHS.end() as f64 / 2.0;
     let mut best_e: Option<(f64, &LayerMap, usize, f64, ShapeId)> = None;
     for lm in &maps.maps {
-        let search_r = outer_r.max(widest_half * crate::vector_engine::max_scale(lm.xform));
+        let search_r = reach.empty.max(widest_half * crate::vector_engine::max_scale(lm.xform));
         let Some((e, t)) = lm.base.hit_edge(mouse_pt, search_r, lm.xform) else {
             continue;
         };
@@ -309,7 +310,7 @@ pub(crate) fn reshape_hover(
         } else {
             (ed.right, ed.right_src)
         };
-        let max = if side.is_some() { inner_r } else { outer_r };
+        let max = reach.at(side.is_some());
         // 見えている線の上か（線の図形は文書の座標で太らせて置くので、文書の座標の距離で測る）
         let on_line = ed.stroke.is_some_and(|s| {
             let doc_pt = lm.xform.inverse() * mouse_pt;

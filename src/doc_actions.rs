@@ -1156,7 +1156,7 @@ fn apply_draw_lines(tab: &mut Tab, segs: Vec<crate::planar_map::LineSeg>) -> boo
     })
 }
 
-/// インクボトル：作業中のレイヤー・編集中の階層の地図の、点 `pt` の線か、点を含む面の輪郭に、線 `stroke` を乗せる
+/// インクボトル：作業中のレイヤー・編集中の階層の地図の、点 `pt` の上か近くの辺1本か、点を含む面の輪郭に、線 `stroke` を乗せる
 /// （`LayerBase::stroke_local`）。前面のレイヤーに覆われている所には乗せない（バケツと同じ）
 fn apply_ink_bottle(tab: &mut Tab, stroke: crate::planar_map::EdgeStroke, pt: Point) -> bool {
     let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
@@ -1171,9 +1171,13 @@ fn apply_ink_bottle(tab: &mut Tab, stroke: crate::planar_map::EdgeStroke, pt: Po
     }
     // 線が替わらないときは、write_local が false を返し、apply が Undo の控えを捨てる
     push_undo(tab, None);
-    let doc_pt = tab.session.edit_path.world_xform().inverse() * pt;
+    let to_stage = tab.session.edit_path.world_xform();
+    let doc_pt = to_stage.inverse() * pt;
+    // 辺に合う距離は、選択ツールと同じ画面の px（文書の座標の長さにする）
+    let px = 1.0 / (tab.view.zoom() as f64 * crate::vector_engine::max_scale(to_stage));
+    let reach = crate::planar_map::EdgeGrab::SCREEN_PX.scaled(px);
     write_local(tab, target_lid, |base, scope| {
-        base.stroke_local(doc_pt, stroke, scope)
+        base.stroke_local(doc_pt, stroke, reach, scope)
     })
 }
 

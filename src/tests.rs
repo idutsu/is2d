@@ -38657,6 +38657,58 @@ mod strokes {
     }
 
     #[test]
+    fn ink_bottle_on_a_boundary_lines_only_that_edge() {
+        // 線の無い赤い正方形（100〜300）と、右に接する青い正方形。境界線の上か近く（選択ツールで辺が光る距離：塗りの側は
+        // 画面で 5.5px、何も無い側は 9.5px まで）を押すと、その辺1本だけに線を乗せる。塗りの中の離れた所は輪郭の全部
+        let fresh = |zoom: f32| {
+            let mut app = Is2dApp::default();
+            put_cel_shapes(
+                &mut app,
+                0,
+                0,
+                vec![rect(100.0, 100.0, 300.0, 300.0, Color32::RED), rect(300.0, 100.0, 500.0, 300.0, Color32::BLUE)],
+            );
+            app.tab_mut().view.set_zoom(zoom);
+            app
+        };
+        // 線を乗せた辺（中点）の並び
+        let lined = |app: &Is2dApp| -> Vec<(i64, i64)> {
+            let m = cel_map(app);
+            let mut v: Vec<_> = (0..m.edges.len())
+                .filter(|&e| m.edges[e].stroke.is_some())
+                .map(|e| {
+                    let c = m.quad(e).eval(0.5);
+                    (c.x.round() as i64, c.y.round() as i64)
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        for zoom in [1.0f32, 4.0] {
+            let px = |n: f64| n / zoom as f64;
+            let ink = |pt: Point| {
+                let mut app = fresh(zoom);
+                let changed = apply(&mut app, Action::InkBottle { pt, stroke: INK });
+                (changed, lined(&app))
+            };
+            // 上の辺：塗りの側 3px、何も無い側 8px、辺の上
+            for y in [100.0 + px(3.0), 100.0 - px(8.0), 100.0] {
+                assert_eq!(ink(Point::new(200.0, y)), (true, vec![(200, 100)]), "倍率 {zoom}、y={y}");
+            }
+            // 赤と青の境目：どちらの塗りの側でも 3px なら、境目の1本だけ
+            for x in [300.0 - px(3.0), 300.0 + px(3.0)] {
+                assert_eq!(ink(Point::new(x, 200.0)), (true, vec![(300, 200)]), "倍率 {zoom}、x={x}");
+            }
+            // 塗りの中の離れた所（塗りの側 8px）：赤の輪郭の全部（4本）
+            let (changed, all) = ink(Point::new(200.0, 100.0 + px(8.0)));
+            assert!(changed);
+            assert_eq!(all, vec![(100, 200), (200, 100), (200, 300), (300, 200)]);
+            // 何も無い側の遠い所（12px）：何も変わらない
+            assert_eq!(ink(Point::new(200.0, 100.0 - px(12.0))), (false, vec![]));
+        }
+    }
+
+    #[test]
     fn clicking_near_a_line_selects_the_line_not_the_fill_beyond_it() {
         // 線の外の近く（輪郭の変形で辺が光る所：何も無い側は画面で 9.5px まで）をクリックすると、その線を選ぶ。塗りの輪郭の
         // 線の外側でも、線の向こうの塗りは選ばない。塗りの上は塗り。遠い所は何も選ばない
