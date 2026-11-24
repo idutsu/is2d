@@ -6,6 +6,11 @@
 //! 届いていない数（`Shared::ahead`：渡した分と、出力の遅れ）を引いた、鳴った所から決める（`AudioOut::position` →
 //! `sound::frame_at`。Bluetooth など遅れの大きい出力でも、絵が耳に届く音より先に進まない）。装置が使えないときは、同じ数を画面の時刻で同じ速さに進める
 //! （`Output::Clock`。鳴らさない）ので、コマの決め方は装置の有る無しによらず1つ
+//!
+//! 装置は、鳴らし始めるときに決める（`AudioOut::follow_default_device`）：OS の既定の出力の装置が、開いた（開こうとした）
+//! ものと違えば、その場で開き直し、遅れもそのとき聞く。開けなければ、その装置に替わるまで時計で数える。起動のときに
+//! 装置が無いときも、装置が使えなくなったときも、同じ決まりで、次に既定の装置が替わった（つないだ・OS が切り替えた）
+//! ときから鳴る
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -202,6 +207,11 @@ pub(crate) struct AudioOut {
     span: Option<Span>,
     /// 装置を動かしているか
     running: bool,
+    /// 装置を開く出力（`open`）なら、画面（装置の側が画面を起こす先）。装置を使わない出力（`silent`）は `None`（開かない）
+    wake: Option<egui::Context>,
+    /// 最後に開いた（開こうとした）ときの、既定の出力の装置の名前（装置が無ければ `None`）。まだ開こうとしていなければ
+    /// `None`（外側）
+    tried: Option<Option<String>>,
 }
 
 impl AudioOut {
@@ -215,24 +225,40 @@ impl AudioOut {
             },
             span: None,
             running: false,
+            wake: None,
+            tried: None,
         }
     }
 
-    /// 既定の出力の装置を開く。開けなければ時計で数え、わけを `tick` が1回だけ返す（画面が知らせる）
+    /// 既定の出力の装置を開く出力。開けなければ時計で数え、わけを `tick` が1回だけ返す（画面が知らせる）
     pub(crate) fn open(ctx: &egui::Context) -> Self {
-        match open_device(ctx) {
-            Ok((shared, stream)) => Self {
-                shared,
-                output: Output::Device(stream),
-                span: None,
-                running: false,
-            },
-            Err(why) => {
-                let out = Self::silent();
-                out.shared.fail(why);
-                out
-            }
+        let mut out = Self::silent();
+        out.wake = Some(ctx.clone());
+        out.follow_default_device();
+        out
+    }
+
+    /// 装置を開く出力なら、OS の既定の出力の装置が、最後に開いた（開こうとした）ものと違うときだけ、開き直す（装置の
+    /// 遅れも聞き直す：`open_device`）。開けなければ時計で数え、わけを `tick` が1回だけ返す。開き直すのは既定の装置が
+    /// 替わったときだけなので、スクラブ（コマごとに鳴らし始める）で毎回開かない
+    fn follow_default_device(&mut self) {
+        let Some(ctx) = self.wake.clone() else {
+            return;
+        };
+        let now = default_output_name();
+        if !needs_reopen(self.tried.as_ref(), &now) {
+            return;
         }
+        self.tried = Some(now);
+        self.running = false;
+        (self.shared, self.output) = match open_device(&ctx) {
+            Ok((shared, stream)) => (shared, Output::Device(stream)),
+            Err(why) => {
+                let shared = Arc::new(Shared::new(SOUND_RATE as u32, Some(ctx)));
+                shared.fail(why);
+                (shared, Output::Clock { since: None, base: 0 })
+            }
+        };
     }
 
     /// 出力の速さ（1 秒あたりのサンプルの数）
@@ -241,7 +267,8 @@ impl AudioOut {
     }
 
     /// 文書 `doc` のタイムライン `tl` の、コマ `first` の始まりからコマ `end` の手前まで（`first < end`）を鳴らす
-    /// （`looping` なら、終わりでコマ 0 へ戻ってくり返す）。鳴らしている中身は打ち切り、数は 0 から数え直す
+    /// （`looping` なら、終わりでコマ 0 へ戻ってくり返す）。鳴らしている中身は打ち切り、数は 0 から数え直す。鳴らす装置は
+    /// ここで決める（`follow_default_device`）
     pub(crate) fn play(
         &mut self,
         doc: &Document,
@@ -250,6 +277,7 @@ impl AudioOut {
         end: usize,
         looping: bool,
     ) {
+        self.follow_default_device();
         let job = Job::new(doc, tl, first, end, looping, self.rate());
         self.span = Some(job.span);
         {
@@ -313,7 +341,7 @@ impl AudioOut {
                 self.running = false;
             }
             return Some(format!(
-                "音の出力が使えません（{why}）。再生はできますが、音は鳴りません"
+                "音の出力が使えません（{why}）。再生はできますが、音は鳴りません（ほかの出力の装置に切り替えると、次に鳴らすときから鳴ります）"
             ));
         }
         if let Output::Device(stream) = &self.output {
@@ -327,6 +355,22 @@ impl AudioOut {
         }
         None
     }
+}
+
+/// 鳴らし始めるときに装置を開き直すか：最後に開いた（開こうとした）ときの既定の出力の装置の名前 `tried`（まだ開こうと
+/// していなければ `None`）と、今の既定の出力の装置の名前 `now`（装置が無ければ `None`）が違うとき。同じ装置で開けな
+/// かった・使えなくなったときは、既定の装置が替わるまで開き直さない（開くのは時間がかかることがあるので、鳴らすたびに
+/// 試さない）
+fn needs_reopen(tried: Option<&Option<String>>, now: &Option<String>) -> bool {
+    tried != Some(now)
+}
+
+/// 今の既定の出力の装置の名前（装置を見分ける：`needs_reopen`。名前を聞けなければ空。装置が無ければ `None`）
+fn default_output_name() -> Option<String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    cpal::default_host()
+        .default_output_device()
+        .map(|d| d.name().unwrap_or_default())
 }
 
 /// 既定の出力の装置を、その装置の既定の形で開く（止めたまま）。サンプルの形は装置の既定に合わせる
@@ -454,4 +498,27 @@ fn output_latency() -> u64 {
 #[cfg(not(target_os = "macos"))]
 fn output_latency() -> u64 {
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_reopen;
+
+    /// レビュー d91cd4c の N-4001：装置は鳴らし始めるときに決め、既定の出力の装置が替わったときだけ開き直す（前は起動の
+    /// ときに1回だけ開き、使えなくなったら、ほかの装置があってもアプリを終えるまで鳴らなかった）
+    #[test]
+    fn the_output_follows_the_default_device_when_it_changes() {
+        let (earphones, speakers) = (Some("イヤホン".to_owned()), Some("内蔵スピーカー".to_owned()));
+        // 起動：まだ開こうとしていない
+        assert!(needs_reopen(None, &earphones));
+        assert!(needs_reopen(None, &None), "起動のときに装置が無いことも知らせる");
+        // 同じ装置のまま：鳴らすたびに開き直さない（使えなくなっていても、替わるまで試さない）
+        assert!(!needs_reopen(Some(&earphones), &earphones));
+        // イヤホンが切れて、OS が内蔵スピーカーに切り替えた：開き直す（遅れも聞き直す）
+        assert!(needs_reopen(Some(&earphones), &speakers));
+        // 装置が無くなった：開き直す（開けないので時計で数える）。装置がつながったら開き直す
+        assert!(needs_reopen(Some(&speakers), &None));
+        assert!(!needs_reopen(Some(&None), &None));
+        assert!(needs_reopen(Some(&None), &earphones));
+    }
 }
